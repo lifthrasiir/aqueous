@@ -27,32 +27,32 @@ come from.
 ## Sneak peek
 
 Matt Mahoney's 10 GB benchmark (79,431 files, 10.00 GB), on an Apple M4 (10 cores): `aqr` on
-2026-10-31 at commit `921778d`, the others on 2026-10-27:
+2026-11-01 at commit `83097ad`, the others on 2026-10-27:
 
 | method | size | compression | decompression |
 |---|---|---|---|
 | `tar \| zstd -3 -T10` | 4.68 GB | 33 s | |
 | `tar \| zstd -3 -T10 --long=31` | 4.17 GB | 36 s | |
 | zpaq 7.15 | 3.70 GB | | |
-| **`aqr`** (level `mid`) | **2.552 GB** | 161 s (62 MB/s, 3.3 GB peak) | 38.8 s (258 MB/s, 2.6 GB peak) |
+| **`aqr`** (level `mid`) | **2.498 GB** | 164 s (61 MB/s, 3.1 GB peak) | 38.8 s (258 MB/s, 2.6 GB peak) |
 
 Compression includes the round-trip check of every file. Some formats alone, as
 `archive / input` against `zstd -3` of the same files:
 
 | format | aqr | zstd -3 |
 |---|---|---|
-| JPEG | 0.785 | 0.913 |
-| PNG | 0.802 | 0.997 |
-| MP3 | 0.853 ~ 0.890 | 0.971 |
-| PE executables | 0.326 | 0.381 |
-| SQLite | 0.227 | 0.366 |
-| text (enwik9) | 0.253 | 0.312 |
-| FASTA (hg19) | 0.218 | 0.309 |
+| JPEG | 0.778 ~ 0.794 | 0.913 |
+| PNG | 0.802 ~ 0.855 | 0.997 |
+| MP3 | 0.852 ~ 0.915 | 0.968 |
+| PE executables | 0.295 ~ 0.303 | 0.381 |
+| SQLite | 0.210 ~ 0.219 | 0.366 |
+| text (enwik9) | 0.233 ~ 0.235 | 0.312 |
+| FASTA (hg19) | 0.209 | 0.309 |
 
-The 10 GB archive includes its decoder modules. The figures by format are tentative: they were
-measured before the modules were embedded in archives. How they were measured, and the
-formats taken or not yet taken, are in
-[`docs/file-formats.md`](docs/file-formats.md).
+Archives include their decoder modules. By format, *x ~ y*: *y* with each file an archive of
+its own, its modules and their tables in it; *x* without them, as in an archive of many files
+that share them. How they were measured (2026-11-01), and the formats taken or not yet taken,
+are in [`docs/file-formats.md`](docs/file-formats.md).
 
 ## Building
 

@@ -6,6 +6,13 @@ and the design is argued in `xform-design.md`.
 
 ## How it was measured
 
+- Ratios: 2026-11-01, through `aqr-show` by `scripts/format-ratio.py` (its `sample` draws the
+  samples below, its `measure` runs `aqr-show` as the Ratio column tells), at commit `54cddfe`
+  (aqr's code as at `83097ad`), level `mid`. On an Apple M4 on one thread (enwik9 on 10, hg19
+  on 4), but for aqr-clip, aqr-tex, aqr-vorbis, aqr-prores and the Hangul text: on a
+  Ryzen 7 9700X with `-t 16`. Container formats (ZIP, gzip and the like) were not measured
+  again: what they gain is what their contents are.
+- Speeds and memory, as follows (not measured again with the ratios):
 - 2026-10-23, Apple M4, one thread (`-t 1`), at commit `2abe944`.
 - Through `aqr-show` (`crates/aqr/src/bin/show.rs`): each file is archived (recompression, archive
   coding and the round-trip check) at level `mid`, then extracted.
@@ -23,13 +30,13 @@ and the design is argued in `xform-design.md`.
 - Samples: files of 256 KiB or more from each crate's `corpus/` (aqr-jpeg: `samples/` and the
   JPEG files of codec-corpus), taken in the order of their paths' hashes up to about 400 MB.
 - Columns:
-  - **Ratio**: Σ archive / Σ input, as *best ~ worst*. Modules' resources (built-in tables)
-    are shared by the files of an archive. Worst: one file per archive, as here, its resources
-    in it (and files kept raw where they do not pay for them). Best: in the limit of many
-    files per archive, Σ (archive − resources) / Σ input, the formulas taken where they pay
-    without them (`aqr-show -r`). One figure where the two agree to three decimals (no
-    resources, or a few KB). **Tentative**: the actual decoder modules (Wasm) were not embedded
-    when these were measured, and will add their blocks.
+  - **Ratio**: Σ archive / Σ input, as *best ~ worst*. An archive carries the decoder modules
+    (Wasm) its formulas apply and their resources (built-in tables), each once, shared by its
+    files. Worst: one file per archive, its modules and resources in it (and files kept raw
+    where they do not pay for them). Best: in the limit of many files per archive,
+    Σ (archive − modules − resources) / Σ input, the formulas taken where they pay without
+    them (`aqr-show -r -m`). One figure where the two agree to three decimals. Rows of
+    container formats keep their earlier figures, of `aqr` on the whole set.
   - **zstd -3**: the same files under `zstd -3`, for reference.
   - **Speed**: Σ input / Σ time, MB/s. Compression covers recompression, archive coding and
     the check; decompression covers archive decoding and rebuilding.
@@ -45,26 +52,27 @@ and the design is argued in `xform-design.md`.
 
 ### Images
 
-| format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
+| format | crate | sample | ratio | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
-| PNG, APNG | aqr-png | 379 files, 391 MB | 0.802 | 0.997 | 42 | 90 | 7 MB + 10.3× | the data, the raw image and the tokens are held a window at a time; the encoder's symbols (2 bytes per byte of data on photos) are what still follows the pixels |
-| GIF | aqr-gif | the 488 GIF files of the 10gb corpus, 9.25 MB (README) | 0.522 (0.987 before) | 0.981 | 2.7 (`aqr`, 10 threads) | 4.8 and 3.5 (`-t`, 10 threads; the second as Wasm) | 0.5 GB (`aqr` peak) | measured 2026-10-31 with `aqr`, not `aqr-show`. No encoder reproduced: the codes against the longest match (a few bytes a file), the pixels by a context-mixing model of palette indices at 3.5 (photographs) to 15 (animations) megapixels a second. The model's tables are up to 32 MB a file |
-| JPEG | aqr-jpeg | 96 files, 186 MB | 0.785 | 0.913 | 39 | 82 | 28 MB + 8.2× | sequential files are coded a stripe at a time: a 1.3 MB 7680×4320 file takes 54 MB. Progressive ones still hold their coefficients whole: 259 MB for a 1.4 MB one of that size |
-| BMP, PGM, PPM, PAM | aqr-raw | 17 files, 53 MB | 0.228 | 0.421 | 71 | 303 | 21 MB + 5.5× | 8-bit samples; not a sample of real files (PNGs of aqr-png's corpus converted, README of aqr-raw). 16-bit and RLE images are not taken |
-| PSD, PSB | aqr-psd | 56 files, 439 MB | 0.330 | 0.555 | 45 | 127 | 28 MB + 5.4× | pixels coded in 8-bit documents only; aqr-psd itself takes a few MB besides its streams, the rest is the archive's (a file kept raw is scanned by the parts aqr-psd tells) |
-| Clip Studio Paint (`.clip`) | aqr-clip | 13 files, 926 MB | 0.340 | 0.760 | 35 | 91 | not measured | measured 2026-10-28 on a Ryzen 7 9700X with `aqr-show -t 16` (16 threads, not one); the tiles (zlib level 1, memLevel 9, all made again exactly) by a model of whole pixels in batches of 64 decoded as tasks (a tile equal to an earlier one a reference), the database by aqr-sqlite, the rest (13 MB of one file's 3D data) by the archive; aqr as it was: 0.726. A held-out file came to 0.454 against 0.763 (0.499 before the references; README of aqr-clip). The database's PNG preview is not recompressed |
-| DDS (BC1–BC5) | aqr-tex | 1274 files, 402 MB | 0.347 | 0.495 | 23 | 20 | not measured | measured 2026-10-28 on a Ryzen 7 9700X with `aqr-tex-bench` (the module a thread, not `aqr-show`), on a sample of The Crew's textures; all 52,181 of them (16.4 GB): 0.325 against zstd -19's 0.403 (README of aqr-tex). Large surfaces are coded in stripes decoded at once: the largest files (2.8–5.6 MB), one at a time, 23 → 97 MB/s on 16 threads. On an M4 after the coding was made faster (2026-11-01): 31.9 / 27.1 MB/s on a thread (26.6 / 20.9 before). Uncompressed DDS goes to aqr-raw's `raster-recons`; BC6H, BC7 and KTX are not taken yet |
+| PNG, APNG | aqr-png | 379 files, 391 MB | 0.802 ~ 0.855 | 0.997 | 42 | 90 | 7 MB + 10.3× | the data, the raw image and the tokens are held a window at a time; the encoder's symbols (2 bytes per byte of data on photos) are what still follows the pixels |
+| GIF | aqr-gif | the 488 GIF files of the 10gb corpus, 9.25 MB (README) | 0.528 ~ 0.570 (0.987 before) | 0.989 | 2.7 (`aqr`, 10 threads) | 4.8 and 3.5 (`-t`, 10 threads; the second as Wasm) | 0.5 GB (`aqr` peak) | speed and memory measured 2026-10-31 with `aqr`, not `aqr-show` (all of them in one archive: 0.522). The module (14.5 KB) does not pay alone for most of these small files: 474 of 488 kept raw (worst), 173 without it (best). No encoder reproduced: the codes against the longest match (a few bytes a file), the pixels by a context-mixing model of palette indices at 3.5 (photographs) to 15 (animations) megapixels a second. The model's tables are up to 32 MB a file |
+| JPEG | aqr-jpeg | 96 files, 186 MB | 0.778 ~ 0.794 | 0.913 | 39 | 82 | 28 MB + 8.2× | sequential files are coded a stripe at a time: a 1.3 MB 7680×4320 file takes 54 MB. Progressive ones still hold their coefficients whole: 259 MB for a 1.4 MB one of that size |
+| BMP, PGM, PPM, PAM | aqr-raw | 17 files, 51 MB | 0.245 ~ 0.248 | 0.444 | 71 | 303 | 21 MB + 5.5× | 8-bit samples; not a sample of real files (PNGs of aqr-png's corpus converted, README of aqr-raw; made again for the ratio, from a corpus grown since). 16-bit and RLE images are not taken |
+| PSD, PSB | aqr-psd | 37 files, 424 MB | 0.230 ~ 0.236 | 0.419 | 45 | 127 | 28 MB + 5.4× | pixels coded in 8-bit documents only; aqr-psd itself takes a few MB besides its streams, the rest is the archive's (a file kept raw is scanned by the parts aqr-psd tells) |
+| Clip Studio Paint (`.clip`) | aqr-clip | 13 files, 926 MB | 0.339 ~ 0.340 | 0.760 | 35 | 91 | not measured | measured 2026-10-28 on a Ryzen 7 9700X with `aqr-show -t 16` (16 threads, not one); the tiles (zlib level 1, memLevel 9, all made again exactly) by a model of whole pixels in batches of 64 decoded as tasks (a tile equal to an earlier one a reference), the database by aqr-sqlite, the rest (13 MB of one file's 3D data) by the archive; aqr as it was: 0.726. A held-out file came to 0.454 against 0.763 (0.499 before the references; README of aqr-clip). The database's PNG preview is not recompressed |
+| DDS (BC1–BC5) | aqr-tex | 1275 files of The Crew's textures, 400 MB | 0.342 ~ 0.376 | 0.486 | 23 | 20 | not measured | the ratio of a sample drawn with no least size (`sample --min 0`; of 256 KiB or more, 423 files: 0.345 ~ 0.366); the module (19 KB) does not pay alone for small files. Speeds measured 2026-10-28 on a Ryzen 7 9700X with `aqr-tex-bench` (the module a thread, not `aqr-show`) on a sample of 1274 files, 402 MB (0.347 then); all 52,181 of them (16.4 GB): 0.325 against zstd -19's 0.403 (README of aqr-tex). Large surfaces are coded in stripes decoded at once: the largest files (2.8–5.6 MB), one at a time, 23 → 97 MB/s on 16 threads. On an M4 after the coding was made faster (2026-11-01): 31.9 / 27.1 MB/s on a thread (26.6 / 20.9 before). Uncompressed DDS goes to aqr-raw's `raster-recons`; BC6H, BC7 and KTX are not taken yet |
 
 ### Audio
 
-| format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
+| format | crate | sample | ratio | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
-| MP3 | aqr-mp3 | 402 files, 401 MB | 0.853 ~ 0.890 | 0.971 | 45 | 116 | 61 MB + 6.4× | see below |
-| Ogg Vorbis | aqr-ogg, aqr-vorbis | 12 files made from aqr-flac's corpus by libvorbisenc with libogg and by ffmpeg, 49.1 MB (FORMAT.md of aqr-ogg) | 0.932 | 0.999 | 55 (`aqr`, 10 threads) | 158 and 117 (`-t`, 10 threads; the second as Wasm) | 0.66 GB heap peak (`aqr`) | measured 2026-10-31 with `aqr`, not `aqr-show`. The pages from the packets (layout about 5 bytes a page before compression); the audio packets by aqr-vorbis in pieces of 2 MiB. Opus and FLAC in Ogg are not taken |
-| FLAC; WAV, AIFF | aqr-flac; aqr-raw | 28 files, 401 MB | 0.945 | 0.999 | 65 | 165 | 9 MB + 11.5× | the resource is about 2.6 KB per archive. Measured when aqr-flac took WAV and AIFF too: aqr-raw has them now, with the same streams |
+| MP3 | aqr-mp3 | 394 files, 400 MB | 0.852 ~ 0.915 | 0.968 | 45 | 116 | 61 MB + 6.4× | see below |
+| Vorbis | aqr-vorbis | 4 Ogg Vorbis files of libvorbis (2008), 29.1 MB; 144 FSB5 sound banks of The Crew, 401 MB | 0.919 ~ 0.925; 0.845 ~ 0.853 | 0.999; 0.955 | 55 (`aqr`, 10 threads) | 158 and 117 (`-t`, 10 threads; the second as Wasm) | 0.66 GB heap peak (`aqr`) | the ratios measured 2026-11-01 on a Ryzen 7 9700X with `aqr-show -t 16`, of the files in their containers (aqr-ogg, aqr-fsb); speed and memory measured 2026-10-31 with `aqr` on 12 Ogg files made from aqr-flac's corpus by libvorbisenc with libogg and by ffmpeg (49.1 MB, FORMAT.md of aqr-ogg; 0.932 then), which were not kept. The audio packets coded in pieces of 2 MiB |
+| FLAC; WAV, AIFF | aqr-flac; aqr-raw | 25 files, 450 MB | 0.946 ~ 0.948 | 0.999 | 65 | 165 | 9 MB + 11.5× | the module is about 31 KB per archive, the resource 2.4 KB. Measured when aqr-flac took WAV and AIFF too: aqr-raw has them now, with the same streams |
 
-The MP3 resource is the built-in tables (131 KB raw, about 38 KB in every archive), so a
-typical 1 MB track is coded alone too (worst). The speeds are those of the files coded
+The MP3 resource is the built-in tables (131 KB raw, about 33 KB in every archive), and the
+module about 28 KB more: a typical 1 MB track alone (worst) pays for both, and 23 of the
+sample's 394 tracks are kept raw. The speeds are those of the files coded
 (`-r`); the memory is a fit over concatenations of the sample (9 to 120 MB, each coded as one
 file with `-e`), as the sample's files are all about 1 MB (32–59 MB each, median 41 MB). The
 fixed part is mostly the tables. Before the contexts shared 500 tables, the resource was
@@ -75,26 +83,26 @@ reservoir is rebuilt.
 
 ### Documents, data, 3D
 
-| format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
+| format | crate | sample | ratio | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
-| PDF | aqr-pdf | 144 files, 402 MB | 0.855 | 0.896 | 46 | 198 | 41 MB + 5.7× | 18 files kept as they are (no formula paid). 9 files take over twice the memory fit, up to 331 MB for 3.4 MB (`cc/0000192.pdf`) and 202 MB for 1.8 MB |
-| SQLite 3 | aqr-sqlite | 88 files, 324 MB | 0.227 | 0.366 | 48 | 368 | 24 MB + 6.7× | |
-| Text (words, XML markup) | aqr-wrt | enwik9, 1 GB (README) | 0.253 | 0.312 | 148 | 291 | not measured | measured 2026-10-26 with `aqr` (10 threads) on enwik9 alone, not `aqr-show`; text of 256 KiB or more. The 10gb corpus −35.8 MB (README) |
-| Text of Hangul (Korean) | aqr-wrt (`wrt-recons-hangul`) | namuwiki, 512 MiB of 8.8 GB (README) | 0.272 | 0.358 | 175 | 1280 | 4.2× | measured 2026-10-29 with `aqr -5` (10 threads), not `aqr-show`; 0.307 before (zstd -9 on it raw). Syllables in two bytes, words of Hangul by codes |
-| FASTA (nucleotides) | aqr-fasta | hg19, 93 files, 3.2 GB (README) | 0.218 | 0.309 | 170 | 133 (753 through `aqr`, files at once) | not measured | measured 2026-10-26 with `aqr-fasta-bench` (chr1) and `aqr` (hg19 of the 10gb corpus), not `aqr-show`; zstd -3 file by file |
+| PDF | aqr-pdf | 123 files, 456 MB | 0.822 ~ 0.836 | 0.918 | 46 | 198 | 41 MB + 5.7× | files kept as they are (no formula paid): 73 alone (worst), 5 without the modules (best). Speed and memory of an earlier sample (144 files, 402 MB). 9 files take over twice the memory fit, up to 331 MB for 3.4 MB (`cc/0000192.pdf`) and 202 MB for 1.8 MB |
+| SQLite 3 | aqr-sqlite | 88 files, 324 MB | 0.210 ~ 0.219 | 0.366 | 48 | 368 | 24 MB + 6.7× | |
+| Text (words, XML markup) | aqr-wrt | enwik9, 1 GB (README) | 0.233 ~ 0.235 | 0.312 | 148 | 291 | not measured | speeds measured 2026-10-26 with `aqr` (10 threads) on enwik9 alone, not `aqr-show` (0.253 then); text of 256 KiB or more. The 10gb corpus −35.8 MB (README) |
+| Text of Hangul (Korean) | aqr-wrt (`wrt-recons-hangul`) | namuwiki, 512 MiB of 8.8 GB (README) | 0.261 ~ 0.267 | 0.349 | 175 | 1280 | 4.2× | the ratio of the middle 512 MiB cut again at level mid; speeds measured 2026-10-29 with `aqr -5` (10 threads), not `aqr-show`, on a cut of its own (0.272 then, zstd -3 0.358); 0.307 before (zstd -9 on it raw). Syllables in two bytes, words of Hangul by codes |
+| FASTA (nucleotides) | aqr-fasta | hg19, 93 files, 3.2 GB (README) | 0.209 | 0.309 | 170 | 133 (753 through `aqr`, files at once) | not measured | speeds measured 2026-10-26 with `aqr-fasta-bench` (chr1) and `aqr` (hg19 of the 10gb corpus), not `aqr-show`; zstd -3 file by file |
 | Delimited tables (CSV, TSV, USV) | aqr-xsv | 10 files, 11.7 MB (README) | 0.792 of `zstd -3` (streams through zstd -3) | | 39–479 | 584–1219 | not measured | measured 2026-10-28 with `aqr-xsv-bench`, not `aqr-show`: GPS logs 0.41 of zstd -3, cmz's `airport-codes.csv` 0.82 (2.74 → 2.32 MB through `aqr`), perl's `UnicodeData.txt` 0.91. Taken by its text before aqr-wrt. The 10gb corpus −1.71 MB (85 files; README) |
 | JSON lines | aqr-jsonl | 7 files, 2.27 GB (README) | 0.872 of `aqr` before (through `aqr`) | | 179–1012 | 741–3080 (one thread) | segments of 64 MiB: decompressing 2.24 GB, 376 MB of heap | measured 2026-11-01 through `aqr` (10 threads) and `aqr-jsonl-bench`, not `aqr-show`: GH Archive −8.4%, Amazon reviews −18.1%, OpenAlex −27.8%, GeoJSON −15.1%, event logs −37.6%, C4 −1.5%. Taken by its text before aqr-xsv and aqr-wrt |
-| Wavefront OBJ | aqr-obj | 22 files, 403 MB | 0.097 | 0.242 | 121 | 324 | 24 MB + 3.1× | `aqr-obj bench`, before the wiring. Files over 300 MB left out. Through `aqr` (all threads, 2026-10-28): c3d 67.5 → 9.99 MB (19.94 before the wiring), threejs 6.0 → 0.83 MB (1.50). Taken by its text, not by the name `.obj` (object files) |
+| Wavefront OBJ | aqr-obj | 14 files, 411 MB | 0.080 ~ 0.081 | 0.232 | 121 | 324 | 24 MB + 3.1× | files over 300 MB left out. Speed and memory by `aqr-obj bench`, before the wiring, on 22 files of 403 MB (0.097 then). Through `aqr` (all threads, 2026-10-28): c3d 67.5 → 9.99 MB (19.94 before the wiring), threejs 6.0 → 0.83 MB (1.50). Taken by its text, not by the name `.obj` (object files) |
 
 ### Video
 
-| format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
+| format | crate | sample | ratio | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
-| Apple ProRes (QuickTime, MXF) | aqr-prores | 33 files, 16.89 GB: ARRI cameras (MOV and MXF), an Apple-encoded film, an SD capture, ffmpeg's encoders, FFmpeg's samples (README) | 0.676 (0.990 before) | 0.990 | 46 (`aqr`, 16 threads) | 130 (`-t`, 16 threads) | the archiver's (it holds the largest file whole) | measured 2026-11-01 with `aqr` on a Ryzen 7 9700X. The coefficients under a context model with the previous frame as context (most of the gain: 0.830 without it), in chunks of 64 MiB whose stripes (one for each 4 MiB) decode as tasks; nothing reproduced but the coding. A chunk codes at about 15 MB/s on a thread and decodes at 13 |
+| Apple ProRes (QuickTime, MXF) | aqr-prores | 33 files, 16.89 GB: ARRI cameras (MOV and MXF), an Apple-encoded film, an SD capture, ffmpeg's encoders, FFmpeg's samples (README) | 0.676 (0.990 before) | 0.919 | 46 (`aqr`, 16 threads) | 130 (`-t`, 16 threads) | the archiver's (it holds the largest file whole) | measured 2026-11-01 with `aqr` on a Ryzen 7 9700X. The coefficients under a context model with the previous frame as context (most of the gain: 0.830 without it), in chunks of 64 MiB whose stripes (one for each 4 MiB) decode as tasks; nothing reproduced but the coding. A chunk codes at about 15 MB/s on a thread and decodes at 13. The largest file (`NineEnProres01.mov`, 4.58 GB, 27% of the set) is found to be ProRes but not recoded: the archive keeps it as one stream (0.461) |
 
 ### Containers and general-purpose compression
 
-| format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
+| format | crate | sample | ratio | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
 | gzip, zlib | aqr-flate | 4 files, 4 MB | 0.932 | 0.977 | 16 | 58 | 34 MB + 35.6× | a small sample; 2 of 4 not coded, and since 2026-10-25 not deconstructed either (a probe of what the stream may gain): 6.7 and 8.0 to 50 and 33 MB/s. 153 gzip files of this machine (280 MB): 0.881 at 9.0 MB/s (README of aqr-flate). Per-stream figures on 924 streams are in aqr-flate's README |
 | ZIP | aqr-zip | 5 files, 327 MB | 0.954 | 0.998 | 8 | 23 | 48 MB + 13.8× | dominated by enwik9.zip (322 MB, 1 GB of text: 4.5 GB peak); two Python wheels come to 0.76. Since 2026-10-25 large bodies are rebuilt only where a probe says they may pay: 76 ZIP files of this machine (267 MB: wheels, JARs, Office files, Go modules, test corpora) 0.7799 -> 0.7795 at 10.8 -> 12.6 MB/s (README of aqr-zip) |
@@ -102,6 +110,8 @@ reservoir is rebuilt.
 | lzop files (LZO1X) | aqr-lzo | Silesia (12 files) through `lzop -3` and `-9`, 101.0 and 76.3 MB (README) | 0.622 and 0.821 | 0.840 and 0.923 | 16 and 10 (`aqr`, 10 threads) | 94 and 41 (`-t`, 10 threads; the second as Wasm) | 13.5× (`aqr` peak) | measured 2026-10-28 with `aqr`, not `aqr-show`; the original files archive to 57.8 MB: the records (4.5% and 6.1% of the streams) are most of the rest. No compressor reproduced: data + record of the parse |
 | LZFSE, LZVN (bvx blocks) | aqr-bvx | the 36 asset catalogs over 100 KB of `/Applications`, 272.5 MB (README) | 0.701 (0.809 before) | 0.854 | 4.9 (`aqr`, 10 threads) | 43 and 34 (`-t`, 10 threads; the second as Wasm) | 28.5× (`aqr` peak, 7.8 GB) | measured 2026-10-30 with `aqr`, not `aqr-show`, with the streams taken at level mid (now level 9 only: 170.57 MB at `-l 9`, 146 s); 4,781 LZFSE and 10,200 LZVN streams, 3.7 GB of data. No compressor reproduced: data + record of the parse (1.5% and 2.5% of the streams), with the LZFSE compressor's table of candidates as a context. The data (pixels) is stored by zstd; some catalogs' streams are kept |
 | bzip2 | aqr-bz2 | 79 files of this machine, 352.8 MB (README) | 0.726 (0.88 for a source tar, 0.85 for a tar of binaries); text alone kept | | 3–5 (`aqr`, 16 threads) | 16 (`-t`, 16 threads) | 30 B per symbol of a block, on each thread | measured 2026-10-31 on Windows with `aqr`, not `aqr-show`; libbzip2's compressor reproduced exactly (149 of 153 files); the gain is what the data holds, BWT already models text well |
+| Ogg | aqr-ogg | | | | | | | the pages from the packets (layout about 5 bytes a page before compression), the Vorbis packets by aqr-vorbis (Audio). Opus and FLAC in Ogg are not taken |
+| FSB5 (FMOD sound banks) | aqr-fsb | | | | | | | the Vorbis samples' setup headers found by their CRC-32 in aqr-fsb's database, the samples recoded by aqr-vorbis (Audio), IMA ADPCM by aqr-ima |
 | ar, tar, cpio | aqr-bundle | the 10gb corpus (README) | 2810.8 → 2775.0 MB for all of it | | | 6600 (the module) | 28000 (the module) | not measured | measured with `aqr` and `aqr-bundle-check`, not `aqr-show`: an archive alone gains nothing, its files are recompressed by their formats and shared with the same files archived along (`gimp.tar` and its files −11.3 MB); ar archives of objects +1.0 MB |
 | asar (Electron) | aqr-asar | 27 archives of one machine (README) | 714.42 → 697.11 MB for all of them (with aqr-gif) | | | 950 | 4100 (the module) | not measured | an archive alone gains little (headers at zstd -3 2.13 → 0.84 MB); its files are recompressed by their formats; archives of many small files (`node_modules`) lose alone, as their text is a stream apart (aqr-compress's kinds) |
 | ISO 9660, UDF images | aqr-iso | a Windows Server 2008 R2 DVD, 3.17 GB (README) | 2777.6 → 2776.9 MB | | 177 (`aqr`, all threads) | | 1.82 GB peak for 3.17 GB (2.04 before) | measured 2026-10-30 with `aqr`; no module (the image is its files' contents and the rest); 89% of the DVD is `install.wim` (LZX), which it gives as a file of its own |
@@ -119,9 +129,9 @@ reservoir is rebuilt.
 
 ### Executables
 
-| format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
+| format | crate | sample | ratio | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
-| PE, Mach-O (x86, x86-64, ARM64, CIL) | aqr-exe | 259 files, 391 MB | 0.326 | 0.381 | 28 | 414 | 26 MB + 7.9× | samples from `Program Files` and `System32` of a Windows machine; .NET metadata and IL (CIL) too: 0.306 → 0.267 for the 84 assemblies of IL alone; the rest of an image scanned (PNG resources); 39 files not coded (27 of them .NET, mostly satellite assemblies of resources). 11 large binaries (1529 MB): 0.306 at 58 and 348 MB/s, 0.76–1.01 of the sample's memory fit; two small files kept raw take over twice it (106 MB for 0.7 MB, 136 MB for 5.3 MB). The disfilter alone: 292 and 336 MB/s, −20% under zstd -9. Mach-O, thin or universal, and ARM64 code (in Mach-O and PE): VS Code's 34 universal binaries (493 MB) −16.7% against the files as they are; the ARM64 filter alone −17.6% under zstd -9 (xz's BCJ −12.1%). No ELF yet |
+| PE, Mach-O (x86, x86-64, ARM64, CIL) | aqr-exe | 259 files, 391 MB | 0.295 ~ 0.303 | 0.381 | 28 | 414 | 26 MB + 7.9× | samples from `Program Files` and `System32` of a Windows machine; .NET metadata and IL (CIL) too: 0.306 → 0.267 for the 84 assemblies of IL alone; the rest of an image scanned (PNG resources); 39 files not coded (27 of them .NET, mostly satellite assemblies of resources). 11 large binaries (1529 MB): 0.306 at 58 and 348 MB/s, 0.76–1.01 of the sample's memory fit; two small files kept raw take over twice it (106 MB for 0.7 MB, 136 MB for 5.3 MB). The disfilter alone: 292 and 336 MB/s, −20% under zstd -9. Mach-O, thin or universal, and ARM64 code (in Mach-O and PE): VS Code's 34 universal binaries (493 MB) −16.7% against the files as they are; the ARM64 filter alone −17.6% under zstd -9 (xz's BCJ −12.1%). No ELF yet |
 
 ### In progress or planned
 
