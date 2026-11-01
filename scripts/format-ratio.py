@@ -41,7 +41,7 @@ def sample(args):
                 size = os.path.getsize(p)
                 if size < args.min or (args.max_file and size > args.max_file):
                     continue
-                rel = os.path.relpath(p, root)
+                rel = os.path.relpath(p, root).replace(os.sep, "/")
                 files.append((hashlib.sha256(rel.encode()).hexdigest(), p, size))
     files.sort()
     total = 0
