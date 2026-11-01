@@ -41,6 +41,9 @@ pub fn cut<'a>(data: &'a [u8], records: &'a [u8], index: &[u8]) -> Result<Vec<(&
     Ok(out)
 }
 
+/// What joins a stream's data and record onto an output: the sizes of its files' parts.
+type Join = fn(&[u8], &[u8], &mut Vec<u8>) -> Result<Vec<usize>>;
+
 /// A module: the streams of `len` bytes in all that the data and records of the inputs (data,
 /// records, index) rebuild with `join`, one after another (see `FORMAT.md`). Streams are rebuilt
 /// side by side on up to `threads` threads natively; one after another in Wasm.
@@ -49,7 +52,7 @@ fn decode_with(
     inputs: &[&[u8]],
     len: u64,
     threads: usize,
-    join: fn(&[u8], &[u8], &mut Vec<u8>) -> Result<Vec<usize>>,
+    join: Join,
 ) -> Result<Vec<u8>> {
     let &[data, records, index] = inputs else { return Err(Error("three inputs wanted")) };
     if !params.is_empty() {

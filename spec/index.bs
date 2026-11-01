@@ -5120,7 +5120,7 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/lzo-recons.wasm" title="crates/aqr-modules/wasm/lzo-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-lzo/FORMAT.md" title="codecs/aqr-lzo/FORMAT.md">R</a>
     <tr>
-      <td><code>94723274d403c5c934b4446093d6ec8df3c357378e03ac81db7a929895915e97</code>
+      <td><code>d760fe64344c9208995eae2f36f78f7054e2a8f361d9c70ffcb89a42fa734a4e</code>
       <td>lzx-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/lzx-recons.wasm" title="crates/aqr-modules/wasm/lzx-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-lzx/FORMAT.md" title="codecs/aqr-lzx/FORMAT.md">R</a>
@@ -5174,6 +5174,16 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td>psd-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/psd-recons.wasm" title="crates/aqr-modules/wasm/psd-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-psd/FORMAT.md" title="codecs/aqr-psd/FORMAT.md">R</a>
+    <tr>
+      <td><code>a511b981b5b3e946bd167485510a878b72177d9a8508f53f32fe2f7c675e1369</code>
+      <td>rar3-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/rar3-recons.wasm" title="crates/aqr-modules/wasm/rar3-recons.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-rar/FORMAT.md" title="codecs/aqr-rar/FORMAT.md">R</a>
+    <tr>
+      <td><code>f1592c81fa01d14c856b09f824c2c3e257814006ff276b54ed0496be6d919394</code>
+      <td>rar5-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/rar5-recons.wasm" title="crates/aqr-modules/wasm/rar5-recons.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-rar/FORMAT.md" title="codecs/aqr-rar/FORMAT.md">R</a>
     <tr>
       <td><code>9595f7182f109fffea3716e5e9c45ef95d79e4a40262e7586326a272eeacd29d</code>
       <td>raster-recons-16@1

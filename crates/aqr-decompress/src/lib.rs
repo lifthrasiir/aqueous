@@ -155,6 +155,15 @@ pub const AZO: Module = aqr_azo::formula::MODULE;
 /// streams'.
 pub const LHA: Module = aqr_lha::formula::MODULE;
 
+/// aqr-rar reconstruction of RAR5 streams (a solid group's files' packed data, or a file's), one
+/// after another, from their data and records. Inputs: the data, the records and the index
+/// cutting them into the streams'.
+pub const RAR5: Module = aqr_rar::formula::MODULE5;
+
+/// aqr-rar reconstruction of the streams of RAR 3.x and 4.x (RAR 2.9's algorithm: LZ and PPMd
+/// blocks, filters), one after another, from their data and records. Inputs: as [`RAR5`].
+pub const RAR3: Module = aqr_rar::formula::MODULE3;
+
 /// aqr-bvx reconstruction of a stream of Apple's LZFSE and LZVN blocks from its data and
 /// record. Inputs: the data and the record.
 pub const BVX: Module = aqr_bvx::formula::MODULE;
@@ -279,7 +288,7 @@ pub const RECS_ENTRIES: Module = aqr_infer_recs::formula::ENTRIES;
 pub const RECS_FLOATS: Module = aqr_infer_recs::formula::FLOATS;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 68] = [
+pub const MODULES: [Module; 70] = [
     X86,
     X86_REMAP,
     ARM64,
@@ -304,6 +313,8 @@ pub const MODULES: [Module; 68] = [
     LZO,
     AZO,
     LHA,
+    RAR5,
+    RAR3,
     BVX,
     BZ2,
     BZ2_ALZ,
@@ -570,6 +581,12 @@ impl Native {
         } else if m == LHA {
             none(resources)?;
             aqr_lha::formula::decode(params, inputs, len, threads).map_err(msg)
+        } else if m == RAR5 {
+            none(resources)?;
+            aqr_rar::formula::decode5(params, inputs, len, threads).map_err(msg)
+        } else if m == RAR3 {
+            none(resources)?;
+            aqr_rar::formula::decode3(params, inputs, len, threads).map_err(msg)
         } else if m == BVX {
             none(resources)?;
             aqr_bvx::formula::decode(params, inputs, len, threads).map_err(msg)

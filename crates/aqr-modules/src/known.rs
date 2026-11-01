@@ -270,7 +270,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "lzx-recons",
         version: 1,
-        sha512_256: hex("94723274d403c5c934b4446093d6ec8df3c357378e03ac81db7a929895915e97"),
+        sha512_256: hex("d760fe64344c9208995eae2f36f78f7054e2a8f361d9c70ffcb89a42fa734a4e"),
         block: include_bytes!("../wasm/lzx-recons.block"),
     },
     Known {
@@ -332,6 +332,18 @@ pub const KNOWN: &[Known] = &[
         version: 1,
         sha512_256: hex("b00379f54350fc3e0b7739057e9f05da387d5ecbb81e8e0a3cf30ff9cc7d06d1"),
         block: include_bytes!("../wasm/psd-recons.block"),
+    },
+    Known {
+        name: "rar3-recons",
+        version: 1,
+        sha512_256: hex("a511b981b5b3e946bd167485510a878b72177d9a8508f53f32fe2f7c675e1369"),
+        block: include_bytes!("../wasm/rar3-recons.block"),
+    },
+    Known {
+        name: "rar5-recons",
+        version: 1,
+        sha512_256: hex("f1592c81fa01d14c856b09f824c2c3e257814006ff276b54ed0496be6d919394"),
+        block: include_bytes!("../wasm/rar5-recons.block"),
     },
     Known {
         name: "raster-recons-16",

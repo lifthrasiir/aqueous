@@ -4,10 +4,14 @@ fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(format!("{}/tests/data/{name}.rar", env!("CARGO_MANIFEST_DIR"))).unwrap()
 }
 
-/// A RAR5 archive's streams: (parts, sizes, version 1, dictionary), a solid group each.
-fn groups5(d: &[u8]) -> Vec<(Vec<&[u8]>, Vec<usize>, bool, u64)> {
+/// A RAR5 stream: its files' parts, their sizes, version 1's or not, the dictionary.
+type Group5<'a> = (Vec<&'a [u8]>, Vec<usize>, bool, u64);
+type Group3<'a> = (Vec<&'a [u8]>, Vec<usize>, u64);
+
+/// A RAR5 archive's streams, a solid group each.
+fn groups5(d: &[u8]) -> Vec<Group5<'_>> {
     let a = rar5::parse(d).unwrap();
-    let mut out: Vec<(Vec<&[u8]>, Vec<usize>, bool, u64)> = Vec::new();
+    let mut out: Vec<Group5> = Vec::new();
     for e in a.entries.iter().filter(|e| !e.service && e.method != 0 && !e.data.is_empty()) {
         let p = (&d[e.data.clone()], e.size.unwrap() as usize);
         match out.last_mut() {
@@ -21,9 +25,9 @@ fn groups5(d: &[u8]) -> Vec<(Vec<&[u8]>, Vec<usize>, bool, u64)> {
     out
 }
 
-fn groups3(d: &[u8]) -> Vec<(Vec<&[u8]>, Vec<usize>, u64)> {
+fn groups3(d: &[u8]) -> Vec<Group3<'_>> {
     let a = rar4::parse(d).unwrap();
-    let mut out: Vec<(Vec<&[u8]>, Vec<usize>, u64)> = Vec::new();
+    let mut out: Vec<Group3> = Vec::new();
     for e in a.entries.iter().filter(|e| !e.service && e.method != 0x30 && !e.data.is_empty()) {
         let p = (&d[e.data.clone()], e.size as usize);
         match out.last_mut() {
@@ -44,7 +48,7 @@ fn damaged(data: &[u8], record: &[u8], join: fn(&[u8], &[u8]) -> aqr_rar::Result
         seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
         let mut r = record.to_vec();
         let i = 1 + seed as usize % (r.len() - 1);
-        r[i] ^= 1 << (seed >> 16) % 8;
+        r[i] ^= 1 << ((seed >> 16) % 8);
         let _ = join(data, &r);
         let _ = join(data, &r[..i]);
     }

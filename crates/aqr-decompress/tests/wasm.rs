@@ -338,6 +338,37 @@ fn lzo_same_as_wasm() {
     }
 }
 
+/// RAR archives (RAR5's and RAR 3.x's, LZ and PPMd, with filters) natively and as WebAssembly
+/// alike, and their records damaged in turn failing alike (or giving the same).
+#[test]
+fn rar_same_as_wasm() {
+    let enc = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
+    for t in ["r5_solid", "r4_solid", "r4_ppmd", "r4_audio"] {
+        let d = fixture(&format!("codecs/aqr-rar/tests/data/{t}.rar"));
+        let f = aqr_rar::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
+        let c = enc.encode(&f, None).unwrap();
+        assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{t}");
+        assert!(aqr::decode(&c, &Wasm).unwrap() == d, "{t}");
+        let r = f.streams.iter().position(|s| s.class == "rar/record").unwrap();
+        for k in 0..8 {
+            let mut bad = f.clone();
+            let s = &mut bad.streams[r].data;
+            let at = s.len() * k / 8;
+            if k == 7 {
+                s[at..].fill(0xff);
+            } else if at < s.len() {
+                s[at] ^= 1 << k;
+            }
+            let c = enc.encode(&bad, None).unwrap();
+            let (n, w) = (aqr::decode(&c, &Native::default()), aqr::decode(&c, &Wasm));
+            assert_eq!(n.is_ok(), w.is_ok(), "{t} ({k}): {n:?} {w:?}");
+            if let (Ok(n), Ok(w)) = (n, w) {
+                assert!(n == w, "{t} ({k})");
+            }
+        }
+    }
+}
+
 /// LHA's streams (two of an archive, of `-lh5-` and `-lh6-`) natively and as WebAssembly alike,
 /// and their records damaged in turn failing alike (or giving the same).
 #[test]
