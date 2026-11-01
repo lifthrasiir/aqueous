@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use aqr_formula::aqr::{Entry, EntryNode, Extra, Tree, name_from};
+use aqr_formula::aqr::{Entry, EntryNode, Extra, Tree, name_bytes, name_from};
 
 /// The names of `path` (separated by `/`, and `\` too where `backslash`): `None` where it has a
 /// `..` (it could reach out of the directory) or a zero byte. A `/` or a drive (`C:`) at the
@@ -23,6 +23,80 @@ pub fn split(path: &[u8], backslash: bool) -> Option<Vec<&[u8]>> {
     }
     (!names.iter().any(|n| *n == b".." || n.contains(&0))).then_some(names)
 }
+
+/// The names of `path` as [`split`] has them, but taken as they are where it has a `..` or a
+/// zero byte: what a note of an entry left out is of ([`Select::wants`]).
+pub fn lax(path: &[u8], backslash: bool) -> Vec<Vec<u8>> {
+    let sep = |b: &u8| *b == b'/' || backslash && *b == b'\\';
+    match split(path, backslash) {
+        Some(names) => names.into_iter().map(<[u8]>::to_vec).collect(),
+        None => path.split(sep).filter(|n| !n.is_empty() && *n != b".").map(<[u8]>::to_vec).collect(),
+    }
+}
+
+/// Paths of an archive's entries to extract alone, each with what is under it (as names, by
+/// [`split`]); none: everything.
+#[derive(Debug, Clone, Default)]
+pub struct Select {
+    paths: Vec<Vec<Vec<u8>>>,
+}
+
+impl Select {
+    /// The selection of `paths` (each of one name at least).
+    pub fn new(paths: Vec<Vec<Vec<u8>>>) -> Select {
+        Select { paths }
+    }
+
+    /// Whether the entry of `names` is selected, or under a path selected. A note of no names
+    /// (of the archive, not of an entry) is wanted.
+    pub fn wants<N: AsRef<[u8]>>(&self, names: &[N]) -> bool {
+        names.is_empty()
+            || self
+                .paths
+                .iter()
+                .any(|p| p.len() <= names.len() && p.iter().zip(names).all(|(a, b)| a[..] == *b.as_ref()))
+    }
+
+    /// By entry of `t`, whether it is selected or under a path selected.
+    pub fn entries(&self, t: &Tree) -> Vec<bool> {
+        let mut paths: Vec<Vec<Vec<u8>>> = Vec::with_capacity(t.entries.len());
+        let mut out = Vec::with_capacity(t.entries.len());
+        for e in &t.entries {
+            let mut p = e.parent.map_or_else(Vec::new, |q| paths[q].clone());
+            p.push(name_bytes(&e.name).0.to_vec());
+            out.push(e.parent.is_some_and(|q| out[q]) || self.wants(&p));
+            paths.push(p);
+        }
+        out
+    }
+
+    /// By content of `t` (of `n` contents at least), whether a file or a fork of an entry
+    /// selected is of it.
+    pub fn contents(&self, t: &Tree, n: usize) -> Vec<bool> {
+        let mut out = vec![false; n];
+        for (e, _) in t.entries.iter().zip(self.entries(t)).filter(|x| x.1) {
+            let files = match e.node {
+                EntryNode::File(c) => Some(c),
+                _ => None,
+            };
+            for c in files.into_iter().chain(e.extra.forks.iter().map(|f| f.1)) {
+                if out.len() <= c {
+                    out.resize(c + 1, false);
+                }
+                out[c] = true;
+            }
+        }
+        out
+    }
+}
+
+/// Whether content `c` is wanted by `wanted` (by content; all where `None`).
+pub fn wanted(wanted: Option<&[bool]>, c: usize) -> bool {
+    wanted.is_none_or(|w| w.get(c) == Some(&true))
+}
+
+/// What is told of an entry left out: its names ([`lax`]; none: of the archive) and what.
+pub type Note = (Vec<Vec<u8>>, String);
 
 /// `names` joined for people.
 pub fn shown(names: &[&[u8]]) -> String {

@@ -4,7 +4,8 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use aqr_unpack::{Done, EntryNode, Extra, Filter, Format, Opened, Sink, Time, Tree, by_name};
+use aqr_formula::aqr::Step;
+use aqr_unpack::{Done, EntryNode, Extra, Filter, Format, Opened, Select, Sink, Time, Tree, by_name};
 
 /// What the tree tells: by path, the node (a file's content) and its metadata.
 #[derive(Debug, Clone, PartialEq)]
@@ -22,6 +23,8 @@ struct Rec {
     told: Mutex<Vec<bool>>,
     contents: Mutex<BTreeMap<usize, Vec<u8>>>,
     notes: Mutex<Vec<String>>,
+    /// The units started.
+    started: Mutex<Vec<usize>>,
 }
 
 impl Sink for Rec {
@@ -48,6 +51,12 @@ impl Sink for Rec {
     fn note(&self, what: &str) {
         self.notes.lock().unwrap().push(what.to_string());
     }
+
+    fn step(&self, s: Step) {
+        if let Step::Started(i) = s {
+            self.started.lock().unwrap().push(i);
+        }
+    }
 }
 
 fn data(name: &str) -> Vec<u8> {
@@ -65,6 +74,34 @@ fn unpack(f: Format, d: &[u8]) -> Result<(Done, Rec), String> {
     let done = Opened::open(f, d)?.unpack(4, &r)?;
     assert_eq!(*r.tree.lock().unwrap(), done.tree, "the tree told is the tree done");
     Ok((done, r))
+}
+
+/// `d` read as [`unpack`] does, `paths` alone (`/` between names) selected.
+fn unpack_some(f: Format, d: &[u8], paths: &[&str]) -> Result<(Done, Rec), String> {
+    let r = Rec::default();
+    let mut o = Opened::open(f, d)?;
+    o.select(Select::new(paths.iter().map(|p| p.split('/').map(|n| n.as_bytes().to_vec()).collect()).collect()));
+    let done = o.unpack(4, &r)?;
+    assert_eq!(*r.tree.lock().unwrap(), done.tree, "the tree told is the tree done");
+    Ok((done, r))
+}
+
+/// By path, the files whose contents were given, and their contents.
+fn given(done: &Done, r: &Rec) -> BTreeMap<String, Vec<u8>> {
+    let contents = r.contents.lock().unwrap();
+    let mut paths: Vec<String> = Vec::new();
+    let mut out = BTreeMap::new();
+    for e in &done.tree.entries {
+        let name = String::from_utf8_lossy(&e.name).into_owned();
+        let path = e.parent.map_or(name.clone(), |p| format!("{}/{name}", paths[p]));
+        if let EntryNode::File(c) = e.node
+            && let Some(d) = contents.get(&c)
+        {
+            out.insert(path.clone(), d.clone());
+        }
+        paths.push(path);
+    }
+    out
 }
 
 /// By path, the node and the metadata.
@@ -491,4 +528,64 @@ fn encrypted() {
     // the traditional encryption: the passphrase as its bytes
     let (took, ..) = unpack_with(Format::Zip, &data("enc-zipcrypto.zip"), "päss wörd".as_bytes()).unwrap();
     assert!(!took);
+}
+
+/// Paths selected of each format: only their files given (a directory's with what is under
+/// it), only the units holding them started, and nothing told of the entries not selected.
+#[test]
+fn selected() {
+    let map = |v: &[(&str, &[u8])]| v.iter().map(|(p, d)| (p.to_string(), d.to_vec())).collect::<BTreeMap<_, _>>();
+    // ZIP: `../evil.txt` (left out, told when all is) not told
+    let (done, r) = unpack_some(Format::Zip, &data("tree.zip"), &["dir"]).unwrap();
+    assert_eq!(given(&done, &r), map(&[("dir/in.txt", b"in dir")]));
+    assert_eq!((done.skipped, r.started.lock().unwrap().len()), (0, 1), "{:?}", r.notes.lock().unwrap());
+    let (done, r) = unpack_some(Format::Zip, &data("tree.zip"), &["stored.txt", "lzma.txt"]).unwrap();
+    assert_eq!(given(&done, &r), map(&[("stored.txt", &text()), ("lzma.txt", &text())]));
+    assert_eq!(r.started.lock().unwrap().len(), 2);
+
+    // tar (read through; the tree of what is selected); a hard link to a file not selected told
+    for (name, f) in [("tree-pax.tar", None), ("tree.tar.gz", Some(Filter::Gzip))] {
+        let (done, r) = unpack_some(Format::Tar(f), &data(name), &["dir/file.txt", "한글"]).unwrap();
+        let want = map(&[("dir/file.txt", &text()), ("한글/파일.txt", "유니코드".as_bytes())]);
+        assert_eq!(given(&done, &r), want, "{name}");
+        assert_eq!(done.skipped, 0, "{name}: {:?}", r.notes.lock().unwrap());
+        let l = listing(&done, &r);
+        assert_eq!(l.keys().collect::<Vec<_>>(), ["dir", "dir/file.txt", "한글", "한글/파일.txt"], "{name}");
+        let (done, r) = unpack_some(Format::Tar(f), &data(name), &["dir/hard"]).unwrap();
+        assert!(given(&done, &r).is_empty() && done.skipped == 1, "{name}");
+        assert!(r.notes.lock().unwrap()[0].contains("not selected"), "{:?}", r.notes.lock().unwrap());
+    }
+
+    // RAR: RAR5's hard link (left out) not told
+    let (done, r) = unpack_some(Format::Rar, &data("tree-rar5.rar"), &["dir/file.txt"]).unwrap();
+    assert_eq!(given(&done, &r), map(&[("dir/file.txt", &text())]));
+    assert_eq!(done.skipped, 0, "{:?}", r.notes.lock().unwrap());
+
+    // solid ones: what is given as it is extracted whole
+    let solid = |f: Format, d: &[u8], path: &str, units: Option<usize>| {
+        let (done, r) = unpack(f, d).unwrap();
+        let all = given(&done, &r);
+        let (done, r) = unpack_some(f, d, &[path]).unwrap();
+        let got = given(&done, &r);
+        let want: BTreeMap<_, _> =
+            all.into_iter().filter(|(p, _)| *p == path || p.starts_with(&format!("{path}/"))).collect();
+        assert!(!want.is_empty() && got == want, "{path}: {:?} of {:?}", got.keys(), want.keys());
+        assert!(units.is_none_or(|n| r.started.lock().unwrap().len() == n), "{path}");
+    };
+    let rar = |name: &str| codec_data("aqr-rar", &format!("{name}.rar"));
+    for name in ["r5_solid", "r4_solid"] {
+        let d = rar(name);
+        let (done, r) = unpack(Format::Rar, &d).unwrap();
+        // (a file in the middle, and the last)
+        let files: Vec<String> = given(&done, &r).into_keys().collect();
+        for p in [&files[files.len() / 2], files.last().unwrap()] {
+            solid(Format::Rar, &d, p, Some(1));
+        }
+    }
+    let blocks = codec_data("aqr-7z", "blocks.7z");
+    solid(Format::SevenZip, &blocks, "docs/words.txt", Some(1));
+    solid(Format::SevenZip, &blocks, "docs", Some(1));
+    solid(Format::SevenZip, &blocks, "bin/noise.dat", Some(1));
+    solid(Format::Egg, &codec_data("aqr-egg", "solid.egg"), "s/lorem_ipsum_short2.txt", Some(1));
+    solid(Format::Alz, &codec_data("aqr-alz", "normal.alz"), "subdir", None);
 }

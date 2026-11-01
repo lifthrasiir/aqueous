@@ -17,11 +17,11 @@ use aqr_7z::header::{self, File, Folder, Streams, Top};
 use aqr_bcj::bcj2;
 use aqr_bcj::formula::Filter;
 use aqr_common::{crc32, pool};
-use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, WIN_ATTRS_ALLOWED, name_from};
+use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, Tree, WIN_ATTRS_ALLOWED, name_from};
 
 use crate::build::{self, Builder};
 use crate::codec::Raw;
-use crate::{Done, Sink, codec, sys};
+use crate::{Done, Select, Sink, codec, sys};
 
 const S_IFMT: u32 = 0o170000;
 const S_IFDIR: u32 = 0o040000;
@@ -74,7 +74,7 @@ pub struct Listing<'d> {
     /// The contents of no data (empty files), and the links' entries by folder and substream.
     empty: Vec<usize>,
     links: Vec<(usize, usize, usize)>,
-    notes: Vec<String>,
+    notes: Vec<build::Note>,
     /// The passphrase of the encrypted folders, and whether the header was encrypted.
     pass: Option<Vec<u8>>,
     sealed: bool,
@@ -307,6 +307,7 @@ impl<'d> Listing<'d> {
         for file in files {
             let sub = if file.stream { subs.next() } else { None };
             let shown = String::from_utf8_lossy(&file.name).into_owned();
+            let lax = build::lax(&file.name, true);
             if let Some((f, k)) = sub {
                 self.units[f].files[k].1 = shown.clone();
             }
@@ -314,7 +315,7 @@ impl<'d> Listing<'d> {
                 continue;
             }
             let Some(names) = build::split(&file.name, true) else {
-                self.notes.push(format!("{shown}: a path reaching out of the directory, not extracted"));
+                self.notes.push((lax.clone(), format!("{shown}: a path reaching out of the directory, not extracted")));
                 continue;
             };
             let attrib = file.attrib.unwrap_or(0);
@@ -337,7 +338,7 @@ impl<'d> Listing<'d> {
             } else if mode & S_IFMT == S_IFLNK {
                 // (the target is its data: read before the tree is told)
                 let Some(_) = sub else {
-                    self.notes.push(format!("{shown}: a link to nothing, not extracted"));
+                    self.notes.push((lax.clone(), format!("{shown}: a link to nothing, not extracted")));
                     continue;
                 };
                 EntryNode::Link(Vec::new())
@@ -361,7 +362,7 @@ impl<'d> Listing<'d> {
                     self.links.push((f, k, i));
                 }
                 Ok(_) => {}
-                Err(e) => self.notes.push(e),
+                Err(e) => self.notes.push((lax.clone(), e)),
             }
         }
         for u in &mut self.units {
@@ -456,10 +457,19 @@ impl<'d> Listing<'d> {
     }
 
     /// Decodes folder `f` on up to `threads` threads, giving the data of each of its substreams
-    /// to `each` (with its index, on any thread) as soon as it is all decoded, and telling
-    /// `tick` the bytes given as it goes. The parts of the folder decode on threads of their
-    /// own, while what is decoded is given on the others.
-    fn stream(&self, f: usize, threads: usize, each: &Each, tick: &dyn Fn(u64)) -> Result<(), Error> {
+    /// that `want` (by index) to `each` (with its index, on any thread) as soon as it is all
+    /// decoded, and telling `tick` the bytes given as it goes. The parts of the folder decode on
+    /// threads of their own, while what is decoded is given on the others. Only the parts
+    /// holding the substreams from the first wanted to the last are decoded (LZMA2's parts are
+    /// apart), and the last only as far as needed; the folder's CRC is checked where it is all.
+    fn stream(
+        &self,
+        f: usize,
+        threads: usize,
+        want: &dyn Fn(usize) -> bool,
+        each: &Each,
+        tick: &dyn Fn(u64),
+    ) -> Result<(), Error> {
         let parts = self.parts(f)?;
         let size: usize = parts.iter().map(|p| p.1).sum();
         if Some(size as u64) != self.main.folders[f].size() {
@@ -477,17 +487,27 @@ impl<'d> Listing<'d> {
             })
             .collect();
         let starts: Vec<usize> = parts.iter().scan(0, |at, p| Some(std::mem::replace(at, *at + p.1))).collect();
+        // the substreams given, and the parts holding them (those before taken as done)
+        let (Some(first), Some(last)) = ((0..ends.len()).find(|&k| want(k)), (0..ends.len()).rfind(|&k| want(k)))
+        else {
+            return Ok(());
+        };
+        let (lo, hi) = (if first == 0 { 0 } else { ends[first - 1] }, ends[last]);
+        let p0 = (0..parts.len()).take_while(|&r| starts[r] + parts[r].1 <= lo && starts[r] < lo).count();
+        let p1 = (0..parts.len()).find(|&r| r > p0 && starts[r] >= hi).unwrap_or(parts.len());
+        let whole = (0..ends.len()).all(want) && p0 == 0 && p1 == parts.len();
         let mut buf = codec::room(size + codec::LZMA_ROOM)?;
         let room = buf.capacity();
         let raw = Raw(buf.as_mut_ptr());
-        let progress = Mutex::new(Progress { done: vec![0; parts.len()], failed: None, stop: false });
+        let done: Vec<usize> = (0..parts.len()).map(|r| if r < p0 { parts[r].1 } else { 0 }).collect();
+        let progress = Mutex::new(Progress { done, failed: None, stop: false });
         let more = Condvar::new();
-        let next = AtomicUsize::new(0);
+        let next = AtomicUsize::new(p0);
         // (the parts taken in order by as many threads as decode them)
         let work = || {
             loop {
                 let r = next.fetch_add(1, Relaxed);
-                let Some((p, n)) = parts.get(r) else { return };
+                let Some((p, n)) = parts[..p1].get(r) else { return };
                 let mut done = |k| {
                     let mut g = progress.lock().unwrap();
                     g.done[r] = k;
@@ -516,8 +536,8 @@ impl<'d> Listing<'d> {
             starts.get(whole).map_or(size, |s| s + done[whole])
         };
         let write = || -> Result<(), Error> {
-            let mut k = 0;
-            while k < ends.len() {
+            let mut k = first;
+            while k <= last {
                 let front = {
                     let mut g = progress.lock().unwrap();
                     loop {
@@ -531,20 +551,21 @@ impl<'d> Listing<'d> {
                         g = more.wait(g).unwrap();
                     }
                 };
-                let m = k + ends[k..].partition_point(|&e| e <= front);
-                let made = pool::par_map(m - k, threads, |i| {
-                    let j = k + i;
+                let m = (k + ends[k..].partition_point(|&e| e <= front)).min(last + 1);
+                let given: Vec<usize> = (k..m).filter(|&j| want(j)).collect();
+                let made = pool::par_map(given.len(), threads, |i| {
+                    let j = given[i];
                     let at = if j == 0 { 0 } else { ends[j - 1] };
                     // SAFETY: decoded (told under the lock), and written no more
                     each(j, unsafe { std::slice::from_raw_parts(raw.at(at), ends[j] - at) })
                 });
                 made.into_iter().collect::<Result<(), String>>()?;
-                tick((ends[m - 1] - if k == 0 { 0 } else { ends[k - 1] }) as u64);
+                tick(given.iter().map(|&j| sizes[j]).sum());
                 k = m;
             }
             // SAFETY: all decoded
             let all = unsafe { std::slice::from_raw_parts(raw.0, size) };
-            if self.main.folders[f].crc.is_some_and(|c| crc32::hash(all) != c) {
+            if whole && self.main.folders[f].crc.is_some_and(|c| crc32::hash(all) != c) {
                 return Err("a folder's CRC mismatch".into());
             }
             Ok(())
@@ -557,9 +578,8 @@ impl<'d> Listing<'d> {
             }
             let handles: Vec<_> = (0..w).map(|_| sc.spawn(work)).collect();
             let r = write();
-            if r.is_err() {
-                progress.lock().unwrap().stop = true;
-            }
+            // (what is past the last substream given not decoded)
+            progress.lock().unwrap().stop = true;
             for h in handles {
                 h.join().unwrap_or_else(|p| std::panic::resume_unwind(p));
             }
@@ -569,19 +589,28 @@ impl<'d> Listing<'d> {
         r
     }
 
-    pub fn unpack(&self, threads: usize, sink: &dyn Sink) -> Result<Done, String> {
-        self.notes.iter().for_each(|n| sink.note(n));
-        let mut skipped = self.notes.len();
+    pub fn tree(&self) -> &Tree {
+        &self.b.tree
+    }
+
+    pub fn unpack(&self, threads: usize, sink: &dyn Sink, select: Option<&Select>) -> Result<Done, String> {
+        let mut skipped = crate::tell(&self.notes, select, sink);
         let mut tree = self.b.tree.clone();
+        let wanted = select.map(|s| s.contents(&tree, self.b.contents));
+        let entries = select.map(|s| s.entries(&tree));
+        let want = |c: Option<usize>| c.is_some_and(|c| self.b.live(c) && build::wanted(wanted.as_deref(), c));
+        let links: Vec<_> = self.links.iter().filter(|l| entries.as_ref().is_none_or(|e| e[l.2])).collect();
         // the folders of links first, for their targets
-        let early: Vec<usize> = (0..self.units.len()).filter(|&f| self.units[f].links).collect();
+        let mut early: Vec<usize> = links.iter().map(|l| l.0).collect();
+        early.sort_unstable();
+        early.dedup();
         let mut held: Vec<Option<Vec<Vec<u8>>>> = vec![None; self.units.len()];
         for (f, r) in early.iter().zip(pool::par_map(early.len(), threads, |k| self.decode(early[k], threads))) {
             held[*f] = Some(r.map_err(|e| match e {
                 Error::Unknown(e) | Error::Bad(e) => format!("7z: {}: {e}", self.units[*f].name),
             })?);
         }
-        for &(f, k, i) in &self.links {
+        for &&(f, k, i) in &links {
             let target = &held[f].as_ref().unwrap()[k];
             if target.is_empty() || target.contains(&0) {
                 // (told as a special entry not created)
@@ -596,18 +625,38 @@ impl<'d> Listing<'d> {
         if !all.is_empty() {
             sink.entries(&tree, &all)?;
         }
-        for &c in self.empty.iter().filter(|&&c| self.b.live(c)) {
+        for &c in self.empty.iter().filter(|&&c| want(Some(c))) {
             sink.content(c, Vec::new())?;
         }
-        let packed: u64 = self.spans.iter().map(|r| r.end - r.start).sum();
-        let total: u64 = self.main.folders.iter().filter_map(Folder::size).sum();
+        // by folder and substream, whether it is decoded (all of a folder of a file, where
+        // nothing is selected, as their CRC-32s are checked); by folder, whether it is, and the
+        // bytes decoded of it
+        let decodes = |f: usize, k: usize| match select {
+            None => true,
+            Some(_) => want(self.units[f].files[k].0),
+        };
+        let decoded: Vec<bool> = (0..self.units.len())
+            .map(|f| match select {
+                None => self.units[f].files.iter().any(|x| x.0.is_some()),
+                Some(_) => (0..self.units[f].files.len()).any(|k| decodes(f, k)),
+            })
+            .collect();
+        let given = |f: usize| -> u64 {
+            (0..self.units[f].files.len()).filter(|&k| decodes(f, k)).map(|k| self.main.subs[f][k]).sum()
+        };
+        let packed: u64 = (0..self.units.len())
+            .filter(|&f| decoded[f])
+            .flat_map(|f| &self.spans[self.packs[f].clone()])
+            .map(|r| r.end - r.start)
+            .sum();
+        let total: u64 = (0..self.units.len()).filter(|&f| decoded[f]).map(given).sum();
         let (done_packed, done) = (AtomicU64::new(0), AtomicU64::new(0));
         let failed = AtomicBool::new(false);
         let held: Vec<std::sync::Mutex<Option<Vec<Vec<u8>>>>> = held.into_iter().map(std::sync::Mutex::new).collect();
         let notes = std::sync::Mutex::new(0usize);
         let made = pool::par_map(self.units.len(), threads, |f| -> Result<(), String> {
             let u = &self.units[f];
-            if failed.load(Relaxed) || u.files.iter().all(|c| c.0.is_none()) {
+            if failed.load(Relaxed) || !decoded[f] {
                 return Ok(());
             }
             sink.step(Step::Started(f));
@@ -621,10 +670,10 @@ impl<'d> Listing<'d> {
                 Some(parts) => {
                     let parts: Vec<_> = parts.into_iter().map(|p| std::sync::Mutex::new(Some(p))).collect();
                     let r = pool::par_map(parts.len(), threads, |k| match u.files[k].0 {
-                        Some(c) if self.b.live(c) => sink.content(c, parts[k].lock().unwrap().take().unwrap()),
+                        Some(c) if want(Some(c)) => sink.content(c, parts[k].lock().unwrap().take().unwrap()),
                         _ => Ok(()),
                     });
-                    tick(self.main.folders[f].size().unwrap_or(0));
+                    tick(given(f));
                     r.into_iter().collect::<Result<(), String>>().map_err(Error::Bad)
                 }
                 None => {
@@ -634,11 +683,11 @@ impl<'d> Listing<'d> {
                             return Err(format!("{}: CRC mismatch", u.files[k].1));
                         }
                         match u.files[k].0 {
-                            Some(c) if self.b.live(c) => sink.content(c, d.to_vec()),
+                            Some(c) if want(Some(c)) => sink.content(c, d.to_vec()),
                             _ => Ok(()),
                         }
                     };
-                    self.stream(f, threads, &each, &tick)
+                    self.stream(f, threads, &|k| decodes(f, k), &each, &tick)
                 }
             };
             let r = match r {
@@ -647,23 +696,23 @@ impl<'d> Listing<'d> {
                 // does not decode by the passphrase given, as it cannot be told from damage)
                 Err(Error::Bad(_)) if encrypted(&self.main.folders[f]) => {
                     for (c, name) in &u.files {
-                        if c.is_some() {
+                        if want(*c) {
                             sink.note(&format!("{name}: a wrong passphrase (or damaged), not extracted"));
                             *notes.lock().unwrap() += 1;
                         }
                     }
-                    tick(self.main.folders[f].size().unwrap_or(0));
+                    tick(given(f));
                     Ok(())
                 }
                 Err(Error::Unknown(e)) => {
                     for (c, name) in &u.files {
-                        if c.is_some() {
+                        if want(*c) {
                             sink.note(&format!("{name}: {e}, not extracted"));
                             *notes.lock().unwrap() += 1;
                         }
                     }
                     // (nothing given of it: told as done all the same)
-                    tick(self.main.folders[f].size().unwrap_or(0));
+                    tick(given(f));
                     Ok(())
                 }
                 Err(Error::Bad(e)) => Err(format!("7z: {}: {e}", u.name)),
@@ -680,5 +729,72 @@ impl<'d> Listing<'d> {
         });
         made.into_iter().collect::<Result<(), String>>()?;
         Ok(Done { tree, skipped: skipped + notes.into_inner().unwrap() })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{Kept, file_of};
+
+    /// Of a solid folder of LZMA2 parts (aqr-7z's `blocks.7z`), a file selected decodes
+    /// without the parts before it nor those after it: a damaged one of those fails the folder
+    /// extracted whole, not the file.
+    #[test]
+    fn parts_apart() {
+        let d =
+            std::fs::read(format!("{}/../../codecs/aqr-7z/tests/data/blocks.7z", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let l = Listing::read(&d, None).unwrap().unwrap();
+        let f = (0..l.units.len()).max_by_key(|&f| l.units[f].files.len()).unwrap();
+        let Ok(parts) = l.parts(f) else { panic!("no parts") };
+        assert!(parts.len() >= 3, "{} parts", parts.len());
+        // where each part's packed bytes are, and where its output starts and ends
+        let packed: Vec<std::ops::Range<usize>> = parts
+            .iter()
+            .map(|p| match p.0 {
+                Part::Lzma2(s) => {
+                    let at = s.as_ptr() as usize - d.as_ptr() as usize;
+                    at..at + s.len()
+                }
+                _ => panic!("not of LZMA2 parts"),
+            })
+            .collect();
+        let out: Vec<usize> = parts.iter().scan(0, |at, p| Some(std::mem::replace(at, *at + p.1))).collect();
+        let first_end = parts[0].1;
+        let last_start = *out.last().unwrap();
+        // by substream: its start and end in the folder's output
+        let sizes = &l.main.subs[f];
+        let spans: Vec<(usize, usize)> = sizes
+            .iter()
+            .scan(0, |at, &n| {
+                let s = *at;
+                *at += n as usize;
+                Some((s, *at))
+            })
+            .collect();
+        let pick = |ok: &dyn Fn(usize, usize) -> bool| {
+            (0..spans.len())
+                .find(|&k| l.units[f].files[k].0.is_some() && spans[k].1 > spans[k].0 && ok(spans[k].0, spans[k].1))
+        };
+        let good = Kept::default();
+        l.unpack(4, &good, None).unwrap();
+        let good = good.0.into_inner().unwrap();
+        for (k, damaged) in [
+            (pick(&|s, _| s >= first_end).expect("a file past the first part"), 0),
+            (pick(&|_, e| e <= last_start).expect("a file before the last part"), parts.len() - 1),
+        ] {
+            let mut bad = d.clone();
+            let r = &packed[damaged];
+            bad[r.start + r.len() / 2] ^= 0x55;
+            let lb = Listing::read(&bad, None).unwrap().unwrap();
+            assert!(lb.unpack(4, &Kept::default(), None).is_err(), "part {damaged} damaged");
+            let c = l.units[f].files[k].0.unwrap();
+            let kept = Kept::default();
+            let done = lb.unpack(4, &kept, Some(&file_of(&l.b.tree, c))).unwrap();
+            assert_eq!(done.skipped, 0);
+            let kept = kept.0.into_inner().unwrap();
+            assert_eq!(kept.keys().collect::<Vec<_>>(), [&c], "part {damaged} damaged");
+            assert_eq!(kept[&c], good[&c], "part {damaged} damaged");
+        }
     }
 }

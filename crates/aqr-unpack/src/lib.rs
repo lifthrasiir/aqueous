@@ -9,9 +9,16 @@
 //! directory, encrypted entries without their passphrase, methods not known) is left out and
 //! told ([`Sink::note`]). Encrypted ZIP entries and 7z folders (and headers) are decrypted by
 //! the passphrase taken by [`Opened::unlock`].
+//!
+//! Some paths of an archive may be extracted alone ([`Opened::select`]): what is decoded then
+//! is what they need. Of an archive of a listing (ZIP, 7z, RAR, ALZ, EGG), the units holding
+//! none of their files are not decoded, and a solid one only as far as the last of them (7z's
+//! LZMA2 parts and EGG's pieces of none of them not at all); a tar archive is read through, as
+//! its listing is not known before, but the bodies of the members not selected are not kept.
 
 use aqr_formula::aqr::Step;
 pub use aqr_formula::aqr::{Entry, EntryNode, Extra, Time, Tree};
+pub use build::Select;
 
 mod alzip;
 mod build;
@@ -110,6 +117,12 @@ pub trait Sink: Sync {
     fn step(&self, _: Step) {}
 }
 
+/// The notes of a listing told to `sink`, but those of entries not selected by `s`: how many.
+fn tell(notes: &[build::Note], s: Option<&Select>, sink: &dyn Sink) -> usize {
+    let told = notes.iter().filter(|n| s.is_none_or(|s| s.wants(&n.0)));
+    told.map(|n| sink.note(&n.1)).count()
+}
+
 /// An archive extracted: its tree (whole), and the entries left out (told to [`Sink::note`]).
 pub struct Done {
     pub tree: Tree,
@@ -120,6 +133,7 @@ pub struct Done {
 pub struct Opened<'d> {
     d: &'d [u8],
     inner: Inner<'d>,
+    select: Option<Select>,
 }
 
 enum Inner<'d> {
@@ -150,7 +164,26 @@ impl<'d> Opened<'d> {
             Format::Tar(f) => Inner::Tar(f),
             Format::Single(f) => Inner::Single(f),
         };
-        Ok(Opened { d, inner })
+        Ok(Opened { d, inner, select: None })
+    }
+
+    /// Has only the entries of `s` extracted (and what is under them); what they need alone
+    /// decoded ([module](self)). The tree told is the whole archive's still (a tar archive's,
+    /// what is selected), the contents only those selected.
+    pub fn select(&mut self, s: Select) {
+        self.select = Some(s);
+    }
+
+    /// The tree as its listing has it, where it has one read already (not of a tar archive, nor
+    /// of a 7z archive whose header is not decrypted yet).
+    pub fn tree(&self) -> Option<&Tree> {
+        match &self.inner {
+            Inner::Zip(l) => Some(l.tree()),
+            Inner::SevenZip(l) => Some(l.tree()),
+            Inner::Rar(l) => Some(l.tree()),
+            Inner::Alz(l) | Inner::Egg(l) => Some(l.tree()),
+            Inner::SevenZipSealed | Inner::Tar(_) | Inner::Single(_) => None,
+        }
     }
 
     /// Whether it is encrypted, in part (its entries) or whole (its listing too): a passphrase
@@ -206,14 +239,15 @@ impl<'d> Opened<'d> {
 
     /// Extracts the tree to `sink`, on up to `threads` threads.
     pub fn unpack(&self, threads: usize, sink: &dyn Sink) -> Result<Done, String> {
+        let s = self.select.as_ref();
         match &self.inner {
-            Inner::Zip(l) => l.unpack(threads, sink),
-            Inner::SevenZip(l) => l.unpack(threads, sink),
+            Inner::Zip(l) => l.unpack(threads, sink, s),
+            Inner::SevenZip(l) => l.unpack(threads, sink, s),
             Inner::SevenZipSealed => Err("7z: its header encrypted, and no passphrase given".into()),
-            Inner::Rar(l) => l.unpack(threads, sink),
-            Inner::Alz(l) => l.unpack("ALZ", threads, sink),
-            Inner::Egg(l) => l.unpack("EGG", threads, sink),
-            &Inner::Tar(f) => tar::unpack(f, self.d, threads, sink),
+            Inner::Rar(l) => l.unpack(threads, sink, s),
+            Inner::Alz(l) => l.unpack("ALZ", threads, sink, s),
+            Inner::Egg(l) => l.unpack("EGG", threads, sink, s),
+            &Inner::Tar(f) => tar::unpack(f, self.d, threads, sink, s),
             Inner::Single(_) => Err("a single file, not a tree".into()),
         }
     }
@@ -243,5 +277,42 @@ impl<'d> Opened<'d> {
         })?;
         step(Step::Ended(0));
         failed.map_or(Ok(n), Err)
+    }
+}
+
+/// What the readers' tests of selected paths take: a [`Sink`] keeping the contents given.
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    use super::{EntryNode, Select, Sink, Tree};
+
+    #[derive(Default)]
+    pub struct Kept(pub Mutex<BTreeMap<usize, Vec<u8>>>);
+
+    impl Sink for Kept {
+        fn entries(&self, _: &Tree, _: &[usize]) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn content(&self, c: usize, d: Vec<u8>) -> Result<(), String> {
+            self.0.lock().unwrap().insert(c, d);
+            Ok(())
+        }
+
+        fn note(&self, _: &str) {}
+    }
+
+    /// The selection of the file of content `c` of `t`.
+    pub fn file_of(t: &Tree, c: usize) -> Select {
+        let mut i = t.entries.iter().position(|e| e.node == EntryNode::File(c)).expect("a file of it");
+        let mut names = vec![t.entries[i].name.clone()];
+        while let Some(p) = t.entries[i].parent {
+            names.push(t.entries[p].name.clone());
+            i = p;
+        }
+        names.reverse();
+        Select::new(vec![names])
     }
 }

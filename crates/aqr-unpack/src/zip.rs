@@ -12,12 +12,12 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 
 use aqr_common::{crc32, pool};
-use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, WIN_ATTRS_ALLOWED, name_from};
+use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, Tree, WIN_ATTRS_ALLOWED, name_from};
 use aqr_zip::zip::{self as z, u16_at, u32_at, u64_at};
 
 use crate::build::{self, Builder};
 use crate::crypt::{self, Fail, ZipCrypto};
-use crate::{Done, Filter, Sink, codec, stream, sys};
+use crate::{Done, Filter, Select, Sink, codec, stream, sys};
 
 /// Hosts of "version made by" whose names may separate by `\` and whose attributes are MS-DOS's.
 fn dos_host(host: u8) -> bool {
@@ -66,7 +66,7 @@ pub struct Listing<'d> {
     units: Vec<Unit>,
     /// The contents of no data to decode (empty files).
     empty: Vec<usize>,
-    notes: Vec<String>,
+    notes: Vec<build::Note>,
     /// The passphrase of the encrypted entries ([`Listing::unlock`]), and those entries until
     /// it is taken (their names, metadata and data): not in the tree without it.
     pass: Option<Vec<u8>>,
@@ -199,8 +199,9 @@ impl<'d> Listing<'d> {
         let cx = &d[c.extra.clone()];
         let name = entry_name(raw, flags, cx);
         let shown = String::from_utf8_lossy(&name).into_owned();
+        let lax = build::lax(&name, dos_host(host));
         let Some(names) = build::split(&name, dos_host(host)) else {
-            self.notes.push(format!("{shown}: a path reaching out of the directory, not extracted"));
+            self.notes.push((lax.clone(), format!("{shown}: a path reaching out of the directory, not extracted")));
             return Ok(());
         };
         // the local header, and the body after it
@@ -236,20 +237,23 @@ impl<'d> Listing<'d> {
                 false => self.b.add(&names, Some(EntryNode::Dir), x),
             };
             if let Err(e) = r {
-                self.notes.push(e);
+                self.notes.push((lax.clone(), e));
             }
             return Ok(());
         }
         let (enc, method) = match (flags & 1 != 0, method) {
             (true, _) if flags & 0x40 != 0 => {
-                self.notes.push(format!("{shown}: of PKWARE's strong encryption, not known here, not extracted"));
+                self.notes.push((
+                    lax.clone(),
+                    format!("{shown}: of PKWARE's strong encryption, not known here, not extracted"),
+                ));
                 return Ok(());
             }
             // WinZip's AES: its field gives the strength and the method
             (_, 99) => match fields(cx).chain(fields(lx)).find(|f| f.0 == 0x9901 && f.1.len() >= 7) {
                 Some((_, a)) => (Enc::Aes(a[4], u16_at(a, 0) == 1), u16_at(a, 5)),
                 None => {
-                    self.notes.push(format!("{shown}: of AES without its field, not extracted"));
+                    self.notes.push((lax.clone(), format!("{shown}: of AES without its field, not extracted")));
                     return Ok(());
                 }
             },
@@ -262,20 +266,20 @@ impl<'d> Listing<'d> {
                 98 => "PPMd".into(),
                 m => format!("method {m}"),
             };
-            self.notes.push(format!("{shown}: of {what}, not known here, not extracted"));
+            self.notes.push((lax.clone(), format!("{shown}: of {what}, not known here, not extracted")));
             return Ok(());
         }
         let unit =
             |c| Unit { c, name: shown.clone(), method, body: body.clone(), size: info.usize, crc: info.crc, enc };
         let node = if mode & S_IFMT == S_IFLNK {
             if enc != Enc::None {
-                self.notes.push(format!("{shown}: an encrypted link, not extracted"));
+                self.notes.push((lax.clone(), format!("{shown}: an encrypted link, not extracted")));
                 return Ok(());
             }
             // (the target, the entry's data, read now: the tree has it)
             let target = decode(d, &unit(0), None).map_err(|e| format!("ZIP: {shown}: {}", e.shown()))?;
             if target.is_empty() {
-                self.notes.push(format!("{shown}: a link to nothing, not extracted"));
+                self.notes.push((lax.clone(), format!("{shown}: a link to nothing, not extracted")));
                 return Ok(());
             }
             EntryNode::Link(name_from(&target))
@@ -292,7 +296,7 @@ impl<'d> Listing<'d> {
             EntryNode::File(c)
         };
         if let Err(e) = self.b.add(&names, Some(node), x) {
-            self.notes.push(e);
+            self.notes.push((lax.clone(), e));
         }
         Ok(())
     }
@@ -333,40 +337,46 @@ impl<'d> Listing<'d> {
                     _ => self.units.push(u),
                 }
                 if let Err(e) = self.b.add(&names, Some(EntryNode::File(c)), x) {
-                    self.notes.push(e);
+                    self.notes.push((names.iter().map(|n| n.to_vec()).collect(), e));
                 }
             }
         }
         ok
     }
 
-    pub fn unpack(&self, threads: usize, sink: &dyn Sink) -> Result<Done, String> {
-        self.notes.iter().for_each(|n| sink.note(n));
-        for (_, _, u) in &self.sealed {
+    pub fn tree(&self) -> &Tree {
+        &self.b.tree
+    }
+
+    pub fn unpack(&self, threads: usize, sink: &dyn Sink, select: Option<&Select>) -> Result<Done, String> {
+        let mut skipped = crate::tell(&self.notes, select, sink);
+        for (_, _, u) in self.sealed.iter().filter(|s| select.is_none_or(|w| w.wants(&s.0))) {
             sink.note(&format!("{}: encrypted, and no passphrase given, not extracted", u.name));
+            skipped += 1;
         }
+        let wanted = select.map(|s| s.contents(&self.b.tree, self.b.contents));
+        let want = |c: usize| self.b.live(c) && build::wanted(wanted.as_deref(), c);
         let tree = self.b.tree.clone();
         let all: Vec<usize> = (0..tree.entries.len()).collect();
         if !all.is_empty() {
             sink.entries(&tree, &all)?;
         }
-        for &c in self.empty.iter().filter(|&&c| self.b.live(c)) {
+        for &c in self.empty.iter().filter(|&&c| want(c)) {
             sink.content(c, Vec::new())?;
         }
-        let packed: u64 = self.units.iter().map(|u| u.body.len() as u64).sum();
-        let total: u64 = self.units.iter().map(|u| u.size).sum();
+        // (by their indices among all, as Opened::units has them)
+        let units: Vec<usize> = (0..self.units.len()).filter(|&k| want(self.units[k].c)).collect();
+        let packed: u64 = units.iter().map(|&k| self.units[k].body.len() as u64).sum();
+        let total: u64 = units.iter().map(|&k| self.units[k].size).sum();
         let (done_packed, done) = (AtomicU64::new(0), AtomicU64::new(0));
         let failed = AtomicBool::new(false);
         let left = AtomicU64::new(0);
-        let made = pool::par_map(self.units.len(), threads, |k| -> Result<(), String> {
+        let made = pool::par_map(units.len(), threads, |k| -> Result<(), String> {
             if failed.load(Relaxed) {
                 return Ok(());
             }
+            let k = units[k];
             let u = &self.units[k];
-            // (of a name given again since: left)
-            if !self.b.live(u.c) {
-                return Ok(());
-            }
             sink.step(Step::Started(k));
             let r = match decode(self.d, u, self.pass.as_deref()) {
                 Ok(data) => sink.content(u.c, data),
@@ -388,7 +398,7 @@ impl<'d> Listing<'d> {
             r
         });
         made.into_iter().collect::<Result<(), String>>()?;
-        Ok(Done { tree, skipped: self.notes.len() + self.sealed.len() + left.into_inner() as usize })
+        Ok(Done { tree, skipped: skipped + left.into_inner() as usize })
     }
 }
 

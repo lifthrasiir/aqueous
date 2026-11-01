@@ -11,11 +11,11 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 
 use aqr_common::{crc32, pool};
-use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, Time, WIN_ATTRS_ALLOWED, name_from};
+use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, Time, Tree, WIN_ATTRS_ALLOWED, name_from};
 use aqr_rar::{lz3, lz5, rar4, rar5};
 
 use crate::build::{self, Builder};
-use crate::{Done, Sink, sys};
+use crate::{Done, Select, Sink, sys};
 
 const S_IFMT: u32 = 0o170000;
 const S_IFLNK: u32 = 0o120000;
@@ -56,7 +56,7 @@ pub struct Listing<'d> {
     units: Vec<Unit>,
     /// The contents of no data (empty files).
     empty: Vec<usize>,
-    notes: Vec<String>,
+    notes: Vec<build::Note>,
 }
 
 /// A RAR5 header's time.
@@ -124,11 +124,12 @@ impl<'d> Listing<'d> {
         // (the unit a solid file continues: the last stream's, while nothing broke it)
         let mut open: Option<usize> = None;
         for h in heads {
+            let lax = h.names.as_deref().map_or_else(Vec::new, |n| build::lax(n, h.backslash));
             let shown = h.shown;
             let node = match h.kind {
                 Kind::Dir => Some(EntryNode::Dir),
                 Kind::Left { why, data } => {
-                    self.notes.push(format!("{shown}: {why}, not extracted"));
+                    self.notes.push((lax.clone(), format!("{shown}: {why}, not extracted")));
                     if data {
                         // (the files continuing its solid group cannot be decoded)
                         if let Some(u) = open.take() {
@@ -142,12 +143,13 @@ impl<'d> Listing<'d> {
                     x.win_link_type = win;
                     let names = h.names.as_deref().and_then(|n| build::split(n, h.backslash));
                     match names {
-                        None => {
-                            self.notes.push(format!("{shown}: a path reaching out of the directory, not extracted"))
-                        }
+                        None => self.notes.push((
+                            lax.clone(),
+                            format!("{shown}: a path reaching out of the directory, not extracted"),
+                        )),
                         Some(names) => {
                             if let Err(e) = self.b.add(&names, Some(EntryNode::Link(name_from(&target))), x) {
-                                self.notes.push(e);
+                                self.notes.push((lax.clone(), e));
                             }
                         }
                     }
@@ -158,7 +160,10 @@ impl<'d> Listing<'d> {
                     let c = match &names {
                         Some(n) if !n.is_empty() => Some(self.b.content()),
                         _ => {
-                            self.notes.push(format!("{shown}: a path reaching out of the directory, not extracted"));
+                            self.notes.push((
+                                lax.clone(),
+                                format!("{shown}: a path reaching out of the directory, not extracted"),
+                            ));
                             None
                         }
                     };
@@ -185,18 +190,18 @@ impl<'d> Listing<'d> {
                     }
                     let Some(names) = names.filter(|n| !n.is_empty()) else { continue };
                     if let Err(e) = self.b.add(&names, Some(EntryNode::File(c.unwrap())), h.extra) {
-                        self.notes.push(e);
+                        self.notes.push((lax.clone(), e));
                     }
                     continue;
                 }
             };
             let Some(names) = h.names.as_deref().and_then(|n| build::split(n, h.backslash)) else {
-                self.notes.push(format!("{shown}: a path reaching out of the directory, not extracted"));
+                self.notes.push((lax.clone(), format!("{shown}: a path reaching out of the directory, not extracted")));
                 continue;
             };
             let r = if names.is_empty() { self.b.add(&[], None, h.extra) } else { self.b.add(&names, node, h.extra) };
             if let Err(e) = r {
-                self.notes.push(e);
+                self.notes.push((lax.clone(), e));
             }
         }
         for u in &mut self.units {
@@ -211,8 +216,15 @@ impl<'d> Listing<'d> {
         self.units.iter().map(|u| u.name.clone()).collect()
     }
 
-    /// Decodes unit `u`, giving each file's content to `give` as it is decoded.
-    fn decode(&self, u: &Unit, give: &mut dyn FnMut(usize, Vec<u8>) -> Result<(), String>) -> Result<(), String> {
+    /// Decodes unit `u`, giving each file's content that `want` (by its index) to `give` as it
+    /// is decoded: as far as the last of them.
+    fn decode(
+        &self,
+        u: &Unit,
+        want: &dyn Fn(usize) -> bool,
+        give: &mut dyn FnMut(usize, Vec<u8>) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let upto = (0..u.files.len()).rfind(|&k| want(k)).map_or(0, |k| k + 1);
         let check = |f: &File, data: &[u8]| {
             if f.crc.is_some_and(|c| crc32::hash(data) != c) {
                 return Err(format!("{}: CRC mismatch", f.name));
@@ -228,10 +240,13 @@ impl<'d> Listing<'d> {
             }
             How::V5(v1, dict) => {
                 let mut dec = lz5::Decoder5::new(v1, dict);
-                for (k, f) in u.files.iter().enumerate() {
+                for (k, f) in u.files[..upto].iter().enumerate() {
                     let last = dec.last();
                     let at = dec.out.len();
                     let st = dec.file(&self.d[f.data.clone()], f.size).map_err(|e| format!("{}: {e}", f.name))?;
+                    if !want(k) {
+                        continue;
+                    }
                     let mut data = dec.out[at..].to_vec();
                     lz5::unfilter(&mut data, &st.placed(last)).map_err(|e| format!("{}: {e}", f.name))?;
                     check(f, &data)?;
@@ -241,9 +256,12 @@ impl<'d> Listing<'d> {
             }
             How::V3(dict) => {
                 let mut dec = lz3::Decoder3::new(dict);
-                for (k, f) in u.files.iter().enumerate() {
+                for (k, f) in u.files[..upto].iter().enumerate() {
                     let at = dec.out.len();
                     let st = dec.file(&self.d[f.data.clone()], f.size).map_err(|e| format!("{}: {e}", f.name))?;
+                    if !want(k) {
+                        continue;
+                    }
                     let mut data = dec.out[at..].to_vec();
                     lz3::unfilter(&mut data, &st.filters).map_err(|e| format!("{}: {e}", f.name))?;
                     check(f, &data)?;
@@ -254,44 +272,63 @@ impl<'d> Listing<'d> {
         }
     }
 
-    pub fn unpack(&self, threads: usize, sink: &dyn Sink) -> Result<Done, String> {
-        self.notes.iter().for_each(|n| sink.note(n));
-        let mut skipped = self.notes.len();
+    pub fn tree(&self) -> &Tree {
+        &self.b.tree
+    }
+
+    pub fn unpack(&self, threads: usize, sink: &dyn Sink, select: Option<&Select>) -> Result<Done, String> {
+        let mut skipped = crate::tell(&self.notes, select, sink);
+        let wanted = select.map(|s| s.contents(&self.b.tree, self.b.contents));
+        let want = |f: &File| f.c.is_some_and(|c| self.b.live(c) && build::wanted(wanted.as_deref(), c));
         let tree = self.b.tree.clone();
         let all: Vec<usize> = (0..tree.entries.len()).collect();
         if !all.is_empty() {
             sink.entries(&tree, &all)?;
         }
-        for &c in self.empty.iter().filter(|&&c| self.b.live(c)) {
+        for &c in self.empty.iter().filter(|&&c| self.b.live(c) && build::wanted(wanted.as_deref(), c)) {
             sink.content(c, Vec::new())?;
         }
         // the units left out
         for u in &self.units {
             if let Some(why) = &u.left {
-                for f in u.files.iter().filter(|f| f.c.is_some()) {
+                for f in u.files.iter().filter(|f| f.c.is_some() && build::wanted(wanted.as_deref(), f.c.unwrap())) {
                     sink.note(&format!("{}: {why}, not extracted", f.name));
                     skipped += 1;
                 }
             }
         }
-        let packed: u64 = self.units.iter().flat_map(|u| &u.files).map(|f| f.data.len() as u64).sum();
-        let total: u64 = self.units.iter().flat_map(|u| &u.files).map(|f| f.size as u64).sum();
+        // (of the files given)
+        let given = || {
+            self.units
+                .iter()
+                .filter(|u| u.left.is_none())
+                .flat_map(|u| &u.files)
+                .filter(|f| select.is_none() || want(f))
+        };
+        let packed: u64 = given().map(|f| f.data.len() as u64).sum();
+        let total: u64 = given().map(|f| f.size as u64).sum();
         let (done_packed, done) = (AtomicU64::new(0), AtomicU64::new(0));
         let failed = AtomicBool::new(false);
         let made = pool::par_map(self.units.len(), threads, |i| -> Result<(), String> {
             let u = &self.units[i];
-            if failed.load(Relaxed) || u.left.is_some() || u.files.iter().all(|f| f.c.is_none()) {
+            let any = match select {
+                None => u.files.iter().any(|f| f.c.is_some()),
+                Some(_) => u.files.iter().any(want),
+            };
+            if failed.load(Relaxed) || u.left.is_some() || !any {
                 return Ok(());
             }
             sink.step(Step::Started(i));
+            // (all of it where nothing is selected, as the files' CRC-32s are checked)
+            let decodes = |k: usize| select.is_none() || want(&u.files[k]);
             let r = self
-                .decode(u, &mut |k, data| {
+                .decode(u, &decodes, &mut |k, data| {
                     let f = &u.files[k];
                     let p = done_packed.fetch_add(f.data.len() as u64, Relaxed) + f.data.len() as u64;
                     let n = done.fetch_add(f.size as u64, Relaxed) + f.size as u64;
                     sink.step(Step::Reached(Reached { decompressed: (p, packed), evaluated: (n, total) }));
                     match f.c {
-                        Some(c) if self.b.live(c) => sink.content(c, data),
+                        Some(c) if want(f) => sink.content(c, data),
                         _ => Ok(()),
                     }
                 })
@@ -415,4 +452,38 @@ fn heads4(d: &[u8]) -> Result<Vec<Head>, String> {
         out.push(Head { names: Some(name), backslash: true, shown, data: e.data.clone(), kind, extra: x });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{Kept, file_of};
+
+    /// Of a solid group (aqr-rar's `r5_solid` and `r4_solid`), a file selected decodes only as
+    /// far as itself: the last file's data damaged fails the group extracted whole, not the file.
+    #[test]
+    fn solid_stops() {
+        for name in ["r5_solid", "r4_solid"] {
+            let path = format!("{}/../../codecs/aqr-rar/tests/data/{name}.rar", env!("CARGO_MANIFEST_DIR"));
+            let d = std::fs::read(path).unwrap();
+            let l = Listing::read(&d).unwrap();
+            let u = l.units.iter().max_by_key(|u| u.files.len()).unwrap();
+            assert!(u.files.len() >= 2, "{name}");
+            let good = Kept::default();
+            l.unpack(4, &good, None).unwrap();
+            let good = good.0.into_inner().unwrap();
+            let mut bad = d.clone();
+            let last = &u.files.last().unwrap().data;
+            bad[last.start + last.len() / 2] ^= 0x55;
+            let lb = Listing::read(&bad).unwrap();
+            assert!(lb.unpack(4, &Kept::default(), None).is_err(), "{name}");
+            let k = u.files.len() - 2;
+            let c = u.files[k].c.unwrap();
+            let kept = Kept::default();
+            lb.unpack(4, &kept, Some(&file_of(&l.b.tree, c))).unwrap();
+            let kept = kept.0.into_inner().unwrap();
+            assert_eq!(kept.keys().collect::<Vec<_>>(), [&c], "{name}");
+            assert_eq!(kept[&c], good[&c], "{name}");
+        }
+    }
 }

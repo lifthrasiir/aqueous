@@ -17,10 +17,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use aqr_alz::alz;
 use aqr_common::{crc32, pool};
 use aqr_egg::egg;
-use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, WIN_ATTRS_ALLOWED};
+use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, Tree, WIN_ATTRS_ALLOWED};
 
 use crate::build::{self, Builder};
-use crate::{Done, Sink, codec, sys};
+use crate::{Done, Select, Sink, codec, sys};
 
 const S_IFMT: u32 = 0o170000;
 const S_IFDIR: u32 = 0o040000;
@@ -95,7 +95,7 @@ pub struct Listing<'d> {
     units: Vec<Unit>,
     /// The contents of no data (empty files).
     empty: Vec<usize>,
-    notes: Vec<String>,
+    notes: Vec<build::Note>,
 }
 
 /// Name `b` of code page `cp` (949, 932; else as ZIP's names not flagged UTF-8) as UTF-8: as it
@@ -172,9 +172,10 @@ impl<'d> Listing<'d> {
         let mut l = Listing::new(d);
         l.files(heads, false);
         if !a.ended {
-            l.notes.push(
+            l.notes.push((
+                Vec::new(),
                 "ALZ: the archive goes on in another volume or is cut short: what is past it is not extracted".into(),
-            );
+            ));
         }
         Ok(l)
     }
@@ -252,10 +253,13 @@ impl<'d> Listing<'d> {
         let mut l = Listing::new(d);
         l.files(heads, a.solid);
         if !a.ended {
-            l.notes.push(match a.split {
-                true => "EGG: a volume of a split archive: what goes on in other volumes is not extracted".into(),
-                false => "EGG: the archive is cut short: what is past it is not extracted".into(),
-            });
+            l.notes.push((
+                Vec::new(),
+                match a.split {
+                    true => "EGG: a volume of a split archive: what goes on in other volumes is not extracted".into(),
+                    false => "EGG: the archive is cut short: what is past it is not extracted".into(),
+                },
+            ));
         }
         Ok(l)
     }
@@ -272,11 +276,12 @@ impl<'d> Listing<'d> {
         let mut broken: Option<String> = None;
         for h in heads {
             let shown = String::from_utf8_lossy(&h.name).into_owned();
+            let lax = build::lax(&h.name, true);
             let names = build::split(&h.name, true);
             let dir_named = h.name.last().is_some_and(|&c| c == b'/' || c == b'\\');
             let r = match h.kind {
                 Kind::Left { why, size } => {
-                    self.notes.push(format!("{shown}: {why}, not extracted"));
+                    self.notes.push((lax.clone(), format!("{shown}: {why}, not extracted")));
                     if solid && size > 0 {
                         pending.push(File { c: None, name: shown.clone(), size, crc: None });
                         broken.get_or_insert_with(|| format!("of a solid block with {shown}, which is not"));
@@ -296,7 +301,10 @@ impl<'d> Listing<'d> {
                     let names = names.filter(|n| !n.is_empty());
                     let c = names.as_ref().map(|_| self.b.content());
                     if c.is_none() {
-                        self.notes.push(format!("{shown}: a path reaching out of the directory, not extracted"));
+                        self.notes.push((
+                            lax.clone(),
+                            format!("{shown}: a path reaching out of the directory, not extracted"),
+                        ));
                     }
                     let f = File { c, name: shown.clone(), size, crc };
                     if size == 0 && pieces.is_empty() {
@@ -319,7 +327,7 @@ impl<'d> Listing<'d> {
                 }
             };
             if let Err(e) = r {
-                self.notes.push(e);
+                self.notes.push((lax.clone(), e));
             }
         }
         if !pending.is_empty() {
@@ -367,9 +375,18 @@ impl<'d> Listing<'d> {
         Ok(data)
     }
 
-    /// Decodes unit `u`, giving each file's content to `give`.
-    fn decode(&self, u: &Unit, give: &mut dyn FnMut(usize, Vec<u8>) -> Result<(), String>) -> Result<(), String> {
+    /// Decodes unit `u`, giving each file's content that `want` (by its index) to `give`. Of a
+    /// solid one, only the pieces from that of the first file wanted to that of the last are.
+    fn decode(
+        &self,
+        u: &Unit,
+        want: &dyn Fn(usize) -> bool,
+        give: &mut dyn FnMut(usize, Vec<u8>) -> Result<(), String>,
+    ) -> Result<(), String> {
         let at = |e: String| format!("{}: {e}", u.name);
+        if (0..u.files.len()).any(|k| !want(k)) {
+            return self.decode_some(u, want, give).map_err(at);
+        }
         let mut data = match u.pieces.len() {
             1 => self.piece(&u.pieces[0]).map_err(at)?,
             _ => {
@@ -403,42 +420,97 @@ impl<'d> Listing<'d> {
         Ok(())
     }
 
-    pub fn unpack(&self, format: &str, threads: usize, sink: &dyn Sink) -> Result<Done, String> {
-        self.notes.iter().for_each(|n| sink.note(n));
-        let mut skipped = self.notes.len();
+    /// [`Listing::decode`] of some of the files of a unit: the pieces from that of the first file
+    /// wanted to that of the last decoded, and those files given.
+    fn decode_some(
+        &self,
+        u: &Unit,
+        want: &dyn Fn(usize) -> bool,
+        give: &mut dyn FnMut(usize, Vec<u8>) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let starts: Vec<usize> = u.files.iter().scan(0, |at, f| Some(std::mem::replace(at, *at + f.size))).collect();
+        let (Some(first), Some(last)) = ((0..u.files.len()).find(|&k| want(k)), (0..u.files.len()).rfind(|&k| want(k)))
+        else {
+            return Ok(());
+        };
+        let (lo, hi) = (starts[first], starts[last] + u.files[last].size);
+        // the pieces of [lo, hi), and where the first starts
+        let (mut base, mut at, mut data) = (None, 0, Vec::new());
+        for p in &u.pieces {
+            if at < hi && at + p.size > lo || p.size == 0 && (lo..hi).contains(&at) {
+                base.get_or_insert(at);
+                data.extend_from_slice(&self.piece(p)?);
+            }
+            at += p.size;
+        }
+        let base = base.unwrap_or(lo);
+        if at != starts.last().map_or(0, |s| s + u.files.last().unwrap().size) || base + data.len() < hi {
+            return Err("data not of the files' sizes".into());
+        }
+        for k in (first..=last).filter(|&k| want(k)) {
+            let (f, s) = (&u.files[k], starts[k] - base);
+            let d = &data[s..s + f.size];
+            if f.crc.is_some_and(|c| crc32::hash(d) != c) {
+                return Err(format!("{}: CRC mismatch", f.name));
+            }
+            give(k, d.to_vec())?;
+        }
+        Ok(())
+    }
+
+    pub fn tree(&self) -> &Tree {
+        &self.b.tree
+    }
+
+    pub fn unpack(
+        &self,
+        format: &str,
+        threads: usize,
+        sink: &dyn Sink,
+        select: Option<&Select>,
+    ) -> Result<Done, String> {
+        let mut skipped = crate::tell(&self.notes, select, sink);
+        let wanted = select.map(|s| s.contents(&self.b.tree, self.b.contents));
+        let want = |f: &File| f.c.is_some_and(|c| self.b.live(c) && build::wanted(wanted.as_deref(), c));
         let tree = self.b.tree.clone();
         let all: Vec<usize> = (0..tree.entries.len()).collect();
         if !all.is_empty() {
             sink.entries(&tree, &all)?;
         }
-        for &c in self.empty.iter().filter(|&&c| self.b.live(c)) {
+        for &c in self.empty.iter().filter(|&&c| self.b.live(c) && build::wanted(wanted.as_deref(), c)) {
             sink.content(c, Vec::new())?;
         }
         for u in &self.units {
             if let Some(why) = &u.left {
-                for f in u.files.iter().filter(|f| f.c.is_some()) {
+                for f in u.files.iter().filter(|f| f.c.is_some_and(|c| build::wanted(wanted.as_deref(), c))) {
                     sink.note(&format!("{}: {why}, not extracted", f.name));
                     skipped += 1;
                 }
             }
         }
-        let packed: u64 = self.units.iter().flat_map(|u| &u.pieces).map(|p| p.body.len() as u64).sum();
-        let total: u64 = self.units.iter().flat_map(|u| &u.files).map(|f| f.size as u64).sum();
+        // (of the units decoded)
+        let decoded =
+            || self.units.iter().filter(|u| u.left.is_none() && (select.is_none() || u.files.iter().any(want)));
+        let packed: u64 = decoded().flat_map(|u| &u.pieces).map(|p| p.body.len() as u64).sum();
+        let total: u64 = decoded().flat_map(|u| &u.files).map(|f| f.size as u64).sum();
         let (done_packed, done) = (AtomicU64::new(0), AtomicU64::new(0));
         let failed = AtomicBool::new(false);
         let made = pool::par_map(self.units.len(), threads, |i| -> Result<(), String> {
             let u = &self.units[i];
-            if failed.load(Relaxed) || u.left.is_some() || u.files.iter().all(|f| f.c.is_none()) {
+            let any = match select {
+                None => u.files.iter().any(|f| f.c.is_some()),
+                Some(_) => u.files.iter().any(want),
+            };
+            if failed.load(Relaxed) || u.left.is_some() || !any {
                 return Ok(());
             }
             sink.step(Step::Started(i));
+            // (all of it where nothing is selected, as the files' CRC-32s are checked)
+            let decodes = |k: usize| select.is_none() || want(&u.files[k]);
             let r = self
-                .decode(u, &mut |k, data| {
-                    let f = &u.files[k];
-                    match f.c {
-                        Some(c) if self.b.live(c) => sink.content(c, data),
-                        _ => Ok(()),
-                    }
+                .decode(u, &decodes, &mut |k, data| match u.files[k].c {
+                    Some(c) if want(&u.files[k]) => sink.content(c, data),
+                    _ => Ok(()),
                 })
                 .map_err(|e| format!("{format}: {e}"));
             let p = u.pieces.iter().map(|p| p.body.len() as u64).sum::<u64>();

@@ -18,16 +18,26 @@ use aqr_formula::aqr::{EntryNode, Extra, Step, Time};
 
 use crate::build::{self, Builder};
 use crate::stream;
-use crate::{Done, Filter, Sink};
+use crate::{Done, Filter, Select, Sink};
 
 const BLOCK: usize = 512;
 /// A batch is told once it holds this many bytes of contents, or this many files.
 const BATCH_BYTES: usize = 32 << 20;
 const BATCH_FILES: usize = 4096;
 
-pub fn unpack(f: Option<Filter>, d: &[u8], threads: usize, sink: &dyn Sink) -> Result<Done, String> {
+/// Extracts tar archive `d` (under `f`) to `sink`; where `select` is given, the members it does
+/// not select are left out of the tree and their bodies not kept (the archive read through all
+/// the same: what is selected may come anywhere).
+pub fn unpack(
+    f: Option<Filter>,
+    d: &[u8],
+    threads: usize,
+    sink: &dyn Sink,
+    select: Option<&Select>,
+) -> Result<Done, String> {
     let total = stream::estimate(f, d);
     let mut p = Parser::new(sink, threads, total, d.len() as u64);
+    p.select = select;
     sink.step(Step::Started(0));
     let fed = pool::scope(1, |s| -> Result<(), String> {
         let mut failed = None;
@@ -76,6 +86,8 @@ enum State {
 
 struct Parser<'s> {
     sink: &'s dyn Sink,
+    /// The members extracted, where not all.
+    select: Option<&'s Select>,
     threads: usize,
     b: Builder,
     state: State,
@@ -220,6 +232,7 @@ impl<'s> Parser<'s> {
     fn new(sink: &'s dyn Sink, threads: usize, total: u64, packed: u64) -> Self {
         Parser {
             sink,
+            select: None,
             threads,
             b: Builder::default(),
             state: State::Header,
@@ -373,7 +386,7 @@ impl<'s> Parser<'s> {
         // taken for files, as POSIX has it)
         let meta = matches!(kind, b'x' | b'g' | b'L' | b'K');
         let file = !matches!(kind, b'1'..=b'6' | b'D' | b'S' | b'V' | b'M' | b'N') && !meta;
-        let keep = meta || file && !h.sparse;
+        let keep = meta || file && !h.sparse && self.wants(&h.path);
         if kind == b'S' && b[482] != 0 {
             // (old GNU sparse: headers of the map follow; the file left out)
             self.member(h, Vec::new())?;
@@ -423,6 +436,11 @@ fn pax_record(h: &mut Header, k: &[u8], v: &[u8]) {
 }
 
 impl Parser<'_> {
+    /// Whether the member of `path` is selected.
+    fn wants(&self, path: &[u8]) -> bool {
+        self.select.is_none_or(|s| s.wants(&build::lax(path, false)))
+    }
+
     /// Takes member `h` of body `body` (its body where it is kept).
     fn member(&mut self, h: Header, body: Vec<u8>) -> Result<(), String> {
         match h.kind {
@@ -437,6 +455,10 @@ impl Parser<'_> {
                 return Ok(());
             }
             _ => {}
+        }
+        // (not selected: left out, and nothing told of it)
+        if !self.wants(&h.path) {
+            return Ok(());
         }
         let Some(names) = build::split(&h.path, false) else {
             self.note(format!("{}: a path reaching out of the directory, not extracted", show(&h.path)));
@@ -503,7 +525,11 @@ impl Parser<'_> {
             return Ok(());
         };
         let Some((j, c)) = self.b.file(&target) else {
-            self.note(format!("{shown}: a hard link to {}, not a file before it, not extracted", show(&h.link)));
+            let why = match self.select.is_some_and(|s| !s.wants(&target)) {
+                true => "not selected",
+                false => "not a file before it",
+            };
+            self.note(format!("{shown}: a hard link to {}, {why}, not extracted", show(&h.link)));
             return Ok(());
         };
         let g = match self.b.tree.entries[j].extra.link_group {
