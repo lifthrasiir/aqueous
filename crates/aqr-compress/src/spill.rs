@@ -172,7 +172,8 @@ mod tests {
         assert!(bytes.iter().all(|&b| b == 0xff));
         let segment = spill.state.lock().unwrap().open.as_ref().unwrap().0.clone();
         assert!(head(&segment) == magic);
-        drop((segment, bytes));
+        // (on Windows the file goes as the spill closes it)
+        drop((segment, bytes, spill));
         std::fs::remove_dir(&dir).unwrap();
     }
 }
