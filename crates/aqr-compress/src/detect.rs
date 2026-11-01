@@ -79,6 +79,10 @@ pub enum Format {
     /// LHA archive (aqr-lha, which splits its streams of `-lh4-` to `-lh7-`), known by its first
     /// header (no signature at its start): at the start of data only.
     Lha,
+    /// Aqueous archive, unencrypted and standalone: its blocks as they are, those of modules
+    /// and resources shared with the archive holding it and the data of uncompressed blocks
+    /// contents (`aqueous`). At the start of data only.
+    Aqr,
     /// git pack (aqr-git, and aqr-flate on its entries' zlib streams), a whole file: not
     /// looked for in other data.
     GitPack,
@@ -127,7 +131,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 50] = [
+    pub const ALL: [Format; 51] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -161,6 +165,7 @@ impl Format {
         Format::Alz,
         Format::Egg,
         Format::Lha,
+        Format::Aqr,
         Format::GitPack,
         Format::Fasta,
         Format::Wasm,
@@ -215,6 +220,7 @@ impl Format {
             Format::Alz => "alz",
             Format::Egg => "egg",
             Format::Lha => "lha",
+            Format::Aqr => "aqr",
             Format::GitPack => "git-pack",
             Format::Fasta => "fasta",
             Format::Wasm => "wasm",
@@ -301,6 +307,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"alz" => format(Format::Alz),
         b"egg" => format(Format::Egg),
         b"lzh" | b"lha" => format(Format::Lha),
+        b"aqr" => format(Format::Aqr),
         b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"ogv" | b"opus" | b"aac" | b"webp" | b"avif"
         | b"heic" | b"heif" | b"jxl" | b"jp2" | b"woff2" => Kind::Compressed,
         b"tga" | b"pbm" => Kind::Pixels,
@@ -332,6 +339,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Png)
     } else if aqr_gif::formula::starts(d) {
         Some(Format::Gif)
+    } else if start && crate::aqueous::starts(d) {
+        Some(Format::Aqr)
     } else if start && aqr_iso::starts(d) {
         // (before the others: a hybrid image starts with a boot sector, or anything)
         Some(Format::Iso)

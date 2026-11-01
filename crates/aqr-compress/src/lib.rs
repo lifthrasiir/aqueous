@@ -113,6 +113,7 @@
 //! # Ok::<(), aqr_formula::Error>(())
 //! ```
 
+mod aqueous;
 mod archive;
 mod bundle;
 mod detect;
@@ -962,6 +963,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
                 Format::Alz => alz(d, opt, depth, cx),
                 Format::Egg => egg(d, opt, depth, cx),
                 Format::Lha => lha(d, opt, cx),
+                Format::Aqr => aqueous::archive(d),
                 Format::GitPack => git::pack(d, opt, depth, cx),
                 Format::Hdf5 => hdf5::file(d, opt, depth, cx),
                 Format::Bvx => bvx(d, opt, cx),
@@ -1560,7 +1562,7 @@ impl Apart {
 /// stored once where another file starts with it, or aqr-mkv's, which holds frames seen
 /// before once.
 fn takes_place(f: &Formula) -> bool {
-    !f.applies().is_empty() || aqr_ppmd::formula::is(f) || aqr_mkv::formula::is(f)
+    !f.applies().is_empty() || aqr_ppmd::formula::is(f) || aqr_mkv::formula::is(f) || aqueous::is(f)
 }
 
 /// Contents, each its slice and its formula where it has one ([`nested`]).
@@ -2168,6 +2170,40 @@ mod tests {
             assert_eq!(detect::starts(&x[17..]), Some(Format::Alz));
             assert_eq!(extent(Format::Alz, &x[17..]), Some(d.len()));
         }
+    }
+
+    /// An Aqueous archive is taken apart: its module block the outer archive's own block of the
+    /// module, its resource block one of the data as it is, and (at level 0) the data of its
+    /// uncompressed blocks contents of their own; the rest as it is, damaged or not.
+    #[test]
+    fn aqr_taken_apart() {
+        let dir = format!("{}/../../codecs/aqr-flac/tests/data", env!("CARGO_MANIFEST_DIR"));
+        let flac = std::fs::read(format!("{dir}/s16_f5.flac")).unwrap();
+        // (a file alone too small for the module to pay for itself: its formula taken anyway)
+        let inner = compress(&flac, &Options { shared_modules: true, smaller: false, ..Options::default() });
+        assert_eq!(detect(&inner), Some(Format::Aqr));
+        let f = aqueous::archive(&inner).unwrap();
+        let mut module_bytes = false;
+        f.root.visit(&mut |n| module_bytes |= matches!(n, Node::ModuleBytes(m, _) if *m == aqr_decompress::FLAC));
+        assert!(module_bytes);
+        assert!(f.eval(&Native::default()).unwrap() == inner);
+        // an archive of it, which has the module's block once
+        let opt = Options { shared_modules: true, ..Options::default() };
+        assert!(aqueous::is(&recompress(&inner, &opt)));
+        let c = compress(&[&inner[..], &flac].concat(), &Options::default());
+        assert!(aqr_decompress::decompress(&c, 1).unwrap() == [&inner[..], &flac].concat());
+        // at level 0, the file in an uncompressed block: a content
+        let stored = compress(&flac, &Options { level: Level::STORED, ..Options::default() });
+        let f = aqueous::archive(&stored).unwrap();
+        assert!(f.streams.iter().any(|s| s.content && s.data[..] == flac[..]));
+        assert!(f.eval(&Native::default()).unwrap() == stored);
+        // cut short, it is still given back
+        for n in [7, 100, inner.len() / 2] {
+            if let Some(f) = aqueous::archive(&inner[..n]) {
+                assert!(f.eval(&Native::default()).unwrap() == inner[..n], "{n}");
+            }
+        }
+        assert!(aqueous::archive(&flac).is_none());
     }
 
     /// An LHA archive is taken apart, its streams by aqr-lha's module, its stored files their

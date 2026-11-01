@@ -520,7 +520,8 @@ impl Encoder {
         self.cctx.borrow_mut()
     }
 
-    /// The length of the archive of `f` without a checksum.
+    /// The length of the archive of `f` without a checksum, nor the blocks whose data it takes as
+    /// stored ([`Encoder::module_bytes_len`]).
     pub fn len(&self, f: &Formula) -> Result<usize> {
         self.len_with(f, None)
     }
@@ -530,12 +531,33 @@ impl Encoder {
         let mut n = Count(0);
         self.write(f, stand_in, None, &mut n)?;
         let held = self.held.borrow();
-        let modules = if self.shared_modules { self.modules_len(f)? } else { 0 };
-        Ok(match self.shared {
-            true => n.0 - self.resources_len(f)?,
-            false if held.is_empty() => n.0,
-            false => n.0 - self.resources_len_of(f, |r| held.contains(&key(&[&r[..]])))?,
-        } - modules)
+        let modules = if self.shared_modules { self.modules_len(f)? } else { self.module_bytes_len(f)? };
+        let resources = match self.shared {
+            true => self.resources_len(f)?,
+            false => self.resources_len_of(f, |r| r.stored_data().is_some() || held.contains(&key(&[&r[..]])))?,
+        };
+        Ok(n.0 - resources - modules)
+    }
+
+    /// The bytes of the module blocks of `f` whose bytes it takes ([`Node::ModuleBytes`]), which
+    /// [`Encoder::len`] does not count, as those of resources stored ([`Resource::stored`]): the
+    /// archive holds them as they are either way, typically shared with the archive around them.
+    fn module_bytes_len(&self, f: &Formula) -> Result<usize> {
+        let mut modules: Vec<Module> = Vec::new();
+        for n in f.shared.iter().flat_map(|s| &s.apply.inputs).chain([&f.root]) {
+            n.visit(&mut |n| {
+                if let &Node::ModuleBytes(m, _) = n
+                    && !modules.contains(&m)
+                {
+                    modules.push(m);
+                }
+            });
+        }
+        let mut n = Count(0);
+        for m in modules {
+            block(&mut n, MODULE, &self.module_block(m, self.base_level())?);
+        }
+        Ok(n.0)
     }
 
     /// The length of the archive of `d` as it is, without a checksum (`d` itself not copied).
