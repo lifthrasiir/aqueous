@@ -6,7 +6,9 @@
 //! the program extracting Aqueous archives extracts these the same way.
 //!
 //! What cannot be extracted safely or as the archive has it (paths reaching out of the
-//! directory, encrypted entries, methods not known) is left out and told ([`Sink::note`]).
+//! directory, encrypted entries without their passphrase, methods not known) is left out and
+//! told ([`Sink::note`]). Encrypted ZIP entries and 7z folders (and headers) are decrypted by
+//! the passphrase taken by [`Opened::unlock`].
 
 use aqr_formula::aqr::Step;
 pub use aqr_formula::aqr::{Entry, EntryNode, Extra, Time, Tree};
@@ -14,6 +16,7 @@ pub use aqr_formula::aqr::{Entry, EntryNode, Extra, Time, Tree};
 mod alzip;
 mod build;
 mod codec;
+mod crypt;
 mod lzma;
 mod rar;
 mod sevenz;
@@ -122,6 +125,8 @@ pub struct Opened<'d> {
 enum Inner<'d> {
     Zip(zip::Listing<'d>),
     SevenZip(sevenz::Listing<'d>),
+    /// A 7z archive whose header is encrypted, read once a passphrase decrypts it.
+    SevenZipSealed,
     Rar(rar::Listing<'d>),
     Alz(alzip::Listing<'d>),
     Egg(alzip::Listing<'d>),
@@ -135,7 +140,10 @@ impl<'d> Opened<'d> {
     pub fn open(f: Format, d: &'d [u8]) -> Result<Opened<'d>, String> {
         let inner = match f {
             Format::Zip => Inner::Zip(zip::Listing::read(d)?),
-            Format::SevenZip => Inner::SevenZip(sevenz::Listing::read(d)?),
+            Format::SevenZip => match sevenz::Listing::read(d, None)? {
+                Some(l) => Inner::SevenZip(l),
+                None => Inner::SevenZipSealed,
+            },
             Format::Rar => Inner::Rar(rar::Listing::read(d)?),
             Format::Alz => Inner::Alz(alzip::Listing::read_alz(d)?),
             Format::Egg => Inner::Egg(alzip::Listing::read_egg(d)?),
@@ -143,6 +151,40 @@ impl<'d> Opened<'d> {
             Format::Single(f) => Inner::Single(f),
         };
         Ok(Opened { d, inner })
+    }
+
+    /// Whether it is encrypted, in part (its entries) or whole (its listing too): a passphrase
+    /// to give it ([`Opened::unlock`]).
+    pub fn encrypted(&self) -> bool {
+        match &self.inner {
+            Inner::Zip(l) => l.encrypted(),
+            Inner::SevenZip(l) => l.encrypted(),
+            Inner::SevenZipSealed => true,
+            _ => false,
+        }
+    }
+
+    /// Whether its listing is encrypted and not decrypted yet: it fails to unpack.
+    pub fn sealed(&self) -> bool {
+        matches!(self.inner, Inner::SevenZipSealed)
+    }
+
+    /// Whether `pass` decrypts it, taken for it where it does (as far as can be told without
+    /// decoding it all: an entry not decoding by it is left out, told). Without one, the
+    /// entries encrypted are left out, and an archive encrypted whole fails.
+    pub fn unlock(&mut self, pass: &[u8]) -> Result<bool, String> {
+        match &mut self.inner {
+            Inner::Zip(l) => Ok(l.unlock(pass)),
+            Inner::SevenZip(l) => Ok(l.unlock(pass)),
+            Inner::SevenZipSealed => match sevenz::Listing::read(self.d, Some(pass))? {
+                Some(l) => {
+                    self.inner = Inner::SevenZip(l);
+                    Ok(true)
+                }
+                None => Ok(false),
+            },
+            _ => Ok(false),
+        }
     }
 
     /// Whether it is a tree of entries (else a single file: [`Opened::decompress`]).
@@ -155,6 +197,7 @@ impl<'d> Opened<'d> {
         match &self.inner {
             Inner::Zip(l) => l.units(),
             Inner::SevenZip(l) => l.units(),
+            Inner::SevenZipSealed => Vec::new(),
             Inner::Rar(l) => l.units(),
             Inner::Alz(l) | Inner::Egg(l) => l.units(),
             Inner::Tar(_) | Inner::Single(_) => vec![String::new()],
@@ -166,6 +209,7 @@ impl<'d> Opened<'d> {
         match &self.inner {
             Inner::Zip(l) => l.unpack(threads, sink),
             Inner::SevenZip(l) => l.unpack(threads, sink),
+            Inner::SevenZipSealed => Err("7z: its header encrypted, and no passphrase given".into()),
             Inner::Rar(l) => l.unpack(threads, sink),
             Inner::Alz(l) => l.unpack("ALZ", threads, sink),
             Inner::Egg(l) => l.unpack("EGG", threads, sink),

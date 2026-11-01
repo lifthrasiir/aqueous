@@ -6,6 +6,7 @@ description = "Archives of other formats (ZIP, 7z, RAR, ALZ, EGG, tar and the co
 publish = false
 
 [dependencies]
+aes = "0.8"
 aqr-7z = { path = "../../codecs/aqr-7z" }
 aqr-alz = { path = "../../codecs/aqr-alz" }
 aqr-azo = { path = "../../codecs/aqr-azo" }
@@ -18,7 +19,13 @@ aqr-formula = { path = "../aqr-formula" }
 aqr-lzma = { path = "../../codecs/aqr-lzma" }
 aqr-rar = { path = "../../codecs/aqr-rar", default-features = false }
 aqr-zip = { path = "../../codecs/aqr-zip" }
+cbc = "0.1"
+ctr = "0.9"
 encoding_rs = "0.8"
+hmac = "0.12"
+pbkdf2 = "0.12"
+sha1 = "0.10"
+sha2 = "0.10"
 zstd = "0.13"
 
 [target.'cfg(unix)'.dependencies]

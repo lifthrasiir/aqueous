@@ -16,8 +16,12 @@ readers must take or leave out.
 - tree-rar5.rar, tree-rar4.rar: a tree (a directory, files, one read-only, a symbolic link, a
   Korean path; RAR5's with a hard link too, left out) archived by RARLAB's rar 7.23 and 6.24
   (`-ma4`, RAR 3.x's format) of third_party/rar-dl, where they are there (else not written).
+- enc-zipcrypto.zip (Info-ZIP's zip), enc-aes128.zip, enc-aes256.zip, enc.7z, enc-headers.7z
+  (7-Zip's 7zz, the last of encrypted headers): `secret.txt` (the text) and `small.txt`
+  encrypted with the passphrase `pass word` (7z's `päss wörd`, of UTF-8 to UTF-16). Written
+  alone with `--encrypted` (their salts are random: written again, they differ).
 
-    python3 -I crates/aqr-unpack/scripts/gen-fixtures.py
+    python3 -I crates/aqr-unpack/scripts/gen-fixtures.py [--encrypted]
 """
 import bz2
 import gzip
@@ -136,6 +140,26 @@ def main():
     rar_trees()
 
 
+def encrypted():
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, 'src')
+        os.makedirs(src)
+        open(os.path.join(src, 'secret.txt'), 'wb').write(TEXT)
+        open(os.path.join(src, 'small.txt'), 'wb').write(b'small\n')
+        files = ['secret.txt', 'small.txt']
+        # (7-Zip takes a passphrase of the locale's encoding)
+        env = dict(os.environ, LC_ALL='en_US.UTF-8')
+        runs = [('enc-zipcrypto.zip', ['zip', '-q', '-X', '-P', 'pass word']),
+                ('enc-aes128.zip', ['7zz', 'a', '-bso0', '-tzip', '-mem=AES128', '-ppass word']),
+                ('enc-aes256.zip', ['7zz', 'a', '-bso0', '-tzip', '-mem=AES256', '-ppass word']),
+                ('enc.7z', ['7zz', 'a', '-bso0', '-t7z', '-ppäss wörd']),
+                ('enc-headers.7z', ['7zz', 'a', '-bso0', '-t7z', '-mhe=on', '-ppäss wörd'])]
+        for name, cmd in runs:
+            out = os.path.join(d, name)
+            subprocess.run([*cmd, out, *files], cwd=src, env=env, check=True)
+            write(name, open(out, 'rb').read())
+
+
 def rar_trees():
     root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'third_party', 'rar-dl')
     tools = [('tree-rar5.rar', os.path.join(root, 'v723', 'rar'), ['-oh']),
@@ -164,4 +188,9 @@ def rar_trees():
 
 
 if __name__ == '__main__':
-    main()
+    import sys
+    if sys.argv[1:] == ['--encrypted']:
+        encrypted()
+    else:
+        main()
+        encrypted()

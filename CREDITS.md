@@ -84,6 +84,14 @@ own terms; the code is written from that description, not from the encoder's cod
   the bias correction by context, in aqr-fits's pixel model.
 - **ryg_rans** (Fabian Giesen): rANS coding and division by a reciprocal, in aqr-common and
   elsewhere.
+- **age** (Filippo Valsorda; the age v1 format, C2SP): Aqueous's encrypted archives, in
+  aqr-formula (`aqr/envelope.rs`), written from the specification and checked against rage
+  (pyrage) used as a black box (`scripts/age-interop.py`).
+- **Archive encryption**: ZIP's traditional encryption (PKWARE's APPNOTE §6.1), WinZip's AES
+  (its AE-1 and AE-2 description) and 7-Zip's AES-256 coder, decrypted in aqr-unpack
+  (`crypt.rs`), written from the formats' descriptions and checked against Info-ZIP's zip and
+  7-Zip's 7zz used as black boxes. The ciphers, hashes and key derivations are the RustCrypto
+  crates'.
 
 ## Code
 

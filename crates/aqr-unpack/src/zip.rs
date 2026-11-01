@@ -4,7 +4,9 @@
 //! symbolic links), times (NTFS's field, else Info-ZIP's extended timestamp, else the MS-DOS
 //! time as local time), Unix modes and owners, and Windows' attributes; the contents decoded
 //! by entry on the pool's threads (stored, DEFLATE, bzip2, LZMA, Zstandard, xz), their CRC-32s
-//! checked. Encrypted entries and methods not known are left out (told).
+//! checked. Encrypted entries (the traditional encryption and WinZip's AES, [`crate::crypt`])
+//! are decrypted by the passphrase given ([`Listing::unlock`]), else left out (told), as are
+//! those of PKWARE's strong encryption and methods not known.
 
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
@@ -14,6 +16,7 @@ use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, WIN_ATTRS_ALLOWED, name_
 use aqr_zip::zip::{self as z, u16_at, u32_at, u64_at};
 
 use crate::build::{self, Builder};
+use crate::crypt::{self, Fail, ZipCrypto};
 use crate::{Done, Filter, Sink, codec, stream, sys};
 
 /// Hosts of "version made by" whose names may separate by `\` and whose attributes are MS-DOS's.
@@ -30,7 +33,8 @@ const S_IFMT: u32 = 0o170000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFLNK: u32 = 0o120000;
 
-/// An entry's data to decode: its content, its name (shown), method, body, size and CRC-32.
+/// An entry's data to decode: its content, its name (shown), method, body, size and CRC-32,
+/// and how it is encrypted.
 struct Unit {
     c: usize,
     name: String,
@@ -38,7 +42,23 @@ struct Unit {
     body: Range<usize>,
     size: u64,
     crc: u32,
+    enc: Enc,
 }
+
+/// How an entry is encrypted.
+#[derive(Clone, Copy, PartialEq)]
+enum Enc {
+    None,
+    /// The traditional encryption, its header's last byte one of these (the CRC's high byte,
+    /// or the time's where a data descriptor follows: either is taken, as encoders differ).
+    Zip([u8; 2]),
+    /// WinZip's AES of a strength (1 to 3), its CRC-32 checked or not (AE-1, AE-2).
+    Aes(u8, bool),
+}
+
+/// Bytes of an encrypted entry decoded whole to check a passphrase by (a larger one is checked
+/// by its header alone).
+const CHECKED: usize = 64 << 20;
 
 pub struct Listing<'d> {
     d: &'d [u8],
@@ -47,6 +67,10 @@ pub struct Listing<'d> {
     /// The contents of no data to decode (empty files).
     empty: Vec<usize>,
     notes: Vec<String>,
+    /// The passphrase of the encrypted entries ([`Listing::unlock`]), and those entries until
+    /// it is taken (their names, metadata and data): not in the tree without it.
+    pass: Option<Vec<u8>>,
+    sealed: Vec<(Vec<Vec<u8>>, Extra, Unit)>,
 }
 
 /// The blocks of extra field `x`: by id, the data.
@@ -144,7 +168,15 @@ fn entry_name(raw: &[u8], flags: u16, central: &[u8]) -> Vec<u8> {
 impl<'d> Listing<'d> {
     pub fn read(d: &'d [u8]) -> Result<Listing<'d>, String> {
         let (base, cd) = z::find_end(d).ok_or("ZIP: no central directory (not a ZIP archive, or cut short)")?;
-        let mut l = Listing { d, b: Builder::default(), units: Vec::new(), empty: Vec::new(), notes: Vec::new() };
+        let mut l = Listing {
+            d,
+            b: Builder::default(),
+            units: Vec::new(),
+            empty: Vec::new(),
+            notes: Vec::new(),
+            pass: None,
+            sealed: Vec::new(),
+        };
         let mut p = cd.start;
         while p < cd.end {
             let c = z::central_at(d, p).ok_or("ZIP: a damaged central directory")?;
@@ -208,10 +240,22 @@ impl<'d> Listing<'d> {
             }
             return Ok(());
         }
-        if flags & 1 != 0 || method == 99 {
-            self.notes.push(format!("{shown}: encrypted, not extracted"));
-            return Ok(());
-        }
+        let (enc, method) = match (flags & 1 != 0, method) {
+            (true, _) if flags & 0x40 != 0 => {
+                self.notes.push(format!("{shown}: of PKWARE's strong encryption, not known here, not extracted"));
+                return Ok(());
+            }
+            // WinZip's AES: its field gives the strength and the method
+            (_, 99) => match fields(cx).chain(fields(lx)).find(|f| f.0 == 0x9901 && f.1.len() >= 7) {
+                Some((_, a)) => (Enc::Aes(a[4], u16_at(a, 0) == 1), u16_at(a, 5)),
+                None => {
+                    self.notes.push(format!("{shown}: of AES without its field, not extracted"));
+                    return Ok(());
+                }
+            },
+            (true, m) => (Enc::Zip([(info.crc >> 24) as u8, (u16_at(f, 8) >> 8) as u8]), m),
+            (false, m) => (Enc::None, m),
+        };
         if ![0, 8, 12, 14, 93, 95].contains(&method) {
             let what = match method {
                 9 => "Deflate64".into(),
@@ -221,15 +265,24 @@ impl<'d> Listing<'d> {
             self.notes.push(format!("{shown}: of {what}, not known here, not extracted"));
             return Ok(());
         }
-        let unit = |c| Unit { c, name: shown.clone(), method, body: body.clone(), size: info.usize, crc: info.crc };
+        let unit =
+            |c| Unit { c, name: shown.clone(), method, body: body.clone(), size: info.usize, crc: info.crc, enc };
         let node = if mode & S_IFMT == S_IFLNK {
+            if enc != Enc::None {
+                self.notes.push(format!("{shown}: an encrypted link, not extracted"));
+                return Ok(());
+            }
             // (the target, the entry's data, read now: the tree has it)
-            let target = decode(d, &unit(0)).map_err(|e| format!("ZIP: {shown}: {e}"))?;
+            let target = decode(d, &unit(0), None).map_err(|e| format!("ZIP: {shown}: {}", e.shown()))?;
             if target.is_empty() {
                 self.notes.push(format!("{shown}: a link to nothing, not extracted"));
                 return Ok(());
             }
             EntryNode::Link(name_from(&target))
+        } else if enc != Enc::None {
+            let names = names.iter().map(|n| n.to_vec()).collect();
+            self.sealed.push((names, x, unit(0)));
+            return Ok(());
         } else {
             let c = self.b.content();
             match info.usize {
@@ -248,8 +301,50 @@ impl<'d> Listing<'d> {
         self.units.iter().map(|u| u.name.clone()).collect()
     }
 
+    /// Whether entries are encrypted.
+    pub fn encrypted(&self) -> bool {
+        !self.sealed.is_empty() || self.units.iter().any(|u| u.enc != Enc::None)
+    }
+
+    /// Whether `pass` decrypts the encrypted entries, taken for them where it does: as the
+    /// smallest of them is decoded by it (or its header tells, where it is large).
+    pub fn unlock(&mut self, pass: &[u8]) -> bool {
+        if self.pass.as_deref() == Some(pass) {
+            return true;
+        }
+        let Some(u) = self.sealed.iter().map(|s| &s.2).min_by_key(|u| u.body.len()) else {
+            return false;
+        };
+        let body = &self.d[u.body.clone()];
+        let ok = match u.enc {
+            _ if body.len() <= CHECKED => decode(self.d, u, Some(pass)).is_ok(),
+            Enc::Zip(checks) => ZipCrypto::open(pass, &body[..12.min(body.len())], &checks).is_some(),
+            Enc::Aes(strength, _) => crypt::winzip_aes_verifies(pass, strength, body),
+            Enc::None => true,
+        };
+        if ok {
+            self.pass = Some(pass.to_vec());
+            for (names, x, mut u) in std::mem::take(&mut self.sealed) {
+                let names: Vec<&[u8]> = names.iter().map(|n| &n[..]).collect();
+                u.c = self.b.content();
+                let c = u.c;
+                match u.size {
+                    0 => self.empty.push(c),
+                    _ => self.units.push(u),
+                }
+                if let Err(e) = self.b.add(&names, Some(EntryNode::File(c)), x) {
+                    self.notes.push(e);
+                }
+            }
+        }
+        ok
+    }
+
     pub fn unpack(&self, threads: usize, sink: &dyn Sink) -> Result<Done, String> {
         self.notes.iter().for_each(|n| sink.note(n));
+        for (_, _, u) in &self.sealed {
+            sink.note(&format!("{}: encrypted, and no passphrase given, not extracted", u.name));
+        }
         let tree = self.b.tree.clone();
         let all: Vec<usize> = (0..tree.entries.len()).collect();
         if !all.is_empty() {
@@ -262,6 +357,7 @@ impl<'d> Listing<'d> {
         let total: u64 = self.units.iter().map(|u| u.size).sum();
         let (done_packed, done) = (AtomicU64::new(0), AtomicU64::new(0));
         let failed = AtomicBool::new(false);
+        let left = AtomicU64::new(0);
         let made = pool::par_map(self.units.len(), threads, |k| -> Result<(), String> {
             if failed.load(Relaxed) {
                 return Ok(());
@@ -272,8 +368,16 @@ impl<'d> Listing<'d> {
                 return Ok(());
             }
             sink.step(Step::Started(k));
-            let r =
-                decode(self.d, u).map_err(|e| format!("ZIP: {}: {e}", u.name)).and_then(|data| sink.content(u.c, data));
+            let r = match decode(self.d, u, self.pass.as_deref()) {
+                Ok(data) => sink.content(u.c, data),
+                // (an encrypted entry left out, as it cannot be told from a damaged one)
+                Err(e) if u.enc != Enc::None => {
+                    sink.note(&format!("{}: {}, not extracted", u.name, e.shown()));
+                    left.fetch_add(1, Relaxed);
+                    Ok(())
+                }
+                Err(e) => Err(format!("ZIP: {}: {}", u.name, e.shown())),
+            };
             sink.step(Step::Ended(k));
             if r.is_err() {
                 failed.store(true, Relaxed);
@@ -284,13 +388,54 @@ impl<'d> Listing<'d> {
             r
         });
         made.into_iter().collect::<Result<(), String>>()?;
-        Ok(Done { tree, skipped: self.notes.len() })
+        Ok(Done { tree, skipped: self.notes.len() + self.sealed.len() + left.into_inner() as usize })
     }
 }
 
-/// The data of unit `u` of archive `d`, its size and CRC-32 checked.
-fn decode(d: &[u8], u: &Unit) -> Result<Vec<u8>, String> {
+impl Fail {
+    fn shown(&self) -> String {
+        match self {
+            Fail::Wrong => "encrypted, and no passphrase given opens it".into(),
+            Fail::Bad(e) => e.clone(),
+        }
+    }
+}
+
+/// The data of unit `u` of archive `d` (decrypted by `pass`), its size and CRC-32 checked. An
+/// encrypted one fails as of a wrong passphrase, but where it is damaged as nothing else is.
+fn decode(d: &[u8], u: &Unit, pass: Option<&[u8]>) -> Result<Vec<u8>, Fail> {
     let body = &d[u.body.clone()];
+    let decrypted;
+    let body = match (u.enc, pass) {
+        (Enc::None, _) => body,
+        (_, None) => return Err(Fail::Wrong),
+        (Enc::Zip(checks), Some(p)) => {
+            if body.len() < 12 {
+                return Err(Fail::Bad("cut short".into()));
+            }
+            decrypted = ZipCrypto::open(p, body, &checks).ok_or(Fail::Wrong)?;
+            &decrypted
+        }
+        (Enc::Aes(strength, _), Some(p)) => {
+            decrypted = crypt::winzip_aes(p, strength, body)?;
+            &decrypted
+        }
+    };
+    // (of the traditional encryption, a passphrase taken by its header may yet be wrong)
+    let wrong = |e: String| if matches!(u.enc, Enc::Zip(_)) { Fail::Wrong } else { Fail::Bad(e) };
+    let data = plain(body, u).map_err(wrong)?;
+    if data.len() as u64 != u.size {
+        return Err(wrong("not of its size".into()));
+    }
+    // (AE-2 has no CRC-32: its code authenticates the data)
+    if !matches!(u.enc, Enc::Aes(_, false)) && crc32::hash(&data) != u.crc {
+        return Err(wrong("CRC mismatch".into()));
+    }
+    Ok(data)
+}
+
+/// The data of `body` (decrypted) of unit `u`.
+fn plain(body: &[u8], u: &Unit) -> Result<Vec<u8>, String> {
     let size = usize::try_from(u.size).map_err(|_| "too large")?;
     let data = match u.method {
         0 if body.len() != size => return Err("not of its size".into()),
@@ -316,11 +461,5 @@ fn decode(d: &[u8], u: &Unit) -> Result<Vec<u8>, String> {
         }
         m => return Err(format!("method {m} not known")),
     };
-    if data.len() as u64 != u.size {
-        return Err("not of its size".into());
-    }
-    if crc32::hash(&data) != u.crc {
-        return Err("CRC mismatch".into());
-    }
     Ok(data)
 }

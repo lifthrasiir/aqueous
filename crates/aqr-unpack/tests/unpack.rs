@@ -442,3 +442,53 @@ fn alzip_names() {
         assert_eq!(l[braille].0, Node::File(b"full".to_vec()), "{name}");
     }
 }
+
+/// `d` (of format `f`) read with passphrase `pass` given ([`Opened::unlock`]): whether it took
+/// it, and what was told.
+fn unpack_with(f: Format, d: &[u8], pass: &[u8]) -> Result<(bool, Done, Rec), String> {
+    let r = Rec::default();
+    let mut o = Opened::open(f, d)?;
+    assert!(o.encrypted());
+    let took = o.unlock(pass)?;
+    let done = o.unpack(4, &r)?;
+    Ok((took, done, r))
+}
+
+/// Encrypted ZIP entries (the traditional encryption, WinZip's AES) and 7z folders and headers
+/// decrypted by their passphrase, left out without it, and a wrong one not taken.
+#[test]
+fn encrypted() {
+    let want = [("secret.txt", text()), ("small.txt", b"small\n".to_vec())];
+    for (name, f, pass) in [
+        ("enc-zipcrypto.zip", Format::Zip, "pass word"),
+        ("enc-aes128.zip", Format::Zip, "pass word"),
+        ("enc-aes256.zip", Format::Zip, "pass word"),
+        ("enc.7z", Format::SevenZip, "päss wörd"),
+        ("enc-headers.7z", Format::SevenZip, "päss wörd"),
+    ] {
+        let d = data(name);
+        let (took, done, r) = unpack_with(f, &d, pass.as_bytes()).unwrap();
+        assert!(took, "{name}");
+        assert_eq!(done.skipped, 0, "{name}: {:?}", r.notes.lock().unwrap());
+        let l = listing(&done, &r);
+        for (p, c) in &want {
+            assert_eq!(l[*p].0, Node::File(c.clone()), "{name}: {p}");
+        }
+        // a wrong one: not taken (the smallest entry decoded by it), the entries left out
+        let mut o = Opened::open(f, &d).unwrap();
+        assert!(!o.unlock(b"pass wor").unwrap(), "{name}");
+        assert!(!o.unlock(b"").unwrap(), "{name}");
+        match name {
+            "enc-headers.7z" => assert!(o.sealed() && o.unpack(4, &Rec::default()).is_err()),
+            _ => {
+                let r = Rec::default();
+                let done = o.unpack(4, &r).unwrap();
+                assert_eq!(done.skipped, 2, "{name}");
+                assert!(r.notes.lock().unwrap().iter().all(|n| n.contains("encrypted")), "{name}");
+            }
+        }
+    }
+    // the traditional encryption: the passphrase as its bytes
+    let (took, ..) = unpack_with(Format::Zip, &data("enc-zipcrypto.zip"), "päss wörd".as_bytes()).unwrap();
+    assert!(!took);
+}

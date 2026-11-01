@@ -1019,7 +1019,14 @@ fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Forma
     let file = fs::File::open(input).map_err(|e| err(&e))?;
     // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
     let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
-    let opened = aqr_unpack::Opened::open(format, &c).map_err(|e| err(&e))?;
+    let mut opened = aqr_unpack::Opened::open(format, &c).map_err(|e| err(&e))?;
+    // (its entries encrypted without a passphrase taken are left out, told)
+    if opened.encrypted()
+        && pass::keys().open(input, |p| opened.unlock(p).map(|ok| ok.then_some(())).map_err(|e| err(&e)))?.is_none()
+        && opened.sealed()
+    {
+        return Err(err(&pass::keys().none_opens()));
+    }
     let ask = |p: &Path| output(a, p);
     let (place, force) = match (a.test, opened.is_tree()) {
         (true, _) => (None, false),

@@ -3,8 +3,10 @@
 //! (modification, creation, access) and attributes (Windows', and the Unix mode where given);
 //! the folders decoded on the pool's threads, a folder at a time, and cut into the files'
 //! contents, their CRC-32s checked. Folders are chains of LZMA, LZMA2, DEFLATE, bzip2 or
-//! stored coders and the filters over them (the branch converters, Delta, BCJ2); a folder of
-//! another coder (PPMd, AES) is left out (its files told).
+//! stored coders and the filters over them (the branch converters, Delta, BCJ2), AES among
+//! them decrypted by the passphrase given ([`Listing::unlock`]; an encrypted header needs it to
+//! be read at all, [`Listing::read`]); a folder of another coder (PPMd), or encrypted without
+//! the passphrase, is left out (its files told).
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -73,6 +75,18 @@ pub struct Listing<'d> {
     empty: Vec<usize>,
     links: Vec<(usize, usize, usize)>,
     notes: Vec<String>,
+    /// The passphrase of the encrypted folders, and whether the header was encrypted.
+    pass: Option<Vec<u8>>,
+    sealed: bool,
+}
+
+/// Bytes of the output of an encrypted folder decoded to check a passphrase by (a larger one
+/// is not checked).
+const CHECKED: u64 = 64 << 20;
+
+/// Whether `folder` has an AES coder.
+fn encrypted(folder: &Folder) -> bool {
+    folder.coders.iter().any(|c| c.id == AES)
 }
 
 /// A part of a folder's data, decoded apart from the others: a segment of an LZMA2 stream, an
@@ -102,17 +116,20 @@ fn folder_data(
     spans: &[Range<u64>],
     f: usize,
     threads: usize,
+    pass: Option<&[u8]>,
 ) -> Result<Vec<u8>, Error> {
     let folder = &s.folders[f];
     let out = folder.output().ok_or("7z: a damaged folder")?;
-    let data = output(d, folder, packs[f].start, spans, out, 0, threads)?.into_owned();
+    let data = output(d, folder, packs[f].start, spans, out, 0, threads, pass)?.into_owned();
     if folder.crc.is_some_and(|c| crc32::hash(&data) != c) {
         return Err("a folder's CRC mismatch".into());
     }
     Ok(data)
 }
 
-/// Output `o` of `folder` (whose first packed stream is `pack` among the archive's).
+/// Output `o` of `folder` (whose first packed stream is `pack` among the archive's), AES
+/// decrypted by `pass`.
+#[allow(clippy::too_many_arguments)]
 fn output<'d>(
     d: &'d [u8],
     folder: &Folder,
@@ -121,6 +138,7 @@ fn output<'d>(
     o: u64,
     depth: usize,
     threads: usize,
+    pass: Option<&[u8]>,
 ) -> Result<Cow<'d, [u8]>, Error> {
     let bad = || Error::Bad("a damaged folder".into());
     if depth > folder.coders.len() {
@@ -133,7 +151,7 @@ fn output<'d>(
     let mut inputs = Vec::new();
     for i in base..base + coder.ins {
         inputs.push(match folder.source(i).ok_or_else(bad)? {
-            Ok(o) => output(d, folder, pack, spans, o, depth + 1, threads)?,
+            Ok(o) => output(d, folder, pack, spans, o, depth + 1, threads, pass)?,
             Err(k) => {
                 let r = spans.get(pack + k).ok_or_else(bad)?;
                 Cow::Borrowed(d.get(r.start as usize..r.end as usize).ok_or("cut short")?)
@@ -154,7 +172,17 @@ fn output<'d>(
             let s = bcj2::Streams { main: inputs[0].to_vec(), call: inputs[1].to_vec(), jump: inputs[2].to_vec() };
             Cow::Owned(bcj2::decode(&s, &inputs[3], size).map_err(|e| format!("BCJ2: {e:?}"))?)
         }
-        AES => return Err(Error::Unknown("encrypted".into())),
+        AES => match pass {
+            None => return Err(Error::Unknown("encrypted, and no passphrase given".into())),
+            Some(p) => {
+                let mut v = crate::crypt::sevenz_aes(p, &coder.props, one()?)?;
+                if v.len() < size {
+                    return Err("AES: cut short".into());
+                }
+                v.truncate(size);
+                Cow::Owned(v)
+            }
+        },
         PPMD => return Err(Error::Unknown("of PPMd, not known here".into())),
         id => match Filter::from_7z(id, &coder.props) {
             Some(f) if coder.ins == 1 => {
@@ -185,7 +213,9 @@ fn spans(s: &Streams, len: usize) -> Result<Spans, String> {
 }
 
 impl<'d> Listing<'d> {
-    pub fn read(d: &'d [u8]) -> Result<Listing<'d>, String> {
+    /// Archive `d` read, its header decrypted by `pass` where it is encrypted: `None` where it
+    /// is and `pass` is not given or does not decrypt it.
+    pub fn read(d: &'d [u8], pass: Option<&[u8]>) -> Result<Option<Listing<'d>>, String> {
         let (span, crc) = header::signature(d).ok_or("7z: not a 7z archive")?;
         let h = usize::try_from(span.start)
             .ok()
@@ -196,21 +226,30 @@ impl<'d> Listing<'d> {
             return Err("7z: a damaged header (its CRC)".into());
         }
         let h = match header::parse(h).ok_or("7z: a damaged header")? {
-            Top::Plain(h) => h,
+            Top::Plain(h) => (h, false),
             Top::Encoded(s) => {
                 let (packs, spans) = spans(&s, d.len())?;
                 if s.folders.is_empty() {
                     return Err("7z: a damaged header".into());
                 }
-                let hd = folder_data(d, &s, &packs, &spans, 0, 1).map_err(|e| match e {
-                    Error::Unknown(e) | Error::Bad(e) => format!("7z: the header: {e}"),
-                })?;
+                let sealed = encrypted(&s.folders[0]);
+                if sealed && pass.is_none() {
+                    return Ok(None);
+                }
+                let hd = match folder_data(d, &s, &packs, &spans, 0, 1, pass) {
+                    Ok(hd) => hd,
+                    // (a wrong passphrase decrypts to what does not decode)
+                    Err(_) if sealed => return Ok(None),
+                    Err(Error::Unknown(e) | Error::Bad(e)) => return Err(format!("7z: the header: {e}")),
+                };
                 match header::parse(&hd) {
-                    Some(Top::Plain(h)) => h,
+                    Some(Top::Plain(h)) => (h, sealed),
+                    _ if sealed => return Ok(None),
                     _ => return Err("7z: a damaged header".into()),
                 }
             }
         };
+        let (h, sealed) = h;
         let (packs, spans) = spans(&h.main, d.len())?;
         let mut l = Listing {
             d,
@@ -222,9 +261,39 @@ impl<'d> Listing<'d> {
             empty: Vec::new(),
             links: Vec::new(),
             notes: Vec::new(),
+            pass: pass.filter(|_| sealed).map(<[u8]>::to_vec),
+            sealed,
         };
         l.files(&h.files);
-        Ok(l)
+        Ok(Some(l))
+    }
+
+    /// Whether its header or folders are encrypted.
+    pub fn encrypted(&self) -> bool {
+        self.sealed || self.main.folders.iter().any(encrypted)
+    }
+
+    /// Whether `pass` decrypts the encrypted folders, taken for them where it does: as the
+    /// smallest of them decodes by it (where not too large to check). The passphrase of an
+    /// encrypted header is taken already.
+    pub fn unlock(&mut self, pass: &[u8]) -> bool {
+        if self.pass.as_deref() == Some(pass) {
+            return true;
+        }
+        let smallest = (0..self.main.folders.len())
+            .filter(|&f| encrypted(&self.main.folders[f]))
+            .min_by_key(|&f| self.main.folders[f].size().unwrap_or(u64::MAX));
+        let ok = match smallest {
+            None => false,
+            Some(f) if self.main.folders[f].size().is_some_and(|n| n <= CHECKED) => {
+                folder_data(self.d, &self.main, &self.packs, &self.spans, f, 1, Some(pass)).is_ok()
+            }
+            Some(_) => true,
+        };
+        if ok {
+            self.pass = Some(pass.to_vec());
+        }
+        ok
     }
 
     fn files(&mut self, files: &[File]) {
@@ -311,7 +380,7 @@ impl<'d> Listing<'d> {
 
     /// The data of folder `f` cut into its substreams, their CRC-32s checked.
     fn decode(&self, f: usize, threads: usize) -> Result<Vec<Vec<u8>>, Error> {
-        let data = folder_data(self.d, &self.main, &self.packs, &self.spans, f, threads)?;
+        let data = folder_data(self.d, &self.main, &self.packs, &self.spans, f, threads, self.pass.as_deref())?;
         let sizes = &self.main.subs[f];
         if sizes.iter().sum::<u64>() != data.len() as u64 {
             return Err("a folder not of its files' sizes".into());
@@ -374,7 +443,8 @@ impl<'d> Listing<'d> {
                 Part::Lzma2(input) => Ok(codec::lzma2_segment(input, buf, n, done)?),
                 Part::Lzma(input, props) => Ok(codec::lzma_part(input, props, buf, n, room, done)?),
                 Part::Whole => {
-                    let data = folder_data(self.d, &self.main, &self.packs, &self.spans, f, threads)?;
+                    let data =
+                        folder_data(self.d, &self.main, &self.packs, &self.spans, f, threads, self.pass.as_deref())?;
                     if data.len() != n {
                         return Err("a coder's output not of its size".into());
                     }
@@ -573,7 +643,18 @@ impl<'d> Listing<'d> {
             };
             let r = match r {
                 Ok(()) => Ok(()),
-                // (a folder of coders not known, or encrypted: its files left out)
+                // (a folder of coders not known, or encrypted: its files left out; and one that
+                // does not decode by the passphrase given, as it cannot be told from damage)
+                Err(Error::Bad(_)) if encrypted(&self.main.folders[f]) => {
+                    for (c, name) in &u.files {
+                        if c.is_some() {
+                            sink.note(&format!("{name}: a wrong passphrase (or damaged), not extracted"));
+                            *notes.lock().unwrap() += 1;
+                        }
+                    }
+                    tick(self.main.folders[f].size().unwrap_or(0));
+                    Ok(())
+                }
                 Err(Error::Unknown(e)) => {
                     for (c, name) in &u.files {
                         if c.is_some() {
