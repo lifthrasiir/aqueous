@@ -26,6 +26,18 @@ pub struct Entry {
     pub split: bool,
     pub encrypted: bool,
     pub dir: bool,
+    /// The host OS (0 MS-DOS, 1 OS/2, 2 Windows, 3 Unix, …) and the attributes (MS-DOS's or the
+    /// Unix mode).
+    pub host: u8,
+    pub attrs: u32,
+    /// The name's field holds a Unicode name ([`name`]).
+    pub unicode: bool,
+    /// The times: modification, creation and access, each an MS-DOS date and time (local; date
+    /// in the high 16 bits) and nanoseconds past it, up to 2 s (of the extended times, their
+    /// added second included; the modification time's MS-DOS time is the header's).
+    pub mtime: Option<(u32, u32)>,
+    pub ctime: Option<(u32, u32)>,
+    pub atime: Option<(u32, u32)>,
 }
 
 #[derive(Debug)]
@@ -130,6 +142,37 @@ fn file(d: &[u8], at: usize, hd: &[u8], flags: u16, service: bool) -> Option<Ent
         return None;
     }
     let n = (flags >> 5) & 7;
+    // the extended times, after the name (and the salt)
+    let dos = le32(hd, 20);
+    let mut times = [Some((dos, 0u32)), None, None];
+    if flags & 0x1000 != 0 {
+        let mut q = p + nl + if flags & 0x0400 != 0 { 8 } else { 0 };
+        let tf = le16(hd.get(q..q + 2)?, 0);
+        q += 2;
+        for k in 0..4 {
+            let nib = (tf >> (12 - 4 * k)) & 15;
+            if nib & 8 == 0 {
+                continue;
+            }
+            let t = if k == 0 {
+                dos
+            } else {
+                let t = le32(hd.get(q..q + 4)?, 0);
+                q += 4;
+                t
+            };
+            let m = (nib & 3) as usize;
+            let b = hd.get(q..q + m)?;
+            q += m;
+            let frac = b.iter().enumerate().fold(0u32, |a, (i, &x)| a | (x as u32) << (8 * i)) << (8 * (3 - m));
+            // (a second more where the flag says, past the MS-DOS time's 2-second step)
+            let ns = (frac % 10_000_000) * 100 + if nib & 4 != 0 { 1_000_000_000 } else { 0 };
+            // (the archive time, the fourth, not kept)
+            if let Some(slot) = times.get_mut(k) {
+                *slot = Some((t, ns));
+            }
+        }
+    }
     Some(Entry {
         service,
         name,
@@ -143,5 +186,65 @@ fn file(d: &[u8], at: usize, hd: &[u8], flags: u16, service: bool) -> Option<Ent
         split: flags & 0x0003 != 0,
         encrypted: flags & 0x0004 != 0,
         dir: n == 7 && !service,
+        host: hd[15],
+        attrs: le32(hd, 28),
+        unicode: flags & 0x0200 != 0,
+        mtime: times[0],
+        ctime: times[1],
+        atime: times[2],
     })
+}
+
+/// The name of a field `f` of an entry: where `unicode`, the Unicode name it holds (UTF-8 where
+/// it has no zero byte, else the plain name, a zero byte and the encoded one); else the field as
+/// it is.
+pub fn name(f: &[u8], unicode: bool) -> Vec<u8> {
+    if !unicode {
+        return f.to_vec();
+    }
+    let Some(z) = f.iter().position(|&b| b == 0) else { return f.to_vec() };
+    let (plain, enc) = (&f[..z], &f[z + 1..]);
+    let Some(&high) = enc.first() else { return plain.to_vec() };
+    let high = high as u16;
+    let mut out: Vec<u16> = Vec::new();
+    let (mut pos, mut flags, mut bits) = (1usize, 0u8, 0);
+    let limit = f.len();
+    while pos < enc.len() && out.len() < limit {
+        if bits == 0 {
+            flags = enc[pos];
+            pos += 1;
+            bits = 8;
+        }
+        let op = flags >> 6;
+        flags <<= 2;
+        bits -= 2;
+        match op {
+            0 | 1 => {
+                let Some(&b) = enc.get(pos) else { break };
+                pos += 1;
+                out.push(if op == 0 { b as u16 } else { high << 8 | b as u16 });
+            }
+            2 => {
+                let Some(b) = enc.get(pos..pos + 2) else { break };
+                pos += 2;
+                out.push((b[1] as u16) << 8 | b[0] as u16);
+            }
+            _ => {
+                let Some(&n) = enc.get(pos) else { break };
+                pos += 1;
+                let (c, hi) = if n & 0x80 != 0 {
+                    let Some(&c) = enc.get(pos) else { break };
+                    pos += 1;
+                    (c, high)
+                } else {
+                    (0, 0)
+                };
+                for _ in 0..(n & 0x7f) as usize + 2 {
+                    let Some(&p) = plain.get(out.len()) else { break };
+                    out.push(hi << 8 | p.wrapping_add(c) as u16);
+                }
+            }
+        }
+    }
+    String::from_utf16_lossy(&out).into_bytes()
 }

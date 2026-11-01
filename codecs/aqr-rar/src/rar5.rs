@@ -27,6 +27,24 @@ pub struct Entry {
     pub split: bool,
     pub encrypted: bool,
     pub dir: bool,
+    /// The host OS (0 Windows, 1 Unix) and the attributes (Windows' or the Unix mode).
+    pub host: u64,
+    pub attrs: u64,
+    /// The times: modification (of the header's field, or the time record's), creation and
+    /// access (of the time record).
+    pub mtime: Option<Time>,
+    pub ctime: Option<Time>,
+    pub atime: Option<Time>,
+    /// The redirection record: its type (1 a Unix symbolic link, 2 a Windows one, 3 a junction, 4
+    /// a hard link, 5 a copy of a file), whether its target is a directory, the target (UTF-8).
+    pub redir: Option<(u64, bool, Range<usize>)>,
+}
+
+/// A time of a RAR5 header: seconds since 1970 and nanoseconds, or a Windows FILETIME.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Time {
+    Unix(u32, u32),
+    Filetime(u64),
 }
 
 #[derive(Debug)]
@@ -150,34 +168,77 @@ pub fn parse(d: &[u8]) -> Option<Rar5> {
 
 /// A file or service header: its fields from `p`, its extra area at `x..hend`, its data to `dend`.
 fn file(h: &[u8], mut p: usize, x: usize, hend: usize, dend: usize, flags: u64, service: bool) -> Option<Entry> {
+    let le32 = |p: usize| Some(u32::from_le_bytes(h.get(p..p + 4)?.try_into().unwrap()));
     let ff = vint(h, &mut p)?;
     let size = vint(h, &mut p)?;
-    let _attr = vint(h, &mut p)?;
+    let attrs = vint(h, &mut p)?;
+    let mut mtime = None;
     if ff & 2 != 0 {
+        mtime = Some(Time::Unix(le32(p)?, 0));
         p += 4;
     }
     let crc = if ff & 4 != 0 {
-        let c = u32::from_le_bytes(h.get(p..p + 4)?.try_into().unwrap());
+        let c = le32(p)?;
         p += 4;
         Some(c)
     } else {
         None
     };
     let ci = vint(h, &mut p)?;
-    let _os = vint(h, &mut p)?;
+    let host = vint(h, &mut p)?;
     let nl = usize::try_from(vint(h, &mut p)?).ok()?;
     let name = p..p.checked_add(nl)?;
     if name.end > x {
         return None;
     }
-    // the extra records: an encryption record (type 1)
-    let mut encrypted = false;
+    // the extra records: encryption (type 1), times (3), a redirection (5)
+    let (mut encrypted, mut ctime, mut atime, mut redir) = (false, None, None, None);
     let mut q = x;
     while q < hend {
         let n = usize::try_from(vint(h, &mut q)?).ok()?;
         let rend = q.checked_add(n).filter(|&e| e <= hend)?;
-        if vint(h, &mut q)? == 1 {
-            encrypted = true;
+        match vint(h, &mut q)? {
+            1 => encrypted = true,
+            3 => {
+                let tf = vint(h, &mut q)?;
+                let unix = tf & 1 != 0;
+                let mut ts = [None; 3];
+                for (k, t) in ts.iter_mut().enumerate() {
+                    if tf & (2 << k) == 0 {
+                        continue;
+                    }
+                    *t = Some(if unix {
+                        let v = le32(q)?;
+                        q += 4;
+                        Time::Unix(v, 0)
+                    } else {
+                        let v = u64::from_le_bytes(h.get(q..q + 8)?.try_into().unwrap());
+                        q += 8;
+                        Time::Filetime(v)
+                    });
+                }
+                if unix && tf & 0x10 != 0 {
+                    for t in ts.iter_mut() {
+                        if let Some(Time::Unix(_, ns)) = t {
+                            *ns = le32(q)? & 0x3fff_ffff;
+                            q += 4;
+                        }
+                    }
+                }
+                if q > rend {
+                    return None;
+                }
+                mtime = ts[0].or(mtime);
+                (ctime, atime) = (ts[1], ts[2]);
+            }
+            5 => {
+                let kind = vint(h, &mut q)?;
+                let rf = vint(h, &mut q)?;
+                let tl = usize::try_from(vint(h, &mut q)?).ok()?;
+                let target = q..q.checked_add(tl).filter(|&e| e <= rend)?;
+                redir = Some((kind, rf & 1 != 0, target));
+            }
+            _ => {}
         }
         q = rend;
     }
@@ -198,5 +259,11 @@ fn file(h: &[u8], mut p: usize, x: usize, hend: usize, dend: usize, flags: u64, 
         split: flags & 0x18 != 0,
         encrypted,
         dir: ff & 1 != 0,
+        host,
+        attrs,
+        mtime,
+        ctime,
+        atime,
+        redir,
     })
 }
