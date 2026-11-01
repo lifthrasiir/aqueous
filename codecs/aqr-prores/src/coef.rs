@@ -7,7 +7,7 @@
 //! Coefficients are kept by block, in scan order: `c[b * 64 + i]` is block `b`'s `i`th in
 //! scan order (`c[b * 64]` its DC, as coded: without the 4096 offset).
 
-use aqr_common::msb::{BitReader, BitWriter};
+use aqr_common::msb::BitReader;
 
 use crate::{Error, Result};
 
@@ -43,25 +43,52 @@ fn get_code(r: &mut BitReader, cb: u8) -> Result<u32> {
     }
 }
 
+/// The codeword of `v` in codebook `cb` (see [`get_code`]), right aligned, and its length.
 #[inline(always)]
-fn put_code(w: &mut BitWriter, cb: u8, v: u32) {
+fn codeword(cb: u8, v: u32) -> (u64, u32) {
     let s = (cb & 3) as u32;
     let rk = (cb >> 5) as u32;
     let ek = ((cb >> 2) & 7) as u32;
     if v < (s + 1) << rk {
-        w.put(1, (v >> rk) + 1);
-        w.put(v & ((1 << rk) - 1), rk);
+        (((1 << rk) | (v & ((1 << rk) - 1))) as u64, (v >> rk) + 1 + rk)
     } else {
         let y = (v - ((s + 1) << rk)) as u64 + (1 << ek);
         let n = 64 - y.leading_zeros();
-        let zeros = n - 1 - ek + s + 1;
-        w.put(0, zeros.min(32));
-        w.put(0, zeros.saturating_sub(32));
-        if n > 32 {
-            w.put((y >> 32) as u32, n - 32);
-            w.put(y as u32, 32);
-        } else {
-            w.put(y as u32, n);
+        (y, 2 * n - ek + s)
+    }
+}
+
+/// MSB-first bits appended to a byte vector.
+struct Out<'a> {
+    out: &'a mut Vec<u8>,
+    acc: u64,
+    n: u32,
+}
+
+impl Out<'_> {
+    /// The low `len` bits of `v` (`v` has no others set).
+    #[inline(always)]
+    fn put(&mut self, v: u64, len: u32) {
+        if len > 32 {
+            self.put(v >> 32, len - 32);
+            self.put(v & 0xffff_ffff, 32);
+            return;
+        }
+        self.acc = (self.acc << len) | v;
+        self.n += len;
+        if self.n >= 32 {
+            self.n -= 32;
+            self.out.extend_from_slice(&((self.acc >> self.n) as u32).to_be_bytes());
+        }
+    }
+
+    /// Pads with zero bits to a byte.
+    fn finish(mut self) {
+        let pad = (8 - self.n % 8) % 8;
+        self.put(0, pad);
+        while self.n > 0 {
+            self.n -= 8;
+            self.out.push((self.acc >> self.n) as u8);
         }
     }
 }
@@ -124,15 +151,17 @@ pub fn decode(d: &[u8], start: usize, end: usize, blocks: usize, c: &mut [i16]) 
     Ok(Tail { zero_bytes: (end / 8 - used) as u32, empty: false })
 }
 
-/// Encodes `c` as [`decode`] reads it, then `tail`'s padding.
-pub fn encode(w: &mut BitWriter, c: &[i16], tail: Tail) {
+/// Appends `c` coded as [`decode`] reads it, then `tail`'s padding, to `out`.
+pub fn encode(out: &mut Vec<u8>, c: &[i16], tail: Tail) {
     if tail.empty {
         debug_assert!(c.iter().all(|&v| v == 0));
         return;
     }
+    let mut w = Out { out, acc: 0, n: 0 };
     let blocks = c.len() / 64;
     let mut prev = c[0] as i32;
-    put_code(w, FIRST_DC_CB, ((prev << 1) ^ (prev >> 31)) as u32);
+    let (v, n) = codeword(FIRST_DC_CB, ((prev << 1) ^ (prev >> 31)) as u32);
+    w.put(v, n);
     let (mut code, mut sign) = (5u32, 0i32);
     for b in 1..blocks {
         let v = c[b * 64] as i32;
@@ -146,7 +175,8 @@ pub fn encode(w: &mut BitWriter, c: &[i16], tail: Tail) {
             if (d < 0) != (sign != 0) { 2 * m - 1 } else { 2 * m }
         };
         sign = if code == 0 { 0 } else { sign ^ -((code & 1) as i32) };
-        put_code(w, cb, code);
+        let (v, n) = codeword(cb, code);
+        w.put(v, n);
     }
     let (mut run, mut level) = (4u32, 2u32);
     let mut last = blocks - 1;
@@ -157,21 +187,22 @@ pub fn encode(w: &mut BitWriter, c: &[i16], tail: Tail) {
                 continue;
             }
             let pos = i * blocks + b;
-            let cb = RUN_CB[run.min(15) as usize];
+            let (rv, rn) = codeword(RUN_CB[run.min(15) as usize], (pos - last - 1) as u32);
             run = (pos - last - 1) as u32;
-            put_code(w, cb, run);
             last = pos;
-            let cb = LEV_CB[level.min(9) as usize];
+            let (lv, ln) = codeword(LEV_CB[level.min(9) as usize], v.unsigned_abs() as u32 - 1);
             level = v.unsigned_abs() as u32;
-            put_code(w, cb, level - 1);
-            w.put((v < 0) as u32, 1);
+            let (lv, ln) = ((lv << 1) | (v < 0) as u64, ln + 1);
+            if rn + ln <= 32 {
+                w.put((rv << ln) | lv, rn + ln);
+            } else {
+                w.put(rv, rn);
+                w.put(lv, ln);
+            }
         }
     }
-    let pad = (8 - w.len() % 8) % 8;
-    w.put(0, pad as u32);
-    for _ in 0..tail.zero_bytes {
-        w.put(0, 8);
-    }
+    w.finish();
+    out.resize(out.len() + tail.zero_bytes as usize, 0);
 }
 
 #[cfg(test)]
@@ -182,11 +213,14 @@ mod tests {
     #[test]
     fn codewords_round_trip() {
         for cb in DC_CB.iter().chain(&RUN_CB).chain(&LEV_CB).chain(&[FIRST_DC_CB]) {
-            let mut w = BitWriter::new();
+            let mut bytes = Vec::new();
+            let mut w = Out { out: &mut bytes, acc: 0, n: 0 };
             for v in 0..3000 {
-                put_code(&mut w, *cb, v);
+                let (x, n) = codeword(*cb, v);
+                w.put(x, n);
             }
-            let d = padded(&w.finish());
+            w.finish();
+            let d = padded(&bytes);
             let mut r = BitReader::new(&d, 0);
             for v in 0..3000 {
                 assert_eq!(get_code(&mut r, *cb).unwrap(), v, "cb {cb:#x}");
@@ -214,9 +248,8 @@ mod tests {
                 };
             }
             let tail = Tail { zero_bytes: (blocks % 3) as u32, empty: false };
-            let mut w = BitWriter::new();
-            encode(&mut w, &c, tail);
-            let bytes = w.finish();
+            let mut bytes = Vec::new();
+            encode(&mut bytes, &c, tail);
             let d = padded(&bytes);
             let mut back = vec![0i16; blocks * 64];
             assert_eq!(decode(&d, 0, bytes.len() * 8, blocks, &mut back).unwrap(), tail);

@@ -5,7 +5,7 @@
 //! Headers are kept as they are; the slices' and pictures' sizes are what the coded data
 //! gives, and are checked against the frame's.
 
-use aqr_common::msb::{BitWriter, padded};
+use aqr_common::msb::padded;
 
 use crate::coef::{self, Tail};
 use crate::{Error, Result};
@@ -237,11 +237,9 @@ impl Frame {
                 out.extend_from_slice(&s.header);
                 let mut sizes = [0usize; 3];
                 for (k, (c, tail)) in s.comps.iter().enumerate() {
-                    let mut w = BitWriter::with_capacity(c.len());
-                    coef::encode(&mut w, c, *tail);
-                    let b = w.finish();
-                    sizes[k] = b.len();
-                    out.extend_from_slice(&b);
+                    let at = out.len();
+                    coef::encode(&mut out, c, *tail);
+                    sizes[k] = out.len() - at;
                 }
                 out.extend_from_slice(&s.alpha);
                 for (k, n) in sizes.into_iter().enumerate() {

@@ -317,44 +317,61 @@ impl Model {
         n: usize,
     ) {
         let bw = p.bw;
-        let (a, l, al, ar) = (
-            (by > 0).then(|| p.blocks[i - bw]),
-            (bx > 0).then(|| p.blocks[i - 1]),
-            (bx > 0 && by > 0).then(|| p.blocks[i - bw - 1]),
-            (bx + 1 < bw && by > 0).then(|| p.blocks[i - bw + 1]),
-        );
+        // The expected magnitude before the in-block neighbours: twice the previous frame's,
+        // or weighted neighbouring blocks (missing ones' weight to the others).
+        let mut base = [0u32; 64];
+        let tqs: [i32; 64] = match q {
+            Some(q) => std::array::from_fn(|k| q[k] as i32),
+            None => [0; 64],
+        };
+        let wf = if q.is_some() {
+            for k in 1..64 {
+                base[k] = 2 * tqs[k].unsigned_abs();
+            }
+            0
+        } else {
+            const ZERO: [i16; 64] = [0; 64];
+            let has = |c: bool, j: usize| if c { &p.blocks[j] } else { &ZERO };
+            let (ha, hl, hal, har) = (by > 0, bx > 0, bx > 0 && by > 0, bx + 1 < bw && by > 0);
+            let (a, l) = (has(ha, i.wrapping_sub(bw)), has(hl, i.wrapping_sub(1)));
+            let (al, ar) = (has(hal, i.wrapping_sub(bw + 1)), has(har, i.wrapping_sub(bw).wrapping_add(1)));
+            // 2 * (near + far): near 2 (|a| + |l|), far |al| + |ar|; a missing one's share
+            // to its pair, a missing pair's far half of near.
+            let (wa, wl) = match (ha, hl) {
+                (true, true) => (2, 2),
+                (true, false) => (4, 0),
+                (false, true) => (0, 4),
+                _ => (0, 0),
+            };
+            let (wal, war, wa, wl) = match (hal, har) {
+                (true, true) => (1, 1, wa, wl),
+                (true, false) => (2, 0, wa, wl),
+                (false, true) => (0, 2, wa, wl),
+                _ => (0, 0, wa + wa / 2, wl + wl / 2),
+            };
+            for k in 1..64 {
+                let m = |x: &[i16; 64]| (x[k] as i32).unsigned_abs();
+                base[k] = 2 * (wa * m(a) + wl * m(l) + wal * m(al) + war * m(ar));
+            }
+            3
+        };
         // |coefficients| of this block so far, and a zero at 64 for missing neighbours.
-        let mut own = [0i32; 65];
+        let mut own = [0u32; 65];
+        let (zbase, hpv) = (cc * KB, hp * PV);
         let cur = p.blocks[i];
         let mut rem = n;
         for k in 1..64 {
-            let tq = q.map_or(0, |q| q[k] as i32);
+            let tq = tqs[k];
             let f = own[FNBR[k][0]] + own[FNBR[k][1]];
-            let nb = if q.is_some() {
-                half_oct(2 * tq.unsigned_abs())
-            } else {
-                let get = |b: Option<[i16; 64]>| b.map(|x| (x[k] as i32).abs());
-                let near = match (get(a), get(l)) {
-                    (Some(x), Some(y)) => 2 * (x + y),
-                    (Some(x), None) | (None, Some(x)) => 4 * x,
-                    _ => 0,
-                };
-                let far = match (get(al), get(ar)) {
-                    (Some(x), Some(y)) => x + y,
-                    (Some(x), None) | (None, Some(x)) => 2 * x,
-                    _ => near / 2,
-                };
-                half_oct((2 * (near + far) + 3 * f) as u32)
-            }
-            .min(NB - 1);
-            let pv = cat(f).min(PV - 1);
+            let nb = half_oct(base[k] + wf * f).min(NB - 1);
+            let pv = cat(f as i32).min(PV - 1);
             let kb = KBAND[k] as usize;
-            let zctx = ((((cc * KB + kb) * NREM + REM_CLASS[rem] as usize) * NB + nb) * 2 + hp) * PV + pv;
+            let zctx = (((zbase + kb) * NREM + REM_CLASS[rem] as usize) * NB + nb) * 2 * PV + hpv + pv;
             let v = cur[k] as i32;
             if !c.bit(&mut self.zero[zctx], v != 0) {
                 continue;
             }
-            let sctx = ((((cc * KB + kb) * NB + nb) * 2 + hp) * PV + pv) * NS;
+            let sctx = ((((zbase + kb) * NB + nb) * 2 * PV) + hpv + pv) * NS;
             let k1 = 1 + self.unary(c, sctx, cat(v).wrapping_sub(1), NS + 1, |m| &mut m.size);
             // Mantissa: the two bits below the leading one modelled, the rest raw.
             let mag = v.unsigned_abs();
@@ -386,9 +403,14 @@ impl Model {
             } else {
                 2
             };
-            let neg = c.bit(&mut self.sign[(cc * KB + kb) * 9 + ts * 3 + tcm], v < 0);
+            // Signs are close to even but where the previous frame has the coefficient.
+            let neg = if tq == 0 {
+                c.raw((v < 0) as u32, 1) != 0
+            } else {
+                c.bit(&mut self.sign[(cc * KB + kb) * 9 + ts * 3 + tcm], v < 0)
+            };
             let v = if neg { -(m as i32) } else { m as i32 };
-            own[k] = m as i32;
+            own[k] = m;
             if C::DECODE {
                 p.blocks[i][k] = v as i16;
             }
