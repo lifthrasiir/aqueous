@@ -13,6 +13,7 @@ pub use aqr_formula::aqr::{Entry, EntryNode, Extra, Time, Tree};
 
 mod build;
 mod codec;
+mod lzma;
 mod sevenz;
 mod stream;
 mod sys;

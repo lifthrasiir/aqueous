@@ -1,12 +1,13 @@
 //! The decoders the formats need, giving their data alone: DEFLATE (whole, or in chunks as it
-//! is decoded), LZMA and LZMA2 (aqr-lzma's model, without keeping its packets), bzip2
-//! (aqr-bz2's), Zstandard (the zstd crate's), and CRC-64 (of `.xz`).
+//! is decoded), LZMA and LZMA2 ([`crate::lzma`]), bzip2 (aqr-bz2's), Zstandard (the zstd
+//! crate's), and CRC-64 (of `.xz`).
 
 use std::ops::Range;
 
 use aqr_flate::inflate::{self, Sink};
-use aqr_lzma::lzma::{self, Kind, Model, Packet, Props};
-use aqr_lzma::rc::Decoder;
+use aqr_lzma::lzma::Props;
+
+use crate::lzma::{Dec, Ended, Rc};
 
 /// Room kept free past the data for a token: the longest match and its overshoot as copied.
 const ROOM: usize = 258 + 32;
@@ -183,57 +184,6 @@ pub fn room(n: usize) -> Result<Vec<u8>, String> {
     Ok(v)
 }
 
-/// Appends to `out` the data of the LZMA stream at the start of `input` (of properties `props`,
-/// of `size` bytes where known, else up to its end marker), as part of what `out` holds from
-/// `base` on (what its matches may reach), refusing more than `limit` bytes in all. Returns the
-/// bytes of the stream.
-fn lzma_into(
-    m: &mut Model,
-    c: &mut Decoder,
-    out: &mut Vec<u8>,
-    base: usize,
-    end: Option<usize>,
-    limit: usize,
-) -> Result<bool, String> {
-    let corrupt = || "LZMA: damaged data".to_string();
-    loop {
-        let pos = out.len();
-        if end == Some(pos) {
-            return Ok(false);
-        }
-        if pos >= limit {
-            return Err("LZMA: more data than can be held".into());
-        }
-        let pk = m.code(c, &out[base..], pos - base, Packet::LIT);
-        if c.overrun > 4 {
-            return Err(corrupt());
-        }
-        match pk.kind {
-            Kind::Lit => out.push(pk.dist as u8),
-            Kind::ShortRep => {
-                let src = (pos - base).checked_sub(pk.dist as usize + 1).ok_or_else(corrupt)?;
-                out.push(out[base + src]);
-            }
-            _ if pk.dist == lzma::END => return Ok(true),
-            _ => {
-                let (len, dist) = (pk.len as usize, pk.dist as usize + 1);
-                let src = base + (pos - base).checked_sub(dist).ok_or_else(corrupt)?;
-                if pos + len > end.unwrap_or(limit).min(limit) {
-                    return Err(corrupt());
-                }
-                if dist >= len {
-                    out.extend_from_within(src..src + len);
-                } else {
-                    out.reserve(len);
-                    for j in 0..len {
-                        out.push(out[src + j]);
-                    }
-                }
-            }
-        }
-    }
-}
-
 fn lzma_props(b: u8) -> Result<Props, String> {
     Props::from_byte(b).ok_or_else(|| "LZMA: bad properties".to_string())
 }
@@ -243,22 +193,37 @@ fn lzma_props(b: u8) -> Result<Props, String> {
 /// `limit` bytes; and the bytes of the stream.
 pub fn lzma(input: &[u8], props: u8, size: Option<u64>, limit: usize) -> Result<(Vec<u8>, usize), String> {
     let props = lzma_props(props)?;
-    let mut c = Decoder::new(input).ok_or("LZMA: damaged data")?;
-    let mut m = Model::new(props);
+    let corrupt = |_| "LZMA: damaged data".to_string();
+    let mut c = Rc::new(input).ok_or("LZMA: damaged data")?;
+    let mut m = Dec::new(props);
     let size = size.map(|s| usize::try_from(s).unwrap_or(usize::MAX));
     if size.is_some_and(|s| s > limit) {
         return Err("LZMA: more data than can be held".into());
     }
     let mut out = room(size.unwrap_or(input.len().saturating_mul(4)).min(limit))?;
-    let marker = lzma_into(&mut m, &mut c, &mut out, 0, size, limit)?;
+    let marker = match size {
+        Some(n) => m.run_vec(&mut c, &mut out, 0, n, n).map_err(corrupt)? == Ended::Marker,
+        // (of no known size: as much at a time as there is room for, then more room)
+        None => loop {
+            let end = (out.capacity().max(1 << 16) + (out.len() >> 1)).min(limit);
+            // (short of the end by the longest match where more may come)
+            let stop = if end < limit { end - 273 } else { end };
+            if m.run_vec(&mut c, &mut out, 0, stop, end).map_err(corrupt)? == Ended::Marker {
+                break true;
+            }
+            if out.len() >= limit {
+                return Err("LZMA: more data than can be held".into());
+            }
+        },
+    };
     // (a stream of known size may still end with a marker)
     if !marker && !c.finished() {
-        let pk = m.code(&mut c, &out, out.len(), Packet::LIT);
-        if pk.kind != Kind::Match || pk.dist != lzma::END {
+        let n = out.len();
+        if m.run_vec(&mut c, &mut out, 0, n + 1, n + 273) != Ok(Ended::Marker) {
             return Err("LZMA: data after the end".into());
         }
     }
-    if c.overrun > 0 {
+    if c.overrun() > 0 {
         return Err("LZMA: cut short".into());
     }
     Ok((out, c.pos))
@@ -339,7 +304,9 @@ fn lzma2_run(input: &[u8], out: &mut Vec<u8>, limit: usize, whole: bool) -> Resu
     let (mut at, start) = (0, out.len());
     // where the dictionary was last reset
     let mut base = None;
-    let mut model: Option<Model> = None;
+    let mut model: Option<Dec> = None;
+    // whether the model's state follows the last reset of the dictionary
+    let mut live = false;
     let mut props = None;
     loop {
         if !whole && at == input.len() {
@@ -365,7 +332,7 @@ fn lzma2_run(input: &[u8], out: &mut Vec<u8>, limit: usize, whole: bool) -> Resu
         let len = (if lzma { (first as usize & 0x1f) << 16 } else { 0 } | (h[1] as usize) << 8 | h[2] as usize) + 1;
         if control == 1 || control == 0xe0 {
             base = Some(out.len());
-            (model, props) = (None, None);
+            (live, props) = (false, None);
         }
         let b = base.ok_or_else(corrupt)?;
         if out.len() - start + len > limit {
@@ -381,13 +348,18 @@ fn lzma2_run(input: &[u8], out: &mut Vec<u8>, limit: usize, whole: bool) -> Resu
             props = Some(lzma_props(h[5]).ok().filter(|p| p.lc + p.lp <= 4).ok_or_else(corrupt)?);
         }
         if control >= 0xa0 {
-            model = Some(Model::new(props.ok_or_else(corrupt)?));
+            let p = props.ok_or_else(corrupt)?;
+            match &mut model {
+                Some(m) => m.reset(p),
+                None => model = Some(Dec::new(p)),
+            }
+            live = true;
         }
-        let m = model.as_mut().ok_or_else(corrupt)?;
+        let m = model.as_mut().filter(|_| live).ok_or_else(corrupt)?;
         let coded = input.get(at + head..at + head + packed).ok_or_else(corrupt)?;
-        let mut c = Decoder::new(coded).ok_or_else(corrupt)?;
+        let mut c = Rc::new(coded).ok_or_else(corrupt)?;
         let end = out.len() + len;
-        if lzma_into(m, &mut c, out, b, Some(end), usize::MAX)? || !c.finished() || c.overrun > 0 || c.pos != packed {
+        if m.run_vec(&mut c, out, b, end, end) != Ok(Ended::Stop) || !c.finished() || c.pos != packed {
             return Err(corrupt());
         }
         at += head + packed;
