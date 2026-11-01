@@ -161,19 +161,24 @@ pub struct Mf<'a> {
     /// Positions below this are inserted.
     next: usize,
     found: Vec<(usize, usize)>,
+    /// The bits of the heads ([`head_bits`]).
+    bits: u32,
 }
 
-/// Bits of the chains' heads.
-const HEAD_BITS: u32 = 16;
+/// Bits of the chains' heads for `n` bytes of data: as many as the data's positions need (12 to
+/// 20), so that a chain holds few other keys' positions.
+pub fn head_bits(n: u64) -> u32 {
+    (64 - n.leading_zeros()).clamp(12, 20)
+}
 
-/// The key of `k` bytes at `p` (`p + k` within the data).
+/// The key of `k` bytes at `p` (`p + k` within the data), of `bits` bits.
 #[inline]
-fn key(d: &[u8], p: usize, k: usize) -> usize {
+fn key(d: &[u8], p: usize, k: usize, bits: u32) -> usize {
     let mut h = 0u64;
     for &b in &d[p..p + k] {
         h = (h ^ b as u64).wrapping_mul(0x100_0000_01b3);
     }
-    (h.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (64 - HEAD_BITS)) as usize
+    (h.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (64 - bits)) as usize
 }
 
 impl<'a> Mf<'a> {
@@ -187,20 +192,22 @@ impl<'a> Mf<'a> {
 
     pub fn new(d: &'a [u8], reach: usize) -> Self {
         let span = d.len().max(2).next_power_of_two();
+        let bits = head_bits(d.len() as u64);
         Mf {
             d,
             reach,
-            head: Self::KEYS.iter().map(|_| vec![NONE; 1 << HEAD_BITS]).collect(),
+            head: Self::KEYS.iter().map(|_| vec![NONE; 1 << bits]).collect(),
             prev: Self::KEYS.iter().map(|&(_, b)| vec![NONE; span.min(1 << b)]).collect(),
             next: 0,
             found: Vec::new(),
+            bits,
         }
     }
 
     /// Bytes of the match finder of `n` bytes of data.
     pub fn memory(n: u64) -> u64 {
         let span = n.max(2).next_power_of_two();
-        Self::KEYS.iter().map(|&(_, b)| 4 * (span.min(1 << b) + (1 << HEAD_BITS))).sum()
+        Self::KEYS.iter().map(|&(_, b)| 4 * (span.min(1 << b) + (1 << head_bits(n)))).sum()
     }
 
     /// Inserts the positions up to `pos`.
@@ -210,7 +217,7 @@ impl<'a> Mf<'a> {
             let p = self.next;
             for (c, &(k, _)) in Self::KEYS.iter().enumerate() {
                 if p + k <= d.len() {
-                    let h = key(d, p, k);
+                    let h = key(d, p, k, self.bits);
                     let mask = self.prev[c].len() - 1;
                     self.prev[c][p & mask] = self.head[c][h];
                     self.head[c][h] = p as u32;
@@ -241,7 +248,7 @@ impl<'a> Mf<'a> {
             }
             let mask = self.prev[c].len() - 1;
             let far = self.far(c, pos);
-            let mut q = self.head[c][key(d, pos, k)];
+            let mut q = self.head[c][key(d, pos, k, self.bits)];
             let mut top = k - 1;
             for _ in 0..Self::DEPTH {
                 if q == NONE {
@@ -335,7 +342,7 @@ impl<'a> Mf<'a> {
         }
         let mask = self.prev[c].len() - 1;
         let far = self.far(c, pos);
-        let mut q = self.head[c][key(d, pos, k)];
+        let mut q = self.head[c][key(d, pos, k, self.bits)];
         for _ in 0..Self::LIMIT {
             if q == NONE {
                 return;

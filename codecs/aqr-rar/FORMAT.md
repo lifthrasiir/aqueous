@@ -283,8 +283,9 @@ number of the record). It holds chains of five **keys**:
 | ring bits `b_c` | 10 | 18 | 22 | 22 | 22 |
 
 - The key of `k` bytes at `p` (`p + k ≤ N`): from `h = 0`, for each byte `x` of `U[p..p+k)`, `h
-  = (h ^ x) × 0x100000001B3` (mod 2^64); the key is `(h × 0x9E3779B97F4A7C15 mod 2^64) >> 48`.
-- Chain `c` has `head_c[65536]` and a ring `prev_c` of `ring_c = min(2^⌈log2 max(N, 2)⌉,
+  = (h ^ x) × 0x100000001B3` (mod 2^64); the key is `(h × 0x9E3779B97F4A7C15 mod 2^64) >> (64 −
+  H)`, of `H = min(max(bitlen(N), 12), 20)` bits.
+- Chain `c` has `head_c[2^H]` and a ring `prev_c` of `ring_c = min(2^⌈log2 max(N, 2)⌉,
   2^b_c)` entries, all `NONE` at first. Inserting `p`: for each chain with `p + k_c ≤ N`,
   `prev_c[p mod ring_c] = head_c[key]` and `head_c[key] = p`. Positions are inserted in order;
   "insert below `q`" inserts those not inserted yet below `q`.
@@ -795,7 +796,7 @@ the application's declared output size.
 
 **Memory** *(informative)*: besides the inputs and the output, the work of the largest stream of
 `n` bytes of data: `U` and the parts written (`2n`), the tokens (twice), the match finder (four
-bytes each of `head_c` and `prev_c`, from 1.3 MiB up to about 52 MiB), 1 MiB more; for `rar3-recons`
+bytes each of `head_c` and `prev_c`, from 80 KiB up to about 72 MiB), 1 MiB more; for `rar3-recons`
 also the parameter's MiB of PPMd model.
 
 ## 8. Encoder choices *(informative)*
