@@ -531,7 +531,7 @@ impl Encoder {
     }
 
     /// The bytes of the module blocks in the archive of `f`.
-    fn modules_len(&self, f: &Formula) -> Result<usize> {
+    pub fn modules_len(&self, f: &Formula) -> Result<usize> {
         let mut n = Count(0);
         let (modules, _) = f.blocks();
         for m in modules {

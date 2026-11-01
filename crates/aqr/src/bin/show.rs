@@ -4,12 +4,12 @@
 //! usage: aqr-show [-t THREADS] [-d DEPTH] [-l LEVEL] [-e] [-r] [-m] [-f] FILE...
 //!
 //! For each file: the detected format, the modules applied, the stream bytes by class, and the
-//! archive (of level `-l`, by default mid), the bytes of its resource blocks among them, with
-//! the speeds of compressing it (recompression, the archive and its verification) and of
-//! decompressing it; `-e` takes each file as one file of the format it starts like rather than
-//! scanning it, `-r` decides whether formulas pay without their resources (as in an archive of
-//! many files sharing them; the archive still holds them), `-m` likewise without their modules,
-//! and `-f` prints the formula itself.
+//! archive (of level `-l`, by default mid), the bytes of its module and resource blocks among
+//! them, with the speeds of compressing it (recompression, the archive and its verification)
+//! and of decompressing it; `-e` takes each file as one file of the format it starts like
+//! rather than scanning it, `-r` decides whether formulas pay without their resources (as in an
+//! archive of many files sharing them; the archive still holds them), `-m` likewise without
+//! their modules, and `-f` prints the formula itself.
 
 use std::time::Instant;
 
@@ -47,8 +47,10 @@ fn main() {
 
 /// Shows each of `files` as the module docs tell; returns whether all went well.
 fn show(files: &[String], opt: &Options, tree: bool) -> bool {
-    // the resources compressed once for all files
-    let enc = aqr::Encoder::with_threads(opt.level, opt.threads);
+    // the modules and resources compressed once for all files
+    let enc = aqr::Encoder::with_threads(opt.level, opt.threads)
+        .with_modules(aqr_decompress::wasm_of)
+        .with_dictionaries(opt.dictionaries);
     let mut failed = false;
     for path in files {
         let d = match std::fs::read(path) {
@@ -68,9 +70,10 @@ fn show(files: &[String], opt: &Options, tree: bool) -> bool {
         let unpacked = decompress(&c, opt.threads);
         let unpack = start.elapsed().as_secs_f64();
         let res = enc.resources_len(&f).expect("slices within their streams");
+        let modules_len = enc.modules_len(&f).expect("a Wasm module of each module");
         let archived = match &unpacked {
             Ok(out) if *out == d => format!(
-                "archive {} B, resources {res} B, compress {:.1} MB/s, decompress {:.1} MB/s",
+                "archive {} B, modules {modules_len} B, resources {res} B, compress {:.1} MB/s, decompress {:.1} MB/s",
                 c.len(),
                 mb / pack,
                 mb / unpack
