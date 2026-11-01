@@ -91,10 +91,10 @@ pub struct Placed {
 }
 
 impl Stream {
-    /// The filters of the file, placed, given the tokens' lengths (a stream decoded or checked).
-    pub fn placed(&self) -> Vec<Placed> {
+    /// The filters of the file, placed, given the tokens' lengths (a stream decoded or checked)
+    /// and the last length before it, [`Decoder5::last`].
+    pub fn placed(&self, mut last: u32) -> Vec<Placed> {
         let mut pos = 0usize;
-        let mut last = 0u32;
         let mut out = Vec::new();
         for t in &self.tokens {
             match *t {
@@ -257,6 +257,11 @@ pub struct Decoder5 {
 impl Decoder5 {
     pub fn new(v1: bool, dict: u64) -> Self {
         Decoder5 { v1, dict, out: Vec::new(), cache: [0; 4], last: 0, codes: None }
+    }
+
+    /// The length of the last copy so far.
+    pub fn last(&self) -> u32 {
+        self.last
     }
 
     /// Decodes a file's part `packed` to `size` bytes more of [`Decoder5::out`].
@@ -641,4 +646,36 @@ pub fn unfilter(d: &mut [u8], placed: &[Placed]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The symbols token `t` writes, to `f`: of the main code (0), the distance code (1), the low
+/// distance code (2), the repeated length code (3).
+pub fn symbols(t: &Token, mut f: impl FnMut(usize, usize)) {
+    match *t {
+        Token::Lit(b) => f(0, b as usize),
+        Token::Filter(_) => f(0, 256),
+        Token::Last => f(0, 257),
+        Token::Rep { idx, len } => {
+            f(0, 258 + idx as usize);
+            f(3, len_slot(len.max(2)));
+        }
+        Token::Copy { len, dist } => {
+            f(0, 262 + len_slot(len.saturating_sub(bonus(dist)).max(2)));
+            let c = dist_slot(dist.max(1) as u64);
+            f(1, c);
+            let (b, e) = dist_base(c);
+            if e >= 4 {
+                f(2, ((dist as u64 - b) & 15) as usize);
+            }
+        }
+    }
+}
+
+/// The counts of the symbols of `tokens` by code.
+pub fn counts(tokens: &[Token], v1: bool) -> [Vec<u32>; 4] {
+    let mut c = [vec![0; MAIN], vec![0; dists(v1)], vec![0; LOW], vec![0; REPLEN]];
+    for t in tokens {
+        symbols(t, |k, s| c[k][s] += 1);
+    }
+    c
 }

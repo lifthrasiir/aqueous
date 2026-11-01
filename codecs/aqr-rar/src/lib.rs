@@ -8,6 +8,8 @@
 pub mod huff;
 pub mod lz5;
 pub mod rar5;
+pub mod rec;
+pub mod recons5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error(pub &'static str);
