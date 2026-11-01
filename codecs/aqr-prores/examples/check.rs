@@ -114,7 +114,7 @@ fn layouts(f: &Frame) -> [Vec<u8>; 2] {
             }
             for i in 0..64 {
                 for s in &p.slices {
-                    s.comps[k].0.chunks_exact(64).for_each(|b| by_pos.extend_from_slice(&b[i].to_le_bytes()));
+                    s.comps[k].0.as_chunks::<64>().0.iter().for_each(|b| by_pos.extend_from_slice(&b[i].to_le_bytes()));
                 }
             }
         }
