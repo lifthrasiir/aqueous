@@ -2888,7 +2888,7 @@ A violation of any MUST in host functions is signalled as an error to the module
 Tasks</h4>
 
 A <dfn>task</dfn> is an instance of the module of its own,
-run on a copy of the [=working memory=] of the instance that spawns it and giving back a [=byte sequence=], its <dfn for=task>result</dfn>.
+run on a copy of the [=working memory=] of the instance that spawns it and giving back a [=byte sequence=], its <dfn noexport for=task>result</dfn>.
 The application's instance and every task are the instances of the application;
 each instance has a [=list=] of handles, initially empty, each of which is a [=list=] of the tasks spawned at once.
 A task is either pending, running, done (with a result), failed (with an [=invalid archive=] failure or a [=resource failure=]),
