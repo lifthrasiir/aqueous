@@ -655,25 +655,34 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
 
     let mut g = Gathered::new(mapper, a.preserve);
     let gathering = aqr_common::trace::span("gather");
-    match inputs {
-        // a directory alone: its entries at the root
-        [dir] => {
-            let m = meta(dir)?;
-            let (x, forks) = g.reader.extra(dir, &m, &mut |w| g.warnings.push(w));
-            g.tree.root = x;
-            for f in forks {
-                g.tree.root.forks.push((f.name, g.contents.len()));
-                g.contents.push((f.path.clone(), os_bytes(f.path.as_os_str()), f.size));
+    // (as long as it takes: a bar of no end known, and how many files)
+    let listing = view::Listing::new(bars());
+    let gathered = ticking(a, &listing, || -> Result<(), String> {
+        match inputs {
+            // a directory alone: its entries at the root
+            [dir] => {
+                let m = meta(dir)?;
+                let (x, forks) = g.reader.extra(dir, &m, &mut |w| g.warnings.push(w));
+                g.tree.root = x;
+                for f in forks {
+                    g.tree.root.forks.push((f.name, g.contents.len()));
+                    g.contents.push((f.path.clone(), os_bytes(f.path.as_os_str()), f.size));
+                    listing.bytes(f.size);
+                }
+                gather_dir(dir, None, &mut g, &listing)?;
             }
-            gather_dir(dir, None, &mut g)?;
-        }
-        _ => {
-            for input in inputs {
-                let name = input.file_name().ok_or(format!("{}: no name to archive it by", input.display()))?;
-                gather(input, name, None, &mut g)?;
+            _ => {
+                for input in inputs {
+                    let name = input.file_name().ok_or(format!("{}: no name to archive it by", input.display()))?;
+                    gather(input, name, None, &mut g, &listing)?;
+                }
             }
         }
-    }
+        listing.finish();
+        Ok(())
+    });
+    listing.finish();
+    gathered?;
     if g.tree.entries.is_empty() {
         return Err(format!("nothing to archive in {}", inputs[0].display()));
     }
@@ -841,7 +850,7 @@ fn summary(out: &Path, files: usize, total: usize, len: usize, start: Instant) {
 
 /// Gathers `path` as an entry `name` in `parent` (`None`: the root). The files of an inode
 /// archived already are of its content (and forks), read once.
-fn gather(path: &Path, name: &OsStr, parent: Option<usize>, g: &mut Gathered) -> Result<(), String> {
+fn gather(path: &Path, name: &OsStr, parent: Option<usize>, g: &mut Gathered, l: &view::Listing) -> Result<(), String> {
     let m = fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let name = name_from(&os_bytes(name));
     let (mut extra, forks) = g.reader.extra(path, &m, &mut |w| g.warnings.push(w));
@@ -854,6 +863,7 @@ fn gather(path: &Path, name: &OsStr, parent: Option<usize>, g: &mut Gathered) ->
         for f in forks {
             extra.forks.push((f.name, g.contents.len()));
             g.contents.push((f.path.clone(), os_bytes(f.path.as_os_str()), f.size));
+            l.bytes(f.size);
         }
     }
     let node = if t.is_dir() {
@@ -862,6 +872,7 @@ fn gather(path: &Path, name: &OsStr, parent: Option<usize>, g: &mut Gathered) ->
         g.tree.entries[first].node.clone()
     } else if t.is_file() {
         g.contents.push((path.to_owned(), os_bytes(path.as_os_str()), m.len()));
+        l.file(m.len());
         EntryNode::File(g.contents.len() - 1)
     } else if let Some(node) = meta::special(&m) {
         node
@@ -882,13 +893,14 @@ fn gather(path: &Path, name: &OsStr, parent: Option<usize>, g: &mut Gathered) ->
     }
     g.tree.entries.push(Entry { parent, name, node: node.clone(), extra });
     if node == EntryNode::Dir {
-        gather_dir(path, Some(g.tree.entries.len() - 1), g)?;
+        gather_dir(path, Some(g.tree.entries.len() - 1), g, l)?;
     }
     Ok(())
 }
 
 /// Gathers what directory `dir` holds into `parent`, by name.
-fn gather_dir(dir: &Path, parent: Option<usize>, g: &mut Gathered) -> Result<(), String> {
+fn gather_dir(dir: &Path, parent: Option<usize>, g: &mut Gathered, l: &view::Listing) -> Result<(), String> {
+    l.dir(dir);
     let mut names: Vec<OsString> = fs::read_dir(dir)
         .map_err(|e| format!("{}: {e}", dir.display()))?
         .map(|e| e.map(|e| e.file_name()))
@@ -896,7 +908,7 @@ fn gather_dir(dir: &Path, parent: Option<usize>, g: &mut Gathered) -> Result<(),
         .map_err(|e| format!("{}: {e}", dir.display()))?;
     names.sort();
     for name in names {
-        gather(&dir.join(&name), &name, parent, g)?;
+        gather(&dir.join(&name), &name, parent, g, l)?;
     }
     Ok(())
 }

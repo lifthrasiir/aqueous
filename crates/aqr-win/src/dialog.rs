@@ -327,21 +327,28 @@ impl Window<'_> {
     }
 
     /// The shares of the phases done, as the bar overlays them (the one before never behind
-    /// the one after): compressing, the probe, the analysis and the compression; decoding,
+    /// the one after): compressing, the probe (from and to: a stretch going to and fro while
+    /// the files are listed, as on a terminal), the analysis and the compression; decoding,
     /// none, the decompression and the evaluation.
-    fn phases(&self) -> [f64; 3] {
+    fn phases(&self) -> [f64; 4] {
         let s = self.job.state.lock().unwrap();
-        let Some(p) = &s.progress else { return [0.0; 3] };
+        let Some(p) = &s.progress else { return [0.0; 4] };
         let of = |k: &str| {
             let (done, total) = (p[k][0].as_f64().unwrap_or(0.0), p[k][1].as_f64().unwrap_or(0.0));
             if total > 0.0 { (done / total).min(1.0) } else { 0.0 }
         };
         match self.job.verb {
+            Verb::Compress if p["listed"].is_array() => {
+                // (a quarter of the bar, there and back every 4 s)
+                let t = s.since.map_or(0.0, |t| t.elapsed().as_secs_f64()) / 4.0 % 1.0;
+                let at = 0.75 * if t < 0.5 { 2.0 * t } else { 2.0 - 2.0 * t };
+                [at, at + 0.25, 0.0, 0.0]
+            }
             Verb::Compress => {
                 // (nothing to look into: no strip, as on a terminal)
-                [of("probe"), of("analysis"), of("compression")]
+                [0.0, of("probe"), of("analysis"), of("compression")]
             }
-            Verb::Extract | Verb::Test => [0.0, of("decompressed"), of("evaluated")],
+            Verb::Extract | Verb::Test => [0.0, 0.0, of("decompressed"), of("evaluated")],
         }
     }
 
@@ -384,7 +391,10 @@ impl Window<'_> {
             lines.push(match self.job.verb {
                 Verb::Compress => {
                     let (probe, analysis, compression) = (pair("probe"), pair("analysis"), pair("compression"));
-                    if analysis.0 == 0.0 && probe.0 < probe.1 {
+                    if p["listed"].is_array() {
+                        let (files, bytes) = pair("listed");
+                        format!("Listing files: {files} ({})", size(bytes))
+                    } else if analysis.0 == 0.0 && probe.0 < probe.1 {
                         format!("Looking into files: {} of {}", probe.0, probe.1)
                     } else if analysis.0 < analysis.1 {
                         format!("Recompressing: {}", bytes(analysis))
@@ -396,9 +406,9 @@ impl Window<'_> {
                     bytes(pair("evaluated"))
                 }),
             });
-            let file = &p["file"];
+            let (file, what) = if p["dir"].is_object() { (&p["dir"], "Folder") } else { (&p["file"], "File") };
             if let Some(path) = file["path"].as_str() {
-                let mut line = format!("File: {}", fit(path, 60));
+                let mut line = format!("{what}: {}", fit(path, 60));
                 if let (Some(done), Some(len)) = (file["done"].as_f64(), file["len"].as_f64())
                     && len > 0.0
                 {
@@ -514,8 +524,10 @@ unsafe extern "system" fn paint(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM, id
 }
 
 /// Draws the bar `hwnd` on `hdc` (see [`paint`]).
-unsafe fn draw(hwnd: HWND, hdc: HDC, [probe, partly, done]: [f64; 3], paused: bool) {
-    let upto = |r: &RECT, f: f64| RECT { right: r.left + ((r.right - r.left) as f64 * f).round() as i32, ..*r };
+unsafe fn draw(hwnd: HWND, hdc: HDC, [from, probe, partly, done]: [f64; 4], paused: bool) {
+    let at = |r: &RECT, f: f64| r.left + ((r.right - r.left) as f64 * f).round() as i32;
+    let upto = |r: &RECT, f: f64| RECT { right: at(r, f), ..*r };
+    let probed = |r: &RECT| RECT { left: at(r, from), ..upto(r, probe) };
     let strip = |r: RECT| RECT { top: r.bottom - ((r.bottom - r.top) / 3).max(1), ..r };
     let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
     let class = wide("PROGRESS");
@@ -526,7 +538,7 @@ unsafe fn draw(hwnd: HWND, hdc: HDC, [probe, partly, done]: [f64; 3], paused: bo
         if theme == 0 {
             // (no theme: the system's colours)
             FillRect(hdc, &rc, GetSysColorBrush(COLOR_BTNFACE));
-            FillRect(hdc, &strip(upto(&rc, probe)), GetSysColorBrush(COLOR_3DSHADOW));
+            FillRect(hdc, &strip(probed(&rc)), GetSysColorBrush(COLOR_3DSHADOW));
             FillRect(hdc, &upto(&rc, partly), GetSysColorBrush(COLOR_3DSHADOW));
             FillRect(hdc, &upto(&rc, done), GetSysColorBrush(COLOR_HIGHLIGHT));
             return;
@@ -544,7 +556,7 @@ unsafe fn draw(hwnd: HWND, hdc: HDC, [probe, partly, done]: [f64; 3], paused: bo
                 }
             }
         };
-        fill(strip(upto(&inner, probe)), 200);
+        fill(strip(probed(&inner)), 200);
         fill(upto(&inner, partly), 140);
         fill(upto(&inner, done), 0);
         CloseThemeData(theme);

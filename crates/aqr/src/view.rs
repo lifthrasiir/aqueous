@@ -10,12 +10,16 @@
 //! the data blocks as they are in the archive) and the evaluation (`#`, bytes of the leaves'
 //! outputs: the files), and below it the file evaluated the longest, where that is long.
 //!
-//! Driven by a frontend ([`crate::ipc`]), both tell it the same as `progress` events instead of
+//! Before the probe, the files listed ([`Listing`]): a bar of no end known, and how many.
+//!
+//! Driven by a frontend ([`crate::ipc`]), all tell it the same as `progress` events instead of
 //! drawing the bar.
 
 use std::collections::HashMap;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use aqr_compress::{Event, Report};
@@ -320,6 +324,105 @@ impl Ticking for Decoding {
         let mut text = String::new();
         if s.drawn > 0 {
             // (to the start of the bar's first line, and all after it cleared)
+            text += &format!("\x1b[{}F\x1b[J", s.drawn);
+        }
+        lines.iter().for_each(|l| text += &format!("{l}\n"));
+        s.drawn = lines.len();
+        let mut out = std::io::stderr().lock();
+        _ = out.write_all(text.as_bytes());
+        _ = out.flush();
+    }
+}
+
+/// What the files being listed for an archive show on standard error, before any are probed:
+/// on a terminal a bar of no end known (a stretch of it going to and fro), the files and bytes
+/// found so far, and below it the directory being read where it takes long. Driven by a
+/// frontend, the same as `progress` events (`listed`, `dir`). The bar is cleared once done.
+pub struct Listing {
+    bar: bool,
+    files: AtomicU64,
+    bytes: AtomicU64,
+    state: Mutex<Listed>,
+}
+
+struct Listed {
+    since: Instant,
+    /// The directory being read, since when.
+    dir: Option<(PathBuf, Instant)>,
+    /// Lines of the bar drawn last.
+    drawn: usize,
+    done: bool,
+}
+
+impl Listing {
+    pub fn new(bar: bool) -> Listing {
+        let state = Mutex::new(Listed { since: Instant::now(), dir: None, drawn: 0, done: false });
+        Listing { bar, files: AtomicU64::new(0), bytes: AtomicU64::new(0), state }
+    }
+
+    /// A file found, of `len` bytes.
+    pub fn file(&self, len: u64) {
+        self.files.fetch_add(1, Ordering::Relaxed);
+        self.bytes.fetch_add(len, Ordering::Relaxed);
+    }
+
+    /// Bytes found of no file of their own (forks).
+    pub fn bytes(&self, len: u64) {
+        self.bytes.fetch_add(len, Ordering::Relaxed);
+    }
+
+    /// Directory `dir` being read.
+    pub fn dir(&self, dir: &Path) {
+        self.state.lock().unwrap().dir = Some((dir.to_owned(), Instant::now()));
+    }
+
+    /// Done: the bar drawn no more, and cleared.
+    pub fn finish(&self) {
+        let mut s = self.state.lock().unwrap();
+        s.done = true;
+        if s.drawn > 0 {
+            let mut out = std::io::stderr().lock();
+            _ = write!(out, "\x1b[{}F\x1b[J", s.drawn);
+            _ = out.flush();
+            s.drawn = 0;
+        }
+    }
+}
+
+impl Ticking for Listing {
+    fn shows(&self) -> bool {
+        self.bar || ipc::get().is_some()
+    }
+
+    fn tick(&self) {
+        let mut s = self.state.lock().unwrap();
+        if s.done {
+            return;
+        }
+        let (files, bytes) = (self.files.load(Ordering::Relaxed), self.bytes.load(Ordering::Relaxed));
+        let dir = s.dir.as_ref().filter(|(_, t)| t.elapsed() >= SLOW);
+        if ipc::get().is_some() {
+            let dir = dir.map(|(d, t)| json!({"path": d.display().to_string(), "seconds": t.elapsed().as_secs_f64()}));
+            ipc::tell(json!({"event": "progress", "listed": [files, bytes], "dir": dir}));
+        }
+        if !self.bar {
+            return;
+        }
+        // (a stretch of a quarter of the bar, there and back every 4 s)
+        const RUN: usize = CELLS / 4;
+        let t = s.since.elapsed().as_millis() as usize * 2 * (CELLS - RUN) / 4000;
+        let at = match t % (2 * (CELLS - RUN)) {
+            t if t <= CELLS - RUN => t,
+            t => 2 * (CELLS - RUN) - t,
+        };
+        let b: String = (0..CELLS).map(|i| if (at..at + RUN).contains(&i) { '-' } else { ' ' }).collect();
+        let what = format!("listing {files} file{}, {}", if files == 1 { "" } else { "s" }, size(bytes as f64));
+        let mut lines = vec![fit(&format!("[{b}] {what}"), WIDTH)];
+        if let Some((d, t)) = dir {
+            lines.push(format!("  {}", fit(&format!("{}, {} s", d.display(), t.elapsed().as_secs()), WIDTH - 2)));
+        }
+        let mut text = String::new();
+        if s.drawn > 0 {
             text += &format!("\x1b[{}F\x1b[J", s.drawn);
         }
         lines.iter().for_each(|l| text += &format!("{l}\n"));

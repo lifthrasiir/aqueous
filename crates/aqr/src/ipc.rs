@@ -21,7 +21,10 @@
 //!   `[done, total]` (files for the probe, bytes otherwise: [`aqr_compress::Event`]);
 //!   decoding, `decompressed` and `evaluated` (bytes: [`aqr_formula::aqr::Reached`]). Both
 //!   with `file`, where one is being worked on: the one the longest, `{"path", "seconds"}`
-//!   (with `len` and `done`, its bytes reached, where its recompressors tell).
+//!   (with `len` and `done`, its bytes reached, where its recompressors tell). Compressing,
+//!   while the files are listed (before any of the others), `listed` instead: `[files, bytes]`
+//!   found so far, with `dir`, the directory being read where it takes long (`{"path",
+//!   "seconds"}`, else null).
 //! - `{"event":"end","output":O,"files":N,"read":R,"written":W,"seconds":S}`: an archive done
 //!   (`written` is what was decoded, decoding).
 //! - `{"event":"skipped","output":O}`: an archive not made, as the frontend answered.
