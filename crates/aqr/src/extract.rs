@@ -863,9 +863,11 @@ enum Folding {
     /// directories are not told apart).
     Exact,
     /// Normalization aside (macOS's case-sensitive APFS and HFSX).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Normalization,
     /// Case and normalization aside ([`fold::fold`]: macOS's case-insensitive file systems,
     /// Windows).
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
     Full,
 }
 
