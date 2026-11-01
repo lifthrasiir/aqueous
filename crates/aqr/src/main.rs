@@ -658,26 +658,7 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
     // (as long as it takes: a bar of no end known, and how many files)
     let listing = view::Listing::new(bars());
     let gathered = ticking(a, &listing, || -> Result<(), String> {
-        match inputs {
-            // a directory alone: its entries at the root
-            [dir] => {
-                let m = meta(dir)?;
-                let (x, forks) = g.reader.extra(dir, &m, &mut |w| g.warnings.push(w));
-                g.tree.root = x;
-                for f in forks {
-                    g.tree.root.forks.push((f.name, g.contents.len()));
-                    g.contents.push((f.path.clone(), os_bytes(f.path.as_os_str()), f.size));
-                    listing.bytes(f.size);
-                }
-                gather_dir(dir, None, &mut g, &listing)?;
-            }
-            _ => {
-                for input in inputs {
-                    let name = input.file_name().ok_or(format!("{}: no name to archive it by", input.display()))?;
-                    gather(input, name, None, &mut g, &listing)?;
-                }
-            }
-        }
+        gather(inputs, &mut g, &listing, a.opt.threads)?;
         listing.finish();
         Ok(())
     });
@@ -848,14 +829,120 @@ fn summary(out: &Path, files: usize, total: usize, len: usize, start: Instant) {
     );
 }
 
-/// Gathers `path` as an entry `name` in `parent` (`None`: the root). The files of an inode
-/// archived already are of its content (and forks), read once.
-fn gather(path: &Path, name: &OsStr, parent: Option<usize>, g: &mut Gathered, l: &view::Listing) -> Result<(), String> {
-    let m = fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+/// The most threads that read what is found ([`gather`]): more only contend in the file system
+/// (on Windows, 402,844 files on an SSD: 11.0 s on 1, 4.2 s on 4, 4.5 s on 8, 4.4 s on 16 and
+/// 5.3 s on 32).
+const STAT_THREADS: usize = 8;
+
+/// An entry found as the inputs are walked ([`walk`]): its path and name, the one found that
+/// holds it (none: at the root), and whether it is a directory as it was listed.
+struct Found {
+    path: PathBuf,
+    name: OsString,
+    parent: Option<usize>,
+    dir: bool,
+}
+
+/// Gathers `inputs` (a directory alone: its entries at the root) into `g`: walked first (what
+/// the directories hold, a call for each), then what is read of each by its path ([`meta::stat`],
+/// a handle or so each, the most of the time) read on `threads`, then made the entries in the
+/// order they were found. The files of an inode archived already are of its content (and
+/// forks), read once.
+fn gather(inputs: &[PathBuf], g: &mut Gathered, l: &view::Listing, threads: usize) -> Result<(), String> {
+    let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
+    let privileged = g.reader.privileged;
+    let mut found = Vec::new();
+    match inputs {
+        [dir] => {
+            let s = meta::stat(dir, privileged).map_err(|e| err(dir, e))?;
+            let (x, forks) = g.reader.extra(dir, &s, &mut |w| g.warnings.push(w));
+            g.tree.root = x;
+            for f in forks {
+                g.tree.root.forks.push((f.name, g.contents.len()));
+                g.contents.push((f.path.clone(), os_bytes(f.path.as_os_str()), f.size));
+                l.bytes(f.size);
+            }
+            walk(dir, None, &mut found, l)?;
+        }
+        _ => {
+            for input in inputs {
+                let name = input.file_name().ok_or(format!("{}: no name to archive it by", input.display()))?;
+                let t = fs::symlink_metadata(input).map_err(|e| err(input, e))?.file_type();
+                found.push(Found { path: input.clone(), name: name.to_owned(), parent: None, dir: t.is_dir() });
+                if t.is_file() {
+                    l.found();
+                }
+                if t.is_dir() {
+                    walk(input, Some(found.len() - 1), &mut found, l)?;
+                }
+            }
+        }
+    }
+    l.walked();
+    let stats = aqr_common::pool::par_map(found.len(), threads.min(STAT_THREADS), |i| {
+        let s = meta::stat(&found[i].path, privileged);
+        if let Ok(s) = &s
+            && s.m.is_file()
+        {
+            l.read(s.m.len());
+        }
+        s
+    });
+    // (by the entries found, the entry made of each)
+    let mut made: Vec<Option<usize>> = Vec::with_capacity(found.len());
+    for (f, s) in found.iter().zip(stats) {
+        let s = s.map_err(|e| err(&f.path, e))?;
+        if s.m.is_dir() != f.dir {
+            return Err(format!("{}: changed as it was listed", f.path.display()));
+        }
+        // (a directory never skipped)
+        let parent = f.parent.map(|p| made[p].expect("a directory made"));
+        made.push(entry(&f.path, &f.name, &s, parent, g, l)?);
+    }
+    Ok(())
+}
+
+/// Finds what directory `dir` (found as `parent`) holds, by name, and what those directories
+/// hold in turn, each directory followed by what it holds.
+fn walk(dir: &Path, parent: Option<usize>, found: &mut Vec<Found>, l: &view::Listing) -> Result<(), String> {
+    l.dir(dir);
+    let err = |e: std::io::Error| format!("{}: {e}", dir.display());
+    let mut names: Vec<(OsString, fs::FileType)> = fs::read_dir(dir)
+        .map_err(err)?
+        .map(|e| e.and_then(|e| Ok((e.file_name(), e.file_type()?))))
+        .collect::<Result<_, _>>()
+        .map_err(err)?;
+    names.sort_by(|a, b| a.0.cmp(&b.0));
+    for (name, t) in names {
+        let path = dir.join(&name);
+        found.push(Found { path, name, parent, dir: t.is_dir() });
+        if t.is_file() {
+            l.found();
+        }
+        if t.is_dir() {
+            let at = found.len() - 1;
+            let path = found[at].path.clone();
+            walk(&path, Some(at), found, l)?;
+        }
+    }
+    Ok(())
+}
+
+/// The entry `name` in `parent` (`None`: the root) of `path`, as `s` read it: its index, none
+/// where it is skipped.
+fn entry(
+    path: &Path,
+    name: &OsStr,
+    s: &meta::Stat,
+    parent: Option<usize>,
+    g: &mut Gathered,
+    l: &view::Listing,
+) -> Result<Option<usize>, String> {
+    let m = &s.m;
     let name = name_from(&os_bytes(name));
-    let (mut extra, forks) = g.reader.extra(path, &m, &mut |w| g.warnings.push(w));
+    let (mut extra, forks) = g.reader.extra(path, s, &mut |w| g.warnings.push(w));
     let t = m.file_type();
-    let inode = if t.is_file() { meta::inode(path, &m) } else { None };
+    let inode = s.inode;
     let first = inode.and_then(|i| g.inodes.get(&i)).map(|f| f[0]);
     if let Some(first) = first {
         extra.forks = g.tree.entries[first].extra.forks.clone();
@@ -872,45 +959,26 @@ fn gather(path: &Path, name: &OsStr, parent: Option<usize>, g: &mut Gathered, l:
         g.tree.entries[first].node.clone()
     } else if t.is_file() {
         g.contents.push((path.to_owned(), os_bytes(path.as_os_str()), m.len()));
-        l.file(m.len());
         EntryNode::File(g.contents.len() - 1)
-    } else if let Some(node) = meta::special(&m) {
+    } else if let Some(node) = meta::special(m) {
         node
     } else if t.is_symlink() {
         let target = meta::link_target(fs::read_link(path).map_err(|e| format!("{}: {e}", path.display()))?);
         let target = name_from(&os_bytes(target.as_os_str()));
         if name_bytes(&target).0.is_empty() {
             g.skipped.push(format!("{} (an empty link)", path.display()));
-            return Ok(());
+            return Ok(None);
         }
         EntryNode::Link(target)
     } else {
         g.skipped.push(format!("{} (a socket, or of a kind not known)", path.display()));
-        return Ok(());
+        return Ok(None);
     };
     if let Some(i) = inode {
         g.inodes.entry(i).or_default().push(g.tree.entries.len());
     }
-    g.tree.entries.push(Entry { parent, name, node: node.clone(), extra });
-    if node == EntryNode::Dir {
-        gather_dir(path, Some(g.tree.entries.len() - 1), g, l)?;
-    }
-    Ok(())
-}
-
-/// Gathers what directory `dir` holds into `parent`, by name.
-fn gather_dir(dir: &Path, parent: Option<usize>, g: &mut Gathered, l: &view::Listing) -> Result<(), String> {
-    l.dir(dir);
-    let mut names: Vec<OsString> = fs::read_dir(dir)
-        .map_err(|e| format!("{}: {e}", dir.display()))?
-        .map(|e| e.map(|e| e.file_name()))
-        .collect::<Result<_, _>>()
-        .map_err(|e| format!("{}: {e}", dir.display()))?;
-    names.sort();
-    for name in names {
-        gather(&dir.join(&name), &name, parent, g, l)?;
-    }
-    Ok(())
+    g.tree.entries.push(Entry { parent, name, node, extra });
+    Ok(Some(g.tree.entries.len() - 1))
 }
 
 /// Writes a new file `path` (or one in place of it, where `force`) by `write`: under a name of

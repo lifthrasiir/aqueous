@@ -338,6 +338,7 @@ impl Window<'_> {
             if total > 0.0 { (done / total).min(1.0) } else { 0.0 }
         };
         match self.job.verb {
+            Verb::Compress if p["read"].is_u64() => [0.0, of_files(p), 0.0, 0.0],
             Verb::Compress if p["listed"].is_array() => {
                 // (a quarter of the bar, there and back every 4 s)
                 let t = s.since.map_or(0.0, |t| t.elapsed().as_secs_f64()) / 4.0 % 1.0;
@@ -393,7 +394,10 @@ impl Window<'_> {
                     let (probe, analysis, compression) = (pair("probe"), pair("analysis"), pair("compression"));
                     if p["listed"].is_array() {
                         let (files, bytes) = pair("listed");
-                        format!("Listing files: {files} ({})", size(bytes))
+                        match p["read"].as_u64() {
+                            Some(read) => format!("Listing files: {read} of {files} ({})", size(bytes)),
+                            None => format!("Listing files: {files}"),
+                        }
                     } else if analysis.0 == 0.0 && probe.0 < probe.1 {
                         format!("Looking into files: {} of {}", probe.0, probe.1)
                     } else if analysis.0 < analysis.1 {
@@ -493,6 +497,12 @@ unsafe extern "system" fn find_bar(hwnd: HWND, found: LPARAM) -> BOOL {
         }
     }
     1
+}
+
+/// The share of the files listed that are read (`progress`'s `read` of `listed`).
+fn of_files(p: &Value) -> f64 {
+    let (read, files) = (p["read"].as_f64().unwrap_or(0.0), p["listed"][0].as_f64().unwrap_or(0.0));
+    if files > 0.0 { (read / files).min(1.0) } else { 0.0 }
 }
 
 /// Paints the progress bar `hwnd` as the phases overlaid, in the theme's fill: the analysis

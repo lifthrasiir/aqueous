@@ -41,7 +41,53 @@ pub struct Reader {
     groups: HashMap<u32, Option<Arc<[u8]>>>,
 }
 
+/// What is read of an entry by its path ([`stat`], of any thread), made the entry's extra by
+/// [`Reader::extra`].
+pub struct Stat {
+    /// Its metadata (not followed where it is a link).
+    pub m: fs::Metadata,
+    /// Of a file of more links than one, its device and number.
+    pub inode: Option<(u64, u64)>,
+    /// Its extended attributes (Unix), or its alternate data streams (Windows; none of a
+    /// link), or why they could not be read.
+    #[cfg(unix)]
+    xattrs: Result<Vec<(Vec<u8>, Vec<u8>)>, String>,
+    #[cfg(windows)]
+    streams: Result<Vec<Fork>, String>,
+    /// Its backup time, where asked (`privileged`).
+    #[cfg(target_os = "macos")]
+    backup: Option<Time>,
+}
+
+/// What is read of `path` by its path ([`Stat`]), of the backup time too where `privileged`;
+/// on Windows, by a handle opened once.
+pub fn stat(path: &Path, privileged: bool) -> std::io::Result<Stat> {
+    let _ = privileged;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let m = fs::symlink_metadata(path)?;
+        let inode = (m.is_file() && m.nlink() > 1).then(|| (m.dev(), m.ino()));
+        let xattrs = os::xattrs(path).map_err(|e| e.to_string());
+        #[cfg(target_os = "macos")]
+        let backup = if privileged { os::backup_time(path) } else { None };
+        Ok(Stat {
+            m,
+            inode,
+            xattrs,
+            #[cfg(target_os = "macos")]
+            backup,
+        })
+    }
+    #[cfg(windows)]
+    {
+        let (m, inode, streams) = os::stat(path)?;
+        Ok(Stat { m, inode, streams: streams.map_err(|e| e.to_string()) })
+    }
+}
+
 /// A fork to archive: its name, and the path its content is read by.
+#[derive(Clone)]
 pub struct Fork {
     pub name: Vec<u8>,
     pub path: PathBuf,
@@ -55,10 +101,10 @@ impl Reader {
         Reader { privileged, ..Reader::default() }
     }
 
-    /// The extra of `path` (of metadata `m`, not followed where it is a link), and its forks
-    /// (whose contents the caller gives `Extra::forks`). What cannot be read of it is told by
-    /// `warn`.
-    pub fn extra(&mut self, path: &Path, m: &fs::Metadata, warn: &mut dyn FnMut(String)) -> (Extra, Vec<Fork>) {
+    /// The extra of `path`, as `s` read it, and its forks (whose contents the caller gives
+    /// `Extra::forks`). What could not be read of it is told by `warn`.
+    pub fn extra(&mut self, path: &Path, s: &Stat, warn: &mut dyn FnMut(String)) -> (Extra, Vec<Fork>) {
+        let m = &s.m;
         let time = |t: std::io::Result<std::time::SystemTime>| t.ok().map(time_of);
         let mut x = Extra {
             crtime: time(m.created()),
@@ -81,8 +127,8 @@ impl Reader {
             x.gid = Some(m.gid() as u64);
             x.uname = self.users.entry(m.uid()).or_insert_with(|| os::user_name(m.uid()).map(Into::into)).clone();
             x.gname = self.groups.entry(m.gid()).or_insert_with(|| os::group_name(m.gid()).map(Into::into)).clone();
-            match os::xattrs(path) {
-                Ok(a) => x.xattrs = a.into_iter().map(|(n, v)| (n.into(), v.into())).collect(),
+            match &s.xattrs {
+                Ok(a) => x.xattrs = a.iter().map(|(n, v)| (n[..].into(), v[..].into())).collect(),
                 Err(e) => warn(format!("{}: extended attributes not read: {e}", path.display())),
             }
         }
@@ -93,7 +139,7 @@ impl Reader {
                 x.mac_flags = Some(m.st_flags() & MAC_FLAGS_ALLOWED);
             }
             if self.privileged {
-                x.arctime = os::backup_time(path);
+                x.arctime = s.backup;
             }
             // (the resource fork a fork, not an attribute)
             if let Some(i) = x.xattrs.iter().position(|a| *a.0 == *RESOURCE_FORK_XATTR) {
@@ -115,8 +161,8 @@ impl Reader {
             if m.is_symlink() {
                 x.win_link_type = Some(m.file_type().is_symlink_dir() as u8);
             } else {
-                match os::streams(path) {
-                    Ok(f) => forks = f,
+                match &s.streams {
+                    Ok(f) => forks = f.clone(),
                     Err(e) => warn(format!("{}: alternate data streams not read: {e}", path.display())),
                 }
             }
@@ -210,22 +256,6 @@ pub fn link_target(target: PathBuf) -> PathBuf {
         }
     }
     target
-}
-
-/// The inode of file `path` (of metadata `m`): its device and number, where it has more links
-/// than one.
-pub fn inode(path: &Path, m: &fs::Metadata) -> Option<(u64, u64)> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let _ = path;
-        (m.nlink() > 1).then(|| (m.dev(), m.ino()))
-    }
-    #[cfg(windows)]
-    {
-        let _ = m;
-        os::inode(path)
-    }
 }
 
 /// The path the resource fork of file `path` is read and written by.
@@ -696,15 +726,18 @@ mod os {
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_NORMAL, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_WRITE_ATTRIBUTES, FileBasicInfo, FindClose,
-        FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard, GetFileInformationByHandle, SetFileAttributesW,
-        SetFileInformationByHandle, WIN32_FIND_STREAM_DATA,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_WRITE_ATTRIBUTES, FileBasicInfo, FileStreamInfo, FindClose,
+        FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard, GetFileInformationByHandle,
+        GetFileInformationByHandleEx, SetFileAttributesW, SetFileInformationByHandle, WIN32_FIND_STREAM_DATA,
     };
 
     use super::{Fork, Kind};
 
     /// `ERROR_HANDLE_EOF`: no more streams.
     const NO_MORE: i32 = 38;
+    /// `ERROR_MORE_DATA` and `ERROR_INSUFFICIENT_BUFFER`: more than a buffer holds.
+    const MORE_DATA: i32 = 234;
+    const INSUFFICIENT_BUFFER: i32 = 122;
 
     /// `p` as the system's calls take it, of a NUL: of more characters than they take without
     /// it (`MAX_PATH`, the NUL and the room CreateDirectoryW keeps for a name), absolute and of
@@ -769,19 +802,84 @@ mod os {
         r
     }
 
-    /// The volume and the index of file `path`, where it has more links than one.
-    pub fn inode(path: &Path) -> Option<(u64, u64)> {
-        let f = fs::OpenOptions::new()
-            .access_mode(FILE_READ_ATTRIBUTES)
+    /// The metadata of `path` (not followed), the volume and the index of a file of more links
+    /// than one, and its alternate data streams (as [`streams`]; none of a link): of a handle
+    /// opened once, of no access (as the standard library's `symlink_metadata` opens it). Where
+    /// it does not open (a file held, as the paging file), as the standard library reads it,
+    /// and the streams by their own call.
+    #[allow(clippy::type_complexity)]
+    pub fn stat(path: &Path) -> io::Result<(fs::Metadata, Option<(u64, u64)>, io::Result<Vec<Fork>>)> {
+        let f = match fs::OpenOptions::new()
+            .access_mode(0)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .open(path)
-            .ok()?;
+        {
+            Ok(f) => f,
+            Err(_) => {
+                let m = fs::symlink_metadata(path)?;
+                let streams = if m.is_symlink() { Ok(Vec::new()) } else { streams(path) };
+                return Ok((m, None, streams));
+            }
+        };
+        let m = f.metadata()?;
+        // SAFETY: plain data
         let mut i: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
         // SAFETY: an open handle, and the information of its type
-        if unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut i) } == 0 || i.nNumberOfLinks < 2 {
-            return None;
+        let linked = m.is_file() && unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut i) } != 0;
+        let inode = (linked && i.nNumberOfLinks > 1)
+            .then_some((i.dwVolumeSerialNumber as u64, (i.nFileIndexHigh as u64) << 32 | i.nFileIndexLow as u64));
+        let streams = if m.is_symlink() { Ok(Vec::new()) } else { handle_streams(&f, path) };
+        Ok((m, inode, streams))
+    }
+
+    /// The alternate data streams of `path`, open as `f`, as [`streams`] has them.
+    fn handle_streams(f: &fs::File, path: &Path) -> io::Result<Vec<Fork>> {
+        // (FILE_STREAM_INFO, of 8-byte alignment)
+        let mut buf = vec![0u64; 128];
+        loop {
+            let size = (buf.len() * 8) as u32;
+            // SAFETY: an open handle, and a buffer of `size` bytes
+            let ok = unsafe {
+                GetFileInformationByHandleEx(f.as_raw_handle(), FileStreamInfo, buf.as_mut_ptr().cast(), size)
+            };
+            if ok != 0 {
+                break;
+            }
+            let e = io::Error::last_os_error();
+            match e.raw_os_error() {
+                // (more than the buffer holds)
+                Some(MORE_DATA | INSUFFICIENT_BUFFER) if buf.len() < 1 << 20 => buf.resize(buf.len() * 2, 0),
+                // (none, or a file system of no streams)
+                Some(NO_MORE | 1 | 87) => return Ok(Vec::new()),
+                _ => return Err(e),
+            }
         }
-        Some((i.dwVolumeSerialNumber as u64, (i.nFileIndexHigh as u64) << 32 | i.nFileIndexLow as u64))
+        // SAFETY: the buffer's own bytes
+        let bytes: &[u8] = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast(), buf.len() * 8) };
+        let data: Vec<u16> = ":$DATA".encode_utf16().collect();
+        let mut out = Vec::new();
+        let mut at = 0;
+        loop {
+            // FILE_STREAM_INFO: NextEntryOffset and StreamNameLength (u32 each), StreamSize and
+            // StreamAllocationSize (i64 each), StreamName
+            let word = |p: usize| u32::from_le_bytes(bytes[p..p + 4].try_into().expect("4 bytes"));
+            let (next, len) = (word(at) as usize, word(at + 4) as usize);
+            let size = u64::from_le_bytes(bytes[at + 8..at + 16].try_into().expect("8 bytes"));
+            let name: Vec<u16> =
+                bytes[at + 24..at + 24 + len].as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c)).collect();
+            // `:NAME:$DATA`
+            if let Some(name) = name.strip_prefix(&[b':' as u16])
+                && let Some(name) = name.strip_suffix(&data[..])
+                && !name.is_empty()
+            {
+                let name = OsString::from_wide(name);
+                out.push(Fork { name: super::os_bytes(&name), path: stream(path, &name), size });
+            }
+            if next == 0 {
+                break Ok(out);
+            }
+            at += next;
+        }
     }
 
     pub fn fork(path: &Path, kind: Kind, name: &[u8], data: &[u8]) -> io::Result<()> {

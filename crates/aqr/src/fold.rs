@@ -204,7 +204,7 @@ mod tests {
             eprintln!("{}: {} pairs, {n} folded apart", f.display(), pairs.len());
             for (a, b, what) in pairs.iter().filter(|(a, b, _)| !alike(a, b)) {
                 let hex = |s: &str| s.chars().map(|c| format!("{:04X}", c as u32)).collect::<Vec<_>>().join(" ");
-                wrong.push(format!("{} ~ {} ({what}): {} / {}", hex(&a), hex(&b), hex(&fold(a)), hex(&fold(b))));
+                wrong.push(format!("{} ~ {} ({what}): {} / {}", hex(a), hex(b), hex(&fold(a)), hex(&fold(b))));
             }
         }
         assert!(wrong.is_empty(), "{} pairs folded apart:\n{}", wrong.len(), wrong.join("\n"));
