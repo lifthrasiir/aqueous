@@ -32,9 +32,10 @@ pub(crate) fn own_class(class: &str) -> bool {
 }
 
 /// Whether formula `f` is one whose contents are files, each made apart (on a thread of its
-/// own): aqr-iso's, of an image, or aqr-wim's.
+/// own): those of an archive that only bundles files ([`bundles`]: ar, tar, cpio, asar, an
+/// image), and aqr-wim's.
 pub(crate) fn files_apart(f: &Formula) -> bool {
-    is_iso(f) || f.streams.get(1).is_some_and(|s| s.class == aqr_wim::formula::REST)
+    bundles(f) || f.streams.get(1).is_some_and(|s| s.class == aqr_wim::formula::REST)
 }
 
 /// Whether formula `f` is aqr-iso's, of an image.

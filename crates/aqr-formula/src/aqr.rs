@@ -788,6 +788,18 @@ impl Encoder {
                 data.extend_from_slice(&c.to_le_bytes());
             }
 
+            // (the blocks compressed at once beforehand, where written once: kept, they may be
+            // compressed already, or be written apart)
+            if !self.keep.get() {
+                let mut blocks = Vec::new();
+                for (s, used) in used.iter().enumerate() {
+                    let (data, how) = (streams[s], self.how(&f.streams[s]));
+                    for (r, _) in block_ranges(total(data)).zip(used).filter(|(_, u)| **u) {
+                        blocks.push((cut(data, r.start, r.len()), how));
+                    }
+                }
+                self.precompress_blocks(blocks, true)?;
+            }
             for &m in &modules {
                 block(out, MODULE, &self.module_block(m, level)?);
             }
@@ -1345,37 +1357,60 @@ impl Encoder {
     /// two of Zstandard's jobs, each on up to `LARGE_THREADS` beforehand: for the blocks of
     /// them written next, the same bytes as one after another.
     pub fn precompress(&self, streams: &[&crate::Stream]) -> Result<()> {
-        let todo: Vec<(&[u8], How)> = {
+        let blocks =
+            streams.iter().flat_map(|s| block_ranges(s.data.len()).map(move |r| (vec![&s.data[r]], self.how(s))));
+        self.precompress_blocks(blocks.collect(), false)
+    }
+
+    /// [`Encoder::precompress`] of `blocks` (each its bytes in pieces, and how it is compressed),
+    /// those kept already, or listed before, skipped. Where `wide`, those of more than one of
+    /// Zstandard's jobs are compressed first and at once, the largest first, each on as many
+    /// workers as are free for its jobs (as each block written alone is): for an archive of one
+    /// file, whose blocks are all there is to compress.
+    fn precompress_blocks(&self, blocks: Vec<(Vec<&[u8]>, How)>, wide: bool) -> Result<()> {
+        let todo: Vec<(Vec<&[u8]>, How)> = {
             let kept = self.streams.borrow();
             let mut seen = std::collections::HashSet::new();
-            streams
-                .iter()
-                .flat_map(|s| block_ranges(s.data.len()).map(move |r| (&s.data[r], self.how(s))))
-                .filter(|&(d, how)| {
-                    let k = key_how(&[d], how);
+            blocks
+                .into_iter()
+                .filter(|(d, how)| {
+                    let k = key_how(d, *how);
                     !kept.contains_key(&k) && seen.insert(k)
                 })
                 .collect()
         };
         let level = self.level;
-        let total = todo.iter().map(|t| t.0.len() as u64).sum();
+        let total = todo.iter().map(|t| self::total(&t.0) as u64).sum();
         let (done, progress) = (std::sync::atomic::AtomicU64::new(0), self.progress.as_deref());
-        let one = |(d, how): (&[u8], How), threads: usize| -> Result<(StreamKey, Compressed, i32)> {
+        let one = |(d, how): &(Vec<&[u8]>, How), threads: usize| -> Result<(StreamKey, Compressed, i32)> {
+            let (d, how) = (&d[..], *how);
             let made = THREAD_CCTX.with(|c| {
                 let c = &mut c.borrow_mut();
-                let plan = plan_by(level, how, &[d], &mut |sample, l| compressed(c, &[sample.unwrap_or(d)], l, 1))?;
-                let (c, l) = plan.carry_out(c, &[d], threads)?;
-                Ok((key_how(&[d], how), c, l))
+                let plan = plan_by(level, how, d, &mut |sample, l| match sample {
+                    Some(sample) => compressed(c, &[sample], l, 1),
+                    None => compressed(c, d, l, 1),
+                })?;
+                let (c, l) = plan.carry_out(c, d, threads)?;
+                Ok((key_how(d, how), c, l))
             });
+            let n = self::total(d) as u64;
             if let Some(p) = progress {
-                p(done.fetch_add(d.len() as u64, std::sync::atomic::Ordering::Relaxed) + d.len() as u64, total);
+                p(done.fetch_add(n, std::sync::atomic::Ordering::Relaxed) + n, total);
             }
             made
         };
-        let (large, small): (Vec<_>, Vec<_>) = todo.iter().partition(|t| t.0.len() > 2 * ZSTD_JOB as usize);
-        let threads = self.threads.min(LARGE_THREADS);
-        let mut made: Vec<_> = large.into_iter().map(|&t| one(t, threads)).collect();
-        made.extend(aqr_common::pool::par_map(small.len(), self.threads, |i| one(*small[i], 1)));
+        let jobs = if wide { 1 } else { 2 };
+        let (mut large, small): (Vec<_>, Vec<_>) =
+            todo.iter().partition(|t| self::total(&t.0) > jobs * ZSTD_JOB as usize);
+        let mut made: Vec<_> = match wide {
+            true => {
+                large.sort_by_key(|t| std::cmp::Reverse(self::total(&t.0)));
+                let threads = self.threads;
+                aqr_common::pool::par_map(large.len(), threads, |i| one(large[i], threads))
+            }
+            false => large.into_iter().map(|t| one(t, self.threads.min(LARGE_THREADS))).collect(),
+        };
+        made.extend(aqr_common::pool::par_map(small.len(), self.threads, |i| one(small[i], 1)));
         let (mut kept, mut levels) = (self.streams.borrow_mut(), self.levels.borrow_mut());
         for m in made {
             let (k, c, l) = m?;
