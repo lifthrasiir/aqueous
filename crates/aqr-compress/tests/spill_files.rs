@@ -31,7 +31,7 @@ fn dropped_regions_freed() {
     let dir = std::env::temp_dir().join(format!("aqr-spill-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let before = open_files(&dir);
-    let spill = Spill::create(&dir).unwrap();
+    let spill = Spill::create(&dir.join(".out")).unwrap();
     let regions: Vec<_> = (0..3).map(|_| spill.region(SEGMENT).unwrap()).collect();
     regions.iter().for_each(|&(at, _)| unsafe { at.write(1) });
     let made: Vec<_> = open_files(&dir).into_iter().filter(|f| !before.contains(f)).collect();

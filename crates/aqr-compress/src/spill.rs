@@ -2,12 +2,14 @@
 //! ([`aqr_formula::store`]), mapped, so that what compressing a large file holds (the data of
 //! a WIM file, the formulas of its contents) is written out and dropped by the system as
 //! memory runs short rather than all held (`docs/streaming-encoder-design.md`). A file is a
-//! segment of the regions, `._$pill$PID.N` (the process's id, the segment's number), closed
+//! segment of the regions, `PREFIX._$pill$PID.N` (the spill's prefix, the process's id, the
+//! segment's number; aqr's prefix is `.` and the output's name, beside it), closed
 //! once they are all dropped, and gone once closed: deleted on close (Windows), or unlinked as
 //! it is made (Unix). So the spill takes the space of the regions held, not of all made. A
 //! segment starts with [`MAGIC`], so that one left behind is not taken for a file of another
 //! kind.
 
+use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -28,7 +30,8 @@ const MAGIC: [u8; 6] = [0x69, 0x0a, 0xf9, 0xa6, 0x29, 0x7f];
 const HEADER: usize = 4 << 10;
 
 pub struct Spill {
-    dir: PathBuf,
+    /// The path the files' names extend.
+    prefix: PathBuf,
     state: Mutex<State>,
 }
 
@@ -74,12 +77,14 @@ impl AsRef<[u8]> for View {
 }
 
 impl Spill {
-    /// The spill of files made in directory `dir` (none until a region is taken).
-    pub fn create(dir: &Path) -> io::Result<Spill> {
-        if !dir.is_dir() {
+    /// The spill of files made as `prefix._$pill$PID.N` (none until a region is taken), in the
+    /// directory of `prefix`.
+    pub fn create(prefix: &Path) -> io::Result<Spill> {
+        let dir = prefix.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        if prefix.file_name().is_none() || !dir.is_dir() {
             return Err(io::Error::new(io::ErrorKind::NotADirectory, "the spill's directory"));
         }
-        Ok(Spill { dir: dir.to_owned(), state: Mutex::new(State { made: 0, open: None }) })
+        Ok(Spill { prefix: prefix.to_owned(), state: Mutex::new(State { made: 0, open: None }) })
     }
 
     /// A new segment of `n` bytes (the magic, and regions to fill the rest), a file of its own
@@ -94,7 +99,9 @@ impl Spill {
             o.custom_flags(0x0400_0000).share_mode(7);
         }
         let (file, path) = loop {
-            let path = self.dir.join(format!("._$pill${}.{}", std::process::id(), state.made));
+            let mut path = OsString::from(&self.prefix);
+            path.push(format!("._$pill${}.{}", std::process::id(), state.made));
+            let path = PathBuf::from(path);
             state.made += 1;
             match o.open(&path) {
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -149,7 +156,7 @@ mod tests {
     fn magic() {
         let dir = std::env::temp_dir().join(format!("aqr-compress-magic-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let spill = Spill::create(&dir).unwrap();
+        let spill = Spill::create(&dir.join("magic")).unwrap();
         // SAFETY: the start of the mapping, longer than its header
         let head = |s: &Segment| unsafe { std::slice::from_raw_parts(s.base, 4096) }.to_vec();
         let mut magic = vec![0; 4096];

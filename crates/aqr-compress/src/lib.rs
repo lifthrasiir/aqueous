@@ -206,10 +206,11 @@ pub struct Options {
     /// Of an archive of several files: about the most bytes of files made at once (a file
     /// longer is a batch of its own), which bounds the memory taken.
     pub batch: usize,
-    /// The directory where large buffers of streams are kept rather than on the heap
-    /// ([`spill::Spill`], files made there and gone once their buffers are dropped; beside the
-    /// output by aqr, as a temporary directory may be on another drive, but where that is a drive
-    /// of the network): the system writes them out as memory runs short. None by default.
+    /// Where large buffers of streams are kept rather than on the heap: the path the names of
+    /// [`spill::Spill`]'s files extend (made there and gone once their buffers are dropped;
+    /// beside the output by aqr, named after it, as a temporary directory may be on another
+    /// drive, but where that is a drive of the network): the system writes them out as memory
+    /// runs short. None by default.
     pub spill: Option<std::path::PathBuf>,
 }
 

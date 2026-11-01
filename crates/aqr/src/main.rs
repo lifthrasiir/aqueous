@@ -465,9 +465,11 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
     // temporary directory where the output is on a drive of the network: too slow for them, and
     // Windows there neither holds a file open against deletion nor deletes it on close
     let mut opt = a.opt.clone();
-    out.file_name().ok_or(format!("{}: not a file's name", out.display()))?;
+    let name = out.file_name().ok_or(format!("{}: not a file's name", out.display()))?;
     let dir = out.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    opt.spill = Some(if remote(dir) { std::env::temp_dir() } else { dir.to_owned() });
+    let mut hidden = std::ffi::OsString::from(".");
+    hidden.push(name);
+    opt.spill = Some(if remote(dir) { std::env::temp_dir() } else { dir.to_owned() }.join(hidden));
     let opt = &opt;
     let meta = |p: &Path| fs::symlink_metadata(p).map_err(|e| format!("{}: {e}", p.display()));
     let mapper = Mapper::new().map_err(|e| format!("files not to be mapped: {e}"))?;

@@ -1,9 +1,9 @@
 //! Peak heap of archiving each file (recompression, the archive and its verification) and of
 //! extracting it, as aqr-show does them, and the process's peak resident set.
 //!
-//! usage: aqr-compress-memprobe [-t THREADS] [-e] [-s DIR] FILE... (`-e` as in aqr-show; `-s`
-//! a spill there, `Options::spill`); `LOG=MB` logs the allocations of at least that many MB,
-//! with where they were made.
+//! usage: aqr-compress-memprobe [-t THREADS] [-e] [-s PREFIX] FILE... (`-e` as in aqr-show;
+//! `-s` a spill of files named after the prefix, `Options::spill`); `LOG=MB` logs the
+//! allocations of at least that many MB, with where they were made.
 
 use aqr_common::mem::{self, Counting};
 use aqr_compress::{Nest, Options};
