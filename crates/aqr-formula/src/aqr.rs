@@ -35,7 +35,9 @@ mod segment;
 mod tree;
 
 pub use segment::{Batch, ContentAt, Layout, Leaf, Placed, Segment, SegmentWriter};
-pub use tree::{Entry, EntryNode, Extra, MAC_FLAGS_ALLOWED, Time, Tree, WIN_ATTRS_ALLOWED, name_bytes, name_from};
+pub use tree::{
+    Entry, EntryNode, Extra, MAC_FLAGS_ALLOWED, Time, Tree, WIN_ATTRS_ALLOWED, Xattr, name_bytes, name_from,
+};
 
 use std::borrow::Cow;
 use std::cell::{RefCell, RefMut};

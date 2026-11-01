@@ -91,7 +91,7 @@ fn tree_of(files: &[(&str, Vec<u8>)]) -> (Tree, Vec<(String, Vec<u8>)>) {
     });
     if let Some(e) = t.entries.iter_mut().find(|e| matches!(e.node, EntryNode::File(_))) {
         e.extra.forks.push((b"AFP_Resource".to_vec(), contents.len()));
-        e.extra.xattrs.push((b"user.x".to_vec(), b"y".to_vec()));
+        e.extra.xattrs.push((b"user.x"[..].into(), b"y"[..].into()));
         contents.push(("fork".into(), b"a fork of a file".repeat(10)));
     }
     (t, contents)

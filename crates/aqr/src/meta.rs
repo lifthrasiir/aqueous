@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use aqr_formula::aqr::{EntryNode, Extra, MAC_FLAGS_ALLOWED, Time, WIN_ATTRS_ALLOWED};
 
@@ -34,9 +35,9 @@ pub struct Reader {
     #[cfg_attr(windows, allow(dead_code))]
     pub privileged: bool,
     #[cfg(unix)]
-    users: HashMap<u32, Option<Vec<u8>>>,
+    users: HashMap<u32, Option<Arc<[u8]>>>,
     #[cfg(unix)]
-    groups: HashMap<u32, Option<Vec<u8>>>,
+    groups: HashMap<u32, Option<Arc<[u8]>>>,
 }
 
 /// A fork to archive: its name, and the path its content is read by.
@@ -77,10 +78,10 @@ impl Reader {
             x.mode = Some(m.mode() & 0o7777);
             x.uid = Some(m.uid() as u64);
             x.gid = Some(m.gid() as u64);
-            x.uname = self.users.entry(m.uid()).or_insert_with(|| os::user_name(m.uid())).clone();
-            x.gname = self.groups.entry(m.gid()).or_insert_with(|| os::group_name(m.gid())).clone();
+            x.uname = self.users.entry(m.uid()).or_insert_with(|| os::user_name(m.uid()).map(Into::into)).clone();
+            x.gname = self.groups.entry(m.gid()).or_insert_with(|| os::group_name(m.gid()).map(Into::into)).clone();
             match os::xattrs(path) {
-                Ok(a) => x.xattrs = a,
+                Ok(a) => x.xattrs = a.into_iter().map(|(n, v)| (n.into(), v.into())).collect(),
                 Err(e) => warn(format!("{}: extended attributes not read: {e}", path.display())),
             }
         }
@@ -94,7 +95,7 @@ impl Reader {
                 x.arctime = os::backup_time(path);
             }
             // (the resource fork a fork, not an attribute)
-            if let Some(i) = x.xattrs.iter().position(|a| a.0 == RESOURCE_FORK_XATTR) {
+            if let Some(i) = x.xattrs.iter().position(|a| *a.0 == *RESOURCE_FORK_XATTR) {
                 let (_, rsrc) = x.xattrs.remove(i);
                 if m.is_file() && !rsrc.is_empty() {
                     let path = fork_path(path);

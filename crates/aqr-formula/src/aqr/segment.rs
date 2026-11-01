@@ -932,15 +932,18 @@ mod tests {
             atime: t(1 << 40, 0),
             arctime: t(0, 1),
             link_group: Some(-1 << 64),
-            xattrs: vec![(b"com.apple.quarantine".to_vec(), b"0081;".to_vec()), (b"\xff".to_vec(), vec![0; 300])],
+            xattrs: vec![
+                (b"com.apple.quarantine"[..].into(), b"0081;"[..].into()),
+                (b"\xff"[..].into(), vec![0; 300].into()),
+            ],
             forks: vec![(b"AFP_Resource".to_vec(), 4), (b"\xed\xa0\x80".to_vec(), 0)],
             win_link_type: None,
             win_attrs: Some(0x2127),
             mode: Some(0o644),
             uid: Some(u64::MAX),
             gid: Some(20),
-            uname: Some(b"\xc1".to_vec()),
-            gname: Some("스태프".into()),
+            uname: Some(b"\xc1"[..].into()),
+            gname: Some("스태프".as_bytes().into()),
             mac_flags: Some(0x8000),
         };
         tree.entries[11].extra.mode = Some(0o600);
@@ -1015,7 +1018,7 @@ mod tests {
             |x| x.forks.push((b"AFP_Resource".to_vec(), 0)),
             |x| x.forks.push((Vec::new(), 0)),
             |x| x.forks[0].1 = 6,
-            |x| x.xattrs.push((b"\xff".to_vec(), Vec::new())),
+            |x| x.xattrs.push((b"\xff"[..].into(), b""[..].into())),
             |x| x.mac_flags = Some(0x20),
             |x| x.win_attrs = Some(0x10),
         ];

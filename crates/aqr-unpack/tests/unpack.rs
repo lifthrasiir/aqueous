@@ -164,7 +164,7 @@ fn tar_trees() {
     let x = &get("dir/file.txt").1;
     assert_eq!(x.mtime, Some(Time { secs: 1_500_000_001, nanos: 250_000_000 }));
     assert_eq!(x.mode, Some(0o644));
-    assert_eq!(x.xattrs, vec![(b"user.note".to_vec(), b"kept".to_vec())]);
+    assert_eq!(x.xattrs, [(b"user.note"[..].into(), b"kept"[..].into())]);
     assert_eq!(get("dir/ro.txt").1.mode, Some(0o444));
     // a hard link: a file of the same content, in a link group with it
     assert_eq!(get("dir/hard").0, Node::File(text()));

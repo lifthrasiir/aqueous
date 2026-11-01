@@ -6,6 +6,9 @@
 //! The optional metadata is CBOR: this module writes the little it needs of it, and reads any
 //! well-formed CBOR, taking what it knows and leaving the rest.
 
+use std::borrow::Cow;
+use std::sync::Arc;
+
 use aqr_common::varint;
 
 use super::{Decoded, invalid};
@@ -49,6 +52,10 @@ pub enum EntryNode {
     Special(u64),
 }
 
+/// An extended attribute: its name (as `aqr-text`'s bytes) and value (shared by the entries of
+/// the same as they are read).
+pub type Xattr = (Arc<[u8]>, Arc<[u8]>);
+
 /// What an entry has of the optional metadata, as far as this crate knows it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Extra {
@@ -59,8 +66,8 @@ pub struct Extra {
     pub arctime: Option<Time>,
     /// `link-group` (of files alone).
     pub link_group: Option<i128>,
-    /// `xattrs`: names (as `aqr-text`'s bytes) and values.
-    pub xattrs: Vec<(Vec<u8>, Vec<u8>)>,
+    /// `xattrs`.
+    pub xattrs: Vec<Xattr>,
     /// `forks`: names (as `aqr-text`'s bytes) and contents (by index, as [`EntryNode::File`]).
     pub forks: Vec<(Vec<u8>, usize)>,
     /// `win-link-type` (of links alone): a link to a file (0), to a directory (1), or a
@@ -73,8 +80,8 @@ pub struct Extra {
     pub uid: Option<u64>,
     pub gid: Option<u64>,
     /// `unix-uname` and `unix-gname` (as `aqr-text`'s bytes).
-    pub uname: Option<Vec<u8>>,
-    pub gname: Option<Vec<u8>>,
+    pub uname: Option<Arc<[u8]>>,
+    pub gname: Option<Arc<[u8]>>,
     /// `mac-flags` ([`MAC_FLAGS_ALLOWED`]).
     pub mac_flags: Option<u32>,
 }
@@ -235,11 +242,11 @@ fn check_extra(x: &Extra, contents: usize) -> Result<(), &'static str> {
     {
         return Err("attributes or flags not allowed");
     }
-    fn names<'a>(mut n: impl Iterator<Item = &'a Vec<u8>>) -> bool {
+    fn names<'a>(mut n: impl Iterator<Item = &'a [u8]>) -> bool {
         let mut seen = std::collections::HashSet::new();
         n.all(|n| !n.is_empty() && seen.insert(n))
     }
-    if !names(x.xattrs.iter().map(|a| &a.0)) || !names(x.forks.iter().map(|f| &f.0)) {
+    if !names(x.xattrs.iter().map(|a| &a.0[..])) || !names(x.forks.iter().map(|f| &f.0[..])) {
         return Err("an empty or repeated name of an attribute or a fork");
     }
     if x.forks.iter().any(|f| f.1 >= contents) {
@@ -529,18 +536,80 @@ fn int(out: &mut Vec<u8>, v: i128) {
     if v >= 0 { head(out, 0, v as u64) } else { head(out, 1, (-1 - v) as u64) }
 }
 
-/// A CBOR data item, as far as it is read.
-#[derive(Debug, Clone, PartialEq)]
-enum Cbor {
+/// A CBOR data item, as far as it is read, without allocating but for strings in chunks: strings
+/// borrowed from the data, and arrays, maps and tagged items as the bytes of their contents
+/// ([`Items`]), checked as they are read first and read again where looked into.
+#[derive(Debug, Clone)]
+enum Cbor<'a> {
     Int(i128),
-    Bytes(Vec<u8>),
-    Text(Vec<u8>),
-    Array(Vec<Cbor>),
-    Map(Vec<(Cbor, Cbor)>),
-    Tag(u64, Box<Cbor>),
+    Bytes(Cow<'a, [u8]>),
+    Text(Cow<'a, [u8]>),
+    Array(Items<'a>),
+    /// Its keys and values, one after the other.
+    Map(Items<'a>),
+    Tag(u64, Items<'a>),
     /// Simple values (null among them), and floats by their bits (as keys are told apart).
     Simple(u8),
     Float(u64),
+}
+
+/// The items of an array or a map (keys and values, one after the other) or the item of a tag,
+/// checked already: `d`, the bytes of all of them (a break after them where of an indefinite
+/// length), and their number (`None`: up to the break), each at `depth`.
+#[derive(Debug, Clone, Copy)]
+struct Items<'a> {
+    d: &'a [u8],
+    n: Option<usize>,
+    depth: usize,
+}
+
+impl<'a> Items<'a> {
+    fn iter(self) -> impl Iterator<Item = Cbor<'a>> {
+        let (mut at, mut k) = (0, 0);
+        std::iter::from_fn(move || {
+            if ended(self.d, &mut at, self.n, k) {
+                return None;
+            }
+            k += 1;
+            Some(item(self.d, &mut at, self.depth).expect("an item checked"))
+        })
+    }
+
+    /// Of a map, its pairs.
+    fn pairs(self) -> impl Iterator<Item = (Cbor<'a>, Cbor<'a>)> {
+        let mut items = self.iter();
+        std::iter::from_fn(move || Some((items.next()?, items.next().expect("a map of pairs"))))
+    }
+
+    /// Of a tag, its item.
+    fn first(self) -> Cbor<'a> {
+        self.iter().next().expect("a tag of an item")
+    }
+}
+
+impl PartialEq for Cbor<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        use Cbor::*;
+        let items = |a: Items, b: Items| {
+            let (mut a, mut b) = (a.iter(), b.iter());
+            loop {
+                match (a.next(), b.next()) {
+                    (None, None) => return true,
+                    (Some(x), Some(y)) if x == y => {}
+                    _ => return false,
+                }
+            }
+        };
+        match (self, other) {
+            (Int(a), Int(b)) => a == b,
+            (Bytes(a), Bytes(b)) | (Text(a), Text(b)) => a == b,
+            (Array(a), Array(b)) | (Map(a), Map(b)) => items(*a, *b),
+            (Tag(s, a), Tag(t, b)) => s == t && items(*a, *b),
+            (Simple(a), Simple(b)) => a == b,
+            (Float(a), Float(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 /// Maps and arrays nested deeper than this are not read (a resource failure).
@@ -594,24 +663,25 @@ fn ended(d: &[u8], at: &mut usize, n: Option<usize>, k: usize) -> bool {
 }
 
 /// Reads a CBOR data item at `*at` of `d`.
-fn item(d: &[u8], at: &mut usize, depth: usize) -> Decoded<Cbor> {
+fn item<'a>(d: &'a [u8], at: &mut usize, depth: usize) -> Decoded<Cbor<'a>> {
     if depth > CBOR_DEPTH {
         return super::resource("optional metadata nested too deep");
     }
     let bad = || invalid::<Cbor>("bad CBOR in the optional metadata");
     let (major, ai, arg) = head_of(d, at)?;
     let len = |n: u64, at: usize| usize::try_from(n).ok().filter(|&n| n <= d.len() - at.min(d.len()));
+    let string = |b: Cow<'a, [u8]>| if major == 2 { Cbor::Bytes(b) } else { Cbor::Text(b) };
     Ok(match (major, arg) {
         (0, Some(v)) => Cbor::Int(v as i128),
         (1, Some(v)) => Cbor::Int(-1 - v as i128),
         (2 | 3, Some(n)) => {
             let Some(n) = len(n, *at) else { return bad() };
-            let b = d[*at..*at + n].to_vec();
-            if major == 3 && std::str::from_utf8(&b).is_err() {
+            let b = &d[*at..*at + n];
+            if major == 3 && std::str::from_utf8(b).is_err() {
                 return bad();
             }
             *at += n;
-            if major == 2 { Cbor::Bytes(b) } else { Cbor::Text(b) }
+            string(Cow::Borrowed(b))
         }
         // chunks of the same major type, definite each, up to a break
         (2 | 3, None) => {
@@ -627,30 +697,45 @@ fn item(d: &[u8], at: &mut usize, depth: usize) -> Decoded<Cbor> {
                 }
             }
             *at += 1;
-            if major == 2 { Cbor::Bytes(b) } else { Cbor::Text(b) }
+            string(Cow::Owned(b))
         }
-        (4, arg) => {
+        (4 | 5, arg) => {
             let n = count(d, *at, arg)?;
-            // (room for `n` items made at once, up to 4096: a length told is not trusted)
-            let mut items = Vec::with_capacity(n.unwrap_or(0).min(1 << 12));
-            while !ended(d, at, n, items.len()) {
-                items.push(item(d, at, depth + 1)?);
-            }
-            Cbor::Array(items)
-        }
-        (5, arg) => {
-            let n = count(d, *at, arg)?;
-            let mut pairs: Vec<(Cbor, Cbor)> = Vec::with_capacity(n.unwrap_or(0).min(1 << 12));
-            while !ended(d, at, n, pairs.len()) {
-                let (k, v) = pair(d, at, depth, n)?;
-                if pairs.iter().any(|(q, _)| *q == k) {
-                    return invalid("duplicate keys in the optional metadata");
+            let start = *at;
+            let mut k = 0;
+            if major == 4 {
+                while !ended(d, at, n, k) {
+                    item(d, at, depth + 1)?;
+                    k += 1;
                 }
-                pairs.push((k, v));
+            } else {
+                // where each key is, compared with each one after it as it is read again (maps
+                // are small: room for a few made at once)
+                let (mut few, mut more) = ([0usize; 16], Vec::new());
+                while !ended(d, at, n, k) {
+                    let key_at = *at;
+                    let (key, _) = pair(d, at, depth, n)?;
+                    let before = few[..k.min(few.len())].iter().chain(&more);
+                    if before.map(|&q| item(d, &mut { q }, depth + 1)).any(|q| q.is_ok_and(|q| q == key)) {
+                        return invalid("duplicate keys in the optional metadata");
+                    }
+                    match few.get_mut(k) {
+                        Some(q) => *q = key_at,
+                        None => more.push(key_at),
+                    }
+                    k += 1;
+                }
             }
-            Cbor::Map(pairs)
+            // (the items of a map: its keys and values)
+            let n = n.map(|n| if major == 4 { n } else { 2 * n });
+            let items = Items { d: &d[start..*at], n, depth: depth + 1 };
+            if major == 4 { Cbor::Array(items) } else { Cbor::Map(items) }
         }
-        (6, Some(tag)) => Cbor::Tag(tag, Box::new(item(d, at, depth + 1)?)),
+        (6, Some(tag)) => {
+            let start = *at;
+            item(d, at, depth + 1)?;
+            Cbor::Tag(tag, Items { d: &d[start..*at], n: Some(1), depth: depth + 1 })
+        }
         (7, Some(v)) => match ai {
             0..24 => Cbor::Simple(v as u8),
             // (two-byte simple values below 32 are not well-formed)
@@ -663,7 +748,7 @@ fn item(d: &[u8], at: &mut usize, depth: usize) -> Decoded<Cbor> {
 }
 
 /// Reads a pair of a map at `depth` of `n` pairs ([`count`]) at `*at` of `d`.
-fn pair(d: &[u8], at: &mut usize, depth: usize, n: Option<usize>) -> Decoded<(Cbor, Cbor)> {
+fn pair<'a>(d: &'a [u8], at: &mut usize, depth: usize, n: Option<usize>) -> Decoded<(Cbor<'a>, Cbor<'a>)> {
     let k = item(d, at, depth + 1)?;
     if n.is_none() && d.get(*at) == Some(&0xff) {
         return invalid("bad CBOR in the optional metadata");
@@ -674,6 +759,42 @@ fn pair(d: &[u8], at: &mut usize, depth: usize, n: Option<usize>) -> Decoded<(Cb
 /// A fork as `forks` refers to it: the relative offset of its leaf block, its output and its
 /// size.
 pub(crate) type ForkRef = (u64, u64, u64);
+
+/// The texts and bytes of the optional metadata taken last, each shared by the entries taking
+/// the same (most entries of an archive have the same owner and group names, and often the
+/// same extended attributes).
+struct Shared<'a> {
+    recent: Vec<(&'a [u8], Arc<[u8]>)>,
+    next: usize,
+}
+
+/// How many texts [`Shared`] keeps.
+const SHARED: usize = 16;
+
+impl<'a> Shared<'a> {
+    fn new() -> Self {
+        Shared { recent: Vec::with_capacity(SHARED), next: 0 }
+    }
+
+    /// `b` as an `Arc`, the one made last of the same bytes where it is kept.
+    fn get(&mut self, b: Cow<'a, [u8]>) -> Arc<[u8]> {
+        let b = match b {
+            Cow::Borrowed(b) => b,
+            Cow::Owned(b) => return b.into(),
+        };
+        if let Some((_, a)) = self.recent.iter().find(|(r, _)| *r == b) {
+            return a.clone();
+        }
+        let a: Arc<[u8]> = b.into();
+        if self.recent.len() < SHARED {
+            self.recent.push((b, a.clone()));
+        } else {
+            self.recent[self.next] = (b, a.clone());
+            self.next = (self.next + 1) % SHARED;
+        }
+        a
+    }
+}
 
 /// The extras of the entries (from the root, by number) in optional metadata `d`, of `n`
 /// entries besides the root; their forks apart, as they refer to them (their extras' `forks`
@@ -695,6 +816,7 @@ pub(crate) fn extras(d: &[u8], n: usize) -> Decoded<(Vec<Extra>, Vec<Vec<(Vec<u8
     let top = count(d, at, arg)?;
     // the keys of the map read (`keys`), and of an entry extra (`members`, made once)
     let (mut keys, mut members): (Vec<Cbor>, Vec<Cbor>) = (Vec::new(), Vec::new());
+    let mut shared = Shared::new();
     let dup = || invalid("duplicate keys in the optional metadata");
     while !ended(d, &mut at, top, keys.len()) {
         let k = item(d, &mut at, 1)?;
@@ -733,7 +855,7 @@ pub(crate) fn extras(d: &[u8], n: usize) -> Decoded<(Vec<Extra>, Vec<Vec<(Vec<u8
                             return dup();
                         }
                         if let Cbor::Int(k) = k {
-                            member(x, f, k, &v)?;
+                            member(x, f, &mut shared, k, v)?;
                         }
                         members.push(k);
                     }
@@ -749,50 +871,61 @@ pub(crate) fn extras(d: &[u8], n: usize) -> Decoded<(Vec<Extra>, Vec<Vec<(Vec<u8
 }
 
 /// Takes member `k` of value `v` of an entry extra into `x` (its forks into `forks`), where it
-/// is one this crate knows.
-fn member(x: &mut Extra, forks: &mut Vec<(Vec<u8>, ForkRef)>, k: i128, v: &Cbor) -> Decoded<()> {
+/// is one this crate knows, its texts and bytes shared as `shared` has them.
+fn member<'a>(
+    x: &mut Extra,
+    forks: &mut Vec<(Vec<u8>, ForkRef)>,
+    shared: &mut Shared<'a>,
+    k: i128,
+    v: Cbor<'a>,
+) -> Decoded<()> {
     let uint = |max: u64| match v {
-        &Cbor::Int(v) if (0..=max as i128).contains(&v) => Ok(v as u64),
+        Cbor::Int(v) if (0..=max as i128).contains(&v) => Ok(v as u64),
         _ => invalid("a bad unsigned integer in an entry extra"),
     };
     // (`aqr-text`s of names, not empty)
-    let name = |c: &Cbor| -> Decoded<Vec<u8>> {
+    let name = |c: Cbor<'a>| -> Decoded<Cow<'a, [u8]>> {
         match aqr_text(c)? {
             n if n.is_empty() => invalid("an empty name in an entry extra"),
             n => Ok(n),
         }
     };
     match k {
-        CRTIME => x.crtime = time(v),
-        CTIME => x.ctime = time(v),
-        MTIME => x.mtime = time(v),
-        ATIME => x.atime = time(v),
-        ARCTIME => x.arctime = time(v),
+        CRTIME => x.crtime = time(&v),
+        CTIME => x.ctime = time(&v),
+        MTIME => x.mtime = time(&v),
+        ATIME => x.atime = time(&v),
+        ARCTIME => x.arctime = time(&v),
         LINK_GROUP => match v {
-            &Cbor::Int(g) => x.link_group = Some(g),
+            Cbor::Int(g) => x.link_group = Some(g),
             _ => return invalid("a bad link-group"),
         },
         XATTRS => {
             let Cbor::Map(m) = v else { return invalid("xattrs not a map") };
-            for (k, v) in m {
+            for (k, v) in m.pairs() {
                 let Cbor::Bytes(v) = v else { return invalid("an extended attribute not bytes") };
-                x.xattrs.push((name(k)?, v.clone()));
+                x.xattrs.push((shared.get(name(k)?), shared.get(v)));
             }
         }
         FORKS => {
             let Cbor::Map(m) = v else { return invalid("forks not a map") };
-            for (k, v) in m {
+            for (k, v) in m.pairs() {
                 let r = match v {
-                    Cbor::Array(a) => match a[..] {
-                        [Cbor::Int(o), Cbor::Int(i), Cbor::Int(s)] if o >= 0 && i >= 0 && s >= 0 => {
-                            Some((o as u64, i as u64, s as u64))
+                    Cbor::Array(a) => {
+                        let mut a = a.iter();
+                        match (a.next(), a.next(), a.next(), a.next()) {
+                            (Some(Cbor::Int(o)), Some(Cbor::Int(i)), Some(Cbor::Int(s)), None)
+                                if o >= 0 && i >= 0 && s >= 0 =>
+                            {
+                                Some((o as u64, i as u64, s as u64))
+                            }
+                            _ => None,
                         }
-                        _ => None,
-                    },
+                    }
                     _ => None,
                 };
                 let Some(r) = r else { return invalid("a bad fork") };
-                forks.push((name(k)?, r));
+                forks.push((name(k)?.into_owned(), r));
             }
         }
         WIN_LINK_TYPE => x.win_link_type = Some(uint(2)? as u8),
@@ -803,8 +936,8 @@ fn member(x: &mut Extra, forks: &mut Vec<(Vec<u8>, ForkRef)>, k: i128, v: &Cbor)
         UNIX_MODE => x.mode = Some(uint(0o7777)? as u32),
         UNIX_UID => x.uid = Some(uint(u64::MAX)?),
         UNIX_GID => x.gid = Some(uint(u64::MAX)?),
-        UNIX_UNAME => x.uname = Some(aqr_text(v)?),
-        UNIX_GNAME => x.gname = Some(aqr_text(v)?),
+        UNIX_UNAME => x.uname = Some(shared.get(aqr_text(v)?)),
+        UNIX_GNAME => x.gname = Some(shared.get(aqr_text(v)?)),
         MAC_FLAGS => match uint(u32::MAX as u64)? as u32 {
             f if f & !MAC_FLAGS_ALLOWED == 0 => x.mac_flags = Some(f),
             _ => return invalid("mac-flags of bits not allowed"),
@@ -815,11 +948,11 @@ fn member(x: &mut Extra, forks: &mut Vec<(Vec<u8>, ForkRef)>, k: i128, v: &Cbor)
 }
 
 /// The bytes of an `aqr-text`.
-fn aqr_text(c: &Cbor) -> Decoded<Vec<u8>> {
+fn aqr_text(c: Cbor) -> Decoded<Cow<[u8]>> {
     match c {
-        Cbor::Text(b) | Cbor::Bytes(b) => Ok(b.clone()),
-        Cbor::Tag(TAG_WTF8, b) => match &**b {
-            Cbor::Bytes(b) if wtf8(b) && std::str::from_utf8(b).is_err() => Ok(b.clone()),
+        Cbor::Text(b) | Cbor::Bytes(b) => Ok(b),
+        Cbor::Tag(TAG_WTF8, b) => match b.first() {
+            Cbor::Bytes(b) if wtf8(&b) && std::str::from_utf8(&b).is_err() => Ok(b),
             _ => invalid("a bad WTF-8 text"),
         },
         _ => invalid("a bad text in an entry extra"),
@@ -829,11 +962,11 @@ fn aqr_text(c: &Cbor) -> Decoded<Vec<u8>> {
 /// The UTC time of an `aqr-time`, where it is a base time this crate reads (else `None`: a
 /// local time, or an extended one).
 fn time(t: &Cbor) -> Option<Time> {
-    let ns = match t {
-        &Cbor::Int(s) => s.checked_mul(1_000_000_000)?,
+    let ns = match *t {
+        Cbor::Int(s) => s.checked_mul(1_000_000_000)?,
         Cbor::Tag(tag, v) => {
-            let &Cbor::Int(v) = &**v else { return None };
-            v.checked_mul(TAG_SCALES.iter().find(|s| s.0 == *tag)?.1)?
+            let Cbor::Int(v) = v.first() else { return None };
+            v.checked_mul(TAG_SCALES.iter().find(|s| s.0 == tag)?.1)?
         }
         _ => return None,
     };
@@ -1046,7 +1179,11 @@ mod tests {
         // texts of each kind, and bad ones
         let names = [0xa1, 0x21, 0x81, 0xa1, 0x29, 0xa3, 0x61, b'a', 0x40, 0x41, 0xff, 0x40, 0xd9, 0x01, 0x11];
         let (got, _) = extras(&[&names[..], &[0x43, 0xed, 0xa0, 0x80, 0x40]].concat(), 1).unwrap();
-        let want = [(b"a".to_vec(), vec![]), (b"\xff".to_vec(), vec![]), (b"\xed\xa0\x80".to_vec(), vec![])];
+        let want: [Xattr; 3] = [
+            (b"a"[..].into(), b""[..].into()),
+            (b"\xff"[..].into(), b""[..].into()),
+            (b"\xed\xa0\x80"[..].into(), b""[..].into()),
+        ];
         assert_eq!(got[0].xattrs, want);
         assert!(extras(&[&names[..], &[0x41, b'a', 0x40]].concat(), 1).is_err());
         assert!(extras(&[0xa1, 0x21, 0x81, 0xa1, 0x38, 0x4f, 0x18, 0x20], 1).is_err());
@@ -1055,5 +1192,44 @@ mod tests {
         assert!(extras(&[0xa2, 0x61, b'a', 0x00, 0x61, b'b', 0x00], 1).is_ok());
         assert!(extras(&[0xa2, 0xf9, 0x3c, 0x00, 0x00, 0xf9, 0x40, 0x00, 0x00], 1).is_ok());
         assert!(extras(&[0xa1, 0x21, 0x83, 0xf6, 0xf6, 0xf6], 1).is_err());
+    }
+
+    #[test]
+    fn optional_metadata_keys() {
+        // keys of maps and arrays, and tagged ones, the same as items (of either length)
+        let map = |pairs: &[&[u8]]| [&[0xa1u8, 0x01, 0xa0 + pairs.len() as u8 / 2][..], &pairs.concat()].concat();
+        let (one, two, two_) = (&[0x82, 0x01, 0x02][..], &[0x82, 0x01, 0x03][..], &[0x9f, 0x01, 0x03, 0xff][..]);
+        assert!(extras(&map(&[one, &[0], two, &[0]]), 0).is_ok());
+        assert!(extras(&map(&[two, &[0], two_, &[0]]), 0).is_err());
+        assert!(extras(&map(&[&[0xc1, 0x01], &[0], &[0xc1, 0x18, 0x01], &[0]]), 0).is_err());
+        assert!(extras(&map(&[&[0xc1, 0x01], &[0], &[0xc2, 0x01], &[0]]), 0).is_ok());
+        assert!(extras(&map(&[&[0xa1, 0x01, 0x02], &[0], &[0xbf, 0x01, 0x02, 0xff], &[0]]), 0).is_err());
+        // of a map of more keys than are kept at once, the last the same as the first
+        let mut many = vec![0xa1, 0x01, 0xb8, 20];
+        (0..20u8).for_each(|k| many.extend([k, 0]));
+        assert!(extras(&many, 0).is_ok());
+        *many.iter_mut().rev().nth(1).unwrap() = 0;
+        assert!(extras(&many, 0).is_err());
+    }
+
+    #[test]
+    fn optional_metadata_shared() {
+        // the same texts of several entries taken once
+        let mut t = Tree::default();
+        let x = Extra {
+            uname: Some(b"me"[..].into()),
+            xattrs: vec![(b"user.a"[..].into(), b"1"[..].into())],
+            ..Extra::default()
+        };
+        for i in 0..3 {
+            let extra = Extra { gname: Some(vec![b'g', i % 2].into()), ..x.clone() };
+            t.entries.push(Entry { parent: None, name: vec![b'a' + i], node: EntryNode::Dir, extra });
+        }
+        let c = optional(&t, &[0, 1, 2], &|_| unreachable!());
+        let (got, _) = extras(&c, 3).unwrap();
+        assert_eq!(got[1..], t.entries.iter().map(|e| e.extra.clone()).collect::<Vec<_>>()[..]);
+        let same = |f: &dyn Fn(&Extra) -> &Arc<[u8]>| got[1..].windows(2).all(|w| Arc::ptr_eq(f(&w[0]), f(&w[1])));
+        assert!(same(&|x| x.uname.as_ref().unwrap()) && same(&|x| &x.xattrs[0].0) && same(&|x| &x.xattrs[0].1));
+        assert!(Arc::ptr_eq(got[1].gname.as_ref().unwrap(), got[3].gname.as_ref().unwrap()));
     }
 }

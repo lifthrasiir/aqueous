@@ -349,7 +349,7 @@ impl<'s> Parser<'s> {
         x.uid = field(108..116);
         x.gid = field(116..124);
         if posix || gnu {
-            let name = |r: std::ops::Range<usize>| Some(string(&b[r]).to_vec()).filter(|n| !n.is_empty());
+            let name = |r: std::ops::Range<usize>| Some(string(&b[r])).filter(|n| !n.is_empty()).map(Into::into);
             x.uname = name(265..297);
             x.gname = name(297..329);
         }
@@ -418,8 +418,8 @@ fn pax_record(h: &mut Header, k: &[u8], v: &[u8]) {
         b"LIBARCHIVE.creationtime" => x.crtime = pax_time(v),
         b"uid" => x.uid = num().or(x.uid),
         b"gid" => x.gid = num().or(x.gid),
-        b"uname" => x.uname = Some(v.to_vec()).filter(|v| !v.is_empty()),
-        b"gname" => x.gname = Some(v.to_vec()).filter(|v| !v.is_empty()),
+        b"uname" => x.uname = Some(v).filter(|v| !v.is_empty()).map(Into::into),
+        b"gname" => x.gname = Some(v).filter(|v| !v.is_empty()).map(Into::into),
         b"SCHILY.devmajor" => h.major = num().unwrap_or(h.major),
         b"SCHILY.devminor" => h.minor = num().unwrap_or(h.minor),
         _ if k.starts_with(b"SCHILY.xattr.") => {
@@ -595,9 +595,9 @@ fn set_xattr(x: &mut Extra, name: Vec<u8>, value: Vec<u8>) {
     if name.is_empty() {
         return;
     }
-    match x.xattrs.iter_mut().find(|a| a.0 == name) {
-        Some(a) => a.1 = value,
-        None => x.xattrs.push((name, value)),
+    match x.xattrs.iter_mut().find(|a| *a.0 == name[..]) {
+        Some(a) => a.1 = value.into(),
+        None => x.xattrs.push((name.into(), value.into())),
     }
 }
 
