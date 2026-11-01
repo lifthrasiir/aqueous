@@ -726,6 +726,7 @@ dependencies = [
  "aqr-flate",
  "aqr-formula",
  "aqr-lzma",
+ "aqr-rar",
  "aqr-zip",
  "libc",
  "windows-sys",

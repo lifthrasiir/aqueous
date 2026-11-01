@@ -13,6 +13,9 @@ readers must take or leave out.
   it): folded where extracted into `proj`.
 - skip.zip: an entry flagged encrypted and one of Deflate64 (its method changed), left out.
 - one.txt.gz, .bz2, .xz, .lzma: a single file.
+- tree-rar5.rar, tree-rar4.rar: a tree (a directory, files, one read-only, a symbolic link, a
+  Korean path; RAR5's with a hard link too, left out) archived by RARLAB's rar 7.23 and 6.24
+  (`-ma4`, RAR 3.x's format) of third_party/rar-dl, where they are there (else not written).
 
     python3 -I crates/aqr-unpack/scripts/gen-fixtures.py
 """
@@ -21,7 +24,9 @@ import gzip
 import io
 import lzma
 import os
+import subprocess
 import tarfile
+import tempfile
 import zipfile
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tests', 'data')
@@ -127,6 +132,35 @@ def main():
     write('one.txt.bz2', bz2.compress(TEXT))
     write('one.txt.xz', lzma.compress(TEXT))
     write('one.txt.lzma', lzma.compress(TEXT, format=lzma.FORMAT_ALONE))
+
+    rar_trees()
+
+
+def rar_trees():
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'third_party', 'rar-dl')
+    tools = [('tree-rar5.rar', os.path.join(root, 'v723', 'rar'), ['-oh']),
+             ('tree-rar4.rar', os.path.join(root, 'v624', 'rar', 'rar'), ['-ma4'])]
+    for name, rar, extra in tools:
+        if not os.path.exists(rar):
+            print(f'{name}: no {rar}, not written')
+            continue
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, 'dir'))
+            os.makedirs(os.path.join(d, '한글'))
+            put = lambda p, data, mode=0o644: (open(os.path.join(d, p), 'wb').write(data), os.chmod(os.path.join(d, p), mode))
+            put('dir/file.txt', TEXT)
+            put('dir/ro.txt', b'read only\n', 0o444)
+            put('한글/파일.txt', '유니코드'.encode())
+            os.symlink('file.txt', os.path.join(d, 'dir/sym'))
+            if '-oh' in extra:
+                os.link(os.path.join(d, 'dir/file.txt'), os.path.join(d, 'dir/hard'))
+            for p in ['dir/file.txt', 'dir/ro.txt', '한글/파일.txt']:
+                os.utime(os.path.join(d, p), ns=(1_500_000_001_250_000_000,) * 2)
+            for p in ['dir', '한글']:
+                os.utime(os.path.join(d, p), (1_400_000_000,) * 2)
+            out = os.path.join(d, name)
+            subprocess.run([rar, 'a', '-idq', '-r', '-ol', '-m3', '-mt1', *extra, out, 'dir', '한글'], cwd=d, check=True)
+            write(name, open(out, 'rb').read())
 
 
 if __name__ == '__main__':

@@ -101,6 +101,8 @@ fn names() {
     assert_eq!(f("a.gz"), Some((Format::Single(Filter::Gzip), 3)));
     assert_eq!(f("a.ZIP"), Some((Format::Zip, 4)));
     assert_eq!(f("x.7z"), Some((Format::SevenZip, 3)));
+    assert_eq!(f("x.rar"), Some((Format::Rar, 4)));
+    assert_eq!(f("x.CBR"), Some((Format::Rar, 4)));
     assert_eq!(f("a.tar.zst"), Some((Format::Tar(Some(Filter::Zstd)), 8)));
     assert_eq!(f(".zip"), None);
     assert_eq!(f("a.aqr"), None);
@@ -257,4 +259,49 @@ fn damage_fails() {
     assert!(unpack(Format::Tar(None), &d[..d.len() / 2 + 100]).is_err());
     let d = data("tree.zip");
     assert!(Opened::open(Format::Zip, &d[..d.len() - 30]).is_err());
+}
+
+/// RAR archives of a tree by rar 7.23 (RAR5) and 6.24 (RAR 3.x's format): their nodes, contents,
+/// modes and times (RAR5's to the nanosecond, RAR 3.x's extended times to 100 ns), the hard
+/// link of RAR5's left out (told).
+#[test]
+fn rar_trees() {
+    for (name, hard) in [("tree-rar5.rar", true), ("tree-rar4.rar", false)] {
+        let (done, r) = unpack(Format::Rar, &data(name)).unwrap();
+        let notes = r.notes.lock().unwrap().clone();
+        assert_eq!(done.skipped, hard as usize, "{name}: {notes:?}");
+        assert!(!hard || notes[0].starts_with("dir/hard:"), "{name}: {notes:?}");
+        let l = listing(&done, &r);
+        let get = |p: &str| l.get(p).unwrap_or_else(|| panic!("{name}: {p} not in {:?}", l.keys()));
+        assert_eq!(get("dir").0, Node::Dir, "{name}");
+        assert_eq!(get("dir").1.mtime, at(1_400_000_000), "{name}");
+        assert_eq!(get("dir/file.txt").0, Node::File(text()), "{name}");
+        let x = &get("dir/file.txt").1;
+        assert_eq!(x.mtime, Some(Time { secs: 1_500_000_001, nanos: 250_000_000 }), "{name}");
+        assert_eq!(x.mode, Some(0o644), "{name}");
+        assert_eq!(get("dir/ro.txt").0, Node::File(b"read only\n".to_vec()), "{name}");
+        assert_eq!(get("dir/ro.txt").1.mode, Some(0o444), "{name}");
+        assert_eq!(get("dir/sym").0, Node::Link(b"file.txt".to_vec()), "{name}");
+        assert_eq!(get("한글/파일.txt").0, Node::File("유니코드".as_bytes().to_vec()), "{name}");
+        assert!(!l.contains_key("dir/hard"), "{name}");
+    }
+}
+
+/// aqr-rar's fixtures (RAR5 and RAR 3.x: solid groups, filters, PPMd, audio) extracted whole,
+/// their CRC-32s checked as they are decoded.
+#[test]
+fn rar_streams() {
+    let dir = format!("{}/../../codecs/aqr-rar/tests/data", env!("CARGO_MANIFEST_DIR"));
+    for name in ["r5_solid", "r5_m3", "r5_stored", "r4_solid", "r4_ppmd", "r4_audio", "r4_m3", "r4_stored"] {
+        let d = std::fs::read(format!("{dir}/{name}.rar")).unwrap();
+        let (done, r) = unpack(Format::Rar, &d).unwrap();
+        assert_eq!(done.skipped, 0, "{name}: {:?}", r.notes.lock().unwrap());
+        let l = listing(&done, &r);
+        assert!(!l.is_empty() && l.values().all(|(n, _)| matches!(n, Node::File(f) if !f.is_empty())), "{name}");
+    }
+    // (damaged: a byte of a stream changed fails, not panics)
+    let mut d = std::fs::read(format!("{dir}/r4_solid.rar")).unwrap();
+    let k = d.len() / 2;
+    d[k] ^= 0x55;
+    assert!(unpack(Format::Rar, &d).is_err());
 }

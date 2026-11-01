@@ -2,7 +2,7 @@
 name = "aqr-unpack"
 version = "0.1.0"
 edition = "2024"
-description = "Archives of other formats (ZIP, 7z, tar and the compressors over it) read for extraction into a tree"
+description = "Archives of other formats (ZIP, 7z, RAR, tar and the compressors over it) read for extraction into a tree"
 publish = false
 
 [dependencies]
@@ -13,6 +13,7 @@ aqr-common = { path = "../aqr-common" }
 aqr-flate = { path = "../../codecs/aqr-flate" }
 aqr-formula = { path = "../aqr-formula" }
 aqr-lzma = { path = "../../codecs/aqr-lzma" }
+aqr-rar = { path = "../../codecs/aqr-rar", default-features = false }
 aqr-zip = { path = "../../codecs/aqr-zip" }
 zstd = "0.13"
 

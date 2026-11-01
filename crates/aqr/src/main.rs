@@ -7,7 +7,7 @@
 //!   file, a directory as an archive of what it holds; with `-o`, all the inputs into one
 //!   archive (several of them, or a directory, as entries of their names).
 //! - `-d` (the default as `unaqr`): each archive into its name without `.aqr`, or `-o`. An
-//!   archive of another format, by its name (ZIP, 7z, tar alone or under gzip, bzip2, xz, LZMA
+//!   archive of another format, by its name (ZIP, 7z, RAR, tar alone or under gzip, bzip2, xz, LZMA
 //!   or Zstandard, and those compressors' single files: [`aqr_unpack::by_name`]), is extracted
 //!   into its name without its extension the same way ([`extract`]), its metadata as an
 //!   Aqueous archive's; what it holds that is not extracted (encrypted entries, methods not
@@ -94,8 +94,8 @@ usage: aqr [OPTIONS] INPUT...
 Modes:
   -c, --compress        each input into INPUT.aqr (the default as aqr)
   -d, --decompress      each archive into its name without .aqr (the default as unaqr);
-                        .zip, .7z, .tar (.gz .tgz .bz2 .xz .lzma .zst), .gz, .bz2,
-                        .xz, .lzma and .zst too, into the name without them
+                        .zip, .7z, .rar, .tar (.gz .tgz .bz2 .xz .lzma .zst), .gz,
+                        .bz2, .xz, .lzma and .zst too, into the name without them
                         (a single directory at their top of that name: what it
                         holds, as 7-Zip's -spe)
   -t, --test            decode and check each archive, writing nothing

@@ -16,6 +16,7 @@ another entry at the top comes later). A directory of another name, even a like 
 |---|---|---|
 | `.zip` `.jar` `.apk` `.xpi` `.cbz` `.whl` | the central directory | stored, DEFLATE, bzip2, LZMA, Zstandard, xz; by entry |
 | `.7z` `.cb7` | the header (an encoded one decoded first) | folders of LZMA, LZMA2, DEFLATE, bzip2, stored, BCJ/ARM/…/Delta, BCJ2; by folder, an LZMA2 stream by its segments, files written as their bytes are decoded |
+| `.rar` `.cbr` | the headers (aqr-rar's readers; RAR5, RAR 1.5–4.x) | stored, RAR5's LZ with its filters, RAR 2.9's LZ and PPMd with the standard filters (aqr-rar's decoders); by solid group (or file), its files given as each is decoded |
 | `.tar`, `.tar.gz` `.tgz`, `.tar.bz2` `.tbz2`, `.tar.xz` `.txz`, `.tar.lzma`, `.tar.zst` | as it is decoded (v7, ustar, GNU, pax) | gzip (members), bzip2 (a wave of blocks at a time), xz (blocks, and an LZMA2 stream's segments), LZMA, Zstandard |
 | `.gz` `.bz2` `.xz` `.lzma` `.zst` | | a single file, written as it is decoded |
 
@@ -28,20 +29,25 @@ let done = opened.unpack(threads, &sink)?;                  // sink: entries tol
 ## What is kept
 
 - Times: ZIP's NTFS field, else Info-ZIP's extended timestamp, else the MS-DOS time as local
-  time; 7z's modification, creation and access times; tar's modification time (pax's of
+  time; 7z's modification, creation and access times; RAR5's (its time record, to the
+  nanosecond), RAR 3.x's (the MS-DOS time as local time, its extended times to 100 ns); tar's modification time (pax's of
   nanoseconds), GNU's and pax's access and status change times, libarchive's creation time.
-- Permissions and kinds: the Unix mode of ZIP (Unix hosts) and of 7z (`0x8000` in the
-  attributes), tar's; Windows' attributes of ZIP (MS-DOS hosts) and 7z; symbolic links of all
-  three; tar's hard links (as link groups), FIFOs and devices (made with `-p` alone).
+- Permissions and kinds: the Unix mode of ZIP (Unix hosts), of 7z (`0x8000` in the
+  attributes) and of RAR (Unix hosts), tar's; Windows' attributes of ZIP (MS-DOS hosts), 7z and
+  RAR (MS-DOS and Windows hosts); symbolic links of all four (RAR5's Windows links and junctions
+  with their `win-link-type`); tar's hard links (as link groups), FIFOs and devices (made with `-p` alone).
 - Owners: tar's ids and names, Info-ZIP's Unix ids. Extended attributes: pax's
   `SCHILY.xattr.` and `LIBARCHIVE.xattr.`.
 - Names: ZIP's UTF-8 where flagged or given by Info-ZIP's Unicode path field, else UTF-8 where
-  they are, else of the system's code page (on Windows; as they are elsewhere). `\` separates
-  names of ZIP's MS-DOS hosts and of 7z.
+  they are, else of the system's code page (on Windows; as they are elsewhere); RAR5's UTF-8,
+  RAR 3.x's Unicode names (else as ZIP's). `\` separates names of ZIP's MS-DOS hosts, of 7z
+  and of RAR 3.x.
 
 Left out and told (the run then fails, once the rest is extracted): paths with `..` (a `/` or
 a drive at the start is dropped), encrypted entries, methods and coders not known (Deflate64,
-PPMd, AES), sparse files and multi-volume parts of tar. A path given again takes the place of
+PPMd of 7z and ZIP, AES, RAR 1.5's and 2.0's algorithms), sparse files and multi-volume parts
+of tar and RAR, RAR5's hard links and copies of files (and the files after a file left out in
+a RAR solid group). A path given again takes the place of
 the one before (as tar has it); a file and a directory of one name keep the first.
 
 ## How it does
@@ -67,7 +73,11 @@ close), which hides the rest (aqr 4.1 s, 7-Zip 2.8 s on the ZIP archive then).
 ## Left
 
 - Formats of whose code there is more in the repository: ALZ, EGG, LHA, CAB, CHM, ISO, WIM.
-- RAR; PPMd (7z, ZIP); Deflate64; AES and ZipCrypto (no passwords asked for yet).
+- PPMd (7z, ZIP: aqr-rar's PPMd var.H, with 7z's range coder); Deflate64; AES and ZipCrypto
+  (no passwords asked for yet).
+- RAR: volumes (a file over several archives), hard links (as link groups), self-extracting
+  archives (by name, `.exe`, they are not taken); a solid group is decoded whole in memory
+  (its window is all of it), its files given as each is done.
 - A 7z folder of LZMA (not LZMA2), a gzip member and a single-block xz decode on one thread;
   a 7z folder is held whole until all its files are written (a window of its dictionary's size
   would do, as 7-Zip has it).
