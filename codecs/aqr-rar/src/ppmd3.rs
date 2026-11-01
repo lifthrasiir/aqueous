@@ -1,42 +1,57 @@
 //! PPMd blocks of RAR 2.9 streams over `ppmd` (the model and RAR's range coder): a model
 //! started or restarted, symbols decoded and encoded.
 
-use crate::{Error, Result};
+use crate::ppmd::{Model, RangeDecoder, RangeEncoder};
+use crate::{Error, Result, corrupt};
 
-/// A model (placeholder until `ppmd` is in).
-pub struct Ppmd;
+pub type Ppmd = Model;
 
-/// Starts `m` afresh: of `order`, `mem` bytes.
-pub fn start(_m: &mut Option<Ppmd>, _order: u32, _mem: u32) -> Result<()> {
-    Err(Error("PPMd not yet"))
+/// Starts `m` afresh: of `order`, `mem` bytes (its memory kept where of that size).
+pub fn start(m: &mut Option<Ppmd>, order: u32, mem: u32) -> Result<()> {
+    if m.as_ref().map(Model::size) != Some(mem) {
+        *m = None;
+        *m = Some(Model::new(mem).ok_or(Error("a PPMd model of no memory to have"))?);
+    }
+    m.as_mut().unwrap().init(order);
+    Ok(())
 }
 
-pub struct Reader;
+/// A range decoder over a block's bytes.
+pub struct Reader<'a>(RangeDecoder<'a>);
 
-impl Reader {
-    pub fn new(_d: &[u8]) -> Result<Reader> {
-        Err(Error("PPMd not yet"))
+impl<'a> Reader<'a> {
+    pub fn new(d: &'a [u8]) -> Result<Reader<'a>> {
+        Ok(Reader(RangeDecoder::new(d)))
     }
+
     /// The bytes read, an error where past the data.
     pub fn used(&self) -> Result<usize> {
-        Err(Error("PPMd not yet"))
+        if self.0.overrun() { Err(corrupt()) } else { Ok(self.0.consumed()) }
     }
 }
 
-pub fn decode(_m: &mut Ppmd, _r: &mut Reader) -> Result<u8> {
-    Err(Error("PPMd not yet"))
+pub fn decode(m: &mut Ppmd, r: &mut Reader) -> Result<u8> {
+    if r.0.overrun() {
+        return Err(corrupt());
+    }
+    m.decode(&mut r.0).ok_or_else(corrupt)
 }
 
+/// A range encoder of a block's bytes.
 #[derive(Default)]
-pub struct Writer;
+pub struct Writer(RangeEncoder);
 
 impl Writer {
     pub fn new() -> Writer {
-        Writer
+        Writer(RangeEncoder::new())
     }
+
+    /// The bytes, flushed.
     pub fn finish(self) -> Vec<u8> {
-        Vec::new()
+        self.0.flush()
     }
 }
 
-pub fn encode(_m: &mut Ppmd, _w: &mut Writer, _s: u8) {}
+pub fn encode(m: &mut Ppmd, w: &mut Writer, s: u8) {
+    m.encode(&mut w.0, s);
+}

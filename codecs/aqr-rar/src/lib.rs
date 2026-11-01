@@ -8,10 +8,12 @@
 pub mod huff;
 pub mod lz3;
 pub mod lz5;
+pub mod ppmd;
 pub mod ppmd3;
 pub mod rar4;
 pub mod rar5;
 pub mod rec;
+pub mod recons3;
 pub mod recons5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use aqr_common::crc32;
-use aqr_rar::{huff, lz3, lz5, rar4, rar5, rec, recons5};
+use aqr_rar::{huff, lz3, lz5, rar4, rar5, rec, recons3, recons5};
 
 fn walk(p: &Path, out: &mut Vec<PathBuf>) {
     if p.is_dir() {
@@ -212,6 +212,7 @@ fn check(d: &[u8], g: &[&rar5::Entry], t: &mut Totals) -> Option<String> {
         t.data += file.len();
         sts.push(st);
     }
+    t.same += 1;
     tables(&sts, e0.version == 1, t);
     let parts: Vec<&[u8]> = g.iter().map(|e| &d[e.data.clone()]).collect();
     let sizes: Vec<usize> = g.iter().map(|e| e.size.unwrap() as usize).collect();
@@ -223,6 +224,19 @@ fn check(d: &[u8], g: &[&rar5::Entry], t: &mut Totals) -> Option<String> {
     let t1 = Instant::now();
     let joined = recons5::join(&sp.data, &sp.record);
     let t2 = Instant::now();
+    measure(t, &parts, sp, joined, t0, t1, t2)
+}
+
+/// A split and join measured: the joined stream compared with the packed data.
+fn measure(
+    t: &mut Totals,
+    parts: &[&[u8]],
+    sp: recons5::Split,
+    joined: Result<Vec<u8>, aqr_rar::Error>,
+    t0: Instant,
+    t1: Instant,
+    t2: Instant,
+) -> Option<String> {
     let whole: Vec<u8> = parts.concat();
     match joined {
         Ok(j) if j == whole => {}
@@ -245,50 +259,6 @@ fn check(d: &[u8], g: &[&rar5::Entry], t: &mut Totals) -> Option<String> {
             100.0 * sp.record.len() as f64 / whole.len() as f64
         );
     }
-    if std::env::var_os("CUTS").is_some() {
-        // each block: its tokens, whether it has tables, where in the file it ends
-        for (fi, st) in sts.iter().enumerate() {
-            let (mut at, mut pos, mut last) = (0, 0usize, 0u32);
-            for (bi, b) in st.blocks.iter().enumerate() {
-                for tk in &st.tokens[at..at + b.tokens] {
-                    match *tk {
-                        lz5::Token::Lit(_) => pos += 1,
-                        lz5::Token::Copy { len, .. } | lz5::Token::Rep { len, .. } => {
-                            pos += len as usize;
-                            last = len;
-                        }
-                        lz5::Token::Last => pos += last as usize,
-                        _ => {}
-                    }
-                }
-                let nf = st.tokens[at..at + b.tokens].iter().filter(|t| matches!(t, lz5::Token::Filter(_))).count();
-                if !b.last {
-                    let def = 16384 - (bi == 0) as usize - b.tokens;
-                    let fs: Vec<String> = st.tokens[at..at + b.tokens]
-                        .iter()
-                        .filter_map(|t| match t {
-                            lz5::Token::Filter(f) => Some(format!(
-                                "k{}c{}l{}s{}b{}{}",
-                                f.kind, f.channels, f.len, f.start, f.start_bytes, f.len_bytes
-                            )),
-                            _ => None,
-                        })
-                        .collect();
-                    println!("  deficit {def} filters {nf}: {}", fs.join(" "));
-                }
-                at += b.tokens;
-                println!(
-                    "  cut f{fi} b{bi} tokens {} filters {nf} tables {} last {} end {} end%128K {}",
-                    b.tokens,
-                    b.tables.is_some() as u8,
-                    b.last as u8,
-                    pos,
-                    pos % 131072
-                );
-            }
-        }
-    }
-    t.same += 1;
     None
 }
 
@@ -327,6 +297,7 @@ fn check4(d: &[u8], g: &[&rar4::Entry], t: &mut Totals) -> Option<String> {
             return Some(format!("encoding: {err}"));
         }
         header = st.next_header;
+        tables3(&st, t);
         if again != packed {
             t.failed += 1;
             let at = again.iter().zip(packed).position(|(a, b)| a != b).unwrap_or(again.len().min(packed.len()));
@@ -336,5 +307,57 @@ fn check4(d: &[u8], g: &[&rar4::Entry], t: &mut Totals) -> Option<String> {
         t.data += file.len();
     }
     t.same += 1;
-    None
+    let parts: Vec<&[u8]> = g.iter().map(|e| &d[e.data.clone()]).collect();
+    let sizes: Vec<usize> = g.iter().map(|e| e.size as usize).collect();
+    let t0 = Instant::now();
+    let sp = match recons3::split(&parts, &sizes, g[0].dict) {
+        Ok(sp) => sp,
+        Err(err) => return Some(format!("split: {err}")),
+    };
+    let t1 = Instant::now();
+    let joined = recons3::join(&sp.data, &sp.record);
+    let t2 = Instant::now();
+    measure(t, &parts, sp, joined, t0, t1, t2)
+}
+
+/// The tables of an RAR 3.x stream (a file) against Huffman's lengths of the symbols up to the
+/// next table (the 256 ending each block counted); the blocks' sizes against 16384 symbols.
+fn tables3(st: &lz3::Stream, t: &mut Totals) {
+    let bases = lz3::bases();
+    let mut low = (0u32, 0u32);
+    let mut cur: Option<(&lz3::Table, Vec<Vec<u32>>)> = None;
+    let done = |c: Option<(&lz3::Table, Vec<Vec<u32>>)>, t: &mut Totals| {
+        if let Some((tb, c)) = c {
+            t.tables += 1;
+            let mut k = 0;
+            for (i, f) in c.iter().enumerate() {
+                t.alike[i] += (huff::lengths(f, huff::MAX) == tb.lens[k..k + f.len()]) as usize;
+                k += f.len();
+            }
+        }
+    };
+    let n = st.blocks.len();
+    for (bi, b) in st.blocks.iter().enumerate() {
+        match b {
+            lz3::Block::Lz { table, tokens } => {
+                if let Some(tb) = table {
+                    done(cur.take(), t);
+                    low = (0, 0);
+                    cur =
+                        Some((tb, vec![vec![0; lz3::MAIN], vec![0; lz3::DIST], vec![0; lz3::LOW], vec![0; lz3::LEN]]));
+                }
+                if let Some((_, c)) = cur.as_mut() {
+                    for tk in tokens {
+                        lz3::symbols(tk, &bases, &mut low, |k, s| c[k][s] += 1);
+                    }
+                    c[0][256] += std::env::var_os("NO256").is_none() as u32;
+                }
+                if std::env::var_os("CUTS").is_some() && bi + 1 < n {
+                    println!("  cut3 tokens {} table {}", tokens.len(), table.is_some() as u8);
+                }
+            }
+            lz3::Block::Ppmd { .. } => done(cur.take(), t),
+        }
+    }
+    done(cur, t);
 }

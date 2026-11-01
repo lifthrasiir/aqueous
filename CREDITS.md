@@ -82,6 +82,9 @@ own terms; the code is written from that description, not from the encoder's cod
 
 - **LZMA SDK** (Igor Pavlov, public domain): aqr-bcj's filters (the branch converters, Delta,
   BCJ2's decoder) are ported from its `Bra.c`, `Bra86.c`, `BraIA64.c`, `Delta.c` and `Bcj2.c`.
+- **PPMd var.H** (Dmitry Shkarin, public domain), through the **LZMA SDK**'s `Ppmd7.c`,
+  `Ppmd7Dec.c` and `Ppmd7Enc.c` (Igor Pavlov, public domain): aqr-rar's PPMd model and range
+  coder (`ppmd.rs`) are ported from them.
 
 ## Data
 

@@ -140,15 +140,20 @@ pub fn bonus(dist: u32) -> u32 {
 
 /// A program of the filters' state: its filter, its last length.
 #[derive(Clone, Copy, Debug)]
-struct Prog {
-    kind: u8,
-    len: u32,
+pub(crate) struct Prog {
+    pub kind: u8,
+    pub len: u32,
 }
 
 /// What a filter record of `raw` means given the programs `progs` and the last one used
 /// `last`, at output position `p`: its start (in the stream), length, filter and registers.
 /// The programs' state is updated.
-fn parse_filter(raw: &[u8], progs: &mut Vec<Prog>, last: &mut usize, p: u64) -> Result<(u64, u32, u8, [u32; 2])> {
+pub(crate) fn parse_filter(
+    raw: &[u8],
+    progs: &mut Vec<Prog>,
+    last: &mut usize,
+    p: u64,
+) -> Result<(u64, u32, u8, [u32; 2])> {
     let g = raw[0];
     let skip = match g & 7 {
         6 => 2,
@@ -299,7 +304,7 @@ impl Decoder3 {
                         return Err(corrupt());
                     }
                     let at = r.pos / 8;
-                    let (syms, used, ending) = self.ppmd_block(&packed[at..], base)?;
+                    let (syms, used, ending) = self.ppmd_block(&packed[at..], base, &mut st.filters)?;
                     st.blocks.push(Block::Ppmd { flags, mem, esc, syms });
                     r.pos = (at + used) * 8;
                     if ending {
@@ -534,8 +539,7 @@ impl Decoder3 {
 
     /// Decodes a PPMd block from the start of `d`: its symbols, the bytes its range coder read,
     /// whether it ends the file.
-    fn ppmd_block(&mut self, d: &[u8], base: usize) -> Result<(Vec<u8>, usize, bool)> {
-        let _ = base;
+    fn ppmd_block(&mut self, d: &[u8], base: usize, filters: &mut Vec<FilterRec>) -> Result<(Vec<u8>, usize, bool)> {
         let model = self.ppmd.as_mut().ok_or_else(corrupt)?;
         let mut rc = ppmd3::Reader::new(d)?;
         let mut syms = Vec::new();
@@ -556,6 +560,31 @@ impl Decoder3 {
                 0 => return Ok((syms, rc.used()?, false)),
                 1 => out.push(esc),
                 2 => return Ok((syms, rc.used()?, true)),
+                3 => {
+                    // a filter record, its bytes as symbols
+                    let mut raw = vec![get(&mut rc, &mut syms)?];
+                    let n = match raw[0] & 7 {
+                        6 => {
+                            let b = get(&mut rc, &mut syms)?;
+                            raw.push(b);
+                            b as usize + 7
+                        }
+                        7 => {
+                            let (a, b) = (get(&mut rc, &mut syms)?, get(&mut rc, &mut syms)?);
+                            raw.extend([a, b]);
+                            (a as usize) << 8 | b as usize
+                        }
+                        k => k as usize + 1,
+                    };
+                    for _ in 0..n {
+                        let b = get(&mut rc, &mut syms)?;
+                        raw.push(b);
+                    }
+                    let (start, len, kind, regs) =
+                        parse_filter(&raw, &mut self.progs, &mut self.last_prog, out.len() as u64)?;
+                    let at = start.checked_sub(base as u64).ok_or_else(corrupt)? as usize;
+                    filters.push(FilterRec { raw, at, len, kind, regs });
+                }
                 4 => {
                     let mut v = 0u32;
                     for _ in 0..3 {
