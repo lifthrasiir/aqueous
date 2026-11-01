@@ -3,7 +3,8 @@
 //!
 //! - Finder's services (`NSServices` in `Info.plist`, under Quick Actions or Services of a
 //!   Control-click) send the paths chosen, all at once, on a pasteboard: "Compress with Aqueous"
-//!   on files and folders ("Compress with Aqueous (Passphrase)…" encrypts: `aqr -P`), "Extract with Aqueous" and "Test with Aqueous" on `.aqr` files.
+//!   on files and folders ("Compress with Aqueous (Passphrase)…" encrypts: `aqr -P`), "Extract
+//!   with Aqueous" and "Test with Aqueous" on `.aqr` files.
 //!   `.aqr` files opened (a double-click) are extracted: beside them, a single entry at the top
 //!   as it is, else into their names without `.aqr` (`aqr --auto-dir`).
 //! - How far a job is shows on its file in Finder: an `NSProgress` published for it, a bar on
@@ -468,10 +469,10 @@ fn welcome(mtm: MainThreadMarker) {
     let a = NSAlert::new(mtm);
     a.setMessageText(&NSString::from_str("Aqueous is ready"));
     let mut info = String::from(
-        "In Finder, Control-click files or folders for \"Compress with Aqueous\" (or \"(Passphrase)…\" to encrypt), and .aqr files for \"Extract \
-         with Aqueous\" and \"Test with Aqueous\" (under Quick Actions or Services). Opening an .aqr file \
-         extracts it beside it.\n\nWhere they are not there, turn them on in System Settings: Keyboard, \
-         Keyboard Shortcuts, Services, Files and Folders.",
+        "In Finder, Control-click files or folders for \"Compress with Aqueous\" (or \"(Passphrase)…\" to \
+         encrypt), and .aqr files for \"Extract with Aqueous\" and \"Test with Aqueous\" (under Quick \
+         Actions or Services). Opening an .aqr file extracts it beside it.\n\nWhere they are not there, \
+         turn them on in System Settings: Keyboard, Keyboard Shortcuts, Services, Files and Folders.",
     );
     if aqr.is_some() && !linked {
         info += &match there() {
