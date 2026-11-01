@@ -20,3 +20,11 @@ zstd = "0.13"
 [[example]]
 name = "aqr-prores-check"
 path = "examples/check.rs"
+
+[[example]]
+name = "aqr-prores-model"
+path = "examples/model.rs"
+
+[[example]]
+name = "aqr-prores-bench"
+path = "examples/bench.rs"

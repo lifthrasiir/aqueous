@@ -5,8 +5,11 @@
 //! ProRes frames delimit themselves (a big-endian size, then `icpf`), so they are found in any
 //! container (QuickTime, MXF, Matroska) without reading it: `find` scans for them.
 
+pub mod codec;
 pub mod coef;
 pub mod frame;
+pub mod model;
+pub mod plane;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error(pub &'static str);

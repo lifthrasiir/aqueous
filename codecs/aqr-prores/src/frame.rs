@@ -38,6 +38,31 @@ pub struct Header {
     pub alpha: u8,
 }
 
+impl Header {
+    /// The header whose bytes (from its size field on) are `raw`.
+    pub fn new(raw: Vec<u8>) -> Result<Header> {
+        let h = &raw;
+        if h.len() < 20 || be16(h, 0) != h.len() || h[12] >> 6 < 2 || be16(h, 8) == 0 || be16(h, 10) == 0 {
+            return Err(bad("bad frame header"));
+        }
+        Ok(Header {
+            version: be16(h, 2) as u16,
+            creator: h[4..8].try_into().unwrap(),
+            width: be16(h, 8),
+            height: be16(h, 10),
+            chroma: h[12] >> 6,
+            interlace: (h[12] >> 2) & 3,
+            alpha: h[17] & 15,
+            raw,
+        })
+    }
+
+    /// The number of pictures: two fields if interlaced.
+    pub fn pictures(&self) -> usize {
+        if self.interlace == 0 { 1 } else { 2 }
+    }
+}
+
 /// The frame's size (from the size field on) if `d` starts with a frame whose header makes
 /// sense.
 pub fn plausible(d: &[u8]) -> Option<usize> {
@@ -65,6 +90,8 @@ pub struct Slice {
     pub comps: [(Vec<i16>, Tail); 3],
     /// The alpha plane's bits, kept as they are.
     pub alpha: Vec<u8>,
+    /// The bytes of Y, Cb and Cr as stored.
+    pub sizes: [usize; 3],
 }
 
 #[derive(Debug, Clone)]
@@ -97,24 +124,26 @@ fn row_slices(mbw: usize, log2: u32) -> impl Iterator<Item = usize> {
     })
 }
 
+impl Picture {
+    /// The widths in macroblocks of the slices along a row.
+    pub fn widths(&self, h: &Header) -> Vec<usize> {
+        widths(h, &self.header)
+    }
+}
+
+/// The widths in macroblocks of the slices along a row, given the picture header.
+pub fn widths(h: &Header, pic_header: &[u8]) -> Vec<usize> {
+    row_slices(h.width.div_ceil(16), (pic_header[7] >> 4) as u32).collect()
+}
+
 impl Frame {
     /// Parses the frame at the start of `d`.
     pub fn parse(d: &[u8]) -> Result<Frame> {
         let size = plausible(d).ok_or(bad("not a frame"))?;
         let d = &d[..size];
         let hs = be16(d, 8);
-        let h = &d[8..8 + hs];
-        let header = Header {
-            raw: h.to_vec(),
-            version: be16(h, 2) as u16,
-            creator: h[4..8].try_into().unwrap(),
-            width: be16(h, 8),
-            height: be16(h, 10),
-            chroma: h[12] >> 6,
-            interlace: (h[12] >> 2) & 3,
-            alpha: h[17] & 15,
-        };
-        let npics = if header.interlace == 0 { 1 } else { 2 };
+        let header = Header::new(d[8..8 + hs].to_vec())?;
+        let npics = header.pictures();
         let mbw = header.width.div_ceil(16);
         let mut at = 8 + hs;
         let mut pictures = Vec::with_capacity(npics);
@@ -184,7 +213,13 @@ impl Frame {
             comps[k] = (c, tail);
             start += sz;
         }
-        Ok(Slice { header: p[at..at + hs].to_vec(), mbs, comps, alpha: p[start..at + len].to_vec() })
+        Ok(Slice {
+            header: p[at..at + hs].to_vec(),
+            mbs,
+            comps,
+            alpha: p[start..at + len].to_vec(),
+            sizes: [ys, us, vs],
+        })
     }
 
     /// The frame's bytes, from its size field on.
