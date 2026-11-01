@@ -3831,6 +3831,23 @@ fn apply(env: &Env, module: usize, a: &Apply, inputs: &[&[u8]], resources: &[Res
 mod tests {
     use super::*;
 
+    /// An archive of a single file, `quine.aqr`, that is the archive itself
+    /// (`scripts/make-quine.py`): its formula takes the stored bytes of a resource block twice
+    /// (ResourceBytes), splits one of them and swaps the pieces around the other.
+    #[test]
+    fn quine_holds_itself() {
+        let c = include_bytes!("../testdata/quine.aqr");
+        let Value::Tree(tree, contents) = decode_value(c, &NoModules).unwrap() else {
+            panic!("a tree expected");
+        };
+        assert_eq!(tree.entries.len(), 1);
+        assert_eq!(tree.entries[0].name, b"quine.aqr");
+        let EntryNode::File(i) = tree.entries[0].node else {
+            panic!("a file expected");
+        };
+        assert_eq!(contents[i], c);
+    }
+
     #[test]
     fn compressed_len_counts() {
         let mut rng = aqr_common::rng::Rng::new(3);
