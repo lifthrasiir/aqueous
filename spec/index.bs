@@ -3,9 +3,10 @@
 Shortname: aqueous
 Status: LD
 Text Macro: LONGSTATUS Editor's Draft
-Boilerplate: omit feedback-header, omit conformance
+Boilerplate: omit conformance
 Editor: Kang Seonghoon, https://mearie.org/
 Repository: https://github.com/lifthrasiir/aqueous/
+!Repository: <a href="https://github.com/lifthrasiir/aqueous/tree/main/spec">github.com/lifthrasiir/aqueous/tree/main/spec</a>
 Abstract: This specification defines the Aqueous archive format, a compressed archive format designed for efficient storage and retrieval of files, and the Aqueous overlay archive format, which describes a directory tree as changes to an existing one.
 Markup Shorthands: markdown yes
 </pre>
