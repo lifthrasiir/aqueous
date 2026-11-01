@@ -3,11 +3,11 @@
 //! a WIM file, the formulas of its contents) is written out and dropped by the system as
 //! memory runs short rather than all held (`docs/streaming-encoder-design.md`). A file is a
 //! segment of the regions, `PREFIX._$pill$PID.N` (the spill's prefix, the process's id, the
-//! segment's number; aqr's prefix is `.` and the output's name, beside it), closed
-//! once they are all dropped, and gone once closed: deleted on close (Windows), or unlinked as
-//! it is made (Unix). So the spill takes the space of the regions held, not of all made. A
-//! segment starts with [`MAGIC`], so that one left behind is not taken for a file of another
-//! kind.
+//! segment's number; aqr's prefix is `.` and the output's name, beside it), closed once they
+//! are all dropped, and gone once closed: deleted on close (Windows, hidden and not indexed
+//! until then), or unlinked as it is made (Unix). So the spill takes the space of the regions
+//! held, not of all made. A segment starts with [`MAGIC`], so that one left behind is not
+//! taken for a file of another kind.
 
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
@@ -95,8 +95,9 @@ impl Spill {
         #[cfg(windows)]
         {
             use std::os::windows::fs::OpenOptionsExt;
-            // FILE_FLAG_DELETE_ON_CLOSE; shared to read, write and delete
-            o.custom_flags(0x0400_0000).share_mode(7);
+            // FILE_FLAG_DELETE_ON_CLOSE; shared to read, write and delete; hidden (from Explorer
+            // while it is there) and not indexed (Windows Search would read the segments)
+            o.custom_flags(0x0400_0000).share_mode(7).attributes(0x2 | 0x2000);
         }
         let (file, path) = loop {
             let mut path = OsString::from(&self.prefix);
