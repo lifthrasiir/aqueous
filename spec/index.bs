@@ -2132,6 +2132,16 @@ whose structure is determined by the opcode as described in the following sectio
       <td>0
       <td>1
     <tr>
+      <td>02<sub>16</sub>
+      <td>[[#insn-module-bytes|ModuleBytes]]
+      <td>0
+      <td>1
+    <tr>
+      <td>03<sub>16</sub>
+      <td>[[#insn-resource-bytes|ResourceBytes]]
+      <td>0
+      <td>1
+    <tr>
       <td>0F<sub>16</sub>
       <td>[[#insn-swap|Swap]]
       <td>0
@@ -2175,7 +2185,8 @@ whose structure is determined by the opcode as described in the following sectio
 </table>
 
 Opcodes are grouped by their roles:
-00<sub>16</sub> through 0F<sub>16</sub> push data in the formula itself or rearrange the stack,
+00<sub>16</sub> through 0F<sub>16</sub> push bytes as they are, in the formula itself or in the blocks it lists,
+or rearrange the stack,
 10<sub>16</sub> through 1F<sub>16</sub> compute byte sequences from [=referenced items=] or the stack,
 and 20<sub>16</sub> through 2F<sub>16</sub> check them.
 Other opcodes are reserved.
@@ -2238,6 +2249,83 @@ Opcode 01<sub>16</sub> denotes a **Literal instruction**. Its operands consist o
 </table>
 
 It pushes [=formula/literal_data=].
+
+<h4 id=insn-module-bytes>
+ModuleBytes instruction</h4>
+
+Opcode 02<sub>16</sub> denotes a **ModuleBytes instruction**. Its operands consist of the following:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>module_bytes_module</dfn>
+      <td>[=leb128=]
+    <tr>
+      <td><dfn>module_bytes_size</dfn>
+      <td>[=leb128=]
+  </tbody>
+</table>
+
+<ol class=algorithm>
+    1. [=formula/module_bytes_module=] MUST be less than [=formula/num_modules=].
+    2. Let |b| be the module block at [=formula/module_indices=][[=formula/module_bytes_module=]].
+        |b| MUST NOT be a [=shorthand block=].
+    3. The length of [=block/data=] of |b| MUST be [=formula/module_bytes_size=].
+    4. Push [=block/data=] of |b|.
+</ol>
+
+<h4 id=insn-resource-bytes>
+ResourceBytes instruction</h4>
+
+Opcode 03<sub>16</sub> denotes a **ResourceBytes instruction**. Its operands consist of the following:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>resource_bytes_resource</dfn>
+      <td>[=leb128=]
+    <tr>
+      <td><dfn>resource_bytes_size</dfn>
+      <td>[=leb128=]
+  </tbody>
+</table>
+
+<ol class=algorithm>
+    1. [=formula/resource_bytes_resource=] MUST be less than [=formula/num_resources=].
+    2. Let |b| be the resource block at [=formula/resource_indices=][[=formula/resource_bytes_resource=]].
+    3. The length of [=block/data=] of |b| MUST be [=formula/resource_bytes_size=].
+    4. Push [=block/data=] of |b|.
+</ol>
+
+<div class=note>
+  ModuleBytes and ResourceBytes instructions push the bytes of a block as stored, i.e. still compressed and with its checksum,
+  rather than its [=decoded data=].
+  They let a file holding the same blocks, typically another Aqueous archive, share them with the archive holding the file:
+  a formula rebuilds such a block from its type and size, given by a Literal instruction, followed by its [=block/data=],
+  without compressing the module or the resource again.
+  A compressor can take the stored bytes of the inner block as they are for the outer block,
+  as any compressed data decoding to the same bytes is valid.
+  A [=shorthand block=] can't be referenced,
+  since its [=block/data=] is a [=registered hash=] while the block it stands for is never stored.
+
+  The instructions neither decode nor apply the block:
+  a module referenced only by ModuleBytes instructions isn't applied, so a [=conformance level=] doesn't allow refusing it,
+  and the checksum of the block covers its [=decoded data=], which the instructions don't compute ([[#partial-access]]).
+  The pushed bytes are covered instead by a Checksum instruction covering a byte sequence computed from them,
+  typically an [=output checksum=].
+  The size is given as an operand, as the sizes of Slice and Patch instructions are,
+  so that the length of every byte sequence on the stack is known from the formula alone.
+</div>
 
 <h4 id=insn-swap>
 Swap instruction</h4>
