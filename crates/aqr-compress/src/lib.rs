@@ -2065,7 +2065,10 @@ fn prepare(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> (Vec<(usize, usiz
     let made = sets::par_map(jobs.len(), workers, |i| {
         files.inspect(|f| f.tell(jobs[i].1.as_ptr(), false));
         let _item = aqr_common::trace::item(files.and_then(|f| f.content(jobs[i].1.as_ptr())));
-        let made = pure(jobs[i].0, jobs[i].1, opt, depth, inner, words, once, held).flatten();
+        let mut made = pure(jobs[i].0, jobs[i].1, opt, depth, inner, words, once, held).flatten();
+        // (of the store as it is made, as [`recompress_with`] has a formula: they are all made
+        // before any is taken)
+        made.iter_mut().for_each(aqr_formula::store::spill_streams);
         files.inspect(|f| f.tell(jobs[i].1.as_ptr(), true));
         made
     });

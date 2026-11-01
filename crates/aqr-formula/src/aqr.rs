@@ -273,8 +273,9 @@ pub struct Encoder {
     level: Level,
     /// Threads compressing a stream (the archive does not depend on them).
     threads: usize,
-    /// Compressed streams (as [`compressed`] gives) by their [`StreamKey`].
-    streams: RefCell<HashMap<StreamKey, Option<Vec<u8>>>>,
+    /// Compressed streams (as [`compressed`] gives) by their [`StreamKey`], of the store where one
+    /// is set ([`kept`]).
+    streams: RefCell<HashMap<StreamKey, Option<crate::Bytes>>>,
     /// Whether the streams compressed are kept in [`Encoder::streams`] (not while
     /// [`Encoder::encode_pieces`] writes).
     keep: std::cell::Cell<bool>,
@@ -359,6 +360,17 @@ type StreamKey = (u128, usize);
 
 /// What [`compressed`] gives: the compressed stream, or `None` where it does not compress.
 type Compressed = Option<Vec<u8>>;
+
+/// A compressed stream as [`Encoder::streams`] keeps it: moved to the store where one is set
+/// ([`crate::store`]), so that what is kept to be written later (all the streams of a file, as
+/// its formula is sized) is not held in memory.
+fn kept(c: Compressed) -> Option<crate::Bytes> {
+    c.map(|c| {
+        let mut b = crate::Bytes::from(c);
+        crate::store::spill(&mut b);
+        b
+    })
+}
 
 impl Encoder {
     pub fn new(level: Level) -> Encoder {
@@ -1152,13 +1164,14 @@ impl Encoder {
                 Some(c) => c,
                 None => {
                     drop(streams);
-                    match match how {
+                    let c = match match how {
                         How::Stored => Plan::Done(None, STORED),
                         _ => self.plan(key(data), data, how)?,
                     } {
                         Plan::Done(c, _) => c,
                         Plan::Level(level, size) => compressed_to(&mut self.cctx(), data, level, self.threads, size)?,
-                    }
+                    };
+                    c.map(crate::Bytes::from)
                 }
             };
             content_block(out, leaf, data, c.as_deref());
@@ -1171,10 +1184,10 @@ impl Encoder {
                     How::Stored => Plan::Done(None, STORED),
                     _ => self.plan(key(data), data, how)?,
                 };
-                e.insert(match plan {
+                e.insert(kept(match plan {
                     Plan::Done(c, _) => c,
                     Plan::Level(level, size) => compressed_to(&mut self.cctx(), data, level, self.threads, size)?,
-                })
+                }))
             }
         };
         content_block(out, leaf, data, c.as_deref());
@@ -1329,7 +1342,7 @@ impl Encoder {
         let (mut kept, mut levels) = (self.streams.borrow_mut(), self.levels.borrow_mut());
         for m in made {
             let (k, c, l) = m?;
-            kept.insert(k, c);
+            kept.insert(k, self::kept(c));
             levels.insert(k, l);
         }
         Ok(())
@@ -1393,16 +1406,21 @@ impl Encoder {
                     // Of compares at the base level, as a formula mostly is smaller, and what
                     // was compared is then not archived: a formula is taken over data that only
                     // a higher level would have compressed to less (by up to what they differ)
-                    if matches!(self.level, Level::Of(_)) && level > self.base_level() {
-                        let c = compressed_to(&mut self.cctx(), &[d], self.base_level(), self.threads, estimate)?;
-                        let raw = archived_raw(d, c.as_deref());
+                    // (counted, not held, where it is not kept)
+                    let counted = match matches!(self.level, Level::Of(_)) && level > self.base_level() {
+                        true => Some(self.base_level()),
+                        false => (d.len() > RAW_KEPT_MAX).then_some(level),
+                    };
+                    if let Some(counted) = counted {
+                        let c = compressed_len(&mut self.cctx(), &[d], counted, self.threads)?;
+                        let raw = archived_raw_len(d, c);
                         self.raw_lens.borrow_mut().insert(key(&[d]), raw);
                         return Ok(n < raw);
                     }
                     compressed_to(&mut self.cctx(), &[d], level, self.threads, estimate)?
                 }
             };
-            self.streams.borrow_mut().insert(key(&[d]), c);
+            self.streams.borrow_mut().insert(key(&[d]), kept(c));
         }
         Ok(n < self.raw_len(d)?)
     }
@@ -1648,11 +1666,36 @@ fn checksum_of(data: &[&[u8]]) -> u64 {
 }
 
 /// The length of the archive of `d` as it is ([`Encoder::raw_len`]), compressed as `c`
-/// ([`compressed`]) if given.
+/// ([`compressed`]) if given ([`archived_raw_len`]'s reference).
+#[cfg(test)]
 fn archived_raw(d: &[u8], c: Option<&[u8]>) -> usize {
     let mut n = Count(0);
     n.put(&HEADER_MAGIC);
     content_block(&mut n, true, &[d], c);
+    let blocks = n.0 - HEADER_MAGIC.len();
+    footer(&mut n, blocks);
+    n.0
+}
+
+/// Data longer than this that [`Encoder::smaller`] compresses to compare with a formula is only
+/// counted, not kept to be archived if it is (compressed again then): what compressing it holds
+/// is then a window of its output, whatever its length. (Below, it is kept, of the store.)
+const RAW_KEPT_MAX: usize = 4 * BLOCK;
+
+/// [`archived_raw`] of `d` compressed to `c` bytes ([`compressed_len`]) if given, the compressed
+/// bytes not at hand.
+fn archived_raw_len(d: &[u8], c: Option<usize>) -> usize {
+    static ZEROS: [u8; 1 << 16] = [0; 1 << 16];
+    let mut n = Count(0);
+    n.put(&HEADER_MAGIC);
+    match c {
+        // (bytes standing in for the compressed ones, which a count does not read)
+        Some(c) => {
+            let parts: Vec<&[u8]> = (0..c).step_by(ZEROS.len()).map(|i| &ZEROS[..(c - i).min(ZEROS.len())]).collect();
+            block_of(&mut n, LEAF_ZSTD, &parts);
+        }
+        None => block_of(&mut n, LEAF_RAW, &[d, &[0; 8]]),
+    }
     let blocks = n.0 - HEADER_MAGIC.len();
     footer(&mut n, blocks);
     n.0
@@ -1766,20 +1809,20 @@ fn external(c: &mut CCtx, data: &[&[u8]], level: i32, threads: usize, size: usiz
     external_with(c, data, level, threads, size, dict::With::None)
 }
 
-/// [`external`], compressed with dictionary `dict` (one a context of a lifetime as long as
-/// `c`'s may refer to).
-fn external_with<'a>(
+fn zstd_error(e: zstd_safe::ErrorCode) -> Error {
+    Error::new(format!("zstd: {}", zstd_safe::get_error_name(e)))
+}
+
+/// Sets context `c` to compress `data` at `level` on up to `threads` threads, with `dict`:
+/// the workers of the pool lent while it compresses, and the length of `data`.
+fn begin<'a>(
     c: &mut CCtx<'a>,
     data: &[&[u8]],
     level: i32,
     threads: usize,
-    size: usize,
     dict: dict::With<'a>,
-) -> Result<(Vec<u8>, bool)> {
-    let _s = aqr_common::trace::span("zstd");
-    #[cfg(test)]
-    tests::COMPRESSED.with(|n| n.set(n.get() + 1));
-    let zstd = |e: zstd_safe::ErrorCode| Error::new(format!("zstd: {}", zstd_safe::get_error_name(e)));
+) -> Result<(aqr_common::pool::Reservation, usize)> {
+    let zstd = zstd_error;
     // A context compressed with before keeps its workers and buffers, not its parameters.
     c.reset(ResetDirective::SessionAndParameters).map_err(zstd)?;
     // Zstandard's workers counted in aqr-common's pool: as many workers of it reserved, but
@@ -1813,6 +1856,76 @@ fn external_with<'a>(
         dict::With::Raw(d) => c.ref_prefix(d).map(drop).map_err(zstd)?,
     }
     c.set_pledged_src_size(Some(len as u64)).map_err(zstd)?;
+    Ok((lent, len))
+}
+
+/// The length of what [`compressed`] gives of `data` at `level` (`None` where it does not
+/// compress), its output made a window at a time and counted rather than held: the output does
+/// not depend on the room it has (Zstandard's multithreaded mode).
+fn compressed_len(c: &mut CCtx, data: &[&[u8]], level: i32, threads: usize) -> Result<Option<usize>> {
+    let _s = aqr_common::trace::span("zstd");
+    let zstd = zstd_error;
+    let (_lent, len) = begin(c, data, level, threads, dict::With::None)?;
+    let pieces: Vec<&[u8]> = data.iter().copied().filter(|p| !p.is_empty()).collect();
+    let swept = SWEEP.with(|s| s.borrow().is_some());
+    let (mut window, mut told) = (Vec::with_capacity(SWEPT_WINDOW), 0);
+    // the frame's header, and the bytes of the frame
+    let (mut header, mut n) = (Vec::with_capacity(6), 0usize);
+    for i in 0..pieces.len().max(1) {
+        let (piece, last) = (pieces.get(i).copied().unwrap_or_default(), i + 1 >= pieces.len());
+        let end = if last { ZSTD_EndDirective::ZSTD_e_end } else { ZSTD_EndDirective::ZSTD_e_continue };
+        let mut input = InBuffer::around(piece);
+        loop {
+            window.clear();
+            let left = c.compress_stream2(&mut OutBuffer::around(&mut window), &mut input, end).map_err(zstd)?;
+            let more = (6 - header.len()).min(window.len());
+            header.extend_from_slice(&window[..more]);
+            n += window.len();
+            if swept {
+                let consumed = c.get_frame_progression().consumed;
+                SWEEP.with(|s| s.borrow_mut().as_mut().map(|s| s.add(consumed.saturating_sub(told))));
+                told = consumed;
+            }
+            if if last { left == 0 } else { input.pos() == piece.len() } {
+                break;
+            }
+        }
+    }
+    if c.sizeof() > CCTX_KEPT {
+        *c = CCtx::create();
+    }
+    // (as [`external_with`] puts the header in place: a frame header of no flags, then the
+    // window descriptor)
+    let [m0, m1, m2, m3, 0, _] = header[..] else {
+        return Err(Error::new("zstd: unexpected frame header"));
+    };
+    assert_eq!([m0, m1, m2, m3], ZSTD_MAGIC);
+    let blocks = n - 6;
+    if blocks > len {
+        return Ok(None);
+    }
+    let head = match len - blocks {
+        0 => 1 + varint::len(0),
+        delta => varint::len(delta as u64),
+    } + 1;
+    Ok(Some(head + blocks + 8))
+}
+
+/// [`external`], compressed with dictionary `dict` (one a context of a lifetime as long as
+/// `c`'s may refer to).
+fn external_with<'a>(
+    c: &mut CCtx<'a>,
+    data: &[&[u8]],
+    level: i32,
+    threads: usize,
+    size: usize,
+    dict: dict::With<'a>,
+) -> Result<(Vec<u8>, bool)> {
+    let _s = aqr_common::trace::span("zstd");
+    #[cfg(test)]
+    tests::COMPRESSED.with(|n| n.set(n.get() + 1));
+    let zstd = zstd_error;
+    let (_lent, len) = begin(c, data, level, threads, dict)?;
     let pieces: Vec<&[u8]> = data.iter().copied().filter(|p| !p.is_empty()).collect();
     // the frame, then its checksum
     let bound = zstd_safe::compress_bound(len).saturating_add(8);
@@ -3523,6 +3636,21 @@ fn apply(env: &Env, module: usize, a: &Apply, inputs: &[&[u8]], resources: &[Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compressed_len_counts() {
+        let mut rng = aqr_common::rng::Rng::new(3);
+        let random: Vec<u8> = (0..100_000).map(|_| rng.below(256) as u8).collect();
+        let text: Vec<u8> = (0..300_000u32).flat_map(|i| format!("{} {} ", i % 977, i / 13).into_bytes()).collect();
+        for d in [&b""[..], b"abc", &random, &text] {
+            for (level, threads) in [(1, 1), (3, 4), (9, 2)] {
+                let c = compressed(&mut CCtx::create(), &[d], level, threads).unwrap();
+                let n = compressed_len(&mut CCtx::create(), &[d], level, threads).unwrap();
+                assert_eq!(n, c.as_ref().map(Vec::len), "{} bytes, level {level}", d.len());
+                assert_eq!(archived_raw_len(d, n), archived_raw(d, c.as_deref()));
+            }
+        }
+    }
     use crate::Stream;
 
     thread_local! {

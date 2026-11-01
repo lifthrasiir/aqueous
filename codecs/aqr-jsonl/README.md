@@ -69,10 +69,11 @@ gain as much (−0.03%). The segments' text is coded with one aqr-wrt dictionary
 (aqr-compress's `segment_words`): with a dictionary of each segment's own, GH Archive was 70.31 MB
 rather than 65.66. Counting that dictionary is most of the instructions compressing takes more.
 
-Compressing still holds more as the file grows (two hours of GH Archive: 1.16 GB of heap, against
-591 MB): aqr-compress makes all the contents of a formula (the segments' text, coded by aqr-wrt)
-before it puts them in place, and the archive's zstd blocks are held until written
-(`docs/streaming-encoder-design.md`, steps 3 and 4).
+Compressing holds as much whatever the file's length: two hours of GH Archive peak at 536 MB of
+heap, one at 557 MB (they were 1.16 GB and 591 MB before aqr-compress spilled the contents it
+makes ahead and the streams its encoder keeps compressed, and counted the file it compares a
+formula with; `docs/streaming-encoder-design.md`). What is left is the work of the threads that
+code the segments' text with aqr-wrt at once.
 
 `aqr-jsonl-bench` (one thread; the streams of each class one after another through zstd -3,
 against the file through zstd -3):
