@@ -9,6 +9,8 @@ readers must take or leave out.
 - tree.tar.gz (two members), .tar.bz2, .tar.xz, .tar.lzma: tree-pax.tar compressed.
 - tree.zip: stored, DEFLATE, bzip2 and LZMA entries, a directory, a Unix symbolic link, a
   Korean name (UTF-8 flagged), an MS-DOS time, `../evil.txt`.
+- wrapped.zip: a single directory at the top (`proj/`), of files and links (one reaching out of
+  it): folded where extracted into `proj`.
 - skip.zip: an entry flagged encrypted and one of Deflate64 (its method changed), left out.
 - one.txt.gz, .bz2, .xz, .lzma: a single file.
 
@@ -90,6 +92,18 @@ def main():
         i.external_attr = 0o120777 << 16
         z.writestr(i, b'stored.txt')
     write('tree.zip', b.getvalue())
+
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, 'w', zipfile.ZIP_DEFLATED) as z:
+        z.writestr(zipfile.ZipInfo('proj/', (2019, 5, 6, 7, 8, 10)), b'')
+        z.writestr(zipfile.ZipInfo('proj/a.txt', (2021, 2, 3, 4, 5, 6)), b'a')
+        z.writestr(zipfile.ZipInfo('proj/sub/b.txt', (2021, 2, 3, 4, 5, 6)), b'b')
+        for name, target in [('proj/link', b'a.txt'), ('proj/out', b'../x')]:
+            i = zipfile.ZipInfo(name, (2021, 2, 3, 4, 5, 6))
+            i.create_system = 3
+            i.external_attr = 0o120777 << 16
+            z.writestr(i, target)
+    write('wrapped.zip', b.getvalue())
 
     b = io.BytesIO()
     with zipfile.ZipFile(b, 'w') as z:

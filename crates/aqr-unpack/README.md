@@ -4,7 +4,13 @@ Archives of other formats than Aqueous read for extraction, so that `aqr -d` ext
 it does its own (`crates/aqr/src/extract.rs`): the archive is read into the same tree of
 entries, with the metadata it keeps made the tree's, and the contents of its files are given as
 they are decoded, on the pool's threads. The format is told by the name (`by_name`), and the
-output is the name without it.
+output is the name without it. Where an archive's top is a single directory of the output's
+name (`foo-1.0.tar.gz` of `foo-1.0/`; case aside on Windows and macOS), `aqr -d` extracts what
+it holds into the output, the directory's metadata the output's, rather than making
+`foo-1.0/foo-1.0/`, as 7-Zip's `-spe` does (`Extractor::new`'s `fold`; of a tar archive decided
+on its first batch of members, and undone, what was made moved under the directory, where
+another entry at the top comes later). A directory of another name, even a like one
+(`app-1.2-win64.zip` of `app-1.2/`), is kept as it is.
 
 | Names | Read | Decoded |
 |---|---|---|

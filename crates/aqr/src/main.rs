@@ -11,7 +11,9 @@
 //!   or Zstandard, and those compressors' single files: [`aqr_unpack::by_name`]), is extracted
 //!   into its name without its extension the same way ([`extract`]), its metadata as an
 //!   Aqueous archive's; what it holds that is not extracted (encrypted entries, methods not
-//!   known, paths reaching out) is told, and the run fails once the rest is extracted.
+//!   known, paths reaching out) is told, and the run fails once the rest is extracted. Of a
+//!   single directory at its top of the output's name (`foo.zip` of `foo/`), what that holds is
+//!   extracted into the output, not into `foo/foo/` (as 7-Zip's `-spe`).
 //! - `-t`: each archive decoded as `-d` does, but nothing written (its checksums checked).
 //! - `--wasm`: in decoding, every module run as WebAssembly, the known ones too (natively
 //!   otherwise).
@@ -94,6 +96,8 @@ Modes:
   -d, --decompress      each archive into its name without .aqr (the default as unaqr);
                         .zip, .7z, .tar (.gz .tgz .bz2 .xz .lzma .zst), .gz, .bz2,
                         .xz, .lzma and .zst too, into the name without them
+                        (a single directory at their top of that name: what it
+                        holds, as 7-Zip's -spe)
   -t, --test            decode and check each archive, writing nothing
 
 Output:
@@ -959,7 +963,7 @@ fn decompress_foreign(a: &Args, input: &Path, out: &Path, format: aqr_unpack::Fo
         ticking(a, &view, || -> Result<_, String> {
             let x = match a.test {
                 true => None,
-                false => Some(extract::Extractor::new(out, force, &ap, &seen)?),
+                false => Some(extract::Extractor::new(out, force, true, &ap, &seen)?),
             };
             let sink =
                 Unpacking { x: x.as_ref(), input, quiet: a.quiet, view: shown, seen: &seen, sizes: Default::default() };
@@ -1108,7 +1112,7 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
         Some(t) => {
             let ap = meta::Applier { privileged: a.preserve, quiet: a.quiet };
             ticking(a, &*view, || {
-                let x = extract::Extractor::new(out, force, &ap, &seen)?;
+                let x = extract::Extractor::new(out, force, false, &ap, &seen)?;
                 x.entries(t, &(0..t.entries.len()).collect::<Vec<_>>())?;
                 archive
                     .contents(a.opt.threads, |c, d| x.content(c, d).map_err(Failure::Resource))

@@ -7,6 +7,14 @@
 //! written as they are decoded (on any thread); then, once all is told ([`Extractor::finish`]),
 //! the links (but those reaching out of the directory), the metadata of all but the
 //! directories, and that of the directories, the deepest first (spec, "Extraction").
+//!
+//! Where asked ([`Extractor::new`]'s `fold`, for archives of other formats), a tree of a single
+//! directory at its top, of the name of the directory extracted into (case aside on Windows and
+//! macOS), is extracted into that directory, not into a directory of the same name in it: what
+//! is in it at the top, and its metadata the directory's (as 7-Zip's `-spe` eliminates the
+//! duplication of the root folder). As a tree read as it is decoded is not known whole, that is
+//! decided by the entries first told; where another entry at the top comes later, what was made
+//! is moved into a directory of the first one's name.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -61,6 +69,9 @@ struct State {
     groups: HashMap<i128, Vec<usize>>,
     /// Whether the root's forks are known.
     root: bool,
+    /// Of an extractor folding: not decided yet (`None`), the directory extracted as the root
+    /// (`Some(Some(i))`), or none (`Some(None)`).
+    fold: Option<Option<usize>>,
 }
 
 /// A fork of a content: the entry (`None`: the root), the fork's index and name, and the kind
@@ -82,8 +93,15 @@ fn err(p: &Path, e: std::io::Error) -> String {
 }
 
 impl<'a> Extractor<'a> {
-    /// An extractor into `out`, made here (or there already, where `force`).
-    pub fn new(out: &'a Path, force: bool, ap: &'a meta::Applier, seen: &'a stats::Seen) -> Result<Self, String> {
+    /// An extractor into `out`, made here (or there already, where `force`); folding a tree of a
+    /// single directory at its top where `fold` ([module](self)).
+    pub fn new(
+        out: &'a Path,
+        force: bool,
+        fold: bool,
+        ap: &'a meta::Applier,
+        seen: &'a stats::Seen,
+    ) -> Result<Self, String> {
         match fs::create_dir(out) {
             Err(e) if !(force && e.kind() == std::io::ErrorKind::AlreadyExists && out.is_dir()) => {
                 return Err(err(out, e));
@@ -95,7 +113,7 @@ impl<'a> Extractor<'a> {
             force,
             ap,
             seen,
-            s: RwLock::default(),
+            s: RwLock::new(State { fold: (!fold).then_some(None), ..State::default() }),
             later: Mutex::default(),
             written: Mutex::default(),
             files: AtomicUsize::new(0),
@@ -121,6 +139,7 @@ impl<'a> Extractor<'a> {
                 grow(&mut s.forks, f.1).push((None, k, f.0.clone(), Kind::Dir));
             }
         }
+        self.fold(s, t, new)?;
         // the link groups of the files told, consistent where all their files are of a content
         let mut touched = Vec::new();
         for &i in new {
@@ -148,6 +167,11 @@ impl<'a> Extractor<'a> {
                 s.paths[i] = parent.join(self.fs_name(parent, &e.name));
             }
             let path = s.paths[i].clone();
+            // (the directory folded: the root, made already)
+            if s.fold == Some(Some(i)) {
+                s.made[i] = Some(Kind::Dir);
+                continue;
+            }
             // told again: a file of the content it had kept as it is (now in a link group)
             if let (Some(Kind::File), EntryNode::File(c)) = (s.made[i], &e.node)
                 && s.content[i] == Some(*c)
@@ -237,6 +261,58 @@ impl<'a> Extractor<'a> {
         Ok(())
     }
 
+    /// Decides whether to fold ([module](self)) as entries are first told, and undoes it where
+    /// an entry of `new` is at the top beside the directory folded: the directory made, what is in
+    /// it moved there.
+    fn fold(&self, s: &mut State, t: &Tree, new: &[usize]) -> Result<(), String> {
+        let top = |i: &&usize| t.entries[**i].parent.is_none();
+        match s.fold {
+            None if !new.is_empty() => {
+                let mut tops = new.iter().filter(top);
+                let first = tops.next().copied();
+                s.fold = Some(match (first, tops.next()) {
+                    (Some(i), None) if t.entries[i].node == EntryNode::Dir && self.out_named(&t.entries[i].name) => {
+                        s.paths[i] = self.out.to_path_buf();
+                        Some(i)
+                    }
+                    _ => None,
+                });
+                Ok(())
+            }
+            Some(Some(i)) if new.iter().filter(top).any(|&j| j != i) => {
+                let dir = self.out.join(self.fs_name(self.out, &t.entries[i].name));
+                fs::create_dir(&dir).map_err(|x| err(&dir, x))?;
+                let moved: Vec<usize> =
+                    (0..t.entries.len()).filter(|&k| t.entries[k].parent == Some(i) && s.made[k].is_some()).collect();
+                for k in moved {
+                    let to = dir.join(s.paths[k].file_name().unwrap());
+                    fs::rename(&s.paths[k], &to).map_err(|x| err(&to, x))?;
+                }
+                // (every path so far is of the directory folded: under the root)
+                for p in s.paths.iter_mut().filter(|p| !p.as_os_str().is_empty()) {
+                    *p = dir.join(p.strip_prefix(self.out).unwrap());
+                }
+                s.paths[i] = dir;
+                s.fold = Some(None);
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Whether entry name `name` is the name of the directory extracted into, as this system
+    /// takes names (on Windows and macOS, case aside).
+    fn out_named(&self, name: &[u8]) -> bool {
+        let Some(out) = self.out.file_name() else { return false };
+        let name = os_from(name_bytes(name).0);
+        if cfg!(any(windows, target_os = "macos")) {
+            let fold = |s: &std::ffi::OsStr| s.to_string_lossy().to_lowercase();
+            fold(&name) == fold(out)
+        } else {
+            name == out
+        }
+    }
+
     /// The name of `name` (an entry's) on this system, in directory `dir`. On Windows, the
     /// characters it cannot have (and a dot or a space at the end) are `_`, and a device's name
     /// takes `_` before it: told where that is so (spec, "Extraction").
@@ -304,7 +380,9 @@ impl<'a> Extractor<'a> {
                 continue;
             }
             let path = &s.paths[i];
-            let Some(to) = resolve_link(t, &by_name, i) else {
+            // (folded: reaching out of the directory folded is reaching out)
+            let within = s.fold.flatten().map(|f| &t.entries[f].name[..]);
+            let Some(to) = resolve_link(t, &by_name, i, within) else {
                 self.ap.tell(path, &format!("a link reaching out of {}, not created", self.out.display()));
                 continue;
             };
@@ -382,8 +460,14 @@ pub fn windows_name(name: &std::ffi::OsStr) -> Option<OsString> {
 /// Where link `i` of `t` leads, resolved from the link's directory through the links of the
 /// tree (`by_name`: the entries by their directory and name): the entry (`None`: none of the
 /// tree); `None` where it reaches out of the directory it is extracted into, by an absolute
-/// target or by one going above it.
-fn resolve_link(t: &Tree, by_name: &HashMap<(Option<usize>, &[u8]), usize>, i: usize) -> Option<Option<usize>> {
+/// target or by one going above it (or out of the directory at the top named `within`, where
+/// given: the one extracted as the root).
+fn resolve_link(
+    t: &Tree,
+    by_name: &HashMap<(Option<usize>, &[u8]), usize>,
+    i: usize,
+    within: Option<&[u8]>,
+) -> Option<Option<usize>> {
     // the path of an entry, as names from the root
     let path_of = |mut e: Option<usize>| {
         let mut p = Vec::new();
@@ -437,7 +521,11 @@ fn resolve_link(t: &Tree, by_name: &HashMap<(Option<usize>, &[u8]), usize>, i: u
         Some(at)
     }
     let EntryNode::Link(target) = &t.entries[i].node else { return Some(None) };
-    resolve(t, path_of(t.entries[i].parent), target, &mut budget, &find, &path_of).map(|p| find(&p))
+    let p = resolve(t, path_of(t.entries[i].parent), target, &mut budget, &find, &path_of)?;
+    if within.is_some_and(|w| p.first().is_none_or(|n| n[..] != *w)) {
+        return None;
+    }
+    Some(find(&p))
 }
 
 /// Makes a link to `target` at `at` (on Windows, to a directory where `dir`).
