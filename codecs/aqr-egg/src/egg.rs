@@ -16,6 +16,8 @@ const SKIP: u32 = 0xFFFF_0000;
 const FILE: u32 = 0x0A85_90E3;
 const FILENAME: u32 = 0x0A85_91AC;
 const COMMENT: u32 = 0x04C6_3672;
+const WINDOWS_INFO: u32 = 0x2C86_950B;
+const POSIX_INFO: u32 = 0x1EE9_22E5;
 const ENCRYPT: u32 = 0x08D1_470F;
 const BLOCK: u32 = 0x02B5_0C13;
 const DUMMY: u32 = 0x0746_3307;
@@ -51,13 +53,31 @@ pub struct Block {
 pub struct Entry {
     /// Where its header starts.
     pub pos: usize,
-    /// The name, of its first filename record (empty where it has none).
+    /// The name, of its first filename record (empty where it has none), and its locale (a code
+    /// page, 0 the system's) where it has one, else UTF-8.
     pub name: Range<usize>,
+    pub locale: Option<u16>,
+    /// Of its Windows file information (spec §8.3): the modification time (a FILETIME) and the
+    /// attributes (Windows' read-only, hidden and system bits, 0x08 a symbolic link, 0x80 a
+    /// directory).
+    pub windows: Option<(u64, u8)>,
+    /// Of its POSIX file information (spec §8.4).
+    pub posix: Option<Posix>,
     /// Whether it has an encryption record.
     pub encrypted: bool,
     /// The uncompressed size, as the header says.
     pub size: u64,
     pub blocks: Vec<Block>,
+}
+
+/// A file's POSIX information: its mode (of `stat`), owner, group and modification time (seconds
+/// since 1970).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Posix {
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub mtime: u64,
 }
 
 /// An archive read.
@@ -72,6 +92,9 @@ pub struct Egg {
     /// or at the end of the data where a record runs past it (a volume of a split archive, an
     /// archive cut short).
     pub end: usize,
+    /// Whether the records end with the final end marker (else other bytes or the end of the
+    /// data end them).
+    pub ended: bool,
 }
 
 fn le(d: &[u8], at: usize, n: usize) -> Option<u64> {
@@ -111,7 +134,16 @@ enum Stop {
 /// its blocks.
 fn file(d: &[u8], p: usize) -> Result<(Entry, usize), Stop> {
     let size = le(d, p + 8, 8).ok_or(Stop::Past)?;
-    let mut e = Entry { pos: p, name: 0..0, encrypted: false, size, blocks: Vec::new() };
+    let mut e = Entry {
+        pos: p,
+        name: 0..0,
+        locale: None,
+        windows: None,
+        posix: None,
+        encrypted: false,
+        size,
+        blocks: Vec::new(),
+    };
     let mut at = p + 16;
     let mut named = false;
     loop {
@@ -125,16 +157,28 @@ fn file(d: &[u8], p: usize) -> Result<(Entry, usize), Stop> {
                 if s == FILENAME {
                     // (a filename's bit 3 tells of a locale, 2 bytes before the name that its
                     // size does not count: FORMAT.md, "The archive")
+                    let mut locale = None;
                     if flags & 8 != 0 {
+                        locale = le(d, r.start, LOCALE).map(|l| l as u16);
                         r = r.start + LOCALE..r.end + LOCALE;
                         if r.end > d.len() {
                             return Err(Stop::Past);
                         }
                     }
                     if !named {
-                        e.name = r.clone();
+                        (e.name, e.locale) = (r.clone(), locale);
                         named = true;
                     }
+                } else if s == WINDOWS_INFO && r.len() >= 9 {
+                    e.windows = Some((le(d, r.start, 8).unwrap(), d[r.start + 8]));
+                } else if s == POSIX_INFO && r.len() >= 20 {
+                    let at = |k, n| le(d, r.start + k, n).unwrap();
+                    e.posix = Some(Posix {
+                        mode: at(0, 4) as u32,
+                        uid: at(4, 4) as u32,
+                        gid: at(8, 4) as u32,
+                        mtime: at(12, 8),
+                    });
                 }
                 e.encrypted |= s == ENCRYPT;
                 at = r.end;
@@ -168,7 +212,7 @@ pub fn parse(d: &[u8]) -> Option<Egg> {
     if !starts(d) {
         return None;
     }
-    let mut egg = Egg { solid: false, split: false, entries: Vec::new(), end: d.len() };
+    let mut egg = Egg { solid: false, split: false, entries: Vec::new(), end: d.len(), ended: false };
     // the prefix's records up to their end marker
     let mut p = HEADER;
     loop {
@@ -201,7 +245,10 @@ pub fn parse(d: &[u8]) -> Option<Egg> {
                 Err(Stop::Past) => None,
             },
             Some(COMMENT | DUMMY) => extra(d, p).map(|(_, r)| r.end),
-            Some(END) => break p + 4,
+            Some(END) => {
+                egg.ended = true;
+                break p + 4;
+            }
             Some(_) => break p,
         };
         match next {
@@ -287,7 +334,7 @@ mod tests {
         let n = d.len();
         d.extend_from_slice(b"after");
         let a = parse(&d).unwrap();
-        assert!(a.solid && !a.split);
+        assert!(a.solid && !a.split && a.ended);
         assert_eq!(a.end, n);
         assert_eq!(a.entries.len(), 2);
         assert_eq!((a.entries[0].blocks.len(), &d[a.entries[0].name.clone()]), (0, &b"dir"[..]));
@@ -297,7 +344,8 @@ mod tests {
         assert_eq!((b.method, b.size, b.crc, &d[b.body.clone()]), (STORED, 3, 0x04030201, &b"abc"[..]));
         // cut short: the records run to the end; a block's header without its end marker: not a
         // file
-        assert_eq!(parse(&d[..n - 20]).unwrap().end, n - 20);
+        let cut = parse(&d[..n - 20]).unwrap();
+        assert_eq!((cut.end, cut.ended), (n - 20, false));
         let mut bad = d.clone();
         let at = b.body.start - 4;
         bad[at] ^= 1;

@@ -17,11 +17,13 @@ another entry at the top comes later). A directory of another name, even a like 
 | `.zip` `.jar` `.apk` `.xpi` `.cbz` `.whl` | the central directory | stored, DEFLATE, bzip2, LZMA, Zstandard, xz; by entry |
 | `.7z` `.cb7` | the header (an encoded one decoded first) | folders of LZMA, LZMA2, DEFLATE, bzip2, stored, BCJ/ARM/…/Delta, BCJ2; by folder, an LZMA2 stream by its segments, files written as their bytes are decoded |
 | `.rar` `.cbr` | the headers (aqr-rar's readers; RAR5, RAR 1.5–4.x) | stored, RAR5's LZ with its filters, RAR 2.9's LZ and PPMd with the standard filters (aqr-rar's decoders); by solid group (or file), its files given as each is decoded |
+| `.alz` | the records (aqr-alz's reader) | stored, DEFLATE, ALZip's bzip2; by file |
+| `.egg` | the records (aqr-egg's reader) | stored, DEFLATE, bzip2, LZMA, AZO; by file (its blocks), a solid archive's block whole, cut into its files |
 | `.tar`, `.tar.gz` `.tgz`, `.tar.bz2` `.tbz2`, `.tar.xz` `.txz`, `.tar.lzma`, `.tar.zst` | as it is decoded (v7, ustar, GNU, pax) | gzip (members), bzip2 (a wave of blocks at a time), xz (blocks, and an LZMA2 stream's segments), LZMA, Zstandard |
 | `.gz` `.bz2` `.xz` `.lzma` `.zst` | | a single file, written as it is decoded |
 
 ```rust
-let opened = aqr_unpack::Opened::open(format, &archive)?;  // the listing read (ZIP, 7z)
+let opened = aqr_unpack::Opened::open(format, &archive)?;  // the listing read (ZIP, 7z, RAR, ALZ, EGG)
 let done = opened.unpack(threads, &sink)?;                  // sink: entries told, then contents
 // done.tree: the whole tree; done.skipped: entries left out (told to sink.note)
 ```
@@ -30,24 +32,28 @@ let done = opened.unpack(threads, &sink)?;                  // sink: entries tol
 
 - Times: ZIP's NTFS field, else Info-ZIP's extended timestamp, else the MS-DOS time as local
   time; 7z's modification, creation and access times; RAR5's (its time record, to the
-  nanosecond), RAR 3.x's (the MS-DOS time as local time, its extended times to 100 ns); tar's modification time (pax's of
+  nanosecond), RAR 3.x's (the MS-DOS time as local time, its extended times to 100 ns); ALZ's
+  modification time (MS-DOS's, as local time), EGG's (a FILETIME, else its POSIX time); tar's modification time (pax's of
   nanoseconds), GNU's and pax's access and status change times, libarchive's creation time.
 - Permissions and kinds: the Unix mode of ZIP (Unix hosts), of 7z (`0x8000` in the
   attributes) and of RAR (Unix hosts), tar's; Windows' attributes of ZIP (MS-DOS hosts), 7z and
-  RAR (MS-DOS and Windows hosts); symbolic links of all four (RAR5's Windows links and junctions
+  RAR (MS-DOS and Windows hosts), ALZ's and EGG's read-only, hidden, system (and ALZ's archive)
+  bits; EGG's POSIX mode and ids; symbolic links of all four (RAR5's Windows links and junctions
   with their `win-link-type`); tar's hard links (as link groups), FIFOs and devices (made with `-p` alone).
 - Owners: tar's ids and names, Info-ZIP's Unix ids. Extended attributes: pax's
   `SCHILY.xattr.` and `LIBARCHIVE.xattr.`.
 - Names: ZIP's UTF-8 where flagged or given by Info-ZIP's Unicode path field, else UTF-8 where
   they are, else of the system's code page (on Windows; as they are elsewhere); RAR5's UTF-8,
-  RAR 3.x's Unicode names (else as ZIP's). `\` separates names of ZIP's MS-DOS hosts, of 7z
-  and of RAR 3.x.
+  RAR 3.x's Unicode names (else as ZIP's); ALZ's UTF-8 where they are, else CP949; EGG's UTF-8,
+  or of the code page its filename record gives (CP949, Shift_JIS; else as ZIP's). `\` separates
+  names of ZIP's MS-DOS hosts, of 7z, of RAR 3.x, of ALZ and of EGG.
 
 Left out and told (the run then fails, once the rest is extracted): paths with `..` (a `/` or
 a drive at the start is dropped), encrypted entries, methods and coders not known (Deflate64,
-PPMd of 7z and ZIP, AES, RAR 1.5's and 2.0's algorithms), sparse files and multi-volume parts
-of tar and RAR, RAR5's hard links and copies of files (and the files after a file left out in
-a RAR solid group). A path given again takes the place of
+PPMd of 7z and ZIP, AES, RAR 1.5's and 2.0's algorithms, AZO's x86 filter), sparse files and
+multi-volume parts of tar, RAR, ALZ and EGG (what is past a volume's end, told once), RAR5's hard
+links and copies of files (and the files after a file left out in a RAR or EGG solid group), ALZ's
+and EGG's symbolic links (whose targets neither is known to store). A path given again takes the place of
 the one before (as tar has it); a file and a directory of one name keep the first.
 
 ## How it does
@@ -72,7 +78,11 @@ close), which hides the rest (aqr 4.1 s, 7-Zip 2.8 s on the ZIP archive then).
 
 ## Left
 
-- Formats of whose code there is more in the repository: ALZ, EGG, LHA, CAB, CHM, ISO, WIM.
+- Formats of whose code there is more in the repository: LHA, CAB, CHM, ISO, WIM.
+- ALZ and EGG: volumes (`.a00`…, `.vol2.egg`…), ZipCrypto, AES and LEA (no passwords asked for
+  yet), AZO's x86 filter (aqr-azo's is not ALZip's: such files are left out), an EGG solid
+  archive of several blocks whose decoders' state goes on across them (the archives seen have
+  one), EGG's relative names (a parent's id, flags bit 5; not seen).
 - PPMd (7z, ZIP: aqr-rar's PPMd var.H, with 7z's range coder); Deflate64; AES and ZipCrypto
   (no passwords asked for yet).
 - RAR: volumes (a file over several archives), hard links (as link groups), self-extracting

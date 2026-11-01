@@ -2,19 +2,23 @@
 name = "aqr-unpack"
 version = "0.1.0"
 edition = "2024"
-description = "Archives of other formats (ZIP, 7z, RAR, tar and the compressors over it) read for extraction into a tree"
+description = "Archives of other formats (ZIP, 7z, RAR, ALZ, EGG, tar and the compressors over it) read for extraction into a tree"
 publish = false
 
 [dependencies]
 aqr-7z = { path = "../../codecs/aqr-7z" }
+aqr-alz = { path = "../../codecs/aqr-alz" }
+aqr-azo = { path = "../../codecs/aqr-azo" }
 aqr-bcj = { path = "../../codecs/aqr-bcj" }
 aqr-bz2 = { path = "../../codecs/aqr-bz2" }
 aqr-common = { path = "../aqr-common" }
+aqr-egg = { path = "../../codecs/aqr-egg" }
 aqr-flate = { path = "../../codecs/aqr-flate" }
 aqr-formula = { path = "../aqr-formula" }
 aqr-lzma = { path = "../../codecs/aqr-lzma" }
 aqr-rar = { path = "../../codecs/aqr-rar", default-features = false }
 aqr-zip = { path = "../../codecs/aqr-zip" }
+encoding_rs = "0.8"
 zstd = "0.13"
 
 [target.'cfg(unix)'.dependencies]

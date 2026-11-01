@@ -1,4 +1,4 @@
-//! Archives of other formats than Aqueous read for extraction: ZIP, 7z, RAR and tar (alone, or under
+//! Archives of other formats than Aqueous read for extraction: ZIP, 7z, RAR, ALZ, EGG and tar (alone, or under
 //! gzip, bzip2, xz, LZMA or Zstandard), and those compressors' streams of a single file. An
 //! archive is read into a [`Tree`] as Aqueous's own are (the metadata it keeps made the tree's:
 //! times, permissions, ownership, attributes, extended attributes, links), told to a [`Sink`]
@@ -11,6 +11,7 @@
 use aqr_formula::aqr::Step;
 pub use aqr_formula::aqr::{Entry, EntryNode, Extra, Time, Tree};
 
+mod alzip;
 mod build;
 mod codec;
 mod lzma;
@@ -38,6 +39,10 @@ pub enum Format {
     SevenZip,
     /// A RAR archive: RAR5, or RAR 1.5–4.x.
     Rar,
+    /// An ALZ archive (ALZip's).
+    Alz,
+    /// An EGG archive (ALZip's).
+    Egg,
     /// A tar archive, under a compressor where given.
     Tar(Option<Filter>),
     /// A compressor's stream of a single file.
@@ -74,6 +79,8 @@ pub fn by_name(name: &[u8]) -> Option<(Format, usize)> {
         (".cb7", SevenZip),
         (".rar", Rar),
         (".cbr", Rar),
+        (".alz", Alz),
+        (".egg", Egg),
         (".gz", Single(Gzip)),
         (".bz2", Single(Bzip2)),
         (".xz", Single(Xz)),
@@ -116,18 +123,22 @@ enum Inner<'d> {
     Zip(zip::Listing<'d>),
     SevenZip(sevenz::Listing<'d>),
     Rar(rar::Listing<'d>),
+    Alz(alzip::Listing<'d>),
+    Egg(alzip::Listing<'d>),
     Tar(Option<Filter>),
     Single(Filter),
 }
 
 impl<'d> Opened<'d> {
-    /// Archive `d` of format `f`: a ZIP, 7z or RAR archive's listing read (its directory, its
-    /// header, its headers).
+    /// Archive `d` of format `f`: a ZIP, 7z, RAR, ALZ or EGG archive's listing read (its
+    /// directory, its header, its headers, its records).
     pub fn open(f: Format, d: &'d [u8]) -> Result<Opened<'d>, String> {
         let inner = match f {
             Format::Zip => Inner::Zip(zip::Listing::read(d)?),
             Format::SevenZip => Inner::SevenZip(sevenz::Listing::read(d)?),
             Format::Rar => Inner::Rar(rar::Listing::read(d)?),
+            Format::Alz => Inner::Alz(alzip::Listing::read_alz(d)?),
+            Format::Egg => Inner::Egg(alzip::Listing::read_egg(d)?),
             Format::Tar(f) => Inner::Tar(f),
             Format::Single(f) => Inner::Single(f),
         };
@@ -145,6 +156,7 @@ impl<'d> Opened<'d> {
             Inner::Zip(l) => l.units(),
             Inner::SevenZip(l) => l.units(),
             Inner::Rar(l) => l.units(),
+            Inner::Alz(l) | Inner::Egg(l) => l.units(),
             Inner::Tar(_) | Inner::Single(_) => vec![String::new()],
         }
     }
@@ -155,6 +167,8 @@ impl<'d> Opened<'d> {
             Inner::Zip(l) => l.unpack(threads, sink),
             Inner::SevenZip(l) => l.unpack(threads, sink),
             Inner::Rar(l) => l.unpack(threads, sink),
+            Inner::Alz(l) => l.unpack("ALZ", threads, sink),
+            Inner::Egg(l) => l.unpack("EGG", threads, sink),
             &Inner::Tar(f) => tar::unpack(f, self.d, threads, sink),
             Inner::Single(_) => Err("a single file, not a tree".into()),
         }

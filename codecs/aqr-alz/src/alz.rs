@@ -31,6 +31,11 @@ pub struct Entry {
     /// Where its local header starts.
     pub pos: usize,
     pub name: Range<usize>,
+    /// The attributes (spec §4: Windows' read-only, hidden, system and archive bits, 0x10 a
+    /// directory, 0x40 a symbolic link) and the modification time (MS-DOS's, its date in the
+    /// high half).
+    pub attrs: u8,
+    pub time: u32,
     /// The method, None for an entry without sizes (a directory, an empty file).
     pub method: Option<u8>,
     pub encrypted: bool,
@@ -49,6 +54,10 @@ pub struct Alz {
     /// at the end of the data where a record runs past it (a volume of a split archive, an
     /// archive cut short).
     pub end: usize,
+    /// Whether the records end with the end record (its signature alone, or at the end of the
+    /// central directory's 16 bytes; else a split marker, other bytes or the end of the data end
+    /// them).
+    pub ended: bool,
 }
 
 /// Whether `d` starts with an archive's header and a record after it.
@@ -97,7 +106,8 @@ fn local_sized(d: &[u8], p: usize, desc: u8, width: usize) -> Option<Entry> {
     if end > d.len() {
         return None;
     }
-    Some(Entry { pos: p, name, method, encrypted, crc, size, body: start..end })
+    let (attrs, time) = (*d.get(f + 2)?, le(d, f + 3, 4)? as u32);
+    Some(Entry { pos: p, name, attrs, time, method, encrypted, crc, size, body: start..end })
 }
 
 /// The comment section at `p` (its signature checked): its entries (a file's index, 4 bytes, the
@@ -119,6 +129,7 @@ pub fn parse(d: &[u8]) -> Option<Alz> {
     }
     let mut entries = Vec::new();
     let mut p = HEADER;
+    let mut ended = false;
     let end = loop {
         let Some(sig) = d.get(p..p + 4) else { break p.min(d.len()) };
         let next = match sig.try_into().unwrap() {
@@ -132,8 +143,16 @@ pub fn parse(d: &[u8]) -> Option<Alz> {
                 Err(true) => None,
             },
             COMMENT => comments(d, p),
-            CENTRAL => Some(p + 16).filter(|&e| e <= d.len()),
-            END | SPLIT => break p + 4,
+            CENTRAL => {
+                // (its 16 bytes end with the end's signature in every archive seen)
+                ended = d.get(p + 12..p + 16) == Some(&END[..]);
+                Some(p + 16).filter(|&e| e <= d.len())
+            }
+            END => {
+                ended = true;
+                break p + 4;
+            }
+            SPLIT => break p + 4,
             _ => break p,
         };
         match next {
@@ -143,7 +162,7 @@ pub fn parse(d: &[u8]) -> Option<Alz> {
             None => break d.len(),
         }
     };
-    Some(Alz { entries, end })
+    Some(Alz { entries, end, ended })
 }
 
 #[cfg(test)]
@@ -166,13 +185,14 @@ mod tests {
         let n = d.len();
         d.extend_from_slice(b"after");
         let a = parse(&d).unwrap();
-        assert_eq!(a.end, n);
+        assert_eq!((a.end, a.ended), (n, true));
         assert_eq!(a.entries.len(), 2);
         assert_eq!((a.entries[0].method, &d[a.entries[0].name.clone()]), (None, &b"dir"[..]));
+        assert_eq!((a.entries[0].attrs, a.entries[1].attrs), (0x10, 0x20));
         let e = &a.entries[1];
         assert_eq!((e.method, e.crc, e.size, &d[e.body.clone()]), (Some(0), 0x04030201, 3, &b"abc"[..]));
         // cut short: the records run to the end; another width of sizes: not a record
-        assert_eq!(parse(&d[..40]).unwrap().end, 40);
+        assert_eq!((parse(&d[..40]).unwrap().end, parse(&d[..40]).unwrap().ended), (40, false));
         let mut bad = d.clone();
         bad[24 + 4 + 7] = 0x30;
         assert_eq!(parse(&bad).unwrap().end, 24);

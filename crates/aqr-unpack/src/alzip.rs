@@ -1,0 +1,456 @@
+//! ALZip's archives, ALZ and EGG, read by their records (aqr-alz's and aqr-egg's readers): the
+//! files' names (UTF-8 where they are, else CP949, ALZ; EGG's UTF-8, or of the code page its
+//! filename record gives: CP949, Shift_JIS, else the system's), directories, modification times
+//! (ALZ's MS-DOS time as local time; EGG's FILETIME, else its POSIX time) and attributes
+//! (Windows' read-only, hidden, system and archive bits; EGG's POSIX mode and owner); the data
+//! decoded on the pool's threads, a file at a time (an EGG solid archive's block as one), its
+//! CRC-32s checked (ALZ's of the file, EGG's of each block).
+//!
+//! Encrypted files, symbolic links (whose targets neither format is known to store), methods not
+//! known (and AZO's x86 filter), and what is past the archive's records where they do not end as they should (a volume of
+//! a split archive, an archive cut short) are left out and told.
+
+use std::ops::Range;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+
+use aqr_alz::alz;
+use aqr_common::{crc32, pool};
+use aqr_egg::egg;
+use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, WIN_ATTRS_ALLOWED};
+
+use crate::build::{self, Builder};
+use crate::{Done, Sink, codec, sys};
+
+const S_IFMT: u32 = 0o170000;
+const S_IFDIR: u32 = 0o040000;
+const S_IFREG: u32 = 0o100000;
+
+/// How a piece of data is coded.
+#[derive(Clone, Copy, Debug)]
+enum Method {
+    Stored,
+    Deflate,
+    /// bzip2 of ALZ's framing.
+    AlzBzip2,
+    Bzip2,
+    /// EGG's LZMA: 4 bytes, LZMA's properties (5), the stream.
+    Lzma,
+    Azo,
+}
+
+/// A stream of data: an ALZ file's body, an EGG block; its CRC-32 where it has one of its own.
+struct Piece {
+    method: Method,
+    body: Range<usize>,
+    size: usize,
+    crc: Option<u32>,
+}
+
+/// A file of a unit: its content (`None` where left out of the tree), name (shown), size and
+/// CRC-32 (where it has one of its own).
+struct File {
+    c: Option<usize>,
+    name: String,
+    size: usize,
+    crc: Option<u32>,
+}
+
+/// The data of `files`, one after another, decoded from `pieces`; `left` where it cannot be
+/// decoded here (why).
+struct Unit {
+    pieces: Vec<Piece>,
+    files: Vec<File>,
+    name: String,
+    left: Option<String>,
+}
+
+/// What a file of the archive is.
+enum Kind {
+    Dir,
+    /// A file of data: its pieces (none where they come later, in an EGG solid archive), size and
+    /// CRC-32.
+    Data {
+        pieces: Vec<Piece>,
+        size: usize,
+        crc: Option<u32>,
+    },
+    /// Not extracted: why (of data, `size` bytes of a solid block, where `size` is not 0).
+    Left {
+        why: String,
+        size: usize,
+    },
+}
+
+/// A file as read from the records.
+struct Head {
+    name: Vec<u8>,
+    kind: Kind,
+    extra: Extra,
+}
+
+pub struct Listing<'d> {
+    d: &'d [u8],
+    b: Builder,
+    units: Vec<Unit>,
+    /// The contents of no data (empty files).
+    empty: Vec<usize>,
+    notes: Vec<String>,
+}
+
+/// Name `b` of code page `cp` (949, 932; else the system's) as UTF-8: as it is where it is
+/// UTF-8.
+fn named(b: &[u8], cp: u16) -> Vec<u8> {
+    if std::str::from_utf8(b).is_ok() {
+        return b.to_vec();
+    }
+    let enc = match cp {
+        949 => encoding_rs::EUC_KR,
+        932 => encoding_rs::SHIFT_JIS,
+        _ => return sys::legacy_name(b),
+    };
+    match enc.decode_without_bom_handling_and_without_replacement(b) {
+        Some(s) => s.into_owned().into_bytes(),
+        None => b.to_vec(),
+    }
+}
+
+/// Windows' attributes of `a` (bits that are Windows' own).
+fn win_attrs(a: u8) -> Option<u32> {
+    Some(a as u32 & 0x27 & WIN_ATTRS_ALLOWED).filter(|&a| a != 0)
+}
+
+fn size_of(n: u64) -> Option<usize> {
+    usize::try_from(n).ok()
+}
+
+impl<'d> Listing<'d> {
+    pub fn read_alz(d: &'d [u8]) -> Result<Listing<'d>, String> {
+        let a = alz::parse(d).ok_or("ALZ: not an ALZ archive")?;
+        let mut heads = Vec::new();
+        for e in &a.entries {
+            let name = named(&d[e.name.clone()], 949);
+            let extra = Extra {
+                mtime: sys::dos((e.time >> 16) as u16, e.time as u16),
+                win_attrs: win_attrs(e.attrs),
+                ..Extra::default()
+            };
+            let kind = if e.attrs & 0x10 != 0 {
+                Kind::Dir
+            } else if e.attrs & 0x40 != 0 {
+                Kind::Left { why: "a symbolic link".into(), size: 0 }
+            } else if e.encrypted {
+                Kind::Left { why: "encrypted".into(), size: 0 }
+            } else {
+                let method = match e.method {
+                    None => None,
+                    Some(alz::STORED) => Some(Method::Stored),
+                    Some(alz::BZIP2) => Some(Method::AlzBzip2),
+                    Some(alz::DEFLATE) => Some(Method::Deflate),
+                    Some(m) => {
+                        heads.push(Head {
+                            name,
+                            kind: Kind::Left { why: format!("of method {m}, not known"), size: 0 },
+                            extra,
+                        });
+                        continue;
+                    }
+                };
+                match (method, size_of(e.size)) {
+                    (_, None) => Kind::Left { why: "too large".into(), size: 0 },
+                    (None, _) | (_, Some(0)) => Kind::Data { pieces: Vec::new(), size: 0, crc: None },
+                    (Some(method), Some(size)) => Kind::Data {
+                        pieces: vec![Piece { method, body: e.body.clone(), size, crc: None }],
+                        size,
+                        crc: Some(e.crc),
+                    },
+                }
+            };
+            heads.push(Head { name, kind, extra });
+        }
+        let mut l = Listing::new(d);
+        l.files(heads, false);
+        if !a.ended {
+            l.notes.push(
+                "ALZ: the archive goes on in another volume or is cut short: what is past it is not extracted".into(),
+            );
+        }
+        Ok(l)
+    }
+
+    pub fn read_egg(d: &'d [u8]) -> Result<Listing<'d>, String> {
+        let a = egg::parse(d).ok_or("EGG: not an EGG archive")?;
+        let mut heads = Vec::new();
+        for e in &a.entries {
+            let raw = &d[e.name.clone()];
+            let name = match e.locale {
+                None => raw.to_vec(),
+                Some(cp) => named(raw, cp),
+            };
+            let mut extra = Extra::default();
+            let (mut dir, mut link) = (false, false);
+            if let Some((t, attrs)) = e.windows {
+                extra.mtime = sys::filetime(t);
+                extra.win_attrs = win_attrs(attrs & 0x07);
+                (dir, link) = (attrs & 0x80 != 0, attrs & 0x08 != 0);
+            }
+            if let Some(p) = e.posix {
+                extra.mode = Some(p.mode & 0o7777);
+                (extra.uid, extra.gid) = (Some(p.uid as u64), Some(p.gid as u64));
+                extra.mtime = extra.mtime.or(Some(sys::unix(p.mtime as i64)));
+                match p.mode & S_IFMT {
+                    S_IFDIR => dir = true,
+                    0 | S_IFREG => {}
+                    _ => link = true,
+                }
+            }
+            let size = size_of(e.size);
+            let held = || size.unwrap_or(0);
+            let kind = if dir && e.blocks.is_empty() {
+                Kind::Dir
+            } else if link {
+                Kind::Left { why: "a symbolic link".into(), size: held() }
+            } else if e.encrypted {
+                Kind::Left { why: "encrypted".into(), size: held() }
+            } else if let Some(m) = e.blocks.iter().map(|b| b.method).find(|&m| m > egg::LZMA) {
+                Kind::Left { why: format!("of method {m}, not known"), size: held() }
+            } else if e
+                .blocks
+                .iter()
+                .any(|b| b.method == egg::AZO && aqr_azo::azo::parse(&d[b.body.clone()]).is_ok_and(|s| s.x86))
+            {
+                // (aqr-azo's x86 filter is not ALZip's: its data would not be the file's)
+                Kind::Left { why: "of AZO's x86 filter, not known here".into(), size: held() }
+            } else {
+                match size {
+                    None => Kind::Left { why: "too large".into(), size: 0 },
+                    Some(size) => Kind::Data {
+                        pieces: e
+                            .blocks
+                            .iter()
+                            .map(|b| Piece {
+                                method: match b.method {
+                                    egg::STORED => Method::Stored,
+                                    egg::DEFLATE => Method::Deflate,
+                                    egg::BZIP2 => Method::Bzip2,
+                                    egg::AZO => Method::Azo,
+                                    _ => Method::Lzma,
+                                },
+                                body: b.body.clone(),
+                                size: b.size as usize,
+                                crc: Some(b.crc),
+                            })
+                            .collect(),
+                        size,
+                        crc: None,
+                    },
+                }
+            };
+            heads.push(Head { name, kind, extra });
+        }
+        let mut l = Listing::new(d);
+        l.files(heads, a.solid);
+        if !a.ended {
+            l.notes.push(match a.split {
+                true => "EGG: a volume of a split archive: what goes on in other volumes is not extracted".into(),
+                false => "EGG: the archive is cut short: what is past it is not extracted".into(),
+            });
+        }
+        Ok(l)
+    }
+
+    fn new(d: &'d [u8]) -> Listing<'d> {
+        Listing { d, b: Builder::default(), units: Vec::new(), empty: Vec::new(), notes: Vec::new() }
+    }
+
+    /// The tree and units of `heads`. In a `solid` archive, files of data of no pieces have their
+    /// data in the pieces of the file of data after them, one after another.
+    fn files(&mut self, heads: Vec<Head>, solid: bool) {
+        let mut pending: Vec<File> = Vec::new();
+        // (why the pending files cannot be decoded, where one of them cannot)
+        let mut broken: Option<String> = None;
+        for h in heads {
+            let shown = String::from_utf8_lossy(&h.name).into_owned();
+            let names = build::split(&h.name, true);
+            let dir_named = h.name.last().is_some_and(|&c| c == b'/' || c == b'\\');
+            let r = match h.kind {
+                Kind::Left { why, size } => {
+                    self.notes.push(format!("{shown}: {why}, not extracted"));
+                    if solid && size > 0 {
+                        pending.push(File { c: None, name: shown.clone(), size, crc: None });
+                        broken.get_or_insert_with(|| format!("of a solid block with {shown}, which is not"));
+                    }
+                    continue;
+                }
+                Kind::Dir => match names {
+                    None => Err(format!("{shown}: a path reaching out of the directory, not extracted")),
+                    Some(n) if n.is_empty() => self.b.add(&[], None, h.extra),
+                    Some(n) => self.b.add(&n, Some(EntryNode::Dir), h.extra),
+                },
+                Kind::Data { pieces, size, .. } if size == 0 && pieces.is_empty() && dir_named => match names {
+                    None => Err(format!("{shown}: a path reaching out of the directory, not extracted")),
+                    Some(n) => self.b.add(&n, (!n.is_empty()).then_some(EntryNode::Dir), h.extra),
+                },
+                Kind::Data { pieces, size, crc } => {
+                    let names = names.filter(|n| !n.is_empty());
+                    let c = names.as_ref().map(|_| self.b.content());
+                    if c.is_none() {
+                        self.notes.push(format!("{shown}: a path reaching out of the directory, not extracted"));
+                    }
+                    let f = File { c, name: shown.clone(), size, crc };
+                    if size == 0 && pieces.is_empty() {
+                        self.empty.extend(c);
+                    } else if pieces.is_empty() && solid {
+                        pending.push(f);
+                    } else {
+                        let mut files = std::mem::take(&mut pending);
+                        files.push(f);
+                        let left = match pieces.is_empty() {
+                            true => Some("its data not in the archive".to_string()),
+                            false => broken.take(),
+                        };
+                        self.units.push(Unit { pieces, files, name: String::new(), left });
+                    }
+                    match names {
+                        Some(n) => self.b.add(&n, Some(EntryNode::File(c.unwrap())), h.extra),
+                        None => continue,
+                    }
+                }
+            };
+            if let Err(e) = r {
+                self.notes.push(e);
+            }
+        }
+        if !pending.is_empty() {
+            let left = broken.take().or_else(|| Some("its data not in the archive".to_string()));
+            self.units.push(Unit { pieces: Vec::new(), files: pending, name: String::new(), left });
+        }
+        for u in &mut self.units {
+            u.name = match u.files.len() {
+                1 => u.files[0].name.clone(),
+                n => format!("{} and {} more files", u.files[0].name, n - 1),
+            };
+        }
+    }
+
+    pub fn units(&self) -> Vec<String> {
+        self.units.iter().map(|u| u.name.clone()).collect()
+    }
+
+    /// The data of piece `p`, of its size, its CRC-32 checked.
+    fn piece(&self, p: &Piece) -> Result<Vec<u8>, String> {
+        let body = &self.d[p.body.clone()];
+        let size = p.size;
+        let data = match p.method {
+            Method::Stored if body.len() != size => return Err("stored data not of its size".into()),
+            Method::Stored => body.to_vec(),
+            Method::Deflate => codec::inflate(body, size, size)?.0,
+            Method::AlzBzip2 => {
+                aqr_bz2::stream::decode_framed(body, aqr_bz2::Framing::Alz, true, size, &mut |_, _| {})
+                    .map_err(|e| format!("bzip2: {e}"))?
+                    .data
+            }
+            Method::Bzip2 => codec::bzip2(body, size)?,
+            Method::Lzma => {
+                let props = *body.get(4).filter(|_| body.len() >= egg::LZMA_HEADER).ok_or("LZMA: no header")?;
+                codec::lzma(&body[egg::LZMA_HEADER..], props, Some(size as u64), size)?.0
+            }
+            Method::Azo => aqr_azo::azo::decode(body, size).map_err(|e| format!("AZO: {e}"))?.data,
+        };
+        if data.len() != size {
+            return Err("data not of its size".into());
+        }
+        if p.crc.is_some_and(|c| crc32::hash(&data) != c) {
+            return Err("CRC mismatch".into());
+        }
+        Ok(data)
+    }
+
+    /// Decodes unit `u`, giving each file's content to `give`.
+    fn decode(&self, u: &Unit, give: &mut dyn FnMut(usize, Vec<u8>) -> Result<(), String>) -> Result<(), String> {
+        let at = |e: String| format!("{}: {e}", u.name);
+        let mut data = match u.pieces.len() {
+            1 => self.piece(&u.pieces[0]).map_err(at)?,
+            _ => {
+                let mut v = Vec::new();
+                for p in &u.pieces {
+                    v.extend_from_slice(&self.piece(p).map_err(at)?);
+                }
+                v
+            }
+        };
+        if u.files.iter().map(|f| f.size).sum::<usize>() != data.len() {
+            return Err(at("data not of the files' sizes".into()));
+        }
+        if let [f] = &u.files[..] {
+            if f.crc.is_some_and(|c| crc32::hash(&data) != c) {
+                return Err(format!("{}: CRC mismatch", f.name));
+            }
+            return give(0, std::mem::take(&mut data));
+        }
+        let mut start = 0;
+        for (k, f) in u.files.iter().enumerate() {
+            let d = &data[start..start + f.size];
+            start += f.size;
+            if f.crc.is_some_and(|c| crc32::hash(d) != c) {
+                return Err(format!("{}: CRC mismatch", f.name));
+            }
+            if f.c.is_some() {
+                give(k, d.to_vec())?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn unpack(&self, format: &str, threads: usize, sink: &dyn Sink) -> Result<Done, String> {
+        self.notes.iter().for_each(|n| sink.note(n));
+        let mut skipped = self.notes.len();
+        let tree = self.b.tree.clone();
+        let all: Vec<usize> = (0..tree.entries.len()).collect();
+        if !all.is_empty() {
+            sink.entries(&tree, &all)?;
+        }
+        for &c in self.empty.iter().filter(|&&c| self.b.live(c)) {
+            sink.content(c, Vec::new())?;
+        }
+        for u in &self.units {
+            if let Some(why) = &u.left {
+                for f in u.files.iter().filter(|f| f.c.is_some()) {
+                    sink.note(&format!("{}: {why}, not extracted", f.name));
+                    skipped += 1;
+                }
+            }
+        }
+        let packed: u64 = self.units.iter().flat_map(|u| &u.pieces).map(|p| p.body.len() as u64).sum();
+        let total: u64 = self.units.iter().flat_map(|u| &u.files).map(|f| f.size as u64).sum();
+        let (done_packed, done) = (AtomicU64::new(0), AtomicU64::new(0));
+        let failed = AtomicBool::new(false);
+        let made = pool::par_map(self.units.len(), threads, |i| -> Result<(), String> {
+            let u = &self.units[i];
+            if failed.load(Relaxed) || u.left.is_some() || u.files.iter().all(|f| f.c.is_none()) {
+                return Ok(());
+            }
+            sink.step(Step::Started(i));
+            let r = self
+                .decode(u, &mut |k, data| {
+                    let f = &u.files[k];
+                    match f.c {
+                        Some(c) if self.b.live(c) => sink.content(c, data),
+                        _ => Ok(()),
+                    }
+                })
+                .map_err(|e| format!("{format}: {e}"));
+            let p = u.pieces.iter().map(|p| p.body.len() as u64).sum::<u64>();
+            let n = u.files.iter().map(|f| f.size as u64).sum::<u64>();
+            let p = done_packed.fetch_add(p, Relaxed) + p;
+            let n = done.fetch_add(n, Relaxed) + n;
+            sink.step(Step::Reached(Reached { decompressed: (p, packed), evaluated: (n, total) }));
+            sink.step(Step::Ended(i));
+            if r.is_err() {
+                failed.store(true, Relaxed);
+            }
+            r
+        });
+        made.into_iter().collect::<Result<(), String>>()?;
+        Ok(Done { tree, skipped })
+    }
+}

@@ -389,13 +389,7 @@ impl<'d> Listing<'d> {
     /// to `each` (with its index, on any thread) as soon as it is all decoded, and telling
     /// `tick` the bytes given as it goes. The parts of the folder decode on threads of their
     /// own, while what is decoded is given on the others.
-    fn stream(
-        &self,
-        f: usize,
-        threads: usize,
-        each: &Each,
-        tick: &dyn Fn(u64),
-    ) -> Result<(), Error> {
+    fn stream(&self, f: usize, threads: usize, each: &Each, tick: &dyn Fn(u64)) -> Result<(), Error> {
         let parts = self.parts(f)?;
         let size: usize = parts.iter().map(|p| p.1).sum();
         if Some(size as u64) != self.main.folders[f].size() {

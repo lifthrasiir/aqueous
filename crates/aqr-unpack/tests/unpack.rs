@@ -103,6 +103,8 @@ fn names() {
     assert_eq!(f("x.7z"), Some((Format::SevenZip, 3)));
     assert_eq!(f("x.rar"), Some((Format::Rar, 4)));
     assert_eq!(f("x.CBR"), Some((Format::Rar, 4)));
+    assert_eq!(f("x.alz"), Some((Format::Alz, 4)));
+    assert_eq!(f("x.EGG"), Some((Format::Egg, 4)));
     assert_eq!(f("a.tar.zst"), Some((Format::Tar(Some(Filter::Zstd)), 8)));
     assert_eq!(f(".zip"), None);
     assert_eq!(f("a.aqr"), None);
@@ -304,4 +306,92 @@ fn rar_streams() {
     let k = d.len() / 2;
     d[k] ^= 0x55;
     assert!(unpack(Format::Rar, &d).is_err());
+}
+
+/// A codec crate's test archive.
+fn codec_data(krate: &str, name: &str) -> Vec<u8> {
+    std::fs::read(format!("{}/../../codecs/{krate}/tests/data/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+}
+
+/// unalz's ALZ archives (aqr-alz's tests/data): CP949 names, directories, stored, DEFLATE and
+/// ALZip's bzip2, encrypted files and a first volume left out.
+#[test]
+fn alz_trees() {
+    let alz = |name| unpack(Format::Alz, &codec_data("aqr-alz", name)).unwrap();
+    for name in ["normal.alz", "low.alz"] {
+        let (done, r) = alz(name);
+        assert_eq!(done.skipped, 0, "{name}: {:?}", r.notes.lock().unwrap());
+        let l = listing(&done, &r);
+        assert_eq!(l.len(), 12, "{name}: {:?}", l.keys());
+        assert!(matches!(&l["한글파일.txt"].0, Node::File(f) if !f.is_empty()), "{name}");
+        // (뷁: of CP949, not EUC-KR)
+        assert!(matches!(&l["뷁테스트.txt"].0, Node::File(f) if !f.is_empty()), "{name}");
+        assert_eq!(l["empty.txt"].0, Node::File(Vec::new()), "{name}");
+        assert_eq!(l["subdir"].0, Node::Dir, "{name}");
+        assert!(matches!(&l["subdir/nested/deep.txt"].0, Node::File(_)), "{name}");
+        let x = &l["hello.txt"].1;
+        assert!(x.mtime.is_some() && x.win_attrs == Some(0x20), "{name}: {x:?}");
+    }
+    let (done, r) = alz("dir_tree.alz");
+    let l = listing(&done, &r);
+    assert_eq!(l["work/tree/empty_folder"].0, Node::Dir);
+    assert!(matches!(&l["work/tree/sub/deeper/deepest/three.txt"].0, Node::File(_)));
+    for name in ["bzip2.alz", "bzip2_dlz.alz", "deflate_empty.alz", "store_empty.alz"] {
+        let (done, r) = alz(name);
+        assert_eq!(done.skipped, 0, "{name}: {:?}", r.notes.lock().unwrap());
+        assert!(listing(&done, &r).values().any(|(n, _)| matches!(n, Node::File(f) if !f.is_empty())), "{name}");
+    }
+    let (done, r) = alz("enc_deflate.alz");
+    assert_eq!(done.skipped, 2);
+    assert!(r.notes.lock().unwrap().iter().all(|n| n.ends_with("encrypted, not extracted")));
+    let (done, r) = alz("split_store.alz");
+    assert_eq!(done.skipped, 1, "{:?}", r.notes.lock().unwrap());
+    assert!(listing(&done, &r).contains_key("part0.bin"));
+    // (damaged: a byte of a DEFLATE body changed fails the file's CRC-32)
+    let mut d = codec_data("aqr-alz", "normal.alz");
+    let k = d.len() / 2;
+    d[k] ^= 0x55;
+    assert!(unpack(Format::Alz, &d).is_err());
+}
+
+/// EggDotNet's EGG archives (aqr-egg's tests/data): a solid one, names of a code page, Windows'
+/// attributes and times, directories, LZMA and AZO, an encrypted file left out.
+#[test]
+fn egg_trees() {
+    let egg = |name| unpack(Format::Egg, &codec_data("aqr-egg", name)).unwrap();
+    let lorem = |n: &Node| matches!(n, Node::File(f) if f.starts_with(b"Lorem ipsum"));
+    let (done, r) = egg("solid.egg");
+    assert_eq!(done.skipped, 0, "{:?}", r.notes.lock().unwrap());
+    let l = listing(&done, &r);
+    assert!(lorem(&l["s/lorem_ipsum_short.txt"].0) && lorem(&l["s/lorem_ipsum_short2.txt"].0), "{:?}", l.keys());
+    let (done, r) = egg("small_kor.egg");
+    assert!(listing(&done, &r).contains_key("작은.txt"));
+    let (done, r) = egg("lorem_short_readonlyhidden.egg");
+    let l = listing(&done, &r);
+    let (ro, hidden) = (&l["lorem_ipsum_short_readonly.txt"], &l["lorem_ipsum_short_hidden.txt"]);
+    assert!(lorem(&ro.0) && lorem(&hidden.0));
+    assert_eq!((ro.1.win_attrs, hidden.1.win_attrs), (Some(1), Some(2)));
+    assert_eq!(ro.1.mtime, at(1_703_855_226));
+    let (done, r) = egg("directories.egg");
+    assert_eq!(listing(&done, &r)["dir1/dir2/dir3/test.txt"].0, Node::File(b"This is some text.".to_vec()));
+    let (done, r) = egg("extattr.egg");
+    assert_eq!(listing(&done, &r)["Some folder"].0, Node::Dir);
+    for (name, files) in
+        [("lzma_simple.egg", 2), ("azonumbers.egg", 1), ("azoshort_txt.egg", 1), ("globalcomment.egg", 1)]
+    {
+        let (done, r) = egg(name);
+        assert_eq!(done.skipped, 0, "{name}: {:?}", r.notes.lock().unwrap());
+        let l = listing(&done, &r);
+        assert_eq!(l.values().filter(|(n, _)| matches!(n, Node::File(f) if !f.is_empty())).count(), files, "{name}");
+    }
+    let (done, r) = egg("lorem_long_zipEnc.egg");
+    assert_eq!(done.skipped, 1, "{:?}", r.notes.lock().unwrap());
+    // (cut short: told; damaged: a byte of an AZO block changed fails its CRC-32)
+    let d = codec_data("aqr-egg", "azonumbers.egg");
+    let (done, _) = unpack(Format::Egg, &d[..d.len() / 2]).unwrap();
+    assert_eq!(done.skipped, 1);
+    let mut d = d;
+    let k = d.len() / 2;
+    d[k] ^= 0x55;
+    assert!(unpack(Format::Egg, &d).is_err());
 }
