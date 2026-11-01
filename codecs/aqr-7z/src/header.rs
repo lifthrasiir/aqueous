@@ -33,7 +33,13 @@ mod id {
     pub const UNPACK_SIZE: u64 = 12;
     pub const NUM_UNPACK_STREAM: u64 = 13;
     pub const EMPTY_STREAM: u64 = 14;
+    pub const EMPTY_FILE: u64 = 15;
+    pub const ANTI: u64 = 16;
     pub const NAME: u64 = 17;
+    pub const CTIME: u64 = 18;
+    pub const ATIME: u64 = 19;
+    pub const MTIME: u64 = 20;
+    pub const WIN_ATTRIBUTES: u64 = 21;
     pub const ENCODED_HEADER: u64 = 23;
 }
 
@@ -160,11 +166,20 @@ impl Streams {
     }
 }
 
-/// A file: its name (UTF-8, from UTF-16) and whether it has data (a substream).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A file: its name (UTF-8, from UTF-16), whether it has data (a substream), and what the
+/// header tells of it besides: whether it is an empty file (else, of no data, a directory) or
+/// an anti-item (a file to remove, of an update), its times (FILETIME) and its attributes (of
+/// Windows, and with `0x8000` the Unix mode in the high 16 bits).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct File {
     pub name: Vec<u8>,
     pub stream: bool,
+    pub empty_file: bool,
+    pub anti: bool,
+    pub ctime: Option<u64>,
+    pub atime: Option<u64>,
+    pub mtime: Option<u64>,
+    pub attrib: Option<u32>,
 }
 
 /// The header: the main streams and the files.
@@ -387,10 +402,30 @@ impl Reader<'_> {
         Some(())
     }
 
+    /// Values of `n` items, each of `size` bytes where defined (all, or by bits), after a byte
+    /// telling they are not external.
+    fn defined(&mut self, n: usize, size: u64) -> Option<Vec<Option<u64>>> {
+        let all = self.byte()? != 0;
+        let defined = if all { vec![true; n] } else { self.bits(n)? };
+        if self.byte()? != 0 {
+            return None;
+        }
+        defined
+            .into_iter()
+            .map(|d| {
+                Some(match d {
+                    true => Some(self.bytes(size)?.iter().rev().fold(0u64, |v, &b| v << 8 | b as u64)),
+                    false => None,
+                })
+            })
+            .collect()
+    }
+
     fn files(&mut self) -> Option<Vec<File>> {
         let n = self.count()?;
+        let mut files = vec![File::default(); n];
         let mut empty = vec![false; n];
-        let mut names: Vec<Vec<u8>> = vec![Vec::new(); n];
+        let (mut empty_file, mut anti) = (Vec::new(), Vec::new());
         loop {
             let t = self.number()?;
             if t == id::END {
@@ -398,22 +433,40 @@ impl Reader<'_> {
             }
             let size = self.number()?;
             let mut r = Reader { d: self.bytes(size)?, at: 0 };
+            let set = |files: &mut [File], v: Vec<Option<u64>>, f: fn(&mut File, u64)| {
+                files.iter_mut().zip(v).for_each(|(file, v)| v.into_iter().for_each(|v| f(file, v)))
+            };
             match t {
                 id::EMPTY_STREAM => empty = r.bits(n)?,
+                // (of the files of no data, in order)
+                id::EMPTY_FILE => empty_file = r.bits(empty.iter().filter(|&&e| e).count())?,
+                id::ANTI => anti = r.bits(empty.iter().filter(|&&e| e).count())?,
                 id::NAME => {
                     if r.byte()? != 0 {
                         return None;
                     }
                     let units: Vec<u16> = r.d[1..].as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c)).collect();
                     let mut it = units.split(|&u| u == 0);
-                    for name in &mut names {
-                        *name = String::from_utf16_lossy(it.next()?).into_bytes();
+                    for f in &mut files {
+                        f.name = String::from_utf16_lossy(it.next()?).into_bytes();
                     }
                 }
+                id::CTIME => set(&mut files, r.defined(n, 8)?, |f, v| f.ctime = Some(v)),
+                id::ATIME => set(&mut files, r.defined(n, 8)?, |f, v| f.atime = Some(v)),
+                id::MTIME => set(&mut files, r.defined(n, 8)?, |f, v| f.mtime = Some(v)),
+                id::WIN_ATTRIBUTES => set(&mut files, r.defined(n, 4)?, |f, v| f.attrib = Some(v as u32)),
                 _ => {}
             }
         }
-        Some(names.into_iter().zip(empty).map(|(name, e)| File { name, stream: !e }).collect())
+        let (mut empty_file, mut anti) = (empty_file.into_iter(), anti.into_iter());
+        for (f, e) in files.iter_mut().zip(empty) {
+            f.stream = !e;
+            if e {
+                f.empty_file = empty_file.next().unwrap_or(false);
+                f.anti = anti.next().unwrap_or(false);
+            }
+        }
+        Some(files)
     }
 
     fn header(&mut self) -> Option<Header> {

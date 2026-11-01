@@ -146,6 +146,45 @@ pub fn decode_framed(
     Ok(s)
 }
 
+/// Decodes the stream at the start of `d`, giving its data to `give` a wave of blocks at a time
+/// (made on up to `threads` threads), so that only so much of it is held at once; `give`
+/// returning false stops it. Returns the bytes of the stream, or None where it was stopped.
+pub fn decode_chunks(d: &[u8], threads: usize, give: &mut dyn FnMut(Vec<u8>) -> bool) -> Result<Option<usize>> {
+    let mut blocks = Blocks::new(d, Framing::Bzip2)?;
+    let wave = threads.max(1) * 2;
+    loop {
+        let mut read = Vec::with_capacity(wave);
+        let mut last = Vec::new();
+        while read.len() < wave {
+            match blocks.next(&mut last)? {
+                Some((orig, crc, _)) => read.push((std::mem::take(&mut last), orig, crc)),
+                None => break,
+            }
+        }
+        let end = read.len() < wave;
+        let made = pool::par_map(read.len(), threads, |k| {
+            let (last, orig, crc) = &read[k];
+            let mut out = Vec::new();
+            undo(last, *orig, *crc, &mut Vec::new(), &mut out, usize::MAX).map(|()| out)
+        });
+        let mut out = Vec::new();
+        for m in made {
+            let m = m?;
+            if out.is_empty() {
+                out = m;
+            } else {
+                out.extend_from_slice(&m);
+            }
+        }
+        if !out.is_empty() && !give(out) {
+            return Ok(None);
+        }
+        if end {
+            return Ok(Some(blocks.finish(true)?));
+        }
+    }
+}
+
 /// The blocks of a stream read one after another, up to the symbols after the BWT.
 struct Blocks<'a> {
     r: Bits<'a>,

@@ -216,7 +216,7 @@ pub fn resolve<const N: usize>(fields: [u32; N], z: &[u8]) -> [u64; N] {
 
 /// The end of central directory record found from the end of `d` whose directory starts with a
 /// central header: where the directory is, and its base (where offset 0 is in `d`).
-fn find_end(d: &[u8]) -> Option<(i64, Range<usize>)> {
+pub fn find_end(d: &[u8]) -> Option<(i64, Range<usize>)> {
     let last = d.len().checked_sub(4 + END_FIXED)?;
     let low = last.saturating_sub(0xffff + 0x10000);
     let mut p = d.len();
@@ -288,7 +288,7 @@ pub fn directory(d: &[u8]) -> (i64, BTreeMap<usize, Info>) {
     if m0.len() > m.len() { (0, m0) } else { (base, m) }
 }
 
-fn central_at(d: &[u8], p: usize) -> Option<Central> {
+pub fn central_at(d: &[u8], p: usize) -> Option<Central> {
     let f = d.get(p + 4..p + 4 + CENTRAL_FIXED)?;
     let name = p + 46..p + 46 + u16_at(f, 24) as usize;
     let extra = name.end..name.end + u16_at(f, 26) as usize;
