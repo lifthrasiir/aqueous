@@ -8,7 +8,7 @@ with Aqueous" work on `.aqr` files, and opening an `.aqr` file (a double-click) 
 
 ```sh
 crates/aqr-mac/bundle.sh   # target/dist/Aqueous.app and Aqueous.zip (dist profile)
-crates/aqr-mac/icns.sh     # droplet.icns at the root, from droplet.svg (committed)
+crates/aqr-mac/icns.sh     # droplet.icns, from droplet.svg at the root (committed)
 ```
 
 Aqueous is distributed as `Aqueous.zip`, holding `Aqueous.app` (`aqr-mac` and `aqr` in

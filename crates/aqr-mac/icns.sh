@@ -1,8 +1,9 @@
 #!/bin/sh
-# Makes droplet.icns at the root from droplet.svg (rsvg-convert, iconutil): the drop at 80% of
-# each size, centred, as macOS's icons leave a margin (824 of 1024 points of their grid).
+# Makes droplet.icns here from droplet.svg at the root (rsvg-convert, iconutil): the drop at
+# 80% of each size, centred, as macOS's icons leave a margin (824 of 1024 points of their grid).
 set -eu
-root=$(cd "$(dirname "$0")/../.." && pwd)
+here=$(cd "$(dirname "$0")" && pwd)
+root=$(cd "$here/../.." && pwd)
 set_dir=$(mktemp -d)/droplet.iconset
 mkdir -p "$set_dir"
 for n in 16 32 128 256 512; do
@@ -16,6 +17,6 @@ for n in 16 32 128 256 512; do
             --left "$off" --top "$off" -o "$set_dir/$name.png" "$root/droplet.svg"
     done
 done
-iconutil -c icns -o "$root/droplet.icns" "$set_dir"
+iconutil -c icns -o "$here/droplet.icns" "$set_dir"
 rm -r "${set_dir:?}"
-ls -l "$root/droplet.icns"
+ls -l "$here/droplet.icns"

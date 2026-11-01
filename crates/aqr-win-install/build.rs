@@ -22,7 +22,7 @@ const LEVEL: i32 = 19;
 fn main() {
     println!("cargo:rerun-if-changed=aqr-win-install.manifest");
     println!("cargo:rerun-if-changed=aqr-win-install.rc");
-    println!("cargo:rerun-if-changed=../../droplet.ico");
+    println!("cargo:rerun-if-changed=../aqr-win/droplet.ico");
     println!("cargo:rerun-if-changed=src/payload.rs");
     println!("cargo:rerun-if-env-changed=AQR_WIN_INSTALL_FROM");
     embed_resource::compile("aqr-win-install.rc", embed_resource::NONE).manifest_optional().unwrap();

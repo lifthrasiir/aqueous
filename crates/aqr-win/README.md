@@ -3,7 +3,7 @@
 Aqueous in Windows Explorer: "Compress with Aqueous" and "Compress with passphrase…" (encrypted,
 `aqr -P`) on files and folders, "Extract here" (also the double-click) and "Test" on `.aqr`
 files, and a window of how far the work is. The work is done by `aqr --ipc` in a process of its own (the protocol: `crates/aqr/src/ipc.rs`); this program
-is the window and the verbs, about 560 KB (70 KB of it the icon, `droplet.ico` at the root).
+is the window and the verbs, about 560 KB (70 KB of it the icon, `droplet.ico`).
 
 ```sh
 cargo build -r -p aqr-win
