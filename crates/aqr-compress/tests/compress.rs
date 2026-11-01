@@ -5,7 +5,7 @@ use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
     ARM64, ASAR, BUNDLE, BVX, BZ2, CLIP, FLAC, FLATE, GIF, HDF5_FLOAT, JPEG, JSONL, LEVELDB, LZ4, LZO, MACHO_SYMTAB,
-    MP3, Native, PCM, PDF, PNG, PNG_SET, RASTER, RECS_ENTRIES, RECS_FIELDS, SQLITE, WRT, WRT_HANGUL, X86, ZIP,
+    MP3, Native, PCM, PDF, PNG, PNG_SET, PRORES, RASTER, RECS_ENTRIES, RECS_FIELDS, SQLITE, WRT, WRT_HANGUL, X86, ZIP,
     decompress,
 };
 use aqr_formula::aqr;
@@ -364,6 +364,17 @@ fn gif_files() {
     assert_eq!(formats(&roundtrip(&d, &all())), [GIF.name, GIF.name]);
     // not a GIF file but its header
     assert!(modules(&roundtrip(&[b"GIF89a".as_slice(), &text(3000)].concat(), &all())).is_empty());
+}
+
+#[test]
+fn prores_files() {
+    for t in ["ks-422", "aw-422hq", "ks-4444-alpha", "ks-interlaced"] {
+        let d = fixture(&format!("codecs/aqr-prores/tests/data/{t}.mov"));
+        assert_eq!(formats(&roundtrip(&d, &all())), [PRORES.name], "{t}");
+    }
+    // not looked for in other data
+    let d = [noise(3000), fixture("codecs/aqr-prores/tests/data/ks-422.mov")].concat();
+    assert!(!formats(&roundtrip(&d, &all())).contains(&PRORES.name));
 }
 
 #[test]

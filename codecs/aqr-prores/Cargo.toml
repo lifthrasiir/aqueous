@@ -2,11 +2,17 @@
 name = "aqr-prores"
 version = "0.1.0"
 edition = "2024"
-description = "Apple ProRes frames rebuilt bit for bit from their coefficients"
+description = "Apple ProRes frames rebuilt bit for bit from their coefficients, which a context model codes with the previous frame as context"
 publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula"]
 
 [dependencies]
 aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 memchr = "2"
 
 [dev-dependencies]

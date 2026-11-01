@@ -47,6 +47,7 @@ pub fn extent(f: Format, d: &[u8]) -> Option<usize> {
         Format::Wasm => aqr_wasm::formula::extent(d),
         Format::Fsb5 => aqr_fsb::fsb5::extent(d),
         Format::Ogg => aqr_ogg::formula::extent(d),
+        Format::ProRes => aqr_prores::formula::extent(d),
         Format::Fasta
         | Format::Ppmd
         | Format::Mkv

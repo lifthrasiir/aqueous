@@ -159,6 +159,13 @@ impl Default for Model {
 }
 
 impl Model {
+    /// Bytes of a model's adaptive bits.
+    pub fn bytes() -> u64 {
+        let m = Model::new();
+        let n = m.zero.len() + m.size.len() + m.mant.len() + m.sign.len() + m.nz.len() + m.dc.len() + m.dc_sign.len();
+        (n * size_of::<Bit>()) as u64
+    }
+
     pub fn new() -> Self {
         let b = Bit::default();
         Model {

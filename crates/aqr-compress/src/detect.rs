@@ -29,6 +29,9 @@ pub enum Format {
     /// Matroska or WebM file (aqr-mkv: frames seen before held once, no module), known by its
     /// EBML header: not looked for in other data.
     Mkv,
+    /// QuickTime or MXF file of ProRes frames (aqr-prores, the frames' coefficients under a
+    /// model), known by its container's start and a frame near it: not looked for in other data.
+    ProRes,
     /// lzop file (aqr-lzo on its LZO1X streams).
     Lzo,
     /// Stream of Apple's LZFSE and LZVN blocks (aqr-bvx on its data).
@@ -136,7 +139,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 53] = [
+    pub const ALL: [Format; 54] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -146,6 +149,7 @@ impl Format {
         Format::Xz,
         Format::Ppmd,
         Format::Mkv,
+        Format::ProRes,
         Format::Lzo,
         Format::Bvx,
         Format::Bzip2,
@@ -203,6 +207,7 @@ impl Format {
             Format::Xz => "xz",
             Format::Ppmd => "ppmd",
             Format::Mkv => "mkv",
+            Format::ProRes => "prores",
             Format::Lzo => "lzo",
             Format::Bvx => "bvx",
             Format::Bzip2 => "bzip2",
@@ -306,6 +311,8 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"xz" | b"txz" => format(Format::Xz),
         b"pmd" => format(Format::Ppmd),
         b"webm" | b"mkv" | b"mka" | b"mk3d" | b"mks" => format(Format::Mkv),
+        // (ProRes's containers; others' video, as in MP4, stays compressed data)
+        b"mov" | b"mxf" => format(Format::ProRes),
         b"lzo" | b"tzo" => format(Format::Lzo),
         b"lzfse" | b"lzvn" => format(Format::Bvx),
         b"bz2" | b"tbz" | b"tbz2" => format(Format::Bzip2),
@@ -318,8 +325,8 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"lzh" | b"lha" => format(Format::Lha),
         b"rar" => format(Format::Rar),
         b"aqr" => format(Format::Aqr),
-        b"zst" | b"br" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"ogv" | b"opus" | b"aac" | b"webp" | b"avif"
-        | b"heic" | b"heif" | b"jxl" | b"jp2" | b"woff2" => Kind::Compressed,
+        b"zst" | b"br" | b"mp4" | b"m4a" | b"m4v" | b"ogv" | b"opus" | b"aac" | b"webp" | b"avif" | b"heic"
+        | b"heif" | b"jxl" | b"jp2" | b"woff2" => Kind::Compressed,
         b"tga" | b"pbm" => Kind::Pixels,
         b"txt" | b"log" | b"csv" | b"tsv" | b"json" | b"jsonl" | b"ndjson" | b"geojsonl" | b"xml" | b"html"
         | b"htm" | b"css" | b"js" | b"svg" | b"md" => Kind::Text,
@@ -449,6 +456,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Ppmd)
     } else if start && aqr_mkv::starts(d) {
         Some(Format::Mkv)
+    } else if start && aqr_prores::formula::starts(d) {
+        Some(Format::ProRes)
     } else if start && aqr_lha::formula::starts(d) {
         // (a header starts with its size and checksum: too weak to look for in other data)
         Some(Format::Lha)

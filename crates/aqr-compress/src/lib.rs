@@ -38,6 +38,8 @@
 //! - Data in which a scan finds no file (an ELF image, the rest of an executable, data of no
 //!   format): aqr-infer-recs, its tables of records and chains of entries transposed by their
 //!   fields, where a quick estimate tells they may save 5% at least and they do.
+//! - QuickTime and MXF files of ProRes frames: aqr-prores, the frames' coefficients under a
+//!   context model with the frame before, in chunks of about 32 MiB.
 //! - Ogg files of Vorbis streams: aqr-ogg, rebuilding the pages from the streams' packets with
 //!   their lacing and CRCs derived, the Vorbis audio packets by aqr-vorbis.
 //! - PNG, GIF, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, Clip Studio Paint, DDS, PDF, SQLite, FASTA, FITS
@@ -2031,6 +2033,7 @@ fn pure_encode(format: Format) -> Option<Encode> {
         Format::Wim => aqr_wim::formula::encode,
         Format::Ppmd => aqr_ppmd::formula::encode,
         Format::Mkv => aqr_mkv::formula::encode,
+        Format::ProRes => aqr_prores::formula::encode,
         _ => return None,
     })
 }

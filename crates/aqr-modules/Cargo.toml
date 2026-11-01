@@ -20,6 +20,7 @@ aqr-clip = { path = "../../codecs/aqr-clip", default-features = false }
 aqr-exe = { path = "../../codecs/aqr-exe", default-features = false, features = ["decode"] }
 aqr-fasta = { path = "../../codecs/aqr-fasta", default-features = false }
 aqr-gif = { path = "../../codecs/aqr-gif", default-features = false }
+aqr-prores = { path = "../../codecs/aqr-prores", default-features = false }
 aqr-gnu-gettext = { path = "../../codecs/aqr-gnu-gettext", default-features = false }
 aqr-vorbis = { path = "../../codecs/aqr-vorbis", default-features = false }
 aqr-ogg = { path = "../../codecs/aqr-ogg", default-features = false }
@@ -73,6 +74,11 @@ required-features = ["wasm"]
 [[bin]]
 name = "lzma2-recons"
 path = "src/bin/lzma2-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "prores-recons"
+path = "src/bin/prores-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]

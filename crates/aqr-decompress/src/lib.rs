@@ -225,6 +225,9 @@ pub const PNG_AGAINST: Module = aqr_png::formula::AGAINST_MODULE;
 pub const PNG_SET: Module = aqr_png::formula::SET_MODULE;
 /// A GIF file from its skeleton and the record of its images.
 pub const GIF: Module = aqr_gif::formula::MODULE;
+/// A span of a QuickTime or MXF file from its ProRes frames' coefficients, coded, and the bytes
+/// between them.
+pub const PRORES: Module = aqr_prores::formula::MODULE;
 pub const JPEG: Module = aqr_jpeg::formula::MODULE;
 pub const MP3: Module = aqr_mp3::formula::MODULE;
 pub const FLAC: Module = aqr_flac::formula::MODULE;
@@ -290,7 +293,7 @@ pub const RECS_ENTRIES: Module = aqr_infer_recs::formula::ENTRIES;
 pub const RECS_FLOATS: Module = aqr_infer_recs::formula::FLOATS;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 71] = [
+pub const MODULES: [Module; 72] = [
     X86,
     X86_REMAP,
     ARM64,
@@ -333,6 +336,7 @@ pub const MODULES: [Module; 71] = [
     PNG_AGAINST,
     PNG_SET,
     GIF,
+    PRORES,
     JPEG,
     MP3,
     FLAC,
@@ -377,11 +381,12 @@ fn none(r: &[&[u8]]) -> std::result::Result<(), String> {
 }
 
 /// The recompressors' own modules, by their `decode`.
-const RECONS: [(Module, Decode); 33] = [
+const RECONS: [(Module, Decode); 34] = [
     (PNG, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode(p, i, n, t).map_err(msg))),
     (PNG_AGAINST, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode_against(p, i, n, t).map_err(msg))),
     (PNG_SET, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode_set(p, i, n, t).map_err(msg))),
     (GIF, |p, r, i, n, t| none(r).and_then(|_| aqr_gif::formula::decode(p, i, n, t).map_err(msg))),
+    (PRORES, |p, r, i, n, t| none(r).and_then(|_| aqr_prores::formula::decode(p, i, n, t).map_err(msg))),
     (JPEG, |p, r, i, n, t| none(r).and_then(|_| aqr_jpeg::formula::decode(p, i, n, t).map_err(msg))),
     (MP3, |p, r, i, n, t| aqr_mp3::formula::decode(p, r, i, n, t).map_err(msg)),
     (FLAC, |p, r, i, n, t| aqr_flac::formula::decode(p, r, i, n, t).map_err(msg)),

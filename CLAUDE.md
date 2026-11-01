@@ -29,7 +29,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   - `aqr-modules` — Wasm modules built from the recompressors' code (`src/bin`, `wasm/`,
     `src/known.rs`).
 - `codecs/` — the recompressor crates `aqr-*` (flate, png, jpeg, mp3, flac, pdf, zip, sqlite,
-  git, lz4, lzma, lzo, bvx, bz2, alz, egg, azo, lha, rar, snappy, gif, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle,
+  git, lz4, lzma, lzo, bvx, bz2, alz, egg, azo, lha, rar, snappy, gif, prores, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle,
   asar, vorbis, ogg, mkv, …), each with a `README.md` and a `FORMAT.md` describing what it stores; a crate with a
   `FORMAT.md` belongs here. `aqr-flate` underlies everything that uses DEFLATE. The workspace
   takes both directories by glob, so a new crate needs no entry in the root `Cargo.toml`.
@@ -169,6 +169,12 @@ optimization picked by hash.
   model is ported from lzma-sdk (public domain). rar 7.23 and 6.24 (`third_party/rar-dl`,
   6.24 for `-ma4`) are the black boxes. Left (its README's Status): volumes, SFX checks, older
   WinRARs' tables, RAR5's parse (most of its record), speed.
+- aqr-prores (Apple ProRes in QuickTime or MXF): the frames found by their `icpf` (no container
+  parsed), parsed to coefficients and written again (every coefficient set has one coding); a
+  context model with the previous frame as context, in chunks of 32 MiB whose eight stripes of
+  rows decode as tasks. Written from RDD 36's description; no decoder's code read. Left (its
+  README's Status): decoding speed (decisions per byte), alpha's run-lengths, Apple-encoded
+  samples (AVFoundation, iPhone).
 - aqr-snappy and aqr-lz4 reimplement the encoders: Chrome's LevelDB Snappy is the
   multiplicative-hash build (Homebrew's arm64 builds use the CRC hash and do not match);
   Firefox's mozlz4 is liblz4's `LZ4_compress_default`.

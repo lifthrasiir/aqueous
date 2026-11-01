@@ -482,6 +482,37 @@ fn bvx_same_as_wasm() {
     }
 }
 
+/// ProRes files natively and as WebAssembly alike (the stripes as tasks), and their coded
+/// chunks damaged in turn failing alike (or giving the same).
+#[test]
+fn prores_same_as_wasm() {
+    let enc = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
+    for t in ["ks-422", "ks-4444-alpha", "ks-interlaced"] {
+        let d = fixture(&format!("codecs/aqr-prores/tests/data/{t}.mov"));
+        let f = aqr_prores::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
+        let c = enc.encode(&f, None).unwrap();
+        assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{t}");
+        assert!(aqr::decode(&c, &Wasm).unwrap() == d, "{t}");
+        let r = f.streams.iter().position(|s| s.class == "prores/coded").unwrap();
+        for k in 0..8 {
+            let mut bad = f.clone();
+            let s = &mut bad.streams[r].data;
+            let at = s.len() * k / 8;
+            if k == 7 {
+                s[at..].fill(0xff);
+            } else {
+                s[at] ^= 1 << k;
+            }
+            let c = enc.encode(&bad, None).unwrap();
+            let (n, w) = (aqr::decode(&c, &Native::default()), aqr::decode(&c, &Wasm));
+            assert_eq!(n.is_ok(), w.is_ok(), "{t} ({k}): {n:?} {w:?}");
+            if let (Ok(n), Ok(w)) = (n, w) {
+                assert!(n == w, "{t} ({k})");
+            }
+        }
+    }
+}
+
 /// GIF files natively and as WebAssembly alike, and their records damaged in turn failing alike
 /// (or giving the same).
 #[test]

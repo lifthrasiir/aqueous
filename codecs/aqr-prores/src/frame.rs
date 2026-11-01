@@ -124,6 +124,27 @@ fn row_slices(mbw: usize, log2: u32) -> impl Iterator<Item = usize> {
     })
 }
 
+impl Slice {
+    /// Appends the slice's bytes to `out`, its sizes from its coefficients; returns how many.
+    pub fn write_onto(&self, out: &mut Vec<u8>) -> usize {
+        let s0 = out.len();
+        out.extend_from_slice(&self.header);
+        let mut sizes = [0usize; 3];
+        for (k, (c, tail)) in self.comps.iter().enumerate() {
+            let at = out.len();
+            coef::encode(out, c, *tail);
+            sizes[k] = out.len() - at;
+        }
+        out.extend_from_slice(&self.alpha);
+        for (k, n) in sizes.into_iter().enumerate() {
+            if k < 2 || self.header.len() >= 8 {
+                out[s0 + 2 + 2 * k..s0 + 4 + 2 * k].copy_from_slice(&(n as u16).to_be_bytes());
+            }
+        }
+        out.len() - s0
+    }
+}
+
 impl Picture {
     /// The widths in macroblocks of the slices along a row.
     pub fn widths(&self, h: &Header) -> Vec<usize> {
@@ -224,8 +245,16 @@ impl Frame {
 
     /// The frame's bytes, from its size field on.
     pub fn write(&self) -> Vec<u8> {
-        let mut out = vec![0; 8];
-        out[4..8].copy_from_slice(b"icpf");
+        let mut out = Vec::new();
+        self.write_onto(&mut out);
+        out
+    }
+
+    /// Appends the frame's bytes to `out`.
+    pub fn write_onto(&self, out: &mut Vec<u8>) {
+        let base = out.len();
+        out.resize(base + 8, 0);
+        out[base + 4..base + 8].copy_from_slice(b"icpf");
         out.extend_from_slice(&self.header.raw);
         for pic in &self.pictures {
             let p0 = out.len();
@@ -233,29 +262,14 @@ impl Frame {
             let table = out.len();
             out.resize(table + 2 * pic.slices.len(), 0);
             for (i, s) in pic.slices.iter().enumerate() {
-                let s0 = out.len();
-                out.extend_from_slice(&s.header);
-                let mut sizes = [0usize; 3];
-                for (k, (c, tail)) in s.comps.iter().enumerate() {
-                    let at = out.len();
-                    coef::encode(&mut out, c, *tail);
-                    sizes[k] = out.len() - at;
-                }
-                out.extend_from_slice(&s.alpha);
-                for (k, n) in sizes.into_iter().enumerate() {
-                    if k < 2 || s.header.len() >= 8 {
-                        out[s0 + 2 + 2 * k..s0 + 4 + 2 * k].copy_from_slice(&(n as u16).to_be_bytes());
-                    }
-                }
-                let len = (out.len() - s0) as u16;
+                let len = s.write_onto(out) as u16;
                 out[table + 2 * i..table + 2 * i + 2].copy_from_slice(&len.to_be_bytes());
             }
             let size = (out.len() - p0) as u32;
             out[p0 + 1..p0 + 5].copy_from_slice(&size.to_be_bytes());
         }
         out.extend_from_slice(&self.trailer);
-        let size = out.len() as u32;
-        out[..4].copy_from_slice(&size.to_be_bytes());
-        out
+        let size = (out.len() - base) as u32;
+        out[base..base + 4].copy_from_slice(&size.to_be_bytes());
     }
 }

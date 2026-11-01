@@ -3,7 +3,7 @@
 //! thread, the chunks in parallel). Frames are checked byte for byte.
 //!
 //! ```sh
-//! cargo run --release -p aqr-prores --example aqr-prores-bench -- [-c CHUNK_MB] [-n MAX_FRAMES] FILE_OR_DIR...
+//! cargo run --release -p aqr-prores --example aqr-prores-bench -- [-c CHUNK_MB] [-n MAX_FRAMES] [-t DECODING_THREADS] FILE_OR_DIR...
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -24,12 +24,13 @@ fn walk(p: &Path, out: &mut Vec<PathBuf>) {
 
 fn main() {
     let mut paths = Vec::new();
-    let (mut chunk_mb, mut max_frames) = (32usize, usize::MAX);
+    let (mut chunk_mb, mut max_frames, mut threads) = (32usize, usize::MAX, 1usize);
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "-c" => chunk_mb = args.next().unwrap().parse().unwrap(),
             "-n" => max_frames = args.next().unwrap().parse().unwrap(),
+            "-t" => threads = args.next().unwrap().parse().unwrap(),
             _ => walk(Path::new(&a), &mut paths),
         }
     }
@@ -42,33 +43,34 @@ fn main() {
         if at.is_empty() {
             continue;
         }
-        let frames: Vec<&[u8]> = at
-            .iter()
-            .take(max_frames)
-            .map(|&a| &d[a..a + u32::from_be_bytes(d[a..a + 4].try_into().unwrap()) as usize])
-            .collect();
-        // Chunks of at least chunk_mb.
-        let mut chunks: Vec<Vec<&[u8]>> = vec![Vec::new()];
+        let size = |a: usize| u32::from_be_bytes(d[a..a + 4].try_into().unwrap()) as usize;
+        let at: Vec<usize> = at.into_iter().take(max_frames).collect();
+        // Chunks of at least chunk_mb of frames, each the span from its first frame to its last.
+        let mut chunks: Vec<Vec<usize>> = vec![Vec::new()];
         let mut acc = 0;
-        for f in frames {
+        for &a in &at {
             if acc >= chunk_mb << 20 {
                 chunks.push(Vec::new());
                 acc = 0;
             }
-            acc += f.len();
-            chunks.last_mut().unwrap().push(f);
+            acc += size(a);
+            chunks.last_mut().unwrap().push(a);
         }
+        // Frame bytes, coded bytes, seconds of encoding and decoding, and whether it round-trips.
         let res: Vec<(usize, usize, f64, f64, bool)> = chunks
             .par_iter()
             .map(|ch| {
+                let span = ch[0]..ch[ch.len() - 1] + size(ch[ch.len() - 1]);
+                let ranges: Vec<_> = ch.iter().map(|&a| a - span.start..a - span.start + size(a)).collect();
+                let s = &d[span];
                 let t = Instant::now();
-                let e = codec::encode(ch);
+                let e = codec::encode(s, &ranges);
                 let te = t.elapsed().as_secs_f64();
                 let t = Instant::now();
-                let back = codec::decode(&e);
+                let back = codec::decode(&e.coded, &e.gaps, e.limits, s.len(), threads);
                 let td = t.elapsed().as_secs_f64();
-                let ok = back.is_ok_and(|b| b.len() == ch.len() && b.iter().zip(ch).all(|(x, y)| x == y));
-                (ch.iter().map(|f| f.len()).sum(), e.len(), te, td, ok)
+                let ok = back.is_ok_and(|b| b == s);
+                (ch.iter().map(|&a| size(a)).sum(), e.coded.len(), te, td, ok)
             })
             .collect();
         let (i, o): (usize, usize) = (res.iter().map(|r| r.0).sum(), res.iter().map(|r| r.1).sum());

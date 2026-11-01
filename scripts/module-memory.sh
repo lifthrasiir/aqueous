@@ -62,6 +62,9 @@ samples() {
     # a dithered photograph of 4 megapixels (gif-recons' largest tables), and an animation
     make photo.gif 'magick $s/photo.png -resize 2400x1700! $out'
     make anim.gif 'ffmpeg -loglevel error -f lavfi -i testsrc=duration=3:size=320x240:rate=10 $out'
+    # ProRes: 4:4:4 with alpha (a fixture), and 422 HQ of 1080p (prores-recons' stripes)
+    copy prores.mov $codecs/aqr-prores/tests/data/ks-4444-alpha.mov
+    make prores-hq.mov 'ffmpeg -loglevel error -f lavfi -i testsrc2=size=1920x1080:rate=24:duration=5 -c:v prores_ks -profile:v 3 $out'
     make photo-prog.jpg 'magick $s/photo.png -quality 90 -interlace JPEG $out'
     make big.jpg 'magick $s/photo.png -resize 4000x3000! -quality 90 $out'
     make photo.bmp 'magick $s/photo.png -type TrueColor BMP3:$out'

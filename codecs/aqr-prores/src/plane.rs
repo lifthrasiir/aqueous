@@ -4,7 +4,7 @@
 //! bottom right; 4:2:2 chroma has two blocks per macroblock, top then bottom, and 4:4:4 chroma
 //! four, as luma. Slices are one macroblock high, laid left to right along a row.
 
-use crate::frame::{Header, Picture, Slice};
+use crate::frame::{Header, Slice};
 
 /// Blocks of one component, in raster order, each in scan order.
 pub struct Plane {
@@ -26,10 +26,10 @@ pub fn place(b: usize, per_mb: usize) -> (usize, usize) {
     }
 }
 
-/// The planes (Y, Cb, Cr) of `pic`, whose slices are `widths` macroblocks wide along a row.
-pub fn planes(pic: &Picture, h: &Header, widths: &[usize]) -> [Plane; 3] {
+/// The planes (Y, Cb, Cr) of whole rows of slices, `widths` macroblocks wide along a row.
+pub fn planes(slices: &[Slice], h: &Header, widths: &[usize]) -> [Plane; 3] {
     let mbw: usize = widths.iter().sum();
-    let rows = pic.slices.len() / widths.len();
+    let rows = slices.len() / widths.len();
     std::array::from_fn(|k| {
         let per_mb = if k == 0 || h.chroma == 3 { 4 } else { 2 };
         let bw = if per_mb == 4 { 2 * mbw } else { mbw };
@@ -39,7 +39,7 @@ pub fn planes(pic: &Picture, h: &Header, widths: &[usize]) -> [Plane; 3] {
         for r in 0..rows {
             let mut x0 = 0;
             for &w in widths {
-                let sl = &pic.slices[s];
+                let sl = &slices[s];
                 let q = sl.header[1];
                 for (b, c) in sl.comps[k].0.as_chunks::<64>().0.iter().enumerate() {
                     let (x, y) = place(b, per_mb);

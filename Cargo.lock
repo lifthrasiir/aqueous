@@ -198,6 +198,7 @@ dependencies = [
  "aqr-pdf",
  "aqr-png",
  "aqr-ppmd",
+ "aqr-prores",
  "aqr-psd",
  "aqr-rar",
  "aqr-raw",
@@ -256,6 +257,7 @@ dependencies = [
  "aqr-ogg",
  "aqr-pdf",
  "aqr-png",
+ "aqr-prores",
  "aqr-psd",
  "aqr-rar",
  "aqr-raw",
@@ -570,6 +572,7 @@ dependencies = [
  "aqr-ogg",
  "aqr-pdf",
  "aqr-png",
+ "aqr-prores",
  "aqr-psd",
  "aqr-rar",
  "aqr-raw",
@@ -675,6 +678,7 @@ name = "aqr-prores"
 version = "0.1.0"
 dependencies = [
  "aqr-common",
+ "aqr-formula",
  "memchr",
  "memmap2",
  "rayon",

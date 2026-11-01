@@ -334,6 +334,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/png-set.block"),
     },
     Known {
+        name: "prores-recons",
+        version: 1,
+        sha512_256: hex("54a549eaa892fd1d30b8d9890c3cf7806ebe0fc94c66a5f26cb0e467c0f87400"),
+        block: include_bytes!("../wasm/prores-recons.block"),
+    },
+    Known {
         name: "psd-recons",
         version: 1,
         sha512_256: hex("b00379f54350fc3e0b7739057e9f05da387d5ecbb81e8e0a3cf30ff9cc7d06d1"),

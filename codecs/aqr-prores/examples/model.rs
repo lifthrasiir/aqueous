@@ -399,9 +399,9 @@ fn main() {
                     let ws = pic.widths(&f.header);
                     let pp = pf.as_ref().and_then(|g| {
                         let gp = g.pictures.get(f.pictures.iter().position(|x| std::ptr::eq(x, pic))?)?;
-                        Some(planes(gp, &g.header, &gp.widths(&g.header)))
+                        Some(planes(&gp.slices, &g.header, &gp.widths(&g.header)))
                     });
-                    for (k, pl) in planes(pic, &f.header, &ws).iter().enumerate() {
+                    for (k, pl) in planes(&pic.slices, &f.header, &ws).iter().enumerate() {
                         let q = pp.as_ref().map(|x| &x[k]).filter(|q| q.bw == pl.bw && q.bh == pl.bh);
                         if env("TD", 0) != 0
                             && let Some(q) = q

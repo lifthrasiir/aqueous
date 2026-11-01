@@ -1,14 +1,17 @@
 # aqr-prores
 
 Apple ProRes (SMPTE RDD 36; 422 Proxy to 4444 XQ, not ProRes RAW) recompression: a frame is
-parsed into its headers and its slices' quantized coefficients, which are coded again by a
-context model with the previous frame as context, and the frame is written again from them
-bit for bit. No formula or module yet.
+parsed into its headers and its slices' quantized coefficients, which a context model codes
+again with the previous frame as context, and the frame is written again from them bit for
+bit. The module `prores-recons` (`FORMAT.md`) rebuilds a chunk of a QuickTime or MXF file.
 
 Frames delimit themselves (a big-endian size, then `icpf`), so `find` takes them out of any
-container (QuickTime, MXF, Matroska) without reading it.
+container without reading it; aqr-compress takes `.mov` and `.mxf` files, and others that start
+as QuickTime or MXF with a frame in their first 64 MiB.
 
 Written from the specification's description of the bitstream; no decoder's code was read.
+The test fixtures (`tests/data`, `scripts/gen-fixtures.sh`) are ffmpeg's test patterns through
+its two encoders.
 
 ## What a frame holds
 
@@ -23,12 +26,30 @@ Written from the specification's description of the bitstream; no decoder's code
 - Bytes after the pictures within the frame's size: zero stuffing in Apple's frames
   (64–128 bytes), kept.
 
-## The model (`src/model.rs`, `src/codec.rs`)
+## The formula (`src/formula.rs`, `src/codec.rs`)
 
-Frames are coded in chunks (32 MB in the bench), each with adaptive binary arithmetic coding
-(aqr-common's `arith`), one code path for both directions (`Coder`). Each picture's planes
-(`src/plane.rs`: blocks put in place, in a macroblock TL, TR, BL, BR) are coded block by block
-in raster order, with the same plane of the previous frame in the chunk as context:
+The frames are cut into chunks of about 32 MiB (a chunk ends also where more than 4 MiB lie
+between frames). A chunk's span, from its first frame to its last, is an application of
+`prores-recons`, whose inputs are the coded chunk and the bytes between its frames (audio,
+the container's headers); the bytes outside the spans and between frames are one stream,
+`prores/rest`, in the file's order.
+
+A coded chunk is nine streams of adaptive binary arithmetic coding (aqr-common's `arith`) and
+raw bits. The first tells the frames: the gaps' lengths, the frames kept as they are (those
+that do not parse), the headers as differences from the previous ones, the slices' headers,
+tails and alpha. Each of the other eight codes a stripe of rows of every picture, with a model
+of its own and the same stripe of the frame before as context. So the stripes decode at once
+(tasks in WebAssembly), each writing its slices' bytes; the frames are put together from them.
+The stripes cost 0.1% (0.7272 -> 0.7280 on three files).
+
+The parameters give what decoding holds (blocks of a frame and of a stripe, bytes of a frame,
+of the headers and of what each stripe writes), exactly as the encoder found it; the decoder
+holds to them, and the memory estimate (tasks counted with their copies) follows from them.
+
+## The model (`src/model.rs`)
+
+One code path for both directions (`Coder`). Each picture's planes (`src/plane.rs`: blocks put
+in place, in a macroblock TL, TR, BL, BR) are coded block by block in raster order:
 
 - DC: predicted by the previous frame's DC, else the median of the left, above and gradient;
   the residual's size in unary, sign modelled, the rest raw.
@@ -40,7 +61,6 @@ in raster order, with the same plane of the previous frame in the chunk as conte
   in the block itself), the scan band and the nonzeros left. The top two mantissa bits and the
   sign are modelled with the previous frame's coefficient; signs without one, and lower
   mantissa bits, are raw.
-- Headers as differences from the previous ones (most repeat); sizes are derived.
 - A frame that does not parse is kept as it is. One that parses needs no check: every
   coefficient set has one coding, padding is zero and recorded, sizes are derived.
 
@@ -53,26 +73,44 @@ even in all. The other block placement and a raster scan cost more, which confir
 
 ## Status
 
-`examples/check.rs` (`aqr-prores-check FILE_OR_DIR...`) finds the frames and checks them.
-On the local corpus (`F:\Data\aqr-prores-corpus`, see its README: Apple, ARRI, FFmpeg's
-`prores_ks` and `prores_aw`, 2K to UHD, MOV and MXF, interlaced, alpha) every frame is
-rebuilt.
+Tools (`cargo run -r -p aqr-prores --example ...`):
 
-`examples/bench.rs` (`aqr-prores-bench [-c CHUNK_MB] [-n FRAMES] FILE_OR_DIR...`) codes
-the frames in chunks and decodes them. On the corpus (16.4 GB, Ryzen 7 9700X):
+- `aqr-prores-check [--zstd] FILE_OR_DIR...`: finds the frames and checks that each is written
+  again bit for bit (with `--zstd`, zstd -3 of the frames and of their parse).
+- `aqr-prores-bench [-c CHUNK_MB] [-n FRAMES] [-t THREADS] FILE_OR_DIR...`: codes the frames
+  in chunks and decodes them.
+- `aqr-prores-model [-n FRAMES] FILE_OR_DIR...`: the context estimator above.
 
-| | ratio | encode | decode |
-|---|---|---|---|
-| all, 16 threads on 8 cores (MB/s per thread) | 0.7308 | 9.6 | 8.0 |
-| 40 frames of three files, one thread (MB/s) | 0.7212 | 15.7 | 12.6 |
+The local corpus is `F:\Data\aqr-prores-corpus` (see its README: Apple, ARRI, FFmpeg's
+`prores_ks` and `prores_aw`, 2K to UHD, MOV and MXF, interlaced, alpha; 16.4 GB). Every frame
+of it is written again bit for bit; zstd -3 takes the frames to 0.9902.
 
-By file: tripod ARRI 2K 422 HQ 0.54–0.55, ARRI 4444 0.67–0.83, Apple's animated film 0.63, the
-SD tape capture 0.82, ffmpeg's encodes 0.35–0.73. About 8–9 binary decisions per input byte,
-mostly zero flags (3.8 per byte) and sizes (1.8); the arithmetic coder itself is about 15% of
-the encoding time.
+Measured 2026-11-01 on a Ryzen 7 9700X (8 cores, 16 threads), `cargo aqr -c --stats` of the
+corpus directory (33 files, 16.89 GB) at level mid, against the build before aqr-prores
+(`cache/aqr-corpus.txt`):
+
+| | before | after |
+|---|---|---|
+| archived | 16.72 GB (0.990) | 11.46 GB (0.678) |
+| compressed in | 39 s | 368 s (46 MB/s; the largest file, 5.8 GB, 111 s on 12 threads) |
+| tested (`aqr -t`) | | 153 s (110 MB/s) |
+| heap peak | 17.5 GB | 20.5 GB compressing, 11.9 GB testing |
+
+The peaks are the archiver's: it holds the largest files whole (17.5 GB before as well), and a
+leaf's output is its file. By file, from the bench (`examples/bench.rs`, 32 MiB chunks): tripod
+ARRI 2K 422 HQ 0.54–0.55, ARRI 4444 0.67–0.83, Apple's animated film 0.63, the SD tape capture
+0.82, ffmpeg's encodes 0.35–0.73 of their frames. A chunk codes at about 15 MB/s on a thread
+and decodes at about 13 (70 MB/s with its eight stripes at once).
 
 Left:
 
-- Speed, decoding first (`Frame::write` is about a quarter of it).
-- The formula and module; chunking by the archive's needs.
-- Alpha: its run-length coding parsed and modelled.
+- Speed: about 8–9 binary decisions per input byte, mostly zero flags (3.8 a byte) and sizes
+  (1.8); the arithmetic coder itself is about 15% of the encoding time, the rest the decisions'
+  contexts and branches. Fewer decisions (zero runs coded together, sizes binarised around
+  their expected value) are the way to go faster.
+- Alpha: its run-length coding parsed and modelled (0.3 MB of the corpus).
+- Apple's own encoders as a sample: AVFoundation (`avconvert`, `prores_videotoolbox`) and iPhone
+  recordings; the corpus has one Apple-encoded film.
+- MP4 or Matroska holding ProRes are not taken (`.mp4` stays compressed data; Matroska goes to
+  aqr-mkv).
+- `scripts/module-memory.sh` has two ProRes samples, not yet measured (`estimates_hold`).

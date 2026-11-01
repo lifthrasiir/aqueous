@@ -86,6 +86,12 @@ reservoir is rebuilt.
 | JSON lines | aqr-jsonl | 7 files, 2.27 GB (README) | 0.872 of `aqr` before (through `aqr`) | | 179–1012 | 741–3080 (one thread) | segments of 64 MiB: decompressing 2.24 GB, 376 MB of heap | measured 2026-11-01 through `aqr` (10 threads) and `aqr-jsonl-bench`, not `aqr-show`: GH Archive −8.4%, Amazon reviews −18.1%, OpenAlex −27.8%, GeoJSON −15.1%, event logs −37.6%, C4 −1.5%. Taken by its text before aqr-xsv and aqr-wrt |
 | Wavefront OBJ | aqr-obj | 22 files, 403 MB | 0.097 | 0.242 | 121 | 324 | 24 MB + 3.1× | `aqr-obj bench`, before the wiring. Files over 300 MB left out. Through `aqr` (all threads, 2026-10-28): c3d 67.5 → 9.99 MB (19.94 before the wiring), threejs 6.0 → 0.83 MB (1.50). Taken by its text, not by the name `.obj` (object files) |
 
+### Video
+
+| format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
+|---|---|---|---|---|---|---|---|---|
+| Apple ProRes (QuickTime, MXF) | aqr-prores | 33 files, 16.89 GB: ARRI cameras (MOV and MXF), an Apple-encoded film, an SD capture, ffmpeg's encoders, FFmpeg's samples (README) | 0.678 (0.990 before) | 0.990 | 46 (`aqr`, 16 threads) | 110 (`-t`, 16 threads) | the archiver's (it holds the largest file whole) | measured 2026-11-01 with `aqr` on a Ryzen 7 9700X. The coefficients under a context model with the previous frame as context (most of the gain: 0.830 without it), in chunks of 32 MiB whose eight stripes decode as tasks; nothing reproduced but the coding. A chunk codes at about 15 MB/s on a thread and decodes at 13 |
+
 ### Containers and general-purpose compression
 
 | format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
@@ -138,6 +144,7 @@ reservoir is rebuilt.
 | aqr-bundle | members sliced from the archive's bytes rather than copied (the memory of `.tar.gz`); COFF objects of ar archives (aqr-exe); old GNU sparse files; tar archives found in other data |
 | aqr-asar | contents of many small files by kind cost alone and pay in a batch (etcher +1.96 MB alone; of no kind the 27 archives +9.2 MB) |
 | aqr-ppmd | the data decoded and coded again (a few MB/s, `docs/10gb-todo.md` item 5); files of several files past the first; other variants |
+| aqr-prores | decoding speed (fewer decisions a byte); alpha's run-lengths; Apple's own encoders as a sample (README) |
 | aqr-mkv | Opus audio; MP4 (`stsz`/`stco`) by the same idea; why the formula taken unweighed archives larger (README) |
 | aqr-mszip | speed of LZX (22 MB/s of data a stream), to take it below level 9; the data blocks' checksums derived; MSI |
 | aqr-alz | split archives' volumes joined; encrypted entries; the entries' CRC-32 and sizes for the probe of what is archived along (`entry_sums`); bzip2 of several blocks checked against ALZip |
@@ -157,14 +164,13 @@ bytes. Gains are estimates unless a tool is cited.
 
 | format | used in | how it compresses | what is left | reuse |
 |---|---|---|---|---|
-| Apple ProRes (422, 4444) | editing, mastering, camera recording | intra-only DCT; per slice, coefficients in a Rice/exp-Golomb hybrid whose parameter adapts to the previous value only | context modelling of the coefficients (as Lepton); no quantisation to reproduce, only the coding. 20–30% estimated | aqr-jpeg's coefficient model; a MOV atom parser is new |
-| Avid DNxHD, DNxHR | broadcast, Avid workflows | intra DCT, VLC; constant bit rate, so every frame is padded | the padding, then the VLC recoded | with ProRes |
+| Avid DNxHD, DNxHR | broadcast, Avid workflows | intra DCT, VLC; constant bit rate, so every frame is padded | the padding, then the VLC recoded | aqr-prores's model and chunks |
 | DV, HDV, XDCAM (MPEG-2), MPEG-4 Part 2 (Xvid, DivX), H.263 | archived broadcast and camcorder footage, DVD VOB, old downloads | DCT, VLC tables fixed by the standard | coefficients recoded (as packMP3). Inter frames also need motion vectors and macroblock modes modelled, but nothing reconstructed | aqr-mp3's structure |
 | Motion JPEG (AVI, MOV) | dashcams, webcams, older cameras' video, security cameras | a JPEG per frame, often without its Huffman tables (the standard ones implied) | each frame through aqr-jpeg; the frames' headers predicted from each other | aqr-jpeg |
 | HuffYUV, FFVHuff, UT Video, MagicYUV | lossless capture, intermediates | spatial prediction, then static Huffman tables per stream or slice | the residuals context-modelled | aqr-raw's pixel model |
 | H.264 CAVLC (baseline profile) | older phones, video calls, some security cameras | VLC tables chosen by the neighbours' coefficient counts | parsing needs no reconstruction, so the syntax elements can be recoded under richer contexts | aqr-mp3's structure |
 | Theora | old web video, game cutscenes | VP3: DCT tokens with Huffman tables set in the stream header | as Vorbis | the Vorbis work |
-| CineForm, ProRes RAW | high-end cameras, post-production | wavelets, or a RAW-specific coding | after ProRes | |
+| CineForm, ProRes RAW | high-end cameras, post-production | wavelets, or a RAW-specific coding | after ProRes (aqr-prores) | |
 
 ### Audio
 
