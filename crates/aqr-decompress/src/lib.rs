@@ -266,6 +266,8 @@ pub const IMA: Module = aqr_ima::formula::MODULE;
 pub const HDF5_FLOAT: Module = aqr_hdf5::formula::FLOAT;
 /// A delimited text table (CSV, TSV, USV and the like) from its columns (aqr-xsv).
 pub const XSV: Module = aqr_xsv::formula::MODULE;
+/// JSON lines from their values stored by key path (aqr-jsonl).
+pub const JSONL: Module = aqr_jsonl::formula::MODULE;
 /// Text of words and markup replaced by codes of a dictionary (aqr-wrt). Resources: the
 /// dictionary; inputs: the coded text.
 pub const WRT: Module = aqr_wrt::formula::MODULE;
@@ -288,7 +290,7 @@ pub const RECS_ENTRIES: Module = aqr_infer_recs::formula::ENTRIES;
 pub const RECS_FLOATS: Module = aqr_infer_recs::formula::FLOATS;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 70] = [
+pub const MODULES: [Module; 71] = [
     X86,
     X86_REMAP,
     ARM64,
@@ -351,6 +353,7 @@ pub const MODULES: [Module; 70] = [
     IMA,
     HDF5_FLOAT,
     XSV,
+    JSONL,
     WRT,
     WRT_HANGUL,
     PCM,
@@ -374,7 +377,7 @@ fn none(r: &[&[u8]]) -> std::result::Result<(), String> {
 }
 
 /// The recompressors' own modules, by their `decode`.
-const RECONS: [(Module, Decode); 32] = [
+const RECONS: [(Module, Decode); 33] = [
     (PNG, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode(p, i, n, t).map_err(msg))),
     (PNG_AGAINST, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode_against(p, i, n, t).map_err(msg))),
     (PNG_SET, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode_set(p, i, n, t).map_err(msg))),
@@ -399,6 +402,7 @@ const RECONS: [(Module, Decode); 32] = [
     (IMA, |p, r, i, n, _| none(r).and_then(|_| aqr_ima::formula::decode(p, i, n).map_err(msg))),
     (HDF5_FLOAT, |p, r, i, n, _| none(r).and_then(|_| aqr_hdf5::module::float(p, i, n).map_err(msg))),
     (XSV, |p, r, i, n, t| none(r).and_then(|_| aqr_xsv::formula::decode(p, i, n, t).map_err(msg))),
+    (JSONL, |p, r, i, n, t| none(r).and_then(|_| aqr_jsonl::formula::decode(p, i, n, t).map_err(msg))),
     (WRT, |p, r, i, n, t| aqr_wrt::formula::decode(p, r, i, n, t).map_err(msg)),
     (WRT_HANGUL, |p, r, i, n, t| aqr_wrt::formula::decode_hangul(p, r, i, n, t).map_err(msg)),
     (PCM, |p, r, i, n, t| aqr_raw::formula::pcm::decode(p, r, i, n, t).map_err(msg)),

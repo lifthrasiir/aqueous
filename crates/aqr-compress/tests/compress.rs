@@ -4,8 +4,8 @@ use std::sync::{PoisonError, RwLock};
 use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
-    ARM64, ASAR, BUNDLE, BVX, BZ2, CLIP, FLAC, FLATE, GIF, HDF5_FLOAT, JPEG, LEVELDB, LZ4, LZO, MACHO_SYMTAB, MP3,
-    Native, PCM, PDF, PNG, PNG_SET, RASTER, RECS_ENTRIES, RECS_FIELDS, SQLITE, WRT, WRT_HANGUL, X86, XSV, ZIP,
+    ARM64, ASAR, BUNDLE, BVX, BZ2, CLIP, FLAC, FLATE, GIF, HDF5_FLOAT, JPEG, JSONL, LEVELDB, LZ4, LZO, MACHO_SYMTAB,
+    MP3, Native, PCM, PDF, PNG, PNG_SET, RASTER, RECS_ENTRIES, RECS_FIELDS, SQLITE, WRT, WRT_HANGUL, X86, ZIP,
     decompress,
 };
 use aqr_formula::aqr;
@@ -234,9 +234,9 @@ fn mozlz4(d: &[u8]) -> Vec<u8> {
 
 #[test]
 fn lz4_nested() {
-    // (its records, a line each of four fields between commas, taken as a table)
+    // (its records, the lines of a JSON array, taken as JSON lines)
     let f = roundtrip(&fixture("codecs/aqr-lz4/tests/data/f64k.lz4"), &all());
-    assert_eq!(modules(&f), [LZ4.name, XSV.name]);
+    assert_eq!(modules(&f), [LZ4.name, JSONL.name]);
     // linked blocks are not reproduced
     assert!(modules(&roundtrip(&fixture("codecs/aqr-lz4/tests/data/f64k-linked.lz4"), &all())).is_empty());
 

@@ -164,6 +164,20 @@ with open(sys.argv[1], \"w\") as f:
     for i in range(200000):
         f.write(f\"{i},user{r.randrange(5000)},{r.randrange(1000)},{r.random():.4f},2026-{r.randrange(1,13):02}-{r.randrange(1,29):02}\\n\")
 " $out'
+    # JSON lines of nested objects, key lists that vary, maps (keys that are words), tuples
+    make records.jsonl 'py "
+import json, random, sys
+r = random.Random(1)
+w = open(\"/usr/share/dict/words\").read().split()
+with open(sys.argv[1], \"w\") as f:
+    for i in range(100000):
+        d = {\"id\": i, \"user\": {\"name\": r.choice(w), \"score\": r.random()}, \"tags\": r.sample(w, r.randrange(4))}
+        d[\"at\"] = [round(r.uniform(-180, 180), 6), round(r.uniform(-90, 90), 6)]
+        if r.random() < 0.3:
+            d[\"extra\"] = {k: r.randrange(100) for k in r.sample([\"a\", \"b\", \"c\", \"d\", \"e\"], r.randrange(1, 5))}
+        d[\"index\"] = {r.choice(w): [r.randrange(1000)] for _ in range(r.randrange(8))}
+        f.write(json.dumps(d) + \"\\n\")
+" $out'
     make genome.fa 'py "
 import random, sys
 r = random.Random(1)

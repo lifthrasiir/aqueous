@@ -31,9 +31,10 @@
 //!   the files' sizes, offsets and SHA-256 integrity derived.
 //! - ISO 9660 and UDF images: aqr-iso, the image cut into its files' contents and the rest.
 //! - WIM files of LZX: aqr-wim, the resources' data, the LZX chunks rebuilt by aqr-lzx.
-//! - Text, a whole file of text bytes or data of a name telling text: a delimited table (CSV,
-//!   TSV, USV and the like) by aqr-xsv, its fields stored column by column, where it takes it;
-//!   else aqr-wrt, its words and markup replaced by codes of a dictionary of its own.
+//! - Text, a whole file of text bytes or data of a name telling text: JSON lines by aqr-jsonl,
+//!   their values stored by key path, or a delimited table (CSV, TSV, USV and the like) by
+//!   aqr-xsv, its fields stored column by column, where either takes it; else aqr-wrt, its
+//!   words and markup replaced by codes of a dictionary of its own.
 //! - Data in which a scan finds no file (an ELF image, the rest of an executable, data of no
 //!   format): aqr-infer-recs, its tables of records and chains of entries transposed by their
 //!   fields, where a quick estimate tells they may save 5% at least and they do.
@@ -808,9 +809,10 @@ fn made_alone(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option
     match how {
         _ if depth >= opt.depth || !opt.recompresses() => None,
         Nest::Exact => detect(d).and_then(|format| recompress_as(format, d, opt, depth, cx)).map(Made::from),
-        // a table where aqr-xsv takes it (and it is [`smaller`]); else text as aqr-wrt tells of
-        // it alone (not [`smaller`]), so that the same text is taken alike wherever it is; else
-        // scanned as other data is, or kept raw where named as text
+        // JSON lines or a table where aqr-jsonl or aqr-xsv takes it (and it is [`smaller`]);
+        // else text as aqr-wrt tells of it alone (not [`smaller`]), so that the same text is
+        // taken alike wherever it is; else scanned as other data is, or kept raw where named as
+        // text
         _ if text => match table(d, opt, depth, cx).or_else(|| recompress_as(Format::Text, d, opt, depth, cx)) {
             Some(f) => Some(Made::from(f)),
             None if how == Nest::Scan => {
@@ -838,12 +840,14 @@ fn records(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Made> {
 
 /// Whether data detected as `format` is text: taken as a table, else as text ([`made`]).
 fn is_text(format: Option<Format>) -> bool {
-    matches!(format, Some(Format::Text | Format::Xsv))
+    matches!(format, Some(Format::Text | Format::Xsv | Format::Jsonl))
 }
 
-/// `d`, text, as a table if aqr-xsv takes it (and the formula is [`smaller`]).
+/// `d`, text, as JSON lines if aqr-jsonl takes it, else as a table if aqr-xsv does (and the
+/// formula is [`smaller`]).
 fn table(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
-    aqr_xsv::formula::starts(d).then(|| recompress_as(Format::Xsv, d, opt, depth, cx)).flatten()
+    let jsonl = aqr_jsonl::formula::starts(d).then(|| recompress_as(Format::Jsonl, d, opt, depth, cx)).flatten();
+    jsonl.or_else(|| aqr_xsv::formula::starts(d).then(|| recompress_as(Format::Xsv, d, opt, depth, cx)).flatten())
 }
 
 /// A formula of data, its stream 0 perhaps yet to be cut out of the data: the bytes of `gaps`,
@@ -1986,6 +1990,7 @@ fn pure_encode(format: Format) -> Option<Encode> {
         Format::Fits => aqr_fits::formula::encode,
         Format::Obj => aqr_obj::formula::encode,
         Format::Xsv => aqr_xsv::formula::encode,
+        Format::Jsonl => aqr_jsonl::formula::encode,
         Format::Text => aqr_wrt::formula::encode,
         Format::Sized => aqr_raw::formula::encode_sized,
         Format::Records => aqr_infer_recs::formula::encode,

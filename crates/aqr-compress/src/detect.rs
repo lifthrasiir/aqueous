@@ -123,6 +123,8 @@ pub enum Format {
     /// Delimited text table (aqr-xsv): CSV, TSV, USV and the like, a whole file known by its
     /// text: not looked for in other data.
     Xsv,
+    /// JSON lines (aqr-jsonl), a whole file known by its text: not looked for in other data.
+    Jsonl,
     /// Text (aqr-wrt), a whole file of text bytes only: not looked for in other data.
     Text,
     /// 16-bit samples after a header telling their size (aqr-raw's `sized`), in data in which a
@@ -134,7 +136,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 52] = [
+    pub const ALL: [Format; 53] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -184,6 +186,7 @@ impl Format {
         Format::Wim,
         Format::Asar,
         Format::Xsv,
+        Format::Jsonl,
         Format::Text,
         Format::Sized,
         Format::Records,
@@ -240,6 +243,7 @@ impl Format {
             Format::Wim => "wim",
             Format::Asar => "asar",
             Format::Xsv => "xsv",
+            Format::Jsonl => "jsonl",
             Format::Text => "text",
             Format::Sized => "sized",
             Format::Records => "records",
@@ -317,9 +321,8 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"zst" | b"br" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"ogv" | b"opus" | b"aac" | b"webp" | b"avif"
         | b"heic" | b"heif" | b"jxl" | b"jp2" | b"woff2" => Kind::Compressed,
         b"tga" | b"pbm" => Kind::Pixels,
-        b"txt" | b"log" | b"csv" | b"tsv" | b"json" | b"xml" | b"html" | b"htm" | b"css" | b"js" | b"svg" | b"md" => {
-            Kind::Text
-        }
+        b"txt" | b"log" | b"csv" | b"tsv" | b"json" | b"jsonl" | b"ndjson" | b"geojsonl" | b"xml" | b"html"
+        | b"htm" | b"css" | b"js" | b"svg" | b"md" => Kind::Text,
         b"ttf" | b"otf" | b"ttc" | b"cff" | b"pfb" => Kind::Font,
         _ => Kind::Unknown,
     }
@@ -449,6 +452,9 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
     } else if start && aqr_lha::formula::starts(d) {
         // (a header starts with its size and checksum: too weak to look for in other data)
         Some(Format::Lha)
+    } else if start && aqr_jsonl::formula::starts(d) {
+        // (before tables: JSON lines may cut into the same number of fields)
+        Some(Format::Jsonl)
     } else if start && aqr_xsv::formula::starts(d) {
         Some(Format::Xsv)
     } else if start && aqr_wrt::formula::starts(d) {

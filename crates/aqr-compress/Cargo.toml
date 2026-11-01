@@ -51,6 +51,7 @@ aqr-snappy = { path = "../../codecs/aqr-snappy" }
 aqr-sqlite = { path = "../../codecs/aqr-sqlite" }
 aqr-tex = { path = "../../codecs/aqr-tex" }
 aqr-wrt = { path = "../../codecs/aqr-wrt" }
+aqr-jsonl = { path = "../../codecs/aqr-jsonl" }
 aqr-xsv = { path = "../../codecs/aqr-xsv" }
 aqr-zip = { path = "../../codecs/aqr-zip" }
 crc32fast = "1.5"

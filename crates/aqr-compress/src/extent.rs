@@ -52,6 +52,7 @@ pub fn extent(f: Format, d: &[u8]) -> Option<usize> {
         | Format::Mkv
         | Format::Obj
         | Format::Xsv
+        | Format::Jsonl
         | Format::Text
         | Format::Sized
         | Format::Records => Some(d.len()),

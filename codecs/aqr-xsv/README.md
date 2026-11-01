@@ -67,4 +67,3 @@ streams (errors, never panics).
   numbers, as aqr-obj does with lines.
 - Hexadecimal fields (`UnicodeData.txt`'s code points).
 - The numbers coded better than varints for zstd (rANS per column, as aqr-obj does).
-- JSON (a separate crate): the values by key path, as columns are here.
