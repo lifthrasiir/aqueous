@@ -270,6 +270,9 @@ impl SegmentWriter {
             let members: Vec<usize> = (first..leaves.len()).filter(|&i| roots[i] == roots[first]).collect();
             // the modules and resources of the group not written yet
             for &i in &members {
+                for (m, d) in &uses[i].module_bytes {
+                    enc.check_module_bytes(*m, d, level)?;
+                }
                 for &m in &uses[i].modules {
                     if !modules.contains(&m) {
                         let at = out.len();
@@ -537,12 +540,14 @@ const METADATA_ZSTD: u64 = 0x14;
 
 /// What a leaf takes: the streams it slices and the applications of several outputs whose
 /// outputs it takes (directly or through those of later ones), in order; the modules and
-/// resources of its applications, in the order of their first.
+/// resources of its applications and of the bytes of blocks it takes, in the order of their
+/// first; and the bytes it takes of module blocks ([`Node::ModuleBytes`]).
 struct Uses {
     streams: Vec<usize>,
     shared: Vec<usize>,
     modules: Vec<Module>,
     resources: Vec<Resource>,
+    module_bytes: Vec<(Module, std::sync::Arc<[u8]>)>,
 }
 
 fn uses(f: &Formula, leaf: &Leaf) -> Uses {
@@ -561,7 +566,13 @@ fn uses(f: &Formula, leaf: &Leaf) -> Uses {
         }
     }
     let shared: Vec<usize> = (0..f.shared.len()).filter(|&i| shared[i]).collect();
-    let mut u = Uses { streams: Vec::new(), shared: Vec::new(), modules: Vec::new(), resources: Vec::new() };
+    let mut u = Uses {
+        streams: Vec::new(),
+        shared: Vec::new(),
+        modules: Vec::new(),
+        resources: Vec::new(),
+        module_bytes: Vec::new(),
+    };
     fn note(u: &mut Uses, a: &crate::Apply) {
         if !u.modules.contains(&a.module) {
             u.modules.push(a.module);
@@ -577,6 +588,13 @@ fn uses(f: &Formula, leaf: &Leaf) -> Uses {
             // (an empty slice is of no block)
             &Node::Slice { stream, len: 1.., .. } if !u.streams.contains(&stream) => u.streams.push(stream),
             Node::Apply(a) => note(u, a),
+            Node::ModuleBytes(m, d) => {
+                if !u.modules.contains(m) {
+                    u.modules.push(*m);
+                }
+                u.module_bytes.push((*m, d.clone()));
+            }
+            Node::ResourceBytes(r) if !u.resources.contains(r) => u.resources.push(r.clone()),
             _ => {}
         })
     }
@@ -641,6 +659,43 @@ mod tests {
         out.extend_from_slice(&w.finish(&enc, &t, &contents).unwrap().0);
         let Ok(Value::Tree(_, files)) = decode_value(&out, &natives()) else { panic!() };
         assert_eq!(files, [b"zyxolleh".to_vec(), b"ollehzyx".to_vec()]);
+    }
+
+    /// The bytes of module and resource blocks in a batch: of a module applied by another leaf
+    /// and of one only taken so, and of a resource as stored.
+    #[test]
+    fn block_bytes() {
+        let mut f = Formula::default();
+        let a = f.push("a", b"hello".to_vec());
+        let enc = Encoder::new(Level::Zstd(3));
+        let block_of = |m| -> std::sync::Arc<[u8]> {
+            let w = crate::aqr::stand_in(m);
+            crate::aqr::always_compressed(&mut zstd::zstd_safe::CCtx::create(), &[&w], 3, 1).unwrap().into()
+        };
+        let (rev, cut) = (block_of(REV), block_of(CUT));
+        let stored = crate::aqr::always_compressed(&mut zstd::zstd_safe::CCtx::create(), &[b"model"], 3, 1).unwrap();
+        let r = Resource::stored(stored.clone()).unwrap();
+        let leaves = vec![
+            Leaf { outputs: vec![Node::apply(REV, vec![1, 2, 3], vec![a.clone()], 5)], sums: vec![None] },
+            Leaf {
+                outputs: vec![Node::concat([
+                    a,
+                    Node::ModuleBytes(REV, rev.clone()),
+                    Node::ModuleBytes(CUT, cut.clone()),
+                    Node::ResourceBytes(r),
+                ])],
+                sums: vec![None],
+            },
+        ];
+        let w = SegmentWriter::new();
+        let batch = w.batch(&enc, &f, &leaves).unwrap();
+        assert_eq!(batch.layout.iter().filter(|p| p.0 == Placed::Module).count(), 2);
+        let want = [&b"olleh"[..], b"hello", &rev, &cut, &stored].concat();
+        assert_eq!(decode(&w.standalone(&batch), &natives()).unwrap(), want);
+        // a module's block of other bytes
+        let mut other = leaves;
+        other[1].outputs = vec![Node::ModuleBytes(REV, cut)];
+        assert!(w.batch(&enc, &f, &other).is_err());
     }
 
     /// Leaves slicing parts of a stream of several blocks list only the blocks they slice: one

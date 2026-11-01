@@ -1642,7 +1642,7 @@ fn contents(n: &Node, f: &Formula, opt: &Options, depth: u32, cx: &Cx, out: &mut
     match n {
         &Node::Slice { stream, .. } if is_content(f, stream) => content_slices(n, Nest::Scan, f, opt, depth, cx, out),
         // (patches are made of recompressed data, not looked into)
-        Node::Slice { .. } | Node::Output { .. } | Node::Patch(_) => {}
+        Node::Slice { .. } | Node::Output { .. } | Node::Patch(_) | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
         Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| contents(n, f, opt, depth, cx, out)),
         Node::Apply(a) => {
             for (i, input) in a.inputs.iter().enumerate() {
@@ -1689,7 +1689,7 @@ fn content_slices(
         }
         Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| content_slices(n, nest, f, opt, depth, cx, out)),
         Node::Apply(_) => contents(n, f, opt, depth, cx, out),
-        Node::Output { .. } | Node::Patch(_) => {}
+        Node::Output { .. } | Node::Patch(_) | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
     }
 }
 
@@ -1705,7 +1705,7 @@ fn place(
 ) {
     match n {
         &mut Node::Slice { stream, .. } if is_content(f, stream) => place_slices(n, f, slices, opt, children),
-        Node::Slice { .. } | Node::Output { .. } | Node::Patch(_) => {}
+        Node::Slice { .. } | Node::Output { .. } | Node::Patch(_) | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
         Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| place(n, f, slices, opt, children)),
         Node::Apply(a) => {
             let module = a.module;
@@ -1744,7 +1744,7 @@ fn place_slices(
         },
         Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| place_slices(n, f, slices, opt, children)),
         Node::Apply(_) => place(n, f, slices, opt, children),
-        Node::Output { .. } | Node::Patch(_) => {}
+        Node::Output { .. } | Node::Patch(_) | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
     }
 }
 

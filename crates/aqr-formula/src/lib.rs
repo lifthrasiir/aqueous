@@ -419,11 +419,30 @@ pub struct Region {
 /// Bytes that applications of a module share, typically a model (§5.6): a resource block of
 /// an archive. Clones share the bytes.
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct Resource(Arc<[u8]>);
+pub struct Resource {
+    data: Arc<[u8]>,
+    /// The data of its block as stored, where it is given ([`Resource::stored`]).
+    stored: Option<Arc<[u8]>>,
+}
 
 impl Resource {
     pub fn new(data: impl Into<Arc<[u8]>>) -> Resource {
-        Resource(data.into())
+        Resource { data: data.into(), stored: None }
+    }
+
+    /// The resource whose block has data `stored` as it is (checksummed Zstandard data, as of a
+    /// resource or module block of another archive): for [`Node::ResourceBytes`]. A resource of
+    /// the same bytes not stored so is another resource, of a block of its own. Fails where
+    /// `stored` is no such data.
+    pub fn stored(stored: impl Into<Arc<[u8]>>) -> Result<Resource> {
+        let stored = stored.into();
+        let data = aqr::stored_decoded(&stored).ok_or_else(|| Error::new("no checksummed Zstandard data"))?;
+        Ok(Resource { data: data.into(), stored: Some(stored) })
+    }
+
+    /// The data of its block as stored, if given ([`Resource::stored`]).
+    pub fn stored_data(&self) -> Option<&[u8]> {
+        self.stored.as_deref()
     }
 }
 
@@ -431,13 +450,17 @@ impl std::ops::Deref for Resource {
     type Target = [u8];
 
     fn deref(&self) -> &[u8] {
-        &self.0
+        &self.data
     }
 }
 
 impl fmt::Debug for Resource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Resource({} bytes, {:016x})", self.len(), xxhash_rust::xxh64::xxh64(self, 0))
+        write!(f, "Resource({} bytes, {:016x}", self.len(), xxhash_rust::xxh64::xxh64(self, 0))?;
+        match &self.stored {
+            Some(s) => write!(f, ", stored in {} bytes)", s.len()),
+            None => write!(f, ")"),
+        }
     }
 }
 
@@ -461,6 +484,13 @@ pub enum Node {
         len: u64,
     },
     Patch(Box<Patch>),
+    /// The data of the module block of `module` as stored, which is to be these bytes (a
+    /// ModuleBytes instruction): those of a module block of another archive, as when it is
+    /// archived. The encoder fails where its block of the module is other bytes.
+    ModuleBytes(Module, Arc<[u8]>),
+    /// The data of the resource block of a resource [`Resource::stored`] as stored (a
+    /// ResourceBytes instruction).
+    ResourceBytes(Resource),
 }
 
 /// The output of `patch` ([`patch`]), of `len` bytes, against `source`.
@@ -555,6 +585,8 @@ impl Node {
             Node::Apply(a) => a.len,
             Node::Output { len, .. } => *len,
             Node::Patch(p) => p.len,
+            Node::ModuleBytes(_, d) => d.len() as u64,
+            Node::ResourceBytes(r) => r.stored_data().map_or(0, |d| d.len() as u64),
         }
     }
 
@@ -566,7 +598,7 @@ impl Node {
     pub fn visit<'a>(&'a self, f: &mut impl FnMut(&'a Node)) {
         f(self);
         match self {
-            Node::Slice { .. } | Node::Output { .. } => {}
+            Node::Slice { .. } | Node::Output { .. } | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
             Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| n.visit(f)),
             Node::Apply(a) => a.inputs.iter().for_each(|n| n.visit(f)),
             Node::Patch(p) => [&p.source, &p.patch].into_iter().for_each(|n| n.visit(f)),
@@ -587,7 +619,7 @@ impl Node {
     fn map_slices(&mut self, f: &mut impl FnMut(usize, u64, u64) -> Node) {
         match self {
             &mut Node::Slice { stream, start, len } => *self = f(stream, start, len),
-            Node::Output { .. } => {}
+            Node::Output { .. } | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
             Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| n.map_slices(f)),
             Node::Apply(a) => a.inputs.iter_mut().for_each(|n| n.map_slices(f)),
             Node::Patch(p) => [&mut p.source, &mut p.patch].into_iter().for_each(|n| n.map_slices(f)),
@@ -598,7 +630,7 @@ impl Node {
     fn visit_mut(&mut self, f: &mut impl FnMut(&mut Node)) {
         f(self);
         match self {
-            Node::Slice { .. } | Node::Output { .. } => {}
+            Node::Slice { .. } | Node::Output { .. } | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
             Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| n.visit_mut(f)),
             Node::Apply(a) => a.inputs.iter_mut().for_each(|n| n.visit_mut(f)),
             Node::Patch(p) => [&mut p.source, &mut p.patch].into_iter().for_each(|n| n.visit_mut(f)),
@@ -1172,6 +1204,35 @@ impl Formula {
         if parts.len() == 1 { parts.pop().unwrap() } else { Node::Concat(parts) }
     }
 
+    /// The modules and resources of the formula's blocks, each once: those of its applications
+    /// ([`Formula::applies`]) in order, then those whose bytes it takes ([`Node::ModuleBytes`],
+    /// [`Node::ResourceBytes`]).
+    pub fn blocks(&self) -> (Vec<Module>, Vec<&Resource>) {
+        let (mut modules, mut resources): (Vec<Module>, Vec<&Resource>) = (Vec::new(), Vec::new());
+        let mut module = |m: Module| {
+            if !modules.contains(&m) {
+                modules.push(m);
+            }
+        };
+        let mut resource = |r| {
+            if !resources.contains(&r) {
+                resources.push(r);
+            }
+        };
+        for a in self.applies() {
+            module(a.module);
+            a.resources.iter().for_each(&mut resource);
+        }
+        for n in self.shared.iter().flat_map(|s| &s.apply.inputs).chain([&self.root]) {
+            n.visit(&mut |n| match n {
+                &Node::ModuleBytes(m, _) => module(m),
+                Node::ResourceBytes(r) => resource(r),
+                _ => {}
+            });
+        }
+        (modules, resources)
+    }
+
     /// The applications, those of the root parents first, then those of several outputs.
     pub fn applies(&self) -> Vec<&Apply> {
         let mut out = Vec::new();
@@ -1193,6 +1254,7 @@ impl Formula {
 
     /// Checks the outputs of the applications of several outputs: each taken exactly once, of
     /// the size declared, and in the inputs of an application only from those before it.
+    /// Also checks that each resource whose bytes it takes is [`Resource::stored`].
     pub fn check_outputs(&self) -> Result<()> {
         let mut taken: Vec<Vec<bool>> = self.shared.iter().map(|s| vec![false; s.sizes.len()]).collect();
         let mut check = |n: &Node, before: usize| -> Result<()> {
@@ -1226,6 +1288,17 @@ impl Formula {
             s.apply.inputs.iter().try_for_each(|n| check(n, i))?;
         }
         check(&self.root, self.shared.len())?;
+        let mut stored = Ok(());
+        for n in self.shared.iter().flat_map(|s| &s.apply.inputs).chain([&self.root]) {
+            n.visit(&mut |n| {
+                if let Node::ResourceBytes(r) = n
+                    && r.stored_data().is_none()
+                {
+                    stored = Err(Error::new("the bytes of a resource not stored"));
+                }
+            });
+        }
+        stored?;
         match taken.iter().position(|t| t.contains(&false)) {
             Some(i) => Err(Error::new(format!("an output of #{i} not taken"))),
             None => Ok(()),
@@ -1268,7 +1341,7 @@ impl Formula {
                     out.push(a);
                     a.inputs.iter().for_each(|n| visit(n, out));
                 }
-                Node::Slice { .. } | Node::Output { .. } => {}
+                Node::Slice { .. } | Node::Output { .. } | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
             }
         }
         fn visit_mut(n: &mut Node, limits: &mut impl Iterator<Item = u64>) {
@@ -1279,7 +1352,7 @@ impl Formula {
                     a.memory_limit = limits.next().expect("a limit for each application");
                     a.inputs.iter_mut().for_each(|n| visit_mut(n, limits));
                 }
-                Node::Slice { .. } | Node::Output { .. } => {}
+                Node::Slice { .. } | Node::Output { .. } | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
             }
         }
         let limits = {
@@ -1344,6 +1417,12 @@ impl Formula {
             }
             // (checked, and taken only once)
             &Node::Output { shared, index, .. } => Ok(Cow::Borrowed(&outputs[shared][index])),
+            // (copied: of the node, not of the formula)
+            Node::ModuleBytes(_, d) => Ok(Cow::Owned(d.to_vec())),
+            Node::ResourceBytes(r) => r
+                .stored_data()
+                .map(|d| Cow::Owned(d.to_vec()))
+                .ok_or_else(|| Error::new("the bytes of a resource not stored")),
             Node::Patch(p) => {
                 let (source, patch) = (self.bytes(&p.source, m, outputs)?, self.bytes(&p.patch, m, outputs)?);
                 let out = patch::apply(&source, &patch, p.len)?;
@@ -1393,7 +1472,7 @@ impl<M: Modules> Lazy<'_, M> {
                 Node::Patch(p) => last_output(&p.source).max(last_output(&p.patch)),
                 Node::Apply(a) => a.inputs.iter().filter_map(last_output).max(),
                 &Node::Output { shared, .. } => Some(shared),
-                Node::Slice { .. } => None,
+                Node::Slice { .. } | Node::ModuleBytes(..) | Node::ResourceBytes(_) => None,
             }
         }
         if let Some(last) = last_output(n) {
@@ -1430,7 +1509,7 @@ impl<M: Modules> Contents for Inputs<'_, '_, M> {
 /// Indented, a node a line: `slice #stream [start, +len) CLASS` (and the kind of the stream
 /// unless [`Kind::Unknown`] and not [`Stream::content`], with `content` if it is), `concat LEN`, `pack LEN`, `apply MODULE LEN` with the lengths of its
 /// resources and its parameters in hex, `output #SHARED.INDEX LEN`, `patch LEN` (its source then
-/// its patch): first each application of
+/// its patch), `module bytes MODULE LEN`, `resource bytes LEN`: first each application of
 /// several outputs, `shared #I MODULE SIZES...` and its inputs, then the root.
 impl fmt::Display for Formula {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1454,6 +1533,8 @@ impl fmt::Display for Formula {
                     a.inputs.iter().try_for_each(|n| node(fm, n, depth + 1, f))
                 }
                 &Node::Output { shared, index, len } => writeln!(f, "output #{shared}.{index} {len}"),
+                Node::ModuleBytes(m, d) => writeln!(f, "module bytes {m} {}", d.len()),
+                Node::ResourceBytes(_) => writeln!(f, "resource bytes {}", n.len()),
                 Node::Patch(p) => {
                     writeln!(f, "patch {}", p.len)?;
                     [&p.source, &p.patch].into_iter().try_for_each(|n| node(fm, n, depth + 1, f))

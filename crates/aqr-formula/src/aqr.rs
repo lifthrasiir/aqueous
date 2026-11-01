@@ -346,6 +346,11 @@ pub fn module_block_data(wasm: &[u8]) -> Result<Vec<u8>> {
 
 /// The Wasm module of the data of its module block ([`module_block_data`]).
 pub fn module_of_block_data(d: &[u8]) -> Option<Vec<u8>> {
+    stored_decoded(d)
+}
+
+/// The decoded data of checksummed Zstandard data `d` (the data of a module or resource block).
+pub(crate) fn stored_decoded(d: &[u8]) -> Option<Vec<u8>> {
     decoded(d, true, true).ok()
 }
 
@@ -438,6 +443,15 @@ impl Encoder {
     }
 
     /// The data of the module block of `m`, compressed at `level`, once.
+    /// Checks bytes `d` that a [`Node::ModuleBytes`] takes of the block of module `m` against
+    /// the block it writes (at `level`): the same.
+    fn check_module_bytes(&self, m: Module, d: &[u8], level: i32) -> Result<()> {
+        match self.module_block(m, level)?[..] == *d {
+            true => Ok(()),
+            false => Err(Error::new(format!("the bytes of a module block of {m} not its own"))),
+        }
+    }
+
     fn module_block(&self, m: Module, level: i32) -> Result<ModuleBlock> {
         if let Some(b) = self.module_blocks.borrow().get(&(m, level)) {
             return Ok(b.clone());
@@ -472,13 +486,8 @@ impl Encoder {
 
     /// The bytes of the module blocks in the archive of `f`.
     fn modules_len(&self, f: &Formula) -> Result<usize> {
-        let mut modules: Vec<Module> = Vec::new();
-        for a in f.applies() {
-            if !modules.contains(&a.module) {
-                modules.push(a.module);
-            }
-        }
         let mut n = Count(0);
+        let (modules, _) = f.blocks();
         for m in modules {
             block(&mut n, MODULE, &self.module_block(m, self.base_level())?);
         }
@@ -499,14 +508,8 @@ impl Encoder {
 
     /// [`Encoder::resources_len`] of the resources `which` takes.
     fn resources_len_of(&self, f: &Formula, which: impl Fn(&Resource) -> bool) -> Result<usize> {
-        let mut resources: Vec<&Resource> = Vec::new();
-        for a in f.applies() {
-            for r in &a.resources {
-                if !resources.contains(&r) && which(r) {
-                    resources.push(r);
-                }
-            }
-        }
+        let (_, mut resources) = f.blocks();
+        resources.retain(|r| which(r));
         let mut n = Count(0);
         resources.into_iter().try_for_each(|r| self.resource_block(&mut n, r))?;
         Ok(n.0)
@@ -663,17 +666,18 @@ impl Encoder {
             nodes.push(&f.root);
             let used = sliced(f.streams.len(), |s| total(streams[s]), nodes);
             let (ordinals, next) = listed(&used, 0..f.streams.len());
-            let (mut modules, mut resources): (Vec<Module>, Vec<&Resource>) = (Vec::new(), Vec::new());
-            for a in f.applies() {
-                if !modules.contains(&a.module) {
-                    modules.push(a.module);
-                }
-                for r in &a.resources {
-                    if !resources.contains(&r) {
-                        resources.push(r);
+            let (modules, resources) = f.blocks();
+            let mut checked = Ok(());
+            for n in f.shared.iter().flat_map(|s| &s.apply.inputs).chain([&f.root]) {
+                n.visit(&mut |n| {
+                    if let Node::ModuleBytes(m, d) = n
+                        && checked.is_ok()
+                    {
+                        checked = self.check_module_bytes(*m, d, level);
                     }
-                }
+                });
             }
+            checked?;
 
             let mut data = Vec::new();
             varint::put(&mut data, next);
@@ -799,6 +803,18 @@ impl Emit<'_> {
                 debug_assert_eq!(self.stack[top], Some((shared, index)));
                 self.stack[top] = None;
             }
+            Node::ModuleBytes(m, d) => {
+                self.out.push(MODULE_BYTES);
+                varint::put(self.out, self.modules.iter().position(|n| n == m).unwrap() as u64);
+                varint::put(self.out, d.len() as u64);
+                self.stack.push(None);
+            }
+            Node::ResourceBytes(r) => {
+                self.out.push(RESOURCE_BYTES);
+                varint::put(self.out, self.resources.iter().position(|&s| s == r).unwrap() as u64);
+                varint::put(self.out, n.len());
+                self.stack.push(None);
+            }
             Node::Patch(p) => {
                 self.node(&p.source);
                 self.node(&p.patch);
@@ -877,7 +893,7 @@ const FOLD: usize = 8;
 fn takes_output(n: &Node) -> bool {
     match n {
         Node::Output { .. } => true,
-        Node::Slice { .. } => false,
+        Node::Slice { .. } | Node::ModuleBytes(..) | Node::ResourceBytes(_) => false,
         Node::Concat(ns) | Node::Pack(ns) => ns.iter().any(takes_output),
         Node::Apply(a) => a.inputs.iter().any(takes_output),
         Node::Patch(p) => takes_output(&p.source) || takes_output(&p.patch),
@@ -892,6 +908,7 @@ fn takes_output(n: &Node) -> bool {
 pub fn description_bound(n: &Node) -> usize {
     match n {
         Node::Output { .. } => 1 + 3,
+        Node::ModuleBytes(..) | Node::ResourceBytes(_) => 1 + 2 + varint::len(n.len()),
         Node::Patch(p) => description_bound(&p.source) + description_bound(&p.patch) + 1 + varint::len(p.len),
         &Node::Slice { start, len, .. } => match slice_blocks(start, len)[..] {
             [(_, at, n)] => 1 + 3 + varint::len(at) + varint::len(n),
@@ -1153,7 +1170,11 @@ impl Encoder {
 
     /// Appends a resource block of `r`, compressed at the level the encoder picks for it, or at
     /// the base level where it does not compress: the block is always compressed.
-    fn resource_block(&self, out: &mut impl Out, r: &[u8]) -> Result<()> {
+    fn resource_block(&self, out: &mut impl Out, r: &Resource) -> Result<()> {
+        if let Some(s) = r.stored_data() {
+            block(out, RESOURCE, s);
+            return Ok(());
+        }
         let mut resources = self.resources.borrow_mut();
         let c = match resources.entry(key(&[r])) {
             MapEntry::Occupied(e) => e.into_mut(),
@@ -3820,6 +3841,38 @@ mod tests {
     }
 
     const SAMPLE: &[u8] = b"hezyxollehyz";
+
+    /// Nodes of the bytes of a module block and of a resource block as stored push those of the
+    /// blocks the archive has: the module's own (which the nodes' must be) and the resource's as
+    /// given.
+    #[test]
+    fn block_bytes() {
+        let module: std::sync::Arc<[u8]> =
+            always_compressed(&mut CCtx::create(), &[&stand_in(REV)], 3, 1).unwrap().into();
+        let r = Resource::stored(always_compressed(&mut CCtx::create(), &[&b"resource".repeat(40)], 3, 1).unwrap())
+            .unwrap();
+        assert_eq!(&r[..], b"resource".repeat(40));
+        let mut f = sample();
+        f.root = Node::concat([f.root, Node::ModuleBytes(REV, module.clone()), Node::ResourceBytes(r.clone())]);
+        let want = [SAMPLE, &module, r.stored_data().unwrap()].concat();
+        let rev = |_: &crate::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect());
+        assert_eq!(f.eval(&rev).unwrap(), want);
+        let c = encode(&f, Some(checksum(&want)), Level::Zstd(3)).unwrap();
+        assert_eq!(types(&c), [MODULE + 1, RESOURCE, FORMULA, NON_LEAF_RAW, NON_LEAF_RAW]);
+        assert_eq!(decode(&c, &natives()).unwrap(), want);
+        // the module's block of other bytes (another module's)
+        let mut g = f.clone();
+        let other = always_compressed(&mut CCtx::create(), &[&stand_in(CUT)], 3, 1).unwrap();
+        let Node::Concat(ns) = &mut g.root else { unreachable!() };
+        ns[3] = Node::ModuleBytes(REV, other.into());
+        assert!(encode(&g, None, Level::Zstd(3)).is_err());
+        // a module taken only so, and a resource not stored
+        g.root = Node::concat([Node::slice(0, 0, 2), Node::ModuleBytes(CUT, module.clone())]);
+        assert!(encode(&g, None, Level::Zstd(3)).is_err_and(|e| e.to_string().contains("not its own")));
+        g.root = Node::concat([Node::slice(0, 0, 2), Node::ResourceBytes(Resource::new(b"x".to_vec()))]);
+        assert!(encode(&g, None, Level::Zstd(3)).is_err_and(|e| e.to_string().contains("not stored")));
+        assert!(Resource::stored(b"not zstd".to_vec()).is_err());
+    }
 
     /// Level 0 compresses nothing: streams in uncompressed blocks, formula and module blocks of
     /// raw Zstandard blocks, of any size.
