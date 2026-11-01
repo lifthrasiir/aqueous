@@ -66,7 +66,7 @@ pub fn archive(d: &[u8]) -> Option<Formula> {
             0x20..=0x27 | 0x40..=0x43 => {
                 let checked = ty & 0x40 != 0 || ty & 0x04 != 0;
                 let end = data.end.saturating_sub(if checked { 8 } else { 0 }).max(data.start);
-                ((end > data.start).then(|| Part::Content(data.start..end)), end)
+                ((end > data.start).then_some(Part::Content(data.start..end)), end)
             }
             _ => (None, data.end),
         };
