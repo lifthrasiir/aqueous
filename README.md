@@ -6,11 +6,15 @@ machine can afford: JPEG's and MP3's Huffman codes, deflate in PNG, ZIP, PDF and
 Snappy in browser profiles and databases. Aqueous undoes that compression, codes the contents
 with stronger models, and rebuilds the original files bit for bit on extraction.
 
-- **Recompressors** for about twenty format families: images (PNG, JPEG, PSD, BMP and PNM,
-  BCn textures in DDS), audio (MP3, FLAC, WAV, AIFF, Ogg Vorbis), documents and data (PDF, SQLite, text,
-  FASTA, Wavefront OBJ), containers and general-purpose compression (gzip and zlib, ZIP, LZ4,
-  LZO, LZMA, Snappy, tar, ar and cpio, git checkouts) and executables (PE and Mach-O). Each
-  lives in its own crate under `codecs/`, with a `FORMAT.md` describing what it stores.
+- **Recompressors** for a long and growing list of formats, each in its own crate under
+  `codecs/` with a `FORMAT.md` describing what it stores. To name some: images (PNG, JPEG, GIF,
+  PSD, Clip Studio Paint, BMP and PNM, BCn textures in DDS), audio and video (MP3, FLAC, Ogg
+  Vorbis, WAV and AIFF, FMOD sound banks, ProRes, Matroska and WebM), documents and data (PDF,
+  SQLite, HDF5, FITS, CSV and JSON Lines, plain text, FASTA, Wavefront OBJ, gettext catalogs),
+  archives and images of discs (ZIP, 7z, RAR, tar, ar and cpio, ISO 9660 and UDF, CAB and CHM,
+  LHA, ALZ and EGG, Electron's asar, git packs), the compressors found in and around them
+  (deflate in gzip and zlib, LZMA and xz, bzip2, LZ4, Snappy, LZO, LZFSE, LZX, PPMd), and
+  executables (PE, Mach-O, .NET, WebAssembly).
 - **Self-describing archives.** A file's content is a *formula*, a small stack-machine program
   over stored blocks, which applies WebAssembly modules to undo what the compressor did. A
   decompressor needs no knowledge of the formats inside; known modules run natively, unknown
