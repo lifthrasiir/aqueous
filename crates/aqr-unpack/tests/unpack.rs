@@ -425,3 +425,20 @@ fn alz_names_by_archive() {
     assert_eq!(names(&[b"\xb0\xa1.txt", b"\xc3\xa1.txt"]), ["가.txt", "찼.txt"]);
     assert_eq!(names(&["가.txt".as_bytes(), b"\xc3\xa1.txt"]), ["á.txt", "가.txt"]);
 }
+
+/// Archives made by ALZip itself (names-alzip.alz and .egg, by hand): `뷁.txt` ("break"; 뷁 is in
+/// CP949, not EUC-KR) and `⣿.txt` ("full"; U+28FF, in no Korean code page). ALZ has CP949 names,
+/// ALZip writing `?` for the braille; EGG has UTF-8 names (with no locale), the braille kept.
+#[test]
+fn alzip_names() {
+    for (format, name, braille) in
+        [(Format::Alz, "names-alzip.alz", "?.txt"), (Format::Egg, "names-alzip.egg", "⣿.txt")]
+    {
+        let (done, r) = unpack(format, &data(name)).unwrap();
+        assert_eq!(done.skipped, 0, "{name}: {:?}", r.notes.lock().unwrap());
+        let l = listing(&done, &r);
+        assert_eq!(l.len(), 2, "{name}: {:?}", l.keys());
+        assert_eq!(l["뷁.txt"].0, Node::File(b"break".to_vec()), "{name}");
+        assert_eq!(l[braille].0, Node::File(b"full".to_vec()), "{name}");
+    }
+}
