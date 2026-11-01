@@ -37,9 +37,12 @@ pub struct Rar4 {
     pub volume: bool,
 }
 
-/// Whether `d` starts with a RAR 1.5–4.x archive.
+/// Whether `d` starts with a RAR 1.5–4.x archive: its marker and a main header of its CRC.
 pub fn starts(d: &[u8]) -> bool {
-    d.starts_with(SIGNATURE)
+    let at = SIGNATURE.len();
+    let Some(h) = d.get(at..at + 7).filter(|_| d.starts_with(SIGNATURE)) else { return false };
+    let size = le16(h, 5) as usize;
+    h[2] == 0x73 && size >= 7 && d.get(at..at + size).is_some_and(|hd| crc32::hash(&hd[2..]) as u16 == le16(h, 0))
 }
 
 fn le16(d: &[u8], at: usize) -> u16 {

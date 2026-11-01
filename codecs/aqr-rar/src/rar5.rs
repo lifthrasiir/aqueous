@@ -54,9 +54,17 @@ pub fn vint(d: &[u8], at: &mut usize) -> Option<u64> {
     None
 }
 
-/// Whether `d` starts with a RAR5 archive.
+/// Whether `d` starts with a RAR5 archive: its signature and a first header of its CRC-32.
 pub fn starts(d: &[u8]) -> bool {
-    d.starts_with(SIGNATURE)
+    if !d.starts_with(SIGNATURE) {
+        return false;
+    }
+    let at = SIGNATURE.len();
+    let Some(crc) = d.get(at..at + 4) else { return false };
+    let mut p = at + 4;
+    let Some(size) = vint(d, &mut p) else { return false };
+    let end = usize::try_from(size).ok().and_then(|s| p.checked_add(s)).filter(|&e| e <= d.len());
+    end.is_some_and(|e| size >= 2 && crc32::hash(&d[at + 4..e]) == u32::from_le_bytes(crc.try_into().unwrap()))
 }
 
 /// The dictionary of compression information `ci`, None where it is of no known version.
