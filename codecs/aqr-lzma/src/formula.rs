@@ -7,7 +7,7 @@ use aqr_formula::{Apply, Formula, Module, Node};
 
 use aqr_bcj::formula::{self as bcj, Filter};
 
-use crate::{alone, lzma2, recons, xz};
+use crate::{alone, lzma2, mf, recons, xz};
 
 pub use crate::module::{decode, decode2, index};
 
@@ -17,13 +17,15 @@ pub const MODULE: Module = Module::new("lzma-recons", 2).with_memory(memory);
 pub const LZMA2: Module = Module::new("lzma2-recons", 1).with_memory(memory);
 
 /// The memory of the module, a stream rebuilt at a time: the inputs and the streams; the match
-/// finder's chains, 12 bytes a position of the largest of their rings ([`ring`]) and their heads
-/// (12.5 MiB); the literal model, 6 MiB at most (lc + lp up to 12); and the encoder's output,
+/// finder's chains, 12 bytes a position of the largest of their rings ([`ring`]), and its other
+/// tables (132.5 MiB, or 12.5 MiB for less than 1 MiB of data); the literal model, 6 MiB at most (lc + lp up to 12); and the encoder's output,
 /// reserved for a quarter of the data and growing twice at a time.
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     let &[data, ..] = u.inputs else { return None };
     let m = u.output();
-    Some(u.whole(12 * ring(u).unwrap_or(data) + (25 << 19) + (6 << 20) + (data / 4).max(3 * m), 6))
+    Some(
+        u.whole(12 * ring(u).unwrap_or(data) + mf::tables(data as usize) as u64 + (6 << 20) + (data / 4).max(3 * m), 6),
+    )
 }
 
 /// The positions of the largest ring of the match finders of the streams (FORMAT.md, "Tables"):

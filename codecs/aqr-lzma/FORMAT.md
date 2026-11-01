@@ -306,7 +306,9 @@ chunk `0x80` or `0xA0` finds no properties before it in the segment.
 ## Implementation limits
 
 `N < 2^32 − 1`. The reference decoder holds `D`, the stream and the match finder's tables:
-`4 × 3 × S` bytes for the rings, and 12.5 MiB for the heads; natively, those of each part being
+`4 × 3 × S` bytes for the rings, and 12.5 MiB for the heads (132.5 MiB from `N` = 2^20 on: it
+keeps the newest 16 positions of each hash of the chains of 4 and 16 bytes together, the same
+candidates, so that a walk takes one cache miss for them); natively, those of each part being
 decoded at once, with the packets of the parts decoded and not yet encoded (a Wasm module goes
 through the parts with one match finder).
 

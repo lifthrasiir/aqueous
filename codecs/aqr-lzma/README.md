@@ -33,22 +33,27 @@ let f = formula::encode_xz(&file, threads).unwrap(); // an .xz file: `formula::L
 
 ## Results
 
-Measured on 2026-10-27 on an Apple M4 (4 performance and 6 efficiency cores), with another
-build running beside (load 2–5). Speeds are of the data, per thread, with 4 threads (the
-performance cores); with 10, the per-thread figures halve and the wall time stays.
+Measured on 2026-11-02 on an Apple M4 (4 performance and 6 efficiency cores), load about 2.
+Speeds are of the data, per thread: with 4 threads (the performance cores) for the `.tar.lzma`,
+2 for the `.xz`, 1 for the 7z folder (one stream); with 10, the per-thread figures halve and the
+wall time stays. In parentheses, those of the match finder before its buckets (below), measured
+just before on the same machine.
 
 | streams | streams MB | data MB | records MB | of the streams | split | rebuild |
 |---|---|---|---|---|---|---|
-| the 123 `.tar.lzma` of the 10gb benchmark (XZ Utils `-6`, 8 MiB dictionary) | 73.08 | 428.6 | 9.84 | 13.5% | 15 MB/s | 13 MB/s |
-| folder 0 of its `mingw480/*.7z` (7-Zip, 64 MiB dictionary) | 23.43 | 249.4 | 4.31 | 18.4% | 20 MB/s | 19 MB/s |
-| its 6 `.tar.xz` (LZMA2; the records with the rest of the files) | 0.465 | 1.331 | 0.047 | 10.1% | 15 MB/s | 17 MB/s |
-| a tar of its `mingw480/libexec` (58.0 MB), XZ Utils `-6 -T1` (one block) | 19.29 | 58.0 | 3.07 | 15.9% | 10 MB/s | 9 MB/s |
-| the same, `-6 -T4` (blocks of 24 MiB) | 19.49 | 58.0 | 3.03 | 15.5% | 10 MB/s | 9 MB/s |
+| the 123 `.tar.lzma` of the 10gb benchmark (XZ Utils `-6`, 8 MiB dictionary) | 73.08 | 428.6 | 9.84 | 13.5% | 39 (19) MB/s | 34 (17) MB/s |
+| folder 0 of its `mingw480/*.7z` (7-Zip, 64 MiB dictionary) | 23.43 | 249.4 | 4.31 | 18.4% | 56 (25) MB/s | 50 (24) MB/s |
+| its 6 `.tar.xz` (LZMA2; the records with the rest of the files) | 0.465 | 1.331 | 0.047 | 10.1% | 36 (27) MB/s | 27 (22) MB/s |
+| a tar of its `mingw480/libexec` (58.0 MB), XZ Utils `-6 -T1` (one block) | 19.29 | 58.0 | 3.07 | 15.9% | 30 (12) MB/s | 23 (10) MB/s |
+| the same, `-6 -T4` (blocks of 24 MiB) | 19.49 | 58.0 | 3.03 | 15.5% | 31 (13) MB/s | 24 (11) MB/s |
 
-The `.xz` rows were measured on 2026-10-30 likewise, with 2 threads.
-
-- Decoding and encoding the packets alone run at 110–230 MB/s. The rest is the match finder,
-  bound by its cache misses (three chains and a hash of 3 bytes, a few per byte).
+- Decoding and encoding the packets alone run at 75–300 MB/s. The rest is the match finder.
+  Its walks along the chains were one cache miss after another: 70% of the time on the 7z
+  folder, 1.2 µs a match. Now the chains of 4 and 16 bytes keep the newest 16 positions of each
+  hash on one cache line (from 1 MiB of data; `mf::RECENT`), and inserting asks for those lines
+  32 positions ahead (the data is all at hand). The candidates are the same, and so are the
+  records. Splitting that folder now takes 1.4 s inserting, 1.1 s for the longest matches,
+  0.85 s for the nearest ones and 0.7 s for the rest (4.4 s; 9.8 s before).
 - The record is mostly the packet types (36%) and the lengths of matches (42%); distances are
   16%, as a match's distance is almost always the nearest one matching for its length. Deeper
   search lowers lengths and distances, slowly: 16 candidates per chain rather than 4 make the
@@ -56,8 +61,10 @@ The `.xz` rows were measured on 2026-10-30 likewise, with 2 threads.
 - Every member of those `.tar.lzma` (421 MB) and the data of that 7z folder are files of the
   benchmark, so with the data shared the streams cost about 14 MB instead of 96.5 MB.
 - Memory: the data, the stream and `12 × S` bytes of chains, `S` the dictionary size rounded
-  up to a power of 2 (at most the data's), and 12.5 MiB. The bench on the 7z folder (data,
-  packets, stream and record held at once) peaked at 2.1 GB.
+  up to a power of 2 (at most the data's), and 132.5 MiB of tables (12.5 MiB for less than
+  1 MiB of data, without the buckets). The bench on the 7z folder (data, packets, stream and
+  record held at once) peaked at 1.39 GB (1.29 GB before the buckets); that on the `.tar.lzma`,
+  4 at once, at 1.80 GB (1.31 GB).
 - A stream of more than 64 MiB of data is coded in parts of 64 MiB, each with contexts of its
   own, which split and rebuild side by side (FORMAT.md, "Parts"). Natively, the match finders
   of a process take at most 1 GiB of chains at once (one of a 64 MiB dictionary), or as much

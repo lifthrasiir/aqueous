@@ -15,7 +15,12 @@ pub const LONG: usize = 16;
 
 /// Positions by a hash of their next `K` bytes, the newest first.
 struct Chain<const K: usize> {
-    head: Vec<u32>,
+    /// The newest `w` positions of each hash (1 or [`RECENT`]), the newest first, from
+    /// `recent[base]`: a walk's first 16 candidates in one cache line, rather than one cache miss
+    /// after another along `prev`. The candidates are the same whatever `w` is.
+    recent: Vec<u32>,
+    base: usize,
+    w: usize,
     /// The position before each in its chain, by position modulo the ring's size: as many as
     /// there are positions where the data is shorter than the ring.
     prev: Vec<u32>,
@@ -28,9 +33,17 @@ struct Chain<const K: usize> {
 }
 
 impl<const K: usize> Chain<K> {
-    fn new(ring: usize, len: usize, reach: usize) -> Self {
+    fn new(ring: usize, len: usize, reach: usize, w: usize) -> Self {
         let prev = vec![NONE; ring.min(len.max(1))];
-        Chain { head: vec![NONE; 1 << HASH_BITS], prev, mask: ring - 1, reach, found: vec![] }
+        // The buckets on cache lines of 64 bytes (an allocation this large is often not).
+        let recent = vec![NONE; (w << HASH_BITS) + 15];
+        let base = recent.as_ptr().align_offset(64).min(15);
+        Chain { recent, base, w, prev, mask: ring - 1, reach, found: vec![] }
+    }
+
+    #[inline(always)]
+    fn bucket(&self, h: usize) -> &[u32] {
+        &self.recent[self.base + h * self.w..][..self.w]
     }
 
     #[inline]
@@ -47,25 +60,39 @@ impl<const K: usize> Chain<K> {
         (h.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (64 - HASH_BITS)) as usize
     }
 
+    /// Asks for the bucket of position `p`, to be inserted soon.
+    #[inline(always)]
+    fn ahead(&self, d: &[u8], p: usize) {
+        if p + K <= d.len() {
+            prefetch_w(&self.recent[self.base + Self::hash(d, p) * self.w]);
+        }
+    }
+
     #[inline]
     fn insert(&mut self, d: &[u8], p: usize) {
         if p + K <= d.len() {
-            let h = Self::hash(d, p);
-            self.prev[p & self.mask] = self.head[h];
-            self.head[h] = p as u32;
+            let at = self.base + Self::hash(d, p) * self.w;
+            self.prev[p & self.mask] = self.recent[at];
+            if self.w == RECENT {
+                let r: &mut [u32; RECENT] = (&mut self.recent[at..at + RECENT]).try_into().unwrap();
+                r.copy_within(0..RECENT - 1, 1);
+            }
+            self.recent[at] = p as u32;
         }
     }
 
     /// The candidates for `pos`, nearest first, within reach.
     #[inline]
     fn walk(&self, d: &[u8], pos: usize) -> impl Iterator<Item = usize> {
-        let mut c = self.head[Self::hash(d, pos)];
+        let r = self.bucket(Self::hash(d, pos));
+        let (mut i, mut c) = (0, r[0]);
         std::iter::from_fn(move || {
             if c == NONE || pos - c as usize > self.reach {
                 return None;
             }
             let cu = c as usize;
-            c = self.prev[cu & self.mask];
+            i += 1;
+            c = if i < r.len() { r[i] } else { self.prev[cu & self.mask] };
             Some(cu)
         })
     }
@@ -99,6 +126,44 @@ impl<const K: usize> Chain<K> {
         self.found = found;
         r
     }
+}
+
+/// The newest positions of each hash kept together, on the chains [`Mf::longest`] goes through
+/// (its `depth`): as many as a cache line of 64 bytes holds.
+const RECENT: usize = 16;
+
+/// Data from which those chains keep [`RECENT`] positions of each hash rather than one: below,
+/// filling their tables (64 MiB each) takes longer than it saves.
+const RECENT_FROM: usize = 1 << 20;
+
+/// The positions kept of each hash on the chains [`Mf::longest`] goes through, for data of `n`
+/// bytes.
+fn recent(n: usize) -> usize {
+    if n >= RECENT_FROM { RECENT } else { 1 }
+}
+
+/// Bytes of the tables of a match finder over data of `n` bytes besides its rings.
+pub fn tables(n: usize) -> usize {
+    4 * ((2 * recent(n) + 1) << HASH_BITS) + 4 * (1 << 16) + 4 * (1 << HASH3_BITS)
+}
+
+/// How far ahead [`Mf::advance`] asks for the buckets it will insert into: the data is all at
+/// hand, so their cache misses overlap (at 8 or 16, inserting took 1.4 or 1.2 times as long).
+const AHEAD: usize = 32;
+
+/// Asks for the cache line of `x`, to be written soon.
+#[inline(always)]
+fn prefetch_w<T>(x: &T) {
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: a hint, on a reference.
+    unsafe {
+        std::arch::asm!("prfm pstl1keep, [{0}]", in(reg) x as *const T, options(nostack, preserves_flags, readonly))
+    };
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: as above.
+    unsafe {
+        std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(x as *const T as *const i8)
+    };
 }
 
 #[inline]
@@ -159,7 +224,7 @@ impl<'a> Mf<'a> {
         // slot is taken again only by `c + ring`, which is at least `pos` (not added yet). So a
         // dictionary of 2^n bytes takes chains of 2^n, not 2^(n+1).
         let ring = reach.clamp(1, n.max(1)).next_power_of_two();
-        3 * 4 * (ring.min(n.max(1)) + (1 << HASH_BITS))
+        3 * 4 * ring.min(n.max(1)) + tables(n)
     }
 
     /// How many match finders of [`Mf::new`] work at once (at least one; one in a module).
@@ -172,6 +237,11 @@ impl<'a> Mf<'a> {
 
     /// A match finder for matches at most `reach` back (LZMA's dictionary size).
     pub fn new(d: &'a [u8], reach: usize) -> Self {
+        Self::keeping(d, reach, recent(d.len()))
+    }
+
+    /// [`Mf::new`] keeping `w` positions of each hash together (1 or [`RECENT`]).
+    fn keeping(d: &'a [u8], reach: usize, w: usize) -> Self {
         let ring = reach.clamp(1, d.len().max(1)).next_power_of_two();
         #[cfg(not(target_arch = "wasm32"))]
         let admitted = gate::admit(Self::chains(d.len(), reach));
@@ -180,9 +250,9 @@ impl<'a> Mf<'a> {
             reach,
             head2: vec![NONE; 1 << 16],
             head3: vec![NONE; 1 << HASH3_BITS],
-            short: Chain::new(ring, d.len(), reach),
-            mid: Chain::new(ring, d.len(), reach),
-            long: Chain::new(ring, d.len(), reach),
+            short: Chain::new(ring, d.len(), reach, w),
+            mid: Chain::new(ring, d.len(), reach, 1),
+            long: Chain::new(ring, d.len(), reach, w),
             next: 0,
             found_at: usize::MAX,
             #[cfg(not(target_arch = "wasm32"))]
@@ -202,6 +272,9 @@ impl<'a> Mf<'a> {
     pub fn advance(&mut self, pos: usize) {
         let d = self.d;
         for p in self.next..pos {
+            self.short.ahead(d, p + AHEAD);
+            self.long.ahead(d, p + AHEAD);
+            self.mid.ahead(d, p + AHEAD);
             self.short.insert(d, p);
             self.mid.insert(d, p);
             self.long.insert(d, p);
@@ -369,6 +442,30 @@ mod gate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The same matches whether the newest positions of each hash are kept together or not:
+    /// longest, pairs and nearest, on data of few symbols (long chains, past the buckets).
+    #[test]
+    fn buckets() {
+        const REACH: usize = 1 << 16;
+        let mut r = aqr_common::rng::Rng::new(5);
+        let d: Vec<u8> = (0..RECENT_FROM).map(|_| b"abc"[r.below(3) as usize]).collect();
+        let (mut a, mut b) = (Mf::keeping(&d, REACH, RECENT), Mf::keeping(&d, REACH, 1));
+        let (mut pa, mut pb) = (vec![], vec![]);
+        for pos in (0..d.len()).step_by(97) {
+            let cap = 273.min(d.len() - pos);
+            a.advance(pos);
+            b.advance(pos);
+            assert_eq!(a.first(pos, cap), b.first(pos, cap), "{pos}");
+            assert_eq!(a.longest(pos, 16, 64, cap), b.longest(pos, 16, 64, cap), "{pos}");
+            a.pairs(pos, cap, &mut pa);
+            b.pairs(pos, cap, &mut pb);
+            assert_eq!(pa, pb, "{pos}");
+            for n in [4, 6, MID, 12, LONG, 24] {
+                assert_eq!(a.nearest(pos, n, 64), b.nearest(pos, n, 64), "{pos} {n}");
+            }
+        }
+    }
 
     /// Chains of as many positions as a dictionary of 2^n bytes, which still find the nearest
     /// match within it, at its very end too (data of a few bytes, longer than the dictionary).
