@@ -194,6 +194,7 @@ dependencies = [
  "aqr-clip",
  "aqr-common",
  "aqr-decompress",
+ "aqr-dex",
  "aqr-egg",
  "aqr-exe",
  "aqr-fasta",
@@ -255,6 +256,7 @@ dependencies = [
  "aqr-bz2",
  "aqr-clip",
  "aqr-common",
+ "aqr-dex",
  "aqr-exe",
  "aqr-fasta",
  "aqr-fits",
@@ -320,6 +322,16 @@ name = "aqr-demo-xor"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+]
+
+[[package]]
+name = "aqr-dex"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
+ "sha1",
+ "zstd",
 ]
 
 [[package]]
@@ -578,6 +590,7 @@ dependencies = [
  "aqr-bvx",
  "aqr-bz2",
  "aqr-clip",
+ "aqr-dex",
  "aqr-exe",
  "aqr-fasta",
  "aqr-fits",

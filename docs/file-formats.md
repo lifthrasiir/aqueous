@@ -320,7 +320,7 @@ container is TIFF/EXIF.
 | format | used in | how it compresses | what is left | reuse |
 |---|---|---|---|---|
 | ELF (x86-64, ARM64) | Linux and Android binaries | uncompressed (debug sections optionally zlib or zstd) | the code is filtered (aqr-exe); left: the tables (relocations, symbols, `.eh_frame`), DWARF (a recompressor of its own, for Mach-O's dSYM too) | aqr-exe, aqr-flate |
-| Android DEX | APKs | uncompressed, with shared string, type and method tables | the tables and bytecode modelled (as Pack200 did for class files) | |
+| Android DEX | APKs | uncompressed, with shared string, type and method tables | strings, id tables and classes' data taken (aqr-dex, −22% under zstd -9); left: the bytecode (65% of what is left), as Pack200 did for class files | aqr-dex |
 | Java class files | JARs | uncompressed constant pools and bytecode | as DEX | |
 | WebAssembly | the web, plugins | uncompressed sections | instructions and indices modelled | |
 

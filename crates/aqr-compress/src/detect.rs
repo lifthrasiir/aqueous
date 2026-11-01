@@ -98,6 +98,8 @@ pub enum Format {
     /// FASTA file of nucleotide sequences (aqr-fasta), a whole file: not looked for in other
     /// data.
     Fasta,
+    /// Android DEX file (aqr-dex), known by its header: at the start of data only.
+    Dex,
     /// WebAssembly module (aqr-wasm), of the binary format's version 1.
     Wasm,
     /// GNU gettext message catalog, `.mo` (aqr-gnu-gettext), known by its magic and header.
@@ -142,7 +144,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 55] = [
+    pub const ALL: [Format; 56] = [
         Format::Pe,
         Format::MachO,
         Format::Elf,
@@ -182,6 +184,7 @@ impl Format {
         Format::Aqr,
         Format::GitPack,
         Format::Fasta,
+        Format::Dex,
         Format::Wasm,
         Format::GnuGettext,
         Format::Fits,
@@ -241,6 +244,7 @@ impl Format {
             Format::Aqr => "aqr",
             Format::GitPack => "git-pack",
             Format::Fasta => "fasta",
+            Format::Dex => "dex",
             Format::Wasm => "wasm",
             Format::GnuGettext => "gnu-gettext",
             Format::Fits => "fits",
@@ -304,6 +308,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"fa" | b"fasta" | b"fna" | b"ffn" | b"fas" => format(Format::Fasta),
         b"mo" | b"gmo" => format(Format::GnuGettext),
         b"wasm" => format(Format::Wasm),
+        b"dex" => format(Format::Dex),
         b"fits" | b"fit" | b"fts" | b"fz" => format(Format::Fits),
         b"h5" | b"hdf5" | b"he5" | b"h5ad" | b"nwb" => format(Format::Hdf5),
         b"ldb" => format(Format::LevelDb),
@@ -446,6 +451,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Fits)
     } else if aqr_hdf5::formula::starts(d) || start && aqr_hdf5::formula::after_user_block(d) {
         Some(Format::Hdf5)
+    } else if start && aqr_dex::formula::starts(d) {
+        Some(Format::Dex)
     } else if start && aqr_fasta::formula::starts(d) {
         Some(Format::Fasta)
     } else if start && aqr_obj::formula::starts(d) {

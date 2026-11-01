@@ -46,6 +46,7 @@ pub fn extent(f: Format, d: &[u8]) -> Option<usize> {
         Format::GitPack => aqr_git::pack::extent(d),
         Format::GnuGettext => aqr_gnu_gettext::formula::extent(d),
         Format::Wasm => aqr_wasm::formula::extent(d),
+        Format::Dex => aqr_dex::formula::extent(d),
         Format::Fsb5 => aqr_fsb::fsb5::extent(d),
         Format::Ogg => aqr_ogg::formula::extent(d),
         Format::ProRes => aqr_prores::formula::extent(d),

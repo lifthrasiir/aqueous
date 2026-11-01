@@ -1,0 +1,30 @@
+[package]
+name = "aqr-dex"
+version = "0.1.0"
+edition = "2024"
+description = "Android DEX files rebuilt bit for bit from their strings, tables and sections split into streams"
+publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula"]
+
+[dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+sha1 = { version = "0.10", default-features = false }
+
+[dev-dependencies]
+zstd = "0.13"
+
+# Tools are named <crate>-<tool>, so that names do not collide in the workspace's target
+# directory.
+
+[[example]]
+name = "aqr-dex-check"
+path = "examples/check.rs"
+
+[[example]]
+name = "aqr-dex-bench"
+path = "examples/bench.rs"

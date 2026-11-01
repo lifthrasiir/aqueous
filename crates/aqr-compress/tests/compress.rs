@@ -1183,6 +1183,43 @@ fn kinds() {
     }
 }
 
+/// A DEX file goes to aqr-dex, by its start or its name: one of strings alone, its header's
+/// checksum and signature left as zeros (kept as they are).
+#[test]
+fn dex() {
+    let strings: Vec<String> = (0..300).map(|i| format!("Lcom/example/pkg{}/Class{i};", i % 7)).collect();
+    let n = strings.len();
+    let ids = 0x70;
+    let data = ids + 4 * n;
+    let mut d = vec![0u8; data];
+    for (i, s) in strings.iter().enumerate() {
+        let at = d.len() as u32;
+        d[ids + 4 * i..ids + 4 * i + 4].copy_from_slice(&at.to_le_bytes());
+        d.push(s.len() as u8);
+        d.extend_from_slice(s.as_bytes());
+        d.push(0);
+    }
+    while d.len() % 4 != 0 {
+        d.push(0);
+    }
+    let map = d.len();
+    d.extend_from_slice(&4u32.to_le_bytes());
+    for (t, c, o) in [(0u16, 1u32, 0usize), (1, n as u32, ids), (0x2002, n as u32, data), (0x1000, 1, map)] {
+        d.extend_from_slice(&t.to_le_bytes());
+        d.extend_from_slice(&[0, 0]);
+        d.extend_from_slice(&c.to_le_bytes());
+        d.extend_from_slice(&(o as u32).to_le_bytes());
+    }
+    let len = d.len() as u32;
+    d[..8].copy_from_slice(b"dex\n035\0");
+    for (at, v) in [(0x20, len), (0x24, 0x70), (0x28, 0x12345678), (0x34, map as u32), (0x38, n as u32), (0x3c, ids as u32)] {
+        d[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    let f = roundtrip(&d, &all());
+    assert_eq!(modules(&f), ["dex-recons"]);
+    assert_eq!(aqr_compress::kind_by_name(b"x/classes.dex"), aqr_formula::Kind::Format("dex"));
+}
+
 /// A FASTA file of nucleotides goes to aqr-fasta, by its start or its name.
 #[test]
 fn fasta() {
