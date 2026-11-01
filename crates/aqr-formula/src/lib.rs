@@ -1309,8 +1309,40 @@ impl Formula {
     /// modules whose output is not of the declared size, and on outputs not taken once
     /// ([`Formula::check_outputs`]).
     pub fn eval(&self, m: &impl Modules) -> Result<Vec<u8>> {
+        let outputs = self.shared_outputs(m)?;
+        // the output of a single application, or a stream, as it is
+        Ok(self.bytes(&self.root, m, &outputs)?.into_owned())
+    }
+
+    /// [`Formula::eval`], the output given to `part` a piece at a time as it is made, rather than
+    /// held whole: each of what the root concatenates (and what they do) in turn, let go once
+    /// given (or kept, [`Modules::keep`]).
+    pub fn eval_parts(&self, m: &impl Modules, part: &mut dyn FnMut(&[u8]) -> Result<()>) -> Result<()> {
+        let outputs = self.shared_outputs(m)?;
+        self.parts_into(&self.root, m, &outputs, part)
+    }
+
+    fn parts_into(
+        &self,
+        n: &Node,
+        m: &impl Modules,
+        outputs: &[Vec<Vec<u8>>],
+        part: &mut dyn FnMut(&[u8]) -> Result<()>,
+    ) -> Result<()> {
+        match n {
+            Node::Concat(ns) => ns.iter().try_for_each(|n| self.parts_into(n, m, outputs, part)),
+            _ => {
+                let b = self.bytes(n, m, outputs)?;
+                part(&b)?;
+                keep_all(m, [n], [b]);
+                Ok(())
+            }
+        }
+    }
+
+    /// The outputs of the applications of several outputs, in order (checked first).
+    fn shared_outputs(&self, m: &impl Modules) -> Result<Vec<Vec<Vec<u8>>>> {
         self.check_outputs()?;
-        // the outputs of the applications of several outputs, in order
         let mut outputs: Vec<Vec<Vec<u8>>> = Vec::with_capacity(self.shared.len());
         for s in &self.shared {
             let inputs = s.apply.inputs.iter().map(|n| self.bytes(n, m, &outputs)).collect::<Result<Vec<_>>>()?;
@@ -1321,8 +1353,7 @@ impl Formula {
             }
             outputs.push(out);
         }
-        // the output of a single application, or a stream, as it is
-        Ok(self.bytes(&self.root, m, &outputs)?.into_owned())
+        Ok(outputs)
     }
 
     /// Sets every application's memory limit ([`Apply::memory_limit`]) to what `limit` gives of
@@ -1649,6 +1680,34 @@ mod tests {
         ]);
         assert_eq!(n, Node::Concat(vec![Node::slice(0, 0, 5), Node::slice(0, 6, 1)]));
         assert_eq!(Node::concat([Node::slice(0, 0, 1), Node::slice(0, 1, 1)]), Node::slice(0, 0, 2));
+    }
+
+    #[test]
+    fn eval_parts() {
+        let mut f = Formula::default();
+        let a = f.push("a", b"hello".to_vec());
+        let b = f.push("b", b"xyz".to_vec());
+        f.root = Node::Concat(vec![
+            Node::apply(REV, vec![], vec![a.clone()], 5),
+            Node::Concat(vec![Node::slice(1, 0, 2), Node::apply(REV, vec![], vec![b], 3)]),
+            a,
+        ]);
+        let mut parts = Vec::new();
+        f.eval_parts(&Rev, &mut |p| {
+            parts.push(p.to_vec());
+            Ok(())
+        })
+        .unwrap();
+        // (a part each, what the root concatenates and what that does in turn)
+        assert_eq!(parts, [&b"olleh"[..], b"xy", b"zyx", b"hello"]);
+        assert_eq!(parts.concat(), f.eval(&Rev).unwrap());
+        // (a failure of the part's taker stops it)
+        let mut n = 0;
+        let r = f.eval_parts(&Rev, &mut |_| {
+            n += 1;
+            Err(Error::new("enough"))
+        });
+        assert!(r.is_err() && n == 1);
     }
 
     #[test]
