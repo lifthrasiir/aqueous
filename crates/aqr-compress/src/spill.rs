@@ -9,11 +9,12 @@
 //! held, not of all made. A segment starts with [`MAGIC`], so that one left behind is not
 //! taken for a file of another kind.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use aqr_formula::Bytes;
 use memmap2::{MmapMut, MmapOptions};
@@ -40,6 +41,12 @@ struct State {
     made: u64,
     /// The segment regions are taken from, and its bytes taken.
     open: Option<(Arc<Segment>, usize)>,
+    /// The regions by their addresses, for [`Store::find`](aqr_formula::store::Store::find):
+    /// those dropped too, until pruned (as their number doubles) or a segment is mapped over
+    /// them.
+    regions: BTreeMap<usize, Weak<View>>,
+    /// The regions held when last pruned.
+    pruned: usize,
 }
 
 struct Segment {
@@ -84,7 +91,10 @@ impl Spill {
         if prefix.file_name().is_none() || !dir.is_dir() {
             return Err(io::Error::new(io::ErrorKind::NotADirectory, "the spill's directory"));
         }
-        Ok(Spill { prefix: prefix.to_owned(), state: Mutex::new(State { made: 0, open: None }) })
+        Ok(Spill {
+            prefix: prefix.to_owned(),
+            state: Mutex::new(State { made: 0, open: None, regions: BTreeMap::new(), pruned: 0 }),
+        })
     }
 
     /// A new segment of `n` bytes (the magic, and regions to fill the rest), a file of its own
@@ -117,6 +127,9 @@ impl Spill {
         let mut map = unsafe { MmapOptions::new().len(n).map_mut(&file)? };
         map[..MAGIC.len()].copy_from_slice(&MAGIC);
         let base = map.as_mut_ptr();
+        // (regions dropped, of a segment that was mapped here before)
+        let mut over = state.regions.split_off(&(base as usize));
+        state.regions.append(&mut over.split_off(&(base as usize + n)));
         Ok(Arc::new(Segment { _map: map, _file: file, base, len: n }))
     }
 }
@@ -141,7 +154,22 @@ impl aqr_formula::store::Store for Spill {
             }
         };
         let at = segment.at(start);
-        Some((at, Bytes::shared(Arc::new(View { segment, start, len: n }))))
+        let view = Arc::new(View { segment, start, len: n });
+        state.regions.insert(at as usize, Arc::downgrade(&view));
+        if state.regions.len() > 2 * state.pruned.max(64) {
+            state.regions.retain(|_, v| v.strong_count() > 0);
+            state.pruned = state.regions.len();
+        }
+        Some((at, Bytes::shared(view)))
+    }
+
+    fn find(&self, d: &[u8]) -> Option<Bytes> {
+        let at = d.as_ptr() as usize;
+        let view = self.state.lock().unwrap().regions.range(..=at).next_back()?.1.upgrade()?;
+        let start = at - (*view).as_ref().as_ptr() as usize;
+        // (sharing a region holds all of it: a copy where `d` is not most of it)
+        (start + d.len() <= view.len && d.len() * 2 >= view.len)
+            .then(|| Bytes::shared(view).slice(start..start + d.len()))
     }
 }
 

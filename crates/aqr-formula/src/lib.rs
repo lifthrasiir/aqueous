@@ -247,19 +247,24 @@ impl Bytes {
 
     /// Its first `len` bytes only.
     pub fn prefix(self, len: usize) -> Bytes {
-        struct Prefix(Arc<dyn AsRef<[u8]> + Send + Sync>, usize);
-        impl AsRef<[u8]> for Prefix {
-            fn as_ref(&self) -> &[u8] {
-                &(*self.0).as_ref()[..self.1]
-            }
-        }
         match self.0 {
             Repr::Owned(mut v) => {
                 v.truncate(len);
                 Bytes(Repr::Owned(v))
             }
             Repr::Shared(d) if len >= (*d).as_ref().len() => Bytes(Repr::Shared(d)),
-            Repr::Shared(d) => Bytes::shared(Arc::new(Prefix(d, len))),
+            Repr::Shared(d) => Bytes::shared(Arc::new(Slice(d, 0..len))),
+        }
+    }
+
+    /// Bytes `range` of it: sharing them where they are shared, else a copy.
+    pub fn slice(&self, range: std::ops::Range<usize>) -> Bytes {
+        match &self.0 {
+            Repr::Owned(v) => Bytes(Repr::Owned(v[range].to_vec())),
+            Repr::Shared(d) => {
+                assert!(range.start <= range.end && range.end <= (**d).as_ref().len(), "a slice within");
+                Bytes::shared(Arc::new(Slice(d.clone(), range)))
+            }
         }
     }
 
@@ -284,6 +289,15 @@ impl Bytes {
         if let Repr::Owned(v) = &mut self.0 {
             v.shrink_to_fit()
         }
+    }
+}
+
+/// Bytes of bytes shared ([`Bytes::prefix`], [`Bytes::slice`]).
+struct Slice(Arc<dyn AsRef<[u8]> + Send + Sync>, std::ops::Range<usize>);
+
+impl AsRef<[u8]> for Slice {
+    fn as_ref(&self) -> &[u8] {
+        &(*self.0).as_ref()[self.1.clone()]
     }
 }
 

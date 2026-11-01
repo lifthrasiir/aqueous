@@ -15,6 +15,12 @@ pub trait Store: Send + Sync {
     /// A region of `n` bytes, zeroed: where to write it, and its bytes as the store holds them
     /// (not to be read until written). None where there is no room.
     fn region(&self, n: usize) -> Option<(*mut u8, Bytes)>;
+
+    /// `d` as bytes of the store, sharing them, where it is within a region of it still held
+    /// (and the store would rather share the region than have it copied).
+    fn find(&self, _d: &[u8]) -> Option<Bytes> {
+        None
+    }
 }
 
 static STORE: RwLock<Option<Arc<dyn Store>>> = RwLock::new(None);
@@ -108,6 +114,15 @@ pub fn spill(b: &mut Bytes) {
     // SAFETY: the region is of `b.len()` bytes and no one else's
     unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), at, b.len()) };
     *b = bytes;
+}
+
+/// `d` as bytes shared with the store where it is within a region of it still held (a stream
+/// spilled, say) and the store would rather share it, rather than a copy.
+pub fn find(d: &[u8]) -> Option<Bytes> {
+    if d.len() < MIN {
+        return None;
+    }
+    store()?.find(d)
 }
 
 /// [`spill`] of every stream of `f`.

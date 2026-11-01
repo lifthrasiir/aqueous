@@ -8,7 +8,9 @@
 //! again: modules are pure functions, so that this is the output it would give. Everything else
 //! of the archive (its blocks, the formula block, the streams, the checksums) is decoded as it
 //! would be. An application whose output is part of the file (that of a formula of a file in
-//! the file, at its top) is not kept in the memo, but known to give that part of the file.
+//! the file, at its top) is not kept in the memo, but known to give that part of the file; one
+//! whose output is a stream of the store (a content's formula's, the content spilled) shares
+//! it rather than a copy ([`aqr_formula::store::find`]).
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -40,6 +42,7 @@ fn key(a: &Apply, inputs: &[&[u8]]) -> Key {
 }
 
 /// An application's output: its bytes, or a range of a file (by index).
+#[derive(Clone)]
 enum Output {
     /// (of the store where one is set, see [`crate::Options::spill`])
     Bytes(aqr_formula::Bytes),
@@ -59,13 +62,13 @@ impl Memo {
     }
 }
 
-/// Runs the modules, keeping the output of every application by its key: as a range of a
-/// file for the applications in `file` (by address, with the file's index and the range), else
+/// Runs the modules, keeping the output of every application by its key: as it is known for
+/// the applications in `known` (by address: a range of a file, or bytes of the store), else
 /// the bytes themselves once the evaluation is done with them ([`Modules::keep`]), rather than
 /// a copy as they are made.
 struct Recording<'f> {
     native: Native,
-    file: Vec<(usize, usize, Range<usize>)>,
+    known: Vec<(usize, Output)>,
     seen: Mutex<Vec<(Key, Output)>>,
     /// The keys of the applications whose outputs are to be kept, by address.
     keys: Mutex<HashMap<usize, Key>>,
@@ -81,8 +84,8 @@ impl Modules for Recording<'_> {
             Some(out) => out,
             None => self.native.apply(a, inputs)?,
         };
-        match self.file.iter().find(|(at, ..)| std::ptr::addr_eq(a, *at as *const Apply)) {
-            Some((_, i, range)) => self.seen.lock().unwrap().push((key(a, inputs), Output::File(*i, range.clone()))),
+        match self.known.iter().find(|(at, _)| std::ptr::addr_eq(a, *at as *const Apply)) {
+            Some((_, o)) => self.seen.lock().unwrap().push((key(a, inputs), o.clone())),
             None => _ = self.keys.lock().unwrap().insert(a as *const Apply as usize, key(a, inputs)),
         }
         self.limit(a, &[a.len], inputs);
@@ -198,9 +201,15 @@ pub(crate) struct Prevalidator {
     files: Vec<(Range<usize>, usize)>,
 }
 
-/// A formula, the hash of its data, and where the data is in a file if it is (the file's
-/// index, and the offset).
-type Job = (Arc<Formula>, Key, Option<(usize, usize)>);
+/// A formula, the hash of its data, and where the data is: in a file (the file's index, and the
+/// offset), or in the store (a stream spilled, its bytes shared), if it is.
+type Job = (Arc<Formula>, Key, Where);
+
+enum Where {
+    File(usize, usize),
+    Store(aqr_formula::Bytes),
+    Elsewhere,
+}
 
 /// A formula of data to evaluate beforehand, later ([`Prevalidator::job`]).
 pub(crate) struct Deferred(Job);
@@ -263,8 +272,12 @@ impl Prevalidator {
         let within = self.files[..self.files.partition_point(|f| f.0.start <= at)]
             .last()
             .filter(|(r, _)| r.contains(&at) && at + d.len() <= r.end)
-            .map(|(r, i)| (*i, at - r.start));
-        (!f.applies().is_empty()).then(|| Deferred((f, hash(d), within)))
+            .map(|(r, i)| Where::File(*i, at - r.start));
+        if f.applies().is_empty() {
+            return None;
+        }
+        let within = within.or_else(|| aqr_formula::store::find(d).map(Where::Store)).unwrap_or(Where::Elsewhere);
+        Some(Deferred((f, hash(d), within)))
     }
 
     /// Has a formula of [`Prevalidator::job`] evaluated.
@@ -299,13 +312,18 @@ impl Prevalidator {
 }
 
 /// Evaluates job `j` on `threads` threads, keeping its applications' outputs in `memo` where it
-/// gives what it stands for. The file is not kept again: the outputs of the applications at
-/// the top of a formula of data in it are where they make it.
+/// gives what it stands for. The data is not kept again where it is in a file or the store:
+/// the outputs of the applications at the top of its formula are where they make it.
 fn evaluate((f, d, at): Job, threads: usize, memo: &mut Memo) {
     let native = Native { threads };
+    let top = top(&f.root).into_iter();
     let r = Recording {
         native,
-        file: at.map_or_else(Vec::new, |(i, at)| top(&f.root, i, at)),
+        known: match at {
+            Where::File(i, at) => top.map(|(a, r)| (a, Output::File(i, at + r.start..at + r.end))).collect(),
+            Where::Store(b) => top.map(|(a, r)| (a, Output::Bytes(b.slice(r)))).collect(),
+            Where::Elsewhere => Vec::new(),
+        },
         seen: Mutex::default(),
         keys: Mutex::default(),
         limits: Mutex::default(),
@@ -424,15 +442,15 @@ fn ahead(f: &Formula) -> Vec<(&Apply, Vec<&[u8]>)> {
     applies
 }
 
-/// The applications at the top of `n`, by address, with the ranges of their outputs in file
-/// `file`, where the output of `n` is at `at`: `n`, or those it concatenates.
-fn top(n: &Node, file: usize, at: usize) -> Vec<(usize, usize, Range<usize>)> {
+/// The applications at the top of `n`, by address, with the ranges of their outputs in its
+/// output: `n`, or those it concatenates.
+fn top(n: &Node) -> Vec<(usize, Range<usize>)> {
     let mut out = Vec::new();
-    let mut p = at;
+    let mut p = 0;
     for n in if let Node::Concat(ns) = n { &ns[..] } else { std::slice::from_ref(n) } {
         let len = n.len() as usize;
         if let Node::Apply(a) = n {
-            out.push((&**a as *const Apply as usize, file, p..p + len));
+            out.push((&**a as *const Apply as usize, p..p + len));
         }
         p += len;
     }
