@@ -530,8 +530,9 @@ symbol (relative starts 0 and 65536). `-mcE+` forces type 1, `-mc-` disables fil
 ### 3.5 Blocks and tables
 
 - Block boundaries. RAR closes a block after at most 16384 symbols (16383 for a file's first
-  block), at segment ends, and at the end of each file. Whether filter records count
-  towards the limit was not determined.
+  block), at segment ends, and at the end of each file. A filter record counts as 6 units plus
+  its start field's byte count (determined later from the fixtures: aqr-rar's `FORMAT.md`
+  §5.6), so a block with filters holds fewer tokens.
 - Table transmission: in non-solid files every block observed has tables; in solid streams
   files often start with a block without tables, and RAR resends tables every few hundred
   symbols across small files.

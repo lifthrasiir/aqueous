@@ -23,6 +23,13 @@ own terms; the code is written from that description, not from the encoder's cod
   tables, their selectors and code lengths), in aqr-bz2, written from memory of its behaviour
   and checked against libbzip2 1.0.8 (Python's `bz2`) used as a black box, without its code.
 - **libjpeg** (the Independent JPEG Group): its progressive Huffman encoder, in aqr-jpeg.
+- **RAR** (Alexander Roshal, RARLAB): its compressors' block cuts, code lengths, filter records
+  and PPMd escape bytes, and the RAR5 and RAR 2.9 stream formats, in aqr-rar. Written in a clean
+  room: the formats were described in `docs/rar5-decoding.md` and `docs/rar3-decoding.md` by an
+  agent that read libarchive's RAR readers (BSD) and RARLAB's technotes and wrote no code, and
+  the code was written from those notes by others; rar 7.23 and 6.24 and bsdtar were used as
+  black boxes. unrar's code (whose licence forbids using it towards a RAR compressor) was read by
+  no one.
 
 ## Ideas
 

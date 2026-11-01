@@ -29,7 +29,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   - `aqr-modules` — Wasm modules built from the recompressors' code (`src/bin`, `wasm/`,
     `src/known.rs`).
 - `codecs/` — the recompressor crates `aqr-*` (flate, png, jpeg, mp3, flac, pdf, zip, sqlite,
-  git, lz4, lzma, lzo, bvx, bz2, alz, egg, azo, lha, snappy, gif, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle,
+  git, lz4, lzma, lzo, bvx, bz2, alz, egg, azo, lha, rar, snappy, gif, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle,
   asar, vorbis, ogg, mkv, …), each with a `README.md` and a `FORMAT.md` describing what it stores; a crate with a
   `FORMAT.md` belongs here. `aqr-flate` underlies everything that uses DEFLATE. The workspace
   takes both directories by glob, so a new crate needs no entry in the root `Cargo.toml`.
@@ -161,6 +161,14 @@ optimization picked by hash.
   coder (predicted from the tokens) and cuts blocks by its token buffer. No LHA code is read;
   lhasa's test archives and Aminet are the black boxes (Debian's `lha`, LHa for UNIX, would be
   an oracle in the Linux VM). Left (its README's Status): `-lh1-`, archives in other data.
+- aqr-rar (RAR5, and RAR 3.x/4.x's RAR 2.9 algorithm: LZ, PPMd, the standard filters): a record
+  of the parse, as aqr-lzo. Clean room: `docs/rar5-decoding.md` and `docs/rar3-decoding.md` were
+  written by agents that read libarchive (BSD) and wrote no code; the code is written from those
+  notes only. Don't read libarchive's RAR readers when changing aqr-rar's code (have a note
+  written instead), and never unrar's source (its licence forbids RAR compressors). The PPMd
+  model is ported from lzma-sdk (public domain). rar 7.23 and 6.24 (`third_party/rar-dl`,
+  6.24 for `-ma4`) are the black boxes. Left (its README's Status): volumes, SFX checks, older
+  WinRARs' tables, RAR5's parse (most of its record), speed.
 - aqr-snappy and aqr-lz4 reimplement the encoders: Chrome's LevelDB Snappy is the
   multiplicative-hash build (Homebrew's arm64 builds use the CRC hash and do not match);
   Firefox's mozlz4 is liblz4's `LZ4_compress_default`.
