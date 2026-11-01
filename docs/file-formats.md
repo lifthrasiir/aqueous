@@ -90,7 +90,7 @@ reservoir is rebuilt.
 
 | format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
-| Apple ProRes (QuickTime, MXF) | aqr-prores | 33 files, 16.89 GB: ARRI cameras (MOV and MXF), an Apple-encoded film, an SD capture, ffmpeg's encoders, FFmpeg's samples (README) | 0.678 (0.990 before) | 0.990 | 46 (`aqr`, 16 threads) | 110 (`-t`, 16 threads) | the archiver's (it holds the largest file whole) | measured 2026-11-01 with `aqr` on a Ryzen 7 9700X. The coefficients under a context model with the previous frame as context (most of the gain: 0.830 without it), in chunks of 32 MiB whose eight stripes decode as tasks; nothing reproduced but the coding. A chunk codes at about 15 MB/s on a thread and decodes at 13 |
+| Apple ProRes (QuickTime, MXF) | aqr-prores | 33 files, 16.89 GB: ARRI cameras (MOV and MXF), an Apple-encoded film, an SD capture, ffmpeg's encoders, FFmpeg's samples (README) | 0.676 (0.990 before) | 0.990 | 46 (`aqr`, 16 threads) | 130 (`-t`, 16 threads) | the archiver's (it holds the largest file whole) | measured 2026-11-01 with `aqr` on a Ryzen 7 9700X. The coefficients under a context model with the previous frame as context (most of the gain: 0.830 without it), in chunks of 64 MiB whose stripes (one for each 4 MiB) decode as tasks; nothing reproduced but the coding. A chunk codes at about 15 MB/s on a thread and decodes at 13 |
 
 ### Containers and general-purpose compression
 

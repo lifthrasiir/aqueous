@@ -3,8 +3,8 @@
 aqr-prores codes the ProRes frames of a file (QuickTime or MXF) in **chunks**: a chunk is a span
 of the file from a frame's start to a later frame's end, and its frames are coded with a context
 model of their quantized coefficients, the frame before as context, while the bytes between them
-(audio, the container's headers) go apart as they are. The coefficients are coded in eight
-stripes of rows, each a stream of its own, so that they decode at once. From the coded chunk and
+(audio, the container's headers) go apart as they are. The coefficients are coded in stripes
+of rows, each a stream of its own, so that they decode at once. From the coded chunk and
 those bytes the module `prores-recons` rebuilds the span bit for bit. This document describes
 ProRes frames as aqr-prores reads and writes them (§2), the module (§3), the chunk and its
 streams (§4), a frame's headers (§5), the planes of coefficients (§6) and their model (§7).
@@ -132,26 +132,27 @@ padding.
 ## 3. The module
 
 - **Module**: name `prores-recons`, version 1.
-- **Params**: 12 varints (unsigned LEB128, shortest form), what decoding holds (§4.4):
+- **Params**: `5 + k` varints (unsigned LEB128, shortest form), what decoding holds (§4.4):
 
   ```text
   blocks         most blocks of a frame (all its pictures' components), at most 2^24
   frame          most bytes of a frame, at most 2^32 − 1
   side           most of what the first stream tells, as §4.4 counts it
   stripe_blocks  most blocks of a stripe of a picture (§6), at most blocks
-  result[8]      bytes each stripe writes (§4.3)
+  k              the number of stripes, 1 to 64
+  result[k]      bytes each stripe writes (§4.3)
   ```
 
 - **Resources**: none.
 - **Inputs**: exactly two, the chunk `C` (§4; class `prores/coded`) and the bytes between its
   frames `G` (class `prores/rest`, of which it is a slice).
 - **Output**: the span of §4, which must be of the `len` the application declares.
-- **Tasks**: the stripes (§4.3) may be decoded as tasks, at most 8 at once (the module's task
+- **Tasks**: the stripes (§4.3) may be decoded as tasks, at most 16 at once (the module's task
   slots); the output does not depend on it.
 
 ## 4. The chunk
 
-`C` is 9 **streams**: first, for each stream in order, `le32 A` and `le32 R`, its bytes of
+`C` is `1 + k` **streams**: first, for each stream in order, `le32 A` and `le32 R`, its bytes of
 arithmetic code and of raw bits; then the streams one after another, each its `A` bytes of
 arithmetic code and its `R` bytes of raw bits. Nothing follows. Stream 0 tells the frames
 (§4.2, §5); stream `1 + s` the coefficients of stripe `s` of every picture (§4.3).
@@ -192,8 +193,8 @@ past theirs.
 
 ### 4.3 Stripes
 
-A picture of `rows` slice rows has 8 **stripes**: stripe `s` is its slice rows
-`⌊rows·s / 8⌋` up to (not with) `⌊rows·(s + 1) / 8⌋`, and so may be empty.
+A picture of `rows` slice rows has `k` **stripes**: stripe `s` is its slice rows
+`⌊rows·s / k⌋` up to (not with) `⌊rows·(s + 1) / k⌋`, and so may be empty.
 
 Stream `1 + s`, for each modelled frame in order and each of its pictures `j`, codes the planes
 (§6) of stripe `s` of the picture, Y, Cb and Cr, each by §7, with the same plane of stripe `s`
@@ -340,9 +341,11 @@ At position `i`, with `tq = Q[i]` (0 without `Q`), `f = mag[FN[i][0]] + mag[FN[i
 `formula::encode` finds the frames of a file (a `be32` size and `icpf` whose frame parses as §2:
 the frame header, pictures that fit the frame, slices that fit the pictures, components whose
 codewords end within them with zero padding, coefficients within 16 bits; a frame found is
-skipped whole) and cuts them into chunks of about 32 MiB of frames, a chunk ending also where
-more than 4 MiB lie between two frames. Each chunk is coded on a thread of its own, its stripes
-side by side. A frame that parses is modelled: it is written again bit for bit, as its
+skipped whole) and cuts them into chunks of about 64 MiB of frames, a chunk ending also where
+more than 4 MiB lie between two frames. A chunk has a stripe for each 4 MiB of its frames,
+rounded up (at most 64): as each stripe's model learns anew, their cost stays a small part
+whatever the size, and a large file's chunks decode on 16 threads. Each chunk is coded on a
+thread of its own, its stripes side by side. A frame that parses is modelled: it is written again bit for bit, as its
 codewords, signs and positions have one coding each, its padding is zero and recorded, and its
 sizes are derived. Any other is kept as it is. The parameters are what the chunk takes, exactly.
 

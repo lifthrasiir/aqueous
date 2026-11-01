@@ -4,8 +4,9 @@
 //!
 //! The coded chunk is streams: the first holds what is not coefficients (the bytes between
 //! frames' lengths, the frames kept, the headers as differences from the previous ones, the
-//! slices' headers, tails and alpha); each of the [`STRIPES`] others the coefficients of a
-//! stripe of rows of slices of every picture, with a model of its own. So the stripes decode at
+//! slices' headers, tails and alpha); each of the others the coefficients of a stripe of rows
+//! of slices of every picture, with a model of its own, a stripe for about [`STRIPE_BYTES`] of
+//! frames. So the stripes decode at
 //! once, each writing its slices' bytes, and the frames are put together from them.
 //! `FORMAT.md` specifies it.
 
@@ -20,13 +21,16 @@ use crate::model::{Coder, Model};
 use crate::plane::{self, Plane};
 use crate::{Error, Result};
 
-/// Stripes of a picture: stripe `s` is its slice rows `rows * s / STRIPES` up to
-/// `rows * (s + 1) / STRIPES`.
-pub const STRIPES: usize = 8;
+/// Bytes of frames a stripe codes, about: a chunk has `⌈its frames' bytes / STRIPE_BYTES⌉`
+/// stripes, at most [`MAX_STRIPES`]. (Each stripe's model learns anew: an animated film lost
+/// 0.6% at 8 stripes for 56 MB, 2.3% at 32; camera footage gained a little.)
+pub const STRIPE_BYTES: usize = 4 << 20;
+pub const MAX_STRIPES: usize = 64;
 
-/// The slice rows of stripe `s` of a picture of `rows` of them.
-fn stripe_rows(rows: usize, s: usize) -> Range<usize> {
-    rows * s / STRIPES..rows * (s + 1) / STRIPES
+/// The slice rows of stripe `s` of `k` of a picture of `rows` of them: `rows * s / k` up to
+/// `rows * (s + 1) / k`.
+fn stripe_rows(rows: usize, s: usize, k: usize) -> Range<usize> {
+    rows * s / k..rows * (s + 1) / k
 }
 
 struct Enc {
@@ -136,7 +140,7 @@ fn bytes<C: Coder>(c: &mut C, d: &mut Vec<u8>, n: usize) {
 
 /// What decoding a chunk holds at most, which its application gives (`FORMAT.md`), and
 /// decoding holds to.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Limits {
     /// Blocks of a frame (of all its pictures and components).
     pub blocks: u64,
@@ -147,8 +151,8 @@ pub struct Limits {
     pub side: u64,
     /// Blocks of a stripe of a picture.
     pub stripe_blocks: u64,
-    /// Bytes each stripe writes: its slices, and their lengths.
-    pub results: [u64; STRIPES],
+    /// Bytes each stripe writes (its slices, and their lengths), one for each stripe.
+    pub results: Vec<u64>,
 }
 
 /// Bytes counted for what the first stream tells ([`Limits::side`]): of an item, a frame kept, a
@@ -173,10 +177,16 @@ pub struct Coded {
 /// Encodes `span`, whose frames (each from its size field on) are at `frames` (in order, apart),
 /// as a chunk: the frames coded, the bytes between them given back as they are.
 pub fn encode(span: &[u8], frames: &[Range<usize>]) -> Coded {
+    let frame_bytes: usize = frames.iter().map(|r| r.len()).sum();
+    encode_with(span, frames, frame_bytes.div_ceil(STRIPE_BYTES).clamp(1, MAX_STRIPES))
+}
+
+/// [`encode`] in `k` stripes.
+fn encode_with(span: &[u8], frames: &[Range<usize>], k: usize) -> Coded {
     let mut side = Enc::new();
     let mut st = SideState::default();
-    let mut stripes: Vec<(Enc, StripeState)> = (0..STRIPES).map(|_| (Enc::new(), StripeState::default())).collect();
-    let (mut gaps, mut limits) = (Vec::new(), Limits::default());
+    let mut stripes: Vec<(Enc, StripeState)> = (0..k).map(|_| (Enc::new(), StripeState::default())).collect();
+    let (mut gaps, mut limits) = (Vec::new(), Limits { results: vec![0; k], ..Limits::default() });
     side.raw(frames.len() as u32, 32);
     let mut at = 0;
     for r in frames {
@@ -202,8 +212,8 @@ pub fn encode(span: &[u8], frames: &[Range<usize>]) -> Coded {
                     for s in &pic.slices {
                         limits.side += SIDE_SLICE + (s.header.len() + s.alpha.len()) as u64;
                     }
-                    for (k, r) in limits.results.iter_mut().enumerate() {
-                        let rs = stripe_rows(rows, k);
+                    for (s, r) in limits.results.iter_mut().enumerate() {
+                        let rs = stripe_rows(rows, s, k);
                         limits.stripe_blocks = limits.stripe_blocks.max(picture_blocks(&f.header, mbw, rs.len()));
                         for s in &pic.slices[rs.start * nw..rs.end * nw] {
                             *r += 4 + (s.header.len() + s.sizes.iter().sum::<usize>() + s.alpha.len()) as u64;
@@ -216,7 +226,7 @@ pub fn encode(span: &[u8], frames: &[Range<usize>]) -> Coded {
                     let mut planes = Vec::with_capacity(f.pictures.len());
                     for (pi, pic) in f.pictures.iter().enumerate() {
                         let ws = pic.widths(&f.header);
-                        let rs = stripe_rows(pic.slices.len() / ws.len(), s);
+                        let rs = stripe_rows(pic.slices.len() / ws.len(), s, k);
                         let mut pl = plane::planes(&pic.slices[rs.start * ws.len()..rs.end * ws.len()], &f.header, &ws);
                         let prev = ss.prev.as_ref().and_then(|v| v.get(pi));
                         for (k, p) in pl.iter_mut().enumerate() {
@@ -333,13 +343,17 @@ enum Item {
 
 /// Decodes a chunk into its span of `len` bytes, with `gaps` the bytes between its frames, its
 /// stripes on up to `threads` threads (tasks, in WebAssembly).
-pub fn decode(coded: &[u8], gaps: &[u8], limits: Limits, len: usize, threads: usize) -> Result<Vec<u8>> {
+pub fn decode(coded: &[u8], gaps: &[u8], limits: &Limits, len: usize, threads: usize) -> Result<Vec<u8>> {
     let bad = || Error("corrupt chunk");
+    let stripes = limits.results.len();
+    if !(1..=MAX_STRIPES).contains(&stripes) {
+        return Err(bad());
+    }
     // The streams: their lengths, then them.
-    let table = 8 * (1 + STRIPES);
+    let table = 8 * (1 + stripes);
     let mut at = coded.get(..table).ok_or(bad())?.len();
-    let mut streams = Vec::with_capacity(1 + STRIPES);
-    for k in 0..1 + STRIPES {
+    let mut streams = Vec::with_capacity(1 + stripes);
+    for k in 0..1 + stripes {
         let n = |o: usize| u32::from_le_bytes(coded[8 * k + o..8 * k + o + 4].try_into().unwrap()) as usize;
         let (a, r) = (n(0), n(4));
         let arith = coded.get(at..at.checked_add(a).ok_or(bad())?).ok_or(bad())?;
@@ -352,12 +366,12 @@ pub fn decode(coded: &[u8], gaps: &[u8], limits: Limits, len: usize, threads: us
         return Err(bad());
     }
     let (items, last) = side_dec(&streams[0], limits)?;
-    let parts = aqr_common::pool::par_map_apart(STRIPES, threads, |s| {
+    let parts = aqr_common::pool::par_map_apart(stripes, threads, |s| {
         let (arith, raw) = &streams[1 + s];
         stripe_dec(s, &items, Dec::new(arith, raw), limits).unwrap_or_default()
     });
     // (an empty part where a stripe failed: it has a byte at least otherwise)
-    if parts.iter().zip(limits.results).any(|(p, n)| Some(p.len() as u64) != n.checked_add(1)) {
+    if parts.iter().zip(&limits.results).any(|(p, n)| Some(p.len() as u64) != n.checked_add(1)) {
         return Err(bad());
     }
     let mut cursors: Vec<&[u8]> = parts.iter().map(|p| &p[1..]).collect();
@@ -383,7 +397,7 @@ pub fn decode(coded: &[u8], gaps: &[u8], limits: Limits, len: usize, threads: us
                     let mut table = out.len();
                     out.resize(table + 2 * p.slices.len(), 0);
                     for (s, cur) in cursors.iter_mut().enumerate() {
-                        let count = stripe_rows(p.rows, s).len() * p.widths.len();
+                        let count = stripe_rows(p.rows, s, stripes).len() * p.widths.len();
                         let lens = cur.get(..4 * count).ok_or(bad())?;
                         let mut total = 0;
                         for l in lens.as_chunks::<4>().0 {
@@ -418,7 +432,7 @@ pub fn decode(coded: &[u8], gaps: &[u8], limits: Limits, len: usize, threads: us
 }
 
 /// Decodes the first stream: each frame after its gap, and the last gap.
-fn side_dec(stream: &(&[u8], Vec<u8>), limits: Limits) -> Result<(Vec<(usize, Item)>, usize)> {
+fn side_dec(stream: &(&[u8], Vec<u8>), limits: &Limits) -> Result<(Vec<(usize, Item)>, usize)> {
     let bad = || Error("corrupt chunk");
     let mut c = Dec::new(stream.0, &stream.1);
     let mut st = SideState::default();
@@ -452,7 +466,7 @@ fn side_dec(stream: &(&[u8], Vec<u8>), limits: Limits) -> Result<(Vec<(usize, It
     Ok((items, last))
 }
 
-fn frame_side_dec(c: &mut Dec, st: &mut SideState, limits: Limits, side: &mut u64) -> Result<FrameSide> {
+fn frame_side_dec(c: &mut Dec, st: &mut SideState, limits: &Limits, side: &mut u64) -> Result<FrameSide> {
     let bad = |s| Error(s);
     if !c.bit(&mut st.bits.same_header, false) {
         let n = c.raw(0, 16) as usize;
@@ -483,7 +497,8 @@ fn frame_side_dec(c: &mut Dec, st: &mut SideState, limits: Limits, side: &mut u6
         let rows = n / ws.len();
         blocks += picture_blocks(&header, mbw, rows);
         *side += SIDE_PICTURE;
-        let most = (0..STRIPES).map(|s| picture_blocks(&header, mbw, stripe_rows(rows, s).len())).max().unwrap_or(0);
+        let k = limits.results.len();
+        let most = (0..k).map(|s| picture_blocks(&header, mbw, stripe_rows(rows, s, k).len())).max().unwrap_or(0);
         if blocks > limits.blocks || most > limits.stripe_blocks || *side > limits.side {
             return Err(bad("frame past the chunk's limits"));
         }
@@ -551,7 +566,8 @@ fn frame_side_dec(c: &mut Dec, st: &mut SideState, limits: Limits, side: &mut u6
 /// Decodes stripe `s` of every frame of `items` and writes its slices: for each modelled frame
 /// and picture, the lengths of its slices in the stripe (u32, little-endian), then their bytes;
 /// after a byte 1. None where the stream does not decode.
-fn stripe_dec(s: usize, items: &[(usize, Item)], mut c: Dec, limits: Limits) -> Option<Vec<u8>> {
+fn stripe_dec(s: usize, items: &[(usize, Item)], mut c: Dec, limits: &Limits) -> Option<Vec<u8>> {
+    let k = limits.results.len();
     let mut ss = StripeState::default();
     let mut out = vec![1u8];
     for (_, item) in items {
@@ -561,7 +577,7 @@ fn stripe_dec(s: usize, items: &[(usize, Item)], mut c: Dec, limits: Limits) -> 
         };
         let mut planes = Vec::with_capacity(f.pics.len());
         for (pi, p) in f.pics.iter().enumerate() {
-            let rs = stripe_rows(p.rows, s);
+            let rs = stripe_rows(p.rows, s, k);
             let mut pl = plane::empty(&f.header, &p.widths, rs.len());
             let prev = ss.prev.as_ref().and_then(|v| v.get(pi));
             for (k, q) in pl.iter_mut().enumerate() {
@@ -669,16 +685,26 @@ mod tests {
             span.extend_from_slice(f);
         }
         span.extend_from_slice(b"tail");
-        let e = encode(&span, &ranges);
+        for k in [1, 3, 8] {
+            stripes_round_trip(&span, &ranges, &frames, k);
+        }
+    }
+
+    fn stripes_round_trip(span: &[u8], ranges: &[std::ops::Range<usize>], frames: &[Vec<u8>], k: usize) {
+        let e = encode_with(span, ranges, k);
+        assert_eq!(e.limits.results.len(), k);
         assert_eq!(e.limits.frame, frames.iter().map(|f| f.len() as u64).max().unwrap());
-        assert_eq!(decode(&e.coded, &e.gaps, e.limits, span.len(), 2).unwrap(), span);
-        assert!(decode(&e.coded[..e.coded.len() / 2], &e.gaps, e.limits, span.len(), 2).is_err());
-        let tight = Limits { blocks: e.limits.blocks - 1, ..e.limits };
-        assert!(decode(&e.coded, &e.gaps, tight, span.len(), 2).is_err());
-        let tight = Limits { side: e.limits.side - 1, ..e.limits };
-        assert!(decode(&e.coded, &e.gaps, tight, span.len(), 2).is_err());
-        let mut tight = e.limits;
+        assert_eq!(decode(&e.coded, &e.gaps, &e.limits, span.len(), 2).unwrap(), span);
+        let mut more = e.limits.clone();
+        more.results.push(0);
+        assert!(decode(&e.coded, &e.gaps, &more, span.len(), 2).is_err());
+        assert!(decode(&e.coded[..e.coded.len() / 2], &e.gaps, &e.limits, span.len(), 2).is_err());
+        let tight = Limits { blocks: e.limits.blocks - 1, ..e.limits.clone() };
+        assert!(decode(&e.coded, &e.gaps, &tight, span.len(), 2).is_err());
+        let tight = Limits { side: e.limits.side - 1, ..e.limits.clone() };
+        assert!(decode(&e.coded, &e.gaps, &tight, span.len(), 2).is_err());
+        let mut tight = e.limits.clone();
         *tight.results.iter_mut().find(|r| **r > 0).unwrap() -= 1;
-        assert!(decode(&e.coded, &e.gaps, tight, span.len(), 2).is_err());
+        assert!(decode(&e.coded, &e.gaps, &tight, span.len(), 2).is_err());
     }
 }

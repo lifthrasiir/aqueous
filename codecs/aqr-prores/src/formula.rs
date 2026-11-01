@@ -15,8 +15,12 @@ pub use crate::module::decode;
 
 pub const MODULE: Module = Module::new("prores-recons", 1).with_memory(memory);
 
-/// Frame bytes of a chunk: its application holds about as much (and its output).
-pub const CHUNK: usize = 32 << 20;
+/// Frame bytes of a chunk: its application holds about as much (and its output); its stripes
+/// are about 4 MiB each (`codec::STRIPE_BYTES`), 16 of them.
+pub const CHUNK: usize = 64 << 20;
+
+/// Stripes decoding at once in WebAssembly: the module's task slots (aqr-modules' `prores-recons`).
+pub const SLOTS: usize = 16;
 /// Bytes between frames past which a chunk ends (they stay out of the applications).
 const GAP: usize = 4 << 20;
 /// How far into a file its first frame is looked for.
@@ -32,10 +36,13 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     let l = module::limits(u.params).ok()?;
     let coded = *u.inputs.first()?;
     let page = aqr_formula::PAGE;
-    let w = u.base() + coded + l.side + (1 + codec::STRIPES as u64) * page;
-    let tasks: u64 = l
-        .results
+    let w = u.base() + coded + l.side + (1 + l.results.len() as u64) * page;
+    // (the largest at once, as many as the slots)
+    let mut results = l.results.clone();
+    results.sort_unstable_by(|a, b| b.cmp(a));
+    let tasks: u64 = results
         .iter()
+        .take(SLOTS)
         .map(|&r| w + Model::bytes() + l.stripe_blocks * (3 * 129 + 2) + l.side + 2 * (r + 1) + 8 * page)
         .sum();
     let results: u64 = l.results.iter().map(|&r| r + 1).sum();
@@ -120,7 +127,7 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
         rest.extend_from_slice(&input[at..span.start]);
         let gaps = (rest.len(), c.gaps.len());
         rest.extend_from_slice(&c.gaps);
-        parts.push((before, (all.len(), c.coded.len()), gaps, span.len(), c.limits));
+        parts.push((before, (all.len(), c.coded.len()), gaps, span.len(), c.limits.clone()));
         all.extend_from_slice(&c.coded);
         at = span.end;
     }
@@ -134,7 +141,7 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     for (before, coded, gaps, span, limits) in parts {
         root.push(slice(rs, before));
         let inputs = vec![slice(cs, coded), slice(rs, gaps)];
-        root.push(Node::apply(MODULE, module::params(limits), inputs, span as u64));
+        root.push(Node::apply(MODULE, module::params(&limits), inputs, span as u64));
     }
     root.push(slice(rs, tail));
     f.root = Node::concat(root);

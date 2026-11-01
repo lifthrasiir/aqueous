@@ -67,7 +67,7 @@ fn main() {
                 let e = codec::encode(s, &ranges);
                 let te = t.elapsed().as_secs_f64();
                 let t = Instant::now();
-                let back = codec::decode(&e.coded, &e.gaps, e.limits, s.len(), threads);
+                let back = codec::decode(&e.coded, &e.gaps, &e.limits, s.len(), threads);
                 let td = t.elapsed().as_secs_f64();
                 let ok = back.is_ok_and(|b| b == s);
                 (ch.iter().map(|&a| size(a)).sum(), e.coded.len(), te, td, ok)

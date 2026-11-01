@@ -487,8 +487,12 @@ fn bvx_same_as_wasm() {
 #[test]
 fn prores_same_as_wasm() {
     let enc = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
-    for t in ["ks-422", "ks-4444-alpha", "ks-interlaced"] {
-        let d = fixture(&format!("codecs/aqr-prores/tests/data/{t}.mov"));
+    for t in ["ks-422", "ks-4444-alpha", "ks-interlaced", "aw-422hq x80"] {
+        let d = match t.split_once(" x") {
+            // (frames of more than a stripe's bytes: stripes as several tasks)
+            Some((t, n)) => fixture(&format!("codecs/aqr-prores/tests/data/{t}.mov")).repeat(n.parse().unwrap()),
+            None => fixture(&format!("codecs/aqr-prores/tests/data/{t}.mov")),
+        };
         let f = aqr_prores::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
         let c = enc.encode(&f, None).unwrap();
         assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{t}");

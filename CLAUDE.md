@@ -171,8 +171,8 @@ optimization picked by hash.
   WinRARs' tables, RAR5's parse (most of its record), speed.
 - aqr-prores (Apple ProRes in QuickTime or MXF): the frames found by their `icpf` (no container
   parsed), parsed to coefficients and written again (every coefficient set has one coding); a
-  context model with the previous frame as context, in chunks of 32 MiB whose eight stripes of
-  rows decode as tasks. Written from RDD 36's description; no decoder's code read. Left (its
+  context model with the previous frame as context, in chunks of 64 MiB whose stripes of rows
+  (one for each 4 MiB of frames) decode as tasks. Written from RDD 36's description; no decoder's code read. Left (its
   README's Status): decoding speed (decisions per byte), alpha's run-lengths, Apple-encoded
   samples (AVFoundation, iPhone).
 - aqr-snappy and aqr-lz4 reimplement the encoders: Chrome's LevelDB Snappy is the
