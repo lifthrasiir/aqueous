@@ -154,12 +154,15 @@ pub(crate) fn parse_filter(
     last: &mut usize,
     p: u64,
 ) -> Result<(u64, u32, u8, [u32; 2])> {
-    let g = raw[0];
-    let skip = match g & 7 {
-        6 => 2,
-        7 => 3,
-        _ => 1,
+    let &g = raw.first().ok_or_else(corrupt)?;
+    let (skip, len) = match g & 7 {
+        6 => (2, *raw.get(1).ok_or_else(corrupt)? as usize + 7),
+        7 => (3, (*raw.get(1).ok_or_else(corrupt)? as usize) << 8 | *raw.get(2).ok_or_else(corrupt)? as usize),
+        k => (1, k as usize + 1),
     };
+    if raw.len() != skip + len {
+        return Err(corrupt());
+    }
     let body = padded(&raw[skip..]);
     let n = (raw.len() - skip) * 8;
     let mut r = BitReader::new(&body, 0);

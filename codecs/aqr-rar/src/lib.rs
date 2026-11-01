@@ -1,13 +1,17 @@
 //! RAR recompression: archives taken apart into their files' contents (`rar5` reads RAR5
-//! archives), their compressed streams split into the data they decode to and a record of their
-//! parse (`recons`), so that the data is stored instead. `lz5` decodes and encodes RAR5 streams,
-//! `huff` their prefix codes. `FORMAT.md` specifies the record and the module.
+//! archives, `rar4` those of RAR 1.5–4.x), their compressed streams split into the data they
+//! decode to and a record of their parse (`recons5`, `recons3`), so that the data is stored
+//! instead. `lz5` decodes and encodes RAR5 streams, `lz3` RAR 2.9's (with `ppmd` for their PPMd
+//! blocks), `huff` their prefix codes. `FORMAT.md` specifies the records and the modules.
 
 // The code of the modules alone uses only part of the rest.
 #![cfg_attr(not(feature = "encode"), allow(unused))]
+#[cfg(feature = "encode")]
+pub mod formula;
 pub mod huff;
 pub mod lz3;
 pub mod lz5;
+pub mod module;
 pub mod ppmd;
 pub mod ppmd3;
 pub mod rar4;
