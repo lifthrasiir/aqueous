@@ -2371,7 +2371,6 @@ Opcode 03<sub>16</sub> denotes a **ResourceBytes instruction**. Its operands con
   as any compressed data decoding to the same bytes is valid.
   A [=shorthand block=] can't be referenced by a ModuleBytes instruction,
   since its [=block/data=] is a [=registered hash=] while the block it stands for is never stored.
-  Resource blocks have no shorthand form ([[#registered-blocks]]), so ResourceBytes has no such restriction.
 
   The instructions neither decode nor apply the block:
   a module referenced only by ModuleBytes instructions isn't applied, so a [=conformance level=] doesn't allow refusing it,
