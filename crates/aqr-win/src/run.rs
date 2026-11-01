@@ -59,6 +59,8 @@ pub struct State {
     pub skipped: Vec<String>,
     pub error: Option<String>,
     pub stopped: bool,
+    /// The user gave up a passphrase (`aqr`'s error for that is not told).
+    pub cancelled: bool,
     /// Its standard output closed (all told).
     pub eof: bool,
     /// The last lines of its standard error.
@@ -135,7 +137,8 @@ fn archive_of(paths: &[PathBuf]) -> PathBuf {
     dir.join(format!("{name}.aqr"))
 }
 
-pub fn run(verb: Verb, mut paths: Vec<PathBuf>) -> ExitCode {
+/// Runs `aqr` on `paths` (`-P` where `encrypt`), and shows how far it is.
+pub fn run(verb: Verb, mut paths: Vec<PathBuf>, encrypt: bool) -> ExitCode {
     paths.sort();
     let mut cmd = Command::new(aqr());
     cmd.arg("--ipc").arg(match verb {
@@ -143,6 +146,9 @@ pub fn run(verb: Verb, mut paths: Vec<PathBuf>) -> ExitCode {
         Verb::Extract => "-d",
         Verb::Test => "-t",
     });
+    if encrypt {
+        cmd.arg("-P");
+    }
     // (a single entry at the top beside the archive, else a directory of its name)
     if matches!(verb, Verb::Extract) {
         cmd.arg("--auto-dir");
@@ -170,7 +176,7 @@ pub fn run(verb: Verb, mut paths: Vec<PathBuf>) -> ExitCode {
         }
     };
     let job = Job { verb, count, state: Mutex::default(), input: Mutex::new(child.stdin.take()) };
-    job.send(&json!({"hello": 1, "answers": ["overwrite"]}));
+    job.send(&json!({"hello": 1, "answers": ["overwrite", "passphrase"]}));
     let (out, err) = (child.stdout.take().expect("piped"), child.stderr.take().expect("piped"));
     let status = std::thread::scope(|s| {
         let job = &job;
@@ -197,7 +203,7 @@ pub fn run(verb: Verb, mut paths: Vec<PathBuf>) -> ExitCode {
         status
     });
     let s = job.state.into_inner().unwrap();
-    if s.stopped {
+    if s.stopped || s.cancelled {
         return ExitCode::FAILURE;
     }
     let log: Vec<&str> = s.log.iter().map(String::as_str).collect();

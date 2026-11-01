@@ -453,6 +453,19 @@ impl Window<'_> {
                 }
                 answer
             }
+            "passphrase" => {
+                let file = q["path"].as_str().map(file_name);
+                let compress = q["mode"] == "compress";
+                let (again, confirm) = (q["again"].as_bool() == Some(true), q["confirm"].as_bool() == Some(true));
+                match crate::passphrase::ask(hwnd, file.as_deref(), compress, again, confirm) {
+                    Some(p) => Value::String(p),
+                    None => {
+                        // (given up: aqr's error for it is not told)
+                        self.job.state.lock().unwrap().cancelled = true;
+                        Value::Null
+                    }
+                }
+            }
             _ => Value::Null,
         }
     }

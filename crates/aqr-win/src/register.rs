@@ -2,7 +2,8 @@
 //! needed):
 //!
 //! - `*\shell\Aqueous.compress` and `Directory\shell\Aqueous.compress`: `aqr-win compress`,
-//!   with this program's icon.
+//!   with this program's icon; and `Aqueous.compress-passphrase`, `aqr-win compress-passphrase`
+//!   ("Compress with passphrase…", `aqr -P`).
 //! - `.aqr` of the class `Aqueous.Archive`, whose verbs are `extract` (the default: a double
 //!   click) and `test`, and whose icon is this program's (`DefaultIcon`).
 //!
@@ -28,6 +29,8 @@ use crate::dialog::wide;
 const CLASS: &str = "Aqueous.Archive";
 
 const COMPRESS: [&str; 2] = [r"*\shell\Aqueous.compress", r"Directory\shell\Aqueous.compress"];
+const COMPRESS_PASSPHRASE: [&str; 2] =
+    [r"*\shell\Aqueous.compress-passphrase", r"Directory\shell\Aqueous.compress-passphrase"];
 
 pub fn register() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("This program's path is not known: {e}"))?;
@@ -35,11 +38,16 @@ pub fn register() -> Result<(), String> {
     // (the icon of resource 1, aqr-win.rc)
     let icon = format!("\"{}\",-1", exe.display());
     let set = |key: &str, name: Option<&str>, value: &str| set(&classes(key), name, Value::Sz(value));
-    for key in COMPRESS {
-        set(key, None, "Compress with Aqueous")?;
-        set(key, Some("MultiSelectModel"), "Player")?;
-        set(key, Some("Icon"), &icon)?;
-        set(&format!(r"{key}\command"), None, &command("compress"))?;
+    for (keys, text, verb) in [
+        (COMPRESS, "Compress with Aqueous", "compress"),
+        (COMPRESS_PASSPHRASE, "Compress with passphrase…", "compress-passphrase"),
+    ] {
+        for key in keys {
+            set(key, None, text)?;
+            set(key, Some("MultiSelectModel"), "Player")?;
+            set(key, Some("Icon"), &icon)?;
+            set(&format!(r"{key}\command"), None, &command(verb))?;
+        }
     }
     set(".aqr", None, CLASS)?;
     set(CLASS, None, "Aqueous archive")?;
@@ -56,7 +64,7 @@ pub fn register() -> Result<(), String> {
 }
 
 pub fn unregister() -> Result<(), String> {
-    for key in COMPRESS.iter().copied().chain([CLASS]) {
+    for key in COMPRESS.iter().chain(&COMPRESS_PASSPHRASE).copied().chain([CLASS]) {
         delete(&classes(key))?;
     }
     // (`.aqr` left as it is where another program has it)

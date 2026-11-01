@@ -1,10 +1,12 @@
 //! Aqueous in Explorer: verbs on files, folders and archives, and a window of how far the work
 //! is, the work done by `aqr --ipc` (`crates/aqr/src/ipc.rs`) in a process of its own.
 //!
-//! usage: aqr-win --register | --unregister | compress PATH... | extract ARCHIVE... | test ARCHIVE...
+//! usage: aqr-win --register | --unregister | compress[-passphrase] PATH... | extract ARCHIVE... |
+//!        test ARCHIVE...
 //!
 //! - `--register` adds the verbs for the user ([`register`]): "Compress with Aqueous" on files
-//!   and folders, "Extract here" (also the double-click) and "Test" on `.aqr` files.
+//!   and folders ("Compress with passphrase…" encrypts: `aqr -P`), "Extract here" (also the
+//!   double-click) and "Test" on `.aqr` files.
 //!   `--unregister` takes them away.
 //! - `--install` and `--uninstall [--quiet]`, of the program that aqr-win-install installed
 //!   ([`install`]): the former run by the installer, the latter by Settings' Apps.
@@ -28,6 +30,8 @@ mod dialog;
 mod gather;
 #[cfg(windows)]
 mod install;
+#[cfg(windows)]
+mod passphrase;
 #[cfg(windows)]
 mod register;
 #[cfg(windows)]
@@ -53,12 +57,15 @@ fn main() -> std::process::ExitCode {
         dialog::message(dialog::Icon::Error, main, e, None);
         ExitCode::FAILURE
     };
+    let mut encrypt = false;
+    let name = verb;
     let verb = match verb {
         "--register" => {
             return match register::register() {
                 Ok(()) => {
-                    let done = "\"Compress with Aqueous\" is on files and folders, \"Extract here\" and \"Test\" on \
-                                .aqr files (on Windows 11, under \"Show more options\").";
+                    let done = "\"Compress with Aqueous\" and \"Compress with passphrase…\" are on files and folders, \
+                                \"Extract here\" and \"Test\" on .aqr files (on Windows 11, under \"Show more \
+                                options\").";
                     dialog::message(dialog::Icon::Information, "Aqueous is registered", done, None);
                     ExitCode::SUCCESS
                 }
@@ -99,21 +106,26 @@ fn main() -> std::process::ExitCode {
             };
         }
         "compress" => Verb::Compress,
+        "compress-passphrase" => {
+            encrypt = true;
+            Verb::Compress
+        }
         "extract" => Verb::Extract,
         "test" => Verb::Test,
         _ => {
-            let usage = "aqr-win --register | --unregister | compress PATH... | extract ARCHIVE... | test ARCHIVE...";
+            let usage = "aqr-win --register | --unregister | compress[-passphrase] PATH... | extract ARCHIVE... | \
+                         test ARCHIVE...";
             return fail("Not a verb of Aqueous", usage);
         }
     };
     let paths = match <[PathBuf; 1]>::try_from(paths) {
         // (one a process, as Explorer runs it: gathered into one)
-        Ok([path]) => match gather::gather(verb.name(), path) {
+        Ok([path]) => match gather::gather(name, path) {
             Some(paths) => paths,
             None => return ExitCode::SUCCESS,
         },
         Err(paths) if paths.is_empty() => return fail("Nothing to work on", "No path given."),
         Err(paths) => paths,
     };
-    run::run(verb, paths)
+    run::run(verb, paths, encrypt)
 }

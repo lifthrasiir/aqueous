@@ -1,8 +1,8 @@
 # aqr-win
 
-Aqueous in Windows Explorer: "Compress with Aqueous" on files and folders, "Extract here" (also
-the double-click) and "Test" on `.aqr` files, and a window of how far the work is. The work is
-done by `aqr --ipc` in a process of its own (the protocol: `crates/aqr/src/ipc.rs`); this program
+Aqueous in Windows Explorer: "Compress with Aqueous" and "Compress with passphrase…" (encrypted,
+`aqr -P`) on files and folders, "Extract here" (also the double-click) and "Test" on `.aqr`
+files, and a window of how far the work is. The work is done by `aqr --ipc` in a process of its own (the protocol: `crates/aqr/src/ipc.rs`); this program
 is the window and the verbs, about 560 KB (70 KB of it the icon, `droplet.ico` at the root).
 
 ```sh
@@ -27,7 +27,11 @@ Installed by `aqr-win-install` (crates/aqr-win-install), it is run as `aqr-win -
   stop (its output being written removed; killed if it has not stopped in 10 s). A job done
   within 0.4 s shows no window.
 - An output there already is asked about (replace, or skip; for all, where there are several).
-  Errors are shown with the last lines `aqr` wrote. A test tells what it checked.
+  A passphrase is asked for in a dialog of its own (`src/passphrase.rs`: a template made in
+  memory, as task dialogs have no edit controls), two fields to choose one (it answers only
+  when both match), and again where it was wrong; an encrypted archive asks on its own.
+  Cancelling it stops the job without an error shown. Errors are shown with the last lines
+  `aqr` wrote. A test tells what it checked.
 
 ## Status
 
