@@ -102,7 +102,7 @@ pub fn encode(frames: &[&[u8]]) -> Vec<u8> {
         // A frame that parses is written again bit for bit (codewords, signs and positions have
         // one coding each, padding is zero and recorded, sizes are derived and were checked
         // against the coded data), so it is not written to check.
-        let f = Frame::parse(d).ok().filter(|f| f.header.raw.len() + 8 <= d.len());
+        let f = Frame::parse(d).ok();
         match f {
             Some(f) => {
                 c.bit(&mut st.side.modelled, true);
