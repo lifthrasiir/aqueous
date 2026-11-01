@@ -933,6 +933,13 @@ fn lzx_on(opt: &Options) -> bool {
     opt.level.scale() >= 9
 }
 
+/// Whether RAR's streams with PPMd blocks are taken apart (and PPMd rebuilt): from level 9 only,
+/// as rebuilding PPMd is slow and its data seldom archives smaller apart (high-order PPMd is
+/// strong); below, they are turned down at their first PPMd block.
+fn ppmd_on(opt: &Options) -> bool {
+    opt.level.scale() >= 9
+}
+
 /// `d` as a file of `format`, with its contents nested, if its recompressor takes it (and the
 /// formula is [`smaller`]).
 fn recompress_as(format: Format, d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
@@ -1874,9 +1881,14 @@ fn lha(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
 /// aqr-rar's formula of a RAR archive, the contents of its files a content of the application
 /// (or of the formula, those stored), recompressed in turn, each by its kind by its name
 /// ([`kind_by_name`]). Its streams decode within what is left of the budget
-/// ([`Options::expansion`]).
+/// ([`Options::expansion`]); those with PPMd blocks only from level 9 ([`ppmd_on`]).
 fn rar(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
-    let o = aqr_rar::formula::Options { threads: opt.threads, limit: cx.inflate_left(), kind: kind_by_name };
+    let o = aqr_rar::formula::Options {
+        threads: opt.threads,
+        limit: cx.inflate_left(),
+        kind: kind_by_name,
+        ppmd: ppmd_on(opt),
+    };
     let e = aqr_rar::formula::encode_with(d, &o)?;
     cx.inflate(e.inflated);
     Some(e.formula)
@@ -2246,11 +2258,16 @@ mod tests {
         for name in ["r5_solid", "r4_solid", "r4_ppmd", "r5_stored"] {
             let d = std::fs::read(format!("{dir}/{name}.rar")).unwrap();
             assert_eq!(detect(&d), Some(Format::Rar), "{name}");
-            let opt = Options { shared_modules: true, smaller: false, ..Options::default() };
-            let f = recompress(&d, &opt);
-            let module = f.applies().iter().any(|a| a.module == aqr_decompress::RAR5 || a.module == aqr_decompress::RAR3);
-            assert_eq!(module, name != "r5_stored", "{name}");
-            assert!(f.eval(&Native::default()).unwrap() == d, "{name}");
+            // (PPMd from level 9 only)
+            for level in [Level::MID, Level::Of(9)] {
+                let opt = Options { shared_modules: true, smaller: false, level, ..Options::default() };
+                let f = recompress(&d, &opt);
+                let module =
+                    f.applies().iter().any(|a| a.module == aqr_decompress::RAR5 || a.module == aqr_decompress::RAR3);
+                let ppmd = name == "r4_ppmd";
+                assert_eq!(module, name != "r5_stored" && (!ppmd || ppmd_on(&opt)), "{name} {level:?}");
+                assert!(f.eval(&Native::default()).unwrap() == d, "{name}");
+            }
             let x = [&b"some data before "[..], &d].concat();
             assert_eq!(detect::starts(&x[17..]), Some(Format::Rar), "{name}");
         }

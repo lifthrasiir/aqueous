@@ -1268,10 +1268,16 @@ pub use crate::recons5::Split;
 /// with the window `dict`. Fails where it does not decode, or is not what encoding its parse
 /// gives.
 pub fn split(packed: &[&[u8]], sizes: &[usize], dict: u64) -> Result<Split> {
+    split_with(packed, sizes, dict, true)
+}
+
+/// [`split`], failing at once at a PPMd block unless `ppmd`.
+pub fn split_with(packed: &[&[u8]], sizes: &[usize], dict: u64, ppmd: bool) -> Result<Split> {
     if packed.len() != sizes.len() || packed.is_empty() {
         return Err(corrupt());
     }
     let mut dec = Decoder3::new(dict);
+    dec.ppmd_on = ppmd;
     let mut streams = Vec::new();
     let mut data = Vec::new();
     for (&p, &size) in packed.iter().zip(sizes) {

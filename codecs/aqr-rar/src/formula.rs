@@ -72,11 +72,14 @@ pub struct Options {
     /// What a file's contents are by its name: the contents of each [`Kind`] are a stream of their
     /// own, sliced in order. By default all are unknown.
     pub kind: fn(&[u8]) -> Kind,
+    /// Whether streams with PPMd blocks are taken (else kept as they are, turned down at their
+    /// first PPMd block): rebuilding PPMd is slow, and its data seldom compresses better apart.
+    pub ppmd: bool,
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options { threads: 1, limit: u64::MAX, kind: |_| Kind::Unknown }
+        Options { threads: 1, limit: u64::MAX, kind: |_| Kind::Unknown, ppmd: true }
     }
 }
 
@@ -207,7 +210,11 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         let parts: Vec<&[u8]> = g.files.iter().map(|&i| &input[files[i].data.clone()]).collect();
         let sizes: Vec<usize> = g.files.iter().map(|&i| files[i].size as usize).collect();
         let packed: usize = parts.iter().map(|p| p.len()).sum();
-        let sp = if v5 { recons5::split(&parts, &sizes, g.v1, g.dict) } else { recons3::split(&parts, &sizes, g.dict) };
+        let sp = if v5 {
+            recons5::split(&parts, &sizes, g.v1, g.dict)
+        } else {
+            recons3::split_with(&parts, &sizes, g.dict, opt.ppmd)
+        };
         // (a stream kept costs nothing more than itself, its headers kept anyway)
         sp.ok().filter(|sp| sp.record.len() < packed)
     });

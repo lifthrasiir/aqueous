@@ -253,6 +253,8 @@ pub struct Decoder3 {
     esc: u8,
     progs: Vec<Prog>,
     last_prog: usize,
+    /// Whether PPMd blocks are decoded (else they fail at once).
+    pub ppmd_on: bool,
 }
 
 impl Decoder3 {
@@ -270,6 +272,7 @@ impl Decoder3 {
             esc: 2,
             progs: Vec::new(),
             last_prog: 0,
+            ppmd_on: true,
         }
     }
 
@@ -291,6 +294,9 @@ impl Decoder3 {
                     return Err(corrupt());
                 }
                 if r.get(1) == 1 {
+                    if !self.ppmd_on {
+                        return Err(Error("PPMd blocks not taken"));
+                    }
                     let flags = r.get(7) as u8;
                     let mem = if flags & 0x20 != 0 { r.get(8) as u8 } else { 0 };
                     let esc = if flags & 0x40 != 0 { r.get(8) as u8 } else { 0 };
