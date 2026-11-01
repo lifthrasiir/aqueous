@@ -678,6 +678,7 @@ dependencies = [
  "memchr",
  "memmap2",
  "rayon",
+ "zstd",
 ]
 
 [[package]]

@@ -1,9 +1,11 @@
 //! Finds the ProRes frames in files and checks that each is written again bit for bit from
 //! its parse: frames found, rebuilt, failed (and why), what was kept as is (alpha, zero bytes
-//! after the coefficients) and the thread seconds of parsing and of writing.
+//! after the coefficients) and the thread seconds of parsing and of writing. With `--zstd`,
+//! also zstd -3 of each frame as stored and of its parse: the headers, then the coefficients
+//! by block (as parsed) or by scan position (each position across the frame's blocks).
 //!
 //! ```sh
-//! cargo run --release -p aqr-prores --example aqr-prores-check -- FILE_OR_DIR...
+//! cargo run --release -p aqr-prores --example aqr-prores-check -- [--zstd] FILE_OR_DIR...
 //! ```
 
 use std::collections::BTreeMap;
@@ -34,6 +36,7 @@ struct Stats {
     trailer: usize,
     parse: f64,
     write: f64,
+    zstd: [usize; 3],
     failed: BTreeMap<String, usize>,
     kinds: BTreeMap<String, usize>,
 }
@@ -48,6 +51,7 @@ impl Stats {
         self.trailer += o.trailer;
         self.parse += o.parse;
         self.write += o.write;
+        (0..3).for_each(|k| self.zstd[k] += o.zstd[k]);
         for (k, v) in &o.failed {
             *self.failed.entry(k.clone()).or_default() += v;
         }
@@ -71,6 +75,15 @@ impl Stats {
             self.write,
             mb / self.write,
         );
+        if self.zstd[0] > 0 {
+            let r = |n: usize| n as f64 / self.bytes as f64;
+            println!(
+                "    zstd -3: stored {:.4}, parse by block {:.4}, by scan position {:.4}",
+                r(self.zstd[0]),
+                r(self.zstd[1]),
+                r(self.zstd[2])
+            );
+        }
         for (k, v) in &self.kinds {
             println!("    {k}: {v}");
         }
@@ -80,7 +93,40 @@ impl Stats {
     }
 }
 
-fn check(d: &[u8], at: usize) -> Stats {
+fn zstd3(d: &[u8]) -> usize {
+    zstd::bulk::compress(d, 3).unwrap().len()
+}
+
+/// The parse as bytes: headers, alpha and trailer, then the coefficients (little-endian i16) by
+/// block or by scan position.
+fn layouts(f: &Frame) -> [Vec<u8>; 2] {
+    let mut head = f.header.raw.clone();
+    let (mut by_block, mut by_pos) = (Vec::new(), Vec::new());
+    for p in &f.pictures {
+        head.extend_from_slice(&p.header);
+        for s in &p.slices {
+            head.extend_from_slice(&s.header);
+            head.extend_from_slice(&s.alpha);
+        }
+        for k in 0..3 {
+            for s in &p.slices {
+                s.comps[k].0.iter().for_each(|v| by_block.extend_from_slice(&v.to_le_bytes()));
+            }
+            for i in 0..64 {
+                for s in &p.slices {
+                    s.comps[k].0.chunks_exact(64).for_each(|b| by_pos.extend_from_slice(&b[i].to_le_bytes()));
+                }
+            }
+        }
+    }
+    head.extend_from_slice(&f.trailer);
+    let mut a = head.clone();
+    a.extend_from_slice(&by_block);
+    head.extend_from_slice(&by_pos);
+    [a, head]
+}
+
+fn check(d: &[u8], at: usize, zstd: bool) -> Stats {
     let mut s = Stats { frames: 1, ..Default::default() };
     let t = Instant::now();
     let f = match Frame::parse(&d[at..]) {
@@ -116,6 +162,10 @@ fn check(d: &[u8], at: usize) -> Stats {
     s.write = t.elapsed().as_secs_f64();
     let orig = &d[at..at + out.len().min(d.len() - at)];
     s.bytes = orig.len();
+    if zstd {
+        let [a, b] = layouts(&f);
+        s.zstd = [zstd3(orig), zstd3(&a), zstd3(&b)];
+    }
     if out == orig {
         s.rebuilt = 1;
     } else {
@@ -127,7 +177,14 @@ fn check(d: &[u8], at: usize) -> Stats {
 
 fn main() {
     let mut paths = Vec::new();
-    std::env::args().skip(1).for_each(|a| walk(Path::new(&a), &mut paths));
+    let mut zstd = false;
+    for a in std::env::args().skip(1) {
+        if a == "--zstd" {
+            zstd = true;
+        } else {
+            walk(Path::new(&a), &mut paths);
+        }
+    }
     let mut all = Stats::default();
     for p in paths {
         let Ok(file) = std::fs::File::open(&p) else { continue };
@@ -139,7 +196,7 @@ fn main() {
         }
         let st = Mutex::new(Stats::default());
         frames.par_iter().for_each(|&at| {
-            let s = check(&d, at);
+            let s = check(&d, at, zstd);
             st.lock().unwrap().add(&s);
         });
         let st = st.into_inner().unwrap();
