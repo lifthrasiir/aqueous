@@ -2378,7 +2378,7 @@ impl Archive<'_, '_> {
         threads: usize,
         f: impl Fn(usize, Decoded<Vec<Vec<u8>>>) -> Decoded<()> + Sync,
     ) -> Decoded<()> {
-        self.each_leaf_into(threads, None, f)
+        self.each_leaf_into(threads, None, None, f)
     }
 
     /// The file of an archive of a single file, written to `sink` as it is evaluated: of a
@@ -2399,7 +2399,7 @@ impl Archive<'_, '_> {
             sink(d)
         };
         let streaming: Mutex<&mut Sink> = Mutex::new(&mut counted);
-        self.each_leaf_into(threads, Some(&streaming), |_, outputs| {
+        self.each_leaf_into(threads, None, Some(&streaming), |_, outputs| {
             let mut sink = streaming.lock().unwrap();
             outputs?.iter().try_for_each(|d| sink(d))
         })?;
@@ -2407,10 +2407,13 @@ impl Archive<'_, '_> {
     }
 
     /// [`Archive::each_leaf`], a leaf of a formula written to `sink` as it is evaluated where
-    /// its output may be ([`run`]): `f` given no output of it then.
+    /// its output may be ([`run`]): `f` given no output of it then. Where `only` is given, the
+    /// leaves (by index) not marked there are not evaluated, nor the non-leaf blocks only they
+    /// slice decoded (every formula block is read all the same, to check the archive).
     fn each_leaf_into(
         &self,
         threads: usize,
+        only: Option<&[bool]>,
         sink: Option<&Mutex<&mut Sink>>,
         f: impl Fn(usize, Decoded<Vec<Vec<u8>>>) -> Decoded<()> + Sync,
     ) -> Decoded<()> {
@@ -2440,8 +2443,11 @@ impl Archive<'_, '_> {
         if used.contains(&false) {
             return invalid("a non-leaf block no formula block references");
         }
+        // the leaves evaluated, in order
+        let picked: Vec<usize> =
+            (0..blocks.leaves.len()).filter(|&i| only.is_none_or(|o| o.get(i) == Some(&true))).collect();
         let mut refs = vec![0; blocks.non_leaf.len()];
-        for p in programs.iter().flatten() {
+        for p in picked.iter().filter_map(|&i| programs[i].as_ref()) {
             for insn in &p.insns {
                 if let &Insn::Slice { block, .. } = insn {
                     refs[p.blocks[block]] += 1;
@@ -2466,17 +2472,22 @@ impl Archive<'_, '_> {
         }
         // the leaves of long work on a thread first, the longest first, for it to be done beside
         // the others; the others in their order
-        let long = |i: &usize| serial[*i] >= LONG_SERIAL;
-        let mut order: Vec<usize> = (0..serial.len()).filter(long).collect();
-        order.sort_by_key(|&i| std::cmp::Reverse(serial[i]));
-        order.extend((0..serial.len()).filter(|i| !long(i)));
-        let stored = blocks.leaves.iter().map(|l| if let &LeafBlock::Stored(d, ..) = l { d.len() as u64 } else { 0 });
-        let data_len = stored.sum::<u64>() + blocks.non_leaf.iter().map(|(d, ..)| d.len() as u64).sum::<u64>();
+        // (by their places among those picked)
+        let long = |k: &usize| serial[picked[*k]] >= LONG_SERIAL;
+        let mut order: Vec<usize> = (0..picked.len()).filter(long).collect();
+        order.sort_by_key(|&k| std::cmp::Reverse(serial[picked[k]]));
+        order.extend((0..picked.len()).filter(|k| !long(k)));
+        let stored = picked.iter().map(|&i| match blocks.leaves[i] {
+            LeafBlock::Stored(d, ..) => d.len() as u64,
+            _ => 0,
+        });
+        let sliced = blocks.non_leaf.iter().zip(&refs).filter(|(_, n)| **n > 0).map(|((d, ..), _)| d.len() as u64);
+        let data_len = stored.sum::<u64>() + sliced.sum::<u64>();
         let tally = Tally {
             tell: self.tell.as_deref(),
             decompressed: AtomicU64::new(0),
             evaluated: AtomicU64::new(0),
-            totals: (data_len, lens.iter().sum()),
+            totals: (data_len, picked.iter().map(|&i| lens[i]).sum()),
         };
         tally.add(0, 0);
         let contents = Contents {
@@ -2485,18 +2496,20 @@ impl Archive<'_, '_> {
             dictionaries: &blocks.dictionaries,
             tally: &tally,
         };
+        let weights: Vec<u64> = picked.iter().map(|&i| weights[i]).collect();
         let gate = Gate::new(self.budget, &weights, order);
         let programs: Vec<Mutex<Option<Program>>> = programs.into_iter().map(Mutex::new).collect();
         // each leaf on a worker of its own, which is given back as it is done, for those still
         // running to take for their own work (a stream that takes long alone)
         let done = aqr_common::pool::dispatch_any(
-            blocks.leaves.len(),
+            picked.len(),
             threads,
             || {
                 let _w = aqr_common::trace::wait("budget");
                 gate.next()
             },
-            |i, _admitted| {
+            |k, _admitted| {
+                let i = picked[k];
                 let (_s, _i) =
                     (aqr_common::trace::span("leaf"), aqr_common::trace::item(self.items.get(i).copied().flatten()));
                 tally.step(Step::Started(i));
@@ -2559,11 +2572,26 @@ impl Archive<'_, '_> {
     /// Evaluates every leaf as [`Archive::leaves`] does, giving `f` each content of the tree
     /// (by [`EntryNode::File`]) once, as it is evaluated; checked against the size of its files.
     pub fn contents(&self, threads: usize, f: impl Fn(usize, Vec<u8>) -> Decoded<()> + Sync) -> Decoded<()> {
+        self.contents_of(threads, None, f)
+    }
+
+    /// [`Archive::contents`] of the contents marked in `only` alone (by content; all where
+    /// `None`): only the leaves of those evaluated, and only the non-leaf blocks they slice
+    /// decoded. The other contents of those leaves are not given.
+    pub fn contents_of(
+        &self,
+        threads: usize,
+        only: Option<&[bool]>,
+        f: impl Fn(usize, Vec<u8>) -> Decoded<()> + Sync,
+    ) -> Decoded<()> {
         let Some((_, refs)) = &self.tree else { return invalid("an archive of a single file") };
+        let wanted = |c: usize| only.is_none_or(|o| o.get(c) == Some(&true));
         // by leaf, its outputs taken: output, content, size
         let mut of: Vec<Vec<(usize, usize, u64)>> = vec![Vec::new(); self.blocks.leaves.len()];
-        refs.iter().enumerate().for_each(|(c, &(l, o, n))| of[l].push((o, c, n)));
-        self.leaves(threads, |i, mut outputs| {
+        refs.iter().enumerate().filter(|&(c, _)| wanted(c)).for_each(|(c, &(l, o, n))| of[l].push((o, c, n)));
+        let leaves: Option<Vec<bool>> = only.map(|_| of.iter().map(|o| !o.is_empty()).collect());
+        self.each_leaf_into(threads, leaves.as_deref(), None, |i, outputs| {
+            let mut outputs = outputs?;
             for &(o, c, n) in &of[i] {
                 let d = std::mem::take(&mut outputs[o]);
                 if d.len() as u64 != n {

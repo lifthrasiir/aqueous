@@ -687,6 +687,65 @@ mod tests {
         assert_eq!(files, [b"zyxolleh".to_vec(), b"ollehzyx".to_vec()]);
     }
 
+    /// Contents taken alone evaluate only their leaves, and decode only the non-leaf blocks those
+    /// slice: of three leaves in batches of their own, the second.
+    #[test]
+    fn contents_of() {
+        let mut f = Formula::default();
+        let names = ["hello", "xyz", "uvw"];
+        let lits: Vec<_> = names.iter().map(|s| f.push(*s, s.as_bytes().to_vec())).collect();
+        let enc = Encoder::new(Level::Zstd(3));
+        let mut w = SegmentWriter::new();
+        let mut out = SegmentWriter::header().to_vec();
+        let mut t = Tree::default();
+        let mut contents = Vec::new();
+        for (k, a) in lits.iter().enumerate() {
+            let leaves = vec![Leaf {
+                outputs: vec![Node::apply(REV, vec![1, 2, 3], vec![a.clone()], names[k].len() as u64)],
+                sums: vec![None],
+            }];
+            let batch = w.batch(&enc, &f, &leaves).unwrap();
+            w.commit(&batch);
+            out.extend_from_slice(&batch.bytes);
+            contents.push(ContentAt { leaf: batch.leaf_at[0], output: 0, size: names[k].len() as u64 });
+            t.entries.push(entry(None, &format!("f{k}"), EntryNode::File(k)));
+        }
+        out.extend_from_slice(&w.finish(&enc, &t, &contents).unwrap().0);
+        let natives = natives();
+        let mut a = super::super::open(&out, &natives).unwrap();
+        let told = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tell = told.clone();
+        a.on_progress(Some(std::sync::Arc::new(move |s| tell.lock().unwrap().push(s))));
+        let got = std::sync::Mutex::new(Vec::new());
+        a.contents_of(2, Some(&[false, true, false]), |c, d| {
+            got.lock().unwrap().push((c, d));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(got.into_inner().unwrap(), [(1, b"zyx".to_vec())]);
+        let told = told.lock().unwrap();
+        let started: Vec<usize> =
+            told.iter().filter_map(|s| if let super::super::Step::Started(i) = s { Some(*i) } else { None }).collect();
+        assert_eq!(started, [1]);
+        // (the data of the second batch's blocks alone counted, and decoded)
+        let reached = told.iter().filter_map(|s| if let super::super::Step::Reached(r) = s { Some(*r) } else { None });
+        let most = reached.fold((0, 0, 0, 0), |m, r| {
+            (m.0.max(r.decompressed.0), r.decompressed.1, m.2.max(r.evaluated.0), r.evaluated.1)
+        });
+        assert!(most.0 == most.1 && most.1 > 0 && (most.2, most.3) == (3, 3), "{most:?}");
+        // (fewer bytes than of the whole archive's blocks)
+        let mut all = super::super::open(&out, &natives).unwrap();
+        let whole = std::sync::Arc::new(std::sync::Mutex::new(0));
+        let w = whole.clone();
+        all.on_progress(Some(std::sync::Arc::new(move |s| {
+            if let super::super::Step::Reached(r) = s {
+                *w.lock().unwrap() = r.decompressed.1;
+            }
+        })));
+        all.contents(2, |_, _| Ok(())).unwrap();
+        assert!(most.1 < *whole.lock().unwrap());
+    }
+
     /// The bytes of module and resource blocks in a batch: of a module applied by another leaf
     /// and of one only taken so, and of a resource as stored.
     #[test]
