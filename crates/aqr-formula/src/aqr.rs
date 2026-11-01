@@ -86,6 +86,8 @@ const FORMULA: u64 = 0x70;
 
 const NOP: u8 = 0x00;
 const LITERAL: u8 = 0x01;
+const MODULE_BYTES: u8 = 0x02;
+const RESOURCE_BYTES: u8 = 0x03;
 const SWAP: u8 = 0x0f;
 const SLICE: u8 = 0x10;
 const APPLY: u8 = 0x11;
@@ -2184,6 +2186,8 @@ impl Archive<'_, '_> {
         let env = |modules: usize, resources: usize, first| Env {
             first,
             modules: &blocks.modules[..modules],
+            module_data: &blocks.module_data[..modules],
+            resource_data: &blocks.resource_data[..resources],
             loaded: &self.loaded[..modules],
             resources: &blocks.resources[..resources],
             runner: self.runner,
@@ -2457,6 +2461,10 @@ struct Blocks<'c> {
     non_leaf: Vec<(&'c [u8], bool, Option<usize>)>,
     modules: Vec<Vec<u8>>,
     resources: Vec<Resource>,
+    /// The data of each module and resource block as stored, for ModuleBytes and ResourceBytes
+    /// instructions.
+    module_data: Vec<&'c [u8]>,
+    resource_data: Vec<&'c [u8]>,
     dictionaries: Vec<dict::Dictionary>,
 }
 
@@ -2482,6 +2490,8 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks<'_>> {
         non_leaf: Vec::new(),
         modules: Vec::new(),
         resources: Vec::new(),
+        module_data: Vec::new(),
+        resource_data: Vec::new(),
         dictionaries: Vec::new(),
     };
     // the generic structure first: a block of an undefined critical type anywhere in it makes
@@ -2554,10 +2564,12 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks<'_>> {
             0x61..=0x63 => {
                 b.module_at.push(at);
                 b.modules.push(decoded(data, true, true)?);
+                b.module_data.push(data);
             }
             0x64..=0x67 => {
                 b.resource_at.push(at);
                 b.resources.push(Resource::new(decoded(data, true, true)?));
+                b.resource_data.push(data);
             }
             // formula blocks: `0111 0dss`
             0x70..=0x77 => {
@@ -2714,6 +2726,9 @@ struct Env<'a, 'n> {
     /// The ordinal of the first non-leaf block after the formula block.
     first: usize,
     modules: &'a [Vec<u8>],
+    /// The data of the module and resource blocks as stored.
+    module_data: &'a [&'a [u8]],
+    resource_data: &'a [&'a [u8]],
     loaded: &'a [OnceLock<Decoded<Box<dyn Loaded + 'n>>>],
     resources: &'a [Resource],
     runner: &'n dyn Runner,
@@ -2965,7 +2980,7 @@ impl Drop for Admitted<'_> {
 
 /// Formula data `d` of `outputs` outputs read, among `non_leaf` non-leaf blocks, marking those it
 /// refers to in `used`: everything checked that does not depend on the evaluation.
-fn read<'a>(d: &'a [u8], outputs: u64, env: &Env, non_leaf: usize, used: &mut [bool]) -> Decoded<Program<'a>> {
+fn read<'a>(d: &'a [u8], outputs: u64, env: &Env<'a, '_>, non_leaf: usize, used: &mut [bool]) -> Decoded<Program<'a>> {
     let mut r = Reader { d, at: 0 };
     // the non-leaf blocks referenced, by their ordinals among all
     let (mut blocks, mut next) = (Vec::new(), env.first);
@@ -3000,6 +3015,18 @@ fn read<'a>(d: &'a [u8], outputs: u64, env: &Env, non_leaf: usize, used: &mut [b
         let insn = match op {
             NOP => Insn::Nop,
             LITERAL => Insn::Literal(r.bytes()?),
+            // the data of a block as stored, pushed as a literal is (of a module block in full:
+            // shorthand blocks, which it may not take, are not supported yet)
+            MODULE_BYTES => {
+                let module = r.index(modules.len())?;
+                m_used[module] = true;
+                stored_bytes(env.module_data[modules[module]], r.num()?)?
+            }
+            RESOURCE_BYTES => {
+                let resource = r.index(resources.len())?;
+                r_used[resource] = true;
+                stored_bytes(env.resource_data[resources[resource]], r.num()?)?
+            }
             SWAP => Insn::Swap(r.index(depth)?),
             SLICE => {
                 let block = r.index(blocks.len())?;
@@ -3070,6 +3097,15 @@ fn read<'a>(d: &'a [u8], outputs: u64, env: &Env, non_leaf: usize, used: &mut [b
     }
     blocks.iter().for_each(|&o| used[o] = true);
     Ok(Program { insns, blocks, resources, modules })
+}
+
+/// A ModuleBytes or ResourceBytes instruction pushing `data`, the data of a block as stored,
+/// which its operand says is of `size` bytes.
+fn stored_bytes(data: &[u8], size: u64) -> Decoded<Insn<'_>> {
+    if data.len() as u64 != size {
+        return invalid(format!("a block of {} bytes, not {size}", data.len()));
+    }
+    Ok(Insn::Literal(data))
 }
 
 /// A byte sequence on the stack: a slice of a non-leaf block (by its ordinal among all, with
@@ -4439,6 +4475,32 @@ mod tests {
         let shorthand = |ty: u8| archive(|out| out.extend([&[ty, 32][..], &[7; 32]].concat()));
         assert_eq!(decode(&shorthand(0x60), &natives()), resource("registered modules are not supported yet"));
         assert_eq!(decode(&shorthand(0x50), &natives()), resource("registered dictionaries are not supported yet"));
+    }
+
+    /// ModuleBytes and ResourceBytes instructions push the data of the blocks as stored, of the
+    /// size they tell.
+    #[test]
+    fn stored_bytes() {
+        let module = always_compressed(&mut CCtx::create(), &[&stand_in(REV)], 3, 1).unwrap();
+        let resource = always_compressed(&mut CCtx::create(), &[&[b'r'; 300]], 3, 1).unwrap();
+        let of = |insns: &[u8]| {
+            let d = [&[0, 1, 0, 1, 0][..], insns].concat();
+            archive(|out| {
+                block(out, MODULE, &module);
+                block(out, RESOURCE, &resource);
+                formula_block(out, 1, &always_compressed(&mut CCtx::create(), &[&d], 3, 1).unwrap());
+            })
+        };
+        let (m, r) = (module.len() as u8, resource.len() as u8);
+        let c = of(&[RESOURCE_BYTES, 0, r, MODULE_BYTES, 0, m, CONCAT, 2]);
+        assert_eq!(decode(&c, &natives()).unwrap(), [&resource[..], &module].concat());
+        let c = of(&[RESOURCE_BYTES, 0, r, MODULE_BYTES, 0, m + 1, CONCAT, 2]);
+        assert_eq!(decode(&c, &natives()), invalid(format!("a block of {m} bytes, not {}", m + 1)));
+        let c = of(&[RESOURCE_BYTES, 0, r - 1, MODULE_BYTES, 0, m, CONCAT, 2]);
+        assert_eq!(decode(&c, &natives()), invalid(format!("a block of {r} bytes, not {}", r - 1)));
+        // each listed block used
+        assert_eq!(decode(&of(&[MODULE_BYTES, 0, m]), &natives()), invalid("a block listed but not used"));
+        assert_eq!(decode(&of(&[RESOURCE_BYTES, 1, r]), &natives()), invalid("index 1 out of range"));
     }
 
     #[test]
