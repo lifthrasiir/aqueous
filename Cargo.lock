@@ -671,6 +671,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-prores"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "memchr",
+ "memmap2",
+ "rayon",
+]
+
+[[package]]
 name = "aqr-psd"
 version = "0.1.0"
 dependencies = [
