@@ -1,9 +1,12 @@
 //! usage: aqr-jsonl-bench FILE...
 //!
-//! For each file: its streams as zstd -3 compresses them, against the file itself, the
-//! module's encoding and decoding speeds (of the file's bytes), and that it decodes back.
+//! For each file: its streams as zstd -3 compresses them (those of a class one after another, as
+//! the archive has them), against the file itself, the module's encoding and decoding speeds (of
+//! the file's bytes), and that it decodes back (a segment at a time).
 
 use std::time::Instant;
+
+use aqr_formula::Node;
 
 fn main() {
     let (mut total, mut packed, mut plain) = (0usize, 0usize, 0usize);
@@ -25,18 +28,39 @@ fn main() {
             continue;
         };
         let e = t.elapsed().as_secs_f64();
-        let aqr_formula::Node::Apply(a) = &f.root else { unreachable!() };
-        let inputs: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
+        let segments = match &f.root {
+            Node::Concat(ns) => ns.iter().collect(),
+            n => vec![n],
+        };
         let t = Instant::now();
-        let out = aqr_jsonl::formula::decode(&a.params, &inputs, d.len() as u64, 1).unwrap();
+        let mut at = 0;
+        for n in &segments {
+            let Node::Apply(a) = n else { unreachable!() };
+            let inputs: Vec<&[u8]> = a
+                .inputs
+                .iter()
+                .map(|n| match n {
+                    &Node::Slice { stream, start, len } => &f.streams[stream].data[start as usize..][..len as usize],
+                    _ => unreachable!(),
+                })
+                .collect();
+            let out = aqr_jsonl::formula::decode(&a.params, &inputs, a.len, 1).unwrap();
+            assert!(d[at..].starts_with(&out), "{path}: not given back");
+            at += out.len();
+        }
         let dt = t.elapsed().as_secs_f64();
-        assert!(out == d, "{path}: not given back");
-        let sizes: Vec<(usize, usize)> = f.streams.iter().map(|s| (s.data.len(), z(&s.data))).collect();
+        assert!(at == d.len(), "{path}: not given back");
+        let classes = aqr_jsonl::formula::STREAM_NAMES.map(|name| {
+            let class = format!("jsonl/{name}");
+            f.streams.iter().filter(|s| s.class == class).flat_map(|s| s.data.iter().copied()).collect::<Vec<u8>>()
+        });
+        let sizes: Vec<(usize, usize)> = classes.iter().map(|s| (s.len(), z(s))).collect();
         let sum: usize = sizes.iter().map(|s| s.1).sum();
         let base = z(&d);
         let mb = d.len() as f64 / 1e6;
         println!(
-            "{path}: {mb:.2} MB, zstd -3 {base} -> {sum} B ({:.3}), encode {:.0} MB/s, decode {:.0} MB/s",
+            "{path}: {mb:.2} MB, {} segments, zstd -3 {base} -> {sum} B ({:.3}), encode {:.0} MB/s, decode {:.0} MB/s",
+            segments.len(),
             sum as f64 / base as f64,
             mb / e,
             mb / dt

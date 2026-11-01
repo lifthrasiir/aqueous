@@ -166,7 +166,12 @@ parts too; a line that would make the file longer than declared is an error.
   is taken where at least 9 lines in 10 of them are objects or arrays, of 8 lines at least (2 in a
   file of fewer). The style's comma and colon are those most of their commas and colons are.
 - **Files taken.** A file of at least 16 KiB whose style is found, of which lines kept as they are
-  make less than a tenth, of at most 2^20 paths.
+  make less than a tenth, of at most 2^20 paths in a segment.
+- **Segments.** The file is cut, at the ends of lines, into segments of 64 MiB at least (the last
+  shorter, and one of a longer line longer), each an application of the module of its own: the
+  formula is their concatenation, each holding its streams (of the same classes, which the archive
+  puts one after the other). What the encoder and the module hold of the file at once is a
+  segment; the first pass is of all of it.
 - **Paths.** A first pass over the file tells, of each path:
   - a map: once it has had 32 objects, where at least 16 keys are met, used fewer than 4 times
     each on average, or more than 4,096 keys (keys that are data: ids, hashes, words). Its members
@@ -180,8 +185,10 @@ parts too; a line that would make the file longer than declared is an error.
     most, and before them those of the others together, are made shared where that makes the
     strings smaller through zstd -3 (the paths' parts, then the shared part).
 
-  The second pass writes the streams with them; a path made in the second pass has those of the
-  path it is of in the first (none where that was not seen: not a map, width 1).
+  It keeps of each path 4,096 key lists at most, and of the strings 4 MiB (each counted 16 bytes
+  longer), so that it holds what it is told by bounds of its own. The second pass writes the
+  streams of each segment with them; a path made in the second pass has those of the path it is
+  of in the first (none where that was not seen: not a map, width 1).
 - **Numbers.** Each in its path's style (with fallbacks as `Style::encode` has them), where it
   prints back to the same bytes; zero takes the scale of the path's previous number. Others are
   numbers as they are written.
@@ -189,4 +196,5 @@ parts too; a line that would make the file longer than declared is an error.
   recently defined or recalled at the path if it is one of the 1,024 the path keeps, else defined.
 - **Predictors.** Of a path, the one whose `nums` part zstd -1 compresses smaller.
 - The streams are left to the archive to compress; `raw`, `keys`, `names` and `text` are of
-  `Kind::Text` and contents (aqr-compress recompresses them in turn, as text).
+  `Kind::Text` and contents (aqr-compress recompresses them in turn, as text: with one aqr-wrt
+  dictionary of all the segments' text, where there are several).

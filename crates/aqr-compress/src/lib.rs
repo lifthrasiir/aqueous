@@ -364,8 +364,9 @@ pub(crate) struct Cx {
     remaps: Option<Arc<exe::Remaps>>,
     /// The dictionary that the text archived together is coded with (aqr-wrt), for an archive
     /// of several: made of the files that are text, so that text holding other text codes to
-    /// what holds the other's code. Else each text has its own.
-    words: Option<Arc<aqr_wrt::formula::Shared>>,
+    /// what holds the other's code; and for the contents of a formula of JSON lines, its
+    /// segments' text ([`segment_words`]). Else each text has its own.
+    words: RefCell<Option<Arc<aqr_wrt::formula::Shared>>>,
     /// The text coded with [`Cx::words`] of data the files archived together hold, by its
     /// length and hash: the text that holds it codes to what holds this, so that it costs
     /// nothing as that data does ([`smaller`]). So are the streams of the members of an ar, tar
@@ -474,7 +475,7 @@ impl Cx {
             later: Default::default(),
             held: None,
             remaps: None,
-            words: None,
+            words: Default::default(),
             coded_held: Default::default(),
             once: Default::default(),
             files: None,
@@ -510,17 +511,18 @@ impl Cx {
     }
 
     /// Codes the text archived with `words` ([`Cx::words`]), their resources sized as nothing.
-    pub(crate) fn share_words(&mut self, words: Option<Arc<aqr_wrt::formula::Shared>>) {
+    pub(crate) fn share_words(&self, words: Option<Arc<aqr_wrt::formula::Shared>>) {
         for r in words.iter().flat_map(|w| w.resources()) {
             self.enc.hold_resource(r);
         }
-        self.words = words;
+        *self.words.borrow_mut() = words;
     }
 
     /// Notes the text coded by formula `f` of text `d` ([`Cx::coded_held`]), where it is coded
     /// with [`Cx::words`] and the files archived together hold `d`.
     fn note_coded(&self, f: &Formula, d: &[u8]) {
-        let Some(w) = &self.words else { return };
+        let words = self.words.borrow();
+        let Some(w) = words.as_deref() else { return };
         let shared = f.applies().iter().any(|a| a.resources.first().is_some_and(|r| w.resources().any(|w| w == r)));
         if shared && f.streams.len() == 1 && self.held_by_others(d, d) {
             self.coded_held.lock().unwrap().insert(stream_key(&f.streams[0].data));
@@ -959,7 +961,8 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
     tests::TRIED.with(|t| t.borrow_mut().push(format));
     let ready = cx.ready.borrow_mut().remove(&(d.as_ptr() as usize, d.len(), format));
     let prepared = ready.is_some();
-    let (words, held) = (cx.words.as_deref(), cx.held.as_deref());
+    let words = cx.words.borrow().clone();
+    let (words, held) = (words.as_deref(), cx.held.as_deref());
     let f = match ready {
         Some(f) => f,
         None => pure(format, d, opt, depth, opt.threads, words, &cx.once, held).unwrap_or_else(|| {
@@ -1020,7 +1023,11 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
         false => opt,
     };
     let watches = told_as_second_half(&shared, d);
+    let words = (format == Format::Jsonl).then(|| segment_words(&shared, opt, cx)).flatten();
     let children = nested(&shared, opt, depth, cx);
+    if words.is_some() {
+        cx.share_words(None);
+    }
     drop(watches);
     // (where the data put off is, as the formula may be a copy once reclaimed)
     let bases: Vec<usize> = shared.streams.iter().map(|s| s.data.as_ptr() as usize).collect();
@@ -1045,6 +1052,33 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
     }
     // (text as aqr-wrt tells, see [`made`])
     (format == Format::Text || smaller(&f, None, d, opt, cx)).then_some(f)
+}
+
+/// Text of the contents of a formula shorter than this in all is coded with dictionaries of each
+/// text's own (as [`archive`]'s batches have it).
+const SEGMENT_WORDS_MIN: usize = 256 << 10;
+
+/// Sets [`Cx::words`] for the contents of `f`, a formula of JSON lines cut into segments, where
+/// none is set: a dictionary of the text of its segments (contents of [`Kind::Text`], at least
+/// [`SEGMENT_WORDS_MIN`] bytes in all), so that it is coded with one dictionary, as it is where
+/// the file is one segment. Returns it, to be unset once they are made.
+fn segment_words(f: &Formula, opt: &Options, cx: &Cx) -> Option<Arc<aqr_wrt::formula::Shared>> {
+    // (of one segment, the file's text has a dictionary of its own anyway)
+    if cx.words.borrow().is_some() || !matches!(f.root, Node::Concat(_)) {
+        return None;
+    }
+    let texts: Vec<&[u8]> = f
+        .streams
+        .iter()
+        .filter(|s| s.content && s.kind == Kind::Text && aqr_wrt::formula::starts(&s.data))
+        .map(|s| &s.data[..])
+        .collect();
+    if texts.len() < 2 || texts.iter().map(|t| t.len()).sum::<usize>() < SEGMENT_WORDS_MIN {
+        return None;
+    }
+    let words = Arc::new(aqr_wrt::formula::Shared::of(&texts, opt.threads)?);
+    cx.share_words(Some(words.clone()));
+    Some(words)
 }
 
 /// Tells of the work on the streams of `f` that are data of their own (not of `d`, the data
@@ -1545,7 +1579,7 @@ impl Cx {
             pre: self.pre.clone(),
             held: self.held.clone(),
             remaps: self.remaps.clone(),
-            words: self.words.clone(),
+            words: self.words.borrow().clone(),
             coded_held: self.coded_held.clone(),
             once: self.once.clone(),
             shares_modules: self.enc.shares_modules(),
@@ -2023,7 +2057,8 @@ fn prepare(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> (Vec<(usize, usiz
     // (each may take all: the pool gives it the workers free, and those given back as the
     // others finish)
     let inner = opt.threads;
-    let words = cx.words.as_deref();
+    let words = cx.words.borrow().clone();
+    let words = words.as_deref();
     let once = &*cx.once;
     let held = cx.held.as_deref();
     let files = cx.files.as_deref();

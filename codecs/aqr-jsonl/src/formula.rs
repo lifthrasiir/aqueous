@@ -14,7 +14,7 @@ use aqr_common::varint;
 use aqr_formula::{Formula, Kind, Module, Node};
 use aqr_num::style::{Style as NumStyle, choose};
 
-use crate::parse::{self, Line, S_CLOSE, S_COLON, S_COMMA, S_OPEN, Tok, Toks, skip};
+use crate::parse::{self, S_CLOSE, S_COLON, S_COMMA, S_OPEN, Tok, Toks, skip};
 use crate::tree::{
     E_COMMA, F_DELTA, F_MAP, F_SHARED, MAX_LISTS, MAX_PATHS, MAX_WIDTH, Style, T_ARR, T_FALSE, T_NEW, T_NULL, T_NUM,
     T_NUMTEXT, T_OBJ, T_STR, T_TRUE,
@@ -54,6 +54,9 @@ const MAP_OBJECTS: u64 = 32;
 const MAP_KEYS: u64 = 16;
 const MAP_USES: u64 = 4;
 const MAP_MAX_KEYS: u64 = 4096;
+
+/// The key lists the first pass keeps of a path (only to find their members' paths again).
+const SEEN_LISTS: usize = 4096;
 
 /// A path's arrays are tuples where 9 in 10 of them, of [`TUPLE_ARRAYS`] at least, are of one
 /// length within 2..=[`MAX_WIDTH`].
@@ -264,9 +267,10 @@ impl<'a> First<'a> {
                 }
             }
             Tok::Str(a, b) => {
+                // (an entry counted as 16 bytes more, so that their number is bounded too)
                 if self.string_bytes < SHARED_SAMPLE {
                     self.strings.push((p, a, b));
-                    self.string_bytes += b - a + 1;
+                    self.string_bytes += b - a + 16;
                 }
             }
             Tok::Obj { n, .. } => {
@@ -279,6 +283,10 @@ impl<'a> First<'a> {
                     let l = match s.lists.find(d, toks, i, &[], h) {
                         Some(l) => l,
                         None => {
+                            // (the lists met kept up to a bound: those after it found again)
+                            if s.lists.lists.len() >= SEEN_LISTS {
+                                s.lists = Lists::default();
+                            }
                             let keys = keys_of(d, toks, i);
                             let kids = keys
                                 .iter()
@@ -397,13 +405,13 @@ struct Path<'a> {
 }
 
 /// The second pass: the streams.
-struct Second<'a> {
+struct Second<'a, 'b> {
     d: &'a [u8],
     style: Style,
     /// Scratch space for [`object_others`].
     others: Vec<u8>,
-    first: First<'a>,
-    kinds: Vec<Kind1>,
+    first: &'b First<'a>,
+    kinds: &'b [Kind1],
     paths: Vec<Path<'a>>,
     named: Named<'a>,
     keys: Vec<u8>,
@@ -415,7 +423,24 @@ struct Second<'a> {
     over: bool,
 }
 
-impl<'a> Second<'a> {
+impl<'a, 'b> Second<'a, 'b> {
+    fn new(d: &'a [u8], style: Style, first: &'b First<'a>, kinds: &'b [Kind1]) -> Self {
+        Second {
+            d,
+            style,
+            others: Vec::new(),
+            first,
+            kinds,
+            paths: Vec::new(),
+            named: HashMap::new(),
+            keys: Vec::new(),
+            shared: Vec::new(),
+            scratch: Vec::with_capacity(64),
+            back: Vec::with_capacity(64),
+            over: false,
+        }
+    }
+
     /// A new path, of the first pass's path `seen`.
     fn make(&mut self, seen: Option<u32>) -> u32 {
         if self.paths.len() == MAX_PATHS {
@@ -661,109 +686,148 @@ pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
     encode_as(input, style).filter(|(_, raw)| raw * 10 < input.len()).map(|f| f.0)
 }
 
+/// The bytes of lines of a segment at least (but the last), coded on its own (FORMAT.md,
+/// "Encoding"): what the encoder and the module hold of a file at once.
+pub const SEGMENT: usize = 64 << 20;
+
 /// The formula of `input` as JSON lines of style `style` and the bytes of its lines kept as they
-/// are, or `None` where it has more than [`MAX_PATHS`] paths.
+/// are, or `None` where a segment has more than [`MAX_PATHS`] paths.
 pub fn encode_as(input: &[u8], style: Style) -> Option<(Formula, usize)> {
+    encode_in(input, style, SEGMENT)
+}
+
+/// [`encode_as`] in segments of `segment` bytes of lines at least.
+fn encode_in(input: &[u8], style: Style, segment: usize) -> Option<(Formula, usize)> {
     let d = input;
-    // the lines, each a value or kept as it is
-    let mut lines: Vec<(Line, bool)> = Vec::new();
+    // the first pass, over all of the file
     let mut toks = Toks::default();
     let mut first = First { d, seen: Vec::new(), named: HashMap::new(), strings: Vec::new(), string_bytes: 0 };
     let mut at = 0;
     while at < d.len() {
         let l = parse::line(d, at);
         at = l.next;
-        let ok = parse::tokens(d, &l, &mut toks);
-        if ok {
+        if parse::tokens(d, &l, &mut toks) {
             if first.seen.is_empty() {
                 first.make();
             }
             first.value(&toks.t, 0, 0);
         }
-        lines.push((l, ok));
     }
     let shared = shared_paths(d, &first.strings, first.seen.len());
     let kinds: Vec<Kind1> = first.seen.iter().zip(shared).map(|(s, sh)| s.kind(sh)).collect();
-    let mut s = Second {
-        d,
-        style,
-        others: Vec::new(),
-        first,
-        kinds,
-        paths: Vec::new(),
-        named: HashMap::new(),
-        keys: Vec::new(),
-        shared: Vec::new(),
-        scratch: Vec::with_capacity(64),
-        back: Vec::with_capacity(64),
-        over: false,
-    };
-    let (mut layout, mut raw) = (Vec::new(), Vec::new());
-    for (l, ok) in &lines {
-        if *ok {
-            parse::tokens(d, l, &mut toks);
-            if s.paths.is_empty() {
-                s.make(Some(0));
-            }
-            s.value(&toks, 0, 0);
-            varint::put(&mut layout, (l.term | if toks.comma { E_COMMA } else { 0 }) + 1);
-        } else {
-            layout.push(0);
-            varint::put(&mut layout, (l.next - l.start) as u64);
-            raw.extend_from_slice(&d[l.start..l.next]);
-        }
-    }
-    if s.over {
-        return None;
-    }
-    let mut table = Vec::new();
-    let [mut types, mut shapes, mut names, mut text, mut nums, mut desc] = [0; 6].map(|_| Vec::new());
-    for p in &s.paths {
-        let (plain, delta) = (values(&p.vals, false), values(&p.vals, true));
-        let (pred, n) =
-            if !p.vals.is_empty() && packed(&delta) < packed(&plain) { (F_DELTA, delta) } else { (0, plain) };
-        table.push(pred | if p.kind.map { F_MAP } else { 0 } | if p.kind.shared { F_SHARED } else { 0 });
-        varint::put(&mut table, p.kind.width as u64);
-        for (part, all) in [
-            (&p.types, &mut types),
-            (&p.shapes, &mut shapes),
-            (&p.names, &mut names),
-            (&p.text, &mut text),
-            (&n, &mut nums),
-            (&p.desc, &mut desc),
-        ] {
-            varint::put(&mut table, part.len() as u64);
-            all.extend_from_slice(part);
-        }
-    }
-    text.extend_from_slice(&s.shared);
-    let raw_len = raw.len();
-    // (the strings, and the lines kept, text that aqr-compress recompresses in turn)
+    // the second, a segment at a time
     let mut f = Formula::default();
-    let inputs = vec![
-        f.push("jsonl/layout", layout),
-        f.push_content("jsonl/raw", Kind::Text, raw),
-        f.push("jsonl/paths", table),
-        f.push_content("jsonl/keys", Kind::Text, s.keys),
-        f.push("jsonl/types", types),
-        f.push("jsonl/shapes", shapes),
-        f.push_content("jsonl/names", Kind::Text, names),
-        f.push_content("jsonl/text", Kind::Text, text),
-        f.push("jsonl/nums", nums),
-        f.push("jsonl/desc", desc),
-    ];
-    f.root = Node::apply(MODULE, style.to_params(), inputs, input.len() as u64);
+    let mut roots = Vec::new();
+    let mut raw_len = 0;
+    let mut at = 0;
+    while at < d.len() || roots.is_empty() {
+        let start = at;
+        let mut s = Second::new(d, style, &first, &kinds);
+        let (mut layout, mut raw) = (Vec::new(), Vec::new());
+        while at < d.len() && at - start < segment {
+            let l = parse::line(d, at);
+            at = l.next;
+            if parse::tokens(d, &l, &mut toks) {
+                if s.paths.is_empty() {
+                    s.make(Some(0));
+                }
+                s.value(&toks, 0, 0);
+                varint::put(&mut layout, (l.term | if toks.comma { E_COMMA } else { 0 }) + 1);
+            } else {
+                layout.push(0);
+                varint::put(&mut layout, (l.next - l.start) as u64);
+                raw.extend_from_slice(&d[l.start..l.next]);
+            }
+        }
+        if s.over {
+            return None;
+        }
+        raw_len += raw.len();
+        roots.push(s.finish(&mut f, layout, raw, (at - start) as u64));
+    }
+    f.root = match roots.len() {
+        1 => roots.pop().unwrap(),
+        _ => Node::concat(roots),
+    };
     Some((f, raw_len))
+}
+
+impl Second<'_, '_> {
+    /// The application of the segment of `len` bytes, its streams (of its `layout` and `raw`
+    /// lines) put into `f` (and its store, [`aqr_formula::store::spill`]).
+    fn finish(self, f: &mut Formula, layout: Vec<u8>, raw: Vec<u8>, len: u64) -> Node {
+        let mut table = Vec::new();
+        let [mut types, mut shapes, mut names, mut text, mut nums, mut desc] = [0; 6].map(|_| Vec::new());
+        // (each path's parts let go as they are put in place)
+        for p in self.paths {
+            let (plain, delta) = (values(&p.vals, false), values(&p.vals, true));
+            let (pred, n) =
+                if !p.vals.is_empty() && packed(&delta) < packed(&plain) { (F_DELTA, delta) } else { (0, plain) };
+            table.push(pred | if p.kind.map { F_MAP } else { 0 } | if p.kind.shared { F_SHARED } else { 0 });
+            varint::put(&mut table, p.kind.width as u64);
+            for (part, all) in [
+                (&p.types, &mut types),
+                (&p.shapes, &mut shapes),
+                (&p.names, &mut names),
+                (&p.text, &mut text),
+                (&n, &mut nums),
+                (&p.desc, &mut desc),
+            ] {
+                varint::put(&mut table, part.len() as u64);
+                all.extend_from_slice(part);
+            }
+        }
+        text.extend_from_slice(&self.shared);
+        drop(self.shared);
+        // (the strings, and the lines kept, text that aqr-compress recompresses in turn)
+        let at = f.streams.len();
+        let inputs = vec![
+            f.push("jsonl/layout", layout),
+            f.push_content("jsonl/raw", Kind::Text, raw),
+            f.push("jsonl/paths", table),
+            f.push_content("jsonl/keys", Kind::Text, self.keys),
+            f.push("jsonl/types", types),
+            f.push("jsonl/shapes", shapes),
+            f.push_content("jsonl/names", Kind::Text, names),
+            f.push_content("jsonl/text", Kind::Text, text),
+            f.push("jsonl/nums", nums),
+            f.push("jsonl/desc", desc),
+        ];
+        f.streams[at..].iter_mut().for_each(|s| aqr_formula::store::spill(&mut s.data));
+        Node::apply(MODULE, self.style.to_params(), inputs, len)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The file of formula `f` (an application, or segments' one after another), of `len`
+    /// bytes in all.
     fn eval(f: &Formula, len: usize) -> crate::Result<Vec<u8>> {
-        let Node::Apply(a) = &f.root else { panic!() };
-        let inputs: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
-        decode(&a.params, &inputs, len as u64, 1)
+        let apply = |a: &aqr_formula::Apply, len: u64| {
+            let inputs: Vec<&[u8]> = a
+                .inputs
+                .iter()
+                .map(|n| match n {
+                    &Node::Slice { stream, start, len } => &f.streams[stream].data[start as usize..][..len as usize],
+                    _ => panic!("not a slice"),
+                })
+                .collect();
+            decode(&a.params, &inputs, len, 1)
+        };
+        match &f.root {
+            Node::Apply(a) => apply(a, len as u64),
+            Node::Concat(ns) => {
+                let mut out = Vec::new();
+                for n in ns {
+                    let Node::Apply(a) = n else { panic!("not an application") };
+                    out.extend(apply(a, a.len)?);
+                }
+                if out.len() == len { Ok(out) } else { Err(crate::corrupt()) }
+            }
+            _ => panic!("not a formula of aqr-jsonl"),
+        }
     }
 
     fn roundtrip(d: &[u8], st: Style) -> Formula {
@@ -893,6 +957,28 @@ mod tests {
         let flags = path_flags(&f);
         assert!(flags.iter().any(|&(fl, _)| fl & F_SHARED != 0), "{flags:?}");
         assert!(flags.iter().any(|&(fl, _)| fl & F_SHARED == 0), "{flags:?}");
+    }
+
+    #[test]
+    fn segments() {
+        // segments of a few lines each, coded on their own, and one of a line longer than they are
+        let mut s = String::new();
+        for i in 0..300 {
+            s += &format!("{{\"i\":{i},\"s\":\"{}\",\"a\":[{i},{}]}}\n", "x".repeat(i % 7), i * 2);
+            if i == 150 {
+                s += &format!("{{\"long\":\"{}\"}}\nnot json\n", "y".repeat(5000));
+            }
+        }
+        let d = s.as_bytes();
+        let (one, _) = encode_in(d, Style::default(), usize::MAX).unwrap();
+        assert!(matches!(one.root, Node::Apply(_)));
+        let (f, raw) = encode_in(d, Style::default(), 1000).unwrap();
+        let Node::Concat(ns) = &f.root else { panic!() };
+        assert!(ns.len() >= 8, "{}", ns.len());
+        assert_eq!(f.streams.len(), 10 * ns.len());
+        assert_eq!(raw, 9);
+        assert_eq!(eval(&f, d.len()).unwrap(), d);
+        assert!(eval(&f, d.len() + 1).is_err());
     }
 
     #[test]
