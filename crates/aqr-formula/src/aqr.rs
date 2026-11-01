@@ -1054,13 +1054,14 @@ fn formula_block(out: &mut impl Out, num_outputs: u64, data: &[u8]) {
     block_of(out, FORMULA, &[&n, data]);
 }
 
-/// A block of the bytes of `parts` one after the other.
+/// A block of the bytes of `parts` one after the other. A dictionary or module block in full
+/// takes a 2-byte size at least, as its type with a 1-byte size is a shorthand block's.
 fn block_of(out: &mut impl Out, ty: u64, parts: &[&[u8]]) {
     let start = out.len();
     let len: usize = parts.iter().map(|p| p.len()).sum();
     let ss = match len as u64 {
-        0..0x100 => 0,
-        0x100..0x1_0000 => 1,
+        0..0x100 if ty != DICTIONARY_RAW && ty != MODULE => 0,
+        0..0x1_0000 => 1,
         0x1_0000..0x1_0000_0000 => 2,
         _ => 3,
     };
@@ -2548,7 +2549,9 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks<'_>> {
                 b.dictionary_at.push(at);
                 b.dictionaries.push(dict::Dictionary::read(decoded(data, true, true)?, ty & 0x04 != 0)?);
             }
-            0x60..=0x63 => {
+            // a shorthand block: the hash of a registered module
+            0x60 => return resource("registered modules are not supported yet"),
+            0x61..=0x63 => {
                 b.module_at.push(at);
                 b.modules.push(decoded(data, true, true)?);
             }
@@ -3847,7 +3850,7 @@ mod tests {
         for sum in [None, Some(checksum(SAMPLE))] {
             let c = encode(&f, sum, Level::Zstd(3)).unwrap();
             assert_eq!(c[..6], HEADER_MAGIC);
-            assert_eq!(types(&c), [MODULE, FORMULA, NON_LEAF_RAW, NON_LEAF_RAW]);
+            assert_eq!(types(&c), [MODULE + 1, FORMULA, NON_LEAF_RAW, NON_LEAF_RAW]);
             assert_eq!(decode(&c, &natives()).unwrap(), SAMPLE);
         }
         // Streams without slices have no blocks.
@@ -3858,14 +3861,14 @@ mod tests {
         );
         f.root.slices_mut(&mut |s, _, _| *s += 1);
         let c = encode(&f, None, Level::Zstd(3)).unwrap();
-        assert_eq!(types(&c), [MODULE, FORMULA, NON_LEAF_RAW, NON_LEAF_RAW]);
+        assert_eq!(types(&c), [MODULE + 1, FORMULA, NON_LEAF_RAW, NON_LEAF_RAW]);
         assert_eq!(decode(&c, &natives()).unwrap(), SAMPLE);
         // A module named twice has one block.
         let mut f = sample();
         let Node::Concat(ns) = &mut f.root else { unreachable!() };
         ns.push(ns[1].clone());
         let c = encode(&f, None, Level::Zstd(3)).unwrap();
-        assert_eq!(types(&c), [MODULE, FORMULA, NON_LEAF_RAW, NON_LEAF_RAW]);
+        assert_eq!(types(&c), [MODULE + 1, FORMULA, NON_LEAF_RAW, NON_LEAF_RAW]);
         assert_eq!(decode(&c, &natives()).unwrap(), [SAMPLE, b"zyxolleh"].concat());
     }
 
@@ -3889,13 +3892,13 @@ mod tests {
         let expect = [&r1[..], &r2, b"xyz", &r2, b"xyz", &r1, b"xyz"].concat();
         assert_eq!(f.eval(&pre).unwrap(), expect);
         let c = encode(&f, None, Level::MID).unwrap();
-        assert_eq!(types(&c), [MODULE, RESOURCE, RESOURCE, FORMULA, NON_LEAF_RAW]);
+        assert_eq!(types(&c), [MODULE + 1, RESOURCE, RESOURCE, FORMULA, NON_LEAF_RAW]);
         assert_eq!(decode(&c, &super::natives(&[PRE], &pre)).unwrap(), expect);
         // A resource block is always compressed, even when that makes it longer.
         let noise = Resource::new(aqr_common::rng::noise(1000));
         f.root = Node::apply_with(PRE, vec![noise.clone()], vec![], vec![x], 1003);
         let c = encode(&f, None, Level::MID).unwrap();
-        assert_eq!(types(&c), [MODULE, RESOURCE + 1, FORMULA, NON_LEAF_RAW]);
+        assert_eq!(types(&c), [MODULE + 1, RESOURCE + 1, FORMULA, NON_LEAF_RAW]);
         assert_eq!(decode(&c, &super::natives(&[PRE], &pre)).unwrap(), [&noise[..], b"xyz"].concat());
         // sized without the resources held, but archived with them
         let enc = Encoder::new(Level::MID);
@@ -4420,6 +4423,22 @@ mod tests {
         assert_eq!(stand_in_name(&other), Some("rev@1"));
         assert_eq!(stand_in_name(&WASM_HEADER), None);
         assert_eq!(stand_in_name(&stand_in(REV)[..20]), None);
+    }
+
+    /// A dictionary or module block of a 1-byte size is a shorthand block: one in full of fewer
+    /// bytes is written with a 2-byte size.
+    #[test]
+    fn shorthand_types() {
+        let small = always_compressed(&mut CCtx::create(), &[&stand_in(REV)], 3, 1).unwrap();
+        assert!(small.len() < 0x100);
+        for ty in [MODULE, DICTIONARY_RAW] {
+            let mut out = Vec::new();
+            block(&mut out, ty, &small);
+            assert_eq!(out[0] as u64, ty + 1);
+        }
+        let shorthand = |ty: u8| archive(|out| out.extend([&[ty, 32][..], &[7; 32]].concat()));
+        assert_eq!(decode(&shorthand(0x60), &natives()), resource("registered modules are not supported yet"));
+        assert_eq!(decode(&shorthand(0x50), &natives()), resource("registered dictionaries are not supported yet"));
     }
 
     #[test]
