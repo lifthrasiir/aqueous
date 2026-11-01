@@ -666,6 +666,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-rar"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
+]
+
+[[package]]
 name = "aqr-raw"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,22 @@
+[package]
+name = "aqr-rar"
+version = "0.1.0"
+edition = "2024"
+description = "RAR archives taken apart into their files' contents, compressed streams split into their data and a record of the parse"
+publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula"]
+
+[dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-rar-check"
+path = "examples/check.rs"
