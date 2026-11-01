@@ -18,6 +18,9 @@ aqr (crates/aqr/src/fold.rs), which checks that aqr's fold takes each pair as on
         `--names PAIRS.json` probes the names of those pairs instead, each pair in a
         directory of its own. `--bucket N` makes them in subdirectories of N names, a
         character's names in one (FAT's directories hold about 32 000 names of this size).
+        `--cased UCD.json` probes only characters that have case (all but categories Lo, Cn,
+        Co and Cs, and those of any case mapping of the `ucd` pairs given): few enough for one
+        directory of FAT, and for exFAT, whose directories are slow as they grow on macOS.
 
         Disk images to probe on macOS: `hdiutil create -size 8g -type SPARSE -fs FS ...` of
         APFS, HFS+, ExFAT or "MS-DOS FAT32"; exFAT and FAT given small clusters
@@ -82,7 +85,7 @@ def stored(fd, path):
     return os.path.basename(os.path.realpath(path))
 
 
-def probe(d, bucket, given=None):
+def probe(d, bucket, given=None, cased=None):
     if given is not None:
         # the names of the pairs given, each pair in a directory of its own
         return probe_pairs(d, given)
@@ -91,7 +94,11 @@ def probe(d, bucket, given=None):
         if 0xD800 <= cp < 0xE000 or cp in (0x2F, 0x7F):
             continue
         c = chr(cp)
-        if unicodedata.category(c) == "Cn" and not 0x200B <= cp <= 0x206F and cp != 0xFEFF:
+        cat = unicodedata.category(c)
+        if cat == "Cn" and not 0x200B <= cp <= 0x206F and cp != 0xFEFF:
+            continue
+        # (of --cased: characters of no case left out, but those of some case mapping)
+        if cased is not None and cat in ("Lo", "Cn", "Co", "Cs") and c not in cased and not 0x200B <= cp <= 0x206F and cp != 0xFEFF:
             continue
         chars.append(c)
     # by bucket: its names, each character's together
@@ -158,6 +165,14 @@ def probe_pairs(d, given):
     return pairs
 
 
+def cased(path):
+    out = set()
+    for a, b, what in json.load(open(path, encoding="utf-8")):
+        if "decomposition" not in what and what != "hangul":
+            out |= set(a) | set(b)
+    return out
+
+
 def main():
     a = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     s = a.add_subparsers(dest="cmd", required=True)
@@ -169,8 +184,9 @@ def main():
     p.add_argument("out")
     p.add_argument("--bucket", type=int, default=0)
     p.add_argument("--names", help="a JSON of pairs (as OUT.json): probe their names alone, pair by pair")
+    p.add_argument("--cased", help="a JSON of pairs of `ucd`: probe characters of a case alone (all but Lo, Cn, Co and Cs, and those of the pairs' case mappings)")
     args = a.parse_args()
-    pairs = ucd_pairs(args.files) if args.cmd == "ucd" else probe(args.dir, args.bucket, args.names and json.load(open(args.names, encoding="utf-8")))
+    pairs = ucd_pairs(args.files) if args.cmd == "ucd" else probe(args.dir, args.bucket, args.names and json.load(open(args.names, encoding="utf-8")), args.cased and cased(args.cased))
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(pairs, f, ensure_ascii=False)
     print(f"{len(pairs)} pairs", file=sys.stderr)

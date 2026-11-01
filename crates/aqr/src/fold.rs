@@ -14,6 +14,9 @@
 //!   `ntfs_pairs`). HFS+ took one mapping of no current Unicode as one: Georgian Mkhedruli as
 //!   Asomtavruli (Unicode 1.1 to 2.1), hence [`legacy`]. The decompositions of earlier versions
 //!   corrected since were probed too, and taken by neither.
+//! - exFAT (its up-case table) as macOS 27 and Windows 11 make it, and FAT32 (long names) as
+//!   macOS 27 makes it, probed of the characters that have case (`--cased`: all but those of no
+//!   case, categories Lo, Cn, Co and Cs, that no case mapping of any version has).
 
 use std::ffi::OsStr;
 
