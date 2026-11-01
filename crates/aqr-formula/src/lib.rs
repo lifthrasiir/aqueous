@@ -382,7 +382,9 @@ pub enum Kind {
     /// Binary records of fixed layout, such as a cross-reference table.
     Table,
     /// Of high entropy, such as compressed or encrypted data that no recompressor takes: holds
-    /// no files and does not compress, and is stored as it is.
+    /// no files and hardly compresses. The archive encoder stores it as it is unless zstd
+    /// level 1 over all of it at once saves 1/32 (what repeats from afar, as a video's
+    /// keyframes may), and keeps it apart from the streams of other kinds.
     Compressed,
     /// A file of the format named (as aqr-compress names them: `zlib`, `png`, ...) from the
     /// first byte: recompressed as such without looking for it, and kept as it is where its
@@ -914,8 +916,8 @@ impl Formula {
 
     /// Puts the streams of each class and kind one after another, in one stream (in the place
     /// of the first): they are alike, and archive smaller together (the archive encoder
-    /// compresses each stream on its own). The streams of [`Kind::Compressed`] (stored as they
-    /// are), the contents, and those that a slice goes past the end of are left apart. The
+    /// compresses each stream on its own). The streams of [`Kind::Compressed`] (mostly stored as
+    /// they are), the contents, and those that a slice goes past the end of are left apart. The
     /// output is the same.
     pub fn merge_classes(&mut self) {
         self.merge_classes_within(u64::MAX);

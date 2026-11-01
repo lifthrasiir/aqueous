@@ -85,7 +85,7 @@ impl Encoder {
         let mut classes: Vec<(Class, Vec<&[u8]>)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for c in blocks {
-            if c.how == How::Stored || c.data.is_empty() || c.data.len() > BLOCK_MAX {
+            if c.how == How::Light || c.data.is_empty() || c.data.len() > BLOCK_MAX {
                 continue;
             }
             if !seen.insert(key_how(&[c.data], c.how)) {
