@@ -29,11 +29,12 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          manifest = (pkgs.lib.importTOML ./crates/aqr/Cargo.toml).package;
         in
         rec {
           aqr = pkgs.rustPlatform.buildRustPackage {
-            pname = "aqr";
-            version = "0.1.0";
+            pname = manifest.name;
+            inherit (manifest) version;
             __structuredAttrs = true;
             src = pkgs.runCommand "aqueous-source" { } ''
               cp -r --no-preserve=mode ${self} $out
