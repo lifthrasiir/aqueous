@@ -6,7 +6,10 @@
 // The code of the modules alone uses only part of the rest.
 #![cfg_attr(not(feature = "encode"), allow(unused))]
 pub mod huff;
+pub mod lz3;
 pub mod lz5;
+pub mod ppmd3;
+pub mod rar4;
 pub mod rar5;
 pub mod rec;
 pub mod recons5;
