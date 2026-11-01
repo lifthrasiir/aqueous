@@ -17,33 +17,74 @@
 //! - exFAT (its up-case table) as macOS 27 and Windows 11 make it, and FAT32 (long names) as
 //!   macOS 27 makes it, probed of the characters that have case (`--cased`: all but those of no
 //!   case, categories Lo, Cn, Co and Cs, that no case mapping of any version has).
+//! - On Linux 6.8, so too: vfat (of `utf8` and not), exFAT, ntfs3 of `nocase`, a casefolded
+//!   directory of ext4 (which ignores all of Default_Ignorable_Code_Point, hence [`ignored`]),
+//!   and hfsplus, which takes Cyrillic `ӕ`, `ә`, `ӡ` and `ө` as Latin letters (in [`legacy`]) and
+//!   keeps each character beyond the Basic Multilingual Plane as `????` ([`fold_astral`]).
 
 use std::ffi::OsStr;
 
 use unicode_normalization::UnicodeNormalization;
 
-/// The code points HFS+ ignores in names (TN1150, "Unicode Subtleties"): joiners, marks of
-/// direction and the byte order mark.
+/// The code points file systems ignore in names: Unicode's Default_Ignorable_Code_Point (17),
+/// which ext4's and f2fs' casefolding leave out, of which those HFS+ ignores (TN1150, "Unicode
+/// Subtleties": joiners, marks of direction and the byte order mark) are some.
 fn ignored(c: char) -> bool {
-    matches!(c, '\u{200c}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{206a}'..='\u{206f}' | '\u{feff}')
+    matches!(
+        c,
+        '\u{ad}'
+            | '\u{34f}'
+            | '\u{61c}'
+            | '\u{115f}'..='\u{1160}'
+            | '\u{17b4}'..='\u{17b5}'
+            | '\u{180b}'..='\u{180f}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{3164}'
+            | '\u{fe00}'..='\u{fe0f}'
+            | '\u{feff}'
+            | '\u{ffa0}'
+            | '\u{fff0}'..='\u{fff8}'
+            | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0000}'..='\u{e0fff}'
+    )
 }
 
 /// `c` (lowercase, as [`fold`] has it) as one of the characters that earlier versions of Unicode
 /// took as its case: Georgian Mkhedruli as Nuskhuri, which Asomtavruli lowercases to now (to
 /// Mkhedruli in Unicode 1.1 to 2.1; HFS+ takes them as one), `ɘ` as `ǝ` (`Ǝ`'s lowercase in 1.1),
-/// `ϲ` as `σ` (uppercase `Σ` to 3.2) and `ʔ` as `ɂ` (uppercase `Ɂ` in 4.1).
+/// `ϲ` as `σ` (uppercase `Σ` to 3.2) and `ʔ` as `ɂ` (uppercase `Ɂ` in 4.1). And as Linux's hfsplus
+/// takes them, of a table of its own: Cyrillic `ӕ`, `ә`, `ӡ` and `ө` as Latin `æ`, `ə`, `ʒ` and `ɵ`.
 fn legacy(c: char) -> char {
     match c {
         '\u{10d0}'..='\u{10f5}' => char::from_u32(c as u32 - 0x10d0 + 0x2d00).unwrap(),
         '\u{258}' => '\u{1dd}',
         '\u{3f2}' => 'σ',
         '\u{294}' => '\u{242}',
+        '\u{4d5}' => 'æ',
+        '\u{4d9}' => '\u{259}',
+        '\u{4e1}' => '\u{292}',
+        '\u{4e9}' => '\u{275}',
         _ => c,
     }
 }
 
+/// `name` folded ([`fold`]) after each character beyond the Basic Multilingual Plane is `????`,
+/// as Linux's hfsplus keeps it (a `?` for each byte of its UTF-8, not decomposed nor ignored):
+/// `x😀`, `x😁` and `x????` alike.
+pub fn fold_astral(name: &OsStr) -> String {
+    let s = name.to_string_lossy();
+    if s.chars().all(|c| (c as u32) < 0x1_0000) {
+        return fold(name);
+    }
+    let x: String = s.chars().map(|c| if (c as u32) < 0x1_0000 { c.to_string() } else { "????".into() }).collect();
+    fold(x.as_ref())
+}
+
 /// `name` folded as file systems taking names by case but normalization aside could take it
-/// (macOS's case-sensitive APFS and HFSX): the code points HFS+ ignores left out, decomposed
+/// (macOS's case-sensitive APFS and HFSX): the code points ignored left out, decomposed
 /// (NFD). What is not Unicode is U+FFFD, as [`fold`] has it.
 pub fn normalized(name: &OsStr) -> String {
     let s = name.to_string_lossy();
@@ -53,7 +94,7 @@ pub fn normalized(name: &OsStr) -> String {
     s.chars().filter(|&c| !ignored(c)).nfd().collect()
 }
 
-/// `name` folded ([module](self)): the code points HFS+ ignores left out, decomposed (NFD), and
+/// `name` folded ([module](self)): the code points ignored left out, decomposed (NFD), and
 /// each character's uppercase then lowercase (full mappings, by character) taken until nothing
 /// changes, decomposed again each time. What is not Unicode (lone surrogates, bytes of no
 /// UTF-8) is U+FFFD: names of it fold alike, more coarsely than any file system takes them.
@@ -107,6 +148,10 @@ mod tests {
         assert!(alike("ꭰ", "Ꭰ"));
         assert!(alike("ა", "Ⴀ") && alike("ა", "ⴀ") && alike("ა", "Ა"));
         assert!(alike("Ǝ", "ɘ") && alike("ϲ", "Σ") && alike("Ϲ", "σ") && alike("ʔ", "Ɂ"));
+        assert!(alike("Ӕ", "æ") && alike("ә", "Ə") && alike("Ӡ", "ʒ") && alike("ө", "Ɵ"));
+        assert!(alike("a\u{200b}b", "ab") && alike("a\u{fe0f}", "A") && alike("a\u{e0041}", "a"));
+        let astral = |a: &str, b: &str| super::fold_astral(a.as_ref()) == super::fold_astral(b.as_ref());
+        assert!(astral("x😀", "x😁") && astral("x😀", "X????") && !astral("x😀", "x???") && !alike("x😀", "x😁"));
         assert!(alike("é", "e\u{301}") && alike("É", "e\u{301}"));
         assert!(alike("한", "\u{1112}\u{1161}\u{11ab}"));
         assert!(alike(".g\u{200c}it", ".GIT") && alike("a\u{feff}", "A"));
@@ -131,7 +176,8 @@ mod tests {
     }
 
     /// The pairs of `scripts/name-fold-pairs.py` (the JSON files of `cache/fold`, or those of
-    /// `AQR_FOLD_PAIRS`, separated by commas): each pair folds alike.
+    /// `AQR_FOLD_PAIRS`, separated by commas): each pair folds alike (by `fold_astral` in a file
+    /// whose name has `astral`).
     #[test]
     #[ignore = "of pairs made by scripts/name-fold-pairs.py"]
     fn name_fold_pairs() {
@@ -150,17 +196,15 @@ mod tests {
         for f in &files {
             let pairs: Vec<(String, String, String)> =
                 serde_json::from_slice(&std::fs::read(f).unwrap()).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
+            // (of a file named so, as Linux's hfsplus takes them: `fold_astral`)
+            let astral = f.to_string_lossy().contains("astral");
+            let fold = |s: &str| if astral { super::fold_astral(s.as_ref()) } else { fold(s.as_ref()) };
+            let alike = |a: &str, b: &str| fold(a) == fold(b);
             let n = pairs.iter().filter(|(a, b, _)| !alike(a, b)).count();
             eprintln!("{}: {} pairs, {n} folded apart", f.display(), pairs.len());
-            for (a, b, what) in pairs.into_iter().filter(|(a, b, _)| !alike(a, b)) {
+            for (a, b, what) in pairs.iter().filter(|(a, b, _)| !alike(a, b)) {
                 let hex = |s: &str| s.chars().map(|c| format!("{:04X}", c as u32)).collect::<Vec<_>>().join(" ");
-                wrong.push(format!(
-                    "{} ~ {} ({what}): {} / {}",
-                    hex(&a),
-                    hex(&b),
-                    hex(&fold(a.as_ref())),
-                    hex(&fold(b.as_ref()))
-                ));
+                wrong.push(format!("{} ~ {} ({what}): {} / {}", hex(&a), hex(&b), hex(&fold(a)), hex(&fold(b))));
             }
         }
         assert!(wrong.is_empty(), "{} pairs folded apart:\n{}", wrong.len(), wrong.join("\n"));

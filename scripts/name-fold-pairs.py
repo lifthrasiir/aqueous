@@ -13,7 +13,7 @@ aqr (crates/aqr/src/fold.rs), which checks that aqr's fold takes each pair as on
     name-fold-pairs.py probe DIR OUT.json
         The pairs that the file system of DIR (an empty directory) takes as one: probe names
         made in DIR, and each that is there already (`O_EXCL`) paired with the name kept there
-        (`F_GETPATH` on macOS, `realpath` elsewhere). Names are `p{s}q` for every character s and
+        (`F_GETPATH` on macOS, `realpath` on Windows, by inode elsewhere). Names are `p{s}q` for every character s and
         what it maps to (as above, by Python's own data), and `pq` (for characters ignored).
         `--names PAIRS.json` probes the names of those pairs instead, each pair in a
         directory of its own. `--bucket N` makes them in subdirectories of N names, a
@@ -76,13 +76,25 @@ def related(c):
     return out
 
 
+# names made, by (device, inode): on Linux, where no call tells the name a file is kept by
+MADE = {}
+
+
+def made(fd, name):
+    st = os.fstat(fd)
+    MADE[(st.st_dev, st.st_ino)] = name
+
+
 def stored(fd, path):
     if sys.platform == "darwin":
         import fcntl
 
         # F_GETPATH: the path as the file system keeps it
         return os.path.basename(fcntl.fcntl(fd, 50, b"\0" * 1024).split(b"\0")[0].decode("utf-8", "surrogateescape"))
-    return os.path.basename(os.path.realpath(path))
+    if sys.platform == "win32":
+        return os.path.basename(os.path.realpath(path))
+    st = os.fstat(fd)
+    return MADE.get((st.st_dev, st.st_ino), "?")
 
 
 def probe(d, bucket, given=None, cased=None):
@@ -113,7 +125,7 @@ def probe(d, bucket, given=None, cased=None):
             buckets.append(names)
             names = []
     buckets.append(names)
-    pairs, failed = [], 0
+    pairs, failed, clashing = [], 0, []
     fs = os.path.realpath(d)
     for k, names in enumerate(buckets):
         sub = os.path.join(d, f"b{k}") if bucket else d
@@ -122,9 +134,16 @@ def probe(d, bucket, given=None, cased=None):
             p = os.path.join(sub, n)
             try:
                 fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                made(fd, n)
                 os.close(fd)
             except FileExistsError:
-                fd = os.open(p, os.O_RDONLY)
+                try:
+                    fd = os.open(p, os.O_RDONLY)
+                except OSError:
+                    # (there and not: vfat of Linux, `utf8`, takes it as a short name to make, not
+                    # to look up)
+                    clashing.append(n)
+                    continue
                 try:
                     there = stored(fd, p)
                 finally:
@@ -134,7 +153,9 @@ def probe(d, bucket, given=None, cased=None):
             except OSError:
                 # (names the file system does not take: EILSEQ, EINVAL, EFAULT of FAT on macOS, ...)
                 failed += 1
-        print(f"bucket {k}: {len(names)} names, {len(pairs)} pairs so far, {failed} not taken", file=sys.stderr)
+        print(f"bucket {k}: {len(names)} names, {len(pairs)} pairs so far, {failed} not taken, {len(clashing)} there but not found", file=sys.stderr)
+    if clashing:
+        print("there but not found: " + " ".join(":".join(f"{ord(c):04X}" for c in n[1:-1]) for n in clashing[:200]), file=sys.stderr)
     return pairs
 
 
@@ -149,6 +170,7 @@ def probe_pairs(d, given):
             p = os.path.join(sub, n)
             try:
                 fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                made(fd, n)
                 os.close(fd)
                 made.append(n)
             except FileExistsError:

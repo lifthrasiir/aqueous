@@ -218,18 +218,17 @@ struct State {
     top_made: bool,
     /// How the file system extracted into takes names as one (decided as the first entries are
     /// made), and the entries of each directory by the key of their names so taken.
-    folding: Option<Folding>,
+    folding: Option<(Folding, bool)>,
     taken: HashMap<(Option<usize>, String), usize>,
     /// By entry, where it is not made as its name is one that the file system takes as an
     /// earlier entry's of its directory: that entry (`Some`), or `None` where one above it is
     /// not made so (spec, "Extraction").
     clashed: Vec<Option<Option<usize>>>,
-    /// On Windows, the entries of each directory by their short names, where their names may be
-    /// ones ([`short_key`]); and the first entry of each directory whose name is none (and so
-    /// takes a short name Windows makes, `~` and digits: [`made_short`]).
-    #[cfg(windows)]
+    /// Where the file system has short names, the entries of each directory by their short
+    /// names, where their names may be ones ([`short_key`]); and the first entry of each
+    /// directory whose name is none (and so takes a short name made, `~` and digits:
+    /// [`made_short`]).
     taken_short: HashMap<(Option<usize>, Vec<u8>), usize>,
-    #[cfg(windows)]
     long_named: HashMap<Option<usize>, usize>,
 }
 
@@ -337,7 +336,7 @@ impl<'a> Extractor<'a> {
         let force = self.force.load(Relaxed);
         // the entries of names the file system takes as an earlier one's, not made (nor what is
         // under them)
-        let folding = *s.folding.get_or_insert_with(|| Folding::of(&top));
+        let (folding, short) = *s.folding.get_or_insert_with(|| Folding::of(&top));
         s.clashed.resize(n, None);
         for &i in new {
             let e = &t.entries[i];
@@ -359,11 +358,10 @@ impl<'a> Extractor<'a> {
                     s.clashed[i] = Some(Some(j));
                 }
             }
-            // (on Windows, of short names too: FAT takes a name as another's short name, by the
-            // best fit of the OEM code page, `pÀq` as `paq`; and both FAT and NTFS take a short
-            // name Windows made, `LONGFI~1.TXT`, as the long name's)
-            #[cfg(windows)]
-            if s.clashed[i].is_none() {
+            // (of short names too: FAT on Windows takes a name as another's short name, by the
+            // best fit of the OEM code page, `pÀq` as `paq`; and FAT and NTFS take a short name
+            // made, `LONGFI~1.TXT`, as the long name's)
+            if short && s.clashed[i].is_none() {
                 match short_key(&os_name(name_bytes(&e.name).0).0) {
                     Some(k) => {
                         let long = s.long_named.get(&e.parent).copied().filter(|&j| j != i && made_short(&k));
@@ -884,46 +882,61 @@ fn os_name(bytes: &[u8]) -> (OsString, bool) {
 /// apart: entries of names it takes as one are a conflict ([`Extractor::entries`]).
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Folding {
-    /// As they are (as far as it is known: Linux's case-insensitive file systems and
-    /// directories are not told apart).
+    /// As they are.
     Exact,
-    /// Normalization aside (macOS's case-sensitive APFS and HFSX).
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    /// Normalization aside (macOS's case-sensitive APFS and HFSX; on Linux what a probe finds so).
+    #[cfg_attr(windows, allow(dead_code))]
     Normalization,
     /// Case and normalization aside ([`fold::fold`]: macOS's case-insensitive file systems,
-    /// Windows).
-    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+    /// Windows; on Linux FAT, exFAT, HFS and what a probe finds so).
     Full,
+    /// As [`Folding::Full`], and characters beyond the Basic Multilingual Plane alike
+    /// ([`fold::fold_astral`]: Linux's hfsplus).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    FullAstral,
 }
 
 impl Folding {
-    /// The folding of the file system of directory `dir` (or the nearest one above it there).
-    fn of(dir: &Path) -> Folding {
+    /// The folding of the file system of directory `dir` (or the nearest one above it there),
+    /// and whether it has short names (8.3) that a name could be taken as (FAT; on Windows, any,
+    /// as NTFS may have them too).
+    fn of(dir: &Path) -> (Folding, bool) {
+        let mut d = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+        while !d.exists()
+            && let Some(p) = d.parent()
+        {
+            d = if p.as_os_str().is_empty() { Path::new(".") } else { p };
+        }
         #[cfg(target_os = "macos")]
         {
             use std::os::unix::ffi::OsStrExt;
-            let mut d = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
-            while !d.exists()
-                && let Some(p) = d.parent()
-            {
-                d = if p.as_os_str().is_empty() { Path::new(".") } else { p };
-            }
-            let Ok(c) = std::ffi::CString::new(d.as_os_str().as_bytes()) else { return Folding::Full };
+            let Ok(c) = std::ffi::CString::new(d.as_os_str().as_bytes()) else { return (Folding::Full, true) };
             // SAFETY: a path of a C string
-            return match unsafe { libc::pathconf(c.as_ptr(), libc::_PC_CASE_SENSITIVE) } {
+            let folding = match unsafe { libc::pathconf(c.as_ptr(), libc::_PC_CASE_SENSITIVE) } {
                 1 => Folding::Normalization,
                 _ => Folding::Full,
             };
+            // SAFETY: plain data, filled by `statfs`
+            let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+            // SAFETY: as above
+            let fat = unsafe { libc::statfs(c.as_ptr(), &mut st) } != 0 || {
+                // SAFETY: a NUL-terminated name of the file system's type
+                let ty = unsafe { std::ffi::CStr::from_ptr(st.f_fstypename.as_ptr()) };
+                ty.to_bytes() == b"msdos"
+            };
+            return (folding, fat);
         }
+        #[cfg(target_os = "linux")]
+        return linux_folding(d);
         #[cfg(windows)]
         {
-            let _ = dir;
-            return Folding::Full;
+            let _ = d;
+            return (Folding::Full, true);
         }
         #[allow(unreachable_code)]
         {
-            let _ = dir;
-            Folding::Exact
+            let _ = d;
+            (Folding::Exact, false)
         }
     }
 
@@ -934,7 +947,47 @@ impl Folding {
             Folding::Exact => None,
             Folding::Normalization => Some(fold::normalized(name)),
             Folding::Full => Some(fold::fold(name)),
+            Folding::FullAstral => Some(fold::fold_astral(name)),
         }
+    }
+}
+
+/// [`Folding::of`] directory `d` (there) on Linux: by the type of its file system where that
+/// tells (FAT of short names, exFAT, HFS, hfsplus), else by a probe in `d` (files `.aqr-names-*`
+/// made and removed: names of another case, or composed and decomposed, found as one), which
+/// finds casefolded directories of ext4 and f2fs, ntfs3 of `nocase`, CIFS, and shares of
+/// macOS's file systems in virtual machines. Where `d` cannot be written, as they are.
+#[cfg(target_os = "linux")]
+fn linux_folding(d: &Path) -> (Folding, bool) {
+    use std::os::unix::ffi::OsStrExt;
+    if let Ok(c) = std::ffi::CString::new(d.as_os_str().as_bytes()) {
+        // SAFETY: plain data, filled by `statfs`
+        let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+        // SAFETY: a path of a C string
+        if unsafe { libc::statfs(c.as_ptr(), &mut st) } == 0 {
+            match st.f_type as u64 & 0xffff_ffff {
+                // MSDOS_SUPER_MAGIC (vfat, msdos)
+                0x4d44 => return (Folding::Full, true),
+                // EXFAT_SUPER_MAGIC, HFS_SUPER_MAGIC
+                0x2011_bab0 | 0x4244 => return (Folding::Full, false),
+                // HFSPLUS_SUPER_MAGIC
+                0x482b => return (Folding::FullAstral, false),
+                _ => {}
+            }
+        }
+    }
+    let base = format!(".aqr-names-{}-", std::process::id());
+    let probe = |made: &str, other: &str| -> Option<bool> {
+        let at = d.join(format!("{base}{made}"));
+        fs::OpenOptions::new().write(true).create_new(true).open(&at).ok()?;
+        let one = fs::symlink_metadata(d.join(format!("{base}{other}"))).is_ok();
+        let _ = fs::remove_file(&at);
+        Some(one)
+    };
+    match (probe("a", "A"), probe("\u{e9}", "e\u{301}")) {
+        (Some(true), _) => (Folding::Full, false),
+        (_, Some(true)) => (Folding::Normalization, false),
+        _ => (Folding::Exact, false),
     }
 }
 
@@ -1007,12 +1060,21 @@ fn short_key(name: &std::ffi::OsStr) -> Option<Vec<u8>> {
     short_valid(oem).then(|| oem.to_vec())
 }
 
+/// The short name (8.3) that FAT may take `name` (a name on this system) as, elsewhere than on
+/// Windows: of ASCII names alone, uppercased (macOS's and Linux's FAT take names of no such
+/// short name as their long names: [`fold::fold`] has them).
+#[cfg(not(windows))]
+fn short_key(name: &std::ffi::OsStr) -> Option<Vec<u8>> {
+    let s = name.to_str().filter(|s| s.is_ascii())?;
+    let up = s.to_ascii_uppercase().into_bytes();
+    short_valid(&up).then_some(up)
+}
+
 /// Whether `oem` (a name in an OEM code page) may be a short name (8.3) of FAT: a base of 1 to 8
 /// bytes and an extension of 1 to 3 after a dot, or none. Lenient (the characters FAT does not
 /// take aside, but `?`, the best fit of characters of no fit, and `*`), as a name taken as short
 /// that is not is a conflict or a link not made more, but one not taken that is could be written
 /// through.
-#[cfg(any(windows, test))]
 fn short_valid(oem: &[u8]) -> bool {
     if oem.iter().any(|&c| c < 0x20 || c == b'?' || c == b'*') {
         return false;
@@ -1031,10 +1093,12 @@ fn made_short(key: &[u8]) -> bool {
 }
 
 /// A name (an entry's, or one of a link target) as file systems could take it: folded
-/// ([`fold::fold`]), and on Windows its short name where it may be one ([`short_key`]).
+/// ([`fold::fold`]), folded as Linux's hfsplus takes it ([`fold::fold_astral`]), and its short
+/// name where it may be one ([`short_key`]). Names alike by any of them are taken as one.
 #[derive(Clone)]
 struct Name {
     fold: String,
+    astral: String,
     short: Option<Vec<u8>>,
 }
 
@@ -1042,18 +1106,24 @@ impl Name {
     /// The name of `bytes` (decoded) on this system.
     fn of(bytes: &[u8]) -> Name {
         let os = os_name(bytes).0;
-        #[cfg(windows)]
-        let short = short_key(&os);
-        #[cfg(not(windows))]
-        let short = None;
-        Name { fold: fold::fold(&os), short }
+        Name { fold: fold::fold(&os), astral: fold::fold_astral(&os), short: short_key(&os) }
+    }
+
+    /// The keys of the name in [`ByName`].
+    /// The keys of the name in [`ByName`] (each kind of every name, as `x😀`'s `Astral` key is
+    /// `x????`'s).
+    fn keys(&self) -> impl Iterator<Item = Key> + '_ {
+        [Key::Fold(self.fold.clone()), Key::Astral(self.astral.clone())]
+            .into_iter()
+            .chain(self.short.clone().map(Key::Short))
     }
 }
 
-/// A key of [`ByName`]: a name folded, or a short name.
+/// A key of [`ByName`]: a name folded, folded as Linux's hfsplus takes it, or a short name.
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum Key {
     Fold(String),
+    Astral(String),
     Short(Vec<u8>),
 }
 
@@ -1063,10 +1133,9 @@ type ByName = HashMap<(Option<usize>, Key), Vec<usize>>;
 
 /// Adds entry `j` of `parent` and name `n` to `m`.
 fn by_name_add(m: &mut ByName, parent: Option<usize>, n: Name, j: usize) {
-    if let Some(s) = n.short {
-        m.entry((parent, Key::Short(s))).or_default().push(j);
+    for k in n.keys() {
+        m.entry((parent, k)).or_default().push(j);
     }
-    m.entry((parent, Key::Fold(n.fold))).or_default().push(j);
 }
 
 /// Why a link is not made ([`resolve_link`]).
@@ -1103,8 +1172,7 @@ fn resolve_link(t: &Tree, by_name: &ByName, i: usize, within: Option<&[Vec<u8>]>
         for n in path {
             let mut next: Vec<Option<usize>> = Vec::new();
             for &d in &at {
-                let keys = std::iter::once(Key::Fold(n.fold.clone())).chain(n.short.clone().map(Key::Short));
-                for j in keys.filter_map(|k| by_name.get(&(d, k))).flatten() {
+                for j in n.keys().filter_map(|k| by_name.get(&(d, k))).flatten() {
                     if !next.contains(&Some(*j)) {
                         next.push(Some(*j));
                     }
@@ -1141,8 +1209,9 @@ fn resolve_link(t: &Tree, by_name: &ByName, i: usize, within: Option<&[Vec<u8>]>
                 name => {
                     let os = os_name(name).0;
                     let n = Name::of(name);
-                    // (a short name Windows made, which could be any long name's of the directory)
-                    let made = cfg!(windows) && (name.contains(&b'~') || n.short.as_deref().is_some_and(made_short));
+                    // (a short name of FAT or NTFS made, which could be any long name's of the
+                    // directory)
+                    let made = n.short.as_deref().is_some_and(made_short) || cfg!(windows) && name.contains(&b'~');
                     at.push(n);
                     let there = find(&at);
                     let unsure = || Refused::Unsure(String::from_utf8_lossy(name).into_owned());
