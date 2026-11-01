@@ -8,7 +8,8 @@
 
 use std::borrow::Cow;
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
+use std::sync::{Condvar, Mutex};
 
 use aqr_7z::header::{self, File, Folder, Streams, Top};
 use aqr_bcj::bcj2;
@@ -17,6 +18,7 @@ use aqr_common::{crc32, pool};
 use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, WIN_ATTRS_ALLOWED, name_from};
 
 use crate::build::{self, Builder};
+use crate::codec::Raw;
 use crate::{Done, Sink, codec, sys};
 
 const S_IFMT: u32 = 0o170000;
@@ -71,6 +73,25 @@ pub struct Listing<'d> {
     empty: Vec<usize>,
     links: Vec<(usize, usize, usize)>,
     notes: Vec<String>,
+}
+
+/// A part of a folder's data, decoded apart from the others: a segment of an LZMA2 stream, an
+/// LZMA stream (as it goes, both), or the whole data of other coders (filters too) at once.
+enum Part<'d> {
+    Lzma2(&'d [u8]),
+    Lzma(&'d [u8], u8),
+    Whole,
+}
+
+/// What is given the data of each substream of a folder, as [`Listing::stream`] decodes it.
+type Each<'a> = dyn Fn(usize, &[u8]) -> Result<(), String> + Sync + 'a;
+
+/// The state of a folder decoded as it is written: the bytes of each part decoded so far, and
+/// why it stopped.
+struct Progress {
+    done: Vec<usize>,
+    failed: Option<Error>,
+    stop: bool,
 }
 
 /// The output of folder `f` of `s` (of archive `d`): its coders run from their packed streams.
@@ -309,6 +330,181 @@ impl<'d> Listing<'d> {
         Ok(out)
     }
 
+    /// The parts folder `f` decodes by, and the bytes of each.
+    fn parts(&self, f: usize) -> Result<Vec<(Part<'d>, usize)>, Error> {
+        let folder = &self.main.folders[f];
+        let size = folder.size().and_then(|n| usize::try_from(n).ok()).ok_or("a damaged folder")?;
+        if let Some(c) = folder.single() {
+            let r = &self.spans[self.packs[f].start];
+            let input = self.d.get(r.start as usize..r.end as usize).ok_or("cut short")?;
+            match &c.id[..] {
+                header::LZMA2 => {
+                    let (segs, _) = codec::lzma2_segments(input)?;
+                    return Ok(segs.into_iter().map(|(span, n)| (Part::Lzma2(&input[span]), n)).collect());
+                }
+                header::LZMA => {
+                    return Ok(vec![(Part::Lzma(input, *c.props.first().ok_or("a damaged folder")?), size)]);
+                }
+                _ => {}
+            }
+        }
+        Ok(vec![(Part::Whole, size)])
+    }
+
+    /// Decodes part `p` of folder `f`, `n` bytes, into `buf` (of room for `room`), telling `done`
+    /// the bytes written so far as it goes (false: stop, returning false).
+    ///
+    /// # Safety
+    /// `buf[..room]` is allocated and nobody else's while this runs, `room >= n`, and more by
+    /// [`codec::LZMA_ROOM`] for an LZMA stream.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn decode_part(
+        &self,
+        f: usize,
+        p: &Part,
+        buf: *mut u8,
+        n: usize,
+        room: usize,
+        threads: usize,
+        done: &mut dyn FnMut(usize) -> bool,
+    ) -> Result<bool, Error> {
+        // SAFETY: as the caller's
+        unsafe {
+            match *p {
+                Part::Lzma2(input) => Ok(codec::lzma2_segment(input, buf, n, done)?),
+                Part::Lzma(input, props) => Ok(codec::lzma_part(input, props, buf, n, room, done)?),
+                Part::Whole => {
+                    let data = folder_data(self.d, &self.main, &self.packs, &self.spans, f, threads)?;
+                    if data.len() != n {
+                        return Err("a coder's output not of its size".into());
+                    }
+                    std::ptr::copy_nonoverlapping(data.as_ptr(), buf, n);
+                    Ok(done(n))
+                }
+            }
+        }
+    }
+
+    /// Decodes folder `f` on up to `threads` threads, giving the data of each of its substreams
+    /// to `each` (with its index, on any thread) as soon as it is all decoded, and telling
+    /// `tick` the bytes given as it goes. The parts of the folder decode on threads of their
+    /// own, while what is decoded is given on the others.
+    fn stream(
+        &self,
+        f: usize,
+        threads: usize,
+        each: &Each,
+        tick: &dyn Fn(u64),
+    ) -> Result<(), Error> {
+        let parts = self.parts(f)?;
+        let size: usize = parts.iter().map(|p| p.1).sum();
+        if Some(size as u64) != self.main.folders[f].size() {
+            return Err("a coder's output not of its size".into());
+        }
+        let sizes = &self.main.subs[f];
+        if sizes.iter().sum::<u64>() != size as u64 {
+            return Err("a folder not of its files' sizes".into());
+        }
+        let ends: Vec<usize> = sizes
+            .iter()
+            .scan(0, |at, &n| {
+                *at += n as usize;
+                Some(*at)
+            })
+            .collect();
+        let starts: Vec<usize> = parts.iter().scan(0, |at, p| Some(std::mem::replace(at, *at + p.1))).collect();
+        let mut buf = codec::room(size + codec::LZMA_ROOM)?;
+        let room = buf.capacity();
+        let raw = Raw(buf.as_mut_ptr());
+        let progress = Mutex::new(Progress { done: vec![0; parts.len()], failed: None, stop: false });
+        let more = Condvar::new();
+        let next = AtomicUsize::new(0);
+        // (the parts taken in order by as many threads as decode them)
+        let work = || {
+            loop {
+                let r = next.fetch_add(1, Relaxed);
+                let Some((p, n)) = parts.get(r) else { return };
+                let mut done = |k| {
+                    let mut g = progress.lock().unwrap();
+                    g.done[r] = k;
+                    more.notify_all();
+                    !g.stop
+                };
+                // (the last part has the room past the data)
+                let space = if r + 1 == parts.len() { room - starts[r] } else { *n };
+                // SAFETY: the parts' places in `buf` are apart, within its room
+                match unsafe { self.decode_part(f, p, raw.at(starts[r]), *n, space, threads, &mut done) } {
+                    Ok(true) => {}
+                    Ok(false) => return,
+                    Err(e) => {
+                        let mut g = progress.lock().unwrap();
+                        g.failed.get_or_insert(e);
+                        g.stop = true;
+                        more.notify_all();
+                        return;
+                    }
+                }
+            }
+        };
+        // the bytes decoded from the start on
+        let reached = |done: &[usize]| {
+            let whole = done.iter().zip(&parts).take_while(|(d, p)| **d == p.1).count();
+            starts.get(whole).map_or(size, |s| s + done[whole])
+        };
+        let write = || -> Result<(), Error> {
+            let mut k = 0;
+            while k < ends.len() {
+                let front = {
+                    let mut g = progress.lock().unwrap();
+                    loop {
+                        if let Some(e) = g.failed.take() {
+                            return Err(e);
+                        }
+                        let front = reached(&g.done);
+                        if front >= ends[k] {
+                            break front;
+                        }
+                        g = more.wait(g).unwrap();
+                    }
+                };
+                let m = k + ends[k..].partition_point(|&e| e <= front);
+                let made = pool::par_map(m - k, threads, |i| {
+                    let j = k + i;
+                    let at = if j == 0 { 0 } else { ends[j - 1] };
+                    // SAFETY: decoded (told under the lock), and written no more
+                    each(j, unsafe { std::slice::from_raw_parts(raw.at(at), ends[j] - at) })
+                });
+                made.into_iter().collect::<Result<(), String>>()?;
+                tick((ends[m - 1] - if k == 0 { 0 } else { ends[k - 1] }) as u64);
+                k = m;
+            }
+            // SAFETY: all decoded
+            let all = unsafe { std::slice::from_raw_parts(raw.0, size) };
+            if self.main.folders[f].crc.is_some_and(|c| crc32::hash(all) != c) {
+                return Err("a folder's CRC mismatch".into());
+            }
+            Ok(())
+        };
+        let r = pool::scope(parts.len().min(threads.saturating_sub(1)), |sc| {
+            let w = sc.workers().min(parts.len());
+            if w == 0 {
+                work();
+                return write();
+            }
+            let handles: Vec<_> = (0..w).map(|_| sc.spawn(work)).collect();
+            let r = write();
+            if r.is_err() {
+                progress.lock().unwrap().stop = true;
+            }
+            for h in handles {
+                h.join().unwrap_or_else(|p| std::panic::resume_unwind(p));
+            }
+            r
+        });
+        drop(buf);
+        r
+    }
+
     pub fn unpack(&self, threads: usize, sink: &dyn Sink) -> Result<Done, String> {
         self.notes.iter().for_each(|n| sink.note(n));
         let mut skipped = self.notes.len();
@@ -351,20 +547,38 @@ impl<'d> Listing<'d> {
                 return Ok(());
             }
             sink.step(Step::Started(f));
-            let parts = match held[f].lock().unwrap().take() {
-                Some(p) => Ok(p),
-                None => self.decode(f, threads),
+            let tick = |k: u64| {
+                let k = done.fetch_add(k, Relaxed) + k;
+                let p = done_packed.load(Relaxed);
+                sink.step(Step::Reached(Reached { decompressed: (p, packed), evaluated: (k, total) }));
             };
-            let r = match parts {
+            let r = match held[f].lock().unwrap().take() {
                 // (the files of a folder written on as many threads as it takes)
-                Ok(parts) => {
+                Some(parts) => {
                     let parts: Vec<_> = parts.into_iter().map(|p| std::sync::Mutex::new(Some(p))).collect();
                     let r = pool::par_map(parts.len(), threads, |k| match u.files[k].0 {
                         Some(c) if self.b.live(c) => sink.content(c, parts[k].lock().unwrap().take().unwrap()),
                         _ => Ok(()),
                     });
-                    r.into_iter().collect()
+                    tick(self.main.folders[f].size().unwrap_or(0));
+                    r.into_iter().collect::<Result<(), String>>().map_err(Error::Bad)
                 }
+                None => {
+                    let first: usize = self.main.subs[..f].iter().map(Vec::len).sum();
+                    let each = |k: usize, d: &[u8]| {
+                        if self.main.sub_crcs.get(first + k).copied().flatten().is_some_and(|c| crc32::hash(d) != c) {
+                            return Err(format!("{}: CRC mismatch", u.files[k].1));
+                        }
+                        match u.files[k].0 {
+                            Some(c) if self.b.live(c) => sink.content(c, d.to_vec()),
+                            _ => Ok(()),
+                        }
+                    };
+                    self.stream(f, threads, &each, &tick)
+                }
+            };
+            let r = match r {
+                Ok(()) => Ok(()),
                 // (a folder of coders not known, or encrypted: its files left out)
                 Err(Error::Unknown(e)) => {
                     for (c, name) in &u.files {
@@ -373,6 +587,8 @@ impl<'d> Listing<'d> {
                             *notes.lock().unwrap() += 1;
                         }
                     }
+                    // (nothing given of it: told as done all the same)
+                    tick(self.main.folders[f].size().unwrap_or(0));
                     Ok(())
                 }
                 Err(Error::Bad(e)) => Err(format!("7z: {}: {e}", u.name)),
@@ -383,10 +599,8 @@ impl<'d> Listing<'d> {
             }
             let range = &self.packs[f];
             let p: u64 = self.spans[range.clone()].iter().map(|r| r.end - r.start).sum();
-            let p = done_packed.fetch_add(p, Relaxed) + p;
-            let n = self.main.folders[f].size().unwrap_or(0);
-            let n = done.fetch_add(n, Relaxed) + n;
-            sink.step(Step::Reached(Reached { decompressed: (p, packed), evaluated: (n, total) }));
+            done_packed.fetch_add(p, Relaxed);
+            tick(0);
             r
         });
         made.into_iter().collect::<Result<(), String>>()?;

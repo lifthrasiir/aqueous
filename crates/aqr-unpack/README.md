@@ -15,7 +15,7 @@ another entry at the top comes later). A directory of another name, even a like 
 | Names | Read | Decoded |
 |---|---|---|
 | `.zip` `.jar` `.apk` `.xpi` `.cbz` `.whl` | the central directory | stored, DEFLATE, bzip2, LZMA, Zstandard, xz; by entry |
-| `.7z` `.cb7` | the header (an encoded one decoded first) | folders of LZMA, LZMA2, DEFLATE, bzip2, stored, BCJ/ARM/…/Delta, BCJ2; by folder, an LZMA2 stream by its segments |
+| `.7z` `.cb7` | the header (an encoded one decoded first) | folders of LZMA, LZMA2, DEFLATE, bzip2, stored, BCJ/ARM/…/Delta, BCJ2; by folder, an LZMA2 stream by its segments, files written as their bytes are decoded |
 | `.tar`, `.tar.gz` `.tgz`, `.tar.bz2` `.tbz2`, `.tar.xz` `.txz`, `.tar.lzma`, `.tar.zst` | as it is decoded (v7, ustar, GNU, pax) | gzip (members), bzip2 (a wave of blocks at a time), xz (blocks, and an LZMA2 stream's segments), LZMA, Zstandard |
 | `.gz` `.bz2` `.xz` `.lzma` `.zst` | | a single file, written as it is decoded |
 
@@ -53,10 +53,10 @@ Measured 2026-11-01 on Windows 11 (16 threads, NVMe SSD), extracting a Python 3.
 | Archive | aqr | 7-Zip / bsdtar | `aqr -t` |
 |---|---|---|---|
 | ZIP, 92.4 MB | 0.85 s | 2.71 s | 0.11 s |
-| 7z, 40.1 MB (LZMA2) | 1.70 s | 2.30 s | 0.90 s |
+| 7z, 40.1 MB (LZMA2) | 1.05 s | 2.30 s | 0.49 s |
 | tar | 0.96 s | 1.58 s | 0.39 s |
 | tar.gz, 81.0 MB | 1.18 s | 1.91 s | 0.64 s |
-| tar.xz, 40.8 MB | 1.21 s | 2.44 s | |
+| tar.xz, 40.8 MB | 0.97 s | 2.44 s | 0.29 s |
 | tar.zst, 53.6 MB | 1.00 s | 1.47 s | |
 | tar.bz2, 54.0 MB | 2.71 s | 5.65 s | |
 
@@ -69,6 +69,7 @@ close), which hides the rest (aqr 4.1 s, 7-Zip 2.8 s on the ZIP archive then).
 - Formats of whose code there is more in the repository: ALZ, EGG, LHA, CAB, CHM, ISO, WIM.
 - RAR; PPMd (7z, ZIP); Deflate64; AES and ZipCrypto (no passwords asked for yet).
 - A 7z folder of LZMA (not LZMA2), a gzip member and a single-block xz decode on one thread;
-  a 7z folder is held whole until its files are written.
+  a 7z folder is held whole until all its files are written (a window of its dictionary's size
+  would do, as 7-Zip has it).
 - Names of ZIP and tar archives neither UTF-8 nor flagged, on macOS (raw bytes, which APFS does
   not take).

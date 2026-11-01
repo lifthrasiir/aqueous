@@ -229,10 +229,49 @@ pub fn lzma(input: &[u8], props: u8, size: Option<u64>, limit: usize) -> Result<
     Ok((out, c.pos))
 }
 
-/// Appends to `out` the data of the LZMA2 stream at the start of `input`, refusing more than
-/// `limit` bytes of it; returns the bytes of the stream.
-pub fn lzma2_into(input: &[u8], out: &mut Vec<u8>, limit: usize) -> Result<usize, String> {
-    lzma2_run(input, out, limit, true)
+/// Bytes of the data of an LZMA stream decoded at a time by [`lzma_part`].
+const LZMA_STEP: usize = 1 << 20;
+/// Room [`lzma_part`] wants past the data: for a match at the end, read for the end marker.
+pub const LZMA_ROOM: usize = 273 + 16;
+
+/// Decodes the LZMA stream at the start of `input` (properties `props`), `n` bytes of data,
+/// into `buf`, telling `done` the bytes written so far as it goes (false: stop, returning false).
+/// Returns whether it decoded it all.
+///
+/// # Safety
+/// `buf[..room]` is allocated and nobody else's while this runs, `room >= n + LZMA_ROOM`.
+pub unsafe fn lzma_part(
+    input: &[u8],
+    props: u8,
+    buf: *mut u8,
+    n: usize,
+    room: usize,
+    done: &mut dyn FnMut(usize) -> bool,
+) -> Result<bool, String> {
+    assert!(room >= n + LZMA_ROOM);
+    let corrupt = |_| "LZMA: damaged data".to_string();
+    let mut c = Rc::new(input).ok_or("LZMA: damaged data")?;
+    let mut m = Dec::new(lzma_props(props)?);
+    let mut pos = 0;
+    while pos < n {
+        let stop = (pos + LZMA_STEP).min(n);
+        // SAFETY: `buf[..pos]` written, `buf[..room]` ours
+        if unsafe { m.run(&mut c, buf, 0, &mut pos, stop, n, room) }.map_err(corrupt)? == Ended::Marker {
+            return Err("LZMA: cut short".into());
+        }
+        if pos < n && !done(pos) {
+            return Ok(false);
+        }
+    }
+    // (a stream of known size may still end with a marker)
+    // SAFETY: as above
+    if !c.finished() && unsafe { m.run(&mut c, buf, 0, &mut pos, n + 1, n + 273, room) } != Ok(Ended::Marker) {
+        return Err("LZMA: data after the end".into());
+    }
+    if c.overrun() > 0 {
+        return Err("LZMA: cut short".into());
+    }
+    Ok(done(n))
 }
 
 /// Segments of an LZMA2 stream: the span of each and the bytes of its data.
@@ -279,46 +318,59 @@ pub fn lzma2_par(input: &[u8], limit: usize, threads: usize) -> Result<(Vec<u8>,
     if total > limit {
         return Err("LZMA2: more data than can be held".into());
     }
-    if segs.len() <= 1 || threads <= 1 {
-        let mut out = room(total)?;
-        lzma2_into(input, &mut out, limit)?;
-        return Ok((out, used));
-    }
-    let parts = aqr_common::pool::par_map(segs.len(), threads, |k| {
-        let (span, n) = &segs[k];
-        let mut out = room(*n)?;
-        lzma2_run(&input[span.clone()], &mut out, *n, false)?;
-        Ok::<_, String>(out)
-    });
     let mut out = room(total)?;
-    for p in parts {
-        out.extend_from_slice(&p?);
-    }
+    let buf = Raw(out.as_mut_ptr());
+    let starts: Vec<usize> = segs.iter().scan(0, |at, s| Some(std::mem::replace(at, *at + s.1))).collect();
+    let made = aqr_common::pool::par_map(segs.len(), threads, |k| {
+        let (span, n) = &segs[k];
+        // SAFETY: the segments' places in `out` are apart, and within its room
+        unsafe { lzma2_segment(&input[span.clone()], buf.at(starts[k]), *n, &mut |_| true) }
+    });
+    made.into_iter().collect::<Result<Vec<_>, _>>()?;
+    // SAFETY: every segment written whole
+    unsafe { out.set_len(total) };
     Ok((out, used))
 }
 
-/// [`lzma2_into`], of a stream to its end byte where `whole`, else (a segment) to the end of
-/// `input`.
-fn lzma2_run(input: &[u8], out: &mut Vec<u8>, limit: usize, whole: bool) -> Result<usize, String> {
+/// A buffer written by several threads at once, each its own part.
+#[derive(Clone, Copy)]
+pub struct Raw(pub *mut u8);
+
+// SAFETY: its users keep to their parts
+unsafe impl Send for Raw {}
+unsafe impl Sync for Raw {}
+
+impl Raw {
+    /// # Safety
+    /// As [`pointer::add`].
+    pub unsafe fn at(self, i: usize) -> *mut u8 {
+        unsafe { self.0.add(i) }
+    }
+}
+
+/// Decodes the segment of an LZMA2 stream that is `input` ([`lzma2_segments`]: from a reset of
+/// the dictionary, no end byte) into `buf`, `n` bytes, telling `done` the bytes written so far
+/// after each chunk (false: stop, returning false). Returns whether it decoded it all.
+///
+/// # Safety
+/// `buf[..n]` is allocated and nobody else's while this runs.
+pub unsafe fn lzma2_segment(
+    input: &[u8],
+    buf: *mut u8,
+    n: usize,
+    done: &mut dyn FnMut(usize) -> bool,
+) -> Result<bool, String> {
     let corrupt = || "LZMA2: damaged data".to_string();
-    let (mut at, start) = (0, out.len());
-    // where the dictionary was last reset
-    let mut base = None;
+    let (mut at, mut pos) = (0, 0);
     let mut model: Option<Dec> = None;
-    // whether the model's state follows the last reset of the dictionary
+    // whether the model's state follows the reset of the dictionary
     let mut live = false;
     let mut props = None;
-    loop {
-        if !whole && at == input.len() {
-            return Ok(at);
-        }
-        let &first = input.get(at).ok_or_else(corrupt)?;
-        if first == 0 {
-            return Ok(at + 1);
-        }
+    while at < input.len() {
+        let first = input[at];
         let lzma = first >= 0x80;
         let control = if lzma { first & 0xe0 } else { first };
-        if !lzma && control > 2 {
+        if first == 0 || !lzma && control > 2 || (at == 0) != (control == 1 || control == 0xe0) {
             return Err(corrupt());
         }
         let head = if !lzma {
@@ -330,40 +382,47 @@ fn lzma2_run(input: &[u8], out: &mut Vec<u8>, limit: usize, whole: bool) -> Resu
         };
         let h = input.get(at..at + head).ok_or_else(corrupt)?;
         let len = (if lzma { (first as usize & 0x1f) << 16 } else { 0 } | (h[1] as usize) << 8 | h[2] as usize) + 1;
-        if control == 1 || control == 0xe0 {
-            base = Some(out.len());
-            (live, props) = (false, None);
-        }
-        let b = base.ok_or_else(corrupt)?;
-        if out.len() - start + len > limit {
+        if n - pos < len {
             return Err("LZMA2: more data than can be held".into());
         }
         if !lzma {
-            out.extend_from_slice(input.get(at + 3..at + 3 + len).ok_or_else(corrupt)?);
+            let d = input.get(at + 3..at + 3 + len).ok_or_else(corrupt)?;
+            // SAFETY: `pos + len <= n`
+            unsafe { std::ptr::copy_nonoverlapping(d.as_ptr(), buf.add(pos), len) };
+            pos += len;
             at += 3 + len;
-            continue;
-        }
-        let packed = ((h[3] as usize) << 8 | h[4] as usize) + 1;
-        if control >= 0xc0 {
-            props = Some(lzma_props(h[5]).ok().filter(|p| p.lc + p.lp <= 4).ok_or_else(corrupt)?);
-        }
-        if control >= 0xa0 {
-            let p = props.ok_or_else(corrupt)?;
-            match &mut model {
-                Some(m) => m.reset(p),
-                None => model = Some(Dec::new(p)),
+        } else {
+            let packed = ((h[3] as usize) << 8 | h[4] as usize) + 1;
+            if control >= 0xc0 {
+                props = Some(lzma_props(h[5]).ok().filter(|p| p.lc + p.lp <= 4).ok_or_else(corrupt)?);
             }
-            live = true;
+            if control >= 0xa0 {
+                let p = props.ok_or_else(corrupt)?;
+                match &mut model {
+                    Some(m) => m.reset(p),
+                    None => model = Some(Dec::new(p)),
+                }
+                live = true;
+            }
+            let m = model.as_mut().filter(|_| live).ok_or_else(corrupt)?;
+            let coded = input.get(at + head..at + head + packed).ok_or_else(corrupt)?;
+            let mut c = Rc::new(coded).ok_or_else(corrupt)?;
+            let end = pos + len;
+            // SAFETY: `buf[..pos]` written, `buf[..n]` ours
+            let r = unsafe { m.run(&mut c, buf, 0, &mut pos, end, end, n) };
+            if r != Ok(Ended::Stop) || !c.finished() || c.pos != packed {
+                return Err(corrupt());
+            }
+            at += head + packed;
         }
-        let m = model.as_mut().filter(|_| live).ok_or_else(corrupt)?;
-        let coded = input.get(at + head..at + head + packed).ok_or_else(corrupt)?;
-        let mut c = Rc::new(coded).ok_or_else(corrupt)?;
-        let end = out.len() + len;
-        if m.run_vec(&mut c, out, b, end, end) != Ok(Ended::Stop) || !c.finished() || c.pos != packed {
-            return Err(corrupt());
+        if !done(pos) {
+            return Ok(false);
         }
-        at += head + packed;
     }
+    if pos != n {
+        return Err(corrupt());
+    }
+    Ok(true)
 }
 
 /// The data of the bzip2 streams at the start of `d`, one after another, at most `limit` bytes.
