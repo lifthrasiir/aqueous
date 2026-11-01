@@ -7,6 +7,7 @@
 //! well-formed CBOR, taking what it knows and leaving the rest.
 
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::sync::Arc;
 
 use aqr_common::varint;
@@ -612,6 +613,73 @@ impl PartialEq for Cbor<'_> {
     }
 }
 
+impl Cbor<'_> {
+    /// An order of items, the same as `==` where equal: by kind, then by value (arrays, maps
+    /// and tags by their items, in turn).
+    fn order(&self, other: &Self) -> Ordering {
+        use Cbor::*;
+        let rank = |c: &Cbor| match c {
+            Int(_) => 0,
+            Bytes(_) => 1,
+            Text(_) => 2,
+            Array(_) => 3,
+            Map(_) => 4,
+            Tag(..) => 5,
+            Simple(_) => 6,
+            Float(_) => 7,
+        };
+        let items = |a: Items, b: Items| {
+            let (mut a, mut b) = (a.iter(), b.iter());
+            loop {
+                match (a.next(), b.next()) {
+                    (None, None) => return Ordering::Equal,
+                    (None, Some(_)) => return Ordering::Less,
+                    (Some(_), None) => return Ordering::Greater,
+                    (Some(x), Some(y)) => match x.order(&y) {
+                        Ordering::Equal => {}
+                        o => return o,
+                    },
+                }
+            }
+        };
+        match (self, other) {
+            (Int(a), Int(b)) => a.cmp(b),
+            (Bytes(a), Bytes(b)) | (Text(a), Text(b)) => a.cmp(b),
+            (Array(a), Array(b)) | (Map(a), Map(b)) => items(*a, *b),
+            (Tag(s, a), Tag(t, b)) => s.cmp(t).then_with(|| items(*a, *b)),
+            (Simple(a), Simple(b)) => a.cmp(b),
+            (Float(a), Float(b)) => a.cmp(b),
+            (a, b) => rank(a).cmp(&rank(b)),
+        }
+    }
+}
+
+/// Keys of a map compared with each before as they are added while there are no more than
+/// this, and all sorted once read where there are more.
+const FEW_KEYS: usize = 16;
+
+/// Adds key `k` to `keys`, the keys of a map read so far: a duplicate of one before is a
+/// failure, found here while [`FEW_KEYS`] at most, else by [`no_duplicates`] once all are added.
+fn add_key<'a>(keys: &mut Vec<Cbor<'a>>, k: Cbor<'a>) -> Decoded<()> {
+    if keys.len() < FEW_KEYS && keys.contains(&k) {
+        return invalid("duplicate keys in the optional metadata");
+    }
+    keys.push(k);
+    Ok(())
+}
+
+/// Whether `keys` (of a map, all of them, by [`add_key`]) are of no duplicates: sorted where
+/// there are many.
+fn no_duplicates(keys: &mut [Cbor]) -> Decoded<()> {
+    if keys.len() > FEW_KEYS {
+        keys.sort_unstable_by(|a, b| a.order(b));
+        if keys.windows(2).any(|w| w[0] == w[1]) {
+            return invalid("duplicate keys in the optional metadata");
+        }
+    }
+    Ok(())
+}
+
 /// Maps and arrays nested deeper than this are not read (a resource failure).
 const CBOR_DEPTH: usize = 64;
 
@@ -709,22 +777,26 @@ fn item<'a>(d: &'a [u8], at: &mut usize, depth: usize) -> Decoded<Cbor<'a>> {
                     k += 1;
                 }
             } else {
-                // where each key is, compared with each one after it as it is read again (maps
-                // are small: room for a few made at once)
-                let (mut few, mut more) = ([0usize; 16], Vec::new());
+                // where each of a few keys is, each compared with those before as they are read
+                // again (without room made for them); the keys of a map of more, all kept
+                let (mut few, mut many) = ([0usize; FEW_KEYS], Vec::new());
                 while !ended(d, at, n, k) {
                     let key_at = *at;
                     let (key, _) = pair(d, at, depth, n)?;
-                    let before = few[..k.min(few.len())].iter().chain(&more);
-                    if before.map(|&q| item(d, &mut { q }, depth + 1)).any(|q| q.is_ok_and(|q| q == key)) {
-                        return invalid("duplicate keys in the optional metadata");
-                    }
-                    match few.get_mut(k) {
-                        Some(q) => *q = key_at,
-                        None => more.push(key_at),
+                    if k < FEW_KEYS {
+                        if few[..k].iter().any(|&q| item(d, &mut { q }, depth + 1).is_ok_and(|q| q == key)) {
+                            return invalid("duplicate keys in the optional metadata");
+                        }
+                        few[k] = key_at;
+                    } else {
+                        if many.is_empty() {
+                            many.extend(few.iter().map(|&q| item(d, &mut { q }, depth + 1).expect("a key read")));
+                        }
+                        many.push(key);
                     }
                     k += 1;
                 }
+                no_duplicates(&mut many)?;
             }
             // (the items of a map: its keys and values)
             let n = n.map(|n| if major == 4 { n } else { 2 * n });
@@ -817,21 +889,17 @@ pub(crate) fn extras(d: &[u8], n: usize) -> Decoded<(Vec<Extra>, Vec<Vec<(Vec<u8
     // the keys of the map read (`keys`), and of an entry extra (`members`, made once)
     let (mut keys, mut members): (Vec<Cbor>, Vec<Cbor>) = (Vec::new(), Vec::new());
     let mut shared = Shared::new();
-    let dup = || invalid("duplicate keys in the optional metadata");
     while !ended(d, &mut at, top, keys.len()) {
         let k = item(d, &mut at, 1)?;
         if top.is_none() && d.get(at) == Some(&0xff) {
             return invalid("bad CBOR in the optional metadata");
         }
-        if keys.contains(&k) {
-            return dup();
-        }
-        if k != Cbor::Int(ENTRY_EXTRAS) {
+        let entry_extras = k == Cbor::Int(ENTRY_EXTRAS);
+        add_key(&mut keys, k)?;
+        if !entry_extras {
             item(d, &mut at, 1)?;
-            keys.push(k);
             continue;
         }
-        keys.push(k);
         let (major, _, arg) = head_of(d, &mut at)?;
         if major != 4 {
             return invalid("entry-extras not an array");
@@ -851,19 +919,18 @@ pub(crate) fn extras(d: &[u8], n: usize) -> Decoded<(Vec<Extra>, Vec<Vec<(Vec<u8
                     members.clear();
                     while !ended(d, &mut at, m, members.len()) {
                         let (k, v) = pair(d, &mut at, 2, m)?;
-                        if members.contains(&k) {
-                            return dup();
-                        }
                         if let Cbor::Int(k) = k {
                             member(x, f, &mut shared, k, v)?;
                         }
-                        members.push(k);
+                        add_key(&mut members, k)?;
                     }
+                    no_duplicates(&mut members)?;
                 }
                 _ => return invalid("an entry extra not a map"),
             }
         }
     }
+    no_duplicates(&mut keys)?;
     if at != d.len() {
         return invalid("bytes after the optional metadata");
     }
@@ -1210,6 +1277,35 @@ mod tests {
         assert!(extras(&many, 0).is_ok());
         *many.iter_mut().rev().nth(1).unwrap() = 0;
         assert!(extras(&many, 0).is_err());
+    }
+
+    #[test]
+    fn optional_metadata_big_maps() {
+        // maps of many keys (a map's value, the top map, an entry extra) read in time, their
+        // duplicates found
+        const N: u32 = 100_000;
+        let map = |n: u32, f: &dyn Fn(u32) -> u32| {
+            let mut m = vec![0xba];
+            m.extend(n.to_be_bytes());
+            (0..n).for_each(|k| {
+                m.push(0x3a);
+                m.extend((f(k) + 100).to_be_bytes());
+                m.push(0);
+            });
+            m
+        };
+        // (in a map's value, as the top map, as an entry extra)
+        let case = |c: usize, f: &dyn Fn(u32) -> u32| match c {
+            0 => [&[0xa1, 0x01][..], &map(N, f)].concat(),
+            1 => map(N, f),
+            _ => [&[0xa1, 0x21, 0x81][..], &map(N, f)].concat(),
+        };
+        for c in 0..3 {
+            let start = std::time::Instant::now();
+            assert!(extras(&case(c, &|k| k), 0).is_ok());
+            assert!(extras(&case(c, &|k| if k == N - 1 { 0 } else { k }), 0).is_err());
+            assert!(start.elapsed().as_secs_f64() < 2.0, "{:?}", start.elapsed());
+        }
     }
 
     #[test]
