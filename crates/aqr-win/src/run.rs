@@ -143,6 +143,10 @@ pub fn run(verb: Verb, mut paths: Vec<PathBuf>) -> ExitCode {
         Verb::Extract => "-d",
         Verb::Test => "-t",
     });
+    // (a single entry at the top beside the archive, else a directory of its name)
+    if matches!(verb, Verb::Extract) {
+        cmd.arg("--auto-dir");
+    }
     let count = match verb {
         Verb::Compress if paths.len() > 1 => {
             cmd.arg("-o").arg(archive_of(&paths));

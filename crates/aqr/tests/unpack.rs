@@ -1,6 +1,8 @@
 //! Archives of other formats extracted by `aqr -d` (and tested by `-t`), named by their
 //! formats: the files made with their metadata, what is left out told, and an error at the end
-//! for it (aqr-unpack's fixtures).
+//! for it (aqr-unpack's fixtures); extracted as they are into the current directory (or `-o`),
+//! and with `--auto-dir` a single entry at their top beside them, else a directory of their
+//! name.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -46,6 +48,11 @@ fn aqr(args: &[&std::ffi::OsStr]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_aqr")).args(args).output().unwrap()
 }
 
+/// `aqr` with `args`, run in directory `dir`.
+fn aqr_in(dir: &Path, args: &[&std::ffi::OsStr]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_aqr")).current_dir(dir).args(args).output().unwrap()
+}
+
 fn text() -> Vec<u8> {
     (0..1000).flat_map(|i| format!("line {i} of some text\n").into_bytes()).collect()
 }
@@ -54,12 +61,12 @@ fn text() -> Vec<u8> {
 fn tar_extracted() {
     let d = scratch("tar");
     let archive = fixture(&d, "tree.tar.gz", "tree.tar.gz");
-    let o = aqr(&["-d".as_ref(), archive.as_os_str()]);
+    let out = d.join("tree");
+    let o = aqr(&["-d".as_ref(), "-o".as_ref(), out.as_os_str(), archive.as_os_str()]);
     let err = String::from_utf8_lossy(&o.stderr);
     // `../evil.txt` left out and told, and the run failing for it, once all else is done
     assert!(!o.status.success(), "{err}");
     assert!(err.contains("../evil.txt: a path reaching out") && err.contains("1 entry not extracted"), "{err}");
-    let out = d.join("tree");
     assert!(!d.join("evil.txt").exists());
     assert_eq!(fs::read(out.join("dir/file.txt")).unwrap(), text());
     let m = fs::metadata(out.join("dir/file.txt")).unwrap();
@@ -87,7 +94,7 @@ fn tar_extracted() {
         assert_eq!(fs::read(out.join("12:30.txt")).unwrap(), b"colon");
     }
     // there already: not written over without -f
-    let o = aqr(&["-d".as_ref(), archive.as_os_str()]);
+    let o = aqr(&["-d".as_ref(), "-o".as_ref(), out.as_os_str(), archive.as_os_str()]);
     assert!(String::from_utf8_lossy(&o.stderr).contains("exists (-f to overwrite)"));
     unlock(&d);
     fs::remove_dir_all(&d).unwrap();
@@ -164,58 +171,114 @@ fn tar(members: &[(String, Option<&[u8]>)]) -> Vec<u8> {
 }
 
 #[test]
-fn single_directory_folded() {
-    let d = scratch("fold");
-    // of another name than the output's (even a like one): kept as it is
-    for name in ["wrapped.zip", "proj-1.2.zip"] {
+fn extracted_as_is() {
+    let d = scratch("as-is");
+    // into the current directory, a single directory at the top too (of the archive's name or
+    // not), beside what is there
+    fs::write(d.join("other.txt"), b"other").unwrap();
+    for name in ["wrapped.zip", "proj.zip"] {
         let archive = fixture(&d, "wrapped.zip", name);
-        let o = aqr(&["-d".as_ref(), archive.as_os_str()]);
+        let o = aqr_in(&d, &["-d".as_ref(), "-f".as_ref(), archive.as_os_str()]);
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-        let out = d.join(&name[..name.len() - 4]);
-        assert_eq!(fs::read(out.join("proj/a.txt")).unwrap(), b"a", "{name}");
-        // (`../x` from `proj/` is in the output)
-        assert_eq!(fs::read_link(out.join("proj/out")).unwrap(), Path::new("../x"), "{name}");
+        assert_eq!(fs::read(d.join("proj/a.txt")).unwrap(), b"a", "{name}");
+        assert_eq!(fs::read(d.join("proj/sub/b.txt")).unwrap(), b"b", "{name}");
+        assert!(!d.join("wrapped").exists() && !d.join("proj/proj").exists(), "{name}");
+        // (`../x` from `proj/` is in the directory extracted into)
+        assert_eq!(fs::read_link(d.join("proj/out")).unwrap(), Path::new("../x"), "{name}");
     }
-    // a ZIP archive of `proj/` alone, extracted into `proj` (or `PROJ` where case is aside): its
-    // files in the output, its time the output's
-    let name = if cfg!(any(windows, target_os = "macos")) { "PROJ.zip" } else { "proj.zip" };
-    fs::create_dir(d.join("in")).unwrap();
-    let archive = fixture(&d.join("in"), "wrapped.zip", name);
-    let o = aqr(&["-d".as_ref(), archive.as_os_str()]);
+    assert_eq!(fs::read(d.join("other.txt")).unwrap(), b"other");
+    // a file there already: not written over without -f
+    let o = aqr_in(&d, &["-d".as_ref(), d.join("proj.zip").as_os_str()]);
     let err = String::from_utf8_lossy(&o.stderr);
-    assert!(o.status.success(), "{err}");
-    let out = d.join("in").join(&name[..4]);
-    assert_eq!(fs::read(out.join("a.txt")).unwrap(), b"a");
-    assert_eq!(fs::read(out.join("sub/b.txt")).unwrap(), b"b");
-    assert!(!out.join("proj").exists());
-    assert_eq!(fs::read_link(out.join("link")).unwrap(), Path::new("a.txt"));
-    // (`../x` from `proj/` stays in the tree, but not in the directory folded)
-    assert!(err.contains("a link reaching out of") && fs::symlink_metadata(out.join("out")).is_err(), "{err}");
-    // (2019-05-06 07:08:10 local time: within 14 hours of it in UTC)
-    let t = fs::metadata(&out).unwrap().modified().unwrap().duration_since(UNIX_EPOCH).unwrap().as_secs();
-    assert!(t.abs_diff(1_557_126_490) <= 14 * 3600, "{t}");
+    assert!(!o.status.success() && err.contains("exists (-f to overwrite)"), "{err}");
+    // into -o, made where it is not
+    let o = aqr(&["-d".as_ref(), "-o".as_ref(), d.join("x/y").as_os_str(), d.join("proj.zip").as_os_str()]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(fs::read(d.join("x/y/proj/a.txt")).unwrap(), b"a");
+    unlock(&d);
+    fs::remove_dir_all(&d).unwrap();
+}
 
-    // a tar archive read as it is decoded, of more members than a batch: folded, then (another
-    // entry at the top after the first batch) what was extracted moved under `proj`
+#[test]
+fn auto_dir() {
+    let d = scratch("auto");
+    let auto = |args: &[&std::ffi::OsStr]| {
+        let o = aqr_in(&d, &[&["-d".as_ref(), "--auto-dir".as_ref()][..], args].concat());
+        (o.status.success(), String::from_utf8_lossy(&o.stderr).into_owned())
+    };
+    // a single directory at the top, of another name: beside the archive as it is (run
+    // elsewhere), its time kept
+    fs::create_dir(d.join("in")).unwrap();
+    let archive = fixture(&d.join("in"), "wrapped.zip", "wrapped.zip");
+    let (ok, err) = auto(&[archive.as_os_str()]);
+    assert!(ok, "{err}");
+    let proj = d.join("in/proj");
+    assert_eq!(fs::read(proj.join("a.txt")).unwrap(), b"a");
+    assert_eq!(fs::read(proj.join("sub/b.txt")).unwrap(), b"b");
+    assert_eq!(fs::read_link(proj.join("link")).unwrap(), Path::new("a.txt"));
+    // (`../x` from `proj/` reaches out of what is extracted)
+    assert!(err.contains("a link reaching out of") && fs::symlink_metadata(proj.join("out")).is_err(), "{err}");
+    assert!(!d.join("in/wrapped").exists() && !d.join("proj").exists());
+    // (2019-05-06 07:08:10 local time: within 14 hours of it in UTC)
+    let t = fs::metadata(&proj).unwrap().modified().unwrap().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    assert!(t.abs_diff(1_557_126_490) <= 14 * 3600, "{t}");
+    // `proj` there already: into a directory of the archive's name; that there too, an error
+    let (ok, err) = auto(&[archive.as_os_str()]);
+    assert!(ok, "{err}");
+    assert_eq!(fs::read(d.join("in/wrapped/proj/a.txt")).unwrap(), b"a");
+    let (ok, err) = auto(&[archive.as_os_str()]);
+    assert!(!ok && err.contains("exists (-f to overwrite)"), "{err}");
+    // of the archive's name (case aside where the system takes it so), there already: written
+    // over with -f, not into `proj/proj`
+    let name = if cfg!(any(windows, target_os = "macos")) { "PROJ.zip" } else { "proj.zip" };
+    let archive = fixture(&d.join("in"), "wrapped.zip", name);
+    let (ok, err) = auto(&[archive.as_os_str()]);
+    assert!(!ok && err.contains("exists (-f to overwrite)"), "{err}");
+    let (ok, err) = auto(&["-f".as_ref(), archive.as_os_str()]);
+    assert!(ok, "{err}");
+    assert!(!proj.join("proj").exists() && !d.join("in/PROJ/proj").exists());
+    // several entries at the top: into a directory of the archive's name, in -o
+    let archive = fixture(&d, "tree.zip", "tree.zip");
+    let (ok, err) = auto(&["-o".as_ref(), "out".as_ref(), archive.as_os_str()]);
+    assert!(!ok && err.contains("1 entry not extracted"), "{err}");
+    assert_eq!(fs::read(d.join("out/tree/stored.txt")).unwrap(), text());
+    assert_eq!(fs::read(d.join("out/tree/dir/in.txt")).unwrap(), b"in dir");
+    // a single file at the top: beside the archive
+    fs::write(d.join("one.tar"), tar(&[("one.txt".into(), Some(b"one"))])).unwrap();
+    let (ok, err) = auto(&["one.tar".as_ref()]);
+    assert!(ok, "{err}");
+    assert_eq!(fs::read(d.join("one.txt")).unwrap(), b"one");
+    assert!(!d.join("one").exists());
+    // a tar archive read as it is decoded, of more members than a batch: `proj/` beside it,
+    // then (another entry at the top after the first batch) moved into a directory of its name
     let files: Vec<(String, Option<&[u8]>)> = std::iter::once(("proj/".to_string(), None))
         .chain((0..4200).map(|i| (format!("proj/f{i}"), Some(&b"x"[..]))))
         .collect();
     let late: Vec<_> = files.iter().cloned().chain([("late.txt".to_string(), Some(&b"late"[..]))]).collect();
-    for (dir, members) in [("folded", &files), ("unfolded", &late)] {
+    for (dir, members) in [("single", &files), ("late", &late)] {
         fs::create_dir(d.join(dir)).unwrap();
-        fs::write(d.join(dir).join("proj.tar"), tar(members)).unwrap();
-        let o = aqr(&["-d".as_ref(), d.join(dir).join("proj.tar").as_os_str()]);
-        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        fs::write(d.join(dir).join("stuff.tar"), tar(members)).unwrap();
+        let (ok, err) = auto(&[d.join(dir).join("stuff.tar").as_os_str()]);
+        assert!(ok, "{err}");
     }
-    assert_eq!(fs::read(d.join("folded/proj/f0")).unwrap(), b"x");
-    assert_eq!(fs::read(d.join("folded/proj/f4199")).unwrap(), b"x");
-    assert!(!d.join("folded/proj/proj").exists());
-    assert_eq!(fs::read(d.join("unfolded/proj/proj/f0")).unwrap(), b"x");
-    assert_eq!(fs::read(d.join("unfolded/proj/proj/f4199")).unwrap(), b"x");
-    assert_eq!(fs::read(d.join("unfolded/proj/late.txt")).unwrap(), b"late");
-    assert_eq!(fs::read_dir(d.join("unfolded/proj")).unwrap().count(), 2);
-    let t = fs::metadata(d.join("unfolded/proj/proj")).unwrap().modified().unwrap();
+    assert_eq!(fs::read(d.join("single/proj/f0")).unwrap(), b"x");
+    assert_eq!(fs::read(d.join("single/proj/f4199")).unwrap(), b"x");
+    assert!(!d.join("single/stuff").exists());
+    assert_eq!(fs::read(d.join("late/stuff/proj/f0")).unwrap(), b"x");
+    assert_eq!(fs::read(d.join("late/stuff/proj/f4199")).unwrap(), b"x");
+    assert_eq!(fs::read(d.join("late/stuff/late.txt")).unwrap(), b"late");
+    assert!(!d.join("late/proj").exists());
+    let t = fs::metadata(d.join("late/stuff/proj")).unwrap().modified().unwrap();
     assert_eq!(t, UNIX_EPOCH + Duration::from_secs(1_600_000_000));
+    // an Aqueous archive of a directory holding a single one: that beside it
+    fs::create_dir_all(d.join("src/inner")).unwrap();
+    fs::write(d.join("src/inner/f"), b"f").unwrap();
+    assert!(aqr(&["-q".as_ref(), d.join("src").as_os_str()]).status.success());
+    fs::rename(d.join("src.aqr"), d.join("in/src.aqr")).unwrap();
+    let (ok, err) = auto(&[d.join("in/src.aqr").as_os_str()]);
+    assert!(ok, "{err}");
+    assert_eq!(fs::read(d.join("in/inner/f")).unwrap(), b"f");
+    assert!(!d.join("in/src").exists());
     unlock(&d);
     fs::remove_dir_all(&d).unwrap();
 }

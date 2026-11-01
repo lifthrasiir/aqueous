@@ -116,6 +116,37 @@ fn overwrite() {
     fs::remove_dir_all(&d).unwrap();
 }
 
+/// `--auto-dir` (as the frontends extract): the output not told as it begins but once it is
+/// decided (the single entry at the top, or the archive's directory), and asked of then.
+#[test]
+fn auto_dir() {
+    let d = scratch("auto-dir");
+    fs::create_dir_all(d.join("src/inner")).unwrap();
+    fs::write(d.join("src/inner/f"), b"f").unwrap();
+    let made = Command::new(env!("CARGO_BIN_EXE_aqr")).arg("-q").arg(d.join("src")).status().unwrap();
+    assert!(made.success());
+    fs::remove_dir_all(d.join("src")).unwrap();
+    let archive = d.join("src.aqr");
+    let args = ["-d".as_ref(), "--auto-dir".as_ref(), archive.as_os_str()];
+    for out in ["inner", "src"] {
+        let (mut c, lines) = start(&args, &["overwrite"]);
+        let seen = run(&mut c, lines, false);
+        assert!(c.wait().unwrap().success());
+        assert_eq!(events(&seen), ["begin", "output", "end"], "{out}");
+        assert_eq!(seen[0]["output"], Value::Null);
+        assert_eq!(seen[1]["output"], d.join(out).display().to_string());
+        assert_eq!(seen[2]["output"], d.join(out).display().to_string());
+    }
+    // both there: asked of the archive's directory, and skipped as answered
+    let (mut c, lines) = start(&args, &["overwrite"]);
+    let seen = run(&mut c, lines, false);
+    assert!(c.wait().unwrap().success());
+    assert_eq!(events(&seen), ["begin", "overwrite", "skipped"]);
+    assert_eq!(seen[1]["path"], d.join("src").display().to_string());
+    assert_eq!(fs::read(d.join("src/inner/f")).unwrap(), b"f");
+    fs::remove_dir_all(&d).unwrap();
+}
+
 /// Cancelled once begun, by a message (`by_message`) or by standard input closed: stopped,
 /// nothing left of the archive.
 fn cancel(by_message: bool) {

@@ -98,6 +98,10 @@ impl Job {
             Verb::Extract => "-d",
             Verb::Test => "-t",
         });
+        // (a single entry at the top beside the archive, else a directory of its name)
+        if matches!(verb, Verb::Extract) {
+            cmd.arg("--auto-dir");
+        }
         let count = match verb {
             Verb::Compress if paths.len() > 1 => {
                 cmd.arg("-o").arg(archive_of(&paths));
@@ -195,6 +199,8 @@ impl Job {
                 s.since = Some(Instant::now());
                 s.progress = None;
             }
+            // (with --auto-dir, what is extracted once decided)
+            Some("output") => s.output = v["output"].as_str().map(PathBuf::from),
             Some("progress") => s.progress = Some(v),
             Some("end") => {
                 let input = s.input.clone();
@@ -225,8 +231,8 @@ impl Job {
     }
 
     /// The file that Finder shows the archive at work on: the archive being written (under the
-    /// name `aqr` writes it, `NAME.PID.part`, renamed once it is written), the folder being
-    /// extracted into, or the archive being tested.
+    /// name `aqr` writes it, `NAME.PID.part`, renamed once it is written), what is extracted
+    /// (the archive until `aqr` has decided that), or the archive being tested.
     pub fn shown(&self) -> Option<PathBuf> {
         let s = self.state.lock().unwrap();
         if s.begun == 0 {

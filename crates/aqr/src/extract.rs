@@ -8,13 +8,13 @@
 //! the links (but those reaching out of the directory), the metadata of all but the
 //! directories, and that of the directories, the deepest first (spec, "Extraction").
 //!
-//! Where asked ([`Extractor::new`]'s `fold`, for archives of other formats), a tree of a single
-//! directory at its top, of the name of the directory extracted into (case aside on Windows and
-//! macOS), is extracted into that directory, not into a directory of the same name in it: what
-//! is in it at the top, and its metadata the directory's (as 7-Zip's `-spe` eliminates the
-//! duplication of the root folder). As a tree read as it is decoded is not known whole, that is
-//! decided by the entries first told; where another entry at the top comes later, what was made
-//! is moved into a directory of the first one's name.
+//! The entries at the top of the tree go where [`Place`] tells: into a directory of the
+//! archive's own, into a directory as it is (the current one: as `tar`, `unzip` and 7-Zip
+//! extract), or, with `--auto-dir` ([`Place::Auto`]), a single entry at the top as it is beside
+//! the archive where nothing is there of its name, else into a directory of the archive's own.
+//! As a tree read as it is decoded is not known whole, that is decided by the entries first
+//! told; where another entry at the top comes later, what was made of the first one is moved
+//! into the archive's directory.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -29,10 +29,32 @@ use aqr_formula::aqr::{EntryNode, Extra, Tree, name_bytes, name_from};
 use crate::meta::{self, Kind, os_from};
 use crate::{create, stats};
 
+/// Whether output `path` is to be written over where it is there: `None` not, the output
+/// skipped (the frontend answering so; [`crate::output`]).
+pub type Ask<'a> = dyn Fn(&Path) -> Result<Option<bool>, String> + Sync + 'a;
+
+/// Where the entries at the top of a tree are extracted ([module](self)).
+#[derive(Clone, Copy)]
+pub enum Place<'a> {
+    /// Into a directory of the archive's own: made, or there already where forced (asked
+    /// before); the root's metadata its.
+    Own(&'a Path),
+    /// Into a directory as it is, beside what is there: made where it is not (the root's
+    /// metadata its then). The current one where empty.
+    Into(&'a Path),
+    /// A single entry at the top into `base` as it is, where nothing is there of its name or that
+    /// is `own`'s; else into `own`, a directory of the archive's own. `ask` is asked of what is
+    /// there.
+    Auto { base: &'a Path, own: &'a Path, ask: &'a Ask<'a> },
+}
+
 /// Extracts the entries told into a directory ([module](self)).
 pub struct Extractor<'a> {
-    out: &'a Path,
-    force: bool,
+    place: Place<'a>,
+    /// Whether what is there is written over (decided as the output is, with [`Place::Auto`]).
+    force: AtomicBool,
+    /// Whether the output was skipped as asked ([`Place::Auto`]): the error then not one.
+    skipped: AtomicBool,
     ap: &'a meta::Applier,
     seen: &'a stats::Seen,
     s: RwLock<State>,
@@ -69,9 +91,12 @@ struct State {
     groups: HashMap<i128, Vec<usize>>,
     /// Whether the root's forks are known.
     root: bool,
-    /// Of an extractor folding: not decided yet (`None`), the directory extracted as the root
-    /// (`Some(Some(i))`), or none (`Some(None)`).
-    fold: Option<Option<usize>>,
+    /// The directory that the entries at the top go into (`None`: not decided yet), and whether
+    /// it is the archive's own (made by it, given its metadata and forks).
+    top: Option<PathBuf>,
+    ours: bool,
+    /// Of [`Place::Auto`], the single entry at the top extracted as it is beside the archive.
+    single: Option<usize>,
 }
 
 /// A fork of a content: the entry (`None`: the root), the fork's index and name, and the kind
@@ -93,27 +118,32 @@ fn err(p: &Path, e: std::io::Error) -> String {
 }
 
 impl<'a> Extractor<'a> {
-    /// An extractor into `out`, made here (or there already, where `force`); folding a tree of a
-    /// single directory at its top where `fold` ([module](self)).
-    pub fn new(
-        out: &'a Path,
-        force: bool,
-        fold: bool,
-        ap: &'a meta::Applier,
-        seen: &'a stats::Seen,
-    ) -> Result<Self, String> {
-        match fs::create_dir(out) {
-            Err(e) if !(force && e.kind() == std::io::ErrorKind::AlreadyExists && out.is_dir()) => {
-                return Err(err(out, e));
+    /// An extractor to `place`, what is there written over where `force`.
+    pub fn new(place: Place<'a>, force: bool, ap: &'a meta::Applier, seen: &'a stats::Seen) -> Result<Self, String> {
+        let (top, ours) = match place {
+            Place::Own(out) => {
+                match fs::create_dir(out) {
+                    Err(e) if !(force && e.kind() == std::io::ErrorKind::AlreadyExists && out.is_dir()) => {
+                        return Err(err(out, e));
+                    }
+                    _ => {}
+                }
+                (Some(out.to_owned()), true)
             }
-            _ => {}
-        }
+            Place::Into(dir) if dir.as_os_str().is_empty() || dir.is_dir() => (Some(dir.to_owned()), false),
+            Place::Into(dir) => {
+                fs::create_dir_all(dir).map_err(|e| err(dir, e))?;
+                (Some(dir.to_owned()), true)
+            }
+            Place::Auto { .. } => (None, false),
+        };
         Ok(Extractor {
-            out,
-            force,
+            place,
+            force: AtomicBool::new(force),
+            skipped: AtomicBool::new(false),
             ap,
             seen,
-            s: RwLock::new(State { fold: (!fold).then_some(None), ..State::default() }),
+            s: RwLock::new(State { top, ours, ..State::default() }),
             later: Mutex::default(),
             written: Mutex::default(),
             files: AtomicUsize::new(0),
@@ -133,13 +163,18 @@ impl<'a> Extractor<'a> {
         s.content.resize(n, None);
         s.soon.resize(n, None);
         s.applied.resize_with(n, AtomicBool::default);
-        if !s.root {
+        self.place(s, t, new)?;
+        if s.top.is_none() {
+            return Ok(());
+        }
+        if !s.root && s.ours {
             s.root = true;
             for (k, f) in t.root.forks.iter().enumerate() {
                 grow(&mut s.forks, f.1).push((None, k, f.0.clone(), Kind::Dir));
             }
         }
-        self.fold(s, t, new)?;
+        let top = s.top.clone().unwrap();
+        let force = self.force.load(Relaxed);
         // the link groups of the files told, consistent where all their files are of a content
         let mut touched = Vec::new();
         for &i in new {
@@ -163,15 +198,10 @@ impl<'a> Extractor<'a> {
             let e = &t.entries[i];
             let kind = kind_of(&e.node);
             if s.paths[i].as_os_str().is_empty() {
-                let parent = e.parent.map_or(self.out, |p| &s.paths[p]);
+                let parent = e.parent.map_or(&top, |p| &s.paths[p]);
                 s.paths[i] = parent.join(self.fs_name(parent, &e.name));
             }
             let path = s.paths[i].clone();
-            // (the directory folded: the root, made already)
-            if s.fold == Some(Some(i)) {
-                s.made[i] = Some(Kind::Dir);
-                continue;
-            }
             // told again: a file of the content it had kept as it is (now in a link group)
             if let (Some(Kind::File), EntryNode::File(c)) = (s.made[i], &e.node)
                 && s.content[i] == Some(*c)
@@ -206,8 +236,9 @@ impl<'a> Extractor<'a> {
                 *s.applied[i].get_mut() = false;
             }
             match &e.node {
+                // (into a directory there already, as it is)
                 EntryNode::Dir => match fs::create_dir(&path) {
-                    Err(x) if !(self.force && path.is_dir() && !path.is_symlink()) => return Err(err(&path, x)),
+                    Err(x) if !(path.is_dir() && !path.is_symlink()) => return Err(err(&path, x)),
                     _ => {}
                 },
                 EntryNode::File(c) => {
@@ -215,7 +246,7 @@ impl<'a> Extractor<'a> {
                     s.content[i] = Some(*c);
                     match s.linked[i] {
                         Some(j) => {
-                            if self.force && fs::symlink_metadata(&path).is_ok_and(|m| !m.is_dir()) {
+                            if force && fs::symlink_metadata(&path).is_ok_and(|m| !m.is_dir()) {
                                 fs::remove_file(&path).map_err(|x| err(&path, x))?;
                             }
                             fs::hard_link(&s.paths[j], &path).map_err(|x| err(&path, x))?;
@@ -229,7 +260,7 @@ impl<'a> Extractor<'a> {
                             if e.extra.link_group.is_none() && e.extra.forks.is_empty() {
                                 s.soon[i] = Some(e.extra.clone());
                             } else {
-                                create(&path, self.force)?;
+                                create(&path, force)?;
                             }
                             s.files[*c].0.push(i);
                         }
@@ -238,7 +269,7 @@ impl<'a> Extractor<'a> {
                 // (made once all else is)
                 EntryNode::Link(_) => {}
                 EntryNode::Fifo | EntryNode::Device { .. } => {
-                    if self.force && fs::symlink_metadata(&path).is_ok_and(|m| !m.is_dir()) {
+                    if force && fs::symlink_metadata(&path).is_ok_and(|m| !m.is_dir()) {
                         fs::remove_file(&path).map_err(|x| err(&path, x))?;
                     }
                     if !self.ap.special(&path, &e.node)? {
@@ -261,56 +292,97 @@ impl<'a> Extractor<'a> {
         Ok(())
     }
 
-    /// Decides whether to fold ([module](self)) as entries are first told, and undoes it where
-    /// an entry of `new` is at the top beside the directory folded: the directory made, what is in
-    /// it moved there.
-    fn fold(&self, s: &mut State, t: &Tree, new: &[usize]) -> Result<(), String> {
+    /// Of [`Place::Auto`], decides where the entries at the top go as entries are first told
+    /// ([module](self)), and where an entry of `new` is at the top beside the single one
+    /// extracted as it is, moves that into the archive's directory.
+    fn place(&self, s: &mut State, t: &Tree, new: &[usize]) -> Result<(), String> {
+        let Place::Auto { base, own, ask } = self.place else { return Ok(()) };
         let top = |i: &&usize| t.entries[**i].parent.is_none();
-        match s.fold {
-            None if !new.is_empty() => {
+        match s.single {
+            None if s.top.is_none() && !new.is_empty() => {
+                // (-o, made where it is not)
+                if !base.as_os_str().is_empty() {
+                    fs::create_dir_all(base).map_err(|e| err(base, e))?;
+                }
                 let mut tops = new.iter().filter(top);
-                let first = tops.next().copied();
-                s.fold = Some(match (first, tops.next()) {
-                    (Some(i), None) if t.entries[i].node == EntryNode::Dir && self.out_named(&t.entries[i].name) => {
-                        s.paths[i] = self.out.to_path_buf();
-                        Some(i)
+                if let (Some(&i), None) = (tops.next(), tops.next()) {
+                    let name = &t.entries[i].name;
+                    let at = base.join(self.fs_name(base, name));
+                    // (of the archive's name: the archive's directory, asked of as it is)
+                    let mine = own.file_name().is_some_and(|o| alike(&os_from(name_bytes(name).0), o));
+                    let there = fs::symlink_metadata(&at).is_ok();
+                    if !there || mine {
+                        if there {
+                            match ask(own)? {
+                                Some(f) => self.force.store(f, Relaxed),
+                                None => return Err(self.skip()),
+                            }
+                        }
+                        tell_output(&at);
+                        s.paths[i] = at;
+                        s.single = Some(i);
+                        s.top = Some(base.to_owned());
+                        return Ok(());
                     }
-                    _ => None,
-                });
-                Ok(())
+                }
+                match self.own(s, own, ask)? {
+                    true => Ok(()),
+                    false => Err(self.skip()),
+                }
             }
-            Some(Some(i)) if new.iter().filter(top).any(|&j| j != i) => {
-                let dir = self.out.join(self.fs_name(self.out, &t.entries[i].name));
-                fs::create_dir(&dir).map_err(|x| err(&dir, x))?;
-                let moved: Vec<usize> =
-                    (0..t.entries.len()).filter(|&k| t.entries[k].parent == Some(i) && s.made[k].is_some()).collect();
-                for k in moved {
-                    let to = dir.join(s.paths[k].file_name().unwrap());
-                    fs::rename(&s.paths[k], &to).map_err(|x| err(&to, x))?;
+            Some(i) if new.iter().filter(top).any(|&j| j != i) => {
+                let at = s.paths[i].clone();
+                if !self.own(s, own, ask)? {
+                    return Err(format!("{} exists, and {} was extracted already", own.display(), at.display()));
                 }
-                // (every path so far is of the directory folded: under the root)
+                let to = own.join(at.file_name().unwrap());
+                if s.made[i].is_some() {
+                    fs::rename(&at, &to).map_err(|x| err(&to, x))?;
+                }
+                // (every path so far is of the single entry: in `base`)
                 for p in s.paths.iter_mut().filter(|p| !p.as_os_str().is_empty()) {
-                    *p = dir.join(p.strip_prefix(self.out).unwrap());
+                    *p = own.join(p.strip_prefix(base).unwrap());
                 }
-                s.paths[i] = dir;
-                s.fold = Some(None);
+                s.single = None;
                 Ok(())
             }
             _ => Ok(()),
         }
     }
 
-    /// Whether entry name `name` is the name of the directory extracted into, as this system
-    /// takes names (on Windows and macOS, case aside).
-    fn out_named(&self, name: &[u8]) -> bool {
-        let Some(out) = self.out.file_name() else { return false };
-        let name = os_from(name_bytes(name).0);
-        if cfg!(any(windows, target_os = "macos")) {
-            let fold = |s: &std::ffi::OsStr| s.to_string_lossy().to_lowercase();
-            fold(&name) == fold(out)
-        } else {
-            name == out
+    /// Of [`Place::Auto`], has the entries at the top go into the archive's directory `own`:
+    /// made, or there already as `ask` answers (false: not to be written over).
+    fn own(&self, s: &mut State, own: &Path, ask: &Ask<'_>) -> Result<bool, String> {
+        let force = match ask(own)? {
+            Some(f) => f,
+            None => return Ok(false),
+        };
+        if let Some(p) = own.parent().filter(|p| !p.as_os_str().is_empty()) {
+            fs::create_dir_all(p).map_err(|e| err(p, e))?;
         }
+        match fs::create_dir(own) {
+            Err(e) if !(force && e.kind() == std::io::ErrorKind::AlreadyExists && own.is_dir()) => {
+                return Err(err(own, e));
+            }
+            _ => {}
+        }
+        self.force.store(force, Relaxed);
+        tell_output(own);
+        s.top = Some(own.to_owned());
+        s.ours = true;
+        Ok(true)
+    }
+
+    /// The output skipped as asked: the error that ends the extraction ([`Extractor::skipped`]).
+    fn skip(&self) -> String {
+        self.skipped.store(true, Relaxed);
+        "skipped".into()
+    }
+
+    /// Whether the output was skipped as the frontend answered ([`Place::Auto`]): an error of
+    /// the extraction then not one, nothing extracted.
+    pub fn skipped(&self) -> bool {
+        self.skipped.load(Relaxed)
     }
 
     /// The name of `name` (an entry's) on this system, in directory `dir`. On Windows, the
@@ -341,7 +413,7 @@ impl<'a> Extractor<'a> {
             let p = &s.paths[i];
             match &s.soon[i] {
                 Some(x) => {
-                    let mut f = create(p, self.force)?;
+                    let mut f = create(p, self.force.load(Relaxed))?;
                     f.write_all(&d).map_err(|e| err(p, e))?;
                     self.ap.apply_file(&f, p, x)?;
                     drop(f);
@@ -357,7 +429,7 @@ impl<'a> Extractor<'a> {
         for (i, k, name, kind) in s.forks.get(c).map_or(&[][..], |f| f) {
             match (kind, *i) {
                 (Kind::Link, Some(i)) => self.later.lock().unwrap().push((i, *k, d.clone())),
-                (_, None) => self.ap.fork(self.out, *kind, name, &d),
+                (_, None) => self.ap.fork(s.top.as_deref().unwrap(), *kind, name, &d),
                 (_, Some(i)) if s.made[i].is_some() => self.ap.fork(&s.paths[i], *kind, name, &d),
                 _ => {}
             }
@@ -369,9 +441,24 @@ impl<'a> Extractor<'a> {
     }
 
     /// Makes the links of `t` (the whole tree, all of it told) and applies the metadata of what
-    /// was made. Returns the number of files written and their bytes.
-    pub fn finish(self, t: &Tree) -> Result<(usize, u64), String> {
+    /// was made. Returns the number of files written and their bytes, and what was extracted:
+    /// the directory, or the single entry extracted as it is ([`Place::Auto`]); `None` where the
+    /// output was skipped as asked.
+    pub fn finish(self, t: &Tree) -> Result<Option<(usize, u64, PathBuf)>, String> {
+        // (nothing told: the archive's directory, empty)
+        if let Place::Auto { own, ask, .. } = self.place {
+            let mut s = self.s.write().unwrap();
+            if s.top.is_none() && !self.own(&mut s, own, ask)? {
+                return Ok(None);
+            }
+        }
         let mut s = self.s.into_inner().unwrap();
+        let top = s.top.clone().unwrap();
+        let force = self.force.load(Relaxed);
+        let out = match s.single {
+            Some(i) => s.paths[i].clone(),
+            None => top.clone(),
+        };
         let by_name: HashMap<(Option<usize>, &[u8]), usize> =
             t.entries.iter().enumerate().map(|(i, e)| ((e.parent, &e.name[..]), i)).collect();
         for (i, e) in t.entries.iter().enumerate() {
@@ -380,13 +467,14 @@ impl<'a> Extractor<'a> {
                 continue;
             }
             let path = &s.paths[i];
-            // (folded: reaching out of the directory folded is reaching out)
-            let within = s.fold.flatten().map(|f| &t.entries[f].name[..]);
+            // (of a single entry extracted as it is: reaching out of it is reaching out)
+            let within = s.single.map(|f| &t.entries[f].name[..]);
             let Some(to) = resolve_link(t, &by_name, i, within) else {
-                self.ap.tell(path, &format!("a link reaching out of {}, not created", self.out.display()));
+                let of = if out.as_os_str().is_empty() { Path::new(".") } else { &out };
+                self.ap.tell(path, &format!("a link reaching out of {}, not created", of.display()));
                 continue;
             };
-            if self.force && fs::symlink_metadata(path).is_ok_and(|m| !m.is_dir()) {
+            if force && fs::symlink_metadata(path).is_ok_and(|m| !m.is_dir()) {
                 fs::remove_file(path).map_err(|x| err(path, x))?;
             }
             // (on Windows, of the kind recorded, else by what it leads to; spec, "Extraction")
@@ -416,8 +504,25 @@ impl<'a> Extractor<'a> {
                 self.ap.apply(&s.paths[i], Kind::Dir, &e.extra)?;
             }
         }
-        self.ap.apply(self.out, Kind::Dir, &t.root)?;
-        Ok((self.files.into_inner(), self.bytes.into_inner()))
+        if s.ours {
+            self.ap.apply(&top, Kind::Dir, &t.root)?;
+        }
+        Ok(Some((self.files.into_inner(), self.bytes.into_inner(), out)))
+    }
+}
+
+/// Tells the frontend what is extracted, as it is decided ([`Place::Auto`]).
+fn tell_output(p: &Path) {
+    crate::ipc::tell(serde_json::json!({"event": "output", "output": p.display().to_string()}));
+}
+
+/// Whether names `a` and `b` are of one file, as this system takes names (on Windows and
+/// macOS, case aside).
+fn alike(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
+    if cfg!(any(windows, target_os = "macos")) {
+        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+    } else {
+        a == b
     }
 }
 

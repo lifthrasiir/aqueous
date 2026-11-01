@@ -4,11 +4,12 @@
 //! - Finder's services (`NSServices` in `Info.plist`, under Quick Actions or Services of a
 //!   Control-click) send the paths chosen, all at once, on a pasteboard: "Compress with Aqueous"
 //!   on files and folders, "Extract with Aqueous" and "Test with Aqueous" on `.aqr` files.
-//!   `.aqr` files opened (a double-click) are extracted.
+//!   `.aqr` files opened (a double-click) are extracted: beside them, a single entry at the top
+//!   as it is, else into their names without `.aqr` (`aqr --auto-dir`).
 //! - How far a job is shows on its file in Finder: an `NSProgress` published for it, a bar on
 //!   the file's icon as of a file downloading, with a button that stops the job (`aqr`'s
 //!   output being written removed). The file is the archive being written (`NAME.PID.part`),
-//!   the folder being extracted into, or the archive being tested.
+//!   what is extracted (the archive until that is decided), or the archive being tested.
 //! - Alerts tell errors (with the last lines `aqr` wrote), what a test checked, and ask about an
 //!   output there already.
 //! - Run by itself (not for a file or a service), it registers itself with Launch Services and

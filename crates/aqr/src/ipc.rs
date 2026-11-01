@@ -12,7 +12,10 @@
 //! frontend answers. Then this program tells, as it goes:
 //!
 //! - `{"event":"begin","mode":M,"inputs":[...],"output":O}`: an archive to make (`M` is
-//!   `compress`) or to decode (`decompress`, `test`; `output` null testing).
+//!   `compress`) or to decode (`decompress`, `test`; `output` null testing, and with
+//!   `--auto-dir` where it is not decided yet).
+//! - `{"event":"output","output":O}`: with `--auto-dir`, what the archive is extracted as, once
+//!   decided by the entries at its top (the single one beside it, or the directory of its name).
 //! - `{"event":"progress",...}`: how far it is, now and then (every quarter of a second or so,
 //!   and as each batch is written). Compressing, `probe`, `analysis` and `compression`, each
 //!   `[done, total]` (files for the probe, bytes otherwise: [`aqr_compress::Event`]);

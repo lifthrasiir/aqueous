@@ -9,8 +9,9 @@
 //! - `--install` and `--uninstall [--quiet]`, of the program that aqr-win-install installed
 //!   ([`install`]): the former run by the installer, the latter by Settings' Apps.
 //! - `compress`: the paths into an archive, a single one into `PATH.aqr`, several into one
-//!   named after their folder. `extract`: each archive into its name without `.aqr`. `test`:
-//!   each archive checked, and what it holds told.
+//!   named after their folder. `extract`: each archive beside it, a single entry at its top
+//!   as it is, else into its name without `.aqr` (`aqr --auto-dir`). `test`: each archive
+//!   checked, and what it holds told.
 //! - Explorer runs a process for each of the paths chosen: those of a verb in a folder are
 //!   gathered into the first of them ([`gather`]).
 //! - `aqr.exe` is the one beside this program, else the one on `PATH` (`AQR` names another).

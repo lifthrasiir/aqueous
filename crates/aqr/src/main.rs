@@ -7,13 +7,18 @@
 //!   file, a directory as an archive of what it holds; with `-o`, all the inputs into one
 //!   archive (several of them, or a directory, as entries of their names).
 //! - `-d` (the default as `unaqr`): each archive into its name without `.aqr`, or `-o`. An
-//!   archive of another format, by its name (ZIP, 7z, RAR, ALZ, EGG, tar alone or under gzip,
-//!   bzip2, xz, LZMA or Zstandard, and those compressors' single files: [`aqr_unpack::by_name`]), is extracted
-//!   into its name without its extension the same way ([`extract`]), its metadata as an
-//!   Aqueous archive's; what it holds that is not extracted (encrypted entries, methods not
-//!   known, paths reaching out) is told, and the run fails once the rest is extracted. Of a
-//!   single directory at its top of the output's name (`foo.zip` of `foo/`), what that holds is
-//!   extracted into the output, not into `foo/foo/` (as 7-Zip's `-spe`).
+//!   archive of another format, by its name (ZIP, 7z, RAR, ALZ, EGG, tar alone or under gzip, bzip2,
+//!   xz, LZMA or Zstandard, and those compressors' single files: [`aqr_unpack::by_name`]), is extracted
+//!   as it is into the current directory, or `-o` (made where it is not), as `tar`, `unzip` and
+//!   7-Zip do; a compressor's single file into its name without its extension, as gzip does.
+//!   Its metadata is taken as an Aqueous archive's ([`extract`]); what it holds that is not
+//!   extracted (encrypted entries, methods not known, paths reaching out) is told, and the run
+//!   fails once the rest is extracted. A file there already is written over only with `-f`.
+//! - `--auto-dir` (as the frontends extract): a single entry at the top of an archive (of
+//!   either kind) is extracted beside it as it is, where nothing is there of its name; else
+//!   the archive is extracted into a directory of its name without its extension, beside it
+//!   (`foo.zip` of `foo/` into `foo/`, never `foo/foo/`). `-o` is where it goes instead of
+//!   beside it, a directory (with several archives too).
 //! - `-t`: each archive decoded as `-d` does, but nothing written (its checksums checked).
 //! - `--wasm`: in decoding, every module run as WebAssembly, the known ones too (natively
 //!   otherwise).
@@ -94,15 +99,17 @@ usage: aqr [OPTIONS] INPUT...
 Modes:
   -c, --compress        each input into INPUT.aqr (the default as aqr)
   -d, --decompress      each archive into its name without .aqr (the default as unaqr);
-                        .zip, .7z, .rar, .alz, .egg, .tar (.gz .tgz .bz2 .xz
-                        .lzma .zst), .gz, .bz2, .xz, .lzma and .zst too, into the
-                        name without them
-                        (a single directory at their top of that name: what it
-                        holds, as 7-Zip's -spe)
+                        .zip, .7z, .rar, .alz, .egg and .tar (.gz .tgz .bz2 .xz
+                        .lzma .zst) too, as they are into the current directory
+                        (or -o); .gz, .bz2, .xz, .lzma and .zst into the name
+                        without them
   -t, --test            decode and check each archive, writing nothing
 
 Output:
   -o OUTPUT             write to OUTPUT; compressing, all the inputs into one archive
+      --auto-dir        decompressing, a single entry at an archive's top beside it,
+                        else a directory of its name without its extension beside it
+                        (-o: in that directory instead of beside it)
   -f, --force           overwrite outputs
   -p, --preserve        keep and apply the metadata not commonly kept too
   -q, --quiet           log nothing but errors
@@ -145,6 +152,8 @@ struct Args {
     /// The modules not known (all, with `wasm`) run in a sandbox.
     sandbox: bool,
     output: Option<PathBuf>,
+    /// Decompressing, a single entry at the top beside the archive, else a directory of its name.
+    auto_dir: bool,
     force: bool,
     /// What is not commonly kept of the metadata kept too ([`meta`]).
     preserve: bool,
@@ -216,6 +225,7 @@ fn parse() -> Result<Args, String> {
         wasm: false,
         sandbox: true,
         output: None,
+        auto_dir: false,
         force: false,
         preserve: false,
         quiet: false,
@@ -248,6 +258,7 @@ fn parse() -> Result<Args, String> {
             "--wasm" => a.wasm = true,
             "--no-sandbox" => a.sandbox = false,
             "-o" => a.output = Some(value("-o")?.into()),
+            "--auto-dir" => a.auto_dir = true,
             "-f" | "--force" => a.force = true,
             "-p" | "--preserve" => a.preserve = true,
             "-q" | "--quiet" => a.quiet = true,
@@ -289,7 +300,7 @@ fn parse() -> Result<Args, String> {
     if a.opt.threads == 0 {
         a.opt.threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     }
-    if a.decompress && a.output.is_some() && a.inputs.len() > 1 {
+    if a.decompress && a.output.is_some() && a.inputs.len() > 1 && !a.auto_dir {
         return Err("-o with several archives to decompress".into());
     }
     Ok(a)
@@ -832,7 +843,10 @@ fn create(path: &Path, force: bool) -> Result<fs::File, String> {
     if force && fs::symlink_metadata(path).is_ok_and(|m| !m.is_dir()) {
         fs::remove_file(path).map_err(err)?;
     }
-    fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(err)
+    fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::AlreadyExists => format!("{} exists (-f to overwrite)", path.display()),
+        _ => err(e),
+    })
 }
 
 fn decompress_all(a: &Args) -> Result<(), String> {
@@ -840,25 +854,68 @@ fn decompress_all(a: &Args) -> Result<(), String> {
         // an archive of another format by its name (`.zip`, `.tar.gz`, ...), else an Aqueous one
         let name = input.file_name().map(os_bytes).unwrap_or_default();
         let foreign = aqr_unpack::by_name(&name);
-        let out = match (&a.output, foreign) {
-            (Some(o), _) => o.clone(),
-            (None, Some((_, n))) => input.with_file_name(os_from(&name[..name.len() - n])),
-            (None, None) => match input.extension() {
-                Some(e) if e == "aqr" => input.with_extension(""),
-                _ => {
-                    return Err(format!(
-                        "{}: not named .aqr nor as an archive known (-o to name the output)",
-                        input.display()
-                    ));
-                }
-            },
+        // its name without its extension, beside it
+        let named = match foreign {
+            Some((_, n)) => Some(input.with_file_name(os_from(&name[..name.len() - n]))),
+            None => input.extension().is_some_and(|e| e == "aqr").then(|| input.with_extension("")),
+        };
+        let to = match (named, &a.output, a.auto_dir) {
+            (Some(n), Some(o), true) => To { named: o.join(n.file_name().unwrap()), base: o.clone() },
+            (Some(n), None, true) => To { base: n.parent().unwrap_or(Path::new("")).to_owned(), named: n },
+            (_, Some(o), false) => To { named: o.clone(), base: o.clone() },
+            (Some(n), None, false) => To { named: n, base: PathBuf::new() },
+            (None, ..) => {
+                return Err(format!(
+                    "{}: not named .aqr nor as an archive known (-o to name the output)",
+                    input.display()
+                ));
+            }
         };
         match foreign {
-            Some((f, _)) => decompress_foreign(a, input, &out, f)?,
-            None => decompress_into(a, input, &out)?,
+            Some((f, _)) => decompress_foreign(a, input, &to, f)?,
+            None => decompress_into(a, input, &to)?,
         }
     }
     Ok(())
+}
+
+/// Where an archive is decoded: `named`, its name without its extension beside it (or in
+/// `-o`, with `--auto-dir`), or `-o`; `base`, the directory that it is extracted into as it is
+/// (`-o`, or the current directory where empty), or (with `--auto-dir`) that its single entry
+/// at the top goes into.
+struct To {
+    named: PathBuf,
+    base: PathBuf,
+}
+
+impl To {
+    /// Where `a` has a tree extracted (`foreign`: of another format than Aqueous), and whether
+    /// what is there is written over (`None`: the output skipped).
+    fn place<'p>(
+        &'p self,
+        a: &Args,
+        foreign: bool,
+        ask: &'p extract::Ask<'p>,
+    ) -> Result<Option<(extract::Place<'p>, bool)>, String> {
+        Ok(Some(match (a.auto_dir, foreign) {
+            (true, _) => (extract::Place::Auto { base: &self.base, own: &self.named, ask }, a.force),
+            (false, true) => (extract::Place::Into(&self.base), a.force),
+            (false, false) => match output(a, &self.named)? {
+                Some(f) => (extract::Place::Own(&self.named), f),
+                None => return Ok(None),
+            },
+        }))
+    }
+}
+
+/// What a frontend is told of the output of place `p` as it begins, where that is known yet.
+fn shown<'p>(p: &extract::Place<'p>) -> Option<&'p Path> {
+    match *p {
+        extract::Place::Own(o) => Some(o),
+        extract::Place::Into(d) if d.as_os_str().is_empty() => Some(Path::new(".")),
+        extract::Place::Into(d) => Some(d),
+        extract::Place::Auto { .. } => None,
+    }
 }
 
 /// What an archive of another format is extracted to: [`extract::Extractor`], or nothing but
@@ -907,30 +964,39 @@ impl aqr_unpack::Sink for Unpacking<'_, '_> {
     }
 }
 
-/// Extracts (or tests) `input`, an archive of format `format`, into `out`: as an Aqueous
-/// archive is ([`extract::Extractor`]); an error at the end where entries were left out.
-fn decompress_foreign(a: &Args, input: &Path, out: &Path, format: aqr_unpack::Format) -> Result<(), String> {
-    let force = match a.test {
-        true => false,
-        false => match output(a, out)? {
-            Some(f) => f,
-            None => return Ok(()),
-        },
-    };
-    begin(if a.test { "test" } else { "decompress" }, &[input.to_owned()], (!a.test).then_some(out));
-    let start = Instant::now();
-    let rec = stats::record(a.stats.as_ref());
+/// Extracts (or tests) `input`, an archive of format `format`, to `to`: as an Aqueous archive
+/// is ([`extract::Extractor`]); an error at the end where entries were left out.
+fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Format) -> Result<(), String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
     let file = fs::File::open(input).map_err(|e| err(&e))?;
     // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
     let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
     let opened = aqr_unpack::Opened::open(format, &c).map_err(|e| err(&e))?;
+    let ask = |p: &Path| output(a, p);
+    let (place, force) = match (a.test, opened.is_tree()) {
+        (true, _) => (None, false),
+        (false, true) => match to.place(a, true, &ask)? {
+            Some((p, f)) => (Some(p), f),
+            None => return Ok(()),
+        },
+        (false, false) => match output(a, &to.named)? {
+            Some(f) => (None, f),
+            None => return Ok(()),
+        },
+    };
+    let told = match &place {
+        Some(p) => shown(p),
+        None => (!a.test).then_some(&*to.named),
+    };
+    begin(if a.test { "test" } else { "decompress" }, &[input.to_owned()], told);
+    let start = Instant::now();
+    let rec = stats::record(a.stats.as_ref());
     let names = if !a.quiet && (bars() || a.ipc) { opened.units() } else { Vec::new() };
     let view = view::Decoding::new(bars(), names);
     let shown = (!a.quiet && view.shows()).then_some(&view);
     let seen = stats::Seen::new(0, rec.is_some());
     let threads = a.opt.threads;
-    let (files, total, tree, skipped) = if !opened.is_tree() {
+    let (files, total, tree, skipped, out) = if !opened.is_tree() {
         let step = |s: aqr::Step| shown.into_iter().for_each(|v| v.tell(s));
         let n = if a.test {
             ticking(a, &view, || {
@@ -945,7 +1011,7 @@ fn decompress_foreign(a: &Args, input: &Path, out: &Path, format: aqr_unpack::Fo
             })
             .map_err(|e| err(&e))?
         } else {
-            write_whole(out, force, |w| {
+            write_whole(&to.named, force, |w| {
                 ticking(a, &view, || {
                     opened.decompress(
                         threads,
@@ -960,36 +1026,47 @@ fn decompress_foreign(a: &Args, input: &Path, out: &Path, format: aqr_unpack::Fo
                 .map_err(std::io::Error::other)
             })?
         };
-        (1, n, None, 0)
+        (1, n, None, 0, (!a.test).then(|| to.named.clone()))
     } else {
         let ap = meta::Applier { privileged: a.preserve, quiet: a.quiet };
-        ticking(a, &view, || -> Result<_, String> {
-            let x = match a.test {
-                true => None,
-                false => Some(extract::Extractor::new(out, force, true, &ap, &seen)?),
+        let r = ticking(a, &view, || -> Result<_, String> {
+            let x = match place {
+                None => None,
+                Some(p) => Some(extract::Extractor::new(p, force, &ap, &seen)?),
             };
             let sink =
                 Unpacking { x: x.as_ref(), input, quiet: a.quiet, view: shown, seen: &seen, sizes: Default::default() };
-            let done = opened.unpack(threads, &sink).map_err(|e| err(&e))?;
+            let done = match opened.unpack(threads, &sink) {
+                Err(_) if x.as_ref().is_some_and(|x| x.skipped()) => return Ok(None),
+                r => r.map_err(|e| err(&e))?,
+            };
             let sizes = sink.sizes.into_inner().unwrap();
-            let (n, total) = match x {
-                Some(x) => x.finish(&done.tree)?,
-                None => done.tree.entries.iter().fold((0, 0), |(n, t), e| match e.node {
-                    EntryNode::File(c) => (n + 1, t + sizes.get(c).copied().unwrap_or(0)),
-                    _ => (n, t),
+            let (n, total, out) = match x {
+                Some(x) => match x.finish(&done.tree)? {
+                    Some((n, t, o)) => (n, t, Some(o)),
+                    None => return Ok(None),
+                },
+                None => done.tree.entries.iter().fold((0, 0, None), |(n, t, o), e| match e.node {
+                    EntryNode::File(c) => (n + 1, t + sizes.get(c).copied().unwrap_or(0), o),
+                    _ => (n, t, o),
                 }),
             };
-            Ok((n, total, Some(done.tree), done.skipped))
-        })?
+            Ok(Some((n, total, Some(done.tree), done.skipped, out)))
+        })?;
+        match r {
+            Some(r) => r,
+            None => return Ok(()),
+        }
     };
+    let out = out.as_deref();
     if !a.quiet {
-        summary_d(input, (!a.test).then_some(out), files, total, start);
+        summary_d(input, out, files, total, start);
     }
-    end((!a.test).then_some(out), files, c.len() as u64, total, start);
+    end(out, files, c.len() as u64, total, start);
     if let (Some(s), Some(rec)) = (&a.stats, rec) {
         let paths = match &tree {
             Some(t) => tree_content_paths(t),
-            None => vec![out.display().to_string()],
+            None => vec![to.named.display().to_string()],
         };
         let mut contents = seen.contents(paths);
         if tree.is_none()
@@ -1000,7 +1077,7 @@ fn decompress_foreign(a: &Args, input: &Path, out: &Path, format: aqr_unpack::Fo
         s.add(stats::Run {
             mode: if a.test { "test" } else { "decompress" },
             input: input.display().to_string(),
-            output: if a.test { String::new() } else { out.display().to_string() },
+            output: out.map_or(String::new(), |o| o.display().to_string()),
             seconds: start.elapsed().as_secs_f64(),
             threads,
             read: c.len() as u64,
@@ -1017,17 +1094,8 @@ fn decompress_foreign(a: &Args, input: &Path, out: &Path, format: aqr_unpack::Fo
     Ok(())
 }
 
-fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
-    let force = match a.test {
-        true => false,
-        false => match output(a, out)? {
-            Some(f) => f,
-            None => return Ok(()),
-        },
-    };
-    begin(if a.test { "test" } else { "decompress" }, &[input.to_owned()], (!a.test).then_some(out));
-    let start = Instant::now();
-    let rec = stats::record(a.stats.as_ref());
+/// Decodes (or tests) `input`, an Aqueous archive, to `to`.
+fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<(), String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
     let file = fs::File::open(input).map_err(|e| err(&e))?;
     // (mapped, so that what is read of it is the system's to drop)
@@ -1037,7 +1105,26 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
         Decoder { native: Native { threads: a.opt.threads }, wasm: a.wasm, sandbox: a.sandbox.then(OnceLock::new) };
     let runner: &dyn aqr::Runner = &decoder;
     let mut archive = aqr::open(&c, runner).map_err(|e| err(&e))?;
-    let names = if !a.quiet && (bars() || a.ipc) { leaf_names(&archive, out) } else { Vec::new() };
+    let ask = |p: &Path| output(a, p);
+    let (place, force) = match (a.test, archive.tree().is_some()) {
+        (true, _) => (None, false),
+        (false, true) => match to.place(a, false, &ask)? {
+            Some((p, f)) => (Some(p), f),
+            None => return Ok(()),
+        },
+        (false, false) => match output(a, &to.named)? {
+            Some(f) => (None, f),
+            None => return Ok(()),
+        },
+    };
+    let told = match &place {
+        Some(p) => shown(p),
+        None => (!a.test).then_some(&*to.named),
+    };
+    begin(if a.test { "test" } else { "decompress" }, &[input.to_owned()], told);
+    let start = Instant::now();
+    let rec = stats::record(a.stats.as_ref());
+    let names = if !a.quiet && (bars() || a.ipc) { leaf_names(&archive, &to.named) } else { Vec::new() };
     let view = std::sync::Arc::new(view::Decoding::new(bars(), names));
     if !a.quiet && view.shows() {
         let view = view.clone();
@@ -1058,7 +1145,7 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
         }
         archive.set_items(items);
     }
-    let (files, total) = match archive.tree() {
+    let (files, total, out) = match archive.tree() {
         // (written as it is evaluated: a file of parts is not held whole)
         None if a.test => {
             let n = ticking(a, &*view, || {
@@ -1068,10 +1155,10 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
                 })
             })
             .map_err(|e| err(&e))?;
-            (1, n)
+            (1, n, None)
         }
         None => {
-            let n = write_whole(out, force, |w| {
+            let n = write_whole(&to.named, force, |w| {
                 let mut failed = None;
                 let r = ticking(a, &*view, || {
                     archive.write_file(a.opt.threads, &mut |d: &[u8]| {
@@ -1091,7 +1178,7 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
                     (Err(e), None) => Err(std::io::Error::other(e.to_string())),
                 }
             })?;
-            (1, n)
+            (1, n, Some(to.named.clone()))
         }
         Some(t) if a.test => {
             let (n, total) = (std::sync::atomic::AtomicUsize::new(0), std::sync::atomic::AtomicU64::new(0));
@@ -1110,26 +1197,34 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
                 })
             })
             .map_err(|e| err(&e))?;
-            (n.into_inner(), total.into_inner())
+            (n.into_inner(), total.into_inner(), None)
         }
         Some(t) => {
             let ap = meta::Applier { privileged: a.preserve, quiet: a.quiet };
-            ticking(a, &*view, || {
-                let x = extract::Extractor::new(out, force, false, &ap, &seen)?;
-                x.entries(t, &(0..t.entries.len()).collect::<Vec<_>>())?;
+            let r = ticking(a, &*view, || {
+                let x = extract::Extractor::new(place.unwrap(), force, &ap, &seen)?;
+                match x.entries(t, &(0..t.entries.len()).collect::<Vec<_>>()) {
+                    Err(_) if x.skipped() => return Ok(None),
+                    r => r?,
+                }
                 archive
                     .contents(a.opt.threads, |c, d| x.content(c, d).map_err(Failure::Resource))
                     .map_err(|e| e.to_string())?;
                 x.finish(t)
-            })?
+            })?;
+            match r {
+                Some((n, total, out)) => (n, total, Some(out)),
+                None => return Ok(()),
+            }
         }
     };
+    let out = out.as_deref();
     if !a.quiet {
-        summary_d(input, (!a.test).then_some(out), files, total, start);
+        summary_d(input, out, files, total, start);
     }
-    end((!a.test).then_some(out), files, c.len() as u64, total, start);
+    end(out, files, c.len() as u64, total, start);
     if let (Some(s), Some(rec)) = (&a.stats, rec) {
-        let mut contents = seen.contents(content_paths(&archive, out));
+        let mut contents = seen.contents(content_paths(&archive, &to.named));
         if archive.tree().is_none()
             && let Some(c) = contents.first_mut()
         {
@@ -1138,7 +1233,7 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
         s.add(stats::Run {
             mode: if a.test { "test" } else { "decompress" },
             input: input.display().to_string(),
-            output: if a.test { String::new() } else { out.display().to_string() },
+            output: out.map_or(String::new(), |o| o.display().to_string()),
             seconds: start.elapsed().as_secs_f64(),
             threads: a.opt.threads,
             read: c.len() as u64,
