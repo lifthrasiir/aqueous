@@ -72,7 +72,12 @@ RAYON_NUM_THREADS=1 cargo run --release --features train --bin aqr-flate-train -
   corrections at λ = 5. Lengths and distances make the rest.
 - Profile 10 is less than half the size of profile 9, joins at half its speed and splits at
   a sixth. Splitting codes every stream two or three times (with the catalog's rule, a chain
-  rule, and zlib emulation for streams that look like zlib's).
+  rule, and zlib emulation for streams that look like zlib's), except where zlib emulation,
+  tried first, misses at most 1% of the tokens: then it is taken without the others (the
+  chain rule only tried for coding its misses). zlib emulation runs once: the detection's,
+  if it followed the whole stream, else a coding's; codings with other rules replay its
+  predictions, the segments at once. On a Ryzen 7 9700X, one thread, raw streams of zlib
+  -9 (-6): dickens 2.27 -> 0.75 s (1.35 -> 0.44), mozilla 9.0 -> 4.5 s (4.9 -> 1.6).
 
 ## How it works
 

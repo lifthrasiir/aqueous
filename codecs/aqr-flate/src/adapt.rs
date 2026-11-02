@@ -297,6 +297,11 @@ pub struct Adaptive<'a, B> {
     pub misses: usize,
     /// For training priors: per context, uses among the first [`FIRST`] and ones among them.
     pub seen: Option<Vec<[u32; 2]>>,
+    /// zlib emulation's mispredictions so far, when deconstructing: (position, predicted
+    /// token), as [`Adaptive::replaying`] takes them.
+    pub missed: Vec<(usize, Token)>,
+    /// Whether zlib emulation stopped following the tokens (the rule carrying on).
+    pub lost: bool,
 }
 
 impl<'a, B: Backend> Adaptive<'a, B> {
@@ -315,7 +320,14 @@ impl<'a, B: Backend> Adaptive<'a, B> {
             alen: 0,
             misses: 0,
             seen: None,
+            missed: vec![],
+            lost: false,
         }
+    }
+
+    /// Whether it predicts by zlib emulation (from the start of its range).
+    pub fn emulating(&self) -> bool {
+        self.emu.is_some() || self.replay.is_some()
     }
 
     /// Deconstructing from the start of a stream, with zlib emulation that has `followed` it
@@ -328,6 +340,46 @@ impl<'a, B: Backend> Adaptive<'a, B> {
             until: followed.pos,
         });
         a
+    }
+
+    /// Deconstructing a range with zlib emulation's predictions replayed before `until`: its
+    /// mispredictions from `log` (by position), and otherwise the actual token. Without an
+    /// emulator after it.
+    pub fn replaying(b: B, priors: &Priors, log: Vec<(usize, Token)>, until: usize) -> Self {
+        let mut a = Self::new(b, priors, None);
+        a.replay = Some(Replay {
+            log,
+            next: 0,
+            until,
+        });
+        a
+    }
+
+    /// zlib emulation's prediction at `p`, replayed or worked out.
+    #[inline(always)]
+    fn emulated(&mut self, p: usize, actual: Option<Token>) -> Option<Token> {
+        if let Some(r) = &mut self.replay {
+            if p < r.until {
+                return match r.log.get(r.next) {
+                    Some(&(at, t)) if at == p => {
+                        r.next += 1;
+                        Some(t)
+                    }
+                    _ => actual,
+                };
+            }
+            self.replay = None;
+        }
+        let e = self.emu.as_mut()?;
+        match e.predict() {
+            Some((at, t)) if at == p => Some(t),
+            // The emulation lost track; the rule carries on.
+            _ => {
+                self.emu = None;
+                self.lost = true;
+                None
+            }
+        }
     }
 
     /// The emulation after the range, if it still follows the tokens.
@@ -405,27 +457,13 @@ impl<B: Backend> Corr for Adaptive<'_, B> {
 
     #[inline(always)]
     fn predict(&mut self, _: &[u8], p: usize, actual: Option<Token>) -> Option<Token> {
-        if let Some(r) = &mut self.replay {
-            if p < r.until {
-                return match r.log.get(r.next) {
-                    Some(&(at, t)) if at == p => {
-                        r.next += 1;
-                        Some(t)
-                    }
-                    _ => actual,
-                };
-            }
-            self.replay = None;
+        let t = self.emulated(p, actual)?;
+        if let Some(a) = actual
+            && a != t
+        {
+            self.missed.push((p, t));
         }
-        let e = self.emu.as_mut()?;
-        match e.predict() {
-            Some((at, t)) if at == p => Some(t),
-            // The emulation lost track; the rule carries on.
-            _ => {
-                self.emu = None;
-                None
-            }
-        }
+        Some(t)
     }
 
     #[inline(always)]
@@ -437,6 +475,7 @@ impl<B: Backend> Corr for Adaptive<'_, B> {
             && !e.commit(tok)
         {
             self.emu = None;
+            self.lost = true;
         }
     }
 
@@ -450,6 +489,7 @@ impl<B: Backend> Corr for Adaptive<'_, B> {
             && !e.skip_to(end)
         {
             self.emu = None;
+            self.lost = true;
         }
     }
 

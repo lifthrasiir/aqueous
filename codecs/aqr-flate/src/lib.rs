@@ -1189,7 +1189,9 @@ struct AdaptiveChoice<'a> {
 /// The smallest adaptive coding among: the catalog's `rule`; a chain rule
 /// ([`chain_rule`]); and, for a stream that looks like zlib's, the better of the two with
 /// zlib emulation (with parameters `hints` allows). Hinted parameters that predict every
-/// token are taken with `rule` alone.
+/// token are taken with `rule` alone. zlib emulation that misses few tokens
+/// ([`ZLIB_SETTLES`]) is taken without coding the stream without it, with the rule or a
+/// chain rule, whichever codes its misses smaller.
 fn choose_adaptive<'a>(
     f: &'a Flat,
     rule: Rule,
@@ -1211,7 +1213,7 @@ fn choose_adaptive<'a>(
             f,
             rule,
             Some(p),
-            None,
+            Emulation::New,
             priors,
             &zr,
             threads,
@@ -1226,7 +1228,7 @@ fn choose_adaptive<'a>(
                     f,
                     rule,
                     None,
-                    None,
+                    Emulation::New,
                     priors,
                     &ranges,
                     threads,
@@ -1250,22 +1252,80 @@ fn choose_adaptive<'a>(
             });
         }
     }
-    // The rule alone, the chain rule and zlib's parameters are worked out independently, at
-    // once given threads.
-    // (told of as the first of two passes while zlib's parameters may be found: the stream is
-    // coded again with them)
-    let passes = std::sync::atomic::AtomicUsize::new(if stream.is_some() { 2 } else { 1 });
+    // zlib's parameters first: where coding with them misses few tokens, neither the rule
+    // alone nor a chain rule is tried (they would hardly do better). Otherwise those two are
+    // worked out, at once given threads, and the smallest coding taken.
+    // (told of as the first of two passes while zlib's parameters may be found, the other
+    // codings taking the second)
+    let passes = std::sync::atomic::AtomicUsize::new(2);
+    let mut emulated: Option<AdaptiveChoice> = None;
+    // zlib's parameters where the detection missed too often for them to settle the coding:
+    // the stream is coded with them after the others, with the best rule.
+    let mut late = None;
+    let cuts: Vec<usize> = ranges.iter().skip(1).map(|r| r.pos).collect();
+    match stream
+        .as_ref()
+        .and_then(|s| zlib_params(s, &f.data, hints, &cuts))
+    {
+        None => passes.store(1, std::sync::atomic::Ordering::Relaxed),
+        Some((d, followed)) if d.misses > d.tokens / ZLIB_SETTLES => {
+            late = Some((d.params, followed))
+        }
+        Some((d, followed)) => {
+            let p = d.params;
+            let zr = zlib_ranges(f, p, &ranges);
+            let code = |r: Rule, from: Emulation<'a, '_>, pass: usize| {
+                let segs = code_adaptive(
+                    f,
+                    r,
+                    Some(p),
+                    from,
+                    priors,
+                    &zr,
+                    threads,
+                    collect,
+                    (pass, &passes),
+                )?;
+                Ok::<_, Error>(AdaptiveChoice {
+                    rule: r,
+                    zlib: Some(p),
+                    segs,
+                    ranges: zlib_ranges(f, p, &ranges),
+                })
+            };
+            let mut e = code(rule, followed.into(), 0)?;
+            let misses: usize = e.segs.iter().map(|s| s.misses).sum();
+            if misses <= f.tokens.len() / ZLIB_SETTLES {
+                // The misses are coded against the rule's matches, where a chain rule may do
+                // better (coded again with the emulation's predictions).
+                if misses > 0
+                    && opts.chain
+                    && let Some((c, _)) = chain_rule(f, priors, &ranges, false)?
+                    && c != rule
+                {
+                    let other = code(c, Emulation::Coded(&e.segs), 1)?;
+                    if size(&other.segs) < size(&e.segs) {
+                        e = other;
+                    }
+                }
+                f.tell(0..f.data.len(), (1, &passes));
+                return Ok(e);
+            }
+            emulated = Some(e);
+        }
+    }
+    let pass = (emulated.is_some() as usize, &passes);
     let alone = || {
         code_adaptive(
             f,
             rule,
             None,
-            None,
+            Emulation::New,
             priors,
             &ranges,
             threads,
             collect,
-            (0, &passes),
+            pass,
         )
     };
     let chain = || -> Result<Option<(Rule, Vec<AdaptiveSeg>)>> {
@@ -1281,44 +1341,17 @@ fn choose_adaptive<'a>(
                 f,
                 chain,
                 None,
-                None,
+                Emulation::New,
                 priors,
                 &ranges,
                 threads,
                 collect,
-                (0, &passes),
+                pass,
             )?,
         };
         Ok(Some((chain, segs)))
     };
-    let params = || {
-        let p = stream.as_ref().and_then(|s| zlib_params(s, &f.data, hints));
-        if p.is_none() {
-            passes.store(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        p
-    };
-    let (alone, chain, params) = if threads > 1 {
-        fn join<T>(h: aqr_common::pool::Handle<'_, T>) -> T {
-            h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))
-        }
-        // (on as many workers as there are, the rest here)
-        aqr_common::pool::scope(2, |s| match s.workers() {
-            0 => (alone(), chain(), params()),
-            1 => {
-                let c = s.spawn(chain);
-                let (a, p) = (alone(), params());
-                (a, join(c), p)
-            }
-            _ => {
-                let (c, p) = (s.spawn(chain), s.spawn(params));
-                let a = alone();
-                (a, join(c), join(p))
-            }
-        })
-    } else {
-        (alone(), chain(), params())
-    };
+    let (alone, chain) = both(threads, alone, chain);
     let mut best = AdaptiveChoice {
         rule,
         zlib: None,
@@ -1330,31 +1363,80 @@ fn choose_adaptive<'a>(
     {
         (best.rule, best.segs) = (chain, segs);
     }
-    let Some((p, followed)) = params else {
+    if let Some((p, followed)) = late {
+        let ranges = zlib_ranges(f, p, &best.ranges);
+        let segs = code_adaptive(
+            f,
+            best.rule,
+            Some(p),
+            followed.into(),
+            priors,
+            &ranges,
+            threads,
+            collect,
+            (1, &passes),
+        )?;
+        if size(&segs) < size(&best.segs) {
+            best = AdaptiveChoice {
+                rule: best.rule,
+                zlib: Some(p),
+                segs,
+                ranges,
+            };
+        }
+        return Ok(best);
+    }
+    let Some(mut e) = emulated else {
         return Ok(best);
     };
-    let ranges = zlib_ranges(f, p, &best.ranges);
-    let segs = code_adaptive(
-        f,
-        best.rule,
-        Some(p),
-        followed,
-        priors,
-        &ranges,
-        threads,
-        collect,
-        (1, &passes),
-    )?;
-    if size(&segs) < size(&best.segs) {
-        best = AdaptiveChoice {
-            rule: best.rule,
-            zlib: Some(p),
-            segs,
-            ranges,
-        };
+    // (with the better rule too)
+    if best.rule != e.rule {
+        let segs = code_adaptive(
+            f,
+            best.rule,
+            e.zlib,
+            Emulation::Coded(&e.segs),
+            priors,
+            &e.ranges,
+            threads,
+            collect,
+            (1, &passes),
+        )?;
+        if size(&segs) < size(&e.segs) {
+            (e.rule, e.segs) = (best.rule, segs);
+        }
+    }
+    if size(&e.segs) < size(&best.segs) {
+        best = e;
     }
     Ok(best)
 }
+
+/// `a()` and `b()`, at once given threads.
+fn both<A: Send, B: Send>(
+    threads: usize,
+    a: impl FnOnce() -> A + Send,
+    b: impl FnOnce() -> B + Send,
+) -> (A, B) {
+    if threads <= 1 {
+        return (a(), b());
+    }
+    aqr_common::pool::scope(1, |s| {
+        if s.workers() == 0 {
+            return (a(), b());
+        }
+        let hb = s.spawn(b);
+        let ra = a();
+        (
+            ra,
+            hb.join().unwrap_or_else(|e| std::panic::resume_unwind(e)),
+        )
+    })
+}
+
+/// zlib emulation missing at most one token in this many settles a stream's coding (with the
+/// rule or a chain rule, whichever codes the misses smaller).
+const ZLIB_SETTLES: usize = 100;
 
 /// Below this many bytes of data, the catalog's rule alone is compared with exact hinted
 /// zlib parameters (it is cheap there, and often smaller).
@@ -1448,6 +1530,9 @@ fn chain_rule<'a>(
             cp: None,
             misses: a.misses,
             seen: vec![],
+            emulated: false,
+            missed: vec![],
+            lost: false,
             body: a.b.0.finish(),
         };
         return Ok(Some((rules[i], Some(vec![seg]))));
@@ -1468,17 +1553,19 @@ fn chain_rule<'a>(
 }
 
 /// zlib's parameters among those `hints` allows, if the stream looks like zlib's (see
-/// [`crate::detect`]), and the emulation that found them, if at hand.
+/// [`crate::detect`]), and the emulation that found them, if at hand, with its checkpoints
+/// where segments start at `cuts`.
 fn zlib_params<'a>(
     stream: &Stream,
     data: &'a [u8],
     hints: &Hints,
-) -> Option<(zlib::Params, Option<Followed<'a>>)> {
+    cuts: &[usize],
+) -> Option<(crate::detect::Detection, Option<Followed<'a>>)> {
     let candidates = crate::detect::candidates_hinted(stream, hints);
     if candidates.is_empty() {
         return None;
     }
-    crate::detect::detect_refined_followed(stream, data, candidates).map(|(d, f)| (d.params, f))
+    crate::detect::detect_refined_at(stream, data, candidates, cuts)
 }
 
 /// The segments to code with zlib emulation under `p`: `ranges`, or the whole stream as one
@@ -1504,19 +1591,44 @@ struct AdaptiveSeg {
     cp: Option<Checkpoint>,
     misses: usize,
     seen: Vec<[u32; 2]>,
+    /// Whether it was coded with zlib emulation, which then mispredicted `missed` and maybe
+    /// lost track ([`adapt::Adaptive::missed`], [`adapt::Adaptive::lost`]).
+    emulated: bool,
+    missed: Vec<(usize, Token)>,
+    lost: bool,
+}
+
+/// Where [`code_adaptive`] takes zlib emulation's predictions from.
+enum Emulation<'a, 's> {
+    /// A new emulation.
+    New,
+    /// The one that the parameters' detection followed the stream with.
+    Followed(Box<Followed<'a>>),
+    /// That of an earlier coding of the same segments with the same parameters (the
+    /// predictions do not depend on the rule).
+    Coded(&'s [AdaptiveSeg]),
+}
+
+impl<'a> From<Option<Followed<'a>>> for Emulation<'a, '_> {
+    fn from(f: Option<Followed<'a>>) -> Self {
+        f.map_or(Emulation::New, |f| Emulation::Followed(Box::new(f)))
+    }
 }
 
 /// Codes the segments adaptively, with zlib emulation under `zlib`. Each segment but the first
 /// resumes the emulation from its state where the previous one ended, if it can be resumed
-/// there (and was not lost on the way); segments are then coded one after another. A single
-/// segment is coded with the emulation `followed` gives, if any (from the parameters'
-/// detection), rather than a new one. How far it is is told as pass `pass.0` of `pass.1`.
+/// there (and was not lost on the way); segments are then coded one after another. Unless
+/// `from` has the emulation's predictions: a single segment is coded with the emulation the
+/// parameters' detection followed it with; so are several, at once given threads, if it
+/// followed the whole stream and has their checkpoints ([`replayed`]); and segments coded
+/// before, at once, with what the emulation predicted then, if it never lost track. How far it
+/// is is told as pass `pass.0` of `pass.1`.
 #[allow(clippy::too_many_arguments)]
 fn code_adaptive<'a>(
     f: &'a Flat,
     rule: Rule,
     zlib: Option<zlib::Params>,
-    followed: Option<Followed<'a>>,
+    from: Emulation<'a, '_>,
     priors: &Priors,
     ranges: &[Range],
     threads: usize,
@@ -1530,6 +1642,7 @@ fn code_adaptive<'a>(
             a.seen = Some(vec![[0; 2]; adapt::NUM]);
         }
         let actual = &f.tokens[r.first..r.first + r.count];
+        let emulated = a.emulating();
         let mut t = Ticking::new(&mut a, f, r, pass);
         tokens::code_range(&mut t, &f.data, rule, r, Some(actual), None)?;
         t.end();
@@ -1538,6 +1651,9 @@ fn code_adaptive<'a>(
             cp,
             misses: a.misses,
             seen: a.seen.take().unwrap_or_default(),
+            emulated,
+            missed: std::mem::take(&mut a.missed),
+            lost: a.lost,
             body: a.b.finish(),
         };
         Ok::<_, Error>((seg, emu))
@@ -1550,10 +1666,45 @@ fn code_adaptive<'a>(
             .into_iter()
             .collect();
     };
-    if let (Some(followed), [_]) = (followed, ranges) {
-        debug_assert_eq!(followed.emu.params(), p);
-        let a = adapt::Adaptive::following(adapt::Enc::new(), priors, followed);
-        return Ok(vec![finish(a, 0, None)?.0]);
+    let followed = match (from, ranges) {
+        (Emulation::Followed(followed), [_]) => {
+            debug_assert_eq!(followed.emu.params(), p);
+            let a = adapt::Adaptive::following(adapt::Enc::new(), priors, *followed);
+            return Ok(vec![finish(a, 0, None)?.0]);
+        }
+        (Emulation::Coded(segs), _)
+            if segs.len() == ranges.len() && !segs.iter().any(|s| s.lost) =>
+        {
+            return par_map(ranges.len(), threads, |i| {
+                let (s, enc) = (&segs[i], adapt::Enc::new());
+                let a = match s.emulated {
+                    true => {
+                        adapt::Adaptive::replaying(enc, priors, s.missed.clone(), ranges[i].end)
+                    }
+                    false => adapt::Adaptive::new(enc, priors, None),
+                };
+                finish(a, i, s.cp).map(|r| r.0)
+            })
+            .into_iter()
+            .collect();
+        }
+        (Emulation::Followed(followed), _) => Some(followed),
+        _ => None,
+    };
+    if let Some(followed) = &followed
+        && let Some(cps) = replayed(f, p, followed, ranges)
+    {
+        let log = &followed.log;
+        return par_map(ranges.len(), threads, |i| {
+            let r = &ranges[i];
+            let lo = log.partition_point(|&(at, _)| at < r.pos);
+            let hi = log.partition_point(|&(at, _)| at < r.end);
+            let a =
+                adapt::Adaptive::replaying(adapt::Enc::new(), priors, log[lo..hi].to_vec(), r.end);
+            finish(a, i, (i > 0).then(|| cps[i - 1])).map(|r| r.0)
+        })
+        .into_iter()
+        .collect();
     }
     let mut emu = Some(Emulator::new(&f.data, p));
     let mut out = Vec::with_capacity(ranges.len());
@@ -1575,6 +1726,32 @@ fn code_adaptive<'a>(
         out.push(seg);
     }
     Ok(out)
+}
+
+/// The checkpoints of segments `ranges[1..]` from `followed`, if it followed the whole stream
+/// and each is what coding the segments one after another would write: where its segment
+/// starts, and one the emulator can be rebuilt from. Rebuilding is exact (FORMAT.md,
+/// "Checkpoints"), so the emulation's predictions over the stream are those of each segment's
+/// rebuilt emulator.
+fn replayed(
+    f: &Flat,
+    p: zlib::Params,
+    followed: &Followed,
+    ranges: &[Range],
+) -> Option<Vec<Checkpoint>> {
+    if followed.pos < f.data.len() || followed.cps.len() + 1 != ranges.len() {
+        return None;
+    }
+    followed
+        .cps
+        .iter()
+        .zip(&ranges[1..])
+        .map(|(cp, r)| {
+            cp.filter(|cp| {
+                cp.cursor - cp.held as usize == r.pos && Emulator::resume(&f.data, p, cp).is_some()
+            })
+        })
+        .collect()
 }
 
 /// An emulator's state at the start of a segment, relative to where it normally is.
@@ -2323,4 +2500,102 @@ fn rebuild(
 /// `f(0..n)` on up to `threads` threads, in order.
 fn par_map<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
     aqr_common::pool::par_map(n, threads, f)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Segments as compared: body, checkpoint, misses and what the emulation mispredicted.
+    type Coded = Vec<(
+        Vec<u8>,
+        Option<Checkpoint>,
+        usize,
+        Vec<(usize, Token)>,
+        bool,
+    )>;
+
+    fn coded(segs: &[AdaptiveSeg]) -> Coded {
+        segs.iter()
+            .map(|s| (s.body.clone(), s.cp, s.misses, s.missed.clone(), s.lost))
+            .collect()
+    }
+
+    /// Segments coded with zlib emulation's predictions taken from the detection's emulation,
+    /// or from an earlier coding (with another rule), are coded as with a new emulation coded
+    /// one segment after another.
+    #[test]
+    fn replayed_emulation_codes_alike() {
+        let mut d = vec![];
+        for k in 0..6u8 {
+            for src in [
+                include_bytes!("lib.rs").as_slice(),
+                include_bytes!("adapt.rs"),
+            ] {
+                d.extend(src.iter().map(|&b| if b == b'e' { b'a' + k } else { b }));
+            }
+        }
+        let raw = "zlib:level=9"
+            .parse::<flate_zoo::Encoder>()
+            .unwrap()
+            .compress(&d)
+            .unwrap();
+        let f = Flat::new(&raw, 64 << 10, 1, false, usize::MAX).unwrap();
+        let ranges = segment_ranges(&f);
+        assert!(ranges.len() > 4);
+        let (catalog, priors) = (
+            &profile_catalog(ADAPTIVE).unwrap().0,
+            profile_priors(ADAPTIVE).unwrap(),
+        );
+        let code = |rule: Rule, p: zlib::Params, from: Emulation| {
+            let segs = code_adaptive(
+                &f,
+                rule,
+                Some(p),
+                from,
+                priors,
+                &ranges,
+                4,
+                false,
+                (0, &ONCE),
+            )
+            .unwrap();
+            assert!(segs.iter().all(|s| s.emulated && !s.lost));
+            segs
+        };
+
+        // Level 7 mispredicts the stream (of level 9), strategies default and fixed alike: tied
+        // over the whole stream, the detection follows all of it.
+        let p = zlib::Params {
+            level: 7,
+            ..Default::default()
+        };
+        let cuts: Vec<usize> = ranges.iter().skip(1).map(|r| r.pos).collect();
+        let lanes = vec![
+            p,
+            zlib::Params {
+                strategy: zlib::Strategy::Fixed,
+                ..p
+            },
+        ];
+        let (found, followed) =
+            detect::detect_refined_at(&f.stream_with_tokens(), &f.data, lanes, &cuts).unwrap();
+        assert_eq!((found.params, found.complete), (p, true));
+        assert!(found.misses > 100);
+        let followed = followed.unwrap();
+        assert!(replayed(&f, p, &followed, &ranges).is_some());
+        let new = code(catalog[0], p, Emulation::New);
+        assert_eq!(
+            coded(&code(
+                catalog[0],
+                p,
+                Emulation::Followed(Box::new(followed))
+            )),
+            coded(&new)
+        );
+
+        // Its misses replayed with another rule.
+        let again = code(catalog[1], p, Emulation::Coded(&new));
+        assert_eq!(coded(&again), coded(&code(catalog[1], p, Emulation::New)));
+    }
 }

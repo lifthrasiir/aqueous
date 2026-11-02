@@ -10,7 +10,7 @@
 
 use crate::deflate::{Body, Stream, Token};
 use crate::header::zlib_header;
-use crate::zlib::{Emulator, Followed, MultiSlow, Params, Strategy};
+use crate::zlib::{Checkpoint, Emulator, Followed, MultiSlow, Params, Strategy};
 
 /// Tokens emulated per candidate in the first round of ranking; each further round covers
 /// four times as many among the candidates still tied for the fewest misses.
@@ -226,10 +226,28 @@ struct Trial<'a> {
     log: Vec<(usize, Token)>,
     /// Set once the emulation cannot follow the stream any more.
     lost: bool,
+    /// Where checkpoints are taken, and those taken so far.
+    cuts: Vec<usize>,
+    cps: Vec<Option<Checkpoint>>,
+}
+
+/// Takes the checkpoints due by data position `pos` (a token boundary): `cp()` for the one
+/// at `pos`, None for those passed over.
+fn mark(
+    cuts: &[usize],
+    pos: usize,
+    mut cp: impl FnMut() -> Option<Checkpoint>,
+    cps: &mut Vec<Option<Checkpoint>>,
+) {
+    while let Some(&at) = cuts.get(cps.len())
+        && at <= pos
+    {
+        cps.push(if at == pos { cp() } else { None });
+    }
 }
 
 impl<'a> Trial<'a> {
-    fn new(data: &'a [u8], p: Params) -> Self {
+    fn new(data: &'a [u8], p: Params, cuts: &[usize]) -> Self {
         Trial {
             e: Emulator::new(data, p),
             block: 0,
@@ -243,6 +261,8 @@ impl<'a> Trial<'a> {
             },
             log: vec![],
             lost: false,
+            cuts: cuts.to_vec(),
+            cps: vec![],
         }
     }
 
@@ -251,6 +271,7 @@ impl<'a> Trial<'a> {
             log: self.log,
             pos: self.pos,
             emu: self.e,
+            cps: self.cps,
         }
     }
 
@@ -292,6 +313,9 @@ impl<'a> Trial<'a> {
             self.token += 1;
             self.d.tokens += 1;
             self.pos += t.span();
+            if !self.lost {
+                mark(&self.cuts, self.pos, || self.e.checkpoint(), &mut self.cps);
+            }
         }
     }
 }
@@ -305,7 +329,7 @@ pub fn trial(
     limit: usize,
     give_up: usize,
 ) -> Option<Detection> {
-    run_trial(stream, data, p, limit, give_up).map(|t| t.d)
+    run_trial(stream, data, p, limit, give_up, &[]).map(|t| t.d)
 }
 
 fn run_trial<'a>(
@@ -314,8 +338,9 @@ fn run_trial<'a>(
     p: Params,
     limit: usize,
     give_up: usize,
+    cuts: &[usize],
 ) -> Option<Trial<'a>> {
-    let mut t = Trial::new(data, p);
+    let mut t = Trial::new(data, p, cuts);
     t.run(stream, limit, give_up);
     if limit == usize::MAX {
         t.d.complete = !t.lost && t.d.misses <= give_up;
@@ -375,18 +400,30 @@ pub fn detect_refined_followed<'a>(
     data: &'a [u8],
     candidates: Vec<Params>,
 ) -> Option<(Detection, Option<Followed<'a>>)> {
-    let (d, followed) = detect_among_followed(stream, data, candidates)?;
+    detect_refined_at(stream, data, candidates, &[])
+}
+
+/// [`detect_refined_followed`], the emulation taking its checkpoints right after the tokens
+/// ending at data positions `cuts` (increasing), as far as it went ([`Followed::cps`]).
+pub fn detect_refined_at<'a>(
+    stream: &Stream,
+    data: &'a [u8],
+    candidates: Vec<Params>,
+    cuts: &[usize],
+) -> Option<(Detection, Option<Followed<'a>>)> {
+    let (d, followed) = detect_among_followed(stream, data, candidates, cuts)?;
     let alts = mem_alternatives(stream);
     if alts.is_empty() {
         return Some((d, followed));
     }
-    let mut best = run_trial(stream, data, d.params, usize::MAX, usize::MAX)?;
+    let mut best = run_trial(stream, data, d.params, usize::MAX, usize::MAX, cuts)?;
     for mem in alts {
         if best.d.misses == 0 {
             break;
         }
         let p = Params { mem, ..d.params };
-        if let Some(t) = run_trial(stream, data, p, usize::MAX, best.d.misses.saturating_sub(1)) {
+        let give_up = best.d.misses.saturating_sub(1);
+        if let Some(t) = run_trial(stream, data, p, usize::MAX, give_up, cuts) {
             best = t;
         }
     }
@@ -411,7 +448,12 @@ pub fn common(candidates: Vec<Params>) -> Vec<Params> {
 /// [`detect`] restricted to `candidates`.
 /// Emulation units for `candidates`: deflate_slow candidates sharing windowBits and memLevel
 /// together (see `MultiSlow`), unless stored blocks would make their states diverge.
-fn units<'a>(stream: &Stream, data: &'a [u8], candidates: Vec<Params>) -> Vec<Unit<'a>> {
+fn units<'a>(
+    stream: &Stream,
+    data: &'a [u8],
+    candidates: Vec<Params>,
+    cuts: &[usize],
+) -> Vec<Unit<'a>> {
     let shareable = |p: &Params| {
         p.level >= 4
             && matches!(
@@ -434,11 +476,11 @@ fn units<'a>(stream: &Stream, data: &'a [u8], candidates: Vec<Params>) -> Vec<Un
                 None => groups.push(((p.wbits, p.mem), vec![(i, p)])),
             }
         } else {
-            units.push(Unit::Single(i, Trial::new(data, p)));
+            units.push(Unit::Single(i, Trial::new(data, p, cuts)));
         }
     }
     for (_, g) in groups {
-        units.push(Unit::Multi(MultiRun::new(data, g)));
+        units.push(Unit::Multi(MultiRun::new(data, g, cuts)));
     }
     units
 }
@@ -447,7 +489,7 @@ fn units<'a>(stream: &Stream, data: &'a [u8], candidates: Vec<Params>) -> Vec<Un
 /// tokens without a miss: a cheap guess, to be verified by coding the whole stream.
 pub fn first_exact(stream: &Stream, data: &[u8], candidates: Vec<Params>) -> Option<Detection> {
     let mut found: Vec<(usize, Detection)> = vec![];
-    for mut u in units(stream, data, candidates) {
+    for mut u in units(stream, data, candidates, &[]) {
         u.run(stream, TRIAL_TOKENS, 0);
         found.extend(u.detections().filter(|(_, d)| d.misses == 0));
     }
@@ -455,7 +497,7 @@ pub fn first_exact(stream: &Stream, data: &[u8], candidates: Vec<Params>) -> Opt
 }
 
 pub fn detect_among(stream: &Stream, data: &[u8], candidates: Vec<Params>) -> Option<Detection> {
-    detect_among_followed(stream, data, candidates).map(|(d, _)| d)
+    detect_among_followed(stream, data, candidates, &[]).map(|(d, _)| d)
 }
 
 /// [`detect_among`], and the emulation of the candidate found as far as it went.
@@ -463,8 +505,9 @@ fn detect_among_followed<'a>(
     stream: &Stream,
     data: &'a [u8],
     candidates: Vec<Params>,
+    cuts: &[usize],
 ) -> Option<(Detection, Option<Followed<'a>>)> {
-    let mut units = units(stream, data, candidates);
+    let mut units = units(stream, data, candidates, cuts);
     let take = |units: Vec<Unit<'a>>, i: usize| units.into_iter().find_map(|u| u.into_followed(i));
     let mut limit = TRIAL_TOKENS;
     loop {
@@ -509,10 +552,13 @@ struct MultiRun<'a> {
     tokens: usize,
     complete: bool,
     lost: bool,
+    /// Where checkpoints are taken, and each lane's taken so far.
+    cuts: Vec<usize>,
+    cps: Vec<Vec<Option<Checkpoint>>>,
 }
 
 impl<'a> MultiRun<'a> {
-    fn new(data: &'a [u8], lanes: Vec<(usize, Params)>) -> Self {
+    fn new(data: &'a [u8], lanes: Vec<(usize, Params)>, cuts: &[usize]) -> Self {
         let params: Vec<Params> = lanes.iter().map(|&(_, p)| p).collect();
         MultiRun {
             m: MultiSlow::new(data, &params),
@@ -523,6 +569,8 @@ impl<'a> MultiRun<'a> {
             tokens: 0,
             complete: false,
             lost: false,
+            cuts: cuts.to_vec(),
+            cps: vec![vec![]; lanes.len()],
         }
     }
 
@@ -551,14 +599,20 @@ impl<'a> MultiRun<'a> {
             self.token += 1;
             self.tokens += 1;
             self.pos += t.span();
+            for (k, cps) in self.cps.iter_mut().enumerate() {
+                mark(&self.cuts, self.pos, || self.m.checkpoint(k), cps);
+            }
             self.kill_above(give_up);
         }
     }
 
     /// Candidate `i`'s emulation, if it is one of the lanes.
-    fn into_followed(self, i: usize) -> Option<Followed<'a>> {
+    fn into_followed(mut self, i: usize) -> Option<Followed<'a>> {
         let k = self.ids.iter().position(|&j| j == i)?;
-        Some(self.m.into_followed(k, self.pos))
+        let cps = std::mem::take(&mut self.cps[k]);
+        let mut f = self.m.into_followed(k, self.pos);
+        f.cps = cps;
+        Some(f)
     }
 
     fn kill_above(&mut self, give_up: usize) {

@@ -492,6 +492,31 @@ impl<'a> Engine<'a> {
         }
     }
 
+    /// Lane `k`'s checkpoint, as [`Emulator::checkpoint`]; None for a dead lane.
+    fn checkpoint(&self, k: usize) -> Option<Checkpoint> {
+        let l = &self.lanes[k];
+        if !l.alive || !l.p.resumable() || self.finished || l.pending.is_some() {
+            return None;
+        }
+        let w = &self.win;
+        let (length, source) = if self.kind == Kind::Lazy && l.len > 2 {
+            (l.len, usize::try_from(w.origin as isize + l.src).ok()?)
+        } else if self.kind == Kind::Lazy {
+            (l.len, 0)
+        } else {
+            (2, 0)
+        };
+        Some(Checkpoint {
+            cursor: w.origin + w.cursor,
+            origin: w.origin,
+            fed: w.fed,
+            zero_mark: w.zero_mark,
+            held: self.held,
+            length,
+            source,
+        })
+    }
+
     /// Refills the window.
     fn refill(&mut self) {
         loop {
@@ -872,28 +897,7 @@ impl<'a> Emulator<'a> {
     /// The checkpoint of this emulator, where it can be resumed (see [`Params::resumable`]),
     /// it has no pending token and is not finished.
     pub fn checkpoint(&self) -> Option<Checkpoint> {
-        let e = &self.e;
-        let l = &e.lanes[0];
-        if !self.p.resumable() || e.finished || l.pending.is_some() {
-            return None;
-        }
-        let w = &e.win;
-        let (length, source) = if e.kind == Kind::Lazy && l.len > 2 {
-            (l.len, usize::try_from(w.origin as isize + l.src).ok()?)
-        } else if e.kind == Kind::Lazy {
-            (l.len, 0)
-        } else {
-            (2, 0)
-        };
-        Some(Checkpoint {
-            cursor: w.origin + w.cursor,
-            origin: w.origin,
-            fed: w.fed,
-            zero_mark: w.zero_mark,
-            held: e.held,
-            length,
-            source,
-        })
+        self.e.checkpoint(0)
     }
 
     /// The emulator rebuilt from `input` and a checkpoint (FORMAT.md, "Checkpoints"), or
@@ -1225,6 +1229,9 @@ pub struct Followed<'a> {
     /// Where the next token starts (before any stored block there): the emulator is there.
     pub pos: usize,
     pub emu: Emulator<'a>,
+    /// Its checkpoints where asked for, if it got there: [`Emulator::checkpoint`] right after
+    /// the token ending at each position, None where there is none.
+    pub cps: Vec<Option<Checkpoint>>,
 }
 
 /// Several lazy-parser emulations (levels 4-9, strategies default, filtered or fixed, the same
@@ -1269,6 +1276,11 @@ impl<'a> MultiSlow<'a> {
         self.e.lanes[lane].alive = false;
     }
 
+    /// Lane `k`'s checkpoint, as [`Emulator::checkpoint`]; None for a dead lane.
+    pub fn checkpoint(&self, k: usize) -> Option<Checkpoint> {
+        self.e.checkpoint(k)
+    }
+
     pub fn any_alive(&self) -> bool {
         self.e.lanes.iter().any(|l| l.alive)
     }
@@ -1288,6 +1300,7 @@ impl<'a> MultiSlow<'a> {
             log,
             pos,
             emu: Emulator { p, e },
+            cps: vec![],
         }
     }
 
