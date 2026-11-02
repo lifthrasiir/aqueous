@@ -233,6 +233,7 @@ dependencies = [
  "aqr-mszip",
  "aqr-obj",
  "aqr-ogg",
+ "aqr-pdb",
  "aqr-pdf",
  "aqr-png",
  "aqr-ppmd",
@@ -295,6 +296,7 @@ dependencies = [
  "aqr-mszip",
  "aqr-obj",
  "aqr-ogg",
+ "aqr-pdb",
  "aqr-pdf",
  "aqr-png",
  "aqr-prores",
@@ -662,6 +664,7 @@ dependencies = [
  "aqr-mszip",
  "aqr-obj",
  "aqr-ogg",
+ "aqr-pdb",
  "aqr-pdf",
  "aqr-png",
  "aqr-prores",
@@ -740,6 +743,15 @@ dependencies = [
  "encoding_rs",
  "getrandom 0.4.3",
  "liblzma",
+ "zstd",
+]
+
+[[package]]
+name = "aqr-pdb"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
  "zstd",
 ]
 

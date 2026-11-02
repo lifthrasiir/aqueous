@@ -250,6 +250,12 @@ pub const DWARF_APPLE: Module = aqr_dwarf::formula::APPLE;
 /// DWARF's `.debug_info` from aqr-dwarf's streams of its DIEs, `.debug_abbrev` and `.debug_str`.
 /// No params or resources.
 pub const DWARF_INFO: Module = aqr_dwarf::formula::INFO;
+/// A PDB file (MSF) from aqr-pdb's streams: its streams one after another, its layout and the
+/// rest of its blocks. No params or resources.
+pub const PDB_MSF: Module = aqr_pdb::formula::MODULE;
+/// The symbol substreams of a PDB file's modules from aqr-pdb's streams of their records' fields.
+/// No params or resources.
+pub const PDB_SYMBOLS: Module = aqr_pdb::formula::SYMBOLS;
 /// An Android resource table from aqr-arsc's streams (string pools, entries, chunks). No params
 /// or resources.
 pub const ARSC: Module = aqr_arsc::formula::MODULE;
@@ -392,6 +398,8 @@ const NATIVE: &[Entry] = &[
     bare(DEX, |p, _, i, n, _| aqr_dex::formula::decode(p, i, n).map_err(err)),
     bare(DWARF_APPLE, |p, _, i, n, _| aqr_dwarf::formula::decode_apple(p, i, n).map_err(err)),
     bare(DWARF_INFO, |p, _, i, n, _| aqr_dwarf::formula::decode_info(p, i, n).map_err(err)),
+    bare(PDB_MSF, |p, _, i, n, _| aqr_pdb::formula::decode(p, i, n).map_err(err)),
+    bare(PDB_SYMBOLS, |p, _, i, n, _| aqr_pdb::formula::decode_symbols(p, i, n).map_err(err)),
     bare(ARSC, |p, _, i, n, _| aqr_arsc::formula::decode(p, i, n).map_err(err)),
     bare(WASM, |p, _, i, n, _| aqr_wasm::formula::decode(p, i, n).map_err(err)),
     bare(GNU_GETTEXT, |p, _, i, n, _| aqr_gnu_gettext::formula::decode(p, i, n).map_err(err)),

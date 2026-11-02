@@ -90,6 +90,8 @@ samples() {
             "    for (i, a) in std::env::args().enumerate() {" "        h.entry(a.clone()).or_default().push(i as u64);" \
             "        b.insert(a.len(), format!(\"{a:?} {i}\"));" "    }" "    println!(\"{h:?} {b:?}\");" "}" > $t/m.rs &&
         rustc -O -g -C split-debuginfo=packed -o $t/m $t/m.rs && cp $t/m.dSYM/Contents/Resources/DWARF/m $out'
+    # a PDB of the symbols of inline sites (pdb-msf, pdb-symbols): Rust's std of x86_64-pc-windows-msvc
+    copy pdb.pdb $codecs/aqr-pdb/corpus/local/std.pdb
     # versions of a program whose code moved (exe-recons/arm64-remap): Mach-O files of 9.4 MB
     # of ARM64 code each, as aqr-compress's test arm64_versions_remapped makes them, the second's
     # functions 37 words on

@@ -5228,6 +5228,16 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/pcm-recons.wasm" title="crates/aqr-modules/wasm/pcm-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-raw/FORMAT.md" title="codecs/aqr-raw/FORMAT.md">R</a>
     <tr>
+      <td><code>fb736a82991e6e3350c215dc41b1a6502cf7a5743cc85c55b4b267d7a9a9e1b1</code>
+      <td>pdb-msf@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/pdb-msf.wasm" title="crates/aqr-modules/wasm/pdb-msf.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-pdb/FORMAT.md" title="codecs/aqr-pdb/FORMAT.md">R</a>
+    <tr>
+      <td><code>5b4c1561f48579b2e5ba57a2ab8f7b32c02ef940380b90ef099a09bd8cd299ed</code>
+      <td>pdb-symbols@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/pdb-symbols.wasm" title="crates/aqr-modules/wasm/pdb-symbols.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-pdb/FORMAT.md" title="codecs/aqr-pdb/FORMAT.md">R</a>
+    <tr>
       <td><code>53f9978815b7f3e0f3532042167212320a906ef55f04393dfa07f5ebb9e12e63</code>
       <td>pdf-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/pdf-recons.wasm" title="crates/aqr-modules/wasm/pdf-recons.wasm">D</a>

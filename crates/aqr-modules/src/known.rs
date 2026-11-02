@@ -334,6 +334,18 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/pcm-recons.block"),
     },
     Known {
+        name: "pdb-msf",
+        version: 1,
+        sha512_256: hex("fb736a82991e6e3350c215dc41b1a6502cf7a5743cc85c55b4b267d7a9a9e1b1"),
+        block: include_bytes!("../wasm/pdb-msf.block"),
+    },
+    Known {
+        name: "pdb-symbols",
+        version: 1,
+        sha512_256: hex("5b4c1561f48579b2e5ba57a2ab8f7b32c02ef940380b90ef099a09bd8cd299ed"),
+        block: include_bytes!("../wasm/pdb-symbols.block"),
+    },
+    Known {
         name: "pdf-recons",
         version: 2,
         sha512_256: hex("53f9978815b7f3e0f3532042167212320a906ef55f04393dfa07f5ebb9e12e63"),

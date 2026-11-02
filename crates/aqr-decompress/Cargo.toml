@@ -26,6 +26,7 @@ aqr-flate = { path = "../../codecs/aqr-flate" }
 aqr-arsc = { path = "../../codecs/aqr-arsc" }
 aqr-dex = { path = "../../codecs/aqr-dex" }
 aqr-dwarf = { path = "../../codecs/aqr-dwarf" }
+aqr-pdb = { path = "../../codecs/aqr-pdb" }
 aqr-fasta = { path = "../../codecs/aqr-fasta" }
 aqr-wasm = { path = "../../codecs/aqr-wasm" }
 aqr-gnu-gettext = { path = "../../codecs/aqr-gnu-gettext" }

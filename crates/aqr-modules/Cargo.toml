@@ -21,6 +21,7 @@ aqr-exe = { path = "../../codecs/aqr-exe", default-features = false, features = 
 aqr-arsc = { path = "../../codecs/aqr-arsc", default-features = false }
 aqr-dex = { path = "../../codecs/aqr-dex", default-features = false }
 aqr-dwarf = { path = "../../codecs/aqr-dwarf", default-features = false }
+aqr-pdb = { path = "../../codecs/aqr-pdb", default-features = false }
 aqr-fasta = { path = "../../codecs/aqr-fasta", default-features = false }
 aqr-gif = { path = "../../codecs/aqr-gif", default-features = false }
 aqr-prores = { path = "../../codecs/aqr-prores", default-features = false }

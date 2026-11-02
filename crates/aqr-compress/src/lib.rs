@@ -43,8 +43,8 @@
 //!   context model with the frame before, in chunks of about 32 MiB.
 //! - Ogg files of Vorbis streams: aqr-ogg, rebuilding the pages from the streams' packets with
 //!   their lacing and CRCs derived, the Vorbis audio packets by aqr-vorbis.
-//! - PNG, GIF, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, Clip Studio Paint, DDS, PDF, SQLite, FASTA, DEX, `resources.arsc`, FITS
-//!   and Wavefront OBJ (by its text, not its name): the recompressor's own formula, its module
+//! - PNG, GIF, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, Clip Studio Paint, DDS, PDF, SQLite, FASTA, DEX, `resources.arsc`, FITS,
+//!   PDB (its container and modules' symbols) and Wavefront OBJ (by its text, not its name): the recompressor's own formula, its module
 //!   applied to its streams, and files it embeds (PDF's DEFLATE streams and images, PSD's and
 //!   JPEG's embedded files, Clip Studio Paint's database) applied to theirs (see aqr-decompress
 //!   for the modules).
@@ -2041,6 +2041,7 @@ fn recompressor(format: Format) -> Recompressor {
         Format::LevelDb => Pure(aqr_snappy::formula::encode),
         Format::Fasta => Pure(aqr_fasta::formula::encode),
         Format::Dex => Pure(aqr_dex::formula::encode),
+        Format::Pdb => Pure(aqr_pdb::formula::encode),
         Format::Arsc => Pure(aqr_arsc::formula::encode),
         Format::GnuGettext => Pure(aqr_gnu_gettext::formula::encode),
         Format::Wasm => Pure(aqr_wasm::formula::encode),

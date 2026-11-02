@@ -75,6 +75,12 @@ own terms; the code is written from that description, not from the encoder's cod
   (public domain) is one of the record's match finders.
 - **GIF** (CompuServe's GIF89a specification): the container and its LZW, in aqr-gif, whose
   tests take the output of ImageMagick, ffmpeg, Pillow and macOS's ImageIO used as black boxes.
+- **DWARF** (the DWARF Standards Committee's DWARF Debugging Information Format, version 5):
+  the format, in aqr-dwarf, written from the standard; Apple's accelerator tables as their
+  layout is described and seen in `dsymutil`'s output.
+- **PDB** (Microsoft's MSF container and CodeView records, as LLVM's documentation of the PDB
+  format describes them): in aqr-pdb, written from those descriptions; Windows' PDBs from
+  Microsoft's symbol server and `lld-link`'s output used as inputs, no PDB reader's code.
 - **lpaq** and **PAQ** (Matt Mahoney and others): the style of binary arithmetic coding and
   context mixing (aqr-gif's model of palette indices: hashed contexts in buckets of a nibble,
   mixers of stretched probabilities, an APM).
