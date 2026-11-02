@@ -298,135 +298,125 @@ pub const RECS_FIELDS: Module = aqr_infer_recs::formula::FIELDS;
 pub const RECS_ENTRIES: Module = aqr_infer_recs::formula::ENTRIES;
 pub const RECS_FLOATS: Module = aqr_infer_recs::formula::FLOATS;
 
-/// Every module of this crate.
-pub const MODULES: [Module; 74] = [
-    X86,
-    X86_REMAP,
-    ARM64,
-    ARM64_REMAP,
-    CIL,
-    PE_RELOC,
-    MACHO_SYMTAB,
-    FLATE,
-    LZ4,
-    LZMA,
-    LZMA2,
-    BCJ_X86,
-    BCJ_POWERPC,
-    BCJ_IA64,
-    BCJ_ARM,
-    BCJ_ARM_THUMB,
-    BCJ_SPARC,
-    BCJ_ARM64,
-    BCJ_RISCV,
-    BCJ_DELTA,
-    BCJ2,
-    LZO,
-    AZO,
-    LHA,
-    RAR5,
-    RAR3,
-    BVX,
-    BZ2,
-    BZ2_ALZ,
-    LZX,
-    MSZIP,
-    SNAPPY,
-    LEVELDB,
-    ZIP,
-    BUNDLE,
-    ASAR,
-    GIT_PACK,
-    GIT_PACK_INDEX,
-    PNG,
-    PNG_AGAINST,
-    PNG_SET,
-    GIF,
-    PRORES,
-    JPEG,
-    MP3,
-    FLAC,
-    PSD,
-    CLIP,
-    BCN,
-    PDF,
-    SQLITE,
-    FASTA,
-    DEX,
-    ARSC,
-    WASM,
-    GNU_GETTEXT,
-    FITS_IMAGE,
-    FITS_RICE,
-    FITS_TABLE,
-    OBJ,
-    VORBIS,
-    OGG,
-    IMA,
-    HDF5_FLOAT,
-    XSV,
-    JSONL,
-    WRT,
-    WRT_HANGUL,
-    PCM,
-    RASTER,
-    RASTER_16,
-    RECS_FIELDS,
-    RECS_ENTRIES,
-    RECS_FLOATS,
-];
-
 /// A module's `decode`: params, resources, inputs, output length and threads.
 pub type Decode = fn(&[u8], &[&[u8]], &[&[u8]], u64, usize) -> std::result::Result<Vec<u8>, String>;
 
-fn msg(e: impl std::fmt::Debug) -> String {
-    format!("{e:?}")
+/// A module of this crate as it runs natively: its `decode`, and whether it takes resources
+/// (those that do not are given none).
+#[derive(Clone, Copy)]
+struct Entry {
+    module: Module,
+    resources: bool,
+    decode: Decode,
 }
 
-/// No resources, for the modules that take none.
-fn none(r: &[&[u8]]) -> std::result::Result<(), String> {
-    if r.is_empty() { Ok(()) } else { Err("resources given".into()) }
+/// [`Entry`] of a module taking resources.
+const fn takes(module: Module, decode: Decode) -> Entry {
+    Entry { module, resources: true, decode }
 }
 
-/// The recompressors' own modules, by their `decode`.
-const RECONS: [(Module, Decode); 36] = [
-    (PNG, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode(p, i, n, t).map_err(msg))),
-    (PNG_AGAINST, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode_against(p, i, n, t).map_err(msg))),
-    (PNG_SET, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode_set(p, i, n, t).map_err(msg))),
-    (GIF, |p, r, i, n, t| none(r).and_then(|_| aqr_gif::formula::decode(p, i, n, t).map_err(msg))),
-    (PRORES, |p, r, i, n, t| none(r).and_then(|_| aqr_prores::formula::decode(p, i, n, t).map_err(msg))),
-    (JPEG, |p, r, i, n, t| none(r).and_then(|_| aqr_jpeg::formula::decode(p, i, n, t).map_err(msg))),
-    (MP3, |p, r, i, n, t| aqr_mp3::formula::decode(p, r, i, n, t).map_err(msg)),
-    (FLAC, |p, r, i, n, t| aqr_flac::formula::decode(p, r, i, n, t).map_err(msg)),
-    (PSD, |p, r, i, n, t| none(r).and_then(|_| aqr_psd::formula::decode(p, i, n, t).map_err(msg))),
-    (CLIP, |p, r, i, n, t| none(r).and_then(|_| aqr_clip::formula::decode(p, i, n, t).map_err(msg))),
-    (BCN, |p, r, i, n, t| none(r).and_then(|_| aqr_tex::formula::decode(p, i, n, t).map_err(msg))),
-    (PDF, |p, r, i, n, t| none(r).and_then(|_| aqr_pdf::formula::decode(p, i, n, t).map_err(msg))),
-    (SQLITE, |p, r, i, n, t| none(r).and_then(|_| aqr_sqlite::formula::decode(p, i, n, t).map_err(msg))),
-    (FASTA, |p, r, i, n, t| none(r).and_then(|_| aqr_fasta::formula::decode(p, i, n, t).map_err(msg))),
-    (DEX, |p, r, i, n, _| none(r).and_then(|_| aqr_dex::formula::decode(p, i, n).map_err(msg))),
-    (ARSC, |p, r, i, n, _| none(r).and_then(|_| aqr_arsc::formula::decode(p, i, n).map_err(msg))),
-    (WASM, |p, r, i, n, _| none(r).and_then(|_| aqr_wasm::formula::decode(p, i, n).map_err(msg))),
-    (GNU_GETTEXT, |p, r, i, n, _| none(r).and_then(|_| aqr_gnu_gettext::formula::decode(p, i, n).map_err(msg))),
-    (FITS_IMAGE, |p, r, i, n, _| none(r).and_then(|_| aqr_fits::formula::decode_image(p, i, n).map_err(msg))),
-    (FITS_RICE, |p, r, i, n, _| none(r).and_then(|_| aqr_fits::formula::decode_rice(p, i, n).map_err(msg))),
-    (FITS_TABLE, |p, r, i, n, _| none(r).and_then(|_| aqr_fits::formula::decode_table(p, i, n).map_err(msg))),
-    (OBJ, |p, r, i, n, t| none(r).and_then(|_| aqr_obj::formula::decode(p, i, n, t).map_err(msg))),
-    (VORBIS, |p, r, i, n, _| none(r).and_then(|_| aqr_vorbis::formula::decode(p, i, n).map_err(msg))),
-    (OGG, |p, r, i, n, _| none(r).and_then(|_| aqr_ogg::formula::decode(p, i, n).map_err(msg))),
-    (IMA, |p, r, i, n, _| none(r).and_then(|_| aqr_ima::formula::decode(p, i, n).map_err(msg))),
-    (HDF5_FLOAT, |p, r, i, n, _| none(r).and_then(|_| aqr_hdf5::module::float(p, i, n).map_err(msg))),
-    (XSV, |p, r, i, n, t| none(r).and_then(|_| aqr_xsv::formula::decode(p, i, n, t).map_err(msg))),
-    (JSONL, |p, r, i, n, t| none(r).and_then(|_| aqr_jsonl::formula::decode(p, i, n, t).map_err(msg))),
-    (WRT, |p, r, i, n, t| aqr_wrt::formula::decode(p, r, i, n, t).map_err(msg)),
-    (WRT_HANGUL, |p, r, i, n, t| aqr_wrt::formula::decode_hangul(p, r, i, n, t).map_err(msg)),
-    (PCM, |p, r, i, n, t| aqr_raw::formula::pcm::decode(p, r, i, n, t).map_err(msg)),
-    (RASTER, |p, r, i, n, t| none(r).and_then(|_| aqr_raw::formula::raster::decode(p, i, n, t).map_err(msg))),
-    (RASTER_16, |p, r, i, n, _| none(r).and_then(|_| aqr_raw::formula::raster16::decode(p, i, n).map_err(msg))),
-    (RECS_FIELDS, |p, r, i, n, _| none(r).and_then(|_| aqr_infer_recs::formula::decode_fields(p, i, n).map_err(msg))),
-    (RECS_ENTRIES, |p, r, i, n, _| none(r).and_then(|_| aqr_infer_recs::formula::decode_entries(p, i, n).map_err(msg))),
-    (RECS_FLOATS, |p, r, i, n, _| none(r).and_then(|_| aqr_infer_recs::formula::decode_floats(p, i, n).map_err(msg))),
+/// [`Entry`] of a module taking none.
+const fn bare(module: Module, decode: Decode) -> Entry {
+    Entry { module, resources: false, decode }
+}
+
+fn err(e: impl std::fmt::Display) -> String {
+    e.to_string()
+}
+
+/// A filter of aqr-bcj's.
+fn bcj(m: Module, p: &[u8], i: &[&[u8]], n: u64) -> std::result::Result<Vec<u8>, String> {
+    aqr_bcj::formula::decode(m, p, i, n).ok_or("not of aqr-bcj")?.map_err(err)
+}
+
+/// Every module of this crate, as it runs natively.
+const NATIVE: &[Entry] = &[
+    takes(X86, |p, r, i, n, _| aqr_exe::module::x86(p, r, i, n).map_err(err)),
+    takes(X86_REMAP, |p, r, i, n, _| aqr_exe::module::x86_remap(p, r, i, n).map_err(err)),
+    bare(ARM64, |p, _, i, n, _| aqr_exe::module::arm64(p, i, n).map_err(err)),
+    bare(ARM64_REMAP, |p, _, i, n, _| aqr_exe::module::arm64_remap(p, i, n).map_err(err)),
+    bare(CIL, |p, _, i, n, _| aqr_exe::module::cil(p, i, n).map_err(err)),
+    bare(PE_RELOC, |p, _, i, n, _| aqr_exe::module::reloc(p, i, n).map_err(err)),
+    bare(MACHO_SYMTAB, |p, _, i, n, _| aqr_exe::module::macho_symtab(p, i, n).map_err(err)),
+    takes(FLATE, |p, r, i, n, t| aqr_flate::formula::decode(p, r, i, n, t).map_err(err)),
+    bare(LZ4, |p, _, i, n, t| aqr_lz4::formula::decode(p, i, n, t).map_err(err)),
+    bare(LZMA, |p, _, i, n, t| aqr_lzma::formula::decode(p, i, n, t).map_err(err)),
+    bare(LZMA2, |p, _, i, n, t| aqr_lzma::formula::decode2(p, i, n, t).map_err(err)),
+    bare(BCJ_X86, |p, _, i, n, _| bcj(BCJ_X86, p, i, n)),
+    bare(BCJ_POWERPC, |p, _, i, n, _| bcj(BCJ_POWERPC, p, i, n)),
+    bare(BCJ_IA64, |p, _, i, n, _| bcj(BCJ_IA64, p, i, n)),
+    bare(BCJ_ARM, |p, _, i, n, _| bcj(BCJ_ARM, p, i, n)),
+    bare(BCJ_ARM_THUMB, |p, _, i, n, _| bcj(BCJ_ARM_THUMB, p, i, n)),
+    bare(BCJ_SPARC, |p, _, i, n, _| bcj(BCJ_SPARC, p, i, n)),
+    bare(BCJ_ARM64, |p, _, i, n, _| bcj(BCJ_ARM64, p, i, n)),
+    bare(BCJ_RISCV, |p, _, i, n, _| bcj(BCJ_RISCV, p, i, n)),
+    bare(BCJ_DELTA, |p, _, i, n, _| bcj(BCJ_DELTA, p, i, n)),
+    bare(BCJ2, |p, _, i, n, _| bcj(BCJ2, p, i, n)),
+    bare(LZO, |p, _, i, n, t| aqr_lzo::formula::decode(p, i, n, t).map_err(err)),
+    bare(AZO, |p, _, i, n, t| aqr_azo::formula::decode(p, i, n, t).map_err(err)),
+    bare(LHA, |p, _, i, n, t| aqr_lha::formula::decode(p, i, n, t).map_err(err)),
+    bare(RAR5, |p, _, i, n, t| aqr_rar::formula::decode5(p, i, n, t).map_err(err)),
+    bare(RAR3, |p, _, i, n, t| aqr_rar::formula::decode3(p, i, n, t).map_err(err)),
+    bare(BVX, |p, _, i, n, t| aqr_bvx::formula::decode(p, i, n, t).map_err(err)),
+    bare(BZ2, |p, _, i, n, t| aqr_bz2::formula::decode(p, i, n, t).map_err(err)),
+    bare(BZ2_ALZ, |p, _, i, n, t| aqr_bz2::formula::decode_alz(p, i, n, t).map_err(err)),
+    bare(LZX, |p, _, i, n, t| aqr_lzx::formula::decode(p, i, n, t).map_err(err)),
+    bare(MSZIP, |p, _, i, n, _| aqr_mszip::module::decode(p, i, n).map_err(err)),
+    bare(SNAPPY, |p, _, i, n, t| aqr_snappy::formula::decode(p, i, n, t).map_err(err)),
+    bare(LEVELDB, |p, _, i, n, t| aqr_snappy::formula::decode_table(p, i, n, t).map_err(err)),
+    bare(ZIP, |p, _, i, n, t| aqr_zip::formula::decode(p, i, n, t).map_err(err)),
+    bare(BUNDLE, |p, _, i, n, t| aqr_bundle::formula::decode(p, i, n, t).map_err(err)),
+    bare(ASAR, |p, _, i, n, t| aqr_asar::formula::decode(p, i, n, t).map_err(err)),
+    bare(GIT_PACK, |p, _, i, n, t| aqr_git::formula::decode(p, i, n, t).map_err(err)),
+    bare(GIT_PACK_INDEX, |p, _, i, n, t| aqr_git::formula::decode_index(p, i, n, t).map_err(err)),
+    bare(PNG, |p, _, i, n, t| aqr_png::formula::decode(p, i, n, t).map_err(err)),
+    bare(PNG_AGAINST, |p, _, i, n, t| aqr_png::formula::decode_against(p, i, n, t).map_err(err)),
+    bare(PNG_SET, |p, _, i, n, t| aqr_png::formula::decode_set(p, i, n, t).map_err(err)),
+    bare(GIF, |p, _, i, n, t| aqr_gif::formula::decode(p, i, n, t).map_err(err)),
+    bare(PRORES, |p, _, i, n, t| aqr_prores::formula::decode(p, i, n, t).map_err(err)),
+    bare(JPEG, |p, _, i, n, t| aqr_jpeg::formula::decode(p, i, n, t).map_err(err)),
+    takes(MP3, |p, r, i, n, t| aqr_mp3::formula::decode(p, r, i, n, t).map_err(err)),
+    takes(FLAC, |p, r, i, n, t| aqr_flac::formula::decode(p, r, i, n, t).map_err(err)),
+    bare(PSD, |p, _, i, n, t| aqr_psd::formula::decode(p, i, n, t).map_err(err)),
+    bare(CLIP, |p, _, i, n, t| aqr_clip::formula::decode(p, i, n, t).map_err(err)),
+    bare(BCN, |p, _, i, n, t| aqr_tex::formula::decode(p, i, n, t).map_err(err)),
+    bare(PDF, |p, _, i, n, t| aqr_pdf::formula::decode(p, i, n, t).map_err(err)),
+    bare(SQLITE, |p, _, i, n, t| aqr_sqlite::formula::decode(p, i, n, t).map_err(err)),
+    bare(FASTA, |p, _, i, n, t| aqr_fasta::formula::decode(p, i, n, t).map_err(err)),
+    bare(DEX, |p, _, i, n, _| aqr_dex::formula::decode(p, i, n).map_err(err)),
+    bare(ARSC, |p, _, i, n, _| aqr_arsc::formula::decode(p, i, n).map_err(err)),
+    bare(WASM, |p, _, i, n, _| aqr_wasm::formula::decode(p, i, n).map_err(err)),
+    bare(GNU_GETTEXT, |p, _, i, n, _| aqr_gnu_gettext::formula::decode(p, i, n).map_err(err)),
+    bare(FITS_IMAGE, |p, _, i, n, _| aqr_fits::formula::decode_image(p, i, n).map_err(err)),
+    bare(FITS_RICE, |p, _, i, n, _| aqr_fits::formula::decode_rice(p, i, n).map_err(err)),
+    bare(FITS_TABLE, |p, _, i, n, _| aqr_fits::formula::decode_table(p, i, n).map_err(err)),
+    bare(OBJ, |p, _, i, n, t| aqr_obj::formula::decode(p, i, n, t).map_err(err)),
+    bare(VORBIS, |p, _, i, n, _| aqr_vorbis::formula::decode(p, i, n).map_err(err)),
+    bare(OGG, |p, _, i, n, _| aqr_ogg::formula::decode(p, i, n).map_err(err)),
+    bare(IMA, |p, _, i, n, _| aqr_ima::formula::decode(p, i, n).map_err(err)),
+    bare(HDF5_FLOAT, |p, _, i, n, _| aqr_hdf5::module::float(p, i, n).map_err(err)),
+    bare(XSV, |p, _, i, n, t| aqr_xsv::formula::decode(p, i, n, t).map_err(err)),
+    bare(JSONL, |p, _, i, n, t| aqr_jsonl::formula::decode(p, i, n, t).map_err(err)),
+    takes(WRT, |p, r, i, n, t| aqr_wrt::formula::decode(p, r, i, n, t).map_err(err)),
+    takes(WRT_HANGUL, |p, r, i, n, t| aqr_wrt::formula::decode_hangul(p, r, i, n, t).map_err(err)),
+    takes(PCM, |p, r, i, n, t| aqr_raw::formula::pcm::decode(p, r, i, n, t).map_err(err)),
+    bare(RASTER, |p, _, i, n, t| aqr_raw::formula::raster::decode(p, i, n, t).map_err(err)),
+    bare(RASTER_16, |p, _, i, n, _| aqr_raw::formula::raster16::decode(p, i, n).map_err(err)),
+    bare(RECS_FIELDS, |p, _, i, n, _| aqr_infer_recs::formula::decode_fields(p, i, n).map_err(err)),
+    bare(RECS_ENTRIES, |p, _, i, n, _| aqr_infer_recs::formula::decode_entries(p, i, n).map_err(err)),
+    bare(RECS_FLOATS, |p, _, i, n, _| aqr_infer_recs::formula::decode_floats(p, i, n).map_err(err)),
 ];
+
+/// Every module of this crate.
+pub const MODULES: [Module; NATIVE.len()] = {
+    let mut out = [NATIVE[0].module; NATIVE.len()];
+    let mut i = 0;
+    while i < NATIVE.len() {
+        out[i] = NATIVE[i].module;
+        i += 1;
+    }
+    out
+};
 
 /// The file in archive `c`, an archive of a single file.
 pub fn decompress(c: &[u8], threads: usize) -> std::result::Result<Vec<u8>, Failure> {
@@ -560,96 +550,11 @@ impl Native {
         inputs: &[&[u8]],
         len: u64,
     ) -> std::result::Result<Vec<u8>, String> {
-        let threads = self.threads.max(1);
-        if m == X86 {
-            aqr_exe::module::x86(params, resources, inputs, len).map_err(str::to_owned)
-        } else if m == X86_REMAP {
-            aqr_exe::module::x86_remap(params, resources, inputs, len).map_err(str::to_owned)
-        } else if m == ARM64 {
-            none(resources)?;
-            aqr_exe::module::arm64(params, inputs, len).map_err(str::to_owned)
-        } else if m == ARM64_REMAP {
-            none(resources)?;
-            aqr_exe::module::arm64_remap(params, inputs, len).map_err(str::to_owned)
-        } else if m == CIL {
-            none(resources)?;
-            aqr_exe::module::cil(params, inputs, len).map_err(str::to_owned)
-        } else if m == PE_RELOC {
-            none(resources)?;
-            aqr_exe::module::reloc(params, inputs, len).map_err(str::to_owned)
-        } else if m == MACHO_SYMTAB {
-            none(resources)?;
-            aqr_exe::module::macho_symtab(params, inputs, len).map_err(str::to_owned)
-        } else if m == FLATE {
-            aqr_flate::formula::decode(params, resources, inputs, len, threads).map_err(msg)
-        } else if m == LZ4 {
-            none(resources)?;
-            aqr_lz4::formula::decode(params, inputs, len, threads).map_err(msg)
-        } else if m == LZMA {
-            none(resources)?;
-            aqr_lzma::formula::decode(params, inputs, len, threads).map_err(msg)
-        } else if m == LZMA2 {
-            none(resources)?;
-            aqr_lzma::formula::decode2(params, inputs, len, threads).map_err(msg)
-        } else if m == LZO {
-            none(resources)?;
-            aqr_lzo::formula::decode(params, inputs, len, threads).map_err(msg)
-        } else if m == AZO {
-            none(resources)?;
-            aqr_azo::formula::decode(params, inputs, len, threads).map_err(msg)
-        } else if m == LHA {
-            none(resources)?;
-            aqr_lha::formula::decode(params, inputs, len, threads).map_err(msg)
-        } else if m == RAR5 {
-            none(resources)?;
-            aqr_rar::formula::decode5(params, inputs, len, threads).map_err(msg)
-        } else if m == RAR3 {
-            none(resources)?;
-            aqr_rar::formula::decode3(params, inputs, len, threads).map_err(msg)
-        } else if m == BVX {
-            none(resources)?;
-            aqr_bvx::formula::decode(params, inputs, len, threads).map_err(msg)
-        } else if m == BZ2 {
-            none(resources)?;
-            aqr_bz2::formula::decode(params, inputs, len, threads).map_err(msg)
-        } else if m == BZ2_ALZ {
-            none(resources)?;
-            aqr_bz2::formula::decode_alz(params, inputs, len, threads).map_err(msg)
-        } else if m == LZX {
-            none(resources)?;
-            aqr_lzx::formula::decode(params, inputs, len, threads).map_err(msg)
-        } else if m == MSZIP {
-            none(resources)?;
-            aqr_mszip::module::decode(params, inputs, len).map_err(msg)
-        } else if m == SNAPPY {
-            none(resources)?;
-            aqr_snappy::formula::decode(params, inputs, len, threads).map_err(msg)
-        } else if m == LEVELDB {
-            none(resources)?;
-            aqr_snappy::formula::decode_table(params, inputs, len, threads).map_err(msg)
-        } else if m == ZIP {
-            none(resources)?;
-            aqr_zip::formula::decode(params, inputs, len, threads).map_err(msg)
-        } else if m == BUNDLE {
-            none(resources)?;
-            aqr_bundle::formula::decode(params, inputs, len, threads).map_err(msg)
-        } else if m == ASAR {
-            none(resources)?;
-            aqr_asar::formula::decode(params, inputs, len, threads).map_err(msg)
-        } else if m == GIT_PACK {
-            none(resources)?;
-            aqr_git::formula::decode(params, inputs, len, threads).map_err(msg)
-        } else if m == GIT_PACK_INDEX {
-            none(resources)?;
-            aqr_git::formula::decode_index(params, inputs, len, threads).map_err(msg)
-        } else if let Some((_, decode)) = RECONS.iter().find(|r| r.0 == m) {
-            decode(params, resources, inputs, len, threads)
-        } else if let Some(out) = aqr_bcj::formula::decode(m, params, inputs, len) {
-            none(resources)?;
-            out.map_err(msg)
-        } else {
-            Err("unknown module".into())
+        let e = NATIVE.iter().find(|e| e.module == m).ok_or("unknown module")?;
+        if !e.resources && !resources.is_empty() {
+            return Err("resources given".into());
         }
+        (e.decode)(params, resources, inputs, len, self.threads.max(1))
     }
 }
 
