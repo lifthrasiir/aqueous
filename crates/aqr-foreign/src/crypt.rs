@@ -21,11 +21,7 @@ const CRC: [u32; 256] = {
         let mut c = i as u32;
         let mut k = 0;
         while k < 8 {
-            c = if c & 1 != 0 {
-                0xedb8_8320 ^ (c >> 1)
-            } else {
-                c >> 1
-            };
+            c = if c & 1 != 0 { 0xedb8_8320 ^ (c >> 1) } else { c >> 1 };
             k += 1;
         }
         t[i] = c;
@@ -52,10 +48,7 @@ impl ZipCrypto {
     fn update(&mut self, b: u8) {
         let k = &mut self.0;
         k[0] = crc_byte(k[0], b);
-        k[1] = k[1]
-            .wrapping_add(k[0] & 0xff)
-            .wrapping_mul(134_775_813)
-            .wrapping_add(1);
+        k[1] = k[1].wrapping_add(k[0] & 0xff).wrapping_mul(134_775_813).wrapping_add(1);
         k[2] = crc_byte(k[2], (k[1] >> 24) as u8);
     }
 
@@ -132,16 +125,13 @@ pub fn winzip_aes_encrypt(passphrase: &[u8], salt: &[u8; WINZIP_SALT], data: &[u
 
 /// The bytes of the AES key of WinZip's `strength` (1 to 3: 128 to 256 bits).
 fn winzip_key(strength: u8) -> Option<usize> {
-    (1..=3)
-        .contains(&strength)
-        .then_some(8 + 8 * strength as usize)
+    (1..=3).contains(&strength).then_some(8 + 8 * strength as usize)
 }
 
 /// The data of `body` encrypted by WinZip's AES of `strength` (1 to 3: 128 to 256 bits) by
 /// `passphrase`: its salt, the passphrase's verifier, the data and its authentication code.
 pub fn winzip_aes_decrypt(passphrase: &[u8], strength: u8, body: &[u8]) -> Result<Vec<u8>, Fail> {
-    let key =
-        winzip_key(strength).ok_or_else(|| Fail::Bad(format!("AES of strength {strength}")))?;
+    let key = winzip_key(strength).ok_or_else(|| Fail::Bad(format!("AES of strength {strength}")))?;
     let salt = key / 2;
     if body.len() < salt + 2 + 10 {
         return Err(Fail::Bad("cut short".into()));
@@ -174,8 +164,7 @@ pub fn winzip_aes_verifies(passphrase: &[u8], strength: u8, body: &[u8]) -> bool
         return false;
     };
     let salt = key / 2;
-    body.len() >= salt + 2
-        && winzip_keys(passphrase, &body[..salt], key)[2 * key..] == body[salt..salt + 2]
+    body.len() >= salt + 2 && winzip_keys(passphrase, &body[..salt], key)[2 * key..] == body[salt..salt + 2]
 }
 
 /// The power of 7-Zip's rounds of SHA-256 for a key that is written (its default).
@@ -197,19 +186,13 @@ impl SevenzProps {
     /// The properties of the coder's bytes `p`.
     pub fn parse(p: &[u8]) -> Result<SevenzProps, String> {
         let b0 = *p.first().ok_or("AES: no properties")?;
-        let mut props = SevenzProps {
-            power: b0 & 0x3f,
-            salt: Vec::new(),
-            iv: [0; 16],
-        };
+        let mut props = SevenzProps { power: b0 & 0x3f, salt: Vec::new(), iv: [0; 16] };
         // (b0: bit 7 a salt given, bit 6 an IV given; b1: their lengths less one, in its nibbles)
         if b0 & 0xc0 != 0 {
             let b1 = *p.get(1).ok_or("AES: bad properties")?;
             let salt_len = (b0 >> 7 & 1) as usize + (b1 >> 4) as usize;
             let iv_len = (b0 >> 6 & 1) as usize + (b1 & 15) as usize;
-            let rest = p
-                .get(2..2 + salt_len + iv_len)
-                .ok_or("AES: bad properties")?;
+            let rest = p.get(2..2 + salt_len + iv_len).ok_or("AES: bad properties")?;
             props.salt = rest[..salt_len].to_vec();
             props.iv[..iv_len].copy_from_slice(&rest[salt_len..]);
         }
@@ -230,10 +213,7 @@ impl SevenzProps {
 
 /// `passphrase` (UTF-8, as typed) in UTF-16LE, as 7-Zip takes it.
 fn utf16le(passphrase: &[u8]) -> Vec<u8> {
-    String::from_utf8_lossy(passphrase)
-        .encode_utf16()
-        .flat_map(u16::to_le_bytes)
-        .collect()
+    String::from_utf8_lossy(passphrase).encode_utf16().flat_map(u16::to_le_bytes).collect()
 }
 
 /// 7-Zip's AES-256 key of `passphrase` (UTF-8, taken in UTF-16LE), `salt` and 2^`power`
@@ -268,10 +248,7 @@ pub struct SevenzEncryptor {
 
 impl SevenzEncryptor {
     pub fn new(key: &[u8; 32], iv: &[u8; 16]) -> SevenzEncryptor {
-        SevenzEncryptor {
-            enc: cbc::Encryptor::new(key.into(), iv.into()),
-            carry: Vec::new(),
-        }
+        SevenzEncryptor { enc: cbc::Encryptor::new(key.into(), iv.into()), carry: Vec::new() }
     }
 
     /// The encryption of the blocks `data` completes.
@@ -279,10 +256,7 @@ impl SevenzEncryptor {
         self.carry.extend_from_slice(data);
         let whole = self.carry.len() / 16 * 16;
         let mut out: Vec<u8> = self.carry.drain(..whole).collect();
-        out.as_chunks_mut::<16>()
-            .0
-            .iter_mut()
-            .for_each(|b| self.enc.encrypt_block_mut(b.into()));
+        out.as_chunks_mut::<16>().0.iter_mut().for_each(|b| self.enc.encrypt_block_mut(b.into()));
         out
     }
 
@@ -332,11 +306,7 @@ fn sevenz_key_once(passphrase: &[u8], salt: &[u8], power: u8) -> [u8; 32] {
 
 /// The data of `input` encrypted by 7-Zip's AES-256 of properties `props` by `passphrase` (of
 /// any length of a multiple of 16: the padding past the coder's output is the caller's to cut).
-pub fn sevenz_aes_decrypt(
-    passphrase: &[u8],
-    props: &[u8],
-    input: &[u8],
-) -> Result<Vec<u8>, String> {
+pub fn sevenz_aes_decrypt(passphrase: &[u8], props: &[u8], input: &[u8]) -> Result<Vec<u8>, String> {
     let p = SevenzProps::parse(props)?;
     let key = sevenz_key_once(passphrase, &p.salt, p.power);
     if !input.len().is_multiple_of(16) {
@@ -366,10 +336,7 @@ mod tests {
             z.update(p);
         }
         assert_eq!(ZipCrypto::open(pass, &c, b"b").unwrap(), &plain[12..]);
-        assert_eq!(
-            ZipCrypto::open(b"secreT", &c, b"b").filter(|d| d == &plain[12..]),
-            None
-        );
+        assert_eq!(ZipCrypto::open(b"secreT", &c, b"b").filter(|d| d == &plain[12..]), None);
     }
 
     #[test]
@@ -389,30 +356,15 @@ mod tests {
     fn sevenz_aes_round_trips() {
         let iv = [3; 16];
         let props = SevenzProps::written(&iv);
-        assert_eq!(
-            SevenzProps::parse(&props),
-            Ok(SevenzProps {
-                power: SEVENZ_POWER,
-                salt: Vec::new(),
-                iv
-            })
-        );
+        assert_eq!(SevenzProps::parse(&props), Ok(SevenzProps { power: SEVENZ_POWER, salt: Vec::new(), iv }));
         let data = b"the data of a folder";
-        let c = sevenz_aes_encrypt(
-            &sevenz_key("p\u{e4}ss".as_bytes(), &[], SEVENZ_POWER),
-            &iv,
-            data,
-        );
+        let c = sevenz_aes_encrypt(&sevenz_key("p\u{e4}ss".as_bytes(), &[], SEVENZ_POWER), &iv, data);
         assert_eq!(c.len(), 32);
         let d = sevenz_aes_decrypt("p\u{e4}ss".as_bytes(), &props, &c).unwrap();
         assert_eq!(&d[..data.len()], data);
-        assert_ne!(
-            &sevenz_aes_decrypt(b"pass", &props, &c).unwrap()[..data.len()],
-            data
-        );
+        assert_ne!(&sevenz_aes_decrypt(b"pass", &props, &c).unwrap()[..data.len()], data);
         // (in pieces, the same)
-        let mut e =
-            SevenzEncryptor::new(&sevenz_key("p\u{e4}ss".as_bytes(), &[], SEVENZ_POWER), &iv);
+        let mut e = SevenzEncryptor::new(&sevenz_key("p\u{e4}ss".as_bytes(), &[], SEVENZ_POWER), &iv);
         let mut pieces: Vec<u8> = data.chunks(7).flat_map(|p| e.feed(p)).collect();
         pieces.extend(e.finish());
         assert_eq!(pieces, c);
