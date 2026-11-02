@@ -1070,6 +1070,9 @@ struct Found {
     parent: Option<usize>,
     dir: bool,
     plain: bool,
+    /// Of a directory, what was read of it ([`meta::stat`]) before what it holds was listed:
+    /// as listing it changes its access time (Linux's `relatime`, where it is a day old).
+    stat: Option<std::io::Result<meta::Stat>>,
 }
 
 /// The names of the path in the archive of `input`: those `to` gives (`--rename`), exactly;
@@ -1129,7 +1132,7 @@ fn gather(
                 g.contents.push((f.path.clone(), os_bytes(f.path.as_os_str()), f.size));
                 l.bytes(f.size);
             }
-            walk(dir, None, &mut found, l)?;
+            walk(dir, None, &mut found, l, privileged)?;
         }
         _ => {
             // (by their names in the archive, the directories found among the inputs or on the way)
@@ -1140,7 +1143,7 @@ fn gather(
                 for k in 1..names.len() {
                     let at = dirs.entry(names[..k].to_vec()).or_insert_with(|| {
                         let name = names[k - 1].clone();
-                        found.push(Found { path: PathBuf::new(), name, parent, dir: true, plain: true });
+                        found.push(Found { path: PathBuf::new(), name, parent, dir: true, plain: true, stat: None });
                         found.len() - 1
                     });
                     parent = Some(*at);
@@ -1154,7 +1157,14 @@ fn gather(
                     }
                     _ => {
                         let name = names.last().unwrap().clone();
-                        found.push(Found { path: input.clone(), name, parent, dir: t.is_dir(), plain: false });
+                        found.push(Found {
+                            path: input.clone(),
+                            name,
+                            parent,
+                            dir: t.is_dir(),
+                            plain: false,
+                            stat: None,
+                        });
                         found.len() - 1
                     }
                 };
@@ -1163,15 +1173,16 @@ fn gather(
                 }
                 if t.is_dir() {
                     dirs.entry(names).or_insert(at);
-                    walk(input, Some(at), &mut found, l)?;
+                    walk(input, Some(at), &mut found, l, privileged)?;
                 }
             }
             taken_twice(&found)?;
         }
     }
     l.walked();
+    let early: Vec<_> = found.iter_mut().map(|f| f.stat.take()).collect();
     let stats = aqr_common::pool::par_map(found.len(), threads.min(STAT_THREADS), |i| {
-        if found[i].plain {
+        if found[i].plain || early[i].is_some() {
             return None;
         }
         let s = meta::stat(&found[i].path, privileged);
@@ -1184,8 +1195,8 @@ fn gather(
     });
     // (by the entries found, the entry made of each)
     let mut made: Vec<Option<usize>> = Vec::with_capacity(found.len());
-    for (f, s) in found.iter().zip(stats) {
-        let Some(s) = s else {
+    for ((f, s), e) in found.iter().zip(stats).zip(early) {
+        let Some(s) = s.or(e) else {
             let parent = f.parent.map(|p| made[p].expect("a directory made"));
             let name = name_from(&os_bytes(&f.name));
             g.tree.entries.push(Entry { parent, name, node: EntryNode::Dir, extra: Default::default() });
@@ -1227,8 +1238,22 @@ fn taken_twice(found: &[Found]) -> Result<(), String> {
 }
 
 /// Finds what directory `dir` (found as `parent`) holds, by name, and what those directories
-/// hold in turn, each directory followed by what it holds.
-fn walk(dir: &Path, parent: Option<usize>, found: &mut Vec<Found>, l: &view::Listing) -> Result<(), String> {
+/// hold in turn, each directory followed by what it holds. On Unix, each directory found is read
+/// ([`meta::stat`]) before it is listed.
+fn walk(
+    dir: &Path,
+    parent: Option<usize>,
+    found: &mut Vec<Found>,
+    l: &view::Listing,
+    privileged: bool,
+) -> Result<(), String> {
+    // (not on Windows, where reading takes longer and listing a directory leaves its access
+    // time, NTFS's, mostly as it was: there they are read with the rest, on threads)
+    if cfg!(unix)
+        && let Some(p) = parent
+    {
+        found[p].stat = Some(meta::stat(dir, privileged));
+    }
     l.dir(dir);
     let err = |e: std::io::Error| format!("{}: {e}", dir.display());
     let mut names: Vec<(OsString, fs::FileType)> = fs::read_dir(dir)
@@ -1239,14 +1264,14 @@ fn walk(dir: &Path, parent: Option<usize>, found: &mut Vec<Found>, l: &view::Lis
     names.sort_by(|a, b| a.0.cmp(&b.0));
     for (name, t) in names {
         let path = dir.join(&name);
-        found.push(Found { path, name, parent, dir: t.is_dir(), plain: false });
+        found.push(Found { path, name, parent, dir: t.is_dir(), plain: false, stat: None });
         if t.is_file() {
             l.found();
         }
         if t.is_dir() {
             let at = found.len() - 1;
             let path = found[at].path.clone();
-            walk(&path, Some(at), found, l)?;
+            walk(&path, Some(at), found, l, privileged)?;
         }
     }
     Ok(())
