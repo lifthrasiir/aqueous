@@ -260,11 +260,17 @@ fn bytes_os(b: &[u8]) -> OsString {
 }
 
 /// Bytes `b` as text: what is UTF-8 as it is, other bytes as `%XX` (as macOS writes names of HFS
-/// that are not UTF-8).
+/// that are not UTF-8), and so `%` itself, and `\\` (on Windows a separator; here likely a byte
+/// of a character not decoded, as 5C of Shift_JIS's): one name, to be taken back as it was.
 pub fn escaped(b: &[u8]) -> String {
     let mut out = String::new();
     for chunk in b.utf8_chunks() {
-        out.push_str(chunk.valid());
+        for c in chunk.valid().chars() {
+            match c {
+                '%' | '\\' => out.push_str(&format!("%{:02X}", c as u8)),
+                c => out.push(c),
+            }
+        }
         for c in chunk.invalid() {
             out.push_str(&format!("%{c:02X}"));
         }
@@ -364,5 +370,8 @@ mod tests {
         assert_eq!(normalized(w, Some(Form::Composed)), b"\xc3\xa9\xed\xa0\x80\xc3\xa9");
         assert_eq!(units(b"a\xed\xa0\x80b"), [Some('a'), None, Some('b')]);
         assert_eq!(escaped(b"a\xb0\xa1b"), "a%B0%A1b");
+        // (5C, of a character of Shift_JIS not decoded, and `%` escaped too: one name, taken
+        // back as it was)
+        assert_eq!(escaped(b"\x95\\\x8e\xa6%.txt"), "%95%5C%8E%A6%25.txt");
     }
 }
