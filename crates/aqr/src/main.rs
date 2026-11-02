@@ -1,10 +1,10 @@
 //! Compresses files and directories into Aqueous archives, and decompresses them, as zstd does.
 //!
-//! usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-p] [-q | -v] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N]
+//! usage: aqr [-c | -d | -t | -L] [-o OUTPUT] [-f] [-p] [-q | -v] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N]
 //! [--batch MIB | -B SIZE] [-b SIZE] [-D] [--no-check] [-P] [--wasm] [--no-sandbox] [--stats[=FILE]] [-h]
 //! INPUT [--rename TO]...
 //!
-//! aqr -d [OPTIONS] ARCHIVE [PATH [--rename TO]]...; aqr -d --each [OPTIONS] ARCHIVE...
+//! aqr -d [OPTIONS] ARCHIVE [PATH [--rename TO]]...; aqr -d --each [OPTIONS] ARCHIVE...; aqr -L [-q | -v] ARCHIVE...
 //!
 //! - `-c` (the default; `aqr`): each input into `INPUT.aqr`, a file as an archive of a single
 //!   file, a directory as an archive of what it holds; with `-o`, all the inputs into one
@@ -42,6 +42,8 @@
 //!   (`foo.zip` of `foo/` into `foo/`, never `foo/foo/`). `-o` is where it goes instead of
 //!   beside it, a directory (with several archives too).
 //! - `-t`: each archive decoded as `-d` does, but nothing written (its checksums checked).
+//! - `-L`: the entries of each archive listed on standard output, and what each file takes of
+//!   the archive and how it is made ([`list`]); `-q` the paths alone, `-v` all that is told.
 //! - `-P`: compressing, the archives encrypted with a passphrase ([`aqr::envelope`]), asked for
 //!   as the work begins (twice on a terminal); decompressing, asked for then rather than as an
 //!   archive needs it. An encrypted archive (of either kind) is opened by the passphrases that
@@ -106,6 +108,7 @@ use std::time::Instant;
 mod extract;
 mod fold;
 mod ipc;
+mod list;
 mod meta;
 mod pass;
 mod stats;
@@ -126,6 +129,7 @@ const HELP: &str = "\
 usage: aqr [OPTIONS] INPUT [--rename TO]...
        aqr -d [OPTIONS] ARCHIVE [PATH [--rename TO]]...
        aqr -d --each [OPTIONS] ARCHIVE...
+       aqr -L [-q | -v] ARCHIVE...
        unaqr [OPTIONS] ARCHIVE [PATH [--rename TO]]...
 
 Modes:
@@ -136,6 +140,8 @@ Modes:
                         (or -o); .gz, .bz2, .xz, .lzma and .zst into the name
                         without them
   -t, --test            decode and check an archive, writing nothing
+  -L, --list            list the entries of archives (-q: the paths alone; -v: the
+                        blocks each file takes, its formula and all its metadata)
 
 Compressing (aqr -o ARCHIVE INPUT [--rename TO]...):
   INPUT                 a file or directory; several of them archived by their paths,
@@ -198,6 +204,8 @@ struct Args {
     decompress: bool,
     /// Decompressing, but nothing written.
     test: bool,
+    /// Listing the archives' entries (`-L`).
+    list: bool,
     wasm: bool,
     /// The modules not known (all, with `wasm`) run in a sandbox.
     sandbox: bool,
@@ -275,7 +283,7 @@ fn main() -> ExitCode {
         eprintln!("aqr: {e}");
         return ExitCode::FAILURE;
     }
-    if let Err(e) = pass::init(args.passphrase, !args.decompress) {
+    if let Err(e) = pass::init(args.passphrase, !args.decompress && !args.list) {
         eprintln!("aqr: {e}");
         ipc::tell(serde_json::json!({"event": "error", "message": e}));
         return ExitCode::FAILURE;
@@ -285,7 +293,11 @@ fn main() -> ExitCode {
         aqr_common::trace::enable();
     }
     aqr_common::pool::init(args.opt.threads);
-    let r = aqr_common::pool::run(|| if args.decompress { decompress_all(&args) } else { compress_all(&args) });
+    let r = aqr_common::pool::run(|| match () {
+        _ if args.list => list::list_all(&args),
+        _ if args.decompress => decompress_all(&args),
+        _ => compress_all(&args),
+    });
     // (of the archives done, whether or not all are)
     let r = match args.stats.as_ref().map(|s| s.write(std::io::stderr().is_terminal())) {
         Some(Err(e)) => r.and(Err(e)),
@@ -308,6 +320,7 @@ fn parse() -> Result<Args, String> {
     let mut a = Args {
         decompress: unaqr,
         test: false,
+        list: false,
         wasm: false,
         sandbox: true,
         output: None,
@@ -351,9 +364,10 @@ fn parse() -> Result<Args, String> {
                 println!("aqr {}", env!("AQR_VERSION"));
                 std::process::exit(0);
             }
-            "-c" | "--compress" => a.decompress = false,
-            "-d" | "--decompress" => a.decompress = true,
-            "-t" | "--test" => (a.decompress, a.test) = (true, true),
+            "-c" | "--compress" => (a.decompress, a.list) = (false, false),
+            "-d" | "--decompress" => (a.decompress, a.test, a.list) = (true, false, false),
+            "-t" | "--test" => (a.decompress, a.test, a.list) = (true, true, false),
+            "-L" | "--list" => a.list = true,
             "--wasm" => a.wasm = true,
             "--no-sandbox" => a.sandbox = false,
             "-o" => a.output = Some(value("-o")?.into()),
@@ -408,6 +422,12 @@ fn parse() -> Result<Args, String> {
     }
     if a.opt.threads == 0 {
         a.opt.threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    }
+    if a.list {
+        if a.output.is_some() || !renames.is_empty() {
+            return Err("-L takes archives alone".into());
+        }
+        return Ok(a);
     }
     if !a.decompress {
         if a.each {

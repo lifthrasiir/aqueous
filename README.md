@@ -64,6 +64,7 @@ are in [`docs/file-formats.md`](docs/file-formats.md).
 cargo build -r -p aqr
 target/release/aqr -c -o out.aqr some/directory   # compress
 target/release/aqr -t out.aqr                     # test
+target/release/aqr -L out.aqr                     # list (-v: blocks, formulas, metadata)
 target/release/aqr -d out.aqr                     # extract
 target/release/aqr -d out.aqr a/b.txt --rename b.txt   # extract a path alone (to b.txt)
 ```

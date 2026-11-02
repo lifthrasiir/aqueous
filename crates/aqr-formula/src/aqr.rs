@@ -31,9 +31,11 @@
 
 mod dict;
 pub mod envelope;
+mod listing;
 mod segment;
 mod tree;
 
+pub use listing::Listed;
 pub use segment::{Batch, ContentAt, Layout, Leaf, Placed, Segment, SegmentWriter};
 pub use tree::{
     Entry, EntryNode, Extra, MAC_FLAGS_ALLOWED, Time, Tree, WIN_ATTRS_ALLOWED, Xattr, Zone, name_bytes, name_from,
@@ -2806,6 +2808,18 @@ struct Blocks<'c> {
     module_data: Vec<&'c [u8]>,
     resource_data: Vec<&'c [u8]>,
     dictionaries: Vec<dict::Dictionary>,
+    /// The bytes each block takes in the archive, framing and padding too ([`listing`]).
+    sizes: BlockSizes,
+}
+
+/// The bytes each block takes in the archive, by its index among those of its kind.
+#[derive(Default)]
+struct BlockSizes {
+    leaves: Vec<u64>,
+    non_leaf: Vec<u64>,
+    modules: Vec<u64>,
+    resources: Vec<u64>,
+    dictionaries: Vec<u64>,
 }
 
 enum LeafBlock<'c> {
@@ -2835,6 +2849,7 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool, sealed: bool) -> Decoded<Bloc
         module_data: Vec::new(),
         resource_data: Vec::new(),
         dictionaries: Vec::new(),
+        sizes: BlockSizes::default(),
     };
     // the generic structure first: a block of an undefined critical type anywhere in it makes
     // the archive unsupported, whatever else is wrong with the other blocks
@@ -2862,15 +2877,15 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool, sealed: bool) -> Decoded<Bloc
             }
             at += 1;
         }
-        framed.push((start, ty, data));
+        framed.push((start, ty, data, (at - start) as u64));
     }
     if sealed && framed.first().is_none_or(|b| b.1 != SIZE_HINT) {
         return invalid("an encrypted archive's payload without a size hint block");
     }
-    if let Some(&(_, ty, _)) = framed.iter().find(|&&(_, ty, _)| critical(ty) && !defined(ty)) {
+    if let Some(&(_, ty, ..)) = framed.iter().find(|&&(_, ty, ..)| critical(ty) && !defined(ty)) {
         return Err(Failure::Unsupported(format!("a block of an undefined critical type {ty:#x}")));
     }
-    for (start, ty, data) in framed {
+    for (start, ty, data, size) in framed {
         let at = start + HEADER_MAGIC.len();
         // (content blocks after a metadata block are of another segment)
         if !b.metadata.is_empty() && matches!(ty, 0x20..=0x37 | 0x40..=0x4b | 0x50..=0x57 | 0x60..=0x67 | 0x70..=0x77) {
@@ -2891,29 +2906,34 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool, sealed: bool) -> Decoded<Bloc
             0x20..=0x37 => {
                 let (data, dict) = dictionary_of(data, ty & 0x10 != 0, b.dictionaries.len())?;
                 b.leaf_at.push(at);
+                b.sizes.leaves.push(size);
                 b.leaf_dictionary.push(dict);
                 b.leaves.push(LeafBlock::Stored(data, ty & 0x18 != 0, ty & 0x04 != 0, dict));
             }
             0x40..=0x4b => {
                 let (data, dict) = dictionary_of(data, ty & 0x08 != 0, b.dictionaries.len())?;
                 b.non_leaf.push((data, ty & 0x0c != 0, dict));
+                b.sizes.non_leaf.push(size);
             }
             // a shorthand block: the hash of a registered dictionary
             0x50 => return resource("registered dictionaries are not supported yet"),
             // dictionary blocks: `0101 0tss`
             0x51..=0x57 => {
                 b.dictionary_at.push(at);
+                b.sizes.dictionaries.push(size);
                 b.dictionaries.push(dict::Dictionary::read(decoded(data, true, true)?, ty & 0x04 != 0)?);
             }
             // a shorthand block: the hash of a registered module
             0x60 => return resource("registered modules are not supported yet"),
             0x61..=0x63 => {
                 b.module_at.push(at);
+                b.sizes.modules.push(size);
                 b.modules.push(decoded(data, true, true)?);
                 b.module_data.push(data);
             }
             0x64..=0x67 => {
                 b.resource_at.push(at);
+                b.sizes.resources.push(size);
                 b.resources.push(Resource::new(decoded(data, true, true)?));
                 b.resource_data.push(data);
             }
@@ -2927,6 +2947,7 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool, sealed: bool) -> Decoded<Bloc
                 }
                 b.formulas.push((&data[p..], dict));
                 b.leaf_at.push(at);
+                b.sizes.leaves.push(size);
                 b.leaf_dictionary.push(dict);
                 b.leaves.push(LeafBlock::Formula {
                     outputs,
