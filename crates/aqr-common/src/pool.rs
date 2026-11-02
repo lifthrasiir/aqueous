@@ -534,7 +534,8 @@ pub fn par_map_apart<R: Send + crate::wire::Wire>(n: usize, threads: usize, f: i
 /// memory), each on a worker as one is free, and the worker is given back as `f` returns. So
 /// no thread waits holding a worker, which work still running can reserve (an item's own
 /// threads). On the calling thread alone where `threads` is 1, or there are no threads. A panic
-/// of `f` stops what is not let in yet and is resumed here.
+/// of `f` stops what is not let in yet and is resumed here; one of `admit` is, once what was
+/// let in before it has returned.
 pub fn dispatch<G: Send, R: Send>(
     n: usize,
     threads: usize,
@@ -574,43 +575,46 @@ pub fn dispatch_any<G: Send, R: Send>(
     let (out, running, done, failed, f) = (&out, &running, &done, &failed, &f);
     let p = pool();
     let mut hs = Vec::new();
-    for _ in 0..n {
-        if failed.load(Ordering::Relaxed) {
-            break;
-        }
-        let (i, g) = next();
-        let slot = &out[i];
-        let w = crate::trace::wait("worker");
-        {
-            let mut r = running.lock().unwrap();
-            while *r >= threads - 1 {
-                r = done.wait(r).unwrap();
+    // (the items borrow this frame: joined however letting them in ends, `next` may panic)
+    let admitted = catch_unwind(AssertUnwindSafe(|| {
+        for _ in 0..n {
+            if failed.load(Ordering::Relaxed) {
+                break;
             }
-            *r += 1;
-        }
-        let mut free = p.free.lock().unwrap();
-        while *free == 0 {
-            free = p.freed.wait(free).unwrap();
-        }
-        *free -= 1;
-        drop(free);
-        drop(w);
-        let job = move || {
-            let r = catch_unwind(AssertUnwindSafe(|| f(i, g)));
-            if r.is_err() {
-                failed.store(true, Ordering::Relaxed);
+            let (i, g) = next();
+            let slot = &out[i];
+            let w = crate::trace::wait("worker");
+            {
+                let mut r = running.lock().unwrap();
+                while *r >= threads - 1 {
+                    r = done.wait(r).unwrap();
+                }
+                *r += 1;
             }
-            *running.lock().unwrap() -= 1;
-            done.notify_all();
-            match r {
-                Ok(r) => *slot.lock().unwrap() = Some(r),
-                Err(p) => resume_unwind(p),
+            let mut free = p.free.lock().unwrap();
+            while *free == 0 {
+                free = p.freed.wait(free).unwrap();
             }
-        };
-        // SAFETY: each joined below, before what `job` borrows goes
-        hs.push(unsafe { Reservation { n: 1 }.spawn_unchecked(job, None) });
-    }
-    let mut panic = None;
+            *free -= 1;
+            drop(free);
+            drop(w);
+            let job = move || {
+                let r = catch_unwind(AssertUnwindSafe(|| f(i, g)));
+                if r.is_err() {
+                    failed.store(true, Ordering::Relaxed);
+                }
+                *running.lock().unwrap() -= 1;
+                done.notify_all();
+                match r {
+                    Ok(r) => *slot.lock().unwrap() = Some(r),
+                    Err(p) => resume_unwind(p),
+                }
+            };
+            // SAFETY: each joined below, before what `job` borrows goes
+            hs.push(unsafe { Reservation { n: 1 }.spawn_unchecked(job, None) });
+        }
+    }));
+    let mut panic = admitted.err();
     for h in hs {
         if let Err(p) = h.join() {
             panic.get_or_insert(p);
@@ -718,6 +722,35 @@ mod tests {
         // (every worker back)
         drop(_turn);
         drop(exclusive());
+    }
+
+    /// A panic of `admit` comes once what was let in before it has returned, as that borrows
+    /// the frame of `dispatch`.
+    #[test]
+    fn dispatch_admit_panics() {
+        let _turn = exclusive();
+        if size() < 1 {
+            return;
+        }
+        // (static: the item may outlive what `dispatch` borrows, the bug this test is for)
+        static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            dispatch(
+                2,
+                2,
+                |i| {
+                    if i == 1 {
+                        panic!("admit 1");
+                    }
+                },
+                |_, ()| {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    DONE.store(true, Ordering::SeqCst);
+                },
+            )
+        }));
+        assert!(r.is_err());
+        assert!(DONE.load(Ordering::SeqCst), "the panic came with item 0 still running");
     }
 
     /// Work that borrows, a pipeline of stages blocking on each other, panics; never more
