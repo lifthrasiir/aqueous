@@ -501,34 +501,34 @@ fn code_streamed(
     }
     let done: Vec<Mutex<Option<Result<tokens::Recorder>>>> =
         ranges.iter().map(|_| Mutex::new(None)).collect();
-    // at most two segments waiting per thread: the parse waits for the coding
+    // at most two segments waiting per thread: more the parse codes itself
     let (tx, rx) = mpsc::sync_channel::<(usize, Vec<Token>)>(2 * threads);
-    let rx = Mutex::new(rx);
-    // the parse here, the coding on the workers of the pool there are (or here too)
-    let parsed = aqr_common::pool::scope(threads - 1, |scope| {
-        if scope.workers() == 0 {
-            return None;
-        }
-        for _ in 0..scope.workers() {
-            scope.spawn(|| {
-                loop {
-                    // (the lock only while taking a segment, not while coding it)
-                    let job = rx.lock().unwrap().recv();
-                    let Ok((i, toks)) = job else { break };
+    let (tx, rx) = (Mutex::new(Some(tx)), Mutex::new(rx));
+    let parsed = Mutex::new(None);
+    // The parse on one thread, the coding on the others: workers free now, or freed later (a
+    // map takes them as they are), as the parse runs. The parse codes a segment itself where
+    // none takes it (all busy, or none yet), so that it never waits for them.
+    aqr_common::pool::par_map(threads, threads, |k| {
+        if k == 0 {
+            let tx = tx.lock().unwrap().take().expect("one parse");
+            let r = split_parsed(raw, &f.stats.cuts, |i, toks| match tx.try_send((i, toks)) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full((i, toks)) | mpsc::TrySendError::Disconnected((i, toks))) => {
                     *done[i].lock().unwrap() = Some(code(i, &toks));
                 }
             });
+            drop(tx);
+            *parsed.lock().unwrap() = Some(r);
+        } else {
+            loop {
+                // (the lock only while taking a segment, not while coding it)
+                let job = rx.lock().unwrap().recv();
+                let Ok((i, toks)) = job else { break };
+                *done[i].lock().unwrap() = Some(code(i, &toks));
+            }
         }
-        let r = split_parsed(raw, &f.stats.cuts, |i, toks| {
-            let _ = tx.send((i, toks));
-        });
-        drop(tx);
-        Some(r)
     });
-    match parsed {
-        None => return serial(),
-        Some(r) => r?,
-    }
+    parsed.into_inner().unwrap().expect("parsed")?;
     done.into_iter()
         .map(|d| d.into_inner().unwrap().ok_or(Error::Inconsistent)?)
         .collect()
