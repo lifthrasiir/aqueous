@@ -2,6 +2,11 @@
 
 use flate_zoo::{Sweep, presets_of};
 
+/// Whether the encoder of `spec` is built: zlib-ng and zlib-chromium are not with MSVC.
+fn built(spec: &&str) -> bool {
+    flate_zoo::backend(spec.split(':').next().unwrap()).is_some()
+}
+
 /// zlib's Huffman headers are what [`aqr_flate::header::zlib_header`] builds for each block.
 #[test]
 fn zlib_headers_are_predicted() {
@@ -186,7 +191,7 @@ fn multi_slow_matches_single() {
         })
         .collect();
     for input in &inputs {
-        for spec in specs {
+        for spec in specs.into_iter().filter(built) {
             let raw = spec
                 .parse::<flate_zoo::Encoder>()
                 .unwrap()
@@ -484,7 +489,10 @@ fn followed_emulations_carry_on() {
         "zlib:level=9,mem=1",
         "zlib-ng:level=6",
         "libdeflate:level=9",
-    ] {
+    ]
+    .into_iter()
+    .filter(built)
+    {
         for input in &inputs {
             let raw = spec
                 .parse::<flate_zoo::Encoder>()

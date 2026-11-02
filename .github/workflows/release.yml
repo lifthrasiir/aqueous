@@ -46,8 +46,6 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
       - id: stem
         run: |
           s=${GITHUB_REF_NAME#v0.0.}
@@ -86,8 +84,6 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
       - id: stem
         run: |
           s=${GITHUB_REF_NAME#v0.0.}
@@ -118,8 +114,6 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
       - id: stem
         run: |
           s=${GITHUB_REF_NAME#v0.0.}
@@ -151,8 +145,6 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
       - id: stem
         run: |
           s=${GITHUB_REF_NAME#v0.0.}

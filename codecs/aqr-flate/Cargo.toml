@@ -16,11 +16,23 @@ train = ["dep:flate-zoo", "dep:rayon"]
 [dependencies]
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
-flate-zoo = { path = "../../flate-zoo", optional = true }
+flate-zoo = { workspace = true, optional = true }
 rayon = { version = "1.12.0", optional = true }
 
 [dev-dependencies]
-flate-zoo = { path = "../../flate-zoo" }
+flate-zoo.workspace = true
+
+# flate-zoo's backends that do not work with MSVC (the root Cargo.toml has why).
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+flate-zoo = { workspace = true, optional = true, features = [
+    "zlib-ng", "zlib-chromium", "zlib-cloudflare", "libslz", "cryptopp", "go", "gzip", "infozip", "ect",
+] }
+
+# flate-zoo's backends that do not work with MSVC (the root Cargo.toml has why).
+[target.'cfg(not(target_env = "msvc"))'.dev-dependencies]
+flate-zoo = { workspace = true, features = [
+    "zlib-ng", "zlib-chromium", "zlib-cloudflare", "libslz", "cryptopp", "go", "gzip", "infozip", "ect",
+] }
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.

@@ -18,23 +18,6 @@
         "type": "github"
       }
     },
-    "flate-zoo": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1792979090,
-        "narHash": "sha256-swXsFGJ8FDcaVhL4Ca+CqV+UoROrcEsozAxmdkxvnFU=",
-        "owner": "lifthrasiir",
-        "repo": "flate-zoo",
-        "rev": "2724c73c3efe336ee66db62dc188b5189a38149a",
-        "type": "github"
-      },
-      "original": {
-        "owner": "lifthrasiir",
-        "repo": "flate-zoo",
-        "rev": "2724c73c3efe336ee66db62dc188b5189a38149a",
-        "type": "github"
-      }
-    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1793341285,
@@ -69,7 +52,6 @@
     "root": {
       "inputs": {
         "flake-parts": "flake-parts",
-        "flate-zoo": "flate-zoo",
         "nixpkgs": "nixpkgs",
         "rust-overlay": "rust-overlay"
       }

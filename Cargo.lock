@@ -1462,6 +1462,8 @@ checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 [[package]]
 name = "flate-zoo"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03fc6433c84b7e092f83f06cd645b3c2e85c1c06ecdfb3b0f230305acecbb123"
 dependencies = [
  "cc",
  "deflate",
