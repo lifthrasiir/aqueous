@@ -272,13 +272,7 @@ trait Side {
     fn bit(&mut self, b: &mut Bit, v: bool, cat: Cat) -> bool;
 
     /// `n` bits of probability 1/2, from the top.
-    fn raw(&mut self, n: u32, v: u32, cat: Cat) -> u32 {
-        let mut x = 0;
-        for i in (0..n).rev() {
-            x = x << 1 | self.bit(&mut Bit::default(), v >> i & 1 != 0, cat) as u32;
-        }
-        x
-    }
+    fn raw(&mut self, n: u32, v: u32, cat: Cat) -> u32;
 
     /// `v < 2^31` as Elias gamma of `v + 1`: its bit length less 1 in unary under the adaptive
     /// bits `t` (the last one shared beyond), then the bits below the top one under `t`'s
@@ -311,32 +305,21 @@ trait Side {
     }
 }
 
-pub struct Enc {
-    c: ArithEncoder,
-    pub cost: [f64; CATS],
-}
+/// The encoder, counting the bits of each [`Cat`].
+type Enc = aqr_common::arith::Costed<CATS>;
 
-impl Side for Enc {
+/// Each side of `aqr_common::arith`'s coder codes the record, each bit of a [`Cat`].
+impl<C: aqr_common::arith::Coder> Side for C {
     #[inline]
     fn bit(&mut self, b: &mut Bit, v: bool, cat: Cat) -> bool {
-        let p1 = b.p1();
-        self.cost[cat as usize] -= ((if v { p1 } else { 65536 - p1 }) as f64 / 65536.0).log2();
-        self.c.encode(v, p1);
-        b.update(v);
-        v
+        aqr_common::arith::Coder::set_cat(self, cat as usize);
+        aqr_common::arith::Coder::bit(self, b, v)
     }
-}
 
-struct Dec<'a> {
-    c: ArithDecoder<'a>,
-}
-
-impl Side for Dec<'_> {
     #[inline]
-    fn bit(&mut self, b: &mut Bit, _: bool, _: Cat) -> bool {
-        let v = self.c.decode(b.p1());
-        b.update(v);
-        v
+    fn raw(&mut self, n: u32, v: u32, cat: Cat) -> u32 {
+        aqr_common::arith::Coder::set_cat(self, cat as usize);
+        aqr_common::arith::Coder::raws(self, n, v as u64) as u32
     }
 }
 
@@ -995,7 +978,7 @@ pub fn split_into(chunks: &[(&[u8], usize)], data: &mut [u8]) -> Result<(Vec<u8>
         lzx::e8_decode(out);
         parses.push(Some(p));
     }
-    let mut enc = Enc { c: ArithEncoder::new(Vec::new()), cost: [0.0; CATS] };
+    let mut enc = Enc::with(ArithEncoder::new(Vec::new()));
     let mut w = Walker::new(lzx::WIM);
     for (raw, p) in data.chunks(CHUNK).zip(&parses) {
         w.chunk(&mut enc, raw, Some(p), None)?;
@@ -1012,11 +995,11 @@ pub fn join(data: &[u8], record: &[u8]) -> Result<Vec<u8>> {
 
 /// [`join`] onto `out`.
 pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>) -> Result<()> {
-    let mut dec = Dec { c: ArithDecoder::new(record) };
+    let mut dec = ArithDecoder::new(record);
     let mut w = Walker::new(lzx::WIM);
     for raw in data.chunks(CHUNK) {
         w.chunk(&mut dec, raw, None, Some(out))?;
-        if dec.c.overrun() {
+        if dec.overrun() {
             return Err(corrupt());
         }
     }
@@ -1030,16 +1013,16 @@ pub fn split_stream(src: &[u8], n: usize, v: Variant) -> Result<Split> {
     if let Some(size) = parse.e8 {
         lzx::e8_decode_frames(&mut data, size);
     }
-    let mut enc = Enc { c: ArithEncoder::new(Vec::new()), cost: [0.0; CATS] };
+    let mut enc = Enc::with(ArithEncoder::new(Vec::new()));
     Walker::new(v).chunk(&mut enc, &data, Some(&Some(parse)), None)?;
     Ok(Split { data, record: enc.c.finish(), cost: enc.cost })
 }
 
 /// The stream of `v` that `data` and `record` rebuild, onto `out`.
 pub fn join_stream_onto(data: &[u8], record: &[u8], v: Variant, out: &mut Vec<u8>) -> Result<()> {
-    let mut dec = Dec { c: ArithDecoder::new(record) };
+    let mut dec = ArithDecoder::new(record);
     Walker::new(v).chunk(&mut dec, data, None, Some(out))?;
-    if dec.c.overrun() {
+    if dec.overrun() {
         return Err(corrupt());
     }
     Ok(())

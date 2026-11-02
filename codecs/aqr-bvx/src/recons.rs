@@ -399,57 +399,33 @@ trait Coder {
     fn bit(&mut self, b: &mut Bit, v: bool, cat: Cat) -> bool;
 
     /// `n` bits of probability 1/2.
-    fn raw(&mut self, n: u32, v: u32, cat: Cat) -> u32 {
-        let mut x = 0;
-        for i in (0..n).rev() {
-            x = x << 1 | self.bit(&mut Bit::default(), v >> i & 1 != 0, cat) as u32;
-        }
-        x
-    }
+    fn raw(&mut self, n: u32, v: u32, cat: Cat) -> u32;
 
     /// `v < 2^32 - 1` as Elias gamma of `v + 1`: its bit length less 1 in unary under the
     /// adaptive bits `t` (the last one shared beyond), then the bits below the top one, raw.
-    fn gamma(&mut self, t: &mut [Bit], v: u32, cat: Cat) -> Result<u32> {
-        let x = v.wrapping_add(1);
-        let len = u32::BITS - x.leading_zeros();
-        let mut b = 0;
-        while self.bit(&mut t[b.min(t.len() - 1)], b + 1 < len as usize, cat) {
-            b += 1;
-            if b == 31 {
-                return Err(corrupt());
-            }
-        }
-        let low = self.raw(b as u32, x, cat);
-        Ok((1 << b | low) - 1)
-    }
+    fn gamma(&mut self, t: &mut [Bit], v: u32, cat: Cat) -> Result<u32>;
 }
 
-struct Enc {
-    c: ArithEncoder,
-    cost: [f64; CATS],
-}
+/// The encoder, counting the bits of each [`Cat`].
+type Enc = aqr_common::arith::Costed<CATS>;
 
-impl Coder for Enc {
+/// Each side of `aqr_common::arith`'s coder codes the record, each bit of a [`Cat`].
+impl<C: aqr_common::arith::Coder> Coder for C {
     #[inline]
     fn bit(&mut self, b: &mut Bit, v: bool, cat: Cat) -> bool {
-        let p1 = b.p1();
-        self.cost[cat as usize] -= ((if v { p1 } else { 65536 - p1 }) as f64 / 65536.0).log2();
-        self.c.encode(v, p1);
-        b.update(v);
-        v
+        aqr_common::arith::Coder::set_cat(self, cat as usize);
+        aqr_common::arith::Coder::bit(self, b, v)
     }
-}
 
-struct Dec<'a> {
-    c: ArithDecoder<'a>,
-}
-
-impl Coder for Dec<'_> {
     #[inline]
-    fn bit(&mut self, b: &mut Bit, _: bool, _: Cat) -> bool {
-        let v = self.c.decode(b.p1());
-        b.update(v);
-        v
+    fn raw(&mut self, n: u32, v: u32, cat: Cat) -> u32 {
+        aqr_common::arith::Coder::set_cat(self, cat as usize);
+        aqr_common::arith::Coder::raws(self, n, v as u64) as u32
+    }
+
+    fn gamma(&mut self, t: &mut [Bit], v: u32, cat: Cat) -> Result<u32> {
+        aqr_common::arith::Coder::set_cat(self, cat as usize);
+        aqr_common::arith::Coder::gamma32(self, t, v, corrupt)
     }
 }
 
@@ -795,7 +771,7 @@ pub struct Split {
 
 /// The record of `plan` over `data`.
 pub fn record(data: &[u8], plan: &Plan) -> Result<(Vec<u8>, [f64; CATS])> {
-    let mut e = Enc { c: ArithEncoder::new(Vec::new()), cost: [0.0; CATS] };
+    let mut e = Enc::with(ArithEncoder::new(Vec::new()));
     let mut p = plan.clone();
     code(&mut e, data, &mut p, true)?;
     code_fill(&mut e, &mut p, true)?;
@@ -815,11 +791,11 @@ pub fn split(s: &[u8], limit: usize) -> Result<Split> {
 
 /// The plan that `record` codes over `data`.
 pub fn plan(data: &[u8], record: &[u8]) -> Result<Plan> {
-    let mut dec = Dec { c: ArithDecoder::new(record) };
+    let mut dec = ArithDecoder::new(record);
     let mut p = Plan::default();
     code(&mut dec, data, &mut p, false)?;
     code_fill(&mut dec, &mut p, false)?;
-    if dec.c.overrun() {
+    if dec.overrun() {
         return Err(corrupt());
     }
     Ok(p)

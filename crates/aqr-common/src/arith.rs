@@ -270,6 +270,11 @@ impl<const CATS: usize> Costed<CATS> {
     pub fn new(cat: usize) -> Self {
         Costed { c: ArithEncoder::new(Vec::new()), cat, cost: [0.0; CATS] }
     }
+
+    /// The encoder `c` (its output so far kept), counting from kind 0.
+    pub fn with(c: ArithEncoder) -> Self {
+        Costed { c, cat: 0, cost: [0.0; CATS] }
+    }
 }
 
 impl<const CATS: usize> Coder for Costed<CATS> {

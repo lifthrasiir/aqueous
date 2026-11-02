@@ -90,13 +90,7 @@ impl Ctx {
 trait Side {
     fn bit(&mut self, b: &mut Bit, v: bool, cat: Cat) -> bool;
     /// `n` bits of probability 1/2.
-    fn raw(&mut self, n: u32, v: u32, cat: Cat) -> u32 {
-        let mut x = 0;
-        for i in (0..n).rev() {
-            x = x << 1 | self.bit(&mut Bit::default(), v >> i & 1 != 0, cat) as u32;
-        }
-        x
-    }
+    fn raw(&mut self, n: u32, v: u32, cat: Cat) -> u32;
     /// `n` bits under the contexts of the bits before them.
     fn tree(&mut self, t: &mut [Bit], n: u32, v: u32, cat: Cat) -> u32 {
         let mut m = 1;
@@ -115,32 +109,21 @@ trait Side {
     }
 }
 
-struct Enc {
-    c: ArithEncoder,
-    cost: [f64; CATS],
-}
+/// The encoder, counting the bits of each [`Cat`].
+type Enc = aqr_common::arith::Costed<CATS>;
 
-impl Side for Enc {
+/// Each side of `aqr_common::arith`'s coder codes the record, each bit of a [`Cat`].
+impl<C: aqr_common::arith::Coder> Side for C {
     #[inline]
     fn bit(&mut self, b: &mut Bit, v: bool, cat: Cat) -> bool {
-        let p1 = b.p1();
-        self.cost[cat as usize] -= ((if v { p1 } else { 65536 - p1 }) as f64 / 65536.0).log2();
-        self.c.encode(v, p1);
-        b.update(v);
-        v
+        aqr_common::arith::Coder::set_cat(self, cat as usize);
+        aqr_common::arith::Coder::bit(self, b, v)
     }
-}
 
-struct Dec<'a> {
-    c: ArithDecoder<'a>,
-}
-
-impl Side for Dec<'_> {
     #[inline]
-    fn bit(&mut self, b: &mut Bit, _: bool, _: Cat) -> bool {
-        let v = self.c.decode(b.p1());
-        b.update(v);
-        v
+    fn raw(&mut self, n: u32, v: u32, cat: Cat) -> u32 {
+        aqr_common::arith::Coder::set_cat(self, cat as usize);
+        aqr_common::arith::Coder::raws(self, n, v as u64) as u32
     }
 }
 
@@ -400,7 +383,7 @@ fn walk<S: Side>(
 /// `dict` bytes, with `breaks` (none for LZMA), and its cost by [`Cat`] in bits. None where the
 /// packets do not cover the data exactly.
 pub fn deconstruct(data: &[u8], packets: &[Packet], dict: u32, breaks: &[Break]) -> Option<(Vec<u8>, [f64; CATS])> {
-    let mut e = Enc { c: ArithEncoder::new(vec![]), cost: [0.0; CATS] };
+    let mut e = Enc::with(ArithEncoder::new(vec![]));
     let mut mf = Mf::new(data, reach(dict));
     walk(&mut e, &mut mf, data, reach(dict), breaks, Part::START, data.len(), Some(packets), |_| ())?;
     Some((e.c.finish(), e.cost))
@@ -409,10 +392,10 @@ pub fn deconstruct(data: &[u8], packets: &[Packet], dict: u32, breaks: &[Break])
 /// The packets of `data` from its record, given to `emit` as they come. None where the record
 /// does not fit the data (some packets may have been given by then).
 pub fn reconstruct(data: &[u8], record: &[u8], dict: u32, breaks: &[Break], emit: impl FnMut(Packet)) -> Option<()> {
-    let mut d = Dec { c: ArithDecoder::new(record) };
+    let mut d = ArithDecoder::new(record);
     let mut mf = Mf::new(data, reach(dict));
     walk(&mut d, &mut mf, data, reach(dict), breaks, Part::START, data.len(), None, emit)?;
-    (!d.c.overrun()).then_some(())
+    (!d.overrun()).then_some(())
 }
 
 /// Bytes of data from which a record is cut into parts, at the first packet at or past each
@@ -449,7 +432,7 @@ fn deconstruct_parts(
     let code = |k: usize, mf: &mut Mf| {
         let (part, first) = parts[k];
         let (end, last) = parts.get(k + 1).map_or((data.len(), packets.len()), |&(p, i)| (p.at, i));
-        let mut e = Enc { c: ArithEncoder::new(vec![]), cost: [0.0; CATS] };
+        let mut e = Enc::with(ArithEncoder::new(vec![]));
         walk(&mut e, mf, data, reach, &[], part, end, Some(&packets[first..last]), |_| ())?;
         Some(e.c.finish())
     };
@@ -531,20 +514,20 @@ fn rebuild_parts(
     if threads <= 1 || parts.len() == 1 || Mf::at_once(data.len(), reach) < 2 {
         let mut mf = Mf::new(data, reach);
         for (k, &(part, b)) in parts.iter().enumerate() {
-            let mut d = Dec { c: ArithDecoder::new(b) };
+            let mut d = ArithDecoder::new(b);
             walk(&mut d, &mut mf, data, reach, &[], part, end(k), None, |pk| e.push(data, pk))?;
-            if d.c.overrun() {
+            if d.overrun() {
                 return None;
             }
         }
     } else {
         let packets = aqr_common::pool::par_map(parts.len(), threads, |k| {
             let (part, b) = parts[k];
-            let mut d = Dec { c: ArithDecoder::new(b) };
+            let mut d = ArithDecoder::new(b);
             let mut mf = Mf::starting(data, reach, part.at.saturating_sub(reach));
             let mut out = Vec::new();
             walk(&mut d, &mut mf, data, reach, &[], part, end(k), None, |pk| out.push(pk))?;
-            (!d.c.overrun()).then_some(out)
+            (!d.overrun()).then_some(out)
         });
         for p in packets {
             p?.into_iter().for_each(|pk| e.push(data, pk));
