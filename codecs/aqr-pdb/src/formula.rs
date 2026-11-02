@@ -28,11 +28,13 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.whole(u.output() / 128 + 48 * layout, 4))
 }
 
-/// The memory of [`SYMBOLS`]: the output, and the scopes open (16 bytes each, each a record
-/// at least, each 2 bytes of the kinds in the first input at least).
+/// The memory of [`SYMBOLS`]: the output; the scopes open (16 bytes each, each a record at
+/// least, each 2 bytes of the kinds in the first input at least); the inlinees' last files and
+/// lines (about 32 bytes each in a hash map, each an entry of inlinee lines at least, each 4
+/// bytes of the C13 lines' input at least).
 fn symbols_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let head = *u.inputs.first()?;
-    Some(u.whole(8 * head + (16 << 10), 2))
+    let (head, c13) = (*u.inputs.first()?, *u.inputs.get(4)?);
+    Some(u.whole(8 * head + 8 * c13 + (16 << 10), 3))
 }
 
 /// Whether `d` starts like an MSF file.
@@ -53,7 +55,7 @@ pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
     let mut f = Formula::default();
     f.push_content("pdb/streams", Kind::Unknown, Vec::new());
     let (subs, outputs) = symbols_apply(&mut f, &streams, &spans)?;
-    // the streams but the symbols, which the outputs fill
+    // the streams but the modules', which the outputs fill
     let (mut kept, mut parts, mut at) = (Vec::new(), Vec::new(), 0);
     for (r, out) in subs.into_iter().zip(outputs) {
         parts.push(Node::slice(0, kept.len() as u64, (r.start - at) as u64));
@@ -69,8 +71,8 @@ pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
     Some(f)
 }
 
-/// The modules' symbols among `streams` (the streams one after another, each where `spans`
-/// tells) through [`SYMBOLS`]: where each module's are, and the outputs of the application.
+/// The modules' streams among `streams` (the streams one after another, each where `spans`
+/// tells) through [`SYMBOLS`]: where each is, and the outputs of the application.
 fn symbols_apply(
     f: &mut Formula,
     streams: &[u8],
@@ -78,23 +80,28 @@ fn symbols_apply(
 ) -> Option<(Vec<Range<usize>>, Vec<Node>)> {
     let stream = |k: usize| spans.get(k).cloned().flatten();
     let mods = dbi::modules(&streams[stream(3)?])?;
-    let mut subs: Vec<Range<usize>> = mods
+    // the modules' streams, each whole, and what the DBI stream tells of it
+    let mut subs: Vec<(Range<usize>, dbi::Module)> = mods
         .into_iter()
-        .filter_map(|(k, n)| stream(k).filter(|r| n <= r.len()).map(|r| r.start..r.start + n))
-        .filter(|r| !r.is_empty())
+        .filter_map(|m| stream(m.stream).filter(|r| m.symbols <= r.len() && !r.is_empty()).map(|r| (r, m)))
         .collect();
-    subs.sort_by_key(|r| r.start);
-    subs.dedup_by(|b, a| b.start < a.end);
-    if subs.iter().map(|r| r.len()).sum::<usize>() < MIN_SYMBOLS {
+    subs.sort_by_key(|s| s.0.start);
+    subs.dedup_by(|b, a| b.0.start < a.0.end);
+    if subs.iter().map(|s| s.1.symbols).sum::<usize>() < MIN_SYMBOLS {
         return None;
     }
-    let parts: Vec<&[u8]> = subs.iter().map(|r| &streams[r.clone()]).collect();
+    let parts: Vec<(&[u8], dbi::Module)> = subs.iter().map(|(r, m)| (&streams[r.clone()], *m)).collect();
     let st = symbols::encode(&parts)?;
+    let subs: Vec<Range<usize>> = subs.into_iter().map(|s| s.0).collect();
     let inputs = symbols::INPUTS
         .iter()
         .map(|(name, which)| {
             let packed = crate::pack(&which.iter().map(|&k| &st[k][..]).collect::<Vec<_>>());
-            f.push_as(format!("pdb-symbols/{name}"), Kind::Table, packed)
+            // (what follows the symbols, their lines most, is scanned as content)
+            match *name {
+                "lines" => f.push_content(format!("pdb-symbols/{name}"), Kind::Unknown, packed),
+                _ => f.push_as(format!("pdb-symbols/{name}"), Kind::Table, packed),
+            }
         })
         .collect();
     let a = Apply {

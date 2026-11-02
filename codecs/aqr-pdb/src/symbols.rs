@@ -8,9 +8,30 @@ use aqr_common::varint;
 use crate::{Result, corrupt};
 
 /// The streams, and the inputs they are packed into.
-pub const STREAM_NAMES: [&str; 15] = [
-    "kind", "len", "scope", "item", "type", "code", "name", "ann", "tail", "raw", "annop", "annoff", "annlen",
-    "annline", "annother",
+pub const STREAM_NAMES: [&str; 23] = [
+    "kind",
+    "len",
+    "scope",
+    "item",
+    "type",
+    "code",
+    "name",
+    "ann",
+    "tail",
+    "raw",
+    "annop",
+    "annoff",
+    "annlen",
+    "annline",
+    "annother",
+    "lines",
+    "c13",
+    "c13line",
+    "c13off",
+    "c13flag",
+    "c13inl",
+    "c13inlline",
+    "c13inlid",
 ];
 const KIND: usize = 0;
 const LEN: usize = 1;
@@ -27,12 +48,22 @@ const ANNOFF: usize = 11;
 const ANNLEN: usize = 12;
 const ANNLINE: usize = 13;
 const ANNOTHER: usize = 14;
+const LINES: usize = 15;
+const C13: usize = 16;
+const C13LINE: usize = 17;
+const C13OFF: usize = 18;
+const C13FLAG: usize = 19;
+const C13INL: usize = 20;
+const C13INLLINE: usize = 21;
+const C13INLID: usize = 22;
 pub const NUM_STREAMS: usize = STREAM_NAMES.len();
-pub const INPUTS: [(&str, &[usize]); 4] = [
+pub const INPUTS: [(&str, &[usize]); 6] = [
     ("head", &[KIND, LEN, SCOPE]),
     ("fields", &[ITEM, TYPE, CODE, TAIL, RAW]),
     ("text", &[NAME, ANN]),
     ("ann", &[ANNOP, ANNOFF, ANNLEN, ANNLINE, ANNOTHER]),
+    ("c13", &[C13, C13LINE, C13OFF, C13FLAG, C13INL, C13INLLINE, C13INLID]),
+    ("lines", &[LINES]),
 ];
 
 /// A field of a record's layout.
@@ -100,6 +131,11 @@ const CACHE: usize = 64;
 /// The state both sides keep, of which values are predicted.
 struct State {
     prev: Vec<u32>,
+    /// The previous of the lines' fields: a block's offset and file, a line's number, an
+    /// inlinee's file and line.
+    c13: [u32; 5],
+    /// Of each inlinee, the file and line of its last entry in inlinee lines.
+    inlinees: std::collections::HashMap<u32, (u32, u32)>,
     item_prev: u32,
     item_cache: Vec<u32>,
     type_prev: u32,
@@ -144,7 +180,15 @@ fn used(cache: &mut Vec<u32>, prev: &mut u32, v: u32) {
 
 impl State {
     fn new() -> State {
-        State { prev: vec![0; SLOTS], item_prev: 0, item_cache: Vec::new(), type_prev: 0, type_cache: Vec::new() }
+        State {
+            prev: vec![0; SLOTS],
+            c13: [0; 5],
+            inlinees: std::collections::HashMap::new(),
+            item_prev: 0,
+            item_cache: Vec::new(),
+            type_prev: 0,
+            type_cache: Vec::new(),
+        }
     }
 }
 
@@ -156,24 +200,258 @@ fn u16le(d: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes(*d.get(at..)?.first_chunk()?))
 }
 
-/// The streams of the symbol substreams `subs` (each a module's, from its signature), or `None`
-/// where they are not rebuilt as they are.
-pub fn encode(subs: &[&[u8]]) -> Option<Vec<Vec<u8>>> {
+/// The streams of the modules' streams `mods` (each with what the DBI stream tells of it), or
+/// `None` where they are not rebuilt as they are. A module's C13 lines are coded by their
+/// subsections; its C11 lines and what follows (its global references) go to `lines` as they
+/// are.
+pub fn encode(mods: &[(&[u8], crate::dbi::Module)]) -> Option<Vec<Vec<u8>>> {
     let mut st = vec![Vec::new(); NUM_STREAMS];
     let mut s = State::new();
-    for &m in subs {
-        module(&mut st, &mut s, m);
+    for &(m, info) in mods {
+        let (sym, rest) = m.split_at_checked(info.symbols)?;
+        module(&mut st, &mut s, sym);
+        // the C11 lines, the C13 lines (where they are whole within), the rest
+        let c11 = info.c11.min(rest.len());
+        let c13 = if info.c13 <= rest.len() - c11 { info.c13 } else { 0 };
+        varint::put(&mut st[LEN], c11 as u64);
+        st[LINES].extend_from_slice(&rest[..c11]);
+        varint::put(&mut st[LEN], c13 as u64);
+        if c13 > 0 {
+            lines(&mut st, &mut s, &rest[c11..c11 + c13]);
+        }
+        varint::put(&mut st[LEN], (rest.len() - c11 - c13) as u64);
+        st[LINES].extend_from_slice(&rest[c11 + c13..]);
     }
     let refs: Vec<&[u8]> = st.iter().map(|v| &v[..]).collect();
-    let back = decode(&refs).ok()?;
+    let back = decode_sized(&refs, mods.iter().map(|m| m.0.len()).sum()).ok()?;
     let mut at = 0;
-    for &m in subs {
+    for &(m, _) in mods {
         if back.get(at..at + m.len())? != m {
             return None;
         }
         at += m.len();
     }
     (at == back.len()).then_some(st)
+}
+
+const DEBUG_S_LINES: u32 = 0xf2;
+const DEBUG_S_INLINEELINES: u32 = 0xf6;
+
+/// The subsections of C13 lines `c`: `(kind, body)`, each padded to 4 bytes with zeros; `None`
+/// where they are not so.
+fn subsections(c: &[u8]) -> Option<Vec<(u32, &[u8])>> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < c.len() {
+        let (kind, len) = (u32le(c, at)?, u32le(c, at + 4)? as usize);
+        let body = c.get(at + 8..at.checked_add(8)?.checked_add(len)?)?;
+        let end = (at + 8 + len).next_multiple_of(4);
+        if c.get(at + 8 + len..end)?.iter().any(|&b| b != 0) {
+            return None;
+        }
+        out.push((kind, body));
+        at = end;
+    }
+    Some(out)
+}
+
+/// Whether a lines subsection's body `b` is as [`lines`] codes it: its header, then blocks each
+/// of its lines (and their columns where the header's flags tell), to its end.
+fn lines_fit(b: &[u8]) -> bool {
+    let Some(flags) = u16le(b, 6) else { return false };
+    let per = if flags & 1 != 0 { 12 } else { 8 };
+    let mut at = 12;
+    while at < b.len() {
+        let (Some(n), Some(size)) = (u32le(b, at + 4), u32le(b, at + 8)) else { return false };
+        if (n as u64) * per + 12 != size as u64 || at + size as usize > b.len() {
+            return false;
+        }
+        at += size as usize;
+    }
+    at == b.len() && b.len() >= 12
+}
+
+/// Whether an inlinee lines subsection's body `b` is as [`lines`] codes it: of signature 0, its
+/// entries of 12 bytes.
+fn inlinees_fit(b: &[u8]) -> bool {
+    u32le(b, 0) == Some(0) && (b.len() - 4).is_multiple_of(12)
+}
+
+/// C13 lines `c`: a byte of `c13`, 1 where they are kept as they are (in `lines`), else 0 and
+/// their subsections: each its kind and length (varints of `c13`), then, of lines and inlinee
+/// lines as they fit, a 0 and their fields, else a 1 and the body as it is.
+fn lines(st: &mut [Vec<u8>], s: &mut State, c: &[u8]) {
+    let Some(subs) = subsections(c) else {
+        st[C13].push(1);
+        st[LINES].extend_from_slice(c);
+        return;
+    };
+    st[C13].push(0);
+    varint::put(&mut st[C13], subs.len() as u64);
+    for (kind, b) in subs {
+        varint::put(&mut st[C13], kind as u64);
+        varint::put(&mut st[C13], b.len() as u64);
+        let delta = |st: &mut [Vec<u8>], k: usize, prev: &mut u32, v: u32| {
+            varint::put_signed(&mut st[k], v as i64 - *prev as i64);
+            *prev = v;
+        };
+        match kind {
+            DEBUG_S_LINES if lines_fit(b) => {
+                st[C13].push(0);
+                let flags = u16le(b, 6).unwrap();
+                delta(st, C13, &mut s.c13[0], u32le(b, 0).unwrap());
+                st[C13].extend_from_slice(&b[4..8]);
+                varint::put(&mut st[C13], u32le(b, 8).unwrap() as u64);
+                let mut at = 12;
+                while at < b.len() {
+                    let n = u32le(b, at + 4).unwrap() as usize;
+                    delta(st, C13, &mut s.c13[1], u32le(b, at).unwrap());
+                    varint::put(&mut st[C13], n as u64);
+                    let mut off = 0;
+                    for i in 0..n {
+                        let (o, l) = (u32le(b, at + 12 + 8 * i).unwrap(), u32le(b, at + 16 + 8 * i).unwrap());
+                        delta(st, C13OFF, &mut off, o);
+                        delta(st, C13LINE, &mut s.c13[2], l & 0xff_ffff);
+                        st[C13FLAG].push((l >> 24) as u8);
+                    }
+                    let cols = if flags & 1 != 0 { 4 * n } else { 0 };
+                    st[LINES].extend_from_slice(&b[at + 12 + 8 * n..][..cols]);
+                    at += 12 + 8 * n + cols;
+                }
+            }
+            DEBUG_S_INLINEELINES if inlinees_fit(b) => {
+                st[C13].push(0);
+                for e in b[4..].as_chunks::<12>().0 {
+                    let item = u32::from_le_bytes(e[..4].try_into().unwrap());
+                    st[C13INLID].extend_from_slice(&item.to_le_bytes());
+                    // the file and line from the inlinee's last entry, else the previous entry's
+                    let (file, line) = (u32le(e, 4).unwrap(), u32le(e, 8).unwrap());
+                    let (pf, pl) = s.inlinees.get(&item).copied().unwrap_or((s.c13[3], s.c13[4]));
+                    varint::put_signed(&mut st[C13INL], file as i64 - pf as i64);
+                    varint::put_signed(&mut st[C13INLLINE], line as i64 - pl as i64);
+                    (s.c13[3], s.c13[4]) = (file, line);
+                    s.inlinees.insert(item, (file, line));
+                }
+            }
+            _ => {
+                st[C13].push(1);
+                st[LINES].extend_from_slice(b);
+            }
+        }
+    }
+}
+
+/// [`lines`] decoded: C13 lines of `size` bytes appended to `out`.
+fn lines_decode(r: &mut [Reader], s: &mut State, out: &mut Vec<u8>, size: usize) -> Result<()> {
+    let start = out.len();
+    if r[C13].bytes(1)?[0] != 0 {
+        out.extend_from_slice(r[LINES].bytes(size)?);
+        return Ok(());
+    }
+    let n = r[C13].get()?;
+    let u32_of = |v: u64| u32::try_from(v).map_err(|_| corrupt());
+    let moved = |r: &mut Reader, prev: &mut u32| -> Result<u32> {
+        *prev = u32::try_from(*prev as i64 + varint::unzz(r.get()?)).map_err(|_| corrupt())?;
+        Ok(*prev)
+    };
+    for _ in 0..n {
+        let kind = u32_of(r[C13].get()?)?;
+        let len = usize::try_from(r[C13].get()?).map_err(|_| corrupt())?;
+        if out.len() - start + 8 + len > size {
+            return Err(corrupt());
+        }
+        out.extend_from_slice(&kind.to_le_bytes());
+        out.extend_from_slice(&(len as u32).to_le_bytes());
+        let body = out.len();
+        match (kind, r[C13].bytes(1)?[0]) {
+            (_, 1) => out.extend_from_slice(r[LINES].bytes(len)?),
+            (DEBUG_S_LINES, 0) => {
+                let off = moved(&mut r[C13], &mut s.c13[0])?;
+                out.extend_from_slice(&off.to_le_bytes());
+                let seg_flags: [u8; 4] = r[C13].bytes(4)?.try_into().unwrap();
+                out.extend_from_slice(&seg_flags);
+                let cols = seg_flags[2] & 1 != 0;
+                out.extend_from_slice(&u32_of(r[C13].get()?)?.to_le_bytes());
+                while out.len() - body < len {
+                    let file = moved(&mut r[C13], &mut s.c13[1])?;
+                    let n = r[C13].get()?;
+                    let size = 12 + n * if cols { 12 } else { 8 };
+                    if (out.len() - body) as u64 + size > len as u64 {
+                        return Err(corrupt());
+                    }
+                    out.extend_from_slice(&file.to_le_bytes());
+                    out.extend_from_slice(&(n as u32).to_le_bytes());
+                    out.extend_from_slice(&(size as u32).to_le_bytes());
+                    let mut off = 0;
+                    for _ in 0..n {
+                        let o = moved(&mut r[C13OFF], &mut off)?;
+                        let l = moved(&mut r[C13LINE], &mut s.c13[2])?;
+                        let flags = r[C13FLAG].bytes(1)?[0] as u32;
+                        if l > 0xff_ffff {
+                            return Err(corrupt());
+                        }
+                        out.extend_from_slice(&o.to_le_bytes());
+                        out.extend_from_slice(&(l | flags << 24).to_le_bytes());
+                    }
+                    if cols {
+                        out.extend_from_slice(r[LINES].bytes(4 * n as usize)?);
+                    }
+                }
+            }
+            (DEBUG_S_INLINEELINES, 0) => {
+                if len < 4 || !(len - 4).is_multiple_of(12) {
+                    return Err(corrupt());
+                }
+                out.extend_from_slice(&0u32.to_le_bytes());
+                for _ in 0..(len - 4) / 12 {
+                    let item = u32::from_le_bytes(r[C13INLID].bytes(4)?.try_into().unwrap());
+                    let (mut file, mut line) = s.inlinees.get(&item).copied().unwrap_or((s.c13[3], s.c13[4]));
+                    let file = moved(&mut r[C13INL], &mut file)?;
+                    let line = moved(&mut r[C13INLLINE], &mut line)?;
+                    (s.c13[3], s.c13[4]) = (file, line);
+                    s.inlinees.insert(item, (file, line));
+                    out.extend_from_slice(&item.to_le_bytes());
+                    out.extend_from_slice(&file.to_le_bytes());
+                    out.extend_from_slice(&line.to_le_bytes());
+                }
+            }
+            _ => return Err(corrupt()),
+        }
+        if out.len() - body != len {
+            return Err(corrupt());
+        }
+        let pad = (4 - (out.len() - start) % 4) % 4;
+        out.resize(out.len() + pad, 0);
+    }
+    if out.len() - start != size {
+        return Err(corrupt());
+    }
+    Ok(())
+}
+
+/// Whether payload `d` holds `fields` (the record is coded by its layout, else kept).
+fn fits(d: &[u8], fields: &[F]) -> bool {
+    let mut at = 0;
+    for &f in fields {
+        let n = match f {
+            Parent | End | Item | Type | Code | U32 => 4,
+            U16 => 2,
+            U8 => 1,
+            Items => match u32le(d, at) {
+                Some(n) if n as usize <= (d.len() - at - 4) / 4 => 4 + 4 * n as usize,
+                _ => return false,
+            },
+            Name => match d.get(at..).and_then(|r| r.iter().position(|&c| c == 0)) {
+                Some(n) => n + 1,
+                None => return false,
+            },
+        };
+        at += n;
+        if at > d.len() {
+            return false;
+        }
+    }
+    true
 }
 
 /// The records of module substream `m`, `(offset, kind, payload range)`, as far as they hold,
@@ -200,34 +478,31 @@ fn module(st: &mut [Vec<u8>], s: &mut State, m: &[u8]) {
     }
     st[TAIL].extend_from_slice(&m[..4]);
     let (recs, end) = records(m);
-    // the end of each scope opened, by where it opens
-    let mut ends = std::collections::HashMap::new();
+    // of each record opening a scope, the offset of the record closing it (none: `None`)
+    let mut ends = vec![None; recs.len()];
     let mut stack = Vec::new();
-    for &(q, kind, _, _) in &recs {
+    for (i, &(q, kind, _, _)) in recs.iter().enumerate() {
         match layout(kind).1 {
-            Some(true) => stack.push(q),
+            Some(true) => stack.push(i),
             Some(false) => {
                 if let Some(o) = stack.pop() {
-                    ends.insert(o, q as u32);
+                    ends[o] = Some(q as u32);
                 }
             }
             None => {}
         }
     }
     let mut stack: Vec<u32> = Vec::new();
-    for &(q, kind, p, e) in &recs {
+    for (i, &(q, kind, p, e)) in recs.iter().enumerate() {
         st[KIND].extend_from_slice(&kind.to_le_bytes());
-        let mark = st.iter().map(Vec::len).collect::<Vec<_>>();
-        let saved = (s.prev.clone(), s.item_prev, s.item_cache.clone(), s.type_prev, s.type_cache.clone());
         let len = (e - q - 2) as u64;
-        varint::put(&mut st[LEN], len << 1);
         let (fields, scope) = layout(kind);
-        if record(st, s, m, q, kind, p, e, fields, &stack, &ends).is_none() {
+        if fits(&m[p..e], fields) {
+            varint::put(&mut st[LEN], len << 1);
+            let coded = record(st, s, m, kind, p, e, fields, &stack, ends[i]);
+            debug_assert!(coded.is_some(), "a record that fits is coded");
+        } else {
             // kept as it is
-            for (v, l) in st.iter_mut().zip(mark) {
-                v.truncate(l);
-            }
-            (s.prev, s.item_prev, s.item_cache, s.type_prev, s.type_cache) = saved;
             varint::put(&mut st[LEN], len << 1 | 1);
             st[RAW].extend_from_slice(&m[p..e]);
         }
@@ -250,13 +525,12 @@ fn record(
     st: &mut [Vec<u8>],
     s: &mut State,
     m: &[u8],
-    q: usize,
     kind: u16,
     p: usize,
     e: usize,
     fields: &[F],
     stack: &[u32],
-    ends: &std::collections::HashMap<usize, u32>,
+    end: Option<u32>,
 ) -> Option<()> {
     let r = &m[..e];
     let mut at = p;
@@ -275,7 +549,7 @@ fn record(
             End => {
                 let v = u32le(r, at)?;
                 at += 4;
-                if ends.get(&q) == Some(&v) {
+                if end == Some(v) {
                     st[SCOPE].push(0);
                 } else {
                     varint::put(&mut st[SCOPE], v as u64 + 1);
@@ -445,19 +719,44 @@ impl<'a> Reader<'a> {
 
 /// The symbol substreams, one after another, from the streams of [`STREAM_NAMES`].
 pub fn decode(streams: &[&[u8]]) -> Result<Vec<u8>> {
+    decode_sized(streams, 0)
+}
+
+/// [`decode`], the output's room made for `len` bytes (what the module is to give) at first.
+pub fn decode_sized(streams: &[&[u8]], len: usize) -> Result<Vec<u8>> {
     if streams.len() != NUM_STREAMS {
         return Err(corrupt());
     }
     let mut r: Vec<Reader> = streams.iter().map(|d| Reader { d, at: 0 }).collect();
     let mut s = State::new();
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(len);
     while !r[LEN].done() {
         let size = usize::try_from(r[LEN].get()?).map_err(|_| corrupt())?;
-        let start = out.len();
         if size < 4 {
             out.extend_from_slice(r[RAW].bytes(size)?);
-            continue;
+        } else {
+            symbols(&mut r, &mut s, &mut out, size)?;
         }
+        // what follows the symbols: the C11 lines, the C13 lines, the rest
+        let n = usize::try_from(r[LEN].get()?).map_err(|_| corrupt())?;
+        out.extend_from_slice(r[LINES].bytes(n)?);
+        let n = usize::try_from(r[LEN].get()?).map_err(|_| corrupt())?;
+        if n > 0 {
+            lines_decode(&mut r, &mut s, &mut out, n)?;
+        }
+        let n = usize::try_from(r[LEN].get()?).map_err(|_| corrupt())?;
+        out.extend_from_slice(r[LINES].bytes(n)?);
+    }
+    if !r.iter().all(Reader::done) {
+        return Err(corrupt());
+    }
+    Ok(out)
+}
+
+/// A module's symbols of `size` bytes (4 at least), appended to `out`.
+fn symbols(r: &mut [Reader], s: &mut State, out: &mut Vec<u8>, size: usize) -> Result<()> {
+    let start = out.len();
+    {
         out.extend_from_slice(r[TAIL].bytes(4)?);
         // the scopes open: where each opened (in the module), and where its end goes
         let mut stack: Vec<(u32, Option<usize>)> = Vec::new();
@@ -549,7 +848,7 @@ pub fn decode(streams: &[&[u8]]) -> Result<Vec<u8>> {
                         let (k, n) = operands(op);
                         for _ in 0..n {
                             let v = u32::try_from(r[k].get()?).map_err(|_| corrupt())?;
-                            put_cint(&mut out, v).ok_or_else(corrupt)?;
+                            put_cint(out, v).ok_or_else(corrupt)?;
                         }
                         if out.len() > rec_end {
                             return Err(corrupt());
@@ -586,8 +885,5 @@ pub fn decode(streams: &[&[u8]]) -> Result<Vec<u8>> {
             return Err(corrupt());
         }
     }
-    if !r.iter().all(Reader::done) {
-        return Err(corrupt());
-    }
-    Ok(out)
+    Ok(())
 }

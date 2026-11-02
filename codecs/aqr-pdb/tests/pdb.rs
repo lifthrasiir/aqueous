@@ -192,10 +192,13 @@ fn msf_not_taken() {
 #[test]
 fn symbols_round_trip() {
     let (_, mods) = pdb(false);
-    let subs: Vec<&[u8]> = mods.iter().map(|m| &m[..]).collect();
+    // (each module's stream its symbols and lines after them)
+    let whole: Vec<Vec<u8>> = mods.iter().map(|m| [&m[..], b"lines"].concat()).collect();
+    let info = |m: &Vec<u8>| aqr_pdb::dbi::Module { stream: 0, symbols: m.len(), c11: 0, c13: 0 };
+    let subs: Vec<(&[u8], aqr_pdb::dbi::Module)> = whole.iter().zip(&mods).map(|(w, m)| (&w[..], info(m))).collect();
     let st = symbols::encode(&subs).expect("taken");
     let refs: Vec<&[u8]> = st.iter().map(|v| &v[..]).collect();
-    assert_eq!(symbols::decode(&refs).unwrap(), mods.concat());
+    assert_eq!(symbols::decode(&refs).unwrap(), whole.concat());
     // every parent and end derived
     let scope = symbols::STREAM_NAMES.iter().position(|&n| n == "scope").unwrap();
     assert!(st[scope].iter().all(|&b| b == 0));
@@ -205,15 +208,16 @@ fn symbols_round_trip() {
         .map(|(_, which)| aqr_pdb::pack(&which.iter().map(|&k| &st[k][..]).collect::<Vec<_>>()))
         .collect();
     let p: Vec<&[u8]> = packed.iter().map(|v| &v[..]).collect();
-    let len = mods.iter().map(Vec::len).sum::<usize>() as u64;
-    assert_eq!(aqr_pdb::module::symbols(&[], &p, len).unwrap(), mods.concat());
+    let len = whole.iter().map(Vec::len).sum::<usize>() as u64;
+    assert_eq!(aqr_pdb::module::symbols(&[], &p, len).unwrap(), whole.concat());
     assert!(aqr_pdb::module::symbols(&[], &p, len + 1).is_err());
 }
 
 #[test]
 fn symbols_corrupt() {
     let (_, mods) = pdb(false);
-    let subs: Vec<&[u8]> = mods.iter().map(|m| &m[..]).collect();
+    let info = |m: &Vec<u8>| aqr_pdb::dbi::Module { stream: 0, symbols: m.len(), c11: 0, c13: 0 };
+    let subs: Vec<(&[u8], aqr_pdb::dbi::Module)> = mods.iter().map(|m| (&m[..], info(m))).collect();
     let st = symbols::encode(&subs).unwrap();
     for k in 0..st.len() {
         if st[k].is_empty() {

@@ -16,6 +16,16 @@ fn files(p: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--dump") {
+        // the formula's streams, each to OUT.k: `--dump FILE OUT`
+        let a: Vec<String> = std::env::args().collect();
+        let f = aqr_pdb::formula::encode(&std::fs::read(&a[2]).unwrap(), 1).unwrap();
+        for (k, s) in f.streams.iter().enumerate() {
+            std::fs::write(format!("{}.{k}", a[3]), &s.data[..]).unwrap();
+            println!("{k} {} {}", s.class, s.data.len());
+        }
+        return;
+    }
     if std::env::args().nth(1).as_deref() == Some("--formula") {
         std::env::args().skip(2).for_each(|p| time_formula(&p));
         return;
@@ -51,9 +61,9 @@ fn main() {
 fn symbols(streams: &[u8], spans: &[Option<std::ops::Range<usize>>]) {
     let stream = |k: usize| spans.get(k).cloned().flatten().map(|r| &streams[r]);
     let Some(mods) = stream(3).and_then(aqr_pdb::dbi::modules) else { return };
-    let subs: Vec<&[u8]> =
-        mods.iter().filter_map(|&(k, n)| stream(k).filter(|s| n <= s.len()).map(|s| &s[..n])).collect();
-    let raw: Vec<u8> = subs.concat();
+    let subs: Vec<(&[u8], aqr_pdb::dbi::Module)> =
+        mods.iter().filter_map(|&m| stream(m.stream).filter(|s| m.symbols <= s.len()).map(|s| (s, m))).collect();
+    let raw: Vec<u8> = subs.iter().flat_map(|&(s, _)| s).copied().collect();
     let t = std::time::Instant::now();
     let Some(st) = aqr_pdb::symbols::encode(&subs) else {
         println!("  symbols: not taken");
@@ -62,7 +72,7 @@ fn symbols(streams: &[u8], spans: &[Option<std::ops::Range<usize>>]) {
     let enc = t.elapsed();
     let zs: Vec<usize> = st.iter().map(|s| z(s)).collect();
     println!(
-        "  symbols of {} modules: {} B; zstd -3 {} -> {}; encode {enc:.2?}",
+        "  modules' streams, {}: {} B; zstd -3 {} -> {}; encode {enc:.2?}",
         subs.len(),
         raw.len(),
         z(&raw),

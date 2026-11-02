@@ -88,12 +88,14 @@ A module's stream starts with its symbols: a `u32` signature, then CodeView symb
 each a `u16` length (of what follows it), a `u16` kind and its fields. Some records open a
 scope that a later one closes; those that open one hold the offsets (from the start of the
 module's stream) of the record of the scope they are in (0 at the top) and of the record that
-closes them. The module rebuilds the symbols of many modules, one after another.
+closes them. The symbols are followed by the module's C11 lines, its C13 lines (subsections,
+each a `u32` kind, a `u32` length, its body and zeros to 4 bytes) and the rest (its global
+references). The module rebuilds the streams of many modules, one after another.
 
 - **Module**: name `pdb-symbols`, version 1.
 - **Params**: none (zero bytes).
 - **Resources**: none.
-- **Inputs**: exactly 4 of packed streams, each of class `pdb-symbols/NAME`:
+- **Inputs**: exactly 6 of packed streams, each of class `pdb-symbols/NAME`:
 
   | # | input | its streams |
   |---|---|---|
@@ -101,8 +103,10 @@ closes them. The module rebuilds the symbols of many modules, one after another.
   | 1 | `fields` | `item`, `type`, `code`, `tail`, `raw` |
   | 2 | `text` | `name`, `ann` |
   | 3 | `ann` | `annop`, `annoff`, `annlen`, `annline`, `annother` |
+  | 4 | `c13` | `c13`, `c13line`, `c13off`, `c13flag`, `c13inl`, `c13inlline`, `c13inlid` |
+  | 5 | `lines` | `lines` |
 
-- **Output**: the modules' symbols, one after another, `len` bytes in all.
+- **Output**: the modules' streams, one after another, `len` bytes in all.
 
 ### 3.1 Layouts
 
@@ -137,17 +141,21 @@ others, their **rest**.
 
 Kept all through: `prev[s] = 0` for each slot `s` below 1024 (the slot of field `k` of a
 record of kind `t` is `(31t + k) AND 1023`); `item_prev = type_prev = 0`; `item_cache` and
-`type_cache` empty lists. A value **cached** is read from a varint `y`: `y < 64`, entry `y` of
+`type_cache` empty lists; of the lines (§3.5), `block_off`, `block_file`, `line`, `inl_file`
+and `inl_line` 0, and of each inlinee its last file and line (none at first). A value **cached** is read from a varint `y`: `y < 64`, entry `y` of
 the list (which must exist); else the previous moved by `unzigzag(y − 64)` (within `u32`); then
 the previous is set to the value and the value goes to the front of the list (leaving its place
 there; the list keeps its first 64).
 
 ### 3.3 Modules
 
-Until `len` is at its end, a module: a varint `size` of `len`. A size below 4: `size` bytes
-of `raw`. Else a `u32` signature of `tail`, then records (§3.4) until a varint of `len` is 2;
-then a varint `n` of `len` and `n` bytes of `raw`. The module must then be `size` bytes, and
-no scope open (below) may have an end to derive.
+Until `len` is at its end, a module: its symbols, a varint `size` of `len`: a size below 4,
+`size` bytes of `raw`; else a `u32` signature of `tail`, then records (§3.4) until a varint of
+`len` is 2, then a varint `n` of `len` and `n` bytes of `raw`; the symbols must then be `size`
+bytes, and no scope open (below) may have an end to derive. Then a varint `n` of `len` and `n`
+bytes of `lines` (the C11 lines); a varint `n` of `len` and, where not 0, C13 lines of `n`
+bytes (§3.5); a varint `n` of `len` and `n` bytes of `lines` (the rest). Offsets of records are
+from the start of the module's stream.
 
 ### 3.4 Records
 
@@ -182,9 +190,35 @@ After a record that opens a scope, it is open (innermost); after one that closes
 innermost open closes (if any), its end, where to derive, set to the closing record's
 offset `q`. The record must have ended at its length.
 
-### 3.5 Encoding *(encoder)*
+### 3.5 C13 lines
 
-A record is kept where its fields do not fit its length (a name without its NUL); an inline
+A byte of `c13`: 1, the lines are `n` bytes of `lines`; 0, a varint count of `c13` of
+subsections, each: a `u32` kind and a length `L`, varints of `c13` (the subsection may not end
+past `n`), written as `u32`s, then a byte of `c13`: 1, the body is `L` bytes of `lines`; 0, the
+body by its kind (others fail):
+
+- `0xf2` (lines): `block_off` moved by a varint of `c13` (unzigzagged, within `u32`), 4 bytes
+  of `c13` (a `u16` segment and `u16` flags), a varint of `c13` (the code's size, a `u32`);
+  then blocks until the body is `L` bytes: `block_file` moved by a varint of `c13`, a count
+  `k` (a varint of `c13`), written as `u32`s with the block's size `12 + 8k` (`12 + 12k` where
+  the flags' bit 0 is set; the block may not end past `L`); then `k` lines, each an offset
+  moved from the block's previous (0 for the first) by a varint of `c13off`, `line` moved by a
+  varint of `c13line` (below 2^24), and a byte of `c13flag`, written as the offset and `line |
+  flag << 24`; then, of columns, `4k` bytes of `lines`.
+- `0xf6` (inlinee lines): `L − 4` a multiple of 12; a `u32` 0; then `(L − 4) / 12` entries:
+  the inlinee, 4 bytes of `c13inlid`; its file, moved by a varint of `c13inl` from the
+  inlinee's last file (else `inl_file`); its line, moved by a varint of `c13inlline` from its
+  last line (else `inl_line`); written as three `u32`s; `inl_file`, `inl_line` and the
+  inlinee's last file and line are set to them.
+
+The body must then be `L` bytes, then zeros to 4 bytes from the lines' start. The lines must
+then be `n` bytes.
+
+### 3.6 Encoding *(encoder)*
+
+C13 lines are kept where their subsections are not padded with zeros; a subsection of lines or
+inlinee lines, where its blocks' sizes are not as above or its signature is not 0. A record is
+kept where its fields do not fit its length (a name without its NUL); an inline
 site's annotations are kept where they hold an operation not of 1 to 13, an integer not in its
 fewest bytes, or bytes but zeros after an operation 0. Parents and ends are derived where they
 are those of the scopes as they nest. The encoder decodes what it made and takes the symbols

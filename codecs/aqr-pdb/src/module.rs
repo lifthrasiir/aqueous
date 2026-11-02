@@ -25,7 +25,7 @@ pub fn symbols(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
             streams[k] = s;
         }
     }
-    let out = crate::symbols::decode(&streams)?;
+    let out = crate::symbols::decode_sized(&streams, usize::try_from(len).map_err(|_| corrupt())?)?;
     if out.len() as u64 != len {
         return Err(corrupt());
     }
