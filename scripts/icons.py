@@ -16,6 +16,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -90,7 +91,42 @@ def render(svg_path: Path, px: int, inner: int, out: Path):
         + ["-define", "png:color-type=6", "-depth", "8", "-strip", str(out)],
         check=True,
     )
-    return out.read_bytes()
+    png = flush_above_label(out.read_bytes(), px, inner)
+    out.write_bytes(png)
+    return png
+
+
+# The top and bottom of the label (its outline's) in droplet.svg's 24 units, of the band at small
+# sizes.
+LABEL_TOP = 12.5
+LABEL_BOTTOM = 21.3
+
+
+def flush_above_label(png: bytes, px: int, inner: int) -> bytes:
+    """`png` (one IDAT, as ImageMagick writes it) deflated again by zlib at level 9, flushed
+    just above the label (`Z_SYNC_FLUSH`) and below it (`Z_FULL_FLUSH`, its window forgotten):
+    the rows above and below it are the same drop in every icon of a color, and so become the same
+    bytes, which the installer's zstd (aqr-win-install) then finds across the icons. Unflushed, one block's Huffman tables, made from the label's rows too, made
+    every icon's stream differ from its first bytes (408 -> 112 KB of the 15 .ico, as zstd -19
+    packed them inflated)."""
+    head, idat, tail = [], [], []
+    at = 8
+    while at < len(png):
+        n, kind = struct.unpack_from(">I4s", png, at)
+        chunk = png[at : at + 12 + n]
+        (idat.append(chunk[8:-4]) if kind == b"IDAT" else (tail if idat else head).append(chunk))
+        at += 12 + n
+    raw = zlib.decompress(b"".join(idat))
+    def at(y):  # (8-bit RGBA rows and their filter bytes)
+        return min(px, max(0, int((px - inner) / 2 + inner * y / 24))) * (4 * px + 1)
+
+    top, bottom = at(LABEL_TOP) - 2 * (4 * px + 1), at(LABEL_BOTTOM) + 2 * (4 * px + 1)
+    z = zlib.compressobj(9)
+    data = z.compress(raw[: max(top, 0)]) + z.flush(zlib.Z_SYNC_FLUSH)
+    data += z.compress(raw[max(top, 0) : bottom]) + z.flush(zlib.Z_FULL_FLUSH)
+    data += z.compress(raw[bottom:]) + z.flush()
+    chunk = struct.pack(">I", len(data)) + b"IDAT" + data + struct.pack(">I", zlib.crc32(b"IDAT" + data))
+    return png[:8] + b"".join(head) + chunk + b"".join(tail)
 
 
 def ico(images: list[tuple[int, bytes]]) -> bytes:
