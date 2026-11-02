@@ -517,7 +517,8 @@ pub fn par_map_apart<R: Send + crate::wire::Wire>(n: usize, threads: usize, f: i
             out.reserve_exact(r.size());
             r.put(out)
         };
-        let mut t = aqr_api::task::spawn(n, &g);
+        // SAFETY: joined below, before `g` goes
+        let mut t = unsafe { aqr_api::task::spawn(n, &g) };
         return (0..n)
             .map(|i| {
                 let b = t.join(i);

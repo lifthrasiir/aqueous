@@ -68,7 +68,19 @@ pub struct Tasks<'a> {
 
 /// Spawns `n` tasks running `f(i, out)` for `i` in `0..n`, all on one copy of the working
 /// memory. Trapping in one fails the application.
-pub fn spawn<'a, F: Fn(usize, &mut Vec<u8>) + Sync + 'a>(n: usize, f: &'a F) -> Tasks<'a> {
+///
+/// Natively the tasks are threads borrowing `f`, joined as the [`Tasks`] are dropped: leaking
+/// them (`mem::forget`, a cycle of `Rc`s) leaves the threads running after `f` is gone, so
+/// spawning is unsafe, as nothing in safe code stops it.
+///
+/// # Safety
+/// The [`Tasks`] are dropped (or each joined) before `'a` ends: not leaked.
+///
+/// ```compile_fail,E0133
+/// let f = |_: usize, _: &mut Vec<u8>| {};
+/// core::mem::forget(aqr_api::task::spawn(1, &f));
+/// ```
+pub unsafe fn spawn<'a, F: Fn(usize, &mut Vec<u8>) + Sync + 'a>(n: usize, f: &'a F) -> Tasks<'a> {
     #[cfg(target_family = "wasm")]
     let t = Tasks {
         handle: spawn_record(run::<F>, f as *const F as *const (), n),
@@ -77,7 +89,7 @@ pub fn spawn<'a, F: Fn(usize, &mut Vec<u8>) + Sync + 'a>(n: usize, f: &'a F) -> 
     };
     #[cfg(not(target_family = "wasm"))]
     let rec = Record { run: run::<F>, data: f as *const F as *const () };
-    // SAFETY: `f` outlives the threads, joined as the tasks are dropped
+    // SAFETY: `f` outlives the threads, joined as the tasks are dropped (as the caller makes sure)
     #[cfg(not(target_family = "wasm"))]
     let t = Tasks { threads: unsafe { crate::sys::spawn(&rec, n) }, taken: alloc::vec![false; n], _f: PhantomData };
     t

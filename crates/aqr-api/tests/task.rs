@@ -10,7 +10,8 @@ aqr_api::entry! {
         Input::<0>::read(0, &mut data);
         let chunks: Vec<&[u8]> = data.chunks(1000).collect();
         let f = |i: usize, out: &mut Vec<u8>| out.extend(chunks[i].iter().rev());
-        let mut t = task::spawn(chunks.len(), &f);
+        // SAFETY: the tasks are dropped here (as in the others)
+        let mut t = unsafe { task::spawn(chunks.len(), &f) };
         let mut at = 0;
         for i in 0..t.len() {
             let r = t.join(i);
@@ -28,7 +29,7 @@ aqr_api::entry! {
             Input::<0>::read(0, &mut b);
             out.push(b[0]);
         };
-        let r = task::spawn(1, &f).join(0);
+        let r = unsafe { task::spawn(1, &f) }.join(0);
         Output::<0>::write(0, &r);
     }
 }
@@ -38,10 +39,10 @@ aqr_api::entry! {
     whole fn nested(params_len, in0_len, size) {
         let inner = |i: usize, out: &mut Vec<u8>| out.push(i as u8);
         let outer = |i: usize, out: &mut Vec<u8>| {
-            let mut t = task::spawn(i + 1, &inner);
+            let mut t = unsafe { task::spawn(i + 1, &inner) };
             out.extend(t.join(i));
         };
-        let mut t = task::spawn(3, &outer);
+        let mut t = unsafe { task::spawn(3, &outer) };
         let r = [t.join(2), t.join(0)].concat();
         Output::<0>::write(0, &r);
     }
@@ -83,7 +84,7 @@ aqr_api::entry! {
                 tx1.close();
             }
         };
-        let _t = task::spawn(2, &f);
+        let _t = unsafe { task::spawn(2, &f) };
         let mut at = 0;
         while let Some(m) = rx1.recv() {
             Output::<0>::write(at, &m);
@@ -98,7 +99,7 @@ aqr_api::entry! {
         let (tx, rx) = chan::channel(4);
         tx.send(b"a");
         let f = |_: usize, _: &mut Vec<u8>| tx.send(b"b");
-        task::spawn(1, &f).join(0);
+        unsafe { task::spawn(1, &f) }.join(0);
         rx.recv();
     }
 }

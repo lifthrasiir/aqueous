@@ -149,7 +149,8 @@ fn apart<T>(
     #[cfg(target_family = "wasm")]
     if threads > 1 {
         let g = |i: usize, out: &mut Vec<u8>| *out = f(i);
-        let mut t = aqr_api::task::spawn(n, &g);
+        // SAFETY: joined below, before `g` goes
+        let mut t = unsafe { aqr_api::task::spawn(n, &g) };
         let mine = here();
         return ((0..n).map(|i| t.join(i)).collect(), mine);
     }

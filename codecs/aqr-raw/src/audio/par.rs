@@ -519,7 +519,8 @@ pub mod apart {
                 c4[j].0.close();
             }
         };
-        let tasks = aqr_api::task::spawn(3 + workers, &task);
+        // SAFETY: dropped below, before `task` goes
+        let tasks = unsafe { aqr_api::task::spawn(3 + workers, &task) };
         let (mut r, mut k) = (Ok(()), 0);
         let mut open = vec![true; workers];
         loop {
