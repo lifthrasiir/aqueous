@@ -4,9 +4,11 @@
 //! - Finder's services (`NSServices` in `Info.plist`, under Quick Actions or Services of a
 //!   Control-click) send the paths chosen, all at once, on a pasteboard: "Compress with Aqueous"
 //!   on files and folders ("Compress with Aqueous (Passphrase)…" encrypts: `aqr -P`), "Extract
-//!   with Aqueous" and "Test with Aqueous" on `.aqr` files.
-//!   `.aqr` files opened (a double-click) are extracted: beside them, a single entry at the top
-//!   as it is, else into their names without `.aqr` (`aqr --each --auto-dir`).
+//!   with Aqueous" and "Test with Aqueous" on `.aqr` files and the other archives `aqr` extracts.
+//!   Those opened (a double-click; [`EXTRACTED`]) are extracted: beside them, a single entry at
+//!   the top as it is, else into their names without the extension (`aqr --each --auto-dir`).
+//!   Other formats than `.aqr` are document types of the rank `Alternate` (`Info.plist`): opened
+//!   by Aqueous where no other app does, else where the user chooses it.
 //! - How far a job is shows on its file in Finder: an `NSProgress` published for it, a bar on
 //!   the file's icon as of a file downloading, with a button that stops the job (`aqr`'s
 //!   output being written removed). The file is the archive being written (`NAME.PID.part`),
@@ -55,6 +57,11 @@ const WELCOME: f64 = 1.0;
 
 /// The progress bar's units.
 const UNITS: i64 = 1000;
+
+/// The extensions of the files opened that are extracted (`Info.plist`'s document types; other
+/// files opened are compressed).
+const EXTRACTED: [&str; 15] =
+    ["aqr", "zip", "7z", "rar", "alz", "egg", "tar", "tgz", "tbz2", "txz", "gz", "bz2", "xz", "lzma", "zst"];
 
 /// A job, as the app keeps it.
 struct Running {
@@ -110,7 +117,9 @@ define_class!(
         fn open_urls(&self, _: &NSApplication, urls: &NSArray<NSURL>) {
             let paths: Vec<PathBuf> = urls.iter().filter_map(|u| u.to_file_path()).collect();
             let (archives, others): (Vec<_>, Vec<_>) =
-                paths.into_iter().partition(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("aqr")));
+                paths.into_iter().partition(|p| {
+                    p.extension().is_some_and(|e| EXTRACTED.iter().any(|x| e.eq_ignore_ascii_case(x)))
+                });
             if !archives.is_empty() {
                 self.start(Verb::Extract, archives);
             }
@@ -470,8 +479,9 @@ fn welcome(mtm: MainThreadMarker) {
     a.setMessageText(&NSString::from_str("Aqueous is ready"));
     let mut info = String::from(
         "In Finder, Control-click files or folders for \"Compress with Aqueous\" (or \"(Passphrase)…\" to \
-         encrypt), and .aqr files for \"Extract with Aqueous\" and \"Test with Aqueous\" (under Quick \
-         Actions or Services). Opening an .aqr file extracts it beside it.\n\nWhere they are not there, \
+         encrypt), and archives for \"Extract with Aqueous\" and \"Test with Aqueous\" (under Quick \
+         Actions or Services). Opening an .aqr file extracts it beside it; other archives too where \
+         Aqueous opens them (Get Info, Open with).\n\nWhere the services are not there, \
          turn them on in System Settings: Keyboard, Keyboard Shortcuts, Services, Files and Folders.",
     );
     if aqr.is_some() && !linked {
