@@ -3,18 +3,29 @@
 //! process is then stopped as it would have been. A frontend may stop it as well ([`now`]).
 
 use std::path::Path;
+use std::sync::Mutex;
 
-/// Where the process stops, `path` is removed, until the guard is dropped.
-pub fn removing(path: &Path) -> Guard {
+/// Held as an output is made and set to be removed ([`create`]), and by [`now`] as the process
+/// stops (never released then): so that it never stops between the two, the output left.
+static GATE: Mutex<()> = Mutex::new(());
+
+/// Makes output `path` by `make` (creating it) and has it removed where the process stops,
+/// until the guard is dropped; where it is stopping already, waits for it to.
+pub fn create<T>(path: &Path, make: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<(T, Guard)> {
+    let _gate = GATE.lock().unwrap_or_else(|e| e.into_inner());
+    let t = make()?;
     imp::set(Some(path));
-    Guard(())
+    Ok((t, Guard(())))
 }
 
 pub struct Guard(());
 
-/// Stops the process now, with exit code `code`, the output being written removed.
+/// Stops the process now, with exit code `code`, the output being written removed (once one
+/// being made is: [`create`]; `exit` runs its handlers while the other threads go on).
 pub fn now(code: i32) -> ! {
+    let gate = GATE.lock().unwrap_or_else(|e| e.into_inner());
     imp::remove();
+    std::mem::forget(gate);
     std::process::exit(code)
 }
 

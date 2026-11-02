@@ -1343,9 +1343,8 @@ fn write_whole<T>(
     let mut name = path.file_name().ok_or(format!("{}: not a file's name", path.display()))?.to_owned();
     name.push(format!(".{}.part", std::process::id()));
     let part = path.with_file_name(name);
-    let mut file =
-        fs::OpenOptions::new().read(true).write(true).create_new(true).open(&part).map_err(|e| err(&part, e))?;
-    let stop = stop::removing(&part);
+    let open = || fs::OpenOptions::new().read(true).write(true).create_new(true).open(&part);
+    let (mut file, stop) = stop::create(&part, open).map_err(|e| err(&part, e))?;
     let r = write(&mut file).map_err(|e| err(path, e)).and_then(|t| {
         drop(file);
         place(&part, path, force)?;
