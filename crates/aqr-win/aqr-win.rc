@@ -1,7 +1,22 @@
 // The program's icon (the first, so Explorer's), also that of the windows (dialog.rs).
 1 ICON "droplet.ico"
-// .aqr files' (register.rs): the drop with a blue label (scripts/icons.py).
+// Files' (register.rs, FORMATS by these numbers; scripts/icons.py): .aqr's the drop with a blue
+// label, the other formats' the drop in gray with a dark one.
 2 ICON "icons/aqr.ico"
+3 ICON "icons/zip.ico"
+4 ICON "icons/7z.ico"
+5 ICON "icons/rar.ico"
+6 ICON "icons/alz.ico"
+7 ICON "icons/egg.ico"
+8 ICON "icons/tar.ico"
+9 ICON "icons/tgz.ico"
+10 ICON "icons/tbz2.ico"
+11 ICON "icons/txz.ico"
+12 ICON "icons/gz.ico"
+13 ICON "icons/bz2.ico"
+14 ICON "icons/xz.ico"
+15 ICON "icons/lzma.ico"
+16 ICON "icons/zst.ico"
 
 // The version (written by build.rs into OUT_DIR, which embed-resource gives rc.exe to look in).
 #include "version.rc"

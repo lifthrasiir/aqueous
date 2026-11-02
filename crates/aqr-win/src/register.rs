@@ -7,6 +7,15 @@
 //! - `.aqr` of the class `Aqueous.Archive`, whose verbs are `extract` (the default: a double
 //!   click) and `test`, and whose icon (`DefaultIcon`) is resource 2: this program's drop with
 //!   a label, "AQR" (`scripts/icons.py`).
+//! - The other formats `aqr` extracts ([`FORMATS`]), each of a class of its own
+//!   (`Aqueous.zip`, ...) with the same verbs and its own icon (the drop in gray, labeled).
+//!   None is taken from another program: the class goes in the extension's `OpenWithProgids`,
+//!   and is its default only where the extension has none (no class in `HKEY_CLASSES_ROOT`, no
+//!   `UserChoice`). Elsewhere Windows (8 on) asks which program to open the next such file
+//!   with, Aqueous being new; Windows 7 only lists it under "Open with".
+//! - Aqueous's capabilities (`Software\Aqueous\Capabilities`, named in
+//!   `Software\RegisteredApplications`): those extensions and their classes, so that Settings'
+//!   default apps lists Aqueous for them.
 //!
 //! The verbs take any number of paths chosen (`MultiSelectModel` `Player`; Explorer runs a
 //! process for each, [`crate::gather`]). On Windows 11 they are under "Show more options": the
@@ -18,9 +27,9 @@ use std::os::windows::ffi::OsStrExt;
 
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_SUCCESS, WIN32_ERROR};
 use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_DWORD, REG_EXPAND_SZ, REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE,
-    RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW,
-    RegDeleteTreeW, RegGetValueW, RegSetValueExW,
+    HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, KEY_WRITE, REG_DWORD, REG_EXPAND_SZ, REG_OPTION_NON_VOLATILE, REG_SZ,
+    REG_VALUE_TYPE, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW,
+    RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW, RegSetValueExW,
 };
 use windows_sys::Win32::UI::Shell::{SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify};
 
@@ -29,6 +38,33 @@ use crate::dialog::wide;
 /// The class of `.aqr` files.
 const CLASS: &str = "Aqueous.Archive";
 
+/// The formats `aqr` extracts besides its own (aqr-unpack's, by the last extension, as Explorer
+/// tells a file's type): the extension, the resource of its icon (aqr-win.rc) and the name of
+/// its type. Their classes are `Aqueous.` and the extension.
+const FORMATS: [(&str, u16, &str); 14] = [
+    ("zip", 3, "ZIP archive"),
+    ("7z", 4, "7z archive"),
+    ("rar", 5, "RAR archive"),
+    ("alz", 6, "ALZip archive"),
+    ("egg", 7, "EGG archive"),
+    ("tar", 8, "tar archive"),
+    ("tgz", 9, "tar archive (gzip)"),
+    ("tbz2", 10, "tar archive (bzip2)"),
+    ("txz", 11, "tar archive (xz)"),
+    ("gz", 12, "gzip file"),
+    ("bz2", 13, "bzip2 file"),
+    ("xz", 14, "xz file"),
+    ("lzma", 15, "LZMA file"),
+    ("zst", 16, "Zstandard file"),
+];
+
+const CAPABILITIES: &str = r"Software\Aqueous\Capabilities";
+const APPLICATIONS: &str = r"Software\RegisteredApplications";
+/// Aqueous's name in [`APPLICATIONS`].
+const APPLICATION: &str = "Aqueous";
+/// Where Explorer keeps the program the user chose for an extension (`{}`: `.zip`, ...).
+const USER_CHOICE: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{}\UserChoice";
+
 const COMPRESS: [&str; 2] = [r"*\shell\Aqueous.compress", r"Directory\shell\Aqueous.compress"];
 const COMPRESS_PASSPHRASE: [&str; 2] =
     [r"*\shell\Aqueous.compress-passphrase", r"Directory\shell\Aqueous.compress-passphrase"];
@@ -36,9 +72,8 @@ const COMPRESS_PASSPHRASE: [&str; 2] =
 pub fn register() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("This program's path is not known: {e}"))?;
     let command = |verb: &str| format!("\"{}\" {verb} \"%1\"", exe.display());
-    // (the icons of resources 1, this program's, and 2, `.aqr` files': aqr-win.rc)
+    // (the icon of resource 1, this program's; files' are 2 on, aqr-win.rc)
     let icon = format!("\"{}\",-1", exe.display());
-    let file_icon = format!("\"{}\",-2", exe.display());
     let set = |key: &str, name: Option<&str>, value: &str| set(&classes(key), name, Value::Sz(value));
     for (keys, text, verb) in [
         (COMPRESS, "Compress with Aqueous", "compress"),
@@ -51,16 +86,40 @@ pub fn register() -> Result<(), String> {
             set(&format!(r"{key}\command"), None, &command(verb))?;
         }
     }
+    let class = |class: &str, name: &str, icon: u16| -> Result<(), String> {
+        set(class, None, name)?;
+        set(&format!(r"{class}\DefaultIcon"), None, &format!("\"{}\",-{icon}", exe.display()))?;
+        set(&format!(r"{class}\shell"), None, "extract")?;
+        for (verb, text) in [("extract", "Extract here"), ("test", "Test")] {
+            let key = format!(r"{class}\shell\{verb}");
+            set(&key, None, text)?;
+            set(&key, Some("MultiSelectModel"), "Player")?;
+            set(&format!(r"{key}\command"), None, &command(verb))?;
+        }
+        Ok(())
+    };
+    let capability =
+        |ext: &str, class: &str| self::set(&format!(r"{CAPABILITIES}\FileAssociations"), Some(ext), Value::Sz(class));
     set(".aqr", None, CLASS)?;
-    set(CLASS, None, "Aqueous archive")?;
-    set(&format!(r"{CLASS}\DefaultIcon"), None, &file_icon)?;
-    set(&format!(r"{CLASS}\shell"), None, "extract")?;
-    for (verb, text) in [("extract", "Extract here"), ("test", "Test")] {
-        let key = format!(r"{CLASS}\shell\{verb}");
-        set(&key, None, text)?;
-        set(&key, Some("MultiSelectModel"), "Player")?;
-        set(&format!(r"{key}\command"), None, &command(verb))?;
+    class(CLASS, "Aqueous archive", 2)?;
+    capability(".aqr", CLASS)?;
+    for (ext, icon, name) in FORMATS {
+        let (ext, progid) = (format!(".{ext}"), format!("Aqueous.{ext}"));
+        class(&progid, name, icon)?;
+        set(&format!(r"{ext}\OpenWithProgids"), Some(&progid), "")?;
+        if !has_default(&ext) {
+            set(&ext, None, &progid)?;
+        }
+        capability(&ext, &progid)?;
     }
+    for (name, value) in [
+        ("ApplicationName", "Aqueous"),
+        ("ApplicationDescription", "Archives recompressed losslessly; other formats extracted"),
+        ("ApplicationIcon", &icon),
+    ] {
+        self::set(CAPABILITIES, Some(name), Value::Sz(value))?;
+    }
+    self::set(APPLICATIONS, Some(APPLICATION), Value::Sz(CAPABILITIES))?;
     notify();
     Ok(())
 }
@@ -73,8 +132,26 @@ pub fn unregister() -> Result<(), String> {
     if get(&classes(".aqr"), None).is_some_and(|(v, _)| v == CLASS) {
         delete(&classes(".aqr"))?;
     }
+    for (ext, ..) in FORMATS {
+        let (ext, progid) = (format!(".{ext}"), format!("Aqueous.{ext}"));
+        delete(&classes(&progid))?;
+        delete_value(&classes(&format!(r"{ext}\OpenWithProgids")), &progid)?;
+        // (the default only where it is still Aqueous's)
+        if get(&classes(&ext), None).is_some_and(|(v, _)| v == progid) {
+            delete_value(&classes(&ext), "")?;
+        }
+    }
+    delete_value(APPLICATIONS, APPLICATION)?;
+    delete(r"Software\Aqueous")?;
     notify();
     Ok(())
+}
+
+/// Whether extension `ext` (`.zip`) opens with a program already: a class in
+/// `HKEY_CLASSES_ROOT` (the machine's and the user's), or the user's choice.
+fn has_default(ext: &str) -> bool {
+    get_from(HKEY_CLASSES_ROOT, ext, None).is_some_and(|(v, _)| !v.is_empty())
+        || get(&USER_CHOICE.replace("{}", ext), Some("ProgId")).is_some_and(|(v, _)| !v.is_empty())
 }
 
 /// Tells Explorer that the verbs changed.
@@ -151,6 +228,11 @@ pub fn set(key: &str, name: Option<&str>, value: Value) -> Result<(), String> {
 /// The string `name` (`None`: the default) of `key` (of `HKEY_CURRENT_USER`), its variables not
 /// expanded, and whether it is of `REG_EXPAND_SZ`; `None` where there is none.
 pub fn get(key: &str, name: Option<&str>) -> Option<(String, bool)> {
+    get_from(HKEY_CURRENT_USER, key, name)
+}
+
+/// [`get`] of `root`.
+fn get_from(root: HKEY, key: &str, name: Option<&str>) -> Option<(String, bool)> {
     let p = wide(key);
     let name = name.map(wide);
     let mut buf = vec![0u16; 256];
@@ -160,7 +242,7 @@ pub fn get(key: &str, name: Option<&str>) -> Option<(String, bool)> {
         // SAFETY: a key of NULs, a name of NULs or none, room for the value and its length
         let e = unsafe {
             RegGetValueW(
-                HKEY_CURRENT_USER,
+                root,
                 p.as_ptr(),
                 name.as_ref().map_or(std::ptr::null(), |n| n.as_ptr()),
                 RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND,
@@ -197,5 +279,23 @@ pub fn delete_value(key: &str, name: &str) -> Result<(), String> {
     match unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, p.as_ptr(), n.as_ptr()) } {
         ERROR_SUCCESS | ERROR_FILE_NOT_FOUND => Ok(()),
         e => Err(error("Not deleted:", key, e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FORMATS;
+
+    /// `FORMATS`' icons are the resources of aqr-win.rc by those numbers, and are there.
+    #[test]
+    fn icons_of_formats() {
+        let rc = include_str!("../aqr-win.rc");
+        let icon = |n: u16| rc.lines().find_map(|l| l.strip_prefix(&format!("{n} ICON ")).map(|f| f.trim_matches('"')));
+        assert_eq!(icon(2), Some("icons/aqr.ico"));
+        for (ext, n, _) in FORMATS {
+            assert_eq!(icon(n), Some(format!("icons/{ext}.ico").as_str()), "{ext}");
+            assert!(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("icons/{ext}.ico")).is_file());
+        }
+        assert_eq!(rc.lines().filter(|l| l.contains(" ICON ")).count(), 2 + FORMATS.len());
     }
 }

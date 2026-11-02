@@ -64,8 +64,8 @@ fn main() -> std::process::ExitCode {
             return match register::register() {
                 Ok(()) => {
                     let done = "\"Compress with Aqueous\" and \"Compress with passphrase…\" are on files and \
-                                folders, \"Extract here\" and \"Test\" on .aqr files (on Windows 11, under \"Show more \
-                                options\").";
+                                folders, \"Extract here\" and \"Test\" on .aqr files and other archives (on Windows 11, \
+                                under \"Show more options\").";
                     dialog::message(dialog::Icon::Information, "Aqueous is registered", done, None);
                     ExitCode::SUCCESS
                 }
