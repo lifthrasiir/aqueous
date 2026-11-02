@@ -247,7 +247,6 @@ dependencies = [
  "aqr-wrt",
  "aqr-xsv",
  "aqr-zip",
- "crc32fast",
  "flate2",
  "libc",
  "memmap2",

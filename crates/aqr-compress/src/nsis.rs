@@ -67,7 +67,7 @@ pub(crate) fn sums(d: &[u8], blocks: &[Range<usize>], threads: usize) -> Vec<(u3
     let blocks: Vec<&[u8]> = blocks.iter().map(|b| &d[b.clone()]).filter(|b| b.len() >= MIN_BLOCK).collect();
     let each = aqr_common::pool::par_map(blocks.len(), threads, |i| {
         let b = blocks[i];
-        let mut sums = vec![(crc32fast::hash(b), b.len() as u64)];
+        let mut sums = vec![(aqr_common::crc32::hash(b), b.len() as u64)];
         let data = match format(b) {
             Some(Format::Gzip) => crate::flate::gunzip(b, DATA_MAX),
             Some(Format::Bzip2) => aqr_bz2::stream::decode(b, true, DATA_MAX).ok().map(|s| s.data),

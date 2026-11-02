@@ -44,7 +44,7 @@ fn variant(w: usize, h: usize, rect: Option<(usize, usize, usize, usize)>) -> Ve
         let start = out.len();
         out.extend_from_slice(kind);
         out.extend_from_slice(&d);
-        out.extend_from_slice(&crc32fast::hash(&out[start..]).to_be_bytes());
+        out.extend_from_slice(&aqr_common::crc32::hash(&out[start..]).to_be_bytes());
     }
     out
 }
@@ -957,7 +957,7 @@ fn zip_of(name: &str, data: &[u8], deflated: &[u8]) -> Vec<u8> {
     for v in [20u16, 0, 8, 0, 0] {
         common.extend_from_slice(&v.to_le_bytes());
     }
-    for v in [crc32fast::hash(data), deflated.len() as u32, data.len() as u32] {
+    for v in [aqr_common::crc32::hash(data), deflated.len() as u32, data.len() as u32] {
         common.extend_from_slice(&v.to_le_bytes());
     }
     common.extend_from_slice(&(name.len() as u16).to_le_bytes());

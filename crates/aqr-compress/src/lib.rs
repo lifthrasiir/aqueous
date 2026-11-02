@@ -2463,7 +2463,7 @@ mod tests {
         let (mut d, mut cd) = (Vec::new(), Vec::new());
         for (i, data) in files.iter().enumerate() {
             let mut h = vec![20, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-            h.extend_from_slice(&crc32fast::hash(data).to_le_bytes());
+            h.extend_from_slice(&aqr_common::crc32::hash(data).to_le_bytes());
             h.extend_from_slice(&(data.len() as u32).to_le_bytes());
             h.extend_from_slice(&(data.len() as u32).to_le_bytes());
             h.extend_from_slice(&[5, 0, 0, 0]);
@@ -2546,7 +2546,7 @@ mod tests {
         let (mut d, mut cd) = (Vec::new(), Vec::new());
         for &(name, data) in files {
             let mut h = vec![20, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-            h.extend_from_slice(&crc32fast::hash(data).to_le_bytes());
+            h.extend_from_slice(&aqr_common::crc32::hash(data).to_le_bytes());
             h.extend_from_slice(&(data.len() as u32).to_le_bytes());
             h.extend_from_slice(&(data.len() as u32).to_le_bytes());
             h.extend_from_slice(&(name.len() as u16).to_le_bytes());
@@ -2596,7 +2596,7 @@ mod tests {
             let start = out.len();
             out.extend_from_slice(kind);
             out.extend_from_slice(&d);
-            out.extend_from_slice(&crc32fast::hash(&out[start..]).to_be_bytes());
+            out.extend_from_slice(&aqr_common::crc32::hash(&out[start..]).to_be_bytes());
         }
         out
     }
@@ -3089,7 +3089,7 @@ mod tests {
             let data = aqr_common::rng::noise(5000 + i as usize);
             // encrypted: kept as they are, so that the archive is turned down
             let mut h = vec![20, 0, 1, 0, 0, 0, 0, 0, 0, 0];
-            h.extend_from_slice(&crc32fast::hash(&data).to_le_bytes());
+            h.extend_from_slice(&aqr_common::crc32::hash(&data).to_le_bytes());
             h.extend_from_slice(&(data.len() as u32).to_le_bytes());
             h.extend_from_slice(&(data.len() as u32).to_le_bytes());
             h.extend_from_slice(&[1, 0, 0, 0]);

@@ -766,7 +766,7 @@ fn together<S: Source + ?Sized>(
     };
     notes.send(Note::More(wanted.len() as u64));
     let sums = aqr_common::pool::par_map(wanted.len(), opt.threads, |i| {
-        let sum = src.read(wanted[i]).map(|d| crc32fast::hash(&d));
+        let sum = src.read(wanted[i]).map(|d| aqr_common::crc32::hash(&d));
         notes.send(Note::Looked);
         sum
     });
@@ -828,7 +828,7 @@ fn lay_alike<S: Source + ?Sized>(
 pub(crate) fn stream_sums(data: Option<Vec<u8>>) -> Vec<(u32, u64)> {
     match data {
         Some(data) if detect(&data).is_some_and(detect::Format::is_bundle) => member_sums(&data, 1),
-        Some(data) if data.len() as u64 >= MEMBER_MIN => vec![(crc32fast::hash(&data), data.len() as u64)],
+        Some(data) if data.len() as u64 >= MEMBER_MIN => vec![(aqr_common::crc32::hash(&data), data.len() as u64)],
         _ => Vec::new(),
     }
 }
@@ -846,7 +846,7 @@ fn member_sums(d: &[u8], threads: usize) -> Vec<(u32, u64)> {
         recs.iter().filter_map(|r| r.body()).filter(|b| b.role == Role::File).map(|b| b.span.clone()).collect()
     };
     let bodies: Vec<&[u8]> = spans.into_iter().filter(|s| s.len() as u64 >= MEMBER_MIN).map(|s| &d[s]).collect();
-    aqr_common::pool::par_map(bodies.len(), threads, |i| (crc32fast::hash(bodies[i]), bodies[i].len() as u64))
+    aqr_common::pool::par_map(bodies.len(), threads, |i| (aqr_common::crc32::hash(bodies[i]), bodies[i].len() as u64))
 }
 
 /// What files are ordered by, to put those alike next to each other: the extension, then the

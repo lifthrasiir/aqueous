@@ -886,7 +886,7 @@ fn zip(entries: &[(&str, &[u8], bool)]) -> Vec<u8> {
         common.extend_from_slice(&0u16.to_le_bytes());
         common.extend_from_slice(&(if deflate { 8u16 } else { 0 }).to_le_bytes());
         common.extend_from_slice(&0x5021_6c4au32.to_le_bytes());
-        common.extend_from_slice(&crc32fast::hash(data).to_le_bytes());
+        common.extend_from_slice(&aqr_common::crc32::hash(data).to_le_bytes());
         common.extend_from_slice(&(body.len() as u32).to_le_bytes());
         common.extend_from_slice(&(data.len() as u32).to_le_bytes());
         common.extend_from_slice(&(name.len() as u16).to_le_bytes());
@@ -986,7 +986,7 @@ fn picture(w: usize, h: usize, rect: Option<(usize, usize, usize, usize)>) -> Ve
         let start = out.len();
         out.extend_from_slice(kind);
         out.extend_from_slice(&d);
-        out.extend_from_slice(&crc32fast::hash(&out[start..]).to_be_bytes());
+        out.extend_from_slice(&aqr_common::crc32::hash(&out[start..]).to_be_bytes());
     }
     out
 }
