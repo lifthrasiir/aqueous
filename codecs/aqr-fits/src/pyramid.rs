@@ -405,7 +405,7 @@ pub fn encode(v: Vec<i64>, w: usize, h: usize) -> Coded {
 
 /// The `w` × `h` values of [`encode`].
 pub fn decode(c: &Coded, w: usize, h: usize) -> crate::Result<Vec<i64>> {
-    let mut d = Decoder { m: Models::new(), ac: ArithDecoder::new(&c.model), raw: bits::Reader::new(&c.raw) };
+    let mut d = Decoder { m: Models::new(), ac: ArithDecoder::new(&c.model), raw: bits::Reader::new(&c.raw, 0) };
     let mut levels: Vec<Level> = Vec::new();
     let (mut cw, mut ch) = (w, h);
     let mut ph = d.m.phase;
@@ -453,7 +453,7 @@ pub fn decode(c: &Coded, w: usize, h: usize) -> crate::Result<Vec<i64>> {
         above = Some((l, b));
         cur = values;
     }
-    if d.ac.overrun() || d.raw.past_end() {
+    if d.ac.overrun() || d.raw.overrun() {
         return Err(crate::corrupt());
     }
     Ok(cur)

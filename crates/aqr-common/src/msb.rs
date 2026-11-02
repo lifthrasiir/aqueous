@@ -84,6 +84,83 @@ impl<'a> BitReader<'a> {
     }
 }
 
+/// MSB-first reader of any slice: past its end it reads zeros, and [`ZeroReader::overrun`]
+/// tells afterwards whether it did. Unlike [`BitReader`], the data needs no padding (no copy of
+/// it), at the cost of a check of the length at each read.
+#[derive(Clone, Copy)]
+pub struct ZeroReader<'a> {
+    data: &'a [u8],
+    /// The position in bits.
+    pub pos: usize,
+}
+
+impl<'a> ZeroReader<'a> {
+    /// The reader of `data` from bit `pos`.
+    #[inline]
+    pub fn new(data: &'a [u8], pos: usize) -> Self {
+        ZeroReader { data, pos }
+    }
+
+    /// The next 57 or more bits, left aligned (zeros past the end).
+    #[inline]
+    pub fn window(&self) -> u64 {
+        let at = self.pos >> 3;
+        let w = match self.data.get(at..at + 8) {
+            Some(b) => u64::from_be_bytes(*b.first_chunk().expect("8 bytes")),
+            None => {
+                let mut b = [0u8; 8];
+                let tail = self.data.get(at..).unwrap_or_default();
+                b[..tail.len()].copy_from_slice(tail);
+                u64::from_be_bytes(b)
+            }
+        };
+        w << (self.pos & 7)
+    }
+
+    /// The next `n` bits (1..=32), without reading them.
+    #[inline]
+    pub fn peek(&self, n: u32) -> u32 {
+        (self.window() >> (64 - n)) as u32
+    }
+
+    #[inline]
+    pub fn skip(&mut self, n: u32) {
+        self.pos += n as usize;
+    }
+
+    /// `n` bits (0..=32).
+    #[inline]
+    pub fn get(&mut self, n: u32) -> u32 {
+        if n == 0 {
+            return 0;
+        }
+        let v = self.peek(n);
+        self.skip(n);
+        v
+    }
+
+    /// `n` bits (0..=64).
+    #[inline]
+    pub fn get64(&mut self, n: u32) -> u64 {
+        if n > 32 {
+            let hi = self.get(n - 32) as u64;
+            return hi << 32 | self.get(32) as u64;
+        }
+        self.get(n) as u64
+    }
+
+    #[inline]
+    pub fn bit(&mut self) -> bool {
+        self.get(1) != 0
+    }
+
+    /// Whether more bits were read than there are.
+    #[inline]
+    pub fn overrun(&self) -> bool {
+        self.pos > self.data.len() * 8
+    }
+}
+
 /// MSB-first writer.
 #[derive(Default)]
 pub struct BitWriter {
@@ -158,6 +235,33 @@ impl BitWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reads as [`BitReader`] over the data padded does, and zeros past the end.
+    #[test]
+    fn zero_reader() {
+        let mut w = BitWriter::new();
+        let mut seed = 7u64;
+        let mut vals = Vec::new();
+        for _ in 0..500 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let n = (seed >> 59) as u32 + 1;
+            let v = (seed >> 20) as u32 & ((1u64 << n) - 1) as u32;
+            w.put(v, n);
+            vals.push((n, v));
+        }
+        let d = w.finish();
+        let p = padded(&d);
+        let (mut a, mut b) = (BitReader::new(&p, 0), ZeroReader::new(&d, 0));
+        for &(n, v) in &vals {
+            assert_eq!(b.peek(n), a.peek(n));
+            assert_eq!((b.get(n), a.get(n)), (v, v));
+        }
+        assert!(!b.overrun());
+        b.pos = d.len() * 8 - 3;
+        assert_eq!(b.get64(40), (d[d.len() - 1] as u64 & 7) << 37);
+        assert!(b.overrun());
+        assert_eq!(ZeroReader::new(&[0xa5, 0x0f], 4).get64(12), 0x50f);
+    }
 
     #[test]
     fn fast_writer() {

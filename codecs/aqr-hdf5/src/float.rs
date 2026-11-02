@@ -141,37 +141,6 @@ impl Bits {
     }
 }
 
-/// Bits read MSB first, zeros past the end.
-struct Reader<'a> {
-    d: &'a [u8],
-    pos: usize,
-}
-
-impl Reader<'_> {
-    #[inline]
-    fn get(&mut self, n: u32) -> u64 {
-        if n > 32 {
-            let hi = self.get(n - 32);
-            return hi << 32 | self.get(32);
-        }
-        if n == 0 {
-            return 0;
-        }
-        let at = self.pos >> 3;
-        let w = match self.d.get(at..at + 8) {
-            Some(b) => u64::from_be_bytes(b.try_into().unwrap()),
-            None => {
-                let mut b = [0u8; 8];
-                let tail = self.d.get(at..).unwrap_or(&[]);
-                b[..tail.len()].copy_from_slice(tail);
-                u64::from_be_bytes(b)
-            }
-        };
-        self.pos += n as usize;
-        (w << ((self.pos - n as usize) & 7)) >> (64 - n)
-    }
-}
-
 /// Bits of the zigzag of a difference of `width` bits.
 #[inline]
 fn zigzag(d: u64, width: u32) -> u64 {
@@ -256,7 +225,7 @@ pub fn decode(
     let mut o = vec![0u64; n];
     let mut m = Model::new();
     let mut d = ArithDecoder::new(model);
-    let mut bits = Reader { d: raw, pos: 0 };
+    let mut bits = aqr_common::msb::ZeroReader::new(raw, 0);
     let mut last = [0u32; 3];
     let mut w = vec![0f64; order];
     for (b, start) in (0..n).step_by(BLOCK).enumerate() {
@@ -292,14 +261,14 @@ pub fn decode(
                         v = v << 1 | bit as u64;
                     }
                     let rest = l - 1 - top;
-                    v << rest | bits.get(rest)
+                    v << rest | bits.get64(rest)
                 }
             };
             o[i] = k.predict(&x, &o, i, &w).wrapping_add(unzigzag(z, width)) & k.mask();
             x[i] = k.value(k.unordered(o[i]));
         }
     }
-    if d.overrun() || bits.pos > raw.len() * 8 {
+    if d.overrun() || bits.overrun() {
         return None;
     }
     Some(o.into_iter().map(|o| k.unordered(o) << shift).collect())

@@ -30,69 +30,7 @@ pub const MAX_GROUPS: usize = 6;
 pub const MAX_SELECTORS: usize = 18002;
 
 /// A reader of bits, MSB first, reading zeros past the end.
-struct Bits<'a> {
-    d: &'a [u8],
-    /// The next byte to load.
-    p: usize,
-    acc: u64,
-    /// Bits in `acc`, its low ones.
-    n: u32,
-}
-
-impl<'a> Bits<'a> {
-    fn new(d: &'a [u8], byte: usize) -> Self {
-        Bits { d, p: byte, acc: 0, n: 0 }
-    }
-
-    #[inline(always)]
-    fn refill(&mut self) {
-        while self.n <= 56 {
-            let b = self.d.get(self.p).copied().unwrap_or(0);
-            self.p += 1;
-            self.acc = (self.acc << 8) | b as u64;
-            self.n += 8;
-        }
-    }
-
-    /// The next 32 bits, without reading them.
-    #[inline(always)]
-    fn peek32(&mut self) -> u32 {
-        if self.n < 32 {
-            self.refill();
-        }
-        (self.acc >> (self.n - 32)) as u32
-    }
-
-    #[inline(always)]
-    fn skip(&mut self, k: u32) {
-        self.n -= k;
-    }
-
-    /// `k` bits, 1..=32.
-    #[inline(always)]
-    fn get(&mut self, k: u32) -> u32 {
-        let v = self.peek32() >> (32 - k);
-        self.n -= k;
-        v
-    }
-
-    fn bit(&mut self) -> bool {
-        self.get(1) != 0
-    }
-
-    fn get48(&mut self) -> u64 {
-        (self.get(24) as u64) << 24 | self.get(24) as u64
-    }
-
-    /// Bits read so far.
-    fn pos(&self) -> usize {
-        self.p * 8 - self.n as usize
-    }
-
-    fn overrun(&self) -> bool {
-        self.pos() > self.d.len() * 8
-    }
-}
+type Bits<'a> = aqr_common::msb::ZeroReader<'a>;
 
 /// The level of a stream header at the start of `d`.
 pub fn level(d: &[u8]) -> Option<u8> {
@@ -200,7 +138,7 @@ impl<'a> Blocks<'a> {
             Framing::Alz if d.starts_with(b"DLZ") => (ALZ_LEVEL, 0),
             Framing::Alz => return Err(Error("not an ALZ bzip2 stream")),
         };
-        Ok(Blocks { r: Bits::new(d, at), level, framing, combined: 0 })
+        Ok(Blocks { r: Bits::new(d, at * 8), level, framing, combined: 0 })
     }
 
     /// The next block into `last`, with its `origPtr`, CRC (none in [`Framing::Alz`]) and
@@ -209,7 +147,7 @@ impl<'a> Blocks<'a> {
         let r = &mut self.r;
         let want = match self.framing {
             Framing::Bzip2 => {
-                match r.get48() {
+                match r.get64(48) {
                     BLOCK_MAGIC => {}
                     END_MAGIC => return Ok(None),
                     _ => return Err(corrupt()),
@@ -239,7 +177,7 @@ impl<'a> Blocks<'a> {
 
     /// Bytes of the stream read so far, to the end of the last block (its last byte with it).
     fn read(&self) -> usize {
-        self.r.pos().div_ceil(8)
+        self.r.pos.div_ceil(8)
     }
 
     /// After the last block: the bytes of the stream, its combined CRC checked where `data`.
@@ -254,7 +192,7 @@ impl<'a> Blocks<'a> {
         if data && want != self.combined {
             return Err(Error("CRC mismatch"));
         }
-        Ok(self.r.pos().div_ceil(8))
+        Ok(self.r.pos.div_ceil(8))
     }
 }
 
@@ -439,7 +377,7 @@ fn block(r: &mut Bits, level: u8, last: &mut Vec<u8>) -> Result<usize> {
     'groups: for &t in &selectors {
         let tab = &tables[t as usize];
         for _ in 0..GROUP {
-            let (sym, l) = tab.decode(r.peek32()).ok_or_else(corrupt)?;
+            let (sym, l) = tab.decode(r.peek(32)).ok_or_else(corrupt)?;
             r.skip(l);
             if sym <= 1 {
                 run += weight << sym;

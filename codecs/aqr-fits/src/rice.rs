@@ -133,7 +133,7 @@ pub fn decode(d: &[u8], n: usize, p: Params) -> Option<Tile> {
         return None;
     }
     let (bits, mask) = (p.bits(), p.mask());
-    let mut r = Reader::new(d);
+    let mut r = Reader::new(d, 0);
     let mut last = r.get(bits);
     let mut t = Tile { pixels: Vec::with_capacity(n), codes: Vec::with_capacity(p.blocks(n)) };
     let mut first = true;
@@ -149,9 +149,9 @@ pub fn decode(d: &[u8], n: usize, p: Params) -> Option<Tile> {
                 c if c < p.raw_code() => {
                     let k = c as u32 - 1;
                     let mut q = 0u32;
-                    while r.bit() == 0 {
+                    while !r.bit() {
                         q += 1;
-                        if q > mask >> k || r.past_end() {
+                        if q > mask >> k || r.overrun() {
                             return None;
                         }
                     }
@@ -169,7 +169,7 @@ pub fn decode(d: &[u8], n: usize, p: Params) -> Option<Tile> {
             last = last.wrapping_add(unzig(z)) & mask;
             t.pixels.push(last);
         }
-        if r.past_end() {
+        if r.overrun() {
             return None;
         }
     }

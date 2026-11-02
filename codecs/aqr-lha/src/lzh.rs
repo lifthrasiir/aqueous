@@ -4,6 +4,7 @@
 //! parse encodes to itself is its parse.
 
 use crate::{Error, Result, corrupt};
+use aqr_common::msb::ZeroReader;
 
 /// Symbols of the code of literals and lengths: 256 literals, lengths 3 to 256.
 pub const NC: usize = 510;
@@ -259,29 +260,28 @@ impl Code {
 }
 
 /// MSB-first reader; past the end it fails.
-pub struct Reader<'a> {
-    d: &'a [u8],
-    pub pos: usize,
-}
+pub struct Reader<'a>(ZeroReader<'a>);
 
 impl<'a> Reader<'a> {
     pub fn new(d: &'a [u8]) -> Self {
-        Reader { d, pos: 0 }
+        Reader(ZeroReader::new(d, 0))
+    }
+
+    /// The position in bits.
+    pub fn pos(&self) -> usize {
+        self.0.pos
     }
 
     #[inline]
     fn bit(&mut self) -> Result<u32> {
-        let b = *self.d.get(self.pos >> 3).ok_or(Error("a stream cut short"))?;
-        let v = (b >> (7 - (self.pos & 7))) & 1;
-        self.pos += 1;
-        Ok(v as u32)
+        self.get(1)
     }
 
     #[inline]
     pub fn get(&mut self, n: u32) -> Result<u32> {
-        let mut v = 0;
-        for _ in 0..n {
-            v = v << 1 | self.bit()?;
+        let v = self.0.get(n);
+        if self.0.overrun() {
+            return Err(Error("a stream cut short"));
         }
         Ok(v)
     }
@@ -554,10 +554,10 @@ pub fn decode(d: &[u8], size: usize, m: Method) -> Result<Stream> {
         }
         st.heads.push(h);
     }
-    let bits = (8 - r.pos % 8) % 8;
+    let bits = (8 - r.pos() % 8) % 8;
     st.pad_bits = bits as u8;
     st.pad = r.get(bits as u32)? as u8;
-    st.tail = d[r.pos / 8..].to_vec();
+    st.tail = d[r.pos() / 8..].to_vec();
     Ok(st)
 }
 

@@ -693,7 +693,7 @@ fn code_blocks(bits: &mut impl Bits, ctx: &mut Ctx, st: &mut Stream, m: Method, 
             }
             let mut r = lzh::Reader::new(&out);
             let (h, _) = lzh::read_head(&mut r, m)?;
-            if r.pos != n as usize || h.size as usize != size {
+            if r.pos() != n as usize || h.size as usize != size {
                 return Err(corrupt());
             }
             h

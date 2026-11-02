@@ -186,13 +186,13 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "fits-recons-image",
         version: 1,
-        sha512_256: hex("be133870b4cfa8e76ec6691df296a3da3f005516e3f6fb6c59ac9a1dedffe4fd"),
+        sha512_256: hex("e958c876dbb3edc813bc68d3cf483a43152c06c4d371369166d469e45c701ecd"),
         block: include_bytes!("../wasm/fits-recons-image.block"),
     },
     Known {
         name: "fits-recons-rice",
         version: 1,
-        sha512_256: hex("6bc4d5a09f68a8ddd2e09b3417cc2c9fbe0e7bf9bf0b8b0517ec6e24caca2bd7"),
+        sha512_256: hex("3a860f0ccf2378b995263b755b50956d3a554263c87dfa5df6ddd8a452ac28f4"),
         block: include_bytes!("../wasm/fits-recons-rice.block"),
     },
     Known {
@@ -240,7 +240,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "hdf5-recons-float",
         version: 1,
-        sha512_256: hex("ace87cb3af669f164286e24e6d4e58c097a25202c979e3eb7d2db33707498a27"),
+        sha512_256: hex("474890dd097d245654a484974f694c3cdd4ce42e999124cd887db9ba33f20081"),
         block: include_bytes!("../wasm/hdf5-recons-float.block"),
     },
     Known {
@@ -270,7 +270,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "lha-recons",
         version: 1,
-        sha512_256: hex("f6f49d223fa77a5fa9bb35444cca9f90e7fe5c88347b3dbaaf7a219668f8917d"),
+        sha512_256: hex("829e48c5443ab16c0e0bef96392ae29f6b9b4e3c76e1311af1047f6f628c7f48"),
         block: include_bytes!("../wasm/lha-recons.block"),
     },
     Known {

@@ -226,7 +226,7 @@ pub fn encode(image: &[u32], s: Shape, known: Option<&[bool]>) -> Coded {
 pub fn decode(c: &Coded, s: Shape, image: &mut [u32], known: Option<&[bool]>) -> crate::Result<()> {
     let mut m = Model::new(s);
     let mut ac = ArithDecoder::new(&c.model);
-    let mut raw = bits::Reader::new(&c.raw);
+    let mut raw = bits::Reader::new(&c.raw, 0);
     for y in 0..image.len().div_ceil(s.width) {
         let (done, rest) = image.split_at_mut(y * s.width);
         let up = (y > 0).then(|| &done[(y - 1) * s.width..]);
@@ -272,7 +272,7 @@ pub fn decode(c: &Coded, s: Shape, image: &mut [u32], known: Option<&[bool]>) ->
         }
         m.next_row();
     }
-    if ac.overrun() || raw.past_end() {
+    if ac.overrun() || raw.overrun() {
         return Err(crate::corrupt());
     }
     Ok(())
