@@ -5,7 +5,7 @@
 //! slot, packed, which the formula fills with the children's formulas (this module again).
 
 use crate::jpeg::Error;
-use crate::{codec, fast, jpeg};
+use crate::{codec, jpeg, model};
 use aqr_common::varint;
 use aqr_formula::{Formula, Kind, Module, Node};
 
@@ -17,11 +17,11 @@ pub const MODULE: Module = Module::new("jpeg-recons", 2).with_memory(memory);
 /// Tasks of an instance that run at once (the module's slots).
 const SLOTS: usize = 8;
 
-/// Bytes of the decoding tables (`fast::Tables`, `N_SYM` symbols: 4 bytes of the decoder's
+/// Bytes of the decoding tables (`model::Tables`, `N_SYM` symbols: 4 bytes of the decoder's
 /// `cum | freq << 16` and 4 of its lookup table each) with what `read_tables` and
 /// `build_tables` hold while they are made (the frequencies and cumulative sums, 2 bytes a
 /// symbol each), and slack.
-const TABLES: u64 = 12 * fast::N_SYM as u64 + (140 << 10);
+const TABLES: u64 = 12 * model::N_SYM as u64 + (140 << 10);
 
 /// Bytes of a block of coefficients and its mask.
 const BLOCK: u64 = 136;
@@ -63,7 +63,7 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     }
     // the scan info (see codec::decode_core): raw scans and truncated tails, whose lengths
     // come first in `lens`, then the stripes' (words, raw bytes)
-    let get = |d: &[u8], p: &mut usize| fast::get_varint(d, p).ok();
+    let get = |d: &[u8], p: &mut usize| model::get_varint(d, p).ok();
     let mut p = 0;
     if get(info, &mut p)? != j.scans.len() as u64 {
         return None;
@@ -87,7 +87,7 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
             slices += 1;
         }
     }
-    let ns = usize::try_from(get(info, &mut p)?).ok().filter(|&n| (1..=fast::MAX_STRIPES).contains(&n))?;
+    let ns = usize::try_from(get(info, &mut p)?).ok().filter(|&n| (1..=model::MAX_STRIPES).contains(&n))?;
     let mut p = 0;
     for _ in 0..slices {
         get(lens, &mut p)?;
@@ -116,7 +116,7 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
         + scans.len() as u64
         + 2 * 1024 * nc
         + 4 * aqr_formula::PAGE;
-    // the rows of block rows `rows` of each component (as fast::stripe_rows)
+    // the rows of block rows `rows` of each component (as model::stripe_rows)
     let rows = if nc == 1 { j.comps[0].bh } else { j.comps[0].bh / j.comps[0].v };
     let held = |k: usize| -> u64 {
         j.comps
@@ -142,7 +142,7 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     };
     let nmcu = (s.mcux * s.mcuy) as u64;
     let emit = first_cut.map_or(nmcu, |m| m.min(nmcu));
-    let ranges: Vec<_> = fast::stripe_mcus(&j, s.mcux, ns).into_iter().take_while(|r| (r.0 as u64) < emit).collect();
+    let ranges: Vec<_> = model::stripe_mcus(&j, s.mcux, ns).into_iter().take_while(|r| (r.0 as u64) < emit).collect();
     let nr = ranges.len() as u64;
     let bpm: u64 = j.comps.iter().map(|c| if nc == 1 { 1 } else { (c.h * c.v) as u64 }).sum();
     let nseg = nmcu.div_ceil(if s.ri > 0 { s.ri as u64 } else { nmcu });

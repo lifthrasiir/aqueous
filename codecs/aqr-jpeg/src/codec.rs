@@ -9,13 +9,13 @@
 //!
 //! Sequential files with a single scan (most files) are decoded, modelled and re-emitted a
 //! stripe at a time, so that memory does not follow the image size: only a few stripes'
-//! coefficients are held at once (see `jpeg::decode_striped`, `fast::Modeller` and
+//! coefficients are held at once (see `jpeg::decode_striped`, `model::Modeller` and
 //! `jpeg::encode_striped`). Other files, and scans that do not decode cleanly, are held whole.
 
-use crate::fast::{self, get_varint};
 #[cfg(feature = "encode")]
 use crate::jpeg::Order;
 use crate::jpeg::{self, Clean, Coefs, Error, Jpeg, Scan, ScanInfo};
+use crate::model::{self, get_varint};
 use crate::progressive;
 #[cfg(feature = "encode")]
 use aqr_common::varint;
@@ -127,7 +127,7 @@ pub(crate) struct Core<'a> {
     pub info: Vec<u8>,
     /// raw scan data / truncated tails, in scan order
     pub scans: Vec<Cow<'a, [u8]>>,
-    pub model: fast::Encoded,
+    pub model: model::Encoded,
 }
 
 /// The scan of a sequential file that codes every component in one scan (as most do), whose
@@ -150,17 +150,17 @@ fn striped_scan(j: &Jpeg) -> Option<&Scan> {
 /// Scan info and (for a reproducible scan) model of a `striped_scan` file, its coefficients
 /// decoded and modelled a stripe at a time; None for other files.
 #[cfg(feature = "encode")]
-fn model_striped(j: &Jpeg, input: &[u8], clean: &mut Clean) -> Option<(ScanInfo, Option<fast::Encoded>)> {
+fn model_striped(j: &Jpeg, input: &[u8], clean: &mut Clean) -> Option<(ScanInfo, Option<model::Encoded>)> {
     let s = striped_scan(j)?;
     jpeg::destuff(&input[s.start..s.end], clean);
-    let ns = fast::stripe_count(j);
-    let ranges = fast::stripe_mcus(j, s.mcux, ns);
+    let ns = model::stripe_count(j);
+    let ranges = model::stripe_mcus(j, s.mcux, ns);
     let pool = std::sync::Mutex::new(Vec::<Vec<Coefs>>::new());
     for serial_only in [false, true] {
-        let m = fast::Modeller::new(j, ns);
+        let m = model::Modeller::new(j, ns);
         let take = |k| {
             let mut b = pool.lock().unwrap().pop().unwrap_or_default();
-            fast::hold_stripe(j, k, ns, &mut b);
+            model::hold_stripe(j, k, ns, &mut b);
             b
         };
         let put = |k, b: Vec<Coefs>| {
@@ -195,7 +195,7 @@ pub(crate) fn encode_core<'a>(input: &'a [u8], coefs: &mut Vec<Coefs>, clean: &m
                 // test oracle: the outcome must equal that of decoding the scan whole
                 let infos = jpeg::decode_all(&j, input, Order::Zigzag, coefs, clean)?;
                 assert!(infos == [info.clone()], "striped decoding: scan info differs");
-                let e = fast::encode(&j, coefs).0;
+                let e = model::encode(&j, coefs).0;
                 let same = e.tables == model.tables
                     && e.stripes.len() == model.stripes.len()
                     && e.stripes.iter().zip(&model.stripes).all(|(a, b)| a.rans == b.rans && a.raw == b.raw);
@@ -212,7 +212,7 @@ pub(crate) fn encode_core<'a>(input: &'a [u8], coefs: &mut Vec<Coefs>, clean: &m
             if infos.iter().all(|i| i.raw) {
                 return none();
             }
-            (infos, fast::encode(&j, coefs).0)
+            (infos, model::encode(&j, coefs).0)
         }
     };
     // blob: everything but the entropy-coded data
@@ -412,7 +412,7 @@ pub(crate) fn decode_core<'a>(
     }
     let nstripes = get_varint(info, &mut p)?;
     fully_read(info, p, "scan info")?;
-    if nstripes == 0 || nstripes > fast::MAX_STRIPES as u64 {
+    if nstripes == 0 || nstripes > model::MAX_STRIPES as u64 {
         return Err(Error("bad stripe count".into()));
     }
     // raw scan data and truncated tails, in scan order
@@ -430,7 +430,7 @@ pub(crate) fn decode_core<'a>(
     let tables = r.tables()?;
     let stripes: Vec<(&[u8], &[u8])> = (0..nstripes).map(|_| r.stripe()).collect::<Result<_, Error>>()?;
     r.finish()?;
-    let t = fast::read_tables_section(tables)?;
+    let t = model::read_tables_section(tables)?;
     if let Some(s) = striped_scan(&j)
         && !raws[0]
         && infos[0].truncated.as_ref().is_none_or(|t| t.mcus > 0)
@@ -440,9 +440,9 @@ pub(crate) fn decode_core<'a>(
             return Err(Error("blob contains entropy-coded data".into()));
         }
         let ns = stripes.len();
-        fast::check_stripes(&j, ns)?;
-        let ranges = fast::stripe_mcus(&j, s.mcux, ns);
-        let fill = |k, b: &mut Vec<Coefs>| fast::decode_stripe(&j, &t, k, ns, stripes[k], b);
+        model::check_stripes(&j, ns)?;
+        let ranges = model::stripe_mcus(&j, s.mcux, ns);
+        let fill = |k, b: &mut Vec<Coefs>| model::decode_stripe(&j, &t, k, ns, stripes[k], b);
         let pieces = jpeg::encode_striped(&j, s, &infos[0], &ranges, fill)?;
         let mut out = Vec::with_capacity(blob.len() + pieces.iter().map(|p| p.len()).sum::<usize>());
         out.extend_from_slice(&blob[..s.start]);
@@ -452,14 +452,14 @@ pub(crate) fn decode_core<'a>(
         out.extend_from_slice(&blob[s.start..]);
         if std::env::var_os("JRC_VERIFY_STRIPED").is_some() {
             // test oracle: the scan must equal the one re-emitted from whole components
-            fast::decode_whole(&j, &t, &stripes, coefs)?;
+            model::decode_whole(&j, &t, &stripes, coefs)?;
             let mut scan = Vec::new();
             jpeg::encode_scan(&j, s, &infos[0], coefs, &mut scan)?;
             assert!(out[s.start..out.len() - (blob.len() - s.start)] == scan, "striped re-emission differs");
         }
         return Ok(out);
     }
-    fast::decode_whole(&j, &t, &stripes, coefs)?;
+    model::decode_whole(&j, &t, &stripes, coefs)?;
     // scans are re-emitted independently of each other (in parallel; sequential scans are also
     // split internally, see `jpeg::encode_scan`)
     use crate::par::prelude::*;

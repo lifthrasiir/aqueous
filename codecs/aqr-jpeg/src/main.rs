@@ -245,7 +245,7 @@ fn main() {
                 match aqr_jpeg::jpeg::decode_all(&j, &d, aqr_jpeg::jpeg::Order::Zigzag, &mut coefs, &mut clean) {
                     Ok(infos) => {
                         if !j.progressive {
-                            let (e, _) = aqr_jpeg::fast::encode(&j, &coefs);
+                            let (e, _) = aqr_jpeg::model::encode(&j, &coefs);
                             let rans: usize = e.stripes.iter().map(|s| s.rans.len() * 4).sum();
                             let raw: usize = e.stripes.iter().map(|s| s.raw.len()).sum();
                             println!(

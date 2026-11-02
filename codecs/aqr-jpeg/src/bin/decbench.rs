@@ -1,6 +1,6 @@
 //! Loop the fast model decoder or the Huffman re-encoder only (for profiling).
 //! usage: aqr-jpeg-decbench file.jpg iters [huff|enc]   (RAYON_NUM_THREADS limits the workers)
-use aqr_jpeg::{fast, jpeg};
+use aqr_jpeg::{jpeg, model};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -10,7 +10,7 @@ fn main() {
     let mut clean = jpeg::Clean::default();
     let mut coefs = Vec::new();
     let infos = jpeg::decode_all(&j, &data, jpeg::Order::Zigzag, &mut coefs, &mut clean).unwrap();
-    let (e, _) = fast::encode(&j, &coefs);
+    let (e, _) = model::encode(&j, &coefs);
     let mut out = Vec::new();
     if args.get(3).map(String::as_str) == Some("huff") {
         let mut scan = Vec::new();
@@ -29,7 +29,7 @@ fn main() {
         let (mut w, mut n, mut r) = (0f64, 0f64, 0f64);
         let t = std::time::Instant::now();
         for _ in 0..iters {
-            let (e, ph) = fast::encode(&j, &coefs);
+            let (e, ph) = model::encode(&j, &coefs);
             std::hint::black_box(&e);
             (w, n, r) = (w + ph.walk, n + ph.norm, r + ph.rans);
         }
@@ -46,7 +46,7 @@ fn main() {
     }
     let t = std::time::Instant::now();
     for _ in 0..iters {
-        fast::decode_into(&j, &e, &mut out).unwrap();
+        model::decode_into(&j, &e, &mut out).unwrap();
         std::hint::black_box(&out);
     }
     let s = t.elapsed().as_secs_f64() / iters as f64;

@@ -1,7 +1,6 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod codec;
-pub mod fast;
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod jpeg;

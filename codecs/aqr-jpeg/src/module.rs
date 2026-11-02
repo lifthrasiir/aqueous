@@ -4,8 +4,8 @@
 use aqr_common::packed;
 
 use crate::codec::{self, CoreSource};
-use crate::fast::{get_bytes, get_varint};
 use crate::jpeg::Error;
+use crate::model::{get_bytes, get_varint};
 
 /// The module: the JPEG of `len` bytes from `params` (the frame type, 1 byte: 0 sequential,
 /// 1 progressive) and the nine `inputs` (FORMAT.md), on up to `threads` threads (0: rayon's

@@ -74,11 +74,10 @@ as a file that is not coded.
 |---|---|
 | `src/jpeg.rs` | Parsing, destuffing, fast Huffman decoding (serial / restart-interval parallel / speculative parallel, whole or stripe by stripe), canonicality checks, sequential scan re-encoding (parallel chunks or stripes) |
 | `src/progressive.rs` | Progressive decoding (jdphuff semantics) with inline canonicality checks, scan-script validation, row pipeline across scans, re-encoding (jcphuff semantics) |
-| `src/fast.rs` | Entropy stage: the "P1" model, table normalisation and serialisation, 4-way rANS, stripes |
+| `src/model.rs` | Entropy stage: the "P1" model, table normalisation and serialisation, 4-way rANS, stripes |
 | `src/codec.rs` | The codec behind the formula module: blob and scan info, embedded JPEGs, model and scan re-emission glue |
 | `src/formula.rs` | The formula module `jpeg-recons` (spec: [FORMAT.md](FORMAT.md)): `encode`, `decode`, recursive coding of embedded JPEGs |
 | `src/variant.rs` | Test generator: re-encodes the same coefficients in valid but non-canonical ways |
-| `src/model.rs` | The earlier, heavier model (reference only; only its `Phases` struct is still used) |
 | `tests/regress.rs` | Regression inputs |
 | `tests/memory.rs` | Peak heap use of a large sequential file (counting allocator) |
 
@@ -105,7 +104,7 @@ as a file that is not coded.
 - **Truncation**: in a scan whose data ends early, the K complete MCUs are modelled and the
   remaining bits are stored verbatim.
 
-### 2. Entropy model "P1" (`fast.rs`)
+### 2. Entropy model "P1" (`model.rs`)
 
 Blocks are processed in raster order per component, coefficients in zigzag order.
 
@@ -213,7 +212,7 @@ serial result.
 
 Sequential files with a single scan, which most files are, never hold their coefficients
 whole: they are decoded, modelled and re-emitted a stripe at a time (`jpeg::decode_striped`,
-`fast::Modeller`, `jpeg::encode_striped`). Each worker holds a stripe or two (32K blocks of
+`model::Modeller`, `jpeg::encode_striped`). Each worker holds a stripe or two (32K blocks of
 136 bytes each), and what follows the file is the input, its destuffed scan, the compact
 symbols and the output. Truncated scans are handled stripe-wise too, and a scan found not to
 be reproducible is left undecoded from there on. Progressive files and files with several

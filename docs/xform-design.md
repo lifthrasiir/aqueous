@@ -717,7 +717,7 @@ patch(s, d)[a:b]      = patch(s, d)를 b까지 평가한 출력의 [a:b]
 > |---|---|---|---|
 > | par-map(결과는 번호 순) | flate 세그먼트 배치, rans64 디코드 표(mp3), png 이미지별과 `png-set` 단계별, zip 항목(큰 것은 안에서 다시 flate 세그먼트) | `pool::par_map`(`AtomicUsize`로 다음 번호, `Mutex<Option<R>>` 칸) | 1 |
 > | 워커별 상태가 있는 작업 큐 | sqlite 테이블 첫 패스와 인덱스 순서(비용순 정렬) | `sqlite::par::map` | 1 |
-> | rayon par-iter, `join` | jpeg stripe별 모델 디코드(`fast::decode_whole`), 스캔별 재방출(`decode_core`), MCU 청크 인코딩과 stripe 인코딩 | rayon, 버퍼 재활용 `Mutex<Vec<…>>` | 1 |
+> | rayon par-iter, `join` | jpeg stripe별 모델 디코드(`model::decode_whole`), 스캔별 재방출(`decode_core`), MCU 청크 인코딩과 stripe 인코딩 | rayon, 버퍼 재활용 `Mutex<Vec<…>>` | 1 |
 > | 겹쳐 돌기(spawn 뒤 join) | flate 다음 배치를 현재 배치 쓰기와 겹침, mp3 helper(표와 rANS 디코더) | `pool::scope`, `Handle::join` | 1 |
 > | 출력의 서로 다른 구간에 직접 쓰기 | mp3 조립(`split_at_mut`), pcm 풀 | 빌린 `&mut` 조각 | 1(`join`의 `dst`로) |
 > | 유한 채널 파이프라인 | flac/pcm 4단(앞단 → 오차 → LMS → 풀) + 배치 회수, mp3 사이드 정보(헤더 채널 1, 사이드 정보 채널 8), png 블록 writer, psd 행 reader와 writer | `sync_channel`, 풀의 MPMC(`Arc<Mutex<Receiver>>`), 도착 순서 무관 + `Reorder`, 회수 채널, `try_recv`(png) | 2 |
