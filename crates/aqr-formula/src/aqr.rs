@@ -788,9 +788,9 @@ impl Encoder {
                 data.extend_from_slice(&c.to_le_bytes());
             }
 
-            // (the blocks compressed at once beforehand, where written once: kept, they may be
-            // compressed already, or be written apart)
-            if !self.keep.get() {
+            // (the blocks compressed at once beforehand, kept or not: where kept, as a formula is
+            // compared with its data, those compressed already are skipped)
+            {
                 let mut blocks = Vec::new();
                 for (s, used) in used.iter().enumerate() {
                     let (data, how) = (streams[s], self.how(&f.streams[s]));
