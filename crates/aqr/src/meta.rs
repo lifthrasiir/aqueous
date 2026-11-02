@@ -41,6 +41,10 @@ pub struct Reader {
     groups: HashMap<u32, Option<Arc<[u8]>>>,
 }
 
+/// An extended attribute: its name and value.
+#[cfg(unix)]
+type Xattr = (Vec<u8>, Vec<u8>);
+
 /// What is read of an entry by its path ([`stat`], of any thread), made the entry's extra by
 /// [`Reader::extra`].
 pub struct Stat {
@@ -51,7 +55,7 @@ pub struct Stat {
     /// Its extended attributes (Unix), or its alternate data streams (Windows; none of a
     /// link), or why they could not be read.
     #[cfg(unix)]
-    xattrs: Result<Vec<(Vec<u8>, Vec<u8>)>, String>,
+    xattrs: Result<Vec<Xattr>, String>,
     #[cfg(windows)]
     streams: Result<Vec<Fork>, String>,
     /// Its backup time, where asked (`privileged`).
