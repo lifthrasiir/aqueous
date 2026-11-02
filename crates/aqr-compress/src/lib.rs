@@ -1563,13 +1563,15 @@ fn make_later(f: &Formula, opt: &Options, depth: u32, cx: &Cx, children: &mut Co
         let mut child = made(d, opt, depth + 1, *nest, &own).filter(|c| takes_place(&c.f));
         child.iter_mut().for_each(|c| aqr_formula::store::spill_streams(&mut c.f));
         files.inspect(|f| f.tell(d.as_ptr(), true));
-        (child, own.deferred.into_inner())
+        (child, own.deferred.into_inner(), own.enc)
     });
     let mut made: Vec<_> = order.into_iter().zip(made).collect();
     made.sort_unstable_by_key(|&(i, _)| i);
-    for ((at, ..), (_, (child, deferred))) in later.into_iter().zip(made) {
+    for ((at, ..), (_, (child, deferred, enc))) in later.into_iter().zip(made) {
         children[at].1 = child;
         cx.deferred.borrow_mut().extend(deferred);
+        // (so that what holds it is sized and written without compressing its streams again)
+        cx.enc.adopt(enc);
     }
 }
 
@@ -1756,8 +1758,8 @@ fn content_slices(
                 return;
             }
             // (the files of an archive made later, at once, and so are those of an image or a
-            // WIM file)
-            if (depth == 0 && cx.top_sets.is_some() || bundle::files_apart(f))
+            // WIM file, and a ZIP archive's entries)
+            if (depth == 0 && cx.top_sets.is_some() || bundle::contents_apart(f))
                 && let Some(nest) = s.and_then(|s| nest.of(s.kind)).filter(|_| d.is_some())
             {
                 cx.later.borrow_mut().push((out.len(), n.clone(), nest));

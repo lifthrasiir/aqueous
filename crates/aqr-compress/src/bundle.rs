@@ -38,6 +38,13 @@ pub(crate) fn files_apart(f: &Formula) -> bool {
     bundles(f) || f.streams.get(1).is_some_and(|s| s.class == aqr_wim::formula::REST)
 }
 
+/// Whether the contents of formula `f` are made apart, each on a thread of its own: files
+/// ([`files_apart`]), and the entries of a ZIP archive (an APK's DEX files, libraries and
+/// resources one after another took most of its time).
+pub(crate) fn contents_apart(f: &Formula) -> bool {
+    files_apart(f) || f.applies().iter().any(|a| a.module == aqr_decompress::ZIP)
+}
+
 /// Whether formula `f` is aqr-iso's, of an image.
 pub(crate) fn is_iso(f: &Formula) -> bool {
     f.streams.get(1).is_some_and(|s| s.class == aqr_iso::formula::REST)
