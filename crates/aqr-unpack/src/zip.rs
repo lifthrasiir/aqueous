@@ -162,10 +162,13 @@ fn entry_name(raw: &[u8], flags: u16, central: &[u8]) -> Named {
         return Named::utf8(raw.to_vec());
     }
     for (id, f) in fields(central) {
-        if id == 0x7075 && f.len() >= 5 && f[0] == 1 && u32_at(f, 1) == crc32::hash(raw) {
-            if let Named::Text(t) = Named::utf8(f[5..].to_vec()) {
-                return Named::Text(t);
-            }
+        if id == 0x7075
+            && f.len() >= 5
+            && f[0] == 1
+            && u32_at(f, 1) == crc32::hash(raw)
+            && let Named::Text(t) = Named::utf8(f[5..].to_vec())
+        {
+            return Named::Text(t);
         }
     }
     Named::Bytes(raw.to_vec())

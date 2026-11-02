@@ -19,6 +19,9 @@
 //! On WebAssembly, which has no threads, the pool has no workers: nothing is reserved, and
 //! everything runs on the calling thread (the modules of aqr-modules, whatever their threads).
 
+// (on WebAssembly, `trace::Span` is nothing: dropped all the same, where it ends natively)
+#![cfg_attr(target_family = "wasm", allow(clippy::drop_non_drop))]
+
 use std::any::Any;
 use std::collections::VecDeque;
 use std::marker::PhantomData;

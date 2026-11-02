@@ -90,9 +90,11 @@ impl Undeclared {
             (None, Named::Text(_)) => unreachable!(),
             (None, Named::Bytes(b)) => {
                 let mut out = b.clone();
-                for i in 0..out.len() {
-                    if backslash && out[i] == b'\\' && self.d.starts(b, i) {
-                        out[i] = b'/';
+                if backslash {
+                    for (i, c) in out.iter_mut().enumerate() {
+                        if *c == b'\\' && self.d.starts(b, i) {
+                            *c = b'/';
+                        }
                     }
                 }
                 out
