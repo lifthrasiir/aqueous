@@ -18,6 +18,7 @@
 //! - [`adler32`]: Adler-32 (of zlib).
 //! - [`arith`]: binary arithmetic coding with adaptive bits (the records of aqr-lzma, aqr-lzo, aqr-bvx, aqr-gif).
 //! - [`out`]: output made in order, into a vector or compared with what it should be.
+//! - [`streams`]: streams of data and records one after another, and their index.
 
 pub mod adler32;
 pub mod arith;
@@ -31,6 +32,7 @@ pub mod progress;
 pub mod rans32;
 pub mod rans64;
 pub mod rng;
+pub mod streams;
 #[cfg(not(target_family = "wasm"))]
 pub mod trace;
 #[cfg(target_family = "wasm")]

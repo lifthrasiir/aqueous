@@ -5,41 +5,7 @@ use aqr_common::varint;
 
 use crate::{Error, Result, corrupt};
 
-/// The index of streams of data and records of `lens` bytes: for each, the two lengths as
-/// varints; empty for a single stream.
-pub fn index(lens: &[(usize, usize)]) -> Vec<u8> {
-    let mut out = Vec::new();
-    if lens.len() > 1 {
-        for &(d, r) in lens {
-            varint::put(&mut out, d as u64);
-            varint::put(&mut out, r as u64);
-        }
-    }
-    out
-}
-
-/// The data and records of each stream that `index` cuts `data` and `records` into.
-pub fn cut<'a>(data: &'a [u8], records: &'a [u8], index: &[u8]) -> Result<Vec<(&'a [u8], &'a [u8])>> {
-    if index.is_empty() {
-        return Ok(vec![(data, records)]);
-    }
-    let (mut at, mut d, mut r) = (0, data, records);
-    let mut out = Vec::new();
-    while at < index.len() {
-        let mut take = |from: &mut &'a [u8]| {
-            let n = varint::get(index, &mut at).map_err(|_| corrupt())?;
-            let n = usize::try_from(n).ok().filter(|&n| n <= from.len()).ok_or_else(corrupt)?;
-            let (a, b) = from.split_at(n);
-            *from = b;
-            Ok::<_, Error>(a)
-        };
-        out.push((take(&mut d)?, take(&mut r)?));
-    }
-    if !d.is_empty() || !r.is_empty() {
-        return Err(corrupt());
-    }
-    Ok(out)
-}
+pub use aqr_common::streams::index;
 
 /// What joins a stream's data and record onto an output: the sizes of its files' parts.
 type Join<'a> = &'a (dyn Fn(&[u8], &[u8], &mut Vec<u8>) -> Result<Vec<usize>> + Sync);
@@ -49,7 +15,7 @@ type Join<'a> = &'a (dyn Fn(&[u8], &[u8], &mut Vec<u8>) -> Result<Vec<usize>> + 
 /// side by side on up to `threads` threads natively; one after another in Wasm.
 fn decode_with(inputs: &[&[u8]], len: u64, threads: usize, join: Join) -> Result<Vec<u8>> {
     let &[data, records, index] = inputs else { return Err(Error("three inputs wanted")) };
-    let streams = cut(data, records, index)?;
+    let streams = aqr_common::streams::cut(data, records, index, corrupt)?;
     let len = usize::try_from(len).map_err(|_| corrupt())?;
     let mut out = Vec::with_capacity(len);
     if threads <= 1 || streams.len() <= 1 || cfg!(target_family = "wasm") {
