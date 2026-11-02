@@ -129,16 +129,17 @@ fn aqr() -> PathBuf {
     beside.filter(|p| p.is_file()).unwrap_or_else(|| "aqr.exe".into())
 }
 
-/// The archive of several `paths` (of a folder, as Explorer gives them): named after the
-/// folder, in it.
-fn archive_of(paths: &[PathBuf]) -> PathBuf {
+/// The archive of several `paths` (of a folder, as Explorer gives them) in `format` (its
+/// extension): named after the folder, in it.
+fn archive_of(paths: &[PathBuf], format: &str) -> PathBuf {
     let dir = paths[0].parent().unwrap_or(Path::new("."));
     let name = dir.file_name().map_or_else(|| "Archive".into(), |n| n.to_string_lossy().into_owned());
-    dir.join(format!("{name}.aqr"))
+    dir.join(format!("{name}.{format}"))
 }
 
-/// Runs `aqr` on `paths` (`-P` where `encrypt`), and shows how far it is.
-pub fn run(verb: Verb, mut paths: Vec<PathBuf>, encrypt: bool) -> ExitCode {
+/// Runs `aqr` on `paths` (`-P` where `encrypt`; compressing, into archives of `format`, `aqr`
+/// or another that `aqr --format` takes), and shows how far it is.
+pub fn run(verb: Verb, mut paths: Vec<PathBuf>, encrypt: bool, format: &str) -> ExitCode {
     paths.sort();
     let mut cmd = Command::new(aqr());
     cmd.arg("--ipc").arg(match verb {
@@ -148,6 +149,9 @@ pub fn run(verb: Verb, mut paths: Vec<PathBuf>, encrypt: bool) -> ExitCode {
     });
     if encrypt {
         cmd.arg("-P");
+    }
+    if verb == Verb::Compress && format != "aqr" {
+        cmd.arg("--format").arg(format);
     }
     // (every path an archive: several of them selected; a single entry at the top beside the
     // archive, else a directory of its name)
@@ -159,7 +163,7 @@ pub fn run(verb: Verb, mut paths: Vec<PathBuf>, encrypt: bool) -> ExitCode {
     }
     let count = match verb {
         Verb::Compress if paths.len() > 1 => {
-            cmd.arg("-o").arg(archive_of(&paths));
+            cmd.arg("-o").arg(archive_of(&paths, format));
             1
         }
         _ => paths.len(),

@@ -1,17 +1,18 @@
 //! Aqueous in Explorer: verbs on files, folders and archives, and a window of how far the work
 //! is, the work done by `aqr --ipc` (`crates/aqr/src/ipc.rs`) in a process of its own.
 //!
-//! usage: aqr-win --register | --unregister | compress[-passphrase] PATH... | extract ARCHIVE... |
-//!        test ARCHIVE...
+//! usage: aqr-win --register | --unregister | compress[-passphrase|-zip] PATH... |
+//!        extract ARCHIVE... | test ARCHIVE...
 //!
 //! - `--register` adds the verbs for the user ([`register`]): "Compress with Aqueous" on files
-//!   and folders ("Compress with passphrase…" encrypts: `aqr -P`), "Extract here" (also the
-//!   double-click) and "Test" on `.aqr` files.
+//!   and folders, and the menu "Aqueous" beside it with the rest ("Compress with passphrase…",
+//!   which encrypts: `aqr -P`; then "Compress into .zip", `aqr --format zip`); "Extract here"
+//!   (also the double-click) and "Test" on `.aqr` files and the other archives `aqr` extracts.
 //!   `--unregister` takes them away.
 //! - `--install` and `--uninstall [--quiet]`, of the program that aqr-win-install installed
 //!   ([`install`]): the former run by the installer, the latter by Settings' Apps.
 //! - `compress`: the paths into an archive, a single one into `PATH.aqr`, several into one
-//!   named after their folder. `extract`: each archive beside it, a single entry at its top
+//!   named after their folder (`compress-zip`: `.zip`, [`register::OTHER_FORMATS`]). `extract`: each archive beside it, a single entry at its top
 //!   as it is, else into its name without `.aqr` (`aqr --each --auto-dir`). `test`: each archive
 //!   checked, and what it holds told.
 //! - Explorer runs a process for each of the paths chosen: those of a verb in a folder are
@@ -57,16 +58,13 @@ fn main() -> std::process::ExitCode {
         dialog::message(dialog::Icon::Error, main, e, None);
         ExitCode::FAILURE
     };
-    let mut encrypt = false;
+    let (mut encrypt, mut format) = (false, "aqr");
     let name = verb;
     let verb = match verb {
         "--register" => {
             return match register::register() {
                 Ok(()) => {
-                    let done = "\"Compress with Aqueous\" and \"Compress with passphrase…\" are on files and \
-                                folders, \"Extract here\" and \"Test\" on .aqr files and other archives (on Windows 11, \
-                                under \"Show more options\").";
-                    dialog::message(dialog::Icon::Information, "Aqueous is registered", done, None);
+                    dialog::message(dialog::Icon::Information, "Aqueous is registered", &register::told(), None);
                     ExitCode::SUCCESS
                 }
                 Err(e) => fail("Aqueous is not registered", &e),
@@ -110,11 +108,17 @@ fn main() -> std::process::ExitCode {
             encrypt = true;
             Verb::Compress
         }
+        v if let Some(f) =
+            v.strip_prefix("compress-").and_then(|f| register::OTHER_FORMATS.iter().find(|&&g| g == f)) =>
+        {
+            format = f;
+            Verb::Compress
+        }
         "extract" => Verb::Extract,
         "test" => Verb::Test,
         _ => {
-            let usage = "aqr-win --register | --unregister | compress[-passphrase] PATH... | extract ARCHIVE... | \
-                         test ARCHIVE...";
+            let usage = "aqr-win --register | --unregister | compress[-passphrase|-zip] PATH... | \
+                         extract ARCHIVE... | test ARCHIVE...";
             return fail("Not a verb of Aqueous", usage);
         }
     };
@@ -127,5 +131,5 @@ fn main() -> std::process::ExitCode {
         Err(paths) if paths.is_empty() => return fail("Nothing to work on", "No path given."),
         Err(paths) => paths,
     };
-    run::run(verb, paths, encrypt)
+    run::run(verb, paths, encrypt, format)
 }

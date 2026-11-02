@@ -1,7 +1,8 @@
 # aqr-win
 
-Aqueous in Windows Explorer: "Compress with Aqueous" and "Compress with passphrase…" (encrypted,
-`aqr -P`) on files and folders, "Extract here" (also the double-click) and "Test" on `.aqr`
+Aqueous in Windows Explorer: "Compress with Aqueous" on files and folders, and beside it the
+menu "Aqueous" of the rest ("Compress with passphrase…", encrypted, `aqr -P`; a separator;
+"Compress into .zip", `aqr --format zip`), "Extract here" (also the double-click) and "Test" on `.aqr`
 files and the other archives `aqr` extracts, and a window of how far the work is. The work is
 done by `aqr --ipc` in a process of its own (the protocol: `crates/aqr/src/ipc.rs`); this
 program is the window and the verbs, about 1 MB (550 KB of it the icons: `droplet.ico`, the
@@ -18,6 +19,11 @@ Installed by `aqr-win-install` (crates/aqr-win-install), it is run as `aqr-win -
 (the verbs, the folder on the user's `PATH`, the uninstaller in Settings' Apps) and
 `aqr-win --uninstall [--quiet]` (all that taken away, and the folder: `src/install.rs`).
 
+- The menu "Aqueous" is the registry's own (`SubCommands` and a `shell` key under the verb,
+  the verbs in the order of their keys' names, `CommandFlags` for the separator): no shell
+  extension. Compressing into another format is a verb `compress-FORMAT` for each format of
+  `OTHER_FORMATS` (`src/register.rs`), the archive of several paths named after their folder
+  with that extension.
 - The verbs are registered for the user alone, no administrator needed; "Compress with Aqueous"
   takes this program's icon, `.aqr` files it with a label, "AQR". On Windows 11 the
   verbs are under "Show more options": the menu above takes only `IExplorerCommand` handlers of

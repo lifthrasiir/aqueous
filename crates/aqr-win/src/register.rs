@@ -2,8 +2,12 @@
 //! needed):
 //!
 //! - `*\shell\Aqueous.compress` and `Directory\shell\Aqueous.compress`: `aqr-win compress`,
-//!   with this program's icon; and `Aqueous.compress-passphrase`, `aqr-win compress-passphrase`
-//!   ("Compress with passphrase…", `aqr -P`).
+//!   with this program's icon; and beside it `Aqueous.more`, the menu "Aqueous" of the other
+//!   verbs ([`more`]: "Compress with passphrase…", `aqr -P`; then, after a separator, "Compress
+//!   into .zip" and the other formats `aqr` makes, [`OTHER_FORMATS`]). The menu is made by the
+//!   registry alone: `SubCommands` (empty) on the key has its own `shell` key taken as the
+//!   submenu's verbs, in the order of their keys' names; `CommandFlags` of
+//!   `ECF_SEPARATORBEFORE` puts the separator.
 //! - `.aqr` of the class `Aqueous.Archive`, whose verbs are `extract` (the default: a double
 //!   click) and `test`, and whose icon (`DefaultIcon`) is resource 2: this program's drop with
 //!   a label, "AQR" (`scripts/icons.py`).
@@ -66,8 +70,41 @@ const APPLICATION: &str = "Aqueous";
 const USER_CHOICE: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{}\UserChoice";
 
 const COMPRESS: [&str; 2] = [r"*\shell\Aqueous.compress", r"Directory\shell\Aqueous.compress"];
-const COMPRESS_PASSPHRASE: [&str; 2] =
-    [r"*\shell\Aqueous.compress-passphrase", r"Directory\shell\Aqueous.compress-passphrase"];
+/// The menu "Aqueous", of the verbs of [`more`].
+const MENU: [&str; 2] = [r"*\shell\Aqueous.more", r"Directory\shell\Aqueous.more"];
+/// Where "Compress with passphrase…" was before it went into [`MENU`]: taken away.
+const OLD: [&str; 2] = [r"*\shell\Aqueous.compress-passphrase", r"Directory\shell\Aqueous.compress-passphrase"];
+
+/// The formats other than Aqueous's that `aqr -c --format` makes, each a verb
+/// `compress-FORMAT` in [`MENU`] ("Compress into .FORMAT"), after the separator.
+pub const OTHER_FORMATS: [&str; 1] = ["zip"];
+
+/// `ECF_SEPARATORBEFORE` of `CommandFlags`.
+const SEPARATOR_BEFORE: u32 = 0x20;
+
+/// The verbs of [`MENU`], in order: the key's name (which orders them), the text and the verb.
+fn more() -> Vec<(String, String, String)> {
+    let mut v = vec![("1-passphrase".into(), "Compress with passphrase…".into(), "compress-passphrase".into())];
+    for (i, f) in OTHER_FORMATS.iter().enumerate() {
+        v.push((format!("{}-{f}", i + 2), format!("Compress into .{f}"), format!("compress-{f}")));
+    }
+    v
+}
+
+/// What [`register`] made, as the user is told: the verbs (those of [`MENU`] by [`more`]) and
+/// the formats (of [`FORMATS`]).
+pub fn told() -> String {
+    let menu: Vec<String> = more().into_iter().map(|(_, text, _)| format!("\"{text}\"")).collect();
+    let formats: Vec<String> = FORMATS.iter().map(|(ext, ..)| format!(".{ext}")).collect();
+    format!(
+        "Files and folders have \"Compress with Aqueous\", and the menu \"Aqueous\": {}.\n\n\
+         .aqr files open with Aqueous (extracted beside them), and have \"Extract here\" and \"Test\"; so do \
+         the other archives ({}), which open with Aqueous where no other program opens them (else Windows \
+         offers it).\n\nOn Windows 11 these are under \"Show more options\".",
+        menu.join(", "),
+        formats.join(" ")
+    )
+}
 
 pub fn register() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("This program's path is not known: {e}"))?;
@@ -75,15 +112,28 @@ pub fn register() -> Result<(), String> {
     // (the icon of resource 1, this program's; files' are 2 on, aqr-win.rc)
     let icon = format!("\"{}\",-1", exe.display());
     let set = |key: &str, name: Option<&str>, value: &str| set(&classes(key), name, Value::Sz(value));
-    for (keys, text, verb) in [
-        (COMPRESS, "Compress with Aqueous", "compress"),
-        (COMPRESS_PASSPHRASE, "Compress with passphrase…", "compress-passphrase"),
-    ] {
-        for key in keys {
-            set(key, None, text)?;
-            set(key, Some("MultiSelectModel"), "Player")?;
-            set(key, Some("Icon"), &icon)?;
-            set(&format!(r"{key}\command"), None, &command(verb))?;
+    for key in OLD {
+        delete(&classes(key))?;
+    }
+    let verb = |key: &str, text: &str, verb: &str| -> Result<(), String> {
+        set(key, None, text)?;
+        set(key, Some("MultiSelectModel"), "Player")?;
+        set(&format!(r"{key}\command"), None, &command(verb))
+    };
+    for (key, menu) in COMPRESS.into_iter().zip(MENU) {
+        verb(key, "Compress with Aqueous", "compress")?;
+        set(key, Some("Icon"), &icon)?;
+        // (made anew: no verbs left of another version)
+        delete(&classes(menu))?;
+        set(menu, Some("MUIVerb"), "Aqueous")?;
+        set(menu, Some("SubCommands"), "")?;
+        set(menu, Some("Icon"), &icon)?;
+        for (i, (name, text, v)) in more().into_iter().enumerate() {
+            let key = format!(r"{menu}\shell\{name}");
+            verb(&key, &text, &v)?;
+            if i == 1 {
+                self::set(&classes(&key), Some("CommandFlags"), Value::Dword(SEPARATOR_BEFORE))?;
+            }
         }
     }
     let class = |class: &str, name: &str, icon: u16| -> Result<(), String> {
@@ -125,7 +175,7 @@ pub fn register() -> Result<(), String> {
 }
 
 pub fn unregister() -> Result<(), String> {
-    for key in COMPRESS.iter().chain(&COMPRESS_PASSPHRASE).copied().chain([CLASS]) {
+    for key in COMPRESS.iter().chain(&MENU).chain(&OLD).copied().chain([CLASS]) {
         delete(&classes(key))?;
     }
     // (`.aqr` left as it is where another program has it)
@@ -284,7 +334,15 @@ pub fn delete_value(key: &str, name: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::FORMATS;
+    use super::{FORMATS, told};
+
+    /// The message of `--register` tells the menu's verbs and the formats as they are.
+    #[test]
+    fn told_as_registered() {
+        let t = told();
+        assert!(t.contains("\"Compress with passphrase…\", \"Compress into .zip\""), "{t}");
+        assert!(t.contains("(.zip .7z .rar") && t.contains(".zst)"), "{t}");
+    }
 
     /// `FORMATS`' icons are the resources of aqr-win.rc by those numbers, and are there.
     #[test]
