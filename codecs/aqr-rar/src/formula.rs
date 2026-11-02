@@ -268,7 +268,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     };
     let kept_nodes = match kept_sizes.is_empty() {
         true => Vec::new(),
-        false => cut(by_kind(&mut f, kept), &kept_sizes),
+        false => by_kind(&mut f, kept).cut(&kept_sizes),
     };
     let split_nodes = match split_sizes.is_empty() {
         true => Vec::new(),
@@ -319,34 +319,6 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     f.root = Node::concat(root);
     let rebuilt = made.iter().map(Option::is_some).collect();
     Some(Encoded { formula: f, inflated, rebuilt })
-}
-
-/// `n`, a slice or a concatenation of slices, cut into nodes of `sizes`.
-fn cut(n: Node, sizes: &[u64]) -> Vec<Node> {
-    let mut slices = Vec::new();
-    match n {
-        Node::Concat(ns) => slices.extend(ns),
-        n => slices.push(n),
-    }
-    let mut slices = slices.into_iter().map(|s| match s {
-        Node::Slice { stream, start, len } => (stream, start, len),
-        _ => unreachable!("slices of contents"),
-    });
-    let mut cur = slices.next();
-    sizes
-        .iter()
-        .map(|&size| {
-            let (mut parts, mut want) = (Vec::new(), size);
-            while want > 0 {
-                let (s, a, l) = cur.expect("as many bytes as the sizes");
-                let k = l.min(want);
-                parts.push(Node::slice(s, a, k));
-                want -= k;
-                cur = if k == l { slices.next() } else { Some((s, a + k, l - k)) };
-            }
-            Node::concat(parts)
-        })
-        .collect()
 }
 
 /// The output of `a`, an application of [`MODULE5`] or [`MODULE3`], on `inputs`.

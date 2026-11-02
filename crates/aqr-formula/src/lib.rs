@@ -573,6 +573,35 @@ impl Node {
         if out.len() == 1 { out.pop().unwrap() } else { Node::Concat(out) }
     }
 
+    /// This node, a slice or a concatenation of slices (as [`Formula::push_by_kind`] gives the
+    /// contents of an archive's members), cut into nodes of `sizes`, which add up to its bytes.
+    /// Panics on another node, or where the sizes add up to more.
+    pub fn cut(self, sizes: &[u64]) -> Vec<Node> {
+        let slices = match self {
+            Node::Concat(ns) => ns,
+            n => vec![n],
+        };
+        let mut slices = slices.into_iter().map(|s| match s {
+            Node::Slice { stream, start, len } => (stream, start, len),
+            _ => panic!("slices of contents"),
+        });
+        let mut cur = slices.next();
+        sizes
+            .iter()
+            .map(|&size| {
+                let (mut parts, mut want) = (Vec::new(), size);
+                while want > 0 {
+                    let (s, a, l) = cur.expect("as many bytes as the sizes");
+                    let k = l.min(want);
+                    parts.push(Node::slice(s, a, k));
+                    want -= k;
+                    cur = if k == l { slices.next() } else { Some((s, a + k, l - k)) };
+                }
+                Node::concat(parts)
+            })
+            .collect()
+    }
+
     /// The [`packed`] byte sequence of `nodes`, as they are.
     pub fn pack(nodes: impl IntoIterator<Item = Node>) -> Node {
         Node::Pack(nodes.into_iter().collect())
@@ -1696,6 +1725,21 @@ mod tests {
         ]);
         assert_eq!(n, Node::Concat(vec![Node::slice(0, 0, 5), Node::slice(0, 6, 1)]));
         assert_eq!(Node::concat([Node::slice(0, 0, 1), Node::slice(0, 1, 1)]), Node::slice(0, 0, 2));
+    }
+
+    #[test]
+    fn cut_by_sizes() {
+        let n = Node::Concat(vec![Node::slice(0, 0, 5), Node::slice(1, 10, 3)]);
+        assert_eq!(
+            n.cut(&[2, 0, 4, 2]),
+            [
+                Node::slice(0, 0, 2),
+                Node::Concat(Vec::new()),
+                Node::Concat(vec![Node::slice(0, 2, 3), Node::slice(1, 10, 1)]),
+                Node::slice(1, 11, 2),
+            ]
+        );
+        assert_eq!(Node::slice(0, 4, 6).cut(&[6]), [Node::slice(0, 4, 6)]);
     }
 
     #[test]

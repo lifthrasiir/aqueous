@@ -312,7 +312,7 @@ pub fn encode_with(
     let mut nodes: [std::vec::IntoIter<Node>; 5] = Default::default();
     let stored_sizes = sizes(0);
     if !stored_sizes.is_empty() {
-        nodes[0] = cut(by_kind(&mut f, stored), &stored_sizes).into_iter();
+        nodes[0] = by_kind(&mut f, stored).cut(&stored_sizes).into_iter();
     }
     let flate_sizes = sizes(1);
     if !flate_sizes.is_empty() {
@@ -379,34 +379,6 @@ fn outputs(f: &mut Formula, a: aqr_formula::Apply, sizes: Vec<u64>) -> Vec<Node>
         1 => vec![Node::Apply(Box::new(a))],
         _ => f.split(a, sizes),
     }
-}
-
-/// `n`, a slice or a concatenation of slices, cut into nodes of `sizes`.
-fn cut(n: Node, sizes: &[u64]) -> Vec<Node> {
-    let mut slices = Vec::new();
-    match n {
-        Node::Concat(ns) => slices.extend(ns),
-        n => slices.push(n),
-    }
-    let mut slices = slices.into_iter().map(|s| match s {
-        Node::Slice { stream, start, len } => (stream, start, len),
-        _ => unreachable!("slices of contents"),
-    });
-    let mut cur = slices.next();
-    sizes
-        .iter()
-        .map(|&size| {
-            let (mut parts, mut want) = (Vec::new(), size);
-            while want > 0 {
-                let (s, a, l) = cur.expect("as many bytes as the sizes");
-                let k = l.min(want);
-                parts.push(Node::slice(s, a, k));
-                want -= k;
-                cur = if k == l { slices.next() } else { Some((s, a + k, l - k)) };
-            }
-            Node::concat(parts)
-        })
-        .collect()
 }
 
 /// The output of `a`, an application of aqr-flate's module, aqr-bz2's `bz2-recons` or aqr-lzma's
