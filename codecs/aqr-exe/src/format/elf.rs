@@ -19,6 +19,8 @@ pub const SHT_PROGBITS: u32 = 1;
 pub const SHT_NOBITS: u32 = 8;
 const SHF_ALLOC: u64 = 0x2;
 const SHF_EXECINSTR: u64 = 0x4;
+/// A section of a compression header and compressed data (debugging information).
+pub const SHF_COMPRESSED: u64 = 0x800;
 const PT_LOAD: u32 = 1;
 const PF_X: u32 = 1;
 

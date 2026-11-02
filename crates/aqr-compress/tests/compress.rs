@@ -4,9 +4,9 @@ use std::sync::{PoisonError, RwLock};
 use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
-    ARM64, ASAR, BUNDLE, BVX, BZ2, CLIP, DWARF_APPLE, FLAC, FLATE, GIF, HDF5_FLOAT, JPEG, JSONL, LEVELDB, LZ4, LZO,
-    MACHO_SYMTAB, MP3, Native, PCM, PDF, PNG, PNG_SET, PRORES, RASTER, RECS_ENTRIES, RECS_FIELDS, SQLITE, WRT,
-    WRT_HANGUL, X86, ZIP, decompress,
+    ARM64, ASAR, BUNDLE, BVX, BZ2, CLIP, DWARF_APPLE, DWARF_INFO, FLAC, FLATE, GIF, HDF5_FLOAT, JPEG, JSONL, LEVELDB,
+    LZ4, LZO, MACHO_SYMTAB, MP3, Native, PCM, PDF, PNG, PNG_SET, PRORES, RASTER, RECS_ENTRIES, RECS_FIELDS, SQLITE,
+    WRT, WRT_HANGUL, X86, ZIP, decompress,
 };
 use aqr_formula::aqr;
 
@@ -751,6 +751,91 @@ fn elf(wide: bool, machine: u16, fill: u8, code: &[u8]) -> (Vec<u8>, std::ops::R
 
 /// The code of an ELF image (`.init` and `.text` as one), filtered by its machine; the rest of
 /// the file around it. Found in other data too.
+/// `.debug_info`, `.debug_abbrev` and `.debug_str` of a unit of `n` variables, each of a name and
+/// a type of `.debug_str`.
+fn dwarf(n: usize) -> [Vec<u8>; 3] {
+    let abbrev = vec![
+        1, 0x11, 1, 0x03, 0x0e, 0, 0, // compile unit: name (strp)
+        2, 0x24, 0, 0x03, 0x0e, 0x0b, 0x0b, 0, 0, // base type: name (strp), byte size (data1)
+        3, 0x34, 0, 0x03, 0x0e, 0x49, 0x13, 0x3b, 0x05, 0, 0, // variable: name, type (ref4), line (data2)
+        0,
+    ];
+    let mut strs = b"main.c\0int\0char\0".to_vec();
+    let mut info = vec![0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 8, 1, 0, 0, 0, 0];
+    let types = [info.len() as u32, info.len() as u32 + 6];
+    info.extend_from_slice(&[2, 7, 0, 0, 0, 4, 2, 11, 0, 0, 0, 1]);
+    for i in 0..n {
+        let name = strs.len() as u32;
+        strs.extend_from_slice(format!("variable_{i}\0").as_bytes());
+        info.push(3);
+        info.extend_from_slice(&name.to_le_bytes());
+        info.extend_from_slice(&types[i % 2].to_le_bytes());
+        info.extend_from_slice(&(10 + 3 * i as u16).to_le_bytes());
+    }
+    info.push(0);
+    let len = (info.len() - 4) as u32;
+    info[..4].copy_from_slice(&len.to_le_bytes());
+    [info, abbrev, strs]
+}
+
+/// A 64-bit ELF file of `code` (x86-64) in `.text` and of other sections, (name, data), after it.
+fn elf_with(code: &[u8], others: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut names = b"\0.text\0.shstrtab\0".to_vec();
+    let mut d = vec![0u8; 64];
+    let text_at = d.len();
+    d.extend_from_slice(code);
+    let mut sects = vec![(1u32, 1u32, 6u64, text_at, code.len())];
+    for (name, data) in others {
+        sects.push((names.len() as u32, 1, 0, d.len(), data.len()));
+        names.extend_from_slice(name.as_bytes());
+        names.push(0);
+        d.extend_from_slice(data);
+    }
+    sects.push((7, 3, 0, d.len(), names.len()));
+    d.extend_from_slice(&names);
+    let shoff = d.len().next_multiple_of(8);
+    d.resize(shoff, 0);
+    d[..7].copy_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1]);
+    d[16..18].copy_from_slice(&2u16.to_le_bytes());
+    d[18..20].copy_from_slice(&62u16.to_le_bytes());
+    d[20] = 1;
+    d[40..48].copy_from_slice(&(shoff as u64).to_le_bytes());
+    d[52..54].copy_from_slice(&64u16.to_le_bytes());
+    d[58..60].copy_from_slice(&64u16.to_le_bytes());
+    d[60..62].copy_from_slice(&(sects.len() as u16 + 1).to_le_bytes());
+    d[62..64].copy_from_slice(&(sects.len() as u16).to_le_bytes());
+    d.resize(shoff + 64, 0);
+    for (name, kind, flags, off, size) in sects {
+        let p = d.len();
+        d.resize(p + 64, 0);
+        d[p..p + 4].copy_from_slice(&name.to_le_bytes());
+        d[p + 4..p + 8].copy_from_slice(&kind.to_le_bytes());
+        d[p + 8..p + 16].copy_from_slice(&flags.to_le_bytes());
+        d[p + 24..p + 32].copy_from_slice(&(off as u64).to_le_bytes());
+        d[p + 32..p + 40].copy_from_slice(&(size as u64).to_le_bytes());
+    }
+    d
+}
+
+/// The DWARF of an ELF file through `dwarf-info`, `.debug_abbrev` and `.debug_str` placed where
+/// they were and taken as its inputs.
+#[test]
+fn elf_dwarf() {
+    let [info, abbrev, strs] = dwarf(3000);
+    let sections = [(".debug_abbrev", &abbrev[..]), (".debug_info", &info[..]), (".debug_str", &strs[..])];
+    let d = elf_with(&x86_64_code(), &sections);
+    let f = roundtrip(&d, &Options { file: Nest::Exact, ..all() });
+    assert_eq!(formats(&f), [X86.name, DWARF_INFO.name]);
+    // compressed (SHF_COMPRESSED) sections are not taken as DWARF
+    let mut compressed = d.clone();
+    let shoff = u64::from_le_bytes(compressed[40..48].try_into().unwrap()) as usize;
+    for k in 2..5 {
+        compressed[shoff + 64 * k + 8] = 0;
+        compressed[shoff + 64 * k + 9] = 0x08;
+    }
+    assert!(!modules(&roundtrip(&compressed, &Options { file: Nest::Exact, ..all() })).contains(&DWARF_INFO.name));
+}
+
 #[test]
 fn elf_code() {
     for (wide, machine, fill, code, module) in [

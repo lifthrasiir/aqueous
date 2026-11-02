@@ -126,8 +126,14 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "dwarf-apple",
         version: 1,
-        sha512_256: hex("f46d6780d8a0fa691c8e6d77d078d63d5f72cfc79f992d5b1aed14b88438b4fb"),
+        sha512_256: hex("7b33a4c068d632dc8a98cf4ebb46ee33ea61c6cb22525196beb1d483b9fc9ed2"),
         block: include_bytes!("../wasm/dwarf-apple.block"),
+    },
+    Known {
+        name: "dwarf-info",
+        version: 1,
+        sha512_256: hex("e6108c29948ea5b40f3ae91587081279800719bd5c4ca147ba83b64ed62719de"),
+        block: include_bytes!("../wasm/dwarf-info.block"),
     },
     Known {
         name: "exe-recons/arm64-remap",

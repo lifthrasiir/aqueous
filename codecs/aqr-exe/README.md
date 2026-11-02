@@ -282,11 +282,11 @@ archives of an older one run it as WebAssembly.
 ## Limitations
 
 - ELF: only little-endian images. Their tables (relocations, symbols, `.eh_frame` and its
-  header's table, which follows from it, `.gnu.hash`) and debug sections are left in the rest.
-  DWARF (`.debug_*`, and Mach-O's dSYM bundles) belongs to aqr-dwarf, as PDB files would to
-  a recompressor of their own for PE: so far it takes Apple's accelerator tables of Mach-O
-  images (aqr-dwarf's README). Compressed sections (`SHF_COMPRESSED`) are left
-  to the scan of the rest, which finds their zlib streams.
+  header's table, which follows from it, `.gnu.hash`) are left in the rest. DWARF (`.debug_*`
+  of ELF and Mach-O images, as of dSYMs) belongs to aqr-dwarf, as PDB files would to a
+  recompressor of their own for PE: so far it takes `.debug_info` and Apple's accelerator
+  tables (aqr-dwarf's README). Compressed sections (`SHF_COMPRESSED`) are left to the scan of
+  the rest, which finds their zlib streams.
 - x86, x86-64 and ARM64 only: images of other machines (32-bit ARM, PowerPC) are kept as
   they are. ARM64 data in code sections (literal pools) is taken as instructions.
 - Code against another version: only of Mach-O images, not PE; of files in one batch (two

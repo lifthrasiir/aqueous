@@ -7,6 +7,7 @@
 pub mod apple;
 #[cfg(feature = "encode")]
 pub mod formula;
+pub mod info;
 pub mod module;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +26,43 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cold]
 pub fn corrupt() -> Error {
     Error("corrupt input")
+}
+
+/// Streams packed into an input: the varints of the lengths of all but the last, then the
+/// streams one after another, the last taking what is left.
+pub fn pack(streams: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(streams.iter().map(|s| s.len() + 4).sum());
+    if let Some((_, init)) = streams.split_last() {
+        for s in init {
+            aqr_common::varint::put(&mut out, s.len() as u64);
+        }
+    }
+    for s in streams {
+        out.extend_from_slice(s);
+    }
+    out
+}
+
+/// The `n` streams of an input packed by [`pack`].
+pub fn unpack(d: &[u8], n: usize) -> Result<Vec<&[u8]>> {
+    let mut at = 0;
+    let mut lens = Vec::with_capacity(n);
+    for _ in 1..n {
+        let l = aqr_common::varint::get(d, &mut at).map_err(|_| corrupt())?;
+        lens.push(usize::try_from(l).map_err(|_| corrupt())?);
+    }
+    let mut out = Vec::with_capacity(n);
+    for l in lens {
+        let s = d.get(at..at.checked_add(l).ok_or_else(corrupt)?).ok_or_else(corrupt)?;
+        out.push(s);
+        at += l;
+    }
+    if n > 0 {
+        out.push(&d[at..]);
+    } else if at != d.len() {
+        return Err(corrupt());
+    }
+    Ok(out)
 }
 
 /// A section of DWARF (or of Apple's tables beside it), as ELF (`.debug_info`) and Mach-O

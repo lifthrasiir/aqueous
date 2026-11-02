@@ -9,8 +9,8 @@
 //! imports and runtime functions by `recs-fields`, their numbers as deltas; of an NSIS
 //! installer, the files its data stores, each a content of its format ([`crate::nsis`]). Of a 64-bit Mach-O
 //! image, the symbol table and its string table by `exe-recons/macho-symtab`; of its `__DWARF`
-//! segment, Apple's accelerator tables by `dwarf-apple` ([`crate::dwarf`]). ELF images, of
-//! their code alone.
+//! segment, its DWARF by aqr-dwarf's modules ([`crate::dwarf`]). ELF images, of their code and
+//! their DWARF.
 //!
 //! The ARM64 and x86 images of the Mach-O and ELF files of an archive alike (other versions of
 //! one program) are planned beforehand ([`plan`]) as a forest, each image's targets (of BL and
@@ -140,7 +140,18 @@ fn with_arch((a, code): (Arch, Code)) -> impl Iterator<Item = (u64, usize, usize
 /// archive smaller.)
 pub(crate) fn elf(d: &[u8], remaps: &[Option<Arc<Remap>>]) -> Option<Formula> {
     let sections = code_images(d).into_iter().flat_map(with_arch);
-    filtered(d, "elf", sections.collect(), remaps, &[])
+    // (compressed sections are left to the scan of the rest)
+    let debug: Vec<_> = elf::image(d)
+        .map(|i| i.sections)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| s.flags & elf::SHF_COMPRESSED == 0)
+        .filter_map(|s| {
+            let section = aqr_dwarf::Section::by_name(&s.name)?;
+            Some(crate::dwarf::Debug { section, image: 0, off: s.off, size: s.size })
+        })
+        .collect();
+    filtered(d, "elf", sections.collect(), remaps, &debug)
 }
 
 /// The formula of Mach-O file `d`, its images remapped as `remaps` tells (by image).
