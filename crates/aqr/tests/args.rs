@@ -1,6 +1,6 @@
 //! Paths given as the values of options (`-o`, `--rename`, `--stats=`) taken as they are, not
 //! as Unicode: a name that is not (bytes not UTF-8 on Unix, a lone surrogate on Windows) names
-//! the file it names.
+//! the file it names (where the file system takes such names: not macOS's APFS).
 
 use std::ffi::OsString;
 use std::fs;
@@ -44,6 +44,13 @@ fn names(d: &std::path::Path) -> Vec<OsString> {
 #[test]
 fn values_not_unicode() {
     let d = scratch("values");
+    // (macOS's APFS takes names of UTF-8 alone: nothing to test there)
+    if fs::write(d.join(not_unicode("probe", "")), b"").is_err() {
+        eprintln!("{}: names not Unicode not taken here, not tested", d.display());
+        fs::remove_dir_all(&d).unwrap();
+        return;
+    }
+    fs::remove_file(d.join(not_unicode("probe", ""))).unwrap();
     let input = d.join("in.txt");
     fs::write(&input, "some text\n".repeat(50)).unwrap();
     let (archive, stats, renamed) =
