@@ -65,6 +65,46 @@ fn shorty(desc: &str) -> char {
     }
 }
 
+/// An instruction array: instructions of any opcode with any fields (a `nop` with a zero high
+/// byte), and now and then a payload of each kind at the end.
+fn instructions(rng: &mut Rng) -> Vec<u16> {
+    let mut u = Vec::new();
+    for _ in 0..rng.below(12) {
+        let op = 1 + rng.below(255) as u16;
+        let (n, _, _) = aqr_dex::code::format(op as u8);
+        u.push(op | (rng.u64() as u16) << 8);
+        for _ in 1..n {
+            // (small values mostly, as indices and registers are)
+            u.push(if rng.below(2) == 0 { rng.below(8) as u16 } else { rng.u64() as u16 });
+        }
+    }
+    if rng.below(2) == 0 {
+        u.push(0);
+    }
+    match rng.below(4) {
+        0 => {
+            let n = rng.below(4) as u16;
+            u.extend([0x0100, n, 7, 0]);
+            u.extend((0..2 * n).map(|_| rng.u64() as u16));
+        }
+        1 => {
+            let n = rng.below(4) as u16;
+            u.extend([0x0200, n]);
+            u.extend((0..4 * n).map(|_| rng.u64() as u16));
+        }
+        2 => {
+            let (w, n) = (1 + rng.below(4) as u16, rng.below(5) as u16);
+            u.extend([0x0300, w, n, 0]);
+            u.extend((0..(w * n).div_ceil(2)).map(|_| rng.u64() as u16));
+        }
+        _ => {}
+    }
+    if u.is_empty() {
+        u.push(0x000e);
+    }
+    u
+}
+
 /// A DEX file of classes made from `seed`.
 fn write(seed: u64, shape: Shape) -> Vec<u8> {
     let mut rng = Rng::new(seed);
@@ -191,15 +231,16 @@ fn write(seed: u64, shape: Shape) -> Vec<u8> {
     for &j in &order {
         pad4(&mut d, 0);
         code_off[j] = d.len() as u32;
-        let insns = 1 + rng.below(9) as u32;
+        let units = instructions(&mut rng);
+        let insns = units.len() as u32;
         let tries = (rng.below(3) == 0) as u16;
         for v in [1 + rng.below(8) as u16, rng.below(3) as u16, rng.below(3) as u16, tries] {
             d.extend_from_slice(&v.to_le_bytes());
         }
         d.extend_from_slice(&0u32.to_le_bytes());
         d.extend_from_slice(&insns.to_le_bytes());
-        for _ in 0..insns {
-            d.extend_from_slice(&(rng.u64() as u16).to_le_bytes());
+        for u in &units {
+            d.extend_from_slice(&u.to_le_bytes());
         }
         if tries > 0 {
             if insns % 2 == 1 {
@@ -398,17 +439,22 @@ fn write(seed: u64, shape: Shape) -> Vec<u8> {
 }
 
 /// The modes of the map's items, by type, from the head stream.
-fn modes(st: &[Vec<u8>; s::N]) -> Vec<(u16, u8)> {
-    let head = &st[s::HEAD];
+fn modes(st: &[Vec<u8>]) -> Vec<(u16, u8)> {
+    let head = streams(st)[s::HEAD];
     let count = dex::le32(head, dex::HEADER + 1).unwrap() as usize;
     let items = dex::items(&head[dex::HEADER + 5..][..12 * count]);
     items.iter().map(|it| it.ty).zip(head[dex::HEADER + 5 + 12 * count..].iter().copied()).collect()
 }
 
-fn check(d: &[u8]) -> [Vec<u8>; s::N] {
+fn check(d: &[u8]) -> Vec<Vec<u8>> {
     let f = formula::encode(d, 1).expect("taken");
     assert_eq!(eval(&f).unwrap(), d);
     encode::split(d).unwrap()
+}
+
+/// The streams of the module's inputs `st`.
+fn streams(st: &[Vec<u8>]) -> Vec<&[u8]> {
+    dex::unpack(&st.iter().map(|v| v.as_slice()).collect::<Vec<_>>()).unwrap()
 }
 
 /// Files of every shape come back; what can be taken is.
@@ -420,8 +466,8 @@ fn files() {
         for (t, m) in modes(&st) {
             assert_eq!(m == mode::TAKEN, dex::takes(t), "seed {seed}: {t:#x} {m}");
         }
-        assert_eq!(st[s::HEAD][dex::HEADER], 3, "checksum and signature derived");
-        assert!(st[s::REST].iter().all(|&b| b == 0), "only padding in the rest");
+        assert_eq!(streams(&st)[s::HEAD][dex::HEADER], 3, "checksum and signature derived");
+        assert!(streams(&st)[s::REST].iter().all(|&b| b == 0), "only padding in the rest");
         for (k, shape) in [
             Shape { code_order: true, ..Shape::default() },
             Shape { data_order: true, ..Shape::default() },
@@ -447,7 +493,7 @@ fn kept() {
         let m = modes(&st);
         assert!(m.contains(&(0x2000, mode::RAW)) && m.contains(&(0x0006, mode::TAKEN)), "seed {seed}");
         let st = check(&write(seed, Shape { bad_sums: true, ..Shape::default() }));
-        assert_eq!(st[s::HEAD][dex::HEADER], 0);
+        assert_eq!(streams(&st)[s::HEAD][dex::HEADER], 0);
     }
 }
 
@@ -471,7 +517,7 @@ fn corrupt() {
     let mut rng = Rng::new(7);
     for _ in 0..20000 {
         let mut bad = st.clone();
-        let k = rng.below(s::N as u64) as usize;
+        let k = rng.below(st.len() as u64) as usize;
         if bad[k].is_empty() {
             continue;
         }

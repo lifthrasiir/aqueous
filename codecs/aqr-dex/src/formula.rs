@@ -3,12 +3,12 @@
 
 use aqr_formula::{Formula, Kind, Module, Node};
 
-use crate::dex::{STREAM_NAMES, s};
+use crate::dex::INPUT_NAMES;
 use crate::encode;
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("dex-recons", 1).with_memory(memory);
+pub const MODULE: Module = Module::new("dex-recons", 2).with_memory(memory);
 
 /// The memory of the module: the file, the strings and the classes' data as they are rebuilt
 /// before they are copied into it (at most the file again), and the index of the strings.
@@ -36,11 +36,9 @@ pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
         .into_iter()
         .enumerate()
         .map(|(i, data)| {
-            let kind = match i {
-                s::REST | s::HEAD | s::CODE..=s::RAW => Kind::Unknown,
-                _ => Kind::Table,
-            };
-            f.push_as(format!("dex/{}", STREAM_NAMES[i]), kind, data)
+            // (the first three hold sections as they are)
+            let kind = if i < 3 { Kind::Unknown } else { Kind::Table };
+            f.push_as(format!("dex/{}", INPUT_NAMES[i]), kind, data)
         })
         .collect();
     f.root = Node::apply(MODULE, Vec::new(), inputs, input.len() as u64);

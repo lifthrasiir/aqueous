@@ -5,6 +5,7 @@
 
 // The code of the module alone uses only part of the rest.
 #![cfg_attr(not(feature = "encode"), allow(unused))]
+pub mod code;
 pub mod dex;
 #[cfg(feature = "encode")]
 pub mod encode;

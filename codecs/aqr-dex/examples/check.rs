@@ -1,8 +1,8 @@
 //! Splits DEX files, checks that they are rebuilt, and tells the streams' sizes under zstd.
 //!
-//! `aqr-dex-check [-l LEVEL] FILE_OR_DIR...` (zstd level 9 by default): the files' and the
-//! streams' bytes, each stream class compressed as one (all files' together, as the archive
-//! groups them), against the files compressed one after the other as one.
+//! `aqr-dex-check [-l LEVEL] FILE_OR_DIR...` (zstd level 9 by default): the files' and each
+//! stream's bytes, all files' together, as the archive groups them; then the module's inputs
+//! (several streams each), the files' inputs one after another.
 
 use aqr_dex::dex::{self, s};
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ fn walk(p: &Path, out: &mut Vec<PathBuf>) {
         for p in e {
             walk(&p, out);
         }
-    } else if p.extension().is_some_and(|e| e == "dex") || !p.extension().is_some() {
+    } else if p.extension().is_some_and(|e| e == "dex") || p.extension().is_none() {
         out.push(p.to_path_buf());
     }
 }
@@ -31,6 +31,7 @@ fn main() {
     }
     let mut whole = Vec::new();
     let mut streams: Vec<Vec<u8>> = vec![Vec::new(); s::N];
+    let mut inputs: Vec<Vec<u8>> = vec![Vec::new(); dex::INPUTS.len()];
     let (mut taken, mut failed) = (0, 0);
     for f in &files {
         let d = std::fs::read(f).unwrap();
@@ -47,7 +48,8 @@ fn main() {
         let join = t.elapsed();
         assert!(back == d, "{}: not rebuilt", f.display());
         taken += 1;
-        let head = &st[s::HEAD];
+        let un = dex::unpack(&refs).unwrap();
+        let head = un[s::HEAD];
         let count = dex::le32(head, dex::HEADER + 1).unwrap() as usize;
         let items = dex::items(&head[dex::HEADER + 5..][..12 * count]);
         let modes = &head[dex::HEADER + 5 + 12 * count..];
@@ -67,21 +69,32 @@ fn main() {
             if raw.is_empty() { String::new() } else { format!(", kept {}", raw.join(" ")) }
         );
         whole.extend_from_slice(&d);
-        for (a, b) in streams.iter_mut().zip(st) {
-            a.extend_from_slice(&b);
+        for (a, b) in streams.iter_mut().zip(&un) {
+            a.extend_from_slice(b);
+        }
+        for (a, b) in inputs.iter_mut().zip(&st) {
+            a.extend_from_slice(b);
         }
     }
-    let z = |d: &[u8]| zstd::bulk::compress(d, level).unwrap().len();
+    let z = |d: &[u8]| if d.is_empty() { 0 } else { zstd::bulk::compress(d, level).unwrap().len() };
     let zw = z(&whole);
     let mut sum = 0;
     for (name, v) in dex::STREAM_NAMES.iter().zip(&streams) {
-        let n = if v.is_empty() { 0 } else { z(v) };
+        let n = z(v);
         sum += n;
         println!("  {name:16} {:>11} -> {:>10}", v.len(), n);
     }
+    let pct = |n: usize| 100.0 * (n as f64 / zw as f64 - 1.0);
+    let mut packed = 0;
+    for (name, v) in dex::INPUT_NAMES.iter().zip(&inputs) {
+        let n = z(v);
+        packed += n;
+        println!("  [{name}] {:>11} -> {:>10}", v.len(), n);
+    }
     println!(
-        "{taken} taken, {failed} not; {} bytes; zstd -{level}: files {zw}, streams {sum} ({:+.1}%)",
+        "{taken} taken, {failed} not; {} bytes; zstd -{level}: files {zw}, streams {sum} ({:+.1}%), inputs {packed} ({:+.1}%)",
         whole.len(),
-        100.0 * (sum as f64 / zw as f64 - 1.0)
+        pct(sum),
+        pct(packed)
     );
 }

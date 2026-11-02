@@ -113,8 +113,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "dex-recons",
-        version: 1,
-        sha512_256: hex("a6d581e82eb0727a5719f794862f1fe365d6567cba603a5036e886c0db0e56f5"),
+        version: 2,
+        sha512_256: hex("0326d22e5f5bafafbc1c270d335336330674e0c0991407201dbdfab5c39a0065"),
         block: include_bytes!("../wasm/dex-recons.block"),
     },
     Known {
