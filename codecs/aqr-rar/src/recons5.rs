@@ -13,7 +13,7 @@ use aqr_common::arith::{ArithDecoder, Bit};
 
 use crate::huff;
 use crate::lz5::{self, Block, Decoder5, Encoder5, Filter, Placed, Stream, Tables, Token, bonus};
-use crate::rec::{Bits, CATS, Cat, Enc, Mf, bits, lcp_up};
+use crate::rec::{Bits, CATS, Cat, Dec, Enc, Mf, bits, lcp_up};
 use crate::{Error, Result, corrupt};
 
 /// The longest copy RAR writes.
@@ -750,7 +750,7 @@ pub fn split(parts: &[&[u8]], sizes: &[usize], v1: bool, dict: u64) -> Result<Sp
         .map(|t| if let Token::Copy { dist, .. } = t { *dist } else { 0 })
         .max()
         .unwrap_or(0);
-    let mut e = Enc::new();
+    let mut e = Enc::new(Cat::Head as usize);
     let mut ctx = Ctx::new();
     e.gamma(g32(&mut ctx.misc, 1), sizes.len() as u64 - 1)?;
     for &s in sizes {
@@ -798,7 +798,7 @@ pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>) -> Result<Vec<us
         return Err(corrupt());
     }
     let v1 = v1 == 1;
-    let mut dec = ArithDecoder::new(rest);
+    let mut dec = Dec(ArithDecoder::new(rest));
     let mut ctx = Ctx::new();
     let n = dec.gamma(g32(&mut ctx.misc, 1), 0)? as usize + 1;
     if n > data.len() + 1 {

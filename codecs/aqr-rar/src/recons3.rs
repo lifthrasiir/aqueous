@@ -14,7 +14,7 @@ use aqr_common::msb::BitWriter;
 
 use crate::huff;
 use crate::lz3::{self, Block, Decoder3, Encoder3, FilterRec, Prog, Stream, Table, Token, bonus};
-use crate::rec::{Bits, Cat, Enc, Mf, bits, lcp_up};
+use crate::rec::{Bits, Cat, Dec, Enc, Mf, bits, lcp_up};
 use crate::{Error, Result, corrupt};
 
 /// The longest match RAR writes.
@@ -1302,7 +1302,7 @@ pub fn split_with(packed: &[&[u8]], sizes: &[usize], dict: u64, ppmd: bool) -> R
         })
         .max()
         .unwrap_or(0);
-    let mut e = Enc::new();
+    let mut e = Enc::new(Cat::Head as usize);
     let mut ctx = Ctx::new();
     e.gamma(g32(&mut ctx.misc, 1), sizes.len() as u64 - 1)?;
     for &s in sizes {
@@ -1363,7 +1363,7 @@ pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>, ppmd_limit: u32)
     if tag != 3 {
         return Err(corrupt());
     }
-    let mut dec = ArithDecoder::new(rest);
+    let mut dec = Dec(ArithDecoder::new(rest));
     let mut ctx = Ctx::new();
     let n = dec.gamma(g32(&mut ctx.misc, 1), 0)? as usize + 1;
     if n > data.len() + 1 {

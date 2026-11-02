@@ -6,7 +6,7 @@
 //! one of the longest matches a hash chain finds, nearest first (ALZip's matches are the nearest
 //! of their lengths, and as long as the data there allows).
 
-use aqr_common::arith::{ArithDecoder, ArithEncoder, Bit};
+use aqr_common::arith::{ArithDecoder, ArithEncoder, Bit, Coder};
 use aqr_common::varint;
 
 use crate::azo::{self, History, MAX_LENGTH, Token};
@@ -179,61 +179,16 @@ impl Ctx {
     }
 }
 
-/// What codes the record's bits: the arithmetic encoder (which writes the value given) or
-/// decoder (which returns what it reads).
-trait Bits {
-    fn bit(&mut self, b: &mut Bit, v: bool) -> bool;
-    fn raw(&mut self, v: bool) -> bool;
-    fn failed(&self) -> bool;
-
-    /// `v` as `x = v + 1`: the bit length of `x` less 1 in unary (adaptive bits of `t`), then
-    /// the bits of `x` below its top one, raw.
+/// What codes the record's bits ([`Coder`]: the arithmetic encoder, which writes the value
+/// given, or decoder, which returns what it reads), of this crate's errors.
+trait Bits: Coder {
+    /// [`Coder::gamma32`], failing as corrupt input.
     fn gamma(&mut self, t: &mut [Bit], v: u32) -> Result<u32> {
-        let x = v.wrapping_add(1);
-        let n = 31 - x.max(1).leading_zeros();
-        let mut k = 0;
-        while self.bit(&mut t[(k as usize).min(t.len() - 1)], k < n) {
-            k += 1;
-            if k > 31 || self.failed() {
-                return Err(corrupt());
-            }
-        }
-        let mut y = 1u32;
-        for i in (0..k).rev() {
-            y = y << 1 | self.raw(x >> i & 1 != 0) as u32;
-        }
-        Ok(y - 1)
+        self.gamma32(t, v, corrupt)
     }
 }
 
-impl Bits for ArithEncoder {
-    fn bit(&mut self, b: &mut Bit, v: bool) -> bool {
-        self.encode(v, b.p1());
-        b.update(v);
-        v
-    }
-    fn raw(&mut self, v: bool) -> bool {
-        self.encode(v, 1 << 15);
-        v
-    }
-    fn failed(&self) -> bool {
-        false
-    }
-}
-
-impl Bits for ArithDecoder<'_> {
-    fn bit(&mut self, b: &mut Bit, _: bool) -> bool {
-        let v = self.decode(b.p1());
-        b.update(v);
-        v
-    }
-    fn raw(&mut self, _: bool) -> bool {
-        self.decode(1 << 15)
-    }
-    fn failed(&self) -> bool {
-        self.overrun()
-    }
-}
+impl<C: Coder> Bits for C {}
 
 /// The walk over a block's data coding its tokens (`tokens` given to the encoder; the
 /// decoder's are pushed onto it).

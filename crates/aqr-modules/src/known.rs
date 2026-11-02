@@ -18,7 +18,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "azo-recons",
         version: 1,
-        sha512_256: hex("5421a9fed77506d6cbc8f94088744101dedafa4f4ffdd448ce414749410294bb"),
+        sha512_256: hex("a8d18f6d04c3ad94ef3051326adc8a1f2b0d553a47f91fc95aacddf7eac3e0be"),
         block: include_bytes!("../wasm/azo-recons.block"),
     },
     Known {
@@ -270,7 +270,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "lha-recons",
         version: 1,
-        sha512_256: hex("202a57cb70a084fa302d9a2aee63b9df8700393ecc68d015a63ee883c43617c6"),
+        sha512_256: hex("f6f49d223fa77a5fa9bb35444cca9f90e7fe5c88347b3dbaaf7a219668f8917d"),
         block: include_bytes!("../wasm/lha-recons.block"),
     },
     Known {
@@ -390,13 +390,13 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "rar3-recons",
         version: 1,
-        sha512_256: hex("88b3af6cbebf40d619aaa7d017ba027242314ab142b51fc503b47401c03d3e32"),
+        sha512_256: hex("df2d490fb4a337195ec951b97662277ed7498974c0069a41ea4719cd56db9b26"),
         block: include_bytes!("../wasm/rar3-recons.block"),
     },
     Known {
         name: "rar5-recons",
         version: 1,
-        sha512_256: hex("72df1b461ac7a6f66328f4b9801455954c9b81ee2566040c2b22f5938ccc7927"),
+        sha512_256: hex("4418a38022fb20f3180d70be55facee5d064f9fff25213a1edcb7d46a31d3971"),
         block: include_bytes!("../wasm/rar5-recons.block"),
     },
     Known {

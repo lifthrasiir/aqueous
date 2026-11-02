@@ -153,3 +153,177 @@ impl Bit {
         }
     }
 }
+
+/// A side of the coder of a record: the encoder (which writes the value given and returns it)
+/// or the decoder (which returns what it reads), so that one walk over the record does both.
+/// The bits, `bit`'s under the adaptive bit given and `raw`'s of probability 1/2, are the
+/// same either way; what is built of them here ([`Coder::gamma32`], [`Coder::raws`],
+/// [`Coder::tree`]) is too.
+pub trait Coder {
+    fn bit(&mut self, b: &mut Bit, v: bool) -> bool;
+    fn raw(&mut self, v: bool) -> bool;
+    /// Whether the decoder has read past its input.
+    fn failed(&self) -> bool;
+    /// The kind of what the bits after are, for the statistics ([`Costed`]).
+    fn set_cat(&mut self, _: usize) {}
+
+    /// `v` as `x = v + 1` (wrapping): the bit length of `x` less 1 in unary (adaptive bits of
+    /// `t`, the last one for the lengths beyond), then the bits of `x` below its top one, raw.
+    /// Decoding, `corrupt()` where the unary runs past 32 bits or the input.
+    // (called from many places in a walk: out of line, as each was in its crate)
+    #[inline(never)]
+    fn gamma32<E>(&mut self, t: &mut [Bit], v: u32, corrupt: impl Fn() -> E) -> Result<u32, E> {
+        let x = v.wrapping_add(1);
+        let n = 31 - x.max(1).leading_zeros();
+        let mut k = 0;
+        while self.bit(&mut t[(k as usize).min(t.len() - 1)], k < n) {
+            k += 1;
+            if k > 31 || self.failed() {
+                return Err(corrupt());
+            }
+        }
+        let mut y = 1u32;
+        for i in (0..k).rev() {
+            y = y << 1 | self.raw(x >> i & 1 != 0) as u32;
+        }
+        Ok(y - 1)
+    }
+
+    /// [`Coder::gamma32`] of 64 bits.
+    // (called from many places in a walk: out of line, as each was in its crate)
+    #[inline(never)]
+    fn gamma64<E>(&mut self, t: &mut [Bit], v: u64, corrupt: impl Fn() -> E) -> Result<u64, E> {
+        let x = v.wrapping_add(1);
+        let n = 63 - x.max(1).leading_zeros();
+        let mut k = 0;
+        while self.bit(&mut t[(k as usize).min(t.len() - 1)], k < n) {
+            k += 1;
+            if k > 63 || self.failed() {
+                return Err(corrupt());
+            }
+        }
+        let mut y = 1u64;
+        for i in (0..k).rev() {
+            y = y << 1 | self.raw(x >> i & 1 != 0) as u64;
+        }
+        Ok(y - 1)
+    }
+
+    /// `n` raw bits of `v`, the high one first.
+    fn raws(&mut self, n: u32, v: u64) -> u64 {
+        (0..n).rev().fold(0, |x, i| x << 1 | self.raw(v >> i & 1 != 0) as u64)
+    }
+
+    /// `v` of `n` bits, by a binary tree of adaptive bits `t` (of `1 << n` bits).
+    fn tree(&mut self, t: &mut [Bit], n: u32, v: u32) -> u32 {
+        let mut k = 1usize;
+        for i in (0..n).rev() {
+            let b = self.bit(&mut t[k], v >> i & 1 != 0);
+            k = k << 1 | b as usize;
+        }
+        (k - (1 << n)) as u32
+    }
+}
+
+impl Coder for ArithEncoder {
+    #[inline]
+    fn bit(&mut self, b: &mut Bit, v: bool) -> bool {
+        self.encode(v, b.p1());
+        b.update(v);
+        v
+    }
+    #[inline]
+    fn raw(&mut self, v: bool) -> bool {
+        self.encode(v, 1 << 15);
+        v
+    }
+    fn failed(&self) -> bool {
+        false
+    }
+}
+
+impl Coder for ArithDecoder<'_> {
+    #[inline]
+    fn bit(&mut self, b: &mut Bit, _: bool) -> bool {
+        let v = self.decode(b.p1());
+        b.update(v);
+        v
+    }
+    #[inline]
+    fn raw(&mut self, _: bool) -> bool {
+        self.decode(1 << 15)
+    }
+    fn failed(&self) -> bool {
+        self.overrun()
+    }
+}
+
+/// The encoder, counting the bits it writes of each of `CATS` kinds ([`Coder::set_cat`]).
+pub struct Costed<const CATS: usize> {
+    pub c: ArithEncoder,
+    cat: usize,
+    pub cost: [f64; CATS],
+}
+
+impl<const CATS: usize> Costed<CATS> {
+    /// The encoder, its bits of kind `cat` first.
+    pub fn new(cat: usize) -> Self {
+        Costed { c: ArithEncoder::new(Vec::new()), cat, cost: [0.0; CATS] }
+    }
+}
+
+impl<const CATS: usize> Coder for Costed<CATS> {
+    #[inline]
+    fn bit(&mut self, b: &mut Bit, v: bool) -> bool {
+        let p1 = b.p1();
+        self.cost[self.cat] -= ((if v { p1 } else { 65536 - p1 }) as f64 / 65536.0).log2();
+        self.c.bit(b, v)
+    }
+    #[inline]
+    fn raw(&mut self, v: bool) -> bool {
+        self.cost[self.cat] += 1.0;
+        self.c.raw(v)
+    }
+    fn failed(&self) -> bool {
+        false
+    }
+    fn set_cat(&mut self, cat: usize) {
+        self.cat = cat;
+    }
+}
+
+#[cfg(test)]
+mod coder_tests {
+    use super::*;
+
+    /// Gammas, raw bits and trees written and read back alike, the bits counted by kind.
+    #[test]
+    fn coded_both_ways() {
+        let vals32 = [0u32, 1, 2, 5, 1000, u32::MAX - 1];
+        let vals64 = [0u64, 7, 1 << 40, u64::MAX - 1];
+        let mut e = Costed::<2>::new(0);
+        let (mut t, mut tree) = (vec![Bit::default(); 8], vec![Bit::default(); 16]);
+        for &v in &vals32 {
+            assert_eq!(e.gamma32(&mut t, v, || ()), Ok(v));
+        }
+        e.set_cat(1);
+        for &v in &vals64 {
+            assert_eq!(e.gamma64(&mut t, v, || ()), Ok(v));
+        }
+        assert_eq!(e.raws(12, 0xabc), 0xabc);
+        assert_eq!(e.tree(&mut tree, 4, 9), 9);
+        assert!(e.cost[0] > 0.0 && e.cost[1] > 0.0);
+        let data = e.c.finish();
+        let mut d = ArithDecoder::new(&data);
+        let (mut t, mut tree) = (vec![Bit::default(); 8], vec![Bit::default(); 16]);
+        for &v in &vals32 {
+            assert_eq!(d.gamma32(&mut t, 0, || ()), Ok(v));
+        }
+        for &v in &vals64 {
+            assert_eq!(d.gamma64(&mut t, 0, || ()), Ok(v));
+        }
+        assert_eq!(d.raws(12, 0), 0xabc);
+        assert_eq!(d.tree(&mut tree, 4, 0), 9);
+        assert!(!d.failed());
+    }
+}

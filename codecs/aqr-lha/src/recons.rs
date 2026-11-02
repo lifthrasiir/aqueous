@@ -8,7 +8,7 @@
 //! literal, three for a match, one for each eight tokens), its threshold learnt from the cuts
 //! before; its header against the one [`huff::head`] writes for its tokens.
 
-use aqr_common::arith::{ArithDecoder, ArithEncoder, Bit};
+use aqr_common::arith::{ArithDecoder, Bit, Coder, Costed};
 
 use crate::huff;
 use crate::lzh::{self, Head, MAX_MATCH, MIN_MATCH, Method, Stream, Token};
@@ -404,81 +404,25 @@ pub enum Cat {
 }
 pub const CATS: usize = 5;
 
-/// What codes the record's bits: the arithmetic encoder (which writes the value given) or
-/// decoder (which returns what it reads).
-trait Bits {
-    fn bit(&mut self, b: &mut Bit, v: bool) -> bool;
-    fn raw(&mut self, v: bool) -> bool;
-    fn failed(&self) -> bool;
+/// What codes the record's bits ([`Coder`]: the arithmetic encoder, which writes the value
+/// given, or decoder, which returns what it reads), of this crate's [`Cat`]s and errors.
+trait Bits: Coder {
     /// What the bits after are, for the statistics.
-    fn cat(&mut self, _: Cat) {}
-
-    /// `v` as `x = v + 1`: the bit length of `x` less 1 in unary (adaptive bits of `t`), then
-    /// the bits of `x` below its top one, raw.
-    fn gamma(&mut self, t: &mut [Bit], v: u32) -> Result<u32> {
-        let x = v.wrapping_add(1);
-        let n = 31 - x.max(1).leading_zeros();
-        let mut k = 0;
-        while self.bit(&mut t[(k as usize).min(t.len() - 1)], k < n) {
-            k += 1;
-            if k > 31 || self.failed() {
-                return Err(corrupt());
-            }
-        }
-        let mut y = 1u32;
-        for i in (0..k).rev() {
-            y = y << 1 | self.raw(x >> i & 1 != 0) as u32;
-        }
-        Ok(y - 1)
+    #[inline]
+    fn cat(&mut self, c: Cat) {
+        self.set_cat(c as usize)
     }
 
-    /// `n` raw bits of `v`.
-    fn raws(&mut self, n: u32, v: u32) -> u32 {
-        (0..n).rev().fold(0, |x, i| x << 1 | self.raw(v >> i & 1 != 0) as u32)
+    /// [`Coder::gamma32`], failing as corrupt input.
+    fn gamma(&mut self, t: &mut [Bit], v: u32) -> Result<u32> {
+        self.gamma32(t, v, corrupt)
     }
 }
+
+impl<C: Coder> Bits for C {}
 
 /// The encoder, counting the bits of each [`Cat`].
-struct Enc {
-    c: ArithEncoder,
-    cat: Cat,
-    cost: [f64; CATS],
-}
-
-impl Bits for Enc {
-    fn bit(&mut self, b: &mut Bit, v: bool) -> bool {
-        let p1 = b.p1();
-        self.cost[self.cat as usize] -= ((if v { p1 } else { 65536 - p1 }) as f64 / 65536.0).log2();
-        self.c.encode(v, p1);
-        b.update(v);
-        v
-    }
-    fn raw(&mut self, v: bool) -> bool {
-        self.cost[self.cat as usize] += 1.0;
-        self.c.encode(v, 1 << 15);
-        v
-    }
-    fn failed(&self) -> bool {
-        false
-    }
-    fn cat(&mut self, c: Cat) {
-        self.cat = c;
-    }
-}
-
-impl Bits for ArithDecoder<'_> {
-    fn bit(&mut self, b: &mut Bit, _: bool) -> bool {
-        let v = self.decode(b.p1());
-        b.update(v);
-        v
-    }
-    fn raw(&mut self, _: bool) -> bool {
-        self.decode(1 << 15)
-    }
-    fn failed(&self) -> bool {
-        self.overrun()
-    }
-}
+type Enc = Costed<CATS>;
 
 /// The walk over the data coding its tokens (`tokens` given to the encoder; the decoder's are
 /// pushed onto it), the matches within `reach`.
@@ -724,7 +668,7 @@ fn code_blocks(bits: &mut impl Bits, ctx: &mut Ctx, st: &mut Stream, m: Method, 
         let size = if bits.bit(&mut ctx.cut[cut.known as usize], given == guess) {
             guess
         } else {
-            bits.raws(16, given as u32) as usize
+            bits.raws(16, given as u64) as usize
         };
         if size == 0 || size > left.len() {
             return Err(corrupt());
@@ -745,7 +689,7 @@ fn code_blocks(bits: &mut impl Bits, ctx: &mut Ctx, st: &mut Stream, m: Method, 
             for i in 0..n.div_ceil(8) {
                 let k = (n - 8 * i).min(8);
                 let v = bytes.get(i as usize).map_or(0, |&x| (x >> (8 - k)) as u32);
-                out.push((bits.raws(k, v) << (8 - k)) as u8);
+                out.push((bits.raws(k, v as u64) << (8 - k)) as u8);
             }
             let mut r = lzh::Reader::new(&out);
             let (h, _) = lzh::read_head(&mut r, m)?;
@@ -771,7 +715,7 @@ fn code_blocks(bits: &mut impl Bits, ctx: &mut Ctx, st: &mut Stream, m: Method, 
     st.tokens = tokens;
     // the padding, and the bytes after it
     st.pad_bits = ((8 - w.pending() % 8) % 8) as u8;
-    st.pad = bits.raws(st.pad_bits as u32, st.pad as u32) as u8;
+    st.pad = bits.raws(st.pad_bits as u32, st.pad as u64) as u8;
     let n = bits.gamma(&mut ctx.misc[32..], st.tail.len() as u32)? as usize;
     if !encoding {
         if n > 1 << 24 {
@@ -780,7 +724,7 @@ fn code_blocks(bits: &mut impl Bits, ctx: &mut Ctx, st: &mut Stream, m: Method, 
         st.tail = (0..n).map(|_| bits.raws(8, 0) as u8).collect();
     } else {
         for &x in &st.tail {
-            bits.raws(8, x as u32);
+            bits.raws(8, x as u64);
         }
     }
     if bits.failed() {
@@ -809,7 +753,7 @@ pub fn split(input: &[u8], size: usize, m: Method) -> Result<Split> {
 fn record(input: &[u8], st: &mut Stream, m: Method) -> Result<(Vec<u8>, [f64; CATS])> {
     let reach = st.tokens.iter().map(|t| if let Token::Match { dist, .. } = t { *dist as usize } else { 0 }).max();
     let reach = reach.unwrap_or(0);
-    let mut e = Enc { c: ArithEncoder::new(Vec::new()), cat: Cat::Blocks, cost: [0.0; CATS] };
+    let mut e = Enc::new(Cat::Blocks as usize);
     let mut ctx = Ctx::new();
     e.gamma(&mut ctx.misc[..32], reach as u32)?;
     let mut tokens = std::mem::take(&mut st.tokens);

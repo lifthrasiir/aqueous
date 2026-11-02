@@ -2,7 +2,8 @@
 //! under adaptive contexts (`Bits`), and the match finder whose matches they are coded
 //! against (`Mf`).
 
-use aqr_common::arith::{ArithDecoder, ArithEncoder, Bit};
+pub use aqr_common::arith::Coder;
+use aqr_common::arith::{ArithDecoder, Bit, Costed};
 
 use crate::{Result, corrupt};
 
@@ -29,101 +30,40 @@ pub enum Cat {
 }
 pub const CATS: usize = 7;
 
-/// What codes the record's bits: the arithmetic encoder (which writes the value given) or
-/// decoder (which returns what it reads).
-pub trait Bits {
-    fn bit(&mut self, b: &mut Bit, v: bool) -> bool;
-    fn raw(&mut self, v: bool) -> bool;
-    fn failed(&self) -> bool;
+/// What codes the record's bits ([`Coder`]: the arithmetic encoder, which writes the value
+/// given, or decoder, which returns what it reads), of this crate's [`Cat`]s and errors.
+pub trait Bits: Coder {
     /// What the bits after are, for the statistics.
-    fn cat(&mut self, _: Cat) {}
+    #[inline]
+    fn cat(&mut self, c: Cat) {
+        self.set_cat(c as usize)
+    }
 
-    /// `v` as `x = v + 1`: the bit length of `x` less 1 in unary (adaptive bits of `t`), then
-    /// the bits of `x` below its top one, raw.
+    /// [`Coder::gamma64`], failing as corrupt input.
     fn gamma(&mut self, t: &mut [Bit], v: u64) -> Result<u64> {
-        let x = v.wrapping_add(1);
-        let n = 63 - x.max(1).leading_zeros();
-        let mut k = 0;
-        while self.bit(&mut t[(k as usize).min(t.len() - 1)], k < n) {
-            k += 1;
-            if k > 63 || self.failed() {
-                return Err(corrupt());
-            }
-        }
-        let mut y = 1u64;
-        for i in (0..k).rev() {
-            y = y << 1 | self.raw(x >> i & 1 != 0) as u64;
-        }
-        Ok(y - 1)
-    }
-
-    /// `n` raw bits of `v`.
-    fn raws(&mut self, n: u32, v: u64) -> u64 {
-        (0..n).rev().fold(0, |x, i| x << 1 | self.raw(v >> i & 1 != 0) as u64)
-    }
-
-    /// `v` of `n` bits, by a binary tree of adaptive bits `t` (of `1 << n` bits).
-    fn tree(&mut self, t: &mut [Bit], n: u32, v: u32) -> u32 {
-        let mut k = 1usize;
-        for i in (0..n).rev() {
-            let b = self.bit(&mut t[k], v >> i & 1 != 0);
-            k = k << 1 | b as usize;
-        }
-        (k - (1 << n)) as u32
+        self.gamma64(t, v, corrupt)
     }
 }
+
+impl<C: Coder> Bits for C {}
 
 /// The encoder, counting the bits of each [`Cat`].
-pub struct Enc {
-    pub c: ArithEncoder,
-    cat: Cat,
-    pub cost: [f64; CATS],
-}
+pub type Enc = Costed<CATS>;
 
-impl Enc {
-    pub fn new() -> Self {
-        Enc { c: ArithEncoder::new(Vec::new()), cat: Cat::Head, cost: [0.0; CATS] }
-    }
-}
+/// The decoder, its adaptive bits read out of line in the modules: inlined (as they are of
+/// `aqr_common::arith`'s decoder), rar3-recons came to some 6 KB more and rar5-recons 3 KB.
+pub struct Dec<'a>(pub ArithDecoder<'a>);
 
-impl Default for Enc {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Bits for Enc {
+impl Coder for Dec<'_> {
+    #[cfg_attr(target_family = "wasm", inline(never))]
     fn bit(&mut self, b: &mut Bit, v: bool) -> bool {
-        let p1 = b.p1();
-        self.cost[self.cat as usize] -= ((if v { p1 } else { 65536 - p1 }) as f64 / 65536.0).log2();
-        self.c.encode(v, p1);
-        b.update(v);
-        v
+        self.0.bit(b, v)
     }
     fn raw(&mut self, v: bool) -> bool {
-        self.cost[self.cat as usize] += 1.0;
-        self.c.encode(v, 1 << 15);
-        v
+        self.0.raw(v)
     }
     fn failed(&self) -> bool {
-        false
-    }
-    fn cat(&mut self, c: Cat) {
-        self.cat = c;
-    }
-}
-
-impl Bits for ArithDecoder<'_> {
-    fn bit(&mut self, b: &mut Bit, _: bool) -> bool {
-        let v = self.decode(b.p1());
-        b.update(v);
-        v
-    }
-    fn raw(&mut self, _: bool) -> bool {
-        self.decode(1 << 15)
-    }
-    fn failed(&self) -> bool {
-        self.overrun()
+        self.0.failed()
     }
 }
 
