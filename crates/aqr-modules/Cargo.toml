@@ -434,3 +434,23 @@ required-features = ["wasm"]
 name = "pdf-recons"
 path = "src/bin/pdf-recons.rs"
 required-features = ["wasm"]
+
+[[bin]]
+name = "dwarf-info"
+path = "src/bin/dwarf-info.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "dwarf-apple"
+path = "src/bin/dwarf-apple.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "pdb-msf"
+path = "src/bin/pdb-msf.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "pdb-symbols"
+path = "src/bin/pdb-symbols.rs"
+required-features = ["wasm"]
