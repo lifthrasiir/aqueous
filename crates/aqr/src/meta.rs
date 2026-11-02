@@ -744,6 +744,9 @@ mod os {
     /// `ERROR_MORE_DATA` and `ERROR_INSUFFICIENT_BUFFER`: more than a buffer holds.
     const MORE_DATA: i32 = 234;
     const INSUFFICIENT_BUFFER: i32 = 122;
+    /// `ERROR_INVALID_FUNCTION` and `ERROR_INVALID_PARAMETER`: a file system of no streams
+    /// (FAT and exFAT, those of VeraCrypt volumes among them).
+    const NO_STREAMS: [i32; 2] = [1, 87];
 
     /// `p` as the system's calls take it, of a NUL: of more characters than they take without
     /// it (`MAX_PATH`, the NUL and the room CreateDirectoryW keeps for a name), absolute and of
@@ -781,7 +784,8 @@ mod os {
         if h == INVALID_HANDLE_VALUE {
             let e = io::Error::last_os_error();
             // (none, or a file system of no streams)
-            return if matches!(e.raw_os_error(), Some(NO_MORE) | Some(1)) { Ok(Vec::new()) } else { Err(e) };
+            let none = e.raw_os_error().is_some_and(|c| c == NO_MORE || NO_STREAMS.contains(&c));
+            return if none { Ok(Vec::new()) } else { Err(e) };
         }
         let mut out = Vec::new();
         let r = loop {
@@ -856,7 +860,7 @@ mod os {
                 // (more than the buffer holds)
                 Some(MORE_DATA | INSUFFICIENT_BUFFER) if buf.len() < 1 << 20 => buf.resize(buf.len() * 2, 0),
                 // (none, or a file system of no streams)
-                Some(NO_MORE | 1 | 87) => return Ok(Vec::new()),
+                Some(c) if c == NO_MORE || NO_STREAMS.contains(&c) => return Ok(Vec::new()),
                 _ => return Err(e),
             }
         }
