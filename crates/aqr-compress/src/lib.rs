@@ -995,33 +995,10 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
     let (words, held) = (words.as_deref(), cx.held.as_deref());
     let f = match ready {
         Some(f) => f,
-        None => pure(format, d, opt, depth, opt.threads, words, &cx.once, held).unwrap_or_else(|| {
-            catch_unwind(AssertUnwindSafe(|| match format {
-                Format::Pe => exe::pe(d),
-                Format::MachO => exe::macho(d, cx.remaps.as_deref().map_or(&[], |r| r.of(d))),
-                Format::Elf => exe::elf(d, cx.remaps.as_deref().map_or(&[], |r| r.of(d))),
-                Format::Gzip => flate::gzip(d, contents, opt, depth, cx),
-                Format::Zlib => flate::zlib(d, contents, opt, depth, cx),
-                Format::Zip => zip::zip(d, opt, depth, cx),
-                Format::SevenZip => sevenz(d, opt),
-                Format::Cab => cab(d, opt, cx),
-                Format::Chm => chm(d, opt, cx),
-                Format::Alz => alz(d, opt, depth, cx),
-                Format::Egg => egg(d, opt, depth, cx),
-                Format::Lha => lha(d, opt, cx),
-                Format::Rar => rar(d, opt, cx),
-                Format::Aqr => aqueous::archive(d),
-                Format::GitPack => git::pack(d, opt, depth, cx),
-                Format::Hdf5 => hdf5::file(d, opt, depth, cx),
-                Format::Bvx => bvx(d, opt, cx),
-                Format::Ar | Format::Tar | Format::Cpio => bundle::bundle(d),
-                Format::Iso => bundle::iso(d),
-                Format::Asar => bundle::asar(d),
-                _ => unreachable!("a pure format"),
-            }))
-            .ok()
-            .flatten()
-        }),
+        None => match recompressor(format) {
+            Recompressor::Cx(r) => catch_unwind(AssertUnwindSafe(|| r(d, contents, opt, depth, cx))).ok().flatten(),
+            _ => pure(format, d, &Pure { opt, depth, words, once: &cx.once, held }).flatten(),
+        },
     }?;
     let mut f = f;
     aqr_formula::store::spill_streams(&mut f);
@@ -1840,26 +1817,30 @@ fn content(opt: &Options, m: Module, i: usize) -> Option<&Content> {
     opt.contents.iter().find(|c| c.module == m && c.input == i)
 }
 
+/// What the recompressor of a [`pure`] format is given besides the data: the options (of the
+/// level and the threads), how many formats deep the data is, and what the context lends.
+struct Pure<'a> {
+    opt: &'a Options,
+    depth: u32,
+    /// The dictionary text is coded with, if any ([`Cx::words`]).
+    words: Option<&'a aqr_wrt::formula::Shared>,
+    /// Which text is coded once ([`Cx::once`]).
+    once: &'a Once,
+    /// What the files archived along hold ([`Cx::held`]).
+    held: Option<&'a Held>,
+}
+
 /// The formula that the recompressor of `format` makes of `d` (its `formula` module, see its
 /// FORMAT.md), if it makes one, where it is a function of `d` alone (it looks for no files in
-/// its data, and takes nothing of a budget) and of the level of `opt`: `None` for the other
-/// formats. Whether coding pays off is the recompressor's call: the streams are not compressed
-/// yet, so their size says little. The formula is the same whatever `threads` is. Text is coded
-/// with `words` where given ([`Cx::words`]), and as `once` tells; PDF as [`pdf_options`] tells;
-/// bzip2 streams where they may pay ([`bz2`], `depth` formats deep, the files archived along
-/// holding what `held` tells).
-#[allow(clippy::too_many_arguments)]
-fn pure(
-    format: Format,
-    d: &[u8],
-    opt: &Options,
-    depth: u32,
-    threads: usize,
-    words: Option<&aqr_wrt::formula::Shared>,
-    once: &Once,
-    held: Option<&Held>,
-) -> Option<Option<Formula>> {
-    let encode = pure_encode(format)?;
+/// its data, and takes nothing of a budget) and of what `p` gives: `None` for the other formats
+/// ([`Recompressor::Cx`]). Whether coding pays off is the recompressor's call: the streams are
+/// not compressed yet, so their size says little. The formula is the same whatever the threads.
+/// Text is coded as `p.once` tells.
+fn pure(format: Format, d: &[u8], p: &Pure) -> Option<Option<Formula>> {
+    let r = recompressor(format);
+    if let Recompressor::Cx(_) = r {
+        return None;
+    }
     #[cfg(test)]
     tests::PURE.with(|n| n.set(n.get() + 1));
     let code = || {
@@ -1867,16 +1848,15 @@ fn pure(
         if format == Format::Text {
             tests::TEXTS.lock().unwrap().push(d.len());
         }
-        catch_unwind(AssertUnwindSafe(|| match (format, words) {
-            (Format::Text, Some(w)) => aqr_wrt::formula::encode_with(d, w, threads),
-            (Format::Pdf, _) => aqr_pdf::formula::encode_with(d, &pdf_options(opt, threads)),
-            (Format::Bzip2, _) => bz2(d, opt, depth, threads, held),
-            _ => encode(d, threads),
+        catch_unwind(AssertUnwindSafe(|| match r {
+            Recompressor::Pure(e) => e(d, p.opt.threads),
+            Recompressor::PureWith(e) => e(d, p),
+            Recompressor::Cx(_) => None,
         }))
         .ok()
         .flatten()
     };
-    Some(if format == Format::Text { once.code(d, code) } else { code() })
+    Some(if format == Format::Text { p.once.code(d, code) } else { code() })
 }
 
 /// aqr-bz2's formula of `d` (`depth` formats deep), each stream taken only where its data may
@@ -2023,52 +2003,87 @@ fn pdf_options(opt: &Options, threads: usize) -> aqr_pdf::encode::Options {
 
 /// Whether `format` is one of [`pure`].
 fn is_pure(format: Format) -> bool {
-    pure_encode(format).is_some()
+    !matches!(recompressor(format), Recompressor::Cx(_))
 }
 
-/// A recompressor's `encode`: the formula of the data, on so many threads.
-type Encode = fn(&[u8], usize) -> Option<Formula>;
+/// How the recompressor of a format is run.
+#[derive(Clone, Copy)]
+enum Recompressor {
+    /// A [`pure`] one, its `encode`: the formula of the data, on so many threads.
+    Pure(fn(&[u8], usize) -> Option<Formula>),
+    /// A [`pure`] one taking more of what [`Pure`] gives than the threads.
+    PureWith(fn(&[u8], &Pure) -> Option<Formula>),
+    /// One that looks for files in its data or takes of a budget, given the context: of the data,
+    /// the kind of its contents (of a zlib stream or gzip member without a name), the options and
+    /// how many formats deep it is.
+    Cx(fn(&[u8], Kind, &Options, u32, &Cx) -> Option<Formula>),
+}
 
-/// The `encode` of the recompressor of a [`pure`] format.
-fn pure_encode(format: Format) -> Option<Encode> {
-    Some(match format {
-        Format::Lz4 => aqr_lz4::formula::encode,
-        Format::Lzma => aqr_lzma::formula::encode,
-        Format::Xz => aqr_lzma::formula::encode_xz,
-        Format::Lzo => aqr_lzo::formula::encode,
-        Format::Bzip2 => aqr_bz2::formula::encode,
-        Format::Png => aqr_png::formula::encode,
-        Format::Gif => aqr_gif::formula::encode,
-        Format::Jpeg => aqr_jpeg::formula::encode,
-        Format::Mp3 => aqr_mp3::formula::encode,
-        Format::Flac => aqr_flac::formula::encode,
-        Format::Raw => aqr_raw::formula::encode,
-        Format::Psd => aqr_psd::formula::encode,
-        Format::Clip => aqr_clip::formula::encode,
-        Format::Dds => aqr_tex::formula::encode,
-        Format::Pdf => aqr_pdf::formula::encode,
-        Format::Sqlite => aqr_sqlite::formula::encode,
-        Format::LevelDb => aqr_snappy::formula::encode,
-        Format::Fasta => aqr_fasta::formula::encode,
-        Format::Dex => aqr_dex::formula::encode,
-        Format::Arsc => aqr_arsc::formula::encode,
-        Format::GnuGettext => aqr_gnu_gettext::formula::encode,
-        Format::Wasm => aqr_wasm::formula::encode,
-        Format::Fsb5 => aqr_fsb::formula::encode,
-        Format::Ogg => aqr_ogg::formula::encode,
-        Format::Fits => aqr_fits::formula::encode,
-        Format::Obj => aqr_obj::formula::encode,
-        Format::Xsv => aqr_xsv::formula::encode,
-        Format::Jsonl => aqr_jsonl::formula::encode,
-        Format::Text => aqr_wrt::formula::encode,
-        Format::Sized => aqr_raw::formula::encode_sized,
-        Format::Records => aqr_infer_recs::formula::encode,
-        Format::Wim => aqr_wim::formula::encode,
-        Format::Ppmd => aqr_ppmd::formula::encode,
-        Format::Mkv => aqr_mkv::formula::encode,
-        Format::ProRes => aqr_prores::formula::encode,
-        _ => return None,
-    })
+/// The recompressor of `format`.
+fn recompressor(format: Format) -> Recompressor {
+    use Recompressor::{Cx, Pure, PureWith};
+    match format {
+        Format::Lz4 => Pure(aqr_lz4::formula::encode),
+        Format::Lzma => Pure(aqr_lzma::formula::encode),
+        Format::Xz => Pure(aqr_lzma::formula::encode_xz),
+        Format::Lzo => Pure(aqr_lzo::formula::encode),
+        Format::Png => Pure(aqr_png::formula::encode),
+        Format::Gif => Pure(aqr_gif::formula::encode),
+        Format::Jpeg => Pure(aqr_jpeg::formula::encode),
+        Format::Mp3 => Pure(aqr_mp3::formula::encode),
+        Format::Flac => Pure(aqr_flac::formula::encode),
+        Format::Raw => Pure(aqr_raw::formula::encode),
+        Format::Psd => Pure(aqr_psd::formula::encode),
+        Format::Clip => Pure(aqr_clip::formula::encode),
+        Format::Dds => Pure(aqr_tex::formula::encode),
+        Format::Sqlite => Pure(aqr_sqlite::formula::encode),
+        Format::LevelDb => Pure(aqr_snappy::formula::encode),
+        Format::Fasta => Pure(aqr_fasta::formula::encode),
+        Format::Dex => Pure(aqr_dex::formula::encode),
+        Format::Arsc => Pure(aqr_arsc::formula::encode),
+        Format::GnuGettext => Pure(aqr_gnu_gettext::formula::encode),
+        Format::Wasm => Pure(aqr_wasm::formula::encode),
+        Format::Fsb5 => Pure(aqr_fsb::formula::encode),
+        Format::Ogg => Pure(aqr_ogg::formula::encode),
+        Format::Fits => Pure(aqr_fits::formula::encode),
+        Format::Obj => Pure(aqr_obj::formula::encode),
+        Format::Xsv => Pure(aqr_xsv::formula::encode),
+        Format::Jsonl => Pure(aqr_jsonl::formula::encode),
+        Format::Sized => Pure(aqr_raw::formula::encode_sized),
+        Format::Records => Pure(aqr_infer_recs::formula::encode),
+        Format::Wim => Pure(aqr_wim::formula::encode),
+        Format::Ppmd => Pure(aqr_ppmd::formula::encode),
+        Format::Mkv => Pure(aqr_mkv::formula::encode),
+        Format::ProRes => Pure(aqr_prores::formula::encode),
+        // (text with the dictionary given, if any; PDF as [`pdf_options`] tells; bzip2 streams
+        // where they may pay, see [`bz2`])
+        Format::Text => PureWith(|d, p| match p.words {
+            Some(w) => aqr_wrt::formula::encode_with(d, w, p.opt.threads),
+            None => aqr_wrt::formula::encode(d, p.opt.threads),
+        }),
+        Format::Pdf => PureWith(|d, p| aqr_pdf::formula::encode_with(d, &pdf_options(p.opt, p.opt.threads))),
+        Format::Bzip2 => PureWith(|d, p| bz2(d, p.opt, p.depth, p.opt.threads, p.held)),
+        Format::Pe => Cx(|d, _, _, _, _| exe::pe(d)),
+        Format::MachO => Cx(|d, _, _, _, cx| exe::macho(d, cx.remaps.as_deref().map_or(&[], |r| r.of(d)))),
+        Format::Elf => Cx(|d, _, _, _, cx| exe::elf(d, cx.remaps.as_deref().map_or(&[], |r| r.of(d)))),
+        Format::Gzip => Cx(flate::gzip),
+        Format::Zlib => Cx(flate::zlib),
+        Format::Zip => Cx(|d, _, opt, depth, cx| zip::zip(d, opt, depth, cx)),
+        Format::SevenZip => Cx(|d, _, opt, _, _| sevenz(d, opt)),
+        Format::Cab => Cx(|d, _, opt, _, cx| cab(d, opt, cx)),
+        Format::Chm => Cx(|d, _, opt, _, cx| chm(d, opt, cx)),
+        Format::Alz => Cx(|d, _, opt, depth, cx| alz(d, opt, depth, cx)),
+        Format::Egg => Cx(|d, _, opt, depth, cx| egg(d, opt, depth, cx)),
+        Format::Lha => Cx(|d, _, opt, _, cx| lha(d, opt, cx)),
+        Format::Rar => Cx(|d, _, opt, _, cx| rar(d, opt, cx)),
+        Format::Aqr => Cx(|d, _, _, _, _| aqueous::archive(d)),
+        Format::GitPack => Cx(|d, _, opt, depth, cx| git::pack(d, opt, depth, cx)),
+        Format::Hdf5 => Cx(|d, _, opt, depth, cx| hdf5::file(d, opt, depth, cx)),
+        Format::Bvx => Cx(|d, _, opt, _, cx| bvx(d, opt, cx)),
+        Format::Ar | Format::Tar | Format::Cpio => Cx(|d, _, _, _, _| bundle::bundle(d)),
+        Format::Iso => Cx(|d, _, _, _, _| bundle::iso(d)),
+        Format::Asar => Cx(|d, _, _, _, _| bundle::asar(d)),
+    }
 }
 
 /// Makes the formulas of the files of [`pure`] formats among the contents of `f` beforehand,
@@ -2090,18 +2105,15 @@ fn prepare(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> (Vec<(usize, usiz
     jobs.retain(|j| !(j.0 == Format::Png && skip.contains(&(j.1.as_ptr() as usize, j.1.len()))));
     cx.skip.borrow_mut().extend(skip);
     let workers = opt.threads.min(jobs.len()).max(1);
-    // (each may take all: the pool gives it the workers free, and those given back as the
-    // others finish)
-    let inner = opt.threads;
+    // (each may take all of `opt.threads`: the pool gives it the workers free, and those given
+    // back as the others finish)
     let words = cx.words.borrow().clone();
-    let words = words.as_deref();
-    let once = &*cx.once;
-    let held = cx.held.as_deref();
+    let p = Pure { opt, depth, words: words.as_deref(), once: &cx.once, held: cx.held.as_deref() };
     let files = cx.files.as_deref();
     let made = sets::par_map(jobs.len(), workers, |i| {
         files.inspect(|f| f.tell(jobs[i].1.as_ptr(), false));
         let _item = aqr_common::trace::item(files.and_then(|f| f.content(jobs[i].1.as_ptr())));
-        let mut made = pure(jobs[i].0, jobs[i].1, opt, depth, inner, words, once, held).flatten();
+        let mut made = pure(jobs[i].0, jobs[i].1, &p).flatten();
         // (of the store as it is made, as [`recompress_with`] has a formula: they are all made
         // before any is taken)
         made.iter_mut().for_each(aqr_formula::store::spill_streams);
