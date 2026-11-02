@@ -473,6 +473,8 @@ struct Engine<'a> {
     finished: bool,
     /// Whether lanes count and log their misses.
     track: bool,
+    /// Whether it neither chains nor searches ([`Emulator::blind`]).
+    blind: bool,
     lanes: Vec<Lane>,
     jobs: Vec<Job>,
 }
@@ -487,6 +489,7 @@ impl<'a> Engine<'a> {
             last_head: 0,
             finished: false,
             track,
+            blind: false,
             lanes: params.iter().map(|&p| Lane::new(p)).collect(),
             jobs: vec![],
         }
@@ -603,7 +606,7 @@ impl<'a> Engine<'a> {
                 }
             }
             let c = self.win.cursor;
-            let h = if self.win.ahead >= 3 {
+            let h = if self.win.ahead >= 3 && !self.blind {
                 self.win.chain(c)
             } else {
                 0
@@ -786,7 +789,7 @@ impl<'a> Engine<'a> {
                 win.ahead -= n - 1;
                 for _ in 0..n - 2 {
                     win.cursor += 1;
-                    if win.cursor as isize <= last {
+                    if win.cursor as isize <= last && !self.blind {
                         win.chain(win.cursor);
                     }
                 }
@@ -892,6 +895,19 @@ impl<'a> Emulator<'a> {
             p,
             e: Engine::new(input, &[p], false),
         }
+    }
+
+    /// An emulator of the lazy parser (or of runs or Huffman only) that neither chains nor
+    /// searches, so that it predicts no matches; driven by the actual tokens, it moves through
+    /// the window as the emulation does (how far the cursor goes and when the window is
+    /// refilled depend on the tokens alone). Right after a match its whole state is the
+    /// emulation's, and so is its [`checkpoint`] there.
+    ///
+    /// [`checkpoint`]: Emulator::checkpoint
+    pub fn blind(input: &'a [u8], p: Params) -> Self {
+        let mut e = Emulator::new(input, p);
+        e.e.blind = true;
+        e
     }
 
     /// The checkpoint of this emulator, where it can be resumed (see [`Params::resumable`]),

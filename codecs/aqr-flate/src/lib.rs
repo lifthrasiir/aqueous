@@ -1706,6 +1706,27 @@ fn code_adaptive<'a>(
         .into_iter()
         .collect();
     }
+    // Given threads, the segments are coded at once from checkpoints worked out on their own
+    // ([`starts`]), as they would be one after another unless the emulation loses track.
+    if threads > 1
+        && ranges.len() > 1
+        && let Some(cps) = starts(f, p, ranges, threads)
+    {
+        let segs = par_map(ranges.len(), threads, |i| {
+            let cp = (i > 0).then(|| cps[i - 1]);
+            let emu = match &cp {
+                None => Emulator::new(&f.data, p),
+                Some(cp) => Emulator::resume(&f.data, p, cp).ok_or(Error::Corrupt)?,
+            };
+            let a = adapt::Adaptive::new(adapt::Enc::new(), priors, Some(emu));
+            finish(a, i, cp).map(|r| r.0)
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+        if !segs.iter().any(|s| s.lost) {
+            return Ok(segs);
+        }
+    }
     let mut emu = Some(Emulator::new(&f.data, p));
     let mut out = Vec::with_capacity(ranges.len());
     for (i, r) in ranges.iter().enumerate() {
@@ -1726,6 +1747,76 @@ fn code_adaptive<'a>(
         out.push(seg);
     }
     Ok(out)
+}
+
+/// The checkpoints of segments `ranges[1..]` under zlib emulation with `p`, as coding them one
+/// after another would write them (if the emulation does not lose track), without emulating
+/// the stream through: a blind emulation ([`Emulator::blind`]) follows the tokens, taking its
+/// checkpoint after the last match before each segment, where it is the emulation's; from
+/// there, the segments at once, an emulation rebuilt from it follows the tokens up to the
+/// segment. None where one is not had.
+fn starts(f: &Flat, p: zlib::Params, ranges: &[Range], threads: usize) -> Option<Vec<Checkpoint>> {
+    if !p.resumable() {
+        return None;
+    }
+    // Follows `tokens[k..to]` from data position `pos` (skips `skips[s..]`), as coding does,
+    // calling `at_match` after each match with where it is.
+    fn follow(
+        f: &Flat,
+        e: &mut Emulator,
+        (mut k, mut pos, mut s): (usize, usize, usize),
+        to: usize,
+        at_match: &mut dyn FnMut(&Emulator, usize, usize, usize),
+    ) -> Option<()> {
+        while k < to {
+            while let Some(&(at, len)) = f.skips.get(s)
+                && at == k
+            {
+                pos += len;
+                s += 1;
+                if !e.skip_to(pos) {
+                    return None;
+                }
+            }
+            match e.predict() {
+                Some((q, _)) if q == pos => {}
+                _ => return None,
+            }
+            let t = f.tokens[k];
+            if !e.commit(t) {
+                return None;
+            }
+            (k, pos) = (k + 1, pos + t.span());
+            if matches!(t, Token::Match { .. }) {
+                at_match(e, k, pos, s);
+            }
+        }
+        Some(())
+    }
+    // (the checkpoint after the last match before each segment, with where it is)
+    let mut anchors = vec![None; ranges.len() - 1];
+    let mut blind = Emulator::blind(&f.data, p);
+    let (mut k, mut pos, mut s, mut last) = (0, 0, 0, None);
+    for (i, r) in ranges.iter().enumerate().skip(1) {
+        let mut mark = |e: &Emulator, k1, p1, s1| last = Some((e.checkpoint(), k1, p1, s1));
+        follow(f, &mut blind, (k, pos, s), r.first, &mut mark)?;
+        anchors[i - 1] = last;
+        (k, pos, s) = (r.first, r.pos, f.skips.partition_point(|x| x.0 < r.first));
+    }
+    par_map(ranges.len() - 1, threads, |j| {
+        let r = &ranges[j + 1];
+        let (mut e, k, pos, s) = match anchors[j] {
+            Some((cp, k, pos, s)) => (Emulator::resume(&f.data, p, &cp?)?, k, pos, s),
+            None => (Emulator::new(&f.data, p), 0, 0, 0),
+        };
+        follow(f, &mut e, (k, pos, s), r.first, &mut |_, _, _, _| {})?;
+        let cp = e
+            .checkpoint()
+            .filter(|cp| cp.cursor - cp.held as usize == r.pos)?;
+        Emulator::resume(&f.data, p, &cp).map(|_| cp)
+    })
+    .into_iter()
+    .collect()
 }
 
 /// The checkpoints of segments `ranges[1..]` from `followed`, if it followed the whole stream
@@ -2522,8 +2613,9 @@ mod tests {
     }
 
     /// Segments coded with zlib emulation's predictions taken from the detection's emulation,
-    /// or from an earlier coding (with another rule), are coded as with a new emulation coded
-    /// one segment after another.
+    /// or from an earlier coding (with another rule), or by a new emulation for each segment
+    /// from its own checkpoint, are coded as with a new emulation coded one segment after
+    /// another.
     #[test]
     fn replayed_emulation_codes_alike() {
         let mut d = vec![];
@@ -2540,14 +2632,14 @@ mod tests {
             .unwrap()
             .compress(&d)
             .unwrap();
-        let f = Flat::new(&raw, 64 << 10, 1, false, usize::MAX).unwrap();
+        let f = Flat::new(&raw, 16 << 10, 1, false, usize::MAX).unwrap();
         let ranges = segment_ranges(&f);
         assert!(ranges.len() > 4);
         let (catalog, priors) = (
             &profile_catalog(ADAPTIVE).unwrap().0,
             profile_priors(ADAPTIVE).unwrap(),
         );
-        let code = |rule: Rule, p: zlib::Params, from: Emulation| {
+        let code_on = |threads: usize, rule: Rule, p: zlib::Params, from: Emulation| {
             let segs = code_adaptive(
                 &f,
                 rule,
@@ -2555,7 +2647,7 @@ mod tests {
                 from,
                 priors,
                 &ranges,
-                4,
+                threads,
                 false,
                 (0, &ONCE),
             )
@@ -2563,6 +2655,7 @@ mod tests {
             assert!(segs.iter().all(|s| s.emulated && !s.lost));
             segs
         };
+        let code = |rule, p, from| code_on(4, rule, p, from);
 
         // Level 7 mispredicts the stream (of level 9), strategies default and fixed alike: tied
         // over the whole stream, the detection follows all of it.
@@ -2584,7 +2677,13 @@ mod tests {
         assert!(found.misses > 100);
         let followed = followed.unwrap();
         assert!(replayed(&f, p, &followed, &ranges).is_some());
+        // (a new emulation on threads starting the segments from their own checkpoints)
+        assert!(starts(&f, p, &ranges, 4).is_some());
         let new = code(catalog[0], p, Emulation::New);
+        assert_eq!(
+            coded(&new),
+            coded(&code_on(1, catalog[0], p, Emulation::New))
+        );
         assert_eq!(
             coded(&code(
                 catalog[0],

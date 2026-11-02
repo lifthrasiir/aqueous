@@ -108,7 +108,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "clip-recons",
         version: 1,
-        sha512_256: hex("b5173d89314991e19d79a2a1c4fb1e171c6ddc9eaa5b5095c0850114e79482d2"),
+        sha512_256: hex("d975841c56b108e79546a794116e9f7b37aebf464c0e2d0d9f704e26cd445cf0"),
         block: include_bytes!("../wasm/clip-recons.block"),
     },
     Known {
@@ -186,7 +186,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "flate-set",
         version: 1,
-        sha512_256: hex("5221e9fc73b75023d1d4119547cbe4bee8ae5ea9c2e5cff2f5e891f9cba32508"),
+        sha512_256: hex("ff0725f8a83b98bd0e1bf596809a56f9c985601b4c53cc23b4f0bf3c6b339bba"),
         block: include_bytes!("../wasm/flate-set.block"),
     },
     Known {

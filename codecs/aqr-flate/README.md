@@ -107,6 +107,12 @@ RAYON_NUM_THREADS=1 cargo run --release --features train --bin aqr-flate-train -
   `commit` of the actual token), so after a misprediction it carries on from where the stream
   really is. Each segment resumes it from a checkpoint (`zlib::Checkpoint`, a few counters:
   the lazy levels insert every position, so the rest of the state follows from the data).
+  Given threads, the encoder works out each segment's checkpoint on its own and codes the
+  segments at once: a blind emulation (`Emulator::blind`, neither chaining nor searching)
+  follows the tokens, its window moving as the emulation's does; right after a match its
+  state is the emulation's, so from its checkpoint after the last match before a segment an
+  emulation rebuilt there follows the tokens up to the segment (enwik8 by Info-ZIP 3.0 -9, 10
+  threads of a Ryzen 7 9700X: split 4.85 -> 1.86 s, the same record).
   deflate_fast (levels 1-3) cannot be resumed, since its hash chains depend on the tokens, so
   such a stream is one segment.
 - **zlib as a compressor**: `zlib::compress(data, params)` writes what zlib 1.3.1 writes in one
