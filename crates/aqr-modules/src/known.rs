@@ -18,7 +18,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "azo-recons",
         version: 1,
-        sha512_256: hex("a8d18f6d04c3ad94ef3051326adc8a1f2b0d553a47f91fc95aacddf7eac3e0be"),
+        sha512_256: hex("a9e11f874e8c1080d55eee385408fa2d00e5c84d4d6cd319e2f9efd6f656fca5"),
         block: include_bytes!("../wasm/azo-recons.block"),
     },
     Known {
@@ -204,7 +204,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "flac-recons",
         version: 3,
-        sha512_256: hex("90604218c63ea884a7d5cd0ae5cbe7895ed50ea9176cea7d23b9868eecbe3b22"),
+        sha512_256: hex("fa9e3dedb787c9d1e4517eb87090132c043c9e79a57b7b7e11f7b2b34e2ef431"),
         block: include_bytes!("../wasm/flac-recons.block"),
     },
     Known {
@@ -270,7 +270,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "lha-recons",
         version: 1,
-        sha512_256: hex("829e48c5443ab16c0e0bef96392ae29f6b9b4e3c76e1311af1047f6f628c7f48"),
+        sha512_256: hex("6a0c08e518884134899f372c5dad9d221aab70758ead451c552b8afee9f2e03d"),
         block: include_bytes!("../wasm/lha-recons.block"),
     },
     Known {
@@ -294,13 +294,13 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "lzo-recons",
         version: 1,
-        sha512_256: hex("2a566e41dfddf87079fe36794505541904c17d146693e750642a15f9e082b6c4"),
+        sha512_256: hex("62d2002f89f4d0c59cff25638744a7292b01b5fcf5175ca9231e8cab6de527b1"),
         block: include_bytes!("../wasm/lzo-recons.block"),
     },
     Known {
         name: "lzx-recons",
         version: 1,
-        sha512_256: hex("933033505b08ed54ccc35ab5b3424cca700ca0603d0b17ff8798e4e2ec0a0822"),
+        sha512_256: hex("944f81d6f6703211c36f8fd1156791b7a668cc5eef81e386bba990c10e3d5ec5"),
         block: include_bytes!("../wasm/lzx-recons.block"),
     },
     Known {
@@ -330,7 +330,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "pcm-recons",
         version: 1,
-        sha512_256: hex("ec77c292505c30f23e706985f7bb09208fa718840f5fe2523b35fc0e319fc4c5"),
+        sha512_256: hex("cc73ffe08dd3c002e0e69c877f4fbf793d1de7096b9f8691d9e9912897da4207"),
         block: include_bytes!("../wasm/pcm-recons.block"),
     },
     Known {
@@ -348,37 +348,31 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "pdf-recons",
         version: 2,
-        sha512_256: hex("f243a4988fbe27cc7824e39392b465cdb480ea97b2eb642de07d956f4588c286"),
+        sha512_256: hex("9c4c7e5147ca68491ee7665da25dfb658cfbddb31f3bb1b5e1c667203e9bb15d"),
         block: include_bytes!("../wasm/pdf-recons.block"),
     },
     Known {
         name: "png-against",
         version: 1,
-        sha512_256: hex("f20ff76dcf70ed2a5f9c473105011f7df71f40c7bf7ea95256c8c0284eb3bc99"),
+        sha512_256: hex("a07a29464f405280d4e78f1b4d89e4bf701965f9db2d81c5fae62b9b2e8fb644"),
         block: include_bytes!("../wasm/png-against.block"),
     },
     Known {
         name: "png-recons",
         version: 3,
-        sha512_256: hex("d51098f589de3b719c0da6bc6b5289a2e478220e5b8a5f99d7dea2d84eca431e"),
+        sha512_256: hex("c6da076e49d92d8c589ff31548f896d99d9f954927d089a576bf5fa78852bb38"),
         block: include_bytes!("../wasm/png-recons.block"),
     },
     Known {
         name: "png-set",
         version: 2,
-        sha512_256: hex("1adb253b481a255776d645ae0da8d552132edfdfcf95c36d70f7eb955f224e59"),
+        sha512_256: hex("ce49fa72299e377b285b23cbcc946a988fa637a7eea18d809ba194b4fb35cbb7"),
         block: include_bytes!("../wasm/png-set.block"),
     },
     Known {
         name: "prores-recons",
         version: 1,
         sha512_256: hex("ddb6ba9f3cb49b45854fb69a68cede5a62aa292edf483121de63133724e4f725"),
-        block: include_bytes!("../wasm/prores-recons.block"),
-    },
-    Known {
-        name: "prores-recons",
-        version: 1,
-        sha512_256: hex("54a549eaa892fd1d30b8d9890c3cf7806ebe0fc94c66a5f26cb0e467c0f87400"),
         block: include_bytes!("../wasm/prores-recons.block"),
     },
     Known {
@@ -444,7 +438,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "vorbis-recons",
         version: 2,
-        sha512_256: hex("cf82a6c9e22a8662f05688d13c97a994e9c24beeb5b3b3cf7c268bc82476c27a"),
+        sha512_256: hex("6e76abf31b966bddb1378a5223a93bb70d651074d141de355c33dbd6375af915"),
         block: include_bytes!("../wasm/vorbis-recons.block"),
     },
     Known {
