@@ -5,7 +5,115 @@
 
 use std::collections::{HashMap, HashSet};
 
+use aqr_foreign::charset::{Charset, Choice, Decision, decide};
 use aqr_formula::aqr::{Entry, EntryNode, Extra, Tree, name_bytes, name_from};
+
+/// A path as an archive gives it: in an encoding it declares, as UTF-8, or in none, as it is
+/// (`docs/names-design.md`).
+#[derive(Clone, Debug)]
+pub enum Named {
+    Text(Vec<u8>),
+    Bytes(Vec<u8>),
+}
+
+impl Named {
+    /// Path `b`, declared UTF-8: of no declared encoding where it is not UTF-8 (declared wrongly).
+    pub fn utf8(b: Vec<u8>) -> Named {
+        match std::str::from_utf8(&b) {
+            Ok(_) => Named::Text(b),
+            Err(_) => Named::Bytes(b),
+        }
+    }
+
+    /// Path `b`, declared of `cs`: of no declared encoding where it is not of it.
+    pub fn of(cs: Charset, b: Vec<u8>) -> Named {
+        match cs.decode(&b) {
+            Some(s) => Named::Text(s.into_bytes()),
+            None => Named::Bytes(b),
+        }
+    }
+
+    /// The path where it is of no declared encoding.
+    pub fn undeclared(&self) -> Option<&[u8]> {
+        match self {
+            Named::Text(_) => None,
+            Named::Bytes(b) => Some(b),
+        }
+    }
+}
+
+/// How the paths of no declared encoding of an archive are taken ([`Decision`]), and how many
+/// there are.
+#[derive(Clone, Debug, Default)]
+pub struct Undeclared {
+    pub d: Decision,
+    pub n: usize,
+}
+
+impl Undeclared {
+    /// The paths of no declared encoding of an archive, `paths`, decided as `choice` asks:
+    /// decoded where they can be, guessed where not given. Where they are not all UTF-8,
+    /// `convention`, the set the format's archivers write (ALZip's CP949), is taken where it
+    /// decodes them all.
+    pub fn decide<'a>(
+        choice: &Choice,
+        paths: impl IntoIterator<Item = &'a [u8]>,
+        convention: Option<Charset>,
+    ) -> Undeclared {
+        let paths: Vec<&[u8]> = paths.into_iter().collect();
+        if paths.is_empty() {
+            return Undeclared::default();
+        }
+        let utf8 = || paths.iter().all(|p| std::str::from_utf8(p).is_ok());
+        let d = match (choice, convention) {
+            (Choice::Auto, Some(cs)) if !utf8() && paths.iter().all(|p| cs.decode(p).is_some()) => Decision::of(cs),
+            _ => decide(choice, &paths, true, Charset::system(true), convention.or_else(Charset::likely)),
+        };
+        Undeclared { d, n: paths.len() }
+    }
+
+    /// Path `p` with its names separated by `/` alone: decoded where it is of no declared
+    /// encoding and that is decided (else as it is), and where `backslash`, its `\`s made `/`s
+    /// as characters, not as bytes (5C is a byte of characters of Shift_JIS, GBK and Big5).
+    pub fn path(&self, p: &Named, backslash: bool) -> Vec<u8> {
+        let text = match p {
+            Named::Text(t) => Some(t.clone()),
+            Named::Bytes(b) => self.d.decode(b).map(String::into_bytes),
+        };
+        match (text, p) {
+            (Some(mut t), _) => {
+                if backslash {
+                    t.iter_mut().filter(|c| **c == b'\\').for_each(|c| *c = b'/');
+                }
+                t
+            }
+            (None, Named::Text(_)) => unreachable!(),
+            (None, Named::Bytes(b)) => {
+                let mut out = b.clone();
+                for i in 0..out.len() {
+                    if backslash && out[i] == b'\\' && self.d.starts(b, i) {
+                        out[i] = b'/';
+                    }
+                }
+                out
+            }
+        }
+    }
+
+    /// Link target `t` of an entry, of the encoding of the entry's path (none where
+    /// `undeclared`): decoded as [`Undeclared::path`] decodes, else as it is.
+    pub fn target(&self, t: &[u8], undeclared: bool) -> Vec<u8> {
+        match undeclared.then(|| self.d.decode(t)).flatten() {
+            Some(s) => s.into_bytes(),
+            None => t.to_vec(),
+        }
+    }
+
+    /// What is told of the decision, where anything is (of archive format `what`).
+    pub fn told(&self, what: &str) -> Option<String> {
+        self.d.told(self.n).map(|t| format!("{what}: {t}"))
+    }
+}
 
 /// The names of `path` (separated by `/`, and `\` too where `backslash`): `None` where it has a
 /// `..` (it could reach out of the directory) or a zero byte. A `/` or a drive (`C:`) at the

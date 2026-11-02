@@ -1,7 +1,7 @@
 //! ALZip's archives, ALZ and EGG, read by their records (aqr-alz's and aqr-egg's readers): the
-//! files' names (ALZ's, which tell no encoding, UTF-8 where all of the archive's are, else CP949;
-//! EGG's UTF-8, or of the code page its filename record gives: CP949, Shift_JIS, else as ZIP's
-//! names not flagged UTF-8), directories, modification times
+//! files' names (ALZ's, which tell no encoding, decided for the archive as ZIP's of none are, CP949
+//! the likeliest; EGG's UTF-8, or of the code page its filename record gives: CP949, Shift_JIS,
+//! else of no declared encoding), directories, modification times
 //! (ALZ's MS-DOS time as local time; EGG's FILETIME, else its POSIX time) and attributes
 //! (Windows' read-only, hidden, system and archive bits; EGG's POSIX mode and owner); the data
 //! decoded on the pool's threads, a file at a time (an EGG solid archive's block as one), its
@@ -19,8 +19,9 @@ use aqr_common::{crc32, pool};
 use aqr_egg::egg;
 use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, Tree, WIN_ATTRS_ALLOWED};
 
-use crate::build::{self, Builder};
+use crate::build::{self, Builder, Named, Undeclared};
 use crate::{Done, Select, Sink, codec, sys};
+use aqr_foreign::charset::{Charset, Choice};
 
 const S_IFMT: u32 = 0o170000;
 const S_IFDIR: u32 = 0o040000;
@@ -84,7 +85,7 @@ enum Kind {
 
 /// A file as read from the records.
 struct Head {
-    name: Vec<u8>,
+    name: Named,
     kind: Kind,
     extra: Extra,
 }
@@ -96,19 +97,16 @@ pub struct Listing<'d> {
     /// The contents of no data (empty files).
     empty: Vec<usize>,
     notes: Vec<build::Note>,
+    /// How the names of no declared encoding are taken.
+    pub undeclared: Undeclared,
 }
 
-/// Name `b` of code page `cp` (949, 932; else as ZIP's names not flagged UTF-8) as UTF-8: as it
-/// is where it is not of it.
-fn named(b: &[u8], cp: u16) -> Vec<u8> {
-    let enc = match cp {
-        949 => encoding_rs::EUC_KR,
-        932 => encoding_rs::SHIFT_JIS,
-        _ => return sys::legacy_name(b),
-    };
-    match enc.decode_without_bom_handling_and_without_replacement(b) {
-        Some(s) => s.into_owned().into_bytes(),
-        None => b.to_vec(),
+/// Name `b` of code page `cp` (949, 932; else of no declared encoding).
+fn named(b: &[u8], cp: u16) -> Named {
+    match cp {
+        949 => Named::of(Charset::Std(encoding_rs::EUC_KR), b.to_vec()),
+        932 => Named::of(Charset::Std(encoding_rs::SHIFT_JIS), b.to_vec()),
+        _ => Named::Bytes(b.to_vec()),
     }
 }
 
@@ -122,15 +120,12 @@ fn size_of(n: u64) -> Option<usize> {
 }
 
 impl<'d> Listing<'d> {
-    pub fn read_alz(d: &'d [u8]) -> Result<Listing<'d>, String> {
+    /// ALZ archive `d`, its names (of no declared encoding) taken as `choice` asks.
+    pub fn read_alz(d: &'d [u8], choice: &Choice) -> Result<Listing<'d>, String> {
         let a = alz::parse(d).ok_or("ALZ: not an ALZ archive")?;
-        // (one archiver wrote all its names: ALZip's are CP949, but where every name is UTF-8,
-        // the archiver's was UTF-8, a name of CP949 rarely being UTF-8 too, and never all of them)
-        let utf8 = a.entries.iter().all(|e| std::str::from_utf8(&d[e.name.clone()]).is_ok());
         let mut heads = Vec::new();
         for e in &a.entries {
-            let raw = &d[e.name.clone()];
-            let name = if utf8 { raw.to_vec() } else { named(raw, 949) };
+            let name = Named::Bytes(d[e.name.clone()].to_vec());
             let extra = Extra {
                 mtime: aqr_foreign::time::from_dos((e.time >> 16) as u16, e.time as u16),
                 win_attrs: win_attrs(e.attrs),
@@ -170,7 +165,9 @@ impl<'d> Listing<'d> {
             heads.push(Head { name, kind, extra });
         }
         let mut l = Listing::new(d);
-        l.files(heads, false);
+        // (ALZip's are CP949; all UTF-8, they are of an archiver writing UTF-8, as names of CP949
+        // rarely are, and never all of them)
+        l.files(heads, false, choice, Some(Charset::Std(encoding_rs::EUC_KR)));
         if !a.ended {
             l.notes.push((
                 Vec::new(),
@@ -180,13 +177,14 @@ impl<'d> Listing<'d> {
         Ok(l)
     }
 
-    pub fn read_egg(d: &'d [u8]) -> Result<Listing<'d>, String> {
+    /// EGG archive `d`, its names of no declared encoding taken as `choice` asks.
+    pub fn read_egg(d: &'d [u8], choice: &Choice) -> Result<Listing<'d>, String> {
         let a = egg::parse(d).ok_or("EGG: not an EGG archive")?;
         let mut heads = Vec::new();
         for e in &a.entries {
             let raw = &d[e.name.clone()];
             let name = match e.locale {
-                None => raw.to_vec(),
+                None => Named::utf8(raw.to_vec()),
                 Some(cp) => named(raw, cp),
             };
             let mut extra = Extra::default();
@@ -251,7 +249,7 @@ impl<'d> Listing<'d> {
             heads.push(Head { name, kind, extra });
         }
         let mut l = Listing::new(d);
-        l.files(heads, a.solid);
+        l.files(heads, a.solid, choice, None);
         if !a.ended {
             l.notes.push((
                 Vec::new(),
@@ -265,20 +263,31 @@ impl<'d> Listing<'d> {
     }
 
     fn new(d: &'d [u8]) -> Listing<'d> {
-        Listing { d, b: Builder::default(), units: Vec::new(), empty: Vec::new(), notes: Vec::new() }
+        Listing {
+            d,
+            b: Builder::default(),
+            units: Vec::new(),
+            empty: Vec::new(),
+            notes: Vec::new(),
+            undeclared: Undeclared::default(),
+        }
     }
 
     /// The tree and units of `heads`. In a `solid` archive, files of data of no pieces have their
-    /// data in the pieces of the file of data after them, one after another.
-    fn files(&mut self, heads: Vec<Head>, solid: bool) {
+    /// data in the pieces of the file of data after them, one after another. Their names of no
+    /// declared encoding are taken as `choice` asks, of `convention` where they can be
+    /// ([`Undeclared::decide`]).
+    fn files(&mut self, heads: Vec<Head>, solid: bool, choice: &Choice, convention: Option<Charset>) {
+        self.undeclared = Undeclared::decide(choice, heads.iter().filter_map(|h| h.name.undeclared()), convention);
         let mut pending: Vec<File> = Vec::new();
         // (why the pending files cannot be decoded, where one of them cannot)
         let mut broken: Option<String> = None;
         for h in heads {
-            let shown = String::from_utf8_lossy(&h.name).into_owned();
-            let lax = build::lax(&h.name, true);
-            let names = build::split(&h.name, true);
-            let dir_named = h.name.last().is_some_and(|&c| c == b'/' || c == b'\\');
+            let name = self.undeclared.path(&h.name, true);
+            let shown = String::from_utf8_lossy(&name).into_owned();
+            let lax = build::lax(&name, false);
+            let names = build::split(&name, false);
+            let dir_named = name.last() == Some(&b'/');
             let r = match h.kind {
                 Kind::Left { why, size } => {
                     self.notes.push((lax.clone(), format!("{shown}: {why}, not extracted")));

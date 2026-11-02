@@ -428,6 +428,7 @@ dependencies = [
  "aqr-formula",
  "cbc",
  "ctr",
+ "encoding_rs",
  "hmac",
  "libc",
  "pbkdf2",
@@ -881,7 +882,6 @@ dependencies = [
  "aqr-rar",
  "aqr-zip",
  "encoding_rs",
- "windows-sys",
  "zstd",
 ]
 

@@ -16,6 +16,7 @@
 //! LZMA2 parts and EGG's pieces of none of them not at all); a tar archive is read through, as
 //! its listing is not known before, but the bodies of the members not selected are not kept.
 
+pub use aqr_foreign::charset::Choice;
 use aqr_formula::aqr::Step;
 pub use aqr_formula::aqr::{Entry, EntryNode, Extra, Time, Tree};
 pub use build::Select;
@@ -151,15 +152,21 @@ impl<'d> Opened<'d> {
     /// Archive `d` of format `f`: a ZIP, 7z, RAR, ALZ or EGG archive's listing read (its
     /// directory, its header, its headers, its records).
     pub fn open(f: Format, d: &'d [u8]) -> Result<Opened<'d>, String> {
+        Opened::open_with(f, d, &Choice::Auto)
+    }
+
+    /// As [`Opened::open`], its names of no declared encoding (ZIP's, ALZ's, EGG's and RAR
+    /// 1.5–4.x's of none) taken as `names` asks (`docs/names-design.md`).
+    pub fn open_with(f: Format, d: &'d [u8], names: &Choice) -> Result<Opened<'d>, String> {
         let inner = match f {
-            Format::Zip => Inner::Zip(zip::Listing::read(d)?),
+            Format::Zip => Inner::Zip(zip::Listing::read(d, names)?),
             Format::SevenZip => match sevenz::Listing::read(d, None)? {
                 Some(l) => Inner::SevenZip(l),
                 None => Inner::SevenZipSealed,
             },
-            Format::Rar => Inner::Rar(rar::Listing::read(d)?),
-            Format::Alz => Inner::Alz(alzip::Listing::read_alz(d)?),
-            Format::Egg => Inner::Egg(alzip::Listing::read_egg(d)?),
+            Format::Rar => Inner::Rar(rar::Listing::read(d, names)?),
+            Format::Alz => Inner::Alz(alzip::Listing::read_alz(d, names)?),
+            Format::Egg => Inner::Egg(alzip::Listing::read_egg(d, names)?),
             Format::Tar(f) => Inner::Tar(f),
             Format::Single(f) => Inner::Single(f),
         };
@@ -196,6 +203,18 @@ impl<'d> Opened<'d> {
             Inner::Rar(l) => Some(l.tree()),
             Inner::Alz(l) | Inner::Egg(l) => Some(l.tree()),
             Inner::SevenZipSealed | Inner::Tar(_) | Inner::Single(_) => None,
+        }
+    }
+
+    /// What is told of how its names of no declared encoding were taken, where it was guessed
+    /// ([`build::Undeclared::told`]).
+    pub fn names_told(&self) -> Option<String> {
+        match &self.inner {
+            Inner::Zip(l) => l.undeclared.told("ZIP"),
+            Inner::Rar(l) => l.undeclared.told("RAR"),
+            Inner::Alz(l) => l.undeclared.told("ALZ"),
+            Inner::Egg(l) => l.undeclared.told("EGG"),
+            _ => None,
         }
     }
 

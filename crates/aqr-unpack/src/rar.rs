@@ -1,6 +1,6 @@
 //! RAR archives (RAR5, and RAR 1.5–4.x of RAR 2.9's algorithm, that of RAR 3.x and 4.x) read by
 //! their headers (aqr-rar's readers): the files' names (RAR5's UTF-8; RAR 3.x's Unicode names,
-//! else of the system's code page where they are not UTF-8), kinds (directories, files, symbolic
+//! else of no declared encoding, decided for the archive: [`Undeclared`]), kinds (directories, files, symbolic
 //! links and junctions), times (modification, creation, access) and attributes (Windows', or the
 //! Unix mode); the streams decoded by aqr-rar on the pool's threads, a solid group (or a file) at
 //! a time, its files' contents given as each is decoded and their CRC-32s checked. Encrypted
@@ -14,8 +14,9 @@ use aqr_common::{crc32, pool};
 use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, Time, Tree, WIN_ATTRS_ALLOWED, name_from};
 use aqr_rar::{lz3, lz5, rar4, rar5};
 
-use crate::build::{self, Builder};
-use crate::{Done, Select, Sink, sys};
+use crate::build::{self, Builder, Named, Undeclared};
+use crate::{Done, Select, Sink};
+use aqr_foreign::charset::Choice;
 
 const S_IFMT: u32 = 0o170000;
 const S_IFLNK: u32 = 0o120000;
@@ -57,6 +58,8 @@ pub struct Listing<'d> {
     /// The contents of no data (empty files).
     empty: Vec<usize>,
     notes: Vec<build::Note>,
+    /// How the names of no declared encoding are taken.
+    pub undeclared: Undeclared,
 }
 
 /// A RAR5 header's time.
@@ -98,16 +101,16 @@ enum Kind {
 
 /// A file as read from a header.
 struct Head {
-    names: Option<Vec<u8>>,
+    names: Option<Named>,
     backslash: bool,
-    shown: String,
     data: Range<usize>,
     kind: Kind,
     extra: Extra,
 }
 
 impl<'d> Listing<'d> {
-    pub fn read(d: &'d [u8]) -> Result<Listing<'d>, String> {
+    /// Archive `d`, its names of no declared encoding taken as `choice` asks.
+    pub fn read(d: &'d [u8], choice: &Choice) -> Result<Listing<'d>, String> {
         let heads = if rar5::starts(d) {
             heads5(d)?
         } else if rar4::starts(d) {
@@ -115,7 +118,9 @@ impl<'d> Listing<'d> {
         } else {
             return Err("RAR: not a RAR archive".into());
         };
-        let mut l = Listing { d, b: Builder::default(), units: Vec::new(), empty: Vec::new(), notes: Vec::new() };
+        let undeclared = Undeclared::decide(choice, heads.iter().filter_map(|h| h.names.as_ref()?.undeclared()), None);
+        let mut l =
+            Listing { d, b: Builder::default(), units: Vec::new(), empty: Vec::new(), notes: Vec::new(), undeclared };
         l.files(heads);
         Ok(l)
     }
@@ -124,8 +129,10 @@ impl<'d> Listing<'d> {
         // (the unit a solid file continues: the last stream's, while nothing broke it)
         let mut open: Option<usize> = None;
         for h in heads {
-            let lax = h.names.as_deref().map_or_else(Vec::new, |n| build::lax(n, h.backslash));
-            let shown = h.shown;
+            let path = h.names.as_ref().map(|n| self.undeclared.path(n, h.backslash));
+            let undeclared = h.names.as_ref().is_some_and(|n| n.undeclared().is_some());
+            let lax = path.as_deref().map_or_else(Vec::new, |n| build::lax(n, false));
+            let shown = String::from_utf8_lossy(path.as_deref().unwrap_or_default()).into_owned();
             let node = match h.kind {
                 Kind::Dir => Some(EntryNode::Dir),
                 Kind::Left { why, data } => {
@@ -141,14 +148,15 @@ impl<'d> Listing<'d> {
                 Kind::Link { target, win } => {
                     let mut x = h.extra.clone();
                     x.win_link_type = win;
-                    let names = h.names.as_deref().and_then(|n| build::split(n, h.backslash));
+                    let names = path.as_deref().and_then(|n| build::split(n, false));
+                    let target = name_from(&self.undeclared.target(&target, undeclared));
                     match names {
                         None => self.notes.push((
                             lax.clone(),
                             format!("{shown}: a path reaching out of the directory, not extracted"),
                         )),
                         Some(names) => {
-                            if let Err(e) = self.b.add(&names, Some(EntryNode::Link(name_from(&target))), x) {
+                            if let Err(e) = self.b.add(&names, Some(EntryNode::Link(target)), x) {
                                 self.notes.push((lax.clone(), e));
                             }
                         }
@@ -156,7 +164,7 @@ impl<'d> Listing<'d> {
                     continue;
                 }
                 Kind::Data { how, solid, size, crc } => {
-                    let names = h.names.as_deref().and_then(|n| build::split(n, h.backslash));
+                    let names = path.as_deref().and_then(|n| build::split(n, false));
                     let c = match &names {
                         Some(n) if !n.is_empty() => Some(self.b.content()),
                         _ => {
@@ -195,7 +203,7 @@ impl<'d> Listing<'d> {
                     continue;
                 }
             };
-            let Some(names) = h.names.as_deref().and_then(|n| build::split(n, h.backslash)) else {
+            let Some(names) = path.as_deref().and_then(|n| build::split(n, false)) else {
                 self.notes.push((lax.clone(), format!("{shown}: a path reaching out of the directory, not extracted")));
                 continue;
             };
@@ -354,7 +362,6 @@ fn heads5(d: &[u8]) -> Result<Vec<Head>, String> {
     let mut out = Vec::new();
     for e in a.entries.iter().filter(|e| !e.service) {
         let name = &d[e.name.clone()];
-        let shown = String::from_utf8_lossy(name).into_owned();
         let mut x = Extra {
             mtime: e.mtime.and_then(time5),
             crtime: e.ctime.and_then(time5),
@@ -396,7 +403,13 @@ fn heads5(d: &[u8]) -> Result<Vec<Head>, String> {
                 _ => Kind::Left { why: "of an algorithm not known".into(), data: true },
             }
         };
-        out.push(Head { names: Some(name.to_vec()), backslash: false, shown, data: e.data.clone(), kind, extra: x });
+        out.push(Head {
+            names: Some(Named::utf8(name.to_vec())),
+            backslash: false,
+            data: e.data.clone(),
+            kind,
+            extra: x,
+        });
     }
     Ok(out)
 }
@@ -408,10 +421,9 @@ fn heads4(d: &[u8]) -> Result<Vec<Head>, String> {
     for e in a.entries.iter().filter(|e| !e.service) {
         let field = &d[e.name.clone()];
         let name = match e.unicode {
-            true => rar4::name(field, true),
-            false => sys::legacy_name(field),
+            true => Named::utf8(rar4::name(field, true)),
+            false => Named::Bytes(field.to_vec()),
         };
-        let shown = String::from_utf8_lossy(&name).into_owned();
         let mut x = Extra {
             mtime: e.mtime.and_then(time4),
             crtime: e.ctime.and_then(time4),
@@ -453,7 +465,7 @@ fn heads4(d: &[u8]) -> Result<Vec<Head>, String> {
                 },
             }
         };
-        out.push(Head { names: Some(name), backslash: true, shown, data: e.data.clone(), kind, extra: x });
+        out.push(Head { names: Some(name), backslash: true, data: e.data.clone(), kind, extra: x });
     }
     Ok(out)
 }
@@ -470,7 +482,7 @@ mod tests {
         for name in ["r5_solid", "r4_solid"] {
             let path = format!("{}/../../codecs/aqr-rar/tests/data/{name}.rar", env!("CARGO_MANIFEST_DIR"));
             let d = std::fs::read(path).unwrap();
-            let l = Listing::read(&d).unwrap();
+            let l = Listing::read(&d, &Choice::Auto).unwrap();
             let u = l.units.iter().max_by_key(|u| u.files.len()).unwrap();
             assert!(u.files.len() >= 2, "{name}");
             let good = Kept::default();
@@ -479,7 +491,7 @@ mod tests {
             let mut bad = d.clone();
             let last = &u.files.last().unwrap().data;
             bad[last.start + last.len() / 2] ^= 0x55;
-            let lb = Listing::read(&bad).unwrap();
+            let lb = Listing::read(&bad, &Choice::Auto).unwrap();
             assert!(lb.unpack(4, &Kept::default(), None).is_err(), "{name}");
             let k = u.files.len() - 2;
             let c = u.files[k].c.unwrap();

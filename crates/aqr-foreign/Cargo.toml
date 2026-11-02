@@ -2,7 +2,7 @@
 name = "aqr-foreign"
 version = "0.1.0"
 edition = "2024"
-description = "What archives of other formats keep alike, both ways: their encryptions (ZIP's, WinZip's AES, 7-Zip's AES) and times (FILETIME, MS-DOS's)"
+description = "What archives of other formats keep alike, both ways: their encryptions (ZIP's, WinZip's AES, 7-Zip's AES) times (FILETIME, MS-DOS's) and the character sets of names"
 publish = false
 
 [dependencies]
@@ -10,6 +10,7 @@ aes = "0.8"
 aqr-formula = { path = "../aqr-formula" }
 cbc = "0.1"
 ctr = "0.9"
+encoding_rs = "0.8"
 hmac = "0.12"
 pbkdf2 = "0.12"
 sha1 = "0.10"
@@ -19,4 +20,4 @@ sha2 = "0.10"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Time"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_System_Time"] }

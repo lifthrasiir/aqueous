@@ -1,6 +1,6 @@
 //! ZIP archives read by their central directory (found from the end, past data before the
 //! archive): the entries' names (UTF-8 where flagged or given by Info-ZIP's Unicode path field,
-//! else of the system's code page where they are not UTF-8), kinds (directories, files, Unix's
+//! else of no declared encoding, decided for the archive: [`Undeclared`]), kinds (directories, files, Unix's
 //! symbolic links), times (NTFS's field, else Info-ZIP's extended timestamp, else the MS-DOS
 //! time as local time), Unix modes and owners, and Windows' attributes; the contents decoded
 //! by entry on the pool's threads (stored, DEFLATE, bzip2, LZMA, Zstandard, xz), their CRC-32s
@@ -15,8 +15,9 @@ use aqr_common::{crc32, pool};
 use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, Tree, WIN_ATTRS_ALLOWED, name_from};
 use aqr_zip::zip::{self as z, u16_at, u32_at, u64_at};
 
-use crate::build::{self, Builder};
+use crate::build::{self, Builder, Named, Undeclared};
 use crate::{Done, Filter, Select, Sink, codec, stream, sys};
+use aqr_foreign::charset::Choice;
 use aqr_foreign::crypt::{self, Fail, ZipCrypto};
 use aqr_foreign::time;
 
@@ -72,6 +73,8 @@ pub struct Listing<'d> {
     /// it is taken (their names, metadata and data): not in the tree without it.
     pass: Option<Vec<u8>>,
     sealed: Vec<(Vec<Vec<u8>>, Extra, Unit)>,
+    /// How the names of no declared encoding are taken.
+    pub undeclared: Undeclared,
 }
 
 /// The blocks of extra field `x`: by id, the data.
@@ -152,23 +155,39 @@ fn owner(x: &mut Extra, central: &[u8], local: &[u8]) {
     }
 }
 
-/// The name of a central header: UTF-8 where flagged, else that of Info-ZIP's Unicode path
-/// field where it is of this name, else [`sys::legacy_name`].
-fn entry_name(raw: &[u8], flags: u16, central: &[u8]) -> Vec<u8> {
+/// The path of a central header: UTF-8 where flagged, else that of Info-ZIP's Unicode path
+/// field where it is of this path, else of no declared encoding (spec, "Entry names from ZIP").
+fn entry_name(raw: &[u8], flags: u16, central: &[u8]) -> Named {
     if flags & 0x800 != 0 {
-        return raw.to_vec();
+        return Named::utf8(raw.to_vec());
     }
     for (id, f) in fields(central) {
         if id == 0x7075 && f.len() >= 5 && f[0] == 1 && u32_at(f, 1) == crc32::hash(raw) {
-            return f[5..].to_vec();
+            if let Named::Text(t) = Named::utf8(f[5..].to_vec()) {
+                return Named::Text(t);
+            }
         }
     }
-    sys::legacy_name(raw)
+    Named::Bytes(raw.to_vec())
 }
 
 impl<'d> Listing<'d> {
-    pub fn read(d: &'d [u8]) -> Result<Listing<'d>, String> {
+    /// Archive `d`, its names of no declared encoding taken as `choice` asks.
+    pub fn read(d: &'d [u8], choice: &Choice) -> Result<Listing<'d>, String> {
         let (base, cd) = z::find_end(d).ok_or("ZIP: no central directory (not a ZIP archive, or cut short)")?;
+        let mut headers = Vec::new();
+        let mut p = cd.start;
+        while p < cd.end {
+            let c = z::central_at(d, p).ok_or("ZIP: a damaged central directory")?;
+            if d[p..p + 4] != z::CENTRAL {
+                return Err("ZIP: a damaged central directory".into());
+            }
+            p = c.comment.end;
+            let f = c.fixed(d);
+            let name = entry_name(&d[c.name.clone()], u16_at(f, 4), &d[c.extra.clone()]);
+            headers.push((c, name));
+        }
+        let undeclared = Undeclared::decide(choice, headers.iter().filter_map(|h| h.1.undeclared()), None);
         let mut l = Listing {
             d,
             b: Builder::default(),
@@ -177,31 +196,25 @@ impl<'d> Listing<'d> {
             notes: Vec::new(),
             pass: None,
             sealed: Vec::new(),
+            undeclared,
         };
-        let mut p = cd.start;
-        while p < cd.end {
-            let c = z::central_at(d, p).ok_or("ZIP: a damaged central directory")?;
-            if d[p..p + 4] != z::CENTRAL {
-                return Err("ZIP: a damaged central directory".into());
-            }
-            p = c.comment.end;
-            l.entry(&c, base)?;
+        for (c, name) in &headers {
+            l.entry(c, name, base)?;
         }
         Ok(l)
     }
 
-    fn entry(&mut self, c: &z::Central, base: i64) -> Result<(), String> {
+    fn entry(&mut self, c: &z::Central, path: &Named, base: i64) -> Result<(), String> {
         let d = self.d;
         let f = c.fixed(d);
         let (host, flags, method) = ((u16_at(f, 0) >> 8) as u8, u16_at(f, 4), u16_at(f, 6));
         let external = u32_at(f, 34);
         let (offset, info) = c.info(d);
-        let raw = &d[c.name.clone()];
         let cx = &d[c.extra.clone()];
-        let name = entry_name(raw, flags, cx);
+        let name = self.undeclared.path(path, dos_host(host));
         let shown = String::from_utf8_lossy(&name).into_owned();
-        let lax = build::lax(&name, dos_host(host));
-        let Some(names) = build::split(&name, dos_host(host)) else {
+        let lax = build::lax(&name, false);
+        let Some(names) = build::split(&name, false) else {
             self.notes.push((lax.clone(), format!("{shown}: a path reaching out of the directory, not extracted")));
             return Ok(());
         };
@@ -220,9 +233,7 @@ impl<'d> Listing<'d> {
             .map(|e| start..e)
             .ok_or_else(|| format!("ZIP: {shown}: cut short"))?;
         let mode = if unix_host(host) { external >> 16 } else { 0 };
-        let dir = name.ends_with(b"/")
-            || dos_host(host) && (name.ends_with(b"\\") || external & 0x10 != 0)
-            || mode & S_IFMT == S_IFDIR;
+        let dir = name.ends_with(b"/") || dos_host(host) && external & 0x10 != 0 || mode & S_IFMT == S_IFDIR;
         let mut x = Extra { mtime: time::from_dos(u16_at(f, 10), u16_at(f, 8)), ..Extra::default() };
         times(&mut x, cx, lx);
         owner(&mut x, cx, lx);
@@ -283,7 +294,7 @@ impl<'d> Listing<'d> {
                 self.notes.push((lax.clone(), format!("{shown}: a link to nothing, not extracted")));
                 return Ok(());
             }
-            EntryNode::Link(name_from(&target))
+            EntryNode::Link(name_from(&self.undeclared.target(&target, path.undeclared().is_some())))
         } else if enc != Enc::None {
             let names = names.iter().map(|n| n.to_vec()).collect();
             self.sealed.push((names, x, unit(0)));
@@ -479,4 +490,95 @@ fn plain(body: &[u8], u: &Unit) -> Result<Vec<u8>, String> {
         m => return Err(format!("method {m} not known")),
     };
     Ok(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A ZIP archive of `entries` (names and data, stored) made on `host`, of `flags`.
+    pub(crate) fn zip_of(entries: &[(&[u8], &[u8])], host: u8, flags: u16) -> Vec<u8> {
+        let (mut out, mut cd) = (Vec::new(), Vec::new());
+        for (name, data) in entries {
+            let crc = crc32::hash(data);
+            let at = out.len() as u32;
+            let common = |v: &mut Vec<u8>| {
+                v.extend_from_slice(&20u16.to_le_bytes());
+                v.extend_from_slice(&flags.to_le_bytes());
+                v.extend_from_slice(&[0, 0, 0, 0, 0x21, 0]);
+                v.extend_from_slice(&crc.to_le_bytes());
+                v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+                v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+                v.extend_from_slice(&(name.len() as u16).to_le_bytes());
+                v.extend_from_slice(&0u16.to_le_bytes());
+            };
+            out.extend_from_slice(&z::LOCAL);
+            common(&mut out);
+            out.extend_from_slice(name);
+            out.extend_from_slice(data);
+            cd.extend_from_slice(&z::CENTRAL);
+            cd.extend_from_slice(&(((host as u16) << 8) | 20).to_le_bytes());
+            common(&mut cd);
+            cd.extend_from_slice(&[0; 6]);
+            cd.extend_from_slice(&0u32.to_le_bytes());
+            cd.extend_from_slice(&at.to_le_bytes());
+            cd.extend_from_slice(name);
+        }
+        let (start, n) = (out.len() as u32, entries.len() as u16);
+        out.extend_from_slice(&cd);
+        out.extend_from_slice(b"PK\x05\x06\0\0\0\0");
+        out.extend_from_slice(&n.to_le_bytes());
+        out.extend_from_slice(&n.to_le_bytes());
+        out.extend_from_slice(&(cd.len() as u32).to_le_bytes());
+        out.extend_from_slice(&start.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out
+    }
+
+    /// The paths of `t`'s entries, their names decoded (a name kept as bytes in `<>`), a
+    /// directory's ending with `/`.
+    pub(crate) fn paths(t: &Tree) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for e in &t.entries {
+            let (b, raw) = aqr_formula::aqr::name_bytes(&e.name);
+            let name = if raw {
+                format!("<{}>", b.iter().map(|c| format!("{c:02x}")).collect::<String>())
+            } else {
+                String::from_utf8_lossy(b).into_owned()
+            };
+            let parent = e.parent.map_or(String::new(), |p| out[p].clone());
+            let dir = if e.node == EntryNode::Dir { "/" } else { "" };
+            out.push(format!("{parent}{name}{dir}"));
+        }
+        out
+    }
+
+    #[test]
+    fn shift_jis_backslash() {
+        // (MS-DOS's names of Shift_JIS, `\` between them: 表 is 95 5C, ソ 83 5C)
+        let sjis = |s: &str| encoding_rs::SHIFT_JIS.encode(s).0.into_owned();
+        let (a, b) = (sjis("表示\\ソフト.txt"), sjis("予定表"));
+        let zip = zip_of(&[(&a, b"x"), (&b, b"y")], 0, 0);
+        let l = Listing::read(&zip, &Choice::Auto).unwrap();
+        assert_eq!(paths(l.tree()), ["表示/", "表示/ソフト.txt", "予定表"]);
+        assert_eq!(l.undeclared.d.charset, Some(aqr_foreign::charset::Charset::Std(encoding_rs::SHIFT_JIS)));
+        // kept as they are, split between Shift_JIS's characters still
+        let l = Listing::read(&zip, &Choice::Raw).unwrap();
+        assert_eq!(paths(l.tree()), ["<955c8ea6>/", "<955c8ea6>/<835c837483672e747874>", "<975c92e8955c>"]);
+    }
+
+    #[test]
+    fn declared_wrongly() {
+        // (flagged UTF-8, but of EUC-KR; and one flagged rightly beside it)
+        let euc = encoding_rs::EUC_KR.encode("사진/여름 휴가.jpg").0.into_owned();
+        let zip = zip_of(&[(&euc, b"x")], 3, 0x800);
+        let l = Listing::read(&zip, &Choice::Auto).unwrap();
+        assert_eq!(paths(l.tree()), ["사진/", "사진/여름 휴가.jpg"]);
+        let utf8 = "보고서.txt".as_bytes();
+        let mixed = zip_of(&[(&euc, b"x"), (utf8, b"y")], 0, 0);
+        let l = Listing::read(&mixed, &Choice::Auto).unwrap();
+        // (the one of UTF-8 taken as UTF-8, the set guessed of the other)
+        assert_eq!(l.undeclared.n, 2);
+        assert_eq!(paths(l.tree()), ["사진/", "사진/여름 휴가.jpg", "보고서.txt"]);
+    }
 }
