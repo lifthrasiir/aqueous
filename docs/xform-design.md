@@ -20,7 +20,7 @@ Aqueous의 세 번째 목표인 WebAssembly 기반 전처리기(RarVM의 현대�
 - `codecs/aqr-flate/`: DEFLATE 재압축기. 원래 main(문맥 모델링, zlib 에뮬레이션)과 fast(규칙 기반) 두 표현이 있었는데, 지금은 *레코드* 하나로 통합되고 프로파일(u16)로 갈린다.
   - 프로파일 0–9: 정적 코드. 빠른 쪽이며, 프로파일마다 속도 페널티 λ로 맞춘 규칙 카탈로그가 다르다. 기본은 6(λ=5)이다.
   - 프로파일 10: 적응형 산술 코딩, lookahead, chain 규칙, zlib 에뮬레이션. 작은 쪽이다.
-- `flate-zoo/`: DEFLATE 인코더 모음(서브모듈; 크레이트들은 crates.io의 것을 쓴다). aqr-flate의 학습과 시험용 표본 생성기이다.
+- flate-zoo(crates.io): DEFLATE 인코더 모음. aqr-flate의 학습과 시험용 표본 생성기이다.
 - 포맷별 재압축기. 모두 단일 스레드 100 MB/s(M4) 수준을 목표로 한다.
   - `codecs/aqr-png/`: PNG. aqr-flate를 라이브러리로 쓰며, LZ77 토큰을 픽셀 문맥으로 모델링한다. 픽셀 모델은 aqr-raw의 것이다.
   - `codecs/aqr-jpeg/`: JPEG(Lepton/brunsli 계열). 임베디드 JPEG을 깊이 3까지 재귀 처리한다.

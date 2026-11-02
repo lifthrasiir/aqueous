@@ -45,10 +45,10 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   takes both directories by glob, so a new crate needs no entry in the root `Cargo.toml`.
 - `corpus/` and `cache/` under a crate are gitignored local data (test inputs, cached results
   of slow measurements).
-- `flate-zoo/` — a submodule (a workspace of its own), for working on flate-zoo itself; the
-  crates use flate-zoo from crates.io (the root `Cargo.toml`'s `[workspace.dependencies]`, with
-  the backends that do not work with MSVC added for other targets). `third_party/` — reference checkouts,
-  gitignored. Both are excluded from the workspace.
+- flate-zoo (DEFLATE encoders for aqr-flate's training and tests) comes from crates.io: the root
+  `Cargo.toml`'s `[workspace.dependencies]`, with the backends that do not work with MSVC added
+  for other targets. `third_party/` — reference checkouts, gitignored, excluded from the
+  workspace.
 - `scripts/` — helper scripts (Python uses the `.venv` at the root).
 
 ## Development notes
@@ -200,8 +200,7 @@ optimization picked by hash.
 Other sessions often work in the same working copy at the same time.
 
 - Stage explicit paths only; never `git commit -a` or `git add .`/`-A`.
-- Never stage the `flate-zoo` submodule pointer, nor its hunk in `Cargo.lock`. For
-  `Cargo.lock`, stage only your own hunks.
+- For `Cargo.lock`, stage only your own hunks.
 
 **Commit on your own after each substantial step, one commit per coherent step. Never push.**
 

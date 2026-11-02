@@ -7,16 +7,16 @@ members = [
     "crates/aqr-api/demo/split",
     "codecs/*",
 ]
-# flate-zoo is a submodule with a workspace of its own; the benches are standalone, with the
-# checkouts of third_party/ (some of them workspaces of their own).
-exclude = ["flate-zoo", "third_party", "codecs/aqr-flate/bench", "codecs/aqr-png/bench"]
+# The benches are standalone, with the checkouts of third_party/ (some of them workspaces of their
+# own).
+exclude = ["third_party", "codecs/aqr-flate/bench", "codecs/aqr-png/bench"]
 
 [workspace.dependencies]
-# DEFLATE encoders for aqr-flate's training and the tests of aqr-flate, aqr-png and aqr-pdf, from
-# crates.io (the submodule is not needed to build). The backends here work with MSVC as well;
-# the crates add the others for `cfg(not(target_env = "msvc"))`: zlib-ng, zlib-chromium, libslz,
-# cryptopp, go, gzip, infozip and ect do not build, and zlib-cloudflare builds but takes zlib's
-# symbols (or zlib its), the other one then refusing every stream.
+# DEFLATE encoders for aqr-flate's training and the tests of aqr-flate, aqr-png and aqr-pdf. The
+# backends here work with MSVC as well; the crates add the others for
+# `cfg(not(target_env = "msvc"))`: zlib-ng, zlib-chromium, libslz, cryptopp, go, gzip, infozip and
+# ect do not build, and zlib-cloudflare builds but takes zlib's symbols (or zlib its), the other
+# one then refusing every stream.
 flate-zoo = { version = "1.0.0", default-features = false, features = [
     "zlib", "libdeflate", "zopfli", "miniz", "stb", "lodepng", "sdefl", "uzlib",
     "7zip", "advancecomp-7z", "apple", "rust", "js", "isa-l",

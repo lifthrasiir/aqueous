@@ -1,5 +1,4 @@
-Aqueous (everything in this repository except the flate-zoo submodule, which has its own
-LICENSE.txt, and the icon, see below) is dedicated to the public domain. Where that is not possible, it is licensed
+Aqueous (everything in this repository except the icon, see below) is dedicated to the public domain. Where that is not possible, it is licensed
 under the MIT No Attribution license below. SPDX: MIT-0
 
 See CREDITS.md for the projects its ideas, data and reproduced behaviour come from.
