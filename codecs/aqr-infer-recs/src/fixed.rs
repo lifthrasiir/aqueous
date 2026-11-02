@@ -229,7 +229,7 @@ fn gcd(a: usize, b: usize) -> usize {
 /// Big windows (a few, k up to MAX_K) find big tables; small windows over the whole file (k
 /// up to FINE_K) find small ones, each grown only within FINE_SPAN, and skipped where a region
 /// of the same k already holds them. The same table found from several windows is one.
-pub fn find(data: &[u8]) -> Vec<(usize, usize, usize)> {
+pub fn find(data: &[u8], threads: usize) -> Vec<(usize, usize, usize)> {
     struct Found {
         gain: f64,
         s: usize,
@@ -239,31 +239,56 @@ pub fn find(data: &[u8]) -> Vec<(usize, usize, usize)> {
         wlen: usize,
     }
     let n = data.len();
-    let mut found: Vec<Found> = Vec::new();
-    let mut counts = Vec::new();
-    let mut scan = |wo: usize, wlen: usize, max_k: usize, span: Option<usize>, found: &mut Vec<Found>| {
-        let (k, gain, h0) = scan_window(&data[wo..wo + wlen], max_k, &mut counts);
-        if found.iter().any(|f| f.s <= wo && wo + wlen <= f.e && f.k == k) {
-            return;
-        }
-        if k == 1 || gain < 0.05 || h0 > 7.8 {
-            return;
-        }
-        let (s, e, gain) = grow_region(data, k, wo, wlen, span);
-        if (e - s) / k >= MIN_RECORDS {
-            found.push(Found { gain, s, e, k, wo, wlen });
-        }
-    };
     let wlen = WINDOW.min(n);
     if wlen == 0 {
         return Vec::new();
     }
-    for wo in linspace(n - wlen, (n / WINDOW_EVERY).clamp(1, MAX_WINDOWS)) {
-        scan(wo, wlen, MAX_K, Some(SPAN), &mut found);
-    }
+    // the windows: coarse, then fine
+    let mut windows: Vec<(usize, usize, usize, Option<usize>)> =
+        linspace(n - wlen, (n / WINDOW_EVERY).clamp(1, MAX_WINDOWS))
+            .into_iter()
+            .map(|wo| (wo, wlen, MAX_K, Some(SPAN)))
+            .collect();
     if n >= 2 * FINE_WINDOW {
-        for wo in linspace(n - FINE_WINDOW, MAX_FINE_WINDOWS.min(n / FINE_WINDOW)) {
-            scan(wo, FINE_WINDOW, FINE_K, Some(FINE_SPAN), &mut found);
+        windows.extend(
+            linspace(n - FINE_WINDOW, MAX_FINE_WINDOWS.min(n / FINE_WINDOW))
+                .into_iter()
+                .map(|wo| (wo, FINE_WINDOW, FINE_K, Some(FINE_SPAN))),
+        );
+    }
+    // The windows scanned at once, on `threads`; then their regions grown, in order, but where a
+    // region found from a window before covers it (of the same k): a batch of as many windows
+    // as threads at a time, each window's region grown unless one found before the batch covers
+    // it, then taken in order (one covered by another of the batch grown for nothing).
+    let scanned = aqr_common::pool::par_map(windows.len(), threads, |i| {
+        let (wo, wlen, max_k, _) = windows[i];
+        let (k, gain, h0) = scan_window(&data[wo..wo + wlen], max_k, &mut Vec::new());
+        (k != 1 && gain >= 0.05 && h0 <= 7.8).then_some(k)
+    });
+    let covered = |found: &[Found], wo: usize, wlen: usize, k: usize| {
+        found.iter().any(|f| f.s <= wo && wo + wlen <= f.e && f.k == k)
+    };
+    let mut found: Vec<Found> = Vec::new();
+    let todo: Vec<usize> = (0..windows.len()).filter(|&i| scanned[i].is_some()).collect();
+    for batch in todo.chunks(threads.max(1)) {
+        let batch: Vec<usize> = batch
+            .iter()
+            .copied()
+            .filter(|&i| !covered(&found, windows[i].0, windows[i].1, scanned[i].unwrap()))
+            .collect();
+        let grown = aqr_common::pool::par_map(batch.len(), threads, |j| {
+            let (wo, wlen, _, span) = windows[batch[j]];
+            grow_region(data, scanned[batch[j]].unwrap(), wo, wlen, span)
+        });
+        for (&i, (s, e, gain)) in batch.iter().zip(grown) {
+            let (wo, wlen, ..) = windows[i];
+            let k = scanned[i].unwrap();
+            if covered(&found, wo, wlen, k) {
+                continue;
+            }
+            if (e - s) / k >= MIN_RECORDS {
+                found.push(Found { gain, s, e, k, wo, wlen });
+            }
         }
     }
     found.sort_unstable_by(|a, b| {
@@ -280,12 +305,17 @@ pub fn find(data: &[u8]) -> Vec<(usize, usize, usize)> {
     }
     let mut regions = Vec::new();
     let bg = kt::order0_log2(data);
-    for f in seeds.iter().take(MAX_REGIONS) {
+    let seeds = &seeds[..seeds.len().min(MAX_REGIONS)];
+    let spans = aqr_common::pool::par_map(seeds.len(), threads, |i| {
+        let f = seeds[i];
         let s = if f.k <= FINE_K { phase(f.s, f.k) } else { f.s };
         let mut spans = vec![(s, f.e)];
         if f.k <= FINE_K {
             spans.push(grow_fields(data, &bg, f.k, s, (f.wo, f.wo + f.wlen), FINE_SPAN));
         }
+        spans
+    });
+    for (f, spans) in seeds.iter().zip(spans) {
         for (s, e) in spans {
             if e > s && (e - s) / f.k >= MIN_RECORDS {
                 regions.push((s, f.k, (e - s) / f.k));

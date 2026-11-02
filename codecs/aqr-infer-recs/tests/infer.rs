@@ -73,7 +73,7 @@ fn records() {
     }
     data.extend(b"END!");
     data.extend([0; 64]);
-    let choices = infer(&data);
+    let choices = infer(&data, 4);
     check(&data, &choices);
     let r = &choices.iter().max_by_key(|c| c.region.end - c.region.start).unwrap().region;
     assert_eq!((r.start, r.count, &r.shape), (316, n, &Shape::Fixed { k: 20 }), "{} {}", r.label(), r.describe());
@@ -109,7 +109,7 @@ fn packets() {
         }
         data.extend(&p[..len]);
     }
-    let choices = choose(&data, candidates(&data, true)).0;
+    let choices = choose(&data, candidates(&data, true, 4), 4).0;
     check(&data, &choices);
     let c = choices.iter().max_by_key(|c| c.region.end - c.region.start).unwrap();
     let Shape::Entries { rule, head, .. } = &c.region.shape else { panic!("{}", c.region.label()) };
@@ -144,7 +144,7 @@ fn catalogue() {
             data.extend(pm(&mut rng, std::f64::consts::PI / 648_000_000.0).to_le_bytes());
         }
     }
-    let choices = infer(&data);
+    let choices = infer(&data, 4);
     check(&data, &choices);
     let r = &choices.iter().max_by_key(|c| c.region.end - c.region.start).unwrap().region;
     assert_eq!((r.start, r.count), (28, n as usize), "{} {}", r.label(), r.describe());

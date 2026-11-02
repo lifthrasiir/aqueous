@@ -56,7 +56,7 @@ const MAX_KNOWN: usize = 1 << 16;
 
 /// The formula of `d` with the regions of records inferred in it, where the quick estimate says
 /// they may save [`LEAST`] at least and some are taken; None otherwise. On one thread.
-pub fn encode(d: &[u8], _threads: usize) -> Option<Formula> {
+pub fn encode(d: &[u8], threads: usize) -> Option<Formula> {
     static KNOWN: Mutex<Option<Known>> = Mutex::new(None);
     if d.len() < MIN_LEN {
         return None;
@@ -66,7 +66,7 @@ pub fn encode(d: &[u8], _threads: usize) -> Option<Formula> {
     let choices = match known {
         Some(c) => c,
         None => {
-            let c = std::panic::catch_unwind(|| crate::infer_if(d, LEAST)).ok().flatten();
+            let c = std::panic::catch_unwind(|| crate::infer_if(d, LEAST, threads)).ok().flatten();
             let c = c.filter(|c| !c.is_empty()).map(Arc::new);
             let mut k = KNOWN.lock().unwrap();
             let k = k.get_or_insert_with(HashMap::new);

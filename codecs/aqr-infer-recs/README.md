@@ -41,7 +41,10 @@ code, and [`formula`](src/formula.rs) makes the formula of a file. aqr-compress 
 data in which a scan finds no file, where the quick estimate tells 5% at least (below).
 
 The inference takes 0.01 to 0.5 s a file (on one thread), mostly a constant: the window scan
-and the growth of the regions found (`fixed`), the fields, and the choice's zstd.
+and the growth of the regions found (`fixed`), the fields, and the choice's zstd. Each step runs
+on the threads it is given (the windows scanned and grown a batch at a time, the regions' fields
+and the candidates' sizes at once), with the same choices: on the 42.6 MB of an APK's library
+data, 0.71 s on one thread, 0.29 s on ten.
 
 ## Giving up early
 
@@ -99,5 +102,5 @@ bits (the catalogue's converter used its own constants), q's deltas most of the 
 
 ```sh
 cargo build -r -p aqr-infer-recs --examples
-target/release/examples/aqr-infer-recs-bench [-j THREADS] [-v] [-t] FILE...  # -t: time of each step
+target/release/examples/aqr-infer-recs-bench [-j THREADS] [-p INNER] [-v] [-t] FILE...  # -t: time of each step, -p: each file on INNER threads (timed by the clock)
 ```

@@ -1,17 +1,26 @@
-//! usage: aqr-infer-recs-bench [-j THREADS] [-v] [-t] [-c] FILE...
+//! usage: aqr-infer-recs-bench [-j THREADS] [-p INNER] [-v] [-t] [-c] FILE...
 //!
 //! For each file: zstd -3 of it, and of it with the regions inferred in their forms (each
 //! checked to restore), and the CPU time of the inference (of its thread: the files run on
 //! THREADS threads, all the cores by default). As `scripts/rec_bench.py`, for comparison.
 //! `-v` prints the candidates, `-t` the CPU time of each step of the inference, `-c` looks
-//! for chains of entries too (as [`aqr_infer_recs::infer`] does not). Last, what
+//! for chains of entries too (as [`aqr_infer_recs::infer`] does not); `-p` infers each file
+//! on INNER threads of the pool (as aqr does), timed by the clock rather than the thread's CPU.
+//! Last, what
 //! giving up early would have given ([`aqr_infer_recs::infer_if`]): for thresholds on the
 //! quick estimate, the files' sizes and the time with the files below them left as they are.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Threads of the pool each file is inferred on: with more than one, times are the clock's.
+static INNER: AtomicUsize = AtomicUsize::new(1);
+
 fn thread_cpu() -> f64 {
+    if INNER.load(Ordering::Relaxed) > 1 {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        return START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64();
+    }
     let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
     t.tv_sec as f64 + t.tv_nsec as f64 * 1e-9
@@ -47,14 +56,15 @@ fn bench(path: &str, chains: bool) -> Row {
     let mut at = t;
     let chains = if chains { aqr_infer_recs::chain::chains(&data) } else { Vec::new() };
     lap(0, &mut at);
-    let tables = aqr_infer_recs::fixed::find(&data);
+    let inner = INNER.load(Ordering::Relaxed);
+    let tables = aqr_infer_recs::fixed::find(&data, inner);
     lap(1, &mut at);
     let mut cands: Vec<aqr_infer_recs::Region> =
         chains.into_iter().map(|(p, r)| aqr_infer_recs::Region::entries(&data, p, r, None)).collect();
     lap(2, &mut at);
-    cands.extend(aqr_infer_recs::tables(&data, tables));
+    cands.extend(aqr_infer_recs::tables(&data, tables, inner));
     lap(3, &mut at);
-    let (choices, lines) = aqr_infer_recs::choose(&data, cands);
+    let (choices, lines) = aqr_infer_recs::choose(&data, cands, inner);
     lap(4, &mut at);
     let cpu = thread_cpu() - t;
     for c in &choices {
@@ -78,6 +88,12 @@ fn main() {
         match a.as_str() {
             "-j" => {
                 threads = args[1].parse().unwrap();
+                args.drain(..2);
+            }
+            "-p" => {
+                let n: usize = args[1].parse().unwrap();
+                INNER.store(n, Ordering::Relaxed);
+                aqr_common::pool::init(n);
                 args.drain(..2);
             }
             "-v" => {

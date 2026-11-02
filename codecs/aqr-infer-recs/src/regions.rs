@@ -233,18 +233,19 @@ pub struct Choice {
 /// The candidate regions of a file: tables of fixed-size records, and with `chains` chains of
 /// entries before them. [`infer`] looks for tables alone: on the data of the 10 GB corpus that
 /// the quick estimate lets through, chains saved 0.04% more for a third of the time.
-pub fn candidates(data: &[u8], chains: bool) -> Vec<Region> {
+pub fn candidates(data: &[u8], chains: bool, threads: usize) -> Vec<Region> {
     let mut out: Vec<Region> = match chains {
         true => chain::chains(data).into_iter().map(|(p, r)| Region::entries(data, p, r, None)).collect(),
         false => Vec::new(),
     };
-    out.extend(tables(data, fixed::find(data)));
+    out.extend(tables(data, fixed::find(data, threads), threads));
     out
 }
 
 /// The regions of the tables `found` ([`fixed::find`]), and of those of a k found apart.
-pub fn tables(data: &[u8], found: Vec<(usize, usize, usize)>) -> Vec<Region> {
-    let mut tables: Vec<Region> = found.into_iter().map(|(s, k, n)| Region::fixed(data, s, k, n)).collect();
+pub fn tables(data: &[u8], found: Vec<(usize, usize, usize)>, threads: usize) -> Vec<Region> {
+    let mut tables: Vec<Region> =
+        aqr_common::pool::par_map(found.len(), threads, |i| Region::fixed(data, found[i].0, found[i].1, found[i].2));
     let mut out = Vec::new();
     // tables of a k in the same phase found apart (grown from windows only so far), as one
     // where they cover most of it: it is judged on its first records alone
@@ -303,11 +304,12 @@ fn local_size(data: &[u8], taken: &[(usize, usize, &[u8])], s: usize, e: usize) 
 /// region of a little gain must not shut out the tables it overlaps). Those, from the best,
 /// and then the rest, from the best, are taken where they still make it smaller among those
 /// taken before.
-pub fn choose(data: &[u8], cands: Vec<Region>) -> (Vec<Choice>, Vec<String>) {
+pub fn choose(data: &[u8], cands: Vec<Region>, threads: usize) -> (Vec<Choice>, Vec<String>) {
     // a region is judged on its first JUDGE bytes, its gains scaled to its size
     let judged: Vec<Region> = cands.iter().map(|c| c.prefix(JUDGE)).collect();
-    let forms: Vec<[Vec<u8>; 2]> =
-        judged.iter().map(|c| [c.render(data, Form::Bytes), c.render(data, Form::Fields)]).collect();
+    let forms: Vec<[Vec<u8>; 2]> = aqr_common::pool::par_map(judged.len(), threads, |i| {
+        [judged[i].render(data, Form::Bytes), judged[i].render(data, Form::Fields)]
+    });
     let gains = |i: usize, taken: &[(usize, usize, &[u8])]| -> [i64; 2] {
         let c = &judged[i];
         let scale = (cands[i].end - cands[i].start) as f64 / (c.end - c.start) as f64;
@@ -318,7 +320,7 @@ pub fn choose(data: &[u8], cands: Vec<Region>) -> (Vec<Choice>, Vec<String>) {
             ((before - local_size(data, &t, c.start, c.end) as i64) as f64 * scale) as i64
         })
     };
-    let alone: Vec<i64> = (0..cands.len()).map(|i| *gains(i, &[]).iter().max().unwrap()).collect();
+    let alone: Vec<i64> = aqr_common::pool::par_map(cands.len(), threads, |i| *gains(i, &[]).iter().max().unwrap());
     let mut byend: Vec<usize> = (0..cands.len()).filter(|&i| alone[i] > 0).collect();
     byend.sort_unstable_by_key(|&i| (cands[i].end, i));
     let ends: Vec<usize> = byend.iter().map(|&i| cands[i].end).collect();
@@ -375,14 +377,14 @@ pub fn choose(data: &[u8], cands: Vec<Region>) -> (Vec<Choice>, Vec<String>) {
 }
 
 /// The regions to take in data, sorted.
-pub fn infer(data: &[u8]) -> Vec<Choice> {
-    choose(data, candidates(data, false)).0
+pub fn infer(data: &[u8], threads: usize) -> Vec<Choice> {
+    choose(data, candidates(data, false, threads), threads).0
 }
 
 /// The regions to take in data, if a quick estimate ([`probe::estimate`]) says they may save
 /// at least `least` of its zstd size: None (in tens of ms) where it does not.
-pub fn infer_if(data: &[u8], least: f64) -> Option<Vec<Choice>> {
-    (probe::estimate(data).saves >= least).then(|| infer(data))
+pub fn infer_if(data: &[u8], least: f64, threads: usize) -> Option<Vec<Choice>> {
+    (probe::estimate(data).saves >= least).then(|| infer(data, threads))
 }
 
 /// The file with the regions taken in their forms.
