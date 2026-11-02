@@ -357,9 +357,8 @@ fn parse() -> Result<Args, String> {
             a.inputs.push(arg.into());
             continue;
         }
-        let mut value = |name: &str| -> Result<String, String> {
-            argv.next().map(|v| v.to_string_lossy().into_owned()).ok_or(format!("{name} takes a value"))
-        };
+        // (as given: a path need not be Unicode; [`text`] for the others)
+        let mut value = |name: &str| argv.next().ok_or(format!("{name} takes a value"));
         match &*s {
             "--" => only_inputs = true,
             "-h" | "--help" => {
@@ -382,10 +381,10 @@ fn parse() -> Result<Args, String> {
             "-p" | "--preserve" => a.preserve = true,
             "-q" | "--quiet" => a.quiet = true,
             "-v" | "--verbose" => a.verbose = true,
-            "-T" => a.opt.threads = value("-T")?.parse().map_err(|_| "-T takes a number")?,
-            "-l" => a.level = Some(value("-l")?),
+            "-T" => a.opt.threads = text(value("-T")?).parse().map_err(|_| "-T takes a number")?,
+            "-l" => a.level = Some(text(value("-l")?)),
             "--format" => {
-                format = Some(match &*value("--format")? {
+                format = Some(match &*text(value("--format")?) {
                     "aqr" => None,
                     f => match aqr_pack::Format::by_format_name(f) {
                         Some(f) => Some(f),
@@ -396,13 +395,13 @@ fn parse() -> Result<Args, String> {
                     },
                 })
             }
-            "--depth" => a.opt.depth = value("--depth")?.parse().map_err(|_| "--depth takes a number")?,
+            "--depth" => a.opt.depth = text(value("--depth")?).parse().map_err(|_| "--depth takes a number")?,
             "--batch" => {
-                let mib: usize = value("--batch")?.parse().map_err(|_| "--batch takes a number of MiB")?;
+                let mib: usize = text(value("--batch")?).parse().map_err(|_| "--batch takes a number of MiB")?;
                 a.opt.batch = mib.max(1) << 20;
             }
-            "-B" => a.opt.batch = size_of(&value("-B")?).ok_or("-B takes a size (64M, 1G, ...)")?.max(1),
-            "-b" => a.opt.block = size_of(&value("-b")?).ok_or("-b takes a size (64K, 1M, ...)")?.max(1),
+            "-B" => a.opt.batch = size_of(&text(value("-B")?)).ok_or("-B takes a size (64M, 1G, ...)")?.max(1),
+            "-b" => a.opt.block = size_of(&text(value("-b")?)).ok_or("-b takes a size (64K, 1M, ...)")?.max(1),
             "-D" => a.opt.dictionaries = true,
             "--no-check" => a.opt.verify = false,
             "--stats" => stats = true,
@@ -411,7 +410,9 @@ fn parse() -> Result<Args, String> {
             "--each" => a.each = true,
             "--rename" => renames.push((a.inputs.len(), value("--rename")?.into())),
             s if s.starts_with("--stats=") => {
-                let to = PathBuf::from(&s["--stats=".len()..]);
+                let to = &arg.as_encoded_bytes()["--stats=".len()..];
+                // SAFETY: split after ASCII, of an `OsStr`'s bytes
+                let to = PathBuf::from(unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(to) });
                 if !stats::takes(&to) {
                     return Err("--stats= takes a file named .json or .html".into());
                 }
@@ -493,6 +494,11 @@ fn parse() -> Result<Args, String> {
         return Err("-o with several archives to decompress".into());
     }
     Ok(a)
+}
+
+/// An option's value as text (any of it not Unicode replaced), where it is not a path.
+fn text(v: std::ffi::OsString) -> String {
+    v.to_string_lossy().into_owned()
 }
 
 /// The paths of an archive given, `paths`, with `renames` (each by the number of inputs before
