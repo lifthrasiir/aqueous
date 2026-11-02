@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use aqr_pack::zip::{Options, write};
-use aqr_pack::{Bytes, Contents, Entry, EntryNode, Extra, Progress, Time, Tree};
+use aqr_pack::zip::write;
+use aqr_pack::{Bytes, Contents, Entry, EntryNode, Extra, Options, Progress, Time, Tree};
 use aqr_unpack::{Format, Opened, Sink};
 
 struct Files(Vec<Vec<u8>>);
@@ -91,7 +91,7 @@ fn round_trip() {
     };
     let steps = Mutex::new(Vec::new());
     let mut out = Vec::new();
-    let o = Options { level: 6, threads: 2, batch: 4000 };
+    let o = Options { level: Some(6), threads: 2, batch: 4000, passphrase: None };
     let w = write(&tree, &files, &o, &mut out, &|p| steps.lock().unwrap().push(p)).unwrap();
     assert_eq!(w.len, out.len() as u64);
     assert_eq!(w.read, (2 * text.len() + noise.len() + 4 + 8) as u64);
@@ -143,4 +143,53 @@ fn read_by_python() {
     assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
     let lines = String::from_utf8(r.stdout).unwrap().replace("\r\n", "\n");
     assert_eq!(lines, "a/ 0o0 0 0\na/ü.txt 0o100640 600 8\nb 0o100640 10 0\n");
+}
+
+/// Encrypted by WinZip's AES-256: read back by the passphrase alone (and by 7-Zip, where it is
+/// at hand); directories and links are not encrypted.
+#[test]
+fn aes() {
+    let text: Vec<u8> = (0..3000).flat_map(|i| format!("line {i}\n").into_bytes()).collect();
+    let files = Files(vec![text.clone(), b"tiny".to_vec(), Vec::new()]);
+    let x = Extra { mtime: Some(Time { secs: 1_600_000_000, nanos: 0 }), mode: Some(0o644), ..Extra::default() };
+    let tree = Tree {
+        root: Extra::default(),
+        entries: vec![
+            entry(None, "d", EntryNode::Dir, Extra::default()),
+            entry(Some(0), "text", EntryNode::File(0), x.clone()),
+            entry(None, "tiny", EntryNode::File(1), x.clone()),
+            entry(None, "empty", EntryNode::File(2), x.clone()),
+            entry(None, "link", EntryNode::Link(b"tiny".to_vec()), Extra::default()),
+        ],
+    };
+    let o = Options { threads: 2, passphrase: Some("비밀 pass".as_bytes().to_vec()), ..Options::default() };
+    let mut out = Vec::new();
+    write(&tree, &files, &o, &mut out, &|_| {}).unwrap();
+    // (deflated, then encrypted: no text in the clear)
+    assert!(out.len() < text.len() / 2);
+    assert!(!out.windows(8).any(|w| w == b"line 100"));
+
+    let mut opened = Opened::open(Format::Zip, &out).unwrap();
+    assert!(opened.encrypted());
+    assert!(!opened.unlock(b"wrong").unwrap());
+    assert!(opened.unlock("비밀 pass".as_bytes()).unwrap());
+    let kept = Kept::default();
+    let done = opened.unpack(2, &kept).unwrap();
+    let contents: Vec<Vec<u8>> = kept.0.into_inner().unwrap().into_values().collect();
+    let mut want = listed(&tree, &files.0);
+    let mtime = |n: &[u8]| done.tree.entries.iter().find(|e| e.name == n).unwrap().extra.mtime;
+    want.get_mut("d").unwrap().1 = mtime(b"d");
+    want.get_mut("link").unwrap().1 = mtime(b"link");
+    want.get_mut("link").unwrap().2 = Some(0o777);
+    assert_eq!(listed(&done.tree, &contents), want);
+
+    let dir = std::env::temp_dir().join(format!("aqr-pack-zip-aes-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("t.zip");
+    std::fs::write(&path, &out).unwrap();
+    let r = std::process::Command::new("7zz").args(["t", "-p비밀 pass"]).arg(&path).output();
+    std::fs::remove_dir_all(&dir).unwrap();
+    let Ok(r) = r else { return eprintln!("no 7-Zip: not checked") };
+    let said = String::from_utf8_lossy(&r.stdout);
+    assert!(r.status.success() && said.contains("Everything is Ok"), "{said}{}", String::from_utf8_lossy(&r.stderr));
 }

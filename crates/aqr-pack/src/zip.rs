@@ -11,6 +11,9 @@
 //!   fields. The Unix mode, where it is known, in the external attributes (made by Unix);
 //!   Windows' attributes (read-only, hidden, system, archive) in their low byte.
 //! - Zip64 where a size, an offset or the number of entries needs it.
+//! - With a passphrase, files (not directories nor links) are encrypted by WinZip's AES-256,
+//!   AE-2 (no CRC-32 told: the authentication code checks the data), each with a salt of its
+//!   own.
 //! - Left out, told: FIFOs and devices, extended attributes and forks.
 
 use std::io::{self, Write};
@@ -19,22 +22,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use aqr_common::{crc32, pool};
 use aqr_flate::zlib;
 
-use crate::{Bytes, Contents, EntryNode, Extra, Progress, Tree, Written, path_of, time};
-
-#[derive(Debug, Clone)]
-pub struct Options {
-    /// zlib's level: 0 stores every file, 1 to 9 deflate (6 is zlib's and Info-ZIP's default).
-    pub level: u8,
-    pub threads: usize,
-    /// About the most bytes of files read and deflated at once (one larger alone).
-    pub batch: u64,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Options { level: 6, threads: 1, batch: 512 << 20 }
-    }
-}
+use crate::{
+    Bytes, Contents, Extra, Format, Item, Keeps, Kind, Options, Progress, Tell, Tree, Written, batches, crypt, items,
+    time,
+};
 
 const LOCAL: u32 = 0x0403_4b50;
 const CENTRAL: u32 = 0x0201_4b50;
@@ -53,6 +44,11 @@ const HOST_UNIX: u16 = 3;
 const UTF8: u16 = 0x800;
 const STORED: u16 = 0;
 const DEFLATED: u16 = 8;
+/// WinZip's AES: the method, and the version needed (5.1).
+const AES: u16 = 99;
+const NEEDS_AES: u16 = 51;
+/// Bit 0 of the flags: encrypted.
+const ENCRYPTED: u16 = 1;
 
 const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
@@ -62,26 +58,14 @@ const S_IFLNK: u32 = 0o120000;
 const DOS_DIR: u32 = 0x10;
 const DOS_KEPT: u32 = 0x27;
 
-/// An entry to write: its path, whether it is UTF-8, its index in the tree and what it is.
-struct Item {
-    path: Vec<u8>,
-    utf8: bool,
-    entry: usize,
-    kind: Kind,
-}
-
-enum Kind {
-    Dir,
-    File(usize),
-    Link(Vec<u8>),
-}
-
-/// The body of an entry: its CRC-32, method, size and the data written.
+/// The body of an entry: its CRC-32, method, size and the data written; for WinZip's AES,
+/// the method under it.
 struct Body {
     crc: u32,
     method: u16,
     size: u64,
     data: Data,
+    aes: Option<u16>,
 }
 
 enum Data {
@@ -103,42 +87,22 @@ impl Data {
 struct Written1 {
     item: usize,
     body: (u32, u16, u64, u64),
+    aes: Option<u16>,
     offset: u64,
 }
 
 /// Writes tree `t`, the contents of its files read from `c`, as a ZIP archive to `w`, telling
 /// `tell` how far it is.
-pub fn write(
-    t: &Tree,
-    c: &dyn Contents,
-    o: &Options,
-    w: &mut dyn Write,
-    tell: &(dyn Fn(Progress) + Sync),
-) -> io::Result<Written> {
+pub fn write(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tell: &Tell) -> io::Result<Written> {
     let mut out = Written::default();
-    let mut items = Vec::new();
-    let mut dropped = 0;
-    for (i, e) in t.entries.iter().enumerate() {
-        let (mut path, utf8) = path_of(t, i);
-        let kind = match &e.node {
-            EntryNode::Dir => {
-                path.push(b'/');
-                Kind::Dir
-            }
-            &EntryNode::File(k) => Kind::File(k),
-            EntryNode::Link(to) => Kind::Link(aqr_formula::aqr::name_bytes(to).0.to_vec()),
-            EntryNode::Fifo | EntryNode::Device { .. } | EntryNode::Special(_) => {
-                out.notes.push(format!("{}: a FIFO or device, not kept in ZIP", String::from_utf8_lossy(&path)));
-                continue;
-            }
-        };
-        dropped += (!e.extra.xattrs.is_empty() || !e.extra.forks.is_empty()) as usize;
-        items.push(Item { path, utf8, entry: i, kind });
+    let keeps = Keeps { special: false, xattrs: false, links: true };
+    let mut items = items(t, "ZIP", keeps, &mut out.notes);
+    for it in &mut items {
+        if let Kind::Dir = it.kind {
+            it.path.push(b'/');
+        }
     }
-    if dropped > 0 {
-        let s = if dropped == 1 { "y" } else { "ies" };
-        out.notes.push(format!("the extended attributes and forks of {dropped} entr{s}, not kept in ZIP"));
-    }
+    let level = o.level_of(Format::Zip);
     let size = |it: &Item| match it.kind {
         Kind::File(k) => c.size(k),
         _ => 0,
@@ -148,26 +112,26 @@ pub fn write(
     tell(Progress::Done { done: 0, total });
     let mut at = 0u64;
     let mut written = Vec::with_capacity(items.len());
-    let mut start = 0;
-    while start < items.len() {
-        // (a batch: up to `o.batch` bytes of files, one at least)
-        let (mut end, mut bytes) = (start, 0u64);
-        while end < items.len() && (end == start || bytes + size(&items[end]) <= o.batch) {
-            bytes += size(&items[end]);
-            end += 1;
-        }
-        let batch = &items[start..end];
+    for range in batches(&items, o.batch, size) {
+        let start = range.start;
+        let batch = &items[range];
         let bodies = pool::par_map(batch.len(), o.threads, |i| -> io::Result<Body> {
             match &batch[i].kind {
-                Kind::Dir => Ok(Body { crc: 0, method: STORED, size: 0, data: Data::Of(Vec::new()) }),
+                Kind::Dir => Ok(Body { crc: 0, method: STORED, size: 0, data: Data::Of(Vec::new()), aes: None }),
                 Kind::Link(to) => {
                     let data = Data::Of(to.clone());
-                    Ok(Body { crc: crc32::hash(to), method: STORED, size: to.len() as u64, data })
+                    Ok(Body { crc: crc32::hash(to), method: STORED, size: to.len() as u64, data, aes: None })
                 }
+                Kind::Fifo | Kind::Device { .. } => unreachable!("not kept"),
                 &Kind::File(k) => {
                     tell(Progress::Started(k));
                     let d = c.read(k)?;
-                    let b = deflate(d, o.level);
+                    let mut b = deflate(d, level);
+                    if let Some(p) = &o.passphrase {
+                        let salt = crate::random()?;
+                        let data = Data::Of(crypt::winzip_aes(p, &salt, b.data.bytes()));
+                        b = Body { crc: 0, method: AES, data, aes: Some(b.method), ..b };
+                    }
                     tell(Progress::Ended(k));
                     let n = done.fetch_add(c.size(k), Ordering::Relaxed) + c.size(k);
                     tell(Progress::Done { done: n, total });
@@ -183,10 +147,9 @@ pub fn write(
             w.write_all(&header)?;
             w.write_all(b.data.bytes())?;
             let clen = b.data.bytes().len() as u64;
-            written.push(Written1 { item: start + k, body: (b.crc, b.method, b.size, clen), offset: at });
+            written.push(Written1 { item: start + k, body: (b.crc, b.method, b.size, clen), aes: b.aes, offset: at });
             at += header.len() as u64 + clen;
         }
-        start = end;
     }
     let cd_at = at;
     for wr in &written {
@@ -230,10 +193,10 @@ fn deflate(d: Bytes, level: u8) -> Body {
     if level > 0 && !d.is_empty() {
         let p = zlib::Params { level: level.min(9), ..zlib::Params::default() };
         if let Some(v) = zlib::compress(&d, p).filter(|v| v.len() < d.len()) {
-            return Body { crc, method: DEFLATED, size, data: Data::Deflated(v) };
+            return Body { crc, method: DEFLATED, size, data: Data::Deflated(v), aes: None };
         }
     }
-    Body { crc, method: STORED, size, data: Data::Read(d) }
+    Body { crc, method: STORED, size, data: Data::Read(d), aes: None }
 }
 
 /// The host, and the external attributes, of item `it` of metadata `x`.
@@ -286,6 +249,17 @@ fn times(x: &Extra, central: bool) -> Vec<u8> {
     f
 }
 
+/// WinZip's AES field (0x9901): AE-2, AES-256, the method under it.
+fn aes_field(f: &mut Vec<u8>, method: Option<u16>) {
+    if let Some(m) = method {
+        let mut d = 2u16.to_le_bytes().to_vec();
+        d.extend(b"AE");
+        d.push(3);
+        d.extend(m.to_le_bytes());
+        field(f, 0x9901, &d);
+    }
+}
+
 fn field(f: &mut Vec<u8>, id: u16, d: &[u8]) {
     f.extend(id.to_le_bytes());
     f.extend((d.len() as u16).to_le_bytes());
@@ -294,7 +268,8 @@ fn field(f: &mut Vec<u8>, id: u16, d: &[u8]) {
 
 /// The fields of a header that the two kinds share from "version needed" to the CRC-32.
 fn common(h: &mut Vec<u8>, it: &Item, x: &Extra, needs: u16, method: u16, crc: u32) {
-    let flags = if it.utf8 && !it.path.is_ascii() { UTF8 } else { 0 };
+    let flags = if it.utf8 && !it.path.is_ascii() { UTF8 } else { 0 } | if method == AES { ENCRYPTED } else { 0 };
+    let needs = if method == AES { needs.max(NEEDS_AES) } else { needs };
     let (date, time) = x.mtime.map_or((0x21, 0), time::dos);
     for v in [needs, flags, method, time, date] {
         h.extend(v.to_le_bytes());
@@ -310,6 +285,7 @@ fn local(it: &Item, x: &Extra, b: &Body) -> Vec<u8> {
         field(&mut extra, 0x0001, &[b.size.to_le_bytes(), clen.to_le_bytes()].concat());
     }
     extra.extend(times(x, false));
+    aes_field(&mut extra, b.aes);
     let mut h = Vec::with_capacity(30 + it.path.len() + extra.len());
     h.extend(LOCAL.to_le_bytes());
     common(&mut h, it, x, if zip64 { NEEDS_ZIP64 } else { NEEDS }, b.method, b.crc);
@@ -340,6 +316,7 @@ fn central(it: &Item, x: &Extra, w: &Written1) -> Vec<u8> {
     }
     let zip64 = !z.is_empty() || size >= 0xffff_ffff || clen >= 0xffff_ffff;
     extra.extend(times(x, true));
+    aes_field(&mut extra, w.aes);
     let (host, attrs) = attributes(it, x);
     let mut h = Vec::with_capacity(46 + it.path.len() + extra.len());
     h.extend(CENTRAL.to_le_bytes());

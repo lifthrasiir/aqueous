@@ -1,35 +1,63 @@
 # aqr-pack
 
 Archives of other formats than Aqueous written from the tree that `aqr -c` gathers, the
-counterpart of aqr-unpack: `aqr -c --format zip` (or `-o NAME.zip`) makes a ZIP archive
-instead of an Aqueous one. A single input goes in by its name (a directory with what it holds
-under it, as 7-Zip and `zip -r` have it).
+counterpart of aqr-unpack: `aqr -c --format FORMAT` (or `-o NAME.EXT`) makes a ZIP, 7z, ALZ,
+EGG or tar archive (alone, or under gzip, bzip2, xz, LZMA or Zstandard), or one of those
+compressors' streams of a single file, instead of an Aqueous one. A single input goes in by its
+name (a directory with what it holds under it, as 7-Zip, `zip -r` and tar have it).
 
 ```rust
-let w = aqr_pack::zip::write(&tree, &contents, &options, &mut out, &|progress| ...)?;
-// w.read, w.len: bytes of the files and of the archive; w.notes: what ZIP did not keep
+let w = aqr_pack::write(Format::Tar(Some(Filter::Xz)), &tree, &contents, &options, &mut out, &|progress| ...)?;
+// w.read, w.len: bytes of the files and of the archive; w.notes: what the format did not keep
 ```
 
-## ZIP
+Every format spreads its work over the pool's threads, with the parts cut so that each thread
+has one even for a small input: the files of a batch side by side (ZIP, ALZ, EGG), or a
+stream's parts side by side (gzip members, bzip2 blocks, xz blocks, 7z's LZMA2 chunks,
+Zstandard jobs). Only `.lzma` (a single LZMA stream, no parts) is one thread's.
 
-- Each file is deflated as zlib 1.3.1 does it (aqr-flate's emulator, `zlib::compress`), at
-  zlib's level (`-l 0` to `9` there, 6 by default; 0 stores everything), or stored where that
-  is no smaller; so an archive made here is rebuilt whole when Aqueous recompresses it. The
-  files of a batch (`--batch`, 512 MiB) are deflated on the pool's threads, then written in
-  order.
-- Names are UTF-8 (flagged where not ASCII); directories are entries; symbolic links are
-  stored entries of their targets with Unix's `S_IFLNK`, as Info-ZIP writes them; hard links
-  are files each. Times: MS-DOS's (local time), and the extended timestamp (0x5455) and NTFS
-  (0x000a, 100 ns) fields with the modification, access and creation times. The Unix mode
-  where it is known (made by Unix), Windows' attributes in the low byte. Zip64 where needed.
-- Left out, told: FIFOs and devices, extended attributes and forks (on Windows, alternate data
-  streams, Dropbox's among them).
+| format | `-l` (default) | how | `-P` |
+|---|---|---|---|
+| ZIP | zlib's 0–9 (6) | each file as zlib 1.3.1 deflates it (aqr-flate's emulator), stored where no smaller | WinZip's AES-256 (AE-2) |
+| 7z | XZ Utils' presets 0–9 (6) | one solid folder of LZMA2 (liblzma's raw encoder) in parts of `total / threads` (1 MiB to 4 dictionaries), each from a dictionary reset; Copy at 0 | AES-256, the header too |
+| ALZ, EGG | zlib's 0–9 (6) | as ZIP's; ALZ's names in CP949 where they all can be, EGG's in UTF-8 | — |
+| tar | — | pax, kept to ustar where that holds an entry | — |
+| gzip | zlib's 0–9 (6) | members of `total / threads` (1 to 16 MiB), each as zlib 1.3.1 deflates it | — |
+| bzip2 | 1–9 (9) | aqr-bz2's libbzip2: the blocks side by side, the stream bzip2 writes bit for bit | — |
+| xz | presets 0–9 (6) | liblzma's encoder of threads, blocks of `total / threads` (1 MiB to 3 dictionaries) | — |
+| LZMA | presets 0–9 (6) | liblzma's `.lzma`, one thread | — |
+| Zstandard | 1–22 (3) | libzstd's workers, jobs of `total / threads` (512 KiB on), its checksum | — |
 
-On a Ryzen 7 9700X, `third_party` (1,399 files, 40.8 MB): 0.30 s on 16 threads, 0.92 s on
-one (Python's zlib at level 6 takes 0.67 s for the files alone), 20.04 MB; recompressed by
-`aqr -c` in a directory, 9.88 MB (the files archived themselves: 9.69 MB).
+liblzma is XZ Utils' (0BSD), built from its source by the `liblzma` crate (not the system's),
+used as a black box.
+
+## What is kept
+
+- ZIP: UTF-8 names, directory entries, symbolic links as Info-ZIP's `S_IFLNK` entries, MS-DOS,
+  extended timestamp and NTFS times, Unix modes and Windows attributes, Zip64 where needed.
+- 7z: UTF-16 names, empty streams and files, modification, access and creation times, Windows
+  attributes with 7-Zip's Unix extension (the mode), symbolic links as 7-Zip on Unix writes them.
+- ALZ and EGG: names, directories, the modification time (MS-DOS's; EGG's FILETIME) and
+  Windows attributes. Not tested against ALZip or Bandizip (only aqr-unpack).
+- tar: files, directories, symbolic and hard links (of a link group), FIFOs, devices; mode,
+  owner (ids and names), the modification time (to the nanosecond in pax), extended attributes
+  (`SCHILY.xattr.`).
+- Left out, told: what each format has no room for (FIFOs and devices but in tar, symbolic links
+  in ALZ and EGG, extended attributes but in tar, forks).
+
+## Measurements
+
+On a Ryzen 7 9700X, `third_party` (1,399 files, 40.8 MB) as ZIP: 0.30 s on 16 threads, 0.92 s
+on one, 20.04 MB; recompressed by `aqr -c` in a directory, 9.88 MB (the files archived
+themselves: 9.69 MB).
+
+On an M4 (10 cores), 7z at level 6 of `third_party` (230.2 MB): 6.2 s and 113.7 MB on 10 threads,
+48.3 s and 107.0 MB on one; `7zz a -mx6 -mmt10`: 10.7 s, 88.7 MB. ALZ and EGG of 48 files of 1
+MiB (50.3 MB): 0.22 s on 10 threads, 1.44 s on one.
 
 ## Status
 
-Left: tar and 7z, ZIP's AES encryption (`-P`), a single large file deflated in parallel
-(pigz's way), Info-ZIP's owner field (0x7875).
+Left: 7-Zip's ordering of a solid folder by extension and its BCJ filters (most of the 7z gap
+to `7zz`), a single large file deflated in parallel in ZIP (pigz's way), Info-ZIP's owner field
+(0x7875), EGG's POSIX information, encryption of ALZ and EGG (aqr-unpack does not decrypt them
+to check against), RAR (not written: a proprietary format whose compressor RARLAB keeps to itself).

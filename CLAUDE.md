@@ -25,8 +25,9 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   - `aqr-decompress` — runs the formulas' modules natively and extracts archives.
   - `aqr-unpack` — archives of other formats (ZIP, 7z, tar and its compressors) read into a
     tree for `aqr -d`, which extracts them as Aqueous archives (`crates/aqr/src/extract.rs`).
-  - `aqr-pack` — the tree `aqr -c` gathers written as an archive of another format (ZIP so
-    far: `--format zip`, or `-o NAME.zip`).
+  - `aqr-pack` — the tree `aqr -c` gathers written as an archive of another format (ZIP, 7z,
+    ALZ, EGG, tar and its compressors, single-file streams: `--format FORMAT`, or `-o NAME.EXT`),
+    each format's work spread over the pool; liblzma (XZ Utils, built from source) for xz/7z.
   - `aqr-common` — shared parts: varints, rANS, bit I/O, heap accounting, the task pool.
     `aqr-num` — numbers printed as text.
   - `aqr-version` — the binaries' version for their build scripts: the tag's (`AQR_VERSION`, set

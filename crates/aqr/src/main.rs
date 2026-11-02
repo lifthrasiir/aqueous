@@ -14,11 +14,15 @@
 //!   with `..` by its last name alone, as 7-Zip does (tar, zip and RAR would keep an absolute
 //!   path whole, but the frontends give absolute paths); `--rename TO` after an input has it at
 //!   `TO` (`/` between names) instead. Two inputs of the same path are an error.
-//! - `--format zip` (or `-o` of a name ending in `.zip`): a ZIP archive instead
-//!   ([`aqr_pack::zip`]), `INPUT.zip` without `-o`; a single input in it by its name (a
-//!   directory with what it holds under it, as 7-Zip and `zip -r` have it). `-l` is zlib's
-//!   level there (0 stored, 6 the default). What ZIP does not keep (FIFOs, devices, extended
-//!   attributes, forks) is told; `-P` is not taken yet.
+//! - `--format FORMAT` (or `-o` of a name ending in its extension): an archive of another
+//!   format instead ([`aqr_pack`]): ZIP, 7z, ALZ, EGG, tar alone or under gzip, bzip2, xz, LZMA
+//!   or Zstandard, or those compressors' stream of a single file; `INPUT.EXT` without `-o`. A
+//!   single input is in it by its name (a directory with what it holds under it, as 7-Zip, `zip
+//!   -r` and tar have it). `-l` is the format's level there ([`aqr_pack::Format::levels`]: zlib's
+//!   0-9 of ZIP, ALZ, EGG and gzip, XZ Utils' presets of xz, LZMA and 7z, bzip2's 1-9,
+//!   Zstandard's 1-22). What the format does not keep (FIFOs, devices, extended attributes,
+//!   forks) is told; `-P` encrypts ZIP (WinZip's AES-256) and 7z archives (AES-256, the header
+//!   too).
 //! - `-d` (the default as `unaqr`): an archive into its name without `.aqr`, or `-o`. An
 //!   archive of another format, by its name (ZIP, 7z, RAR, ALZ, EGG, tar alone or under gzip, bzip2,
 //!   xz, LZMA or Zstandard, and those compressors' single files: [`aqr_unpack::by_name`]), is extracted
@@ -148,8 +152,10 @@ Compressing (aqr -o ARCHIVE INPUT [--rename TO]...):
                         a relative one as given, an absolute one or one with .. by
                         its last name
       --rename TO       after an INPUT: that one archived at TO (names between /)
-      --format FORMAT   aqr (the default) or zip (also by -o NAME.zip); zip's -l
-                        is zlib's level (0-9, default 6)
+      --format FORMAT   aqr (the default), zip, 7z, alz, egg, tar, tar.gz, tar.bz2,
+                        tar.xz, tar.lzma, tar.zst, or gz, bz2, xz, lzma, zst of a
+                        single file (also by -o's name); -l is the format's level
+                        (zlib's 0-9; xz, lzma, 7z: 0-9; bz2: 1-9; zst: 1-22)
 
 Decompressing some paths (aqr -d ARCHIVE PATH [--rename TO]...):
   PATH                  a path in the archive (a directory with what is under it),
@@ -228,8 +234,8 @@ struct Args {
     ipc: bool,
     /// Compressing, into archives of this format (`--format`, or `-o`'s name).
     format: Pack,
-    /// `-l` given (ZIP's level otherwise zlib's default).
-    leveled: bool,
+    /// `-l` as given (read as the format's level: [`Args::format`]'s, or Aqueous's).
+    level: Option<String>,
     /// `-P`: compressing, the archives encrypted with a passphrase asked for; decompressing,
     /// the passphrase asked for before the archives need it ([`pass`]).
     passphrase: bool,
@@ -240,19 +246,19 @@ struct Args {
     select: Option<extract::Selection>,
 }
 
-/// The format of the archives made.
+/// The format of the archives made: Aqueous, or another of [`aqr_pack`] at its level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pack {
     Aqr,
-    Zip,
+    Other(aqr_pack::Format, Option<u8>),
 }
 
 impl Pack {
     /// The extension of its archives.
-    fn ext(self) -> &'static str {
+    fn ext(self) -> String {
         match self {
-            Pack::Aqr => ".aqr",
-            Pack::Zip => ".zip",
+            Pack::Aqr => ".aqr".into(),
+            Pack::Other(f, _) => f.ext(),
         }
     }
 }
@@ -335,7 +341,7 @@ fn parse() -> Result<Args, String> {
         stats: None,
         ipc: false,
         format: Pack::Aqr,
-        leveled: false,
+        level: None,
         passphrase: false,
         each: false,
         select: None,
@@ -377,12 +383,17 @@ fn parse() -> Result<Args, String> {
             "-q" | "--quiet" => a.quiet = true,
             "-v" | "--verbose" => a.verbose = true,
             "-T" => a.opt.threads = value("-T")?.parse().map_err(|_| "-T takes a number")?,
-            "-l" => (a.opt.level, a.leveled) = (value("-l")?.parse()?, true),
+            "-l" => a.level = Some(value("-l")?),
             "--format" => {
                 format = Some(match &*value("--format")? {
-                    "aqr" => Pack::Aqr,
-                    "zip" => Pack::Zip,
-                    f => return Err(format!("not a format to compress into (aqr or zip): {f}")),
+                    "aqr" => None,
+                    f => match aqr_pack::Format::by_format_name(f) {
+                        Some(f) => Some(f),
+                        None => {
+                            let names = aqr_pack::Format::names().collect::<Vec<_>>().join(", ");
+                            return Err(format!("not a format to compress into (aqr, {names}): {f}"));
+                        }
+                    },
                 })
             }
             "--depth" => a.opt.depth = value("--depth")?.parse().map_err(|_| "--depth takes a number")?,
@@ -408,9 +419,9 @@ fn parse() -> Result<Args, String> {
             }
             // -T8 and the like
             s if s.starts_with("-T") => a.opt.threads = s[2..].parse().map_err(|_| "-T takes a number")?,
-            s if s.starts_with("-l") => (a.opt.level, a.leveled) = (s[2..].parse()?, true),
+            s if s.starts_with("-l") => a.level = Some(s[2..].to_string()),
             // -0 to -9, and whatever level of more digits there may be (one level, not several)
-            s if s[1..].bytes().all(|b| b.is_ascii_digit()) => (a.opt.level, a.leveled) = (s[1..].parse()?, true),
+            s if s[1..].bytes().all(|b| b.is_ascii_digit()) => a.level = Some(s[1..].to_string()),
             s => return Err(format!("unknown option {s}")),
         }
     }
@@ -433,16 +444,34 @@ fn parse() -> Result<Args, String> {
         if a.each {
             return Err("--each is for decompressing".into());
         }
-        let zip_named = a.output.as_ref().and_then(|o| o.extension()).is_some_and(|e| e.eq_ignore_ascii_case("zip"));
-        a.format = format.unwrap_or(if zip_named { Pack::Zip } else { Pack::Aqr });
-        if a.format == Pack::Zip {
-            if a.passphrase {
-                return Err("-P: ZIP archives are not encrypted yet".into());
+        let named = a.output.as_ref().and_then(|o| aqr_pack::Format::by_name(&os_bytes(o.as_os_str())));
+        a.format = match format.unwrap_or(named) {
+            None => Pack::Aqr,
+            Some(f) => {
+                let (range, _) = f.levels();
+                let level = match &a.level {
+                    None => None,
+                    Some(l) => match l.parse::<u8>() {
+                        Ok(n) if range.contains(&n) => Some(n),
+                        _ => {
+                            let (lo, hi) = (range.start(), range.end());
+                            return Err(format!("not a level of {} ({lo}-{hi}): {l}", f.ext()));
+                        }
+                    },
+                };
+                if a.passphrase && !f.encrypts() {
+                    return Err(format!("-P: {} archives are not encrypted here (.zip and .7z are)", f.ext()));
+                }
+                Pack::Other(f, level)
             }
-            if let aqr::Level::Zstd(_) = a.opt.level {
-                return Err("zstd levels are not ZIP's (-l 0-9)".into());
-            }
-        }
+        };
+    }
+    if a.format == Pack::Aqr
+        && let Some(l) = &a.level
+    {
+        a.opt.level = l.parse()?;
+    }
+    if !a.decompress {
         a.renames = vec![None; a.inputs.len()];
         for (n, to) in renames {
             let Some(k) = n.checked_sub(1) else {
@@ -575,7 +604,7 @@ fn compress_all(a: &Args) -> Result<(), String> {
                 if input.as_os_str() == "-" {
                     return Err("standard input is not taken yet".into());
                 }
-                let out = with_ext(input, a.format.ext());
+                let out = with_ext(input, &a.format.ext());
                 compress_into(a, std::slice::from_ref(input), std::slice::from_ref(to), &out)?;
             }
             Ok(())
@@ -664,8 +693,8 @@ impl aqr_compress::Source for Gathered {
 
 /// Compresses `inputs` into `out`, each in the archive at the path `renames` gives it, if any.
 fn compress_into(a: &Args, inputs: &[PathBuf], renames: &[Option<PathBuf>], out: &Path) -> Result<(), String> {
-    if a.format == Pack::Zip {
-        return pack_into(a, inputs, renames, out);
+    if let Pack::Other(f, level) = a.format {
+        return pack_into(a, f, level, inputs, renames, out);
     }
     let Some(force) = output(a, out)? else { return Ok(()) };
     begin("compress", inputs, Some(out));
@@ -826,9 +855,16 @@ fn compress_into(a: &Args, inputs: &[PathBuf], renames: &[Option<PathBuf>], out:
     Ok(())
 }
 
-/// Compresses `inputs` into ZIP archive `out` ([`aqr_pack::zip`]), each at the path `renames`
-/// gives it; a single one not renamed at its name.
-fn pack_into(a: &Args, inputs: &[PathBuf], renames: &[Option<PathBuf>], out: &Path) -> Result<(), String> {
+/// Compresses `inputs` into archive `out` of format `f` at `level` ([`aqr_pack`]), each at the
+/// path `renames` gives it; a single one not renamed at its name.
+fn pack_into(
+    a: &Args,
+    f: aqr_pack::Format,
+    level: Option<u8>,
+    inputs: &[PathBuf],
+    renames: &[Option<PathBuf>],
+    out: &Path,
+) -> Result<(), String> {
     let Some(force) = output(a, out)? else { return Ok(()) };
     begin("compress", inputs, Some(out));
     let start = Instant::now();
@@ -853,17 +889,13 @@ fn pack_into(a: &Args, inputs: &[PathBuf], renames: &[Option<PathBuf>], out: &Pa
         g.skipped.iter().for_each(|s| eprintln!("skipped {s}"));
         g.warnings.iter().for_each(|w| eprintln!("{w}"));
     }
-    let level = match a.opt.level {
-        _ if !a.leveled => 6,
-        aqr::Level::Of(n) => n,
-        aqr::Level::Zstd(_) => unreachable!("refused as the arguments are read"),
-    };
-    let o = aqr_pack::zip::Options { level, threads: a.opt.threads, batch: a.opt.batch as u64 };
+    let passphrase = pass::keys().sealing();
+    let o = aqr_pack::Options { level, threads: a.opt.threads, batch: a.opt.batch as u64, passphrase };
     let view = view::View::new(&g, bars(), false);
     let w = write_whole(out, force, |file| {
         let mut w = std::io::BufWriter::with_capacity(8 << 20, file);
         let r = viewed(a, &view, |tell| {
-            aqr_pack::zip::write(&g.tree, &g, &o, &mut w, &|p| match p {
+            aqr_pack::write(f, &g.tree, &g, &o, &mut w, &|p| match p {
                 aqr_pack::Progress::Started(c) => tell(aqr_compress::Event::Started(c)),
                 aqr_pack::Progress::Ended(c) => tell(aqr_compress::Event::Ended(c)),
                 aqr_pack::Progress::Done { done, total } => {

@@ -695,12 +695,24 @@ dependencies = [
 name = "aqr-pack"
 version = "0.1.0"
 dependencies = [
+ "aes",
+ "aqr-bz2",
  "aqr-common",
  "aqr-flate",
  "aqr-formula",
  "aqr-unpack",
+ "cbc",
+ "ctr",
+ "encoding_rs",
+ "getrandom 0.4.3",
+ "hmac",
  "libc",
+ "liblzma",
+ "pbkdf2",
+ "sha1",
+ "sha2",
  "windows-sys",
+ "zstd",
 ]
 
 [[package]]
@@ -1711,6 +1723,26 @@ dependencies = [
  "hashbrown 0.16.1",
  "no_std_io2",
  "rle-decode-fast",
+]
+
+[[package]]
+name = "liblzma"
+version = "0.4.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa980ea6744074a5b5e0ac6b164aca94fc970121869b3e78ae12a2b0097dbea7"
+dependencies = [
+ "liblzma-sys",
+]
+
+[[package]]
+name = "liblzma-sys"
+version = "0.4.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c7e3581f367a78d7b7e7ae948d023310556f0cfc13156c2e4e00e25616492b9"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
 ]
 
 [[package]]
