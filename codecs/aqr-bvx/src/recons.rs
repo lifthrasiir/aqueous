@@ -12,6 +12,8 @@ use crate::bvx::{self, D_MAX, Freqs};
 use crate::plan::{self, LMD_LOW, Match, Part, Plan, Seg, Side};
 use crate::{Error, Result, corrupt};
 
+pub use aqr_common::lz::{lcp, lcp_up};
+
 /// The triples of a full LZFSE block, as the compressor cuts them.
 pub const BLOCK_LMD: u32 = 9992;
 
@@ -52,25 +54,6 @@ fn bucket(x: u32) -> usize {
 #[inline]
 fn lb(l: usize) -> usize {
     if l < 8 { l } else { (5 + (usize::BITS - l.leading_zeros()) as usize).min(11) }
-}
-
-/// The length of the common prefix of `d[a..]` and `d[b..]`, `a < b`, up to the end of `d`.
-#[inline]
-pub fn lcp(d: &[u8], a: usize, b: usize) -> usize {
-    let n = d.len() - b;
-    let mut i = 0;
-    while i + 8 <= n {
-        let x = u64::from_le_bytes(d[a + i..a + i + 8].try_into().unwrap())
-            ^ u64::from_le_bytes(d[b + i..b + i + 8].try_into().unwrap());
-        if x != 0 {
-            return i + (x.trailing_zeros() / 8) as usize;
-        }
-        i += 8;
-    }
-    while i < n && d[a + i] == d[b + i] {
-        i += 1;
-    }
-    i
 }
 
 /// The match finder: every position before the current one on a chain of the hash of its first
@@ -323,12 +306,6 @@ impl<'a> Table<'a> {
         }
         (a, b)
     }
-}
-
-/// [`lcp`] up to `cap`.
-#[inline]
-fn lcp_up(d: &[u8], a: usize, b: usize, cap: usize) -> usize {
-    if cap >= d.len() - b { lcp(d, a, b) } else { lcp(&d[..b + cap], a, b) }
 }
 
 /// The table's guesses at a position: the first and the second, and the class of their lengths.

@@ -12,6 +12,8 @@ use aqr_common::varint;
 use crate::azo::{self, History, MAX_LENGTH, Token};
 use crate::{Error, Result, corrupt};
 
+pub use aqr_common::lz::lcp;
+
 /// Candidates looked at on the chain for the longest matches.
 pub const DEPTH: usize = 32;
 
@@ -27,25 +29,6 @@ fn lb(l: usize) -> usize {
 #[inline]
 fn db(d: usize) -> usize {
     (d >= 16) as usize + (d >= 256) as usize + (d >= 4096) as usize + (d >= 65536) as usize
-}
-
-/// The length of the common prefix of `d[a..]` and `d[b..]`, `a < b`, up to the end of `d`.
-#[inline]
-pub fn lcp(d: &[u8], a: usize, b: usize) -> usize {
-    let n = d.len() - b;
-    let mut i = 0;
-    while i + 8 <= n {
-        let x = u64::from_le_bytes(d[a + i..a + i + 8].try_into().unwrap())
-            ^ u64::from_le_bytes(d[b + i..b + i + 8].try_into().unwrap());
-        if x != 0 {
-            return i + (x.trailing_zeros() / 8) as usize;
-        }
-        i += 8;
-    }
-    while i < n && d[a + i] == d[b + i] {
-        i += 1;
-    }
-    i
 }
 
 /// The keys of the match finder's chains: their first bytes, 2 as they are, the others hashed.

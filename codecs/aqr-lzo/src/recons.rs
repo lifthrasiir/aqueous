@@ -10,6 +10,8 @@ use aqr_common::arith::{ArithDecoder, ArithEncoder, Bit};
 use crate::lzo1x::{self, Form, Match, Parse, WINDOW, long_fits, short_fits, state};
 use crate::{Error, Result, corrupt};
 
+pub use aqr_common::lz::lcp;
+
 /// Candidates looked at for the longest matches, on the chain of 3 bytes.
 pub const DEPTH: usize = 32;
 /// Candidates looked at for the nearest match of a length beyond those.
@@ -40,25 +42,6 @@ fn lb(l: usize) -> usize {
 #[inline]
 fn db(d: usize) -> usize {
     (d >= 64) as usize + (d >= 1024) as usize + (d >= 8192) as usize
-}
-
-/// The length of the common prefix of `d[a..]` and `d[b..]`, `a < b`, up to the end of `d`.
-#[inline]
-pub fn lcp(d: &[u8], a: usize, b: usize) -> usize {
-    let n = d.len() - b;
-    let mut i = 0;
-    while i + 8 <= n {
-        let x = u64::from_le_bytes(d[a + i..a + i + 8].try_into().unwrap())
-            ^ u64::from_le_bytes(d[b + i..b + i + 8].try_into().unwrap());
-        if x != 0 {
-            return i + (x.trailing_zeros() / 8) as usize;
-        }
-        i += 8;
-    }
-    while i < n && d[a + i] == d[b + i] {
-        i += 1;
-    }
-    i
 }
 
 /// The match finder: the positions before the current one, on a chain of their first 2 bytes

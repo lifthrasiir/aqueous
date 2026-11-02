@@ -19,10 +19,12 @@
 //! - [`arith`]: binary arithmetic coding with adaptive bits (the records of aqr-lzma, aqr-lzo, aqr-bvx, aqr-gif).
 //! - [`out`]: output made in order, into a vector or compared with what it should be.
 //! - [`streams`]: streams of data and records one after another, and their index.
+//! - [`lz`]: what the LZ parsers share (the length of a match).
 
 pub mod adler32;
 pub mod arith;
 pub mod crc32;
+pub mod lz;
 pub mod mem;
 pub mod msb;
 pub mod out;

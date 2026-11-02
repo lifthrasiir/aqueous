@@ -26,6 +26,8 @@ use crate::lzx::{
 };
 use crate::{Error, Result, corrupt};
 
+use aqr_common::lz::lcp_up;
+
 /// Bytes of the data of a chunk.
 pub const CHUNK: usize = WINDOW;
 /// Candidates looked at for the longest match, on the chain of 3 bytes.
@@ -34,25 +36,6 @@ pub const DEPTH: usize = 32;
 pub const LIMIT: usize = 4096;
 
 const NONE: u32 = u32::MAX;
-
-/// The length of the common prefix of `d[a..]` and `d[b..]`, `a < b`, up to `cap` bytes.
-#[inline]
-fn lcp(d: &[u8], a: usize, b: usize, cap: usize) -> usize {
-    let n = cap.min(d.len() - b);
-    let mut i = 0;
-    while i + 8 <= n {
-        let x = u64::from_le_bytes(d[a + i..a + i + 8].try_into().unwrap())
-            ^ u64::from_le_bytes(d[b + i..b + i + 8].try_into().unwrap());
-        if x != 0 {
-            return i + (x.trailing_zeros() / 8) as usize;
-        }
-        i += 8;
-    }
-    while i < n && d[a + i] == d[b + i] {
-        i += 1;
-    }
-    i
-}
 
 #[inline]
 fn k2(d: &[u8], p: usize) -> usize {
@@ -151,7 +134,7 @@ impl Mf {
         }
         let (c, _) = self.chain(d, pos, 2);
         if self.near(c, pos) {
-            let n = lcp(d, c as usize, pos, cap);
+            let n = lcp_up(d, c as usize, pos, cap);
             if n >= MIN_MATCH {
                 (best, off) = (n, pos - c as usize);
             }
@@ -164,7 +147,7 @@ impl Mf {
                 }
                 let p = c as usize;
                 if d[p + best.min(cap - 1)] == d[pos + best.min(cap - 1)] {
-                    let n = lcp(d, p, pos, cap);
+                    let n = lcp_up(d, p, pos, cap);
                     if n > best {
                         (best, off) = (n, pos - p);
                     }
@@ -184,7 +167,7 @@ impl Mf {
                 return;
             }
             let p = c as usize;
-            if d[p + len - 1] == d[pos + len - 1] && lcp(d, p, pos, len) >= len && f(pos - p) {
+            if d[p + len - 1] == d[pos + len - 1] && lcp_up(d, p, pos, len) >= len && f(pos - p) {
                 return;
             }
             c = prev[p & self.mask];
@@ -825,7 +808,7 @@ impl Walker {
             *t += 1;
             let (longest, _) = mf.longest(d, pos, cap);
             let rl: [usize; 3] = std::array::from_fn(|k| {
-                if (reps[k] as usize) <= pos { lcp(d, pos - reps[k] as usize, pos, cap) } else { 0 }
+                if (reps[k] as usize) <= pos { lcp_up(d, pos - reps[k] as usize, pos, cap) } else { 0 }
             });
             let ctx = (lb(longest) * 8 + lb(rl[0])) * 4 + lb(rl[1]).min(3);
             let is_match = side.bit(&mut c.is_match[ctx], matches!(w, Some(Tok::Match { .. })), Cat::Kind);
@@ -902,7 +885,7 @@ impl Walker {
                     off
                 }
             };
-            if off == 0 || off > pos || len > cap || lcp(d, pos - off, pos, len) < len {
+            if off == 0 || off > pos || len > cap || lcp_up(d, pos - off, pos, len) < len {
                 return Err(corrupt());
             }
             toks.push(Tok::Match { len: len as u16, off: off as u32, rep });

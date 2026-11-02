@@ -3,6 +3,8 @@
 //! sees only what lies before it, as when the stream was made, and no farther back than the
 //! stream's dictionary allows (the chains are rings of that size).
 
+pub use aqr_common::lz::lcp_up;
+
 const NONE: u32 = u32::MAX;
 const HASH_BITS: u32 = 20;
 /// Positions by a hash of their next 3 bytes: a bucket's newest position, where its bytes are
@@ -99,7 +101,7 @@ impl<const K: usize> Chain<K> {
 
     /// The nearest candidate matching `n` bytes, among `limit`.
     fn nearest(&self, d: &[u8], pos: usize, n: usize, limit: usize) -> Option<usize> {
-        self.walk(d, pos).take(limit).find(|&c| d[c + n - 1] == d[pos + n - 1] && lcp(d, c, pos, n) >= n)
+        self.walk(d, pos).take(limit).find(|&c| d[c + n - 1] == d[pos + n - 1] && lcp_up(d, c, pos, n) >= n)
     }
 
     /// Goes through `depth` candidates for matches longer than `best`, up to `nice`, keeping
@@ -111,7 +113,7 @@ impl<const K: usize> Chain<K> {
             for c in self.walk(d, pos).take(depth) {
                 // A longer match must agree at `best` first.
                 if best < cap && d[c + best] == d[pos + best] {
-                    let n = lcp(d, c, pos, cap);
+                    let n = lcp_up(d, c, pos, cap);
                     if n > best {
                         best = n;
                         found.push((n as u32, c as u32));
@@ -181,25 +183,6 @@ fn k3(d: &[u8], p: usize) -> usize {
 #[inline]
 fn h3(d: &[u8], p: usize) -> usize {
     ((k3(d, p) as u32).wrapping_mul(0x9e37_79b1) >> (32 - HASH3_BITS)) as usize
-}
-
-/// The length of the common prefix of `d[a..]` and `d[b..]`, `a < b`, at most `cap`.
-#[inline]
-pub fn lcp(d: &[u8], a: usize, b: usize, cap: usize) -> usize {
-    let cap = cap.min(d.len() - b);
-    let mut n = 0;
-    while n + 8 <= cap {
-        let x = u64::from_le_bytes(d[a + n..a + n + 8].try_into().unwrap())
-            ^ u64::from_le_bytes(d[b + n..b + n + 8].try_into().unwrap());
-        if x != 0 {
-            return n + (x.trailing_zeros() / 8) as usize;
-        }
-        n += 8;
-    }
-    while n < cap && d[a + n] == d[b + n] {
-        n += 1;
-    }
-    n
 }
 
 pub struct Mf<'a> {
@@ -343,7 +326,7 @@ impl<'a> Mf<'a> {
         out.extend(self.short.found.iter().chain(&self.long.found));
         for k in [2, 3] {
             if let Some(c) = self.head(k, pos) {
-                out.push((lcp(self.d, c, pos, cap) as u32, c as u32));
+                out.push((lcp_up(self.d, c, pos, cap) as u32, c as u32));
             }
         }
         out.sort_unstable_by_key(|&(_, c)| std::cmp::Reverse(c));
@@ -362,7 +345,7 @@ impl<'a> Mf<'a> {
         if pos + 4 <= d.len()
             && let Some(c) = self.short.walk(d, pos).next()
         {
-            let n = lcp(d, c, pos, cap);
+            let n = lcp_up(d, c, pos, cap);
             if n >= 4 {
                 return n;
             }
@@ -485,7 +468,7 @@ mod tests {
         for pos in (REACH..d.len() - LONG).step_by(7) {
             mf.advance(pos);
             for n in [4, MID, LONG] {
-                let want = (pos - REACH..pos).rev().find(|&c| lcp(&d, c, pos, n) >= n);
+                let want = (pos - REACH..pos).rev().find(|&c| lcp_up(&d, c, pos, n) >= n);
                 assert_eq!(mf.nearest(pos, n, usize::MAX), want, "{pos} {n}");
             }
         }

@@ -9,7 +9,7 @@ use aqr_common::varint;
 
 use crate::arith::{ArithDecoder, ArithEncoder, Bit};
 use crate::lzma::{self, Kind, MAX_LEN, MIN_LEN, Packet, Props, StreamEncoder};
-use crate::mf::{Mf, lcp};
+use crate::mf::{Mf, lcp_up};
 
 /// Candidates looked at for the longest match at a match, on each of two chains.
 const DEPTH: usize = 16;
@@ -260,7 +260,7 @@ fn walk<S: Side>(
         let mut rl = [0usize; 4];
         for k in 0..4 {
             if (reps[k] as usize) < pos {
-                rl[k] = lcp(data, pos - reps[k] as usize - 1, pos, cap);
+                rl[k] = lcp_up(data, pos - reps[k] as usize - 1, pos, cap);
             }
         }
         let hint = mf.first(pos, cap);
@@ -382,7 +382,7 @@ fn walk<S: Side>(
             } else {
                 (pos - near? - 1) as u32
             };
-            if d as usize >= pos.min(reach) || lcp(data, pos - d as usize - 1, pos, n) < n {
+            if d as usize >= pos.min(reach) || lcp_up(data, pos - d as usize - 1, pos, n) < n {
                 return None;
             }
             reps.copy_within(0..3, 1);

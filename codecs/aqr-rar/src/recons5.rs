@@ -13,7 +13,7 @@ use aqr_common::arith::{ArithDecoder, Bit};
 
 use crate::huff;
 use crate::lz5::{self, Block, Decoder5, Encoder5, Filter, Placed, Stream, Tables, Token, bonus};
-use crate::rec::{Bits, CATS, Cat, Enc, Mf, bits, lcp};
+use crate::rec::{Bits, CATS, Cat, Enc, Mf, bits, lcp_up};
 use crate::{Error, Result, corrupt};
 
 /// The longest copy RAR writes.
@@ -410,7 +410,7 @@ fn walk(
             for i in 0..4 {
                 let d = cache[i];
                 if d != 0 && d <= pos && d <= reach {
-                    rl[i] = lcp(u, pos - d, pos, cap);
+                    rl[i] = lcp_up(u, pos - d, pos, cap);
                 }
             }
             let rbest = *rl.iter().max().unwrap();
@@ -523,7 +523,8 @@ fn walk(
                     (len, dist)
                 }
             };
-            if dist == 0 || dist > pos || dist > reach || len < 2 || len > cap || lcp(u, pos - dist, pos, len) < len {
+            if dist == 0 || dist > pos || dist > reach || len < 2 || len > cap || lcp_up(u, pos - dist, pos, len) < len
+            {
                 return Err(Error("a match that does not fit"));
             }
             // how it is written: RAR's way (the last copy again, else a repeated distance,

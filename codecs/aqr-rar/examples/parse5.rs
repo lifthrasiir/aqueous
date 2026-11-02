@@ -1,7 +1,7 @@
 //! How RAR5's parses stand to the matches the data offers: per token, what the longest pair and
 //! the repeated distances give, and what was taken. (An analysis, not a tool.)
 
-use aqr_rar::rec::{Mf, lcp};
+use aqr_rar::rec::{Mf, lcp_up};
 use aqr_rar::{lz5, rar5};
 use std::collections::BTreeMap;
 
@@ -34,7 +34,7 @@ fn main() {
                 let longest = pairs.last().map_or(0, |p| p.0);
                 let rl: Vec<usize> = cache
                     .iter()
-                    .map(|&dd| if dd != 0 && dd <= pos { lcp(u, pos - dd, pos, 4100) } else { 0 })
+                    .map(|&dd| if dd != 0 && dd <= pos { lcp_up(u, pos - dd, pos, 4100) } else { 0 })
                     .collect();
                 let rbest = *rl.iter().max().unwrap();
                 let lb = |l: usize| match l {

@@ -6,6 +6,8 @@ use aqr_common::arith::{ArithDecoder, ArithEncoder, Bit};
 
 use crate::{Result, corrupt};
 
+pub use aqr_common::lz::lcp_up;
+
 /// What the record codes, for the statistics.
 #[derive(Clone, Copy, Debug)]
 #[repr(usize)]
@@ -130,25 +132,6 @@ pub fn bits(n: usize) -> Vec<Bit> {
     vec![Bit::default(); n]
 }
 
-/// The length of the common prefix of `d[a..]` and `d[b..]`, `a < b`, at most `cap`.
-#[inline]
-pub fn lcp(d: &[u8], a: usize, b: usize, cap: usize) -> usize {
-    let n = (d.len() - b).min(cap);
-    let mut i = 0;
-    while i + 8 <= n {
-        let x = u64::from_le_bytes(d[a + i..a + i + 8].try_into().unwrap())
-            ^ u64::from_le_bytes(d[b + i..b + i + 8].try_into().unwrap());
-        if x != 0 {
-            return i + (x.trailing_zeros() / 8) as usize;
-        }
-        i += 8;
-    }
-    while i < n && d[a + i] == d[b + i] {
-        i += 1;
-    }
-    i
-}
-
 const NONE: u32 = u32::MAX;
 
 /// The match finder: the positions before the current one, on a chain for each key length of
@@ -264,7 +247,7 @@ impl<'a> Mf<'a> {
                     break;
                 }
                 if d[p + top] == d[pos + top] {
-                    let l = lcp(d, p, pos, cap);
+                    let l = lcp_up(d, p, pos, cap);
                     if l > top && ok(l, pos - p) {
                         top = l;
                         found.push((pos - p, l));

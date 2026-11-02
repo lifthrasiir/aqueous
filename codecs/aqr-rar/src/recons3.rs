@@ -14,7 +14,7 @@ use aqr_common::msb::BitWriter;
 
 use crate::huff;
 use crate::lz3::{self, Block, Decoder3, Encoder3, FilterRec, Prog, Stream, Table, Token, bonus};
-use crate::rec::{Bits, Cat, Enc, Mf, bits, lcp};
+use crate::rec::{Bits, Cat, Enc, Mf, bits, lcp_up};
 use crate::{Error, Result, corrupt};
 
 /// The longest match RAR writes.
@@ -854,7 +854,7 @@ fn walk(
                     mf.advance(pos);
                     let g = if encoding { *given.get(k).ok_or_else(corrupt)? } else { Token::Lit(0) };
                     k += 1;
-                    let run = if pos > 0 { lcp(u, pos - 1, pos, 259.min(re - pos)) } else { 0 };
+                    let run = if pos > 0 { lcp_up(u, pos - 1, pos, 259.min(re - pos)) } else { 0 };
                     let rc = if run < 4 { 0 } else { 1 + lb(run).min(11) / 3 };
                     if !bits.bit(&mut ctx.pp_match[prev * 6 + rc.min(5)], !matches!(g, Token::Lit(_))) {
                         made.push(Token::Lit(u[pos]));
@@ -885,7 +885,7 @@ fn walk(
                         };
                         let d = bits.gamma(g32(&mut ctx.misc, 5), gd.wrapping_sub(2) as u64)? as usize + 2;
                         let l = bits.gamma(g32(&mut ctx.misc, 6), gl.wrapping_sub(32) as u64)? as usize + 32;
-                        if l > 287 || d > (1 << 24) + 1 || d > pos || pos + l > re || lcp(u, pos - d, pos, l) < l {
+                        if l > 287 || d > (1 << 24) + 1 || d > pos || pos + l > re || lcp_up(u, pos - d, pos, l) < l {
                             return Err(corrupt());
                         }
                         Token::Copy { len: l as u32, dist: d as u32, run: false }
@@ -917,7 +917,7 @@ fn walk(
                     for i in 0..4 {
                         let d = rep[i];
                         if d != 0 && d <= pos && d <= reach {
-                            rl[i] = lcp(u, pos - d, pos, cap);
+                            rl[i] = lcp_up(u, pos - d, pos, cap);
                         }
                     }
                     let rbest = *rl.iter().max().unwrap();
@@ -1043,7 +1043,7 @@ fn walk(
                         || dist > reach
                         || len < 2
                         || len > cap
-                        || lcp(u, pos - dist, pos, len) < len
+                        || lcp_up(u, pos - dist, pos, len) < len
                     {
                         return Err(Error("a match that does not fit"));
                     }
