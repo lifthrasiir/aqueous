@@ -372,6 +372,12 @@ impl<'a> Window<'a> {
     /// Searches the chain from `h` for the cursor on behalf of all `jobs` at once, each as
     /// its own search with its own best length and budget would.
     fn walk(&self, h: usize, jobs: &mut [Job]) {
+        if let [job] = jobs {
+            if job.active {
+                self.walk_one(h, job);
+            }
+            return;
+        }
         let c = self.cursor;
         let floor = c.saturating_sub(self.max_dist);
         let buf = &self.buf[..];
@@ -411,6 +417,48 @@ impl<'a> Window<'a> {
             }
             x = next;
         }
+    }
+
+    /// [`Window::walk`] for one job, finding what it finds: each position is screened, without
+    /// a branch for each byte, for those a longer match needs (the two at the best length and
+    /// the first two), and only those passing are compared in full.
+    #[inline(always)]
+    fn walk_one(&self, h: usize, job: &mut Job) {
+        let c = self.cursor;
+        let floor = c.saturating_sub(self.max_dist);
+        // Every window index is below twice the window: masking them changes nothing, but
+        // lets the indexing below go unchecked (as does the best length, at most 258).
+        let (span, mask) = (2 * self.w - 1, self.w - 1);
+        let buf = &self.buf[..span + SLACK];
+        let links = &self.links[..=mask];
+        let pair = |i: usize| u16::from_le_bytes([buf[i], buf[i + 1]]);
+        let head = pair(c);
+        let mut b1 = job.best.min(258) - 1;
+        let mut tail = pair(c + b1);
+        let mut x = h;
+        loop {
+            let y = x & span;
+            let pass = (pair(y + b1) == tail) & (pair(y) == head);
+            if pass {
+                let len = self.common(x);
+                if len > job.best {
+                    job.best = len;
+                    job.sigma = x as isize;
+                    if len >= job.stop {
+                        break;
+                    }
+                    b1 = len.min(258) - 1;
+                    tail = pair(c + b1);
+                }
+            }
+            job.budget -= 1;
+            let next = links[x & mask] as usize;
+            if job.budget == 0 || next <= floor {
+                break;
+            }
+            x = next;
+        }
+        job.active = false;
     }
 }
 
