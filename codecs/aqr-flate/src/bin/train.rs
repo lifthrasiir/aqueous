@@ -322,9 +322,9 @@ fn eval(args: &[String]) -> Res<()> {
     let reports: Vec<(usize, Report, usize, f64, f64)> = samples
         .par_iter()
         .map(|s| {
-            let t0 = thread_cpu();
+            let t0 = aqr_common::cpu::thread();
             let (data, meta, r) = aqr_flate::deconstruct_report(&s.raw, &opts).unwrap();
-            let t1 = thread_cpu();
+            let t1 = aqr_common::cpu::thread();
             if join {
                 let back = aqr_flate::reconstruct_with_threads(&data, &meta, 1).unwrap();
                 assert!(
@@ -334,7 +334,7 @@ fn eval(args: &[String]) -> Res<()> {
                     s.source
                 );
             }
-            let t2 = thread_cpu();
+            let t2 = aqr_common::cpu::thread();
             (s.raw.len(), r, meta.len(), t1 - t0, t2 - t1)
         })
         .collect();
@@ -865,9 +865,9 @@ fn speed(args: &[String]) -> Res<()> {
             .par_iter()
             .map(|s| {
                 let (data, meta) = aqr_flate::deconstruct_with(&s.raw, &opts).unwrap();
-                let t = thread_cpu();
+                let t = aqr_common::cpu::thread();
                 let back = aqr_flate::reconstruct_with_threads(&data, &meta, 1).unwrap();
-                let dt = thread_cpu() - t;
+                let dt = aqr_common::cpu::thread() - t;
                 assert!(back == s.raw);
                 (meta.len(), dt)
             })
@@ -883,29 +883,4 @@ fn speed(args: &[String]) -> Res<()> {
         );
     }
     Ok(())
-}
-
-/// CPU time of the calling thread, in seconds.
-fn thread_cpu() -> f64 {
-    let mut ts = Timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    unsafe { clock_gettime(CLOCK_THREAD_CPUTIME_ID, &mut ts) };
-    ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9
-}
-
-#[repr(C)]
-struct Timespec {
-    tv_sec: i64,
-    tv_nsec: i64,
-}
-
-#[cfg(target_os = "macos")]
-const CLOCK_THREAD_CPUTIME_ID: i32 = 16;
-#[cfg(not(target_os = "macos"))]
-const CLOCK_THREAD_CPUTIME_ID: i32 = 3;
-
-unsafe extern "C" {
-    fn clock_gettime(clk: i32, ts: *mut Timespec) -> i32;
 }

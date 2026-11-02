@@ -24,6 +24,8 @@
 
 pub mod adler32;
 pub mod arith;
+#[cfg(not(target_family = "wasm"))]
+pub mod cpu;
 pub mod crc32;
 pub mod cursor;
 pub mod lz;

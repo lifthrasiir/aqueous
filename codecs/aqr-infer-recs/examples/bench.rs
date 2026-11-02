@@ -21,9 +21,7 @@ fn thread_cpu() -> f64 {
         static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
         return START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64();
     }
-    let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
-    t.tv_sec as f64 + t.tv_nsec as f64 * 1e-9
+    aqr_common::cpu::thread()
 }
 
 /// Per file: zstd -3, inferred, CPU s, the estimate's saving, its CPU s.
