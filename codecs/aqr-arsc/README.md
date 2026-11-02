@@ -43,8 +43,15 @@ Left:
   Strings stored in the order of their first reference, the pool's order derived by sorting
   each run, would drop most of it, if the run of every string can be told (strings shared by
   configurations).
-- Binary XML (`AndroidManifest.xml`, `res/**/*.xml`): the same chunks and string pools, with
-  XML nodes; 30.8 MB in the 7 APKs, 1.84 MB through aqr.
+- Binary XML (`AndroidManifest.xml`, `res/**/*.xml`; 6,914 files of 9.2 MB in the 7 APKs) was
+  tried and not taken (2026-11-02): the same chunks, its nodes coded by field (lines in
+  deltas, ends from the starts open, attributes by name, raw value, type and data) in a module
+  of 3 inputs. Its streams of all files as one came to 0.91 MB under zstd -9 against 1.21 MB,
+  but a formula for each file costs more than that: a ZIP of K-9's XML archived to 332 KB
+  instead of 249 KB with every file taken (its files are 1.3 KB on average), and the files
+  loose to 171 KB with those that are smaller alone taken, which none in a ZIP is (aqr-zip
+  sends `.xml` entries as text, one content of all). It would pay as one application for all
+  of an archive's binary XML, as flate-set does for DEFLATE bodies.
 - Compact entries (flag 8, aapt2's `--enable-compact-entries`), sparse and 16-bit offsets
   (type flags 1 and 2): kept as they are.
 - Type specs as they are.

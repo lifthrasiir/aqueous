@@ -322,7 +322,7 @@ container is TIFF/EXIF.
 | ELF (x86-64, ARM64) | Linux and Android binaries | uncompressed (debug sections optionally zlib or zstd) | the code is filtered (aqr-exe); left: the tables (relocations, symbols, `.eh_frame`), DWARF (a recompressor of its own, for Mach-O's dSYM too) | aqr-exe, aqr-flate |
 | Android DEX | APKs | uncompressed, with shared string, type and method tables | strings, id tables, classes' data and instructions taken (aqr-dex, −37% under zstd -9, beating xz -9e); left: a context model of opcodes and registers | aqr-dex |
 | Java class files | JARs | uncompressed constant pools and bytecode | as DEX | |
-| Android resource tables (`resources.arsc`), binary XML | APKs (stored, for mapping) | uncompressed: string pools with offsets and lengths, type chunks of fixed-size entries | the pools' strings and the entries taken (aqr-arsc, −36% under zstd -9); left: the string indices (the pool sorted by configuration and value), binary XML | aqr-arsc |
+| Android resource tables (`resources.arsc`), binary XML | APKs (stored, for mapping) | uncompressed: string pools with offsets and lengths, type chunks of fixed-size entries | the pools' strings and the entries taken (aqr-arsc, −36% under zstd -9); left: the string indices (the pool sorted by configuration and value); binary XML, whose files are too small for a formula each (aqr-arsc's README) | aqr-arsc |
 | WebAssembly | the web, plugins | uncompressed sections | instructions and indices modelled | |
 
 ### Games
