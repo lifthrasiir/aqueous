@@ -299,14 +299,14 @@ mod simd {
 
 #[cfg(target_family = "wasm")]
 fn lms_run<const DEC: bool, const PIPE: bool>(st: &mut Lms, buf: &mut [i32]) {
-    // SAFETY: SIMD128 is of the profile of the modules (an engine without it does not run them)
-    unsafe { simd::run::<DEC>(st, buf) }
+    // (SIMD128 is of the profile of the modules: an engine without it does not run them)
+    simd::run::<DEC>(st, buf)
 }
 
 #[cfg(target_family = "wasm")]
 pub(crate) fn lms_run2_in<const DEC: bool, const PIPE: bool>(sa: &mut Lms, a: &mut [i32], sb: &mut Lms, b: &mut [i32]) {
-    // SAFETY: as in `lms_run`
-    unsafe { simd::run2::<DEC>(sa, a, sb, b) }
+    // (as in `lms_run`)
+    simd::run2::<DEC>(sa, a, sb, b)
 }
 
 #[cfg(target_arch = "aarch64")]

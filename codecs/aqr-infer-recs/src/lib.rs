@@ -13,8 +13,6 @@
 //! `recs-fields`, `recs-entries` and `recs-floats` of aqr-formula, whose code is `module`);
 //! `FORMAT.md` specifies them.
 
-#![cfg_attr(not(feature = "encode"), allow(unused))]
-
 #[cfg(feature = "encode")]
 pub mod chain;
 #[cfg(feature = "encode")]
@@ -42,6 +40,7 @@ pub use regions::*;
 pub const MIN_RECORDS: usize = 16;
 
 /// `count` points over [0, last], rounded down, without repeats: numpy's `linspace`.
+#[cfg(feature = "encode")]
 pub(crate) fn linspace(last: usize, count: usize) -> Vec<usize> {
     let mut v: Vec<usize> = if count <= 1 {
         vec![0]

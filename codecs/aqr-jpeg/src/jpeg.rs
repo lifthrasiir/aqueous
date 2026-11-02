@@ -736,6 +736,7 @@ impl CompPtr {
         CompPtr { blocks: o.blocks.as_mut_ptr(), masks: o.masks.as_mut_ptr(), bw: o.bw, bh: o.bh, y0: o.y0, keep: !0 }
     }
     /// A component of `bw` x `bh` blocks whose blocks are decoded into `scratch` and dropped.
+    #[cfg(feature = "encode")]
     fn discard(bw: usize, bh: usize, scratch: &mut ([i16; 64], u64)) -> CompPtr {
         CompPtr { blocks: &mut scratch.0, masks: &mut scratch.1, bw, bh, y0: 0, keep: 0 }
     }
@@ -968,6 +969,7 @@ impl Ctx<'_> {
 
     /// `run_in` (zigzag order) without a hook.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(feature = "encode")]
     fn span<const REL: bool>(
         &self,
         comps: &[CompPtr],
@@ -1490,6 +1492,7 @@ fn decode_speculative<const NAT: bool>(c: &Ctx, chunks: usize) -> Option<ScanRes
 // ---------------------------------------------------------------- stripe-wise decoding
 
 /// Every component of the image, decoded into `scratch` and dropped.
+#[cfg(feature = "encode")]
 fn discard_all(j: &Jpeg, scratch: &mut ([i16; 64], u64)) -> Vec<CompPtr> {
     j.comps.iter().map(|c| CompPtr::discard(c.bw, c.bh, scratch)).collect()
 }
@@ -1506,6 +1509,7 @@ fn discard_all(j: &Jpeg, scratch: &mut ([i16; 64], u64)) -> Vec<CompPtr> {
 /// starting points are first located as by speculative decoding (see `locate`). Anything
 /// unusual there returns None: the caller is to start over with `serial_only`, which always
 /// gives the outcome.
+#[cfg(feature = "encode")]
 pub(crate) fn decode_striped(
     j: &Jpeg,
     s: &Scan,
@@ -1718,6 +1722,7 @@ pub(crate) fn decode_striped(
 }
 
 /// Zero the blocks of MCUs `from..to` (of the stripe held in `bufs`).
+#[cfg(feature = "encode")]
 fn clear_held(s: &Scan, layout: &[(usize, usize, usize)], from: usize, to: usize, bufs: &mut [Coefs]) {
     for m in from..to {
         let (mx, my) = (m % s.mcux, m / s.mcux);
@@ -1744,6 +1749,7 @@ impl std::ops::BitOr for Checks {
 
 /// Add the DC offsets `off` (per scan component) to a stripe decoded with relative
 /// predictions, setting the masks' DC bits; false if a DC value leaves the limit.
+#[cfg(feature = "encode")]
 fn rebase(layout: &[(usize, usize, usize)], bufs: &mut [Coefs], off: [i32; 4]) -> bool {
     for (si, &(ci, _, _)) in layout.iter().enumerate() {
         let o = &mut bufs[ci];
@@ -1762,12 +1768,14 @@ fn rebase(layout: &[(usize, usize, usize)], bufs: &mut [Coefs], off: [i32; 4]) -
 /// MCU starts seen by a speculative decoder (`skim`): bit positions relative to its chunk,
 /// in runs as in `SpecOut`.
 #[derive(Default)]
+#[cfg(feature = "encode")]
 struct Skim {
     bits: Vec<u32>,
     runs: Vec<(usize, bool)>,
 }
 
 /// `speculate` keeping nothing but the MCU starts.
+#[cfg(feature = "encode")]
 fn skim(c: &Ctx, from: usize, to: usize, o: &mut Skim) {
     let (base, stop, limit) = (from * 8, to * 8, c.data_len * 8);
     let mut blk = [0i16; 64];
@@ -1810,6 +1818,7 @@ fn skim(c: &Ctx, from: usize, to: usize, o: &mut Skim) {
 /// as `decode_speculative` synchronises its chunks, but keeping no blocks: the true decoding
 /// (into `skip`) only follows each chunk boundary until it meets an MCU start that chunk's
 /// speculative decoder saw. None where that fails.
+#[cfg(feature = "encode")]
 fn locate(c: &Ctx, skip: &[CompPtr], starts: &[usize], chunks: usize) -> Option<Vec<usize>> {
     use crate::par::prelude::*;
     // positions within a chunk are kept as u32

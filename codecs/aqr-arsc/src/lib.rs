@@ -3,8 +3,6 @@
 //! their offsets derived and their keys and values predicted by the configurations before, the
 //! other chunks as they are. `formula` is the entry point (see aqr-formula).
 
-// The code of the module alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
 pub mod arsc;
 #[cfg(feature = "encode")]
 pub mod encode;

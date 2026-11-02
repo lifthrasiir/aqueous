@@ -2,8 +2,6 @@
 //! A stream is a chain of blocks of magic `bvx?`: LZFSE (`bvx2`), LZVN (`bvxn`), stored (`bvx-`),
 //! ending with `bvx$` (`bvx`). LZVN is also found alone, without blocks (`lzvn`).
 
-// The code of the modules alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
 pub mod bvx;
 #[cfg(feature = "encode")]
 pub mod formula;

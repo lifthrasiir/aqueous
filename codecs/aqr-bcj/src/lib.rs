@@ -5,7 +5,6 @@
 //!
 //! `bra`, `delta` and `bcj2` are ported from the LZMA SDK (Igor Pavlov, public domain).
 
-#![cfg_attr(not(feature = "encode"), allow(unused))]
 pub mod bcj2;
 pub mod bra;
 pub mod delta;

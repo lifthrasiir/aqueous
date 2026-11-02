@@ -3,8 +3,6 @@
 //! (`recons`), so that the data is stored instead. `lzh` decodes and encodes those streams.
 //! `FORMAT.md` specifies the record and the module.
 
-// The code of the modules alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod huff;

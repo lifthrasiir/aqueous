@@ -8,8 +8,6 @@
 //! `layout` rebuilds the archive (the module's code); `json` reads the header into the fields
 //! the encoder derives (encoder only).
 
-// The code of the modules alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
 #[cfg(feature = "encode")]
 pub mod formula;
 #[cfg(feature = "encode")]

@@ -164,6 +164,8 @@ fn prefetch_w<T>(x: &T) {
     unsafe {
         std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(x as *const T as *const i8)
     };
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    let _ = x;
 }
 
 #[inline]
@@ -219,6 +221,7 @@ pub struct Mf<'a> {
 
 impl<'a> Mf<'a> {
     /// Bytes of the chains of a match finder of [`Mf::new`].
+    #[cfg(not(target_arch = "wasm32"))]
     fn chains(n: usize, reach: usize) -> usize {
         // A ring of `reach` positions at least: a candidate `c` is at least `pos - reach`, and its
         // slot is taken again only by `c + ring`, which is at least `pos` (not added yet). So a
@@ -232,7 +235,10 @@ impl<'a> Mf<'a> {
         #[cfg(not(target_arch = "wasm32"))]
         return (gate::AT_ONCE.load(std::sync::atomic::Ordering::Relaxed) / Self::chains(n, reach)).max(1);
         #[cfg(target_arch = "wasm32")]
-        return 1;
+        {
+            let _ = (n, reach);
+            1
+        }
     }
 
     /// A match finder for matches at most `reach` back (LZMA's dictionary size).

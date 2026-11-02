@@ -1,8 +1,6 @@
 //! Lossless PNG recompression: a smaller representation from which the original file is
 //! rebuilt bit for bit.
 
-// The code of the modules alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
 pub mod codec;
 pub mod filter;
 #[cfg(feature = "encode")]

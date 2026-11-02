@@ -7,8 +7,6 @@
 //! that rotations sort as libbzip2 sorts them. Only the order of equal rotations (of a
 //! periodic block) can differ, which a formula notes.
 
-// The code of the modules alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
 pub mod compress;
 pub mod crc;
 #[cfg(feature = "encode")]

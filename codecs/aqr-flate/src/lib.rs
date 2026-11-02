@@ -26,8 +26,6 @@
 //! - corrections: static codes (profiles 0-9), or adaptive binary arithmetic coding with
 //!   lookahead and zlib emulation ([`adapt`], profiles from [`ADAPTIVE`] on).
 
-// The code of the modules alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
 pub mod adapt;
 mod arith;
 pub mod bits;
@@ -513,7 +511,10 @@ fn code_streamed(
             let tx = tx.lock().unwrap().take().expect("one parse");
             let r = split_parsed(raw, &f.stats.cuts, |i, toks| match tx.try_send((i, toks)) {
                 Ok(()) => {}
-                Err(mpsc::TrySendError::Full((i, toks)) | mpsc::TrySendError::Disconnected((i, toks))) => {
+                Err(
+                    mpsc::TrySendError::Full((i, toks))
+                    | mpsc::TrySendError::Disconnected((i, toks)),
+                ) => {
                     *done[i].lock().unwrap() = Some(code(i, &toks));
                 }
             });

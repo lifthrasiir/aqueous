@@ -6,8 +6,6 @@
 //! LZMA2 streams (`lzma2`) are split by their segments, each standing alone. The containers
 //! taken are the `.lzma` file (LZMA-alone, `alone`) and the `.xz` file (`xz`).
 
-// The code of the modules alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
 pub mod alone;
 pub use aqr_common::arith;
 #[cfg(feature = "encode")]

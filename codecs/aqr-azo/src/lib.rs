@@ -4,8 +4,6 @@
 //! encodes streams of a parse; `formula` is the entry point (see aqr-formula), with the feature
 //! `encode`; `module` is the code of the module, which `FORMAT.md` specifies.
 
-// The code of the modules alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
 pub mod azo;
 #[cfg(feature = "encode")]
 pub mod formula;

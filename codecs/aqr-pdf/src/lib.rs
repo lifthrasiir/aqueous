@@ -1,8 +1,5 @@
 //! Lossless PDF recompression: a PDF file is stored smaller, and restored bit for bit.
 
-// The code of the module alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
-
 #[cfg(feature = "encode")]
 pub mod encode;
 pub mod flate;

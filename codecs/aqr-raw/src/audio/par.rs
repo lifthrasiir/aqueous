@@ -337,7 +337,6 @@ pub mod apart {
     use super::*;
     use aqr_api::chan::{self, Receiver, Sender};
     use aqr_common::wire::Wire;
-    use std::sync::Mutex;
 
     impl Wire for Error {
         fn put(&self, _: &mut Vec<u8>) {}
@@ -521,20 +520,19 @@ pub mod apart {
         };
         // SAFETY: dropped below, before `task` goes
         let tasks = unsafe { aqr_api::task::spawn(3 + workers, &task) };
-        let (mut r, mut k) = (Ok(()), 0);
+        let mut k = 0;
         let mut open = vec![true; workers];
-        loop {
+        let r = loop {
             let Some((last, w)) = recv::<(bool, W)>(&c4[k % workers].1) else {
                 open[k % workers] = false;
-                r = Err(closed);
-                break;
+                break Err(closed);
             };
             k += 1;
-            r = take(w, last);
+            let r = take(w, last);
             if r.is_err() || last {
-                break;
+                break r;
             }
-        }
+        };
         // (what is left read, in the same turn, for the stages to end)
         while open.contains(&true) {
             if open[k % workers] && c4[k % workers].1.recv().is_none() {

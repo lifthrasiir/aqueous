@@ -19,7 +19,9 @@ use crate::composite::{self, RowRenderer};
 use crate::model::{self, GroupCoder};
 use crate::packbits::{self, Encoder};
 use crate::psd::{self, Compression, Error, Psd, Result};
-use crate::rows::{self, PlaneRows};
+#[cfg(feature = "encode")]
+use crate::rows;
+use crate::rows::PlaneRows;
 use aqr_common::varint;
 #[cfg(feature = "encode")]
 use aqr_formula::Formula;
@@ -32,6 +34,7 @@ fn corrupt() -> Error {
     Error("corrupt input".into())
 }
 
+#[cfg(feature = "encode")]
 fn put_varint(out: &mut Vec<u8>, v: u64) {
     varint::put(out, v)
 }
@@ -55,6 +58,7 @@ fn get_u8(src: &[u8], at: &mut usize) -> Result<u8> {
 }
 
 /// `usize::MAX` as 0, anything else shifted by one.
+#[cfg(feature = "encode")]
 fn put_opt(out: &mut Vec<u8>, v: usize) {
     put_varint(out, if v == usize::MAX { 0 } else { v as u64 + 1 });
 }
@@ -66,6 +70,7 @@ fn get_opt(src: &[u8], at: &mut usize) -> Result<usize> {
     })
 }
 
+#[cfg(feature = "encode")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Codec {
     Psd,
@@ -74,13 +79,16 @@ enum Codec {
 }
 
 /// How deep embedded PSDs are recompressed.
+#[cfg(feature = "encode")]
 const MAX_DEPTH: usize = 3;
 
 /// Thread budget of one call.
+#[cfg(feature = "encode")]
 pub(crate) struct Par {
     threads: usize,
 }
 
+#[cfg(feature = "encode")]
 impl Par {
     pub(crate) fn new(threads: usize) -> Par {
         Par { threads: threads.max(1) }
@@ -95,6 +103,7 @@ impl Par {
 /// `f` on every item, `threads` at a time (the caller's thread among them); results in the
 /// order of the items. One thread, or one item: in order, on the calling thread. A panic
 /// of `f` propagates, as it would serially.
+#[cfg(feature = "encode")]
 fn par_map<T: Send, R: Send>(threads: usize, items: Vec<T>, f: impl Fn(T) -> R + Sync) -> Vec<R> {
     let n = items.len();
     if threads <= 1 || n <= 1 {
@@ -154,6 +163,8 @@ enum Coding<'a> {
 struct Span<'a> {
     start: usize,
     end: usize,
+    // (read by the encoder alone, which writes it in the skeleton)
+    #[cfg_attr(not(feature = "encode"), allow(dead_code))]
     gap: usize,
     planes: usize,
     w: usize,
@@ -178,6 +189,7 @@ struct GroupDef {
 /// Checks the row counts of RLE data against its length, and a sample of rows (every
 /// `every`th) decoding to `w` bytes; other rows are checked as they are decoded. Returns the
 /// bytes of each plane's rows and the token breaks of the sample, for encoder identification.
+#[cfg(feature = "encode")]
 fn check_rle(
     src: &[u8],
     planes: usize,
@@ -207,6 +219,7 @@ fn check_rle(
 }
 
 /// The token breaks of all rows of RLE data (for a second look at the encoder).
+#[cfg(feature = "encode")]
 fn all_splits(src: &[u8], rows: usize, cb: usize) -> Vec<usize> {
     let mut pos = rows * cb;
     let mut splits = Vec::new();
@@ -220,6 +233,7 @@ fn all_splits(src: &[u8], rows: usize, cb: usize) -> Vec<usize> {
 
 /// How many of a sample of rows (every `rows / 32`th) each candidate encoder reproduces, and
 /// the rows sampled (that decode to `w` bytes).
+#[cfg(feature = "encode")]
 fn sample_hits(cands: &[Encoder], src: &[u8], planes: usize, w: usize, h: usize, cb: usize) -> (Vec<usize>, usize) {
     const SAMPLE: usize = 32;
     let rows = planes * h;
@@ -249,6 +263,7 @@ fn sample_hits(cands: &[Encoder], src: &[u8], planes: usize, w: usize, h: usize,
 /// inferred tile cut stays first on ties); None where the best reproduces less than half of
 /// them, and so does the tile cut inferred from all rows: the span is then not worth coding,
 /// its rows being stored as they are (as exceptions) besides.
+#[cfg(feature = "encode")]
 fn rank_candidates(
     cands: Vec<Encoder>,
     src: &[u8],
@@ -272,6 +287,7 @@ fn rank_candidates(
 }
 
 /// A planned span with what is known before coding.
+#[cfg(feature = "encode")]
 struct Planned<'a> {
     span: Span<'a>,
     /// For RLE: candidate encoders, most likely first.
@@ -282,6 +298,7 @@ struct Planned<'a> {
 
 /// A span of `planes` planes in `d[start..end]`, if its pixel data can be coded.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "encode")]
 fn plan_span<'a>(
     d: &[u8],
     start: usize,
@@ -328,6 +345,7 @@ fn hint_psd(prefix: &[u8], w: usize, h: usize) -> Result<Psd> {
 
 /// Whether rendering the layers predicts the composite (span `sp`, first `planes` planes) well
 /// enough to be worth its time: on a sample of rows, the share of pixels predicted exactly.
+#[cfg(feature = "encode")]
 fn hint_pays(psd: &Psd, d: &[u8], sp: &Span, planes: usize) -> bool {
     const EVERY: usize = 16;
     const SHARE: f64 = 0.5;
@@ -571,6 +589,7 @@ fn plan<'a>(psd: &Psd, d: &'a [u8], depth: usize, par: &Par) -> (Vec<Planned<'a>
     (spans, groups, nested)
 }
 
+#[cfg(feature = "encode")]
 fn put_encoder(out: &mut Vec<u8>, e: Encoder) {
     match e {
         Encoder::Photoshop { phase, period } => {
@@ -611,6 +630,7 @@ const MAX_PLANES: usize = 64;
 
 /// The head stream: the spans and the groups. An embedded file is of kind 16 whatever its
 /// format: its bytes are an input of the module.
+#[cfg(feature = "encode")]
 fn put_head(o: &mut Vec<u8>, spans: &[Span], groups: &[GroupDef]) {
     put_varint(o, spans.len() as u64);
     for s in spans {
@@ -865,12 +885,14 @@ fn join<T>(h: aqr_common::pool::Handle<'_, T>) -> T {
 
 /// How far a group is coded, told of its planes' bytes in the file in proportion to the rows
 /// ([`aqr_common::progress`]), a 64th of them at a time.
+#[cfg(feature = "encode")]
 struct Told<'a> {
     planes: Vec<&'a [u8]>,
     h: usize,
     at: usize,
 }
 
+#[cfg(feature = "encode")]
 impl<'a> Told<'a> {
     fn new(d: &'a [u8], spans: &[Span], g: &GroupDef, h: usize) -> Told<'a> {
         let planes = g
@@ -900,6 +922,7 @@ impl<'a> Told<'a> {
 
 /// Codes the rows of group `g`, straight from the file `d`; returns per plane the rows its
 /// span's encoder does not reproduce (for RLE spans that are not copies).
+#[cfg(feature = "encode")]
 fn encode_group(
     rec: &mut model::Recorder,
     psd: &Psd,
@@ -1008,6 +1031,7 @@ fn encode_group(
 /// `encode_group`'s loop with a thread reading the rows (and checking them against the
 /// encoders, and rendering the hint) ahead, in batches, while this one codes them.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "encode")]
 fn encode_rows_piped<'a>(
     reader: aqr_common::pool::Reservation,
     rec: &mut model::Recorder,
@@ -1132,6 +1156,7 @@ fn encode_rows_piped<'a>(
 
 /// Picks the encoder of RLE span `sp` among `candidates` reproducing most rows, and its
 /// exceptions; `first_misses` are the rows the first candidate misses.
+#[cfg(feature = "encode")]
 fn settle_encoder<'a>(
     sp: &mut Span<'a>,
     d: &'a [u8],
@@ -1189,6 +1214,7 @@ fn settle_encoder<'a>(
 
 /// Codes all groups into `out`, then settles the encoders of RLE spans (their exceptions).
 /// Returns the number of symbols.
+#[cfg(feature = "encode")]
 fn code_pixels<'a>(
     out: &mut Vec<u8>,
     psd: &Psd,

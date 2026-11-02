@@ -13,9 +13,13 @@
 //! `jpeg::encode_striped`). Other files, and scans that do not decode cleanly, are held whole.
 
 use crate::fast::{self, get_varint};
-use crate::jpeg::{self, Clean, Coefs, Error, Jpeg, Order, Scan, ScanInfo};
+#[cfg(feature = "encode")]
+use crate::jpeg::Order;
+use crate::jpeg::{self, Clean, Coefs, Error, Jpeg, Scan, ScanInfo};
 use crate::progressive;
+#[cfg(feature = "encode")]
 use aqr_common::varint;
+#[cfg(feature = "encode")]
 use std::borrow::Cow;
 
 /// scan flags (progressive scans use only the first two)
@@ -24,10 +28,13 @@ pub(crate) const F_RAW: u8 = 2;
 pub(crate) const F_TRUNCATED: u8 = 4;
 const F_BOUNDARY: u8 = 8;
 /// nesting limit for embedded JPEGs (main image = depth 0)
+#[cfg(feature = "encode")]
 const MAX_DEPTH: u32 = 3;
 /// embedded JPEGs smaller than this are left alone (model tables alone would outweigh them)
+#[cfg(feature = "encode")]
 const MIN_EMBEDDED: usize = 1024;
 
+#[cfg(feature = "encode")]
 fn put_varint(out: &mut Vec<u8>, v: u64) {
     varint::put(out, v)
 }
@@ -60,6 +67,7 @@ pub(crate) fn with_bufs<R>(f: impl FnOnce(&mut Vec<Coefs>, &mut Clean) -> R) -> 
 
 /// End (exclusive) of a JPEG starting with SOI at `p`, following its marker segments and
 /// entropy-coded data up to EOI.
+#[cfg(feature = "encode")]
 fn jpeg_extent(d: &[u8], p: usize) -> Option<usize> {
     let mut i = p + 2;
     loop {
@@ -92,6 +100,7 @@ fn jpeg_extent(d: &[u8], p: usize) -> Option<usize> {
 }
 
 /// Non-overlapping embedded JPEGs in `blob` (excluding the outer SOI at 0).
+#[cfg(feature = "encode")]
 fn find_embedded(blob: &[u8]) -> Vec<(usize, usize)> {
     let mut v = Vec::new();
     let mut i = 1;
@@ -111,6 +120,7 @@ fn find_embedded(blob: &[u8]) -> Vec<(usize, usize)> {
 // ---------------------------------------------------------------- encoding
 
 /// Main-image part of a formula: blob, scan info stream, per-scan streams, model.
+#[cfg(feature = "encode")]
 pub(crate) struct Core<'a> {
     pub progressive: bool,
     pub blob: Vec<u8>,
@@ -139,6 +149,7 @@ fn striped_scan(j: &Jpeg) -> Option<&Scan> {
 
 /// Scan info and (for a reproducible scan) model of a `striped_scan` file, its coefficients
 /// decoded and modelled a stripe at a time; None for other files.
+#[cfg(feature = "encode")]
 fn model_striped(j: &Jpeg, input: &[u8], clean: &mut Clean) -> Option<(ScanInfo, Option<fast::Encoded>)> {
     let s = striped_scan(j)?;
     jpeg::destuff(&input[s.start..s.end], clean);
@@ -165,6 +176,7 @@ fn model_striped(j: &Jpeg, input: &[u8], clean: &mut Clean) -> Option<(ScanInfo,
     unreachable!("serial stripe-wise decoding always gives an outcome")
 }
 
+#[cfg(feature = "encode")]
 pub(crate) fn encode_core<'a>(input: &'a [u8], coefs: &mut Vec<Coefs>, clean: &mut Clean) -> Result<Core<'a>, Error> {
     let j = jpeg::parse(input)?;
     let none = || Err(Error("no scan could be modelled".into()));
@@ -240,6 +252,7 @@ pub(crate) fn encode_core<'a>(input: &'a [u8], coefs: &mut Vec<Coefs>, clean: &m
 
 /// An embedded JPEG of the blob: the byte range, and either its coding `coded` or (None) the
 /// index `back` of an earlier entry with the same bytes.
+#[cfg(feature = "encode")]
 pub(crate) struct Entry<C> {
     pub start: usize,
     pub end: usize,
@@ -249,6 +262,7 @@ pub(crate) struct Entry<C> {
 
 /// The embedded JPEGs of `blob` to be coded at `depth`: those `code` gives a coding for (only
 /// where it pays off), and repeats of earlier entries.
+#[cfg(feature = "encode")]
 pub(crate) fn embedded_entries<C>(blob: &[u8], depth: u32, mut code: impl FnMut(&[u8]) -> Option<C>) -> Vec<Entry<C>> {
     let mut entries: Vec<Entry<C>> = Vec::new();
     if depth < MAX_DEPTH {
@@ -265,6 +279,7 @@ pub(crate) fn embedded_entries<C>(blob: &[u8], depth: u32, mut code: impl FnMut(
 }
 
 /// `head` gets the entry list: count, then per entry gap and kind (+ back reference).
+#[cfg(feature = "encode")]
 pub(crate) fn put_entries<C>(head: &mut Vec<u8>, entries: &[Entry<C>]) {
     put_varint(head, entries.len() as u64);
     let mut prev = 0;
@@ -282,6 +297,7 @@ pub(crate) fn put_entries<C>(head: &mut Vec<u8>, entries: &[Entry<C>]) {
 }
 
 /// The blob without the entries.
+#[cfg(feature = "encode")]
 pub(crate) fn cut_blob<C>(blob: &[u8], entries: &[Entry<C>]) -> Vec<u8> {
     let mut cut = Vec::with_capacity(blob.len() - entries.iter().map(|e| e.end - e.start).sum::<usize>());
     let mut p = 0;

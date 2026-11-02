@@ -2,7 +2,6 @@
 //! field, the data segments' bytes apart ([`wasm`]). `formula` is the entry point (a module of
 //! aqr-formula); `FORMAT.md` specifies it.
 
-#![cfg_attr(not(feature = "encode"), allow(unused))]
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod module;

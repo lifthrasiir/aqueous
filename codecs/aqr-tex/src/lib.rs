@@ -4,8 +4,6 @@
 //! ([`dds`]) is its header around the blocks, kept as it is. `formula` is the entry point (a
 //! module of aqr-formula); `FORMAT.md` specifies it.
 
-// The code of the modules alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
 #![allow(clippy::needless_range_loop, clippy::len_without_is_empty)]
 
 pub mod bc;

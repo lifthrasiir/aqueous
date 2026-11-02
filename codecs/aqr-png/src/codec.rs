@@ -22,12 +22,16 @@
 //!   2, as 1                          -- coded against the reference's image
 //! ```
 
+use crate::Result;
 use crate::model::{self, Geometry, Kind, Span};
 use crate::png::{self, Ihdr};
-use crate::rans::{BitR, BitW};
-use crate::{Error, Result};
+use crate::rans::BitR;
+#[cfg(feature = "encode")]
+use crate::{Error, rans::BitW};
 use aqr_common::varint;
-use aqr_flate::bits::{BitReader, BitWriter};
+use aqr_flate::bits::BitReader;
+#[cfg(feature = "encode")]
+use aqr_flate::bits::BitWriter;
 use aqr_flate::deflate::{Block, Body, Token};
 use aqr_flate::header;
 
@@ -94,6 +98,7 @@ fn images<'a>(
 
 /// A PNG file in parts: the skeleton and the records of the
 /// images, in order (each record's first byte being 0, 1 or 2, see FORMAT.md).
+#[cfg(feature = "encode")]
 pub(crate) struct Parts {
     pub skeleton: Vec<u8>,
     pub records: Vec<Vec<u8>>,
@@ -155,6 +160,7 @@ fn reference_of<'r>(
 /// `alone`, the records of the images coded alone, which are not coded again; without, the
 /// images coded against a reference are coded alone too only `also_alone` (else only where
 /// they cannot be coded against it).
+#[cfg(feature = "encode")]
 fn parts(
     file: &[u8],
     threads: usize,
@@ -212,6 +218,7 @@ fn parts(
 /// coding makes it smaller (against `reference` if given and smaller still), else the
 /// payload as it is. `alone` is the record coded alone, if known; else, against a reference,
 /// it is coded alone too only `also_alone`, or where it cannot be coded against it.
+#[cfg(feature = "encode")]
 fn image_rec(
     chunks: &[png::Chunk],
     class: u8,
@@ -268,6 +275,7 @@ fn image_rec(
 /// The parts of `file` for a formula, if it is a PNG file and any image is coded (see
 /// [`crate::formula`]), against `refs` if given, with the records coded `alone` if known
 /// (else coded alone `also_alone`, as [`parts`]).
+#[cfg(feature = "encode")]
 pub(crate) fn formula_parts(
     file: &[u8],
     threads: usize,
@@ -284,11 +292,13 @@ const PAR_MIN: usize = 1 << 16;
 
 /// Runs `f(0..n)` on `workers` threads at most (the caller's among them, the others of
 /// the pool), each index once, and returns the results in order.
+#[cfg(feature = "encode")]
 pub(crate) fn par_map<R: Send>(n: usize, workers: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
     aqr_common::pool::par_map(n, workers, f)
 }
 
 /// Appends the record of a coded image to `rec`, against `reference` if given.
+#[cfg(feature = "encode")]
 fn image_record(
     ih: &Ihdr,
     payload: &[u8],
@@ -312,6 +322,7 @@ fn image_record(
 
 /// Appends the coded record of `enc` to `rec` (of kind 2 if it has the tables of coding
 /// against a reference, else 1).
+#[cfg(feature = "encode")]
 fn write_record(kind: Kind, enc: model::Encoded, threads: usize, rec: &mut Vec<u8>) {
     // Layout.
     let mut lw = BitW::default();

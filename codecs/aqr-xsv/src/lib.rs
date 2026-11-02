@@ -3,8 +3,6 @@
 //! they were printed ([aqr-num](../aqr-num)). Records that are not of the table are kept as
 //! they are. `formula` is the entry point (a module of aqr-formula); `FORMAT.md` specifies it.
 
-// The code of the modules alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod module;

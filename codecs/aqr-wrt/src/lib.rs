@@ -7,8 +7,6 @@
 //! in two bytes, and its words of Hangul replaced by codes. `formula` is the entry point (the
 //! modules of aqr-formula); `FORMAT.md` specifies them.
 
-// The code of the modules alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod hangul;

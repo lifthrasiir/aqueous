@@ -4,8 +4,6 @@
 //! instead. `lz5` decodes and encodes RAR5 streams, `lz3` RAR 2.9's (with `ppmd` for their PPMd
 //! blocks), `huff` their prefix codes. `FORMAT.md` specifies the records and the modules.
 
-// The code of the modules alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod huff;

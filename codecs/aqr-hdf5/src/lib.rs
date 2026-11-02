@@ -4,9 +4,6 @@
 //! by a model of their own ([`float`]), the module `hdf5-recons-float` ([`module`]) giving their
 //! chunks to aqr-flate. `FORMAT.md` tells what is stored.
 
-// The code of the module alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
-
 pub mod float;
 #[cfg(feature = "encode")]
 pub mod formula;

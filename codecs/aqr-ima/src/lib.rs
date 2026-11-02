@@ -2,9 +2,6 @@
 //! their headers and nibbles under an adaptive model of the decoder's state ([`codec`]), and back
 //! bit for bit. `formula` is the entry point (a module of aqr-formula); `FORMAT.md` specifies it.
 
-// The code of the module alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
-
 pub mod codec;
 #[cfg(feature = "encode")]
 pub mod formula;

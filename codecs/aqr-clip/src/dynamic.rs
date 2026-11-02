@@ -147,6 +147,7 @@ const TREES: usize = 10;
 
 /// Bytes of a [`Model`]'s bits (`copy`, `listed`, `samples` and the Elias-gamma codes) and its
 /// list.
+#[cfg(feature = "encode")]
 pub(crate) const MODEL_BYTES: usize = size_of::<Bit>() * (CANDS * COPY_CTX + CANDS + 1 + TREES * 256)
     + size_of::<Gamma>() * (SLOTS * 2 * ACT * CROSS + 1 + RUN_CTX)
     + size_of::<u64>() * (LIST + 1);

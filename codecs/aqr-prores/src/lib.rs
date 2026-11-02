@@ -7,8 +7,6 @@
 //! ProRes frames delimit themselves (a big-endian size, then `icpf`), so they are found in any
 //! container (QuickTime, MXF, Matroska) without reading it: `find` scans for them.
 
-// The code of the module alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
 pub mod codec;
 pub mod coef;
 #[cfg(feature = "encode")]

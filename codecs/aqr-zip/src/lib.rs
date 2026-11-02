@@ -8,9 +8,6 @@
 //! did is kept exactly. `zip` reads the archive into records, with whatever lies between them
 //! kept as gaps.
 
-// The code of the modules alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
-
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod layout;

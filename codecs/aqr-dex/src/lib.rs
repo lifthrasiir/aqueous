@@ -3,8 +3,6 @@
 //! ranks, and the other sections each in a stream of its own, for the archive to compress.
 //! `formula` is the entry point (see aqr-formula).
 
-// The code of the module alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
 pub mod code;
 pub mod dex;
 #[cfg(feature = "encode")]

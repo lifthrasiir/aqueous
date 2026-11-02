@@ -13,16 +13,21 @@
 
 use crate::bits::{BitReader, BitWriter};
 use crate::codec::{
-    self, Coded, Dec, Enc, Error, Frames, N_BYTE_STREAMS, S_CRC, S_GAPS, S_HDR, S_JUNK, S_RAWGR, S_SEGS, S_SIDE,
-    S_TAILBITS,
+    self, Dec, Error, Frames, N_BYTE_STREAMS, S_CRC, S_GAPS, S_HDR, S_JUNK, S_RAWGR, S_SEGS, S_SIDE, S_TAILBITS,
 };
-use crate::frame::{Granule, Header, SideInfo, crc16, scf_layout};
+#[cfg(feature = "encode")]
+use crate::codec::{Coded, Enc};
+#[cfg(feature = "encode")]
+use crate::frame::scf_layout;
+use crate::frame::{Granule, Header, SideInfo, crc16};
+#[cfg(feature = "encode")]
 use crate::model::{self, NBX, NCUR, NOC, NPOS};
 use crate::rans::{self, Tables};
 use crate::rc;
 use crate::side::SideModel;
 use crate::stream::R_PAD;
 use std::mem::MaybeUninit;
+#[cfg(feature = "encode")]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, sync_channel};
 
@@ -31,8 +36,10 @@ use std::sync::mpsc::{Receiver, sync_channel};
 pub(crate) const PAR_MIN: usize = 64 << 10;
 
 /// Sets the flag when dropped (also when unwinding), so that a helper stops.
+#[cfg(feature = "encode")]
 struct SetOnDrop<'a>(&'a AtomicBool);
 
+#[cfg(feature = "encode")]
 impl Drop for SetOnDrop<'_> {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Relaxed);
@@ -40,6 +47,7 @@ impl Drop for SetOnDrop<'_> {
 }
 
 /// [`codec::encode`] with a helper thread (a worker of the pool, else none).
+#[cfg(feature = "encode")]
 pub(crate) fn encode(d: &[u8]) -> Coded {
     let worker = aqr_common::pool::reserve(1);
     if worker.is_empty() {
@@ -82,6 +90,7 @@ pub(crate) fn encode(d: &[u8]) -> Coded {
 
 /// Builds the encoder's inverse maps of `ctxs` in order, until `stop`. The maps are the
 /// same whoever builds them; [`rans::Encoder::finish`] builds the rest.
+#[cfg(feature = "encode")]
 fn prewarm(t: &Tables, ctxs: &[u32], stop: &AtomicBool) {
     for chunk in ctxs.chunks(16) {
         if stop.load(Ordering::Relaxed) {
@@ -100,6 +109,7 @@ fn prewarm(t: &Tables, ctxs: &[u32], stop: &AtomicBool) {
 /// Contexts the model may use for these frames, according to their side information (a
 /// superset, most likely first): count1 tables, escapes and pairs of the Huffman tables
 /// used (by number of pairs), scalefactors of the sizes used.
+#[cfg(feature = "encode")]
 fn likely_contexts(frames: &[(Header, SideInfo, usize, usize)]) -> Vec<u32> {
     let mut pairs = [0u64; 32];
     let mut c1 = [false; 2];

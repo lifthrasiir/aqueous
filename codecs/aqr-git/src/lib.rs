@@ -9,9 +9,6 @@
 //! `pack` reads a pack into its entries. A pack's index and reverse index follow from it and
 //! the ids of its entries (`index`).
 
-// The code of the module alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
-
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod index;

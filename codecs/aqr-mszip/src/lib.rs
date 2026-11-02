@@ -5,8 +5,6 @@
 //! aqr-formula), with the feature `encode`; `module` is the code of the module, which
 //! `FORMAT.md` specifies.
 
-// The code of the module alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
 #[cfg(feature = "encode")]
 pub mod cab;
 #[cfg(feature = "encode")]

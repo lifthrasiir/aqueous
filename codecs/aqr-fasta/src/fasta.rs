@@ -74,9 +74,13 @@ const LETTERS: [u8; 4] = *b"ACGT";
 
 /// What a byte is, for the parse: the base of A, C, G and T (0 to 3), `OTHER` for another
 /// letter, with `LOWER` for a lower case one; `NOT_A_LETTER` else.
+#[cfg(feature = "encode")]
 const LOWER: u8 = 8;
+#[cfg(feature = "encode")]
 const OTHER: u8 = 4;
+#[cfg(feature = "encode")]
 const NOT_A_LETTER: u8 = 0xff;
+#[cfg(feature = "encode")]
 const CLASS: [u8; 256] = {
     let mut t = [NOT_A_LETTER; 256];
     let mut c = 0;

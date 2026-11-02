@@ -2,9 +2,6 @@
 //! a packet against a source of values ([`packet::walk`]), which parses a packet to its values
 //! and writes them back bit for bit ([`packet::parse`], [`packet::write`]).
 
-// The code of the module alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
-
 pub mod bits;
 pub mod codec;
 #[cfg(feature = "encode")]

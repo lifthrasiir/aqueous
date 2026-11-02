@@ -6,12 +6,14 @@ use crate::layout;
 use crate::{Result, corrupt};
 
 /// Bytes from which a DEFLATE stream gets threads of its own: two of aqr-flate's segments.
+#[cfg(feature = "encode")]
 const LARGE: usize = 2 << 20;
 
 /// `f(item, threads)` on every element of `items`, by `threads` threads, the largest by `size`
 /// first: those of at least [`LARGE`] with all of them (aqr-flate codes segments in parallel,
 /// but parses a stream on one), the others with one each, all side by side, so that the small
 /// fill the threads a large one leaves idle.
+#[cfg(feature = "encode")]
 pub(crate) fn par_jobs<T: Sync, R: Send>(
     items: &[T],
     size: impl Fn(&T) -> usize + Sync,
@@ -29,6 +31,7 @@ pub(crate) fn par_jobs<T: Sync, R: Send>(
 }
 
 /// `f` on every element of `items`, on up to `threads` threads.
+#[cfg(feature = "encode")]
 pub(crate) fn par_map<T: Sync, R: Send>(items: &[T], threads: usize, f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     aqr_common::pool::par_map(items.len(), threads, |i| f(&items[i]))
 }

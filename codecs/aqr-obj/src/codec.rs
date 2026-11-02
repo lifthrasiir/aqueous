@@ -62,6 +62,7 @@ impl Default for Options {
 
 /// The end of the block starting at `p`: at most `bsize` bytes, at a line end if there is
 /// one.
+#[cfg(feature = "encode")]
 pub(crate) fn block_end(src: &[u8], p: usize, bsize: usize) -> usize {
     let e = (p + bsize).min(src.len());
     if e < src.len()

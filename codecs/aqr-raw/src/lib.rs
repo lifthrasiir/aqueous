@@ -10,8 +10,6 @@
 //!   files given to aqr-ima).
 
 #![allow(clippy::needless_range_loop, clippy::len_without_is_empty)]
-// The code of the modules alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
 
 pub mod audio;
 pub mod container;

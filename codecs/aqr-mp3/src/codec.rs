@@ -8,7 +8,9 @@ use crate::bits::{BitReader, BitWriter, FastWriter, WordWriter};
 use crate::frame::{Granule, Header, SideInfo, crc16, scf_layout};
 use crate::huff;
 use crate::model::{self, Coder, State, Sym};
-use crate::rans::{self, Tables, builtin};
+#[cfg(feature = "encode")]
+use crate::rans::builtin;
+use crate::rans::{self, Tables};
 use crate::rc;
 use crate::side::SideModel;
 use crate::stream::{R_PAD, place, segment};
@@ -56,6 +58,7 @@ pub struct Model {
 }
 
 impl Model {
+    #[cfg(feature = "encode")]
     fn uniform() -> Model {
         let mut sizes: Vec<usize> = Vec::new();
         let map = (0..model::N_CTX)

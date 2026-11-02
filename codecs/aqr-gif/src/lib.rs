@@ -2,8 +2,6 @@
 //! context model of palette indices, and a record of the encoder's choices given the pixels.
 //! The rest of the file (headers, palettes, extensions) is a skeleton kept as it is.
 
-// The code of the modules alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod gif;

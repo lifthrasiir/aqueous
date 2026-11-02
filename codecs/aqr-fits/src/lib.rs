@@ -3,8 +3,6 @@
 //! their pixels and the codes of their Rice blocks ([`rice`], [`tiled`]). `formula` is the entry
 //! point (modules of aqr-formula); `FORMAT.md` specifies them.
 
-// The code of the modules alone uses only part of the rest.
-#![cfg_attr(not(feature = "encode"), allow(unused))]
 pub mod bits;
 pub mod fits;
 #[cfg(feature = "encode")]
