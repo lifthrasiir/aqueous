@@ -1220,6 +1220,38 @@ fn dex() {
     assert_eq!(aqr_compress::kind_by_name(b"x/classes.dex"), aqr_formula::Kind::Format("dex"));
 }
 
+/// A resource table goes to aqr-arsc, by its start or its name.
+#[test]
+fn arsc() {
+    // (a table of one UTF-8 pool of strings)
+    let strings: Vec<String> = (0..200).map(|i| format!("Some text of the app, number {i}")).collect();
+    let mut data = Vec::new();
+    let mut offs = Vec::new();
+    for s in &strings {
+        offs.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        data.extend_from_slice(&[s.len() as u8, s.len() as u8]);
+        data.extend_from_slice(s.as_bytes());
+        data.push(0);
+    }
+    while data.len() % 4 != 0 {
+        data.push(0);
+    }
+    let n = strings.len() as u32;
+    let pool_len = 28 + offs.len() + data.len();
+    let mut d = vec![2, 0, 12, 0];
+    d.extend_from_slice(&((12 + pool_len) as u32).to_le_bytes());
+    d.extend_from_slice(&1u32.to_le_bytes());
+    d.extend_from_slice(&[1, 0, 28, 0]);
+    for v in [pool_len as u32, n, 0, 0x100, 28 + 4 * n, 0] {
+        d.extend_from_slice(&v.to_le_bytes());
+    }
+    d.extend_from_slice(&offs);
+    d.extend_from_slice(&data);
+    let f = roundtrip(&d, &all());
+    assert_eq!(modules(&f), ["arsc-recons"]);
+    assert_eq!(aqr_compress::kind_by_name(b"x/resources.arsc"), aqr_formula::Kind::Format("arsc"));
+}
+
 /// A FASTA file of nucleotides goes to aqr-fasta, by its start or its name.
 #[test]
 fn fasta() {

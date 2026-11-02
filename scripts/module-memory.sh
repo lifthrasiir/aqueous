@@ -46,6 +46,7 @@ samples() {
     make src.tar 'git ls-files -z codecs/aqr-flate | xargs -0 tar cf $out'
     copy zip.zip $codecs/aqr-zip/corpus/881026.zip
     copy classes.dex $codecs/aqr-dex/corpus/fdroid/org.videolan.vlc_13070208/classes.dex
+    copy resources.arsc $codecs/aqr-arsc/corpus/fdroid/org.mozilla.fennec_fdroid_1590020/resources.arsc
     copy git.pack $codecs/aqr-git/corpus/local/aqueous/.git/objects/pack/pack-d45a1b85c3d4567983098805e604a5afab43e22e.pack
     # (the pack with its index and reverse index: git-pack-index-recons)
     make git.d 'local p=$codecs/aqr-git/corpus/local/aqueous/.git/objects/pack/pack-d45a1b85c3d4567983098805e604a5afab43e22e;

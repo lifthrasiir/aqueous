@@ -100,6 +100,9 @@ pub enum Format {
     Fasta,
     /// Android DEX file (aqr-dex), known by its header: at the start of data only.
     Dex,
+    /// Android resource table, `resources.arsc` (aqr-arsc), known by its table's header: at the
+    /// start of data only.
+    Arsc,
     /// WebAssembly module (aqr-wasm), of the binary format's version 1.
     Wasm,
     /// GNU gettext message catalog, `.mo` (aqr-gnu-gettext), known by its magic and header.
@@ -144,7 +147,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 56] = [
+    pub const ALL: [Format; 57] = [
         Format::Pe,
         Format::MachO,
         Format::Elf,
@@ -185,6 +188,7 @@ impl Format {
         Format::GitPack,
         Format::Fasta,
         Format::Dex,
+        Format::Arsc,
         Format::Wasm,
         Format::GnuGettext,
         Format::Fits,
@@ -245,6 +249,7 @@ impl Format {
             Format::GitPack => "git-pack",
             Format::Fasta => "fasta",
             Format::Dex => "dex",
+            Format::Arsc => "arsc",
             Format::Wasm => "wasm",
             Format::GnuGettext => "gnu-gettext",
             Format::Fits => "fits",
@@ -309,6 +314,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"mo" | b"gmo" => format(Format::GnuGettext),
         b"wasm" => format(Format::Wasm),
         b"dex" => format(Format::Dex),
+        b"arsc" => format(Format::Arsc),
         b"fits" | b"fit" | b"fts" | b"fz" => format(Format::Fits),
         b"h5" | b"hdf5" | b"he5" | b"h5ad" | b"nwb" => format(Format::Hdf5),
         b"ldb" => format(Format::LevelDb),
@@ -453,6 +459,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Hdf5)
     } else if start && aqr_dex::formula::starts(d) {
         Some(Format::Dex)
+    } else if start && aqr_arsc::formula::starts(d) {
+        Some(Format::Arsc)
     } else if start && aqr_fasta::formula::starts(d) {
         Some(Format::Fasta)
     } else if start && aqr_obj::formula::starts(d) {

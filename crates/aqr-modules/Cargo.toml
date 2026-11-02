@@ -18,6 +18,7 @@ aqr-bvx = { path = "../../codecs/aqr-bvx", default-features = false }
 aqr-bz2 = { path = "../../codecs/aqr-bz2", default-features = false }
 aqr-clip = { path = "../../codecs/aqr-clip", default-features = false }
 aqr-exe = { path = "../../codecs/aqr-exe", default-features = false, features = ["decode"] }
+aqr-arsc = { path = "../../codecs/aqr-arsc", default-features = false }
 aqr-dex = { path = "../../codecs/aqr-dex", default-features = false }
 aqr-fasta = { path = "../../codecs/aqr-fasta", default-features = false }
 aqr-gif = { path = "../../codecs/aqr-gif", default-features = false }
@@ -215,6 +216,11 @@ required-features = ["wasm"]
 [[bin]]
 name = "wasm-recons"
 path = "src/bin/wasm-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "arsc-recons"
+path = "src/bin/arsc-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]

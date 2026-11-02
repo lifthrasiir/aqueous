@@ -103,6 +103,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-arsc"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
+ "zstd",
+]
+
+[[package]]
 name = "aqr-asar"
 version = "0.1.0"
 dependencies = [
@@ -187,6 +196,7 @@ version = "0.1.0"
 dependencies = [
  "aqr-7z",
  "aqr-alz",
+ "aqr-arsc",
  "aqr-asar",
  "aqr-bundle",
  "aqr-bvx",
@@ -248,6 +258,7 @@ name = "aqr-decompress"
 version = "0.1.0"
 dependencies = [
  "aqr-7z",
+ "aqr-arsc",
  "aqr-asar",
  "aqr-azo",
  "aqr-bcj",
@@ -583,6 +594,7 @@ name = "aqr-modules"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-arsc",
  "aqr-asar",
  "aqr-azo",
  "aqr-bcj",

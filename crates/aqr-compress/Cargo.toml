@@ -19,6 +19,7 @@ aqr-asar = { path = "../../codecs/aqr-asar" }
 aqr-bundle = { path = "../../codecs/aqr-bundle" }
 aqr-exe = { path = "../../codecs/aqr-exe", default-features = false, features = ["encode"] }
 aqr-flate = { path = "../../codecs/aqr-flate" }
+aqr-arsc = { path = "../../codecs/aqr-arsc" }
 aqr-dex = { path = "../../codecs/aqr-dex" }
 aqr-fasta = { path = "../../codecs/aqr-fasta" }
 aqr-wasm = { path = "../../codecs/aqr-wasm" }
