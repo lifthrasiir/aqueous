@@ -1,13 +1,19 @@
 //! Compresses files and directories into Aqueous archives, and decompresses them, as zstd does.
 //!
 //! usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-p] [-q | -v] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N]
-//! [--batch MIB | -B SIZE] [-b SIZE] [-D] [--no-check] [-P] [--wasm] [--no-sandbox] [--stats[=FILE]] [-h] INPUT...
+//! [--batch MIB | -B SIZE] [-b SIZE] [-D] [--no-check] [-P] [--wasm] [--no-sandbox] [--stats[=FILE]] [-h]
+//! INPUT [--rename TO]...
 //!
 //! aqr -d [OPTIONS] ARCHIVE [PATH [--rename TO]]...; aqr -d --each [OPTIONS] ARCHIVE...
 //!
 //! - `-c` (the default; `aqr`): each input into `INPUT.aqr`, a file as an archive of a single
 //!   file, a directory as an archive of what it holds; with `-o`, all the inputs into one
-//!   archive (several of them, or a directory, as entries of their names).
+//!   archive (several of them, or a directory, as entries of their names). Several inputs, or
+//!   one renamed, are archived by their paths: a relative one as it is given (`.` left out,
+//!   the directories on the way made plainly, without their metadata), an absolute one or one
+//!   with `..` by its last name alone, as 7-Zip does (tar, zip and RAR would keep an absolute
+//!   path whole, but the frontends give absolute paths); `--rename TO` after an input has it at
+//!   `TO` (`/` between names) instead. Two inputs of the same path are an error.
 //! - `-d` (the default as `unaqr`): an archive into its name without `.aqr`, or `-o`. An
 //!   archive of another format, by its name (ZIP, 7z, RAR, ALZ, EGG, tar alone or under gzip, bzip2,
 //!   xz, LZMA or Zstandard, and those compressors' single files: [`aqr_unpack::by_name`]), is extracted
@@ -112,7 +118,7 @@ use view::Ticking;
 const USAGE: &str = "usage: aqr [OPTIONS] INPUT...";
 
 const HELP: &str = "\
-usage: aqr [OPTIONS] INPUT...
+usage: aqr [OPTIONS] INPUT [--rename TO]...
        aqr -d [OPTIONS] ARCHIVE [PATH [--rename TO]]...
        aqr -d --each [OPTIONS] ARCHIVE...
        unaqr [OPTIONS] ARCHIVE [PATH [--rename TO]]...
@@ -125,6 +131,12 @@ Modes:
                         (or -o); .gz, .bz2, .xz, .lzma and .zst into the name
                         without them
   -t, --test            decode and check an archive, writing nothing
+
+Compressing (aqr -o ARCHIVE INPUT [--rename TO]...):
+  INPUT                 a file or directory; several of them archived by their paths,
+                        a relative one as given, an absolute one or one with .. by
+                        its last name
+      --rename TO       after an INPUT: that one archived at TO (names between /)
 
 Decompressing some paths (aqr -d ARCHIVE PATH [--rename TO]...):
   PATH                  a path in the archive (a directory with what is under it),
@@ -193,6 +205,8 @@ struct Args {
     verbose: bool,
     opt: Options,
     inputs: Vec<PathBuf>,
+    /// Compressing, by input, the path in the archive that `--rename` gives it.
+    renames: Vec<Option<PathBuf>>,
     /// What `--stats` asked for.
     stats: Option<stats::Stats>,
     /// Driven by a frontend ([`ipc`]).
@@ -276,6 +290,7 @@ fn parse() -> Result<Args, String> {
         verbose: false,
         opt: Options { threads: 0, ..Options::default() },
         inputs: Vec::new(),
+        renames: Vec::new(),
         stats: None,
         ipc: false,
         passphrase: false,
@@ -356,10 +371,20 @@ fn parse() -> Result<Args, String> {
     if a.opt.threads == 0 {
         a.opt.threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     }
-    if !a.decompress && (a.each || !renames.is_empty()) {
-        return Err(format!("{} is for decompressing", if a.each { "--each" } else { "--rename" }));
-    }
-    if a.decompress && !a.each && a.inputs.len() > 1 {
+    if !a.decompress {
+        if a.each {
+            return Err("--each is for decompressing".into());
+        }
+        a.renames = vec![None; a.inputs.len()];
+        for (n, to) in renames {
+            let Some(k) = n.checked_sub(1) else {
+                return Err(format!("--rename {} not after an input", to.display()));
+            };
+            if a.renames[k].replace(to).is_some() {
+                return Err(format!("{}: --rename given twice", a.inputs[k].display()));
+            }
+        }
+    } else if !a.each && a.inputs.len() > 1 {
         a.select = Some(selection(a.inputs.split_off(1), renames)?);
         if a.auto_dir {
             return Err("--auto-dir with paths of an archive".into());
@@ -476,13 +501,13 @@ fn with_ext(path: &Path, ext: &str) -> PathBuf {
 
 fn compress_all(a: &Args) -> Result<(), String> {
     match &a.output {
-        Some(out) => compress_into(a, &a.inputs, out),
+        Some(out) => compress_into(a, &a.inputs, &a.renames, out),
         None => {
-            for input in &a.inputs {
+            for (input, to) in a.inputs.iter().zip(&a.renames) {
                 if input.as_os_str() == "-" {
                     return Err("standard input is not taken yet".into());
                 }
-                compress_into(a, std::slice::from_ref(input), &with_ext(input, ".aqr"))?;
+                compress_into(a, std::slice::from_ref(input), std::slice::from_ref(to), &with_ext(input, ".aqr"))?;
             }
             Ok(())
         }
@@ -568,7 +593,8 @@ impl aqr_compress::Source for Gathered {
     }
 }
 
-fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String> {
+/// Compresses `inputs` into `out`, each in the archive at the path `renames` gives it, if any.
+fn compress_into(a: &Args, inputs: &[PathBuf], renames: &[Option<PathBuf>], out: &Path) -> Result<(), String> {
     let Some(force) = output(a, out)? else { return Ok(()) };
     begin("compress", inputs, Some(out));
     let start = Instant::now();
@@ -587,8 +613,8 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
     let opt = &opt;
     let meta = |p: &Path| fs::symlink_metadata(p).map_err(|e| format!("{}: {e}", p.display()));
     let mapper = Mapper::new().map_err(|e| format!("files not to be mapped: {e}"))?;
-    // a single file: an archive of the file alone
-    if let [input] = inputs
+    // a single file: an archive of the file alone (but renamed: in a tree, at its name)
+    if let ([input], [None]) = (inputs, renames)
         && meta(input)?.is_file()
     {
         let d = mapper.read(input).map_err(|e| format!("{}: {e}", input.display()))?;
@@ -658,7 +684,7 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
     // (as long as it takes: a bar of no end known, and how many files)
     let listing = view::Listing::new(bars());
     let gathered = ticking(a, &listing, || -> Result<(), String> {
-        gather(inputs, &mut g, &listing, a.opt.threads)?;
+        gather(inputs, renames, &mut g, &listing, a.opt.threads)?;
         listing.finish();
         Ok(())
     });
@@ -835,25 +861,65 @@ fn summary(out: &Path, files: usize, total: usize, len: usize, start: Instant) {
 const STAT_THREADS: usize = 8;
 
 /// An entry found as the inputs are walked ([`walk`]): its path and name, the one found that
-/// holds it (none: at the root), and whether it is a directory as it was listed.
+/// holds it (none: at the root), and whether it is a directory as it was listed; `plain`, a
+/// directory on the way to an input's path in the archive, of no path and no metadata.
 struct Found {
     path: PathBuf,
     name: OsString,
     parent: Option<usize>,
     dir: bool,
+    plain: bool,
 }
 
-/// Gathers `inputs` (a directory alone: its entries at the root) into `g`: walked first (what
-/// the directories hold, a call for each), then what is read of each by its path ([`meta::stat`],
-/// a handle or so each, the most of the time) read on `threads`, then made the entries in the
+/// The names of the path in the archive of `input`: those `to` gives (`--rename`), exactly;
+/// else those of a relative path as it is (`.` left out), and the last one alone of an absolute
+/// path or one with `..` (as 7-Zip names them: the frontends give absolute paths).
+fn archive_names(input: &Path, to: Option<&Path>) -> Result<Vec<OsString>, String> {
+    use std::path::Component;
+    if let Some(to) = to {
+        let b = os_bytes(to.as_os_str());
+        let names: Vec<&[u8]> = b.split(|&c| c == b'/').collect();
+        if names.iter().any(|n| n.is_empty() || *n == b"." || *n == b"..") {
+            return Err(format!("--rename {}: not a path in an archive", to.display()));
+        }
+        return Ok(names.into_iter().map(os_from).collect());
+    }
+    let last = || input.file_name().map(|n| vec![n.to_owned()]);
+    let mut names = Vec::new();
+    for c in input.components() {
+        match c {
+            Component::Normal(n) => names.push(n.to_owned()),
+            Component::CurDir => {}
+            Component::RootDir | Component::Prefix(_) | Component::ParentDir => {
+                names = last().unwrap_or_default();
+                break;
+            }
+        }
+    }
+    if names.is_empty() {
+        return Err(format!("{}: no name to archive it by", input.display()));
+    }
+    Ok(names)
+}
+
+/// Gathers `inputs` (a directory alone and not renamed: its entries at the root; else each at
+/// the path [`archive_names`] gives it with `renames`) into `g`: walked first (what the
+/// directories hold, a call for each), then what is read of each by its path ([`meta::stat`], a
+/// handle or so each, the most of the time) read on `threads`, then made the entries in the
 /// order they were found. The files of an inode archived already are of its content (and
 /// forks), read once.
-fn gather(inputs: &[PathBuf], g: &mut Gathered, l: &view::Listing, threads: usize) -> Result<(), String> {
+fn gather(
+    inputs: &[PathBuf],
+    renames: &[Option<PathBuf>],
+    g: &mut Gathered,
+    l: &view::Listing,
+    threads: usize,
+) -> Result<(), String> {
     let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
     let privileged = g.reader.privileged;
     let mut found = Vec::new();
-    match inputs {
-        [dir] => {
+    match (inputs, renames) {
+        ([dir], [None]) => {
             let s = meta::stat(dir, privileged).map_err(|e| err(dir, e))?;
             let (x, forks) = g.reader.extra(dir, &s, &mut |w| g.warnings.push(w));
             g.tree.root = x;
@@ -865,32 +931,66 @@ fn gather(inputs: &[PathBuf], g: &mut Gathered, l: &view::Listing, threads: usiz
             walk(dir, None, &mut found, l)?;
         }
         _ => {
-            for input in inputs {
-                let name = input.file_name().ok_or(format!("{}: no name to archive it by", input.display()))?;
+            // (by their names in the archive, the directories found among the inputs or on the way)
+            let mut dirs: std::collections::HashMap<Vec<OsString>, usize> = Default::default();
+            for (input, to) in inputs.iter().zip(renames) {
+                let names = archive_names(input, to.as_deref())?;
+                let mut parent = None;
+                for k in 1..names.len() {
+                    let at = dirs.entry(names[..k].to_vec()).or_insert_with(|| {
+                        let name = names[k - 1].clone();
+                        found.push(Found { path: PathBuf::new(), name, parent, dir: true, plain: true });
+                        found.len() - 1
+                    });
+                    parent = Some(*at);
+                }
                 let t = fs::symlink_metadata(input).map_err(|e| err(input, e))?.file_type();
-                found.push(Found { path: input.clone(), name: name.to_owned(), parent: None, dir: t.is_dir() });
+                // (a directory made on the way to an earlier input, given itself: that one)
+                let at = match dirs.get(&names) {
+                    Some(&i) if t.is_dir() && found[i].plain => {
+                        (found[i].path, found[i].plain) = (input.clone(), false);
+                        i
+                    }
+                    _ => {
+                        let name = names.last().unwrap().clone();
+                        found.push(Found { path: input.clone(), name, parent, dir: t.is_dir(), plain: false });
+                        found.len() - 1
+                    }
+                };
                 if t.is_file() {
                     l.found();
                 }
                 if t.is_dir() {
-                    walk(input, Some(found.len() - 1), &mut found, l)?;
+                    dirs.entry(names).or_insert(at);
+                    walk(input, Some(at), &mut found, l)?;
                 }
             }
+            taken_twice(&found)?;
         }
     }
     l.walked();
     let stats = aqr_common::pool::par_map(found.len(), threads.min(STAT_THREADS), |i| {
+        if found[i].plain {
+            return None;
+        }
         let s = meta::stat(&found[i].path, privileged);
         if let Ok(s) = &s
             && s.m.is_file()
         {
             l.read(s.m.len());
         }
-        s
+        Some(s)
     });
     // (by the entries found, the entry made of each)
     let mut made: Vec<Option<usize>> = Vec::with_capacity(found.len());
     for (f, s) in found.iter().zip(stats) {
+        let Some(s) = s else {
+            let parent = f.parent.map(|p| made[p].expect("a directory made"));
+            let name = name_from(&os_bytes(&f.name));
+            g.tree.entries.push(Entry { parent, name, node: EntryNode::Dir, extra: Default::default() });
+            made.push(Some(g.tree.entries.len() - 1));
+            continue;
+        };
         let s = s.map_err(|e| err(&f.path, e))?;
         if s.m.is_dir() != f.dir {
             return Err(format!("{}: changed as it was listed", f.path.display()));
@@ -898,6 +998,29 @@ fn gather(inputs: &[PathBuf], g: &mut Gathered, l: &view::Listing, threads: usiz
         // (a directory never skipped)
         let parent = f.parent.map(|p| made[p].expect("a directory made"));
         made.push(entry(&f.path, &f.name, &s, parent, g, l)?);
+    }
+    Ok(())
+}
+
+/// An error where two of `found` would be archived by the same path, telling the inputs (or
+/// what was found under them) that are.
+fn taken_twice(found: &[Found]) -> Result<(), String> {
+    let mut seen: std::collections::HashMap<(Option<usize>, &OsStr), usize> = Default::default();
+    for (i, f) in found.iter().enumerate() {
+        if let Some(j) = seen.insert((f.parent, &f.name), i) {
+            let mut names = vec![f.name.to_string_lossy()];
+            let mut at = f.parent;
+            while let Some(p) = at {
+                names.push(found[p].name.to_string_lossy());
+                at = found[p].parent;
+            }
+            names.reverse();
+            let by = |k: usize| match found[k].plain {
+                true => "a directory on the way to another input".to_owned(),
+                false => found[k].path.display().to_string(),
+            };
+            return Err(format!("{} and {}: both archived as {}", by(j), by(i), names.join("/")));
+        }
     }
     Ok(())
 }
@@ -915,7 +1038,7 @@ fn walk(dir: &Path, parent: Option<usize>, found: &mut Vec<Found>, l: &view::Lis
     names.sort_by(|a, b| a.0.cmp(&b.0));
     for (name, t) in names {
         let path = dir.join(&name);
-        found.push(Found { path, name, parent, dir: t.is_dir() });
+        found.push(Found { path, name, parent, dir: t.is_dir(), plain: false });
         if t.is_file() {
             l.found();
         }

@@ -142,7 +142,7 @@ fn aqueous() {
         (&["-d", "../arch.aqr", "a.txt", "./a.txt"], "a.txt: given twice"),
         (&["-d", "../arch.aqr", "d/../a.txt"], "d/../a.txt: not a path in an archive"),
         (&["-d", "--auto-dir", "../arch.aqr", "a.txt"], "--auto-dir with paths of an archive"),
-        (&["-c", "../src", "--rename", "q"], "--rename is for decompressing"),
+        (&["-c", "--rename", "q", "../src"], "--rename q not after an input"),
     ] {
         let (ok, err, w) = run(args);
         assert!(!ok && err.contains(why), "{args:?}: {err}");
