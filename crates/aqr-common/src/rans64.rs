@@ -39,8 +39,9 @@ struct EncTables {
     /// Reciprocals (see [`reciprocal`]) by frequency.
     rcp: Vec<u64>,
     /// `PROB_SCALE` entries per canonical context, filled by `ensure_inv` under `inv_lock`
-    /// before `inv_ready` is set; never reallocated.
-    inv: std::cell::UnsafeCell<Vec<u16>>,
+    /// before `inv_ready` is set; never reallocated. (Cells of their own: contexts written
+    /// as others are read, through no reference to the whole.)
+    inv: Box<[std::cell::UnsafeCell<u16>]>,
     inv_ready: Vec<AtomicBool>,
     inv_lock: Mutex<()>,
     /// Set once every context's inverse map is ready.
@@ -156,7 +157,9 @@ impl Tables {
             }
             let rcp: Vec<u64> = (0..=PROB_SCALE as u64).map(|f| reciprocal(f).0).collect();
             // Zeroed allocation: pages are only touched for the contexts used.
-            let inv = std::cell::UnsafeCell::new(vec![0u16; self.n.len() * PROB_SCALE as usize]);
+            let inv = vec![0u16; self.n.len() * PROB_SCALE as usize].into_boxed_slice();
+            // SAFETY: `UnsafeCell<u16>` has the layout of `u16`
+            let inv = unsafe { Box::from_raw(Box::into_raw(inv) as *mut [std::cell::UnsafeCell<u16>]) };
             let inv_ready = (0..self.n.len()).map(|_| AtomicBool::new(false)).collect();
             EncTables { enc, rcp, inv, inv_ready, inv_lock: Mutex::new(()), inv_all: AtomicBool::new(false) }
         })
@@ -267,7 +270,7 @@ impl Tables {
         }
         // SAFETY: entries of context k are written only here, under the lock, before the
         // flag is released.
-        let p = unsafe { (*e.inv.get()).as_mut_ptr() };
+        let p = std::cell::UnsafeCell::raw_get(e.inv.as_ptr());
         let put = |i: usize, v: usize| unsafe { *p.add(i) = v as u16 };
         for i in 0..al.a {
             let cu = al.cutoff[i] as usize;
@@ -498,8 +501,8 @@ impl Encoder {
         let mut x = [RANS_L; LANES];
         let o = out.as_mut_ptr();
         let enc = et.enc.as_ptr();
-        // SAFETY: the contexts used are ready (above) and no longer written.
-        let inv = unsafe { (*et.inv.get()).as_ptr() };
+        // (the contexts used are ready, above, and no longer written)
+        let inv = et.inv.as_ptr() as *const u16;
         let rcp = et.rcp.as_ptr();
         // SAFETY: symbol indices come from `put` (below the table size), slots of a symbol
         // lie within `inv`, and each symbol writes at most one word, so `w` stays >= 2 * LANES.
