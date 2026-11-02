@@ -39,7 +39,8 @@ use std::sync::{Mutex, RwLock};
 
 use aqr_formula::aqr::{EntryNode, Extra, Tree, name_bytes};
 
-use crate::meta::{self, Kind, os_from};
+use crate::meta::{self, Kind};
+use crate::names::{self, Names};
 use crate::{create, fold, stats};
 
 /// Whether output `path` is to be written over where it is there: `None` not, the output
@@ -169,6 +170,8 @@ pub struct Extractor<'a> {
     skipped: AtomicBool,
     ap: &'a meta::Applier,
     seen: &'a stats::Seen,
+    /// The names as this system writes them ([`names`]).
+    names: Names,
     s: RwLock<State>,
     /// The forks of links, written once the links are: the entry, the fork's index, the data.
     later: Mutex<Vec<(usize, usize, Vec<u8>)>>,
@@ -259,6 +262,7 @@ impl<'a> Extractor<'a> {
         ap: &'a meta::Applier,
         seen: &'a stats::Seen,
         sel: Option<Selection>,
+        opts: &names::Opts,
     ) -> Result<Self, String> {
         let (top, ours) = match place {
             // (made as something goes there)
@@ -280,6 +284,10 @@ impl<'a> Extractor<'a> {
             }
             Place::Auto { .. } => (None, false),
         };
+        // (of where the entries go, or beside it: decided before any name is mapped)
+        let folding = Folding::of(match place {
+            Place::Own(d) | Place::Into(d) | Place::Auto { base: d, .. } => d,
+        });
         Ok(Extractor {
             place,
             sel,
@@ -287,7 +295,8 @@ impl<'a> Extractor<'a> {
             skipped: AtomicBool::new(false),
             ap,
             seen,
-            s: RwLock::new(State { top, ours, ..State::default() }),
+            names: Names::new(opts, folding.0 == Folding::Exact),
+            s: RwLock::new(State { top, ours, folding: Some(folding), ..State::default() }),
             later: Mutex::default(),
             written: Mutex::default(),
             files: AtomicUsize::new(0),
@@ -308,6 +317,11 @@ impl<'a> Extractor<'a> {
         s.soon.resize(n, None);
         s.applied.resize_with(n, AtomicBool::default);
         s.picks.resize(n, None);
+        self.names.decide(t);
+        if let Some(&i) = new.iter().find(|&&i| self.names.fails(&self.names.name(&t.entries[i].name))) {
+            let shown = names::escaped(name_bytes(&t.entries[i].name).0);
+            return Err(format!("{shown}: not a name this system takes as it is (--bad-names fail)"));
+        }
         self.place(s, t, new)?;
         // (where paths are selected, the entries made of those told)
         let picked: Vec<usize>;
@@ -352,7 +366,7 @@ impl<'a> Extractor<'a> {
             if renamed {
                 continue;
             }
-            if let Some(key) = folding.key(&os_name(name_bytes(&e.name).0).0) {
+            if let Some(key) = folding.key(&self.names.name(&e.name).os) {
                 let j = *s.taken.entry((e.parent, key)).or_insert(i);
                 if j != i {
                     s.clashed[i] = Some(Some(j));
@@ -362,7 +376,7 @@ impl<'a> Extractor<'a> {
             // best fit of the OEM code page, `pÀq` as `paq`; and FAT and NTFS take a short name
             // made, `LONGFI~1.TXT`, as the long name's)
             if short && s.clashed[i].is_none() {
-                match short_key(&os_name(name_bytes(&e.name).0).0) {
+                match short_key(&self.names.name(&e.name).os) {
                     Some(k) => {
                         let long = s.long_named.get(&e.parent).copied().filter(|&j| j != i && made_short(&k));
                         let j = long.unwrap_or_else(|| *s.taken_short.entry((e.parent, k)).or_insert(i));
@@ -405,7 +419,7 @@ impl<'a> Extractor<'a> {
                 Some(Some(j)) if s.paths[i].as_os_str().is_empty() => {
                     // (told once: its path kept to tell it once)
                     let parent = e.parent.map_or(&top, |p| &s.paths[p]);
-                    let path = parent.join(os_from(name_bytes(&e.name).0));
+                    let path = parent.join(self.names.name(&e.name).os);
                     let what = if e.node == EntryNode::Dir { "nor what is under it " } else { "" };
                     self.ap.tell(
                         &path,
@@ -549,7 +563,7 @@ impl<'a> Extractor<'a> {
                     let name = &t.entries[i].name;
                     let at = base.join(self.fs_name(base, name));
                     // (of the archive's name: the archive's directory, asked of as it is)
-                    let mine = own.file_name().is_some_and(|o| alike(&os_from(name_bytes(name).0), o));
+                    let mine = own.file_name().is_some_and(|o| alike(&self.names.name(name).os, o));
                     let there = fs::symlink_metadata(&at).is_ok();
                     if !there || mine {
                         if there {
@@ -625,19 +639,24 @@ impl<'a> Extractor<'a> {
         self.skipped.load(Relaxed)
     }
 
-    /// The name of `name` (an entry's) on this system, in directory `dir`. On Windows, the
-    /// characters it cannot have (and a dot or a space at the end) are `_`, and a device's name
-    /// takes `_` before it: told where that is so (spec, "Extraction").
+    /// The name of `name` (an entry's, made) on this system, in directory `dir` ([`Names`]):
+    /// told where it is not written as it is (spec, "Extraction"), and counted.
     fn fs_name(&self, dir: &Path, name: &[u8]) -> OsString {
-        let (os, substituted) = os_name(name_bytes(name).0);
-        if substituted {
-            let was = os_from(name_bytes(name).0);
+        let m = self.names.name(name);
+        if m.replaced {
+            let was = names::escaped(name_bytes(name).0);
             self.ap.tell(
                 &dir.join(&was),
-                &format!("not a name this system takes, written as {}", Path::new(&os).display()),
+                &format!("not a name this system takes, written as {}", Path::new(&m.os).display()),
             );
         }
-        os
+        self.names.count(&m);
+        m.os
+    }
+
+    /// What is told of the names of the entries made ([`Names::told`]).
+    pub fn names_told(&self) -> Vec<String> {
+        self.names.told()
     }
 
     /// Writes content `c` of the entries told, `d`: to its files and forks.
@@ -713,7 +732,7 @@ impl<'a> Extractor<'a> {
                 let mut m = ByName::new();
                 for (j, e) in t.entries.iter().enumerate() {
                     if s.clashed.get(j).is_none_or(Option::is_none) {
-                        by_name_add(&mut m, e.parent, Name::of(name_bytes(&e.name).0), j);
+                        by_name_add(&mut m, e.parent, Name::of(&self.names.name(&e.name).os), j);
                     }
                 }
                 m
@@ -728,9 +747,9 @@ impl<'a> Extractor<'a> {
                 }
                 _ => (s.single.map(|f| vec![t.entries[f].name.clone()]), out.as_path(), false),
             };
-            let to = match resolve_link(t, by_name, i, within.as_deref()) {
+            let to = match resolve_link(t, &self.names, by_name, i, within.as_deref()) {
                 Ok(to) => to,
-                Err(_) if alone => resolve_link(t, by_name, i, None).ok().flatten(),
+                Err(_) if alone => resolve_link(t, &self.names, by_name, i, None).ok().flatten(),
                 Err(Refused::Out) => {
                     let of = if of.as_os_str().is_empty() { Path::new(".") } else { of };
                     self.ap.tell(path, &format!("a link reaching out of {}, not created", of.display()));
@@ -752,7 +771,7 @@ impl<'a> Extractor<'a> {
                 Some(k) => k != 0,
                 None => to.is_some_and(|j| t.entries[j].node == EntryNode::Dir),
             };
-            let (os, substituted) = link_target(target);
+            let (os, substituted) = self.names.link(target);
             if substituted {
                 let shown = String::from_utf8_lossy(name_bytes(target).0);
                 self.ap.tell(path, &format!("a link to {shown}, made to {}", Path::new(&os).display()));
@@ -865,17 +884,6 @@ fn windows_wide(name: &[u16]) -> Option<Vec<u16>> {
         out.insert(0, b'_' as u16);
     }
     (out != name).then_some(out)
-}
-
-/// The name on this system of `bytes` (an entry's name or a name of a link target, decoded):
-/// on Windows as [`windows_name`] has it. And whether it is not as it is.
-fn os_name(bytes: &[u8]) -> (OsString, bool) {
-    let os = os_from(bytes);
-    #[cfg(windows)]
-    if let Some(sub) = windows_name(&os) {
-        return (sub, true);
-    }
-    (os, false)
 }
 
 /// How the file system extracted into takes names of a directory as one, as far as it is told
@@ -991,34 +999,6 @@ fn linux_folding(d: &Path) -> (Folding, bool) {
     }
 }
 
-/// The target of a link made of `target` (an encoded one) on this system. On Windows, its
-/// names (between `/`s) are those that entries of them are written as ([`windows_name`]), so
-/// that none reaches beyond its place (by a `\` or a `:`), and the `/`s are `\`s; and whether a
-/// name was not as it is.
-fn link_target(target: &[u8]) -> (OsString, bool) {
-    let bytes = name_bytes(target).0;
-    #[cfg(windows)]
-    {
-        let (mut out, mut substituted) = (OsString::new(), false);
-        for (k, part) in bytes.split(|&b| b == b'/').enumerate() {
-            if k > 0 {
-                out.push("\\");
-            }
-            let os = os_from(part);
-            match (part, windows_name(&os)) {
-                (b"" | b"." | b"..", _) | (_, None) => out.push(&os),
-                (_, Some(sub)) => {
-                    out.push(sub);
-                    substituted = true;
-                }
-            }
-        }
-        (out, substituted)
-    }
-    #[cfg(not(windows))]
-    (os_from(bytes), false)
-}
-
 /// The short name (8.3) that FAT on Windows may take `name` (a name on this system) as: as
 /// FastFAT looks a name up, uppercased and in the OEM code page, characters it does not have
 /// as their best fit (`pÀq` as `PAQ` in code page 949), where that is a valid 8.3 name; and so
@@ -1103,10 +1083,9 @@ struct Name {
 }
 
 impl Name {
-    /// The name of `bytes` (decoded) on this system.
-    fn of(bytes: &[u8]) -> Name {
-        let os = os_name(bytes).0;
-        Name { fold: fold::fold(&os), astral: fold::fold_astral(&os), short: short_key(&os) }
+    /// The name of `os` (a name on this system, mapped: [`Names`]).
+    fn of(os: &std::ffi::OsStr) -> Name {
+        Name { fold: fold::fold(os), astral: fold::fold_astral(os), short: short_key(os) }
     }
 
     /// The keys of the name in [`ByName`].
@@ -1155,12 +1134,18 @@ enum Refused {
 /// normalization, or as a short name of Windows) and not as others: a link is followed only
 /// where the name is the link's as it is, and the link the only entry of names taken as one
 /// there (spec, "Extraction").
-fn resolve_link(t: &Tree, by_name: &ByName, i: usize, within: Option<&[Vec<u8>]>) -> Result<Option<usize>, Refused> {
+fn resolve_link(
+    t: &Tree,
+    names: &Names,
+    by_name: &ByName,
+    i: usize,
+    within: Option<&[Vec<u8>]>,
+) -> Result<Option<usize>, Refused> {
     // the path of an entry, as names from the root
     let path_of = |mut e: Option<usize>| {
         let mut p = Vec::new();
         while let Some(i) = e {
-            p.push(Name::of(name_bytes(&t.entries[i].name).0));
+            p.push(Name::of(&names.name(&t.entries[i].name).os));
             e = t.entries[i].parent;
         }
         p.reverse();
@@ -1189,13 +1174,14 @@ fn resolve_link(t: &Tree, by_name: &ByName, i: usize, within: Option<&[Vec<u8>]>
     let mut budget = t.entries.len() + 1;
     fn resolve(
         t: &Tree,
+        names: &Names,
         dir: Vec<Name>,
         target: &[u8],
         budget: &mut usize,
         find: &dyn Fn(&[Name]) -> Vec<usize>,
         path_of: &dyn Fn(Option<usize>) -> Vec<Name>,
     ) -> Result<Vec<Name>, Refused> {
-        let (bytes, _) = name_bytes(target);
+        let (bytes, raw) = name_bytes(target);
         if bytes.starts_with(b"/") || (cfg!(windows) && bytes.get(1) == Some(&b':')) {
             return Err(Refused::Out);
         }
@@ -1207,8 +1193,8 @@ fn resolve_link(t: &Tree, by_name: &ByName, i: usize, within: Option<&[Vec<u8>]>
                     at.pop().ok_or(Refused::Out)?;
                 }
                 name => {
-                    let os = os_name(name).0;
-                    let n = Name::of(name);
+                    let os = names.part(name, raw).os;
+                    let n = Name::of(&os);
                     // (a short name of FAT or NTFS made, which could be any long name's of the
                     // directory)
                     let made = n.short.as_deref().is_some_and(made_short) || cfg!(windows) && name.contains(&b'~');
@@ -1218,12 +1204,12 @@ fn resolve_link(t: &Tree, by_name: &ByName, i: usize, within: Option<&[Vec<u8>]>
                     let link = |&j: &usize| matches!(t.entries[j].node, EntryNode::Link(_));
                     if there.iter().any(link) {
                         let [j] = there[..] else { return Err(unsure()) };
-                        if os_name(name_bytes(&t.entries[j].name).0).0 != os {
+                        if names.name(&t.entries[j].name).os != os {
                             return Err(unsure());
                         }
                         let EntryNode::Link(next) = &t.entries[j].node else { unreachable!() };
                         *budget = budget.checked_sub(1).ok_or(Refused::Out)?;
-                        at = resolve(t, path_of(t.entries[j].parent), next, budget, find, path_of)?;
+                        at = resolve(t, names, path_of(t.entries[j].parent), next, budget, find, path_of)?;
                     } else if made && there.is_empty() {
                         return Err(unsure());
                     }
@@ -1233,9 +1219,9 @@ fn resolve_link(t: &Tree, by_name: &ByName, i: usize, within: Option<&[Vec<u8>]>
         Ok(at)
     }
     let EntryNode::Link(target) = &t.entries[i].node else { return Ok(None) };
-    let p = resolve(t, path_of(t.entries[i].parent), target, &mut budget, &find, &path_of)?;
+    let p = resolve(t, names, path_of(t.entries[i].parent), target, &mut budget, &find, &path_of)?;
     if let Some(w) = within {
-        let within = p.len() >= w.len() && w.iter().zip(&p).all(|(n, m)| Name::of(name_bytes(n).0).fold == m.fold);
+        let within = p.len() >= w.len() && w.iter().zip(&p).all(|(n, m)| Name::of(&names.name(n).os).fold == m.fold);
         if !within {
             return Err(Refused::Out);
         }

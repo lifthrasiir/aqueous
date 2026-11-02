@@ -54,6 +54,12 @@
 //!   opened those before it, else asks for one where there is a terminal or a frontend
 //!   ([`pass`]). Without a terminal, `-P` takes a line of standard input. An empty passphrase
 //!   is a passphrase too.
+//! - `-E`, `--normalize`, `--bad-names`: decompressing, how the archives' names are written
+//!   ([`names`], `docs/names-design.md`): names of no declared encoding decoded from the set
+//!   given, guessed (`auto`), or kept as bytes (`raw`); Unicode names composed (`auto`: but on
+//!   macOS), `nfc`, `nfd` or kept; and names this system cannot write as they are kept as bytes
+//!   where it takes them, replaced (`%XX`, U+FFFD, `_`), or failed. What was guessed or done is
+//!   told.
 //! - `--wasm`: in decoding, every module run as WebAssembly, the known ones too (natively
 //!   otherwise).
 //! - `--no-sandbox`: in decoding, the modules not known run in this process. By default they
@@ -114,6 +120,7 @@ mod fold;
 mod ipc;
 mod list;
 mod meta;
+mod names;
 mod pass;
 mod stats;
 mod stop;
@@ -190,6 +197,14 @@ Compression:
       --no-check        do not decode the archive made to check it
 
 Decompression:
+  -E, --encoding ENC    names of no declared encoding: auto (the default: as bytes where
+                        this system takes them, else decoded from a set guessed), raw
+                        (as bytes), system, or sets (shift_jis, euc-kr, gbk, big5,
+                        cp437, ...; several: guessed among them)
+      --normalize FORM  auto (the default: composed, but on macOS), nfc, nfd or keep
+      --bad-names WHAT  names not written as they are: auto (the default), keep (as
+                        bytes, where this system takes them), replace (%XX, U+FFFD,
+                        _ for what Windows does not take), or fail
       --wasm            run every module as WebAssembly, the known ones too
       --no-sandbox      run the Wasm modules (the ones not known, or all with --wasm)
                         in this process, not in workers locked down by the system;
@@ -244,6 +259,8 @@ struct Args {
     /// Decompressing some paths of the archive: each path (names as the tree has them), and
     /// where it goes where `--rename` tells.
     select: Option<extract::Selection>,
+    /// Decompressing, how names are written (`-E`, `--normalize`, `--bad-names`).
+    names: names::Opts,
 }
 
 /// The format of the archives made: Aqueous, or another of [`aqr_pack`] at its level.
@@ -345,6 +362,7 @@ fn parse() -> Result<Args, String> {
         passphrase: false,
         each: false,
         select: None,
+        names: names::Opts::default(),
     };
     // (by the number of inputs before it, `--rename`'s place and value)
     let mut renames: Vec<(usize, PathBuf)> = Vec::new();
@@ -409,6 +427,9 @@ fn parse() -> Result<Args, String> {
             "-P" | "--passphrase" => a.passphrase = true,
             "--each" => a.each = true,
             "--rename" => renames.push((a.inputs.len(), value("--rename")?.into())),
+            "-E" | "--encoding" => a.names.encoding = aqr_unpack::Choice::parse(&text(value("-E")?))?,
+            "--normalize" => a.names.normalize = names::Opts::normalize(&text(value("--normalize")?))?,
+            "--bad-names" => a.names.bad = names::Opts::bad(&text(value("--bad-names")?))?,
             s if s.starts_with("--stats=") => {
                 let to = &arg.as_encoded_bytes()["--stats=".len()..];
                 // SAFETY: split after ASCII, of an `OsStr`'s bytes
@@ -1484,7 +1505,8 @@ fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Forma
     let file = fs::File::open(input).map_err(|e| err(&e))?;
     // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
     let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
-    let mut opened = aqr_unpack::Opened::open(format, &c).map_err(|e| err(&e))?;
+    let mut opened = aqr_unpack::Opened::open_with(format, &c, &a.names.encoding).map_err(|e| err(&e))?;
+    tell_names(a, input, opened.names_told());
     if a.select.is_some() && !opened.is_tree() {
         return Err(err(&"a single file, not an archive of paths"));
     }
@@ -1562,7 +1584,7 @@ fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Forma
         let r = ticking(a, &view, || -> Result<_, String> {
             let x = match place {
                 None => None,
-                Some(p) => Some(extract::Extractor::new(p, force, &ap, &seen, a.select.clone())?),
+                Some(p) => Some(extract::Extractor::new(p, force, &ap, &seen, a.select.clone(), &a.names)?),
             };
             let sink =
                 Unpacking { x: x.as_ref(), input, quiet: a.quiet, view: shown, seen: &seen, sizes: Default::default() };
@@ -1578,6 +1600,9 @@ fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Forma
             }
             let picked = a.select.as_ref().map(|s| s.picked(&done.tree));
             let sizes = sink.sizes.into_inner().unwrap();
+            if let Some(x) = &x {
+                tell_names(a, input, x.names_told());
+            }
             let (n, total, out) = match x {
                 Some(x) => match x.finish(&done.tree)? {
                     Some((n, t, o)) => (n, t, Some(o)),
@@ -1763,7 +1788,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<(), String> {
         Some(t) => {
             let ap = meta::Applier { privileged: a.preserve, quiet: a.quiet };
             let r = ticking(a, &*view, || {
-                let x = extract::Extractor::new(place.unwrap(), force, &ap, &seen, a.select.clone())?;
+                let x = extract::Extractor::new(place.unwrap(), force, &ap, &seen, a.select.clone(), &a.names)?;
                 match x.entries(t, &(0..t.entries.len()).collect::<Vec<_>>()) {
                     Err(_) if x.skipped() => return Ok(None),
                     r => r?,
@@ -1771,6 +1796,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<(), String> {
                 archive
                     .contents_of(a.opt.threads, wanted.as_deref(), |c, d| x.content(c, d).map_err(Failure::Resource))
                     .map_err(|e| e.to_string())?;
+                tell_names(a, input, x.names_told());
                 x.finish(t)
             })?;
             match r {
@@ -1909,6 +1935,13 @@ impl aqr::Runner for Decoder {
 }
 
 /// The summary of an archive decoded into `out` (`None`: tested).
+/// What was told of the names of archive `input` ([`names`]), on standard error (but with `-q`).
+fn tell_names(a: &Args, input: &Path, told: impl IntoIterator<Item = String>) {
+    if !a.quiet {
+        told.into_iter().for_each(|t| eprintln!("{}: {t}", input.display()));
+    }
+}
+
 fn summary_d(input: &Path, out: Option<&Path>, files: usize, total: u64, start: Instant) {
     let t = start.elapsed().as_secs_f64();
     let to = match out {

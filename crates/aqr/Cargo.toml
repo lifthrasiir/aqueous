@@ -9,6 +9,7 @@ publish = false
 aqr-common = { path = "../aqr-common" }
 aqr-compress = { path = "../aqr-compress" }
 aqr-decompress = { path = "../aqr-decompress" }
+aqr-foreign = { path = "../aqr-foreign" }
 aqr-formula = { path = "../aqr-formula" }
 aqr-ipc = { path = "../aqr-ipc" }
 aqr-pack = { path = "../aqr-pack" }
@@ -22,6 +23,9 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console"] }
+
+[dev-dependencies]
+encoding_rs = "0.8"
 
 [build-dependencies]
 aqr-version = { path = "../aqr-version" }
