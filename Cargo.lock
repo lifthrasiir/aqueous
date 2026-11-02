@@ -64,6 +64,7 @@ dependencies = [
  "aqr-compress",
  "aqr-decompress",
  "aqr-formula",
+ "aqr-pack",
  "aqr-unpack",
  "aqr-version",
  "embed-resource",
@@ -688,6 +689,18 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "aqr-vorbis",
+]
+
+[[package]]
+name = "aqr-pack"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-flate",
+ "aqr-formula",
+ "aqr-unpack",
+ "libc",
+ "windows-sys",
 ]
 
 [[package]]

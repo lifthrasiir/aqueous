@@ -1,0 +1,20 @@
+[package]
+name = "aqr-pack"
+version = "0.1.0"
+edition = "2024"
+description = "A tree written as an archive of another format (ZIP), for aqr -c"
+publish = false
+
+[dependencies]
+aqr-common = { path = "../aqr-common" }
+aqr-flate = { path = "../../codecs/aqr-flate", default-features = false }
+aqr-formula = { path = "../aqr-formula" }
+
+[dev-dependencies]
+aqr-unpack = { path = "../aqr-unpack" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Time"] }

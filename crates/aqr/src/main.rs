@@ -14,6 +14,11 @@
 //!   with `..` by its last name alone, as 7-Zip does (tar, zip and RAR would keep an absolute
 //!   path whole, but the frontends give absolute paths); `--rename TO` after an input has it at
 //!   `TO` (`/` between names) instead. Two inputs of the same path are an error.
+//! - `--format zip` (or `-o` of a name ending in `.zip`): a ZIP archive instead
+//!   ([`aqr_pack::zip`]), `INPUT.zip` without `-o`; a single input in it by its name (a
+//!   directory with what it holds under it, as 7-Zip and `zip -r` have it). `-l` is zlib's
+//!   level there (0 stored, 6 the default). What ZIP does not keep (FIFOs, devices, extended
+//!   attributes, forks) is told; `-P` is not taken yet.
 //! - `-d` (the default as `unaqr`): an archive into its name without `.aqr`, or `-o`. An
 //!   archive of another format, by its name (ZIP, 7z, RAR, ALZ, EGG, tar alone or under gzip, bzip2,
 //!   xz, LZMA or Zstandard, and those compressors' single files: [`aqr_unpack::by_name`]), is extracted
@@ -137,6 +142,8 @@ Compressing (aqr -o ARCHIVE INPUT [--rename TO]...):
                         a relative one as given, an absolute one or one with .. by
                         its last name
       --rename TO       after an INPUT: that one archived at TO (names between /)
+      --format FORMAT   aqr (the default) or zip (also by -o NAME.zip); zip's -l
+                        is zlib's level (0-9, default 6)
 
 Decompressing some paths (aqr -d ARCHIVE PATH [--rename TO]...):
   PATH                  a path in the archive (a directory with what is under it),
@@ -211,6 +218,10 @@ struct Args {
     stats: Option<stats::Stats>,
     /// Driven by a frontend ([`ipc`]).
     ipc: bool,
+    /// Compressing, into archives of this format (`--format`, or `-o`'s name).
+    format: Pack,
+    /// `-l` given (ZIP's level otherwise zlib's default).
+    leveled: bool,
     /// `-P`: compressing, the archives encrypted with a passphrase asked for; decompressing,
     /// the passphrase asked for before the archives need it ([`pass`]).
     passphrase: bool,
@@ -219,6 +230,23 @@ struct Args {
     /// Decompressing some paths of the archive: each path (names as the tree has them), and
     /// where it goes where `--rename` tells.
     select: Option<extract::Selection>,
+}
+
+/// The format of the archives made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pack {
+    Aqr,
+    Zip,
+}
+
+impl Pack {
+    /// The extension of its archives.
+    fn ext(self) -> &'static str {
+        match self {
+            Pack::Aqr => ".aqr",
+            Pack::Zip => ".zip",
+        }
+    }
 }
 
 /// The bytes of the leaves decoded at once ([`aqr::Archive::set_budget`]). On 10gb (10
@@ -293,6 +321,8 @@ fn parse() -> Result<Args, String> {
         renames: Vec::new(),
         stats: None,
         ipc: false,
+        format: Pack::Aqr,
+        leveled: false,
         passphrase: false,
         each: false,
         select: None,
@@ -301,6 +331,7 @@ fn parse() -> Result<Args, String> {
     let mut renames: Vec<(usize, PathBuf)> = Vec::new();
     let (mut stats, mut stats_to) = (false, Vec::new());
     let mut only_inputs = false;
+    let mut format = None;
     while let Some(arg) = argv.next() {
         let s = arg.to_string_lossy();
         if only_inputs || !s.starts_with('-') || s == "-" {
@@ -332,7 +363,14 @@ fn parse() -> Result<Args, String> {
             "-q" | "--quiet" => a.quiet = true,
             "-v" | "--verbose" => a.verbose = true,
             "-T" => a.opt.threads = value("-T")?.parse().map_err(|_| "-T takes a number")?,
-            "-l" => a.opt.level = value("-l")?.parse()?,
+            "-l" => (a.opt.level, a.leveled) = (value("-l")?.parse()?, true),
+            "--format" => {
+                format = Some(match &*value("--format")? {
+                    "aqr" => Pack::Aqr,
+                    "zip" => Pack::Zip,
+                    f => return Err(format!("not a format to compress into (aqr or zip): {f}")),
+                })
+            }
             "--depth" => a.opt.depth = value("--depth")?.parse().map_err(|_| "--depth takes a number")?,
             "--batch" => {
                 let mib: usize = value("--batch")?.parse().map_err(|_| "--batch takes a number of MiB")?;
@@ -356,9 +394,9 @@ fn parse() -> Result<Args, String> {
             }
             // -T8 and the like
             s if s.starts_with("-T") => a.opt.threads = s[2..].parse().map_err(|_| "-T takes a number")?,
-            s if s.starts_with("-l") => a.opt.level = s[2..].parse()?,
+            s if s.starts_with("-l") => (a.opt.level, a.leveled) = (s[2..].parse()?, true),
             // -0 to -9, and whatever level of more digits there may be (one level, not several)
-            s if s[1..].bytes().all(|b| b.is_ascii_digit()) => a.opt.level = s[1..].parse()?,
+            s if s[1..].bytes().all(|b| b.is_ascii_digit()) => (a.opt.level, a.leveled) = (s[1..].parse()?, true),
             s => return Err(format!("unknown option {s}")),
         }
     }
@@ -374,6 +412,16 @@ fn parse() -> Result<Args, String> {
     if !a.decompress {
         if a.each {
             return Err("--each is for decompressing".into());
+        }
+        let zip_named = a.output.as_ref().and_then(|o| o.extension()).is_some_and(|e| e.eq_ignore_ascii_case("zip"));
+        a.format = format.unwrap_or(if zip_named { Pack::Zip } else { Pack::Aqr });
+        if a.format == Pack::Zip {
+            if a.passphrase {
+                return Err("-P: ZIP archives are not encrypted yet".into());
+            }
+            if let aqr::Level::Zstd(_) = a.opt.level {
+                return Err("zstd levels are not ZIP's (-l 0-9)".into());
+            }
         }
         a.renames = vec![None; a.inputs.len()];
         for (n, to) in renames {
@@ -507,7 +555,8 @@ fn compress_all(a: &Args) -> Result<(), String> {
                 if input.as_os_str() == "-" {
                     return Err("standard input is not taken yet".into());
                 }
-                compress_into(a, std::slice::from_ref(input), std::slice::from_ref(to), &with_ext(input, ".aqr"))?;
+                let out = with_ext(input, a.format.ext());
+                compress_into(a, std::slice::from_ref(input), std::slice::from_ref(to), &out)?;
             }
             Ok(())
         }
@@ -595,6 +644,9 @@ impl aqr_compress::Source for Gathered {
 
 /// Compresses `inputs` into `out`, each in the archive at the path `renames` gives it, if any.
 fn compress_into(a: &Args, inputs: &[PathBuf], renames: &[Option<PathBuf>], out: &Path) -> Result<(), String> {
+    if a.format == Pack::Zip {
+        return pack_into(a, inputs, renames, out);
+    }
     let Some(force) = output(a, out)? else { return Ok(()) };
     begin("compress", inputs, Some(out));
     let start = Instant::now();
@@ -752,6 +804,76 @@ fn compress_into(a: &Args, inputs: &[PathBuf], renames: &[Option<PathBuf>], out:
         });
     }
     Ok(())
+}
+
+/// Compresses `inputs` into ZIP archive `out` ([`aqr_pack::zip`]), each at the path `renames`
+/// gives it; a single one not renamed at its name.
+fn pack_into(a: &Args, inputs: &[PathBuf], renames: &[Option<PathBuf>], out: &Path) -> Result<(), String> {
+    let Some(force) = output(a, out)? else { return Ok(()) };
+    begin("compress", inputs, Some(out));
+    let start = Instant::now();
+    let renames = match (inputs, renames) {
+        ([input], [None]) => vec![input.file_name().map(PathBuf::from)],
+        _ => renames.to_vec(),
+    };
+    let mapper = Mapper::new().map_err(|e| format!("files not to be mapped: {e}"))?;
+    let mut g = Gathered::new(mapper, a.preserve);
+    let listing = view::Listing::new(bars());
+    let gathered = ticking(a, &listing, || -> Result<(), String> {
+        gather(inputs, &renames, &mut g, &listing, a.opt.threads)?;
+        listing.finish();
+        Ok(())
+    });
+    listing.finish();
+    gathered?;
+    if g.tree.entries.is_empty() {
+        return Err(format!("nothing to archive in {}", inputs[0].display()));
+    }
+    if !a.quiet {
+        g.skipped.iter().for_each(|s| eprintln!("skipped {s}"));
+        g.warnings.iter().for_each(|w| eprintln!("{w}"));
+    }
+    let level = match a.opt.level {
+        _ if !a.leveled => 6,
+        aqr::Level::Of(n) => n,
+        aqr::Level::Zstd(_) => unreachable!("refused as the arguments are read"),
+    };
+    let o = aqr_pack::zip::Options { level, threads: a.opt.threads, batch: a.opt.batch as u64 };
+    let view = view::View::new(&g, bars(), false);
+    let w = write_whole(out, force, |file| {
+        let mut w = std::io::BufWriter::with_capacity(8 << 20, file);
+        let r = viewed(a, &view, |tell| {
+            aqr_pack::zip::write(&g.tree, &g, &o, &mut w, &|p| match p {
+                aqr_pack::Progress::Started(c) => tell(aqr_compress::Event::Started(c)),
+                aqr_pack::Progress::Ended(c) => tell(aqr_compress::Event::Ended(c)),
+                aqr_pack::Progress::Done { done, total } => {
+                    tell(aqr_compress::Event::Analysis { done, total });
+                    tell(aqr_compress::Event::Compression { done, total });
+                }
+            })
+        })?;
+        w.flush()?;
+        (0..g.contents.len()).try_for_each(|c| aqr_compress::Source::intact(&g, c))?;
+        Ok(r)
+    })?;
+    let files = g.tree.entries.iter().filter(|e| matches!(e.node, EntryNode::File(_))).count();
+    if !a.quiet {
+        w.notes.iter().for_each(|n| eprintln!("{n}"));
+        summary(out, files, w.read as usize, w.len as usize, start);
+    }
+    end(Some(out), files, w.read, w.len, start);
+    Ok(())
+}
+
+/// The contents of `Gathered` as aqr-pack reads them.
+impl aqr_pack::Contents for Gathered {
+    fn size(&self, c: usize) -> u64 {
+        self.contents[c].2
+    }
+
+    fn read(&self, c: usize) -> std::io::Result<Bytes> {
+        aqr_compress::Source::read(self, c)
+    }
 }
 
 /// An archive written to `file`, encrypted with passphrase `p` ([`aqr::envelope`]): with
