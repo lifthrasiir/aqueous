@@ -8,12 +8,12 @@ const FILETIME_EPOCH: i64 = 11_644_473_600;
 
 /// A FILETIME (100 ns since 1601-01-01 UTC); `None` where it is 0 (none).
 pub fn filetime(t: u64) -> Option<Time> {
-    (t != 0).then(|| Time { secs: (t / 10_000_000) as i64 - FILETIME_EPOCH, nanos: (t % 10_000_000) as u32 * 100 })
+    (t != 0).then(|| Time::new((t / 10_000_000) as i64 - FILETIME_EPOCH, (t % 10_000_000) as u32 * 100))
 }
 
 /// Seconds since 1970 (UTC).
 pub fn unix(secs: i64) -> Time {
-    Time { secs, nanos: 0 }
+    Time::new(secs, 0)
 }
 
 /// An MS-DOS date and time (2-second steps), as local time here: `None` where it is not a
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn times() {
-        assert_eq!(filetime(116_444_736_000_000_000 + 15), Some(Time { secs: 0, nanos: 1500 }));
+        assert_eq!(filetime(116_444_736_000_000_000 + 15), Some(Time::new(0, 1500)));
         assert_eq!(filetime(0), None);
         // 2020-02-29 12:34:56, within a day of its UTC time wherever this runs
         let t = dos((40 << 9) | (2 << 5) | 29, (12 << 11) | (34 << 5) | 28).unwrap();

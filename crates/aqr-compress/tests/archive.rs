@@ -77,7 +77,7 @@ fn tree_of(files: &[(&str, Vec<u8>)]) -> (Tree, Vec<(String, Vec<u8>)>) {
                 }
             });
         }
-        let mtime = Some(Time { secs: 1_700_000_000 + contents.len() as i64, nanos: 1 });
+        let mtime = Some(Time::new(1_700_000_000 + contents.len() as i64, 1));
         let extra = Extra { mtime, mode: Some(0o644), ..Extra::default() };
         let name = parts[parts.len() - 1].into();
         t.entries.push(Entry { parent, name, node: EntryNode::File(contents.len()), extra });

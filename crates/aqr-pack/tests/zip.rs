@@ -71,7 +71,7 @@ fn listed(t: &Tree, contents: &[Vec<u8>]) -> BTreeMap<String, (String, Option<Ti
 
 #[test]
 fn round_trip() {
-    let t0 = Time { secs: 1_700_000_000, nanos: 123_456_700 };
+    let t0 = Time::new(1_700_000_000, 123_456_700);
     let x = |mode: Option<u32>| Extra { mtime: Some(t0), mode, ..Extra::default() };
     let text: Vec<u8> = (0..5000).flat_map(|i| format!("line {i}\n").into_bytes()).collect();
     let noise: Vec<u8> = (0..3000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
@@ -118,7 +118,7 @@ fn round_trip() {
 #[test]
 fn read_by_python() {
     let files = Files(vec![b"hello\n".repeat(100), (0..10).collect()]);
-    let x = Extra { mtime: Some(Time { secs: 1_600_000_000, nanos: 0 }), mode: Some(0o640), ..Extra::default() };
+    let x = Extra { mtime: Some(Time::new(1_600_000_000, 0)), mode: Some(0o640), ..Extra::default() };
     let tree = Tree {
         root: Extra::default(),
         entries: vec![

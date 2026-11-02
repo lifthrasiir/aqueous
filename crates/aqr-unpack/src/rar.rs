@@ -62,7 +62,7 @@ pub struct Listing<'d> {
 /// A RAR5 header's time.
 fn time5(t: rar5::Time) -> Option<Time> {
     match t {
-        rar5::Time::Unix(s, ns) => Some(Time { secs: s as i64, nanos: ns }),
+        rar5::Time::Unix(s, ns) => Some(Time::new(s as i64, ns)),
         rar5::Time::Filetime(t) => sys::filetime(t),
     }
 }
@@ -71,7 +71,7 @@ fn time5(t: rar5::Time) -> Option<Time> {
 fn time4(t: (u32, u32)) -> Option<Time> {
     let base = sys::dos((t.0 >> 16) as u16, t.0 as u16)?;
     let ns = base.nanos as u64 + t.1 as u64;
-    Some(Time { secs: base.secs + (ns / 1_000_000_000) as i64, nanos: (ns % 1_000_000_000) as u32 })
+    Some(Time::new(base.secs + (ns / 1_000_000_000) as i64, (ns % 1_000_000_000) as u32))
 }
 
 /// What a file of the listing is.

@@ -120,7 +120,7 @@ impl Reader {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            let t = |secs: i64, nanos: i64| Some(Time { secs, nanos: nanos as u32 });
+            let t = |secs: i64, nanos: i64| Some(Time::new(secs, nanos as u32));
             x.atime = t(m.atime(), m.atime_nsec());
             x.mtime = t(m.mtime(), m.mtime_nsec());
             if self.privileged {
@@ -290,11 +290,11 @@ pub fn special(m: &fs::Metadata) -> Option<EntryNode> {
 
 fn time_of(t: std::time::SystemTime) -> Time {
     match t.duration_since(std::time::UNIX_EPOCH) {
-        Ok(d) => Time { secs: d.as_secs() as i64, nanos: d.subsec_nanos() },
+        Ok(d) => Time::new(d.as_secs() as i64, d.subsec_nanos()),
         Err(e) => {
             let d = e.duration();
             let (s, n) = (d.as_secs() as i64, d.subsec_nanos());
-            if n == 0 { Time { secs: -s, nanos: 0 } } else { Time { secs: -s - 1, nanos: 1_000_000_000 - n } }
+            if n == 0 { Time::new(-s, 0) } else { Time::new(-s - 1, 1_000_000_000 - n) }
         }
     }
 }
@@ -347,6 +347,7 @@ impl Applier {
     /// order (spec, "Extraction"). Fails where its permissions or times cannot be set, or its
     /// owner where asked.
     pub fn apply(&self, path: &Path, kind: Kind, x: &Extra) -> Result<(), String> {
+        let x = &*x.instants();
         let err = |e: std::io::Error| format!("{}: {e}", path.display());
         // (the attributes the forks are written as)
         #[cfg(unix)]
@@ -407,6 +408,7 @@ impl Applier {
     /// times and attributes set through `f`, in one call (rather than by opening it twice more);
     /// elsewhere as `apply` does.
     pub fn apply_file(&self, f: &fs::File, path: &Path, x: &Extra) -> Result<(), String> {
+        let x = &*x.instants();
         #[cfg(windows)]
         {
             let _ = self;
@@ -692,7 +694,7 @@ mod os {
         let r = unsafe {
             libc::getattrlist(p.as_ptr(), (&raw mut a).cast(), (&raw mut b).cast(), size, libc::FSOPT_NOFOLLOW)
         };
-        (r == 0 && (b.t.tv_sec, b.t.tv_nsec) != (0, 0)).then_some(Time { secs: b.t.tv_sec, nanos: b.t.tv_nsec as u32 })
+        (r == 0 && (b.t.tv_sec, b.t.tv_nsec) != (0, 0)).then_some(Time::new(b.t.tv_sec, b.t.tv_nsec as u32))
     }
 
     /// Sets common attribute `attr` (a time) of `path` (not followed) to `t`.

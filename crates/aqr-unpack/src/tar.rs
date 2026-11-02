@@ -158,9 +158,9 @@ fn pax_time(v: &[u8]) -> Option<Time> {
         nanos += (c.checked_sub(b'0').filter(|&d| d < 10)? as u32) * 10u32.pow(8 - k as u32);
     }
     Some(match (neg, nanos) {
-        (false, _) => Time { secs, nanos },
-        (true, 0) => Time { secs: -secs, nanos: 0 },
-        (true, n) => Time { secs: -secs - 1, nanos: 1_000_000_000 - n },
+        (false, _) => Time::new(secs, nanos),
+        (true, 0) => Time::new(-secs, 0),
+        (true, n) => Time::new(-secs - 1, 1_000_000_000 - n),
     })
 }
 
@@ -344,7 +344,7 @@ impl<'s> Parser<'s> {
             path = [string(&b[345..500]), b"/", &path].concat();
         }
         let field = |r: std::ops::Range<usize>| number(&b[r]);
-        let mut x = Extra { mtime: field(136..148).map(|t| Time { secs: t as i64, nanos: 0 }), ..Extra::default() };
+        let mut x = Extra { mtime: field(136..148).map(|t| Time::new(t as i64, 0)), ..Extra::default() };
         x.mode = field(100..108).map(|m| m as u32 & 0o7777);
         x.uid = field(108..116);
         x.gid = field(116..124);
@@ -354,7 +354,7 @@ impl<'s> Parser<'s> {
             x.gname = name(297..329);
         }
         if gnu {
-            let t = |r: std::ops::Range<usize>| field(r).filter(|&t| t != 0).map(|t| Time { secs: t as i64, nanos: 0 });
+            let t = |r: std::ops::Range<usize>| field(r).filter(|&t| t != 0).map(|t| Time::new(t as i64, 0));
             x.atime = t(345..357);
             x.ctime = t(357..369);
         }
@@ -620,9 +620,9 @@ mod tests {
 
     #[test]
     fn pax() {
-        assert_eq!(pax_time(b"1.5"), Some(Time { secs: 1, nanos: 500_000_000 }));
-        assert_eq!(pax_time(b"-1.25"), Some(Time { secs: -2, nanos: 750_000_000 }));
-        assert_eq!(pax_time(b"12"), Some(Time { secs: 12, nanos: 0 }));
+        assert_eq!(pax_time(b"1.5"), Some(Time::new(1, 500_000_000)));
+        assert_eq!(pax_time(b"-1.25"), Some(Time::new(-2, 750_000_000)));
+        assert_eq!(pax_time(b"12"), Some(Time::new(12, 0)));
         let r = pax_records(b"12 path=a/b\n16 uname=\xea\xb0\x80\xea\xb0\x80\n").unwrap();
         assert_eq!(r[0], (b"path".to_vec(), b"a/b".to_vec()));
         assert_eq!(r[1].1, "가가".as_bytes());

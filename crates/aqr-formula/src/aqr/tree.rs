@@ -91,6 +91,20 @@ impl Extra {
     pub fn is_empty(&self) -> bool {
         *self == Extra::default()
     }
+
+    /// Of the times, only the points in time: the local times of an unknown time zone left out,
+    /// as what applies them to files takes them.
+    pub fn instants(&self) -> Cow<'_, Extra> {
+        let times = [self.crtime, self.ctime, self.mtime, self.atime, self.arctime];
+        if times.iter().flatten().all(Time::is_instant) {
+            return Cow::Borrowed(self);
+        }
+        let mut x = self.clone();
+        for t in [&mut x.crtime, &mut x.ctime, &mut x.mtime, &mut x.atime, &mut x.arctime] {
+            *t = t.filter(Time::is_instant);
+        }
+        Cow::Owned(x)
+    }
 }
 
 /// The bits `win-attrs` may have: read-only, hidden, system, archive, temporary and not
@@ -100,11 +114,62 @@ pub const WIN_ATTRS_ALLOWED: u32 = 0x1 | 0x2 | 0x4 | 0x20 | 0x100 | 0x2000;
 /// `UF_HIDDEN`, `SF_ARCHIVED`, `SF_IMMUTABLE`, `SF_APPEND` and `SF_NOUNLINK`.
 pub const MAC_FLAGS_ALLOWED: u32 = 0xf | 0x8000 | 0x1_0000 | 0x2_0000 | 0x4_0000 | 0x10_0000;
 
-/// A point in time, as seconds and nanoseconds since 1970-01-01T00:00:00Z.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// An `aqr-time` this crate reads: seconds and nanoseconds since 1970-01-01T00:00:00Z (a local
+/// time in an unknown time zone as if it were UTC), with what it tells of its time zone and its
+/// quantization interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Time {
     pub secs: i64,
     pub nanos: u32,
+    pub zone: Zone,
+    /// The quantization interval, in nanoseconds: the scale of its encoding (1, a nanosecond, up
+    /// to a day's).
+    pub unit: u64,
+}
+
+/// What an `aqr-time` tells of its time zone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Zone {
+    /// A point in time, of no time zone told.
+    Utc,
+    /// A point in time, recorded where the offset from UTC was this many 15 minutes (east
+    /// positive).
+    Offset(i8),
+    /// A local time in an unknown time zone: no point in time.
+    Local,
+}
+
+impl Time {
+    /// A point in time of nanoseconds, of no time zone told.
+    pub const fn new(secs: i64, nanos: u32) -> Time {
+        Time { secs, nanos, zone: Zone::Utc, unit: 1 }
+    }
+
+    /// Whether it is a point in time (not a local time of an unknown time zone).
+    pub fn is_instant(&self) -> bool {
+        self.zone != Zone::Local
+    }
+
+    /// The date and time of day as recorded (of UTC where no time zone is told; at its offset
+    /// where one is; a local time as it is): year, month, day, hour, minute and second.
+    pub fn civil(&self) -> (i64, u32, u32, u32, u32, u32) {
+        let secs = match self.zone {
+            Zone::Offset(o) => self.secs.saturating_add(900 * o as i64),
+            _ => self.secs,
+        };
+        let (days, s) = (secs.div_euclid(86400), secs.rem_euclid(86400) as u32);
+        // (Howard Hinnant's days_from_civil, inverted)
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z.rem_euclid(146_097);
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+        let y = yoe + era * 400 + (m <= 2) as i64;
+        (y, m, d, s / 3600, s / 60 % 60, s % 60)
+    }
 }
 
 /// The encoding of an entry name or link target of `bytes`: as they are where they are UTF-8
@@ -458,11 +523,33 @@ fn extra(out: &mut Vec<u8>, e: &Extra, fork_at: &dyn Fn(usize) -> [u64; 3]) {
 /// this crate is given); in seconds where those do not fit an integer of CBOR.
 fn time_of(out: &mut Vec<u8>, t: Time) {
     let ns = t.secs as i128 * 1_000_000_000 + t.nanos as i128;
-    if (-(1i128 << 64)..1i128 << 64).contains(&ns) {
-        head(out, 6, TAG_NS);
-        int(out, ns);
-    } else {
-        int(out, t.secs as i128);
+    // (a day has no offset: of seconds then)
+    let unit = match t.zone {
+        Zone::Offset(_) if t.unit == DAY => 1_000_000_000,
+        _ => t.unit as i128,
+    };
+    match t.zone {
+        Zone::Utc => {}
+        Zone::Offset(_) => head(out, 4, 2),
+        Zone::Local => head(out, 4, 1),
+    }
+    let scaled = TAG_SCALES
+        .iter()
+        .find(|s| s.1 == unit && ns % unit == 0 && (-(1i128 << 64)..1i128 << 64).contains(&(ns / unit)));
+    match scaled {
+        Some(_) if unit == 1_000_000_000 => int(out, ns / unit),
+        Some(&(tag, unit)) => {
+            head(out, 6, tag);
+            int(out, ns / unit);
+        }
+        None if (-(1i128 << 64)..1i128 << 64).contains(&ns) => {
+            head(out, 6, TAG_NS);
+            int(out, ns);
+        }
+        None => int(out, t.secs as i128),
+    }
+    if let Zone::Offset(o) = t.zone {
+        int(out, o as i128);
     }
 }
 
@@ -501,9 +588,13 @@ const NULL: u8 = 0xf6;
 const TAG_WTF8: u64 = 273;
 /// The tags of `$aqr-instant` and `#6.100`, by their scale in nanoseconds.
 const TAG_NS: u64 = 126;
-const TAG_SCALES: [(u64, i128); 7] = [
-    (100, 86400 * 1_000_000_000),
+/// A day, in nanoseconds: the scale of tag 100.
+const DAY: u64 = 86400 * 1_000_000_000;
+const TAG_SCALES: [(u64, i128); 8] = [
+    (100, DAY as i128),
     (121, 2_000_000_000),
+    // (untagged)
+    (u64::MAX, 1_000_000_000),
     (122, 10_000_000),
     (123, 1_000_000),
     (124, 1_000),
@@ -1026,19 +1117,48 @@ fn aqr_text(c: Cbor) -> Decoded<Cow<[u8]>> {
     }
 }
 
-/// The UTC time of an `aqr-time`, where it is a base time this crate reads (else `None`: a
-/// local time, or an extended one).
+/// An `aqr-time`, where it is one this crate reads (else `None`: an extended time).
 fn time(t: &Cbor) -> Option<Time> {
-    let ns = match *t {
-        Cbor::Int(s) => s.checked_mul(1_000_000_000)?,
-        Cbor::Tag(tag, v) => {
-            let Cbor::Int(v) = v.first() else { return None };
-            v.checked_mul(TAG_SCALES.iter().find(|s| s.0 == tag)?.1)?
+    // a base time: in nanoseconds, and its scale
+    let base = |t: &Cbor| -> Option<(i128, i128)> {
+        let scale = match *t {
+            Cbor::Int(_) => 1_000_000_000,
+            Cbor::Tag(tag, _) => TAG_SCALES.iter().find(|s| s.0 == tag)?.1,
+            _ => return None,
+        };
+        let v = match t {
+            Cbor::Int(v) => *v,
+            Cbor::Tag(_, v) => match v.first() {
+                Cbor::Int(v) => v,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        Some((v.checked_mul(scale)?, scale))
+    };
+    let (ns, unit, zone) = match t {
+        Cbor::Array(a) => {
+            let mut items = a.iter();
+            let (b, offset) = (items.next()?, items.next());
+            if items.next().is_some() {
+                return None;
+            }
+            let (ns, unit) = base(&b)?;
+            match offset {
+                None => (ns, unit, Zone::Local),
+                Some(Cbor::Int(o)) if (-48..=56).contains(&o) && unit != DAY as i128 => {
+                    (ns, unit, Zone::Offset(o as i8))
+                }
+                Some(_) => return None,
+            }
         }
-        _ => return None,
+        t => {
+            let (ns, unit) = base(t)?;
+            (ns, unit, Zone::Utc)
+        }
     };
     let secs = i64::try_from(ns.div_euclid(1_000_000_000)).ok()?;
-    Some(Time { secs, nanos: ns.rem_euclid(1_000_000_000) as u32 })
+    Some(Time { secs, nanos: ns.rem_euclid(1_000_000_000) as u32, zone, unit: unit as u64 })
 }
 
 /// A metadata block's internal structure read: the entries (by number) and the files'
@@ -1221,10 +1341,51 @@ mod tests {
     }
 
     #[test]
+    fn times_of_zones_and_units() {
+        let read = |d: &[u8]| -> Option<Time> {
+            let mut at = 0;
+            let c = item(d, &mut at, 0).unwrap();
+            assert_eq!(at, d.len());
+            time(&c)
+        };
+        let day = Time { unit: DAY, ..Time::new(86400 * 3, 0) };
+        let cases: [(&[u8], Option<Time>); 6] = [
+            // 100(3): a date
+            (&[0xd8, 100, 0x03], Some(day)),
+            // [100(3)]: a local date
+            (&[0x81, 0xd8, 100, 0x03], Some(Time { zone: Zone::Local, ..day })),
+            // [121(5), 36]: a point in time recorded at UTC+9, of 2 seconds
+            (
+                &[0x82, 0xd8, 121, 0x05, 0x18, 36],
+                Some(Time { zone: Zone::Offset(36), unit: 2_000_000_000, ..Time::new(10, 0) }),
+            ),
+            // [7, -48]: of seconds, at UTC-12
+            (&[0x82, 0x07, 0x38, 47], Some(Time { zone: Zone::Offset(-48), unit: 1_000_000_000, ..Time::new(7, 0) })),
+            // [100(3), 4]: a date has no offset; nor is 57 one
+            (&[0x82, 0xd8, 100, 0x03, 0x04], None),
+            (&[0x82, 0x07, 0x18, 57], None),
+        ];
+        for (d, want) in cases {
+            assert_eq!(read(d), want, "{d:02x?}");
+            if let Some(t) = want {
+                let mut out = Vec::new();
+                time_of(&mut out, t);
+                assert_eq!(out, d, "{t:?}");
+            }
+        }
+        assert_eq!(Time::new(0, 0).civil(), (1970, 1, 1, 0, 0, 0));
+        assert_eq!(Time::new(951_825_599, 0).civil(), (2000, 2, 29, 11, 59, 59));
+        assert_eq!(Time { zone: Zone::Offset(-4), ..Time::new(0, 0) }.civil(), (1969, 12, 31, 23, 0, 0));
+        assert_eq!(Time::new(-62_135_596_801, 0).civil(), (0, 12, 31, 23, 59, 59));
+        let x = Extra { mtime: Some(Time { zone: Zone::Local, ..day }), atime: Some(day), ..Extra::default() };
+        assert_eq!(*x.instants(), Extra { atime: Some(day), ..Extra::default() });
+    }
+
+    #[test]
     fn optional_metadata() {
         let mut t = Tree::default();
-        let x = Extra { mtime: Some(Time { secs: -5, nanos: 7 }), mode: Some(0o755), ..Extra::default() };
-        let y = Extra { mtime: Some(Time { secs: 1 << 40, nanos: 0 }), forks: vec![(b"f".to_vec(), 2)], ..x.clone() };
+        let x = Extra { mtime: Some(Time::new(-5, 7)), mode: Some(0o755), ..Extra::default() };
+        let y = Extra { mtime: Some(Time::new(1 << 40, 0)), forks: vec![(b"f".to_vec(), 2)], ..x.clone() };
         for (i, extra) in [Extra::default(), x, y].into_iter().enumerate() {
             let node = EntryNode::File(i);
             t.entries.push(Entry { parent: None, name: vec![b'a' + i as u8], node, extra });
@@ -1233,16 +1394,18 @@ mod tests {
         let c = optional(&t, &order, &|c| [c as u64 * 2, 0, 9]);
         let (got, forks) = extras(&c, 3).unwrap();
         assert_eq!(got[1..3], [t.entries[0].extra.clone(), t.entries[1].extra.clone()]);
-        assert_eq!(got[3], Extra { forks: Vec::new(), ..t.entries[2].extra.clone() });
+        // (a time beyond 64 bits of nanoseconds of seconds)
+        let seconds = Some(Time { unit: 1_000_000_000, ..Time::new(1 << 40, 0) });
+        assert_eq!(got[3], Extra { forks: Vec::new(), mtime: seconds, ..t.entries[2].extra.clone() });
         assert_eq!(forks[3], [(b"f".to_vec(), (4, 0, 9))]);
-        // (times always of nanoseconds)
+        // (times of nanoseconds as they are)
         assert!(c.windows(2).any(|w| w == [0xd8, 126]));
         let none = Tree { entries: t.entries[..1].to_vec(), ..Tree::default() };
         assert_eq!(optional(&none, &[0], &|_| unreachable!()), b"");
         // other keys, tags and indefinite lengths read
         let other = [0xbf, 0x21, 0x9f, 0xa1, 0x22, 0xd8, 0x79, 0x0a, 0xf6, 0xff, 0x01, 0x5f, 0x41, 0x00, 0xff, 0xff];
         let (got, _) = extras(&other, 2).unwrap();
-        assert_eq!(got[0].mtime, Some(Time { secs: 20, nanos: 0 }));
+        assert_eq!(got[0].mtime, Some(Time { unit: 2_000_000_000, ..Time::new(20, 0) }));
         // texts of each kind, and bad ones
         let names = [0xa1, 0x21, 0x81, 0xa1, 0x29, 0xa3, 0x61, b'a', 0x40, 0x41, 0xff, 0x40, 0xd9, 0x01, 0x11];
         let (got, _) = extras(&[&names[..], &[0x43, 0xed, 0xa0, 0x80, 0x40]].concat(), 1).unwrap();

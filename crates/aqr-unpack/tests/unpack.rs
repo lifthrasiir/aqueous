@@ -127,7 +127,7 @@ fn listing(done: &Done, r: &Rec) -> BTreeMap<String, (Node, Extra)> {
 }
 
 fn at(secs: i64) -> Option<Time> {
-    Some(Time { secs, nanos: 0 })
+    Some(Time::new(secs, 0))
 }
 
 #[test]
@@ -162,7 +162,7 @@ fn tar_trees() {
     assert_eq!(get("dir").1.mtime, at(1_400_000_000));
     assert_eq!(get("dir/file.txt").0, Node::File(text()));
     let x = &get("dir/file.txt").1;
-    assert_eq!(x.mtime, Some(Time { secs: 1_500_000_001, nanos: 250_000_000 }));
+    assert_eq!(x.mtime, Some(Time::new(1_500_000_001, 250_000_000)));
     assert_eq!(x.mode, Some(0o644));
     assert_eq!(x.xattrs, [(b"user.note"[..].into(), b"kept"[..].into())]);
     assert_eq!(get("dir/ro.txt").1.mode, Some(0o444));
@@ -316,7 +316,7 @@ fn rar_trees() {
         assert_eq!(get("dir").1.mtime, at(1_400_000_000), "{name}");
         assert_eq!(get("dir/file.txt").0, Node::File(text()), "{name}");
         let x = &get("dir/file.txt").1;
-        assert_eq!(x.mtime, Some(Time { secs: 1_500_000_001, nanos: 250_000_000 }), "{name}");
+        assert_eq!(x.mtime, Some(Time::new(1_500_000_001, 250_000_000)), "{name}");
         assert_eq!(x.mode, Some(0o644), "{name}");
         assert_eq!(get("dir/ro.txt").0, Node::File(b"read only\n".to_vec()), "{name}");
         assert_eq!(get("dir/ro.txt").1.mode, Some(0o444), "{name}");

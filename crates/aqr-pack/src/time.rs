@@ -11,10 +11,17 @@ pub fn filetime(t: Time) -> u64 {
     if s < 0 { 0 } else { (s as u64).saturating_mul(10_000_000).saturating_add(t.nanos as u64 / 100) }
 }
 
-/// `t` as an MS-DOS date and time (2-second steps, rounded down) in local time here, kept
+/// `t` as an MS-DOS date and time (2-second steps, rounded down) in local time here (a local
+/// time of an unknown time zone as it is), kept
 /// within what they can have (1980 to 2107).
 pub fn dos(t: Time) -> (u16, u16) {
-    let Some((y, mo, d, h, mi, s)) = local(t.secs) else { return (0x21, 0) };
+    // (a local time of an unknown time zone as it is)
+    let civil = || {
+        let (y, mo, d, h, mi, s) = t.civil();
+        Some((y.clamp(0, 9999) as i32, mo, d, h, mi, s))
+    };
+    let parts = if t.is_instant() { local(t.secs) } else { civil() };
+    let Some((y, mo, d, h, mi, s)) = parts else { return (0x21, 0) };
     if y < 1980 {
         return (0x21, 0);
     }
@@ -28,7 +35,7 @@ pub fn dos(t: Time) -> (u16, u16) {
 fn local(secs: i64) -> Option<(i32, u32, u32, u32, u32, u32)> {
     use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
     use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
-    let ft = filetime(Time { secs, nanos: 0 });
+    let ft = filetime(Time::new(secs, 0));
     if ft == 0 {
         return None;
     }
@@ -66,12 +73,12 @@ mod tests {
 
     #[test]
     fn times() {
-        assert_eq!(filetime(Time { secs: 0, nanos: 1500 }), 116_444_736_000_000_015);
-        assert_eq!(filetime(Time { secs: -FILETIME_EPOCH - 1, nanos: 0 }), 0);
+        assert_eq!(filetime(Time::new(0, 1500)), 116_444_736_000_000_015);
+        assert_eq!(filetime(Time::new(-FILETIME_EPOCH - 1, 0)), 0);
         // 2020-02-29 12:34:56 UTC, within a day of it wherever this runs
-        let (date, time) = dos(Time { secs: 1_582_979_696, nanos: 0 });
+        let (date, time) = dos(Time::new(1_582_979_696, 0));
         assert_eq!(date >> 9, 40);
         assert_eq!(time & 31, 28);
-        assert_eq!(dos(Time { secs: 0, nanos: 0 }).0 >> 9, 0, "1970 as 1980");
+        assert_eq!(dos(Time::new(0, 0)).0 >> 9, 0, "1970 as 1980");
     }
 }

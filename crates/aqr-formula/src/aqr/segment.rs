@@ -924,7 +924,7 @@ mod tests {
         tree.entries.push(entry(Some(1), "link", EntryNode::Link(b"../own".to_vec())));
         tree.entries.push(entry(None, "fifo", EntryNode::Fifo));
         tree.entries.push(entry(None, "dev", EntryNode::Device { block: true, major: 1, minor: 1 << 40 }));
-        let t = |secs, nanos| Some(Time { secs, nanos });
+        let t = |secs, nanos| Some(Time::new(secs, nanos));
         tree.entries[2].extra = Extra {
             crtime: t(1_600_000_000, 0),
             ctime: t(-1, 999_999_999),
@@ -976,7 +976,9 @@ mod tests {
         let want_names: [&[u8]; 12] =
             [b"d", b"e", b"own", b"solid", b"empty", b"rev", b"cut0", b"cut1", b"same", b"link", b"fifo", b"dev"];
         assert_eq!(names, want_names);
-        assert_eq!(t.entries[2].extra, tree.entries[2].extra);
+        // (a time beyond 64 bits of nanoseconds of seconds)
+        let atime = Some(Time { unit: 1_000_000_000, ..Time::new(1 << 40, 0) });
+        assert_eq!(t.entries[2].extra, Extra { atime, ..tree.entries[2].extra.clone() });
         assert_eq!(t.entries[9].node, EntryNode::Link(b"../own".to_vec()));
         assert_eq!(t.entries[9].extra.win_link_type, Some(1));
         assert_eq!(t.entries[10].node, EntryNode::Fifo);

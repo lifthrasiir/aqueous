@@ -263,6 +263,7 @@ fn attributes(it: &Item, x: &Extra) -> (u16, u32) {
 /// The fields of times of `x` (as in local headers, or `central` ones): the extended
 /// timestamp and NTFS's.
 fn times(x: &Extra, central: bool) -> Vec<u8> {
+    let x = &*x.instants();
     let mut f = Vec::new();
     let unix = [x.mtime, x.atime, x.crtime].map(|t| t.filter(|t| i32::try_from(t.secs).is_ok()));
     let flags = unix.iter().enumerate().filter(|(_, t)| t.is_some()).fold(0u8, |a, (i, _)| a | 1 << i);
