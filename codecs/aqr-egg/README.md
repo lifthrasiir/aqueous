@@ -26,7 +26,7 @@ let f = formula::encode(&egg, threads).unwrap();
 
 The blocks follow their headers, each of the size its header tells, so the formula is the bytes
 kept and the blocks rebuilt in turn, with no module of its own (as aqr-alz). ALZip's DEFLATE is
-zlib's: aqr-flate's adaptive profile (zlib emulation, aqr-compress's level 9) leaves a record of
+zlib's: aqr-flate's adaptive profile (zlib emulation, aqr-compress's levels 7 to 9) leaves a record of
 0.08% of the blocks, the default profile 0.79%. Its bzip2 is libbzip2's, a stream a block. Its
 LZMA is the LZMA SDK's (lc 3, lp 0, pb 2, a dictionary of 16 MiB, no end marker), whose parse
 aqr-lzma records in 1.2% of the streams. Its AZO is a stream a block, whose parse aqr-azo

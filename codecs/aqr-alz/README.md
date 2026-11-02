@@ -30,7 +30,7 @@ headers' CRC-32 and sizes as predictions (aqr-zip's way) would save a few bytes 
 cost a module in every archive. ALZip's bzip2 is libbzip2's compressor with the stream header,
 the blocks' CRCs, the randomised bit and the combined CRC left out and the magic numbers made 4
 bytes (`DLZ\x01`, `DLZ\x02`), always at level 9; the blocks are unaligned as bzip2's are. Its
-DEFLATE is zlib's: aqr-flate's adaptive profile (zlib emulation, aqr-compress's level 9) leaves
+DEFLATE is zlib's: aqr-flate's adaptive profile (zlib emulation, aqr-compress's levels 7 to 9) leaves
 a record of about 0.01% of the streams, the default profile 1-10% (it has no zlib emulation).
 
 ## Status

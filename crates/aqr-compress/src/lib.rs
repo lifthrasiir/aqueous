@@ -261,16 +261,16 @@ impl Nest {
 
 impl Options {
     /// The aqr-flate profile that DEFLATE streams (of gzip, zlib and ZIP) are rebuilt with, and
-    /// whether it tries zlib emulation: up to level 6, the default profile; from 7 on, the
-    /// adaptive one with chain rules (enwik8 by Info-ZIP 3.0 `-9`, 10 threads of a Ryzen 7
-    /// 9700X: a record of 0.41% of the data rather than 2.6%, split at 66 MB/s rather than 163,
-    /// joined at 147 MB/s rather than 302); at 9, with zlib emulation too (2.8 KB, split at
-    /// 54 MB/s, joined at 165 MB/s, but at 25 MB/s on a thread: `enwik9.zip` alone some 40 s of
-    /// decoding).
+    /// whether it tries zlib emulation: up to level 6, the default profile (which has no zlib
+    /// emulation); from 7 on, the adaptive one with chain rules and zlib emulation (enwik8 by
+    /// Info-ZIP 3.0 `-9`, 10 threads of a Ryzen 7 9700X: a record of 0.41% of the data rather
+    /// than 2.6% with chain rules alone, split at 66 MB/s rather than 163, joined at 147 MB/s
+    /// rather than 302; 2.8 KB with zlib emulation, split at 54 MB/s, joined at 165 MB/s, but at
+    /// 25 MB/s on a thread: `enwik9.zip` alone some 40 s of decoding). Streams not of zlib's
+    /// cost nothing more: detection turns them down at once.
     pub fn flate(&self) -> (u16, bool) {
         match self.level.scale() {
             ..7 => (aqr_flate::DEFAULT_PROFILE, true),
-            7 | 8 => (aqr_flate::ADAPTIVE, false),
             _ => (aqr_flate::ADAPTIVE, true),
         }
     }
@@ -2265,7 +2265,7 @@ mod tests {
         for (name, module) in [("normal", aqr_decompress::FLATE), ("bzip2", aqr_decompress::BZ2_ALZ)] {
             let d = std::fs::read(format!("{dir}/{name}.alz")).unwrap();
             assert_eq!(detect(&d), Some(Format::Alz));
-            // (ALZip's DEFLATE is zlib's, which the adaptive profile emulates, from level 9)
+            // (ALZip's DEFLATE is zlib's, which the adaptive profile emulates, from level 7)
             let opt = Options { shared_modules: true, level: Level::Of(9), ..Options::default() };
             let f = recompress(&d, &opt);
             assert!(f.applies().iter().any(|a| a.module == module), "{name}");
