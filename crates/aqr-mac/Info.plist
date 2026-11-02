@@ -43,7 +43,7 @@
 				<string>public.archive</string>
 			</array>
 			<key>UTTypeIconFile</key>
-			<string>droplet</string>
+			<string>aqr</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>
@@ -61,7 +61,7 @@
 			<key>CFBundleTypeRole</key>
 			<string>Viewer</string>
 			<key>CFBundleTypeIconFile</key>
-			<string>droplet</string>
+			<string>aqr</string>
 			<key>LSHandlerRank</key>
 			<string>Owner</string>
 			<key>LSItemContentTypes</key>

@@ -1,6 +1,7 @@
-// The program's icon (the first, so Explorer's), also that of .aqr files (register.rs) and of
-// the windows (dialog.rs).
+// The program's icon (the first, so Explorer's), also that of the windows (dialog.rs).
 1 ICON "droplet.ico"
+// .aqr files' (register.rs): the drop with a blue label (scripts/icons.py).
+2 ICON "icons/aqr.ico"
 
 // The version (written by build.rs into OUT_DIR, which embed-resource gives rc.exe to look in).
 #include "version.rc"

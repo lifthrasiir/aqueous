@@ -3,7 +3,8 @@
 Aqueous in Windows Explorer: "Compress with Aqueous" and "Compress with passphrase…" (encrypted,
 `aqr -P`) on files and folders, "Extract here" (also the double-click) and "Test" on `.aqr`
 files, and a window of how far the work is. The work is done by `aqr --ipc` in a process of its own (the protocol: `crates/aqr/src/ipc.rs`); this program
-is the window and the verbs, about 560 KB (70 KB of it the icon, `droplet.ico`).
+is the window and the verbs, about 590 KB (100 KB of it the icons: `droplet.ico`, the
+program's, and `icons/aqr.ico`, `.aqr` files', from `scripts/icons.py`).
 
 ```sh
 cargo build -r -p aqr-win
@@ -15,9 +16,10 @@ Installed by `aqr-win-install` (crates/aqr-win-install), it is run as `aqr-win -
 (the verbs, the folder on the user's `PATH`, the uninstaller in Settings' Apps) and
 `aqr-win --uninstall [--quiet]` (all that taken away, and the folder: `src/install.rs`).
 
-- The verbs are registered for the user alone, no administrator needed; `.aqr` files and
-  "Compress with Aqueous" take this program's icon. On Windows 11 the verbs are under "Show more
-  options": the menu above takes only `IExplorerCommand` handlers of packaged (MSIX) applications.
+- The verbs are registered for the user alone, no administrator needed; "Compress with Aqueous"
+  takes this program's icon, `.aqr` files it with a label, "AQR". On Windows 11 the
+  verbs are under "Show more options": the menu above takes only `IExplorerCommand` handlers of
+  packaged (MSIX) applications.
 - Explorer runs a process for each path chosen; those of a verb in a folder are gathered into
   one (a named pipe, `src/gather.rs`). Several paths compressed make one archive named after
   their folder.

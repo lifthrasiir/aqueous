@@ -5,7 +5,8 @@
 //!   with this program's icon; and `Aqueous.compress-passphrase`, `aqr-win compress-passphrase`
 //!   ("Compress with passphrase…", `aqr -P`).
 //! - `.aqr` of the class `Aqueous.Archive`, whose verbs are `extract` (the default: a double
-//!   click) and `test`, and whose icon is this program's (`DefaultIcon`).
+//!   click) and `test`, and whose icon (`DefaultIcon`) is resource 2: this program's drop with
+//!   a label, "AQR" (`scripts/icons.py`).
 //!
 //! The verbs take any number of paths chosen (`MultiSelectModel` `Player`; Explorer runs a
 //! process for each, [`crate::gather`]). On Windows 11 they are under "Show more options": the
@@ -35,8 +36,9 @@ const COMPRESS_PASSPHRASE: [&str; 2] =
 pub fn register() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("This program's path is not known: {e}"))?;
     let command = |verb: &str| format!("\"{}\" {verb} \"%1\"", exe.display());
-    // (the icon of resource 1, aqr-win.rc)
+    // (the icons of resources 1, this program's, and 2, `.aqr` files': aqr-win.rc)
     let icon = format!("\"{}\",-1", exe.display());
+    let file_icon = format!("\"{}\",-2", exe.display());
     let set = |key: &str, name: Option<&str>, value: &str| set(&classes(key), name, Value::Sz(value));
     for (keys, text, verb) in [
         (COMPRESS, "Compress with Aqueous", "compress"),
@@ -51,7 +53,7 @@ pub fn register() -> Result<(), String> {
     }
     set(".aqr", None, CLASS)?;
     set(CLASS, None, "Aqueous archive")?;
-    set(&format!(r"{CLASS}\DefaultIcon"), None, &icon)?;
+    set(&format!(r"{CLASS}\DefaultIcon"), None, &file_icon)?;
     set(&format!(r"{CLASS}\shell"), None, "extract")?;
     for (verb, text) in [("extract", "Extract here"), ("test", "Test")] {
         let key = format!(r"{CLASS}\shell\{verb}");
