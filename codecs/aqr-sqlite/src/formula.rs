@@ -75,7 +75,7 @@ fn column(mut tag: Rd, mut len: Rd) -> Option<(u64, u64)> {
 /// kinds: the groups, and the overflow pages.
 fn groups(s: &[&[u8]]) -> Option<(Vec<Group>, u64)> {
     let mut dir = Rd::new(s[S_DIR]);
-    let ng = dir.usize().ok().filter(|&n| n <= dir.b.len())?;
+    let ng = dir.usize().ok().filter(|&n| n <= dir.d.len())?;
     let mut gs: [Rd; 8] = std::array::from_fn(|i| Rd::new(s[S_REC + i]));
     let mut out = Vec::with_capacity(ng);
     for _ in 0..ng {
@@ -96,11 +96,11 @@ fn groups(s: &[&[u8]]) -> Option<(Vec<Group>, u64)> {
         let mut rec = gs[0].sub(dir.usize().ok()?).ok()?;
         gs[1].sub(dir.usize().ok()?).ok()?;
         gs[2].sub(dir.usize().ok()?).ok()?;
-        let nc = dir.usize().ok().filter(|&n| n <= dir.b.len())?;
+        let nc = dir.usize().ok().filter(|&n| n <= dir.d.len())?;
         let (mut cols, mut values) = (Vec::with_capacity(nc), 0);
         for _ in 0..nc {
             let tag = gs[3].sub(dir.usize().ok()?).ok()?;
-            values += tag.b.len() as u64;
+            values += tag.d.len() as u64;
             dir.uv().ok()?;
             gs[4].sub(dir.usize().ok()?).ok()?;
             gs[5].sub(dir.usize().ok()?).ok()?;

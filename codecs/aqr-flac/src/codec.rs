@@ -244,7 +244,7 @@ impl Headers {
     #[inline]
     fn frame(&mut self, f: &mut Frame, bps: u32, hdr: &mut Rd, sub: &mut Rd, warm: &mut Rd) -> Result<(), Error> {
         let hbuf = &mut self.hbuf;
-        let hl = hdr.byte()? as usize;
+        let hl = hdr.u8()? as usize;
         if hl == 0 {
             predict_header(&self.prev_hdr, self.prev_block, hbuf);
         } else {
@@ -325,7 +325,7 @@ pub fn decode(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>) -> Res
     let mut f = Frame::default();
     let mut hs = Headers::default();
     loop {
-        let run = layout.varint()?;
+        let run = layout.uv()?;
         for _ in 0..run {
             if out.len() > total_len {
                 return Err(Error("too long"));
@@ -337,10 +337,10 @@ pub fn decode(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>) -> Res
                 return Err(Error("too long"));
             }
         }
-        if layout.done() {
+        if layout.at_end() {
             break;
         }
-        let n = layout.varint()? as usize;
+        let n = layout.uv()? as usize;
         out.extend_from_slice(junk.bytes(n)?);
     }
     rd.finish()
@@ -384,7 +384,7 @@ fn front<'a, X: Default>(
     let mut warm = Rd::new(&c.streams[S_WARM]);
     let mut hs = Headers::default();
     loop {
-        let run = layout.varint()?;
+        let run = layout.uv()?;
         for _ in 0..run {
             let mut f = e.frame();
             if let Err(err) = hs.frame(&mut f, bps, &mut hdr, &mut sub, &mut warm) {
@@ -394,10 +394,10 @@ fn front<'a, X: Default>(
             let n = f.block_size * f.channels;
             e.push(Item::Frame(f), n)?;
         }
-        if layout.done() {
+        if layout.at_end() {
             return Ok(());
         }
-        let n = layout.varint()? as usize;
+        let n = layout.uv()? as usize;
         e.push(Item::Junk(junk.bytes(n)?), 0)?;
     }
 }

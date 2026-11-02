@@ -1,6 +1,7 @@
 //! Building blocks shared by the `aqr-*` recompressors.
 //!
 //! - [`varint`]: LEB128 and zigzag, for the containers' own streams.
+//! - [`cursor`]: reading those streams, every read checked.
 //! - [`rans64`]: alias rANS with static per-context tables, eight interleaved 64-bit states
 //!   (aqr-mp3, aqr-flac).
 //! - [`rans32`]: rANS with per-file tables stored as quantised logarithms, four interleaved
@@ -24,6 +25,7 @@
 pub mod adler32;
 pub mod arith;
 pub mod crc32;
+pub mod cursor;
 pub mod lz;
 pub mod mem;
 pub mod msb;

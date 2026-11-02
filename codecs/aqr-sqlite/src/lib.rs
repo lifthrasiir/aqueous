@@ -40,4 +40,11 @@ pub fn corrupt() -> Error {
     Error("corrupt input")
 }
 
+/// The streams' reads failing ([`varint::Rd`]): corrupt input, as all of it.
+impl From<aqr_common::Corrupt> for Error {
+    fn from(_: aqr_common::Corrupt) -> Error {
+        corrupt()
+    }
+}
+
 pub use aqr_common::mem;

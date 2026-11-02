@@ -48,9 +48,7 @@ fn get_usize(src: &[u8], at: &mut usize) -> Result<usize> {
 }
 
 fn get_bytes<'a>(src: &'a [u8], at: &mut usize, n: usize) -> Result<&'a [u8]> {
-    let s = src.get(*at..at.checked_add(n).ok_or_else(corrupt)?).ok_or_else(corrupt)?;
-    *at += n;
-    Ok(s)
+    aqr_common::cursor::take(src, at, n).map_err(|_| corrupt())
 }
 
 fn get_u8(src: &[u8], at: &mut usize) -> Result<u8> {

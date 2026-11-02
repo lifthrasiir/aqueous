@@ -14,7 +14,7 @@ use crate::rans::{self, Tables};
 use crate::rc;
 use crate::side::SideModel;
 use crate::stream::{R_PAD, place, segment};
-use aqr_common::varint::{self, put as put_varint};
+use aqr_common::varint::put as put_varint;
 use std::sync::{Arc, OnceLock};
 
 /// The built-in model (see `train`), or one uniform table per alphabet size if none is built
@@ -278,24 +278,11 @@ pub const STREAM_NAMES: [&str; N_BYTE_STREAMS + 2] =
 pub struct Error(pub &'static str);
 
 /// Sequential reader of a byte stream.
-pub(crate) struct Rd<'a> {
-    pub(crate) d: &'a [u8],
-    pub(crate) p: usize,
-}
+pub(crate) type Rd<'a> = aqr_common::cursor::Cursor<'a>;
 
-impl<'a> Rd<'a> {
-    pub(crate) fn u8(&mut self) -> Result<u8, Error> {
-        let v = *self.d.get(self.p).ok_or(Error("stream exhausted"))?;
-        self.p += 1;
-        Ok(v)
-    }
-    pub(crate) fn bytes(&mut self, n: usize) -> Result<&'a [u8], Error> {
-        let s = self.d.get(self.p..self.p + n).ok_or(Error("stream exhausted"))?;
-        self.p += n;
-        Ok(s)
-    }
-    fn varint(&mut self) -> Result<u64, Error> {
-        varint::get(self.d, &mut self.p).map_err(|e| Error(e.0))
+impl From<aqr_common::Corrupt> for Error {
+    fn from(e: aqr_common::Corrupt) -> Error {
+        Error(e.0)
     }
 }
 
@@ -541,12 +528,12 @@ pub(crate) fn parse_frames(segs: &[u8], hdr: &[u8], file_len: u64) -> Result<Fra
     let mut junk = Vec::new();
     let mut runs = Vec::new();
     loop {
-        junk.push(rs.varint()? as usize);
+        junk.push(rs.uv()? as usize);
         if rs.p == rs.d.len() {
             break;
         }
-        let n = rs.varint()? as usize;
-        let free = rs.varint()? as usize;
+        let n = rs.uv()? as usize;
+        let free = rs.uv()? as usize;
         if free > 1 << 16 {
             return Err(Error("free format length"));
         }

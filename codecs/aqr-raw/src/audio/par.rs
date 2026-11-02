@@ -193,6 +193,12 @@ impl<'a> From<Error> for Stop<'a> {
     }
 }
 
+impl<'a> From<aqr_common::Corrupt> for Stop<'a> {
+    fn from(e: aqr_common::Corrupt) -> Self {
+        Error::from(e).into()
+    }
+}
+
 impl<'a, P: Pass<'a, X>, X: Default> Front<'a, P, X> {
     /// `None` if the pipeline is closed already.
     pub fn new(mut pass: P, reset: fn(&mut X)) -> Option<Self> {

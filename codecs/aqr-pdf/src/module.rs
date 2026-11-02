@@ -4,7 +4,7 @@
 use aqr_common::packed;
 
 use crate::kind::CLASSES;
-use crate::varint::Reader;
+use crate::varint::{Reader, Upto};
 use crate::{Error, Result, image, tok};
 
 /// The kinds of item in the table.
@@ -70,17 +70,17 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Res
 
 /// The next item of the table, the `index`th; `len` is the file's length.
 fn entry<'a>(t: &mut Reader<'a>, s: &Slots<'a>, cur: &mut Cursors, len: usize, index: usize) -> Result<Entry<'a>> {
-    let gap = t.usize(len)?;
+    let gap = t.upto(len)?;
     let s0 = cur.sk;
     take(s.skel, &mut cur.sk, gap)?;
     let mode = t.u8()?;
     let op = match mode {
         RAW => {
-            let n = t.usize(len)?;
+            let n = t.upto(len)?;
             Op::Raw(take(s.raw, &mut cur.rw, n)?)
         }
         DUP => {
-            let back = t.usize(index)?;
+            let back = t.upto(index)?;
             if back == 0 {
                 return Err(Error::Corrupt);
             }
@@ -158,9 +158,9 @@ fn flate_fields<'a>(t: &mut Reader<'a>, len: usize) -> Result<FlateFields<'a>> {
     if c >= CLASSES.len() {
         return Err(Error::Corrupt);
     }
-    let n = t.usize(len.saturating_mul(1032))?;
+    let n = t.upto(len.saturating_mul(1032))?;
     let px = if flags & 4 != 0 {
-        Some(tok::Pixels { bpp: t.usize(64)?, stride: t.usize((1u64 << 34).min(usize::MAX as u64) as usize)? })
+        Some(tok::Pixels { bpp: t.upto(64)?, stride: t.upto((1u64 << 34).min(usize::MAX as u64) as usize)? })
     } else {
         None
     };

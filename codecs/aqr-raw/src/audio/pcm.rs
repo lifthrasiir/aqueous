@@ -573,7 +573,7 @@ fn pcm_frame(f: &mut Frame, fmt: &Format, n: usize, hdr: &mut Rd, sub: &mut Rd, 
     f.block_size = n;
     f.channels = fmt.channels;
     f.bps = 8 * fmt.bytes as u32;
-    f.assign = hdr.byte()?;
+    f.assign = hdr.u8()?;
     let ok = if fmt.channels == 2 { [1, 8, 9, 10].contains(&f.assign) } else { f.assign as usize == fmt.channels - 1 };
     if !ok {
         return Err(Error("channel assignment"));

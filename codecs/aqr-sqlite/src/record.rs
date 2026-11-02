@@ -636,7 +636,7 @@ impl<'a> GroupDec<'a> {
                 7 => out.extend_from_slice(&v.to_be_bytes()),
                 _ if v >= 0 => {
                     let (o, n) = c.distinct[v as usize];
-                    out.extend_from_slice(&c.bytes.b[o as usize..(o + n) as usize]);
+                    out.extend_from_slice(&c.bytes.d[o as usize..(o + n) as usize]);
                 }
                 _ => {
                     let n = st_size(st);

@@ -66,7 +66,7 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     use crate::kind::CLASSES;
     use crate::rans::BitR;
     use crate::tok::{DIST_ALPHA, LIT_ALPHA};
-    use crate::varint::Reader;
+    use crate::varint::{Reader, Upto};
     if u.inputs.len() != 11 {
         return None;
     }
@@ -85,10 +85,10 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     let (mut t, mut items, mut streams) = (Reader::new(table), 0u64, vec![]);
     let limit = |v: u64| usize::try_from(v).ok();
     while !t.at_end() {
-        t.usize(limit(len)?).ok()?;
+        t.upto(limit(len)?).ok()?;
         match t.u8().ok()? {
-            0 => drop(t.usize(limit(len)?).ok()?),
-            1 => drop(t.usize(items as usize).ok()?),
+            0 => drop(t.upto(limit(len)?).ok()?),
+            1 => drop(t.upto(items as usize).ok()?),
             4 => {
                 let flags = t.u8().ok()?;
                 if flags & !7 != 0 {
@@ -98,10 +98,10 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
                     t.bytes(2).ok()?;
                 }
                 t.u8().ok().filter(|&c| (c as usize) < CLASSES.len())?;
-                let n = t.usize(limit(len.saturating_mul(1032))?).ok()? as u64;
+                let n = t.upto(limit(len.saturating_mul(1032))?).ok()? as u64;
                 let px = if flags & 4 != 0 {
-                    let bpp = t.usize(64).ok()? as u64;
-                    Some((bpp, t.usize((1u64 << 34) as usize).ok()? as u64))
+                    let bpp = t.upto(64).ok()? as u64;
+                    Some((bpp, t.upto((1u64 << 34) as usize).ok()? as u64))
                 } else {
                     None
                 };

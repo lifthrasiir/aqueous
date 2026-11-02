@@ -1,8 +1,6 @@
 //! Integer codings: SQLite's big-endian varints (in the database), and LEB128 with zigzag
 //! (in our streams).
 
-use crate::{Result, corrupt};
-
 /// Reads a SQLite varint (1-9 bytes, big-endian 7-bit groups, the 9th byte whole).
 /// Returns the value and its length.
 #[inline]
@@ -62,56 +60,7 @@ pub fn put_sqlite(out: &mut [u8], v: u64) -> usize {
 pub use aqr_common::varint::{len as uv_len, put as put_uv, put_signed as put_sv, unzz, zz};
 
 /// A cursor over one of our streams.
-#[derive(Clone, Copy, Default)]
-pub struct Rd<'a> {
-    pub b: &'a [u8],
-    pub p: usize,
-}
-
-impl<'a> Rd<'a> {
-    pub fn new(b: &'a [u8]) -> Self {
-        Rd { b, p: 0 }
-    }
-
-    #[inline]
-    pub fn u8(&mut self) -> Result<u8> {
-        let v = *self.b.get(self.p).ok_or_else(corrupt)?;
-        self.p += 1;
-        Ok(v)
-    }
-
-    #[inline]
-    pub fn uv(&mut self) -> Result<u64> {
-        aqr_common::varint::get(self.b, &mut self.p).map_err(|_| corrupt())
-    }
-
-    #[inline]
-    pub fn sv(&mut self) -> Result<i64> {
-        Ok(unzz(self.uv()?))
-    }
-
-    #[inline]
-    pub fn usize(&mut self) -> Result<usize> {
-        usize::try_from(self.uv()?).map_err(|_| corrupt())
-    }
-
-    #[inline]
-    pub fn bytes(&mut self, n: usize) -> Result<&'a [u8]> {
-        let e = self.p.checked_add(n).ok_or_else(corrupt)?;
-        let s = self.b.get(self.p..e).ok_or_else(corrupt)?;
-        self.p = e;
-        Ok(s)
-    }
-
-    /// The next `n` bytes as a cursor of their own.
-    pub fn sub(&mut self, n: usize) -> Result<Rd<'a>> {
-        Ok(Rd::new(self.bytes(n)?))
-    }
-
-    pub fn at_end(&self) -> bool {
-        self.p == self.b.len()
-    }
-}
+pub type Rd<'a> = aqr_common::cursor::Cursor<'a>;
 
 #[cfg(test)]
 mod tests {

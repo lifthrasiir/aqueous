@@ -17,6 +17,12 @@ static BUILTIN: &[u8] = include_bytes!("../../model/audio.bin");
 #[derive(Debug)]
 pub struct Error(pub &'static str);
 
+impl From<aqr_common::Corrupt> for Error {
+    fn from(e: aqr_common::Corrupt) -> Error {
+        Error(e.0)
+    }
+}
+
 /// Identifies the context layout the built-in tables were trained for.
 pub fn layout_id() -> u32 {
     builtin::layout_id([model::N_CTX, model::N_TOK, model::TAPS, 1].map(|v| v as u32))
@@ -88,34 +94,7 @@ impl Coded<'_> {
 pub use varint::{put as put_varint, unzz, zz};
 
 /// Byte stream reader.
-pub struct Rd<'a> {
-    pub d: &'a [u8],
-    pub p: usize,
-}
-
-impl<'a> Rd<'a> {
-    pub fn new(d: &'a [u8]) -> Self {
-        Rd { d, p: 0 }
-    }
-    #[inline(always)]
-    pub fn byte(&mut self) -> Result<u8, Error> {
-        let b = *self.d.get(self.p).ok_or(Error("stream truncated"))?;
-        self.p += 1;
-        Ok(b)
-    }
-    #[inline(always)]
-    pub fn varint(&mut self) -> Result<u64, Error> {
-        varint::get(self.d, &mut self.p).map_err(|e| Error(e.0))
-    }
-    pub fn bytes(&mut self, n: usize) -> Result<&'a [u8], Error> {
-        let s = self.d.get(self.p..self.p.checked_add(n).ok_or(Error("size"))?).ok_or(Error("stream truncated"))?;
-        self.p += n;
-        Ok(s)
-    }
-    pub fn done(&self) -> bool {
-        self.p == self.d.len()
-    }
-}
+pub type Rd<'a> = aqr_common::cursor::Cursor<'a>;
 
 /// What is done per residual, by [`for_each_residual`] (a trait rather than a closure,
 /// so that it is always inlined: the coder state then stays in registers).
@@ -538,9 +517,9 @@ pub fn get_subframes(f: &mut Frame, sub: &mut Rd, warm: &mut Rd, rice: bool) -> 
     for ch in 0..f.channels {
         let side = matches!((f.assign, ch), (8, 1) | (9, 0) | (10, 1));
         let sf = &mut f.sub[ch];
-        let x = sub.byte()?;
+        let x = sub.u8()?;
         sf.typ = x >> 1;
-        sf.wasted = if x & 1 != 0 { sub.byte()? } else { 0 };
+        sf.wasted = if x & 1 != 0 { sub.u8()? } else { 0 };
         let full = f.bps + side as u32;
         if sf.typ > 63 || sf.wasted as u32 >= full || (x & 1 != 0 && sf.wasted == 0) {
             return Err(Error("bad subframe"));
@@ -551,7 +530,7 @@ pub fn get_subframes(f: &mut Frame, sub: &mut Rd, warm: &mut Rd, rice: bool) -> 
         sf.params.clear();
         f.res[ch].clear();
         let rv = |r: &mut Rd| -> Result<i64, Error> {
-            let v = unzz(r.varint()?);
+            let v = unzz(r.uv()?);
             if (v >> (bits - 1)) != 0 && (v >> (bits - 1)) != -1 {
                 return Err(Error("sample range"));
             }
@@ -574,13 +553,13 @@ pub fn get_subframes(f: &mut Frame, sub: &mut Rd, warm: &mut Rd, rice: bool) -> 
                     sf.warm[i] = rv(warm)?;
                 }
                 if typ >= SUB_LPC {
-                    sf.precision = sub.byte()?;
-                    sf.shift = sub.byte()? as i8;
+                    sf.precision = sub.u8()?;
+                    sf.shift = sub.u8()? as i8;
                     if sf.precision == 0 || sf.precision > 15 || !(-16..16).contains(&sf.shift) {
                         return Err(Error("bad precision"));
                     }
                     for i in 0..order {
-                        let c = unzz(sub.varint()?);
+                        let c = unzz(sub.uv()?);
                         if (c >> (sf.precision - 1)) != 0 && (c >> (sf.precision - 1)) != -1 {
                             return Err(Error("coefficient range"));
                         }
@@ -588,7 +567,7 @@ pub fn get_subframes(f: &mut Frame, sub: &mut Rd, warm: &mut Rd, rice: bool) -> 
                     }
                 }
                 if rice {
-                    let b = sub.byte()?;
+                    let b = sub.u8()?;
                     sf.method = b >> 4;
                     sf.porder = b & 15;
                     let np = 1usize << sf.porder;
@@ -597,7 +576,7 @@ pub fn get_subframes(f: &mut Frame, sub: &mut Rd, warm: &mut Rd, rice: bool) -> 
                     }
                     let esc = (1u8 << (4 + sf.method)) - 1;
                     for _ in 0..np {
-                        let k = sub.byte()?;
+                        let k = sub.u8()?;
                         if (k & ESCAPE == 0 && k >= esc) || (k & ESCAPE != 0 && k & !(ESCAPE | 31) != 0) {
                             return Err(Error("bad parameter"));
                         }

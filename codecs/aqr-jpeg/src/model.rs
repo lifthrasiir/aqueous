@@ -1216,9 +1216,7 @@ pub(crate) fn get_varint(d: &[u8], p: &mut usize) -> Result<u64, Error> {
 }
 pub(crate) fn get_bytes<'a>(d: &'a [u8], p: &mut usize, n: u64) -> Result<&'a [u8], Error> {
     let n = usize::try_from(n).map_err(|_| Error("bad length".into()))?;
-    let s = d.get(*p..p.checked_add(n).ok_or(Error("bad length".into()))?).ok_or(Error("truncated".into()))?;
-    *p += n;
-    Ok(s)
+    aqr_common::cursor::take(d, p, n).map_err(|e| Error(e.0.into()))
 }
 
 impl Stripe {

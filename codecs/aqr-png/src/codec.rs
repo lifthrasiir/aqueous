@@ -40,9 +40,7 @@ pub fn get_varint(src: &[u8], at: &mut usize) -> Result<u64> {
 }
 
 pub(crate) fn get_bytes<'a>(src: &'a [u8], at: &mut usize, n: usize) -> Result<&'a [u8]> {
-    let s = src.get(*at..at.checked_add(n).ok_or_else(crate::corrupt)?).ok_or_else(crate::corrupt)?;
-    *at += n;
-    Ok(s)
+    aqr_common::cursor::take(src, at, n).map_err(|_| crate::corrupt())
 }
 
 fn chunk_crc(kind: &[u8; 4], data: &[u8]) -> u32 {
