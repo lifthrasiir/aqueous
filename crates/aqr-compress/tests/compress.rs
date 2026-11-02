@@ -312,7 +312,8 @@ fn records_of_no_format() {
     // records only, and turns them down)
     let d = entries(3_000);
     assert!(modules(&roundtrip(&d, &all())).is_empty());
-    let f = aqr_infer_recs::formula::formula(&d, &aqr_infer_recs::choose(&d, aqr_infer_recs::candidates(&d, true, 1), 1).0);
+    let f =
+        aqr_infer_recs::formula::formula(&d, &aqr_infer_recs::choose(&d, aqr_infer_recs::candidates(&d, true, 1), 1).0);
     check(&d, &f);
     assert_eq!(modules(&f), [RECS_ENTRIES.name, RECS_FIELDS.name]);
 }
@@ -1212,7 +1213,9 @@ fn dex() {
     }
     let len = d.len() as u32;
     d[..8].copy_from_slice(b"dex\n035\0");
-    for (at, v) in [(0x20, len), (0x24, 0x70), (0x28, 0x12345678), (0x34, map as u32), (0x38, n as u32), (0x3c, ids as u32)] {
+    for (at, v) in
+        [(0x20, len), (0x24, 0x70), (0x28, 0x12345678), (0x34, map as u32), (0x38, n as u32), (0x3c, ids as u32)]
+    {
         d[at..at + 4].copy_from_slice(&v.to_le_bytes());
     }
     let f = roundtrip(&d, &all());
