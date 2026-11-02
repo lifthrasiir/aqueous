@@ -38,6 +38,11 @@
 //!   Only what they need is decoded ([`aqr::Archive::contents_of`], [`aqr_unpack::Select`]). A
 //!   path not in the archive is an error, before anything is extracted where its listing tells
 //!   (but in a tar archive, after); so is one under another.
+//! - `-C DIR` (`--directory`), as tar has it: compressing, the inputs after it found in `DIR`
+//!   (each `-C` from the one before) and archived as if this were run there, `INPUT.aqr`
+//!   beside them; decompressing (given anywhere), what is extracted goes into `DIR` in place of
+//!   the current directory or beside the archive, `-o` from there too. The archives (`-o`
+//!   compressing, the inputs decompressing) are where they are given, as tar's `-f`.
 //! - `--each`: decompressing, every input an archive, each extracted whole (as the frontends
 //!   extract a selection of archives).
 //! - `--auto-dir` (as the frontends extract): a single entry at the top of an archive (of
@@ -172,6 +177,9 @@ Decompressing some paths (aqr -d ARCHIVE PATH [--rename TO]...):
 
 Output:
   -o OUTPUT             write to OUTPUT; compressing, all the inputs into one archive
+  -C, --directory DIR   compressing, the inputs after it found in DIR, archived as if
+                        run there; decompressing, extract into DIR (-o in it too);
+                        the archives' own paths are taken from where aqr is run
       --auto-dir        decompressing, a single entry at an archive's top beside it,
                         else a directory of its name without its extension beside it
                         (-o: in that directory instead of beside it)
@@ -240,7 +248,15 @@ struct Args {
     /// Logging each file archived.
     verbose: bool,
     opt: Options,
+    /// Compressing, the paths found (in the directory of `-C` before each); decompressing, the
+    /// archives, then the paths of one selected.
     inputs: Vec<PathBuf>,
+    /// Compressing, by input, the path as given (from the directory of `-C` before it), which
+    /// it is archived by.
+    given: Vec<PathBuf>,
+    /// Decompressing, the directory of `-C` (empty: the current one), where what is extracted
+    /// goes.
+    dir: PathBuf,
     /// Compressing, by input, the path in the archive that `--rename` gives it.
     renames: Vec<Option<PathBuf>>,
     /// What `--stats` asked for.
@@ -354,6 +370,8 @@ fn parse() -> Result<Args, String> {
         verbose: false,
         opt: Options { threads: 0, ..Options::default() },
         inputs: Vec::new(),
+        given: Vec::new(),
+        dir: PathBuf::new(),
         renames: Vec::new(),
         stats: None,
         ipc: false,
@@ -369,10 +387,13 @@ fn parse() -> Result<Args, String> {
     let (mut stats, mut stats_to) = (false, Vec::new());
     let mut only_inputs = false;
     let mut format = None;
+    // (`-C`: the directory so far, by input the one it was given in, and the last given)
+    let (mut dir, mut dirs, mut last_dir) = (PathBuf::new(), Vec::new(), None);
     while let Some(arg) = argv.next() {
         let s = arg.to_string_lossy();
         if only_inputs || !s.starts_with('-') || s == "-" {
             a.inputs.push(arg.into());
+            dirs.push(dir.clone());
             continue;
         }
         // (as given: a path need not be Unicode; [`text`] for the others)
@@ -394,6 +415,13 @@ fn parse() -> Result<Args, String> {
             "--wasm" => a.wasm = true,
             "--no-sandbox" => a.sandbox = false,
             "-o" => a.output = Some(value("-o")?.into()),
+            "-C" | "--directory" => {
+                let to = dir.join(value("-C")?);
+                if let Err(e) = fs::read_dir(&to) {
+                    return Err(format!("-C {}: {e}", to.display()));
+                }
+                (dir, last_dir) = (to, Some(a.inputs.len()));
+            }
             "--auto-dir" => a.auto_dir = true,
             "-f" | "--force" => a.force = true,
             "-p" | "--preserve" => a.preserve = true,
@@ -457,7 +485,7 @@ fn parse() -> Result<Args, String> {
         a.opt.threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     }
     if a.list {
-        if a.output.is_some() || !renames.is_empty() {
+        if a.output.is_some() || !renames.is_empty() || last_dir.is_some() {
             return Err("-L takes archives alone".into());
         }
         return Ok(a);
@@ -494,6 +522,11 @@ fn parse() -> Result<Args, String> {
         a.opt.level = l.parse()?;
     }
     if !a.decompress {
+        if last_dir == Some(a.inputs.len()) {
+            return Err(format!("-C {} not before an input", dir.display()));
+        }
+        a.given = std::mem::take(&mut a.inputs);
+        a.inputs = a.given.iter().zip(&dirs).map(|(i, d)| d.join(i)).collect();
         a.renames = vec![None; a.inputs.len()];
         for (n, to) in renames {
             let Some(k) = n.checked_sub(1) else {
@@ -514,6 +547,7 @@ fn parse() -> Result<Args, String> {
     if a.decompress && a.output.is_some() && a.inputs.len() > 1 && !a.auto_dir {
         return Err("-o with several archives to decompress".into());
     }
+    a.dir = dir;
     Ok(a)
 }
 
@@ -625,14 +659,15 @@ fn with_ext(path: &Path, ext: &str) -> PathBuf {
 
 fn compress_all(a: &Args) -> Result<(), String> {
     match &a.output {
-        Some(out) => compress_into(a, &a.inputs, &a.renames, out),
+        Some(out) => compress_into(a, &a.inputs, &a.given, &a.renames, out),
         None => {
-            for (input, to) in a.inputs.iter().zip(&a.renames) {
-                if input.as_os_str() == "-" {
+            for ((input, given), to) in a.inputs.iter().zip(&a.given).zip(&a.renames) {
+                if given.as_os_str() == "-" {
                     return Err("standard input is not taken yet".into());
                 }
                 let out = with_ext(input, &a.format.ext());
-                compress_into(a, std::slice::from_ref(input), std::slice::from_ref(to), &out)?;
+                use std::slice::from_ref as one;
+                compress_into(a, one(input), one(given), one(to), &out)?;
             }
             Ok(())
         }
@@ -718,10 +753,17 @@ impl aqr_compress::Source for Gathered {
     }
 }
 
-/// Compresses `inputs` into `out`, each in the archive at the path `renames` gives it, if any.
-fn compress_into(a: &Args, inputs: &[PathBuf], renames: &[Option<PathBuf>], out: &Path) -> Result<(), String> {
+/// Compresses `inputs` (`given` as they were given) into `out`, each in the archive at the path
+/// `renames` gives it, if any.
+fn compress_into(
+    a: &Args,
+    inputs: &[PathBuf],
+    given: &[PathBuf],
+    renames: &[Option<PathBuf>],
+    out: &Path,
+) -> Result<(), String> {
     if let Pack::Other(f, level) = a.format {
-        return pack_into(a, f, level, inputs, renames, out);
+        return pack_into(a, f, level, inputs, given, renames, out);
     }
     let Some(force) = output(a, out)? else { return Ok(()) };
     begin("compress", inputs, Some(out));
@@ -812,7 +854,7 @@ fn compress_into(a: &Args, inputs: &[PathBuf], renames: &[Option<PathBuf>], out:
     // (as long as it takes: a bar of no end known, and how many files)
     let listing = view::Listing::new(bars());
     let gathered = ticking(a, &listing, || -> Result<(), String> {
-        gather(inputs, renames, &mut g, &listing, a.opt.threads)?;
+        gather(inputs, given, renames, &mut g, &listing, a.opt.threads)?;
         listing.finish();
         Ok(())
     });
@@ -889,6 +931,7 @@ fn pack_into(
     f: aqr_pack::Format,
     level: Option<u8>,
     inputs: &[PathBuf],
+    given: &[PathBuf],
     renames: &[Option<PathBuf>],
     out: &Path,
 ) -> Result<(), String> {
@@ -903,7 +946,7 @@ fn pack_into(
     let mut g = Gathered::new(mapper, a.preserve);
     let listing = view::Listing::new(bars());
     let gathered = ticking(a, &listing, || -> Result<(), String> {
-        gather(inputs, &renames, &mut g, &listing, a.opt.threads)?;
+        gather(inputs, given, &renames, &mut g, &listing, a.opt.threads)?;
         listing.finish();
         Ok(())
     });
@@ -1107,13 +1150,14 @@ fn archive_names(input: &Path, to: Option<&Path>) -> Result<Vec<OsString>, Strin
 }
 
 /// Gathers `inputs` (a directory alone and not renamed: its entries at the root; else each at
-/// the path [`archive_names`] gives it with `renames`) into `g`: walked first (what the
+/// the path [`archive_names`] gives it, as `given`, with `renames`) into `g`: walked first (what the
 /// directories hold, a call for each), then what is read of each by its path ([`meta::stat`], a
 /// handle or so each, the most of the time) read on `threads`, then made the entries in the
 /// order they were found. The files of an inode archived already are of its content (and
 /// forks), read once.
 fn gather(
     inputs: &[PathBuf],
+    given: &[PathBuf],
     renames: &[Option<PathBuf>],
     g: &mut Gathered,
     l: &view::Listing,
@@ -1137,8 +1181,8 @@ fn gather(
         _ => {
             // (by their names in the archive, the directories found among the inputs or on the way)
             let mut dirs: std::collections::HashMap<Vec<OsString>, usize> = Default::default();
-            for (input, to) in inputs.iter().zip(renames) {
-                let names = archive_names(input, to.as_deref())?;
+            for ((input, given), to) in inputs.iter().zip(given).zip(renames) {
+                let names = archive_names(given, to.as_deref())?;
                 let mut parent = None;
                 for k in 1..names.len() {
                     let at = dirs.entry(names[..k].to_vec()).or_insert_with(|| {
@@ -1415,11 +1459,17 @@ fn decompress_all(a: &Args) -> Result<(), String> {
             Some((_, n)) => Some(input.with_file_name(os_from(&name[..name.len() - n]))),
             None => input.extension().is_some_and(|e| e == "aqr").then(|| input.with_extension("")),
         };
-        let to = match (named, &a.output, a.auto_dir) {
+        // (in the directory of `-C` instead, and `-o` from there)
+        let named = match a.dir.as_os_str().is_empty() {
+            true => named,
+            false => named.map(|n| a.dir.join(n.file_name().unwrap())),
+        };
+        let output = a.output.as_ref().map(|o| a.dir.join(o));
+        let to = match (named, &output, a.auto_dir) {
             (Some(n), Some(o), true) => To { named: o.join(n.file_name().unwrap()), base: o.clone() },
             (Some(n), None, true) => To { base: n.parent().unwrap_or(Path::new("")).to_owned(), named: n },
             (_, Some(o), false) => To { named: o.clone(), base: o.clone() },
-            (Some(n), None, false) => To { named: n, base: PathBuf::new() },
+            (Some(n), None, false) => To { named: n, base: a.dir.clone() },
             (None, ..) => {
                 return Err(format!(
                     "{}: not named .aqr nor as an archive known (-o to name the output)",
