@@ -769,16 +769,9 @@ fn compress_into(
     begin("compress", inputs, Some(out));
     let start = Instant::now();
     let rec = stats::record(a.stats.as_ref());
-    // large buffers kept in files beside the output (gone once dropped), not on the heap; in the
-    // temporary directory where the output is on a drive of the network: too slow for them, and
-    // Windows there neither holds a file open against deletion nor deletes it on close
     let mut opt = a.opt.clone();
-    let name = out.file_name().ok_or(format!("{}: not a file's name", out.display()))?;
-    let dir = out.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let mut hidden = std::ffi::OsString::from(".");
-    hidden.push(name);
-    opt.spill = Some(if remote(dir) { std::env::temp_dir() } else { dir.to_owned() }.join(hidden));
     let sealing = pass::keys().sealing();
+    opt.spill = spill_of(out, sealing.is_some())?;
     opt.size_hint = sealing.is_some();
     let opt = &opt;
     let meta = |p: &Path| fs::symlink_metadata(p).map_err(|e| format!("{}: {e}", p.display()));
@@ -1002,6 +995,26 @@ impl aqr_pack::Contents for Gathered {
 /// mirrored headers, at age's work factor.
 fn sealer<'f>(file: &'f mut fs::File, p: &[u8]) -> std::io::Result<aqr::envelope::Sealer<&'f mut fs::File>> {
     aqr::envelope::Sealer::new(file, p, aqr::envelope::WORK_FACTOR, true)
+}
+
+/// Where the large buffers of compressing into `out` are kept ([`aqr_compress::Options::spill`]):
+/// in files beside it (gone once dropped), not on the heap; in the temporary directory where it
+/// is on a drive of the network (too slow for them, and Windows there neither holds a file open
+/// against deletion nor deletes it on close). None where the archive is `sealed` (encrypted):
+/// its contents would be written out as they are (the mapping's pages, still on the disk once
+/// the files are gone), as decompressing decrypts it into memory rather than a file. (A spill
+/// encrypted with a key of its own was tried: its regions decrypted to the heap whole as they
+/// are read, boot.wim took 2.25 GB of peak footprint and 18.9 s, against 2.41 GB and 12.0 s
+/// without a spill and 1.20 GB and 11.3 s with one not encrypted.)
+fn spill_of(out: &Path, sealed: bool) -> Result<Option<PathBuf>, String> {
+    let name = out.file_name().ok_or(format!("{}: not a file's name", out.display()))?;
+    if sealed {
+        return Ok(None);
+    }
+    let dir = out.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let mut hidden = std::ffi::OsString::from(".");
+    hidden.push(name);
+    Ok(Some(if remote(dir) { std::env::temp_dir() } else { dir.to_owned() }.join(hidden)))
 }
 
 /// Whether `dir` is on a drive of the network (false where that is not known).
@@ -2030,4 +2043,18 @@ fn summary_d(input: &Path, out: Option<&Path>, files: usize, total: u64, start: 
         size(total as f64),
         total as f64 / 1e6 / t.max(1e-9)
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An archive is compressed with a spill beside it, but an encrypted one with none: nothing
+    /// of its contents written out as it is.
+    #[test]
+    fn no_spill_sealed() {
+        let out = std::env::temp_dir().join("x.aqr");
+        assert!(spill_of(&out, false).unwrap().is_some_and(|p| p.ends_with(".x.aqr")));
+        assert_eq!(spill_of(&out, true), Ok(None));
+    }
 }
