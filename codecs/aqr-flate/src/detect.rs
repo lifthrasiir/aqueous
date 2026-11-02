@@ -143,9 +143,11 @@ pub fn candidates_hinted(stream: &Stream, hints: &Hints) -> Vec<Params> {
     }
 
     // memLevel from full blocks; without any, the default (or 9 if the block is too big).
-    let mems: Vec<u8> = match counts.first() {
+    let mems: Vec<u8> = match counts.iter().max() {
         Some(&c) => {
-            if counts.iter().any(|&x| x != c) {
+            // (gzip's and Info-ZIP's deflate, which zlib's descends from and parses as, may
+            // also end a block early, at a multiple of 4096 tokens)
+            if counts.iter().any(|&x| x != c && x % 4096 != 0) {
                 return vec![];
             }
             match (1..=9u8).find(|&m| (1usize << (m + 6)) - 1 == c) {
@@ -747,4 +749,62 @@ pub fn multi_trial(
             complete,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::deflate::Block;
+
+    /// A stream of `tokens` cut into blocks of `sizes` (cycled), with zlib's headers.
+    fn cut(tokens: &[Token], sizes: &[usize]) -> Stream {
+        let mut blocks = vec![];
+        let (mut at, mut k) = (0, 0);
+        while at < tokens.len() {
+            let end = (at + sizes[k % sizes.len()]).min(tokens.len());
+            let tokens = tokens[at..end].to_vec();
+            blocks.push(Block {
+                last: false,
+                body: Body::Dynamic {
+                    header: zlib_header(&tokens),
+                    tokens,
+                },
+            });
+            (at, k) = (end, k + 1);
+        }
+        let n = blocks.len();
+        for (i, b) in blocks.iter_mut().enumerate() {
+            b.last = i + 1 == n;
+        }
+        Stream {
+            blocks,
+            ..Stream::default()
+        }
+    }
+
+    /// gzip's and Info-ZIP's deflate also end blocks early, at multiples of 4096 tokens: such
+    /// streams are still taken for zlib's, by their full blocks; blocks of other sizes, or
+    /// none full, still rule zlib out.
+    #[test]
+    fn blocks_ended_early() {
+        let data = [
+            include_bytes!("lib.rs").as_slice(),
+            include_bytes!("zlib.rs"),
+        ]
+        .concat();
+        let p = Params {
+            level: 9,
+            mem: 7,
+            ..Params::default()
+        };
+        let mut tokens = vec![];
+        Emulator::new(&data, p).run(&mut tokens, usize::MAX);
+        let full = p.block_tokens();
+        assert!(tokens.len() > 2 * full);
+        assert!(candidates(&cut(&tokens, &[full])).contains(&p));
+        assert!(candidates(&cut(&tokens, &[full, 4096, full, 8192])).contains(&p));
+        assert!(candidates(&cut(&tokens, &[4096, full])).contains(&p));
+        assert_eq!(candidates(&cut(&tokens, &[full, 4000])), vec![]);
+        assert_eq!(candidates(&cut(&tokens, &[4096, 8192])), vec![]);
+    }
 }

@@ -262,10 +262,11 @@ impl Nest {
 impl Options {
     /// The aqr-flate profile that DEFLATE streams (of gzip, zlib and ZIP) are rebuilt with, and
     /// whether it tries zlib emulation: up to level 6, the default profile; from 7 on, the
-    /// adaptive one with chain rules (enwik8 by Info-ZIP `-9`, 10 threads: a record of 0.41% of
-    /// the data rather than 2.6%, split at 86 MB/s rather than 214, joined at 196 MB/s rather
-    /// than 349); at 9, with zlib emulation too (3 KB, but split serially at 29 MB/s, and
-    /// joined at 37 MB/s on a thread: `enwik9.zip` alone some 27 s of decoding).
+    /// adaptive one with chain rules (enwik8 by Info-ZIP 3.0 `-9`, 10 threads of a Ryzen 7
+    /// 9700X: a record of 0.41% of the data rather than 2.6%, split at 66 MB/s rather than 163,
+    /// joined at 147 MB/s rather than 302); at 9, with zlib emulation too (2.8 KB, joined at
+    /// 165 MB/s, but split serially at 21 MB/s, and joined at 25 MB/s on a thread: `enwik9.zip`
+    /// alone some 40 s of decoding).
     pub fn flate(&self) -> (u16, bool) {
         match self.level.scale() {
             ..7 => (aqr_flate::DEFAULT_PROFILE, true),

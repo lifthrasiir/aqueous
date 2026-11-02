@@ -119,7 +119,9 @@ RAYON_NUM_THREADS=1 cargo run --release --features train --bin aqr-flate-train -
   emulator block by block), flat synthetic tiles (104.9 MB) 2,011 MB/s against 1,626.
 - **Detection** (`detect`): a cheap check of whether a stream can come from zlib, on the idea
   of preflate's estimator. It checks that every dynamic header is exactly zlib's, that full
-  blocks hold `2^(mem+6) - 1` tokens (which gives memLevel), the maximum distance (which
+  blocks hold `2^(mem+6) - 1` tokens (which gives memLevel; other blocks but the last may
+  hold a multiple of 4096, as gzip's and Info-ZIP's deflate, which zlib's descends from and
+  parses as, end blocks early there), the maximum distance (which
   bounds windowBits), that no match refers to position 0 or uses 284+31, and that there are no
   far length-3 matches for lazy levels. The candidates left are ranked by emulating them over
   growing prefixes, keeping only those tied for the fewest misses (1K, 4K, 16K... tokens). The
