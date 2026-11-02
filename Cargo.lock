@@ -64,6 +64,7 @@ dependencies = [
  "aqr-compress",
  "aqr-decompress",
  "aqr-formula",
+ "aqr-ipc",
  "aqr-pack",
  "aqr-unpack",
  "aqr-version",
@@ -490,6 +491,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-ipc"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "aqr-iso"
 version = "0.1.0"
 dependencies = [
@@ -575,6 +583,7 @@ dependencies = [
 name = "aqr-mac"
 version = "0.1.0"
 dependencies = [
+ "aqr-ipc",
  "block2",
  "objc2",
  "objc2-app-kit",
@@ -889,6 +898,7 @@ dependencies = [
 name = "aqr-win"
 version = "0.1.0"
 dependencies = [
+ "aqr-ipc",
  "aqr-version",
  "embed-resource",
  "serde_json",

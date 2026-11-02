@@ -244,3 +244,37 @@ fn passphrase() {
     assert!(seen[0]["message"].as_str().unwrap().contains("-P"), "{seen:?}");
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// A frontend's job (aqr-ipc's, as aqr-win and aqr-mac run it): two files of a folder
+/// compressed into an archive named after it, which is then tested.
+#[test]
+fn frontend_job() {
+    use aqr_ipc::{Job, State, Verb};
+    let d = scratch("job").join("folder");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("a.txt"), "the first file\n".repeat(100)).unwrap();
+    fs::write(d.join("b.txt"), "the second file\n".repeat(100)).unwrap();
+    let run = |verb: Verb, paths: Vec<PathBuf>| -> State {
+        let aqr = std::path::Path::new(env!("CARGO_BIN_EXE_aqr"));
+        let (mut cmd, count) = aqr_ipc::command(aqr, verb, paths, false, "aqr");
+        let mut child = cmd.spawn().unwrap();
+        let job = Job::new(verb, count, child.stdin.take());
+        let (out, err) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
+        std::thread::scope(|s| {
+            s.spawn(|| job.read_err(err));
+            job.read_out(out);
+        });
+        assert!(child.wait().unwrap().success());
+        job.close();
+        job.state.into_inner().unwrap()
+    };
+    let s = run(Verb::Compress, vec![d.join("b.txt"), d.join("a.txt")]);
+    assert_eq!((s.begun, s.ended.len(), s.error.as_deref()), (1, 1, None));
+    assert_eq!(s.name(), "folder.aqr");
+    assert_eq!(s.ended[0].1["files"], 2);
+    let s = run(Verb::Test, vec![d.join("folder.aqr")]);
+    assert_eq!((s.begun, s.ended.len(), s.error.as_deref()), (1, 1, None));
+    assert_eq!(s.ended[0].0, "folder.aqr");
+    assert_eq!(s.ended[0].1["files"], 2);
+    assert_eq!(s.ended[0].1["written"], 3100);
+}

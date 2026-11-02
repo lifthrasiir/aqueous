@@ -9,10 +9,11 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
+use std::path::Path;
 use std::process::{Child, ExitStatus};
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, S_FALSE, S_OK, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     AlphaBlend, BLENDFUNCTION, BeginPaint, COLOR_3DSHADOW, COLOR_BTNFACE, COLOR_HIGHLIGHT, CreateCompatibleBitmap,
@@ -38,21 +39,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 use windows_sys::core::{BOOL, HRESULT, PCWSTR};
 
-use crate::run::{Job, Verb, file_name};
+use aqr_ipc::{Job, Verb, done, file_name, size};
 
 /// `s` as a string of NULs.
 pub fn wide(s: impl AsRef<OsStr>) -> Vec<u16> {
     s.as_ref().encode_wide().chain([0]).collect()
-}
-
-/// Bytes of a size, for people (as `aqr` tells them).
-pub fn size(n: f64) -> String {
-    match n {
-        n if n < 1e3 => format!("{n:.0} B"),
-        n if n < 1e6 => format!("{:.1} KB", n / 1e3),
-        n if n < 1e9 => format!("{:.2} MB", n / 1e6),
-        n => format!("{:.2} GB", n / 1e9),
-    }
 }
 
 /// A time of seconds, as `m:ss` or `h:mm:ss`.
@@ -264,7 +255,7 @@ unsafe extern "system" fn callback(hwnd: HWND, msg: u32, wparam: WPARAM, _: LPAR
             }
             if w.stopping.get().is_none() {
                 w.stopping.set(Some(Instant::now()));
-                w.job.send(&json!({"control": "cancel"}));
+                w.job.cancel();
                 // SAFETY: the dialog's own messages
                 unsafe { SendMessageW(hwnd, TDM_SET_PROGRESS_BAR_STATE as u32, PBST_PAUSED as usize, 0) };
                 w.tick(hwnd);
@@ -310,7 +301,7 @@ impl Window<'_> {
             }
         }
         drop(shown);
-        let f = self.share();
+        let f = self.job.share();
         // SAFETY: the dialog's own message
         unsafe { SendMessageW(hwnd, TDM_SET_PROGRESS_BAR_POS as u32, (f * 1000.0) as usize, 0) };
         if !self.bar.get().is_null() {
@@ -322,7 +313,7 @@ impl Window<'_> {
             self.asking.set(true);
             let answer = self.ask(hwnd, &q);
             self.asking.set(false);
-            self.job.send(&json!({"answer": q["ask"], "value": answer}));
+            self.job.answer(&q, answer);
         }
     }
 
@@ -333,10 +324,7 @@ impl Window<'_> {
     fn phases(&self) -> [f64; 4] {
         let s = self.job.state.lock().unwrap();
         let Some(p) = &s.progress else { return [0.0; 4] };
-        let of = |k: &str| {
-            let (done, total) = (p[k][0].as_f64().unwrap_or(0.0), p[k][1].as_f64().unwrap_or(0.0));
-            if total > 0.0 { (done / total).min(1.0) } else { 0.0 }
-        };
+        let of = |k: &str| done(p, k);
         match self.job.verb {
             Verb::Compress if p["read"].is_u64() => [0.0, of_files(p), 0.0, 0.0],
             Verb::Compress if p["listed"].is_array() => {
@@ -353,29 +341,11 @@ impl Window<'_> {
         }
     }
 
-    /// The share of the work done, of the archive at work.
-    fn share(&self) -> f64 {
-        let s = self.job.state.lock().unwrap();
-        let Some(p) = &s.progress else { return 0.0 };
-        let of = |k: &str| {
-            let (done, total) = (p[k][0].as_f64().unwrap_or(0.0), p[k][1].as_f64().unwrap_or(0.0));
-            if total > 0.0 { (done / total).min(1.0) } else { 0.0 }
-        };
-        match self.job.verb {
-            // (the analysis, recompressing, takes the most time mostly)
-            Verb::Compress => {
-                let probe = if p["probe"][1].as_u64() == Some(0) { 1.0 } else { of("probe") };
-                0.05 * probe + 0.65 * of("analysis") + 0.3 * of("compression")
-            }
-            Verb::Extract | Verb::Test => 0.3 * of("decompressed") + 0.7 * of("evaluated"),
-        }
-    }
-
     /// The main instruction and the content, as of what `aqr` told last.
     fn texts(&self) -> (String, String) {
-        let f = self.share();
+        let f = self.job.share();
         let s = self.job.state.lock().unwrap();
-        let mut main = match s.name.as_str() {
+        let mut main = match s.name().as_str() {
             "" => format!("{}…", self.job.verb.doing()),
             n => format!("{} {n}", self.job.verb.doing()),
         };
@@ -447,8 +417,8 @@ impl Window<'_> {
         match kind {
             "overwrite" => {
                 let path = q["path"].as_str().unwrap_or("");
-                let dir = std::path::Path::new(path).is_dir();
-                let main = format!("{} is there already", file_name(path));
+                let dir = Path::new(path).is_dir();
+                let main = format!("{} is there already", file_name(Path::new(path)));
                 let content = if dir {
                     format!("Extract into the folder {path} all the same?\nIts files of the same names are replaced.")
                 } else {
@@ -468,7 +438,7 @@ impl Window<'_> {
                 answer
             }
             "passphrase" => {
-                let file = q["path"].as_str().map(file_name);
+                let file = q["path"].as_str().map(|p| file_name(Path::new(p)));
                 let compress = q["mode"] == "compress";
                 let (again, confirm) = (q["again"].as_bool() == Some(true), q["confirm"].as_bool() == Some(true));
                 match crate::passphrase::ask(hwnd, file.as_deref(), compress, again, confirm) {

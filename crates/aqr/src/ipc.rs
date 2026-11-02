@@ -61,10 +61,8 @@ use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, mpsc};
 
+use aqr_ipc::{CANCEL, VERSION};
 use serde_json::{Value, json};
-
-/// The version of the protocol.
-const VERSION: u64 = 1;
 
 /// The exit code where the frontend stopped the work (as shells tell a process stopped by
 /// Ctrl-C).
@@ -113,7 +111,7 @@ pub fn start() -> Result<(), String> {
     if IPC.set(ipc).is_err() {
         return Err("--ipc: started twice".into());
     }
-    send(&json!({"hello": VERSION, "controls": ["cancel"]}));
+    send(&json!({"hello": VERSION, "controls": [CANCEL]}));
     std::thread::Builder::new().name("ipc".into()).spawn(read).map_err(|e| format!("--ipc: {e}"))?;
     Ok(())
 }
@@ -128,7 +126,7 @@ fn read() {
             if let Some(to) = ipc.waiting.lock().unwrap().remove(&id) {
                 _ = to.send(v["value"].clone());
             }
-        } else if v["control"] == "cancel" {
+        } else if v["control"] == CANCEL {
             break;
         }
     }

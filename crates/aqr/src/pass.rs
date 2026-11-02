@@ -46,7 +46,7 @@ enum Asker {
 }
 
 fn asker() -> Asker {
-    if crate::ipc::get().is_some_and(|i| i.answers("passphrase")) {
+    if crate::ipc::get().is_some_and(|i| i.answers(aqr_ipc::ask::PASSPHRASE)) {
         Asker::Frontend
     } else if crate::ipc::get().is_none() && std::io::stdin().is_terminal() {
         Asker::Terminal
@@ -139,7 +139,7 @@ fn ask(asker: Asker, path: Option<&Path>, mode: &str, again: bool, confirm: bool
                 "confirm": confirm,
             });
             let ipc = crate::ipc::get().expect("a frontend");
-            Ok(ipc.ask("passphrase", q).and_then(|v| v.as_str().map(|s| s.as_bytes().to_vec())))
+            Ok(ipc.ask(aqr_ipc::ask::PASSPHRASE, q).and_then(|v| v.as_str().map(|s| s.as_bytes().to_vec())))
         }
         Asker::Terminal => {
             let of = path.map_or(String::new(), |p| format!(" for {}", p.display()));

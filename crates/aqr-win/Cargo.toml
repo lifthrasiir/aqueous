@@ -6,6 +6,7 @@ description = "Explorer's verbs for Aqueous archives and a window of how far the
 publish = false
 
 [dependencies]
+aqr-ipc = { path = "../aqr-ipc" }
 serde_json = "1"
 
 [build-dependencies]

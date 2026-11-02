@@ -40,7 +40,7 @@ use objc2_foundation::{
     NSProgressFileOperationKindCopying, NSProgressFileOperationKindDecompressingAfterDownloading, NSProgressKindFile,
     NSRect, NSSize, NSString, NSTimer, NSURL,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::job::{Job, Verb, file_name, tested};
 
@@ -189,14 +189,14 @@ impl Delegate {
         let jobs = std::mem::take(&mut *self.ivars().jobs.borrow_mut());
         let mut left = Vec::new();
         for mut r in jobs {
-            let question = r.job.state.lock().unwrap().questions.pop_front();
+            let question = r.job.ipc.state.lock().unwrap().questions.pop_front();
             if let Some(q) = question {
                 let answer = ask(mtm, &mut r, &q);
                 if q["kind"] == "passphrase" && answer.is_null() {
                     // (given up: aqr's error for it is not told)
-                    r.job.state.lock().unwrap().cancelled = true;
+                    r.job.ipc.state.lock().unwrap().cancelled = true;
                 }
-                r.job.send(&json!({"answer": q["ask"], "value": answer}));
+                r.job.ipc.answer(&q, answer);
             }
             if let Some(status) = r.job.done() {
                 if let Some((_, p)) = r.progress.take() {
@@ -259,7 +259,7 @@ fn show(r: &mut Running) {
         let p = unsafe {
             let p = NSProgress::initWithParent_userInfo(NSProgress::alloc(), None, None);
             p.setKind(Some(NSProgressKindFile));
-            p.setFileOperationKind(Some(match job.verb {
+            p.setFileOperationKind(Some(match job.ipc.verb {
                 Verb::Compress => NSProgressFileOperationKindCopying,
                 Verb::Extract | Verb::Test => NSProgressFileOperationKindDecompressingAfterDownloading,
             }));
@@ -275,9 +275,9 @@ fn show(r: &mut Running) {
         r.progress = Some((file, p));
     }
     let (_, p) = r.progress.as_ref().unwrap();
-    let f = job.share();
+    let f = job.ipc.share();
     p.setCompletedUnitCount((f * UNITS as f64) as i64);
-    let since = job.state.lock().unwrap().since;
+    let since = job.ipc.state.lock().unwrap().since;
     if let Some(t) = since.map(|s| s.elapsed().as_secs_f64())
         && f >= 0.02
         && t >= 3.0
@@ -288,7 +288,7 @@ fn show(r: &mut Running) {
 
 /// Tells what came of `job`, ended with `status`: an error, or what a test checked.
 fn finished(mtm: MainThreadMarker, job: &Job, status: std::process::ExitStatus) {
-    let s = job.state.lock().unwrap();
+    let s = job.ipc.state.lock().unwrap();
     if s.stopped || s.cancelled {
         return;
     }
@@ -297,19 +297,22 @@ fn finished(mtm: MainThreadMarker, job: &Job, status: std::process::ExitStatus) 
         None if !status.success() => Some(format!("aqr ended with {status}.")),
         None => None,
     };
-    let name = if s.begun > 0 { file_name(&s.input) } else { String::new() };
+    let name = s.input().map(file_name).unwrap_or_default();
     if let Some(e) = failed {
         let main = match name.as_str() {
-            "" => format!("Could not {}", job.verb.name()),
-            n => format!("Could not {} {n}", job.verb.name()),
+            "" => format!("Could not {}", job.ipc.verb.name()),
+            n => format!("Could not {} {n}", job.ipc.verb.name()),
         };
         let log: Vec<&str> = s.log.iter().map(String::as_str).collect();
         let log = log.join("\n");
         alert(mtm, NSAlertStyle::Critical, &main, &e, (!log.is_empty()).then_some(&log));
-    } else if job.verb == Verb::Test {
-        let lines: Vec<String> = s.ended.iter().map(|(n, e)| tested(n, e, job.count > 1)).collect();
-        let main =
-            if job.count == 1 { format!("{name} is intact") } else { format!("The {} archives are intact", job.count) };
+    } else if job.ipc.verb == Verb::Test {
+        let lines: Vec<String> = s.ended.iter().map(|(n, e)| tested(n, e, job.ipc.count > 1)).collect();
+        let main = if job.ipc.count == 1 {
+            format!("{name} is intact")
+        } else {
+            format!("The {} archives are intact", job.ipc.count)
+        };
         alert(mtm, NSAlertStyle::Informational, &main, &lines.join("\n"), None);
     }
 }
@@ -334,7 +337,7 @@ fn ask(mtm: MainThreadMarker, r: &mut Running, q: &Value) -> Value {
             a.setInformativeText(&NSString::from_str(&format!("{}\n\n{info}", path.display())));
             a.addButtonWithTitle(&NSString::from_str(yes));
             a.addButtonWithTitle(&NSString::from_str("Skip"));
-            if r.job.count > 1 {
+            if r.job.ipc.count > 1 {
                 a.setShowsSuppressionButton(true);
                 if let Some(b) = a.suppressionButton() {
                     b.setTitle(&NSString::from_str("Do the same for the other archives"));

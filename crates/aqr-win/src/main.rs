@@ -49,7 +49,7 @@ fn main() -> std::process::ExitCode {
     use std::path::PathBuf;
     use std::process::ExitCode;
 
-    use run::Verb;
+    use aqr_ipc::Verb;
 
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let verb = args.first().and_then(|a| a.to_str()).unwrap_or("");

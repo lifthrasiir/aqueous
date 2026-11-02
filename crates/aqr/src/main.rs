@@ -560,7 +560,7 @@ fn output(a: &Args, path: &Path) -> Result<Option<bool>, String> {
         return Ok(Some(a.force));
     }
     let q = serde_json::json!({"path": path.display().to_string()});
-    match ipc::get().and_then(|i| i.ask("overwrite", q)) {
+    match ipc::get().and_then(|i| i.ask(aqr_ipc::ask::OVERWRITE, q)) {
         Some(serde_json::Value::Bool(true)) => Ok(Some(true)),
         Some(_) => {
             ipc::tell(serde_json::json!({"event": "skipped", "output": path.display().to_string()}));

@@ -14,6 +14,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   benchmark), `file-formats.md` (measurements by format), `*-design.md`.
 - `crates/` — the core crates
   - `aqr` — the CLI (`aqr -c/-t/-d`); `--ipc` drives it from a frontend (`src/ipc.rs`).
+  - `aqr-ipc` — the frontends' side of `--ipc`: `aqr` run on the paths, what it tells taken.
   - `aqr-win` — Explorer's verbs and a progress window over `aqr --ipc` (Windows).
   - `aqr-win-install` — the installer carrying `target/dist/{aqr,aqr-win}.exe`, packed by its
     `build.rs` with aqr-exe's filters and zstd (Windows).
