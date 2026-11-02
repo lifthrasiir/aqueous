@@ -1,5 +1,6 @@
 //! What a listing of an archive tells of each file's content ([`Archive::listing`]): the bytes
-//! of the blocks it takes, of data and of the rest, and the formula making it, summarized.
+//! of the blocks it takes, of data and of the rest, its share of them (of blocks taken by
+//! several, a part), and the formula making it, summarized.
 //!
 //! A formula block is a program of a stack machine: read again as a graph of the instructions,
 //! each item of the stack a node (an application or a split of several outputs a node for each,
@@ -21,6 +22,10 @@ pub struct Listed {
     /// The bytes of the other blocks it takes: its formula block, and the module, resource and
     /// dictionary blocks its formula and data blocks take.
     pub overhead: u64,
+    /// Its share of the blocks of `data` and `overhead`: a block taken by several contents shared
+    /// among them by their sizes, so that contents taking the same blocks have the same ratio of
+    /// share to size, and the shares of a block add up to it.
+    pub share: u64,
     /// The formula making it, summarized: modules by their names, `lit` (a literal), `slice`,
     /// `cat`, `pack`, `split` and `patch`; `#k` the `k`-th output (from 1) of several; `NAME xN`
     /// `N` alike in a row; `*` what is left out at depth, `...` in breadth. A leaf data block
@@ -247,17 +252,12 @@ impl Archive<'_, '_> {
             };
             leaves.push(outputs);
         }
-        // a content: of the outputs (leaf, output) given
-        let listed = |of: &[(usize, usize)]| -> Listed {
-            let (mut insns, mut slices, mut modules, mut resources, mut dicts) =
-                (BTreeSet::new(), BTreeSet::new(), BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
-            let (mut data, mut overhead) = (0, 0);
-            let leaf_set: BTreeSet<usize> = of.iter().map(|&(l, _)| l).collect();
-            for &l in &leaf_set {
-                match blocks.leaves[l] {
-                    LeafBlock::Stored(..) => data += sizes.leaves[l],
-                    LeafBlock::Formula { .. } => overhead += sizes.leaves[l],
-                }
+        // a content, of the outputs (leaf, output) given: its size, the blocks it takes, its formula
+        let taken = |of: &[(usize, usize)]| -> (u64, BTreeSet<Taken>, String, usize) {
+            let mut blocks_of = BTreeSet::new();
+            let (mut insns, mut dicts) = (BTreeSet::new(), BTreeSet::new());
+            for &(l, _) in of {
+                blocks_of.insert(Taken::Leaf(l));
                 dicts.extend(blocks.leaf_dictionary[l]);
             }
             let mut nodes = 0;
@@ -269,23 +269,18 @@ impl Archive<'_, '_> {
                     }
                     match &node.shape {
                         &Shape::Slice(b) => {
-                            slices.insert(b);
+                            blocks_of.insert(Taken::NonLeaf(b));
+                            dicts.extend(blocks.non_leaf[b].2);
                         }
                         Shape::Apply { module, resources: r, .. } => {
-                            modules.insert(*module);
-                            resources.extend(r.iter().copied());
+                            blocks_of.insert(Taken::Module(*module));
+                            blocks_of.extend(r.iter().map(|&r| Taken::Resource(r)));
                         }
                         _ => {}
                     }
                 }
             }
-            for &b in &slices {
-                data += sizes.non_leaf[b];
-                dicts.extend(blocks.non_leaf[b].2);
-            }
-            overhead += modules.iter().map(|&m| sizes.modules[m]).sum::<u64>();
-            overhead += resources.iter().map(|&r| sizes.resources[r]).sum::<u64>();
-            overhead += dicts.iter().map(|&d| sizes.dictionaries[d]).sum::<u64>();
+            blocks_of.extend(dicts.into_iter().map(Taken::Dictionary));
             let formula = match of {
                 [(l, o)] => g.summary(leaves[*l][*o]),
                 _ => {
@@ -310,15 +305,88 @@ impl Archive<'_, '_> {
                 }
             };
             let size = of.iter().map(|&(l, o)| g.nodes[leaves[l][o]].size).sum();
-            Listed { size, data, overhead, formula, nodes }
+            (size, blocks_of, formula, nodes)
         };
-        Ok(match &self.tree {
-            Some((_, refs)) => refs.iter().map(|&(l, o, _)| listed(&[(l, o)])).collect(),
+        let contents: Vec<_> = match &self.tree {
+            Some((_, refs)) => refs.iter().map(|&(l, o, _)| taken(&[(l, o)])).collect(),
             None => {
                 let all: Vec<(usize, usize)> =
                     leaves.iter().enumerate().flat_map(|(l, outs)| (0..outs.len()).map(move |o| (l, o))).collect();
-                vec![listed(&all)]
+                vec![taken(&all)]
             }
+        };
+        // a block's bytes and whether they are data
+        let bytes = |t: Taken| match t {
+            Taken::Leaf(l) => (sizes.leaves[l], matches!(blocks.leaves[l], LeafBlock::Stored(..))),
+            Taken::NonLeaf(b) => (sizes.non_leaf[b], true),
+            Taken::Module(m) => (sizes.modules[m], false),
+            Taken::Resource(r) => (sizes.resources[r], false),
+            Taken::Dictionary(d) => (sizes.dictionaries[d], false),
+        };
+        let shares = apportion(&contents.iter().map(|(size, t, ..)| (*size, t)).collect::<Vec<_>>(), &|t| bytes(t).0);
+        Ok(shares
+            .into_iter()
+            .zip(contents)
+            .map(|(share, (size, taken, formula, nodes))| {
+                let (mut data, mut overhead) = (0, 0);
+                for t in taken {
+                    let (n, is_data) = bytes(t);
+                    *if is_data { &mut data } else { &mut overhead } += n;
+                }
+                Listed { size, data, overhead, share, formula, nodes }
+            })
+            .collect())
+    }
+}
+
+/// A block a content takes.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Taken {
+    Leaf(usize),
+    NonLeaf(usize),
+    Module(usize),
+    Resource(usize),
+    Dictionary(usize),
+}
+
+/// Of contents (their sizes and the blocks they take), their shares of the blocks (`bytes`: a
+/// block's bytes), each block's bytes shared among the contents taking it by their sizes (alike
+/// where they are all empty), rounded.
+fn apportion<T: Copy + Ord>(contents: &[(u64, &BTreeSet<T>)], bytes: &dyn Fn(T) -> u64) -> Vec<u64> {
+    let mut takers: std::collections::BTreeMap<T, (u64, usize)> = Default::default();
+    for &(size, taken) in contents {
+        for &t in taken {
+            let e = takers.entry(t).or_default();
+            *e = (e.0 + size, e.1 + 1);
+        }
+    }
+    contents
+        .iter()
+        .map(|&(size, taken)| {
+            let mut share = 0.0;
+            for &t in taken {
+                let (n, (sum, count)) = (bytes(t) as f64, takers[&t]);
+                share += if sum == 0 { n / count as f64 } else { n * size as f64 / sum as f64 };
+            }
+            share.round() as u64
         })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_blocks_apportioned() {
+        // blocks of 900, 30 and 60 bytes
+        let bytes = |t: usize| [900, 30, 60][t];
+        let (a, b, c, empty) =
+            (BTreeSet::from([0, 2]), BTreeSet::from([0, 2]), BTreeSet::from([1, 2]), BTreeSet::from([1]));
+        let got = apportion(&[(100, &a), (200, &b), (300, &c), (0, &empty)], &bytes);
+        // a and b share block 0 alike, their ratio the same
+        assert_eq!(got, [310, 620, 60, 0]);
+        let got = apportion(&[(0, &empty), (0, &empty)], &bytes);
+        assert_eq!(got, [15, 15]);
     }
 }

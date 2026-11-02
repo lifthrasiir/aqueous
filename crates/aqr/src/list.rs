@@ -13,7 +13,9 @@
 //!   the formula making the file (`[N]`) of each, and the total.
 //! - `-v`: the bytes of the data blocks a file is made of and of the other blocks it takes
 //!   (its formula block, modules, resources and dictionaries; blocks shared by several files
-//!   counted for each of them), its size and their ratio to it, its segment (from 1), its
+//!   counted for each of them), its size, the ratio of its share of those blocks to its size (a
+//!   block taken by several files shared among them by their sizes, so that files taking the
+//!   same blocks have the same ratio: [`aqr::Listed::share`]), its segment (from 1), its
 //!   owner, permissions (`rwxr-xr-x`), Windows' attributes (`RHSATI`), macOS' flags (as
 //!   `chflags` names them), the flags `@+=`, its modification time, and the formula summarized
 //!   ([`aqr::Listed::formula`]); and the total of the archive's data blocks and the rest.
@@ -178,7 +180,7 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
                 Some(l) => (
                     l.data.to_string(),
                     l.overhead.to_string(),
-                    ratio(l.data + l.overhead, l.size),
+                    ratio(l.share, l.size),
                     "1".into(),
                     format!("{} [{}]", l.formula, l.nodes),
                 ),
