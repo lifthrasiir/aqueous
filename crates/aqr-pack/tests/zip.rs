@@ -151,7 +151,7 @@ fn read_by_python() {
 fn aes() {
     let text: Vec<u8> = (0..3000).flat_map(|i| format!("line {i}\n").into_bytes()).collect();
     let files = Files(vec![text.clone(), b"tiny".to_vec(), Vec::new()]);
-    let x = Extra { mtime: Some(Time { secs: 1_600_000_000, nanos: 0 }), mode: Some(0o644), ..Extra::default() };
+    let x = Extra { mtime: Some(Time::new(1_600_000_000, 0)), mode: Some(0o644), ..Extra::default() };
     let tree = Tree {
         root: Extra::default(),
         entries: vec![

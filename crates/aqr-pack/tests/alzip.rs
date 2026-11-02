@@ -80,7 +80,7 @@ struct Sample {
 }
 
 fn sample(secs: i64) -> Sample {
-    let t0 = Time { secs, nanos: 0 };
+    let t0 = Time::new(secs, 0);
     let x = Extra { mtime: Some(t0), ..Extra::default() };
     let text: Vec<u8> = (0..5000).flat_map(|i| format!("line {i}\n").into_bytes()).collect();
     let noise: Vec<u8> = (0..3000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
@@ -186,7 +186,7 @@ fn name_encodings() {
 /// EGG keeps the time to 100 ns; entries without a time have none.
 #[test]
 fn egg_times() {
-    let t0 = Time { secs: 1_700_000_001, nanos: 123_456_700 };
+    let t0 = Time::new(1_700_000_001, 123_456_700);
     let tree = Tree {
         root: Extra::default(),
         entries: vec![

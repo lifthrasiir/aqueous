@@ -98,14 +98,14 @@ fn data(n: usize, seed: u32) -> Vec<u8> {
 }
 
 fn t0() -> Time {
-    Time { secs: 1_700_000_000, nanos: 123_456_700 }
+    Time::new(1_700_000_000, 123_456_700)
 }
 
 fn sample(sizes: &[usize]) -> (Tree, Files) {
     let x = |mode: Option<u32>| Extra {
         mtime: Some(t0()),
-        atime: Some(Time { secs: 1_700_000_100, nanos: 0 }),
-        crtime: Some(Time { secs: 1_600_000_000, nanos: 500 }),
+        atime: Some(Time::new(1_700_000_100, 0)),
+        crtime: Some(Time::new(1_600_000_000, 500)),
         mode,
         ..Extra::default()
     };

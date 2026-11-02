@@ -68,7 +68,7 @@ fn listed(t: &Tree, contents: &BTreeMap<usize, Vec<u8>>) -> BTreeMap<Vec<u8>, St
 
 #[test]
 fn round_trip() {
-    let t0 = Time { secs: 1_700_000_000, nanos: 123_456_700 };
+    let t0 = Time::new(1_700_000_000, 123_456_700);
     let x = |mode| Extra { mtime: Some(t0), mode: Some(mode), uid: Some(501), gid: Some(20), ..Extra::default() };
     let long = "d".repeat(120);
     let text: Vec<u8> = (0..40000).flat_map(|i| format!("line {i}\n").into_bytes()).collect();
@@ -86,7 +86,7 @@ fn round_trip() {
             entry(None, b"link", EntryNode::Link(long.as_bytes().repeat(2)), x(0o777)),
             entry(None, b"fifo", EntryNode::Fifo, x(0o644)),
             entry(None, b"dev", EntryNode::Device { block: true, major: 8, minor: 1 }, x(0o660)),
-            entry(None, b"old", EntryNode::File(1), Extra { mtime: Some(Time { secs: -10, nanos: 250_000_000 }), ..x(0o644) }),
+            entry(None, b"old", EntryNode::File(1), Extra { mtime: Some(Time::new(-10, 250_000_000)), ..x(0o644) }),
         ],
     };
     for f in [None, Some(Filter::Gzip), Some(Filter::Bzip2), Some(Filter::Xz), Some(Filter::Lzma), Some(Filter::Zstd)] {

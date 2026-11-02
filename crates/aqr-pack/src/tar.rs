@@ -208,7 +208,7 @@ fn header(it: &Item, x: &Extra, hard: Option<&[u8]>, size: u64, notes: &mut Vec<
         _ => 0o644,
     }) & 0o7777;
     let (uid, gid) = (x.uid.unwrap_or(0), x.gid.unwrap_or(0));
-    let mtime = x.mtime.unwrap_or(Time { secs: 0, nanos: 0 });
+    let mtime = x.mtime.unwrap_or(Time::new(0, 0));
     let (uname, gname) = (x.uname.as_deref().unwrap_or(b""), x.gname.as_deref().unwrap_or(b""));
 
     let mut pax = Vec::new();
