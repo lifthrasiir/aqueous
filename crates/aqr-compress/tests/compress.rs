@@ -4,9 +4,9 @@ use std::sync::{PoisonError, RwLock};
 use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
-    ARM64, ASAR, BUNDLE, BVX, BZ2, CLIP, FLAC, FLATE, GIF, HDF5_FLOAT, JPEG, JSONL, LEVELDB, LZ4, LZO, MACHO_SYMTAB,
-    MP3, Native, PCM, PDF, PNG, PNG_SET, PRORES, RASTER, RECS_ENTRIES, RECS_FIELDS, SQLITE, WRT, WRT_HANGUL, X86, ZIP,
-    decompress,
+    ARM64, ASAR, BUNDLE, BVX, BZ2, CLIP, DWARF_APPLE, FLAC, FLATE, GIF, HDF5_FLOAT, JPEG, JSONL, LEVELDB, LZ4, LZO,
+    MACHO_SYMTAB, MP3, Native, PCM, PDF, PNG, PNG_SET, PRORES, RASTER, RECS_ENTRIES, RECS_FIELDS, SQLITE, WRT,
+    WRT_HANGUL, X86, ZIP, decompress,
 };
 use aqr_formula::aqr;
 
@@ -570,6 +570,86 @@ fn macho_symbols() {
     short[c + 12..c + 16].copy_from_slice(&100u32.to_le_bytes());
     short[c + 20..c + 24].copy_from_slice(&2000u32.to_le_bytes());
     assert!(!modules(&roundtrip(&short, &Options { file: Nest::Exact, ..all() })).contains(&MACHO_SYMTAB.name));
+}
+
+/// A dSYM: a Mach-O image of a `__DWARF` segment of `.debug_str` and `__apple_names` (as LLVM
+/// lays it out, of `n` names), the table through `dwarf-apple`.
+fn dsym(n: usize) -> Vec<u8> {
+    let mut strs = vec![0u8];
+    let mut names = Vec::new();
+    for i in 0..n {
+        let name = format!("_ZN4core3ptr13drop_in_place{i}E");
+        names.push((strs.len() as u32, aqr_dwarf::apple::djb(name.as_bytes())));
+        strs.extend_from_slice(name.as_bytes());
+        strs.push(0);
+    }
+    let nb = (n / 4).max(1) as u32;
+    names.sort_by_key(|&(strp, h)| (h % nb, h, strp));
+    let groups: Vec<_> = names.chunk_by(|a, b| a.1 == b.1).collect();
+    let put32 = |o: &mut Vec<u8>, v: u32| o.extend_from_slice(&v.to_le_bytes());
+    let mut t = Vec::new();
+    for v in [0x4841_5348, 1, nb, groups.len() as u32, 12, 0, 1, 0x0006_0001] {
+        put32(&mut t, v);
+    }
+    t[4..8].copy_from_slice(&[1, 0, 0, 0]);
+    let mut first = vec![u32::MAX; nb as usize];
+    for (i, g) in groups.iter().enumerate().rev() {
+        first[(g[0].1 % nb) as usize] = i as u32;
+    }
+    first.iter().for_each(|&b| put32(&mut t, b));
+    groups.iter().for_each(|g| put32(&mut t, g[0].1));
+    let data_at = t.len() + 4 * groups.len();
+    let mut data = Vec::new();
+    for g in &groups {
+        put32(&mut t, (data_at + data.len()) as u32);
+        for &(strp, _) in g.iter() {
+            put32(&mut data, strp);
+            let k = 1 + strp % 3;
+            put32(&mut data, k);
+            (0..k).for_each(|j| put32(&mut data, 0x40 + strp * 2 + 0x30 * j));
+        }
+        put32(&mut data, 0);
+    }
+    t.extend_from_slice(&data);
+    // the image: a header, LC_SEGMENT_64 of the two sections, then them
+    let cmds = 72 + 2 * 80;
+    let at = 32 + cmds;
+    let mut d = vec![0u8; at];
+    let p32 = |d: &mut Vec<u8>, p: usize, v: u32| d[p..p + 4].copy_from_slice(&v.to_le_bytes());
+    let p64 = |d: &mut Vec<u8>, p: usize, v: u64| d[p..p + 8].copy_from_slice(&v.to_le_bytes());
+    p32(&mut d, 0, 0xfeed_facf);
+    p32(&mut d, 4, CPU_TYPE_ARM64);
+    p32(&mut d, 12, 0xa); // MH_DSYM
+    p32(&mut d, 16, 1);
+    p32(&mut d, 20, cmds as u32);
+    p32(&mut d, 32, 0x19);
+    p32(&mut d, 36, cmds as u32);
+    d[40..47].copy_from_slice(b"__DWARF");
+    p64(&mut d, 32 + 40, at as u64);
+    p64(&mut d, 32 + 48, (strs.len() + t.len()) as u64);
+    p32(&mut d, 32 + 64, 2);
+    for (k, (name, off, len)) in
+        [(&b"__debug_str"[..], at, strs.len()), (b"__apple_names", at + strs.len(), t.len())].into_iter().enumerate()
+    {
+        let s = 32 + 72 + 80 * k;
+        d[s..s + name.len()].copy_from_slice(name);
+        d[s + 16..s + 23].copy_from_slice(b"__DWARF");
+        p64(&mut d, s + 40, len as u64);
+        p32(&mut d, s + 48, off as u32);
+    }
+    d.extend_from_slice(&strs);
+    d.extend_from_slice(&t);
+    d
+}
+
+#[test]
+fn macho_dwarf() {
+    let d = dsym(2000);
+    let f = roundtrip(&d, &Options { file: Nest::Exact, ..all() });
+    assert_eq!(formats(&f), [DWARF_APPLE.name]);
+    // too short a table is left as it is
+    let f = roundtrip(&dsym(20), &Options { file: Nest::Exact, ..all() });
+    assert!(!modules(&f).contains(&DWARF_APPLE.name));
 }
 
 /// In a universal file, the code of each image is filtered by its architecture, that of

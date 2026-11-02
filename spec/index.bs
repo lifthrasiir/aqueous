@@ -5053,6 +5053,11 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/dex-recons.wasm" title="crates/aqr-modules/wasm/dex-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-dex/FORMAT.md" title="codecs/aqr-dex/FORMAT.md">R</a>
     <tr>
+      <td><code>f46d6780d8a0fa691c8e6d77d078d63d5f72cfc79f992d5b1aed14b88438b4fb</code>
+      <td>dwarf-apple@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/dwarf-apple.wasm" title="crates/aqr-modules/wasm/dwarf-apple.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-dwarf/FORMAT.md" title="codecs/aqr-dwarf/FORMAT.md">R</a>
+    <tr>
       <td><code>5127a1c02f5577874e8912d472a42703d3f6d2352b894254d1cf033e8a0a9d3f</code>
       <td>exe-recons/arm64-remap@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/exe-recons-arm64-remap.wasm" title="crates/aqr-modules/wasm/exe-recons-arm64-remap.wasm">D</a>

@@ -83,6 +83,13 @@ samples() {
     copy mac.bin /usr/bin/vim
     # a Mach-O binary with its symbols and debug map (exe-recons/macho-symtab): this script's own
     copy mac-symbols.bin $memory
+    # a dSYM with Apple's accelerator tables (dwarf-apple): of a small program of rustc's
+    make dsym.bin 'local t=$dir/dsym; mkdir -p $t &&
+        print -l "use std::collections::{BTreeMap, HashMap};" "fn main() {" \
+            "    let mut h: HashMap<String, Vec<u64>> = HashMap::new();" "    let mut b = BTreeMap::new();" \
+            "    for (i, a) in std::env::args().enumerate() {" "        h.entry(a.clone()).or_default().push(i as u64);" \
+            "        b.insert(a.len(), format!(\"{a:?} {i}\"));" "    }" "    println!(\"{h:?} {b:?}\");" "}" > $t/m.rs &&
+        rustc -O -g -C split-debuginfo=packed -o $t/m $t/m.rs && cp $t/m.dSYM/Contents/Resources/DWARF/m $out'
     # versions of a program whose code moved (exe-recons/arm64-remap): Mach-O files of 9.4 MB
     # of ARM64 code each, as aqr-compress's test arm64_versions_remapped makes them, the second's
     # functions 37 words on

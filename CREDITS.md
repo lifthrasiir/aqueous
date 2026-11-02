@@ -23,6 +23,9 @@ own terms; the code is written from that description, not from the encoder's cod
   tables, their selectors and code lengths), in aqr-bz2, written from memory of its behaviour
   and checked against libbzip2 1.0.8 (Python's `bz2`) used as a black box, without its code.
 - **libjpeg** (the Independent JPEG Group): its progressive Huffman encoder, in aqr-jpeg.
+- **LLVM** (`dsymutil` and its `AccelTable`): the layout of Apple's accelerator tables (the
+  names in the order of their buckets, hashes and strings, collisions in one group, the
+  buckets), in aqr-dwarf, as seen in its output; no LLVM code was read.
 - **RAR** (Alexander Roshal, RARLAB): its compressors' block cuts, code lengths, filter records
   and PPMd escape bytes, and the RAR5 and RAR 2.9 stream formats, in aqr-rar. Written in a clean
   room: the formats were described in `docs/rar5-decoding.md` and `docs/rar3-decoding.md` by an

@@ -207,6 +207,7 @@ dependencies = [
  "aqr-common",
  "aqr-decompress",
  "aqr-dex",
+ "aqr-dwarf",
  "aqr-egg",
  "aqr-exe",
  "aqr-fasta",
@@ -269,6 +270,7 @@ dependencies = [
  "aqr-clip",
  "aqr-common",
  "aqr-dex",
+ "aqr-dwarf",
  "aqr-exe",
  "aqr-fasta",
  "aqr-fits",
@@ -343,6 +345,15 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "sha1",
+ "zstd",
+]
+
+[[package]]
+name = "aqr-dwarf"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
  "zstd",
 ]
 
@@ -628,6 +639,7 @@ dependencies = [
  "aqr-bz2",
  "aqr-clip",
  "aqr-dex",
+ "aqr-dwarf",
  "aqr-exe",
  "aqr-fasta",
  "aqr-fits",

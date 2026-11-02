@@ -48,6 +48,10 @@ pub struct Image {
     pub sections: Vec<(u64, usize, usize)>,
     /// The symbol table of a 64-bit image, where whole within the image.
     pub symtab: Option<Symtab>,
+    /// `(name, file offset, size)` of each section of the `__DWARF` segment (debugging
+    /// information, as of a dSYM), cut to the image, in the order of the load commands; the name
+    /// without its NULs.
+    pub debug: Vec<(Vec<u8>, usize, usize)>,
 }
 
 /// The symbol table of an image (`LC_SYMTAB`) and the first of its external symbols
@@ -158,6 +162,7 @@ pub fn images(d: &[u8]) -> Option<Vec<Image>> {
                         cputype,
                         sections: Vec::new(),
                         symtab: None,
+                        debug: Vec::new(),
                     }))
                 })
                 .collect(),
@@ -178,7 +183,7 @@ fn thin(d: &[u8], range: Range<usize>) -> Option<Image> {
     let cputype = u32le(m, 4)?;
     let ncmds = u32le(m, 16)?;
     let cmds_end = header + u32le(m, 20)? as usize;
-    let (mut sections, mut symtab, mut ext) = (Vec::new(), None, 0);
+    let (mut sections, mut symtab, mut ext, mut debug) = (Vec::new(), None, 0, Vec::new());
     let mut p = header;
     for _ in 0..ncmds {
         let (cmd, size) = (u32le(m, p)?, u32le(m, p + 4)? as usize);
@@ -221,17 +226,24 @@ fn thin(d: &[u8], range: Range<usize>) -> Option<Image> {
             };
             let zerofill = matches!(flags & SECTION_TYPE, S_ZEROFILL | S_GB_ZEROFILL | S_THREAD_LOCAL_ZEROFILL);
             let code = flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS) != 0;
+            let dwarf = m.get(s + 16..s + 32) == Some(b"__DWARF\0\0\0\0\0\0\0\0\0");
             let off = off as usize;
-            if !code || zerofill || off == 0 || off >= m.len() || len == 0 {
+            if !(code || dwarf) || zerofill || off == 0 || off >= m.len() || len == 0 {
                 continue;
             }
             let len = usize::try_from(len).map_or(m.len() - off, |l| l.min(m.len() - off));
+            if dwarf {
+                let name = &m[s..s + 16];
+                let name = &name[..name.iter().position(|&c| c == 0).unwrap_or(16)];
+                debug.push((name.to_vec(), range.start + off, len));
+                continue;
+            }
             sections.push((addr, range.start + off, len));
         }
         p += size;
     }
     let symtab = symtab.map(|s| Symtab { ext, ..s });
-    Some(Image { range, cputype, sections, symtab })
+    Some(Image { range, cputype, sections, symtab, debug })
 }
 
 /// Bytes of the Mach-O file at the start of `d`, as far as its headers tell: the end of its

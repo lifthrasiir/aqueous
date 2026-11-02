@@ -244,6 +244,9 @@ pub const FASTA: Module = aqr_fasta::formula::MODULE;
 /// An Android DEX file from aqr-dex's streams (strings, tables, classes' data and sections). No
 /// params or resources.
 pub const DEX: Module = aqr_dex::formula::MODULE;
+/// An Apple accelerator table of DWARF (`__apple_names` and the like) from aqr-dwarf's streams
+/// of its entries and `.debug_str`. Parameters: the table's header; no resources.
+pub const DWARF_APPLE: Module = aqr_dwarf::formula::APPLE;
 /// An Android resource table from aqr-arsc's streams (string pools, entries, chunks). No params
 /// or resources.
 pub const ARSC: Module = aqr_arsc::formula::MODULE;
@@ -384,6 +387,7 @@ const NATIVE: &[Entry] = &[
     bare(SQLITE, |p, _, i, n, t| aqr_sqlite::formula::decode(p, i, n, t).map_err(err)),
     bare(FASTA, |p, _, i, n, t| aqr_fasta::formula::decode(p, i, n, t).map_err(err)),
     bare(DEX, |p, _, i, n, _| aqr_dex::formula::decode(p, i, n).map_err(err)),
+    bare(DWARF_APPLE, |p, _, i, n, _| aqr_dwarf::formula::decode_apple(p, i, n).map_err(err)),
     bare(ARSC, |p, _, i, n, _| aqr_arsc::formula::decode(p, i, n).map_err(err)),
     bare(WASM, |p, _, i, n, _| aqr_wasm::formula::decode(p, i, n).map_err(err)),
     bare(GNU_GETTEXT, |p, _, i, n, _| aqr_gnu_gettext::formula::decode(p, i, n).map_err(err)),

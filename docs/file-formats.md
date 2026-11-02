@@ -133,6 +133,7 @@ reservoir is rebuilt.
 | format | crate | sample | ratio | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
 | PE, Mach-O, ELF (x86, x86-64, ARM64, CIL) | aqr-exe | 259 files, 391 MB | 0.295 ~ 0.303 | 0.381 | 28 | 414 | 26 MB + 7.9× | samples from `Program Files` and `System32` of a Windows machine; .NET metadata and IL (CIL) too: 0.306 → 0.267 for the 84 assemblies of IL alone; the rest of an image scanned (PNG resources); 39 files not coded (27 of them .NET, mostly satellite assemblies of resources). 11 large binaries (1529 MB): 0.306 at 58 and 348 MB/s, 0.76–1.01 of the sample's memory fit; two small files kept raw take over twice it (106 MB for 0.7 MB, 136 MB for 5.3 MB). The disfilter alone: 292 and 336 MB/s, −20% under zstd -9. Mach-O, thin or universal, and ARM64 code (in Mach-O and PE): VS Code's 34 universal binaries (493 MB) −16.7% against the files as they are; the ARM64 filter alone −17.6% under zstd -9 (xz's BCJ −12.1%). ELF (code alone): 22 Linux binaries of ARM64 and x86-64 (499 MB) −16.2% against the files as data of no format (README) |
+| DWARF (dSYM) | aqr-dwarf | the dSYM of a release build of `aqr` (rustc, DWARF 4), 214 MB (README) | 0.141 (Apple's accelerator tables alone so far) | 0.227 | 152 (`aqr`, 10 threads) | 667 (`aqr -t`) | peak RSS 1.33 GB | measured 2026-11-02 with `aqr`: 41.77 → 30.12 MB (−27.9%; xz -9 31.71 MB); `__apple_names` 23.5 MB, 18.0 MB under zstd -3, from its entries in 3.8 |
 
 ### In progress or planned
 
@@ -319,7 +320,7 @@ container is TIFF/EXIF.
 
 | format | used in | how it compresses | what is left | reuse |
 |---|---|---|---|---|
-| ELF (x86-64, ARM64) | Linux and Android binaries | uncompressed (debug sections optionally zlib or zstd) | the code is filtered (aqr-exe); left: the tables (relocations, symbols, `.eh_frame`), DWARF (a recompressor of its own, for Mach-O's dSYM too) | aqr-exe, aqr-flate |
+| ELF (x86-64, ARM64) | Linux and Android binaries | uncompressed (debug sections optionally zlib or zstd) | the code is filtered (aqr-exe); left: the tables (relocations, symbols, `.eh_frame`), DWARF (aqr-dwarf, so far only Apple's accelerator tables of Mach-O dSYMs) | aqr-exe, aqr-flate, aqr-dwarf |
 | Android DEX | APKs | uncompressed, with shared string, type and method tables | strings, id tables, classes' data and instructions taken (aqr-dex, −37% under zstd -9, beating xz -9e); left: a context model of opcodes and registers | aqr-dex |
 | Java class files | JARs | uncompressed constant pools and bytecode | as DEX | |
 | Android resource tables (`resources.arsc`), binary XML | APKs (stored, for mapping) | uncompressed: string pools with offsets and lengths, type chunks of fixed-size entries | the pools' strings and the entries taken (aqr-arsc, −36% under zstd -9); left: the string indices (the pool sorted by configuration and value); binary XML, whose files are too small for a formula each (aqr-arsc's README) | aqr-arsc |

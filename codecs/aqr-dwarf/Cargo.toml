@@ -1,0 +1,25 @@
+[package]
+name = "aqr-dwarf"
+version = "0.1.0"
+edition = "2024"
+description = "DWARF debugging information rebuilt bit for bit from its records split into streams"
+publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula"]
+
+[dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+
+[dev-dependencies]
+zstd = "0.13"
+
+# Tools are named <crate>-<tool>, so that names do not collide in the workspace's target
+# directory.
+
+[[example]]
+name = "aqr-dwarf-check"
+path = "examples/check.rs"

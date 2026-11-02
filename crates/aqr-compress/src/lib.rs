@@ -121,6 +121,7 @@ mod aqueous;
 mod archive;
 mod bundle;
 mod detect;
+mod dwarf;
 mod exe;
 mod extent;
 mod flate;

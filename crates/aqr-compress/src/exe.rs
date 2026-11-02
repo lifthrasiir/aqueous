@@ -8,7 +8,8 @@
 //! the code are taken too: the base relocations by `exe-recons/pe-reloc`, the tables of exports,
 //! imports and runtime functions by `recs-fields`, their numbers as deltas; of an NSIS
 //! installer, the files its data stores, each a content of its format ([`crate::nsis`]). Of a 64-bit Mach-O
-//! image, the symbol table and its string table by `exe-recons/macho-symtab`. ELF images, of
+//! image, the symbol table and its string table by `exe-recons/macho-symtab`; of its `__DWARF`
+//! segment, Apple's accelerator tables by `dwarf-apple` ([`crate::dwarf`]). ELF images, of
 //! their code alone.
 //!
 //! The ARM64 and x86 images of the Mach-O and ELF files of an archive alike (other versions of
@@ -99,7 +100,7 @@ pub(crate) fn pe(d: &[u8]) -> Option<Formula> {
             sections.push((0, b.start, b.len(), Arch::Stored(format.name())));
         }
     }
-    filtered(d, "pe", sections, &[])
+    filtered(d, "pe", sections, &[], &[])
 }
 
 /// An image's code: `(virtual address, offset, size)` of each section, within its file.
@@ -139,7 +140,7 @@ fn with_arch((a, code): (Arch, Code)) -> impl Iterator<Item = (u64, usize, usize
 /// archive smaller.)
 pub(crate) fn elf(d: &[u8], remaps: &[Option<Arc<Remap>>]) -> Option<Formula> {
     let sections = code_images(d).into_iter().flat_map(with_arch);
-    filtered(d, "elf", sections.collect(), remaps)
+    filtered(d, "elf", sections.collect(), remaps, &[])
 }
 
 /// The formula of Mach-O file `d`, its images remapped as `remaps` tells (by image).
@@ -151,7 +152,17 @@ pub(crate) fn macho(d: &[u8], remaps: &[Option<Arc<Remap>>]) -> Option<Formula> 
         (0, s.symoff, s.nsyms as usize * 16, arch)
     });
     let symbols = symbols.filter(|s| matches!(s.3, Arch::Symbols { strsize, .. } if s.2 + strsize >= MIN_SYMBOLS));
-    filtered(d, "macho", sections.chain(symbols).collect(), remaps)
+    let debug: Vec<_> = images
+        .iter()
+        .enumerate()
+        .flat_map(|(image, i)| {
+            i.debug.iter().filter_map(move |(name, off, size)| {
+                let section = aqr_dwarf::Section::by_name(name)?;
+                Some(crate::dwarf::Debug { section, image, off: *off, size: *size })
+            })
+        })
+        .collect();
+    filtered(d, "macho", sections.chain(symbols).collect(), remaps, &debug)
 }
 
 /// Images less alike than this (`Signature::alike`) have no parent: builds of aqr a day
@@ -283,6 +294,7 @@ fn filtered(
     class: &'static str,
     mut sections: Vec<(u64, usize, usize, Arch)>,
     remaps: &[Option<Arc<Remap>>],
+    debug: &[crate::dwarf::Debug],
 ) -> Option<Formula> {
     // In file order, a CIL section before those within it; sections overlapping an earlier
     // one are left in the rest.
@@ -292,6 +304,14 @@ fn filtered(
     let mut f = Formula::default();
     f.push_content(class, Kind::Unknown, Vec::new());
     let mut outputs = symbols(&mut f, d, &mut sections);
+    let placed = crate::dwarf::place(&mut f, d, debug);
+    if !placed.is_empty() {
+        for (off, size, node) in placed {
+            sections.push((0, off, size, Arch::Output(outputs.len())));
+            outputs.push(Some(node));
+        }
+        sections.sort_by_key(|s| (s.1, !matches!(s.3, Arch::Cil(_))));
+    }
     let (mut rest, mut parts, mut at) = (Vec::new(), Vec::new(), 0);
     for (i, &(va, off, size, arch)) in sections.iter().enumerate() {
         if off < at {
