@@ -2651,6 +2651,37 @@ mod tests {
         assert!(applies > 0);
     }
 
+    /// The members of a gzip stream after its first (as gzip, pigz's `--independent` and
+    /// aqr-pack write a stream in parts) are deconstructed too, their data one stream with the
+    /// first's; a member that is not one ends them, what follows it kept as it is.
+    #[test]
+    fn gzip_members_as_one() {
+        let text: Vec<u8> =
+            (0..60000).flat_map(|i| format!("line {} of the text\n", i * 7 % 1000).into_bytes()).collect();
+        let member = |name: Option<&str>, d: &[u8]| {
+            let b = flate2::GzBuilder::new();
+            let b = if let Some(n) = name { b.filename(n) } else { b };
+            let mut z = b.write(Vec::new(), flate2::Compression::new(6));
+            std::io::Write::write_all(&mut z, d).unwrap();
+            z.finish().unwrap()
+        };
+        let parts: Vec<&[u8]> = text.chunks(text.len() / 3 + 1).collect();
+        let mut gz = member(Some("text.txt"), parts[0]);
+        gz.extend(member(None, parts[1]));
+        gz.extend(member(None, parts[2]));
+        gz.extend(b"\x1f\x8b\x08 not a member");
+        DECONSTRUCTED.with(|n| n.set(0));
+        let f = recompress(&gz, &Options { smaller: false, ..Options::default() });
+        assert_eq!(DECONSTRUCTED.with(Cell::get), 3);
+        let back = f.eval(&Native::default());
+        assert!(back.as_ref().is_ok_and(|b| *b == gz), "{:?}", back.map(|b| b.len()));
+        // (one text of them all)
+        let texts: Vec<usize> = f.streams.iter().filter(|s| s.kind == Kind::Text).map(|s| s.data.len()).collect();
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        // (what follows, not a member, kept as it is)
+        assert!(f.streams.iter().any(|s| s.data.windows(12).any(|w| w == b"not a member")));
+    }
+
     /// Level 1 recompresses nothing; from 7 on, DEFLATE streams are always deconstructed (no
     /// probe), with the adaptive profile.
     #[test]

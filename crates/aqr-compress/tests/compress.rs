@@ -1163,7 +1163,8 @@ fn kinds() {
         ("e.bin", &gz(70_000), false),
     ]);
     let f = roundtrip(&d, &all());
-    assert_eq!(modules(&f), [ZIP.name, FLATE.name, FLATE.name, FLATE.name, FLATE.name, FLAC.name], "{f}");
+    // (d.gz's two members one application)
+    assert_eq!(modules(&f), [ZIP.name, FLATE.name, FLATE.name, FLAC.name, FLATE.name], "{f}");
     // Pixels are not looked into, embedded files are, and what an image's filter after
     // FlateDecode decodes is taken as such: a JPEG file for DCTDecode.
     let jpeg = fixture("codecs/aqr-jpeg/tests/data/gradient.jpg");
@@ -1200,7 +1201,7 @@ fn dex() {
         d.extend_from_slice(s.as_bytes());
         d.push(0);
     }
-    while d.len() % 4 != 0 {
+    while !d.len().is_multiple_of(4) {
         d.push(0);
     }
     let map = d.len();

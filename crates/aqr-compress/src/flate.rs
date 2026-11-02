@@ -17,14 +17,105 @@ use aqr_formula::{Formula, Kind, Node};
 
 use crate::{Cx, Options, kind_by_name};
 
-/// A gzip member (RFC 1952), its data of the kind of its name, or else `contents`; what follows
-/// its trailer is sliced as it is.
+/// A gzip member (RFC 1952), its data of the kind of its name, or else `contents`, and the
+/// members after it (as gzip, pigz's `--independent` and aqr-pack write a stream in parts): a run
+/// of them from each member that pays (probed), those after it in the run not probed (parts of a
+/// stream, they pay as it does), the data of a run one stream rebuilt by one application of
+/// aqr-flate's. A member not taken is sliced as it is, and so is what follows the last.
 pub(crate) fn gzip(d: &[u8], contents: Kind, opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
-    let start = gzip_start(d)?;
     let kind = gzip_name(d).map_or(Kind::Unknown, kind_by_name);
     let kind = if kind == Kind::Unknown { contents } else { kind };
-    let hints = Hints::gzip_xfl(d[8]);
-    wrap("gzip", d, start, |_, end| d.get(end..end + 8).is_some(), kind, &hints, opt, depth, cx)
+    let magic = |at: usize| d.get(at..at + 3) == Some(&[0x1f, 0x8b, 8]);
+    let of = |at: usize, probed: bool| {
+        let m = d.get(at..)?;
+        let hints = Hints::gzip_xfl(*m.get(8)?);
+        let start = gzip_start(m)?;
+        let checked = |_: &[u8], end: usize| m.get(end..end + 8).is_some();
+        let (profile, mut p) = member("gzip", m, start, checked, kind, &hints, opt, depth, probed, cx)?;
+        p.raw = at + p.raw.start..at + p.raw.end;
+        Some((profile, p))
+    };
+    let mut runs: Vec<(u16, Vec<Member>)> = Vec::new();
+    let mut at = 0;
+    while magic(at) {
+        match of(at, true) {
+            Some((profile, first)) => {
+                let mut run = vec![first];
+                // (those whose trailers aqr-flate's module derives, as one application derives
+                // them all)
+                while run.last().unwrap().derived == Derived::Gzip
+                    && magic(run.last().unwrap().raw.end + 8)
+                    && let Some((_, m)) =
+                        of(run.last().unwrap().raw.end + 8, false).filter(|m| m.1.derived == Derived::Gzip)
+                {
+                    run.push(m);
+                }
+                at = run.last().unwrap().raw.end + 8;
+                runs.push((profile, run));
+            }
+            None => match d.get(at..).and_then(gzip_deflate) {
+                Some(r) => at += r.end + 8,
+                None => break,
+            },
+        }
+    }
+    if let [(_, run)] = &runs[..]
+        && run.len() == 1
+    {
+        let (profile, mut run) = runs.pop().unwrap();
+        return assemble("gzip", d, kind, profile, run.pop().unwrap());
+    }
+    if runs.is_empty() {
+        return None;
+    }
+    // the bytes around the streams one stream, and of each run its data (one content) and
+    // records; a run of one member rebuilt alone, else by one application split into them
+    let mut outside = Vec::new();
+    let mut prev = 0;
+    let mut f = Formula::default();
+    let o = 0;
+    f.push("gzip", Vec::new());
+    let mut nodes = Vec::new();
+    let gap = |outside: &mut Vec<u8>, nodes: &mut Vec<Node>, to: usize, prev: usize| {
+        nodes.push(Node::slice(o, outside.len() as u64, (to - prev) as u64));
+        outside.extend_from_slice(&d[prev..to]);
+    };
+    for (profile, run) in runs {
+        let (mut data, mut records, mut lens, mut sizes) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut gaps = Vec::with_capacity(run.len());
+        for m in &run {
+            gaps.push((prev, m.raw.start));
+            lens.push((m.data.len(), m.record.len()));
+            sizes.push(m.raw.len() as u64);
+            data.extend_from_slice(&m.data);
+            records.extend_from_slice(&m.record);
+            prev = m.raw.end + m.derived.bytes();
+        }
+        let derived = run[0].derived;
+        drop(run);
+        let records = f.push("flate/record", records);
+        let data = f.push_as("raw", kind, data);
+        if let [(from, to)] = gaps[..] {
+            gap(&mut outside, &mut nodes, to, from);
+            nodes.push(aqr_flate::formula::apply_one(profile, data, records, sizes[0], derived).ok()?);
+            continue;
+        }
+        let index = f.push("flate/index", aqr_flate::module::index(&lens));
+        // (its output the streams, then their trailers)
+        let n = sizes.len();
+        sizes.extend(std::iter::repeat_n(Derived::Gzip.bytes() as u64, n));
+        let a = aqr_flate::formula::apply(profile, data, records, index, sizes.iter().sum(), Derived::Gzip).ok()?;
+        let outs = f.split(a, sizes);
+        for (k, &(from, to)) in gaps.iter().enumerate() {
+            gap(&mut outside, &mut nodes, to, from);
+            nodes.push(outs[k].clone());
+            nodes.push(outs[n + k].clone());
+        }
+    }
+    gap(&mut outside, &mut nodes, d.len(), prev);
+    f.streams[o].data = outside.into();
+    f.root = Node::concat(nodes);
+    Some(f)
 }
 
 /// A zlib stream (RFC 1950), its data of kind `contents`; what follows its checksum is sliced
@@ -160,6 +251,34 @@ fn wrap(
     depth: u32,
     cx: &Cx,
 ) -> Option<Formula> {
+    let (profile, m) = member(class, d, start, checked, kind, hints, opt, depth, true, cx)?;
+    assemble(class, d, kind, profile, m)
+}
+
+/// A DEFLATE stream of a container deconstructed: where it is, its data and record, and the
+/// container's checksum after it as aqr-flate's module derives it.
+struct Member {
+    raw: Range<usize>,
+    data: Vec<u8>,
+    record: Vec<u8>,
+    derived: Derived,
+}
+
+/// The DEFLATE stream from `start` of `d` deconstructed by aqr-flate, as [`wrap`] takes it (but
+/// for the probe, where not `probed`), and the profile it was at.
+#[allow(clippy::too_many_arguments)]
+fn member(
+    class: &'static str,
+    d: &[u8],
+    start: usize,
+    checked: impl FnOnce(&[u8], usize) -> bool,
+    kind: Kind,
+    hints: &Hints,
+    opt: &Options,
+    depth: u32,
+    probed: bool,
+    cx: &Cx,
+) -> Option<(u16, Member)> {
     let (profile, zlib) = opt.flate();
     let fopt = aqr_flate::Options {
         threads: opt.threads,
@@ -167,7 +286,8 @@ fn wrap(
         zlib,
         ..aqr_flate::Options::for_profile(profile).ok()?
     };
-    let parsed = Parsed::head(d.get(start..)?, &fopt).ok()?;
+    let parsed = Parsed::head(d.get(start..)?, &fopt);
+    let parsed = parsed.ok()?;
     let raw = start..start + parsed.len();
     if !checked(parsed.data(), raw.end) {
         return None;
@@ -175,7 +295,7 @@ fn wrap(
     if !cx.inflate(parsed.data().len() as u64) {
         return None;
     }
-    if let Some(probe) = crate::probe(opt, depth)
+    if let Some(probe) = crate::probe(opt, depth).filter(|_| probed)
         && !probe.pays(
             &cx.enc,
             parsed.len(),
@@ -192,7 +312,8 @@ fn wrap(
     // (the coding of the stream told of as the first half of it: the second is its data's, made
     // in turn, [`crate::recompress_with`])
     let _watch = aqr_common::progress::alias(parsed.data(), &d[raw.start..raw.start + raw.len() / 2]);
-    let (data, record, _) = parsed.deconstruct(&fopt, hints).ok()?;
+    let r = parsed.deconstruct(&fopt, hints);
+    let (data, record, _) = r.ok()?;
     if record.len() >= raw.len() {
         return None;
     }
@@ -208,6 +329,13 @@ fn wrap(
         }
         _ => Derived::None,
     };
+    Some((fopt.profile, Member { raw, data, record, derived }))
+}
+
+/// `d` with its DEFLATE stream `m` as aqr-flate's module at `profile` makes it again, its data of
+/// `kind`.
+fn assemble(class: &'static str, d: &[u8], kind: Kind, profile: u16, m: Member) -> Option<Formula> {
+    let Member { raw, data, record, derived } = m;
     let rest = raw.end + derived.bytes();
     let mut f = Formula::default();
     // A git object's header, of a loose object, is with the container's bytes: the rest is a
@@ -232,7 +360,7 @@ fn wrap(
     };
     f.root = Node::concat([
         Node::slice(0, 0, raw.start as u64),
-        aqr_flate::formula::apply_one(fopt.profile, data, record, raw.len() as u64, derived).ok()?,
+        aqr_flate::formula::apply_one(profile, data, record, raw.len() as u64, derived).ok()?,
         Node::slice(0, raw.start as u64, (d.len() - rest) as u64),
     ]);
     Some(f)

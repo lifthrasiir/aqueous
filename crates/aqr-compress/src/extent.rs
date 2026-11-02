@@ -5,6 +5,18 @@ use crate::detect::{Format, id3_len, mp3_header};
 use crate::flate::{gzip_deflate, zlib_deflate};
 use aqr_flac::flac;
 
+/// Bytes of the gzip members one after another at the start of `d` (a stream written in parts:
+/// gzip's, pigz's `--independent`, aqr-pack's), recompressed as one ([`crate::flate::gzip`]).
+fn gzip_members(d: &[u8]) -> Option<usize> {
+    let mut end = gzip_deflate(d)?.end + 8;
+    while d.get(end..end + 3) == Some(&[0x1f, 0x8b, 8])
+        && let Some(r) = gzip_deflate(&d[end..])
+    {
+        end += r.end + 8;
+    }
+    Some(end)
+}
+
 /// Bytes of the file of format `f` at the start of `d`, as far as its structure tells, or
 /// `None` where its structure does not hold. A file whose structure does not tell its end (a
 /// FLAC stream, a PDF without `%%EOF`) or runs past `d` ends with `d`.
@@ -16,7 +28,7 @@ pub fn extent(f: Format, d: &[u8]) -> Option<usize> {
         Format::Pe => pe(d),
         Format::MachO => aqr_exe::format::macho::extent(d).map(|e| clamp(d, e)),
         Format::Elf => aqr_exe::format::elf::extent(d).map(|e| clamp(d, e)),
-        Format::Gzip => gzip_deflate(d).map(|r| r.end + 8),
+        Format::Gzip => gzip_members(d),
         Format::Zlib => zlib_deflate(d).map(|r| r.end + 4),
         Format::Lz4 => aqr_lz4::formula::extent(d),
         Format::Lzma => Some(d.len()),
@@ -774,6 +786,9 @@ mod tests {
         ends(Format::Zlib, &e.finish().unwrap());
         let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(6));
         e.write_all(&[7; 10000]).unwrap();
-        ends(Format::Gzip, &e.finish().unwrap());
+        let gz = e.finish().unwrap();
+        ends(Format::Gzip, &gz);
+        // (members one after another, as one)
+        ends(Format::Gzip, &gz.repeat(3));
     }
 }
