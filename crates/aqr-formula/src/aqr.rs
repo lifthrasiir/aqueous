@@ -586,15 +586,37 @@ impl Encoder {
     }
 
     /// The length of the archive of `f` without a checksum, nor the blocks whose data it takes as
-    /// stored ([`Encoder::module_bytes_len`]).
+    /// stored ([`Encoder::module_bytes_len`]), as the archive of it is made: its streams of a
+    /// class and kind merged ([`Formula::merged`], as aqr-compress writes a file alone and an
+    /// archive's batches group them). Apart, the many small streams of an archive's entries
+    /// (a ZIP of 1,399 files) would count far more than they take.
     pub fn len(&self, f: &Formula) -> Result<usize> {
         self.len_with(f, None)
     }
 
     /// [`Encoder::len`], with the stream of `stand_in` (by index) its bytes rather than its data.
+    /// Where that stream is merged with others, the streams are counted apart.
     fn len_with(&self, f: &Formula, stand_in: Option<(usize, &[&[u8]])>) -> Result<usize> {
+        let (merged, groups) = f.merged();
+        let mut streams: Vec<Vec<&[u8]>> = Vec::with_capacity(groups.len());
+        for g in &groups {
+            match stand_in {
+                // (alone, as a stream that a slice goes past the end of is)
+                Some((t, bytes)) if g[..] == [(t, 0, f.streams[t].data.len() as u64)] => streams.push(bytes.to_vec()),
+                Some((t, _)) if g.iter().any(|p| p.0 == t) => {
+                    return self.len_of(f, |n| self.write(f, stand_in, None, n));
+                }
+                _ => streams.push(g.iter().map(|&(s, a, b)| &f.streams[s].data[a as usize..b as usize]).collect()),
+            }
+        }
+        let refs: Vec<&[&[u8]]> = streams.iter().map(|p| &p[..]).collect();
+        self.len_of(f, |n| self.write_streams(&merged, &refs, None, n))
+    }
+
+    /// The length of the archive of `f` that `write` writes, as [`Encoder::len`] counts it.
+    fn len_of(&self, f: &Formula, write: impl FnOnce(&mut Count) -> Result<()>) -> Result<usize> {
         let mut n = Count(0);
-        self.write(f, stand_in, None, &mut n)?;
+        write(&mut n)?;
         let held = self.held.borrow();
         let modules = if self.shared_modules { self.modules_len(f)? } else { self.module_bytes_len(f)? };
         let resources = match self.shared {
@@ -663,7 +685,7 @@ impl Encoder {
     /// [`encode`] at the level of the encoder. Fails on slices out of their stream.
     pub fn encode(&self, f: &Formula, checksum: Option<u64>) -> Result<Vec<u8>> {
         // sized first (the streams compressed then are kept), so as to be written at its size
-        let mut out = Vec::with_capacity(self.len(f)? + 16);
+        let mut out = Vec::with_capacity(self.len_of(f, |n| self.write(f, None, None, n))? + 16);
         self.write(f, None, checksum, &mut out)?;
         Ok(out)
     }
@@ -4358,6 +4380,23 @@ mod tests {
         enc.hold_resource(&noise);
         assert_eq!(enc.len(&f).unwrap(), n - enc.resources_len(&f).unwrap());
         assert_eq!(enc.encode(&f, None).unwrap(), c);
+    }
+
+    /// A formula is sized as it is archived, its streams of a class merged, not each compressed
+    /// apart (the entries of a ZIP archive alone were sized so far beyond what they took that
+    /// its formula was turned down).
+    #[test]
+    fn sized_merged() {
+        let mut f = Formula::default();
+        let parts: Vec<Node> = (0..300)
+            .map(|i| f.push("x", format!("entry {i}: the same few words once more\n").repeat(20).into_bytes()))
+            .collect();
+        f.root = Node::concat(parts);
+        let mut m = f.clone();
+        m.merge_classes();
+        assert_eq!(m.streams.len(), 1);
+        let enc = Encoder::new(Level::MID);
+        assert_eq!(enc.len(&f).unwrap(), enc.len(&m).unwrap());
     }
 
     /// Zstandard blocks longer than their data declare by how much (`0` then the excess), and as
