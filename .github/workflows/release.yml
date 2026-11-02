@@ -14,8 +14,8 @@ name: release
 # shallow clone (0.0.0-gHASH).
 #
 # Assets, STEM being the tag without `v0.0.` (v0.0.20261031 -> 20261031):
-#   aqr-STEM.exe                  Windows 10 on, x86_64
-#   aqr-STEM-win7.exe             Windows 7 and 8 (cargo +nightly win7)
+#   aqr-STEM.exe                  Windows 10 on, x86_64 (packed by UPX)
+#   aqr-STEM-win7.exe             Windows 7 and 8 (cargo +nightly win7; packed by UPX)
 #   aqr-STEM-win-install.exe      the installer, aqr.exe and aqr-win.exe (crates/aqr-win-install)
 #   aqr-STEM-mac.zip              Aqueous.app, universal (crates/aqr-mac/bundle.sh --universal)
 #   aqr-STEM-linux-x86_64.tar.xz  aqr (glibc of Ubuntu 22.04 on)
@@ -34,6 +34,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # UPX for aqr.exe and aqr-win7.exe (github.com/upx/upx's release, checked by its SHA-256)
+  UPX_VERSION: 5.0.2
+  UPX_SHA256: 1cff6d6ee01c404d4a1ae56003056bd4cfa28d0a5cea1d0950daaf872a4facc9
 
 jobs:
   windows:
@@ -63,6 +66,13 @@ jobs:
           mkdir out
           cp target/dist/aqr.exe "out/aqr-${{ steps.stem.outputs.stem }}.exe"
           cp target/dist/aqr-win-install.exe "out/aqr-${{ steps.stem.outputs.stem }}-win-install.exe"
+      # Last, aqr.exe alone packed by UPX (the installer carries it unpacked, which its own
+      # payload compresses better; the installer itself is not packed).
+      - run: |
+          curl -sSfLo upx.zip "https://github.com/upx/upx/releases/download/v$UPX_VERSION/upx-$UPX_VERSION-win64.zip"
+          echo "$UPX_SHA256 *upx.zip" | sha256sum -c -
+          unzip -jq upx.zip "upx-$UPX_VERSION-win64/upx.exe"
+          ./upx.exe -9 -q "out/aqr-${{ steps.stem.outputs.stem }}.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: windows
@@ -92,6 +102,12 @@ jobs:
       - run: |
           mkdir out
           cp target/x86_64-win7-windows-msvc/dist/aqr.exe "out/aqr-${{ steps.stem.outputs.stem }}-win7.exe"
+      # (packed by UPX as in the job windows)
+      - run: |
+          curl -sSfLo upx.zip "https://github.com/upx/upx/releases/download/v$UPX_VERSION/upx-$UPX_VERSION-win64.zip"
+          echo "$UPX_SHA256 *upx.zip" | sha256sum -c -
+          unzip -jq upx.zip "upx-$UPX_VERSION-win64/upx.exe"
+          ./upx.exe -9 -q out/*.exe
       - uses: actions/upload-artifact@v4
         with:
           name: win7

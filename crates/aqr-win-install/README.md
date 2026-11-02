@@ -9,6 +9,8 @@ cargo build --profile dist -p aqr-win-install   # target/dist/aqr-win-install.ex
 aqr-win-install [--quiet]                       # asks first, unless --quiet
 ```
 
+`build.bat` runs the two builds as the release workflow does.
+
 - `build.rs` packs `target/dist/{aqr,aqr-win}.exe` (`AQR_WIN_INSTALL_FROM` names another
   directory, relative to the workspace's root), checks the payload by unpacking it, and is run
   again when they change. Without them the installer is built anyway, saying so, and tells
