@@ -57,7 +57,14 @@ MiB (50.3 MB): 0.22 s on 10 threads, 1.44 s on one.
 
 ## Status
 
-Left: 7-Zip's ordering of a solid folder by extension and its BCJ filters (most of the 7z gap
-to `7zz`), a single large file deflated in parallel in ZIP (pigz's way), Info-ZIP's owner field
-(0x7875), EGG's POSIX information, encryption of ALZ and EGG (aqr-unpack does not decrypt them
-to check against), RAR (not written: a proprietary format whose compressor RARLAB keeps to itself).
+Left:
+
+- The 7z gap to `7zz -mx6` (22% at 10 threads): its LZMA2 has a dictionary of 64 MiB (8 here,
+  XZ Utils' preset 6; a larger one costs some 11 times its size in memory on every thread), and
+  it puts executables under BCJ or ARM64 filters. Ordering the folder by extension, as 7-Zip
+  does, was measured not to help: 107.4 -> 115.7 MB on one thread; 114.1 -> 111.7 MB but 6.3
+  -> 11.9 s on 10.
+- A single large file deflated in parallel in ZIP, ALZ and EGG (pigz's way).
+- Info-ZIP's owner field (0x7875); EGG's POSIX information.
+- Encryption of ALZ and EGG (aqr-unpack does not decrypt them, to check against).
+- RAR is not written: a proprietary format, whose compressor RARLAB keeps to itself.
