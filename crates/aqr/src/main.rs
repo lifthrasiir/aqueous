@@ -2125,7 +2125,9 @@ impl aqr::Runner for Decoder {
             return if self.wasm { Wasm.load(wasm) } else { self.native.load(wasm) };
         };
         let s = s.get_or_init(|| match sandbox::SUPPORTED {
-            true => sandbox::Sandbox::current_exe([SANDBOX_WORKER]).map_err(|e| e.to_string()),
+            true => sandbox::Sandbox::current_exe([SANDBOX_WORKER])
+                .map(|s| s.title("aqr: sandbox worker"))
+                .map_err(|e| e.to_string()),
             false => Err("this system does not lock workers down (--no-sandbox to run the modules not known in \
                  this process)"
                 .into()),

@@ -12,7 +12,7 @@
 //! Arenas are POSIX shared memory, unlinked as soon as they are made (sized once, as macOS
 //! sizes them: the worker cannot resize them).
 
-use std::ffi::{CStr, CString, OsString, c_char};
+use std::ffi::{CStr, CString, OsStr, OsString, c_char};
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -61,8 +61,8 @@ impl Drop for Child {
     }
 }
 
-pub fn spawn(program: &Path, args: &[OsString]) -> io::Result<(Child, File, File)> {
-    let (c, to, from, socket) = super::unix::spawn(program, args)?;
+pub fn spawn(program: &Path, title: Option<&OsStr>, args: &[OsString]) -> io::Result<(Child, File, File)> {
+    let (c, to, from, socket) = super::unix::spawn(program, title, args)?;
     let w = Arc::new(Watched { pid: c.id() as libc::pid_t, child: Mutex::new(c), limit: AtomicU64::new(u64::MAX) });
     let weak = Arc::downgrade(&w);
     // a worker that is not watched is not started
@@ -197,8 +197,8 @@ mod tests {
     fn memory_limited() {
         // 256 MB written, then held
         let args = ["-e", "$x = 'a' x 256_000_000; sleep 5"].map(OsString::from);
-        let (mut within, ..) = spawn(Path::new("/usr/bin/perl"), &args).unwrap();
-        let (mut beyond, ..) = spawn(Path::new("/usr/bin/perl"), &args).unwrap();
+        let (mut within, ..) = spawn(Path::new("/usr/bin/perl"), None, &args).unwrap();
+        let (mut beyond, ..) = spawn(Path::new("/usr/bin/perl"), None, &args).unwrap();
         within.limit_memory(1 << 30).unwrap();
         beyond.limit_memory(64 << 20).unwrap();
         assert_eq!(beyond.exit_code(), Some(-libc::SIGKILL as i64));

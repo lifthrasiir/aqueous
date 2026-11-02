@@ -8,7 +8,7 @@
 //! The memory is not limited by the system yet: an rlimit would count the threads' stacks and
 //! what Wasmtime reserves, and cgroups are not always delegated.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -40,8 +40,8 @@ impl Drop for Child {
     }
 }
 
-pub fn spawn(program: &Path, args: &[OsString]) -> io::Result<(Child, File, File)> {
-    let (c, to, from, socket) = super::unix::spawn(program, args)?;
+pub fn spawn(program: &Path, title: Option<&OsStr>, args: &[OsString]) -> io::Result<(Child, File, File)> {
+    let (c, to, from, socket) = super::unix::spawn(program, title, args)?;
     Ok((Child(c, socket), to, from))
 }
 

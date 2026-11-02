@@ -1,7 +1,8 @@
 //! What each system does for the sandbox. A system gives:
 //!
-//! - `spawn(program, args)`: a worker started (a `Child`), and its standard input and output.
-//!   The worker has no other handle of the decoder's, and none of its environment.
+//! - `spawn(program, title, args)`: a worker started (a `Child`), and its standard input and
+//!   output, shown as `title` where given and the system can (`argv[0]` on Unix systems). The
+//!   worker has no other handle of the decoder's, and none of its environment.
 //! - `Child::limit_memory(bytes)`: the memory of the worker limited, as the system can, before
 //!   each request (the memory limit of the application, beyond what the worker itself takes).
 //! - `Child::exit_code()`: how the worker ended, once it did. A `Child` dropped kills it.

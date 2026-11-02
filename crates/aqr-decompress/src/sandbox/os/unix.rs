@@ -2,7 +2,7 @@
 //! standard input and output piped, its error discarded and a socket at [`SOCKET`], which the
 //! descriptors of arenas are sent over; and the arenas mapped.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -13,8 +13,13 @@ use std::process::{Command, ExitStatus, Stdio};
 /// The worker's descriptor of the socket that arenas come over.
 pub const SOCKET: RawFd = 3;
 
-/// A worker started, its input, output and the decoder's end of its socket.
-pub fn spawn(program: &Path, args: &[OsString]) -> io::Result<(std::process::Child, File, File, OwnedFd)> {
+/// A worker started, its input, output and the decoder's end of its socket; its `argv[0]`
+/// `title` where given (what `ps` shows), else `program`.
+pub fn spawn(
+    program: &Path,
+    title: Option<&OsStr>,
+    args: &[OsString],
+) -> io::Result<(std::process::Child, File, File, OwnedFd)> {
     let mut fds = [0; 2];
     // not inherited but as `SOCKET` below (macOS, of no `SOCK_CLOEXEC`, as soon as it can)
     #[cfg(target_os = "linux")]
@@ -34,6 +39,9 @@ pub fn spawn(program: &Path, args: &[OsString]) -> io::Result<(std::process::Chi
     }
     let theirs_fd = theirs.as_raw_fd();
     let mut cmd = Command::new(program);
+    if let Some(title) = title {
+        cmd.arg0(title);
+    }
     cmd.args(args).env_clear().current_dir("/").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     // SAFETY: only calls safe after a fork
     unsafe {
@@ -180,4 +188,21 @@ pub fn view(_: u64, len: usize) -> io::Result<Mapping> {
         OwnedFd::from_raw_fd(std::ptr::read_unaligned(libc::CMSG_DATA(cmsg).cast::<RawFd>()))
     };
     Mapping::new(&fd, len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+
+    /// The title is the worker's `argv[0]`, as `ps` shows it.
+    #[test]
+    fn titled() {
+        let args = ["-c", "/bin/ps -o command= -p $$; :"].map(OsString::from);
+        let (mut c, _to, mut from, _) = spawn(Path::new("/bin/sh"), Some(OsStr::new("aqr: titled")), &args).unwrap();
+        let mut shown = String::new();
+        from.read_to_string(&mut shown).unwrap();
+        c.wait().unwrap();
+        assert!(shown.starts_with("aqr: titled -c "), "{shown:?}");
+    }
 }

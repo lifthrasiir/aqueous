@@ -401,7 +401,7 @@ impl Drop for Attributes {
     }
 }
 
-pub fn spawn(program: &Path, args: &[OsString]) -> io::Result<(Child, File, File)> {
+pub fn spawn(program: &Path, _title: Option<&OsStr>, args: &[OsString]) -> io::Result<(Child, File, File)> {
     let (locked, imp) = tokens()?;
     let job = job()?;
     let (child_in, to) = io::pipe()?;

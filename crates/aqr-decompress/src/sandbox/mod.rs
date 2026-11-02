@@ -50,6 +50,12 @@ pub const SUPPORTED: bool = cfg!(any(windows, target_os = "linux", target_os = "
 /// Serves the decoder that started this process as its worker, then exits: the whole of the
 /// worker program, or the part of the host's that its arguments for workers lead to.
 pub fn worker_main() -> ! {
+    // what Linux's `top` shows by default (`comm`, of 15 bytes), as `argv[0]` is not
+    #[cfg(target_os = "linux")]
+    // SAFETY: of the name, terminated
+    unsafe {
+        libc::prctl(libc::PR_SET_NAME, c"aqr-sandbox".as_ptr())
+    };
     std::process::exit(match worker::serve() {
         Ok(()) => 0,
         Err(_) => 1,
@@ -59,6 +65,8 @@ pub fn worker_main() -> ! {
 /// The program of the workers and its arguments, and the workers started, idle.
 pub struct Sandbox {
     program: PathBuf,
+    /// What the workers show as their programs (`argv[0]`), where given.
+    title: Option<OsString>,
     args: Vec<OsString>,
     /// The threads of each worker; those of aqr-common's pool where `None`.
     threads: Option<usize>,
@@ -74,6 +82,7 @@ impl Sandbox {
     pub fn new(program: impl Into<PathBuf>, args: impl IntoIterator<Item = impl Into<OsString>>) -> Sandbox {
         Sandbox {
             program: program.into(),
+            title: None,
             args: args.into_iter().map(Into::into).collect(),
             threads: None,
             idle: Mutex::default(),
@@ -84,6 +93,13 @@ impl Sandbox {
     /// Workers of this process's own program, invoked with `args`.
     pub fn current_exe(args: impl IntoIterator<Item = impl Into<OsString>>) -> io::Result<Sandbox> {
         Ok(Sandbox::new(std::env::current_exe()?, args))
+    }
+
+    /// Each worker shown as `title` in the list of processes (`ps`, `top -c`) on Unix systems,
+    /// in place of its program's path: its `argv[0]`. Windows shows the program.
+    pub fn title(mut self, title: impl Into<OsString>) -> Sandbox {
+        self.title = Some(title.into());
+        self
     }
 
     /// Each worker with `threads` threads (at least one), for the tasks of the modules.
@@ -196,7 +212,7 @@ struct Worker {
 
 impl Worker {
     fn start(s: &Sandbox) -> io::Result<Worker> {
-        let (child, to, from) = os::spawn(&s.program, &s.args)?;
+        let (child, to, from) = os::spawn(&s.program, s.title.as_deref(), &s.args)?;
         let mut w = Worker {
             child,
             to: BufWriter::with_capacity(1 << 16, to),

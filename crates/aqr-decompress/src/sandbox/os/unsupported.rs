@@ -1,6 +1,6 @@
 //! A system the sandbox does not lock down workers on: no worker starts.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io;
 use std::path::Path;
@@ -25,7 +25,7 @@ impl Child {
     }
 }
 
-pub fn spawn(_: &Path, _: &[OsString]) -> io::Result<(Child, File, File)> {
+pub fn spawn(_: &Path, _: Option<&OsStr>, _: &[OsString]) -> io::Result<(Child, File, File)> {
     Err(unsupported())
 }
 
