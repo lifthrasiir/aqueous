@@ -25,7 +25,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use aqr_common::{crc32, pool};
 use aqr_flate::zlib;
 
-use crate::{Bytes, Contents, Format, Item, Keeps, Kind, Options, Progress, Tell, Tree, Written, batches, items, time};
+use crate::{Bytes, Contents, Format, Item, Keeps, Kind, Options, Progress, Tell, Tree, Written, batches, items};
+use aqr_foreign::time;
 
 /// The attributes of Windows kept by ALZ (read-only, hidden, system, archive), and its
 /// directory's.
@@ -167,7 +168,7 @@ pub fn write_alz(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tel
                 )));
             }
             let x = &t.entries[it.entry].extra;
-            let (date, tm) = x.mtime.map_or((0x21, 0), time::dos);
+            let (date, tm) = x.mtime.map_or((0x21, 0), time::to_dos);
             let mut h = b"BLZ\x01".to_vec();
             h.extend((name.len() as u16).to_le_bytes());
             let dir = matches!(it.kind, Kind::Dir);
@@ -278,7 +279,7 @@ pub fn write_egg(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tel
             h.extend(0x2C86_950Bu32.to_le_bytes());
             h.push(0);
             h.extend(9u16.to_le_bytes());
-            h.extend(x.mtime.map_or(0, time::filetime).to_le_bytes());
+            h.extend(x.mtime.map_or(0, time::to_filetime).to_le_bytes());
             h.push((x.win_attrs.unwrap_or(0) & EGG_KEPT) as u8 | if dir { EGG_DIR } else { 0 });
             h.extend(END);
             put(w, &h)?;

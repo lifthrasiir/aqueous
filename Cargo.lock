@@ -409,6 +409,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-foreign"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "aqr-formula",
+ "cbc",
+ "ctr",
+ "hmac",
+ "libc",
+ "pbkdf2",
+ "sha1",
+ "sha2",
+ "windows-sys",
+]
+
+[[package]]
 name = "aqr-formula"
 version = "0.1.0"
 dependencies = [
@@ -704,23 +720,15 @@ dependencies = [
 name = "aqr-pack"
 version = "0.1.0"
 dependencies = [
- "aes",
  "aqr-bz2",
  "aqr-common",
  "aqr-flate",
+ "aqr-foreign",
  "aqr-formula",
  "aqr-unpack",
- "cbc",
- "ctr",
  "encoding_rs",
  "getrandom 0.4.3",
- "hmac",
- "libc",
  "liblzma",
- "pbkdf2",
- "sha1",
- "sha2",
- "windows-sys",
  "zstd",
 ]
 
@@ -837,7 +845,6 @@ dependencies = [
 name = "aqr-unpack"
 version = "0.1.0"
 dependencies = [
- "aes",
  "aqr-7z",
  "aqr-alz",
  "aqr-azo",
@@ -846,18 +853,12 @@ dependencies = [
  "aqr-common",
  "aqr-egg",
  "aqr-flate",
+ "aqr-foreign",
  "aqr-formula",
  "aqr-lzma",
  "aqr-rar",
  "aqr-zip",
- "cbc",
- "ctr",
  "encoding_rs",
- "hmac",
- "libc",
- "pbkdf2",
- "sha1",
- "sha2",
  "windows-sys",
  "zstd",
 ]

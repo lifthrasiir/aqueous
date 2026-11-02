@@ -29,6 +29,8 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   - `aqr-pack` — the tree `aqr -c` gathers written as an archive of another format (ZIP, 7z,
     ALZ, EGG, tar and its compressors, single-file streams: `--format FORMAT`, or `-o NAME.EXT`),
     each format's work spread over the pool; liblzma (XZ Utils, built from source) for xz/7z.
+  - `aqr-foreign` — what aqr-unpack and aqr-pack share, both ways: the encryptions (ZIP's,
+    WinZip's AES, 7-Zip's AES) and times (FILETIME, MS-DOS's).
   - `aqr-common` — shared parts: varints, rANS, bit I/O, heap accounting, the task pool.
     `aqr-num` — numbers printed as text.
   - `aqr-version` — the binaries' version for their build scripts: the tag's (`AQR_VERSION`, set

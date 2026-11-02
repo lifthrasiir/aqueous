@@ -4,7 +4,7 @@
 //! symbolic links), times (NTFS's field, else Info-ZIP's extended timestamp, else the MS-DOS
 //! time as local time), Unix modes and owners, and Windows' attributes; the contents decoded
 //! by entry on the pool's threads (stored, DEFLATE, bzip2, LZMA, Zstandard, xz), their CRC-32s
-//! checked. Encrypted entries (the traditional encryption and WinZip's AES, [`crate::crypt`])
+//! checked. Encrypted entries (the traditional encryption and WinZip's AES, [`aqr_foreign::crypt`])
 //! are decrypted by the passphrase given ([`Listing::unlock`]), else left out (told), as are
 //! those of PKWARE's strong encryption and methods not known.
 
@@ -16,8 +16,9 @@ use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, Tree, WIN_ATTRS_ALLOWED,
 use aqr_zip::zip::{self as z, u16_at, u32_at, u64_at};
 
 use crate::build::{self, Builder};
-use crate::crypt::{self, Fail, ZipCrypto};
 use crate::{Done, Filter, Select, Sink, codec, stream, sys};
+use aqr_foreign::crypt::{self, Fail, ZipCrypto};
+use aqr_foreign::time;
 
 /// Hosts of "version made by" whose names may separate by `\` and whose attributes are MS-DOS's.
 fn dos_host(host: u8) -> bool {
@@ -99,7 +100,7 @@ fn times(x: &mut Extra, central: &[u8], local: &[u8]) {
                 while p + 4 <= f.len() {
                     let (tag, n) = (u16_at(f, p), u16_at(f, p + 2) as usize);
                     if tag == 1 && n >= 24 && p + 4 + 24 <= f.len() {
-                        let t = |k: usize| sys::filetime(u64_at(f, p + 4 + 8 * k));
+                        let t = |k: usize| time::from_filetime(u64_at(f, p + 4 + 8 * k));
                         (x.mtime, x.atime, x.crtime) = (t(0), t(1), t(2));
                         return;
                     }
@@ -222,7 +223,7 @@ impl<'d> Listing<'d> {
         let dir = name.ends_with(b"/")
             || dos_host(host) && (name.ends_with(b"\\") || external & 0x10 != 0)
             || mode & S_IFMT == S_IFDIR;
-        let mut x = Extra { mtime: sys::dos(u16_at(f, 10), u16_at(f, 8)), ..Extra::default() };
+        let mut x = Extra { mtime: time::from_dos(u16_at(f, 10), u16_at(f, 8)), ..Extra::default() };
         times(&mut x, cx, lx);
         owner(&mut x, cx, lx);
         if mode != 0 {
@@ -277,7 +278,7 @@ impl<'d> Listing<'d> {
                 return Ok(());
             }
             // (the target, the entry's data, read now: the tree has it)
-            let target = decode(d, &unit(0), None).map_err(|e| format!("ZIP: {shown}: {}", e.shown()))?;
+            let target = decode(d, &unit(0), None).map_err(|e| format!("ZIP: {shown}: {}", told(&e)))?;
             if target.is_empty() {
                 self.notes.push((lax.clone(), format!("{shown}: a link to nothing, not extracted")));
                 return Ok(());
@@ -389,11 +390,11 @@ impl<'d> Listing<'d> {
                 Ok(data) => sink.content(u.c, data),
                 // (an encrypted entry left out, as it cannot be told from a damaged one)
                 Err(e) if u.enc != Enc::None => {
-                    sink.note(&format!("{}: {}, not extracted", u.name, e.shown()));
+                    sink.note(&format!("{}: {}, not extracted", u.name, told(&e)));
                     left.fetch_add(1, Relaxed);
                     Ok(())
                 }
-                Err(e) => Err(format!("ZIP: {}: {}", u.name, e.shown())),
+                Err(e) => Err(format!("ZIP: {}: {}", u.name, told(&e))),
             };
             sink.step(Step::Ended(k));
             if r.is_err() {
@@ -409,12 +410,11 @@ impl<'d> Listing<'d> {
     }
 }
 
-impl Fail {
-    fn shown(&self) -> String {
-        match self {
-            Fail::Wrong => "encrypted, and no passphrase given opens it".into(),
-            Fail::Bad(e) => e.clone(),
-        }
+/// What failure `f` of an entry's data is, as told.
+fn told(f: &Fail) -> String {
+    match f {
+        Fail::Wrong => "encrypted, and no passphrase given opens it".into(),
+        Fail::Bad(e) => e.clone(),
     }
 }
 
@@ -434,7 +434,7 @@ fn decode(d: &[u8], u: &Unit, pass: Option<&[u8]>) -> Result<Vec<u8>, Fail> {
             &decrypted
         }
         (Enc::Aes(strength, _), Some(p)) => {
-            decrypted = crypt::winzip_aes(p, strength, body)?;
+            decrypted = crypt::winzip_aes_decrypt(p, strength, body)?;
             &decrypted
         }
     };

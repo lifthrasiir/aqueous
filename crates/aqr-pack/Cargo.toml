@@ -6,28 +6,16 @@ description = "A tree written as an archive of another format (ZIP, 7z, ALZ, EGG
 publish = false
 
 [dependencies]
-aes = "0.8"
 aqr-bz2 = { path = "../../codecs/aqr-bz2", default-features = false }
 aqr-common = { path = "../aqr-common" }
 aqr-flate = { path = "../../codecs/aqr-flate", default-features = false }
+aqr-foreign = { path = "../aqr-foreign" }
 aqr-formula = { path = "../aqr-formula" }
-cbc = "0.1"
-ctr = "0.9"
 encoding_rs = "0.8"
 getrandom = "0.4"
-hmac = "0.12"
 # XZ Utils' liblzma (0BSD), built from its source here (not the system's), as a black box
 liblzma = { version = "0.4", default-features = false, features = ["static", "parallel"] }
-pbkdf2 = "0.12"
-sha1 = "0.10"
-sha2 = "0.10"
 zstd = { version = "0.13", features = ["zstdmt"] }
 
 [dev-dependencies]
 aqr-unpack = { path = "../aqr-unpack" }
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Time"] }

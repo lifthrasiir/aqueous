@@ -15,11 +15,9 @@ pub use aqr_formula::Bytes;
 pub use aqr_formula::aqr::{Entry, EntryNode, Extra, Time, Tree};
 
 pub mod alzip;
-mod crypt;
 pub mod filter;
 pub mod sevenz;
 pub mod tar;
-mod time;
 pub mod zip;
 
 /// The contents of the files of a [`Tree`] ([`EntryNode::File`]), read as they are written.

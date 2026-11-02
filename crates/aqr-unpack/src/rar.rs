@@ -63,13 +63,13 @@ pub struct Listing<'d> {
 fn time5(t: rar5::Time) -> Option<Time> {
     match t {
         rar5::Time::Unix(s, ns) => Some(Time::new(s as i64, ns)),
-        rar5::Time::Filetime(t) => sys::filetime(t),
+        rar5::Time::Filetime(t) => aqr_foreign::time::from_filetime(t),
     }
 }
 
 /// A RAR 3.x header's time: an MS-DOS one (local) and nanoseconds past it (up to 2 s).
 fn time4(t: (u32, u32)) -> Option<Time> {
-    let base = sys::dos((t.0 >> 16) as u16, t.0 as u16)?;
+    let base = aqr_foreign::time::from_dos((t.0 >> 16) as u16, t.0 as u16)?;
     let ns = base.nanos as u64 + t.1 as u64;
     Some(Time::new(base.secs + (ns / 1_000_000_000) as i64, (ns % 1_000_000_000) as u32))
 }

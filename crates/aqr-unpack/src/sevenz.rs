@@ -21,7 +21,7 @@ use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, Tree, WIN_ATTRS_ALLOWED,
 
 use crate::build::{self, Builder};
 use crate::codec::Raw;
-use crate::{Done, Select, Sink, codec, sys};
+use crate::{Done, Select, Sink, codec};
 
 const S_IFMT: u32 = 0o170000;
 const S_IFDIR: u32 = 0o040000;
@@ -175,7 +175,7 @@ fn output<'d>(
         AES => match pass {
             None => return Err(Error::Unknown("encrypted, and no passphrase given".into())),
             Some(p) => {
-                let mut v = crate::crypt::sevenz_aes(p, &coder.props, one()?)?;
+                let mut v = aqr_foreign::crypt::sevenz_aes_decrypt(p, &coder.props, one()?)?;
                 if v.len() < size {
                     return Err("AES: cut short".into());
                 }
@@ -321,9 +321,9 @@ impl<'d> Listing<'d> {
             let attrib = file.attrib.unwrap_or(0);
             let mode = if attrib & UNIX_EXTENSION != 0 { attrib >> 16 } else { 0 };
             let mut x = Extra {
-                mtime: file.mtime.and_then(sys::filetime),
-                crtime: file.ctime.and_then(sys::filetime),
-                atime: file.atime.and_then(sys::filetime),
+                mtime: file.mtime.and_then(aqr_foreign::time::from_filetime),
+                crtime: file.ctime.and_then(aqr_foreign::time::from_filetime),
+                atime: file.atime.and_then(aqr_foreign::time::from_filetime),
                 ..Extra::default()
             };
             if mode != 0 {

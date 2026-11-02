@@ -23,7 +23,6 @@ pub use build::Select;
 mod alzip;
 mod build;
 mod codec;
-mod crypt;
 mod lzma;
 mod rar;
 mod sevenz;

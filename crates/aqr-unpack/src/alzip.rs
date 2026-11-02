@@ -132,7 +132,7 @@ impl<'d> Listing<'d> {
             let raw = &d[e.name.clone()];
             let name = if utf8 { raw.to_vec() } else { named(raw, 949) };
             let extra = Extra {
-                mtime: sys::dos((e.time >> 16) as u16, e.time as u16),
+                mtime: aqr_foreign::time::from_dos((e.time >> 16) as u16, e.time as u16),
                 win_attrs: win_attrs(e.attrs),
                 ..Extra::default()
             };
@@ -192,7 +192,7 @@ impl<'d> Listing<'d> {
             let mut extra = Extra::default();
             let (mut dir, mut link) = (false, false);
             if let Some((t, attrs)) = e.windows {
-                extra.mtime = sys::filetime(t);
+                extra.mtime = aqr_foreign::time::from_filetime(t);
                 extra.win_attrs = win_attrs(attrs & 0x07);
                 (dir, link) = (attrs & 0x80 != 0, attrs & 0x08 != 0);
             }

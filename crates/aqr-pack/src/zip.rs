@@ -23,9 +23,9 @@ use aqr_common::{crc32, pool};
 use aqr_flate::zlib;
 
 use crate::{
-    Bytes, Contents, Extra, Format, Item, Keeps, Kind, Options, Progress, Tell, Tree, Written, batches, crypt, items,
-    time,
+    Bytes, Contents, Extra, Format, Item, Keeps, Kind, Options, Progress, Tell, Tree, Written, batches, items,
 };
+use aqr_foreign::{crypt, time};
 
 const LOCAL: u32 = 0x0403_4b50;
 const CENTRAL: u32 = 0x0201_4b50;
@@ -129,7 +129,7 @@ pub fn write(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tell: &
                     let mut b = deflate(d, level);
                     if let Some(p) = &o.passphrase {
                         let salt = crate::random()?;
-                        let data = Data::Of(crypt::winzip_aes(p, &salt, b.data.bytes()));
+                        let data = Data::Of(crypt::winzip_aes_encrypt(p, &salt, b.data.bytes()));
                         b = Body { crc: 0, method: AES, data, aes: Some(b.method), ..b };
                     }
                     tell(Progress::Ended(k));
@@ -242,7 +242,7 @@ fn times(x: &Extra, central: bool) -> Vec<u8> {
         d.extend(1u16.to_le_bytes());
         d.extend(24u16.to_le_bytes());
         for t in [x.mtime, x.atime, x.crtime] {
-            d.extend(t.map_or(0, time::filetime).to_le_bytes());
+            d.extend(t.map_or(0, time::to_filetime).to_le_bytes());
         }
         field(&mut f, 0x000a, &d);
     }
@@ -270,7 +270,7 @@ fn field(f: &mut Vec<u8>, id: u16, d: &[u8]) {
 fn common(h: &mut Vec<u8>, it: &Item, x: &Extra, needs: u16, method: u16, crc: u32) {
     let flags = if it.utf8 && !it.path.is_ascii() { UTF8 } else { 0 } | if method == AES { ENCRYPTED } else { 0 };
     let needs = if method == AES { needs.max(NEEDS_AES) } else { needs };
-    let (date, time) = x.mtime.map_or((0x21, 0), time::dos);
+    let (date, time) = x.mtime.map_or((0x21, 0), time::to_dos);
     for v in [needs, flags, method, time, date] {
         h.extend(v.to_le_bytes());
     }

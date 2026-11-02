@@ -22,15 +22,14 @@
 
 use std::io::{self, SeekFrom};
 
-use aes::cipher::{BlockEncryptMut, KeyIvInit};
 use aqr_common::{crc32, pool};
 use liblzma::stream::{Action, Filters, LzmaOptions, Status, Stream};
 
 use crate::filter::xz_dict;
 use crate::{
-    Bytes, Contents, Extra, Format, Item, Keeps, Kind, Options, Output, Progress, Tell, Tree, Written, batches, crypt,
-    items, time,
+    Bytes, Contents, Extra, Format, Item, Keeps, Kind, Options, Output, Progress, Tell, Tree, Written, batches, items,
 };
+use aqr_foreign::{crypt, time};
 
 const MAGIC: [u8; 6] = [b'7', b'z', 0xbc, 0xaf, 0x27, 0x1c];
 const SIGNATURE: usize = 32;
@@ -122,39 +121,6 @@ fn lzma2(data: &[u8], level: u8, dict: u64) -> io::Result<Vec<u8>> {
     }
 }
 
-/// 7-Zip's AES in CBC, carried over the pieces of a stream: the whole blocks of each piece
-/// encrypted, the rest kept for the next (the end padded with zeros).
-struct Cbc {
-    enc: cbc::Encryptor<aes::Aes256>,
-    carry: Vec<u8>,
-}
-
-impl Cbc {
-    fn new(key: &[u8; 32], iv: &[u8; 16]) -> Cbc {
-        Cbc { enc: cbc::Encryptor::new(key.into(), iv.into()), carry: Vec::new() }
-    }
-
-    /// The encryption of the blocks `data` completes.
-    fn feed(&mut self, data: &[u8]) -> Vec<u8> {
-        self.carry.extend_from_slice(data);
-        let whole = self.carry.len() / 16 * 16;
-        let mut out: Vec<u8> = self.carry.drain(..whole).collect();
-        out.as_chunks_mut::<16>().0.iter_mut().for_each(|b| self.enc.encrypt_block_mut(b.into()));
-        out
-    }
-
-    /// The last block, padded.
-    fn finish(&mut self) -> Vec<u8> {
-        if self.carry.is_empty() {
-            return Vec::new();
-        }
-        self.carry.resize(16, 0);
-        let mut b = std::mem::take(&mut self.carry);
-        self.enc.encrypt_block_mut(b.as_mut_slice().into());
-        b
-    }
-}
-
 /// The data of the folder cut into parts compressed on the pool's threads, a wave at a time,
 /// and the packed stream written (encrypted where it is) as it goes.
 struct Packer<'w> {
@@ -167,7 +133,7 @@ struct Packer<'w> {
     wave: usize,
     dict: u64,
     pending: Vec<u8>,
-    aes: Option<Cbc>,
+    aes: Option<crypt::SevenzEncryptor>,
     /// Bytes given, and bytes written.
     unpacked: u64,
     packed: u64,
@@ -386,7 +352,7 @@ fn header(t: &Tree, items: &[Item], has: &[bool], notes: &mut Vec<String>, main:
     property(&mut h, id::NAME, &names);
     let extra = |i: &Item| &t.entries[i.entry].extra;
     let times = |f: fn(&Extra) -> Option<crate::Time>| -> Vec<Option<u64>> {
-        items.iter().map(|i| f(extra(i)).map(time::filetime)).collect()
+        items.iter().map(|i| f(extra(i)).map(time::to_filetime)).collect()
     };
     defined(&mut h, id::CTIME, &times(|x| x.crtime), 8);
     defined(&mut h, id::ATIME, &times(|x| x.atime), 8);
@@ -428,7 +394,7 @@ pub fn write(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Output, tell: 
     let part = total.div_ceil(threads as u64).clamp(1 << 20, 4 * dict_max);
     let wave = (part * threads as u64).min(o.batch.max(part)) / part * part;
     // (the key once; the IV of the folder)
-    let key = o.passphrase.as_ref().map(|p| crypt::sevenz_key(p, &[]));
+    let key = o.passphrase.as_ref().map(|p| crypt::sevenz_key(p, &[], crypt::SEVENZ_POWER));
     let iv = key.as_ref().map(|_| crate::random::<16>()).transpose()?;
     let base = w.stream_position()?;
     w.write_all(&[0; SIGNATURE])?;
@@ -441,7 +407,7 @@ pub fn write(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Output, tell: 
         wave: wave as usize,
         dict: dictionary(level, part.min(total)),
         pending: Vec::new(),
-        aes: key.as_ref().zip(iv.as_ref()).map(|(k, iv)| Cbc::new(k, iv)),
+        aes: key.as_ref().zip(iv.as_ref()).map(|(k, iv)| crypt::SevenzEncryptor::new(k, iv)),
         unpacked: 0,
         packed: 0,
         stream: 0,
@@ -494,7 +460,7 @@ pub fn write(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Output, tell: 
         let mut coders = vec![main_coder];
         let mut sizes = vec![unpacked];
         if let Some(iv) = &iv {
-            coders.push(Coder { id: AES, props: crypt::sevenz_props(iv) });
+            coders.push(Coder { id: AES, props: crypt::SevenzProps::written(iv) });
             sizes.push(stream);
         }
         streams(0, packed, &coders, &sizes, None, &subs)
@@ -506,9 +472,11 @@ pub fn write(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Output, tell: 
         let iv = crate::random::<16>()?;
         let hd = dictionary(6, (h.len() as u64).next_power_of_two());
         let lz = lzma2(&h, 6, hd)?;
-        let enc = crypt::sevenz_aes(key, &iv, &lz);
-        let coders =
-            [Coder { id: LZMA2, props: vec![dict_prop(hd)] }, Coder { id: AES, props: crypt::sevenz_props(&iv) }];
+        let enc = crypt::sevenz_aes_encrypt(key, &iv, &lz);
+        let coders = [
+            Coder { id: LZMA2, props: vec![dict_prop(hd)] },
+            Coder { id: AES, props: crypt::SevenzProps::written(&iv) },
+        ];
         let s =
             streams(packed, enc.len() as u64, &coders, &[h.len() as u64, lz.len() as u64], Some(crc32::hash(&h)), &[]);
         w.write_all(&enc)?;

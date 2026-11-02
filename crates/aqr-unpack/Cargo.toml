@@ -6,7 +6,6 @@ description = "Archives of other formats (ZIP, 7z, RAR, ALZ, EGG, tar and the co
 publish = false
 
 [dependencies]
-aes = "0.8"
 aqr-7z = { path = "../../codecs/aqr-7z" }
 aqr-alz = { path = "../../codecs/aqr-alz" }
 aqr-azo = { path = "../../codecs/aqr-azo" }
@@ -15,21 +14,13 @@ aqr-bz2 = { path = "../../codecs/aqr-bz2" }
 aqr-common = { path = "../aqr-common" }
 aqr-egg = { path = "../../codecs/aqr-egg" }
 aqr-flate = { path = "../../codecs/aqr-flate" }
+aqr-foreign = { path = "../aqr-foreign" }
 aqr-formula = { path = "../aqr-formula" }
 aqr-lzma = { path = "../../codecs/aqr-lzma" }
 aqr-rar = { path = "../../codecs/aqr-rar", default-features = false }
 aqr-zip = { path = "../../codecs/aqr-zip" }
-cbc = "0.1"
-ctr = "0.9"
 encoding_rs = "0.8"
-hmac = "0.12"
-pbkdf2 = "0.12"
-sha1 = "0.10"
-sha2 = "0.10"
 zstd = "0.13"
 
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_System_Time"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization"] }
