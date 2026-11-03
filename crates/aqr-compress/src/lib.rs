@@ -1705,8 +1705,7 @@ fn make_later(
         let &Node::Slice { stream, start, len } = n else { unreachable!("a slice") };
         &fr.streams[stream].data[start as usize..][..len as usize]
     };
-    let made = aqr_common::pool::par_map(later.len(), opt.threads, |j| {
-        let i = order[j];
+    let make = |i: usize| {
         let (_, n, nest) = &later[i];
         let mine = taken[i].lock().unwrap().take().map(|b| b.made());
         let d = mine.as_deref().unwrap_or_else(|| data(n));
@@ -1782,7 +1781,24 @@ fn make_later(
         };
         child.iter_mut().for_each(|c| aqr_formula::store::spill_streams(&mut c.f));
         (child, back, own.deferred.into_inner(), Some(own.enc))
-    });
+    };
+    let made = match sealing.as_ref().zip(slots.as_ref()) {
+        // in their order, each let in once the content [`SEAL_AHEAD`] times the threads before it
+        // is sealed (the contents made and waiting for their turn held: a long one before them
+        // holding it), on workers as they are free (no thread waiting holds one, so that what
+        // runs, a long content's own, can take them)
+        Some((s, slots)) => aqr_common::pool::dispatch(
+            later.len(),
+            opt.threads,
+            |i| {
+                if let Some(back) = i.checked_sub(SEAL_AHEAD * opt.threads.max(1)) {
+                    s.order.wait_done(slots[back]);
+                }
+            },
+            |i, ()| make(i),
+        ),
+        None => aqr_common::pool::par_map(later.len(), opt.threads, |j| make(order[j])),
+    };
     if let Some(s) = &sealing {
         s.order.wait(s.slot);
     }
@@ -1798,6 +1814,12 @@ fn make_later(
         enc.into_iter().for_each(|e| cx.enc.adopt(e));
     }
 }
+
+/// Contents a content made apart starts at most ahead of the first not sealed, where they are
+/// sealed ([`make_later`]), for each thread. On the Windows Server DVD (16 threads), the spill's
+/// peak and the time: 5.29 GB and 169.1 s with none; 4.45 GB, 171.4 s at 4; 4.24 GB, 175.2 s at
+/// 2 (where a long content holds the turn, fewer start meanwhile).
+const SEAL_AHEAD: usize = 4;
 
 /// Of each stream of `f` of data not made yet that an application among what its root
 /// concatenates takes, that application and where its output starts in `f`'s.
@@ -2556,8 +2578,8 @@ mod tests {
     /// file back.
     #[test]
     fn wim_data_made_as_needed() {
-        let d = std::fs::read(format!("{}/../../codecs/aqr-wim/tests/data/lzx.wim", env!("CARGO_MANIFEST_DIR")))
-            .unwrap();
+        let d =
+            std::fs::read(format!("{}/../../codecs/aqr-wim/tests/data/lzx.wim", env!("CARGO_MANIFEST_DIR"))).unwrap();
         let opt = Options { threads: 2, ..Options::default() };
         let plain = compress(&d, &opt);
         let shared = aqr_formula::Bytes::shared(Arc::new(d.clone()));

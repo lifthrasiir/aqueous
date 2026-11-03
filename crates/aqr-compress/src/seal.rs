@@ -74,6 +74,15 @@ impl Order {
         }
     }
 
+    /// Waits until slot `s` is done.
+    pub fn wait_done(&self, s: Slot) {
+        let _w = aqr_common::trace::wait("seal");
+        let mut st = self.state.lock().unwrap();
+        while !st.slots[s].done {
+            st = self.changed.wait(st).unwrap();
+        }
+    }
+
     /// The sink, once every job has run.
     pub fn into_sink(self) -> Sink {
         debug_assert!(!self.state.into_inner().unwrap().running);
