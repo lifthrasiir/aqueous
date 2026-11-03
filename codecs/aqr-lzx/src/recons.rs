@@ -849,17 +849,22 @@ impl Walker {
                         side.raw(esc_bits, woff as u32, Cat::Off) as usize
                     } else {
                         let rank = side.gamma(&mut c.rank[lb(len) * 4 + lb(longest).min(3)], rank, Cat::Off)?;
-                        let mut n = 0;
-                        let mut off = 0;
-                        mf.each(d, pos, len, |o| {
-                            if n == rank {
-                                off = o;
-                                return true;
-                            }
-                            n += 1;
-                            false
-                        });
-                        off
+                        // (split: the offset of the rank is the one found for it)
+                        if want.is_some() {
+                            woff
+                        } else {
+                            let mut n = 0;
+                            let mut off = 0;
+                            mf.each(d, pos, len, |o| {
+                                if n == rank {
+                                    off = o;
+                                    return true;
+                                }
+                                n += 1;
+                                false
+                            });
+                            off
+                        }
                     };
                     if off == 0 || off > pos.min(mf.max_off) {
                         return Err(corrupt());
