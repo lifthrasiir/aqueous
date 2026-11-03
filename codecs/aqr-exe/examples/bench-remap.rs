@@ -6,6 +6,9 @@
 //!
 //! With `-x`, the same of the x86-64 images (`x86::remap`), each of B's streams against A's.
 //!
+//! With `AQR_REMAP_DUMP=DIR`, the streams are also written there for other tools to compare:
+//! `a.NAME` and `b.NAME` (as they are), `b.NAME.remapped`, and `b.side` (the flags and maps).
+//!
 //! usage: aqr-exe-bench-remap [-x] A B
 
 use std::process::Command;
@@ -43,6 +46,12 @@ fn patch(reference: &[u8], d: &[u8]) -> usize {
     assert!(out.status.success());
     std::fs::remove_dir_all(&dir).unwrap();
     out.stdout.len()
+}
+
+fn dump(name: &str, d: &[u8]) {
+    if let Some(dir) = std::env::var_os("AQR_REMAP_DUMP") {
+        std::fs::write(std::path::Path::new(&dir).join(name), d).unwrap();
+    }
 }
 
 fn mb(n: usize) -> f64 {
@@ -106,6 +115,10 @@ fn main() {
         n / t_enc / 1e6,
         n / t_dec / 1e6,
     );
+    dump("a.CODE", &code_a);
+    dump("b.CODE", &plain);
+    dump("b.CODE.remapped", &remapped);
+    dump("b.side", &(0..4).flat_map(|i| side.iter().flat_map(move |s| s[i].clone())).collect::<Vec<_>>());
     let (alone, before, after) = (zstd(&plain, 7), patch(&code_a, &plain), patch(&code_a, &remapped));
     let extra: usize = side_z.iter().sum();
     println!(
@@ -186,6 +199,13 @@ fn x86_main(sa: &[(u64, &[u8])], sb: &[(u64, &[u8])]) {
         bytes / t_enc / 1e6,
         bytes / t_dec / 1e6,
     );
+    for i in 0..n {
+        let name = x86::STREAM_NAMES[i];
+        dump(&format!("a.{name}"), &a[i]);
+        dump(&format!("b.{name}"), &plain[i]);
+        dump(&format!("b.{name}.remapped"), &remapped[i]);
+    }
+    dump("b.side", &extra.concat());
     let (mut alone, mut before, mut after) = (0, 0, 0);
     for i in 0..n {
         let (x, y) = (patch(&a[i], &plain[i]), patch(&a[i], &remapped[i]));
