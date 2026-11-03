@@ -366,8 +366,11 @@ pub(crate) struct Cx {
     let_go: Option<Range<usize>>,
     /// Where the contents made apart of the formula of this data are sealed, if they are
     /// ([`seal`]): those of a formula whose formulas above all make their files apart, of a
-    /// file archived alone.
-    sealing: Option<seal::Sealing>,
+    /// file archived alone. Taken by what may use it: [`recompress_with`], for [`nested`] only
+    /// where its formula makes its files apart, and [`find`], only for a file that is all of
+    /// the data (else the formula of the scan, or of what holds it, is compared with its data,
+    /// [`smaller`], which reads the streams of the formulas sealed: they are no longer at hand).
+    sealing: RefCell<Option<seal::Sealing>>,
     /// Whether [`make_later`] had the applications of contents of data not made yet evaluated
     /// as it made them ([`recompress_with`] evaluates the formula otherwise).
     parts_checked: std::cell::Cell<bool>,
@@ -498,7 +501,7 @@ impl Cx {
             ready: Default::default(),
             deferred: Default::default(),
             let_go: None,
-            sealing: None,
+            sealing: Default::default(),
             parts_checked: Default::default(),
             skip: Default::default(),
             top_sets: None,
@@ -729,8 +732,8 @@ fn compress_with(
     let mut cx = Cx::new(d, opt);
     cx.pre = opt.verify.then(|| Arc::new(verify::Prevalidator::spawn(opt.threads, &[d])));
     // (the contents of an image or the like sealed into a sink as they are made)
-    let sink = aqr::sink::Sink::new(&cx.enc, archive::SLICE_MIN);
-    cx.sealing = Some(seal::Sealing { order: Arc::new(seal::Order::new(sink)), slot: seal::ROOT });
+    let order = Arc::new(seal::Order::new(aqr::sink::Sink::new(&cx.enc, archive::SLICE_MIN)));
+    *cx.sealing.get_mut() = Some(seal::Sealing { order: order.clone(), slot: seal::ROOT });
     let _item = aqr_common::trace::item(Some(0));
     let analyzing = aqr_common::trace::span("analyze");
     let mut f = recompress_at(d, opt, 0, kind, &cx);
@@ -741,7 +744,8 @@ fn compress_with(
     drop(analyzing);
     note(Note::Ended(0));
     let memo = cx.pre.take().map(verify::Prevalidator::finish_shared).unwrap_or_default();
-    let order = cx.sealing.take().expect("sealing").order;
+    // (the root's slot taken, or never used)
+    drop(cx.sealing.take());
     let sink = Arc::into_inner(order).expect("the order held only here").into_sink();
     let r = finish(f, d, opt, &cx, memo, Some(sink), kept, notes.as_ref(), out)?;
     note(Note::Written(0));
@@ -1043,6 +1047,27 @@ fn recompress_as(format: Format, d: &[u8], opt: &Options, depth: u32, cx: &Cx) -
 /// [`recompress_as`], the data of a zlib stream or gzip member (without a name) of kind
 /// `contents`.
 fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
+    // (the sealing kept from what this recompressor makes, given back where it is not used)
+    let mut sealing = cx.sealing.take();
+    let f = recompress_sealed(format, d, contents, opt, depth, cx, &mut sealing);
+    if sealing.is_some() {
+        *cx.sealing.borrow_mut() = sealing;
+    }
+    f
+}
+
+/// [`recompress_with`], the contents of the formula sealed by `sealing` (taken) where it makes
+/// its files apart, and is not compared with `d` ([`smaller`]).
+#[allow(clippy::too_many_arguments)]
+fn recompress_sealed(
+    format: Format,
+    d: &[u8],
+    contents: Kind,
+    opt: &Options,
+    depth: u32,
+    cx: &Cx,
+    sealing: &mut Option<seal::Sealing>,
+) -> Option<Formula> {
     let _s = aqr_common::trace::span(format.name());
     #[cfg(test)]
     tests::TRIED.with(|t| t.borrow_mut().push(format));
@@ -1101,6 +1126,9 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
     let bases: Vec<usize> = f.streams.iter().map(|s| addr(&s.data)).collect();
     let of = bundle::Kinds::of(&f);
     cx.parts_checked.set(false);
+    if of.files_apart {
+        *cx.sealing.borrow_mut() = sealing.take();
+    }
     let children = nested(&mut f, d, opt, depth, cx);
     if words.is_some() {
         cx.share_words(None);
@@ -1352,6 +1380,8 @@ fn find(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, slack: usize
     // each of its frames), and is not tried.
     let mut turned_down: Vec<(Format, usize)> = Vec::new();
     let mut made = Ahead::default();
+    // (for a file that is all of `d` only)
+    let mut sealing = cx.sealing.take();
     while p < d.len() {
         // at the start, a file may also be known by its end (a LevelDB table), or be one that
         // is only ever a whole file (a SQLite database)
@@ -1369,6 +1399,12 @@ fn find(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, slack: usize
             }
             let child = match made.0.remove(&p) {
                 Some(a) => a.take(&d[p..p + n], cx),
+                None if p == 0 && n == d.len() => {
+                    *cx.sealing.borrow_mut() = sealing.take();
+                    let f = recompress_as(format, d, opt, depth, cx);
+                    sealing = cx.sealing.take();
+                    f
+                }
                 None => recompress_as(format, &d[p..p + n], opt, depth, cx),
             };
             if child.is_none() {
@@ -1573,6 +1609,8 @@ fn nested(f: &mut Formula, of: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Opt
     if depth + 1 >= opt.depth {
         return None;
     }
+    // (where [`recompress_with`] lets `f`'s contents be sealed: only by [`make_later`])
+    let sealing = cx.sealing.take();
     let (prepared, plan) = prepare(f, opt, depth, cx);
     let mut children = Vec::new();
     for n in shared_nodes(f).iter().chain([&f.root]) {
@@ -1580,7 +1618,7 @@ fn nested(f: &mut Formula, of: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Opt
     }
     // (sets read their members' bytes from the formula once made: those of a tree's top too)
     let top = depth == 0 && cx.top_sets.is_some();
-    make_later(f, of, &|n| !top && !plan.holds(n), opt, depth, cx, &mut children);
+    make_later(f, of, &|n| !top && !plan.holds(n), opt, depth, cx, sealing, &mut children);
     // (those not taken: the contents' own nested contents make and take their own)
     let mut ready = cx.ready.borrow_mut();
     prepared.iter().for_each(|k| drop(ready.remove(k)));
@@ -1610,7 +1648,8 @@ fn nested(f: &mut Formula, of: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Opt
 /// the stream's bytes out of `f`, and is cut out of them as soon as it is made: they are let go
 /// of then rather than once all are made (the data of a WIM file's resources, a stream each),
 /// where nothing else holds them (only those of slices that `take`s). Where it takes no place
-/// they are put back.
+/// they are put back. Their formulas are sealed by `sealing` where `f` makes its files apart.
+#[allow(clippy::too_many_arguments)]
 fn make_later(
     f: &mut Formula,
     of: &[u8],
@@ -1618,6 +1657,7 @@ fn make_later(
     opt: &Options,
     depth: u32,
     cx: &Cx,
+    sealing: Option<seal::Sealing>,
     children: &mut Contents,
 ) {
     let later = std::mem::take(&mut *cx.later.borrow_mut());
@@ -1665,7 +1705,7 @@ fn make_later(
     // contents are: each in its slot, those of a stream taken that take no place as they are;
     // those that would pass the bound of the description not (kept as they are), the bound
     // taken in their order (the sizes as [`nested`] fits them)
-    let sealing = cx.sealing.clone().filter(|_| bundle::files_apart(f));
+    let sealing = sealing.filter(|_| bundle::files_apart(f));
     let slots = sealing.as_ref().map(|s| s.order.slots(s.slot, later.len()));
     let budget = Arc::new(std::sync::Mutex::new(bound_of(f)));
     let sealed: Arc<Vec<std::sync::Mutex<Option<Made>>>> =
@@ -1734,7 +1774,7 @@ fn make_later(
         }
         let mut own = apart.cx(d.len(), opt);
         own.let_go = mine.is_some().then_some(d.as_ptr_range()).map(|r| r.start as usize..r.end as usize);
-        own.sealing =
+        *own.sealing.get_mut() =
             sealing.as_ref().zip(slots.as_ref()).map(|(s, slots)| seal::Sealing { slot: slots[i], ..s.clone() });
         own.ready.borrow_mut().extend(std::mem::take(&mut *ready[i].lock().unwrap()));
         files.inspect(|f| f.tell(d.as_ptr(), false));
@@ -2620,6 +2660,26 @@ mod tests {
         assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
         assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
         assert!(archived(4).0 == c);
+    }
+
+    /// An image in data whose formula is compared with the data ([`smaller`]), a gzip member: its
+    /// files are not sealed (the comparison would read the streams sunk), and the archive gives
+    /// the data back.
+    #[test]
+    fn images_compared_not_sealed() {
+        let fixture = |p: &str| std::fs::read(format!("{}/../../{p}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let mut iso = zstd::stream::decode_all(&fixture("codecs/aqr-iso/tests/data/udf201.iso.zst")[..]).unwrap();
+        let jpeg = fixture("codecs/aqr-jpeg/tests/data/gradient.jpg");
+        let files = aqr_iso::files(&iso);
+        let at = files.iter().find(|f| f.name == b"bin/data.bin").unwrap().extents[0].start;
+        iso[at..at + jpeg.len()].copy_from_slice(&jpeg);
+        let mut z = flate2::GzBuilder::new().filename("udf.iso").write(Vec::new(), flate2::Compression::new(6));
+        std::io::Write::write_all(&mut z, &iso).unwrap();
+        let d = z.finish().unwrap();
+        let (c, f) = compress_formula(&d, &Options { threads: 2, shared_modules: true, ..Options::default() });
+        assert!(f.streams.iter().all(|s| s.data.sunk_in().is_none()));
+        assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
+        assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
     }
 
     /// An image whose first file of no kind (stream 0) is taken by its content's formula, and
