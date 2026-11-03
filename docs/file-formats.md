@@ -296,23 +296,58 @@ container is TIFF/EXIF.
 | TrueType, OpenType (CFF), TTC | every OS and application; CJK fonts take 5–20 MB each | uncompressed tables: `glyf` outlines (flags and coordinates as deltas of 1 or 2 bytes), CFF charstrings, `hmtx`, `loca` | WOFF2's transforms show the way (`loca` derived, `glyf` split into streams of flags, coordinates and instructions): about 30% under the same coder; a TTC's shared tables once | aqr-infer-recs's fields (it takes their tables now as data of no format) |
 | WOFF | web fonts (before WOFF2) | each table in zlib, where that is smaller | the zlib streams, then the tables as above | aqr-flate |
 
-### Data, databases and machine learning
+### Data and machine learning
 
 | format | used in | how it compresses | what is left | reuse |
 |---|---|---|---|---|
 | safetensors, GGUF, PyTorch `.pt`, ONNX, `.npy`, `.npz` | model weights | raw tensors (`.pt` and `.npz` are stored ZIPs) | bf16 and fp16 exponents entropy-coded: about 30% for bf16 (ZipNN, DFloat11); quantised GGUF gains less | aqr-zip |
 | Parquet, ORC, Avro | data lakes, analytics | pages or blocks in Snappy (Parquet's usual default), gzip, LZ4 or zstd | the Snappy and gzip pages, then the column values | aqr-snappy, aqr-flate |
 | Arrow IPC, Feather, Zarr (Blosc) | dataframes, arrays | LZ4 frames or zstd buffers; Blosc's shuffle and LZ4 | the LZ4 ones | aqr-lz4 |
-| RocksDB and Cassandra SSTables, Kafka segments | databases, logs | Snappy or LZ4 blocks (zstd elsewhere) | as LevelDB's tables | aqr-snappy, aqr-lz4 |
-| Firefox IndexedDB | browser storage | SQLite rows whose values are Snappy-compressed | the values through aqr-snappy inside aqr-sqlite | aqr-sqlite, aqr-snappy |
-| Lucene, Elasticsearch | search indices | stored fields in Lucene's own LZ4 | Lucene's LZ4 reproduced | aqr-lz4 |
-| Redis RDB | cache snapshots | LZF-compressed strings | LZF reproduced | |
-| PostgreSQL (data files, `pg_dump -Fc`) | databases | pglz or LZ4 for TOAST values; zlib per block in custom dumps | pglz is simple and open; the zlib blocks | aqr-flate, aqr-lz4 |
 | TFRecord | ML datasets | protobuf records, optionally gzip or zlib | the gzip, then the records | aqr-flate |
 | MATLAB `.mat` (v5–v7) | engineering, science | each variable zlib-compressed (v7.3 is HDF5) | the zlib streams | aqr-flate |
+
+### Databases
+
+Backups come as text dumps (SQL or delimited rows), logical binary dumps, or the engine's own
+files (pages, logs) copied by a backup tool. What they share:
+
+- The layer of compression on top decides first: zlib, Snappy, LZ4 and LZF are reproduced;
+  the closed ones (MSSQL's, RMAN's, Data Pump's, DB2's) belong under Hard; encryption (TDE,
+  encrypted backups and binlogs) is detected and stored as it is.
+- Pages carry fields derived from their place: checksums (CRC-32C in InnoDB, PostgreSQL's
+  FNV-based 16 bits, Oracle's 16-bit XOR, MSSQL's), page numbers, space ids, LSNs and SCNs
+  rising; logs carry file offsets (`log_pos`) and lengths. aqr-sqlite derives the same.
+- Rows by column: SQL dumps are tables printed as literals, so aqr-xsv's columns and aqr-num's
+  numbers apply once the literals are parsed; hex-printed binaries (`\x…`, `0x…`, `X'…'`)
+  are twice their bytes.
+- Logs repeat the data: PostgreSQL's full-page images, binlog's before and after images,
+  table maps in every transaction; recycled log files keep old contents in their tails.
+- Daily full backups differ little from one another: where several generations are archived
+  together, long-range matches (pages by number, dumps in a stable row order) gain the most.
+
+| format | used in | how it compresses | what is left | reuse |
+|---|---|---|---|---|
+| mysqldump, MariaDB's `mariadb-dump` (`.sql`, `.sql.gz`) | MySQL backups, migrations | text: `--opt`'s extended `INSERT … VALUES (…),(…);`, lines up to `net_buffer_length` (about 1 MB) of thousands of rows in column order; strings with `\0 \n \r \\ \' \" \Z`; binaries escaped as they are, or `0x…` with `--hex-blob`; `--tab` writes TSV with `\N` | the rows parsed into columns (lines of a megabyte), the hex decoded; the DDL and `/*!40101 … */` boilerplate by the archive | aqr-xsv, aqr-num, aqr-flate |
+| mydumper, MySQL Shell's `util.dumpInstance` | large MySQL dumps | chunks of a table per file; mydumper's in gzip or zstd, Shell's TSV in zstd by default with JSON metadata | the gzip ones, then as above; zstd as under Hard | aqr-flate, aqr-xsv |
+| MySQL binlog (`binlog.000123`) | replication, point-in-time recovery; up to `max_binlog_size` (1 GB) each | events of a 19-byte header (time, type, server id, size, `log_pos` = the next event's offset) and a CRC-32 (since 5.6); ROW format (since 5.7.7): `TABLE_MAP` then `WRITE/UPDATE/DELETE_ROWS`, each row a null bitmap and values by column type; `binlog_row_image=FULL` keeps both images of an update; optionally zstd (`TRANSACTION_PAYLOAD`, 8.0.20) or encrypted | the header fields and CRCs derived; rows by column from the table map; an update's after image against its before image | aqr-infer-recs's fields |
+| MySQL InnoDB (`.ibd`, `ibdata1`, redo), Percona XtraBackup | database servers and their physical backups | 16 KiB pages: a FIL header of 38 bytes (checksum, page number, neighbours, LSN, type, space id) and an 8-byte trailer, CRC-32C by default; records with a 5-byte header and relative next-record offsets; `ROW_FORMAT=COMPRESSED` and page compression in zlib (or LZ4, with holes punched); redo in 512-byte blocks, reused in a circle; XtraBackup's xbstream, `--compress` with qpress (QuickLZ), LZ4 or zstd, incrementals as `.delta` pages by LSN | the checksums, page numbers and space ids derived; the records by column; the zlib pages; free space as it is | aqr-flate, aqr-lz4, aqr-sqlite's approach |
+| pg_dump plain (`-Fp`), `pg_dumpall` | PostgreSQL backups, migrations | text: `COPY t (…) FROM stdin;` of TSV rows with `\N` and backslash escapes, ended by `\.` (or `INSERT`s with `--inserts`); `bytea` in hex (`\\x…`, the default since 9.0), timestamps with zones, arrays and JSON as text | the COPY rows as aqr-xsv takes TSV; the hex decoded | aqr-xsv, aqr-num |
+| pg_dump custom and directory (`-Fc`, `-Fd`) | PostgreSQL backups (`pg_restore`) | `PGDMP`, a table of contents, each table's COPY text as length-prefixed chunks of one zlib stream (lz4 or zstd from 16); `-Fd` writes `NNNN.dat.gz` per table; `-Ft` is a plain tar | the zlib streams, then as plain | aqr-flate, aqr-xsv |
+| PostgreSQL data files, `pg_basebackup`, WAL | database servers, physical backups and their archived WAL | 8 KiB pages: a 24-byte header (LSN, a 16-bit checksum, on by default from 18), line pointers, tuples from the end with 23-byte headers (`xmin` alike in a page, `ctid` mostly pointing at itself); 1 GiB segment files; TOAST values in pglz or LZ4; WAL in 16 MiB segments with CRC-32C records and full-page images after checkpoints (`wal_compression`: pglz, LZ4, zstd); a segment switched early by `archive_timeout` stays 16 MiB; base backups as tar (gzip, LZ4 or zstd on the server from 15) with a JSON manifest; pgBackRest and WAL-G compress with gzip, LZ4, zstd, bzip2 or Brotli | the pages' derived fields and tuples by column; pglz (simple and open); full-page images against the base backup's pages | aqr-flate, aqr-lz4, aqr-sqlite's approach |
+| Oracle Data Pump (`expdp`, `.dmp`), `exp` | Oracle backups and migrations | closed: metadata as XML-like DDL, rows in the direct-path stream, the job's master table included; uncompressed unless `COMPRESSION=ALL` (Advanced Compression's licence), so plain dumps are common; split by `%U` and `FILESIZE` | the row pieces by column, once the format is known (reverse engineering, `expdp` and `impdp` the black boxes); the old `exp` format is simpler | aqr-infer-recs |
+| Oracle datafiles, RMAN image copies, archived redo (`.arc`) | Oracle servers, physical backups | blocks of 8 KiB (2–32 KiB): a header with the block address and SCN, a 16-bit XOR checksum (`DB_BLOCK_CHECKSUM`), a 4-byte tail check from the SCN; redo in 512-byte (or 4 KiB) blocks with headers of sequence, block number and checksum | the derived fields and the rows by column, as InnoDB's; RMAN's backup sets as under Hard | aqr-sqlite's approach |
+| Microsoft SQL Server `.bak`, `.trn` (uncompressed), `.mdf`, `.ldf` | SQL Server backups and detached databases | Microsoft Tape Format: descriptor blocks (`TAPE`, `SSET`, `VOLB`, `MSCI`, `MSDA`) and padding around 8 KiB pages almost as they are (96-byte headers, checksums by default, slot arrays; ROW and PAGE compression within them); differentials hold changed extents; the log in 512-byte sectors each stamped with parity bits (64 and 128 by turns as a VLF is reused); stripes over several files | MTF's blocks parsed, the pages' derived fields and rows by column, as InnoDB's; compressed backups (the default in many installations) as under Hard | aqr-sqlite's approach |
+| SSMS "Generate Scripts", `.bacpac` | SQL Server exports | scripts in UTF-16LE by default ("Unicode"): one `INSERT [dbo].[t] ([a], [b]) VALUES (…, CAST(N'…' AS DateTime))` per row, the column list repeated, `0x…` binaries; `.bacpac` is a ZIP of `model.xml` and BCP native data | UTF-16 to UTF-8 reversibly, the statements as a template and columns; the bacpac's entries | aqr-zip, aqr-xsv |
+| SQLite `.dump`, WAL, rollback journals | SQLite backups | `.dump`: `INSERT INTO t VALUES(…)` per row, blobs as `X'…'`; WAL frames of a page and a 24-byte header with checksums | the dump as SQL text above; the WAL's frames as aqr-sqlite's pages (In progress) | aqr-sqlite |
+| MongoDB `mongodump` (`.bson`, `--archive`, `--gzip`), WiredTiger | MongoDB backups, servers | BSON documents with every field name repeated and int32 lengths, ObjectIds rising (time, machine, counter); `mongoexport` writes Extended JSON lines; WiredTiger's blocks in Snappy by default (zstd or zlib optional) | the lengths derived, fields transposed by path; the gzip; Snappy blocks | aqr-jsonl, aqr-flate, aqr-snappy |
+| Redis RDB, AOF | cache snapshots and logs | RDB: LZF-compressed strings, a CRC-64 footer; AOF: RESP text (`*3\r\n$3\r\nSET\r\n…`), a base RDB and increments from 7 | LZF reproduced; RESP's lengths derived | |
+| RocksDB and Cassandra SSTables, Kafka segments | databases, logs | Snappy or LZ4 blocks (zstd elsewhere); Cassandra's in LZ4 chunks of 16 KiB with CRCs | as LevelDB's tables | aqr-snappy, aqr-lz4 |
+| ClickHouse parts and `BACKUP` | analytics | a file per column of LZ4 blocks (the default) with CityHash128 checksums; backups as directories, ZIP or tar | the LZ4 blocks, then the columns | aqr-lz4, aqr-zip |
+| Firefox IndexedDB | browser storage | SQLite rows whose values are Snappy-compressed | the values through aqr-snappy inside aqr-sqlite | aqr-sqlite, aqr-snappy |
+| Lucene, Elasticsearch and OpenSearch snapshots | search indices | stored fields in Lucene's own LZ4; snapshots reuse segments across generations | Lucene's LZ4 reproduced | aqr-lz4 |
 | Microsoft Access (`.mdb`, `.accdb`) | small businesses, laboratories, government | Jet/ACE pages of rows; text optionally "Unicode compressed" (one byte a character) | the pages' rows by column, the free space dropped | aqr-sqlite's approach |
-| MySQL InnoDB (`.ibd`), MongoDB WiredTiger | database servers and their backups | InnoDB: 16 KiB pages, uncompressed or zlib (`ROW_FORMAT=COMPRESSED`, page compression); WiredTiger: Snappy blocks by default | the pages' records by column; the zlib and Snappy blocks | aqr-flate, aqr-snappy, aqr-sqlite's approach |
 | Windows ESE (`Windows.edb`, Exchange, SRUM), registry hives | Windows' search index (often GBs), mail servers, the registry | ESE: pages of B-trees, some columns 7-bit or XPRESS-compressed; hives: `hbin` blocks of cells, uncompressed | the pages' and cells' records by field; ESE's XPRESS (Hard: Microsoft's encoder) | aqr-infer-recs |
+| Firebird `gbak` (`.fbk`), etcd and BoltDB snapshots | smaller servers, Kubernetes | gbak: a logical dump of tagged attributes and records; BoltDB: 4 KiB pages of a B+tree, protobuf values, uncompressed | records by field | aqr-infer-recs |
 
 ### Science, medicine, geography
 
@@ -437,6 +472,7 @@ not available or comes in too many variants.
 | xz, LZMA, 7z alone (also `.deb`, `.rpm`, Arch packages, pbzx) | source and package distribution | optimal parsing over many versions and options, and little to gain over an already strong coder: aqr-lzma's records of the parse (10–18% of the streams) pay only where the data is stored elsewhere too (Done above) |
 | zstd, Brotli (also WOFF2, HTTP bodies) | HTTP, packages, file systems | output changes between versions; levels, windows and dictionaries make a wide space; the entropy stage is already good |
 | CHD, RVZ, WIA, NSZ | disc and cartridge images for emulators | per-hunk choices among zlib, LZMA, zstd, FLAC and Huffman; the LZMA and zstd ones as above |
+| SQL Server's compressed backups, Oracle RMAN backup sets and compressed Data Pump, DB2's `COMPRESS` | database backups | SQL Server's default `MS_XPRESS` is Microsoft's closed encoder; 2022's `QAT_DEFLATE` is DEFLATE by QATzip and ISA-L, whose encoder would have to be matched; RMAN keeps only used blocks in a closed container, its BASIC, LOW, MEDIUM and HIGH said to be bzip2, LZO, zlib and bzip2 (Oracle's documents after 11.1 name only the levels); DB2's is closed |
 | Android OTA payloads | system updates | bsdiff and puffin operations over xz, bzip2, zstd or Brotli blobs |
 
 ### Other reasons
@@ -444,7 +480,7 @@ not available or comes in too many variants.
 | format | used in | why it is hard |
 |---|---|---|
 | Opus | streaming, voice (Discord, WhatsApp, YouTube's WebM audio) | reproducible (a range coder over mostly static tables, and parsing needs no synthesis), but the PVQ pulses are coded uniformly and fine energy as raw bits, so little is left (Balrogg: 3–8%), for a whole CELT and SILK parser with its bit allocation |
-| DRM-protected media, encrypted archives and backups | commercial content; iOS, WhatsApp and Telegram backups | random data without the key; only files that carry their key (PDF with an empty user password) can be done |
+| DRM-protected media, encrypted archives and backups | commercial content; iOS, WhatsApp and Telegram backups ; databases under TDE and their encrypted backups | random data without the key; only files that carry their key (PDF with an empty user password) can be done |
 | Console packages (Switch NCA, PlayStation PKG), Unreal `.pak` with encryption | games | platform encryption and signatures on top |
 | AutoCAD DWG, Native Instruments Kontakt (NCW), Bink video, ECW, MrSID | CAD, sample libraries, game cutscenes, aerial imagery | closed formats that change with versions; need reverse engineering first |
 | Blockchains (Bitcoin's `blk*.dat`) | full nodes (hundreds of GB) | mostly hashes, public keys and signatures, which are random; the scripts' templates and amounts are a few percent |
