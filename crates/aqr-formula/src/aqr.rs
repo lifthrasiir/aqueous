@@ -2646,8 +2646,8 @@ impl Archive<'_, '_> {
                         let p = programs[i].lock().unwrap().take().expect("each leaf once");
                         let env = env(modules, resources, non_leaf);
                         match sink {
-                            Some(sink) => run(p, &env, &contents, Some(&mut **sink.lock().unwrap())),
-                            None => run(p, &env, &contents, None),
+                            Some(sink) => run(p, &env, &contents, Some(&mut **sink.lock().unwrap()), threads),
+                            None => run(p, &env, &contents, None, threads),
                         }
                     }
                 };
@@ -3795,7 +3795,159 @@ impl Writer<'_, '_> {
 /// The outputs of formula block `p`, with the non-leaf blocks in `contents`. Where `sink` is
 /// given and the output may be streamed ([`streamed`]), it is written to `sink` as its parts
 /// are evaluated, rather than held whole, and no output is returned.
-fn run<'a>(p: Program<'a>, env: &Env, contents: &Contents, sink: Option<&mut Taker<'_>>) -> Decoded<Vec<Vec<u8>>> {
+fn run<'a>(
+    p: Program<'a>,
+    env: &Env,
+    contents: &Contents,
+    sink: Option<&mut Taker<'_>>,
+    threads: usize,
+) -> Decoded<Vec<Vec<u8>>> {
+    // the parts of an output streamed evaluated apart, ahead, on up to `threads` workers of the
+    // pool ([`parts_of`]), the program written out in order taking their values
+    let ranges = match sink.is_some() && threads > 1 {
+        true => streamed(&p).map(|plan| parts_of(&p, &plan)).unwrap_or_default(),
+        false => Vec::new(),
+    };
+    if ranges.len() < 2 {
+        return run_blocks(&p, env, contents, sink, None);
+    }
+    let by_start: HashMap<usize, usize> = ranges.iter().enumerate().map(|(k, r)| (r.0, k)).collect();
+    let slots: Vec<Mutex<Option<Decoded<Vec<u8>>>>> = (0..ranges.len()).map(|_| Mutex::new(None)).collect();
+    let ready = std::sync::Condvar::new();
+    let eval =
+        |r: Range<usize>| run_ahead(&p, r, env, contents, None, None, None).map(|mut o| o.pop().unwrap_or_default());
+    aqr_common::pool::scope(threads.min(AHEAD_PARTS), |s| {
+        let parts = (s.workers() > 0).then(|| PartsAhead {
+            scope: s,
+            eval: &eval,
+            ranges: &ranges,
+            by_start: &by_start,
+            slots: &slots,
+            ready: &ready,
+            spawned: Cell::new(0),
+            running: Arc::default(),
+        });
+        run_blocks(&p, env, contents, sink, parts.as_ref())
+    })
+}
+
+/// Parts of an output evaluated at most at once ahead of where they are written ([`run`]), and
+/// their bytes at most held ahead (but the next part's).
+const AHEAD_PARTS: usize = 8;
+const AHEAD_PART_BYTES: u64 = 256 << 20;
+
+/// The parts of an output streamed (each its value made by an application) whose instructions
+/// make them from a stack they do not touch, and nothing else: each the range of its
+/// instructions (first and last), the values they push and its length, in order. Not of instructions taking
+/// outputs of applications of several outputs (Swap).
+fn parts_of(p: &Program, plan: &Streamed) -> Vec<(usize, usize, usize, u64)> {
+    let (mut depth, mut id) = (0usize, 0usize);
+    let (mut depths, mut ids) = (Vec::with_capacity(p.insns.len()), Vec::with_capacity(p.insns.len()));
+    // (how deep each instruction reaches into the stack)
+    let mut lows = Vec::with_capacity(p.insns.len());
+    let mut made_by: HashMap<usize, usize> = HashMap::new();
+    for (i, insn) in p.insns.iter().enumerate() {
+        depths.push(depth);
+        ids.push(id);
+        let (pop, pushed) = match insn {
+            Insn::Nop | Insn::Concat(1) | Insn::Swap(_) | Insn::Checksum(_) => (0, 0),
+            Insn::Literal(_) | Insn::Slice { .. } => (0, 1),
+            Insn::Apply(a) => {
+                if a.output_sizes.len() == 1 {
+                    made_by.insert(id, i);
+                }
+                (a.num_inputs, a.output_sizes.len())
+            }
+            &Insn::Concat(n) | &Insn::Pack(n) => (n, 1),
+            Insn::Split(sizes) => (1, sizes.len()),
+            Insn::Patch(_) => (2, 1),
+        };
+        lows.push(depth - pop);
+        depth = depth - pop + pushed;
+        id += pushed;
+    }
+    let mut out = Vec::new();
+    for &v in plan.order.keys() {
+        let Some(&e) = made_by.get(&v) else { continue };
+        let Insn::Apply(a) = &p.insns[e] else { continue };
+        // (from where the stack was as deep as below its inputs)
+        let floor = depths[e] - a.num_inputs;
+        let mut s = e;
+        while s > 0 && depths[s] > floor {
+            s -= 1;
+        }
+        if depths[s] != floor
+            || lows[s..=e].iter().any(|&l| l < floor)
+            || p.insns[s..=e].iter().any(|i| matches!(i, Insn::Swap(_) | Insn::Checksum(_)))
+        {
+            continue;
+        }
+        out.push((s, e, ids[e] + 1 - ids[s], a.output_sizes[0] as u64));
+    }
+    out.sort_unstable();
+    out
+}
+
+/// The parts of a program evaluated ahead ([`run`]): their ranges ([`parts_of`]), by their first
+/// instruction, their values once made (by `eval` on a worker of `scope`), and those spawned so far.
+struct PartsAhead<'s, 'env> {
+    scope: &'s aqr_common::pool::Scope<'s, 'env>,
+    eval: &'s (dyn Fn(Range<usize>) -> Decoded<Vec<u8>> + Sync),
+    ranges: &'s [(usize, usize, usize, u64)],
+    by_start: &'s HashMap<usize, usize>,
+    slots: &'s [Mutex<Option<Decoded<Vec<u8>>>>],
+    ready: &'s std::sync::Condvar,
+    spawned: Cell<usize>,
+    running: Arc<AtomicUsize>,
+}
+
+impl PartsAhead<'_, '_> {
+    /// The value of part `k` (taken in order): made ahead and waited for, else made now; the
+    /// parts after it spawned on the scope's workers while they are free.
+    fn take(&self, k: usize) -> Decoded<Vec<u8>> {
+        let here = k >= self.spawned.get();
+        let mut next = self.spawned.get().max(k + 1);
+        // (the bytes of those made ahead and not yet taken)
+        let mut held: u64 = self.ranges[k + 1..next].iter().map(|r| r.3).sum();
+        while next < self.ranges.len()
+            && self.running.load(Ordering::Relaxed) < self.scope.workers()
+            && (next == k + 1 || held + self.ranges[next].3 <= AHEAD_PART_BYTES)
+        {
+            let (s, e, _, len) = self.ranges[next];
+            held += len;
+            let (eval, slot, ready, running) = (self.eval, &self.slots[next], self.ready, self.running.clone());
+            running.fetch_add(1, Ordering::Relaxed);
+            self.scope.spawn(move || {
+                let v = eval(s..e + 1);
+                *slot.lock().unwrap() = Some(v);
+                running.fetch_sub(1, Ordering::Relaxed);
+                ready.notify_all();
+            });
+            next += 1;
+        }
+        self.spawned.set(next);
+        if here {
+            let (s, e, ..) = self.ranges[k];
+            return (self.eval)(s..e + 1);
+        }
+        let mut v = self.slots[k].lock().unwrap();
+        loop {
+            if let Some(d) = v.take() {
+                return d;
+            }
+            v = self.ready.wait(v).unwrap();
+        }
+    }
+}
+
+/// [`run_blocks`] of a program `p`, its parts evaluated `parts` ahead where given.
+fn run_blocks<'a>(
+    p: &Program<'a>,
+    env: &Env,
+    contents: &Contents,
+    sink: Option<&mut Taker<'_>>,
+    parts: Option<&PartsAhead<'_, '_>>,
+) -> Decoded<Vec<Vec<u8>>> {
     // the blocks in the order they are first sliced, each decoded ahead of it on a worker of the
     // pool where one is free, [`AHEAD_BLOCKS`] at most at once
     let mut firsts: Vec<usize> = Vec::new();
@@ -3810,7 +3962,7 @@ fn run<'a>(p: Program<'a>, env: &Env, contents: &Contents, sink: Option<&mut Tak
         }
     }
     if firsts.len() < 2 {
-        return run_ahead(p, env, contents, sink, None);
+        return run_ahead(p, 0..p.insns.len(), env, contents, sink, None, parts);
     }
     aqr_common::pool::scope(AHEAD_BLOCKS, |s| {
         let ahead = (s.workers() > 0).then_some(Ahead {
@@ -3820,7 +3972,7 @@ fn run<'a>(p: Program<'a>, env: &Env, contents: &Contents, sink: Option<&mut Tak
             next: Cell::new(1),
             running: Arc::default(),
         });
-        run_ahead(p, env, contents, sink, ahead.as_ref())
+        run_ahead(p, 0..p.insns.len(), env, contents, sink, ahead.as_ref(), parts)
     })
 }
 
@@ -3839,13 +3991,15 @@ struct Ahead<'s, 'env, 'x> {
 
 /// [`run`], blocks decoded `ahead` where given.
 fn run_ahead<'a, 'r: 's, 's, 'c: 's, 't: 's>(
-    p: Program<'a>,
+    p: &Program<'a>,
+    range: Range<usize>,
     env: &Env,
     contents: &'r Contents<'c, 't>,
     sink: Option<&mut Taker<'_>>,
     ahead: Option<&Ahead<'s, '_, '_>>,
+    parts: Option<&PartsAhead<'_, '_>>,
 ) -> Decoded<Vec<Vec<u8>>> {
-    let plan = sink.is_some().then(|| streamed(&p)).flatten();
+    let plan = sink.is_some().then(|| streamed(p)).flatten();
     let mut w = match (plan.as_ref(), sink) {
         (Some(plan), Some(sink)) => Some(Writer { plan, sink, next: 0, held: HashMap::new(), hash: Xxh64::new(0) }),
         _ => None,
@@ -3853,12 +4007,13 @@ fn run_ahead<'a, 'r: 's, 's, 'c: 's, 't: 's>(
     // literals and slices where they are, each value numbered as [`streamed`] numbers it
     let mut stack: Vec<Item<'a>> = Vec::new();
     let mut ids: Vec<usize> = Vec::new();
-    let mut next = 0;
+    // (of a part made apart, its instructions' values passed over: [`PartsAhead`])
+    let next = Cell::new(0);
     // pushes a value: a part of the output streamed is written out
-    let mut push =
+    let push =
         |stack: &mut Vec<Item<'a>>, ids: &mut Vec<usize>, w: &mut Option<Writer<'_, '_>>, v: Item<'a>| -> Decoded<()> {
-            let id = next;
-            next += 1;
+            let id = next.get();
+            next.set(id + 1);
             let v = match w {
                 Some(w) if w.plan.order.contains_key(&id) => {
                     let n = contents.get(&v).len() as u64;
@@ -3872,8 +4027,22 @@ fn run_ahead<'a, 'r: 's, 's, 'c: 's, 't: 's>(
             ids.push(id);
             Ok(())
         };
-    for insn in p.insns {
-        match insn {
+    let mut at = range.start;
+    while at < range.end {
+        // a part made apart: its value, in place of its instructions
+        if let Some(ps) = parts
+            && let Some(&k) = ps.by_start.get(&at)
+        {
+            let (_, end, pushed, _) = ps.ranges[k];
+            let d = ps.take(k)?;
+            next.set(next.get() + pushed - 1);
+            push(&mut stack, &mut ids, &mut w, Item::Bytes(d))?;
+            at = end + 1;
+            continue;
+        }
+        let insn = &p.insns[at];
+        at += 1;
+        match *insn {
             Insn::Nop => {}
             Insn::Literal(l) => push(&mut stack, &mut ids, &mut w, Item::Literal(l))?,
             Insn::Swap(depth) => {
@@ -3911,12 +4080,12 @@ fn run_ahead<'a, 'r: 's, 's, 'c: 's, 't: 's>(
                     .ok_or_else(|| Failure::Invalid("slice out of its block".into()))?;
                 push(&mut stack, &mut ids, &mut w, Item::Slice(o, d, r))?;
             }
-            Insn::Apply(a) => {
+            Insn::Apply(ref a) => {
                 let inputs = stack.split_off(stack.len() - a.num_inputs);
                 ids.truncate(stack.len());
                 let res: Vec<Resource> = a.resources.iter().map(|&i| env.resources[p.resources[i]].clone()).collect();
                 let bytes: Vec<&[u8]> = inputs.iter().map(|v| contents.get(v)).collect();
-                let outputs = apply(env, p.modules[a.module], &a, &bytes, &res)?;
+                let outputs = apply(env, p.modules[a.module], a, &bytes, &res)?;
                 contents.drop_all(inputs);
                 for o in outputs {
                     push(&mut stack, &mut ids, &mut w, Item::Bytes(o))?;
@@ -3947,7 +4116,7 @@ fn run_ahead<'a, 'r: 's, 's, 'c: 's, 't: 's>(
                 contents.drop_all(parts);
                 push(&mut stack, &mut ids, &mut w, Item::Bytes(bytes))?;
             }
-            Insn::Split(sizes) => {
+            Insn::Split(ref sizes) => {
                 let x = stack.pop().unwrap();
                 ids.pop();
                 let bytes = contents.get(&x);
@@ -3959,9 +4128,9 @@ fn run_ahead<'a, 'r: 's, 's, 'c: 's, 't: 's>(
                 if let Item::Slice(o, ..) = x {
                     contents.refs[o].fetch_add(sizes.len() - 1, Ordering::Relaxed);
                 }
-                let mut at = 0;
-                for &n in &sizes {
-                    let r = at..at + n as usize;
+                let mut from = 0;
+                for &n in sizes {
+                    let r = from..from + n as usize;
                     let item = match &x {
                         Item::Slice(o, d, s) => Item::Slice(*o, d.clone(), s.start + r.start..s.start + r.end),
                         &Item::Literal(l) => Item::Literal(&l[r]),
@@ -3969,7 +4138,7 @@ fn run_ahead<'a, 'r: 's, 's, 'c: 's, 't: 's>(
                         Item::Written(_) => unreachable!("a value written out is only concatenated"),
                     };
                     push(&mut stack, &mut ids, &mut w, item)?;
-                    at += n as usize;
+                    from += n as usize;
                 }
             }
             Insn::Patch(len) => {
@@ -4339,6 +4508,51 @@ mod tests {
         let c = encode(&f, Some(checksum(b"other")), Level::Zstd(1)).unwrap();
         let a = open(&c, &runner).unwrap();
         assert_eq!(a.write_file(2, &mut |_: &[u8]| Ok(())), invalid("output checksum mismatch"));
+    }
+
+    /// A file of many applications concatenated (some of applications, of concatenations, of
+    /// splits) is written out alike whether its parts are evaluated ahead on workers or not.
+    #[test]
+    fn parts_made_ahead() {
+        let mut f = Formula::default();
+        let d: Vec<u8> = (0..2 * BLOCK as u32 + 99).map(|i| (i * 7 % 251) as u8).collect();
+        let a = f.push("a", d.clone());
+        let rev = |inputs: Vec<Node>, len| Node::apply(REV, vec![1, 2, 3], inputs, len);
+        let split = crate::Apply {
+            module: REV,
+            resources: vec![],
+            params: vec![1, 2, 3],
+            inputs: vec![a],
+            len: 0,
+            memory_limit: crate::NO_LIMIT,
+        };
+        let [o0, o1] = <[Node; 2]>::try_from(f.split(split, vec![40, d.len() as u64 - 40])).unwrap();
+        let mut parts = vec![rev(vec![o1], d.len() as u64 - 40)];
+        for k in 0..40u64 {
+            let at = k * 3001 % (d.len() as u64 - 2000);
+            parts.push(match k % 4 {
+                0 => rev(vec![Node::slice(0, at, 1000)], 1000),
+                1 => rev(vec![rev(vec![Node::slice(0, at, 500)], 500), Node::slice(0, at + 7, 30)], 530),
+                2 => rev(vec![Node::concat([Node::slice(0, at, 10), Node::slice(0, at + 99, 20)])], 30),
+                _ => Node::slice(0, at, 77),
+            });
+        }
+        parts.push(o0);
+        f.root = Node::concat(parts);
+        let want = f.eval(&|_: &crate::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect())).unwrap();
+        let c = encode(&f, Some(checksum(&want)), Level::Zstd(1)).unwrap();
+        let runner = natives();
+        let a = open(&c, &runner).unwrap();
+        for threads in [1, 4, 16] {
+            let mut out = Vec::new();
+            let n = a
+                .write_file(threads, &mut |p: &[u8]| {
+                    out.extend_from_slice(p);
+                    Ok(())
+                })
+                .unwrap();
+            assert!(out == want && n == want.len() as u64, "{threads} threads");
+        }
     }
 
     /// Outputs split from the one output of a module (Split instructions), taken as those of
