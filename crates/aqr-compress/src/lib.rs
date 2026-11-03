@@ -2073,7 +2073,7 @@ fn recompressor(format: Format) -> Recompressor {
         Format::Pe => Cx(|d, _, _, _, _| exe::pe(d)),
         Format::MachO => Cx(|d, _, _, _, cx| {
             let r = cx.remaps.as_deref();
-            exe::macho(d, r.map_or(&[], |r| r.of(d)), r.map_or(&[], |r| r.deltas(d)))
+            exe::macho(d, r.map_or(&[], |r| r.of(d)), r.map_or(&[], |r| r.deltas(d)), r.and_then(|r| r.data(d)))
         }),
         Format::Elf => Cx(|d, _, _, _, cx| {
             let r = cx.remaps.as_deref();

@@ -357,6 +357,30 @@ Taking the signatures out made the rest of Deskflow's two programs, put in one s
 rather than 9.5 MB, below the 8 MiB from which aqr-formula then matched from afar, and the
 application 2.1% larger: the threshold is 1 MiB since (`aqr::LONG`).
 
+### Tables of pointers
+
+Measured on 2026-11-03 on an Apple M4, through `aqr -c` (level `mid`, 10 threads). A Mach-O
+image's `__DATA_CONST,__const`, `__DATA,__const` and `__AUTH_CONST,__const` (pointers and
+such, of 4 or 8 bytes a value) archive smaller on their own than amid the rest of the file: of
+Electron Framework 43 and 44 (arm64), zeroing them made the two 95.18 → 90.69 MB, though they
+are 1.02 and 1.03 MB at zstd -19 apart. Of the images of a tree they are coded against the
+root's too (`exe-recons/arm64-delta`), as the code is:
+
+| | before (commit `bab67ef`) | against the root | and apart in every image |
+|---|---|---|---|
+| Chrome Framework .47 + .49, arm64 | 83.38 MB | 82.04 MB | |
+| Chrome Framework .49 + .76, arm64 | 91.60 MB | 90.56 MB | |
+| Electron Framework 43 + 44, arm64 | 95.18 MB | 90.37 MB | |
+| the seven applications | 1053.10 MB | 1048.17 MB | 1039.19 MB (−1.3%) |
+
+Of the applications: Discord 168.44 → 160.67 MB (−4.6%), Google Chrome 332.68 → 328.24 MB
+(−1.3%), Windows App −0.9%, Secretive −0.8%, Pages −0.5%; Deskflow and Blender +0.1% (also
+with tables of 16 KiB or more taken alone). Instructions retired 3285.5 → 3280.4 G.
+
+Against the root's, by `exe-recons/arm64-delta`, Chrome's `__DATA_CONST,__const` of .49 is
+0.44 MB (LZ against .47's 0.92 MB, bsdiff 0.25 MB): bsdiff copies at any byte, where words
+inserted 2 bytes apart are new to whole words.
+
 ## Limitations
 
 - ELF: only little-endian images. Their tables (relocations, symbols, `.eh_frame` and its

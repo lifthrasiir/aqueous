@@ -650,8 +650,9 @@ address space of its root. Values that two would map to after composing are left
 # The `exe-recons/arm64-delta` module
 
 This part specifies the module `exe-recons/arm64-delta`, which rebuilds a `CODE` stream of
-`exe-recons/arm64` or `exe-recons/arm64-remap` (§A2; an input of theirs, not a section) from
-another version's (the **reference**), after bsdiff (Colin Percival, "Naive differences of
+`exe-recons/arm64` or `exe-recons/arm64-remap` (§A2; an input of theirs, not a section), or any
+other stream of 4-byte words (aqr-compress gives it Mach-O tables of pointers), from another
+version's (the **reference**), after bsdiff (Colin Percival, "Naive differences of
 executable code"): copies of the reference's words at some offset, each word coded as its
 difference from a prediction, and bytes of the stream's own between them. The conventions of
 §1 hold; words are big-endian, as in `CODE`.
@@ -721,6 +722,10 @@ root's stream (`delta::references`: the matches looked for at an eighth of the w
 their content). Pieces copying little, or matching nothing, are kept as they are. The formula
 of the image holds a copy of the root's stream, which aqr-compress makes the root's own once
 the formulas of a batch are put together (`exe::resolve`).
+
+Of the Mach-O images of such a tree (of either architecture), aqr-compress codes the sections
+`__DATA_CONST,__const`, `__DATA,__const` and `__AUTH_CONST,__const` alike against the root's of
+the same name: tables of pointers, which move with what they point to.
 
 # The `exe-recons/macho-codesign` module
 

@@ -55,6 +55,10 @@ pub struct Image {
     /// `(file offset, size)` of the code signature (`LC_CODE_SIGNATURE`), where whole within
     /// the image.
     pub signature: Option<(usize, usize)>,
+    /// `(segment and section names as "SEG,SECT", file offset, size)` of each other section with
+    /// file data (neither instructions nor `__DWARF` nor zerofill), cut to the image, in the
+    /// order of the load commands.
+    pub data: Vec<(Vec<u8>, usize, usize)>,
 }
 
 /// The symbol table of an image (`LC_SYMTAB`) and the first of its external symbols
@@ -167,6 +171,7 @@ pub fn images(d: &[u8]) -> Option<Vec<Image>> {
                         symtab: None,
                         debug: Vec::new(),
                         signature: None,
+                        data: Vec::new(),
                     }))
                 })
                 .collect(),
@@ -188,6 +193,7 @@ fn thin(d: &[u8], range: Range<usize>) -> Option<Image> {
     let ncmds = u32le(m, 16)?;
     let cmds_end = header + u32le(m, 20)? as usize;
     let (mut sections, mut symtab, mut ext, mut debug, mut signature) = (Vec::new(), None, 0, Vec::new(), None);
+    let mut data = Vec::new();
     let mut p = header;
     for _ in 0..ncmds {
         let (cmd, size) = (u32le(m, p)?, u32le(m, p + 4)? as usize);
@@ -238,10 +244,18 @@ fn thin(d: &[u8], range: Range<usize>) -> Option<Image> {
             let code = flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS) != 0;
             let dwarf = m.get(s + 16..s + 32) == Some(b"__DWARF\0\0\0\0\0\0\0\0\0");
             let off = off as usize;
-            if !(code || dwarf) || zerofill || off == 0 || off >= m.len() || len == 0 {
+            if zerofill || off == 0 || off >= m.len() || len == 0 {
                 continue;
             }
             let len = usize::try_from(len).map_or(m.len() - off, |l| l.min(m.len() - off));
+            if !(code || dwarf) {
+                let name = |at: usize| {
+                    let n = &m[at..at + 16];
+                    &n[..n.iter().position(|&c| c == 0).unwrap_or(16)]
+                };
+                data.push(([name(s + 16), b",", name(s)].concat(), range.start + off, len));
+                continue;
+            }
             if dwarf {
                 let name = &m[s..s + 16];
                 let name = &name[..name.iter().position(|&c| c == 0).unwrap_or(16)];
@@ -253,7 +267,7 @@ fn thin(d: &[u8], range: Range<usize>) -> Option<Image> {
         p += size;
     }
     let symtab = symtab.map(|s| Symtab { ext, ..s });
-    Some(Image { range, cputype, sections, symtab, debug, signature })
+    Some(Image { range, cputype, sections, symtab, debug, signature, data })
 }
 
 /// Bytes of the Mach-O file at the start of `d`, as far as its headers tell: the end of its

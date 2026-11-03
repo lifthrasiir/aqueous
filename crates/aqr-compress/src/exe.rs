@@ -62,6 +62,9 @@ enum Arch {
     Stored(&'static str),
     /// A Mach-O image's code signature, left out (for `exe-recons/macho-codesign` to put back).
     Signature,
+    /// A section of data of a Mach-O image coded against its tree's root's, or the root's
+    /// ([`Remaps::data`]).
+    Data,
 }
 
 /// Tables shorter than this are left with the rest.
@@ -108,7 +111,7 @@ pub(crate) fn pe(d: &[u8]) -> Option<Formula> {
             sections.push((0, b.start, b.len(), Arch::Stored(format.name())));
         }
     }
-    filtered(d, "pe", sections, &[], &[], &[])
+    filtered(d, "pe", sections, &[], &[], None, &[])
 }
 
 /// An image's code: `(virtual address, offset, size)` of each section, within its file.
@@ -159,11 +162,16 @@ pub(crate) fn elf(d: &[u8], remaps: &[Option<Arc<Remap>>], deltas: &[Option<Delt
             Some(crate::dwarf::Debug { section, image: 0, off: s.off, size: s.size })
         })
         .collect();
-    filtered(d, "elf", sections.collect(), remaps, deltas, &debug)
+    filtered(d, "elf", sections.collect(), remaps, deltas, None, &debug)
 }
 
 /// The formula of Mach-O file `d`, its images remapped as `remaps` tells (by image).
-pub(crate) fn macho(d: &[u8], remaps: &[Option<Arc<Remap>>], deltas: &[Option<Delta>]) -> Option<Formula> {
+pub(crate) fn macho(
+    d: &[u8],
+    remaps: &[Option<Arc<Remap>>],
+    deltas: &[Option<Delta>],
+    data: Option<&HashMap<usize, Delta>>,
+) -> Option<Formula> {
     let images = macho::images(d)?;
     let sections = code_images(d).into_iter().flat_map(with_arch);
     let symbols = images.iter().filter_map(|i| i.symtab).map(|s| {
@@ -186,7 +194,15 @@ pub(crate) fn macho(d: &[u8], remaps: &[Option<Arc<Remap>>], deltas: &[Option<De
     let signatures: Vec<_> = images.iter().filter_map(|i| i.signature.map(|(at, n)| (i.range.start, at, n))).collect();
     let signed = aqr_exe::codesign::encode(d, &signatures);
     let left: Vec<_> = signed.iter().flat_map(|s| &s.ranges).map(|r| (0, r.start, r.len(), Arch::Signature)).collect();
-    let mut f = filtered(d, "macho", sections.chain(symbols).chain(left).collect(), remaps, deltas, &debug)?;
+    // the sections of data coded against those of the root of the image's tree, or the root's
+    let pointers: Vec<_> = images
+        .iter()
+        .flat_map(|i| &i.data)
+        .filter(|s| data.is_some_and(|m| m.contains_key(&s.1)) || POINTERS.contains(&&s.0[..]) && s.2 >= MIN_TABLE)
+        .map(|s| (0, s.1, s.2, Arch::Data))
+        .collect();
+    let all = sections.chain(symbols).chain(left).chain(pointers).collect();
+    let mut f = filtered(d, "macho", all, remaps, deltas, data, &debug)?;
     if let Some(s) = signed {
         // (unless a signature overlapped what went before, and was kept in the rest)
         let without: usize = s.ranges.iter().map(|r| r.len()).sum();
@@ -232,7 +248,11 @@ impl Remap {
 /// image of the file, its remap where it has one; and of the ARM64 images, what their code is
 /// to the others' of their tree ([`Delta`]).
 #[derive(Default)]
-pub(crate) struct Remaps(HashMap<usize, Vec<Option<Arc<Remap>>>>, HashMap<usize, Vec<Option<Delta>>>);
+pub(crate) struct Remaps(
+    HashMap<usize, Vec<Option<Arc<Remap>>>>,
+    HashMap<usize, Vec<Option<Delta>>>,
+    HashMap<usize, HashMap<usize, Delta>>,
+);
 
 impl Remaps {
     /// The remaps of the images of the file whose data is `d`.
@@ -244,7 +264,33 @@ impl Remaps {
     pub fn deltas(&self, d: &[u8]) -> &[Option<Delta>] {
         self.1.get(&(d.as_ptr() as usize)).map_or(&[], |r| r)
     }
+
+    /// The deltas of the sections of data ([`POINTERS`]) of the Mach-O file whose data is `d`, by
+    /// their offsets in it: those of the images of a tree, coded against the root's.
+    pub fn data(&self, d: &[u8]) -> Option<&HashMap<usize, Delta>> {
+        self.2.get(&(d.as_ptr() as usize))
+    }
 }
+
+/// The sections of data of a Mach-O image kept apart from the rest of the file, by name: tables
+/// of pointers and such, of 4 or 8 bytes a value, which archive smaller on their own than amid
+/// the rest, and of an image of a tree are coded against its root's (`exe-recons/arm64-delta`),
+/// their words copied with their differences where LZ takes them as new.
+///
+/// On their own, the applications of `docs/macos-app-todo.md` archive to 1048.17 -> 1039.19 MB
+/// (-0.86%; Discord.app, its Electron Framework's `__DATA_CONST,__const` of 6.5 MB, -4.6%;
+/// Deskflow and Blender +0.1%). Chrome Framework's `__DATA_CONST,__const` (arm64, 12.5 MB) of
+/// 156.0.8078.49 against .47's, at zstd -19: alone 1.73 MB, against .47's by LZ (`--patch-from`)
+/// 0.92 MB, by bsdiff 0.25 MB, by words 0.44 MB; .76's against .49's 1.67, 1.56, 0.65 and 0.71
+/// MB; of Electron 44 against 43, 1.03, 0.96, 1.43 and 0.88 MB. Against the root, the
+/// applications 1053.10 -> 1048.17 MB (Chrome -1.3%). Strings and constants (`__cstring`,
+/// `__TEXT,__const`) are not taken: their bytes move by any bytes, and LZ does better
+/// (Electron's `__cstring` 2.37 MB alone, 0.15 MB by LZ, 1.94 MB by words); nor `__unwind_info`,
+/// whose words do not move alike (0.43 MB alone and by words).
+const POINTERS: [&[u8]; 3] = [b"__DATA_CONST,__const", b"__DATA,__const", b"__AUTH_CONST,__const"];
+
+/// The class of the pieces of a root's sections of data ([`POINTERS`]), apart.
+const DATA: &str = "macho/data";
 
 /// The pieces of an ARM64 code stream coded against its root's are of a fourth of a solid
 /// block's bound (and of [`PIECE_MIN`] at least), and those of the root's stream (a stream each,
@@ -269,16 +315,16 @@ const MOST: usize = 1;
 /// One word in 2^this, by its content, looked up for matches to pick the root's pieces.
 const SAMPLE: u32 = 3;
 
-/// The class of the copy of the root's code stream in a formula of an image coded against it,
-/// which [`resolve`] makes the root's own.
-pub(crate) const REFERENCE: &str = "arm64/root";
+/// The class of the copy of the root's code stream or section of data in a formula of an image
+/// coded against it, which [`resolve`] makes the root's own.
+pub(crate) const REFERENCE: &str = "exe/root";
 
 /// The class of the code streams of ARM64 images, as `arm64::STREAM_NAMES` makes it.
 const CODE: &str = "arm64/CODE";
 
-/// What the code stream of an ARM64 image's largest section, at `va`, is to the others of its
-/// tree: the root's, stored in pieces of `root_piece` bytes (`root` the stream), or coded
-/// against the root's in pieces of `piece`.
+/// What the code stream of an ARM64 image's largest section, at `va`, or a section of data is to
+/// the others of its tree: the root's, stored in pieces of `root_piece` bytes (`root` the
+/// stream), or coded against the root's in pieces of `piece`.
 #[derive(Clone)]
 pub(crate) struct Delta {
     va: u64,
@@ -394,18 +440,55 @@ pub(crate) fn plan(files: &[&[u8]], threads: usize, min: usize) -> Remaps {
         let root_piece = (min * 2).max(piece);
         v[*k] = Some(Delta { va, root: root.clone(), is_root: parents[i].is_none(), root_piece, piece });
     }
-    Remaps(out, deltas)
+    // the sections of data of the Mach-O images of each tree, of either architecture: those of
+    // the root that one of its images has too (by name), each against the root's
+    let sections = |i: usize| -> Vec<(Vec<u8>, usize, usize)> {
+        let (file, k, ..) = images[order[i]];
+        let Some(image) = macho::images(files[file]).and_then(|mut v| (k < v.len()).then(|| v.swap_remove(k))) else {
+            return Vec::new();
+        };
+        image.data.into_iter().filter(|s| POINTERS.contains(&&s.0[..]) && s.2 >= PIECE_MIN).collect()
+    };
+    let of: Vec<Vec<(Vec<u8>, usize, usize)>> = crate::sets::par_map(n, threads, sections);
+    let (piece, root_piece) = ((min * 2 / PIECE_SHARE).max(PIECE_MIN), (min * 2).max(PIECE_MIN));
+    let mut data: HashMap<usize, HashMap<usize, Delta>> = HashMap::new();
+    for i in (0..n).filter(|&i| parents[i].is_some()) {
+        let r = root_of(i);
+        let file = |i: usize| files[images[order[i]].0];
+        for (name, off, _) in &of[i] {
+            let Some(&(_, roff, rsize)) = of[r].iter().find(|s| &s.0 == name) else { continue };
+            let root = data.entry(file(r).as_ptr() as usize).or_default().entry(roff).or_insert_with(|| Delta {
+                va: 0,
+                root: Arc::new(file(r)[roff..roff + rsize].to_vec()),
+                is_root: true,
+                root_piece,
+                piece,
+            });
+            let child = Delta { is_root: false, ..root.clone() };
+            data.entry(file(i).as_ptr() as usize).or_default().insert(*off, child);
+        }
+    }
+    Remaps(out, deltas, data)
 }
 
 /// The code stream `code` of a section at `va` of an image of `delta`, in `f`: in pieces apart
 /// of the root's, or coded against it in pieces; as it is otherwise.
 fn code_stream(f: &mut Formula, code: &[u8], va: u64, delta: Option<&Delta>) -> Node {
-    let Some(d) = delta.filter(|d| d.va == va) else { return f.push(CODE, code.to_vec()) };
+    match delta.filter(|d| d.va == va) {
+        Some(d) => against(f, code, d, CODE, "arm64-delta"),
+        None => f.push(CODE, code.to_vec()),
+    }
+}
+
+/// `code` (a stream of code or a section of data, of `class`) of `d`, in `f`: in pieces apart
+/// of the root's, or coded against it in pieces (their streams of `delta`'s classes); as it is
+/// otherwise.
+fn against(f: &mut Formula, code: &[u8], d: &Delta, class: &'static str, delta: &str) -> Node {
     if d.is_root {
         if code != &d.root[..] {
-            return f.push(CODE, code.to_vec());
+            return f.push(class, code.to_vec());
         }
-        return Node::concat(code.chunks(d.root_piece).map(|p| f.push_apart(CODE, p.to_vec())));
+        return Node::concat(code.chunks(d.root_piece).map(|p| f.push_apart(class, p.to_vec())));
     }
     let size = d.root_piece;
     let refs = arm64::delta::references(&d.root, size, code, d.piece, MOST, SAMPLE);
@@ -418,11 +501,11 @@ fn code_stream(f: &mut Formula, code: &[u8], va: u64, delta: Option<&Delta>) -> 
         let st = arm64::delta::encode(&a, b);
         // (where little of it is copied, as it is)
         if js.is_empty() || st[arm64::delta::EXTRA].len() > b.len() / 10 * 9 {
-            return f.push(CODE, b.to_vec());
+            return f.push(class, b.to_vec());
         }
         let reference = Node::concat(js.iter().map(|&j| Node::slice(root, piece(j).0 as u64, piece(j).1 as u64)));
         let inputs = std::iter::once(reference)
-            .chain(st.into_iter().zip(arm64::delta::STREAM_NAMES).map(|(s, n)| f.push(format!("arm64-delta/{n}"), s)))
+            .chain(st.into_iter().zip(arm64::delta::STREAM_NAMES).map(|(s, n)| f.push(format!("{delta}/{n}"), s)))
             .collect();
         Node::apply(ARM64_DELTA, Vec::new(), inputs, b.len() as u64)
     });
@@ -441,7 +524,8 @@ pub(crate) fn resolve(f: &mut Formula) {
         return;
     }
     let hash = |d: &[u8]| xxhash_rust::xxh3::xxh3_64(d);
-    let ps: Vec<usize> = (0..f.streams.len()).filter(|&s| f.streams[s].apart && f.streams[s].class == CODE).collect();
+    let ps: Vec<usize> =
+        (0..f.streams.len()).filter(|&s| f.streams[s].apart && [CODE, DATA].contains(&&*f.streams[s].class)).collect();
     let pieces: HashMap<(usize, u64), usize> =
         ps.iter().map(|&s| ((f.streams[s].data.len(), hash(&f.streams[s].data)), s)).collect();
     let mut lens: Vec<usize> = ps.iter().map(|&s| f.streams[s].data.len()).collect();
@@ -487,6 +571,7 @@ fn filtered(
     mut sections: Vec<(u64, usize, usize, Arch)>,
     remaps: &[Option<Arc<Remap>>],
     deltas: &[Option<Delta>],
+    data: Option<&HashMap<usize, Delta>>,
     debug: &[crate::dwarf::Debug],
 ) -> Option<Formula> {
     // In file order, a CIL section before those within it; sections overlapping an earlier
@@ -520,6 +605,10 @@ fn filtered(
         let apply = match arch {
             Arch::Output(k) => outputs[k].take().expect("an output placed twice"),
             Arch::Stored(format) => f.push_content("nsis", Kind::Format(format), section.to_vec()),
+            Arch::Data => match data.and_then(|data| data.get(&off)) {
+                Some(d) => against(&mut f, section, d, DATA, "macho-delta"),
+                None => f.push(DATA, section.to_vec()),
+            },
             // (where the CIL filter turns the section down, those within it are filtered on
             // their own)
             Arch::Cil(meta) => {
@@ -622,7 +711,9 @@ fn code_apply(
                 (0..fields).map(|i| Field { off: i * width, width, big: false, how: How::Delta }).collect();
             aqr_infer_recs::formula::apply_fields(f, "pe/table", section, k, &fl)
         }
-        Arch::Cil(_) | Arch::Symbols { .. } | Arch::Output(_) | Arch::Stored(_) | Arch::Signature => return None,
+        Arch::Cil(_) | Arch::Symbols { .. } | Arch::Output(_) | Arch::Stored(_) | Arch::Signature | Arch::Data => {
+            return None;
+        }
     })
 }
 
