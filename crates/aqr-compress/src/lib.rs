@@ -368,6 +368,9 @@ pub(crate) struct Cx {
     /// ([`seal`]): those of a formula whose formulas above all make their files apart, of a
     /// file archived alone.
     sealing: Option<seal::Sealing>,
+    /// Whether [`make_later`] had the applications of contents of data not made yet evaluated
+    /// as it made them ([`recompress_with`] evaluates the formula otherwise).
+    parts_checked: std::cell::Cell<bool>,
     /// The contents planned to be coded in a set against a parent ([`sets::plan`]), which are
     /// not made alone.
     skip: RefCell<HashSet<sets::Key>>,
@@ -493,6 +496,7 @@ impl Cx {
             deferred: Default::default(),
             let_go: None,
             sealing: None,
+            parts_checked: Default::default(),
             skip: Default::default(),
             top_sets: None,
             later: Default::default(),
@@ -994,6 +998,16 @@ fn bvx_on(opt: &Options) -> bool {
     opt.level.scale() >= 9
 }
 
+/// aqr-wim's formula of `d`: of its data made again where needed, rather than held, where its
+/// bytes are shared ([`aqr_formula::store::find`]: of the input mapped, or of the spill), so
+/// that [`make_later`] makes the data of each content as it comes to it.
+fn wim(d: &[u8], threads: usize) -> Option<Formula> {
+    match aqr_formula::store::find(d) {
+        Some(b) => aqr_wim::formula::encode_shared(&b, threads),
+        None => aqr_wim::formula::encode(d, threads),
+    }
+}
+
 /// Whether LZX streams (CAB's folders, CHM's sections) are taken at the level of `opt`: from
 /// level 9, as they split at about 22 MB/s of data on one thread a stream, and a CAB or CHM file
 /// alone gains little for it (441 CAB files: -1.1% for 73.7 -> 290 s; 139 CHM files: -18.3% for
@@ -1046,7 +1060,10 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
     // the prevalidator is done with them too
     f.streams.iter_mut().for_each(|s| s.data.share());
     let shared = Arc::new(f.clone());
-    if let Some(pre) = &cx.pre {
+    // (a formula of data not made yet, aqr-wim's: its applications evaluated with their contents
+    // as they are made, [`make_later`], else once its data is made, below)
+    let lazy = f.streams.iter().any(|s| s.data.is_lazy());
+    if let Some(pre) = cx.pre.as_ref().filter(|_| !lazy) {
         match prepared && format == Format::Png {
             true => pre
                 .job(shared.clone(), d, cx.shares(d))
@@ -1072,13 +1089,22 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
     let words = (format == Format::Jsonl).then(|| segment_words(&f, opt, cx)).flatten();
     // (where the data put off is, and what the formula is, as the contents may take its streams
     // out of it)
-    let bases: Vec<usize> = f.streams.iter().map(|s| s.data.as_ptr() as usize).collect();
+    let bases: Vec<usize> = f.streams.iter().map(|s| addr(&s.data)).collect();
     let of = bundle::Kinds::of(&f);
-    let children = nested(&mut f, opt, depth, cx);
+    cx.parts_checked.set(false);
+    let children = nested(&mut f, d, opt, depth, cx);
     if words.is_some() {
         cx.share_words(None);
     }
     drop(watches);
+    // (data not made by the contents made: made now, and the formula evaluated as others are
+    // where its contents' applications were not)
+    if lazy {
+        f.streams.iter_mut().filter(|s| s.data.is_lazy()).for_each(|s| s.data = s.data.made());
+        if let Some(pre) = cx.pre.as_ref().filter(|_| !cx.parts_checked.get()) {
+            pre.submit(Arc::new(f.clone()), d, cx.shares(d));
+        }
+    }
     let mut taken = Vec::new();
     if let Some((mut children, plan)) = children {
         let sets = sets::sets(&f, &mut children, &plan, opt, depth, cx);
@@ -1099,6 +1125,14 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
     }
     // (text as aqr-wrt tells, see [`made`])
     (format == Format::Text || smaller_as(&f, None, d, of, opt, cx)).then_some(f)
+}
+
+/// Where bytes `b` are, as an address (0 for bytes not made yet, or sunk).
+fn addr(b: &Bytes) -> usize {
+    match b.is_lazy() || b.sunk_in().is_some() {
+        true => 0,
+        false => b.as_ptr() as usize,
+    }
 }
 
 /// Text of the contents of a formula shorter than this in all is coded with dictionaries of each
@@ -1134,7 +1168,13 @@ fn segment_words(f: &Formula, opt: &Options, cx: &Cx) -> Option<Arc<aqr_wrt::for
 /// tells ([`aqr_common::progress`]).
 fn told_as_second_half(f: &Formula, d: &[u8]) -> Vec<aqr_common::progress::Watch> {
     let within = |s: &[u8]| d.as_ptr_range().contains(&s.as_ptr());
-    let own: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).filter(|s| !s.is_empty() && !within(s)).collect();
+    let own: Vec<&[u8]> = f
+        .streams
+        .iter()
+        .filter(|s| !s.data.is_lazy())
+        .map(|s| &s.data[..])
+        .filter(|s| !s.is_empty() && !within(s))
+        .collect();
     let total: usize = own.iter().map(|s| s.len()).sum();
     let (half, rest) = (d.len() / 2, d.len() - d.len() / 2);
     let at = |n: usize| half + (n as u128 * rest as u128 / total.max(1) as u128) as usize;
@@ -1517,7 +1557,7 @@ fn fit(base: usize, parts: &[(usize, usize)], limit: usize) -> Vec<bool> {
 /// where it has any application (as many as fit in [`Options::description`]), and the plan of
 /// the sets of them (whose members with a parent have no formula); `None` where none has any
 /// and there is no set.
-fn nested(f: &mut Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<(Contents, sets::Plan)> {
+fn nested(f: &mut Formula, of: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<(Contents, sets::Plan)> {
     if depth + 1 >= opt.depth {
         return None;
     }
@@ -1528,7 +1568,7 @@ fn nested(f: &mut Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<(Conten
     }
     // (sets read their members' bytes from the formula once made: those of a tree's top too)
     let top = depth == 0 && cx.top_sets.is_some();
-    make_later(f, &|n| !top && !plan.holds(n), opt, depth, cx, &mut children);
+    make_later(f, of, &|n| !top && !plan.holds(n), opt, depth, cx, &mut children);
     // (those not taken: the contents' own nested contents make and take their own)
     let mut ready = cx.ready.borrow_mut();
     prepared.iter().for_each(|k| drop(ready.remove(k)));
@@ -1561,6 +1601,7 @@ fn nested(f: &mut Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<(Conten
 /// they are put back.
 fn make_later(
     f: &mut Formula,
+    of: &[u8],
     take: &dyn Fn(&Node) -> bool,
     opt: &Options,
     depth: u32,
@@ -1571,6 +1612,17 @@ fn make_later(
     if later.is_empty() {
         return;
     }
+    // contents of data not made yet (aqr-wim's), made as each is come to, and the application of
+    // each then evaluated with it (by its stream: the application, and where its output is in
+    // `of`)
+    let lazy: Vec<Option<usize>> = later
+        .iter()
+        .map(|(_, n, _)| match *n {
+            Node::Slice { stream, .. } if f.streams.get(stream).is_some_and(|s| s.data.is_lazy()) => Some(stream),
+            _ => None,
+        })
+        .collect();
+    let apps = applications_of_lazy(f);
     let mut slices = vec![0usize; f.streams.len()];
     f.visit(&mut |n| {
         if let &Node::Slice { stream, .. } = n
@@ -1587,6 +1639,16 @@ fn make_later(
     };
     let owned: Vec<Option<usize>> = later.iter().map(|(_, n, _)| whole(f, n)).collect();
     let members: Vec<bool> = later.iter().map(|(_, n, _)| !take(n)).collect();
+    // (those not taken made now, as others are)
+    for (l, o) in lazy.iter().zip(&owned) {
+        if let (Some(s), None) = (l, o) {
+            f.streams[*s].data = f.streams[*s].data.made();
+        }
+    }
+    let lazy: Vec<Option<usize>> = lazy.into_iter().zip(&owned).map(|(l, o)| l.filter(|_| o.is_some())).collect();
+    let pre = cx.pre.clone().filter(|_| lazy.iter().flatten().any(|s| apps.contains_key(s)));
+    cx.parts_checked.set(cx.parts_checked.get() || pre.is_some());
+    let parent_let_go = cx.let_go.clone();
     // the contents' formulas sealed as they are made, in their order, where this formula's
     // contents are: each in its slot, those of a stream taken that take no place as they are;
     // those that would pass the bound of the description not (kept as they are), the bound
@@ -1600,6 +1662,11 @@ fn make_later(
         let &Node::Slice { stream, start, len } = n else { unreachable!("a slice") };
         &f.streams[stream].data[start as usize..][..len as usize]
     };
+    // (the data that is made already)
+    let peek = |n: &Node| match n {
+        &Node::Slice { stream, .. } if f.streams[stream].data.is_lazy() => None,
+        n => Some(data(n)),
+    };
     // the formulas made beforehand, by where their data is
     let mut by_at: HashMap<usize, Vec<_>> = HashMap::new();
     for (k, v) in std::mem::take(&mut *cx.ready.borrow_mut()) {
@@ -1607,10 +1674,12 @@ fn make_later(
     }
     let ready: Vec<std::sync::Mutex<Vec<_>>> = later
         .iter()
-        .map(|(_, n, _)| std::sync::Mutex::new(by_at.remove(&(data(n).as_ptr() as usize)).unwrap_or_default()))
+        .map(|(_, n, _)| {
+            std::sync::Mutex::new(peek(n).and_then(|d| by_at.remove(&(d.as_ptr() as usize))).unwrap_or_default())
+        })
         .collect();
     cx.ready.borrow_mut().extend(by_at.into_values().flatten());
-    let images: Vec<&[u8]> = later.iter().map(|(_, n, _)| data(n)).filter(|d| exe::remappable(d)).collect();
+    let images: Vec<&[u8]> = later.iter().filter_map(|(_, n, _)| peek(n)).filter(|d| exe::remappable(d)).collect();
     let remaps = (images.len() > 1).then(|| Arc::new(exe::plan(&images, opt.threads, opt.block / 2)));
     let apart = Apart { remaps, ..cx.apart() };
     let files = cx.files.as_deref();
@@ -1618,7 +1687,7 @@ fn make_later(
     // order where sealed: each waits for those before it)
     let mut order: Vec<usize> = (0..later.len()).collect();
     if sealing.is_none() {
-        order.sort_by_cached_key(|&i| std::cmp::Reverse(cost(data(&later[i].1))));
+        order.sort_by_cached_key(|&i| std::cmp::Reverse(peek(&later[i].1).map_or(later[i].1.len() * 50, cost)));
     }
     // (the bytes of the streams taken, shared so as to be moved without a copy)
     let taken: Vec<std::sync::Mutex<Option<Bytes>>> = owned
@@ -1639,8 +1708,19 @@ fn make_later(
     let made = aqr_common::pool::par_map(later.len(), opt.threads, |j| {
         let i = order[j];
         let (_, n, nest) = &later[i];
-        let mine = taken[i].lock().unwrap().take();
+        let mine = taken[i].lock().unwrap().take().map(|b| b.made());
         let d = mine.as_deref().unwrap_or_else(|| data(n));
+        // (the application of data made now evaluated with it)
+        if let (Some(pre), Some((app, at))) = (&pre, lazy[i].and_then(|s| apps.get(&s))) {
+            let s = lazy[i].expect("a stream");
+            let part = fr.part(app, &|x| match x == s {
+                true => mine.clone().expect("taken"),
+                false => fr.streams[x].data.clone(),
+            });
+            let out = &of[*at..*at + app.len() as usize];
+            let share = parent_let_go.as_ref().is_none_or(|r| !r.contains(&(out.as_ptr() as usize)));
+            pre.submit(Arc::new(part), out, share);
+        }
         let mut own = apart.cx(d.len(), opt);
         own.let_go = mine.is_some().then_some(d.as_ptr_range()).map(|r| r.start as usize..r.end as usize);
         own.sealing =
@@ -1717,6 +1797,39 @@ fn make_later(
         // (so that what holds it is sized and written without compressing its streams again)
         enc.into_iter().for_each(|e| cx.enc.adopt(e));
     }
+}
+
+/// Of each stream of `f` of data not made yet that an application among what its root
+/// concatenates takes, that application and where its output starts in `f`'s.
+fn applications_of_lazy(f: &Formula) -> HashMap<usize, (Node, usize)> {
+    let mut out = HashMap::new();
+    let mut at = 0usize;
+    let mut walk = vec![&f.root];
+    while let Some(n) = walk.pop() {
+        match n {
+            // (in order)
+            Node::Concat(ns) => walk.extend(ns.iter().rev()),
+            n => {
+                if let Node::Apply(a) = n {
+                    let mut lazy = None;
+                    a.inputs.iter().for_each(|i| {
+                        i.visit(&mut |m| {
+                            if let &Node::Slice { stream, .. } = m
+                                && f.streams.get(stream).is_some_and(|s| s.data.is_lazy())
+                            {
+                                lazy.get_or_insert(stream);
+                            }
+                        })
+                    });
+                    if let Some(s) = lazy {
+                        out.insert(s, (n.clone(), at));
+                    }
+                }
+                at += n.len() as usize;
+            }
+        }
+    }
+    out
 }
 
 /// About the thread time making data `d` takes, of its bytes and how long its format takes for
@@ -1896,7 +2009,17 @@ fn content_slices(
     match n {
         &Node::Slice { stream, start, len } => {
             let s = f.streams.get(stream);
-            let d = s.and_then(|s| s.data.get(start as usize..)?.get(..len as usize));
+            // (data not made yet is made as it is come to, [`make_later`])
+            if let Some(st) = s.filter(|s| s.data.is_lazy())
+                && start + len <= st.data.len() as u64
+                && bundle::contents_apart(f)
+                && let Some(nest) = nest.of(st.kind)
+            {
+                cx.later.borrow_mut().push((out.len(), n.clone(), nest));
+                out.push((n.clone(), None));
+                return;
+            }
+            let d = s.filter(|s| !s.data.is_lazy()).and_then(|s| s.data.get(start as usize..)?.get(..len as usize));
             // (the first of a set's contents with a parent: made in the set; any other alone)
             if d.is_some_and(|d| cx.skip.borrow_mut().remove(&(d.as_ptr() as usize, d.len()))) {
                 out.push((n.clone(), None));
@@ -2223,7 +2346,7 @@ fn recompressor(format: Format) -> Recompressor {
         Format::Jsonl => Pure(aqr_jsonl::formula::encode),
         Format::Sized => Pure(aqr_raw::formula::encode_sized),
         Format::Records => Pure(aqr_infer_recs::formula::encode),
-        Format::Wim => Pure(aqr_wim::formula::encode),
+        Format::Wim => Pure(wim),
         Format::Ppmd => Pure(aqr_ppmd::formula::encode),
         Format::Mkv => Pure(aqr_mkv::formula::encode),
         Format::ProRes => Pure(aqr_prores::formula::encode),
@@ -2320,7 +2443,7 @@ fn pure_contents<'a>(
     match (n, nest) {
         (&Node::Slice { stream, .. }, None) if is_content(f, stream) => pure_contents(n, Some(Nest::Scan), f, opt, out),
         (&Node::Slice { stream, start, len }, Some(nest)) => {
-            let Some(s) = f.streams.get(stream) else { return };
+            let Some(s) = f.streams.get(stream).filter(|s| !s.data.is_lazy()) else { return };
             let Some(d) = s.data.get(start as usize..).and_then(|d| d.get(..len as usize)) else { return };
             // (a scan takes the file it starts with as one of the format it starts like)
             let format = match nest.of(s.kind) {
@@ -2422,10 +2545,26 @@ mod tests {
         let mut f = bundle::iso(&shared).unwrap();
         let opt = Options { shared_modules: true, ..Options::default() };
         let cx = Cx::new(&shared, &opt);
-        let (children, _) = nested(&mut f, &opt, 0, &cx).unwrap();
+        let (children, _) = nested(&mut f, &shared, &opt, 0, &cx).unwrap();
         let (n, child) = children.iter().find(|c| c.1.as_ref().is_some_and(|c| !c.f.applies().is_empty())).unwrap();
         let &Node::Slice { stream, .. } = n else { panic!("a slice") };
         assert!(f.streams[stream].data.is_empty() && child.as_ref().unwrap().gaps.is_none());
+    }
+
+    /// A WIM file whose bytes are known to the store (mapped) has its data made as each content
+    /// is come to rather than held ([`wim`]): the same archive as where it is not, giving the
+    /// file back.
+    #[test]
+    fn wim_data_made_as_needed() {
+        let d = std::fs::read(format!("{}/../../codecs/aqr-wim/tests/data/lzx.wim", env!("CARGO_MANIFEST_DIR")))
+            .unwrap();
+        let opt = Options { threads: 2, ..Options::default() };
+        let plain = compress(&d, &opt);
+        let shared = aqr_formula::Bytes::shared(Arc::new(d.clone()));
+        let _known = aqr_formula::store::known(&shared);
+        assert!(wim(&shared, 2).unwrap().streams.iter().any(|s| s.data.is_lazy()));
+        assert!(compress(&shared, &opt) == plain);
+        assert!(aqr_decompress::decompress(&plain, 1).unwrap() == d);
     }
 
     /// The files of an image archived alone are sealed into the sink as they are made: the
@@ -2893,7 +3032,7 @@ mod tests {
         let mut f = aqr_iso::formula::build(&d, &files, &pieces, &aqr_iso::formula::Options { kind: kind_by_name });
         let opt = Options { threads: 2, shared_modules: true, ..Options::default() };
         let cx = Cx::new(&d, &opt);
-        let (_, plan) = nested(&mut f, &opt, 0, &cx).unwrap();
+        let (_, plan) = nested(&mut f, &d, &opt, 0, &cx).unwrap();
         assert!(!plan.is_empty());
         let of = |class: &str| f.streams.iter().filter(|s| s.class == class).map(|s| s.data.len()).collect::<Vec<_>>();
         assert!(of("iso/png").len() == 3 && of("iso/png").iter().all(|&n| n > 0));
@@ -3214,7 +3353,7 @@ mod tests {
             let data =
                 if content { f.push_content("data", Kind::Unknown, d.clone()) } else { f.push("data", d.clone()) };
             f.root = Node::apply(aqr_decompress::X86, vec![], vec![data], d.len() as u64);
-            let children = nested(&mut f, &opt, 0, &cx);
+            let children = nested(&mut f, &d, &opt, 0, &cx);
             assert_eq!(children.is_some(), content);
             if let Some((mut children, _)) = children {
                 assert_eq!(children.len(), 1);
