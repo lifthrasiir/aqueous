@@ -87,6 +87,9 @@ pub struct SegmentWriter {
     resources: Vec<Resource>,
     resource_at: Vec<usize>,
     dictionary_at: Vec<usize>,
+    /// Bytes of the blocks so far that may be mirrored but the metadata block (module,
+    /// resource, dictionary and formula blocks): about those of their mirror blocks.
+    mirrorable: usize,
     /// The dictionary (by index) of each leaf block taking one, by where it is.
     leaf_dictionary: HashMap<usize, usize>,
     /// The module and resource blocks so far, one after another, and a stand-in for each
@@ -142,6 +145,7 @@ impl SegmentWriter {
             resources: Vec::new(),
             resource_at: Vec::new(),
             dictionary_at: Vec::new(),
+            mirrorable: 0,
             leaf_dictionary: HashMap::new(),
             prefix: Vec::new(),
         }
@@ -437,6 +441,10 @@ impl SegmentWriter {
             self.leaf_dictionary.insert(b.leaf_at[i], d);
         }
         self.at += b.bytes.len();
+        self.mirrorable += (b.layout.iter())
+            .filter(|(p, _)| matches!(p, Placed::Module | Placed::Resource | Placed::Dictionary | Placed::Formula(_)))
+            .map(|&(_, n)| n)
+            .sum::<usize>();
     }
 
     /// The end of the archive: the metadata block of `t`, its contents where `contents` tells
@@ -458,9 +466,10 @@ impl SegmentWriter {
     /// block, then a spacer block where the room it was given is longer), and those to write
     /// after the blocks held back. The room is found as the metadata block, whose offsets to the
     /// blocks before `front` count it, is made again until its mirror block fits. None where the
-    /// mirror block would be nearer the metadata block than the spec asks (of an encrypted
-    /// archive's payload where `chunked`), or in such a payload (which may have no spacer
-    /// blocks) the room does not come out exact.
+    /// mirror block would be nearer the metadata block than the spec asks; but in an encrypted
+    /// archive's payload (`chunked`), where the room has to come out exact (it may have no
+    /// spacer blocks), it is put there however near where the blocks held back are more than
+    /// the other blocks' mirror blocks after the metadata block would be.
     pub fn finish_mirrored(
         &self,
         enc: &Encoder,
@@ -481,7 +490,10 @@ impl SegmentWriter {
                 room = len + if tries < 3 { 0 } else { 2 << tries };
                 continue;
             }
-            if super::mirror::least_start((front + len) as u64, chunked) > at as u64 {
+            // (in an encrypted archive's payload, before the blocks however near, where that is
+            // further than after them all, the other mirror blocks alone between)
+            let near = super::mirror::least_start((front + len) as u64, chunked) > at as u64;
+            if near && (!chunked || self.at - front < self.mirrorable) {
                 return Ok(None);
             }
             if room > len {
