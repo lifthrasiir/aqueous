@@ -1787,9 +1787,11 @@ fn make_later(
             let child = child.map(|c| Made::from(c.cut(d)));
             let size = child.as_ref().map(|c| bound_of(&c.f).saturating_sub(description_bound(n)));
             // (the bytes taken let go of now where they have a formula, made again of it in the
-            // rare case it is turned down for the bound)
+            // rare case it is turned down for the bound; but kept where formulas are sealed in
+            // it, an image's files, whose streams are no longer at hand to make it)
             let class = owned[i].map(|s| (fr.streams[s].class.clone(), fr.streams[s].kind));
-            let raw = mine.filter(|_| child.is_none());
+            let sunk = child.as_ref().is_some_and(|c| c.f.streams.iter().any(|s| s.data.sunk_in().is_some()));
+            let raw = mine.filter(|_| child.is_none() || sunk);
             let (budget, sealed, threads, limit) = (budget.clone(), sealed.clone(), opt.threads, opt.description);
             s.order.submit(
                 slots[i],
@@ -1799,8 +1801,9 @@ fn make_later(
                     let mut raw = raw;
                     match size.filter(|_| made.is_some()) {
                         Some(n) if *b + n <= limit => *b += n,
+                        // (of the bytes taken only: those of a slice stay in their stream)
                         _ => {
-                            if let (None, Some(m)) = (&raw, made.take()) {
+                            if let (None, Some(m), Some(_)) = (&raw, made.take(), &class) {
                                 raw = Some(m.f.eval(&Native { threads }).expect("the formula of a content").into());
                             }
                         }
@@ -2679,6 +2682,50 @@ mod tests {
         let (c, f) = compress_formula(&d, &Options { threads: 2, shared_modules: true, ..Options::default() });
         assert!(f.streams.iter().all(|s| s.data.sunk_in().is_none()));
         assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
+        assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
+    }
+
+    /// An image in a tar archive, the image's files sealed: where its formula passes the bound of
+    /// the description, it is kept raw, its bytes as they are rather than its formula evaluated
+    /// (which would read the streams sunk).
+    #[test]
+    fn sealed_over_the_bound_kept_raw() {
+        let tar = |files: &[(&str, &[u8])]| {
+            let mut t = Vec::new();
+            for (name, d) in files {
+                let mut h = [0u8; 512];
+                h[..name.len()].copy_from_slice(name.as_bytes());
+                h[100..107].copy_from_slice(b"0000644");
+                h[108..115].copy_from_slice(b"0000000");
+                h[116..123].copy_from_slice(b"0000000");
+                h[124..135].copy_from_slice(format!("{:011o}", d.len()).as_bytes());
+                h[136..147].copy_from_slice(b"00000000000");
+                h[156] = b'0';
+                h[257..265].copy_from_slice(b"ustar\x0000");
+                h[148..156].fill(b' ');
+                let sum: u32 = h.iter().map(|&b| b as u32).sum();
+                h[148..155].copy_from_slice(format!("{sum:06o}\0").as_bytes());
+                t.extend_from_slice(&h);
+                t.extend_from_slice(d);
+                t.resize(t.len().next_multiple_of(512), 0);
+            }
+            t.resize(t.len() + 1024, 0);
+            t
+        };
+        let fixture = |p: &str| std::fs::read(format!("{}/../../{p}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let mut iso = zstd::stream::decode_all(&fixture("codecs/aqr-iso/tests/data/udf201.iso.zst")[..]).unwrap();
+        let jpeg = fixture("codecs/aqr-jpeg/tests/data/gradient.jpg");
+        let files = aqr_iso::files(&iso);
+        let at = files.iter().find(|f| f.name == b"bin/data.bin").unwrap().extents[0].start;
+        iso[at..at + jpeg.len()].copy_from_slice(&jpeg);
+        let text = b"some text, ".repeat(1000);
+        let d = tar(&[("udf.iso", &iso), ("c.txt", &text)]);
+        assert_eq!(detect(&d), Some(Format::Tar));
+        // (the JPEG file within the image's bound, 165 bytes, the image not within the tar
+        // archive's, 196)
+        let opt = Options { description: 180, threads: 2, shared_modules: true, ..Options::default() };
+        let (c, f) = compress_formula(&d, &opt);
+        assert!(f.applies().iter().all(|a| a.module != aqr_decompress::JPEG));
         assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
     }
 
