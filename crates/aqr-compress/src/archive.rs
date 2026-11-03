@@ -1087,12 +1087,6 @@ fn finish<S: Source + ?Sized>(
     Made { batch, at, files: reports, solid, sets, bad }
 }
 
-/// The bytes of the leaves of a batch decoded at once to verify it ([`aqr::Archive::set_budget`]),
-/// as `aqr` decodes an archive: a large leaf waits for others to be done rather than run along
-/// with them (10gb: `enwik9` and `enwik9.zip`, 1.5 GB each), and then takes the output of a module
-/// that is a whole file from the file where the leaf before ran it ([`verify::Cached`]).
-const VERIFY_BUDGET: u64 = 2_000_000_000;
-
 /// The files of batch `b` (by index; each at its leaf and output in `at`) that its blocks, decoded
 /// alone with the modules of `m`, do not give back: all of them where it does not decode.
 #[allow(clippy::too_many_arguments)]
@@ -1133,7 +1127,11 @@ fn check_in(
     let bad = Mutex::new(Vec::new());
     let all = || (0..files.len()).collect();
     let Ok(mut a) = aqr::open(c, &natives) else { return all() };
-    a.set_budget(VERIFY_BUDGET);
+    // within the process's budget, as `aqr` decodes an archive: a large leaf waits for others to
+    // be done rather than run along with them (10gb: `enwik9` and `enwik9.zip`, 1.5 GB each), and
+    // then takes the output of a module that is a whole file from the file where the leaf before
+    // ran it ([`verify::Cached`])
+    a.set_budget(aqr_common::budget::global());
     // (each leaf told of as of its first file)
     a.set_items(by_block.iter().map(|&l| of_leaf[l].first().map(|&(_, k)| files[k].c)).collect());
     let r = a.each_leaf(threads, |i, outputs| {

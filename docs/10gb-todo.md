@@ -253,8 +253,9 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html, 10gb.zpa
   - 크고 적용이 꼭대기에만 있는 식을 모두 미리 평가하지 않으면 0.5 GB 남짓 줄지만, hg19가 29.6 →
     33.4 s로 느려진다(FASTA 디코딩이 놀던 코어에서 검증 단계로 옮겨 간다).
 - 풀기(`921778d`에서 2.60 GB, 목표 2 GB): `aqr`는 leaf를 무게(식이 말하는, 한꺼번에 드는 가장 많은
-  바이트, 적용의 메모리 한도를 넣어)의 합이 2 GB 안일 때만 동시에 푼다(`Archive::set_budget`). 첫
-  leaf가 기다리는 동안에는 뒤의 leaf가 예산 안에서 앞지른다(`Gate`).
+  바이트, 적용의 메모리 한도를 넣어)의 합이 프로세스의 budget(`-M`, 기본 2 GB; 검증도 같은 것을 쓴다) 안일
+  때만 동시에 푼다(`Archive::set_budget`, `aqr_common::budget`). 첫 leaf가 기다리는 동안에는 뒤의 leaf가
+  예산 안에서 앞지른다(`Gate`).
   - 무게가 가장 큰 leaf는 `enwik9.zip`과 `enwik9`(각 3.46 GB), `mingw480`의 7z(2.46 GB), 그다음
     1.87 GB이다. 예산을 넘는 leaf는 아무것도 돌지 않을 때 혼자 들어가고, 도는 동안에는 앞지를 자리도
     없다. 무게는 크게 잡혔지만 그 leaf가 혼자 돌 때의 실제 heap도 2.0–2.2 GB(`--stats`)라서, 무게를

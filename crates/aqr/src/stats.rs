@@ -17,7 +17,7 @@
 //!
 //! - `mode` (`compress`, `decompress` or `test`), `input`, `output`, `seconds`, `threads`,
 //!   `read` and `written` (bytes), `overhead` (bytes of the archive but the files', where
-//!   compressed);
+//!   compressed), `budget` (bytes of `-M`, null for none);
 //! - `contents`, by content (the item of the samples): `path`, `kind` (the format it starts
 //!   like, `-` for none), `len`, and where compressed `archived` (bytes of the archive that are
 //!   its), `same_as` (the content it is the same as) and `modules`;
@@ -275,10 +275,14 @@ fn outliers(run: &Run) -> String {
     });
     _ = writeln!(
         out,
-        "stats: {:.2} s, {w} workers {} busy; heap peak {}{} at {:.1} s{}{}",
+        "stats: {:.2} s, {w} workers {} busy; heap peak {}{}{} at {:.1} s{}{}",
         run.seconds,
         percent(busy_time, total),
         size(peak.max(0) as f64),
+        match aqr_common::budget::global().limit() {
+            u64::MAX => String::new(),
+            b => format!(" ({} of the budget {})", percent(peak.max(0) as f64, b as f64), size(b as f64)),
+        },
         holder.unwrap_or_default(),
         peak_at.map_or(0.0, |i| t.samples[i].at),
         if rss > 0 { format!(", resident peak {}", size(rss as f64)) } else { String::new() },
@@ -483,6 +487,10 @@ fn json(run: &Run) -> String {
     string(&mut o, &run.output);
     _ = write!(o, ",\"seconds\":");
     number(&mut o, run.seconds);
+    match aqr_common::budget::global().limit() {
+        u64::MAX => o += ",\"budget\":null",
+        b => _ = write!(o, ",\"budget\":{b}"),
+    }
     _ = write!(o, ",\"threads\":{},\"read\":{},\"written\":{},\"overhead\":", run.threads, run.read, run.written);
     match run.overhead {
         Some(n) => _ = write!(o, "{n}"),

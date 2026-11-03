@@ -49,9 +49,10 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io;
 use std::ops::Range;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use aqr_common::budget::{Budget, Taken};
 use aqr_common::varint;
 use xxhash_rust::xxh3::Xxh3;
 use xxhash_rust::xxh64::{Xxh64, xxh64};
@@ -2364,8 +2365,8 @@ pub struct Archive<'c, 'n> {
     loaded: Vec<OnceLock<Decoded<Box<dyn Loaded + 'n>>>>,
     /// The tree, and its contents (each a leaf, an output of it and its size).
     tree: Option<(Tree, Vec<ContentRef>)>,
-    /// The bytes of the leaves evaluated at once, by their weights ([`Archive::set_budget`]).
-    budget: u64,
+    /// The budget the leaves evaluated take of by their weights ([`Archive::set_budget`]).
+    budget: Option<&'n Budget>,
     /// Told how far the evaluation is ([`Archive::on_progress`]).
     tell: Option<Telling>,
     /// By leaf, the item its evaluation is told of as ([`Archive::set_items`]).
@@ -2426,23 +2427,23 @@ fn open_as<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, sealed: bool) -> Decoded
         blocks.leaves.iter().map(|l| if let LeafBlock::Formula { outputs, .. } = l { *outputs } else { 1 }).collect();
     let tree = meta.map(|(at, m)| tree_of(m, at, &blocks, &outputs)).transpose()?;
     let loaded = blocks.modules.iter().map(|_| OnceLock::new()).collect();
-    Ok(Archive { blocks, runner, loaded, tree, budget: u64::MAX, tell: None, items: Vec::new() })
+    Ok(Archive { blocks, runner, loaded, tree, budget: None, tell: None, items: Vec::new() })
 }
 
-impl Archive<'_, '_> {
+impl<'n> Archive<'_, 'n> {
     /// The tree, where the archive has a metadata block.
     pub fn tree(&self) -> Option<&Tree> {
         self.tree.as_ref().map(|t| &t.0)
     }
 
-    /// Has leaves evaluated at once only while their weights add up to at most `bytes` (or one
-    /// alone), taken in their order but for those of long work on a thread, first, and those
-    /// going before one waiting for room ([`Gate`]): the weight of a leaf is the most bytes its
-    /// evaluation holds at once, as its formula tells (its literals and slices, and the inputs
-    /// and outputs of an application as it is made), short of what modules take within. None by
-    /// default.
-    pub fn set_budget(&mut self, bytes: u64) {
-        self.budget = bytes;
+    /// Has leaves evaluated at once only while their weights fit in `budget` beside what the
+    /// rest of the process holds of it (or one alone, of those of this evaluation), taken in
+    /// their order but for those of long work on a thread, first, and those going before one
+    /// waiting for room ([`Gate`]): the weight of a leaf is the most bytes its evaluation holds
+    /// at once, as its formula tells (its literals and slices, the inputs and outputs of an
+    /// application as it is made, and its memory limit). None by default.
+    pub fn set_budget(&mut self, budget: &'n Budget) {
+        self.budget = Some(budget);
     }
 
     /// Tells `tell` how far the evaluation of the leaves is as it goes (none: tells nothing).
@@ -3312,16 +3313,19 @@ fn stored_len(d: &[u8], zstd: bool, checked: bool) -> u64 {
 const LONG_SERIAL: u64 = 64 << 20;
 
 /// The leaves let in by [`Archive::set_budget`] ([`aqr_common::pool::dispatch_any`]): in an
-/// order (of the leaves' indices), each once those evaluated leave room for it; but while the
-/// first not let in waits, the leaves after it that fit in go before it, up to the budget's bytes
-/// of weights (after which it is let in alone, as those in end), and past [`PASSING`] leaves that
-/// do not at most.
+/// order (of the leaves' indices), each once there is room in the budget for it (or none of
+/// this evaluation is in); but while the first not let in waits, the leaves after it that fit
+/// go before it, up to the limit's bytes of weights (after which it is let in as soon as it
+/// fits, or alone), and past [`PASSING`] leaves that do not at most.
 struct Gate<'w> {
-    budget: u64,
+    budget: Option<&'w Budget>,
     weights: &'w [u64],
     order: Vec<usize>,
+    /// (locked within the budget's lock, never the other way)
     state: Mutex<GateState>,
-    changed: std::sync::Condvar,
+    /// The leaves in (changed within the budget's lock, or as a leaf ends, which then tells the
+    /// budget).
+    on: AtomicUsize,
 }
 
 /// How many leaves that do not fit in the leaves going before the first waiting pass at most
@@ -3329,8 +3333,6 @@ struct Gate<'w> {
 const PASSING: usize = 64;
 
 struct GateState {
-    /// The weights of the leaves in.
-    on: u64,
     /// The leaves let in, and the first not (by their places in the order, as below).
     taken: Vec<bool>,
     first: usize,
@@ -3343,17 +3345,17 @@ struct GateState {
 
 impl GateState {
     /// A leaf after the first that may go before it, of those that `fits`.
-    fn passing(&mut self, fits: impl Fn(u64, usize) -> bool) -> Option<usize> {
-        let (on, first, taken) = (self.on, self.first, &self.taken);
+    fn passing(&mut self, fits: impl Fn(usize) -> bool) -> Option<usize> {
+        let (first, taken) = (self.first, &self.taken);
         self.skipped.retain(|&i| !taken[i] && i != first);
-        if let Some(k) = self.skipped.iter().position(|&i| fits(on, i)) {
+        if let Some(k) = self.skipped.iter().position(|&i| fits(i)) {
             return Some(self.skipped.remove(k));
         }
         self.scan = self.scan.max(first + 1);
         while self.skipped.len() < PASSING && self.scan < taken.len() {
             let i = self.scan;
             self.scan += 1;
-            if fits(on, i) {
+            if fits(i) {
                 return Some(i);
             }
             self.skipped.push(i);
@@ -3362,58 +3364,64 @@ impl GateState {
     }
 }
 
-/// A leaf let in, until dropped.
-struct Admitted<'g>(&'g Gate<'g>, u64);
+/// A leaf let in, until dropped, and what it takes of the budget.
+struct Admitted<'g>(&'g Gate<'g>, Option<Taken<'g>>);
 
 impl<'w> Gate<'w> {
-    fn new(budget: u64, weights: &'w [u64], order: Vec<usize>) -> Self {
+    fn new(budget: Option<&'w Budget>, weights: &'w [u64], order: Vec<usize>) -> Self {
         let taken = vec![false; weights.len()];
-        let state = GateState { on: 0, taken, first: 0, skipped: Vec::new(), scan: 0, passed: 0 };
-        Gate { budget, weights, order, state: Mutex::new(state), changed: std::sync::Condvar::new() }
+        let state = GateState { taken, first: 0, skipped: Vec::new(), scan: 0, passed: 0 };
+        Gate { budget, weights, order, state: Mutex::new(state), on: AtomicUsize::new(0) }
     }
 
     /// Waits for a leaf to be let in, and gives its index: the first not let in yet if it fits,
-    /// alone or with those in within the budget, else one after it that does as it may pass.
+    /// alone (of this evaluation) or beside what the budget holds, else one after it that does as
+    /// it may pass.
     fn next(&self) -> (usize, Admitted<'_>) {
-        let mut s = self.state.lock().unwrap();
-        while s.taken.get(s.first) == Some(&true) {
-            s.first += 1;
-        }
-        let first = s.first;
-        if self.budget == u64::MAX {
-            s.taken[first] = true;
-            return (self.order[first], Admitted(self, 0));
-        }
-        let fits = |on: u64, i: usize| on == 0 || on.saturating_add(self.weights[self.order[i]]) <= self.budget;
-        loop {
-            let i = if fits(s.on, first) {
-                s.passed = 0;
-                Some(first)
-            } else if s.passed < self.budget {
-                s.passing(fits)
-            } else {
-                None
-            };
-            if let Some(i) = i {
-                let w = self.weights[self.order[i]];
-                s.taken[i] = true;
-                s.on += w;
-                if i != first {
-                    s.passed = s.passed.saturating_add(w);
-                }
-                return (self.order[i], Admitted(self, w));
+        let take = |s: &mut GateState| {
+            while s.taken.get(s.first) == Some(&true) {
+                s.first += 1;
             }
-            s = self.changed.wait(s).unwrap();
-        }
+        };
+        let Some(budget) = self.budget else {
+            let mut s = self.state.lock().unwrap();
+            take(&mut s);
+            let first = s.first;
+            s.taken[first] = true;
+            self.on.fetch_add(1, Relaxed);
+            return (self.order[first], Admitted(self, None));
+        };
+        let (i, t) = budget.wait(|room| {
+            let mut s = self.state.lock().unwrap();
+            take(&mut s);
+            let first = s.first;
+            let alone = self.on.load(Relaxed) == 0;
+            let fits = |i: usize| alone || room.fits(self.weights[self.order[i]]);
+            let i = if fits(first) {
+                s.passed = 0;
+                first
+            } else if s.passed < room.limit {
+                s.passing(fits)?
+            } else {
+                return None;
+            };
+            let w = self.weights[self.order[i]];
+            s.taken[i] = true;
+            if i != first {
+                s.passed = s.passed.saturating_add(w);
+            }
+            self.on.fetch_add(1, Relaxed);
+            Some((self.order[i], w))
+        });
+        (i, Admitted(self, Some(t)))
     }
 }
 
 impl Drop for Admitted<'_> {
     fn drop(&mut self) {
-        if self.0.budget != u64::MAX {
-            self.0.state.lock().unwrap().on -= self.1;
-            self.0.changed.notify_all();
-        }
+        // (before the budget is given back, which tells those waiting)
+        self.0.on.fetch_sub(1, Relaxed);
+        drop(self.1.take());
     }
 }
 
@@ -5655,8 +5663,9 @@ mod tests {
         });
         let natives = natives();
         let each = |budget: Option<u64>| {
+            let budget = budget.map(Budget::new);
             let mut a = open(&c, &natives).unwrap();
-            if let Some(b) = budget {
+            if let Some(b) = &budget {
                 a.set_budget(b);
             }
             let got = Mutex::new(Vec::new());
@@ -5674,6 +5683,41 @@ mod tests {
         for b in [1, 6, 1000] {
             assert_eq!(each(Some(b)), all, "{b}");
         }
+    }
+
+    /// With the budget held elsewhere (another archive's leaves, say), the leaves go one at a
+    /// time, but they go.
+    #[test]
+    fn budget_held() {
+        let leaf = [1, 0, 0, 0, SLICE, 0, 0, 3];
+        let c = archive(|out| {
+            for _ in 0..20 {
+                formula_block(out, 1, &always_compressed(&mut CCtx::create(), &[&leaf], 3, 1).unwrap());
+            }
+            content_block(out, false, &[b"xyz"], None);
+        });
+        let natives = natives();
+        let budget = Budget::new(1000);
+        let held = budget.take(1000);
+        let mut a = open(&c, &natives).unwrap();
+        a.set_budget(&budget);
+        let (on, most) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (o, m) = (on.clone(), most.clone());
+        a.on_progress(Some(Arc::new(move |s| match s {
+            Step::Started(_) => _ = m.fetch_max(o.fetch_add(1, Relaxed) + 1, Relaxed),
+            Step::Ended(_) => _ = o.fetch_sub(1, Relaxed),
+            _ => {}
+        })));
+        let n = AtomicUsize::new(0);
+        a.leaves(4, |_, o| {
+            assert_eq!(o, vec![b"xyz".to_vec()]);
+            n.fetch_add(1, Relaxed);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!((n.into_inner(), most.load(Relaxed)), (20, 1));
+        drop(held);
+        assert_eq!(budget.held(), 0);
     }
 
     /// `rev`, whose application of parameters 9 waits for the last leaf to start.
@@ -5717,8 +5761,9 @@ mod tests {
             let started = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
             let waits = WaitsForLast(started.clone());
             let natives = super::natives(&[REV], &waits);
+            let budget = Budget::new(2000);
             let mut a = open(&c, &natives).unwrap();
-            a.set_budget(2000);
+            a.set_budget(&budget);
             let last = leaves.len() - 1;
             a.on_progress(Some(Arc::new(move |s| {
                 if matches!(s, Step::Started(i) if i == last) {

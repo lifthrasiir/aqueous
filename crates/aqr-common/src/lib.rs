@@ -11,6 +11,7 @@
 //!   large-allocation probes, peak RSS.
 //! - [`rng`]: deterministic pseudo-random numbers and noise, for tests and benchmarks.
 //! - [`pool`]: the pool of threads every thread of the process runs on.
+//! - [`budget`]: the heap the work may take at once (`aqr -M`), and the system's memory.
 //! - [`progress`]: how far the work on data is, told by the parts of it done.
 //! - [`trace`]: what the threads are doing and the heap by what allocated it, sampled.
 //! - [`packed`]: packed byte sequences, a list of them as one.
@@ -24,6 +25,7 @@
 
 pub mod adler32;
 pub mod arith;
+pub mod budget;
 #[cfg(not(target_family = "wasm"))]
 pub mod cpu;
 pub mod crc32;

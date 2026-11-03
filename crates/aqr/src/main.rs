@@ -102,6 +102,12 @@
 //!   a few MiB each or less) with a dictionary trained for them where it pays.
 //! - `-T` is the number of threads (0, the default: as many as the machine has): the size of
 //!   the pool of threads that everything runs on ([`aqr_common::pool`]), this work itself too.
+//! - `-M` (`--memory`) is about the most heap the work takes at once ([`budget`]): the leaves
+//!   of an archive decoded (and of a batch decoded to check it) are let in as their weights fit
+//!   in it, but one at least. A size, `N%` of the system's memory, `avail` (most of what is
+//!   available as it starts), or 0 (no limit); 2 GB by default, at most half the system's. The
+//!   pages of files mapped (the inputs, the spill) are not counted: the system writes them out
+//!   or drops them, rather than swapping, as memory runs short.
 //! - `--stats` tells, after each archive made or decoded, what stands out of its files by kind
 //!   and of where the time went, sampled as it ran ([`stats`]); `--stats=FILE.json` writes all
 //!   of it as well, and `--stats=FILE.html` a page showing it (opened on a terminal). Either
@@ -229,6 +235,9 @@ Decompression:
 
 General:
   -T THREADS            threads to use (default 0: as many as the machine has)
+  -M, --memory MEM      about the most heap to take at once: a SIZE, N% of the
+                        system's memory, avail (most of what is available now), or 0
+                        (no limit); by default 2 GB, or half the system's if less
   -h, --help            show this help
   -V, --version         show the version
 
@@ -306,11 +315,6 @@ impl Pack {
         }
     }
 }
-
-/// The bytes of the leaves decoded at once ([`aqr::Archive::set_budget`]). On 10gb (10
-/// threads): 2.56 GB of peak footprint in 19.5 s, against 4.1–4.6 GB in 16.6–20.1 s without
-/// (as `enwik9` decodes alone first: `enwik9.zip` and the leaves after it wait for it).
-const DECODE_BUDGET: u64 = 2_000_000_000;
 
 #[global_allocator]
 static ALLOC: aqr_common::mem::Mapped = aqr_common::mem::Mapped;
@@ -399,6 +403,7 @@ fn parse() -> Result<Args, String> {
     let (mut stats, mut stats_to) = (false, Vec::new());
     let mut only_inputs = false;
     let mut format = None;
+    let mut memory = None;
     // (`-C`: the directory so far, by input the one it was given in, and the last given)
     let (mut dir, mut dirs, mut last_dir) = (PathBuf::new(), Vec::new(), None);
     while let Some(arg) = argv.next() {
@@ -441,6 +446,7 @@ fn parse() -> Result<Args, String> {
             "-q" | "--quiet" => a.quiet = true,
             "-v" | "--verbose" => a.verbose = true,
             "-T" => a.opt.threads = text(value("-T")?).parse().map_err(|_| "-T takes a number")?,
+            "-M" | "--memory" => memory = Some(text(value("-M")?)),
             "-l" => a.level = Some(text(value("-l")?)),
             "--format" => {
                 format = Some(match &*text(value("--format")?) {
@@ -482,6 +488,7 @@ fn parse() -> Result<Args, String> {
             }
             // -T8 and the like
             s if s.starts_with("-T") => a.opt.threads = s[2..].parse().map_err(|_| "-T takes a number")?,
+            s if s.starts_with("-M") => memory = Some(s[2..].to_string()),
             s if s.starts_with("-l") => a.level = Some(s[2..].to_string()),
             // -0 to -9, and whatever level of more digits there may be (one level, not several)
             s if s[1..].bytes().all(|b| b.is_ascii_digit()) => a.level = Some(s[1..].to_string()),
@@ -497,6 +504,8 @@ fn parse() -> Result<Args, String> {
     if a.opt.threads == 0 {
         a.opt.threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     }
+    let system = (aqr_common::budget::total(), aqr_common::budget::available());
+    aqr_common::budget::global().set_limit(budget(memory.as_deref(), system)?);
     if a.list {
         if a.rm {
             return Err("--rm with -L".into());
@@ -610,6 +619,40 @@ fn selection(paths: Vec<PathBuf>, renames: Vec<(usize, PathBuf)>) -> Result<extr
     }
     Ok(extract::Selection { paths: out })
 }
+
+/// Of `-M` (the system's total and available memory, where known), the bytes of the budget of
+/// the process ([`aqr_common::budget`]): by default [`aqr_common::budget::DEFAULT`], but at most
+/// half the system's memory; `avail` is [`AVAIL_SHARE`] of what is available, but at least
+/// [`AVAIL_FLOOR`] (or a quarter of the system's where less), as a budget smaller only has the
+/// work wait for it the more and what is available may be taken by the page cache that the
+/// archives and the spill are read through; `N%` the share of the system's memory; a size; 0
+/// none.
+fn budget(m: Option<&str>, (total, avail): (Option<u64>, Option<u64>)) -> Result<u64, String> {
+    let default = total.map_or(aqr_common::budget::DEFAULT, |t| aqr_common::budget::DEFAULT.min(t / 2));
+    match m {
+        None => Ok(default),
+        Some("avail") => {
+            let floor = total.map_or(AVAIL_FLOOR, |t| AVAIL_FLOOR.min(t / 4));
+            Ok(avail.map_or(default, |a| (a as f64 * AVAIL_SHARE) as u64).max(floor))
+        }
+        Some(p) if p.ends_with('%') => {
+            let n: f64 =
+                p[..p.len() - 1].parse().ok().filter(|n| *n > 0.0 && *n <= 100.0).ok_or("-M N% takes N of 0 to 100")?;
+            let t = total.ok_or("-M N%: the system's memory is not known")?;
+            Ok((t as f64 * n / 100.0) as u64)
+        }
+        Some(s) => match size_of(s).ok_or("-M takes a size (512M, 2G, ...), N% or avail")? {
+            0 => Ok(u64::MAX),
+            n => Ok(n as u64),
+        },
+    }
+}
+
+/// Of the memory available, the share that `-M avail` takes.
+const AVAIL_SHARE: f64 = 0.8;
+
+/// The least budget of `-M avail`.
+const AVAIL_FLOOR: u64 = 1 << 30;
 
 /// The bytes of size `s`: a number of bytes, or of KiB, MiB or GiB (`K`, `M`, `G`).
 fn size_of(s: &str) -> Option<usize> {
@@ -1952,7 +1995,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     }
     // (of a single file, the leaves all held for the file anyway)
     if archive.tree().is_some() {
-        archive.set_budget(DECODE_BUDGET);
+        archive.set_budget(aqr_common::budget::global());
     }
     // what is decoded of each content, for --stats (each leaf sampled as of its first content)
     let seen = stats::Seen::new(archive.contents_len().max(1), rec.is_some());
@@ -2200,6 +2243,27 @@ fn summary_d(input: &Path, out: Option<&Path>, files: usize, total: u64, start: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `-M`: by default 2 GB but at most half the system's; `avail` most of what is available,
+    /// but not too little; a share of the system's; a size; none.
+    #[test]
+    fn memory() {
+        const G: u64 = 1 << 30;
+        let (sys, unknown) = ((Some(16 * G), Some(10 * G)), (None, None));
+        assert_eq!(budget(None, sys), Ok(aqr_common::budget::DEFAULT));
+        assert_eq!(budget(None, (Some(2 * G), Some(G))), Ok(G));
+        assert_eq!(budget(None, unknown), Ok(aqr_common::budget::DEFAULT));
+        assert_eq!(budget(Some("avail"), sys), Ok(8 * G));
+        assert_eq!(budget(Some("avail"), (Some(16 * G), Some(G / 2))), Ok(G));
+        assert_eq!(budget(Some("avail"), (Some(2 * G), Some(0))), Ok(G / 2));
+        assert_eq!(budget(Some("avail"), unknown), Ok(aqr_common::budget::DEFAULT));
+        assert_eq!(budget(Some("25%"), sys), Ok(4 * G));
+        assert!(budget(Some("25%"), unknown).is_err());
+        assert!(budget(Some("0%"), sys).is_err() && budget(Some("101%"), sys).is_err());
+        assert_eq!(budget(Some("3G"), sys), Ok(3 * G));
+        assert_eq!(budget(Some("0"), sys), Ok(u64::MAX));
+        assert!(budget(Some("lots"), sys).is_err());
+    }
 
     /// An archive is compressed with a spill beside it, but an encrypted one with none: nothing
     /// of its contents written out as it is.
