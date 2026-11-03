@@ -689,8 +689,9 @@ pub struct Repaired {
     /// or its footer not to be trusted).
     pub footer: bool,
     /// The bytes lost, salvaging: before a block restored past the end (the archive cut short
-    /// before it), and the blocks of bytes not to be trusted ([`repair`]'s `erased`), now spacer
-    /// blocks (or non-leaf blocks that do not verify): the archive is to be salvaged
+    /// before it), the blocks of bytes not to be trusted ([`repair`]'s `erased`), now spacer
+    /// blocks (or non-leaf blocks that do not verify), and the blocks of a segment cut short
+    /// after the last metadata block whole, now cut off: the archive is to be salvaged
     /// ([`super::open_salvaging`]).
     pub lost: Vec<Range<usize>>,
 }
@@ -752,6 +753,9 @@ fn failing_non_leaf(out: &mut Vec<u8>, n: usize) {
 /// - Where the blocks no longer reach a footer at the end but are cut short after the last
 ///   metadata block (with only spacer blocks and blocks of non-critical types after it), the
 ///   footer made again after the last block whole (and the size hint block first, if any, set).
+///   Salvaging, also where blocks of a later segment come after it (cut short before that
+///   segment's metadata block): those blocks lost, cut off, and the footer made again after the
+///   metadata block.
 pub fn repair(a: &[u8], c: &Check, salvage: bool, erased: &[Range<usize>]) -> Option<Repaired> {
     // (read one after another up to a footer at the end, as all its blocks are as they are to be)
     if c.walked && erased.is_empty() && c.differing(a).next().is_none() {
@@ -861,15 +865,26 @@ pub fn repair(a: &[u8], c: &Check, salvage: bool, erased: &[Range<usize>]) -> Op
         let b = v.as_deref().unwrap_or(a);
         let (blocks, ended) = blocks(b);
         let last_meta = blocks.iter().rposition(|b| (0x10..=0x17).contains(&b.1));
-        let after_ok = |i: usize| blocks[i + 1..].iter().all(|b| b.1 <= 0x03 || !super::critical(b.1));
+        // (a block cut short at the end, of a critical type but a spacer block's or the footer's:
+        // a content block of a segment cut short)
+        let cut = blocks.last().map_or(HEADER_MAGIC.len(), |l| l.2.end + (l.2.end - l.0) % 2);
+        let mut p = cut;
+        let cut_content = varint::get(b, &mut p)
+            .is_ok_and(|ty| ty > 0x03 && super::critical(ty) && ty != FOOTER_TYPE && ty != OVERLAY_FOOTER_TYPE);
+        let after_ok = |i: usize| !cut_content && blocks[i + 1..].iter().all(|b| b.1 <= 0x03 || !super::critical(b.1));
+        // (salvaging, an archive cut short in a segment after the last metadata block whole: that
+        // segment's blocks lost, the footer made again after the metadata block)
         if ended == Ended::Cut
-            && let Some(i) = last_meta.filter(|&i| after_ok(i))
+            && let Some(i) = last_meta.filter(|&i| salvage || after_ok(i))
         {
             let meta = blocks[i].0;
-            let last = blocks.last().unwrap();
+            let last = if after_ok(i) { blocks.last().unwrap() } else { &blocks[i] };
             let e = last.2.end + (last.2.end - last.0) % 2;
             let first = blocks.first().filter(|f| f.1 == super::SIZE_HINT && f.2.len() == 10).map(|f| f.2.start);
             let b = v.get_or_insert_with(|| a.to_vec());
+            if b.len() > e && !after_ok(i) {
+                lost.push(e..b.len());
+            }
             // (its padding, where cut off, restored as a zero byte)
             b.resize(e, 0);
             let mut f = Vec::new();
@@ -1200,6 +1215,53 @@ mod tests {
             let got = got.into_inner().unwrap();
             assert_eq!(got[..2], [Some(want[0].clone()), Some(want[1].clone())], "{cut}");
             assert_eq!(got[2], None);
+        }
+    }
+
+    /// An archive of two segments (the first file's, then the others'), cut short in the second
+    /// before its metadata block: not repaired, but salvaged as the first segment alone (the
+    /// second's blocks lost, the footer made again after the first metadata block).
+    #[test]
+    fn salvages_segments() {
+        let mut f = Formula::default();
+        let lits: Vec<_> = (0..3).map(|k| f.push(NAMES[k], NAMES[k].as_bytes().to_vec())).collect();
+        let enc = Encoder::new(Level::Zstd(3));
+        let mut w = SegmentWriter::new();
+        let mut out = SegmentWriter::header().to_vec();
+        let (mut t, mut contents) = (Tree::default(), Vec::new());
+        let mut second = 0;
+        for (k, a) in lits.iter().enumerate() {
+            let len = NAMES[k].len() as u64;
+            let leaves =
+                vec![Leaf { outputs: vec![Node::apply(REV, vec![1, 2, 3], vec![a.clone()], len)], sums: vec![None] }];
+            let batch = w.batch(&enc, &f, &leaves).unwrap();
+            w.commit(&batch);
+            out.extend_from_slice(&batch.bytes);
+            contents.push(ContentAt { leaf: batch.leaf_at[0], output: 0, size: len });
+            let name = format!("f{k}").into_bytes();
+            t.entries.push(Entry {
+                parent: None,
+                name,
+                node: EntryNode::File(contents.len() - 1),
+                extra: Extra::default(),
+            });
+            if k == 0 {
+                out.extend_from_slice(&w.close(&enc, &t, &contents).unwrap());
+                second = out.len();
+                (t, contents) = (Tree::default(), Vec::new());
+            }
+        }
+        out.extend_from_slice(&w.finish(&enc, &t, &contents).unwrap().0);
+        let rev = |s: &str| s.bytes().rev().collect::<Vec<u8>>();
+        assert_eq!(files(&out), [rev(NAMES[0]), rev(NAMES[1]), rev(NAMES[2])]);
+        let metas = blocks(&out).0.iter().filter(|b| (0x10..=0x17).contains(&b.1)).count();
+        assert_eq!(metas, 2);
+        for cut in [second + 1, out.len() - 20] {
+            let d = &out[..cut];
+            assert!(repair(d, &check(d), false, &[]).is_none_or(|r| !r.footer));
+            let r = repair(d, &check(d), true, &[]).unwrap();
+            assert!(r.footer && r.lost.len() == 1 && r.lost[0] == (second..cut), "{cut}: {r:?}");
+            assert_eq!(files(&r.bytes), [rev(NAMES[0])]);
         }
     }
 

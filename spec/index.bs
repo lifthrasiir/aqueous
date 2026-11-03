@@ -3958,7 +3958,9 @@ To <dfn>reconstruct the footer</dfn> of a [=byte sequence=] |a| starting with a 
     2. If the reading reached a footer whose [=archive/footer_size=] tells that it ends at the end of |a| and that has no [=untrusted=] byte, return.
     3. If the reading stopped otherwise than by |a| ending or by reaching the start of a footer, return.
     4. Let |m| be the last block read that is a [[#metadata-block|metadata block]].
-        If there is none, or any block read after |m| is neither a [[#spacer-block|spacer block]] nor of a non-[=critical=] type, return.
+        If there is none, or any block read after |m| is neither a [[#spacer-block|spacer block]] nor of a non-[=critical=] type,
+        or the bytes after the last block read start with the shortest [=leb128=] encoding of a [=critical=] type
+        other than those of spacer blocks, [=FOOTER_TYPE=] and [=OVERLAY_FOOTER_TYPE=], return.
     5. Let |e| be the offset after the [=block/padding=] of the last block read (the [=block/block_end=] if it has none).
         Truncate |a| to |e| bytes, appending zero bytes if it is shorter.
     6. Append a footer with the footer magic [=match|matching=] the header magic of |a|,
@@ -3973,7 +3975,7 @@ To <dfn>reconstruct the footer</dfn> of a [=byte sequence=] |a| starting with a 
   with the mirror block of the last metadata block placed before the last blocks ([[#mirror-block]]),
   also an archive cut short within its last metadata block, which the earlier steps restore beyond the end of |a|.
   The footer is not reconstructed when a [=critical=] block other than a spacer block follows the last metadata block,
-  since every content block is followed by a metadata block describing it,
+  whole or cut short, since every content block is followed by a metadata block describing it,
   nor when no metadata block is read:
   an archive without a metadata block decompresses into the concatenation of its leaf blocks,
   and the archive of a single file cut short would otherwise decompress into a shorter file without any failure.
@@ -4021,6 +4023,10 @@ To <dfn>salvage an archive</dfn> |a|, a [=byte sequence=] as for [=repair an arc
 
         Before reconstructing the footer in the step 5, if any byte of |a| is still [=untrusted=],
         [=lose the untrusted blocks=] of |a|.
+        When [=reconstruct the footer|reconstructing the footer=] returns in its step 4
+        only because of blocks after |m| or a block cut short after the last block read,
+        the bytes from the end of |m| (after its [=block/padding=]) to the end of |a| are [=salvage/lost=]:
+        truncate |a| to the end of |m| and continue with its step 5.
     2. Interpret |a| as in [=interpret an archive=], with the following exceptions,
         each of which makes the files and forks concerned [=salvage/lost=] rather than |a| an invalid archive:
         * A file or a fork whose leaf block offset doesn't refer to a leaf block is lost.
@@ -4077,6 +4083,11 @@ and of the footer if one ends at the end of |a| and has no [=untrusted=] byte:
   so that the blocks before them and the metadata block restored after them are read by the generic structure,
   while the blocks that were in them are no longer there and their files are lost.
   A leaf block partly lost is lost as a whole, even without a checksum.
+  An archive cut short in a segment whose metadata block can't be restored is salvaged as the segments before it:
+  the blocks of that segment after the last metadata block whole are lost together.
+  An archive cut short just after a metadata block other than the last, however,
+  is repaired into the archive of the segments before the cut without anything lost being told,
+  as nothing after the metadata block remains to tell that more followed.
 </div>
 
 <div class=note>
