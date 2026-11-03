@@ -1892,8 +1892,15 @@ const ZSTD_JOB: u32 = 16 << 20;
 const LARGE_THREADS: usize = 4;
 
 /// Bytes of data above which it is compressed with long-distance matching, over a window of
-/// all of it up to [`WINDOW_LOG_MAX`].
-pub(crate) const LONG: usize = 8 << 20;
+/// all of it up to [`WINDOW_LOG_MAX`]. Below, the window is the level's own (at level 3, 2 MiB
+/// of most data), which misses what repeats from farther: at 8 MiB, of the files of an archive
+/// of Deskflow.app, the rests of its two programs (a stream of 8.3 MB that a stream class
+/// put together) archived to 3.07 MB, and to 2.28 MB with a window of all of it and
+/// long-distance matching. From 1 MiB on rather than 8 MiB, the applications of
+/// `docs/macos-app-todo.md` archive to 1088.91 -> 1080.60 MB (-0.76%; a window alone, without
+/// long-distance matching, 1085.29 MB) and 10gb to 2464.75 -> 2462.14 MB (-0.11%), the
+/// instructions retired 0.4% more.
+pub(crate) const LONG: usize = 1 << 20;
 
 /// The largest window, as a power of two, that every decoder takes (spec, "Zstandard
 /// compression method").
