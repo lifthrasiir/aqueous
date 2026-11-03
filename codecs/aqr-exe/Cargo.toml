@@ -33,3 +33,7 @@ path = "examples/bench-arm64.rs"
 [[example]]
 name = "aqr-exe-bench-remap"
 path = "examples/bench-remap.rs"
+
+[[example]]
+name = "aqr-exe-bench-delta"
+path = "examples/bench-delta.rs"
