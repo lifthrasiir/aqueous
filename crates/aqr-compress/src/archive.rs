@@ -124,8 +124,11 @@ pub struct Report {
     /// The contents coded against each other, a set each.
     pub sets: Vec<Vec<usize>>,
     /// Bytes of the archive but for the files': its header and footer, the module, resource,
-    /// dictionary and metadata blocks.
+    /// dictionary, metadata and mirror blocks.
     pub overhead: usize,
+    /// Bytes of the mirror blocks ([`Options::mirrors`]; and of the spacer blocks before them,
+    /// and of the footer as its offsets grew).
+    pub mirrors: usize,
     /// The contents kept raw because the archive did not give them back.
     pub unverified: Vec<usize>,
     /// Bytes of the archive, and of the contents read.
@@ -198,6 +201,11 @@ fn compress_tree_noting<S: Source + ?Sized>(
     notes: Notes,
     tell: &(dyn Fn(Event) + Sync),
 ) -> io::Result<Report> {
+    let mut mirroring = None;
+    let out: &mut dyn Write = match opt.mirrors {
+        true => mirroring.insert(aqr::Mirroring::new(out, opt.size_hint)),
+        false => out,
+    };
     let n = src.len();
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| sort_key(src.name(a)).cmp(&sort_key(src.name(b))).then(a.cmp(&b)));
@@ -268,7 +276,8 @@ fn compress_tree_noting<S: Source + ?Sized>(
     let enc = aqr::Encoder::with_threads(opt.level, opt.threads).with_modules(aqr_decompress::wasm_of);
     let (end, _) = w.finish(&enc, tree, &contents).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.0))?;
     out.write_all(&end)?;
-    r.len = w.len() + end.len();
+    r.mirrors = mirroring.map_or(0, |m| m.added() as usize);
+    r.len = w.len() + end.len() + r.mirrors;
     r.overhead = r.len - r.files.iter().map(|f| f.archived).sum::<f64>().round() as usize;
     r.unverified.sort_unstable();
     Ok(r)

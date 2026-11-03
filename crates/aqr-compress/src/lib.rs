@@ -210,6 +210,10 @@ pub struct Options {
     /// Begin the archive with a size hint block to be filled in, as the payload of an
     /// encrypted archive has to ([`aqr::envelope::Sealer`], which fills it in).
     pub size_hint: bool,
+    /// Give the archive a mirror block of each block whose damage would lose more than a file
+    /// (spec, "Mirror block"; [`aqr::Mirroring`]), for it to be repaired: as far from it as an
+    /// encrypted archive's payload asks where [`Options::size_hint`] (which it has to have).
+    pub mirrors: bool,
     /// Of an archive of several files: the most bytes of the files of a set coded against each
     /// other, which a file of it read alone has to decode.
     pub set_bytes: usize,
@@ -300,6 +304,7 @@ impl Default for Options {
             block: 16 << 20,
             dictionaries: false,
             size_hint: false,
+            mirrors: false,
             set_bytes: 64 << 20,
             batch: 512 << 20,
             spill: None,
@@ -688,6 +693,18 @@ impl Sink for std::fs::File {
     }
 }
 
+/// An archive given mirror blocks as it is written to a sink.
+impl<S: Sink + ?Sized> Sink for aqr::Mirroring<&mut S> {
+    fn written(&mut self) -> io::Result<Box<dyn Deref<Target = [u8]> + '_>> {
+        self.get_mut().written()
+    }
+
+    fn restart(&mut self) -> io::Result<()> {
+        aqr::Mirroring::restart(self);
+        self.get_mut().restart()
+    }
+}
+
 /// An encrypted archive being written to a file, read back decrypted (into memory not backed
 /// by a file, so that nothing decrypted is written out).
 impl<F: Write + io::Seek + std::borrow::Borrow<std::fs::File>> Sink for aqr::envelope::Sealer<F> {
@@ -789,6 +806,11 @@ fn finish(
     out: &mut dyn Sink,
 ) -> io::Result<(usize, Option<Formula>)> {
     use progress::Note;
+    let mut mirroring = None;
+    let out: &mut dyn Sink = match opt.mirrors {
+        true => mirroring.insert(aqr::Mirroring::new(out, opt.size_hint)),
+        false => out,
+    };
     memory::declare(&mut f, &Native { threads: opt.threads }, &memo.1);
     // the streams of a class together, as they compress smaller: as pieces of the streams, not
     // copied, their blocks compressed as they are written; then the sink's
@@ -833,8 +855,8 @@ fn finish(
         notes.inspect(|n| n.send(Note::Verified(0, d.len() as u64)));
         decodes
     };
-    match n {
-        Ok(n) if !opt.verify || decodes(&out.written()?) => Ok((n, f)),
+    let r = match n {
+        Ok(n) if !opt.verify || decodes(&out.written()?) => (n, f),
         // a leaf of other bytes than `d` is not encoded with its checksum
         _ => {
             out.restart()?;
@@ -842,9 +864,10 @@ fn finish(
             let mut raw = Formula::raw("raw", Vec::new());
             raw.root = Node::slice(0, 0, d.len() as u64);
             let n = written(out, |w| cx.enc.encode_pieces_to(&raw, &[vec![d]], sum, w))?;
-            Ok((n.expect("a stream of the whole"), kept.then(|| Formula::raw("raw", d.to_vec()))))
+            (n.expect("a stream of the whole"), kept.then(|| Formula::raw("raw", d.to_vec())))
         }
-    }
+    };
+    Ok((r.0 + mirroring.map_or(0, |m| m.added() as usize), r.1))
 }
 
 /// What `write` writes to `out` (through a buffer), flushed.
@@ -3042,6 +3065,61 @@ mod tests {
         assert!(a.report.files.iter().all(|f| f.modules.iter().any(|m| m.name == "wrt-recons")), "{:?}", a.report);
         assert!(a.report.unverified.is_empty());
         assert_eq!(TEXTS.lock().unwrap().iter().filter(|&&n| n == t.len()).count(), 1);
+    }
+
+    /// With [`Options::mirrors`], every block whose damage would lose more than a file has a
+    /// mirror block, an archive of a single file and of a tree alike, and gives its files back
+    /// (with a block damaged and restored too).
+    #[test]
+    fn mirrors() {
+        let mut z = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(6));
+        std::io::Write::write_all(&mut z, &unruled(100_000)).unwrap();
+        let gz = z.finish().unwrap();
+        // (recompressed however small: a module block and a formula block)
+        let opt = Options { threads: 2, mirrors: true, smaller: false, ..Options::default() };
+        let checked = |c: &[u8]| {
+            let m = aqr::mirror::check(c);
+            assert!(m.walked && m.broken == 0 && m.near(false) == 0, "{m:?}");
+            assert!(m.targets.len() >= 2 && m.unmirrored() == 0);
+            assert_eq!(m.differing(c).count(), 0);
+            m
+        };
+        let single = compress(&gz, &opt);
+        assert!(single.len() > compress(&gz, &Options { mirrors: false, ..opt.clone() }).len());
+        checked(&single);
+        assert_eq!(aqr_decompress::decompress(&single, 2).unwrap(), gz);
+
+        let text = unruled(50_000);
+        let tree = aqr::Tree {
+            entries: ["a.gz", "b.txt"]
+                .iter()
+                .enumerate()
+                .map(|(c, name)| aqr::Entry {
+                    parent: None,
+                    name: name.as_bytes().to_vec(),
+                    node: aqr::EntryNode::File(c),
+                    extra: Default::default(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let inputs = [Input { name: b"a.gz", data: &gz }, Input { name: b"b.txt", data: &text }];
+        let a = compress_tree(&tree, &inputs, &opt);
+        assert_eq!(a.report.len, a.archive.len());
+        assert!(a.report.mirrors > 0);
+        let m = checked(&a.archive);
+        let files = |c: &[u8]| match aqr_decompress::decompress_value(c, 2).unwrap() {
+            aqr::Value::Tree(_, files) => files,
+            aqr::Value::File(_) => panic!("a tree"),
+        };
+        assert_eq!(files(&a.archive), [gz.clone(), text.clone()]);
+        let mut d = a.archive.clone();
+        let meta = m.mirrors.last().unwrap();
+        d[meta.target_end() - 1] ^= 0x10;
+        assert!(aqr_decompress::decompress_value(&d, 2).is_err());
+        let cd = aqr::mirror::check(&d);
+        assert_eq!(aqr::mirror::repair(&mut d, &cd), 1);
+        assert_eq!(d, a.archive);
     }
 
     /// Of a text coded once for two, the formula kept is not evaluated beforehand again; nor is
