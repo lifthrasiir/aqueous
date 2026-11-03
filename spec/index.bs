@@ -3568,7 +3568,8 @@ An archive conforms to the <dfn>archival profile</dfn> when the content of every
 * The archive is a [=standalone archive=].
 * No block is a [=shorthand block=] ([[#registered-blocks]]).
 
-A conforming compressor producing an archive for long-term preservation SHOULD conform to the archival profile.
+A conforming compressor producing an archive for long-term preservation SHOULD conform to the archival profile,
+and SHOULD make it a [=mirrored archive=].
 A tool verifying an archive SHOULD report whether it conforms to the archival profile.
 
 <div class=note>
@@ -3790,26 +3791,100 @@ conforming compressors SHOULD place a mirror block and its target block in an en
 so that at least one entire encrypted chunk lies between them.
 
 <div class=note>
-  Dictionary, module and formula blocks typically occur early in their segments,
-  so their mirror blocks can be placed near the end of the segment.
-  A metadata block, on the other hand, only becomes available at the end of its segment,
-  so its mirror block can be placed after a sufficient amount of the next segment has been written.
+  A compressor writing an archive from its start can keep a copy of each block to be mirrored
+  and write all the mirror blocks after the last metadata block, in the order of their target blocks.
+  The mirror block of a block is then as far from it as the blocks after it and the mirror blocks before its own,
+  and the mirror block of the last metadata block, written last, is as far from it as all the other mirror blocks.
+  A spacer block before a mirror block nearer than 4096 bytes makes up the rest.
+  Nothing before the mirror blocks changes, so that the offsets in metadata and formula blocks stay as they are,
+  and only the footer is written again, with [=archive/size_hint=] and [=archive/metadata_backward_offset=] moved past them.
+  The copies are held until the end, about as many bytes as the blocks mirrored.
+
+  In an archive of several segments, a metadata block only becomes available at the end of its segment,
+  so its mirror block can instead be placed after a sufficient amount of the next segment has been written.
   The mirror block of the last metadata block can't be distant from it unless the compressor delays the last segment,
   and closing segments periodically bounds the loss in that case.
 </div>
+
+<h3 id=mirrored-archives>
+Mirrored archives</h3>
+
+An archive is a <dfn>mirrored archive</dfn> when every block whose damage affects more than a single [=parcel=] can be restored:
+
+* Every block of a [=mirror/target type=] listed in [[#mirror-block]] is equal to an [=mirror/intact=] mirror block,
+    i.e. its bytes from its [=block/block_start=] to its [=block/block_end=] are as that mirror block requires.
+* For each such block, at least one of those mirror blocks starts 4096 bytes or more after the [=block/block_end=] of the block,
+    or in an [[#encrypted-archive|encrypted archive]], has at least one entire encrypted chunk between them.
+* An encrypted archive is [=envelope/mirrored=].
+
+A tool verifying an archive SHOULD report whether it is mirrored,
+and SHOULD report the blocks that have no [=mirror/intact=] mirror block,
+whose mirror blocks are all nearer than above,
+and that differ from an intact mirror block.
+
+<div class=note>
+  Being mirrored is a property separate from the [=archival profile=].
+  The archival profile is about detecting damage and is determined from block types and formula blocks,
+  while being mirrored is about restoring blocks and is determined by comparing mirror blocks with their target blocks.
+  An archive may also be protected by redundancy outside it, e.g. a file system or a separate recovery file,
+  where the archival profile still matters but mirror blocks don't.
+</div>
+
+<div class=note>
+  The distance of 4 MiB recommended in [[#mirror-block]] is not a condition,
+  since an archive smaller than that can't satisfy it.
+  The mirror block of the last metadata block is the nearest one when the mirror blocks are placed as described above,
+  and is still 4096 bytes away from it.
+</div>
+
+Issue: In an encrypted archive, a compressor has nothing to place between a block and its mirror block
+to keep them a chunk apart when nothing else is there, because a spacer block is not allowed in the payload,
+so that a small encrypted archive can't be mirrored (`docs/recovery-design.md` §5.5).
 
 
 <h3 id=repair>
 Repair</h3>
 
+Restoring damaged blocks from mirror blocks is a process separate from [=interpret an archive|interpreting an archive=]:
+it takes a damaged [=byte sequence=] and returns a byte sequence that is then interpreted as any archive is.
+A decompressor MAY [=repair an archive=] before interpreting it, and SHOULD report the blocks it restored.
+
+To <dfn>repair an archive</dfn> |a|, a [=byte sequence=] holding an unencrypted archive or the decrypted payload of an encrypted archive
+from its [=archive/header_magic=] on:
+
+<ol class=algorithm>
+    1. Let |start| be 6 if |a| starts with [=const/HEADER_MAGIC=] or [=const/OVERLAY_HEADER_MAGIC=], and null otherwise.
+    2. Let |found| be the list of mirror blocks found by scanning |a| for [=const/MIRROR_MAGIC=] and [=const/OVERLAY_MIRROR_MAGIC=]
+        as described in [[#mirror-block]], in the order of their [=block/block_start=],
+        that are [=mirror/intact=] when [=archive/archive_start=] is taken as their [=block/block_start=] minus [=mirror/archive_offset=].
+    3. If |start| is null, set |start| to the smallest [=block/block_start=] minus [=mirror/archive_offset=] of |found|.
+        Remove from |found| every mirror block whose [=block/block_start=] minus [=mirror/archive_offset=] isn't |start|.
+    4. For each [=mirror/target block=] position |t| of the mirror blocks of |found|, in the order of |found|:
+        1. Let |restored| be the bytes that the first mirror block of |found| for |t| requires of its target block.
+        2. If the bytes of |a| from |t| are those required by any mirror block of |found| for |t|, or |a| is shorter than |t| + the length of |restored|,
+            continue.
+        3. Replace the bytes of |a| from |t| with |restored|,
+            and the following byte with 0 if the length of |restored| is odd and |a| has a following byte.
+    5. Return |a|.
+</ol>
+
 <div class=note>
-  Restoring damaged blocks from mirror blocks is a process separate from [=interpret an archive|interpreting an archive=]:
-  it takes a damaged byte sequence and replaces each target block whose bytes differ from an [=mirror/intact=] mirror block
-  with the bytes reconstructed from the mirror block,
-  locating the target block with [=mirror/target_offset=] alone.
+  A decompressor can find the same mirror blocks more cheaply by reading the blocks of |a| one after another by the generic structure
+  ([[#block]]) when that reaches a footer ending at the end of |a|,
+  taking the blocks of mirror block types that are [=mirror/intact=].
+  The two differ only when the data of another block holds an intact mirror block of the same archive verbatim at the same position,
+  which a compressor never writes.
+  A damaged [=block/size=] field usually makes the reading fail to reach the footer,
+  and a mirror block in the data of another block is then found only by scanning.
 </div>
 
-Issue: The repair process is to be specified in this section (`docs/recovery-design.md` §5.6).
+<div class=note>
+  The header magic and the footer are not restored by mirror blocks:
+  the header magic is a constant, and the footer can be reconstructed by reading the blocks.
+</div>
+
+Issue: Reconstructing the header magic and the footer, and extracting what can be read where blocks remain damaged,
+are to be specified with the repair process (`docs/recovery-design.md` §5.6).
 
 Issue: Repairing an encrypted archive with mirror blocks or mirrored headers requires decrypting
 the encrypted chunks after one that fails to authenticate, which a standard age implementation doesn't do.

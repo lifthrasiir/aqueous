@@ -189,11 +189,17 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 
 #### 배치
 
-명세 §Mirror block에 반영했다(E1, E2의 거리 SHOULD와 블록 종류별 배치 요령). 거리 D의 값은 명세에서도 잠정이다. 근거는 다음과 같다.
+명세 §Mirror block에 반영했다(E1, E2의 거리 SHOULD와 배치 요령). 거리 D의 값은 명세에서도 잠정이다. 근거는 다음과 같다.
 
 길이 L인 버스트는, 원본과 사본의 거리 D가 L보다 짧을 때만 둘을 함께 지운다.
 
 - **E3:** 거리를 고정값이 아니라 아카이브 크기의 비율로 잡으면 노려볼 수 있다. 다만 append 구조와 충돌하기 쉬우므로 best-effort로 둔다.
+
+`aqr -A`(`aqr::Mirroring`)는 모든 mirror를 마지막 metadata 뒤에 원본 순서대로 모은다(명세의 배치 노트).
+
+> segment가 하나뿐인 지금은 마지막 metadata의 mirror가 어차피 꼬리에 와야 하므로, 다른 mirror를 그 사이에 두어 거리를 채우는 것이 가장 싸다. footer 앞의 바이트를 하나도 바꾸지 않으므로 출력 어댑터로 구현되고, 단일 파일 아카이브에도 그대로 쓰인다. 대가는 사본을 끝까지 들고 있는 메모리(중요 블록 크기만큼)와, 꼬리 하나에 몰린 mirror들이다. 꼬리 손상은 mirror만 잃고 원본은 남으므로 단일 손상에는 문제가 없다. 다중 segment가 되면 segment마다 다음 segment 안쪽으로 미루는 방식(§5.1)으로 바꾼다.
+>
+> 측정(cloud VM): 156 KB gzip과 그 원문 617 KB의 디렉토리에서 183,467 → 267,810 B. 늘어난 84 KB는 거의 module block 두 개의 사본이다. 작은 아카이브는 module 크기만큼을 한 번 더 낸다(M1).
 
 #### 찾기
 
@@ -386,7 +392,8 @@ repair의 입력은 바이트열이 아니라, 위치마다 다음 상태 중 �
 
 - [x] **S1.** "무시해도 되는 블록" 범주를 정의한다(§7의 4번). (non-critical 타입으로 정했다. spacer는 0으로 채워진 구멍이 spacer 블록으로 파싱되도록 00–03에 그대로 둔다.)
 - [x] **S2.** mirror block 절을 추가한다. 구조와 배치 SHOULD를 포함한다. (`MIRROR_MAGIC` 값 확정, `archive_offset` 추가함)
-- [ ] **S3.** 해석과 분리된 "Repair" 절을 추가한다(§4의 1번, §5.6). 암호화 아카이브의 복호 단계와 ⊥가 남은 경우의 salvage를 포함한다(§7의 7번).
+- [ ] **S3.** 해석과 분리된 "Repair" 절을 추가한다(§4의 1번, §5.6). 암호화 아카이브의 복호 단계와 ⊥가 남은 경우의 salvage를 포함한다(§7의 7번). (비암호화 아카이브의 mirror 복원 절차는 명세 §Repair에 넣었다. header magic과 footer 재구성, 암호화 아카이브의 복호, salvage가 남았다.)
+- [x] **S8.** "mirrored archive" 정의와 검증 도구의 보고 SHOULD를 추가한다(명세 §Mirrored archives). archival profile과는 별개의 속성으로 두었다. 작은 암호화 아카이브는 payload에 spacer를 둘 수 없어 거리 조건을 못 지킨다(명세의 Issue, 미정).
 - [ ] **S4.** 비규범 노트를 추가한다. 내용은 오류 모델 요약, E5가 범위 밖이라는 점, segment 주기 권고, checksum 있는 블록 타입을 기본값으로 쓰라는 권고이다.
 - [ ] **S5.** 명세 §Block types의 표에 mirror 타입(반영함)과, §5.4를 진행하면 recovery 타입(B0–B7 등 non-critical)을 반영한다.
 - [ ] **S6.** (§5.4를 진행할 경우) recovery block 절과 부호의 완전한 정의를 추가한다.
@@ -395,8 +402,8 @@ repair의 입력은 바이트열이 아니라, 위치마다 다음 상태 중 �
 ### 구현 (I)
 
 - [ ] **I1.** E1–E4를 재현하는 fault injection 하네스를 만든다. 오류 모델을 그대로 시험 생성기로 옮기는 것이다. 4 KiB 정렬 단위 손상, 버스트, 0 채움, truncation을 다루고, 손상 위치는 무작위와 "중요 구조 조준" 두 방식으로 둔다.
-- [ ] **I2.** compressor에 mirror block 생성과 segment 주기 옵션을 넣는다.
-- [ ] **I3.** repair 도구를 만든다. 스캔, mirror 복원, footer 재구성, salvage 추출을 포함한다.
-- [ ] **I4.** `verify` 명령을 만든다. checksum, mirror와 원본의 일치, slice 해시를 모두 검사한다.
+- [ ] **I2.** compressor에 mirror block 생성과 segment 주기 옵션을 넣는다. (mirror는 `aqr -A`로 넣었다. segment 주기는 디코더의 다중 segment 지원이 먼저다.)
+- [ ] **I3.** repair 도구를 만든다. 스캔, mirror 복원, footer 재구성, salvage 추출을 포함한다. (`aqr -d`/`-t`가 mirror와 다른 블록을 메모리에서 복원한다. 파일로 쓰는 명령, footer 재구성, salvage, 암호화 아카이브는 남았다.)
+- [ ] **I4.** `verify` 명령을 만든다. checksum, mirror와 원본의 일치, slice 해시를 모두 검사한다. (`aqr -t`가 archival profile과 mirrored archive 여부를 보고한다.)
 - [ ] **I5.** I1로 "손상된 바이트가 속한 parcel만 잃는다"는 목표를 E1과 E2(D 이상 아카이브)에 대해 검증한다.
 - [ ] **I6.** (선택) §5.4의 recovery set을 구현하고, I1로 L ≤ r·R − S 한계를 검증한다.
