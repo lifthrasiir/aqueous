@@ -148,6 +148,38 @@ fn stored_together() {
     assert!(ns.iter().any(|n| matches!(n, &aqr_formula::Node::Slice { start: 0, len: 5800, .. })));
 }
 
+/// The formula of a WIM file whose bytes are shared: each application's data made again where
+/// needed (not held), runs of resources of no compression the file's bytes; made, the same
+/// streams as of the file not shared.
+#[test]
+fn shared_made_again() {
+    for twice in [false, true] {
+        let d = wim_with(twice, 2);
+        let shared = aqr_formula::Bytes::shared(std::sync::Arc::new(d.clone()));
+        let mut f = formula::encode_shared(&shared, 2).unwrap();
+        assert!(f.streams.iter().any(|s| s.data.is_lazy()));
+        assert!(f.streams.iter().filter(|s| s.class == "raw" && !s.data.is_lazy()).all(|s| s.data.is_shared()));
+        f.streams.iter_mut().for_each(|s| s.data = s.data.made());
+        assert!(f == formula::encode(&d, 2).unwrap());
+        assert!(eval(&f) == d);
+    }
+}
+
+/// Writes `tests/data/lzx.wim`, [`wim`] of the chunks once, for others' tests (aqr-compress's):
+/// `cargo rt -p aqr-wim --test formula -- --ignored fixture`.
+#[test]
+#[ignore]
+fn fixture() {
+    std::fs::write(format!("{}/tests/data/lzx.wim", env!("CARGO_MANIFEST_DIR")), wim(false)).unwrap();
+}
+
+/// The fixture is of the chunks as [`wim`] makes it now.
+#[test]
+fn fixture_as_made() {
+    let d = std::fs::read(format!("{}/tests/data/lzx.wim", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    assert!(d == wim(false));
+}
+
 #[test]
 fn not_a_wim() {
     assert!(formula::encode(b"MSWIM\0\0\0", 1).is_none());

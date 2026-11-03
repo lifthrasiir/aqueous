@@ -957,6 +957,24 @@ pub fn data_len(chunks: &[(&[u8], usize)]) -> usize {
 /// [`split`] with the data written into `data` (of [`data_len`] bytes), as where a container
 /// holds it all: the record, and its cost by what it codes.
 pub fn split_into(chunks: &[(&[u8], usize)], data: &mut [u8]) -> Result<(Vec<u8>, [f64; CATS])> {
+    let parses = read_into(chunks, data)?;
+    let mut enc = Enc::with(ArithEncoder::new(Vec::new()));
+    let mut w = Walker::new(lzx::WIM);
+    for (raw, p) in data.chunks(CHUNK).zip(&parses) {
+        w.chunk(&mut enc, raw, Some(p), None)?;
+    }
+    Ok((enc.c.finish(), enc.cost))
+}
+
+/// The data of a stream of chunks written into `data` (of [`data_len`] bytes), as [`split_into`]
+/// writes it, without the record: the stream's data made again where it was not kept.
+pub fn data_into(chunks: &[(&[u8], usize)], data: &mut [u8]) -> Result<()> {
+    read_into(chunks, data).map(drop)
+}
+
+/// The data of a stream of chunks written into `data`, and the parse of each chunk (none for
+/// one stored).
+fn read_into(chunks: &[(&[u8], usize)], data: &mut [u8]) -> Result<Vec<Option<lzx::Parse>>> {
     if data.len() != data_len(chunks) {
         return Err(Error("data of another length"));
     }
@@ -978,12 +996,7 @@ pub fn split_into(chunks: &[(&[u8], usize)], data: &mut [u8]) -> Result<(Vec<u8>
         lzx::e8_decode(out);
         parses.push(Some(p));
     }
-    let mut enc = Enc::with(ArithEncoder::new(Vec::new()));
-    let mut w = Walker::new(lzx::WIM);
-    for (raw, p) in data.chunks(CHUNK).zip(&parses) {
-        w.chunk(&mut enc, raw, Some(p), None)?;
-    }
-    Ok((enc.c.finish(), enc.cost))
+    Ok(parses)
 }
 
 /// The stream that `data` and `record` rebuild.
