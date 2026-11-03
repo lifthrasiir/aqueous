@@ -81,7 +81,9 @@ fn output_in_place_kept() {
     fs::write(d.join("d/a"), b"a").unwrap();
     fs::write(d.join("d/x.aqr"), b"old").unwrap();
     let (ok, err) = aqr_in(&d, &["-f", "--rm", "-o", "d/x.aqr", "d"]);
-    assert!(!ok && err.contains("kept d/x.aqr (changed since it was read)"), "{err}");
+    // (the path as found under `d`, of the system's separator)
+    let kept = format!("kept {} (changed since it was read)", Path::new("d").join("x.aqr").display());
+    assert!(!ok && err.contains(&kept), "{err}");
     assert_eq!(listing(&d).len(), 2);
     assert!(listing(&d)[1].starts_with("d/x.aqr=") && fs::read(d.join("d/x.aqr")).unwrap() != b"old");
     fs::rename(d.join("d/x.aqr"), d.join("x.aqr")).unwrap();
