@@ -3631,7 +3631,7 @@ Therefore a mirror block is either:
 
 The [=mirror/target block=] MUST be of the <dfn for=mirror>target type</dfn>,
 which MUST be a block type listed above for the mirror block's [=block/type=].
-Whether a mirror block is widened is signalled by [=mirror/target_offset=].
+Whether a mirror block is widened is signalled by [=mirror/archive_offset=].
 
 <div class=note>
   For example, a mirror block of type C13<sub>16</sub> mirrors a metadata block of type 13<sub>16</sub>,
@@ -3656,10 +3656,10 @@ Its data consists of the following:
       <td>[=u8=][8] ∈ {[=const/MIRROR_MAGIC=], [=const/OVERLAY_MIRROR_MAGIC=]}
     <tr>
       <td><dfn>archive_offset</dfn>
-      <td>[=leb128=] = [=block/block_start=] - [=archive/archive_start=]
+      <td>[=leb128=]
     <tr>
       <td><dfn>target_offset</dfn>
-      <td>[=leb128=] ≠ 0
+      <td>[=leb128=]
     <tr>
       <td><dfn>target_data</dfn>
       <td>[=u8=][*]
@@ -3676,7 +3676,10 @@ Its data consists of the following:
 when the surrounding structure, such as the header, the footer or the metadata chain, is damaged.
 It MUST be [=const/OVERLAY_MIRROR_MAGIC=] in an [=overlay archive=] and [=const/MIRROR_MAGIC=] otherwise.
 
-[=mirror/archive_offset=] is the offset from [=archive/archive_start=] to the [=block/block_start=] of the mirror block.
+[=mirror/archive_offset=] is the offset from [=archive/archive_start=] to the [=block/block_start=] of the mirror block,
+plus 1 if the mirror block is [=mirror/widened=].
+Since the offset of every block from [=archive/archive_start=] is even, [=mirror/archive_offset=] % 2 tells whether the mirror block is widened,
+and [=mirror/archive_offset=] − ([=mirror/archive_offset=] % 2) is the offset itself.
 
 <div class=note>
   [=mirror/archive_offset=] distinguishes mirror blocks of this archive from those of another archive stored inside it,
@@ -3685,12 +3688,15 @@ It MUST be [=const/OVERLAY_MIRROR_MAGIC=] in an [=overlay archive=] and [=const/
   for example when the inner archive is split into multiple blocks.
   Since the inner archive is stored after [=archive/archive_start=] of this archive,
   the start of the archive implied by its [=mirror/archive_offset=] is always greater.
+  The widened bit is kept in [=mirror/archive_offset=], which is read only to tell such archives apart,
+  so that [=mirror/target_offset=] has its own bit for the direction below.
 </div>
 
-[=mirror/target_offset=] is the offset from the [=block/block_start=] of the [=mirror/target block=]
-to the [=block/block_start=] of the mirror block, plus 1 if the mirror block is [=mirror/widened=].
-Since the offset between any two blocks is even, [=mirror/target_offset=] % 2 tells whether the mirror block is widened.
-The target block always precedes the mirror block.
+[=mirror/target_offset=] is the distance between the [=block/block_start=] of the [=mirror/target block=]
+and the [=block/block_start=] of the mirror block, plus 1 if the target block follows the mirror block.
+Since the distance between any two blocks is even and not 0,
+[=mirror/target_offset=] % 2 tells which of the two comes first, and [=mirror/target_offset=] is at least 2.
+The target block either precedes or follows the mirror block, and the two MUST NOT overlap.
 
 [=mirror/target_data=] is a copy of the [=block/data=] of the target block.
 The bytes of the target block, from its [=block/block_start=] to its [=block/block_end=],
@@ -3743,7 +3749,8 @@ A mirror block SHOULD be [=mirror/unwidened=] unless its [=block/data=] doesn't 
   and try each of four possible widths of the [=block/size=] field preceding it.
   The candidate is correct when the 2 bytes before the [=block/size=] field encode a mirror block type with the matching width
   and [=mirror/mirror_checksum=] verifies.
-  The candidate is then discarded unless its [=block/block_start=] minus [=mirror/archive_offset=]
+  The candidate is then discarded unless the start of the archive it implies,
+  its [=block/block_start=] minus the offset given by [=mirror/archive_offset=],
   equals [=archive/archive_start=], because it belongs to another archive stored inside this archive otherwise.
   If [=archive/archive_start=] can't be determined from [=archive/header_magic=] or [=archive/size_hint=],
   the smallest value implied by verified candidates can be used instead.
@@ -3757,7 +3764,7 @@ A mirror block SHOULD be [=mirror/unwidened=] unless its [=block/data=] doesn't 
 </div>
 
 A mirror block doesn't belong to any [=segment=] and MAY occur anywhere in [=archive/blocks=],
-including after the last metadata block, subject only to the requirement that its target block precedes it.
+before or after its target block, including after the last metadata block.
 A single target block MAY have multiple mirror blocks.
 The requirements on a mirror block in this section are requirements on conforming compressors,
 and a mirror block violating them doesn't make the archive an [=invalid archive=].
@@ -3776,7 +3783,8 @@ and SHOULD report a mirror block that is not intact or differs from its intact t
 </div>
 
 A mirror block and its target block are expected to be damaged together when they are close to each other.
-Conforming compressors SHOULD separate the end of the target block and the [=block/block_start=] of its mirror block
+Conforming compressors SHOULD separate a mirror block and its target block,
+from the [=block/block_end=] of the earlier one to the [=block/block_start=] of the later one,
 by at least 4096 bytes, so that they never share an aligned 4 KiB unit of the underlying storage,
 and SHOULD separate them by at least 4 MiB (4,194,304 bytes) when possible.
 
@@ -3800,6 +3808,18 @@ so that at least one entire encrypted chunk lies between them.
   and only the footer is written again, with [=archive/size_hint=] and [=archive/metadata_backward_offset=] moved past them.
   The copies are held until the end, about as many bytes as the blocks mirrored.
 
+  A truncation of the archive, however, removes the last metadata block together with all the mirror blocks after it.
+  The compressor can instead hold back the blocks written in the last 4 MiB or more before the last metadata block,
+  and write the mirror block of the last metadata block before them,
+  so that a truncation shorter than them leaves the mirror block and the metadata block can be restored ([[#repair]]).
+  The relative offsets in the metadata block to the blocks before its mirror block, and [=meta/previous_metadata_offset=],
+  then count the mirror block, whose length depends on the metadata block:
+  the compressor encodes the metadata block for a room of a given length for its mirror block,
+  and encodes it again with a longer room until the mirror block fits,
+  filling the rest of the room with a spacer block.
+  Holding back the blocks costs the memory of at least 4 MiB of them,
+  and more when the last ones held back are longer.
+
   In an archive of several segments, a metadata block only becomes available at the end of its segment,
   so its mirror block can instead be placed after a sufficient amount of the next segment has been written.
   The mirror block of the last metadata block can't be distant from it unless the compressor delays the last segment,
@@ -3813,7 +3833,8 @@ An archive is a <dfn>mirrored archive</dfn> when every block whose damage affect
 
 * Every block of a [=mirror/target type=] listed in [[#mirror-block]] is equal to an [=mirror/intact=] mirror block,
     i.e. its bytes from its [=block/block_start=] to its [=block/block_end=] are as that mirror block requires.
-* For each such block, at least one of those mirror blocks starts 4096 bytes or more after the [=block/block_end=] of the block,
+* For each such block, at least one of those mirror blocks is separated from it by 4096 bytes or more
+    as described in [[#mirror-block]],
     or in an [[#encrypted-archive|encrypted archive]], has at least one entire encrypted chunk between them.
 * An encrypted archive is [=envelope/mirrored=].
 
@@ -3833,13 +3854,16 @@ and that differ from an intact mirror block.
 <div class=note>
   The distance of 4 MiB recommended in [[#mirror-block]] is not a condition,
   since an archive smaller than that can't satisfy it.
-  The mirror block of the last metadata block is the nearest one when the mirror blocks are placed as described above,
-  and is still 4096 bytes away from it.
+  An archive placing its mirror blocks as described in [[#mirror-block]] still satisfies the condition of 4096 bytes:
+  the mirror block of the last metadata block is the nearest one when all the mirror blocks are placed after it,
+  and the blocks held back before the metadata block are at least 4096 bytes long when its mirror block is placed before them.
 </div>
 
 Issue: In an encrypted archive, a compressor has nothing to place between a block and its mirror block
 to keep them a chunk apart when nothing else is there, because a spacer block is not allowed in the payload,
-so that a small encrypted archive can't be mirrored (`docs/recovery-design.md` §5.5).
+so that a small encrypted archive can't be mirrored;
+nor can it fill the room left for the mirror block of the last metadata block placed before it,
+which then has to come out exact (`docs/recovery-design.md` §5.5).
 
 
 <h3 id=repair>
@@ -3856,17 +3880,51 @@ from its [=archive/header_magic=] on:
     1. Let |start| be 6 if |a| starts with [=const/HEADER_MAGIC=] or [=const/OVERLAY_HEADER_MAGIC=], and null otherwise.
     2. Let |found| be the list of mirror blocks found by scanning |a| for [=const/MIRROR_MAGIC=] and [=const/OVERLAY_MIRROR_MAGIC=]
         as described in [[#mirror-block]], in the order of their [=block/block_start=],
-        that are [=mirror/intact=] when [=archive/archive_start=] is taken as their [=block/block_start=] minus [=mirror/archive_offset=].
-    3. If |start| is null, set |start| to the smallest [=block/block_start=] minus [=mirror/archive_offset=] of |found|.
-        Remove from |found| every mirror block whose [=block/block_start=] minus [=mirror/archive_offset=] isn't |start|.
+        that are [=mirror/intact=] when [=archive/archive_start=] is taken as the start of the archive they imply.
+        Their target blocks may lie beyond the end of |a|.
+    3. If |start| is null, set |start| to the smallest start of the archive implied by the mirror blocks of |found|.
+        Remove from |found| every mirror block implying another start.
     4. For each [=mirror/target block=] position |t| of the mirror blocks of |found|, in the order of |found|:
         1. Let |restored| be the bytes that the first mirror block of |found| for |t| requires of its target block.
-        2. If the bytes of |a| from |t| are those required by any mirror block of |found| for |t|, or |a| is shorter than |t| + the length of |restored|,
+        2. If the bytes of |a| from |t| are those required by any mirror block of |found| for |t|, or |a| is shorter than |t|,
             continue.
-        3. Replace the bytes of |a| from |t| with |restored|,
+        3. If |a| is shorter than |t| + the length of |restored|, append bytes to |a| up to that length.
+        4. Replace the bytes of |a| from |t| with |restored|,
             and the following byte with 0 if the length of |restored| is odd and |a| has a following byte.
-    5. Return |a|.
+    5. If |start| is 6, [=reconstruct the footer=] of |a|.
+    6. Return |a|.
 </ol>
+
+To <dfn>reconstruct the footer</dfn> of a [=byte sequence=] |a| starting with a header magic:
+
+<ol class=algorithm>
+    1. Read blocks from the offset 6 by the generic structure ([[#block]]), with [=block/data=] of every block taken without parsing,
+        until the bytes at the current offset start with the shortest [=leb128=] encoding of [=FOOTER_TYPE=] or [=OVERLAY_FOOTER_TYPE=],
+        until |a| ends at or before the end of the block being read, or until the bytes at the current offset are not a [=leb128=]
+        in the shortest encoding.
+    2. If the reading reached a footer whose [=archive/footer_size=] tells that it ends at the end of |a|, return.
+    3. If the reading stopped otherwise than by |a| ending or by reaching the start of a footer, return.
+    4. Let |m| be the last block read that is a [[#metadata-block|metadata block]].
+        If there is none, or any block read after |m| is neither a [[#spacer-block|spacer block]] nor of a non-[=critical=] type, return.
+    5. Let |e| be the offset after the [=block/padding=] of the last block read (the [=block/block_end=] if it has none).
+        Truncate |a| to |e| bytes, appending zero bytes if it is shorter.
+    6. Append a footer with the footer magic [=match|matching=] the header magic of |a|,
+        [=archive/size_hint=] |e| − 6 and [=archive/metadata_backward_offset=] from [=archive/footer_start=] back to the [=block/block_start=] of |m|.
+</ol>
+
+<div class=note>
+  Reconstructing the footer restores an archive cut short after its last metadata block,
+  where the mirror blocks and the footer after it have been lost;
+  with the mirror block of the last metadata block placed before the last blocks ([[#mirror-block]]),
+  also an archive cut short within its last metadata block, which the earlier steps restore beyond the end of |a|.
+  The footer is not reconstructed when a [=critical=] block other than a spacer block follows the last metadata block,
+  since every content block is followed by a metadata block describing it,
+  nor when no metadata block is read:
+  an archive without a metadata block decompresses into the concatenation of its leaf blocks,
+  and the archive of a single file cut short would otherwise decompress into a shorter file without any failure.
+  An archive cut short before its last metadata block has lost content blocks,
+  and isn't repaired into a byte sequence that interprets as an archive.
+</div>
 
 <div class=note>
   A decompressor can find the same mirror blocks more cheaply by reading the blocks of |a| one after another by the generic structure
@@ -3879,11 +3937,12 @@ from its [=archive/header_magic=] on:
 </div>
 
 <div class=note>
-  The header magic and the footer are not restored by mirror blocks:
-  the header magic is a constant, and the footer can be reconstructed by reading the blocks.
+  The header magic is not restored: it is a constant, and an archive whose header magic is damaged
+  is restored from the mirror blocks only, whose implied start of the archive tells where the header magic was.
 </div>
 
-Issue: Reconstructing the header magic and the footer, and extracting what can be read where blocks remain damaged,
+Issue: Restoring the header magic, and extracting what can be read where blocks remain damaged
+or an archive is cut short before its last metadata block,
 are to be specified with the repair process (`docs/recovery-design.md` §5.6).
 
 Issue: Repairing an encrypted archive with mirror blocks or mirrored headers requires decrypting
