@@ -90,10 +90,12 @@ pub fn records(d: &[u8]) -> Option<Vec<Rec>> {
         let ty = h[156];
         let field = size(h).unwrap();
         let declared = next_size.take().unwrap_or(field);
-        // links, devices, directories and FIFOs may have a size and no body
-        let n = [0, declared]
-            .into_iter()
-            .take(if matches!(ty, b'1'..=b'6') { 2 } else { 1 })
+        // links, devices, directories and FIFOs may have a size and no body; files have their
+        // size (a body may start with zero blocks: an ISO 9660 image's system area)
+        let tries: &[u64] = if matches!(ty, b'1'..=b'6') { &[0, declared] } else { &[declared] };
+        let n = tries
+            .iter()
+            .copied()
             .filter_map(|n| usize::try_from(n).ok())
             .find(|&n| n <= d.len() - p - TAR_BLOCK && ends(p, n))
             .or_else(|| usize::try_from(declared).ok().filter(|&n| n <= d.len() - p - TAR_BLOCK));

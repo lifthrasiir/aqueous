@@ -212,6 +212,26 @@ fn odd_tars() {
     }
 }
 
+/// A file whose body starts with zero blocks (an ISO 9660 image's system area) is all of its
+/// size, not taken as a member of no body followed by the archive's end.
+#[test]
+fn bodies_of_zeros_first() {
+    let mut body = vec![0u8; 2048];
+    body.extend(noise(1000));
+    let mut d = tar_header("image.iso", format!("{:011o}\0", body.len()).as_bytes(), b'0');
+    d.extend(&body);
+    d.resize(d.len().next_multiple_of(512), 0);
+    d.extend(tar_header("after", b"00000000003\0", b'0'));
+    d.extend(b"abc");
+    d.resize(d.len().next_multiple_of(512) + 1024, 0);
+    let recs = aqr_bundle::tar::records(&d).unwrap();
+    let bodies: Vec<_> = recs.iter().filter_map(|r| r.body()).map(|b| b.span.len()).collect();
+    assert_eq!(bodies, [body.len(), 3]);
+    assert_eq!(formula::extent(Format::Tar, &d), Some(d.len()));
+    let infos = roundtrip(&d);
+    assert_eq!((members(&infos), gaps(&infos)), (2, 0));
+}
+
 /// Odd ar archives: a member of odd size without its pad byte, a BSD name, junk after the end.
 #[test]
 fn odd_ars() {
