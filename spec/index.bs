@@ -2631,6 +2631,15 @@ The [[#xxh64-checksum-method|XXH64]] checksum of the top of the stack MUST be eq
 A Checksum instruction <dfn>covers</dfn> the byte sequence at the top of the stack when it is executed,
 and the byte sequence remains the same item when moved by Swap instructions.
 An <dfn>output checksum</dfn> is a Checksum instruction [=covers|covering=] an output of the formula block.
+An output is <dfn for=output>checksummed</dfn> if an output checksum covers it.
+
+<div class=note>
+  An output checksum covers a single output, not the concatenation of the outputs.
+  A formula block of several outputs, which may be the contents of several files ([[#metadata-block]]),
+  therefore has an output checksum for each output that is to be checksummed,
+  each executed with Swap instructions bringing that output to the top of the stack and back,
+  so that each file can be verified by itself.
+</div>
 
 </div>
 
@@ -3487,8 +3496,8 @@ The encrypted chunks of an encrypted archive are also authenticated by [[AGE]].
 Unless explicitly requested otherwise, conforming compressors SHOULD use a [=checksum_method=] other than None
 for every leaf block.
 
-Unless explicitly requested otherwise, conforming compressors SHOULD declare an [=output checksum=]
-for every formula block.
+Unless explicitly requested otherwise, conforming compressors SHOULD make every output of every formula block
+[=output/checksummed=].
 
 <div class=note>
   An output checksum is the only checksum verifying a module application or a patch,
@@ -3517,7 +3526,7 @@ for every formula block.
 
 <div class=note>
   The checksum is mandatory for non-leaf blocks.
-  The output checksum of a formula block covers its entire output,
+  The output checksum of a formula block covers an entire output,
   so a decompressor that only reads a part of the output can't verify it without reading the whole output.
   Instead it can verify the checksums of non-leaf blocks it has actually read.
   The checksum also lets damage to a non-leaf block be detected before the block is used by a module application,
@@ -3555,7 +3564,7 @@ Archival profile</h3>
 An archive conforms to the <dfn>archival profile</dfn> when the content of every file is covered by a checksum:
 
 * Every [=leaf block|leaf=] [[#data-block|data block]] has a [=checksum_method=] other than None.
-* Every [[#formula-block|formula block]] declares an [=output checksum=].
+* Every output of every [[#formula-block|formula block]] is [=output/checksummed=].
 * The archive is a [=standalone archive=].
 * No block is a [=shorthand block=] ([[#registered-blocks]]).
 
