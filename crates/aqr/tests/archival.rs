@@ -136,9 +136,19 @@ fn restores_damaged_blocks() {
     aqr_in(&d, &["-q", "-o", "plain.aqr", "src"]);
     let (a, plain) = (fs::read(d.join("a.aqr")).unwrap(), fs::read(d.join("plain.aqr")).unwrap());
     assert!(a.len() > plain.len());
-    // the blocks before the mirror blocks as they are without -A (but for the footer)
-    let footer = plain.len() - (6 + 4 + plain[plain.len() - 2] as usize);
-    assert_eq!(a[..footer], plain[..footer]);
+    // the blocks as they are without -A, but for the mirror blocks (the metadata block's before
+    // the files, as the archive is smaller than 4 MiB), the spacer blocks and the metadata block
+    // (whose offsets reach back over the mirror block before the files)
+    let content = |a: &[u8]| -> Vec<u8> {
+        blocks(a)
+            .iter()
+            .filter(|b| !(0xc10..0xc79).contains(&b.1) && b.1 > 3 && !(0x10..0x18).contains(&b.1))
+            .flat_map(|(start, _, data)| a[*start..data.end + (data.end - start) % 2].to_vec())
+            .collect()
+    };
+    assert_eq!(content(&a), content(&plain));
+    let meta = blocks(&a).iter().find(|b| (0x10..0x18).contains(&b.1)).unwrap().0;
+    assert!(blocks(&a)[0].1 >= 0xc10 && blocks(&a)[0].0 < meta);
 
     let t = stderr(&aqr_in(&d, &["-t", "a.aqr"]));
     assert!(t.contains("archival profile: conforms"), "{t}");
@@ -212,5 +222,61 @@ fn single_and_encrypted() {
             && t.contains("only nearer than the spec asks"),
         "{t}"
     );
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// A file of `n` bytes that do not compress.
+fn noise(n: usize, seed: u64) -> Vec<u8> {
+    let mut x = seed;
+    (0..n)
+        .map(|_| {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (x >> 56) as u8
+        })
+        .collect()
+}
+
+/// An archive made with `-A` cut short: after its metadata block (the footer made again), in
+/// it (restored from its mirror block before the last 4 MiB, held back as the archive is made
+/// in batches), but not before it (where files' blocks are lost); without `-A`, a cut into the
+/// metadata block is lost.
+#[test]
+fn restores_truncated() {
+    let d = scratch("truncated");
+    let mut want = source(&d);
+    // (files that do not compress, in batches of about 1 MiB: more than 4 MiB after the first)
+    for i in 0..6 {
+        let name = format!("n{i}.bin");
+        let n = noise(900_000, 100 + i);
+        fs::write(d.join("src").join(&name), &n).unwrap();
+        want.push((name, n));
+    }
+    want.sort();
+    aqr_in(&d, &["-q", "-A", "-B", "1M", "-o", "a.aqr", "src"]);
+    aqr_in(&d, &["-q", "-B", "1M", "-o", "plain.aqr", "src"]);
+    let (a, plain) = (fs::read(d.join("a.aqr")).unwrap(), fs::read(d.join("plain.aqr")).unwrap());
+    let bs = blocks(&a);
+    let meta = bs.iter().find(|b| (0x10..0x18).contains(&b.1)).unwrap().0;
+    // the metadata block's mirror block, before it by more than 4 MiB (but not much more)
+    let mirror = bs.iter().filter(|b| (0xc10..0xc18).contains(&b.1)).map(|b| b.0).collect::<Vec<_>>();
+    assert_eq!(mirror.len(), 1);
+    assert!(meta - mirror[0] > 4 << 20 && meta - mirror[0] < 6 << 20, "{} {meta}", mirror[0]);
+    let t = stderr(&aqr_in(&d, &["-t", "a.aqr"]));
+    assert!(t.contains("mirrored archive: yes"), "{t}");
+
+    for (what, cut) in [("after", a.len() - 7), ("in", meta + 5), ("at", meta)] {
+        fs::write(d.join("cut.aqr"), &a[..cut]).unwrap();
+        let t = stderr(&aqr_in(&d, &["-t", "cut.aqr"]));
+        assert!(t.contains("its footer made again"), "{what}: {t}");
+        assert_eq!(t.contains("1 damaged block restored"), what != "after", "{what}: {t}");
+        let out = d.join(format!("out-{what}"));
+        aqr_in(&d, &["-q", "-d", "-o", out.to_str().unwrap(), "cut.aqr"]);
+        assert_eq!(files(&out), want, "{what}");
+    }
+    fs::write(d.join("cut.aqr"), &a[..meta - 1]).unwrap();
+    assert!(!aqr_fed(&d, &["-t", "cut.aqr"], b"").status.success());
+    let meta = blocks(&plain).iter().find(|b| (0x10..0x18).contains(&b.1)).unwrap().0;
+    fs::write(d.join("cut.aqr"), &plain[..meta + 5]).unwrap();
+    assert!(!aqr_fed(&d, &["-t", "cut.aqr"], b"").status.success());
     fs::remove_dir_all(&d).unwrap();
 }

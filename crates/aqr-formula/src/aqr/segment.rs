@@ -443,14 +443,80 @@ impl SegmentWriter {
     /// (by [`EntryNode::File`]), and the footer. Fails on a tree the spec does not allow.
     pub fn finish(&self, enc: &Encoder, t: &Tree, contents: &[ContentAt]) -> Result<(Vec<u8>, usize)> {
         tree::check(t, contents.len()).map_err(Error::new)?;
+        let mut out = self.metadata_block(enc, t, contents, usize::MAX, 0)?;
+        let metadata = out.len();
+        let end = self.at + out.len();
+        // (from the start of the footer's fields: after the magic and the size)
+        let back = end + FOOTER_MAGIC.len() + 2 - self.at;
+        footer_with(&mut out, end - HEADER_MAGIC.len(), back as u64);
+        Ok((out, metadata))
+    }
+
+    /// [`SegmentWriter::finish`] with a mirror block of the metadata block before the blocks
+    /// written from `front` on (held back, as they are to come after it), so that a truncation
+    /// of the archive shorter than they leaves it: the bytes to write at `front` (the mirror
+    /// block, then a spacer block where the room it was given is longer), and those to write
+    /// after the blocks held back. The room is found as the metadata block, whose offsets to the
+    /// blocks before `front` count it, is made again until its mirror block fits. None where the
+    /// mirror block would be nearer the metadata block than the spec asks (of an encrypted
+    /// archive's payload where `chunked`), or in such a payload (which may have no spacer
+    /// blocks) the room does not come out exact.
+    pub fn finish_mirrored(
+        &self,
+        enc: &Encoder,
+        t: &Tree,
+        contents: &[ContentAt],
+        front: usize,
+        chunked: bool,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        tree::check(t, contents.len()).map_err(Error::new)?;
+        let mut room = 0;
+        for tries in 0..8 {
+            let meta = self.metadata_block(enc, t, contents, front, room)?;
+            let at = self.at + room;
+            let mut mirror = super::mirror::mirror_of(&meta, at as u64, front as u64, false);
+            let len = mirror.len();
+            if len > room || (chunked && len != room) {
+                // (a little more each time, where it does not settle)
+                room = len + if tries < 3 { 0 } else { 2 << tries };
+                continue;
+            }
+            if super::mirror::least_start((front + len) as u64, chunked) > at as u64 {
+                return Ok(None);
+            }
+            if room > len {
+                super::mirror::spacer(&mut mirror, (room - len) as u64);
+            }
+            let mut end = meta;
+            let e = at + end.len();
+            footer_with(&mut end, e - HEADER_MAGIC.len(), (e + FOOTER_MAGIC.len() + 2 - at) as u64);
+            return Ok(Some((mirror, end)));
+        }
+        Ok(None)
+    }
+
+    /// The metadata block of `t` (its contents where `contents` tells), the blocks from `front`
+    /// on (and the metadata block, after them all) moved `shift` bytes later.
+    fn metadata_block(
+        &self,
+        enc: &Encoder,
+        t: &Tree,
+        contents: &[ContentAt],
+        front: usize,
+        shift: usize,
+    ) -> Result<Vec<u8>> {
+        let moved = |at: usize| if at >= front { at + shift } else { at };
         let params: Vec<FileParam> = contents
             .iter()
             .map(|c| {
                 let dictionary = self.leaf_dictionary.get(&c.leaf).copied();
-                FileParam { leaf: c.leaf, output: c.output as u64, size: c.size, dictionary }
+                FileParam { leaf: moved(c.leaf), output: c.output as u64, size: c.size, dictionary }
             })
             .collect();
-        let meta = tree::metadata(t, self.at, &self.module_at, &self.resource_at, &self.dictionary_at, &params);
+        let all = |v: &[usize]| v.iter().map(|&a| moved(a)).collect::<Vec<_>>();
+        let (modules, resources, dictionaries) =
+            (all(&self.module_at), all(&self.resource_at), all(&self.dictionary_at));
+        let meta = tree::metadata(t, self.at + shift, &modules, &resources, &dictionaries, &params);
         let mut out = Vec::new();
         match enc.base_level() {
             STORED => {
@@ -459,12 +525,7 @@ impl SegmentWriter {
             }
             level => block(&mut out, METADATA_ZSTD, &always_compressed(&mut enc.cctx(), &[&meta], level, enc.threads)?),
         }
-        let metadata = out.len();
-        let end = self.at + out.len();
-        // (from the start of the footer's fields: after the magic and the size)
-        let back = end + FOOTER_MAGIC.len() + 2 - self.at;
-        footer_with(&mut out, end - HEADER_MAGIC.len(), back as u64);
-        Ok((out, metadata))
+        Ok(out)
     }
 }
 

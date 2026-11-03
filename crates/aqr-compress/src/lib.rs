@@ -3118,8 +3118,14 @@ mod tests {
         d[meta.target_end() - 1] ^= 0x10;
         assert!(aqr_decompress::decompress_value(&d, 2).is_err());
         let cd = aqr::mirror::check(&d);
-        assert_eq!(aqr::mirror::repair(&mut d, &cd), 1);
-        assert_eq!(d, a.archive);
+        assert_eq!(aqr::mirror::repair(&d, &cd).unwrap().bytes, a.archive);
+        // the metadata block's mirror block before the files (the archive is small: all of them)
+        let meta = m.targets.last().unwrap().0;
+        assert!(m.mirrors.iter().any(|f| f.target == meta && f.at < meta && f.far(false)));
+        let d = &a.archive[..meta + 1];
+        let r = aqr::mirror::repair(d, &aqr::mirror::check(d)).unwrap();
+        assert!(r.restored == 1 && r.footer && r.bytes.len() < a.archive.len());
+        assert_eq!(files(&r.bytes), [gz.clone(), text.clone()]);
     }
 
     /// Of a text coded once for two, the formula kept is not evaluated beforehand again; nor is

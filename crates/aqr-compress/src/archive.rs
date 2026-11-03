@@ -126,7 +126,7 @@ pub struct Report {
     /// Bytes of the archive but for the files': its header and footer, the module, resource,
     /// dictionary, metadata and mirror blocks.
     pub overhead: usize,
-    /// Bytes of the mirror blocks ([`Options::mirrors`]; and of the spacer blocks before them,
+    /// Bytes of the mirror blocks ([`Options::mirrors`]; and of the spacer blocks beside them,
     /// and of the footer as its offsets grew).
     pub mirrors: usize,
     /// The contents kept raw because the archive did not give them back.
@@ -253,6 +253,9 @@ fn compress_tree_noting<S: Source + ?Sized>(
         at: vec![None; n],
         r: Report { files: vec![FileReport::default(); n], ..Report::default() },
         next: 0,
+        hold: opt.mirrors,
+        held: std::collections::VecDeque::new(),
+        held_len: 0,
     };
     std::thread::scope(|s| {
         // (a thread of no worker of the pool, which takes one only as one is free: as the
@@ -269,14 +272,29 @@ fn compress_tree_noting<S: Source + ?Sized>(
         let _done = Done(&pipe);
         wr.run(&pipe, &cx, tell, &mut *out)
     })?;
-    let Writer { w, at, mut r, .. } = wr;
+    let Writer { w, at, mut r, held, held_len, .. } = wr;
     let contents: Vec<ContentAt> =
         (0..n).map(|c| at[c].or_else(|| at[r.files[c].same_as?]).expect("every content made")).collect();
     // (an encoder of the metadata block only)
     let enc = aqr::Encoder::with_threads(opt.level, opt.threads).with_modules(aqr_decompress::wasm_of);
-    let (end, _) = w.finish(&enc, tree, &contents).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.0))?;
+    let bad = |e: aqr_formula::Error| io::Error::new(io::ErrorKind::InvalidInput, e.0);
+    // with mirror blocks, the metadata block's before the batches held back, where it can be
+    // far enough from it; else after it, as the others are ([`aqr::Mirroring`])
+    let front = w.len() - held_len;
+    let mirrored = match opt.mirrors {
+        true => w.finish_mirrored(&enc, tree, &contents, front, opt.size_hint).map_err(bad)?,
+        false => None,
+    };
+    let (mirror, end) = match mirrored {
+        Some(m) => m,
+        None => (Vec::new(), w.finish(&enc, tree, &contents).map_err(bad)?.0),
+    };
+    out.write_all(&mirror)?;
+    for b in &held {
+        out.write_all(b)?;
+    }
     out.write_all(&end)?;
-    r.mirrors = mirroring.map_or(0, |m| m.added() as usize);
+    r.mirrors = mirror.len() + mirroring.map_or(0, |m| m.added() as usize);
     r.len = w.len() + end.len() + r.mirrors;
     r.overhead = r.len - r.files.iter().map(|f| f.archived).sum::<f64>().round() as usize;
     r.unverified.sort_unstable();
@@ -472,6 +490,11 @@ struct Writer {
     r: Report,
     /// The batch to write next.
     next: usize,
+    /// Whether the last batches are held back, at least [`aqr::mirror::FAR`] bytes of them, for
+    /// the metadata block's mirror block to be written before them ([`Options::mirrors`]).
+    hold: bool,
+    held: std::collections::VecDeque<Vec<u8>>,
+    held_len: usize,
 }
 
 impl Writer {
@@ -541,7 +564,7 @@ impl Writer {
             return Ok(());
         };
         let mut raw = HashSet::new();
-        let made = loop {
+        let mut made = loop {
             let made = finish(i, &self.w, &files, part, src, opt, notes);
             let bad: Vec<usize> = made.bad.iter().copied().filter(|k| !raw.contains(k)).collect();
             if bad.is_empty() {
@@ -555,11 +578,24 @@ impl Writer {
             part = analyze(i, &files, reread(src, &files, opt.threads)?, &raw, opt, notes);
         };
         batch.iter().try_for_each(|&c| src.intact(c))?;
+        self.w.commit(&made.batch);
         {
             let _s = aqr_common::trace::span("write");
-            out.write_all(&made.batch.bytes)?;
+            match self.hold {
+                false => out.write_all(&made.batch.bytes)?,
+                true => {
+                    self.held_len += made.batch.bytes.len();
+                    self.held.push_back(std::mem::take(&mut made.batch.bytes));
+                    while let Some(b) = self.held.front()
+                        && (self.held_len - b.len()) as u64 >= aqr::mirror::FAR
+                    {
+                        out.write_all(b)?;
+                        self.held_len -= b.len();
+                        self.held.pop_front();
+                    }
+                }
+            }
         }
-        self.w.commit(&made.batch);
         let r = &mut self.r;
         for (k, file) in files.iter().enumerate() {
             let (l, o) = made.at[k];

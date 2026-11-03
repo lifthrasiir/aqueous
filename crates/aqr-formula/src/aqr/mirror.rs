@@ -1,29 +1,33 @@
 //! Mirror blocks (spec, "Mirror block"): copies of the blocks whose damage would lose more than
-//! a parcel, made as an archive is written ([`Mirroring`]), checked and restored from as it is
-//! read ([`check`], [`repair`]).
+//! a parcel, made as an archive is written ([`Mirroring`], [`mirror_of`]), checked and restored
+//! from as it is read ([`check`], [`repair`]).
 //!
 //! [`Mirroring`] takes the bytes of an archive as they are written and passes them on, keeping
 //! a copy of each metadata, dictionary, import, module, resource and formula block; once the
 //! footer has come, it writes a mirror block of each of them before it, in the order of their
 //! blocks (the last metadata block's last, furthest from it), and the footer with its offsets
 //! moved past them. Nothing before the footer changes, so that it takes any archive written
-//! from its start, and the blocks' offsets (the metadata's, the formulas') stay as they are.
+//! from its start, and the blocks' offsets (the metadata's, the formulas') stay as they are. A
+//! block whose mirror block came before it ([`super::SegmentWriter::finish_mirrored`] puts the
+//! last metadata block's before the last [`FAR`] bytes of the archive, so that a truncation
+//! shorter than that leaves it) has none after it.
 //!
-//! The mirror blocks all coming after the last metadata block, a block's mirror is as far from
-//! it as the blocks after it and the mirrors before its own: far for most, a block near the end
-//! as far as the mirrors of the blocks after it (the metadata block, as far as all the others).
-//! A mirror block nearer its block than the spec's least distance has a spacer block before it
-//! (4 KiB at most); in an encrypted archive's payload, which may have no spacer blocks, it is
-//! left nearer. The archive of a segment holds the copies until its end: about as many bytes as
-//! its formula, module and metadata blocks.
+//! The mirror blocks coming after the last metadata block, a block's mirror is as far from it as
+//! the blocks after it and the mirrors before its own: far for most, a block near the end as far
+//! as the mirrors of the blocks after it (the metadata block, as far as all the others). A mirror
+//! block nearer its block than the spec's least distance has a spacer block before it (4 KiB at
+//! most); in an encrypted archive's payload, which may have no spacer blocks, it is left nearer.
+//! The archive of a segment holds the copies until its end: about as many bytes as its formula,
+//! module and metadata blocks.
 
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::ops::Range;
 
 use aqr_common::varint;
 use xxhash_rust::xxh64::xxh64;
 
-use super::{FOOTER_MAGIC, FOOTER_TYPE, HEADER_MAGIC, OVERLAY_FOOTER_TYPE, OVERLAY_HEADER_MAGIC};
+use super::{FOOTER_MAGIC, FOOTER_TYPE, HEADER_MAGIC, OVERLAY_FOOTER_MAGIC, OVERLAY_FOOTER_TYPE, OVERLAY_HEADER_MAGIC};
 
 pub const MIRROR_MAGIC: [u8; 8] = [0x02, 0xaa, 0xf5, 0xfe, 0xba, 0x2b, 0xae, 0x23];
 pub const OVERLAY_MIRROR_MAGIC: [u8; 8] = [0x01, 0x05, 0x34, 0xfa, 0xbd, 0x11, 0xaf, 0x53];
@@ -36,6 +40,11 @@ const MIRROR: u64 = 0xc00;
 /// 4 KiB unit of storage).
 pub const DISTANCE: u64 = 4096;
 
+/// The bytes between a block and its mirror block that the spec recommends where possible: the
+/// bytes of an archive held back before its last metadata block, for that block's mirror block
+/// to come before them ([`super::SegmentWriter::finish_mirrored`]).
+pub const FAR: u64 = 4 << 20;
+
 /// The bytes of a chunk of an encrypted archive's payload ([`super::envelope`]): a block and its
 /// mirror block have a whole chunk between them in an encrypted archive.
 pub const CHUNK: u64 = 64 << 10;
@@ -46,8 +55,13 @@ pub fn mirrorable(ty: u64) -> bool {
     matches!(ty, 0x10..=0x17 | 0x50..=0x67 | 0x70..=0x77)
 }
 
-/// Where a mirror block starting at `at` has to start at least for a block ending at `end`:
-/// [`DISTANCE`] after it, or in an encrypted archive's payload (`chunked`, whose offsets are
+/// Whether blocks of type `ty` are mirror blocks.
+fn is_mirror(ty: u64) -> bool {
+    (MIRROR + 0x10..=MIRROR + 0x78).contains(&ty)
+}
+
+/// Where the later of a block and its mirror block has to start at least, the earlier ending at
+/// `end`: [`DISTANCE`] after it, or in an encrypted archive's payload (`chunked`, whose offsets are
 /// those of the payload, as the chunks are) after a whole [`CHUNK`].
 pub fn least_start(end: u64, chunked: bool) -> u64 {
     if chunked { (end.div_ceil(CHUNK) + 1) * CHUNK } else { end + DISTANCE }
@@ -69,8 +83,8 @@ enum At {
     /// In the type and size of a block (or the footer magic), held until it is all there.
     Head,
     /// In the data of a block, so many bytes of it left, then its padding (where `pad`); kept
-    /// where `keep` (as the last of the targets).
-    Data { left: u64, pad: bool, keep: bool },
+    /// as the last of the targets, or its start as a mirror block's, as `keep` tells.
+    Data { left: u64, pad: bool, keep: Keep },
     /// In the padding byte of a block.
     Pad,
     /// In the footer, held until it is all there.
@@ -78,6 +92,19 @@ enum At {
     /// Past the footer: nothing more is to come.
     Done,
 }
+
+/// What [`Mirroring`] keeps of a block's data.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Keep {
+    Nothing,
+    /// All of it, as a target's.
+    Target,
+    /// Its start, as a mirror block's (where it starts), for its target block.
+    Mirror(u64),
+}
+
+/// The bytes of a mirror block's data that tell its target block: the magic and two LEB128s.
+const MIRROR_HEAD: usize = 8 + 10 + 10;
 
 /// The archive written to `out` with a mirror block of each of its blocks that may have one
 /// ([`mirrorable`]), as the module tells.
@@ -92,6 +119,10 @@ pub struct Mirroring<W> {
     held: Vec<u8>,
     magic: [u8; 8],
     targets: Vec<Target>,
+    /// The start of a mirror block's data, as it comes ([`Keep::Mirror`]).
+    mirror_head: Vec<u8>,
+    /// The blocks (where they start) of a mirror block written before them.
+    mirrored: HashSet<u64>,
     /// Bytes added to the archive: of the mirror blocks (and spacer blocks), and of the footer
     /// as its offsets grew.
     added: u64,
@@ -108,6 +139,8 @@ impl<W: Write> Mirroring<W> {
             held: Vec::new(),
             magic: MIRROR_MAGIC,
             targets: Vec::new(),
+            mirror_head: Vec::new(),
+            mirrored: HashSet::new(),
             added: 0,
         }
     }
@@ -136,6 +169,8 @@ impl<W: Write> Mirroring<W> {
         (self.at, self.written, self.added, self.magic) = (At::Magic, 0, 0, MIRROR_MAGIC);
         self.held.clear();
         self.targets.clear();
+        self.mirror_head.clear();
+        self.mirrored.clear();
     }
 
     pub fn into_inner(self) -> W {
@@ -169,8 +204,12 @@ impl<W: Write> Mirroring<W> {
         }
         let size = u64::from_le_bytes(std::array::from_fn(|i| if i < width { h[p + i] } else { 0 }));
         let (start, len) = (self.written, h.len() as u64);
-        let keep = mirrorable(ty);
-        if keep {
+        let keep = match ty {
+            ty if mirrorable(ty) => Keep::Target,
+            ty if is_mirror(ty) => Keep::Mirror(start),
+            _ => Keep::Nothing,
+        };
+        if keep == Keep::Target {
             let data = Vec::with_capacity(usize::try_from(size).unwrap_or(0).min(1 << 20));
             self.targets.push(Target { start, end: start + len + size, ty, data });
         }
@@ -178,8 +217,21 @@ impl<W: Write> Mirroring<W> {
         self.pass(&held)?;
         self.held = held;
         self.held.clear();
+        self.mirror_head.clear();
         self.at = At::Data { left: size, pad: (len + size) % 2 == 1, keep };
         Ok(())
+    }
+
+    /// Takes the start of a mirror block's data, all there, as telling a block that has a
+    /// mirror block (where the block follows it).
+    fn mirror_ends(&mut self, at: u64) {
+        let d = &self.mirror_head;
+        let mut p = 8;
+        if let (Ok(_), Ok(t)) = (varint::get(d, &mut p), varint::get(d, &mut p))
+            && t % 2 == 1
+        {
+            self.mirrored.insert(at + t - 1);
+        }
     }
 
     /// Takes the bytes held so far as the footer, where it is all there: writes the mirror
@@ -189,7 +241,7 @@ impl<W: Write> Mirroring<W> {
         if h.len() < 8 {
             return Ok(());
         }
-        if h[..6] != FOOTER_MAGIC && h[..6] != super::OVERLAY_FOOTER_MAGIC {
+        if h[..6] != FOOTER_MAGIC && h[..6] != OVERLAY_FOOTER_MAGIC {
             return Err(bad("a bad footer"));
         }
         let n = u16::from_le_bytes([h[6], h[7]]) as usize;
@@ -208,14 +260,14 @@ impl<W: Write> Mirroring<W> {
             return Err(bad("a footer of another size"));
         }
         let mut tail = Vec::new();
-        for t in &self.targets {
+        for t in self.targets.iter().filter(|t| !self.mirrored.contains(&t.start)) {
             let at = footer_at + tail.len() as u64;
             let least = least_start(t.end, self.chunked);
             if at < least && !self.chunked {
                 spacer(&mut tail, (least - at).next_multiple_of(2).max(2));
             }
             let at = footer_at + tail.len() as u64;
-            mirror_block(&mut tail, &self.magic, at, t);
+            mirror_block(&mut tail, &self.magic, at, t.start, t.ty, &t.data);
         }
         let added = tail.len() as u64;
         let mut f = Vec::new();
@@ -268,8 +320,13 @@ impl<W: Write> Write for Mirroring<W> {
                 At::Data { left, pad, keep } => {
                     let n = usize::try_from(left).unwrap_or(usize::MAX).min(d.len());
                     self.pass(&d[..n])?;
-                    if keep {
-                        self.targets.last_mut().expect("a target").data.extend_from_slice(&d[..n]);
+                    match keep {
+                        Keep::Target => self.targets.last_mut().expect("a target").data.extend_from_slice(&d[..n]),
+                        Keep::Mirror(_) => {
+                            let k = (MIRROR_HEAD - self.mirror_head.len().min(MIRROR_HEAD)).min(n);
+                            self.mirror_head.extend_from_slice(&d[..k]);
+                        }
+                        Keep::Nothing => {}
                     }
                     d = &d[n..];
                     let left = left - n as u64;
@@ -278,6 +335,9 @@ impl<W: Write> Write for Mirroring<W> {
                         (0, false) => At::Head,
                         _ => At::Data { left, pad, keep },
                     };
+                    if let (0, Keep::Mirror(at)) = (left, keep) {
+                        self.mirror_ends(at);
+                    }
                 }
                 At::Pad => {
                     self.pass(&d[..1])?;
@@ -304,7 +364,7 @@ fn bad(what: &str) -> io::Error {
 }
 
 /// Appends a spacer block of `n` bytes (even, at least 2), zeroed.
-fn spacer(out: &mut Vec<u8>, n: u64) {
+pub fn spacer(out: &mut Vec<u8>, n: u64) {
     // (the type and the size field: 2, 3, 5 or 9 bytes, the block as long as `n` without
     // padding, as `n` is even)
     let (ty, head) = match n {
@@ -319,26 +379,38 @@ fn spacer(out: &mut Vec<u8>, n: u64) {
     out.resize(out.len() + size as usize, 0);
 }
 
-/// Appends the mirror block of `t`, to start at `at` in the archive (its magic `magic`).
-fn mirror_block(out: &mut Vec<u8>, magic: &[u8; 8], at: u64, t: &Target) {
+/// The mirror block of block `b` (its bytes from its type on, padding or not) starting at
+/// `target` in the archive, to start at `at` (before or after it) in an archive that is an overlay
+/// archive or not.
+pub fn mirror_of(b: &[u8], target: u64, at: u64, overlay: bool) -> Vec<u8> {
+    let mut p = 0;
+    let ty = varint::get(b, &mut p).expect("a block");
+    let width = 1 << (ty % 4);
+    let size = u64::from_le_bytes(std::array::from_fn(|i| if i < width { b[p + i] } else { 0 })) as usize;
+    let data = &b[p + width..p + width + size];
+    let mut out = Vec::new();
+    let magic = if overlay { OVERLAY_MIRROR_MAGIC } else { MIRROR_MAGIC };
+    mirror_block(&mut out, &magic, at, target, ty, data);
+    out
+}
+
+/// Appends the mirror block of the block of type `ty` and `data` starting at `target`, to start
+/// at `at` in the archive (its magic `magic`): its archive offset odd where it is widened, its
+/// target offset odd where the block follows it.
+fn mirror_block(out: &mut Vec<u8>, magic: &[u8; 8], at: u64, target: u64, ty: u64, data: &[u8]) {
     let archive_offset = at - HEADER_MAGIC.len() as u64;
-    let offset = at - t.start;
-    let len = |target_offset: u64| {
-        (magic.len() + varint::len(archive_offset) + varint::len(target_offset) + t.data.len() + 8) as u64
-    };
-    let fits = |ty: u64, n: u64| ty % 4 == 3 || n < 1 << (8 << (ty % 4));
-    let (ty, target_offset) = match fits(t.ty, len(offset)) {
-        true => (MIRROR + t.ty, offset),
-        false => (MIRROR + t.ty + 1, offset + 1),
-    };
-    let n = len(target_offset);
+    let target_offset = if target < at { at - target } else { target - at + 1 };
+    // (an even archive offset plus 1 is as long, as the LEB128s of each length end at odd ones)
+    let n = (magic.len() + varint::len(archive_offset) + varint::len(target_offset) + data.len() + 8) as u64;
+    let fits = ty % 4 == 3 || n < 1 << (8 << (ty % 4));
+    let (ty, archive_offset) = if fits { (MIRROR + ty, archive_offset) } else { (MIRROR + ty + 1, archive_offset + 1) };
     let start = out.len();
     varint::put(out, ty);
     out.extend_from_slice(&n.to_le_bytes()[..1 << (ty % 4)]);
     out.extend_from_slice(magic);
     varint::put(out, archive_offset);
     varint::put(out, target_offset);
-    out.extend_from_slice(&t.data);
+    out.extend_from_slice(data);
     let sum = xxh64(&out[start..], 0);
     out.extend_from_slice(&sum.to_le_bytes());
     if (out.len() - start) % 2 == 1 {
@@ -350,8 +422,10 @@ fn mirror_block(out: &mut Vec<u8>, magic: &[u8; 8], at: u64, t: &Target) {
 /// requires, but for being equal to its target block).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Found {
-    /// Where it starts in the archive, and where it tells the archive starts.
+    /// Where it starts and ends (before its padding) in the archive, and where it tells the
+    /// archive starts.
     pub at: usize,
+    pub end: usize,
     pub archive_start: usize,
     /// Where its target block starts, and its type.
     pub target: usize,
@@ -373,11 +447,19 @@ impl Found {
         let h = self.target + self.head.len();
         a.get(self.target..h) == Some(&self.head[..]) && a.get(h..self.target_end()) == Some(&a[self.data.clone()])
     }
+
+    /// Whether it is as far from its target block as the spec asks ([`least_start`]).
+    pub fn far(&self, chunked: bool) -> bool {
+        match self.target < self.at {
+            true => self.at as u64 >= least_start(self.target_end() as u64, chunked),
+            false => self.target as u64 >= least_start(self.end as u64, chunked),
+        }
+    }
 }
 
 /// The mirror block in archive `a` starting at `at` of type `ty`, whose data is `data`
 /// (a range of `a`), if intact; the archive starting at `start` (after its header magic) where
-/// known.
+/// known. Its target block may be past the end of `a`.
 fn mirror_at(a: &[u8], at: usize, ty: u64, data: Range<usize>, start: Option<usize>) -> Option<Found> {
     let d = &a[data.clone()];
     if d.len() < 8 + 2 + 8 || (d[..8] != MIRROR_MAGIC && d[..8] != OVERLAY_MIRROR_MAGIC) {
@@ -390,23 +472,29 @@ fn mirror_at(a: &[u8], at: usize, ty: u64, data: Range<usize>, start: Option<usi
     let mut p = 8;
     let archive_offset = usize::try_from(varint::get(d, &mut p).ok()?).ok()?;
     let target_offset = usize::try_from(varint::get(d, &mut p).ok()?).ok()?;
-    if p > d.len() - 8 || target_offset == 0 {
+    if p > d.len() - 8 {
         return None;
     }
-    let archive_start = at.checked_sub(archive_offset)?;
+    let widened = (archive_offset % 2) as u64;
+    let archive_start = at.checked_sub(archive_offset - widened as usize)?;
     // (an archive within this one: its own start, not this one's)
     if start.is_some_and(|s| archive_start != s) {
         return None;
     }
-    let widened = (target_offset % 2) as u64;
     let target_ty = ty.checked_sub(MIRROR + widened).filter(|&t| mirrorable(t))?;
     if widened == 1 && ty.is_multiple_of(4) {
         return None;
     }
-    let target = at.checked_sub(target_offset - widened as usize)?;
+    let follows = target_offset % 2 == 1;
+    let distance = target_offset - follows as usize;
+    if distance == 0 {
+        return None;
+    }
+    let target = if follows { at.checked_add(distance)? } else { at.checked_sub(distance)? };
     if target < archive_start {
         return None;
     }
+    let end = data.end;
     let data = data.start + p..data.end - 8;
     let width = 1 << (target_ty % 4);
     if width < 8 && data.len() as u64 >= 1 << (8 * width) {
@@ -415,9 +503,10 @@ fn mirror_at(a: &[u8], at: usize, ty: u64, data: Range<usize>, start: Option<usi
     let mut head = Vec::with_capacity(10 + 8);
     varint::put(&mut head, target_ty);
     head.extend_from_slice(&(data.len() as u64).to_le_bytes()[..width]);
-    let f = Found { at, archive_start, target, ty: target_ty, head, data };
-    // (the target block before the mirror block)
-    (f.target_end() <= at).then_some(f)
+    let f = Found { at, end, archive_start, target, ty: target_ty, head, data };
+    // (the two not overlapping)
+    let apart = if follows { end <= target } else { f.target_end() <= at };
+    apart.then_some(f)
 }
 
 /// What [`check`] found of an archive's mirror blocks.
@@ -442,16 +531,16 @@ impl Check {
 
     /// The blocks that may be mirrored with no intact mirror block.
     pub fn unmirrored(&self) -> usize {
-        let mirrored: std::collections::HashSet<usize> = self.mirrors.iter().map(|m| m.target).collect();
+        let mirrored: HashSet<usize> = self.mirrors.iter().map(|m| m.target).collect();
         self.targets.iter().filter(|(at, _)| !mirrored.contains(at)).count()
     }
 
     /// The blocks with intact mirror blocks all nearer them than the least distance
     /// ([`least_start`]; the offsets those of an encrypted archive's payload where `chunked`).
     pub fn near(&self, chunked: bool) -> usize {
-        let mut far: std::collections::HashMap<usize, bool> = std::collections::HashMap::new();
+        let mut far: HashMap<usize, bool> = HashMap::new();
         for m in &self.mirrors {
-            *far.entry(m.target).or_default() |= m.at as u64 >= least_start(m.target_end() as u64, chunked);
+            *far.entry(m.target).or_default() |= m.far(chunked);
         }
         far.values().filter(|&&f| !f).count()
     }
@@ -461,8 +550,7 @@ impl Check {
     /// far enough from it (`chunked` as [`Check::near`] takes it). (An encrypted archive has to
     /// have mirrored headers too, which its envelope tells.)
     pub fn mirrored(&self, a: &[u8], chunked: bool) -> bool {
-        let equal: std::collections::HashSet<usize> =
-            self.mirrors.iter().filter(|m| m.matches(a)).map(|m| m.target).collect();
+        let equal: HashSet<usize> = self.mirrors.iter().filter(|m| m.matches(a)).map(|m| m.target).collect();
         self.walked && self.targets.iter().all(|(at, _)| equal.contains(at)) && self.near(chunked) == 0
     }
 }
@@ -479,38 +567,81 @@ pub fn check(a: &[u8]) -> Check {
     Check { mirrors: scan(a, start), ..Check::default() }
 }
 
-/// [`check`] reading the blocks of `a` one after another, if they are all there up to the
-/// footer.
-fn walk(a: &[u8]) -> Option<Check> {
-    let mut c = Check { walked: true, ..Check::default() };
+/// How reading the blocks of an archive one after another ended ([`blocks`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ended {
+    /// At a footer where the archive's end tells it is.
+    Footer,
+    /// At the archive's end, in a block or the footer or between blocks: where the archive is
+    /// cut short.
+    Cut,
+    /// At bytes that are no block.
+    Bad,
+}
+
+/// The blocks of archive `a` read one after another from its header on (where each starts, its
+/// type and data), as far as they go, and how that ended.
+fn blocks(a: &[u8]) -> (Vec<(usize, u64, Range<usize>)>, Ended) {
+    let mut out = Vec::new();
     let mut at = HEADER_MAGIC.len();
     loop {
         let start = at;
-        let ty = varint::get(a, &mut at).ok()?;
+        if at >= a.len() {
+            return (out, Ended::Cut);
+        }
+        let Ok(ty) = varint::get(a, &mut at) else {
+            // (a type running past the end, or too long)
+            let cut = a[start..].iter().all(|b| b & 0x80 != 0) && a.len() - start < 10;
+            return (out, if cut { Ended::Cut } else { Ended::Bad });
+        };
         if ty == FOOTER_TYPE || ty == OVERLAY_FOOTER_TYPE {
-            // (the footer where the archive's end tells it is)
-            let n = u16::from_le_bytes(a.get(at..at + 2)?.try_into().unwrap()) as usize;
-            return (start + FOOTER_MAGIC.len() + 2 + n + 2 == a.len()).then_some(c);
+            let ended = match a.get(at..at + 2) {
+                Some(n) if start + 6 + 2 + u16::from_le_bytes(n.try_into().unwrap()) as usize + 2 == a.len() => {
+                    Ended::Footer
+                }
+                // (a footer cut short, or not ending at the end)
+                _ => Ended::Cut,
+            };
+            return (out, ended);
+        }
+        if at - start != varint::len(ty) {
+            return (out, Ended::Bad);
         }
         let width = 1 << (ty % 4);
-        let size = a.get(at..at + width)?;
+        let Some(size) = a.get(at..at + width) else { return (out, Ended::Cut) };
         at += width;
-        let size =
-            usize::try_from(u64::from_le_bytes(std::array::from_fn(|i| size.get(i).copied().unwrap_or(0)))).ok()?;
-        let data = at..at.checked_add(size).filter(|&e| e <= a.len())?;
+        let size = u64::from_le_bytes(std::array::from_fn(|i| size.get(i).copied().unwrap_or(0)));
+        let Some(data) = usize::try_from(size).ok().and_then(|n| at.checked_add(n)).filter(|&e| e <= a.len()) else {
+            return (out, Ended::Cut);
+        };
+        let data = at..data;
         at = data.end;
+        out.push((start, ty, data));
+        if (at - start) % 2 == 1 {
+            at += 1;
+        }
+    }
+}
+
+/// [`check`] reading the blocks of `a` one after another, if they are all there up to the
+/// footer.
+fn walk(a: &[u8]) -> Option<Check> {
+    let (blocks, ended) = blocks(a);
+    if ended != Ended::Footer {
+        return None;
+    }
+    let mut c = Check { walked: true, ..Check::default() };
+    for (start, ty, data) in blocks {
         if mirrorable(ty) {
             c.targets.push((start, ty));
-        } else if (MIRROR + 0x10..=MIRROR + 0x78).contains(&ty) {
+        } else if is_mirror(ty) {
             match mirror_at(a, start, ty, data, Some(HEADER_MAGIC.len())) {
                 Some(m) => c.mirrors.push(m),
                 None => c.broken += 1,
             }
         }
-        if (at - start) % 2 == 1 {
-            at += 1;
-        }
     }
+    Some(c)
 }
 
 /// The intact mirror blocks of `a` found by their magic, the archive starting at `start` where
@@ -542,30 +673,82 @@ fn scan(a: &[u8], start: Option<usize>) -> Vec<Found> {
     found.into_iter().filter(|f| Some(f.archive_start) == start).collect()
 }
 
-/// Restores the target blocks of archive `a` that are not as an intact mirror block of `c`
-/// tells (the first of them, where several do): how many were.
-pub fn repair(a: &mut [u8], c: &Check) -> usize {
-    let mut restored = std::collections::HashSet::new();
-    let mut good = std::collections::HashSet::new();
-    for m in &c.mirrors {
-        if m.matches(a) {
-            good.insert(m.target);
-        }
+/// An archive repaired ([`repair`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Repaired {
+    pub bytes: Vec<u8>,
+    /// The blocks restored from mirror blocks.
+    pub restored: usize,
+    /// Whether the footer was made again (the archive cut short after its last metadata block).
+    pub footer: bool,
+}
+
+/// Archive `a` repaired (spec, "Repair") by what [`check`] found of it (`c`), where anything
+/// was: the target blocks not as an intact mirror block tells restored from the first of them
+/// (a block past the end of `a` too, where it starts within it); then, where the blocks no
+/// longer reach a footer at the end but are cut short after the last metadata block (with only
+/// spacer blocks and blocks of non-critical types after it), the footer made again after the
+/// last block whole.
+pub fn repair(a: &[u8], c: &Check) -> Option<Repaired> {
+    // (read one after another up to a footer at the end, as all its blocks are as they are to be)
+    if c.walked && c.differing(a).next().is_none() {
+        return None;
     }
+    let mut v: Option<Vec<u8>> = None;
+    let good: HashSet<usize> = c.mirrors.iter().filter(|m| m.matches(a)).map(|m| m.target).collect();
+    let mut restored = HashSet::new();
     for m in &c.mirrors {
-        if good.contains(&m.target) || restored.contains(&m.target) || m.target_end() > a.len() {
+        if good.contains(&m.target) || restored.contains(&m.target) {
             continue;
         }
+        let b = v.get_or_insert_with(|| a.to_vec());
+        if m.target > b.len() {
+            continue;
+        }
+        let end = m.target_end();
+        if b.len() < end {
+            b.resize(end, 0);
+        }
         let h = m.target + m.head.len();
-        a[m.target..h].copy_from_slice(&m.head);
-        a.copy_within(m.data.clone(), h);
+        b[m.target..h].copy_from_slice(&m.head);
+        b[h..end].copy_from_slice(&a[m.data.clone()]);
         // (the padding, as the spec restores it)
-        if (m.target_end() - m.target) % 2 == 1 && m.target_end() < a.len() {
-            a[m.target_end()] = 0;
+        if (end - m.target) % 2 == 1 && end < b.len() {
+            b[end] = 0;
         }
         restored.insert(m.target);
     }
-    restored.len()
+    let headed = a.starts_with(&HEADER_MAGIC) || a.starts_with(&OVERLAY_HEADER_MAGIC);
+    let mut footer = false;
+    if headed {
+        let b = v.as_deref().unwrap_or(a);
+        let (blocks, ended) = blocks(b);
+        let last_meta = blocks.iter().rposition(|b| (0x10..=0x17).contains(&b.1));
+        let after_ok = |i: usize| blocks[i + 1..].iter().all(|b| b.1 <= 0x03 || !super::critical(b.1));
+        if ended == Ended::Cut
+            && let Some(i) = last_meta.filter(|&i| after_ok(i))
+        {
+            let meta = blocks[i].0;
+            let last = blocks.last().unwrap();
+            let e = last.2.end + (last.2.end - last.0) % 2;
+            let b = v.get_or_insert_with(|| a.to_vec());
+            // (its padding, where cut off, restored as a zero byte)
+            b.resize(e, 0);
+            let mut f = Vec::new();
+            varint::put(&mut f, (e - HEADER_MAGIC.len()) as u64);
+            varint::put(&mut f, (e + 8 - meta) as u64);
+            let overlay = a.starts_with(&OVERLAY_HEADER_MAGIC);
+            b.extend_from_slice(if overlay { &OVERLAY_FOOTER_MAGIC } else { &FOOTER_MAGIC });
+            b.extend_from_slice(&(f.len() as u16).to_le_bytes());
+            b.extend_from_slice(&f);
+            b.extend_from_slice(&(f.len() as u16).to_le_bytes());
+            footer = true;
+        }
+    }
+    if restored.is_empty() && !footer {
+        return None;
+    }
+    Some(Repaired { bytes: v.expect("changed"), restored: restored.len(), footer })
 }
 
 #[cfg(test)]
@@ -579,22 +762,39 @@ mod tests {
     const NAMES: [&str; 3] = ["hello", "xyz", "uvw"];
 
     /// An archive of three files, each a formula block applying a module (a metadata block,
-    /// a module block and three formula blocks to mirror), of `pad` bytes more each.
-    fn archive(pad: usize) -> Vec<u8> {
-        archive_of(pad, false)
+    /// a module block and three formula blocks to mirror).
+    fn archive() -> Vec<u8> {
+        segment(&[0; 3], false, None)
     }
 
-    /// [`archive`], with the files' checksums where `sums`.
-    fn archive_of(pad: usize, sums: bool) -> Vec<u8> {
+    /// Bytes that do not compress.
+    fn noise(n: usize, seed: u64) -> Vec<u8> {
+        let mut x = seed;
+        (0..n)
+            .map(|_| {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (x >> 56) as u8
+            })
+            .collect()
+    }
+
+    /// [`archive`], the files of `pads[k]` bytes of noise more each, with their checksums where
+    /// `sums`; where `front` is given, the metadata block's mirror block before the files from
+    /// that one on ([`SegmentWriter::finish_mirrored`]).
+    fn segment(pads: &[usize; 3], sums: bool, front: Option<usize>) -> Vec<u8> {
         let mut f = Formula::default();
-        let datas: Vec<Vec<u8>> = NAMES.iter().map(|s| [s.as_bytes(), &vec![b'.'; pad]].concat()).collect();
+        let datas: Vec<Vec<u8>> = (0..3).map(|k| [NAMES[k].as_bytes(), &noise(pads[k], k as u64)].concat()).collect();
         let lits: Vec<_> = (0..3).map(|k| f.push(NAMES[k], datas[k].clone())).collect();
         let enc = Encoder::new(Level::Zstd(3));
         let mut w = SegmentWriter::new();
         let mut out = SegmentWriter::header().to_vec();
         let mut t = Tree::default();
         let mut contents = Vec::new();
+        let mut at_front = None;
         for (k, a) in lits.iter().enumerate() {
+            if front == Some(k) {
+                at_front = Some(out.len());
+            }
             let len = datas[k].len() as u64;
             let rev: Vec<u8> = datas[k].iter().rev().copied().collect();
             let sum = sums.then(|| super::super::checksum(&rev));
@@ -607,7 +807,14 @@ mod tests {
             let name = format!("f{k}").into_bytes();
             t.entries.push(Entry { parent: None, name, node: EntryNode::File(k), extra: Extra::default() });
         }
-        out.extend_from_slice(&w.finish(&enc, &t, &contents).unwrap().0);
+        match at_front {
+            None => out.extend_from_slice(&w.finish(&enc, &t, &contents).unwrap().0),
+            Some(p) => {
+                let (mirror, end) = w.finish_mirrored(&enc, &t, &contents, p, false).unwrap().expect("far enough");
+                out.splice(p..p, mirror);
+                out.extend_from_slice(&end);
+            }
+        }
         out
     }
 
@@ -631,7 +838,7 @@ mod tests {
 
     #[test]
     fn mirrors_every_block_but_data() {
-        let a = archive(0);
+        let a = archive();
         for step in [1, 7, a.len()] {
             let m = mirrored(&a, step, false);
             // the blocks before the footer as they were, the files too
@@ -663,7 +870,7 @@ mod tests {
     /// their magic.
     #[test]
     fn restores_blocks() {
-        let m = mirrored(&archive(0), 4096, false);
+        let m = mirrored(&archive(), 4096, false);
         let c = check(&m);
         for t in &c.mirrors {
             let mut d = m.clone();
@@ -671,8 +878,9 @@ mod tests {
             let cd = check(&d);
             assert!(cd.walked);
             assert_eq!(cd.differing(&d).count(), 1);
-            assert_eq!(repair(&mut d, &cd), 1);
-            assert_eq!(d, m);
+            let r = repair(&d, &cd).unwrap();
+            assert_eq!((r.restored, r.footer), (1, false));
+            assert_eq!(r.bytes, m);
         }
         let meta = c.mirrors.last().unwrap();
         let mut d = m.clone();
@@ -682,23 +890,23 @@ mod tests {
         let cd = check(&d);
         // (read one after another, the spacer block's zeros resynchronising the blocks)
         assert!(cd.walked && cd.mirrors.len() == 5);
-        assert_eq!(repair(&mut d, &cd), 1);
-        assert_eq!(d, m);
-        assert_eq!(files(&d), files(&m));
+        let r = repair(&d, &cd).unwrap();
+        assert_eq!((r.restored, &r.bytes), (1, &m));
+        assert_eq!(files(&r.bytes), files(&m));
         // the header damaged too: found by their magic, the archive starting where they tell
-        d[meta.target + 1] = 0xff;
         d[0] ^= 1;
         let cd = check(&d);
         assert!(!cd.walked && cd.mirrors.len() == 5);
-        assert_eq!(repair(&mut d, &cd), 1);
-        d[0] ^= 1;
-        assert_eq!(d, m);
+        let mut r = repair(&d, &cd).unwrap();
+        assert_eq!(r.restored, 1);
+        r.bytes[0] ^= 1;
+        assert_eq!(r.bytes, m);
     }
 
     /// A damaged mirror block is told and not used; the archive is read as it is.
     #[test]
     fn tells_damaged_mirrors() {
-        let m = mirrored(&archive(0), 4096, false);
+        let m = mirrored(&archive(), 4096, false);
         let c = check(&m);
         let mut d = m.clone();
         let x = &c.mirrors[1];
@@ -706,15 +914,46 @@ mod tests {
         let cd = check(&d);
         assert_eq!((cd.mirrors.len(), cd.broken, cd.unmirrored()), (4, 1, 1));
         assert!(!cd.mirrored(&d, false));
-        assert_eq!(repair(&mut d.clone(), &cd), 0);
+        assert_eq!(repair(&d, &cd), None);
         assert_eq!(files(&d), files(&m));
+    }
+
+    /// The metadata block's mirror block before the last files (its target following it), and
+    /// none after them; a truncation into the metadata block restores it, and the footer.
+    #[test]
+    fn mirrors_the_metadata_block_before() {
+        let a = segment(&[0, 3000, 3000], false, Some(1));
+        let m = mirrored(&a, 4096, false);
+        assert_eq!(files(&m), files(&segment(&[0, 3000, 3000], false, None)));
+        let c = check(&m);
+        assert!(c.walked && c.mirrored(&m, false), "{c:?}");
+        let meta = c.targets.last().unwrap().0;
+        let front: Vec<&Found> = c.mirrors.iter().filter(|f| f.target == meta).collect();
+        assert!(front.len() == 1 && front[0].at < meta && front[0].far(false));
+        // (cut in the metadata block: restored past the end, the footer made again)
+        for cut in [meta + 3, meta, m.len() - 5] {
+            let d = &m[..cut];
+            let cd = check(d);
+            assert!(!cd.walked);
+            let r = repair(d, &cd).unwrap();
+            assert_eq!((r.restored, r.footer), ((cut <= meta + 3) as usize, true));
+            assert_eq!(files(&r.bytes), files(&m));
+        }
+        // (cut before the metadata block: not repaired, as files' blocks are lost)
+        let d = &m[..meta - 1];
+        assert!(repair(d, &check(d)).is_none_or(|r| !r.footer));
+        // in the archive without it, a truncation into the metadata block is lost
+        let m = mirrored(&segment(&[0, 3000, 3000], false, None), 4096, false);
+        let meta = check(&m).targets.last().unwrap().0;
+        let d = &m[..meta + 3];
+        assert_eq!(repair(d, &check(d)), None);
     }
 
     /// A mirror block of an archive within the archive (as a file of it, stored) is not taken
     /// as one of the archive's.
     #[test]
     fn leaves_inner_archives_alone() {
-        let inner = mirrored(&archive(0), 4096, false);
+        let inner = mirrored(&archive(), 4096, false);
         let mut f = Formula::default();
         f.root = f.push("inner", inner.clone());
         let outer = super::super::encode(&f, None, Level::STORED).unwrap();
@@ -729,25 +968,43 @@ mod tests {
     #[test]
     fn archival() {
         let natives = natives();
-        let of = |sums| super::super::open(&archive_of(0, sums), &natives).unwrap().archival().unwrap();
+        let of = |sums| super::super::open(&segment(&[0; 3], sums, None), &natives).unwrap().archival().unwrap();
         assert_eq!(of(false), super::super::Archival { unchecked_leaves: 0, unchecked_formulas: 3 });
         assert!(of(true).conforms());
     }
 
-    /// A block whose mirror block would not fit its size field has a widened one.
+    /// A block whose mirror block would not fit its size field has a widened one, its archive
+    /// offset odd; a block following its mirror block has an odd target offset.
     #[test]
-    fn widens() {
-        let t = Target { start: 6, end: 6 + 2 + 250, ty: 0x70, data: vec![7; 250] };
+    fn widens_and_follows() {
+        let data = vec![7; 250];
         let mut out = HEADER_MAGIC.to_vec();
         out.extend_from_slice(&[0x70, 250]);
-        out.extend_from_slice(&t.data);
+        out.extend_from_slice(&data);
         let at = out.len() as u64;
-        mirror_block(&mut out, &MIRROR_MAGIC, at, &t);
+        mirror_block(&mut out, &MIRROR_MAGIC, at, 6, 0x70, &data);
         assert_eq!(&out[at as usize..at as usize + 2], &[0xf1, 0x18]);
-        let mut p = at as usize;
-        let ty = varint::get(&out, &mut p).unwrap();
-        let n = u16::from_le_bytes([out[p], out[p + 1]]) as usize;
-        let f = mirror_at(&out, at as usize, ty, p + 2..p + 2 + n, Some(6)).unwrap();
+        let read = |out: &[u8], at: usize| {
+            let mut p = at;
+            let ty = varint::get(out, &mut p).unwrap();
+            let width = 1 << (ty % 4);
+            let n = u64::from_le_bytes(std::array::from_fn(|i| if i < width { out[p + i] } else { 0 })) as usize;
+            let d = &out[p + width..p + width + n];
+            let mut q = 8;
+            let fields = (varint::get(d, &mut q).unwrap(), varint::get(d, &mut q).unwrap());
+            (mirror_at(out, at, ty, p + width..p + width + n, Some(6)).unwrap(), fields)
+        };
+        let (f, (archive_offset, target_offset)) = read(&out, at as usize);
         assert!(f.target == 6 && f.ty == 0x70 && f.matches(&out));
+        assert_eq!((archive_offset, target_offset), (at - 6 + 1, at - 6));
+        // (the block after its mirror block: odd)
+        let mut out = HEADER_MAGIC.to_vec();
+        out.extend_from_slice(&mirror_of(&[0x70, 3, 1, 2, 3], 6 + 30, 6, false));
+        let pad = 6 + 30 - out.len();
+        out.extend_from_slice(&vec![0; pad]);
+        out.extend_from_slice(&[0x70, 3, 1, 2, 3]);
+        let (f, (archive_offset, target_offset)) = read(&out, 6);
+        assert!(f.target == 36 && f.matches(&out));
+        assert_eq!((archive_offset, target_offset), (0, 31));
     }
 }

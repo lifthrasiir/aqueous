@@ -56,8 +56,11 @@
 //! - `-A` (`--archival`): compressing, an archive for long-term preservation: of the archival
 //!   profile (as every archive is made: each file's content checksummed, nothing outside it), with
 //!   a mirror block of each block whose damage would lose more than a file ([`aqr::Mirroring`]),
-//!   which decompressing (and testing) any archive restores a damaged block from, telling so
-//!   ([`repaired`]).
+//!   the last metadata block's before the last 4 MiB of the archive (held back as it is made),
+//!   so that a truncation shorter than that leaves it. Decompressing (and testing), any archive
+//!   is repaired in memory ([`aqr::mirror::repair`]): a damaged block restored from its mirror
+//!   block, the footer made again where the archive is cut short after its last metadata block;
+//!   told so.
 //! - `-L`: the entries of each archive listed on standard output, and what each file takes of
 //!   the archive and how it is made ([`list`]); `-q` the paths alone, `-v` all that is told.
 //! - `-P`: compressing, the archives encrypted with a passphrase ([`aqr::envelope`]), asked for
@@ -1970,18 +1973,21 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     let decoder =
         Decoder { native: Native { threads: a.opt.threads }, wasm: a.wasm, sandbox: a.sandbox.then(OnceLock::new) };
     let runner: &dyn aqr::Runner = &decoder;
-    // its blocks restored from their mirror blocks where they differ
+    // repaired where it is damaged: its blocks restored from their mirror blocks where they
+    // differ, its footer made again where it is cut short after its last metadata block
     let read: &[u8] = decrypted.as_deref().unwrap_or(&c[..]);
     let mirrors = aqr::mirror::check(read);
-    let restored = repaired(read, &mirrors).map_err(|e| err(&e))?;
-    if let Some((_, n)) = &restored {
-        eprintln!(
-            "{}: {n} damaged block{} restored from mirror blocks",
-            input.display(),
-            if *n == 1 { "" } else { "s" }
-        );
+    let restored = aqr::mirror::repair(read, &mirrors);
+    if let Some(r) = &restored {
+        if r.restored > 0 {
+            let s = if r.restored == 1 { "" } else { "s" };
+            eprintln!("{}: {} damaged block{s} restored from mirror blocks", input.display(), r.restored);
+        }
+        if r.footer {
+            eprintln!("{}: cut short after its last metadata block, its footer made again", input.display());
+        }
     }
-    let read: &[u8] = restored.as_ref().map_or(read, |r| &r.0);
+    let read: &[u8] = restored.as_ref().map_or(read, |r| &r.bytes);
     let mut archive = match decrypted.is_some() {
         true => aqr::open_payload(read, runner),
         false => aqr::open(read, runner),
@@ -2143,19 +2149,6 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
         });
     }
     Ok(true)
-}
-
-/// Archive `c` with the blocks restored that differ from their intact mirror blocks
-/// ([`aqr::mirror::repair`]), in memory not backed by a file, and how many were; none where
-/// none differ.
-fn repaired(c: &[u8], m: &aqr::mirror::Check) -> std::io::Result<Option<(memmap2::Mmap, usize)>> {
-    if m.differing(c).next().is_none() {
-        return Ok(None);
-    }
-    let mut d = memmap2::MmapMut::map_anon(c.len())?;
-    d.copy_from_slice(c);
-    let n = aqr::mirror::repair(&mut d, m);
-    Ok(Some((d.make_read_only()?, n)))
 }
 
 /// Tells (on standard error) how far `archive` (of `input`, its bytes `read` as decoded)
