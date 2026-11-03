@@ -1,4 +1,4 @@
-//! An archive of several files, as one segment, written a batch of leaves at a time
+//! An archive of several files, as one or more segments, written a batch of leaves at a time
 //! ([`SegmentWriter`]; all of them at once, [`Encoder::encode_segment`]): each leaf a formula
 //! block of the outputs of a [`Leaf`] (or a leaf data block, where it is all of a stream of its
 //! own), after the formula blocks that slice them the non-leaf blocks of the streams, each module
@@ -76,10 +76,18 @@ const HINTED: [u8; 18] = {
 /// The blocks of an archive in order, each what it is and its bytes.
 pub type Layout = Vec<(Placed, usize)>;
 
-/// A segment being written: where it is, and the modules and resources of its blocks so far.
+/// An archive being written, a segment at a time: where it is, and the modules and resources of
+/// the blocks of its segment so far. A segment is closed by its metadata block
+/// ([`SegmentWriter::close`]), the last by [`SegmentWriter::finish`] (and the footer); what each
+/// tells is of its own blocks, each self-contained (spec, "Content blocks").
 pub struct SegmentWriter {
     /// Bytes of the archive so far, its header magic among them.
     at: usize,
+    /// Where the segment started (after the metadata block before it, or the header and size
+    /// hint), and where the metadata block before it is (the end of the header magic, less 1,
+    /// where there is none).
+    segment_at: usize,
+    prev: usize,
     /// Whether the archive has a size hint block ([`SegmentWriter::with_size_hint`]).
     hinted: bool,
     modules: Vec<Module>,
@@ -137,8 +145,11 @@ impl SegmentWriter {
     /// [`SegmentWriter::new`], its header followed by a size hint block to be filled in where
     /// `on` ([`super::SIZE_HINT_PLACEHOLDER`]), as an encrypted archive's payload has to.
     pub fn with_size_hint(on: bool) -> SegmentWriter {
+        let at = if on { HINTED.len() } else { HEADER_MAGIC.len() };
         SegmentWriter {
-            at: if on { HINTED.len() } else { HEADER_MAGIC.len() },
+            at,
+            segment_at: at,
+            prev: HEADER_MAGIC.len() - 1,
             hinted: on,
             modules: Vec::new(),
             module_at: Vec::new(),
@@ -169,6 +180,46 @@ impl SegmentWriter {
 
     pub fn is_empty(&self) -> bool {
         self.at == self.head().len()
+    }
+
+    /// Bytes of the segment so far.
+    pub fn segment_len(&self) -> usize {
+        self.at - self.segment_at
+    }
+
+    /// Whether the segment has no blocks yet.
+    pub fn segment_is_empty(&self) -> bool {
+        self.at == self.segment_at
+    }
+
+    /// Bytes of the blocks of the segment so far that may be mirrored (module, resource,
+    /// dictionary and formula blocks): about those of their mirror blocks.
+    pub fn mirrorable(&self) -> usize {
+        self.mirrorable
+    }
+
+    /// Closes the segment with the metadata block of `t`, its contents where `contents` tells
+    /// (by [`EntryNode::File`], of leaves of the segment): the bytes to write after its blocks.
+    /// The blocks after it are of a segment of their own, which takes nothing of this one's.
+    /// Fails on a tree the spec does not allow.
+    pub fn close(&mut self, enc: &Encoder, t: &Tree, contents: &[ContentAt]) -> Result<Vec<u8>> {
+        tree::check(t, contents.len()).map_err(Error::new)?;
+        if contents.iter().any(|c| c.leaf < self.segment_at) {
+            return Err(Error::new("a content of a leaf of another segment"));
+        }
+        let out = self.metadata_block(enc, t, contents, usize::MAX, 0)?;
+        self.prev = self.at;
+        self.at += out.len();
+        self.segment_at = self.at;
+        self.modules.clear();
+        self.module_at.clear();
+        self.resources.clear();
+        self.resource_at.clear();
+        self.dictionary_at.clear();
+        self.mirrorable = 0;
+        self.leaf_dictionary.clear();
+        self.prefix.clear();
+        Ok(out)
     }
 
     /// The blocks of `leaves` over `f`'s streams and applications of several outputs (its root
@@ -528,7 +579,7 @@ impl SegmentWriter {
         let all = |v: &[usize]| v.iter().map(|&a| moved(a)).collect::<Vec<_>>();
         let (modules, resources, dictionaries) =
             (all(&self.module_at), all(&self.resource_at), all(&self.dictionary_at));
-        let meta = tree::metadata(t, self.at + shift, &modules, &resources, &dictionaries, &params);
+        let meta = tree::metadata(t, self.at + shift, moved(self.prev), &modules, &resources, &dictionaries, &params);
         let mut out = Vec::new();
         match enc.base_level() {
             STORED => {
@@ -1112,5 +1163,128 @@ mod tests {
             t.entries[i].extra.win_link_type = Some(l);
             assert!(enc.encode_segment(&Segment { tree: &t, ..seg }).is_err());
         }
+    }
+
+    /// An archive of three segments, each closed by its metadata block: each writes the module
+    /// it applies again and takes nothing of the others'; the trees merge (spec, "Merging
+    /// segments"): a directory again (its extra kept where it has none, replaced where it has
+    /// one), a file replaced, a directory replaced by a file, and link groups of a segment's own
+    /// apart from another's of the same number.
+    #[test]
+    fn several_segments() {
+        let names = ["d/a", "x", "h1", "h2", "d/b", "x2", "h3", "d"];
+        let mut f = Formula::default();
+        let lits: Vec<Node> = names.iter().map(|n| f.push(*n, n.as_bytes().to_vec())).collect();
+        let enc = Encoder::new(Level::Zstd(3));
+        let mut w = SegmentWriter::new();
+        let mut out = SegmentWriter::header().to_vec();
+        // each segment's leaves (by name) and tree
+        let file = |parent, name: &str, c, group: Option<i128>| Entry {
+            extra: Extra { link_group: group, ..Extra::default() },
+            ..entry(parent, name, EntryNode::File(c))
+        };
+        let dir =
+            |mode: Option<u32>| Entry { extra: Extra { mode, ..Extra::default() }, ..entry(None, "d", EntryNode::Dir) };
+        let segments: [(Vec<usize>, Vec<Entry>); 3] = [
+            (
+                vec![0, 1, 2],
+                vec![
+                    dir(Some(0o700)),
+                    file(Some(0), "a", 0, None),
+                    file(None, "x", 1, None),
+                    file(None, "h1", 2, Some(0)),
+                    file(None, "h2", 2, Some(0)),
+                ],
+            ),
+            (
+                vec![4, 5, 6],
+                vec![dir(None), file(Some(0), "b", 0, None), file(None, "x", 1, None), file(None, "h3", 2, Some(0))],
+            ),
+            (vec![7], vec![file(None, "d", 0, Some(-5))]),
+        ];
+        let modules = |b: &Batch| b.layout.iter().filter(|p| p.0 == Placed::Module).count();
+        for (k, (of, entries)) in segments.iter().enumerate() {
+            let leaves: Vec<Leaf> = of
+                .iter()
+                .map(|&i| Leaf {
+                    outputs: vec![Node::apply(REV, vec![1, 2, 3], vec![lits[i].clone()], names[i].len() as u64)],
+                    sums: vec![None],
+                })
+                .collect();
+            let b = w.batch(&enc, &f, &leaves).unwrap();
+            assert_eq!(modules(&b), 1);
+            w.commit(&b);
+            out.extend_from_slice(&b.bytes);
+            let contents: Vec<ContentAt> = (of.iter().enumerate())
+                .map(|(j, &i)| ContentAt { leaf: b.leaf_at[j], output: 0, size: names[i].len() as u64 })
+                .collect();
+            let t = Tree { root: Extra::default(), entries: entries.clone() };
+            if k < 2 {
+                out.extend_from_slice(&w.close(&enc, &t, &contents).unwrap());
+                assert!(w.segment_is_empty());
+                // (a content of the segment closed is not of the next)
+                assert!(w.close(&enc, &t, &contents).is_err());
+            } else {
+                out.extend_from_slice(&w.finish(&enc, &t, &contents).unwrap().0);
+            }
+        }
+        let Ok(Value::Tree(t, files)) = decode_value(&out, &natives()) else { panic!() };
+        let rev = |s: &str| s.bytes().rev().collect::<Vec<u8>>();
+        let got: Vec<(&[u8], Vec<u8>, Option<i128>)> = (t.entries.iter())
+            .map(|e| match e.node {
+                EntryNode::File(c) => (&e.name[..], files[c].clone(), e.extra.link_group),
+                _ => (&e.name[..], Vec::new(), None),
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (&b"h1"[..], rev("h1"), Some(0)),
+                (b"h2", rev("h1"), Some(0)),
+                (b"x", rev("x2"), None),
+                (b"h3", rev("h3"), Some(1)),
+                (b"d", rev("d"), Some(-5)),
+            ]
+        );
+        assert!(t.entries.iter().all(|e| e.parent.is_none()));
+        // (only the contents left in the tree)
+        assert_eq!(files.len(), 4);
+
+        // the second segment's directory over the first's: of the first's extra, or of its own
+        let mut both = Vec::new();
+        for mode in [None, Some(0o755)] {
+            let mut w = SegmentWriter::new();
+            let mut out = SegmentWriter::header().to_vec();
+            for (k, (of, entries)) in segments[..2].iter().enumerate() {
+                let leaves: Vec<Leaf> =
+                    of.iter().map(|&i| Leaf { outputs: vec![lits[i].clone()], sums: vec![None] }).collect();
+                let b = w.batch(&enc, &f, &leaves).unwrap();
+                w.commit(&b);
+                out.extend_from_slice(&b.bytes);
+                let contents: Vec<ContentAt> = (of.iter().enumerate())
+                    .map(|(j, &i)| ContentAt { leaf: b.leaf_at[j], output: 0, size: names[i].len() as u64 })
+                    .collect();
+                let mut t = Tree { root: Extra::default(), entries: entries.clone() };
+                if k == 0 {
+                    out.extend_from_slice(&w.close(&enc, &t, &contents).unwrap());
+                } else {
+                    t.entries[0].extra.mode = mode;
+                    out.extend_from_slice(&w.finish(&enc, &t, &contents).unwrap().0);
+                }
+            }
+            let Ok(Value::Tree(t, files)) = decode_value(&out, &natives()) else { panic!() };
+            let d = t.entries.iter().position(|e| e.name == b"d").unwrap();
+            let mut under: Vec<Vec<u8>> = (t.entries.iter())
+                .filter(|e| e.parent == Some(d))
+                .map(|e| match e.node {
+                    EntryNode::File(c) => files[c].clone(),
+                    _ => unreachable!(),
+                })
+                .collect();
+            under.sort();
+            assert_eq!(under, [b"d/a".to_vec(), b"d/b".to_vec()]);
+            both.push(t.entries[d].extra.mode);
+        }
+        assert_eq!(both, [Some(0o700), Some(0o755)]);
     }
 }

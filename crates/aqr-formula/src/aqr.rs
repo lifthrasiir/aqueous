@@ -23,11 +23,12 @@
 //! [`decode`] evaluates such archives, and any other without a metadata block. An encrypted
 //! archive is sealed and opened by [`envelope`], its payload then opened by [`open_payload`].
 //!
-//! An archive of several files is one segment (`segment`): [`Encoder::encode_segment`] lays
-//! out the formulas of the files over streams they may share, with the metadata block of their
-//! [`Tree`], and [`decode_value`] decodes any archive of a segment at most (without
-//! registered dictionaries or imports) to its files. The blocks alike of a batch
-//! of its leaves may take a dictionary trained for them ([`dict`]).
+//! An archive of several files is of one or more segments (`segment`): [`Encoder::encode_segment`]
+//! lays out the formulas of the files over streams they may share, with the metadata block of
+//! their [`Tree`], and [`SegmentWriter`] writes them a batch at a time, closing a segment where
+//! it is told to. [`decode_value`] decodes any archive (without registered dictionaries or
+//! imports) to its files, the trees of its segments merged. The blocks alike of a batch of its
+//! leaves may take a dictionary trained for them ([`dict`]).
 
 mod dict;
 pub mod envelope;
@@ -2449,21 +2450,36 @@ fn open_with<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, sealed: bool, salvagin
     // (salvaging an encrypted archive's payload, its blocks lost are spacer blocks, its size
     // hint block among them maybe)
     let mut blocks = parse(&c[HEADER_MAGIC.len()..archive_end], size_hint, metadata != 0, sealed && !salvaging)?;
-    let meta = match metadata {
-        0 => None,
-        back => {
-            let at = usize::try_from(back).ok().and_then(|b| fields_start.checked_sub(b));
-            match blocks.metadata.pop() {
-                Some((m, d)) if Some(m) == at && blocks.metadata.is_empty() => Some((m, tree::read(&d)?)),
-                Some(_) if !blocks.metadata.is_empty() => return resource("several segments are not supported yet"),
-                _ => return invalid("no metadata block where the footer points"),
-            }
+    if metadata != 0 {
+        let at = usize::try_from(metadata).ok().and_then(|b| fields_start.checked_sub(b));
+        if blocks.segments.last().and_then(|s| s.metadata.as_ref()).map(|m| m.0) != at {
+            return invalid("no metadata block where the footer points");
         }
-    };
+    }
     let outputs: Vec<u64> =
         blocks.leaves.iter().map(|l| if let LeafBlock::Formula { outputs, .. } = l { *outputs } else { 1 }).collect();
     let mut lost = Vec::new();
-    let tree = meta.map(|(at, m)| tree_of(m, at, &blocks, &outputs, salvaging.then_some(&mut lost))).transpose()?;
+    // each segment's tree, then merged (spec, "Interpreting an archive")
+    // (the metadata blocks' data, no longer held once read)
+    let metas: Vec<(usize, Vec<u8>)> = blocks
+        .segments
+        .iter_mut()
+        .filter_map(|s| s.metadata.as_mut().map(|(at, d)| (*at, std::mem::take(d))))
+        .collect();
+    let mut trees = Vec::with_capacity(metas.len());
+    // (where the metadata block before each is: the end of the header magic, less 1, before the first)
+    let mut prev = HEADER_MAGIC.len() - 1;
+    for (k, (at, d)) in metas.into_iter().enumerate() {
+        let m = tree::read(&d)?;
+        drop(d);
+        trees.push(tree_of(m, at, prev, &blocks, k, &outputs, salvaging.then_some(&mut lost))?);
+        prev = at;
+    }
+    let tree = match trees.len() {
+        0 => None,
+        1 => trees.pop().map(|t| (t.tree, t.refs)),
+        _ => Some(tree::merge(trees)),
+    };
     // (the leaves lost, after those there: never where they are, never with a dictionary)
     for _ in lost {
         blocks.leaves.push(LeafBlock::Lost);
@@ -2571,19 +2587,11 @@ impl<'n> Archive<'_, 'n> {
             match *leaf {
                 LeafBlock::Stored(_, _, checked, _) => a.unchecked_leaves += !checked as usize,
                 LeafBlock::Lost => {}
-                LeafBlock::Formula { outputs, data, modules, resources, non_leaf } => {
+                LeafBlock::Formula { outputs, data, .. } => {
                     let (d, dict) = blocks.formulas[data];
                     let d = decoded_with(d, true, true, dict.map(|d| &blocks.dictionaries[d]))?;
-                    let env = Env {
-                        first: non_leaf,
-                        modules: &blocks.modules[..modules],
-                        module_data: &blocks.module_data[..modules],
-                        resource_data: &blocks.resource_data[..resources],
-                        loaded: &self.loaded[..modules],
-                        resources: &blocks.resources[..resources],
-                        runner: self.runner,
-                    };
-                    let p = read(&d, outputs, &env, blocks.non_leaf.len(), &mut used)?;
+                    let (env, end) = blocks.env(leaf, &self.loaded, self.runner);
+                    let p = read(&d, outputs, &env, end, &mut used)?;
                     a.unchecked_formulas += !p.outputs_checked() as usize;
                 }
             }
@@ -2610,15 +2618,7 @@ impl<'n> Archive<'_, 'n> {
         // then for non-leaf blocks no formula refers to): a non-leaf block is dropped once nothing
         // is to slice it
         let mut used = vec![false; blocks.non_leaf.len()];
-        let env = |modules: usize, resources: usize, first| Env {
-            first,
-            modules: &blocks.modules[..modules],
-            module_data: &blocks.module_data[..modules],
-            resource_data: &blocks.resource_data[..resources],
-            loaded: &self.loaded[..modules],
-            resources: &blocks.resources[..resources],
-            runner: self.runner,
-        };
+        let env = |leaf: &LeafBlock| blocks.env(leaf, &self.loaded, self.runner);
         let formulas = blocks
             .leaves
             .iter()
@@ -2636,9 +2636,9 @@ impl<'n> Archive<'_, 'n> {
             .iter()
             .zip(&formulas)
             .map(|(leaf, d)| match (leaf, d) {
-                (&LeafBlock::Formula { outputs, modules, resources, non_leaf, .. }, Ok(Some(d))) => {
-                    let env = env(modules, resources, non_leaf);
-                    read(d, outputs, &env, blocks.non_leaf.len(), &mut used).map(Some)
+                (&LeafBlock::Formula { outputs, .. }, Ok(Some(d))) => {
+                    let (env, end) = env(leaf);
+                    read(d, outputs, &env, end, &mut used).map(Some)
                 }
                 (_, Err(e)) => Err(e.clone()),
                 _ => Ok(None),
@@ -2736,9 +2736,9 @@ impl<'n> Archive<'_, 'n> {
                         tally.add(raw.len() as u64, 0);
                         d.map(|d| vec![d])
                     }
-                    LeafBlock::Formula { modules, resources, non_leaf, .. } => {
+                    ref leaf @ LeafBlock::Formula { .. } => {
                         let p = programs[i].lock().unwrap().take().expect("each leaf once");
-                        let env = env(modules, resources, non_leaf);
+                        let env = env(leaf).0;
                         match sink {
                             Some(sink) => run(p, &env, &contents, Some(&mut **sink.lock().unwrap()), threads),
                             None => run(p, &env, &contents, None, threads),
@@ -2821,28 +2821,36 @@ impl<'n> Archive<'_, 'n> {
     }
 }
 
-/// The tree of metadata block `m` at `at`, among `blocks` whose leaves have `outputs` each;
-/// and its contents, each a leaf and an output of it, and the size of the files of it.
-#[allow(clippy::type_complexity)]
+/// The tree of metadata block `m` at `at` of segment `segment`, the metadata block before it at
+/// `prev` (the end of the header magic, less 1, where it is the first), among `blocks` whose
+/// leaves have `outputs` each; and its contents, each a leaf and an output of it, and the size of
+/// the files of it.
 fn tree_of(
     m: tree::Metadata,
     at: usize,
+    prev: usize,
     blocks: &Blocks,
+    segment: usize,
     outputs: &[u64],
     mut lost: Option<&mut Vec<()>>,
-) -> Decoded<(Tree, Vec<(usize, usize, u64)>)> {
-    if m.prev != (at - HEADER_MAGIC.len() + 1) as u64 {
-        return invalid("a first metadata block not pointing to the header");
+) -> Decoded<tree::SegmentTree> {
+    if m.prev != (at - prev) as u64 {
+        return invalid(match prev {
+            p if p < HEADER_MAGIC.len() => "a first metadata block not pointing to the header",
+            _ => "a metadata block not pointing to the one before it",
+        });
     }
+    let seg = &blocks.segments[segment];
+    let (first, end) = (seg.first, seg.end);
     // (salvaging, those there those the first offsets tell: the others lost with what follows)
     let salvaging = lost.is_some();
     let to = |offsets: &[u64], at_: &[usize]| {
         (offsets.len() == at_.len() || salvaging && offsets.len() > at_.len())
             && offsets.iter().zip(at_).all(|(&o, &b)| at.checked_sub(o as usize) == Some(b))
     };
-    if !to(&m.modules, &blocks.module_at)
-        || !to(&m.resources, &blocks.resource_at)
-        || !to(&m.dictionaries, &blocks.dictionary_at)
+    if !to(&m.modules, &blocks.module_at[first.modules..end.modules])
+        || !to(&m.resources, &blocks.resource_at[first.resources..end.resources])
+        || !to(&m.dictionaries, &blocks.dictionary_at[first.dictionaries..end.dictionaries])
     {
         return invalid("module, resource or dictionary offsets not those of the blocks");
     }
@@ -2853,7 +2861,10 @@ fn tree_of(
     // (salvaging, the leaves lost by where they were, numbered after those there)
     let mut lost_at: HashMap<usize, usize> = HashMap::new();
     let mut content = |offset: u64, output: u64, size: u64| -> Decoded<(usize, usize)> {
-        let found = at.checked_sub(offset as usize).and_then(|b| blocks.leaf_at.binary_search(&b).ok());
+        let found = at.checked_sub(offset as usize).and_then(|b| {
+            let leaves = &blocks.leaf_at[first.leaves..end.leaves];
+            leaves.binary_search(&b).ok().map(|l| first.leaves + l)
+        });
         let leaf = match (found, lost.as_deref_mut()) {
             (Some(leaf), _) => leaf,
             (None, Some(lost)) => {
@@ -2891,7 +2902,10 @@ fn tree_of(
     };
     let mut extras = m.extras;
     let mut t = Tree { root: std::mem::take(&mut extras[0]), entries: Vec::new() };
-    // the tree's index of each entry by number, tombstones (of nothing to remove) left out
+    // (whether the root and each entry of the tree has an entry extra, not null)
+    let mut given = vec![m.given[0]];
+    let mut tombstones = Vec::new();
+    // the tree's index of each entry by number, tombstones left out
     let mut index = vec![None; m.entries.len() + 1];
     let mut names = HashSet::with_capacity(m.entries.len());
     if !m.entries.iter().all(|(parent, name, _)| names.insert((*parent, &name[..]))) {
@@ -2909,7 +2923,7 @@ fn tree_of(
             tree::Read::File { offset, output, size, dictionary } => {
                 let (c, leaf) = content(offset, output, size)?;
                 if leaf < blocks.leaf_dictionary.len()
-                    && blocks.leaf_dictionary[leaf].map_or(0, |d| d as u64 + 1) != dictionary
+                    && blocks.leaf_dictionary[leaf].map_or(0, |d| (d - first.dictionaries) as u64 + 1) != dictionary
                 {
                     return invalid("a file's dictionary not that of its leaf block");
                 }
@@ -2919,14 +2933,16 @@ fn tree_of(
             tree::Read::Fifo => EntryNode::Fifo,
             tree::Read::Device { block, major, minor } => EntryNode::Device { block, major, minor },
             tree::Read::Special(0) => {
-                if !extras[k].is_empty() || !m.forks[k].is_empty() {
+                if m.given[k] {
                     return invalid("a tombstone of an extra");
                 }
+                tombstones.push((parent_index, name));
                 continue;
             }
             tree::Read::Special(kind) => EntryNode::Special(kind),
         };
         index[k] = Some(t.entries.len());
+        given.push(m.given[k]);
         t.entries.push(Entry { parent: parent_index, name, node, extra: std::mem::take(&mut extras[k]) });
     }
     // (after the files, so that their contents are numbered as they are)
@@ -2941,15 +2957,19 @@ fn tree_of(
             .push((name, c));
         }
     }
-    Ok((t, refs))
+    Ok(tree::SegmentTree { tree: t, refs, given, tombstones })
 }
 
 fn leb(d: &[u8], at: &mut usize) -> Decoded<u64> {
     varint::get(d, at).map_err(|e| Failure::Invalid(e.0.into()))
 }
 
-/// The blocks of an archive of a segment at most, framed: the data of leaf data blocks and
-/// non-leaf blocks as it is in the archive (with whether it is Zstandard data, and checked).
+/// The blocks of an archive, framed: the data of leaf data blocks and non-leaf blocks as it is
+/// in the archive (with whether it is Zstandard data, and checked). The blocks of every segment
+/// are indexed together, those of a segment after those of the segments before it; what refers
+/// to them within a segment (a formula block to module, resource and non-leaf blocks, a block
+/// to its dictionary, a metadata block to its blocks) is taken within that segment's
+/// ([`Segmented`]).
 struct Blocks<'c> {
     leaves: Vec<LeafBlock<'c>>,
     /// Where the leaf, module and resource blocks start, in the archive.
@@ -2959,8 +2979,8 @@ struct Blocks<'c> {
     dictionary_at: Vec<usize>,
     /// The dictionary (by index) of each leaf block, where it takes one.
     leaf_dictionary: Vec<Option<usize>>,
-    /// The metadata blocks, where each starts and its decoded data.
-    metadata: Vec<(usize, Vec<u8>)>,
+    /// The segments, in their order: an archive without a metadata block has one, of none.
+    segments: Vec<Segmented>,
     /// The formula data of the formula blocks as it is in the archive (Zstandard data, checked),
     /// with its dictionary: decoded as the leaves are evaluated, only those of the leaves taken
     /// (an archive has a formula block a leaf, and opening it to take a few of them should not
@@ -2979,6 +2999,53 @@ struct Blocks<'c> {
     sizes: BlockSizes,
 }
 
+impl Blocks<'_> {
+    /// What formula block `leaf` (a [`LeafBlock::Formula`]) is evaluated in: the module and
+    /// resource blocks of its segment before it (`loaded` the modules', by module block, run by
+    /// `runner`), and the non-leaf blocks after it; and the end of its segment's non-leaf blocks.
+    fn env<'a, 'n>(
+        &'a self,
+        leaf: &LeafBlock,
+        loaded: &'a [OnceLock<Decoded<Box<dyn Loaded + 'n>>>],
+        runner: &'n dyn Runner,
+    ) -> (Env<'a, 'n>, usize) {
+        let &LeafBlock::Formula { modules, resources, non_leaf, segment, .. } = leaf else {
+            unreachable!("a formula block")
+        };
+        let s = &self.segments[segment];
+        let (m, r) = (s.first.modules..modules, s.first.resources..resources);
+        let env = Env {
+            first: non_leaf,
+            modules: &self.modules[m.clone()],
+            module_data: &self.module_data[m.clone()],
+            resource_data: &self.resource_data[r.clone()],
+            loaded: &loaded[m],
+            resources: &self.resources[r],
+            runner,
+        };
+        (env, s.end.non_leaf)
+    }
+}
+
+/// The blocks of each kind before a point of an archive (as [`Blocks`] indexes them): those
+/// before a segment are not of it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Counts {
+    leaves: usize,
+    non_leaf: usize,
+    modules: usize,
+    resources: usize,
+    dictionaries: usize,
+}
+
+/// A segment of an archive: its blocks (of each kind, those from `first` to `end`), and its
+/// metadata block (where it starts in the archive, and its decoded data) where it has one.
+struct Segmented {
+    first: Counts,
+    end: Counts,
+    metadata: Option<(usize, Vec<u8>)>,
+}
+
 /// The bytes each block takes in the archive, by its index among those of its kind.
 #[derive(Default)]
 struct BlockSizes {
@@ -2993,8 +3060,8 @@ enum LeafBlock<'c> {
     /// Its data, whether it is Zstandard data and whether checked, and its dictionary.
     Stored(&'c [u8], bool, bool, Option<usize>),
     /// The number of outputs and the formula data (by index), with the numbers of module and
-    /// resource blocks before it and of non-leaf blocks.
-    Formula { outputs: u64, data: usize, modules: usize, resources: usize, non_leaf: usize },
+    /// resource blocks before it and of non-leaf blocks (of all segments), and its segment.
+    Formula { outputs: u64, data: usize, modules: usize, resources: usize, non_leaf: usize, segment: usize },
     /// A leaf block a file is at that is not there (salvaging, [`open_salvaging`]).
     Lost,
 }
@@ -3010,7 +3077,7 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool, sealed: bool) -> Decoded<Bloc
         resource_at: Vec::new(),
         dictionary_at: Vec::new(),
         leaf_dictionary: Vec::new(),
-        metadata: Vec::new(),
+        segments: Vec::new(),
         formulas: Vec::new(),
         non_leaf: Vec::new(),
         modules: Vec::new(),
@@ -3054,12 +3121,20 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool, sealed: bool) -> Decoded<Bloc
     if let Some(&(_, ty, ..)) = framed.iter().find(|&&(_, ty, ..)| critical(ty) && !defined(ty)) {
         return Err(Failure::Unsupported(format!("a block of an undefined critical type {ty:#x}")));
     }
+    // the blocks before the segment read
+    let mut first = Counts::default();
+    let counts = |b: &Blocks| Counts {
+        leaves: b.leaves.len(),
+        non_leaf: b.non_leaf.len(),
+        modules: b.modules.len(),
+        resources: b.resources.len(),
+        dictionaries: b.dictionaries.len(),
+    };
     for (start, ty, data, size) in framed {
         let at = start + HEADER_MAGIC.len();
-        // (content blocks after a metadata block are of another segment)
-        if !b.metadata.is_empty() && matches!(ty, 0x20..=0x37 | 0x40..=0x4b | 0x50..=0x57 | 0x60..=0x67 | 0x70..=0x77) {
-            return resource("several segments are not supported yet");
-        }
+        // (a dictionary of the segment's, by its index in it)
+        let dicts = (first.dictionaries, b.dictionaries.len());
+        let dictionary_of = |d, has| dictionary_of(d, has, dicts.0, dicts.1);
         match ty {
             0x00..=0x03 if sealed => return invalid("a spacer block in an encrypted archive's payload"),
             // spacer blocks, of any space: only compressors have to zero it
@@ -3073,14 +3148,14 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool, sealed: bool) -> Decoded<Bloc
             // data blocks: `001k kcss` (leaf) and `0100 kkss` (non-leaf, always checked), of a
             // dictionary where kk is 2
             0x20..=0x37 => {
-                let (data, dict) = dictionary_of(data, ty & 0x10 != 0, b.dictionaries.len())?;
+                let (data, dict) = dictionary_of(data, ty & 0x10 != 0)?;
                 b.leaf_at.push(at);
                 b.sizes.leaves.push(size);
                 b.leaf_dictionary.push(dict);
                 b.leaves.push(LeafBlock::Stored(data, ty & 0x18 != 0, ty & 0x04 != 0, dict));
             }
             0x40..=0x4b => {
-                let (data, dict) = dictionary_of(data, ty & 0x08 != 0, b.dictionaries.len())?;
+                let (data, dict) = dictionary_of(data, ty & 0x08 != 0)?;
                 b.non_leaf.push((data, ty & 0x0c != 0, dict));
                 b.sizes.non_leaf.push(size);
             }
@@ -3108,7 +3183,7 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool, sealed: bool) -> Decoded<Bloc
             }
             // formula blocks: `0111 0dss`
             0x70..=0x77 => {
-                let (data, dict) = dictionary_of(data, ty & 0x04 != 0, b.dictionaries.len())?;
+                let (data, dict) = dictionary_of(data, ty & 0x04 != 0)?;
                 let mut p = 0;
                 let outputs = leb(data, &mut p)?;
                 if outputs == 0 {
@@ -3124,14 +3199,27 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool, sealed: bool) -> Decoded<Bloc
                     modules: b.modules.len(),
                     resources: b.resources.len(),
                     non_leaf: b.non_leaf.len(),
+                    segment: b.segments.len(),
                 });
             }
             // mirror blocks and undefined non-critical blocks, not read
             _ if !critical(ty) => {}
-            0x10..=0x17 if metadata => b.metadata.push((at, decoded(data, ty & 0x04 != 0, true)?)),
+            0x10..=0x17 if metadata => {
+                let end = counts(&b);
+                let m = Some((at, decoded(data, ty & 0x04 != 0, true)?));
+                b.segments.push(Segmented { first, end, metadata: m });
+                first = end;
+            }
             0x10..=0x17 => return invalid("a metadata block, but none in the footer"),
             _ => return invalid(format!("bad block of type {ty:#x}")),
         }
+    }
+    let end = counts(&b);
+    if metadata && end != first {
+        return invalid("content blocks after the last metadata block");
+    }
+    if !metadata {
+        b.segments.push(Segmented { first, end, metadata: None });
     }
     Ok(b)
 }
@@ -3168,15 +3256,16 @@ fn defined(ty: u64) -> bool {
 }
 
 /// The data of a block's data `d` past its dictionary index where it has one (`has`), and the
-/// index: one of the `before` dictionary blocks before it.
-fn dictionary_of(d: &[u8], has: bool, before: usize) -> Decoded<(&[u8], Option<usize>)> {
+/// index: one of the dictionary blocks from `first` to `before` (those of its segment before it),
+/// as an index among all.
+fn dictionary_of(d: &[u8], has: bool, first: usize, before: usize) -> Decoded<(&[u8], Option<usize>)> {
     if !has {
         return Ok((d, None));
     }
     let mut at = 0;
     let i = leb(d, &mut at)?;
-    match usize::try_from(i).ok().filter(|&i| i < before) {
-        Some(i) => Ok((&d[at..], Some(i))),
+    match usize::try_from(i).ok().filter(|&i| i < before - first) {
+        Some(i) => Ok((&d[at..], Some(first + i))),
         None => invalid("a dictionary index of no dictionary block before"),
     }
 }

@@ -321,6 +321,120 @@ fn check_extra(x: &Extra, contents: usize) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// The tree of a segment as its metadata block tells it (spec, "Interpreting a segment"), before
+/// it is merged into those of the segments before it ([`merge`]).
+pub(crate) struct SegmentTree {
+    /// The entries (but tombstones), their contents numbered among those of the segment.
+    pub tree: Tree,
+    /// Of each content: its leaf (among all of the archive), its output and its size.
+    pub refs: Vec<(usize, usize, u64)>,
+    /// Whether the root and each entry (by index, after the root's) has an entry extra (not null).
+    pub given: Vec<bool>,
+    /// The tombstones: the directory each is in (by index, or the root) and its name.
+    pub tombstones: Vec<(Option<usize>, Vec<u8>)>,
+}
+
+/// The trees of the segments of an archive, in their order, merged (spec, "Merging segments"),
+/// with their contents as one: those of the files left in the tree alone, in their order.
+/// A directory merges with one of its name before it, its extra replaced only where it has one;
+/// any other entry replaces what had its name, a directory with all under it; a tombstone takes
+/// away what has its name. Link groups of a segment's own (not negative) are renumbered apart
+/// from those of the other segments, those of the first segment kept as they are.
+pub(crate) fn merge(trees: Vec<SegmentTree>) -> (Tree, Vec<(usize, usize, u64)>) {
+    // the entries made, in their order: each after its parent, and whether it is taken away
+    let mut made: Vec<Entry> = Vec::new();
+    let mut alive: Vec<bool> = Vec::new();
+    let mut root = Extra::default();
+    // by directory (or the root) and name, the entry there
+    let mut at: std::collections::HashMap<(Option<usize>, Vec<u8>), usize> = std::collections::HashMap::new();
+    let mut refs = Vec::new();
+    // (the first link group free for those of a segment's own after the first)
+    let own = |t: &Tree| t.entries.iter().filter_map(|e| e.extra.link_group).filter(|&g| g >= 0).max();
+    let mut free = trees.first().and_then(|t| own(&t.tree)).map_or(0, |g| g + 1);
+    for (s, st) in trees.into_iter().enumerate() {
+        let SegmentTree { tree, refs: seg_refs, given, tombstones } = st;
+        let first = refs.len();
+        refs.extend(seg_refs);
+        let mut groups = std::collections::HashMap::new();
+        let mut renumber = |x: &mut Extra| {
+            for f in &mut x.forks {
+                f.1 += first;
+            }
+            if s > 0
+                && let Some(g) = x.link_group.filter(|&g| g >= 0)
+            {
+                x.link_group = Some(*groups.entry(g).or_insert_with(|| {
+                    free += 1;
+                    free - 1
+                }));
+            }
+        };
+        if given[0] {
+            root = tree.root;
+            renumber(&mut root);
+        }
+        // by the segment's entry, the entry made or merged into
+        let mut index = Vec::with_capacity(tree.entries.len());
+        for (i, mut e) in tree.entries.into_iter().enumerate() {
+            let parent = e.parent.map(|p| index[p]);
+            renumber(&mut e.extra);
+            if let EntryNode::File(c) = &mut e.node {
+                *c += first;
+            }
+            let key = (parent, e.name);
+            let existing = at.get(&key).copied();
+            if e.node == EntryNode::Dir
+                && let Some(x) = existing.filter(|&x| made[x].node == EntryNode::Dir)
+            {
+                if given[i + 1] {
+                    made[x].extra = e.extra;
+                }
+                index.push(x);
+                continue;
+            }
+            if let Some(x) = existing {
+                alive[x] = false;
+            }
+            at.insert(key.clone(), made.len());
+            index.push(made.len());
+            made.push(Entry { parent, name: key.1, node: e.node, extra: e.extra });
+            alive.push(true);
+        }
+        for (parent, name) in tombstones {
+            if let Some(x) = at.remove(&(parent.map(|p| index[p]), name)) {
+                alive[x] = false;
+            }
+        }
+    }
+    // those left (not taken away, nor under one taken away), and the contents they take
+    let mut new = vec![None; made.len()];
+    let mut tree = Tree { root, entries: Vec::new() };
+    for (k, e) in made.into_iter().enumerate() {
+        if !alive[k] || e.parent.is_some_and(|p| new[p].is_none()) {
+            continue;
+        }
+        new[k] = Some(tree.entries.len());
+        tree.entries.push(Entry { parent: e.parent.map(|p| new[p].expect("kept")), ..e });
+    }
+    let mut taken = vec![None; refs.len()];
+    let mut kept = Vec::new();
+    let mut take = |c: &mut usize| {
+        *c = *taken[*c].get_or_insert_with(|| {
+            kept.push(refs[*c]);
+            kept.len() - 1
+        });
+    };
+    for x in std::iter::once(&mut tree.root).chain(tree.entries.iter_mut().map(|e| &mut e.extra)) {
+        x.forks.iter_mut().for_each(|f| take(&mut f.1));
+    }
+    for e in &mut tree.entries {
+        if let EntryNode::File(c) = &mut e.node {
+            take(c);
+        }
+    }
+    (tree, kept)
+}
+
 /// What a file's parameters in a metadata block point to: a leaf block (by where it starts in
 /// the archive), its output, and the dictionary it takes (by index).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -331,12 +445,14 @@ pub(crate) struct FileParam {
     pub dictionary: Option<usize>,
 }
 
-/// The internal structure of the metadata block at `at` (in the archive), of a segment of the
+/// The internal structure of the metadata block at `at` (in the archive), the one before it at
+/// `prev` (the end of the header magic, less 1, where it is the first), of a segment of the
 /// module, resource and dictionary blocks at `modules`, `resources` and `dictionaries`; where
 /// each content is (by [`EntryNode::File`]).
 pub(crate) fn metadata(
     t: &Tree,
     at: usize,
+    prev: usize,
     modules: &[usize],
     resources: &[usize],
     dictionaries: &[usize],
@@ -355,8 +471,7 @@ pub(crate) fn metadata(
     let dirs = count(|n| matches!(n, EntryNode::Dir));
     let nfiles = count(|n| matches!(n, EntryNode::File(_)));
 
-    // (from the end of the header magic, plus 1)
-    let prev = (at - super::HEADER_MAGIC.len() + 1) as u64;
+    let prev = (at - prev) as u64;
     let mut entries = Vec::new();
     let mut entry_offsets = Vec::new();
     for (k, &i) in order.iter().enumerate() {
@@ -962,12 +1077,20 @@ impl<'a> Shared<'a> {
 /// The extras of the entries (from the root, by number) in optional metadata `d`, of `n`
 /// entries besides the root; their forks apart, as they refer to them (their extras' `forks`
 /// left empty).
+#[cfg(test)]
 #[allow(clippy::type_complexity)]
-pub(crate) fn extras(d: &[u8], n: usize) -> Decoded<(Vec<Extra>, Vec<Vec<(Vec<u8>, ForkRef)>>)> {
+fn extras(d: &[u8], n: usize) -> Decoded<(Vec<Extra>, Vec<Vec<(Vec<u8>, ForkRef)>>)> {
+    extras_given(d, n).map(|(out, forks, _)| (out, forks))
+}
+
+/// [`extras`], and whether each has an entry extra (a map, not null nor left out).
+#[allow(clippy::type_complexity)]
+fn extras_given(d: &[u8], n: usize) -> Decoded<(Vec<Extra>, Vec<Vec<(Vec<u8>, ForkRef)>>, Vec<bool>)> {
     let mut out = vec![Extra::default(); n + 1];
     let mut forks = vec![Vec::new(); n + 1];
+    let mut given = vec![false; n + 1];
     if d.is_empty() {
-        return Ok((out, forks));
+        return Ok((out, forks, given));
     }
     // Walked rather than read whole: the entry-extras an entry at a time, each a member at a
     // time (read whole, those of an archive of many entries took most of opening it).
@@ -1006,6 +1129,7 @@ pub(crate) fn extras(d: &[u8], n: usize) -> Decoded<(Vec<Extra>, Vec<Vec<(Vec<u8
             match head_of(d, &mut at)? {
                 (7, 22, _) => {}
                 (5, _, arg) => {
+                    given[e - 1] = true;
                     let m = count(d, at, arg)?;
                     members.clear();
                     while !ended(d, &mut at, m, members.len()) {
@@ -1025,7 +1149,7 @@ pub(crate) fn extras(d: &[u8], n: usize) -> Decoded<(Vec<Extra>, Vec<Vec<(Vec<u8
     if at != d.len() {
         return invalid("bytes after the optional metadata");
     }
-    Ok((out, forks))
+    Ok((out, forks, given))
 }
 
 /// Takes member `k` of value `v` of an entry extra into `x` (its forks into `forks`), where it
@@ -1174,6 +1298,8 @@ pub(crate) struct Metadata {
     /// From the root, by number: the extras, and the forks as they refer to them.
     pub extras: Vec<Extra>,
     pub forks: Vec<Vec<(Vec<u8>, ForkRef)>>,
+    /// From the root, by number: whether each has an entry extra (not null).
+    pub given: Vec<bool>,
 }
 
 pub(crate) enum Read {
@@ -1306,7 +1432,7 @@ pub(crate) fn read(d: &[u8]) -> Decoded<Metadata> {
     if p != entries.len() {
         return invalid("bytes after the entries");
     }
-    let (extras, forks) = extras(opt, n)?;
+    let (extras, forks, given) = extras_given(opt, n)?;
     Ok(Metadata {
         prev,
         modules: module_offsets,
@@ -1315,6 +1441,7 @@ pub(crate) fn read(d: &[u8]) -> Decoded<Metadata> {
         entries: out,
         extras,
         forks,
+        given,
     })
 }
 
@@ -1490,5 +1617,73 @@ mod tests {
         let same = |f: &dyn Fn(&Extra) -> &Arc<[u8]>| got[1..].windows(2).all(|w| Arc::ptr_eq(f(&w[0]), f(&w[1])));
         assert!(same(&|x| x.uname.as_ref().unwrap()) && same(&|x| &x.xattrs[0].0) && same(&|x| &x.xattrs[0].1));
         assert!(Arc::ptr_eq(got[1].gname.as_ref().unwrap(), got[3].gname.as_ref().unwrap()));
+    }
+
+    /// Trees of segments merged: tombstones taking away a file and a directory with all under it
+    /// (and nothing where nothing has the name, even under a directory new), a directory replaced
+    /// by a link and then made again (empty), the root's extra kept where a segment has none, and
+    /// the contents of the files left alone kept.
+    #[test]
+    fn merged() {
+        let e =
+            |parent, name: &str, node| Entry { parent, name: name.as_bytes().to_vec(), node, extra: Extra::default() };
+        let seg = |entries: Vec<Entry>, root: Option<u32>, refs: usize, tombstones: Vec<(Option<usize>, &str)>| {
+            let given = std::iter::once(root.is_some()).chain(entries.iter().map(|_| false)).collect();
+            SegmentTree {
+                tree: Tree { root: Extra { mode: root, ..Extra::default() }, entries },
+                refs: (0..refs).map(|r| (r, 0, r as u64)).collect(),
+                given,
+                tombstones: tombstones.into_iter().map(|(p, n)| (p, n.as_bytes().to_vec())).collect(),
+            }
+        };
+        let (t, refs) = merge(vec![
+            seg(
+                vec![
+                    e(None, "d", EntryNode::Dir),
+                    e(Some(0), "a", EntryNode::File(0)),
+                    e(Some(0), "s", EntryNode::Dir),
+                    e(Some(2), "b", EntryNode::File(1)),
+                    e(None, "l", EntryNode::Dir),
+                    e(Some(4), "c", EntryNode::File(2)),
+                    e(None, "f", EntryNode::File(3)),
+                ],
+                Some(0o700),
+                4,
+                vec![],
+            ),
+            seg(
+                vec![
+                    e(None, "d", EntryNode::Dir),
+                    e(None, "l", EntryNode::Link(b"x".to_vec())),
+                    e(None, "n", EntryNode::Dir),
+                ],
+                None,
+                0,
+                vec![(Some(0), "s"), (None, "f"), (None, "none"), (Some(2), "none")],
+            ),
+            seg(vec![e(None, "l", EntryNode::Dir), e(Some(0), "g", EntryNode::File(0))], None, 1, vec![]),
+        ]);
+        let paths: Vec<(String, &EntryNode)> = (t.entries.iter())
+            .map(|x| {
+                let mut p = String::from_utf8(x.name.clone()).unwrap();
+                let mut up = x.parent;
+                while let Some(u) = up {
+                    p = format!("{}/{p}", String::from_utf8(t.entries[u].name.clone()).unwrap());
+                    up = t.entries[u].parent;
+                }
+                (p, &x.node)
+            })
+            .collect();
+        let want: [(&str, EntryNode); 5] = [
+            ("d", EntryNode::Dir),
+            ("d/a", EntryNode::File(0)),
+            ("n", EntryNode::Dir),
+            ("l", EntryNode::Dir),
+            ("l/g", EntryNode::File(1)),
+        ];
+        assert_eq!(paths, want.iter().map(|(p, n)| (p.to_string(), n)).collect::<Vec<_>>());
+        assert_eq!(t.root.mode, Some(0o700));
+        // (of the first segment's first content, and the third's)
+        assert_eq!(refs, [(0, 0, 0), (0, 0, 0)]);
     }
 }

@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 
-use super::{Archive, Decoded, Env, Insn, LeafBlock, decoded_with, invalid, read, stored_len};
+use super::{Archive, Decoded, Insn, LeafBlock, decoded_with, invalid, read, stored_len};
 
 /// Of a content of an archive ([`Archive::listing`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,19 +185,13 @@ impl Archive<'_, '_> {
                     vec![g.add(Shape::Stored(zstd), Vec::new(), insn, stored_len(d, zstd, checked))]
                 }
                 LeafBlock::Lost => return invalid("a file whose block is lost"),
-                LeafBlock::Formula { outputs, data, modules, resources, non_leaf } => {
+                LeafBlock::Formula { outputs, data, segment, .. } => {
                     let (d, dict) = blocks.formulas[data];
                     let d = decoded_with(d, true, true, dict.map(|d| &blocks.dictionaries[d]))?;
-                    let env = Env {
-                        first: non_leaf,
-                        modules: &blocks.modules[..modules],
-                        module_data: &blocks.module_data[..modules],
-                        resource_data: &blocks.resource_data[..resources],
-                        loaded: &self.loaded[..modules],
-                        resources: &blocks.resources[..resources],
-                        runner: self.runner,
-                    };
-                    let p = read(&d, outputs, &env, blocks.non_leaf.len(), &mut used)?;
+                    let (env, end) = blocks.env(leaf, &self.loaded, self.runner);
+                    let p = read(&d, outputs, &env, end, &mut used)?;
+                    // (the program's modules and resources by their indices in the segment)
+                    let first = blocks.segments[segment].first;
                     let mut st: Vec<usize> = Vec::new();
                     for insn in &p.insns {
                         let at = g.insns;
@@ -216,8 +210,9 @@ impl Archive<'_, '_> {
                             }
                             Insn::Apply(a) => {
                                 let kids = pop(a.num_inputs);
-                                let (module, outs) = (p.modules[a.module], a.output_sizes.len());
-                                let resources: Vec<usize> = a.resources.iter().map(|&r| p.resources[r]).collect();
+                                let (module, outs) = (first.modules + p.modules[a.module], a.output_sizes.len());
+                                let resources: Vec<usize> =
+                                    a.resources.iter().map(|&r| first.resources + p.resources[r]).collect();
                                 for (out, &size) in a.output_sizes.iter().enumerate() {
                                     let shape = Shape::Apply { module, resources: resources.clone(), out, outs };
                                     st.push(g.add(shape, kids.clone(), at, size));
