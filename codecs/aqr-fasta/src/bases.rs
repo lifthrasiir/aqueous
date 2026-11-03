@@ -37,7 +37,7 @@ fn update(p: &mut [u16; 4], b: usize) {
 /// Has the cache line at `p` loaded, where the target has a way to (the output does not depend
 /// on it).
 #[inline(always)]
-fn prefetch(p: *const [u16; 4]) {
+fn prefetch(p: *const u8) {
     #[cfg(target_arch = "aarch64")]
     // SAFETY: a hint, which reads nothing
     unsafe {
@@ -54,8 +54,45 @@ fn prefetch(p: *const [u16; 4]) {
 /// Bytes of the model.
 pub const MODEL_BYTES: u64 = (CONTEXTS * 8) as u64;
 
-fn model() -> Vec<[u16; 4]> {
-    vec![[16384; 4]; CONTEXTS]
+/// The 16 contexts that a context leads to two bases on: 128 bytes, which the decoder prefetches
+/// together. Aligned, they are one line of 128 bytes (Apple's) or two of 64 (others'), whatever
+/// the allocator gives (glibc's large blocks are 16 bytes into a page).
+#[cfg(not(target_family = "wasm"))]
+#[derive(Clone)]
+#[repr(C, align(128))]
+struct Line([[u16; 4]; 16]);
+
+/// The model: the contexts' probabilities, by [`Line`]s (in Wasm, which has no prefetching, as
+/// they come: the module the smaller).
+#[cfg(not(target_family = "wasm"))]
+#[derive(Clone)]
+struct Model(Vec<Line>);
+#[cfg(target_family = "wasm")]
+type Model = Vec<[u16; 4]>;
+
+#[cfg(not(target_family = "wasm"))]
+impl std::ops::Deref for Model {
+    type Target = [[u16; 4]];
+
+    fn deref(&self) -> &[[u16; 4]] {
+        // SAFETY: a Line is its 16 contexts, of 128 bytes with no padding
+        unsafe { std::slice::from_raw_parts(self.0.as_ptr().cast(), self.0.len() * 16) }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl std::ops::DerefMut for Model {
+    fn deref_mut(&mut self) -> &mut [[u16; 4]] {
+        // SAFETY: as above
+        unsafe { std::slice::from_raw_parts_mut(self.0.as_mut_ptr().cast(), self.0.len() * 16) }
+    }
+}
+
+fn model() -> Model {
+    #[cfg(not(target_family = "wasm"))]
+    return Model(vec![Line([[16384; 4]; 16]); CONTEXTS / 16]);
+    #[cfg(target_family = "wasm")]
+    return vec![[16384; 4]; CONTEXTS];
 }
 
 /// Bases packed four to a byte, the first in the low bits: what the encoder holds of a file's.
@@ -195,7 +232,7 @@ fn encode_in(s: &Packed, chunk: usize) -> Vec<u8> {
     // the model at the start of each chunk, and the context there; the last one's is where the
     // model is left
     let mut t = model();
-    let mut kept: Vec<(Vec<[u16; 4]>, usize)> = Vec::with_capacity(last / chunk);
+    let mut kept: Vec<(Model, usize)> = Vec::with_capacity(last / chunk);
     let mut h = 0usize;
     for start in (0..last).step_by(chunk) {
         kept.push((t.clone(), h));
@@ -279,7 +316,7 @@ pub fn decode(c: &[u8], n: usize) -> Result<Vec<u8>> {
 /// The `n` bases of coded form `c` as they are decoded, without the bases themselves held
 /// ([`Decoder::finish`] tells whether `c` was exactly of them).
 pub struct Decoder<'c> {
-    t: Vec<[u16; 4]>,
+    t: Model,
     c: &'c [u8],
     at: usize,
     x: u32,
@@ -319,8 +356,11 @@ impl Iterator for Decoder<'_> {
         }
         self.left -= 1;
         let (t, h, mut x) = (&mut self.t, self.h, self.x);
-        // the contexts two bases on, one cache line of them: loaded as this one decodes
-        prefetch(t.as_ptr().wrapping_add((h << 4) & (CONTEXTS - 1)));
+        // the contexts two bases on, a Line of them: loaded as this one decodes (both halves,
+        // for lines of 64 bytes)
+        let ahead = t.as_ptr().wrapping_add((h << 4) & (CONTEXTS - 1)).cast::<u8>();
+        prefetch(ahead);
+        prefetch(ahead.wrapping_add(64));
         let p = &mut t[h & (CONTEXTS - 1)];
         let f = freqs(p);
         let slot = x & ((1 << SCALE) - 1);
