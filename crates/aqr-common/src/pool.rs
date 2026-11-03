@@ -41,6 +41,9 @@ struct Pool {
     size: usize,
     /// Workers neither reserved nor running anything.
     free: Mutex<usize>,
+    /// Threads made, and workers waiting with their places lent ([`Lent`]): at least `size`
+    /// and one for each lent, so that every worker free is a thread idle.
+    threads: Mutex<(usize, usize)>,
     freed: Condvar,
     jobs: Mutex<VecDeque<Job>>,
     queued: Condvar,
@@ -80,20 +83,65 @@ fn pool() -> &'static Pool {
             n => n,
         };
         for i in 0..size {
-            std::thread::Builder::new()
-                .name(format!("aqr-pool-{i}"))
-                .stack_size(STACK)
-                .spawn(work)
-                .expect("a worker of the pool");
+            spawn_worker(i);
         }
         Pool {
             size,
             free: Mutex::new(size),
+            threads: Mutex::new((size, 0)),
             freed: Condvar::new(),
             jobs: Mutex::new(VecDeque::new()),
             queued: Condvar::new(),
         }
     })
+}
+
+fn spawn_worker(i: usize) {
+    std::thread::Builder::new()
+        .name(format!("aqr-pool-{i}"))
+        .stack_size(STACK)
+        .spawn(work)
+        .expect("a worker of the pool");
+}
+
+/// The place of the calling worker in the pool, lent to the pool while it only waits (as
+/// [`dispatch`] does, letting work in), with a thread made for it where no other is spare;
+/// taken back as it is dropped, once a worker is free. Nothing where the calling thread is not
+/// a worker.
+struct Lent(bool);
+
+fn lend() -> Lent {
+    if !THREADS || !is_worker() {
+        return Lent(false);
+    }
+    let p = pool();
+    {
+        let mut t = p.threads.lock().unwrap();
+        t.1 += 1;
+        if t.0 < p.size + t.1 {
+            spawn_worker(t.0);
+            t.0 += 1;
+        }
+    }
+    release(1);
+    Lent(true)
+}
+
+impl Drop for Lent {
+    fn drop(&mut self) {
+        if !self.0 {
+            return;
+        }
+        let p = pool();
+        let mut free = p.free.lock().unwrap();
+        let w = (*free == 0).then(|| crate::trace::wait("worker"));
+        while *free == 0 {
+            free = p.freed.wait(free).unwrap();
+        }
+        *free -= 1;
+        drop((free, w));
+        p.threads.lock().unwrap().1 -= 1;
+    }
 }
 
 /// What a worker does: the jobs queued, one after another. (A job is queued only for a worker
@@ -120,7 +168,7 @@ fn work() {
 /// made).
 #[cfg(not(target_family = "wasm"))]
 pub(crate) fn usage() -> (usize, usize) {
-    POOL.get().map_or((0, 0), |p| (p.size - *p.free.lock().unwrap(), p.size))
+    POOL.get().map_or((0, 0), |p| (p.size.saturating_sub(*p.free.lock().unwrap()), p.size))
 }
 
 /// Gives back `n` workers: each to an open [`par_map`] with items left, else free.
@@ -533,11 +581,13 @@ pub fn par_map_apart<R: Send + crate::wire::Wire>(n: usize, threads: usize, f: i
     par_map(n, threads, f)
 }
 
-/// `f(i, admit(i))` for each `i` of `0..n`, each on a worker of its own, up to `threads − 1`
-/// at once: the calling thread lets them in, in order, as `admit` does (which may wait, as for
+/// `f(i, admit(i))` for each `i` of `0..n`, each on a worker of its own, up to `threads` at
+/// once: the calling thread lets them in, in order, as `admit` does (which may wait, as for
 /// memory), each on a worker as one is free, and the worker is given back as `f` returns. So
 /// no thread waits holding a worker, which work still running can reserve (an item's own
-/// threads). On the calling thread alone where `threads` is 1, or there are no threads. A panic
+/// threads): a worker calling it lends its place meanwhile (on 10gb, `aqr -t` with 4 threads
+/// ran its leaves on 3 of them before). On the calling thread alone where `threads` is 1, or
+/// there are no threads. A panic
 /// of `f` stops what is not let in yet and is resumed here; one of `admit` is, once what was
 /// let in before it has returned.
 pub fn dispatch<G: Send, R: Send>(
@@ -579,6 +629,7 @@ pub fn dispatch_any<G: Send, R: Send>(
     let (out, running, done, failed, f) = (&out, &running, &done, &failed, &f);
     let p = pool();
     let mut hs = Vec::new();
+    let lent = lend();
     // (the items borrow this frame: joined however letting them in ends, `next` may panic)
     let admitted = catch_unwind(AssertUnwindSafe(|| {
         for _ in 0..n {
@@ -590,7 +641,7 @@ pub fn dispatch_any<G: Send, R: Send>(
             let w = crate::trace::wait("worker");
             {
                 let mut r = running.lock().unwrap();
-                while *r >= threads - 1 {
+                while *r >= threads {
                     r = done.wait(r).unwrap();
                 }
                 *r += 1;
@@ -624,6 +675,7 @@ pub fn dispatch_any<G: Send, R: Send>(
             panic.get_or_insert(p);
         }
     }
+    drop(lent);
     if let Some(p) = panic {
         resume_unwind(p);
     }
@@ -840,8 +892,9 @@ mod tests {
         assert_eq!(got[0], 1);
     }
 
-    /// [`dispatch`]: every item, let in in order and never more than `threads − 1` at once,
-    /// while what runs can reserve the workers left; and a panic resumed.
+    /// [`dispatch`]: every item, let in in order and never more than `threads` at once, on as
+    /// many workers as the pool has, the calling worker's place lent; while what runs can
+    /// reserve the workers left; and a panic resumed.
     #[test]
     fn dispatches() {
         let _turn = exclusive();
@@ -863,7 +916,28 @@ mod tests {
         });
         assert_eq!(got, (0..100).map(|i| i * 2).collect::<Vec<_>>());
         assert_eq!(*admitted.lock().unwrap(), (0..100).collect::<Vec<_>>());
-        assert!(most.load(Ordering::Relaxed) <= 3.min(n - 1).max(1));
+        assert!(most.load(Ordering::Relaxed) <= 4.min(n).max(1));
+        // as many at once as the pool has workers, though the calling thread is one
+        if n >= 2 {
+            let (at_once, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+            run(|| {
+                dispatch(
+                    n,
+                    n,
+                    |_| (),
+                    |_, ()| {
+                        let k = at_once.fetch_add(1, Ordering::Relaxed) + 1;
+                        most.fetch_max(k, Ordering::Relaxed);
+                        let start = std::time::Instant::now();
+                        while at_once.load(Ordering::Relaxed) < n && start.elapsed().as_secs() < 2 {
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                        at_once.fetch_sub(1, Ordering::Relaxed);
+                    },
+                )
+            });
+            assert_eq!(most.load(Ordering::Relaxed), n, "n {n}");
+        }
         // one long item takes the workers the others leave
         if n >= 3 {
             let left = AtomicUsize::new(0);

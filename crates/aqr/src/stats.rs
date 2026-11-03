@@ -229,7 +229,11 @@ fn outliers(run: &Run) -> String {
     let t = &run.trace;
     let mut out = String::new();
     let workers = v.workers();
-    let w = workers.iter().filter(|&&w| w).count().max(1);
+    // (the pool's places: a worker lending its place as it waits has a thread made for it)
+    let w = match t.workers {
+        0 => workers.iter().filter(|&&w| w).count().max(1),
+        n => n,
+    };
     let (mut busy_time, mut wait_time, mut total) = (0.0, HashMap::<u32, f64>::new(), 0.0);
     // the peak of the heap, and when
     let (mut peak, mut peak_at, mut rss) = (0i64, None, 0u64);
