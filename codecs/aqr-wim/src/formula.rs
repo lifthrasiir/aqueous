@@ -113,7 +113,7 @@ fn encode_as(input: &[u8], shared: Option<&Bytes>, threads: usize) -> Option<For
             out.copy_from_slice(&input[parts[i].span.clone()]);
             return Some(Vec::new());
         }
-        aqr_lzx::recons::split_into(&parts[i].chunks, out).ok().map(|(record, _)| record)
+        aqr_lzx::recons::split_into(&parts[i].chunks, out).ok()
     });
     drop(outs);
     // a resource of a stream not split kept whole, with the bytes around it

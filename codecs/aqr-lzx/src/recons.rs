@@ -950,8 +950,10 @@ pub struct Split {
 /// bytes of data (but the last).
 pub fn split(chunks: &[(&[u8], usize)]) -> Result<Split> {
     let mut data = vec![0; data_len(chunks)];
-    let (record, cost) = split_into(chunks, &mut data)?;
-    Ok(Split { data, record, cost })
+    let parses = read_into(chunks, &mut data)?;
+    let mut enc = Enc::with(ArithEncoder::new(Vec::new()));
+    walk(&mut enc, &data, &parses)?;
+    Ok(Split { data, record: enc.c.finish(), cost: enc.cost })
 }
 
 /// Bytes of the data of a stream of chunks.
@@ -960,15 +962,21 @@ pub fn data_len(chunks: &[(&[u8], usize)]) -> usize {
 }
 
 /// [`split`] with the data written into `data` (of [`data_len`] bytes), as where a container
-/// holds it all: the record, and its cost by what it codes.
-pub fn split_into(chunks: &[(&[u8], usize)], data: &mut [u8]) -> Result<(Vec<u8>, [f64; CATS])> {
+/// holds it all: the record (its cost not counted).
+pub fn split_into(chunks: &[(&[u8], usize)], data: &mut [u8]) -> Result<Vec<u8>> {
     let parses = read_into(chunks, data)?;
-    let mut enc = Enc::with(ArithEncoder::new(Vec::new()));
+    let mut enc = ArithEncoder::new(Vec::new());
+    walk(&mut enc, data, &parses)?;
+    Ok(enc.finish())
+}
+
+/// The record of the chunks of `data` of `parses` coded onto `enc`.
+fn walk(enc: &mut impl Side, data: &[u8], parses: &[Option<Parse>]) -> Result<()> {
     let mut w = Walker::new(lzx::WIM);
-    for (raw, p) in data.chunks(CHUNK).zip(&parses) {
-        w.chunk(&mut enc, raw, Some(p), None)?;
+    for (raw, p) in data.chunks(CHUNK).zip(parses) {
+        w.chunk(enc, raw, Some(p), None)?;
     }
-    Ok((enc.c.finish(), enc.cost))
+    Ok(())
 }
 
 /// The data of a stream of chunks written into `data` (of [`data_len`] bytes), as [`split_into`]
