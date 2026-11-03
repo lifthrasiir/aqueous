@@ -372,6 +372,8 @@ impl Pipe {
     fn analyze<S: Source + ?Sized>(&self, (i, lens, taken): Claimed, cx: &Ctx<S>) {
         let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             taken.map(|(files, data)| {
+                // (what is cut out of the files mapped shared, not copied: an image's files, say)
+                let _known: Vec<_> = data.iter().map(aqr_formula::store::known).collect();
                 let a = analyze(i, &files, data, &HashSet::new(), cx.opt, cx.notes);
                 (files, a)
             })

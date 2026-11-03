@@ -2244,6 +2244,14 @@ mod tests {
         assert!(f.streams.iter().any(|s| s.class == aqr_iso::formula::REST));
         assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
         assert!(f.eval(&Native::default()).unwrap() == d);
+        // the files of an image known to the store (mapped) shared, not copied: the same archive
+        let plain = compress(&d, &Options::default());
+        let shared = aqr_formula::Bytes::shared(Arc::new(d));
+        let _known = aqr_formula::store::known(&shared);
+        let f = bundle::iso(&shared).unwrap();
+        let large: Vec<_> = f.streams.iter().filter(|s| s.content && s.data.len() >= aqr_formula::store::MIN).collect();
+        assert!(!large.is_empty() && large.iter().all(|s| s.data.is_shared()));
+        assert!(compress(&shared, &Options::default()) == plain);
     }
 
     /// A CAB file's MSZIP folder is taken apart into its files, recompressed in turn: a JPEG file

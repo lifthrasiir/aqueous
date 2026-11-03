@@ -874,6 +874,8 @@ fn compress_into(
     };
     if let Some((input, m)) = single {
         let d = mapper.read(input).map_err(|e| format!("{}: {e}", input.display()))?;
+        // (what is cut out of it shared, not copied: an image's files, say)
+        let _known = aqr_formula::store::known(&d);
         let name = os_bytes(input.as_os_str());
         let kind = kind_by_name(&name);
         let mut g = Gathered::new(mapper, a.preserve);

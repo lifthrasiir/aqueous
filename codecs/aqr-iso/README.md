@@ -48,6 +48,8 @@ files of their own, for a recompressor of WIM.
 
 aqr-compress takes an image as an archive that only bundles files (as aqr-bundle's): its
 formula is not compared against the image raw, and its files are made in parallel.
+Each file is a stream of its own, sharing the image's bytes where it is mapped (`aqr`'s input)
+rather than a copy of them; the streams of a kind are merged as the archive is written.
 
 ## Tests
 

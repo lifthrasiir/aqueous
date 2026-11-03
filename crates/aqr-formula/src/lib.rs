@@ -996,7 +996,7 @@ impl Formula {
     /// different streams (versions of a program's code, say): the pieces of a stream not so
     /// put are one stream, and a stream none of whose pieces is put so is left whole.
     pub fn merge_classes_within(&mut self, limit: u64) {
-        let (to, groups) = self.merge_plan(limit);
+        let (to, groups) = self.merge_plan(limit, false);
         let mut old: Vec<Option<Stream>> = std::mem::take(&mut self.streams).into_iter().map(Some).collect();
         // (the pieces of each stream not copied yet: it is let go after its last)
         let mut left = vec![0usize; old.len()];
@@ -1041,22 +1041,19 @@ impl Formula {
         self.streams = streams;
     }
 
-    /// [`Formula::merge_classes`] without moving the bytes: the formula of the streams merged
-    /// (their bytes empty), and of each of its streams, the pieces of those of `self` it is the
-    /// concatenation of, in order.
+    /// [`Formula::merge_classes`] as the formula is archived, without moving the bytes: the
+    /// contents merged too, as nothing recompresses them any more (a stream of each file of an
+    /// image, say), as a tree's are. The formula of the streams merged (their bytes empty), and
+    /// of each of its streams, the pieces of those of `self` it is the concatenation of, in
+    /// order.
     pub fn merged(&self) -> (Formula, Vec<Vec<Piece>>) {
-        let (to, groups) = self.merge_plan(u64::MAX);
+        let (to, groups) = self.merge_plan(u64::MAX, true);
         let streams = groups
             .iter()
             .map(|g| {
                 let s = &self.streams[g[0].0];
-                Stream {
-                    class: s.class.clone(),
-                    kind: s.kind,
-                    content: s.content,
-                    apart: s.apart,
-                    data: Bytes::default(),
-                }
+                let content = g.iter().all(|p| self.streams[p.0].content);
+                Stream { class: s.class.clone(), kind: s.kind, content, apart: s.apart, data: Bytes::default() }
             })
             .collect();
         let mut f = Formula { streams: Vec::new(), root: self.root.clone(), shared: self.shared.clone() };
@@ -1067,8 +1064,8 @@ impl Formula {
 
     /// Of each stream, its pieces in order, each as where it starts, the merged stream it goes
     /// to and where in it; and of each merged stream, the pieces it is made of, in order
-    /// ([`Formula::merge_classes_within`]).
-    fn merge_plan(&self, limit: u64) -> (Vec<Vec<At>>, Vec<Vec<Piece>>) {
+    /// ([`Formula::merge_classes_within`]); the contents merged as well where `contents`.
+    fn merge_plan(&self, limit: u64, contents: bool) -> (Vec<Vec<At>>, Vec<Vec<Piece>>) {
         let n = self.streams.len();
         let lens: Vec<u64> = self.streams.iter().map(|s| s.data.len() as u64).collect();
         let mut past = vec![false; n];
@@ -1085,7 +1082,7 @@ impl Formula {
         visit(&self.root);
         let alike = |i: usize| {
             let s = &self.streams[i];
-            s.kind != Kind::Compressed && !s.content && !s.apart && !past[i]
+            s.kind != Kind::Compressed && (contents || !s.content) && !s.apart && !past[i]
         };
 
         // the streams longer than half the limit, of each class and kind, cut into pieces of a
@@ -1844,6 +1841,22 @@ mod tests {
             f.to_string(),
             "pack 37\n  slice #0 [1, +2) a\n  apply rev@1 3\n    slice #0 [0, +3) a\n  slice #0 [0, +0) a\n"
         );
+    }
+
+    /// Contents of a class are merged as the formula is archived ([`Formula::merged`]), as
+    /// nothing recompresses them any more, but not as recompressors merge classes.
+    #[test]
+    fn contents_merged_as_archived() {
+        let mut f = Formula::default();
+        let a = f.push_content("raw", Kind::Unknown, b"one".to_vec());
+        let b = f.push_content("raw", Kind::Unknown, b"two".to_vec());
+        f.root = Node::concat([a, b]);
+        let (m, groups) = f.merged();
+        assert_eq!(groups, [vec![(0, 0, 3), (1, 0, 3)]]);
+        assert!(m.streams.len() == 1 && m.streams[0].content);
+        let mut g = f.clone();
+        g.merge_classes();
+        assert_eq!(g.streams.len(), 2);
     }
 
     #[test]

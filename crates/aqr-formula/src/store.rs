@@ -3,6 +3,7 @@
 //! the system writes out and drops as memory runs short, rather than holding them all.
 
 use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use crate::Bytes;
@@ -116,13 +117,41 @@ pub fn spill(b: &mut Bytes) {
     *b = bytes;
 }
 
-/// `d` as bytes shared with the store where it is within a region of it still held (a stream
-/// spilled, say) and the store would rather share it, rather than a copy.
+/// Bytes shared already (files mapped, say) that [`find`] shares rather than copies, while
+/// their guards are kept, by the guards' ids.
+static KNOWN: RwLock<Vec<(u64, Bytes)>> = RwLock::new(Vec::new());
+
+/// Has [`find`] share bytes within `b` (where shared: its own are not) until the guard is
+/// dropped: the input mapped, so that what is cut out of it is not copied.
+pub fn known(b: &Bytes) -> Known {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    if b.is_shared() && !b.is_empty() {
+        KNOWN.write().unwrap().push((id, b.clone()));
+    }
+    Known(id)
+}
+
+pub struct Known(u64);
+
+impl Drop for Known {
+    fn drop(&mut self) {
+        KNOWN.write().unwrap().retain(|k| k.0 != self.0);
+    }
+}
+
+/// `d` as bytes shared rather than a copy, where it is within bytes [`known`], or within a
+/// region of the store still held (a stream spilled, say) and the store would rather share it.
 pub fn find(d: &[u8]) -> Option<Bytes> {
     if d.len() < MIN {
         return None;
     }
-    store()?.find(d)
+    let at = d.as_ptr() as usize;
+    let known = KNOWN.read().unwrap().iter().find_map(|(_, b)| {
+        let start = at.checked_sub(b.as_ptr() as usize)?;
+        (start + d.len() <= b.len()).then(|| b.slice(start..start + d.len()))
+    });
+    known.or_else(|| store()?.find(d))
 }
 
 /// [`spill`] of every stream of `f`.

@@ -82,15 +82,28 @@ fn contents_by_kind() {
     };
     let f = formula::encode_with(&d, &Options { kind }).unwrap();
     assert!(eval(&f) == d);
-    let classes: Vec<_> = f.streams.iter().map(|s| (&s.class[..], s.content, s.data.len())).collect();
+    // (a stream of each file, those of a class merged in the order of their first)
+    let mut classes: Vec<(&str, bool, usize)> = Vec::new();
+    for s in &f.streams {
+        match classes.iter_mut().find(|c| c.0 == s.class) {
+            Some(c) => c.2 += s.data.len(),
+            None => classes.push((&s.class, s.content, s.data.len())),
+        }
+    }
     let text = 840 + "물 aqueous".len();
     assert_eq!(
         classes,
         [("raw", true, 20026), (formula::REST, false, d.len() - 20026 - text), ("iso/text", true, text)]
     );
-    // a file a slice of its own
+    // a file a slice of its own, the whole of its stream
     let Node::Concat(parts) = &f.root else { unreachable!() };
-    assert_eq!(parts.iter().filter(|n| matches!(n, Node::Slice { stream: 0 | 2, .. })).count(), 5);
+    let files: Vec<_> = parts.iter().filter(|n| !matches!(n, Node::Slice { stream: 1, .. })).collect();
+    assert_eq!(files.len(), 5);
+    for n in files {
+        let &Node::Slice { stream, start, len } = n else { panic!("a slice") };
+        assert!(stream != 1 && start == 0 && len == f.streams[stream].data.len() as u64);
+    }
+    assert_eq!(f.streams.len(), 1 + 5);
 }
 
 /// UDF 2.50 keeps its files in a metadata partition, which is not read: no file is found.

@@ -1,5 +1,5 @@
 //! aqr-iso as an entry formula (see aqr-formula): the image as the concatenation of its pieces
-//! ([`crate::pieces`]), each file's contents a slice of the content stream of its kind, the
+//! ([`crate::pieces`]), each file's contents a stream of its own (of its kind's class), the
 //! rest a slice of the stream `iso/rest`. `FORMAT.md` tells of the streams.
 
 use std::borrow::Cow;
@@ -44,49 +44,74 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Formula> {
 
 /// The formula of `input` as `pieces` of `files`.
 pub fn build(input: &[u8], files: &[File], pieces: &[Piece], opt: &Options) -> Formula {
-    const RAW_AT: usize = 0;
+    // Each file's contents a stream of its own, of its kind's class: the streams of a class are
+    // put together as the archive is encoded (in the order of their indices, by the first of
+    // them), as one stream of the class would be. The contents are shared with `input` where it
+    // is known to the store (the file mapped, not copied), else copied. The streams are in the
+    // order of the classes' first contents, the first of `raw` (or an empty one) before the rest,
+    // stream 1, as `raw` is the first class.
     const REST_AT: usize = 1;
-    let mut f = Formula::default();
-    f.push_content("raw", Kind::Unknown, Vec::new());
-    f.push(REST, Vec::new());
-    // the stream of each piece, the streams by kind, and their lengths
-    let mut lens: Vec<usize> = vec![0, 0];
-    let mut kinds: Vec<(Kind, usize)> = vec![(Kind::Unknown, RAW_AT)];
-    let mut parts = Vec::with_capacity(pieces.len());
-    let mut of = Vec::with_capacity(pieces.len());
-    for p in pieces {
-        let s = match p.file {
-            None => REST_AT,
-            Some(i) => {
-                let kind = (opt.kind)(&files[i].name);
-                match kinds.iter().find(|k| k.0 == kind) {
-                    Some(k) => k.1,
-                    None => {
-                        let class: Cow<'static, str> = match kind {
-                            Kind::Format(name) => format!("iso/{name}").into(),
-                            kind => format!("iso/{kind}").into(),
-                        };
-                        f.push_content(class, kind, Vec::new());
-                        lens.push(0);
-                        kinds.push((kind, lens.len() - 1));
-                        lens.len() - 1
-                    }
-                }
-            }
+    // the kinds in the order they come, `raw` first, and the pieces of each
+    let mut kinds: Vec<(Kind, Vec<usize>)> = vec![(Kind::Unknown, Vec::new())];
+    let mut rest_len = 0;
+    for (j, p) in pieces.iter().enumerate() {
+        let Some(i) = p.file else {
+            rest_len += p.span.len();
+            continue;
         };
-        parts.push(Node::slice(s, lens[s] as u64, p.span.len() as u64));
-        of.push((s, lens[s]));
-        lens[s] += p.span.len();
+        let kind = (opt.kind)(&files[i].name);
+        match kinds.iter_mut().find(|k| k.0 == kind) {
+            Some(k) => k.1.push(j),
+            None => kinds.push((kind, vec![j])),
+        }
     }
-    // (of the store where one is set: aqr-compress's spill, see aqr_formula::store)
-    let mut data: Vec<Buffer> = lens.iter().map(|&n| Buffer::new(n)).collect();
-    for (p, &(s, at)) in pieces.iter().zip(&of) {
-        data[s][at..at + p.span.len()].copy_from_slice(&input[p.span.clone()]);
+    let class = |kind: Kind| -> Cow<'static, str> {
+        match kind {
+            Kind::Unknown => "raw".into(),
+            Kind::Format(name) => format!("iso/{name}").into(),
+            kind => format!("iso/{kind}").into(),
+        }
+    };
+    let contents = |j: usize| {
+        let d = &input[pieces[j].span.clone()];
+        aqr_formula::store::find(d).unwrap_or_else(|| {
+            // (of the store where one is set: aqr-compress's spill, see aqr_formula::store)
+            let mut b = Buffer::new(d.len());
+            b.copy_from_slice(d);
+            b.into_bytes()
+        })
+    };
+    let mut f = Formula::default();
+    let mut stream_of = vec![usize::MAX; pieces.len()];
+    let raws = &kinds[0].1;
+    match raws.first() {
+        Some(&j) => {
+            f.push_content("raw", Kind::Unknown, contents(j));
+            stream_of[j] = 0;
+        }
+        None => _ = f.push_content("raw", Kind::Unknown, Vec::new()),
     }
-    for (s, d) in data.into_iter().enumerate() {
-        f.streams[s].data = d.into_bytes();
+    // (filled below, in the order of the pieces)
+    let mut rest = Buffer::new(rest_len);
+    f.push(REST, Vec::new());
+    for (n, (kind, js)) in kinds.iter().enumerate() {
+        for &j in &js[(n == 0) as usize..] {
+            f.push_content(class(*kind), *kind, contents(j));
+            stream_of[j] = f.streams.len() - 1;
+        }
     }
-    f.root = Node::concat(parts);
+    let mut at = 0;
+    let parts = pieces.iter().zip(&stream_of).map(|(p, &s)| match p.file {
+        None => {
+            let n = p.span.len();
+            rest[at..at + n].copy_from_slice(&input[p.span.clone()]);
+            at += n;
+            Node::slice(REST_AT, (at - n) as u64, n as u64)
+        }
+        Some(_) => Node::slice(s, 0, p.span.len() as u64),
+    });
+    f.root = Node::concat(parts.collect::<Vec<_>>());
+    f.streams[REST_AT].data = rest.into_bytes();
     debug_assert_eq!(f.root.len(), input.len() as u64);
     f
 }
