@@ -301,3 +301,70 @@ fn links_all() {
     assert!(err.contains("abs: a link reaching out of") && fs::symlink_metadata(out.join("abs")).is_err(), "{err}");
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// With `-f`, a link (or a file) where a directory of the archive goes is taken away and the
+/// directory made, never followed: the archive's own directory (by `-o`, by its name, and with
+/// `--auto-dir`) and a directory of the tree. Without `-f`, it is told as there (where a
+/// directory there is taken as it is: of a path selected).
+#[test]
+fn force_over_links_to_directories() {
+    let d = scratch(&std::env::temp_dir(), "force-links");
+    let victim = d.join("victim");
+    let tree = Tree {
+        root: Extra::default(),
+        entries: vec![
+            entry("sub", EntryNode::Dir, None),
+            Entry { parent: Some(0), ..entry("x", EntryNode::File(0), None) },
+            entry("plain", EntryNode::Dir, None),
+            entry("y", EntryNode::File(1), None),
+        ],
+    };
+    let check = |out: &Path, err: &str| {
+        assert_eq!(fs::read_dir(&victim).unwrap().count(), 0, "written through a link: {err}");
+        for p in [out, &out.join("sub"), &out.join("plain")] {
+            assert!(fs::symlink_metadata(p).unwrap().is_dir(), "{}: {err}", p.display());
+        }
+        assert_eq!(fs::read(out.join("sub/x")).unwrap(), b"content 0", "{err}");
+    };
+    let fresh = |at: &Path| {
+        let _ = fs::remove_dir_all(&victim);
+        fs::create_dir(&victim).unwrap();
+        let _ = fs::remove_file(at).or_else(|_| fs::remove_dir_all(at));
+    };
+
+    // directories of the tree: a link to one, a file
+    let out = d.join("out");
+    fresh(&out);
+    fs::create_dir(&out).unwrap();
+    std::os::unix::fs::symlink(&victim, out.join("sub")).unwrap();
+    fs::write(out.join("plain"), b"a file").unwrap();
+    let (_, err) = extract_with(&d, &tree, true, &[]);
+    check(&out, &err);
+    fs::remove_dir_all(out.join("sub")).unwrap();
+    std::os::unix::fs::symlink(&victim, out.join("sub")).unwrap();
+    // (without -f: of a path selected, into a directory there already)
+    let (_, err) = extract_with(&d, &tree, false, &["sub"]);
+    assert!(err.contains("sub exists (-f to overwrite)"), "{err}");
+    assert_eq!(fs::read_dir(&victim).unwrap().count(), 0, "{err}");
+
+    // the archive's own directory, by -o
+    fresh(&out);
+    std::os::unix::fs::symlink(&victim, &out).unwrap();
+    let (_, err) = extract_with(&d, &tree, true, &[]);
+    check(&out, &err);
+
+    // by its name, and with --auto-dir (two entries at the top: the archive's directory)
+    for args in [&[][..], &["--auto-dir"][..]] {
+        let own = d.join("a");
+        fresh(&own);
+        std::os::unix::fs::symlink(&victim, &own).unwrap();
+        let o = Command::new(env!("CARGO_BIN_EXE_aqr"))
+            .args(["-d", "-f"])
+            .args(args)
+            .arg(d.join("a.aqr"))
+            .output()
+            .unwrap();
+        check(&own, &String::from_utf8_lossy(&o.stderr));
+    }
+    fs::remove_dir_all(&d).unwrap();
+}

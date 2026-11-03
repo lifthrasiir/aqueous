@@ -292,12 +292,7 @@ impl<'a> Extractor<'a> {
             Place::Into(dir) if sel.is_some() => (Some(dir.to_owned()), false),
             _ if sel.is_some() => return Err("paths selected of an archive extracted, not into a directory".into()),
             Place::Own(out) => {
-                match fs::create_dir(out) {
-                    Err(e) if !(force && e.kind() == std::io::ErrorKind::AlreadyExists && out.is_dir()) => {
-                        return Err(err(out, e));
-                    }
-                    _ => {}
-                }
+                own_dir(out, force)?;
                 (Some(out.to_owned()), true)
             }
             Place::Into(dir) if dir.as_os_str().is_empty() || dir.is_dir() => (Some(dir.to_owned()), false),
@@ -516,8 +511,16 @@ impl<'a> Extractor<'a> {
             match &e.node {
                 // (into a directory there already, as it is)
                 EntryNode::Dir => match fs::create_dir(&path) {
-                    Err(x) if !(path.is_dir() && !path.is_symlink()) => return Err(err(&path, x)),
-                    _ => {}
+                    Err(x) if x.kind() == std::io::ErrorKind::AlreadyExists => {
+                        if !fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+                            if !force {
+                                return Err(format!("{} exists (-f to overwrite)", path.display()));
+                            }
+                            replace_with_dir(&path)?;
+                        }
+                    }
+                    Err(x) => return Err(err(&path, x)),
+                    Ok(()) => {}
                 },
                 EntryNode::File(c) => {
                     grow(&mut s.files, *c).1 += 1;
@@ -638,12 +641,7 @@ impl<'a> Extractor<'a> {
         if let Some(p) = own.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(p).map_err(|e| err(p, e))?;
         }
-        match fs::create_dir(own) {
-            Err(e) if !(force && e.kind() == std::io::ErrorKind::AlreadyExists && own.is_dir()) => {
-                return Err(err(own, e));
-            }
-            _ => {}
-        }
+        own_dir(own, force)?;
         self.force.store(force, Relaxed);
         tell_output(own);
         s.top = Some(own.to_owned());
@@ -1166,6 +1164,30 @@ fn by_name_add(m: &mut ByName, parent: Option<usize>, n: Name, j: usize) {
     for k in n.keys() {
         m.entry((parent, k)).or_default().push(j);
     }
+}
+
+/// Makes `dir`, the archive's own directory: where something is there, an error, but where
+/// `force`, a directory kept as it is and anything else (a link to a directory too) taken away
+/// for it, so that nothing is written through a link.
+fn own_dir(dir: &Path, force: bool) -> Result<(), String> {
+    match fs::create_dir(dir) {
+        Err(e) if force && e.kind() == std::io::ErrorKind::AlreadyExists => match fs::symlink_metadata(dir) {
+            Ok(m) if m.is_dir() => Ok(()),
+            Ok(_) => replace_with_dir(dir),
+            Err(_) => Err(err(dir, e)),
+        },
+        r => r.map_err(|e| err(dir, e)),
+    }
+}
+
+/// Takes away what is at `path`, not a directory (a link to one, on Windows a junction, is
+/// itself taken away), and makes a directory there.
+fn replace_with_dir(path: &Path) -> Result<(), String> {
+    // (a link to a directory on Windows is removed as a directory)
+    fs::remove_file(path)
+        .or_else(|e| if cfg!(windows) { fs::remove_dir(path) } else { Err(e) })
+        .map_err(|e| err(path, e))?;
+    fs::create_dir(path).map_err(|e| err(path, e))
 }
 
 /// Why a link is not made ([`resolve_link`]).
