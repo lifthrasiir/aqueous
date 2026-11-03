@@ -55,8 +55,9 @@ fn prefetch(p: *const u8) {
 pub const MODEL_BYTES: u64 = (CONTEXTS * 8) as u64;
 
 /// The 16 contexts that a context leads to two bases on: 128 bytes, which the decoder prefetches
-/// together. Aligned, they are one line of 128 bytes (Apple's) or two of 64 (others'), whatever
-/// the allocator gives (glibc's large blocks are 16 bytes into a page).
+/// together, aligned whatever the allocator gives (glibc's large blocks are 16 bytes into a
+/// page), as two halves of 64 bytes: a hint for each half is faster even on an M4, whose lines
+/// are said to be of 128 bytes (162 against 132 MB/s on chr1).
 #[cfg(not(target_family = "wasm"))]
 #[derive(Clone)]
 #[repr(C, align(128))]
