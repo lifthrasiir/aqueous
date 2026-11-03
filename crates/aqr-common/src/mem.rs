@@ -154,13 +154,18 @@ pub fn mark(_label: &str) {
 pub const MAPPED_MIN: usize = 1 << 20;
 
 /// The system's allocator, but for blocks of at least [`MAPPED_MIN`] bytes, which are mapped
-/// and unmapped at once (on Unix): macOS's gives back the pages of large blocks freed only
-/// some seconds later, as large blocks come and go faster than that (10gb decompression of
-/// 4.4 GB in use took 7.5 GB). A growing block is extended in place where the pages after it
-/// are free, as the system's realloc does. Registered by the binaries.
+/// and unmapped at once (on Apple's systems): macOS's gives back the pages of large blocks
+/// freed only some seconds later, as large blocks come and go faster than that (10gb
+/// decompression of 4.4 GB in use took 7.5 GB). A growing block is extended in place where the
+/// pages after it are free, as the system's realloc does. Registered by the binaries.
+///
+/// Elsewhere the system's allocator alone: glibc's reuses the large blocks it keeps, where
+/// mapping each anew faulted in every page of it (4 KiB on x86-64) and unmapping took the
+/// process's lock of mappings and flushed the other threads' TLBs. On 10gb `aqr -t` (4 threads
+/// of a cloud VM) that was 17% of the CPU time in the kernel, and more with more threads.
 pub struct Mapped;
 
-#[cfg(unix)]
+#[cfg(target_vendor = "apple")]
 mod mapped {
     use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
@@ -201,27 +206,27 @@ mod mapped {
 impl Mapped {
     #[inline]
     fn mapped(l: Layout) -> bool {
-        cfg!(unix) && l.size() >= MAPPED_MIN && l.align() <= 4096
+        cfg!(target_vendor = "apple") && l.size() >= MAPPED_MIN && l.align() <= 4096
     }
 }
 
 impl Mapped {
     unsafe fn raw_alloc(&self, l: Layout) -> *mut u8 {
-        #[cfg(unix)]
+        #[cfg(target_vendor = "apple")]
         if Self::mapped(l) {
             return mapped::map(std::ptr::null_mut(), mapped::round(l.size()));
         }
         unsafe { System.alloc(l) }
     }
     unsafe fn raw_alloc_zeroed(&self, l: Layout) -> *mut u8 {
-        #[cfg(unix)]
+        #[cfg(target_vendor = "apple")]
         if Self::mapped(l) {
             return mapped::map(std::ptr::null_mut(), mapped::round(l.size()));
         }
         unsafe { System.alloc_zeroed(l) }
     }
     unsafe fn raw_dealloc(&self, p: *mut u8, l: Layout) {
-        #[cfg(unix)]
+        #[cfg(target_vendor = "apple")]
         if Self::mapped(l) {
             // SAFETY: mapped by `alloc` as of this size, and the caller's no more
             return unsafe { mapped::unmap(p, mapped::round(l.size())) };
@@ -235,7 +240,7 @@ impl Mapped {
         if !old && !new {
             return unsafe { System.realloc(p, l, n) };
         }
-        #[cfg(unix)]
+        #[cfg(target_vendor = "apple")]
         if old && new {
             let (have, want) = (mapped::round(l.size()), mapped::round(n));
             if want <= have {
