@@ -32,11 +32,13 @@
 mod dict;
 pub mod envelope;
 mod listing;
+pub mod mirror;
 mod segment;
 pub mod sink;
 mod tree;
 
 pub use listing::Listed;
+pub use mirror::Mirroring;
 pub use segment::{Batch, ContentAt, Layout, Leaf, Placed, Segment, SegmentWriter};
 pub use tree::{
     Entry, EntryNode, Extra, MAC_FLAGS_ALLOWED, Time, Tree, WIN_ATTRS_ALLOWED, Xattr, Zone, name_bytes, name_from,
@@ -64,6 +66,7 @@ use crate::{Error, Formula, Kind, Module, Node, Resource, Result, packed};
 pub const HEADER_MAGIC: [u8; 6] = [0xf8, 0x04, 0x03, 0x6a, 0xd6, 0xbe];
 pub const FOOTER_MAGIC: [u8; 6] = [0xfd, 0xaa, 0xae, 0xde, 0x85, 0x12];
 pub const OVERLAY_HEADER_MAGIC: [u8; 6] = [0x69, 0x0d, 0x15, 0xaf, 0xf6, 0xb2];
+pub const OVERLAY_FOOTER_MAGIC: [u8; 6] = [0xfc, 0x0f, 0x6e, 0x7b, 0x4b, 0xac];
 /// The type of a size hint block.
 const SIZE_HINT: u64 = 0x04;
 /// A size hint block of a padded LEB128 to be filled in ([`Encoder::with_size_hint`], and
@@ -2354,6 +2357,21 @@ pub type Telling = Arc<dyn Fn(Step) + Send + Sync>;
 /// A content of a tree: its leaf, its output of it and its size.
 type ContentRef = (usize, usize, u64);
 
+/// How far an archive conforms to the archival profile ([`Archive::archival`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Archival {
+    /// Leaf data blocks without a checksum.
+    pub unchecked_leaves: usize,
+    /// Formula blocks with an output no Checksum instruction covers.
+    pub unchecked_formulas: usize,
+}
+
+impl Archival {
+    pub fn conforms(&self) -> bool {
+        self.unchecked_leaves == 0 && self.unchecked_formulas == 0
+    }
+}
+
 /// An archive opened ([`open`]): its blocks framed, and its tree read where it has one. The
 /// data of its blocks is decoded as the leaves are evaluated, a non-leaf block when first sliced
 /// (and dropped once no slice of it is left), so that evaluating them takes about the memory of
@@ -2512,6 +2530,37 @@ impl<'n> Archive<'_, 'n> {
             outputs?.iter().try_for_each(|d| sink(d))
         })?;
         Ok(n)
+    }
+
+    /// How far the archive conforms to the archival profile (spec, "Archival profile"), as its
+    /// blocks tell: its leaf data blocks without a checksum, and its formula blocks with an output
+    /// no Checksum instruction covers (every formula block read). An archive opened is standalone
+    /// and has no shorthand blocks (which are not supported yet).
+    pub fn archival(&self) -> Decoded<Archival> {
+        let blocks = &self.blocks;
+        let mut a = Archival::default();
+        let mut used = vec![false; blocks.non_leaf.len()];
+        for leaf in &blocks.leaves {
+            match *leaf {
+                LeafBlock::Stored(_, _, checked, _) => a.unchecked_leaves += !checked as usize,
+                LeafBlock::Formula { outputs, data, modules, resources, non_leaf } => {
+                    let (d, dict) = blocks.formulas[data];
+                    let d = decoded_with(d, true, true, dict.map(|d| &blocks.dictionaries[d]))?;
+                    let env = Env {
+                        first: non_leaf,
+                        modules: &blocks.modules[..modules],
+                        module_data: &blocks.module_data[..modules],
+                        resource_data: &blocks.resource_data[..resources],
+                        loaded: &self.loaded[..modules],
+                        resources: &blocks.resources[..resources],
+                        runner: self.runner,
+                    };
+                    let p = read(&d, outputs, &env, blocks.non_leaf.len(), &mut used)?;
+                    a.unchecked_formulas += !p.outputs_checked() as usize;
+                }
+            }
+        }
+        Ok(a)
     }
 
     /// [`Archive::each_leaf`], a leaf of a formula written to `sink` as it is evaluated where
@@ -3247,6 +3296,32 @@ struct Program<'a> {
 }
 
 impl Program<'_> {
+    /// Whether a Checksum instruction covers each output: the item on top of the stack as it
+    /// runs, the same item as Swap instructions move it (spec, "Checksum instruction").
+    fn outputs_checked(&self) -> bool {
+        let mut st: Vec<bool> = Vec::new();
+        let replace = |st: &mut Vec<bool>, n: usize, m: usize| {
+            st.truncate(st.len() - n);
+            st.resize(st.len() + m, false);
+        };
+        for insn in &self.insns {
+            match insn {
+                Insn::Nop => {}
+                Insn::Literal(_) | Insn::Slice { .. } => st.push(false),
+                &Insn::Swap(d) => {
+                    let top = st.len() - 1;
+                    st.swap(top, top - d);
+                }
+                Insn::Apply(a) => replace(&mut st, a.num_inputs, a.output_sizes.len()),
+                &Insn::Concat(n) | &Insn::Pack(n) => replace(&mut st, n, 1),
+                Insn::Split(sizes) => replace(&mut st, 1, sizes.len()),
+                Insn::Patch(_) => replace(&mut st, 2, 1),
+                Insn::Checksum(_) => *st.last_mut().expect("checked when read") = true,
+            }
+        }
+        st.iter().all(|&c| c)
+    }
+
     /// The most bytes on the stack at once (with the inputs and outputs of an instruction as it
     /// runs both, or an application's memory limit where larger: the working memory of its module,
     /// which a native one takes too), as the sizes the program tells: the weight of its leaf
