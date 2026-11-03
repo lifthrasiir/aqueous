@@ -21,8 +21,11 @@ Measured 2026-10-26 on an Apple M4 (10 cores), on hg19 (93 chromosome files of t
   4^10 contexts (8 MiB) codes 1% smaller than 4^9 (2 MiB), but ten of them at once miss the
   caches, 19 Mbase/s a thread against 71 (chr1, ten decoders at once; an M4). The decoder loads
   the contexts two bases ahead as it decodes one, which brings 58 to 71 there: 128 bytes,
-  aligned, one line on Apple's cores and two on others', both asked for (with one asked for and
-  glibc's blocks 16 bytes into a page, an x86 server decoded 60 MB/s rather than 75).
+  aligned, asked for as two halves of 64 bytes. One hint for all 128 bytes was slower on both
+  machines measured (`scripts/cache-ab.sh`, decode MB/s, the faster of three interleaved runs):
+  chr1 on the M4 132 -> 162 alone and 91 -> 95 ten at once (54.3 -> 57.7 G instructions, 16.4
+  -> 14.9 G cycles); a synthetic 61 MB file on a 4-core Xeon 61 -> 75 alone, 61 -> 80 four at
+  once (glibc's large blocks start 16 bytes into a page, so the hint caught at most 6 contexts).
 - The model was picked on chr1 (bits per base): order-9 1.806, order-10 1.787, order-11 1.786;
   probabilities moving by 1/64 against 1/16 (1.827) and 1/128 (1.795) at order 10; counts
   halved at 250 (1.790, and a division per base). A match model of 24-base hashes (last
