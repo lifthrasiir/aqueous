@@ -1,5 +1,5 @@
 //! The code of the modules of aqr-exe (`exe-recons/x86`, `exe-recons/x86-remap`,
-//! `exe-recons/arm64`, `exe-recons/arm64-remap`, `exe-recons/cil`, `exe-recons/pe-reloc` and
+//! `exe-recons/arm64`, `exe-recons/arm64-remap`, `exe-recons/arm64-delta`, `exe-recons/cil`, `exe-recons/pe-reloc` and
 //! `exe-recons/macho-symtab`, as aqr-decompress names them): the parameters and the inputs
 //! checked, then the section or table decoded. aqr-modules builds it into their Wasm modules.
 
@@ -69,6 +69,19 @@ pub fn arm64_remap(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>>
         return Err("bad parameters or inputs");
     };
     of_len(arm64::remap::decode(streams, u64::from_le_bytes(*p), n), len)
+}
+
+/// A stream of ARM64 code against that of another version (the stream, not the section: an
+/// input of [`arm64_remap`]'s). No parameters; inputs: the other version's stream, then the
+/// streams of [`arm64::delta::STREAM_NAMES`].
+pub fn arm64_delta(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
+    let (true, [reference, streams @ ..], Ok(n)) = (params.is_empty(), inputs, usize::try_from(len)) else {
+        return Err("bad parameters or inputs");
+    };
+    let Ok(streams) = <[&[u8]; arm64::delta::NUM_STREAMS]>::try_from(streams) else {
+        return Err("bad parameters or inputs");
+    };
+    of_len(arm64::delta::decode(reference, streams, n), len)
 }
 
 /// The CIL filter on the section holding the metadata of a .NET image. Parameters: the

@@ -179,6 +179,7 @@ pub use encode::*;
 #[cfg(feature = "encode")]
 pub(crate) use encode::encode_into;
 
+pub mod delta;
 pub mod remap;
 
 #[cfg(feature = "decode")]

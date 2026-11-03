@@ -279,6 +279,52 @@ and held through it. Discord and Windows App archive as before. The module block
 `exe-recons/x86`'s bytes changed (its decoder now takes a hook, of no effect there), so that
 archives of an older one run it as WebAssembly.
 
+### Code against another version, by differences
+
+Measured on 2026-11-03 on an Apple M4. B's remapped `CODE` stream of the arm64 images, against
+A's (`aqr-exe-bench-delta`; the streams zstd -19), as LZ does it (`zstd -7 --long=31
+--patch-from`), bsdiff 4.3, Zucchini (Firefox's, raw, its patch through `xz -9`) and
+`exe-recons/arm64-delta` (`arm64::delta`, B in pieces of 4 MiB each against one of 16 MiB of
+A, as aqr-compress codes them):
+
+| A → B | LZ | bsdiff | Zucchini | arm64-delta, whole | in pieces |
+|---|---|---|---|---|---|
+| Chrome Framework 156.0.8078.47 → .49 | 8.10 MB | 1.01 MB | 0.93 MB | 0.87 MB | 0.86 MB |
+| Chrome Framework .49 → .76 | 19.99 MB | 4.97 MB | 4.41 MB | 4.88 MB | 5.07 MB |
+| Electron Framework 43 (VS Code) → 44 (Discord) | 28.96 MB | 16.01 MB | 12.79 MB | 14.14 MB | 16.01 MB |
+
+Most of what LZ leaves is where the words differ (1.4% of those copied), not what they are:
+the differences of the words alike are 0, and the others go sparse. A word of A that became
+another in B mostly becomes it again (data moved within a page changes the low bits of every
+`ADD` and `LDR` after an `ADRP` to it alike): predicted so, the differences not 0 drop from
+726,440 to 262,549 of Chrome's first pair. Pieces of B against three of 4 MiB of A make
+Electron 14.96 MB, against two of 8 MiB 14.97 MB, against one of 8 MiB 23.50 MB (the
+prototype's, `aqr-exe-bench-delta -p`); but A's stream in pieces is larger (at zstd -9, by
+6.1%, 2.9% and 1.9% in pieces of 4, 8 and 16 MiB), and through `aqr -c` one of 16 MiB archives
+smallest but for Electron (below). The differences decode at 0.9 to 3.1 GB/s; the streams are
+made at 80 to 210 MB/s a thread, picking A's pieces 0.2 to 0.4 s.
+
+Through `aqr -c` (level `mid`, 10 threads), the arm64 images of each pair, and Chrome's
+application (its framework's three versions), before (commit `511681e`) and after:
+
+| | before | after | |
+|---|---|---|---|
+| Chrome Framework .47 and .49, arm64 (503.4 MB) | 92.04 MB | 88.71 MB | −3.6% |
+| Chrome Framework .49 and .76, arm64 | 103.22 MB | 96.04 MB | −7.0% |
+| Electron Framework 43 and 44, arm64 (386.1 MB) | 111.19 MB | 97.75 MB | −12.1% |
+| Google Chrome.app (2.28 GB) | 367.19 MB | 352.75 MB | −3.9% |
+
+Against two pieces of 8 MiB of A, the pairs were 90.06, 97.29 and 97.35 MB; against three of
+4 MiB the first was 91.56 MB. Of Chrome.app, instructions retired 1439.4 → 1191.8 G (less of
+the code compressed), 27.9 → 27.7 s, peak RSS 6.22 GB as before; `aqr -t` 4.85–5.33 →
+4.71–4.79 s, 86.6 → 90.3 G instructions, peak RSS 3.24 → 2.80 GB. The other six applications
+of `docs/macos-app-todo.md` archive as before (to a few bytes). The module block is 2.9 KB.
+
+What is left of B's share is mostly not code: of Chrome's first pair (10.58 MB through
+`aqr -c` before the pieces of 16 MiB), the rest of B's file (`__TEXT,__const`, strings,
+`__LINKEDIT`) 4.1 MB at zstd -9, A's code stream in pieces 1.8 MB more than whole; Zucchini's
+patch of the whole file is 3.43 MB (`docs/macos-app-todo.md`, appendix A).
+
 ## Limitations
 
 - ELF: only little-endian images. Their tables (relocations, symbols, `.eh_frame` and its
@@ -289,13 +335,15 @@ archives of an older one run it as WebAssembly.
   the rest, which finds their zlib streams.
 - x86, x86-64 and ARM64 only: images of other machines (32-bit ARM, PowerPC) are kept as
   they are. ARM64 data in code sections (literal pools) is taken as instructions.
-- Code against another version: only of Mach-O images, not PE; of files in one batch (two
-  large files of no name or size alike, as Electron Frameworks of two apps, are not); and only
-  images of more than half a solid block of code, whose streams are cut
+- Code against another version: only of Mach-O and ELF images, not PE; of files in one batch
+  (two large files of no name or size alike, as Electron Frameworks of two apps, are not); and
+  only images of more than half a solid block of code, whose streams are cut
   into pieces put with those alike: shorter streams go one after another as their files do,
   rarely by their parents', where remapping them costs more (Blender's `_ssl` against
   `_hashlib`, both linking OpenSSL, 11 KB more). The low 12 bits of what follows an `ADRP`
-  (`ADD`, `LDR`) are not remapped.
+  (`ADD`, `LDR`) are not remapped (`exe-recons/arm64-delta` predicts them). By differences
+  (`exe-recons/arm64-delta`) only ARM64 code, of an image's largest section, against its
+  tree's root (not its parent); x86 code (whose streams are of bytes, by field) is not.
 - Mach-O code signatures are kept as they are, though their page hashes follow from the
   image.
 - Mach-O symbol tables are taken only as `ld64` writes them (730 of the 775 of 16 KiB or more

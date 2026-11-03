@@ -1171,20 +1171,24 @@ fn smaller(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], opt: &Options, 
         cx.note_bundled(f);
     }
     let covered = gaps.is_some_and(|g| g.iter().all(Range::is_empty));
-    let smaller = !opt.smaller || bundled || covered || bundle::files_apart(f) || aqr_ppmd::formula::is(f) || {
-        let pieces: Option<Vec<&[u8]>> = gaps.map(|gaps| gaps.iter().map(|g| &d[g.clone()]).collect());
-        let stand_in = pieces.as_deref().map(|p| (0, p));
-        // (the streams the files archived together hold cost nothing)
-        let free: Vec<usize> = (0..f.streams.len())
-            .filter(|&s| stand_in.is_none_or(|(t, _)| t != s))
-            .filter(|&s| {
-                // (text coded alike as its copies, whose data was long enough to tell)
-                let data = &f.streams[s].data;
-                data.len() >= SHARE_MIN && cx.held_by_others(data, d) || cx.coded_held(data)
-            })
-            .collect();
-        cx.enc.smaller_but(f, stand_in, &free, d).expect("slices within their streams")
-    };
+    // (an image coded against another's code holds a copy of it, which would only be compressed
+    // to be taken off: the code filtered, it is smaller)
+    let against = f.streams.iter().any(|s| s.class == exe::REFERENCE);
+    let smaller =
+        !opt.smaller || bundled || covered || against || bundle::files_apart(f) || aqr_ppmd::formula::is(f) || {
+            let pieces: Option<Vec<&[u8]>> = gaps.map(|gaps| gaps.iter().map(|g| &d[g.clone()]).collect());
+            let stand_in = pieces.as_deref().map(|p| (0, p));
+            // (the streams the files archived together hold cost nothing)
+            let free: Vec<usize> = (0..f.streams.len())
+                .filter(|&s| stand_in.is_none_or(|(t, _)| t != s))
+                .filter(|&s| {
+                    // (text coded alike as its copies, whose data was long enough to tell)
+                    let data = &f.streams[s].data;
+                    data.len() >= SHARE_MIN && cx.held_by_others(data, d) || cx.coded_held(data)
+                })
+                .collect();
+            cx.enc.smaller_but(f, stand_in, &free, d).expect("slices within their streams")
+        };
     if smaller {
         // `d` is not archived as it is (`f` is, or is part of something larger kept raw)
         cx.enc.forget(d);
@@ -1676,6 +1680,7 @@ fn place_all(f: &mut Formula, children: Vec<Option<Made>>, sets: Vec<sets::Set>,
     f.root = root;
     order.extend(embedded..f.shared.len());
     f.reorder_shared(&order);
+    exe::resolve(f);
     f.compact();
 }
 
@@ -2066,8 +2071,14 @@ fn recompressor(format: Format) -> Recompressor {
         Format::Pdf => PureWith(|d, p| aqr_pdf::formula::encode_with(d, &pdf_options(p.opt, p.opt.threads))),
         Format::Bzip2 => PureWith(|d, p| bz2(d, p.opt, p.depth, p.opt.threads, p.held)),
         Format::Pe => Cx(|d, _, _, _, _| exe::pe(d)),
-        Format::MachO => Cx(|d, _, _, _, cx| exe::macho(d, cx.remaps.as_deref().map_or(&[], |r| r.of(d)))),
-        Format::Elf => Cx(|d, _, _, _, cx| exe::elf(d, cx.remaps.as_deref().map_or(&[], |r| r.of(d)))),
+        Format::MachO => Cx(|d, _, _, _, cx| {
+            let r = cx.remaps.as_deref();
+            exe::macho(d, r.map_or(&[], |r| r.of(d)), r.map_or(&[], |r| r.deltas(d)))
+        }),
+        Format::Elf => Cx(|d, _, _, _, cx| {
+            let r = cx.remaps.as_deref();
+            exe::elf(d, r.map_or(&[], |r| r.of(d)), r.map_or(&[], |r| r.deltas(d)))
+        }),
         Format::Gzip => Cx(flate::gzip),
         Format::Zlib => Cx(flate::zlib),
         Format::Zip => Cx(|d, _, opt, depth, cx| zip::zip(d, opt, depth, cx)),
@@ -3017,6 +3028,7 @@ mod tests {
                 class: "raw".into(),
                 kind: Kind::Unknown,
                 content: false,
+                apart: false,
                 data: vec![1, 2, 3].into(),
             }],
             root: Node::apply(FLATE, vec![], vec![Node::slice(0, 0, 3), Node::slice(0, 0, 3)], d.len() as u64),

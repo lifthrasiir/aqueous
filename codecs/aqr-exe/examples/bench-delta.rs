@@ -10,7 +10,10 @@
 //! With `-p`, B is cut into pieces of `AQR_DELTA_PB` MiB (8), each coded against the
 //! `AQR_DELTA_K` pieces (1) of `AQR_DELTA_PA` MiB (8) of A that its matches fall in the most.
 //!
-//! usage: aqr-exe-bench-delta [-p] A B (streams, such as aqr-exe-bench-remap writes)
+//! With `-l`, aqr-exe's own (`arm64::delta`) on pieces of `AQR_DELTA_PB` MiB (4), each against
+//! one of `AQR_DELTA_PA` MiB (16) of A.
+//!
+//! usage: aqr-exe-bench-delta [-p | -l] A B (streams, such as aqr-exe-bench-remap writes)
 
 use std::time::Instant;
 
@@ -226,7 +229,11 @@ impl Predict {
             return self.map.get(&x).copied().unwrap_or(x);
         }
         let (k, v) = self.table[self.slot(x)];
-        if k == x { v } else { x }
+        if k == x {
+            v
+        } else {
+            x
+        }
     }
     fn set(&mut self, x: u32, y: u32) {
         if !PREDICT {
@@ -420,7 +427,8 @@ fn report(label: &str, parts: &[Coded], secs: f64, n: usize) {
     // values by byte planes
     let planes: Vec<u8> = (0..WORD).flat_map(|k| vals.chunks(WORD).map(move |w| w[k])).collect();
     println!(
-        "  sparse: {} words, gaps {:.2} + values {:.2} (planes {:.2}) MB (zstd 19); total ctrl + sparse + extra {:.2} MB",
+        "  sparse: {} words, gaps {:.2} + values {:.2} (planes {:.2}) MB (zstd 19); \
+         total ctrl + sparse + extra {:.2} MB",
         vals.len() / WORD,
         mb(z(&gaps, 19)),
         mb(z(&vals, 19)),
@@ -444,8 +452,45 @@ fn report(label: &str, parts: &[Coded], secs: f64, n: usize) {
     );
 }
 
+/// aqr-exe's `arm64::delta` on pieces of 4 MiB, each against a piece of 16 MiB of A (as
+/// aqr-compress codes them), the streams of all pieces together compressed by zstd -19.
+fn library(a: &[u8], b: &[u8]) {
+    use aqr_exe::arch::arm64::delta;
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let (pb, pa) = (env("AQR_DELTA_PB", 4) << 20, env("AQR_DELTA_PA", 16) << 20);
+    let t = Instant::now();
+    let sample = std::env::var("AQR_DELTA_SAMPLE").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    let refs = delta::references(a, pa, b, pb, 1, sample);
+    let t_refs = t.elapsed().as_secs_f64();
+    let (mut streams, mut t_dec) = (vec![Vec::new(); delta::NUM_STREAMS], 0.0);
+    for (k, r) in refs.iter().enumerate() {
+        let bp = &b[k * pb..((k + 1) * pb).min(b.len())];
+        let ap: Vec<u8> = r.iter().flat_map(|&j| a[j * pa..((j + 1) * pa).min(a.len())].iter().copied()).collect();
+        let st = delta::encode(&ap, bp);
+        let t = Instant::now();
+        let back = delta::decode(&ap, [&st[0], &st[1], &st[2], &st[3]], bp.len());
+        t_dec += t.elapsed().as_secs_f64();
+        assert!(back.as_deref() == Some(bp), "piece {k} decoded back");
+        streams.iter_mut().zip(st).for_each(|(o, s)| o.extend(s));
+    }
+    let total = t.elapsed().as_secs_f64() - t_dec;
+    let z: Vec<usize> = streams.iter().map(|s| zstd(s, 19)).collect();
+    println!(
+        "library: {} = {:.2} MB; references {t_refs:.2} s, encode {:.0} MB/s, decode {:.0} MB/s",
+        delta::STREAM_NAMES.iter().zip(&z).map(|(n, z)| format!("{n} {:.2}", mb(*z))).collect::<Vec<_>>().join(" + "),
+        mb(z.iter().sum()),
+        b.len() as f64 / total / 1e6,
+        b.len() as f64 / t_dec / 1e6,
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let [l, a, b] = &args[..] {
+        if l == "-l" {
+            return library(&std::fs::read(a).unwrap(), &std::fs::read(b).unwrap());
+        }
+    }
     let (pieces, files) = match &args[..] {
         [p, rest @ ..] if p == "-p" => (true, rest),
         rest => (false, rest),

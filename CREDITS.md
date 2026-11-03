@@ -41,6 +41,13 @@ own terms; the code is written from that description, not from the encoder's cod
   it, in Aqueous's formulas and modules; an archive extended by appending, in its segments.
 - **preflate** (Dirk Steinke): estimating zlib's parameters from a stream, in aqr-flate's
   detection.
+- **disfilter** (Fabian Giesen, kkrunchy): splitting x86 code into streams by field, with
+  absolute targets and a cache of calls, in aqr-exe.
+- **Courgette** (Google): code of another version written with the other's targets, in
+  aqr-exe's remaps. **bsdiff** (Colin Percival, "Naive differences of executable code"):
+  copies of another version with their bytes' differences, in aqr-exe's
+  `exe-recons/arm64-delta`. Zucchini (Google), as Firefox carries it, and bsdiff were used as
+  black boxes to compare against, without their code.
 - **Lepton** (Dropbox; Daniel Reiter Horn and others) and Ken Lakhani's predictors of DCT
   coefficients, and **packJPG** / **brunsli**: modelling JPEG coefficients, in aqr-jpeg.
 - **packMP3** (Matthias Stirner): modelling MP3's Huffman-coded data, in aqr-mp3.

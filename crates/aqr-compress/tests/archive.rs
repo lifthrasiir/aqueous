@@ -822,7 +822,9 @@ fn macho(cputype: u32, code: &[u8]) -> Vec<u8> {
     d
 }
 
-/// Versions of a program whose code moved: one's targets written in the other's address space (`exe-recons/arm64-remap`), so that its code costs little.
+/// Versions of a program whose code moved: one's targets written in the other's address space
+/// (`exe-recons/arm64-remap`), its code stream then coded against the other's
+/// (`exe-recons/arm64-delta`, the other's stored once), so that its code costs little.
 #[test]
 fn arm64_versions_remapped() {
     // (code of over half a block: of streams cut into pieces, put with those alike)
@@ -836,9 +838,14 @@ fn arm64_versions_remapped() {
     // (either the root of the two)
     let mut all = [names(0), names(1)];
     all.sort();
-    assert_eq!(all, [["exe-recons/arm64"], ["exe-recons/arm64-remap"]], "{:?}", r.files);
+    assert_eq!(
+        all,
+        [&["exe-recons/arm64"][..], &["exe-recons/arm64-remap", "exe-recons/arm64-delta"]],
+        "{:?}",
+        r.files
+    );
     let both = both.len() - r.overhead;
-    assert!(both < alone + alone / 10, "{both} of {alone} alone");
+    assert!(both < alone + alone / 20, "{both} of {alone} alone");
 }
 
 /// A 64-bit ELF shared object of ARM64 `code`: its header, the code at 0x1000 (of that
@@ -882,7 +889,12 @@ fn elf_versions_remapped() {
     let names = |k: usize| -> Vec<&str> { r.files[k].modules.iter().map(|m| m.name).collect() };
     let mut all = [names(0), names(1)];
     all.sort();
-    assert_eq!(all, [["exe-recons/arm64"], ["exe-recons/arm64-remap"]], "{:?}", r.files);
+    assert_eq!(
+        all,
+        [&["exe-recons/arm64"][..], &["exe-recons/arm64-remap", "exe-recons/arm64-delta"]],
+        "{:?}",
+        r.files
+    );
     assert!(!both.is_empty());
 }
 

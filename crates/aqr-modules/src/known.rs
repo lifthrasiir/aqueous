@@ -136,6 +136,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/dwarf-info.block"),
     },
     Known {
+        name: "exe-recons/arm64-delta",
+        version: 1,
+        sha512_256: hex("268b6733613c0979dd332ddf6a508194f7e2127c7dca62270b963ddf4814e50c"),
+        block: include_bytes!("../wasm/exe-recons-arm64-delta.block"),
+    },
+    Known {
         name: "exe-recons/arm64-remap",
         version: 1,
         sha512_256: hex("5127a1c02f5577874e8912d472a42703d3f6d2352b894254d1cf033e8a0a9d3f"),

@@ -4350,7 +4350,13 @@ mod tests {
         let mut f = sample();
         f.streams.insert(
             0,
-            Stream { class: "unused".into(), kind: Kind::Unknown, content: false, data: vec![1; 100].into() },
+            Stream {
+                class: "unused".into(),
+                kind: Kind::Unknown,
+                content: false,
+                apart: false,
+                data: vec![1; 100].into(),
+            },
         );
         f.root.slices_mut(&mut |s, _, _| *s += 1);
         let c = encode(&f, None, Level::Zstd(3)).unwrap();
@@ -4640,6 +4646,7 @@ mod tests {
             class: class.into(),
             kind,
             content: false,
+            apart: false,
             data: d.to_vec().into(),
         };
         for (level, dense) in [(Level::MID, false), (Level::Of(7), false), (Level::HIGH, true), (Level::Of(9), true)] {
@@ -4844,7 +4851,13 @@ mod tests {
         let whole = Formula {
             streams: vec![
                 f.streams[0].clone(),
-                Stream { class: "b".into(), kind: Kind::Unknown, content: false, data: d.to_vec().into() },
+                Stream {
+                    class: "b".into(),
+                    kind: Kind::Unknown,
+                    content: false,
+                    apart: false,
+                    data: d.to_vec().into(),
+                },
             ],
             ..f.clone()
         };

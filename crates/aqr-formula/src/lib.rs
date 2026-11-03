@@ -189,6 +189,10 @@ pub struct Stream {
     /// representation of the recompressor's own: whoever takes the formula may recompress its
     /// slices in turn wherever they are (aqr-compress, as it does an application's content).
     pub content: bool,
+    /// Whether the stream is kept apart, never put with others ([`Formula::merge_classes`]):
+    /// one that other formulas slice in pieces, each of which is to decode alone (the archive
+    /// encoder stores each stream on its own).
+    pub apart: bool,
     pub data: Bytes,
 }
 
@@ -723,12 +727,23 @@ impl Formula {
 
     /// Adds a stream of `kind`, returning a slice of all of it.
     pub fn push_as(&mut self, class: impl Into<Cow<'static, str>>, kind: Kind, data: impl Into<Bytes>) -> Node {
-        self.push_stream(Stream { class: class.into(), kind, content: false, data: data.into() })
+        self.push_stream(Stream { class: class.into(), kind, content: false, apart: false, data: data.into() })
+    }
+
+    /// Adds a stream of [`Kind::Unknown`] that is [`Stream::apart`], returning a slice of all of it.
+    pub fn push_apart(&mut self, class: impl Into<Cow<'static, str>>, data: impl Into<Bytes>) -> Node {
+        self.push_stream(Stream {
+            class: class.into(),
+            kind: Kind::Unknown,
+            content: false,
+            apart: true,
+            data: data.into(),
+        })
     }
 
     /// Adds a stream of `kind` that is [`Stream::content`], returning a slice of all of it.
     pub fn push_content(&mut self, class: impl Into<Cow<'static, str>>, kind: Kind, data: impl Into<Bytes>) -> Node {
-        self.push_stream(Stream { class: class.into(), kind, content: true, data: data.into() })
+        self.push_stream(Stream { class: class.into(), kind, content: true, apart: false, data: data.into() })
     }
 
     fn push_stream(&mut self, s: Stream) -> Node {
@@ -798,9 +813,16 @@ impl Formula {
         self.root.visit(f);
     }
 
-    /// [`Node::slices_mut`] of the inputs of the applications of several outputs, and of the
-    /// root.
-    fn slices_mut(&mut self, f: &mut impl FnMut(&mut usize, &mut u64, &mut u64)) {
+    /// Replaces every slice of the inputs of the applications of several outputs and of the
+    /// root with what `f` makes of it, of `(stream, start, len)`; what it makes is not visited.
+    pub fn map_slices(&mut self, f: &mut impl FnMut(usize, u64, u64) -> Node) {
+        self.shared.iter_mut().flat_map(|s| &mut s.apply.inputs).for_each(|n| n.map_slices(f));
+        self.root.map_slices(f);
+    }
+
+    /// Calls `f` on every slice of the inputs of the applications of several outputs and of the
+    /// root, as `(stream, start, len)`, which it may change.
+    pub fn slices_mut(&mut self, f: &mut impl FnMut(&mut usize, &mut u64, &mut u64)) {
         self.shared.iter_mut().flat_map(|s| &mut s.apply.inputs).for_each(|n| n.slices_mut(f));
         self.root.slices_mut(f);
     }
@@ -960,8 +982,8 @@ impl Formula {
     /// Puts the streams of each class and kind one after another, in one stream (in the place
     /// of the first): they are alike, and archive smaller together (the archive encoder
     /// compresses each stream on its own). The streams of [`Kind::Compressed`] (mostly stored as
-    /// they are), the contents, and those that a slice goes past the end of are left apart. The
-    /// output is the same.
+    /// they are), the contents, those [`Stream::apart`], and those that a slice goes past the end
+    /// of are left apart. The output is the same.
     pub fn merge_classes(&mut self) {
         self.merge_classes_within(u64::MAX);
     }
@@ -988,7 +1010,16 @@ impl Formula {
                 left[s] -= 1;
                 (old[s].take().unwrap(), &g[1..])
             } else {
-                (Stream { class: o.class.clone(), kind: o.kind, content: o.content, data: Bytes::default() }, &g[..])
+                (
+                    Stream {
+                        class: o.class.clone(),
+                        kind: o.kind,
+                        content: o.content,
+                        apart: o.apart,
+                        data: Bytes::default(),
+                    },
+                    &g[..],
+                )
             };
             if !rest.is_empty() {
                 let total: u64 = g.iter().map(|p| p.2 - p.1).sum();
@@ -1019,7 +1050,13 @@ impl Formula {
             .iter()
             .map(|g| {
                 let s = &self.streams[g[0].0];
-                Stream { class: s.class.clone(), kind: s.kind, content: s.content, data: Bytes::default() }
+                Stream {
+                    class: s.class.clone(),
+                    kind: s.kind,
+                    content: s.content,
+                    apart: s.apart,
+                    data: Bytes::default(),
+                }
             })
             .collect();
         let mut f = Formula { streams: Vec::new(), root: self.root.clone(), shared: self.shared.clone() };
@@ -1048,7 +1085,7 @@ impl Formula {
         visit(&self.root);
         let alike = |i: usize| {
             let s = &self.streams[i];
-            s.kind != Kind::Compressed && !s.content && !past[i]
+            s.kind != Kind::Compressed && !s.content && !s.apart && !past[i]
         };
 
         // the streams longer than half the limit, of each class and kind, cut into pieces of a
@@ -1946,8 +1983,8 @@ mod tests {
         assert!(f.eval(&Rev).is_err());
     }
 
-    /// Streams of a class and kind merged, but those compressed, the contents and those a slice
-    /// goes past; the output the same.
+    /// Streams of a class and kind merged, but those compressed, the contents, those apart and
+    /// those a slice goes past; the output the same.
     #[test]
     fn merge_classes() {
         let mut f = Formula::default();
@@ -1958,6 +1995,7 @@ mod tests {
         let t = f.push_content("a", Kind::Unknown, b"ttt".to_vec());
         f.push("a", b"678".to_vec());
         let a3 = f.push("a", b"9".to_vec());
+        let p = f.push_apart("a", b"ppp".to_vec());
         f.root = Node::concat([
             a1,
             Node::apply(REV, vec![], vec![a0, b, Node::slice(5, 1, 2)], 8),
@@ -1965,13 +2003,17 @@ mod tests {
             t,
             a3,
             Node::slice(5, 0, 1),
+            p,
         ]);
         let want = f.eval(&Rev).unwrap();
         let mut g = f.clone();
         g.merge_classes();
         assert_eq!(g.eval(&Rev), Ok(want));
         let classes: Vec<_> = g.streams.iter().map(|s| (&*s.class, &s.data[..])).collect();
-        assert_eq!(classes, [("a", &b"0123456789"[..]), ("b", &b"xyz"[..]), ("a", &b"ccc"[..]), ("a", &b"ttt"[..])]);
+        assert_eq!(
+            classes,
+            [("a", &b"0123456789"[..]), ("b", &b"xyz"[..]), ("a", &b"ccc"[..]), ("a", &b"ttt"[..]), ("a", &b"ppp"[..])]
+        );
         // within 6 bytes a stream
         let mut g = f.clone();
         g.merge_classes_within(6);
@@ -1979,14 +2021,21 @@ mod tests {
         let classes: Vec<_> = g.streams.iter().map(|s| (&*s.class, &s.data[..])).collect();
         assert_eq!(
             classes,
-            [("a", &b"012345"[..]), ("b", &b"xyz"[..]), ("a", &b"ccc"[..]), ("a", &b"ttt"[..]), ("a", &b"6789"[..])]
+            [
+                ("a", &b"012345"[..]),
+                ("b", &b"xyz"[..]),
+                ("a", &b"ccc"[..]),
+                ("a", &b"ttt"[..]),
+                ("a", &b"6789"[..]),
+                ("a", &b"ppp"[..])
+            ]
         );
         // a slice past the end of the last keeps it apart
         let mut past = f.clone();
         let Node::Concat(ns) = &mut past.root else { unreachable!() };
         ns.push(Node::slice(6, 0, 3));
         past.merge_classes();
-        assert_eq!(past.streams.len(), 5);
+        assert_eq!(past.streams.len(), 6);
         assert_eq!((&past.streams[0].data[..], &past.streams[4].data[..]), (&b"012345678"[..], &b"9"[..]));
     }
 

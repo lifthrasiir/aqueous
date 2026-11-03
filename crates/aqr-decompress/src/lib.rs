@@ -61,6 +61,16 @@ fn arm64_remap(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.whole((4 + 8) * 8 * flags, 4))
 }
 
+/// aqr-exe's stream of ARM64 code against that of another version (an input of
+/// [`ARM64_REMAP`]'s). No parameters; inputs: the other version's stream, then the streams of
+/// `arm64::delta::STREAM_NAMES`.
+pub const ARM64_DELTA: Module = Module::new("exe-recons/arm64-delta", 1).with_memory(arm64_delta);
+
+/// The memory of [`ARM64_DELTA`]: the whole of it, with its table of predictions.
+fn arm64_delta(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    Some(u.whole(8 << aqr_exe::arch::arm64::delta::TABLE_BITS, 1))
+}
+
 /// aqr-exe's CIL filter on the section holding the metadata of a .NET image. Parameters: the
 /// section's RVA and the offset of the metadata root in it (u32 each, little endian); inputs:
 /// the streams of `cil::STREAM_NAMES`.
@@ -347,6 +357,7 @@ const NATIVE: &[Entry] = &[
     takes(X86_REMAP, |p, r, i, n, _| aqr_exe::module::x86_remap(p, r, i, n).map_err(err)),
     bare(ARM64, |p, _, i, n, _| aqr_exe::module::arm64(p, i, n).map_err(err)),
     bare(ARM64_REMAP, |p, _, i, n, _| aqr_exe::module::arm64_remap(p, i, n).map_err(err)),
+    bare(ARM64_DELTA, |p, _, i, n, _| aqr_exe::module::arm64_delta(p, i, n).map_err(err)),
     bare(CIL, |p, _, i, n, _| aqr_exe::module::cil(p, i, n).map_err(err)),
     bare(PE_RELOC, |p, _, i, n, _| aqr_exe::module::reloc(p, i, n).map_err(err)),
     bare(MACHO_SYMTAB, |p, _, i, n, _| aqr_exe::module::macho_symtab(p, i, n).map_err(err)),

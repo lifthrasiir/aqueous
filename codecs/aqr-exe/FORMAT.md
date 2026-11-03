@@ -4,6 +4,7 @@ This document specifies the module `exe-recons/x86` of aqr-formula entry formula
 [`exe-recons/x86-remap`](#the-exe-reconsx86-remap-module),
 [`exe-recons/arm64`](#the-exe-reconsarm64-module),
 [`exe-recons/arm64-remap`](#the-exe-reconsarm64-remap-module),
+[`exe-recons/arm64-delta`](#the-exe-reconsarm64-delta-module),
 [`exe-recons/cil`](#the-exe-reconscil-module),
 [`exe-recons/pe-reloc`](#the-exe-reconspe-reloc-module) and
 [`exe-recons/macho-symtab`](#the-exe-reconsmacho-symtab-module) after it. The x86 module rebuilds a section
@@ -644,6 +645,81 @@ their files do, rarely by their parents'): a maximum spanning forest of how alik
 functions' hashes, a sixteenth of them sampled, in both; 0.1 at least), each image mapped to
 its parent and that composed with its parent's own map, so that a tree is written in the
 address space of its root. Values that two would map to after composing are left unmapped.
+
+# The `exe-recons/arm64-delta` module
+
+This part specifies the module `exe-recons/arm64-delta`, which rebuilds a `CODE` stream of
+`exe-recons/arm64` or `exe-recons/arm64-remap` (§A2; an input of theirs, not a section) from
+another version's (the **reference**), after bsdiff (Colin Percival, "Naive differences of
+executable code"): copies of the reference's words at some offset, each word coded as its
+difference from a prediction, and bytes of the stream's own between them. The conventions of
+§1 hold; words are big-endian, as in `CODE`.
+
+## D1. The module
+- **Module**: name `exe-recons/arm64-delta`, version 1.
+- **Params**: none (0 bytes).
+- **Resources**: none.
+- **Inputs**: exactly 5: the reference, then the streams of §D2.
+- **Output**: the stream, `len` bytes long.
+
+## D2. Streams
+
+| # | name | contents |
+|---|---|---|
+| 1 | `CTRL` | per copy: the bytes of its own before it, the change of its offset, the words copied; then the bytes of its own after the last copy (unsigned LEB128s, §D3) |
+| 2 | `GAPS` | per difference that is not 0: the differences of 0 before it (unsigned LEB128s) |
+| 3 | `VALUES` | the differences that are not 0, `be32` each |
+| 4 | `EXTRA` | the bytes of its own, in order |
+
+## D3. Decoding
+
+The LEB128s are of 10 bytes at most, their value below `2^64`. The **prediction table** has
+`2^16` entries, each a pair of `u32`s `(k, v)`, all `(0, 0)` at first; the slot of a word `x`
+is `(x · 9E3779B1₁₆ mod 2^32) >> 16`. The prediction of `x` is `v` where its slot's `k = x`,
+else `x`. After a word `x` of the reference is copied as `y`, its slot becomes `(x, y)` where
+`x ≠ y` or its `k` is `x` already (otherwise it is left as it is).
+
+`off`, a signed integer, is 0 at first; `zeros` is the first LEB128 of `GAPS`, or `∞` where
+`GAPS` is empty.
+
+1. Read a LEB128 `n` from `CTRL`; copy `n` bytes from `EXTRA`. If `CTRL` is then empty, stop.
+2. Read a LEB128 `z` from `CTRL`; `off += (z >> 1) XOR −(z & 1)`. Read a LEB128 `w`, the
+   number of words copied; `4w` must be at most `len − |out|`.
+3. `w` times: `x` is the `be32` of the reference at `|out| + off` (which must be within it,
+   all 4 bytes). If `zeros` is 0, read `d` as a `be32` from `VALUES` and set `zeros` to the
+   next LEB128 of `GAPS`, or `∞` where it is empty; else `d = 0`, and `zeros` is decreased by
+   1 unless it is `∞`. Append `y = d + prediction(x) mod 2^32` (`be32`) and update `x`'s slot.
+4. Go to 1.
+
+## D4. Validation
+
+The module fails if:
+
+- there are params or resources, or not exactly 5 inputs;
+- a LEB128 runs out or is longer than 10 bytes, or `EXTRA` or `VALUES` runs out;
+- a copy is past `len`, or reads past either end of the reference;
+- at the end, the output is not `len` bytes long, or `EXTRA` or `VALUES` has bytes left, or
+  `zeros` is not `∞` (a difference was told of and not read).
+
+## D5. Encoding *(encoder)*
+
+`aqr_exe::arch::arm64::delta::encode` finds exact matches of whole words, at word offsets:
+the reference's positions hashed by their 4 words (the last 4 of each of a table's buckets),
+the stream scanned from its start for the longest match from the last match's offset or one
+the table has (extended backwards too), of 6 words at least, taken greedily. Each is then
+extended backwards to the end of the one before and forwards to the next, as far as words
+alike outnumber the others the most, and copies of one offset at most 16 words apart are
+merged (the words between them coded as differences).
+
+aqr-compress (`exe::plan`) codes the `CODE` stream of the largest section of each ARM64 image
+that has a parent in the forest of §M5 against that of its tree's root, in pieces of a fourth
+of a solid block's bound (4 MiB of 16), each an application of this module against the piece
+of the root's stream (in pieces of the bound, each a stream of its own, a block each) that
+the longest of its matches fall in, so that a piece decodes from no more than the bound of the
+root's stream (`delta::references`: the matches looked for at an eighth of the words, by
+their content). Pieces copying little, or matching nothing, are kept as they are. The formula
+of the image holds a copy of the root's stream, which aqr-compress makes the root's own once
+the formulas of a batch are put together (`exe::resolve`).
 
 # The `exe-recons/cil` module
 
