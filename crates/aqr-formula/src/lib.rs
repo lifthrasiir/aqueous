@@ -212,7 +212,9 @@ const GROUP_MOST: usize = 4;
 
 /// The bytes of a [`Stream`]: its own, or shared with whoever else holds them (a file mapped
 /// into memory, which the system may drop and read again as it likes, rather than a copy of
-/// it). Changing them makes them its own first.
+/// it). Changing them makes them its own first. Or bytes written to a sink already
+/// ([`aqr::sink::Sink`]), of a stream of it: their length only, slices of the stream being
+/// where they are in the sink's stream; reading or changing them is a bug.
 #[derive(Clone)]
 pub struct Bytes(Repr);
 
@@ -220,6 +222,7 @@ pub struct Bytes(Repr);
 enum Repr {
     Owned(Vec<u8>),
     Shared(Arc<dyn AsRef<[u8]> + Send + Sync>),
+    Sunk { stream: usize, len: usize },
 }
 
 impl Bytes {
@@ -227,7 +230,33 @@ impl Bytes {
         Bytes(Repr::Shared(data))
     }
 
+    /// Stream `stream` of a sink, of `len` bytes so far ([`Bytes`]).
+    pub fn sunk(stream: usize, len: usize) -> Bytes {
+        Bytes(Repr::Sunk { stream, len })
+    }
+
+    /// The stream of the sink these bytes are, if they are sunk.
+    pub fn sunk_in(&self) -> Option<usize> {
+        match self.0 {
+            Repr::Sunk { stream, .. } => Some(stream),
+            _ => None,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match &self.0 {
+            Repr::Owned(v) => v.len(),
+            Repr::Shared(d) => (**d).as_ref().len(),
+            &Repr::Sunk { len, .. } => len,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Whether the bytes are shared rather than its own: changing them would copy them all.
+    /// (Bytes sunk are not.)
     pub fn is_shared(&self) -> bool {
         matches!(self.0, Repr::Shared(_))
     }
@@ -242,8 +271,10 @@ impl Bytes {
 
     /// The bytes as its own, copied first where they are shared.
     pub fn to_mut(&mut self) -> &mut Vec<u8> {
-        if let Repr::Shared(d) = &self.0 {
-            self.0 = Repr::Owned(d.as_ref().as_ref().to_vec());
+        match &self.0 {
+            Repr::Shared(d) => self.0 = Repr::Owned(d.as_ref().as_ref().to_vec()),
+            &Repr::Sunk { stream, .. } => sunk(stream),
+            Repr::Owned(_) => {}
         }
         let Repr::Owned(v) = &mut self.0 else { unreachable!() };
         v
@@ -258,6 +289,7 @@ impl Bytes {
             }
             Repr::Shared(d) if len >= (*d).as_ref().len() => Bytes(Repr::Shared(d)),
             Repr::Shared(d) => Bytes::shared(Arc::new(Slice(d, 0..len))),
+            Repr::Sunk { stream, .. } => sunk(stream),
         }
     }
 
@@ -269,6 +301,7 @@ impl Bytes {
                 assert!(range.start <= range.end && range.end <= (**d).as_ref().len(), "a slice within");
                 Bytes::shared(Arc::new(Slice(d.clone(), range)))
             }
+            &Repr::Sunk { stream, .. } => sunk(stream),
         }
     }
 
@@ -276,6 +309,7 @@ impl Bytes {
         match self.0 {
             Repr::Owned(v) => v,
             Repr::Shared(d) => d.as_ref().as_ref().to_vec(),
+            Repr::Sunk { stream, .. } => sunk(stream),
         }
     }
 
@@ -294,6 +328,12 @@ impl Bytes {
             v.shrink_to_fit()
         }
     }
+}
+
+/// Reading bytes sunk ([`Bytes::sunk`]): a bug.
+#[cold]
+fn sunk(stream: usize) -> ! {
+    panic!("the bytes of stream {stream} of the sink are not at hand")
 }
 
 /// Bytes of bytes shared ([`Bytes::prefix`], [`Bytes::slice`]).
@@ -334,6 +374,7 @@ impl std::ops::Deref for Bytes {
         match &self.0 {
             Repr::Owned(v) => v,
             Repr::Shared(d) => d.as_ref().as_ref(),
+            &Repr::Sunk { stream, .. } => sunk(stream),
         }
     }
 }
@@ -352,7 +393,11 @@ impl std::ops::DerefMut for Bytes {
 
 impl PartialEq for Bytes {
     fn eq(&self, other: &Bytes) -> bool {
-        **self == **other
+        match (&self.0, &other.0) {
+            (Repr::Sunk { stream: a, len: m }, Repr::Sunk { stream: b, len: n }) => (a, m) == (b, n),
+            (Repr::Sunk { .. }, _) | (_, Repr::Sunk { .. }) => false,
+            _ => **self == **other,
+        }
     }
 }
 
@@ -378,7 +423,10 @@ impl PartialEq<Vec<u8>> for Bytes {
 
 impl fmt::Debug for Bytes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&**self, f)
+        match self.0 {
+            Repr::Sunk { stream, len } => write!(f, "Sunk {{ stream: {stream}, len: {len} }}"),
+            _ => fmt::Debug::fmt(&**self, f),
+        }
     }
 }
 
@@ -829,7 +877,8 @@ impl Formula {
 
     /// Drops what no slice points to: the bytes of a stream outside every slice of it, and
     /// streams without slices. The output is the same: a stream with a slice out of it is
-    /// kept whole, and slices of streams that do not exist still point to none.
+    /// kept whole, and so is one sunk ([`Bytes::sunk`]), and slices of streams that do not
+    /// exist still point to none.
     pub fn compact(&mut self) {
         // Per stream, the ranges of its slices, merged into (start, end, start in the new data).
         let mut ranges = vec![Vec::new(); self.streams.len()];
@@ -846,7 +895,8 @@ impl Formula {
                 continue;
             }
             index[i] = streams.len();
-            if r.iter().any(|&(_, b, _)| b > s.data.len() as u64) {
+            // (a stream sunk kept whole: its slices are where its bytes are in the sink)
+            if s.data.sunk_in().is_some() || r.iter().any(|&(_, b, _)| b > s.data.len() as u64) {
                 *r = vec![(0, u64::MAX, 0)];
                 streams.push(s);
                 continue;
@@ -904,18 +954,18 @@ impl Formula {
     /// in an archive, say, are then stored once. From the shortest slice on, each is cut into
     /// slices kept before that it starts with, one after another (the longest each time; else
     /// the longest start of one, of at least half of it), and what follows of its own; one cut
-    /// nowhere is kept. Slices past the end of their stream
-    /// are left as they are. The output is the same.
+    /// nowhere is kept. Slices past the end of their stream, and those of streams sunk
+    /// ([`Bytes::sunk`], which a sink shares as it takes them), are left as they are. The
+    /// output is the same.
     pub fn share_slices(&mut self, min: usize) {
         type Sl = (usize, u64, u64);
         let mut slices: Vec<Sl> = Vec::new();
         self.visit(&mut |n| {
             if let &Node::Slice { stream, start, len } = n
                 && len >= min as u64
-                && self
-                    .streams
-                    .get(stream)
-                    .is_some_and(|s| start.checked_add(len).is_some_and(|e| e <= s.data.len() as u64))
+                && self.streams.get(stream).is_some_and(|s| {
+                    s.data.sunk_in().is_none() && start.checked_add(len).is_some_and(|e| e <= s.data.len() as u64)
+                })
             {
                 slices.push((stream, start, len));
             }
@@ -1048,7 +1098,9 @@ impl Formula {
     /// contents merged too, as nothing recompresses them any more (a stream of each file of an
     /// image, say), as a tree's are. The formula of the streams merged (their bytes empty), and
     /// of each of its streams, the pieces of those of `self` it is the concatenation of, in
-    /// order.
+    /// order. Streams sunk ([`Bytes::sunk`]) are of no group: their slices are of the sink's
+    /// streams, stream `k` of it after the groups (the formula's streams `groups.len() + k`,
+    /// which whoever writes it adds).
     pub fn merged(&self) -> (Formula, Vec<Vec<Piece>>) {
         let (to, groups) = self.merge_plan(u64::MAX, true);
         let streams = groups
@@ -1085,7 +1137,7 @@ impl Formula {
         visit(&self.root);
         let alike = |i: usize| {
             let s = &self.streams[i];
-            s.kind != Kind::Compressed && (contents || !s.content) && !s.apart && !past[i]
+            s.kind != Kind::Compressed && (contents || !s.content) && !s.apart && !past[i] && s.data.sunk_in().is_none()
         };
 
         // the streams longer than half the limit, of each class and kind, cut into pieces of a
@@ -1124,6 +1176,10 @@ impl Formula {
         let (mut groups, mut glens): (Vec<Vec<Piece>>, Vec<u64>) = (Vec::with_capacity(n), Vec::with_capacity(n));
         let mut placed = vec![false; pieces.len()];
         for (i, s) in self.streams.iter().enumerate() {
+            // (a stream sunk is of the sink's stream, after the groups)
+            if s.data.sunk_in().is_some() {
+                continue;
+            }
             if cut[i].iter().any(|&p| members[groups_of[p]].len() > 1) {
                 // each piece with those of its group (of streams after: one before took them
                 // already), and the rest one after another
@@ -1182,6 +1238,11 @@ impl Formula {
                 .for_each(|(s, a, at)| to[s].push((a, g, at)));
         }
         to.iter_mut().for_each(|t| t.sort_unstable());
+        for (t, s) in to.iter_mut().zip(&self.streams) {
+            if let Some(k) = s.data.sunk_in() {
+                *t = vec![(0, groups.len() + k, 0)];
+            }
+        }
         (to, groups)
     }
 

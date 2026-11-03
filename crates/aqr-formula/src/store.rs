@@ -108,7 +108,7 @@ impl DerefMut for Buffer {
 /// `b` moved to the store where it is of the heap and large and a store is set (copied, its
 /// heap let go), so that what a formula keeps is not held in memory.
 pub fn spill(b: &mut Bytes) {
-    if b.is_shared() || b.len() < MIN {
+    if b.is_shared() || b.sunk_in().is_some() || b.len() < MIN {
         return;
     }
     let Some((at, bytes)) = store().and_then(|s| s.region(b.len())) else { return };

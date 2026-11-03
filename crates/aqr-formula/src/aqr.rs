@@ -33,6 +33,7 @@ mod dict;
 pub mod envelope;
 mod listing;
 mod segment;
+pub mod sink;
 mod tree;
 
 pub use listing::Listed;
@@ -612,7 +613,7 @@ impl Encoder {
             }
         }
         let refs: Vec<&[&[u8]]> = streams.iter().map(|p| &p[..]).collect();
-        self.len_of(f, |n| self.write_streams(&merged, &refs, None, n))
+        self.len_of(f, |n| self.write_streams(&merged, &refs, &[], None, n))
     }
 
     /// The length of the archive of `f` that `write` writes, as [`Encoder::len`] counts it.
@@ -672,16 +673,7 @@ impl Encoder {
     /// has a dense level ([`Pick`]), if PE code (an x86 or ARM64 filter's streams, or the rest
     /// of a PE file) or text.
     fn how(&self, s: &crate::Stream) -> How {
-        let dense = matches!(self.level, Level::Of(n) if Pick::of(n).dense.is_some())
-            && (s.kind == Kind::Text
-                || s.class == "pe"
-                || s.class.starts_with("x86/")
-                || s.class.starts_with("arm64/"));
-        match s.kind {
-            Kind::Compressed => How::Light,
-            _ if dense => How::Dense,
-            _ => How::Usual,
-        }
+        how_of(self.level, &s.class, s.kind)
     }
 
     /// [`encode`] at the level of the encoder. Fails on slices out of their stream.
@@ -715,7 +707,28 @@ impl Encoder {
         let streams: Vec<&[&[u8]]> = pieces.iter().map(|p| &p[..]).collect();
         let mut w = Writing { out, len: 0, failed: None };
         self.keep.set(false);
-        let r = self.write_streams(f, &streams, checksum, &mut w);
+        let r = self.write_streams(f, &streams, &[], checksum, &mut w);
+        self.keep.set(true);
+        match w.failed {
+            Some(e) => Err(e),
+            None => Ok(r.map(|_| w.len)),
+        }
+    }
+
+    /// [`Encoder::encode_pieces_to`] of `f` whose streams are those of `pieces`, then those of
+    /// `sunk` (of a [`sink::Sink`]), whose blocks are written as they are.
+    pub fn encode_sunk_to(
+        &self,
+        f: &Formula,
+        pieces: &[Vec<&[u8]>],
+        sunk: &[sink::Sunk],
+        checksum: Option<u64>,
+        out: &mut dyn io::Write,
+    ) -> io::Result<Result<usize>> {
+        let streams: Vec<&[&[u8]]> = pieces.iter().map(|p| &p[..]).collect();
+        let mut w = Writing { out, len: 0, failed: None };
+        self.keep.set(false);
+        let r = self.write_streams(f, &streams, sunk, checksum, &mut w);
         self.keep.set(true);
         match w.failed {
             Some(e) => Err(e),
@@ -739,24 +752,31 @@ impl Encoder {
                 _ => std::slice::from_ref(&data[s]),
             })
             .collect();
-        self.write_streams(f, &streams, checksum, out)
+        self.write_streams(f, &streams, &[], checksum, out)
     }
 
-    /// [`Encoder::write`] of `f` whose streams' bytes are `streams` (each in pieces).
+    /// [`Encoder::write`] of `f` whose streams' bytes are `streams` (each in pieces), then the
+    /// streams of a sink, `sunk`, their blocks encoded already.
     fn write_streams(
         &self,
         f: &Formula,
         streams: &[&[&[u8]]],
+        sunk: &[sink::Sunk],
         checksum: Option<u64>,
         out: &mut impl Out,
     ) -> Result<()> {
         // of the module and formula blocks
         let level = self.base_level();
         f.check_outputs()?;
+        let own = streams.len();
+        let len_of = |s: usize| match s < own {
+            true => Some(total(streams[s])),
+            false => sunk.get(s - own).map(|s| s.len as usize),
+        };
         let mut slices = Ok(());
         f.visit(&mut |n| {
             if let &Node::Slice { stream, start, len } = n
-                && streams.get(stream).is_none_or(|&s| start.checked_add(len).is_none_or(|e| e > total(s) as u64))
+                && len_of(stream).is_none_or(|l| start.checked_add(len).is_none_or(|e| e > l as u64))
             {
                 slices = Err(Error::new(format!("slice [{start}, +{len}) out of stream #{stream}")));
             }
@@ -768,7 +788,9 @@ impl Encoder {
         if self.size_hint {
             out.put(&SIZE_HINT_PLACEHOLDER);
         }
-        if let (&Node::Slice { stream, start, len }, []) = (&f.root, &f.shared[..]) {
+        if let (&Node::Slice { stream, start, len }, []) = (&f.root, &f.shared[..])
+            && stream < own
+        {
             let leaf = cut(streams[stream], start as usize, len as usize);
             if checksum.is_some_and(|c| c != checksum_of(&leaf)) {
                 return Err(Error::new("output checksum not that of the leaf"));
@@ -778,7 +800,7 @@ impl Encoder {
             // the non-leaf blocks sliced, of each stream in order, by their ordinals
             let mut nodes: Vec<&Node> = f.shared.iter().flat_map(|s| &s.apply.inputs).collect();
             nodes.push(&f.root);
-            let used = sliced(f.streams.len(), |s| total(streams[s]), nodes);
+            let used = sliced(f.streams.len(), |s| len_of(s).unwrap_or(0), nodes);
             let (ordinals, next) = listed(&used, 0..f.streams.len());
             let (modules, resources) = f.blocks();
             let mut checked = Ok(());
@@ -816,7 +838,7 @@ impl Encoder {
             // compared with its data, those compressed already are skipped)
             {
                 let mut blocks = Vec::new();
-                for (s, used) in used.iter().enumerate() {
+                for (s, used) in used.iter().enumerate().take(own) {
                     let (data, how) = (streams[s], self.how(&f.streams[s]));
                     for (r, _) in block_ranges(total(data)).zip(used).filter(|(_, u)| **u) {
                         blocks.push((cut(data, r.start, r.len()), how));
@@ -832,6 +854,12 @@ impl Encoder {
             }
             formula_block(out, 1, &always_compressed(&mut self.cctx(), &[&data], level, self.threads)?);
             for (s, used) in used.iter().enumerate() {
+                if s >= own {
+                    for (b, _) in sunk[s - own].blocks.iter().zip(used).filter(|(_, u)| **u) {
+                        out.put(b);
+                    }
+                    continue;
+                }
                 let (data, how) = (streams[s], self.how(&f.streams[s]));
                 for (r, _) in block_ranges(total(data)).zip(used).filter(|(_, u)| **u) {
                     self.content_block(out, false, &cut(data, r.start, r.len()), how, None)?;
@@ -841,6 +869,17 @@ impl Encoder {
 
         footer(out, out.len() - blocks);
         Ok(())
+    }
+}
+
+/// [`Encoder::how`] of a stream of `class` and `kind` at `level`.
+fn how_of(level: Level, class: &str, kind: Kind) -> How {
+    let dense = matches!(level, Level::Of(n) if Pick::of(n).dense.is_some())
+        && (kind == Kind::Text || class == "pe" || class.starts_with("x86/") || class.starts_with("arm64/"));
+    match kind {
+        Kind::Compressed => How::Light,
+        _ if dense => How::Dense,
+        _ => How::Usual,
     }
 }
 
@@ -4043,6 +4082,89 @@ mod tests {
         assert!(enc.encode_pieces(&merged, &pieces, sum).unwrap() == one);
         assert!(enc.streams.borrow().is_empty());
         assert!(decode(&one, &natives()).unwrap() == want);
+    }
+
+    /// Formulas sealed into a sink one after another, then embedded in one of a stream of its
+    /// own, archive and give their bytes back: the second's slice of the same bytes as one of
+    /// the first's, and its slice starting with them, written once (but a slice of part of one
+    /// sealed is not found); a stream of [`Kind::Compressed`] a stream of the sink of its own.
+    #[test]
+    fn sealed() {
+        let same: Vec<u8> = (0..64u8).collect();
+        let mut first = Formula::default();
+        let a = first.push("a", same.clone());
+        let b = first.push("b", b"of the first".to_vec());
+        let c = first.push_as("c", Kind::Compressed, b"compressed".to_vec());
+        first.root = Node::concat([a, b, c]);
+        let mut second = Formula::default();
+        second.push("a", [&b"own "[..], &same, &same, b" and more"].concat());
+        second.root = Node::concat([Node::slice(0, 4, 64), Node::slice(0, 0, 4), Node::slice(0, 68, 73)]);
+        let id = |_: &crate::Apply, i: &[&[u8]]| Ok(i.concat());
+        let want = [first.eval(&id).unwrap(), second.eval(&id).unwrap(), b"top".to_vec()].concat();
+        let enc = Encoder::new(Level::Zstd(1));
+        let sink = sink::Sink::new(&enc, 16);
+        sink.seal(&mut first).unwrap();
+        sink.seal(&mut second).unwrap();
+        assert!(first.streams.iter().chain(&second.streams).all(|s| s.data.sunk_in().is_some()));
+        let mut top = Formula::default();
+        let own = top.push("own", b"top".to_vec());
+        let (x, y) = (top.embed(first), top.embed(second));
+        top.root = Node::concat([x, y, own]);
+        let sunk = sink.close().unwrap();
+        // "a": the 64 bytes once, "own " (under the least shared), " and more" after them
+        let lens: Vec<(&str, u64)> = sunk.iter().map(|s| (&s.class[..], s.len)).collect();
+        assert_eq!(lens, [("a", 64 + 4 + 9), ("b", 12), ("c", 10)]);
+        let (mut merged, groups) = top.merged();
+        merged.streams.extend(sunk.iter().map(|s| crate::Stream {
+            class: s.class.clone(),
+            kind: s.kind,
+            content: false,
+            apart: false,
+            data: crate::Bytes::sunk(0, s.len as usize),
+        }));
+        let pieces: Vec<Vec<&[u8]>> = groups
+            .iter()
+            .map(|g| g.iter().map(|&(i, a, b)| &top.streams[i].data[a as usize..b as usize]).collect())
+            .collect();
+        let mut out = Vec::new();
+        enc.encode_sunk_to(&merged, &pieces, &sunk, Some(checksum(&want)), &mut out).unwrap().unwrap();
+        assert!(decode(&out, &natives()).unwrap() == want);
+    }
+
+    /// Streams written to a sink, a piece at a time (over a block's end), archive as those held
+    /// whole, byte for byte: all of them, or those after the first (at a level picking levels by
+    /// samples too).
+    #[test]
+    fn sunk_as_held() {
+        let mut f = Formula::default();
+        let noise: Vec<u8> = (0..3 * BLOCK as u32 / 2).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect();
+        let text: Vec<u8> = b"some text, some more text. ".iter().copied().cycle().take(BLOCK + 1000).collect();
+        let a = f.push("a", noise.clone());
+        let b = f.push_as("b", Kind::Text, text.clone());
+        let c = f.push("c", b"short".to_vec());
+        f.root = Node::concat([b, Node::slice(0, BLOCK as u64 - 7, 20), c, a]);
+        let want = f.eval(&|_: &crate::Apply, i: &[&[u8]]| Ok(i.concat())).unwrap();
+        let sum = Some(checksum(&want));
+        for level in [Level::Zstd(1), Level::MID] {
+            let enc = Encoder::new(level);
+            let held = enc.encode(&f, sum).unwrap();
+            for own in [0, 1] {
+                let sink = sink::Sink::new(&enc, 1024);
+                for st in &f.streams[own..] {
+                    let s = sink.stream(st.class.clone(), st.kind);
+                    let d = &st.data[..];
+                    let (x, y) = (d.len() / 3, 2 * d.len() / 3);
+                    sink.append(s, &[&d[..x], &d[x..y]]).unwrap();
+                    sink.append(s, &[&d[y..]]).unwrap();
+                }
+                let sunk = sink.close().unwrap();
+                let pieces: Vec<Vec<&[u8]>> = f.streams[..own].iter().map(|s| vec![&s.data[..]]).collect();
+                let mut out = Vec::new();
+                enc.encode_sunk_to(&f, &pieces, &sunk, sum, &mut out).unwrap().unwrap();
+                assert!(out == held, "{level:?}, {own} held");
+            }
+            assert!(decode(&held, &natives()).unwrap() == want);
+        }
     }
 
     /// A stream of more than [`BLOCK`] bytes is several non-leaf blocks: slices within one,
