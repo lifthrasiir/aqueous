@@ -52,6 +52,9 @@ pub struct Image {
     /// information, as of a dSYM), cut to the image, in the order of the load commands; the name
     /// without its NULs.
     pub debug: Vec<(Vec<u8>, usize, usize)>,
+    /// `(file offset, size)` of the code signature (`LC_CODE_SIGNATURE`), where whole within
+    /// the image.
+    pub signature: Option<(usize, usize)>,
 }
 
 /// The symbol table of an image (`LC_SYMTAB`) and the first of its external symbols
@@ -163,6 +166,7 @@ pub fn images(d: &[u8]) -> Option<Vec<Image>> {
                         sections: Vec::new(),
                         symtab: None,
                         debug: Vec::new(),
+                        signature: None,
                     }))
                 })
                 .collect(),
@@ -183,7 +187,7 @@ fn thin(d: &[u8], range: Range<usize>) -> Option<Image> {
     let cputype = u32le(m, 4)?;
     let ncmds = u32le(m, 16)?;
     let cmds_end = header + u32le(m, 20)? as usize;
-    let (mut sections, mut symtab, mut ext, mut debug) = (Vec::new(), None, 0, Vec::new());
+    let (mut sections, mut symtab, mut ext, mut debug, mut signature) = (Vec::new(), None, 0, Vec::new(), None);
     let mut p = header;
     for _ in 0..ncmds {
         let (cmd, size) = (u32le(m, p)?, u32le(m, p + 4)? as usize);
@@ -206,6 +210,12 @@ fn thin(d: &[u8], range: Range<usize>) -> Option<Image> {
             }
             LC_DYSYMTAB if size >= 80 => {
                 ext = u32le(m, p + 16)?;
+                p += size;
+                continue;
+            }
+            LC_CODE_SIGNATURE if size >= 16 => {
+                let (off, len) = (u32le(m, p + 8)? as usize, u32le(m, p + 12)? as usize);
+                signature = (off.checked_add(len).is_some_and(|e| e <= m.len())).then_some((range.start + off, len));
                 p += size;
                 continue;
             }
@@ -243,7 +253,7 @@ fn thin(d: &[u8], range: Range<usize>) -> Option<Image> {
         p += size;
     }
     let symtab = symtab.map(|s| Symtab { ext, ..s });
-    Some(Image { range, cputype, sections, symtab, debug })
+    Some(Image { range, cputype, sections, symtab, debug, signature })
 }
 
 /// Bytes of the Mach-O file at the start of `d`, as far as its headers tell: the end of its

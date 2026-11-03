@@ -71,6 +71,16 @@ fn arm64_delta(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.whole(8 << aqr_exe::arch::arm64::delta::TABLE_BITS, 1))
 }
 
+/// aqr-exe's Mach-O file with its code signatures' code slots derived. Parameters: the
+/// signatures (`codesign`); inputs: the file without them, then the signatures.
+pub const MACHO_CODESIGN: Module = Module::new("exe-recons/macho-codesign", 1).with_memory(macho_codesign);
+
+/// The memory of [`MACHO_CODESIGN`]: the whole of it, with the slots of a signature computed
+/// at once (no more than the signatures).
+fn macho_codesign(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    Some(u.whole(*u.inputs.get(1)?, 1))
+}
+
 /// aqr-exe's CIL filter on the section holding the metadata of a .NET image. Parameters: the
 /// section's RVA and the offset of the metadata root in it (u32 each, little endian); inputs:
 /// the streams of `cil::STREAM_NAMES`.
@@ -358,6 +368,7 @@ const NATIVE: &[Entry] = &[
     bare(ARM64, |p, _, i, n, _| aqr_exe::module::arm64(p, i, n).map_err(err)),
     bare(ARM64_REMAP, |p, _, i, n, _| aqr_exe::module::arm64_remap(p, i, n).map_err(err)),
     bare(ARM64_DELTA, |p, _, i, n, _| aqr_exe::module::arm64_delta(p, i, n).map_err(err)),
+    bare(MACHO_CODESIGN, |p, _, i, n, _| aqr_exe::module::macho_codesign(p, i, n).map_err(err)),
     bare(CIL, |p, _, i, n, _| aqr_exe::module::cil(p, i, n).map_err(err)),
     bare(PE_RELOC, |p, _, i, n, _| aqr_exe::module::reloc(p, i, n).map_err(err)),
     bare(MACHO_SYMTAB, |p, _, i, n, _| aqr_exe::module::macho_symtab(p, i, n).map_err(err)),

@@ -5,6 +5,7 @@ This document specifies the module `exe-recons/x86` of aqr-formula entry formula
 [`exe-recons/arm64`](#the-exe-reconsarm64-module),
 [`exe-recons/arm64-remap`](#the-exe-reconsarm64-remap-module),
 [`exe-recons/arm64-delta`](#the-exe-reconsarm64-delta-module),
+[`exe-recons/macho-codesign`](#the-exe-reconsmacho-codesign-module),
 [`exe-recons/cil`](#the-exe-reconscil-module),
 [`exe-recons/pe-reloc`](#the-exe-reconspe-reloc-module) and
 [`exe-recons/macho-symtab`](#the-exe-reconsmacho-symtab-module) after it. The x86 module rebuilds a section
@@ -720,6 +721,60 @@ root's stream (`delta::references`: the matches looked for at an eighth of the w
 their content). Pieces copying little, or matching nothing, are kept as they are. The formula
 of the image holds a copy of the root's stream, which aqr-compress makes the root's own once
 the formulas of a batch are put together (`exe::resolve`).
+
+# The `exe-recons/macho-codesign` module
+
+This part specifies the module `exe-recons/macho-codesign`, which rebuilds a Mach-O file from
+the file without its code signatures (the **body**) and the signatures, each of whose
+CodeDirectories may have its code slots zeroed: those are the hashes of the pages of its image,
+which the module computes again. The conventions of §1 hold; the signatures' fields are
+big-endian, as Apple's code signing writes them.
+
+## G1. The module
+- **Module**: name `exe-recons/macho-codesign`, version 1.
+- **Params**: unsigned LEB128s (10 bytes at most each): `n`, the number of signatures, then of
+  each `image`, `at`, `size` and `mask`; nothing after them.
+- **Resources**: none.
+- **Inputs**: exactly 2: the body, then the signatures one after another (`size` bytes each).
+- **Output**: the file, `len` bytes long: `len` must be the body's length and the signatures'.
+
+## G2. Decoding
+
+1. **The file.** The signatures in order go at `at` each: the output is the body with each
+   signature put in at `at` (each `at` at least where the one before ends; the body's bytes
+   before it are those before `at` not of an earlier signature).
+2. **Code slots.** For each signature in order, and each bit `k` (0 to 63) set in its `mask`:
+   the signature (`sig`, its `size` bytes at `at`) is a SuperBlob, `be32` magic `fade0cc0` and a
+   count of blobs above `k`, whose `k`-th index entry (`be32 type`, `be32 offset`, at
+   `12 + 8k`) is of a CodeDirectory: at `offset` in `sig`, `be32` magic `fade0c02` and length
+   `L` (at least 40, within `sig`). Of its fields (offsets in it): `hashOffset` (16, `be32`),
+   `nCodeSlots` (28), `codeLimit` (32), `hashSize` (36, a byte), `hashType` (37) and
+   `pageSize` (39, `log2`, 0 to 31; 0 is one page to the code limit). The pages are the bytes
+   `image + i · page` to `image + min((i + 1) · page, codeLimit)` of the output, of which there
+   must be `nCodeSlots` (one where `pageSize` is 0 and `codeLimit` is not, none where it is),
+   and `image + codeLimit` must be at most `at`. The `hashSize` bytes at `hashOffset + i ·
+   hashSize` of the CodeDirectory (within `L`) become the hash of page `i`: SHA-1 for
+   `hashType` 1 (`hashSize` 20), SHA-256 for 2 (32), SHA-256 cut to its first 20 bytes for 3
+   (20), SHA-384 for 4 (48).
+
+## G3. Validation
+
+The module fails if:
+
+- the params do not read as G1 says, or there are resources, or not exactly 2 inputs;
+- the signatures overlap or go past the output, or the inputs are not of `len` bytes in all;
+- a bit of a mask is not of a CodeDirectory as G2 says, or its slots are not as it says, or
+  its hash type and size are none of G2's.
+
+## G4. Encoding *(encoder)*
+
+`aqr_exe::codesign::encode` takes the signatures of the images of a Mach-O file
+(`LC_CODE_SIGNATURE`, thin or in a universal file): of each, the CodeDirectories whose code
+slots are the hashes G2 computes (of the file as it is) are zeroed and their bits set; a
+signature with none is left in the file. aqr-compress makes the formula of a Mach-O file
+without the signatures so taken (out of the rest of the file, `exe::macho`), and puts it
+under an application of this module. The special slots, the requirements, the entitlements and
+the CMS signature are kept as they are.
 
 # The `exe-recons/cil` module
 

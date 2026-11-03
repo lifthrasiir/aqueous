@@ -325,6 +325,38 @@ What is left of B's share is mostly not code: of Chrome's first pair (10.58 MB t
 `__LINKEDIT`) 4.1 MB at zstd -9, A's code stream in pieces 1.8 MB more than whole; Zucchini's
 patch of the whole file is 3.43 MB (`docs/macos-app-todo.md`, appendix A).
 
+### Mach-O code signatures
+
+Measured on 2026-11-03 on an Apple M4. The page hashes of a code signature's CodeDirectories
+follow from the image (`exe-recons/macho-codesign`). `aqr-exe-bench-codesign` on seven files
+(Chrome Framework 156.0.8078.47, thin and universal; Secretive, Pages, Calculator, `/bin/ls`,
+Electron Framework 44): every signature had them so, 8.67 MB of signatures at zstd -19 are
+0.053 MB with them zeroed; the hashes are computed again at 2.5 GB/s (sha2 with ARMv8's
+instructions; 590 MB/s without).
+
+Through `aqr -c` (level `mid`, 10 threads), the applications of `docs/macos-app-todo.md`,
+before (commit `40205d3`) and after:
+
+| | before | after | |
+|---|---|---|---|
+| Secretive.app | 2.86 MB | 2.81 MB | −1.7% |
+| Deskflow.app | 18.63 MB | 18.14 MB | −2.6% |
+| Windows App.app | 107.02 MB | 104.64 MB | −2.2% |
+| Discord.app | 170.57 MB | 168.44 MB | −1.3% |
+| Pages.app | 202.23 MB | 198.53 MB | −1.8% |
+| Blender.app | 233.13 MB | 227.85 MB | −2.3% |
+| Google Chrome.app | 346.15 MB | 332.68 MB | −3.9% |
+| all | 1080.60 MB | 1053.10 MB | −2.5% |
+
+Instructions retired 3252.8 → 3285.6 G (+1.0%). The file is put together whole before its
+pages are hashed: `aqr -t` of Pages.app 46.6 → 52.0 G instructions (+11.5%), peak RSS
+0.58–0.63 → 0.75–0.84 GB (the time within its noise, 0.74–1.34 s either way); of Google
+Chrome.app 90.0 → 93.5 G (+3.8%), 2.79 → 2.63 GB. The module block is 10.1 KB.
+
+Taking the signatures out made the rest of Deskflow's two programs, put in one stream, 8.3 MB
+rather than 9.5 MB, below the 8 MiB from which aqr-formula then matched from afar, and the
+application 2.1% larger: the threshold is 1 MiB since (`aqr::LONG`).
+
 ## Limitations
 
 - ELF: only little-endian images. Their tables (relocations, symbols, `.eh_frame` and its
@@ -344,8 +376,9 @@ patch of the whole file is 3.43 MB (`docs/macos-app-todo.md`, appendix A).
   (`ADD`, `LDR`) are not remapped (`exe-recons/arm64-delta` predicts them). By differences
   (`exe-recons/arm64-delta`) only ARM64 code, of an image's largest section, against its
   tree's root (not its parent); x86 code (whose streams are of bytes, by field) is not.
-- Mach-O code signatures are kept as they are, though their page hashes follow from the
-  image.
+- Mach-O code signatures: only their code slots are derived; the special slots (of the
+  requirements, the entitlements, `Info.plist` and `CodeResources`), and `_CodeSignature/
+  CodeResources` itself (the hashes of a bundle's files), are kept as they are.
 - Mach-O symbol tables are taken only as `ld64` writes them (730 of the 775 of 16 KiB or more
   in the images under `/Applications`, `/System/Applications`, `/usr/bin` and `/usr/lib` of a
   Mac on 2026-10-30): not lld's string tables, whose strings share their tails (Chromium,

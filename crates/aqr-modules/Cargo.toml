@@ -186,6 +186,11 @@ path = "src/bin/exe-recons-arm64-delta.rs"
 required-features = ["wasm"]
 
 [[bin]]
+name = "exe-recons-macho-codesign"
+path = "src/bin/exe-recons-macho-codesign.rs"
+required-features = ["wasm"]
+
+[[bin]]
 name = "exe-recons-cil"
 path = "src/bin/exe-recons-cil.rs"
 required-features = ["wasm"]

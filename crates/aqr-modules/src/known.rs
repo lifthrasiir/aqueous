@@ -160,6 +160,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/exe-recons-cil.block"),
     },
     Known {
+        name: "exe-recons/macho-codesign",
+        version: 1,
+        sha512_256: hex("bd73ce2b3224162b050e3f2442679a7ca5c62a7c230ef9a578f559321b8fce17"),
+        block: include_bytes!("../wasm/exe-recons-macho-codesign.block"),
+    },
+    Known {
         name: "exe-recons/macho-symtab",
         version: 1,
         sha512_256: hex("e1ba2dfaac07bfe9ad73c4b5e35d5c8db3f958456e0f806b9139c2519d65c36f"),
@@ -384,7 +390,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "psd-recons",
         version: 1,
-        sha512_256: hex("dab2ccc310cb1829a2621ef5b8e1c9089babb9b7fa7c563d92eca3ec1a96a42b"),
+        sha512_256: hex("c607be20cdd34d01f0e86b4913db3ded03d4381737e6db7d6f2a316beba330a8"),
         block: include_bytes!("../wasm/psd-recons.block"),
     },
     Known {

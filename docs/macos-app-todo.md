@@ -234,7 +234,19 @@ Google Chrome 앱 410.70 → 388.10 MB(−5.5%), `aqr` 빌드 셋(10-27, 10-28, 
 - `_CodeSignature/CodeResources`(XML plist, 번들 파일마다 SHA-1과 SHA-256의 base64)는 전체로는
   0.35%이지만 파일이 많은 Pages에서는 결과의 2.3%(4.6 MB)이다. 번들의 다른 엔트리 여럿을 입력으로
   받으므로 "가변 인자 없음"과 맞게 짜야 한다(`git-pack-index-recons`처럼 집합으로).
-- `aqr-exe/README.md`의 Limitations에 페이지 해시가 이미 적혀 있다.
+
+페이지 해시는 했다(`exe-recons/macho-codesign`, aqr-exe FORMAT.md §G). Mach-O의 서명을 rest에서
+빼고, CodeDirectory마다 코드 슬롯이 이미지 페이지의 해시와 같으면 0으로 지워 두며, 모듈이 파일을 다시
+모은 뒤 해시를 계산해 채운다. 7개 앱 모두 서명이 그랬고, 1080.60 → 1053.10 MB(−2.5%; 앱마다 −1.3%에서
+Chrome −3.9%)이다. 풀 때 파일 전체를 모아야 해시를 계산하므로 명령어가 Pages에서 +11.5%, 최대 RSS가
+0.15–0.2 GB 는다. 자세한 것은 aqr-exe README의 Results이다.
+
+서명을 빼자 Deskflow의 두 프로그램의 나머지를 합친 스트림이 8 MiB 밑으로 내려가, 그때까지 긴 거리
+일치를 8 MiB부터 쓰던 aqr-formula가 2 MiB 창으로 압축해 앱이 2.1% 커졌다. 문턱을 1 MiB로 내렸다
+(`40205d3`; 7개 앱 −0.76%, 10gb −0.11%).
+
+남은 것: special slot(요구 사항, 엔타이틀먼트, `Info.plist`, `CodeResources`의 해시)과
+`CodeResources` 자체.
 
 ### 4. LZFSE와 LZVN
 
@@ -549,8 +561,9 @@ B 파일의 나머지(`__TEXT,__const`, 문자열, `__LINKEDIT`)가 zstd -9로 4
 
 ### 남은 것
 
-- 코드가 아닌 부분의 같은 비교: 두 버전의 `__TEXT,__const`, `__cstring`, `__LINKEDIT`를 LZ와 차분으로.
-  지금은 파일의 나머지(내용 스트림)로, 다른 버전의 것과 만나지 않는다.
+- 코드가 아닌 부분: Chrome .47+.49에서 양쪽을 0으로 지워 본 몫이 코드 서명 3.91 MB(했다, 3절),
+  `__DATA_CONST,__const` 3.66 MB, `__TEXT,__unwind_info` 0.70 MB이다. 같은 바이트인 `__TEXT,__const`와
+  `__cstring`은 이미 공유된다. `__DATA_CONST,__const`(포인터 표)는 bsdiff로 B 몫이 1.73 → 0.25 MB이다.
 - 뿌리 스트림을 조각으로 두는 비용(통째 대비 1–2 MB): 조각 경계를 넘는 문맥을 살릴 방법.
 - 차분을 부모가 아닌 뿌리에 대해 둔다. 깊은 트리(버전 여럿)에서 부모에 대해 두려면 연쇄를 풀어야 한다.
 - x86-64: 스트림 나눔이 버전 사이의 차분에 맞는지(Zucchini는 나누지 않은 바이트에서 더 작다).

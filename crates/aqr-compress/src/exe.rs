@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::{Arc, OnceLock};
 
-use aqr_decompress::{ARM64, ARM64_DELTA, ARM64_REMAP, CIL, MACHO_SYMTAB, PE_RELOC, X86, X86_REMAP};
+use aqr_decompress::{ARM64, ARM64_DELTA, ARM64_REMAP, CIL, MACHO_CODESIGN, MACHO_SYMTAB, PE_RELOC, X86, X86_REMAP};
 use aqr_exe::arch::{arm64, cil, x86};
 use aqr_exe::format::pe::{TableKind, locate_code, tables};
 use aqr_exe::format::{elf, macho};
@@ -60,6 +60,8 @@ enum Arch {
     /// A file of this format, stored in an NSIS installer's data ([`crate::nsis`]): a content
     /// of its own.
     Stored(&'static str),
+    /// A Mach-O image's code signature, left out (for `exe-recons/macho-codesign` to put back).
+    Signature,
 }
 
 /// Tables shorter than this are left with the rest.
@@ -179,7 +181,22 @@ pub(crate) fn macho(d: &[u8], remaps: &[Option<Arc<Remap>>], deltas: &[Option<De
             })
         })
         .collect();
-    filtered(d, "macho", sections.chain(symbols).collect(), remaps, deltas, &debug)
+    // the code signatures whose code slots are the pages' hashes, left out of the rest and put
+    // back by `exe-recons/macho-codesign` (around all of the file)
+    let signatures: Vec<_> = images.iter().filter_map(|i| i.signature.map(|(at, n)| (i.range.start, at, n))).collect();
+    let signed = aqr_exe::codesign::encode(d, &signatures);
+    let left: Vec<_> = signed.iter().flat_map(|s| &s.ranges).map(|r| (0, r.start, r.len(), Arch::Signature)).collect();
+    let mut f = filtered(d, "macho", sections.chain(symbols).chain(left).collect(), remaps, deltas, &debug)?;
+    if let Some(s) = signed {
+        // (unless a signature overlapped what went before, and was kept in the rest)
+        let without: usize = s.ranges.iter().map(|r| r.len()).sum();
+        if f.root.len() == (d.len() - without) as u64 {
+            let body = std::mem::replace(&mut f.root, Node::Concat(Vec::new()));
+            let sigs = f.push("macho-sign/SIGS", s.sigs);
+            f.root = Node::apply(MACHO_CODESIGN, s.params, vec![body, sigs], d.len() as u64);
+        }
+    }
+    Some(f)
 }
 
 /// Images less alike than this (`Signature::alike`) have no parent: builds of aqr a day
@@ -494,6 +511,12 @@ fn filtered(
             continue;
         }
         let section = &d[off..off + size];
+        if arch == Arch::Signature {
+            parts.push(Node::slice(0, rest.len() as u64, (off - at) as u64));
+            rest.extend_from_slice(&d[at..off]);
+            at = off + size;
+            continue;
+        }
         let apply = match arch {
             Arch::Output(k) => outputs[k].take().expect("an output placed twice"),
             Arch::Stored(format) => f.push_content("nsis", Kind::Format(format), section.to_vec()),
@@ -599,7 +622,7 @@ fn code_apply(
                 (0..fields).map(|i| Field { off: i * width, width, big: false, how: How::Delta }).collect();
             aqr_infer_recs::formula::apply_fields(f, "pe/table", section, k, &fl)
         }
-        Arch::Cil(_) | Arch::Symbols { .. } | Arch::Output(_) | Arch::Stored(_) => return None,
+        Arch::Cil(_) | Arch::Symbols { .. } | Arch::Output(_) | Arch::Stored(_) | Arch::Signature => return None,
     })
 }
 

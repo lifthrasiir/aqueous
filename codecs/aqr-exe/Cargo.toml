@@ -12,6 +12,12 @@ decode = []
 bytemuck = { version = "1.16.0", features = ["must_cast"] }
 log = "0.4.21"
 mini-alloc = "0.4.2"
+sha1 = { version = "0.10", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+
+# (ARMv8's SHA-2 instructions, which sha2 takes only with "asm"; x86's SHA-NI it takes as it is)
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+sha2 = { version = "0.10", default-features = false, features = ["asm"] }
 
 [dev-dependencies]
 zstd = { version = "0.13", features = ["zstdmt"] }
@@ -37,3 +43,7 @@ path = "examples/bench-remap.rs"
 [[example]]
 name = "aqr-exe-bench-delta"
 path = "examples/bench-delta.rs"
+
+[[example]]
+name = "aqr-exe-bench-codesign"
+path = "examples/bench-codesign.rs"

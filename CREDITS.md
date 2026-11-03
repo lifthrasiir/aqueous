@@ -48,6 +48,9 @@ own terms; the code is written from that description, not from the encoder's cod
   copies of another version with their bytes' differences, in aqr-exe's
   `exe-recons/arm64-delta`. Zucchini (Google), as Firefox carries it, and bsdiff were used as
   black boxes to compare against, without their code.
+- **Apple's code signing**: the embedded signature's SuperBlob and CodeDirectory, in aqr-exe's
+  `exe-recons/macho-codesign`, as Apple describes them and as signed files show them (checked
+  against `codesign`'s output), without Apple's code.
 - **Lepton** (Dropbox; Daniel Reiter Horn and others) and Ken Lakhani's predictors of DCT
   coefficients, and **packJPG** / **brunsli**: modelling JPEG coefficients, in aqr-jpeg.
 - **packMP3** (Matthias Stirner): modelling MP3's Huffman-coded data, in aqr-mp3.

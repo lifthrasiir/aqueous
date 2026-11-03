@@ -1,5 +1,6 @@
 //! The code of the modules of aqr-exe (`exe-recons/x86`, `exe-recons/x86-remap`,
-//! `exe-recons/arm64`, `exe-recons/arm64-remap`, `exe-recons/arm64-delta`, `exe-recons/cil`, `exe-recons/pe-reloc` and
+//! `exe-recons/arm64`, `exe-recons/arm64-remap`, `exe-recons/arm64-delta`,
+//! `exe-recons/macho-codesign`, `exe-recons/cil`, `exe-recons/pe-reloc` and
 //! `exe-recons/macho-symtab`, as aqr-decompress names them): the parameters and the inputs
 //! checked, then the section or table decoded. aqr-modules builds it into their Wasm modules.
 
@@ -82,6 +83,15 @@ pub fn arm64_delta(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>>
         return Err("bad parameters or inputs");
     };
     of_len(arm64::delta::decode(reference, streams, n), len)
+}
+
+/// A Mach-O file with its code signatures' code slots derived. Params and inputs (the body,
+/// then the signatures): as [`crate::codesign`] tells.
+pub fn macho_codesign(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
+    let (&[body, sigs], Ok(n)) = (inputs, usize::try_from(len)) else {
+        return Err("bad parameters or inputs");
+    };
+    of_len(crate::codesign::decode(params, body, sigs, n), len)
 }
 
 /// The CIL filter on the section holding the metadata of a .NET image. Parameters: the

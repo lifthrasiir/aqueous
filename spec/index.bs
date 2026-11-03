@@ -5083,6 +5083,11 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/exe-recons-cil.wasm" title="crates/aqr-modules/wasm/exe-recons-cil.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-exe/FORMAT.md" title="codecs/aqr-exe/FORMAT.md">R</a>
     <tr>
+      <td><code>bd73ce2b3224162b050e3f2442679a7ca5c62a7c230ef9a578f559321b8fce17</code>
+      <td>exe-recons/macho-codesign@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/exe-recons-macho-codesign.wasm" title="crates/aqr-modules/wasm/exe-recons-macho-codesign.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-exe/FORMAT.md" title="codecs/aqr-exe/FORMAT.md">R</a>
+    <tr>
       <td><code>e1ba2dfaac07bfe9ad73c4b5e35d5c8db3f958456e0f806b9139c2519d65c36f</code>
       <td>exe-recons/macho-symtab@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/exe-recons-macho-symtab.wasm" title="crates/aqr-modules/wasm/exe-recons-macho-symtab.wasm">D</a>
@@ -5268,7 +5273,7 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/prores-recons.wasm" title="crates/aqr-modules/wasm/prores-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-prores/FORMAT.md" title="codecs/aqr-prores/FORMAT.md">R</a>
     <tr>
-      <td><code>dab2ccc310cb1829a2621ef5b8e1c9089babb9b7fa7c563d92eca3ec1a96a42b</code>
+      <td><code>c607be20cdd34d01f0e86b4913db3ded03d4381737e6db7d6f2a316beba330a8</code>
       <td>psd-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/psd-recons.wasm" title="crates/aqr-modules/wasm/psd-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-psd/FORMAT.md" title="codecs/aqr-psd/FORMAT.md">R</a>
