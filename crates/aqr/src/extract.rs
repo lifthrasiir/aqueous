@@ -659,6 +659,26 @@ impl<'a> Extractor<'a> {
         self.names.told()
     }
 
+    /// Takes content `c` as lost (not to be written): its files made so far (empty, or hard links
+    /// to one of them) removed, and their metadata not applied.
+    pub fn lose(&self, c: usize) -> Result<(), String> {
+        let mut s = self.s.write().unwrap();
+        let s = &mut *s;
+        for i in 0..s.content.len() {
+            if s.content[i] != Some(c) {
+                continue;
+            }
+            if s.made[i].take().is_some() {
+                match fs::remove_file(&s.paths[i]) {
+                    Err(x) if x.kind() != std::io::ErrorKind::NotFound => return Err(err(&s.paths[i], x)),
+                    _ => {}
+                }
+            }
+            s.soon[i] = None;
+        }
+        Ok(())
+    }
+
     /// Writes content `c` of the entries told, `d`: to its files and forks.
     pub fn content(&self, c: usize, d: Vec<u8>) -> Result<(), String> {
         self.seen.saw(c, &d, d.len() as u64);

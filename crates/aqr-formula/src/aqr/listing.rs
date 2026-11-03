@@ -184,6 +184,7 @@ impl Archive<'_, '_> {
                     g.insns += 1;
                     vec![g.add(Shape::Stored(zstd), Vec::new(), insn, stored_len(d, zstd, checked))]
                 }
+                LeafBlock::Lost => return invalid("a file whose block is lost"),
                 LeafBlock::Formula { outputs, data, modules, resources, non_leaf } => {
                     let (d, dict) = blocks.formulas[data];
                     let d = decoded_with(d, true, true, dict.map(|d| &blocks.dictionaries[d]))?;

@@ -273,10 +273,50 @@ fn restores_truncated() {
         aqr_in(&d, &["-q", "-d", "-o", out.to_str().unwrap(), "cut.aqr"]);
         assert_eq!(files(&out), want, "{what}");
     }
-    fs::write(d.join("cut.aqr"), &a[..meta - 1]).unwrap();
-    assert!(!aqr_fed(&d, &["-t", "cut.aqr"], b"").status.success());
+    // cut before the metadata block: salvaged, the files of the blocks lost told and left out,
+    // the others extracted as they were (the run failing)
+    for (k, cut) in [(1, meta - 100), (2, meta - (3 << 20))] {
+        fs::write(d.join("cut.aqr"), &a[..cut]).unwrap();
+        let out = d.join(format!("salvaged-{k}"));
+        let o = aqr_fed(&d, &["-d", "-o", out.to_str().unwrap(), "cut.aqr"], b"");
+        let t = stderr(&o);
+        assert!(!o.status.success() && t.contains("salvaging what is left") && t.contains(" lost ("), "{t}");
+        let got = files(&out);
+        assert!(!got.is_empty() && got.len() < want.len(), "{t}");
+        assert!(got.iter().all(|f| want.contains(f)));
+        // (each file left out told)
+        for (name, _) in want.iter().filter(|f| !got.contains(f)) {
+            assert!(t.contains(&format!("{name}: lost (")), "{name}: {t}");
+        }
+        let o = aqr_fed(&d, &["-t", "cut.aqr"], b"");
+        assert!(!o.status.success() && stderr(&o).contains(" files lost"), "{}", stderr(&o));
+    }
     let meta = blocks(&plain).iter().find(|b| (0x10..0x18).contains(&b.1)).unwrap().0;
     fs::write(d.join("cut.aqr"), &plain[..meta + 5]).unwrap();
     assert!(!aqr_fed(&d, &["-t", "cut.aqr"], b"").status.success());
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// An archive without mirror blocks whose file's block is damaged: the others extracted, that
+/// file told as lost and left out (the run failing), its checksum telling.
+#[test]
+fn leaves_damaged_files_out() {
+    let d = scratch("damaged-file");
+    let want = source(&d);
+    aqr_in(&d, &["-q", "-o", "a.aqr", "src"]);
+    let mut a = fs::read(d.join("a.aqr")).unwrap();
+    // (the last formula block: of a file alone, as the text files are solid)
+    let (_, _, data) = blocks(&a).into_iter().rfind(|b| (0x70..0x78).contains(&b.1)).unwrap();
+    a[(data.start + data.end) / 2] ^= 1;
+    fs::write(d.join("a.aqr"), &a).unwrap();
+    let out = d.join("out");
+    let o = aqr_fed(&d, &["-d", "-o", out.to_str().unwrap(), "a.aqr"], b"");
+    let t = stderr(&o);
+    assert!(!o.status.success() && t.contains("1 file lost"), "{t}");
+    let got = files(&out);
+    assert_eq!(got.len(), want.len() - 1, "{t}");
+    assert!(got.iter().all(|f| want.contains(f)));
+    let gone = want.iter().find(|f| !got.contains(f)).unwrap();
+    assert!(t.contains(&format!("{}: lost (invalid archive: checksum mismatch)", gone.0)), "{t}");
     fs::remove_dir_all(&d).unwrap();
 }

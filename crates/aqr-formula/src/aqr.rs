@@ -2406,8 +2406,25 @@ pub fn open_payload<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner) -> Decoded<Arch
     open_as(c, runner, true)
 }
 
+/// Archive `c` (the payload of an encrypted archive where `sealed`) opened as [`open`] does, but
+/// salvaged (spec, "Salvage"): a file whose block is not there (an archive repaired from a
+/// truncation, [`mirror::repair`]) is lost rather than the archive invalid, and so is a file of a
+/// formula block that does not read, or that refers to blocks not there; its evaluation fails,
+/// the others' as they do. Files are checked by their checksums where they have them.
+pub fn open_salvaging<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, sealed: bool) -> Decoded<Archive<'c, 'n>> {
+    if envelope::is_encrypted(c) {
+        return Err(Failure::Decryption("an encrypted archive, and no passphrase".into()));
+    }
+    open_with(c, runner, sealed, true)
+}
+
 /// [`open`] of an archive, the payload of an encrypted one where `sealed`.
 fn open_as<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, sealed: bool) -> Decoded<Archive<'c, 'n>> {
+    open_with(c, runner, sealed, false)
+}
+
+/// [`open_as`], salvaging where `salvaging` ([`open_salvaging`]).
+fn open_with<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, sealed: bool, salvaging: bool) -> Decoded<Archive<'c, 'n>> {
     if !c.starts_with(&HEADER_MAGIC) {
         return invalid("bad header magic");
     }
@@ -2443,7 +2460,15 @@ fn open_as<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, sealed: bool) -> Decoded
     };
     let outputs: Vec<u64> =
         blocks.leaves.iter().map(|l| if let LeafBlock::Formula { outputs, .. } = l { *outputs } else { 1 }).collect();
-    let tree = meta.map(|(at, m)| tree_of(m, at, &blocks, &outputs)).transpose()?;
+    let mut lost = Vec::new();
+    let tree = meta.map(|(at, m)| tree_of(m, at, &blocks, &outputs, salvaging.then_some(&mut lost))).transpose()?;
+    // (the leaves lost, after those there: never where they are, never with a dictionary)
+    for _ in lost {
+        blocks.leaves.push(LeafBlock::Lost);
+        blocks.leaf_at.push(usize::MAX);
+        blocks.leaf_dictionary.push(None);
+        blocks.sizes.leaves.push(0);
+    }
     let loaded = blocks.modules.iter().map(|_| OnceLock::new()).collect();
     Ok(Archive { blocks, runner, loaded, tree, budget: None, tell: None, items: Vec::new() })
 }
@@ -2543,6 +2568,7 @@ impl<'n> Archive<'_, 'n> {
         for leaf in &blocks.leaves {
             match *leaf {
                 LeafBlock::Stored(_, _, checked, _) => a.unchecked_leaves += !checked as usize,
+                LeafBlock::Lost => {}
                 LeafBlock::Formula { outputs, data, modules, resources, non_leaf } => {
                     let (d, dict) = blocks.formulas[data];
                     let d = decoded_with(d, true, true, dict.map(|d| &blocks.dictionaries[d]))?;
@@ -2602,19 +2628,34 @@ impl<'n> Archive<'_, 'n> {
                 }
                 _ => Ok(None),
             })
-            .collect::<Decoded<Vec<_>>>()?;
+            .collect::<Vec<Decoded<_>>>();
         let programs = blocks
             .leaves
             .iter()
             .zip(&formulas)
             .map(|(leaf, d)| match (leaf, d) {
-                (&LeafBlock::Formula { outputs, modules, resources, non_leaf, .. }, Some(d)) => {
+                (&LeafBlock::Formula { outputs, modules, resources, non_leaf, .. }, Ok(Some(d))) => {
                     let env = env(modules, resources, non_leaf);
                     read(d, outputs, &env, blocks.non_leaf.len(), &mut used).map(Some)
                 }
+                (_, Err(e)) => Err(e.clone()),
                 _ => Ok(None),
             })
-            .collect::<Decoded<Vec<_>>>()?;
+            .collect::<Vec<Decoded<_>>>();
+        // (a formula block that does not read is its leaf's failure, the others evaluated as they
+        // are: a file damaged loses itself alone)
+        let mut failed: Vec<Option<Failure>> = Vec::with_capacity(programs.len());
+        let programs: Vec<Option<Program>> = programs
+            .into_iter()
+            .map(|p| {
+                failed.push(p.as_ref().err().cloned());
+                p.ok().flatten()
+            })
+            .collect();
+        // (a non-leaf block of a formula block failing or lost not referenced)
+        if failed.iter().any(Option::is_some) || blocks.leaves.iter().any(|l| matches!(l, LeafBlock::Lost)) {
+            used.fill(true);
+        }
         if only.is_none() && used.contains(&false) {
             return invalid("a non-leaf block no formula block references");
         }
@@ -2686,6 +2727,8 @@ impl<'n> Archive<'_, 'n> {
                     (aqr_common::trace::span("leaf"), aqr_common::trace::item(self.items.get(i).copied().flatten()));
                 tally.step(Step::Started(i));
                 let outputs = match blocks.leaves[i] {
+                    _ if failed[i].is_some() => Err(failed[i].clone().expect("a failure")),
+                    LeafBlock::Lost => invalid("a file whose block is lost"),
                     LeafBlock::Stored(raw, zstd, checked, dict) => {
                         let d = decoded_with(raw, zstd, checked, dict.map(|d| &blocks.dictionaries[d]));
                         tally.add(raw.len() as u64, 0);
@@ -2784,12 +2827,16 @@ fn tree_of(
     at: usize,
     blocks: &Blocks,
     outputs: &[u64],
+    mut lost: Option<&mut Vec<()>>,
 ) -> Decoded<(Tree, Vec<(usize, usize, u64)>)> {
     if m.prev != (at - HEADER_MAGIC.len() + 1) as u64 {
         return invalid("a first metadata block not pointing to the header");
     }
+    // (salvaging, those there those the first offsets tell: the others lost with what follows)
+    let salvaging = lost.is_some();
     let to = |offsets: &[u64], at_: &[usize]| {
-        offsets.len() == at_.len() && offsets.iter().zip(at_).all(|(&o, &b)| at.checked_sub(o as usize) == Some(b))
+        (offsets.len() == at_.len() || salvaging && offsets.len() > at_.len())
+            && offsets.iter().zip(at_).all(|(&o, &b)| at.checked_sub(o as usize) == Some(b))
     };
     if !to(&m.modules, &blocks.module_at)
         || !to(&m.resources, &blocks.resource_at)
@@ -2801,11 +2848,31 @@ fn tree_of(
     let mut ref_of: HashMap<(usize, usize), usize> = HashMap::new();
     // the content of output `output` of the leaf block at relative offset `offset`, of `size`
     // bytes; and the leaf
+    // (salvaging, the leaves lost by where they were, numbered after those there)
+    let mut lost_at: HashMap<usize, usize> = HashMap::new();
     let mut content = |offset: u64, output: u64, size: u64| -> Decoded<(usize, usize)> {
-        let leaf = at
-            .checked_sub(offset as usize)
-            .and_then(|b| blocks.leaf_at.binary_search(&b).ok())
-            .ok_or_else(|| Failure::Invalid("a file or a fork not at a leaf block".into()))?;
+        let found = at.checked_sub(offset as usize).and_then(|b| blocks.leaf_at.binary_search(&b).ok());
+        let leaf = match (found, lost.as_deref_mut()) {
+            (Some(leaf), _) => leaf,
+            (None, Some(lost)) => {
+                let k = *lost_at.entry(at.wrapping_sub(offset as usize)).or_insert_with(|| {
+                    lost.push(());
+                    lost.len() - 1
+                });
+                blocks.leaves.len() + k
+            }
+            (None, None) => return invalid("a file or a fork not at a leaf block"),
+        };
+        if leaf >= outputs.len() {
+            let c = match ref_of.entry((leaf, output as usize)) {
+                MapEntry::Occupied(c) => *c.get(),
+                MapEntry::Vacant(e) => {
+                    refs.push((leaf, output as usize, size));
+                    *e.insert(refs.len() - 1)
+                }
+            };
+            return Ok((c, leaf));
+        }
         if output >= outputs[leaf] {
             return invalid("a file or a fork of an output its leaf block does not have");
         }
@@ -2839,7 +2906,9 @@ fn tree_of(
             tree::Read::Dir => EntryNode::Dir,
             tree::Read::File { offset, output, size, dictionary } => {
                 let (c, leaf) = content(offset, output, size)?;
-                if blocks.leaf_dictionary[leaf].map_or(0, |d| d as u64 + 1) != dictionary {
+                if leaf < blocks.leaf_dictionary.len()
+                    && blocks.leaf_dictionary[leaf].map_or(0, |d| d as u64 + 1) != dictionary
+                {
                     return invalid("a file's dictionary not that of its leaf block");
                 }
                 EntryNode::File(c)
@@ -2924,6 +2993,8 @@ enum LeafBlock<'c> {
     /// The number of outputs and the formula data (by index), with the numbers of module and
     /// resource blocks before it and of non-leaf blocks.
     Formula { outputs: u64, data: usize, modules: usize, resources: usize, non_leaf: usize },
+    /// A leaf block a file is at that is not there (salvaging, [`open_salvaging`]).
+    Lost,
 }
 
 /// The blocks in `d`; `metadata` tells whether the footer points to a metadata block.

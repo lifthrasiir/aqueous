@@ -60,7 +60,11 @@
 //!   so that a truncation shorter than that leaves it. Decompressing (and testing), any archive
 //!   is repaired in memory ([`aqr::mirror::repair`]): a damaged block restored from its mirror
 //!   block, the footer made again where the archive is cut short after its last metadata block;
-//!   told so.
+//!   told so. Cut short before it (its metadata block restored past the bytes lost), it is
+//!   salvaged ([`aqr::open_salvaging`]): the files of the blocks lost are lost.
+//! - A file whose evaluation fails (its checksum not verifying, say) is lost, told on a line of
+//!   its own; the others are extracted (or tested), and the run fails at the end. A file covered
+//!   by no checksum is given as it decodes.
 //! - `-L`: the entries of each archive listed on standard output, and what each file takes of
 //!   the archive and how it is made ([`list`]); `-q` the paths alone, `-v` all that is told.
 //! - `-P`: compressing, the archives encrypted with a passphrase ([`aqr::envelope`]), asked for
@@ -1977,20 +1981,30 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     // differ, its footer made again where it is cut short after its last metadata block
     let read: &[u8] = decrypted.as_deref().unwrap_or(&c[..]);
     let mirrors = aqr::mirror::check(read);
-    let restored = aqr::mirror::repair(read, &mirrors);
+    let restored = aqr::mirror::repair(read, &mirrors, true);
     if let Some(r) = &restored {
         if r.restored > 0 {
             let s = if r.restored == 1 { "" } else { "s" };
             eprintln!("{}: {} damaged block{s} restored from mirror blocks", input.display(), r.restored);
         }
-        if r.footer {
-            eprintln!("{}: cut short after its last metadata block, its footer made again", input.display());
+        match &r.lost {
+            Some(l) => eprintln!(
+                "{}: cut short before its last metadata block, {} bytes lost; salvaging what is left",
+                input.display(),
+                l.len()
+            ),
+            None if r.footer => {
+                eprintln!("{}: cut short after its last metadata block, its footer made again", input.display())
+            }
+            None => {}
         }
     }
     let read: &[u8] = restored.as_ref().map_or(read, |r| &r.bytes);
-    let mut archive = match decrypted.is_some() {
-        true => aqr::open_payload(read, runner),
-        false => aqr::open(read, runner),
+    // (salvaged where bytes were lost: their files lost, the others given back as they check)
+    let mut archive = match (restored.as_ref().is_some_and(|r| r.lost.is_some()), decrypted.is_some()) {
+        (true, sealed) => aqr::open_salvaging(read, runner, sealed),
+        (false, true) => aqr::open_payload(read, runner),
+        (false, false) => aqr::open(read, runner),
     }
     .map_err(|e| err(&e))?;
     // (some paths: by content, whether it is decoded)
@@ -2042,6 +2056,8 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
         }
         archive.set_items(items);
     }
+    // (the contents lost, each with why)
+    let mut lost: Vec<(usize, Failure)> = Vec::new();
     let (files, total, out) = match archive.tree() {
         // (written as it is evaluated: a file of parts is not held whole)
         None if a.test => {
@@ -2088,15 +2104,17 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
                 }
                 f
             });
-            ticking(a, &*view, || {
+            let given = std::sync::Mutex::new(vec![false; archive.contents_len()]);
+            let r = ticking(a, &*view, || {
                 archive.contents_of(a.opt.threads, wanted.as_deref(), |c, d| {
                     seen.saw(c, &d, d.len() as u64);
+                    given.lock().unwrap()[c] = true;
                     n.fetch_add(files[c], std::sync::atomic::Ordering::Relaxed);
                     total.fetch_add(files[c] as u64 * d.len() as u64, std::sync::atomic::Ordering::Relaxed);
                     Ok(())
                 })
-            })
-            .map_err(|e| err(&e))?;
+            });
+            lost = not_given(r, &given.into_inner().unwrap(), wanted.as_deref()).map_err(|e| err(&e))?;
             (n.into_inner(), total.into_inner(), None)
         }
         Some(t) => {
@@ -2107,14 +2125,29 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
                     Err(_) if x.skipped() => return Ok(None),
                     r => r?,
                 }
-                archive
-                    .contents_of(a.opt.threads, wanted.as_deref(), |c, d| x.content(c, d).map_err(Failure::Resource))
-                    .map_err(|e| e.to_string())?;
+                // (a file of a leaf failing lost, the others extracted; but where writing fails)
+                let given = std::sync::Mutex::new(vec![false; archive.contents_len()]);
+                let writing = std::sync::Mutex::new(None);
+                let r = archive.contents_of(a.opt.threads, wanted.as_deref(), |c, d| {
+                    given.lock().unwrap()[c] = true;
+                    x.content(c, d).map_err(|m| {
+                        writing.lock().unwrap().get_or_insert(m.clone());
+                        Failure::Resource(m)
+                    })
+                });
+                if let Some(m) = writing.into_inner().unwrap() {
+                    return Err(m);
+                }
+                let lost = not_given(r, &given.into_inner().unwrap(), wanted.as_deref()).map_err(|e| e.to_string())?;
+                lost.iter().try_for_each(|&(c, _)| x.lose(c))?;
                 tell_names(a, input, x.names_told());
-                x.finish(t)
+                Ok(x.finish(t)?.map(|r| (r, lost)))
             })?;
             match r {
-                Some((n, total, out)) => (n, total, Some(out)),
+                Some(((n, total, out), l)) => {
+                    lost = l;
+                    (n, total, Some(out))
+                }
                 None => return Ok(false),
             }
         }
@@ -2122,12 +2155,22 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     let out = out.as_deref();
     if !a.quiet {
         summary_d(input, out, files, total, start);
-        if a.test && (a.verbose || !mirrors.mirrors.is_empty() || mirrors.broken > 0) {
+        // (of an archive whose files are all there)
+        if a.test && lost.is_empty() && (a.verbose || !mirrors.mirrors.is_empty() || mirrors.broken > 0) {
             tell_archival(input, &archive, &mirrors, read, decrypted.is_some().then_some(&c[..]))
                 .map_err(|e| err(&e))?;
         }
     }
     end(out, files, c.len() as u64, total, start);
+    if !lost.is_empty() {
+        // (each told, by the path of its first file, however quiet)
+        let paths = content_paths(&archive, &to.named);
+        for (c, f) in &lost {
+            eprintln!("{}: {}: lost ({f})", input.display(), paths[*c]);
+        }
+        let n = lost.len();
+        return Err(err(&format!("{n} file{} lost", if n == 1 { "" } else { "s" })));
+    }
     if let (Some(s), Some(rec)) = (&a.stats, rec) {
         let mut contents = seen.contents(content_paths(&archive, &to.named));
         if archive.tree().is_none()
@@ -2149,6 +2192,21 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
         });
     }
     Ok(true)
+}
+
+/// The contents wanted (all, or those `wanted` marks) not given (`given`) where evaluating them
+/// failed (`r`): each lost, with the failure. The failure, where it is of no content.
+fn not_given(
+    r: Result<(), Failure>,
+    given: &[bool],
+    wanted: Option<&[bool]>,
+) -> Result<Vec<(usize, Failure)>, Failure> {
+    let Err(f) = r else { return Ok(Vec::new()) };
+    let lost: Vec<(usize, Failure)> = (0..given.len())
+        .filter(|&c| !given[c] && wanted.is_none_or(|w| w.get(c) == Some(&true)))
+        .map(|c| (c, f.clone()))
+        .collect();
+    if lost.is_empty() { Err(f) } else { Ok(lost) }
 }
 
 /// Tells (on standard error) how far `archive` (of `input`, its bytes `read` as decoded)
