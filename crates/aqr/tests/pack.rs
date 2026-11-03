@@ -221,3 +221,39 @@ fn single_files() {
     aqr_in(&d, &["-q", "-f", "-l", "19", "-o", "f.zst", "f.txt"]);
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// The header blocks of the tar `a` (not compressed), by name: the type flag of each.
+#[cfg(unix)]
+fn tar_types(a: &[u8]) -> Vec<(String, u8)> {
+    let (mut out, mut at) = (Vec::new(), 0);
+    while at + 512 <= a.len() && a[at] != 0 {
+        let h = &a[at..at + 512];
+        let name = String::from_utf8_lossy(&h[..100]).trim_end_matches('\0').to_owned();
+        let size = u64::from_str_radix(std::str::from_utf8(&h[124..136]).unwrap().trim_matches(['\0', ' ']), 8);
+        out.push((name, h[156]));
+        at += 512 + (size.unwrap() as usize).div_ceil(512) * 512;
+    }
+    out
+}
+
+#[cfg(unix)]
+#[test]
+fn tar_keeps_hard_links() {
+    use std::os::unix::fs::MetadataExt;
+    let d = scratch("tar-hard");
+    let src = d.join("src");
+    fs::create_dir_all(src.join("sub")).unwrap();
+    fs::write(src.join("a.txt"), text()).unwrap();
+    fs::hard_link(src.join("a.txt"), src.join("sub/hard")).unwrap();
+    aqr_in(&d, &["-q", "-o", "src.tar", "src"]);
+    let types = tar_types(&fs::read(d.join("src.tar")).unwrap());
+    let of = |n: &str| types.iter().find(|t| t.0 == n).unwrap_or_else(|| panic!("{n} in {types:?}")).1;
+    assert_eq!((of("src/a.txt"), of("src/sub/hard")), (b'0', b'1'), "{types:?}");
+    let x = d.join("x");
+    fs::create_dir(&x).unwrap();
+    aqr_in(&d, &["-q", "-d", "-o", "x", "src.tar"]);
+    let (a, h) = (fs::metadata(x.join("src/a.txt")).unwrap(), fs::metadata(x.join("src/sub/hard")).unwrap());
+    assert_eq!((a.ino(), a.nlink()), (h.ino(), 2), "hard links");
+    assert_eq!(fs::read(x.join("src/sub/hard")).unwrap(), text());
+    fs::remove_dir_all(&d).unwrap();
+}

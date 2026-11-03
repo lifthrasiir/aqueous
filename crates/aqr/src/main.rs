@@ -1143,6 +1143,8 @@ fn pack_into(
     if g.tree.entries.is_empty() {
         return Err(format!("nothing to archive in {}", inputs[0].display()));
     }
+    // (tar writes the later files of a link group as hard links to the first)
+    g.link_groups();
     if !a.quiet {
         g.skipped.iter().for_each(|s| eprintln!("skipped {s}"));
         g.warnings.iter().for_each(|w| eprintln!("{w}"));
