@@ -201,7 +201,8 @@ pub struct Model {
     /// count of its uses, each held exclusive-or [`SLOT0`] (its value at first), so that the
     /// tables start as zeros: pages of them never used are never touched.
     slots: Vec<u16>,
-    /// Where each table starts, and its buckets (of 16 slots) less 1.
+    /// Where each table starts (its buckets of 16 slots, 32 bytes, aligned: within a line of
+    /// the cache, whatever the allocator gives), and its buckets less 1.
     base: [usize; INPUTS],
     mask: [u32; INPUTS],
     weights: Vec<[i32; LANES]>,
@@ -251,6 +252,12 @@ impl Model {
             *b = at;
             at += 1 << n;
         }
+        // (zeros, so that the pages stay untouched; glibc's large blocks are 16 bytes into a page;
+        // not in Wasm, which has no lines to keep to: the module the smaller)
+        let pad = if cfg!(target_family = "wasm") { 0 } else { 15 };
+        let slots = vec![0u16; at + pad];
+        let align = if pad > 0 { slots.as_ptr().align_offset(32).min(pad) } else { 0 };
+        let base = base.map(|b| b + align);
         let mut w0 = [0; LANES];
         w0[..INPUTS].fill(W0);
         Model {
@@ -258,7 +265,7 @@ impl Model {
                 let t = stretch_table();
                 (0..4096).map(|p| t[p ^ (SLOT0 >> 4) as usize]).collect()
             },
-            slots: vec![0; at],
+            slots,
             base,
             mask: bits.map(|b| (1 << (b - 4)) - 1),
             weights: vec![w0; SETS],
@@ -273,7 +280,7 @@ impl Model {
     pub fn bytes(pixels: u64, screen: (usize, usize)) -> u64 {
         let screen = canvas_of(screen);
         let slots: usize = table_bits(pixels).iter().map(|&b| 1 << b).sum();
-        (slots * 2 + 2 * screen.0 * screen.1 + 4 * SETS * LANES + 2 * (FLAT_CTX + (1 << FLAT_BITS)) + 8192) as u64
+        (slots * 2 + 30 + 2 * screen.0 * screen.1 + 4 * SETS * LANES + 2 * (FLAT_CTX + (1 << FLAT_BITS)) + 8192) as u64
     }
 
     /// Codes a bit (`want`, the encoder's) of the slots `idx` and the mixers' weight sets `set1`
@@ -412,7 +419,7 @@ impl Model {
             h[9] = hash(hash(11, up), n);
             let differ =
                 (wv != n) as usize + (nw != wv && nw != n) as usize + (ne != wv && ne != n && ne != nw) as usize;
-            // the slots of a context are in buckets of 16 (of a cache line), the first of the
+            // the slots of a context are in buckets of 16 (within a cache line), the first of the
             // index's first 4 bits, the second of the next 4 under them; the first bucket's
             // slot 0 is whether the pixel is W's
             for j in 0..INPUTS {
