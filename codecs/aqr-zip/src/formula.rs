@@ -168,7 +168,9 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         let size = |&(i, _): &(usize, u64)| locals[i].body.len();
         // (each with its options, made once: they hold the profile's catalog)
         let parsed = par_jobs(jobs, size, opt.threads, |&(i, max), threads| {
-            let fopt = fopt(threads, max);
+            // (room made at once for the size the headers tell)
+            let declared = usize::try_from(kept_entry(input, locals[i], &map).1).unwrap_or(0);
+            let fopt = aqr_flate::Options { size: declared, ..fopt(threads, max) };
             match Parsed::new(&input[locals[i].body.clone()], &fopt) {
                 Ok(p) => {
                     let record = if probed(i) { p.estimate(&fopt).ok() } else { None };

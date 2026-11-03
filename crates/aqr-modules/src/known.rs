@@ -12,7 +12,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "asar-recons",
         version: 1,
-        sha512_256: hex("7a753a3fd492919e52fef49685bfeaa24703ead307257dc51e54dc235f32f07f"),
+        sha512_256: hex("247be485b15198abd547b17c693c9f61dd5c206010fb071c74f9e9d72d98062f"),
         block: include_bytes!("../wasm/asar-recons.block"),
     },
     Known {
@@ -120,7 +120,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "dex-recons",
         version: 2,
-        sha512_256: hex("0326d22e5f5bafafbc1c270d335336330674e0c0991407201dbdfab5c39a0065"),
+        sha512_256: hex("ee617bef326ab1acaf38f68e1deed1fb68000aadb0d914ba9bceed6841840110"),
         block: include_bytes!("../wasm/dex-recons.block"),
     },
     Known {
@@ -222,7 +222,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "flate-set",
         version: 1,
-        sha512_256: hex("ff0725f8a83b98bd0e1bf596809a56f9c985601b4c53cc23b4f0bf3c6b339bba"),
+        sha512_256: hex("1eef1ed1b42621409914f4e40307d075f50ecef3fa35dcccffbbf8d7fee27b11"),
         block: include_bytes!("../wasm/flate-set.block"),
     },
     Known {
@@ -330,7 +330,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "obj-recons",
         version: 1,
-        sha512_256: hex("202ee85ad95b14d43d585720b2642db0df2527d34bf840dd2fb7665b1c23d16d"),
+        sha512_256: hex("17644e5fbfe12dadc03aa81df76bdde876fe71359a8e6f273d967ed35855d128"),
         block: include_bytes!("../wasm/obj-recons.block"),
     },
     Known {
@@ -390,7 +390,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "psd-recons",
         version: 1,
-        sha512_256: hex("c607be20cdd34d01f0e86b4913db3ded03d4381737e6db7d6f2a316beba330a8"),
+        sha512_256: hex("1144ced2ff7f9a0db2819386fda939c61c421ec679c25a1bc393b796606d70b5"),
         block: include_bytes!("../wasm/psd-recons.block"),
     },
     Known {

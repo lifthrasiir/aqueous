@@ -245,6 +245,9 @@ pub struct Options {
     pub verify: bool,
     /// Streams of more data than this are refused ([`Error::Limit`]), before it is all made.
     pub max_data: usize,
+    /// The bytes of data that the stream's container tells (0: none), made room for at once
+    /// rather than as it comes: a wrong size costs only more room made later.
+    pub size: usize,
 }
 
 impl Options {
@@ -276,6 +279,7 @@ impl Default for Options {
             prefix: 4 << 10,
             verify: false,
             max_data: usize::MAX,
+            size: 0,
         }
     }
 }
@@ -584,8 +588,15 @@ impl Flat {
         stream
     }
 
-    fn new(raw: &[u8], segment: usize, threads: usize, verify: bool, max: usize) -> Result<Flat> {
-        let f = inflate::parse_segments_max(raw, segment, max)?;
+    fn new(
+        raw: &[u8],
+        segment: usize,
+        threads: usize,
+        verify: bool,
+        max: usize,
+        size: usize,
+    ) -> Result<Flat> {
+        let f = inflate::parse_segments_max(raw, segment, max, size)?;
         if verify {
             // The writer must round-trip what the parser saw, or nothing downstream can.
             let mut stream = f.stream.clone();
@@ -695,7 +706,7 @@ impl<'a> Parsed<'a> {
         let streamed = opts.profile < ADAPTIVE && !opts.verify;
         let mut f = if streamed {
             let prefix = opts.prefix.max(ESTIMATE_FIRST);
-            inflate::parse_segments_head(raw, opts.segment, prefix, opts.max_data)?
+            inflate::parse_segments_head(raw, opts.segment, prefix, opts.max_data, opts.size)?
         } else {
             Flat::new(
                 raw,
@@ -703,6 +714,7 @@ impl<'a> Parsed<'a> {
                 opts.threads.max(1),
                 opts.verify,
                 opts.max_data,
+                opts.size,
             )?
         };
         let raw = if head {
@@ -1956,7 +1968,7 @@ pub struct Prepared {
 impl Prepared {
     /// The first `prefix` bytes of data of a raw stream.
     pub fn new(raw: &[u8], prefix: usize) -> Result<Prepared> {
-        let f = Flat::new(raw, usize::MAX, 1, false, usize::MAX)?;
+        let f = Flat::new(raw, usize::MAX, 1, false, usize::MAX, 0)?;
         Ok(Prepared::from_flat(&f, prefix))
     }
 
@@ -2079,7 +2091,7 @@ impl Prepared {
 /// A stream's fingerprint and the estimated cost in bits of each rule over the first
 /// `prefix` bytes of its data, for deriving rule catalogs.
 pub fn analyze(raw: &[u8], rules: &[Rule], prefix: usize) -> Result<((u64, u64), Vec<f64>, usize)> {
-    let f = Flat::new(raw, usize::MAX, 1, false, usize::MAX)?;
+    let f = Flat::new(raw, usize::MAX, 1, false, usize::MAX, 0)?;
     let fp = fingerprint(&f, headers(&f).1.unwrap_or(u32::MAX));
     let mut p = Prepared::from_flat(&f, prefix);
     let costs = rules.iter().map(|&r| p.cost(r)).collect::<Result<_>>()?;
@@ -2633,7 +2645,7 @@ mod tests {
             .unwrap()
             .compress(&d)
             .unwrap();
-        let f = Flat::new(&raw, 16 << 10, 1, false, usize::MAX).unwrap();
+        let f = Flat::new(&raw, 16 << 10, 1, false, usize::MAX, 0).unwrap();
         let ranges = segment_ranges(&f);
         assert!(ranges.len() > 4);
         let (catalog, priors) = (

@@ -394,13 +394,16 @@ impl<const HEAD: bool> Collect<HEAD> {
             c.count = self.tokens.1 - c.kept;
         }
         // SAFETY: as in `grow`.
-        unsafe {
+        let (mut data, mut tokens) = unsafe {
             (
                 Vec::from_raw_parts(self.data.0, self.data.1, self.data.2),
                 Vec::from_raw_parts(self.tokens.0, self.tokens.1, self.tokens.2),
-                self.chunks,
             )
-        }
+        };
+        // (the room grown into given back: up to as much again as the data, held as long as it)
+        data.shrink_to_fit();
+        tokens.shrink_to_fit();
+        (data, tokens, self.chunks)
     }
 }
 
@@ -466,29 +469,45 @@ pub fn parse(raw: &[u8]) -> Result<Flat> {
 
 /// Parses `raw`, with segments of about `segment` bytes in [`Stats`].
 pub fn parse_segments(raw: &[u8], segment: usize) -> Result<Flat> {
-    parse_segments_max(raw, segment, usize::MAX)
+    parse_segments_max(raw, segment, usize::MAX, 0)
 }
 
 /// [`parse_segments`] refusing data of more than `max` bytes (as [`parse_head_max`] does).
-pub fn parse_segments_max(raw: &[u8], segment: usize, max: usize) -> Result<Flat> {
+pub fn parse_segments_max(raw: &[u8], segment: usize, max: usize, size: usize) -> Result<Flat> {
     collect(
         raw,
         segment,
         max,
-        Collect::<false>::new(raw.len() * 3, raw.len(), usize::MAX),
+        Collect::<false>::new(room(raw, max, size), raw.len(), usize::MAX),
     )
 }
 
 /// [`parse_segments`] keeping only the tokens that start before `prefix` bytes of data, and
 /// in runs further on ([`Flat::chunks`]): all else (the data, the blocks, the statistics) as
 /// it gives; refusing data of more than `max` bytes.
-pub fn parse_segments_head(raw: &[u8], segment: usize, prefix: usize, max: usize) -> Result<Flat> {
+pub fn parse_segments_head(
+    raw: &[u8],
+    segment: usize,
+    prefix: usize,
+    max: usize,
+    size: usize,
+) -> Result<Flat> {
     collect(
         raw,
         segment,
         max,
-        Collect::<true>::new(raw.len() * 3, prefix / 2 + 64, prefix),
+        Collect::<true>::new(room(raw, max, size), prefix / 2 + 64, prefix),
     )
+}
+
+/// The bytes to make room for at first for the data of `raw`, of at most `max` bytes: `size`,
+/// where the container tells it (0: it does not), as DEFLATE can tell (at most 1032 bytes of
+/// data a byte); else three times `raw`. (More is made room for as it comes.)
+fn room(raw: &[u8], max: usize, size: usize) -> usize {
+    match size {
+        0 => raw.len().saturating_mul(3),
+        n => n.min(max).min(raw.len().saturating_mul(1032)),
+    }
 }
 
 fn collect<const HEAD: bool>(
