@@ -69,6 +69,7 @@ and the design is argued in `xform-design.md`.
 | MP3 | aqr-mp3 | 394 files, 400 MB | 0.852 ~ 0.915 | 0.968 | 45 | 116 | 61 MB + 6.4× | see below |
 | Vorbis | aqr-vorbis | 4 Ogg Vorbis files of libvorbis (2008), 29.1 MB; 144 FSB5 sound banks of The Crew, 401 MB | 0.919 ~ 0.925; 0.845 ~ 0.853 | 0.999; 0.955 | 55 (`aqr`, 10 threads) | 158 and 117 (`-t`, 10 threads; the second as Wasm) | 0.66 GB heap peak (`aqr`) | the ratios measured 2026-11-01 on a Ryzen 7 9700X with `aqr-show -t 16`, of the files in their containers (aqr-ogg, aqr-fsb); speed and memory measured 2026-10-31 with `aqr` on 12 Ogg files made from aqr-flac's corpus by libvorbisenc with libogg and by ffmpeg (49.1 MB, FORMAT.md of aqr-ogg; 0.932 then), which were not kept. The audio packets coded in pieces of 2 MiB |
 | FLAC; WAV, AIFF | aqr-flac; aqr-raw | 25 files, 450 MB | 0.946 ~ 0.948 | 0.999 | 65 | 165 | 9 MB + 11.5× | the module is about 31 KB per archive, the resource 2.4 KB. Measured when aqr-flac took WAV and AIFF too: aqr-raw has them now, with the same streams |
+| IMA ADPCM (Xbox ADPCM in FSB5, Microsoft's in WAV) | aqr-ima | The Crew's FSB5 banks; IMA ADPCM WAV files of ffmpeg and sox (README) | the record 0.578 of the blocks (xz -9e about 0.67); WAV 0.58–0.61 stereo, 0.78 mono | | 33 (one thread) | 25 (one thread) | not measured | the headers and nibbles by binary arithmetic coding in contexts of the decoder's state (step index, the nibble before, the other channel's nibble); a channel equal to the one before is one decision. Through aqr-fsb and aqr-raw |
 
 The MP3 resource is the built-in tables (131 KB raw, about 33 KB in every archive), and the
 module about 28 KB more: a typical 1 MB track alone (worst) pays for both, and 23 of the
@@ -92,6 +93,9 @@ reservoir is rebuilt.
 | FASTA (nucleotides) | aqr-fasta | hg19, 93 files, 3.2 GB (README) | 0.209 | 0.309 | 170 | 133 (753 through `aqr`, files at once) | not measured | speeds measured 2026-10-26 with `aqr-fasta-bench` (chr1) and `aqr` (hg19 of the 10gb corpus), not `aqr-show`; zstd -3 file by file |
 | Delimited tables (CSV, TSV, USV) | aqr-xsv | 10 files, 11.7 MB (README) | 0.792 of `zstd -3` (streams through zstd -3) | | 39–479 | 584–1219 | not measured | measured 2026-10-28 with `aqr-xsv-bench`, not `aqr-show`: GPS logs 0.41 of zstd -3, cmz's `airport-codes.csv` 0.82 (2.74 → 2.32 MB through `aqr`), perl's `UnicodeData.txt` 0.91. Taken by its text before aqr-wrt. The 10gb corpus −1.71 MB (85 files; README) |
 | JSON lines | aqr-jsonl | 7 files, 2.27 GB (README) | 0.872 of `aqr` before (through `aqr`) | | 179–1012 | 741–3080 (one thread) | segments of 64 MiB: decompressing 2.24 GB, 376 MB of heap | measured 2026-11-01 through `aqr` (10 threads) and `aqr-jsonl-bench`, not `aqr-show`: GH Archive −8.4%, Amazon reviews −18.1%, OpenAlex −27.8%, GeoJSON −15.1%, event logs −37.6%, C4 −1.5%. Taken by its text before aqr-xsv and aqr-wrt |
+| FITS (images, Rice tiles, binary tables) | aqr-fits | 68 files, 96.2 MB: SDO/AIA (Rice), Digitized Sky Survey (16-bit, and through `fpack`), Kepler tables, NASA's and SDSS's samples, a Legacy Survey image (README) | 0.584 (0.715 before) | | 7.1 (`aqr -c -T 1`) | 22 | 299 MB peak for the 11.1 MB Legacy Survey file | measured 2026-10-28 with `aqr`, not `aqr-show`, one archive per file. Integer images by prediction or an H-transform pyramid (DSS 0.505 → 0.172), Rice tiles rebuilt from their pixels and their blocks' codes (AIA 1.000 → 0.937), tables as byte planes of their columns (Kepler 0.591 → 0.307); `GZIP_*`, `HCOMPRESS_1` and `PLIO_1` tiles kept |
+| HDF5 (netCDF-4, NeXus, NWB, AnnData, Keras) | aqr-hdf5, aqr-flate | 60 files, 271.2 MB: GWOSC strain, GOES-16, NOAA OISST, Keras weights, 10x and AnnData, NWB, NeXus, test files (README) | 0.728 (default level), 0.704 (`-9`); 0.826 before | | 8.6 (`aqr`, 16 threads, a file at a time) | | not measured | measured 2026-10-30 on Windows with `aqr`. The deflated chunks rebuilt by `flate-set` (zlib's `compress2`, emulated exactly from level 7), floats by a linear predictor of order 32 (`hdf5-recons-float`, GWOSC 1.000 → 0.799); LZF, Blosc, szip and zstd chunks kept |
+| GNU gettext catalogs (`.mo`) | aqr-gnu-gettext | the 10gb corpus's 1,171 distinct `.mo` files, 79.66 MB (README) | 10.98 MB archived together (13.70 before, −19.8%) | | 68 (`aqr`, all threads; 1.82 s → 1.17 s) | | not measured | measured with `aqr -c` at level mid; the offsets, lengths and hash table derived from the strings, the rest kept for the archive |
 | Wavefront OBJ | aqr-obj | 14 files, 411 MB | 0.080 ~ 0.081 | 0.232 | 121 | 324 | 24 MB + 3.1× | files over 300 MB left out. Speed and memory by `aqr-obj bench`, before the wiring, on 22 files of 403 MB (0.097 then). Through `aqr` (all threads, 2026-10-28): c3d 67.5 → 9.99 MB (19.94 before the wiring), threejs 6.0 → 0.83 MB (1.50). Taken by its text, not by the name `.obj` (object files) |
 
 ### Video
@@ -109,11 +113,13 @@ reservoir is rebuilt.
 | mozlz4, LZ4 frames | aqr-lz4 | a Firefox profile (README) | −9 to −18% against `zstd -3` of the files, −57% solid | | | 650–1150 (the compressor) | not measured | no sample on this machine; liblz4 1.10.0's fast compressor reproduced exactly |
 | lzop files (LZO1X) | aqr-lzo | Silesia (12 files) through `lzop -3` and `-9`, 101.0 and 76.3 MB (README) | 0.622 and 0.821 | 0.840 and 0.923 | 16 and 10 (`aqr`, 10 threads) | 94 and 41 (`-t`, 10 threads; the second as Wasm) | 13.5× (`aqr` peak) | measured 2026-10-28 with `aqr`, not `aqr-show`; the original files archive to 57.8 MB: the records (4.5% and 6.1% of the streams) are most of the rest. No compressor reproduced: data + record of the parse |
 | LZFSE, LZVN (bvx blocks) | aqr-bvx | the 36 asset catalogs over 100 KB of `/Applications`, 272.5 MB (README) | 0.701 (0.809 before) | 0.854 | 4.9 (`aqr`, 10 threads) | 43 and 34 (`-t`, 10 threads; the second as Wasm) | 28.5× (`aqr` peak, 7.8 GB) | measured 2026-10-30 with `aqr`, not `aqr-show`, with the streams taken at level mid (now level 9 only: 170.57 MB at `-l 9`, 146 s); 4,781 LZFSE and 10,200 LZVN streams, 3.7 GB of data. No compressor reproduced: data + record of the parse (1.5% and 2.5% of the streams), with the LZFSE compressor's table of candidates as a context. The data (pixels) is stored by zstd; some catalogs' streams are kept |
+| LZMA (`.lzma`), xz (LZMA2) | aqr-lzma | the 10gb corpus's 123 `.tar.lzma` (73.08 MB, XZ Utils `-6`) and 6 `.tar.xz`; a 7z folder of 7-Zip; a tar through `xz -6 -T1` and `-T4` (README) | records 13.5% of the `.tar.lzma` (10.1% of the `.tar.xz`, 15.5–18.4% of the others) | | 39 of data (`aqr-lzma bench`, a thread) | 34 of data (a thread) | the data, the stream, 12 × the dictionary of chains and 132.5 MiB of tables (1.39 GB peak for the 7z folder) | measured 2026-11-02 on an M4. No encoder reproduced: data + record of the parse against a binary-tree match finder; streams over 64 MiB of data in parts coded side by side. For streams whose data is stored elsewhere too (a `.tar.lzma` beside its files: 96.5 → about 14 MB); a stream alone gains nothing (Hard, below). Blocks of filters before LZMA2 by aqr-bcj |
+| 7z (LZMA, LZMA2, Copy, BCJ, BCJ2, Delta) | aqr-7z, aqr-bcj, aqr-lzma | the 10gb corpus's four 7z archives, 37.25 MB (README) | records 17.5% of the packed streams; `mingw480` (its tree and its 7z) 84.45 → 55.36 MB (the tree alone 47.36) | | 30 of data (`aqr-7z-check -t 4`) | 24 of data | 4.96 GB peak for `mingw480` (1.44 before) | measured 2026-10-30 on an M4; no module of its own: the folders' streams rebuilt from the files' contents by `lzma-recons` and `lzma2-recons`, the filters by aqr-bcj's modules (ported from the LZMA SDK; BCJ2's bits of conversion kept from its range coder's stream). PPMd, BZip2 and Deflate folders and encrypted archives kept |
 | bzip2 | aqr-bz2 | 79 files of this machine, 352.8 MB (README) | 0.726 (0.88 for a source tar, 0.85 for a tar of binaries); text alone kept | | 3–5 (`aqr`, 16 threads) | 16 (`-t`, 16 threads) | 30 B per symbol of a block, on each thread | measured 2026-10-31 on Windows with `aqr`, not `aqr-show`; libbzip2's compressor reproduced exactly (149 of 153 files); the gain is what the data holds, BWT already models text well |
 | Ogg | aqr-ogg | | | | | | | the pages from the packets (layout about 5 bytes a page before compression), the Vorbis packets by aqr-vorbis (Audio). Opus and FLAC in Ogg are not taken |
 | FSB5 (FMOD sound banks) | aqr-fsb | | | | | | | the Vorbis samples' setup headers found by their CRC-32 in aqr-fsb's database, the samples recoded by aqr-vorbis (Audio), IMA ADPCM by aqr-ima |
-| ar, tar, cpio | aqr-bundle | the 10gb corpus (README) | 2810.8 → 2775.0 MB for all of it | | | 6600 (the module) | 28000 (the module) | not measured | measured with `aqr` and `aqr-bundle-check`, not `aqr-show`: an archive alone gains nothing, its files are recompressed by their formats and shared with the same files archived along (`gimp.tar` and its files −11.3 MB); ar archives of objects +1.0 MB |
-| asar (Electron) | aqr-asar | 27 archives of one machine (README) | 714.42 → 697.11 MB for all of them (with aqr-gif) | | | 950 | 4100 (the module) | not measured | an archive alone gains little (headers at zstd -3 2.13 → 0.84 MB); its files are recompressed by their formats; archives of many small files (`node_modules`) lose alone, as their text is a stream apart (aqr-compress's kinds) |
+| ar, tar, cpio | aqr-bundle | the 10gb corpus (README) | 2810.8 → 2775.0 MB for all of it | | 6600 (the module) | 28000 (the module) | not measured | measured with `aqr` and `aqr-bundle-check`, not `aqr-show`: an archive alone gains nothing, its files are recompressed by their formats and shared with the same files archived along (`gimp.tar` and its files −11.3 MB); ar archives of objects +1.0 MB |
+| asar (Electron) | aqr-asar | 27 archives of one machine (README) | 714.42 → 697.11 MB for all of them (with aqr-gif) | | 950 | 4100 (the module) | not measured | an archive alone gains little (headers at zstd -3 2.13 → 0.84 MB); its files are recompressed by their formats; archives of many small files (`node_modules`) lose alone, as their text is a stream apart (aqr-compress's kinds) |
 | ISO 9660, UDF images | aqr-iso | a Windows Server 2008 R2 DVD, 3.17 GB (README) | 2777.6 → 2776.9 MB | | 177 (`aqr`, all threads) | | 1.82 GB peak for 3.17 GB (2.04 before) | measured 2026-10-30 with `aqr`; no module (the image is its files' contents and the rest); 89% of the DVD is `install.wim` (LZX), which it gives as a file of its own |
 | WIM (LZX, stored) | aqr-wim, aqr-lzx | the same DVD's `install.wim` (2.81 GB) and `boot.wim` (README) | the DVD: 3.17 GB → 2483.1 MB | | 19 (`aqr`, 16 threads, the whole DVD) | 45 (extracting) | 22.9 GB peak commit compressing, 1.72 GB extracting | measured 2026-10-30 with `aqr`; no module of its own (applications of `lzx-recons` and slices); the LZX chunks' data (6.86 GB for `install.wim`) with records of 6.74% of the chunks, recompressed together rather than 32 KiB at a time |
 | CAB (MSZIP, LZX, stored) | aqr-mszip, aqr-flate, aqr-lzx | 441 CAB files of Windows, 1.80 GB (README) | 1662.7 → 1331.3 MB for all of them | | 23 (`aqr`, all threads) | 84 (`-t`) | 3.92 GB peak footprint (1.29 before) | measured 2026-10-31 with `aqr`; MSZIP folders as one DEFLATE stream each (the blocks joined), rebuilt by aqr-flate (records 4.6% of the streams at profile 6, 1.2% at 10); LZX folders by aqr-lzx (records 7.9%) from level 9 only: at level mid −1.1% more for 73.7 → 290 s, as an LZX CAB alone gains little (40 of them with the files they hold −33%) |
@@ -136,6 +142,17 @@ reservoir is rebuilt.
 | PE, Mach-O, ELF (x86, x86-64, ARM64, CIL) | aqr-exe | 259 files, 391 MB | 0.295 ~ 0.303 | 0.381 | 28 | 414 | 26 MB + 7.9× | samples from `Program Files` and `System32` of a Windows machine; .NET metadata and IL (CIL) too: 0.306 → 0.267 for the 84 assemblies of IL alone; the rest of an image scanned (PNG resources); 39 files not coded (27 of them .NET, mostly satellite assemblies of resources). 11 large binaries (1529 MB): 0.306 at 58 and 348 MB/s, 0.76–1.01 of the sample's memory fit; two small files kept raw take over twice it (106 MB for 0.7 MB, 136 MB for 5.3 MB). The disfilter alone: 292 and 336 MB/s, −20% under zstd -9. Mach-O, thin or universal, and ARM64 code (in Mach-O and PE): VS Code's 34 universal binaries (493 MB) −16.7% against the files as they are; the ARM64 filter alone −17.6% under zstd -9 (xz's BCJ −12.1%). ELF (code alone): 22 Linux binaries of ARM64 and x86-64 (499 MB) −16.2% against the files as data of no format (README) |
 | DWARF (dSYM, ELF) | aqr-dwarf | the dSYM of a release build of `aqr` (rustc, DWARF 4), 214 MB; 7-Zip's `7zr` by clang (dSYM) and GCC (ELF), DWARF 5 (README) | 0.107 (rustc), 0.276 (clang), 0.239 (gcc) | 0.227 (rustc) | | | peak RSS 0.99 GB (rustc) | measured 2026-11-02 with `aqr`: `.debug_info` by its DIEs and Apple's accelerator tables: rustc 41.77 → 22.85 MB (−45.3%; xz -9 31.71 MB), clang −24.8%, gcc −37.9% |
 | PDB (MSF) | aqr-pdb | a Rust program's PDB by lld-link (54 MB), Rust's `std`, 12 of Windows' PDBs (README) | 0.121 (`uniform.pdb`), 0.145 (`std`) | | | | peak RSS 473 MB (`uniform.pdb`) | measured 2026-11-02 with `aqr`: the container and the modules' streams (inline sites' scopes derived, annotations by operation, C13 lines): `uniform.pdb` 14.95 → 6.57 MB (−56%; xz -9 9.73) at 56 MB/s, `std` −23.8%, `combase.pdb` −6.6%; Windows' public PDBs kept as they were |
+| Android DEX | aqr-dex | the 21 DEX files of 7 APKs from F-Droid, 132.0 MB (README) | the files 46.23 → 30.87 MB through `aqr` (−33.2%); the 7 APKs −6.8% | 0.631 of zstd -9 (`aqr-dex-check`; xz -9e 0.758) | 130 (the module, a thread) | 290 (the module, a thread); 827 tested through `aqr` | not measured | measured 2026-11-02 on an M4. Strings front-coded, id tables by column in deltas, instructions split by field, indices through caches of the recent ones, the checksum and SHA-1 derived. Left: a context model of opcodes and registers (3.6 MB each) |
+| Android resource tables (`resources.arsc`) | aqr-arsc | the `resources.arsc` of the same 7 APKs, 44.7 MB (README) | 9.41 → 6.78 MB through `aqr` (−27.9%); the APKs −1.3% more | 0.638 of zstd -9 (xz -9e 0.731) | | 2100 tested through `aqr` | not measured | measured 2026-11-02 on an M4. The string pools' strings without offsets and lengths, the type chunks' entries by field, keys and values predicted by the configurations before. Left: the string indices (0.94 MB, the pool sorted by configuration and value); binary XML, too small a file for a formula each |
+| WebAssembly | aqr-wasm | the 56 modules of aqr-modules, 3.60 MB (README) | −20.5% through `aqr -c` at mid (−21.7% at high); −4.3% each file alone | −15.8% at zstd -22, each alone | 169 (one thread) | 185 (one thread) | not measured | the instructions split by field, local indices by their ranks among those used last, sizes derived; data segments and custom sections handed on as content. The module (7.9 KB) costs an archive of one module nearly what it saves |
+
+### Data of no known format
+
+What aqr-compress tries on data in which no file of a known format is found.
+
+| what | crate | sample | ratio | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
+|---|---|---|---|---|---|---|---|---|
+| records of fixed size, entries with a length field, floats of whole multiples | aqr-infer-recs | 11 files, 114.6 MB: ELF and Mach-O binaries, a font, a pcap, git's index and pack index, `ld.so.cache` (README) | 0.974 of zstd -3 (one thread) | | 65 (one thread) | | 527 MB peak RSS | tables of fixed-size records, entries with a length field and floats of whole multiples, their fields transposed (`recs-fields`, `recs-entries`, `recs-floats`); tried by aqr-compress on data in which no file is found, where a 2–50 ms estimate tells 5% at least. The SAO star catalogue 0.432 of zstd -3 |
 
 ### In progress or planned
 
@@ -169,6 +186,14 @@ reservoir is rebuilt.
 | aqr-iso | UDF's metadata partition (2.50, Blu-ray); raw 2352-byte sectors (EDC/ECC); the files' contents sliced from the image rather than copied |
 | aqr-wim | XPRESS and LZMS (and ESD files); the lookup table's SHA-1 and the chunk tables derived; the resources cut into the images' files by their metadata; spanned WIMs |
 | aqr-lzx | speed (a large CAB folder is one stream on one thread); LZX DELTA |
+| aqr-lzma | speed of the match finder (most of the time); a stream alone does not pay for its record (14%); LZMA in ZIP (method 14) |
+| aqr-7z | PPMd, BZip2 and Deflate folders; Swap2/Swap4; a large folder rebuilt on one thread (10.7 s for the 10gb corpus's), its match finder 12 × the dictionary |
+| aqr-bcj | Swap2/Swap4; BCJ2 under other filters |
+| aqr-dex | a context model of opcodes and registers; `registers_size` and `ins_size` from the prototypes; debug info by its state machine; DEX 041's containers, DEX in OAT and VDEX |
+| aqr-arsc | the string indices (the pool's order derived from the order of first reference); binary XML as one application for all of an archive's; compact and sparse entries |
+| aqr-fits | a blend of predictors (AIA's tiles at 0.95 of their Rice streams); hcompress's quantisation; `GZIP_*`, `HCOMPRESS_1`, `PLIO_1` tiles and compressed tables; the modules' sizes against small files |
+| aqr-hdf5 | a module of zlib's deflate alone (`flate-set` is 78.7 KB); integer images by a 2D predictor; LZF and Blosc chunks emulated; layout 4's indexes |
+| aqr-wasm | a dictionary for the streams (−16% more in a trial); the module's cost against archives of one module |
 
 ## Worth doing
 
@@ -181,12 +206,14 @@ bytes. Gains are estimates unless a tool is cited.
 | format | used in | how it compresses | what is left | reuse |
 |---|---|---|---|---|
 | Avid DNxHD, DNxHR | broadcast, Avid workflows | intra DCT, VLC; constant bit rate, so every frame is padded | the padding, then the VLC recoded | aqr-prores's model and chunks |
-| DV, HDV, XDCAM (MPEG-2), MPEG-4 Part 2 (Xvid, DivX), H.263 | archived broadcast and camcorder footage, DVD VOB, old downloads | DCT, VLC tables fixed by the standard | coefficients recoded (as packMP3). Inter frames also need motion vectors and macroblock modes modelled, but nothing reconstructed | aqr-mp3's structure |
+| DV, HDV, XDCAM (MPEG-2), MPEG-4 Part 2 (Xvid, DivX), H.263, VC-1 (WMV9, Blu-ray) | archived broadcast and camcorder footage, DVD VOB, old downloads | DCT, VLC tables fixed by the standard | coefficients recoded (as packMP3). Inter frames also need motion vectors and macroblock modes modelled, but nothing reconstructed | aqr-mp3's structure |
 | Motion JPEG (AVI, MOV) | dashcams, webcams, older cameras' video, security cameras | a JPEG per frame, often without its Huffman tables (the standard ones implied) | each frame through aqr-jpeg; the frames' headers predicted from each other | aqr-jpeg |
 | HuffYUV, FFVHuff, UT Video, MagicYUV | lossless capture, intermediates | spatial prediction, then static Huffman tables per stream or slice | the residuals context-modelled | aqr-raw's pixel model |
 | H.264 CAVLC (baseline profile) | older phones, video calls, some security cameras | VLC tables chosen by the neighbours' coefficient counts | parsing needs no reconstruction, so the syntax elements can be recoded under richer contexts | aqr-mp3's structure |
 | Theora | old web video, game cutscenes | VP3: DCT tokens with Huffman tables set in the stream header | as Vorbis | the Vorbis work |
 | CineForm, ProRes RAW | high-end cameras, post-production | wavelets, or a RAW-specific coding | after ProRes (aqr-prores) | |
+| MPEG-TS, M2TS | AVCHD camcorders, DVB and IPTV recordings, Blu-ray | 188-byte packets (192 in M2TS) of PES around the streams; null packets padding a constant rate | the packets' headers (continuity counters, PCR, M2TS's timestamps) derived and the null packets dropped; the streams handed to their recompressors (MPEG-2, MP2, AC-3; H.264 CABAC is Hard) | aqr-mkv's handling |
+| AVI, ASF (WMV, WMA), FLV | old downloads, camera and screen recordings, Flash video | chunks or packets interleaved, with an index (`idx1`, ASF's simple index, FLV's keyframes) | the indexes derived from the chunks; the streams handed to their recompressors (Motion JPEG, MP3, VC-1, WMA) | aqr-mkv's handling |
 
 ### Audio
 
@@ -240,6 +267,10 @@ container is TIFF/EXIF.
 | 3MF | 3D printing | ZIP of XML | already taken by aqr-zip; the XML has no model yet | aqr-zip |
 | Blender (`.blend`) | 3D art | a dump of in-memory structs described by its SDNA; optionally gzip (before 3.0) or zstd | the gzip ones; the structs modelled by their SDNA types | aqr-flate |
 | LAS, E57 | lidar, surveying | uncompressed point records (LAZ is LAS's arithmetic-coded form) | the points predicted (LASzip shows how much: LAZ is typically a tenth to a fifth of LAS) | |
+| STEP, IGES, IFC | mechanical CAD exchange, BIM (IFC is a STEP file: hundreds of MB a building) | text: entity instances of numbers and references | numbers and references (`#123`, mostly the previous instance's plus a little) modelled by entity type | aqr-obj's predictors, aqr-xsv's fields |
+| DXF (ASCII) | AutoCAD exchange, CNC, laser cutting | text of group codes and values, one a line | the group codes predicted from the entity, the coordinates as in aqr-obj | aqr-obj |
+| GDSII, OASIS | chip layouts (often GBs, then gzip'd) | GDSII: uncompressed records of 32-bit coordinates; OASIS: varints, optionally DEFLATE blocks (`CBLOCK`) | the polygons' coordinates as deltas; OASIS's raw deflate | aqr-flate |
+| Alembic, OpenVDB | VFX caches and volumes | Alembic (Ogawa): uncompressed arrays of samples; OpenVDB: grids of half or full floats, in zlib or Blosc | the arrays against the frame before; the zlib grids | aqr-flate, aqr-hdf5's float model |
 
 ### Documents and office
 
@@ -253,6 +284,17 @@ container is TIFF/EXIF.
 | SWF | Flash archives (Flashpoint and others) | `CWS` is the whole file in zlib; `ZWS` is LZMA | the zlib ones, then the tags, JPEG and lossless bitmaps (zlib) inside | aqr-flate, aqr-jpeg |
 | PostScript, EPS | print, old figures | images in ASCII85, RunLength, LZW, Flate or DCT filters | the filters undone as in PDF | aqr-pdf's stream coding |
 | XPS, OXPS | Windows print spool, documents | ZIP of XML, fonts and images | already taken by aqr-zip | aqr-zip |
+| Keynote, Pages, Numbers (iWork) | Apple's office documents | ZIP of `.iwa`: protobuf in Snappy chunks without the framing format's CRCs | the Snappy chunks reproduced (if Apple's compressor is Google's; else a record of the parse as aqr-lzo), then the protobuf by field | aqr-zip, aqr-snappy |
+| RTF | word processors, Outlook, legal and government documents | text; pictures as hexadecimal digits (`\pict`: PNG, JPEG, WMF) | the hex undone, the pictures recompressed | aqr-png, aqr-jpeg |
+| Jupyter notebooks (`.ipynb`) | data science | JSON; plots as base64 PNG in the outputs | the base64 undone, the PNGs recompressed (the base64 row below in general) | aqr-png, aqr-jsonl |
+| OneNote (`.one`) | notes | a revision store (MS-ONESTORE) of uncompressed objects; embedded files and pictures as they are | the pictures and files recompressed; the store's references derived | everything |
+
+### Fonts
+
+| format | used in | how it compresses | what is left | reuse |
+|---|---|---|---|---|
+| TrueType, OpenType (CFF), TTC | every OS and application; CJK fonts take 5–20 MB each | uncompressed tables: `glyf` outlines (flags and coordinates as deltas of 1 or 2 bytes), CFF charstrings, `hmtx`, `loca` | WOFF2's transforms show the way (`loca` derived, `glyf` split into streams of flags, coordinates and instructions): about 30% under the same coder; a TTC's shared tables once | aqr-infer-recs's fields (it takes their tables now as data of no format) |
+| WOFF | web fonts (before WOFF2) | each table in zlib, where that is smaller | the zlib streams, then the tables as above | aqr-flate |
 
 ### Data, databases and machine learning
 
@@ -268,6 +310,9 @@ container is TIFF/EXIF.
 | PostgreSQL (data files, `pg_dump -Fc`) | databases | pglz or LZ4 for TOAST values; zlib per block in custom dumps | pglz is simple and open; the zlib blocks | aqr-flate, aqr-lz4 |
 | TFRecord | ML datasets | protobuf records, optionally gzip or zlib | the gzip, then the records | aqr-flate |
 | MATLAB `.mat` (v5–v7) | engineering, science | each variable zlib-compressed (v7.3 is HDF5) | the zlib streams | aqr-flate |
+| Microsoft Access (`.mdb`, `.accdb`) | small businesses, laboratories, government | Jet/ACE pages of rows; text optionally "Unicode compressed" (one byte a character) | the pages' rows by column, the free space dropped | aqr-sqlite's approach |
+| MySQL InnoDB (`.ibd`), MongoDB WiredTiger | database servers and their backups | InnoDB: 16 KiB pages, uncompressed or zlib (`ROW_FORMAT=COMPRESSED`, page compression); WiredTiger: Snappy blocks by default | the pages' records by column; the zlib and Snappy blocks | aqr-flate, aqr-snappy, aqr-sqlite's approach |
+| Windows ESE (`Windows.edb`, Exchange, SRUM), registry hives | Windows' search index (often GBs), mail servers, the registry | ESE: pages of B-trees, some columns 7-bit or XPRESS-compressed; hives: `hbin` blocks of cells, uncompressed | the pages' and cells' records by field; ESE's XPRESS (Hard: Microsoft's encoder) | aqr-infer-recs |
 
 ### Science, medicine, geography
 
@@ -277,25 +322,27 @@ container is TIFF/EXIF.
 | DICOM | medical imaging (PACS) | uncompressed 16-bit, JPEG Lossless, JPEG-LS, RLE | lossless JPEG shared with RAW; uncompressed images through `raster-recons` once it takes 16 bits | RAW's lossless JPEG, aqr-raw |
 | NIfTI (`.nii.gz`) | neuroimaging | a gzip of the whole volume | the gzip, then a 3D model of the voxels | aqr-flate |
 | mzML, mzXML | mass spectrometry | XML with base64 arrays of floats, optionally zlib | base64 and zlib undone, the m/z and intensity arrays modelled | aqr-flate |
-| FITS (`fpack`) | astronomy | Rice coding of 32-pixel blocks; uncompressed images and binary tables | taken by aqr-fits (Rice tiles rebuilt from their pixels, images and tables modelled); hcompress, GZIP tiles and better pixel models left (its README) | aqr-fits |
-| HDF5, NetCDF-4 | climate, simulation | shuffle filter and deflate per chunk | taken by aqr-hdf5 (deflated chunks rebuilt by aqr-flate, floats by a linear predictor); integer images, LZF and Blosc chunks left (its README) | aqr-hdf5, aqr-flate |
 | ROOT | particle physics (CERN) | baskets in zlib, LZ4, LZMA or zstd | the zlib and LZ4 baskets | aqr-flate, aqr-lz4 |
 | GRIB2, simple packing | weather | integers packed at a fixed width | unpacked, then a predictive model | |
 | SEG-Y | seismic surveys | uncompressed traces of IBM or IEEE floats | a trace model | |
 | OSM PBF | OpenStreetMap extracts | zlib-compressed protobuf blobs | the zlib blobs | aqr-flate |
 | MBTiles, PMTiles | map tiles | SQLite or a flat archive of PNG, JPEG or gzip'd vector tiles | the tiles through their recompressors | aqr-sqlite, aqr-png, aqr-jpeg, aqr-flate |
+| FASTQ, SAM (uncompressed) | sequencers' output, alignments | text: reads' names, nucleotides, quality strings (FASTQ); tab-separated fields (SAM) | names by field against the read before, quality strings by a context model (fqzcomp's), nucleotides as aqr-fasta | aqr-fasta, aqr-xsv |
+| MRC, cryo-EM movies | structural biology (TBs per session) | raw 8- or 16-bit counts or floats a frame (TIFF of LZW too) | a model of sparse counts against the frames before | aqr-fits's pixel model |
+| SRTM `.hgt`, Esri shapefiles (`.shp`, `.dbf`) | elevation data, GIS | `.hgt`: 16-bit big-endian heights uncompressed; `.shp`: records of doubles; `.dbf`: fixed-width text records | the heights through `raster-recons` once it takes 16 bits; the coordinates as deltas, the `.dbf` by column | aqr-raw, aqr-infer-recs, aqr-xsv |
 
 ### Web, logs and capture
 
 | format | used in | how it compresses | what is left | reuse |
 |---|---|---|---|---|
 | WARC (`.warc.gz`) | web archives (Common Crawl, Internet Archive) | a gzip member per record | the gzip, then the HTTP bodies (gzip again, images) | aqr-flate, everything |
-| HAR, data URIs, base64 in JSON and XML | web tooling, inline assets | base64 | base64 undone, the bytes recompressed | everything |
+| HAR, data URIs, base64 in JSON and XML; uuencode, yEnc | web tooling, inline assets; Usenet binaries | base64 (uuencode and yEnc alike: text of 6 or 8 bits a byte, in lines) | base64 undone, the bytes recompressed | everything |
 | Browser HTTP caches (Chrome, Firefox, Safari) | browser profiles | bodies as sent: gzip, Brotli, zstd; images | the gzip bodies and images (Brotli and zstd are hard, below) | aqr-flate, aqr-png, aqr-jpeg |
 | Rotated logs (`*.log.N.gz`) | every server | gzip, usually zlib's level 6 or 9 | reproduced by zlib emulation | aqr-flate |
 | systemd journal | Linux logs | field data over a size threshold in xz, LZ4 or zstd | the LZ4 objects; the journal's hash tables and offsets derived | aqr-lz4 |
 | pcap, pcapng | network captures | uncompressed packets | packets modelled by flow and protocol; payloads recompressed | |
 | Windows EVTX | event logs | chunks of binary XML with templates | the templates and records modelled | |
+| Chromium `.pak` | every Electron app and Chromium browser (`resources.pak`, `chrome_100_percent.pak`) | an index and resources, gzip or Brotli where compressed (HTML, JS, CSS), PNGs | the gzip resources, the PNGs; laid out as aqr-asar does its files | aqr-flate, aqr-png, aqr-asar |
 
 ### Version control
 
@@ -319,16 +366,17 @@ container is TIFF/EXIF.
 | OCI and Docker layers | container registries | tar.gz by Go's `compress/flate` | flate-zoo has Go's encoder already; the tar is aqr-bundle's | aqr-flate, aqr-bundle |
 | UEFI firmware volumes | PC firmware | EFI/Tiano compression (LZ77 with Huffman) or LZMA | Tiano's reference encoder (EDK II) reproduced | |
 | Intel HEX, Motorola S-record | microcontroller firmware | hex text with per-line checksums | the bytes, with addresses and checksums derived | |
+| VMDK, VHD, VHDX, qcow2, VDI | virtual machines, their backups and OVAs | sparse images behind block tables; qcow2's compressed clusters and streamOptimized VMDK's grains (OVA) in deflate | the deflate clusters; the block tables derived; the guest's file system as below | aqr-flate, aqr-iso's approach |
+| File system images (ext4, NTFS, FAT, APFS, HFS+), E01 | disk dumps, firmware, forensics (E01: chunks of 32 KiB in zlib) | none (NTFS's LZNT1 and WOF's XPRESS for compressed files) | as aqr-iso: the image as its files' contents and the rest, the free blocks found zero or kept; E01's zlib chunks | aqr-iso, aqr-flate |
 
 ### Executables and bytecode
 
 | format | used in | how it compresses | what is left | reuse |
 |---|---|---|---|---|
 | ELF (x86-64, ARM64) | Linux and Android binaries | uncompressed (debug sections optionally zlib or zstd) | the code is filtered (aqr-exe); left: the tables (relocations, symbols, `.eh_frame`), DWARF (aqr-dwarf: `.debug_info` and Apple's tables so far; not compressed sections) | aqr-exe, aqr-flate, aqr-dwarf |
-| Android DEX | APKs | uncompressed, with shared string, type and method tables | strings, id tables, classes' data and instructions taken (aqr-dex, −37% under zstd -9, beating xz -9e); left: a context model of opcodes and registers | aqr-dex |
 | Java class files | JARs | uncompressed constant pools and bytecode | as DEX | |
-| Android resource tables (`resources.arsc`), binary XML | APKs (stored, for mapping) | uncompressed: string pools with offsets and lengths, type chunks of fixed-size entries | the pools' strings and the entries taken (aqr-arsc, −36% under zstd -9); left: the string indices (the pool sorted by configuration and value); binary XML, whose files are too small for a formula each (aqr-arsc's README) | aqr-arsc |
-| WebAssembly | the web, plugins | uncompressed sections | instructions and indices modelled | |
+| Python bytecode (`.pyc`) | every Python installation (`__pycache__`, wheels of compiled code) | uncompressed marshal of code objects | the constants and names against the source beside it; the bytecode by field | aqr-wasm's approach |
+| SPIR-V, DXBC/DXIL shaders | games' shader caches and packages | uncompressed 32-bit words (SPIR-V); LLVM bitcode in a container (DXIL) | SPIR-V's ids and opcodes by field | aqr-wasm's approach |
 
 ### Games
 
@@ -343,6 +391,20 @@ container is TIFF/EXIF.
 | Minecraft regions (`.mca`), NBT (`.dat`), Bedrock worlds | server backups | zlib per chunk with sector padding; gzip; LevelDB with raw deflate (Bedrock) | Java's default zlib reproduced, the padding dropped | aqr-flate, aqr-snappy's LevelDB tables |
 | CD images (BIN/CUE, IMG) | PlayStation, Saturn and other disc images | none; each 2352-byte sector carries EDC and ECC computed from its data | sync, EDC and ECC regenerated (as ECM does): about 12% of a data sector | |
 | CSO, ZSO | PSP and PS2 ISOs | deflate (CSO) or LZ4 (ZSO) per block | the blocks | aqr-flate, aqr-lz4 |
+| Wwise (`.wem`, `.bnk`) | most AAA games' audio | Vorbis without its setup header (codebooks referenced from a known set), ADPCM, Opus in newer versions; banks of them | as FSB5: the setup rebuilt, the Vorbis recoded; the ADPCM through aqr-ima | aqr-fsb, aqr-vorbis, aqr-ima |
+| CRI ADX, HCA, USM, CPK | Japanese games | ADX: 4-bit ADPCM at fixed width; HCA: MDCT with static tables; USM: MPEG-1, VP9 or H.264 in its own container; CPK: an archive of CRILAYLA (an LZ of its own) | ADX's samples modelled (a large gain); CRILAYLA reproduced | aqr-ima's approach |
+| Valve VPK, VTF | Source engine games | VPK: files stored; VTF: DXT1/DXT5 textures with mipmaps | the textures as aqr-tex does DDS | aqr-tex |
+| XNA, MonoGame `.xnb` | indie games | XMemCompress's LZX (XNA) or LZ4 (MonoGame) | the LZX as aqr-lzx's record of the parse, the LZ4 reproduced | aqr-lzx, aqr-lz4 |
+| GameCube and Wii disc images | emulation | none; padding of junk from a known generator; Wii's partitions encrypted with known keys and hashed | the junk regenerated (as RVZ does), Wii's data decrypted and its hashes derived | |
+
+### Older archives
+
+| format | used in | how it compresses | what is left | reuse |
+|---|---|---|---|---|
+| Unix `compress` (`.Z`, `.tar.Z`) | old source and FTP archives, some scientific data | LZW of 9 to 16-bit codes, reset when the ratio drops; one encoder (ncompress) | the encoder reproduced (its reset rule) | aqr-gif's LZW |
+| ARJ | DOS-era archives, BBS and Korean PC-communication files | LZSS with Huffman, close to LHA's (methods 1–3), and a simpler method 4 | a record of the parse, as aqr-lha | aqr-lha |
+| StuffIt, Compact Pro, ZOO, ARC | classic Mac and DOS archives | LZW, Huffman and LZH methods (StuffIt 5's Arsenic is arithmetic: Hard) | the LZW reproduced, the rest as records of the parse | aqr-gif's LZW, aqr-lha |
+| AppleDouble (`._*`, `__MACOSX` in ZIPs), MacBinary, BinHex | files from Macs | headers around resource forks and Finder information; BinHex as 6-bit text | the forks' resources (icons, `snd `) recompressed; BinHex's text undone | |
 
 ## Hard
 
@@ -370,9 +432,9 @@ not available or comes in too many variants.
 
 | format | used in | why it is hard |
 |---|---|---|
-| LZMS, XPRESS Huffman (ESD, Windows prefetch; LZX of WIM, CAB and CHM is aqr-lzx's, a record of the parse) | Windows install images | Microsoft's encoders are closed and their parsers optimal-style; predicting and correcting (as aqr-flate does) leaves large corrections |
+| LZMS, XPRESS Huffman (ESD, Windows prefetch, `hiberfil.sys`; LZX of WIM, CAB and CHM is aqr-lzx's, a record of the parse) | Windows install images | Microsoft's encoders are closed and their parsers optimal-style; predicting and correcting (as aqr-flate does) leaves large corrections |
 | Oodle (Kraken, Mermaid, Leviathan) | AAA game paks | a closed commercial library with many versions and levels |
-| xz, LZMA, 7z (also `.deb`, `.rpm`, Arch packages, pbzx) | source and package distribution | optimal parsing over many versions and options, and little to gain over an already strong coder |
+| xz, LZMA, 7z alone (also `.deb`, `.rpm`, Arch packages, pbzx) | source and package distribution | optimal parsing over many versions and options, and little to gain over an already strong coder: aqr-lzma's records of the parse (10–18% of the streams) pay only where the data is stored elsewhere too (Done above) |
 | zstd, Brotli (also WOFF2, HTTP bodies) | HTTP, packages, file systems | output changes between versions; levels, windows and dictionaries make a wide space; the entropy stage is already good |
 | CHD, RVZ, WIA, NSZ | disc and cartridge images for emulators | per-hunk choices among zlib, LZMA, zstd, FLAC and Huffman; the LZMA and zstd ones as above |
 | Android OTA payloads | system updates | bsdiff and puffin operations over xz, bzip2, zstd or Brotli blobs |
@@ -384,4 +446,5 @@ not available or comes in too many variants.
 | Opus | streaming, voice (Discord, WhatsApp, YouTube's WebM audio) | reproducible (a range coder over mostly static tables, and parsing needs no synthesis), but the PVQ pulses are coded uniformly and fine energy as raw bits, so little is left (Balrogg: 3–8%), for a whole CELT and SILK parser with its bit allocation |
 | DRM-protected media, encrypted archives and backups | commercial content; iOS, WhatsApp and Telegram backups | random data without the key; only files that carry their key (PDF with an empty user password) can be done |
 | Console packages (Switch NCA, PlayStation PKG), Unreal `.pak` with encryption | games | platform encryption and signatures on top |
-| AutoCAD DWG, Native Instruments Kontakt (NCW) | CAD, sample libraries | closed formats that change with versions; need reverse engineering first |
+| AutoCAD DWG, Native Instruments Kontakt (NCW), Bink video, ECW, MrSID | CAD, sample libraries, game cutscenes, aerial imagery | closed formats that change with versions; need reverse engineering first |
+| Blockchains (Bitcoin's `blk*.dat`) | full nodes (hundreds of GB) | mostly hashes, public keys and signatures, which are random; the scripts' templates and amounts are a few percent |
