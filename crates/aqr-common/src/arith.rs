@@ -258,7 +258,12 @@ impl Coder for ArithDecoder<'_> {
     }
 }
 
-/// The encoder, counting the bits it writes of each of `CATS` kinds ([`Coder::set_cat`]).
+/// The bits a bit of probability `(i + 0.5) / 4096` costs, by `i`: what [`Costed`] counts
+/// (a `log2` a bit took 11% of aqr-lzx's splitting, for statistics alone).
+static COST: std::sync::LazyLock<[f64; 4096]> =
+    std::sync::LazyLock::new(|| std::array::from_fn(|i| -((i as f64 + 0.5) / 4096.0).log2()));
+
+/// The encoder, counting the bits it writes of each of `CATS` kinds ([`Coder::set_cat`]), about.
 pub struct Costed<const CATS: usize> {
     pub c: ArithEncoder,
     cat: usize,
@@ -281,7 +286,7 @@ impl<const CATS: usize> Coder for Costed<CATS> {
     #[inline]
     fn bit(&mut self, b: &mut Bit, v: bool) -> bool {
         let p1 = b.p1();
-        self.cost[self.cat] -= ((if v { p1 } else { 65536 - p1 }) as f64 / 65536.0).log2();
+        self.cost[self.cat] += COST[((if v { p1 } else { 65536 - p1 }) >> 4).min(4095) as usize];
         self.c.bit(b, v)
     }
     #[inline]
