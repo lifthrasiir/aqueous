@@ -300,6 +300,33 @@ impl Drop for Adopted {
 
 static HEAP: AtomicI64 = AtomicI64::new(0);
 static BYTES: [AtomicI64; LABELS_MAX] = [const { AtomicI64::new(0) }; LABELS_MAX];
+/// Bytes held outside the heap ([`outside`]) by label.
+static OUTSIDE: [AtomicI64; LABELS_MAX] = [const { AtomicI64::new(0) }; LABELS_MAX];
+
+/// Bytes held outside the heap (regions of aqr-compress's spill, say), counted by the label of
+/// work of the calling thread (as a large block of the heap is) until the guard is dropped.
+pub fn outside(n: usize) -> Outside {
+    if !on() || n == 0 {
+        return Outside { label: NONE, n: 0 };
+    }
+    let label = OWNER.try_with(Cell::get).unwrap_or(NONE);
+    OUTSIDE[label as usize].fetch_add(n as i64, Relaxed);
+    Outside { label, n: n as i64 }
+}
+
+/// Bytes counted by [`outside`].
+pub struct Outside {
+    label: u32,
+    n: i64,
+}
+
+impl Drop for Outside {
+    fn drop(&mut self) {
+        if self.n != 0 {
+            OUTSIDE[self.label as usize].fetch_sub(self.n, Relaxed);
+        }
+    }
+}
 
 const SHARDS: usize = 16;
 
@@ -434,6 +461,8 @@ pub struct Sample {
     pub threads: Vec<(u32, u32)>,
     /// Bytes of the large blocks by the label that allocated them, those of any.
     pub bytes: Vec<(u32, i64)>,
+    /// Bytes held outside the heap ([`outside`]) by label, those of any.
+    pub outside: Vec<(u32, i64)>,
 }
 
 /// The stack of a thread ended ([`Sample::threads`]).
@@ -506,6 +535,7 @@ fn sample(stop: &AtomicBool) -> Trace {
             reserved: crate::pool::usage().0 as u32,
             threads: Vec::with_capacity(threads.len()),
             bytes: Vec::new(),
+            outside: Vec::new(),
         };
         for t in &threads {
             if !t.alive.load(Relaxed) {
@@ -521,6 +551,7 @@ fn sample(stop: &AtomicBool) -> Trace {
         }
         let labels = LABELS.read().unwrap().names.len();
         s.bytes = (0..labels).map(|l| (l as u32, BYTES[l].load(Relaxed))).filter(|b| b.1 != 0).collect();
+        s.outside = (0..labels).map(|l| (l as u32, OUTSIDE[l].load(Relaxed))).filter(|b| b.1 != 0).collect();
         samples.push(s);
         if samples.len() >= SAMPLES_MAX {
             let mut k = 0;

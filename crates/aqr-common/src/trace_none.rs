@@ -43,6 +43,13 @@ pub fn adopt(_: Option<Context>) -> Adopted {
     Adopted
 }
 
+pub struct Outside;
+
+#[inline]
+pub fn outside(_: usize) -> Outside {
+    Outside
+}
+
 #[inline]
 pub(crate) fn allocated(_: *mut u8, _: usize) {}
 

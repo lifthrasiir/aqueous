@@ -27,7 +27,8 @@
 //!   `at` (seconds), `heap` and `rss` (bytes), `reserved` (workers reserved or running), `samples`
 //!   (by sample, of each thread its stack and item, one after the other; -1 for a thread ended
 //!   or no item) and `bytes` (by sample, label ids and the bytes of large blocks they hold, one
-//!   after the other).
+//!   after the other), `outside` (the same of the bytes held outside the heap: the spill's
+//!   regions, by what took them).
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -232,6 +233,8 @@ fn outliers(run: &Run) -> String {
     let (mut busy_time, mut wait_time, mut total) = (0.0, HashMap::<u32, f64>::new(), 0.0);
     // the peak of the heap, and when
     let (mut peak, mut peak_at, mut rss) = (0i64, None, 0u64);
+    // and of what is held outside it (the spill)
+    let (mut outside, mut outside_at) = (0i64, None);
     for (i, s) in t.samples.iter().enumerate() {
         total += v.dt[i] * w as f64;
         for (k, &(stack, _)) in s.threads.iter().enumerate() {
@@ -248,21 +251,34 @@ fn outliers(run: &Run) -> String {
             (peak, peak_at) = (s.heap, Some(i));
         }
         rss = rss.max(s.rss);
+        let out: i64 = s.outside.iter().map(|b| b.1).sum();
+        if out > outside {
+            (outside, outside_at) = (out, Some(i));
+        }
     }
     let holder = peak_at.and_then(|i| {
         let s = &t.samples[i];
         let &(l, n) = s.bytes.iter().max_by_key(|b| b.1)?;
         (n > 0).then(|| format!(", {} of it by {}", size(n as f64), t.labels[l as usize].0))
     });
+    let spill = outside_at.map(|i| {
+        let s = &t.samples[i];
+        let mut by: Vec<(u32, i64)> = s.outside.clone();
+        by.sort_by_key(|b| std::cmp::Reverse(b.1));
+        let most: Vec<String> =
+            by.iter().take(3).map(|&(l, n)| format!("{} by {}", size(n as f64), t.labels[l as usize].0)).collect();
+        format!("; spill peak {} ({}) at {:.1} s", size(outside as f64), most.join(", "), s.at)
+    });
     _ = writeln!(
         out,
-        "stats: {:.2} s, {w} workers {} busy; heap peak {}{} at {:.1} s{}",
+        "stats: {:.2} s, {w} workers {} busy; heap peak {}{} at {:.1} s{}{}",
         run.seconds,
         percent(busy_time, total),
         size(peak.max(0) as f64),
         holder.unwrap_or_default(),
         peak_at.map_or(0.0, |i| t.samples[i].at),
-        if rss > 0 { format!(", resident peak {}", size(rss as f64)) } else { String::new() }
+        if rss > 0 { format!(", resident peak {}", size(rss as f64)) } else { String::new() },
+        spill.unwrap_or_default()
     );
     let mut said = 0;
     let mut say = |out: &mut String, line: String| {
@@ -521,6 +537,10 @@ fn json(run: &Run) -> String {
     o += ",\"bytes\":";
     array(&mut o, &t.samples, |o, s| {
         array(o, s.bytes.iter().flat_map(|&(l, n)| [l as i64, n]), |o, x| _ = write!(o, "{x}"))
+    });
+    o += ",\"outside\":";
+    array(&mut o, &t.samples, |o, s| {
+        array(o, s.outside.iter().flat_map(|&(l, n)| [l as i64, n]), |o, x| _ = write!(o, "{x}"))
     });
     o += "}}";
     o

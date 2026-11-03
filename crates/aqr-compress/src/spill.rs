@@ -142,6 +142,8 @@ struct View {
     segment: Arc<Segment>,
     start: usize,
     len: usize,
+    /// Its bytes counted by what took it, for `--stats`.
+    _counted: aqr_common::trace::Outside,
 }
 
 impl AsRef<[u8]> for View {
@@ -230,7 +232,7 @@ impl aqr_formula::store::Store for Spill {
             }
         };
         let at = segment.at(start);
-        let view = Arc::new(View { segment, start, len: n });
+        let view = Arc::new(View { segment, start, len: n, _counted: aqr_common::trace::outside(n) });
         state.regions.insert(at as usize, Arc::downgrade(&view));
         drop(state);
         drop(before);
