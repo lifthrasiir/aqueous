@@ -394,9 +394,12 @@ pub(crate) struct Cx {
     /// length and hash: the text that holds it codes to what holds this, so that it costs
     /// nothing as that data does ([`smaller`]). So are the streams of the members of an ar, tar
     /// or cpio archive that they hold ([`Cx::note_bundled`]), and those of the formula of any
-    /// data they hold ([`Cx::note_held`]). Shared with the contexts of the files and contents
-    /// made apart.
-    coded_held: Arc<std::sync::Mutex<HashSet<(usize, u64)>>>,
+    /// data they hold ([`Cx::note_held`]). A context made apart (a file of an archive, a
+    /// content made on a worker) starts with those noted before it was let go ([`Apart`]), and
+    /// what it notes is taken back once it and those made beside it are done
+    /// ([`Cx::adopt_notes`]): not shared as they are made, so that what one sees of another
+    /// does not depend on which of them a worker took first (the archive on the threads).
+    coded_held: RefCell<HashSet<(usize, u64)>>,
     /// The text of the files of an archive that others hold as contents, coded once ([`Once`]).
     /// Shared with the contexts of the files made apart.
     once: Arc<Once>,
@@ -558,7 +561,7 @@ impl Cx {
         let Some(w) = words.as_deref() else { return };
         let shared = f.applies().iter().any(|a| a.resources.first().is_some_and(|r| w.resources().any(|w| w == r)));
         if shared && f.streams.len() == 1 && self.held_by_others(d, d) {
-            self.coded_held.lock().unwrap().insert(stream_key(&f.streams[0].data));
+            self.coded_held.borrow_mut().insert(stream_key(&f.streams[0].data));
         }
     }
 
@@ -578,7 +581,7 @@ impl Cx {
     }
 
     fn note_streams(&self, f: &Formula, take: impl Fn(&aqr_formula::Stream) -> bool) {
-        let mut held = self.coded_held.lock().unwrap();
+        let mut held = self.coded_held.borrow_mut();
         for s in f.streams.iter().filter(|s| take(s) && !s.data.is_empty()) {
             held.insert(stream_key(&s.data));
         }
@@ -587,8 +590,14 @@ impl Cx {
     /// Whether `data` is a stream noted by [`Cx::note_coded`], [`Cx::note_bundled`] or
     /// [`Cx::note_held`].
     fn coded_held(&self, data: &[u8]) -> bool {
-        let held = self.coded_held.lock().unwrap();
+        let held = self.coded_held.borrow();
         !held.is_empty() && held.contains(&stream_key(data))
+    }
+
+    /// Takes the notes of a context made apart ([`Cx::coded_held`]), once it and those made
+    /// beside it are done.
+    fn adopt_notes(&self, notes: HashSet<(usize, u64)>) {
+        self.coded_held.borrow_mut().extend(notes);
     }
 }
 
@@ -1402,6 +1411,8 @@ struct Ahead(HashMap<usize, Early>);
 struct Early {
     f: Option<Formula>,
     deferred: Vec<(usize, verify::Deferred)>,
+    /// What it noted ([`Cx::coded_held`]).
+    notes: HashSet<(usize, u64)>,
     inflated: u64,
     /// The encoder it was sized with, which keeps the streams compressed for it.
     enc: Encoder,
@@ -1411,6 +1422,7 @@ impl Early {
     /// The formula of stream `d`, as [`recompress_as`] would give it in `cx`.
     fn take(self, d: &[u8], cx: &Cx) -> Option<Formula> {
         cx.deferred.borrow_mut().extend(self.deferred);
+        cx.adopt_notes(self.notes);
         // (so that what holds it is sized without compressing its streams again)
         cx.enc.adopt(self.enc);
         if self.f.is_some() {
@@ -1471,10 +1483,10 @@ fn ahead(d: &[u8], p: usize, turned_down: &[(Format, usize)], opt: &Options, dep
         let own = apart.cx(n, opt);
         own.inflate.set(m);
         let f = recompress_as(Format::Bvx, &d[q..q + n], opt, depth, &own);
-        (f, own.deferred.into_inner(), own.enc)
+        (f, own.deferred.into_inner(), own.coded_held.into_inner(), own.enc)
     });
-    for ((q, _, inflated), (f, deferred, enc)) in streams.into_iter().zip(out) {
-        made.0.insert(q, Early { f, deferred, inflated, enc });
+    for ((q, _, inflated), (f, deferred, notes, enc)) in streams.into_iter().zip(out) {
+        made.0.insert(q, Early { f, deferred, notes, inflated, enc });
     }
 }
 
@@ -1769,7 +1781,7 @@ fn make_later(
                     }
                 }),
             );
-            return (None, None, own.deferred.into_inner(), None);
+            return (None, None, own.deferred.into_inner(), own.coded_held.into_inner(), None);
         }
         // (cut out of the bytes taken, which are let go of; put back where it takes no place)
         let back = match mine {
@@ -1780,7 +1792,7 @@ fn make_later(
             mine => mine,
         };
         child.iter_mut().for_each(|c| aqr_formula::store::spill_streams(&mut c.f));
-        (child, back, own.deferred.into_inner(), Some(own.enc))
+        (child, back, own.deferred.into_inner(), own.coded_held.into_inner(), Some(own.enc))
     };
     let made = match sealing.as_ref().zip(slots.as_ref()) {
         // in their order, each let in once the content [`SEAL_AHEAD`] times the threads before it
@@ -1804,12 +1816,14 @@ fn make_later(
     }
     let mut made: Vec<_> = order.into_iter().zip(made).collect();
     made.sort_unstable_by_key(|&(i, _)| i);
-    for (((at, ..), (i, (child, back, deferred, enc))), s) in later.into_iter().zip(made).zip(owned) {
+    for (((at, ..), (i, (child, back, deferred, notes, enc))), s) in later.into_iter().zip(made).zip(owned) {
         if let (Some(s), Some(back)) = (s, back) {
             f.streams[s].data = back;
         }
         children[at].1 = child.or_else(|| sealed[i].lock().unwrap().take());
         cx.deferred.borrow_mut().extend(deferred);
+        // (in the contents' order, all of them made: none saw another's)
+        cx.adopt_notes(notes);
         // (so that what holds it is sized and written without compressing its streams again)
         enc.into_iter().for_each(|e| cx.enc.adopt(e));
     }
@@ -1880,7 +1894,8 @@ struct Apart {
     held: Option<Arc<Held>>,
     remaps: Option<Arc<exe::Remaps>>,
     words: Option<Arc<aqr_wrt::formula::Shared>>,
-    coded_held: Arc<std::sync::Mutex<HashSet<(usize, u64)>>>,
+    /// What was noted before it was made ([`Cx::coded_held`]), for each context made of it.
+    coded_held: Arc<HashSet<(usize, u64)>>,
     once: Arc<Once>,
     shares_modules: bool,
 }
@@ -1892,7 +1907,7 @@ impl Cx {
             held: self.held.clone(),
             remaps: self.remaps.clone(),
             words: self.words.borrow().clone(),
-            coded_held: self.coded_held.clone(),
+            coded_held: Arc::new(self.coded_held.borrow().clone()),
             once: self.once.clone(),
             shares_modules: self.enc.shares_modules(),
         }
@@ -1910,7 +1925,7 @@ impl Apart {
         own.held = self.held.clone();
         own.remaps = self.remaps.clone();
         own.share_words(self.words.clone());
-        own.coded_held = self.coded_held.clone();
+        own.coded_held = RefCell::new((*self.coded_held).clone());
         own.once = self.once.clone();
         own
     }
