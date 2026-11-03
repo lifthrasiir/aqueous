@@ -3863,7 +3863,9 @@ Issue: In an encrypted archive, a compressor has nothing to place between a bloc
 to keep them a chunk apart when nothing else is there, because a spacer block is not allowed in the payload,
 so that a small encrypted archive can't be mirrored;
 nor can it fill the room left for the mirror block of the last metadata block placed before it,
-which then has to come out exact (`docs/recovery-design.md` §5.5).
+which then has to come out exact.
+Such a compressor places its mirror blocks as far from their target blocks as it can
+(`docs/recovery-design.md` §5.5).
 
 
 <h3 id=repair>
@@ -3873,27 +3875,78 @@ Restoring damaged blocks from mirror blocks is a process separate from [=interpr
 it takes a damaged [=byte sequence=] and returns a byte sequence that is then interpreted as any archive is.
 A decompressor MAY [=repair an archive=] before interpreting it, and SHOULD report the blocks it restored.
 
+To <dfn>decrypt a damaged encrypted archive</dfn> |c|, a [=byte sequence=] starting where an encrypted archive starts,
+given the passphrase:
+
+<ol class=algorithm>
+    1. If |c| starts with [=const/ENCRYPTED_HEADER_MAGIC=] or [=const/ENCRYPTED_MIRRORED_HEADER_MAGIC=]
+        and its header is whole, with an [=envelope/header_checksum=] that verifies if it has one,
+        take its [=header fields=] and whether it is [=envelope/mirrored=].
+    2. Otherwise, take the [=emirror/mirrored_fields=] of a mirrored header found by scanning |c| for [=const/ENCRYPTED_MIRROR_MAGIC=]
+        that is [=emirror/intact=] and is at the position its [=emirror/mirror_index=] tells in an archive starting at the start of |c|,
+        and take the archive as [=envelope/mirrored=].
+        If there is none, return failure.
+    3. Unwrap the file key as in [[#encrypted-archive]]; a failure there is a failure of this algorithm.
+    4. Divide the bytes after the header into encrypted chunks and mirrored headers at the positions [[#encrypted-archive]] gives them.
+        If the bytes after the last whole encrypted chunk are 16 or fewer, leave them out.
+    5. Decrypt each encrypted chunk with the flag of the last chunk set if it is the last one,
+        and if it is the last one and fails to authenticate, again with the flag not set.
+    6. Decrypt each encrypted chunk failing to authenticate anyway, as ChaCha20 [[!RFC8439]] without its authentication tag,
+        and take its bytes as [=untrusted=].
+    7. Return the payload, the concatenation of the decrypted chunks, and its untrusted bytes.
+</ol>
+
+<div class=note>
+  An encrypted chunk failing to authenticate is decrypted correctly but for the bytes actually damaged,
+  as ChaCha20 is a stream cipher, but nothing tells which bytes these are,
+  and the ciphertext may have been modified on purpose, as ChaCha20 is malleable.
+  Untrusted bytes therefore never become a file's content:
+  repairing and salvaging use them only to tell where blocks are,
+  and only as checked by reaching the start of a block an authenticated mirror block tells ([[#salvage]]).
+  A decompressor MUST NOT use untrusted bytes otherwise.
+</div>
+
+<div class=note>
+  An archive cut short in its last encrypted chunk has a last chunk too short to hold anything,
+  or one that fails to authenticate with or without the flag of the last chunk;
+  the chunk before it, taken as the last, then fails with the flag and authenticates without it.
+</div>
+
 To <dfn>repair an archive</dfn> |a|, a [=byte sequence=] holding an unencrypted archive or the decrypted payload of an encrypted archive
-from its [=archive/header_magic=] on:
+from its [=archive/header_magic=] on, with a set |untrusted| of the bytes of |a| that are <dfn>untrusted</dfn>
+(those of encrypted chunks that fail to authenticate, [=decrypt a damaged encrypted archive=]; none for an unencrypted archive):
 
 <ol class=algorithm>
     1. Let |start| be 6 if |a| starts with [=const/HEADER_MAGIC=] or [=const/OVERLAY_HEADER_MAGIC=], and null otherwise.
     2. Let |found| be the list of mirror blocks found by scanning |a| for [=const/MIRROR_MAGIC=] and [=const/OVERLAY_MIRROR_MAGIC=]
         as described in [[#mirror-block]], in the order of their [=block/block_start=],
-        that are [=mirror/intact=] when [=archive/archive_start=] is taken as the start of the archive they imply.
+        that are [=mirror/intact=] when [=archive/archive_start=] is taken as the start of the archive they imply
+        and that have no [=untrusted=] byte.
         Their target blocks may lie beyond the end of |a|.
-    3. If |start| is null, set |start| to the smallest start of the archive implied by the mirror blocks of |found|.
-        Remove from |found| every mirror block implying another start.
+    3. If |start| is null:
+        1. Set |start| to the smallest start of the archive implied by the mirror blocks of |found|.
+            Remove from |found| every mirror block implying another start.
+        2. If |start| is 6, replace the first 6 bytes of |a| with [=const/OVERLAY_HEADER_MAGIC=]
+            if the mirror blocks of |found| have [=const/OVERLAY_MIRROR_MAGIC=], and with [=const/HEADER_MAGIC=] otherwise.
     4. For each [=mirror/target block=] position |t| of the mirror blocks of |found|, in the order of |found|:
         1. Let |restored| be the bytes that the first mirror block of |found| for |t| requires of its target block.
-        2. If the bytes of |a| from |t| are those required by any mirror block of |found| for |t|, or |a| is shorter than |t|,
-            continue.
-        3. If |a| is shorter than |t| + the length of |restored|, append bytes to |a| up to that length.
-        4. Replace the bytes of |a| from |t| with |restored|,
+        2. If the bytes of |a| from |t| are those required by any mirror block of |found| for |t|,
+            remove the bytes of the target block from |untrusted| and continue.
+        3. If |a| is shorter than |t|, continue.
+        4. If |a| is shorter than |t| + the length of |restored|, append bytes to |a| up to that length.
+        5. Replace the bytes of |a| from |t| with |restored|,
             and the following byte with 0 if the length of |restored| is odd and |a| has a following byte.
+            Remove those bytes from |untrusted|.
     5. If |start| is 6, [=reconstruct the footer=] of |a|.
-    6. Return |a|.
+    6. Return |a| and |untrusted|.
 </ol>
+
+<div class=note>
+  The bytes of a target block that equal an intact mirror block, or that are restored from one, are trusted
+  even in an encrypted chunk that fails to authenticate, since the mirror block lies in chunks that do authenticate.
+  An unencrypted archive has no untrusted bytes:
+  its bytes are only as trustworthy as the checksums verifying them, damaged or not.
+</div>
 
 To <dfn>reconstruct the footer</dfn> of a [=byte sequence=] |a| starting with a header magic:
 
@@ -3902,7 +3955,7 @@ To <dfn>reconstruct the footer</dfn> of a [=byte sequence=] |a| starting with a 
         until the bytes at the current offset start with the shortest [=leb128=] encoding of [=FOOTER_TYPE=] or [=OVERLAY_FOOTER_TYPE=],
         until |a| ends at or before the end of the block being read, or until the bytes at the current offset are not a [=leb128=]
         in the shortest encoding.
-    2. If the reading reached a footer whose [=archive/footer_size=] tells that it ends at the end of |a|, return.
+    2. If the reading reached a footer whose [=archive/footer_size=] tells that it ends at the end of |a| and that has no [=untrusted=] byte, return.
     3. If the reading stopped otherwise than by |a| ending or by reaching the start of a footer, return.
     4. Let |m| be the last block read that is a [[#metadata-block|metadata block]].
         If there is none, or any block read after |m| is neither a [[#spacer-block|spacer block]] nor of a non-[=critical=] type, return.
@@ -3910,6 +3963,8 @@ To <dfn>reconstruct the footer</dfn> of a [=byte sequence=] |a| starting with a 
         Truncate |a| to |e| bytes, appending zero bytes if it is shorter.
     6. Append a footer with the footer magic [=match|matching=] the header magic of |a|,
         [=archive/size_hint=] |e| − 6 and [=archive/metadata_backward_offset=] from [=archive/footer_start=] back to the [=block/block_start=] of |m|.
+    7. If the first block read is a [[#size-hint-block|size hint block]] whose [=block/data=] is 10 bytes long,
+        set its [=szhint/size_hint=] to |e| − 6, encoded in 10 bytes as an encrypted archive's payload has it.
 </ol>
 
 <div class=note>
@@ -3941,7 +3996,6 @@ To <dfn>reconstruct the footer</dfn> of a [=byte sequence=] |a| starting with a 
   is restored from the mirror blocks only, whose implied start of the archive tells where the header magic was.
 </div>
 
-Issue: Restoring the header magic is to be specified with the repair process (`docs/recovery-design.md` §5.6).
 
 <h3 id=salvage>
 Salvage</h3>
@@ -3963,7 +4017,10 @@ To <dfn>salvage an archive</dfn> |a|, a [=byte sequence=] as for [=repair an arc
         2. If |e| > |t| or |t| − |e| is odd, skip |t|.
         3. Truncate |a| to |e| bytes, and append a [[#spacer-block|spacer block]] of |t| − |e| bytes if |t| > |e|.
             The bytes from |e| to |t| are <dfn for=salvage>lost</dfn>.
-        4. Continue with the step 4.3.
+        4. Continue with the step 4.4.
+
+        Before reconstructing the footer in the step 5, if any byte of |a| is still [=untrusted=],
+        [=lose the untrusted blocks=] of |a|.
     2. Interpret |a| as in [=interpret an archive=], with the following exceptions,
         each of which makes the files and forks concerned [=salvage/lost=] rather than |a| an invalid archive:
         * A file or a fork whose leaf block offset doesn't refer to a leaf block is lost.
@@ -3976,6 +4033,39 @@ To <dfn>salvage an archive</dfn> |a|, a [=byte sequence=] as for [=repair an arc
             a failure of its evaluation, including a checksum that doesn't verify, makes the files and forks of its outputs lost,
             and the other leaf blocks are evaluated as usual.
 </ol>
+
+To <dfn>lose the untrusted blocks</dfn> of a [=byte sequence=] |a| starting with a header magic,
+given the positions |known| of the [=block/block_start=] of every mirror block of |found| in [=repair an archive=] and of its target block,
+and of the footer if one ends at the end of |a| and has no [=untrusted=] byte:
+
+<ol class=algorithm>
+    1. Let |o| be 6.
+    2. While |o| is less than the length of |a|:
+        1. Read blocks from |o| by the generic structure as far as they go, until the start of a footer.
+        2. Let |s| be the [=block/block_start=] of the first block read whose [=block/type=] or [=block/size=] has an untrusted byte, if any.
+            If there is such a block, and the reading from |s| doesn't reach exactly a position in |known| greater than |s|
+            before failing, reaching the end of |a|, or passing such a position:
+            1. Let |k| be the smallest position in |known| greater than |s|, or the length of |a| if there is none.
+            2. The bytes from |s| to |k| are [=salvage/lost=]: replace them with a [[#spacer-block|spacer block]] of their length.
+            3. Set |o| to |k| and continue.
+        3. Every block read with an untrusted byte is [=salvage/lost=]:
+            replace its bytes, [=block/padding=] included, with a [[#data-block|non-leaf data block]] of the same length
+            without compression whose checksum doesn't verify if it is a non-leaf data block,
+            and with a spacer block of the same length otherwise.
+        4. If the reading stopped at a footer with an untrusted byte, truncate |a| to the start of that footer.
+        5. Stop.
+</ol>
+
+<div class=note>
+  A lost non-leaf data block is replaced with one whose checksum doesn't verify, not with a spacer block,
+  so that the non-leaf blocks after it keep their ordinals in the formula blocks referring to them:
+  a formula block slicing the lost block then fails and its files are lost,
+  while the formula blocks after it slice the blocks they refer to.
+  The bytes from a block read astray to the next known position are lost as a single spacer block,
+  as the blocks there can't be told apart;
+  a formula block before them whose non-leaf blocks were among them then refers to the wrong non-leaf blocks,
+  which its [=output checksums=] detect.
+</div>
 
 <div class=note>
   Salvaging gives every file whose bytes are all there and verify where they have checksums,
@@ -3995,11 +4085,6 @@ To <dfn>salvage an archive</dfn> |a|, a [=byte sequence=] as for [=repair an arc
   Salvaging adds that the structure may refer to blocks that aren't there.
 </div>
 
-Issue: Repairing an encrypted archive with mirror blocks or mirrored headers requires decrypting
-the encrypted chunks after one that fails to authenticate, which a standard age implementation doesn't do.
-This is to be specified with the repair process as a separate step producing the decrypted bytes,
-where bytes of such chunks are marked as erasures and the interpretation of an archive stays unchanged
-(`docs/recovery-design.md` §5.6).
 
 <div class=note>
   A repaired encrypted chunk can't be encrypted again with the original file key and [=envelope/payload_nonce=]

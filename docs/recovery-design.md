@@ -372,7 +372,7 @@ repair의 입력은 바이트열이 아니라, 위치마다 다음 상태 중 �
 4. ~~**"무시해도 되는 블록"의 명세 용어.**~~ leading digit(두 자리로 채운 첫 16진 자리)이 A–F인 non-critical 타입으로 정했다. 모르는 타입은 ignored block이 된다(명세 §Reserved block types).
 5. ~~**encrypted archive 안의 mirror 허용 여부.**~~ 허용한다. 헤더 필드는 mirrored header로 따로 보호한다(명세 §Encrypted archives, §5.5).
 6. **스크러빙.** 필요한 여유분은 "다음 검증 전까지 쌓일 손상"이 정한다. 그래서 `verify` 명령과 권장 주기를 도구 쪽에서 함께 설계해야 한다.
-7. **바이트 상태를 명세에 넣을지.** §5.6의 세 상태(인증됨, 검증되지 않음, ⊥)는 지금 이 문서에만 있다. 명세의 Repair 절(S3)을 쓸 때 입력 모델로 넣을지, ⊥만 넣고 미인증 바이트는 구현의 선택으로 남길지 정한다. 미인증 바이트를 기본으로 켤지도 함께 정한다.
+7. ~~**바이트 상태를 명세에 넣을지.**~~ 명세에는 "untrusted" 하나만 넣었다(인증에 실패한 청크의 바이트). 미인증 바이트는 블록 경계를 찾는 데만 쓰고, 그것도 인증된 mirror가 알려 주는 블록 시작에 정확히 닿을 때만 믿는다. 파일 내용으로는 절대 쓰지 않으므로 켜고 끌 선택이 필요 없고, 기본으로 쓴다. mirror와 같거나 mirror에서 복원한 바이트는 인증된 청크에서 온 것이므로 다시 믿는다. ⊥는 따로 두지 않았다. 잘려서 없는 바이트와 믿을 수 없는 블록은 spacer block(non-leaf 블록이면 checksum이 맞지 않는 non-leaf 블록)으로 바꾸어 그 블록의 파일만 잃는다(명세 §Salvage).
 8. **암호화 아카이브의 RS 위치.** §5.4의 RS를 복호한 평문 위에 두면, erasure 단위가 청크(64 KiB)가 되어 흩어진 E1 손상이 parity를 16–32배 빨리 소모하고, 키가 없으면 repair할 수 없다. ciphertext 위(청크 사이의 non-critical 프레임)에 두면 두 문제가 모두 사라지지만, 비암호화 쪽과 RS 구조가 갈라지고 프레임 정렬(§5.5)을 다시 봐야 한다. §5.6의 미인증 바이트는 위치를 아는 손상에 한해 첫 번째 문제를 줄인다. 또 S를 64 KiB의 배수로 잡으면 slice가 청크와 정렬되므로(§5.4의 slice 격자) 청크 하나의 손실이 slice 하나만 소모한다. 이때 첫 번째 문제는 S ≥ 64 KiB의 비용으로 바뀌고, 키 없는 repair만 남는다.
 
 ## 8. Action items
@@ -396,7 +396,7 @@ repair의 입력은 바이트열이 아니라, 위치마다 다음 상태 중 �
 
 - [x] **S1.** "무시해도 되는 블록" 범주를 정의한다(§7의 4번). (non-critical 타입으로 정했다. spacer는 0으로 채워진 구멍이 spacer 블록으로 파싱되도록 00–03에 그대로 둔다.)
 - [x] **S2.** mirror block 절을 추가한다. 구조와 배치 SHOULD를 포함한다. (`MIRROR_MAGIC` 값 확정, `archive_offset` 추가함)
-- [ ] **S3.** 해석과 분리된 "Repair" 절을 추가한다(§4의 1번, §5.6). 암호화 아카이브의 복호 단계와 ⊥가 남은 경우의 salvage를 포함한다(§7의 7번). (비암호화 아카이브의 mirror 복원 절차와 마지막 metadata 뒤에서 잘린 아카이브의 footer 재구성은 명세 §Repair에, 마지막 metadata 앞에서 잘렸거나 파일이 손상된 경우의 salvage는 §Salvage에 넣었다. 잃은 바이트는 ⊥ 대신 spacer block으로 바꿔, 그 블록을 가리키는 파일만 잃는다. header magic 복원과 암호화 아카이브의 복호가 남았다.)
+- [x] **S3.** 해석과 분리된 "Repair" 절을 추가한다(§4의 1번, §5.6). 암호화 아카이브의 복호 단계와 ⊥가 남은 경우의 salvage를 포함한다(§7의 7번). (비암호화 아카이브의 mirror 복원 절차와 마지막 metadata 뒤에서 잘린 아카이브의 footer 재구성은 명세 §Repair에, 마지막 metadata 앞에서 잘렸거나 파일이 손상된 경우의 salvage는 §Salvage에 넣었다. 잃은 바이트는 ⊥ 대신 spacer block으로 바꿔, 그 블록을 가리키는 파일만 잃는다. header magic 복원, 손상된 암호화 아카이브의 복호(mirrored header에서 헤더, 인증 실패 청크는 untrusted)도 넣었다. 남은 것은 없다.)
 - [x] **S8.** "mirrored archive" 정의와 검증 도구의 보고 SHOULD를 추가한다(명세 §Mirrored archives). archival profile과는 별개의 속성으로 두었다. 작은 암호화 아카이브는 payload에 spacer를 둘 수 없어 거리 조건을 못 지킨다(명세의 Issue, 미정).
 - [ ] **S4.** 비규범 노트를 추가한다. 내용은 오류 모델 요약, E5가 범위 밖이라는 점, segment 주기 권고, checksum 있는 블록 타입을 기본값으로 쓰라는 권고이다.
 - [ ] **S5.** 명세 §Block types의 표에 mirror 타입(반영함)과, §5.4를 진행하면 recovery 타입(B0–B7 등 non-critical)을 반영한다.
@@ -407,7 +407,7 @@ repair의 입력은 바이트열이 아니라, 위치마다 다음 상태 중 �
 
 - [ ] **I1.** E1–E4를 재현하는 fault injection 하네스를 만든다. 오류 모델을 그대로 시험 생성기로 옮기는 것이다. 4 KiB 정렬 단위 손상, 버스트, 0 채움, truncation을 다루고, 손상 위치는 무작위와 "중요 구조 조준" 두 방식으로 둔다.
 - [ ] **I2.** compressor에 mirror block 생성과 segment 주기 옵션을 넣는다. (mirror는 `aqr -A`로 넣었다. segment 주기는 디코더의 다중 segment 지원이 먼저다.)
-- [ ] **I3.** repair 도구를 만든다. 스캔, mirror 복원, footer 재구성, salvage 추출을 포함한다. (`aqr -d`/`-t`가 mirror와 다른 블록을 메모리에서 복원하고, 마지막 metadata 뒤에서 잘린 아카이브의 footer를 다시 만들며, 그 앞에서 잘렸으면 salvage한다. 평가가 실패한 파일은 잃은 것으로 알리고 나머지는 푼다. 파일로 쓰는 명령과 암호화 아카이브는 남았다.)
+- [ ] **I3.** repair 도구를 만든다. 스캔, mirror 복원, footer 재구성, salvage 추출을 포함한다. (`aqr -d`/`-t`가 mirror와 다른 블록을 메모리에서 복원하고, 마지막 metadata 뒤에서 잘린 아카이브의 footer를 다시 만들며, 그 앞에서 잘렸으면 salvage한다. 평가가 실패한 파일은 잃은 것으로 알리고 나머지는 푼다. 손상된 암호화 아카이브도 복호해 repair·salvage한다(`-L`은 인증 실패 청크가 있으면 거절한다). 복원한 아카이브를 파일로 쓰는 명령은 남았다.)
 - [ ] **I4.** `verify` 명령을 만든다. checksum, mirror와 원본의 일치, slice 해시를 모두 검사한다. (`aqr -t`가 archival profile과 mirrored archive 여부를 보고한다.)
 - [ ] **I5.** I1로 "손상된 바이트가 속한 parcel만 잃는다"는 목표를 E1과 E2(D 이상 아카이브)에 대해 검증한다.
 - [ ] **I6.** (선택) §5.4의 recovery set을 구현하고, I1로 L ≤ r·R − S 한계를 검증한다.
