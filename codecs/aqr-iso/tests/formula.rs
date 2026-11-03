@@ -106,6 +106,17 @@ fn contents_by_kind() {
     assert_eq!(f.streams.len(), 1 + 5);
 }
 
+/// An image without files of kind `Unknown`: stream 0, of `raw`, is empty, the rest stream 1.
+#[test]
+fn no_raw_contents() {
+    let d = fixture("udf201.iso");
+    let f = formula::encode_with(&d, &Options { kind: |_| Kind::Text }).unwrap();
+    assert!(eval(&f) == d);
+    assert!(f.streams[0].class == "raw" && f.streams[0].data.is_empty());
+    assert_eq!(f.streams[1].class, formula::REST);
+    assert!(f.streams[2..].iter().all(|s| s.class == "iso/text"));
+}
+
 /// UDF 2.50 keeps its files in a metadata partition, which is not read: no file is found.
 #[test]
 fn metadata_partition_not_read() {

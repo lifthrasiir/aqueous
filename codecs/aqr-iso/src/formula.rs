@@ -95,7 +95,8 @@ pub fn build(input: &[u8], files: &[File], pieces: &[Piece], opt: &Options) -> F
     let mut rest = Buffer::new(rest_len);
     f.push(REST, Vec::new());
     for (n, (kind, js)) in kinds.iter().enumerate() {
-        for &j in &js[(n == 0) as usize..] {
+        // (the first of `raw` stream 0, if any)
+        for &j in js.iter().skip((n == 0) as usize) {
             f.push_content(class(*kind), *kind, contents(j));
             stream_of[j] = f.streams.len() - 1;
         }
