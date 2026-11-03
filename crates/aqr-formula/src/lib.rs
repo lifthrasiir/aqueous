@@ -865,10 +865,13 @@ impl Formula {
                 at += m.1 - m.0;
             }
             let data = if s.data.is_shared() && at < s.data.len() as u64 {
-                // (bytes shared copied only as far as they are kept)
-                let mut d = Vec::with_capacity(at as usize);
-                merged.iter().for_each(|m| d.extend_from_slice(&s.data[m.0 as usize..m.1 as usize]));
-                d.into()
+                // (bytes shared copied only as far as they are kept, to the store where one is set:
+                // they were most likely of it)
+                let mut d = store::Buffer::new(at as usize);
+                for m in &merged {
+                    d[m.2 as usize..(m.2 + m.1 - m.0) as usize].copy_from_slice(&s.data[m.0 as usize..m.1 as usize]);
+                }
+                d.into_bytes()
             } else {
                 // in place: the bytes kept only move towards the start
                 let mut data = s.data;
