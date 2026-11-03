@@ -1,7 +1,7 @@
 //! Compresses files and directories into Aqueous archives, and decompresses them, as zstd does.
 //!
 //! usage: aqr [-c | -d | -t | -L] [-o OUTPUT] [-f] [--rm] [-p] [-q | -v] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N]
-//! [--batch MIB | -B SIZE] [-b SIZE] [-D] [--no-check] [-P] [--wasm] [--no-sandbox] [--stats[=FILE]] [-h]
+//! [--batch MIB | -B SIZE] [-b SIZE] [-D] [-A] [--no-check] [-P] [--wasm] [--no-sandbox] [--stats[=FILE]] [-h]
 //! INPUT [--rename TO]...
 //!
 //! aqr -d [OPTIONS] ARCHIVE [PATH [--rename TO]]...; aqr -d --each [OPTIONS] ARCHIVE...; aqr -L [-q | -v] ARCHIVE...
@@ -50,7 +50,14 @@
 //!   the archive is extracted into a directory of its name without its extension, beside it
 //!   (`foo.zip` of `foo/` into `foo/`, never `foo/foo/`). `-o` is where it goes instead of
 //!   beside it, a directory (with several archives too).
-//! - `-t`: each archive decoded as `-d` does, but nothing written (its checksums checked).
+//! - `-t`: each archive decoded as `-d` does, but nothing written (its checksums checked); and
+//!   where it has mirror blocks (or with `-v`), told how far it conforms to the archival profile
+//!   and how many of its blocks are mirrored ([`tell_archival`]).
+//! - `-A` (`--archival`): compressing, an archive for long-term preservation: of the archival
+//!   profile (as every archive is made: each file's content checksummed, nothing outside it), with
+//!   a mirror block of each block whose damage would lose more than a file ([`aqr::Mirroring`]),
+//!   which decompressing (and testing) any archive restores a damaged block from, telling so
+//!   ([`repaired`]).
 //! - `-L`: the entries of each archive listed on standard output, and what each file takes of
 //!   the archive and how it is made ([`list`]); `-q` the paths alone, `-v` all that is told.
 //! - `-P`: compressing, the archives encrypted with a passphrase ([`aqr::envelope`]), asked for
@@ -217,6 +224,8 @@ Compression:
   -B SIZE               --batch as a size (512M)
   -b SIZE               the most bytes of a block that files share (default 16M)
   -D                    compress blocks alike with dictionaries trained for them
+  -A, --archival        for long-term preservation: mirror the blocks whose damage
+                        would lose more than a file, to be restored from as it is read
       --no-check        do not decode the archive made to check it
 
 Decompression:
@@ -468,6 +477,7 @@ fn parse() -> Result<Args, String> {
             "-B" => a.opt.batch = size_of(&text(value("-B")?)).ok_or("-B takes a size (64M, 1G, ...)")?.max(1),
             "-b" => a.opt.block = size_of(&text(value("-b")?)).ok_or("-b takes a size (64K, 1M, ...)")?.max(1),
             "-D" => a.opt.dictionaries = true,
+            "-A" | "--archival" => a.opt.mirrors = true,
             "--no-check" => a.opt.verify = false,
             "--stats" => stats = true,
             "--ipc" => a.ipc = true,
@@ -534,6 +544,9 @@ fn parse() -> Result<Args, String> {
                         }
                     },
                 };
+                if a.opt.mirrors {
+                    return Err(format!("-A: {} archives are not made so here (.aqr only)", f.ext()));
+                }
                 if a.passphrase && !f.encrypts() {
                     return Err(format!("-P: {} archives are not encrypted here (.zip and .7z are)", f.ext()));
                 }
@@ -1056,6 +1069,9 @@ fn compress_into(
     let files = g.tree.entries.iter().filter(|e| matches!(e.node, EntryNode::File(_))).count();
     if !a.quiet {
         eprintln!("archive overhead (header, modules, metadata): {}", size(r.overhead as f64));
+        if r.mirrors > 0 {
+            eprintln!("mirror blocks: {}", size(r.mirrors as f64));
+        }
         summary(out, files, r.read as usize, r.len, start);
     }
     end(Some(out), files, r.read, r.len as u64, start);
@@ -1954,9 +1970,21 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     let decoder =
         Decoder { native: Native { threads: a.opt.threads }, wasm: a.wasm, sandbox: a.sandbox.then(OnceLock::new) };
     let runner: &dyn aqr::Runner = &decoder;
-    let mut archive = match &decrypted {
-        Some(d) => aqr::open_payload(d, runner),
-        None => aqr::open(&c, runner),
+    // its blocks restored from their mirror blocks where they differ
+    let read: &[u8] = decrypted.as_deref().unwrap_or(&c[..]);
+    let mirrors = aqr::mirror::check(read);
+    let restored = repaired(read, &mirrors).map_err(|e| err(&e))?;
+    if let Some((_, n)) = &restored {
+        eprintln!(
+            "{}: {n} damaged block{} restored from mirror blocks",
+            input.display(),
+            if *n == 1 { "" } else { "s" }
+        );
+    }
+    let read: &[u8] = restored.as_ref().map_or(read, |r| &r.0);
+    let mut archive = match decrypted.is_some() {
+        true => aqr::open_payload(read, runner),
+        false => aqr::open(read, runner),
     }
     .map_err(|e| err(&e))?;
     // (some paths: by content, whether it is decoded)
@@ -2088,6 +2116,9 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     let out = out.as_deref();
     if !a.quiet {
         summary_d(input, out, files, total, start);
+        if a.test && (a.verbose || !mirrors.mirrors.is_empty() || mirrors.broken > 0) {
+            tell_archival(input, &archive, &mirrors, decrypted.is_some()).map_err(|e| err(&e))?;
+        }
     }
     end(out, files, c.len() as u64, total, start);
     if let (Some(s), Some(rec)) = (&a.stats, rec) {
@@ -2111,6 +2142,56 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
         });
     }
     Ok(true)
+}
+
+/// Archive `c` with the blocks restored that differ from their intact mirror blocks
+/// ([`aqr::mirror::repair`]), in memory not backed by a file, and how many were; none where
+/// none differ.
+fn repaired(c: &[u8], m: &aqr::mirror::Check) -> std::io::Result<Option<(memmap2::Mmap, usize)>> {
+    if m.differing(c).next().is_none() {
+        return Ok(None);
+    }
+    let mut d = memmap2::MmapMut::map_anon(c.len())?;
+    d.copy_from_slice(c);
+    let n = aqr::mirror::repair(&mut d, m);
+    Ok(Some((d.make_read_only()?, n)))
+}
+
+/// Tells (on standard error) how far `archive` (of `input`) conforms to the archival profile
+/// (spec, "Archival profile"), and how many of its blocks have intact mirror blocks
+/// (`mirrors`) and how many of those are nearer them than the spec asks (of an encrypted
+/// archive's payload where `sealed`), or not intact.
+fn tell_archival(
+    input: &Path,
+    archive: &aqr::Archive,
+    mirrors: &aqr::mirror::Check,
+    sealed: bool,
+) -> Result<(), Failure> {
+    let p = archive.archival()?;
+    let profile = match (p.unchecked_leaves, p.unchecked_formulas) {
+        (0, 0) => "conforms".to_string(),
+        (l, f) => {
+            format!("does not conform ({l} leaf blocks without checksums, {f} formula blocks without output checksums)")
+        }
+    };
+    let mut told = format!("{}: archival profile: {profile}", input.display());
+    if mirrors.walked {
+        let n = mirrors.targets.len();
+        told += &format!("; {} of {n} blocks to mirror mirrored", n - mirrors.unmirrored());
+    } else {
+        told += &format!("; {} mirror blocks found by their magic", mirrors.mirrors.len());
+    }
+    let near = mirrors.near(sealed);
+    if near > 0 {
+        told += &format!(", {near} nearer their blocks than the spec asks");
+    }
+    match mirrors.broken {
+        0 => {}
+        1 => told += ", 1 damaged mirror block",
+        n => told += &format!(", {n} damaged mirror blocks"),
+    }
+    eprintln!("{told}");
+    Ok(())
 }
 
 /// The payload of encrypted archive `c` (of `input`), decrypted on `threads` threads, by a
