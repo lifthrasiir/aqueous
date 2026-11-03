@@ -144,7 +144,7 @@ fn restores_damaged_blocks() {
     assert!(t.contains("archival profile: conforms"), "{t}");
     let all = blocks(&a).iter().filter(|b| matches!(b.1, 0x10..=0x17 | 0x50..=0x67 | 0x70..=0x77)).count();
     assert!(all >= 3);
-    assert!(t.contains(&format!("{all} of {all} blocks to mirror mirrored")), "{t}");
+    assert!(t.contains(&format!("mirrored archive: yes ({all} of {all} blocks to mirror mirrored)")), "{t}");
     assert!(!t.contains("nearer"), "{t}");
     assert!(!t.contains("restored"), "{t}");
 
@@ -175,7 +175,10 @@ fn restores_damaged_blocks() {
     damaged[at] ^= 0x5a;
     fs::write(d.join("damaged.aqr"), &damaged).unwrap();
     let t = stderr(&aqr_in(&d, &["-t", "damaged.aqr"]));
-    assert!(t.contains("1 damaged mirror block") && t.contains(&format!("{} of {all}", all - 1)), "{t}");
+    assert!(
+        t.contains("1 damaged mirror block") && t.contains(&format!("mirrored archive: no ({} of {all}", all - 1)),
+        "{t}"
+    );
     fs::remove_dir_all(&d).unwrap();
 }
 
@@ -203,6 +206,11 @@ fn single_and_encrypted() {
     let o = aqr_fed(&d, &["-t", "-P", "e.aqr"], b"secret\n");
     let t = stderr(&o);
     assert!(o.status.success(), "{t}");
-    assert!(t.contains("archival profile: conforms") && t.contains("nearer their blocks than the spec asks"), "{t}");
+    assert!(
+        t.contains("archival profile: conforms")
+            && t.contains("mirrored archive: no")
+            && t.contains("only nearer than the spec asks"),
+        "{t}"
+    );
     fs::remove_dir_all(&d).unwrap();
 }

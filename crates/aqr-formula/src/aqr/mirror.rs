@@ -446,10 +446,24 @@ impl Check {
         self.targets.iter().filter(|(at, _)| !mirrored.contains(at)).count()
     }
 
-    /// The intact mirror blocks nearer their target blocks than the least distance
+    /// The blocks with intact mirror blocks all nearer them than the least distance
     /// ([`least_start`]; the offsets those of an encrypted archive's payload where `chunked`).
     pub fn near(&self, chunked: bool) -> usize {
-        self.mirrors.iter().filter(|m| (m.at as u64) < least_start(m.target_end() as u64, chunked)).count()
+        let mut far: std::collections::HashMap<usize, bool> = std::collections::HashMap::new();
+        for m in &self.mirrors {
+            *far.entry(m.target).or_default() |= m.at as u64 >= least_start(m.target_end() as u64, chunked);
+        }
+        far.values().filter(|&&f| !f).count()
+    }
+
+    /// Whether archive `a` is mirrored as far as its blocks tell (spec, "Mirrored archives"):
+    /// read one after another, every block to mirror equal to an intact mirror block, one of them
+    /// far enough from it (`chunked` as [`Check::near`] takes it). (An encrypted archive has to
+    /// have mirrored headers too, which its envelope tells.)
+    pub fn mirrored(&self, a: &[u8], chunked: bool) -> bool {
+        let equal: std::collections::HashSet<usize> =
+            self.mirrors.iter().filter(|m| m.matches(a)).map(|m| m.target).collect();
+        self.walked && self.targets.iter().all(|(at, _)| equal.contains(at)) && self.near(chunked) == 0
     }
 }
 
@@ -631,6 +645,7 @@ mod tests {
             assert_eq!(kinds, [0x60, 0x70, 0x70, 0x70, 0x10]);
             assert_eq!((c.mirrors.len(), c.unmirrored(), c.near(false)), (5, 0, 0));
             assert_eq!(c.differing(&m).count(), 0);
+            assert!(c.mirrored(&m, false));
             // the metadata block's mirror last, a spacer before the mirrors (the archive is small)
             assert_eq!(c.mirrors.last().unwrap().target, c.targets.last().unwrap().0);
             assert_eq!(m[footer], 0x01);
@@ -639,6 +654,7 @@ mod tests {
         let m = mirrored(&a, 64, true);
         let c = check(&m);
         assert_eq!((c.mirrors.len(), c.unmirrored(), c.near(true)), (5, 0, 5));
+        assert!(!c.mirrored(&m, true));
         assert_eq!(files(&m), files(&a));
     }
 
@@ -689,6 +705,7 @@ mod tests {
         d[x.data.start + 1] ^= 1;
         let cd = check(&d);
         assert_eq!((cd.mirrors.len(), cd.broken, cd.unmirrored()), (4, 1, 1));
+        assert!(!cd.mirrored(&d, false));
         assert_eq!(repair(&mut d.clone(), &cd), 0);
         assert_eq!(files(&d), files(&m));
     }

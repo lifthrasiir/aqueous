@@ -2117,7 +2117,8 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     if !a.quiet {
         summary_d(input, out, files, total, start);
         if a.test && (a.verbose || !mirrors.mirrors.is_empty() || mirrors.broken > 0) {
-            tell_archival(input, &archive, &mirrors, decrypted.is_some()).map_err(|e| err(&e))?;
+            tell_archival(input, &archive, &mirrors, read, decrypted.is_some().then_some(&c[..]))
+                .map_err(|e| err(&e))?;
         }
     }
     end(out, files, c.len() as u64, total, start);
@@ -2157,15 +2158,18 @@ fn repaired(c: &[u8], m: &aqr::mirror::Check) -> std::io::Result<Option<(memmap2
     Ok(Some((d.make_read_only()?, n)))
 }
 
-/// Tells (on standard error) how far `archive` (of `input`) conforms to the archival profile
-/// (spec, "Archival profile"), and how many of its blocks have intact mirror blocks
-/// (`mirrors`) and how many of those are nearer them than the spec asks (of an encrypted
-/// archive's payload where `sealed`), or not intact.
+/// Tells (on standard error) how far `archive` (of `input`, its bytes `read` as decoded)
+/// conforms to the archival profile (spec, "Archival profile"), and whether it is a mirrored
+/// archive (spec, "Mirrored archives"; of an encrypted archive's payload where there is an
+/// `envelope`, the archive as stored): how many of its blocks have intact mirror blocks
+/// (`mirrors`), how many have them only nearer than the spec asks, and how many mirror blocks
+/// are not intact.
 fn tell_archival(
     input: &Path,
     archive: &aqr::Archive,
     mirrors: &aqr::mirror::Check,
-    sealed: bool,
+    read: &[u8],
+    envelope: Option<&[u8]>,
 ) -> Result<(), Failure> {
     let p = archive.archival()?;
     let profile = match (p.unchecked_leaves, p.unchecked_formulas) {
@@ -2174,22 +2178,30 @@ fn tell_archival(
             format!("does not conform ({l} leaf blocks without checksums, {f} formula blocks without output checksums)")
         }
     };
-    let mut told = format!("{}: archival profile: {profile}", input.display());
+    let sealed = envelope.is_some();
+    let mirrored = mirrors.mirrored(read, sealed)
+        && envelope.is_none_or(|e| e.starts_with(&aqr::envelope::ENCRYPTED_MIRRORED_HEADER_MAGIC));
+    let mut told = format!(
+        "{}: archival profile: {profile}; mirrored archive: {}",
+        input.display(),
+        if mirrored { "yes" } else { "no" }
+    );
     if mirrors.walked {
         let n = mirrors.targets.len();
-        told += &format!("; {} of {n} blocks to mirror mirrored", n - mirrors.unmirrored());
+        told += &format!(" ({} of {n} blocks to mirror mirrored", n - mirrors.unmirrored());
     } else {
-        told += &format!("; {} mirror blocks found by their magic", mirrors.mirrors.len());
+        told += &format!(" ({} mirror blocks found by their magic", mirrors.mirrors.len());
     }
     let near = mirrors.near(sealed);
     if near > 0 {
-        told += &format!(", {near} nearer their blocks than the spec asks");
+        told += &format!(", {near} only nearer than the spec asks");
     }
     match mirrors.broken {
         0 => {}
         1 => told += ", 1 damaged mirror block",
         n => told += &format!(", {n} damaged mirror blocks"),
     }
+    told += ")";
     eprintln!("{told}");
     Ok(())
 }
