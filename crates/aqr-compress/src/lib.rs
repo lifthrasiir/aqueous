@@ -131,6 +131,7 @@ pub mod mapped;
 mod memory;
 mod nsis;
 mod progress;
+mod seal;
 mod sets;
 pub mod spill;
 mod verify;
@@ -363,6 +364,10 @@ pub(crate) struct Cx {
     /// ([`make_later`]): data within it is not shared from the store by the prevalidator's memo
     /// (which would hold it), but copied as other data is.
     let_go: Option<Range<usize>>,
+    /// Where the contents made apart of the formula of this data are sealed, if they are
+    /// ([`seal`]): those of a formula whose formulas above all make their files apart, of a
+    /// file archived alone.
+    sealing: Option<seal::Sealing>,
     /// The contents planned to be coded in a set against a parent ([`sets::plan`]), which are
     /// not made alone.
     skip: RefCell<HashSet<sets::Key>>,
@@ -487,6 +492,7 @@ impl Cx {
             ready: Default::default(),
             deferred: Default::default(),
             let_go: None,
+            sealing: None,
             skip: Default::default(),
             top_sets: None,
             later: Default::default(),
@@ -709,6 +715,9 @@ fn compress_with(
     let watch = notes.as_ref().map(|notes| progress::Files::of(notes, [(0, d)]));
     let mut cx = Cx::new(d, opt);
     cx.pre = opt.verify.then(|| Arc::new(verify::Prevalidator::spawn(opt.threads, &[d])));
+    // (the contents of an image or the like sealed into a sink as they are made)
+    let sink = aqr::sink::Sink::new(&cx.enc, archive::SLICE_MIN);
+    cx.sealing = Some(seal::Sealing { order: Arc::new(seal::Order::new(sink)), slot: seal::ROOT });
     let _item = aqr_common::trace::item(Some(0));
     let analyzing = aqr_common::trace::span("analyze");
     let mut f = recompress_at(d, opt, 0, kind, &cx);
@@ -719,7 +728,9 @@ fn compress_with(
     drop(analyzing);
     note(Note::Ended(0));
     let memo = cx.pre.take().map(verify::Prevalidator::finish_shared).unwrap_or_default();
-    let r = finish(f, d, opt, &cx, memo, kept, notes.as_ref(), out)?;
+    let order = cx.sealing.take().expect("sealing").order;
+    let sink = Arc::into_inner(order).expect("the order held only here").into_sink();
+    let r = finish(f, d, opt, &cx, memo, Some(sink), kept, notes.as_ref(), out)?;
     note(Note::Written(0));
     Ok(r)
 }
@@ -744,9 +755,10 @@ pub(crate) fn spilling(opt: &Options) -> Option<aqr_formula::store::Guard> {
 /// The archive of formula `f` of `d`, written to `out`, of the bytes written; with
 /// [`Options::verify`], read back, decoded and compared with `d` (the outputs of applications
 /// in `memo` taken from there), and where it is not `d` (a module's bug), the archive of `d` raw
-/// written instead. The formula is returned where `kept`; what is no longer needed (the formula,
-/// the streams compressed) is dropped before the decoding. The `notes` are told of it encoded
-/// and verified. Fails where `out` does.
+/// written instead. The formula is returned where `kept` (of no bytes of the streams sunk);
+/// what is no longer needed (the formula, the streams compressed) is dropped before the
+/// decoding. The streams of `sink`, where `f`'s sunk streams are, are written after its own.
+/// The `notes` are told of it encoded and verified. Fails where `out` does.
 #[allow(clippy::too_many_arguments)]
 fn finish(
     mut f: Formula,
@@ -754,6 +766,7 @@ fn finish(
     opt: &Options,
     cx: &Cx,
     memo: verify::Memo,
+    sink: Option<aqr::sink::Sink>,
     kept: bool,
     notes: Option<&progress::Notes>,
     out: &mut dyn Sink,
@@ -761,15 +774,24 @@ fn finish(
     use progress::Note;
     memory::declare(&mut f, &Native { threads: opt.threads }, &memo.1);
     // the streams of a class together, as they compress smaller: as pieces of the streams, not
-    // copied, their blocks compressed as they are written
+    // copied, their blocks compressed as they are written; then the sink's
     let sum = Some(aqr::checksum(d));
-    let (merged, groups) = f.merged();
+    let encoding = aqr_common::trace::span("encode");
+    let sunk = sink.map(aqr::sink::Sink::close).transpose().map_err(io::Error::other)?.unwrap_or_default();
+    let (mut merged, groups) = f.merged();
+    merged.streams.extend(sunk.iter().enumerate().map(|(k, s)| Stream {
+        class: s.class.clone(),
+        kind: s.kind,
+        content: false,
+        apart: false,
+        data: Bytes::sunk(k, s.len as usize),
+    }));
     let pieces: Vec<Vec<&[u8]>> = groups
         .iter()
         .map(|g| g.iter().map(|&(i, a, b)| &f.streams[i].data[a as usize..b as usize]).collect())
         .collect();
-    let encoding = aqr_common::trace::span("encode");
-    let n = written(out, |w| cx.enc.encode_pieces_to(&merged, &pieces, sum, w))?;
+    let n = written(out, |w| cx.enc.encode_sunk_to(&merged, &pieces, &sunk, sum, w))?;
+    drop(sunk);
     drop(encoding);
     drop(pieces);
     notes.inspect(|n| n.send(Note::Encoded(0, 1, 1)));
@@ -1564,6 +1586,16 @@ fn make_later(
         _ => None,
     };
     let owned: Vec<Option<usize>> = later.iter().map(|(_, n, _)| whole(f, n)).collect();
+    let members: Vec<bool> = later.iter().map(|(_, n, _)| !take(n)).collect();
+    // the contents' formulas sealed as they are made, in their order, where this formula's
+    // contents are: each in its slot, those of a stream taken that take no place as they are;
+    // those that would pass the bound of the description not (kept as they are), the bound
+    // taken in their order (the sizes as [`nested`] fits them)
+    let sealing = cx.sealing.clone().filter(|_| bundle::files_apart(f));
+    let slots = sealing.as_ref().map(|s| s.order.slots(s.slot, later.len()));
+    let budget = Arc::new(std::sync::Mutex::new(bound_of(f)));
+    let sealed: Arc<Vec<std::sync::Mutex<Option<Made>>>> =
+        Arc::new((0..later.len()).map(|_| std::sync::Mutex::new(None)).collect());
     let data = |n: &Node| {
         let &Node::Slice { stream, start, len } = n else { unreachable!("a slice") };
         &f.streams[stream].data[start as usize..][..len as usize]
@@ -1582,9 +1614,12 @@ fn make_later(
     let remaps = (images.len() > 1).then(|| Arc::new(exe::plan(&images, opt.threads, opt.block / 2)));
     let apart = Apart { remaps, ..cx.apart() };
     let files = cx.files.as_deref();
-    // the costliest first, so that a long one is not left to the end, alone
+    // the costliest first, so that a long one is not left to the end, alone (but in their
+    // order where sealed: each waits for those before it)
     let mut order: Vec<usize> = (0..later.len()).collect();
-    order.sort_by_cached_key(|&i| std::cmp::Reverse(cost(data(&later[i].1))));
+    if sealing.is_none() {
+        order.sort_by_cached_key(|&i| std::cmp::Reverse(cost(data(&later[i].1))));
+    }
     // (the bytes of the streams taken, shared so as to be moved without a copy)
     let taken: Vec<std::sync::Mutex<Option<Bytes>>> = owned
         .iter()
@@ -1608,11 +1643,55 @@ fn make_later(
         let d = mine.as_deref().unwrap_or_else(|| data(n));
         let mut own = apart.cx(d.len(), opt);
         own.let_go = mine.is_some().then_some(d.as_ptr_range()).map(|r| r.start as usize..r.end as usize);
+        own.sealing =
+            sealing.as_ref().zip(slots.as_ref()).map(|(s, slots)| seal::Sealing { slot: slots[i], ..s.clone() });
         own.ready.borrow_mut().extend(std::mem::take(&mut *ready[i].lock().unwrap()));
         files.inspect(|f| f.tell(d.as_ptr(), false));
         let _item = aqr_common::trace::item(files.and_then(|f| f.content(d.as_ptr())));
         let mut child = made(d, opt, depth + 1, *nest, &own).filter(|c| takes_place(&c.f));
         files.inspect(|f| f.tell(d.as_ptr(), true));
+        if let Some((s, slots)) = sealing.as_ref().zip(slots.as_ref()) {
+            // (not a member of a set planned, which the sets are made of)
+            let member = members[i];
+            let child = child.map(|c| Made::from(c.cut(d)));
+            let size = child.as_ref().map(|c| bound_of(&c.f).saturating_sub(description_bound(n)));
+            // (the bytes taken let go of now where they have a formula, made again of it in the
+            // rare case it is turned down for the bound)
+            let class = owned[i].map(|s| (fr.streams[s].class.clone(), fr.streams[s].kind));
+            let raw = mine.filter(|_| child.is_none());
+            let (budget, sealed, threads, limit) = (budget.clone(), sealed.clone(), opt.threads, opt.description);
+            s.order.submit(
+                slots[i],
+                Box::new(move |sink| {
+                    let mut made = child.filter(|_| !member);
+                    let mut b = budget.lock().unwrap();
+                    let mut raw = raw;
+                    match size.filter(|_| made.is_some()) {
+                        Some(n) if *b + n <= limit => *b += n,
+                        _ => {
+                            if let (None, Some(m)) = (&raw, made.take()) {
+                                raw = Some(m.f.eval(&Native { threads }).expect("the formula of a content").into());
+                            }
+                        }
+                    }
+                    drop(b);
+                    // (or the bytes taken as they are, which nothing else holds)
+                    let made = made.or_else(|| {
+                        raw.zip(class).map(|(d, (class, kind))| {
+                            let mut f = Formula::default();
+                            f.root = f.push_as(class, kind, d);
+                            Made::from(f)
+                        })
+                    });
+                    if let Some(mut m) = made {
+                        memory::declare(&mut m.f, &Native { threads }, &memory::Limits::default());
+                        sink.seal(&mut m.f).expect("sealed");
+                        *sealed[i].lock().unwrap() = Some(m);
+                    }
+                }),
+            );
+            return (None, None, own.deferred.into_inner(), None);
+        }
         // (cut out of the bytes taken, which are let go of; put back where it takes no place)
         let back = match mine {
             Some(mine) if child.is_some() => {
@@ -1622,18 +1701,21 @@ fn make_later(
             mine => mine,
         };
         child.iter_mut().for_each(|c| aqr_formula::store::spill_streams(&mut c.f));
-        (child, back, own.deferred.into_inner(), own.enc)
+        (child, back, own.deferred.into_inner(), Some(own.enc))
     });
+    if let Some(s) = &sealing {
+        s.order.wait(s.slot);
+    }
     let mut made: Vec<_> = order.into_iter().zip(made).collect();
     made.sort_unstable_by_key(|&(i, _)| i);
-    for (((at, ..), (_, (child, back, deferred, enc))), s) in later.into_iter().zip(made).zip(owned) {
+    for (((at, ..), (i, (child, back, deferred, enc))), s) in later.into_iter().zip(made).zip(owned) {
         if let (Some(s), Some(back)) = (s, back) {
             f.streams[s].data = back;
         }
-        children[at].1 = child;
+        children[at].1 = child.or_else(|| sealed[i].lock().unwrap().take());
         cx.deferred.borrow_mut().extend(deferred);
         // (so that what holds it is sized and written without compressing its streams again)
-        cx.enc.adopt(enc);
+        enc.into_iter().for_each(|e| cx.enc.adopt(e));
     }
 }
 
@@ -2346,6 +2428,24 @@ mod tests {
         assert!(f.streams[stream].data.is_empty() && child.as_ref().unwrap().gaps.is_none());
     }
 
+    /// The files of an image archived alone are sealed into the sink as they are made: the
+    /// archive the same whatever the threads, and giving the image back.
+    #[test]
+    fn images_sealed() {
+        let fixture = |p: &str| std::fs::read(format!("{}/../../{p}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let mut d = zstd::stream::decode_all(&fixture("codecs/aqr-iso/tests/data/udf201.iso.zst")[..]).unwrap();
+        let jpeg = fixture("codecs/aqr-jpeg/tests/data/gradient.jpg");
+        let files = aqr_iso::files(&d);
+        let at = files.iter().find(|f| f.name == b"bin/data.bin").unwrap().extents[0].start;
+        d[at..at + jpeg.len()].copy_from_slice(&jpeg);
+        let archived = |threads| compress_formula(&d, &Options { threads, shared_modules: true, ..Options::default() });
+        let (c, f) = archived(1);
+        assert!(f.streams.iter().any(|s| s.data.sunk_in().is_some()));
+        assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
+        assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
+        assert!(archived(4).0 == c);
+    }
+
     /// An image whose first file of no kind (stream 0) is taken by its content's formula, and
     /// dropped from the image's, is still taken as an image once its contents are in place: not
     /// compared with its data (which would compress all of it).
@@ -3002,7 +3102,7 @@ mod tests {
     /// [`finish`] into memory, of as many bytes as it tells.
     fn finished(f: Formula, d: &[u8], opt: &Options, cx: &Cx) -> Vec<u8> {
         let mut c = Vec::new();
-        let (n, _) = finish(f, d, opt, cx, Default::default(), false, None, &mut c).unwrap();
+        let (n, _) = finish(f, d, opt, cx, Default::default(), None, false, None, &mut c).unwrap();
         assert_eq!(n, c.len());
         c
     }
@@ -3022,7 +3122,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("aqr-compress-written-again-{}.aqr", std::process::id()));
         let mut file =
             std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path).unwrap();
-        let (n, _) = finish(f, &d, &opt, &Cx::new(&d, &opt), Default::default(), false, None, &mut file).unwrap();
+        let (n, _) = finish(f, &d, &opt, &Cx::new(&d, &opt), Default::default(), None, false, None, &mut file).unwrap();
         drop(file);
         let c = std::fs::read(&path).unwrap();
         std::fs::remove_file(&path).unwrap();

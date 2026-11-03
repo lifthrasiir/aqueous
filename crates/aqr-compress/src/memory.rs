@@ -69,10 +69,14 @@ pub(crate) fn limit(a: &Apply, lens: &[u64], outputs: &[u64], contents: &dyn Con
     imported.saturating_add(room(pages.saturating_mul(PAGE)))
 }
 
-/// Declares the memory limits of `f`'s applications: those of `known` (worked out as the
+/// Declares the memory limits of `f`'s applications: those declared already kept (of a formula
+/// sealed, whose inputs are no longer at hand), else those of `known` (worked out as the
 /// prevalidation ran them), else worked out, the inputs made by `m` as estimates ask for them.
 pub(crate) fn declare(f: &mut Formula, m: &impl Modules, known: &Limits) {
     let declared = f.declare_memory(m, &|a, contents| {
+        if a.memory_limit != aqr_formula::NO_LIMIT {
+            return Some(a.memory_limit);
+        }
         let lens: Vec<u64> = a.inputs.iter().map(Node::len).collect();
         Some(match known.0.get(&shape(a, &lens)) {
             Some(&l) => l,
