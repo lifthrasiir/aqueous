@@ -19,8 +19,10 @@ Measured 2026-10-26 on an Apple M4 (10 cores), on hg19 (93 chromosome files of t
 - Decoding is one serial chain per file (each base's context is the bases before it), so the
   speed through `aqr` comes from the files decoded at once. What bounds it is memory: a model of
   4^10 contexts (8 MiB) codes 1% smaller than 4^9 (2 MiB), but ten of them at once miss the
-  caches, 19 Mbase/s a thread against 71 (chr1, ten decoders at once). The decoder loads the
-  line of the contexts two bases ahead as it decodes one, which brings 58 to 71.
+  caches, 19 Mbase/s a thread against 71 (chr1, ten decoders at once; an M4). The decoder loads
+  the contexts two bases ahead as it decodes one, which brings 58 to 71 there: 128 bytes,
+  aligned, one line on Apple's cores and two on others', both asked for (with one asked for and
+  glibc's blocks 16 bytes into a page, an x86 server decoded 60 MB/s rather than 75).
 - The model was picked on chr1 (bits per base): order-9 1.806, order-10 1.787, order-11 1.786;
   probabilities moving by 1/64 against 1/16 (1.827) and 1/128 (1.795) at order 10; counts
   halved at 250 (1.790, and a division per base). A match model of 24-base hashes (last
