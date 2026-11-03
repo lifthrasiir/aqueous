@@ -3941,9 +3941,59 @@ To <dfn>reconstruct the footer</dfn> of a [=byte sequence=] |a| starting with a 
   is restored from the mirror blocks only, whose implied start of the archive tells where the header magic was.
 </div>
 
-Issue: Restoring the header magic, and extracting what can be read where blocks remain damaged
-or an archive is cut short before its last metadata block,
-are to be specified with the repair process (`docs/recovery-design.md` §5.6).
+Issue: Restoring the header magic is to be specified with the repair process (`docs/recovery-design.md` §5.6).
+
+<h3 id=salvage>
+Salvage</h3>
+
+Salvaging an archive extracts what can still be read from an archive that is an [=invalid archive=] even after it is repaired,
+e.g. one cut short before its last metadata block or one with a damaged [=leaf block=] that no mirror block covers.
+Its result is not the result of [=interpret an archive|interpreting an archive=]:
+a decompressor MAY [=salvage an archive=] it can't interpret,
+and then MUST report every file it doesn't extract and why,
+and MUST NOT report the archive as valid.
+
+To <dfn>salvage an archive</dfn> |a|, a [=byte sequence=] as for [=repair an archive=]:
+
+<ol class=algorithm>
+    1. [=Repair an archive|Repair=] |a|, except that, if |a| starts with a header magic,
+        a target block position |t| beyond the end of |a| isn't skipped in the step 4.2:
+        1. Read blocks from the offset 6 by the generic structure ([[#block]]) as far as they are whole,
+            and let |e| be the offset after the [=block/padding=] of the last block read (6 if none).
+        2. If |e| > |t| or |t| − |e| is odd, skip |t|.
+        3. Truncate |a| to |e| bytes, and append a [[#spacer-block|spacer block]] of |t| − |e| bytes if |t| > |e|.
+            The bytes from |e| to |t| are <dfn for=salvage>lost</dfn>.
+        4. Continue with the step 4.3.
+    2. Interpret |a| as in [=interpret an archive=], with the following exceptions,
+        each of which makes the files and forks concerned [=salvage/lost=] rather than |a| an invalid archive:
+        * A file or a fork whose leaf block offset doesn't refer to a leaf block is lost.
+        * The [=meta/module_offsets=], [=meta/resource_offsets=] and [=meta/dictionary_offsets=] may list more blocks than there are,
+            if those there are the first ones listed.
+        * A formula block whose [=formula/formula_data=] fails to decode or to parse,
+            including a reference to a non-leaf block that isn't there, makes the files and forks of its outputs lost.
+        * If any file or fork is lost, a non-leaf block that no formula block references is not a failure.
+        * Every [=leaf block=] is evaluated by itself:
+            a failure of its evaluation, including a checksum that doesn't verify, makes the files and forks of its outputs lost,
+            and the other leaf blocks are evaluated as usual.
+</ol>
+
+<div class=note>
+  Salvaging gives every file whose bytes are all there and verify where they have checksums,
+  and only those files within its [=parcel=] where the damage hits it.
+  A file covered by no checksum, i.e. one of a leaf block without a checksum or of a formula block without an output checksum,
+  is given as it decodes, since nothing tells whether it is damaged;
+  an archive conforming to the [=archival profile=] has no such file.
+  The bytes lost by a truncation become a spacer block,
+  so that the blocks before them and the metadata block restored after them are read by the generic structure,
+  while the blocks that were in them are no longer there and their files are lost.
+  A leaf block partly lost is lost as a whole, even without a checksum.
+</div>
+
+<div class=note>
+  Evaluating every leaf block by itself and reporting the failures of some of them
+  is what a decompressor computing a partial result ([[#partial-access]]) of the other files does anyway.
+  Salvaging adds that the structure may refer to blocks that aren't there.
+</div>
 
 Issue: Repairing an encrypted archive with mirror blocks or mirrored headers requires decrypting
 the encrypted chunks after one that fails to authenticate, which a standard age implementation doesn't do.
