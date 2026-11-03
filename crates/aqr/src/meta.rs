@@ -3,8 +3,11 @@
 //! ([`Applier`]).
 //!
 //! What is not commonly kept is read and applied only where asked (`-p`, `privileged`): the
-//! status change and backup times are read then, and the ownership, the superuser's flags and
-//! the set-user-ID and set-group-ID bits applied then.
+//! access, status change and backup times are read then, and the ownership, the superuser's
+//! flags and the set-user-ID and set-group-ID bits applied then. The access time is not kept
+//! otherwise, as reading a file for archiving may change it (so that an archive of the same
+//! files would differ each time it is made); where it is kept, the files' are put back once
+//! they are archived ([`restore_atime`]).
 //!
 //! On Windows: the times, the file attributes, the kinds of links and the alternate data
 //! streams (as forks); not the extended attributes (EAs) of NTFS, read nor written.
@@ -113,7 +116,7 @@ impl Reader {
         let mut x = Extra {
             crtime: time(m.created()),
             mtime: time(m.modified()),
-            atime: time(m.accessed()),
+            atime: if self.privileged { time(m.accessed()) } else { None },
             ..Extra::default()
         };
         let mut forks = Vec::new();
@@ -121,9 +124,9 @@ impl Reader {
         {
             use std::os::unix::fs::MetadataExt;
             let t = |secs: i64, nanos: i64| Some(Time::new(secs, nanos as u32));
-            x.atime = t(m.atime(), m.atime_nsec());
             x.mtime = t(m.mtime(), m.mtime_nsec());
             if self.privileged {
+                x.atime = t(m.atime(), m.atime_nsec());
                 x.ctime = t(m.ctime(), m.ctime_nsec());
             }
             x.mode = Some(m.mode() & 0o7777);
@@ -286,6 +289,35 @@ pub fn special(m: &fs::Metadata) -> Option<EntryNode> {
     }
     let _ = m;
     None
+}
+
+/// The access time of metadata `m`, as [`Reader::extra`] reads it where it keeps it.
+pub fn atime_of(m: &fs::Metadata) -> Option<Time> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(Time::new(m.atime(), m.atime_nsec() as u32))
+    }
+    #[cfg(not(unix))]
+    m.accessed().ok().map(time_of)
+}
+
+/// Puts the access time of `path` (not followed) back to `t`, as it was read before the file
+/// was archived, where it is no longer that: on Linux, contents are read without updating it
+/// where this process may ([`aqr_compress::mapped::open`]), and those are left as they are, as
+/// setting it changes the status change time. What cannot be set (a file of another user) is
+/// left.
+pub fn restore_atime(path: &Path, t: Time) {
+    let Ok(m) = fs::symlink_metadata(path) else { return };
+    if atime_of(&m) == Some(t) {
+        return;
+    }
+    let kind = match m.file_type() {
+        f if f.is_dir() => Kind::Dir,
+        f if f.is_symlink() => Kind::Link,
+        _ => Kind::File,
+    };
+    let _ = os::set_times(path, kind, &Extra { atime: Some(t), ..Extra::default() });
 }
 
 fn time_of(t: std::time::SystemTime) -> Time {

@@ -1,6 +1,7 @@
 //! The metadata of a directory kept through `aqr -c` and `aqr -d`: times (of nanoseconds, of a
 //! read-only file and of a link too), permissions, extended attributes, resource forks, hard
-//! links; and what is applied only with `-p` (set-user-ID bits, FIFOs).
+//! links; what is applied only with `-p` (set-user-ID bits, FIFOs); and the access times, kept
+//! only with `-p` (the inputs' left as they were) and not changing the archive otherwise.
 #![cfg(unix)]
 
 use std::ffi::CString;
@@ -102,7 +103,7 @@ fn before(src: &Path) -> Vec<fs::Metadata> {
 }
 
 /// Checks the metadata of `out` against `src` (as `before` was), `privileged` where extracted
-/// with `-p`.
+/// with `-p` (of an archive made with `-p`, keeping the access times).
 fn check(src: &Path, before: &[fs::Metadata], out: &Path, privileged: bool) {
     for (p, s) in CHECKED.iter().zip(before) {
         let o = fs::symlink_metadata(out.join(p)).unwrap();
@@ -139,7 +140,7 @@ fn metadata_kept() {
     let src = source(&d);
     let was = before(&src);
     let archive = d.join("src.aqr");
-    let err = aqr(&["-c".as_ref(), "-o".as_ref(), archive.as_os_str(), src.as_os_str()]);
+    let err = aqr(&["-c".as_ref(), "-p".as_ref(), "-o".as_ref(), archive.as_os_str(), src.as_os_str()]);
     assert!(!err.contains("skipped"), "{err}");
     let out = d.join("out");
     let err = aqr(&["-d".as_ref(), "-o".as_ref(), out.as_os_str(), archive.as_os_str()]);
@@ -147,6 +148,53 @@ fn metadata_kept() {
     check(&src, &was, &out, false);
     let out = d.join("out-p");
     aqr(&["-d".as_ref(), "-p".as_ref(), "-o".as_ref(), out.as_os_str(), archive.as_os_str()]);
+    check(&src, &was, &out, true);
+    Command::new("chmod").args(["-R", "u+w"]).arg(&d).status().unwrap();
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// The access times of the entries checked of `src`.
+fn atimes(src: &Path) -> Vec<(i64, i64)> {
+    before(src).iter().map(|m| times(m)[0]).collect()
+}
+
+/// Access times, which reading a file may change: not kept without `-p`, so that the archive
+/// of the same files is the same whatever they are (macOS updates them as files are read);
+/// kept with `-p`, the inputs' left as they were before they were archived (on Linux, files
+/// read without updating them where this process may, and directories listed put back).
+#[test]
+fn access_times() {
+    let d = scratch("atime");
+    let src = source(&d);
+    let made = |name: &str, p: bool| {
+        let archive = d.join(name);
+        let mut args: Vec<&std::ffi::OsStr> = vec!["-c".as_ref(), "-o".as_ref(), archive.as_os_str()];
+        if p {
+            args.push("-p".as_ref());
+        }
+        args.push(src.as_os_str());
+        aqr(&args);
+        fs::read(&archive).unwrap()
+    };
+    // other access times than they have, the same modification times: as reading them would
+    // change them; days ago, as reading them changes them then on Linux (`relatime`), and
+    // after their modification times
+    let age = |secs: i64| {
+        for p in CHECKED {
+            let m = fs::symlink_metadata(src.join(p)).unwrap();
+            set_times(&src.join(p), (secs.max(times(&m)[1].0 + 1), 1), times(&m)[1]);
+        }
+    };
+    let one = made("one.aqr", false);
+    age(1_500_000_000);
+    assert!(one == made("two.aqr", false), "the archive follows the access times");
+    age(1_600_000_000);
+    let was = before(&src);
+    let kept = atimes(&src);
+    made("p.aqr", true);
+    assert_eq!(atimes(&src), kept, "access times left as they were");
+    let out = d.join("out-p");
+    aqr(&["-d".as_ref(), "-p".as_ref(), "-o".as_ref(), out.as_os_str(), d.join("p.aqr").as_os_str()]);
     check(&src, &was, &out, true);
     Command::new("chmod").args(["-R", "u+w"]).arg(&d).status().unwrap();
     fs::remove_dir_all(&d).unwrap();

@@ -120,7 +120,8 @@ fn metadata_kept() {
     let src = source(&d);
     let was = snapshot(&src);
     let archive = d.join("src.aqr");
-    let err = aqr(&["-c".as_ref(), "-o".as_ref(), archive.as_os_str(), src.as_os_str()]);
+    // (with -p, the access times kept)
+    let err = aqr(&["-c".as_ref(), "-p".as_ref(), "-o".as_ref(), archive.as_os_str(), src.as_os_str()]);
     assert!(!err.contains("not read"), "{err}");
     let out = d.join("out");
     let err = aqr(&["-d".as_ref(), "-o".as_ref(), out.as_os_str(), archive.as_os_str()]);

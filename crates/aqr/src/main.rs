@@ -79,9 +79,12 @@
 //! - The metadata of a directory archived is kept ([`meta`]): times, permissions, ownership,
 //!   flags, extended attributes and resource forks, hard links, FIFOs and devices; and applied
 //!   as it is extracted, but what is not commonly kept. `-p` keeps that too: in compressing,
-//!   the status change and backup times; in decompressing, the ownership, the flags only the
-//!   superuser can change, the set-user-ID and set-group-ID bits, FIFOs and devices, and the
-//!   backup times. An archive of a single file has no metadata.
+//!   the access, status change and backup times (the access times of the inputs put back once
+//!   archived, which changes their status change times where they were changed by reading
+//!   them); in decompressing, the ownership, the flags only the superuser can change, the
+//!   set-user-ID and set-group-ID bits, FIFOs and devices, and the backup times. An archive of
+//!   a single file has no metadata. On Linux, the inputs are read without updating their access
+//!   times where this process may (`O_NOATIME`: files it owns).
 //! - `-f` overwrites outputs. `--rm` removes the inputs once their archive is made (and checked,
 //!   but with `--no-check`), or an archive once it is extracted whole, as zstd's `--rm` does:
 //!   compressing, what was archived of them (the directories last, where left empty; what was
@@ -778,6 +781,30 @@ struct Gathered {
     inodes: std::collections::HashMap<(u64, u64), Vec<usize>>,
     /// With `--rm`, the paths archived (each directory before what it holds), as read.
     gone: Option<Vec<Gone>>,
+    /// With `-p`, the access times of the paths read, put back once they are archived.
+    atimes: Atimes,
+}
+
+/// The access times of the paths read as they were before (`-p`, as they are archived), put
+/// back as this is dropped ([`meta::restore_atime`]): once the archive is made, or has failed.
+#[derive(Default)]
+struct Atimes(Option<Vec<(PathBuf, aqr_formula::aqr::Time)>>);
+
+impl Atimes {
+    /// Notes the access time of `path`, as `m` read it, where they are kept.
+    fn note(&mut self, path: &Path, m: &fs::Metadata) {
+        if let (Some(v), Some(t)) = (&mut self.0, meta::atime_of(m)) {
+            v.push((path.to_owned(), t));
+        }
+    }
+}
+
+impl Drop for Atimes {
+    fn drop(&mut self) {
+        for (path, t) in self.0.take().unwrap_or_default() {
+            meta::restore_atime(&path, t);
+        }
+    }
 }
 
 impl Gathered {
@@ -791,6 +818,7 @@ impl Gathered {
             reader: meta::Reader::new(preserve),
             inodes: Default::default(),
             gone: None,
+            atimes: Atimes(preserve.then(Vec::new)),
         }
     }
 
@@ -828,7 +856,7 @@ impl aqr_compress::Source for Gathered {
         use std::io::{Read, Seek};
         let p = &self.contents[c].0;
         let at = |e: std::io::Error| std::io::Error::new(e.kind(), format!("{}: {e}", p.display()));
-        let mut f = fs::File::open(p).map_err(at)?;
+        let mut f = aqr_compress::mapped::open(p).map_err(at)?;
         f.seek(std::io::SeekFrom::Start(range.start)).map_err(at)?;
         let mut d = Vec::with_capacity(range.end.min(self.contents[c].2).saturating_sub(range.start) as usize);
         f.take(range.end.saturating_sub(range.start)).read_to_end(&mut d).map_err(at)?;
@@ -873,6 +901,8 @@ fn compress_into(
         _ => None,
     };
     if let Some((input, m)) = single {
+        let mut atimes = Atimes(a.preserve.then(Vec::new));
+        atimes.note(input, &m);
         let d = mapper.read(input).map_err(|e| format!("{}: {e}", input.display()))?;
         // (what is cut out of it shared, not copied: an image's files, say)
         let _known = aqr_formula::store::known(&d);
@@ -1281,6 +1311,7 @@ fn gather(
             let s = meta::stat(dir, privileged).map_err(|e| err(dir, e))?;
             let (x, forks) = g.reader.extra(dir, &s, &mut |w| g.warnings.push(w));
             g.tree.root = x;
+            g.atimes.note(dir, &s.m);
             if let Some(gone) = &mut g.gone {
                 gone.push(Gone::of(dir, &s.m));
             }
@@ -1367,6 +1398,7 @@ fn gather(
         // (a directory never skipped)
         let parent = f.parent.map(|p| made[p].expect("a directory made"));
         let e = entry(&f.path, &f.name, &s, parent, g, l)?;
+        g.atimes.note(&f.path, &s.m);
         if e.is_some()
             && let Some(gone) = &mut g.gone
         {
