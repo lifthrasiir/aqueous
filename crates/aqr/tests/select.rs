@@ -109,6 +109,12 @@ fn aqueous() {
             listing(&w, &[]),
             ["big", "p", "p/q", "p/q/dd", "p/q/dd/b.txt", "p/q/dd/e", "p/q/dd/e/c.txt", "p/q/dd/m"]
         );
+        // (with --links all, made as it is too)
+        let (ok, err, w) = run(&["-d", "../arch.aqr", "d", "--rename", "p/q/dd", "--links", "all"]);
+        assert!(ok && !err.contains("a link"), "{err}");
+        assert_eq!(fs::read_link(w.join("p/q/dd/l")).unwrap(), Path::new("../a.txt"));
+        let (ok, err) = aqr_in(&w, &["-d", "../arch.aqr", "--links", "some"]);
+        assert!(!ok && err.contains("--links takes inside or all: some"), "{err}");
         // (a link renamed itself: made as it is)
         let (ok, err, w) = run(&["-d", "../arch.aqr", "link", "--rename", "lk"]);
         assert!(ok, "{err}");

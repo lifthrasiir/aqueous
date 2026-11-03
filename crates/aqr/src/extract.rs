@@ -5,8 +5,9 @@
 //! The directories, the files (empty, or hard links to the first of their link group), FIFOs and
 //! devices are made as their entries are told; the contents of the files and their forks are
 //! written as they are decoded (on any thread); then, once all is told ([`Extractor::finish`]),
-//! the links (but those reaching out of the directory), the metadata of all but the
-//! directories, and that of the directories, the deepest first (spec, "Extraction").
+//! the links (but those reaching out of the directory, without `--links all`: [`Links`]), the
+//! metadata of all but the directories, and that of the directories, the deepest first (spec,
+//! "Extraction").
 //!
 //! Names are taken as the file system extracted into could take them ([`Folding`], [`fold`]):
 //! an entry of a name taken as an earlier one's of its directory is a conflict, told and not
@@ -159,6 +160,25 @@ enum Pick {
     Under(usize),
 }
 
+/// Which links are made (`--links`): those whose targets stay in the directory extracted into
+/// (the default; spec, "Extraction"), or all of them as they are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Links {
+    #[default]
+    Inside,
+    All,
+}
+
+impl Links {
+    pub fn parse(s: &str) -> Result<Links, String> {
+        match s {
+            "inside" => Ok(Links::Inside),
+            "all" => Ok(Links::All),
+            _ => Err(format!("--links takes inside or all: {s}")),
+        }
+    }
+}
+
 /// Extracts the entries told into a directory ([module](self)).
 pub struct Extractor<'a> {
     place: Place<'a>,
@@ -168,6 +188,8 @@ pub struct Extractor<'a> {
     force: AtomicBool,
     /// Whether the output was skipped as asked ([`Place::Auto`]): the error then not one.
     skipped: AtomicBool,
+    /// Which links are made.
+    links: Links,
     ap: &'a meta::Applier,
     seen: &'a stats::Seen,
     /// The names as this system writes them ([`names`]).
@@ -254,11 +276,12 @@ fn err(p: &Path, e: std::io::Error) -> String {
 }
 
 impl<'a> Extractor<'a> {
-    /// An extractor to `place`, what is there written over where `force`; of the paths of `sel`
-    /// alone where given (into [`Place::Into`] alone).
+    /// An extractor to `place`, what is there written over where `force`, the links of `links`
+    /// made; of the paths of `sel` alone where given (into [`Place::Into`] alone).
     pub fn new(
         place: Place<'a>,
         force: bool,
+        links: Links,
         ap: &'a meta::Applier,
         seen: &'a stats::Seen,
         sel: Option<Selection>,
@@ -293,6 +316,7 @@ impl<'a> Extractor<'a> {
             sel,
             force: AtomicBool::new(force),
             skipped: AtomicBool::new(false),
+            links,
             ap,
             seen,
             names: Names::new(opts, folding.0 == Folding::Exact),
@@ -769,7 +793,10 @@ impl<'a> Extractor<'a> {
             };
             let to = match resolve_link(t, &self.names, by_name, i, within.as_deref()) {
                 Ok(to) => to,
-                Err(_) if alone => resolve_link(t, &self.names, by_name, i, None).ok().flatten(),
+                // (as it is: what it leads to only where that is known, for its kind on Windows)
+                Err(_) if alone || self.links == Links::All => {
+                    resolve_link(t, &self.names, by_name, i, None).ok().flatten()
+                }
                 Err(Refused::Out) => {
                     let of = if of.as_os_str().is_empty() { Path::new(".") } else { of };
                     self.ap.tell(path, &format!("a link reaching out of {}, not created", of.display()));

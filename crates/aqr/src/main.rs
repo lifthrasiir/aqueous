@@ -79,6 +79,11 @@
 //!   macOS), `nfc`, `nfd` or kept; and names this system cannot write as they are kept as bytes
 //!   where it takes them, replaced (`%XX`, U+FFFD, `_`), or failed. What was guessed or done is
 //!   told.
+//! - `--links`: decompressing, which links are made ([`extract::Links`]): by default those
+//!   whose targets stay in the directory extracted into, through the archive's own links, the
+//!   others told and not made (spec, "Extraction"); with `all`, every one as it is, those
+//!   reaching out of it, going round in a loop of links or through names a file system may
+//!   take as a link of the archive or not.
 //! - `--wasm`: in decoding, every module run as WebAssembly, the known ones too (natively
 //!   otherwise).
 //! - `--no-sandbox`: in decoding, the modules not known run in this process. By default they
@@ -246,6 +251,9 @@ Decompression:
       --bad-names WHAT  names not written as they are: auto (the default), keep (as
                         bytes, where this system takes them), replace (%XX, U+FFFD,
                         _ for what Windows does not take), or fail
+      --links WHAT      links made: inside (the default: those whose targets stay in
+                        the directory extracted into; the others told), or all (as
+                        they are, those reaching out or going round in loops too)
       --wasm            run every module as WebAssembly, the known ones too
       --no-sandbox      run the Wasm modules (the ones not known, or all with --wasm)
                         in this process, not in workers locked down by the system;
@@ -315,6 +323,8 @@ struct Args {
     select: Option<extract::Selection>,
     /// Decompressing, how names are written (`-E`, `--normalize`, `--bad-names`).
     names: names::Opts,
+    /// Decompressing, which links are made (`--links`).
+    links: extract::Links,
 }
 
 /// The format of the archives made: Aqueous, or another of [`aqr_pack`] at its level.
@@ -415,6 +425,7 @@ fn parse() -> Result<Args, String> {
         each: false,
         select: None,
         names: names::Opts::default(),
+        links: extract::Links::Inside,
     };
     // (by the number of inputs before it, `--rename`'s place and value)
     let mut renames: Vec<(usize, PathBuf)> = Vec::new();
@@ -496,6 +507,7 @@ fn parse() -> Result<Args, String> {
             "-E" | "--encoding" => a.names.encoding = aqr_unpack::Choice::parse(&text(value("-E")?))?,
             "--normalize" => a.names.normalize = names::Opts::normalize(&text(value("--normalize")?))?,
             "--bad-names" => a.names.bad = names::Opts::bad(&text(value("--bad-names")?))?,
+            "--links" => a.links = extract::Links::parse(&text(value("--links")?))?,
             s if s.starts_with("--stats=") => {
                 let to = &arg.as_encoded_bytes()["--stats=".len()..];
                 // SAFETY: split after ASCII, of an `OsStr`'s bytes
@@ -1890,7 +1902,7 @@ fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Forma
         let r = ticking(a, &view, || -> Result<_, String> {
             let x = match place {
                 None => None,
-                Some(p) => Some(extract::Extractor::new(p, force, &ap, &seen, a.select.clone(), &a.names)?),
+                Some(p) => Some(extract::Extractor::new(p, force, a.links, &ap, &seen, a.select.clone(), &a.names)?),
             };
             let sink =
                 Unpacking { x: x.as_ref(), input, quiet: a.quiet, view: shown, seen: &seen, sizes: Default::default() };
@@ -2127,7 +2139,8 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
         Some(t) => {
             let ap = meta::Applier { privileged: a.preserve, quiet: a.quiet };
             let r = ticking(a, &*view, || {
-                let x = extract::Extractor::new(place.unwrap(), force, &ap, &seen, a.select.clone(), &a.names)?;
+                let x =
+                    extract::Extractor::new(place.unwrap(), force, a.links, &ap, &seen, a.select.clone(), &a.names)?;
                 match x.entries(t, &(0..t.entries.len()).collect::<Vec<_>>()) {
                     Err(_) if x.skipped() => return Ok(None),
                     r => r?,

@@ -1,8 +1,9 @@
 //! Names of an archive taken as one by a file system through `aqr -d` (spec, "Extraction"):
 //! entries of names taken as one are a conflict, the later not made; a link whose target names a
 //! link by a name of another case is not made (it could lead out of the directory extracted
-//! into), nor one going round in a loop of links; and the metadata of what was made is applied
-//! to that alone, not to what a link made over it leads to.
+//! into), nor one going round in a loop of links (both made with `--links all`); and the
+//! metadata of what was made is applied to that alone, not to what a link made over it leads
+//! to.
 //!
 //! In the temporary directory (macOS's APFS takes names case and normalization aside), and in
 //! each directory of `AQR_TEST_DIRS` (separated by `:`), say on Linux of vfat, exFAT, hfsplus,
@@ -57,6 +58,10 @@ fn links(d: &Path) -> bool {
 }
 
 fn extract(d: &Path, tree: &Tree, force: bool) -> (PathBuf, String) {
+    extract_with(d, tree, force, &[])
+}
+
+fn extract_with(d: &Path, tree: &Tree, force: bool, args: &[&str]) -> (PathBuf, String) {
     let contents: Vec<Vec<u8>> = (0..4).map(|i| format!("content {i}").into_bytes()).collect();
     let inputs: Vec<Input> = contents.iter().map(|c| Input { name: b"c", data: c }).collect();
     let archive = d.join("a.aqr");
@@ -67,6 +72,7 @@ fn extract(d: &Path, tree: &Tree, force: bool) -> (PathBuf, String) {
     if force {
         c.arg("-f");
     }
+    c.args(args);
     let o = c.output().unwrap();
     (out, String::from_utf8_lossy(&o.stderr).into_owned())
 }
@@ -267,5 +273,31 @@ fn link_loops() {
     }
     assert!(!err.contains("reaching out"), "{err}");
     assert_eq!(fs::read_link(out.join("ok")).unwrap(), Path::new("."), "{err}");
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// With `--links all`, the links refused otherwise made as they are, and nothing told of them:
+/// those going round in a loop, an absolute one and one going above the directory.
+#[test]
+fn links_all() {
+    let d = scratch(&std::env::temp_dir(), "links-all");
+    let tree = Tree {
+        root: Extra::default(),
+        entries: vec![
+            entry("l1", EntryNode::Link("l2".into()), None),
+            entry("l2", EntryNode::Link("l1".into()), None),
+            entry("abs", EntryNode::Link("/etc".into()), None),
+            entry("up", EntryNode::Link("../victim".into()), None),
+        ],
+    };
+    let (out, err) = extract_with(&d, &tree, false, &["--links", "all"]);
+    for (name, to) in [("l1", "l2"), ("l2", "l1"), ("abs", "/etc"), ("up", "../victim")] {
+        assert_eq!(fs::read_link(out.join(name)).unwrap(), Path::new(to), "{name}: {err}");
+    }
+    assert!(!err.contains("a link"), "{err}");
+    // (inside, the default, as given)
+    fs::remove_dir_all(&out).unwrap();
+    let (out, err) = extract_with(&d, &tree, false, &["--links", "inside"]);
+    assert!(err.contains("abs: a link reaching out of") && fs::symlink_metadata(out.join("abs")).is_err(), "{err}");
     fs::remove_dir_all(&d).unwrap();
 }
