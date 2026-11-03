@@ -24,7 +24,8 @@
 //! - `trace`: `interval` (seconds between samples, as it ended), `workers`, `labels` (by id:
 //!   name and whether of waiting), `stacks` (by id: label ids, the outermost first; 0 is none,
 //!   idle), `threads` (name and whether a worker of the pool), and the samples by columns:
-//!   `at` (seconds), `heap` and `rss` (bytes), `reserved` (workers reserved or running), `samples`
+//!   `at` (seconds), `heap` and `rss` (bytes), `held` (bytes taken of the budget), `reserved`
+//!   (workers reserved or running), `samples`
 //!   (by sample, of each thread its stack and item, one after the other; -1 for a thread ended
 //!   or no item) and `bytes` (by sample, label ids and the bytes of large blocks they hold, one
 //!   after the other), `outside` (the same of the bytes held outside the heap: the spill's
@@ -281,7 +282,12 @@ fn outliers(run: &Run) -> String {
         size(peak.max(0) as f64),
         match aqr_common::budget::global().limit() {
             u64::MAX => String::new(),
-            b => format!(" ({} of the budget {})", percent(peak.max(0) as f64, b as f64), size(b as f64)),
+            b => format!(
+                " ({} of the budget {}, {} taken of it at most)",
+                percent(peak.max(0) as f64, b as f64),
+                size(b as f64),
+                size(t.samples.iter().map(|s| s.held).max().unwrap_or(0) as f64)
+            ),
         },
         holder.unwrap_or_default(),
         peak_at.map_or(0.0, |i| t.samples[i].at),
@@ -540,6 +546,8 @@ fn json(run: &Run) -> String {
     array(&mut o, &t.samples, |o, s| _ = write!(o, "{}", s.heap.max(0)));
     o += ",\"rss\":";
     array(&mut o, &t.samples, |o, s| _ = write!(o, "{}", s.rss));
+    o += ",\"held\":";
+    array(&mut o, &t.samples, |o, s| _ = write!(o, "{}", s.held));
     o += ",\"reserved\":";
     array(&mut o, &t.samples, |o, s| _ = write!(o, "{}", s.reserved));
     o += ",\"samples\":";

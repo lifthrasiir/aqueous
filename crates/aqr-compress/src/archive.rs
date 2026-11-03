@@ -352,12 +352,20 @@ struct State {
 
 impl State {
     /// Whether the next batch to let in has room: those let in and not yet written are none,
-    /// or with it of at most [`AHEAD`] batches' bytes.
+    /// or with it of at most [`AHEAD`] batches' bytes, its bytes fitting in the budget of the
+    /// process beside the heap in use ([`aqr_common::budget::global`]: what it holds, as its
+    /// data is inflated, is about as many bytes again).
     fn room<S: ?Sized>(&self, cx: &Ctx<S>) -> bool {
         let w = cx.weights[self.claimed];
-        self.held == 0 || self.held.saturating_add(w) <= (cx.opt.batch as u64).saturating_mul(AHEAD)
+        self.held == 0
+            || (self.held.saturating_add(w) <= (cx.opt.batch as u64).saturating_mul(AHEAD)
+                && aqr_common::budget::global().room().fits(w))
     }
 }
+
+/// How often those waiting for room for a batch look again: the heap tells nobody as it
+/// shrinks ([`State::room`]).
+const LOOK: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// The files of a batch read and their data (none: all of contents before it).
 type Taken = Option<(Vec<File>, Vec<Bytes>)>;
@@ -438,7 +446,7 @@ impl Pipe {
                     if st.room(cx) {
                         break;
                     }
-                    st = self.changed.wait(st).unwrap();
+                    st = self.changed.wait_timeout(st, LOOK).unwrap().0;
                 }
             }
             // (the batch let in only once a worker is free, unless the writer has let it in
@@ -535,7 +543,7 @@ impl Writer {
             let st = pipe.state.lock().unwrap();
             if st.made[self.next].is_none() && st.failed.is_none() {
                 let _w = aqr_common::trace::wait("batch");
-                drop(pipe.changed.wait(st).unwrap());
+                drop(pipe.changed.wait_timeout(st, LOOK).unwrap());
             }
         }
         Ok(())

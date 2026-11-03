@@ -197,9 +197,9 @@ pub struct Mf<'a> {
     next: usize,
     /// The position the chains' `found` are for.
     found_at: usize,
-    /// The bytes of its chains let in by [`gate`].
+    /// Its chains let in by [`gate`], until dropped.
     #[cfg(not(target_arch = "wasm32"))]
-    admitted: usize,
+    _admitted: gate::Admitted,
 }
 
 impl<'a> Mf<'a> {
@@ -233,7 +233,7 @@ impl<'a> Mf<'a> {
     fn keeping(d: &'a [u8], reach: usize, w: usize) -> Self {
         let ring = reach.clamp(1, d.len().max(1)).next_power_of_two();
         #[cfg(not(target_arch = "wasm32"))]
-        let admitted = gate::admit(Self::chains(d.len(), reach));
+        let _admitted = gate::admit(Self::chains(d.len(), reach));
         Mf {
             d,
             reach,
@@ -245,7 +245,7 @@ impl<'a> Mf<'a> {
             next: 0,
             found_at: usize::MAX,
             #[cfg(not(target_arch = "wasm32"))]
-            admitted,
+            _admitted,
         }
     }
 
@@ -382,13 +382,6 @@ impl<'a> Mf<'a> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-impl Drop for Mf<'_> {
-    fn drop(&mut self) {
-        gate::release(self.admitted);
-    }
-}
-
 /// Lets the match finders of the process take up to `bytes` of chains at once ([`gate`]),
 /// where that is more than they may already.
 #[cfg(not(target_arch = "wasm32"))]
@@ -397,34 +390,46 @@ pub fn allow_chains(bytes: usize) {
 }
 
 /// The match finders' chains of a process at once, natively: one that would take them past
-/// [`gate::AT_ONCE`] bytes waits for others to be dropped (one alone is let in whatever its
-/// size), so that streams of large dictionaries split or rebuilt on several threads (the folders
-/// of a 7z archive, the parts of a stream: 0.8 GB of chains each for 64 MiB) take turns: one at
-/// a time by default, more as [`allow_chains`] lets in. Only the order of the work changes. A
-/// module, on a thread of its own, has none.
+/// [`gate::AT_ONCE`] bytes, or past the budget of the process beside what is in use
+/// ([`aqr_common::budget::global`]), waits for others to be dropped (one alone is let in
+/// whatever its size and the budget), so that streams of large dictionaries split or rebuilt on
+/// several threads (the folders of a 7z archive, the parts of a stream: 0.8 GB of chains each
+/// for 64 MiB) take turns: one at a time by default, more as [`allow_chains`] and the budget let
+/// in. Only the order of the work changes. A module, on a thread of its own, has none.
 #[cfg(not(target_arch = "wasm32"))]
 mod gate {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Condvar, Mutex};
+    use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+
+    use aqr_common::budget::Taken;
 
     pub static AT_ONCE: AtomicUsize = AtomicUsize::new(1 << 30);
 
-    static HELD: Mutex<usize> = Mutex::new(0);
-    static FREED: Condvar = Condvar::new();
+    /// The bytes of the chains let in (changed within the budget's lock, or as chains are
+    /// dropped, which then tells the budget).
+    static HELD: AtomicUsize = AtomicUsize::new(0);
 
-    /// Waits for `n` bytes to be let in, and gives them back.
-    pub fn admit(n: usize) -> usize {
-        let mut held = HELD.lock().unwrap();
-        while *held > 0 && *held + n > AT_ONCE.load(Ordering::Relaxed) {
-            held = FREED.wait(held).unwrap();
-        }
-        *held += n;
-        n
+    /// Chains let in, until dropped.
+    pub struct Admitted(usize, Option<Taken<'static>>);
+
+    /// Waits for `n` bytes of chains to be let in.
+    pub fn admit(n: usize) -> Admitted {
+        let (_, t) = aqr_common::budget::global().wait(|room| {
+            let held = HELD.load(Relaxed);
+            let fits = held + n <= AT_ONCE.load(Relaxed) && room.fits(n as u64);
+            (held == 0 || fits).then(|| {
+                HELD.fetch_add(n, Relaxed);
+                ((), n as u64)
+            })
+        });
+        Admitted(n, Some(t))
     }
 
-    pub fn release(n: usize) {
-        *HELD.lock().unwrap() -= n;
-        FREED.notify_all();
+    impl Drop for Admitted {
+        fn drop(&mut self) {
+            // (before the budget is given back, which tells those waiting)
+            HELD.fetch_sub(self.0, Relaxed);
+            drop(self.1.take());
+        }
     }
 }
 

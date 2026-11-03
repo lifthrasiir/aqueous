@@ -14,6 +14,34 @@ pub struct Counting;
 pub static CUR: AtomicUsize = AtomicUsize::new(0);
 pub static PEAK: AtomicUsize = AtomicUsize::new(0);
 
+/// Blocks of at least this many bytes are counted always, by [`Mapped`] and [`Counting`]
+/// ([`large_in_use`]): those smaller are not, so that their allocations, the most of them,
+/// do not all take one counter of the process (a size compared is all they cost).
+pub const LARGE_MIN: usize = 64 << 10;
+
+static LARGE: AtomicUsize = AtomicUsize::new(0);
+
+/// The bytes of the blocks of at least [`LARGE_MIN`] in use, by the allocators of this module
+/// (none by another): about all of the heap where it is large, which the budget of the process
+/// looks at ([`crate::budget`]).
+pub fn large_in_use() -> u64 {
+    LARGE.load(Relaxed) as u64
+}
+
+#[inline]
+fn large_added(n: usize) {
+    if n >= LARGE_MIN {
+        LARGE.fetch_add(n, Relaxed);
+    }
+}
+
+#[inline]
+fn large_removed(n: usize) {
+    if n >= LARGE_MIN {
+        LARGE.fetch_sub(n, Relaxed);
+    }
+}
+
 /// Allocations of at least this many bytes are logged ([`log_large`]); 0: none.
 static LOG_MIN: AtomicUsize = AtomicUsize::new(0);
 
@@ -24,6 +52,7 @@ thread_local! {
 
 #[inline]
 fn add(n: usize) {
+    large_added(n);
     let c = CUR.fetch_add(n, Relaxed) + n;
     PEAK.fetch_max(c, Relaxed);
     let min = LOG_MIN.load(Relaxed);
@@ -72,11 +101,14 @@ unsafe impl GlobalAlloc for Counting {
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
         unsafe { System.dealloc(p, l) };
+        large_removed(l.size());
         CUR.fetch_sub(l.size(), Relaxed);
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
         let q = unsafe { System.realloc(p, l, n) };
         if !q.is_null() {
+            large_removed(l.size());
+            large_added(n);
             if n >= l.size() {
                 // Both blocks at the moment of the copy.
                 PEAK.fetch_max(CUR.load(Relaxed) + n, Relaxed);
@@ -268,28 +300,40 @@ impl Mapped {
     }
 }
 
-/// (The heap counted for [`crate::trace`], once it is on.)
+/// (The heap counted for [`crate::trace`], once it is on; its large blocks always,
+/// [`large_in_use`].)
 unsafe impl GlobalAlloc for Mapped {
     #[inline]
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
         let p = unsafe { self.raw_alloc(l) };
+        if !p.is_null() {
+            large_added(l.size());
+        }
         crate::trace::allocated(p, l.size());
         p
     }
     #[inline]
     unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
         let p = unsafe { self.raw_alloc_zeroed(l) };
+        if !p.is_null() {
+            large_added(l.size());
+        }
         crate::trace::allocated(p, l.size());
         p
     }
     #[inline]
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        large_removed(l.size());
         crate::trace::freed(p, l.size());
         unsafe { self.raw_dealloc(p, l) }
     }
     #[inline]
     unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
         let q = unsafe { self.raw_realloc(p, l, n) };
+        if !q.is_null() {
+            large_removed(l.size());
+            large_added(n);
+        }
         crate::trace::reallocated(p, l.size(), q, n);
         q
     }

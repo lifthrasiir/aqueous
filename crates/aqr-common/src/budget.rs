@@ -6,6 +6,7 @@
 //! their own files, or drops them, as memory runs short.
 
 use std::sync::{Condvar, Mutex};
+use std::time::Duration;
 
 /// The budget by default: about what the work took before there was one (10gb at 10 threads:
 /// decoding 2.56 GB of peak footprint in 19.5 s, against 4.1–4.6 GB in 16.6–20.1 s with no
@@ -14,25 +15,39 @@ pub const DEFAULT: u64 = 2_000_000_000;
 
 /// Bytes of heap held by the work of the process at once, within a limit. Each consumer weighs
 /// its units (the leaves of an archive decoded, say) and waits for room for the next
-/// ([`Budget::wait`]); but a consumer holding nothing takes one in whatever the others hold,
-/// so that it makes progress (one of them waiting for another inside it, too). A unit larger
-/// than the limit is so taken alone, the limit passed by it.
+/// ([`Budget::wait`]): the bytes the units in have taken (their weights, which they may not
+/// have allocated yet), or the heap in use where more (of [`Budget::measuring`]: what is
+/// allocated by work that takes nothing too), and the next unit's, within the limit. A consumer
+/// holding nothing takes one in whatever is in use, so that it makes progress (one of them
+/// waiting for another inside it, too); a unit larger than the limit is so taken alone, the
+/// limit passed by it.
 pub struct Budget {
-    state: Mutex<Room>,
+    state: Mutex<(u64, u64)>,
     changed: Condvar,
+    heap: Option<fn() -> u64>,
 }
 
-/// The limit of a budget and the bytes taken of it, as a consumer looks ([`Budget::wait`]).
+/// How often a consumer waiting looks at the heap again, which tells nobody as it shrinks.
+const LOOK: Duration = Duration::from_millis(10);
+
+/// The limit of a budget, the bytes taken of it and the heap in use, as a consumer looks
+/// ([`Budget::wait`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Room {
     pub limit: u64,
     pub held: u64,
+    pub heap: u64,
 }
 
 impl Room {
+    /// The bytes in use: those taken, or the heap where more.
+    pub fn used(&self) -> u64 {
+        self.held.max(self.heap)
+    }
+
     /// Whether `n` bytes more fit in.
     pub fn fits(&self, n: u64) -> bool {
-        self.held.saturating_add(n) <= self.limit
+        self.used().saturating_add(n) <= self.limit
     }
 }
 
@@ -44,40 +59,57 @@ pub struct Taken<'a> {
 }
 
 impl Budget {
+    /// A budget of what its units take alone.
     pub const fn new(limit: u64) -> Budget {
-        Budget { state: Mutex::new(Room { limit, held: 0 }), changed: Condvar::new() }
+        Budget { state: Mutex::new((limit, 0)), changed: Condvar::new(), heap: None }
     }
 
-    fn room(&self) -> std::sync::MutexGuard<'_, Room> {
+    /// A budget of what its units take, or of the heap in use that `heap` tells where more.
+    pub const fn measuring(limit: u64, heap: fn() -> u64) -> Budget {
+        Budget { state: Mutex::new((limit, 0)), changed: Condvar::new(), heap: Some(heap) }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, (u64, u64)> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// The room as it is now.
+    pub fn room(&self) -> Room {
+        let (limit, held) = *self.lock();
+        Room { limit, held, heap: self.heap.map_or(0, |h| h()) }
+    }
+
     pub fn limit(&self) -> u64 {
-        self.room().limit
+        self.lock().0
     }
 
     /// Sets the limit (the units in keep what they took).
     pub fn set_limit(&self, limit: u64) {
-        self.room().limit = limit;
+        self.lock().0 = limit;
         self.changed.notify_all();
     }
 
     /// The bytes taken now.
     pub fn held(&self) -> u64 {
-        self.room().held
+        self.lock().1
     }
 
     /// Waits until `f`, looking at the room (each time something is given back or the limit
-    /// changes), takes a unit: what it gives, and the bytes taken for it. `f` runs with the
-    /// budget locked; a lock it takes is taken after the budget's, never before.
+    /// changes, and every [`LOOK`] where the heap is measured), takes a unit: what it gives, and
+    /// the bytes taken for it. `f` runs with the budget locked; a lock it takes is taken after
+    /// the budget's, never before.
     pub fn wait<R>(&self, mut f: impl FnMut(Room) -> Option<(R, u64)>) -> (R, Taken<'_>) {
-        let mut room = self.room();
+        let mut st = self.lock();
         loop {
-            if let Some((r, n)) = f(*room) {
-                room.held = room.held.saturating_add(n);
+            let room = Room { limit: st.0, held: st.1, heap: self.heap.map_or(0, |h| h()) };
+            if let Some((r, n)) = f(room) {
+                st.1 = st.1.saturating_add(n);
                 return (r, Taken { budget: self, n });
             }
-            room = self.changed.wait(room).unwrap_or_else(|e| e.into_inner());
+            st = match self.heap {
+                None => self.changed.wait(st).unwrap_or_else(|e| e.into_inner()),
+                Some(_) => self.changed.wait_timeout(st, LOOK).unwrap_or_else(|e| e.into_inner()).0,
+            };
         }
     }
 
@@ -90,14 +122,15 @@ impl Budget {
 impl Drop for Taken<'_> {
     fn drop(&mut self) {
         // (told of even of no bytes: a consumer may wait for its units to end)
-        self.budget.room().held -= self.n;
+        self.budget.lock().1 -= self.n;
         self.budget.changed.notify_all();
     }
 }
 
-/// The budget of the process, of [`DEFAULT`] bytes until set.
+/// The budget of the process, of [`DEFAULT`] bytes until set, measuring the heap's large blocks
+/// ([`crate::mem::large_in_use`]: none where the allocator is not of [`crate::mem`]).
 pub fn global() -> &'static Budget {
-    static GLOBAL: Budget = Budget::new(DEFAULT);
+    static GLOBAL: Budget = Budget::measuring(DEFAULT, crate::mem::large_in_use);
     &GLOBAL
 }
 
@@ -344,6 +377,25 @@ mod tests {
         });
         assert_eq!(b.held(), 0);
         assert_eq!(most.load(SeqCst), 60);
+    }
+
+    /// The heap in use counts as taken where more than what is, and a consumer waiting sees it
+    /// shrink.
+    #[test]
+    fn heap_measured() {
+        static HEAP: AtomicU64 = AtomicU64::new(0);
+        let b = Budget::measuring(100, || HEAP.load(SeqCst));
+        HEAP.store(80, SeqCst);
+        let _a = b.take(10);
+        assert_eq!(b.room(), Room { limit: 100, held: 10, heap: 80 });
+        assert!(b.room().fits(20) && !b.room().fits(21));
+        std::thread::scope(|s| {
+            let t = s.spawn(|| drop(b.wait(|r| r.fits(50).then_some(((), 50)))));
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            assert!(!t.is_finished());
+            HEAP.store(30, SeqCst);
+            t.join().unwrap();
+        });
     }
 
     /// A raised limit lets in those waiting.

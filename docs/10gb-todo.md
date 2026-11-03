@@ -254,7 +254,8 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html, 10gb.zpa
     33.4 s로 느려진다(FASTA 디코딩이 놀던 코어에서 검증 단계로 옮겨 간다).
 - 풀기(`921778d`에서 2.60 GB, 목표 2 GB): `aqr`는 leaf를 무게(식이 말하는, 한꺼번에 드는 가장 많은
   바이트, 적용의 메모리 한도를 넣어)의 합이 프로세스의 budget(`-M`, 기본 2 GB; 검증도 같은 것을 쓴다) 안일
-  때만 동시에 푼다(`Archive::set_budget`, `aqr_common::budget`). 첫 leaf가 기다리는 동안에는 뒤의 leaf가
+  때만 동시에 푼다(`Archive::set_budget`, `aqr_common::budget`). budget은 신고된 무게와 실제 heap(64 KiB 이상
+  블록) 중 큰 쪽을 보며, 압축의 batch와 LZMA match finder도 같은 budget에서 들어간다. 첫 leaf가 기다리는 동안에는 뒤의 leaf가
   예산 안에서 앞지른다(`Gate`).
   - 무게가 가장 큰 leaf는 `enwik9.zip`과 `enwik9`(각 3.46 GB), `mingw480`의 7z(2.46 GB), 그다음
     1.87 GB이다. 예산을 넘는 leaf는 아무것도 돌지 않을 때 혼자 들어가고, 도는 동안에는 앞지를 자리도

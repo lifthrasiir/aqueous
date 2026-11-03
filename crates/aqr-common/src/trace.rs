@@ -456,6 +456,8 @@ pub struct Sample {
     pub rss: u64,
     /// Workers of the pool reserved or running something.
     pub reserved: u32,
+    /// Bytes taken of the budget of the process ([`crate::budget::global`]).
+    pub held: u64,
     /// By thread ([`Trace::threads`]; those made later missing): its stack ([`Trace::stacks`];
     /// [`DEAD`] where it has ended) and its item ([`NO_ITEM`]: none).
     pub threads: Vec<(u32, u32)>,
@@ -533,6 +535,7 @@ fn sample(stop: &AtomicBool) -> Trace {
             heap: HEAP.load(Relaxed),
             rss: rss(),
             reserved: crate::pool::usage().0 as u32,
+            held: crate::budget::global().held(),
             threads: Vec::with_capacity(threads.len()),
             bytes: Vec::new(),
             outside: Vec::new(),

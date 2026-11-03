@@ -117,8 +117,10 @@
 //! - `-T` is the number of threads (0, the default: as many as the machine has): the size of
 //!   the pool of threads that everything runs on ([`aqr_common::pool`]), this work itself too.
 //! - `-M` (`--memory`) is about the most heap the work takes at once ([`budget`]): the leaves
-//!   of an archive decoded (and of a batch decoded to check it) are let in as their weights fit
-//!   in it, but one at least. A size, `N%` of the system's memory, `avail` (most of what is
+//!   of an archive decoded (and of a batch decoded to check it), the batches of files made and
+//!   the match finders of large LZMA dictionaries are let in as they fit in it beside the heap in
+//!   use (its blocks of 64 KiB or more, counted always) or what those in have taken where more,
+//!   but one of each at least. A size, `N%` of the system's memory, `avail` (most of what is
 //!   available as it starts), or 0 (no limit); 2 GB by default, at most half the system's. The
 //!   pages of files mapped (the inputs, the spill) are not counted: the system writes them out
 //!   or drops them, rather than swapping, as memory runs short.
