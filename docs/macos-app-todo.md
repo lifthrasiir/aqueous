@@ -418,3 +418,83 @@ Blender −2.0%).
 quarantine, provenance 속성이 남는다. 남은 것:
 
 - decmpfs의 투명 압축은 저장 방식이라 보존하지 않는다. 풀면 디스크를 더 쓴다.
+
+## 부록 A. 버전 사이의 실행 파일 차분: 기존 도구와 비교
+
+1과 2(조각 묶기와 주소 공간 다시 쓰기)를 Courgette의 후속인 Zucchini와 범용 차분 도구에 견주었다.
+macOS와는 상관없는 비교이지만, 입력이 이 문서의 앱에서 나왔다.
+
+### 방법
+
+2026-11-03, Apple M4, aqr은 커밋 `511681e`의 `cargo aqr -c`(level mid, 10 스레드).
+
+- 쌍: Chrome Framework 156.0.8078.47→.49, .49→.76, Electron Framework 43.7.7(VS Code)→44.9.3
+  (Discord, 위 측정 뒤 업데이트되었다). `lipo -thin`으로 arm64와 x86-64 슬라이스를 따로 떼어 6쌍.
+- B의 몫: aqr은 A와 B를 한 아카이브로 묶은 크기에서 A 혼자를 뺀 것, 차분 도구는 패치 크기.
+  A가 있을 때 B에 더 드는 바이트이다.
+- Zucchini: Firefox가 들여온 것(`third_party/zucchini`, firefox `7a315fc8`, Zucchini 2.0)을 그
+  `moz.build`의 소스 목록(macOS 몫)대로 Homebrew clang 22로 빌드했다(`-std=c++20 -O2 -DNDEBUG
+  -DMOZ_ZUCCHINI -DHAVE_64BIT_BUILD`, include 경로는 `moz.build`의 것과 `mozilla/moz_zucchini.h`, 링크는
+  Foundation, CoreGraphics, CoreText, Security에 `-dead_strip`). 패치는 압축되지 않으므로 Firefox의 MAR처럼 `xz -9`로 쟀다.
+  생성한 패치는 모두 `-apply`로 B와 바이트까지 같게 돌아왔다.
+- Courgette는 ARM64를 모르고 ELF는 32비트만 받아서 빼었다. Chrome은 Courgette를 Zucchini로 바꾸었다.
+- bsdiff 4.3(출력이 bzip2), xdelta3 3.2.2(`-9 -S lzma -B 1G`), zstd 1.5.7(`-7 --long=31 --patch-from`).
+
+Zucchini와 Courgette는 PE와 ELF만 알고 Mach-O는 그냥 데이터로 다룬다("Zucchini raw"). 그래서 Mach-O
+슬라이스를 ELF64로 감쌌다(돌지는 않고 Zucchini가 읽을 만큼만, `scripts/macho2elf4zucchini.py`). 맞춘
+것은 Zucchini의 코드를 보지 않고 시험으로 찾았다.
+
+- 원래 바이트를 그대로 16 KiB 뒤에 두고, 앞에 ELF 헤더와 세그먼트마다 `PT_LOAD`, 뒤에 섹션마다 섹션
+  헤더를 붙인다. `S_ATTR_*_INSTRUCTIONS`인 섹션은 `SHF_EXECINSTR`.
+- Zucchini는 4 GiB 넘는 주소를 받지 않아서 주소를 첫 세그먼트의 것만큼 내린다(실행 파일의
+  `0x100000000`). PC 상대 참조는 그대로이다.
+- 같은 파일 오프셋의 `SHT_NOBITS` 섹션이 여럿이면 받지 않아서 zerofill 섹션은 뺀다.
+- chained fixup은 ELF 재배치로 옮기지 않았다. 따라서 Zucchini가 본 것은 PC 상대 참조(arm64는 세
+  종류, x86-64는 rel32)뿐으로, aqr의 다시 쓰기와 범위가 같다.
+
+### 크기
+
+B의 몫(MB):
+
+| A → B | aqr | Zucchini(ELF) + xz | Zucchini raw + xz | bsdiff | xdelta3 | zstd `--patch-from` | B 혼자(aqr) |
+|---|---|---|---|---|---|---|---|
+| Chrome .47→.49, arm64 | 12.56 | **3.43** | 6.94 | 6.89 | 20.46 | 53.36 | 79.47 |
+| Chrome .49→.76, arm64 | 23.75 | **9.27** | 16.52 | 18.85 | 38.15 | 69.54 | 79.50 |
+| Electron 43→44, arm64 | 49.72 | **19.64** | 25.70 | 32.00 | 40.70 | 56.22 | 58.98 |
+| Chrome .47→.49, x86-64 | 8.56 | **4.20** | 8.29 | 8.91 | 24.62 | 58.46 | 87.10 |
+| Chrome .49→.76, x86-64 | 24.56 | **10.46** | 19.80 | 23.29 | 43.76 | 75.64 | 87.21 |
+| Electron 43→44, x86-64 | 50.78 | **23.64** | 31.16 | 39.88 | 48.35 | 64.01 | 64.88 |
+| 합계 | 169.93 | **70.64** | 108.41 | 129.82 | 215.04 | 377.23 | 457.14 |
+
+- aqr의 몫은 Zucchini의 2.0–3.7배(합계 2.4배)이다. raw Zucchini도 6쌍 모두, bsdiff도 Chrome .47→.49
+  x86-64 말고는 aqr보다 작다. 결과물을 맞추어 A를 aqr로, B를 Zucchini 패치로 두어도 Electron arm64가 61.47 + 19.64 = 81.11 MB로,
+  aqr로 함께 묶은 111.19 MB보다 27% 작다.
+- ELF로 감싸면 Zucchini의 몫이 raw의 49–56%(Chrome), 76%(Electron)가 된다. aqr의 다시 쓰기가
+  −20%에 그친 Electron(2의 대응표 모양: 함수 배치가 바뀌었다)에서도 Zucchini는 참조를 꽤 짝지었다.
+- 다시 쓰기를 빼도, 곧 raw Zucchini와 bsdiff도 Electron에서 aqr보다 48%, 36% 작다(arm64). 거의 같은 구간을 바이트 차분으로 넘기는 쪽(바뀐 변위와 상수가 0 근처로 모인다)이
+  LZ가 그 구간을 짧은 매치로 끊는 것보다 낫다는 뜻으로 보인다. 재지는 않았다.
+
+### 속도
+
+압축 쪽만 쟀다(`/usr/bin/time -l`). aqr은 A와 B를 모두 압축한 시간이고, 차분 도구는 A가 있다고 보고
+패치만 만든 시간이다(Zucchini의 xz 제외). 차분 도구는 모두 한 스레드이다.
+
+| | 실제 시간 | aqr 대비 실제 | CPU 시간 aqr 대비 | 명령어 | 최대 RSS |
+|---|---|---|---|---|---|
+| aqr | 5.8–11.6 s | | (20.6–34.2 s) | 190–362 G | 2.3–3.0 GB |
+| Zucchini(ELF) | 103–237 s | 9–41배 | 3.3–11.4배 | 664–1719 G | 3.1–4.2 GB |
+| Zucchini raw | 30–82 s | | | 187–651 G | 2.5–3.6 GB |
+| bsdiff | 65–128 s | 6–19배 | 2.3–5.4배 | 176–264 G | 3.7–5.2 GB |
+| xdelta3 | 20–30 s | | | 121–185 G | 1.4–2.5 GB |
+
+- Zucchini(ELF)는 Electron 쌍에서 가장 느리다(236 s, aqr의 29–41배). 참조를 많이 짝지은 쌍이다.
+- bsdiff는 명령어가 aqr의 0.55–1.17배인데 시간은 몇 배이다. 접미사 정렬의 캐시 미스로 보인다.
+- 풀기(`zucchini -apply`, `bspatch`, `aqr -t`)는 재지 않았다.
+
+### 남은 것
+
+- 짝지은 조각에서 B를 A에 대한 바이트 차분(bsdiff식: 근사 일치 구간의 차분과 끼워 넣은 바이트)으로
+  두는 것이 얼마나 듣는지. 다시 쓰기 위에서 남는 몫이 주로 이것인지 먼저 재 볼 것.
+- Zucchini가 Chrome 쌍에서 aqr보다 작은 까닭이 근사 일치인지, 짝짓기(8 MiB 조각을 16 MiB 스트림에서만
+  만나게 하는 것)인지 가르기. 조각을 짝짓지 않고 B 전체를 A 전체와 만나게 한 상한부터.
+- Zucchini 빌드는 저장소에 두지 않았다(위 방법대로 다시 만든다).
