@@ -1,8 +1,8 @@
 //! Names of an archive taken as one by a file system through `aqr -d` (spec, "Extraction"):
 //! entries of names taken as one are a conflict, the later not made; a link whose target names a
 //! link by a name of another case is not made (it could lead out of the directory extracted
-//! into); and the metadata of what was made is applied to that alone, not to what a link made
-//! over it leads to.
+//! into), nor one going round in a loop of links; and the metadata of what was made is applied
+//! to that alone, not to what a link made over it leads to.
 //!
 //! In the temporary directory (macOS's APFS takes names case and normalization aside), and in
 //! each directory of `AQR_TEST_DIRS` (separated by `:`), say on Linux of vfat, exFAT, hfsplus,
@@ -243,4 +243,29 @@ fn mode_through_other_case() {
         assert_eq!(mode, 0o600, "{}: {err}", d.display());
         fs::remove_dir_all(&d).unwrap();
     }
+}
+
+/// `l1` a link to `l2`, `l2` one to `l1`, `s` one to `s/x`: links going round in a loop, told
+/// so (not as reaching out); `d`, to `l1/..`, never resolving either. `ok`, to `.`, is made.
+#[test]
+fn link_loops() {
+    let d = scratch(&std::env::temp_dir(), "link-loops");
+    let tree = Tree {
+        root: Extra::default(),
+        entries: vec![
+            entry("l1", EntryNode::Link("l2".into()), None),
+            entry("l2", EntryNode::Link("l1".into()), None),
+            entry("s", EntryNode::Link("s/x".into()), None),
+            entry("d", EntryNode::Link("l1/..".into()), None),
+            entry("ok", EntryNode::Link(".".into()), None),
+        ],
+    };
+    let (out, err) = extract(&d, &tree, false);
+    for name in ["l1", "l2", "s", "d"] {
+        assert!(err.contains(&format!("{name}: a link going round in a loop of links, not created")), "{name}: {err}");
+        assert!(fs::symlink_metadata(out.join(name)).is_err(), "{name} made");
+    }
+    assert!(!err.contains("reaching out"), "{err}");
+    assert_eq!(fs::read_link(out.join("ok")).unwrap(), Path::new("."), "{err}");
+    fs::remove_dir_all(&d).unwrap();
 }

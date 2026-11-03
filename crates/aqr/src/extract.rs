@@ -775,6 +775,10 @@ impl<'a> Extractor<'a> {
                     self.ap.tell(path, &format!("a link reaching out of {}, not created", of.display()));
                     continue;
                 }
+                Err(Refused::Loop) => {
+                    self.ap.tell(path, "a link going round in a loop of links, not created");
+                    continue;
+                }
                 Err(Refused::Unsure(name)) => {
                     self.ap.tell(
                         path,
@@ -1141,6 +1145,9 @@ fn by_name_add(m: &mut ByName, parent: Option<usize>, n: Name, j: usize) {
 enum Refused {
     /// It reaches out of the directory extracted into.
     Out,
+    /// Following the tree's links on its way does not end: they go round in a loop (or there
+    /// are more of them on the way than the tree has entries).
+    Loop,
     /// A name of its target, `.0`, could be a link of the tree as the file system takes names, or
     /// not: what it leads to is not known.
     Unsure(String),
@@ -1150,7 +1157,7 @@ enum Refused {
 /// tree (`by_name`, of the entries not made aside): the entry (`None`: none of the tree). Refused
 /// where it reaches out of the directory it is extracted into, by an absolute target or by one
 /// going above it (or out of the entry of names `within`, where given: the one extracted as the
-/// root); or where a name of it could be a link as some file system takes names (by case, by
+/// root); where the links on its way go round in a loop; or where a name of it could be a link as some file system takes names (by case, by
 /// normalization, or as a short name of Windows) and not as others: a link is followed only
 /// where the name is the link's as it is, and the link the only entry of names taken as one
 /// there (spec, "Extraction").
@@ -1228,7 +1235,7 @@ fn resolve_link(
                             return Err(unsure());
                         }
                         let EntryNode::Link(next) = &t.entries[j].node else { unreachable!() };
-                        *budget = budget.checked_sub(1).ok_or(Refused::Out)?;
+                        *budget = budget.checked_sub(1).ok_or(Refused::Loop)?;
                         at = resolve(t, names, path_of(t.entries[j].parent), next, budget, find, path_of)?;
                     } else if made && there.is_empty() {
                         return Err(unsure());
