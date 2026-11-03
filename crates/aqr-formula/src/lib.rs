@@ -196,6 +196,19 @@ pub struct Stream {
     pub data: Bytes,
 }
 
+impl Stream {
+    /// The stream of no bytes, of its class and kind.
+    fn clone_empty(&self) -> Stream {
+        Stream {
+            class: self.class.clone(),
+            kind: self.kind,
+            content: self.content,
+            apart: self.apart,
+            data: Bytes::default(),
+        }
+    }
+}
+
 /// A piece of a stream: the stream, and where it starts and ends in it.
 pub type Piece = (usize, u64, u64);
 
@@ -214,7 +227,9 @@ const GROUP_MOST: usize = 4;
 /// into memory, which the system may drop and read again as it likes, rather than a copy of
 /// it). Changing them makes them its own first. Or bytes written to a sink already
 /// ([`aqr::sink::Sink`]), of a stream of it: their length only, slices of the stream being
-/// where they are in the sink's stream; reading or changing them is a bug.
+/// where they are in the sink's stream; reading or changing them is a bug. Or bytes not made
+/// yet ([`Bytes::lazy`]): their length, and what makes them ([`Bytes::made`]) where they are
+/// needed, each time, so that whoever needs them holds them only as long as it does.
 #[derive(Clone)]
 pub struct Bytes(Repr);
 
@@ -223,6 +238,7 @@ enum Repr {
     Owned(Vec<u8>),
     Shared(Arc<dyn AsRef<[u8]> + Send + Sync>),
     Sunk { stream: usize, len: usize },
+    Lazy(Arc<dyn Fn() -> Bytes + Send + Sync>, usize),
 }
 
 impl Bytes {
@@ -233,6 +249,28 @@ impl Bytes {
     /// Stream `stream` of a sink, of `len` bytes so far ([`Bytes`]).
     pub fn sunk(stream: usize, len: usize) -> Bytes {
         Bytes(Repr::Sunk { stream, len })
+    }
+
+    /// Bytes of `len`, not made yet: `make` makes them where they are needed ([`Bytes::made`]).
+    pub fn lazy(len: usize, make: impl Fn() -> Bytes + Send + Sync + 'static) -> Bytes {
+        Bytes(Repr::Lazy(Arc::new(make), len))
+    }
+
+    /// Whether the bytes are not made yet ([`Bytes::lazy`]).
+    pub fn is_lazy(&self) -> bool {
+        matches!(self.0, Repr::Lazy(..))
+    }
+
+    /// The bytes, made where they were not yet (each time: they are not kept), else shared.
+    pub fn made(&self) -> Bytes {
+        match &self.0 {
+            Repr::Lazy(make, len) => {
+                let b = make();
+                assert_eq!(b.len(), *len, "bytes made of the length told");
+                b
+            }
+            _ => self.clone(),
+        }
     }
 
     /// The stream of the sink these bytes are, if they are sunk.
@@ -247,7 +285,7 @@ impl Bytes {
         match &self.0 {
             Repr::Owned(v) => v.len(),
             Repr::Shared(d) => (**d).as_ref().len(),
-            &Repr::Sunk { len, .. } => len,
+            &Repr::Sunk { len, .. } | &Repr::Lazy(_, len) => len,
         }
     }
 
@@ -274,6 +312,7 @@ impl Bytes {
         match &self.0 {
             Repr::Shared(d) => self.0 = Repr::Owned(d.as_ref().as_ref().to_vec()),
             &Repr::Sunk { stream, .. } => sunk(stream),
+            Repr::Lazy(..) => lazy(),
             Repr::Owned(_) => {}
         }
         let Repr::Owned(v) = &mut self.0 else { unreachable!() };
@@ -290,6 +329,7 @@ impl Bytes {
             Repr::Shared(d) if len >= (*d).as_ref().len() => Bytes(Repr::Shared(d)),
             Repr::Shared(d) => Bytes::shared(Arc::new(Slice(d, 0..len))),
             Repr::Sunk { stream, .. } => sunk(stream),
+            Repr::Lazy(..) => lazy(),
         }
     }
 
@@ -302,6 +342,7 @@ impl Bytes {
                 Bytes::shared(Arc::new(Slice(d.clone(), range)))
             }
             &Repr::Sunk { stream, .. } => sunk(stream),
+            Repr::Lazy(..) => lazy(),
         }
     }
 
@@ -310,6 +351,7 @@ impl Bytes {
             Repr::Owned(v) => v,
             Repr::Shared(d) => d.as_ref().as_ref().to_vec(),
             Repr::Sunk { stream, .. } => sunk(stream),
+            Repr::Lazy(..) => lazy(),
         }
     }
 
@@ -334,6 +376,12 @@ impl Bytes {
 #[cold]
 fn sunk(stream: usize) -> ! {
     panic!("the bytes of stream {stream} of the sink are not at hand")
+}
+
+/// Reading bytes not made ([`Bytes::lazy`]) as they are: a bug.
+#[cold]
+fn lazy() -> ! {
+    panic!("bytes not made yet read as they are")
 }
 
 /// Bytes of bytes shared ([`Bytes::prefix`], [`Bytes::slice`]).
@@ -375,6 +423,7 @@ impl std::ops::Deref for Bytes {
             Repr::Owned(v) => v,
             Repr::Shared(d) => d.as_ref().as_ref(),
             &Repr::Sunk { stream, .. } => sunk(stream),
+            Repr::Lazy(..) => lazy(),
         }
     }
 }
@@ -396,6 +445,8 @@ impl PartialEq for Bytes {
         match (&self.0, &other.0) {
             (Repr::Sunk { stream: a, len: m }, Repr::Sunk { stream: b, len: n }) => (a, m) == (b, n),
             (Repr::Sunk { .. }, _) | (_, Repr::Sunk { .. }) => false,
+            (Repr::Lazy(a, m), Repr::Lazy(b, n)) => Arc::ptr_eq(a, b) && m == n,
+            (Repr::Lazy(..), _) | (_, Repr::Lazy(..)) => false,
             _ => **self == **other,
         }
     }
@@ -425,6 +476,7 @@ impl fmt::Debug for Bytes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
             Repr::Sunk { stream, len } => write!(f, "Sunk {{ stream: {stream}, len: {len} }}"),
+            Repr::Lazy(_, len) => write!(f, "Lazy {{ len: {len} }}"),
             _ => fmt::Debug::fmt(&**self, f),
         }
     }
@@ -1455,6 +1507,23 @@ impl Formula {
         let outputs = self.shared_outputs(m)?;
         // the output of a single application, or a stream, as it is
         Ok(self.bytes(&self.root, m, &outputs)?.into_owned())
+    }
+
+    /// A formula of node `n` of this one (of no outputs of applications of several outputs) and
+    /// the streams it slices, each the bytes `data` gives of it (by its index here).
+    pub fn part(&self, n: &Node, data: &dyn Fn(usize) -> Bytes) -> Formula {
+        let mut n = n.clone();
+        let mut of: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+        let mut own: Vec<Stream> = Vec::new();
+        n.slices_mut(&mut |s, _, _| {
+            if let Some(st) = self.streams.get(*s) {
+                *s = *of.entry(*s).or_insert_with(|| {
+                    own.push(Stream { data: data(*s), ..st.clone_empty() });
+                    own.len() - 1
+                });
+            }
+        });
+        Formula { streams: own, root: n, shared: Vec::new() }
     }
 
     /// [`Formula::eval`], the output given to `part` a piece at a time as it is made, rather than
