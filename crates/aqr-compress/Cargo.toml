@@ -61,6 +61,7 @@ aqr-xsv = { path = "../../codecs/aqr-xsv" }
 aqr-zip = { path = "../../codecs/aqr-zip" }
 memmap2 = "0.9"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+zstd = "0.13"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

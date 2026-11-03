@@ -41,13 +41,20 @@ fn key(a: &Apply, inputs: &[&[u8]]) -> Key {
     h.digest128()
 }
 
-/// An application's output: its bytes, or a range of a file (by index).
+/// An application's output: its bytes, a range of a file (by index), or its bytes compressed
+/// (a Zstandard frame at [`PACKED_LEVEL`], and their length).
 #[derive(Clone)]
 enum Output {
     /// (of the store where one is set, see [`crate::Options::spill`])
     Bytes(aqr_formula::Bytes),
     File(usize, Range<usize>),
+    Packed(aqr_formula::Bytes, usize),
 }
+
+/// The zstd level of the outputs kept in the memo that are copies ([`Output::Packed`]): they are
+/// read once, and are most of what compressing a large file holds at its end (3 GB of the
+/// Windows Server DVD's 9).
+const PACKED_LEVEL: i32 = 1;
 
 /// Outputs of applications, by [`key`]; and their memory limits, worked out as they are run
 /// ([`crate::memory`]).
@@ -58,7 +65,13 @@ impl Memo {
     /// Bytes of the outputs kept.
     #[cfg(test)]
     pub fn bytes(&self) -> usize {
-        self.0.values().map(|o| if let Output::Bytes(b) = o { b.len() } else { 0 }).sum()
+        self.0
+            .values()
+            .map(|o| match o {
+                Output::Bytes(b) | Output::Packed(b, _) => b.len(),
+                Output::File(..) => 0,
+            })
+            .sum()
     }
 }
 
@@ -94,11 +107,11 @@ impl Modules for Recording<'_> {
 
     fn keep(&self, a: &Apply, out: Vec<u8>) {
         if let Some(k) = self.keys.lock().unwrap().remove(&(a as *const Apply as usize)) {
-            // (moved to the store where one is set, see [`crate::Options::spill`])
-            let mut b = aqr_formula::store::Buffer::new(out.len());
-            b.copy_from_slice(&out);
-            drop(out);
-            self.seen.lock().unwrap().push((k, Output::Bytes(b.into_bytes())));
+            // (compressed, and moved to the store where one is set, see [`crate::Options::spill`])
+            let packed = zstd::bulk::compress(&out, PACKED_LEVEL).expect("compressed");
+            let mut b = aqr_formula::store::Buffer::new(packed.len());
+            b.copy_from_slice(&packed);
+            self.seen.lock().unwrap().push((k, Output::Packed(b.into_bytes(), out.len())));
         }
     }
 
@@ -164,6 +177,7 @@ impl Modules for Cached<'_> {
         };
         match hit {
             Some(Output::Bytes(out)) => Ok(out.into_vec()),
+            Some(Output::Packed(c, n)) => Ok(zstd::bulk::decompress(&c, n).expect("an output kept")),
             Some(Output::File(i, range)) => file(i, range),
             None => {
                 let ran = self.ran.lock().unwrap().get(&k).copied();
