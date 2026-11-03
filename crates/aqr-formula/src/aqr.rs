@@ -3903,7 +3903,7 @@ fn parts_of(p: &Program, plan: &Streamed) -> Vec<(usize, usize, usize, u64)> {
         {
             continue;
         }
-        out.push((s, e, ids[e] + 1 - ids[s], a.output_sizes[0] as u64));
+        out.push((s, e, ids[e] + 1 - ids[s], a.output_sizes[0]));
     }
     out.sort_unstable();
     out
