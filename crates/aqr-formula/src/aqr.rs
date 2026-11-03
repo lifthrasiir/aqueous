@@ -2614,8 +2614,7 @@ impl Archive<'_, '_> {
         tally.add(0, 0);
         let contents = Contents {
             refs: refs.into_iter().map(AtomicUsize::new).collect(),
-            data: blocks.non_leaf.iter().map(|&(d, zstd, dict)| Mutex::new(Slot::Raw(d, zstd, dict))).collect(),
-            decoded: std::sync::Condvar::new(),
+            data: blocks.non_leaf.iter().map(|&(d, zstd, dict)| Waited::new(Slot::Raw(d, zstd, dict))).collect(),
             dictionaries: &blocks.dictionaries,
             tally: &tally,
         };
@@ -3561,13 +3560,37 @@ enum Item<'a> {
 /// The non-leaf blocks as formula blocks are evaluated (several at once), each with the slices
 /// of it yet to be evaluated or on a stack: once there are none, it is dropped.
 struct Contents<'c, 't> {
-    data: Vec<Mutex<Slot<'c>>>,
+    /// Each told of its block decoded ahead ([`Contents::ahead`]).
+    data: Vec<Waited<Slot<'c>>>,
     dictionaries: &'c [dict::Dictionary],
     refs: Vec<AtomicUsize>,
     /// Told of the blocks as they are decoded.
     tally: &'t Tally<'t>,
-    /// Told of a block decoded ahead ([`Contents::ahead`]).
-    decoded: std::sync::Condvar,
+}
+
+/// A value under a lock with a condition variable of its own: one condition variable waited on
+/// with several mutexes is an error to POSIX (and panics in std on macOS, which checks it).
+struct Waited<T> {
+    value: Mutex<T>,
+    changed: std::sync::Condvar,
+}
+
+impl<T> Waited<T> {
+    fn new(v: T) -> Self {
+        Waited { value: Mutex::new(v), changed: std::sync::Condvar::new() }
+    }
+
+    fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, T>> {
+        self.value.lock()
+    }
+
+    fn wait<'g>(&self, g: std::sync::MutexGuard<'g, T>) -> std::sync::LockResult<std::sync::MutexGuard<'g, T>> {
+        self.changed.wait(g)
+    }
+
+    fn notify_all(&self) {
+        self.changed.notify_all();
+    }
 }
 
 /// How far the leaves' evaluation is, told as it goes where it is to be ([`Archive::on_progress`]).
@@ -3609,7 +3632,7 @@ impl Contents<'_, '_> {
     fn block(&self, o: usize) -> Decoded<Arc<Vec<u8>>> {
         let mut s = self.data[o].lock().unwrap();
         while let Slot::Ahead = *s {
-            s = self.decoded.wait(s).unwrap();
+            s = self.data[o].wait(s).unwrap();
         }
         if let Slot::Raw(d, zstd, dict) = *s {
             let decoded = decoded_with(d, zstd, true, dict.map(|d| &self.dictionaries[d]));
@@ -3639,7 +3662,7 @@ impl Contents<'_, '_> {
             Err(_) => Slot::Raw(d, zstd, dict),
         };
         drop(s);
-        self.decoded.notify_all();
+        self.data[o].notify_all();
     }
 
     fn get<'v>(&self, v: &'v Item) -> &'v [u8] {
@@ -3812,8 +3835,7 @@ fn run<'a>(
         return run_blocks(&p, env, contents, sink, None);
     }
     let by_start: HashMap<usize, usize> = ranges.iter().enumerate().map(|(k, r)| (r.0, k)).collect();
-    let slots: Vec<Mutex<Option<Decoded<Vec<u8>>>>> = (0..ranges.len()).map(|_| Mutex::new(None)).collect();
-    let ready = std::sync::Condvar::new();
+    let slots: Vec<Waited<Option<Decoded<Vec<u8>>>>> = (0..ranges.len()).map(|_| Waited::new(None)).collect();
     let eval =
         |r: Range<usize>| run_ahead(&p, r, env, contents, None, None, None).map(|mut o| o.pop().unwrap_or_default());
     aqr_common::pool::scope(threads.min(AHEAD_PARTS), |s| {
@@ -3823,7 +3845,6 @@ fn run<'a>(
             ranges: &ranges,
             by_start: &by_start,
             slots: &slots,
-            ready: &ready,
             spawned: Cell::new(0),
             running: Arc::default(),
         });
@@ -3895,8 +3916,8 @@ struct PartsAhead<'s, 'env> {
     eval: &'s (dyn Fn(Range<usize>) -> Decoded<Vec<u8>> + Sync),
     ranges: &'s [(usize, usize, usize, u64)],
     by_start: &'s HashMap<usize, usize>,
-    slots: &'s [Mutex<Option<Decoded<Vec<u8>>>>],
-    ready: &'s std::sync::Condvar,
+    /// Each told of its part made ahead.
+    slots: &'s [Waited<Option<Decoded<Vec<u8>>>>],
     spawned: Cell<usize>,
     running: Arc<AtomicUsize>,
 }
@@ -3915,13 +3936,13 @@ impl PartsAhead<'_, '_> {
         {
             let (s, e, _, len) = self.ranges[next];
             held += len;
-            let (eval, slot, ready, running) = (self.eval, &self.slots[next], self.ready, self.running.clone());
+            let (eval, slot, running) = (self.eval, &self.slots[next], self.running.clone());
             running.fetch_add(1, Ordering::Relaxed);
             self.scope.spawn(move || {
                 let v = eval(s..e + 1);
                 *slot.lock().unwrap() = Some(v);
                 running.fetch_sub(1, Ordering::Relaxed);
-                ready.notify_all();
+                slot.notify_all();
             });
             next += 1;
         }
@@ -3935,7 +3956,7 @@ impl PartsAhead<'_, '_> {
             if let Some(d) = v.take() {
                 return d;
             }
-            v = self.ready.wait(v).unwrap();
+            v = self.slots[k].wait(v).unwrap();
         }
     }
 }
