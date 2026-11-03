@@ -29,6 +29,11 @@ fn reshdr(size: usize, flags: u8, offset: usize, orig: usize) -> Vec<u8> {
 /// A WIM file of LZX: the chunks as a resource (twice where `twice`, the second a copy at
 /// another offset), a resource of no compression, the lookup table, XML data.
 fn wim(twice: bool) -> Vec<u8> {
+    wim_with(twice, 1)
+}
+
+/// [`wim`] with `stored` resources of no compression, one right after another.
+fn wim_with(twice: bool, stored: usize) -> Vec<u8> {
     let cs = chunks();
     let mut d = vec![0u8; 208];
     let mut entries = Vec::new();
@@ -43,9 +48,11 @@ fn wim(twice: bool) -> Vec<u8> {
         let orig: usize = cs.iter().map(|c| c.1).sum();
         entries.push(reshdr(d.len() - at, 0x04, at, orig));
     }
-    let at = d.len();
-    d.extend(b"plain data, stored as it is. ".repeat(100));
-    entries.push(reshdr(d.len() - at, 0, at, d.len() - at));
+    for _ in 0..stored {
+        let at = d.len();
+        d.extend(b"plain data, stored as it is. ".repeat(100));
+        entries.push(reshdr(d.len() - at, 0, at, d.len() - at));
+    }
     let lookup = d.len();
     for e in &entries {
         d.extend_from_slice(e);
@@ -72,6 +79,13 @@ fn eval(f: &Formula) -> Vec<u8> {
     f.eval(&Native::default()).unwrap()
 }
 
+/// Bytes of the streams of `raw`, the data (a stream of each application and of each resource
+/// of no compression, the first stream 0).
+fn raw_len(f: &Formula) -> usize {
+    assert_eq!(f.streams[0].class, "raw");
+    f.streams.iter().filter(|s| s.class == "raw").map(|s| s.data.len()).sum()
+}
+
 #[test]
 fn taken_apart_and_given_back() {
     for twice in [false, true] {
@@ -79,7 +93,10 @@ fn taken_apart_and_given_back() {
         let f = formula::encode(&d, 2).expect("a formula");
         assert!(eval(&f) == d);
         let orig: usize = chunks().iter().map(|c| c.1).sum();
-        assert_eq!(f.streams[0].data.len(), orig * (1 + twice as usize) + 2900);
+        assert_eq!(raw_len(&f), orig * (1 + twice as usize) + 2900);
+        // (a stream of the application's data, the resource twice in it one after the other, and
+        // one of the resource of no compression)
+        assert_eq!(f.streams.iter().filter(|s| s.class == "raw").count(), 2);
         assert!(f.streams.iter().any(|s| s.class == "lzx/record"));
     }
 }
@@ -94,7 +111,7 @@ fn chunks_not_taken_kept() {
     d[208] -= 1;
     let f = formula::encode(&d, 1).expect("a formula");
     assert!(eval(&f) == d);
-    assert_eq!(f.streams[0].data.len(), 2900);
+    assert_eq!(raw_len(&f), 2900);
     assert!(f.streams[1].data.len() > chunks().iter().map(|c| c.0.len()).sum::<usize>());
 }
 
@@ -110,12 +127,25 @@ fn applications_in_order() {
         .iter()
         .map(|n| match n {
             aqr_formula::Node::Apply(_) => "apply",
-            aqr_formula::Node::Slice { stream: 0, len: 2900, .. } => "resource",
+            &aqr_formula::Node::Slice { stream, start: 0, len: 2900 } if f.streams[stream].class == "raw" => "resource",
             aqr_formula::Node::Slice { stream: 1, .. } => "rest",
             n => panic!("{n:?}"),
         })
         .collect();
     assert_eq!(kinds, ["apply", "resource", "rest"]);
+}
+
+/// Resources of no compression one right after another are one stream of `raw`, and one slice
+/// of the root (one content), as they would be of a stream of all the data.
+#[test]
+fn stored_together() {
+    let d = wim_with(false, 2);
+    let f = formula::encode(&d, 1).unwrap();
+    assert!(eval(&f) == d);
+    let raw: Vec<usize> = f.streams.iter().filter(|s| s.class == "raw").map(|s| s.data.len()).collect();
+    assert_eq!(raw.len(), 2);
+    let aqr_formula::Node::Concat(ns) = &f.root else { panic!("not a concatenation") };
+    assert!(ns.iter().any(|n| matches!(n, &aqr_formula::Node::Slice { start: 0, len: 5800, .. })));
 }
 
 #[test]

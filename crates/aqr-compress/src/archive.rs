@@ -980,7 +980,7 @@ fn analyze(i: usize, files: &[File], data: Vec<Bytes>, raw: &HashSet<usize>, opt
     let contents = files.iter().zip(&f.streams).map(|(file, s)| (file.c, &s.data[..]));
     cx.files = Some(std::sync::Arc::new(Files::of(notes, contents)));
     let mut taken = HashSet::new();
-    if let Some((mut children, plan)) = nested(&f, &nopt, 0, &cx) {
+    if let Some((mut children, plan)) = nested(&mut f, &nopt, 0, &cx) {
         let sets = sets::sets(&f, &mut children, &plan, &nopt, 0, &cx);
         for s in &sets {
             for &m in &s.members {

@@ -45,6 +45,20 @@ pub(crate) fn contents_apart(f: &Formula) -> bool {
     files_apart(f) || f.applies().iter().any(|a| a.module == aqr_decompress::ZIP)
 }
 
+/// What a formula is as its recompressor made it ([`bundles`], [`files_apart`]): told by its
+/// streams, which may be gone once its contents are in place.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Kinds {
+    pub bundles: bool,
+    pub files_apart: bool,
+}
+
+impl Kinds {
+    pub(crate) fn of(f: &Formula) -> Kinds {
+        Kinds { bundles: bundles(f), files_apart: files_apart(f) }
+    }
+}
+
 /// Whether formula `f` is aqr-iso's, of an image.
 pub(crate) fn is_iso(f: &Formula) -> bool {
     f.streams.get(1).is_some_and(|s| s.class == aqr_iso::formula::REST)

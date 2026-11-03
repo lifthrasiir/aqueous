@@ -37,7 +37,8 @@ fn spilled() {
     println!("peak {:.1} MB, {:.1} MB spilling", heap_used as f64 / 1e6, spilled_used as f64 / 1e6);
     assert!(spilled == heap);
     assert!(aqr_decompress::decompress(&spilled, 1).unwrap() == d);
-    assert!(spilled_used + (16 << 20) < heap_used, "{spilled_used} spilling, {heap_used} not");
+    // (63.2 and 77.7 MB: the formula of the text is no longer copied for the prevalidator either)
+    assert!(spilled_used + (8 << 20) < heap_used, "{spilled_used} spilling, {heap_used} not");
     assert!(std::fs::read_dir(&path).unwrap().next().is_none());
     std::fs::remove_dir(&path).unwrap();
 }

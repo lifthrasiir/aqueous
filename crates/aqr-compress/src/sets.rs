@@ -68,6 +68,11 @@ impl Plan {
     pub fn is_empty(&self) -> bool {
         self.sets.is_empty()
     }
+
+    /// Whether the content of `slice` is a member of a set planned.
+    pub fn holds(&self, slice: &Node) -> bool {
+        at(slice).is_some_and(|a| self.sets.iter().any(|(members, _)| members.iter().any(|m| m.1 == a)))
+    }
 }
 
 /// The plan of the sets of `files` (PNG files, each the whole of a content, with its slice),

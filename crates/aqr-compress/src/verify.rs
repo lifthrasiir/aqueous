@@ -218,32 +218,6 @@ fn hash(d: &[u8]) -> Key {
     xxhash_rust::xxh3::xxh3_128(d)
 }
 
-/// Formulas of at most this many bytes of streams are copied by [`reclaim`] rather than waited
-/// for.
-const RECLAIM_COPY: usize = 64 << 20;
-
-/// `f` once the [`Prevalidator`] is done with it: a copy where it is small and still evaluated
-/// (or waiting to be), else `f` itself when it is.
-pub(crate) fn reclaim(mut f: Arc<Formula>) -> Formula {
-    #[cfg(test)]
-    if crate::tests::COPY.with(std::cell::Cell::get) {
-        return (*f).clone();
-    }
-    loop {
-        match Arc::try_unwrap(f) {
-            Ok(f) => return f,
-            Err(shared) if shared.streams.iter().map(|s| s.data.len()).sum::<usize>() <= RECLAIM_COPY => {
-                return (*shared).clone();
-            }
-            Err(shared) => {
-                let _w = aqr_common::trace::wait("reclaim");
-                f = shared;
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-        }
-    }
-}
-
 impl Prevalidator {
     /// A prevalidator of the formulas made of `files` and of what they hold, each evaluated on
     /// up to `threads` threads.
@@ -258,16 +232,16 @@ impl Prevalidator {
     }
 
     /// Has formula `f` of data `d` evaluated: where it gives `d`, its applications' outputs go
-    /// to the memo.
-    pub fn submit(&self, f: Arc<Formula>, d: &[u8]) {
-        if let Some(j) = self.job(f, d) {
+    /// to the memo (sharing `d` where it is of the store and `share`, else copied).
+    pub fn submit(&self, f: Arc<Formula>, d: &[u8], share: bool) {
+        if let Some(j) = self.job(f, d, share) {
             self.send(j);
         }
     }
 
     /// What [`Prevalidator::submit`] would have evaluated, to [`Prevalidator::send`] later (or
     /// not): `None` for a formula without applications.
-    pub fn job(&self, f: Arc<Formula>, d: &[u8]) -> Option<Deferred> {
+    pub fn job(&self, f: Arc<Formula>, d: &[u8], share: bool) -> Option<Deferred> {
         let at = d.as_ptr() as usize;
         let within = self.files[..self.files.partition_point(|f| f.0.start <= at)]
             .last()
@@ -276,7 +250,8 @@ impl Prevalidator {
         if f.applies().is_empty() {
             return None;
         }
-        let within = within.or_else(|| aqr_formula::store::find(d).map(Where::Store)).unwrap_or(Where::Elsewhere);
+        let shared = || share.then(|| aqr_formula::store::find(d)).flatten();
+        let within = within.or_else(|| shared().map(Where::Store)).unwrap_or(Where::Elsewhere);
         Some(Deferred((f, hash(d), within)))
     }
 

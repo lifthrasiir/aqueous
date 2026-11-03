@@ -38,9 +38,15 @@ Streams:
 
 | stream | class | content |
 |---|---|---|
-| 0 | `raw` (a content) | the data of the resources taken apart, in the file's order |
+| 0 | `raw` (a content) | the data of the first application of `lzx-recons` or resource of no compression taken (empty where none is) |
 | 1 | `wim/rest` | the bytes kept, in the file's order |
-| 2, 3, … | `lzx/record`, `lzx/index` | of each application of `lzx-recons`, its records and index |
+| 2, 3, … | `raw` (a content), `lzx/record`, `lzx/index` | in the file's order: the data of each other application or resource of no compression taken, and each application's records and index |
+
+The data of the resources taken apart is thus in streams of `raw`, one of each application and
+of each resource of no compression, in the file's order; the streams of a class are put
+together as the formula is archived, in that order, so that the archive holds them as one
+stream. (A stream each lets aqr-compress let go of the data of each as its contents are made,
+rather than hold all of it to the end: 6.9 GB of the Windows Server DVD's install.wim.)
 
 A compressed resource is cut into streams of `lzx-recons` of at most 1024 chunks (32 MiB of
 data); it is taken apart where all of them split (aqr-lzx's encoder choices), else kept with
@@ -51,11 +57,11 @@ The root is the concatenation, in the file's order, of:
 
 - **applications** of `lzx-recons` (no parameters): each takes streams of consecutive compressed
   resources, of at most 32 MiB of data in all (but for a stream alone). Its inputs are the
-  streams' data (a slice of `raw`), its records, the bytes kept (slices of `wim/rest`: before
+  streams' data (its stream of `raw`, whole), its records, the bytes kept (slices of `wim/rest`: before
   each stream, the header, chunk tables and resources not taken since the stream before; after
   the last, nothing, or the bytes up to a resource of no compression or the end of the file),
   and its index. Its output is that part of the file.
-- **slices** of `raw`: a resource of no compression taken, whole (a WIM file stored in it is a
+- **streams** of `raw`, whole: a resource of no compression taken (a WIM file stored in it is a
   content of its own, taken apart in turn);
 - **slices** of `wim/rest`: bytes kept that no application holds (before a first resource of
   no compression, or after the last).

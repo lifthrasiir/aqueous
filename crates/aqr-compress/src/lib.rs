@@ -359,6 +359,10 @@ pub(crate) struct Cx {
     /// The prevalidation of those taken, by where their data is: put off until it is known
     /// whether they are taken into a set ([`sets`]), whose files are not evaluated alone.
     deferred: RefCell<Vec<(usize, verify::Deferred)>>,
+    /// Where the data of a content is that is let go of once its formula is made
+    /// ([`make_later`]): data within it is not shared from the store by the prevalidator's memo
+    /// (which would hold it), but copied as other data is.
+    let_go: Option<Range<usize>>,
     /// The contents planned to be coded in a set against a parent ([`sets::plan`]), which are
     /// not made alone.
     skip: RefCell<HashSet<sets::Key>>,
@@ -482,6 +486,7 @@ impl Cx {
             pre: None,
             ready: Default::default(),
             deferred: Default::default(),
+            let_go: None,
             skip: Default::default(),
             top_sets: None,
             later: Default::default(),
@@ -514,6 +519,12 @@ impl Cx {
 
     pub(crate) fn inflate_left(&self) -> u64 {
         self.inflate.get()
+    }
+
+    /// Whether the prevalidator's memo may share data `d` where it is of the store
+    /// ([`Cx::let_go`]).
+    fn shares(&self, d: &[u8]) -> bool {
+        self.let_go.as_ref().is_none_or(|r| !r.contains(&(d.as_ptr() as usize)))
     }
 
     /// Whether the files archived together hold `data` ([`Held`]), but for the one `within`
@@ -1006,19 +1017,21 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
     if format == Format::Text {
         cx.note_coded(&f, d);
     }
-    // evaluated beforehand while its contents are recompressed, which reads it only (once it is
-    // known not to be taken into a set, where made beforehand as a PNG file among contents: it
-    // is put off, and does not hold up [`verify::reclaim`] of a large formula, as only PNG
-    // files are taken into sets)
-    let shared = Arc::new(f);
+    // evaluated beforehand while its contents are recompressed (once it is known not to be
+    // taken into a set, where made beforehand as a PNG file among contents: it is put off, as
+    // only PNG files are taken into sets), a copy of it sharing its bytes: the contents may take
+    // the bytes of their streams out of it as they are made ([`make_later`]), let go of once
+    // the prevalidator is done with them too
+    f.streams.iter_mut().for_each(|s| s.data.share());
+    let shared = Arc::new(f.clone());
     if let Some(pre) = &cx.pre {
         match prepared && format == Format::Png {
             true => pre
-                .job(shared.clone(), d)
+                .job(shared.clone(), d, cx.shares(d))
                 .into_iter()
                 .for_each(|j| cx.deferred.borrow_mut().push((d.as_ptr() as usize, j))),
             false if format == Format::Text && !cx.once.evaluated(d) => {}
-            false => pre.submit(shared.clone(), d),
+            false => pre.submit(shared.clone(), d, cx.shares(d)),
         }
     }
     let mark = cx.deferred.borrow().len();
@@ -1032,16 +1045,18 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
         }
         false => opt,
     };
-    let watches = told_as_second_half(&shared, d);
-    let words = (format == Format::Jsonl).then(|| segment_words(&shared, opt, cx)).flatten();
-    let children = nested(&shared, opt, depth, cx);
+    drop(shared);
+    let watches = told_as_second_half(&f, d);
+    let words = (format == Format::Jsonl).then(|| segment_words(&f, opt, cx)).flatten();
+    // (where the data put off is, and what the formula is, as the contents may take its streams
+    // out of it)
+    let bases: Vec<usize> = f.streams.iter().map(|s| s.data.as_ptr() as usize).collect();
+    let of = bundle::Kinds::of(&f);
+    let children = nested(&mut f, opt, depth, cx);
     if words.is_some() {
         cx.share_words(None);
     }
     drop(watches);
-    // (where the data put off is, as the formula may be a copy once reclaimed)
-    let bases: Vec<usize> = shared.streams.iter().map(|s| s.data.as_ptr() as usize).collect();
-    let mut f = verify::reclaim(shared);
     let mut taken = Vec::new();
     if let Some((mut children, plan)) = children {
         let sets = sets::sets(&f, &mut children, &plan, opt, depth, cx);
@@ -1061,7 +1076,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
         deferred.into_iter().filter(|(at, _)| !taken.contains(at)).for_each(|(_, j)| pre.send(j));
     }
     // (text as aqr-wrt tells, see [`made`])
-    (format == Format::Text || smaller(&f, None, d, opt, cx)).then_some(f)
+    (format == Format::Text || smaller_as(&f, None, d, of, opt, cx)).then_some(f)
 }
 
 /// Text of the contents of a formula shorter than this in all is coded with dictionaries of each
@@ -1166,7 +1181,14 @@ fn files_len(d: &[u8]) -> usize {
 /// cut off ([`takes_place`]), which costs no more apart: a file whose data starts another's
 /// is stored once only where both are cut alike.
 fn smaller(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], opt: &Options, cx: &Cx) -> bool {
-    let bundled = bundle::bundles(f) && cx.held_by_others(d, d);
+    smaller_as(f, gaps, d, bundle::Kinds::of(f), opt, cx)
+}
+
+/// [`smaller`] of formula `f` of what `of` tells, as its recompressor made it: once its
+/// contents are in place, its own streams may be gone (a WIM file's data, all of it cut into
+/// its contents' formulas).
+fn smaller_as(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], of: bundle::Kinds, opt: &Options, cx: &Cx) -> bool {
+    let bundled = of.bundles && cx.held_by_others(d, d);
     if bundled {
         cx.note_bundled(f);
     }
@@ -1174,21 +1196,22 @@ fn smaller(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], opt: &Options, 
     // (an image coded against another's code holds a copy of it, which would only be compressed
     // to be taken off: the code filtered, it is smaller)
     let against = f.streams.iter().any(|s| s.class == exe::REFERENCE);
-    let smaller =
-        !opt.smaller || bundled || covered || against || bundle::files_apart(f) || aqr_ppmd::formula::is(f) || {
-            let pieces: Option<Vec<&[u8]>> = gaps.map(|gaps| gaps.iter().map(|g| &d[g.clone()]).collect());
-            let stand_in = pieces.as_deref().map(|p| (0, p));
-            // (the streams the files archived together hold cost nothing)
-            let free: Vec<usize> = (0..f.streams.len())
-                .filter(|&s| stand_in.is_none_or(|(t, _)| t != s))
-                .filter(|&s| {
-                    // (text coded alike as its copies, whose data was long enough to tell)
-                    let data = &f.streams[s].data;
-                    data.len() >= SHARE_MIN && cx.held_by_others(data, d) || cx.coded_held(data)
-                })
-                .collect();
-            cx.enc.smaller_but(f, stand_in, &free, d).expect("slices within their streams")
-        };
+    let smaller = !opt.smaller || bundled || covered || against || of.files_apart || aqr_ppmd::formula::is(f) || {
+        #[cfg(test)]
+        tests::COMPARED.with(|c| c.borrow_mut().push(d.len()));
+        let pieces: Option<Vec<&[u8]>> = gaps.map(|gaps| gaps.iter().map(|g| &d[g.clone()]).collect());
+        let stand_in = pieces.as_deref().map(|p| (0, p));
+        // (the streams the files archived together hold cost nothing)
+        let free: Vec<usize> = (0..f.streams.len())
+            .filter(|&s| stand_in.is_none_or(|(t, _)| t != s))
+            .filter(|&s| {
+                // (text coded alike as its copies, whose data was long enough to tell)
+                let data = &f.streams[s].data;
+                data.len() >= SHARE_MIN && cx.held_by_others(data, d) || cx.coded_held(data)
+            })
+            .collect();
+        cx.enc.smaller_but(f, stand_in, &free, d).expect("slices within their streams")
+    };
     if smaller {
         // `d` is not archived as it is (`f` is, or is part of something larger kept raw)
         cx.enc.forget(d);
@@ -1472,7 +1495,7 @@ fn fit(base: usize, parts: &[(usize, usize)], limit: usize) -> Vec<bool> {
 /// where it has any application (as many as fit in [`Options::description`]), and the plan of
 /// the sets of them (whose members with a parent have no formula); `None` where none has any
 /// and there is no set.
-fn nested(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<(Contents, sets::Plan)> {
+fn nested(f: &mut Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<(Contents, sets::Plan)> {
     if depth + 1 >= opt.depth {
         return None;
     }
@@ -1481,7 +1504,9 @@ fn nested(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<(Contents, 
     for n in shared_nodes(f).iter().chain([&f.root]) {
         contents(n, f, opt, depth, cx, &mut children);
     }
-    make_later(f, opt, depth, cx, &mut children);
+    // (sets read their members' bytes from the formula once made: those of a tree's top too)
+    let top = depth == 0 && cx.top_sets.is_some();
+    make_later(f, &|n| !top && !plan.holds(n), opt, depth, cx, &mut children);
     // (those not taken: the contents' own nested contents make and take their own)
     let mut ready = cx.ready.borrow_mut();
     prepared.iter().for_each(|k| drop(ready.remove(k)));
@@ -1507,12 +1532,38 @@ fn nested(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<(Contents, 
 /// Makes the contents of [`Cx::later`] (the files of an archive) at once, on up to
 /// [`Options::threads`] threads, each in a context of its own (with the formula made of it
 /// beforehand, if any, and the same prevalidator), into `children`; what is put off of their
-/// prevalidation goes to `cx`'s.
-fn make_later(f: &Formula, opt: &Options, depth: u32, cx: &Cx, children: &mut Contents) {
+/// prevalidation goes to `cx`'s. A content that is all of its stream, and its only slice, takes
+/// the stream's bytes out of `f`, and is cut out of them as soon as it is made: they are let go
+/// of then rather than once all are made (the data of a WIM file's resources, a stream each),
+/// where nothing else holds them (only those of slices that `take`s). Where it takes no place
+/// they are put back.
+fn make_later(
+    f: &mut Formula,
+    take: &dyn Fn(&Node) -> bool,
+    opt: &Options,
+    depth: u32,
+    cx: &Cx,
+    children: &mut Contents,
+) {
     let later = std::mem::take(&mut *cx.later.borrow_mut());
     if later.is_empty() {
         return;
     }
+    let mut slices = vec![0usize; f.streams.len()];
+    f.visit(&mut |n| {
+        if let &Node::Slice { stream, .. } = n
+            && let Some(n) = slices.get_mut(stream)
+        {
+            *n += 1;
+        }
+    });
+    let whole = |f: &Formula, n: &Node| match *n {
+        Node::Slice { stream, start: 0, len } if take(n) => {
+            (slices[stream] == 1 && len > 0 && len == f.streams[stream].data.len() as u64).then_some(stream)
+        }
+        _ => None,
+    };
+    let owned: Vec<Option<usize>> = later.iter().map(|(_, n, _)| whole(f, n)).collect();
     let data = |n: &Node| {
         let &Node::Slice { stream, start, len } = n else { unreachable!("a slice") };
         &f.streams[stream].data[start as usize..][..len as usize]
@@ -1534,22 +1585,51 @@ fn make_later(f: &Formula, opt: &Options, depth: u32, cx: &Cx, children: &mut Co
     // the costliest first, so that a long one is not left to the end, alone
     let mut order: Vec<usize> = (0..later.len()).collect();
     order.sort_by_cached_key(|&i| std::cmp::Reverse(cost(data(&later[i].1))));
+    // (the bytes of the streams taken, shared so as to be moved without a copy)
+    let taken: Vec<std::sync::Mutex<Option<Bytes>>> = owned
+        .iter()
+        .map(|&s| {
+            std::sync::Mutex::new(s.map(|s| {
+                let mut b = std::mem::take(&mut f.streams[s].data);
+                b.share();
+                b
+            }))
+        })
+        .collect();
+    let fr = &*f;
+    let data = |n: &Node| {
+        let &Node::Slice { stream, start, len } = n else { unreachable!("a slice") };
+        &fr.streams[stream].data[start as usize..][..len as usize]
+    };
     let made = aqr_common::pool::par_map(later.len(), opt.threads, |j| {
         let i = order[j];
         let (_, n, nest) = &later[i];
-        let d = data(n);
-        let own = apart.cx(d.len(), opt);
+        let mine = taken[i].lock().unwrap().take();
+        let d = mine.as_deref().unwrap_or_else(|| data(n));
+        let mut own = apart.cx(d.len(), opt);
+        own.let_go = mine.is_some().then_some(d.as_ptr_range()).map(|r| r.start as usize..r.end as usize);
         own.ready.borrow_mut().extend(std::mem::take(&mut *ready[i].lock().unwrap()));
         files.inspect(|f| f.tell(d.as_ptr(), false));
         let _item = aqr_common::trace::item(files.and_then(|f| f.content(d.as_ptr())));
         let mut child = made(d, opt, depth + 1, *nest, &own).filter(|c| takes_place(&c.f));
-        child.iter_mut().for_each(|c| aqr_formula::store::spill_streams(&mut c.f));
         files.inspect(|f| f.tell(d.as_ptr(), true));
-        (child, own.deferred.into_inner(), own.enc)
+        // (cut out of the bytes taken, which are let go of; put back where it takes no place)
+        let back = match mine {
+            Some(mine) if child.is_some() => {
+                child = child.map(|c| Made::from(c.cut(&mine)));
+                None
+            }
+            mine => mine,
+        };
+        child.iter_mut().for_each(|c| aqr_formula::store::spill_streams(&mut c.f));
+        (child, back, own.deferred.into_inner(), own.enc)
     });
     let mut made: Vec<_> = order.into_iter().zip(made).collect();
     made.sort_unstable_by_key(|&(i, _)| i);
-    for ((at, ..), (_, (child, deferred, enc))) in later.into_iter().zip(made) {
+    for (((at, ..), (_, (child, back, deferred, enc))), s) in later.into_iter().zip(made).zip(owned) {
+        if let (Some(s), Some(back)) = (s, back) {
+            f.streams[s].data = back;
+        }
         children[at].1 = child;
         cx.deferred.borrow_mut().extend(deferred);
         // (so that what holds it is sized and written without compressing its streams again)
@@ -1798,7 +1878,10 @@ fn place_slices(
             Some(Placed::Made(child)) => {
                 // (a child is of a slice within its stream)
                 let data = &mut f.streams[stream].data;
-                let child = if slices[stream] == 1 && start == 0 && len == data.len() as u64 {
+                // (one cut already, out of the bytes it took, takes none: [`make_later`])
+                let child = if child.gaps.is_none() {
+                    child.f
+                } else if slices[stream] == 1 && start == 0 && len == data.len() as u64 {
                     child.cut_from(std::mem::take(data))
                 } else {
                     child.cut(&data[start as usize..][..len as usize])
@@ -2203,8 +2286,8 @@ mod tests {
         pub(crate) static DECONSTRUCTED: Cell<usize> = const { Cell::new(0) };
         /// The files of [`pure`] formats given to their recompressors.
         pub(crate) static PURE: Cell<usize> = const { Cell::new(0) };
-        /// Whether [`verify::reclaim`] copies every formula (as it does those still evaluated).
-        pub(crate) static COPY: Cell<bool> = const { Cell::new(false) };
+        /// The lengths of the data compared with their formulas by [`smaller`].
+        pub(crate) static COMPARED: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
     }
 
     /// The lengths of the texts given to aqr-wrt, on any thread.
@@ -2252,6 +2335,37 @@ mod tests {
         let large: Vec<_> = f.streams.iter().filter(|s| s.content && s.data.len() >= aqr_formula::store::MIN).collect();
         assert!(!large.is_empty() && large.iter().all(|s| s.data.is_shared()));
         assert!(compress(&shared, &Options::default()) == plain);
+        // a file all of its stream takes its bytes, cut out of them as it is made (let go of
+        // then): the JPEG file's stream empty, its formula of no gaps left
+        let mut f = bundle::iso(&shared).unwrap();
+        let opt = Options { shared_modules: true, ..Options::default() };
+        let cx = Cx::new(&shared, &opt);
+        let (children, _) = nested(&mut f, &opt, 0, &cx).unwrap();
+        let (n, child) = children.iter().find(|c| c.1.as_ref().is_some_and(|c| !c.f.applies().is_empty())).unwrap();
+        let &Node::Slice { stream, .. } = n else { panic!("a slice") };
+        assert!(f.streams[stream].data.is_empty() && child.as_ref().unwrap().gaps.is_none());
+    }
+
+    /// An image whose first file of no kind (stream 0) is taken by its content's formula, and
+    /// dropped from the image's, is still taken as an image once its contents are in place: not
+    /// compared with its data (which would compress all of it).
+    #[test]
+    fn images_not_compared() {
+        let fixture = |p: &str| std::fs::read(format!("{}/../../{p}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let mut d = zstd::stream::decode_all(&fixture("codecs/aqr-iso/tests/data/udf201.iso.zst")[..]).unwrap();
+        let jpeg = fixture("codecs/aqr-jpeg/tests/data/gradient.jpg");
+        let files = aqr_iso::files(&d);
+        let first = aqr_iso::pieces(&d, &files)
+            .into_iter()
+            .find(|p| p.file.is_some_and(|i| kind_by_name(&files[i].name) == Kind::Unknown))
+            .unwrap();
+        assert!(first.span.len() >= jpeg.len());
+        d[first.span.start..][..jpeg.len()].copy_from_slice(&jpeg);
+        COMPARED.with(|c| c.borrow_mut().clear());
+        let f = recompress(&d, &Options { shared_modules: true, ..Options::default() });
+        assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
+        assert!(f.eval(&Native::default()).unwrap() == d);
+        assert!(!COMPARED.with(|c| c.borrow().contains(&d.len())));
     }
 
     /// A CAB file's MSZIP folder is taken apart into its files, recompressed in turn: a JPEG file
@@ -2640,8 +2754,8 @@ mod tests {
         assert!(f.eval(&Native::default()).unwrap() == d);
     }
 
-    /// The sets planned are made where the formula of the contents is a copy once reclaimed
-    /// from the prevalidator (as one is that it still evaluates).
+    /// The sets planned are made where the formula of the contents is not the one the
+    /// prevalidator evaluates (a copy of it, sharing its bytes).
     #[test]
     fn sets_of_copies() {
         let files = [
@@ -2650,11 +2764,40 @@ mod tests {
             variant(200, 150, Some((90, 10, 30, 90))),
         ];
         let d = stored_zip(&[("a.png", &files[0]), ("b.png", &files[1]), ("c.png", &files[2])]);
-        COPY.with(|c| c.set(true));
         let (c, f) = compress_formula(&d, &Options { threads: 2, shared_modules: true, ..Options::default() });
-        COPY.with(|c| c.set(false));
         assert_eq!(f.shared.len(), 1);
         assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
+    }
+
+    /// Among files made apart (an image's) of which sets are planned, those not in a set still
+    /// take the bytes of their streams as they are made ([`make_later`]); the members keep
+    /// theirs, which the sets are made of.
+    #[test]
+    fn taken_beside_sets() {
+        let jpeg =
+            std::fs::read(format!("{}/../../codecs/aqr-jpeg/tests/data/gradient.jpg", env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+        let named = [
+            (&b"a.png"[..], variant(200, 150, None)),
+            (b"b.png", variant(200, 150, Some((20, 30, 40, 50)))),
+            (b"c.png", variant(200, 150, Some((90, 10, 30, 90)))),
+            (b"j.jpg", jpeg),
+        ];
+        let (mut d, mut files, mut pieces) = (Vec::new(), Vec::new(), Vec::new());
+        for (i, (name, data)) in named.iter().enumerate() {
+            let span = d.len()..d.len() + data.len();
+            d.extend_from_slice(data);
+            files.push(aqr_iso::File { name: name.to_vec(), extents: vec![span.clone()], rank: 0 });
+            pieces.push(aqr_iso::Piece { span, file: Some(i) });
+        }
+        let mut f = aqr_iso::formula::build(&d, &files, &pieces, &aqr_iso::formula::Options { kind: kind_by_name });
+        let opt = Options { threads: 2, shared_modules: true, ..Options::default() };
+        let cx = Cx::new(&d, &opt);
+        let (_, plan) = nested(&mut f, &opt, 0, &cx).unwrap();
+        assert!(!plan.is_empty());
+        let of = |class: &str| f.streams.iter().filter(|s| s.class == class).map(|s| s.data.len()).collect::<Vec<_>>();
+        assert!(of("iso/png").len() == 3 && of("iso/png").iter().all(|&n| n > 0));
+        assert_eq!(of("iso/jpeg"), [0]);
     }
 
     /// The DEFLATE stream of a gzip file is deconstructed where its data may archive smaller
@@ -2971,7 +3114,7 @@ mod tests {
             let data =
                 if content { f.push_content("data", Kind::Unknown, d.clone()) } else { f.push("data", d.clone()) };
             f.root = Node::apply(aqr_decompress::X86, vec![], vec![data], d.len() as u64);
-            let children = nested(&f, &opt, 0, &cx);
+            let children = nested(&mut f, &opt, 0, &cx);
             assert_eq!(children.is_some(), content);
             if let Some((mut children, _)) = children {
                 assert_eq!(children.len(), 1);
