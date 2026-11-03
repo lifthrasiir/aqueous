@@ -43,7 +43,7 @@ pub use tree::{
 };
 
 use std::borrow::Cow;
-use std::cell::{RefCell, RefMut};
+use std::cell::{Cell, RefCell, RefMut};
 use std::collections::hash_map::Entry as MapEntry;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -2615,6 +2615,7 @@ impl Archive<'_, '_> {
         let contents = Contents {
             refs: refs.into_iter().map(AtomicUsize::new).collect(),
             data: blocks.non_leaf.iter().map(|&(d, zstd, dict)| Mutex::new(Slot::Raw(d, zstd, dict))).collect(),
+            decoded: std::sync::Condvar::new(),
             dictionaries: &blocks.dictionaries,
             tally: &tally,
         };
@@ -3565,6 +3566,8 @@ struct Contents<'c, 't> {
     refs: Vec<AtomicUsize>,
     /// Told of the blocks as they are decoded.
     tally: &'t Tally<'t>,
+    /// Told of a block decoded ahead ([`Contents::ahead`]).
+    decoded: std::sync::Condvar,
 }
 
 /// How far the leaves' evaluation is, told as it goes where it is to be ([`Archive::on_progress`]).
@@ -3593,9 +3596,10 @@ impl Tally<'_> {
 }
 
 /// A non-leaf block: its data as it is in the archive (and whether it is Zstandard data) until
-/// first sliced, then decoded until no slice of it is left.
+/// first sliced (or being decoded ahead), then decoded until no slice of it is left.
 enum Slot<'c> {
     Raw(&'c [u8], bool, Option<usize>),
+    Ahead,
     Decoded(Arc<Vec<u8>>),
     Gone,
 }
@@ -3604,6 +3608,9 @@ impl Contents<'_, '_> {
     /// The data of block `o`, while any slice of it is to be evaluated: decoded the first time.
     fn block(&self, o: usize) -> Decoded<Arc<Vec<u8>>> {
         let mut s = self.data[o].lock().unwrap();
+        while let Slot::Ahead = *s {
+            s = self.decoded.wait(s).unwrap();
+        }
         if let Slot::Raw(d, zstd, dict) = *s {
             let decoded = decoded_with(d, zstd, true, dict.map(|d| &self.dictionaries[d]));
             self.tally.add(d.len() as u64, 0);
@@ -3613,6 +3620,26 @@ impl Contents<'_, '_> {
             Slot::Decoded(d) => Ok(d.clone()),
             _ => unreachable!("a block with slices left"),
         }
+    }
+
+    /// Decodes block `o` ahead of its first slice, where it is not yet (and does not fail: one
+    /// that does is left to be decoded, and fail, as it is sliced).
+    fn ahead(&self, o: usize) {
+        let mut s = self.data[o].lock().unwrap();
+        let Slot::Raw(d, zstd, dict) = *s else { return };
+        *s = Slot::Ahead;
+        drop(s);
+        let decoded = decoded_with(d, zstd, true, dict.map(|d| &self.dictionaries[d]));
+        let mut s = self.data[o].lock().unwrap();
+        *s = match decoded {
+            Ok(b) => {
+                self.tally.add(d.len() as u64, 0);
+                Slot::Decoded(Arc::new(b))
+            }
+            Err(_) => Slot::Raw(d, zstd, dict),
+        };
+        drop(s);
+        self.decoded.notify_all();
     }
 
     fn get<'v>(&self, v: &'v Item) -> &'v [u8] {
@@ -3769,6 +3796,55 @@ impl Writer<'_, '_> {
 /// given and the output may be streamed ([`streamed`]), it is written to `sink` as its parts
 /// are evaluated, rather than held whole, and no output is returned.
 fn run<'a>(p: Program<'a>, env: &Env, contents: &Contents, sink: Option<&mut Taker<'_>>) -> Decoded<Vec<Vec<u8>>> {
+    // the blocks in the order they are first sliced, each decoded ahead of it on a worker of the
+    // pool where one is free, [`AHEAD_BLOCKS`] at most at once
+    let mut firsts: Vec<usize> = Vec::new();
+    let mut first_at: HashMap<usize, usize> = HashMap::new();
+    for insn in &p.insns {
+        if let &Insn::Slice { block, .. } = insn {
+            let o = p.blocks[block];
+            first_at.entry(o).or_insert_with(|| {
+                firsts.push(o);
+                firsts.len() - 1
+            });
+        }
+    }
+    if firsts.len() < 2 {
+        return run_ahead(p, env, contents, sink, None);
+    }
+    aqr_common::pool::scope(AHEAD_BLOCKS, |s| {
+        let ahead = (s.workers() > 0).then_some(Ahead {
+            scope: s,
+            firsts: &firsts,
+            first_at: &first_at,
+            next: Cell::new(1),
+            running: Arc::default(),
+        });
+        run_ahead(p, env, contents, sink, ahead.as_ref())
+    })
+}
+
+/// Blocks decoded at most at once ahead of their first slice ([`run`]).
+const AHEAD_BLOCKS: usize = 3;
+
+/// The blocks of a program decoded ahead ([`run`]): in the order they are first sliced, by
+/// block, and the next to decode.
+struct Ahead<'s, 'env, 'x> {
+    scope: &'s aqr_common::pool::Scope<'s, 'env>,
+    firsts: &'x [usize],
+    first_at: &'x HashMap<usize, usize>,
+    next: Cell<usize>,
+    running: Arc<AtomicUsize>,
+}
+
+/// [`run`], blocks decoded `ahead` where given.
+fn run_ahead<'a, 'r: 's, 's, 'c: 's, 't: 's>(
+    p: Program<'a>,
+    env: &Env,
+    contents: &'r Contents<'c, 't>,
+    sink: Option<&mut Taker<'_>>,
+    ahead: Option<&Ahead<'s, '_, '_>>,
+) -> Decoded<Vec<Vec<u8>>> {
     let plan = sink.is_some().then(|| streamed(&p)).flatten();
     let mut w = match (plan.as_ref(), sink) {
         (Some(plan), Some(sink)) => Some(Writer { plan, sink, next: 0, held: HashMap::new(), hash: Xxh64::new(0) }),
@@ -3807,6 +3883,25 @@ fn run<'a>(p: Program<'a>, env: &Env, contents: &Contents, sink: Option<&mut Tak
             }
             Insn::Slice { block, start, len } => {
                 let o = p.blocks[block];
+                if let Some(a) = ahead
+                    && let Some(&at) = a.first_at.get(&o)
+                {
+                    // (those after the block first sliced now, as workers are free)
+                    let mut next = a.next.get().max(at + 1);
+                    while next < a.firsts.len()
+                        && next <= at + AHEAD_BLOCKS
+                        && a.running.load(Ordering::Relaxed) < a.scope.workers()
+                    {
+                        let (b, running) = (a.firsts[next], a.running.clone());
+                        running.fetch_add(1, Ordering::Relaxed);
+                        a.scope.spawn(move || {
+                            contents.ahead(b);
+                            running.fetch_sub(1, Ordering::Relaxed);
+                        });
+                        next += 1;
+                    }
+                    a.next.set(next);
+                }
                 let d = contents.block(o)?;
                 let r = usize::try_from(start)
                     .ok()
