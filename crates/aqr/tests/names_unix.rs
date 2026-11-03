@@ -368,3 +368,70 @@ fn force_over_links_to_directories() {
     }
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// With `-f`, a directory where something else of the archive goes (a file, a hard link, a
+/// link) is taken away with what is under it, where it is in the directory extracted into; not
+/// where it is not (renamed to `.`), nor where it holds the archive.
+#[test]
+fn force_over_directories() {
+    let d = scratch(&std::env::temp_dir(), "force-dirs");
+    let grouped = |name: &str, c| Entry {
+        extra: Extra { link_group: Some(1), ..Extra::default() },
+        ..entry(name, EntryNode::File(c), None)
+    };
+    let tree = Tree {
+        root: Extra::default(),
+        entries: vec![
+            entry("f", EntryNode::File(0), None),
+            grouped("h1", 1),
+            grouped("h2", 1),
+            entry("l", EntryNode::Link("f".into()), None),
+        ],
+    };
+    let out = d.join("out");
+    let fill = || {
+        for n in ["f", "h2", "l"] {
+            fs::create_dir_all(out.join(n).join("deeper")).unwrap();
+            fs::write(out.join(n).join("deeper/x"), b"x").unwrap();
+        }
+    };
+    fs::create_dir(&out).unwrap();
+    fill();
+    // (without -f: told as there)
+    let (_, err) = extract_with(&d, &tree, false, &["f"]);
+    assert!(err.contains("f exists (-f to overwrite)"), "{err}");
+    let (_, err) = extract_with(&d, &tree, true, &[]);
+    assert_eq!(fs::read(out.join("f")).unwrap(), b"content 0", "{err}");
+    assert_eq!(fs::read_link(out.join("l")).unwrap(), Path::new("f"), "{err}");
+    {
+        use std::os::unix::fs::MetadataExt;
+        let (a, b) = (fs::metadata(out.join("h1")).unwrap(), fs::metadata(out.join("h2")).unwrap());
+        assert_eq!((a.ino(), a.nlink()), (b.ino(), 2), "{err}");
+    }
+
+    // renamed to `.`: not taken away
+    let w = d.join("w");
+    fs::create_dir_all(w.join("keep")).unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_aqr"))
+        .current_dir(&w)
+        .args(["-d", "-f", "../a.aqr", "f", "--rename", "."])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success() && err.contains("is a directory, not taken away"), "{err}");
+    assert!(w.join("keep").is_dir(), "{err}");
+
+    // holding the archive: not taken away
+    fs::remove_dir_all(&out).unwrap();
+    fs::create_dir_all(out.join("f")).unwrap();
+    fs::copy(d.join("a.aqr"), out.join("f/a.aqr")).unwrap();
+    let inner = out.join("f/a.aqr");
+    let o = Command::new(env!("CARGO_BIN_EXE_aqr"))
+        .args(["-d".as_ref(), "-f".as_ref(), "-o".as_ref(), out.as_os_str(), inner.as_os_str()])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success() && err.contains("is a directory, not taken away"), "{err}");
+    assert!(inner.is_file(), "{err}");
+    fs::remove_dir_all(&d).unwrap();
+}

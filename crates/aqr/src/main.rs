@@ -104,7 +104,10 @@
 //!   set-user-ID and set-group-ID bits, FIFOs and devices, and the backup times. An archive of
 //!   a single file has no metadata. On Linux, the inputs are read without updating their access
 //!   times where this process may (`O_NOATIME`: files it owns).
-//! - `-f` overwrites outputs. `--rm` removes the inputs once their archive is made (and checked,
+//! - `-f` overwrites outputs. Extracting, what is where an entry goes is taken away for it
+//!   (a link itself, never followed), a directory with what is under it only where it is in
+//!   the directory extracted into and holds neither the archive nor the current directory
+//!   ([`extract`]). `--rm` removes the inputs once their archive is made (and checked,
 //!   but with `--no-check`), or an archive once it is extracted whole, as zstd's `--rm` does:
 //!   compressing, what was archived of them (the directories last, where left empty; what was
 //!   not archived, or what changed or was written in their place since it was read, is kept
@@ -1902,7 +1905,9 @@ fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Forma
         let r = ticking(a, &view, || -> Result<_, String> {
             let x = match place {
                 None => None,
-                Some(p) => Some(extract::Extractor::new(p, force, a.links, &ap, &seen, a.select.clone(), &a.names)?),
+                Some(p) => Some(
+                    extract::Extractor::new(p, force, a.links, &ap, &seen, a.select.clone(), &a.names)?.keeping(input),
+                ),
             };
             let sink =
                 Unpacking { x: x.as_ref(), input, quiet: a.quiet, view: shown, seen: &seen, sizes: Default::default() };
@@ -2140,7 +2145,8 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
             let ap = meta::Applier { privileged: a.preserve, quiet: a.quiet };
             let r = ticking(a, &*view, || {
                 let x =
-                    extract::Extractor::new(place.unwrap(), force, a.links, &ap, &seen, a.select.clone(), &a.names)?;
+                    extract::Extractor::new(place.unwrap(), force, a.links, &ap, &seen, a.select.clone(), &a.names)?
+                        .keeping(input);
                 match x.entries(t, &(0..t.entries.len()).collect::<Vec<_>>()) {
                     Err(_) if x.skipped() => return Ok(None),
                     r => r?,

@@ -190,6 +190,9 @@ pub struct Extractor<'a> {
     skipped: AtomicBool,
     /// Which links are made.
     links: Links,
+    /// What a directory taken away with `-f` must not hold (as canonical paths): the current
+    /// directory and the archives read ([`Extractor::keeping`]).
+    keep: Vec<PathBuf>,
     ap: &'a meta::Applier,
     seen: &'a stats::Seen,
     /// The names as this system writes them ([`names`]).
@@ -312,6 +315,7 @@ impl<'a> Extractor<'a> {
             force: AtomicBool::new(force),
             skipped: AtomicBool::new(false),
             links,
+            keep: std::env::current_dir().and_then(fs::canonicalize).into_iter().collect(),
             ap,
             seen,
             names: Names::new(opts, folding.0 == Folding::Exact),
@@ -321,6 +325,17 @@ impl<'a> Extractor<'a> {
             files: AtomicUsize::new(0),
             bytes: AtomicU64::new(0),
         })
+    }
+
+    /// Has nothing taken away with `-f` that holds `archive` (being read).
+    pub fn keeping(mut self, archive: &Path) -> Self {
+        self.keep.extend(fs::canonicalize(archive));
+        self
+    }
+
+    /// With `-f`, takes away what is at `path` ([`clear`]).
+    fn clear(&self, top: Option<&Path>, path: &Path) -> Result<(), String> {
+        clear(self.force.load(Relaxed), &self.keep, top, path)
     }
 
     /// Makes entries `new` of `t` (new ones, or ones told before and changed since: made again),
@@ -527,9 +542,7 @@ impl<'a> Extractor<'a> {
                     s.content[i] = Some(*c);
                     match s.linked[i] {
                         Some(j) => {
-                            if force && fs::symlink_metadata(&path).is_ok_and(|m| !m.is_dir()) {
-                                fs::remove_file(&path).map_err(|x| err(&path, x))?;
-                            }
+                            self.clear(s.top.as_deref(), &path)?;
                             fs::hard_link(&s.paths[j], &path).map_err(|x| err(&path, x))?;
                             // (of a content written already: counted now)
                             if let Some(&Some(n)) = self.written.lock().unwrap().get(*c) {
@@ -541,6 +554,7 @@ impl<'a> Extractor<'a> {
                             if e.extra.link_group.is_none() && e.extra.forks.is_empty() {
                                 s.soon[i] = Some(e.extra.clone());
                             } else {
+                                self.clear(s.top.as_deref(), &path)?;
                                 create(&path, force)?;
                             }
                             s.files[*c].0.push(i);
@@ -550,9 +564,7 @@ impl<'a> Extractor<'a> {
                 // (made once all else is)
                 EntryNode::Link(_) => {}
                 EntryNode::Fifo | EntryNode::Device { .. } => {
-                    if force && fs::symlink_metadata(&path).is_ok_and(|m| !m.is_dir()) {
-                        fs::remove_file(&path).map_err(|x| err(&path, x))?;
-                    }
+                    self.clear(s.top.as_deref(), &path)?;
                     if !self.ap.special(&path, &e.node)? {
                         continue;
                     }
@@ -711,6 +723,7 @@ impl<'a> Extractor<'a> {
             let p = &s.paths[i];
             match &s.soon[i] {
                 Some(x) => {
+                    self.clear(s.top.as_deref(), p)?;
                     let mut f = create(p, self.force.load(Relaxed))?;
                     f.write_all(&d).map_err(|e| err(p, e))?;
                     self.ap.apply_file(&f, p, x)?;
@@ -812,9 +825,7 @@ impl<'a> Extractor<'a> {
                     continue;
                 }
             };
-            if force && fs::symlink_metadata(path).is_ok_and(|m| !m.is_dir()) {
-                fs::remove_file(path).map_err(|x| err(path, x))?;
-            }
+            clear(force, &self.keep, s.top.as_deref(), path)?;
             // (on Windows, of the kind recorded, else by what it leads to; spec, "Extraction")
             let dir = match e.extra.win_link_type {
                 Some(k) => k != 0,
@@ -1164,6 +1175,34 @@ fn by_name_add(m: &mut ByName, parent: Option<usize>, n: Name, j: usize) {
     for k in n.keys() {
         m.entry((parent, k)).or_default().push(j);
     }
+}
+
+/// Where `force`, takes away what is at `path`, where something not a directory of the
+/// archive goes: anything not a directory (a link itself), and a directory with what is under
+/// it, but only where it is in the directory extracted into, `top`, and holds none of `keep`
+/// (an error otherwise). Nothing where not `force`.
+fn clear(force: bool, keep: &[PathBuf], top: Option<&Path>, path: &Path) -> Result<(), String> {
+    if !force {
+        return Ok(());
+    }
+    let Ok(m) = fs::symlink_metadata(path) else { return Ok(()) };
+    if !m.is_dir() {
+        // (a link to a directory on Windows is removed as a directory)
+        return fs::remove_file(path)
+            .or_else(|e| if cfg!(windows) && m.is_symlink() { fs::remove_dir(path) } else { Err(e) })
+            .map_err(|e| err(path, e));
+    }
+    let canon = |p: &Path| fs::canonicalize(if p.as_os_str().is_empty() { Path::new(".") } else { p });
+    let d = canon(path).map_err(|e| err(path, e))?;
+    let within = top.and_then(|t| canon(t).ok()).is_some_and(|t| d != t && d.starts_with(&t));
+    let why = if !within {
+        "not in the directory extracted into"
+    } else if keep.iter().any(|k| k.starts_with(&d)) {
+        "holding the archive or the current directory"
+    } else {
+        return fs::remove_dir_all(path).map_err(|e| err(path, e));
+    };
+    Err(format!("{} is a directory, not taken away ({why})", path.display()))
 }
 
 /// Makes `dir`, the archive's own directory: where something is there, an error, but where
