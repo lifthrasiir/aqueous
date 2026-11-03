@@ -71,7 +71,12 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
     // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
     let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
     let decrypted = match aqr::envelope::is_encrypted(&c) {
-        true => Some(decrypt(&c, input, a.opt.threads)?),
+        // (not listed from chunks that do not authenticate, whose bytes are not to be trusted:
+        // decompressing or testing repairs it)
+        true => match decrypt(&c, input, a.opt.threads)? {
+            (d, erased) if erased.is_empty() => Some(d),
+            _ => return Err(err(&"encrypted chunks not authenticating (-t repairs what it can)")),
+        },
         false => None,
     };
     // (no module is run)

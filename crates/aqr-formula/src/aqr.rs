@@ -2446,7 +2446,9 @@ fn open_with<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, sealed: bool, salvagin
     if at != fields.len() || size_hint != (archive_end - HEADER_MAGIC.len()) as u64 {
         return invalid("bad footer");
     }
-    let mut blocks = parse(&c[HEADER_MAGIC.len()..archive_end], size_hint, metadata != 0, sealed)?;
+    // (salvaging an encrypted archive's payload, its blocks lost are spacer blocks, its size
+    // hint block among them maybe)
+    let mut blocks = parse(&c[HEADER_MAGIC.len()..archive_end], size_hint, metadata != 0, sealed && !salvaging)?;
     let meta = match metadata {
         0 => None,
         back => {

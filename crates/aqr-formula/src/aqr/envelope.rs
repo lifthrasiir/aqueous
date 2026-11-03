@@ -143,9 +143,14 @@ impl Fields {
 
     /// The cipher of the payload under `file_key`.
     fn payload(&self, file_key: &[u8; 16]) -> ChaCha20Poly1305 {
+        ChaCha20Poly1305::new(&self.payload_key(file_key))
+    }
+
+    /// The key of the payload under `file_key`.
+    fn payload_key(&self, file_key: &[u8; 16]) -> Key {
         let mut k = Key::default();
         Hkdf::<Sha256>::new(Some(self.nonce()), file_key).expand(b"payload", &mut k).expect("32 bytes");
-        ChaCha20Poly1305::new(&k)
+        k
     }
 
     /// The header of an archive `mirrored` or not.
@@ -322,7 +327,7 @@ impl<W: Write + Seek> Sealer<W> {
         if e.fields.0 != self.fields.0 {
             return invalid("not the archive sealed");
         }
-        Ok(Unlocked { cipher: self.cipher.clone(), chunks: e.chunks })
+        Ok(Unlocked { cipher: self.cipher.clone(), key: self.fields.payload_key(&self.file_key), chunks: e.chunks })
     }
 
     pub fn get_ref(&self) -> &W {
@@ -383,6 +388,8 @@ pub struct Envelope<'c> {
 /// An encrypted archive whose file key is unwrapped: its payload to be decrypted.
 pub struct Unlocked<'c> {
     cipher: ChaCha20Poly1305,
+    /// The payload's key, for chunks that do not authenticate ([`Unlocked::decrypt_lossy`]).
+    key: Key,
     chunks: Vec<&'c [u8]>,
 }
 
@@ -401,7 +408,29 @@ pub fn open(c: &[u8]) -> Decoded<Envelope<'_>> {
     if !(12..0x3f).contains(&fields.work_factor()) {
         return invalid("bad work factor");
     }
-    let mut chunks = Vec::with_capacity((c.len() - h) / SEALED + 1);
+    let (chunks, cut) = chunks_of(c, mirrored);
+    if cut {
+        return invalid("truncated encrypted chunk");
+    }
+    envelope(fields, chunks)
+}
+
+/// The envelope of `fields` and `chunks`, checked.
+fn envelope(fields: Fields, chunks: Vec<&[u8]>) -> Decoded<Envelope<'_>> {
+    if chunks.is_empty() {
+        return invalid("no payload");
+    }
+    if fields.work_factor() > WORK_FACTOR_LIMIT {
+        return Err(Failure::Resource(format!("a work factor of {} (over {WORK_FACTOR_LIMIT})", fields.work_factor())));
+    }
+    Ok(Envelope { fields, chunks })
+}
+
+/// The chunks sealed of encrypted archive `c` (`mirrored` or not), at the places the spec
+/// tells; and whether the last was too short to hold anything (left out).
+fn chunks_of(c: &[u8], mirrored: bool) -> (Vec<&[u8]>, bool) {
+    let h = header_len(mirrored);
+    let mut chunks = Vec::with_capacity(c.len().saturating_sub(h) / SEALED + 1);
     let mut at = h;
     while at < c.len() {
         let m = chunks.len() as u64;
@@ -410,18 +439,78 @@ pub fn open(c: &[u8]) -> Decoded<Envelope<'_>> {
         }
         let rest = c.len().saturating_sub(at);
         if rest <= 16 {
-            return invalid("truncated encrypted chunk");
+            return (chunks, true);
         }
         chunks.push(&c[at..at + rest.min(SEALED)]);
         at += rest.min(SEALED);
     }
-    if chunks.is_empty() {
-        return invalid("no payload");
+    (chunks, false)
+}
+
+/// Where the `k`-th mirrored header (from 1) is in its archive (spec, "Encrypted archives").
+fn mirror_at(k: u32) -> u64 {
+    let m = if k <= 6 { (1u64 << k) - 1 } else { 64 * (k as u64 - 5) - 1 };
+    header_len(true) as u64 + SEALED as u64 * m + MIRROR as u64 * (k as u64 - 1)
+}
+
+/// The header fields of an intact mirrored header of `c` telling that its archive starts where
+/// `c` does (found by its magic), and its index.
+fn mirrored_header(c: &[u8]) -> Option<(Fields, u32)> {
+    let mut from = 0;
+    while let Some(i) = c.get(from..)?.windows(8).position(|w| w == ENCRYPTED_MIRROR_MAGIC) {
+        let at = from + i;
+        from = at + 1;
+        let Some(h) = c.get(at..at + MIRROR) else { break };
+        let k = u32::from_le_bytes(h[8..12].try_into().unwrap());
+        if k == 0 || xxh64(&h[..MIRROR - 8], 0).to_le_bytes() != h[MIRROR - 8..] || mirror_at(k) != at as u64 {
+            continue;
+        }
+        return Some((Fields(h[12..12 + FIELDS].try_into().unwrap()), k));
     }
-    if fields.work_factor() > WORK_FACTOR_LIMIT {
-        return Err(Failure::Resource(format!("a work factor of {} (over {WORK_FACTOR_LIMIT})", fields.work_factor())));
+    None
+}
+
+/// Whether `c` is an encrypted archive whose header magic is damaged: one not starting with a
+/// header magic of any kind, of an intact mirrored header telling that its archive starts where
+/// `c` does.
+pub fn is_damaged_encrypted(c: &[u8]) -> bool {
+    !is_encrypted(c)
+        && !c.starts_with(&HEADER_MAGIC)
+        && !c.starts_with(&OVERLAY_HEADER_MAGIC)
+        && mirrored_header(c).is_some()
+}
+
+/// What [`open_damaged`] did of an encrypted archive.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Opened {
+    /// The mirrored header (its index) whose fields were taken, the header not intact.
+    pub header_from: Option<u32>,
+    /// Whether the archive is cut short: the bytes after its last chunk whole too few to hold
+    /// anything (left out).
+    pub cut: bool,
+}
+
+/// Encrypted archive `c` parsed as [`open`] does, but damaged (spec, "Repair"): the header fields
+/// of an intact mirrored header where its header is not intact (its magic or its checksum
+/// damaged), and its last chunk left out where it is too short to hold anything.
+pub fn open_damaged(c: &[u8]) -> Decoded<(Envelope<'_>, Opened)> {
+    let mirrored = c.starts_with(&ENCRYPTED_MIRRORED_HEADER_MAGIC);
+    let h = header_len(mirrored);
+    let intact = (mirrored || c.starts_with(&ENCRYPTED_HEADER_MAGIC))
+        && c.get(..h).is_some_and(|header| !mirrored || xxh64(&header[..h - 8], 0).to_le_bytes() == header[h - 8..])
+        && (12..0x3f).contains(&c[8]);
+    let (fields, mirrored, header_from) = match intact {
+        true => (Fields(c[8..8 + FIELDS].try_into().unwrap()), mirrored, None),
+        false => match mirrored_header(c) {
+            Some((f, k)) => (f, true, Some(k)),
+            None => return invalid("an encrypted header damaged, and no intact mirrored header"),
+        },
+    };
+    if !(12..0x3f).contains(&fields.work_factor()) {
+        return invalid("bad work factor");
     }
-    Ok(Envelope { fields, chunks })
+    let (chunks, cut) = chunks_of(c, mirrored);
+    Ok((envelope(fields, chunks)?, Opened { header_from, cut }))
 }
 
 impl<'c> Envelope<'c> {
@@ -441,7 +530,7 @@ impl<'c> Envelope<'c> {
         if mac.iter().zip(f.mac()).fold(0, |d, (a, b)| d | (a ^ b)) != 0 {
             return invalid("bad header MAC");
         }
-        Ok(Unlocked { cipher: f.payload(&key), chunks: self.chunks.clone() })
+        Ok(Unlocked { cipher: f.payload(&key), key: f.payload_key(&key), chunks: self.chunks.clone() })
     }
 }
 
@@ -477,6 +566,47 @@ impl Unlocked<'_> {
             Ok(())
         });
         r.into_iter().collect()
+    }
+
+    /// The payload decrypted into `out` (of [`Unlocked::len`] bytes) as [`Unlocked::decrypt_into`]
+    /// does, but of chunks that do not authenticate too: decrypted without it (their bytes not to
+    /// be trusted, spec "Repair"), the last one tried as not the last too (the archive cut short
+    /// after it). Returns the chunks that do not authenticate.
+    pub fn decrypt_lossy(&self, out: &mut [u8], threads: usize) -> Vec<usize> {
+        use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
+        assert_eq!(out.len(), self.len());
+        const TASK: usize = 64;
+        let last = self.chunks.len() - 1;
+        let parts: Vec<std::sync::Mutex<&mut [u8]>> = out.chunks_mut(CHUNK * TASK).map(std::sync::Mutex::new).collect();
+        let failed = aqr_common::pool::par_map(parts.len(), threads, |t| {
+            let mut part = parts[t].lock().unwrap();
+            let mut failed = Vec::new();
+            for (i, d) in part.chunks_mut(CHUNK).enumerate() {
+                let m = t * TASK + i;
+                let c = self.chunks[m];
+                let (body, tag) = (&c[..c.len() - 16], Tag::from_slice(&c[c.len() - 16..]));
+                let authentic = [m == last, false].into_iter().take(1 + (m == last) as usize).any(|is_last| {
+                    d.copy_from_slice(body);
+                    self.cipher.decrypt_in_place_detached(&chunk_nonce(m as u64, is_last), &[], d, tag).is_ok()
+                });
+                if !authentic {
+                    // (ChaCha20-Poly1305's keystream: from the second block, the first the MAC's key)
+                    d.copy_from_slice(body);
+                    let mut k = chacha20::ChaCha20::new(&self.key, &chunk_nonce(m as u64, m == last));
+                    k.seek(64u64);
+                    k.apply_keystream(d);
+                    failed.push(m);
+                }
+            }
+            failed
+        });
+        failed.into_iter().flatten().collect()
+    }
+
+    /// The bytes of the payload of chunk `m`.
+    pub fn chunk_range(&self, m: usize) -> std::ops::Range<usize> {
+        let start = m * CHUNK;
+        start..start + self.chunks[m].len() - 16
     }
 
     /// The payload decrypted.
@@ -576,6 +706,47 @@ mod tests {
         let mut d = c.clone();
         d[8] = WORK_FACTOR_LIMIT + 1;
         assert!(matches!(open(&d).map(|_| ()), Err(Failure::Resource(_))));
+    }
+
+    /// Damaged, an archive is still decrypted: chunks that do not authenticate without it (their
+    /// bytes but the damaged ones as they were), the header from a mirrored header, the last
+    /// chunk cut short left out (the one before it then the last, as not flagged so).
+    #[test]
+    fn decrypts_damaged() {
+        let a = archive(5 * CHUNK + 100);
+        let c = sealed(&a, b"pass", true);
+        // (as sealed: its size hint filled in)
+        let a = opened(&c, b"pass").unwrap();
+        let lossy = |c: &[u8]| {
+            let (e, o) = open_damaged(c).unwrap();
+            let u = e.unlock(b"pass").unwrap();
+            let mut d = vec![0; u.len()];
+            let failed = u.decrypt_lossy(&mut d, 2);
+            let ranges: Vec<_> = failed.iter().map(|&m| u.chunk_range(m)).collect();
+            (d, failed, o, ranges)
+        };
+        let (d, failed, o, _) = lossy(&c);
+        assert!(d == a && failed.is_empty() && o == Opened::default());
+        // (chunk 2: after the mirrored headers before chunks 1 and 3)
+        let at = chunk_at(2, true) as usize + 1000;
+        let mut x = c.clone();
+        x[at] ^= 0x40;
+        let (d, failed, _, ranges) = lossy(&x);
+        assert!(failed == [2] && ranges.len() == 1 && ranges[0] == (2 * CHUNK..3 * CHUNK));
+        let diff: Vec<usize> = (0..a.len()).filter(|&i| d[i] != a[i]).collect();
+        assert_eq!(diff, [2 * CHUNK + 1000]);
+        // the header magic and its checksum damaged: from the first mirrored header
+        let mut x = c.clone();
+        x[0] ^= 1;
+        x[50] ^= 1;
+        assert!(is_damaged_encrypted(&x) && !is_damaged_encrypted(&c));
+        let (d, failed, o, _) = lossy(&x);
+        assert!(d == a && failed.is_empty() && o.header_from == Some(1));
+        // cut in the last chunk: what is left of it, too short, left out, the chunk before it
+        // taken as the last
+        let cut = chunk_at(5, true) as usize + 10;
+        let (d, failed, o, _) = lossy(&c[..cut]);
+        assert!(o.cut && failed.is_empty() && d[..] == a[..5 * CHUNK]);
     }
 
     #[test]

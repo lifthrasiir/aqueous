@@ -320,3 +320,52 @@ fn leaves_damaged_files_out() {
     assert!(t.contains(&format!("{}: lost (invalid archive: checksum mismatch)", gone.0)), "{t}");
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// An encrypted archive made with `-A`, damaged: its header (taken from a mirrored header), its
+/// last chunk (of the mirror blocks after the metadata block and the footer: the footer made
+/// again), a chunk of a file's block (that file lost, the others extracted).
+#[test]
+fn repairs_encrypted() {
+    let d = scratch("encrypted");
+    let mut want = source(&d);
+    for i in 0..6 {
+        let name = format!("n{i}.bin");
+        let n = noise(900_000, 200 + i);
+        fs::write(d.join("src").join(&name), &n).unwrap();
+        want.push((name, n));
+    }
+    want.sort();
+    let o = aqr_fed(&d, &["-q", "-A", "-P", "-B", "1M", "-o", "e.aqr", "src"], b"secret\n");
+    assert!(o.status.success(), "{}", stderr(&o));
+    let e = fs::read(d.join("e.aqr")).unwrap();
+    let extract = |name: &str, bytes: &[u8]| {
+        fs::write(d.join("x.aqr"), bytes).unwrap();
+        let out = d.join(name);
+        let o = aqr_fed(&d, &["-d", "-P", "-o", out.to_str().unwrap(), "x.aqr"], b"secret\n");
+        (o.status.success(), stderr(&o), files(&out))
+    };
+    // the header magic and its checksum
+    let mut x = e.clone();
+    x[0] ^= 1;
+    x[50] ^= 1;
+    let (ok, t, got) = extract("header", &x);
+    assert!(ok && t.contains("taken from mirrored header 1"), "{t}");
+    assert_eq!(got, want);
+    // the last chunk's tag
+    let mut x = e.clone();
+    let n = x.len();
+    x[n - 3] ^= 1;
+    let (ok, t, got) = extract("last", &x);
+    assert!(ok && t.contains("1 encrypted chunk not authenticating") && t.contains("its footer made again"), "{t}");
+    assert_eq!(got, want);
+    // a chunk amid the files that do not compress, first in the archive
+    let mut x = e.clone();
+    x[n / 3] ^= 1;
+    let (ok, t, got) = extract("amid", &x);
+    assert!(!ok && t.contains("1 encrypted chunk not authenticating") && t.contains("1 file lost"), "{t}");
+    assert_eq!(got.len(), want.len() - 1, "{t}");
+    assert!(got.iter().all(|f| want.contains(f)));
+    let gone = want.iter().find(|f| !got.contains(f)).unwrap();
+    assert!(t.contains(&format!("{}: lost (", gone.0)), "{t}");
+    fs::remove_dir_all(&d).unwrap();
+}

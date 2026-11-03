@@ -1970,9 +1970,13 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
     // an encrypted one decrypted into memory (not backed by a file, so that nothing decrypted
     // is written out but the output)
-    let decrypted = match aqr::envelope::is_encrypted(&c) {
-        true => Some(decrypt(&c, input, a.opt.threads)?),
-        false => None,
+    // (and its chunks that do not authenticate, their bytes not to be trusted)
+    let (decrypted, erased) = match aqr::envelope::is_encrypted(&c) || aqr::envelope::is_damaged_encrypted(&c) {
+        true => {
+            let (d, erased) = decrypt(&c, input, a.opt.threads)?;
+            (Some(d), erased)
+        }
+        false => (None, Vec::new()),
     };
     let decoder =
         Decoder { native: Native { threads: a.opt.threads }, wasm: a.wasm, sandbox: a.sandbox.then(OnceLock::new) };
@@ -1981,27 +1985,26 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     // differ, its footer made again where it is cut short after its last metadata block
     let read: &[u8] = decrypted.as_deref().unwrap_or(&c[..]);
     let mirrors = aqr::mirror::check(read);
-    let restored = aqr::mirror::repair(read, &mirrors, true);
+    let restored = aqr::mirror::repair(read, &mirrors, true, &erased);
     if let Some(r) = &restored {
+        if r.header {
+            eprintln!("{}: its header magic restored", input.display());
+        }
         if r.restored > 0 {
             let s = if r.restored == 1 { "" } else { "s" };
             eprintln!("{}: {} damaged block{s} restored from mirror blocks", input.display(), r.restored);
         }
-        match &r.lost {
-            Some(l) => eprintln!(
-                "{}: cut short before its last metadata block, {} bytes lost; salvaging what is left",
-                input.display(),
-                l.len()
-            ),
-            None if r.footer => {
-                eprintln!("{}: cut short after its last metadata block, its footer made again", input.display())
-            }
-            None => {}
+        if r.footer {
+            eprintln!("{}: its footer made again", input.display());
+        }
+        if !r.lost.is_empty() {
+            let n: usize = r.lost.iter().map(|l| l.len()).sum();
+            eprintln!("{}: {n} bytes lost; salvaging what is left", input.display());
         }
     }
     let read: &[u8] = restored.as_ref().map_or(read, |r| &r.bytes);
     // (salvaged where bytes were lost: their files lost, the others given back as they check)
-    let mut archive = match (restored.as_ref().is_some_and(|r| r.lost.is_some()), decrypted.is_some()) {
+    let mut archive = match (restored.as_ref().is_some_and(|r| !r.lost.is_empty()), decrypted.is_some()) {
         (true, sealed) => aqr::open_salvaging(read, runner, sealed),
         (false, true) => aqr::open_payload(read, runner),
         (false, false) => aqr::open(read, runner),
@@ -2258,10 +2261,18 @@ fn tell_archival(
 }
 
 /// The payload of encrypted archive `c` (of `input`), decrypted on `threads` threads, by a
-/// passphrase given ([`pass`]).
-fn decrypt(c: &[u8], input: &Path, threads: usize) -> Result<memmap2::Mmap, String> {
+/// passphrase given ([`pass`]); damaged ([`aqr::envelope::open_damaged`]), its header from a
+/// mirrored header, and its chunks that do not authenticate decrypted without it, told: their
+/// bytes in the payload, not to be trusted.
+fn decrypt(c: &[u8], input: &Path, threads: usize) -> Result<(memmap2::Mmap, Vec<std::ops::Range<usize>>), String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
-    let e = aqr::envelope::open(c).map_err(|e| err(&e))?;
+    let (e, opened) = aqr::envelope::open_damaged(c).map_err(|e| err(&e))?;
+    if let Some(k) = opened.header_from {
+        eprintln!("{}: its encrypted header damaged, taken from mirrored header {k}", input.display());
+    }
+    if opened.cut {
+        eprintln!("{}: cut short in its last encrypted chunk", input.display());
+    }
     let unlocked = pass::keys().open(input, |p| match e.unlock(p) {
         Ok(u) => Ok(Some(u)),
         Err(Failure::Decryption(_)) => Ok(None),
@@ -2271,8 +2282,13 @@ fn decrypt(c: &[u8], input: &Path, threads: usize) -> Result<memmap2::Mmap, Stri
         return Err(err(&pass::keys().none_opens()));
     };
     let mut d = memmap2::MmapMut::map_anon(u.len()).map_err(|e| err(&e))?;
-    u.decrypt_into(&mut d, threads).map_err(|e| err(&e))?;
-    d.make_read_only().map_err(|e| err(&e))
+    let failed = u.decrypt_lossy(&mut d, threads);
+    if !failed.is_empty() {
+        let s = if failed.len() == 1 { "" } else { "s" };
+        eprintln!("{}: {} encrypted chunk{s} not authenticating, not trusted", input.display(), failed.len());
+    }
+    let erased = failed.iter().map(|&m| u.chunk_range(m)).collect();
+    Ok((d.make_read_only().map_err(|e| err(&e))?, erased))
 }
 
 /// By content of `archive` (decoded into `out`), the path of its first file in the archive (of

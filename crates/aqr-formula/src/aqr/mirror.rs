@@ -434,6 +434,8 @@ pub struct Found {
     /// block's data is in the archive.
     pub head: Vec<u8>,
     pub data: Range<usize>,
+    /// Whether its magic is an overlay archive's.
+    pub overlay: bool,
 }
 
 impl Found {
@@ -503,7 +505,8 @@ fn mirror_at(a: &[u8], at: usize, ty: u64, data: Range<usize>, start: Option<usi
     let mut head = Vec::with_capacity(10 + 8);
     varint::put(&mut head, target_ty);
     head.extend_from_slice(&(data.len() as u64).to_le_bytes()[..width]);
-    let f = Found { at, end, archive_start, target, ty: target_ty, head, data };
+    let overlay = d[..8] == OVERLAY_MIRROR_MAGIC;
+    let f = Found { at, end, archive_start, target, ty: target_ty, head, data, overlay };
     // (the two not overlapping)
     let apart = if follows { end <= target } else { f.target_end() <= at };
     apart.then_some(f)
@@ -679,32 +682,109 @@ pub struct Repaired {
     pub bytes: Vec<u8>,
     /// The blocks restored from mirror blocks.
     pub restored: usize,
-    /// Whether the footer was made again (the archive cut short after its last metadata block).
+    /// Whether the header magic was restored (damaged, the mirror blocks telling the archive
+    /// starts after it).
+    pub header: bool,
+    /// Whether the footer was made again (the archive cut short after its last metadata block,
+    /// or its footer not to be trusted).
     pub footer: bool,
-    /// Salvaging, the bytes lost before a block restored past the end (the archive cut short
-    /// before it), now a spacer block: the archive is to be salvaged
+    /// The bytes lost, salvaging: before a block restored past the end (the archive cut short
+    /// before it), and the blocks of bytes not to be trusted ([`repair`]'s `erased`), now spacer
+    /// blocks (or non-leaf blocks that do not verify): the archive is to be salvaged
     /// ([`super::open_salvaging`]).
-    pub lost: Option<Range<usize>>,
+    pub lost: Vec<Range<usize>>,
+}
+
+/// Whether ranges `a` and `b` overlap.
+fn overlap(a: &Range<usize>, b: &Range<usize>) -> bool {
+    a.start < b.end && b.start < a.end
+}
+
+/// Ranges `of` but for those in `but`, each sorted and apart.
+fn subtract(of: &[Range<usize>], but: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut out = Vec::new();
+    for r in of {
+        let mut at = r.start;
+        for b in but.iter().filter(|b| overlap(b, r)) {
+            if b.start > at {
+                out.push(at..b.start);
+            }
+            at = at.max(b.end);
+        }
+        if at < r.end {
+            out.push(at..r.end);
+        }
+    }
+    out
+}
+
+/// Appends a non-leaf data block of `n` bytes (even, at least 10) whose checksum does not
+/// verify: in place of one lost, so that the non-leaf blocks after it keep their ordinals.
+fn failing_non_leaf(out: &mut Vec<u8>, n: usize) {
+    let (ss, width) = match n {
+        0..=257 => (0u8, 1),
+        258..=65_538 => (1, 2),
+        65_539..=0xffff_ffff => (2, 4),
+        _ => (3, 8),
+    };
+    let size = n - 1 - width;
+    out.push(super::NON_LEAF_RAW as u8 | ss);
+    out.extend_from_slice(&(size as u64).to_le_bytes()[..width]);
+    let zeros = vec![0; size - 8];
+    out.extend_from_slice(&zeros);
+    out.extend_from_slice(&(xxh64(&zeros, 0) ^ 1).to_le_bytes());
 }
 
 /// Archive `a` repaired (spec, "Repair") by what [`check`] found of it (`c`), where anything
-/// was: the target blocks not as an intact mirror block tells restored from the first of them
-/// (a block past the end of `a` too, where it starts within it; where `salvage`, one starting
-/// further too, the bytes from the end of the last block whole to it a spacer block); then,
-/// where the blocks no longer reach a footer at the end but are cut short after the last
-/// metadata block (with only spacer blocks and blocks of non-critical types after it), the
-/// footer made again after the last block whole.
-pub fn repair(a: &[u8], c: &Check, salvage: bool) -> Option<Repaired> {
+/// was:
+///
+/// - The header magic restored where the mirror blocks (found by their magic) tell the archive
+///   starts after it.
+/// - The target blocks not as an intact mirror block tells restored from the first of them (a
+///   block past the end of `a` too, where it starts within it; where `salvage`, one starting
+///   further too, the bytes from the end of the last block whole to it a spacer block).
+/// - Bytes of `a` `erased` (an encrypted archive's chunks that do not authenticate, decrypted
+///   without it): mirror blocks there not used; salvaging, the blocks there not restored lost,
+///   each a spacer block (a non-leaf data block a non-leaf block that does not verify, for those
+///   after it to keep their ordinals). The blocks are read through them only to tell where they
+///   are, checked by reaching the start of a block a mirror block tells; where they do not, the
+///   bytes up to the next such start are lost. The footer there is made again.
+/// - Where the blocks no longer reach a footer at the end but are cut short after the last
+///   metadata block (with only spacer blocks and blocks of non-critical types after it), the
+///   footer made again after the last block whole (and the size hint block first, if any, set).
+pub fn repair(a: &[u8], c: &Check, salvage: bool, erased: &[Range<usize>]) -> Option<Repaired> {
     // (read one after another up to a footer at the end, as all its blocks are as they are to be)
-    if c.walked && c.differing(a).next().is_none() {
+    if c.walked && erased.is_empty() && c.differing(a).next().is_none() {
         return None;
     }
+    let mirrors: Vec<&Found> =
+        c.mirrors.iter().filter(|m| !erased.iter().any(|e| overlap(e, &(m.at..m.end)))).collect();
     let mut v: Option<Vec<u8>> = None;
-    let good: HashSet<usize> = c.mirrors.iter().filter(|m| m.matches(a)).map(|m| m.target).collect();
-    let headed = a.starts_with(&HEADER_MAGIC) || a.starts_with(&OVERLAY_HEADER_MAGIC);
+    let mut header = false;
+    let mut headed = a.starts_with(&HEADER_MAGIC) || a.starts_with(&OVERLAY_HEADER_MAGIC);
+    if !headed
+        && a.len() >= HEADER_MAGIC.len()
+        && !mirrors.is_empty()
+        && mirrors.iter().all(|m| m.archive_start == HEADER_MAGIC.len())
+    {
+        let overlay = mirrors[0].overlay;
+        let b = v.get_or_insert_with(|| a.to_vec());
+        b[..6].copy_from_slice(if overlay { &OVERLAY_HEADER_MAGIC } else { &HEADER_MAGIC });
+        (header, headed) = (true, true);
+    }
+    // (the bytes restored or found as a mirror block tells: to be trusted, erased or not)
+    let mut trusted: Vec<Range<usize>> = Vec::new();
+    let good: HashSet<usize> = mirrors
+        .iter()
+        .filter(|m| m.matches(a))
+        .map(|m| {
+            trusted.push(m.target..m.target_end());
+            m.target
+        })
+        .collect();
     let mut restored = HashSet::new();
-    let mut lost = None;
-    for m in &c.mirrors {
+    let mut lost = Vec::new();
+    for m in &mirrors {
         if good.contains(&m.target) || restored.contains(&m.target) {
             continue;
         }
@@ -722,9 +802,9 @@ pub fn repair(a: &[u8], c: &Check, salvage: bool) -> Option<Repaired> {
             b.truncate(e);
             if m.target > e {
                 spacer(b, (m.target - e) as u64);
+                // (nothing lost where only a padding byte was cut off)
+                lost.push(e..m.target);
             }
-            // (nothing lost where only a padding byte was cut off)
-            lost = (e < m.target).then_some(e..m.target);
         }
         let end = m.target_end();
         if b.len() < end {
@@ -737,9 +817,46 @@ pub fn repair(a: &[u8], c: &Check, salvage: bool) -> Option<Repaired> {
         if (end - m.target) % 2 == 1 && end < b.len() {
             b[end] = 0;
         }
+        trusted.push(m.target..end);
         restored.insert(m.target);
     }
+    trusted.sort_by_key(|r| r.start);
+    let untrusted = subtract(erased, &trusted);
     let mut footer = false;
+    if headed && salvage && !untrusted.is_empty() {
+        let b = v.get_or_insert_with(|| a.to_vec());
+        let known: Vec<usize> = {
+            let mut k: Vec<usize> = mirrors.iter().flat_map(|m| [m.at, m.target]).collect();
+            // (the footer, where the end tells it is and it is to be trusted)
+            let n = b.len().checked_sub(2).map(|e| u16::from_le_bytes([b[e], b[e + 1]]) as usize);
+            if let Some(f) = n.and_then(|n| b.len().checked_sub(10 + n))
+                && (b[f..f + 6] == FOOTER_MAGIC || b[f..f + 6] == OVERLAY_FOOTER_MAGIC)
+                && !untrusted.iter().any(|u| overlap(u, &(f..b.len())))
+            {
+                k.push(f);
+            }
+            k.sort_unstable();
+            k.dedup();
+            k
+        };
+        let (spans, cut_at) = erased_blocks(b, &untrusted, &known);
+        for (r, non_leaf) in spans {
+            // (an odd number of bytes only at the end, of a block cut short: its last byte zero)
+            let n = r.len() & !1;
+            let mut fill = Vec::with_capacity(r.len());
+            match (non_leaf && n >= 10, n) {
+                (true, _) => failing_non_leaf(&mut fill, n),
+                (false, 0) => {}
+                (false, _) => spacer(&mut fill, n as u64),
+            }
+            fill.resize(r.len(), 0);
+            b[r.clone()].copy_from_slice(&fill);
+            lost.push(r);
+        }
+        if let Some(f) = cut_at {
+            b.truncate(f);
+        }
+    }
     if headed {
         let b = v.as_deref().unwrap_or(a);
         let (blocks, ended) = blocks(b);
@@ -751,24 +868,107 @@ pub fn repair(a: &[u8], c: &Check, salvage: bool) -> Option<Repaired> {
             let meta = blocks[i].0;
             let last = blocks.last().unwrap();
             let e = last.2.end + (last.2.end - last.0) % 2;
+            let first = blocks.first().filter(|f| f.1 == super::SIZE_HINT && f.2.len() == 10).map(|f| f.2.start);
             let b = v.get_or_insert_with(|| a.to_vec());
             // (its padding, where cut off, restored as a zero byte)
             b.resize(e, 0);
             let mut f = Vec::new();
             varint::put(&mut f, (e - HEADER_MAGIC.len()) as u64);
             varint::put(&mut f, (e + 8 - meta) as u64);
-            let overlay = a.starts_with(&OVERLAY_HEADER_MAGIC);
+            let overlay = b.starts_with(&OVERLAY_HEADER_MAGIC);
             b.extend_from_slice(if overlay { &OVERLAY_FOOTER_MAGIC } else { &FOOTER_MAGIC });
             b.extend_from_slice(&(f.len() as u16).to_le_bytes());
             b.extend_from_slice(&f);
             b.extend_from_slice(&(f.len() as u16).to_le_bytes());
+            // (a size hint block of a padded LEB128, as an encrypted archive's payload begins)
+            if let Some(at) = first {
+                let mut v = (e - HEADER_MAGIC.len()) as u64;
+                for (i, x) in b[at..at + 10].iter_mut().enumerate() {
+                    *x = (v & 0x7f) as u8 | if i < 9 { 0x80 } else { 0 };
+                    v >>= 7;
+                }
+            }
             footer = true;
         }
     }
-    if restored.is_empty() && !footer {
+    if restored.is_empty() && !footer && !header && lost.is_empty() {
         return None;
     }
-    Some(Repaired { bytes: v.expect("changed"), restored: restored.len(), footer, lost })
+    Some(Repaired { bytes: v.expect("changed"), restored: restored.len(), header, footer, lost })
+}
+
+/// Blocks (or bytes) where they are, padding too, and whether each is a non-leaf data block.
+type Spans = Vec<(Range<usize>, bool)>;
+
+/// The blocks of archive `a` that bytes `untrusted` (sorted, apart) make lost (where each is,
+/// its padding too, and whether it is a non-leaf data block), and where the footer starts if it
+/// is among them. The blocks are read one after another; those from one whose type or size is
+/// among them on are not trusted until the reading reaches the start of a block that `known`
+/// (sorted: of mirror blocks and their targets, and the footer) has; where it passes one, fails,
+/// or ends first, the bytes from that block to the next known start (or the end) are lost as one.
+fn erased_blocks(a: &[u8], untrusted: &[Range<usize>], known: &[usize]) -> (Spans, Option<usize>) {
+    let bad = |r: &Range<usize>| untrusted.iter().any(|u| overlap(u, r));
+    let next_known = |from: usize| known.iter().copied().find(|&k| k > from);
+    let mut lost: Spans = Vec::new();
+    // (the blocks read since one of untrusted type or size, and where it starts)
+    let mut suspect: Option<(Spans, usize)> = None;
+    let mut at = HEADER_MAGIC.len();
+    loop {
+        if suspect.is_some() && known.binary_search(&at).is_ok() {
+            // (reaching a block known: those read since as they tell)
+            let (read, _) = suspect.take().unwrap();
+            lost.extend(read.into_iter().filter(|(r, _)| bad(r)));
+        }
+        // (the reading gone astray: from where it is not trusted to the next block known)
+        let astray = match &suspect {
+            Some((_, s)) => next_known(*s).is_none_or(|k| k < at) || at >= a.len(),
+            None => false,
+        };
+        let block = (!astray && at < a.len()).then(|| {
+            let mut p = at;
+            let ty = varint::get(a, &mut p).ok().filter(|&ty| p - at == varint::len(ty))?;
+            if ty == FOOTER_TYPE || ty == OVERLAY_FOOTER_TYPE {
+                return Some((ty, p, at));
+            }
+            let width = 1 << (ty % 4);
+            let size = a.get(p..p + width)?;
+            let size =
+                usize::try_from(u64::from_le_bytes(std::array::from_fn(|i| size.get(i).copied().unwrap_or(0)))).ok()?;
+            let end = (p + width).checked_add(size).filter(|&e| e <= a.len())?;
+            Some((ty, p + width, end + (end - at) % 2))
+        });
+        match block {
+            None if suspect.is_none() && at >= a.len() => return (lost, None),
+            Some(Some((ty, _, _))) if (ty == FOOTER_TYPE || ty == OVERLAY_FOOTER_TYPE) && suspect.is_none() => {
+                return (lost, bad(&(at..a.len())).then_some(at));
+            }
+            Some(Some((ty, data, end))) if !(ty == FOOTER_TYPE || ty == OVERLAY_FOOTER_TYPE) => {
+                let b = (at..end.min(a.len()), (0x40..=0x4b).contains(&ty));
+                match &mut suspect {
+                    Some((read, _)) => read.push(b),
+                    None if bad(&(at..data)) => suspect = Some((vec![b], at)),
+                    None if bad(&b.0) => lost.push(b),
+                    None => {}
+                }
+                at = end;
+            }
+            // (not readable where nothing is to be distrusted: left for the reading to fail on)
+            Some(None) if suspect.is_none() && !bad(&(at..(at + 10).min(a.len()))) => return (lost, None),
+            _ => {
+                let s = suspect.take().map_or(at, |(_, s)| s);
+                match next_known(s).filter(|&k| k <= a.len()) {
+                    Some(k) => {
+                        lost.push((s..k, false));
+                        at = k;
+                    }
+                    None => {
+                        lost.push((s..a.len(), false));
+                        return (lost, None);
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -898,7 +1098,7 @@ mod tests {
             let cd = check(&d);
             assert!(cd.walked);
             assert_eq!(cd.differing(&d).count(), 1);
-            let r = repair(&d, &cd, false).unwrap();
+            let r = repair(&d, &cd, false, &[]).unwrap();
             assert_eq!((r.restored, r.footer), (1, false));
             assert_eq!(r.bytes, m);
         }
@@ -910,16 +1110,16 @@ mod tests {
         let cd = check(&d);
         // (read one after another, the spacer block's zeros resynchronising the blocks)
         assert!(cd.walked && cd.mirrors.len() == 5);
-        let r = repair(&d, &cd, false).unwrap();
+        let r = repair(&d, &cd, false, &[]).unwrap();
         assert_eq!((r.restored, &r.bytes), (1, &m));
         assert_eq!(files(&r.bytes), files(&m));
-        // the header damaged too: found by their magic, the archive starting where they tell
+        // the header damaged too: found by their magic, the archive starting where they tell, its
+        // header magic restored
         d[0] ^= 1;
         let cd = check(&d);
         assert!(!cd.walked && cd.mirrors.len() == 5);
-        let mut r = repair(&d, &cd, false).unwrap();
-        assert_eq!(r.restored, 1);
-        r.bytes[0] ^= 1;
+        let r = repair(&d, &cd, false, &[]).unwrap();
+        assert!(r.restored == 1 && r.header);
         assert_eq!(r.bytes, m);
     }
 
@@ -934,7 +1134,7 @@ mod tests {
         let cd = check(&d);
         assert_eq!((cd.mirrors.len(), cd.broken, cd.unmirrored()), (4, 1, 1));
         assert!(!cd.mirrored(&d, false));
-        assert_eq!(repair(&d, &cd, false), None);
+        assert_eq!(repair(&d, &cd, false, &[]), None);
         assert_eq!(files(&d), files(&m));
     }
 
@@ -955,18 +1155,18 @@ mod tests {
             let d = &m[..cut];
             let cd = check(d);
             assert!(!cd.walked);
-            let r = repair(d, &cd, false).unwrap();
+            let r = repair(d, &cd, false, &[]).unwrap();
             assert_eq!((r.restored, r.footer), ((cut <= meta + 3) as usize, true));
             assert_eq!(files(&r.bytes), files(&m));
         }
         // (cut before the metadata block: not repaired, as files' blocks are lost)
         let d = &m[..meta - 1];
-        assert!(repair(d, &check(d), false).is_none_or(|r| !r.footer));
+        assert!(repair(d, &check(d), false, &[]).is_none_or(|r| !r.footer));
         // in the archive without it, a truncation into the metadata block is lost
         let m = mirrored(&segment(&[0, 3000, 3000], false, None), 4096, false);
         let meta = check(&m).targets.last().unwrap().0;
         let d = &m[..meta + 3];
-        assert_eq!(repair(d, &check(d), false), None);
+        assert_eq!(repair(d, &check(d), false, &[]), None);
     }
 
     /// A truncation before the metadata block, salvaged: the metadata block restored past the
@@ -983,9 +1183,9 @@ mod tests {
         let third = c.targets.iter().rev().nth(1).unwrap().0;
         for cut in [third + 1, third + 40, meta - 1] {
             let d = &m[..cut];
-            assert!(repair(d, &check(d), false).is_none_or(|r| r.lost.is_none() && !r.footer));
-            let r = repair(d, &check(d), true).unwrap();
-            assert!(r.restored == 1 && r.footer && r.lost.as_ref().is_some_and(|l| l.end == meta), "{cut}");
+            assert!(repair(d, &check(d), false, &[]).is_none_or(|r| r.lost.is_empty() && !r.footer));
+            let r = repair(d, &check(d), true, &[]).unwrap();
+            assert!(r.restored == 1 && r.footer && r.lost.len() == 1 && r.lost[0].end == meta, "{cut}");
             // (not an archive as the spec reads it: a file at no block, or a formula block referring
             // to a block not there)
             assert!(decode_value(&r.bytes, &natives()).is_err());
@@ -1001,6 +1201,53 @@ mod tests {
             assert_eq!(got[..2], [Some(want[0].clone()), Some(want[1].clone())], "{cut}");
             assert_eq!(got[2], None);
         }
+    }
+
+    /// Bytes not to be trusted (an encrypted archive's chunk that does not authenticate): a block
+    /// there restored from its mirror block; a non-leaf block there lost (one that does not verify
+    /// in its place), its file with it; its type or size there too, the blocks up to the next one
+    /// a mirror block tells lost.
+    #[test]
+    fn salvages_erased() {
+        let m = mirrored(&segment(&[0, 3000, 3000], false, Some(1)), 4096, false);
+        let want = files(&m);
+        let c = check(&m);
+        let meta = c.targets.last().unwrap().0;
+        let salvaged = |d: &[u8], erased: &[Range<usize>]| {
+            let r = repair(d, &check(d), true, erased).unwrap();
+            let natives = natives();
+            let a = super::super::open_salvaging(&r.bytes, &natives, false).unwrap();
+            let got = std::sync::Mutex::new(vec![None; 3]);
+            let done = a.contents(1, |k, d| {
+                got.lock().unwrap()[k] = Some(d);
+                Ok(())
+            });
+            (r, done.is_ok(), got.into_inner().unwrap())
+        };
+        // the metadata block, garbled: restored from its mirror block before
+        let mut d = m.clone();
+        let e = meta..meta + 40;
+        d[e.clone()].iter_mut().for_each(|b| *b ^= 0xa5);
+        let (r, ok, got) = salvaged(&d, std::slice::from_ref(&e));
+        assert!(r.restored == 1 && r.lost.is_empty() && ok);
+        assert_eq!(got, want.iter().cloned().map(Some).collect::<Vec<_>>());
+        // the last non-leaf block's data, garbled: lost, the third file with it
+        let (start, _, data) = blocks(&m).0.into_iter().rfind(|b| (0x40..0x4c).contains(&b.1)).unwrap();
+        let mut d = m.clone();
+        d[data.start + 100..data.start + 200].iter_mut().for_each(|b| *b ^= 0xa5);
+        let e = data.start + 64..data.start + 300;
+        let (r, ok, got) = salvaged(&d, std::slice::from_ref(&e));
+        assert!(r.restored == 0 && r.lost.len() == 1 && r.lost[0].start == start && !ok);
+        assert!(r.bytes[start] == 0x41 && r.bytes[start..].len() > data.end - start);
+        assert_eq!(got[..2], [Some(want[0].clone()), Some(want[1].clone())]);
+        assert_eq!(got[2], None);
+        // its size garbled too: the blocks read astray, those up to the metadata block lost
+        let mut d = m.clone();
+        d[start + 1..start + 3].copy_from_slice(&[0x10, 0]);
+        let e = start..start + 10;
+        let (r, ok, got) = salvaged(&d, std::slice::from_ref(&e));
+        assert!(r.lost.len() == 1 && r.lost[0] == (start..meta) && !ok, "{:?}", r.lost);
+        assert_eq!(got[..2], [Some(want[0].clone()), Some(want[1].clone())]);
     }
 
     /// A mirror block of an archive within the archive (as a file of it, stored) is not taken
