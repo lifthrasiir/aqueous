@@ -26,7 +26,12 @@ fn aqr_fed(dir: &Path, args: &[&str], input: &[u8]) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    c.stdin.take().unwrap().write_all(input).unwrap();
+    // (a run refused before it reads its input, as a format of no encryption is, closes it
+    // first: what it tells is what is checked)
+    match c.stdin.take().unwrap().write_all(input) {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => panic!("{e}"),
+        _ => {}
+    }
     c.wait_with_output().unwrap()
 }
 
