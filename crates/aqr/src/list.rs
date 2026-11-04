@@ -357,7 +357,7 @@ fn owner(x: &Extra) -> String {
 }
 
 /// The permissions as `ls -l` shows them (`rwxr-xr-x`, `s`, `S`, `t` and `T` too).
-fn mode(x: &Extra) -> String {
+pub(crate) fn mode(x: &Extra) -> String {
     let Some(m) = x.mode else { return "-".into() };
     let mut s = String::new();
     for (k, special, c) in [(6, 0o4000, 's'), (3, 0o2000, 's'), (0, 0o1000, 't')] {
@@ -375,7 +375,7 @@ fn mode(x: &Extra) -> String {
 }
 
 /// Windows' attributes, `RHSATI`, `-` for those not set; `-` alone where none are kept.
-fn win(x: &Extra) -> String {
+pub(crate) fn win(x: &Extra) -> String {
     let Some(w) = x.win_attrs else { return "-".into() };
     [(0x1, 'R'), (0x2, 'H'), (0x4, 'S'), (0x20, 'A'), (0x100, 'T'), (0x2000, 'I')]
         .iter()
@@ -384,7 +384,7 @@ fn win(x: &Extra) -> String {
 }
 
 /// macOS' flags, as `chflags` names them, between commas; `-` where none are.
-fn mac(x: &Extra) -> String {
+pub(crate) fn mac(x: &Extra) -> String {
     const NAMES: [(u32, &str); 9] = [
         (0x1, "nodump"),
         (0x2, "uchg"),

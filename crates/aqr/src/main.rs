@@ -78,6 +78,9 @@
 //!   takes of the archive and how it is made ([`list`]); `-q` the paths alone, `-v` all that is
 //!   told. `-t ARCHIVE PATH...`: the entries at those paths alone, with what is under them, as
 //!   tar's `-t` has them; `--each` lists several archives whole.
+//! - `-I` (`--info`): all that an archive records, for debugging ([`info`]): of the archive
+//!   itself (its blocks and segments; of a single file, its formula too), or with paths, each
+//!   path's entry in every segment (those before an update too), its metadata and formula in full.
 //! - `-P`: compressing, the archives encrypted with a passphrase ([`aqr::envelope`]), asked for
 //!   as the work begins (twice on a terminal); decompressing, asked for then rather than as an
 //!   archive needs it. An encrypted archive (of either kind) is opened by the passphrases that
@@ -175,6 +178,7 @@ use std::time::Instant;
 
 mod extract;
 mod fold;
+mod info;
 mod ipc;
 mod list;
 mod meta;
@@ -200,6 +204,7 @@ usage: aqr [OPTIONS] INPUT [--rename TO]...
        aqr -d --each [OPTIONS] ARCHIVE...
        aqr -t [-q | -v] ARCHIVE [PATH]...
        aqr -t --each [-q | -v] ARCHIVE...
+       aqr -I [-v] ARCHIVE [PATH]...
        unaqr [OPTIONS] ARCHIVE [PATH [--rename TO]]...
 
 Modes:
@@ -213,6 +218,9 @@ Modes:
                         paths alone; -v: the blocks each file takes, its formula and
                         all its metadata)
   -K, --test            decode and check an archive, writing nothing
+  -I, --info            all that an archive records (its blocks and segments), or of
+                        its PATHs in each segment (their formulas in full); -v: the
+                        unknown metadata uncut
 
 Compressing (aqr -o ARCHIVE INPUT [--rename TO]...):
   INPUT                 a file or directory; several of them archived by their paths,
@@ -304,6 +312,8 @@ struct Args {
     test: bool,
     /// Listing the archives' entries (`-t`).
     list: bool,
+    /// Telling all that an archive records (`-I`).
+    info: bool,
     wasm: bool,
     /// The modules not known (all, with `wasm`) run in a sandbox.
     sandbox: bool,
@@ -392,7 +402,7 @@ fn main() -> ExitCode {
         eprintln!("aqr: {e}");
         return ExitCode::FAILURE;
     }
-    if let Err(e) = pass::init(args.passphrase, !args.decompress && !args.list) {
+    if let Err(e) = pass::init(args.passphrase, !args.decompress && !args.list && !args.info) {
         eprintln!("aqr: {e}");
         ipc::tell(serde_json::json!({"event": "error", "message": e}));
         return ExitCode::FAILURE;
@@ -403,6 +413,7 @@ fn main() -> ExitCode {
     }
     aqr_common::pool::init(args.opt.threads);
     let r = aqr_common::pool::run(|| match () {
+        _ if args.info => info::info(&args),
         _ if args.list => list::list_all(&args),
         _ if args.decompress => decompress_all(&args),
         _ => compress_all(&args),
@@ -430,6 +441,7 @@ fn parse() -> Result<Args, String> {
         decompress: unaqr,
         test: false,
         list: false,
+        info: false,
         wasm: false,
         sandbox: true,
         output: None,
@@ -482,10 +494,11 @@ fn parse() -> Result<Args, String> {
                 println!("aqr {}", env!("AQR_VERSION"));
                 std::process::exit(0);
             }
-            "-c" | "--compress" => (a.decompress, a.list) = (false, false),
-            "-d" | "--decompress" => (a.decompress, a.test, a.list) = (true, false, false),
-            "-K" | "--test" => (a.decompress, a.test, a.list) = (true, true, false),
-            "-t" | "--list" => a.list = true,
+            "-c" | "--compress" => (a.decompress, a.list, a.info) = (false, false, false),
+            "-d" | "--decompress" => (a.decompress, a.test, a.list, a.info) = (true, false, false, false),
+            "-K" | "--test" => (a.decompress, a.test, a.list, a.info) = (true, true, false, false),
+            "-t" | "--list" => (a.list, a.info) = (true, false),
+            "-I" | "--info" => (a.info, a.list) = (true, false),
             "--wasm" => a.wasm = true,
             "--no-sandbox" => a.sandbox = false,
             "-o" => a.output = Some(value("-o")?.into()),
@@ -567,6 +580,12 @@ fn parse() -> Result<Args, String> {
     }
     let system = (aqr_common::budget::total(), aqr_common::budget::available());
     aqr_common::budget::global().set_limit(budget(memory.as_deref(), system)?);
+    if a.info {
+        if a.rm || a.each || a.dereference || a.output.is_some() || !renames.is_empty() || last_dir.is_some() {
+            return Err("-I takes an archive and its paths alone".into());
+        }
+        return Ok(a);
+    }
     if a.list {
         if a.rm {
             return Err("--rm with -t".into());

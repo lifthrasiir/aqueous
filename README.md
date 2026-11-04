@@ -66,6 +66,8 @@ target/release/aqr -c -o out.aqr some/directory   # compress
 target/release/aqr -K out.aqr                     # test
 target/release/aqr -t out.aqr                     # list (-v: blocks, formulas, metadata)
 target/release/aqr -t out.aqr a/                  # list what is under a path
+target/release/aqr -I out.aqr                     # all it records: blocks, segments
+target/release/aqr -I out.aqr a/b.txt             # a path in each segment, its formula in full
 target/release/aqr -d out.aqr                     # extract
 target/release/aqr -d out.aqr a/b.txt --rename b.txt   # extract a path alone (to b.txt)
 ```
