@@ -514,6 +514,21 @@ pub fn open_damaged(c: &[u8]) -> Decoded<(Envelope<'_>, Opened)> {
 }
 
 impl<'c> Envelope<'c> {
+    /// The work factor of scrypt (lg N).
+    pub fn work_factor(&self) -> u8 {
+        self.fields.work_factor()
+    }
+
+    /// scrypt's salt and the payload's nonce, as stored.
+    pub fn salt_and_nonce(&self) -> (&[u8], &[u8]) {
+        (self.fields.salt(), self.fields.nonce())
+    }
+
+    /// The number of chunks sealed.
+    pub fn chunks(&self) -> usize {
+        self.chunks.len()
+    }
+
     /// The payload unlocked by `passphrase`: a decryption failure where it does not unwrap the
     /// file key (scrypt is run here).
     pub fn unlock(&self, passphrase: &[u8]) -> Decoded<Unlocked<'c>> {

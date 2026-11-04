@@ -1313,6 +1313,247 @@ fn time(t: &Cbor) -> Option<Time> {
     Some(Time { secs, nanos: ns.rem_euclid(1_000_000_000) as u32, zone, unit: unit as u64 })
 }
 
+/// A member of a map of the optional metadata, as [`members`] gives it: its key where it is an
+/// integer, and its key and value in CBOR's diagnostic notation (RFC 8949, section 8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Member {
+    pub key: Option<i128>,
+    pub key_text: String,
+    pub value: String,
+    /// The value's text, where it is an `aqr-text` (of a comment, say).
+    pub text: Option<Vec<u8>>,
+    /// The value's fields, where it is a map of integers to byte strings (`zip-extras`).
+    pub fields: Option<Vec<(i128, Vec<u8>)>>,
+}
+
+/// The members of optional metadata `d` (well-formed, as [`extras`] read it): those of its
+/// top-level map but `entry-extras`, and by entry (from the root, `n` besides it) those of its
+/// entry extra (`None`: null, or none given), each as it is encoded. Byte and text strings
+/// over `cut` bytes are cut there (`None`: none cut).
+#[allow(clippy::type_complexity)]
+pub(crate) fn members(d: &[u8], n: usize, cut: Option<usize>) -> Decoded<(Vec<Member>, Vec<Option<Vec<Member>>>)> {
+    let (mut top, mut entries) = (Vec::new(), vec![None; n + 1]);
+    if d.is_empty() {
+        return Ok((top, entries));
+    }
+    let bad = || super::Failure::Invalid("bad CBOR in the optional metadata".into());
+    // a member at `*at` of a map, and the key read as an item
+    let member = |at: &mut usize| -> Decoded<(Member, Cbor<'_>)> {
+        let k0 = *at;
+        let k = item(d, at, 1)?;
+        let k1 = *at;
+        let v = item(d, at, 1)?;
+        let key = if let Cbor::Int(v) = k { Some(v) } else { None };
+        let value = diagnostic(&d[k1..*at], cut);
+        let fields = match &v {
+            Cbor::Map(m) => m
+                .pairs()
+                .map(|(k, v)| match (k, v) {
+                    (Cbor::Int(k), Cbor::Bytes(b)) => Some((k, b.into_owned())),
+                    _ => None,
+                })
+                .collect(),
+            _ => None,
+        };
+        let text = aqr_text(v).ok().map(Cow::into_owned);
+        Ok((Member { key, key_text: diagnostic(&d[k0..k1], cut), value, text, fields }, k))
+    };
+    let mut at = 0;
+    let (major, _, arg) = head_of(d, &mut at)?;
+    if major != 5 {
+        return invalid("optional metadata not a map");
+    }
+    let top_n = count(d, at, arg)?;
+    let mut k = 0;
+    while !ended(d, &mut at, top_n, k) {
+        k += 1;
+        let k0 = at;
+        let key = item(d, &mut at, 1)?;
+        if key != Cbor::Int(ENTRY_EXTRAS) {
+            at = k0;
+            top.push(member(&mut at)?.0);
+            continue;
+        }
+        let (major, _, arg) = head_of(d, &mut at)?;
+        if major != 4 {
+            return invalid("entry-extras not an array");
+        }
+        let list = count(d, at, arg)?;
+        let mut e = 0;
+        while !ended(d, &mut at, list, e) {
+            let slot = entries.get_mut(e).ok_or_else(bad)?;
+            e += 1;
+            match head_of(d, &mut at)? {
+                (7, 22, _) => {}
+                (5, _, arg) => {
+                    let m = count(d, at, arg)?;
+                    let mut got = Vec::new();
+                    while !ended(d, &mut at, m, got.len()) {
+                        got.push(member(&mut at)?.0);
+                    }
+                    *slot = Some(got);
+                }
+                _ => return invalid("an entry extra not a map"),
+            }
+        }
+    }
+    Ok((top, entries))
+}
+
+/// The name of member `k` of an entry extra (spec, "Optional metadata").
+pub fn entry_key_name(k: i128) -> Option<&'static str> {
+    Some(match k {
+        CRTIME => "crtime",
+        CTIME => "ctime",
+        MTIME => "mtime",
+        ATIME => "atime",
+        ARCTIME => "arctime",
+        -6 => "comment",
+        LINK_GROUP => "link-group",
+        XATTRS => "xattrs",
+        FORKS => "forks",
+        WIN_LINK_TYPE => "win-link-type",
+        WIN_ATTRS => "win-attrs",
+        UNIX_MODE => "unix-mode",
+        UNIX_UID => "unix-uid",
+        UNIX_GID => "unix-gid",
+        UNIX_UNAME => "unix-uname",
+        UNIX_GNAME => "unix-gname",
+        MAC_FLAGS => "mac-flags",
+        -100 => "zip-extras",
+        _ => return None,
+    })
+}
+
+/// The name of member `k` of the top-level map of the optional metadata.
+pub fn archive_key_name(k: i128) -> Option<&'static str> {
+    match k {
+        -1 => Some("archive-comment"),
+        ENTRY_EXTRAS => Some("entry-extras"),
+        LAST_SEGMENT_INTENDED => Some("last-segment-intended"),
+        _ => None,
+    }
+}
+
+/// Well-formed CBOR data item `d` in diagnostic notation: indefinite lengths as `_`, strings in
+/// chunks as `(_ ...)`, byte strings in hexadecimal; strings over `cut` bytes cut there (`...`
+/// and how many bytes there are in all).
+pub fn diagnostic(d: &[u8], cut: Option<usize>) -> String {
+    let mut out = String::new();
+    let mut at = 0;
+    if diag_item(d, &mut at, cut, &mut out, 0).is_err() || at != d.len() {
+        out += " <bad CBOR>";
+    }
+    out
+}
+
+fn diag_item(d: &[u8], at: &mut usize, cut: Option<usize>, out: &mut String, depth: usize) -> Decoded<()> {
+    use std::fmt::Write;
+    if depth > CBOR_DEPTH {
+        return super::resource("CBOR nested too deep");
+    }
+    let (major, ai, arg) = head_of(d, at)?;
+    let string = |b: &[u8], out: &mut String| {
+        let (shown, more) = match cut {
+            Some(c) if b.len() > c => (&b[..c], true),
+            _ => (b, false),
+        };
+        if major == 2 {
+            out.push_str("h'");
+            shown.iter().for_each(|x| _ = write!(out, "{x:02x}"));
+            out.push('\'');
+        } else {
+            let t = String::from_utf8_lossy(shown);
+            _ = write!(out, "{t:?}");
+        }
+        if more {
+            _ = write!(out, "...<{} bytes>", b.len());
+        }
+    };
+    match (major, arg) {
+        (0, Some(v)) => _ = write!(out, "{v}"),
+        (1, Some(v)) => _ = write!(out, "{}", -1 - v as i128),
+        (2 | 3, Some(n)) => {
+            let n =
+                usize::try_from(n).ok().filter(|&n| n <= d.len() - *at).ok_or(super::Failure::Invalid("".into()))?;
+            string(&d[*at..*at + n], out);
+            *at += n;
+        }
+        (2 | 3, None) => {
+            out.push_str("(_ ");
+            let mut first = true;
+            while d.get(*at) != Some(&0xff) {
+                if !std::mem::take(&mut first) {
+                    out.push_str(", ");
+                }
+                diag_item(d, at, cut, out, depth + 1)?;
+            }
+            *at += 1;
+            out.push(')');
+        }
+        (4 | 5, arg) => {
+            let n = count(d, *at, arg)?;
+            out.push(if major == 4 { '[' } else { '{' });
+            if n.is_none() {
+                out.push_str("_ ");
+            }
+            let mut k = 0;
+            while !ended(d, at, n, k) {
+                if k > 0 {
+                    out.push_str(", ");
+                }
+                diag_item(d, at, cut, out, depth + 1)?;
+                if major == 5 {
+                    out.push_str(": ");
+                    diag_item(d, at, cut, out, depth + 1)?;
+                }
+                k += 1;
+            }
+            out.push(if major == 4 { ']' } else { '}' });
+        }
+        (6, Some(tag)) => {
+            _ = write!(out, "{tag}(");
+            diag_item(d, at, cut, out, depth + 1)?;
+            out.push(')');
+        }
+        (7, Some(v)) => match ai {
+            20 => out.push_str("false"),
+            21 => out.push_str("true"),
+            22 => out.push_str("null"),
+            23 => out.push_str("undefined"),
+            0..24 => _ = write!(out, "simple({v})"),
+            24 => _ = write!(out, "simple({v})"),
+            25..28 => {
+                let f = match ai {
+                    25 => half(v as u16),
+                    26 => f32::from_bits(v as u32) as f64,
+                    _ => f64::from_bits(v),
+                };
+                let s = match f {
+                    f if f.is_nan() => "NaN".into(),
+                    f if f.is_infinite() => if f > 0.0 { "Infinity" } else { "-Infinity" }.into(),
+                    f => format!("{f:?}"),
+                };
+                _ = write!(out, "{s}_{}", ai - 24);
+            }
+            _ => return invalid(""),
+        },
+        _ => return invalid(""),
+    }
+    Ok(())
+}
+
+/// An IEEE 754 half-precision float's value.
+fn half(h: u16) -> f64 {
+    let (sign, exp, frac) = (if h >> 15 != 0 { -1.0 } else { 1.0 }, (h >> 10) & 0x1f, (h & 0x3ff) as f64);
+    sign * match exp {
+        0 => frac * 2f64.powi(-24),
+        31 if frac == 0.0 => f64::INFINITY,
+        31 => f64::NAN,
+        e => (1.0 + frac / 1024.0) * 2f64.powi(e as i32 - 15),
+    }
+}
+
 /// A metadata block's internal structure read: the entries (by number) and the files'
 /// parameters, with the relative offsets of the module and resource blocks.
 pub(crate) struct Metadata {
@@ -1331,8 +1572,11 @@ pub(crate) struct Metadata {
     /// Whether the segment is told to be the last written (`last-segment-intended`): a hint of
     /// repair alone, not of the archive's value.
     pub last: bool,
+    /// Where the optional metadata is in the block's data.
+    pub opt: std::ops::Range<usize>,
 }
 
+#[derive(Clone)]
 pub(crate) enum Read {
     Dir,
     File {
@@ -1474,6 +1718,7 @@ pub(crate) fn read(d: &[u8]) -> Decoded<Metadata> {
         forks,
         given,
         last,
+        opt: d.len() - opt_size..d.len(),
     })
 }
 
@@ -1589,6 +1834,33 @@ mod tests {
         assert!(extras(&[0xa2, 0x61, b'a', 0x00, 0x61, b'b', 0x00], 1).is_ok());
         assert!(extras(&[0xa2, 0xf9, 0x3c, 0x00, 0x00, 0xf9, 0x40, 0x00, 0x00], 1).is_ok());
         assert!(extras(&[0xa1, 0x21, 0x83, 0xf6, 0xf6, 0xf6], 1).is_err());
+    }
+
+    #[test]
+    fn members_as_encoded() {
+        // {-1: "c", 5: h'00ff', -2: [null, {-3: 10, -999: [_ 1, 2.5]}]}
+        let d = [
+            0xa3, 0x20, 0x61, b'c', 0x05, 0x42, 0x00, 0xff, 0x21, 0x82, 0xf6, 0xa2, 0x22, 0x0a, 0x39, 0x03, 0xe6, 0x9f,
+            0x01, 0xf9, 0x41, 0x00, 0xff,
+        ];
+        let (got, _) = extras(&d, 1).unwrap();
+        assert_eq!(got[1].mtime, Some(Time { unit: 1_000_000_000, ..Time::new(10, 0) }));
+        let (top, entries) = members(&d, 1, None).unwrap();
+        let shown = |m: &[Member]| m.iter().map(|m| (m.key, m.value.clone())).collect::<Vec<_>>();
+        assert_eq!(shown(&top), [(Some(-1), "\"c\"".into()), (Some(5), "h'00ff'".into())]);
+        assert_eq!(top[0].text.as_deref(), Some(&b"c"[..]));
+        assert_eq!(entries[0], None);
+        let e = entries[1].as_ref().unwrap();
+        assert_eq!(shown(e), [(Some(-3), "10".into()), (Some(-999), "[_ 1, 2.5_1]".into())]);
+        assert_eq!(
+            (entry_key_name(-3), entry_key_name(-999), archive_key_name(-1)),
+            (Some("mtime"), None, Some("archive-comment"))
+        );
+        // strings cut, chunks and other items
+        assert_eq!(diagnostic(&[0x45, 1, 2, 3, 4, 5], Some(2)), "h'0102'...<5 bytes>");
+        assert_eq!(diagnostic(&[0x7f, 0x61, b'a', 0x61, b'b', 0xff], None), "(_ \"a\", \"b\")");
+        assert_eq!(diagnostic(&[0xbf, 0xf4, 0xf5, 0xff], None), "{_ false: true}");
+        assert_eq!(diagnostic(&[0xfa, 0x7f, 0xc0, 0, 0], None), "NaN_2");
     }
 
     #[test]

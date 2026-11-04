@@ -7,9 +7,11 @@
 //! of the one instruction), the content of output `o` is what the item `o` from the bottom at
 //! the end is made of, apart from the other outputs of the leaf.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
+use std::fmt::Write;
+use std::sync::OnceLock;
 
-use super::{Archive, Decoded, Insn, LeafBlock, decoded_with, invalid, read, stored_len};
+use super::{Archive, Blocks, Decoded, Insn, LeafBlock, NoModules, decoded_with, invalid, read, stored_len};
 
 /// Of a content of an archive ([`Archive::listing`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,17 +42,25 @@ const SUMMARY: usize = 48;
 /// The most groups of alike children shown of a node.
 const BREADTH: usize = 4;
 
+/// The most bytes of a literal or parameters kept to be shown ([`Graph::dump`]).
+const SHOWN: usize = 32;
+
 #[derive(Clone)]
 enum Shape {
-    Literal,
-    /// Of the non-leaf block (by its ordinal among all).
-    Slice(usize),
-    /// Of the module block (by index), its resources (by index) and the output taken of how many.
+    /// Its first bytes ([`SHOWN`]).
+    Literal(Vec<u8>),
+    /// Of the non-leaf block (by its ordinal among all), from where.
+    Slice(usize, u64),
+    /// Of the module block (by index), its resources (by index) and the output taken of how many;
+    /// its parameters (the first [`SHOWN`] bytes, and how many) and memory limit.
     Apply {
         module: usize,
         resources: Vec<usize>,
         out: usize,
         outs: usize,
+        params: Vec<u8>,
+        params_len: usize,
+        memory_limit: u64,
     },
     Concat,
     Pack,
@@ -59,8 +69,8 @@ enum Shape {
         outs: usize,
     },
     Patch,
-    /// A leaf data block, Zstandard data or not.
-    Stored(bool),
+    /// A leaf data block, Zstandard data or not, and checked or not.
+    Stored(bool, bool),
 }
 
 struct Node {
@@ -70,18 +80,22 @@ struct Node {
     insn: usize,
     /// The bytes of its output.
     size: u64,
+    /// The checksum a Checksum instruction gives it.
+    checksum: Option<u64>,
 }
 
 /// The graph of one or more formulas, and module names given.
-struct Graph<'f> {
+pub(super) struct Graph<'f> {
     nodes: Vec<Node>,
     insns: usize,
     name: &'f dyn Fn(usize) -> String,
+    /// By instruction, the first of the graph's of its leaf.
+    first_insn: Vec<usize>,
 }
 
 impl Graph<'_> {
     fn add(&mut self, shape: Shape, kids: Vec<usize>, insn: usize, size: u64) -> usize {
-        self.nodes.push(Node { shape, kids, insn, size });
+        self.nodes.push(Node { shape, kids, insn, size, checksum: None });
         self.nodes.len() - 1
     }
 
@@ -100,15 +114,79 @@ impl Graph<'_> {
     fn label(&self, n: usize) -> String {
         let nth = |s: String, out: usize, outs: usize| if outs > 1 { format!("{s}#{}", out + 1) } else { s };
         match &self.nodes[n].shape {
-            Shape::Literal => "lit".into(),
-            Shape::Slice(_) => "slice".into(),
+            Shape::Literal(_) => "lit".into(),
+            Shape::Slice(..) => "slice".into(),
             Shape::Apply { module, out, outs, .. } => nth((self.name)(*module), *out, *outs),
             Shape::Concat => "cat".into(),
             Shape::Pack => "pack".into(),
             Shape::Split { out, outs } => nth("split".into(), *out, *outs),
             Shape::Patch => "patch".into(),
-            Shape::Stored(false) => "stored".into(),
-            Shape::Stored(true) => "zstd".into(),
+            Shape::Stored(false, _) => "stored".into(),
+            Shape::Stored(true, _) => "zstd".into(),
+        }
+    }
+
+    /// Node `n` in full, a line of each node under it indented `indent` (two spaces a level
+    /// down): its label, bytes and what it is of. The inputs of an instruction of several outputs
+    /// are shown once, where it is first (`seen`, by instruction); `non_leaf_at` tells where
+    /// each non-leaf block is (by its ordinal among all).
+    pub(super) fn dump(
+        &self,
+        n: usize,
+        indent: usize,
+        non_leaf_at: &[usize],
+        seen: &mut HashSet<usize>,
+        out: &mut String,
+    ) {
+        let node = &self.nodes[n];
+        let hex = |b: &[u8], len: usize| {
+            let mut s: String = b.iter().map(|x| format!("{x:02x}")).collect();
+            if len > b.len() {
+                s += "...";
+            }
+            s
+        };
+        let _ = write!(out, "{:indent$}{}  {} B", "", self.label(n), node.size);
+        let several = match &node.shape {
+            Shape::Apply { outs, .. } | Shape::Split { outs, .. } => *outs > 1,
+            _ => false,
+        };
+        // (the instruction, within its leaf from 1, of several outputs)
+        if several {
+            let _ = write!(out, "  @{}", node.insn - self.first_insn[node.insn] + 1);
+        }
+        match &node.shape {
+            Shape::Literal(b) if node.size > 0 => _ = write!(out, "  {}", hex(b, node.size as usize)),
+            Shape::Literal(_) => {}
+            &Shape::Slice(b, start) => {
+                let _ = write!(out, "  of non-leaf block #{} at {}, from {start}", b + 1, non_leaf_at[b]);
+            }
+            Shape::Apply { module, resources, params, params_len, memory_limit, .. } => {
+                let _ = write!(out, "  module #{}", module + 1);
+                if !resources.is_empty() {
+                    let r: Vec<String> = resources.iter().map(|r| format!("#{}", r + 1)).collect();
+                    let _ = write!(out, ", resource {}", r.join(" "));
+                }
+                if *params_len > 0 {
+                    let _ = write!(out, ", params {params_len} B {}", hex(params, *params_len));
+                }
+                if *memory_limit != crate::NO_LIMIT {
+                    let _ = write!(out, ", memory limit {memory_limit} B");
+                }
+            }
+            Shape::Stored(_, true) => out.push_str("  checked"),
+            _ => {}
+        }
+        if let Some(c) = node.checksum {
+            let _ = write!(out, "  checksum {c:016x}");
+        }
+        if several && !seen.insert(node.insn) {
+            out.push_str("  (inputs as above)\n");
+            return;
+        }
+        out.push('\n');
+        for &k in &node.kids {
+            self.dump(k, indent + 2, non_leaf_at, seen, out);
         }
     }
 
@@ -166,88 +244,9 @@ impl Archive<'_, '_> {
     pub fn listing(&self, name: &dyn Fn(&[u8]) -> Option<String>) -> Decoded<Vec<Listed>> {
         let blocks = &self.blocks;
         let sizes = &blocks.sizes;
-        let names: Vec<String> = blocks
-            .modules
-            .iter()
-            .enumerate()
-            .map(|(i, w)| name(w).unwrap_or_else(|| format!("module{}", i + 1)))
-            .collect();
+        let names = module_names(blocks, name);
         let name_of = |m: usize| names[m].clone();
-        let mut g = Graph { nodes: Vec::new(), insns: 0, name: &name_of };
-        // by leaf, its outputs (nodes)
-        let mut leaves: Vec<Vec<usize>> = Vec::new();
-        let mut used = vec![false; blocks.non_leaf.len()];
-        for leaf in &blocks.leaves {
-            let outputs = match *leaf {
-                LeafBlock::Stored(d, zstd, checked, _) => {
-                    let insn = g.insns;
-                    g.insns += 1;
-                    vec![g.add(Shape::Stored(zstd), Vec::new(), insn, stored_len(d, zstd, checked))]
-                }
-                LeafBlock::Lost => return invalid("a file whose block is lost"),
-                LeafBlock::Formula { outputs, data, segment, .. } => {
-                    let (d, dict) = blocks.formulas[data];
-                    let d = decoded_with(d, true, true, dict.map(|d| &blocks.dictionaries[d]))?;
-                    let (env, end) = blocks.env(leaf, &self.loaded, self.runner);
-                    let p = read(&d, outputs, &env, end, &mut used)?;
-                    // (the program's modules and resources by their indices in the segment)
-                    let first = blocks.segments[segment].first;
-                    let mut st: Vec<usize> = Vec::new();
-                    for insn in &p.insns {
-                        let at = g.insns;
-                        g.insns += 1;
-                        let mut pop = |n: usize| st.split_off(st.len() - n);
-                        let sum = |g: &Graph, kids: &[usize]| kids.iter().map(|&k| g.nodes[k].size).sum::<u64>();
-                        match insn {
-                            Insn::Nop | Insn::Checksum(_) | Insn::Concat(1) => {}
-                            &Insn::Swap(depth) => {
-                                let top = st.len() - 1;
-                                st.swap(top, top - depth);
-                            }
-                            Insn::Literal(l) => st.push(g.add(Shape::Literal, Vec::new(), at, l.len() as u64)),
-                            &Insn::Slice { block, len, .. } => {
-                                st.push(g.add(Shape::Slice(p.blocks[block]), Vec::new(), at, len))
-                            }
-                            Insn::Apply(a) => {
-                                let kids = pop(a.num_inputs);
-                                let (module, outs) = (first.modules + p.modules[a.module], a.output_sizes.len());
-                                let resources: Vec<usize> =
-                                    a.resources.iter().map(|&r| first.resources + p.resources[r]).collect();
-                                for (out, &size) in a.output_sizes.iter().enumerate() {
-                                    let shape = Shape::Apply { module, resources: resources.clone(), out, outs };
-                                    st.push(g.add(shape, kids.clone(), at, size));
-                                }
-                            }
-                            &Insn::Concat(n) => {
-                                let kids = pop(n);
-                                let size = sum(&g, &kids);
-                                st.push(g.add(Shape::Concat, kids, at, size));
-                            }
-                            &Insn::Pack(n) => {
-                                let kids = pop(n);
-                                let size = 8 + 8 * n as u64 + sum(&g, &kids);
-                                st.push(g.add(Shape::Pack, kids, at, size));
-                            }
-                            Insn::Split(sizes) => {
-                                let kids = pop(1);
-                                for (out, &size) in sizes.iter().enumerate() {
-                                    st.push(g.add(Shape::Split { out, outs: sizes.len() }, kids.clone(), at, size));
-                                }
-                            }
-                            &Insn::Patch(len) => {
-                                let kids = pop(2);
-                                st.push(g.add(Shape::Patch, kids, at, len));
-                            }
-                        }
-                    }
-                    if st.len() as u64 != outputs {
-                        return invalid("a formula of other outputs than its block's");
-                    }
-                    st
-                }
-            };
-            leaves.push(outputs);
-        }
+        let (g, leaves) = graph(blocks, &name_of)?;
         // a content, of the outputs (leaf, output) given: its size, the blocks it takes, its formula
         let taken = |of: &[(usize, usize)]| -> (u64, BTreeSet<Taken>, String, usize) {
             let mut blocks_of = BTreeSet::new();
@@ -260,11 +259,11 @@ impl Archive<'_, '_> {
             for &(l, o) in of {
                 for n in g.reach(leaves[l][o]) {
                     let node = &g.nodes[n];
-                    if !matches!(node.shape, Shape::Stored(_)) && insns.insert(node.insn) {
+                    if !matches!(node.shape, Shape::Stored(..)) && insns.insert(node.insn) {
                         nodes += 1;
                     }
                     match &node.shape {
-                        &Shape::Slice(b) => {
+                        &Shape::Slice(b, _) => {
                             blocks_of.insert(Taken::NonLeaf(b));
                             dicts.extend(blocks.non_leaf[b].2);
                         }
@@ -333,6 +332,110 @@ impl Archive<'_, '_> {
             })
             .collect())
     }
+}
+
+/// The names of the module blocks of `blocks`, as `name` names their Wasm modules (`moduleN`
+/// where it does not).
+pub(super) fn module_names(blocks: &Blocks, name: &dyn Fn(&[u8]) -> Option<String>) -> Vec<String> {
+    blocks.modules.iter().enumerate().map(|(i, w)| name(w).unwrap_or_else(|| format!("module{}", i + 1))).collect()
+}
+
+/// The graph of the formulas of the leaf blocks of `blocks`, the modules named by `name`; and by
+/// leaf, its outputs (nodes).
+pub(super) fn graph<'f>(blocks: &Blocks, name: &'f dyn Fn(usize) -> String) -> Decoded<(Graph<'f>, Vec<Vec<usize>>)> {
+    let mut g = Graph { nodes: Vec::new(), insns: 0, name, first_insn: Vec::new() };
+    let loaded: Vec<OnceLock<_>> = blocks.modules.iter().map(|_| OnceLock::new()).collect();
+    // by leaf, its outputs (nodes)
+    let mut leaves: Vec<Vec<usize>> = Vec::new();
+    let mut used = vec![false; blocks.non_leaf.len()];
+    for leaf in &blocks.leaves {
+        let outputs = match *leaf {
+            LeafBlock::Stored(d, zstd, checked, _) => {
+                let insn = g.insns;
+                g.insns += 1;
+                g.first_insn.push(insn);
+                vec![g.add(Shape::Stored(zstd, checked), Vec::new(), insn, stored_len(d, zstd, checked))]
+            }
+            LeafBlock::Lost => return invalid("a file whose block is lost"),
+            LeafBlock::Formula { outputs, data, segment, .. } => {
+                let (d, dict) = blocks.formulas[data];
+                let d = decoded_with(d, true, true, dict.map(|d| &blocks.dictionaries[d]))?;
+                let (env, end) = blocks.env(leaf, &loaded, &NoModules);
+                let p = read(&d, outputs, &env, end, &mut used)?;
+                // (the program's modules and resources by their indices in the segment)
+                let seg = blocks.segments[segment].first;
+                let mut st: Vec<usize> = Vec::new();
+                let first = g.insns;
+                for insn in &p.insns {
+                    let at = g.insns;
+                    g.insns += 1;
+                    g.first_insn.push(first);
+                    let mut pop = |n: usize| st.split_off(st.len() - n);
+                    let sum = |g: &Graph, kids: &[usize]| kids.iter().map(|&k| g.nodes[k].size).sum::<u64>();
+                    match insn {
+                        Insn::Nop | Insn::Concat(1) => {}
+                        &Insn::Checksum(c) => g.nodes[*st.last().expect("checked when read")].checksum = Some(c),
+                        &Insn::Swap(depth) => {
+                            let top = st.len() - 1;
+                            st.swap(top, top - depth);
+                        }
+                        Insn::Literal(l) => {
+                            let shown = l[..l.len().min(SHOWN)].to_vec();
+                            st.push(g.add(Shape::Literal(shown), Vec::new(), at, l.len() as u64))
+                        }
+                        &Insn::Slice { block, start, len } => {
+                            st.push(g.add(Shape::Slice(p.blocks[block], start), Vec::new(), at, len))
+                        }
+                        Insn::Apply(a) => {
+                            let kids = pop(a.num_inputs);
+                            let (module, outs) = (seg.modules + p.modules[a.module], a.output_sizes.len());
+                            let resources: Vec<usize> =
+                                a.resources.iter().map(|&r| seg.resources + p.resources[r]).collect();
+                            let params = a.params[..a.params.len().min(SHOWN)].to_vec();
+                            for (out, &size) in a.output_sizes.iter().enumerate() {
+                                let shape = Shape::Apply {
+                                    module,
+                                    resources: resources.clone(),
+                                    out,
+                                    outs,
+                                    params: params.clone(),
+                                    params_len: a.params.len(),
+                                    memory_limit: a.memory_limit,
+                                };
+                                st.push(g.add(shape, kids.clone(), at, size));
+                            }
+                        }
+                        &Insn::Concat(n) => {
+                            let kids = pop(n);
+                            let size = sum(&g, &kids);
+                            st.push(g.add(Shape::Concat, kids, at, size));
+                        }
+                        &Insn::Pack(n) => {
+                            let kids = pop(n);
+                            let size = 8 + 8 * n as u64 + sum(&g, &kids);
+                            st.push(g.add(Shape::Pack, kids, at, size));
+                        }
+                        Insn::Split(sizes) => {
+                            let kids = pop(1);
+                            for (out, &size) in sizes.iter().enumerate() {
+                                st.push(g.add(Shape::Split { out, outs: sizes.len() }, kids.clone(), at, size));
+                            }
+                        }
+                        &Insn::Patch(len) => {
+                            let kids = pop(2);
+                            st.push(g.add(Shape::Patch, kids, at, len));
+                        }
+                    }
+                }
+                if st.len() as u64 != outputs {
+                    return invalid("a formula of other outputs than its block's");
+                }
+                st
+            }
+        };
+        leaves.push(outputs);
+    }
+    Ok((g, leaves))
 }
 
 /// A block a content takes.

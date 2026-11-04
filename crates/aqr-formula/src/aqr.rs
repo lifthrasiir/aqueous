@@ -32,6 +32,7 @@
 
 mod dict;
 pub mod envelope;
+pub mod inspect;
 mod listing;
 pub mod mirror;
 mod segment;
@@ -42,7 +43,8 @@ pub use listing::Listed;
 pub use mirror::Mirroring;
 pub use segment::{Batch, ContentAt, Layout, Leaf, Placed, Segment, SegmentWriter};
 pub use tree::{
-    Entry, EntryNode, Extra, MAC_FLAGS_ALLOWED, Time, Tree, WIN_ATTRS_ALLOWED, Xattr, Zone, name_bytes, name_from,
+    Entry, EntryNode, Extra, MAC_FLAGS_ALLOWED, Member, Time, Tree, WIN_ATTRS_ALLOWED, Xattr, Zone, archive_key_name,
+    diagnostic, entry_key_name, name_bytes, name_from,
 };
 
 use std::borrow::Cow;
@@ -2451,7 +2453,7 @@ fn open_with<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, sealed: bool, salvagin
     }
     // (salvaging an encrypted archive's payload, its blocks lost are spacer blocks, its size
     // hint block among them maybe)
-    let mut blocks = parse(&c[HEADER_MAGIC.len()..archive_end], size_hint, metadata != 0, sealed && !salvaging)?;
+    let mut blocks = parse(&c[HEADER_MAGIC.len()..archive_end], 0, size_hint, metadata != 0, sealed && !salvaging)?;
     if metadata != 0 {
         let at = usize::try_from(metadata).ok().and_then(|b| fields_start.checked_sub(b));
         if blocks.segments.last().and_then(|s| s.metadata.as_ref()).map(|m| m.0) != at {
@@ -3000,6 +3002,8 @@ struct Blocks<'c> {
     formulas: Vec<(&'c [u8], Option<usize>)>,
     /// The data of each non-leaf block, whether it is Zstandard data, and its dictionary.
     non_leaf: Vec<(&'c [u8], bool, Option<usize>)>,
+    /// Where each non-leaf block starts, in the archive.
+    non_leaf_at: Vec<usize>,
     modules: Vec<Vec<u8>>,
     resources: Vec<Resource>,
     /// The data of each module and resource block as stored, for ModuleBytes and ResourceBytes
@@ -3078,10 +3082,10 @@ enum LeafBlock<'c> {
     Lost,
 }
 
-/// The blocks in `d`; `metadata` tells whether the footer points to a metadata block.
 /// The blocks `d` of an archive of `size_hint` with a metadata block or not, the payload of an
-/// encrypted archive where `sealed`.
-fn parse(d: &[u8], size_hint: u64, metadata: bool, sealed: bool) -> Decoded<Blocks<'_>> {
+/// encrypted archive where `sealed`; `d` starting `base` bytes after the header magic (a
+/// segment after the first, [`inspect`]), where the blocks are told to be.
+fn parse(d: &[u8], base: usize, size_hint: u64, metadata: bool, sealed: bool) -> Decoded<Blocks<'_>> {
     let mut b = Blocks {
         leaves: Vec::new(),
         leaf_at: Vec::new(),
@@ -3092,6 +3096,7 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool, sealed: bool) -> Decoded<Bloc
         segments: Vec::new(),
         formulas: Vec::new(),
         non_leaf: Vec::new(),
+        non_leaf_at: Vec::new(),
         modules: Vec::new(),
         resources: Vec::new(),
         module_data: Vec::new(),
@@ -3101,32 +3106,7 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool, sealed: bool) -> Decoded<Bloc
     };
     // the generic structure first: a block of an undefined critical type anywhere in it makes
     // the archive unsupported, whatever else is wrong with the other blocks
-    let mut framed = Vec::new();
-    let mut at = 0;
-    while at < d.len() {
-        let start = at;
-        let ty = leb(d, &mut at)?;
-        if at - start != varint::len(ty) {
-            return invalid("a block type not in the shortest encoding");
-        }
-        let width = 1 << (ty % 4);
-        let size = d.get(at..at + width).ok_or_else(|| Failure::Invalid("truncated block".into()))?;
-        at += width;
-        let size = u64::from_le_bytes(std::array::from_fn(|i| size.get(i).copied().unwrap_or(0)));
-        let data = usize::try_from(size)
-            .ok()
-            .and_then(|n| d.get(at..at.checked_add(n)?))
-            .ok_or_else(|| Failure::Invalid("truncated block".into()))?;
-        at += data.len();
-        // the padding, of any value: only compressors have to zero it
-        if (at - start) % 2 == 1 {
-            if at == d.len() {
-                return invalid("truncated block");
-            }
-            at += 1;
-        }
-        framed.push((start, ty, data, (at - start) as u64));
-    }
+    let framed = frame(d)?;
     if sealed && framed.first().is_none_or(|b| b.1 != SIZE_HINT) {
         return invalid("an encrypted archive's payload without a size hint block");
     }
@@ -3143,7 +3123,7 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool, sealed: bool) -> Decoded<Bloc
         dictionaries: b.dictionaries.len(),
     };
     for (start, ty, data, size) in framed {
-        let at = start + HEADER_MAGIC.len();
+        let at = base + start + HEADER_MAGIC.len();
         // (a dictionary of the segment's, by its index in it)
         let dicts = (first.dictionaries, b.dictionaries.len());
         let dictionary_of = |d, has| dictionary_of(d, has, dicts.0, dicts.1);
@@ -3151,7 +3131,7 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool, sealed: bool) -> Decoded<Bloc
             0x00..=0x03 if sealed => return invalid("a spacer block in an encrypted archive's payload"),
             // spacer blocks, of any space: only compressors have to zero it
             0x00..=0x03 => {}
-            SIZE_HINT if start == 0 => {
+            SIZE_HINT if base + start == 0 => {
                 let mut p = 0;
                 if leb(data, &mut p)? != size_hint || p != data.len() {
                     return invalid("bad size hint block");
@@ -3169,6 +3149,7 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool, sealed: bool) -> Decoded<Bloc
             0x40..=0x4b => {
                 let (data, dict) = dictionary_of(data, ty & 0x08 != 0)?;
                 b.non_leaf.push((data, ty & 0x0c != 0, dict));
+                b.non_leaf_at.push(at);
                 b.sizes.non_leaf.push(size);
             }
             // a shorthand block: the hash of a registered dictionary
@@ -3234,6 +3215,41 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool, sealed: bool) -> Decoded<Bloc
         b.segments.push(Segmented { first, end, metadata: None });
     }
     Ok(b)
+}
+
+/// A block framed: where it starts, its type, its data and the bytes it takes (with its
+/// padding).
+type Framed<'d> = (usize, u64, &'d [u8], u64);
+
+/// The blocks `d` framed.
+fn frame(d: &[u8]) -> Decoded<Vec<Framed<'_>>> {
+    let mut framed = Vec::new();
+    let mut at = 0;
+    while at < d.len() {
+        let start = at;
+        let ty = leb(d, &mut at)?;
+        if at - start != varint::len(ty) {
+            return invalid("a block type not in the shortest encoding");
+        }
+        let width = 1 << (ty % 4);
+        let size = d.get(at..at + width).ok_or_else(|| Failure::Invalid("truncated block".into()))?;
+        at += width;
+        let size = u64::from_le_bytes(std::array::from_fn(|i| size.get(i).copied().unwrap_or(0)));
+        let data = usize::try_from(size)
+            .ok()
+            .and_then(|n| d.get(at..at.checked_add(n)?))
+            .ok_or_else(|| Failure::Invalid("truncated block".into()))?;
+        at += data.len();
+        // the padding, of any value: only compressors have to zero it
+        if (at - start) % 2 == 1 {
+            if at == d.len() {
+                return invalid("truncated block");
+            }
+            at += 1;
+        }
+        framed.push((start, ty, data, (at - start) as u64));
+    }
+    Ok(framed)
 }
 
 /// The leading digit of block type `ty`: the first digit of its hexadecimal representation,
