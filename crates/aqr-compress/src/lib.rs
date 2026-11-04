@@ -1818,6 +1818,8 @@ fn make_later(
             let out = &of[*at..*at + app.len() as usize];
             let share = parent_let_go.as_ref().is_none_or(|r| !r.contains(&(out.as_ptr() as usize)));
             pre.submit(Arc::new(part), out, share);
+            // (its output hashed: of a WIM file mapped, its chunks, read through again)
+            aqr_formula::store::let_go(out);
         }
         let mut own = apart.cx(d.len(), opt);
         own.let_go = mine.is_some().then_some(d.as_ptr_range()).map(|r| r.start as usize..r.end as usize);
@@ -2771,6 +2773,27 @@ mod tests {
             drop(s.data.made());
         }
         assert!(rss(&mapped) <= left);
+    }
+
+    /// The chunks of a WIM file mapped are let go of again once the contents of its data are
+    /// made and its applications prevalidated (hashing the chunks they make).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wim_chunks_let_go_prevalidated() {
+        let d =
+            std::fs::read(format!("{}/../../codecs/aqr-wim/tests/data/lzx.wim", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let (mapped, rss) = mapped(&d);
+        let _known = aqr_formula::store::known_mapped(&mapped);
+        let opt = Options { threads: 2, ..Options::default() };
+        let mut f = wim(&mapped, 2).unwrap();
+        let left = rss(&mapped);
+        let mut cx = Cx::new(&mapped, &opt);
+        cx.pre = Some(Arc::new(verify::Prevalidator::spawn(2, &[&mapped])));
+        touch(&mapped);
+        assert!(rss(&mapped) > left);
+        nested(&mut f, &mapped, &opt, 0, &cx);
+        assert!(cx.parts_checked.get());
+        assert!(rss(&mapped) <= left, "{} > {left}", rss(&mapped));
     }
 
     /// The files of an image archived alone are sealed into the sink as they are made: the
