@@ -1,18 +1,19 @@
 //! Aqueous in Explorer: verbs on files, folders and archives, and a window of how far the work
 //! is, the work done by `aqr --ipc` (`crates/aqr/src/ipc.rs`) in a process of its own.
 //!
-//! usage: aqr-win --register | --unregister | compress[-passphrase|-zip] PATH... |
+//! usage: aqr-win --register | --unregister | compress[-passphrase|-zip|-7z] PATH... |
 //!        extract ARCHIVE... | test ARCHIVE...
 //!
 //! - `--register` adds the verbs for the user ([`register`]): "Compress with Aqueous" on files
 //!   and folders, and the menu "Aqueous" beside it with the rest ("Compress with passphrase…",
-//!   which encrypts: `aqr -P`; then "Compress into .zip", `aqr --format zip`); "Extract here"
-//!   (also the double-click) and "Test" on `.aqr` files and the other archives `aqr` extracts.
-//!   `--unregister` takes them away.
+//!   which encrypts: `aqr -P`; then "Compress into .zip" and ".7z", `aqr --format zip`, `7z`);
+//!   "Extract here" (also the double-click) and "Test" on `.aqr` files and the other archives
+//!   `aqr` extracts. `--unregister` takes them away.
 //! - `--install` and `--uninstall [--quiet]`, of the program that aqr-win-install installed
 //!   ([`install`]): the former run by the installer, the latter by Settings' Apps.
 //! - `compress`: the paths into an archive, a single one into `PATH.aqr`, several into one
-//!   named after their folder (`compress-zip`: `.zip`, [`register::OTHER_FORMATS`]). `extract`: each archive beside it, a single entry at its top
+//!   named after their folder (`compress-zip`: `.zip`, `compress-7z`: `.7z`,
+//!   [`register::OTHER_FORMATS`]). `extract`: each archive beside it, a single entry at its top
 //!   as it is, else into its name without `.aqr` (`aqr --each --auto-dir`). `test`: each archive
 //!   checked, and what it holds told.
 //! - Explorer runs a process for each of the paths chosen: those of a verb in a folder are
@@ -117,7 +118,7 @@ fn main() -> std::process::ExitCode {
         "extract" => Verb::Extract,
         "test" => Verb::Test,
         _ => {
-            let usage = "aqr-win --register | --unregister | compress[-passphrase|-zip] PATH... | \
+            let usage = "aqr-win --register | --unregister | compress[-passphrase|-zip|-7z] PATH... | \
                          extract ARCHIVE... | test ARCHIVE...";
             return fail("Not a verb of Aqueous", usage);
         }

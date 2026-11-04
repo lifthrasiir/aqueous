@@ -2,12 +2,12 @@
 
 Aqueous in Windows Explorer: "Compress with Aqueous" on files and folders, and beside it the
 menu "Aqueous" of the rest ("Compress with passphrase…", encrypted, `aqr -P`; a separator;
-"Compress into .zip", `aqr --format zip`), "Extract here" (also the double-click) and "Test" on `.aqr`
-files and the other archives `aqr` extracts, and a window of how far the work is. The work is
-done by `aqr --ipc` in a process of its own (the protocol: `crates/aqr/src/ipc.rs`); this
-program is the window and the verbs, about 1 MB (550 KB of it the icons: `droplet.ico`, the
-program's, and `icons/*.ico`, the files', from `scripts/icons.py`; in the installer they take
-some 230 KB, the drop being the same bytes in each).
+"Compress into .zip" and ".7z", `aqr --format zip`, `7z`), "Extract here" (also the
+double-click) and "Test" on `.aqr` files and the other archives `aqr` extracts, and a window of
+how far the work is. The work is done by `aqr --ipc` in a process of its own (the protocol:
+`crates/aqr/src/ipc.rs`); this program is the window and the verbs, about 1 MB (550 KB of it
+the icons: `droplet.ico`, the program's, and `icons/*.ico`, the files', from `scripts/icons.py`;
+in the installer they take some 230 KB, the drop being the same bytes in each).
 
 ```sh
 cargo build -r -p aqr-win

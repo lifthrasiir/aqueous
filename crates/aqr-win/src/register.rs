@@ -4,9 +4,9 @@
 //! - `*\shell\Aqueous.compress` and `Directory\shell\Aqueous.compress`: `aqr-win compress`,
 //!   with this program's icon; and beside it `Aqueous.more`, the menu "Aqueous" of the other
 //!   verbs ([`more`]: "Compress with passphrase…", `aqr -P`; then, after a separator, "Compress
-//!   into .zip" and the other formats `aqr` makes, [`OTHER_FORMATS`]). The menu is made by the
-//!   registry alone: `SubCommands` (empty) on the key has its own `shell` key taken as the
-//!   submenu's verbs, in the order of their keys' names; `CommandFlags` of
+//!   into .zip", ".7z" and the other formats `aqr` makes, [`OTHER_FORMATS`]). The menu is made
+//!   by the registry alone: `SubCommands` (empty) on the key has its own `shell` key taken as
+//!   the submenu's verbs, in the order of their keys' names; `CommandFlags` of
 //!   `ECF_SEPARATORBEFORE` puts the separator.
 //! - `.aqr` of the class `Aqueous.Archive`, whose verbs are `extract` (the default: a double
 //!   click) and `test`, and whose icon (`DefaultIcon`) is resource 2: this program's drop with
@@ -77,7 +77,7 @@ const OLD: [&str; 2] = [r"*\shell\Aqueous.compress-passphrase", r"Directory\shel
 
 /// The formats other than Aqueous's that `aqr -c --format` makes, each a verb
 /// `compress-FORMAT` in [`MENU`] ("Compress into .FORMAT"), after the separator.
-pub const OTHER_FORMATS: [&str; 1] = ["zip"];
+pub const OTHER_FORMATS: [&str; 2] = ["zip", "7z"];
 
 /// `ECF_SEPARATORBEFORE` of `CommandFlags`.
 const SEPARATOR_BEFORE: u32 = 0x20;
@@ -340,7 +340,7 @@ mod tests {
     #[test]
     fn told_as_registered() {
         let t = told();
-        assert!(t.contains("\"Compress with passphrase…\", \"Compress into .zip\""), "{t}");
+        assert!(t.contains("\"Compress with passphrase…\", \"Compress into .zip\", \"Compress into .7z\""), "{t}");
         assert!(t.contains("(.zip .7z .rar") && t.contains(".zst)"), "{t}");
     }
 
