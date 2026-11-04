@@ -335,6 +335,17 @@ fn salvages_segments() {
         let t = stderr(&o);
         assert!(!o.status.success() && t.contains("its footer made again") && t.contains("segments after it"), "{t}");
         assert_eq!(files(&out).len(), 3, "{t}");
+        // (in the fourth segment's metadata block: its file salvaged whole, of no name)
+        fs::write(d.join("cut.aqr"), &a[..metas[3] + 10]).unwrap();
+        let out = d.join(format!("unnamed-{mirrors}"));
+        let o = aqr_fed(&d, &["-d", "-o", out.to_str().unwrap(), "cut.aqr"], b"");
+        let t = stderr(&o);
+        assert!(!o.status.success() && t.contains("1 file of no name"), "{t}");
+        let got = files(&out);
+        assert_eq!(got.len(), 4, "{t}");
+        assert!(got.contains(&("#salvaged/leaf-1".to_string(), want[3].1.clone())), "{t}");
+        let o = aqr_fed(&d, &["-K", "cut.aqr"], b"");
+        assert!(!o.status.success() && stderr(&o).contains("1 file of no name"), "{}", stderr(&o));
         // (in the fourth segment's blocks)
         fs::write(d.join("cut.aqr"), &a[..metas[2] + 100_000]).unwrap();
         let out = d.join(format!("out-{mirrors}"));

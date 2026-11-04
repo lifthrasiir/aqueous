@@ -66,7 +66,11 @@
 //!   is repaired in memory ([`aqr::mirror::repair`]): a damaged block restored from its mirror
 //!   block, the footer made again where the archive is cut short after its last metadata block;
 //!   told so. Cut short before it (its metadata block restored past the bytes lost), it is
-//!   salvaged ([`aqr::open_salvaging`]): the files of the blocks lost are lost.
+//!   salvaged ([`aqr::open_salvaging`]): the files of the blocks lost are lost. Cut short in a
+//!   segment whose metadata block is not there, that segment is cut off, the run failing; its
+//!   leaf blocks still whole are evaluated each alone, their files of no name written into
+//!   `#salvaged` (`leaf-N`) beside the tree extracted whole ([`salvage_unnamed`]). An archive
+//!   whose footer is made again after a segment not meant to be the last fails the run too.
 //! - A file whose evaluation fails (its checksum not verifying, say) is lost, told on a line of
 //!   its own; the others are extracted (or tested), and the run fails at the end. A file covered
 //!   by no checksum is given as it decodes.
@@ -2136,6 +2140,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     }
     let cut_off = restored.as_ref().and_then(|r| r.cut_off.as_ref()).map(|c| c.len());
     let footer_made = restored.as_ref().is_some_and(|r| r.footer);
+    let damaged = read;
     let read: &[u8] = restored.as_ref().map_or(read, |r| &r.bytes);
     // (salvaged where bytes were lost: their files lost, the others given back as they check)
     let mut archive = match (restored.as_ref().is_some_and(|r| !r.lost.is_empty()), decrypted.is_some()) {
@@ -2301,6 +2306,26 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
         }
     };
     let out = out.as_deref();
+    // the files of a segment cut short, of no name known: each leaf's outputs (into a directory
+    // of their own beside the tree, where the archive is extracted whole)
+    if let Some(cut) = restored.as_ref().and_then(|r| r.cut_off.as_ref()) {
+        let into = match (out, archive.tree()) {
+            (Some(o), Some(t)) if a.select.is_none() && !a.test => Some(unnamed_dir(o, t)),
+            _ => None,
+        };
+        let (n, bytes) = salvage_unnamed(a, damaged, cut, &erased, runner, into.as_deref()).map_err(|e| err(&e))?;
+        if n > 0 {
+            let s = if n == 1 { "" } else { "s" };
+            let (what, bytes) = (input.display(), size(bytes as f64));
+            match &into {
+                Some(d) => eprintln!(
+                    "{what}: {n} file{s} of no name ({bytes}) salvaged from the segment cut short, into {}",
+                    d.display()
+                ),
+                None => eprintln!("{what}: {n} file{s} of no name ({bytes}) salvaged from the segment cut short"),
+            }
+        }
+    }
     if !a.quiet {
         summary_d(input, out, files, total, start);
         // (of an archive whose files are all there)
@@ -2348,6 +2373,61 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
         });
     }
     Ok(true)
+}
+
+/// A directory in `out` (where tree `t` was extracted) for the files of no name of a segment cut
+/// short: `#salvaged`, or `#salvaged-2` and on where the tree or `out` has that name.
+fn unnamed_dir(out: &Path, t: &Tree) -> PathBuf {
+    (1..)
+        .map(|k| if k == 1 { "#salvaged".to_string() } else { format!("#salvaged-{k}") })
+        .find(|n| !t.entries.iter().any(|e| e.parent.is_none() && e.name == n.as_bytes()) && !out.join(n).exists())
+        .map(|n| out.join(n))
+        .expect("a name free")
+}
+
+/// The leaves of the segment of `damaged` (an archive as read, before repair) that repair cut
+/// off at `cut`, its bytes `erased` not to be trusted, evaluated each alone
+/// ([`aqr::mirror::cut_segment`]): each output a file of no name, written into directory `into`
+/// (made) where given, as `leaf-N` (`leaf-N-K` of a leaf of several outputs). Returns how many,
+/// and their bytes.
+fn salvage_unnamed(
+    a: &Args,
+    damaged: &[u8],
+    cut: &std::ops::Range<usize>,
+    erased: &[std::ops::Range<usize>],
+    runner: &dyn aqr::Runner,
+    into: Option<&Path>,
+) -> Result<(usize, u64), String> {
+    let Some(c) = aqr::mirror::cut_segment(damaged, cut, erased) else { return Ok((0, 0)) };
+    let mut archive = aqr::open_salvaging(&c, runner, false).map_err(|e| e.to_string())?;
+    archive.set_budget(aqr_common::budget::global());
+    if let Some(d) = into {
+        fs::create_dir(d).map_err(|e| format!("{}: {e}", d.display()))?;
+    }
+    let got = std::sync::Mutex::new((0usize, 0u64, None::<String>));
+    // (a leaf failing lost, as its files would be: nothing tells which they were)
+    let _ = archive.each_leaf(a.opt.threads, |i, r| {
+        let Ok(outputs) = r else { return Ok(()) };
+        let several = outputs.len() > 1;
+        for (k, d) in outputs.iter().enumerate() {
+            if let Some(dir) = into {
+                let name = if several { format!("leaf-{}-{}", i + 1, k + 1) } else { format!("leaf-{}", i + 1) };
+                let p = dir.join(name);
+                if let Err(e) = fs::File::create_new(&p).and_then(|mut f| f.write_all(d)) {
+                    got.lock().unwrap().2.get_or_insert(format!("{}: {e}", p.display()));
+                    return Err(Failure::Resource(e.to_string()));
+                }
+            }
+            let mut g = got.lock().unwrap();
+            (g.0, g.1) = (g.0 + 1, g.1 + d.len() as u64);
+        }
+        Ok(())
+    });
+    let (n, bytes, failed) = got.into_inner().unwrap();
+    match failed {
+        Some(m) => Err(m),
+        None => Ok((n, bytes)),
+    }
 }
 
 /// The contents wanted (all, or those `wanted` marks) not given (`given`) where evaluating them

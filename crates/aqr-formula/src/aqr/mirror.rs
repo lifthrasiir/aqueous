@@ -947,6 +947,42 @@ pub fn repair(a: &[u8], c: &Check, salvage: bool, erased: &[Range<usize>]) -> Op
     Some(Repaired { bytes: v.expect("changed"), restored: restored.len(), header, footer, lost, cut_off })
 }
 
+/// The blocks of archive `a` (repaired or not: those before `cut` do not matter) from the start
+/// of `cut` (the blocks of a segment cut short, [`Repaired::cut_off`]) as far as they are whole,
+/// as an archive of their own without a metadata block, for its leaf blocks to be salvaged each
+/// alone ([`super::open_salvaging`] and [`super::Archive::each_leaf`]): files of no name known.
+/// Its blocks stop before the first with a byte `erased` (not to be trusted). None where no
+/// leaf block is whole.
+pub fn cut_segment(a: &[u8], cut: &Range<usize>, erased: &[Range<usize>]) -> Option<Vec<u8>> {
+    let mut at = cut.start;
+    let mut leaves = 0;
+    while at < a.len() {
+        let mut p = at;
+        let Ok(ty) = varint::get(a, &mut p) else { break };
+        if p - at != varint::len(ty) || ty == FOOTER_TYPE || ty == OVERLAY_FOOTER_TYPE {
+            break;
+        }
+        let width = 1 << (ty % 4);
+        let Some(size) = a.get(p..p + width) else { break };
+        let size = u64::from_le_bytes(std::array::from_fn(|i| size.get(i).copied().unwrap_or(0)));
+        let Some(end) = usize::try_from(size).ok().and_then(|n| (p + width).checked_add(n)) else { break };
+        let end = end + (end - at) % 2;
+        if end > a.len() || erased.iter().any(|e| overlap(e, &(at..end))) {
+            break;
+        }
+        leaves += matches!(ty, 0x20..=0x37 | 0x70..=0x77) as usize;
+        at = end;
+    }
+    if leaves == 0 {
+        return None;
+    }
+    // (a standalone archive whatever `a` is: its leaves are evaluated alone)
+    let mut out = HEADER_MAGIC.to_vec();
+    out.extend_from_slice(&a[cut.start..at]);
+    super::footer(&mut out, at - cut.start);
+    Some(out)
+}
+
 /// Blocks (or bytes) where they are, padding too, and whether each is a non-leaf data block.
 type Spans = Vec<(Range<usize>, bool)>;
 
@@ -1305,6 +1341,25 @@ mod tests {
             let r = repair(d, &check(d), true, &[]).unwrap();
             assert!(r.footer && r.lost.len() == 1 && r.lost[0] == (second..cut), "{cut}: {r:?}");
             assert_eq!(r.cut_off, Some(second..cut));
+            // the second segment's leaves whole, each alone: a file of no name each (of the
+            // cut in the second file's blocks, none)
+            let c = cut_segment(d, &(second..cut), &[]);
+            let leaves = std::sync::Mutex::new(Vec::new());
+            if let Some(c) = &c {
+                let a = super::super::open_salvaging(c, &natives, false).unwrap();
+                a.each_leaf(1, |i, r| {
+                    leaves.lock().unwrap().push((i, r.ok()));
+                    Ok(())
+                })
+                .unwrap();
+            }
+            let mut leaves = leaves.into_inner().unwrap();
+            leaves.sort_by_key(|l| l.0);
+            let given: Vec<Vec<Vec<u8>>> = leaves.into_iter().filter_map(|l| l.1).collect();
+            match cut {
+                c if c == second + 1 => assert!(given.is_empty()),
+                _ => assert_eq!(given, [vec![rev(NAMES[1])], vec![rev(NAMES[2])]]),
+            }
             assert_eq!(files(&r.bytes), [rev(NAMES[0])]);
         }
     }

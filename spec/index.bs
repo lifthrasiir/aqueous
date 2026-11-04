@@ -4027,6 +4027,11 @@ To <dfn>salvage an archive</dfn> |a|, a [=byte sequence=] as for [=repair an arc
         only because of blocks after |m| or a block cut short after the last block read,
         the bytes from the end of |m| (after its [=block/padding=]) to the end of |a| are [=salvage/lost=]:
         truncate |a| to the end of |m| and continue with its step 5.
+        The blocks in those bytes, as far as they are whole and have no [=untrusted=] byte, MAY be salvaged apart
+        as the [=archive/blocks=] of a [=standalone archive=] of their own without a metadata block,
+        each of its [=leaf blocks=] evaluated by itself as in the step 2:
+        the outputs of those evaluated are files and forks whose names are not known,
+        which a decompressor MUST report as such if it extracts them.
     2. Interpret |a| as in [=interpret an archive=], with the following exceptions,
         each of which makes the files and forks concerned [=salvage/lost=] rather than |a| an invalid archive:
         * A file or a fork whose leaf block offset doesn't refer to a leaf block is lost.
@@ -4084,7 +4089,9 @@ and of the footer if one ends at the end of |a| and has no [=untrusted=] byte:
   while the blocks that were in them are no longer there and their files are lost.
   A leaf block partly lost is lost as a whole, even without a checksum.
   An archive cut short in a segment whose metadata block can't be restored is salvaged as the segments before it:
-  the blocks of that segment after the last metadata block whole are lost together.
+  the blocks of that segment after the last metadata block whole are lost together,
+  but for the contents of its leaf blocks still whole, which can be salvaged without their names,
+  as a segment refers only to blocks of its own.
   An archive cut short just after a metadata block other than the last, however,
   is repaired into the archive of the segments before the cut,
   as nothing after the metadata block remains to tell that more followed;
