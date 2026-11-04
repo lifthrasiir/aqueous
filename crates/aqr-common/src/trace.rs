@@ -395,46 +395,97 @@ pub(crate) fn reallocated(p: *mut u8, n: usize, q: *mut u8, m: usize) {
 
 /// The resident set of the process, in bytes (0 where unknown).
 pub fn rss() -> u64 {
+    resident().all
+}
+
+/// The resident set of the process, and what of it is of files mapped (0 where unknown).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Resident {
+    pub all: u64,
+    /// Of files mapped (the inputs, the spill): pages the system may write out (where changed)
+    /// and drop as memory runs short, rather than swap. On Windows, the working set but its
+    /// private part; on macOS, the pages of external objects; on Linux, `RssFile` and
+    /// `RssShmem`.
+    pub mapped: u64,
+}
+
+/// [`Resident`] now.
+pub fn resident() -> Resident {
     #[cfg(windows)]
     {
+        /// PROCESS_MEMORY_COUNTERS_EX2 (Windows 10 1809 on), whose first fields are those of
+        /// PROCESS_MEMORY_COUNTERS: of `sizes`, 1 is WorkingSetSize, 9 PrivateWorkingSetSize.
         #[repr(C)]
         struct Counters {
             cb: u32,
             page_faults: u32,
-            sizes: [usize; 8],
+            sizes: [usize; 11],
         }
         unsafe extern "system" {
             fn GetCurrentProcess() -> isize;
             fn K32GetProcessMemoryInfo(process: isize, counters: *mut Counters, cb: u32) -> i32;
         }
-        let mut c = Counters { cb: size_of::<Counters>() as u32, page_faults: 0, sizes: [0; 8] };
-        // SAFETY: the process's own pseudo-handle, and a PROCESS_MEMORY_COUNTERS of its size
-        if unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) } == 0 {
-            return 0;
+        let mut c = Counters { cb: size_of::<Counters>() as u32, page_faults: 0, sizes: [0; 11] };
+        // SAFETY: the process's own pseudo-handle, and counters of the size told
+        if unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) } != 0 {
+            let all = c.sizes[1] as u64;
+            return Resident { all, mapped: all.saturating_sub(c.sizes[9] as u64) };
         }
-        // (WorkingSetSize)
-        c.sizes[1] as u64
+        // (older systems: PROCESS_MEMORY_COUNTERS alone, of 8 sizes)
+        c.cb = (8 + size_of::<[usize; 8]>()) as u32;
+        // SAFETY: as above, of fewer bytes than the struct's
+        match unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) } {
+            0 => Resident::default(),
+            _ => Resident { all: c.sizes[1] as u64, mapped: 0 },
+        }
     }
     #[cfg(target_vendor = "apple")]
     {
-        // SAFETY: a proc_taskinfo of its size, written by the call
+        /// task_vm_info (TASK_VM_INFO), up to `external` and the fields after it that every
+        /// revision has: sizes of 8 bytes but `region_count` and `page_size`, of 4.
+        #[repr(C)]
+        struct VmInfo {
+            virtual_size: u64,
+            region_count: i32,
+            page_size: i32,
+            resident_size: u64,
+            resident_size_peak: u64,
+            device: u64,
+            device_peak: u64,
+            internal: u64,
+            internal_peak: u64,
+            external: u64,
+            external_peak: u64,
+            rest: [u64; 10],
+        }
+        const TASK_VM_INFO: u32 = 22;
+        unsafe extern "C" {
+            /// The task's own port (what `mach_task_self()` reads).
+            static mach_task_self_: libc::mach_port_t;
+        }
+        // SAFETY: a struct of the size told (in 4-byte units), written by the call
         unsafe {
-            let mut info: libc::proc_taskinfo = std::mem::zeroed();
-            let size = size_of::<libc::proc_taskinfo>() as i32;
-            let n = libc::proc_pidinfo(libc::getpid(), libc::PROC_PIDTASKINFO, 0, (&raw mut info).cast(), size);
-            if n == size { info.pti_resident_size } else { 0 }
+            let mut info: VmInfo = std::mem::zeroed();
+            let mut count = (size_of::<VmInfo>() / 4) as libc::mach_msg_type_number_t;
+            let r = libc::task_info(mach_task_self_, TASK_VM_INFO, (&raw mut info).cast(), &mut count);
+            match r == libc::KERN_SUCCESS {
+                true => Resident { all: info.resident_size, mapped: info.external },
+                false => Resident::default(),
+            }
         }
     }
     #[cfg(all(unix, not(target_vendor = "apple")))]
     {
+        // (pages: of all, resident, and resident of files and shared memory)
         let statm = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
-        let pages: u64 = statm.split_whitespace().nth(1).and_then(|p| p.parse().ok()).unwrap_or(0);
+        let mut pages = statm.split_whitespace().skip(1).map(|p| p.parse::<u64>().unwrap_or(0));
+        let (all, mapped) = (pages.next().unwrap_or(0), pages.next().unwrap_or(0));
         // SAFETY: of no preconditions
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(0) as u64;
-        pages * page
+        Resident { all: all * page, mapped: mapped * page }
     }
     #[cfg(not(any(windows, unix)))]
-    0
+    Resident::default()
 }
 
 // The sampler.
@@ -451,9 +502,11 @@ const SAMPLES_MAX: usize = 1 << 16;
 pub struct Sample {
     /// Seconds since the recording started.
     pub at: f64,
-    /// Bytes of the heap, and the resident set.
+    /// Bytes of the heap, and the resident set and of it what is of files mapped
+    /// ([`Resident`]).
     pub heap: i64,
     pub rss: u64,
+    pub mapped: u64,
     /// Workers of the pool reserved or running something.
     pub reserved: u32,
     /// Bytes taken of the budget of the process ([`crate::budget::global`]).
@@ -530,10 +583,12 @@ fn sample(stop: &AtomicBool) -> Trace {
                 threads.extend(all[threads.len()..].iter().cloned());
             }
         }
+        let r = resident();
         let mut s = Sample {
             at: start.elapsed().as_secs_f64(),
             heap: HEAP.load(Relaxed),
-            rss: rss(),
+            rss: r.all,
+            mapped: r.mapped,
             reserved: crate::pool::usage().0 as u32,
             held: crate::budget::global().held(),
             threads: Vec::with_capacity(threads.len()),

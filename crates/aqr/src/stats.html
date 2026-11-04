@@ -138,16 +138,22 @@ function show(i) {
   render();
 }
 
+/** Bytes of the resident set of sample `i` but files mapped (`mapped`: none in older JSON). */
+function own(t, i) {
+  return Math.max(0, t.rss[i] - (t.mapped ? t.mapped[i] : 0));
+}
+
 // --- the page ---
 
 function render() {
   const v = VIEW, r = v.r, t = v.t;
   const workers = v.shown.filter((k) => t.threads[k][1]).length || 1;
-  let busy = 0, heapPeak = 0, heapAt = 0, rssPeak = 0;
+  let busy = 0, heapPeak = 0, heapAt = 0, rssPeak = 0, ownPeak = 0;
   for (let i = 0; i < v.n; i++) {
     for (const k of v.shown) { const s = v.stack[i * v.T + k]; if (t.threads[k][1] && s > 0 && v.waits[s] < 0) busy += v.dt[i]; }
     if (t.heap[i] > heapPeak) { heapPeak = t.heap[i]; heapAt = t.at[i]; }
     rssPeak = Math.max(rssPeak, t.rss[i]);
+    ownPeak = Math.max(ownPeak, own(t, i));
   }
   const total = r.seconds * workers;
   const archived = r.mode === "compress";
@@ -156,6 +162,7 @@ function render() {
     ["busy", pc(busy, total)], ["read", size(r.read)], ["written", size(r.written)],
     archived ? ["ratio", pc(r.written, r.read)] : ["speed", (r.written / 1e6 / r.seconds).toFixed(1) + " MB/s"],
     ["heap peak", size(heapPeak) + ` @ ${heapAt.toFixed(1)} s`], ["resident peak", rssPeak ? size(rssPeak) : "-"],
+    ...(ownPeak < rssPeak ? [["resident peak, not mapped", size(ownPeak)]] : []),
     ["files", r.contents.length], ["samples", `${v.n} × ${(t.interval * 1000).toFixed(0)} ms`],
   ];
   if (r.overhead != null) tiles.splice(7, 0, ["overhead", size(r.overhead)]);
@@ -288,7 +295,7 @@ function drawMem() {
   for (let k = 0; k <= 4; k++) { const n = most * k / 4; g.fillText(size(n), LEFT - 6, y(n)); }
   const other = "#9a9aa2", small = css("--wait");
   const color = (l) => v.color[l] !== "#999" ? v.color[l] : PALETTE[(top.indexOf(l) + 7) % PALETTE.length];
-  let rssPath = [];
+  let rssPath = [], ownPath = [];
   for (let c = 0; c < cols; c++) {
     const [a, b] = cs[c];
     // the sample of the most heap in the column
@@ -307,17 +314,24 @@ function drawMem() {
     if (rest) { g.fillStyle = other; g.fillRect(LEFT + c, y(at + rest), 1, y(at) - y(at + rest)); at += rest; }
     const sm = Math.max(0, t.heap[i] - tracked);
     if (sm) { g.fillStyle = small; g.fillRect(LEFT + c, y(at + sm), 1, y(at) - y(at + sm)); }
-    let rss = 0;
-    for (let j = a; j < b; j++) rss = Math.max(rss, t.rss[j]);
+    let rss = 0, mine = 0;
+    for (let j = a; j < b; j++) { rss = Math.max(rss, t.rss[j]); mine = Math.max(mine, own(t, j)); }
     rssPath.push([LEFT + c + 0.5, y(rss)]);
+    ownPath.push([LEFT + c + 0.5, y(mine)]);
   }
   if (rssPath.some((p) => p[1] < height)) {
     g.strokeStyle = css("--fg"); g.lineWidth = 1; g.beginPath();
     rssPath.forEach(([x, yy], k) => k ? g.lineTo(x, yy) : g.moveTo(x, yy)); g.stroke();
   }
+  // (the resident set but files mapped, where it is told apart)
+  if (t.mapped && ownPath.some((p, k) => p[1] !== rssPath[k][1])) {
+    g.strokeStyle = css("--fg"); g.lineWidth = 1; g.setLineDash([3, 3]); g.beginPath();
+    ownPath.forEach(([x, yy], k) => k ? g.lineTo(x, yy) : g.moveTo(x, yy)); g.stroke(); g.setLineDash([]);
+  }
   $("#memlegend").innerHTML = top.map((l) => `<span><i style="background:${color(l)}"></i>${esc(t.labels[l][0] || "(no span)")}</span>`).join("")
     + `<span><i style="background:${other}"></i>other large</span><span><i style="background:${small}"></i>small</span>`
-    + `<span><i style="background:${css("--fg")};height:2px;vertical-align:3px"></i>resident set</span>`;
+    + `<span><i style="background:${css("--fg")};height:2px;vertical-align:3px"></i>resident set</span>`
+    + (t.mapped ? `<span><i style="border-top:1px dashed ${css("--fg")};height:0;vertical-align:3px"></i>resident but for files mapped</span>` : "");
   return { cols, cs, top, color };
 }
 
@@ -369,7 +383,7 @@ function hover(e) {
     let tracked = 0;
     for (let j = 0; j < bs.length; j += 2) { tracked += bs[j + 1]; parts.push([bs[j], bs[j + 1]]); }
     parts.sort((a, b) => b[1] - a[1]);
-    html += ` · heap ${size(t.heap[i])}${t.rss[i] ? ", resident " + size(t.rss[i]) : ""}<br>`
+    html += ` · heap ${size(t.heap[i])}${t.rss[i] ? ", resident " + size(t.rss[i]) : ""}${t.mapped && t.mapped[i] ? ` (${size(t.mapped[i])} of files mapped)` : ""}<br>`
       + parts.slice(0, 10).map(([l, n]) => `${esc(t.labels[l][0] || "(no span)")}: ${size(n)}`).join("<br>")
       + `<br>small: ${size(Math.max(0, t.heap[i] - tracked))}`;
   }

@@ -24,7 +24,8 @@
 //! - `trace`: `interval` (seconds between samples, as it ended), `workers`, `labels` (by id:
 //!   name and whether of waiting), `stacks` (by id: label ids, the outermost first; 0 is none,
 //!   idle), `threads` (name and whether a worker of the pool), and the samples by columns:
-//!   `at` (seconds), `heap` and `rss` (bytes), `held` (bytes taken of the budget), `reserved`
+//!   `at` (seconds), `heap` and `rss` (bytes), `mapped` (bytes of the resident set of files
+//!   mapped: the inputs, the spill; 0 where unknown), `held` (bytes taken of the budget), `reserved`
 //!   (workers reserved or running), `samples`
 //!   (by sample, of each thread its stack and item, one after the other; -1 for a thread ended
 //!   or no item) and `bytes` (by sample, label ids and the bytes of large blocks they hold, one
@@ -238,6 +239,8 @@ fn outliers(run: &Run) -> String {
     let (mut busy_time, mut wait_time, mut total) = (0.0, HashMap::<u32, f64>::new(), 0.0);
     // the peak of the heap, and when
     let (mut peak, mut peak_at, mut rss) = (0i64, None, 0u64);
+    // of the resident set: what of it was of files mapped then, and the most of the rest
+    let (mut mapped, mut own) = (0u64, 0u64);
     // and of what is held outside it (the spill)
     let (mut outside, mut outside_at) = (0i64, None);
     for (i, s) in t.samples.iter().enumerate() {
@@ -255,7 +258,10 @@ fn outliers(run: &Run) -> String {
         if s.heap > peak {
             (peak, peak_at) = (s.heap, Some(i));
         }
-        rss = rss.max(s.rss);
+        if s.rss > rss {
+            (rss, mapped) = (s.rss, s.mapped);
+        }
+        own = own.max(s.rss.saturating_sub(s.mapped));
         let out: i64 = s.outside.iter().map(|b| b.1).sum();
         if out > outside {
             (outside, outside_at) = (out, Some(i));
@@ -291,7 +297,16 @@ fn outliers(run: &Run) -> String {
         },
         holder.unwrap_or_default(),
         peak_at.map_or(0.0, |i| t.samples[i].at),
-        if rss > 0 { format!(", resident peak {}", size(rss as f64)) } else { String::new() },
+        match (rss, mapped) {
+            (0, _) => String::new(),
+            (_, 0) => format!(", resident peak {}", size(rss as f64)),
+            _ => format!(
+                ", resident peak {} ({} of it of files mapped; the rest {} at most)",
+                size(rss as f64),
+                size(mapped as f64),
+                size(own as f64)
+            ),
+        },
         spill.unwrap_or_default()
     );
     let mut said = 0;
@@ -546,6 +561,8 @@ fn json(run: &Run) -> String {
     array(&mut o, &t.samples, |o, s| _ = write!(o, "{}", s.heap.max(0)));
     o += ",\"rss\":";
     array(&mut o, &t.samples, |o, s| _ = write!(o, "{}", s.rss));
+    o += ",\"mapped\":";
+    array(&mut o, &t.samples, |o, s| _ = write!(o, "{}", s.mapped));
     o += ",\"held\":";
     array(&mut o, &t.samples, |o, s| _ = write!(o, "{}", s.held));
     o += ",\"reserved\":";
