@@ -116,6 +116,11 @@ fn encode_as(input: &[u8], shared: Option<&Bytes>, threads: usize) -> Option<For
         aqr_lzx::recons::split_into(&parts[i].chunks, out).ok()
     });
     drop(outs);
+    // (the chunks read through where the bytes are shared: of a file mapped, its pages let go
+    // of, read again as the data is made again of them)
+    if shared.is_some() {
+        parts.iter().flat_map(|p| &p.chunks).for_each(|&(c, _)| aqr_formula::store::let_go(c));
+    }
     // a resource of a stream not split kept whole, with the bytes around it
     let mut taken = vec![true; w.resources.len()];
     for (p, r) in parts.iter().zip(&records) {
@@ -273,6 +278,8 @@ fn made_again<'a>(
             let chunks: Vec<(&[u8], usize)> = p.iter().map(|(r, n)| (&whole[r.clone()], *n)).collect();
             let n = aqr_lzx::recons::data_len(&chunks);
             aqr_lzx::recons::data_into(&chunks, &mut b[at..at + n]).expect("chunks split before");
+            // (of a file mapped, let go of again: see `encode_as`)
+            chunks.iter().for_each(|&(c, _)| aqr_formula::store::let_go(c));
             at += n;
         }
         b.into_bytes()

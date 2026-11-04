@@ -825,7 +825,8 @@ fn finish(
     memory::declare(&mut f, &Native { threads: opt.threads }, &memo.1);
     // the streams of a class together, as they compress smaller: as pieces of the streams, not
     // copied, their blocks compressed as they are written; then the sink's
-    let sum = Some(aqr::checksum(d));
+    // (of a file mapped, let go of as it is read: of all of it, again)
+    let sum = Some(aqr::checksum_through(d));
     let encoding = aqr_common::trace::span("encode");
     let sunk = sink.map(aqr::sink::Sink::close).transpose().map_err(io::Error::other)?.unwrap_or_default();
     let (mut merged, groups) = f.merged();
@@ -2697,22 +2698,19 @@ mod tests {
         assert!(aqr_decompress::decompress(&plain, 1).unwrap() == d);
     }
 
-    /// The pages of an input mapped are let go of as it is read through (its contents sealed, its
-    /// streams encoded, its bytes compared in verifying): not resident as compressing ends,
-    /// the archive the same (Linux: told by the mapping's `Rss` in `/proc/self/smaps`).
+    /// `d` as a file mapped (of a file made for it and gone), and the bytes of the mapping
+    /// resident in the process (Linux: its `Rss` in `/proc/self/smaps`).
     #[cfg(target_os = "linux")]
-    #[test]
-    fn input_let_go() {
-        let fixture = |p: &str| std::fs::read(format!("{}/../../{p}", env!("CARGO_MANIFEST_DIR"))).unwrap();
-        let d = zstd::stream::decode_all(&fixture("codecs/aqr-iso/tests/data/udf201.iso.zst")[..]).unwrap();
-        let path = std::env::temp_dir().join(format!("aqr-compress-let-go-{}.iso", std::process::id()));
-        std::fs::write(&path, &d).unwrap();
+    fn mapped(d: &[u8]) -> (aqr_formula::Bytes, impl Fn(&aqr_formula::Bytes) -> usize) {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("aqr-compress-mapped-{}-{n}", std::process::id()));
+        std::fs::write(&path, d).unwrap();
         // SAFETY: a file of this test's alone, not changed while mapped
         let map = unsafe { memmap2::Mmap::map(&std::fs::File::open(&path).unwrap()) }.unwrap();
         std::fs::remove_file(&path).unwrap();
-        let mapped = aqr_formula::Bytes::shared(Arc::new(map));
-        // the bytes of the mapping at `at` resident in the process
-        let rss = |at: usize| {
+        let rss = |b: &aqr_formula::Bytes| {
+            let at = b.as_ptr() as usize;
             let smaps = std::fs::read_to_string("/proc/self/smaps").unwrap();
             let mut lines = smaps.lines().skip_while(|l| {
                 let Some((a, b)) = l.split(' ').next().and_then(|r| r.split_once('-')) else { return true };
@@ -2723,13 +2721,56 @@ mod tests {
             let rss = lines.find_map(|l| l.strip_prefix("Rss:")).expect("its Rss");
             rss.trim().trim_end_matches(" kB").trim().parse::<usize>().unwrap() << 10
         };
+        (aqr_formula::Bytes::shared(Arc::new(map)), rss)
+    }
+
+    /// Every page of `b` read.
+    #[cfg(target_os = "linux")]
+    fn touch(b: &[u8]) {
+        b.iter().step_by(4096).for_each(|&x| _ = std::hint::black_box(x));
+    }
+
+    /// The pages of an input mapped are let go of as it is read through (its contents sealed, its
+    /// streams encoded, its bytes compared in verifying): not resident as compressing ends,
+    /// the archive the same.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn input_let_go() {
+        let fixture = |p: &str| std::fs::read(format!("{}/../../{p}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let d = zstd::stream::decode_all(&fixture("codecs/aqr-iso/tests/data/udf201.iso.zst")[..]).unwrap();
+        let (mapped, rss) = mapped(&d);
         let opt = Options { threads: 2, ..Options::default() };
         let plain = compress(&d, &opt);
         let _known = aqr_formula::store::known_mapped(&mapped);
-        mapped.iter().step_by(4096).for_each(|&b| _ = std::hint::black_box(b));
-        assert!(rss(mapped.as_ptr() as usize) >= d.len() / 2);
+        touch(&mapped);
+        assert!(rss(&mapped) >= d.len() / 2);
         assert!(compress(&mapped, &opt) == plain);
-        assert!(rss(mapped.as_ptr() as usize) < d.len() / 8);
+        assert!(rss(&mapped) < d.len() / 8);
+        // and as it is checksummed (as the archive is encoded: of all of it)
+        touch(&mapped);
+        assert_eq!(aqr::checksum_through(&mapped), aqr::checksum(&d));
+        assert!(rss(&mapped) < d.len() / 8);
+    }
+
+    /// The chunks of a WIM file mapped are let go of once split, and once the data of each
+    /// application is made of them again.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wim_chunks_let_go() {
+        let d =
+            std::fs::read(format!("{}/../../codecs/aqr-wim/tests/data/lzx.wim", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let (mapped, rss) = mapped(&d);
+        let _known = aqr_formula::store::known_mapped(&mapped);
+        touch(&mapped);
+        assert!(rss(&mapped) >= d.len() / 2);
+        let f = wim(&mapped, 2).unwrap();
+        // (the pages of the headers and of what is between the resources are left)
+        let left = rss(&mapped);
+        assert!(left < d.len() / 2, "{left} of {}", d.len());
+        for s in f.streams.iter().filter(|s| s.data.is_lazy()) {
+            drop(s.data.made());
+        }
+        assert!(rss(&mapped) <= left);
     }
 
     /// The files of an image archived alone are sealed into the sink as they are made: the

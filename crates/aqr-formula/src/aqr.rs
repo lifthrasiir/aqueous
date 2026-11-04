@@ -124,6 +124,17 @@ pub fn checksum(d: &[u8]) -> u64 {
     xxh64(d, 0)
 }
 
+/// [`checksum`] of `d`, its pages let go of as they are read through where it is of a file mapped
+/// ([`crate::store::let_go`]): not all of them resident at once.
+pub fn checksum_through(d: &[u8]) -> u64 {
+    let mut h = xxhash_rust::xxh64::Xxh64::new(0);
+    for part in d.chunks(4 << 20) {
+        h.update(part);
+        crate::store::let_go(part);
+    }
+    h.digest()
+}
+
 /// `f` as an archive, its blocks compressed at `level` ([`Encoder`]), with `checksum` of the
 /// output ([`checksum`]) if given. A leaf block checksums itself, which is the output: a
 /// `checksum` given must be its own. Fails on slices out of their stream, and on such a
