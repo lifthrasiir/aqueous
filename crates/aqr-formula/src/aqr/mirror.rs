@@ -18,7 +18,9 @@
 //! block nearer its block than the spec's least distance has a spacer block before it (4 KiB at
 //! most); in an encrypted archive's payload, which may have no spacer blocks, it is left nearer.
 //! The archive of a segment holds the copies until its end: about as many bytes as its formula,
-//! module and metadata blocks.
+//! module and metadata blocks. An archive of several segments has the mirror blocks of each
+//! segment written between blocks before the next one's metadata block ([`Mirroring::mirror_before`]),
+//! as far from their blocks as that segment is long, the copies of about two segments held.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
@@ -183,6 +185,34 @@ impl<W: Write> Mirroring<W> {
         Ok(())
     }
 
+    /// Writes now, between blocks, the mirror blocks of the blocks kept that end by `end` (those
+    /// of segments closed, say: an archive of several segments has those of each segment after
+    /// the next, rather than all of them at its end, holding the copies of about two segments'
+    /// blocks); with a spacer block before one nearer its block than the spec's least distance
+    /// but in an encrypted archive's payload. Returns the bytes written, which the blocks after
+    /// them are moved by ([`super::SegmentWriter::skip`]). Fails in a block, and where `out` does.
+    pub fn mirror_before(&mut self, end: u64) -> io::Result<u64> {
+        if !matches!(self.at, At::Head) || !self.held.is_empty() {
+            return Err(bad("mirror blocks not between blocks"));
+        }
+        let mut tail = Vec::new();
+        let (now, later): (Vec<Target>, Vec<Target>) =
+            std::mem::take(&mut self.targets).into_iter().partition(|t| t.end <= end);
+        self.targets = later;
+        for t in now.iter().filter(|t| !self.mirrored.contains(&t.start)) {
+            let least = least_start(t.end, self.chunked);
+            let at = self.written + tail.len() as u64;
+            if at < least && !self.chunked {
+                spacer(&mut tail, (least - at).next_multiple_of(2).max(2));
+            }
+            let at = self.written + tail.len() as u64;
+            mirror_block(&mut tail, &self.magic, at, t.start, t.ty, &t.data);
+        }
+        self.pass(&tail)?;
+        self.added += tail.len() as u64;
+        Ok(tail.len() as u64)
+    }
+
     /// Takes the bytes held so far as the head of a block or the footer, where they are all
     /// there: whether they were.
     fn head(&mut self) -> io::Result<()> {
@@ -281,7 +311,7 @@ impl<W: Write> Mirroring<W> {
         tail.extend_from_slice(&n.to_le_bytes());
         self.out.write_all(&tail)?;
         // (the footer's fields may have grown too)
-        self.added = (tail.len() - h.len()) as u64;
+        self.added += (tail.len() - h.len()) as u64;
         self.held.clear();
         self.targets = Vec::new();
         self.at = At::Done;
@@ -694,6 +724,9 @@ pub struct Repaired {
     /// after the last metadata block whole, now cut off: the archive is to be salvaged
     /// ([`super::open_salvaging`]).
     pub lost: Vec<Range<usize>>,
+    /// Of those, the blocks of a segment cut short, cut off: files whose names are not known
+    /// are lost with them.
+    pub cut_off: Option<Range<usize>>,
 }
 
 /// Whether ranges `a` and `b` overlap.
@@ -861,6 +894,7 @@ pub fn repair(a: &[u8], c: &Check, salvage: bool, erased: &[Range<usize>]) -> Op
             b.truncate(f);
         }
     }
+    let mut cut_off = None;
     if headed {
         let b = v.as_deref().unwrap_or(a);
         let (blocks, ended) = blocks(b);
@@ -884,6 +918,7 @@ pub fn repair(a: &[u8], c: &Check, salvage: bool, erased: &[Range<usize>]) -> Op
             let b = v.get_or_insert_with(|| a.to_vec());
             if b.len() > e && !after_ok(i) {
                 lost.push(e..b.len());
+                cut_off = Some(e..b.len());
             }
             // (its padding, where cut off, restored as a zero byte)
             b.resize(e, 0);
@@ -909,7 +944,7 @@ pub fn repair(a: &[u8], c: &Check, salvage: bool, erased: &[Range<usize>]) -> Op
     if restored.is_empty() && !footer && !header && lost.is_empty() {
         return None;
     }
-    Some(Repaired { bytes: v.expect("changed"), restored: restored.len(), header, footer, lost })
+    Some(Repaired { bytes: v.expect("changed"), restored: restored.len(), header, footer, lost, cut_off })
 }
 
 /// Blocks (or bytes) where they are, padding too, and whether each is a non-leaf data block.
@@ -1261,6 +1296,7 @@ mod tests {
             assert!(repair(d, &check(d), false, &[]).is_none_or(|r| !r.footer));
             let r = repair(d, &check(d), true, &[]).unwrap();
             assert!(r.footer && r.lost.len() == 1 && r.lost[0] == (second..cut), "{cut}: {r:?}");
+            assert_eq!(r.cut_off, Some(second..cut));
             assert_eq!(files(&r.bytes), [rev(NAMES[0])]);
         }
     }

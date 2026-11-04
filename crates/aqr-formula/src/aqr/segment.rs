@@ -198,6 +198,12 @@ impl SegmentWriter {
         self.mirrorable
     }
 
+    /// Takes `n` bytes written after the blocks so far that are of no segment (mirror and
+    /// spacer blocks, [`super::Mirroring::mirror_before`]) as written.
+    pub fn skip(&mut self, n: usize) {
+        self.at += n;
+    }
+
     /// Closes the segment with the metadata block of `t`, its contents where `contents` tells
     /// (by [`EntryNode::File`], of leaves of the segment): the bytes to write after its blocks.
     /// The blocks after it are of a segment of their own, which takes nothing of this one's.
