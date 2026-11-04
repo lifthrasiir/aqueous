@@ -677,6 +677,12 @@ pub trait Sink: Write {
 
     /// Drops the bytes written, to be written again from the start.
     fn restart(&mut self) -> io::Result<()>;
+
+    /// Whether the bytes [`Sink::written`] gives are a mapping, read only, of a file: whose
+    /// pages may be let go of as they are read ([`aqr::Archive::let_go_read`]).
+    fn mapped(&self) -> bool {
+        false
+    }
 }
 
 impl Sink for Vec<u8> {
@@ -702,6 +708,10 @@ impl Sink for std::fs::File {
         self.set_len(0)?;
         self.seek(io::SeekFrom::Start(0)).map(|_| ())
     }
+
+    fn mapped(&self) -> bool {
+        true
+    }
 }
 
 /// An archive given mirror blocks as it is written to a sink.
@@ -713,6 +723,10 @@ impl<S: Sink + ?Sized> Sink for aqr::Mirroring<&mut S> {
     fn restart(&mut self) -> io::Result<()> {
         aqr::Mirroring::restart(self);
         self.get_mut().restart()
+    }
+
+    fn mapped(&self) -> bool {
+        self.get_ref().mapped()
     }
 }
 
@@ -850,6 +864,9 @@ fn finish(
     notes.inspect(|n| n.send(Note::Encoded(0, 1, 1)));
     cx.enc.clear();
     let f = kept.then_some(f);
+    // (read back from its file, its blocks let go of as they are decoded: not all of the archive
+    // resident by the end; not where it is decrypted into memory of its own)
+    let mapped = out.mapped();
     let decodes = |c: &[u8]| {
         let _s = aqr_common::trace::span("verify");
         let files = |_: usize, range: Range<usize>| d.get(range).map(<[u8]>::to_vec);
@@ -859,7 +876,11 @@ fn finish(
         let runner = aqr_decompress::natives(&m);
         // (the bytes compared let go of as it goes, [`LET_GO`] at a time, where `d` is a file mapped)
         let (mut at, mut gone) = (0, 0);
-        let decodes = aqr::open(c, &runner).is_ok_and(|a| {
+        let decodes = aqr::open(c, &runner).is_ok_and(|mut a| {
+            if mapped {
+                // SAFETY: the archive's file mapped read only ([`Sink::mapped`])
+                unsafe { a.let_go_read() };
+            }
             let written = a.write_file(opt.threads, &mut |p: &[u8]| {
                 let same = d.get(at..at + p.len()) == Some(p);
                 at += p.len();
@@ -2786,6 +2807,40 @@ mod tests {
         let before = rss(&mapped);
         cx.enc.forget(&mapped);
         assert_eq!(rss(&mapped), before);
+    }
+
+    /// An archive mapped from its file, decoded with its blocks let go of as they are read
+    /// ([`aqr::Archive::let_go_read`]): its pages not resident once its file is written, the file
+    /// the same.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn archive_let_go_read() {
+        // two streams of noise (stored as they are), a formula of them; and noise alone (a leaf
+        // stored)
+        let mut rng = aqr_common::rng::Rng::new(7);
+        let (a, b) = (rng.bytes(512 << 10), rng.bytes(512 << 10));
+        let mut f = Formula::default();
+        f.root = Node::concat([f.push("a", a.clone()), f.push("b", b.clone())]);
+        let whole = [a.clone(), b.clone()].concat();
+        let raw = Formula::raw("raw", whole.clone());
+        for f in [f, raw] {
+            let c = aqr::encode(&f, None, aqr::Level::MID).unwrap();
+            let (mapped, rss) = mapped(&c);
+            let native = Native { threads: 2 };
+            let runner = aqr_decompress::natives(&native);
+            let mut archive = aqr::open(&mapped, &runner).unwrap();
+            // SAFETY: a file mapped read only
+            unsafe { archive.let_go_read() };
+            let mut out = Vec::new();
+            archive
+                .write_file(2, &mut |p: &[u8]| {
+                    out.extend_from_slice(p);
+                    Ok(())
+                })
+                .unwrap();
+            assert!(out == whole);
+            assert!(rss(&mapped) < c.len() / 8, "{} of {}", rss(&mapped), c.len());
+        }
     }
 
     /// The chunks of a WIM file mapped are let go of again once the contents of its data are

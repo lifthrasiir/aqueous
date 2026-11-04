@@ -2410,6 +2410,8 @@ pub struct Archive<'c, 'n> {
     tell: Option<Telling>,
     /// By leaf, the item its evaluation is told of as ([`Archive::set_items`]).
     items: Vec<Option<usize>>,
+    /// Whether the pages of the blocks are let go of as they are read ([`Archive::let_go_read`]).
+    let_go: bool,
 }
 
 /// Archive `c` opened, its modules run by `runner`. An encrypted archive is a decryption
@@ -2510,7 +2512,17 @@ fn open_with<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, sealed: bool, salvagin
         blocks.sizes.leaves.push(0);
     }
     let loaded = blocks.modules.iter().map(|_| OnceLock::new()).collect();
-    Ok(Archive { blocks, runner, loaded, tree, last_intended, budget: None, tell: None, items: Vec::new() })
+    Ok(Archive {
+        blocks,
+        runner,
+        loaded,
+        tree,
+        last_intended,
+        budget: None,
+        tell: None,
+        items: Vec::new(),
+        let_go: false,
+    })
 }
 
 impl<'n> Archive<'_, 'n> {
@@ -2535,6 +2547,18 @@ impl<'n> Archive<'_, 'n> {
     /// application as it is made, and its memory limit). None by default.
     pub fn set_budget(&mut self, budget: &'n Budget) {
         self.budget = Some(budget);
+    }
+
+    /// Lets go of the pages of the archive's blocks once they are read (decoded) in evaluating
+    /// ([`aqr_common::pages::let_go`]): an archive mapped from its file, read back to be verified,
+    /// so that it is not all resident by the end.
+    ///
+    /// # Safety
+    ///
+    /// The archive's bytes are a mapping, read only, of a file (not memory of its own: pages
+    /// let go of read as zeros there).
+    pub unsafe fn let_go_read(&mut self) {
+        self.let_go = true;
     }
 
     /// Tells `tell` how far the evaluation of the leaves is as it goes (none: tells nothing).
@@ -2740,6 +2764,7 @@ impl<'n> Archive<'_, 'n> {
             data: blocks.non_leaf.iter().map(|&(d, zstd, dict)| Waited::new(Slot::Raw(d, zstd, dict))).collect(),
             dictionaries: &blocks.dictionaries,
             tally: &tally,
+            let_go: self.let_go,
         };
         let weights: Vec<u64> = picked.iter().map(|&i| weights[i]).collect();
         let gate = Gate::new(self.budget, &weights, order);
@@ -2763,6 +2788,7 @@ impl<'n> Archive<'_, 'n> {
                     LeafBlock::Lost => invalid("a file whose block is lost"),
                     LeafBlock::Stored(raw, zstd, checked, dict) => {
                         let d = decoded_with(raw, zstd, checked, dict.map(|d| &blocks.dictionaries[d]));
+                        contents.read(raw);
                         tally.add(raw.len() as u64, 0);
                         d.map(|d| vec![d])
                     }
@@ -3855,6 +3881,8 @@ struct Contents<'c, 't> {
     refs: Vec<AtomicUsize>,
     /// Told of the blocks as they are decoded.
     tally: &'t Tally<'t>,
+    /// Whether the pages of a block are let go of once it is read ([`Archive::let_go_read`]).
+    let_go: bool,
 }
 
 /// A value under a lock with a condition variable of its own: one condition variable waited on
@@ -3927,6 +3955,7 @@ impl Contents<'_, '_> {
             let decoded = decoded_with(d, zstd, true, dict.map(|d| &self.dictionaries[d]));
             self.tally.add(d.len() as u64, 0);
             *s = Slot::Decoded(Arc::new(decoded?));
+            self.read(d);
         }
         match &*s {
             Slot::Decoded(d) => Ok(d.clone()),
@@ -3946,12 +3975,22 @@ impl Contents<'_, '_> {
         *s = match decoded {
             Ok(b) => {
                 self.tally.add(d.len() as u64, 0);
+                self.read(d);
                 Slot::Decoded(Arc::new(b))
             }
             Err(_) => Slot::Raw(d, zstd, dict),
         };
         drop(s);
         self.data[o].notify_all();
+    }
+
+    /// Block `d` of the archive read (decoded), not to be read again: its pages let go of where
+    /// they are to be ([`Archive::let_go_read`]).
+    fn read(&self, d: &[u8]) {
+        if self.let_go {
+            // SAFETY: of the archive, a file mapped read only (as `let_go_read` was told)
+            unsafe { aqr_common::pages::let_go(d.as_ptr(), d.len()) };
+        }
     }
 
     fn get<'v>(&self, v: &'v Item) -> &'v [u8] {
