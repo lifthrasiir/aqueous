@@ -55,8 +55,7 @@ pub fn scan_window(a: &[u8], max_k: usize, counts: &mut Vec<u16>) -> (usize, f64
     }
     let mut best = (base, 1);
     let q = &a[..(n / 4).max(2 * top + 1).min(n)];
-    let mut by_eq: Vec<(usize, usize)> =
-        (2..=top).map(|k| (q[k..].iter().zip(q).filter(|(x, y)| x == y).count(), k)).collect();
+    let mut by_eq: Vec<(usize, usize)> = (2..=top).map(|k| (equal_bytes(&q[k..], q), k)).collect();
     let cut = by_eq.len().min(SCAN_KS);
     if cut > 0 {
         by_eq.select_nth_unstable_by(cut - 1, |x, y| y.cmp(x));
@@ -85,6 +84,32 @@ pub fn scan_window(a: &[u8], max_k: usize, counts: &mut Vec<u16>) -> (usize, f64
     (best.1, (base - best.0) / n as f64, base / n as f64)
 }
 
+/// How many of the bytes of `a` are those of `b` at the same index (`b` as long at least):
+/// 16 at a time, as vectors compare them.
+fn equal_bytes(a: &[u8], b: &[u8]) -> usize {
+    let b = &b[..a.len()];
+    let (av, ar) = a.as_chunks::<16>();
+    let (bv, br) = b.as_chunks::<16>();
+    let mut n = 0;
+    for (x, y) in av.iter().zip(bv) {
+        n += x.iter().zip(y).map(|(x, y)| (x == y) as u8).sum::<u8>() as usize;
+    }
+    n + ar.iter().zip(br).filter(|(x, y)| x == y).count()
+}
+
+/// The columns `i % k` of positions i from `from` on, counted rather than divided.
+fn columns(from: usize, k: usize) -> impl Iterator<Item = usize> {
+    let mut c = from % k;
+    std::iter::repeat_with(move || {
+        let at = c;
+        c += 1;
+        if c == k {
+            c = 0;
+        }
+        at
+    })
+}
+
 /// The region of records of size k grown from the window [wo, wo + wlen): (start, end, gain
 /// in bits). A maximum-sum run of each byte's log-ratio of the column models against the
 /// order-0 model; the column models are refitted on the region found and the region grown
@@ -102,8 +127,8 @@ pub fn grow_region(data: &[u8], k: usize, wo: usize, wlen: usize, span: Option<u
     let phase = (k - wo % k) % k;
     for _ in 0..ROUNDS {
         counts.fill(0);
-        for (i, &b) in data[s..e].iter().enumerate() {
-            counts[(s + i + phase) % k * 256 + b as usize] += 1;
+        for (c, &b) in columns(s + phase, k).zip(&data[s..e]) {
+            counts[c * 256 + b as usize] += 1;
         }
         for c in 0..k {
             let row = &counts[c * 256..c * 256 + 256];
@@ -112,7 +137,7 @@ pub fn grow_region(data: &[u8], k: usize, wo: usize, wlen: usize, span: Option<u
                 llr[c * 256 + s] = (lp[s] - bg[s]).max(CLIP);
             }
         }
-        let (ns, ne, g) = best_run(data.iter().enumerate().map(|(i, &b)| llr[(i + phase) % k * 256 + b as usize]));
+        let (ns, ne, g) = best_run(columns(phase, k).zip(data).map(|(c, &b)| llr[c * 256 + b as usize]));
         gain = g;
         if (ns, ne) == (s, e) {
             break;

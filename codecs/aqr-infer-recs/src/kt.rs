@@ -73,10 +73,20 @@ pub fn plane_bits(planes: &[u8], n: usize) -> f64 {
 
 /// log2 probabilities of the bytes of data under its order-0 model (with the prior).
 pub fn order0_log2(data: &[u8]) -> [f64; 256] {
-    let mut c = [0u64; 256];
-    for &b in data {
-        c[b as usize] += 1;
+    // (counted in four quarters, summed after, so that a run of the same byte does not wait on
+    // its own count)
+    let mut q = [[0u64; 256]; 4];
+    let (quads, rest) = data.as_chunks::<4>();
+    for &[a, b, c, d] in quads {
+        q[0][a as usize] += 1;
+        q[1][b as usize] += 1;
+        q[2][c as usize] += 1;
+        q[3][d as usize] += 1;
     }
+    for &b in rest {
+        q[0][b as usize] += 1;
+    }
+    let c: [u64; 256] = std::array::from_fn(|s| q[0][s] + q[1][s] + q[2][s] + q[3][s]);
     let tot = data.len() as f64 + 256.0 * ALPHA;
     std::array::from_fn(|s| ((c[s] as f64 + ALPHA) / tot).log2())
 }

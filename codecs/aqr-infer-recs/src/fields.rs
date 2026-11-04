@@ -96,7 +96,7 @@ pub fn split(m: &[u8], k: usize, cost: Cost, refs: bool) -> (Vec<Field>, f64, f6
     let m = sample(m, k);
     let m = &m[..];
     let n = m.len() / k;
-    let mut scratch = Scratch { counts: [0; 256], coded: Vec::with_capacity(n), buf: Vec::new() };
+    let mut scratch = Scratch::new(n);
     // the values of the fields of each width and endianness at each offset, kept where fields
     // refer to them
     let refs = refs && k <= REF_K;
@@ -171,8 +171,36 @@ pub fn split(m: &[u8], k: usize, cost: Cost, refs: bool) -> (Vec<Field>, f64, f6
 /// What the costs of the fields are counted in, kept from field to field.
 struct Scratch {
     counts: [u32; 256],
+    /// Each plane's counts in two halves (of the values at even and odd indices).
+    halves: Box<[[u32; 256]; 16]>,
     coded: Vec<u64>,
     buf: Vec<u8>,
+}
+
+impl Scratch {
+    fn new(n: usize) -> Scratch {
+        Scratch { counts: [0; 256], halves: Box::new([[0; 256]; 16]), coded: Vec::with_capacity(n), buf: Vec::new() }
+    }
+
+    /// The counts of the bytes of each of the `W` planes of the values coded, in
+    /// [`Scratch::halves`]: all the planes in one pass, each in two halves, so that a run of the
+    /// same byte does not wait on its own count.
+    fn count_planes<const W: usize>(&mut self) {
+        let h = &mut self.halves[..2 * W];
+        h.iter_mut().for_each(|c| c.fill(0));
+        let (pairs, rest) = self.coded.as_chunks::<2>();
+        for &[x, y] in pairs {
+            for i in 0..W {
+                h[2 * i][(x >> (8 * i)) as u8 as usize] += 1;
+                h[2 * i + 1][(y >> (8 * i)) as u8 as usize] += 1;
+            }
+        }
+        for &x in rest {
+            for i in 0..W {
+                h[2 * i][(x >> (8 * i)) as u8 as usize] += 1;
+            }
+        }
+    }
 }
 
 impl Scratch {
@@ -195,12 +223,16 @@ impl Scratch {
         }
         match cost {
             Cost::Kt => {
+                match width {
+                    1 => self.count_planes::<1>(),
+                    2 => self.count_planes::<2>(),
+                    4 => self.count_planes::<4>(),
+                    _ => self.count_planes::<8>(),
+                }
                 let mut bits = 0.0;
                 for i in 0..width {
-                    self.counts.fill(0);
-                    for &x in &self.coded {
-                        self.counts[(x >> (8 * i)) as u8 as usize] += 1;
-                    }
+                    let (a, b) = (&self.halves[2 * i], &self.halves[2 * i + 1]);
+                    self.counts.iter_mut().zip(a.iter().zip(b)).for_each(|(c, (x, y))| *c = x + y);
                     bits += kt::bits(&self.counts);
                 }
                 bits
