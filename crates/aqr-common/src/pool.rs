@@ -585,7 +585,7 @@ pub fn par_map_apart<R: Send + crate::wire::Wire>(n: usize, threads: usize, f: i
 /// once: the calling thread lets them in, in order, as `admit` does (which may wait, as for
 /// memory), each on a worker as one is free, and the worker is given back as `f` returns. So
 /// no thread waits holding a worker, which work still running can reserve (an item's own
-/// threads): a worker calling it lends its place meanwhile (on 10gb, `aqr -t` with 4 threads
+/// threads): a worker calling it lends its place meanwhile (on 10gb, `aqr -K`, then `-t`, with 4 threads
 /// ran its leaves on 3 of them before). On the calling thread alone where `threads` is 1, or
 /// there are no threads. A panic
 /// of `f` stops what is not let in yet and is resumed here; one of `admit` is, once what was

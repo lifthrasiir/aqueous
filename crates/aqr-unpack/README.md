@@ -64,7 +64,7 @@ Measured 2026-11-01 on Windows 11 (16 threads, NVMe SSD), extracting a Python 3.
 (318 MB, 10,694 files) archived by 7-Zip 24 (ZIP and 7z at `-mx=5`), bsdtar, gzip -6, xz -6
 -T0, zstd -3 and bzip2 -9; against 7-Zip (`7z x`) and bsdtar (`-xf`), best of two:
 
-| Archive | aqr | 7-Zip / bsdtar | `aqr -t` |
+| Archive | aqr | 7-Zip / bsdtar | `aqr -K` (then `-t`) |
 |---|---|---|---|
 | ZIP, 92.4 MB | 0.85 s | 2.71 s | 0.11 s |
 | 7z, 40.1 MB (LZMA2) | 1.05 s | 2.30 s | 0.49 s |

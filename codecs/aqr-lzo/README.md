@@ -57,7 +57,7 @@ Speeds are of the data. Every stream was rebuilt.
 Through `aqr` (10 threads, level mid, with its check), the Silesia files as `lzop -3` files
 (101.0 MB) archive to 62.84 MB in 6.5 s, and as `lzop -9` files (76.3 MB) to 62.62 MB in 7.8 s;
 `zstd -3` of the same files gives 84.85 and 70.44 MB, and the original files archive to 57.83 MB.
-Testing the archives (`aqr -t`) takes 1.1 s, and 1.9 s for the second with the modules as Wasm.
+Testing the archives (`aqr -K`, then `-t`) takes 1.1 s, and 1.9 s for the second with the modules as Wasm.
 
 ## Tests
 

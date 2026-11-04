@@ -193,7 +193,7 @@ pub const MAPPED_MIN: usize = 1 << 20;
 ///
 /// Elsewhere the system's allocator alone: glibc's reuses the large blocks it keeps, where
 /// mapping each anew faulted in every page of it (4 KiB on x86-64) and unmapping took the
-/// process's lock of mappings and flushed the other threads' TLBs. On 10gb `aqr -t` (4 threads
+/// process's lock of mappings and flushed the other threads' TLBs. On 10gb `aqr -K` (then `-t`; 4 threads
 /// of a cloud VM) that was 17% of the CPU time in the kernel, and more with more threads.
 pub struct Mapped;
 

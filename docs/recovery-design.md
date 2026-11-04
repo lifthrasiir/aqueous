@@ -407,7 +407,7 @@ repair의 입력은 바이트열이 아니라, 위치마다 다음 상태 중 �
 
 - [ ] **I1.** E1–E4를 재현하는 fault injection 하네스를 만든다. 오류 모델을 그대로 시험 생성기로 옮기는 것이다. 4 KiB 정렬 단위 손상, 버스트, 0 채움, truncation을 다루고, 손상 위치는 무작위와 "중요 구조 조준" 두 방식으로 둔다.
 - [ ] **I2.** compressor에 mirror block 생성과 segment 주기 옵션을 넣는다. (mirror는 `aqr -A`로 넣었다. segment 주기는 디코더의 다중 segment 지원이 먼저다.)
-- [ ] **I3.** repair 도구를 만든다. 스캔, mirror 복원, footer 재구성, salvage 추출을 포함한다. (`aqr -d`/`-t`가 mirror와 다른 블록을 메모리에서 복원하고, 마지막 metadata 뒤에서 잘린 아카이브의 footer를 다시 만들며, 그 앞에서 잘렸으면 salvage한다. 평가가 실패한 파일은 잃은 것으로 알리고 나머지는 푼다. 손상된 암호화 아카이브도 복호해 repair·salvage한다(`-L`은 인증 실패 청크가 있으면 거절한다). 복원한 아카이브를 파일로 쓰는 명령은 남았다.)
-- [ ] **I4.** `verify` 명령을 만든다. checksum, mirror와 원본의 일치, slice 해시를 모두 검사한다. (`aqr -t`가 archival profile과 mirrored archive 여부를 보고한다.)
+- [ ] **I3.** repair 도구를 만든다. 스캔, mirror 복원, footer 재구성, salvage 추출을 포함한다. (`aqr -d`/`-K`가 mirror와 다른 블록을 메모리에서 복원하고, 마지막 metadata 뒤에서 잘린 아카이브의 footer를 다시 만들며, 그 앞에서 잘렸으면 salvage한다. 평가가 실패한 파일은 잃은 것으로 알리고 나머지는 푼다. 손상된 암호화 아카이브도 복호해 repair·salvage한다(`-t`는 인증 실패 청크가 있으면 거절한다). 복원한 아카이브를 파일로 쓰는 명령은 남았다.)
+- [ ] **I4.** `verify` 명령을 만든다. checksum, mirror와 원본의 일치, slice 해시를 모두 검사한다. (`aqr -K`가 archival profile과 mirrored archive 여부를 보고한다.)
 - [ ] **I5.** I1로 "손상된 바이트가 속한 parcel만 잃는다"는 목표를 E1과 E2(D 이상 아카이브)에 대해 검증한다.
 - [ ] **I6.** (선택) §5.4의 recovery set을 구현하고, I1로 L ≤ r·R − S 한계를 검증한다.

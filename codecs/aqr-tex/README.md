@@ -33,7 +33,7 @@ Coded in one stripe a surface (before stripes, below), all of them came to 0.324
   encoding and 20.3 MB/s decoding of the blocks (BC1 19.4 / 17.4, BC3 30.9 / 27.2, BC5 24.2 /
   21.0). On an M4 (2026-11-01), a sample of 402.4 MB (1,271 files, every 41st path): 31.9 and
   27.1 MB/s (BC1 26.3 / 21.0, BC3 43.4 / 41.1, BC5 31.1 / 29.2), against 26.6 and 20.9 before the
-  coding was made faster (below, "Speed"); `aqr -t` of 255 of those files (105.5 MB) on one
+  coding was made faster (below, "Speed"); `aqr -K` (then `-t`) of 255 of those files (105.5 MB) on one
   thread, 3.20 s (as WebAssembly 3.85 s).
 - One file on several threads (stripes), the 45 largest files of BC1, BC3 and BC5 (209.7 MB,
   2.8 and 5.6 MB each), a file at a time, decoding: 22.8 MB/s on one thread, 60.5 on 4, 79.5 on

@@ -37,7 +37,7 @@ Measured 2026-10-31 on an Apple M4 (10 cores; all threads, level mid) through `c
 |---|---|---|
 | archived | 738.08 MB | 392.26 MB (0.531; `zstd -3 --long=27` 0.532) |
 | compressed in | 0.65 s, 11.2 G instructions | 1.81 s, 105.7 G instructions |
-| tested (`aqr -t`) | | 0.28 s, 2.4 G instructions |
+| tested (`aqr -K`, then `-t`) | | 0.28 s, 2.4 G instructions |
 | peak resident | 1.47 GB | 1.94 GB |
 
 A still picture's file comes to 0.32 to 0.67 of itself; most of what is left is its Opus audio

@@ -64,7 +64,7 @@ dithered to 256 colors (their records 3.61 MB of 6.91 MB), and icons and web gra
 one of codec-corpus, and a file named `.gif` that is not one (a Perl module's table).
 
 - `aqr -c` of `corpus/10gb` takes 3.4 s (0.3 s before aqr-gif; 13.9 s of threads), with a peak
-  of 0.5 GB (55 MB before); `aqr -t` 1.9 s (0.4 GB), and 2.6 s with the modules as Wasm. Of
+  of 0.5 GB (55 MB before); `aqr -K` (then `-t`) 1.9 s (0.4 GB), and 2.6 s with the modules as Wasm. Of
   `corpus/misc`, 2.5 s and 1.4 s (2.0 s as Wasm).
 - The model codes 3.5 megapixels a second of a dithered photograph on one thread, 6 of a map of
   flat colors and 15 of an animation (a pixel equal to the one on its left is a single bit), and

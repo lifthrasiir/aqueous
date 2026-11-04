@@ -167,7 +167,7 @@ are larger than as laced.
 Measured on an M4 (`aqr`, 10 threads) on 12 Ogg Vorbis files of 0.45 to 9.0 MB made from the
 FLAC corpus's live recordings, 8 by libvorbisenc and libogg (quality 1 to 8) and 4 by ffmpeg's
 muxer (quality 0 to 5), 49.14 MB: 45.78 MB archived (0.932; zstd -3 0.999), compressed in 0.90 s
-and tested at 158 MB/s natively and 117 MB/s as Wasm (`aqr -t --wasm`). The layout is about
+and tested at 158 MB/s natively and 117 MB/s as Wasm (`aqr -K --wasm`, then `-t`). The layout is about
 5 bytes a page before the archive compresses it, a page of libogg's being about 4 KB; every
 page's header type and sequence number are as predicted, and so is every granule position but
 the last page's of 10 of the 12 streams (cut short at the end of the samples). Pieces of 1 MiB made the records 0.15% of the files larger than the

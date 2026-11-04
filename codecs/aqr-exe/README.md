@@ -316,7 +316,7 @@ application (its framework's three versions), before (commit `511681e`) and afte
 
 Against two pieces of 8 MiB of A, the pairs were 90.06, 97.29 and 97.35 MB; against three of
 4 MiB the first was 91.56 MB. Of Chrome.app, instructions retired 1439.4 → 1191.8 G (less of
-the code compressed), 27.9 → 27.7 s, peak RSS 6.22 GB as before; `aqr -t` 4.85–5.33 →
+the code compressed), 27.9 → 27.7 s, peak RSS 6.22 GB as before; `aqr -K` (then `-t`) 4.85–5.33 →
 4.71–4.79 s, 86.6 → 90.3 G instructions, peak RSS 3.24 → 2.80 GB. The other six applications
 of `docs/macos-app-todo.md` archive as before (to a few bytes). The module block is 2.9 KB.
 
@@ -349,7 +349,7 @@ before (commit `40205d3`) and after:
 | all | 1080.60 MB | 1053.10 MB | −2.5% |
 
 Instructions retired 3252.8 → 3285.6 G (+1.0%). The file is put together whole before its
-pages are hashed: `aqr -t` of Pages.app 46.6 → 52.0 G instructions (+11.5%), peak RSS
+pages are hashed: `aqr -K` of Pages.app 46.6 → 52.0 G instructions (+11.5%), peak RSS
 0.58–0.63 → 0.75–0.84 GB (the time within its noise, 0.74–1.34 s either way); of Google
 Chrome.app 90.0 → 93.5 G (+3.8%), 2.79 → 2.63 GB. The module block is 10.1 KB.
 

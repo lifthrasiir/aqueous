@@ -100,7 +100,7 @@ corpus directory (33 files, 16.89 GB) at level mid, against the build before aqr
 |---|---|---|
 | archived | 16.72 GB (0.990) | 11.42 GB (0.676) |
 | compressed in | 39 s | 371 s (46 MB/s; the largest file, 5.8 GB, 113 s on 12 threads) |
-| tested (`aqr -t`) | | 130 s (130 MB/s; the largest file 61 s on 10.4 threads) |
+| tested (`aqr -K`, then `-t`) | | 130 s (130 MB/s; the largest file 61 s on 10.4 threads) |
 | heap peak | 17.5 GB | 20.5 GB compressing, 11.9 GB testing |
 
 Compressing, aqr-compress decodes every application to check it (prevalidate): of its 3,250
