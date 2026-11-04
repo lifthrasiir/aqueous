@@ -1,6 +1,6 @@
 //! Compresses files and directories into Aqueous archives, and decompresses them, as zstd does.
 //!
-//! usage: aqr [-c | -d | -K | -t] [-o OUTPUT] [-f] [--rm] [-p] [-q | -v] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N]
+//! usage: aqr [-c | -d | -K | -t] [-o OUTPUT] [-L] [-f] [--rm] [-p] [-q | -v] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N]
 //! [--batch MIB | -B SIZE] [-b SIZE] [-D] [-A] [--no-check] [-P] [--wasm] [--no-sandbox] [--stats[=FILE]] [-h]
 //! INPUT [--rename TO]...
 //!
@@ -15,6 +15,10 @@
 //!   with `..` by its last name alone, as 7-Zip does (tar, zip and RAR would keep an absolute
 //!   path whole, but the frontends give absolute paths); `--rename TO` after an input has it at
 //!   `TO` (`/` between names) instead. Two inputs of the same path are an error.
+//! - `-L` (`--dereference`), as bsdtar's: compressing, the links given and found followed, each
+//!   archived (at its own name) as what it leads to, read there; a link leading nowhere, or to a
+//!   directory it is in, kept as a link and told. Without it a link is archived as a link, one
+//!   given alone too. Not with `--rm` (what a link leads to is not an input to remove).
 //! - `--format FORMAT` (or `-o` of a name ending in its extension): an archive of another
 //!   format instead ([`aqr_pack`]): ZIP, 7z, ALZ, EGG, tar alone or under gzip, bzip2, xz, LZMA
 //!   or Zstandard, or those compressors' stream of a single file; `INPUT.EXT` without `-o`. A
@@ -206,6 +210,8 @@ Compressing (aqr -o ARCHIVE INPUT [--rename TO]...):
                         a relative one as given, an absolute one or one with .. by
                         its last name
       --rename TO       after an INPUT: that one archived at TO (names between /)
+  -L, --dereference     follow links (given or found), archiving what they lead to;
+                        those leading nowhere or to a directory they are in kept
       --format FORMAT   aqr (the default), zip, 7z, alz, egg, tar, tar.gz, tar.bz2,
                         tar.xz, tar.lzma, tar.zst, or gz, bz2, xz, lzma, zst of a
                         single file (also by -o's name); -l is the format's level
@@ -296,6 +302,8 @@ struct Args {
     force: bool,
     /// `--rm`: the inputs removed once their archive is made, or an archive once extracted.
     rm: bool,
+    /// `-L`: compressing, the links found (and given) followed, archived as what they lead to.
+    dereference: bool,
     /// What is not commonly kept of the metadata kept too ([`meta`]).
     preserve: bool,
     quiet: bool,
@@ -417,6 +425,7 @@ fn parse() -> Result<Args, String> {
         auto_dir: false,
         force: false,
         rm: false,
+        dereference: false,
         preserve: false,
         quiet: false,
         verbose: false,
@@ -479,6 +488,7 @@ fn parse() -> Result<Args, String> {
             "--auto-dir" => a.auto_dir = true,
             "-f" | "--force" => a.force = true,
             "--rm" => a.rm = true,
+            "-L" | "--dereference" => a.dereference = true,
             "-p" | "--preserve" => a.preserve = true,
             "-q" | "--quiet" => a.quiet = true,
             "-v" | "--verbose" => a.verbose = true,
@@ -555,6 +565,16 @@ fn parse() -> Result<Args, String> {
         if !a.each && a.inputs.len() > 1 {
             a.select = Some(selection(a.inputs.split_off(1), Vec::new())?);
         }
+    }
+    if a.dereference && (a.decompress || a.list) {
+        return Err("-L is for compressing".into());
+    }
+    if a.dereference && a.rm {
+        // (what a link leads to is not the input's to remove, and removing the link alone
+        // would not take away what was archived)
+        return Err("--rm with -L".into());
+    }
+    if a.list {
         return Ok(a);
     }
     if !a.decompress {
@@ -984,7 +1004,11 @@ fn compress_into(
     let meta = |p: &Path| fs::symlink_metadata(p).map_err(|e| format!("{}: {e}", p.display()));
     let mapper = Mapper::new().map_err(|e| format!("files not to be mapped: {e}"))?;
     // a single file: an archive of the file alone (but renamed: in a tree, at its name)
-    let single = match (inputs, renames) {
+    let followed = match (inputs, renames) {
+        ([input], [None]) if a.dereference => Some(follow(input)?),
+        _ => None,
+    };
+    let single = match (followed.as_ref().map(std::slice::from_ref).unwrap_or(inputs), renames) {
         ([input], [None]) => Some((input, meta(input)?)).filter(|(_, m)| m.is_file()),
         _ => None,
     };
@@ -1061,7 +1085,7 @@ fn compress_into(
     // (as long as it takes: a bar of no end known, and how many files)
     let listing = view::Listing::new(bars());
     let gathered = ticking(a, &listing, || -> Result<(), String> {
-        gather(inputs, given, renames, &mut g, &listing, a.opt.threads)?;
+        gather(inputs, given, renames, &mut g, &listing, a.opt.threads, a.dereference)?;
         listing.finish();
         Ok(())
     });
@@ -1157,7 +1181,7 @@ fn pack_into(
     g.gone = a.rm.then(Vec::new);
     let listing = view::Listing::new(bars());
     let gathered = ticking(a, &listing, || -> Result<(), String> {
-        gather(inputs, given, &renames, &mut g, &listing, a.opt.threads)?;
+        gather(inputs, given, &renames, &mut g, &listing, a.opt.threads, a.dereference)?;
         listing.finish();
         Ok(())
     });
@@ -1387,7 +1411,8 @@ fn archive_names(input: &Path, to: Option<&Path>) -> Result<Vec<OsString>, Strin
 /// directories hold, a call for each), then what is read of each by its path ([`meta::stat`], a
 /// handle or so each, the most of the time) read on `threads`, then made the entries in the
 /// order they were found. The files of an inode archived already are of its content (and
-/// forks), read once.
+/// forks), read once. Where `dereference` (`-L`), the links given and found are followed
+/// ([`Follow`]).
 fn gather(
     inputs: &[PathBuf],
     given: &[PathBuf],
@@ -1395,12 +1420,27 @@ fn gather(
     g: &mut Gathered,
     l: &view::Listing,
     threads: usize,
+    dereference: bool,
 ) -> Result<(), String> {
     let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
     let privileged = g.reader.privileged;
     let mut found = Vec::new();
-    match (inputs, renames) {
-        ([dir], [None]) => {
+    let mut follow = Follow { on: dereference, chain: Vec::new(), warnings: Vec::new() };
+    // (each input as it is read: where followed, what it leads to)
+    let read: Vec<(PathBuf, fs::FileType)> = inputs
+        .iter()
+        .map(|input| {
+            let m = fs::symlink_metadata(input).map_err(|e| err(input, e))?;
+            Ok(match follow.target(input, &m)? {
+                Some((to, m)) => (to, m.file_type()),
+                None => (input.clone(), m.file_type()),
+            })
+        })
+        .collect::<Result<_, String>>()?;
+    match (&read[..], renames) {
+        // (a directory alone, its entries at the root; a link alone, not followed, is archived
+        // as a link at its name)
+        ([(dir, t)], [None]) if t.is_dir() => {
             let s = meta::stat(dir, privileged).map_err(|e| err(dir, e))?;
             let (x, forks) = g.reader.extra(dir, &s, &mut |w| g.warnings.push(w));
             g.tree.root = x;
@@ -1413,12 +1453,12 @@ fn gather(
                 g.contents.push((f.path.clone(), os_bytes(f.path.as_os_str()), f.size));
                 l.bytes(f.size);
             }
-            walk(dir, None, &mut found, l, privileged)?;
+            walk(dir, None, &mut found, l, privileged, &mut follow)?;
         }
         _ => {
             // (by their names in the archive, the directories found among the inputs or on the way)
             let mut dirs: std::collections::HashMap<Vec<OsString>, usize> = Default::default();
-            for ((input, given), to) in inputs.iter().zip(given).zip(renames) {
+            for (((input, t), given), to) in read.iter().zip(given).zip(renames) {
                 let names = archive_names(given, to.as_deref())?;
                 let mut parent = None;
                 for k in 1..names.len() {
@@ -1429,7 +1469,6 @@ fn gather(
                     });
                     parent = Some(*at);
                 }
-                let t = fs::symlink_metadata(input).map_err(|e| err(input, e))?.file_type();
                 // (a directory made on the way to an earlier input, given itself: that one)
                 let at = match dirs.get(&names) {
                     Some(&i) if t.is_dir() && found[i].plain => {
@@ -1454,12 +1493,13 @@ fn gather(
                 }
                 if t.is_dir() {
                     dirs.entry(names).or_insert(at);
-                    walk(input, Some(at), &mut found, l, privileged)?;
+                    walk(input, Some(at), &mut found, l, privileged, &mut follow)?;
                 }
             }
             taken_twice(&found)?;
         }
     }
+    g.warnings.append(&mut follow.warnings);
     l.walked();
     let early: Vec<_> = found.iter_mut().map(|f| f.stat.take()).collect();
     let stats = aqr_common::pool::par_map(found.len(), threads.min(STAT_THREADS), |i| {
@@ -1527,13 +1567,14 @@ fn taken_twice(found: &[Found]) -> Result<(), String> {
 
 /// Finds what directory `dir` (found as `parent`) holds, by name, and what those directories
 /// hold in turn, each directory followed by what it holds. On Unix, each directory found is read
-/// ([`meta::stat`]) before it is listed.
+/// ([`meta::stat`]) before it is listed. Links are followed as `follow` has it.
 fn walk(
     dir: &Path,
     parent: Option<usize>,
     found: &mut Vec<Found>,
     l: &view::Listing,
     privileged: bool,
+    follow: &mut Follow,
 ) -> Result<(), String> {
     // (not on Windows, where reading takes longer and listing a directory leaves its access
     // time, NTFS's, mostly as it was: there they are read with the rest, on threads)
@@ -1550,8 +1591,18 @@ fn walk(
         .collect::<Result<_, _>>()
         .map_err(err)?;
     names.sort_by(|a, b| a.0.cmp(&b.0));
+    if follow.on {
+        follow.chain.push(fs::canonicalize(dir).map_err(err)?);
+    }
     for (name, t) in names {
-        let path = dir.join(&name);
+        let mut path = dir.join(&name);
+        let mut t = t;
+        if follow.on && t.is_symlink() {
+            let m = fs::symlink_metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            if let Some((to, m)) = follow.target(&path, &m)? {
+                (path, t) = (to, m.file_type());
+            }
+        }
         found.push(Found { path, name, parent, dir: t.is_dir(), plain: false, stat: None });
         if t.is_file() {
             l.found();
@@ -1559,10 +1610,54 @@ fn walk(
         if t.is_dir() {
             let at = found.len() - 1;
             let path = found[at].path.clone();
-            walk(&path, Some(at), found, l, privileged)?;
+            walk(&path, Some(at), found, l, privileged, follow)?;
         }
     }
+    follow.chain.pop();
     Ok(())
+}
+
+/// Links followed (`-L`), where `on`: each archived as what it leads to, read by the path
+/// that has no links in it ([`fs::canonicalize`]), so that what is read of it (metadata,
+/// extended attributes, access times put back) is of that, not of the link. A link leading
+/// nowhere, or to a directory it is in (which would be walked without end), is kept as a link
+/// and told.
+struct Follow {
+    on: bool,
+    /// The directories being walked, by such paths.
+    chain: Vec<PathBuf>,
+    warnings: Vec<String>,
+}
+
+impl Follow {
+    /// What `path`, read (not followed) as `m`, leads to and its metadata, where it is a link
+    /// to follow.
+    fn target(&mut self, path: &Path, m: &fs::Metadata) -> Result<Option<(PathBuf, fs::Metadata)>, String> {
+        if !self.on || !m.file_type().is_symlink() {
+            return Ok(None);
+        }
+        let to = match fs::canonicalize(path).and_then(|to| Ok((fs::metadata(&to)?, to))) {
+            Ok((m, to)) if m.is_dir() && self.chain.contains(&to) => {
+                self.warnings.push(format!("{}: a link to a directory it is in, kept as a link", path.display()));
+                return Ok(None);
+            }
+            Ok((m, to)) => (to, m),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.warnings.push(format!("{}: a link leading nowhere, kept as a link", path.display()));
+                return Ok(None);
+            }
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        Ok(Some(to))
+    }
+}
+
+/// What input `path` leads to, where it is a link (`-L`): the path that has no links in it.
+/// (A link kept is told by [`gather`], which takes it then.)
+fn follow(path: &Path) -> Result<PathBuf, String> {
+    let m = fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut f = Follow { on: true, chain: Vec::new(), warnings: Vec::new() };
+    Ok(f.target(path, &m)?.map_or_else(|| path.to_owned(), |(to, _)| to))
 }
 
 /// The entry `name` in `parent` (`None`: the root) of `path`, as `s` read it: its index, none
