@@ -259,6 +259,23 @@ fn segments() {
     assert_eq!(metadata_blocks(&m), metadata_blocks(&c));
 }
 
+/// Files of the same content far apart by their names (of other extensions, others between
+/// them), in segments of a batch each: put in one batch, so stored once rather than again in a
+/// later segment.
+#[test]
+fn segments_same_contents_together() {
+    let same = text(100_000, 9);
+    let mut files: Vec<(&str, Vec<u8>)> = vec![("a.dat", same.clone())];
+    let names = ["b.txt", "c.txt", "d.txt", "e.txt", "f.txt", "g.txt"];
+    files.extend(names.iter().enumerate().map(|(i, n)| (*n, text(30_000, 20 + i))));
+    files.push(("z.bin", same.clone()));
+    let opt = Options { batch: 30_000, segment: 1, ..Options::default() };
+    let (c, r) = archived(&files, &opt);
+    assert!(metadata_blocks(&c) > 3, "{}", metadata_blocks(&c));
+    let (a, z) = (0, files.len() - 1);
+    assert!(r.files[a].same_as == Some(z) || r.files[z].same_as == Some(a), "{:?} {:?}", r.files[a], r.files[z]);
+}
+
 /// Files linked together in two segments: of one link group after them, however they were
 /// numbered (archive-wide).
 #[test]

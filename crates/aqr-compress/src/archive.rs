@@ -885,6 +885,10 @@ pub(crate) const SLICE_MIN: usize = 1 << 10;
 /// ([`together`]).
 const CHUNK_COMMON: usize = 8;
 
+/// Contents of at least this many bytes of the same bytes as others are put in one batch
+/// ([`together`]): one smaller costs little made again in a segment of its own.
+const SAME_MIN: u64 = 64 << 10;
+
 /// The most bytes of contents put in one batch for holding each other ([`together`]).
 const TOGETHER_MAX: u64 = 2 << 30;
 
@@ -899,7 +903,9 @@ const TOGETHER_MAX: u64 = 2 << 30;
 /// (decoded whole, [`stream_sums`]), an NSIS installer and those of the files its data stores
 /// (read whole, the tarballs decoded, [`crate::nsis::sums`]), FSB5 banks and those of their samples (read whole, by the samples'
 /// CRC-32; banks sharing samples so), and contents that start alike (their first 64 KiB, or
-/// two or more of its pieces, [`probe::chunks`]; the same file, longer or shorter, or edited).
+/// two or more of its pieces, [`probe::chunks`]; the same file, longer or shorter, or edited),
+/// and contents of the same bytes (of at least [`SAME_MIN`] bytes, of a size others have, read
+/// whole), for a segment not to make again one of another's.
 /// Of the contents of at least [`TOGETHER_MIN`] bytes, which are read at their start (and the
 /// archives at their end, the contents of the sizes of entries whole); together, no more than
 /// [`TOGETHER_MAX`] bytes. Returns them, and the contents found
@@ -1073,6 +1079,30 @@ fn together<S: Source + ?Sized>(
         let alike = by_sum.get(e).map_or(&[][..], |cs| &cs[..]);
         archives.iter().chain(alike).for_each(|&c| join(archives[0], c));
         entries.extend(alike);
+    }
+    // contents of the same bytes, for those after the first to be stored as the same as it rather
+    // than made again in a segment of their own ([`Writer::write`]): of a size (at least
+    // [`SAME_MIN`] bytes) that others have, hashed whole; but those of a start that 2 to 8 have,
+    // joined by it already
+    let mut by_size: HashMap<u64, Vec<usize>> = HashMap::new();
+    for c in (0..n).filter(|&c| src.size(c) >= SAME_MIN) {
+        if same.get(&c).is_some_and(|s| (2..=8).contains(&heads[&s.1].len())) {
+            continue;
+        }
+        by_size.entry(src.size(c)).or_default().push(c);
+    }
+    let mut wanted: Vec<usize> = by_size.into_values().filter(|cs| cs.len() > 1).flatten().collect();
+    wanted.sort_unstable();
+    notes.send(Note::More(wanted.len() as u64));
+    let hashes = aqr_common::pool::par_map(wanted.len(), opt.threads, |i| {
+        let hash = src.read(wanted[i]).map(|d| xxhash_rust::xxh3::xxh3_128(&d));
+        notes.send(Note::Looked);
+        hash
+    });
+    let mut by_hash: HashMap<(u128, u64), usize> = HashMap::new();
+    for (&c, hash) in wanted.iter().zip(hashes) {
+        let first = *by_hash.entry((hash?, src.size(c))).or_insert(c);
+        join(first, c);
     }
     Ok(((0..n).map(|c| root(&mut parent, c)).collect(), entries, exes))
 }
