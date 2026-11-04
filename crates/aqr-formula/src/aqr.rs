@@ -445,6 +445,11 @@ impl Encoder {
     /// Drops what is kept of stream `d` compressed (by [`Encoder::smaller`], say), where it will
     /// not be archived; only its archived length is kept, for [`Encoder::smaller`].
     pub fn forget(&self, d: &[u8]) {
+        // (none of its length kept: not hashed, which reads all of it, an image of GBs mapped)
+        let n = d.len();
+        if !self.trials.borrow().keys().any(|t| t.0.1 == n) && !self.streams.borrow().keys().any(|k| k.1 == n) {
+            return;
+        }
         let k = key(&[d]);
         self.trials.borrow_mut().retain(|t, _| t.0 != k);
         if self.streams.borrow().contains_key(&k) {

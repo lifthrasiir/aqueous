@@ -2775,6 +2775,19 @@ mod tests {
         assert!(rss(&mapped) <= left);
     }
 
+    /// Forgetting data the encoder has not compressed (an image found smaller as its formula)
+    /// reads none of it: not every page of an input mapped made resident again to hash it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn forget_reads_nothing() {
+        let d = vec![7; 1 << 20];
+        let (mapped, rss) = mapped(&d);
+        let cx = Cx::new(&mapped, &Options::default());
+        let before = rss(&mapped);
+        cx.enc.forget(&mapped);
+        assert_eq!(rss(&mapped), before);
+    }
+
     /// The chunks of a WIM file mapped are let go of again once the contents of its data are
     /// made and its applications prevalidated (hashing the chunks they make).
     #[cfg(target_os = "linux")]
