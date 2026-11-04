@@ -13,7 +13,8 @@ use std::collections::HashSet;
 use std::ops::Range;
 
 use super::listing::{graph, module_names};
-use super::tree::{self, Member};
+use super::tree::{self, Kind, Member, Shape};
+pub use super::tree::{Fate, Origin};
 use super::{
     Blocks, Decoded, Extra, FOOTER_MAGIC, Failure, HEADER_MAGIC, LeafBlock, OVERLAY_FOOTER_MAGIC, OVERLAY_HEADER_MAGIC,
     critical, frame, invalid, leb, parse,
@@ -145,6 +146,19 @@ pub enum Node {
     Tombstone,
     /// Of a kind undefined.
     Special(u64),
+}
+
+/// What an entry of a segment is in the archive as it is, segments merged
+/// ([`Inspection::merged`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State {
+    /// In the tree as it is: of the entry whose entry extra it has, where one has (of a
+    /// directory, the root among them, that may be one of an earlier segment).
+    Current { extra: Option<Origin> },
+    /// A tombstone: never in the tree.
+    Tombstone,
+    /// Not in the tree, and why.
+    Gone(Fate),
 }
 
 /// A content of a segment: where the metadata block puts it.
@@ -435,6 +449,66 @@ impl Inspection<'_> {
             .collect())
     }
 
+    /// By segment and entry number, what each entry is in the archive as it is: segments
+    /// merged as [`super::open`] merges them (spec, "Merging segments"), an [`Origin`] being a
+    /// segment and an entry number (the root 0). An earlier segment's root is merged into the
+    /// next one's.
+    pub fn merged(&self) -> Vec<Vec<State>> {
+        let given = |e: &Entry| e.members.is_some();
+        let roots: Vec<bool> = self.segments.iter().map(|g| g.entries.first().is_some_and(given)).collect();
+        let shapes: Vec<Vec<Shape>> = (self.segments.iter())
+            .map(|g| {
+                (g.entries.iter().skip(1))
+                    .map(|e| Shape {
+                        parent: e.parent.checked_sub(1),
+                        name: e.names.last().expect("not the root"),
+                        kind: match e.node {
+                            Node::Dir => Kind::Dir,
+                            Node::Tombstone => Kind::Tombstone,
+                            _ => Kind::Other,
+                        },
+                        given: given(e),
+                    })
+                    .collect()
+            })
+            .collect();
+        // (by entry number, past the root)
+        let number = |o: Origin| Origin { segment: o.segment, entry: o.entry + 1 };
+        let mut states: Vec<Vec<State>> = (self.segments.iter())
+            .map(|g| {
+                (g.entries.iter())
+                    .map(|e| match e.node {
+                        Node::Tombstone => State::Tombstone,
+                        _ => State::Current { extra: None },
+                    })
+                    .collect()
+            })
+            .collect();
+        let r = tree::resolve(&roots, &shapes, &mut |o, f| {
+            let f = match f {
+                Fate::Replaced(b) => Fate::Replaced(number(b)),
+                Fate::Removed(b) => Fate::Removed(number(b)),
+                Fate::Merged(b) => Fate::Merged(number(b)),
+                Fate::WithAncestor(b) => Fate::WithAncestor(number(b)),
+            };
+            states[o.segment][o.entry + 1] = State::Gone(f);
+        });
+        let has = |o: Origin| given(&self.segments[o.segment].entries[o.entry]);
+        for e in r.entries {
+            let (node, extra) = (number(e.node), number(e.extra));
+            states[node.segment][node.entry] = State::Current { extra: has(extra).then_some(extra) };
+        }
+        // the roots: each merged into the next
+        let n = states.iter().filter(|s| !s.is_empty()).count();
+        for (k, s) in states.iter_mut().enumerate().filter(|(_, s)| !s.is_empty()) {
+            s[0] = match k + 1 < n {
+                true => State::Gone(Fate::Merged(Origin { segment: k + 1, entry: 0 })),
+                false => State::Current { extra: r.root.map(|segment| Origin { segment, entry: 0 }) },
+            };
+        }
+        states
+    }
+
     /// Of an archive without a metadata block, its contents: each output of each leaf block in
     /// order, the file being all of them one after another.
     pub fn unnamed(&self) -> Vec<Content> {
@@ -563,6 +637,119 @@ mod tests {
         let one = inspect(&alone, false, &|_| None, None).unwrap();
         assert_eq!(one.segments.len(), 1);
         assert!(one.segments[0].problems.is_empty());
+    }
+
+    /// A node of a segment's tree for [`segmented`].
+    enum N {
+        Dir(Option<u32>),
+        File(&'static [u8]),
+        Link,
+    }
+
+    /// An archive of a segment of each of `segments`, of entries (parent, name, node) each.
+    fn segmented(segments: &[Vec<(Option<usize>, &str, N)>]) -> Vec<u8> {
+        let enc = Encoder::new(Level::STORED);
+        let mut w = SegmentWriter::new();
+        let mut out = SegmentWriter::header().to_vec();
+        for (k, entries) in segments.iter().enumerate() {
+            let mut f = Formula::default();
+            let files: Vec<&[u8]> =
+                entries.iter().filter_map(|e| if let N::File(b) = e.2 { Some(b) } else { None }).collect();
+            let leaves: Vec<Leaf> =
+                files.iter().map(|b| Leaf { outputs: vec![f.push("t", b.to_vec())], sums: vec![None] }).collect();
+            let b = w.batch(&enc, &f, &leaves).unwrap();
+            w.commit(&b);
+            out.extend_from_slice(&b.bytes);
+            let mut t = Tree::default();
+            for (parent, name, n) in entries {
+                let (node, mode) = match n {
+                    N::Dir(mode) => (EntryNode::Dir, *mode),
+                    N::File(_) => (
+                        EntryNode::File(t.entries.iter().filter(|e| matches!(e.node, EntryNode::File(_))).count()),
+                        None,
+                    ),
+                    N::Link => (EntryNode::Link(b"t".to_vec()), None),
+                };
+                let extra = Extra { mode, ..Extra::default() };
+                t.entries.push(crate::aqr::Entry { parent: *parent, name: name.as_bytes().to_vec(), node, extra });
+            }
+            let contents: Vec<ContentAt> = (files.iter().enumerate())
+                .map(|(j, bytes)| ContentAt { leaf: b.leaf_at[j], output: 0, size: bytes.len() as u64 })
+                .collect();
+            if k + 1 < segments.len() {
+                out.extend_from_slice(&w.close(&enc, &t, &contents).unwrap());
+            } else {
+                out.extend_from_slice(&w.finish(&enc, &t, &contents).unwrap().0);
+            }
+        }
+        out
+    }
+
+    /// The entries of the segments merged as open merges them: a directory merged (its extra
+    /// kept where a later one has none, replaced where it has one), a file replaced, a
+    /// directory replaced by a link (all under it with it) and the link by a directory again.
+    #[test]
+    fn merged_as_opened() {
+        let c = segmented(&[
+            vec![
+                (None, "d", N::Dir(Some(0o700))),
+                (None, "l", N::Dir(None)),
+                (Some(0), "a", N::File(b"a")),
+                (Some(0), "s", N::Dir(None)),
+                (Some(3), "b", N::File(b"b")),
+                (Some(1), "c", N::File(b"c")),
+                (None, "x", N::File(b"x")),
+            ],
+            vec![(None, "d", N::Dir(None)), (None, "l", N::Link), (None, "x", N::File(b"x2"))],
+            vec![(None, "d", N::Dir(Some(0o755))), (None, "l", N::Dir(None)), (Some(1), "g", N::File(b"g"))],
+        ]);
+        let i = inspect(&c, false, &|_| None, None).unwrap();
+        let states = i.merged();
+        // the tree open makes, and the current entries: path, kind and mode
+        let opened = crate::aqr::open(&c, &crate::aqr::NoModules).unwrap();
+        let t = opened.tree().unwrap();
+        let path = |mut k: usize| {
+            let mut p = t.entries[k].name.clone();
+            while let Some(u) = t.entries[k].parent {
+                p = [&t.entries[u].name[..], b"/", &p].concat();
+                k = u;
+            }
+            p
+        };
+        let mut want: Vec<(Vec<u8>, bool, Option<u32>)> = (0..t.entries.len())
+            .map(|k| (path(k), t.entries[k].node == EntryNode::Dir, t.entries[k].extra.mode))
+            .collect();
+        let mut got = Vec::new();
+        for (k, g) in i.segments.iter().enumerate() {
+            for (e, entry) in g.entries.iter().enumerate().skip(1) {
+                if let State::Current { extra } = states[k][e] {
+                    let mode = extra.and_then(|x| i.segments[x.segment].entries[x.entry].extra.mode);
+                    got.push((entry.names.join(&b"/"[..]), entry.node == Node::Dir, mode));
+                }
+            }
+        }
+        want.sort();
+        got.sort();
+        assert_eq!(got, want);
+        let o = |segment, entry| Origin { segment, entry };
+        // (by entry number: the directories first, as they are encoded)
+        let number = |k: usize, names: &[&str]| {
+            let names: Vec<Vec<u8>> = names.iter().map(|n| n.as_bytes().to_vec()).collect();
+            i.segments[k].entries.iter().position(|e| e.names == names).unwrap()
+        };
+        let (d0, d1, d2) = (number(0, &["d"]), number(1, &["d"]), number(2, &["d"]));
+        assert_eq!(states[0][d0], State::Gone(Fate::Merged(o(1, d1))));
+        assert_eq!(states[1][d1], State::Gone(Fate::Merged(o(2, d2))));
+        assert_eq!(states[2][d2], State::Current { extra: Some(o(2, d2)) });
+        let (l0, l1) = (number(0, &["l"]), number(1, &["l"]));
+        assert_eq!(states[0][l0], State::Gone(Fate::Replaced(o(1, l1))));
+        assert_eq!(states[0][number(0, &["l", "c"])], State::Gone(Fate::WithAncestor(o(0, l0))));
+        assert_eq!(states[1][l1], State::Gone(Fate::Replaced(o(2, number(2, &["l"])))));
+        assert_eq!(states[0][number(0, &["x"])], State::Gone(Fate::Replaced(o(1, number(1, &["x"])))));
+        // (d/s and d/a, under a directory merged, left)
+        assert!(matches!(states[0][number(0, &["d", "s", "b"])], State::Current { .. }));
+        assert_eq!(states[0][0], State::Gone(Fate::Merged(o(1, 0))));
+        assert!(matches!(states[2][0], State::Current { .. }));
     }
 
     /// A formula in full: each node a line, indented by depth, an application of several

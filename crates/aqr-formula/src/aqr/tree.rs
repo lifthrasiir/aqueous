@@ -8,6 +8,7 @@
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use aqr_common::varint;
@@ -334,28 +335,180 @@ pub(crate) struct SegmentTree {
     pub tombstones: Vec<(Option<usize>, Vec<u8>)>,
 }
 
-/// The trees of the segments of an archive, in their order, merged (spec, "Merging segments"),
-/// with their contents as one: those of the files left in the tree alone, in their order.
-/// A directory merges with one of its name before it, its extra replaced only where it has one;
+/// An entry of a segment, among those given to [`resolve`]: the segment (by index) and the
+/// entry (by its index among the segment's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Origin {
+    pub segment: usize,
+    pub entry: usize,
+}
+
+/// What became of an entry of a segment, segments merged (spec, "Merging segments"), where it
+/// is not in the tree as it is: each by the entry that did it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fate {
+    /// Replaced by an entry of its name (a directory by one not a directory, and anything else
+    /// by anything but a tombstone).
+    Replaced(Origin),
+    /// Taken away by a tombstone.
+    Removed(Origin),
+    /// A directory merged into a later one of its name, which took its place (and its extra,
+    /// where it has one); what became of that is that of the later one.
+    Merged(Origin),
+    /// Taken away with a directory above it, by that directory's entry (its own fate telling
+    /// why).
+    WithAncestor(Origin),
+}
+
+/// An entry of a segment as [`resolve`] takes it.
+pub(crate) struct Shape<'a> {
+    /// The directory it is in (by its index among the segment's), or the root.
+    pub parent: Option<usize>,
+    pub name: &'a [u8],
+    pub kind: Kind,
+    /// Whether it has an entry extra (not null).
+    pub given: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kind {
+    Dir,
+    Tombstone,
+    /// Anything else: a file, a link, a special file.
+    Other,
+}
+
+/// Segments merged ([`resolve`]): the tree as it is, each entry by the entries of the segments
+/// it is of.
+pub(crate) struct Resolved {
+    /// The segment whose root extra the root has (none: no segment has one).
+    pub root: Option<usize>,
+    /// The entries, each after its parent.
+    pub entries: Vec<Resolution>,
+}
+
+pub(crate) struct Resolution {
+    /// The directory it is in (by index in [`Resolved::entries`]), or the root.
+    pub parent: Option<usize>,
+    /// The entry it is (the latest of a directory merged), and the one whose extra it has: of
+    /// a directory the latest of those merged with one (else the first), of anything else its
+    /// own.
+    pub node: Origin,
+    pub extra: Origin,
+}
+
+/// The entries of segments `segments` (each entry after its parent; `roots` telling whether each
+/// segment's root has an entry extra) merged, in their order (spec, "Merging segments"): a
+/// directory merges with one of its name before it, its extra replaced only where it has one;
 /// any other entry replaces what had its name, a directory with all under it; a tombstone takes
-/// away what has its name. Link groups of a segment's own (not negative) are renumbered apart
-/// from those of the other segments, those of the first segment kept as they are.
-pub(crate) fn merge(trees: Vec<SegmentTree>) -> (Tree, Vec<(usize, usize, u64)>) {
-    // the entries made, in their order: each after its parent, and whether it is taken away
-    let mut made: Vec<Entry> = Vec::new();
-    let mut alive: Vec<bool> = Vec::new();
-    let mut root = Extra::default();
-    // by directory (or the root) and name, the entry there
-    let mut at: std::collections::HashMap<(Option<usize>, Vec<u8>), usize> = std::collections::HashMap::new();
+/// away what has its name. `dropped` is told of each entry not in the tree as it is, and why.
+pub(crate) fn resolve(roots: &[bool], segments: &[Vec<Shape>], dropped: &mut dyn FnMut(Origin, Fate)) -> Resolved {
+    struct Made {
+        parent: Option<usize>,
+        node: Origin,
+        extra: Origin,
+        dir: bool,
+        alive: bool,
+    }
+    // the entries made, in their order: each after its parent
+    let mut made: Vec<Made> = Vec::new();
+    // by directory made (or the root) and name, the entry there
+    let mut at: HashMap<(Option<usize>, &[u8]), usize> = HashMap::new();
+    let mut root = None;
+    for (s, shapes) in segments.iter().enumerate() {
+        if roots[s] {
+            root = Some(s);
+        }
+        // by the segment's entry, the entry made or merged into (none: a tombstone)
+        let mut index: Vec<Option<usize>> = Vec::with_capacity(shapes.len());
+        for (i, sh) in shapes.iter().enumerate() {
+            let o = Origin { segment: s, entry: i };
+            let parent = sh.parent.map(|p| index[p].expect("a directory"));
+            let key = (parent, sh.name);
+            if sh.kind == Kind::Tombstone {
+                if let Some(x) = at.remove(&key) {
+                    made[x].alive = false;
+                    dropped(made[x].node, Fate::Removed(o));
+                }
+                index.push(None);
+                continue;
+            }
+            let existing = at.get(&key).copied();
+            if sh.kind == Kind::Dir
+                && let Some(x) = existing.filter(|&x| made[x].dir)
+            {
+                dropped(made[x].node, Fate::Merged(o));
+                made[x].node = o;
+                if sh.given {
+                    made[x].extra = o;
+                }
+                index.push(Some(x));
+                continue;
+            }
+            if let Some(x) = existing {
+                made[x].alive = false;
+                dropped(made[x].node, Fate::Replaced(o));
+            }
+            at.insert(key, made.len());
+            index.push(Some(made.len()));
+            made.push(Made { parent, node: o, extra: o, dir: sh.kind == Kind::Dir, alive: true });
+        }
+    }
+    // those left (not taken away, nor under one taken away)
+    let mut new = vec![None; made.len()];
+    // (by entry made, the nearest of it and those above it taken away)
+    let mut gone: Vec<Option<usize>> = vec![None; made.len()];
+    let mut entries = Vec::new();
+    for (k, m) in made.iter().enumerate() {
+        let above = m.parent.and_then(|p| gone[p]);
+        gone[k] = if m.alive { above } else { Some(k) };
+        match above {
+            _ if !m.alive => {}
+            Some(a) => dropped(m.node, Fate::WithAncestor(made[a].node)),
+            None => {
+                new[k] = Some(entries.len());
+                let parent = m.parent.map(|p| new[p].expect("kept"));
+                entries.push(Resolution { parent, node: m.node, extra: m.extra });
+            }
+        }
+    }
+    Resolved { root, entries }
+}
+
+/// The trees of the segments of an archive, in their order, merged ([`resolve`]), with their
+/// contents as one: those of the files left in the tree alone, in their order. Link groups of a
+/// segment's own (not negative) are renumbered apart from those of the other segments, those of
+/// the first segment kept as they are.
+pub(crate) fn merge(mut trees: Vec<SegmentTree>) -> (Tree, Vec<(usize, usize, u64)>) {
+    let roots: Vec<bool> = trees.iter().map(|t| t.given[0]).collect();
+    let shapes: Vec<Vec<Shape>> = (trees.iter())
+        .map(|t| {
+            let entries = t.tree.entries.iter().enumerate().map(|(i, e)| Shape {
+                parent: e.parent,
+                name: &e.name,
+                kind: if e.node == EntryNode::Dir { Kind::Dir } else { Kind::Other },
+                given: t.given[i + 1],
+            });
+            let tombstones = (t.tombstones.iter()).map(|(parent, name)| Shape {
+                parent: *parent,
+                name,
+                kind: Kind::Tombstone,
+                given: false,
+            });
+            entries.chain(tombstones).collect()
+        })
+        .collect();
+    let r = resolve(&roots, &shapes, &mut |_, _| {});
+    drop(shapes);
+    // the contents and link groups of each segment renumbered among those of all
     let mut refs = Vec::new();
     // (the first link group free for those of a segment's own after the first)
     let own = |t: &Tree| t.entries.iter().filter_map(|e| e.extra.link_group).filter(|&g| g >= 0).max();
     let mut free = trees.first().and_then(|t| own(&t.tree)).map_or(0, |g| g + 1);
-    for (s, st) in trees.into_iter().enumerate() {
-        let SegmentTree { tree, refs: seg_refs, given, tombstones } = st;
+    for (s, st) in trees.iter_mut().enumerate() {
         let first = refs.len();
-        refs.extend(seg_refs);
-        let mut groups = std::collections::HashMap::new();
+        refs.append(&mut st.refs);
+        let mut groups = HashMap::new();
         let mut renumber = |x: &mut Extra| {
             for f in &mut x.forks {
                 f.1 += first;
@@ -369,53 +522,26 @@ pub(crate) fn merge(trees: Vec<SegmentTree>) -> (Tree, Vec<(usize, usize, u64)>)
                 }));
             }
         };
-        if given[0] {
-            root = tree.root;
-            renumber(&mut root);
+        if st.given[0] {
+            renumber(&mut st.tree.root);
         }
-        // by the segment's entry, the entry made or merged into
-        let mut index = Vec::with_capacity(tree.entries.len());
-        for (i, mut e) in tree.entries.into_iter().enumerate() {
-            let parent = e.parent.map(|p| index[p]);
+        for e in &mut st.tree.entries {
             renumber(&mut e.extra);
             if let EntryNode::File(c) = &mut e.node {
                 *c += first;
             }
-            let key = (parent, e.name);
-            let existing = at.get(&key).copied();
-            if e.node == EntryNode::Dir
-                && let Some(x) = existing.filter(|&x| made[x].node == EntryNode::Dir)
-            {
-                if given[i + 1] {
-                    made[x].extra = e.extra;
-                }
-                index.push(x);
-                continue;
-            }
-            if let Some(x) = existing {
-                alive[x] = false;
-            }
-            at.insert(key.clone(), made.len());
-            index.push(made.len());
-            made.push(Entry { parent, name: key.1, node: e.node, extra: e.extra });
-            alive.push(true);
-        }
-        for (parent, name) in tombstones {
-            if let Some(x) = at.remove(&(parent.map(|p| index[p]), name)) {
-                alive[x] = false;
-            }
         }
     }
-    // those left (not taken away, nor under one taken away), and the contents they take
-    let mut new = vec![None; made.len()];
-    let mut tree = Tree { root, entries: Vec::new() };
-    for (k, e) in made.into_iter().enumerate() {
-        if !alive[k] || e.parent.is_some_and(|p| new[p].is_none()) {
-            continue;
-        }
-        new[k] = Some(tree.entries.len());
-        tree.entries.push(Entry { parent: e.parent.map(|p| new[p].expect("kept")), ..e });
+    let root = r.root.map(|s| std::mem::take(&mut trees[s].tree.root)).unwrap_or_default();
+    let mut tree = Tree { root, entries: Vec::with_capacity(r.entries.len()) };
+    for m in r.entries {
+        let e = &mut trees[m.node.segment].tree.entries[m.node.entry];
+        let (name, node) = (std::mem::take(&mut e.name), e.node.clone());
+        let extra = std::mem::take(&mut trees[m.extra.segment].tree.entries[m.extra.entry].extra);
+        tree.entries.push(Entry { parent: m.parent, name, node, extra });
     }
+    drop(trees);
+    // the contents the files left take
     let mut taken = vec![None; refs.len()];
     let mut kept = Vec::new();
     let mut take = |c: &mut usize| {
@@ -1997,5 +2123,59 @@ mod tests {
         assert_eq!(t.root.mode, Some(0o700));
         // (of the first segment's first content, and the third's)
         assert_eq!(refs, [(0, 0, 0), (0, 0, 0)]);
+    }
+
+    /// The segments of [`merged`] resolved: what became of each entry not left, and where the
+    /// entries left (and the extras of the directories) are of.
+    #[test]
+    fn resolved() {
+        let sh = |parent, name: &'static str, kind| Shape { parent, name: name.as_bytes(), kind, given: false };
+        let (dir, other, gone) = (Kind::Dir, Kind::Other, Kind::Tombstone);
+        let segments = vec![
+            vec![
+                sh(None, "d", dir),
+                sh(Some(0), "a", other),
+                sh(Some(0), "s", dir),
+                sh(Some(2), "b", other),
+                sh(None, "l", dir),
+                sh(Some(4), "c", other),
+                sh(None, "f", other),
+            ],
+            vec![
+                sh(None, "d", dir),
+                sh(None, "l", other),
+                sh(None, "n", dir),
+                sh(Some(0), "s", gone),
+                sh(None, "f", gone),
+                sh(None, "none", gone),
+                sh(Some(2), "none", gone),
+            ],
+            vec![sh(None, "l", dir), sh(Some(0), "g", other)],
+        ];
+        let o = |segment, entry| Origin { segment, entry };
+        let mut fates = HashMap::new();
+        let r = resolve(&[true, false, false], &segments, &mut |x, f| assert!(fates.insert(x, f).is_none()));
+        let want = [
+            (o(0, 0), Fate::Merged(o(1, 0))),
+            (o(0, 2), Fate::Removed(o(1, 3))),
+            (o(0, 3), Fate::WithAncestor(o(0, 2))),
+            (o(0, 4), Fate::Replaced(o(1, 1))),
+            (o(0, 5), Fate::WithAncestor(o(0, 4))),
+            (o(0, 6), Fate::Removed(o(1, 4))),
+            (o(1, 1), Fate::Replaced(o(2, 0))),
+        ];
+        assert_eq!(fates, HashMap::from(want));
+        assert_eq!(r.root, Some(0));
+        let got: Vec<_> = r.entries.iter().map(|e| (e.parent, e.node, e.extra)).collect();
+        assert_eq!(
+            got,
+            [
+                (None, o(1, 0), o(0, 0)),
+                (Some(0), o(0, 1), o(0, 1)),
+                (None, o(1, 2), o(1, 2)),
+                (None, o(2, 0), o(2, 0)),
+                (Some(3), o(2, 1), o(2, 1)),
+            ]
+        );
     }
 }
