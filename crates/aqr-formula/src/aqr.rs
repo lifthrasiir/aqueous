@@ -1656,40 +1656,89 @@ fn plan_by(level: Level, how: How, data: &[&[u8]], compress: &mut Compress) -> R
         Level::Of(level) => {
             let p = Pick::of(level);
             let sample = sampled(data);
-            let len = |c: &Option<Vec<u8>>| c.as_ref().map_or(sample.len(), Vec::len);
-            let probe = trial(&sample, PROBE)?;
-            if !saves(len(&probe), sample.len()) {
-                return match sample.len() < n {
-                    true => Ok(Plan::Probe),
-                    false => Ok(Plan::Done(None, STORED)),
+            // (planned before, of the same data: its trials not made again)
+            let k = (n >= SMALL).then(|| (key_how(data, how), level));
+            let before = k.and_then(|k| PLANNED.lock().unwrap().as_ref().and_then(|m| m.get(&k).copied()));
+            if let Some(b) = before {
+                return Ok(match b {
+                    Planned::Probe => Plan::Probe,
+                    Planned::Stored => Plan::Done(None, STORED),
+                    Planned::Done(l) => Plan::Done(compress(Some(&sample), l)?, l),
+                    Planned::Level(l, size) => Plan::Level(l, size),
+                });
+            }
+            let plan = plan_of(&p, how, n, &sample, compress)?;
+            if let Some(k) = k {
+                let b = match plan {
+                    Plan::Probe => Planned::Probe,
+                    Plan::Done(None, STORED) => Planned::Stored,
+                    Plan::Done(_, l) => Planned::Done(l),
+                    Plan::Level(l, size) => Planned::Level(l, size),
                 };
-            }
-            if n < SMALL {
-                return Ok(Plan::Done(compress(None, p.base.0)?, p.base.0));
-            }
-            let mut tried = Vec::new();
-            for level in [p.base.0].into_iter().chain(p.higher.iter().map(|h| h.0)).chain(p.lower.iter().copied()) {
-                tried.push((level, if level == PROBE { probe.clone() } else { trial(&sample, level)? }));
-            }
-            let lens: Vec<usize> = tried.iter().map(|(_, c)| len(c)).collect();
-            let (higher, lower) = lens[1..].split_at(p.higher.len());
-            let level = pick(&p, sample.len(), lens[0], higher, lower);
-            let best = tried.into_iter().find(|t| t.0 == level).expect("a level tried");
-            let size = scaled(len(&best.1), sample.len(), n);
-            // (dense data at the dense level above any picked: where larger than a sample, as
-            // a sample does not tell; else where it is smaller, as the sample is all of it)
-            match p.dense {
-                Some(dense) if how == How::Dense && sample.len() < n && level >= p.base.0 => {
-                    Ok(Plan::Level(dense, size))
+                let mut m = PLANNED.lock().unwrap();
+                let m = m.get_or_insert_with(HashMap::new);
+                if m.len() >= PLANNED_MAX {
+                    m.clear();
                 }
-                Some(dense) if how == How::Dense && sample.len() == n && level >= p.base.0 => {
-                    let c = trial(&sample, dense)?;
-                    Ok(if len(&c) < len(&best.1) { Plan::Done(c, dense) } else { Plan::Done(best.1, best.0) })
-                }
-                _ if sample.len() == n => Ok(Plan::Done(best.1, best.0)),
-                _ => Ok(Plan::Level(best.0, size)),
+                m.insert(k, b);
             }
+            Ok(plan)
         }
+    }
+}
+
+/// What [`plan_by`] made of data of at least [`SMALL`] bytes at a level of [`Level::Of`], by
+/// the data's [`key_how`] and the level: the same data met again (a file in two images, of
+/// two encoders) planned alike without its trials, the sample of all of it compressed at the
+/// level planned. A plan is a function of the data alone, so that what is planned does not
+/// depend on which was met first. (Of the Windows 7 SP1 DVD's trials, 15% of the bytes were
+/// of data met before.)
+#[derive(Clone, Copy)]
+enum Planned {
+    Probe,
+    Stored,
+    Done(i32),
+    Level(i32, usize),
+}
+
+static PLANNED: std::sync::Mutex<Option<HashMap<(StreamKey, u8), Planned>>> = std::sync::Mutex::new(None);
+
+/// Plans [`PLANNED`] holds at most, before it is cleared.
+const PLANNED_MAX: usize = 1 << 20;
+
+/// [`plan_by`] at a level of [`Level::Of`] picking `p`, of `n` bytes of data of which `sample` is
+/// the sample, by `compress`.
+fn plan_of(p: &Pick, how: How, n: usize, sample: &[u8], compress: &mut Compress) -> Result<Plan> {
+    let len = |c: &Option<Vec<u8>>| c.as_ref().map_or(sample.len(), Vec::len);
+    let probe = compress(Some(sample), PROBE)?;
+    if !saves(len(&probe), sample.len()) {
+        return match sample.len() < n {
+            true => Ok(Plan::Probe),
+            false => Ok(Plan::Done(None, STORED)),
+        };
+    }
+    if n < SMALL {
+        return Ok(Plan::Done(compress(None, p.base.0)?, p.base.0));
+    }
+    let mut tried = Vec::new();
+    for level in [p.base.0].into_iter().chain(p.higher.iter().map(|h| h.0)).chain(p.lower.iter().copied()) {
+        tried.push((level, if level == PROBE { probe.clone() } else { compress(Some(sample), level)? }));
+    }
+    let lens: Vec<usize> = tried.iter().map(|(_, c)| len(c)).collect();
+    let (higher, lower) = lens[1..].split_at(p.higher.len());
+    let level = pick(p, sample.len(), lens[0], higher, lower);
+    let best = tried.into_iter().find(|t| t.0 == level).expect("a level tried");
+    let size = scaled(len(&best.1), sample.len(), n);
+    // (dense data at the dense level above any picked: where larger than a sample, as
+    // a sample does not tell; else where it is smaller, as the sample is all of it)
+    match p.dense {
+        Some(dense) if how == How::Dense && sample.len() < n && level >= p.base.0 => Ok(Plan::Level(dense, size)),
+        Some(dense) if how == How::Dense && sample.len() == n && level >= p.base.0 => {
+            let c = compress(Some(sample), dense)?;
+            Ok(if len(&c) < len(&best.1) { Plan::Done(c, dense) } else { Plan::Done(best.1, best.0) })
+        }
+        _ if sample.len() == n => Ok(Plan::Done(best.1, best.0)),
+        _ => Ok(Plan::Level(best.0, size)),
     }
 }
 
