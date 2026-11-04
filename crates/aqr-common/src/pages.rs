@@ -165,7 +165,7 @@ mod tests {
         let p = size();
         assert_eq!(within(0, p), (0, p));
         assert_eq!(within(1, p), (p, 0));
-        assert_eq!(within(1, 3 * p), (p, p));
+        assert_eq!(within(1, 3 * p), (p, 2 * p));
         assert_eq!(within(p - 1, 2 * p + 1), (p, 2 * p));
         assert_eq!(within(5, 10), (p, 0));
     }
