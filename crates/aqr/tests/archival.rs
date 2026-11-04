@@ -322,6 +322,19 @@ fn salvages_segments() {
         assert_eq!(metas.len(), 6, "{mirrors}");
         let t = stderr(&aqr_in(&d, &["-K", "s.aqr"]));
         assert!(!mirrors || t.contains("mirrored archive: yes"), "{t}");
+        // (just after the third segment's metadata block: its footer made again, but the
+        // segment not the one meant to be the last)
+        fs::write(
+            d.join("cut.aqr"),
+            &a[..metas[2]
+                + (blocks(&a).iter().find(|b| b.0 == metas[2]).unwrap().2.end - metas[2]).next_multiple_of(2)],
+        )
+        .unwrap();
+        let out = d.join(format!("after-{mirrors}"));
+        let o = aqr_fed(&d, &["-d", "-o", out.to_str().unwrap(), "cut.aqr"], b"");
+        let t = stderr(&o);
+        assert!(!o.status.success() && t.contains("its footer made again") && t.contains("segments after it"), "{t}");
+        assert_eq!(files(&out).len(), 3, "{t}");
         // (in the fourth segment's blocks)
         fs::write(d.join("cut.aqr"), &a[..metas[2] + 100_000]).unwrap();
         let out = d.join(format!("out-{mirrors}"));

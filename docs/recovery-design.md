@@ -143,7 +143,7 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 
 - compressor는 N MiB(또는 N초)마다 segment를 닫는다. 그러면 truncation 손실은 **아직 닫히지 않은 마지막 segment 하나로 묶인다**.
   - 구현: `aqr -S SIZE`(`Options::segment`). 출력 크기 기준이며, 그 크기를 넘긴 batch 뒤에서 닫는다(큰 batch가 끼면 segment도 커진다). 각 segment는 module, resource, dictionary를 다시 쓰고, 앞 segment의 파일과 같은 내용은 다시 만든다(internal import는 쓰지 않는다: blast radius만 커진다). 하드링크 그룹은 음수(archive-wide)로 쓴다. 디렉토리와 내용 없는 entry는 첫 segment에, 나머지는 내용이 있는 segment에 두고 조상 디렉토리를 extra 없이 다시 적는다.
-  - salvage는 마지막 segment가 잘리면 그 segment를 버리고 앞 segment들로 되살린다(명세 §Salvage). metadata block 바로 뒤에서 정확히 잘린 경우는 알아챌 길이 없다.
+  - salvage는 마지막 segment가 잘리면 그 segment를 버리고 앞 segment들로 되살린다(명세 §Salvage). metadata block 바로 뒤에서 정확히 잘린 경우는 블록만으로는 footer만 잃은 경우와 구별되지 않으므로, 마지막으로 쓴 segment의 optional metadata에 `last-segment-intended`(-3)를 둔다(명세 §last-segment-intended). footer를 다시 만들었는데 그 표식이 없으면 뒤의 segment를 잃었을 수 있다고 알리고 실패한다. 나중에 덧붙인 segment가 있으면 덧붙이기 전 끝에서 잘린 경우는 여전히 온전해 보이는데, 덧붙이기 전에는 실제로 온전했으니 받아들인다.
 - 명세에는 비규범 권고로 둔다. 백업 도구가 기본값을 정한다.
 - metadata를 잃은 마지막 segment의 leaf block도 이름 없는 파일로는 추출할 수 있다(photorec식 salvage).
 

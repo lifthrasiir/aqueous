@@ -448,11 +448,13 @@ pub(crate) struct FileParam {
 /// The internal structure of the metadata block at `at` (in the archive), the one before it at
 /// `prev` (the end of the header magic, less 1, where it is the first), of a segment of the
 /// module, resource and dictionary blocks at `modules`, `resources` and `dictionaries`; where
-/// each content is (by [`EntryNode::File`]).
+/// each content is (by [`EntryNode::File`]); the last segment written where `last`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn metadata(
     t: &Tree,
     at: usize,
     prev: usize,
+    last: bool,
     modules: &[usize],
     resources: &[usize],
     dictionaries: &[usize],
@@ -498,10 +500,11 @@ pub(crate) fn metadata(
             EntryNode::Special(_) => unreachable!("checked"),
         }
     }
-    let opt = optional(t, &order, &|c| {
+    let fork_at = |c: usize| {
         let p = contents[c];
         [(at - p.leaf) as u64, p.output, p.size]
-    });
+    };
+    let opt = optional(t, &order, &fork_at, last);
 
     let mut m = Vec::new();
     varint::put(&mut m, prev);
@@ -553,19 +556,28 @@ fn put_u(out: &mut Vec<u8>, n: u64, v: u64) {
 /// The optional metadata of `t`, its entries in `order`, its forks' contents where `fork_at`
 /// tells (`aqr-fork`: offset, output and size): `entry-extras` where any entry has an extra,
 /// else nothing (an empty map).
-fn optional(t: &Tree, order: &[usize], fork_at: &dyn Fn(usize) -> [u64; 3]) -> Vec<u8> {
+fn optional(t: &Tree, order: &[usize], fork_at: &dyn Fn(usize) -> [u64; 3], last_segment: bool) -> Vec<u8> {
     let extras: Vec<&Extra> = std::iter::once(&t.root).chain(order.iter().map(|&i| &t.entries[i].extra)).collect();
-    let Some(last) = extras.iter().rposition(|e| !e.is_empty()) else { return Vec::new() };
+    let last = extras.iter().rposition(|e| !e.is_empty());
+    if last.is_none() && !last_segment {
+        return Vec::new();
+    }
     let mut c = Vec::new();
-    head(&mut c, 5, 1);
-    int(&mut c, ENTRY_EXTRAS);
-    head(&mut c, 4, last as u64 + 1);
-    for e in &extras[..=last] {
-        if e.is_empty() {
-            c.push(NULL);
-            continue;
+    head(&mut c, 5, last.is_some() as u64 + last_segment as u64);
+    if let Some(last) = last {
+        int(&mut c, ENTRY_EXTRAS);
+        head(&mut c, 4, last as u64 + 1);
+        for e in &extras[..=last] {
+            if e.is_empty() {
+                c.push(NULL);
+                continue;
+            }
+            extra(&mut c, e, fork_at);
         }
-        extra(&mut c, e, fork_at);
+    }
+    if last_segment {
+        int(&mut c, LAST_SEGMENT_INTENDED);
+        c.push(TRUE);
     }
     c
 }
@@ -683,6 +695,7 @@ fn text(out: &mut Vec<u8>, b: &[u8]) {
 }
 
 const ENTRY_EXTRAS: i128 = -2;
+const LAST_SEGMENT_INTENDED: i128 = -3;
 const CRTIME: i128 = -1;
 const CTIME: i128 = -2;
 const MTIME: i128 = -3;
@@ -700,6 +713,7 @@ const UNIX_UNAME: i128 = -73;
 const UNIX_GNAME: i128 = -74;
 const MAC_FLAGS: i128 = -80;
 const NULL: u8 = 0xf6;
+const TRUE: u8 = 0xf5;
 const TAG_WTF8: u64 = 273;
 /// The tags of `$aqr-instant` and `#6.100`, by their scale in nanoseconds.
 const TAG_NS: u64 = 126;
@@ -1080,17 +1094,23 @@ impl<'a> Shared<'a> {
 #[cfg(test)]
 #[allow(clippy::type_complexity)]
 fn extras(d: &[u8], n: usize) -> Decoded<(Vec<Extra>, Vec<Vec<(Vec<u8>, ForkRef)>>)> {
-    extras_given(d, n).map(|(out, forks, _)| (out, forks))
+    extras_given(d, n).map(|(out, forks, ..)| (out, forks))
 }
 
-/// [`extras`], and whether each has an entry extra (a map, not null nor left out).
+/// The extras of [`extras`] and their forks, whether each has an entry extra (a map, not null
+/// nor left out), and whether `last-segment-intended` is there.
+type Extras = (Vec<Extra>, Vec<Vec<(Vec<u8>, ForkRef)>>, Vec<bool>, bool);
+
+/// [`extras`], and whether each has an entry extra (a map, not null nor left out), and whether
+/// the segment is told to be the last one written (`last-segment-intended`).
 #[allow(clippy::type_complexity)]
-fn extras_given(d: &[u8], n: usize) -> Decoded<(Vec<Extra>, Vec<Vec<(Vec<u8>, ForkRef)>>, Vec<bool>)> {
+fn extras_given(d: &[u8], n: usize) -> Decoded<Extras> {
     let mut out = vec![Extra::default(); n + 1];
     let mut forks = vec![Vec::new(); n + 1];
     let mut given = vec![false; n + 1];
+    let mut last = false;
     if d.is_empty() {
-        return Ok((out, forks, given));
+        return Ok((out, forks, given, last));
     }
     // Walked rather than read whole: the entry-extras an entry at a time, each a member at a
     // time (read whole, those of an archive of many entries took most of opening it).
@@ -1109,7 +1129,15 @@ fn extras_given(d: &[u8], n: usize) -> Decoded<(Vec<Extra>, Vec<Vec<(Vec<u8>, Fo
             return invalid("bad CBOR in the optional metadata");
         }
         let entry_extras = k == Cbor::Int(ENTRY_EXTRAS);
+        let last_segment = k == Cbor::Int(LAST_SEGMENT_INTENDED);
         add_key(&mut keys, k)?;
+        if last_segment {
+            match item(d, &mut at, 1)? {
+                Cbor::Simple(21) => last = true,
+                _ => return invalid("last-segment-intended not true"),
+            }
+            continue;
+        }
         if !entry_extras {
             item(d, &mut at, 1)?;
             continue;
@@ -1149,7 +1177,7 @@ fn extras_given(d: &[u8], n: usize) -> Decoded<(Vec<Extra>, Vec<Vec<(Vec<u8>, Fo
     if at != d.len() {
         return invalid("bytes after the optional metadata");
     }
-    Ok((out, forks, given))
+    Ok((out, forks, given, last))
 }
 
 /// Takes member `k` of value `v` of an entry extra into `x` (its forks into `forks`), where it
@@ -1300,6 +1328,9 @@ pub(crate) struct Metadata {
     pub forks: Vec<Vec<(Vec<u8>, ForkRef)>>,
     /// From the root, by number: whether each has an entry extra (not null).
     pub given: Vec<bool>,
+    /// Whether the segment is told to be the last written (`last-segment-intended`): a hint of
+    /// repair alone, not of the archive's value.
+    pub last: bool,
 }
 
 pub(crate) enum Read {
@@ -1432,7 +1463,7 @@ pub(crate) fn read(d: &[u8]) -> Decoded<Metadata> {
     if p != entries.len() {
         return invalid("bytes after the entries");
     }
-    let (extras, forks, given) = extras_given(opt, n)?;
+    let (extras, forks, given, last) = extras_given(opt, n)?;
     Ok(Metadata {
         prev,
         modules: module_offsets,
@@ -1442,6 +1473,7 @@ pub(crate) fn read(d: &[u8]) -> Decoded<Metadata> {
         extras,
         forks,
         given,
+        last,
     })
 }
 
@@ -1518,7 +1550,7 @@ mod tests {
             t.entries.push(Entry { parent: None, name: vec![b'a' + i as u8], node, extra });
         }
         let order: Vec<usize> = (0..3).collect();
-        let c = optional(&t, &order, &|c| [c as u64 * 2, 0, 9]);
+        let c = optional(&t, &order, &|c| [c as u64 * 2, 0, 9], false);
         let (got, forks) = extras(&c, 3).unwrap();
         assert_eq!(got[1..3], [t.entries[0].extra.clone(), t.entries[1].extra.clone()]);
         // (a time beyond 64 bits of nanoseconds of seconds)
@@ -1528,7 +1560,15 @@ mod tests {
         // (times of nanoseconds as they are)
         assert!(c.windows(2).any(|w| w == [0xd8, 126]));
         let none = Tree { entries: t.entries[..1].to_vec(), ..Tree::default() };
-        assert_eq!(optional(&none, &[0], &|_| unreachable!()), b"");
+        assert_eq!(optional(&none, &[0], &|_| unreachable!(), false), b"");
+        // last-segment-intended, alone and after entry-extras; true alone
+        assert_eq!(optional(&none, &[0], &|_| unreachable!(), true), [0xa1, 0x22, 0xf5]);
+        assert!(extras_given(&[0xa1, 0x22, 0xf5], 1).unwrap().3);
+        let both = optional(&t, &order, &|c| [c as u64 * 2, 0, 9], true);
+        let (again, _, _, last) = extras_given(&both, 3).unwrap();
+        assert!(last && again == extras(&c, 3).unwrap().0);
+        assert!(!extras_given(&c, 3).unwrap().3);
+        assert!(extras_given(&[0xa1, 0x22, 0xf4], 1).is_err());
         // other keys, tags and indefinite lengths read
         let other = [0xbf, 0x21, 0x9f, 0xa1, 0x22, 0xd8, 0x79, 0x0a, 0xf6, 0xff, 0x01, 0x5f, 0x41, 0x00, 0xff, 0xff];
         let (got, _) = extras(&other, 2).unwrap();
@@ -1611,7 +1651,7 @@ mod tests {
             let extra = Extra { gname: Some(vec![b'g', i % 2].into()), ..x.clone() };
             t.entries.push(Entry { parent: None, name: vec![b'a' + i], node: EntryNode::Dir, extra });
         }
-        let c = optional(&t, &[0, 1, 2], &|_| unreachable!());
+        let c = optional(&t, &[0, 1, 2], &|_| unreachable!(), false);
         let (got, _) = extras(&c, 3).unwrap();
         assert_eq!(got[1..], t.entries.iter().map(|e| e.extra.clone()).collect::<Vec<_>>()[..]);
         let same = |f: &dyn Fn(&Extra) -> &Arc<[u8]>| got[1..].windows(2).all(|w| Arc::ptr_eq(f(&w[0]), f(&w[1])));

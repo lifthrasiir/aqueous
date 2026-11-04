@@ -213,7 +213,7 @@ impl SegmentWriter {
         if contents.iter().any(|c| c.leaf < self.segment_at) {
             return Err(Error::new("a content of a leaf of another segment"));
         }
-        let out = self.metadata_block(enc, t, contents, usize::MAX, 0)?;
+        let out = self.metadata_block(enc, t, contents, usize::MAX, 0, false)?;
         self.prev = self.at;
         self.at += out.len();
         self.segment_at = self.at;
@@ -508,7 +508,7 @@ impl SegmentWriter {
     /// (by [`EntryNode::File`]), and the footer. Fails on a tree the spec does not allow.
     pub fn finish(&self, enc: &Encoder, t: &Tree, contents: &[ContentAt]) -> Result<(Vec<u8>, usize)> {
         tree::check(t, contents.len()).map_err(Error::new)?;
-        let mut out = self.metadata_block(enc, t, contents, usize::MAX, 0)?;
+        let mut out = self.metadata_block(enc, t, contents, usize::MAX, 0, true)?;
         let metadata = out.len();
         let end = self.at + out.len();
         // (from the start of the footer's fields: after the magic and the size)
@@ -538,7 +538,7 @@ impl SegmentWriter {
         tree::check(t, contents.len()).map_err(Error::new)?;
         let mut room = 0;
         for tries in 0..8 {
-            let meta = self.metadata_block(enc, t, contents, front, room)?;
+            let meta = self.metadata_block(enc, t, contents, front, room, true)?;
             let at = self.at + room;
             let mut mirror = super::mirror::mirror_of(&meta, at as u64, front as u64, false);
             let len = mirror.len();
@@ -565,7 +565,8 @@ impl SegmentWriter {
     }
 
     /// The metadata block of `t` (its contents where `contents` tells), the blocks from `front`
-    /// on (and the metadata block, after them all) moved `shift` bytes later.
+    /// on (and the metadata block, after them all) moved `shift` bytes later; of the last
+    /// segment written (`last-segment-intended`) where `last`.
     fn metadata_block(
         &self,
         enc: &Encoder,
@@ -573,6 +574,7 @@ impl SegmentWriter {
         contents: &[ContentAt],
         front: usize,
         shift: usize,
+        last: bool,
     ) -> Result<Vec<u8>> {
         let moved = |at: usize| if at >= front { at + shift } else { at };
         let params: Vec<FileParam> = contents
@@ -585,7 +587,8 @@ impl SegmentWriter {
         let all = |v: &[usize]| v.iter().map(|&a| moved(a)).collect::<Vec<_>>();
         let (modules, resources, dictionaries) =
             (all(&self.module_at), all(&self.resource_at), all(&self.dictionary_at));
-        let meta = tree::metadata(t, self.at + shift, moved(self.prev), &modules, &resources, &dictionaries, &params);
+        let meta =
+            tree::metadata(t, self.at + shift, moved(self.prev), last, &modules, &resources, &dictionaries, &params);
         let mut out = Vec::new();
         match enc.base_level() {
             STORED => {

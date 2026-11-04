@@ -1291,6 +1291,14 @@ mod tests {
         assert_eq!(files(&out), [rev(NAMES[0]), rev(NAMES[1]), rev(NAMES[2])]);
         let metas = blocks(&out).0.iter().filter(|b| (0x10..=0x17).contains(&b.1)).count();
         assert_eq!(metas, 2);
+        let natives = natives();
+        assert_eq!(super::super::open(&out, &natives).unwrap().last_intended(), Some(true));
+        // (cut just after the first metadata block: repaired as an archive of the first segment,
+        // which does not tell it was meant to be the last)
+        let d = &out[..second];
+        let r = repair(d, &check(d), false, &[]).unwrap();
+        assert!(r.footer && r.lost.is_empty() && r.cut_off.is_none());
+        assert_eq!(super::super::open(&r.bytes, &natives).unwrap().last_intended(), Some(false));
         for cut in [second + 1, out.len() - 20] {
             let d = &out[..cut];
             assert!(repair(d, &check(d), false, &[]).is_none_or(|r| !r.footer));

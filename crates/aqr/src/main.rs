@@ -2135,6 +2135,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
         }
     }
     let cut_off = restored.as_ref().and_then(|r| r.cut_off.as_ref()).map(|c| c.len());
+    let footer_made = restored.as_ref().is_some_and(|r| r.footer);
     let read: &[u8] = restored.as_ref().map_or(read, |r| &r.bytes);
     // (salvaged where bytes were lost: their files lost, the others given back as they check)
     let mut archive = match (restored.as_ref().is_some_and(|r| !r.lost.is_empty()), decrypted.is_some()) {
@@ -2143,6 +2144,15 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
         (false, false) => aqr::open(read, runner),
     }
     .map_err(|e| err(&e))?;
+    // (its footer made again after a metadata block not of the segment meant to be the last:
+    // cut short just after it, maybe, segments after it lost whole)
+    let maybe_cut = footer_made && cut_off.is_none() && archive.last_intended() == Some(false);
+    if maybe_cut {
+        eprintln!(
+            "{}: its last segment is not the one meant to be the last: segments after it may be lost",
+            input.display()
+        );
+    }
     // (some paths: by content, whether it is decoded)
     let wanted = match (&a.select, archive.tree()) {
         (None, _) => None,
@@ -2313,6 +2323,9 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     // files of no name known)
     if let Some(n) = cut_off {
         return Err(err(&format!("a segment cut short lost ({n} bytes), its files not known")));
+    }
+    if maybe_cut {
+        return Err(err(&"cut short after a segment, maybe: segments after it not known"));
     }
     if let (Some(s), Some(rec)) = (&a.stats, rec) {
         let mut contents = seen.contents(content_paths(&archive, &to.named));

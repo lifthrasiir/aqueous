@@ -1709,7 +1709,7 @@ and an optional [=base=] |base|, which is an [=archive value=]:
         1. Let |segment root| be the result of [=interpret a segment|interpreting=] |segment|.
         2. [=Merge directory nodes|Merge=] |segment root| into |root|.
         3. For each key |k| and value |v| in the top-level map of the segment's [[#optional-metadata|optional metadata]]
-            other than `entry-extras`, set |extra|[|k|] to |v|.
+            other than `entry-extras` and `last-segment-intended` ([[#last-segment]]), set |extra|[|k|] to |v|.
     10. Return an [=archive value=] with |root| as [=archive value/root=] and |extra| as [=archive value/extra=].
 </ol>
 
@@ -4086,8 +4086,9 @@ and of the footer if one ends at the end of |a| and has no [=untrusted=] byte:
   An archive cut short in a segment whose metadata block can't be restored is salvaged as the segments before it:
   the blocks of that segment after the last metadata block whole are lost together.
   An archive cut short just after a metadata block other than the last, however,
-  is repaired into the archive of the segments before the cut without anything lost being told,
-  as nothing after the metadata block remains to tell that more followed.
+  is repaired into the archive of the segments before the cut,
+  as nothing after the metadata block remains to tell that more followed;
+  only the absence of `last-segment-intended` in it tells that segments may have been lost ([[#last-segment]]).
 </div>
 
 <div class=note>
@@ -4117,6 +4118,7 @@ The optional metadata is described by the following CDDL [[RFC8610]] definitions
 aqr-opt-metadata = {
   aqr-archive-comment
   ? &(entry-extras: -2) => [* aqr-entry-extra / null]  ; Indexed by entry numbers, starting from the root directory
+  aqr-last-segment
 
     * $$aqr-opt-metadata-member  ; For future extensions
 }
@@ -4419,6 +4421,33 @@ A `bstr` is not subject to these requirements even if it happens to be a valid U
 as its encoding is not known.
 
 Comments from ZIP are discussed in [[#comments-from-zip]].
+
+<h3 id=last-segment><code>last-segment-intended</code>: The end of an archive</h3>
+
+`last-segment-intended` of `aqr-opt-metadata` tells that the compressor meant the segment to be the last one it writes:
+
+<pre class=cddl>
+aqr-last-segment = (
+  ? &(last-segment-intended: -3) => true
+)
+</pre>
+
+It is only a hint to [=repair an archive|repairing=] and doesn't affect the result of [=interpret an archive|interpreting an archive=]
+([[#interpretation]]): a later segment may still follow it, e.g. a segment appended to the archive afterwards.
+Conforming compressors SHOULD put it in the optional metadata of the last segment they write, and in no other segment.
+A decompressor that [=reconstruct the footer|reconstructs the footer=] of an archive after a metadata block
+without `last-segment-intended` SHOULD report that segments after it may have been lost, and SHOULD NOT report the archive as intact.
+
+<div class=note>
+  An archive cut short just after a metadata block other than the last
+  can't be told by its blocks from an archive that has lost only its footer and the mirror blocks before it,
+  as either ends with a metadata block followed by nothing.
+  The footer is reconstructed either way ([[#repair]]),
+  and `last-segment-intended` tells the two apart where the compressor wrote the segments in one go.
+  An archive cut short just where a segment was later appended to it still reads as whole, as it was before the appending.
+  The hint is lost with the optional metadata of a damaged metadata block,
+  which then can't be relied on for anything else either.
+</div>
 
 <h3 id=link-groups><code>link-group</code>: Hard links</h3>
 
