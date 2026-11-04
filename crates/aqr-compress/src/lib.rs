@@ -841,6 +841,8 @@ fn finish(
         .map(|g| g.iter().map(|&(i, a, b)| &f.streams[i].data[a as usize..b as usize]).collect())
         .collect();
     let n = written(out, |w| cx.enc.encode_sunk_to(&merged, &pieces, &sunk, sum, w))?;
+    // (the input read through: a file mapped, its pages read again as verifying comes to them)
+    aqr_formula::store::let_go(d);
     drop(sunk);
     drop(encoding);
     drop(pieces);
@@ -854,15 +856,21 @@ fn finish(
         // (compared as it is written out, not held whole: a file of parts streams, see
         // `aqr::Archive::write_file`)
         let runner = aqr_decompress::natives(&m);
-        let mut at = 0;
+        // (the bytes compared let go of as it goes, [`LET_GO`] at a time, where `d` is a file mapped)
+        let (mut at, mut gone) = (0, 0);
         let decodes = aqr::open(c, &runner).is_ok_and(|a| {
             let written = a.write_file(opt.threads, &mut |p: &[u8]| {
                 let same = d.get(at..at + p.len()) == Some(p);
                 at += p.len();
+                if same && at - gone >= LET_GO {
+                    aqr_formula::store::let_go(&d[gone..at]);
+                    gone = at;
+                }
                 if same { Ok(()) } else { Err(aqr::Failure::Invalid("not the file".into())) }
             });
             written.is_ok_and(|n| n == d.len() as u64)
         });
+        aqr_formula::store::let_go(d);
         notes.inspect(|n| n.send(Note::Verified(0, d.len() as u64)));
         decodes
     };
@@ -880,6 +888,10 @@ fn finish(
     };
     Ok((r.0 + mirroring.map_or(0, |m| m.added() as usize), r.1))
 }
+
+/// Bytes of the input compared in verifying ([`finish`]) between the pages let go of: few calls,
+/// and few pages more resident.
+const LET_GO: usize = 4 << 20;
 
 /// What `write` writes to `out` (through a buffer), flushed.
 fn written<T>(out: &mut dyn Sink, write: impl FnOnce(&mut dyn Write) -> io::Result<T>) -> io::Result<T> {
@@ -1818,6 +1830,9 @@ fn make_later(
         if let Some((s, slots)) = sealing.as_ref().zip(slots.as_ref()) {
             // (not a member of a set planned, which the sets are made of)
             let member = members[i];
+            // (where the data is of a file mapped, an image's file of the input: read through once
+            // sealed, but in verifying)
+            let input = (d.as_ptr() as usize, d.len());
             let child = child.map(|c| Made::from(c.cut(d)));
             let size = child.as_ref().map(|c| bound_of(&c.f).saturating_sub(description_bound(n)));
             // (the bytes taken let go of now where they have a formula, made again of it in the
@@ -1855,6 +1870,7 @@ fn make_later(
                         memory::declare(&mut m.f, &Native { threads }, &memory::Limits::default());
                         sink.seal(&mut m.f).expect("sealed");
                         *sealed[i].lock().unwrap() = Some(m);
+                        aqr_formula::store::let_go_at(input.0, input.1);
                     }
                 }),
             );
@@ -2679,6 +2695,41 @@ mod tests {
         assert!(wim(&shared, 2).unwrap().streams.iter().any(|s| s.data.is_lazy()));
         assert!(compress(&shared, &opt) == plain);
         assert!(aqr_decompress::decompress(&plain, 1).unwrap() == d);
+    }
+
+    /// The pages of an input mapped are let go of as it is read through (its contents sealed, its
+    /// streams encoded, its bytes compared in verifying): not resident as compressing ends,
+    /// the archive the same (Linux: told by the mapping's `Rss` in `/proc/self/smaps`).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn input_let_go() {
+        let fixture = |p: &str| std::fs::read(format!("{}/../../{p}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let d = zstd::stream::decode_all(&fixture("codecs/aqr-iso/tests/data/udf201.iso.zst")[..]).unwrap();
+        let path = std::env::temp_dir().join(format!("aqr-compress-let-go-{}.iso", std::process::id()));
+        std::fs::write(&path, &d).unwrap();
+        // SAFETY: a file of this test's alone, not changed while mapped
+        let map = unsafe { memmap2::Mmap::map(&std::fs::File::open(&path).unwrap()) }.unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let mapped = aqr_formula::Bytes::shared(Arc::new(map));
+        // the bytes of the mapping at `at` resident in the process
+        let rss = |at: usize| {
+            let smaps = std::fs::read_to_string("/proc/self/smaps").unwrap();
+            let mut lines = smaps.lines().skip_while(|l| {
+                let Some((a, b)) = l.split(' ').next().and_then(|r| r.split_once('-')) else { return true };
+                let (a, b) = (usize::from_str_radix(a, 16), usize::from_str_radix(b, 16));
+                !matches!((a, b), (Ok(a), Ok(b)) if (a..b).contains(&at))
+            });
+            lines.next().expect("the mapping");
+            let rss = lines.find_map(|l| l.strip_prefix("Rss:")).expect("its Rss");
+            rss.trim().trim_end_matches(" kB").trim().parse::<usize>().unwrap() << 10
+        };
+        let opt = Options { threads: 2, ..Options::default() };
+        let plain = compress(&d, &opt);
+        let _known = aqr_formula::store::known_mapped(&mapped);
+        mapped.iter().step_by(4096).for_each(|&b| _ = std::hint::black_box(b));
+        assert!(rss(mapped.as_ptr() as usize) >= d.len() / 2);
+        assert!(compress(&mapped, &opt) == plain);
+        assert!(rss(mapped.as_ptr() as usize) < d.len() / 8);
     }
 
     /// The files of an image archived alone are sealed into the sink as they are made: the

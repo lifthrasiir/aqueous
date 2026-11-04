@@ -118,18 +118,50 @@ pub fn spill(b: &mut Bytes) {
 }
 
 /// Bytes shared already (files mapped, say) that [`find`] shares rather than copies, while
-/// their guards are kept, by the guards' ids.
-static KNOWN: RwLock<Vec<(u64, Bytes)>> = RwLock::new(Vec::new());
+/// their guards are kept, by the guards' ids: and whether they are of a file mapped
+/// ([`known_mapped`]).
+static KNOWN: RwLock<Vec<(u64, Bytes, bool)>> = RwLock::new(Vec::new());
 
 /// Has [`find`] share bytes within `b` (where shared: its own are not) until the guard is
-/// dropped: the input mapped, so that what is cut out of it is not copied.
+/// dropped: the input, so that what is cut out of it is not copied.
 pub fn known(b: &Bytes) -> Known {
+    register(b, false)
+}
+
+/// [`known`] of `b`, a file mapped read only, whose pages [`let_go`] drops out of the resident
+/// set once they are read through.
+pub fn known_mapped(b: &Bytes) -> Known {
+    register(b, true)
+}
+
+fn register(b: &Bytes, mapped: bool) -> Known {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
     if b.is_shared() && !b.is_empty() {
-        KNOWN.write().unwrap().push((id, b.clone()));
+        KNOWN.write().unwrap().push((id, b.clone(), mapped));
     }
     Known(id)
+}
+
+/// Drops the pages of `d` out of the resident set where it is within a file mapped
+/// ([`known_mapped`]; else nothing): read through and not needed soon, read again from the file
+/// where they are ([`aqr_common::pages::let_go`]).
+pub fn let_go(d: &[u8]) {
+    let_go_at(d.as_ptr() as usize, d.len());
+}
+
+/// [`let_go`] of the `len` bytes at address `at` (which may be of bytes let go of already: then
+/// not within a file mapped).
+pub fn let_go_at(at: usize, len: usize) {
+    let known = KNOWN.read().unwrap();
+    let within = known.iter().any(|(_, b, mapped)| {
+        *mapped && at.checked_sub(b.as_ptr() as usize).is_some_and(|start| start + len <= b.len())
+    });
+    drop(known);
+    if within {
+        // SAFETY: bytes of a file mapped read only, as `known_mapped` was told
+        unsafe { aqr_common::pages::let_go(at as *const u8, len) };
+    }
 }
 
 pub struct Known(u64);
@@ -147,7 +179,7 @@ pub fn find(d: &[u8]) -> Option<Bytes> {
         return None;
     }
     let at = d.as_ptr() as usize;
-    let known = KNOWN.read().unwrap().iter().find_map(|(_, b)| {
+    let known = KNOWN.read().unwrap().iter().find_map(|(_, b, _)| {
         let start = at.checked_sub(b.as_ptr() as usize)?;
         (start + d.len() <= b.len()).then(|| b.slice(start..start + d.len()))
     });

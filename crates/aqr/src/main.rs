@@ -1047,8 +1047,12 @@ fn compress_into(
         let mut atimes = Atimes(a.preserve.then(Vec::new));
         atimes.note(input, &m);
         let d = mapper.read(input).map_err(|e| format!("{}: {e}", input.display()))?;
-        // (what is cut out of it shared, not copied: an image's files, say)
-        let _known = aqr_formula::store::known(&d);
+        // (what is cut out of it shared, not copied: an image's files, say; and where it is mapped,
+        // as the mapper shares only what it maps, its pages let go of as it is read through)
+        let _known = match d.is_shared() {
+            true => aqr_formula::store::known_mapped(&d),
+            false => aqr_formula::store::known(&d),
+        };
         let name = os_bytes(input.as_os_str());
         let kind = kind_by_name(&name);
         let mut g = Gathered::new(mapper, a.preserve);
