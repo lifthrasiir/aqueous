@@ -9,7 +9,8 @@
 //! again for regions after it (the smallest free run that fits), so the spill takes about the
 //! space of the regions held, not of all made, even where they are dropped out of turn. A
 //! segment starts with [`MAGIC`], so that one left behind is not taken for a file of another
-//! kind.
+//! kind. The pages of the bytes free are given back to the system ([`aqr_common::pages::discard`]),
+//! so that the resident set and the files hold about the regions held too.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
@@ -68,8 +69,9 @@ impl State {
         len
     }
 
-    /// Bytes `at..at + len` of segment `id` free again, joined to the free runs beside them.
-    fn release(&mut self, id: u64, mut at: usize, mut len: usize) {
+    /// Bytes `at..at + len` of segment `id` free again, joined to the free runs beside them:
+    /// the run they are of now.
+    fn release(&mut self, id: u64, mut at: usize, mut len: usize) -> (usize, usize) {
         if let Some((&(i, before), &n)) = self.free.range(..(id, at)).next_back()
             && i == id
             && before + n == at
@@ -81,6 +83,7 @@ impl State {
             len += self.remove(id, at + len);
         }
         self.insert(id, at, len);
+        (at, len)
     }
 
     /// `n` bytes of a segment taken from its free runs, the smallest that fits: the segment,
@@ -160,7 +163,15 @@ impl Drop for View {
         let mut state = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         state.regions.remove(&(self.segment.at(self.start) as usize));
         if state.segments.contains_key(&self.segment.id) {
-            state.release(self.segment.id, self.start, self.len.next_multiple_of(REGION_ALIGN));
+            let (at, len) = state.release(self.segment.id, self.start, self.len.next_multiple_of(REGION_ALIGN));
+            // its pages given back, those of the free run it is of now (with the state held, so
+            // that no region takes them meanwhile): else they stay in the resident set, changed,
+            // until the segment goes, as the system has no cause to write them out and drop them
+            // where memory is plenty (a segment is 256 MiB)
+            let s = &self.segment;
+            // SAFETY: a free run of the segment's mapping, of all of its file: no region's
+            // bytes, and those of one taken of it after are zeroed before they are read
+            unsafe { aqr_common::pages::discard(&s._file, s.base, s.at(at), len) };
         }
     }
 }
@@ -297,6 +308,40 @@ mod tests {
         }
         assert_eq!(spill.state.lock().unwrap().made, 1);
         drop((held, spill));
+        std::fs::remove_dir(&dir).unwrap();
+    }
+
+    /// The pages of a region dropped are given back to the system, those of a region held kept
+    /// (Linux: told by `mincore`, which tells of the file's pages in the system's cache).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dropped_given_back() {
+        let dir = std::env::temp_dir().join(format!("aqr-compress-given-back-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let spill = Spill::create(&dir.join("back")).unwrap();
+        let page = aqr_common::pages::size();
+        // the pages of `n` bytes at `at` resident
+        let resident = |at: *mut u8, n: usize| {
+            let mut v = vec![0u8; n.div_ceil(page)];
+            // SAFETY: pages of a mapping of the spill, and a byte for each
+            assert_eq!(unsafe { libc::mincore(at.cast(), n, v.as_mut_ptr()) }, 0);
+            v.iter().filter(|&&b| b & 1 != 0).count()
+        };
+        let n = 64 * page;
+        let (a, ra) = spill.region(n).unwrap();
+        let (b, rb) = spill.region(n).unwrap();
+        // SAFETY: the regions' bytes, not read before
+        unsafe { std::ptr::write_bytes(a, 0xff, n) };
+        unsafe { std::ptr::write_bytes(b, 0xff, n) };
+        assert_eq!((resident(a, n), resident(b, n)), (64, 64));
+        drop(ra);
+        // (ext4 keeps the last page of a hole in its cache: of the file, not the process's)
+        assert!(resident(a, n) <= 1 && resident(b, n) == 64);
+        // taken again, zeroed
+        let (c, rc) = spill.region(n).unwrap();
+        assert_eq!(c, a);
+        assert!(rc.iter().all(|&x| x == 0));
+        drop((rb, rc, spill));
         std::fs::remove_dir(&dir).unwrap();
     }
 

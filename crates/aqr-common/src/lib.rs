@@ -35,6 +35,8 @@ pub mod mem;
 pub mod msb;
 pub mod out;
 pub mod packed;
+#[cfg(not(target_family = "wasm"))]
+pub mod pages;
 pub mod pool;
 pub mod progress;
 pub mod rans32;
