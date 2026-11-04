@@ -8,19 +8,23 @@ pub fn lcp(d: &[u8], a: usize, b: usize) -> usize {
 }
 
 /// [`lcp`] up to `cap` bytes.
-#[inline]
+// (inlined natively, where its callers' loops are hot; called in Wasm, whose modules grow by
+// some kilobytes each otherwise)
+#[cfg_attr(not(target_arch = "wasm32"), inline)]
+#[cfg_attr(target_arch = "wasm32", inline(never))]
 pub fn lcp_up(d: &[u8], a: usize, b: usize, cap: usize) -> usize {
     let n = cap.min(d.len() - b);
+    // (both sides cut to `n` bytes first, so that the words within them are not checked again)
+    let (x, y) = (&d[a..a + n], &d[b..b + n]);
     let mut i = 0;
-    while i + 8 <= n {
-        let x = u64::from_le_bytes(d[a + i..a + i + 8].try_into().unwrap())
-            ^ u64::from_le_bytes(d[b + i..b + i + 8].try_into().unwrap());
-        if x != 0 {
-            return i + (x.trailing_zeros() / 8) as usize;
+    for (p, q) in x.chunks_exact(8).zip(y.chunks_exact(8)) {
+        let w = u64::from_le_bytes(p.try_into().unwrap()) ^ u64::from_le_bytes(q.try_into().unwrap());
+        if w != 0 {
+            return i + (w.trailing_zeros() / 8) as usize;
         }
         i += 8;
     }
-    while i < n && d[a + i] == d[b + i] {
+    while i < n && x[i] == y[i] {
         i += 1;
     }
     i

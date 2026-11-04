@@ -38,23 +38,35 @@ pub const LIMIT: usize = 4096;
 const NONE: u32 = u32::MAX;
 
 #[inline]
-fn k2(d: &[u8], p: usize) -> usize {
-    d[p] as usize | (d[p + 1] as usize) << 8
+fn k2(d: &[u8], p: usize) -> u16 {
+    d[p] as u16 | (d[p + 1] as u16) << 8
 }
 
 #[inline]
-fn h3(d: &[u8], p: usize) -> usize {
-    let k = d[p] as u32 | (d[p + 1] as u32) << 8 | (d[p + 2] as u32) << 16;
-    (k.wrapping_mul(0x9e37_79b1) >> 16) as usize
+fn h3(d: &[u8], p: usize) -> u16 {
+    hash3(d[p] as u32 | (d[p + 1] as u32) << 8 | (d[p + 2] as u32) << 16)
+}
+
+/// The hash of 3 bytes (little-endian, the top byte clear).
+#[inline]
+fn hash3(k: u32) -> u16 {
+    (k.wrapping_mul(0x9e37_79b1) >> 16) as u16
+}
+
+/// The heads of chains, by a key of 16 bits (indexed so without bounds to check).
+type Heads = [u32; 1 << 16];
+
+fn heads() -> Box<Heads> {
+    vec![NONE; 1 << 16].into_boxed_slice().try_into().expect("heads of 2^16")
 }
 
 /// The match finder of a stream: every position before the current one within the window, on
 /// a chain of its first 2 bytes and one of a hash of its first 3 (their links in rings of the
 /// window's size).
 struct Mf {
-    head2: Vec<u32>,
+    head2: Box<Heads>,
     prev2: Vec<u32>,
-    head3: Vec<u32>,
+    head3: Box<Heads>,
     prev3: Vec<u32>,
     next: usize,
     /// The rings' mask, and the farthest offset a candidate may be.
@@ -65,19 +77,14 @@ struct Mf {
 impl Mf {
     fn new(window: usize) -> Mf {
         Mf {
-            head2: vec![NONE; 1 << 16],
+            head2: heads(),
             prev2: vec![NONE; window],
-            head3: vec![NONE; 1 << 16],
+            head3: heads(),
             prev3: vec![NONE; window],
             next: 0,
             mask: window - 1,
             max_off: window,
         }
-    }
-
-    /// A match finder of nothing, for a moment.
-    fn empty() -> Mf {
-        Mf { head2: Vec::new(), prev2: Vec::new(), head3: Vec::new(), prev3: Vec::new(), next: 0, mask: 0, max_off: 0 }
     }
 
     /// Starts a stream whose matches reach at most `max_off` back.
@@ -91,20 +98,34 @@ impl Mf {
     /// Inserts the positions before `pos`.
     #[inline]
     fn advance(&mut self, d: &[u8], pos: usize) {
-        while self.next < pos {
-            let p = self.next;
+        let Mf { head2, prev2, head3, prev3, next, mask, .. } = self;
+        let (mut p, mask) = (*next, *mask);
+        let (prev2, prev3) = (&mut prev2[..=mask], &mut prev3[..=mask]);
+        // (both keys of a word read once, where 4 bytes are left)
+        let words = pos.min(d.len().saturating_sub(3));
+        while p < words {
+            let k = u32::from_le_bytes(d[p..p + 4].try_into().unwrap());
+            let (h, k) = (hash3(k & 0xff_ffff) as usize, k as u16 as usize);
+            prev3[p & mask] = head3[h];
+            head3[h] = p as u32;
+            prev2[p & mask] = head2[k];
+            head2[k] = p as u32;
+            p += 1;
+        }
+        while p < pos {
             if p + 3 <= d.len() {
-                let h = h3(d, p);
-                self.prev3[p & self.mask] = self.head3[h];
-                self.head3[h] = p as u32;
+                let h = h3(d, p) as usize;
+                prev3[p & mask] = head3[h];
+                head3[h] = p as u32;
             }
             if p + 2 <= d.len() {
-                let k = k2(d, p);
-                self.prev2[p & self.mask] = self.head2[k];
-                self.head2[k] = p as u32;
+                let k = k2(d, p) as usize;
+                prev2[p & mask] = head2[k];
+                head2[k] = p as u32;
             }
-            self.next += 1;
+            p += 1;
         }
+        *next = p;
     }
 
     /// Whether candidate `c` is one at `pos`: a position within reach.
@@ -117,9 +138,9 @@ impl Mf {
     #[inline]
     fn chain(&self, d: &[u8], pos: usize, len: usize) -> (u32, &[u32]) {
         if len >= 3 && pos + 3 <= d.len() {
-            (self.head3[h3(d, pos)], &self.prev3)
+            (self.head3[h3(d, pos) as usize], &self.prev3)
         } else if pos + 2 <= d.len() {
-            (self.head2[k2(d, pos)], &self.prev2)
+            (self.head2[k2(d, pos) as usize], &self.prev2)
         } else {
             (NONE, &self.prev2)
         }
@@ -146,7 +167,7 @@ impl Mf {
                     break;
                 }
                 let p = c as usize;
-                if d[p + best.min(cap - 1)] == d[pos + best.min(cap - 1)] {
+                if ends_alike(d, p, pos, best.min(cap - 1)) {
                     let n = lcp_up(d, p, pos, cap);
                     if n > best {
                         (best, off) = (n, pos - p);
@@ -167,11 +188,24 @@ impl Mf {
                 return;
             }
             let p = c as usize;
-            if d[p + len - 1] == d[pos + len - 1] && lcp_up(d, p, pos, len) >= len && f(pos - p) {
+            if ends_alike(d, p, pos, len - 1) && lcp_up(d, p, pos, len) >= len && f(pos - p) {
                 return;
             }
             c = prev[p & self.mask];
         }
+    }
+}
+
+/// Whether `d[a..]` and `d[b..]`, `a < b`, may have more than `k` bytes in common: the bytes up
+/// to `d[b + k]` (which is in `d`) as far as a word reaches back alike.
+#[inline(always)]
+fn ends_alike(d: &[u8], a: usize, b: usize, k: usize) -> bool {
+    match k.checked_sub(3) {
+        Some(s) => {
+            let w = |p: usize| u32::from_le_bytes(d[p + s..p + s + 4].try_into().unwrap());
+            w(a) == w(b)
+        }
+        None => d[a + k] == d[b + k],
     }
 }
 
@@ -401,7 +435,7 @@ struct Walker {
     ctx: Ctx,
     /// The match finder and a chunk's data, of the thread's last walker (allocated once a
     /// thread: streams are many, and the allocator slow to find room where much is held).
-    mf: Box<Mf>,
+    mf: Option<Box<Mf>>,
     d: Vec<u8>,
     v: Variant,
     /// Where the frame ends, and the stream (CAB's).
@@ -414,7 +448,7 @@ thread_local! {
 
 impl Drop for Walker {
     fn drop(&mut self) {
-        let mf = std::mem::replace(&mut self.mf, Box::new(Mf::empty()));
+        let Some(mf) = self.mf.take() else { return };
         let d = std::mem::take(&mut self.d);
         SPARE.with(|s| *s.borrow_mut() = Some((mf, d)));
     }
@@ -428,7 +462,7 @@ impl Walker {
         let window = v.window();
         let spare = SPARE.with(|s| s.borrow_mut().take()).filter(|(mf, _)| mf.prev2.len() == window);
         let (mf, d) = spare.unwrap_or_else(|| (Box::new(Mf::new(window)), Vec::with_capacity(CHUNK)));
-        Walker { ctx: Ctx::new(), mf, d, v, frame_end: usize::MAX }
+        Walker { ctx: Ctx::new(), mf: Some(mf), d, v, frame_end: usize::MAX }
     }
 
     /// One chunk (or CAB stream) of data `raw` (as the file holds it): its parse coded or
@@ -469,7 +503,7 @@ impl Walker {
             (true, None) => {}
         }
         let main = self.v.main();
-        self.mf.reset(if cab { self.v.max_off() } else { CHUNK });
+        self.mf.as_mut().expect("a match finder").reset(if cab { self.v.max_off() } else { CHUNK });
         self.frame_end = if cab { lzx::FRAME.min(d.len()) } else { usize::MAX };
         let mut reps = lzx::REPS;
         let mut lens = lzx::Lens::new(self.v);
@@ -778,7 +812,7 @@ impl Walker {
         parse: &mut Parse,
     ) -> Result<()> {
         let c = &mut self.ctx;
-        let mf = &mut self.mf;
+        let mf = self.mf.as_deref_mut().expect("a match finder");
         let (want, want_pads) = (want.map(|w| w.0), want.map(|w| w.1));
         let esc_bits = if self.v.cab { self.v.window_bits as u32 } else { 15 };
         let Parse { toks, frame_pad, .. } = parse;

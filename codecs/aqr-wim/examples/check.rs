@@ -30,9 +30,22 @@ fn main() {
     let t = Instant::now();
     let f = aqr_wim::formula::encode(d, threads).expect("a formula");
     let enc = t.elapsed().as_secs_f64();
+    // (a digest of the streams, records among them: the same of every build that splits alike)
+    let mut digest = std::collections::hash_map::DefaultHasher::new();
     for s in &f.streams {
-        println!("  {:<12} {:>14} bytes", s.class, s.data.len());
+        std::hash::Hash::hash(&s.class, &mut digest);
+        std::hash::Hash::hash(&s.data[..], &mut digest);
     }
+    let classes: std::collections::BTreeMap<&str, (usize, usize)> =
+        f.streams.iter().fold(Default::default(), |mut m, s| {
+            let e = m.entry(&s.class[..]).or_default();
+            *e = (e.0 + 1, e.1 + s.data.len());
+            m
+        });
+    for (class, (n, len)) in classes {
+        println!("  {class:<12} {n:>6} streams {len:>14} bytes");
+    }
+    println!("  digest {:016x}", std::hash::Hasher::finish(&digest));
     let t = Instant::now();
     let out = f.eval(&aqr_decompress::Native { threads }).expect("evaluated");
     let dec = t.elapsed().as_secs_f64();
