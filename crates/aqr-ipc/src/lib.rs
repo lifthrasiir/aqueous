@@ -43,12 +43,29 @@ impl Verb {
         }
     }
 
-    /// What it is doing, as a window says.
-    pub fn doing(self) -> &'static str {
-        match self {
-            Verb::Compress => "Compressing",
-            Verb::Extract => "Extracting",
-            Verb::Test => "Testing",
+    /// What it is doing to archive `name` (shown; none: "Compressing…").
+    pub fn doing(self, name: &str) -> String {
+        use aqr_l10n::common as c;
+        match (self, name) {
+            (Verb::Compress, "") => c::compressing().into(),
+            (Verb::Extract, "") => c::extracting().into(),
+            (Verb::Test, "") => c::testing().into(),
+            (Verb::Compress, n) => c::compressing_name(n),
+            (Verb::Extract, n) => c::extracting_name(n),
+            (Verb::Test, n) => c::testing_name(n),
+        }
+    }
+
+    /// What is told where it failed on archive `name` (none: before any was begun).
+    pub fn failed(self, name: &str) -> String {
+        use aqr_l10n::common as c;
+        match (self, name) {
+            (Verb::Compress, "") => c::could_not_compress().into(),
+            (Verb::Extract, "") => c::could_not_extract().into(),
+            (Verb::Test, "") => c::could_not_test().into(),
+            (Verb::Compress, n) => c::could_not_compress_name(n),
+            (Verb::Extract, n) => c::could_not_extract_name(n),
+            (Verb::Test, n) => c::could_not_test_name(n),
         }
     }
 
@@ -338,16 +355,33 @@ pub fn tested(name: &str, e: &Value, named: bool) -> String {
     let files = e["files"].as_u64().unwrap_or(0);
     let bytes = size(e["written"].as_u64().unwrap_or(0) as f64);
     let archive = size(e["read"].as_u64().unwrap_or(0) as f64);
-    let s = if files == 1 { "" } else { "s" };
-    let name = if named {
-        format!("{name}: ")
+    let seconds = format!("{:.1}", e["seconds"].as_f64().unwrap_or(0.0));
+    let text = aqr_l10n::common::tested(files, bytes, archive, seconds);
+    if named {
+        aqr_l10n::common::named(name, text)
     } else {
-        String::new()
-    };
-    format!(
-        "{name}{files} file{s}, {bytes}, in {archive} ({:.1} s)",
-        e["seconds"].as_f64().unwrap_or(0.0)
-    )
+        text
+    }
+}
+
+/// What is told of `count` archives (`name` the last, where one) all tested intact.
+pub fn intact(name: &str, count: usize) -> String {
+    if count == 1 {
+        aqr_l10n::common::intact(name)
+    } else {
+        aqr_l10n::common::all_intact(count as u64)
+    }
+}
+
+/// What failed of the job, ended with `status` (`None`: unknown), where it did: `aqr`'s error,
+/// else how it ended where that was not a success.
+pub fn failure(s: &State, status: Option<std::process::ExitStatus>) -> Option<String> {
+    match (&s.error, status) {
+        (Some(e), _) => Some(e.clone()),
+        (None, Some(st)) if !st.success() => Some(aqr_l10n::common::ended_with(st)),
+        (None, None) => Some(aqr_l10n::common::did_not_end().into()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

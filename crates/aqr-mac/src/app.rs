@@ -42,7 +42,9 @@ use objc2_foundation::{
 };
 use serde_json::Value;
 
-use crate::job::{Job, Verb, file_name, tested};
+use aqr_l10n::{common, mac, services};
+
+use crate::job::{Job, Verb, failure, file_name, intact, tested};
 
 /// How often the jobs are looked at, in seconds.
 const TICK: f64 = 0.25;
@@ -153,6 +155,15 @@ define_class!(
     }
 );
 
+/// Chooses the language of the messages: the first of the user's (this app's own in System
+/// Settings, else the system's) that the catalogs have, as `NSBundle` prefers localizations.
+pub fn init_language() {
+    let available: Vec<Retained<NSString>> = aqr_l10n::LANGS.iter().map(|t| NSString::from_str(t)).collect();
+    let preferred = NSBundle::preferredLocalizationsFromArray(&NSArray::from_retained_slice(&available));
+    let preferred: Vec<String> = preferred.iter().map(|s| s.to_string()).collect();
+    aqr_l10n::init(&preferred);
+}
+
 impl Delegate {
     pub fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(Ivars::default());
@@ -176,9 +187,7 @@ impl Delegate {
         self.ivars().worked.set(true);
         match Job::start(verb, paths, encrypt) {
             Ok(job) => self.ivars().jobs.borrow_mut().push(Running { job, progress: None, always: Vec::new() }),
-            Err(e) => {
-                alert(self.mtm(), NSAlertStyle::Critical, &format!("Could not {} anything", verb.name()), &e, None)
-            }
+            Err(e) => alert(self.mtm(), NSAlertStyle::Critical, &verb.failed(""), &e, None),
         }
     }
 
@@ -292,28 +301,15 @@ fn finished(mtm: MainThreadMarker, job: &Job, status: std::process::ExitStatus) 
     if s.stopped || s.cancelled {
         return;
     }
-    let failed = match &s.error {
-        Some(e) => Some(e.clone()),
-        None if !status.success() => Some(format!("aqr ended with {status}.")),
-        None => None,
-    };
     let name = s.input().map(file_name).unwrap_or_default();
-    if let Some(e) = failed {
-        let main = match name.as_str() {
-            "" => format!("Could not {}", job.ipc.verb.name()),
-            n => format!("Could not {} {n}", job.ipc.verb.name()),
-        };
+    if let Some(e) = failure(&s, Some(status)) {
+        let main = job.ipc.verb.failed(&name);
         let log: Vec<&str> = s.log.iter().map(String::as_str).collect();
         let log = log.join("\n");
         alert(mtm, NSAlertStyle::Critical, &main, &e, (!log.is_empty()).then_some(&log));
     } else if job.ipc.verb == Verb::Test {
         let lines: Vec<String> = s.ended.iter().map(|(n, e)| tested(n, e, job.ipc.count > 1)).collect();
-        let main = if job.ipc.count == 1 {
-            format!("{name} is intact")
-        } else {
-            format!("The {} archives are intact", job.ipc.count)
-        };
-        alert(mtm, NSAlertStyle::Informational, &main, &lines.join("\n"), None);
+        alert(mtm, NSAlertStyle::Informational, &intact(&name, job.ipc.count), &lines.join("\n"), None);
     }
 }
 
@@ -328,19 +324,19 @@ fn ask(mtm: MainThreadMarker, r: &mut Running, q: &Value) -> Value {
             let path = PathBuf::from(q["path"].as_str().unwrap_or(""));
             let a = NSAlert::new(mtm);
             a.setAlertStyle(NSAlertStyle::Warning);
-            a.setMessageText(&NSString::from_str(&format!("{} is there already", file_name(&path))));
+            a.setMessageText(&NSString::from_str(&common::is_there_already(file_name(&path))));
             let (info, yes) = if path.is_dir() {
-                ("Extract into the folder all the same? Its files of the same names are replaced.", "Extract")
+                (mac::extract_into(), mac::extract())
             } else {
-                ("Replace the file?", "Replace")
+                (mac::replace_file(), mac::replace())
             };
             a.setInformativeText(&NSString::from_str(&format!("{}\n\n{info}", path.display())));
             a.addButtonWithTitle(&NSString::from_str(yes));
-            a.addButtonWithTitle(&NSString::from_str("Skip"));
+            a.addButtonWithTitle(&NSString::from_str(mac::skip()));
             if r.job.ipc.count > 1 {
                 a.setShowsSuppressionButton(true);
                 if let Some(b) = a.suppressionButton() {
-                    b.setTitle(&NSString::from_str("Do the same for the other archives"));
+                    b.setTitle(&NSString::from_str(common::same_for_others()));
                 }
             }
             activate(mtm);
@@ -361,18 +357,18 @@ fn passphrase(mtm: MainThreadMarker, q: &Value) -> Option<String> {
     let confirm = q["confirm"].as_bool().unwrap_or(false);
     let compress = q["mode"] == "compress";
     let path = q["path"].as_str().map(PathBuf::from);
-    let mut note = if q["again"].as_bool().unwrap_or(false) { Some("Wrong passphrase, try again.") } else { None };
+    let mut note = if q["again"].as_bool().unwrap_or(false) { Some(common::wrong_passphrase()) } else { None };
     loop {
         let a = NSAlert::new(mtm);
         a.setAlertStyle(NSAlertStyle::Informational);
         let main = match (&path, compress) {
-            (Some(p), _) => format!("{} is encrypted", file_name(p)),
-            (None, true) => "Choose a passphrase for the archive".to_string(),
-            (None, false) => "The archive is encrypted".to_string(),
+            (Some(p), true) => mac::choose_name(file_name(p)),
+            (Some(p), false) => mac::encrypted_name(file_name(p)),
+            (None, true) => mac::choose().to_string(),
+            (None, false) => mac::encrypted().to_string(),
         };
         a.setMessageText(&NSString::from_str(&main));
-        let mut info =
-            String::from(if compress { "The passphrase is needed to extract it." } else { "Enter its passphrase." });
+        let mut info = String::from(if compress { mac::needed() } else { mac::enter() });
         if let Some(n) = note {
             info = format!("{n}\n\n{info}");
         }
@@ -383,9 +379,9 @@ fn passphrase(mtm: MainThreadMarker, q: &Value) -> Option<String> {
                 let frame = NSRect::new(NSPoint::new(0.0, y), NSSize::new(260.0, 24.0));
                 let f = NSSecureTextField::initWithFrame(NSSecureTextField::alloc(mtm), frame);
                 f.setPlaceholderString(Some(&NSString::from_str(if i == 0 {
-                    "Passphrase"
+                    mac::passphrase()
                 } else {
-                    "Passphrase again"
+                    mac::passphrase_again()
                 })));
                 f
             })
@@ -397,8 +393,8 @@ fn passphrase(mtm: MainThreadMarker, q: &Value) -> Option<String> {
             view.addSubview(f);
         }
         a.setAccessoryView(Some(&view));
-        a.addButtonWithTitle(&NSString::from_str("OK"));
-        a.addButtonWithTitle(&NSString::from_str("Cancel"));
+        a.addButtonWithTitle(&NSString::from_str(common::ok()));
+        a.addButtonWithTitle(&NSString::from_str(common::cancel()));
         a.layout();
         a.window().setInitialFirstResponder(Some(&fields[0]));
         activate(mtm);
@@ -409,7 +405,7 @@ fn passphrase(mtm: MainThreadMarker, q: &Value) -> Option<String> {
         if !confirm || value == fields[1].stringValue().to_string() {
             return Some(value);
         }
-        note = Some("The two passphrases differ, try again.");
+        note = Some(common::passphrases_differ());
     }
 }
 
@@ -462,9 +458,7 @@ fn welcome(mtm: MainThreadMarker) {
     let bundle = NSBundle::mainBundle();
     let path = bundle.bundlePath().to_string();
     if path.contains("/AppTranslocation/") {
-        let info = "macOS runs it from a copy of its own as long as it is where it was downloaded. Move \
-                    Aqueous to the Applications folder in Finder, and open it from there.";
-        alert(mtm, NSAlertStyle::Warning, "Aqueous is to be moved first", info, None);
+        alert(mtm, NSAlertStyle::Warning, mac::move_first(), mac::move_info(), None);
         return;
     }
     let url = bundle.bundleURL();
@@ -472,31 +466,27 @@ fn welcome(mtm: MainThreadMarker) {
     let status = unsafe { LSRegisterURL(Retained::as_ptr(&url).cast(), 1) };
     NSUpdateDynamicServices();
     if status != 0 {
-        let e = format!("Launch Services did not register {path} (error {status}).");
-        alert(mtm, NSAlertStyle::Critical, "Aqueous is not registered", &e, None);
+        let e = mac::launch_services(&path, status);
+        alert(mtm, NSAlertStyle::Critical, mac::not_registered(), &e, None);
         return;
     }
     let aqr = std::env::current_exe().ok().map(|e| e.with_file_name("aqr")).filter(|p| p.is_file());
     let linked = aqr.as_ref().is_some_and(|a| std::fs::canonicalize(COMMAND).ok() == std::fs::canonicalize(a).ok());
     let a = NSAlert::new(mtm);
-    a.setMessageText(&NSString::from_str("Aqueous is ready"));
-    let mut info = String::from(
-        "In Finder, Control-click files or folders for \"Compress with Aqueous\" (or \"(Passphrase)…\" to \
-         encrypt), and archives for \"Extract with Aqueous\" and \"Test with Aqueous\" (under Quick \
-         Actions or Services). Opening an .aqr file extracts it beside it; other archives too where \
-         Aqueous opens them (Get Info, Open with).\n\nWhere the services are not there, \
-         turn them on in System Settings: Keyboard, Keyboard Shortcuts, Services, Files and Folders.",
-    );
+    a.setMessageText(&NSString::from_str(mac::ready()));
+    let mut info =
+        mac::ready_info(services::compress(), services::compress_passphrase(), services::extract(), services::test());
     if aqr.is_some() && !linked {
+        info += "\n\n";
         info += &match there() {
-            None => format!("\n\nThe aqr command can be put at {COMMAND} (as an administrator)."),
-            Some(t) => format!("\n\n{COMMAND} is {t}, not this app's aqr."),
+            None => mac::command_offer(COMMAND),
+            Some(t) => mac::command_other(COMMAND, t.what()),
         };
     }
     a.setInformativeText(&NSString::from_str(&info));
-    a.addButtonWithTitle(&NSString::from_str("OK"));
+    a.addButtonWithTitle(&NSString::from_str(common::ok()));
     if let (Some(aqr), false) = (&aqr, linked) {
-        a.addButtonWithTitle(&NSString::from_str("Install the aqr Command"));
+        a.addButtonWithTitle(&NSString::from_str(mac::install_command()));
         activate(mtm);
         if a.runModal() != NSAlertFirstButtonReturn {
             install_command(mtm, aqr);
@@ -507,16 +497,33 @@ fn welcome(mtm: MainThreadMarker) {
     }
 }
 
-/// What is at [`COMMAND`], where something is: a link (to where) or a file.
-fn there() -> Option<String> {
+/// What is at [`COMMAND`].
+enum There {
+    /// A link to that path, and whether something is there.
+    Link(PathBuf, bool),
+    Folder,
+    File,
+}
+
+impl There {
+    /// What it is, as told.
+    fn what(&self) -> String {
+        match self {
+            There::Link(to, true) => mac::link(to.display()),
+            There::Link(to, false) => mac::link_gone(to.display()),
+            There::Folder => mac::folder().into(),
+            There::File => mac::file().into(),
+        }
+    }
+}
+
+/// What is at [`COMMAND`], where something is.
+fn there() -> Option<There> {
     let m = std::fs::symlink_metadata(COMMAND).ok()?;
     Some(match std::fs::read_link(COMMAND) {
-        Ok(to) if m.file_type().is_symlink() => {
-            let gone = if std::fs::metadata(COMMAND).is_err() { ", which is not there" } else { "" };
-            format!("a link to {}{gone}", to.display())
-        }
-        _ if m.is_dir() => "a folder".into(),
-        _ => "a file".into(),
+        Ok(to) if m.file_type().is_symlink() => There::Link(to, std::fs::metadata(COMMAND).is_ok()),
+        _ if m.is_dir() => There::Folder,
+        _ => There::File,
     })
 }
 
@@ -524,18 +531,18 @@ fn there() -> Option<String> {
 /// already replaced only where the user agrees.
 fn install_command(mtm: MainThreadMarker, aqr: &std::path::Path) {
     if let Some(t) = there() {
-        if t == "a folder" {
-            let e = format!("{COMMAND} is a folder; it is left as it is.");
-            alert(mtm, NSAlertStyle::Critical, "The aqr command is not installed", &e, None);
+        if let There::Folder = t {
+            let e = mac::command_folder(COMMAND);
+            alert(mtm, NSAlertStyle::Critical, mac::command_not_installed(), &e, None);
             return;
         }
         let a = NSAlert::new(mtm);
         a.setAlertStyle(NSAlertStyle::Warning);
-        a.setMessageText(&NSString::from_str(&format!("{COMMAND} is there already")));
-        let info = format!("It is {t}. Replace it with a link to {}?", aqr.display());
+        a.setMessageText(&NSString::from_str(&common::is_there_already(COMMAND)));
+        let info = mac::command_replace(t.what(), aqr.display());
         a.setInformativeText(&NSString::from_str(&info));
-        a.addButtonWithTitle(&NSString::from_str("Cancel"));
-        a.addButtonWithTitle(&NSString::from_str("Replace"));
+        a.addButtonWithTitle(&NSString::from_str(common::cancel()));
+        a.addButtonWithTitle(&NSString::from_str(mac::replace()));
         activate(mtm);
         if a.runModal() == NSAlertFirstButtonReturn {
             return;
@@ -548,15 +555,15 @@ fn install_command(mtm: MainThreadMarker, aqr: &std::path::Path) {
     let out = std::process::Command::new("/usr/bin/osascript").arg("-e").arg(script).arg(aqr).output();
     match out {
         Ok(o) if o.status.success() => {
-            let info = format!("{COMMAND} runs {}.", aqr.display());
-            alert(mtm, NSAlertStyle::Informational, "The aqr command is installed", &info, None);
+            let info = mac::command_runs(COMMAND, aqr.display());
+            alert(mtm, NSAlertStyle::Informational, mac::command_installed(), &info, None);
         }
         // (cancelled at the password: error -128)
         Ok(o) if String::from_utf8_lossy(&o.stderr).contains("-128") => {}
         Ok(o) => {
             let e = String::from_utf8_lossy(&o.stderr).trim().to_string();
-            alert(mtm, NSAlertStyle::Critical, "The aqr command is not installed", &e, None);
+            alert(mtm, NSAlertStyle::Critical, mac::command_not_installed(), &e, None);
         }
-        Err(e) => alert(mtm, NSAlertStyle::Critical, "The aqr command is not installed", &e.to_string(), None),
+        Err(e) => alert(mtm, NSAlertStyle::Critical, mac::command_not_installed(), &e.to_string(), None),
     }
 }

@@ -43,6 +43,10 @@ Aqueous is distributed as `Aqueous.zip`, holding `Aqueous.app` (`aqr-mac` and `a
   (typed twice, to choose one, until both match), again where it was wrong; an encrypted
   archive asks on its own. Cancelling it stops the job without an error alert.
 
+- The texts are in the user's language (aqr-l10n: English, Korean; the app's own language in
+  System Settings, else the system's). Those Finder shows (the services, the types' names) are
+  the bundle's `LANG.lproj/*.strings`, written by `bundle.sh`.
+
 ## Status
 
 Left:

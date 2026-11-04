@@ -21,6 +21,11 @@
 //!   `Software\RegisteredApplications`): those extensions and their classes, so that Settings'
 //!   default apps lists Aqueous for them.
 //!
+//! The texts that Explorer shows (the verbs, the types' names, the description in Settings) are
+//! indirect strings, `@aqr-win.exe,-ID`: Windows' string table of aqr-win.rc (aqr-l10n's `RC`),
+//! read by Explorer in the user's language as it is now; the default values beside them are in
+//! the language of the registration.
+//!
 //! The verbs take any number of paths chosen (`MultiSelectModel` `Player`; Explorer runs a
 //! process for each, [`crate::gather`]). On Windows 11 they are under "Show more options": the
 //! menu above takes only `IExplorerCommand` handlers of packaged applications.
@@ -37,6 +42,8 @@ use windows_sys::Win32::System::Registry::{
 };
 use windows_sys::Win32::UI::Shell::{SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify};
 
+use aqr_l10n::{Msg, shell, types, win};
+
 use crate::dialog::wide;
 
 /// The class of `.aqr` files.
@@ -45,21 +52,21 @@ const CLASS: &str = "Aqueous.Archive";
 /// The formats `aqr` extracts besides its own (aqr-unpack's, by the last extension, as Explorer
 /// tells a file's type): the extension, the resource of its icon (aqr-win.rc) and the name of
 /// its type. Their classes are `Aqueous.` and the extension.
-const FORMATS: [(&str, u16, &str); 14] = [
-    ("zip", 3, "ZIP archive"),
-    ("7z", 4, "7z archive"),
-    ("rar", 5, "RAR archive"),
-    ("alz", 6, "ALZip archive"),
-    ("egg", 7, "EGG archive"),
-    ("tar", 8, "tar archive"),
-    ("tgz", 9, "tar archive (gzip)"),
-    ("tbz2", 10, "tar archive (bzip2)"),
-    ("txz", 11, "tar archive (xz)"),
-    ("gz", 12, "gzip file"),
-    ("bz2", 13, "bzip2 file"),
-    ("xz", 14, "xz file"),
-    ("lzma", 15, "LZMA file"),
-    ("zst", 16, "Zstandard file"),
+const FORMATS: [(&str, u16, Msg); 14] = [
+    ("zip", 3, types::ZIP),
+    ("7z", 4, types::SEVEN_Z),
+    ("rar", 5, types::RAR),
+    ("alz", 6, types::ALZ),
+    ("egg", 7, types::EGG),
+    ("tar", 8, types::TAR),
+    ("tgz", 9, types::TGZ),
+    ("tbz2", 10, types::TBZ2),
+    ("txz", 11, types::TXZ),
+    ("gz", 12, types::GZ),
+    ("bz2", 13, types::BZ2),
+    ("xz", 14, types::XZ),
+    ("lzma", 15, types::LZMA),
+    ("zst", 16, types::ZST),
 ];
 
 const CAPABILITIES: &str = r"Software\Aqueous\Capabilities";
@@ -76,17 +83,18 @@ const MENU: [&str; 2] = [r"*\shell\Aqueous.more", r"Directory\shell\Aqueous.more
 const OLD: [&str; 2] = [r"*\shell\Aqueous.compress-passphrase", r"Directory\shell\Aqueous.compress-passphrase"];
 
 /// The formats other than Aqueous's that `aqr -c --format` makes, each a verb
-/// `compress-FORMAT` in [`MENU`] ("Compress into .FORMAT"), after the separator.
-pub const OTHER_FORMATS: [&str; 2] = ["zip", "7z"];
+/// `compress-FORMAT` in [`MENU`] ("Compress into .FORMAT", its text of `shell` as Explorer reads
+/// it from the string table), after the separator.
+pub const OTHER_FORMATS: [(&str, Msg); 2] = [("zip", shell::COMPRESS_ZIP), ("7z", shell::COMPRESS_7Z)];
 
 /// `ECF_SEPARATORBEFORE` of `CommandFlags`.
 const SEPARATOR_BEFORE: u32 = 0x20;
 
 /// The verbs of [`MENU`], in order: the key's name (which orders them), the text and the verb.
-fn more() -> Vec<(String, String, String)> {
-    let mut v = vec![("1-passphrase".into(), "Compress with passphrase…".into(), "compress-passphrase".into())];
-    for (i, f) in OTHER_FORMATS.iter().enumerate() {
-        v.push((format!("{}-{f}", i + 2), format!("Compress into .{f}"), format!("compress-{f}")));
+fn more() -> Vec<(String, Msg, String)> {
+    let mut v = vec![("1-passphrase".into(), shell::COMPRESS_PASSPHRASE, "compress-passphrase".into())];
+    for (i, (f, text)) in OTHER_FORMATS.iter().enumerate() {
+        v.push((format!("{}-{f}", i + 2), *text, format!("compress-{f}")));
     }
     v
 }
@@ -94,34 +102,30 @@ fn more() -> Vec<(String, String, String)> {
 /// What [`register`] made, as the user is told: the verbs (those of [`MENU`] by [`more`]) and
 /// the formats (of [`FORMATS`]).
 pub fn told() -> String {
-    let menu: Vec<String> = more().into_iter().map(|(_, text, _)| format!("\"{text}\"")).collect();
+    let menu: Vec<String> = more().into_iter().map(|(_, text, _)| win::quoted(text.text())).collect();
     let formats: Vec<String> = FORMATS.iter().map(|(ext, ..)| format!(".{ext}")).collect();
-    format!(
-        "Files and folders have \"Compress with Aqueous\", and the menu \"Aqueous\": {}.\n\n\
-         .aqr files open with Aqueous (extracted beside them), and have \"Extract here\" and \"Test\"; so do \
-         the other archives ({}), which open with Aqueous where no other program opens them (else Windows \
-         offers it).\n\nOn Windows 11 these are under \"Show more options\".",
-        menu.join(", "),
-        formats.join(" ")
-    )
+    win::told(shell::compress(), menu.join(", "), shell::extract(), shell::test(), formats.join(" "))
 }
 
 pub fn register() -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| format!("This program's path is not known: {e}"))?;
+    let exe = std::env::current_exe().map_err(win::unknown_path)?;
     let command = |verb: &str| format!("\"{}\" {verb} \"%1\"", exe.display());
+    // (a text of the string table, as Explorer reads it in the user's language)
+    let indirect = |m: Msg| format!("@{},-{}", exe.display(), m.resource());
     // (the icon of resource 1, this program's; files' are 2 on, aqr-win.rc)
     let icon = format!("\"{}\",-1", exe.display());
     let set = |key: &str, name: Option<&str>, value: &str| set(&classes(key), name, Value::Sz(value));
     for key in OLD {
         delete(&classes(key))?;
     }
-    let verb = |key: &str, text: &str, verb: &str| -> Result<(), String> {
-        set(key, None, text)?;
+    let verb = |key: &str, text: Msg, verb: &str| -> Result<(), String> {
+        set(key, None, text.text())?;
+        set(key, Some("MUIVerb"), &indirect(text))?;
         set(key, Some("MultiSelectModel"), "Player")?;
         set(&format!(r"{key}\command"), None, &command(verb))
     };
     for (key, menu) in COMPRESS.into_iter().zip(MENU) {
-        verb(key, "Compress with Aqueous", "compress")?;
+        verb(key, shell::COMPRESS, "compress")?;
         set(key, Some("Icon"), &icon)?;
         // (made anew: no verbs left of another version)
         delete(&classes(menu))?;
@@ -130,28 +134,26 @@ pub fn register() -> Result<(), String> {
         set(menu, Some("Icon"), &icon)?;
         for (i, (name, text, v)) in more().into_iter().enumerate() {
             let key = format!(r"{menu}\shell\{name}");
-            verb(&key, &text, &v)?;
+            verb(&key, text, &v)?;
             if i == 1 {
                 self::set(&classes(&key), Some("CommandFlags"), Value::Dword(SEPARATOR_BEFORE))?;
             }
         }
     }
-    let class = |class: &str, name: &str, icon: u16| -> Result<(), String> {
-        set(class, None, name)?;
+    let class = |class: &str, name: Msg, icon: u16| -> Result<(), String> {
+        set(class, None, name.text())?;
+        set(class, Some("FriendlyTypeName"), &indirect(name))?;
         set(&format!(r"{class}\DefaultIcon"), None, &format!("\"{}\",-{icon}", exe.display()))?;
         set(&format!(r"{class}\shell"), None, "extract")?;
-        for (verb, text) in [("extract", "Extract here"), ("test", "Test")] {
-            let key = format!(r"{class}\shell\{verb}");
-            set(&key, None, text)?;
-            set(&key, Some("MultiSelectModel"), "Player")?;
-            set(&format!(r"{key}\command"), None, &command(verb))?;
+        for (v, text) in [("extract", shell::EXTRACT), ("test", shell::TEST)] {
+            verb(&format!(r"{class}\shell\{v}"), text, v)?;
         }
         Ok(())
     };
     let capability =
         |ext: &str, class: &str| self::set(&format!(r"{CAPABILITIES}\FileAssociations"), Some(ext), Value::Sz(class));
     set(".aqr", None, CLASS)?;
-    class(CLASS, "Aqueous archive", 2)?;
+    class(CLASS, types::AQR, 2)?;
     capability(".aqr", CLASS)?;
     for (ext, icon, name) in FORMATS {
         let (ext, progid) = (format!(".{ext}"), format!("Aqueous.{ext}"));
@@ -164,7 +166,7 @@ pub fn register() -> Result<(), String> {
     }
     for (name, value) in [
         ("ApplicationName", "Aqueous"),
-        ("ApplicationDescription", "Archives recompressed losslessly; other formats extracted"),
+        ("ApplicationDescription", &indirect(shell::DESCRIPTION)),
         ("ApplicationIcon", &icon),
     ] {
         self::set(CAPABILITIES, Some(name), Value::Sz(value))?;
@@ -215,8 +217,9 @@ fn classes(key: &str) -> String {
     format!(r"Software\Classes\{key}")
 }
 
-fn error(what: &str, key: &str, e: WIN32_ERROR) -> String {
-    format!(r"{what} HKEY_CURRENT_USER\{key}: {}", std::io::Error::from_raw_os_error(e as i32))
+/// The error `e` of the system's, as told.
+fn os(e: WIN32_ERROR) -> std::io::Error {
+    std::io::Error::from_raw_os_error(e as i32)
 }
 
 /// A value of the registry.
@@ -246,7 +249,7 @@ pub fn set(key: &str, name: Option<&str>, value: Value) -> Result<(), String> {
         )
     };
     if e != ERROR_SUCCESS {
-        return Err(error("Not made:", key, e));
+        return Err(win::registry_not_made(key, os(e)));
     }
     let name = name.map(wide);
     let string = |s: &str| std::ffi::OsStr::new(s).encode_wide().chain([0]).flat_map(u16::to_le_bytes).collect();
@@ -270,7 +273,7 @@ pub fn set(key: &str, name: Option<&str>, value: Value) -> Result<(), String> {
         e
     };
     if e != ERROR_SUCCESS {
-        return Err(error("Not set:", key, e));
+        return Err(win::registry_not_set(key, os(e)));
     }
     Ok(())
 }
@@ -318,7 +321,7 @@ pub fn delete(key: &str) -> Result<(), String> {
     // SAFETY: a key of NULs
     match unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, p.as_ptr()) } {
         ERROR_SUCCESS | ERROR_FILE_NOT_FOUND => Ok(()),
-        e => Err(error("Not deleted:", key, e)),
+        e => Err(win::registry_not_deleted(key, os(e))),
     }
 }
 
@@ -328,13 +331,13 @@ pub fn delete_value(key: &str, name: &str) -> Result<(), String> {
     // SAFETY: a key and a name of NULs
     match unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, p.as_ptr(), n.as_ptr()) } {
         ERROR_SUCCESS | ERROR_FILE_NOT_FOUND => Ok(()),
-        e => Err(error("Not deleted:", key, e)),
+        e => Err(win::registry_not_deleted(key, os(e))),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{FORMATS, told};
+    use super::{FORMATS, OTHER_FORMATS, told};
 
     /// The message of `--register` tells the menu's verbs and the formats as they are.
     #[test]
@@ -355,5 +358,13 @@ mod tests {
             assert!(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("icons/{ext}.ico")).is_file());
         }
         assert_eq!(rc.lines().filter(|l| l.contains(" ICON ")).count(), 2 + FORMATS.len());
+    }
+
+    /// Each format of `OTHER_FORMATS` has its own verb's text.
+    #[test]
+    fn other_formats_told() {
+        for (f, text) in OTHER_FORMATS {
+            assert!(text.text().ends_with(&format!(".{f}")), "{f}");
+        }
     }
 }

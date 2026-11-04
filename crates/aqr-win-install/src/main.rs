@@ -27,42 +27,38 @@ static PAYLOAD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/payload.bin"))
 fn main() -> std::process::ExitCode {
     use std::process::ExitCode;
 
+    use aqr_l10n::{install as l, shell};
+
+    aqr_l10n::init(&aqr_l10n::system_languages());
     let args: Vec<String> = std::env::args().skip(1).collect();
     let quiet = match &args[..] {
         [] => false,
         [q] if q == "--quiet" => true,
         _ => {
-            ui::message(ui::Icon::Error, "Not an option of the installer", "usage: aqr-win-install [--quiet]");
+            ui::message(ui::Icon::Error, l::not_option(), "usage: aqr-win-install [--quiet]");
             return ExitCode::FAILURE;
         }
     };
     let Some(dir) = std::env::var_os("LOCALAPPDATA").map(|d| std::path::PathBuf::from(d).join(r"Programs\Aqueous"))
     else {
-        ui::message(ui::Icon::Error, "Aqueous is not installed", "%LOCALAPPDATA% is not set.");
+        ui::message(ui::Icon::Error, l::failed(), l::no_local_app_data());
         return ExitCode::FAILURE;
     };
     if !quiet {
-        let content = format!(
-            "aqr and the verbs of Explorer, for this user alone, into\n{}\n\nThe folder goes on PATH; Settings' \
-             Apps uninstalls it.",
-            dir.display()
-        );
-        if !ui::confirm(&format!("Install Aqueous {}?", env!("AQR_VERSION")), &content) {
+        if !ui::confirm(&l::ask(env!("AQR_VERSION")), &l::what(dir.display())) {
             return ExitCode::SUCCESS;
         }
     }
     match install(&dir) {
         Ok(()) => {
             if !quiet {
-                let done = "\"Compress with Aqueous\" is on files and folders, \"Extract here\" and \"Test\" on .aqr \
-                            files (on Windows 11, under \"Show more options\"). aqr is on PATH in terminals opened \
-                            from now on.";
-                ui::message(ui::Icon::Information, "Aqueous is installed", done);
+                let done = l::done(shell::compress(), shell::extract(), shell::test());
+                ui::message(ui::Icon::Information, l::installed(), &done);
             }
             ExitCode::SUCCESS
         }
         Err(e) => {
-            ui::message(ui::Icon::Error, "Aqueous is not installed", &e);
+            ui::message(ui::Icon::Error, l::failed(), &e);
             ExitCode::FAILURE
         }
     }
@@ -70,30 +66,29 @@ fn main() -> std::process::ExitCode {
 
 #[cfg(windows)]
 fn install(dir: &std::path::Path) -> Result<(), String> {
+    use aqr_l10n::install as l;
+
     if PAYLOAD.is_empty() {
-        return Err("This installer was built without aqr.exe and aqr-win.exe (target/dist).".into());
+        return Err(l::empty().into());
     }
-    let files = payload::unpack(PAYLOAD).map_err(|e| format!("This installer is damaged: {e}"))?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("{} is not made: {e}", dir.display()))?;
+    let files = payload::unpack(PAYLOAD).map_err(l::damaged)?;
+    std::fs::create_dir_all(dir).map_err(|e| l::not_made(dir.display(), e))?;
     for f in &files {
         let to = dir.join(&f.name);
         let old = dir.join(format!("{}.old", f.name));
         let _ = std::fs::remove_file(&old);
         let new = dir.join(format!("{}.new", f.name));
-        std::fs::write(&new, &f.data).map_err(|e| format!("{} is not written: {e}", new.display()))?;
+        std::fs::write(&new, &f.data).map_err(|e| l::not_written(new.display(), e))?;
         if std::fs::rename(&new, &to).is_err() {
             // (running, which a rename aside allows)
             let moved = std::fs::rename(&to, &old).and_then(|()| std::fs::rename(&new, &to));
             if let Err(e) = moved {
                 let _ = std::fs::remove_file(&new);
-                return Err(format!("{} is not replaced: {e}", to.display()));
+                return Err(l::not_replaced(to.display(), e));
             }
         }
     }
-    let out = std::process::Command::new(dir.join("aqr-win.exe"))
-        .arg("--install")
-        .output()
-        .map_err(|e| format!("aqr-win.exe does not run: {e}"))?;
+    let out = std::process::Command::new(dir.join("aqr-win.exe")).arg("--install").output().map_err(l::not_run)?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
@@ -144,7 +139,8 @@ mod ui {
 
     /// Shows a dialog until it is closed: the button that closed it.
     fn show(icon: Option<Icon>, main: &str, content: &str, ask: bool) -> i32 {
-        let (title, main, content, install) = (wide("Aqueous"), wide(main), wide(content), wide("Install"));
+        let (title, main, content, install) =
+            (wide("Aqueous"), wide(main), wide(content), wide(aqr_l10n::install::install()));
         let buttons = [TASKDIALOG_BUTTON { nButtonID: INSTALL, pszButtonText: install.as_ptr() }];
         // SAFETY: a struct of C's, all of whose fields may be zeroes (nulls)
         let mut c: TASKDIALOGCONFIG = unsafe { std::mem::zeroed() };

@@ -1,0 +1,178 @@
+# The frontends' messages in English, the source: every message is here, the other languages
+# translate what they can (the rest falls back to these). The format is in README.md.
+#
+# A section is a module of aqr-l10n (`aqr_l10n::common::intact(name)`), a key its function and
+# its constant (`aqr_l10n::types::ZIP`). `{name}` is a placeholder (`{{`, `}}` braces); a table
+# of CLDR's plural categories is a plural, chosen by `{n}`.
+
+# Shared by aqr-ipc, aqr-win and aqr-mac.
+[common]
+compressing = "Compressing…"
+extracting = "Extracting…"
+testing = "Testing…"
+compressing_name = "Compressing {name}"
+extracting_name = "Extracting {name}"
+testing_name = "Testing {name}"
+could_not_compress = "Could not compress"
+could_not_extract = "Could not extract"
+could_not_test = "Could not test"
+could_not_compress_name = "Could not compress {name}"
+could_not_extract_name = "Could not extract {name}"
+could_not_test_name = "Could not test {name}"
+not_run = "{program} is not run: {error}"
+ended_with = "aqr ended with {status}."
+did_not_end = "aqr did not end."
+intact = "{name} is intact"
+all_intact = { one = "The {n} archive is intact", other = "The {n} archives are intact" }
+# A test's `end`: files, their bytes, the archive's bytes, seconds.
+tested = { one = "{n} file, {bytes}, in {archive} ({seconds} s)", other = "{n} files, {bytes}, in {archive} ({seconds} s)" }
+named = "{name}: {text}"
+is_there_already = "{name} is there already"
+same_for_others = "Do the same for the other archives"
+wrong_passphrase = "Wrong passphrase, try again."
+passphrases_differ = "The two passphrases differ, try again."
+ok = "OK"
+cancel = "Cancel"
+
+# The names of the file types, as Explorer (aqr-win's FORMATS) and Finder (Info.plist's
+# UTTypeDescription and CFBundleTypeName, by InfoPlist.strings) show them. In Windows' string table.
+[types]
+aqr = "Aqueous archive"
+zip = "ZIP archive"
+seven_z = "7z archive"
+rar = "RAR archive"
+alz = "ALZip archive"
+egg = "EGG archive"
+tar = "tar archive"
+tgz = "tar archive (gzip)"
+tbz2 = "tar archive (bzip2)"
+txz = "tar archive (xz)"
+gz = "gzip file"
+bz2 = "bzip2 file"
+xz = "xz file"
+lzma = "LZMA file"
+zst = "Zstandard file"
+
+# Explorer's verbs and Settings' default apps (aqr-win's register.rs), read by Explorer from
+# Windows' string table: no placeholders.
+[shell]
+compress = "Compress with Aqueous"
+compress_passphrase = "Compress with passphrase…"
+compress_zip = "Compress into .zip"
+compress_7z = "Compress into .7z"
+extract = "Extract here"
+test = "Test"
+description = "Archives recompressed losslessly; other formats extracted"
+
+# aqr-win.
+[win]
+show_log = "Show what aqr said"
+hide_log = "Hide what aqr said"
+of_archives = "{text} ({n} of {count})"
+stopping = "Stopping…"
+bytes_of = "{done} of {total}"
+listing_read = "Listing files: {read} of {files} ({size})"
+listing = "Listing files: {files}"
+looking = "Looking into files: {done} of {total}"
+recompressing = "Recompressing: {bytes}"
+compressing = "Compressing: {bytes}"
+checked = "Checked: {bytes}"
+written = "Written: {bytes}"
+folder = "Folder: {path}"
+file = "File: {path}"
+time = "Time: {time}"
+time_left = "Time: {time}, about {left} left"
+extract_into = "Extract into the folder {path} all the same?\nIts files of the same names are replaced."
+replace = "Replace the file {path}?"
+choose_name = "Choose a passphrase for {name}."
+encrypted_name = "{name} is encrypted. Enter its passphrase."
+choose = "Choose a passphrase for the archive."
+encrypted = "The archive is encrypted. Enter its passphrase."
+passphrase = "Passphrase:"
+again = "Again:"
+registered = "Aqueous is registered"
+not_registered = "Aqueous is not registered"
+unregistered = "Aqueous is unregistered"
+not_unregistered = "Aqueous is not unregistered"
+not_uninstall_option = "Not an option of the uninstall"
+not_uninstalled = "Aqueous is not uninstalled"
+not_verb = "Not a verb of Aqueous"
+nothing = "Nothing to work on"
+no_path = "No path given."
+# What --register made: the verbs ({menu}: those of the menu "Aqueous", each `quoted`) and the
+# formats.
+told = "Files and folders have \"{compress}\", and the menu \"Aqueous\": {menu}.\n\n.aqr files open with Aqueous (extracted beside them), and have \"{extract}\" and \"{test}\"; so do the other archives ({formats}), which open with Aqueous where no other program opens them (else Windows offers it).\n\nOn Windows 11 these are under \"Show more options\"."
+quoted = "\"{text}\""
+unknown_path = "This program's path is not known: {error}"
+no_folder = "This program is in no folder."
+installed_elsewhere = "Aqueous is installed in {location}, not where this program is ({dir})."
+not_installed = "Aqueous is not installed."
+uninstall = "Uninstall Aqueous?"
+uninstall_what = "aqr, the verbs of Explorer and {dir} are taken away."
+not_deleted_running = "{name} is not deleted (is it running?): {error}"
+uninstalled = "Aqueous is uninstalled"
+cmd_not_run = "{exe} is not deleted: cmd.exe does not run: {error}"
+registry_not_made = "Not made: HKEY_CURRENT_USER\\{key}: {error}"
+registry_not_set = "Not set: HKEY_CURRENT_USER\\{key}: {error}"
+registry_not_deleted = "Not deleted: HKEY_CURRENT_USER\\{key}: {error}"
+
+# aqr-win-install.
+[install]
+not_option = "Not an option of the installer"
+failed = "Aqueous is not installed"
+no_local_app_data = "%LOCALAPPDATA% is not set."
+ask = "Install Aqueous {version}?"
+what = "aqr and the verbs of Explorer, for this user alone, into\n{dir}\n\nThe folder goes on PATH; Settings' Apps uninstalls it."
+install = "Install"
+installed = "Aqueous is installed"
+done = "\"{compress}\" is on files and folders, \"{extract}\" and \"{test}\" on .aqr files (on Windows 11, under \"Show more options\"). aqr is on PATH in terminals opened from now on."
+empty = "This installer was built without aqr.exe and aqr-win.exe (target/dist)."
+damaged = "This installer is damaged: {error}"
+not_made = "{path} is not made: {error}"
+not_written = "{path} is not written: {error}"
+not_replaced = "{path} is not replaced: {error}"
+not_run = "aqr-win.exe does not run: {error}"
+
+# aqr-mac.
+[mac]
+extract_into = "Extract into the folder all the same? Its files of the same names are replaced."
+extract = "Extract"
+replace_file = "Replace the file?"
+replace = "Replace"
+skip = "Skip"
+# The passphrase asked for: of an archive made (`choose_name`, `choose`) or decoded.
+choose_name = "{name} is encrypted"
+encrypted_name = "{name} is encrypted"
+choose = "Choose a passphrase for the archive"
+encrypted = "The archive is encrypted"
+needed = "The passphrase is needed to extract it."
+enter = "Enter its passphrase."
+passphrase = "Passphrase"
+passphrase_again = "Passphrase again"
+move_first = "Aqueous is to be moved first"
+move_info = "macOS runs it from a copy of its own as long as it is where it was downloaded. Move Aqueous to the Applications folder in Finder, and open it from there."
+not_registered = "Aqueous is not registered"
+launch_services = "Launch Services did not register {path} (error {status})."
+ready = "Aqueous is ready"
+# The services' names, as `services` has them.
+ready_info = "In Finder, Control-click files or folders for \"{compress}\" (or \"{compress_passphrase}\" to encrypt), and archives for \"{extract}\" and \"{test}\" (under Quick Actions or Services). Opening an .aqr file extracts it beside it; other archives too where Aqueous opens them (Get Info, Open with).\n\nWhere the services are not there, turn them on in System Settings: Keyboard, Keyboard Shortcuts, Services, Files and Folders."
+command_offer = "The aqr command can be put at {command} (as an administrator)."
+# What is at the command's place (`link`, `link_gone`, `folder`, `file`).
+command_other = "{command} is {what}, not this app's aqr."
+link = "a link to {target}"
+link_gone = "a link to {target}, which is not there"
+folder = "a folder"
+file = "a file"
+install_command = "Install the aqr Command"
+command_folder = "{command} is a folder; it is left as it is."
+command_not_installed = "The aqr command is not installed"
+command_replace = "It is {what}. Replace it with a link to {aqr}?"
+command_installed = "The aqr command is installed"
+command_runs = "{command} runs {aqr}."
+
+# Finder's services (Info.plist's NSServices, by ServicesMenu.strings).
+[services]
+compress = "Compress with Aqueous"
+compress_passphrase = "Compress with Aqueous (Passphrase)…"
+extract = "Extract with Aqueous"
+test = "Test with Aqueous"

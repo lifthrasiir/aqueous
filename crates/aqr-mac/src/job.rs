@@ -7,7 +7,7 @@ use std::process::{Child, ExitStatus};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub use aqr_ipc::{Verb, file_name, tested};
+pub use aqr_ipc::{Verb, failure, file_name, intact, tested};
 
 /// The time given `aqr` to stop before it is killed.
 const STOP: Duration = Duration::from_secs(10);
@@ -26,7 +26,7 @@ impl Job {
     /// Runs `aqr` on `paths` (`-P` where `encrypt`), read on threads of their own.
     pub fn start(verb: Verb, paths: Vec<PathBuf>, encrypt: bool) -> Result<Arc<Job>, String> {
         let (mut cmd, count) = aqr_ipc::command(&aqr_ipc::aqr(), verb, paths, encrypt, "aqr");
-        let mut child = cmd.spawn().map_err(|e| format!("{} is not run: {e}", cmd.get_program().display()))?;
+        let mut child = cmd.spawn().map_err(|e| aqr_l10n::common::not_run(cmd.get_program().display(), e))?;
         let (out, err) = (child.stdout.take().expect("piped"), child.stderr.take().expect("piped"));
         let job = Arc::new(Job {
             ipc: aqr_ipc::Job::new(verb, count, child.stdin.take()),

@@ -19,6 +19,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
 };
 
+use aqr_l10n::win;
+
 use crate::dialog::wide;
 use crate::register::{self, Value};
 
@@ -30,8 +32,8 @@ const FILES: [&str; 1] = ["aqr.exe"];
 
 /// This program and its folder.
 fn here() -> Result<(PathBuf, PathBuf), String> {
-    let exe = std::env::current_exe().map_err(|e| format!("This program's path is not known: {e}"))?;
-    let dir = exe.parent().ok_or("This program is in no folder.")?.to_path_buf();
+    let exe = std::env::current_exe().map_err(win::unknown_path)?;
+    let dir = exe.parent().ok_or(win::no_folder())?.to_path_buf();
     Ok((exe, dir))
 }
 
@@ -64,13 +66,13 @@ pub fn uninstall(quiet: bool) -> Result<bool, String> {
     let installed = register::get(UNINSTALL, Some("InstallLocation")).map(|(l, _)| l);
     if !installed.as_deref().is_some_and(|l| same(Path::new(l), &dir)) {
         return Err(match installed {
-            Some(l) => format!("Aqueous is installed in {l}, not where this program is ({}).", dir.display()),
-            None => "Aqueous is not installed.".into(),
+            Some(l) => win::installed_elsewhere(l, dir.display()),
+            None => win::not_installed().into(),
         });
     }
     if !quiet {
-        let content = format!("aqr, the verbs of Explorer and {} are taken away.", dir.display());
-        if !crate::dialog::confirm("Uninstall Aqueous?", &content) {
+        let content = win::uninstall_what(dir.display());
+        if !crate::dialog::confirm(win::uninstall(), &content) {
             return Ok(false);
         }
     }
@@ -78,7 +80,7 @@ pub fn uninstall(quiet: bool) -> Result<bool, String> {
     for name in FILES.iter().flat_map(|&f| [f.to_string(), format!("{f}.old"), format!("{f}.new")]) {
         match std::fs::remove_file(dir.join(&name)) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                return Err(format!("{name} is not deleted (is it running?): {e}"));
+                return Err(win::not_deleted_running(name, e));
             }
             _ => {}
         }
@@ -91,7 +93,7 @@ pub fn uninstall(quiet: bool) -> Result<bool, String> {
     path(&dir, false)?;
     register::delete(UNINSTALL)?;
     if !quiet {
-        crate::dialog::message(crate::dialog::Icon::Information, "Aqueous is uninstalled", "", None);
+        crate::dialog::message(crate::dialog::Icon::Information, win::uninstalled(), "", None);
     }
     delete_after_exit(&exe, &dir)?;
     Ok(true)
@@ -166,5 +168,5 @@ fn delete_after_exit(exe: &Path, dir: &Path) -> Result<(), String> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .map(drop)
-        .map_err(|e| format!("{exe} is not deleted: cmd.exe does not run: {e}"))
+        .map_err(|e| win::cmd_not_run(exe, e))
 }

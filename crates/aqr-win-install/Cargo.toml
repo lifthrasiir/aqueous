@@ -6,6 +6,7 @@ description = "An installer of aqr.exe and aqr-win.exe for the user, carrying th
 publish = false
 
 [dependencies]
+aqr-l10n = { path = "../aqr-l10n" }
 aqr-exe = { path = "../../codecs/aqr-exe", default-features = false, features = ["decode"] }
 zstd = { version = "0.13", default-features = false }
 

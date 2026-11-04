@@ -13,6 +13,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_TABSTOP, WS_VISIBLE,
 };
 
+use aqr_l10n::{common, win};
+
 use crate::dialog::wide;
 
 /// The ids of the controls.
@@ -78,13 +80,14 @@ impl Template {
 pub fn ask(parent: HWND, file: Option<&str>, compress: bool, again: bool, confirm: bool) -> Option<String> {
     let mut message = String::new();
     if again {
-        message += "Wrong passphrase, try again.\r\n";
+        message += common::wrong_passphrase();
+        message += "\r\n";
     }
     message += &match (file, compress) {
-        (Some(f), true) => format!("Choose a passphrase for {f}."),
-        (Some(f), false) => format!("{f} is encrypted. Enter its passphrase."),
-        (None, true) => "Choose a passphrase for the archive.".into(),
-        (None, false) => "The archive is encrypted. Enter its passphrase.".into(),
+        (Some(f), true) => win::choose_name(f),
+        (Some(f), false) => win::encrypted_name(f),
+        (None, true) => win::choose().into(),
+        (None, false) => win::encrypted().into(),
     };
     let fields = if confirm { 2 } else { 1 };
     let buttons_y = 46 + 18 * fields;
@@ -107,13 +110,13 @@ pub fn ask(parent: HWND, file: Option<&str>, compress: bool, again: bool, confir
         let style = (WS_BORDER | WS_TABSTOP) | (ES_PASSWORD | ES_AUTOHSCROLL) as u32;
         t.item(style, [76, y, 147, 14], id, EDIT, "");
     };
-    label(&mut t, 42, FIRST, "Passphrase:");
+    label(&mut t, 42, FIRST, win::passphrase());
     if confirm {
-        label(&mut t, 60, SECOND, "Again:");
+        label(&mut t, 60, SECOND, win::again());
     }
     let by = buttons_y as i16;
-    t.item(WS_TABSTOP | BS_DEFPUSHBUTTON as u32, [117, by, 50, 14], IDOK, BUTTON, "OK");
-    t.item(WS_TABSTOP | BS_PUSHBUTTON as u32, [173, by, 50, 14], IDCANCEL, BUTTON, "Cancel");
+    t.item(WS_TABSTOP | BS_DEFPUSHBUTTON as u32, [117, by, 50, 14], IDOK, BUTTON, common::ok());
+    t.item(WS_TABSTOP | BS_PUSHBUTTON as u32, [173, by, 50, 14], IDCANCEL, BUTTON, common::cancel());
     // (the template at a double word)
     t.0.resize(t.0.len().next_multiple_of(2), 0);
     let aligned: Vec<u32> = t.0.chunks(2).map(|c| c[0] as u32 | (c[1] as u32) << 16).collect();
@@ -149,7 +152,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, _: LPARAM) -> i
                 let confirm = STATE.with(|s| s.borrow().as_ref().is_some_and(|s| s.confirm));
                 let value = text(hwnd, FIRST);
                 if confirm && value != text(hwnd, SECOND) {
-                    let differ = wide("The two passphrases differ, try again.");
+                    let differ = wide(common::passphrases_differ());
                     let empty = wide("");
                     // SAFETY: the dialog's own controls and strings of NULs
                     unsafe {

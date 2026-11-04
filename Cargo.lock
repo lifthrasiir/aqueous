@@ -527,6 +527,7 @@ dependencies = [
 name = "aqr-ipc"
 version = "0.1.0"
 dependencies = [
+ "aqr-l10n",
  "serde_json",
 ]
 
@@ -557,6 +558,13 @@ dependencies = [
  "aqr-num",
  "memchr",
  "zstd",
+]
+
+[[package]]
+name = "aqr-l10n"
+version = "0.1.0"
+dependencies = [
+ "toml",
 ]
 
 [[package]]
@@ -617,6 +625,7 @@ name = "aqr-mac"
 version = "0.1.0"
 dependencies = [
  "aqr-ipc",
+ "aqr-l10n",
  "block2",
  "objc2",
  "objc2-app-kit",
@@ -927,6 +936,7 @@ name = "aqr-win"
 version = "0.1.0"
 dependencies = [
  "aqr-ipc",
+ "aqr-l10n",
  "aqr-version",
  "embed-resource",
  "serde_json",
@@ -938,6 +948,7 @@ name = "aqr-win-install"
 version = "0.1.0"
 dependencies = [
  "aqr-exe",
+ "aqr-l10n",
  "aqr-version",
  "embed-resource",
  "windows-sys",

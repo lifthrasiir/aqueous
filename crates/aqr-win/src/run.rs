@@ -5,7 +5,7 @@ use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use aqr_ipc::{Job, Verb, tested};
+use aqr_ipc::{Job, Verb, failure, intact, tested};
 
 use crate::dialog::{self, Icon};
 
@@ -19,8 +19,8 @@ pub fn run(verb: Verb, paths: Vec<PathBuf>, encrypt: bool, format: &str) -> Exit
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            let what = format!("{} is not run: {e}", cmd.get_program().to_string_lossy());
-            dialog::message(Icon::Error, &format!("Could not {} anything", verb.name()), &what, None);
+            let what = aqr_l10n::common::not_run(cmd.get_program().to_string_lossy(), e);
+            dialog::message(Icon::Error, &verb.failed(""), &what, None);
             return ExitCode::FAILURE;
         }
     };
@@ -40,25 +40,14 @@ pub fn run(verb: Verb, paths: Vec<PathBuf>, encrypt: bool, format: &str) -> Exit
     }
     let log: Vec<&str> = s.log.iter().map(String::as_str).collect();
     let log = log.join("\n");
-    let failed = match (&s.error, status) {
-        (Some(e), _) => Some(e.clone()),
-        (None, Some(st)) if !st.success() => Some(format!("aqr ended with {st}.")),
-        (None, None) => Some("aqr did not end.".into()),
-        _ => None,
-    };
     let name = s.name();
-    if let Some(e) = failed {
-        let main = match name.as_str() {
-            "" => format!("Could not {}", verb.name()),
-            n => format!("Could not {} {n}", verb.name()),
-        };
-        dialog::message(Icon::Error, &main, &e, (!log.is_empty()).then_some(&log));
+    if let Some(e) = failure(&s, status) {
+        dialog::message(Icon::Error, &verb.failed(&name), &e, (!log.is_empty()).then_some(&log));
         return ExitCode::FAILURE;
     }
     if verb == Verb::Test {
         let lines: Vec<String> = s.ended.iter().map(|(n, e)| tested(n, e, count > 1)).collect();
-        let main = if count == 1 { format!("{name} is intact") } else { format!("The {count} archives are intact") };
-        dialog::message(Icon::Information, &main, &lines.join("\n"), None);
+        dialog::message(Icon::Information, &intact(&name, count), &lines.join("\n"), None);
     }
     ExitCode::SUCCESS
 }

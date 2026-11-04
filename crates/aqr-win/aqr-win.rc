@@ -18,5 +18,9 @@
 15 ICON "icons/lzma.ico"
 16 ICON "icons/zst.ico"
 
+// The texts that Explorer reads itself (register.rs's indirect strings), in each language:
+// aqr-l10n's RC, written by build.rs into OUT_DIR.
+#include "strings.rc"
+
 // The version (written by build.rs into OUT_DIR, which embed-resource gives rc.exe to look in).
 #include "version.rc"

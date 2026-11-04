@@ -40,6 +40,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use windows_sys::core::{BOOL, HRESULT, PCWSTR};
 
 use aqr_ipc::{Job, Verb, done, file_name, size};
+use aqr_l10n::{common, win};
 
 /// `s` as a string of NULs.
 pub fn wide(s: impl AsRef<OsStr>) -> Vec<u16> {
@@ -140,8 +141,8 @@ pub fn message(icon: Icon, main: &str, content: &str, more: Option<&str>) {
     d.c.pfCallback = Some(plain);
     if let Some(m) = more {
         d.c.pszExpandedInformation = d.keep(m);
-        d.c.pszCollapsedControlText = d.keep("Show what aqr said");
-        d.c.pszExpandedControlText = d.keep("Hide what aqr said");
+        d.c.pszCollapsedControlText = d.keep(win::show_log());
+        d.c.pszExpandedControlText = d.keep(win::hide_log());
     }
     d.show();
 }
@@ -345,44 +346,42 @@ impl Window<'_> {
     fn texts(&self) -> (String, String) {
         let f = self.job.share();
         let s = self.job.state.lock().unwrap();
-        let mut main = match s.name().as_str() {
-            "" => format!("{}…", self.job.verb.doing()),
-            n => format!("{} {n}", self.job.verb.doing()),
-        };
+        let mut main = self.job.verb.doing(&s.name());
         if self.job.count > 1 && s.begun > 0 {
-            main += &format!(" ({} of {})", s.begun, self.job.count);
+            main = win::of_archives(main, s.begun, self.job.count);
         }
         if self.stopping.get().is_some() {
-            main = "Stopping…".into();
+            main = win::stopping().into();
         }
         let mut lines = Vec::new();
         if let Some(p) = &s.progress {
             let pair = |k: &str| (p[k][0].as_f64().unwrap_or(0.0), p[k][1].as_f64().unwrap_or(0.0));
-            let bytes = |(done, total): (f64, f64)| format!("{} of {}", size(done), size(total));
+            let bytes = |(done, total): (f64, f64)| win::bytes_of(size(done), size(total));
             lines.push(match self.job.verb {
                 Verb::Compress => {
                     let (probe, analysis, compression) = (pair("probe"), pair("analysis"), pair("compression"));
                     if p["listed"].is_array() {
                         let (files, bytes) = pair("listed");
                         match p["read"].as_u64() {
-                            Some(read) => format!("Listing files: {read} of {files} ({})", size(bytes)),
-                            None => format!("Listing files: {files}"),
+                            Some(read) => win::listing_read(read, files, size(bytes)),
+                            None => win::listing(files),
                         }
                     } else if analysis.0 == 0.0 && probe.0 < probe.1 {
-                        format!("Looking into files: {} of {}", probe.0, probe.1)
+                        win::looking(probe.0, probe.1)
                     } else if analysis.0 < analysis.1 {
-                        format!("Recompressing: {}", bytes(analysis))
+                        win::recompressing(bytes(analysis))
                     } else {
-                        format!("Compressing: {}", bytes(compression))
+                        win::compressing(bytes(compression))
                     }
                 }
-                _ => format!("{}: {}", if self.job.verb == Verb::Test { "Checked" } else { "Written" }, {
-                    bytes(pair("evaluated"))
-                }),
+                Verb::Test => win::checked(bytes(pair("evaluated"))),
+                Verb::Extract => win::written(bytes(pair("evaluated"))),
             });
-            let (file, what) = if p["dir"].is_object() { (&p["dir"], "Folder") } else { (&p["file"], "File") };
+            let dir = p["dir"].is_object();
+            let file = if dir { &p["dir"] } else { &p["file"] };
             if let Some(path) = file["path"].as_str() {
-                let mut line = format!("{what}: {}", fit(path, 60));
+                let path = fit(path, 60);
+                let mut line = if dir { win::folder(path) } else { win::file(path) };
                 if let (Some(done), Some(len)) = (file["done"].as_f64(), file["len"].as_f64())
                     && len > 0.0
                 {
@@ -396,11 +395,11 @@ impl Window<'_> {
         }
         if let Some(since) = s.since {
             let t = since.elapsed().as_secs_f64();
-            let mut line = format!("Time: {}", time(t));
-            if f >= 0.02 && t >= 3.0 {
-                line += &format!(", about {} left", time(t * (1.0 - f) / f));
-            }
-            lines.push(line);
+            lines.push(if f >= 0.02 && t >= 3.0 {
+                win::time_left(time(t), time(t * (1.0 - f) / f))
+            } else {
+                win::time(time(t))
+            });
         }
         lines.resize(LINES, String::new());
         // (an empty line keeps its height with a space)
@@ -418,17 +417,13 @@ impl Window<'_> {
             "overwrite" => {
                 let path = q["path"].as_str().unwrap_or("");
                 let dir = Path::new(path).is_dir();
-                let main = format!("{} is there already", file_name(Path::new(path)));
-                let content = if dir {
-                    format!("Extract into the folder {path} all the same?\nIts files of the same names are replaced.")
-                } else {
-                    format!("Replace the file {path}?")
-                };
+                let main = common::is_there_already(file_name(Path::new(path)));
+                let content = if dir { win::extract_into(path) } else { win::replace(path) };
                 let mut d = Config::new(hwnd, Some(Icon::Warning), &main, &content);
                 d.c.dwCommonButtons = TDCBF_YES_BUTTON | TDCBF_NO_BUTTON;
                 d.c.nDefaultButton = IDYES;
                 if self.job.count > 1 {
-                    d.c.pszVerificationText = d.keep("Do the same for the other archives");
+                    d.c.pszVerificationText = d.keep(common::same_for_others());
                 }
                 let (button, all) = d.show();
                 let answer = Value::Bool(button == IDYES);

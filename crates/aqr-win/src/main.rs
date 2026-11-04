@@ -51,7 +51,9 @@ fn main() -> std::process::ExitCode {
     use std::process::ExitCode;
 
     use aqr_ipc::Verb;
+    use aqr_l10n::win;
 
+    aqr_l10n::init(&aqr_l10n::system_languages());
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let verb = args.first().and_then(|a| a.to_str()).unwrap_or("");
     let paths: Vec<PathBuf> = args.iter().skip(1).map(PathBuf::from).collect();
@@ -65,19 +67,19 @@ fn main() -> std::process::ExitCode {
         "--register" => {
             return match register::register() {
                 Ok(()) => {
-                    dialog::message(dialog::Icon::Information, "Aqueous is registered", &register::told(), None);
+                    dialog::message(dialog::Icon::Information, win::registered(), &register::told(), None);
                     ExitCode::SUCCESS
                 }
-                Err(e) => fail("Aqueous is not registered", &e),
+                Err(e) => fail(win::not_registered(), &e),
             };
         }
         "--unregister" => {
             return match register::unregister() {
                 Ok(()) => {
-                    dialog::message(dialog::Icon::Information, "Aqueous is unregistered", "", None);
+                    dialog::message(dialog::Icon::Information, win::unregistered(), "", None);
                     ExitCode::SUCCESS
                 }
-                Err(e) => fail("Aqueous is not unregistered", &e),
+                Err(e) => fail(win::not_unregistered(), &e),
             };
         }
         "--install" => {
@@ -93,7 +95,7 @@ fn main() -> std::process::ExitCode {
             let quiet = match args.get(1).and_then(|a| a.to_str()) {
                 None => false,
                 Some("--quiet") if args.len() == 2 => true,
-                _ => return fail("Not an option of the uninstall", "aqr-win --uninstall [--quiet]"),
+                _ => return fail(win::not_uninstall_option(), "aqr-win --uninstall [--quiet]"),
             };
             return match install::uninstall(quiet) {
                 Ok(_) => ExitCode::SUCCESS,
@@ -101,7 +103,7 @@ fn main() -> std::process::ExitCode {
                     eprintln!("{e}");
                     ExitCode::FAILURE
                 }
-                Err(e) => fail("Aqueous is not uninstalled", &e),
+                Err(e) => fail(win::not_uninstalled(), &e),
             };
         }
         "compress" => Verb::Compress,
@@ -109,8 +111,8 @@ fn main() -> std::process::ExitCode {
             encrypt = true;
             Verb::Compress
         }
-        v if let Some(f) =
-            v.strip_prefix("compress-").and_then(|f| register::OTHER_FORMATS.iter().find(|&&g| g == f)) =>
+        v if let Some((f, _)) =
+            v.strip_prefix("compress-").and_then(|f| register::OTHER_FORMATS.iter().find(|&&(g, _)| g == f)) =>
         {
             format = f;
             Verb::Compress
@@ -120,7 +122,7 @@ fn main() -> std::process::ExitCode {
         _ => {
             let usage = "aqr-win --register | --unregister | compress[-passphrase|-zip|-7z] PATH... | \
                          extract ARCHIVE... | test ARCHIVE...";
-            return fail("Not a verb of Aqueous", usage);
+            return fail(win::not_verb(), usage);
         }
     };
     let paths = match <[PathBuf; 1]>::try_from(paths) {
@@ -129,7 +131,7 @@ fn main() -> std::process::ExitCode {
             Some(paths) => paths,
             None => return ExitCode::SUCCESS,
         },
-        Err(paths) if paths.is_empty() => return fail("Nothing to work on", "No path given."),
+        Err(paths) if paths.is_empty() => return fail(win::nothing(), win::no_path()),
         Err(paths) => paths,
     };
     run::run(verb, paths, encrypt, format)

@@ -45,6 +45,9 @@ sed "s/@VERSION@/$version/g" "$here/Info.plist" > "$app/Contents/Info.plist"
 printf 'APPL????' > "$app/Contents/PkgInfo"
 cp "$bin/aqr-mac" "$bin/aqr" "$app/Contents/MacOS/"
 cp "$here/droplet.icns" "$here"/icons/*.icns "$app/Contents/Resources/"
+# (the .strings of each language: Finder's names of the types and the services, by aqr-l10n's
+# catalogs; the app's own messages are in its binary)
+cargo run -q -p aqr-l10n -- lproj "$app/Contents/Resources"
 codesign --force --sign - "$app/Contents/MacOS/aqr"
 codesign --force --sign - "$app"
 codesign --verify --strict "$app"
