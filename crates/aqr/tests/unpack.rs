@@ -1,4 +1,4 @@
-//! Archives of other formats extracted by `aqr -d` (and tested by `-t`), named by their
+//! Archives of other formats extracted by `aqr -d` (and tested by `-K`), named by their
 //! formats: the files made with their metadata, what is left out told, and an error at the end
 //! for it (aqr-unpack's fixtures); extracted as they are into the current directory (or `-o`),
 //! and with `--auto-dir` a single entry at their top beside them, else a directory of their
@@ -113,7 +113,7 @@ fn zip_extracted() {
     assert_eq!(fs::read(out.join("dir/in.txt")).unwrap(), b"in dir");
     assert_eq!(fs::read_link(out.join("link")).unwrap(), Path::new("stored.txt"));
     // tested: the same left out, nothing written
-    let o = aqr(&["-t".as_ref(), archive.as_os_str()]);
+    let o = aqr(&["-K".as_ref(), archive.as_os_str()]);
     let err = String::from_utf8_lossy(&o.stderr);
     assert!(!o.status.success() && err.contains("1 entry not extracted"), "{err}");
     assert!(!d.join("tree").exists());
@@ -125,7 +125,7 @@ fn single_files() {
     let d = scratch("single");
     for (fixture_name, name) in [("one.txt.xz", "a.txt.xz"), ("one.txt.gz", "b.txt.gz"), ("one.txt.bz2", "c.txt.bz2")] {
         let archive = fixture(&d, fixture_name, name);
-        let o = aqr(&["-t".as_ref(), archive.as_os_str()]);
+        let o = aqr(&["-K".as_ref(), archive.as_os_str()]);
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
         let o = aqr(&["-d".as_ref(), archive.as_os_str()]);
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));

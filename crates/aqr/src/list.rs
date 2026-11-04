@@ -1,5 +1,6 @@
-//! `aqr -L`: the entries of Aqueous archives listed on standard output, without decoding
-//! their files (but for their formula blocks, read to tell how each file is made).
+//! `aqr -t`: the entries of Aqueous archives listed on standard output, without decoding
+//! their files (but for their formula blocks, read to tell how each file is made); with paths
+//! of the archive given ([`crate::extract::Selection`]), the entries at them and under them alone.
 //!
 //! Entries are listed by their paths (names in turn, as bytes), a directory's ending with `/`;
 //! an archive of a single file, which has no metadata, as one entry `<Unnamed>`. In place of a
@@ -32,7 +33,7 @@ use aqr_formula::aqr::{self, EntryNode, Extra, Time, Zone, name_bytes};
 
 use crate::{Args, decrypt, size};
 
-/// What `-L` lists of each entry.
+/// What `-t` lists of each entry.
 struct Row {
     path: Vec<u8>,
     /// The size or the kind, as shown.
@@ -75,7 +76,7 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
         // decompressing or testing repairs it)
         true => match decrypt(&c, input, a.opt.threads)? {
             (d, erased) if erased.is_empty() => Some(d),
-            _ => return Err(err(&"encrypted chunks not authenticating (-t repairs what it can)")),
+            _ => return Err(err(&"encrypted chunks not authenticating (-K repairs what it can)")),
         },
         false => None,
     };
@@ -90,6 +91,7 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
         archive.listing(&name).map_err(|e| err(&e))?.into_iter().map(Some).collect();
     let mut rows = Vec::new();
     match archive.tree() {
+        None if a.select.is_some() => return Err(err(&"an archive of a single file, not of paths")),
         None => {
             let l = listed[0].take().unwrap();
             let size = size_shown(a, l.size);
@@ -103,13 +105,24 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
             });
         }
         Some(t) => {
+            let picked = match &a.select {
+                Some(sel) => {
+                    sel.check(t, &|_| Vec::new()).map_err(|e| err(&e))?;
+                    Some(sel.picked(t))
+                }
+                None => None,
+            };
             let mut paths: Vec<Vec<u8>> = Vec::with_capacity(t.entries.len());
-            for e in &t.entries {
+            for (i, e) in t.entries.iter().enumerate() {
                 let name = name_bytes(&e.name).0;
                 let path = match e.parent {
                     Some(p) => [&paths[p][..], b"/", name].concat(),
                     None => name.to_vec(),
                 };
+                if picked.as_ref().is_some_and(|p| !p[i]) {
+                    paths.push(path);
+                    continue;
+                }
                 let (size, listed, link) = match &e.node {
                     EntryNode::Dir => ("<DIR>".into(), None, None),
                     &EntryNode::File(c) => {
@@ -207,13 +220,19 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
                 shown(r),
             ]);
         }
-        let data = archive.data_bytes();
-        let len = c.len() as u64;
+        // (of paths selected, the files' shares of the archive; else the archive's bytes)
+        let (data, overhead, whole) = match a.select {
+            Some(_) => ("-".into(), "-".into(), rows.iter().filter_map(|r| r.listed.as_ref()).map(|l| l.share).sum()),
+            None => {
+                let (data, len) = (archive.data_bytes(), c.len() as u64);
+                (data.to_string(), (len - data.min(len)).to_string(), len)
+            }
+        };
         table.push(vec![
-            data.to_string(),
-            (len - data.min(len)).to_string(),
+            data,
+            overhead,
             total.to_string(),
-            ratio(len, total),
+            ratio(whole, total),
             String::new(),
             String::new(),
             String::new(),
@@ -279,7 +298,7 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
     Ok(s)
 }
 
-/// A size as `-v` shows it (in bytes), or as `-L` alone does.
+/// A size as `-v` shows it (in bytes), or as `-t` alone does.
 fn size_shown(a: &Args, n: u64) -> String {
     if a.verbose { n.to_string() } else { size(n as f64) }
 }

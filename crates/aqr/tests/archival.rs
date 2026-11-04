@@ -1,4 +1,4 @@
-//! Archives made with `-A` (mirror blocks), damaged and still read by `aqr -t` and `aqr -d`,
+//! Archives made with `-A` (mirror blocks), damaged and still read by `aqr -K` and `aqr -d`,
 //! which restore the damaged blocks from their mirror blocks.
 
 use std::fs;
@@ -150,7 +150,7 @@ fn restores_damaged_blocks() {
     let meta = blocks(&a).iter().find(|b| (0x10..0x18).contains(&b.1)).unwrap().0;
     assert!(blocks(&a)[0].1 >= 0xc10 && blocks(&a)[0].0 < meta);
 
-    let t = stderr(&aqr_in(&d, &["-t", "a.aqr"]));
+    let t = stderr(&aqr_in(&d, &["-K", "a.aqr"]));
     assert!(t.contains("archival profile: conforms"), "{t}");
     let all = blocks(&a).iter().filter(|b| matches!(b.1, 0x10..=0x17 | 0x50..=0x67 | 0x70..=0x77)).count();
     assert!(all >= 3);
@@ -163,7 +163,7 @@ fn restores_damaged_blocks() {
         let mut damaged = a.clone();
         damaged[at] ^= 0x5a;
         fs::write(d.join("damaged.aqr"), &damaged).unwrap();
-        let t = stderr(&aqr_in(&d, &["-t", "damaged.aqr"]));
+        let t = stderr(&aqr_in(&d, &["-K", "damaged.aqr"]));
         assert!(t.contains("1 damaged block restored from mirror blocks"), "{kind}: {t}");
         let out = d.join(format!("out-{kind}"));
         aqr_in(&d, &["-q", "-d", "-o", out.to_str().unwrap(), "damaged.aqr"]);
@@ -175,7 +175,7 @@ fn restores_damaged_blocks() {
         let at = middle_of(&plain, types);
         plain[at] ^= 0x5a;
         fs::write(d.join("damaged.aqr"), &plain).unwrap();
-        let o = aqr_fed(&d, &["-t", "damaged.aqr"], b"");
+        let o = aqr_fed(&d, &["-K", "damaged.aqr"], b"");
         assert!(!o.status.success(), "{kind}: damage not found without -A");
     }
 
@@ -184,7 +184,7 @@ fn restores_damaged_blocks() {
     let mut damaged = a.clone();
     damaged[at] ^= 0x5a;
     fs::write(d.join("damaged.aqr"), &damaged).unwrap();
-    let t = stderr(&aqr_in(&d, &["-t", "damaged.aqr"]));
+    let t = stderr(&aqr_in(&d, &["-K", "damaged.aqr"]));
     assert!(
         t.contains("1 damaged mirror block") && t.contains(&format!("mirrored archive: no ({} of {all}", all - 1)),
         "{t}"
@@ -199,7 +199,7 @@ fn single_and_encrypted() {
     let d = scratch("single");
     source(&d);
     aqr_in(&d, &["-q", "-A", "-o", "s.aqr", "src/big.txt.gz"]);
-    let t = stderr(&aqr_in(&d, &["-t", "s.aqr"]));
+    let t = stderr(&aqr_in(&d, &["-K", "s.aqr"]));
     assert!(t.contains("archival profile: conforms") && t.contains("blocks to mirror mirrored"), "{t}");
     assert!(!t.contains("nearer"), "{t}");
     let s = fs::read(d.join("s.aqr")).unwrap();
@@ -213,7 +213,7 @@ fn single_and_encrypted() {
 
     let o = aqr_fed(&d, &["-q", "-A", "-P", "-o", "e.aqr", "src"], b"secret\n");
     assert!(o.status.success(), "{}", stderr(&o));
-    let o = aqr_fed(&d, &["-t", "-P", "e.aqr"], b"secret\n");
+    let o = aqr_fed(&d, &["-K", "-P", "e.aqr"], b"secret\n");
     let t = stderr(&o);
     assert!(o.status.success(), "{t}");
     assert!(
@@ -261,12 +261,12 @@ fn restores_truncated() {
     let mirror = bs.iter().filter(|b| (0xc10..0xc18).contains(&b.1)).map(|b| b.0).collect::<Vec<_>>();
     assert_eq!(mirror.len(), 1);
     assert!(meta - mirror[0] > 4 << 20 && meta - mirror[0] < 6 << 20, "{} {meta}", mirror[0]);
-    let t = stderr(&aqr_in(&d, &["-t", "a.aqr"]));
+    let t = stderr(&aqr_in(&d, &["-K", "a.aqr"]));
     assert!(t.contains("mirrored archive: yes"), "{t}");
 
     for (what, cut) in [("after", a.len() - 7), ("in", meta + 5), ("at", meta)] {
         fs::write(d.join("cut.aqr"), &a[..cut]).unwrap();
-        let t = stderr(&aqr_in(&d, &["-t", "cut.aqr"]));
+        let t = stderr(&aqr_in(&d, &["-K", "cut.aqr"]));
         assert!(t.contains("its footer made again"), "{what}: {t}");
         assert_eq!(t.contains("1 damaged block restored"), what != "after", "{what}: {t}");
         let out = d.join(format!("out-{what}"));
@@ -288,12 +288,12 @@ fn restores_truncated() {
         for (name, _) in want.iter().filter(|f| !got.contains(f)) {
             assert!(t.contains(&format!("{name}: lost (")), "{name}: {t}");
         }
-        let o = aqr_fed(&d, &["-t", "cut.aqr"], b"");
+        let o = aqr_fed(&d, &["-K", "cut.aqr"], b"");
         assert!(!o.status.success() && stderr(&o).contains(" files lost"), "{}", stderr(&o));
     }
     let meta = blocks(&plain).iter().find(|b| (0x10..0x18).contains(&b.1)).unwrap().0;
     fs::write(d.join("cut.aqr"), &plain[..meta + 5]).unwrap();
-    assert!(!aqr_fed(&d, &["-t", "cut.aqr"], b"").status.success());
+    assert!(!aqr_fed(&d, &["-K", "cut.aqr"], b"").status.success());
     fs::remove_dir_all(&d).unwrap();
 }
 

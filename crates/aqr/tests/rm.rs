@@ -128,7 +128,7 @@ fn refused() {
     let d = scratch("refused");
     fs::write(d.join("f"), b"f").unwrap();
     assert_eq!(aqr_in(&d, &["-o", "x.aqr", "f"]), (true, String::new()));
-    for args in [&["-t", "--rm", "x.aqr"][..], &["-L", "--rm", "x.aqr"], &["-d", "--rm", "x.aqr", "f"]] {
+    for args in [&["-K", "--rm", "x.aqr"][..], &["-t", "--rm", "x.aqr"], &["-d", "--rm", "x.aqr", "f"]] {
         let (ok, err) = aqr_in(&d, args);
         assert!(!ok && err.contains("--rm"), "{args:?}: {err}");
     }

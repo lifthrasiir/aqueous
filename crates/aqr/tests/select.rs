@@ -1,6 +1,7 @@
 //! Some paths of an archive extracted alone (`aqr -d ARCHIVE PATH [--rename TO]...`): in place,
 //! with the directories on the way, or renamed; a directory with what is under it; only what
 //! they need decoded; and the errors of paths given wrong. Of Aqueous archives and of others.
+//! Some paths of an Aqueous archive listed alone (`aqr -t ARCHIVE PATH...`) too.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -122,7 +123,7 @@ fn aqueous() {
     }
 
     // tested: the files of the paths alone
-    let (ok, err, _) = run(&["-t", "../arch.aqr", "d"]);
+    let (ok, err, _) = run(&["-K", "../arch.aqr", "d"]);
     assert!(ok && err.contains("(tested): 2 files"), "{err}");
 
     // only what they need decoded: a damaged block of another file fails the archive whole,
@@ -131,7 +132,7 @@ fn aqueous() {
     let at = bad.windows(6).position(|w| w == b"MARKER").unwrap();
     bad[at + 1000] ^= 0x55;
     fs::write(d.join("bad.aqr"), &bad).unwrap();
-    let (ok, err, _) = run(&["-t", "../bad.aqr"]);
+    let (ok, err, _) = run(&["-K", "../bad.aqr"]);
     assert!(!ok && err.contains("checksum mismatch"), "{err}");
     let (ok, err, w) = run(&["-d", "../bad.aqr", "d", "--rename", "dd", "a.txt", "--rename", "a"]);
     assert!(ok, "{err}");
@@ -159,6 +160,36 @@ fn aqueous() {
     assert!(ok, "{err}");
     let (ok, err, _) = run(&["-d", "../one.aqr", "a.txt"]);
     assert!(!ok && err.contains("an archive of a single file"), "{err}");
+
+    // listed: the entries at the paths and under them alone; several archives with --each
+    let list = |args: &[&str]| {
+        let o = Command::new(env!("CARGO_BIN_EXE_aqr")).current_dir(&d).args(args).output().unwrap();
+        let (out, err) = (String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr));
+        assert!(o.status.success(), "{args:?}: {err}");
+        out
+    };
+    #[cfg(unix)]
+    let (all, d_all) =
+        ("a.txt\nbig.bin\nd/\nd/b.txt\nd/e/\nd/e/c.txt\nd/l\nd/m\nlink\n", "d/\nd/b.txt\nd/e/\nd/e/c.txt\nd/l\nd/m\n");
+    #[cfg(not(unix))]
+    let (all, d_all) = ("a.txt\nbig.bin\nd/\nd/b.txt\nd/e/\nd/e/c.txt\n", "d/\nd/b.txt\nd/e/\nd/e/c.txt\n");
+    assert_eq!(list(&["-t", "-q", "arch.aqr"]), all);
+    assert_eq!(list(&["-t", "-q", "arch.aqr", "d"]), d_all);
+    assert_eq!(list(&["-t", "-q", "arch.aqr", "d/e", "./a.txt"]), "a.txt\nd/e/\nd/e/c.txt\n");
+    let t = list(&["-t", "arch.aqr", "d/e"]);
+    assert!(t.contains("d/e/c.txt") && !t.contains("b.txt") && t.contains("1 file, 1 directory"), "{t}");
+    let t = list(&["-t", "-v", "arch.aqr", "d/b.txt"]);
+    assert!(t.contains("d/b.txt") && t.lines().last().unwrap().contains("1 file"), "{t}");
+    assert_eq!(list(&["-t", "-q", "--each", "arch.aqr", "arch.aqr"]), format!("{all}{all}"));
+    for (args, why) in [
+        (&["-t", "arch.aqr", "nope"][..], "nope: not in the archive"),
+        (&["-t", "arch.aqr", "d", "d/b.txt"], "d/b.txt: under d, given too"),
+        (&["-t", "arch.aqr", "a.txt", "--rename", "z"], "-t takes an archive and its paths alone"),
+        (&["-t", "one.aqr", "a.txt"], "an archive of a single file"),
+    ] {
+        let (ok, err) = aqr_in(&d, args);
+        assert!(!ok && err.contains(why), "{args:?}: {err}");
+    }
 
     // --each: every input an archive, extracted whole
     fs::copy(d.join("arch.aqr"), d.join("w2.aqr")).unwrap();

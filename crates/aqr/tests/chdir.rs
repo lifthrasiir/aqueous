@@ -94,8 +94,8 @@ fn compressing_in_dir() {
         let (ok, err) = aqr_in(&w, &[&["-l", "0", "-o", "y.aqr"], args].concat());
         assert!(!ok && err.contains(told), "{args:?}: {err}");
     }
-    let (ok, err) = aqr_in(&w, &["-L", "-C", "p", "x.aqr"]);
-    assert!(!ok && err.contains("-L takes archives alone"), "{err}");
+    let (ok, err) = aqr_in(&w, &["-t", "-C", "p", "x.aqr"]);
+    assert!(!ok && err.contains("-t takes an archive and its paths alone"), "{err}");
 }
 
 #[test]

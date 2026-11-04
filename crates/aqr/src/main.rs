@@ -1,10 +1,11 @@
 //! Compresses files and directories into Aqueous archives, and decompresses them, as zstd does.
 //!
-//! usage: aqr [-c | -d | -t | -L] [-o OUTPUT] [-f] [--rm] [-p] [-q | -v] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N]
+//! usage: aqr [-c | -d | -K | -t] [-o OUTPUT] [-f] [--rm] [-p] [-q | -v] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N]
 //! [--batch MIB | -B SIZE] [-b SIZE] [-D] [-A] [--no-check] [-P] [--wasm] [--no-sandbox] [--stats[=FILE]] [-h]
 //! INPUT [--rename TO]...
 //!
-//! aqr -d [OPTIONS] ARCHIVE [PATH [--rename TO]]...; aqr -d --each [OPTIONS] ARCHIVE...; aqr -L [-q | -v] ARCHIVE...
+//! aqr -d [OPTIONS] ARCHIVE [PATH [--rename TO]]...; aqr -d --each [OPTIONS] ARCHIVE...; aqr -t [-q | -v] ARCHIVE [PATH]...;
+//! aqr -t --each [-q | -v] ARCHIVE...
 //!
 //! - `-c` (the default; `aqr`): each input into `INPUT.aqr`, a file as an archive of a single
 //!   file, a directory as an archive of what it holds; with `-o`, all the inputs into one
@@ -31,7 +32,7 @@
 //!   Its metadata is taken as an Aqueous archive's ([`extract`]); what it holds that is not
 //!   extracted (encrypted entries, methods not known, paths reaching out) is told, and the run
 //!   fails once the rest is extracted. A file there already is written over only with `-f`.
-//! - `-d ARCHIVE PATH...` (and `-t`): the paths of the archive given alone (`/` between names;
+//! - `-d ARCHIVE PATH...` (and `-K`): the paths of the archive given alone (`/` between names;
 //!   a directory with what is under it), where the whole archive would have them, with the
 //!   directories on the way (made plainly, without their metadata); `--rename TO` after a path
 //!   has that one at `TO` instead (with what is under it; the directories before `TO` made).
@@ -43,14 +44,14 @@
 //!   beside them; decompressing (given anywhere), what is extracted goes into `DIR` in place of
 //!   the current directory or beside the archive, `-o` from there too. The archives (`-o`
 //!   compressing, the inputs decompressing) are where they are given, as tar's `-f`.
-//! - `--each`: decompressing, every input an archive, each extracted whole (as the frontends
-//!   extract a selection of archives).
+//! - `--each`: decompressing (or listing), every input an archive, each extracted (or listed)
+//!   whole (as the frontends extract a selection of archives).
 //! - `--auto-dir` (as the frontends extract): a single entry at the top of an archive (of
 //!   either kind) is extracted beside it as it is, where nothing is there of its name; else
 //!   the archive is extracted into a directory of its name without its extension, beside it
 //!   (`foo.zip` of `foo/` into `foo/`, never `foo/foo/`). `-o` is where it goes instead of
 //!   beside it, a directory (with several archives too).
-//! - `-t`: each archive decoded as `-d` does, but nothing written (its checksums checked); and
+//! - `-K` (`--test`): each archive decoded as `-d` does, but nothing written (its checksums checked); and
 //!   where it has mirror blocks (or with `-v`), told how far it conforms to the archival profile
 //!   and how many of its blocks are mirrored ([`tell_archival`]).
 //! - `-A` (`--archival`): compressing, an archive for long-term preservation: of the archival
@@ -65,8 +66,10 @@
 //! - A file whose evaluation fails (its checksum not verifying, say) is lost, told on a line of
 //!   its own; the others are extracted (or tested), and the run fails at the end. A file covered
 //!   by no checksum is given as it decodes.
-//! - `-L`: the entries of each archive listed on standard output, and what each file takes of
-//!   the archive and how it is made ([`list`]); `-q` the paths alone, `-v` all that is told.
+//! - `-t` (`--list`): the entries of each archive listed on standard output, and what each file
+//!   takes of the archive and how it is made ([`list`]); `-q` the paths alone, `-v` all that is
+//!   told. `-t ARCHIVE PATH...`: the entries at those paths alone, with what is under them, as
+//!   tar's `-t` has them; `--each` lists several archives whole.
 //! - `-P`: compressing, the archives encrypted with a passphrase ([`aqr::envelope`]), asked for
 //!   as the work begins (twice on a terminal); decompressing, asked for then rather than as an
 //!   archive needs it. An encrypted archive (of either kind) is opened by the passphrases that
@@ -182,7 +185,8 @@ const HELP: &str = "\
 usage: aqr [OPTIONS] INPUT [--rename TO]...
        aqr -d [OPTIONS] ARCHIVE [PATH [--rename TO]]...
        aqr -d --each [OPTIONS] ARCHIVE...
-       aqr -L [-q | -v] ARCHIVE...
+       aqr -t [-q | -v] ARCHIVE [PATH]...
+       aqr -t --each [-q | -v] ARCHIVE...
        unaqr [OPTIONS] ARCHIVE [PATH [--rename TO]]...
 
 Modes:
@@ -192,9 +196,10 @@ Modes:
                         .lzma .zst) too, as they are into the current directory
                         (or -o); .gz, .bz2, .xz, .lzma and .zst into the name
                         without them
-  -t, --test            decode and check an archive, writing nothing
-  -L, --list            list the entries of archives (-q: the paths alone; -v: the
-                        blocks each file takes, its formula and all its metadata)
+  -t, --list            list the entries of an archive, or those of its PATHs (-q: the
+                        paths alone; -v: the blocks each file takes, its formula and
+                        all its metadata)
+  -K, --test            decode and check an archive, writing nothing
 
 Compressing (aqr -o ARCHIVE INPUT [--rename TO]...):
   INPUT                 a file or directory; several of them archived by their paths,
@@ -210,7 +215,7 @@ Decompressing some paths (aqr -d ARCHIVE PATH [--rename TO]...):
   PATH                  a path in the archive (a directory with what is under it),
                         extracted where the whole archive would have it
       --rename TO       after a PATH: that one extracted at TO instead
-      --each            every input an archive, each extracted whole
+      --each            every input an archive, each extracted (or listed) whole
 
 Output:
   -o OUTPUT             write to OUTPUT; compressing, all the inputs into one archive
@@ -280,7 +285,7 @@ struct Args {
     decompress: bool,
     /// Decompressing, but nothing written.
     test: bool,
-    /// Listing the archives' entries (`-L`).
+    /// Listing the archives' entries (`-t`).
     list: bool,
     wasm: bool,
     /// The modules not known (all, with `wasm`) run in a sandbox.
@@ -319,9 +324,9 @@ struct Args {
     /// `-P`: compressing, the archives encrypted with a passphrase asked for; decompressing,
     /// the passphrase asked for before the archives need it ([`pass`]).
     passphrase: bool,
-    /// `--each`: decompressing, every input an archive.
+    /// `--each`: decompressing or listing, every input an archive.
     each: bool,
-    /// Decompressing some paths of the archive: each path (names as the tree has them), and
+    /// Decompressing (or listing) some paths of the archive: each path (names as the tree has them), and
     /// where it goes where `--rename` tells.
     select: Option<extract::Selection>,
     /// Decompressing, how names are written (`-E`, `--normalize`, `--bad-names`).
@@ -459,8 +464,8 @@ fn parse() -> Result<Args, String> {
             }
             "-c" | "--compress" => (a.decompress, a.list) = (false, false),
             "-d" | "--decompress" => (a.decompress, a.test, a.list) = (true, false, false),
-            "-t" | "--test" => (a.decompress, a.test, a.list) = (true, true, false),
-            "-L" | "--list" => a.list = true,
+            "-K" | "--test" => (a.decompress, a.test, a.list) = (true, true, false),
+            "-t" | "--list" => a.list = true,
             "--wasm" => a.wasm = true,
             "--no-sandbox" => a.sandbox = false,
             "-o" => a.output = Some(value("-o")?.into()),
@@ -542,10 +547,13 @@ fn parse() -> Result<Args, String> {
     aqr_common::budget::global().set_limit(budget(memory.as_deref(), system)?);
     if a.list {
         if a.rm {
-            return Err("--rm with -L".into());
+            return Err("--rm with -t".into());
         }
         if a.output.is_some() || !renames.is_empty() || last_dir.is_some() {
-            return Err("-L takes archives alone".into());
+            return Err("-t takes an archive and its paths alone".into());
+        }
+        if !a.each && a.inputs.len() > 1 {
+            a.select = Some(selection(a.inputs.split_off(1), Vec::new())?);
         }
         return Ok(a);
     }
@@ -607,7 +615,7 @@ fn parse() -> Result<Args, String> {
         return Err(format!("--rename {} not after a path of an archive", to.display()));
     }
     if a.rm && a.test {
-        return Err("--rm with -t".into());
+        return Err("--rm with -K".into());
     }
     if a.rm && a.select.is_some() {
         return Err("--rm with paths of an archive (it is removed once extracted whole)".into());

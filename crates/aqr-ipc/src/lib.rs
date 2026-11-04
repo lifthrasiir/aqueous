@@ -57,7 +57,7 @@ impl Verb {
         match self {
             Verb::Compress => "-c",
             Verb::Extract => "-d",
-            Verb::Test => "-t",
+            Verb::Test => "-K",
         }
     }
 }
