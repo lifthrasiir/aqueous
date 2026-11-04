@@ -677,6 +677,23 @@ impl Node {
         if out.len() == 1 { out.pop().unwrap() } else { Node::Concat(out) }
     }
 
+    /// This node with every concatenation below it, itself among them, flattened as
+    /// [`Node::concat`] does: one put in place of a slice within another (in
+    /// [`Formula::share_slices`], or a formula embedded) is spliced into it. The parts of a pack
+    /// stay its parts. The output is the same.
+    pub fn flatten(&mut self) {
+        match self {
+            Node::Concat(ns) => {
+                ns.iter_mut().for_each(Node::flatten);
+                *self = Node::concat(std::mem::take(ns));
+            }
+            Node::Pack(ns) => ns.iter_mut().for_each(Node::flatten),
+            Node::Apply(a) => a.inputs.iter_mut().for_each(Node::flatten),
+            Node::Patch(p) => [&mut p.source, &mut p.patch].into_iter().for_each(Node::flatten),
+            Node::Slice { .. } | Node::Output { .. } | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
+        }
+    }
+
     /// This node, a slice or a concatenation of slices (as [`Formula::push_by_kind`] gives the
     /// contents of an archive's members), cut into nodes of `sizes`, which add up to its bytes.
     /// Panics on another node, or where the sizes add up to more.
@@ -1006,9 +1023,13 @@ impl Formula {
     /// in an archive, say, are then stored once. From the shortest slice on, each is cut into
     /// slices kept before that it starts with, one after another (the longest each time; else
     /// the longest start of one, of at least half of it), and what follows of its own; one cut
-    /// nowhere is kept. Slices past the end of their stream, and those of streams sunk
-    /// ([`Bytes::sunk`], which a sink shares as it takes them), are left as they are. The
-    /// output is the same.
+    /// nowhere is kept. A piece found again right after itself is a run of the same bytes
+    /// (padding, zeros), which compresses to little: the rest of the run is kept of the slice's
+    /// own bytes instead of cut into a slice of each copy. Slices past the end of their stream,
+    /// and those of streams sunk ([`Bytes::sunk`], which a sink shares as it takes them), are
+    /// left as they are. The concatenations below the root's parts are then flattened
+    /// ([`Node::flatten`]), the root's parts (a batch's files) staying its parts. The output is
+    /// the same.
     pub fn share_slices(&mut self, min: usize) {
         type Sl = (usize, u64, u64);
         let mut slices: Vec<Sl> = Vec::new();
@@ -1047,6 +1068,14 @@ impl Formula {
                         .map(|(k, n)| (k.0, k.1, n as u64))
                 });
                 let Some(k) = found else { break };
+                if pieces.last() == Some(&k) {
+                    // (the run of its copies, of its length as the period, of the slice's own)
+                    let p = k.2 as usize;
+                    let run = b[at..].iter().zip(&b[at - p..]).take_while(|(a, b)| a == b).count();
+                    pieces.push((x.0, x.1 + at as u64, run as u64));
+                    at += run;
+                    continue;
+                }
                 pieces.push(k);
                 at += k.2 as usize;
             }
@@ -1069,6 +1098,7 @@ impl Formula {
             to.insert(x, pieces);
         }
         if to.is_empty() {
+            self.flatten_parts();
             return;
         }
         // (the pieces are slices kept, not cut again)
@@ -1081,7 +1111,18 @@ impl Formula {
         };
         self.shared.iter_mut().flat_map(|s| &mut s.apply.inputs).for_each(|n| n.visit_mut(&mut cut));
         self.root.visit_mut(&mut cut);
+        self.flatten_parts();
         self.compact();
+    }
+
+    /// [`Node::flatten`] of the inputs of the applications of several outputs and of the root's
+    /// parts, or of the root where it is not a concatenation: the root's parts stay its parts.
+    fn flatten_parts(&mut self) {
+        self.shared.iter_mut().flat_map(|s| &mut s.apply.inputs).for_each(Node::flatten);
+        match &mut self.root {
+            Node::Concat(ns) => ns.iter_mut().for_each(Node::flatten),
+            n => n.flatten(),
+        }
     }
 
     /// Puts the streams of each class and kind one after another, in one stream (in the place
@@ -2277,6 +2318,45 @@ mod tests {
         let classes: Vec<_> = f.streams.iter().map(|s| (&*s.class, s.data.len())).collect();
         assert_eq!(classes, [("a", 80), ("b", 40), ("c", 100), ("d", 8), ("e", 20), ("o", 1), ("z", 4), ("q", 80)]);
         assert!(matches!(&f.root, Node::Concat(ns) if ns.last() == Some(&Node::slice(2, 90, 20))));
+    }
+
+    /// A slice cut within a concatenation below the root is spliced into it, not nested; the
+    /// root's parts stay its parts, each cut where it is.
+    #[test]
+    fn share_slices_flat() {
+        let long: Vec<u8> = (0..40u32).flat_map(|i| i.to_le_bytes()).collect();
+        let mut f = Formula::default();
+        let a = f.push("a", long[..32].to_vec());
+        let b = f.push("b", long.clone());
+        let c = f.push("c", b"x".repeat(20));
+        f.root = Node::Concat(vec![Node::Concat(vec![c, b.clone()]), b.clone(), a]);
+        let want = f.eval(&Rev).unwrap();
+        f.share_slices(16);
+        assert_eq!(f.eval(&Rev), Ok(want));
+        let Node::Concat(parts) = &f.root else { panic!("{f}") };
+        assert_eq!(parts.len(), 3, "{f}");
+        let nested = |n: &Node| matches!(n, Node::Concat(ns) if ns.iter().any(|n| matches!(n, Node::Concat(_))));
+        assert!(!parts.iter().any(nested), "{f}");
+        assert!(matches!(&parts[0], Node::Concat(ns) if ns.len() == 3), "{f}");
+        assert!(matches!(&parts[1], Node::Concat(ns) if ns.len() == 2), "{f}");
+    }
+
+    /// A slice whose bytes repeat a piece over and over (padding, zeros) is cut at its first
+    /// copy only: the rest of the run is kept of its own bytes, which compress to little, not
+    /// cut into a slice of each copy.
+    #[test]
+    fn share_slices_runs() {
+        let mut f = Formula::default();
+        let z = f.push("z", vec![0; 16]);
+        let run = f.push("run", [&[0; 200][..], b"some tail of its own"].concat());
+        f.root = Node::Concat(vec![z, run]);
+        let want = f.eval(&Rev).unwrap();
+        f.share_slices(16);
+        assert_eq!(f.eval(&Rev), Ok(want));
+        let Node::Concat(parts) = &f.root else { panic!("{f}") };
+        // the zeros' first 16 bytes of z, the rest of run's own
+        assert_eq!(parts[1], Node::concat([Node::slice(0, 0, 16), Node::slice(1, 0, 204)]), "{f}");
+        assert_eq!(f.streams[1].data.len(), 204);
     }
 
     /// Bytes shared are cloned without a copy, and copied once changed.

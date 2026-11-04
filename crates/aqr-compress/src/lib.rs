@@ -782,6 +782,8 @@ fn compress_with(
     // (what the file's parts hold of each other, as a batch's files: the same body in two ZIP
     // archives in a tar archive, say)
     f.share_slices(archive::SLICE_MIN);
+    // (the root is one output: its parts flattened too)
+    f.root.flatten();
     drop(watch);
     drop(analyzing);
     note(Note::Ended(0));
