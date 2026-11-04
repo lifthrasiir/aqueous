@@ -220,6 +220,13 @@ pub struct Options {
     /// Of an archive of several files: about the most bytes of files made at once (a file
     /// longer is a batch of its own), which bounds the memory taken.
     pub batch: usize,
+    /// Of an archive of several files: about the least bytes of a segment of it (spec,
+    /// "Segments and entries"), which is closed by its metadata block after the batch that
+    /// makes it so long (a batch longer makes a segment longer), so that an archive cut short
+    /// or damaged loses no more than a segment's names; the next takes nothing of it (its
+    /// modules and dictionaries written again, a file of the same content as one of it made
+    /// again). None (0): one segment.
+    pub segment: usize,
     /// Where large buffers of streams are kept rather than on the heap: the path the names of
     /// [`spill::Spill`]'s files extend (made there and gone once their buffers are dropped;
     /// beside the output by aqr, named after it, as a temporary directory may be on another
@@ -227,6 +234,9 @@ pub struct Options {
     /// runs short. None by default.
     pub spill: Option<std::path::PathBuf>,
 }
+
+/// The bytes of a segment of an archive of several files by default ([`Options::segment`]).
+pub const SEGMENT: usize = 256 << 20;
 
 /// Streams shorter than this are not taken as held by the files archived together ([`Held`]):
 /// what they share is found by compressing them solid.
@@ -307,6 +317,7 @@ impl Default for Options {
             mirrors: false,
             set_bytes: 64 << 20,
             batch: 512 << 20,
+            segment: SEGMENT,
             spill: None,
         }
     }

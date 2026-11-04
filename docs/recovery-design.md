@@ -142,6 +142,8 @@ Par2의 MDS 결함: Par2는 Plank의 1997년 RS 튜토리얼을 따랐다. 그 �
 metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리밍 인코더는 마지막 segment의 metadata 사본을 앞쪽에 둘 수 없고, truncation이 일어나면 마지막 segment는 metadata를 반드시 잃는다.
 
 - compressor는 N MiB(또는 N초)마다 segment를 닫는다. 그러면 truncation 손실은 **아직 닫히지 않은 마지막 segment 하나로 묶인다**.
+  - 구현: `aqr -S SIZE`(`Options::segment`). 출력 크기 기준이며, 그 크기를 넘긴 batch 뒤에서 닫는다(큰 batch가 끼면 segment도 커진다). 각 segment는 module, resource, dictionary를 다시 쓰고, 앞 segment의 파일과 같은 내용은 다시 만든다(internal import는 쓰지 않는다: blast radius만 커진다). 하드링크 그룹은 음수(archive-wide)로 쓴다. 디렉토리와 내용 없는 entry는 첫 segment에, 나머지는 내용이 있는 segment에 두고 조상 디렉토리를 extra 없이 다시 적는다.
+  - salvage는 마지막 segment가 잘리면 그 segment를 버리고 앞 segment들로 되살린다(명세 §Salvage). metadata block 바로 뒤에서 정확히 잘린 경우는 알아챌 길이 없다.
 - 명세에는 비규범 권고로 둔다. 백업 도구가 기본값을 정한다.
 - metadata를 잃은 마지막 segment의 leaf block도 이름 없는 파일로는 추출할 수 있다(photorec식 salvage).
 
@@ -201,7 +203,7 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 
 > 꼬리에만 모으면 truncation(E4)이 마지막 metadata와 그 mirror를 함께 지운다. 마지막 batch들을 붙잡아 두면 mirror가 그 앞에 와서, 붙잡아 둔 만큼보다 짧은 truncation에서는 metadata를 되살리고 footer를 다시 만들 수 있다(명세 §Repair). 다중 segment 없이 E4를 막는다는 점이 크다. metadata의 오프셋이 그 mirror의 길이를 세므로 순환이 생기는데, mirror 자리의 길이를 정해 metadata를 만들고 mirror가 들어갈 때까지 늘려 다시 만들며, 남는 자리는 spacer로 채운다. 대개 한두 번에 끝난다. 암호화 payload에서는 spacer를 못 쓰므로 정확히 맞아야 하고, 안 맞으면 꼬리 배치로 물러난다. 메모리는 batch가 이미 두 개 분량 메모리에 있으므로 한 batch 남짓 더 드는 정도이다.
 >
-> 나머지 mirror에 대해서는, 다른 mirror를 metadata와 그 사이에 두어 거리를 채우는 것이 가장 싸다. footer 앞의 바이트를 하나도 바꾸지 않으므로 출력 어댑터로 구현되고, 단일 파일 아카이브에도 그대로 쓰인다. 대가는 사본을 끝까지 들고 있는 메모리(중요 블록 크기만큼)와, 꼬리 하나에 몰린 mirror들이다. 꼬리 손상은 mirror만 잃고 원본은 남으므로 단일 손상에는 문제가 없다. 다중 segment가 되면 segment마다 다음 segment 안쪽으로 미루는 방식(§5.1)으로 바꾼다.
+> 나머지 mirror에 대해서는, 다른 mirror를 metadata와 그 사이에 두어 거리를 채우는 것이 가장 싸다. footer 앞의 바이트를 하나도 바꾸지 않으므로 출력 어댑터로 구현되고, 단일 파일 아카이브에도 그대로 쓰인다. 대가는 사본을 끝까지 들고 있는 메모리(중요 블록 크기만큼)와, 꼬리 하나에 몰린 mirror들이다. 꼬리 손상은 mirror만 잃고 원본은 남으므로 단일 손상에는 문제가 없다. 다중 segment에서는 segment k의 mirror를 segment k+1의 metadata 바로 앞(그 segment의 batch를 다 쓴 뒤, 붙잡아 둔 batch도 내보낸 뒤)에 쓴다(`Mirroring::mirror_before`). 거리는 segment 하나만큼이고, 사본은 segment 두 개 분량까지만 들고 있다. 마지막 segment는 위와 같다.
 >
 > 측정(cloud VM): 156 KB gzip과 그 원문 617 KB의 디렉토리에서 183,467 → 267,810 B. 늘어난 84 KB는 거의 module block 두 개의 사본이다. 작은 아카이브는 module 크기만큼을 한 번 더 낸다(M1).
 

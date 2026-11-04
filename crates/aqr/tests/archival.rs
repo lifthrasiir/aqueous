@@ -297,6 +297,44 @@ fn restores_truncated() {
     fs::remove_dir_all(&d).unwrap();
 }
 
+/// An archive of a segment for each batch (`-S 1`) cut short in a segment before the last: the
+/// segments before it extracted, the one cut short and those after it lost as a whole, the run
+/// failing (with or without `-A`).
+#[test]
+fn salvages_segments() {
+    let d = scratch("segments");
+    fs::create_dir_all(d.join("src")).unwrap();
+    let mut want = Vec::new();
+    for i in 0..6 {
+        let name = format!("n{i}.bin");
+        let n = noise(300_000, 300 + i);
+        fs::write(d.join("src").join(&name), &n).unwrap();
+        want.push((name, n));
+    }
+    for mirrors in [false, true] {
+        let mut args = vec!["-q", "-f", "-B", "300K", "-S", "1", "-o", "s.aqr", "src"];
+        if mirrors {
+            args.insert(0, "-A");
+        }
+        aqr_in(&d, &args);
+        let a = fs::read(d.join("s.aqr")).unwrap();
+        let metas: Vec<usize> = blocks(&a).iter().filter(|b| (0x10..0x18).contains(&b.1)).map(|b| b.0).collect();
+        assert_eq!(metas.len(), 6, "{mirrors}");
+        let t = stderr(&aqr_in(&d, &["-K", "s.aqr"]));
+        assert!(!mirrors || t.contains("mirrored archive: yes"), "{t}");
+        // (in the fourth segment's blocks)
+        fs::write(d.join("cut.aqr"), &a[..metas[2] + 100_000]).unwrap();
+        let out = d.join(format!("out-{mirrors}"));
+        let o = aqr_fed(&d, &["-d", "-o", out.to_str().unwrap(), "cut.aqr"], b"");
+        let t = stderr(&o);
+        assert!(!o.status.success() && t.contains("a segment cut short lost"), "{t}");
+        let got = files(&out);
+        assert_eq!(got.len(), 3, "{t}");
+        assert!(got.iter().all(|f| want.contains(f)));
+    }
+    fs::remove_dir_all(&d).unwrap();
+}
+
 /// An archive without mirror blocks whose file's block is damaged: the others extracted, that
 /// file told as lost and left out (the run failing), its checksum telling.
 #[test]

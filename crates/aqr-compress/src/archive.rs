@@ -1,8 +1,9 @@
 //! Archives of several files ([`compress_tree`]; spec, "Segments and entries"): the files of a
 //! [`Tree`] are recompressed as the entries of a ZIP archive are, each by its kind by its name
 //! ([`kind_by_name`]) and up to [`Options::depth`] formats deep from the file, the PNG files
-//! alike among them coded as sets; each file's formula is then a leaf of the archive's one
-//! segment. The files are made at once, on up to [`Options::threads`] threads (the formulas of
+//! alike among them coded as sets; each file's formula is then a leaf of a segment of the
+//! archive, closed after the batch that makes it [`Options::segment`] bytes long
+//! ([`Writer::close`]). The files are made at once, on up to [`Options::threads`] threads (the formulas of
 //! those of pure formats beforehand, as contents are; then each file in a context of its own).
 //!
 //! The files are taken in batches of about [`Options::batch`] bytes, in their order (by
@@ -32,7 +33,7 @@ use std::ops::Range;
 use std::sync::{Condvar, Mutex};
 
 use aqr_decompress::Native;
-use aqr_formula::aqr::{self, Batch, ContentAt, Leaf, Level, Placed, SegmentWriter, Tree};
+use aqr_formula::aqr::{self, Batch, ContentAt, Entry, EntryNode, Extra, Leaf, Level, Placed, SegmentWriter, Tree};
 use aqr_formula::probe::{self, Held};
 use aqr_formula::{Bytes, Formula, Kind, Module, Node};
 
@@ -201,17 +202,18 @@ fn compress_tree_noting<S: Source + ?Sized>(
     notes: Notes,
     tell: &(dyn Fn(Event) + Sync),
 ) -> io::Result<Report> {
-    let mut mirroring = None;
-    let out: &mut dyn Write = match opt.mirrors {
-        true => mirroring.insert(aqr::Mirroring::new(out, opt.size_hint)),
-        false => out,
+    let mut out = match opt.mirrors {
+        true => Out::Mirrored(aqr::Mirroring::new(out, opt.size_hint)),
+        false => Out::Plain(out),
     };
     let n = src.len();
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| sort_key(src.name(a)).cmp(&sort_key(src.name(b))).then(a.cmp(&b)));
     // the contents that may hold each other together, in the place of the first, a batch never
     // cutting them apart
-    let (group, entries, exes) = together(src, opt, &notes)?;
+    let (mut group, entries, exes) = together(src, opt, &notes)?;
+    // (and the contents of an entry, its file's and its forks', for it to be of one segment)
+    entry_units(tree, &mut group);
     lay_alike(&mut order, &exes, &group, src, opt, &notes)?;
     let mut members: HashMap<usize, Vec<usize>> = HashMap::new();
     order.iter().for_each(|&c| members.entry(group[c]).or_default().push(c));
@@ -235,8 +237,9 @@ fn compress_tree_noting<S: Source + ?Sized>(
 
     let w = SegmentWriter::with_size_hint(opt.size_hint);
     out.write_all(w.head())?;
+    let w_at = w.len();
     let weights: Vec<u64> = batches.iter().map(weight).collect();
-    let cx = Ctx { src, opt, notes: &notes, batches: &batches, weights: &weights, entries: &entries };
+    let cx = Ctx { src, opt, notes: &notes, batches: &batches, weights: &weights, entries: &entries, tree };
     let pipe = Pipe {
         reader: Mutex::new(Reader { first: HashMap::new() }),
         state: Mutex::new(State {
@@ -256,6 +259,12 @@ fn compress_tree_noting<S: Source + ?Sized>(
         hold: opt.mirrors,
         held: std::collections::VecDeque::new(),
         held_len: 0,
+        segment: Vec::new(),
+        again: HashMap::new(),
+        segment_at: w_at,
+        segments: 0,
+        metadata_end: None,
+        inserted: 0,
     };
     std::thread::scope(|s| {
         // (a thread of no worker of the pool, which takes one only as one is free: as the
@@ -270,11 +279,21 @@ fn compress_tree_noting<S: Source + ?Sized>(
             }
         }
         let _done = Done(&pipe);
-        wr.run(&pipe, &cx, tell, &mut *out)
+        wr.run(&pipe, &cx, tell, &mut out)
     })?;
-    let Writer { w, at, mut r, held, held_len, .. } = wr;
-    let contents: Vec<ContentAt> =
-        (0..n).map(|c| at[c].or_else(|| at[r.files[c].same_as?]).expect("every content made")).collect();
+    // the last segment's entries, or all of them where it is the only one
+    let (last, contents) = match wr.segments {
+        0 => {
+            let at = |c: usize| wr.at[c].or_else(|| wr.at[wr.r.files[c].same_as?]);
+            (None, (0..n).map(|c| at(c).expect("every content made")).collect())
+        }
+        _ => {
+            let (t, contents) = wr.segment_tree(tree);
+            (Some(t), contents)
+        }
+    };
+    let tree = last.as_ref().unwrap_or(tree);
+    let Writer { w, mut r, held, held_len, inserted, .. } = wr;
     // (an encoder of the metadata block only)
     let enc = aqr::Encoder::with_threads(opt.level, opt.threads).with_modules(aqr_decompress::wasm_of);
     let bad = |e: aqr_formula::Error| io::Error::new(io::ErrorKind::InvalidInput, e.0);
@@ -294,8 +313,9 @@ fn compress_tree_noting<S: Source + ?Sized>(
         out.write_all(b)?;
     }
     out.write_all(&end)?;
-    r.mirrors = mirror.len() + mirroring.map_or(0, |m| m.added() as usize);
-    r.len = w.len() + end.len() + r.mirrors;
+    r.mirrors = mirror.len() + out.added() as usize;
+    // (the mirror blocks of segments closed, written between batches, counted by the writer)
+    r.len = w.len() + end.len() + r.mirrors - inserted;
     r.overhead = r.len - r.files.iter().map(|f| f.archived).sum::<f64>().round() as usize;
     r.unverified.sort_unstable();
     Ok(r)
@@ -319,6 +339,8 @@ struct Ctx<'a, S: ?Sized> {
     weights: &'a [u64],
     /// The contents found as entries or members of others ([`together`]).
     entries: &'a HashSet<usize>,
+    /// The entries archived, those of each segment written as it is closed.
+    tree: &'a Tree,
 }
 
 /// The batches being made: read in order (under [`Pipe::reader`]) as there is room for them,
@@ -491,7 +513,8 @@ impl Reader {
     }
 }
 
-/// The archive written so far, a batch after another in their order.
+/// The archive written so far, a batch after another in their order, closing a segment after
+/// the batch that makes it [`Options::segment`] bytes long.
 struct Writer {
     w: SegmentWriter,
     at: Vec<Option<ContentAt>>,
@@ -503,6 +526,89 @@ struct Writer {
     hold: bool,
     held: std::collections::VecDeque<Vec<u8>>,
     held_len: usize,
+    /// The contents of the segment being written (those of the same content as one before it
+    /// too), where it starts, and the segments closed.
+    segment: Vec<usize>,
+    segment_at: usize,
+    segments: usize,
+    /// Of the contents of segments closed that contents of this one are the same as: the one
+    /// of them made again in this one.
+    again: HashMap<usize, usize>,
+    /// Where the last metadata block written ends: the blocks before it are mirrored before the
+    /// next one ([`Options::mirrors`]).
+    metadata_end: Option<u64>,
+    /// Bytes of the mirror blocks written between batches.
+    inserted: usize,
+}
+
+/// Where the archive is written: as it is, or with mirror blocks ([`Options::mirrors`]).
+enum Out<'a> {
+    Plain(&'a mut dyn Write),
+    Mirrored(aqr::Mirroring<&'a mut dyn Write>),
+}
+
+impl Out<'_> {
+    /// Bytes of the mirror blocks written (and of the footer as it grew).
+    fn added(&self) -> u64 {
+        match self {
+            Out::Plain(_) => 0,
+            Out::Mirrored(m) => m.added(),
+        }
+    }
+}
+
+impl Write for Out<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Out::Plain(o) => o.write(buf),
+            Out::Mirrored(m) => m.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Out::Plain(o) => o.flush(),
+            Out::Mirrored(m) => m.flush(),
+        }
+    }
+}
+
+/// The contents of each entry of `tree` (its file's and its forks', and the root's forks) in one
+/// group of `group` (each content's first of those that may hold each other, [`together`]),
+/// which are in a batch together: an entry is of the segment of its contents.
+fn entry_units(tree: &Tree, group: &mut [usize]) {
+    let extras = std::iter::once(&tree.root).chain(tree.entries.iter().map(|e| &e.extra));
+    let nodes = std::iter::once(None).chain(tree.entries.iter().map(|e| Some(&e.node)));
+    let mut joined: Vec<Vec<usize>> = Vec::new();
+    for (x, node) in extras.zip(nodes) {
+        let file = match node {
+            Some(&EntryNode::File(c)) => Some(c),
+            _ => None,
+        };
+        let cs: Vec<usize> = file.into_iter().chain(x.forks.iter().map(|f| f.1)).collect();
+        if cs.len() > 1 {
+            joined.push(cs);
+        }
+    }
+    if joined.is_empty() {
+        return;
+    }
+    // (the groups joined, each the least of them)
+    let mut parent: HashMap<usize, usize> = HashMap::new();
+    fn root(p: &HashMap<usize, usize>, mut g: usize) -> usize {
+        while let Some(&q) = p.get(&g).filter(|&&q| q != g) {
+            g = q;
+        }
+        g
+    }
+    for cs in joined {
+        let roots: Vec<usize> = cs.iter().map(|&c| root(&parent, group[c])).collect();
+        let least = *roots.iter().min().expect("contents");
+        roots.iter().for_each(|&r| _ = parent.insert(r, least));
+    }
+    for g in group.iter_mut() {
+        *g = root(&parent, *g);
+    }
 }
 
 impl Writer {
@@ -513,7 +619,7 @@ impl Writer {
         pipe: &Pipe,
         cx: &Ctx<S>,
         tell: &(dyn Fn(Event) + Sync),
-        out: &mut dyn Write,
+        out: &mut Out,
     ) -> io::Result<()> {
         while self.next < cx.batches.len() {
             let made = {
@@ -534,6 +640,10 @@ impl Writer {
                 self.next += 1;
                 drop(st);
                 pipe.changed.notify_all();
+                let segment = cx.opt.segment;
+                if segment > 0 && self.next < cx.batches.len() && self.w.segment_len() >= segment {
+                    self.close(cx, out)?;
+                }
                 continue;
             }
             if let Some(c) = pipe.claim(cx) {
@@ -560,32 +670,75 @@ impl Writer {
         tell: &(dyn Fn(Event) + Sync),
         out: &mut dyn Write,
     ) -> io::Result<()> {
-        let (src, opt, notes, batch) = (cx.src, cx.opt, cx.notes, &cx.batches[i]);
+        let (src, notes, batch) = (cx.src, cx.notes, &cx.batches[i]);
         for (&c, &(len, same_as)) in batch.iter().zip(lens) {
             self.r.read += len;
             (self.r.files[c].len, self.r.files[c].same_as) = (len, same_as);
         }
-        let Some((files, mut part)) = made else {
-            batch.iter().try_for_each(|&c| src.intact(c))?;
-            notes.send(Note::Written(i));
-            tell(Event::Written { contents: batch, report: &self.r });
-            return Ok(());
-        };
+        self.segment.extend_from_slice(batch);
+        if let Some((files, part)) = made {
+            self.put(i, &files, part, cx, out)?;
+        }
+        // those of the same content as one of a segment closed made again, apart (by its first
+        // of them, the others of the same content as it)
+        let mut again: Vec<usize> = Vec::new();
+        for &c in batch {
+            let Some(d) = self.r.files[c].same_as else { continue };
+            if self.at[d].is_some_and(|a| a.leaf < self.segment_at) {
+                match self.again.entry(d) {
+                    std::collections::hash_map::Entry::Occupied(e) => self.r.files[c].same_as = Some(*e.get()),
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(c);
+                        self.r.files[c].same_as = None;
+                        again.push(c);
+                    }
+                }
+            }
+        }
+        if !again.is_empty() {
+            let data = aqr_common::pool::par_map(again.len(), cx.opt.threads, |k| src.read(again[k]));
+            let data: Vec<Bytes> = data.into_iter().collect::<io::Result<_>>()?;
+            let files: Vec<File> = (again.iter().zip(&data))
+                .map(|(&c, d)| {
+                    let hash = xxhash_rust::xxh3::xxh3_128(d);
+                    File::of(c, d, hash, kind_by_name(src.name(c)), cx.entries.contains(&c))
+                })
+                .collect();
+            let part = analyze(i, &files, data, &HashSet::new(), cx.opt, notes);
+            self.put(i, &files, part, cx, out)?;
+        }
+        batch.iter().try_for_each(|&c| src.intact(c))?;
+        notes.send(Note::Written(i));
+        tell(Event::Written { contents: batch, report: &self.r });
+        Ok(())
+    }
+
+    /// Encodes, verifies and writes `files` (of batch `i`) of analysis `part`: those not given
+    /// back made again kept as they are.
+    fn put<S: Source + ?Sized>(
+        &mut self,
+        i: usize,
+        files: &[File],
+        mut part: Analyzed,
+        cx: &Ctx<S>,
+        out: &mut dyn Write,
+    ) -> io::Result<()> {
+        let (src, opt, notes, batch) = (cx.src, cx.opt, cx.notes, &cx.batches[i]);
         let mut raw = HashSet::new();
         let mut made = loop {
-            let made = finish(i, &self.w, &files, part, src, opt, notes);
+            let made = finish(i, &self.w, files, part, src, opt, notes);
             let bad: Vec<usize> = made.bad.iter().copied().filter(|k| !raw.contains(k)).collect();
             if bad.is_empty() {
                 break made;
             }
             // (not given back as it was not read as it is: told so, not made again)
-            batch.iter().try_for_each(|&c| src.intact(c))?;
+            files.iter().try_for_each(|f| src.intact(f.c))?;
             raw.extend(bad);
             let bytes = batch.iter().map(|&c| src.size(c)).sum();
             notes.send(Note::Batch { batch: i, bytes, verify: opt.verify, contents: batch.clone() });
-            part = analyze(i, &files, reread(src, &files, opt.threads)?, &raw, opt, notes);
+            part = analyze(i, files, reread(src, files, opt.threads)?, &raw, opt, notes);
         };
-        batch.iter().try_for_each(|&c| src.intact(c))?;
+        files.iter().try_for_each(|f| src.intact(f.c))?;
         self.w.commit(&made.batch);
         {
             let _s = aqr_common::trace::span("write");
@@ -618,9 +771,95 @@ impl Writer {
         }
         r.sets.extend(made.sets.iter().map(|s| global(s)));
         r.unverified.extend(raw.iter().map(|&k| files[k].c));
-        notes.send(Note::Written(i));
-        tell(Event::Written { contents: batch, report: r });
         Ok(())
+    }
+
+    /// Closes the segment: the batches held back written, then the mirror blocks of the
+    /// segments closed before (as far from their blocks as this segment is long), then its
+    /// metadata block, of its entries ([`Writer::segment_tree`]).
+    fn close<S: Source + ?Sized>(&mut self, cx: &Ctx<S>, out: &mut Out) -> io::Result<()> {
+        let _s = aqr_common::trace::span("write");
+        for b in std::mem::take(&mut self.held) {
+            out.write_all(&b)?;
+        }
+        self.held_len = 0;
+        if let (Some(end), Out::Mirrored(m)) = (self.metadata_end, &mut *out) {
+            let n = m.mirror_before(end)? as usize;
+            self.w.skip(n);
+            self.inserted += n;
+        }
+        let (t, contents) = self.segment_tree(cx.tree);
+        let enc = aqr::Encoder::with_threads(cx.opt.level, cx.opt.threads).with_modules(aqr_decompress::wasm_of);
+        let meta = self.w.close(&enc, &t, &contents).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.0))?;
+        out.write_all(&meta)?;
+        self.metadata_end = Some(self.w.len() as u64);
+        (self.segment_at, self.segments) = (self.w.len(), self.segments + 1);
+        self.segment.clear();
+        self.again.clear();
+        Ok(())
+    }
+
+    /// The entries of the segment being written, of `tree`, and its contents (by
+    /// [`EntryNode::File`]): those whose contents (file and forks) are of it, those of none in
+    /// the first segment; and the directories they are in, again (their extra where they are of
+    /// the segment, else none, which keeps theirs before). The root's extra likewise. Link
+    /// groups are taken as archive-wide (negative), as the archive is of several segments.
+    fn segment_tree(&self, tree: &Tree) -> (Tree, Vec<ContentAt>) {
+        let at = |c: usize| self.at[c].or_else(|| self.at[self.r.files[c].same_as?]);
+        let mine: HashSet<usize> = self.segment.iter().copied().collect();
+        let first = self.segments == 0;
+        // whether an entry (or the root, of an extra alone) is of the segment
+        let of = |node: Option<&EntryNode>, x: &Extra| {
+            let file = match node {
+                Some(&EntryNode::File(c)) => Some(c),
+                _ => None,
+            };
+            let mut cs = file.into_iter().chain(x.forks.iter().map(|f| f.1)).peekable();
+            match cs.peek() {
+                None => first,
+                Some(_) => cs.all(|c| mine.contains(&c)),
+            }
+        };
+        let n = tree.entries.len();
+        let own: Vec<bool> = tree.entries.iter().map(|e| of(Some(&e.node), &e.extra)).collect();
+        let mut taken = own.clone();
+        for k in (0..n).rev() {
+            if taken[k]
+                && let Some(p) = tree.entries[k].parent
+            {
+                taken[p] = true;
+            }
+        }
+        let mut contents: Vec<ContentAt> = Vec::new();
+        let mut index: HashMap<usize, usize> = HashMap::new();
+        let mut content = |c: usize| {
+            *index.entry(c).or_insert_with(|| {
+                contents.push(at(c).expect("a content of the segment made"));
+                contents.len() - 1
+            })
+        };
+        fn extra(x: &Extra, own: bool, content: &mut dyn FnMut(usize) -> usize) -> Extra {
+            if !own {
+                return Extra::default();
+            }
+            let mut x = x.clone();
+            x.forks.iter_mut().for_each(|f| f.1 = content(f.1));
+            x.link_group = x.link_group.map(|g| if g >= 0 { -(g + 1) } else { g });
+            x
+        }
+        let root = extra(&tree.root, of(None, &tree.root), &mut content);
+        let mut new = vec![None; n];
+        let mut entries = Vec::new();
+        for (k, e) in tree.entries.iter().enumerate().filter(|&(k, _)| taken[k]) {
+            let node = match e.node {
+                EntryNode::File(c) => EntryNode::File(content(c)),
+                ref node => node.clone(),
+            };
+            new[k] = Some(entries.len());
+            let parent = e.parent.map(|p| new[p].expect("a directory taken"));
+            entries.push(Entry { parent, name: e.name.clone(), node, extra: extra(&e.extra, own[k], &mut content) });
+        }
+        (Tree { root, entries }, contents)
     }
 }
 

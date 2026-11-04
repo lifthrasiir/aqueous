@@ -117,7 +117,10 @@ fn archived(files: &[(&str, Vec<u8>)], opt: &Options) -> (Vec<u8>, aqr_compress:
             })
             .collect()
     };
-    let (want, have) = (files_of(&tree), files_of(&t));
+    // (by name: the entries of several segments come in their segments' order)
+    let (mut want, mut have) = (files_of(&tree), files_of(&t));
+    want.sort_by(|a, b| a.0.cmp(&b.0));
+    have.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(want.len(), have.len());
     for (w, h) in want.iter().zip(&have) {
         assert_eq!((&w.0, &w.1), (&h.0, &h.1));
@@ -221,6 +224,58 @@ fn batches() {
     assert!(c.len() > one.len() && r.solid.iter().all(|s| s.len <= 2 * 30_000), "{} {}", c.len(), one.len());
     let attributed: f64 = r.files.iter().map(|f| f.archived).sum();
     assert!((attributed + r.overhead as f64 - c.len() as f64).abs() < 1.0);
+}
+
+/// The metadata blocks of archive `c`, as its blocks are read.
+fn metadata_blocks(c: &[u8]) -> usize {
+    let check = aqr_formula::aqr::mirror::check(c);
+    assert!(check.walked);
+    check.targets.iter().filter(|t| (0x10..=0x17).contains(&t.1)).count()
+}
+
+/// Files in segments of a batch each (batches of 30 KB): every file given back (a file and its
+/// fork in one segment), a file of the same content as one of a segment before made again; with
+/// mirror blocks, those of each segment before the next one's metadata block, as far from their
+/// blocks as the spec asks at least.
+#[test]
+fn segments() {
+    let files = sample();
+    let (one, _) = archived(&files, &Options { batch: 30_000, ..Options::default() });
+    assert_eq!(metadata_blocks(&one), 1);
+    let opt = Options { batch: 30_000, segment: 1, ..Options::default() };
+    let (c, r) = archived(&files, &opt);
+    assert!(metadata_blocks(&c) > 3, "{}", metadata_blocks(&c));
+    // (same.txt, then t1.txt of its content in a later batch: made again)
+    assert_eq!(r.files[1].same_as, None);
+    assert!(c.len() > one.len());
+    let attributed: f64 = r.files.iter().map(|f| f.archived).sum();
+    assert!((attributed + r.overhead as f64 - c.len() as f64).abs() < 1.0);
+    let (threaded, _) = archived(&files, &Options { threads: 4, ..opt.clone() });
+    assert!(threaded == c);
+    let (m, r) = archived(&files, &Options { mirrors: true, ..opt });
+    assert_eq!(r.len, m.len());
+    let check = aqr_formula::aqr::mirror::check(&m);
+    assert!(check.walked && check.mirrored(&m, false), "{check:?}");
+    assert_eq!(metadata_blocks(&m), metadata_blocks(&c));
+}
+
+/// Files linked together in two segments: of one link group after them, however they were
+/// numbered (archive-wide).
+#[test]
+fn segments_link_groups() {
+    let files = vec![("a.txt", text(20_000, 0)), ("b.txt", text(20_000, 1)), ("c.txt", text(20_000, 2))];
+    let (mut tree, contents) = tree_of(&files);
+    let mut groups = [Some(7), Some(3), Some(7)].into_iter();
+    for e in tree.entries.iter_mut().filter(|e| matches!(e.node, EntryNode::File(_))) {
+        e.extra.link_group = groups.next().flatten();
+    }
+    let inputs: Vec<Input> = contents.iter().map(|(n, d)| Input { name: n.as_bytes(), data: d }).collect();
+    let a = compress_tree(&tree, &inputs, &Options { batch: 20_000, segment: 1, ..Options::default() });
+    assert!(metadata_blocks(&a.archive) >= 3);
+    let Ok(Value::Tree(t, _)) = decompress_value(&a.archive, 1) else { panic!("not decoded") };
+    let group = |name: &[u8]| t.entries.iter().find(|e| e.name == name).unwrap().extra.link_group;
+    let (ga, gb, gc) = (group(b"a.txt"), group(b"b.txt"), group(b"c.txt"));
+    assert!(ga.is_some() && ga == gc && gb.is_some() && gb != ga, "{ga:?} {gb:?} {gc:?}");
 }
 
 /// A file, and the same in a gzip file and in a ZIP archive: their streams rebuilt and taken

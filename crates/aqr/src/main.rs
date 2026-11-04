@@ -1,7 +1,7 @@
 //! Compresses files and directories into Aqueous archives, and decompresses them, as zstd does.
 //!
 //! usage: aqr [-c | -d | -K | -t] [-o OUTPUT] [-L] [-f] [--rm] [-p] [-q | -v] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N]
-//! [--batch MIB | -B SIZE] [-b SIZE] [-D] [-A] [--no-check] [-P] [--wasm] [--no-sandbox] [--stats[=FILE]] [-h]
+//! [--batch MIB | -B SIZE] [-b SIZE] [-S SIZE] [-D] [-A] [--no-check] [-P] [--wasm] [--no-sandbox] [--stats[=FILE]] [-h]
 //! INPUT [--rename TO]...
 //!
 //! aqr -d [OPTIONS] ARCHIVE [PATH [--rename TO]]...; aqr -d --each [OPTIONS] ARCHIVE...; aqr -t [-q | -v] ARCHIVE [PATH]...;
@@ -127,7 +127,12 @@
 //!   memory taken by compression (but for a file larger).
 //! - `-B` is `--batch` as a size (512M; `K`, `M` and `G` are KiB, MiB and GiB, a number alone
 //!   bytes). `-b` is the most bytes of a block that files share (16M by default), which a file
-//!   read alone may have to decompress: smaller for faster random access. `-D` compresses the blocks alike of a batch (many of a class of stream, of
+//!   read alone may have to decompress: smaller for faster random access. `-S` is about the
+//!   least bytes of a segment of an archive of several files (256M by default; 0, one segment):
+//!   each closed by its metadata block after the batch that makes it so long, so that an archive
+//!   cut short or damaged loses no more than a segment's names, each segment carrying its own
+//!   modules and dictionaries (a file of the same content as one of a segment before stored
+//!   again). `-D` compresses the blocks alike of a batch (many of a class of stream, of
 //!   a few MiB each or less) with a dictionary trained for them where it pays.
 //! - `-T` is the number of threads (0, the default: as many as the machine has): the size of
 //!   the pool of threads that everything runs on ([`aqr_common::pool`]), this work itself too.
@@ -251,6 +256,8 @@ Compression:
       --batch MIB       make about MIB MiB of files at once (default 512)
   -B SIZE               --batch as a size (512M)
   -b SIZE               the most bytes of a block that files share (default 16M)
+  -S SIZE               close a segment of the archive after about SIZE bytes of it
+                        (default 256M; 0, one segment)
   -D                    compress blocks alike with dictionaries trained for them
   -A, --archival        for long-term preservation: mirror the blocks whose damage
                         would lose more than a file, to be restored from as it is read
@@ -514,6 +521,7 @@ fn parse() -> Result<Args, String> {
             }
             "-B" => a.opt.batch = size_of(&text(value("-B")?)).ok_or("-B takes a size (64M, 1G, ...)")?.max(1),
             "-b" => a.opt.block = size_of(&text(value("-b")?)).ok_or("-b takes a size (64K, 1M, ...)")?.max(1),
+            "-S" => a.opt.segment = size_of(&text(value("-S")?)).ok_or("-S takes a size (64M, 1G, ...)")?,
             "-D" => a.opt.dictionaries = true,
             "-A" | "--archival" => a.opt.mirrors = true,
             "--no-check" => a.opt.verify = false,
@@ -2126,6 +2134,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
             eprintln!("{}: {n} bytes lost; salvaging what is left", input.display());
         }
     }
+    let cut_off = restored.as_ref().and_then(|r| r.cut_off.as_ref()).map(|c| c.len());
     let read: &[u8] = restored.as_ref().map_or(read, |r| &r.bytes);
     // (salvaged where bytes were lost: their files lost, the others given back as they check)
     let mut archive = match (restored.as_ref().is_some_and(|r| !r.lost.is_empty()), decrypted.is_some()) {
@@ -2299,6 +2308,11 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
         }
         let n = lost.len();
         return Err(err(&format!("{n} file{} lost", if n == 1 { "" } else { "s" })));
+    }
+    // (salvaged, its files given back, but the blocks of a segment cut short lost with it, of
+    // files of no name known)
+    if let Some(n) = cut_off {
+        return Err(err(&format!("a segment cut short lost ({n} bytes), its files not known")));
     }
     if let (Some(s), Some(rec)) = (&a.stats, rec) {
         let mut contents = seen.contents(content_paths(&archive, &to.named));
