@@ -53,8 +53,8 @@ fn segments_and_paths() {
     // a path in both: each segment's entry, the second current, its times all told
     let (ok, out, err) = aqr_in(&d, &["-I", "two.aqr", "dir/f.txt"]);
     assert!(ok, "{err}");
-    let (one, two) = out.split_once("segment #2").expect(&out);
-    assert!(one.contains("segment #1:") && one.contains("a file of 3 B"), "{out}");
+    let (one, two) = out.split_once("\n  segment #2").expect(&out);
+    assert!(one.contains("segment #1 [replaced in segment #2]:") && one.contains("a file of 3 B"), "{out}");
     assert!(two.starts_with(" [current]:") && two.contains("a file of 11 B"), "{out}");
     for key in ["mtime: ", "atime: ", "unix-mode: ", "formula:"] {
         assert!(one.contains(key) && two.contains(key), "{key}: {out}");
@@ -64,8 +64,16 @@ fn segments_and_paths() {
     assert!(ok && out.contains("segment #1 [current]:") && !out.contains("segment #2"), "{out}");
     // the root directory, in each (merged: the latest current)
     let (ok, out, _) = aqr_in(&d, &["-I", "two.aqr", "/"]);
-    assert!(ok && out.contains("segment #1:") && out.contains("segment #2 [current]:"), "{out}");
+    assert!(
+        ok && out.contains("segment #1 [merged into segment #2]:") && out.contains("segment #2 [current]:"),
+        "{out}"
+    );
     assert!(out.contains("the root directory"), "{out}");
+    let (ok, out, _) = aqr_in(&d, &["-I", "two.aqr", "dir"]);
+    assert!(
+        ok && out.contains("segment #1 [merged into segment #2]:") && out.contains("segment #2 [current]:"),
+        "{out}"
+    );
     let (ok, _, err) = aqr_in(&d, &["-I", "two.aqr", "nothing"]);
     assert!(!ok && err.contains("not in the archive"), "{err}");
 }

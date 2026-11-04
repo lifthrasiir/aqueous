@@ -9,24 +9,26 @@
 //!   what does not hold of its references. The last segment is the archive as it is now
 //!   (`[current]`). An archive of a single file (of no metadata block) has its file told too:
 //!   the formula of each output of each leaf block, the file all of them one after another.
-//! - `-I ARCHIVE PATH...`: each path's entry as each segment has it (`segment #k`; an
-//!   archive of several segments has its entries before an update too), the one the archive has
-//!   as it is now `[current]` (the spec's merging of segments, "Merging segments"), a tombstone
-//!   `[removed]`: what it is, where its content is, every member of its entry extra (all its
-//!   timestamps among them), its forks, and the formula of its content and of each fork in full,
-//!   a node a line, indented by its depth. `.` or `/` is the root directory.
+//! - `-I ARCHIVE PATH...`: each path's entry as each segment has it (`segment #k`; an archive of
+//!   several segments has its entries before an update too), the one the archive has as it is
+//!   now `[current]` (the spec's merging of segments, "Merging segments", as
+//!   [`Inspection::merged`] tells it), the others with what became of them and in which segment
+//!   (`[replaced in segment #k]`, `[removed in segment #k]` by a tombstone, `[merged into
+//!   segment #k]` of a directory, `[gone with PATH of segment #k]` with a directory above it),
+//!   a tombstone `[tombstone]`: what it is, where its content is, every member of its entry
+//!   extra (all its timestamps among them), its forks, and the formula of its content and of
+//!   each fork in full, a node a line, indented by its depth. `.` or `/` is the root directory.
 //!
 //! Members of the entry extras that this crate knows are told as they read (times to their
 //! nanoseconds and time zones, permissions, attributes, names); members it does not know, as
 //! CBOR in its diagnostic notation, their strings cut at 64 bytes but with `-v`.
 
-use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use aqr_formula::aqr::inspect::{self, Content, Entry, Inspection, Node};
+use aqr_formula::aqr::inspect::{self, Content, Entry, Fate, Inspection, Node, Origin, State};
 use aqr_formula::aqr::{self, Extra, Member, Time, Zone, entry_key_name, name_bytes, name_from};
 
 use crate::Args;
@@ -97,11 +99,12 @@ fn info_of(a: &Args, input: &Path) -> Result<String, String> {
         if i.segments[0].metadata.is_none() {
             return Err(err(&"an archive of a single file, not of paths"));
         }
+        let states = i.merged();
         for (k, p) in paths.iter().enumerate() {
             if k > 0 {
                 s.push('\n');
             }
-            path(&mut s, &i, p).map_err(|e| err(&e))?;
+            path(&mut s, &i, &states, p).map_err(|e| err(&e))?;
         }
     }
     Ok(s)
@@ -234,8 +237,9 @@ fn archive(s: &mut String, i: &Inspection) -> aqr::Decoded<()> {
     Ok(())
 }
 
-/// Path `p`'s entry in each segment, of `-I ARCHIVE PATH`.
-fn path(s: &mut String, i: &Inspection, p: &Path) -> Result<(), String> {
+/// Path `p`'s entry in each segment, of `-I ARCHIVE PATH`, the archive as it is told by `states`
+/// ([`Inspection::merged`]).
+fn path(s: &mut String, i: &Inspection, states: &[Vec<State>], p: &Path) -> Result<(), String> {
     let bytes = crate::meta::os_bytes(p.as_os_str());
     let names: Vec<Vec<u8>> =
         bytes.split(|&b| b == b'/').filter(|n| !n.is_empty() && *n != b".").map(name_from).collect();
@@ -248,70 +252,41 @@ fn path(s: &mut String, i: &Inspection, p: &Path) -> Result<(), String> {
     if found.is_empty() {
         return Err(format!("{}: not in the archive", p.display()));
     }
-    let now = current(i, &names);
-    let shown = match names.is_empty() {
-        true => "/".into(),
-        false => names.iter().map(|n| String::from_utf8_lossy(name_bytes(n).0)).collect::<Vec<_>>().join("/"),
-    };
-    let _ = writeln!(s, "{shown}");
+    let _ = writeln!(s, "{}", shown(&names));
+    let of = |o: Origin| o.segment + 1;
     for &(k, e) in &found {
         let entry = &i.segments[k].entries[e];
-        let mark = match now {
-            Some((g, f, _)) if (g, f) == (k, e) => " [current]",
-            _ if entry.node == Node::Tombstone => " [removed]",
-            _ => "",
+        let mark = match states[k][e] {
+            State::Current { .. } => " [current]".into(),
+            State::Tombstone => " [tombstone]".into(),
+            State::Gone(Fate::Replaced(o)) => format!(" [replaced in segment #{}]", of(o)),
+            State::Gone(Fate::Removed(o)) => format!(" [removed in segment #{}]", of(o)),
+            State::Gone(Fate::Merged(o)) => format!(" [merged into segment #{}]", of(o)),
+            State::Gone(Fate::WithAncestor(o)) => {
+                let above = &i.segments[o.segment].entries[o.entry].names;
+                format!(" [gone with {} of segment #{}]", shown(above), of(o))
+            }
         };
         let _ = writeln!(s, "  segment #{}{mark}:", k + 1);
-        if let Some((g, f, Some(x))) = now
-            && (g, f) == (k, e)
-            && x != k
+        if let State::Current { extra: Some(x) } = states[k][e]
+            && x.segment != k
         {
-            let _ = writeln!(s, "    (its extra that of segment #{})", x + 1);
+            let _ = writeln!(s, "    (its extra that of segment #{})", of(x));
         }
         entry_of(s, i, k, entry).map_err(|e| e.to_string())?;
     }
-    if now.is_none() {
+    if !found.iter().any(|&(k, e)| matches!(states[k][e], State::Current { .. })) {
         let _ = writeln!(s, "  not in the archive as it is now");
     }
     Ok(())
 }
 
-/// Where the entry at `names` is in the archive as it is now, segments merged (spec, "Merging
-/// segments"): its segment and entry, and for a directory the segment whose extra it has
-/// (`None`: none has one).
-fn current(i: &Inspection, names: &[Vec<u8>]) -> Option<(usize, usize, Option<usize>)> {
-    // by path, the segment and entry, whether a directory, and the segment of its extra
-    type Now = BTreeMap<Vec<Vec<u8>>, (usize, usize, bool, Option<usize>)>;
-    let mut now: Now = BTreeMap::new();
-    let remove = |now: &mut Now, path: &Vec<Vec<u8>>| {
-        if now.remove(path).is_some_and(|n| n.2) {
-            // (a directory, with what is under it)
-            let under: Vec<_> =
-                now.range(path.clone()..).take_while(|(k, _)| k.starts_with(path)).map(|(k, _)| k.clone()).collect();
-            under.iter().for_each(|k| _ = now.remove(k));
-        }
-    };
-    for (k, g) in i.segments.iter().enumerate() {
-        for (e, entry) in g.entries.iter().enumerate() {
-            let extra = entry.members.is_some().then_some(k);
-            match entry.node {
-                Node::Tombstone => remove(&mut now, &entry.names),
-                Node::Root | Node::Dir => match now.get_mut(&entry.names) {
-                    // (merged: the latest, and the extra of the latest of one)
-                    Some(n) if n.2 => (n.0, n.1, n.3) = (k, e, extra.or(n.3)),
-                    _ => {
-                        remove(&mut now, &entry.names);
-                        now.insert(entry.names.clone(), (k, e, true, extra));
-                    }
-                },
-                _ => {
-                    remove(&mut now, &entry.names);
-                    now.insert(entry.names.clone(), (k, e, false, None));
-                }
-            }
-        }
+/// A path of an archive by its names from the root (`/` the root).
+fn shown(names: &[Vec<u8>]) -> String {
+    match names.is_empty() {
+        true => "/".into(),
+        false => names.iter().map(|n| String::from_utf8_lossy(name_bytes(n).0)).collect::<Vec<_>>().join("/"),
     }
-    now.get(names).map(|&(k, e, dir, x)| (k, e, if dir { x } else { None }))
 }
 
 /// Entry `e` of segment `k`: what it is, its content, its extra, its forks and the formulas.
