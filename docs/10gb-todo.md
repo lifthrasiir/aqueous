@@ -41,22 +41,23 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html, 10gb.zpa
 
 ## 측정
 
-2026-11-01, Apple M4(10코어), 커밋 `83097ad`(README의 수치). 압축은 `cargo aqr -c -f -o OUT
-~/tmp/10gb`(모든 스레드, level mid, 배치 512 MB, 검증 포함), 풀기는 `cargo aqr -K OUT`(당시 `-t`)(아무것도
-쓰지 않는다)이고, 둘 다 `--stats --stats=FILE.json`을 켜고 `/usr/bin/time -l`로 쟀다. 시간은 재기마다
-±5% 남짓 흔들린다. 이번에는 `duetexpertd`가 내내 1코어 남짓을 썼다.
+2026-11-04, Apple M4(10코어), 커밋 `9e43bca`(README의 수치). 압축은 `cargo aqr -c -f -o OUT
+~/tmp/10gb`(모든 스레드, level mid, 배치 512 MB, 검증 포함), 풀기는 `cargo aqr -K OUT`(아무것도
+쓰지 않는다)이고, 둘 다 `--stats --stats=FILE.json`을 켜고 `/usr/bin/time -l`로 쟀다(JSON은
+`crates/aqr/cache/10gb/`). 각각 두 번 재어 빠른 쪽을 적었다. 두 번째는 같은 명령어로 압축
+179.2 s, 풀기 37.6 s였다(발열로 보인다).
 
-- **2,497,965,328 B(2.498 GB)**, 압축 164.4 s(60.8 MB/s, 명령어 8.21 T), 최대 footprint 3.09 GB.
-  `921778d`의 2,552,168,908 B에서 −54.2 MB이다.
-- 풀기 38.8 s(258 MB/s, 명령어 1.121 T), 최대 footprint 2.58 GB. `ffb9393`의 22.6 s에서 늘어난 것은
-  거의 모두 7z(`mingw480`)를 받은 탓이다(아래, 6번).
+- **2,465,370,809 B(2.465 GB)**, 압축 165.7 s(60.3 MB/s, 명령어 8.71 T), 최대 footprint 3.25 GB.
+  `83097ad`의 2,497,965,328 B(164.4 s, 8.21 T, 3.09 GB)에서 −32.6 MB이다.
+- 풀기 33.9 s(295 MB/s, 명령어 1.286 T), 최대 footprint 2.23 GB. `83097ad`는 38.8 s(1.121 T), 2.58 GB.
+- `--stats`로 본 압축: worker가 평균 61.7% 일한다. pe가 바이트의 13.1%로 시간의 30.5%를, zip이
+  7.2%로 20.8%를 쓴다. heap 최대 2.86 GB(그중 lzma-recons 2.14 GB, 59.2 s).
+- `--stats`로 본 풀기: worker가 평균 43.6% 일한다. `mingw480`의 7z(lzma-recons)가 8.5 s 동안 혼자
+  돈다(5.6–13.6 s에 worker 하나). zip이 바이트의 7.2%로 시간의 27.3%를, lzma가 0.8%로 11.7%를 쓴다.
+  무게가 예산(2 GB)을 넘는 leaf는 혼자 들어가므로 그 옆에 아무것도 돌지 못한다(메모리 절).
+  `enwik9`와 `enwik9.zip`의 wrt 디코딩은 `921778d`부터 조각마다 스레드를 써서 각각 3.1 → 0.35 s이다.
 - 노는 코어의 몫만큼 빨라지지 않는 것은 M4의 10코어 중 6개가 효율 코어이고, 코어를 채울수록 같은
   명령어의 CPU 시간이 늘기 때문으로 보인다(재 보지 않았다).
-- `--stats`로 본 압축: worker가 평균 57.5% 일한다. 가장 긴 파일은 `mingw480`의 7z(34.5 s, 평균
-  2.3 스레드)이다. zip이 바이트의 7.2%로 시간의 17.9%를, lzma가 0.8%로 14.8%를 쓴다.
-- `--stats`로 본 풀기: worker가 평균 43.3% 일한다. 7z의 lzma-recons가 17.4 s 동안 혼자 돈다(한
-  worker). 무게가 예산(2 GB)을 넘는 leaf는 혼자 들어가므로 그 옆에 아무것도 돌지 못한다(메모리 절).
-  `enwik9`와 `enwik9.zip`의 wrt 디코딩은 `921778d`부터 조각마다 스레드를 써서 각각 3.1 → 0.35 s이다.
 - 잴 때는 `ps`로 다른 부하를 먼저 확인한다. macOS의 `mediaanalysisd`가 빌드의 `target/`을 두고
   1코어 남짓을 오래 쓰면 시간이 부푼다.
 
