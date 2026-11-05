@@ -188,6 +188,7 @@ use std::process::ExitCode;
 use std::sync::OnceLock;
 use std::time::Instant;
 
+mod append;
 mod extract;
 mod fold;
 mod info;
@@ -288,6 +289,10 @@ Compression:
       --no-check        do not decode the archive made to check it
       --atomic          make the archive whole or not at all: stopped (Ctrl-C), nothing
                         kept, rather than what was written ended as an archive
+  -a, --append          append the inputs to an archive (the first input, or -o): what
+                        is not in it, or changed (by size and modification time)
+      --delete          with -a, take away what the archive holds under the inputs'
+                        directories that they do not
 
 Decompression:
   -E, --encoding ENC    names of no declared encoding: auto (the default: as bytes where
@@ -340,6 +345,10 @@ struct Args {
     /// `--atomic`: compressing, an archive made whole or not at all, rather than committed as it
     /// is written ([`stop`]).
     atomic: bool,
+    /// `-a`: compressing, the inputs appended to an archive ([`append`]), the first input or `-o`;
+    /// with `--delete`, what it holds that they do not taken away.
+    append: bool,
+    delete: bool,
     /// `-L`: compressing, the links found (and given) followed, archived as what they lead to.
     dereference: bool,
     /// What is not commonly kept of the metadata kept too ([`meta`]).
@@ -466,6 +475,8 @@ fn parse() -> Result<Args, String> {
         force: false,
         rm: false,
         atomic: false,
+        append: false,
+        delete: false,
         dereference: false,
         preserve: false,
         quiet: false,
@@ -531,6 +542,8 @@ fn parse() -> Result<Args, String> {
             "-f" | "--force" => a.force = true,
             "--rm" => a.rm = true,
             "--atomic" => a.atomic = true,
+            "-a" | "--append" => a.append = true,
+            "--delete" => a.delete = true,
             "-L" | "--dereference" => a.dereference = true,
             "-p" | "--preserve" => a.preserve = true,
             "-q" | "--quiet" => a.quiet = true,
@@ -838,6 +851,19 @@ fn with_ext(path: &Path, ext: &str) -> PathBuf {
 }
 
 fn compress_all(a: &Args) -> Result<(), String> {
+    if a.append {
+        let (out, skip) = match &a.output {
+            Some(o) => (o.clone(), 0),
+            None => (a.inputs.first().cloned().ok_or("-a: no archive given")?, 1),
+        };
+        if a.inputs.len() <= skip {
+            return Err("-a: no inputs given to append".into());
+        }
+        return remove(&compress_into(a, &a.inputs[skip..], &a.given[skip..], &a.renames[skip..], &out)?);
+    }
+    if a.delete {
+        return Err("--delete: with -a alone".into());
+    }
     match &a.output {
         Some(out) => remove(&compress_into(a, &a.inputs, &a.given, &a.renames, out)?),
         None => {
@@ -1040,10 +1066,26 @@ fn compress_into(
     out: &Path,
 ) -> Result<Vec<Gone>, String> {
     if let Pack::Other(f, level) = a.format {
+        if a.append {
+            return Err("-a: Aqueous archives alone are appended to".into());
+        }
         return pack_into(a, f, level, inputs, given, renames, out);
     }
-    let Some(force) = output(a, out)? else { return Ok(Vec::new()) };
-    begin("compress", inputs, Some(out));
+    if a.append && (a.passphrase || a.opt.mirrors) {
+        return Err(format!(
+            "-a: not with {}",
+            if a.passphrase { "-P (an encrypted archive is not appended to)" } else { "-A" }
+        ));
+    }
+    // (appending, the archive there already, to be appended to)
+    let force = match a.append {
+        true => false,
+        false => match output(a, out)? {
+            Some(f) => f,
+            None => return Ok(Vec::new()),
+        },
+    };
+    begin(if a.append { "append" } else { "compress" }, inputs, Some(out));
     let start = Instant::now();
     let rec = stats::record(a.stats.as_ref());
     let mut opt = a.opt.clone();
@@ -1059,6 +1101,7 @@ fn compress_into(
         _ => None,
     };
     let single = match (followed.as_ref().map(std::slice::from_ref).unwrap_or(inputs), renames) {
+        _ if a.append => None,
         ([input], [None]) => Some((input, meta(input)?)).filter(|(_, m)| m.is_file()),
         _ => None,
     };
@@ -1156,39 +1199,59 @@ fn compress_into(
         }
         g.warnings.iter().for_each(|w| eprintln!("{w}"));
     }
+    // appending: what the archive holds already left out
+    let prior = match a.append {
+        true => {
+            let root_given = matches!((inputs, renames), ([i], [None]) if fs::metadata(i).is_ok_and(|m| m.is_dir()));
+            match append::prior(out, &mut g, a.delete, root_given, a.quiet)? {
+                Some(p) => Some(p),
+                None => {
+                    if !a.quiet {
+                        eprintln!("{}: nothing to append, all there already", out.display());
+                    }
+                    end(Some(out), 0, 0, 0, start);
+                    return Ok(g.gone.take().unwrap_or_default());
+                }
+            }
+        }
+        false => None,
+    };
     // (with -v, the log as the files are written)
     let view = view::View::new(&g, bars(), a.verbose);
     // written as it is made
     // (the files, as decompressing counts them: not their forks, each hard link)
     let files = g.tree.entries.iter().filter(|e| matches!(e.node, EntryNode::File(_))).count();
     // committed as it is written, and ended as it is where stopped, but with --atomic
-    let placed = std::sync::atomic::AtomicBool::new(false);
+    let placed = std::sync::atomic::AtomicBool::new(prior.is_some());
     let total = g.contents.iter().map(|c| c.2).sum::<u64>();
     let ended = |r: &aqr_compress::Report| stopped_tree(a, out, force, &placed, (files as u64, total), r);
     let stopping = (!a.atomic).then(|| aqr_compress::Stop { requested: stop::graceful(), ended: &ended });
-    let r = write_placing(out, force, |file, part| match &sealing {
-        None => {
-            let w = std::io::BufWriter::with_capacity(8 << 20, &*file);
-            let place = (part.to_owned(), out.to_owned(), force);
-            let mut o = FileOut { w, commits: !a.atomic, place, placed: &placed };
-            let r = viewed(a, &view, |tell| {
-                aqr_compress::compress_tree_into(&g.tree, &g, opt, &mut o, None, stopping.as_ref(), tell)
-            })?;
-            Ok((r, placed.load(std::sync::atomic::Ordering::SeqCst)))
-        }
-        // (the sealer writing a chunk at a time, the last sealed as the archive ends)
-        Some(p) => {
-            let mut s = Sealed(sealer(file, p)?);
-            let mut r = viewed(a, &view, |tell| {
-                aqr_compress::compress_tree_into(&g.tree, &g, opt, &mut s, None, stopping.as_ref(), tell)
-            })?;
-            drop(s);
-            // (the overhead of the encryption the archive's)
-            let len = file.metadata()?.len() as usize;
-            (r.overhead, r.len) = (r.overhead + len - r.len, len);
-            Ok((r, false))
-        }
-    })?;
+    let r = match prior {
+        Some(p) => appended(a, out, p, &view, &g, opt, stopping.as_ref())?,
+        None => write_placing(out, force, |file, part| match &sealing {
+            None => {
+                let w = std::io::BufWriter::with_capacity(8 << 20, &*file);
+                let place = Some((part.to_owned(), out.to_owned(), force));
+                let mut o = FileOut { w, commits: !a.atomic, once: false, base: 0, place, placed: &placed };
+                let r = viewed(a, &view, |tell| {
+                    aqr_compress::compress_tree_into(&g.tree, &g, opt, &mut o, None, stopping.as_ref(), tell)
+                })?;
+                Ok((r, placed.load(std::sync::atomic::Ordering::SeqCst)))
+            }
+            // (the sealer writing a chunk at a time, the last sealed as the archive ends)
+            Some(p) => {
+                let mut s = Sealed(sealer(file, p)?);
+                let mut r = viewed(a, &view, |tell| {
+                    aqr_compress::compress_tree_into(&g.tree, &g, opt, &mut s, None, stopping.as_ref(), tell)
+                })?;
+                drop(s);
+                // (the overhead of the encryption the archive's)
+                let len = file.metadata()?.len() as usize;
+                (r.overhead, r.len) = (r.overhead + len - r.len, len);
+                Ok((r, false))
+            }
+        })?,
+    };
     if !a.quiet {
         eprintln!("archive overhead (header, modules, metadata): {}", size(r.overhead as f64));
         if r.mirrors > 0 {
@@ -1806,6 +1869,40 @@ fn write_whole<T>(
     r
 }
 
+/// The archive `out` appended to, as [`append::prior`] found it, of what `g` holds (to be
+/// appended), committed as it is written (once as it ends, with `--atomic`): what became of it.
+fn appended(
+    a: &Args,
+    out: &Path,
+    p: append::Prior,
+    view: &view::View,
+    g: &Gathered,
+    opt: &Options,
+    stopping: Option<&aqr_compress::Stop>,
+) -> Result<aqr_compress::Report, String> {
+    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", out.display());
+    let file = &p.file;
+    // (a footer across a sector of the file written over, from where it starts)
+    if !p.kill {
+        if a.verbose {
+            eprintln!("{}: its footer across a sector of the file: written over", out.display());
+        }
+        file.set_len(p.at.start + p.footer.start as u64).map_err(|e| err(&e))?;
+    }
+    let end = p.at.end;
+    let _undo = stop::undo_by(stop::Undo::Truncate(out.to_owned(), end));
+    let mut f = file;
+    std::io::Seek::seek(&mut f, std::io::SeekFrom::End(0)).map_err(|e| err(&e))?;
+    let from =
+        aqr_compress::Appending { footer: p.footer, metadata: p.metadata, link_groups: p.link_groups, kill: p.kill };
+    let placed = std::sync::atomic::AtomicBool::new(true);
+    let w = std::io::BufWriter::with_capacity(8 << 20, file);
+    let mut o = FileOut { w, commits: true, once: a.atomic, base: p.at.start, place: None, placed: &placed };
+    // (failing, what was written after the last commit is left, cut off by the next append)
+    viewed(a, view, |tell| aqr_compress::compress_tree_into(&g.tree, g, opt, &mut o, Some(&from), stopping, tell))
+        .map_err(|e| err(&e))
+}
+
 /// Of archive `out` of several files (`files` files of `total` bytes), stopped and ended as it
 /// is ([`aqr_compress::Stop`]): placed where it was not (but where nothing was kept), what it
 /// holds told, the process ended (exit code 130, as a shell tells a process stopped by Ctrl-C).
@@ -1853,9 +1950,14 @@ fn stopped_tree(
 /// [`stop::placed`]), as `placed` then tells.
 struct FileOut<'f> {
     w: std::io::BufWriter<&'f fs::File>,
+    /// Whether it is committed as it is written, once as it ends (an archive appended to with
+    /// `--atomic`), and where the archive starts in the file.
     commits: bool,
-    /// Where it is to be placed (`part`, its output, whether over a file there).
-    place: (PathBuf, PathBuf, bool),
+    once: bool,
+    base: u64,
+    /// Where it is to be placed (`part`, its output, whether over a file there): none where it is
+    /// in place (an archive appended to).
+    place: Option<(PathBuf, PathBuf, bool)>,
     placed: &'f std::sync::atomic::AtomicBool,
 }
 
@@ -1874,15 +1976,25 @@ impl Write for FileOut<'_> {
 }
 
 impl aqr_compress::Output for FileOut<'_> {
+    fn base(&self) -> u64 {
+        self.base
+    }
+
     fn commits(&self) -> bool {
         self.commits
+    }
+
+    fn commits_once(&self) -> bool {
+        self.once
     }
 
     fn sync(&mut self) -> std::io::Result<()> {
         self.w.flush()?;
         sync_file(self.w.get_ref())?;
-        if self.commits && !self.placed.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            let (part, out, force) = &self.place;
+        if self.commits
+            && let Some((part, out, force)) = &self.place
+            && !self.placed.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
             place(part, out, *force).map_err(std::io::Error::other)?;
             stop::placed(stop::Undo::Remove(out.clone()));
         }
@@ -1891,7 +2003,7 @@ impl aqr_compress::Output for FileOut<'_> {
 
     fn patch(&mut self, at: u64, bytes: &[u8]) -> std::io::Result<()> {
         self.w.flush()?;
-        write_at(self.w.get_ref(), at, bytes)
+        write_at(self.w.get_ref(), self.base + at, bytes)
     }
 }
 

@@ -166,3 +166,134 @@ fn stopped() {
     assert!(fs::read_dir(&d).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().starts_with("b.aqr")));
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// The files of archive `name` in `d`, extracted.
+fn extracted(d: &Path, name: &str) -> Vec<(String, Vec<u8>)> {
+    let to = d.join("x");
+    let _ = fs::remove_dir_all(&to);
+    ok(d, &["-d", "-o", "x", name]);
+    let got = files(&to);
+    fs::remove_dir_all(&to).unwrap();
+    got
+}
+
+/// A file's modification time moved, as an edit would.
+fn touched(path: &Path, seconds: u64) {
+    let f = fs::OpenOptions::new().write(true).open(path).unwrap();
+    f.set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + seconds))
+        .unwrap();
+}
+
+/// Inputs appended to an archive (`-a`): what is new or changed added, what is the same not
+/// written again; with `--delete`, what is gone taken away; nothing to append, nothing written.
+#[test]
+fn appended() {
+    let d = scratch("appended");
+    source(&d, 6);
+    let src = d.join("src");
+    ok(&d, &["-q", "-o", "b.aqr", "src"]);
+    let before = fs::read(d.join("b.aqr")).unwrap();
+    // nothing changed: nothing written
+    let o = ok(&d, &["-a", "b.aqr", "src"]);
+    assert!(stderr(&o).contains("nothing to append"), "{}", stderr(&o));
+    assert_eq!(fs::read(d.join("b.aqr")).unwrap(), before);
+    // a file changed, one added, in a new directory too
+    fs::write(src.join("t1.txt"), text(77, 5000)).unwrap();
+    touched(&src.join("t1.txt"), 5);
+    fs::create_dir_all(src.join("new")).unwrap();
+    fs::write(src.join("new/n.txt"), text(78, 9000)).unwrap();
+    ok(&d, &["-q", "-a", "b.aqr", "src"]);
+    let after = fs::read(d.join("b.aqr")).unwrap();
+    assert!(after.len() > before.len() && after.len() < before.len() * 2, "{} {}", before.len(), after.len());
+    assert_eq!(extracted(&d, "b.aqr"), files(&src));
+    let t = ok(&d, &["-K", "b.aqr"]);
+    assert!(!stderr(&t).contains("incomplete"), "{}", stderr(&t));
+    // (only appended to: the archive before, but for its footer made a spacer block)
+    let differ = (0..before.len()).filter(|&k| before[k] != after[k]).count();
+    assert!(differ > 0 && differ < 30, "{differ}");
+    // the commit written whole but its footer before not made a spacer: read as the archive
+    // before, then made by the next append
+    fs::write(d.join("b.aqr"), [&before[..], &after[before.len()..]].concat()).unwrap();
+    assert_eq!(extracted(&d, "b.aqr").len(), 6);
+    let o = ok(&d, &["-a", "b.aqr", "src"]);
+    assert!(stderr(&o).contains("was whole: committed") && stderr(&o).contains("nothing to append"), "{}", stderr(&o));
+    assert_eq!(fs::read(d.join("b.aqr")).unwrap(), after);
+    // a file taken away: kept in the archive, but with --delete
+    fs::remove_file(src.join("t2.txt")).unwrap();
+    fs::remove_dir_all(src.join("new")).unwrap();
+    fs::write(src.join("t4.txt"), b"short").unwrap();
+    ok(&d, &["-q", "-a", "b.aqr", "src"]);
+    let got = extracted(&d, "b.aqr");
+    assert!(got.iter().any(|f| f.0 == "t2.txt") && got.iter().any(|f| f.0 == "new/n.txt"));
+    assert!(got.contains(&("t4.txt".into(), b"short".to_vec())));
+    ok(&d, &["-q", "-a", "--delete", "b.aqr", "src"]);
+    assert_eq!(extracted(&d, "b.aqr"), files(&src));
+    // not an encrypted archive, nor -P
+    assert!(!aqr(&d, &["-a", "-P", "b.aqr", "src"]).status.success());
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// An archive appended to whose append was not committed (bytes after it, as a process killed
+/// leaves): the bytes cut off, or the commit made where it was written whole; other bytes after
+/// it not taken away.
+#[test]
+fn appended_after_append_not_committed() {
+    let d = scratch("tail");
+    source(&d, 4);
+    ok(&d, &["-q", "-o", "b.aqr", "src"]);
+    let a = fs::read(d.join("b.aqr")).unwrap();
+    // (a block begun: a spacer block's head)
+    let pad = if a.len() % 2 == 1 { &[0u8][..] } else { &[] };
+    fs::write(d.join("b.aqr"), [&a, pad, &[0x03, 0xff, 0xff]].concat()).unwrap();
+    fs::write(d.join("src/t9.txt"), text(9, 4000)).unwrap();
+    let o = ok(&d, &["-a", "b.aqr", "src"]);
+    assert!(stderr(&o).contains("an append not committed cut off"), "{}", stderr(&o));
+    assert_eq!(extracted(&d, "b.aqr"), files(&d.join("src")));
+    // bytes not of an append
+    let a = fs::read(d.join("b.aqr")).unwrap();
+    fs::write(d.join("b.aqr"), [&a, &[0xffu8; 40][..]].concat()).unwrap();
+    fs::write(d.join("src/t10.txt"), text(10, 4000)).unwrap();
+    let o = aqr(&d, &["-a", "b.aqr", "src"]);
+    assert!(!o.status.success() && stderr(&o).contains("not of an append"), "{}", stderr(&o));
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// An append stopped (as Ctrl-C does) ends what it wrote as a commit; appending again adds the
+/// rest.
+#[cfg(unix)]
+#[test]
+fn append_stopped_and_resumed() {
+    let d = scratch("resumed");
+    many(&d);
+    let src = d.join("src");
+    // (half of it first)
+    let half = d.join("half");
+    fs::create_dir_all(&half).unwrap();
+    for e in fs::read_dir(&src).unwrap().take(100) {
+        let e = e.unwrap();
+        fs::copy(e.path(), half.join(e.file_name())).unwrap();
+        let m = fs::metadata(e.path()).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(half.join(e.file_name()))
+            .unwrap()
+            .set_modified(m.modified().unwrap())
+            .unwrap();
+    }
+    ok(&d, &["-q", "-o", "b.aqr", "half"]);
+    let out = d.join("b.aqr");
+    let len = fs::metadata(&out).unwrap().len();
+    let args: Vec<&str> = ["-a"].into_iter().chain(SLOW).chain(["src"]).collect();
+    let (o, running) = signalled(&d, &args, &|| fs::metadata(&out).unwrap().len() > len + 200_000, &["TERM"]);
+    assert!(running, "done before it was stopped");
+    assert_eq!(o.status.code(), Some(130), "{}", stderr(&o));
+    let t = ok(&d, &["-K", "b.aqr"]);
+    assert!(stderr(&t).contains("incomplete"), "{}", stderr(&t));
+    let got = extracted(&d, "b.aqr");
+    assert!(got.len() > 100 && got.len() < 300, "{}", got.len());
+    ok(&d, &["-q", "-a", "b.aqr", "src"]);
+    assert_eq!(extracted(&d, "b.aqr"), files(&src));
+    let t = ok(&d, &["-K", "b.aqr"]);
+    assert!(!stderr(&t).contains("incomplete"), "{}", stderr(&t));
+    fs::remove_dir_all(&d).unwrap();
+}
