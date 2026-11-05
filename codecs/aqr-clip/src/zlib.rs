@@ -14,3 +14,16 @@ pub fn deflate(data: &[u8]) -> Option<Vec<u8>> {
     out.extend(aqr_common::adler32::hash(data).to_be_bytes());
     Some(out)
 }
+
+/// The `len` bytes of the zlib stream `z` (of no preset dictionary, ending where `z` does), by
+/// aqr-flate's inflater; `None` where it is not that.
+#[cfg(feature = "encode")]
+pub fn inflate(z: &[u8], len: usize) -> Option<Vec<u8>> {
+    let (&[cmf, flg], rest) = z.split_first_chunk::<2>()?;
+    let (raw, &sum) = rest.split_last_chunk::<4>()?;
+    if cmf & 15 != 8 || cmf >> 4 > 7 || flg & 0x20 != 0 || !(cmf as u16 * 256 + flg as u16).is_multiple_of(31) {
+        return None;
+    }
+    let data = aqr_flate::inflate::data(raw, len).ok()?;
+    (data.len() == len && aqr_common::adler32::hash(&data) == u32::from_be_bytes(sum)).then_some(data)
+}

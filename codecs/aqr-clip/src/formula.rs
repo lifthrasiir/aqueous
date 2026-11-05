@@ -5,6 +5,7 @@
 use crate::dynamic::{self, Escape, Model};
 use crate::module::{self, MAX_BATCH, Piece, batches, layouts, pieces, sources};
 use crate::tile::{self, AREA, Layout};
+use crate::zlib::inflate;
 use aqr_common::arith::ArithEncoder;
 use aqr_common::{pool, varint};
 use aqr_formula::{Apply, Formula, Kind, Module, Node, PAGE};
@@ -121,13 +122,6 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     let at_spawn = w + results + stale + spawn + slack;
     let at_end = w + results + stale + 8 * d + u.output() + slack;
     Some(at_spawn.max(at_end))
-}
-
-fn inflate(z: &[u8], len: usize) -> Option<Vec<u8>> {
-    use flate2::{Decompress, FlushDecompress, Status};
-    let mut out = Vec::with_capacity(len);
-    let st = Decompress::new(true).decompress_vec(z, &mut out, FlushDecompress::Finish).ok()?;
-    (st == Status::StreamEnd && out.len() == len).then_some(out)
 }
 
 /// The formula of `input`, or `None` where it is not a `.clip` file whose structure holds (or

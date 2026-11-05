@@ -179,7 +179,6 @@ dependencies = [
  "aqr-psd",
  "aqr-raw",
  "aqr-sqlite",
- "flate2",
 ]
 
 [[package]]

@@ -31,6 +31,7 @@
 
 use aqr_clip::dynamic::{self, Escape, Model};
 use aqr_clip::tile::{self, AREA, Class, Layout, SIDE};
+use aqr_clip::zlib::inflate;
 use aqr_clip::{clip, r#static};
 use aqr_common::arith::{ArithDecoder, ArithEncoder};
 use aqr_formula::Formula;
@@ -58,13 +59,6 @@ fn main() {
         Some("formula") => formula(&args[1..]),
         _ => usage(),
     }
-}
-
-fn inflate(z: &[u8], len: usize) -> Option<Vec<u8>> {
-    use flate2::{Decompress, FlushDecompress, Status};
-    let mut out = Vec::with_capacity(len);
-    let st = Decompress::new(true).decompress_vec(z, &mut out, FlushDecompress::Finish).ok()?;
-    (st == Status::StreamEnd && out.len() == len).then_some(out)
 }
 
 /// Tiles by layout and class.

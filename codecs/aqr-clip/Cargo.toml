@@ -9,7 +9,7 @@ publish = false
 default = ["encode"]
 # The formula (`formula`), the static-table model and the research tool; without it, the code
 # of the module alone (`module`).
-encode = ["dep:aqr-formula", "dep:aqr-sqlite", "dep:aqr-psd", "dep:aqr-raw", "dep:flate2"]
+encode = ["dep:aqr-formula", "dep:aqr-sqlite", "dep:aqr-psd", "dep:aqr-raw"]
 
 [dependencies]
 aqr-common = { path = "../../crates/aqr-common" }
@@ -18,7 +18,6 @@ aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 aqr-psd = { path = "../aqr-psd", optional = true }
 aqr-raw = { path = "../aqr-raw", optional = true }
 aqr-sqlite = { path = "../aqr-sqlite", optional = true }
-flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"], optional = true }
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.
