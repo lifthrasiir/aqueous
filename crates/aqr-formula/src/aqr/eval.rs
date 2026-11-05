@@ -235,13 +235,18 @@ trait Source<'a>: Send {
 type Src<'a> = Box<dyn Source<'a> + 'a>;
 
 /// The evaluation of a graph: how it applies a module (an application of the program, its
-/// evaluated inputs), its blocks, and the states of its nodes of several outputs.
+/// evaluated inputs), whether one is a part module and how it applies that, its blocks, the
+/// states of its nodes of several outputs, and the threads applying part modules.
 struct Eval<'e, 'a> {
     g: &'e Graph<'e, 'a>,
     #[allow(clippy::type_complexity)]
     apply: &'e (dyn Fn(&Apply<'a>, &[&[u8]]) -> Decoded<Vec<Vec<u8>>> + Sync),
+    part: &'e (dyn Fn(&Apply<'a>) -> bool + Sync),
+    #[allow(clippy::type_complexity)]
+    apply_part: &'e (dyn Fn(&Apply<'a>, &mut [&mut dyn PartIn], &mut [&mut dyn PartOut]) -> Decoded<()> + Sync),
     blocks: &'e dyn Blocks,
     fans: Vec<Mutex<Fan<'a>>>,
+    threads: &'e Threads,
 }
 
 /// Where values are pulled: of an evaluation, and (on the thread writing the outputs out) what
@@ -258,6 +263,8 @@ enum Fan<'a> {
     Idle,
     /// An application's outputs, each until it is pulled.
     Made(Vec<Option<Vec<u8>>>),
+    /// A part module's application running: the queues of its outputs, each until it is pulled.
+    Part(Vec<Option<Arc<Queue>>>),
     /// A Split's input, pulled so far: the bytes of it pulled, the output they reach into (and
     /// where it starts), and those of each output not yet pulled of it.
     Split {
@@ -271,13 +278,20 @@ enum Fan<'a> {
 }
 
 impl<'a> Eval<'_, 'a> {
+    /// Whether value `v` is made whole by an application, ahead where it is a part of an
+    /// output written out ([`run`]): not a part module's, which is pulled as it is made.
+    fn made_whole(&self, v: Val) -> bool {
+        matches!(self.g.ops[v.node], Op::Apply(a, _, None) if !(self.part)(a))
+    }
+
     /// The source of value `v`.
     fn source(&self, v: Val) -> Src<'a> {
         let s: Src<'a> = match self.g.ops[v.node] {
             Op::Literal(l) => Box::new(Once(Some(Chunk::Borrowed(l)).filter(|c| !c.is_empty()))),
             Op::Slice { block, start, len } => Box::new(SliceSource { block, start, len, done: false }),
+            Op::Apply(a, _, None) if (self.part)(a) => Box::new(Queued { node: v.node, q: None }),
             Op::Apply(_, _, None) | Op::Patch(..) => Box::new(Made { node: v.node, done: false }),
-            Op::Apply(..) | Op::Split(..) => Box::new(Fanned { v, end: None }),
+            Op::Apply(..) | Op::Split(..) => Box::new(Fanned { v, end: None, q: None }),
             Op::Concat(_) => Box::new(Items { node: v.node, next: 0, cur: None, header: false }),
             Op::Pack(_) => Box::new(Items { node: v.node, next: 0, cur: None, header: true }),
         };
@@ -438,10 +452,23 @@ impl<'a> Source<'a> for Items<'a> {
 struct Fanned {
     v: Val,
     end: Option<u64>,
+    /// Of a part module's application, the queue of its output.
+    q: Option<Arc<Queue>>,
+}
+
+impl Drop for Fanned {
+    fn drop(&mut self) {
+        if let Some(q) = &self.q {
+            q.cancel();
+        }
+    }
 }
 
 impl<'a> Source<'a> for Fanned {
     fn next(&mut self, at: At<'_, '_, 'a>) -> Decoded<Option<Chunk<'a>>> {
+        if let Some(q) = &self.q {
+            return q.pop();
+        }
         let (ev, v) = (at.ev, self.v);
         let op = &ev.g.ops[v.node];
         let (Op::Apply(_, _, Some(fan)) | Op::Split(_, _, fan)) = *op else {
@@ -451,6 +478,9 @@ impl<'a> Source<'a> for Fanned {
         let mut f = ev.fans[fan].lock().unwrap();
         if let Fan::Idle = *f {
             *f = match *op {
+                Op::Apply(a, _, _) if (ev.part)(a) => {
+                    Fan::Part(start(at, v.node, usize::MAX).into_iter().map(Some).collect())
+                }
                 Op::Apply(a, ref inputs, _) => match applied(at, a, inputs) {
                     Ok(outs) => Fan::Made(outs.into_iter().map(Some).collect()),
                     Err(e) => Fan::Failed(e),
@@ -467,6 +497,11 @@ impl<'a> Source<'a> for Fanned {
         }
         match &mut *f {
             Fan::Made(outs) => Ok(outs[v.out].take().filter(|o| !o.is_empty()).map(Chunk::owned)),
+            Fan::Part(qs) => {
+                let q = qs[v.out].take().expect("each output pulled by one");
+                drop(f);
+                self.q.insert(q).pop()
+            }
             Fan::Split { input, read, out, start, held } => {
                 let Op::Split(_, sizes, _) = *op else { unreachable!("a split") };
                 let end = *self.end.get_or_insert_with(|| sizes[..=v.out].iter().sum());
@@ -549,12 +584,30 @@ pub(super) fn run<'a>(
     threads: usize,
 ) -> Decoded<Vec<Vec<u8>>> {
     let g = Graph::of(&p, contents)?;
-    let apply = |a: &Apply<'a>, inputs: &[&[u8]]| {
-        let res: Vec<Resource> = a.resources.iter().map(|&i| env.resources[p.resources[i]].clone()).collect();
-        super::apply(env, p.modules[a.module], a, inputs, &res)
+    let resources = |a: &Apply<'a>| -> Vec<Resource> {
+        a.resources.iter().map(|&i| env.resources[p.resources[i]].clone()).collect()
     };
-    let ev =
-        Eval { g: &g, apply: &apply, blocks: contents, fans: (0..g.fans).map(|_| Mutex::new(Fan::Idle)).collect() };
+    let loaded = |a: &Apply<'a>| {
+        let m = p.modules[a.module];
+        env.loaded[m].get_or_init(|| env.runner.load(&env.modules[m])).as_ref().map_err(Failure::clone)
+    };
+    let apply = |a: &Apply<'a>, inputs: &[&[u8]]| super::apply(env, p.modules[a.module], a, inputs, &resources(a));
+    let part = |a: &Apply<'a>| loaded(a).is_ok_and(|l| l.is_part());
+    let apply_part = |a: &Apply<'a>, ins: &mut [&mut dyn PartIn], outs: &mut [&mut dyn PartOut]| {
+        loaded(a)?.apply_part(a.params, &resources(a), ins, outs, &a.output_sizes, a.memory_limit)
+    };
+    let running = Threads::default();
+    let ev = Eval {
+        g: &g,
+        apply: &apply,
+        part: &part,
+        apply_part: &apply_part,
+        blocks: contents,
+        fans: (0..g.fans).map(|_| Mutex::new(Fan::Idle)).collect(),
+        threads: &running,
+    };
+    // (the threads of part modules let go of and joined before what they borrow goes)
+    let _joined = Joined(&ev);
     let Some(sink) = sink else {
         return blocks_ahead(&g, contents, |ahead| {
             let at = At { ev: &ev, ahead };
@@ -565,12 +618,8 @@ pub(super) fn run<'a>(
     // covers, which are pulled as they are: the output's own hashed as it is written), and the
     // applications among them, made ahead
     let roots: Vec<(Vec<Val>, bool)> = g.roots.iter().map(|&r| parts_of(&g, r)).collect();
-    let heavy: Vec<(Val, u64)> = roots
-        .iter()
-        .flat_map(|(parts, _)| parts)
-        .filter(|v| matches!(g.ops[v.node], Op::Apply(_, _, None)))
-        .map(|&v| (v, g.len(v)))
-        .collect();
+    let heavy: Vec<(Val, u64)> =
+        roots.iter().flat_map(|(parts, _)| parts).filter(|&&v| ev.made_whole(v)).map(|&v| (v, g.len(v))).collect();
     let slots: Vec<Waited<Option<Decoded<Vec<u8>>>>> = heavy.iter().map(|_| Waited::new(None)).collect();
     let mut emit = |parts: Option<&PartsAhead<'_, '_, '_, 'a>>| -> Decoded<Vec<Vec<u8>>> {
         blocks_ahead(&g, contents, |ahead| {
@@ -636,7 +685,7 @@ fn write(
         sink(d)
     };
     for &v in parts {
-        if let Op::Apply(_, _, None) = at.ev.g.ops[v.node] {
+        if at.ev.made_whole(v) {
             *k += 1;
             if let Some(a) = ahead {
                 put(&a.take(*k - 1)?)?;
@@ -743,4 +792,244 @@ fn blocks_ahead<R>(g: &Graph, contents: &Contents, f: impl FnOnce(Option<&(dyn F
         };
         f(Some(&tell))
     })
+}
+
+/// Bytes the queue of a part module's application's output holds at most before the module
+/// waits for them to be pulled, where it is its only output (else all: see [`Fan`]).
+const QUEUE_BYTES: usize = 16 << 20;
+
+/// Pieces held of a queue at most this long, committed bytes joined into them.
+const QUEUE_PIECE: usize = 1 << 20;
+
+/// The bytes of an output of a part module's application, as the module commits them, until
+/// they are pulled: at most `cap` of them, the module waiting for room.
+struct Queue {
+    state: Mutex<QueueState>,
+    changed: std::sync::Condvar,
+    cap: usize,
+}
+
+#[derive(Default)]
+struct QueueState {
+    pieces: VecDeque<Vec<u8>>,
+    bytes: usize,
+    /// Whether all is committed, or the application failed.
+    done: bool,
+    failed: Option<Failure>,
+    /// Whether it is no longer pulled: the evaluation ends, or what pulls it went.
+    gone: bool,
+}
+
+impl Queue {
+    fn new(cap: usize) -> Arc<Queue> {
+        Arc::new(Queue { state: Mutex::default(), changed: std::sync::Condvar::new(), cap })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, QueueState> {
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn push(&self, d: &[u8]) -> Decoded<()> {
+        let mut q = self.lock();
+        while !q.gone && q.bytes > 0 && q.bytes + d.len() > self.cap {
+            q = self.changed.wait(q).unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        if q.gone {
+            return resource("an output no longer pulled");
+        }
+        q.bytes += d.len();
+        match q.pieces.back_mut() {
+            Some(last) if last.len() + d.len() <= QUEUE_PIECE => last.extend_from_slice(d),
+            _ => q.pieces.push_back(d.to_vec()),
+        }
+        drop(q);
+        self.changed.notify_all();
+        Ok(())
+    }
+
+    /// All committed (`r` of the application succeeding), or the application failed.
+    fn end(&self, r: &Decoded<()>) {
+        let mut q = self.lock();
+        match r {
+            Ok(()) => q.done = true,
+            Err(e) => q.failed = Some(e.clone()),
+        }
+        drop(q);
+        self.changed.notify_all();
+    }
+
+    fn pop<'a>(&self) -> Decoded<Option<Chunk<'a>>> {
+        let mut q = self.lock();
+        loop {
+            if let Some(p) = q.pieces.pop_front() {
+                q.bytes -= p.len();
+                drop(q);
+                self.changed.notify_all();
+                return Ok(Some(Chunk::owned(p)));
+            }
+            if let Some(e) = &q.failed {
+                return Err(e.clone());
+            }
+            if q.done {
+                return Ok(None);
+            }
+            if q.gone {
+                return resource("an evaluation given up");
+            }
+            q = self.changed.wait(q).unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    /// No longer pulled: the module fails where it commits more.
+    fn cancel(&self) {
+        self.lock().gone = true;
+        self.changed.notify_all();
+    }
+}
+
+/// The output of a part module's application of a single output, pulled of its queue (the
+/// application started as it is first pulled).
+struct Queued {
+    node: usize,
+    q: Option<Arc<Queue>>,
+}
+
+impl Drop for Queued {
+    fn drop(&mut self) {
+        if let Some(q) = &self.q {
+            q.cancel();
+        }
+    }
+}
+
+impl<'a> Source<'a> for Queued {
+    fn next(&mut self, at: At<'_, '_, 'a>) -> Decoded<Option<Chunk<'a>>> {
+        let node = self.node;
+        let q = self.q.get_or_insert_with(|| start(at, node, QUEUE_BYTES).pop().expect("an output"));
+        q.pop()
+    }
+}
+
+/// Starts the application of a part module of node `node` on a thread of its own, each of its
+/// outputs to a queue of `cap` bytes: their queues.
+fn start(at: At, node: usize, cap: usize) -> Vec<Arc<Queue>> {
+    let ev = at.ev;
+    let Op::Apply(a, ref inputs, _) = ev.g.ops[node] else { unreachable!("an application") };
+    let qs: Vec<Arc<Queue>> = a.output_sizes.iter().map(|_| Queue::new(cap)).collect();
+    ev.threads.queues.lock().unwrap().extend(qs.iter().map(Arc::downgrade));
+    let outs = qs.clone();
+    let run = move || {
+        let at = At { ev, ahead: None };
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut ins: Vec<Pulled> = inputs
+                .iter()
+                .map(|&v| Pulled { at, src: ev.source(v), len: ev.g.len(v), done: 0, rest: None })
+                .collect();
+            let mut pushed: Vec<Pushed> = outs.iter().map(|q| Pushed { q: q.clone(), n: 0 }).collect();
+            let mut ins_dyn: Vec<&mut dyn PartIn> = ins.iter_mut().map(|i| i as &mut dyn PartIn).collect();
+            let mut outs_dyn: Vec<&mut dyn PartOut> = pushed.iter_mut().map(|o| o as &mut dyn PartOut).collect();
+            (ev.apply_part)(a, &mut ins_dyn, &mut outs_dyn)?;
+            match pushed.iter().zip(&a.output_sizes).all(|(o, &n)| o.n == n) {
+                true => Ok(()),
+                false => invalid(format!("module block {}: outputs of other sizes than declared", a.module)),
+            }
+        }));
+        let r = r.unwrap_or_else(|_| invalid("a part module panicked"));
+        outs.iter().for_each(|q| q.end(&r));
+    };
+    // SAFETY: what it borrows (the evaluation and what it does) goes only once it is joined
+    // ([`Joined`])
+    unsafe { ev.threads.spawn(Box::new(run)) };
+    qs
+}
+
+/// An input of a part module's application: its value pulled as the module requests it, how far,
+/// and what is left of the piece pulled last.
+struct Pulled<'r, 'e, 'a> {
+    at: At<'r, 'e, 'a>,
+    src: Src<'a>,
+    len: u64,
+    done: u64,
+    rest: Option<Chunk<'a>>,
+}
+
+impl PartIn for Pulled<'_, '_, '_> {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn pull(&mut self, hi: u64, put: &mut dyn FnMut(&[u8])) -> Decoded<()> {
+        while self.done < hi {
+            let c = match self.rest.take() {
+                Some(c) => c,
+                None => match self.src.next(self.at)? {
+                    Some(c) => c,
+                    None => return invalid("an input shorter than declared"),
+                },
+            };
+            let n = c.len().min((hi - self.done) as usize);
+            let (head, tail) = c.split(n);
+            put(&head);
+            self.done += n as u64;
+            self.rest = (!tail.is_empty()).then_some(tail);
+        }
+        Ok(())
+    }
+}
+
+/// An output of a part module's application, to its queue: and the bytes pushed.
+struct Pushed {
+    q: Arc<Queue>,
+    n: u64,
+}
+
+impl PartOut for Pushed {
+    fn push(&mut self, d: &[u8]) -> Decoded<()> {
+        self.n += d.len() as u64;
+        self.q.push(d)
+    }
+}
+
+/// The threads applying part modules, and the queues of their outputs.
+#[derive(Default)]
+struct Threads {
+    running: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    queues: Mutex<Vec<std::sync::Weak<Queue>>>,
+}
+
+impl Threads {
+    /// Runs `f` on a thread of its own.
+    ///
+    /// # Safety
+    ///
+    /// What `f` borrows outlives [`Threads::join`].
+    unsafe fn spawn<'f>(&self, f: Box<dyn FnOnce() + Send + 'f>) {
+        // SAFETY: joined before what it borrows goes, as the caller ensures
+        let f: Box<dyn FnOnce() + Send + 'static> = unsafe { std::mem::transmute(f) };
+        let t = std::thread::Builder::new().name("aqr-part".into()).spawn(f).expect("a thread");
+        self.running.lock().unwrap().push(t);
+    }
+
+    /// Every queue let go of (the modules committing to them failing), and every thread
+    /// joined, those they spawn too.
+    fn join(&self) {
+        loop {
+            self.queues.lock().unwrap().drain(..).filter_map(|q| q.upgrade()).for_each(|q| q.cancel());
+            let Some(t) = self.running.lock().unwrap().pop() else { break };
+            let _ = t.join();
+        }
+    }
+}
+
+/// Joins the threads of an evaluation as it goes, its states of nodes of several outputs let go
+/// first (the queues they pull of among them).
+struct Joined<'r, 'e, 'a>(&'r Eval<'e, 'a>);
+
+impl Drop for Joined<'_, '_, '_> {
+    fn drop(&mut self) {
+        for f in &self.0.fans {
+            *f.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Fan::Idle;
+        }
+        self.0.threads.join();
+    }
 }

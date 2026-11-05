@@ -2380,6 +2380,46 @@ pub trait Loaded: Send + Sync {
         sizes: &[u64],
         memory_limit: u64,
     ) -> Decoded<Vec<Vec<u8>>>;
+
+    /// Whether it is applied as a part module ([`Loaded::apply_part`]) rather than whole.
+    fn is_part(&self) -> bool {
+        false
+    }
+
+    /// An application as a part module: its inputs pulled as it requests them, its outputs (of
+    /// `sizes` bytes) pushed as it commits them, all of them by the time it returns.
+    fn apply_part(
+        &self,
+        params: &[u8],
+        resources: &[Resource],
+        inputs: &mut [&mut dyn PartIn],
+        outputs: &mut [&mut dyn PartOut],
+        sizes: &[u64],
+        memory_limit: u64,
+    ) -> Decoded<()> {
+        let _ = (params, resources, inputs, outputs, sizes, memory_limit);
+        resource("not a part module")
+    }
+}
+
+/// An input of a part module's application ([`Loaded::apply_part`]), pulled as it is requested.
+pub trait PartIn: Send {
+    /// Its length in bytes.
+    fn len(&self) -> u64;
+
+    /// Its bytes from where they were pulled to before up to `hi` (at most [`PartIn::len`]),
+    /// given to `put` in order, in pieces.
+    fn pull(&mut self, hi: u64, put: &mut dyn FnMut(&[u8])) -> Decoded<()>;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// An output of a part module's application ([`Loaded::apply_part`]), taking its bytes in
+/// order as they are committed.
+pub trait PartOut: Send {
+    fn push(&mut self, d: &[u8]) -> Decoded<()>;
 }
 
 /// Runs no module: for archives of none.
@@ -4570,6 +4610,126 @@ mod tests {
             .unwrap();
             assert!(out == want, "{threads} threads");
         }
+    }
+
+    /// Runs `cut@1` as a part module, its inputs pulled and its outputs pushed [`PIECE`] bytes
+    /// at a time (failing midway where its parameters are `[0xff]`), and `rev@1` whole.
+    struct PartCut;
+
+    const PIECE: u64 = 100_000;
+
+    /// The applications [`PartCut`] made as part modules.
+    static PARTS: AtomicUsize = AtomicUsize::new(0);
+
+    struct Stand {
+        cut: bool,
+    }
+
+    impl Runner for PartCut {
+        fn load(&self, wasm: &[u8]) -> Decoded<Box<dyn Loaded + '_>> {
+            match stand_in_name(wasm) {
+                Some("cut@1") => Ok(Box::new(Stand { cut: true })),
+                Some("rev@1") => Ok(Box::new(Stand { cut: false })),
+                _ => resource("an unknown module"),
+            }
+        }
+    }
+
+    impl Loaded for Stand {
+        fn apply(&self, _: &[u8], _: &[Resource], inputs: &[&[u8]], sizes: &[u64], _: u64) -> Decoded<Vec<Vec<u8>>> {
+            assert!(!self.cut, "a part module applied whole");
+            assert_eq!(sizes.len(), 1);
+            Ok(vec![inputs.concat().into_iter().rev().collect()])
+        }
+
+        fn is_part(&self) -> bool {
+            self.cut
+        }
+
+        fn apply_part(
+            &self,
+            params: &[u8],
+            _: &[Resource],
+            inputs: &mut [&mut dyn PartIn],
+            outputs: &mut [&mut dyn PartOut],
+            sizes: &[u64],
+            _: u64,
+        ) -> Decoded<()> {
+            PARTS.fetch_add(1, Ordering::Relaxed);
+            let (mut j, mut left, mut pulled) = (0, sizes[0], 0u64);
+            for i in inputs {
+                let mut at = 0;
+                while at < i.len() {
+                    let hi = (at + PIECE).min(i.len());
+                    let mut buf = Vec::new();
+                    i.pull(hi, &mut |d| buf.extend_from_slice(d))?;
+                    (at, pulled) = (hi, pulled + hi - at);
+                    if params == [0xff] && pulled > 1 << 20 {
+                        return invalid("failed midway");
+                    }
+                    let mut d = &buf[..];
+                    while !d.is_empty() {
+                        while left == 0 {
+                            j += 1;
+                            left = *sizes.get(j).ok_or_else(|| Failure::Invalid("inputs too long".into()))?;
+                        }
+                        let n = d.len().min(left as usize);
+                        outputs[j].push(&d[..n])?;
+                        (d, left) = (&d[n..], left - n as u64);
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// Part modules applied as their outputs are pulled, each on a thread of its own: one of a
+    /// single output in another's input (more than its queue holds, so that it waits for it to
+    /// be pulled), whose outputs are pulled out of their turn; decoded and written out alike.
+    /// One failing midway fails the archive, the one it pulls of let go of rather than left
+    /// waiting.
+    #[test]
+    fn part_modules() {
+        let mut f = Formula::default();
+        let n = (24 << 20) + 77u64;
+        let d: Vec<u8> = (0..n as u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        let a = f.push("a", d.clone());
+        let cut = |inputs, params| crate::Apply {
+            module: CUT,
+            resources: vec![],
+            params,
+            inputs,
+            len: 0,
+            memory_limit: crate::NO_LIMIT,
+        };
+        let inner = f.share(cut(vec![a.clone()], vec![]), vec![n]).pop().unwrap();
+        let [o0, o1] = <[Node; 2]>::try_from(f.share(cut(vec![inner], vec![]), vec![n - 1000, 1000])).unwrap();
+        let rev = Node::apply(REV, vec![1, 2, 3], vec![Node::slice(0, 5, 100)], 100);
+        f.root = Node::concat([o1, rev, o0]);
+        let r: Vec<u8> = d[5..105].iter().rev().copied().collect();
+        let want = [&d[n as usize - 1000..], &r, &d[..n as usize - 1000]].concat();
+        let c = encode(&f, Some(checksum(&want)), Level::Zstd(1)).unwrap();
+        let before = PARTS.load(Ordering::Relaxed);
+        assert!(decode(&c, &PartCut).unwrap() == want);
+        assert_eq!(PARTS.load(Ordering::Relaxed) - before, 2);
+        let archive = open(&c, &PartCut).unwrap();
+        for threads in [1, 4] {
+            let mut out = Vec::new();
+            archive
+                .write_file(threads, &mut |p: &[u8]| {
+                    out.extend_from_slice(p);
+                    Ok(())
+                })
+                .unwrap();
+            assert!(out == want, "{threads} threads");
+        }
+        // failing midway, of the input it pulls
+        let mut f = Formula::default();
+        let a = f.push("a", d);
+        let inner = f.share(cut(vec![a], vec![]), vec![n]).pop().unwrap();
+        f.root = f.share(cut(vec![inner], vec![0xff]), vec![n]).pop().unwrap();
+        let c = encode(&f, None, Level::Zstd(1)).unwrap();
+        assert_eq!(decode(&c, &PartCut), invalid("failed midway"));
     }
 
     /// Many outputs of applications taken in order with slices between them, in a concatenation
