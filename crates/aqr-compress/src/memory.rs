@@ -1,5 +1,6 @@
 //! The memory limits declared for the applications of modules (spec, "Module execution"): the
-//! memories of the parameters, resources, inputs and outputs, and the module's estimate of its
+//! memories of the parameters, resources, inputs and outputs (a part module's inputs and
+//! outputs within their windows), and the module's estimate of its
 //! working memories ([`aqr_formula::Module::memory_usage_in_pages`]) with room for an estimate's
 //! error. The inputs are those that the recompressors made: the prevalidation, which evaluates
 //! the formulas as they are made ([`crate::verify`]), has the limits worked out where it runs an
@@ -64,8 +65,13 @@ pub(crate) fn limit(a: &Apply, lens: &[u64], outputs: &[u64], contents: &dyn Con
         eprintln!("aqr-compress: no memory estimate of {} (a bug), none declared", a.module);
         return NO_LIMIT;
     };
-    let fit = |n: &u64| n.div_ceil(PAGE).saturating_mul(PAGE);
-    let imported: u64 = [&[a.params.len() as u64][..], &resources, lens, outputs].concat().iter().map(fit).sum();
+    // (an input's or output's within its window, of a part module)
+    let windows = aqr_decompress::windows_of(a.module);
+    let fit = |n: u64, window: Option<u64>| n.div_ceil(PAGE).min(window.unwrap_or(u64::MAX)).saturating_mul(PAGE);
+    let window = |output: bool, i: usize| windows.iter().find(|w| (w.0, w.1 as usize) == (output, i)).map(|w| w.2);
+    let imported: u64 = [&[a.params.len() as u64][..], &resources].concat().iter().map(|&n| fit(n, None)).sum::<u64>()
+        + lens.iter().enumerate().map(|(k, &n)| fit(n, window(false, k))).sum::<u64>()
+        + outputs.iter().enumerate().map(|(j, &n)| fit(n, window(true, j))).sum::<u64>();
     imported.saturating_add(room(pages.saturating_mul(PAGE)))
 }
 
@@ -84,4 +90,27 @@ pub(crate) fn declare(f: &mut Formula, m: &impl Modules, known: &Limits) {
         })
     });
     declared.expect("a limit for each application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A part module's inputs and outputs count within their windows: flate-inflate's limit is
+    /// the same small one whatever the lengths.
+    #[test]
+    fn part_windows() {
+        let a = Apply {
+            module: aqr_flate::formula::INFLATE,
+            resources: vec![],
+            params: vec![],
+            inputs: vec![],
+            len: 0,
+            memory_limit: NO_LIMIT,
+        };
+        let none: Vec<&[u8]> = Vec::new();
+        let small = limit(&a, &[1 << 20], &[4 << 20], &none);
+        let large = limit(&a, &[1 << 32], &[1 << 34], &none);
+        assert!(small == large && large < 4 << 20, "{small} {large}");
+    }
 }

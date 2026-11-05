@@ -539,6 +539,22 @@ pub fn initial_pages_of(m: Module) -> Option<u64> {
         .or_insert_with(|| aqr_formula::aqr::module_of_block_data(k.block).and_then(|wasm| wasm::initial_pages(&wasm)))
 }
 
+/// The windows of the memories of the inputs and outputs of the Wasm module of `m` that
+/// aqr-modules built ([`wasm::windows`]): whether each is an output's, its index and its pages.
+pub fn windows_of(m: Module) -> Vec<(bool, u32, u64)> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    type Windows = HashMap<(&'static str, u16), Vec<(bool, u32, u64)>>;
+    static WINDOWS: Mutex<Option<Windows>> = Mutex::new(None);
+    let Some(k) = built(m) else { return Vec::new() };
+    let mut windows = WINDOWS.lock().unwrap();
+    (windows.get_or_insert_with(HashMap::new).entry((k.name, k.version)))
+        .or_insert_with(|| {
+            aqr_formula::aqr::module_of_block_data(k.block).map(|w| wasm::windows(&w)).unwrap_or_default()
+        })
+        .clone()
+}
+
 /// The name of the module of `wasm` ([`known`]), for [`aqr::Natives::identified_by`].
 pub fn identify(wasm: &[u8]) -> Option<String> {
     known(wasm).map(|m| m.to_string())

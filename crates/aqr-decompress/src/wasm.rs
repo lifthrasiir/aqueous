@@ -1038,6 +1038,24 @@ pub fn initial_pages(wasm: &[u8]) -> Option<u64> {
     None
 }
 
+/// The windows of the memories of `wasm`'s inputs and outputs whose import types have a
+/// maximum (of a part module): whether each is an output's, its index, and its pages.
+pub fn windows(wasm: &[u8]) -> Vec<(bool, u32, u64)> {
+    let mut out = Vec::new();
+    for p in wp::Parser::new(0).parse_all(wasm) {
+        let Ok(wp::Payload::ImportSection(r)) = p else { continue };
+        for i in r.into_imports().flatten() {
+            let wp::TypeRef::Memory(m) = i.ty else { continue };
+            match (memory_of(i.name), m.maximum) {
+                (Some(Mem::Input(k)), Some(max)) => out.push((false, k, max)),
+                (Some(Mem::Output(j)), Some(max)) => out.push((true, j, max)),
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
 /// An application of a module, as [`record_applications`] keeps them: what it was given and
 /// the largest size its memories reached.
 #[derive(Debug, Clone)]
