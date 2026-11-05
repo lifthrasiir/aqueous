@@ -59,6 +59,9 @@ pub fn open(path: &Path, quiet: bool) -> Result<Opened, String> {
         Err(fs::TryLockError::WouldBlock) => return Err(err(&"being written by another")),
         Err(fs::TryLockError::Error(e)) => return Err(err(&e)),
     }
+    // (the file cut where an append not committed is cut off: once it is no longer mapped, as
+    // Windows does not cut a file mapped)
+    let mut cut = None;
     let (at, footer, metadata, kill, old, sizes) = {
         // SAFETY: the archive is locked against other writers; where it changes all the same, its
         // checksums tell
@@ -68,7 +71,10 @@ pub fn open(path: &Path, quiet: bool) -> Result<Opened, String> {
         }
         let mut at = aqr::locate(&c).ok_or_else(|| err(&"no archive found in it (aqr -K tells more)"))?;
         if at.end < c.len() {
-            at = tail(&file, &c, at, quiet, path)?;
+            (at, cut) = tail(&file, &c, at, path)?;
+            if cut.is_none() && !quiet {
+                eprintln!("{}: an append not committed was whole: committed", path.display());
+            }
         }
         let a = &c[at.clone()];
         let (footer, metadata) = aqr::footer_of(a).ok_or_else(|| err(&"no footer"))?;
@@ -82,6 +88,13 @@ pub fn open(path: &Path, quiet: bool) -> Result<Opened, String> {
         let kill = !aqr::crossing(at.start as u64 + footer.start as u64, aqr::kill(footer.len()).len());
         ((at.start as u64)..(at.end as u64), footer, metadata, kill, old, sizes)
     };
+    if let Some(n) = cut {
+        file.set_len(at.end).map_err(|e| err(&e))?;
+        crate::sync_file(&file).map_err(|e| err(&e))?;
+        if !quiet {
+            eprintln!("{}: an append not committed cut off ({n} bytes)", path.display());
+        }
+    }
     let link_groups = old.entries.iter().filter_map(|e| e.extra.link_group).min().unwrap_or(0).min(0);
     Ok(Opened { prior: Prior { file, at, footer, metadata, link_groups, kill }, old, sizes })
 }
@@ -95,9 +108,9 @@ impl Opened {
 }
 
 /// The archive at `at` of file `c` (of `file`) where bytes follow it: an append not committed,
-/// made where it ends with a commit written whole, else cut off; where they are not blocks, an
-/// error.
-fn tail(file: &fs::File, c: &[u8], at: Range<usize>, quiet: bool, path: &Path) -> Result<Range<usize>, String> {
+/// made where it ends with a commit written whole, else to be cut off (the bytes after it, which
+/// the caller cuts once `c` is not mapped); where they are not blocks, an error.
+fn tail(file: &fs::File, c: &[u8], at: Range<usize>, path: &Path) -> Result<(Range<usize>, Option<usize>), String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let whole = &c[at.start..];
     // (a commit written whole: the archive to the end of the file, once the footer it was
@@ -115,10 +128,7 @@ fn tail(file: &fs::File, c: &[u8], at: Range<usize>, quiet: bool, path: &Path) -
             crate::sync_file(file).map_err(|e| err(&e))?;
             crate::write_at(file, base + (f.start + k.len()) as u64, &vec![0; f.len() - k.len()])
                 .map_err(|e| err(&e))?;
-            if !quiet {
-                eprintln!("{}: an append not committed was whole: committed", path.display());
-            }
-            return Ok(at.start..c.len());
+            return Ok((at.start..c.len(), None));
         }
     }
     // (blocks after the footer, and its padding byte, as an append writes them)
@@ -130,12 +140,7 @@ fn tail(file: &fs::File, c: &[u8], at: Range<usize>, quiet: bool, path: &Path) -
     if !ours {
         return Err(err(&"bytes after the archive not of an append: not appended to"));
     }
-    file.set_len(at.end as u64).map_err(|e| err(&e))?;
-    crate::sync_file(file).map_err(|e| err(&e))?;
-    if !quiet {
-        eprintln!("{}: an append not committed cut off ({} bytes)", path.display(), c.len() - at.end);
-    }
-    Ok(at)
+    Ok((at.clone(), Some(c.len() - at.end)))
 }
 
 /// The path of each entry of `t`, by its names.
