@@ -202,6 +202,16 @@ impl SegmentWriter {
         w
     }
 
+    /// A segment to append to an archive whose footer, at `footer` (from its header magic) and
+    /// ending it, cannot be made a spacer block in place (spec, "Appending to an archive": its
+    /// first bytes across a sector of the file): written over, from where it starts, by the
+    /// segment's blocks; the archive without a footer until the first commit.
+    pub fn replacing(footer: usize, metadata: usize) -> SegmentWriter {
+        let mut w = SegmentWriter::new();
+        (w.at, w.segment_at, w.prev) = (footer, footer, metadata);
+        w
+    }
+
     /// The footer of the archive so far, to write after the metadata block of the segment just
     /// closed ([`SegmentWriter::close_as`]), committing what is before it (spec, "Appending to an
     /// archive"): the bytes to write (a spacer block first where the footer would cross a sector
@@ -1385,6 +1395,32 @@ mod tests {
         assert_eq!(locate(&third), Some(0..second.len()));
         let third = killed(&third, old);
         assert_eq!(files(&third), [file("a"), file("b"), file("c")]);
+    }
+
+    #[test]
+    fn tombstones() {
+        let mut f = Formula::default();
+        let a = f.push("a", b"aaaaa".to_vec());
+        let enc = Encoder::new(Level::Zstd(3));
+        let mut w = SegmentWriter::new();
+        let mut out = SegmentWriter::header().to_vec();
+        let b = w.batch(&enc, &f, &[Leaf { outputs: vec![a.clone()], sums: vec![None] }]).unwrap();
+        w.commit(&b);
+        out.extend_from_slice(&b.bytes);
+        let contents = [ContentAt { leaf: b.leaf_at[0], output: 0, size: 5 }];
+        let dir = entry(None, "d", EntryNode::Dir);
+        let t = Tree { root: Extra::default(), entries: vec![dir.clone(), entry(Some(0), "a", EntryNode::File(0))] };
+        out.extend_from_slice(&w.close(&enc, &t, &contents).unwrap());
+        // the next segment taking the directory away, and a file of nothing before
+        let gone = |parent, name| entry(parent, name, EntryNode::Special(0));
+        let t = Tree { root: Extra::default(), entries: vec![gone(None, "d"), gone(None, "x")] };
+        out.extend_from_slice(&w.finish(&enc, &t, &[]).unwrap().0);
+        let Ok(Value::Tree(t, _)) = decode_value(&out, &natives()) else { panic!() };
+        assert!(t.entries.is_empty(), "{:?}", t.entries);
+        // (no extra)
+        let mut bad = gone(None, "d");
+        bad.extra.mode = Some(0o755);
+        assert!(w.finish(&enc, &Tree { root: Extra::default(), entries: vec![bad] }, &[]).is_err());
     }
 
     #[test]

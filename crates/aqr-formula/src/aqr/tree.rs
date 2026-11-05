@@ -50,7 +50,9 @@ pub enum EntryNode {
         minor: u64,
     },
     /// A special entry of a kind undefined (`special_kind` beyond 4), as an archive decoded
-    /// holds it; not encoded.
+    /// holds it, not encoded; or, of kind 0, a tombstone to encode (spec, "Merging segments": what
+    /// is at its name in the segments before taken away, it of no extra), as one decoded is
+    /// among [`Tree::tombstones`] rather than an entry.
     Special(u64),
 }
 
@@ -280,6 +282,8 @@ pub(crate) fn check(t: &Tree, contents: usize) -> Result<(), String> {
         match &e.node {
             EntryNode::File(c) if *c >= contents => return Err(format!("entry #{i} of no content")),
             EntryNode::Link(target) if !valid_target(target) => return Err(format!("entry #{i} of an invalid target")),
+            EntryNode::Special(0) if !e.extra.is_empty() => return Err(format!("tombstone #{i} of an extra")),
+            EntryNode::Special(0) => {}
             EntryNode::Special(_) => return Err(format!("entry #{i} of a special kind")),
             _ => {}
         }
@@ -635,6 +639,7 @@ pub(crate) fn metadata(
                 varint::put(&mut entries, major);
                 varint::put(&mut entries, minor);
             }
+            EntryNode::Special(0) => varint::put(&mut entries, 0),
             EntryNode::Special(_) => unreachable!("checked"),
         }
     }
