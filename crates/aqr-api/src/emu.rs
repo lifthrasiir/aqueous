@@ -451,10 +451,12 @@ pub(crate) mod sys {
             }
             let mem = &mut h.inputs[k as usize];
             let mut at = hi_k;
-            let mut put = |d: &[u8]| {
-                for &b in d {
-                    mem[(at % w) as usize] = b;
-                    at += 1;
+            let mut put = |mut d: &[u8]| {
+                while !d.is_empty() {
+                    let from = (at % w) as usize;
+                    let n = d.len().min(w as usize - from);
+                    mem[from..from + n].copy_from_slice(&d[..n]);
+                    (at, d) = (at + n as u64, &d[n..]);
                 }
             };
             match &mut h.data[k as usize] {

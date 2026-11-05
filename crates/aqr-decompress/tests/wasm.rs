@@ -307,6 +307,33 @@ fn filters_same_as_wasm() {
     }
 }
 
+/// The Delta filter (bcj-delta, a part module of windows of a page) on more than its windows,
+/// natively and as WebAssembly alike, streamed as an archive is written out.
+#[test]
+fn delta_streamed() {
+    let d: Vec<u8> = (0..1_000_003u32).map(|i| (i * i / 7) as u8).collect();
+    let mut want = d.clone();
+    aqr_bcj::delta::encode(&mut want, 4);
+    let mut f = Formula::default();
+    let data = f.push("raw", d);
+    f.root = Node::apply(aqr_bcj::formula::DELTA, vec![3], vec![data], want.len() as u64);
+    let c = Encoder::new(Level::Zstd(3)).with_modules(wasm_of).encode(&f, None).unwrap();
+    let wasm = fixture("crates/aqr-modules/wasm/bcj-delta.wasm");
+    for runner in [&Native::default() as &dyn Runner, &Wasm] {
+        assert!(runner.load(&wasm).unwrap().is_part());
+        assert!(aqr::decode(&c, runner).unwrap() == want);
+        let mut out = Vec::new();
+        aqr::open(&c, runner)
+            .unwrap()
+            .write_file(2, &mut |p: &[u8]| {
+                out.extend_from_slice(p);
+                Ok(())
+            })
+            .unwrap();
+        assert!(out == want);
+    }
+}
+
 /// DEFLATE streams inflated (flate-inflate) natively and as WebAssembly alike, and damaged in
 /// turn failing alike (or giving the same).
 #[test]

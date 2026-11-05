@@ -44,6 +44,43 @@ pub fn delta(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     Ok(d)
 }
 
+/// The pages of the windows of `bcj-delta`'s input and output (as a part module,
+/// [`delta_part`]).
+pub const DELTA_WINDOW: u32 = 1;
+
+/// The module `bcj-delta` as a part module (its entry point, of `aqr_api::entry!`): its input
+/// encoded a piece at a time through windows of [`DELTA_WINDOW`] pages, the bytes `dist` before
+/// each kept (those before the data zeros).
+pub fn delta_part(params_len: u64, in0_len: u64, size: u64) {
+    use aqr_api::{Input, Memory, Output, Params};
+    if params_len != 1 || size != in0_len {
+        aqr_api::finish(Err(Error("bad parameters, or output of another length")));
+    }
+    let mut k = [0];
+    Params::read(0, &mut k);
+    let dist = k[0] as usize + 1;
+    let (w_in, w_out) = (Input::<0>::size(), Output::<0>::size());
+    let (mut hist, mut h) = ([0u8; 256], 0);
+    let mut buf = [0; 4096];
+    let mut pos = 0;
+    while pos < size {
+        let n = (size - pos).min(buf.len() as u64).min(w_in - pos % w_in).min(w_out - pos % w_out);
+        let piece = &mut buf[..n as usize];
+        Input::<0>::request(pos + n);
+        Input::<0>::read(pos % w_in, piece);
+        Input::<0>::release(pos + n);
+        for b in piece.iter_mut() {
+            let x = *b;
+            *b = x.wrapping_sub(hist[h]);
+            hist[h] = x;
+            h = if h + 1 == dist { 0 } else { h + 1 };
+        }
+        Output::<0>::write(pos % w_out, piece);
+        Output::<0>::commit(pos + n);
+        pos += n;
+    }
+}
+
 /// The module `bcj2`: the main, call and jump streams of the data (input 0) with the bits that
 /// the range coder's stream (input 1) codes, one after another.
 pub fn bcj2(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {

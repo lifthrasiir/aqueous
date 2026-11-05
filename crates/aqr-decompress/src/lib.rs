@@ -365,7 +365,6 @@ const fn bare(module: Module, decode: Decode) -> Entry {
 
 /// [`Entry`] of a part module, of the entry point `entry` (`aqr_api::entry!`'s), taking
 /// resources where `resources`.
-#[allow(dead_code)]
 const fn part(module: Module, resources: bool, entry: aqr_api::emu::Entry) -> Entry {
     Entry { module, resources, decode: Run::Part(entry) }
 }
@@ -403,7 +402,19 @@ const NATIVE: &[Entry] = &[
     bare(BCJ_SPARC, |p, _, i, n, _| bcj(BCJ_SPARC, p, i, n)),
     bare(BCJ_ARM64, |p, _, i, n, _| bcj(BCJ_ARM64, p, i, n)),
     bare(BCJ_RISCV, |p, _, i, n, _| bcj(BCJ_RISCV, p, i, n)),
-    bare(BCJ_DELTA, |p, _, i, n, _| bcj(BCJ_DELTA, p, i, n)),
+    part(
+        BCJ_DELTA,
+        false,
+        aqr_api::emu::Entry {
+            kind: aqr_api::emu::Kind::Part,
+            windows: &[
+                aqr_api::Window::Input(0, aqr_bcj::module::DELTA_WINDOW),
+                aqr_api::Window::Output(0, aqr_bcj::module::DELTA_WINDOW),
+            ],
+            arity: 3,
+            call: |a| aqr_bcj::module::delta_part(a[0], a[1], a[2]),
+        },
+    ),
     bare(BCJ2, |p, _, i, n, _| bcj(BCJ2, p, i, n)),
     bare(LZO, |p, _, i, n, t| aqr_lzo::formula::decode(p, i, n, t).map_err(err)),
     bare(AZO, |p, _, i, n, t| aqr_azo::formula::decode(p, i, n, t).map_err(err)),

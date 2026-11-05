@@ -84,7 +84,8 @@ IA-64: bundles of 16 bytes, RISC-V below):
 
 Module `bcj-delta`, version 1. **Parameters**: one byte, the distance `n` less one (1 ≤ `n` ≤
 256). **Inputs**: one, the data. **Output**: `D[i] − D[i − n]` for each `i` (bytes, wrapping;
-`D[i]` itself for `i < n`).
+`D[i]` itself for `i < n`). A part module, of windows of a page for its input and its output: it
+holds the `n` bytes before each, whatever the length of the data.
 
 ## BCJ2
 

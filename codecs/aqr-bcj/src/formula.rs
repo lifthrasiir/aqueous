@@ -25,7 +25,13 @@ pub const ARM_THUMB: Module = Module::new("bcj-armthumb", 1).with_memory(memory)
 pub const SPARC: Module = Module::new("bcj-sparc", 1).with_memory(memory);
 pub const ARM64: Module = Module::new("bcj-arm64", 1).with_memory(memory);
 pub const RISCV: Module = Module::new("bcj-riscv", 1).with_memory(memory);
-pub const DELTA: Module = Module::new("bcj-delta", 1).with_memory(memory);
+/// The memory of a part module of no buffers of its own ([`module::delta_part`]): as it is
+/// instantiated, and the small allocations.
+fn memory_part(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    Some(u.initial() + aqr_formula::SMALL)
+}
+
+pub const DELTA: Module = Module::new("bcj-delta", 1).with_memory(memory_part);
 pub const BCJ2: Module = Module::new("bcj2", 1).with_memory(memory_bcj2);
 
 /// Every module of this crate.
