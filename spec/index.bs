@@ -317,6 +317,12 @@ This specification defines and uses the following constants, all of which are de
     <tr>
       <td><dfn noexport>ENCRYPTED_MIRROR_MAGIC</dfn>
       <td>(78&nbsp;D7&nbsp;3F&nbsp;69&nbsp;0A&nbsp;FF&nbsp;44&nbsp;83)<sub>16</sub>
+    <tr>
+      <td><dfn noexport>RECOVERY_MAGIC</dfn>
+      <td>(69&nbsp;0A&nbsp;D1&nbsp;79&nbsp;CD&nbsp;15&nbsp;7A&nbsp;B6)<sub>16</sub>
+    <tr>
+      <td><dfn noexport>OVERLAY_RECOVERY_MAGIC</dfn>
+      <td>(45&nbsp;E7&nbsp;34&nbsp;55&nbsp;EA&nbsp;F2&nbsp;E1&nbsp;0D)<sub>16</sub>
   </tbody>
 </table>
 
@@ -553,7 +559,19 @@ Block types of 2 hexadecimal digits are as follows:
       <td>Yes
       <td>Reserved
     <tr>
-      <td>A0<sub>16</sub>&nbsp;—&nbsp;CF<sub>16</sub>
+      <td>A0<sub>16</sub>&nbsp;—&nbsp;BF<sub>16</sub>
+      <td>No
+      <td>Reserved
+    <tr>
+      <td>C0<sub>16</sub>&nbsp;—&nbsp;C3<sub>16</sub>
+      <td>No
+      <td>[=Parity block=] ([[#recovery-sets]])
+    <tr>
+      <td>C4<sub>16</sub>&nbsp;—&nbsp;C7<sub>16</sub>
+      <td>No
+      <td>[=Index block=] ([[#recovery-sets]])
+    <tr>
+      <td>C8<sub>16</sub>&nbsp;—&nbsp;CF<sub>16</sub>
       <td>No
       <td>Reserved
     <tr>
@@ -661,12 +679,13 @@ A block whose type is not defined by this specification:
     and doesn't affect the result of [=interpret an archive|interpreting an archive=].
 
 <div class=note>
-  Every block type defined by this specification is [=critical=] except for [[#mirror-block|mirror blocks]],
-  which a decompressor not using them can skip.
+  Every block type defined by this specification is [=critical=] except for [[#mirror-block|mirror blocks]]
+  and [[#recovery-sets|recovery blocks]], which a decompressor not using them can skip.
+  The non-critical types with the [=leading digit=] C are kept for blocks used for recovery.
   Future versions of this specification will use a critical type for a block
   without which an archive can't be correctly interpreted,
   e.g. a [[#data-block|data block]] with a new compression method in 38<sub>16</sub> through 3F<sub>16</sub>,
-  and a non-critical type for a block that can be safely skipped, e.g. recovery data.
+  and a non-critical type for a block that can be safely skipped.
   The block-like structures below also have critical types, so they are never skipped by mistake.
 </div>
 
@@ -3565,6 +3584,16 @@ The following table summarizes every checksum defined by this specification:
       <td>Stored bytes
       <td>Always
     <tr>
+      <td>[[#recovery-sets|Recovery blocks]]
+      <td>XXH64 ([=recovery/recovery_checksum=])
+      <td>Stored bytes
+      <td>Always
+    <tr>
+      <td>[=Slices=] of a [=recovery set=]
+      <td>XXH64 ([=recovery/slice_hashes=])
+      <td>Stored bytes within the range
+      <td>If the set has an [=index block=]
+    <tr>
       <td>Header and mirrored headers of an [[#encrypted-archive|encrypted archive]]
       <td>XXH64 ([=envelope/header_checksum=], [=emirror/mirror_checksum=])
       <td>Stored bytes
@@ -3948,11 +3977,349 @@ which then has to come out exact.
 Such a compressor places its mirror blocks as far from their target blocks as it can
 (`docs/recovery-design.md` §5.5).
 
+<h3 id=recovery-sets>
+Recovery sets</h3>
+
+A <dfn>recovery set</dfn> protects a range of bytes of the archive with parity computed by a Reed–Solomon code,
+so that damaged parts of the range can be restored, including the content of files that no mirror block covers.
+The range is divided into [=slices=], each of which is either intact or lost as a whole,
+and up to as many lost slices as the set has parity shards can be restored.
+A recovery set consists of the following blocks, called <dfn>recovery blocks</dfn>:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Block Types
+      <th>Definition
+  </thead>
+  <tbody>
+    <tr>
+      <td>C0<sub>16</sub>&nbsp;—&nbsp;C3<sub>16</sub>
+      <td><dfn>Parity block</dfn>, holding a single [=parity shard=]
+    <tr>
+      <td>C4<sub>16</sub>&nbsp;—&nbsp;C7<sub>16</sub>
+      <td><dfn>Index block</dfn>, holding the hashes of every [=data shard=]
+  </tbody>
+</table>
+
+A recovery set without any parity shard consists of index blocks only,
+which locate damage to the range without restoring it.
+
+Its data consists of the following:
+
+<div dfn-for=recovery>
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+      <th>Conditions
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>recovery_magic</dfn>
+      <td>[=u8=][8] ∈ {[=const/RECOVERY_MAGIC=], [=const/OVERLAY_RECOVERY_MAGIC=]}
+      <td>
+    <tr>
+      <td><dfn>archive_offset</dfn>
+      <td>[=leb128=]
+      <td>
+    <tr>
+      <td><dfn>range_offset</dfn>
+      <td>[=leb128=]
+      <td>
+    <tr>
+      <td><dfn>range_length</dfn>
+      <td>[=leb128=] ≥ 1
+      <td>
+    <tr>
+      <td><dfn>lg_slice_size</dfn>
+      <td>[=u8=], 12 ≤ [=recovery/lg_slice_size=] ≤ 63
+      <td>
+    <tr>
+      <td><dfn>parity_count</dfn>
+      <td>[=leb128=]
+      <td>
+    <tr>
+      <td><dfn>shard_index</dfn>
+      <td>[=leb128=] &lt; [=recovery/parity_count=]
+      <td>[=If=] a [=parity block=]
+    <tr>
+      <td><dfn>shard</dfn>
+      <td>[=u8=][[=recovery/slice size=]]
+      <td>[=If=] a [=parity block=]
+    <tr>
+      <td><dfn>slice_hashes</dfn>
+      <td>[=u64le=][[=recovery/data shard count=]]
+      <td>[=If=] an [=index block=]
+    <tr>
+      <td><dfn>checksum_end</dfn>
+      <td>[=offset=]
+      <td>
+    <tr>
+      <td><dfn>recovery_checksum</dfn>
+      <td>[=u64le=]
+      <td>
+  </tbody>
+</table>
+
+[=recovery/recovery_magic=] is a fixed byte sequence that allows recovery blocks to be found by scanning,
+as [=mirror/mirror_magic=] does for mirror blocks.
+It MUST be [=const/OVERLAY_RECOVERY_MAGIC=] in an [=overlay archive=] and [=const/RECOVERY_MAGIC=] otherwise.
+
+[=recovery/archive_offset=] is the offset from [=archive/archive_start=] to the [=block/block_start=] of the recovery block,
+for the same purpose as [=mirror/archive_offset=] of a mirror block.
+
+The protected range of the set is [<dfn>range_start</dfn>, <dfn>range_end</dfn>),
+where [=recovery/range_start=] is the [=block/block_start=] of the recovery block minus [=recovery/range_offset=]
+and [=recovery/range_end=] is [=recovery/range_start=] + [=recovery/range_length=].
+The range MUST lie within [[=archive/archive_start=], [=archive/archive_end=]),
+and every recovery block MUST start at or after [=recovery/range_end=],
+i.e. [=recovery/range_offset=] ≥ [=recovery/range_length=].
+The range MAY start or end in the middle of a block, and MAY contain recovery blocks of other recovery sets and mirror blocks.
+
+The <dfn>slice size</dfn> |S| is 2<sup>[=recovery/lg_slice_size=]</sup>,
+and the number of parity shards |p| is [=recovery/parity_count=].
+Recovery blocks of an archive with the same [=recovery/range_start=], [=recovery/range_length=],
+[=recovery/lg_slice_size=] and [=recovery/parity_count=] belong to the same recovery set,
+and all others belong to other recovery sets.
+
+[=recovery/recovery_checksum=] is the XXH64 [[!XXHASH]] hash with the seed zero
+of all bytes from the [=block/block_start=] of the recovery block to [=recovery/checksum_end=],
+including its [=block/type=] and [=block/size=] fields.
+
+</div>
+
+<div class=note>
+  The parameters of the set determine its parity shards entirely,
+  so no identifier is needed to tell recovery sets apart:
+  successive sets have distinct ranges, and the sets of another archive stored inside this archive
+  imply another start of the archive by [=recovery/archive_offset=].
+</div>
+
+<h4 id=slices>
+Slices and shards</h4>
+
+The <dfn>slice grid</dfn> of an archive has its origin at the start of its [=archive/header_magic=],
+i.e. at [=archive/archive_start=] − 6, which is the start of the payload in an [[#encrypted-archive|encrypted archive]].
+The <dfn>slice</dfn> |k| of a recovery set, for every integer |k| ≥ 0,
+consists of the bytes from the offset |k| × |S| to the offset (|k| + 1) × |S| from the origin of the [=slice grid=].
+
+The <dfn>data shards</dfn> of a recovery set are its [=slices=] overlapping its range, in their order.
+Let <var>k<sub>0</sub></var> be ⌊([=recovery/range_start=] − |o|) / |S|⌋, where |o| is the origin;
+the <dfn for=recovery>data shard count</dfn> |n| is ⌈([=recovery/range_end=] − |o|) / |S|⌉ − <var>k<sub>0</sub></var>,
+and the data shard <var>d<sub>i</sub></var> for 0 ≤ |i| &lt; |n| is the slice <var>k<sub>0</sub></var> + |i|
+with every byte outside the range taken as zero, whatever the archive holds there.
+Only the first and the last data shards may be partly outside the range.
+
+Every recovery set with |p| ≥ 1 also has |p| <dfn>parity shards</dfn> <var ignore>P<sub>0</sub></var>, …, <var ignore>P<sub>p−1</sub></var>
+of |S| bytes each, computed from its data shards as in [[#rs-code]].
+If |p| ≥ 1, |n| + |m| MUST NOT exceed 65,536, where |m| is the smallest power of two that is |p| or greater.
+
+The [=recovery/shard=] of a [=parity block=] is the parity shard <var>P<sub>j</sub></var> for |j| = [=recovery/shard_index=],
+and MUST be equal to it.
+A parity block MUST NOT belong to a recovery set with |p| = 0.
+
+The [=recovery/slice_hashes=] of an [=index block=] has an entry for every data shard,
+and the entry |i| MUST be the XXH64 [[!XXHASH]] hash with the seed zero
+of the bytes of <var>d<sub>i</sub></var> within the range, without the zeros outside it.
+
+<div class=note>
+  The slice grid is aligned to the archive rather than to the range,
+  so that a slice of every recovery set is a unit of 2<sup>|s|</sup> bytes aligned to the start of the file
+  for an archive starting at the start of the file,
+  where it coincides with the aligned units of the underlying storage that are damaged or lost together;
+  a range aligned to [=archive/archive_start=], 6 bytes after the start of the file, would have every such unit span two slices.
+  In an encrypted archive, a slice of a multiple of 64 KiB is a whole number of encrypted chunks,
+  so that a chunk failing to authenticate loses a single slice.
+  The data shard count is therefore that of the slices the range overlaps, not |R| / |S| for the length |R| of the range:
+  a range of |R| bytes has ⌈|R| / |S|⌉ or ⌈|R| / |S|⌉ + 1 data shards depending on where it starts.
+</div>
+
+<h4 id=rs-code>
+Parity shards</h4>
+
+A shard of |S| bytes is a sequence of |S| / 2 16-bit symbols.
+The symbol |c| of a shard, for 0 ≤ |c| &lt; |S| / 2, has its least significant byte at the offset 64 × ⌊|c| / 32⌋ + (|c| mod 32) in the shard
+and its most significant byte at the offset 64 × ⌊|c| / 32⌋ + 32 + (|c| mod 32).
+In other words, every 64 bytes of a shard hold 32 symbols, their least significant bytes followed by their most significant bytes.
+
+Symbols are elements of the finite field GF(2<sup>16</sup>) represented as GF(2)[|x|] / (|x|<sup>16</sup> + |x|<sup>5</sup> + |x|<sup>3</sup> + |x|<sup>2</sup> + 1),
+in which a polynomial is written as a 16-bit integer whose bit |b| is the coefficient of |x|<sup>|b|</sup>.
+A symbol |v|, however, denotes the element Σ<sub>|b|</sub> <var>v<sub>b</sub></var> × <var>β<sub>b</sub></var>,
+where <var>v<sub>b</sub></var> is the bit |b| of |v| and <var>β<sub>0</sub></var>, …, <var ignore>β<sub>15</sub></var> are the following elements:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>|b|
+      <th>0
+      <th>1
+      <th>2
+      <th>3
+      <th>4
+      <th>5
+      <th>6
+      <th>7
+  </thead>
+  <tbody>
+    <tr>
+      <th><var>β<sub>b</sub></var>
+      <td>0001<sub>16</sub>
+      <td>ACCA<sub>16</sub>
+      <td>3C0E<sub>16</sub>
+      <td>163E<sub>16</sub>
+      <td>C582<sub>16</sub>
+      <td>ED2E<sub>16</sub>
+      <td>914C<sub>16</sub>
+      <td>4012<sub>16</sub>
+  </tbody>
+  <thead>
+    <tr>
+      <th>|b|
+      <th>8
+      <th>9
+      <th>10
+      <th>11
+      <th>12
+      <th>13
+      <th>14
+      <th>15
+  </thead>
+  <tbody>
+    <tr>
+      <th><var>β<sub>b</sub></var>
+      <td>6C98<sub>16</sub>
+      <td>10D8<sub>16</sub>
+      <td>6A72<sub>16</sub>
+      <td>B900<sub>16</sub>
+      <td>FDB8<sub>16</sub>
+      <td>FB34<sub>16</sub>
+      <td>FF38<sub>16</sub>
+      <td>991E<sub>16</sub>
+  </tbody>
+</table>
+
+Addition of symbols is therefore their bitwise exclusive or.
+For 0 ≤ |k| &lt; 65,536, <var>ω<sub>k</sub></var> denotes the element denoted by the symbol |k|.
+
+<div class=note>
+  The elements <var>β<sub>b</sub></var> form a Cantor basis:
+  <var>β<sub>0</sub></var> = 1 and <var>β<sub>b</sub></var><sup>2</sup> + <var>β<sub>b</sub></var> = <var ignore>β<sub>b−1</sub></var> for 1 ≤ |b| ≤ 15.
+  In this basis, <var>ω<sub>0</sub></var>, …, <var ignore>ω<sub>2<sup>t</sup>−1</sub></var> form a subspace for every |t|,
+  which allows the parity shards to be computed by an additive fast Fourier transform.
+</div>
+
+The data shards are divided into groups of |m| shards:
+the group |g| ≥ 0 consists of <var ignore>d<sub>gm</sub></var>, …, <var ignore>d<sub>gm+m−1</sub></var>,
+where <var>d<sub>i</sub></var> for |i| ≥ |n| is taken as |S| zero bytes,
+and the data shard <var>d<sub>gm+r</sub></var> is placed at the point <var>ω<sub>(g+1)m+r</sub></var>.
+For each symbol position |c| and each group |g|,
+let <var>f<sub>g</sub></var> be the polynomial over the field of degree less than |m|
+such that <var>f<sub>g</sub></var>(<var>ω<sub>(g+1)m+r</sub></var>) is the symbol |c| of <var>d<sub>gm+r</sub></var> for every 0 ≤ |r| &lt; |m|.
+The symbol |c| of the parity shard <var>P<sub>j</sub></var>, for 0 ≤ |j| &lt; |p|,
+is Σ<sub>|g|</sub> <var>f<sub>g</sub></var>(<var>ω<sub>j</sub></var>).
+
+<div class=note>
+  Written out by Lagrange interpolation, the symbol |c| of <var>P<sub>j</sub></var> is
+  Σ<sub>|i|</sub> <var>d<sub>i</sub></var>[|c|] × Π<sub>|k|</sub> (<var>ω<sub>j</sub></var> + <var>ω<sub>k</sub></var>) / (<var>ω<sub>m+i</sub></var> + <var>ω<sub>k</sub></var>),
+  where |k| ranges over the points of the group of <var>d<sub>i</sub></var> other than |m| + |i|.
+  It is also the value at <var>ω<sub>j</sub></var> of the polynomial of degree less than 65,536 − |m|
+  that takes the symbol |c| of <var>d<sub>i</sub></var> at <var>ω<sub>m+i</sub></var> for every |i| &lt; 65,536 − |m|.
+  The data and parity shards are thus a codeword of a shortened and punctured systematic Reed–Solomon code over GF(2<sup>16</sup>)
+  with |n| + |p| distinct evaluation points, which is maximum distance separable:
+  any |n| of the |n| + |p| shards determine the others.
+  The data shards beyond |n| are those shortened, and the parity shards from |p| to |m| − 1 are those punctured.
+</div>
+
+<div class=note>
+  This is the code of the additive-FFT Reed–Solomon codes by Lin, Al-Naffouri, Han and Chung,
+  and the shards are in the layout of their implementations:
+  the high-rate code of `reed-solomon-simd` (`rate::HighRateEncoder`)
+  and of Leopard-RS over GF(2<sup>16</sup>) produce these parity shards from the data shards as they are.
+  The high-level interface of the former chooses another code when |p| > |n|,
+  and the original interface of the latter uses GF(2<sup>8</sup>) when |n| + |m| ≤ 256.
+  The parity shards can be computed while the data shards are read, one group at a time:
+  each group is transformed into the coefficients of <var>f<sub>g</sub></var> and accumulated,
+  and the sum is transformed into its values at <var>ω<sub>0</sub></var>, …, <var ignore>ω<sub>m−1</sub></var> once at the end,
+  so that a compressor needs about 2 × |m| × |S| bytes of memory regardless of the length of the range.
+</div>
+
+<h4 id=recovery-placement>
+Placement</h4>
+
+A recovery block doesn't belong to any [=segment=] and MAY occur anywhere in [=archive/blocks=] after the range of its set.
+A recovery set MAY have multiple parity blocks with the same [=recovery/shard_index=] and multiple index blocks,
+and need not have a parity block for every parity shard.
+As for mirror blocks, the requirements on a recovery block in this section are requirements on conforming compressors,
+and a recovery block violating them doesn't make the archive an [=invalid archive=].
+Recovery blocks don't affect the result of [=interpret an archive|interpreting an archive=] at all.
+
+A recovery block is <dfn for=recovery>intact</dfn> if its [=recovery/recovery_checksum=] verifies
+and it satisfies the requirements above other than those on the values of [=recovery/shard=] and [=recovery/slice_hashes=],
+and other than the range lying before [=archive/archive_end=].
+A decompressor MUST NOT restore any byte from a recovery block that is not intact.
+
+A recovery set with |p| ≥ 1 SHOULD have at least two index blocks,
+separated from each other as a mirror block is recommended to be separated from its target block ([[#mirror-block]]),
+since the damage to its data shards can't be located without one.
+Conforming compressors SHOULD place the recovery blocks of a set at least 4 MiB (4,194,304 bytes) after its [=recovery/range_end=] when possible,
+so that a single burst of damage doesn't remove a part of the range and the parity shards restoring it together.
+In an encrypted archive, the [=slice size=] SHOULD be 64 KiB or greater.
+
+<div class=note>
+  A burst of damage |L| bytes long loses at most ⌈|L| / |S|⌉ + 1 slices,
+  and every damaged region, however short, loses a whole slice.
+  A recovery set with |p| parity shards thus restores a single burst of up to about (|p| − 1) × |S| bytes,
+  or |p| scattered damaged regions.
+  For example, a range of 1 GiB with |S| = 64 KiB has 16,384 or 16,385 data shards,
+  and 164 parity shards (about 1%, 10.25 MiB) restore a burst of about 10 MiB.
+</div>
+
+<div class=note>
+  A compressor choosing the [=slice size=] for a range and a ratio |r| of parity shards to data shards can take the smallest |s|
+  from 12 (or 16 in an encrypted archive) on for which |n| + |m| ≤ 65,536 holds,
+  where |S| = 2<sup>|s|</sup>, |n| is the data shard count of the range for |S|, |p| = max(1, ⌈|r| × |n|⌉) and |m| is as above.
+  The smallest slice size loses the fewest bytes to every damaged region.
+  A larger |s| roughly halves both |n| and |p|, so that the condition only gets looser and some |s| satisfies it.
+  The condition holds regardless of where the range starts if its length is at most |S| × (65,535 − |m|).
+</div>
+
+<div class=note>
+  The parity shards of a set can only be written after its range has been read entirely,
+  so that the recovery blocks of the last set of an archive are not in the range of any other set,
+  and a truncation of the archive removes the end of the last range together with its recovery blocks.
+  Closing ranges periodically bounds the loss in that case, as closing segments does for the mirror block of the last metadata block.
+  A compressor keeping a range open across a long block holds the parity shards of the ranges closed meanwhile,
+  or extends the range to the end of the block with a larger [=slice size=].
+  Appending to an archive leaves every existing recovery set valid, since its range precedes the new blocks;
+  a new set starting at the [=recovery/range_end=] of the last existing one also covers its recovery blocks.
+</div>
+
+<div class=note>
+  To find recovery blocks by scanning, a decoder can look for [=const/RECOVERY_MAGIC=]
+  and try each of four possible widths of the [=block/size=] field preceding it, as for mirror blocks ([[#mirror-block]]).
+  Every recovery block type is encoded in 2 bytes.
+  An index block alone tells which slices are damaged without decompressing anything.
+</div>
+
+A tool verifying an archive SHOULD report its recovery sets, the slices whose hash doesn't match,
+and the recovery sets that couldn't restore their damaged slices.
+
+<div class=note>
+  In an encrypted archive, recovery sets lie in the payload and protect it as decrypted,
+  so that they are blocks like any other and the slice grid is that of an unencrypted archive.
+  They can't be used without the passphrase,
+  and an encrypted chunk failing to authenticate loses every slice it overlaps,
+  which is a single slice when the slice size is a multiple of 64 KiB as recommended above.
+</div>
+
 
 <h3 id=repair>
 Repair</h3>
 
-Restoring damaged blocks from mirror blocks is a process separate from [=interpret an archive|interpreting an archive=]:
+Restoring damaged blocks from mirror blocks and damaged slices from recovery sets is a process separate from [=interpret an archive|interpreting an archive=]:
 it takes a damaged [=byte sequence=] and returns a byte sequence that is then interpreted as any archive is.
 A decompressor MAY [=repair an archive=] before interpreting it, and SHOULD report the blocks it restored.
 
@@ -4004,11 +4371,16 @@ from its [=archive/header_magic=] on, with a set |untrusted| of the bytes of |a|
         that are [=mirror/intact=] when [=archive/archive_start=] is taken as the start of the archive they imply
         and that have no [=untrusted=] byte.
         Their target blocks may lie beyond the end of |a|.
+        Let |rfound| be the list of [=recovery blocks=] found likewise by scanning |a|
+        for [=const/RECOVERY_MAGIC=] and [=const/OVERLAY_RECOVERY_MAGIC=] ([[#recovery-sets]]),
+        that are [=recovery/intact=] and have no [=untrusted=] byte.
+        If |start| is not null, remove from |found| and |rfound| every block implying a start of the archive other than |start|.
     3. If |start| is null:
-        1. Set |start| to the smallest start of the archive implied by the mirror blocks of |found|.
-            Remove from |found| every mirror block implying another start.
+        1. Set |start| to the smallest start of the archive implied by the blocks of |found| and |rfound|.
+            Remove from |found| and |rfound| every block implying another start.
         2. If |start| is 6, replace the first 6 bytes of |a| with [=const/OVERLAY_HEADER_MAGIC=]
-            if the mirror blocks of |found| have [=const/OVERLAY_MIRROR_MAGIC=], and with [=const/HEADER_MAGIC=] otherwise.
+            if the blocks of |found| and |rfound| have [=const/OVERLAY_MIRROR_MAGIC=] or [=const/OVERLAY_RECOVERY_MAGIC=],
+            and with [=const/HEADER_MAGIC=] otherwise.
     4. For each [=mirror/target block=] position |t| of the mirror blocks of |found|, in the order of |found|:
         1. Let |restored| be the bytes that the first mirror block of |found| for |t| requires of its target block.
         2. If the bytes of |a| from |t| are those required by any mirror block of |found| for |t|,
@@ -4018,9 +4390,49 @@ from its [=archive/header_magic=] on, with a set |untrusted| of the bytes of |a|
         5. Replace the bytes of |a| from |t| with |restored|,
             and the following byte with 0 if the length of |restored| is odd and |a| has a following byte.
             Remove those bytes from |untrusted|.
-    5. If |start| is 6, [=reconstruct the footer=] of |a|.
-    6. Return |a| and |untrusted|.
+    5. For each [=recovery set=] of the blocks of |rfound|, in the order of decreasing [=recovery/range_end=],
+        [=restore from a recovery set|restore=] |a| from it.
+    6. If the step 5 restored any byte that no earlier repetition of it has restored, repeat from the step 2.
+    7. If |start| is 6, [=reconstruct the footer=] of |a|.
+    8. Return |a| and |untrusted|.
 </ol>
+
+To <dfn>restore from a recovery set</dfn> with the blocks |r| of |rfound| in [=repair an archive=],
+taking |start| as [=archive/archive_start=]:
+
+<ol class=algorithm>
+    1. If |p| is 0, return.
+    2. Let |h| be the [=recovery/slice_hashes=] of the first [=index block=] of |r|, or null if there is none.
+    3. A [=data shard=] <var>d<sub>i</sub></var> is <dfn for=recovery>erased</dfn> if any of its bytes within the range is [=untrusted=],
+        or if |h| is not null and the hash of its bytes within the range ([[#slices]]) is not |h|[|i|].
+        If no data shard is erased, return.
+    4. Let |q| be the set of every |j| for which |r| has a [=parity block=] with [=recovery/shard_index=] |j|,
+        with the [=recovery/shard=] of the first such parity block as <var>P<sub>j</sub></var>.
+    5. If there is exactly one choice of the bytes within the range of the [=recovery/erased=] data shards
+        for which the data shards and <var>P<sub>j</sub></var> for every |j| in |q| are as [[#rs-code]] requires,
+        and every erased data shard has the hash |h| tells if |h| is not null,
+        replace those bytes of |a| with that choice, and remove them from |untrusted|.
+</ol>
+
+<div class=note>
+  Since any |n| of the shards of a recovery set determine the others,
+  there is at most one such choice when no more data shards are erased than |q| has parity shards.
+  It is found by decoding with as many parity shards as there are erased data shards,
+  and exists if the result also agrees with the other parity shards and with the hashes.
+  Without an index block, damage to an unencrypted archive is not located,
+  and only the data shards with an untrusted byte are erased.
+  A restored data shard is trusted, as the parity shards and the hashes lie in encrypted chunks that do authenticate,
+  and so do the data shards not erased.
+</div>
+
+<div class=note>
+  The steps are repeated because restoring from a recovery set may make others usable:
+  a recovery set restores the recovery blocks of the earlier sets in its range,
+  and the mirror blocks and target blocks restored by either reduce the erased data shards of the others.
+  With recovery blocks placed after their ranges as recommended in [[#recovery-placement]],
+  restoring from the sets in the order of decreasing [=recovery/range_end=] restores everything in a single pass,
+  and the repetition finds nothing more.
+</div>
 
 <div class=note>
   The bytes of a target block that equal an intact mirror block, or that are restored from one, are trusted
@@ -4094,7 +4506,7 @@ To <dfn>salvage an archive</dfn> |a|, a [=byte sequence=] as for [=repair an arc
 
 <ol class=algorithm>
     1. [=Repair an archive|Repair=] |a|, except that, if |a| starts with a header magic,
-        a target block position |t| beyond the end of |a| isn't skipped in the step 4.2:
+        a target block position |t| beyond the end of |a| isn't skipped in the step 4.3:
         1. Read blocks from the offset 6 by the generic structure ([[#block]]) as far as they are whole,
             and let |e| be the offset after the [=block/padding=] of the last block read (6 if none).
         2. If |e| > |t| or |t| − |e| is odd, skip |t|.
@@ -4102,7 +4514,7 @@ To <dfn>salvage an archive</dfn> |a|, a [=byte sequence=] as for [=repair an arc
             The bytes from |e| to |t| are <dfn for=salvage>lost</dfn>.
         4. Continue with the step 4.4.
 
-        Before reconstructing the footer in the step 5, if any byte of |a| is still [=untrusted=],
+        Before reconstructing the footer in the step 7, if any byte of |a| is still [=untrusted=],
         [=lose the untrusted blocks=] of |a|.
         When [=reconstruct the footer|reconstructing the footer=] returns in its step 4
         only because of blocks after |m| or a block cut short after the last block read,
@@ -4128,6 +4540,7 @@ To <dfn>salvage an archive</dfn> |a|, a [=byte sequence=] as for [=repair an arc
 
 To <dfn>lose the untrusted blocks</dfn> of a [=byte sequence=] |a| starting with a header magic,
 given the positions |known| of the [=block/block_start=] of every mirror block of |found| in [=repair an archive=] and of its target block,
+of every recovery block of |rfound|,
 and of the footer if one ends at the end of |a| and has no [=untrusted=] byte:
 
 <ol class=algorithm>
