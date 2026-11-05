@@ -133,6 +133,10 @@ fn exe(u: &aqr_formula::Usage<'_>) -> Option<u64> {
 /// profile; inputs: the data, the records and the index cutting them into the streams'.
 pub const FLATE: Module = aqr_flate::formula::MODULE;
 
+/// The data of a raw DEFLATE stream, the one input, for a file that a DEFLATE stream archived
+/// along with it holds (not rebuilt).
+pub const INFLATE: Module = aqr_flate::formula::INFLATE;
+
 /// liblz4's fast compressor on data, for an LZ4 block or frame. Parameters: the kind of stream
 /// and the compressor's settings; inputs: the data.
 pub const LZ4: Module = aqr_lz4::formula::MODULE;
@@ -373,6 +377,7 @@ const NATIVE: &[Entry] = &[
     bare(PE_RELOC, |p, _, i, n, _| aqr_exe::module::reloc(p, i, n).map_err(err)),
     bare(MACHO_SYMTAB, |p, _, i, n, _| aqr_exe::module::macho_symtab(p, i, n).map_err(err)),
     takes(FLATE, |p, r, i, n, t| aqr_flate::formula::decode(p, r, i, n, t).map_err(err)),
+    bare(INFLATE, |p, _, i, n, _| aqr_flate::module::inflate(p, i, n).map_err(err)),
     bare(LZ4, |p, _, i, n, t| aqr_lz4::formula::decode(p, i, n, t).map_err(err)),
     bare(LZMA, |p, _, i, n, t| aqr_lzma::formula::decode(p, i, n, t).map_err(err)),
     bare(LZMA2, |p, _, i, n, t| aqr_lzma::formula::decode2(p, i, n, t).map_err(err)),

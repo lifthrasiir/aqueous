@@ -442,6 +442,38 @@ fn held_once_of(words: [&str; 10], module: &str) {
     assert!(c.len() < alone.len() * 3 / 2, "{} of {} alone, in batches", c.len(), alone.len());
 }
 
+/// Below level 4, a file whose data a ZIP archive's entry, a gzip file or a zlib stream archived
+/// along with it holds is made of their DEFLATE stream (flate-inflate), which is kept as it is
+/// (not rebuilt) and stored once: the file costs about nothing on top of the container.
+#[test]
+fn inflated_below_level_4() {
+    let mut x = 1u64;
+    let mut data = Vec::new();
+    while data.len() < 1 << 20 {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        write!(data, "{} {} ", ["the", "quick", "brown", "fox", "jumps"][(x >> 60) as usize % 5], (x >> 40) % 1000)
+            .unwrap();
+    }
+    let mut e = flate2::GzBuilder::new().filename("words").write(Vec::new(), flate2::Compression::new(6));
+    e.write_all(&data).unwrap();
+    let gz = e.finish().unwrap();
+    let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
+    e.write_all(&data).unwrap();
+    let zlib = e.finish().unwrap();
+    let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(6));
+    e.write_all(&data).unwrap();
+    let zip = zip_of("words", &data, &e.finish().unwrap());
+    let opt = Options { level: aqr_formula::aqr::Level::LOW, ..Options::default() };
+    for (name, container) in [("w/words.gz", gz), ("w/words.zlib", zlib), ("w/words.zip", zip)] {
+        let (alone, _) = archived(&[(name, container.clone())], &opt);
+        let (c, r) = archived(&[("w/words", data.clone()), (name, container)], &opt);
+        let modules = |k: usize| r.files[k].modules.iter().map(|m| m.name).collect::<Vec<_>>();
+        assert_eq!(modules(0), ["flate-inflate"], "{name} {r:?}");
+        assert!(!modules(1).contains(&"flate-set"), "{name} {r:?}");
+        assert!(c.len() < alone.len() + (16 << 10), "{name}: {} of {} alone", c.len(), alone.len());
+    }
+}
+
 /// `n` bytes at random from `seed`, which do not compress.
 fn noise(n: usize, seed: u64) -> Vec<u8> {
     let mut x = seed;

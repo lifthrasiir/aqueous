@@ -307,6 +307,35 @@ fn filters_same_as_wasm() {
     }
 }
 
+/// DEFLATE streams inflated (flate-inflate) natively and as WebAssembly alike, and damaged in
+/// turn failing alike (or giving the same).
+#[test]
+fn inflate_same_as_wasm() {
+    let enc = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
+    let text: Vec<u8> = (0..40_000).flat_map(|i| format!("line {} of {}\n", i % 211, i % 17).into_bytes()).collect();
+    for (level, strategy) in [(1, aqr_flate::zlib::Strategy::Default), (9, aqr_flate::zlib::Strategy::Fixed)] {
+        let p = aqr_flate::zlib::Params { level, strategy, ..Default::default() };
+        let raw = aqr_flate::zlib::compress(&text, p).unwrap();
+        let mut f = Formula::default();
+        let s = f.push("flate/deflated", raw.clone());
+        f.root = aqr_flate::formula::inflated(s, text.len() as u64);
+        let c = enc.encode(&f, None).unwrap();
+        assert!(aqr::decode(&c, &Native::default()).unwrap() == text, "{level}");
+        assert!(decode_wasm(&c).unwrap() == text, "{level}");
+        for at in [1, 2, 3] {
+            let mut bad = f.clone();
+            let i = raw.len() * at / 4;
+            bad.streams[0].data.to_mut()[i] ^= 0x10;
+            let c = enc.encode(&bad, None).unwrap();
+            let (n, w) = (aqr::decode(&c, &Native::default()), decode_wasm(&c));
+            assert_eq!(n.is_ok(), w.is_ok(), "{level} at {i}: {n:?} {w:?}");
+            if let (Ok(n), Ok(w)) = (n, w) {
+                assert!(n == w, "{level} at {i}");
+            }
+        }
+    }
+}
+
 /// lzop files natively and as WebAssembly alike, and their records damaged in turn failing alike
 /// (or giving the same).
 #[test]

@@ -25,6 +25,21 @@ pub use crate::module::{
 
 pub const MODULE: Module = Module::new("flate-set", 1).with_memory(memory);
 
+/// The module `flate-inflate`: the data of a raw DEFLATE stream ([`crate::module::inflate`]),
+/// for a file whose data a DEFLATE stream archived along with it holds (the body of a ZIP
+/// archive's entry, a gzip member or a zlib stream, not rebuilt): the stream is then stored once.
+pub const INFLATE: Module = Module::new("flate-inflate", 1).with_memory(memory_inflate);
+
+/// The memory of [`INFLATE`]: its input, and its output made in place.
+fn memory_inflate(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    Some(u.whole(0, 0))
+}
+
+/// The application of [`INFLATE`] to `raw`, a raw DEFLATE stream of `len` bytes of data.
+pub fn inflated(raw: Node, len: u64) -> Node {
+    Node::apply(INFLATE, Vec::new(), vec![raw], len)
+}
+
 /// Bytes of a rule in a catalog resource, and a rule in memory (`RULE_BYTES` and the fields of
 /// [`Rule`] on 32 bits, rounded up).
 const RULE_MEM: u64 = 24;

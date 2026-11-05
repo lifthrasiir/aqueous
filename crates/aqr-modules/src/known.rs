@@ -220,6 +220,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/flac-recons.block"),
     },
     Known {
+        name: "flate-inflate",
+        version: 1,
+        sha512_256: hex("6a74273cef234bdee732740855812ef61155775690dc6173bb5a324d61cba2b0"),
+        block: include_bytes!("../wasm/flate-inflate.block"),
+    },
+    Known {
         name: "flate-set",
         version: 1,
         sha512_256: hex("b692dbd9724b1a08acc125d697b2ae54d5ce5d4fe670c24fb478031bb1d0b83e"),

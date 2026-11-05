@@ -1672,6 +1672,11 @@ fn analyze(i: usize, files: &[File], data: Vec<Bytes>, raw: &HashSet<usize>, opt
     cx.top_sets = Some(opt.set_bytes);
     // (the files known by where their copies are, and taken from the input; and what they
     // hold, a content told by where it is)
+    if crate::inflated::on(opt) {
+        f.streams.iter_mut().for_each(|s| s.data.share());
+        let files: Vec<Bytes> = f.streams.iter().map(|s| s.data.clone()).collect();
+        cx.bodies = Some(std::sync::Arc::new(crate::inflated::Bodies::of(&files, raw, opt.threads)));
+    }
     let regions: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
     // (nothing to tell where nothing is recompressed)
     cx.held = opt.recompresses().then(|| std::sync::Arc::new(Held::of(&regions, opt.threads)));

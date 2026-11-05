@@ -7,7 +7,9 @@
 //!   sliced in between, a content stream (below). Of an NSIS installer, the files its data
 //!   stores as they are (`nsis`), each a content of its format, as deep as the installer.
 //! - gzip and zlib: the container sliced around aqr-flate on the DEFLATE stream (data and
-//!   record).
+//!   record). Below level 4, DEFLATE streams (theirs and ZIP archives') are not rebuilt but
+//!   kept as they are, each a slice of its own, and the files archived along with them that
+//!   hold their data are made of them by aqr-flate's `flate-inflate` ([`inflated`]).
 //! - mozlz4 files and LZ4 frames: the container sliced around aqr-lz4 on the data.
 //! - `.lzma` files: the header sliced around aqr-lzma on the data and record of the stream.
 //! - `.xz` files: the container sliced around aqr-lzma on the data and records of the LZMA2
@@ -127,6 +129,7 @@ mod extent;
 mod flate;
 mod git;
 mod hdf5;
+mod inflated;
 pub mod mapped;
 mod memory;
 mod nsis;
@@ -404,6 +407,9 @@ pub(crate) struct Cx {
     later: RefCell<Vec<(usize, Node, Nest)>>,
     /// What the files archived together hold ([`Held`]), for an archive of several.
     held: Option<Arc<Held>>,
+    /// The DEFLATE streams of the files archived together, kept as they are, that files holding
+    /// their data are made of ([`inflated`]), for an archive of several below level 4.
+    bodies: Option<Arc<inflated::Bodies>>,
     /// The remaps of the ARM64 and x86 images of the Mach-O and ELF files archived together
     /// ([`exe::plan`]).
     remaps: Option<Arc<exe::Remaps>>,
@@ -526,6 +532,7 @@ impl Cx {
             top_sets: None,
             later: Default::default(),
             held: None,
+            bodies: None,
             remaps: None,
             words: Default::default(),
             coded_held: Default::default(),
@@ -962,6 +969,12 @@ pub(crate) fn made(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> O
 
 fn made_alone(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option<Made> {
     let text = how == Nest::As(Format::Text) || how == Nest::Scan && is_text(detect(d));
+    // (the data of a DEFLATE stream archived along with it, kept as it is: made of it)
+    if depth < opt.depth
+        && let Some(f) = cx.bodies.as_ref().and_then(|b| b.formula(d))
+    {
+        return Some(Made::from(f));
+    }
     match how {
         _ if depth >= opt.depth || !opt.recompresses() => None,
         Nest::Exact => detect(d).and_then(|format| recompress_as(format, d, opt, depth, cx)).map(Made::from),
@@ -1377,22 +1390,25 @@ fn smaller_as(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], of: bundle::
     // (an image coded against another's code holds a copy of it, which would only be compressed
     // to be taken off: the code filtered, it is smaller)
     let against = f.streams.iter().any(|s| s.class == exe::REFERENCE);
-    let smaller = !opt.smaller || bundled || covered || against || of.files_apart || aqr_ppmd::formula::is(f) || {
-        #[cfg(test)]
-        tests::COMPARED.with(|c| c.borrow_mut().push(d.len()));
-        let pieces: Option<Vec<&[u8]>> = gaps.map(|gaps| gaps.iter().map(|g| &d[g.clone()]).collect());
-        let stand_in = pieces.as_deref().map(|p| (0, p));
-        // (the streams the files archived together hold cost nothing)
-        let free: Vec<usize> = (0..f.streams.len())
-            .filter(|&s| stand_in.is_none_or(|(t, _)| t != s))
-            .filter(|&s| {
-                // (text coded alike as its copies, whose data was long enough to tell)
-                let data = &f.streams[s].data;
-                data.len() >= SHARE_MIN && cx.held_by_others(data, d) || cx.coded_held(data)
-            })
-            .collect();
-        cx.enc.smaller_but(f, stand_in, &free, d).expect("slices within their streams")
-    };
+    // (a file keeping DEFLATE streams that files archived along with it are made of)
+    let inflated = cx.bodies.as_ref().is_some_and(|b| b.holds_streams(d));
+    let smaller =
+        !opt.smaller || bundled || covered || against || inflated || of.files_apart || aqr_ppmd::formula::is(f) || {
+            #[cfg(test)]
+            tests::COMPARED.with(|c| c.borrow_mut().push(d.len()));
+            let pieces: Option<Vec<&[u8]>> = gaps.map(|gaps| gaps.iter().map(|g| &d[g.clone()]).collect());
+            let stand_in = pieces.as_deref().map(|p| (0, p));
+            // (the streams the files archived together hold cost nothing)
+            let free: Vec<usize> = (0..f.streams.len())
+                .filter(|&s| stand_in.is_none_or(|(t, _)| t != s))
+                .filter(|&s| {
+                    // (text coded alike as its copies, whose data was long enough to tell)
+                    let data = &f.streams[s].data;
+                    data.len() >= SHARE_MIN && cx.held_by_others(data, d) || cx.coded_held(data)
+                })
+                .collect();
+            cx.enc.smaller_but(f, stand_in, &free, d).expect("slices within their streams")
+        };
     if smaller {
         // `d` is not archived as it is (`f` is, or is part of something larger kept raw)
         cx.enc.forget(d);
@@ -2023,6 +2039,7 @@ fn cost(d: &[u8]) -> u64 {
 struct Apart {
     pre: Option<Arc<verify::Prevalidator>>,
     held: Option<Arc<Held>>,
+    bodies: Option<Arc<inflated::Bodies>>,
     remaps: Option<Arc<exe::Remaps>>,
     words: Option<Arc<aqr_wrt::formula::Shared>>,
     /// What was noted before it was made ([`Cx::coded_held`]), for each context made of it.
@@ -2036,6 +2053,7 @@ impl Cx {
         Apart {
             pre: self.pre.clone(),
             held: self.held.clone(),
+            bodies: self.bodies.clone(),
             remaps: self.remaps.clone(),
             words: self.words.borrow().clone(),
             coded_held: Arc::new(self.coded_held.borrow().clone()),
@@ -2054,6 +2072,7 @@ impl Apart {
         }
         own.pre = self.pre.clone();
         own.held = self.held.clone();
+        own.bodies = self.bodies.clone();
         own.remaps = self.remaps.clone();
         own.share_words(self.words.clone());
         own.coded_held = RefCell::new((*self.coded_held).clone());
@@ -2065,9 +2084,10 @@ impl Apart {
 /// Whether formula `f` of a content takes the place of its slice ([`nested`]): one of
 /// applications, or aqr-ppmd's, which only cuts the header off the data, so that the data is
 /// stored once where another file starts with it, or aqr-mkv's, which holds frames seen
-/// before once.
+/// before once, or a gzip or zlib stream's below level 4, which cuts its DEFLATE stream off for
+/// files made of it ([`inflated::is`]).
 fn takes_place(f: &Formula) -> bool {
-    !f.applies().is_empty() || aqr_ppmd::formula::is(f) || aqr_mkv::formula::is(f) || aqueous::is(f)
+    !f.applies().is_empty() || aqr_ppmd::formula::is(f) || aqr_mkv::formula::is(f) || aqueous::is(f) || inflated::is(f)
 }
 
 /// Contents, each its slice and its formula where it has one ([`nested`]).
@@ -3557,8 +3577,9 @@ mod tests {
         assert!(f.streams.iter().any(|s| s.data.windows(12).any(|w| w == b"not a member")));
     }
 
-    /// Level 1 recompresses nothing; from 7 on, DEFLATE streams are always deconstructed (no
-    /// probe), with the adaptive profile.
+    /// Level 1 recompresses nothing; levels 2 and 3 keep DEFLATE streams as they are
+    /// ([`inflated`]); from 7 on, they are always deconstructed (no probe), with the adaptive
+    /// profile.
     #[test]
     fn levels() {
         let gz = |name: &str, d: &[u8], level| {
@@ -3582,16 +3603,18 @@ mod tests {
             (0..30000).flat_map(|i| format!("line {} of the text\n", i * 7 % 1000).into_bytes()).collect();
         // (DEFLATE at level 1 leaves much to the archive)
         let text = gz("text.txt", &text, 1);
-        for level in [Level::Of(1), Level::LOW, Level::MID, Level::Of(7), Level::HIGH, Level::Of(9)] {
+        for level in
+            [Level::Of(1), Level::LOW, Level::Of(3), Level::Of(4), Level::MID, Level::Of(7), Level::HIGH, Level::Of(9)]
+        {
             let n = level.scale();
             // (noise turned down by the probe, or else after it is deconstructed)
             assert_eq!(made(&noise, level).0, (n >= 7) as usize, "{level:?}");
             let profile = match n {
-                1 => None,
+                ..4 => None,
                 ..7 => Some(aqr_flate::DEFAULT_PROFILE),
                 _ => Some(aqr_flate::ADAPTIVE),
             };
-            assert_eq!(made(&text, level), ((n > 1) as usize, profile), "{level:?}");
+            assert_eq!(made(&text, level), ((n >= 4) as usize, profile), "{level:?}");
         }
     }
 

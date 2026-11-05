@@ -23,6 +23,9 @@ use crate::{Cx, Options, kind_by_name};
 /// stream, they pay as it does), the data of a run one stream rebuilt by one application of
 /// aqr-flate's. A member not taken is sliced as it is, and so is what follows the last.
 pub(crate) fn gzip(d: &[u8], contents: Kind, opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
+    if crate::inflated::on(opt) {
+        return crate::inflated::gzip(d);
+    }
     let kind = gzip_name(d).map_or(Kind::Unknown, kind_by_name);
     let kind = if kind == Kind::Unknown { contents } else { kind };
     let magic = |at: usize| d.get(at..at + 3) == Some(&[0x1f, 0x8b, 8]);
@@ -121,6 +124,9 @@ pub(crate) fn gzip(d: &[u8], contents: Kind, opt: &Options, depth: u32, cx: &Cx)
 /// A zlib stream (RFC 1950), its data of kind `contents`; what follows its checksum is sliced
 /// as it is.
 pub(crate) fn zlib(d: &[u8], contents: Kind, opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
+    if crate::inflated::on(opt) {
+        return crate::inflated::zlib(d);
+    }
     let checked = |data: &[u8], end: usize| {
         d.get(end..)
             .and_then(|t| t.first_chunk())
@@ -162,7 +168,7 @@ pub(crate) fn gunzip(d: &[u8], max: usize) -> Option<Vec<u8>> {
 }
 
 /// Where the DEFLATE stream of the gzip member at the start of `d` starts, after its header.
-fn gzip_start(d: &[u8]) -> Option<usize> {
+pub(crate) fn gzip_start(d: &[u8]) -> Option<usize> {
     let flg = *d.get(3)?;
     if flg & 0xe0 != 0 {
         return None;
@@ -187,6 +193,16 @@ fn gzip_start(d: &[u8]) -> Option<usize> {
 /// Two bytes of header are a weak sign: the checksum confirms.
 pub(crate) fn zlib_deflate(d: &[u8]) -> Option<Range<usize>> {
     zlib_inflated(d).map(|z| z.0)
+}
+
+/// The data of the zlib stream at the start of `d`, or None where it does not inflate, its
+/// checksum is not right or its data would be over `max` bytes.
+pub(crate) fn zlib_data(d: &[u8], max: usize) -> Option<Vec<u8>> {
+    let mut data = Capped(Data(Vec::new()), max);
+    let end = 2 + inflate(d.get(2..)?, &mut data)?;
+    let data = data.0.0;
+    let sum = u32::from_be_bytes(*d.get(end..)?.first_chunk()?);
+    (data.len() <= max && aqr_common::adler32::hash(&data) == sum).then_some(data)
 }
 
 /// [`zlib_deflate`], with the data.

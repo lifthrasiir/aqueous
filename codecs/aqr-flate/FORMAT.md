@@ -3,7 +3,8 @@
 aqr-flate splits a raw DEFLATE stream into its decompressed **data** and a **record** of
 everything else the encoder chose. From the data and the record the stream is rebuilt bit for
 bit. This document describes the record, and the [formula module](#formula-module) that
-rebuilds the stream from the data and the record.
+rebuilds the stream from the data and the record; and the module
+[`flate-inflate`](#the-module-flate-inflate), which goes the other way: the data of a stream.
 
 This document is normative together with the data files it pins by SHA-256 (see
 [Model data](#model-data)) and the external references below. Everything else a decoder
@@ -1101,6 +1102,28 @@ The decoder ignores the following; encoders write none of them:
 - rANS bytes and extra bits left over at the end of a segment's corrections (static
   profiles);
 - varints longer than needed (up to 10 bytes).
+
+## The module flate-inflate
+
+The module `flate-inflate`, version 1 (`formula::INFLATE`, `module::inflate`), decodes a raw
+DEFLATE stream: its output is the stream's data. It is for a file whose data is that of a
+stream which the archive keeps as it is (the body of a ZIP archive's entry, the stream of a
+gzip member or a zlib stream, not rebuilt): the file is then the stream's data, and the stream
+is stored once.
+
+- **Params**: none (empty).
+- **Resources**: none.
+- **Inputs**: exactly one, the stream: RFC 1951, no zlib or gzip wrapper, no preset
+  dictionary, with the relaxations of [Domain](#domain) (HLIT up to 288 and HDIST up to 32,
+  codes incomplete but not oversubscribed, as long as every symbol read has a code and is not
+  literal/length symbol 286 or 287 or distance symbol 30 or 31).
+- **Output**: the stream's data, which must be exactly the `len` the application declares.
+
+The stream must end with its input: after the final block, only the bits padding its last
+byte (of any value) may follow. A stream that ends before its input does, runs past it, has
+more or less data than `len`, or a distance reaching before its data is invalid, and so is the
+application. The module needs `len` bytes for its output besides its input, and memory of a
+size independent of both (the tables of one block at a time).
 
 ## Encoder choices (informative)
 

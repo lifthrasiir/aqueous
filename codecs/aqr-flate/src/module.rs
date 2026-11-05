@@ -317,3 +317,12 @@ pub fn decode(
     }
     Ok(out)
 }
+
+/// The module `flate-inflate`: the data of the raw DEFLATE stream that is its one input, of
+/// `len` bytes (FORMAT.md, "The module flate-inflate"). No parameters.
+pub fn inflate(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
+    let (&[], &[raw]) = (params, inputs) else {
+        return Err(Error::Corrupt);
+    };
+    crate::inflate::data(raw, usize::try_from(len).map_err(|_| Error::Limit)?)
+}

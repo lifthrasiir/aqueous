@@ -1016,9 +1016,195 @@ pub unsafe fn copy_match(base: *mut u8, n: usize, d: usize, len: usize) {
     }
 }
 
+/// The data of the raw DEFLATE stream `raw`, which must end where `raw` does (but for the bits
+/// padding its last byte), and hold exactly `len` bytes: the decoding of the module
+/// `flate-inflate` (FORMAT.md, "The module flate-inflate"). Only the data is made, into a buffer
+/// of `len` bytes (nothing of the blocks or tokens is kept), so that its memory is the output's.
+pub fn data(raw: &[u8], len: usize) -> Result<Vec<u8>> {
+    let mut b = Bits {
+        d: raw,
+        pos: 0,
+        buf: 0,
+        n: 0,
+    };
+    let mut out: Vec<u8> = Vec::new();
+    out.try_reserve_exact(len).map_err(|_| Error::Limit)?;
+    static FIXED: std::sync::OnceLock<(Table, Table)> = std::sync::OnceLock::new();
+    let fixed = FIXED.get_or_init(|| {
+        (
+            Table::new(&huffman::fixed_lit_lens(), LIT_BITS).unwrap(),
+            Table::new(&huffman::FIXED_DIST_LENS, DIST_BITS).unwrap(),
+        )
+    });
+    let (mut lit, mut dist) = (Table::empty(LIT_BITS), Table::empty(DIST_BITS));
+    loop {
+        let last = b.get(1) == 1;
+        match b.get(2) {
+            0 => {
+                let k = (b.bit_pos() as u32).wrapping_neg() & 7;
+                b.get(k);
+                let n = b.get(16) as u16;
+                let nn = b.get(16) as u16;
+                b.check()?;
+                if nn != !n {
+                    return Err(Error::Invalid("stored block length mismatch"));
+                }
+                let at = b.bit_pos() / 8;
+                let bytes = raw.get(at..at + n as usize).ok_or(Error::Truncated)?;
+                if out.len() + bytes.len() > len {
+                    return Err(Error::Limit);
+                }
+                out.extend_from_slice(bytes);
+                b = Bits {
+                    d: raw,
+                    pos: at + n as usize,
+                    buf: 0,
+                    n: 0,
+                };
+            }
+            1 => data_tokens(&mut b, &fixed.0, &fixed.1, &mut out, len)?,
+            2 => {
+                let header = parse_header(&mut b)?;
+                lit.build(header.lit_lens())?;
+                dist.build(header.dist_lens())?;
+                data_tokens(&mut b, &lit, &dist, &mut out, len)?;
+            }
+            _ => return Err(Error::Invalid("reserved block type")),
+        }
+        b.check()?;
+        if last {
+            break;
+        }
+    }
+    let k = (b.bit_pos() as u32).wrapping_neg() & 7;
+    b.get(k);
+    b.check()?;
+    if b.bit_pos() / 8 != raw.len() {
+        return Err(Error::Invalid("bytes after the stream"));
+    }
+    if out.len() != len {
+        return Err(Error::Corrupt);
+    }
+    Ok(out)
+}
+
+/// The data of a block's tokens (up to its end of block) for [`data`], appended to `out`,
+/// which may not grow past `len` bytes.
+fn data_tokens(
+    bits: &mut Bits,
+    lit: &Table,
+    dist: &Table,
+    out: &mut Vec<u8>,
+    len: usize,
+) -> Result<()> {
+    let mut b = *bits;
+    let r = loop {
+        // A token takes at most 15 + 5 + 15 + 13 = 48 bits.
+        b.refill();
+        if b.pos > b.d.len() + 16 {
+            break Err(Error::Truncated);
+        }
+        let sym = match lit.decode(&mut b) {
+            Ok(s) => s,
+            Err(e) => break Err(e),
+        };
+        if sym < 256 {
+            if out.len() >= len {
+                break Err(Error::Limit);
+            }
+            out.push(sym as u8);
+            continue;
+        }
+        if sym == 256 {
+            break b.check();
+        }
+        let c = sym as usize - 257;
+        if c >= 29 {
+            break Err(Error::Invalid("invalid literal/length symbol"));
+        }
+        let n = (LEN_BASE[c] + b.bits(LEN_EXTRA[c] as u32) as u16) as usize;
+        let dc = match dist.decode(&mut b) {
+            Ok(s) => s as usize,
+            Err(e) => break Err(e),
+        };
+        if dc >= 30 {
+            break Err(Error::Invalid("invalid distance symbol"));
+        }
+        b.refill();
+        let d = DIST_BASE[dc] as usize + b.bits(DIST_EXTRA[dc] as u32) as usize;
+        if d > out.len() {
+            break b
+                .check()
+                .and(Err(Error::Invalid("distance before start of data")));
+        }
+        if out.len() + n > len {
+            break Err(Error::Limit);
+        }
+        let from = out.len() - d;
+        if d >= n {
+            out.extend_from_within(from..from + n);
+        } else {
+            // (overlapping: a run of the last `d` bytes)
+            for i in 0..n {
+                out.push(out[from + i]);
+            }
+        }
+    };
+    *bits = b;
+    r
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`data`] gives the data of streams of every block type (fixed, dynamic, stored; matches
+    /// overlapping themselves), as [`parse`] does, and refuses a length not the data's, bytes
+    /// after the stream, and a stream cut short.
+    #[test]
+    fn data_only() {
+        use crate::zlib::{Params, Strategy, compress};
+        let text: Vec<u8> = (0..20000)
+            .flat_map(|i| format!("line {} of {}\n", i % 97, i % 13).into_bytes())
+            .collect();
+        let runs: Vec<u8> = (0..50000).map(|i| (i / 1000 % 3) as u8).collect();
+        let samples = [
+            text,
+            runs,
+            aqr_common::rng::noise(100_000),
+            b"ab".to_vec(),
+            Vec::new(),
+        ];
+        for d in &samples {
+            for (level, strategy) in [
+                (1, Strategy::Default),
+                (6, Strategy::Default),
+                (9, Strategy::Fixed),
+                (6, Strategy::Rle),
+            ] {
+                let raw = compress(
+                    d,
+                    Params {
+                        level,
+                        strategy,
+                        ..Params::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(parse(&raw).unwrap().data, *d);
+                assert_eq!(
+                    data(&raw, d.len()).unwrap(),
+                    *d,
+                    "{} {level} {strategy:?}",
+                    d.len()
+                );
+                assert!(data(&raw, d.len() + 1).is_err());
+                assert!(d.is_empty() || data(&raw, d.len() - 1).is_err());
+                assert!(data(&[&raw[..], &[0]].concat(), d.len()).is_err());
+                assert!(data(&raw[..raw.len() - 1], d.len()).is_err());
+            }
+        }
+    }
 
     struct Skip;
 

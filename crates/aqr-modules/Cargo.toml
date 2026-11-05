@@ -316,6 +316,11 @@ path = "src/bin/flate-set.rs"
 required-features = ["wasm"]
 
 [[bin]]
+name = "flate-inflate"
+path = "src/bin/flate-inflate.rs"
+required-features = ["wasm"]
+
+[[bin]]
 name = "pcm-recons"
 path = "src/bin/pcm-recons.rs"
 required-features = ["wasm"]

@@ -122,6 +122,23 @@ fn kept_entry(d: &[u8], l: &zip::Local, map: &BTreeMap<usize, zip::Info>) -> (u3
     (zip::u32_at(x, 0), if l.desc.long() { zip::u64_at(x, 12) } else { zip::u32_at(x, 8) as u64 })
 }
 
+/// The DEFLATE bodies of the archive `input` that are not encrypted, each with the CRC-32 and
+/// size of its data as the archive tells them: for files archived along with it that hold the
+/// same data, which aqr-flate's module `flate-inflate` makes of the body, where the body is kept
+/// as it is (of at least [`KEPT_OWN`] bytes, a slice of its own; every one with
+/// [`Options::limit`] 0).
+pub fn deflated(input: &[u8]) -> Vec<(u32, u64, std::ops::Range<usize>)> {
+    let (_, map, recs) = zip::records(input);
+    recs.iter()
+        .filter_map(|r| if let Rec::Local(l) = r { Some(l) } else { None })
+        .filter(|l| l.method(input) == DEFLATED && l.flags(input) & ENCRYPTED == 0)
+        .map(|l| {
+            let (crc, usize) = kept_entry(input, l, &map);
+            (crc, usize, l.body.clone())
+        })
+        .collect()
+}
+
 /// The formula rebuilding the archive `input`, or None where it has no local entry. Stored and
 /// DEFLATE bodies (within [`Options::limit`] and where aqr-flate takes them) are rebuilt from
 /// their data; bodies seen before are taken again; the rest are kept as they are.
