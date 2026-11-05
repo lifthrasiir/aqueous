@@ -2964,18 +2964,20 @@ fn content_paths(archive: &aqr::Archive, out: &Path) -> Vec<String> {
     paths
 }
 
-/// By content of tree `t` (as far as its files tell), the path of its first file.
+/// By content of tree `t` (as far as its files tell), the path of its first file, as the
+/// archive has it (its names between `/`, as on any system).
 fn tree_content_paths(t: &Tree) -> Vec<String> {
     let mut first: Vec<Option<String>> = Vec::new();
-    let mut paths: Vec<PathBuf> = Vec::with_capacity(t.entries.len());
+    let mut paths: Vec<String> = Vec::with_capacity(t.entries.len());
     for e in &t.entries {
         let name = os_from(name_bytes(&e.name).0);
-        let path = e.parent.map_or_else(|| PathBuf::from(&name), |p| paths[p].join(&name));
+        let name = name.to_string_lossy();
+        let path = e.parent.map_or_else(|| name.to_string(), |p| format!("{}/{name}", paths[p]));
         if let EntryNode::File(c) = e.node {
             if first.len() <= c {
                 first.resize(c + 1, None);
             }
-            first[c].get_or_insert_with(|| path.display().to_string());
+            first[c].get_or_insert_with(|| path.clone());
         }
         paths.push(path);
     }
@@ -2986,11 +2988,13 @@ fn tree_content_paths(t: &Tree) -> Vec<String> {
 /// long: the first by its path in the archive, and how many more.
 fn leaf_names(archive: &aqr::Archive, out: &Path) -> Vec<String> {
     let Some(t) = archive.tree() else { return vec![out.display().to_string(); archive.leaves_len()] };
-    let mut files: Vec<(Option<PathBuf>, usize)> = vec![(None, 0); archive.leaves_len()];
-    let mut paths: Vec<PathBuf> = Vec::with_capacity(t.entries.len());
+    let mut files: Vec<(Option<String>, usize)> = vec![(None, 0); archive.leaves_len()];
+    // (as the archive has them: names between `/`, [`tree_content_paths`])
+    let mut paths: Vec<String> = Vec::with_capacity(t.entries.len());
     for e in &t.entries {
         let name = os_from(name_bytes(&e.name).0);
-        let path = e.parent.map_or_else(|| PathBuf::from(&name), |p| paths[p].join(&name));
+        let name = name.to_string_lossy();
+        let path = e.parent.map_or_else(|| name.to_string(), |p| format!("{}/{name}", paths[p]));
         if let EntryNode::File(c) = e.node
             && let Some(f) = archive.leaf_of(c).and_then(|l| files.get_mut(l))
         {
@@ -3002,8 +3006,8 @@ fn leaf_names(archive: &aqr::Archive, out: &Path) -> Vec<String> {
     files
         .into_iter()
         .map(|(first, n)| match (first, n) {
-            (Some(p), 1) => p.display().to_string(),
-            (Some(p), n) => format!("{} and {} more files", p.display(), n - 1),
+            (Some(p), 1) => p,
+            (Some(p), n) => format!("{p} and {} more files", n - 1),
             _ => String::new(),
         })
         .collect()

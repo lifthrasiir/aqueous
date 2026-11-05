@@ -56,7 +56,9 @@ fn segments_and_paths() {
     let (one, two) = out.split_once("\n  segment #2").expect(&out);
     assert!(one.contains("segment #1 [replaced in segment #2]:") && one.contains("a file of 3 B"), "{out}");
     assert!(two.starts_with(" [current]:") && two.contains("a file of 11 B"), "{out}");
-    for key in ["mtime: ", "atime: ", "unix-mode: ", "formula:"] {
+    // (the mode a system keeps: Unix's, or Windows' attributes)
+    let mode = if cfg!(windows) { "win-attrs: " } else { "unix-mode: " };
+    for key in ["mtime: ", "atime: ", mode, "formula:"] {
         assert!(one.contains(key) && two.contains(key), "{key}: {out}");
     }
     // a path of the first alone, still current; of neither, an error
