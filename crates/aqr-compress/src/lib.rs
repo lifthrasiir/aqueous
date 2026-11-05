@@ -1116,12 +1116,16 @@ fn ppmd_on(opt: &Options) -> bool {
     opt.level.scale() >= 9
 }
 
-/// Whether files of `format` are taken at the level of `opt` (else kept as they are): LZMA and
+/// Whether files of `format` are taken at the level of `opt` (else kept as they are): none at
+/// levels 0 and 1, which recompress nothing ([`Options::recompresses`]); LZMA and
 /// xz streams (aqr-lzma), 7z archives (aqr-7z, and aqr-lzma on their folders) and GIF files
 /// (aqr-gif) from level 4, as they are slow for their bytes; streams of LZFSE and LZVN blocks
 /// ([`bvx`]) and CHM files ([`lzx_on`]) from level 9. Parts of a format taken (CAB's LZX
 /// folders, RAR's PPMd blocks) are its recompressor's to turn down: [`lzx_on`], [`ppmd_on`].
 pub(crate) fn format_on(format: Format, opt: &Options) -> bool {
+    if !opt.recompresses() {
+        return false;
+    }
     match format {
         Format::Lzma | Format::Xz | Format::SevenZip | Format::Gif => opt.level.scale() >= 4,
         Format::Bvx => opt.level.scale() >= 9,
@@ -3022,6 +3026,24 @@ mod tests {
         for format in [Format::Chm, Format::Bvx] {
             let at = |level| format_on(format, &Options { level, ..Options::default() });
             assert!(!at(Level::MID) && !at(Level::HIGH) && at(Level::Of(9)), "{format:?}");
+        }
+    }
+
+    /// Levels 0 and 1 take no format at all: not even the files made beforehand ([`prepare`])
+    /// are made, as they would only be thrown away.
+    #[test]
+    fn nothing_taken_at_level_1() {
+        let jpeg =
+            std::fs::read(format!("{}/../../codecs/aqr-jpeg/tests/data/gradient.jpg", env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+        let mut f = Formula::default();
+        f.root = Node::concat([f.push_content("raw", Kind::Unknown, jpeg)]);
+        for (level, n) in [(Level::STORED, 0), (Level::Of(1), 0), (Level::LOW, 1), (Level::MID, 1)] {
+            let opt = Options { level, ..Options::default() };
+            let mut jobs = Vec::new();
+            pure_contents(&f.root, None, &f, &opt, &mut jobs);
+            assert_eq!(jobs.len(), n, "{level:?}");
+            assert_eq!(format_on(Format::Jpeg, &opt), n > 0, "{level:?}");
         }
     }
 
