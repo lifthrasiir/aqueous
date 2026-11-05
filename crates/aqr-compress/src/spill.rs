@@ -10,7 +10,9 @@
 //! space of the regions held, not of all made, even where they are dropped out of turn. A
 //! segment starts with [`MAGIC`], so that one left behind is not taken for a file of another
 //! kind. The pages of the bytes free are given back to the system ([`aqr_common::pages::discard`]),
-//! so that the resident set and the files hold about the regions held too.
+//! so that the resident set and the files hold about the regions held too (but on Windows,
+//! which cannot drop changed pages of a file without writing them: there they stay, for the
+//! regions after them).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
@@ -167,7 +169,8 @@ impl Drop for View {
             // its pages given back, those of the free run it is of now (with the state held, so
             // that no region takes them meanwhile): else they stay in the resident set, changed,
             // until the segment goes, as the system has no cause to write them out and drop them
-            // where memory is plenty (a segment is 256 MiB)
+            // where memory is plenty (a segment is 256 MiB); left on Windows, where giving them
+            // back has them written (see there)
             let s = &self.segment;
             // SAFETY: a free run of the segment's mapping, of all of its file: no region's
             // bytes, and those of one taken of it after are zeroed before they are read
@@ -342,6 +345,44 @@ mod tests {
         assert_eq!(c, a);
         assert!(rc.iter().all(|&x| x == 0));
         drop((rb, rc, spill));
+        std::fs::remove_dir(&dir).unwrap();
+    }
+
+    /// The pages of a region dropped stay in the working set on Windows: taken out of it, they
+    /// would be written to the file (their bytes of no use) as soon as the system goes, as it
+    /// cannot drop changed pages of a file otherwise, and be counted in use until then.
+    #[cfg(windows)]
+    #[test]
+    fn dropped_left_in_place() {
+        #[repr(C)]
+        struct WorkingSetEx {
+            at: *mut core::ffi::c_void,
+            attributes: usize,
+        }
+        unsafe extern "system" {
+            fn K32QueryWorkingSetEx(process: isize, info: *mut WorkingSetEx, n: u32) -> i32;
+        }
+        let dir = std::env::temp_dir().join(format!("aqr-compress-left-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let spill = Spill::create(&dir.join("left")).unwrap();
+        let page = aqr_common::pages::size();
+        // the pages of `n` bytes at `at` in the working set (bit 0, valid)
+        let resident = |at: *mut u8, n: usize| {
+            let mut v: Vec<WorkingSetEx> =
+                (0..n / page).map(|i| WorkingSetEx { at: at.wrapping_add(i * page).cast(), attributes: 0 }).collect();
+            let size = (v.len() * size_of::<WorkingSetEx>()) as u32;
+            // SAFETY: the process's own pseudo-handle, and an entry for each page
+            assert_ne!(unsafe { K32QueryWorkingSetEx(-1, v.as_mut_ptr(), size) }, 0);
+            v.iter().filter(|e| e.attributes & 1 != 0).count()
+        };
+        let n = 64 * page;
+        let (a, ra) = spill.region(n).unwrap();
+        // SAFETY: the region's bytes, not read before
+        unsafe { std::ptr::write_bytes(a, 0xff, n) };
+        assert_eq!(resident(a, n), 64);
+        drop(ra);
+        assert_eq!(resident(a, n), 64);
+        drop(spill);
         std::fs::remove_dir(&dir).unwrap();
     }
 

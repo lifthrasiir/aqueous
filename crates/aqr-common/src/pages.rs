@@ -69,8 +69,13 @@ fn within(at: usize, len: usize) -> (usize, usize) {
 ///   dropped).
 /// - macOS: a hole punched (`F_PUNCHHOLE`), and the pages out of the mapping
 ///   (`MADV_DONTNEED`).
-/// - Windows: the pages out of the working set (`VirtualUnlock` of pages not locked), to the
-///   modified list: written to the file as the system goes, then on standby.
+/// - Windows: nothing. It cannot drop changed pages of a file but by writing them: those taken
+///   out of the working set (`VirtualUnlock` of pages not locked) went to the modified list and
+///   were written within seconds, though memory was plenty, and counted in use until then.
+///   Left in place, they are taken again by the regions after them (as the spill takes the
+///   smallest free run that fits), written to the file only as memory runs short. Neither
+///   `MEM_RESET`, `DiscardVirtualMemory` nor `OfferVirtualMemory` takes pages of a file
+///   (`ERROR_INVALID_ADDRESS`), and `FSCTL_SET_ZERO_DATA` of a sparse file writes them first.
 ///
 /// # Safety
 ///
@@ -108,13 +113,7 @@ pub unsafe fn discard(file: &File, base: *const u8, at: *const u8, len: usize) {
             libc::madvise(start as *mut libc::c_void, n, libc::MADV_DONTNEED);
         }
     }
-    #[cfg(windows)]
-    {
-        let _ = (file, offset);
-        // SAFETY: pages of the process's own mapping
-        unsafe { trim(start, n) };
-    }
-    #[cfg(not(any(target_os = "linux", target_vendor = "apple", windows)))]
+    #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
     let _ = (file, offset);
 }
 
