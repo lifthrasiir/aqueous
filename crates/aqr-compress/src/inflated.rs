@@ -26,11 +26,14 @@ pub(crate) fn on(opt: &Options) -> bool {
     opt.recompresses() && opt.level.scale() < 4
 }
 
+/// A DEFLATE stream of [`Bodies`]: the file holding it (by index), and where it is in the file.
+type Body = (usize, Range<usize>);
+
 /// The DEFLATE streams of the files of an archive, by the CRC-32 and size (modulo 2^32, as gzip
 /// tells it) of their data, and where the files that hold them are.
 #[derive(Default)]
 pub(crate) struct Bodies {
-    by: HashMap<(u32, u32), Vec<(usize, Range<usize>)>>,
+    by: HashMap<(u32, u32), Vec<Body>>,
     lens: HashSet<u32>,
     /// The files (their bytes, and where they are: start and end), by index.
     files: Vec<(Bytes, usize, usize)>,

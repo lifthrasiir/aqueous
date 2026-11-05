@@ -3647,7 +3647,7 @@ mod tests {
             assert_eq!(made(&noise, level).0, (n >= 7) as usize, "{level:?}");
             let profile = match n {
                 ..4 => None,
-                ..7 => Some(aqr_flate::DEFAULT_PROFILE),
+                4..7 => Some(aqr_flate::DEFAULT_PROFILE),
                 _ => Some(aqr_flate::ADAPTIVE),
             };
             assert_eq!(made(&text, level), ((n >= 4) as usize, profile), "{level:?}");

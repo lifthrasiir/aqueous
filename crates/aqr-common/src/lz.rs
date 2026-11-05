@@ -17,6 +17,8 @@ pub fn lcp_up(d: &[u8], a: usize, b: usize, cap: usize) -> usize {
     // (both sides cut to `n` bytes first, so that the words within them are not checked again)
     let (x, y) = (&d[a..a + n], &d[b..b + n]);
     let mut i = 0;
+    // (not `as_chunks`: the same code, but other bytes of the modules that link it, ten of them)
+    #[allow(clippy::chunks_exact_to_as_chunks)]
     for (p, q) in x.chunks_exact(8).zip(y.chunks_exact(8)) {
         let w = u64::from_le_bytes(p.try_into().unwrap()) ^ u64::from_le_bytes(q.try_into().unwrap());
         if w != 0 {

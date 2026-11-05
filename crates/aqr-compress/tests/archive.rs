@@ -1360,8 +1360,8 @@ fn stopped() {
     let during = |e: &aqr_compress::Event, written| matches!(e, aqr_compress::Event::Started(_)) && written >= 3;
     let (r, told) = stopped_when(false, &during, &opt, &mut out);
     assert_eq!(told.len(), r.stopped.is_some() as usize);
-    if r.stopped.is_some() {
-        assert!(r.stopped.unwrap().kept);
+    if let Some(s) = r.stopped {
+        assert!(s.kept);
         let (names, status) = located(&out.bytes);
         assert!(names.len() < all.len() && matches!(status, Some(Status::Incomplete { .. })), "{names:?}");
     }
