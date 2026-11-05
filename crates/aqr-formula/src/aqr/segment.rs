@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use aqr_common::varint;
 
 use super::dict::Candidate;
-use super::tree::{self, FileParam, Tree};
+use super::tree::{self, FileParam, Status, Tree};
 use super::{
     CHECKSUM, Emit, Encoder, FOOTER_MAGIC, HEADER_MAGIC, How, MODULE, STORED, SWAP, always_compressed, block, block_of,
     block_ranges, checksum_of, dictionary_block, dictionary_stand_in, footer, footer_with, formula_block, key_how,
@@ -209,11 +209,16 @@ impl SegmentWriter {
     /// The blocks after it are of a segment of their own, which takes nothing of this one's.
     /// Fails on a tree the spec does not allow.
     pub fn close(&mut self, enc: &Encoder, t: &Tree, contents: &[ContentAt]) -> Result<Vec<u8>> {
+        self.close_as(enc, t, contents, Status::None)
+    }
+
+    /// [`SegmentWriter::close`], the metadata block telling `status` (`segment-status`).
+    pub fn close_as(&mut self, enc: &Encoder, t: &Tree, contents: &[ContentAt], status: Status) -> Result<Vec<u8>> {
         tree::check(t, contents.len()).map_err(Error::new)?;
         if contents.iter().any(|c| c.leaf < self.segment_at) {
             return Err(Error::new("a content of a leaf of another segment"));
         }
-        let out = self.metadata_block(enc, t, contents, usize::MAX, 0, false)?;
+        let out = self.metadata_block(enc, t, contents, usize::MAX, 0, status)?;
         self.prev = self.at;
         self.at += out.len();
         self.segment_at = self.at;
@@ -507,8 +512,19 @@ impl SegmentWriter {
     /// The end of the archive: the metadata block of `t`, its contents where `contents` tells
     /// (by [`EntryNode::File`]), and the footer. Fails on a tree the spec does not allow.
     pub fn finish(&self, enc: &Encoder, t: &Tree, contents: &[ContentAt]) -> Result<(Vec<u8>, usize)> {
+        self.finish_as(enc, t, contents, Status::Complete)
+    }
+
+    /// [`SegmentWriter::finish`], the metadata block telling `status` (`segment-status`).
+    pub fn finish_as(
+        &self,
+        enc: &Encoder,
+        t: &Tree,
+        contents: &[ContentAt],
+        status: Status,
+    ) -> Result<(Vec<u8>, usize)> {
         tree::check(t, contents.len()).map_err(Error::new)?;
-        let mut out = self.metadata_block(enc, t, contents, usize::MAX, 0, true)?;
+        let mut out = self.metadata_block(enc, t, contents, usize::MAX, 0, status)?;
         let metadata = out.len();
         let end = self.at + out.len();
         // (from the start of the footer's fields: after the magic and the size)
@@ -534,11 +550,12 @@ impl SegmentWriter {
         contents: &[ContentAt],
         front: usize,
         chunked: bool,
+        status: Status,
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         tree::check(t, contents.len()).map_err(Error::new)?;
         let mut room = 0;
         for tries in 0..8 {
-            let meta = self.metadata_block(enc, t, contents, front, room, true)?;
+            let meta = self.metadata_block(enc, t, contents, front, room, status)?;
             let at = self.at + room;
             let mut mirror = super::mirror::mirror_of(&meta, at as u64, front as u64, false);
             let len = mirror.len();
@@ -565,8 +582,8 @@ impl SegmentWriter {
     }
 
     /// The metadata block of `t` (its contents where `contents` tells), the blocks from `front`
-    /// on (and the metadata block, after them all) moved `shift` bytes later; of the last
-    /// segment written (`last-segment-intended`) where `last`.
+    /// on (and the metadata block, after them all) moved `shift` bytes later, telling `status`
+    /// (`segment-status`).
     fn metadata_block(
         &self,
         enc: &Encoder,
@@ -574,7 +591,7 @@ impl SegmentWriter {
         contents: &[ContentAt],
         front: usize,
         shift: usize,
-        last: bool,
+        status: Status,
     ) -> Result<Vec<u8>> {
         let moved = |at: usize| if at >= front { at + shift } else { at };
         let params: Vec<FileParam> = contents
@@ -588,7 +605,7 @@ impl SegmentWriter {
         let (modules, resources, dictionaries) =
             (all(&self.module_at), all(&self.resource_at), all(&self.dictionary_at));
         let meta =
-            tree::metadata(t, self.at + shift, moved(self.prev), last, &modules, &resources, &dictionaries, &params);
+            tree::metadata(t, self.at + shift, moved(self.prev), status, &modules, &resources, &dictionaries, &params);
         let mut out = Vec::new();
         match enc.base_level() {
             STORED => {

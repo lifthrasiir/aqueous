@@ -301,7 +301,7 @@ fn compress_tree_noting<S: Source + ?Sized>(
     // far enough from it; else after it, as the others are ([`aqr::Mirroring`])
     let front = w.len() - held_len;
     let mirrored = match opt.mirrors {
-        true => w.finish_mirrored(&enc, tree, &contents, front, opt.size_hint).map_err(bad)?,
+        true => w.finish_mirrored(&enc, tree, &contents, front, opt.size_hint, aqr::Status::Complete).map_err(bad)?,
         false => None,
     };
     let (mirror, end) = match mirrored {

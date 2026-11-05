@@ -43,8 +43,8 @@ pub use listing::Listed;
 pub use mirror::Mirroring;
 pub use segment::{Batch, ContentAt, Layout, Leaf, Placed, Segment, SegmentWriter};
 pub use tree::{
-    Entry, EntryNode, Extra, MAC_FLAGS_ALLOWED, Member, Time, Tree, WIN_ATTRS_ALLOWED, Xattr, Zone, archive_key_name,
-    diagnostic, entry_key_name, name_bytes, name_from,
+    Entry, EntryNode, Extra, MAC_FLAGS_ALLOWED, Member, Status, Time, Tree, WIN_ATTRS_ALLOWED, Xattr, Zone,
+    archive_key_name, diagnostic, entry_key_name, name_bytes, name_from,
 };
 
 use std::borrow::Cow;
@@ -2451,8 +2451,8 @@ pub struct Archive<'c, 'n> {
     loaded: Vec<OnceLock<Decoded<Box<dyn Loaded + 'n>>>>,
     /// The tree, and its contents (each a leaf, an output of it and its size).
     tree: Option<(Tree, Vec<ContentRef>)>,
-    /// Whether the last segment is told to be the last written ([`Archive::last_intended`]).
-    last_intended: Option<bool>,
+    /// What the last segment tells of the writing it ends ([`Archive::status`]).
+    status: Option<Status>,
     /// The budget the leaves evaluated take of by their weights ([`Archive::set_budget`]).
     budget: Option<&'n Budget>,
     /// Told how far the evaluation is ([`Archive::on_progress`]).
@@ -2540,11 +2540,11 @@ fn open_with<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, sealed: bool, salvagin
     let mut trees = Vec::with_capacity(metas.len());
     // (where the metadata block before each is: the end of the header magic, less 1, before the first)
     let mut prev = HEADER_MAGIC.len() - 1;
-    let mut last_intended = None;
+    let mut status = None;
     for (k, (at, d)) in metas.into_iter().enumerate() {
         let m = tree::read(&d)?;
         drop(d);
-        last_intended = Some(m.last);
+        status = Some(m.status);
         trees.push(tree_of(m, at, prev, &blocks, k, &outputs, salvaging.then_some(&mut lost))?);
         prev = at;
     }
@@ -2561,17 +2561,7 @@ fn open_with<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, sealed: bool, salvagin
         blocks.sizes.leaves.push(0);
     }
     let loaded = blocks.modules.iter().map(|_| OnceLock::new()).collect();
-    Ok(Archive {
-        blocks,
-        runner,
-        loaded,
-        tree,
-        last_intended,
-        budget: None,
-        tell: None,
-        items: Vec::new(),
-        let_go: false,
-    })
+    Ok(Archive { blocks, runner, loaded, tree, status, budget: None, tell: None, items: Vec::new(), let_go: false })
 }
 
 impl<'n> Archive<'_, 'n> {
@@ -2580,12 +2570,12 @@ impl<'n> Archive<'_, 'n> {
         self.tree.as_ref().map(|t| &t.0)
     }
 
-    /// Whether its last segment's metadata block tells it was meant to be the last one written
-    /// (`last-segment-intended`; none where it has no metadata block): a hint to repair alone.
-    /// An archive whose footer was made again after a metadata block without it may have been
+    /// What its last segment's metadata block tells of the writing it ends (`segment-status`;
+    /// none where it has no metadata block): whether that writing completed, or what it left out.
+    /// An archive whose footer was made again after a metadata block telling nothing may have been
     /// cut short after it, segments after it lost whole.
-    pub fn last_intended(&self) -> Option<bool> {
-        self.last_intended
+    pub fn status(&self) -> Option<Status> {
+        self.status
     }
 
     /// Has leaves evaluated at once only while their weights fit in `budget` beside what the

@@ -1116,7 +1116,10 @@ mod tests {
         match at_front {
             None => out.extend_from_slice(&w.finish(&enc, &t, &contents).unwrap().0),
             Some(p) => {
-                let (mirror, end) = w.finish_mirrored(&enc, &t, &contents, p, false).unwrap().expect("far enough");
+                let (mirror, end) = w
+                    .finish_mirrored(&enc, &t, &contents, p, false, crate::aqr::Status::Complete)
+                    .unwrap()
+                    .expect("far enough");
                 out.splice(p..p, mirror);
                 out.extend_from_slice(&end);
             }
@@ -1328,13 +1331,13 @@ mod tests {
         let metas = blocks(&out).0.iter().filter(|b| (0x10..=0x17).contains(&b.1)).count();
         assert_eq!(metas, 2);
         let natives = natives();
-        assert_eq!(super::super::open(&out, &natives).unwrap().last_intended(), Some(true));
+        assert_eq!(super::super::open(&out, &natives).unwrap().status(), Some(crate::aqr::Status::Complete));
         // (cut just after the first metadata block: repaired as an archive of the first segment,
         // which does not tell it was meant to be the last)
         let d = &out[..second];
         let r = repair(d, &check(d), false, &[]).unwrap();
         assert!(r.footer && r.lost.is_empty() && r.cut_off.is_none());
-        assert_eq!(super::super::open(&r.bytes, &natives).unwrap().last_intended(), Some(false));
+        assert_eq!(super::super::open(&r.bytes, &natives).unwrap().status(), Some(crate::aqr::Status::None));
         for cut in [second + 1, out.len() - 20] {
             let d = &out[..cut];
             assert!(repair(d, &check(d), false, &[]).is_none_or(|r| !r.footer));

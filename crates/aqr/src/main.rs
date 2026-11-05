@@ -2174,7 +2174,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     .map_err(|e| err(&e))?;
     // (its footer made again after a metadata block not of the segment meant to be the last:
     // cut short just after it, maybe, segments after it lost whole)
-    let maybe_cut = footer_made && cut_off.is_none() && archive.last_intended() == Some(false);
+    let maybe_cut = footer_made && cut_off.is_none() && archive.status() == Some(aqr::Status::None);
     if maybe_cut {
         eprintln!(
             "{}: its last segment is not the one meant to be the last: segments after it may be lost",
