@@ -77,7 +77,9 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   kinds of files slow for their bytes or hardly compressed. `--stats=FILE.json` writes all
   that was sampled too (per content: kind, bytes, archived bytes, modules; the samples by
   thread and label), `--stats=FILE.html` a page showing it (threads over time, heap by
-  allocator, time by label, files by kind); both may be given. The JSON's layout is in
+  allocator, time by label, files by kind); both may be given, and are written again every
+  10 seconds as it runs and as it is stopped (`state`: live, interrupted, finished; the archive
+  not done a `partial` run), so a run killed midway still leaves them. The JSON's layout is in
   `crates/aqr/src/stats.rs`. The sampling costs little, so run big benchmarks (10gb) with
   `--stats --stats=FILE.json`, and read it before reaching for a profiler.
 - Benchmark zstd at level 3 or below, never 19 (far too slow); cached results at 19 may still

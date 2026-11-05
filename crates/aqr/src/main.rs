@@ -166,7 +166,8 @@
 //! - `--stats` tells, after each archive made or decoded, what stands out of its files by kind
 //!   and of where the time went, sampled as it ran ([`stats`]); `--stats=FILE.json` writes all
 //!   of it as well, and `--stats=FILE.html` a page showing it (opened on a terminal). Either
-//!   may be given more than once. The sampling slows the work a little.
+//!   may be given more than once; the files are written again every 10 seconds as it runs and
+//!   as it is stopped (their `state`). The sampling slows the work a little.
 //!
 //! Compressing, standard error has the summary of the archive at the end, and on a terminal a
 //! bar of how far it is ([`view`]) until then. With `-v`, a log above the bar tells, for each
@@ -369,7 +370,7 @@ struct Args {
     /// Compressing, by input, the path in the archive that `--rename` gives it.
     renames: Vec<Option<PathBuf>>,
     /// What `--stats` asked for.
-    stats: Option<stats::Stats>,
+    stats: Option<&'static stats::Stats>,
     /// Driven by a frontend ([`ipc`]).
     ipc: bool,
     /// Compressing, into archives of this format (`--format`, or `-o`'s name).
@@ -445,7 +446,7 @@ fn main() -> ExitCode {
         _ => compress_all(&args),
     });
     // (of the archives done, whether or not all are)
-    let r = match args.stats.as_ref().map(|s| s.write(std::io::stderr().is_terminal())) {
+    let r = match args.stats.as_ref().map(|s| s.write(stats::Status::Finished, std::io::stderr().is_terminal())) {
         Some(Err(e)) => r.and(Err(e)),
         _ => r,
     };
@@ -612,7 +613,7 @@ fn parse() -> Result<Args, String> {
         return Err("no input".into());
     }
     if stats || !stats_to.is_empty() {
-        a.stats = Some(stats::Stats::new(stats_to));
+        a.stats = Some(stats::init(stats_to));
     }
     if a.opt.threads == 0 {
         a.opt.threads = std::thread::available_parallelism().map_or(1, |n| n.get());
@@ -1105,7 +1106,13 @@ fn compress_into(
         Some(out),
     );
     let start = Instant::now();
-    let rec = stats::record(a.stats.as_ref());
+    let rec = stats::record(
+        a.stats,
+        "compress",
+        inputs.iter().map(|i| i.display().to_string()).collect::<Vec<_>>().join(" "),
+        out.display().to_string(),
+        a.opt.threads,
+    );
     let mut opt = a.opt.clone();
     let sealing = pass::keys().sealing();
     opt.spill = spill_of(out, sealing.is_some())?;
@@ -2340,7 +2347,13 @@ fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Forma
     };
     begin(if a.test { "test" } else { "decompress" }, &[input.to_owned()], told);
     let start = Instant::now();
-    let rec = stats::record(a.stats.as_ref());
+    let rec = stats::record(
+        a.stats,
+        if a.test { "test" } else { "decompress" },
+        input.display().to_string(),
+        told.map_or(String::new(), |o| o.display().to_string()),
+        a.opt.threads,
+    );
     let names = if !a.quiet && (bars() || a.ipc) { opened.units() } else { Vec::new() };
     let view = view::Decoding::new(bars(), names);
     let shown = (!a.quiet && view.shows()).then_some(&view);
@@ -2589,7 +2602,13 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     };
     begin(if a.test { "test" } else { "decompress" }, &[input.to_owned()], told);
     let start = Instant::now();
-    let rec = stats::record(a.stats.as_ref());
+    let rec = stats::record(
+        a.stats,
+        if a.test { "test" } else { "decompress" },
+        input.display().to_string(),
+        told.map_or(String::new(), |o| o.display().to_string()),
+        a.opt.threads,
+    );
     let names = if !a.quiet && (bars() || a.ipc) { leaf_names(&archive, &to.named) } else { Vec::new() };
     let view = std::sync::Arc::new(view::Decoding::new(bars(), names));
     if !a.quiet && view.shows() {

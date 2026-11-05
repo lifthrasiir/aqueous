@@ -13,11 +13,18 @@
 //!   label and the files by kind. The page opens other files of the JSON as well, and is opened
 //!   in the browser where standard error is a terminal.
 //!
-//! The JSON, an object of `version` (1), `aqr` (the version of aqr that wrote it), `args` (the
-//! arguments it was run with, but its own name; none in JSON of aqr before them) and `runs`,
-//! each:
+//! The files are written again every [`EVERY`] as it runs, with the archive going on as a run
+//! of its own (`partial`), and as the process ends where it is stopped (by a signal, or
+//! [`crate::stop`]); each replaced whole (written aside, then renamed).
 //!
-//! - `mode` (`compress`, `decompress` or `test`), `input`, `output`, `seconds`, `threads`,
+//! The JSON, an object of `version` (1), `aqr` (the version of aqr that wrote it), `args` (the
+//! arguments it was run with, but its own name; none in JSON of aqr before them), `state`
+//! (`live`: written as it runs, `interrupted`: as it was stopped, `finished`: as it ended; none
+//! in JSON of aqr before it) and `runs`, each:
+//!
+//! - `mode` (`compress`, `decompress` or `test`), `partial` (true of an archive not done: going
+//!   on, stopped or failed; its `read` and `written` 0, its `contents` none), `input`, `output`,
+//!   `seconds`, `threads`,
 //!   `read` and `written` (bytes), `overhead` (bytes of the archive but the files', where
 //!   compressed), `budget` (bytes of `-M`, null for none);
 //! - `contents`, by content (the item of the samples): `path`, `kind` (the format it starts
@@ -37,11 +44,15 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use aqr_common::trace::{self, DEAD, NO_ITEM, Trace};
 
 use crate::{percent, size};
+
+/// How often the files are written as it runs.
+const EVERY: Duration = Duration::from_secs(10);
 
 /// What `--stats` asked for.
 pub struct Stats {
@@ -49,30 +60,129 @@ pub struct Stats {
     outputs: Vec<PathBuf>,
     /// The runs so far, as JSON.
     runs: Mutex<Vec<String>>,
+    /// The archive going on (from [`record`] until [`Stats::add`]ed; kept where it fails).
+    current: Mutex<Option<Current>>,
+    /// Held as the files are written; whether they were for the last time.
+    writing: Mutex<bool>,
+}
+
+/// An archive going on, as its run will tell it.
+struct Current {
+    mode: &'static str,
+    input: String,
+    output: String,
+    threads: usize,
+    start: Instant,
+    watch: trace::Watch,
+}
+
+/// What the files tell of the process: written as it runs, as it was stopped, as it ended.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Status {
+    Live,
+    Interrupted,
+    Finished,
+}
+
+impl Status {
+    fn name(self) -> &'static str {
+        match self {
+            Status::Live => "live",
+            Status::Interrupted => "interrupted",
+            Status::Finished => "finished",
+        }
+    }
+}
+
+static STATS: OnceLock<Stats> = OnceLock::new();
+
+/// Of files `outputs` to write, each of them [`takes`]: written every [`EVERY`] from now on, and
+/// as the process is stopped ([`crate::stop::on_end`]).
+pub fn init(outputs: Vec<PathBuf>) -> &'static Stats {
+    let writes = !outputs.is_empty();
+    let s = STATS.get_or_init(|| Stats {
+        outputs,
+        runs: Mutex::default(),
+        current: Mutex::default(),
+        writing: Mutex::new(false),
+    });
+    if writes {
+        crate::stop::on_end(|| {
+            if let Some(s) = STATS.get()
+                && let Err(e) = s.write(Status::Interrupted, false)
+            {
+                eprintln!("aqr: {e}");
+            }
+        });
+        _ = std::thread::Builder::new().name("aqr-stats".into()).spawn(move || {
+            loop {
+                std::thread::park_timeout(EVERY);
+                if !s.write_meanwhile() {
+                    break;
+                }
+            }
+        });
+    }
+    s
 }
 
 impl Stats {
-    /// Of files `outputs` to write, each of them [`takes`].
-    pub fn new(outputs: Vec<PathBuf>) -> Stats {
-        Stats { outputs, runs: Mutex::default() }
-    }
-
     /// Tells the outliers of `run` as it ends, and keeps it for the files.
     pub fn add(&self, run: Run) {
         eprint!("{}", outliers(&run));
-        self.runs.lock().unwrap().push(json(&run));
+        self.current.lock().unwrap().take();
+        self.runs.lock().unwrap().push(json(&run, false));
     }
 
-    /// Writes the files asked for, of the runs so far; opens a page where `open`.
-    pub fn write(&self, open: bool) -> Result<(), String> {
-        if self.outputs.is_empty() {
-            return Ok(());
+    /// The JSON of the runs so far and of the archive going on (where one is), as of `state`.
+    fn document(&self, state: Status) -> String {
+        let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(c) = &*self.current.lock().unwrap_or_else(|e| e.into_inner()) {
+            let run = Run {
+                mode: c.mode,
+                input: c.input.clone(),
+                output: c.output.clone(),
+                seconds: c.start.elapsed().as_secs_f64(),
+                threads: c.threads,
+                read: 0,
+                written: 0,
+                overhead: None,
+                contents: Vec::new(),
+                trace: c.watch.trace(),
+            };
+            runs.push(json(&run, true));
         }
         let args: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
-        let data = document(&self.runs.lock().unwrap(), env!("AQR_VERSION"), &args);
+        document(&runs, env!("AQR_VERSION"), &args, state)
+    }
+
+    /// Writes the files of what was sampled so far (where there is any), unless written for the
+    /// last time already; whether they were not.
+    fn write_meanwhile(&self) -> bool {
+        let done = self.writing.lock().unwrap_or_else(|e| e.into_inner());
+        if *done {
+            return false;
+        }
+        let any = !self.runs.lock().unwrap().is_empty() || self.current.lock().unwrap().is_some();
+        if any {
+            let data = self.document(Status::Live);
+            // (a failure told as the files are written for the last time)
+            _ = self.outputs.iter().try_for_each(|o| save(o, &data));
+        }
+        true
+    }
+
+    /// Writes the files asked for, of the runs so far (and the archive going on, where one is),
+    /// for the last time, as of `state`; opens a page where `open`.
+    pub fn write(&self, state: Status, open: bool) -> Result<(), String> {
+        let mut done = self.writing.lock().unwrap_or_else(|e| e.into_inner());
+        if self.outputs.is_empty() || *done {
+            return Ok(());
+        }
+        *done = true;
+        let data = self.document(state);
         for o in &self.outputs {
-            let text = if is_json(o) { data.clone() } else { page(&data) };
-            std::fs::write(o, text).map_err(|e| format!("{}: {e}", o.display()))?;
+            save(o, &data)?;
             eprintln!("stats written to {}", o.display());
             if open && is_html(o) {
                 browse(o);
@@ -82,12 +192,28 @@ impl Stats {
     }
 }
 
-/// The JSON of `runs` (each as JSON), made by aqr of version `version` run with `args`.
-fn document(runs: &[String], version: &str, args: &[String]) -> String {
+/// Writes file `o` of `data` (the JSON), replacing it whole.
+fn save(o: &Path, data: &str) -> Result<(), String> {
+    let text = if is_json(o) { data.to_owned() } else { page(data) };
+    let mut aside = o.file_name().unwrap_or_default().to_owned();
+    aside.push(format!(".{}.part", std::process::id()));
+    let aside = o.with_file_name(aside);
+    let r = std::fs::write(&aside, text).and_then(|()| std::fs::rename(&aside, o));
+    if r.is_err() {
+        _ = std::fs::remove_file(&aside);
+    }
+    r.map_err(|e| format!("{}: {e}", o.display()))
+}
+
+/// The JSON of `runs` (each as JSON), made by aqr of version `version` run with `args`, as of
+/// `state`.
+fn document(runs: &[String], version: &str, args: &[String], state: Status) -> String {
     let mut o = String::from("{\"version\":1,\"aqr\":");
     string(&mut o, version);
     o.push_str(",\"args\":");
     array(&mut o, args, |o, a| string(o, a));
+    o.push_str(",\"state\":");
+    string(&mut o, state.name());
     _ = write!(o, ",\"runs\":[{}]}}", runs.join(","));
     o
 }
@@ -130,9 +256,19 @@ pub struct Content {
     pub modules: Vec<String>,
 }
 
-/// The sampling of a run, until finished ([`trace::record`]).
-pub fn record(stats: Option<&Stats>) -> Option<trace::Recording> {
-    stats.and_then(|_| trace::record())
+/// The sampling of a run of `mode` from `input` to `output` by `threads`, until finished
+/// ([`trace::record`]); the files written meanwhile tell it as it goes on.
+pub fn record(
+    stats: Option<&Stats>,
+    mode: &'static str,
+    input: String,
+    output: String,
+    threads: usize,
+) -> Option<trace::Recording> {
+    let (s, r) = (stats?, trace::record()?);
+    let c = Current { mode, input, output, threads, start: Instant::now(), watch: r.watch() };
+    *s.current.lock().unwrap() = Some(c);
+    Some(r)
 }
 
 /// Of the contents decoded: the kind each starts like, and its bytes; nothing where `--stats`
@@ -511,10 +647,14 @@ fn array<T>(out: &mut String, xs: impl IntoIterator<Item = T>, mut f: impl FnMut
     out.push(']');
 }
 
-fn json(run: &Run) -> String {
+/// The JSON of `run`, `partial` where not done.
+fn json(run: &Run, partial: bool) -> String {
     let mut o = String::new();
     o += "{\"mode\":";
     string(&mut o, run.mode);
+    if partial {
+        o += ",\"partial\":true";
+    }
     o += ",\"input\":";
     string(&mut o, &run.input);
     o += ",\"output\":";
@@ -634,11 +774,15 @@ fn browse(p: &Path) {
 mod tests {
     use super::*;
 
-    /// The JSON tells the version of aqr and the arguments it was run with, before the runs.
+    /// The JSON tells the version of aqr, the arguments it was run with and its state, before
+    /// the runs.
     #[test]
-    fn document_tells_version_and_args() {
+    fn document_tells_version_args_and_state() {
         let args = ["-c".to_string(), "-9".into(), r#"C:\a "b""#.into()];
-        let d = document(&["{}".to_string(), "{}".into()], "0.0.20261106", &args);
-        assert_eq!(d, r#"{"version":1,"aqr":"0.0.20261106","args":["-c","-9","C:\\a \"b\""],"runs":[{},{}]}"#);
+        let d = document(&["{}".to_string(), "{}".into()], "0.0.20261106", &args, Status::Interrupted);
+        assert_eq!(
+            d,
+            r#"{"version":1,"aqr":"0.0.20261106","args":["-c","-9","C:\\a \"b\""],"state":"interrupted","runs":[{},{}]}"#
+        );
     }
 }

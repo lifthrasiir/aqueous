@@ -12,12 +12,16 @@
 //! An extraction is stopped in two steps as well ([`extracting`]): the files written whole kept,
 //! the others removed ([`crate::extract::Extractor::stop`]).
 //!
+//! What is to be done however the process stops ([`on_end`]: `--stats`'s files written) is done
+//! before it does, by [`now`] and [`exit`], and by a signal stopping it (a second signal while
+//! it is being done stops it at once).
+//!
 //! A frontend cancelling ([`now`]) undoes what was done to the output instead: an output made
 //! is removed, an archive appended to cut back to where it ended before ([`undo_by`]).
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 /// Held as an output is made and set to be removed ([`create`]), and by [`now`] as the process
 /// stops (never released then): so that it never stops between the two, the output left.
@@ -92,6 +96,26 @@ pub fn undo_by(undo: Undo) -> Guard {
 
 pub struct Guard(());
 
+/// What [`on_end`] set, and whether it has been done (held while it is done).
+static ON_END: OnceLock<fn()> = OnceLock::new();
+static ENDED: Mutex<bool> = Mutex::new(false);
+
+/// Has `f` done as the process stops however it does (but returning from `main` or a panic):
+/// [`now`], [`exit`] or a signal. Set once.
+pub fn on_end(f: fn()) {
+    _ = ON_END.set(f);
+    imp::install();
+}
+
+/// Does what [`on_end`] set, where not done already (waiting for it where it is being done).
+fn end() {
+    let Some(f) = ON_END.get() else { return };
+    let mut ended = ENDED.lock().unwrap_or_else(|e| e.into_inner());
+    if !std::mem::replace(&mut *ended, true) {
+        f();
+    }
+}
+
 /// Stops the process now, with exit code `code`, what was done to the output being written
 /// undone ([`Undo`]; once one being made is: [`create`]; `exit` runs its handlers while the other
 /// threads go on).
@@ -109,6 +133,7 @@ pub fn now(code: i32) -> ! {
         }
         None => {}
     }
+    end();
     std::mem::forget(gate);
     std::process::exit(code)
 }
@@ -118,6 +143,7 @@ pub fn exit(code: i32) -> ! {
     let gate = GATE.lock().unwrap_or_else(|e| e.into_inner());
     imp::set(None);
     UNDO.lock().unwrap_or_else(|e| e.into_inner()).take();
+    end();
     std::mem::forget(gate);
     std::process::exit(code)
 }
@@ -138,15 +164,21 @@ mod imp {
     use std::ffi::CString;
     use std::path::Path;
     use std::sync::Once;
-    use std::sync::atomic::{AtomicPtr, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
 
-    use super::{GRACEFUL, REQUESTED, STOPPING};
+    use super::{GATE, GRACEFUL, ON_END, REQUESTED, STOPPING};
 
     /// The path to remove, as the handler takes it: never freed, as the handler may be reading
     /// it while it is replaced (a path for each output, a few bytes).
     static PATH: AtomicPtr<libc::c_char> = AtomicPtr::new(std::ptr::null_mut());
 
     const SIGNALS: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
+
+    /// The pipe the handler tells a signal stopping the process by (where [`ON_END`] is set): a
+    /// thread of its own does that, then stops the process by it. -1 where none.
+    static ENDER: AtomicI32 = AtomicI32::new(-1);
+    /// Whether a signal stopping the process was told to it (any other stops it at once).
+    static ENDING: AtomicBool = AtomicBool::new(false);
 
     pub fn set(path: Option<&Path>) {
         install();
@@ -159,6 +191,10 @@ mod imp {
 
     pub fn install() {
         static INSTALL: Once = Once::new();
+        static ENDER_MADE: Once = Once::new();
+        if ON_END.get().is_some() {
+            ENDER_MADE.call_once(make_ender);
+        }
         INSTALL.call_once(|| {
             for s in SIGNALS {
                 // SAFETY: a handler doing only what is async-signal-safe, set once the
@@ -177,6 +213,44 @@ mod imp {
         });
     }
 
+    /// Makes the thread that ends the process by a signal ([`ENDER`]).
+    fn make_ender() {
+        let mut fds = [0 as libc::c_int; 2];
+        // SAFETY: a pipe of two descriptors, the read end the thread's alone
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return;
+        }
+        let [rx, tx] = fds;
+        let made = std::thread::Builder::new().name("aqr-end".into()).spawn(move || {
+            let mut b = 0u8;
+            loop {
+                // SAFETY: reading a byte into `b`
+                match unsafe { libc::read(rx, (&raw mut b).cast(), 1) } {
+                    1 => break,
+                    -1 if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {}
+                    _ => {
+                        // (gone: the handler stops the process itself)
+                        ENDER.store(-1, Ordering::SeqCst);
+                        return;
+                    }
+                }
+            }
+            {
+                // (the output neither made nor placed meanwhile)
+                let _gate = GATE.lock().unwrap_or_else(|e| e.into_inner());
+                super::end();
+            }
+            // SAFETY: the default restored, the signal raised again stops the process
+            unsafe {
+                libc::signal(b as libc::c_int, libc::SIG_DFL);
+                libc::raise(b as libc::c_int);
+            }
+        });
+        if made.is_ok() {
+            ENDER.store(tx, Ordering::SeqCst);
+        }
+    }
+
     extern "C" fn handler(s: libc::c_int) {
         // (the first of an output ended in two steps: its end requested alone)
         if GRACEFUL.load(Ordering::SeqCst) && !REQUESTED.swap(true, Ordering::SeqCst) {
@@ -189,6 +263,14 @@ mod imp {
         unsafe {
             if !p.is_null() {
                 libc::unlink(p);
+            }
+            // (where a thread is to end it first, and not ending it already)
+            let tx = ENDER.load(Ordering::SeqCst);
+            if tx >= 0 && !ENDING.swap(true, Ordering::SeqCst) {
+                let b = s as u8;
+                if libc::write(tx, (&raw const b).cast(), 1) == 1 {
+                    return;
+                }
             }
             // (the default restored: raised again, the signal stops the process, delivered
             // once the handler returns, the signal blocked until then)
@@ -209,6 +291,9 @@ mod imp {
     use windows_sys::core::BOOL;
 
     use super::{GRACEFUL, REQUESTED, STOPPING};
+
+    /// Whether a signal stopping the process is being handled (any other stops it at once).
+    static ENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
     static PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 
@@ -238,6 +323,10 @@ mod imp {
         if let Some(p) = PATH.lock().unwrap_or_else(|e| e.into_inner()).take() {
             // (open as it is, but shared for deletion: gone once the process is)
             _ = std::fs::remove_file(p);
+        }
+        // (on a thread of its own: what is to be done before it ends, where not doing it already)
+        if !ENDING.swap(true, Ordering::SeqCst) {
+            super::end();
         }
         // the next handler, the default one, ends the process
         FALSE

@@ -551,10 +551,22 @@ pub struct Trace {
     pub workers: usize,
 }
 
-/// A sampler running, until finished.
+/// A sampler running, until finished (or dropped).
 pub struct Recording {
     stop: Arc<AtomicBool>,
-    handle: std::thread::JoinHandle<Trace>,
+    handle: Option<std::thread::JoinHandle<()>>,
+    watch: Watch,
+}
+
+/// What a recording has sampled so far, to be seen as it goes on ([`Recording::watch`]).
+#[derive(Clone)]
+pub struct Watch(Arc<Sampled>);
+
+struct Sampled {
+    start: Instant,
+    /// The trace so far (its labels, seconds and workers filled in once ended, else as seen),
+    /// and whether it has ended.
+    trace: Mutex<(Trace, bool)>,
 }
 
 /// Starts sampling (none where not [`enable`]d).
@@ -563,30 +575,65 @@ pub fn record() -> Option<Recording> {
         return None;
     }
     let stop = Arc::new(AtomicBool::new(false));
-    let s = stop.clone();
-    let handle = std::thread::Builder::new().name("aqr-trace".into()).spawn(move || sample(&s)).ok()?;
-    Some(Recording { stop, handle })
+    let watch = Watch(Arc::new(Sampled {
+        start: Instant::now(),
+        trace: Mutex::new((Trace { interval: INTERVAL, stacks: vec![Vec::new()], ..Trace::default() }, false)),
+    }));
+    let (s, w) = (stop.clone(), watch.clone());
+    let handle = std::thread::Builder::new().name("aqr-trace".into()).spawn(move || sample(&s, &w.0)).ok()?;
+    Some(Recording { stop, handle: Some(handle), watch })
 }
 
 impl Recording {
     /// What was sampled, the sampler stopped.
-    pub fn finish(self) -> Trace {
+    pub fn finish(mut self) -> Trace {
+        self.stop();
+        self.watch.trace()
+    }
+
+    /// A view of what is sampled, as it goes on (and once finished or dropped, all of it).
+    pub fn watch(&self) -> Watch {
+        self.watch.clone()
+    }
+
+    fn stop(&mut self) {
         self.stop.store(true, Relaxed);
-        self.handle.thread().unpark();
-        self.handle.join().unwrap_or_default()
+        if let Some(h) = self.handle.take() {
+            h.thread().unpark();
+            _ = h.join();
+        }
     }
 }
 
-fn sample(stop: &AtomicBool) -> Trace {
-    let start = Instant::now();
+impl Drop for Recording {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+impl Watch {
+    /// What was sampled so far.
+    pub fn trace(&self) -> Trace {
+        let (mut t, ended) = self.0.trace.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if !ended {
+            t.seconds = self.0.start.elapsed().as_secs_f64();
+            t.labels = LABELS.read().unwrap().names.clone();
+            t.workers = crate::pool::usage().1;
+        }
+        t
+    }
+}
+
+fn sample(stop: &AtomicBool, to: &Sampled) {
+    let start = to.start;
     let mut interval = INTERVAL;
     let mut threads: Vec<Arc<Thread>> = Vec::new();
     let mut stacks: HashMap<Vec<u32>, u32> = HashMap::from([(Vec::new(), 0)]);
-    let mut samples: Vec<Sample> = Vec::new();
     let mut next = start;
     let mut frames = Vec::with_capacity(DEPTH);
     loop {
         let done = stop.load(Relaxed);
+        let first = threads.len();
         {
             let all = THREADS.lock().unwrap();
             if all.len() > threads.len() {
@@ -605,6 +652,7 @@ fn sample(stop: &AtomicBool) -> Trace {
             bytes: Vec::new(),
             outside: Vec::new(),
         };
+        let mut new_stacks = Vec::new();
         for t in &threads {
             if !t.alive.load(Relaxed) {
                 s.threads.push((DEAD, NO_ITEM));
@@ -614,23 +662,36 @@ fn sample(stop: &AtomicBool) -> Trace {
             frames.clear();
             frames.extend((0..d).map(|i| t.frames[i].load(Relaxed)));
             let n = stacks.len() as u32;
-            let id = *stacks.entry(frames.clone()).or_insert(n);
+            let id = *stacks.entry(frames.clone()).or_insert_with(|| {
+                new_stacks.push(frames.clone());
+                n
+            });
             s.threads.push((id, t.item.load(Relaxed)));
         }
         let labels = LABELS.read().unwrap().names.len();
         s.bytes = (0..labels).map(|l| (l as u32, BYTES[l].load(Relaxed))).filter(|b| b.1 != 0).collect();
         s.outside = (0..labels).map(|l| (l as u32, OUTSIDE[l].load(Relaxed))).filter(|b| b.1 != 0).collect();
-        samples.push(s);
-        if samples.len() >= SAMPLES_MAX {
-            let mut k = 0;
-            samples.retain(|_| {
-                k += 1;
-                k % 2 == 1
-            });
-            interval *= 2;
-        }
-        if done {
-            break;
+        {
+            let (t, ended) = &mut *to.trace.lock().unwrap_or_else(|e| e.into_inner());
+            t.threads.extend(threads[first..].iter().map(|t| (t.name.clone(), t.worker)));
+            t.stacks.extend(new_stacks);
+            t.samples.push(s);
+            if t.samples.len() >= SAMPLES_MAX {
+                let mut k = 0;
+                t.samples.retain(|_| {
+                    k += 1;
+                    k % 2 == 1
+                });
+                interval *= 2;
+            }
+            t.interval = interval;
+            if done {
+                t.seconds = start.elapsed().as_secs_f64();
+                t.labels = LABELS.read().unwrap().names.clone();
+                t.workers = crate::pool::usage().1;
+                *ended = true;
+                break;
+            }
         }
         next += interval;
         let now = Instant::now();
@@ -639,17 +700,6 @@ fn sample(stop: &AtomicBool) -> Trace {
         } else {
             next = now;
         }
-    }
-    let mut by_id = vec![Vec::new(); stacks.len()];
-    stacks.into_iter().for_each(|(s, id)| by_id[id as usize] = s);
-    Trace {
-        interval,
-        seconds: start.elapsed().as_secs_f64(),
-        labels: LABELS.read().unwrap().names.clone(),
-        stacks: by_id,
-        threads: threads.iter().map(|t| (t.name.clone(), t.worker)).collect(),
-        samples,
-        workers: crate::pool::usage().1,
     }
 }
 
@@ -666,6 +716,26 @@ mod tests {
         assert_eq!((r.all, r.mapped), (8 << 30, 5 << 30));
         let r = Resident::of_working_set(8 << 30, 0);
         assert_eq!((r.all, r.mapped), (8 << 30, 0));
+    }
+
+    /// What a recording sampled so far is seen as it goes on, and all of it once finished.
+    #[test]
+    fn watched() {
+        enable();
+        let r = record().unwrap();
+        let w = r.watch();
+        let _s = span("watched");
+        std::thread::sleep(Duration::from_millis(50));
+        let so_far = w.trace();
+        assert!(!so_far.samples.is_empty());
+        assert!(so_far.seconds >= 0.05);
+        assert!(so_far.labels.contains(&("watched", false)));
+        assert!(so_far.stacks.len() > 1, "the stack of this thread");
+        std::thread::sleep(Duration::from_millis(30));
+        let t = r.finish();
+        assert!(t.samples.len() > so_far.samples.len());
+        assert_eq!(w.trace().samples.len(), t.samples.len());
+        assert_eq!(w.trace().seconds, t.seconds);
     }
 
     /// Spans, waits and items as sampled, work moved to another thread under them, and the

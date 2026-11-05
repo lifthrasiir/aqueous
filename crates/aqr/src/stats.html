@@ -165,7 +165,7 @@ function render() {
   const total = r.seconds * workers;
   const archived = r.mode === "compress";
   const tiles = [
-    ["mode", r.mode], ["time", secs(r.seconds)], ["workers", t.workers + (r.threads !== t.workers ? ` (-T ${r.threads})` : "")],
+    ["mode", r.partial ? `${r.mode} (${DATA.state === "live" ? "going on" : "not done"})` : r.mode], ["time", secs(r.seconds)], ["workers", t.workers + (r.threads !== t.workers ? ` (-T ${r.threads})` : "")],
     ["busy", pc(busy, total)], ["read", size(r.read)], ["written", size(r.written)],
     archived ? ["ratio", pc(r.written, r.read)] : ["speed", (r.written / 1e6 / r.seconds).toFixed(1) + " MB/s"],
     ["heap peak", size(heapPeak) + ` @ ${heapAt.toFixed(1)} s`], ["resident peak", rssPeak ? size(rssPeak) : "-"],
