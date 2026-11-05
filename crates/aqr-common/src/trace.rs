@@ -409,6 +409,17 @@ pub struct Resident {
     pub mapped: u64,
 }
 
+impl Resident {
+    /// Of a working set of `all` bytes, `private` of them private (Windows): of files mapped
+    /// unknown where `private` is 0, as Windows before 10 1809 leaves PrivateWorkingSetSize
+    /// (taking the counters of PROCESS_MEMORY_COUNTERS_EX2 but filling those before), and a
+    /// process always has private pages.
+    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
+    fn of_working_set(all: u64, private: u64) -> Resident {
+        Resident { all, mapped: if private == 0 { 0 } else { all.saturating_sub(private) } }
+    }
+}
+
 /// [`Resident`] now.
 pub fn resident() -> Resident {
     #[cfg(windows)]
@@ -428,8 +439,7 @@ pub fn resident() -> Resident {
         let mut c = Counters { cb: size_of::<Counters>() as u32, page_faults: 0, sizes: [0; 11] };
         // SAFETY: the process's own pseudo-handle, and counters of the size told
         if unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) } != 0 {
-            let all = c.sizes[1] as u64;
-            return Resident { all, mapped: all.saturating_sub(c.sizes[9] as u64) };
+            return Resident::of_working_set(c.sizes[1] as u64, c.sizes[9] as u64);
         }
         // (older systems: PROCESS_MEMORY_COUNTERS alone, of 8 sizes)
         c.cb = (8 + size_of::<[usize; 8]>()) as u32;
@@ -646,6 +656,17 @@ fn sample(stop: &AtomicBool) -> Trace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A working set's part of files mapped is what is not private; unknown (0) where the
+    /// private part is not told (0: Windows before 10 1809 leaves PrivateWorkingSetSize so, and
+    /// a process always has private pages), not all of it.
+    #[test]
+    fn working_set_mapped() {
+        let r = Resident::of_working_set(8 << 30, 3 << 30);
+        assert_eq!((r.all, r.mapped), (8 << 30, 5 << 30));
+        let r = Resident::of_working_set(8 << 30, 0);
+        assert_eq!((r.all, r.mapped), (8 << 30, 0));
+    }
 
     /// Spans, waits and items as sampled, work moved to another thread under them, and the
     /// heap's large blocks by their label.
