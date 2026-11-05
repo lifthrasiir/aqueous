@@ -298,3 +298,41 @@ fn append_stopped_and_resumed() {
     assert!(!stderr(&t).contains("incomplete"), "{}", stderr(&t));
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// An extraction stopped (as a signal would, once so many files are written): the files
+/// written whole kept with their metadata, the others (made empty as they were told) removed.
+#[test]
+fn extraction_stopped() {
+    let d = scratch("extraction");
+    let all = many_files(&d);
+    ok(&d, &["-q", "-B", "100K", "-o", "b.aqr", "src"]);
+    let o = Command::new(env!("CARGO_BIN_EXE_aqr"))
+        .current_dir(&d)
+        .args(["-T", "1", "-d", "-o", "x", "b.aqr"])
+        .env("AQR_TEST_STOP_AFTER", "20")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(130), "{}", stderr(&o));
+    assert!(stderr(&o).contains("not written whole removed"), "{}", stderr(&o));
+    let got = files(&d.join("x"));
+    assert!(got.len() >= 20 && got.len() < all.len(), "{}", got.len());
+    // (each whole, of its time)
+    for (name, data) in &got {
+        assert!(all.contains(&(name.clone(), data.clone())), "{name}");
+        let (src, out) =
+            (fs::metadata(d.join("src").join(name)).unwrap(), fs::metadata(d.join("x").join(name)).unwrap());
+        assert_eq!(src.modified().unwrap(), out.modified().unwrap(), "{name}");
+    }
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// Files of a size each, many of them.
+fn many_files(d: &Path) -> Vec<(String, Vec<u8>)> {
+    let src = d.join("src");
+    fs::create_dir_all(&src).unwrap();
+    for i in 0..120 {
+        fs::write(src.join(format!("f{i:03}.txt")), text(i, 20_000)).unwrap();
+    }
+    files(&src)
+}

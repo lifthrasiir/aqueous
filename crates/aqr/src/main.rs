@@ -2662,15 +2662,42 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
                 // (a file of a leaf failing lost, the others extracted; but where writing fails)
                 let given = std::sync::Mutex::new(vec![false; archive.contents_len()]);
                 let writing = std::sync::Mutex::new(None);
+                // (stopped as a signal or the frontend asks: the files written whole kept)
+                let (_stopping, requested) = stop::extracting();
+                let stopped = || requested.load(std::sync::atomic::Ordering::SeqCst);
+                // (for tests: stopped once so many contents are written, as a signal would)
+                let after = std::env::var("AQR_TEST_STOP_AFTER").ok().and_then(|v| v.parse::<usize>().ok());
+                let written = std::sync::atomic::AtomicUsize::new(0);
                 let r = archive.contents_of(a.opt.threads, wanted.as_deref(), |c, d| {
+                    if stopped() {
+                        return Err(Failure::Resource("stopped".into()));
+                    }
                     given.lock().unwrap()[c] = true;
                     x.content(c, d).map_err(|m| {
                         writing.lock().unwrap().get_or_insert(m.clone());
                         Failure::Resource(m)
-                    })
+                    })?;
+                    if after.is_some_and(|n| written.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 >= n) {
+                        requested.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    Ok(())
                 });
                 if let Some(m) = writing.into_inner().unwrap() {
                     return Err(m);
+                }
+                if stopped() {
+                    let files = t.entries.iter().filter(|e| matches!(e.node, EntryNode::File(_))).count();
+                    let (done, removed) = x.stop(t)?;
+                    let (n, bytes, out) = done.unwrap_or_default();
+                    if !a.quiet {
+                        eprintln!(
+                            "aqr: stopped: {n} of {files} files ({}) extracted into {}; {removed} not written whole removed",
+                            size(bytes as f64),
+                            out.display()
+                        );
+                    }
+                    ipc::tell(serde_json::json!({"event": "stopped", "kept": {"files": n, "bytes": bytes}}));
+                    stop::exit(130);
                 }
                 let lost = not_given(r, &given.into_inner().unwrap(), wanted.as_deref()).map_err(|e| e.to_string())?;
                 lost.iter().try_for_each(|&(c, _)| x.lose(c))?;

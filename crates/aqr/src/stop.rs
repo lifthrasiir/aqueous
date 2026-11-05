@@ -9,6 +9,9 @@
 //! leaving the archive of its last commit (the output removed where nothing was committed yet,
 //! as it is still to be placed: [`placed`]).
 //!
+//! An extraction is stopped in two steps as well ([`extracting`]): the files written whole kept,
+//! the others removed ([`crate::extract::Extractor::stop`]).
+//!
 //! A frontend cancelling ([`now`]) undoes what was done to the output instead: an output made
 //! is removed, an archive appended to cut back to where it ended before ([`undo_by`]).
 
@@ -52,6 +55,14 @@ pub fn graceful() -> &'static AtomicBool {
     imp::install();
     GRACEFUL.store(true, Ordering::SeqCst);
     &REQUESTED
+}
+
+/// Has an extraction ended in two steps (module docs: the first signal requesting its end, the
+/// files written whole kept) until the guard is dropped: the flag a first signal sets.
+pub fn extracting() -> (Guard, &'static AtomicBool) {
+    imp::install();
+    GRACEFUL.store(true, Ordering::SeqCst);
+    (Guard(()), &REQUESTED)
 }
 
 /// Requests that the output being written be ended as it is (a frontend's `finish`): where it
@@ -120,7 +131,7 @@ impl Drop for Guard {
 }
 
 /// What the first signal tells, where the output is ended in two steps.
-const STOPPING: &[u8] = b"\naqr: stopping: committing what is written (again to stop at once)\n";
+const STOPPING: &[u8] = b"\naqr: stopping: ending what is written as it is (again to stop at once)\n";
 
 #[cfg(unix)]
 mod imp {

@@ -205,7 +205,13 @@ pub struct Extractor<'a> {
     /// The files written and their bytes.
     files: AtomicUsize,
     bytes: AtomicU64,
+    /// Whether it was stopped ([`Extractor::stop`]): no content written any more.
+    stopped: AtomicBool,
 }
+
+/// What was extracted ([`Extractor::finish`]): the files written and their bytes, and the
+/// directory (or single entry) extracted; none where the output was skipped as asked.
+pub type Extracted = Option<(usize, u64, PathBuf)>;
 
 #[derive(Default)]
 struct State {
@@ -324,6 +330,7 @@ impl<'a> Extractor<'a> {
             written: Mutex::default(),
             files: AtomicUsize::new(0),
             bytes: AtomicU64::new(0),
+            stopped: AtomicBool::new(false),
         })
     }
 
@@ -718,6 +725,10 @@ impl<'a> Extractor<'a> {
         self.seen.saw(c, &d, d.len() as u64);
         let _s = aqr_common::trace::span("write");
         let s = self.s.read().unwrap();
+        // (stopped: its files lost already, or to be)
+        if self.stopped.load(Relaxed) {
+            return Ok(());
+        }
         let (to, count) = s.files.get(c).map_or((&[][..], 0), |f| (&f.0[..], f.1));
         for &i in to {
             let p = &s.paths[i];
@@ -751,11 +762,40 @@ impl<'a> Extractor<'a> {
         Ok(())
     }
 
+    /// Stops extracting `t` (all of it told) as it is: no content written any more (those being
+    /// written done first), the files of contents not written whole removed (made empty, or hard
+    /// links to them; forks of them not written), and the rest finished as [`Extractor::finish`]
+    /// does (links made, metadata applied). Also how many files were removed.
+    pub fn stop(self, t: &Tree) -> Result<(Extracted, usize), String> {
+        let removed = {
+            let mut s = self.s.write().unwrap();
+            self.stopped.store(true, Relaxed);
+            let written = self.written.lock().unwrap();
+            let s = &mut *s;
+            let mut removed = 0;
+            for i in 0..s.content.len() {
+                let Some(c) = s.content[i] else { continue };
+                if written.get(c).copied().flatten().is_some() {
+                    continue;
+                }
+                if s.made[i].take().is_some() {
+                    match fs::remove_file(&s.paths[i]) {
+                        Err(x) if x.kind() != std::io::ErrorKind::NotFound => return Err(err(&s.paths[i], x)),
+                        _ => removed += 1,
+                    }
+                }
+                s.soon[i] = None;
+            }
+            removed
+        };
+        Ok((self.finish(t)?, removed))
+    }
+
     /// Makes the links of `t` (the whole tree, all of it told) and applies the metadata of what
     /// was made. Returns the number of files written and their bytes, and what was extracted:
     /// the directory, or the single entry extracted as it is ([`Place::Auto`]); `None` where the
     /// output was skipped as asked.
-    pub fn finish(self, t: &Tree) -> Result<Option<(usize, u64, PathBuf)>, String> {
+    pub fn finish(self, t: &Tree) -> Result<Extracted, String> {
         // (nothing told: the archive's directory, empty)
         if let Place::Auto { own, ask, .. } = self.place {
             let mut s = self.s.write().unwrap();
