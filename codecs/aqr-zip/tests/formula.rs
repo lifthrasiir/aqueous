@@ -136,7 +136,7 @@ impl Zip {
         let mut at = Vec::new();
         for e in &self.entries {
             let body = e.body();
-            let crc = crc32fast::hash(&e.data);
+            let crc = aqr_common::crc32::hash(&e.data);
             at.push(o.len() as u64 - shift);
             let flags = e.flags | if e.desc.is_some() { 8 } else { 0 };
             o.extend_from_slice(b"PK\x03\x04");
@@ -191,7 +191,7 @@ impl Zip {
             le16(&mut o, flags as u64);
             le16(&mut o, e.method as u64);
             le32(&mut o, 0x5021_6c4a);
-            le32(&mut o, crc32fast::hash(&e.data) as u64);
+            le32(&mut o, aqr_common::crc32::hash(&e.data) as u64);
             let mut extra = e.central_extra.clone();
             if e.zip64 {
                 le32(&mut o, u32::MAX as u64);

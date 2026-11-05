@@ -19,7 +19,7 @@ pub fn modules(threads: usize) -> impl Fn(&aqr_formula::Apply, &[&[u8]]) -> aqr_
 }
 
 pub fn crc(kind: &[u8], data: &[u8]) -> u32 {
-    let mut h = crc32fast::Hasher::new();
+    let mut h = aqr_common::crc32::Hasher::new();
     h.update(kind);
     h.update(data);
     h.finalize()

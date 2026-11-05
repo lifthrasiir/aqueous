@@ -12,7 +12,6 @@ aqr-bcj = { path = "../aqr-bcj" }
 aqr-lzma = { path = "../aqr-lzma" }
 
 [dev-dependencies]
-crc32fast = "1.5"
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.

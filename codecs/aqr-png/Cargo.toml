@@ -17,7 +17,6 @@ aqr-flate = { path = "../aqr-flate", default-features = false }
 aqr-raw = { path = "../aqr-raw", default-features = false }
 
 [dev-dependencies]
-crc32fast = "1.5"
 flate-zoo.workspace = true
 
 # flate-zoo's backends that do not work with MSVC (the root Cargo.toml has why).

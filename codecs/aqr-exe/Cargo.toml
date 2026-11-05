@@ -10,10 +10,12 @@ decode = []
 
 [dependencies]
 bytemuck = { version = "1.16.0", features = ["must_cast"] }
-log = "0.4.21"
-mini-alloc = "0.4.2"
 sha1 = { version = "0.10", default-features = false }
 sha2 = { version = "0.10", default-features = false }
+
+# (the allocator of its Wasm modules, built without std)
+[target.'cfg(target_family = "wasm")'.dependencies]
+mini-alloc = "1.0"
 
 # (ARMv8's SHA-2 instructions, which sha2 takes only with "asm"; x86's SHA-NI it takes as it is)
 [target.'cfg(target_arch = "aarch64")'.dependencies]

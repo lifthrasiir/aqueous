@@ -56,7 +56,7 @@ fn archives_rebuilt() {
         // every file of 1 KiB or more a slice of its own (the PE file's in a folder of BCJ too)
         let sums = formula::entry_sums(&mut |r| d.get(r.start as usize..r.end as usize).map(<[u8]>::to_vec));
         assert_eq!(sums.len(), 7, "{name}");
-        let own: Vec<u32> = slices(&f, 1024).iter().map(|s| crc32fast::hash(s)).collect();
+        let own: Vec<u32> = slices(&f, 1024).iter().map(|s| aqr_common::crc32::hash(s)).collect();
         let found = sums.iter().filter(|&&(c, n)| n >= 1024 && own.contains(&c)).count();
         let large = sums.iter().filter(|s| s.1 >= 1024).count();
         assert_eq!(found, large, "{name}");
@@ -81,7 +81,7 @@ fn filters_rebuilt() {
         let f = formula::encode(&d, 2).unwrap_or_else(|| panic!("{name}"));
         assert!(eval(&f).unwrap() == d, "{name}");
         let sums = formula::entry_sums(&mut |r| d.get(r.start as usize..r.end as usize).map(<[u8]>::to_vec));
-        let own: Vec<u32> = slices(&f, 1024).iter().map(|s| crc32fast::hash(s)).collect();
+        let own: Vec<u32> = slices(&f, 1024).iter().map(|s| aqr_common::crc32::hash(s)).collect();
         assert!(sums.len() == 2 && sums.iter().all(|s| own.contains(&s.0)), "{name}");
         let module = if name == "filter-bcj2" { "bcj2" } else { "bcj-" };
         assert!(f.applies().iter().any(|a| a.module.name.starts_with(module)), "{name}");
@@ -130,7 +130,7 @@ fn written_rebuilt() {
     assert!(eval(&f).unwrap() == d);
     let sums = formula::entry_sums(&mut |r| d.get(r.start as usize..r.end as usize).map(<[u8]>::to_vec));
     let want: Vec<(u32, u64)> =
-        files.iter().filter(|f| !f.1.is_empty()).map(|f| (crc32fast::hash(f.1), f.1.len() as u64)).collect();
+        files.iter().filter(|f| !f.1.is_empty()).map(|f| (aqr_common::crc32::hash(f.1), f.1.len() as u64)).collect();
     assert_eq!(sums, want);
     // (all files but the empty one and the one of 5 bytes, apart)
     let own = slices(&f, 1024);

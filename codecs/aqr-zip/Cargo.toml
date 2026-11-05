@@ -17,7 +17,6 @@ aqr-flate = { path = "../aqr-flate", default-features = false }
 memchr = "2"
 
 [dev-dependencies]
-crc32fast = "1.5"
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 zstd = "0.13"
 
