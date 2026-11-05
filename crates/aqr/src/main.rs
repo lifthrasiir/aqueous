@@ -1876,7 +1876,9 @@ fn write_whole<T>(
 }
 
 /// The archive `out` appended to, as [`append::prior`] found it, of what `g` holds (to be
-/// appended), committed as it is written (once as it ends, with `--atomic`): what became of it.
+/// appended), committed as it is written (once as it ends, with `--atomic`): what became of it,
+/// its length and overhead those of what was added (the archive's growth, as the summary tells
+/// it against the bytes read).
 fn appended(
     a: &Args,
     out: &Path,
@@ -1905,8 +1907,12 @@ fn appended(
     let w = std::io::BufWriter::with_capacity(8 << 20, file);
     let mut o = FileOut { w, commits: true, once: a.atomic, base: p.at.start, place: None, placed: &placed };
     // (failing, what was written after the last commit is left, cut off by the next append)
-    viewed(a, view, |tell| aqr_compress::compress_tree_into(&g.tree, g, opt, &mut o, Some(&from), stopping, tell))
-        .map_err(|e| err(&e))
+    let mut r =
+        viewed(a, view, |tell| aqr_compress::compress_tree_into(&g.tree, g, opt, &mut o, Some(&from), stopping, tell))
+            .map_err(|e| err(&e))?;
+    let old = (end - p.at.start) as usize;
+    (r.len, r.overhead) = (r.len.saturating_sub(old), r.overhead.saturating_sub(old));
+    Ok(r)
 }
 
 /// Of archive `out` of several files (`files` files of `total` bytes), stopped and ended as it
