@@ -220,7 +220,7 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 
 recovery block도 블록이므로 블록 경계에만 놓일 수 있고, data block은 얼마든지 길 수 있다. 따라서 일정한 간격으로 recovery block을 넣을 수 있다는 보장은 없다. 이 설계는 보호 범위를 블록 경계에서 떼어 내어 이 제약을 배치 쪽에만 남긴다.
 
-- **recovery set**은 보호 범위 `[range_start, range_end)`, slice 크기 S, parity 수 p로 정해진다. 보호 범위는 임의의 바이트 구간이다. data block 한가운데에서 시작하거나 끝나도 된다.
+- **recovery set**은 보호 범위 `[range_start, range_end)`, slice 크기 S, parity 수 p로 정해진다. 범위의 길이(`range_length`)를 R이라 한다. 보호 범위는 임의의 바이트 구간이다. data block 한가운데에서 시작하거나 끝나도 된다.
 - 보호 범위는 `[archive_start, archive_end)` 안에 있어야 한다. header magic은 상수이고 footer는 재구성하므로 보호하지 않는다.
 - **한 set의 모든 recovery block은 `range_end` 뒤에 온다.** parity는 범위를 다 읽은 뒤에야 나온다(mirror block은 원본 앞에도 올 수 있지만, 그것은 사본을 미리 들고 있기 때문이다).
 - 앞선 set의 recovery block과 mirror block은 뒤 set의 보호 범위 안에서 다른 바이트와 똑같이 보호된다.
@@ -235,7 +235,7 @@ recovery block도 블록이므로 블록 경계에만 놓일 수 있고, data bl
 - S = 2<sup>s</sup>, s ≥ 12이다.
 - 격자 원점은 `archive_start`가 아니라 **header magic의 시작**(`archive_start` − 6)이다. slice i는 원점에서 [i·S, (i+1)·S)이다.
   > `archive_start`는 header magic 뒤이다. 여기에 맞추면 파일 처음에서 시작하는 보통의 아카이브에서 4 KiB 단위가 항상 slice 두 개에 걸친다. SFX처럼 원점 자체가 4 KiB 정렬이 아니면 E1 하나가 slice 두 개를 소모할 수 있는데, 이것은 감수한다.
-- set의 data shard는 보호 범위와 겹치는 격자 slice들이고, 개수를 n이라 한다. 범위 밖 부분은 가상의 0으로 채운다. 따라서 부분 slice는 양 끝의 두 개뿐이다.
+- set의 data shard는 보호 범위와 겹치는 격자 slice들이고, 개수를 n이라 한다. 원점에서 잰 오프셋으로 n = ⌈range_end/S⌉ − ⌊range_start/S⌋이며, R/S가 아니다. 첫 slice와 마지막 slice에서 범위 밖 부분은 실제 바이트가 있어도 가상의 0으로 채운다. 따라서 부분 slice는 양 끝의 두 개뿐이고, 채움의 양은 R mod S가 아니라 양 끝의 정렬이 정한다(R이 S의 배수여도 정렬이 어긋나면 n = R/S + 1).
 - 암호화 아카이브에서는 평문의 오프셋 0이 header magic의 시작이므로 같은 원점이 age 청크와 정렬된다. S를 64 KiB의 배수로 잡으면 slice와 청크가 정확히 겹쳐, 청크 하나의 인증 실패가 slice 하나의 erasure가 된다(§7의 3번).
 
 #### 블록
@@ -268,7 +268,7 @@ non-critical 타입 둘을 쓴다. 예를 들어 B0–B3은 parity block, B4–B
   - **체와 심볼 표현.** 체는 GF(2)[x]/(x¹⁶ + x⁵ + x³ + x² + 1)(0x1002D)이다. 다만 16비트 심볼 v는 다항식 기저의 계수가 아니라 Cantor 기저 β<sub>0..15</sub>에 대한 좌표이다. 즉 v가 나타내는 원소는 Σ v<sub>b</sub>·β<sub>b</sub>이다. β는 다항식 기저로 `0001 acca 3c0e 163e c582 ed2e 914c 4012 6c98 10d8 6a72 b900 fdb8 fb34 ff38 991e`(16진)이고, β<sub>0</sub> = 1, β<sub>k</sub>² + β<sub>k</sub> = β<sub>k−1</sub>을 만족한다. 덧셈은 이 표현에서도 XOR이다. 명세에는 이 β 표를 그대로 싣는다.
     > 다항식 기저로 읽으면 인코더가 GF(2¹⁶)-선형이 아니다(시험한 네 모양 모두 불일치). Cantor 좌표로 읽으면 무작위 입력에서 전부 일치한다. 이 β는 라이브러리의 공개 상수 `engine::CANTOR_BASIS`와 같다. 인코더의 비트 행렬에서 따로 구한 해 16개(Frobenius 켤레)가 모두 Cantor 기저였고, 그중 하나가 이 상수와 일치했다. 켤레 중 무엇을 골라도 비트 단위의 부호는 같다.
   - **평가점.** ω<sub>k</sub>는 위 표현으로 정수 k인 심볼이 나타내는 원소이다(0 ≤ k < 65536). 그래서 ω<sub>a</sub> + ω<sub>b</sub> = ω<sub>a⊕b</sub>이고, ω<sub>0..2ᵗ−1</sub>은 부분공간이다.
-  - **배치(high rate).** m = 2<sup>⌈log₂ p⌉</sup>(p = 1이면 1)이다. parity shard j(< p)는 ω<sub>j</sub>, data shard i(< n)는 ω<sub>m+i</sub>에 놓인다. ω<sub>p..m−1</sub>의 parity는 내보내지 않는다(punctured). data 자리 m+n 이후는 0으로 간주한다(shortened). f는 차수가 65536 − m 미만이고 f(ω<sub>m+i</sub>) = d<sub>i</sub>(i ≥ n이면 0)인 유일한 다항식이며, parity j는 f(ω<sub>j</sub>)이다. Leopard2 문서의 "legacy high V1"(`[parity 0..T-1][message T..T+K-1][shortened zero tail]`, T = ceil_pow2(R))과 같은 배치이다.
+  - **배치(high rate).** m = 2<sup>⌈log₂ p⌉</sup>(p = 1이면 1)이다. parity shard j(< p)는 ω<sub>j</sub>, data shard i(< n)는 ω<sub>m+i</sub>에 놓인다. ω<sub>p..m−1</sub>의 parity는 내보내지 않는다(punctured). data 자리 m+n 이후는 0으로 간주한다(shortened). f는 차수가 65536 − m 미만이고 f(ω<sub>m+i</sub>) = d<sub>i</sub>(i ≥ n이면 0)인 유일한 다항식이며, parity j는 f(ω<sub>j</sub>)이다. Leopard2 문서의 "legacy high V1"(`[parity 0..T-1][message T..T+K-1][shortened zero tail]`, T = ceil_pow2(R); 그 문서의 R은 여기의 p)과 같은 배치이다.
   - **계산할 수 있는 형태.** 위 f의 Lagrange 계수는 data 자리를 m개씩 나눈 coset 안의 곱으로 줄어든다. ω<sub>m+i</sub>가 속한 coset의 인덱스 집합을 C(i) = {⌊(m+i)/m⌋·m, …, 그 + m − 1}이라 하면 parity<sub>j</sub> = Σ<sub>i</sub> d<sub>i</sub> · Π<sub>k∈C(i), k≠m+i</sub> (ω<sub>j</sub> + ω<sub>k</sub>)/(ω<sub>m+i</sub> + ω<sub>k</sub>)이다. 명세는 이 식으로 정의하는 것이 낫다.
     > 다른 coset들은 V<sub>m</sub> = {ω<sub>0..m−1</sub>}의 소거 다항식 W(선형화 다항식)가 coset마다 상수인 덕에 Lagrange 계수에 coset별 상수 λ<sub>t</sub> = Π<sub>a∈U∖{0,b}</sub> a/(a+b)만 남긴다(U는 W의 상, b는 coset t의 W 값). a ↦ a+b가 U∖{0,b}의 순열이므로 λ<sub>t</sub> = 1이다. 실측으로도 65532개 자리 전체의 Lagrange 계수와 coset 식이 표본 네 개에서 같았다.
   - **확인 범위.** coset 식이 라이브러리의 생성 행렬과 일치함을 (n, p) = (8, 4), (5, 3), (40, 20), (70, 20), (1000, 100), (3000, 1), (61439, 4096)에서 확인했다(큰 것은 행과 열을 띄엄띄엄 표본으로).
