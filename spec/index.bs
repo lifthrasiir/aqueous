@@ -3869,8 +3869,8 @@ from the [=block/block_end=] of the earlier one to the [=block/block_start=] of 
 by at least 4096 bytes, so that they never share an aligned 4 KiB unit of the underlying storage,
 and SHOULD separate them by at least 4 MiB (4,194,304 bytes) when possible.
 
-Issue: The recommended distances are tentative, pending the measurement of burst lengths of latent sector errors
-(`docs/recovery-design.md` §8, R1).
+Issue: The recommended distances are tentative: a larger one would also cover the loss of a flash erase block,
+pending the measurement of the overhead of mirror blocks (`docs/recovery-design.md` §5.2, §8 M1).
 The interval between mirrored headers in an encrypted archive ([[#encrypted-archive]]) changes with the latter distance.
 
 A damaged encrypted chunk fails to authenticate as a whole,
