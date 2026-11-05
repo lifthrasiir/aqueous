@@ -23,7 +23,7 @@ use std::task::{Poll, Waker};
 use crate::exec::{Exec, Stopped};
 
 use aqr_formula::Resource;
-use aqr_formula::aqr::{Failure, Loaded};
+use aqr_formula::aqr::{Failure, Loaded, PartIn, PartOut};
 use wasmparser::{
     Validator, WasmFeatures, {self as wp},
 };
@@ -549,11 +549,54 @@ struct Job {
     i: u32,
 }
 
-/// An output of an application: the caller's buffer, of the size declared.
+/// An output of an application: where it goes, its memory, and (of a part module) the bytes
+/// committed so far.
 struct Output {
-    buf: &'static mut [u8],
+    buf: Drain,
     memory: Option<Memory>,
     done: u64,
+}
+
+/// The data of an input of an application: whole, or pulled as a part module requests it.
+enum Feed {
+    Bytes(&'static [u8]),
+    /// (under a lock only to be shared with the state, which is taken but by its owner)
+    Pull(Mutex<&'static mut dyn PartIn>),
+}
+
+impl Feed {
+    fn len(&self) -> u64 {
+        match self {
+            Feed::Bytes(d) => d.len() as u64,
+            Feed::Pull(p) => p.lock().unwrap().len(),
+        }
+    }
+}
+
+/// Where an output of an application goes: the caller's buffer (of the size declared), or
+/// pushed as a part module commits it (of so many bytes).
+enum Drain {
+    Buf(&'static mut [u8]),
+    Push(Mutex<&'static mut dyn PartOut>, u64),
+}
+
+impl Drain {
+    fn len(&self) -> u64 {
+        match self {
+            Drain::Buf(b) => b.len() as u64,
+            Drain::Push(_, n) => *n,
+        }
+    }
+}
+
+/// Writes `d` to the ring buffer `m` of `w` bytes from offset `at`.
+fn ring_write(m: &mut [u8], w: u64, mut at: u64, mut d: &[u8]) {
+    while !d.is_empty() {
+        let from = (at % w) as usize;
+        let n = d.len().min(w as usize - from);
+        m[from..from + n].copy_from_slice(&d[..n]);
+        (at, d) = (at + n as u64, &d[n..]);
+    }
 }
 
 /// What the host functions of an instance work on.
@@ -565,7 +608,7 @@ struct State {
     mine: u64,
     working: Option<Memory>,
     /// The data of the inputs of a part module, their memories and visible ranges.
-    inputs: Vec<(&'static [u8], Option<Memory>, u64, u64)>,
+    inputs: Vec<(Feed, Option<Memory>, u64, u64)>,
     /// The outputs, their memories and (of a part module) the bytes committed so far.
     outputs: Vec<Output>,
     last_log: Option<Vec<u8>>,
@@ -724,7 +767,48 @@ async fn defined(store: &mut Store<State>, wm: &Module, pages: u64) -> wasmtime:
     Ok(m)
 }
 
+/// The lengths of `inputs`.
+fn lens(inputs: &[&[u8]]) -> Vec<u64> {
+    inputs.iter().map(|i| i.len() as u64).collect()
+}
+
 impl Loaded for Shared {
+    fn is_part(&self) -> bool {
+        self.0.part
+    }
+
+    fn apply_part(
+        &self,
+        params: &[u8],
+        resources: &[Resource],
+        inputs: &mut [&mut dyn PartIn],
+        outputs: &mut [&mut dyn PartOut],
+        sizes: &[u64],
+        memory_limit: u64,
+    ) -> Decoded<()> {
+        let _s = aqr_common::trace::span("wasm");
+        if !self.0.part {
+            return Err(Failure::Resource("a whole module applied as a part module".into()));
+        }
+        if outputs.len() != sizes.len() {
+            return invalid("outputs of other sizes than declared");
+        }
+        let lens: Vec<u64> = inputs.iter().map(|i| i.len()).collect();
+        self.check(params, resources, &lens, sizes, memory_limit)?;
+        // SAFETY: the inputs and outputs outlive the store, which is dropped within `run_fed`,
+        // and are not reached but by it meanwhile
+        let feeds = (inputs.iter_mut()).map(|i| {
+            Feed::Pull(Mutex::new(unsafe { std::mem::transmute::<&mut dyn PartIn, &'static mut dyn PartIn>(&mut **i) }))
+        });
+        let drains = outputs.iter_mut().zip(sizes).map(|(o, &n)| {
+            Drain::Push(
+                Mutex::new(unsafe { std::mem::transmute::<&mut dyn PartOut, &'static mut dyn PartOut>(&mut **o) }),
+                n,
+            )
+        });
+        self.run_fed(params, resources, feeds.collect(), drains.collect(), memory_limit)
+    }
+
     fn apply(
         &self,
         params: &[u8],
@@ -734,7 +818,7 @@ impl Loaded for Shared {
         memory_limit: u64,
     ) -> Decoded<Vec<Vec<u8>>> {
         let _s = aqr_common::trace::span("wasm");
-        self.check(params, resources, inputs, sizes, memory_limit)?;
+        self.check(params, resources, &lens(inputs), sizes, memory_limit)?;
         // (zeroed by the system as they are written, as a copy out of the memories would be)
         let mut outs: Vec<Vec<u8>> = sizes.iter().map(|&s| vec![0; s as usize]).collect();
         let mut bufs: Vec<&mut [u8]> = outs.iter_mut().map(|o| &mut o[..]).collect();
@@ -756,7 +840,7 @@ impl Shared {
         memory_limit: u64,
     ) -> Decoded<()> {
         let sizes: Vec<u64> = outs.iter().map(|o| o.len() as u64).collect();
-        self.check(params, resources, inputs, &sizes, memory_limit)?;
+        self.check(params, resources, &lens(inputs), &sizes, memory_limit)?;
         self.run(params, resources, inputs, outs, memory_limit)
     }
 
@@ -766,7 +850,7 @@ impl Shared {
         &self,
         params: &[u8],
         resources: &[Resource],
-        inputs: &[&[u8]],
+        inputs: &[u64],
         sizes: &[u64],
         memory_limit: u64,
     ) -> Decoded<()> {
@@ -796,13 +880,13 @@ impl Shared {
     }
 
     /// The bytes of the memories imported but the working memory, as the application makes them.
-    fn imported(&self, params: &[u8], resources: &[Resource], inputs: &[&[u8]], sizes: &[u64]) -> u128 {
+    fn imported(&self, params: &[u8], resources: &[Resource], inputs: &[u64], sizes: &[u64]) -> u128 {
         let pages = |len: u64| len.div_ceil(65536) as u128;
         let pages: u128 = (self.0.imports.iter())
             .map(|i| match *i {
                 Import::Memory(Mem::Params) => pages(params.len() as u64),
                 Import::Memory(Mem::Resource(i)) => pages(resources[i as usize].len() as u64),
-                Import::Memory(m @ Mem::Input(k)) => self.0.pages(m, inputs[k as usize].len() as u64) as u128,
+                Import::Memory(m @ Mem::Input(k)) => self.0.pages(m, inputs[k as usize]) as u128,
                 Import::Memory(m @ Mem::Output(j)) => self.0.pages(m, sizes[j as usize]) as u128,
                 Import::Memory(Mem::Working) | Import::Func(_) => 0,
             })
@@ -819,17 +903,36 @@ impl Shared {
         outs: &mut [&mut [u8]],
         memory_limit: u64,
     ) -> Decoded<()> {
-        let c = &*self.0;
-        let sizes: Vec<u64> = outs.iter().map(|o| o.len() as u64).collect();
-        let sizes = &sizes[..];
+        // SAFETY: the inputs and outputs outlive the store, which is dropped within `run_fed`,
+        // and so do the references to them in it; the outputs are not reached but by it
+        // meanwhile. (Tasks have none of them.)
+        let feeds = inputs.iter().map(|i| Feed::Bytes(unsafe { std::slice::from_raw_parts(i.as_ptr(), i.len()) }));
+        let drains =
+            (outs.iter_mut()).map(|o| Drain::Buf(unsafe { std::slice::from_raw_parts_mut(o.as_mut_ptr(), o.len()) }));
+        self.run_fed(params, resources, feeds.collect(), drains.collect(), memory_limit)
+    }
 
-        // SAFETY: the inputs and outputs outlive the store, which is dropped within this
-        // function, and so do the references to them in it; the outputs are not reached but by
-        // it meanwhile. (Tasks have none of them.)
-        let data: Vec<&'static [u8]> =
-            inputs.iter().map(|i| unsafe { std::slice::from_raw_parts(i.as_ptr(), i.len()) }).collect();
-        let bufs: Vec<&'static mut [u8]> =
-            outs.iter_mut().map(|o| unsafe { std::slice::from_raw_parts_mut(o.as_mut_ptr(), o.len()) }).collect();
+    /// [`Shared::run`] of the inputs and outputs as the instance takes them, which outlive it.
+    fn run_fed(
+        &self,
+        params: &[u8],
+        resources: &[Resource],
+        feeds: Vec<Feed>,
+        drains: Vec<Drain>,
+        memory_limit: u64,
+    ) -> Decoded<()> {
+        let c = &*self.0;
+        let sizes: Vec<u64> = drains.iter().map(Drain::len).collect();
+        let sizes = &sizes[..];
+        let lens: Vec<u64> = feeds.iter().map(Feed::len).collect();
+        // (the data of the inputs given whole, for a whole module's memories, and to record)
+        let data: Vec<Option<&'static [u8]>> = (feeds.iter())
+            .map(|f| match f {
+                Feed::Bytes(d) => Some(*d),
+                Feed::Pull(_) => None,
+            })
+            .collect();
+        let (lens, data) = (&lens, &data);
         let exec = Exec::new();
         let app = Arc::new(App {
             limit: memory_limit,
@@ -841,8 +944,8 @@ impl Shared {
             failed: Mutex::default(),
         });
         let mut state = State::new(self.clone(), app.clone(), false);
-        state.inputs = data.iter().map(|&d| (d, None, 0, 0)).collect();
-        state.outputs = bufs.into_iter().map(|buf| Output { buf, memory: None, done: 0 }).collect();
+        state.inputs = feeds.into_iter().map(|f| (f, None, 0, 0)).collect();
+        state.outputs = drains.into_iter().map(|buf| Output { buf, memory: None, done: 0 }).collect();
         let mut store = Store::new(&ENGINE, state);
         store.limiter(|s| s);
 
@@ -853,11 +956,8 @@ impl Shared {
                 Mem::Params => sized(params.len() as u64, Some(params)),
                 Mem::Resource(i) => sized(resources[i as usize].len() as u64, Some(&resources[i as usize])),
                 Mem::Input(k) => {
-                    let d = inputs[k as usize];
-                    (
-                        MemoryType::new64(c.pages(m, d.len() as u64), Some(c.pages(m, d.len() as u64))),
-                        (!c.part).then_some(d),
-                    )
+                    let pages = c.pages(m, lens[k as usize]);
+                    (MemoryType::new64(pages, Some(pages)), data[k as usize].filter(|_| !c.part))
                 }
                 Mem::Output(j) => {
                     let pages = c.pages(m, sizes[j as usize]);
@@ -868,7 +968,7 @@ impl Shared {
             let entry = instance.get_func(&mut store, if c.part { PART } else { WHOLE }).expect("the entry point");
             let mut args = vec![Val::I64(params.len() as i64)];
             args.extend(resources.iter().map(|r| Val::I64(r.len() as i64)));
-            args.extend(inputs.iter().map(|i| Val::I64(i.len() as i64)));
+            args.extend(lens.iter().map(|&n| Val::I64(n as i64)));
             args.extend(sizes.iter().map(|&s| Val::I64(s as i64)));
             if let Err(e) = entry.call_async(&mut store, &args, &mut []).await {
                 return Err(failure(&store, e));
@@ -877,7 +977,7 @@ impl Shared {
                 return invalid("tasks not taken");
             }
             if c.part {
-                if store.data().outputs.iter().any(|o| o.done != o.buf.len() as u64) {
+                if store.data().outputs.iter().any(|o| o.done != o.buf.len()) {
                     return invalid("outputs of other sizes than declared");
                 }
             } else {
@@ -885,10 +985,13 @@ impl Shared {
                     match m {
                         Some(m) => {
                             let (m, state) = m.data_and_store_mut(&mut store);
-                            let buf = &mut *state.outputs[j].buf;
+                            let Drain::Buf(buf) = &mut state.outputs[j].buf else { unreachable!("pushed") };
                             buf.copy_from_slice(&m[..buf.len()]);
                         }
-                        None => store.data_mut().outputs[j].buf.fill(0),
+                        None => {
+                            let Drain::Buf(buf) = &mut store.data_mut().outputs[j].buf else { unreachable!("pushed") };
+                            buf.fill(0)
+                        }
                     }
                 }
             }
@@ -900,14 +1003,14 @@ impl Shared {
             Err(Stopped::Deadlock) => invalid("a deadlock: every instance waits"),
         };
         if let Some(log) = APPLIED.lock().unwrap().as_mut() {
-            let imported = self.imported(params, resources, inputs, sizes) as u64;
+            let imported = self.imported(params, resources, lens, sizes) as u64;
             log.push(Applied {
                 hash: c.hash,
                 params: params.len() as u64,
                 params_data: params.to_vec(),
                 resources: resources.iter().map(|r| r.len() as u64).collect(),
-                inputs: inputs.iter().map(|i| i.len() as u64).collect(),
-                contents: inputs.iter().map(|i| i.to_vec()).collect(),
+                inputs: lens.clone(),
+                contents: data.iter().map(|d| d.map_or_else(Vec::new, <[u8]>::to_vec)).collect(),
                 sizes: sizes.to_vec(),
                 imported,
                 limit: memory_limit,
@@ -1059,18 +1162,29 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
             Func::wrap(&mut *store, move |mut c: Caller<'_, State>, k: i32, hi: i64| -> wasmtime::Result<()> {
                 part(&c, "aqr_request")?;
                 let (k, hi) = (k as u32 as usize, hi as u64);
-                let Some(&(data, Some(mem), lo_k, hi_k)) = c.data().inputs.get(k) else {
+                let Some((len, Some(mem), lo_k, hi_k)) = c.data().inputs.get(k).map(|i| (i.0.len(), i.1, i.2, i.3))
+                else {
                     return violation(format!("aqr_request({k}) of an input not imported"));
                 };
                 let w = mem.data_size(&c) as u64;
-                if !(hi_k..=data.len() as u64).contains(&hi) || hi - lo_k > w {
-                    return violation(format!("aqr_request({k}, {hi}) outside [{hi_k}, {}] or window {w}", data.len()));
+                if !(hi_k..=len).contains(&hi) || hi - lo_k > w {
+                    return violation(format!("aqr_request({k}, {hi}) outside [{hi_k}, {len}] or window {w}"));
                 }
-                let m = mem.data_mut(&mut c);
-                for o in hi_k..hi {
-                    m[(o % w) as usize] = data[o as usize];
+                let (m, state) = mem.data_and_store_mut(&mut c);
+                match &mut state.inputs[k].0 {
+                    Feed::Bytes(data) => ring_write(m, w, hi_k, &data[hi_k as usize..hi as usize]),
+                    Feed::Pull(p) => {
+                        let mut at = hi_k;
+                        p.get_mut()
+                            .unwrap()
+                            .pull(hi, &mut |d| {
+                                ring_write(m, w, at, d);
+                                at += d.len() as u64;
+                            })
+                            .map_err(|f| wasmtime::Error::new(TaskFailed(f)))?;
+                    }
                 }
-                c.data_mut().inputs[k].3 = hi;
+                state.inputs[k].3 = hi;
                 Ok(())
             })
         }
@@ -1078,7 +1192,7 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
             Func::wrap(&mut *store, move |mut c: Caller<'_, State>, k: i32, lo: i64| -> wasmtime::Result<()> {
                 part(&c, "aqr_release")?;
                 let (k, lo) = (k as u32 as usize, lo as u64);
-                let Some(&(_, Some(_), lo_k, hi_k)) = c.data().inputs.get(k) else {
+                let Some((Some(_), lo_k, hi_k)) = c.data().inputs.get(k).map(|i| (i.1, i.2, i.3)) else {
                     return violation(format!("aqr_release({k}) of an input not imported"));
                 };
                 if !(lo_k..=hi_k).contains(&lo) {
@@ -1092,8 +1206,7 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
             Func::wrap(&mut *store, move |mut c: Caller<'_, State>, j: i32, hi: i64| -> wasmtime::Result<()> {
                 part(&c, "aqr_commit")?;
                 let (j, hi) = (j as u32 as usize, hi as u64);
-                let Some((done, Some(mem), size)) =
-                    c.data().outputs.get(j).map(|o| (o.done, o.memory, o.buf.len() as u64))
+                let Some((done, Some(mem), size)) = c.data().outputs.get(j).map(|o| (o.done, o.memory, o.buf.len()))
                 else {
                     return violation(format!("aqr_commit({j}) of an output not imported"));
                 };
@@ -1108,7 +1221,14 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
                 while at < hi {
                     let from = (at % w) as usize;
                     let n = (hi - at).min(w - from as u64) as usize;
-                    out.buf[at as usize..][..n].copy_from_slice(&m[from..from + n]);
+                    match &mut out.buf {
+                        Drain::Buf(buf) => buf[at as usize..][..n].copy_from_slice(&m[from..from + n]),
+                        Drain::Push(p, _) => p
+                            .get_mut()
+                            .unwrap()
+                            .push(&m[from..from + n])
+                            .map_err(|f| wasmtime::Error::new(TaskFailed(f)))?,
+                    }
                     at += n as u64;
                 }
                 out.done = hi;

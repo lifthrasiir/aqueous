@@ -838,6 +838,47 @@ fn part() {
         MEMORIES.replace(r#""aqr_input0" (memory i64 0)"#, r#""aqr_input0" (memory i64 0 1)"#)
     );
     invalid(apply(&whole, &[b"x"], &[1], u64::MAX), "maximum");
+
+    // streamed (Loaded::apply_part): through windows of a page, its input pulled as requested
+    // and its output pushed as committed, the first bytes pushed before most of the input is
+    // pulled; a failure to pull is the application's
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    struct Feed<'a>(&'a [u8], Arc<AtomicU64>, Option<Failure>);
+    impl aqr::PartIn for Feed<'_> {
+        fn len(&self) -> u64 {
+            self.0.len() as u64
+        }
+        fn pull(&mut self, hi: u64, put: &mut dyn FnMut(&[u8])) -> aqr::Decoded<()> {
+            if let Some(f) = &self.2 {
+                return Err(f.clone());
+            }
+            put(&self.0[self.1.load(Relaxed) as usize..hi as usize]);
+            self.1.store(hi, Relaxed);
+            Ok(())
+        }
+    }
+    // (the bytes pushed, and how much of the input was pulled as the first were)
+    struct Drain(Vec<u8>, Arc<AtomicU64>, Option<u64>);
+    impl aqr::PartOut for Drain {
+        fn push(&mut self, d: &[u8]) -> aqr::Decoded<()> {
+            self.2.get_or_insert(self.1.load(Relaxed));
+            self.0.extend_from_slice(d);
+            Ok(())
+        }
+    }
+    let l = load(&windowed).unwrap();
+    assert!(l.is_part());
+    let pulled = Arc::new(AtomicU64::new(0));
+    let (mut feed, mut drain) = (Feed(&d, pulled.clone(), None), Drain(Vec::new(), pulled, None));
+    l.apply_part(b"pp", &[], &mut [&mut feed], &mut [&mut drain], &[d.len() as u64], 4 << 16).unwrap();
+    assert!(drain.0 == d);
+    assert!(drain.2.is_some_and(|n| n < 1 << 16), "{:?}", drain.2);
+    let upstream = Failure::Invalid("upstream".into());
+    let mut feed = Feed(&d, Arc::default(), Some(upstream.clone()));
+    let mut drain = Drain(Vec::new(), Arc::default(), None);
+    let r = l.apply_part(b"pp", &[], &mut [&mut feed], &mut [&mut drain], &[d.len() as u64], 4 << 16);
+    assert_eq!(r, Err(upstream));
 }
 
 /// Large inputs and outputs (in the sandbox's arenas, as it grows them and uses them again),
