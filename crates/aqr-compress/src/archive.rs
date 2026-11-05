@@ -109,6 +109,68 @@ impl Source for [Input<'_>] {
     }
 }
 
+/// Where an archive of several files is written ([`compress_tree_into`]).
+pub trait Output: Write {
+    /// Where the archive starts in the file written (its header magic): where its footers are
+    /// placed by ([`aqr::crossing`]).
+    fn base(&self) -> u64 {
+        0
+    }
+
+    /// Whether what is written can be made durable ([`Output::sync`]) and written over
+    /// ([`Output::patch`]): the archive is then committed as it is written, at each segment
+    /// closed (spec, "Appending to an archive"), but with mirror blocks or a size hint block.
+    fn commits(&self) -> bool {
+        false
+    }
+
+    /// Makes what was written durable.
+    fn sync(&mut self) -> io::Result<()> {
+        self.flush()
+    }
+
+    /// Writes `bytes` over those written at `at` (from where the archive starts).
+    fn patch(&mut self, at: u64, bytes: &[u8]) -> io::Result<()> {
+        let _ = (at, bytes);
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+
+    /// Ends what is written, once the archive is: what is held back written (the last chunk of
+    /// an encryption).
+    fn end(&mut self) -> io::Result<()> {
+        self.flush()
+    }
+}
+
+/// An output that only writes: an archive not committed as it is written.
+pub struct Plain<'a>(pub &'a mut dyn Write);
+
+impl Write for Plain<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl Output for Plain<'_> {}
+
+/// An archive in memory, committed as it is written.
+impl Output for Vec<u8> {
+    fn commits(&self) -> bool {
+        true
+    }
+
+    fn patch(&mut self, at: u64, bytes: &[u8]) -> io::Result<()> {
+        let at = usize::try_from(at).ok().filter(|&a| a + bytes.len() <= self.len());
+        let at = at.ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        self[at..at + bytes.len()].copy_from_slice(bytes);
+        Ok(())
+    }
+}
+
 /// An archive of several files, and what became of them.
 pub struct Archived {
     pub archive: Vec<u8>,
@@ -184,6 +246,18 @@ pub fn compress_tree_to<S: Source + ?Sized>(
     out: &mut dyn Write,
     tell: &(dyn Fn(Event) + Sync),
 ) -> io::Result<Report> {
+    compress_tree_into(tree, src, opt, &mut Plain(out), tell)
+}
+
+/// [`compress_tree_to`], written to `out`: committed as it is written where it
+/// [commits](Output::commits), and ended ([`Output::end`]) once written.
+pub fn compress_tree_into<S: Source + ?Sized>(
+    tree: &Tree,
+    src: &S,
+    opt: &Options,
+    out: &mut dyn Output,
+    tell: &(dyn Fn(Event) + Sync),
+) -> io::Result<Report> {
     let (tracker, notes) = Tracker::new((0..src.len()).map(|c| src.size(c)).collect());
     crate::compressing();
     let _spill = crate::spilling(opt);
@@ -198,10 +272,12 @@ fn compress_tree_noting<S: Source + ?Sized>(
     tree: &Tree,
     src: &S,
     opt: &Options,
-    out: &mut dyn Write,
+    out: &mut dyn Output,
     notes: Notes,
     tell: &(dyn Fn(Event) + Sync),
 ) -> io::Result<Report> {
+    // (commits only of an archive as it is written: mirror blocks make the footer theirs)
+    let commit = (out.commits() && !opt.mirrors && !opt.size_hint).then(|| out.base());
     let mut out = match opt.mirrors {
         true => Out::Mirrored(aqr::Mirroring::new(out, opt.size_hint)),
         false => Out::Plain(out),
@@ -265,7 +341,11 @@ fn compress_tree_noting<S: Source + ?Sized>(
         segments: 0,
         metadata_end: None,
         inserted: 0,
+        commit,
+        files_of: files_of(tree, n),
+        left: (tree.entries.iter().filter(|e| matches!(e.node, EntryNode::File(_))).count() as u64, 0),
     };
+    wr.left.1 = (0..n).map(|c| src.size(c)).sum();
     std::thread::scope(|s| {
         // (a thread of no worker of the pool, which takes one only as one is free: as the
         // batches being made leave threads idle)
@@ -293,6 +373,18 @@ fn compress_tree_noting<S: Source + ?Sized>(
         }
     };
     let tree = last.as_ref().unwrap_or(tree);
+    if wr.commit.is_some() {
+        let enc = aqr::Encoder::with_threads(opt.level, opt.threads).with_modules(aqr_decompress::wasm_of);
+        let meta = wr.w.close_as(&enc, tree, &contents, aqr::Status::Complete).map_err(bad_tree)?;
+        wr.commit(&mut out, &meta)?;
+        let len = wr.w.len() - wr.w.pad().len();
+        out.output().end()?;
+        let mut r = wr.r;
+        r.len = len;
+        r.overhead = r.len - r.files.iter().map(|f| f.archived).sum::<f64>().round() as usize;
+        r.unverified.sort_unstable();
+        return Ok(r);
+    }
     let Writer { w, mut r, held, held_len, inserted, .. } = wr;
     // (an encoder of the metadata block only)
     let enc = aqr::Encoder::with_threads(opt.level, opt.threads).with_modules(aqr_decompress::wasm_of);
@@ -313,6 +405,7 @@ fn compress_tree_noting<S: Source + ?Sized>(
         out.write_all(b)?;
     }
     out.write_all(&end)?;
+    out.output().end()?;
     r.mirrors = mirror.len() + out.added() as usize;
     // (the mirror blocks of segments closed, written between batches, counted by the writer)
     r.len = w.len() + end.len() + r.mirrors - inserted;
@@ -539,15 +632,45 @@ struct Writer {
     metadata_end: Option<u64>,
     /// Bytes of the mirror blocks written between batches.
     inserted: usize,
+    /// Where the archive starts in the file, where it is committed as it is written, at each
+    /// segment closed ([`Output::commits`]).
+    commit: Option<u64>,
+    /// By content, the files of it (each hard link); and the files and bytes of contents not
+    /// yet written, as a commit tells them (`segment-status`).
+    files_of: Vec<u64>,
+    left: (u64, u64),
+}
+
+/// By content of `tree` (of `n`), the files of it (each hard link).
+fn files_of(tree: &Tree, n: usize) -> Vec<u64> {
+    let mut of = vec![0; n];
+    for e in &tree.entries {
+        if let EntryNode::File(c) = e.node {
+            of[c] += 1;
+        }
+    }
+    of
+}
+
+fn bad_tree(e: aqr_formula::Error) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, e.0)
 }
 
 /// Where the archive is written: as it is, or with mirror blocks ([`Options::mirrors`]).
 enum Out<'a> {
-    Plain(&'a mut dyn Write),
-    Mirrored(aqr::Mirroring<&'a mut dyn Write>),
+    Plain(&'a mut dyn Output),
+    Mirrored(aqr::Mirroring<&'a mut dyn Output>),
 }
 
 impl Out<'_> {
+    /// The output written to, past the mirror blocks.
+    fn output(&mut self) -> &mut dyn Output {
+        match self {
+            Out::Plain(o) => &mut **o,
+            Out::Mirrored(m) => &mut **m.get_mut(),
+        }
+    }
+
     /// Bytes of the mirror blocks written (and of the footer as it grew).
     fn added(&self) -> u64 {
         match self {
@@ -668,7 +791,7 @@ impl Writer {
         made: Option<Ready>,
         cx: &Ctx<S>,
         tell: &(dyn Fn(Event) + Sync),
-        out: &mut dyn Write,
+        out: &mut Out,
     ) -> io::Result<()> {
         let (src, notes, batch) = (cx.src, cx.notes, &cx.batches[i]);
         for (&c, &(len, same_as)) in batch.iter().zip(lens) {
@@ -708,6 +831,10 @@ impl Writer {
             self.put(i, &files, part, cx, out)?;
         }
         batch.iter().try_for_each(|&c| src.intact(c))?;
+        for &(len, _) in lens {
+            self.left.1 = self.left.1.saturating_sub(len);
+        }
+        self.left.0 = self.left.0.saturating_sub(batch.iter().map(|&c| self.files_of[c]).sum());
         notes.send(Note::Written(i));
         tell(Event::Written { contents: batch, report: &self.r });
         Ok(())
@@ -721,7 +848,7 @@ impl Writer {
         files: &[File],
         mut part: Analyzed,
         cx: &Ctx<S>,
-        out: &mut dyn Write,
+        out: &mut Out,
     ) -> io::Result<()> {
         let (src, opt, notes, batch) = (cx.src, cx.opt, cx.notes, &cx.batches[i]);
         let mut raw = HashSet::new();
@@ -743,7 +870,10 @@ impl Writer {
         {
             let _s = aqr_common::trace::span("write");
             match self.hold {
-                false => out.write_all(&made.batch.bytes)?,
+                false => {
+                    out.write_all(self.w.pad())?;
+                    out.write_all(&made.batch.bytes)?
+                }
                 true => {
                     self.held_len += made.batch.bytes.len();
                     self.held.push_back(std::mem::take(&mut made.batch.bytes));
@@ -790,12 +920,37 @@ impl Writer {
         }
         let (t, contents) = self.segment_tree(cx.tree);
         let enc = aqr::Encoder::with_threads(cx.opt.level, cx.opt.threads).with_modules(aqr_decompress::wasm_of);
-        let meta = self.w.close(&enc, &t, &contents).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.0))?;
-        out.write_all(&meta)?;
+        let status = aqr::Status::Incomplete { files: Some(self.left.0), bytes: Some(self.left.1) };
+        let status = if self.commit.is_some() { status } else { aqr::Status::None };
+        let meta = self.w.close_as(&enc, &t, &contents, status).map_err(bad_tree)?;
+        match self.commit {
+            Some(_) => self.commit(out, &meta)?,
+            None => out.write_all(&meta)?,
+        }
         self.metadata_end = Some(self.w.len() as u64);
         (self.segment_at, self.segments) = (self.w.len(), self.segments + 1);
         self.segment.clear();
         self.again.clear();
+        Ok(())
+    }
+
+    /// Commits the segment closed with metadata block `meta` (spec, "Appending to an archive"):
+    /// writes it and a footer after it, and once they are durable, makes the footer of the commit
+    /// before a spacer block.
+    fn commit(&mut self, out: &mut Out, meta: &[u8]) -> io::Result<()> {
+        let base = self.commit.expect("an archive committed");
+        out.write_all(self.w.pad())?;
+        out.write_all(meta)?;
+        let (footer, before) = self.w.footer(base);
+        out.write_all(&footer)?;
+        let o = out.output();
+        o.sync()?;
+        if let Some(f) = before {
+            let k = aqr::kill(f.len());
+            o.patch(f.start as u64, &k)?;
+            o.sync()?;
+            o.patch((f.start + k.len()) as u64, &vec![0; f.len() - k.len()])?;
+        }
         Ok(())
     }
 

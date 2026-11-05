@@ -145,7 +145,10 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 pub use aqr_formula::{Formula, Kind, Module, Node, Region};
-pub use archive::{Archived, FileReport, Input, Report, Solid, Source, compress_tree, compress_tree_to};
+pub use archive::{
+    Archived, FileReport, Input, Output, Plain, Report, Solid, Source, compress_tree, compress_tree_into,
+    compress_tree_to,
+};
 pub use detect::{Format, detect, kind_by_name};
 pub use extent::extent;
 pub use progress::Event;

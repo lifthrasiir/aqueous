@@ -259,6 +259,108 @@ fn segments() {
     assert_eq!(metadata_blocks(&m), metadata_blocks(&c));
 }
 
+/// An archive written as a log of what was done: bytes appended, synced, written over.
+#[derive(Default)]
+struct Logged {
+    bytes: Vec<u8>,
+    ops: Vec<Op>,
+}
+
+enum Op {
+    Append(usize),
+    Sync,
+    Patch(usize, Vec<u8>),
+}
+
+impl Write for Logged {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.bytes.extend_from_slice(buf);
+        self.ops.push(Op::Append(buf.len()));
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl aqr_compress::Output for Logged {
+    fn commits(&self) -> bool {
+        true
+    }
+
+    fn sync(&mut self) -> std::io::Result<()> {
+        self.ops.push(Op::Sync);
+        Ok(())
+    }
+
+    fn patch(&mut self, at: u64, bytes: &[u8]) -> std::io::Result<()> {
+        let at = at as usize;
+        self.ops.push(Op::Patch(at, self.bytes[at..at + bytes.len()].to_vec()));
+        self.bytes[at..at + bytes.len()].copy_from_slice(bytes);
+        Ok(())
+    }
+}
+
+/// The files of the archive in `file` (located), by name, and what its last segment tells.
+fn located(file: &[u8]) -> (Vec<Vec<u8>>, Option<aqr_formula::aqr::Status>) {
+    let at = aqr_formula::aqr::locate(file).expect("an archive located");
+    let a = &file[at];
+    let Ok(Value::Tree(t, _)) = decompress_value(a, 1) else { panic!("not decoded") };
+    let status = aqr_formula::aqr::open(a, &aqr_formula::aqr::NoModules).unwrap().status();
+    let mut names: Vec<Vec<u8>> =
+        t.entries.iter().filter(|e| matches!(e.node, EntryNode::File(_))).map(|e| e.name.clone()).collect();
+    names.sort();
+    (names, status)
+}
+
+/// An archive committed as it is written, a segment each batch: what it writes, wherever it is
+/// stopped (a write cut short too), is the archive of a commit, files only added as it goes;
+/// its last commit tells of the writing complete, the others of what is left.
+#[test]
+fn committed() {
+    use aqr_formula::aqr::Status;
+    let files = sample();
+    let (tree, contents) = tree_of(&files);
+    let inputs: Vec<Input> = contents.iter().map(|(n, d)| Input { name: n.as_bytes(), data: d }).collect();
+    let opt = Options { batch: 30_000, segment: 1, ..Options::default() };
+    let mut out = Logged::default();
+    let r = aqr_compress::compress_tree_into(&tree, &inputs[..], &opt, &mut out, &|_| {}).unwrap();
+    assert_eq!(r.len, out.bytes.len());
+    let (all, status) = located(&out.bytes);
+    assert_eq!(status, Some(Status::Complete));
+    let (plain, _) = archived(&files, &opt);
+    assert_eq!(located(&plain).0, all);
+    // the states the file goes through, undoing the operations from the last
+    let mut file = out.bytes.clone();
+    let mut seen = all.clone();
+    let (mut syncs, mut states, mut none) = (0, 0, false);
+    for op in out.ops.iter().rev() {
+        match op {
+            Op::Append(n) => {
+                for cut in [*n / 2, *n] {
+                    let state = &file[..file.len() - cut];
+                    if aqr_formula::aqr::locate(state).is_none() {
+                        // (nothing committed yet, nor before)
+                        none = true;
+                        continue;
+                    }
+                    assert!(!none, "an archive before its first commit");
+                    let (names, status) = located(state);
+                    assert!(names.iter().all(|n| seen.contains(n)), "files appear as the file shrinks");
+                    assert_ne!(status, Some(Status::None));
+                    seen = names;
+                    states += 1;
+                }
+                file.truncate(file.len() - n);
+            }
+            Op::Sync => syncs += 1,
+            Op::Patch(at, was) => file[*at..*at + was.len()].copy_from_slice(was),
+        }
+    }
+    assert!(none && syncs > 6 && states > 10, "{syncs} {states}");
+}
+
 /// Files of the same content far apart by their names (of other extensions, others between
 /// them), in segments of a batch each: put in one batch, so stored once rather than again in a
 /// later segment.
