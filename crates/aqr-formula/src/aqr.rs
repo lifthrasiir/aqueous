@@ -34,14 +34,16 @@ mod dict;
 pub mod envelope;
 pub mod inspect;
 mod listing;
+mod locate;
 pub mod mirror;
 mod segment;
 pub mod sink;
 mod tree;
 
 pub use listing::Listed;
+pub use locate::{locate, trim};
 pub use mirror::Mirroring;
-pub use segment::{Batch, ContentAt, Layout, Leaf, Placed, Segment, SegmentWriter};
+pub use segment::{Batch, ContentAt, Layout, Leaf, Placed, Segment, SegmentWriter, crossing, kill};
 pub use tree::{
     Entry, EntryNode, Extra, MAC_FLAGS_ALLOWED, Member, Status, Time, Tree, WIN_ATTRS_ALLOWED, Xattr, Zone,
     archive_key_name, diagnostic, entry_key_name, name_bytes, name_from,

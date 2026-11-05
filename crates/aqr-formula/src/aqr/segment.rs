@@ -103,6 +103,11 @@ pub struct SegmentWriter {
     /// The module and resource blocks so far, one after another, and a stand-in for each
     /// dictionary block ([`super::dictionary_stand_in`]).
     prefix: Vec<u8>,
+    /// The footer of the last commit, where there is one ([`SegmentWriter::footer`]): to be made a
+    /// spacer block by the next commit once it is written. Its padding byte, where its length is
+    /// odd, is counted in `at` but not yet written where `pad`.
+    live: Option<std::ops::Range<usize>>,
+    pad: bool,
 }
 
 /// The blocks of a batch of leaves, to write after those before ([`SegmentWriter::commit`]).
@@ -128,6 +133,27 @@ pub struct ContentAt {
     pub leaf: usize,
     pub output: usize,
     pub size: u64,
+}
+
+/// The bytes that make a footer of `len` bytes, and its padding byte where `len` is odd, a spacer
+/// block once they are written over its first bytes (spec, "Appending to an archive"): its type and
+/// size, 2 bytes for a footer of 257 bytes or less. The rest of the footer is to be zeroed after,
+/// as a spacer block's space is.
+pub fn kill(len: usize) -> Vec<u8> {
+    let n = len + len % 2;
+    if n - 2 <= 0xff {
+        vec![0, (n - 2) as u8]
+    } else if n - 3 <= 0xffff {
+        [&[1u8][..], &((n - 3) as u16).to_le_bytes()].concat()
+    } else {
+        [&[2u8][..], &((n - 5) as u32).to_le_bytes()].concat()
+    }
+}
+
+/// Whether `n` bytes written at offset `at` of a file cross a multiple of 512 bytes: a write that
+/// storage devices may then do in part (spec, "Appending to an archive").
+pub fn crossing(at: u64, n: usize) -> bool {
+    at % 512 + n as u64 > 512
 }
 
 impl Default for SegmentWriter {
@@ -159,6 +185,61 @@ impl SegmentWriter {
             mirrorable: 0,
             leaf_dictionary: HashMap::new(),
             prefix: Vec::new(),
+            live: None,
+            pad: false,
+        }
+    }
+
+    /// A segment to append to an archive whose footer is at `footer` (from its header magic),
+    /// ending it, and whose last metadata block is at `metadata` (spec, "Appending to an
+    /// archive"): its blocks after the footer (and a padding byte, [`SegmentWriter::pad`]), the
+    /// footer to be made a spacer block by the first commit ([`SegmentWriter::footer`]).
+    pub fn appending(footer: std::ops::Range<usize>, metadata: usize) -> SegmentWriter {
+        let mut w = SegmentWriter::new();
+        let odd = footer.len() % 2 == 1;
+        w.at = footer.end + odd as usize;
+        (w.segment_at, w.prev, w.live, w.pad) = (w.at, metadata, Some(footer), odd);
+        w
+    }
+
+    /// The footer of the archive so far, to write after the metadata block of the segment just
+    /// closed ([`SegmentWriter::close_as`]), committing what is before it (spec, "Appending to an
+    /// archive"): the bytes to write (a spacer block first where the footer would cross a sector
+    /// of the file, the archive starting at `base` in it, [`crossing`]), and the footer of the
+    /// commit before, to make a spacer block of ([`kill`]) once they are durably written.
+    pub fn footer(&mut self, base: u64) -> (Vec<u8>, Option<std::ops::Range<usize>>) {
+        let mut out = Vec::new();
+        let mut f = Vec::new();
+        let mut room = 0;
+        loop {
+            f.clear();
+            let at = self.at + room;
+            // (from the start of the footer's fields: after the magic and the size)
+            footer_with(&mut f, at - HEADER_MAGIC.len(), (at + FOOTER_MAGIC.len() + 2 - self.prev) as u64);
+            if !crossing(base + at as u64, kill(f.len()).len()) {
+                break;
+            }
+            room += 2;
+        }
+        if room > 0 {
+            out.extend_from_slice(&[0, (room - 2) as u8]);
+            out.resize(room, 0);
+        }
+        let start = self.at + room;
+        out.extend_from_slice(&f);
+        let odd = f.len() % 2 == 1;
+        self.at = start + f.len() + odd as usize;
+        self.segment_at = self.at;
+        self.pad = odd;
+        (out, self.live.replace(start..start + f.len()))
+    }
+
+    /// The padding byte to write before anything after the footer of a commit, once
+    /// ([`SegmentWriter::footer`]): empty where there is none, or it was taken.
+    pub fn pad(&mut self) -> &'static [u8] {
+        match std::mem::take(&mut self.pad) {
+            true => &[0],
+            false => &[],
         }
     }
 
@@ -788,7 +869,7 @@ fn uses(f: &Formula, leaf: &Leaf) -> Uses {
 #[cfg(test)]
 mod tests {
     use super::super::tests::{CUT, REV, natives};
-    use super::super::{BLOCK, Level, Value, checksum, decode, decode_value, invalid};
+    use super::super::{BLOCK, Level, Value, checksum, decode, decode_value, invalid, leb, locate, open};
     use super::*;
     use crate::{Apply, Kind};
     use tree::{Entry, EntryNode, Extra, Time};
@@ -1196,6 +1277,107 @@ mod tests {
     /// segments"): a directory again (its extra kept where it has none, replaced where it has
     /// one), a file replaced, a directory replaced by a file, and link groups of a segment's own
     /// apart from another's of the same number.
+    /// The archive of `out` with the footer at `old` made a spacer block (spec, "Appending to an
+    /// archive").
+    fn killed(out: &[u8], old: std::ops::Range<usize>) -> Vec<u8> {
+        let mut out = out.to_vec();
+        let k = kill(old.len());
+        out[old.start..old.start + k.len()].copy_from_slice(&k);
+        out[old.start + k.len()..old.end].fill(0);
+        out
+    }
+
+    #[test]
+    fn commits() {
+        let names = ["a", "b", "c"];
+        let mut f = Formula::default();
+        let lits: Vec<Node> = names.iter().map(|n| f.push(*n, n.repeat(5).into_bytes())).collect();
+        let enc = Encoder::new(Level::Zstd(3));
+        let files = |a: &[u8]| -> Vec<(Vec<u8>, Vec<u8>)> {
+            let Ok(Value::Tree(t, files)) = decode_value(a, &natives()) else { panic!("not an archive") };
+            let mut got: Vec<_> = (t.entries.iter())
+                .map(|e| match e.node {
+                    EntryNode::File(c) => (e.name.clone(), files[c].clone()),
+                    _ => unreachable!(),
+                })
+                .collect();
+            got.sort();
+            got
+        };
+        let file = |n: &str| (n.as_bytes().to_vec(), n.repeat(5).into_bytes());
+        // a segment of file `k` committed to `w` and `out`, telling `status`
+        let commit = |w: &mut SegmentWriter, out: &mut Vec<u8>, k: usize, status, base| {
+            out.extend_from_slice(w.pad());
+            let b = w.batch(&enc, &f, &[Leaf { outputs: vec![lits[k].clone()], sums: vec![None] }]).unwrap();
+            w.commit(&b);
+            out.extend_from_slice(&b.bytes);
+            let contents = [ContentAt { leaf: b.leaf_at[0], output: 0, size: 5 }];
+            let t = Tree { root: Extra::default(), entries: vec![entry(None, names[k], EntryNode::File(0))] };
+            out.extend_from_slice(&w.close_as(&enc, &t, &contents, status).unwrap());
+            let (end, old) = w.footer(base);
+            out.extend_from_slice(&end);
+            old
+        };
+        let left = Status::Incomplete { files: Some(2), bytes: Some(10) };
+        let mut w = SegmentWriter::new();
+        let mut out = SegmentWriter::header().to_vec();
+        assert_eq!(commit(&mut w, &mut out, 0, left, 0), None);
+        let first = out.clone();
+        assert_eq!(locate(&first), Some(0..first.len()));
+        assert_eq!(files(&first), [file("a")]);
+        assert_eq!(open(&first, &natives()).unwrap().status(), Some(left));
+        // the next commit written, not yet made: the archive before it, found either way
+        let old = commit(&mut w, &mut out, 1, Status::Complete, 0).expect("the footer before");
+        assert_eq!(locate(&out), Some(0..first.len()));
+        assert_eq!(locate(&[&out, b"cut".as_slice()].concat()), Some(0..first.len()));
+        assert_eq!(locate(&out[..out.len() - 3]), Some(0..first.len()));
+        // made: both segments
+        let second = killed(&out, old);
+        assert_eq!(locate(&second), Some(0..second.len()));
+        assert_eq!(files(&second), [file("a"), file("b")]);
+        assert_eq!(open(&second, &natives()).unwrap().status(), Some(Status::Complete));
+        // appended to by another writer, from what the archive tells of itself
+        let footer =
+            second.len() - 10 - u16::from_le_bytes([second[second.len() - 2], second[second.len() - 1]]) as usize;
+        let mut at = footer + 8;
+        let _ = leb(&second, &mut at).unwrap();
+        let back = leb(&second, &mut at).unwrap() as usize;
+        let mut w = SegmentWriter::appending(footer..second.len(), footer + 8 - back);
+        let mut third = second.clone();
+        let old = commit(&mut w, &mut third, 2, Status::Complete, 0).expect("the footer before");
+        assert_eq!(old, footer..second.len());
+        assert_eq!(locate(&third), Some(0..second.len()));
+        let third = killed(&third, old);
+        assert_eq!(files(&third), [file("a"), file("b"), file("c")]);
+    }
+
+    #[test]
+    fn footers_off_sector_boundaries() {
+        let mut f = Formula::default();
+        let s = f.push("a", b"aaaaa".to_vec());
+        let enc = Encoder::new(Level::Zstd(3));
+        // the archive put at every offset of a sector in a file: its footers never across one
+        for base in 0..512u64 {
+            let mut w = SegmentWriter::new();
+            let mut out = SegmentWriter::header().to_vec();
+            let b = w.batch(&enc, &f, &[Leaf { outputs: vec![s.clone()], sums: vec![None] }]).unwrap();
+            w.commit(&b);
+            out.extend_from_slice(&b.bytes);
+            let contents = [ContentAt { leaf: b.leaf_at[0], output: 0, size: 5 }];
+            let t = Tree { root: Extra::default(), entries: vec![entry(None, "a", EntryNode::File(0))] };
+            out.extend_from_slice(&w.close_as(&enc, &t, &contents, Status::Complete).unwrap());
+            let (end, _) = w.footer(base);
+            out.extend_from_slice(&end);
+            let n = u16::from_le_bytes([out[out.len() - 2], out[out.len() - 1]]) as usize;
+            let at = out.len() - n - 10;
+            assert!(!crossing(base + at as u64, kill(n + 10).len()), "{base}");
+            assert!(decode_value(&out, &natives()).is_ok(), "{base}");
+        }
+        assert_eq!(kill(21), [0, 20]);
+        assert_eq!(kill(300), [1, 0x29, 1]);
+        assert!(crossing(511, 2) && !crossing(510, 2) && !crossing(512, 2) && crossing(1022, 3));
+    }
+
     #[test]
     fn several_segments() {
         let names = ["d/a", "x", "h1", "h2", "d/b", "x2", "h3", "d"];
