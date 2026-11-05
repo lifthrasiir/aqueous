@@ -185,7 +185,7 @@ fn touched(path: &Path, seconds: u64) {
 }
 
 /// Inputs appended to an archive (`-a`): what is new or changed added, what is the same not
-/// written again; with `--delete`, what is gone taken away; nothing to append, nothing written.
+/// written again, what is gone kept (but synchronizing, `-s`); nothing to append, nothing written.
 #[test]
 fn appended() {
     let d = scratch("appended");
@@ -218,7 +218,7 @@ fn appended() {
     let o = ok(&d, &["-a", "b.aqr", "src"]);
     assert!(stderr(&o).contains("was whole: committed") && stderr(&o).contains("nothing to append"), "{}", stderr(&o));
     assert_eq!(fs::read(d.join("b.aqr")).unwrap(), after);
-    // a file taken away: kept in the archive, but with --delete
+    // a file taken away: kept in the archive, but synchronizing
     fs::remove_file(src.join("t2.txt")).unwrap();
     fs::remove_dir_all(src.join("new")).unwrap();
     fs::write(src.join("t4.txt"), b"short").unwrap();
@@ -226,10 +226,47 @@ fn appended() {
     let got = extracted(&d, "b.aqr");
     assert!(got.iter().any(|f| f.0 == "t2.txt") && got.iter().any(|f| f.0 == "new/n.txt"));
     assert!(got.contains(&("t4.txt".into(), b"short".to_vec())));
-    ok(&d, &["-q", "-a", "--delete", "b.aqr", "src"]);
+    ok(&d, &["-q", "-s", "b.aqr", "src"]);
     assert_eq!(extracted(&d, "b.aqr"), files(&src));
     // not an encrypted archive, nor -P
     assert!(!aqr(&d, &["-a", "-P", "b.aqr", "src"]).status.success());
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// An archive synchronized (`-s`) holds what `-c` of the inputs would: what is not among them
+/// taken away at the top too, a file made a directory and a directory a file, a single
+/// directory given archived as what it holds; the file grows all the same. `--delete` is no more.
+#[test]
+fn synchronized() {
+    let d = scratch("synchronized");
+    source(&d, 6);
+    fs::create_dir_all(d.join("other/deep")).unwrap();
+    fs::write(d.join("other/deep/o.txt"), text(90, 4000)).unwrap();
+    fs::write(d.join("lone.txt"), text(91, 2000)).unwrap();
+    ok(&d, &["-q", "-o", "b.aqr", "src", "other", "lone.txt"]);
+    let before = fs::metadata(d.join("b.aqr")).unwrap().len();
+    let src = d.join("src");
+    fs::remove_dir_all(src.join("sub")).unwrap();
+    fs::write(src.join("sub"), b"a file now").unwrap();
+    fs::remove_file(src.join("t1.txt")).unwrap();
+    fs::create_dir_all(src.join("t1.txt")).unwrap();
+    fs::write(src.join("t1.txt/in.txt"), text(92, 1000)).unwrap();
+    ok(&d, &["-q", "-s", "b.aqr", "src", "lone.txt"]);
+    let mut want: Vec<_> = files(&src).into_iter().map(|(p, b)| (format!("src/{p}"), b)).collect();
+    want.push(("lone.txt".into(), text(91, 2000)));
+    want.sort();
+    assert_eq!(extracted(&d, "b.aqr"), want);
+    assert!(fs::metadata(d.join("b.aqr")).unwrap().len() > before);
+    // as -c would: the same again, nothing written
+    let o = ok(&d, &["-s", "b.aqr", "src", "lone.txt"]);
+    assert!(stderr(&o).contains("nothing to append"), "{}", stderr(&o));
+    let t = ok(&d, &["-t", "-q", "b.aqr"]);
+    let listed = String::from_utf8_lossy(&t.stdout).into_owned();
+    assert!(!listed.contains("other"), "{listed}");
+    // a single directory, archived as what it holds: at the top, as -c has it
+    ok(&d, &["-q", "-s", "b.aqr", "src"]);
+    assert_eq!(extracted(&d, "b.aqr"), files(&src));
+    assert!(!aqr(&d, &["-a", "--delete", "b.aqr", "src"]).status.success());
     fs::remove_dir_all(&d).unwrap();
 }
 

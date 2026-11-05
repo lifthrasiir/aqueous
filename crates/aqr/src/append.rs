@@ -12,9 +12,11 @@
 //! taken again where it is not there, is there of another kind, size or modification time (as
 //! rsync's quick check has it); a link where its target differs; a directory where it is not
 //! there. The directories on the way to those taken are taken too, without their metadata where
-//! they are there already (which keeps it). With `--delete`, what the archive holds under the
-//! directories of the inputs and they do not is taken away (a tombstone at the top of each such
-//! subtree), and at the top too where the input is a directory archived as what it holds.
+//! they are there already (which keeps it).
+//!
+//! Synchronizing (`-s`), what the archive holds and the inputs do not is taken away too (a
+//! tombstone at the top of each such subtree), so that the archive holds what `-c` of the inputs
+//! would, as the quick check sees it. Its file still grows: what is taken away is only marked so.
 
 use std::collections::HashMap;
 use std::fs;
@@ -85,11 +87,10 @@ pub fn open(path: &Path, quiet: bool) -> Result<Opened, String> {
 }
 
 impl Opened {
-    /// Of `g` (gathered of the inputs; `root_given` where the input is a directory archived as
-    /// what it holds): `g` left as what is to be appended ([module](self)), and the archive. None
-    /// where nothing is to be (the archive left as it is).
-    pub fn against(self, g: &mut Gathered, delete: bool, root_given: bool) -> Option<Prior> {
-        diff(g, &self.old, &self.sizes, delete, root_given).then_some(self.prior)
+    /// Of `g` (gathered of the inputs; `sync`: synchronizing): `g` left as what is to be appended
+    /// ([module](self)), and the archive. None where nothing is to be (the archive left as it is).
+    pub fn against(self, g: &mut Gathered, sync: bool) -> Option<Prior> {
+        diff(g, &self.old, &self.sizes, sync).then_some(self.prior)
     }
 }
 
@@ -150,7 +151,7 @@ fn paths(t: &Tree) -> Vec<Vec<Vec<u8>>> {
 
 /// `g` left as what is to be appended to the archive of tree `old` (its contents of `sizes`):
 /// whether anything is ([module](self)).
-fn diff(g: &mut Gathered, old: &Tree, sizes: &[u64], delete: bool, root_given: bool) -> bool {
+fn diff(g: &mut Gathered, old: &Tree, sizes: &[u64], sync: bool) -> bool {
     let (new_paths, old_paths) = (paths(&g.tree), paths(old));
     let was: HashMap<&[Vec<u8>], usize> = old_paths.iter().enumerate().map(|(k, p)| (&p[..], k)).collect();
     let is: HashMap<&[Vec<u8>], usize> = new_paths.iter().enumerate().map(|(k, p)| (&p[..], k)).collect();
@@ -177,18 +178,16 @@ fn diff(g: &mut Gathered, old: &Tree, sizes: &[u64], delete: bool, root_given: b
             taken[p] = true;
         }
     }
-    // what the archive holds and the inputs do not, at the top of each such subtree, where the
-    // directory it is in is of the inputs
+    // synchronizing, what the archive holds and the inputs do not, at the top of each such
+    // subtree (the directory it is in still a directory; else it is taken away or replaced)
     let mut gone: Vec<(Option<usize>, Vec<u8>)> = Vec::new();
-    if delete {
+    if sync {
         for (o, p) in old_paths.iter().enumerate() {
             if is.contains_key(&p[..]) {
                 continue;
             }
-            let parent = old.entries[o].parent;
-            let up = match parent {
-                None if root_given => None,
-                None => continue,
+            let up = match old.entries[o].parent {
+                None => None,
                 Some(q) => match is.get(&old_paths[q][..]) {
                     Some(&k) if matches!(g.tree.entries[k].node, EntryNode::Dir) => Some(k),
                     _ => continue,

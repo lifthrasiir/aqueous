@@ -9,7 +9,7 @@ footer의 2바이트뿐이고, commit은 언제든 할 수 있다. 그러면 어
 
 - commit은 옛 footer를 2바이트 spacer header로 죽이는 것이다(아래 "footer를 옮기는 법"과 그 전제).
 - 멈추면 commit하는 것이 기본이고, 전부 아니면 전무인 `--atomic`을 옵트인으로 둔다.
-- `-a`는 갱신(없거나 바뀐 것만)이고, tombstone은 `--delete`일 때만 쓴다.
+- `-a`는 갱신(없거나 바뀐 것만)이고 아무것도 지우지 않는다. tombstone은 동기화 verb `-s`(`--sync`)만 쓴다.
 - 암호화된 아카이브에는 덧붙이지 않는다(nonce 재사용).
 - `last-segment-intended`(-3)를 `segment-status`로 바꿔 "미완성"도 함께 나타낸다.
 - internal import는 이 작업 밖의 추가 작업으로 남긴다.
@@ -26,7 +26,7 @@ footer의 2바이트뿐이고, commit은 언제든 할 수 있다. 그러면 어
   replacing, pad}`, `kill`·`crossing`, tombstone(`EntryNode::Special(0)`) 쓰기.
 - aqr-compress: `Output`(commit하는 출력), `Stop`, `Appending`, `Output::commits_once`. 배치를 만드는 일은
   writer가 아닌 스레드에서 돌고, writer는 그동안 stop을 본다.
-- aqr: `-c`의 commit과 두 단계 중단(`stop.rs`), `--atomic`, `-a`·`--delete`(`append.rs`), `--ipc`의
+- aqr: `-c`의 commit과 두 단계 중단(`stop.rs`), `--atomic`, `-a`·`-s`(`append.rs`), `--ipc`의
   `finish`, 위치를 찾아 읽기(앞의 stub, 뒤의 꼬리), 미완성 표시, 중단된 해제의 정리.
 
 남은 것:
@@ -237,8 +237,13 @@ overlay 아카이브의 footer(`OVERLAY_FOOTER_TYPE`)도 똑같이 죽인다.
 - `aqr -a ARCHIVE INPUTS…`(`--append`)는 갱신이다. 합친 트리와 비교해, 없거나 바뀐 엔트리를 새 segment에
   넣고 같은 것은 건너뛴다. "같다"의 판정은 경로, 종류, 크기, mtime이다(rsync의 quick check). 엔트리
   이름은 `-c`와 같은 규칙(입력, `-C`, rename)으로 만든다.
-- `--delete`는 입력 아래에 있던 경로 중 이제 없는 것에 tombstone을 쓴다(백업의 동기화). 기본으로는 지우지
-  않는다(zip의 `-u`처럼).
+- `-a`는 지우지 않는다(zip의 `-u`처럼). 지우는 것은 별도 verb인 `aqr -s ARCHIVE INPUTS…`(`--sync`)가 한다.
+  `-s`는 `-a`의 갱신에 더해, 합친 트리에 있지만 입력에 없는 것마다 그 subtree의 꼭대기에 tombstone을 쓴다.
+  그 결과는 같은 입력으로 `-c`를 돌린 트리와 같다(quick check가 보는 한에서). 입력 밖의 최상위 이름도
+  지워지고, 디렉터리 하나를 주면 `-c`처럼 그 내용이 최상위가 된다. 입력 디렉터리 아래만 지우는 방식
+  (처음 구현했던 `-a --delete`)은 sync라는 이름에서 기대하는 바와 달라서 없앴다.
+- **`-s`도 파일을 키운다.** 지워진 것은 tombstone으로 표시될 뿐이고 그 바이트는 남는다. 공간을 되찾는
+  것(`--vacuum`, `-s --vacuum` 또는 verb)은 나중의 일이며 이번 작업에 들지 않는다.
 - **재개는 별도 기능이 아니다.** 멈춘 `-c`는 같은 입력으로 `aqr -a out.aqr …`를 돌리면 남은 파일이 "없는
   것"이라 들어간다. 결과는 중단 없이 만든 `-c`보다 조금 크다. 모듈이 segment마다 실리고, PNG set 같은
   묶음이 segment 경계에서 끊기기 때문이다.
@@ -307,7 +312,7 @@ aqr-incomplete = {
 
 ## UI
 
-- `-a, --append`, `--delete`, `--atomic`.
+- `-a, --append`, `-s, --sync`, `--atomic`.
 - 첫 Ctrl-C에서는 다음을 보여 준다.
   `stopping: committing the 1,234 files written (3.2 GB of 9.8 GB) to out.aqr; Ctrl-C again to stop at once`
   끝나면 `stopped: out.aqr holds 1,234 of 5,678 files; aqr -a to add the rest`를 보여 주고 exit 130으로
@@ -351,7 +356,7 @@ aqr-incomplete = {
   읽기가 같은 결과를 내야 한다. 꼬리가 붙은 경우 마지막 commit이 보여야 한다. 찢어진 footer(앞부분만,
   0 채움)는 footer로 읽히지 않아야 한다. footer 뒤에 다른 아카이브가 이어 붙은 경우는
   지금과 같아야 한다. 각각 aqr-formula에서 시험한다.
-- **`-a`.** 더하기, 바꾸기, `--delete`, 같은 입력으로 다시 돌리면 아무것도 쓰지 않는지를 본다.
+- **`-a`.** 더하기, 바꾸기, `-s`(`-c`와 같은 트리), 같은 입력으로 다시 돌리면 아무것도 쓰지 않는지를 본다.
 - **멈춘 `-c`.** `-a`로 재개한 결과가 중단 없는 `-c`와 같은 트리를 주는지 본다.
 - **SIGKILL.** commit 사이에 죽인다(시험에서 프로세스를 죽인다). 마지막 commit이 보이고, 다음 `-a`가
   꼬리를 처리해야 한다. 각 쓰기 사이에서 죽이는 fault injection(쓰기를 가로채는 출력)으로 위의 표를
@@ -366,7 +371,7 @@ aqr-incomplete = {
 2. aqr-formula: 읽기(locate의 확인, 합친 트리, `segment-status`), 쓰기(commit마다 footer, 정렬, 패딩, 옛
    footer 죽이기).
 3. aqr-compress: 앞선 상태에서 시작하는 엔진, commit hook(sync), 멈출 때의 commit 경로.
-4. aqr: `-a`(트리 비교, `--delete`, lock, 꼬리 처리), `stop.rs`의 단계, `--atomic`, 출력 이름,
+4. aqr: `-a`(트리 비교, `-s`, lock, 꼬리 처리), `stop.rs`의 단계, `--atomic`, 출력 이름,
    `--rm`, `--ipc`.
 5. 해제 정리.
 6. 추가 작업: internal import. 별도 설계: 암호화한 증분 백업.

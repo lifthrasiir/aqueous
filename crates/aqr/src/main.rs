@@ -291,8 +291,8 @@ Compression:
                         kept, rather than what was written ended as an archive
   -a, --append          append the inputs to an archive (the first input, or -o): what
                         is not in it, or changed (by size and modification time)
-      --delete          with -a, take away what the archive holds under the inputs'
-                        directories that they do not
+  -s, --sync            as -a, and take away what the archive holds that the inputs do
+                        not: it then holds what -c of them would (the file still grows)
 
 Decompression:
   -E, --encoding ENC    names of no declared encoding: auto (the default: as bytes where
@@ -345,10 +345,10 @@ struct Args {
     /// `--atomic`: compressing, an archive made whole or not at all, rather than committed as it
     /// is written ([`stop`]).
     atomic: bool,
-    /// `-a`: compressing, the inputs appended to an archive ([`append`]), the first input or `-o`;
-    /// with `--delete`, what it holds that they do not taken away.
+    /// `-a`: compressing, the inputs appended to an archive ([`append`]), the first input or `-o`.
     append: bool,
-    delete: bool,
+    /// `-s` (with `append`): what the archive holds that the inputs do not taken away too.
+    sync: bool,
     /// `-L`: compressing, the links found (and given) followed, archived as what they lead to.
     dereference: bool,
     /// What is not commonly kept of the metadata kept too ([`meta`]).
@@ -459,6 +459,13 @@ fn main() -> ExitCode {
     }
 }
 
+impl Args {
+    /// The option appending as given, for messages: `-a` or `-s`.
+    fn verb(&self) -> &'static str {
+        if self.sync { "-s" } else { "-a" }
+    }
+}
+
 fn parse() -> Result<Args, String> {
     let mut argv = std::env::args_os();
     let me = argv.next().map(PathBuf::from).unwrap_or_default();
@@ -476,7 +483,7 @@ fn parse() -> Result<Args, String> {
         rm: false,
         atomic: false,
         append: false,
-        delete: false,
+        sync: false,
         dereference: false,
         preserve: false,
         quiet: false,
@@ -542,8 +549,8 @@ fn parse() -> Result<Args, String> {
             "-f" | "--force" => a.force = true,
             "--rm" => a.rm = true,
             "--atomic" => a.atomic = true,
-            "-a" | "--append" => a.append = true,
-            "--delete" => a.delete = true,
+            "-a" | "--append" => (a.append, a.sync) = (true, false),
+            "-s" | "--sync" => (a.append, a.sync) = (true, true),
             "-L" | "--dereference" => a.dereference = true,
             "-p" | "--preserve" => a.preserve = true,
             "-q" | "--quiet" => a.quiet = true,
@@ -854,15 +861,12 @@ fn compress_all(a: &Args) -> Result<(), String> {
     if a.append {
         let (out, skip) = match &a.output {
             Some(o) => (o.clone(), 0),
-            None => (a.inputs.first().cloned().ok_or("-a: no archive given")?, 1),
+            None => (a.inputs.first().cloned().ok_or_else(|| format!("{}: no archive given", a.verb()))?, 1),
         };
         if a.inputs.len() <= skip {
-            return Err("-a: no inputs given to append".into());
+            return Err(format!("{}: no inputs given", a.verb()));
         }
         return remove(&compress_into(a, &a.inputs[skip..], &a.given[skip..], &a.renames[skip..], &out)?);
-    }
-    if a.delete {
-        return Err("--delete: with -a alone".into());
     }
     match &a.output {
         Some(out) => remove(&compress_into(a, &a.inputs, &a.given, &a.renames, out)?),
@@ -1067,13 +1071,14 @@ fn compress_into(
 ) -> Result<Vec<Gone>, String> {
     if let Pack::Other(f, level) = a.format {
         if a.append {
-            return Err("-a: Aqueous archives alone are appended to".into());
+            return Err(format!("{}: Aqueous archives alone are appended to", a.verb()));
         }
         return pack_into(a, f, level, inputs, given, renames, out);
     }
     if a.append && (a.passphrase || a.opt.mirrors) {
         return Err(format!(
-            "-a: not with {}",
+            "{}: not with {}",
+            a.verb(),
             if a.passphrase { "-P (an encrypted archive is not appended to)" } else { "-A" }
         ));
     }
@@ -1090,7 +1095,15 @@ fn compress_into(
         true => Some(append::open(out, a.quiet)?),
         false => None,
     };
-    begin(if a.append { "append" } else { "compress" }, inputs, Some(out));
+    begin(
+        match (a.append, a.sync) {
+            (false, _) => "compress",
+            (true, false) => "append",
+            (true, true) => "sync",
+        },
+        inputs,
+        Some(out),
+    );
     let start = Instant::now();
     let rec = stats::record(a.stats.as_ref());
     let mut opt = a.opt.clone();
@@ -1206,19 +1219,16 @@ fn compress_into(
     }
     // appending: what the archive holds already left out
     let prior = match opened {
-        Some(o) => {
-            let root_given = matches!((inputs, renames), ([i], [None]) if fs::metadata(i).is_ok_and(|m| m.is_dir()));
-            match o.against(&mut g, a.delete, root_given) {
-                Some(p) => Some(p),
-                None => {
-                    if !a.quiet {
-                        eprintln!("{}: nothing to append, all there already", out.display());
-                    }
-                    end(Some(out), 0, 0, 0, start);
-                    return Ok(g.gone.take().unwrap_or_default());
+        Some(o) => match o.against(&mut g, a.sync) {
+            Some(p) => Some(p),
+            None => {
+                if !a.quiet {
+                    eprintln!("{}: nothing to append, all there already", out.display());
                 }
+                end(Some(out), 0, 0, 0, start);
+                return Ok(g.gone.take().unwrap_or_default());
             }
-        }
+        },
         None => None,
     };
     // (with -v, the log as the files are written)
@@ -1949,8 +1959,9 @@ fn stopped_tree(
         let (kept_size, left_size) = (size(kept_bytes as f64), size(s.bytes as f64));
         match a.append {
             true => eprintln!(
-                "aqr: stopped: {kept} of {files} files ({kept_size}) appended to {}; {left} ({left_size}) not (aqr -a adds them)",
-                out.display()
+                "aqr: stopped: {kept} of {files} files ({kept_size}) appended to {}; {left} ({left_size}) not (aqr {} adds them)",
+                out.display(),
+                a.verb()
             ),
             false => eprintln!(
                 "aqr: stopped: {} holds {kept} of {files} files ({kept_size}); {left} ({left_size}) not archived (aqr -a adds them)",
