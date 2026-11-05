@@ -116,7 +116,7 @@ Blocks are grouped into <em>segments</em>, each ending with a metadata block ([[
 The metadata block names the entries of the segment, i.e. directories, files, symbolic links and other nodes,
 and points each file to the block holding its content.
 A later segment adds, replaces and removes entries of earlier segments,
-so that an archive can be extended by appending a segment without rewriting what precedes it.
+so that an archive can be extended by appending a segment without rewriting what precedes it ([[#appending]]).
 An archive without any metadata block simply decompresses into a single unnamed file, as a gzip file does.
 
 The content of a file is given by a single <em>leaf block</em>.
@@ -1073,7 +1073,7 @@ To <dfn>locate an archive</dfn> in a [=byte sequence=] |file|:
         and the [=leb128=] from |f| + 8 is |s| such that |h| = |f| − |s| − 6 ≥ 0
         and the bytes of |file| from |h| are the header magic [=match|matching=] that footer magic, set |back| to |h|.
     3. If |file| starts with [=const/HEADER_MAGIC=] or [=const/OVERLAY_HEADER_MAGIC=]:
-        1. If |back| is 0, return |file|.
+        1. If |back| is 0, return the result of [=trim a located archive|trimming=] |file|.
         2. Read blocks from the offset 6 by the generic structure ([[#block]]),
             with [=block/data=] of every block taken as a [=byte sequence=] without parsing,
             until the bytes at the current offset |e| start with [=const/FOOTER_MAGIC=] or [=const/OVERLAY_FOOTER_MAGIC=].
@@ -1081,9 +1081,89 @@ To <dfn>locate an archive</dfn> in a [=byte sequence=] |file|:
         3. Let |m| be the 2 bytes of |file| from |e| + 6 as [=u16le=].
             If |file| is shorter than |e| + |m| + 10 bytes, return failure.
             Otherwise, return the first |e| + |m| + 10 bytes of |file|.
-    4. If |back| is not null, return the bytes of |file| from |back|.
+    4. If |back| is not null, return the result of [=trim a located archive|trimming=] the bytes of |file| from |back|.
     5. Return failure.
 </ol>
+
+To <dfn>trim a located archive</dfn> |a|, a [=byte sequence=] starting with a header magic and ending with a footer whose magic [=match|matches=] it:
+
+<ol class=algorithm>
+    1. Let |f| be the offset of the footer at the end of |a|.
+        If its [=archive/metadata_backward_offset=] is 0, return |a|.
+    2. Let |last| be the block starting [=archive/metadata_backward_offset=] bytes before the [=archive/footer_start=] of that footer.
+        If it can't be read by the generic structure ([[#block]]) or is not a [[#metadata-block|metadata block]], return |a|.
+    3. Let |blocks| be a [=list=] containing |last|.
+        If the [=decoded data=] of |last| can be parsed as far as its [=meta/previous_metadata_offset=],
+        and the block starting [=meta/previous_metadata_offset=] bytes before |last| can be read by the generic structure
+        and is a metadata block, [=list/append=] that block to |blocks|.
+    4. For each block |m| of |blocks|:
+        1. Let |e| be the offset after the [=block/padding=] of |m| (the [=block/block_end=] if it has none).
+        2. While the bytes of |a| from |e| are a whole [[#spacer-block|spacer block]] read by the generic structure,
+            set |e| to the offset after it.
+        3. If |e| is not |f| and the bytes of |a| from |e| start with the footer magic of |a| followed by a [=u16le=] |n|
+            such that |e| + |n| + 10 ≤ |f|, return the first |e| + |n| + 10 bytes of |a|.
+    5. Return |a|.
+</ol>
+
+<div class=note>
+  A footer directly after the last metadata block or the one before it, other than the footer at the end,
+  is what [[#appending|appending to an archive]] leaves while it writes:
+  the archive still ends at that footer, as reading the blocks forward in the step 3.2 finds,
+  and the bytes after it are trailing bytes until the appending is committed.
+  Trimming finds it from the end of the file without reading every block,
+  as a decompressor reading the last metadata blocks reads the bytes after them anyway.
+  A footer anywhere else before the footer at the end makes the archive found from the end invalid.
+</div>
+
+<h3 id=appending>
+Appending to an archive</h3>
+
+<em>This section is non-normative, except where noted.</em>
+
+Since a later segment adds, replaces and removes the entries of earlier ones ([[#segment-merging]]),
+an unencrypted archive can be extended by appending segments after its last metadata block,
+without rewriting what precedes it.
+The footer has to move to the new end, which is done so that the file holds a valid archive at every point:
+either the archive before the appending or the archive after it.
+To <dfn>commit</dfn> one or more segments to an archive |a| in a file, whose footer |F| starts at the offset |p| of the file:
+
+<ol class=algorithm>
+    1. If the length of |F| is odd, write a zero byte after it.
+        Write the blocks of the segments after it, and a footer for the archive ending with them, directly after their last metadata block
+        or after a spacer block following it ([[#spacer-block]]).
+        Make sure that all of them are durably written.
+    2. Overwrite the first bytes of |F| with the [=block/type=] and [=block/size=] of a spacer block
+        occupying the bytes of |F| and its padding byte if any, and make sure that they are durably written.
+    3. Overwrite the rest of |F| with zero bytes, as the [=spacer/space=] of a spacer block requires.
+</ol>
+
+Until the step 2 completes, the file holds |a|, followed by trailing bytes that [=trim a located archive|trimming=] leaves out.
+Afterwards it holds the extended archive, as |F| is no longer a footer.
+If the file stops being written at any point, the next appending finds |a| or the extended archive
+and either removes the trailing bytes or completes the step 2 if they end with a whole footer.
+
+The step 2 overwrites 2 bytes if |F| is 257 bytes or shorter (a spacer block of the type 0), 3 bytes up to 65,538 bytes, and 5 bytes otherwise.
+It relies on that write being done entirely or not at all,
+which storage devices guarantee within an aligned sector of 512 bytes or a multiple of it.
+Therefore a compressor that is to append to an archive later places each footer so that the bytes the step 2 would overwrite,
+at their offset in the file, don't cross a multiple of 512 bytes,
+putting a spacer block of 2 bytes after the last metadata block when they would.
+Since an archive may be put after leading bytes afterwards, e.g. those of a self-extracting executable,
+a compressor appending to an archive whose footer crosses that boundary
+can't commit as above, and instead removes the footer and writes the segments and a new footer in its place.
+Such an archive stopped being written before the new footer is whole loses its footer,
+which can be [=reconstruct the footer|reconstructed=] ([[#repair]]).
+
+A compressor appending to an archive MUST NOT leave a footer other than the one at the end,
+except while it is writing; another compressor appending to such an archive MUST first remove the trailing bytes or complete the commit.
+Each metadata block whose segment ends a commit SHOULD have `segment-status` ([[#segment-status]]).
+
+<div class=note>
+  An [[#encrypted-archive|encrypted archive]] can't be appended to.
+  The last encrypted chunk of its payload is marked as the last one,
+  and continuing the payload would encrypt that chunk again under the same nonce with a different plaintext,
+  which compromises the confidentiality of both.
+</div>
 
 The located archive is then [=interpret an archive|interpreted=], which may still fail.
 A decompressor SHOULD warn the user when |file| has bytes outside the located archive.
@@ -1709,7 +1789,7 @@ and an optional [=base=] |base|, which is an [=archive value=]:
         1. Let |segment root| be the result of [=interpret a segment|interpreting=] |segment|.
         2. [=Merge directory nodes|Merge=] |segment root| into |root|.
         3. For each key |k| and value |v| in the top-level map of the segment's [[#optional-metadata|optional metadata]]
-            other than `entry-extras` and `last-segment-intended` ([[#last-segment]]), set |extra|[|k|] to |v|.
+            other than `entry-extras` and `segment-status` ([[#segment-status]]), set |extra|[|k|] to |v|.
     10. Return an [=archive value=] with |root| as [=archive value/root=] and |extra| as [=archive value/extra=].
 </ol>
 
@@ -4095,7 +4175,7 @@ and of the footer if one ends at the end of |a| and has no [=untrusted=] byte:
   An archive cut short just after a metadata block other than the last, however,
   is repaired into the archive of the segments before the cut,
   as nothing after the metadata block remains to tell that more followed;
-  only the absence of `last-segment-intended` in it tells that segments may have been lost ([[#last-segment]]).
+  only the absence of `segment-status` in it tells that segments may have been lost ([[#segment-status]]).
 </div>
 
 <div class=note>
@@ -4125,7 +4205,7 @@ The optional metadata is described by the following CDDL [[RFC8610]] definitions
 aqr-opt-metadata = {
   aqr-archive-comment
   ? &(entry-extras: -2) => [* aqr-entry-extra / null]  ; Indexed by entry numbers, starting from the root directory
-  aqr-last-segment
+  aqr-segment-status
 
     * $$aqr-opt-metadata-member  ; For future extensions
 }
@@ -4429,31 +4509,54 @@ as its encoding is not known.
 
 Comments from ZIP are discussed in [[#comments-from-zip]].
 
-<h3 id=last-segment><code>last-segment-intended</code>: The end of an archive</h3>
+<h3 id=segment-status><code>segment-status</code>: Commits and the end of an archive</h3>
 
-`last-segment-intended` of `aqr-opt-metadata` tells that the compressor meant the segment to be the last one it writes:
+`segment-status` of `aqr-opt-metadata` tells whether the compressor meant its writing to end with the segment,
+and whether that writing was complete:
 
 <pre class=cddl>
-aqr-last-segment = (
-  ? &(last-segment-intended: -3) => true
+aqr-segment-status = (
+  ? &(segment-status: -3) => true / aqr-incomplete
 )
+
+aqr-incomplete = {
+  ? &(files: 0) => uint  ; Number of files left out
+  ? &(bytes: 1) => uint  ; Their total size in bytes
+}
 </pre>
 
-It is only a hint to [=repair an archive|repairing=] and doesn't affect the result of [=interpret an archive|interpreting an archive=]
-([[#interpretation]]): a later segment may still follow it, e.g. a segment appended to the archive afterwards.
-Conforming compressors SHOULD put it in the optional metadata of the last segment they write, and in no other segment.
-A decompressor that [=reconstruct the footer|reconstructs the footer=] of an archive after a metadata block
-without `last-segment-intended` SHOULD report that segments after it may have been lost, and SHOULD NOT report the archive as intact.
+* `true` tells that the segment is the last one of a writing that completed, e.g. of all the files it was given.
+* `aqr-incomplete` tells that the segment ends a [=commit=] ([[#appending]]) of a writing that didn't complete,
+    e.g. because it was stopped or is still going on, with what it left out where known.
+    A later writing may append the rest.
+* No `segment-status` tells that no footer was meant directly after the segment.
+
+It doesn't affect the result of [=interpret an archive|interpreting an archive=] ([[#interpretation]]):
+a later segment may still follow it, e.g. a segment appended to the archive afterwards,
+and it is not a part of the [=archive value/extra=] of the result.
+Conforming compressors SHOULD put `true` in the optional metadata of the last segment of a writing that completes,
+and `aqr-incomplete` in that of the last segment of every other commit, and nothing in any other segment.
+
+A decompressor SHOULD report an archive whose last segment has `aqr-incomplete` as incomplete, telling what was left out if given,
+while it still interprets the archive as usual.
+A decompressor that [=reconstruct the footer|reconstructs the footer=] of an archive after a metadata block without `segment-status`
+SHOULD report that segments after it may have been lost, and SHOULD NOT report the archive as intact.
 
 <div class=note>
   An archive cut short just after a metadata block other than the last
   can't be told by its blocks from an archive that has lost only its footer and the mirror blocks before it,
   as either ends with a metadata block followed by nothing.
   The footer is reconstructed either way ([[#repair]]),
-  and `last-segment-intended` tells the two apart where the compressor wrote the segments in one go.
+  and `segment-status` tells the two apart where the compressor meant a footer to follow only the last segment it wrote.
   An archive cut short just where a segment was later appended to it still reads as whole, as it was before the appending.
   The hint is lost with the optional metadata of a damaged metadata block,
   which then can't be relied on for anything else either.
+</div>
+
+<div class=note>
+  `true` and `aqr-incomplete` are exclusive, as a writing either completed or didn't,
+  and only the last segment tells about the archive:
+  a writing that continues one left incomplete ends with `true` without undoing anything of the segments before.
 </div>
 
 <h3 id=link-groups><code>link-group</code>: Hard links</h3>
