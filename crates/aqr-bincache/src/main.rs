@@ -355,25 +355,34 @@ fn list() -> Result<ExitCode> {
         let blobs = blobs(manifests.values().flatten())?;
         manifests.values().map(|paths| key(&env, paths, &blobs)).collect::<Result<BTreeSet<_>>>()
     })()?;
-    for e in &entries {
-        let get = |k: &str| e.info.get(k).map_or("", String::as_str);
-        let created = get("created").parse().unwrap_or(0);
-        let used = e.used.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let mark = if current.contains(&e.key) { '*' } else { ' ' };
-        let dirty = if get("dirty") == "1" { "+" } else { " " };
-        println!(
-            "{mark} {}  {}  used {}  {}{dirty} {}",
-            &e.key[..12],
-            local_time(created),
-            local_time(used),
-            get("commit"),
-            get("subject")
-        );
+    let mut out = std::io::stdout().lock();
+    let written = (|| {
+        for e in &entries {
+            let get = |k: &str| e.info.get(k).map_or("", String::as_str);
+            let created = get("created").parse().unwrap_or(0);
+            let used = e.used.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            let mark = if current.contains(&e.key) { '*' } else { ' ' };
+            let dirty = if get("dirty") == "1" { "+" } else { " " };
+            writeln!(
+                out,
+                "{mark} {}  {}  used {}  {}{dirty} {}",
+                &e.key[..12],
+                local_time(created),
+                local_time(used),
+                get("commit"),
+                get("subject")
+            )?;
+        }
+        if entries.is_empty() {
+            writeln!(out, "(no kept binaries)")?;
+        }
+        out.flush()
+    })();
+    match written {
+        // (read only in part, as by `head`: not an error)
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(format!("writing the list: {e}")),
+        _ => Ok(ExitCode::SUCCESS),
     }
-    if entries.is_empty() {
-        println!("(no kept binaries)");
-    }
-    Ok(ExitCode::SUCCESS)
 }
 
 /// How old a `tmp-*` directory of the cache is (by its modification) once it is no build's.
