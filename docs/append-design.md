@@ -17,7 +17,32 @@ footer의 2바이트뿐이고, commit은 언제든 할 수 있다. 그러면 어
 아카이브 구조는 spec의 "Unencrypted archive", "Locating an archive", "Interpreting an archive"가
 정하고, segment를 닫는 정책과 잘림(E4)에 대한 논의는 `recovery-design.md` §4–5에 있다.
 
-## 현황 (2026-11-04)
+## 구현 (2026-11-05)
+
+정한 대로 구현했다. 커밋은 spec, aqr-formula, aqr-compress, aqr 순서이며, 각각 시험이 붙어 있다.
+
+- spec: "Appending to an archive", "trim a located archive", `segment-status`.
+- aqr-formula: `locate`·`trim`·`footer_of`·`block_at`, `Status`, `SegmentWriter::{footer, end, appending,
+  replacing, pad}`, `kill`·`crossing`, tombstone(`EntryNode::Special(0)`) 쓰기.
+- aqr-compress: `Output`(commit하는 출력), `Stop`, `Appending`, `Output::commits_once`. 배치를 만드는 일은
+  writer가 아닌 스레드에서 돌고, writer는 그동안 stop을 본다.
+- aqr: `-c`의 commit과 두 단계 중단(`stop.rs`), `--atomic`, `-a`·`--delete`(`append.rs`), `--ipc`의
+  `finish`, 위치를 찾아 읽기(앞의 stub, 뒤의 꼬리), 미완성 표시, 중단된 해제의 정리.
+
+남은 것:
+
+- 프론트엔드(aqr-win, aqr-mac)의 UI. `finish`를 보낼 버튼이나 대화상자가 아직 없다. 프로토콜과
+  `aqr_ipc::Ipc::finish`만 있다.
+- `--rm`과 중단. 지금은 멈추면 입력을 하나도 지우지 않는다. commit마다 지우는 것은 아직 하지 않았다.
+- 다른 형식의 해제(aqr-unpack)는 아직 멈추면 이전처럼 끝난다. 큰 content를 나눠 쓰면서 그 안에서
+  멈추는 것도 하지 않았다.
+- 해제의 정리는 다 쓰지 못한 fork가 있는 파일을 남긴다. 파일 자체는 온전하다.
+- Windows에서 파일 잠금(`File::try_lock`)과 콘솔 닫힘의 처리는 type check만 했고 실행해 보지 않았다.
+- 10gb에서 commit의 비용과 멈출 때의 지연은 Mac에서 재야 한다. 이 머신에서 16 MB짜리 시험
+  디렉터리를 `-T 1 -B 100K -S 1`로 만들면 SIGTERM부터 끝까지 50 ms 안에 끝났다.
+- internal import(추가 작업). 암호화한 증분 백업(별도 설계).
+
+## 설계 전 (2026-11-04)
 
 - **압축.** 아카이브는 `OUTPUT.PID.part`로 쓰고 다 쓴 뒤 rename한다(`write_whole`, `main.rs`).
   잡을 수 있는 중단(SIGINT·SIGTERM·SIGHUP, Windows의 Ctrl-C·Ctrl-Break·콘솔 닫힘, `--ipc`의
@@ -134,9 +159,11 @@ overlay 아카이브의 footer(`OVERLAY_FOOTER_TYPE`)도 똑같이 죽인다.
 최종 상태는 지금의 spec 그대로이므로, 바뀌는 것은 잠시 공존하는 상태를 어떻게 읽을지 하나다.
 
 - **Locate.** 지금의 3.1단계는 끝 footer의 size_hint가 header를 가리키면 파일 전체를 아카이브로 돌려준다.
-  여기에 확인 하나를 더한다. 마지막 metadata block과 그 직전 metadata block 뒤(그 뒤의 spacer block을 건너뛰고)가
-  끝 footer가 아닌 footer이면, 아카이브는 그 footer에서 끝난다(3.2단계가 앞에서부터 읽어 얻는 결과와 같다). random access를
-  하는 디코더는 metadata block을 읽으면서 그 뒤 6바이트를 더 보면 된다.
+  여기에 확인 하나를 더한다(spec, "trim a located archive"). metadata block 뒤(그 뒤의 spacer block을
+  건너뛰고)에 끝 footer가 아닌 footer가 있으면, 아카이브는 그런 footer 중 첫 것에서 끝난다(3.2단계가
+  앞에서부터 읽어 얻는 결과와 같다). 처음에는 마지막 두 metadata block만 보려 했으나, 한 commit이 여러
+  segment일 수 있어서(`--atomic`의 `-a`) 첫 metadata block까지 거슬러 올라간다. 해석은 어차피 모든
+  metadata block을 읽으므로, 디코더는 그때 뒤의 6바이트를 더 보면 된다.
 - **`segment-status`.** 아래 "표식".
 - **compressor의 의무.** 아카이브에 footer는 끝에 하나뿐이다(지금과 같다). 두 footer가 공존하는 것은 쓰는
   도중에만 생기는 상태이고, 덧붙이는 쪽은 그것을 남기지 않는다. 남은 경우 다음에 덧붙이는 쪽이 먼저
