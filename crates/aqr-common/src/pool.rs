@@ -303,33 +303,45 @@ impl Reservation {
         self.n -= 1;
         let slot = Arc::new(Slot { value: Mutex::new(None), done: Condvar::new(), scope: scope.clone() });
         let s = slot.clone();
-        // (run under the spans of the thread spawning it)
-        let cx = crate::trace::context();
         let job: Box<dyn FnOnce() + Send + 'a> = Box::new(move || {
-            let _cx = crate::trace::adopt(cx);
             let r = catch_unwind(AssertUnwindSafe(f));
             *s.value.lock().unwrap() = Some(r);
             s.done.notify_all();
         });
         // SAFETY: as the caller makes sure; the slot outlives the job
-        let job: Job = unsafe { std::mem::transmute::<Box<dyn FnOnce() + Send + 'a>, Job>(job) };
-        let p = pool();
-        p.jobs.lock().unwrap().push_back(Box::new(move || {
-            // (the job's part of the slot dropped with it, before the scope is told)
-            job();
-            match scope {
-                // (back to the scope, for it to spawn on again)
-                Some(s) => {
-                    let mut w = s.workers.lock().unwrap();
-                    (w.idle, w.running) = (w.idle + 1, w.running - 1);
-                    s.finished.notify_all();
-                }
-                None => release(1),
-            }
-        }));
-        p.queued.notify_one();
+        unsafe { push_job(job, scope) };
         Handle { slot, _borrow: PhantomData }
     }
+}
+
+/// `job` queued for a worker reserved, given back to `scope` if any (or to the pool) once it
+/// returns: all of [`Reservation::spawn_unchecked`] but making the job, kept out of its copies.
+///
+/// # Safety
+/// `job` has to have returned before `'a` ends.
+unsafe fn push_job<'a>(job: Box<dyn FnOnce() + Send + 'a>, scope: Option<Arc<ScopeState>>) {
+    // SAFETY: as the caller makes sure
+    let job: Job = unsafe { std::mem::transmute::<Box<dyn FnOnce() + Send + 'a>, Job>(job) };
+    // (run under the spans of the thread spawning it)
+    let cx = crate::trace::context();
+    let p = pool();
+    p.jobs.lock().unwrap().push_back(Box::new(move || {
+        {
+            let _cx = crate::trace::adopt(cx);
+            // (the job's part of the slot dropped with it, before the scope is told)
+            job();
+        }
+        match scope {
+            // (back to the scope, for it to spawn on again)
+            Some(s) => {
+                let mut w = s.workers.lock().unwrap();
+                (w.idle, w.running) = (w.idle + 1, w.running - 1);
+                s.finished.notify_all();
+            }
+            None => release(1),
+        }
+    }));
+    p.queued.notify_one();
 }
 
 impl Drop for Reservation {
@@ -406,7 +418,15 @@ pub fn scope<'env, R>(want: usize, f: impl for<'scope> FnOnce(&'scope Scope<'sco
 
 /// [`scope`] of the workers of `r`: for work that tells first whether it has enough of them
 /// (a pipeline, of a thread per stage).
-pub fn scope_in<'env, R>(mut r: Reservation, f: impl for<'scope> FnOnce(&'scope Scope<'scope, 'env>) -> R) -> R {
+pub fn scope_in<'env, R>(r: Reservation, f: impl for<'scope> FnOnce(&'scope Scope<'scope, 'env>) -> R) -> R {
+    // (the rest not generic: monomorphized for every caller, it was most of each copy)
+    let (mut f, mut out) = (Some(f), None);
+    scope_dyn(r, &mut |s| out = Some((f.take().expect("called once"))(s)));
+    out.expect("run")
+}
+
+/// [`scope_in`] of `f` called once.
+fn scope_dyn<'env>(mut r: Reservation, f: &mut dyn for<'scope> FnMut(&'scope Scope<'scope, 'env>)) {
     let n = std::mem::take(&mut r.n);
     let s = Scope {
         state: Arc::new(ScopeState {
@@ -427,9 +447,8 @@ pub fn scope_in<'env, R>(mut r: Reservation, f: impl for<'scope> FnOnce(&'scope 
     drop(w);
     drop(wait);
     let panic = s.state.panic.lock().unwrap().take();
-    match (r, panic) {
-        (Err(p), _) | (Ok(_), Some(p)) => resume_unwind(p),
-        (Ok(r), None) => r,
+    if let Some(p) = r.err().or(panic) {
+        resume_unwind(p)
     }
 }
 
@@ -485,15 +504,22 @@ pub fn run<R: Send>(f: impl FnOnce() -> R + Send) -> R {
 /// panic of `f` is resumed here. Each worker is given back as soon as there is nothing left
 /// for it to start, for what is still running (a long item's own work) to reserve.
 pub fn par_map<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
-    let next = AtomicUsize::new(0);
+    // (the rest not generic: monomorphized for every caller, it was most of each copy)
     let out: Vec<Mutex<Option<R>>> = (0..n).map(|_| Mutex::new(None)).collect();
+    par_for(n, threads, &|i| *out[i].lock().unwrap() = Some(f(i)));
+    out.into_iter().map(|m| m.into_inner().unwrap().expect("every index done")).collect()
+}
+
+/// [`par_map`] of `f` with nothing to return.
+fn par_for(n: usize, threads: usize, f: &(dyn Fn(usize) + Sync)) {
+    let next = AtomicUsize::new(0);
     let work = || {
         loop {
             let i = next.fetch_add(1, Ordering::Relaxed);
             if i >= n {
                 break;
             }
-            *out[i].lock().unwrap() = Some(f(i));
+            f(i);
         }
     };
     let want = threads.min(n).saturating_sub(1);
@@ -553,7 +579,6 @@ pub fn par_map<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync)
     if let Some(p) = panic {
         resume_unwind(p);
     }
-    out.into_iter().map(|m| m.into_inner().unwrap().expect("every index done")).collect()
 }
 
 /// [`par_map`] of work whose items, on WebAssembly, run as tasks of the module (`aqr_api::task`)

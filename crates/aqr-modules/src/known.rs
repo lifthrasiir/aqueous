@@ -102,19 +102,19 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "bz2-alz-recons",
         version: 1,
-        sha512_256: hex("5a78b2d03a68562e122fc59cf35b6da34b56ece366b819f5b9449d1405765d70"),
+        sha512_256: hex("a071b70241db9117b6fa00791718c8980d34e5bfe72454f08bea0bbc7636284f"),
         block: include_bytes!("../wasm/bz2-alz-recons.block"),
     },
     Known {
         name: "bz2-recons",
         version: 1,
-        sha512_256: hex("203c1b3691de35d0621f4a67767f0685ee60ccc7a5134edd1fee440ef882948d"),
+        sha512_256: hex("eef0331cb43e4d3e6f3a57baf0267b979d29b651d854b5debcc3e50df092c140"),
         block: include_bytes!("../wasm/bz2-recons.block"),
     },
     Known {
         name: "clip-recons",
         version: 1,
-        sha512_256: hex("d975841c56b108e79546a794116e9f7b37aebf464c0e2d0d9f704e26cd445cf0"),
+        sha512_256: hex("a3aabb2c9b2c2fb6af4a70101be88f706d3b19478196b834fa8d68aff257577b"),
         block: include_bytes!("../wasm/clip-recons.block"),
     },
     Known {
@@ -228,7 +228,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "flate-set",
         version: 1,
-        sha512_256: hex("1eef1ed1b42621409914f4e40307d075f50ecef3fa35dcccffbbf8d7fee27b11"),
+        sha512_256: hex("bbd3e1ec640faf1d5328f6dee9cf98259bfaf29a9b1f19dd005ad663a68aa225"),
         block: include_bytes!("../wasm/flate-set.block"),
     },
     Known {
@@ -270,7 +270,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "jpeg-recons",
         version: 2,
-        sha512_256: hex("4134c054c366a0c8a19c580a8304b566d727eb163e7003ba13107be1feaa5981"),
+        sha512_256: hex("b9faf95f7f4bec650dca70a006ef486946d8d5309766b2284d30178f91b3d423"),
         block: include_bytes!("../wasm/jpeg-recons.block"),
     },
     Known {
@@ -372,25 +372,25 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "png-against",
         version: 1,
-        sha512_256: hex("a07a29464f405280d4e78f1b4d89e4bf701965f9db2d81c5fae62b9b2e8fb644"),
+        sha512_256: hex("93ee87163514f8e35923c27d901d73183b052112b0d221eab6daeea0eb5535bd"),
         block: include_bytes!("../wasm/png-against.block"),
     },
     Known {
         name: "png-recons",
         version: 3,
-        sha512_256: hex("c6da076e49d92d8c589ff31548f896d99d9f954927d089a576bf5fa78852bb38"),
+        sha512_256: hex("f8ef24e0c70c49256609cf4eae05615487021c5ff3c586bdad3f2412cf40aaf9"),
         block: include_bytes!("../wasm/png-recons.block"),
     },
     Known {
         name: "png-set",
         version: 2,
-        sha512_256: hex("ce49fa72299e377b285b23cbcc946a988fa637a7eea18d809ba194b4fb35cbb7"),
+        sha512_256: hex("5b219d378eacd71bcb66d5cddb25efec9f3c3e353f17debc5a934a377129d793"),
         block: include_bytes!("../wasm/png-set.block"),
     },
     Known {
         name: "prores-recons",
         version: 1,
-        sha512_256: hex("ddb6ba9f3cb49b45854fb69a68cede5a62aa292edf483121de63133724e4f725"),
+        sha512_256: hex("20ec61f36d3fda0f44f0a1eb3f0d841a67c697194e02649abb34f7de0083464b"),
         block: include_bytes!("../wasm/prores-recons.block"),
     },
     Known {
@@ -450,7 +450,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "sqlite-recons",
         version: 1,
-        sha512_256: hex("dd6cc32cb25e3f819eb72facf935f57b9ec16eb6449572e05e80add9d0afd8f3"),
+        sha512_256: hex("2dc5368b0c260054bd15885034f4340be09601b032254d104638be8c53600731"),
         block: include_bytes!("../wasm/sqlite-recons.block"),
     },
     Known {
@@ -468,13 +468,13 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "wrt-recons-hangul",
         version: 1,
-        sha512_256: hex("16abb6cba6e4a68a3d47a689a0bd0f6c1b0f230df4307500b7bb877a16961cca"),
+        sha512_256: hex("1135063cb56a6a6e15bf01df2c75d2802fa70b668878fd934efcfb6d9817a74a"),
         block: include_bytes!("../wasm/wrt-recons-hangul.block"),
     },
     Known {
         name: "wrt-recons",
         version: 2,
-        sha512_256: hex("5b485e107d056ace82a8da79d67bb3de7b68e653164f73ed6e5fc36c19e12246"),
+        sha512_256: hex("d3ef93b7b6cb6a501eedfe39f521386601b84f5db7cb899db86a681e3605c081"),
         block: include_bytes!("../wasm/wrt-recons.block"),
     },
     Known {
