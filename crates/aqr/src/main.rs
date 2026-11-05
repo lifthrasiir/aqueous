@@ -2119,6 +2119,44 @@ fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Forma
     Ok(true)
 }
 
+/// The archive in file `c` (`input`) as it is located (spec, "Locating an archive": an archive
+/// of a file appended to and not committed, one after other bytes, as a self-extracting
+/// executable has it), the bytes before or after it told where not `quiet`; all of `c` where
+/// none is found (to be repaired), or where it is encrypted.
+pub(crate) fn located<'c>(c: &'c [u8], input: &Path, quiet: bool) -> &'c [u8] {
+    let Some(r) = aqr::locate(c) else { return c };
+    if !quiet && r.start > 0 {
+        eprintln!("{}: {} before the archive left out", input.display(), bytes_of(r.start as u64));
+    }
+    if !quiet && r.end < c.len() {
+        let n = bytes_of((c.len() - r.end) as u64);
+        eprintln!(
+            "{}: {n} after the archive left out (bytes added to it, or an append not committed)",
+            input.display()
+        );
+    }
+    &c[r]
+}
+
+/// `n` bytes, told.
+fn bytes_of(n: u64) -> String {
+    if n == 1 { "1 byte".into() } else { format!("{n} bytes") }
+}
+
+/// What the last segment of `archive` (`input`) tells where its writing did not complete
+/// (`segment-status`), told: the files it left out.
+fn tell_incomplete(status: Option<aqr::Status>, input: &Path) {
+    if let Some(aqr::Status::Incomplete { files, bytes }) = status {
+        let left = match (files, bytes) {
+            (Some(1), Some(b)) => format!(": 1 file ({}) not archived", size(b as f64)),
+            (Some(n), Some(b)) => format!(": {n} files ({}) not archived", size(b as f64)),
+            (Some(n), None) => format!(": {n} file{} not archived", if n == 1 { "" } else { "s" }),
+            _ => String::new(),
+        };
+        eprintln!("{}: incomplete, its writing stopped{left} (aqr -a adds them)", input.display());
+    }
+}
+
 /// Decodes (or tests) `input`, an Aqueous archive, to `to`: whether it was (not skipped, as a
 /// frontend answers).
 fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
@@ -2142,7 +2180,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     let runner: &dyn aqr::Runner = &decoder;
     // repaired where it is damaged: its blocks restored from their mirror blocks where they
     // differ, its footer made again where it is cut short after its last metadata block
-    let read: &[u8] = decrypted.as_deref().unwrap_or(&c[..]);
+    let read: &[u8] = decrypted.as_deref().unwrap_or_else(|| located(&c, input, a.quiet));
     let mirrors = aqr::mirror::check(read);
     let restored = aqr::mirror::repair(read, &mirrors, true, &erased);
     if let Some(r) = &restored {
@@ -2175,6 +2213,9 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     // (its footer made again after a metadata block not of the segment meant to be the last:
     // cut short just after it, maybe, segments after it lost whole)
     let maybe_cut = footer_made && cut_off.is_none() && archive.status() == Some(aqr::Status::None);
+    if !a.quiet {
+        tell_incomplete(archive.status(), input);
+    }
     if maybe_cut {
         eprintln!(
             "{}: its last segment is not the one meant to be the last: segments after it may be lost",

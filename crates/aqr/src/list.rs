@@ -83,9 +83,12 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
     // (no module is run)
     let archive = match &decrypted {
         Some(d) => aqr::open_payload(d, &aqr::NoModules),
-        None => aqr::open(&c, &aqr::NoModules),
+        None => aqr::open(crate::located(&c, input, a.quiet), &aqr::NoModules),
     }
     .map_err(|e| err(&e))?;
+    if !a.quiet {
+        crate::tell_incomplete(archive.status(), input);
+    }
     let name = |wasm: &[u8]| aqr_decompress::identify(wasm).map(|n| n.split('@').next().unwrap_or(&n).to_owned());
     let mut listed: Vec<Option<aqr::Listed>> =
         archive.listing(&name).map_err(|e| err(&e))?.into_iter().map(Some).collect();

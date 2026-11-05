@@ -87,7 +87,16 @@ fn info_of(a: &Args, input: &Path) -> Result<String, String> {
         }
         false => None,
     };
-    let payload: &[u8] = decrypted.as_deref().unwrap_or(&c);
+    let payload: &[u8] = match decrypted.as_deref() {
+        Some(d) => d,
+        None => {
+            let at = aqr::locate(&c).unwrap_or(0..c.len());
+            if paths.is_empty() && at != (0..c.len()) {
+                let _ = writeln!(s, "  located: bytes {} to {} of the file", at.start, at.end);
+            }
+            &c[at]
+        }
+    };
     let cut = if a.verbose { None } else { Some(64) };
     let i = inspect::inspect(payload, encrypted, &aqr_decompress::identify, cut).map_err(|e| err(&e))?;
     if paths.is_empty() {
