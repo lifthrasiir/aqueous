@@ -141,6 +141,11 @@ optimization picked by hash.
 
 ## Project notes
 
+- Archives of several files are committed as they are written and appended to by `-a` (spec,
+  "Appending to an archive"; `docs/append-design.md`): a commit writes the segments and a new
+  footer after the old one, then makes the old one a spacer block by its first 2 bytes; a stop
+  (first Ctrl-C) ends the archive as it is, telling what it left out (`segment-status`). Not
+  with `-P` (nonces) nor `-A` (Mirroring owns the footer), which end as they are but do not commit.
 - aqr-formula's decoder (`defined()` in `src/aqr.rs`) does not accept import blocks 58–5F,
   though the spec has them. Implement them together with import resolution and overlays when
   extraction work starts, not by just adding them to `defined()`.
