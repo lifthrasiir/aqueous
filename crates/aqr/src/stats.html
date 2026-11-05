@@ -31,6 +31,7 @@ main { max-width: 1400px; margin: 0 auto; padding: 16px; }
 h1 { font-size: 18px; margin: 0 0 4px; }
 h2 { font-size: 15px; margin: 0 0 8px; }
 .sub { color: var(--muted); font-size: 13px; word-break: break-all; }
+.sub.mono { font-family: var(--mono); font-size: 12px; margin-top: 4px; }
 .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 16px; }
 .bar select, .bar button, .bar label.file { font: inherit; padding: 4px 10px; border: 1px solid var(--line);
   border-radius: 6px; background: var(--panel); color: var(--fg); cursor: pointer; }
@@ -138,6 +139,12 @@ function show(i) {
   render();
 }
 
+/** The command line of aqr run with `args` (`aqr` and `args` of the JSON: none in older JSON), each
+ * argument with spaces or quotes quoted. */
+function command(args) {
+  return ["aqr", ...args.map((a) => /^[^\s"']+$/.test(a) ? a : '"' + a.replace(/"/g, '\\"') + '"')].join(" ");
+}
+
 /** Bytes of the resident set of sample `i` but files mapped (`mapped`: none in older JSON). */
 function own(t, i) {
   return Math.max(0, t.rss[i] - (t.mapped ? t.mapped[i] : 0));
@@ -169,6 +176,7 @@ function render() {
   $("#app").innerHTML = `
   <section>
     <div class="sub">${esc(r.input)}${r.output ? " → " + esc(r.output) : ""}</div>
+    ${DATA.aqr ? `<div class="sub mono">aqr ${esc(DATA.aqr)}${DATA.args ? " · " + esc(command(DATA.args)) : ""}</div>` : ""}
     <div class="tiles" style="margin-top:10px">${tiles.map(([k, x]) => `<div class="tile"><div class="k">${k}</div><div class="v">${esc(x)}</div></div>`).join("")}</div>
   </section>
   <section>

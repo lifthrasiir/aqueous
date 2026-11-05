@@ -13,7 +13,9 @@
 //!   label and the files by kind. The page opens other files of the JSON as well, and is opened
 //!   in the browser where standard error is a terminal.
 //!
-//! The JSON, an object of `version` (1) and `runs`, each:
+//! The JSON, an object of `version` (1), `aqr` (the version of aqr that wrote it), `args` (the
+//! arguments it was run with, but its own name; none in JSON of aqr before them) and `runs`,
+//! each:
 //!
 //! - `mode` (`compress`, `decompress` or `test`), `input`, `output`, `seconds`, `threads`,
 //!   `read` and `written` (bytes), `overhead` (bytes of the archive but the files', where
@@ -66,7 +68,8 @@ impl Stats {
         if self.outputs.is_empty() {
             return Ok(());
         }
-        let data = format!("{{\"version\":1,\"runs\":[{}]}}", self.runs.lock().unwrap().join(","));
+        let args: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
+        let data = document(&self.runs.lock().unwrap(), env!("AQR_VERSION"), &args);
         for o in &self.outputs {
             let text = if is_json(o) { data.clone() } else { page(&data) };
             std::fs::write(o, text).map_err(|e| format!("{}: {e}", o.display()))?;
@@ -77,6 +80,16 @@ impl Stats {
         }
         Ok(())
     }
+}
+
+/// The JSON of `runs` (each as JSON), made by aqr of version `version` run with `args`.
+fn document(runs: &[String], version: &str, args: &[String]) -> String {
+    let mut o = String::from("{\"version\":1,\"aqr\":");
+    string(&mut o, version);
+    o.push_str(",\"args\":");
+    array(&mut o, args, |o, a| string(o, a));
+    _ = write!(o, ",\"runs\":[{}]}}", runs.join(","));
+    o
 }
 
 fn is_json(p: &Path) -> bool {
@@ -614,5 +627,18 @@ fn browse(p: &Path) {
         .spawn();
     if let Err(e) = opened {
         eprintln!("{} not opened: {e}", p.display());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The JSON tells the version of aqr and the arguments it was run with, before the runs.
+    #[test]
+    fn document_tells_version_and_args() {
+        let args = ["-c".to_string(), "-9".into(), r#"C:\a "b""#.into()];
+        let d = document(&["{}".to_string(), "{}".into()], "0.0.20261106", &args);
+        assert_eq!(d, r#"{"version":1,"aqr":"0.0.20261106","args":["-c","-9","C:\\a \"b\""],"runs":[{},{}]}"#);
     }
 }
