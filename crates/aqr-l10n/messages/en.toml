@@ -24,8 +24,8 @@ ended_with = "aqr ended with {status}."
 did_not_end = "aqr did not end."
 intact = "{name} is intact"
 all_intact = { one = "The {n} archive is intact", other = "The {n} archives are intact" }
-# A test's `end`: files, their bytes, the archive's bytes, seconds.
-tested = { one = "{n} file, {bytes}, in {archive} ({seconds} s)", other = "{n} files, {bytes}, in {archive} ({seconds} s)" }
+# A test's `end`: files, their bytes, the archive's bytes, the time it took (`aqr_l10n::duration`).
+tested = { one = "{n} file, {bytes}, in {archive} ({time})", other = "{n} files, {bytes}, in {archive} ({time})" }
 named = "{name}: {text}"
 is_there_already = "{name} is there already"
 same_for_others = "Do the same for the other archives"
@@ -33,6 +33,13 @@ wrong_passphrase = "Wrong passphrase, try again."
 passphrases_differ = "The two passphrases differ, try again."
 ok = "OK"
 cancel = "Cancel"
+
+# The parts of a time, as `aqr_l10n::duration` puts them together (by a space, those of zero left
+# out): `{n}` a number of seconds under a minute (of decimals, maybe), else whole numbers.
+[units]
+hours = "{n} h"
+minutes = "{n} min"
+seconds = "{n} s"
 
 # The names of the file types, as Explorer (aqr-win's FORMATS) and Finder (Info.plist's
 # UTTypeDescription and CFBundleTypeName, by InfoPlist.strings) show them. In Windows' string table.

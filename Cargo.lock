@@ -66,6 +66,7 @@ dependencies = [
  "aqr-foreign",
  "aqr-formula",
  "aqr-ipc",
+ "aqr-l10n",
  "aqr-pack",
  "aqr-unpack",
  "aqr-version",

@@ -47,13 +47,9 @@ pub fn wide(s: impl AsRef<OsStr>) -> Vec<u16> {
     s.as_ref().encode_wide().chain([0]).collect()
 }
 
-/// A time of seconds, as `m:ss` or `h:mm:ss`.
+/// A time of seconds, in whole seconds (`1 h 2 min 3 s`).
 fn time(t: f64) -> String {
-    let t = t.max(0.0) as u64;
-    match t / 3600 {
-        0 => format!("{}:{:02}", t / 60, t % 60),
-        h => format!("{h}:{:02}:{:02}", t / 60 % 60, t % 60),
-    }
+    aqr_l10n::duration(t, 0)
 }
 
 /// `s` of at most `n` characters, its start left out where it is longer (as a path's end tells

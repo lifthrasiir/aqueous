@@ -1480,12 +1480,13 @@ fn ticking<T>(a: &Args, view: &dyn view::Ticking, work: impl FnOnce() -> T) -> T
 fn summary(out: &Path, files: usize, total: usize, len: usize, start: Instant) {
     let t = start.elapsed().as_secs_f64();
     eprintln!(
-        "{}: {files} file{}, {} -> {} ({}) in {t:.2} s, {:.1} MB/s",
+        "{}: {files} file{}, {} -> {} ({}) in {}, {:.1} MB/s",
         out.display(),
         if files == 1 { "" } else { "s" },
         size(total as f64),
         size(len as f64),
         percent(len as f64, total as f64),
+        aqr_l10n::duration(t, 2),
         total as f64 / 1e6 / t.max(1e-9)
     );
 }
@@ -3038,10 +3039,11 @@ fn summary_d(input: &Path, out: Option<&Path>, files: usize, total: u64, start: 
         Some(o) => format!(" -> {}", o.display()),
     };
     eprintln!(
-        "{}{to}: {files} file{}, {} in {t:.2} s, {:.1} MB/s",
+        "{}{to}: {files} file{}, {} in {}, {:.1} MB/s",
         input.display(),
         if files == 1 { "" } else { "s" },
         size(total as f64),
+        aqr_l10n::duration(t, 2),
         total as f64 / 1e6 / t.max(1e-9)
     );
 }

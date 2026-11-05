@@ -12,6 +12,7 @@ aqr-decompress = { path = "../aqr-decompress" }
 aqr-foreign = { path = "../aqr-foreign" }
 aqr-formula = { path = "../aqr-formula" }
 aqr-ipc = { path = "../aqr-ipc" }
+aqr-l10n = { path = "../aqr-l10n" }
 aqr-pack = { path = "../aqr-pack" }
 aqr-unpack = { path = "../aqr-unpack" }
 memmap2 = "0.9"

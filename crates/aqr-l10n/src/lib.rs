@@ -162,6 +162,29 @@ impl Msg {
     }
 }
 
+/// A time of `seconds` in the language chosen, of the parts of [`units`]: under a minute as
+/// seconds of `decimals` decimals (`2.35 s`, `2.35초`), else of whole hours, minutes and seconds,
+/// those of zero left out (`1 h 2 min 3 s`, `1 min`; `1시간 2분 3초`). ICU is not linked, so its
+/// duration formats are not at hand; this is what the catalogs need of them.
+pub fn duration(seconds: f64, decimals: usize) -> String {
+    duration_in(LANG.load(Ordering::Relaxed), seconds, decimals)
+}
+
+/// [`duration`] in language `lang` (an index of [`LANGS`]).
+fn duration_in(lang: usize, seconds: f64, decimals: usize) -> String {
+    let part = |m: Msg, n: &dyn Display| fill(m.form(lang, None), &[("n", n)]);
+    let t = if seconds.is_finite() { seconds.max(0.0) } else { 0.0 };
+    let short = format!("{t:.decimals$}");
+    // (what rounds to a minute is one)
+    if short.parse::<f64>().is_ok_and(|s| s < 60.0) {
+        return part(units::SECONDS, &short);
+    }
+    let t = t.round() as u64;
+    let parts = [(t / 3600, units::HOURS), (t / 60 % 60, units::MINUTES), (t % 60, units::SECONDS)];
+    let parts: Vec<String> = parts.iter().filter(|(n, _)| *n > 0).map(|(n, m)| part(*m, n)).collect();
+    parts.join(" ")
+}
+
 /// `template` with its placeholders filled by `args`, `{{` and `}}` as braces; a placeholder of no
 /// argument left as it is.
 fn fill(template: &str, args: &[(&str, &dyn Display)]) -> String {
@@ -233,6 +256,24 @@ mod tests {
         // (the language chosen is English in the tests)
         assert_eq!(common::intact("a.aqr"), "a.aqr is intact");
         assert_eq!(common::all_intact(2), "The 2 archives are intact");
+    }
+
+    #[test]
+    fn durations() {
+        // (the language chosen is English in the tests)
+        assert_eq!(duration(0.0, 2), "0.00 s");
+        assert_eq!(duration(2.34, 1), "2.3 s");
+        assert_eq!(duration(59.4, 0), "59 s");
+        assert_eq!(duration(59.996, 2), "1 min");
+        assert_eq!(duration(60.0, 2), "1 min");
+        assert_eq!(duration(62.6, 2), "1 min 3 s");
+        assert_eq!(duration(3600.0, 0), "1 h");
+        assert_eq!(duration(3603.0, 0), "1 h 3 s");
+        assert_eq!(duration(3723.2, 1), "1 h 2 min 3 s");
+        assert_eq!(duration(-1.0, 0), "0 s");
+        assert_eq!(duration_in(ko(), 2.34, 1), "2.3초");
+        assert_eq!(duration_in(ko(), 3723.0, 0), "1시간 2분 3초");
+        assert_eq!(duration_in(ko(), 120.0, 0), "2분");
     }
 
     /// The string table has the messages of `types` and `shell` in each language, by their ids.

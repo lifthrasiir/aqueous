@@ -212,7 +212,7 @@ impl<'g> View<'g> {
             Some(&n) if len > 0 => format!(", {}%", (100 * n / len).min(99)),
             _ => String::new(),
         };
-        (t >= SLOW).then(|| format!("{path}, {} s{far}", t.as_secs()))
+        (t >= SLOW).then(|| format!("{path}, {}{far}", aqr_l10n::duration(t.as_secs() as f64, 0)))
     }
 }
 
@@ -319,7 +319,10 @@ impl Ticking for Decoding {
         {
             let name = self.names.get(i).map_or("", |n| n.as_str());
             let name = if name.is_empty() { format!("leaf #{}", i + 1) } else { name.into() };
-            lines.push(format!("  {}", fit(&format!("{name}, {} s", since.elapsed().as_secs()), WIDTH - 2)));
+            lines.push(format!(
+                "  {}",
+                fit(&format!("{name}, {}", aqr_l10n::duration(since.elapsed().as_secs() as f64, 0)), WIDTH - 2)
+            ));
         }
         let mut text = String::new();
         if s.drawn > 0 {
@@ -445,7 +448,10 @@ impl Ticking for Listing {
         };
         let mut lines = vec![fit(&format!("[{b}] {what}"), WIDTH)];
         if let Some((d, t)) = dir {
-            lines.push(format!("  {}", fit(&format!("{}, {} s", d.display(), t.elapsed().as_secs()), WIDTH - 2)));
+            lines.push(format!(
+                "  {}",
+                fit(&format!("{}, {}", d.display(), aqr_l10n::duration(t.elapsed().as_secs() as f64, 0)), WIDTH - 2)
+            ));
         }
         let mut text = String::new();
         if s.drawn > 0 {

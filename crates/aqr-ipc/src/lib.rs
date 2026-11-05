@@ -365,8 +365,8 @@ pub fn tested(name: &str, e: &Value, named: bool) -> String {
     let files = e["files"].as_u64().unwrap_or(0);
     let bytes = size(e["written"].as_u64().unwrap_or(0) as f64);
     let archive = size(e["read"].as_u64().unwrap_or(0) as f64);
-    let seconds = format!("{:.1}", e["seconds"].as_f64().unwrap_or(0.0));
-    let text = aqr_l10n::common::tested(files, bytes, archive, seconds);
+    let time = aqr_l10n::duration(e["seconds"].as_f64().unwrap_or(0.0), 1);
+    let text = aqr_l10n::common::tested(files, bytes, archive, time);
     if named {
         aqr_l10n::common::named(name, text)
     } else {

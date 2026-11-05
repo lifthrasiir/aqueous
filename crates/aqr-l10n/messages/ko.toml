@@ -22,7 +22,7 @@ ended_with = "aqr 종료 상태: {status}."
 did_not_end = "aqr 프로세스가 끝나지 않았습니다."
 intact = "{name}에 이상이 없습니다"
 all_intact = "압축 파일 {n}개 모두 이상이 없습니다"
-tested = "파일 {n}개, {bytes}, 압축 크기 {archive} ({seconds}초)"
+tested = "파일 {n}개, {bytes}, 압축 크기 {archive} ({time})"
 named = "{name}: {text}"
 is_there_already = "이미 있습니다: {name}"
 same_for_others = "다른 압축 파일에도 똑같이 적용"
@@ -30,6 +30,11 @@ wrong_passphrase = "암호가 틀렸습니다. 다시 입력하세요."
 passphrases_differ = "두 암호가 다릅니다. 다시 입력하세요."
 ok = "확인"
 cancel = "취소"
+
+[units]
+hours = "{n}시간"
+minutes = "{n}분"
+seconds = "{n}초"
 
 [types]
 aqr = "Aqueous 압축 파일"
