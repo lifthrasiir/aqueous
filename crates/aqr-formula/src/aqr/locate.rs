@@ -103,6 +103,25 @@ fn metadata(ty: u64) -> bool {
     (0x10..=0x17).contains(&ty)
 }
 
+/// Of the located archive `a` (a header magic, and a footer matching it at its end): where its
+/// footer is, and where its last metadata block is (none where it has none).
+pub fn footer_of(a: &[u8]) -> Option<(Range<usize>, Option<usize>)> {
+    header_at(a, 0)?;
+    let n = u16_at(a, a.len().checked_sub(2)?)?;
+    let f = a.len().checked_sub(n + 10)?;
+    if !is_footer(a, f) || u16_at(a, f + 6)? != n {
+        return None;
+    }
+    let mut at = f + 8;
+    let _size_hint = leb(a, &mut at).ok()?;
+    let back = usize::try_from(leb(a, &mut at).ok()?).ok()?;
+    let metadata = match back {
+        0 => None,
+        b => Some((f + 8).checked_sub(b)?),
+    };
+    Some((f..a.len(), metadata))
+}
+
 /// The length of the located archive `a` (a header magic, and a footer matching it at its
 /// end), trimmed where a footer other than the last follows one of its last two metadata blocks
 /// (spec, "trim a located archive").
@@ -189,5 +208,8 @@ mod tests {
         assert_eq!(locate(&[&a, &a[..]].concat()), Some(0..a.len()));
         assert!(open(&lead[locate(&lead).unwrap()], &natives()).is_ok());
         assert_eq!(trim(&a), a.len());
+        let (f, m) = footer_of(&a).unwrap();
+        assert!(f.end == a.len() && f.len() < 30 && m.is_some_and(|m| m < f.start));
+        assert_eq!(footer_of(&lead), None);
     }
 }

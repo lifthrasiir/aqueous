@@ -41,7 +41,7 @@ pub mod sink;
 mod tree;
 
 pub use listing::Listed;
-pub use locate::{locate, trim};
+pub use locate::{footer_of, locate, trim};
 pub use mirror::Mirroring;
 pub use segment::{Batch, ContentAt, Layout, Leaf, Placed, Segment, SegmentWriter, crossing, kill};
 pub use tree::{
