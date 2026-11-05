@@ -264,6 +264,8 @@ fn segments() {
 struct Logged {
     bytes: Vec<u8>,
     ops: Vec<Op>,
+    /// Committed once, as it ends ([`aqr_compress::Output::commits_once`]).
+    once: bool,
 }
 
 enum Op {
@@ -287,6 +289,10 @@ impl Write for Logged {
 impl aqr_compress::Output for Logged {
     fn commits(&self) -> bool {
         true
+    }
+
+    fn commits_once(&self) -> bool {
+        self.once
     }
 
     fn sync(&mut self) -> std::io::Result<()> {
@@ -1451,4 +1457,40 @@ fn appended() {
     let (tree, contents) = tree_of(second);
     let inputs: Vec<Input> = contents.iter().map(|(n, d)| Input { name: n.as_bytes(), data: d }).collect();
     assert!(aqr_compress::compress_tree_into(&tree, &inputs[..], &opt, &mut out, Some(&from), None, &|_| {}).is_err());
+}
+
+/// Segments appended to an archive committed once (as `--atomic` has it): wherever it is
+/// stopped before it ends, the archive as it was; then the segments with it.
+#[test]
+fn appended_once() {
+    use aqr_formula::aqr::footer_of;
+    let all = sample();
+    let (first, second) = all.split_at(5);
+    let opt = Options { batch: 30_000, segment: 1, ..Options::default() };
+    let mut before = Vec::new();
+    committed_into(first, &opt, &mut before, None);
+    let (f, m) = footer_of(&before).unwrap();
+    let from = aqr_compress::Appending { footer: f, metadata: m.unwrap(), link_groups: 0, kill: true };
+    let (tree, contents) = tree_of(second);
+    let inputs: Vec<Input> = contents.iter().map(|(n, d)| Input { name: n.as_bytes(), data: d }).collect();
+    let mut out = Logged { bytes: before.clone(), once: true, ..Logged::default() };
+    aqr_compress::compress_tree_into(&tree, &inputs[..], &opt, &mut out, Some(&from), None, &|_| {}).unwrap();
+    let (names, _) = located(&out.bytes);
+    assert_eq!(names.len(), located(&before).0.len() + second.len());
+    // (one commit: synced once before the old footer is killed, once after)
+    assert_eq!(out.ops.iter().filter(|o| matches!(o, Op::Sync)).count(), 2);
+    let kill = out.ops.iter().position(|o| matches!(o, Op::Patch(..))).unwrap();
+    let mut file = out.bytes.clone();
+    for op in out.ops[kill..].iter().rev() {
+        if let Op::Patch(at, was) = op {
+            file[*at..*at + was.len()].copy_from_slice(was);
+        }
+    }
+    for op in out.ops[..kill].iter().rev() {
+        if let Op::Append(n) = op {
+            assert_eq!(located(&file).0, located(&before).0);
+            file.truncate(file.len() - n);
+        }
+    }
+    assert_eq!(file, before);
 }

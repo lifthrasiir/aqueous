@@ -125,6 +125,13 @@ pub trait Output: Write {
         false
     }
 
+    /// Whether the archive is committed once, as it ends, where it [commits](Output::commits):
+    /// whole or not at all, the segments before closed without a footer (the archive appended to
+    /// left as it was until then).
+    fn commits_once(&self) -> bool {
+        false
+    }
+
     /// Makes what was written durable.
     fn sync(&mut self) -> io::Result<()> {
         self.flush()
@@ -255,6 +262,11 @@ impl std::fmt::Display for Ended {
 
 impl std::error::Error for Ended {}
 
+/// Whether `e` is the archive stopped and ended ([`Ended`]).
+fn is_ended(e: &io::Error) -> bool {
+    e.get_ref().is_some_and(|e| e.is::<Ended>())
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct FileReport {
     /// The format the data starts like ([`detect`]).
@@ -347,6 +359,7 @@ fn compress_tree_noting<S: Source + ?Sized>(
 ) -> io::Result<Report> {
     // (commits only of an archive as it is written: mirror blocks make the footer theirs)
     let commit = (out.commits() && !opt.mirrors && !opt.size_hint).then(|| out.base());
+    let once = out.commits_once();
     if from.is_some() && commit.is_none() {
         let e = "an archive appended to by commits alone: not with mirror blocks, a size hint block, nor to an output that does not commit";
         return Err(io::Error::new(io::ErrorKind::InvalidInput, e));
@@ -422,6 +435,7 @@ fn compress_tree_noting<S: Source + ?Sized>(
         metadata_end: None,
         inserted: 0,
         commit,
+        once,
         files_of: files_of(tree, n),
         link_groups: from.map_or(0, |a| a.link_groups.min(0)),
     };
@@ -721,6 +735,8 @@ struct Writer {
     /// Where the archive starts in the file, where it is committed as it is written, at each
     /// segment closed ([`Output::commits`]).
     commit: Option<u64>,
+    /// Whether it is committed once, as it ends ([`Output::commits_once`]).
+    once: bool,
     /// By content, the files of it (each hard link).
     files_of: Vec<u64>,
     /// The least archive-wide link group of the archive appended to ([`Appending`]): those of
@@ -846,6 +862,10 @@ impl Writer {
                 let r = self.write(self.next, &lens, made, cx, tell, out);
                 let mut st = pipe.state.lock().unwrap();
                 if let Err(e) = r {
+                    // (ended as it is already: passed up, not ended again)
+                    if is_ended(&e) {
+                        return Err(e);
+                    }
                     st.failed.get_or_insert(e);
                     continue;
                 }
@@ -1008,14 +1028,14 @@ impl Writer {
         }
         let (t, contents) = self.segment_tree(cx.tree);
         let enc = aqr::Encoder::with_threads(cx.opt.level, cx.opt.threads).with_modules(aqr_decompress::wasm_of);
-        let status = match self.commit {
-            Some(_) => self.left(cx),
-            None => aqr::Status::None,
-        };
+        let commits = self.commit.is_some() && !self.once;
+        let status = if commits { self.left(cx) } else { aqr::Status::None };
         let meta = self.w.close_as(&enc, &t, &contents, status).map_err(bad_tree)?;
-        match self.commit {
-            Some(_) => self.commit(out, &meta)?,
-            None => out.write_all(&meta)?,
+        if commits {
+            self.commit(out, &meta)?;
+        } else {
+            out.write_all(self.w.pad())?;
+            out.write_all(&meta)?;
         }
         self.metadata_end = Some(self.w.len() as u64);
         (self.segment_at, self.segments) = (self.w.len(), self.segments + 1);
