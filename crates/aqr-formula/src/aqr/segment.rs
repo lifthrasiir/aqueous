@@ -208,15 +208,50 @@ impl SegmentWriter {
     /// of the file, the archive starting at `base` in it, [`crossing`]), and the footer of the
     /// commit before, to make a spacer block of ([`kill`]) once they are durably written.
     pub fn footer(&mut self, base: u64) -> (Vec<u8>, Option<std::ops::Range<usize>>) {
+        let (out, start) = self.placed_footer(self.at, self.prev, base);
+        let len = out.len() - (start - self.at);
+        let odd = len % 2 == 1;
+        self.at = start + len + odd as usize;
+        self.segment_at = self.at;
+        self.pad = odd;
+        (out, self.live.replace(start..start + len))
+    }
+
+    /// The end of the archive, of the segment so far (as [`SegmentWriter::close_as`] closes it)
+    /// committed ([`SegmentWriter::footer`]), without closing it: the metadata block of `t`
+    /// telling `status` and the footer, to write after the blocks so far (and the padding byte
+    /// due, [`SegmentWriter::pad_due`]), and the footer of the commit before.
+    pub fn end(
+        &self,
+        enc: &Encoder,
+        t: &Tree,
+        contents: &[ContentAt],
+        status: Status,
+        base: u64,
+    ) -> Result<(Vec<u8>, Option<std::ops::Range<usize>>)> {
+        tree::check(t, contents.len()).map_err(Error::new)?;
+        if contents.iter().any(|c| c.leaf < self.segment_at) {
+            return Err(Error::new("a content of a leaf of another segment"));
+        }
+        let mut out = self.metadata_block(enc, t, contents, usize::MAX, 0, status)?;
+        let (footer, _) = self.placed_footer(self.at + out.len(), self.at, base);
+        out.extend_from_slice(&footer);
+        Ok((out, self.live.clone()))
+    }
+
+    /// A footer to write at `at`, of an archive whose last metadata block is at `metadata`,
+    /// placed off the sectors of the file (the archive starting at `base` in it): a spacer block
+    /// first where it has to be moved, and where the footer then starts.
+    fn placed_footer(&self, at: usize, metadata: usize, base: u64) -> (Vec<u8>, usize) {
         let mut out = Vec::new();
         let mut f = Vec::new();
         let mut room = 0;
         loop {
             f.clear();
-            let at = self.at + room;
+            let start = at + room;
             // (from the start of the footer's fields: after the magic and the size)
-            footer_with(&mut f, at - HEADER_MAGIC.len(), (at + FOOTER_MAGIC.len() + 2 - self.prev) as u64);
-            if !crossing(base + at as u64, kill(f.len()).len()) {
+            footer_with(&mut f, start - HEADER_MAGIC.len(), (start + FOOTER_MAGIC.len() + 2 - metadata) as u64);
+            if !crossing(base + start as u64, kill(f.len()).len()) {
                 break;
             }
             room += 2;
@@ -225,13 +260,14 @@ impl SegmentWriter {
             out.extend_from_slice(&[0, (room - 2) as u8]);
             out.resize(room, 0);
         }
-        let start = self.at + room;
         out.extend_from_slice(&f);
-        let odd = f.len() % 2 == 1;
-        self.at = start + f.len() + odd as usize;
-        self.segment_at = self.at;
-        self.pad = odd;
-        (out, self.live.replace(start..start + f.len()))
+        (out, at + room)
+    }
+
+    /// Whether the padding byte after the footer of a commit is still to be written
+    /// ([`SegmentWriter::pad`]).
+    pub fn pad_due(&self) -> bool {
+        self.pad
     }
 
     /// The padding byte to write before anything after the footer of a commit, once
@@ -1365,8 +1401,12 @@ mod tests {
             out.extend_from_slice(&b.bytes);
             let contents = [ContentAt { leaf: b.leaf_at[0], output: 0, size: 5 }];
             let t = Tree { root: Extra::default(), entries: vec![entry(None, "a", EntryNode::File(0))] };
-            out.extend_from_slice(&w.close_as(&enc, &t, &contents, Status::Complete).unwrap());
+            let (ended, _) = w.end(&enc, &t, &contents, Status::Complete, base).unwrap();
+            let meta = w.close_as(&enc, &t, &contents, Status::Complete).unwrap();
             let (end, _) = w.footer(base);
+            // (the same, ended without closing)
+            assert_eq!(ended, [&meta[..], &end].concat());
+            out.extend_from_slice(&meta);
             out.extend_from_slice(&end);
             let n = u16::from_le_bytes([out[out.len() - 2], out[out.len() - 1]]) as usize;
             let at = out.len() - n - 10;
