@@ -325,7 +325,7 @@ fn committed() {
     let inputs: Vec<Input> = contents.iter().map(|(n, d)| Input { name: n.as_bytes(), data: d }).collect();
     let opt = Options { batch: 30_000, segment: 1, ..Options::default() };
     let mut out = Logged::default();
-    let r = aqr_compress::compress_tree_into(&tree, &inputs[..], &opt, &mut out, None, &|_| {}).unwrap();
+    let r = aqr_compress::compress_tree_into(&tree, &inputs[..], &opt, &mut out, None, None, &|_| {}).unwrap();
     assert_eq!(r.len, out.bytes.len());
     let (all, status) = located(&out.bytes);
     assert_eq!(status, Some(Status::Complete));
@@ -1282,7 +1282,7 @@ fn stopped_when(
             requested.store(true, Ordering::Relaxed);
         }
     };
-    let r = aqr_compress::compress_tree_into(&tree, &inputs[..], opt, out, Some(&stop), &tell).unwrap();
+    let r = aqr_compress::compress_tree_into(&tree, &inputs[..], opt, out, None, Some(&stop), &tell).unwrap();
     (r, told.into_inner().unwrap())
 }
 
@@ -1316,13 +1316,17 @@ fn stopped() {
             assert!(check.walked && check.mirrored(&out.bytes, false), "{check:?}");
         }
     }
-    // (while a batch is made: of the batches written before it)
+    // (while a batch is made, where the events come before the archive is done: of the batches
+    // written before it)
     let mut out = Logged::default();
     let during = |e: &aqr_compress::Event, written| matches!(e, aqr_compress::Event::Started(_)) && written >= 3;
     let (r, told) = stopped_when(false, &during, &opt, &mut out);
-    assert!(told.len() == 1 && r.stopped.unwrap().kept);
-    let (names, status) = located(&out.bytes);
-    assert!(names.len() < all.len() && matches!(status, Some(Status::Incomplete { .. })), "{names:?}");
+    assert_eq!(told.len(), r.stopped.is_some() as usize);
+    if r.stopped.is_some() {
+        assert!(r.stopped.unwrap().kept);
+        let (names, status) = located(&out.bytes);
+        assert!(names.len() < all.len() && matches!(status, Some(Status::Incomplete { .. })), "{names:?}");
+    }
     // (while a batch is read: the stop not waiting for it)
     let files = sample();
     let (tree, contents) = tree_of(&files);
@@ -1333,7 +1337,7 @@ fn stopped() {
     let ended = |_: &aqr_compress::Report| *at.lock().unwrap() = Some(std::time::Instant::now());
     let stop = aqr_compress::Stop { requested: &requested, ended: &ended };
     let mut out = Logged::default();
-    let r = aqr_compress::compress_tree_into(&tree, &slow, &opt, &mut out, Some(&stop), &|_| {}).unwrap();
+    let r = aqr_compress::compress_tree_into(&tree, &slow, &opt, &mut out, None, Some(&stop), &|_| {}).unwrap();
     let ended = at.into_inner().unwrap().expect("ended");
     assert!(r.stopped.unwrap().kept);
     assert!(ended.elapsed() > std::time::Duration::from_millis(300), "ended without waiting for the read");
@@ -1370,4 +1374,77 @@ impl aqr_compress::Source for Slow<'_> {
         }
         Ok(self.inputs[c].data.to_vec().into())
     }
+}
+
+/// The files of `files` archived into `out` (appended to the archive it holds where `from`),
+/// committed as it is written.
+fn committed_into(files: &[(&str, Vec<u8>)], opt: &Options, out: &mut Vec<u8>, from: Option<&aqr_compress::Appending>) {
+    let (tree, contents) = tree_of(files);
+    let inputs: Vec<Input> = contents.iter().map(|(n, d)| Input { name: n.as_bytes(), data: d }).collect();
+    let r = aqr_compress::compress_tree_into(&tree, &inputs[..], opt, out, from, None, &|_| {}).unwrap();
+    assert!(r.stopped.is_none());
+}
+
+/// Segments appended to an archive committed (spec, "Appending to an archive"): its files
+/// kept, those of the segments added or replacing theirs, in a segment or several; not with
+/// mirror blocks.
+#[test]
+fn appended() {
+    use aqr_formula::aqr::{Status, footer_of};
+    let all = sample();
+    let (first, second) = all.split_at(5);
+    for segment in [0, 1] {
+        let opt = Options { batch: 30_000, segment, ..Options::default() };
+        let mut out = Vec::new();
+        committed_into(first, &opt, &mut out, None);
+        let (f, m) = footer_of(&out).unwrap();
+        let from = aqr_compress::Appending { footer: f, metadata: m.unwrap(), link_groups: -10 };
+        // the rest, and a file of the first again, changed
+        let mut more = second.to_vec();
+        more.push(("a/t0.txt", text(5_000, 9)));
+        committed_into(&more, &opt, &mut out, Some(&from));
+        assert_eq!(aqr_formula::aqr::locate(&out), Some(0..out.len()));
+        let Ok(Value::Tree(t, got)) = decompress_value(&out, 1) else { panic!("not decoded") };
+        let path = |mut k: usize| {
+            let mut p = t.entries[k].name.clone();
+            while let Some(q) = t.entries[k].parent {
+                p = [&t.entries[q].name[..], b"/", &p].concat();
+                k = q;
+            }
+            String::from_utf8(p).unwrap()
+        };
+        let mut have: Vec<(String, Vec<u8>)> = (0..t.entries.len())
+            .filter_map(|k| match t.entries[k].node {
+                EntryNode::File(c) => Some((path(k), got[c].clone())),
+                _ => None,
+            })
+            .collect();
+        have.sort();
+        let mut want: Vec<(String, Vec<u8>)> =
+            first.iter().chain(&more).map(|(p, d)| (p.to_string(), d.clone())).collect();
+        want.sort();
+        want.dedup_by(|b, a| {
+            // (the later one of a path kept)
+            if a.0 == b.0 {
+                a.1 = b.1.clone();
+                true
+            } else {
+                false
+            }
+        });
+        // (the first's a/t0.txt replaced)
+        let t0 = want.iter().position(|w| w.0 == "a/t0.txt").unwrap();
+        want[t0].1 = text(5_000, 9);
+        assert_eq!(have, want, "segment {segment}");
+        let status = aqr_formula::aqr::open(&out, &aqr_formula::aqr::NoModules).unwrap().status();
+        assert_eq!(status, Some(Status::Complete));
+    }
+    let opt = Options { mirrors: true, ..Options::default() };
+    let mut out = Vec::new();
+    committed_into(first, &Options::default(), &mut out, None);
+    let (f, m) = footer_of(&out).unwrap();
+    let from = aqr_compress::Appending { footer: f, metadata: m.unwrap(), link_groups: 0 };
+    let (tree, contents) = tree_of(second);
+    let inputs: Vec<Input> = contents.iter().map(|(n, d)| Input { name: n.as_bytes(), data: d }).collect();
+    assert!(aqr_compress::compress_tree_into(&tree, &inputs[..], &opt, &mut out, Some(&from), None, &|_| {}).is_err());
 }

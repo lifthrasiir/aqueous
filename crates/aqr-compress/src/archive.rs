@@ -202,6 +202,17 @@ pub struct Report {
     pub stopped: Option<Stopped>,
 }
 
+/// An archive to append to ([`compress_tree_into`]; spec, "Appending to an archive"), as written
+/// to the output already: where its footer is and its last metadata block (from its header
+/// magic: [`aqr::footer_of`]), and the least archive-wide link group it takes (negative; 0 where
+/// none), the groups of the segments appended taken below it.
+#[derive(Debug, Clone)]
+pub struct Appending {
+    pub footer: Range<usize>,
+    pub metadata: usize,
+    pub link_groups: i128,
+}
+
 /// What an archive stopped left out ([`Report::stopped`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stopped {
@@ -287,17 +298,21 @@ pub fn compress_tree_to<S: Source + ?Sized>(
     out: &mut dyn Write,
     tell: &(dyn Fn(Event) + Sync),
 ) -> io::Result<Report> {
-    compress_tree_into(tree, src, opt, &mut Plain(out), None, tell)
+    compress_tree_into(tree, src, opt, &mut Plain(out), None, None, tell)
 }
 
 /// [`compress_tree_to`], written to `out`: committed as it is written where it
 /// [commits](Output::commits), and ended ([`Output::end`]) once written; or, where `stop`
-/// requests it, ended as it is ([`Stop`], [`Report::stopped`]).
+/// requests it, ended as it is ([`Stop`], [`Report::stopped`]). Where `from` is given, the
+/// segments are appended to the archive it tells of, which `out` holds (and then has to
+/// commit): `tree` is what they add to it and replace of it.
+#[allow(clippy::too_many_arguments)]
 pub fn compress_tree_into<S: Source + ?Sized>(
     tree: &Tree,
     src: &S,
     opt: &Options,
     out: &mut dyn Output,
+    from: Option<&Appending>,
     stop: Option<&Stop>,
     tell: &(dyn Fn(Event) + Sync),
 ) -> io::Result<Report> {
@@ -307,7 +322,7 @@ pub fn compress_tree_into<S: Source + ?Sized>(
     std::thread::scope(|s| {
         s.spawn(|| tracker.run(tell));
         // (the notes gone with it, the tracker done)
-        compress_tree_noting(tree, src, opt, out, stop, notes, tell)
+        compress_tree_noting(tree, src, opt, out, from, stop, notes, tell)
     })
     .or_else(|e| match e.get_ref().and_then(|e| e.downcast_ref::<Ended>()) {
         Some(Ended(r)) => Ok(r.clone()),
@@ -315,17 +330,23 @@ pub fn compress_tree_into<S: Source + ?Sized>(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compress_tree_noting<S: Source + ?Sized>(
     tree: &Tree,
     src: &S,
     opt: &Options,
     out: &mut dyn Output,
+    from: Option<&Appending>,
     stop: Option<&Stop>,
     notes: Notes,
     tell: &(dyn Fn(Event) + Sync),
 ) -> io::Result<Report> {
     // (commits only of an archive as it is written: mirror blocks make the footer theirs)
     let commit = (out.commits() && !opt.mirrors && !opt.size_hint).then(|| out.base());
+    if from.is_some() && commit.is_none() {
+        let e = "an archive appended to by commits alone: not with mirror blocks, a size hint block, nor to an output that does not commit";
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, e));
+    }
     let mut out = match opt.mirrors {
         true => Out::Mirrored(aqr::Mirroring::new(out, opt.size_hint)),
         false => Out::Plain(out),
@@ -359,8 +380,14 @@ fn compress_tree_noting<S: Source + ?Sized>(
     let weight = |b: &Vec<usize>| b.iter().map(|&c| src.size(c)).sum::<u64>();
     batches.sort_by_key(|b| weight(b) <= (opt.batch as u64).saturating_mul(AHEAD));
 
-    let w = SegmentWriter::with_size_hint(opt.size_hint);
-    out.write_all(w.head())?;
+    let w = match from {
+        Some(a) => SegmentWriter::appending(a.footer.clone(), a.metadata),
+        None => {
+            let w = SegmentWriter::with_size_hint(opt.size_hint);
+            out.write_all(w.head())?;
+            w
+        }
+    };
     let w_at = w.len();
     let weights: Vec<u64> = batches.iter().map(weight).collect();
     let cx = Ctx { src, opt, notes: &notes, batches: &batches, weights: &weights, entries: &entries, tree, stop };
@@ -391,6 +418,7 @@ fn compress_tree_noting<S: Source + ?Sized>(
         inserted: 0,
         commit,
         files_of: files_of(tree, n),
+        link_groups: from.map_or(0, |a| a.link_groups.min(0)),
     };
     std::thread::scope(|s| {
         // (a thread of no worker of the pool, which takes one only as one is free: as the
@@ -690,6 +718,9 @@ struct Writer {
     commit: Option<u64>,
     /// By content, the files of it (each hard link).
     files_of: Vec<u64>,
+    /// The least archive-wide link group of the archive appended to ([`Appending`]): those of
+    /// the segments written taken below it.
+    link_groups: i128,
 }
 
 /// By content of `tree` (of `n`), the files of it (each hard link).
@@ -1163,15 +1194,16 @@ impl Writer {
                 contents.len() - 1
             })
         };
-        fn extra(x: &Extra, own: bool, content: &mut dyn FnMut(usize) -> usize) -> Extra {
+        let below = self.link_groups;
+        let extra = |x: &Extra, own: bool, content: &mut dyn FnMut(usize) -> usize| -> Extra {
             if !own {
                 return Extra::default();
             }
             let mut x = x.clone();
             x.forks.iter_mut().for_each(|f| f.1 = content(f.1));
-            x.link_group = x.link_group.map(|g| if g >= 0 { -(g + 1) } else { g });
+            x.link_group = x.link_group.map(|g| if g >= 0 { below - (g + 1) } else { g });
             x
-        }
+        };
         let root = extra(&tree.root, of(None, &tree.root), &mut content);
         let mut new = vec![None; n];
         let mut entries = Vec::new();
