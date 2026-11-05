@@ -39,6 +39,7 @@ mod locate;
 pub mod mirror;
 mod segment;
 pub mod sink;
+mod spool;
 mod tree;
 
 pub use listing::Listed;
@@ -4573,8 +4574,8 @@ mod tests {
     }
 
     /// The outputs of a node of several (a split, an application of several outputs) pulled
-    /// out of their turn, through a packed byte sequence too, are held until they are: decoded
-    /// and written out alike.
+    /// out of their turn, through a packed byte sequence too, are held until they are (beyond
+    /// what memory holds of them, in a file): decoded and written out alike.
     #[test]
     fn pulled_out_of_turn() {
         let mut f = Formula::default();
@@ -4599,7 +4600,10 @@ mod tests {
         let want = [&r[n - 200..], &packed, &r[100..n - 200], &s[..1000]].concat();
         let c = encode(&f, Some(checksum(&want)), Level::Zstd(1)).unwrap();
         let runner = natives();
+        let files = spool::FILES.load(Ordering::Relaxed);
         assert!(decode(&c, &runner).unwrap() == want);
+        // (more held than in memory, in a file)
+        assert!(spool::FILES.load(Ordering::Relaxed) > files);
         let a = open(&c, &runner).unwrap();
         for threads in [1, 4] {
             let mut out = Vec::new();
@@ -4709,9 +4713,11 @@ mod tests {
         let r: Vec<u8> = d[5..105].iter().rev().copied().collect();
         let want = [&d[n as usize - 1000..], &r, &d[..n as usize - 1000]].concat();
         let c = encode(&f, Some(checksum(&want)), Level::Zstd(1)).unwrap();
-        let before = PARTS.load(Ordering::Relaxed);
+        let (before, files) = (PARTS.load(Ordering::Relaxed), spool::FILES.load(Ordering::Relaxed));
         assert!(decode(&c, &PartCut).unwrap() == want);
         assert_eq!(PARTS.load(Ordering::Relaxed) - before, 2);
+        // (more queued than in memory, in a file)
+        assert!(spool::FILES.load(Ordering::Relaxed) > files);
         let archive = open(&c, &PartCut).unwrap();
         for threads in [1, 4] {
             let mut out = Vec::new();

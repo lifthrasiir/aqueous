@@ -8,7 +8,7 @@
 //! - an application takes its inputs whole and gives its outputs (of a whole module: the spec's
 //!   part modules are applied the same way for now, their windows all of their data);
 //! - the outputs of a node of several are each pulled by itself, those pulled out of turn held
-//!   until they are;
+//!   until they are (beyond a bound, in a file);
 //! - a value a Checksum instruction covers is hashed as it is pulled, and checked at its end.
 //!
 //! Written out ([`run`] with a sink), the parts of each output, through its concatenations, are
@@ -17,6 +17,7 @@
 
 use std::collections::VecDeque;
 
+use super::spool::Spool;
 use super::*;
 
 /// A value of a program: output `out` of node `node`.
@@ -272,7 +273,7 @@ enum Fan<'a> {
         read: u64,
         out: usize,
         start: u64,
-        held: Vec<VecDeque<Chunk<'a>>>,
+        held: Vec<Held<'a>>,
     },
     Failed(Failure),
 }
@@ -490,7 +491,7 @@ impl<'a> Source<'a> for Fanned {
                     read: 0,
                     out: 0,
                     start: 0,
-                    held: sizes.iter().map(|_| VecDeque::new()).collect(),
+                    held: sizes.iter().map(|_| Held::default()).collect(),
                 },
                 _ => unreachable!("a node of several outputs"),
             };
@@ -506,7 +507,7 @@ impl<'a> Source<'a> for Fanned {
                 let Op::Split(_, sizes, _) = *op else { unreachable!("a split") };
                 let end = *self.end.get_or_insert_with(|| sizes[..=v.out].iter().sum());
                 loop {
-                    if let Some(c) = held[v.out].pop_front() {
+                    if let Some(c) = held[v.out].pop()? {
                         return Ok(Some(c));
                     }
                     if *read >= end {
@@ -516,6 +517,7 @@ impl<'a> Source<'a> for Fanned {
                         return invalid("a split of a value shorter than declared");
                     };
                     // (its bytes to the outputs they are of: those of others held until pulled)
+                    let mut mine = None;
                     while !c.is_empty() {
                         while *start + sizes[*out] <= *read {
                             *start += sizes[*out];
@@ -523,9 +525,15 @@ impl<'a> Source<'a> for Fanned {
                         }
                         let n = c.len().min((*start + sizes[*out] - *read) as usize);
                         let (piece, rest) = c.split(n);
-                        held[*out].push_back(piece);
+                        match *out == v.out {
+                            true => mine = Some(piece),
+                            false => held[*out].push(piece)?,
+                        }
                         *read += n as u64;
                         c = rest;
+                    }
+                    if mine.is_some() {
+                        return Ok(mine);
                     }
                 }
             }
@@ -798,8 +806,50 @@ fn blocks_ahead<R>(g: &Graph, contents: &Contents, f: impl FnOnce(Option<&(dyn F
 /// waits for them to be pulled, where it is its only output (else all: see [`Fan`]).
 const QUEUE_BYTES: usize = 16 << 20;
 
-/// Pieces held of a queue at most this long, committed bytes joined into them.
-const QUEUE_PIECE: usize = 1 << 20;
+/// Bytes held at most in memory of what an output of several of a node is pulled out of its
+/// turn (a queue's, or a split's), the rest in a file ([`Spool`]).
+#[cfg(not(test))]
+const HELD_BYTES: usize = 64 << 20;
+#[cfg(test)]
+const HELD_BYTES: usize = 1 << 20;
+
+/// The pieces of an output of a Split pulled out of its turn: shared, until they are more than
+/// [`HELD_BYTES`]; the rest copied to a spool.
+#[derive(Default)]
+struct Held<'a> {
+    pieces: VecDeque<Chunk<'a>>,
+    bytes: usize,
+    spool: Option<Spool>,
+}
+
+impl<'a> Held<'a> {
+    fn push(&mut self, c: Chunk<'a>) -> Decoded<()> {
+        match &mut self.spool {
+            None if self.bytes + c.len() <= HELD_BYTES => {
+                self.bytes += c.len();
+                self.pieces.push_back(c);
+                Ok(())
+            }
+            s => s.get_or_insert_with(|| Spool::new(0)).push(&c).map_err(spooled),
+        }
+    }
+
+    fn pop(&mut self) -> Decoded<Option<Chunk<'a>>> {
+        if let Some(c) = self.pieces.pop_front() {
+            self.bytes -= c.len();
+            return Ok(Some(c));
+        }
+        match &mut self.spool {
+            Some(s) => s.pop().map(|p| p.map(Chunk::owned)).map_err(spooled),
+            None => Ok(None),
+        }
+    }
+}
+
+/// A failure of a spool's file.
+fn spooled(e: std::io::Error) -> Failure {
+    Failure::Resource(format!("a file of bytes held: {e}"))
+}
 
 /// The bytes of an output of a part module's application, as the module commits them, until
 /// they are pulled: at most `cap` of them, the module waiting for room.
@@ -809,10 +859,8 @@ struct Queue {
     cap: usize,
 }
 
-#[derive(Default)]
 struct QueueState {
-    pieces: VecDeque<Vec<u8>>,
-    bytes: usize,
+    pieces: Spool,
     /// Whether all is committed, or the application failed.
     done: bool,
     failed: Option<Failure>,
@@ -822,7 +870,8 @@ struct QueueState {
 
 impl Queue {
     fn new(cap: usize) -> Arc<Queue> {
-        Arc::new(Queue { state: Mutex::default(), changed: std::sync::Condvar::new(), cap })
+        let state = QueueState { pieces: Spool::new(HELD_BYTES), done: false, failed: None, gone: false };
+        Arc::new(Queue { state: Mutex::new(state), changed: std::sync::Condvar::new(), cap })
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, QueueState> {
@@ -831,17 +880,13 @@ impl Queue {
 
     fn push(&self, d: &[u8]) -> Decoded<()> {
         let mut q = self.lock();
-        while !q.gone && q.bytes > 0 && q.bytes + d.len() > self.cap {
+        while !q.gone && !q.pieces.is_empty() && q.pieces.len() + d.len() as u64 > self.cap as u64 {
             q = self.changed.wait(q).unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         if q.gone {
             return resource("an output no longer pulled");
         }
-        q.bytes += d.len();
-        match q.pieces.back_mut() {
-            Some(last) if last.len() + d.len() <= QUEUE_PIECE => last.extend_from_slice(d),
-            _ => q.pieces.push_back(d.to_vec()),
-        }
+        q.pieces.push(d).map_err(spooled)?;
         drop(q);
         self.changed.notify_all();
         Ok(())
@@ -861,8 +906,7 @@ impl Queue {
     fn pop<'a>(&self) -> Decoded<Option<Chunk<'a>>> {
         let mut q = self.lock();
         loop {
-            if let Some(p) = q.pieces.pop_front() {
-                q.bytes -= p.len();
+            if let Some(p) = q.pieces.pop().map_err(spooled)? {
                 drop(q);
                 self.changed.notify_all();
                 return Ok(Some(Chunk::owned(p)));
