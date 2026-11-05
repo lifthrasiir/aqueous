@@ -1526,3 +1526,38 @@ fn appended_once() {
     }
     assert_eq!(file, before);
 }
+
+/// Below level 2, where nothing is recompressed: every file given back as it is, of no module,
+/// the text files solid (but at level 0, each a block of its own but where they share), the same content once and a
+/// file starting with another's content made of it; the same archive however many threads make
+/// it (batches made at once), in segments and with mirror blocks.
+#[test]
+fn plain_levels() {
+    let mut files = sample();
+    let longer = [&files[1].1[..], &text(10_000, 5)].concat();
+    files.push(("a/longer.txt", longer));
+    for level in [aqr_formula::aqr::Level::Of(0), aqr_formula::aqr::Level::Of(1)] {
+        let opt = Options { level, ..Options::default() };
+        let (c, r) = archived(&files, &opt);
+        assert!(r.files.iter().all(|f| f.modules.is_empty()), "{level:?}: {r:?}");
+        assert_eq!(r.files[1].same_as, Some(3), "{level:?}");
+        let texts = r.solid.iter().any(|s| [0, 2, 3].iter().all(|c| s.contents.contains(c)));
+        assert_eq!(texts, level != aqr_formula::aqr::Level::STORED, "{level:?}: {:?}", r.solid);
+        // (longer.txt of t1.txt's bytes and its own: 60 KB not stored again, even at level 0)
+        let attributed: f64 = r.files.iter().map(|f| f.archived).sum();
+        let total: usize = files.iter().map(|f| f.1.len()).sum();
+        assert!(attributed < (total - 59_000) as f64, "{level:?}: {attributed} of {total}");
+        assert!((attributed + r.overhead as f64 - c.len() as f64).abs() < 1.0, "{level:?}");
+        let (threaded, _) = archived(&files, &Options { threads: 4, ..opt.clone() });
+        assert!(threaded == c, "{level:?}: {} bytes on 4 threads, {} on one", threaded.len(), c.len());
+        let opt = Options { batch: 30_000, segment: 1, ..opt };
+        let (s, _) = archived(&files, &opt);
+        assert!(metadata_blocks(&s) > 3, "{level:?}: {}", metadata_blocks(&s));
+        let (threaded, _) = archived(&files, &Options { threads: 4, ..opt.clone() });
+        assert!(threaded == s, "{level:?}: in segments, {} bytes on 4 threads, {} on one", threaded.len(), s.len());
+        let (m, r) = archived(&files, &Options { mirrors: true, ..opt });
+        assert_eq!(r.len, m.len());
+        let check = aqr_formula::aqr::mirror::check(&m);
+        assert!(check.walked && check.mirrored(&m, false), "{level:?}: {check:?}");
+    }
+}

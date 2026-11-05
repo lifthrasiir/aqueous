@@ -26,6 +26,12 @@
 //! the applications' outputs taken from those evaluated beforehand, as [`crate::compress`]
 //! does) and its files compared with the input: those not given back (all of the batch's where
 //! it does not decode) are made again kept raw.
+//!
+//! Below level 2, where nothing is recompressed ([`Options::recompresses`]), a batch is made by
+//! [`analyze_plain`]: its files as they are, its streams compressed as it is made rather than
+//! as it is written, nothing verified, several batches made at once ([`plain_helpers`],
+//! [`PLAIN_AHEAD`]). The rest, the writing of segments, commits, stops and mirror blocks, is
+//! the same.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
@@ -332,6 +338,7 @@ pub fn compress_tree_into<S: Source + ?Sized>(
     stop: Option<&Stop>,
     tell: &(dyn Fn(Event) + Sync),
 ) -> io::Result<Report> {
+    let opt = &crate::verifying(opt);
     let (tracker, notes) = Tracker::new((0..src.len()).map(|c| src.size(c)).collect());
     crate::compressing();
     let _spill = crate::spilling(opt);
@@ -441,8 +448,12 @@ fn compress_tree_noting<S: Source + ?Sized>(
     };
     std::thread::scope(|s| {
         // (a thread of no worker of the pool, which takes one only as one is free: as the
-        // batches being made leave threads idle)
-        s.spawn(|| pipe.help(&cx));
+        // batches being made leave threads idle; below level 2, where a batch is little more than
+        // read and compressed, several, as the pool has workers for them: [`plain_helpers`])
+        let helpers = if opt.recompresses() { 1 } else { plain_helpers() };
+        for _ in 0..helpers {
+            s.spawn(|| pipe.help(&cx));
+        }
         // (the helper stopped however this ends, a panic too)
         struct Done<'a>(&'a Pipe);
         impl Drop for Done<'_> {
@@ -515,6 +526,19 @@ fn compress_tree_noting<S: Source + ?Sized>(
 /// a time.)
 const AHEAD: u64 = 2;
 
+/// [`AHEAD`] below level 2 ([`Options::recompresses`]), where a batch let in holds little but its
+/// files (mapped), the small ones' copies in the streams of their class and their blocks, and
+/// several are made at once ([`plain_helpers`]). (10gb at level 1, 16 threads, 3 helpers: 21.0 s
+/// and a heap peak of 2.04 GB at 2, 18.3 s and 2.52 GB at 3, 17.8 s and 3.08 GB at 4.)
+const PLAIN_AHEAD: u64 = 3;
+
+/// The helpers making batches below level 2 ([`Pipe::help`]): one for each 4 workers of the
+/// pool, 1 to 3. (10gb at level 1, 16 threads, 4 batches ahead: about 20 s with 1, 17.6 s
+/// with 3.)
+fn plain_helpers() -> usize {
+    (aqr_common::pool::size() / 4).clamp(1, 3)
+}
+
 /// What the batches being made share ([`compress_tree_noting`]).
 struct Ctx<'a, S: ?Sized> {
     src: &'a S,
@@ -573,7 +597,8 @@ impl State {
     fn room<S: ?Sized>(&self, cx: &Ctx<S>) -> bool {
         let w = cx.weights[self.claimed];
         self.held == 0
-            || (self.held.saturating_add(w) <= (cx.opt.batch as u64).saturating_mul(AHEAD)
+            || (self.held.saturating_add(w)
+                <= (cx.opt.batch as u64).saturating_mul(if cx.opt.recompresses() { AHEAD } else { PLAIN_AHEAD })
                 && aqr_common::budget::global().room().fits(w))
     }
 }
@@ -1648,8 +1673,11 @@ struct Analyzed {
 
 /// The formula of batch `i` of `files` (by index, the data of each in `data`), recompressed but
 /// those (by index) in `raw`. The data is the formula's: where it is needed again, to verify
-/// the batch, it is read from the source ([`finish`]).
+/// the batch, it is read from the source ([`finish`]). Below level 2, [`analyze_plain`].
 fn analyze(i: usize, files: &[File], data: Vec<Bytes>, raw: &HashSet<usize>, opt: &Options, notes: &Notes) -> Analyzed {
+    if !opt.recompresses() {
+        return analyze_plain(i, files, data, opt, notes);
+    }
     let _s = aqr_common::trace::span("analyze");
     // a formula of the files as the contents of its streams, each a file of its own
     let mut f = Formula::default();
@@ -1714,7 +1742,35 @@ fn analyze(i: usize, files: &[File], data: Vec<Bytes>, raw: &HashSet<usize>, opt
     cx.files = None;
     crate::memory::declare(&mut f, &Native { threads: opt.threads }, &memo.1);
     notes.send(Note::Analyzed(i));
+    let Cx { enc, .. } = cx;
+    laid(f, files, enc, memo, opt)
+}
 
+/// Batch `i` of `files` (by index, the data of each in `data`) below level 2, where nothing is
+/// recompressed ([`Options::recompresses`]) nor verified: the files as they are, what they hold
+/// of each other stored once ([`Formula::share_slices`]), as [`analyze`] makes them there; and
+/// its streams compressed already, on the workers free as a file alone has them, rather than
+/// by the writer, a batch at a time ([`finish`]).
+fn analyze_plain(i: usize, files: &[File], data: Vec<Bytes>, opt: &Options, notes: &Notes) -> Analyzed {
+    let analyzing = aqr_common::trace::span("analyze");
+    let mut f = Formula::default();
+    let slices = files.iter().zip(data).map(|(file, d)| f.push_as("raw", file.kind, d)).collect();
+    f.root = Node::Concat(slices);
+    f.share_slices(SLICE_MIN);
+    notes.send(Note::Analyzed(i));
+    let mut enc = crate::encoder(opt);
+    enc.share_modules();
+    let mut a = laid(f, files, enc, verify::Memo::default(), opt);
+    drop(analyzing);
+    let _s = aqr_common::trace::span("encode");
+    a.enc.on_precompress(Some(notes.encoding(i)));
+    a.enc.precompress_wide(&a.f.streams.iter().collect::<Vec<_>>()).expect("zstd");
+    a
+}
+
+/// Formula `f` of `files` (each a part of its root), laid out in leaves: one for each file, or for
+/// each set of them; its streams of a class together.
+fn laid(mut f: Formula, files: &[File], enc: aqr::Encoder, memo: verify::Memo, opt: &Options) -> Analyzed {
     // a leaf for each file, or for each set of them
     let Node::Concat(nodes) = std::mem::replace(&mut f.root, Node::Concat(Vec::new())) else { unreachable!() };
     let mut leaves: Vec<Leaf> = Vec::new();
@@ -1741,12 +1797,20 @@ fn analyze(i: usize, files: &[File], data: Vec<Bytes>, raw: &HashSet<usize>, opt
 
     // the streams of a class together, within a block each; but those that do not compress,
     // which would gain nothing and only make a file read alone read more
-    for s in &mut f.streams {
-        s.content = false;
-        if s.kind != Kind::Compressed && s.data.len() >= MERGE_PROBE && !cx.enc.compresses(&s.data).expect("zstd") {
-            s.kind = Kind::Compressed;
+    let probed: Vec<usize> = (0..f.streams.len())
+        .filter(|&s| f.streams[s].kind != Kind::Compressed && f.streams[s].data.len() >= MERGE_PROBE)
+        .collect();
+    let ds: Vec<&[u8]> = probed.iter().map(|&s| &f.streams[s].data[..]).collect();
+    let compresses = {
+        let _s = aqr_common::trace::span("compressible");
+        enc.compresses_each(&ds).expect("zstd")
+    };
+    for (s, compresses) in probed.into_iter().zip(compresses) {
+        if !compresses {
+            f.streams[s].kind = Kind::Compressed;
         }
     }
+    f.streams.iter_mut().for_each(|s| s.content = false);
     let counts: Vec<usize> = leaves.iter().map(|l| l.outputs.len()).collect();
     f.root = Node::Concat(leaves.iter_mut().flat_map(|l| std::mem::take(&mut l.outputs)).collect());
     // (at level 0 each file a leaf block of its own, uncompressed: no formula block, which
@@ -1757,8 +1821,6 @@ fn analyze(i: usize, files: &[File], data: Vec<Bytes>, raw: &HashSet<usize>, opt
     let Node::Concat(nodes) = std::mem::replace(&mut f.root, Node::Concat(Vec::new())) else { unreachable!() };
     let mut nodes = nodes.into_iter();
     leaves.iter_mut().zip(counts).for_each(|(l, n)| l.outputs = nodes.by_ref().take(n).collect());
-
-    let Cx { enc, .. } = cx;
     Analyzed { f, leaves, at, enc, memo }
 }
 

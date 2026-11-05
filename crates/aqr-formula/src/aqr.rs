@@ -1419,6 +1419,27 @@ impl Encoder {
         Ok(saves)
     }
 
+    /// [`Encoder::compresses`] of each of streams `ds`, on up to the encoder's threads.
+    pub fn compresses_each(&self, ds: &[&[u8]]) -> Result<Vec<bool>> {
+        if self.level == Level::STORED {
+            return Ok(vec![false; ds.len()]);
+        }
+        let trials = aqr_common::pool::par_map(ds.len(), self.threads, |i| {
+            let (k, sample) = (key(&[ds[i]]), sampled(&[ds[i]]));
+            THREAD_CCTX.with(|c| Ok((k, sample.len(), compressed(&mut c.borrow_mut(), &[&sample], PROBE, 1)?)))
+        });
+        let mut kept = self.trials.borrow_mut();
+        trials
+            .into_iter()
+            .map(|t| {
+                let (k, n, c): (StreamKey, usize, Compressed) = t?;
+                let saves = c.as_ref().is_some_and(|c| saves(c.len(), n));
+                kept.insert((k, PROBE), c);
+                Ok(saves)
+            })
+            .collect()
+    }
+
     /// `sample` of the stream whose key is `k` compressed at `level`, as [`Encoder::least`]
     /// compressed it if it did.
     fn trial(&self, k: StreamKey, sample: &[u8], level: i32) -> Result<Option<Vec<u8>>> {
@@ -1448,6 +1469,15 @@ impl Encoder {
         let blocks =
             streams.iter().flat_map(|s| block_ranges(s.data.len()).map(move |r| (vec![&s.data[r]], self.how(s))));
         self.precompress_blocks(blocks.collect(), false)
+    }
+
+    /// [`Encoder::precompress`], but each block of more than one of Zstandard's jobs on as many
+    /// workers as are free for its jobs, the largest first (as each block written alone is):
+    /// for streams that are all there is to compress, nothing else made meanwhile.
+    pub fn precompress_wide(&self, streams: &[&crate::Stream]) -> Result<()> {
+        let blocks =
+            streams.iter().flat_map(|s| block_ranges(s.data.len()).map(move |r| (vec![&s.data[r]], self.how(s))));
+        self.precompress_blocks(blocks.collect(), true)
     }
 
     /// [`Encoder::precompress`] of `blocks` (each its bytes in pieces, and how it is compressed),

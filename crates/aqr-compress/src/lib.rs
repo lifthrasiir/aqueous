@@ -175,7 +175,8 @@ pub struct Options {
     pub depth: u32,
     /// Decode the archive that [`compress`] makes, and store the file raw instead where it is
     /// not given back (§6). Without it, the archive's checksum of the output covers the file
-    /// (R8). [`recompress`] does not verify: whoever takes its formula does.
+    /// (R8). [`recompress`] does not verify: whoever takes its formula does. Nor is anything
+    /// verified below level 2, where nothing is recompressed ([`Options::level`]).
     pub verify: bool,
     /// The inputs whose data is recompressed in turn, by module and position; by default
     /// [`CONTENTS`].
@@ -501,6 +502,28 @@ impl Once {
     }
 }
 
+/// `opt`, but [`Options::verify`] only where data is recompressed ([`Options::recompresses`]):
+/// below level 2 no module is applied, and what Zstandard makes of the data in memory is
+/// trusted.
+pub(crate) fn verifying(opt: &Options) -> Options {
+    Options { verify: opt.verify && opt.recompresses(), ..opt.clone() }
+}
+
+/// The encoder of formulas made with `opt`.
+pub(crate) fn encoder(opt: &Options) -> Encoder {
+    let mut enc = Encoder::with_threads(opt.level, opt.threads)
+        .with_modules(aqr_decompress::wasm_of)
+        .with_dictionaries(opt.dictionaries)
+        .with_size_hint(opt.size_hint);
+    if opt.shared_resources {
+        enc.share_resources();
+    }
+    if opt.shared_modules {
+        enc.share_modules();
+    }
+    enc
+}
+
 impl Cx {
     fn new(d: &[u8], opt: &Options) -> Cx {
         Cx::of_len(d.len(), opt)
@@ -509,18 +532,8 @@ impl Cx {
     /// A context of data of `n` bytes.
     fn of_len(n: usize, opt: &Options) -> Cx {
         let inflate = opt.expansion.saturating_mul(n as u64).saturating_add(EXPANSION_SLACK);
-        let mut enc = Encoder::with_threads(opt.level, opt.threads)
-            .with_modules(aqr_decompress::wasm_of)
-            .with_dictionaries(opt.dictionaries)
-            .with_size_hint(opt.size_hint);
-        if opt.shared_resources {
-            enc.share_resources();
-        }
-        if opt.shared_modules {
-            enc.share_modules();
-        }
         Cx {
-            enc,
+            enc: encoder(opt),
             inflate: Cell::new(inflate),
             pre: None,
             ready: Default::default(),
@@ -771,6 +784,7 @@ fn compress_with(
     out: &mut dyn Sink,
 ) -> io::Result<(usize, Option<Formula>)> {
     use progress::Note;
+    let opt = &verifying(opt);
     let note = |n: Note| {
         if let Some(notes) = &notes {
             notes.send(n)
