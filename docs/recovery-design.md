@@ -290,6 +290,10 @@ non-critical 타입 둘을 쓴다. 예를 들어 B0–B3은 parity block, B4–B
 - 버스트 하나는 slice를 최대 ⌈L/S⌉ + 1개 지운다. 보호 범위 R, parity 비율 r이면 범위 안에서 견디는 버스트는 대략 **L ≤ r·R − S**이고, 흩어진 E1은 p개까지 견딘다. E1 하나가 parity를 S만큼 소모한다.
 - 예를 들어 R = 1 GiB, S = 64 KiB이면 n = 16384이다. r = 1%이면 p = 164, parity는 10.25 MiB이다. 버스트는 약 10 MiB(E2)까지 견디고, 인코딩 메모리는 m = 256으로 약 32 MiB이다.
 - E3을 노리면 R = 16 GiB, S = 512 KiB(n = 32768)로 잡는다. r = 1%이면 약 160 MiB이다.
+- **s의 선택.** 명세에 권고(비규범)로 싣는다. decoder는 `lg_slice_size`를 읽기만 하므로 규범으로 둘 필요는 없지만, 적혀 있지 않으면 혼란스럽다. 범위(`range_start`, R)와 parity 비율 r(또는 고정된 p)이 주어지면, s = s<sub>min</sub>부터 하나씩 올리며 다음을 처음 만족하는 s를 고른다. 가장 작은 S가 erasure 단위로 가장 잘다.
+  - S = 2<sup>s</sup>, a = (`range_start` − 원점) mod S, n = ⌈(a + R)/S⌉, p = max(1, ⌈r·n⌉), m = 2<sup>⌈log₂ p⌉</sup>일 때 n + m ≤ 65536.
+  - s<sub>min</sub>은 12이고, 암호화 아카이브에서 slice를 age 청크에 맞추려면 16이다(§7의 3번).
+  - s가 커지면 n과 p가 함께 줄어 조건이 느슨해지기만 하므로 루프는 끝난다. 정렬과 무관한 충분조건은 R ≤ S·(65536 − m − 1)이다.
 - interleave(slice k를 set k mod G에 배정)는 두지 않는다.
   > interleave를 해도 같은 총 parity로 견디는 버스트 길이는 같다(G·p·S). interleave가 버는 것은 shard 수 상한 아래에서 S를 줄이는 것뿐이고, 그 대가로 전체가 MDS가 아니게 된다. Schroeder 2010(§2.1)이 interleaved parity가 예상보다 약하다고 보인 것과 같은 문제이다. S를 줄이고 싶으면 R을 줄인다.
 
@@ -369,7 +373,7 @@ non-critical 타입 둘을 쓴다. 예를 들어 B0–B3은 parity block, B4–B
 
 - [ ] **S3.** 블록 헤더가 손상된 뒤 다음 leaf block에서 metadata의 `file_offset`으로 재동기화하는 절차를 §Repair에 넣는다(`other-projects.md`의 lzip 항목). non-leaf block은 순번으로 참조되므로 손상 지점 뒤로 같은 parcel의 위치를 잃는다.
 - [ ] **S4.** 비규범 노트를 추가한다. 내용은 오류 모델 요약과 E5가 범위 밖이라는 점이다. (segment 주기는 §Mirror block의 노트에, checksum 권고는 §Checksums와 §Archival profile에 있다.)
-- [ ] **S6.** (§5.4를 진행할 경우) recovery block 절과 부호의 완전한 정의를 추가하고, §Block types의 표에 recovery 타입(B0–B7 등 non-critical)을 넣는다.
+- [ ] **S6.** (§5.4를 진행할 경우) recovery block 절과 부호의 완전한 정의, s를 고르는 권고(§5.4의 크기)를 추가하고, §Block types의 표에 recovery 타입(B0–B7 등 non-critical)을 넣는다.
 
 ### 구현 (I)
 
