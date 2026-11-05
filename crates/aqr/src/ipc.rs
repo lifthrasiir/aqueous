@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! > {"hello":1,"answers":["overwrite"]}
-//! < {"hello":1,"controls":["cancel"]}
+//! < {"hello":1,"controls":["cancel","finish"]}
 //! ```
 //!
 //! `hello` is the version of the protocol (this is 1); `answers`, the kinds of question the
@@ -31,7 +31,8 @@
 //! - `{"event":"skipped","output":O}`: an archive not made, as the frontend answered.
 //! - `{"event":"error","message":...}`: the failure that the program ends with.
 //! - `{"event":"stopped"}`: stopped as the frontend asked; the output being written removed
-//!   ([`crate::stop`]).
+//!   ([`crate::stop`]). Of an archive ended as it was (`finish`, or a signal), `"kept"` too:
+//!   `{"files", "bytes"}` it holds, or null where nothing was kept.
 //!
 //! Where the options leave something open that the frontend answers, it is asked, and the work
 //! that asks waits for the answer (the threads at other work go on):
@@ -52,7 +53,9 @@
 //! answer where nobody is asked (an error, as without `--ipc`): a frontend that does not take
 //! a kind of question still works. The questions are numbered, as several may be open at once.
 //!
-//! The frontend may send `{"control":"cancel"}` at any time. Closing this program's standard
+//! The frontend may send `{"control":"cancel"}` at any time, or `{"control":"finish"}`: an
+//! archive being written then ended as it is, of the files written (committed: [`crate::stop`]);
+//! anything else cancelled as `cancel` does. Closing this program's standard
 //! input cancels as well, so that it never outlives a frontend gone. What it does not know of
 //! what it reads, it ignores.
 
@@ -61,7 +64,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, mpsc};
 
-use aqr_ipc::{CANCEL, VERSION};
+use aqr_ipc::{CANCEL, FINISH, VERSION};
 use serde_json::{Value, json};
 
 /// The exit code where the frontend stopped the work (as shells tell a process stopped by
@@ -111,7 +114,7 @@ pub fn start() -> Result<(), String> {
     if IPC.set(ipc).is_err() {
         return Err("--ipc: started twice".into());
     }
-    send(&json!({"hello": VERSION, "controls": [CANCEL]}));
+    send(&json!({"hello": VERSION, "controls": [CANCEL, FINISH]}));
     std::thread::Builder::new().name("ipc".into()).spawn(read).map_err(|e| format!("--ipc: {e}"))?;
     Ok(())
 }
@@ -128,6 +131,9 @@ fn read() {
             }
         } else if v["control"] == CANCEL {
             break;
+        } else if v["control"] == FINISH {
+            // (where nothing is to be ended as it is, cancelled)
+            crate::stop::request(STOPPED);
         }
     }
     send(&json!({"event": "stopped"}));

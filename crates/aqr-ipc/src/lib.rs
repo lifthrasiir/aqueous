@@ -24,8 +24,13 @@ pub mod ask {
     pub const PASSPHRASE: &str = "passphrase";
 }
 
-/// The control that stops the work.
+/// The control that stops the work, undoing what was done to its output.
 pub const CANCEL: &str = "cancel";
+
+/// The control that stops the work keeping what was done: an archive being written ended as
+/// it is, of the files written (and the work cancelled where it cannot be: `aqr` tells the
+/// controls it takes in its hello).
+pub const FINISH: &str = "finish";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Verb {
@@ -270,6 +275,11 @@ impl Job {
     /// Asks `aqr` to stop, its output being written removed.
     pub fn cancel(&self) {
         self.send(&json!({"control": CANCEL}));
+    }
+
+    /// Asks `aqr` to stop, keeping what was done ([`FINISH`]).
+    pub fn finish(&self) {
+        self.send(&json!({"control": FINISH}));
     }
 
     /// Closes `aqr`'s standard input: it stops where it has not, and the readers end.

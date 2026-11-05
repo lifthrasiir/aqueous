@@ -88,3 +88,81 @@ fn located_among_other_bytes() {
     }
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// `aqr` given `args` in `dir`, sent `signals` (one after another) once `when` holds (or 5
+/// seconds have gone by): its outcome, and whether it was still running when they were sent.
+#[cfg(unix)]
+fn signalled(dir: &Path, args: &[&str], when: &dyn Fn() -> bool, signals: &[&str]) -> (Output, bool) {
+    let c = Command::new(env!("CARGO_BIN_EXE_aqr"))
+        .current_dir(dir)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let start = std::time::Instant::now();
+    while !when() && start.elapsed() < std::time::Duration::from_secs(5) {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let pid = c.id().to_string();
+    let mut running = true;
+    for s in signals {
+        running &=
+            Command::new("kill").args([&format!("-{s}"), &pid]).stderr(Stdio::null()).status().unwrap().success();
+    }
+    (c.wait_with_output().unwrap(), running)
+}
+
+/// Many small files, archived a segment a batch, slowly enough to be stopped.
+#[cfg(unix)]
+fn many(d: &Path) -> Vec<(String, Vec<u8>)> {
+    let src = d.join("src");
+    fs::create_dir_all(&src).unwrap();
+    for i in 0..300 {
+        fs::write(src.join(format!("f{i:03}.txt")), text(i, 40_000)).unwrap();
+    }
+    files(&src)
+}
+
+#[cfg(unix)]
+const SLOW: [&str; 8] = ["-T", "1", "-B", "100K", "-S", "1", "-o", "b.aqr"];
+
+/// An archive stopped (a signal, as Ctrl-C is) once a segment of it is committed: ended as it
+/// is, of the files written, telling what it left out; the run failing as a shell tells
+/// Ctrl-C. Stopped twice, at once: the archive of its last commit.
+#[cfg(unix)]
+#[test]
+fn stopped() {
+    let d = scratch("stopped");
+    let all = many(&d);
+    let out = d.join("b.aqr");
+    for signals in [&["TERM"][..], &["TERM", "TERM"]] {
+        let _ = fs::remove_file(&out);
+        let args: Vec<&str> = SLOW.iter().copied().chain(["src"]).collect();
+        let (o, running) = signalled(&d, &args, &|| out.exists(), signals);
+        assert!(running, "done before it was stopped");
+        if signals.len() == 1 {
+            assert_eq!(o.status.code(), Some(130), "{}", stderr(&o));
+            assert!(stderr(&o).contains("aqr: stopped: b.aqr holds"), "{}", stderr(&o));
+        }
+        let t = ok(&d, &["-K", "b.aqr"]);
+        assert!(stderr(&t).contains("incomplete, its writing stopped"), "{}", stderr(&t));
+        ok(&d, &["-d", "-f", "-o", "x", "b.aqr"]);
+        let got = files(&d.join("x"));
+        fs::remove_dir_all(d.join("x")).unwrap();
+        assert!(!got.is_empty() && got.len() < all.len(), "{}", got.len());
+        assert!(got.iter().all(|f| all.contains(f)));
+        let parts =
+            fs::read_dir(&d).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().ends_with(".part"));
+        assert_eq!(parts.count(), 0);
+    }
+    // with --atomic, nothing
+    let _ = fs::remove_file(&out);
+    let args: Vec<&str> = ["--atomic"].into_iter().chain(SLOW).chain(["src"]).collect();
+    let start = std::time::Instant::now();
+    let (o, running) = signalled(&d, &args, &|| start.elapsed() > std::time::Duration::from_millis(500), &["TERM"]);
+    assert!(running && !o.status.success());
+    assert!(fs::read_dir(&d).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().starts_with("b.aqr")));
+    fs::remove_dir_all(&d).unwrap();
+}

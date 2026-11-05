@@ -33,7 +33,7 @@ fn start(args: &[&std::ffi::OsStr], answers: &[&str]) -> (Child, impl Iterator<I
     let mut lines = BufReader::new(out).lines().map(|l| serde_json::from_str::<Value>(&l.unwrap()).unwrap());
     let hello = lines.next().unwrap();
     assert_eq!(hello["hello"], 1);
-    assert_eq!(hello["controls"], json!(["cancel"]));
+    assert_eq!(hello["controls"], json!(["cancel", "finish"]));
     (c, lines)
 }
 
