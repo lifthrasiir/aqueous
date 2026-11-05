@@ -1933,13 +1933,18 @@ fn stopped_tree(
     }
     let (kept, kept_bytes) = (files.saturating_sub(s.files), total.saturating_sub(s.bytes));
     if !a.quiet {
-        eprintln!(
-            "aqr: stopped: {} holds {kept} of {files} files ({}); {} ({}) not archived (aqr -a adds them)",
-            out.display(),
-            size(kept_bytes as f64),
-            if s.files == 1 { "1 file".to_string() } else { format!("{} files", s.files) },
-            size(s.bytes as f64),
-        );
+        let left = if s.files == 1 { "1 file".to_string() } else { format!("{} files", s.files) };
+        let (kept_size, left_size) = (size(kept_bytes as f64), size(s.bytes as f64));
+        match a.append {
+            true => eprintln!(
+                "aqr: stopped: {kept} of {files} files ({kept_size}) appended to {}; {left} ({left_size}) not (aqr -a adds them)",
+                out.display()
+            ),
+            false => eprintln!(
+                "aqr: stopped: {} holds {kept} of {files} files ({kept_size}); {left} ({left_size}) not archived (aqr -a adds them)",
+                out.display()
+            ),
+        }
     }
     ipc::tell(serde_json::json!({"event": "stopped", "kept": {"files": kept, "bytes": kept_bytes}}));
     stop::exit(STOPPED)

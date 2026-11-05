@@ -287,6 +287,7 @@ fn append_stopped_and_resumed() {
     let (o, running) = signalled(&d, &args, &|| fs::metadata(&out).unwrap().len() > len + 200_000, &["TERM"]);
     assert!(running, "done before it was stopped");
     assert_eq!(o.status.code(), Some(130), "{}", stderr(&o));
+    assert!(stderr(&o).contains(") appended to b.aqr"), "{}", stderr(&o));
     let t = ok(&d, &["-K", "b.aqr"]);
     assert!(stderr(&t).contains("incomplete"), "{}", stderr(&t));
     let got = extracted(&d, "b.aqr");
