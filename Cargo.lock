@@ -418,6 +418,7 @@ dependencies = [
 name = "aqr-flate"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
  "aqr-common",
  "aqr-formula",
  "flate-zoo",

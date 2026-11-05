@@ -1105,7 +1105,7 @@ The decoder ignores the following; encoders write none of them:
 
 ## The module flate-inflate
 
-The module `flate-inflate`, version 1 (`formula::INFLATE`, `module::inflate`), decodes a raw
+The module `flate-inflate`, version 1 (`formula::INFLATE`, `module::inflate_part`), decodes a raw
 DEFLATE stream: its output is the stream's data. It is for a file whose data is that of a
 stream which the archive keeps as it is (the body of a ZIP archive's entry, the stream of a
 gzip member or a zlib stream, not rebuilt): the file is then the stream's data, and the stream
@@ -1122,8 +1122,10 @@ is stored once.
 The stream must end with its input: after the final block, only the bits padding its last
 byte (of any value) may follow. A stream that ends before its input does, runs past it, has
 more or less data than `len`, or a distance reaching before its data is invalid, and so is the
-application. The module needs `len` bytes for its output besides its input, and memory of a
-size independent of both (the tables of one block at a time).
+application. It is a part module (`module::inflate_part`) of windows of a page for its input
+and its output: it reads the stream and writes the data as it goes, holding 64 KiB of the
+stream, the last 32 KiB of the data (for the distances) and 256 KiB more before writing them
+out, besides the tables of one block, whatever the lengths of either.
 
 ## Encoder choices (informative)
 

@@ -1088,6 +1088,345 @@ pub fn data(raw: &[u8], len: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Bytes of the data [`data_streamed`] keeps back for the distances of matches.
+const HISTORY: usize = 32 << 10;
+
+/// Bytes [`data_streamed`] makes at most before it writes them out and lets go of all but the
+/// last [`HISTORY`] of them.
+const FLUSH: usize = 256 << 10;
+
+/// Bytes of the stream [`data_streamed`] has ahead of where it decodes, where there are as many:
+/// before a token (of at most 48 bits, and the 8 bytes a refill loads) and before a block's
+/// header (a dynamic one of at most some 560 bytes).
+const AHEAD_TOKEN: usize = 32;
+const AHEAD_HEADER: usize = 1024;
+
+/// Bytes [`data_streamed`] reads at most at once.
+const READ: usize = 64 << 10;
+
+/// Bytes [`data_streamed`] holds at most of the stream and of the data: what it reads at once
+/// beside those ahead, and [`HISTORY`] and [`FLUSH`] beside a match (at most 258 bytes).
+pub const INPUT: usize = READ + AHEAD_HEADER;
+pub const OUTPUT: usize = HISTORY + FLUSH + 258;
+
+/// [`data`] of a stream read a piece at a time and its data written out a piece at a time,
+/// holding a piece of each and [`HISTORY`] bytes of the data rather than either whole: `read`
+/// appends the next bytes of the stream (`len_in` bytes in all) to the vector it is given, at
+/// most so many as it takes from the end of the vector (at least one), and `write` takes the
+/// data in order (`len` bytes in all), in pieces. The decoding of the module `flate-inflate` as
+/// a part module.
+pub fn data_streamed(
+    len_in: u64,
+    read: &mut dyn FnMut(&mut Vec<u8>, usize) -> Result<()>,
+    write: &mut dyn FnMut(&[u8]) -> Result<()>,
+    len: u64,
+) -> Result<()> {
+    let mut s = Streamed {
+        input: Vec::with_capacity(INPUT),
+        taken: 0,
+        len_in,
+        state: (0, 0, 0),
+        out: Vec::with_capacity(OUTPUT),
+        written: 0,
+        made: 0,
+        len,
+        read,
+        write,
+    };
+    static FIXED: std::sync::OnceLock<(Table, Table)> = std::sync::OnceLock::new();
+    let fixed = FIXED.get_or_init(|| {
+        (
+            Table::new(&huffman::fixed_lit_lens(), LIT_BITS).unwrap(),
+            Table::new(&huffman::FIXED_DIST_LENS, DIST_BITS).unwrap(),
+        )
+    });
+    let (mut lit, mut dist) = (Table::empty(LIT_BITS), Table::empty(DIST_BITS));
+    loop {
+        s.ahead(AHEAD_HEADER)?;
+        let mut b = s.bits();
+        let last = b.get(1) == 1;
+        match b.get(2) {
+            0 => {
+                let k = (b.bit_pos() as u32).wrapping_neg() & 7;
+                b.get(k);
+                let n = b.get(16) as u16;
+                let nn = b.get(16) as u16;
+                b.check()?;
+                if nn != !n {
+                    return Err(Error::Invalid("stored block length mismatch"));
+                }
+                // (from the byte after the lengths, the bits loaded ahead put back)
+                s.state = (b.bit_pos() / 8, 0, 0);
+                let mut left = n as usize;
+                while left > 0 {
+                    s.flush(false)?;
+                    s.ahead(1)?;
+                    let at = s.state.0;
+                    let k = left
+                        .min(s.input.len() - at)
+                        .min(HISTORY + FLUSH - s.out.len());
+                    if k == 0 {
+                        return Err(Error::Truncated);
+                    }
+                    if s.made + k as u64 > s.len {
+                        return Err(Error::Limit);
+                    }
+                    s.out.extend_from_slice(&s.input[at..at + k]);
+                    s.made += k as u64;
+                    s.state.0 += k;
+                    left -= k;
+                }
+            }
+            1 => {
+                s.state = (b.pos, b.buf, b.n);
+                s.tokens(&fixed.0, &fixed.1)?;
+            }
+            2 => {
+                let header = parse_header(&mut b)?;
+                lit.build(header.lit_lens())?;
+                dist.build(header.dist_lens())?;
+                s.state = (b.pos, b.buf, b.n);
+                s.tokens(&lit, &dist)?;
+            }
+            _ => return Err(Error::Invalid("reserved block type")),
+        }
+        s.bits().check()?;
+        if last {
+            break;
+        }
+    }
+    let mut b = s.bits();
+    let k = (b.bit_pos() as u32).wrapping_neg() & 7;
+    b.get(k);
+    b.check()?;
+    if s.taken + (b.bit_pos() / 8) as u64 != s.len_in || b.bit_pos() / 8 != s.input.len() {
+        return Err(Error::Invalid("bytes after the stream"));
+    }
+    if s.made != s.len {
+        return Err(Error::Corrupt);
+    }
+    s.flush(true)
+}
+
+/// The state of [`data_streamed`].
+struct Streamed<'r> {
+    /// The bytes of the stream read and not yet let go of, those before them taken (decoded),
+    /// and the stream's length.
+    input: Vec<u8>,
+    taken: u64,
+    len_in: u64,
+    /// Where it decodes in `input`: [`Bits`]'s next byte to load, and the bits loaded.
+    state: (usize, u64, u32),
+    /// The data made and not let go of, of which the first `written` are written out, and the
+    /// data made in all, of `len` bytes at most.
+    out: Vec<u8>,
+    written: usize,
+    made: u64,
+    len: u64,
+    read: &'r mut dyn FnMut(&mut Vec<u8>, usize) -> Result<()>,
+    write: &'r mut dyn FnMut(&[u8]) -> Result<()>,
+}
+
+impl Streamed<'_> {
+    fn bits(&self) -> Bits<'_> {
+        let (pos, buf, n) = self.state;
+        Bits {
+            d: &self.input,
+            pos,
+            buf,
+            n,
+        }
+    }
+
+    /// At least `n` bytes of the stream read ahead of where it decodes, or all that is left of
+    /// it: the bytes before let go of first.
+    fn ahead(&mut self, n: usize) -> Result<()> {
+        let at = self.state.0;
+        if self.input.len() - at.min(self.input.len()) >= n {
+            return Ok(());
+        }
+        // (but those of the bits loaded, for the bits consumed to be counted from within them)
+        let gone = at
+            .min(self.input.len())
+            .saturating_sub((self.state.2 as usize).div_ceil(8));
+        self.input.drain(..gone);
+        self.taken += gone as u64;
+        self.state.0 -= gone;
+        while self.input.len() - self.state.0.min(self.input.len()) < n {
+            let left = self.len_in - self.taken - self.input.len() as u64;
+            if left == 0 {
+                break;
+            }
+            let k = (n.max(READ) as u64).min(left) as usize;
+            let before = self.input.len();
+            (self.read)(&mut self.input, k)?;
+            if self.input.len() == before || self.input.len() > before + k {
+                return Err(Error::Corrupt);
+            }
+        }
+        Ok(())
+    }
+
+    /// The data made since written out (`all`: or where it has more than [`FLUSH`] bytes), all
+    /// but the last [`HISTORY`] of it let go of.
+    fn flush(&mut self, all: bool) -> Result<()> {
+        if !all && self.out.len() < HISTORY + FLUSH {
+            return Ok(());
+        }
+        (self.write)(&self.out[self.written..])?;
+        let gone = self.out.len().saturating_sub(HISTORY);
+        self.out.drain(..gone);
+        self.written = self.out.len();
+        Ok(())
+    }
+
+    /// A block's tokens up to its end of block, of tables `lit` and `dist`, the data written
+    /// out as it grows.
+    fn tokens(&mut self, lit: &Table, dist: &Table) -> Result<()> {
+        loop {
+            self.ahead(AHEAD_TOKEN)?;
+            self.flush(false)?;
+            let (pos, buf, n) = self.state;
+            let mut b = Bits {
+                d: &self.input,
+                pos,
+                buf,
+                n,
+            };
+            // (as many tokens as the stream read ahead and the room before a flush allow)
+            let stop = self.input.len().saturating_sub(AHEAD_TOKEN);
+            let room = HISTORY + FLUSH;
+            let r = loop {
+                if b.pos > stop || self.out.len() >= room {
+                    break Ok(false);
+                }
+                b.refill();
+                if b.pos > b.d.len() + 16 {
+                    break Err(Error::Truncated);
+                }
+                let sym = match lit.decode(&mut b) {
+                    Ok(s) => s,
+                    Err(e) => break Err(e),
+                };
+                if sym < 256 {
+                    if self.made >= self.len {
+                        break Err(Error::Limit);
+                    }
+                    self.out.push(sym as u8);
+                    self.made += 1;
+                    continue;
+                }
+                if sym == 256 {
+                    break b.check().map(|()| true);
+                }
+                let c = sym as usize - 257;
+                if c >= 29 {
+                    break Err(Error::Invalid("invalid literal/length symbol"));
+                }
+                let n = (LEN_BASE[c] + b.bits(LEN_EXTRA[c] as u32) as u16) as usize;
+                let dc = match dist.decode(&mut b) {
+                    Ok(s) => s as usize,
+                    Err(e) => break Err(e),
+                };
+                if dc >= 30 {
+                    break Err(Error::Invalid("invalid distance symbol"));
+                }
+                b.refill();
+                let d = DIST_BASE[dc] as usize + b.bits(DIST_EXTRA[dc] as u32) as usize;
+                if d as u64 > self.made.min(self.out.len() as u64) {
+                    break b
+                        .check()
+                        .and(Err(Error::Invalid("distance before start of data")));
+                }
+                if self.made + n as u64 > self.len {
+                    break Err(Error::Limit);
+                }
+                let from = self.out.len() - d;
+                if d >= n {
+                    self.out.extend_from_within(from..from + n);
+                } else {
+                    // (overlapping: a run of the last `d` bytes)
+                    for i in 0..n {
+                        self.out.push(self.out[from + i]);
+                    }
+                }
+                self.made += n as u64;
+            };
+            self.state = (b.pos, b.buf, b.n);
+            match r {
+                Ok(true) => return Ok(()),
+                Ok(false)
+                    if self.taken + self.input.len() as u64 == self.len_in && b.pos > stop =>
+                {
+                    // (the end of the stream within the bytes ahead: decoded with it as they are)
+                    return self.tail(lit, dist);
+                }
+                Ok(false) => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// [`Streamed::tokens`] of the last bytes of the stream, all of them read.
+    fn tail(&mut self, lit: &Table, dist: &Table) -> Result<()> {
+        loop {
+            self.flush(false)?;
+            let (pos, buf, n) = self.state;
+            let mut b = Bits {
+                d: &self.input,
+                pos,
+                buf,
+                n,
+            };
+            b.refill();
+            if b.pos > b.d.len() + 16 {
+                return Err(Error::Truncated);
+            }
+            let sym = lit.decode(&mut b)?;
+            let r = if sym < 256 {
+                if self.made >= self.len {
+                    return Err(Error::Limit);
+                }
+                self.out.push(sym as u8);
+                self.made += 1;
+                false
+            } else if sym == 256 {
+                b.check()?;
+                true
+            } else {
+                let c = sym as usize - 257;
+                if c >= 29 {
+                    return Err(Error::Invalid("invalid literal/length symbol"));
+                }
+                let n = (LEN_BASE[c] + b.bits(LEN_EXTRA[c] as u32) as u16) as usize;
+                let dc = dist.decode(&mut b)? as usize;
+                if dc >= 30 {
+                    return Err(Error::Invalid("invalid distance symbol"));
+                }
+                b.refill();
+                let d = DIST_BASE[dc] as usize + b.bits(DIST_EXTRA[dc] as u32) as usize;
+                if d as u64 > self.made.min(self.out.len() as u64) {
+                    b.check()?;
+                    return Err(Error::Invalid("distance before start of data"));
+                }
+                if self.made + n as u64 > self.len {
+                    return Err(Error::Limit);
+                }
+                let from = self.out.len() - d;
+                for i in 0..n {
+                    self.out.push(self.out[from + i]);
+                }
+                self.made += n as u64;
+                false
+            };
+            self.state = (b.pos, b.buf, b.n);
+            if r {
+                return Ok(());
+            }
+        }
+    }
+}
+
 /// The data of a block's tokens (up to its end of block) for [`data`], appended to `out`,
 /// which may not grow past `len` bytes.
 fn data_tokens(
@@ -1202,6 +1541,107 @@ mod tests {
                 assert!(d.is_empty() || data(&raw, d.len() - 1).is_err());
                 assert!(data(&[&raw[..], &[0]].concat(), d.len()).is_err());
                 assert!(data(&raw[..raw.len() - 1], d.len()).is_err());
+            }
+        }
+    }
+
+    /// [`data_streamed`] of the stream read in pieces of `piece` bytes at most: the data, and
+    /// the largest piece written.
+    fn streamed(raw: &[u8], len: usize, piece: usize) -> Result<(Vec<u8>, usize)> {
+        let (mut at, mut out, mut largest) = (0, Vec::new(), 0);
+        data_streamed(
+            raw.len() as u64,
+            &mut |v: &mut Vec<u8>, n: usize| {
+                let k = n.min(piece).min(raw.len() - at);
+                v.extend_from_slice(&raw[at..at + k]);
+                at += k;
+                Ok(())
+            },
+            &mut |d: &[u8]| {
+                largest = largest.max(d.len());
+                out.extend_from_slice(d);
+                Ok(())
+            },
+            len as u64,
+        )?;
+        Ok((out, largest))
+    }
+
+    /// [`data_streamed`] gives what [`data`] does, the stream read in pieces of any size and the
+    /// data written in pieces of a bounded size (of blocks longer than that too), and refuses
+    /// what it refuses.
+    #[test]
+    fn streamed_as_data() {
+        use crate::zlib::{Params, Strategy, compress};
+        let text: Vec<u8> = (0..20000)
+            .flat_map(|i| format!("line {} of {}\n", i % 97, i % 13).into_bytes())
+            .collect();
+        let runs: Vec<u8> = (0..3_000_000).map(|i| (i / 100_000 % 3) as u8).collect();
+        let samples = [
+            text,
+            runs,
+            aqr_common::rng::noise(300_000),
+            b"ab".to_vec(),
+            Vec::new(),
+        ];
+        for d in &samples {
+            for (level, strategy) in [
+                (0, Strategy::Default),
+                (1, Strategy::Default),
+                (6, Strategy::Default),
+                (9, Strategy::Fixed),
+                (6, Strategy::Rle),
+            ] {
+                let raw = match level {
+                    // stored blocks, as long as they may be
+                    0 => {
+                        let mut raw = Vec::new();
+                        let blocks: Vec<&[u8]> = d.chunks(65535).collect();
+                        for (k, b) in blocks
+                            .iter()
+                            .enumerate()
+                            .chain((blocks.is_empty()).then_some((0, &&[][..])))
+                        {
+                            raw.push((k + 1 >= blocks.len()) as u8);
+                            raw.extend_from_slice(&(b.len() as u16).to_le_bytes());
+                            raw.extend_from_slice(&(!(b.len() as u16)).to_le_bytes());
+                            raw.extend_from_slice(b);
+                        }
+                        raw
+                    }
+                    _ => compress(
+                        d,
+                        Params {
+                            level,
+                            strategy,
+                            ..Params::default()
+                        },
+                    )
+                    .unwrap(),
+                };
+                assert_eq!(data(&raw, d.len()).unwrap(), *d);
+                for piece in [1, 7, 4096, usize::MAX] {
+                    let what = format!("{} {level} {strategy:?} {piece}", d.len());
+                    let (out, largest) =
+                        streamed(&raw, d.len(), piece).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+                    assert!(out == *d, "{what}");
+                    assert!(largest <= HISTORY + FLUSH + 258, "{what}: {largest}");
+                    if piece == 7 || piece == usize::MAX {
+                        assert!(streamed(&raw, d.len() + 1, piece).is_err(), "{what}");
+                        assert!(
+                            d.is_empty() || streamed(&raw, d.len() - 1, piece).is_err(),
+                            "{what}"
+                        );
+                        assert!(
+                            streamed(&[&raw[..], &[0]].concat(), d.len(), piece).is_err(),
+                            "{what}"
+                        );
+                        assert!(
+                            streamed(&raw[..raw.len() - 1], d.len(), piece).is_err(),
+                            "{what}"
+                        );
+                    }
+                }
             }
         }
     }

@@ -350,7 +350,8 @@ struct Entry {
 #[derive(Clone, Copy)]
 enum Run {
     Whole(Decode),
-    Part(aqr_api::emu::Entry),
+    /// And its `decode` applied whole, where it has one (else the emulation's).
+    Part(aqr_api::emu::Entry, Option<Decode>),
 }
 
 /// [`Entry`] of a module taking resources.
@@ -363,10 +364,10 @@ const fn bare(module: Module, decode: Decode) -> Entry {
     Entry { module, resources: false, decode: Run::Whole(decode) }
 }
 
-/// [`Entry`] of a part module, of the entry point `entry` (`aqr_api::entry!`'s), taking
-/// resources where `resources`.
-const fn part(module: Module, resources: bool, entry: aqr_api::emu::Entry) -> Entry {
-    Entry { module, resources, decode: Run::Part(entry) }
+/// [`Entry`] of a part module, of the entry point `entry` (`aqr_api::entry!`'s) and `decode`
+/// applied whole, taking resources where `resources`.
+const fn part(module: Module, resources: bool, entry: aqr_api::emu::Entry, decode: Decode) -> Entry {
+    Entry { module, resources, decode: Run::Part(entry, Some(decode)) }
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -390,7 +391,20 @@ const NATIVE: &[Entry] = &[
     bare(PE_RELOC, |p, _, i, n, _| aqr_exe::module::reloc(p, i, n).map_err(err)),
     bare(MACHO_SYMTAB, |p, _, i, n, _| aqr_exe::module::macho_symtab(p, i, n).map_err(err)),
     takes(FLATE, |p, r, i, n, t| aqr_flate::formula::decode(p, r, i, n, t).map_err(err)),
-    bare(INFLATE, |p, _, i, n, _| aqr_flate::module::inflate(p, i, n).map_err(err)),
+    part(
+        INFLATE,
+        false,
+        aqr_api::emu::Entry {
+            kind: aqr_api::emu::Kind::Part,
+            windows: &[
+                aqr_api::Window::Input(0, aqr_flate::module::INFLATE_WINDOW),
+                aqr_api::Window::Output(0, aqr_flate::module::INFLATE_WINDOW),
+            ],
+            arity: 3,
+            call: |a| aqr_flate::module::inflate_part(a[0], a[1], a[2]),
+        },
+        |p, _, i, n, _| aqr_flate::module::inflate(p, i, n).map_err(err),
+    ),
     bare(LZ4, |p, _, i, n, t| aqr_lz4::formula::decode(p, i, n, t).map_err(err)),
     bare(LZMA, |p, _, i, n, t| aqr_lzma::formula::decode(p, i, n, t).map_err(err)),
     bare(LZMA2, |p, _, i, n, t| aqr_lzma::formula::decode2(p, i, n, t).map_err(err)),
@@ -414,6 +428,7 @@ const NATIVE: &[Entry] = &[
             arity: 3,
             call: |a| aqr_bcj::module::delta_part(a[0], a[1], a[2]),
         },
+        |p, _, i, n, _| bcj(BCJ_DELTA, p, i, n),
     ),
     bare(BCJ2, |p, _, i, n, _| bcj(BCJ2, p, i, n)),
     bare(LZO, |p, _, i, n, t| aqr_lzo::formula::decode(p, i, n, t).map_err(err)),
@@ -575,7 +590,7 @@ impl NativeLoaded<'_> {
     /// The entry point of its code as a part module, where it is one.
     fn part(&self) -> Option<aqr_api::emu::Entry> {
         NATIVE.iter().find(|e| e.module == self.module).and_then(|e| match e.decode {
-            Run::Part(entry) => Some(entry),
+            Run::Part(entry, _) => Some(entry),
             Run::Whole(_) => None,
         })
     }
@@ -710,8 +725,10 @@ impl Native {
             return Err("resources given".into());
         }
         match e.decode {
-            Run::Whole(decode) => decode(params, resources, inputs, len, self.threads.max(1)),
-            Run::Part(entry) => match aqr_api::emu::apply(&entry, inputs, resources, params, &[len]) {
+            Run::Whole(decode) | Run::Part(_, Some(decode)) => {
+                decode(params, resources, inputs, len, self.threads.max(1))
+            }
+            Run::Part(entry, None) => match aqr_api::emu::apply(&entry, inputs, resources, params, &[len]) {
                 Ok(mut out) => Ok(out.pop().expect("an output")),
                 Err(f) => Err(emulated(f)),
             },

@@ -30,9 +30,11 @@ pub const MODULE: Module = Module::new("flate-set", 1).with_memory(memory);
 /// archive's entry, a gzip member or a zlib stream, not rebuilt): the stream is then stored once.
 pub const INFLATE: Module = Module::new("flate-inflate", 1).with_memory(memory_inflate);
 
-/// The memory of [`INFLATE`]: its input, and its output made in place.
+/// The memory of [`INFLATE`], a part module: what it holds of the stream and of the data, with
+/// the pages of slack of each, its tables among the small allocations.
 fn memory_inflate(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    Some(u.whole(0, 0))
+    let held = (crate::inflate::INPUT + crate::inflate::OUTPUT) as u64;
+    Some(u.initial() + aqr_formula::SMALL + held + 2 * aqr_formula::PAGE)
 }
 
 /// The application of [`INFLATE`] to `raw`, a raw DEFLATE stream of `len` bytes of data.

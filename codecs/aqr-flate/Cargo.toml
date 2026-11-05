@@ -14,6 +14,7 @@ encode = ["dep:aqr-formula"]
 train = ["dep:flate-zoo", "dep:rayon"]
 
 [dependencies]
+aqr-api = { path = "../../crates/aqr-api", default-features = false }
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 flate-zoo = { workspace = true, optional = true }

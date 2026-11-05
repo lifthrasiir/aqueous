@@ -326,3 +326,45 @@ pub fn inflate(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     };
     crate::inflate::data(raw, usize::try_from(len).map_err(|_| Error::Limit)?)
 }
+
+/// The pages of the windows of `flate-inflate`'s input and output (as a part module,
+/// [`inflate_part`]).
+pub const INFLATE_WINDOW: u32 = 1;
+
+/// The module `flate-inflate` as a part module (its entry point, of `aqr_api::entry!`): the
+/// stream read and its data written through windows of [`INFLATE_WINDOW`] pages
+/// ([`crate::inflate::data_streamed`]), whatever their lengths.
+pub fn inflate_part(params_len: u64, in0_len: u64, size: u64) {
+    use aqr_api::{Input, Memory, Output};
+    if params_len != 0 {
+        aqr_api::finish(Err(Error::Corrupt));
+    }
+    let (w_in, w_out) = (Input::<0>::size(), Output::<0>::size());
+    let (mut at_in, mut at_out) = (0u64, 0u64);
+    let r = crate::inflate::data_streamed(
+        in0_len,
+        &mut |v: &mut Vec<u8>, n: usize| {
+            // (to the end of the window at most)
+            let k = (n as u64).min(in0_len - at_in).min(w_in - at_in % w_in) as usize;
+            let start = v.len();
+            v.resize(start + k, 0);
+            Input::<0>::request(at_in + k as u64);
+            Input::<0>::read(at_in % w_in, &mut v[start..]);
+            Input::<0>::release(at_in + k as u64);
+            at_in += k as u64;
+            Ok(())
+        },
+        &mut |mut d: &[u8]| {
+            while !d.is_empty() {
+                let k = (d.len() as u64).min(w_out - at_out % w_out) as usize;
+                Output::<0>::write(at_out % w_out, &d[..k]);
+                at_out += k as u64;
+                Output::<0>::commit(at_out);
+                d = &d[k..];
+            }
+            Ok(())
+        },
+        size,
+    );
+    aqr_api::finish(r);
+}
