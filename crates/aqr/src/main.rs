@@ -1085,6 +1085,11 @@ fn compress_into(
             None => return Ok(Vec::new()),
         },
     };
+    // (the archive appended to opened first: one not to be appended to told before the inputs are read)
+    let opened = match a.append {
+        true => Some(append::open(out, a.quiet)?),
+        false => None,
+    };
     begin(if a.append { "append" } else { "compress" }, inputs, Some(out));
     let start = Instant::now();
     let rec = stats::record(a.stats.as_ref());
@@ -1200,10 +1205,10 @@ fn compress_into(
         g.warnings.iter().for_each(|w| eprintln!("{w}"));
     }
     // appending: what the archive holds already left out
-    let prior = match a.append {
-        true => {
+    let prior = match opened {
+        Some(o) => {
             let root_given = matches!((inputs, renames), ([i], [None]) if fs::metadata(i).is_ok_and(|m| m.is_dir()));
-            match append::prior(out, &mut g, a.delete, root_given, a.quiet)? {
+            match o.against(&mut g, a.delete, root_given) {
                 Some(p) => Some(p),
                 None => {
                     if !a.quiet {
@@ -1214,7 +1219,7 @@ fn compress_into(
                 }
             }
         }
-        false => None,
+        None => None,
     };
     // (with -v, the log as the files are written)
     let view = view::View::new(&g, bars(), a.verbose);

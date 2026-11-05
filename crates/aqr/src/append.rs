@@ -1,5 +1,5 @@
 //! Appending to an archive (`-a`; spec, "Appending to an archive"): what the inputs hold that the
-//! archive does not, as a tree of segments to append ([`prior`]).
+//! archive does not, as a tree of segments to append ([`open`], [`Opened::against`]).
 //!
 //! The archive is opened to be written, locked against another writer, and located in its file
 //! (after a stub, say). Bytes after it are those of an append not committed: where they end with
@@ -39,16 +39,17 @@ pub struct Prior {
     pub kill: bool,
 }
 
-/// Of archive `path`, opened to be appended to, and `g` (gathered of the inputs; `root_given`
-/// where the input is a directory archived as what it holds): `g` left as what is to be appended
-/// ([module](self)), and the archive. None where nothing is to be (the archive left as it is).
-pub fn prior(
-    path: &Path,
-    g: &mut Gathered,
-    delete: bool,
-    root_given: bool,
-    quiet: bool,
-) -> Result<Option<Prior>, String> {
+/// The archive appended to, opened before the inputs are gathered (so that an archive not to be
+/// appended to is told at once), with what it holds.
+pub struct Opened {
+    prior: Prior,
+    old: Tree,
+    sizes: Vec<u64>,
+}
+
+/// Archive `path` opened to be appended to: locked, located, the bytes after it of an append not
+/// committed made or cut off ([module](self)).
+pub fn open(path: &Path, quiet: bool) -> Result<Opened, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let file = fs::OpenOptions::new().read(true).write(true).open(path).map_err(|e| err(&e))?;
     match file.try_lock() {
@@ -80,10 +81,16 @@ pub fn prior(
         ((at.start as u64)..(at.end as u64), footer, metadata, kill, old, sizes)
     };
     let link_groups = old.entries.iter().filter_map(|e| e.extra.link_group).min().unwrap_or(0).min(0);
-    if !diff(g, &old, &sizes, delete, root_given) {
-        return Ok(None);
+    Ok(Opened { prior: Prior { file, at, footer, metadata, link_groups, kill }, old, sizes })
+}
+
+impl Opened {
+    /// Of `g` (gathered of the inputs; `root_given` where the input is a directory archived as
+    /// what it holds): `g` left as what is to be appended ([module](self)), and the archive. None
+    /// where nothing is to be (the archive left as it is).
+    pub fn against(self, g: &mut Gathered, delete: bool, root_given: bool) -> Option<Prior> {
+        diff(g, &self.old, &self.sizes, delete, root_given).then_some(self.prior)
     }
-    Ok(Some(Prior { file, at, footer, metadata, link_groups, kill }))
 }
 
 /// The archive at `at` of file `c` (of `file`) where bytes follow it: an append not committed,

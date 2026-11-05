@@ -233,6 +233,22 @@ fn appended() {
     fs::remove_dir_all(&d).unwrap();
 }
 
+/// An archive not to be appended to (not there, not an archive) told before the inputs are read:
+/// with an input that is not there either, the error is of the archive.
+#[test]
+fn append_archive_checked_first() {
+    let d = scratch("checked-first");
+    fs::write(d.join("not.aqr"), b"not an archive").unwrap();
+    for archive in ["missing.aqr", "not.aqr"] {
+        let o = aqr(&d, &["-a", archive, "no-such-input"]);
+        assert!(!o.status.success());
+        let e = stderr(&o);
+        assert!(e.contains(archive) && !e.contains("no-such-input"), "{e}");
+    }
+    assert!(!d.join("missing.aqr").exists());
+    fs::remove_dir_all(&d).unwrap();
+}
+
 /// An archive appended to whose append was not committed (bytes after it, as a process killed
 /// leaves): the bytes cut off, or the commit made where it was written whole; other bytes after
 /// it not taken away.
