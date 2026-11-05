@@ -1566,8 +1566,8 @@ struct Early {
     /// What it noted ([`Cx::coded_held`]).
     notes: HashSet<(usize, u64)>,
     inflated: u64,
-    /// The encoder it was sized with, which keeps the streams compressed for it.
-    enc: Encoder,
+    /// What the encoder it was sized with kept of the streams it compressed (without its context).
+    enc: aqr::Kept,
 }
 
 impl Early {
@@ -1635,7 +1635,7 @@ fn ahead(d: &[u8], p: usize, turned_down: &[(Format, usize)], opt: &Options, dep
         let own = apart.cx(n, opt);
         own.inflate.set(m);
         let f = recompress_as(Format::Bvx, &d[q..q + n], opt, depth, &own);
-        (f, own.deferred.into_inner(), own.coded_held.into_inner(), own.enc)
+        (f, own.deferred.into_inner(), own.coded_held.into_inner(), own.enc.into_kept())
     });
     for ((q, _, inflated), (f, deferred, notes, enc)) in streams.into_iter().zip(out) {
         made.0.insert(q, Early { f, deferred, notes, inflated, enc });
@@ -1957,7 +1957,7 @@ fn make_later(
             mine => mine,
         };
         child.iter_mut().for_each(|c| aqr_formula::store::spill_streams(&mut c.f));
-        (child, back, own.deferred.into_inner(), own.coded_held.into_inner(), Some(own.enc))
+        (child, back, own.deferred.into_inner(), own.coded_held.into_inner(), Some(own.enc.into_kept()))
     };
     let made = match sealing.as_ref().zip(slots.as_ref()) {
         // in their order, each let in once the content [`SEAL_AHEAD`] times the threads before it

@@ -439,6 +439,39 @@ fn kept(c: Compressed) -> Option<crate::Bytes> {
     })
 }
 
+/// What an [`Encoder`] kept of the streams, resources and module blocks it compressed
+/// ([`Encoder::into_kept`]), without its Zstandard context.
+pub struct Kept {
+    streams: HashMap<StreamKey, Option<crate::Bytes>>,
+    resources: HashMap<StreamKey, Vec<u8>>,
+    raw_lens: HashMap<StreamKey, usize>,
+    trials: HashMap<(StreamKey, i32), Compressed>,
+    levels: HashMap<StreamKey, i32>,
+    module_blocks: HashMap<(Module, i32), ModuleBlock>,
+}
+
+/// The Zstandard contexts of encoders alive (each [`Encoder`] has one), and the most at once
+/// since [`reset_contexts_peak`]. Zstandard allocates outside the Rust heap, so that what they
+/// hold (up to [`CCTX_KEPT`] each) is out of sight of the heap's accounting.
+static CONTEXTS: (AtomicUsize, AtomicUsize) = (AtomicUsize::new(0), AtomicUsize::new(0));
+
+/// The Zstandard contexts of encoders alive, and the most at once since
+/// [`reset_contexts_peak`].
+pub fn contexts() -> (usize, usize) {
+    (CONTEXTS.0.load(Relaxed), CONTEXTS.1.load(Relaxed))
+}
+
+/// Starts the peak of [`contexts`] again from those alive.
+pub fn reset_contexts_peak() {
+    CONTEXTS.1.store(CONTEXTS.0.load(Relaxed), Relaxed);
+}
+
+impl Drop for Encoder {
+    fn drop(&mut self) {
+        CONTEXTS.0.fetch_sub(1, Relaxed);
+    }
+}
+
 impl Encoder {
     pub fn new(level: Level) -> Encoder {
         Encoder::with_threads(level, 1)
@@ -462,15 +495,31 @@ impl Encoder {
         }
     }
 
-    /// Keeps what `other` (an encoder alike, for data compressed into the same archive) kept of
-    /// the streams, resources and module blocks it compressed, as if compressed here.
-    pub fn adopt(&self, other: Encoder) {
-        self.streams.borrow_mut().extend(other.streams.into_inner());
-        self.resources.borrow_mut().extend(other.resources.into_inner());
-        self.raw_lens.borrow_mut().extend(other.raw_lens.into_inner());
-        self.trials.borrow_mut().extend(other.trials.into_inner());
-        self.levels.borrow_mut().extend(other.levels.into_inner());
-        self.module_blocks.borrow_mut().extend(other.module_blocks.into_inner());
+    /// What it kept of the streams, resources and module blocks it compressed, for an encoder
+    /// alike to [`adopt`](Encoder::adopt); its Zstandard context dropped with it, so that what
+    /// is kept for later holds none (a context takes up to [`CCTX_KEPT`] outside the heap: one
+    /// kept for each of the 16,421 files of a batch made apart once took 10 GB).
+    pub fn into_kept(self) -> Kept {
+        Kept {
+            streams: self.streams.take(),
+            resources: self.resources.take(),
+            raw_lens: self.raw_lens.take(),
+            trials: self.trials.take(),
+            levels: self.levels.take(),
+            module_blocks: self.module_blocks.take(),
+        }
+    }
+
+    /// Keeps what an encoder alike (for data compressed into the same archive) kept of the
+    /// streams, resources and module blocks it compressed ([`Encoder::into_kept`]), as if
+    /// compressed here.
+    pub fn adopt(&self, kept: Kept) {
+        self.streams.borrow_mut().extend(kept.streams);
+        self.resources.borrow_mut().extend(kept.resources);
+        self.raw_lens.borrow_mut().extend(kept.raw_lens);
+        self.trials.borrow_mut().extend(kept.trials);
+        self.levels.borrow_mut().extend(kept.levels);
+        self.module_blocks.borrow_mut().extend(kept.module_blocks);
     }
 
     /// Drops everything kept of the streams and resources compressed.
@@ -492,6 +541,8 @@ impl Encoder {
 
     /// An encoder compressing each stream on `threads` threads, into the same archive as on one.
     pub fn with_threads(level: Level, threads: usize) -> Encoder {
+        let alive = CONTEXTS.0.fetch_add(1, Relaxed) + 1;
+        CONTEXTS.1.fetch_max(alive, Relaxed);
         Encoder {
             level,
             threads: threads.max(1),
