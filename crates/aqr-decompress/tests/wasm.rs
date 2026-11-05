@@ -825,6 +825,19 @@ fn part() {
     );
     // past the input
     invalid(apply(&early, &[&d[..60_000]], &[1], u64::MAX), "aqr_request");
+    // through windows of a page (ring buffers), which the memory limit counts rather than the
+    // data; of a whole module, none
+    let windowed = copy
+        .replace(r#""aqr_input0" (memory i64 0)"#, r#""aqr_input0" (memory i64 0 1)"#)
+        .replace(r#""aqr_output0" (memory i64 0)"#, r#""aqr_output0" (memory i64 0 1)"#);
+    assert!(apply(&windowed, &[&d], &[d.len() as u64], 4 << 16).unwrap()[0] == d);
+    assert!(matches!(apply(&copy, &[&d], &[d.len() as u64], 4 << 16), Err(Failure::Resource(_))));
+    let whole = format!(
+        r#"(module {}
+            (func (export "aqr_apply_whole") (param i64 i64 i64)))"#,
+        MEMORIES.replace(r#""aqr_input0" (memory i64 0)"#, r#""aqr_input0" (memory i64 0 1)"#)
+    );
+    invalid(apply(&whole, &[b"x"], &[1], u64::MAX), "maximum");
 }
 
 /// Large inputs and outputs (in the sandbox's arenas, as it grows them and uses them again),

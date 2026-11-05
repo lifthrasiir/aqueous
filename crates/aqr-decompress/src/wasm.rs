@@ -130,6 +130,9 @@ struct Compiled {
     /// memories made as it defines them where they are to be made so (of `cow::Creator`).
     working_module: Option<Module>,
     part: bool,
+    /// The windows of the memories of the inputs and outputs whose import types have a maximum
+    /// (of a part module), in pages.
+    windows: Vec<(Mem, u64)>,
     /// The number of parameters of the entry point.
     arity: usize,
     /// Its task slots: how many of the tasks an instance spawns run at once (0 without tasks).
@@ -208,6 +211,7 @@ fn compile(wasm: &[u8]) -> Decoded<Compiled> {
     let (mut types, mut funcs) = (Vec::new(), Vec::new());
     let (mut imports, mut working, mut entry, mut task) = (Vec::new(), None, None, None);
     let mut memories: Vec<Mem> = Vec::new();
+    let mut windows: Vec<(Mem, u64)> = Vec::new();
     let mut grows_other = false;
     let mut clean = 0u64;
     let mut slots = Vec::new();
@@ -238,8 +242,13 @@ fn compile(wasm: &[u8]) -> Decoded<Compiled> {
                                     return invalid("a 64-bit working memory");
                                 }
                                 working = Some((m.initial, m.maximum));
-                            } else if !m.memory64 || m.initial != 0 || m.maximum.is_some() {
-                                return invalid(format!("{} not 64-bit of minimum 0 and no maximum", i.name));
+                            } else if !m.memory64 || m.initial != 0 {
+                                return invalid(format!("{} not 64-bit of minimum 0", i.name));
+                            } else if let Some(max) = m.maximum {
+                                if !matches!(mem, Mem::Input(_) | Mem::Output(_)) || max == 0 {
+                                    return invalid(format!("{} of a maximum", i.name));
+                                }
+                                windows.push((mem, max));
                             }
                             memories.push(mem);
                             imports.push(Import::Memory(mem));
@@ -322,6 +331,9 @@ fn compile(wasm: &[u8]) -> Decoded<Compiled> {
     if parts && !part {
         return invalid("a whole module importing functions of part modules");
     }
+    if !windows.is_empty() && !part {
+        return invalid("a whole module of a memory of a maximum");
+    }
     let spawns = imports.iter().any(|i| matches!(i, Import::Func(HostFn::Spawn)));
     if spawns {
         let ft = task.and_then(|f| funcs.get(f as usize)).and_then(|&t| types.get(t as usize));
@@ -348,7 +360,7 @@ fn compile(wasm: &[u8]) -> Decoded<Compiled> {
         None
     };
     let arity = ft.params().len();
-    Ok(Compiled { module, imports, working, clean, working_module, part, arity, slots, hash: [0; 32] })
+    Ok(Compiled { module, imports, working, clean, working_module, part, windows, arity, slots, hash: [0; 32] })
 }
 
 /// A module defining a memory of 32 bits of `limits` (in pages), exported as `m`.
@@ -790,8 +802,8 @@ impl Shared {
             .map(|i| match *i {
                 Import::Memory(Mem::Params) => pages(params.len() as u64),
                 Import::Memory(Mem::Resource(i)) => pages(resources[i as usize].len() as u64),
-                Import::Memory(Mem::Input(k)) => pages(inputs[k as usize].len() as u64),
-                Import::Memory(Mem::Output(j)) => pages(sizes[j as usize]),
+                Import::Memory(m @ Mem::Input(k)) => self.0.pages(m, inputs[k as usize].len() as u64) as u128,
+                Import::Memory(m @ Mem::Output(j)) => self.0.pages(m, sizes[j as usize]) as u128,
                 Import::Memory(Mem::Working) | Import::Func(_) => 0,
             })
             .sum();
@@ -842,9 +854,15 @@ impl Shared {
                 Mem::Resource(i) => sized(resources[i as usize].len() as u64, Some(&resources[i as usize])),
                 Mem::Input(k) => {
                     let d = inputs[k as usize];
-                    sized(d.len() as u64, (!c.part).then_some(d))
+                    (
+                        MemoryType::new64(c.pages(m, d.len() as u64), Some(c.pages(m, d.len() as u64))),
+                        (!c.part).then_some(d),
+                    )
                 }
-                Mem::Output(j) => sized(sizes[j as usize], None),
+                Mem::Output(j) => {
+                    let pages = c.pages(m, sizes[j as usize]);
+                    (MemoryType::new64(pages, Some(pages)), None)
+                }
             })
             .await?;
             let entry = instance.get_func(&mut store, if c.part { PART } else { WHOLE }).expect("the entry point");
@@ -980,6 +998,14 @@ impl Job {
             return invalid("tasks not taken");
         }
         Ok(std::mem::take(&mut store.data_mut().result))
+    }
+}
+
+impl Compiled {
+    /// The pages of memory `m` sized to fit `len` bytes, within its window where it has one.
+    fn pages(&self, m: Mem, len: u64) -> u64 {
+        let window = self.windows.iter().find(|w| w.0 == m).map_or(u64::MAX, |w| w.1);
+        len.div_ceil(65536).min(window)
     }
 }
 

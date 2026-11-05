@@ -2917,7 +2917,9 @@ It MUST conform to the following profile, or an [=invalid archive=] failure occu
 * It has no start function.
 * It defines no memory, and imports each memory at most once.
 * Every `memory.grow` instruction targets the [=working memory=].
-* The import type of every memory other than the [=working memory=] has 64-bit addresses, the minimum 0 and no maximum.
+* The import type of every memory other than the [=working memory=] has 64-bit addresses, the minimum 0 and no maximum,
+    except that the import type of an input or output memory of a [=part module=] MAY have a maximum of at least 1,
+    its <dfn>window</dfn> in pages.
 * It exports exactly one of the functions `aqr_apply_whole` and `aqr_apply_part`, the <dfn>entry point</dfn>.
     The module is a <dfn>whole module</dfn> in the former case and a <dfn>part module</dfn> in the latter.
 * If it imports [=aqr_spawn|`aqr_spawn`=], it exports the function `aqr_task`, the <dfn>task entry point</dfn>,
@@ -2954,7 +2956,8 @@ Any other import is an [=invalid archive=] failure.
 : [=aqr_log|`aqr_log`=]
 :: The diagnostic function, defined below.
 
-A memory is <dfn>sized to fit</dfn> a length |L| when both its minimum and maximum are &lceil;|L| / 65536&rceil; pages.
+A memory is <dfn>sized to fit</dfn> a length |L| when both its minimum and maximum are &lceil;|L| / 65536&rceil; pages,
+and sized to fit |L| within a [=window=] of |m| pages when both are min(&lceil;|L| / 65536&rceil;, |m|) pages.
 
 To <dfn>apply a module</dfn> |module| given a [=list=] of input [=byte sequences=] |inputs|,
 a [=list=] of resource blocks |resources|, a parameter [=byte sequence=] |params|,
@@ -2969,10 +2972,10 @@ a [=list=] of declared output sizes |sizes| and a memory limit:
         * The [=working memory=] has the minimum size of its import type.
         * The memory of the parameters is [=sized to fit=] the length of |params|, and holds |params| from offset 0.
         * The memory of the |i|-th resource is [=sized to fit=] its [=stored content=] |c|, and holds |c| from offset 0.
-        * The memory of the |k|-th input is [=sized to fit=] the length of |inputs|[|k|].
+        * The memory of the |k|-th input is [=sized to fit=] the length of |inputs|[|k|], within its [=window=] if its import type has one.
             If |module| is a [=whole module=], it holds |inputs|[|k|] from offset 0.
             Otherwise let |W|<sub>|k|</sub> be its size in bytes and the <dfn>visible range</dfn> of the |k|-th input be [0, 0).
-        * The memory of the |j|-th output is [=sized to fit=] |sizes|[|j|].
+        * The memory of the |j|-th output is [=sized to fit=] |sizes|[|j|], within its [=window=] if its import type has one.
             If |module| is a [=part module=], let |W|<sub>out,|j|</sub> be its size in bytes.
     4. Let |outputs| be a [=list=] of as many empty [=byte sequences=] as |sizes|.
     5. If the total size of the memories in bytes exceeds the memory limit, return a [=resource failure=].
@@ -2994,18 +2997,17 @@ a [=list=] of declared output sizes |sizes| and a memory limit:
     10. Return |outputs|.
 </ol>
 
-Issue: Windows smaller than their data for a [=part module=], i.e. ring buffers,
-which would allow import types with a maximum.
-
 A `memory.grow` instruction exceeds the memory limit when the total size of the memories of the application,
 those of its [=tasks=] and the messages queued in its [=channels=] included, would exceed it,
 and MUST succeed otherwise if the maximum of the import type of the [=working memory=] allows.
 
 <div class=note>
   Each application instantiates the module anew, so nothing remains from an earlier one.
-  The size of every memory except the working memory is fixed by the length of its data,
-  so the declarations of an application need no windows.
-  A module needing a window that depends on its data keeps the bytes in the working memory.
+  The size of every memory except the working memory is fixed by the length of its data and the module's [=window=], if any,
+  so an application declares no sizes of memories.
+  A [=part module=] with a [=window=] smaller than its data uses the memory as a ring buffer, addressing offset |o| at |o| % |W|,
+  and the memory limit counts the window rather than the data, which bounds the application's memory whatever the length of its data.
+  A module needing a buffer whose size depends on its data keeps the bytes in the working memory.
   The memory of an output of a [=whole module=] can be passed to the module consuming it
   as the memory of a [=whole module=]'s input, as long as the bytes from offset |sizes|[|j|] are zeroed,
   since the result is the same.
