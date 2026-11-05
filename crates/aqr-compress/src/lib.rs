@@ -146,8 +146,8 @@ use std::sync::Arc;
 
 pub use aqr_formula::{Formula, Kind, Module, Node, Region};
 pub use archive::{
-    Archived, FileReport, Input, Output, Plain, Report, Solid, Source, compress_tree, compress_tree_into,
-    compress_tree_to,
+    Archived, FileReport, Input, Output, Plain, Report, Solid, Source, Stop, Stopped, compress_tree,
+    compress_tree_into, compress_tree_to,
 };
 pub use detect::{Format, detect, kind_by_name};
 pub use extent::extent;

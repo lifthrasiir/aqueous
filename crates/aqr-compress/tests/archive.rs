@@ -325,7 +325,7 @@ fn committed() {
     let inputs: Vec<Input> = contents.iter().map(|(n, d)| Input { name: n.as_bytes(), data: d }).collect();
     let opt = Options { batch: 30_000, segment: 1, ..Options::default() };
     let mut out = Logged::default();
-    let r = aqr_compress::compress_tree_into(&tree, &inputs[..], &opt, &mut out, &|_| {}).unwrap();
+    let r = aqr_compress::compress_tree_into(&tree, &inputs[..], &opt, &mut out, None, &|_| {}).unwrap();
     assert_eq!(r.len, out.bytes.len());
     let (all, status) = located(&out.bytes);
     assert_eq!(status, Some(Status::Complete));
@@ -1240,4 +1240,134 @@ fn large_formulas() {
     let (_, r) = archived(&[("a.pgm", pgm(1)), ("b.pgm", pgm(2))], &Options { smaller: false, ..Options::default() });
     // (the fork of the first file last)
     assert!(r.files[..2].iter().all(|f| !f.modules.is_empty()), "{r:?}");
+}
+
+/// The archive of the sample stopped once `after` batches are written (`None`: before any), with
+/// `opt`, into `out`: the report, and what the stop was told of.
+fn stopped_after(
+    after: Option<usize>,
+    opt: &Options,
+    out: &mut dyn aqr_compress::Output,
+) -> (aqr_compress::Report, Vec<aqr_compress::Report>) {
+    stopped_when(
+        after.is_none(),
+        &|e, written| matches!(e, aqr_compress::Event::Written { .. }) && Some(written) == after,
+        opt,
+        out,
+    )
+}
+
+/// The archive of the sample stopped as `when` tells, of each event and the batches written
+/// (or at once where `now`): as [`stopped_after`].
+fn stopped_when(
+    now: bool,
+    when: &(dyn Fn(&aqr_compress::Event, usize) -> bool + Sync),
+    opt: &Options,
+    out: &mut dyn aqr_compress::Output,
+) -> (aqr_compress::Report, Vec<aqr_compress::Report>) {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let files = sample();
+    let (tree, contents) = tree_of(&files);
+    let inputs: Vec<Input> = contents.iter().map(|(n, d)| Input { name: n.as_bytes(), data: d }).collect();
+    let requested = AtomicBool::new(now);
+    let written = AtomicUsize::new(0);
+    let told = std::sync::Mutex::new(Vec::new());
+    let ended = |r: &aqr_compress::Report| told.lock().unwrap().push(r.clone());
+    let stop = aqr_compress::Stop { requested: &requested, ended: &ended };
+    let tell = |e: aqr_compress::Event| {
+        if let aqr_compress::Event::Written { .. } = e {
+            written.fetch_add(1, Ordering::Relaxed);
+        }
+        if when(&e, written.load(Ordering::Relaxed)) {
+            requested.store(true, Ordering::Relaxed);
+        }
+    };
+    let r = aqr_compress::compress_tree_into(&tree, &inputs[..], opt, out, Some(&stop), &tell).unwrap();
+    (r, told.into_inner().unwrap())
+}
+
+/// An archive stopped as it is written: ended as it is, of the files of the batches written (in
+/// the segment being written too), telling what it left out, whether committed as it is written
+/// or not (with mirror blocks); stopped before anything, nothing kept.
+#[test]
+fn stopped() {
+    use aqr_formula::aqr::Status;
+    let all = located(&archived(&sample(), &Options::default()).0).0;
+    let opt = Options { batch: 30_000, segment: 1 << 20, ..Options::default() };
+    for (mirrors, mut out) in [(false, Logged::default()), (true, Logged::default())] {
+        let opt = Options { mirrors, ..opt.clone() };
+        let (r, told) = if mirrors {
+            let mut v = Vec::new();
+            let got = stopped_after(Some(2), &opt, &mut aqr_compress::Plain(&mut v));
+            out.bytes = v;
+            got
+        } else {
+            stopped_after(Some(2), &opt, &mut out)
+        };
+        assert_eq!(told.len(), 1);
+        let s = r.stopped.expect("stopped");
+        assert!(s.kept && s.files > 0 && s.bytes > 0, "{s:?}");
+        assert_eq!(r.len, out.bytes.len());
+        let (names, status) = located(&out.bytes);
+        assert!(!names.is_empty() && names.len() < all.len() && names.iter().all(|n| all.contains(n)), "{names:?}");
+        assert_eq!(status, Some(Status::Incomplete { files: Some(s.files), bytes: Some(s.bytes) }));
+        if mirrors {
+            let check = aqr_formula::aqr::mirror::check(&out.bytes);
+            assert!(check.walked && check.mirrored(&out.bytes, false), "{check:?}");
+        }
+    }
+    // (while a batch is made: of the batches written before it)
+    let mut out = Logged::default();
+    let during = |e: &aqr_compress::Event, written| matches!(e, aqr_compress::Event::Started(_)) && written >= 3;
+    let (r, told) = stopped_when(false, &during, &opt, &mut out);
+    assert!(told.len() == 1 && r.stopped.unwrap().kept);
+    let (names, status) = located(&out.bytes);
+    assert!(names.len() < all.len() && matches!(status, Some(Status::Incomplete { .. })), "{names:?}");
+    // (while a batch is read: the stop not waiting for it)
+    let files = sample();
+    let (tree, contents) = tree_of(&files);
+    let inputs: Vec<Input> = contents.iter().map(|(n, d)| Input { name: n.as_bytes(), data: d }).collect();
+    let requested = std::sync::atomic::AtomicBool::new(false);
+    let slow = Slow { inputs: &inputs, at: inputs.len() / 2, requested: &requested };
+    let at = std::sync::Mutex::new(None);
+    let ended = |_: &aqr_compress::Report| *at.lock().unwrap() = Some(std::time::Instant::now());
+    let stop = aqr_compress::Stop { requested: &requested, ended: &ended };
+    let mut out = Logged::default();
+    let r = aqr_compress::compress_tree_into(&tree, &slow, &opt, &mut out, Some(&stop), &|_| {}).unwrap();
+    let ended = at.into_inner().unwrap().expect("ended");
+    assert!(r.stopped.unwrap().kept);
+    assert!(ended.elapsed() > std::time::Duration::from_millis(300), "ended without waiting for the read");
+    let mut out = Logged::default();
+    let (r, told) = stopped_after(None, &opt, &mut out);
+    assert_eq!(told.len(), 1);
+    assert!(!r.stopped.unwrap().kept);
+}
+
+/// Contents of which content `at` is read slowly, a stop requested as it is.
+struct Slow<'a> {
+    inputs: &'a [Input<'a>],
+    at: usize,
+    requested: &'a std::sync::atomic::AtomicBool,
+}
+
+impl aqr_compress::Source for Slow<'_> {
+    fn len(&self) -> usize {
+        self.inputs.len()
+    }
+
+    fn name(&self, c: usize) -> &[u8] {
+        self.inputs[c].name
+    }
+
+    fn size(&self, c: usize) -> u64 {
+        self.inputs[c].data.len() as u64
+    }
+
+    fn read(&self, c: usize) -> std::io::Result<aqr_formula::Bytes> {
+        if c == self.at {
+            self.requested.store(true, std::sync::atomic::Ordering::Relaxed);
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        Ok(self.inputs[c].data.to_vec().into())
+    }
 }

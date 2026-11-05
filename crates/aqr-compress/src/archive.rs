@@ -30,6 +30,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::ops::Range;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Condvar, Mutex};
 
 use aqr_decompress::Native;
@@ -197,7 +198,47 @@ pub struct Report {
     /// Bytes of the archive, and of the contents read.
     pub len: usize,
     pub read: u64,
+    /// Where the archive was stopped before it was whole ([`Stop`]): what it left out.
+    pub stopped: Option<Stopped>,
 }
+
+/// What an archive stopped left out ([`Report::stopped`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stopped {
+    /// Files (each hard link) and bytes of the contents not archived.
+    pub files: u64,
+    pub bytes: u64,
+    /// Whether the archive holds anything: none where nothing was written before the stop.
+    pub kept: bool,
+}
+
+/// A request to stop an archive being written ([`compress_tree_into`]), looked at as it is
+/// written: the archive is then ended as it is, of the files written, and `ended` told of it
+/// (spec, "`segment-status`": what it left out). `ended` may end the process rather than wait
+/// for the work under way to be let go.
+pub struct Stop<'a> {
+    pub requested: &'a AtomicBool,
+    pub ended: &'a (dyn Fn(&Report) + Sync),
+}
+
+impl Stop<'_> {
+    fn is_requested(&self) -> bool {
+        self.requested.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// The archive stopped and ended ([`Writer::stopped`]), as an error passed up to where it is
+/// made the outcome.
+#[derive(Debug)]
+struct Ended(Report);
+
+impl std::fmt::Display for Ended {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("stopped")
+    }
+}
+
+impl std::error::Error for Ended {}
 
 #[derive(Debug, Clone, Default)]
 pub struct FileReport {
@@ -246,16 +287,18 @@ pub fn compress_tree_to<S: Source + ?Sized>(
     out: &mut dyn Write,
     tell: &(dyn Fn(Event) + Sync),
 ) -> io::Result<Report> {
-    compress_tree_into(tree, src, opt, &mut Plain(out), tell)
+    compress_tree_into(tree, src, opt, &mut Plain(out), None, tell)
 }
 
 /// [`compress_tree_to`], written to `out`: committed as it is written where it
-/// [commits](Output::commits), and ended ([`Output::end`]) once written.
+/// [commits](Output::commits), and ended ([`Output::end`]) once written; or, where `stop`
+/// requests it, ended as it is ([`Stop`], [`Report::stopped`]).
 pub fn compress_tree_into<S: Source + ?Sized>(
     tree: &Tree,
     src: &S,
     opt: &Options,
     out: &mut dyn Output,
+    stop: Option<&Stop>,
     tell: &(dyn Fn(Event) + Sync),
 ) -> io::Result<Report> {
     let (tracker, notes) = Tracker::new((0..src.len()).map(|c| src.size(c)).collect());
@@ -264,7 +307,11 @@ pub fn compress_tree_into<S: Source + ?Sized>(
     std::thread::scope(|s| {
         s.spawn(|| tracker.run(tell));
         // (the notes gone with it, the tracker done)
-        compress_tree_noting(tree, src, opt, out, notes, tell)
+        compress_tree_noting(tree, src, opt, out, stop, notes, tell)
+    })
+    .or_else(|e| match e.get_ref().and_then(|e| e.downcast_ref::<Ended>()) {
+        Some(Ended(r)) => Ok(r.clone()),
+        None => Err(e),
     })
 }
 
@@ -273,6 +320,7 @@ fn compress_tree_noting<S: Source + ?Sized>(
     src: &S,
     opt: &Options,
     out: &mut dyn Output,
+    stop: Option<&Stop>,
     notes: Notes,
     tell: &(dyn Fn(Event) + Sync),
 ) -> io::Result<Report> {
@@ -315,7 +363,7 @@ fn compress_tree_noting<S: Source + ?Sized>(
     out.write_all(w.head())?;
     let w_at = w.len();
     let weights: Vec<u64> = batches.iter().map(weight).collect();
-    let cx = Ctx { src, opt, notes: &notes, batches: &batches, weights: &weights, entries: &entries, tree };
+    let cx = Ctx { src, opt, notes: &notes, batches: &batches, weights: &weights, entries: &entries, tree, stop };
     let pipe = Pipe {
         reader: Mutex::new(Reader { first: HashMap::new() }),
         state: Mutex::new(State {
@@ -343,9 +391,7 @@ fn compress_tree_noting<S: Source + ?Sized>(
         inserted: 0,
         commit,
         files_of: files_of(tree, n),
-        left: (tree.entries.iter().filter(|e| matches!(e.node, EntryNode::File(_))).count() as u64, 0),
     };
-    wr.left.1 = (0..n).map(|c| src.size(c)).sum();
     std::thread::scope(|s| {
         // (a thread of no worker of the pool, which takes one only as one is free: as the
         // batches being made leave threads idle)
@@ -434,6 +480,13 @@ struct Ctx<'a, S: ?Sized> {
     entries: &'a HashSet<usize>,
     /// The entries archived, those of each segment written as it is closed.
     tree: &'a Tree,
+    stop: Option<&'a Stop<'a>>,
+}
+
+impl<S: ?Sized> Ctx<'_, S> {
+    fn stopping(&self) -> bool {
+        self.stop.is_some_and(Stop::is_requested)
+    }
 }
 
 /// The batches being made: read in order (under [`Pipe::reader`]) as there is room for them,
@@ -499,7 +552,7 @@ impl Pipe {
         let i = {
             let mut st = self.state.lock().unwrap();
             let i = st.claimed;
-            if st.failed.is_some() || i >= cx.batches.len() {
+            if st.failed.is_some() || i >= cx.batches.len() || cx.stopping() {
                 return None;
             }
             if !st.room(cx) {
@@ -555,7 +608,7 @@ impl Pipe {
             {
                 let mut st = self.state.lock().unwrap();
                 loop {
-                    if st.written || st.failed.is_some() || st.claimed >= cx.batches.len() {
+                    if st.written || st.failed.is_some() || st.claimed >= cx.batches.len() || cx.stopping() {
                         return;
                     }
                     if st.room(cx) {
@@ -635,10 +688,8 @@ struct Writer {
     /// Where the archive starts in the file, where it is committed as it is written, at each
     /// segment closed ([`Output::commits`]).
     commit: Option<u64>,
-    /// By content, the files of it (each hard link); and the files and bytes of contents not
-    /// yet written, as a commit tells them (`segment-status`).
+    /// By content, the files of it (each hard link).
     files_of: Vec<u64>,
-    left: (u64, u64),
 }
 
 /// By content of `tree` (of `n`), the files of it (each hard link).
@@ -745,6 +796,9 @@ impl Writer {
         out: &mut Out,
     ) -> io::Result<()> {
         while self.next < cx.batches.len() {
+            if cx.stopping() {
+                return Err(self.stopped(cx, out));
+            }
             let made = {
                 let mut st = pipe.state.lock().unwrap();
                 if let Some(e) = st.failed.take() {
@@ -769,8 +823,8 @@ impl Writer {
                 }
                 continue;
             }
-            if let Some(c) = pipe.claim(cx) {
-                pipe.analyze(c, cx);
+            // (read and analyzed as a stop is looked for)
+            if self.watched(cx, out, || pipe.claim(cx).map(|c| pipe.analyze(c, cx)).is_some())? {
                 continue;
             }
             let st = pipe.state.lock().unwrap();
@@ -827,14 +881,10 @@ impl Writer {
                     File::of(c, d, hash, kind_by_name(src.name(c)), cx.entries.contains(&c))
                 })
                 .collect();
-            let part = analyze(i, &files, data, &HashSet::new(), cx.opt, notes);
+            let part = self.watched(cx, out, || analyze(i, &files, data, &HashSet::new(), cx.opt, notes))?;
             self.put(i, &files, part, cx, out)?;
         }
         batch.iter().try_for_each(|&c| src.intact(c))?;
-        for &(len, _) in lens {
-            self.left.1 = self.left.1.saturating_sub(len);
-        }
-        self.left.0 = self.left.0.saturating_sub(batch.iter().map(|&c| self.files_of[c]).sum());
         notes.send(Note::Written(i));
         tell(Event::Written { contents: batch, report: &self.r });
         Ok(())
@@ -853,7 +903,8 @@ impl Writer {
         let (src, opt, notes, batch) = (cx.src, cx.opt, cx.notes, &cx.batches[i]);
         let mut raw = HashSet::new();
         let mut made = loop {
-            let made = finish(i, &self.w, files, part, src, opt, notes);
+            let w = &self.w;
+            let made = self.watched(cx, out, move || finish(i, w, files, part, src, opt, notes))?;
             let bad: Vec<usize> = made.bad.iter().copied().filter(|k| !raw.contains(k)).collect();
             if bad.is_empty() {
                 break made;
@@ -863,7 +914,8 @@ impl Writer {
             raw.extend(bad);
             let bytes = batch.iter().map(|&c| src.size(c)).sum();
             notes.send(Note::Batch { batch: i, bytes, verify: opt.verify, contents: batch.clone() });
-            part = analyze(i, files, reread(src, files, opt.threads)?, &raw, opt, notes);
+            let data = reread(src, files, opt.threads)?;
+            part = self.watched(cx, out, || analyze(i, files, data, &raw, opt, notes))?;
         };
         files.iter().try_for_each(|f| src.intact(f.c))?;
         self.w.commit(&made.batch);
@@ -920,8 +972,10 @@ impl Writer {
         }
         let (t, contents) = self.segment_tree(cx.tree);
         let enc = aqr::Encoder::with_threads(cx.opt.level, cx.opt.threads).with_modules(aqr_decompress::wasm_of);
-        let status = aqr::Status::Incomplete { files: Some(self.left.0), bytes: Some(self.left.1) };
-        let status = if self.commit.is_some() { status } else { aqr::Status::None };
+        let status = match self.commit {
+            Some(_) => self.left(cx),
+            None => aqr::Status::None,
+        };
         let meta = self.w.close_as(&enc, &t, &contents, status).map_err(bad_tree)?;
         match self.commit {
             Some(_) => self.commit(out, &meta)?,
@@ -932,6 +986,121 @@ impl Writer {
         self.segment.clear();
         self.again.clear();
         Ok(())
+    }
+
+    /// What is left to write, as a commit tells it (`segment-status`): the files and bytes of the
+    /// contents not written.
+    fn left<S: Source + ?Sized>(&self, cx: &Ctx<S>) -> aqr::Status {
+        let at = |c: usize| self.at[c].or_else(|| self.at[self.r.files[c].same_as?]);
+        let (mut files, mut bytes) = (0, 0);
+        for c in (0..self.at.len()).filter(|&c| at(c).is_none()) {
+            files += self.files_of[c];
+            bytes += cx.src.size(c);
+        }
+        aqr::Status::Incomplete { files: Some(files), bytes: Some(bytes) }
+    }
+
+    /// `work` done on a thread of its own while this one looks for a stop ([`Ctx::stop`]): where
+    /// one is requested, the archive is ended as it is ([`Writer::stopped`]) without waiting for
+    /// `work` (but where [`Stop::ended`] returns).
+    fn watched<S: Source + ?Sized, T: Send>(
+        &self,
+        cx: &Ctx<S>,
+        out: &mut Out,
+        work: impl FnOnce() -> T + Send,
+    ) -> io::Result<T> {
+        if cx.stop.is_none() {
+            return Ok(work());
+        }
+        std::thread::scope(|s| {
+            // (this one woken as it is done, not left to look again)
+            let me = std::thread::current();
+            let h = s.spawn(move || {
+                let t = work();
+                me.unpark();
+                t
+            });
+            while !h.is_finished() {
+                if cx.stopping() {
+                    return Err(self.stopped(cx, out));
+                }
+                std::thread::park_timeout(LOOK);
+            }
+            Ok(h.join().unwrap_or_else(|p| std::panic::resume_unwind(p)))
+        })
+    }
+
+    /// Ends the archive as it is, of the batches written, as a stop requests ([`Stop`]), and
+    /// tells [`Stop::ended`] of it: the error to pass up ([`Ended`]), or that of the ending.
+    fn stopped<S: Source + ?Sized>(&self, cx: &Ctx<S>, out: &mut Out) -> io::Error {
+        let _s = aqr_common::trace::span("write");
+        match self.end_stopped(cx, out) {
+            Ok(r) => {
+                (cx.stop.expect("a stop").ended)(&r);
+                io::Error::new(io::ErrorKind::Interrupted, Ended(r))
+            }
+            Err(e) => e,
+        }
+    }
+
+    fn end_stopped<S: Source + ?Sized>(&self, cx: &Ctx<S>, out: &mut Out) -> io::Result<Report> {
+        let (t, contents) = self.segment_tree(cx.tree);
+        let status = self.left(cx);
+        let aqr::Status::Incomplete { files: Some(files), bytes: Some(bytes) } = status else { unreachable!() };
+        let mut r = Report { stopped: Some(Stopped { files, bytes, kept: false }), ..self.r.clone() };
+        // (no file of the segment: the commit before stands, where there is one; where there is
+        // none, nothing to keep, the directories alone not; nor where segments closed are not
+        // committed, their footer made by Mirroring or a size hint block to be filled in)
+        if contents.is_empty() {
+            if self.commit.is_some() && self.segments > 0 {
+                r.stopped.as_mut().unwrap().kept = true;
+                r.len = self.w.len() - self.w.pad_due() as usize;
+            }
+            return Ok(r);
+        }
+        // (on a thread of no worker: the workers busy with the batch let go)
+        let enc = aqr::Encoder::with_threads(cx.opt.level, 1).with_modules(aqr_decompress::wasm_of);
+        if let Some(base) = self.commit {
+            let (end, before) = self.w.end(&enc, &t, &contents, status, base).map_err(bad_tree)?;
+            if self.w.pad_due() {
+                out.write_all(&[0])?;
+            }
+            out.write_all(&end)?;
+            let o = out.output();
+            o.sync()?;
+            if let Some(f) = before {
+                let k = aqr::kill(f.len());
+                o.patch(f.start as u64, &k)?;
+                o.sync()?;
+                o.patch((f.start + k.len()) as u64, &vec![0; f.len() - k.len()])?;
+            }
+            o.end()?;
+            r.len = self.w.len() + end.len();
+        } else {
+            let front = self.w.len() - self.held_len;
+            let mirrored = match cx.opt.mirrors {
+                true => {
+                    self.w.finish_mirrored(&enc, &t, &contents, front, cx.opt.size_hint, status).map_err(bad_tree)?
+                }
+                false => None,
+            };
+            let (mirror, end) = match mirrored {
+                Some(m) => m,
+                None => (Vec::new(), self.w.finish_as(&enc, &t, &contents, status).map_err(bad_tree)?.0),
+            };
+            out.write_all(&mirror)?;
+            for b in &self.held {
+                out.write_all(b)?;
+            }
+            out.write_all(&end)?;
+            out.output().end()?;
+            r.mirrors = mirror.len() + out.added() as usize;
+            r.len = self.w.len() + end.len() + r.mirrors - self.inserted;
+        }
+        r.stopped.as_mut().unwrap().kept = true;
+        r.overhead = r.len.saturating_sub(r.files.iter().map(|f| f.archived).sum::<f64>().round() as usize);
+        r.unverified.sort_unstable();
+        Ok(r)
     }
 
     /// Commits the segment closed with metadata block `meta` (spec, "Appending to an archive"):
@@ -961,7 +1130,8 @@ impl Writer {
     /// groups are taken as archive-wide (negative), as the archive is of several segments.
     fn segment_tree(&self, tree: &Tree) -> (Tree, Vec<ContentAt>) {
         let at = |c: usize| self.at[c].or_else(|| self.at[self.r.files[c].same_as?]);
-        let mine: HashSet<usize> = self.segment.iter().copied().collect();
+        // (those written: of a batch being made, none where the archive is stopped)
+        let mine: HashSet<usize> = self.segment.iter().copied().filter(|&c| at(c).is_some()).collect();
         let first = self.segments == 0;
         // whether an entry (or the root, of an extra alone) is of the segment
         let of = |node: Option<&EntryNode>, x: &Extra| {
