@@ -205,12 +205,16 @@ pub struct Report {
 /// An archive to append to ([`compress_tree_into`]; spec, "Appending to an archive"), as written
 /// to the output already: where its footer is and its last metadata block (from its header
 /// magic: [`aqr::footer_of`]), and the least archive-wide link group it takes (negative; 0 where
-/// none), the groups of the segments appended taken below it.
+/// none), the groups of the segments appended taken below it. Its footer is made a spacer block
+/// by the first commit where `kill`; else the segments are written over it (from where it
+/// starts: the output cut there already), as where it crosses a sector of the file
+/// ([`aqr::crossing`]).
 #[derive(Debug, Clone)]
 pub struct Appending {
     pub footer: Range<usize>,
     pub metadata: usize,
     pub link_groups: i128,
+    pub kill: bool,
 }
 
 /// What an archive stopped left out ([`Report::stopped`]).
@@ -381,7 +385,8 @@ fn compress_tree_noting<S: Source + ?Sized>(
     batches.sort_by_key(|b| weight(b) <= (opt.batch as u64).saturating_mul(AHEAD));
 
     let w = match from {
-        Some(a) => SegmentWriter::appending(a.footer.clone(), a.metadata),
+        Some(a) if a.kill => SegmentWriter::appending(a.footer.clone(), a.metadata),
+        Some(a) => SegmentWriter::replacing(a.footer.start, a.metadata),
         None => {
             let w = SegmentWriter::with_size_hint(opt.size_hint);
             out.write_all(w.head())?;

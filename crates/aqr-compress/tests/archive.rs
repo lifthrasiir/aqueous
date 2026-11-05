@@ -1393,12 +1393,16 @@ fn appended() {
     use aqr_formula::aqr::{Status, footer_of};
     let all = sample();
     let (first, second) = all.split_at(5);
-    for segment in [0, 1] {
+    for (segment, kill) in [(0, true), (1, true), (1, false)] {
         let opt = Options { batch: 30_000, segment, ..Options::default() };
         let mut out = Vec::new();
         committed_into(first, &opt, &mut out, None);
         let (f, m) = footer_of(&out).unwrap();
-        let from = aqr_compress::Appending { footer: f, metadata: m.unwrap(), link_groups: -10 };
+        if !kill {
+            // (written over: cut there)
+            out.truncate(f.start);
+        }
+        let from = aqr_compress::Appending { footer: f, metadata: m.unwrap(), link_groups: -10, kill };
         // the rest, and a file of the first again, changed
         let mut more = second.to_vec();
         more.push(("a/t0.txt", text(5_000, 9)));
@@ -1443,7 +1447,7 @@ fn appended() {
     let mut out = Vec::new();
     committed_into(first, &Options::default(), &mut out, None);
     let (f, m) = footer_of(&out).unwrap();
-    let from = aqr_compress::Appending { footer: f, metadata: m.unwrap(), link_groups: 0 };
+    let from = aqr_compress::Appending { footer: f, metadata: m.unwrap(), link_groups: 0, kill: true };
     let (tree, contents) = tree_of(second);
     let inputs: Vec<Input> = contents.iter().map(|(n, d)| Input { name: n.as_bytes(), data: d }).collect();
     assert!(aqr_compress::compress_tree_into(&tree, &inputs[..], &opt, &mut out, Some(&from), None, &|_| {}).is_err());
