@@ -262,6 +262,7 @@ name = "aqr-decompress"
 version = "0.1.0"
 dependencies = [
  "aqr-7z",
+ "aqr-api",
  "aqr-arsc",
  "aqr-asar",
  "aqr-azo",

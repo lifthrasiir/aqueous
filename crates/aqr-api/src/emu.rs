@@ -53,6 +53,56 @@ pub(crate) enum MemId {
 /// The payload of a panic signalling an error to the invocation.
 struct Trap(String);
 
+/// An input of a part module's application streamed ([`apply_streaming`]): pulled as the
+/// module requests it.
+pub trait Feed {
+    fn len(&self) -> u64;
+
+    /// Its bytes from where they were pulled to before up to `hi`, given to `put` in order.
+    /// An error fails the application (as a trap, with its message).
+    fn pull(&mut self, hi: u64, put: &mut dyn FnMut(&[u8])) -> Result<(), String>;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// An output of a part module's application streamed ([`apply_streaming`]): taking its bytes
+/// as the module commits them.
+pub trait Drain {
+    fn push(&mut self, d: &[u8]) -> Result<(), String>;
+}
+
+/// The data of an input: of its own, or pulled.
+enum In {
+    Data(Vec<u8>),
+    Pull(&'static mut dyn Feed),
+}
+
+impl In {
+    fn len(&self) -> u64 {
+        match self {
+            In::Data(d) => d.len() as u64,
+            In::Pull(f) => f.len(),
+        }
+    }
+}
+
+/// The bytes of an output committed: kept, or pushed (so many of them).
+enum Committed {
+    Kept(Vec<u8>),
+    Pushed(&'static mut dyn Drain, u64),
+}
+
+impl Committed {
+    fn len(&self) -> u64 {
+        match self {
+            Committed::Kept(d) => d.len() as u64,
+            Committed::Pushed(_, n) => *n,
+        }
+    }
+}
+
 struct Host {
     kind: Kind,
     params: Vec<u8>,
@@ -61,9 +111,9 @@ struct Host {
     outputs: Vec<Vec<u8>>,
     /// The data of the inputs and their visible ranges, and the outputs so far, for a part
     /// module.
-    data: Vec<Vec<u8>>,
+    data: Vec<In>,
     visible: Vec<(u64, u64)>,
-    committed: Vec<Vec<u8>>,
+    committed: Vec<Committed>,
     sizes: Vec<u64>,
     last_log: Option<Vec<u8>>,
     /// How deep within tasks the code runs, and the empty memory they see.
@@ -96,6 +146,78 @@ pub fn apply(
     params: &[u8],
     sizes: &[u64],
 ) -> Result<Vec<Vec<u8>>, Failure> {
+    let data = inputs.iter().map(|i| In::Data(i.to_vec())).collect();
+    let committed = sizes.iter().map(|_| Committed::Kept(Vec::new())).collect();
+    let host = run(entry, data, committed, resources, params, sizes)?;
+    let outputs: Vec<Vec<u8>> = match entry.kind {
+        Kind::Whole => host
+            .outputs
+            .into_iter()
+            .zip(sizes)
+            .map(|(mut o, &s)| {
+                o.truncate(s as usize);
+                o
+            })
+            .collect(),
+        Kind::Part => (host.committed.into_iter())
+            .map(|c| match c {
+                Committed::Kept(d) => d,
+                Committed::Pushed(..) => unreachable!("kept"),
+            })
+            .collect(),
+    };
+    for (j, (o, &size)) in outputs.iter().zip(sizes).enumerate() {
+        if o.len() as u64 != size {
+            return Err(failure(format!("output {j} of {} bytes, not {size}", o.len())));
+        }
+    }
+    Ok(outputs)
+}
+
+/// [`apply`] of a part module, its inputs pulled from `inputs` as it requests them and its
+/// outputs pushed to `outputs` as it commits them, on the calling thread: as the spec's
+/// "apply a module" allows a host to.
+pub fn apply_streaming(
+    entry: &Entry,
+    inputs: &mut [&mut dyn Feed],
+    resources: &[&[u8]],
+    params: &[u8],
+    outputs: &mut [&mut dyn Drain],
+    sizes: &[u64],
+) -> Result<(), Failure> {
+    if entry.kind != Kind::Part {
+        return Err(failure("a whole module streamed".into()));
+    }
+    if outputs.len() != sizes.len() {
+        return Err(failure("outputs of other sizes than declared".into()));
+    }
+    // SAFETY: the inputs and outputs outlive the host, which `run` takes back before it returns
+    let data = (inputs.iter_mut())
+        .map(|f| In::Pull(unsafe { std::mem::transmute::<&mut dyn Feed, &'static mut dyn Feed>(&mut **f) }))
+        .collect();
+    let committed = (outputs.iter_mut())
+        .map(|d| {
+            Committed::Pushed(unsafe { std::mem::transmute::<&mut dyn Drain, &'static mut dyn Drain>(&mut **d) }, 0)
+        })
+        .collect();
+    let host = run(entry, data, committed, resources, params, sizes)?;
+    for (j, (o, &size)) in host.committed.iter().zip(sizes).enumerate() {
+        if o.len() != size {
+            return Err(failure(format!("output {j} of {} bytes, not {size}", o.len())));
+        }
+    }
+    Ok(())
+}
+
+/// Runs `entry` on the host of inputs `data` and outputs `committed`: the host once it returns.
+fn run(
+    entry: &Entry,
+    data: Vec<In>,
+    committed: Vec<Committed>,
+    resources: &[&[u8]],
+    params: &[u8],
+    sizes: &[u64],
+) -> Result<Host, Failure> {
     static HOOK: Once = Once::new();
     HOOK.call_once(|| {
         let prev = panic::take_hook();
@@ -114,22 +236,23 @@ pub fn apply(
         .iter()
         .map(|&s| usize::try_from(s).map_err(|_| failure("declared output size too large".into())))
         .collect::<Result<Vec<_>, _>>()?;
+    let lens: Vec<u64> = data.iter().map(In::len).collect();
     let host = Host {
         kind: entry.kind,
         params: sized_to_fit(params),
         resources: resources.iter().map(|r| sized_to_fit(r)).collect(),
-        inputs: (inputs.iter().enumerate())
-            .map(|(k, i)| match whole {
-                true => sized_to_fit(i),
-                false => zeros(i.len(), crate::Window::of(entry.windows, false, k as u32)),
+        inputs: (data.iter().enumerate())
+            .map(|(k, i)| match (whole, i) {
+                (true, In::Data(d)) => sized_to_fit(d),
+                _ => zeros(i.len() as usize, crate::Window::of(entry.windows, false, k as u32)),
             })
             .collect(),
         outputs: (sizes_usize.iter().enumerate())
             .map(|(j, &s)| zeros(s, crate::Window::of(entry.windows, true, j as u32)))
             .collect(),
-        data: inputs.iter().map(|i| i.to_vec()).collect(),
-        visible: vec![(0, 0); inputs.len()],
-        committed: vec![Vec::new(); sizes.len()],
+        data,
+        visible: vec![(0, 0); lens.len()],
+        committed,
         sizes: sizes.to_vec(),
         last_log: None,
         task: 0,
@@ -142,7 +265,7 @@ pub fn apply(
 
     let mut args = vec![params.len() as u64];
     args.extend(resources.iter().map(|r| r.len() as u64));
-    args.extend(inputs.iter().map(|i| i.len() as u64));
+    args.extend(&lens);
     args.extend(sizes);
     let result = if args.len() != entry.arity {
         Err(failure(format!("entry point takes {} arguments, not {}", entry.arity, args.len())))
@@ -161,25 +284,7 @@ pub fn apply(
     };
     let mut host = HOST.with_borrow_mut(|h| h.take()).unwrap();
     result.map_err(|f| Failure { log: host.last_log.take(), ..f })?;
-
-    let outputs = if whole {
-        host.outputs
-            .into_iter()
-            .zip(&sizes_usize)
-            .map(|(mut o, &s)| {
-                o.truncate(s);
-                o
-            })
-            .collect()
-    } else {
-        host.committed
-    };
-    for (j, (o, &size)) in outputs.iter().zip(sizes).enumerate() {
-        if o.len() as u64 != size {
-            return Err(failure(format!("output {j} of {} bytes, not {size}", o.len())));
-        }
-    }
-    Ok(outputs)
+    Ok(host)
 }
 
 fn trap(msg: String) -> ! {
@@ -301,7 +406,7 @@ fn range(size: usize, at: u64, len: u64) -> Result<std::ops::Range<usize>, Strin
 }
 
 pub(crate) mod sys {
-    use super::{MemId, range, with};
+    use super::{Committed, In, MemId, range, with};
 
     pub fn size(id: MemId) -> u64 {
         with(|h| Ok(h.mem(id)?.len() as u64))
@@ -339,14 +444,22 @@ pub(crate) mod sys {
         with(|h| {
             h.part("aqr_request")?;
             let w = h.mem(MemId::Input(k))?.len() as u64;
-            let data = &h.data[k as usize];
+            let len = h.data[k as usize].len();
             let (lo_k, hi_k) = h.visible[k as usize];
-            if !(hi_k..=data.len() as u64).contains(&hi) || hi - lo_k > w {
-                return Err(format!("aqr_request({k}, {hi}) outside [{hi_k}, {}] or window {w}", data.len()));
+            if !(hi_k..=len).contains(&hi) || hi - lo_k > w {
+                return Err(format!("aqr_request({k}, {hi}) outside [{hi_k}, {len}] or window {w}"));
             }
             let mem = &mut h.inputs[k as usize];
-            for o in hi_k..hi {
-                mem[(o % w) as usize] = data[o as usize];
+            let mut at = hi_k;
+            let mut put = |d: &[u8]| {
+                for &b in d {
+                    mem[(at % w) as usize] = b;
+                    at += 1;
+                }
+            };
+            match &mut h.data[k as usize] {
+                In::Data(d) => put(&d[hi_k as usize..hi as usize]),
+                In::Pull(f) => f.pull(hi, &mut put)?,
             }
             h.visible[k as usize].1 = hi;
             Ok(())
@@ -370,13 +483,23 @@ pub(crate) mod sys {
         with(|h| {
             h.part("aqr_commit")?;
             let w = h.mem(MemId::Output(j))?.len() as u64;
-            let (len, size) = (h.committed[j as usize].len() as u64, h.sizes[j as usize]);
+            let (len, size) = (h.committed[j as usize].len(), h.sizes[j as usize]);
             if !(len..=size).contains(&hi) || hi - len > w {
                 return Err(format!("aqr_commit({j}, {hi}) outside [{len}, {size}] or window {w}"));
             }
-            for o in len..hi {
-                let b = h.outputs[j as usize][(o % w) as usize];
-                h.committed[j as usize].push(b);
+            let mem = &h.outputs[j as usize];
+            let mut at = len;
+            while at < hi {
+                let from = (at % w) as usize;
+                let n = (hi - at).min(w - from as u64) as usize;
+                match &mut h.committed[j as usize] {
+                    Committed::Kept(d) => d.extend_from_slice(&mem[from..from + n]),
+                    Committed::Pushed(p, done) => {
+                        p.push(&mem[from..from + n])?;
+                        *done += n as u64;
+                    }
+                }
+                at += n as u64;
             }
             Ok(())
         })

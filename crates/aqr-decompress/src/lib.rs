@@ -10,7 +10,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use aqr_formula::Resource;
-use aqr_formula::aqr::{self, Failure, Loaded, Runner};
+use aqr_formula::aqr::{self, Failure, Loaded, PartIn, PartOut, Runner};
 use sha2::{Digest, Sha512_256};
 
 #[cfg(feature = "wasm")]
@@ -337,23 +337,37 @@ pub const RECS_FLOATS: Module = aqr_infer_recs::formula::FLOATS;
 /// A module's `decode`: params, resources, inputs, output length and threads.
 pub type Decode = fn(&[u8], &[&[u8]], &[&[u8]], u64, usize) -> std::result::Result<Vec<u8>, String>;
 
-/// A module of this crate as it runs natively: its `decode`, and whether it takes resources
-/// (those that do not are given none).
+/// A module of this crate as it runs natively: its `decode`, or the entry point of its code as a
+/// part module (applied streamed, [`Loaded::apply_part`], and whole by `aqr_api`'s emulation);
+/// and whether it takes resources (those that do not are given none).
 #[derive(Clone, Copy)]
 struct Entry {
     module: Module,
     resources: bool,
-    decode: Decode,
+    decode: Run,
+}
+
+#[derive(Clone, Copy)]
+enum Run {
+    Whole(Decode),
+    Part(aqr_api::emu::Entry),
 }
 
 /// [`Entry`] of a module taking resources.
 const fn takes(module: Module, decode: Decode) -> Entry {
-    Entry { module, resources: true, decode }
+    Entry { module, resources: true, decode: Run::Whole(decode) }
 }
 
 /// [`Entry`] of a module taking none.
 const fn bare(module: Module, decode: Decode) -> Entry {
-    Entry { module, resources: false, decode }
+    Entry { module, resources: false, decode: Run::Whole(decode) }
+}
+
+/// [`Entry`] of a part module, of the entry point `entry` (`aqr_api::entry!`'s), taking
+/// resources where `resources`.
+#[allow(dead_code)]
+const fn part(module: Module, resources: bool, entry: aqr_api::emu::Entry) -> Entry {
+    Entry { module, resources, decode: Run::Part(entry) }
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -546,7 +560,94 @@ struct NativeLoaded<'a> {
     module: Module,
 }
 
+impl NativeLoaded<'_> {
+    /// The entry point of its code as a part module, where it is one.
+    fn part(&self) -> Option<aqr_api::emu::Entry> {
+        NATIVE.iter().find(|e| e.module == self.module).and_then(|e| match e.decode {
+            Run::Part(entry) => Some(entry),
+            Run::Whole(_) => None,
+        })
+    }
+}
+
+/// The message of a failure of `aqr_api`'s emulation: what went wrong, and the module's last
+/// message before it.
+fn emulated(f: aqr_api::emu::Failure) -> String {
+    match f.log {
+        Some(log) => format!("{}: {}", f.what, String::from_utf8_lossy(&log)),
+        None => f.what,
+    }
+}
+
+/// Applies part module `entry` natively ([`aqr_api::emu::apply_streaming`]), its inputs pulled
+/// and its outputs pushed as it goes: a failure to pull or push is the application's.
+fn streamed(
+    entry: &aqr_api::emu::Entry,
+    params: &[u8],
+    resources: &[&[u8]],
+    inputs: &mut [&mut dyn PartIn],
+    outputs: &mut [&mut dyn PartOut],
+    sizes: &[u64],
+) -> aqr::Decoded<()> {
+    use std::cell::RefCell;
+    let failed: RefCell<Option<Failure>> = RefCell::new(None);
+    struct Feed<'a, 'b>(&'a mut dyn PartIn, &'b RefCell<Option<Failure>>);
+    impl aqr_api::emu::Feed for Feed<'_, '_> {
+        fn len(&self) -> u64 {
+            self.0.len()
+        }
+        fn pull(&mut self, hi: u64, put: &mut dyn FnMut(&[u8])) -> std::result::Result<(), String> {
+            self.0.pull(hi, put).map_err(|f| {
+                let m = format!("{f:?}");
+                self.1.borrow_mut().get_or_insert(f);
+                m
+            })
+        }
+    }
+    struct Drain<'a, 'b>(&'a mut dyn PartOut, &'b RefCell<Option<Failure>>);
+    impl aqr_api::emu::Drain for Drain<'_, '_> {
+        fn push(&mut self, d: &[u8]) -> std::result::Result<(), String> {
+            self.0.push(d).map_err(|f| {
+                let m = format!("{f:?}");
+                self.1.borrow_mut().get_or_insert(f);
+                m
+            })
+        }
+    }
+    let mut feeds: Vec<Feed> = inputs.iter_mut().map(|i| Feed(&mut **i, &failed)).collect();
+    let mut drains: Vec<Drain> = outputs.iter_mut().map(|o| Drain(&mut **o, &failed)).collect();
+    let mut feeds: Vec<&mut dyn aqr_api::emu::Feed> = feeds.iter_mut().map(|f| f as _).collect();
+    let mut drains: Vec<&mut dyn aqr_api::emu::Drain> = drains.iter_mut().map(|d| d as _).collect();
+    let r = aqr_api::emu::apply_streaming(entry, &mut feeds, resources, params, &mut drains, sizes);
+    match (failed.into_inner(), r) {
+        (Some(f), _) => Err(f),
+        (None, r) => r.map_err(|f| Failure::Invalid(emulated(f))),
+    }
+}
+
 impl Loaded for NativeLoaded<'_> {
+    fn is_part(&self) -> bool {
+        self.part().is_some()
+    }
+
+    fn apply_part(
+        &self,
+        params: &[u8],
+        resources: &[Resource],
+        inputs: &mut [&mut dyn PartIn],
+        outputs: &mut [&mut dyn PartOut],
+        sizes: &[u64],
+        _: u64,
+    ) -> aqr::Decoded<()> {
+        let Some(entry) = self.part() else { return Err(Failure::Resource("not a part module".into())) };
+        let _s = aqr_common::trace::span(self.module.name);
+        let resources: Vec<&[u8]> = resources.iter().map(|r| &r[..]).collect();
+        streamed(&entry, params, &resources, inputs, outputs, sizes).map_err(|f| match f {
+            Failure::Invalid(m) => Failure::Invalid(format!("{}: {m}", self.module)),
+            f => f,
+        })
+    }
+
     fn apply(
         &self,
         params: &[u8],
@@ -597,7 +698,13 @@ impl Native {
         if !e.resources && !resources.is_empty() {
             return Err("resources given".into());
         }
-        (e.decode)(params, resources, inputs, len, self.threads.max(1))
+        match e.decode {
+            Run::Whole(decode) => decode(params, resources, inputs, len, self.threads.max(1)),
+            Run::Part(entry) => match aqr_api::emu::apply(&entry, inputs, resources, params, &[len]) {
+                Ok(mut out) => Ok(out.pop().expect("an output")),
+                Err(f) => Err(emulated(f)),
+            },
+        }
     }
 }
 
@@ -605,5 +712,86 @@ impl Modules for Native {
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
         let resources: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
         self.run(a.module, &a.params, &resources, inputs, a.len)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    use aqr_api::{Input, Memory, Output};
+
+    use super::*;
+
+    aqr_api::entry! {
+        // its input copied to its output through windows of a page, in pieces of 4 KiB
+        part fn copy(params_len, in0_len, size) windows(Input 0 = 1, Output 0 = 1) {
+            let _ = params_len;
+            assert_eq!(size, in0_len);
+            let (w_in, w_out) = (Input::<0>::size(), Output::<0>::size());
+            let mut buf = [0; 4096];
+            let mut pos = 0;
+            while pos < size {
+                let n = (size - pos).min(buf.len() as u64).min(w_in - pos % w_in).min(w_out - pos % w_out);
+                let chunk = &mut buf[..n as usize];
+                Input::<0>::request(pos + n);
+                Input::<0>::read(pos % w_in, chunk);
+                Input::<0>::release(pos + n);
+                Output::<0>::write(pos % w_out, chunk);
+                Output::<0>::commit(pos + n);
+                pos += n;
+            }
+        }
+    }
+
+    struct Feed<'a>(&'a [u8], Arc<AtomicU64>, Option<Failure>);
+
+    impl PartIn for Feed<'_> {
+        fn len(&self) -> u64 {
+            self.0.len() as u64
+        }
+
+        fn pull(&mut self, hi: u64, put: &mut dyn FnMut(&[u8])) -> aqr::Decoded<()> {
+            if let Some(f) = &self.2 {
+                return Err(f.clone());
+            }
+            put(&self.0[self.1.load(Relaxed) as usize..hi as usize]);
+            self.1.store(hi, Relaxed);
+            Ok(())
+        }
+    }
+
+    /// The bytes pushed, and how much of the input was pulled as the first were.
+    struct Drain(Vec<u8>, Arc<AtomicU64>, Option<u64>);
+
+    impl PartOut for Drain {
+        fn push(&mut self, d: &[u8]) -> aqr::Decoded<()> {
+            self.2.get_or_insert(self.1.load(Relaxed));
+            self.0.extend_from_slice(d);
+            Ok(())
+        }
+    }
+
+    /// A part module run natively streamed, through its windows: its first bytes pushed before
+    /// most of its input is pulled; a failure to pull is the application's, not a trap's.
+    #[test]
+    fn natively_streamed() {
+        let d: Vec<u8> = (0..300_001u32).map(|i| (i * 7) as u8).collect();
+        let pulled = Arc::new(AtomicU64::new(0));
+        let (mut feed, mut drain) = (Feed(&d, pulled.clone(), None), Drain(Vec::new(), pulled, None));
+        streamed(&copy::ENTRY, b"", &[], &mut [&mut feed], &mut [&mut drain], &[d.len() as u64]).unwrap();
+        assert!(drain.0 == d);
+        assert!(drain.2.is_some_and(|n| n < 1 << 16), "{:?}", drain.2);
+        let upstream = Failure::Invalid("upstream".into());
+        let mut feed = Feed(&d, Arc::default(), Some(upstream.clone()));
+        let mut drain = Drain(Vec::new(), Arc::default(), None);
+        let r = streamed(&copy::ENTRY, b"", &[], &mut [&mut feed], &mut [&mut drain], &[d.len() as u64]);
+        assert_eq!(r, Err(upstream));
+        // of another size than declared
+        let mut feed = Feed(&d, Arc::default(), None);
+        let mut drain = Drain(Vec::new(), Arc::default(), None);
+        let r = streamed(&copy::ENTRY, b"", &[], &mut [&mut feed], &mut [&mut drain], &[10]);
+        assert!(matches!(r, Err(Failure::Invalid(_))), "{r:?}");
     }
 }
