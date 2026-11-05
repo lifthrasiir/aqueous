@@ -41,7 +41,7 @@ pub mod sink;
 mod tree;
 
 pub use listing::Listed;
-pub use locate::{footer_of, locate, trim};
+pub use locate::{block_at, footer_of, locate, trim};
 pub use mirror::Mirroring;
 pub use segment::{Batch, ContentAt, Layout, Leaf, Placed, Segment, SegmentWriter, crossing, kill};
 pub use tree::{
@@ -2621,6 +2621,11 @@ impl<'n> Archive<'_, 'n> {
     /// The number of leaf blocks.
     pub fn leaves_len(&self) -> usize {
         self.blocks.leaves.len()
+    }
+
+    /// The bytes of content `c` of the tree, as its metadata block tells.
+    pub fn content_size(&self, c: usize) -> Option<u64> {
+        self.tree.as_ref()?.1.get(c).map(|r| r.2)
     }
 
     /// The leaf (by its index among the leaf blocks) of content `c` of the tree.

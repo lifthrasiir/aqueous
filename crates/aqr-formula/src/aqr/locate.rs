@@ -1,6 +1,6 @@
 //! Locating an archive in a file (spec, "Locating an archive"): the archive at the end of the
 //! file found from its footer, or the first one in the file found by reading its blocks, and
-//! either trimmed where a footer follows one of the last two metadata blocks (what appending to
+//! either trimmed where a footer follows one of its metadata blocks (what appending to
 //! the archive leaves until it commits, spec, "Appending to an archive").
 
 use std::ops::Range;
@@ -75,6 +75,12 @@ fn forward(file: &[u8], footer: [u8; 6]) -> Option<usize> {
     }
 }
 
+/// The type of the block of `d` at `at` by the generic structure (spec, "Block"), and where it
+/// ends (after its padding), where it is whole.
+pub fn block_at(d: &[u8], at: usize) -> Option<(u64, usize)> {
+    frame_at(d, at).map(|(ty, _, end)| (ty, end))
+}
+
 /// The block of `d` at `at` by the generic structure, where it is whole: its type, its data and
 /// where it ends (after its padding).
 pub(crate) fn frame_at(d: &[u8], at: usize) -> Option<(u64, Range<usize>, usize)> {
@@ -123,8 +129,8 @@ pub fn footer_of(a: &[u8]) -> Option<(Range<usize>, Option<usize>)> {
 }
 
 /// The length of the located archive `a` (a header magic, and a footer matching it at its
-/// end), trimmed where a footer other than the last follows one of its last two metadata blocks
-/// (spec, "trim a located archive").
+/// end), trimmed where a footer other than the last follows one of its metadata blocks (spec,
+/// "trim a located archive").
 pub fn trim(a: &[u8]) -> usize {
     trimmed(a).unwrap_or(a.len())
 }
@@ -143,16 +149,20 @@ fn trimmed(a: &[u8]) -> Option<usize> {
     if !metadata(ty) {
         return None;
     }
+    // (the metadata blocks back to the first, each by the offset at the start of its decoded
+    // data; ever earlier, so the walk ends)
     let mut blocks = vec![end];
-    // (the one before it, by the offset at the start of its decoded data)
-    if let Some(prev) = decoded(&a[data], ty & 0x04 != 0, true).ok().and_then(|d| {
-        let mut at = 0;
-        usize::try_from(leb(&d, &mut at).ok()?).ok()
-    }) && let Some(p) = last.checked_sub(prev)
-        && let Some((ty, _, end)) = frame_at(a, p)
-        && metadata(ty)
+    let (mut at, mut data, mut ty) = (last, data, ty);
+    while let Some(prev) = decoded(&a[data.clone()], ty & 0x04 != 0, true).ok().and_then(|d| {
+        let mut p = 0;
+        usize::try_from(leb(&d, &mut p).ok()?).ok()
+    }) && prev > 0
+        && let Some(p) = at.checked_sub(prev)
+        && let Some((t, d, end)) = frame_at(a, p)
+        && metadata(t)
     {
         blocks.insert(0, end);
+        (at, data, ty) = (p, d, t);
     }
     for mut e in blocks {
         while let Some((0..=3, _, end)) = frame_at(a, e) {

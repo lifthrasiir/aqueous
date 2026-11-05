@@ -1092,11 +1092,11 @@ To <dfn>trim a located archive</dfn> |a|, a [=byte sequence=] starting with a he
         If its [=archive/metadata_backward_offset=] is 0, return |a|.
     2. Let |last| be the block starting [=archive/metadata_backward_offset=] bytes before the [=archive/footer_start=] of that footer.
         If it can't be read by the generic structure ([[#block]]) or is not a [[#metadata-block|metadata block]], return |a|.
-    3. Let |blocks| be a [=list=] containing |last|.
-        If the [=decoded data=] of |last| can be parsed as far as its [=meta/previous_metadata_offset=],
-        and the block starting [=meta/previous_metadata_offset=] bytes before |last| can be read by the generic structure
-        and is a metadata block, [=list/prepend=] that block to |blocks|.
-    4. For each block |m| of |blocks|:
+    3. Let |blocks| be a [=list=] containing |last|, and |m| be |last|.
+        While the [=decoded data=] of |m| can be parsed as far as its [=meta/previous_metadata_offset=],
+        and the block starting [=meta/previous_metadata_offset=] bytes before |m| can be read by the generic structure
+        and is a metadata block, set |m| to that block and [=list/prepend=] it to |blocks|.
+    4. For each block |m| of |blocks|, in order:
         1. Let |e| be the offset after the [=block/padding=] of |m| (the [=block/block_end=] if it has none).
         2. While the bytes of |a| from |e| are a whole [[#spacer-block|spacer block]] read by the generic structure,
             set |e| to the offset after it.
@@ -1106,12 +1106,13 @@ To <dfn>trim a located archive</dfn> |a|, a [=byte sequence=] starting with a he
 </ol>
 
 <div class=note>
-  A footer directly after the last metadata block or the one before it, other than the footer at the end,
+  A footer directly after a metadata block, other than the footer at the end,
   is what [[#appending|appending to an archive]] leaves while it writes:
   the archive still ends at that footer, as reading the blocks forward in the step 3.2 finds,
   and the bytes after it are trailing bytes until the appending is committed.
-  Trimming finds it from the end of the file without reading every block,
-  as a decompressor reading the last metadata blocks reads the bytes after them anyway.
+  Trimming finds it from the end of the file by the metadata blocks alone, not reading every block,
+  as a decompressor interpreting the archive reads every metadata block and the bytes after it anyway;
+  where several follow metadata blocks, the first ends the archive, as reading forward finds.
   A footer anywhere else before the footer at the end makes the archive found from the end invalid.
 </div>
 
