@@ -3,8 +3,9 @@
 
 const PAGE = 65536;
 
-function sizedToFit(data, len = data.length) {
-    const pages = BigInt(Math.ceil(len / PAGE));
+function sizedToFit(data, len = data.length, window = undefined) {
+    let pages = BigInt(Math.ceil(len / PAGE));
+    if (window !== undefined && BigInt(window) < pages) pages = BigInt(window);
     const mem = new WebAssembly.Memory({ initial: pages, maximum: pages, address: "i64" });
     if (data) new Uint8Array(mem.buffer).set(data);
     return mem;
@@ -61,11 +62,11 @@ export function apply(bytes, { inputs, resources, params, sizes, logs = [] }) {
             continue;
         } else if (n === "aqr_memory") m = new WebAssembly.Memory({ initial: imp.type.minimum });
         else if (n === "aqr_params") m = sizedToFit(params);
-        else if (n.startsWith("aqr_output")) m = sizedToFit(null, sizes[+n.slice(10)] ?? fail(n));
+        else if (n.startsWith("aqr_output")) m = sizedToFit(null, sizes[+n.slice(10)] ?? fail(n), imp.type.maximum);
         else if (n.startsWith("aqr_resource")) m = sizedToFit(resources[+n.slice(12)] ?? fail(n));
         else if (n.startsWith("aqr_input")) {
             const data = inputs[+n.slice(9)] ?? fail(n);
-            m = whole ? sizedToFit(data) : sizedToFit(null, data.length);
+            m = whole ? sizedToFit(data) : sizedToFit(null, data.length, imp.type.maximum);
         } else throw new Error(`import ${n}`);
         aqr[n] = mems[n] = m;
     }

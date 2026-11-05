@@ -25,6 +25,8 @@ pub enum Kind {
 #[derive(Clone, Copy)]
 pub struct Entry {
     pub kind: Kind,
+    /// The windows of the memories of its inputs and outputs.
+    pub windows: &'static [crate::Window],
     pub arity: usize,
     pub call: fn(&[u64]),
 }
@@ -79,6 +81,12 @@ fn sized_to_fit(data: &[u8]) -> Vec<u8> {
     mem
 }
 
+/// A memory of zeros sized to fit `len` bytes, within `window` pages where given.
+fn zeros(len: usize, window: Option<u64>) -> Vec<u8> {
+    let pages = (len.div_ceil(65536) as u64).min(window.unwrap_or(u64::MAX));
+    vec![0; pages as usize * 65536]
+}
+
 /// Applies the module `entry` to `inputs`, `resources` and `params` with the declared output sizes
 /// `sizes`; returns the outputs.
 pub fn apply(
@@ -110,8 +118,15 @@ pub fn apply(
         kind: entry.kind,
         params: sized_to_fit(params),
         resources: resources.iter().map(|r| sized_to_fit(r)).collect(),
-        inputs: inputs.iter().map(|i| if whole { sized_to_fit(i) } else { sized_to_fit(&vec![0; i.len()]) }).collect(),
-        outputs: sizes_usize.iter().map(|&s| sized_to_fit(&vec![0; s])).collect(),
+        inputs: (inputs.iter().enumerate())
+            .map(|(k, i)| match whole {
+                true => sized_to_fit(i),
+                false => zeros(i.len(), crate::Window::of(entry.windows, false, k as u32)),
+            })
+            .collect(),
+        outputs: (sizes_usize.iter().enumerate())
+            .map(|(j, &s)| zeros(s, crate::Window::of(entry.windows, true, j as u32)))
+            .collect(),
         data: inputs.iter().map(|i| i.to_vec()).collect(),
         visible: vec![(0, 0); inputs.len()],
         committed: vec![Vec::new(); sizes.len()],

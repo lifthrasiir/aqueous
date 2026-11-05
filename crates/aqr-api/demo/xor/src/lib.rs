@@ -1,11 +1,12 @@
-//! A part module: `input0` XOR the key in `params`, streamed through the windows in chunks.
+//! A part module: `input0` XOR the key in `params`, streamed through windows of a page (ring
+//! buffers) in chunks.
 
 #![cfg_attr(target_family = "wasm", no_std)]
 
 use aqr_api::{Input, Memory, Output, Params};
 
 aqr_api::entry! {
-    part fn xor(params_len, in0_len, size) {
+    part fn xor(params_len, in0_len, size) windows(Input 0 = 1, Output 0 = 1) {
         if !(1..=256).contains(&params_len) {
             aqr_api::log(b"xor: key of 1 to 256 bytes expected");
             aqr_api::trap();

@@ -3,7 +3,8 @@
 //! - the memory defined by the linker becomes the working memory `aqr.aqr_memory`;
 //! - `size_M`, `read_M`, `write_O` and `copy_O_M` become `memory.size M`, `memory.copy working M`,
 //!   `memory.copy O working` and `memory.copy O M` (`O` an output), with `aqr.aqr_M` imported
-//!   (64-bit, minimum 0, no maximum) for each memory `M` used;
+//!   (64-bit, minimum 0, no maximum but the window `aqr_windows` gives of an input or an output:
+//!   `aqr-api`'s `entry!` defines them, and the section goes) for each memory `M` used;
 //! - `request`, `release`, `commit`, `heartbeat`, `log`, `spawn`, `result`, `join`, `take`,
 //!   `chan`, `send`, `recv` and `close` become `aqr.aqr_request` and so on;
 //! - where the module spawns tasks, `aqr_task` is exported: it sets the stack pointer below the
@@ -29,6 +30,7 @@ const PART: &str = "aqr_apply_part";
 const TASK: &str = "aqr_task";
 const TASK_BODY: &str = "aqr_task_body";
 const TASK_SLOTS: &str = "aqr_task_slots";
+const WINDOWS: &str = "aqr_windows";
 
 fn parse(wasm: &[u8]) -> Result<Module, String> {
     // (the names parsed still, for `trim`)
@@ -107,11 +109,13 @@ pub fn rewrite(wasm: &[u8]) -> Result<Vec<u8>, String> {
     let import = m.imports.add("aqr", "aqr_memory", working);
     m.memories.get_mut(working).import = Some(import);
 
+    let windows = windows(wasm)?;
     let mut memories = HashMap::new();
     let mut memory = |m: &mut Module, name: &str| {
-        *memories
-            .entry(name.to_owned())
-            .or_insert_with(|| m.add_import_memory("aqr", &format!("aqr_{name}"), false, true, 0, None, None).0)
+        *memories.entry(name.to_owned()).or_insert_with(|| {
+            let max = windows.get(name).copied();
+            m.add_import_memory("aqr", &format!("aqr_{name}"), false, true, 0, max, None).0
+        })
     };
     let mut calls = HashMap::new();
     let mut part_funcs = Vec::new();
@@ -242,6 +246,33 @@ pub fn rewrite(wasm: &[u8]) -> Result<Vec<u8>, String> {
         .validate_all(&wasm)
         .map_err(|e| format!("invalid output: {e}"))?;
     Ok(wasm)
+}
+
+/// The windows of the custom sections [`WINDOWS`] of `wasm` (`aqr-api`'s `entry!`), in pages,
+/// by the memories' names (`input`k, `output`j).
+fn windows(wasm: &[u8]) -> Result<HashMap<String, u64>, String> {
+    let mut out = HashMap::new();
+    for p in wasmparser::Parser::new(0).parse_all(wasm) {
+        if let wasmparser::Payload::CustomSection(c) = p.map_err(|e| e.to_string())?
+            && c.name() == WINDOWS
+        {
+            if c.data().len() % 6 != 0 {
+                return Err(format!("{WINDOWS} of {} bytes", c.data().len()));
+            }
+            for w in c.data().chunks(6) {
+                let pages = u32::from_le_bytes(w[2..].try_into().expect("4 bytes")) as u64;
+                let name = match w[0] {
+                    0 => format!("input{}", w[1]),
+                    1 => format!("output{}", w[1]),
+                    k => return Err(format!("{WINDOWS} of a memory of kind {k}")),
+                };
+                if pages == 0 || out.insert(name.clone(), pages).is_some() {
+                    return Err(format!("{WINDOWS}: a window of {name} of 0 pages, or two"));
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The byte of the custom section [`TASK_SLOTS`] of `wasm`, if it has one; 0 where it is not a

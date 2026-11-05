@@ -17,6 +17,16 @@ fn multi_page() {
     assert_eq!(apply(&ENTRY, &[&data], &[], key, &[data.len() as u64]).unwrap()[0], xor(&data, key));
 }
 
+/// Its memories are of a page whatever the data, which it goes through as ring buffers.
+#[test]
+fn windows() {
+    use aqr_api::Window;
+    assert_eq!(aqr_demo_xor::xor::WINDOWS, [Window::Input(0, 1), Window::Output(0, 1)]);
+    let data: Vec<u8> = (0..300_001u32).map(|i| (i * 13) as u8).collect();
+    let entry = Entry { windows: &[Window::Input(0, 2), Window::Output(0, 1)], ..ENTRY };
+    assert_eq!(apply(&entry, &[&data], &[], b"k", &[data.len() as u64]).unwrap()[0], xor(&data, b"k"));
+}
+
 #[test]
 fn as_whole() {
     // The same code as a whole module may not call the part host functions.

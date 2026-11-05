@@ -257,12 +257,56 @@ memories! {
     Resource<15> => "resource15", MemId::Resource(15);
 }
 
+/// The window of a memory of an input or an output of a part module, in pages: its import
+/// type's maximum, so that the memory is a ring buffer of so many pages where its data is longer
+/// (spec, "Module execution"). Declared with [`entry!`]'s `windows`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Window {
+    Input(u32, u32),
+    Output(u32, u32),
+}
+
+impl Window {
+    /// The pages of memory `output` (else an input) `i` among `windows`, if it has a window.
+    pub fn of(windows: &[Window], output: bool, i: u32) -> Option<u64> {
+        windows.iter().find_map(|&w| match (w, output) {
+            (Window::Input(k, p), false) | (Window::Output(k, p), true) if k == i => Some(p as u64),
+            _ => None,
+        })
+    }
+
+    /// The custom section `aqr_windows` of `windows`, `B` bytes: for each, a byte telling an
+    /// input (0) or an output (1), a byte of its index, and its pages as u32le.
+    #[doc(hidden)]
+    pub const fn section<const B: usize>(windows: &[Window]) -> [u8; B] {
+        let mut out = [0; B];
+        let mut n = 0;
+        while n < windows.len() {
+            let (kind, i, pages) = match windows[n] {
+                Window::Input(i, p) => (0, i, p),
+                Window::Output(i, p) => (1, i, p),
+            };
+            let p = pages.to_le_bytes();
+            let rec = [kind, i as u8, p[0], p[1], p[2], p[3]];
+            let mut b = 0;
+            while b < 6 {
+                out[n * 6 + b] = rec[b];
+                b += 1;
+            }
+            n += 1;
+        }
+        out
+    }
+}
+
 /// Defines the entry point `aqr_apply_whole` or `aqr_apply_part` as `$name::apply`.
 ///
 /// The arguments are the lengths, in order, of the parameters, of each resource and of each input,
 /// and the declared size of each output, so their number fixes the numbers of the resources, the
 /// inputs and the outputs together (the module tells them apart).
-/// Natively, `$name::ENTRY` is the entry point for [`emu::apply`].
+/// Natively, `$name::ENTRY` is the entry point for [`emu::apply`]. A part module may give its
+/// memories windows (in pages, [`Window`]): `part fn copy(params_len, in0_len, size)
+/// windows(Input 0 = 64, Output 0 = 64) { ... }`.
 ///
 /// ```ignore
 /// aqr_api::entry! {
@@ -276,13 +320,30 @@ macro_rules! entry {
     (whole fn $name:ident($($arg:ident),* $(,)?) $body:block) => {
         $crate::entry!(@ "aqr_apply_whole", Whole, $name, ($($arg),*), $body);
     };
-    (part fn $name:ident($($arg:ident),* $(,)?) $body:block) => {
-        $crate::entry!(@ "aqr_apply_part", Part, $name, ($($arg),*), $body);
+    (part fn $name:ident($($arg:ident),* $(,)?) $(windows($($mem:ident $i:literal = $pages:expr),* $(,)?))? $body:block) => {
+        $crate::entry!(@ "aqr_apply_part", Part, $name, ($($arg),*), [$($($crate::Window::$mem($i, $pages)),*)?], $body);
+        // (only where it has windows: a static of none moves the data of the others)
+        $(
+            #[cfg(target_family = "wasm")]
+            const _: () = {
+                const WINDOWS: &[$crate::Window] = &[$($crate::Window::$mem($i, $pages)),*];
+                #[unsafe(link_section = "aqr_windows")]
+                #[used]
+                static SECTION: [u8; WINDOWS.len() * 6] = $crate::Window::section(WINDOWS);
+            };
+        )?
     };
     (@ $export:literal, $kind:ident, $name:ident, ($($arg:ident),*), $body:block) => {
+        $crate::entry!(@ $export, $kind, $name, ($($arg),*), [], $body);
+    };
+    (@ $export:literal, $kind:ident, $name:ident, ($($arg:ident),*), [$($w:expr),*], $body:block) => {
         pub mod $name {
             #[allow(unused_imports)]
             use super::*;
+
+            /// The windows of its memories (in the custom section `aqr_windows`, which aqr-ld
+            /// makes the maximums of their import types).
+            pub const WINDOWS: &[$crate::Window] = &[$($w),*];
 
             #[cfg(target_family = "wasm")]
             #[unsafe(export_name = $export)]
@@ -303,6 +364,7 @@ macro_rules! entry {
             #[cfg(not(target_family = "wasm"))]
             pub const ENTRY: $crate::emu::Entry = $crate::emu::Entry {
                 kind: $crate::emu::Kind::$kind,
+                windows: WINDOWS,
                 arity: [$(stringify!($arg)),*].len(),
                 call: |args| {
                     let &[$($arg),*] = args else { unreachable!() };
