@@ -270,21 +270,27 @@ non-critical 타입 둘을 쓴다. 예를 들어 B0–B3은 parity block, B4–B
 
 #### 부호
 
-- 명세에서는 GF(2¹⁶) 위의 systematic RS로 정의한다. 차수가 n 미만인 다항식 f에 대해 data shard의 각 심볼은 f(x<sub>i</sub>), parity shard의 심볼은 f(y<sub>j</sub>)이다. 평가점이 서로 다르기만 하면 MDS가 증명된다(§1의 Par2 교훈).
-- 평가점은 additive-FFT 기반 RS(Lin–Chung–Han 계열, Leopard-RS와 `reed-solomon-simd`)의 배치에 맞춰, 그 구현을 그대로 쓸 수 있게 고른다.
-  - MDS이므로 p개의 slice가 어떤 조합으로 손실돼도 복구된다.
-  - O(n log n)이다.
-  - 구현별 (n, p) 제약은 다음과 같다. 당장은 n ≤ 32768, p ≤ n을 권고한다.
-    - Leopard-RS(C++, BSD-3-Clause): 원본 + 복구 ≤ 65536이고, 복구 ≤ 원본이다. 2017년 README 기준이다. 조각 크기는 64바이트의 배수여야 한다. AVX2 단일 코어 인코딩이 1.2 GB/s 수준이다.
-    - `reed-solomon-simd`(Rust, MIT AND BSD-3-Clause, 3.1.0): 원본과 복구가 각각 1–32768이면 아무 조합이나 된다. 한쪽이 32768을 넘으면 다른 쪽이 2ⁿ 이하일 때 2¹⁶ − 2ⁿ까지 허용된다(예: 61440 : 4096). 조각 크기는 짝수이면 된다. Ryzen 5 3600 단일 코어(AVX2), 1 KiB 조각에서 32 : 32는 10.2 GiB/s, 1024 : 1024는 4.8 GiB/s, 32768 : 32768은 1.6 GiB/s로 인코딩한다(원본과 복구 합계 기준). 1024 : 1024 디코딩은 1.3–1.4 GiB/s이다.
+- 명세에서는 GF(2¹⁶) 위의 shortened, punctured systematic RS로 정의한다. 평가점이 서로 다르기만 하면 MDS가 증명된다(§1의 Par2 교훈).
+- 부호는 additive-FFT 기반 RS(Lin–Al-Naffouri–Han–Chung 2016, Leopard-RS와 `reed-solomon-simd`)의 high-rate 부호와 같게 정해, 그 구현을 그대로 쓸 수 있게 한다. 아래는 R6에서 `reed-solomon-simd` 3.1.0을 블랙박스로 돌려 확인한 정의이다(방법은 §8의 R6).
+  - **체와 심볼 표현.** 체는 GF(2)[x]/(x¹⁶ + x⁵ + x³ + x² + 1)(0x1002D)이다. 다만 16비트 심볼 v는 다항식 기저의 계수가 아니라 Cantor 기저 β<sub>0..15</sub>에 대한 좌표이다. 즉 v가 나타내는 원소는 Σ v<sub>b</sub>·β<sub>b</sub>이다. β는 다항식 기저로 `0001 acca 3c0e 163e c582 ed2e 914c 4012 6c98 10d8 6a72 b900 fdb8 fb34 ff38 991e`(16진)이고, β<sub>0</sub> = 1, β<sub>k</sub>² + β<sub>k</sub> = β<sub>k−1</sub>을 만족한다. 덧셈은 이 표현에서도 XOR이다. 명세에는 이 β 표를 그대로 싣는다.
+    > 다항식 기저로 읽으면 인코더가 GF(2¹⁶)-선형이 아니다(시험한 네 모양 모두 불일치). Cantor 좌표로 읽으면 무작위 입력에서 전부 일치한다. 이 β는 라이브러리의 공개 상수 `engine::CANTOR_BASIS`와 같다. 인코더의 비트 행렬에서 따로 구한 해 16개(Frobenius 켤레)가 모두 Cantor 기저였고, 그중 하나가 이 상수와 일치했다. 켤레 중 무엇을 골라도 비트 단위의 부호는 같다.
+  - **평가점.** ω<sub>k</sub>는 위 표현으로 정수 k인 심볼이 나타내는 원소이다(0 ≤ k < 65536). 그래서 ω<sub>a</sub> + ω<sub>b</sub> = ω<sub>a⊕b</sub>이고, ω<sub>0..2ᵗ−1</sub>은 부분공간이다.
+  - **배치(high rate).** m = 2<sup>⌈log₂ p⌉</sup>(p = 1이면 1)이다. parity shard j(< p)는 ω<sub>j</sub>, data shard i(< n)는 ω<sub>m+i</sub>에 놓인다. ω<sub>p..m−1</sub>의 parity는 내보내지 않는다(punctured). data 자리 m+n 이후는 0으로 간주한다(shortened). f는 차수가 65536 − m 미만이고 f(ω<sub>m+i</sub>) = d<sub>i</sub>(i ≥ n이면 0)인 유일한 다항식이며, parity j는 f(ω<sub>j</sub>)이다. Leopard2 문서의 "legacy high V1"(`[parity 0..T-1][message T..T+K-1][shortened zero tail]`, T = ceil_pow2(R))과 같은 배치이다.
+  - **계산할 수 있는 형태.** 위 f의 Lagrange 계수는 data 자리를 m개씩 나눈 coset 안의 곱으로 줄어든다. ω<sub>m+i</sub>가 속한 coset의 인덱스 집합을 C(i) = {⌊(m+i)/m⌋·m, …, 그 + m − 1}이라 하면 parity<sub>j</sub> = Σ<sub>i</sub> d<sub>i</sub> · Π<sub>k∈C(i), k≠m+i</sub> (ω<sub>j</sub> + ω<sub>k</sub>)/(ω<sub>m+i</sub> + ω<sub>k</sub>)이다. 명세는 이 식으로 정의하는 것이 낫다.
+    > 다른 coset들은 V<sub>m</sub> = {ω<sub>0..m−1</sub>}의 소거 다항식 W(선형화 다항식)가 coset마다 상수인 덕에 Lagrange 계수에 coset별 상수 λ<sub>t</sub> = Π<sub>a∈U∖{0,b}</sub> a/(a+b)만 남긴다(U는 W의 상, b는 coset t의 W 값). a ↦ a+b가 U∖{0,b}의 순열이므로 λ<sub>t</sub> = 1이다. 실측으로도 65532개 자리 전체의 Lagrange 계수와 coset 식이 표본 네 개에서 같았다.
+  - **확인 범위.** coset 식이 라이브러리의 생성 행렬과 일치함을 (n, p) = (8, 4), (5, 3), (40, 20), (70, 20), (1000, 100), (3000, 1), (61439, 4096)에서 확인했다(큰 것은 행과 열을 띄엄띄엄 표본으로).
+  - **(n, p) 제약.** high rate는 n + m ≤ 65536이다(`HighRate::supports`로 확인: (61440, 4096)은 되고 (61441, 4096)과 (61440, 4097)은 안 된다). n + p ≤ 65536보다 조금 좁다. p > n도 high rate의 식으로는 정의되고 라이브러리도 받는다. 명세는 "1 ≤ p, n ≥ 1, n + m ≤ 65536"으로 적는다. 당장의 권고(n ≤ 32768, p ≤ n)는 이 안에 있다.
+  - **low rate와 기본 선택에 주의.** `reed-solomon-simd`의 low rate는 data를 ω<sub>0..</sub>에, parity를 ω<sub>m′+j</sub>(m′ = 2<sup>⌈log₂ n⌉</sup>)에 두는 다른 부호이다(같은 방법으로 확인). 고수준 API(`encode`, `ReedSolomonEncoder`)는 p > n이면 low rate를 고르므로((3, 5)에서 확인), 구현은 `rate::HighRateEncoder`를 명시해 써야 한다. n = p가 2의 거듭제곱이면 두 부호가 같다.
+  - **심볼의 바이트 배치.** 64바이트마다 심볼 32개의 하위 바이트 32개, 이어서 상위 바이트 32개이다(문서에 적혀 있고, 바이트 하나만 켠 입력으로 확인했다). 명세도 이 배치로 정의한다. 연속한 u16le로 정의하면 입력 slice 전체와 parity를 전치해야 하는데, 이 배치를 쓰면 두 구현 모두 복사 없이 쓴다. S가 4096의 배수이므로 slice는 항상 64바이트 단위로 나뉜다. Leopard도 같은 배치이다(위의 비교가 이 배치에서 일치했다).
+  - **Leopard와의 호환.** Leopard(저장소의 2026-09-17 커밋 `910ad0a`, 옛 API `leo_encode`)를 빌드해 같은 입력으로 비교했다. parent N = ceil_pow2(n + m)가 256을 넘으면 parity가 `reed-solomon-simd`와 바이트 단위로 같았다((200, 56), (200, 57), (250, 6), (253, 3), (300, 20), (1000, 100), (5000, 3), (61439, 4096)). N ≤ 256이면 달랐다((8, 4), (5, 3), (100, 20), (254, 2)). Leopard2 문서가 적은 대로, 이 범위에서는 Leopard가 GF(2⁸)를 고르기 때문이다. 이 부호를 Leopard로 만들려면 Leopard2 API에서 GF16을 명시해야 한다(옛 API로는 작은 set을 못 만든다). 옛 API는 p ≤ n만 받는다. 명세는 작은 set에도 GF(2¹⁶)를 쓴다. 체를 범위에 따라 바꾸면 정의가 둘이 되기 때문이다.
+  - 구현별 처리 속도는 다음과 같다(R5).
+    - Leopard-RS(C++, BSD-3-Clause): AVX2 단일 코어 인코딩이 1.2 GB/s 수준이다(2017년 README). 2026년의 Leopard2는 별도 API(`leopard2.h`)로 low rate와 GFNI 경로를 더했고, `leopard.h`의 옛 API와 그 출력은 유지한다고 한다.
+    - `reed-solomon-simd`(Rust, MIT AND BSD-3-Clause, 3.1.0): Ryzen 5 3600 단일 코어(AVX2), 1 KiB 조각에서 32 : 32는 10.2 GiB/s, 1024 : 1024는 4.8 GiB/s, 32768 : 32768은 1.6 GiB/s로 인코딩한다(원본과 복구 합계 기준). 1024 : 1024 디코딩은 1.3–1.4 GiB/s이다.
   > fountain code는 MDS가 아니고, RaptorQ에는 특허 문제가 있다.
-- **인코딩 메모리는 R이 아니라 O(p·S)이다.** Leopard 계열 high-rate 인코더는 data shard를 m개(p 이상인 가장 작은 2의 거듭제곱)씩 IFFT해 작업 버퍼에 누적하고, 끝에 FFT를 한 번 한다. 그래서 보호 범위를 통째로 들고 있을 필요가 없고, 스트리밍 compressor도 R을 크게 잡을 수 있다. *(확인 필요, §8의 R6)*
+- **인코딩 메모리는 R이 아니라 2·m·S이다.** high-rate 인코더는 data shard를 m개씩(coset 하나씩) IFFT해 작업 버퍼에 XOR로 누적하고, 끝에 V<sub>m</sub> 위에서 FFT를 한 번 한다. 그래서 보호 범위를 통째로 들고 있을 필요가 없고, 스트리밍 compressor도 R을 크게 잡을 수 있다. 작업 버퍼 m·S와 coset 하나를 모으는 버퍼 m·S가 든다. m < 2p이다.
+  - `reed-solomon-simd`의 고수준 API(`ReedSolomonEncoder`, `rate::HighRateEncoder`)는 `add_original_shard`로 받은 원본을 모두 들고 있다가 `encode`에서 계산한다. n = 16384, S = 16 KiB(256 MiB)에서 p = 64와 p = 1024 모두 최대 RSS가 267 MiB였다(cloud VM). 이 API로는 스트리밍이 안 된다.
+  - 공개된 저수준 API로는 된다. coset t(data shard tm..tm+m−1, 모자라면 0)를 모은 버퍼에 `Engine::ifft(buf, 0, m, m, (t+1)·m)`을 하고 작업 버퍼에 XOR한 뒤, 마지막에 작업 버퍼에 `Engine::fft(acc, 0, m, m, 0)`을 하면 parity 0..p−1이 `HighRateEncoder`의 출력과 바이트 단위로 같다(위 확인 범위의 모양 중 여섯 개, 그리고 (3, 8)). `ShardsRefMut::new(m, S/64, buf)`로 버퍼를 넘긴다. 다만 `pos`, `truncated_size`, `skew_delta`는 문서가 없어("TODO") 시행착오로 찾은 호출이다. 버전을 고정하고 고수준 API와 비교하는 시험을 두거나, 논문에서 직접 구현한다.
   > Cauchy 행렬을 그대로 곱하는 방식도 메모리는 O(p·S)이지만, 입력 심볼마다 곱셈이 p번이라 p가 수백이면 너무 느리다.
-- 확인할 것(R6):
-  - `reed-solomon-simd`가 위의 누적을 API로 노출하는지, 아니면 모든 원본을 버퍼링하는지.
-  - 평가점의 정확한 배치. Leopard는 parity를 0..m에, data를 m 이후에 두는 것으로 알고 있다.
-  - 심볼의 바이트 배치. Leopard는 64바이트마다 심볼 32개의 하위 바이트와 상위 바이트를 따로 모아 둔다. 명세가 이것을 그대로 정의할지, 연속한 u16le로 정의하고 구현이 변환할지 정한다. S가 4096의 배수이므로 어느 쪽이든 64바이트 정렬은 맞는다.
-  - (n, p)의 허용 조합을 명세에 어떻게 적을지.
 
 #### 크기와 interleave
 
@@ -386,7 +392,10 @@ repair의 입력은 바이트열이 아니라, 위치마다 다음 상태 중 �
 - [x] **R3.** 현행 SSD의 erase block과 superblock 크기를 확인해 E2/E3의 경계를 검증한다. (176층 이후 제품의 데이터시트 수치는 찾지 못했다. erase block은 E3로 옮겼다.)
 - [x] **R4.** Par2 행렬이 MDS가 아니라는 지적과, Par3 draft가 다른 포맷 안에 복구 데이터를 넣는 경우를 다루는지 확인한다.
 - [x] **R5.** Leopard 계열 구현(C++ leopard, Rust `reed-solomon-simd` 등)의 slice 수와 비율 제약, 라이선스, 처리 속도를 확인한다.
-- [ ] **R6.** additive-FFT RS 구현(Leopard, `reed-solomon-simd`)의 평가점 배치, 심볼 바이트 배치, (n, p) 제약을 확인하고, m개 단위 누적으로 O(p·S) 메모리 스트리밍 인코딩이 가능한지와 그것을 API로 쓸 수 있는지 확인한다(§5.4의 부호).
+- [x] **R6.** additive-FFT RS 구현(Leopard, `reed-solomon-simd`)의 평가점 배치, 심볼 바이트 배치, (n, p) 제약을 확인하고, m개 단위 누적으로 O(p·S) 메모리 스트리밍 인코딩이 가능한지와 그것을 API로 쓸 수 있는지 확인한다(§5.4의 부호).
+  - 결과는 §5.4의 부호에 적었다. 체 표현은 0x1002D 체의 Cantor 좌표이고, ω<sub>k</sub>는 그 표현으로 k인 원소이다. parity는 ω<sub>0..p−1</sub>, data는 ω<sub>m..m+n−1</sub>에 놓이고, n + m ≤ 65536이어야 한다. 바이트는 64바이트마다 하위 32개와 상위 32개로 놓인다. 고수준 API는 원본을 모두 버퍼링하지만, 저수준 `Engine` API로 2·m·S 메모리의 스트리밍 인코딩이 된다.
+  - 방법: 라이브러리 소스는 읽지 않았다(MIT AND BSD-3-Clause; CREDITS.md의 약속). docs.rs의 문서(`algorithm` 모듈의 shard 배치와 rate 설명, 공개 상수 `GF_POLYNOMIAL`과 `CANTOR_BASIS`)를 읽고, 3.1.0을 블랙박스로 돌렸다. 단위 벡터를 인코딩해 생성 행렬과 비트 행렬을 얻었다. 행렬들이 교환하고 GF(2)-선형임을 보이고, 최소다항식의 근으로 체 표현을 구했다. 그다음 평가점 가설을 생성 행렬과 대조했다. Leopard(BSD-3-Clause)는 문서(README, `docs/leopard2_api.md`의 Profiles 절)와 `leopard.h`의 선언만 읽었다. 빌드한 라이브러리의 `leo_encode`를 블랙박스로 돌려 비교했다.
+  - 남은 것: 명세에 β 표, coset 식, 바이트 배치를 옮기는 것(S6). 스트리밍 경로를 고정 버전으로 시험하는 것(I6).
 
 ### 측정 (M)
 
