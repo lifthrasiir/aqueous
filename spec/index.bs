@@ -1095,7 +1095,7 @@ To <dfn>trim a located archive</dfn> |a|, a [=byte sequence=] starting with a he
     3. Let |blocks| be a [=list=] containing |last|.
         If the [=decoded data=] of |last| can be parsed as far as its [=meta/previous_metadata_offset=],
         and the block starting [=meta/previous_metadata_offset=] bytes before |last| can be read by the generic structure
-        and is a metadata block, [=list/append=] that block to |blocks|.
+        and is a metadata block, [=list/prepend=] that block to |blocks|.
     4. For each block |m| of |blocks|:
         1. Let |e| be the offset after the [=block/padding=] of |m| (the [=block/block_end=] if it has none).
         2. While the bytes of |a| from |e| are a whole [[#spacer-block|spacer block]] read by the generic structure,
