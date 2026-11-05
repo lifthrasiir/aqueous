@@ -1311,7 +1311,8 @@ fn together<S: Source + ?Sized>(
     let looked = aqr_common::pool::par_map(large.len(), opt.threads, |i| -> io::Result<Looked> {
         let (c, size) = (large[i], src.size(large[i]));
         let head = src.read_range(c, 0..HEAD)?;
-        let format = detect(&head);
+        // (what is not taken at this level holds nothing)
+        let format = detect(&head).filter(|&f| crate::format_on(f, opt));
         let held = match format {
             Some(detect::Format::Zip) => aqr_zip::zip::entry_sums(&src.read_range(c, size.saturating_sub(TAIL)..size)?),
             // (its header and the packed stream of an encoded one: at its end, mostly)

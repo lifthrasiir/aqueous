@@ -39,7 +39,8 @@ assert_eq!(out, file);
 - Files cut in an image's data (a download stopped): the sub-block cut is kept.
 - Images of other minimum code sizes, and what follows the blocks, stay in the skeleton.
 - aqr-compress takes GIF files at the start of a file and found in other data, up to their
-  trailer, by their magic bytes (not by the name `.gif`).
+  trailer, by their magic bytes (not by the name `.gif`), from level 4 only (`format_on`; kept
+  as they are below, as the model is slow for its bytes).
 - Not files whose record, once their images coded hold a quarter of the LZW data (of 1 Mbit at
   least), has taken more than 5/4 of its bits: the encoder gives them up there rather than at
   the end. These are the files of lossy encoders (Photoshop's "Lossy"), whose pixels are made

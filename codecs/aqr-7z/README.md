@@ -59,7 +59,8 @@ cargo rt -p aqr-7z   # 7-Zip's archives: LZMA2, LZMA, solid or not, header encod
 
 Done: the container (headers encoded or plain), folders of LZMA, LZMA2 or Copy, under filters
 (any of aqr-bcj's, BCJ2 over three of them), and in aqr-compress: 7z archives detected anywhere
-(a self-extractor's), their files' CRC-32s for batching them with the same files (`together`).
+(a self-extractor's), their files' CRC-32s for batching them with the same files (`together`); from level 4 only
+(`format_on`), kept as they are below.
 Left:
 
 - PPMd, BZip2, Deflate folders; Swap2/Swap4; encrypted archives are kept as they are.

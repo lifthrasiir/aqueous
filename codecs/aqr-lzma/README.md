@@ -92,4 +92,5 @@ the files its stream holds (the members of a tar archive, or the whole), so that
 stored once. So are the module `lzma2-recons` and `.xz` files (their blocks of LZMA2 alone),
 which aqr-compress takes alike, anywhere in data too; blocks of filters before LZMA2 (aqr-bcj's:
 the branch converters, Delta) from the data before them. 7z archives are aqr-7z's, on these
-modules and aqr-bcj's.
+modules and aqr-bcj's. aqr-compress takes them (`.lzma`, `.xz` and 7z) from level 4 only
+(`format_on`): up to level 3 they are kept as they are, as rebuilding LZMA is slow.

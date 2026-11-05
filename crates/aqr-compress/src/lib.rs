@@ -11,16 +11,16 @@
 //! - mozlz4 files and LZ4 frames: the container sliced around aqr-lz4 on the data.
 //! - `.lzma` files: the header sliced around aqr-lzma on the data and record of the stream.
 //! - `.xz` files: the container sliced around aqr-lzma on the data and records of the LZMA2
-//!   streams of its blocks.
+//!   streams of its blocks. (These and 7z archives from level 4: [`format_on`].)
 //! - lzop files: the headers sliced around aqr-lzo on the data and records of the streams.
 //! - Streams of Apple's LZFSE and LZVN blocks (`bvx2`, `bvxn`; asset catalogs hold them):
-//!   aqr-bvx on the data and record of the stream.
+//!   aqr-bvx on the data and record of the stream (from level 9).
 //! - bzip2 streams, one after another: aqr-bz2 on their data, what follows sliced.
 //! - LevelDB tables: aqr-snappy on the contents of their blocks.
 //! - ZIP archives: aqr-zip, rebuilding the archive from the contents of its entries (the
 //!   DEFLATE streams by aqr-flate) with its headers derived.
 //! - 7z archives: aqr-7z, rebuilding the folders of LZMA, LZMA2 or Copy alone from the contents
-//!   of the files they hold (by aqr-lzma), the rest of the archive kept.
+//!   of the files they hold (by aqr-lzma), the rest of the archive kept; from level 4.
 //! - git packs: aqr-git, rebuilding the pack from the data of its objects (the zlib streams by
 //!   aqr-flate) with its headers, checksums and trailer derived; the blobs' data is found again
 //!   where the files checked out are archived along with it.
@@ -280,8 +280,8 @@ impl Nest {
 
 impl Options {
     /// The aqr-flate profile that DEFLATE streams (of gzip, zlib and ZIP) are rebuilt with, and
-    /// whether it tries zlib emulation: up to level 6, the default profile (which has no zlib
-    /// emulation); from 7 on, the adaptive one with chain rules and zlib emulation (enwik8 by
+    /// whether it tries zlib emulation (at every level): up to level 6, the default profile;
+    /// from 7 on, the adaptive one with chain rules and zlib emulation (enwik8 by
     /// Info-ZIP 3.0 `-9`, 10 threads of a Ryzen 7 9700X: a record of 0.41% of the data rather
     /// than 2.6% with chain rules alone, split at 66 MB/s rather than 163, joined at 147 MB/s
     /// rather than 302; 2.8 KB with zlib emulation, split at 54 MB/s, joined at 165 MB/s, but at
@@ -1067,21 +1067,13 @@ impl Made {
 /// the streams (14 times in the asset catalogs of /Applications: 3.7 GB of 272.5 MB), and
 /// recompressing them takes 13% off at some 8 MB/s (34 s at level 8 rather than 1.3 s, peak
 /// 8.2 GB; [`ahead`]). The LZVN streams there (small data) gain nothing at the default level
-/// and are left out too.
+/// and are left out too ([`format_on`]).
 fn bvx(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
-    if !bvx_on(opt) {
-        return None;
-    }
     let (_, n) = aqr_bvx::bvx::extent(d)?;
     if !cx.inflate(n) {
         return None;
     }
     aqr_bvx::formula::encode(d, opt.threads)
-}
-
-/// Whether LZFSE and LZVN streams are taken at the level of `opt` ([`bvx`]).
-fn bvx_on(opt: &Options) -> bool {
-    opt.level.scale() >= 9
 }
 
 /// aqr-wim's formula of `d`: of its data made again where needed, rather than held, where its
@@ -1109,6 +1101,20 @@ fn lzx_on(opt: &Options) -> bool {
 /// strong); below, they are turned down at their first PPMd block.
 fn ppmd_on(opt: &Options) -> bool {
     opt.level.scale() >= 9
+}
+
+/// Whether files of `format` are taken at the level of `opt` (else kept as they are): LZMA and
+/// xz streams (aqr-lzma), 7z archives (aqr-7z, and aqr-lzma on their folders) and GIF files
+/// (aqr-gif) from level 4, as they are slow for their bytes; streams of LZFSE and LZVN blocks
+/// ([`bvx`]) and CHM files ([`lzx_on`]) from level 9. Parts of a format taken (CAB's LZX
+/// folders, RAR's PPMd blocks) are its recompressor's to turn down: [`lzx_on`], [`ppmd_on`].
+pub(crate) fn format_on(format: Format, opt: &Options) -> bool {
+    match format {
+        Format::Lzma | Format::Xz | Format::SevenZip | Format::Gif => opt.level.scale() >= 4,
+        Format::Bvx => opt.level.scale() >= 9,
+        Format::Chm => lzx_on(opt),
+        _ => true,
+    }
 }
 
 /// `d` as a file of `format`, with its contents nested, if its recompressor takes it (and the
@@ -1141,6 +1147,9 @@ fn recompress_sealed(
     cx: &Cx,
     sealing: &mut Option<seal::Sealing>,
 ) -> Option<Formula> {
+    if !format_on(format, opt) {
+        return None;
+    }
     let _s = aqr_common::trace::span(format.name());
     #[cfg(test)]
     tests::TRIED.with(|t| t.borrow_mut().push(format));
@@ -1467,7 +1476,7 @@ fn find(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, slack: usize
         let mut down = None;
         let child = format.filter(|_| budget > 0).and_then(|format| {
             let n = extent(format, &d[p..]).filter(|&n| n > 0)?;
-            if format == Format::Bvx && bvx_on(opt) && !made.0.contains_key(&p) {
+            if format == Format::Bvx && format_on(format, opt) && !made.0.contains_key(&p) {
                 ahead(d, p, &turned_down, opt, depth, cx, &mut made);
             }
             let child = match made.0.remove(&p) {
@@ -2428,11 +2437,8 @@ fn cab(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
 
 /// aqr-mszip's formula of a CHM file, the files of its LZX section a content of the application,
 /// recompressed in turn, each by its kind by its name; within what is left of the budget, from
-/// level 9 ([`lzx_on`]).
+/// level 9 ([`lzx_on`], [`format_on`]).
 fn chm(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
-    if !lzx_on(opt) {
-        return None;
-    }
     let o = aqr_mszip::formula::Options {
         threads: opt.threads,
         limit: cx.inflate_left(),
@@ -2610,7 +2616,7 @@ fn pure_contents<'a>(
                 Some(Nest::Scan) => detect(d),
                 _ => None,
             };
-            if let Some(format) = format.filter(|&f| is_pure(f))
+            if let Some(format) = format.filter(|&f| is_pure(f) && format_on(f, opt))
                 && let Some(n) = extent(format, d).filter(|&n| n > 0)
             {
                 out.push((format, &d[..n], (n == d.len()).then_some((stream, start, len))));
@@ -2992,6 +2998,33 @@ mod tests {
     fn lzx_from_level_9() {
         let at = |level| lzx_on(&Options { level, ..Options::default() });
         assert!(!at(Level::MID) && !at(Level::HIGH) && at(Level::Of(9)));
+        // (and so CHM files, and streams of LZFSE and LZVN blocks)
+        for format in [Format::Chm, Format::Bvx] {
+            let at = |level| format_on(format, &Options { level, ..Options::default() });
+            assert!(!at(Level::MID) && !at(Level::HIGH) && at(Level::Of(9)), "{format:?}");
+        }
+    }
+
+    /// LZMA and xz streams, 7z archives and GIF files are taken from level 4 only (up to level 3
+    /// kept as they are).
+    #[test]
+    fn heavy_from_level_4() {
+        let fixture = |p: &str| std::fs::read(format!("{}/../../{p}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let text: Vec<u8> =
+            (0..30000).flat_map(|i| format!("line {} of the text\n", i * 7 % 1000).into_bytes()).collect();
+        let files = [
+            ("lzma", aqr_lzma::greedy::alone(&text)),
+            ("7z", aqr_7z::write::solid(&[("a.txt", &text)])),
+            ("gif", fixture("codecs/aqr-gif/tests/data/im-art.gif")),
+        ];
+        for (name, d) in &files {
+            for (level, taken) in [(Level::LOW, false), (Level::Of(3), false), (Level::Of(4), true), (Level::MID, true)]
+            {
+                let f = recompress(d, &Options { level, shared_modules: true, ..Options::default() });
+                assert_eq!(!f.applies().is_empty(), taken, "{name} {level:?}");
+                assert!(f.eval(&Native::default()).unwrap() == *d, "{name} {level:?}");
+            }
+        }
     }
 
     /// An ALZ archive is taken apart: its DEFLATE bodies by aqr-flate, its bzip2 bodies by
