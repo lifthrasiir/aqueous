@@ -262,8 +262,15 @@ impl Model {
         w0[..INPUTS].fill(W0);
         Model {
             stretch_slot: {
-                let t = stretch_table();
-                (0..4096).map(|p| t[p ^ (SLOT0 >> 4) as usize]).collect()
+                // (the slots' order: an index exclusive-or SLOT0's, a permutation of itself)
+                let mut t = stretch_table();
+                for p in 0..4096 {
+                    let q = p ^ (SLOT0 >> 4) as usize;
+                    if p < q {
+                        t.swap(p, q);
+                    }
+                }
+                t
             },
             slots,
             base,
@@ -276,11 +283,18 @@ impl Model {
         }
     }
 
-    /// Bytes of a model for `pixels` pixels on a screen of `screen`.
-    pub fn bytes(pixels: u64, screen: (usize, usize)) -> u64 {
+    /// The memory plan of a model ([`aqr_api::stack`]) for `pixels` pixels on a screen of
+    /// `screen` on WebAssembly: its tables, each a block.
+    pub fn plan(pixels: u64, screen: (usize, usize)) -> u64 {
+        use aqr_api::stack::block;
         let screen = canvas_of(screen);
-        let slots: usize = table_bits(pixels).iter().map(|&b| 1 << b).sum();
-        (slots * 2 + 30 + 2 * screen.0 * screen.1 + 4 * SETS * LANES + 2 * (FLAT_CTX + (1 << FLAT_BITS)) + 8192) as u64
+        let slots: u64 = table_bits(pixels).iter().map(|&b| 1u64 << b).sum();
+        block(2 * slots)
+            + block(2 * 4096)
+            + block((4 * LANES * SETS) as u64)
+            + block(2 * (FLAT_CTX + (1 << FLAT_BITS)) as u64)
+            + block((4 * FLAT_LANES * FLAT_CTX) as u64)
+            + block(2 * (screen.0 * screen.1) as u64)
     }
 
     /// Codes a bit (`want`, the encoder's) of the slots `idx` and the mixers' weight sets `set1`

@@ -325,9 +325,11 @@ bytes of `X`.
 
 ## 8. Formula module
 
-The module is `gif-recons`, version 1. It rebuilds a GIF file from its skeleton and its record.
+The module is `gif-recons`, version 2. It rebuilds a GIF file from its skeleton and its record.
 
-**Parameters**: none (empty).
+**Parameters**: a varint (LEB128) of the pixels an image holds at most as it is decoded: of each
+image, its `N` pixels (§4.2), twice where its rows are interlaced and `N ≥ w × h` (its pixels in
+rows, and in the stream's order). It bounds the module's memory.
 
 **Inputs**: exactly two, in this order.
 
@@ -340,8 +342,9 @@ The output is the file of §4.
 
 **Resources**: none.
 
-The module fails on any parameters, any other count of inputs or resources, a record that fails
-above, and an output whose length is not the application's declared output size.
+The module fails on parameters of another form, any other count of inputs or resources, a
+record that fails above or of an image holding more pixels than the parameters tell, and an
+output whose length is not the application's declared output size. Version 1 took no parameters.
 
 ## 9. Encoders and the encoder *(informative)*
 

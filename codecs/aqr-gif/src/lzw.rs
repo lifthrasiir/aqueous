@@ -124,6 +124,11 @@ pub struct BitWriter {
 }
 
 impl BitWriter {
+    /// A writer appending to `out`.
+    pub fn onto(out: Vec<u8>) -> Self {
+        BitWriter { out, acc: 0, n: 0 }
+    }
+
     #[inline]
     pub fn put(&mut self, v: u32, n: u32) {
         self.acc |= v << self.n;
@@ -146,6 +151,52 @@ impl BitWriter {
             self.out.push(self.acc as u8 | pad << self.n);
         }
         self.out
+    }
+}
+
+/// Codes written as a stream one by one, as an encoder's dictionary widens them.
+pub struct Chain {
+    dict: Dict,
+    prev: Option<u16>,
+    ended: bool,
+    pub w: BitWriter,
+}
+
+impl Chain {
+    pub fn new(min: u8, w: BitWriter) -> Self {
+        Chain { dict: Dict::new(min), prev: None, ended: false, w }
+    }
+
+    /// Writes `c`; codes after an end code are not. An error where `c` is not defined.
+    #[inline]
+    pub fn put(&mut self, c: u16) -> Result<()> {
+        if self.ended {
+            return Ok(());
+        }
+        let dict = &mut self.dict;
+        let clear = dict.clear_code() as u16;
+        self.w.put(c as u32, dict.width);
+        if c == clear {
+            dict.clear();
+            self.prev = None;
+        } else if c == clear + 1 {
+            self.ended = true;
+        } else {
+            if let Some(p) = self.prev {
+                if c as usize > dict.next {
+                    return Err(crate::corrupt());
+                }
+                let f = if (c as usize) < dict.next { dict.first[c as usize] } else { dict.first[p as usize] };
+                dict.add(p, f);
+            }
+            self.prev = Some(c);
+        }
+        Ok(())
+    }
+
+    /// The writer, its dictionary freed.
+    pub fn into_writer(self) -> BitWriter {
+        self.w
     }
 }
 

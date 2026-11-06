@@ -1931,6 +1931,19 @@ fn within_plans(what: &str, d: &[u8], modules: &[[u8; 32]], exact: bool) -> usiz
     seen
 }
 
+/// gif-recons takes its plan at most, to the page, on the test files.
+#[test]
+fn gif_plan_holds() {
+    let modules = [aqr_decompress::built(aqr_decompress::GIF).expect("built").sha512_256];
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../codecs/aqr-gif/tests/data");
+    let mut seen = 0;
+    for e in std::fs::read_dir(dir).unwrap() {
+        let path = e.unwrap().path();
+        seen += within_plans(&path.to_string_lossy(), &std::fs::read(&path).unwrap(), &modules, true);
+    }
+    assert!(seen >= 10, "{seen} applications");
+}
+
 /// A ZIP layout's `again` (the bytes of the deflated bodies taken again, which zip-recons
 /// reserves) bounds them: one byte short, the archive is invalid, natively and as WebAssembly.
 #[test]

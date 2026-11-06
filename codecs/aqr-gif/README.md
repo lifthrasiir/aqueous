@@ -26,8 +26,9 @@ let f = formula::encode(&file, 1).unwrap();
 
 use aqr_gif::recons;
 let sp = recons::split(&file)?;
-let mut out = Vec::new();
-recons::join_onto(&sp.skeleton, &sp.record, &mut out)?;
+// (the output written within its capacity, the pixels an image holds bounded)
+let mut out = Vec::with_capacity(file.len());
+recons::join_onto(&sp.skeleton, &sp.record, sp.held, &mut out)?;
 assert_eq!(out, file);
 ```
 

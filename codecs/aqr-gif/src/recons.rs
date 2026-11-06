@@ -80,18 +80,20 @@ fn shape(sk: &[u8], at: usize) -> Result<Shape> {
     })
 }
 
-/// The order of an image's pixels in rows (from the stream's): the rows of an interlaced image
-/// as they are shown, where it has as many pixels as its rows hold or more.
-fn raster_rows(s: &Shape, n: usize) -> Option<Vec<usize>> {
-    (s.interlaced && s.width > 0 && n >= s.width * s.height).then(|| gif::interlaced_rows(s.height).collect())
+/// Whether an image of `n` pixels is in rows in another order than the stream's: interlaced,
+/// with as many pixels as its rows hold or more (its rows in [`gif::interlaced_rows`]'s order).
+fn reordered(s: &Shape, n: usize) -> bool {
+    s.interlaced && s.width > 0 && n >= s.width * s.height
 }
 
 /// `px` (in the stream's order) in rows, or back where `back`.
 fn reorder(px: &[u8], s: &Shape, back: bool) -> Vec<u8> {
-    let Some(rows) = raster_rows(s, px.len()) else { return px.to_vec() };
+    if !reordered(s, px.len()) {
+        return px.to_vec();
+    }
     let w = s.width;
     let mut out = px.to_vec();
-    for (i, &r) in rows.iter().enumerate() {
+    for (i, r) in gif::interlaced_rows(s.height).enumerate() {
         let (from, to) = if back { (r, i) } else { (i, r) };
         out[to * w..to * w + w].copy_from_slice(&px[from * w..from * w + w]);
     }
@@ -112,13 +114,12 @@ struct Trie {
 }
 
 const TRIE_BITS: u32 = 14;
-/// Bytes of the encoder's dictionary.
-pub const TRIE_BYTES: u64 = (10 << TRIE_BITS) as u64 + 2 * CODES as u64;
 
 impl Trie {
     fn new() -> Self {
         let n = 1 << TRIE_BITS;
-        let canon = (0..CODES as u16).collect();
+        let mut canon = Vec::with_capacity(CODES);
+        canon.extend(0..CODES as u16);
         Trie { keys: vec![0; n], codes: vec![0; n], canon, generation: 1, gens: vec![0; n] }
     }
 
@@ -213,17 +214,19 @@ impl Ctx {
 /// Clear codes in a row at most.
 const CLEARS: u32 = 64;
 
-/// Codes the codes `codes` (given, or filled in) that give `px` with minimum code size `min`.
+/// Codes the codes that give `px` with minimum code size `min`: `want` (encoding, where
+/// given), or those decoded, each given to `emit`.
 fn walk(
     c: &mut impl Coder,
     x: &mut Ctx,
     trie: &mut Trie,
     px: &[u8],
     min: u8,
-    codes: &mut Vec<u16>,
-    encoding: bool,
+    want: Option<&[u16]>,
+    mut emit: impl FnMut(u16) -> Result<()>,
 ) -> Result<()> {
-    let want = std::mem::take(codes);
+    let encoding = want.is_some();
+    let want = want.unwrap_or_default();
     let mut dict = Dict::new(min);
     trie.clear();
     let clear = dict.clear_code() as u16;
@@ -236,7 +239,8 @@ fn walk(
     let mut last_clear = 0;
     // the last code: 0 the longest match, 1 a single pixel, 2 else
     let mut was = 0;
-    let mut path = Vec::with_capacity(64);
+    // (a match is as long as a code's pixels at most)
+    let mut path = Vec::with_capacity(CODES);
     loop {
         let w = want.get(k).copied();
         let ctx = !started as usize
@@ -255,7 +259,7 @@ fn walk(
             trie.clear();
             prev = None;
             started = true;
-            codes.push(clear);
+            emit(clear)?;
             k += 1;
             continue;
         }
@@ -263,7 +267,7 @@ fn walk(
         clears = 0;
         if p == n {
             if c.bit(&mut x.end, w == Some(clear + 1), Cat::Parse) {
-                codes.push(clear + 1);
+                emit(clear + 1)?;
                 k += 1;
             }
             break;
@@ -325,7 +329,7 @@ fn walk(
         } else {
             2
         };
-        codes.push(code);
+        emit(code)?;
         k += 1;
         p += len;
         prev = Some(code);
@@ -364,29 +368,11 @@ fn lb(l: usize) -> usize {
 
 /// The codes written as a stream: its bytes, and the bits of the last.
 pub fn write(codes: &[u16], min: u8) -> Result<BitWriter> {
-    let mut dict = Dict::new(min);
-    let clear = dict.clear_code() as u16;
-    let mut w = BitWriter::default();
-    let mut prev: Option<u16> = None;
-    for &c in codes {
-        w.put(c as u32, dict.width);
-        if c == clear {
-            dict.clear();
-            prev = None;
-        } else if c == clear + 1 {
-            break;
-        } else {
-            if let Some(p) = prev {
-                let f = if (c as usize) < dict.next { dict.first[c as usize] } else { dict.first[p as usize] };
-                if c as usize > dict.next {
-                    return Err(corrupt());
-                }
-                dict.add(p, f);
-            }
-            prev = Some(c);
-        }
+    let mut c = lzw::Chain::new(min, BitWriter::default());
+    for &code in codes {
+        c.put(code)?;
     }
-    Ok(w)
+    Ok(c.into_writer())
 }
 
 /// Codes what an image's codes do not tell: the padding of their last byte, the bytes after
@@ -450,8 +436,8 @@ fn code_rest(c: &mut impl Coder, x: &mut Ctx, bits: usize, d: &mut Data, encodin
     Ok(())
 }
 
-/// Codes where the images of the skeleton `sk` are (given, or filled in), and gives them.
-fn code_layout(c: &mut impl Coder, x: &mut Ctx, sk: &[u8], at: &mut Vec<usize>, encoding: bool) -> Result<Vec<Shape>> {
+/// Codes where the images of the skeleton `sk` are (`at`, encoding), and gives them.
+fn code_layout(c: &mut impl Coder, x: &mut Ctx, sk: &[u8], at: &[usize]) -> Result<Vec<Shape>> {
     let n = c.gamma(&mut x.count, at.len() as u32, Cat::Layout).ok_or_else(corrupt)? as usize;
     if n > sk.len() / 11 {
         return Err(corrupt());
@@ -461,9 +447,6 @@ fn code_layout(c: &mut impl Coder, x: &mut Ctx, sk: &[u8], at: &mut Vec<usize>, 
     for i in 0..n {
         let d = c.gamma(&mut x.count, at.get(i).map_or(0, |&a| (a - from) as u32), Cat::Layout).ok_or_else(corrupt)?;
         let s = shape(sk, from + d as usize)?;
-        if !encoding {
-            at.push(from + d as usize);
-        }
         from = s.at;
         shapes.push(s);
     }
@@ -475,52 +458,32 @@ fn screen(sk: &[u8]) -> (usize, usize) {
     if sk.len() >= 13 { (gif::le16(sk, 6) as usize, gif::le16(sk, 8) as usize) } else { (0, 0) }
 }
 
-/// The pixels of the images of a record as their descriptors tell, for the module's memory.
-pub struct Layout {
-    pub area: u64,
-    /// Of the largest image.
-    pub largest: u64,
-    pub screen: (usize, usize),
+/// Pixels an image of `n` pixels holds as its codes are decoded: its pixels in rows, and in the
+/// stream's order where those are another.
+fn held(s: &Shape, n: usize) -> u64 {
+    n as u64 * (1 + reordered(s, n) as u64)
 }
 
-/// The [`Layout`] of the images that `record` codes in the skeleton `sk`.
-pub fn layout(sk: &[u8], record: &[u8]) -> Result<Layout> {
-    let mut dec = Dec { c: ArithDecoder::new(record) };
-    let shapes = code_layout(&mut dec, &mut Ctx::new(), sk, &mut vec![], false)?;
-    let area = |s: &Shape| (s.width * s.height) as u64;
-    Ok(Layout {
-        area: shapes.iter().map(area).sum(),
-        largest: shapes.iter().map(area).max().unwrap_or(0),
-        screen: screen(sk),
-    })
-}
-
-/// Codes the record of the images of the skeleton `sk` (given, or filled in): where they are,
-/// then each one's pixels, codes and the rest. Decoding (where `out` is given), the file is
-/// written to `out` as each image is decoded, up to the place of the last one, which it gives.
-fn code(
-    c: &mut impl Coder,
-    sk: &[u8],
-    at: &mut Vec<usize>,
-    data: &mut [Data],
-    mut out: Option<&mut Vec<u8>>,
-) -> Result<usize> {
-    let encoding = out.is_none();
+/// Codes the record of the images `data` of the skeleton `sk`, at `at`: where they are, then
+/// each one's pixels, codes and the rest. Gives the pixels an image holds at most ([`held`]).
+/// [`decode`] mirrors it.
+fn code(c: &mut Enc, sk: &[u8], at: &[usize], data: &[Data]) -> Result<u64> {
     let mut x = Ctx::new();
-    let shapes = code_layout(c, &mut x, sk, at, encoding)?;
+    let shapes = code_layout(c, &mut x, sk, at)?;
     let area: u64 = shapes.iter().map(|s| (s.width * s.height) as u64).sum();
     let screen = screen(sk);
     let mut model = Model::new(area.min(MAX_PIXELS), screen);
     let mut trie = Trie::new();
     let mut total = 0u64;
-    let lzw = encoding.then(|| data.iter().map(chain_bits).sum::<u64>()).filter(|&b| b >= GIVE_UP_MIN);
+    let lzw = Some(data.iter().map(chain_bits).sum::<u64>()).filter(|&b| b >= GIVE_UP_MIN);
     let mut done = 0;
-    let mut from = 0;
-    for (i, s) in shapes.iter().enumerate() {
+    let mut most = 0;
+    for (s, d) in shapes.iter().zip(data) {
         if !(2..=8).contains(&s.min) {
             return Err(corrupt());
         }
-        let mut d = if encoding { data[i].clone() } else { Data::default() };
+        let mut d = d.clone();
+        most = most.max(held(s, d.pixels.len()));
         let area = (s.width * s.height) as u32;
         let np = if c.bit(&mut x.whole, d.pixels.len() == area as usize, Cat::Layout) {
             area
@@ -531,54 +494,185 @@ fn code(
         if total > MAX_PIXELS {
             return Err(Error("pixels beyond the limit"));
         }
-        let mut raster = if encoding { reorder(&d.pixels, s, false) } else { vec![0; np as usize] };
+        let mut raster = reorder(&d.pixels, s, false);
         let place = Place { palette: &sk[s.palette.clone()], left: s.left, top: s.top, width: s.width, min: s.min };
         model.image(c, &mut raster, &place);
-        if !encoding {
-            d.pixels = reorder(&raster, s, true);
-        }
-        walk(c, &mut x, &mut trie, &d.pixels, s.min, &mut d.codes, encoding)?;
+        walk(c, &mut x, &mut trie, &d.pixels, s.min, Some(&d.codes), |_| Ok(()))?;
         let bits = write(&d.codes, s.min)?.bits();
-        code_rest(c, &mut x, bits, &mut d, encoding)?;
+        code_rest(c, &mut x, bits, &mut d, true)?;
         if let Some(all) = lzw {
             done += chain_bits(&d);
             if done >= all / GIVE_UP_AFTER && c.spent() >> 16 > done * GIVE_UP_RATIO.0 / GIVE_UP_RATIO.1 {
                 return Err(Error("the pixels no smaller than their LZW data"));
             }
         }
-        if let Some(out) = out.as_deref_mut() {
-            out.extend_from_slice(&sk[from..s.at]);
-            put_chain(&d, s.min, out)?;
-            from = s.at;
+    }
+    Ok(most)
+}
+
+/// Bytes of an image's shape on WebAssembly, for the plan.
+const SHAPE_BYTES: u64 = 32;
+#[cfg(target_family = "wasm")]
+const _: () = assert!(size_of::<Shape>() as u64 == SHAPE_BYTES);
+
+/// The memory plan of [`join_onto`] ([`aqr_api::stack`]) of the skeleton `sk`, the record
+/// `record` and `held` pixels held at most, beyond the output: the images' shapes, the model
+/// and the encoder's dictionary, then of an image its pixels held (in rows, and in the stream's
+/// order where those are another: two blocks), the dictionaries of its codes as they are
+/// decoded and as they are written, and the codes of a match. `None` where the record's layout
+/// does not decode.
+pub fn plan(sk: &[u8], record: &[u8], held: u64) -> Option<u64> {
+    use aqr_api::stack::block;
+    let mut dec = Dec { c: ArithDecoder::new(record) };
+    let shapes = code_layout(&mut dec, &mut Ctx::new(), sk, &[]).ok()?;
+    let area = |s: &Shape| (s.width * s.height) as u64;
+    let all: u64 = shapes.iter().map(area).sum();
+    let trie = 2 * block(4 << TRIE_BITS) + block(2 << TRIE_BITS) + block(2 * CODES as u64);
+    let dict = 2 * block(2 * CODES as u64) + 2 * block(CODES as u64);
+    Some(
+        block(SHAPE_BYTES * shapes.len() as u64)
+            + Model::plan(all.min(MAX_PIXELS), screen(sk))
+            + trie
+            + block(held)
+            + aqr_api::stack::GRAIN
+            + 2 * dict
+            + block(2 * CODES as u64),
+    )
+}
+
+/// Decodes the record `record` of the images of the skeleton `sk` as [`code`] codes it, and
+/// writes the file to `out` (of the file's capacity) as each image is decoded, up to the place
+/// of the last one, which it gives. An image holding more than `most` pixels ([`held`]) is an
+/// error.
+fn decode(c: &mut Dec, sk: &[u8], most: u64, out: &mut Vec<u8>) -> Result<usize> {
+    let mut x = Ctx::new();
+    let shapes = code_layout(c, &mut x, sk, &[])?;
+    let area: u64 = shapes.iter().map(|s| (s.width * s.height) as u64).sum();
+    let screen = screen(sk);
+    let mut model = Model::new(area.min(MAX_PIXELS), screen);
+    let mut trie = Trie::new();
+    let mut total = 0u64;
+    let mut from = 0;
+    for s in &shapes {
+        if !(2..=8).contains(&s.min) {
+            return Err(corrupt());
         }
+        let area = (s.width * s.height) as u32;
+        let np = if c.bit(&mut x.whole, true, Cat::Layout) {
+            area
+        } else {
+            c.gamma(&mut x.pixels, 0, Cat::Layout).ok_or_else(corrupt)?
+        };
+        total += np as u64;
+        if total > MAX_PIXELS || held(s, np as usize) > most {
+            return Err(Error("pixels beyond the limit"));
+        }
+        let mut raster = vec![0; np as usize];
+        let place = Place { palette: &sk[s.palette.clone()], left: s.left, top: s.top, width: s.width, min: s.min };
+        model.image(c, &mut raster, &place);
+        // the pixels in the stream's order
+        let back = reordered(s, raster.len()).then(|| reorder(&raster, s, true));
+        let px = back.as_deref().unwrap_or(&raster);
+        out.extend_from_slice(&sk[from..s.at]);
+        let start = out.len();
+        let mut chain = lzw::Chain::new(s.min, BitWriter::onto(std::mem::take(out)));
+        walk(c, &mut x, &mut trie, px, s.min, None, |code| chain.put(code))?;
+        *out = chain_into(c, &mut x, chain.into_writer(), start)?;
+        from = s.at;
     }
     Ok(from)
+}
+
+/// Decodes what an image's codes do not tell (as [`code_rest`] codes it), and makes the
+/// stream of its codes, written to `w` from `start` on, its chain of sub-blocks: within the
+/// output's capacity, each sub-block's size put before it as the bytes after are moved up.
+fn chain_into(c: &mut Dec, x: &mut Ctx, w: BitWriter, start: usize) -> Result<Vec<u8>> {
+    let bits = w.bits() - 8 * start;
+    let pad_bits = ((8 - bits % 8) % 8) as u32;
+    let mut pad = 0;
+    if pad_bits > 0 && !c.bit(&mut x.pad, true, Cat::Layout) {
+        pad = c.raw(pad_bits, 0, Cat::Layout) as u8;
+        if pad == 0 {
+            return Err(corrupt());
+        }
+    }
+    let mut out = w.finish(pad);
+    if !c.bit(&mut x.after, true, Cat::Layout) {
+        let n = 1 + c.gamma(&mut x.after_len, 0, Cat::Layout).ok_or_else(corrupt)?;
+        if n > 1 << 24 || out.len() + n as usize > out.capacity() {
+            return Err(corrupt());
+        }
+        for _ in 0..n {
+            out.push(c.raw(8, 0, Cat::Layout) as u8);
+        }
+    }
+    let mut cut = None;
+    if !c.bit(&mut x.whole_chain, true, Cat::Layout) {
+        let s = c.raw(8, 0, Cat::Layout) as u8;
+        let n = if s > 0 { c.raw(8, 0, Cat::Layout) as u8 } else { 0 };
+        if n >= s.max(1) {
+            return Err(corrupt());
+        }
+        cut = Some((s, n));
+    }
+    let mut left = (out.len() - start).checked_sub(cut.map_or(0, |c| c.1 as usize)).ok_or_else(corrupt)?;
+    // the bytes from `read` on are moved up to `write` (and a size before them) as their
+    // sub-blocks are decoded, moved further up where `write` reaches `read`
+    let (mut write, mut read) = (start, start);
+    let room = |out: &mut Vec<u8>, write: usize, read: &mut usize| -> Result<()> {
+        if write < *read {
+            return Ok(());
+        }
+        let n = ((out.len() - *read) / 255 + 1).min(out.capacity() - out.len());
+        if n == 0 {
+            return Err(corrupt());
+        }
+        let end = out.len();
+        out.resize(end + n, 0);
+        out.copy_within(*read..end, *read + n);
+        *read += n;
+        Ok(())
+    };
+    let mut last = 255;
+    let mut first = true;
+    while left > 0 {
+        let usual = last.min(left);
+        let ctx = first as usize | ((usual < last) as usize) << 1;
+        let s = if c.bit(&mut x.size[ctx], true, Cat::Layout) {
+            usual
+        } else {
+            let s = 1 + c.gamma(&mut x.size_v, 0, Cat::Layout).ok_or_else(corrupt)? as usize;
+            if s > 255 || s > left || s == usual {
+                return Err(corrupt());
+            }
+            s
+        };
+        room(&mut out, write, &mut read)?;
+        out[write] = s as u8;
+        out.copy_within(read..read + s, write + 1);
+        (write, read) = (write + 1 + s, read + s);
+        left -= s;
+        last = s;
+        first = false;
+    }
+    match cut {
+        Some((0, _)) => {}
+        cut => {
+            // the terminator, or the size of the sub-block cut and its bytes there
+            room(&mut out, write, &mut read)?;
+            out[write] = cut.map_or(0, |c| c.0);
+            let n = out.len() - read;
+            out.copy_within(read.., write + 1);
+            write += 1 + n;
+        }
+    }
+    out.truncate(write);
+    Ok(out)
 }
 
 /// Bits of the sub-blocks of the image of `d`.
 fn chain_bits(d: &Data) -> u64 {
     8 * (d.sizes.iter().map(|&n| n as u64).sum::<u64>() + d.cut.map_or(0, |(_, n)| n as u64))
-}
-
-/// Writes the chain of the image of `d`, of minimum code size `min`.
-fn put_chain(d: &Data, min: u8, out: &mut Vec<u8>) -> Result<()> {
-    let mut bytes = write(&d.codes, min)?.finish(d.pad);
-    bytes.extend_from_slice(&d.after);
-    let mut p = 0;
-    for &n in &d.sizes {
-        out.push(n);
-        out.extend_from_slice(bytes.get(p..p + n as usize).ok_or_else(corrupt)?);
-        p += n as usize;
-    }
-    match d.cut {
-        None => out.push(0),
-        Some((0, _)) => {}
-        Some((s, _)) => {
-            out.push(s);
-            out.extend_from_slice(&bytes[p..]);
-        }
-    }
-    Ok(())
 }
 
 /// A file split.
@@ -590,6 +684,8 @@ pub struct Split {
     pub images: usize,
     /// Bits of the record by [`Cat`].
     pub cost: [f64; CATS],
+    /// Pixels an image holds at most as it is decoded (the module's params).
+    pub held: u64,
 }
 
 /// An image's data taken apart, where its codes decode.
@@ -631,15 +727,16 @@ pub fn split(d: &[u8]) -> Result<Split> {
     sk.extend_from_slice(&d[from..]);
     let mut e = Enc::new();
     let coded = data.len();
-    code(&mut e, &sk, &mut at, &mut data, None)?;
+    let held = code(&mut e, &sk, &at, &data)?;
     let cost = e.cost();
-    Ok(Split { skeleton: sk, record: e.c.finish(), coded, images: g.images.len(), cost })
+    Ok(Split { skeleton: sk, record: e.c.finish(), coded, images: g.images.len(), cost, held })
 }
 
-/// The file that `sk` and `record` rebuild, appended to `out`.
-pub fn join_onto(sk: &[u8], record: &[u8], out: &mut Vec<u8>) -> Result<()> {
+/// The file that `sk` and `record` rebuild, appended to `out` (of the file's capacity); an
+/// image holding more than `held` pixels is an error.
+pub fn join_onto(sk: &[u8], record: &[u8], held: u64, out: &mut Vec<u8>) -> Result<()> {
     let mut dec = Dec { c: ArithDecoder::new(record) };
-    let from = code(&mut dec, sk, &mut vec![], &mut [], Some(out))?;
+    let from = decode(&mut dec, sk, held, out)?;
     if dec.c.overrun() {
         return Err(corrupt());
     }

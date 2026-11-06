@@ -21,8 +21,8 @@ fn fixtures() -> Vec<(String, Vec<u8>)> {
 
 fn roundtrip(d: &[u8]) -> recons::Split {
     let sp = recons::split(d).unwrap();
-    let mut out = Vec::new();
-    recons::join_onto(&sp.skeleton, &sp.record, &mut out).unwrap();
+    let mut out = Vec::with_capacity(d.len());
+    recons::join_onto(&sp.skeleton, &sp.record, sp.held, &mut out).unwrap();
     assert!(out == d, "rebuilt otherwise");
     sp
 }
@@ -32,8 +32,8 @@ fn files_of_encoders() {
     for (name, d) in fixtures() {
         let sp = recons::split(&d).unwrap();
         assert_eq!(sp.coded, sp.images, "{name}");
-        let mut out = Vec::new();
-        recons::join_onto(&sp.skeleton, &sp.record, &mut out).unwrap();
+        let mut out = Vec::with_capacity(d.len());
+        recons::join_onto(&sp.skeleton, &sp.record, sp.held, &mut out).unwrap();
         assert!(out == d, "{name}: rebuilt otherwise");
         let data = d.len() - sp.skeleton.len();
         assert!(sp.record.len() * 4 < data * 3, "{name}: record of {} bytes for {data}", sp.record.len());
@@ -297,10 +297,13 @@ fn damaged_records() {
                 r[at] ^= 1 << (k % 8);
             }
             // an error or other bytes, never a panic
-            let mut out = Vec::new();
-            let _ = recons::join_onto(&sp.skeleton, &r, &mut out);
+            let mut out = Vec::with_capacity(d.len());
+            let _ = recons::join_onto(&sp.skeleton, &r, sp.held, &mut out);
         }
-        let mut out = Vec::new();
-        assert!(recons::join_onto(&sp.skeleton[..sp.skeleton.len() / 2], &sp.record, &mut out).is_err(), "{name}");
+        let mut out = Vec::with_capacity(d.len());
+        assert!(
+            recons::join_onto(&sp.skeleton[..sp.skeleton.len() / 2], &sp.record, sp.held, &mut out).is_err(),
+            "{name}"
+        );
     }
 }

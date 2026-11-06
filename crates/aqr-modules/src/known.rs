@@ -228,13 +228,13 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "flate-set",
         version: 1,
-        sha512_256: hex("2dc7c565855bf14503e3e25207bd90f184c108c33ad080a36e75b056bc1b99b7"),
+        sha512_256: hex("99c0c9f0ee06f762dbfb0e5ff8bfc7cbb5f3bfbd0684adbf3282e8b42f28cd19"),
         block: include_bytes!("../wasm/flate-set.block"),
     },
     Known {
         name: "gif-recons",
-        version: 1,
-        sha512_256: hex("9840c6fbedd80042b8d6503ab4e1151514da60516f0a3d7e7f96f88c76205ec1"),
+        version: 2,
+        sha512_256: hex("d7a586c0989d23e300fd341bf833c472a9f7cee35b474225067002d149c7b1c3"),
         block: include_bytes!("../wasm/gif-recons.block"),
     },
     Known {
@@ -318,7 +318,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "lzx-recons",
         version: 1,
-        sha512_256: hex("3b8bb70018e13759d301b04912d53548570cb50d5ebf0ab01476e542e9b6b7e0"),
+        sha512_256: hex("2674b76a2903d2620a9f66ad4401130adbe6cbe3bf3311e13579a8928ad52d6d"),
         block: include_bytes!("../wasm/lzx-recons.block"),
     },
     Known {

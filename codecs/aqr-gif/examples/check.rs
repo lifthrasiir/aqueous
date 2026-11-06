@@ -46,12 +46,12 @@ fn main() {
         let ts = t.elapsed().as_secs_f64();
         t_split += ts;
         let t = Instant::now();
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(d.len());
         let r = if std::env::var_os("NOJOIN").is_some() {
             out = d.clone();
             Ok(())
         } else {
-            recons::join_onto(&sp.skeleton, &sp.record, &mut out)
+            recons::join_onto(&sp.skeleton, &sp.record, sp.held, &mut out)
         };
         t_join += t.elapsed().as_secs_f64();
         if r.is_err() || out != d {
