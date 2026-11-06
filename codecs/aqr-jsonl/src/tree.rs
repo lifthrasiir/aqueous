@@ -1,8 +1,6 @@
 //! What the encoder and the module share: the style of a file (its params), the codes of the
 //! streams, and the file rebuilt from its streams (`FORMAT.md`, "Rebuilding the file").
 
-use std::collections::BTreeMap;
-
 use aqr_common::varint;
 
 use crate::{Result, corrupt};
@@ -60,15 +58,21 @@ impl Style {
         Style { comma_space: true, colon_space: false },
     ];
 
-    pub fn to_params(self) -> Vec<u8> {
-        vec![self.comma_space as u8 | (self.colon_space as u8) << 1]
+    /// The params of a file of this style and `lists` key lists defined.
+    pub fn to_params(self, lists: u64) -> Vec<u8> {
+        let mut p = vec![self.comma_space as u8 | (self.colon_space as u8) << 1];
+        varint::put(&mut p, lists);
+        p
     }
 
-    pub fn from_params(p: &[u8]) -> Result<Style> {
-        match p {
-            &[b] if b < 4 => Ok(Style { comma_space: b & 1 != 0, colon_space: b & 2 != 0 }),
-            _ => Err(corrupt()),
+    /// The style and the key lists defined that params `p` tell.
+    pub fn from_params(p: &[u8]) -> Result<(Style, u64)> {
+        let (&b, mut rest) = p.split_first().filter(|&(&b, _)| b < 4).ok_or_else(corrupt)?;
+        let lists = get(&mut rest)?;
+        if !rest.is_empty() {
+            return Err(corrupt());
         }
+        Ok((Style { comma_space: b & 1 != 0, colon_space: b & 2 != 0 }, lists))
     }
 
     /// A comma, of the style or (`other`) not.
@@ -96,35 +100,70 @@ pub struct View<'a> {
     pub desc: &'a [u8],
 }
 
-/// No path (a child not made yet).
+/// No path (a child not made yet), no key list.
 const NONE: u32 = u32::MAX;
 
 /// A path's parts of the streams, read from the front, and its state.
 struct Path<'a> {
-    flags: u8,
-    width: usize,
     types: &'a [u8],
     shapes: &'a [u8],
     names: &'a [u8],
     text: &'a [u8],
     nums: &'a [u8],
     desc: &'a [u8],
+    prev: i64,
     /// The descriptor (mode, flags, scale) of the path's previous number, if any.
     last: Option<(u8, u8, i32)>,
-    prev: i64,
-    /// Its key lists (of [`Decoder::lists`]), the most recent first.
-    lists: Vec<u32>,
-    /// The child of the members of its objects (a map's), and of its arrays' elements.
+    /// Its key lists (of [`Decoder::lists`]), linked from the most recent to the least.
+    newest: u32,
+    oldest: u32,
+    /// The child of the members of its objects (a map's).
     star: u32,
-    elems: Vec<u32>,
+    /// Where the children of its arrays' elements are in [`Decoder::elems`].
+    elems: u32,
+    lists: u16,
+    made: u8,
+    width: u8,
+    flags: u8,
 }
 
-/// A key list: the keys, the paths of their members, and their separators not of the style.
+/// A key list: its members (of [`Decoder::members`]), its separators not of the style, and the
+/// lists of its path more and less recent.
 struct List<'a> {
-    keys: Vec<&'a [u8]>,
-    kids: Vec<u32>,
     others: Option<&'a [u8]>,
+    at: u32,
+    n: u32,
+    newer: u32,
+    older: u32,
 }
+
+/// A member of a key list: its key and its path.
+struct Member<'a> {
+    key: &'a [u8],
+    kid: u32,
+}
+
+/// An entry of [`Decoder::named`]: the path of the members of key `key` of path `parent`'s
+/// objects (none where the entry is empty).
+#[derive(Clone, Copy)]
+struct Named<'a> {
+    key: &'a [u8],
+    parent: u32,
+    kid: u32,
+}
+
+// (the plan's sizes, of wasm32)
+#[cfg(target_arch = "wasm32")]
+const _: () = assert!(
+    size_of::<Path>() == PATH_BYTES as usize
+        && size_of::<List>() == LIST_BYTES as usize
+        && size_of::<Member>() == MEMBER_BYTES as usize
+        && size_of::<Named>() == NAMED_BYTES as usize
+);
+const PATH_BYTES: u64 = 96;
+const LIST_BYTES: u64 = 24;
+const MEMBER_BYTES: u64 = 12;
+const NAMED_BYTES: u64 = 16;
 
 /// The bits of `n` separators not of the style, after a count `m` (its bit 0 telling whether
 /// there are any).
@@ -187,14 +226,87 @@ fn zstring<'a>(s: &mut &'a [u8]) -> Result<&'a [u8]> {
     Ok(a)
 }
 
+/// Entries of `paths` (the stream), each its flags, width and its parts' lengths, read in
+/// turn: `f(flags, width, lengths)`.
+fn each_path(mut paths: &[u8], f: &mut dyn FnMut(u8, u8, [u64; 6]) -> Result<()>) -> Result<()> {
+    let mut k = 0;
+    while !paths.is_empty() {
+        if k == MAX_PATHS {
+            return Err(corrupt());
+        }
+        k += 1;
+        let flags = byte(&mut paths)?;
+        let width = get(&mut paths)?;
+        if flags > (F_MAP | F_DELTA | F_SHARED) || !(1..=MAX_WIDTH).contains(&width) {
+            return Err(corrupt());
+        }
+        let mut n = [0; 6];
+        for n in &mut n {
+            *n = get(&mut paths)?;
+        }
+        f(flags, width as u8, n)?;
+    }
+    Ok(())
+}
+
+/// What the module holds of streams `paths` and `keys` and `lists` key lists: entries of the
+/// paths, of their arrays' children, of the key lists, of their members, and of the table of
+/// the members' paths.
+fn counts(paths: &[u8], keys: &[u8], lists: u64) -> Result<[u64; 5]> {
+    let (mut n, mut width) = (0u64, 0u64);
+    each_path(paths, &mut |_, w, _| {
+        n += 1;
+        width += w as u64;
+        Ok(())
+    })?;
+    let members = keys.iter().filter(|&&b| b == b'\n').count() as u64;
+    Ok([n, width, lists, members, (2 * n).next_power_of_two()])
+}
+
+/// The memory plan of the module ([`aqr_api::stack`]) beyond what `aqr_api::whole` copies, of
+/// params `params`, the streams `paths` and `keys` and a file of `len` bytes (`None` where they
+/// are not so): the paths, their arrays' children, the key lists, their members, the table of
+/// the members' paths and the file, all held to the end.
+pub fn plan(params: &[u8], paths: &[u8], keys: &[u8], len: u64) -> Option<u64> {
+    use aqr_api::stack::block;
+    let (_, lists) = Style::from_params(params).ok()?;
+    let [n, width, lists, members, named] = counts(paths, keys, lists).ok()?;
+    let sizes = [PATH_BYTES, 4, LIST_BYTES, MEMBER_BYTES, NAMED_BYTES];
+    let mut held = block(len);
+    for (k, b) in [n, width, lists, members, named].into_iter().zip(sizes) {
+        held = held.checked_add(block(k.checked_mul(b)?))?;
+    }
+    Some(held)
+}
+
+/// Pushes `x` onto `v`, where it has room (its capacity exact).
+fn push<T>(v: &mut Vec<T>, x: T) -> Result<()> {
+    if v.len() == v.capacity() {
+        return Err(corrupt());
+    }
+    v.push(x);
+    Ok(())
+}
+
+fn named_hash(parent: u32, key: &[u8]) -> usize {
+    let mut h = parent.wrapping_mul(0x9e37_79b1) ^ key.len() as u32;
+    for &b in key {
+        h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+    }
+    (h ^ h >> 15) as usize
+}
+
 struct Decoder<'a> {
     style: Style,
     paths: Vec<Path<'a>>,
     /// The paths made so far (the first of `paths`).
     made: usize,
+    elems: Vec<u32>,
     lists: Vec<List<'a>>,
-    /// The paths of objects' members by their parent and key.
-    named: BTreeMap<(u32, &'a [u8]), u32>,
+    members: Vec<Member<'a>>,
+    /// The paths of objects' members by their parent and key (open addressing, a power of two
+    /// entries, at most half of them used).
+    named: Vec<Named<'a>>,
     keys: &'a [u8],
     /// The part of `text` after the paths' own.
     shared: &'a [u8],
@@ -273,12 +385,11 @@ impl<'a> Decoder<'a> {
         } else {
             let s = get(&mut path.shapes)?;
             let l = if s == 0 { self.define(p)? } else { self.recall(p, s - 1)? };
-            let (n, bits) = (self.lists[l as usize].keys.len(), self.lists[l as usize].others);
+            let List { at, n, others: bits, .. } = self.lists[l as usize];
             open(bits, out);
             for i in 0..n {
-                let list = &self.lists[l as usize];
-                let (key, c) = (list.keys[i], list.kids[i]);
-                self.member(i as u64, key, c, bits, depth, out)?;
+                let Member { key, kid } = self.members[(at + i) as usize];
+                self.member(i as u64, key, kid, bits, depth, out)?;
             }
             (n as u64, bits)
         };
@@ -310,44 +421,86 @@ impl<'a> Decoder<'a> {
         if out.len() > self.len { Err(corrupt()) } else { Ok(()) }
     }
 
+    /// The path of the members of key `key` of path `p`'s objects, found or made.
+    fn named(&mut self, p: u32, key: &'a [u8]) -> Result<u32> {
+        let mask = self.named.len() - 1;
+        let mut i = named_hash(p, key) & mask;
+        loop {
+            let e = self.named[i];
+            if e.kid == NONE {
+                let c = self.make()?;
+                self.named[i] = Named { key, parent: p, kid: c };
+                return Ok(c);
+            }
+            if e.parent == p && e.key == key {
+                return Ok(e.kid);
+            }
+            i = (i + 1) & mask;
+        }
+    }
+
     /// A key list of path `p` defined, its members' paths found or made in order.
     fn define(&mut self, p: u32) -> Result<u32> {
         let shapes = &mut self.paths[p as usize].shapes;
         let m = get(shapes)?;
         let n = m >> 1;
         let bits = others(shapes, m, 2 * n + 2)?;
-        let mut keys = Vec::new();
-        let mut kids = Vec::new();
+        let at = self.members.len() as u32;
         for _ in 0..n {
             let key = zstring(&mut self.keys)?;
-            let c = match self.named.get(&(p, key)) {
-                Some(&c) => c,
-                None => {
-                    let c = self.make()?;
-                    self.named.insert((p, key), c);
-                    c
-                }
-            };
-            keys.push(key);
-            kids.push(c);
+            let kid = self.named(p, key)?;
+            push(&mut self.members, Member { key, kid })?;
         }
         let l = self.lists.len() as u32;
-        self.lists.push(List { keys, kids, others: bits });
-        let lists = &mut self.paths[p as usize].lists;
-        if lists.len() == MAX_LISTS {
-            lists.pop();
+        push(&mut self.lists, List { others: bits, at, n: n as u32, newer: NONE, older: NONE })?;
+        if self.paths[p as usize].lists as usize == MAX_LISTS {
+            self.unlink(p, self.paths[p as usize].oldest);
         }
-        lists.insert(0, l);
+        self.link(p, l);
         Ok(l)
     }
 
     /// The `k`-th most recent key list of path `p`, made the most recent.
     fn recall(&mut self, p: u32, k: u64) -> Result<u32> {
-        let lists = &mut self.paths[p as usize].lists;
-        let k = usize::try_from(k).ok().filter(|&k| k < lists.len()).ok_or_else(corrupt)?;
-        let l = lists.remove(k);
-        lists.insert(0, l);
+        let path = &self.paths[p as usize];
+        if k >= path.lists as u64 {
+            return Err(corrupt());
+        }
+        let mut l = path.newest;
+        for _ in 0..k {
+            l = self.lists[l as usize].older;
+        }
+        self.unlink(p, l);
+        self.link(p, l);
         Ok(l)
+    }
+
+    /// Key list `l` taken out of path `p`'s.
+    fn unlink(&mut self, p: u32, l: u32) {
+        let List { newer, older, .. } = self.lists[l as usize];
+        let path = &mut self.paths[p as usize];
+        match newer {
+            NONE => path.newest = older,
+            n => self.lists[n as usize].older = older,
+        }
+        match older {
+            NONE => path.oldest = newer,
+            o => self.lists[o as usize].newer = newer,
+        }
+        path.lists -= 1;
+    }
+
+    /// Key list `l` made path `p`'s most recent.
+    fn link(&mut self, p: u32, l: u32) {
+        let path = &mut self.paths[p as usize];
+        let h = std::mem::replace(&mut path.newest, l);
+        match h {
+            NONE => path.oldest = l,
+            h => self.lists[h as usize].newer = l,
+        }
+        path.lists += 1;
+        let list = &mut self.lists[l as usize];
+        (list.newer, list.older) = (NONE, h);
     }
 
     fn array(&mut self, p: u32, depth: usize, out: &mut Vec<u8>) -> Result<()> {
@@ -362,14 +515,15 @@ impl<'a> Decoder<'a> {
                 out.extend_from_slice(self.style.comma(bit(bits, i + 2)));
             }
             let path = &self.paths[p as usize];
-            let j = (i as usize).min(path.width - 1);
-            let c = match path.elems.get(j) {
-                Some(&c) => c,
-                None => {
-                    let c = self.make()?;
-                    self.paths[p as usize].elems.push(c);
-                    c
-                }
+            let j = (i as usize).min(path.width as usize - 1);
+            let at = path.elems as usize + j;
+            let c = if j < path.made as usize {
+                self.elems[at]
+            } else {
+                let c = self.make()?;
+                self.elems[at] = c;
+                self.paths[p as usize].made += 1;
+                c
             };
             self.value(c, depth + 1, out)?;
             if out.len() > self.len {
@@ -382,47 +536,54 @@ impl<'a> Decoder<'a> {
     }
 }
 
-/// The file of `len` bytes of style `style` from its streams `v`.
-pub fn build(style: Style, v: View, len: usize) -> Result<Vec<u8>> {
-    let View { mut layout, mut raw, mut paths, keys, mut types, mut shapes, mut names, mut text, mut nums, mut desc } =
-        v;
-    let mut table = Vec::new();
-    while !paths.is_empty() {
-        if table.len() == MAX_PATHS {
-            return Err(corrupt());
-        }
-        let flags = byte(&mut paths)?;
-        let width = get(&mut paths)?;
-        if flags > (F_MAP | F_DELTA | F_SHARED) || !(1..=MAX_WIDTH).contains(&width) {
-            return Err(corrupt());
-        }
-        let mut n = [0; 6];
-        for n in &mut n {
-            *n = get(&mut paths)?;
-        }
-        let [nt, ns, nn, nx, nu, nd] = n;
+/// The file of `len` bytes from params `params` and its streams `v` (taking [`plan`]).
+pub fn build(params: &[u8], v: View, len: usize) -> Result<Vec<u8>> {
+    let View { mut layout, mut raw, paths, keys, mut types, mut shapes, mut names, mut text, mut nums, mut desc } = v;
+    let (style, lists) = Style::from_params(params)?;
+    // (each key list defined takes a byte of `shapes` at least)
+    if lists > shapes.len() as u64 {
+        return Err(corrupt());
+    }
+    let [n, width, lists, members, named] = counts(paths, keys, lists)?.map(|k| k as usize);
+    let (mut table, mut at) = (Vec::with_capacity(n), 0u32);
+    each_path(paths, &mut |flags, width, [nt, ns, nn, nx, nu, nd]| {
+        at += width as u32;
         table.push(Path {
-            flags,
-            width: width as usize,
             types: take(&mut types, nt)?,
             shapes: take(&mut shapes, ns)?,
             names: take(&mut names, nn)?,
             text: take(&mut text, nx)?,
             nums: take(&mut nums, nu)?,
             desc: take(&mut desc, nd)?,
-            last: None,
             prev: 0,
-            lists: Vec::new(),
+            last: None,
+            newest: NONE,
+            oldest: NONE,
             star: NONE,
-            elems: Vec::new(),
+            elems: at - width as u32,
+            lists: 0,
+            made: 0,
+            width,
+            flags,
         });
-    }
+        Ok(())
+    })?;
     // (the rest of `text` shared)
     if [types, shapes, names, nums, desc].iter().any(|s| !s.is_empty()) {
         return Err(corrupt());
     }
-    let mut d =
-        Decoder { style, paths: table, made: 0, lists: Vec::new(), named: BTreeMap::new(), keys, shared: text, len };
+    let mut d = Decoder {
+        style,
+        paths: table,
+        made: 0,
+        elems: vec![NONE; width],
+        lists: Vec::with_capacity(lists),
+        members: Vec::with_capacity(members),
+        named: vec![Named { key: &[], parent: 0, kid: NONE }; named],
+        keys,
+        shared: text,
+        len,
+    };
     let mut out = Vec::with_capacity(len);
     while !layout.is_empty() {
         let r = get(&mut layout)?;
@@ -460,6 +621,7 @@ pub fn build(style: Style, v: View, len: usize) -> Result<Vec<u8>> {
     });
     if left
         || d.made != d.paths.len()
+        || d.lists.len() != d.lists.capacity()
         || !raw.is_empty()
         || !d.keys.is_empty()
         || !d.shared.is_empty()

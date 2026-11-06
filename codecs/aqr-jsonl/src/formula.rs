@@ -22,14 +22,14 @@ use crate::tree::{
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("jsonl-recons", 1).with_memory(memory);
+pub const MODULE: Module = Module::new("jsonl-recons", 2).with_plan(memory);
 
-/// The memory of the module: the streams and the file, the paths' state (about 128 bytes each
-/// on 32 bits, one for 8 bytes of `paths` at least) and the key lists (about 48 bytes a key on
-/// 32 bits, one for a byte of `keys` at least).
+/// The memory of the module: its initial memory, and its plan ([`crate::module::plan`]), of
+/// the streams `paths` and `keys`.
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let &[_, _, paths, keys, ..] = u.inputs else { return None };
-    Some(u.whole(128 * (paths / 8 + 1) + 48 * keys, 3))
+    let &[len] = u.outputs else { return None };
+    let (paths, keys) = (u.content(2)?, u.content(3)?);
+    Some(u.initial() + crate::module::plan(u.params, u.inputs, paths, keys, len)?)
 }
 
 /// The names of the inputs' streams, in order.
@@ -421,6 +421,8 @@ struct Second<'a, 'b> {
     back: Vec<u8>,
     /// Whether there were more paths than [`MAX_PATHS`].
     over: bool,
+    /// Key lists defined.
+    defined: u64,
 }
 
 impl<'a, 'b> Second<'a, 'b> {
@@ -438,6 +440,7 @@ impl<'a, 'b> Second<'a, 'b> {
             scratch: Vec::with_capacity(64),
             back: Vec::with_capacity(64),
             over: false,
+            defined: 0,
         }
     }
 
@@ -579,6 +582,7 @@ impl<'a, 'b> Second<'a, 'b> {
         // defined (again, where it was dropped)
         let keys = keys_of(d, &toks.t, i);
         path.shapes.push(0);
+        self.defined += 1;
         let bits = self.others.iter().flat_map(|&o| [o & 1 != 0, o & 2 != 0]);
         put_bits(&mut path.shapes, keys.len() as u64, 2 * keys.len() + 2, bits);
         let mut kids = Vec::with_capacity(keys.len());
@@ -794,7 +798,7 @@ impl Second<'_, '_> {
             f.push("jsonl/desc", desc),
         ];
         f.streams[at..].iter_mut().for_each(|s| aqr_formula::store::spill(&mut s.data));
-        Node::apply(MODULE, self.style.to_params(), inputs, len)
+        Node::apply(MODULE, self.style.to_params(self.defined), inputs, len)
     }
 }
 

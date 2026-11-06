@@ -30,9 +30,10 @@ Contents:
 
 ## 2. The module
 
-- **Module**: name `jsonl-recons`, version 1.
+- **Module**: name `jsonl-recons`, version 2.
 - **Params**: one byte, the **style**: bit 0 whether a comma is followed by SP, bit 1 whether a
-  colon is. Other values are errors; nothing may follow.
+  colon is (other values are errors); then a varint, the number of key lists defined (§5), all
+  paths' together. Nothing may follow.
 - **Resources**: none.
 - **Inputs**: ten, in order: `layout`, `raw`, `paths`, `keys`, `types`, `shapes`, `names`,
   `text`, `nums` and `desc` (§3).
@@ -152,7 +153,8 @@ The object is `{`, its members with commas between them, `}`; member i is `"`, t
 map's.
 
 The file is the lines, one after the other. Every stream must be read to its end, every path's
-parts too; a line that would make the file longer than declared is an error.
+parts too; a line that would make the file longer than declared is an error, and so is defining
+more or fewer key lists than the params tell.
 
 ## 6. Encoding *(encoder)*
 

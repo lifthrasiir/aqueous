@@ -11,6 +11,7 @@ default = ["encode"]
 encode = ["dep:aqr-formula", "dep:zstd", "dep:memchr"]
 
 [dependencies]
+aqr-api = { path = "../../crates/aqr-api", default-features = false }
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 aqr-num = { path = "../../crates/aqr-num" }

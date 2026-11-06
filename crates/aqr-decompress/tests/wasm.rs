@@ -1694,6 +1694,52 @@ fn bz2_plans_hold() {
     plan_holds("bz2 alz", f, &all);
 }
 
+/// jsonl-recons lays its memory out as a stack, its limit its plan: of objects of key lists
+/// that vary (more at a path than it keeps), maps, tuples, separators not of the style, and lines
+/// kept as they are; each segment of a file its own application.
+#[test]
+fn jsonl_plans_hold() {
+    let mut lists = String::new();
+    for i in 0..3000 {
+        let k = (i * 7919) % 1224;
+        lists += &format!("{{\"a\":{{\"x{}\":1,\"y{}\":2,\"z\":{}}},\"n\":[{i},{}.5]}}\n", k % 40, k / 40, i, i % 7);
+    }
+    let mut maps = String::new();
+    for i in 0..3000u32 {
+        let h = i.wrapping_mul(2654435761);
+        let sp = if i % 50 == 0 { " " } else { "" };
+        maps += &format!(
+            "{{\"id\":{i},\"files\":{{\"{h:08x}\":{{\"size\":{}}}}},\"at\":[{}.{:02},{}.5]{sp},\"s\":\"w{}\"}}\n",
+            i * 3,
+            i % 90,
+            i % 100,
+            i % 180,
+            i % 13
+        );
+        if i % 700 == 0 {
+            maps += "not json\n";
+        }
+    }
+    for (t, d) in [("lists", lists), ("maps", maps)] {
+        let d = d.into_bytes();
+        let f = aqr_jsonl::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
+        let parts = match &f.root {
+            Node::Concat(nodes) => nodes.clone(),
+            n => vec![n.clone()],
+        };
+        let mut at = 0;
+        for (k, n) in parts.into_iter().enumerate() {
+            let Node::Apply(a) = &n else { panic!("{t}: not an application") };
+            let len = a.len as usize;
+            let mut g = f.clone();
+            g.root = n;
+            plan_holds(&format!("jsonl {t} {k}"), g, &d[at..at + len]);
+            at += len;
+        }
+        assert_eq!(at, d.len(), "{t}");
+    }
+}
+
 /// git-pack-recons and git-pack-index-recons lay their memory out as stacks, their limits their
 /// plans: of a pack of more entries than the stack's holes, alone and with its index and reverse
 /// index after it.

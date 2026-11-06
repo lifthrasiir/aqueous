@@ -275,8 +275,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "jsonl-recons",
-        version: 1,
-        sha512_256: hex("12e1e241b1268ff52250602d010a6c98dcab9ec5993c907aeb7df1642208c04c"),
+        version: 2,
+        sha512_256: hex("8b0884a86ad7aabfa7f8822d9d4cb2bb1bb1976a14f97020792abf4b248971e7"),
         block: include_bytes!("../wasm/jsonl-recons.block"),
     },
     Known {

@@ -63,6 +63,11 @@ path, the sample of strings), and spills the streams it makes. aqr-compress eval
 concatenation part by part to check it (`Formula::eval_parts`), the applications run ahead of it
 a window at a time.
 
+The module lays its memory out as a stack (`aqr_api::stack`), its limit its plan: the paths
+counted from `paths`, their arrays' children, the key lists (their number in the params) and
+their members (counted from `keys`), the table of the members' paths and the file, all held to
+the end (`tree::plan`).
+
 Against coding a file as one segment, the archives are 0.9% larger: segments lose the reach of a
 path's values across the file (`meta_All_Beauty` +5.5%, OpenAlex +3.5%), and GH Archive's events
 gain as much (−0.03%). The segments' text is coded with one aqr-wrt dictionary of all of it

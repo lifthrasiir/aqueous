@@ -568,6 +568,7 @@ dependencies = [
 name = "aqr-jsonl"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
  "aqr-common",
  "aqr-formula",
  "aqr-num",
