@@ -1582,6 +1582,76 @@ fn raster16_plan_holds() {
     }
 }
 
+/// bvx-recons lays its memory out as a stack, its limit its plan: of libcompression's streams,
+/// and of a stream of LZFSE blocks (more than the stack's holes), LZVN and stored blocks in turn.
+#[test]
+fn bvx_plans_hold() {
+    use aqr_bvx::plan::{self, Match, Part, Plan, Side};
+    // data made of its parse: literals, then a match back
+    let mut rng = aqr_common::rng::Rng::new(5);
+    let (mut data, mut p) = (Vec::new(), Plan::default());
+    for k in 0..12 {
+        let start = data.len();
+        let lzvn = k % 3 == 1;
+        let mut ms = Vec::new();
+        while data.len() - start < 40_000 {
+            let lits = rng.below(9) as u32;
+            data.extend(rng.bytes(lits as usize));
+            let window = if lzvn { 65535 } else { 1 << 18 };
+            let dist = 1 + rng.below(data.len().clamp(1, window) as u64) as usize;
+            let len = 4 + rng.below(40) as usize;
+            for _ in 0..len {
+                data.push(data[data.len() - dist]);
+            }
+            ms.push(Match { lits, len: len as u32, dist: dist as u32 });
+        }
+        let n = (data.len() - start) as u32;
+        match k % 3 {
+            0 => {
+                p.push_seg(&ms, 0);
+                let (ms, tail) = p.seg(p.segs.len() - 1).unwrap();
+                let mut left = plan::triples(ms, tail).count() as u32;
+                while left > 0 {
+                    let n = left.min(20 + rng.below(80) as u32);
+                    p.parts.push(Part::Lzfse(n, Side::USUAL));
+                    left -= n;
+                }
+            }
+            1 => {
+                p.parts.push(Part::Lzvn(n));
+                p.push_seg(&ms, 0);
+            }
+            _ => p.parts.push(Part::Stored(n)),
+        }
+    }
+    let mut fill = Vec::new();
+    plan::shapes(&p, &mut |i, lits, none| {
+        fill.push((i, (4 - lits % 4) % 4, none));
+        Ok(())
+    })
+    .unwrap();
+    for (i, pad, none) in fill {
+        let Part::Lzfse(_, side) = &mut p.parts[i] else { unreachable!() };
+        side.npad = pad as u8;
+        p.zd.extend(std::iter::repeat_n(0, none));
+    }
+    let mut mixed = Vec::new();
+    plan::join(&data, &p, &p.counts().unwrap(), &mut mixed).unwrap();
+    assert!(p.parts.len() > 100, "{}", p.parts.len());
+    let mut streams: Vec<(String, Vec<u8>)> = ["text", "words", "icon", "small", "stored"]
+        .map(|t| (t.to_owned(), fixture(&format!("codecs/aqr-bvx/tests/data/{t}.lzfse"))))
+        .into();
+    streams.push(("mixed".into(), mixed));
+    for (t, d) in streams {
+        let mut f = aqr_bvx::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
+        if let Node::Concat(nodes) = &f.root {
+            f.root = nodes[0].clone();
+        }
+        let used = aqr_bvx::formula::extent(&d).unwrap();
+        plan_holds(&format!("bvx {t}"), f, &d[..used]);
+    }
+}
+
 /// git-pack-recons and git-pack-index-recons lay their memory out as stacks, their limits their
 /// plans: of a pack of more entries than the stack's holes, alone and with its index and reverse
 /// index after it.

@@ -8,18 +8,15 @@ use crate::{bvx, recons};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("bvx-recons", 1).with_memory(memory);
+pub const MODULE: Module = Module::new("bvx-recons", 2).with_plan(memory);
 
 /// Bytes of data of a stream taken, at most (a stream of zeros grows a thousandfold).
 pub const MAX_DATA: u64 = 1 << 30;
 
-/// The memory of the module: the inputs and the output, the match finder's and the table's
-/// arrays, the parse (a match of 12 bytes for 4 bytes of data or so) and a block being written
-/// (its literals, at most 315 for each of its triples, and its triples).
+/// The memory of the module: its initial memory, and its plan ([`crate::module::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let &[data, _] = u.inputs else { return None };
-    let block = (bvx::L_MAX as u64 + 12) * recons::BLOCK_LMD as u64;
-    Some(u.whole(recons::MF_BYTES + recons::TABLE_BYTES + 3 * data + block.min(2 * data + (1 << 16)), 2))
+    let &[len] = u.outputs else { return None };
+    Some(u.initial() + crate::module::plan(u.params, u.inputs, len)?)
 }
 
 /// Whether `d` starts with a stream of bvx blocks, as far as their headers tell.
@@ -43,7 +40,7 @@ pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
     let data = f.push("raw", sp.data);
     let record = f.push_as("bvx/record", Kind::Compressed, sp.record);
     f.root = Node::concat([
-        Node::apply(MODULE, vec![], vec![data, record], sp.used as u64),
+        Node::apply(MODULE, sp.counts.params(), vec![data, record], sp.used as u64),
         Node::slice(0, 0, (input.len() - sp.used) as u64),
     ]);
     Some(f)

@@ -1283,33 +1283,29 @@ fn zip_nested_like_42() {
 /// with room for it, it is taken.
 #[test]
 fn bvx_past_expansion() {
-    use aqr_bvx::plan::{self, LMD_LOW, Match, Part, Plan, Seg, Side};
+    use aqr_bvx::plan::{self, Match, Part, Plan, Side};
     let data = vec![0; 96 << 20];
-    let seg = Seg { matches: vec![Match { lits: 1, len: data.len() as u32 - 1, dist: 1 }], tail: 0 };
-    let mut parts = Vec::new();
-    let mut left = plan::triples(&seg).count() as u32;
+    let mut p = Plan::default();
+    p.push_seg(&[Match { lits: 1, len: data.len() as u32 - 1, dist: 1 }], 0);
+    let (ms, tail) = p.seg(0).unwrap();
+    let mut left = plan::triples(ms, tail).count() as u32;
     while left > 0 {
         let n = left.min(aqr_bvx::recons::BLOCK_LMD);
-        let side = Side {
-            freqs: None,
-            lit_start: [0; 4],
-            lmd_start: [0; 3],
-            lit_low: 0,
-            lmd_low: LMD_LOW,
-            pad: vec![],
-            zd: vec![],
-        };
-        parts.push(Part::Lzfse(n, side));
+        p.parts.push(Part::Lzfse(n, Side::USUAL));
         left -= n;
     }
-    let mut p = Plan { parts, segs: vec![seg] };
-    let shapes = plan::shapes(&p).unwrap();
-    for (part, (pad, _)) in p.parts.iter_mut().zip(shapes) {
-        let Part::Lzfse(_, side) = part else { unreachable!() };
-        side.pad = vec![0; pad];
+    let mut pads = Vec::new();
+    plan::shapes(&p, &mut |i, lits, _| {
+        pads.push((i, (4 - lits % 4) % 4));
+        Ok(())
+    })
+    .unwrap();
+    for (i, pad) in pads {
+        let Part::Lzfse(_, side) = &mut p.parts[i] else { unreachable!() };
+        side.npad = pad as u8;
     }
     let mut d = Vec::new();
-    plan::join(&data, &p, &mut d).unwrap();
+    plan::join(&data, &p, &p.counts().unwrap(), &mut d).unwrap();
     assert!(d.len() < 1 << 20, "{}", d.len());
     assert!(modules(&roundtrip(&d, &all9())).is_empty());
     assert_eq!(modules(&roundtrip(&d, &Options { expansion: 1 << 20, ..all9() })), [BVX.name]);

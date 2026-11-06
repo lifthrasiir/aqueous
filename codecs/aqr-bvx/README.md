@@ -28,7 +28,7 @@ let f = formula::encode(&file, 1).unwrap();
 use aqr_bvx::recons;
 let sp = recons::split(&stream, limit)?;
 let mut out = Vec::new();
-recons::join_onto(&sp.data, &sp.record, &mut out)?;
+recons::join_onto(&sp.data, &sp.record, &sp.counts, &mut out)?;
 assert_eq!(out, stream[..sp.used]);
 ```
 
@@ -79,7 +79,7 @@ rebuilt):
   pixels of 4 bytes, alpha last, the transparent ones zeros: an image model on it is where the
   rest is (`docs/macos-app-todo.md` §4).
 
-The module `bvx-recons` is 77 KB of Wasm (a block of 21 KB in an archive).
+The module `bvx-recons` is 78 KB of Wasm (a block of 20 KB in an archive).
 
 ## Tests
 

@@ -150,53 +150,53 @@ pub fn matches(ops: &[Op]) -> (Vec<Match>, u32) {
 }
 
 /// The instructions the compressor writes for `matches` and `tail` literals after
-/// them (`FORMAT.md` §5.1).
-pub fn ops(matches: &[Match], tail: u32) -> Vec<Op> {
-    let mut out = Vec::new();
+/// them (`FORMAT.md` §5.1), given to `f` in turn.
+pub fn each_op(matches: &[Match], tail: u32, f: &mut dyn FnMut(Op) -> Result<()>) -> Result<()> {
     let mut prev = 0;
-    let runs = |out: &mut Vec<Op>, mut n: u32, f: fn(u16) -> Op| {
+    let runs = |f: &mut dyn FnMut(Op) -> Result<()>, mut n: u32, op: fn(u16) -> Op| {
         while n > 0 {
             let k = n.min(271);
-            out.push(f(k as u16));
+            f(op(k as u16))?;
             n -= k;
         }
+        Ok(())
     };
     for m in matches {
         let mut r = m.lits;
         if r >= 4 {
-            runs(&mut out, r, Op::Lits);
+            runs(f, r, Op::Lits)?;
             r = 0;
         }
         let cap = 10 - 2 * r;
         let k = if m.dist == prev {
             // (an instruction of no literals is a match alone, of the same cap)
             let k = m.len.min(cap);
-            out.push(if r == 0 { Op::Match(k as u16) } else { Op::Prev { lits: r as u8, len: k as u8 } });
+            f(if r == 0 { Op::Match(k as u16) } else { Op::Prev { lits: r as u8, len: k as u8 } })?;
             k
         } else if m.dist < 1536 {
             let k = m.len.min(cap);
-            out.push(Op::Small { lits: r as u8, len: k as u8, dist: m.dist as u16 });
+            f(Op::Small { lits: r as u8, len: k as u8, dist: m.dist as u16 })?;
             k
         } else if m.dist < 16384 && m.len > cap && m.len <= 34 - 2 * r {
             // (only where it takes the whole match)
-            out.push(Op::Medium { lits: r as u8, len: m.len as u8, dist: m.dist as u16 });
+            f(Op::Medium { lits: r as u8, len: m.len as u8, dist: m.dist as u16 })?;
             m.len
         } else {
             let k = m.len.min(cap);
-            out.push(Op::Large { lits: r as u8, len: k as u8, dist: m.dist as u16 });
+            f(Op::Large { lits: r as u8, len: k as u8, dist: m.dist as u16 })?;
             k
         };
-        runs(&mut out, m.len - k, Op::Match);
+        runs(f, m.len - k, Op::Match)?;
         prev = m.dist;
     }
-    runs(&mut out, tail, Op::Lits);
-    out
+    runs(f, tail, Op::Lits)
 }
 
-/// Writes the instructions `ops` over `data` (the literals taken from it in turn) and the end.
-pub fn write(data: &[u8], ops: &[Op], out: &mut Vec<u8>) -> Result<()> {
+/// Writes the instructions of `matches` and `tail` ([`each_op`]) over `data` (the literals
+/// taken from it in turn), and the end.
+pub fn write(data: &[u8], matches: &[Match], tail: u32, out: &mut Vec<u8>) -> Result<()> {
     let mut pos = 0usize;
-    for &op in ops {
+    each_op(matches, tail, &mut |op| {
         let (lits, len) = match op {
             Op::Small { lits, len, dist } => {
                 if !(1..1536).contains(&dist) || lits > 3 || !(3..=10).contains(&len) {
@@ -251,7 +251,8 @@ pub fn write(data: &[u8], ops: &[Op], out: &mut Vec<u8>) -> Result<()> {
         let lits = if let Op::Lits(n) = op { n as usize } else { lits as usize };
         out.extend_from_slice(data.get(pos..pos + lits).ok_or_else(corrupt)?);
         pos += lits + len as usize;
-    }
+        Ok(())
+    })?;
     out.extend([6, 0, 0, 0, 0, 0, 0, 0]);
     Ok(())
 }

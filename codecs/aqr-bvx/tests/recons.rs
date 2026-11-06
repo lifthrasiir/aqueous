@@ -1,5 +1,5 @@
 use aqr_bvx::bvx::{self, D_MAX};
-use aqr_bvx::plan::{self, LMD_LOW, Match, Part, Plan, Seg, Side};
+use aqr_bvx::plan::{self, Match, Part, Plan, Side};
 use aqr_bvx::recons;
 use aqr_common::rng::Rng;
 
@@ -28,10 +28,10 @@ fn streams_of_libcompression() {
         let sp = recons::split(&s, 1 << 24).unwrap();
         assert!(sp.data == st.data, "{name}");
         // the compressor's choices, all usual
-        let p = recons::plan(&sp.data, &sp.record).unwrap();
+        let p = recons::plan(&sp.data, &sp.record, &sp.counts).unwrap();
         assert!(p.parts.iter().all(|p| !matches!(p, Part::Lzfse(_, s) if !s.usual())), "{name}");
         let mut out = Vec::new();
-        recons::join_onto(&sp.data, &sp.record, &mut out).unwrap();
+        recons::join_onto(&sp.data, &sp.record, &sp.counts, &mut out).unwrap();
         assert!(out == s, "{name}: rebuilt otherwise");
         assert!(sp.record.len() <= s.len() / 25 + 32, "{name}: record of {} bytes", sp.record.len());
     }
@@ -60,7 +60,7 @@ fn data(rng: &mut Rng, n: usize) -> Vec<u8> {
 }
 
 /// A random parse of `d[start..end]` (`lzvn`: as LZVN's instructions can write it).
-fn parse(rng: &mut Rng, d: &[u8], start: usize, end: usize, lzvn: bool) -> Seg {
+fn parse(rng: &mut Rng, d: &[u8], start: usize, end: usize, lzvn: bool) -> (Vec<Match>, u32) {
     let window = if lzvn { 65535 } else { D_MAX as usize };
     let (mut matches, mut run, mut pos, mut prev) = (Vec::new(), 0, start, 0usize);
     while pos < end {
@@ -91,7 +91,7 @@ fn parse(rng: &mut Rng, d: &[u8], start: usize, end: usize, lzvn: bool) -> Seg {
         pos += 1;
         run += 1;
     }
-    Seg { matches, tail: run }
+    (matches, run)
 }
 
 /// A random plan over `d`: segments of LZFSE (blocks cut anywhere, sides unusual too), LZVN and
@@ -107,38 +107,49 @@ fn random_plan(rng: &mut Rng, d: &[u8]) -> Plan {
             0 => plan.parts.push(Part::Stored(n as u32)),
             1 => {
                 plan.parts.push(Part::Lzvn(n as u32));
-                plan.segs.push(parse(rng, d, at, at + n, true));
+                let (ms, tail) = parse(rng, d, at, at + n, true);
+                plan.push_seg(&ms, tail);
             }
             _ => {
-                let seg = parse(rng, d, at, at + n, false);
-                let mut left = plan::triples(&seg).count() as u32;
+                let (ms, tail) = parse(rng, d, at, at + n, false);
+                let mut left = plan::triples(&ms, tail).count() as u32;
                 while left > 0 {
                     let k =
                         if rng.below(2) == 0 { left.min(recons::BLOCK_LMD) } else { 1 + rng.below(left as u64) as u32 };
                     let unusual = rng.below(4) == 0;
-                    let side = Side {
-                        freqs: None,
-                        lit_start: if unusual { [1, 2, 3, 1023] } else { [0; 4] },
-                        lmd_start: if unusual { [5, 63, 200] } else { [0; 3] },
-                        lit_low: if unusual { 3 } else { 0 },
-                        lmd_low: if unusual { 9 } else { LMD_LOW },
-                        pad: vec![],
-                        zd: vec![],
+                    let side = if unusual {
+                        Side {
+                            lit_start: [1, 2, 3, 1023],
+                            lmd_start: [5, 63, 200],
+                            lit_low: 3,
+                            lmd_low: 9,
+                            ..Side::USUAL
+                        }
+                    } else {
+                        Side::USUAL
                     };
                     plan.parts.push(Part::Lzfse(k, side));
                     left -= k;
                 }
-                plan.segs.push(seg);
+                plan.push_seg(&ms, tail);
             }
         }
         at += n;
     }
     // the pads and distances of no match, now that the blocks are known
-    let shapes = plan::shapes(&plan).unwrap();
-    for (p, (pad, zd)) in plan.parts.iter_mut().filter(|p| matches!(p, Part::Lzfse(..))).zip(shapes) {
-        let Part::Lzfse(_, side) = p else { unreachable!() };
-        side.pad = (0..pad).map(|_| if rng.below(2) == 0 { 0 } else { rng.below(256) as u8 }).collect();
-        side.zd = (0..zd).map(|_| if rng.below(2) == 0 { 0 } else { rng.below(1000) as u32 }).collect();
+    let mut shapes = Vec::new();
+    plan::shapes(&plan, &mut |i, lits, none| {
+        shapes.push((i, (4 - lits % 4) % 4, none));
+        Ok(())
+    })
+    .unwrap();
+    for (i, pad, none) in shapes {
+        let Part::Lzfse(_, side) = &mut plan.parts[i] else { unreachable!() };
+        side.npad = pad as u8;
+        for b in &mut side.pad[..pad] {
+            *b = if rng.below(2) == 0 { 0 } else { rng.below(256) as u8 };
+        }
+        plan.zd.extend((0..none).map(|_| if rng.below(2) == 0 { 0 } else { rng.below(1000) as u32 }));
     }
     plan
 }
@@ -154,14 +165,15 @@ fn random_parses() {
         let plan = random_plan(&mut rng, &d);
         let mut s = Vec::new();
         // (an LZFSE block of too many literals for its header is not written)
-        if plan::join(&d, &plan, &mut s).is_err() {
+        if plan::join(&d, &plan, &plan.counts().unwrap(), &mut s).is_err() {
             continue;
         }
         let sp = recons::split(&s, d.len()).unwrap_or_else(|e| panic!("round {round}: {e}"));
         assert!(sp.data == d, "round {round}");
-        assert_eq!(recons::plan(&d, &sp.record).unwrap(), plan, "round {round}");
+        assert_eq!(sp.counts, plan.counts().unwrap(), "round {round}");
+        assert_eq!(recons::plan(&d, &sp.record, &sp.counts).unwrap(), plan, "round {round}");
         let mut out = Vec::new();
-        recons::join_onto(&d, &sp.record, &mut out).unwrap();
+        recons::join_onto(&d, &sp.record, &sp.counts, &mut out).unwrap();
         assert!(out == s, "round {round}");
         taken += 1;
     }
@@ -186,7 +198,7 @@ fn damaged() {
                 _ => d.truncate(rng.below(d.len() as u64 + 1) as usize),
             }
             let mut out = Vec::new();
-            let _ = recons::join_onto(&d, &r, &mut out);
+            let _ = recons::join_onto(&d, &r, &sp.counts, &mut out);
             let _ = name;
         }
     }

@@ -45,7 +45,7 @@ fn main() {
                 t_split += t.elapsed().as_secs_f64();
                 let t = Instant::now();
                 let mut out = Vec::new();
-                let r = recons::join_onto(&sp.data, &sp.record, &mut out);
+                let r = recons::join_onto(&sp.data, &sp.record, &sp.counts, &mut out);
                 t_join += t.elapsed().as_secs_f64();
                 match r {
                     Err(e) => format!("join: {e}"),

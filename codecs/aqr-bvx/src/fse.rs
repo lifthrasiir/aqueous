@@ -17,12 +17,22 @@ pub struct Table {
 impl Table {
     /// The table of `freq`, whose sum must be at most `n` (states beyond it are none).
     pub fn new(freq: &[u16], n: u32) -> Result<Table> {
+        Self::made(freq, n, true)
+    }
+
+    /// The table of `freq` for [`Table::encode`] alone (no states for decoding: `dec` empty).
+    pub fn encoding(freq: &[u16], n: u32) -> Result<Table> {
+        Self::made(freq, n, false)
+    }
+
+    fn made(freq: &[u16], n: u32, decoding: bool) -> Result<Table> {
         let sum: u32 = freq.iter().map(|&f| f as u32).sum();
         if sum > n {
             return Err(corrupt());
         }
-        let mut dec = Vec::with_capacity(n as usize);
+        let mut dec = Vec::with_capacity(if decoding { n as usize } else { 0 });
         let mut sym = Vec::with_capacity(freq.len());
+        let mut first = 0;
         for (s, &f) in freq.iter().enumerate() {
             let f = f as u32;
             if f == 0 {
@@ -32,7 +42,11 @@ impl Table {
             // f << k in [n, 2n); the first j0 states read k bits, the others k - 1
             let k = f.leading_zeros() - n.leading_zeros();
             let j0 = ((2 * n) >> k) - f;
-            sym.push((dec.len() as u32, f, k, j0));
+            sym.push((first, f, k, j0));
+            first += f;
+            if !decoding {
+                continue;
+            }
             for j in 0..f {
                 dec.push(if j < j0 {
                     (k as u8, s as u16, ((f + j) << k) - n)
@@ -96,15 +110,21 @@ impl<'a> BackReader<'a> {
     }
 }
 
-/// A bit stream written forward, for [`BackReader`]: each field at the bits above those before.
-#[derive(Default)]
-pub struct Writer {
-    pub out: Vec<u8>,
+/// A bit stream written forward onto a vector, for [`BackReader`]: each field at the bits above
+/// those before.
+pub struct Writer<'a> {
+    out: &'a mut Vec<u8>,
+    start: usize,
     acc: u64,
     bits: u32,
 }
 
-impl Writer {
+impl<'a> Writer<'a> {
+    pub fn new(out: &'a mut Vec<u8>) -> Self {
+        let start = out.len();
+        Writer { out, start, acc: 0, bits: 0 }
+    }
+
     /// `n ≤ 32` bits of `v`.
     #[inline]
     pub fn put(&mut self, v: u32, n: u32) {
@@ -117,13 +137,15 @@ impl Writer {
         }
     }
 
-    /// The bytes, and the unused bits at the top of the last (0 to 7).
-    pub fn finish(mut self) -> (Vec<u8>, u32) {
-        if self.bits == 0 {
-            return (self.out, 0);
-        }
-        self.out.push(self.acc as u8);
-        (self.out, 8 - self.bits)
+    /// The count of bytes written, and the unused bits at the top of the last (0 to 7).
+    pub fn finish(self) -> (usize, u32) {
+        let unused = if self.bits == 0 {
+            0
+        } else {
+            self.out.push(self.acc as u8);
+            8 - self.bits
+        };
+        (self.out.len() - self.start, unused)
     }
 }
 

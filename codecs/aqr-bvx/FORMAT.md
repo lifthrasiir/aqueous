@@ -415,9 +415,14 @@ for 0, else 8 raw bits; each `D`, adaptive bit `zd_zero`, 1 for 0, else `1 + gam
 
 ## 7. Formula module
 
-The module is `bvx-recons`, version 1. It rebuilds a stream from its data and its record.
+The module is `bvx-recons`, version 2. It rebuilds a stream from its data and its record.
 
-**Parameters**: none (empty).
+**Parameters**: seven varints, the counts of the plan that the record codes (§5, §6): its
+parts, its segments, the matches of all its parses, its LZFSE parts of frequencies of their
+own, and its `D`s of triples of no match (§6.6, all its LZFSE parts'); then the most triples of
+an LZFSE part, and the most literals (with the pad) of one (0 and 0 where it has none). They
+bound what a decoder holds before it decodes the record (the module's memory follows from
+them), and must be the plan's exactly.
 
 **Inputs**: exactly two, in this order.
 
@@ -431,9 +436,9 @@ with its end block.
 
 **Resources**: none.
 
-The module fails on any parameters, any other count of inputs or resources, a record that fails
-above, a plan whose stream cannot be written (§3.6, §5), or an output whose length is not the
-application's declared output size.
+The module fails on parameters that are not seven varints alone or not the plan's counts, any
+other count of inputs or resources, a record that fails above, a plan whose stream cannot be
+written (§3.6, §5), or an output whose length is not the application's declared output size.
 
 ## 8. The compressor and the encoder *(informative)*
 

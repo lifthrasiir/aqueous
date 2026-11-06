@@ -9,7 +9,7 @@
 use aqr_common::arith::{ArithDecoder, ArithEncoder, Bit};
 
 use crate::bvx::{self, D_MAX, Freqs};
-use crate::plan::{self, LMD_LOW, Match, Part, Plan, Seg, Side};
+use crate::plan::{self, Counts, Match, Part, Plan, Side};
 use crate::{Error, Result, corrupt};
 
 pub use aqr_common::lz::{lcp, lcp_up};
@@ -30,8 +30,6 @@ const NONE: u32 = u32::MAX;
 const RING_BITS: u32 = 18;
 const RING: usize = 1 << RING_BITS;
 const HEAD_BITS: u32 = 18;
-/// Bytes of the match finder's tables.
-pub const MF_BYTES: u64 = ((RING + (1 << HEAD_BITS)) * 4) as u64;
 
 /// What the matches of a kind of segment are.
 #[derive(Clone, Copy)]
@@ -61,15 +59,18 @@ fn lb(l: usize) -> usize {
 struct Mf<'a> {
     d: &'a [u8],
     k: Kind,
-    head: Vec<u32>,
-    prev: Vec<u32>,
+    /// Of `1 << HEAD_BITS` and [`RING`] entries.
+    head: &'a mut [u32],
+    prev: &'a mut [u32],
     /// Positions below this are inserted.
     next: usize,
 }
 
 impl<'a> Mf<'a> {
-    fn new(d: &'a [u8], k: Kind) -> Self {
-        Mf { d, k, head: vec![NONE; 1 << HEAD_BITS], prev: vec![NONE; RING], next: 0 }
+    fn new(d: &'a [u8], k: Kind, head: &'a mut [u32], prev: &'a mut [u32]) -> Self {
+        head.fill(NONE);
+        prev.fill(NONE);
+        Mf { d, k, head, prev, next: 0 }
     }
 
     #[inline]
@@ -197,7 +198,8 @@ impl<'a> Mf<'a> {
 /// position is looked up before it is inserted.
 struct Table<'a> {
     d: &'a [u8],
-    tab: Vec<u32>,
+    /// Of `(1 << TABLE_BITS) * WAYS` entries.
+    tab: &'a mut [u32],
     /// Positions below this are inserted.
     next: usize,
     /// The last positions looked up, with their candidates.
@@ -212,6 +214,28 @@ pub const WAYS: usize = 4;
 /// Bytes of the table.
 pub const TABLE_BYTES: u64 = ((1 << TABLE_BITS) * WAYS * 4) as u64;
 
+/// The match finder's tables and the table of candidates, made once for all the segments.
+struct Tables {
+    head: Vec<u32>,
+    prev: Vec<u32>,
+    tab: Vec<u32>,
+    pairs: Vec<(usize, usize, usize)>,
+}
+
+/// Bytes of [`Tables`] (the pairs of 12 bytes on WebAssembly).
+pub const TABLES_HEAP: [u64; 4] = [(1 << HEAD_BITS) * 4, (RING * 4) as u64, TABLE_BYTES, 12 * (DEPTH as u64 + 1)];
+
+impl Tables {
+    fn new() -> Tables {
+        Tables {
+            head: vec![NONE; 1 << HEAD_BITS],
+            prev: vec![NONE; RING],
+            tab: vec![NONE; (1 << TABLE_BITS) * WAYS],
+            pairs: Vec::with_capacity(DEPTH + 1),
+        }
+    }
+}
+
 /// The longer, or the nearer of two as long.
 #[inline]
 fn better(a: Cand, b: Cand) -> Cand {
@@ -219,8 +243,9 @@ fn better(a: Cand, b: Cand) -> Cand {
 }
 
 impl<'a> Table<'a> {
-    fn new(d: &'a [u8]) -> Self {
-        Table { d, tab: vec![NONE; (1 << TABLE_BITS) * WAYS], next: 0, looked: [(usize::MAX, [NONE; WAYS]); 4] }
+    fn new(d: &'a [u8], tab: &'a mut [u32]) -> Self {
+        tab.fill(NONE);
+        Table { d, tab, next: 0, looked: [(usize::MAX, [NONE; WAYS]); 4] }
     }
 
     #[inline]
@@ -336,31 +361,31 @@ pub const CATS: usize = 4;
 
 /// The contexts of a kind of segment's parses.
 struct Walk {
-    start: Vec<Bit>,
-    take: Vec<Bit>,
+    start: [Bit; 8 * 12 * 3],
+    take: [Bit; 4 * 9],
     longer: [Bit; 64],
-    full: Vec<Bit>,
-    short: Vec<[Bit; 64]>,
-    far: Vec<Bit>,
+    full: [Bit; 12],
+    short: [[Bit; 64]; 12],
+    far: [Bit; 12],
     dist_bits: [Bit; 64],
     /// Whether the match is the table's first guess, or its second.
-    best: Vec<Bit>,
-    second: Vec<Bit>,
+    best: [Bit; 7 * 12],
+    second: [Bit; 7 * 12],
 }
 
 impl Walk {
     fn new() -> Self {
-        let v = |n| vec![Bit::default(); n];
+        let b = Bit::default();
         Walk {
-            start: v(8 * 12 * 3),
-            take: v(4 * 9),
-            longer: [Bit::default(); 64],
-            full: v(12),
-            short: vec![[Bit::default(); 64]; 12],
-            far: v(12),
-            dist_bits: [Bit::default(); 64],
-            best: v(7 * 12),
-            second: v(7 * 12),
+            start: [b; 8 * 12 * 3],
+            take: [b; 4 * 9],
+            longer: [b; 64],
+            full: [b; 12],
+            short: [[b; 64]; 12],
+            far: [b; 12],
+            dist_bits: [b; 64],
+            best: [b; 7 * 12],
+            second: [b; 7 * 12],
         }
     }
 }
@@ -429,25 +454,37 @@ impl<C: aqr_common::arith::Coder> Coder for C {
     }
 }
 
-/// Codes the parse of the segment `d[start..]` (`seg` given, or filled in), the positions before
-/// `start` being in reach.
+/// Pushes `x` onto `v` within its capacity.
+#[inline]
+fn push<T>(v: &mut Vec<T>, x: T) -> Result<()> {
+    if v.len() == v.capacity() {
+        return Err(corrupt());
+    }
+    v.push(x);
+    Ok(())
+}
+
+/// Codes the parse of the segment `d[start..]`, the positions before `start` being in reach:
+/// its matches (`want`'s where encoding) pushed onto `out` (within its capacity), and its
+/// literals after them returned.
+#[allow(clippy::too_many_arguments)]
 fn walk(
     c: &mut impl Coder,
     w: &mut Walk,
     d: &[u8],
     start: usize,
     k: Kind,
-    seg: &mut Seg,
-    encoding: bool,
-) -> Result<()> {
-    let mut mf = Mf::new(d, k);
+    t: &mut Tables,
+    want: Option<(&[Match], u32)>,
+    out: &mut Vec<Match>,
+) -> Result<u32> {
+    let encoding = want.is_some();
+    let mut mf = Mf::new(d, k, &mut t.head, &mut t.prev);
     mf.advance(start);
-    let mut table = (k.min == 4).then(|| Table::new(d));
-    let mut pairs = Vec::with_capacity(DEPTH + 1);
+    let mut table = (k.min == 4).then(|| Table::new(d, &mut t.tab));
+    let pairs = &mut t.pairs;
     let (mut pos, mut run) = (start, 0u32);
     let mut next = 0;
-    // (a match for every `min` bytes at most, as the compressors' are: the module's memory)
-    let mut decoded = if encoding { Vec::new() } else { Vec::with_capacity((d.len() - start) / k.min + 1) };
     // the longest of the near candidates at `pos`, once known
     let mut here: Option<usize> = None;
     while pos < d.len() {
@@ -467,7 +504,7 @@ fn walk(
             here = Some(l1);
             (l0, l1, ((0, 0), (0, 0), 0))
         };
-        let want = encoding.then(|| seg.matches.get(next)).flatten();
+        let want = want.and_then(|(ms, _)| ms.get(next));
         let starts = want.is_some_and(|m| m.lits == run);
         let cmp = if l1 > l0 { 2 } else { (l1 == l0) as usize };
         if !c.bit(&mut w.start[(bucket(run) * 12 + lb(l0)) * 3 + cmp], starts, Cat::Start) {
@@ -489,20 +526,17 @@ fn walk(
         }
         if let Some((n, dist)) = guess {
             let got = Match { lits: run, len: n as u32, dist: dist as u32 };
-            if encoding {
-                if got != want {
-                    return Err(Error("match not coded"));
-                }
-            } else {
-                decoded.push(got);
+            if encoding && got != want {
+                return Err(Error("match not coded"));
             }
+            push(out, got)?;
             next += 1;
             mf.skip(pos, n);
             pos += n;
             run = 0;
             continue;
         }
-        mf.pairs(pos, &mut pairs);
+        mf.pairs(pos, pairs);
         let m = pairs.len();
         // which pair: the first, from the nearest, whose length is at least the match's
         let j_want = if encoding { pairs.iter().take_while(|&&(l, _, _)| l < len).count() } else { 0 };
@@ -556,60 +590,51 @@ fn walk(
             return Err(corrupt());
         }
         let got = Match { lits: run, len: n as u32, dist: dist as u32 };
-        if encoding {
-            if got != want {
-                return Err(Error("match not coded"));
-            }
-        } else {
-            decoded.push(got);
+        if encoding && got != want {
+            return Err(Error("match not coded"));
         }
+        push(out, got)?;
         next += 1;
         mf.skip(pos, n);
         pos += n;
         run = 0;
     }
-    if encoding {
-        if next != seg.matches.len() || run != seg.tail {
-            return Err(Error("parse beyond the data"));
-        }
-    } else {
-        seg.matches = decoded;
-        seg.tail = run;
+    if want.is_some_and(|(ms, tail)| next != ms.len() || run != tail) {
+        return Err(Error("parse beyond the data"));
     }
-    Ok(())
+    Ok(run)
 }
 
-/// Codes `plan` over `data` (given, or filled in).
-fn code(c: &mut impl Coder, data: &[u8], plan: &mut Plan, encoding: bool) -> Result<()> {
+/// Codes the plan over `data`: `want`'s where encoding, pushed onto `out` (within its room;
+/// but for the LZFSE blocks' pads and distances of no match, [`code_fill`]).
+fn code(c: &mut impl Coder, data: &[u8], want: Option<&Plan>, out: &mut Plan) -> Result<()> {
+    let encoding = want.is_some();
+    let empty = Plan::default();
+    let inp = want.unwrap_or(&empty);
     let mut ctx = Ctx::new();
-    let segs = if encoding { plan::segments(&plan.parts) } else { Vec::new() };
-    let mut segs_in = std::mem::take(&mut plan.segs).into_iter().peekable();
-    let parts_in = std::mem::take(&mut plan.parts);
-    let mut pi = 0;
-    let mut si = 0;
+    let mut tables = Tables::new();
+    let (mut pi, mut si, mut fi) = (0, 0, 0);
     let mut at = 0usize;
     // (no data: no block, or a stored block of nothing, as the compressor writes it)
-    if data.is_empty() && c.bit(&mut ctx.rest, parts_in == [Part::Stored(0)], Cat::Layout) {
-        plan.parts.push(Part::Stored(0));
+    if data.is_empty() && c.bit(&mut ctx.rest, inp.parts == [Part::Stored(0)], Cat::Layout) {
+        push(&mut out.parts, Part::Stored(0))?;
         pi = 1;
     }
     while at < data.len() {
         // the kind: LZFSE, LZVN or stored; and the bytes of data, the rest or fewer
-        let (kind, want_len, want_parts) = if encoding {
-            let (range, lzvn) =
-                if si < segs.len() && segs[si].0.start == pi { segs[si].clone() } else { (pi..pi + 1, false) };
-            let kind = match parts_in[pi] {
-                Part::Stored(_) => 2,
-                _ if lzvn => 1,
-                _ => 0,
-            };
-            let len = match &parts_in[pi] {
-                Part::Stored(n) | Part::Lzvn(n) => *n as usize,
-                Part::Lzfse(..) => plan::seg_len(segs_in.peek().ok_or_else(corrupt)?) as usize,
-            };
-            (kind, len, range)
+        let (kind, want_len, want_end) = if encoding {
+            let p = *inp.parts.get(pi).ok_or_else(corrupt)?;
+            let end = pi + inp.parts[pi..].iter().take_while(|p| matches!(p, Part::Lzfse(..))).count();
+            match p {
+                Part::Stored(n) => (2, n as usize, pi + 1),
+                Part::Lzvn(n) => (1, n as usize, pi + 1),
+                Part::Lzfse(..) => {
+                    let (ms, tail) = inp.seg(si)?;
+                    (0, plan::seg_len(ms, tail) as usize, end)
+                }
+            }
         } else {
-            (0, 0, 0..0)
+            (0, 0, 0)
         };
         let k = if c.bit(&mut ctx.kind[0], kind != 0, Cat::Layout) {
             1 + c.bit(&mut ctx.kind[1], kind == 2, Cat::Layout) as usize
@@ -627,36 +652,36 @@ fn code(c: &mut impl Coder, data: &[u8], plan: &mut Plan, encoding: bool) -> Res
             n
         };
         let d = &data[..at + n];
+        let want_seg = if encoding && k != 2 { Some(inp.seg(si)?) } else { None };
         match k {
             2 => {
                 if n > u32::MAX as usize {
                     return Err(corrupt());
                 }
-                plan.parts.push(Part::Stored(n as u32));
+                push(&mut out.parts, Part::Stored(n as u32))?;
                 pi += 1;
             }
             1 => {
-                let mut seg = if encoding { segs_in.next().ok_or_else(corrupt)? } else { Seg::default() };
-                walk(c, &mut ctx.walks[1], d, at, LZVN, &mut seg, encoding)?;
-                plan.parts.push(Part::Lzvn(n as u32));
-                plan.segs.push(seg);
+                let tail = walk(c, &mut ctx.walks[1], d, at, LZVN, &mut tables, want_seg, &mut out.matches)?;
+                push(&mut out.parts, Part::Lzvn(n as u32))?;
+                push(&mut out.segs, plan::Seg { end: out.matches.len() as u32, tail })?;
                 pi += 1;
                 si += 1;
             }
             _ => {
-                let mut seg = if encoding { segs_in.next().ok_or_else(corrupt)? } else { Seg::default() };
-                walk(c, &mut ctx.walks[0], d, at, LZFSE, &mut seg, encoding)?;
+                let from = out.matches.len();
+                let tail = walk(c, &mut ctx.walks[0], d, at, LZFSE, &mut tables, want_seg, &mut out.matches)?;
                 // the blocks: their triples, of the full count but for the last
-                let total = plan::triples(&seg).count() as u32;
-                let (mut done, mut i) = (0, want_parts.start);
+                let total = plan::triples(&out.matches[from..], tail).count() as u32;
+                let (mut done, mut i) = (0, pi);
                 while done < total {
-                    let want = if encoding {
-                        match &parts_in.get(i) {
-                            Some(Part::Lzfse(n, _)) => *n,
+                    let (want, want_side) = if encoding {
+                        match inp.parts.get(i) {
+                            Some(&Part::Lzfse(n, s)) => (n, s),
                             _ => return Err(corrupt()),
                         }
                     } else {
-                        0
+                        (0, Side::USUAL)
                     };
                     let usual = BLOCK_LMD.min(total - done);
                     let n = if c.bit(&mut ctx.full_block, want == usual, Cat::Layout) {
@@ -668,50 +693,54 @@ fn code(c: &mut impl Coder, data: &[u8], plan: &mut Plan, encoding: bool) -> Res
                         }
                         n
                     };
-                    let mut side = match &parts_in.get(i) {
-                        Some(Part::Lzfse(_, s)) if encoding => s.clone(),
-                        _ => usual_side(),
+                    let mut side = want_side;
+                    let want_freqs = if encoding && side.own {
+                        fi += 1;
+                        Some(inp.freqs.get(fi - 1).ok_or_else(corrupt)?)
+                    } else {
+                        None
                     };
-                    code_side(c, &mut ctx, &mut side, encoding)?;
-                    plan.parts.push(Part::Lzfse(n, side));
+                    code_side(c, &mut ctx, &mut side, want_freqs, &mut out.freqs, encoding)?;
+                    push(&mut out.parts, Part::Lzfse(n, side))?;
                     done += n;
                     i += 1;
                 }
-                if encoding && i != want_parts.end {
+                if encoding && i != want_end {
                     return Err(Error("blocks not coded"));
                 }
-                pi = want_parts.end;
-                plan.segs.push(seg);
+                pi = i;
+                push(&mut out.segs, plan::Seg { end: out.matches.len() as u32, tail })?;
                 si += 1;
             }
         }
         at += n;
     }
-    if encoding && (pi != parts_in.len() || segs_in.next().is_some()) {
+    if encoding && (pi != inp.parts.len() || si != inp.segs.len()) {
         return Err(Error("plan beyond the data"));
     }
     Ok(())
 }
 
-fn usual_side() -> Side {
-    Side { freqs: None, lit_start: [0; 4], lmd_start: [0; 3], lit_low: 0, lmd_low: LMD_LOW, pad: vec![], zd: vec![] }
-}
-
-/// Codes what an LZFSE block holds beyond its usual choices, but for its pad and distances of no
-/// match, whose counts are known only once all the blocks are ([`code_fill`]).
-fn code_side(c: &mut impl Coder, ctx: &mut Ctx, side: &mut Side, encoding: bool) -> Result<()> {
+/// Codes what an LZFSE block holds beyond its usual choices (its own frequencies, `want`'s
+/// where encoding, pushed onto `freqs`), but for its pad and distances of no match, whose counts
+/// are known only once all the blocks are ([`code_fill`]).
+fn code_side(
+    c: &mut impl Coder,
+    ctx: &mut Ctx,
+    side: &mut Side,
+    want: Option<&bvx::Freqs>,
+    freqs: &mut Vec<Freqs>,
+    encoding: bool,
+) -> Result<()> {
     if !c.bit(&mut ctx.usual, side.usual(), Cat::Layout) {
-        let has = c.bit(&mut ctx.freqs, side.freqs.is_some(), Cat::Layout);
-        if has {
-            let mut f =
-                side.freqs.take().map_or_else(|| Freqs { l: [0; 20], m: [0; 20], d: [0; 64], lit: [0; 256] }, |f| *f);
+        side.own = c.bit(&mut ctx.freqs, side.own, Cat::Layout);
+        if side.own {
+            let mut f = want.cloned().unwrap_or(Freqs { l: [0; 20], m: [0; 20], d: [0; 64], lit: [0; 256] });
             for v in f.l.iter_mut().chain(&mut f.m).chain(&mut f.d).chain(&mut f.lit) {
                 let x = c.gamma(&mut ctx.value, *v as u32, Cat::Layout)?;
                 *v = u16::try_from(x).map_err(|_| corrupt())?;
             }
-            side.freqs = Some(Box::new(f));
-        } else {
-            side.freqs = None;
+            push(freqs, f)?;
         }
         for (s, n) in side.lit_start.iter_mut().map(|s| (s, 10)).chain(side.lmd_start.iter_mut().map(|s| (s, 10))) {
             *s = c.raw(n, *s, Cat::Layout);
@@ -722,39 +751,73 @@ fn code_side(c: &mut impl Coder, ctx: &mut Ctx, side: &mut Side, encoding: bool)
             return Err(corrupt());
         }
     } else if !encoding {
-        *side = usual_side();
+        *side = Side::USUAL;
     }
     Ok(())
 }
 
-/// Codes the pad and the distances of no match of each LZFSE block of `plan`, once its
-/// triples are known.
-fn code_fill(c: &mut impl Coder, plan: &mut Plan, encoding: bool) -> Result<()> {
+/// Codes the pad and the distances of no match of each LZFSE block of `out` (pushed onto its
+/// `zd`; `want`'s where encoding), once its triples are known.
+fn code_fill(c: &mut impl Coder, want: Option<&Plan>, out: &mut Plan) -> Result<()> {
     let mut ctx_pad = Bit::default();
     let mut ctx_zd = Bit::default();
     let mut zd_bits = [Bit::default(); 64];
-    let shape = plan::shapes(plan)?;
-    for (p, (pad, zd)) in plan.parts.iter_mut().filter(|p| matches!(p, Part::Lzfse(..))).zip(shape) {
-        let Part::Lzfse(_, side) = p else { unreachable!() };
-        if encoding && (side.pad.len() != pad || side.zd.len() != zd) {
-            return Err(Error("side of another shape"));
-        }
-        side.pad.resize(pad, 0);
-        side.zd.resize(zd, 0);
-        for b in side.pad.iter_mut() {
-            if !c.bit(&mut ctx_pad, *b == 0, Cat::Layout) {
-                *b = c.raw(8, *b as u32, Cat::Layout) as u8;
-            } else {
-                *b = 0;
+    let encoding = want.is_some();
+    let mut want_zd = want.map(|p| p.zd.iter());
+    let Plan { parts, segs, matches, zd, .. } = out;
+    let (mut i, mut si) = (0, 0);
+    while i < parts.len() {
+        match parts[i] {
+            Part::Stored(_) => {
+                i += 1;
+                continue;
             }
-        }
-        for d in side.zd.iter_mut() {
-            if !c.bit(&mut ctx_zd, *d == 0, Cat::Layout) {
-                *d = 1 + c.gamma(&mut zd_bits, d.wrapping_sub(1), Cat::Layout)?;
-            } else {
-                *d = 0;
+            Part::Lzvn(_) => {
+                (i, si) = (i + 1, si + 1);
+                continue;
             }
+            Part::Lzfse(..) => {}
         }
+        let start = if si == 0 { 0 } else { segs[si - 1].end as usize };
+        let seg = segs.get(si).ok_or_else(corrupt)?;
+        let mut ts = plan::triples(matches.get(start..seg.end as usize).ok_or_else(corrupt)?, seg.tail);
+        si += 1;
+        while let Some(Part::Lzfse(n, side)) = parts.get_mut(i) {
+            let (mut lits, mut none) = (0, 0);
+            for _ in 0..*n {
+                let t = ts.next().ok_or_else(corrupt)?;
+                lits += t.0 as usize;
+                none += t.2.is_none() as usize;
+            }
+            let npad = (4 - lits % 4) % 4;
+            if encoding && side.npad as usize != npad {
+                return Err(Error("side of another shape"));
+            }
+            side.npad = npad as u8;
+            for b in side.pad[..npad].iter_mut() {
+                if !c.bit(&mut ctx_pad, *b == 0, Cat::Layout) {
+                    *b = c.raw(8, *b as u32, Cat::Layout) as u8;
+                } else {
+                    *b = 0;
+                }
+            }
+            for _ in 0..none {
+                let d = match &mut want_zd {
+                    Some(z) => *z.next().ok_or(Error("side of another shape"))?,
+                    None => 0,
+                };
+                let d = if !c.bit(&mut ctx_zd, d == 0, Cat::Layout) {
+                    1 + c.gamma(&mut zd_bits, d.wrapping_sub(1), Cat::Layout)?
+                } else {
+                    0
+                };
+                push(zd, d)?;
+            }
+            i += 1;
+        }
+    }
+    if want_zd.is_some_and(|mut z| z.next().is_some()) {
+        return Err(Error("side of another shape"));
     }
     Ok(())
 }
@@ -763,6 +826,8 @@ fn code_fill(c: &mut impl Coder, plan: &mut Plan, encoding: bool) -> Result<()> 
 pub struct Split {
     pub data: Vec<u8>,
     pub record: Vec<u8>,
+    /// The plan's counts: the module's params.
+    pub counts: Counts,
     /// Bytes of the stream, up to its end.
     pub used: usize,
     /// Bits of the record by [`Cat`].
@@ -772,9 +837,9 @@ pub struct Split {
 /// The record of `plan` over `data`.
 pub fn record(data: &[u8], plan: &Plan) -> Result<(Vec<u8>, [f64; CATS])> {
     let mut e = Enc::with(ArithEncoder::new(Vec::new()));
-    let mut p = plan.clone();
-    code(&mut e, data, &mut p, true)?;
-    code_fill(&mut e, &mut p, true)?;
+    let mut p = Plan::with_room(&plan.counts()?);
+    code(&mut e, data, Some(plan), &mut p)?;
+    code_fill(&mut e, Some(plan), &mut p)?;
     if p != *plan {
         return Err(Error("plan not coded"));
     }
@@ -786,22 +851,26 @@ pub fn split(s: &[u8], limit: usize) -> Result<Split> {
     let st = bvx::decode(s, limit)?;
     let plan = plan::split(&st, s)?;
     let (record, cost) = record(&st.data, &plan)?;
-    Ok(Split { data: st.data, record, used: st.used, cost })
+    Ok(Split { data: st.data, record, counts: plan.counts()?, used: st.used, cost })
 }
 
-/// The plan that `record` codes over `data`.
-pub fn plan(data: &[u8], record: &[u8]) -> Result<Plan> {
+/// The plan that `record` codes over `data`, of the counts `c`.
+pub fn plan(data: &[u8], record: &[u8], c: &Counts) -> Result<Plan> {
     let mut dec = ArithDecoder::new(record);
-    let mut p = Plan::default();
-    code(&mut dec, data, &mut p, false)?;
-    code_fill(&mut dec, &mut p, false)?;
+    let mut p = Plan::with_room(c);
+    code(&mut dec, data, None, &mut p)?;
+    code_fill(&mut dec, None, &mut p)?;
     if dec.overrun() {
+        return Err(corrupt());
+    }
+    let got = (p.parts.len(), p.segs.len(), p.matches.len(), p.freqs.len(), p.zd.len());
+    if got != (c.parts, c.segs, c.matches, c.freqs, c.zd) {
         return Err(corrupt());
     }
     Ok(p)
 }
 
-/// The stream that `data` and `record` rebuild, appended to `out`.
-pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>) -> Result<()> {
-    plan::join(data, &plan(data, record)?, out)
+/// The stream that `data` and `record` rebuild, of the counts `c`, appended to `out`.
+pub fn join_onto(data: &[u8], record: &[u8], c: &Counts, out: &mut Vec<u8>) -> Result<()> {
+    plan::join(data, &plan(data, record, c)?, c, out)
 }

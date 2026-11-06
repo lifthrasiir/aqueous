@@ -95,8 +95,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "bvx-recons",
-        version: 1,
-        sha512_256: hex("c11d4086cb9068c332d8e37d6c374fba5cf6f57e11b68e983a88c406cedb59ea"),
+        version: 2,
+        sha512_256: hex("c6deda73c8980907590e52dbaf14c87d7b44cc3eb18ad07080f25e13897db9e2"),
         block: include_bytes!("../wasm/bvx-recons.block"),
     },
     Known {
@@ -318,7 +318,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "lzx-recons",
         version: 1,
-        sha512_256: hex("2674b76a2903d2620a9f66ad4401130adbe6cbe3bf3311e13579a8928ad52d6d"),
+        sha512_256: hex("3b8bb70018e13759d301b04912d53548570cb50d5ebf0ab01476e542e9b6b7e0"),
         block: include_bytes!("../wasm/lzx-recons.block"),
     },
     Known {

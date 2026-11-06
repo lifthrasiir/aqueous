@@ -1,7 +1,9 @@
 //! A stream as its data, its parse (the matches) and the little else its blocks hold
 //! (`FORMAT.md` §5): [`split`] and [`join`].
 
-use crate::bvx::{self, Block, D_BASE, Freqs, L_BASE, L_MAX, Lzfse, M_BASE, M_MAX, Stream, symbol};
+use aqr_common::varint;
+
+use crate::bvx::{self, Block, D_BASE, Freqs, L_BASE, L_MAX, Lzfse, LzfseRef, M_BASE, M_MAX, Stream, symbol};
 use crate::fse::normalize;
 use crate::lzvn;
 pub use crate::lzvn::Match;
@@ -9,35 +11,44 @@ use crate::{Error, Result, corrupt};
 
 /// What an LZFSE block holds beyond its triples and literals, which the compressor's usual
 /// choices determine but for these.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Side {
-    /// The frequencies, where they are not those normalized from the counts.
-    pub freqs: Option<Box<Freqs>>,
+    /// Whether its frequencies are its own (the next of the plan's `freqs`), not those normalized
+    /// from the counts.
+    pub own: bool,
     pub lit_start: [u32; 4],
     pub lmd_start: [u32; 3],
     pub lit_low: u32,
     pub lmd_low: u32,
-    /// The literals padding the block's to a multiple of 4.
-    pub pad: Vec<u8>,
-    /// The distance field of each triple of no match, in order.
-    pub zd: Vec<u32>,
+    /// The literals padding the block's to a multiple of 4: the first `npad`.
+    pub pad: [u8; 3],
+    pub npad: u8,
 }
 
 /// The triples' stream's zero bits below its symbols, as the compressor leaves them.
 pub const LMD_LOW: u32 = 64;
 
 impl Side {
-    /// Whether it is what the compressor writes, but for `pad` and `zd`.
+    /// What the compressor writes (but for the pad).
+    pub const USUAL: Side =
+        Side { own: false, lit_start: [0; 4], lmd_start: [0; 3], lit_low: 0, lmd_low: LMD_LOW, pad: [0; 3], npad: 0 };
+
+    /// Whether it is what the compressor writes, but for its pad.
     pub fn usual(&self) -> bool {
-        self.freqs.is_none()
+        !self.own
             && self.lit_start == [0; 4]
             && self.lmd_start == [0; 3]
             && self.lit_low == 0
             && self.lmd_low == LMD_LOW
     }
+
+    /// The pad.
+    pub fn pad(&self) -> &[u8] {
+        &self.pad[..self.npad as usize]
+    }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Part {
     Stored(u32),
     /// An LZVN block of so many bytes of data.
@@ -46,44 +57,142 @@ pub enum Part {
     Lzfse(u32, Side),
 }
 
-/// The parse of a segment: the data of an LZVN block, or of LZFSE blocks one after another.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+/// The parse of a segment (the data of an LZVN block, or of LZFSE blocks one after another):
+/// its matches, those of the plan's up to `end` past the segment's before, then `tail`
+/// literals.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Seg {
-    pub matches: Vec<Match>,
+    pub end: u32,
     pub tail: u32,
 }
 
+/// A stream's plan, its vectors flat (each in the order of the stream).
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Plan {
     pub parts: Vec<Part>,
     /// The parses of the segments in order.
     pub segs: Vec<Seg>,
+    pub matches: Vec<Match>,
+    /// The frequencies of the LZFSE blocks of their own ([`Side::own`]).
+    pub freqs: Vec<Freqs>,
+    /// The distance field of each triple of no match of the LZFSE blocks.
+    pub zd: Vec<u32>,
+}
+
+impl Plan {
+    /// A plan of nothing, of room for exactly `c`'s.
+    pub fn with_room(c: &Counts) -> Plan {
+        Plan {
+            parts: Vec::with_capacity(c.parts),
+            segs: Vec::with_capacity(c.segs),
+            matches: Vec::with_capacity(c.matches),
+            freqs: Vec::with_capacity(c.freqs),
+            zd: Vec::with_capacity(c.zd),
+        }
+    }
+
+    /// The parse of segment `i`: its matches, and its literals after them.
+    pub fn seg(&self, i: usize) -> Result<(&[Match], u32)> {
+        let start = if i == 0 { 0 } else { self.segs.get(i - 1).ok_or_else(corrupt)?.end as usize };
+        let s = self.segs.get(i).ok_or_else(corrupt)?;
+        Ok((self.matches.get(start..s.end as usize).ok_or_else(corrupt)?, s.tail))
+    }
+
+    /// Appends a segment's parse.
+    pub fn push_seg(&mut self, matches: &[Match], tail: u32) {
+        self.matches.extend_from_slice(matches);
+        self.segs.push(Seg { end: self.matches.len() as u32, tail });
+    }
+
+    /// Its counts.
+    pub fn counts(&self) -> Result<Counts> {
+        let (mut lmd, mut lits) = (0, 0);
+        shapes(self, &mut |i, l, _| {
+            let Part::Lzfse(n, side) = self.parts[i] else { unreachable!() };
+            lmd = lmd.max(n as usize);
+            lits = lits.max(l + side.npad as usize);
+            Ok(())
+        })?;
+        Ok(Counts {
+            parts: self.parts.len(),
+            segs: self.segs.len(),
+            matches: self.matches.len(),
+            freqs: self.freqs.len(),
+            zd: self.zd.len(),
+            lmd,
+            lits,
+        })
+    }
+}
+
+/// The lengths of a plan's vectors, and the most triples and literals (with the pad) of its
+/// LZFSE blocks: what the module's params tell (`FORMAT.md` §7).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Counts {
+    pub parts: usize,
+    pub segs: usize,
+    pub matches: usize,
+    pub freqs: usize,
+    pub zd: usize,
+    pub lmd: usize,
+    pub lits: usize,
+}
+
+impl Counts {
+    fn all(&self) -> [usize; 7] {
+        [self.parts, self.segs, self.matches, self.freqs, self.zd, self.lmd, self.lits]
+    }
+
+    /// As params: each a varint.
+    pub fn params(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for v in self.all() {
+            varint::put(&mut out, v as u64);
+        }
+        out
+    }
+
+    /// Of params as [`Counts::params`] writes them.
+    pub fn read(params: &[u8]) -> Result<Counts> {
+        let mut at = 0;
+        let mut v = [0; 7];
+        for x in &mut v {
+            *x = usize::try_from(varint::get(params, &mut at).map_err(|_| corrupt())?).map_err(|_| corrupt())?;
+        }
+        if at != params.len() {
+            return Err(corrupt());
+        }
+        let [parts, segs, matches, freqs, zd, lmd, lits] = v;
+        Ok(Counts { parts, segs, matches, freqs, zd, lmd, lits })
+    }
 }
 
 /// The segments of `parts`: for each, the parts it spans and whether it is LZVN's.
-pub fn segments(parts: &[Part]) -> Vec<(std::ops::Range<usize>, bool)> {
-    let mut out = Vec::new();
+pub fn segments(parts: &[Part]) -> impl Iterator<Item = (std::ops::Range<usize>, bool)> + '_ {
     let mut i = 0;
-    while i < parts.len() {
-        match parts[i] {
-            Part::Stored(_) => i += 1,
-            Part::Lzvn(_) => {
-                out.push((i..i + 1, true));
-                i += 1;
-            }
-            Part::Lzfse(..) => {
-                let j = i + parts[i..].iter().take_while(|p| matches!(p, Part::Lzfse(..))).count();
-                out.push((i..j, false));
-                i = j;
+    std::iter::from_fn(move || {
+        while i < parts.len() {
+            match parts[i] {
+                Part::Stored(_) => i += 1,
+                Part::Lzvn(_) => {
+                    i += 1;
+                    return Some((i - 1..i, true));
+                }
+                Part::Lzfse(..) => {
+                    let j = i + parts[i..].iter().take_while(|p| matches!(p, Part::Lzfse(..))).count();
+                    let r = i..j;
+                    i = j;
+                    return Some((r, false));
+                }
             }
         }
-    }
-    out
+        None
+    })
 }
 
 /// Bytes of data of a segment's parse.
-pub fn seg_len(s: &Seg) -> u64 {
-    s.matches.iter().map(|m| m.lits as u64 + m.len as u64).sum::<u64>() + s.tail as u64
+pub fn seg_len(matches: &[Match], tail: u32) -> u64 {
+    matches.iter().map(|m| m.lits as u64 + m.len as u64).sum::<u64>() + tail as u64
 }
 
 /// The plan of the stream `st`, checked to be written again bit for bit by [`join`] into `s`.
@@ -94,11 +203,12 @@ pub fn split(st: &Stream, s: &[u8]) -> Result<Plan> {
         if let (Part::Lzfse(_, side), Block::Lzfse(b), Block::Lzfse(made)) = (p, b, made)
             && made.freqs != b.freqs
         {
-            side.freqs = Some(Box::new(b.freqs.clone()));
+            side.own = true;
+            plan.freqs.push(b.freqs.clone());
         }
     }
     let mut out = Vec::new();
-    join(&st.data, &plan, &mut out)?;
+    join(&st.data, &plan, &plan.counts()?, &mut out)?;
     if out != s[..st.used] {
         return Err(Error("stream not given back"));
     }
@@ -107,35 +217,33 @@ pub fn split(st: &Stream, s: &[u8]) -> Result<Plan> {
 
 /// The plan that the blocks of `st` read as, the frequencies taken as normalized.
 pub fn read(st: &Stream) -> Result<Plan> {
-    let mut parts = Vec::new();
-    let mut segs = Vec::new();
-    let mut pending: Option<(Seg, u32, bool)> = None; // an LZFSE segment: parse, run, in a match
-    let close = |pending: &mut Option<(Seg, u32, bool)>, segs: &mut Vec<Seg>| {
-        if let Some((mut seg, run, _)) = pending.take() {
-            seg.tail = run;
-            segs.push(seg);
+    let mut plan = Plan::default();
+    // an LZFSE segment: where its matches start, run, in a match
+    let mut pending: Option<(usize, u32, bool)> = None;
+    let close = |pending: &mut Option<(usize, u32, bool)>, plan: &mut Plan| {
+        if let Some((_, run, _)) = pending.take() {
+            plan.segs.push(Seg { end: plan.matches.len() as u32, tail: run });
         }
     };
     let mut at = 0usize;
     for b in &st.blocks {
         match b {
             Block::Stored(n) => {
-                close(&mut pending, &mut segs);
-                parts.push(Part::Stored(*n));
+                close(&mut pending, &mut plan);
+                plan.parts.push(Part::Stored(*n));
                 at += *n as usize;
             }
             Block::Lzvn(n, payload) => {
-                close(&mut pending, &mut segs);
+                close(&mut pending, &mut plan);
                 let mut out = st.data[..at].to_vec();
                 let p = lzvn::parse_onto(payload, &mut out, *n as usize, true)?;
                 let (matches, tail) = lzvn::matches(&p.ops);
-                parts.push(Part::Lzvn(*n));
-                segs.push(Seg { matches, tail });
+                plan.parts.push(Part::Lzvn(*n));
+                plan.push_seg(&matches, tail);
                 at += *n as usize;
             }
             Block::Lzfse(b) => {
-                let (seg, run, joined) = pending.get_or_insert_with(Default::default);
-                let mut zd = Vec::new();
+                let (start, run, joined) = pending.get_or_insert((plan.matches.len(), 0, false));
                 let mut prev = 0;
                 for &[l, m, d] in &b.lmd {
                     if d != 0 {
@@ -143,35 +251,41 @@ pub fn read(st: &Stream) -> Result<Plan> {
                     }
                     *run += l;
                     if m == 0 {
-                        zd.push(d);
+                        plan.zd.push(d);
                         *joined = false;
                         continue;
                     }
-                    match seg.matches.last_mut() {
-                        Some(x) if *joined && *run == 0 && x.dist == prev => x.len += m,
-                        _ => seg.matches.push(Match { lits: *run, len: m, dist: prev }),
+                    let in_seg = plan.matches.len() > *start;
+                    match plan.matches.last_mut() {
+                        Some(x) if in_seg && *joined && *run == 0 && x.dist == prev => x.len += m,
+                        _ => plan.matches.push(Match { lits: *run, len: m, dist: prev }),
                     }
                     *run = 0;
                     // (a match continues only past a triple of the longest match)
                     *joined = m == M_MAX;
                 }
                 let nl: u32 = b.lmd.iter().map(|t| t[0]).sum();
-                let side = Side {
-                    freqs: None,
+                let pad = &b.lits[nl as usize..];
+                if pad.len() > 3 {
+                    return Err(corrupt());
+                }
+                let mut side = Side {
+                    own: false,
                     lit_start: b.lit_start,
                     lmd_start: b.lmd_start,
                     lit_low: b.lit_low,
                     lmd_low: b.lmd_low,
-                    pad: b.lits[nl as usize..].to_vec(),
-                    zd,
+                    pad: [0; 3],
+                    npad: pad.len() as u8,
                 };
-                parts.push(Part::Lzfse(b.lmd.len() as u32, side));
+                side.pad[..pad.len()].copy_from_slice(pad);
+                plan.parts.push(Part::Lzfse(b.lmd.len() as u32, side));
                 at += b.lmd.iter().map(|t| (t[0] + t[1]) as usize).sum::<usize>();
             }
         }
     }
-    close(&mut pending, &mut segs);
-    Ok(Plan { parts, segs })
+    close(&mut pending, &mut plan);
+    Ok(plan)
 }
 
 /// A triple of an LZFSE block: literals, match length and distance (absolute; `None` for one
@@ -179,7 +293,7 @@ pub fn read(st: &Stream) -> Result<Plan> {
 pub type Triple = (u32, u32, Option<u32>);
 
 /// The triples of a segment's parse, as the compressor cuts runs of literals and matches.
-pub fn triples(seg: &Seg) -> impl Iterator<Item = Triple> + '_ {
+pub fn triples(matches: &[Match], tail: u32) -> impl Iterator<Item = Triple> + '_ {
     let pieces = |(r, n, d): Triple| {
         // runs of the longest literals first, the rest with the match (or alone)
         let k = r.saturating_sub(1) / L_MAX;
@@ -189,98 +303,173 @@ pub fn triples(seg: &Seg) -> impl Iterator<Item = Triple> + '_ {
             (0..n.div_ceil(M_MAX)).map(move |i| (if i == 0 { rem } else { 0 }, (n - i * M_MAX).min(M_MAX), d));
         lits.chain(matches).chain((n == 0 && rem > 0).then_some((rem, 0, None)))
     };
-    seg.matches.iter().map(|m| (m.lits, m.len, Some(m.dist))).chain([(seg.tail, 0, None)]).flat_map(pieces)
+    matches.iter().map(|m| (m.lits, m.len, Some(m.dist))).chain([(tail, 0, None)]).flat_map(pieces)
 }
 
-/// The blocks of `plan` over `data` (the frequencies of LZFSE blocks those of their `Side`, or
-/// normalized).
+/// For each LZFSE block of `plan` in order, `f` of its part's index, its literals (but its pad)
+/// and its triples of no match.
+pub fn shapes(plan: &Plan, f: &mut dyn FnMut(usize, usize, usize) -> Result<()>) -> Result<()> {
+    for (si, (range, lzvn)) in segments(&plan.parts).enumerate() {
+        if lzvn {
+            continue;
+        }
+        let (ms, tail) = plan.seg(si)?;
+        let mut ts = triples(ms, tail);
+        for i in range {
+            let Part::Lzfse(n, _) = plan.parts[i] else { unreachable!() };
+            let (mut lits, mut none) = (0, 0);
+            for _ in 0..n {
+                let t = ts.next().ok_or_else(corrupt)?;
+                lits += t.0 as usize;
+                none += t.2.is_none() as usize;
+            }
+            f(i, lits, none)?;
+        }
+    }
+    Ok(())
+}
+
+/// A block of a plan as [`each_block`] gives it.
+pub enum View<'a> {
+    Stored(u32),
+    /// An LZVN block: its bytes of data, and its segment's parse.
+    Lzvn(u32, &'a [Match], u32),
+    Lzfse(LzfseRef<'a>),
+}
+
+/// The blocks of `plan` over `data` (the frequencies of LZFSE blocks their own, or normalized).
 pub fn blocks(data: &[u8], plan: &Plan) -> Result<Vec<Block>> {
     let mut out = Vec::with_capacity(plan.parts.len());
-    each_block(data, plan, &mut |b, _| {
-        out.push(b);
+    each_block(data, plan, &plan.counts()?, &mut |b, at| {
+        out.push(match b {
+            View::Stored(n) => Block::Stored(n),
+            View::Lzvn(n, ms, tail) => {
+                let mut payload = Vec::new();
+                lzvn::write(&data[at..at + n as usize], ms, tail, &mut payload)?;
+                Block::Lzvn(n, payload)
+            }
+            View::Lzfse(b) => Block::Lzfse(Box::new(Lzfse {
+                lits: b.lits.to_vec(),
+                lmd: b.lmd.to_vec(),
+                freqs: b.freqs.clone(),
+                lit_start: b.lit_start,
+                lmd_start: b.lmd_start,
+                lit_low: b.lit_low,
+                lmd_low: b.lmd_low,
+            })),
+        });
         Ok(())
     })?;
     Ok(out)
 }
 
-/// The blocks of `plan` over `data` given to `f` in turn, each with where its data starts.
-pub fn each_block(data: &[u8], plan: &Plan, f: &mut dyn FnMut(Block, usize) -> Result<()>) -> Result<()> {
+/// Bytes that [`each_block`] takes of the heap for the counts `c`: an LZFSE block's triples and
+/// literals.
+pub fn each_block_heap(c: &Counts) -> [u64; 2] {
+    [12 * c.lmd as u64, c.lits as u64]
+}
+
+/// The blocks of `plan` over `data` given to `f` in turn, each with where its data starts. The
+/// LZFSE blocks' triples and literals must be at most `c`'s, and the most of them exactly.
+pub fn each_block(
+    data: &[u8],
+    plan: &Plan,
+    c: &Counts,
+    f: &mut dyn FnMut(View<'_>, usize) -> Result<()>,
+) -> Result<()> {
+    let mut lmd: Vec<[u32; 3]> = Vec::with_capacity(c.lmd);
+    let mut lits: Vec<u8> = Vec::with_capacity(c.lits);
+    let (mut most_lmd, mut most_lits) = (0, 0);
+    let (mut zd, mut freqs) = (plan.zd.iter(), plan.freqs.iter());
     let mut done = 0;
     let mut at = 0usize;
-    let mut segs = plan.segs.iter();
-    for (range, lzvn) in segments(&plan.parts).into_iter().chain([(plan.parts.len()..plan.parts.len(), false)]) {
+    let end = plan.parts.len();
+    for (si, (range, lzvn)) in segments(&plan.parts).chain([(end..end, false)]).enumerate() {
         // the stored blocks before the segment
         while done < range.start {
             let Part::Stored(n) = plan.parts[done] else { unreachable!() };
             data.get(at..at + n as usize).ok_or_else(corrupt)?;
-            f(Block::Stored(n), at)?;
+            f(View::Stored(n), at)?;
             done += 1;
             at += n as usize;
         }
         if range.is_empty() {
-            break;
-        }
-        let seg = segs.next().ok_or_else(corrupt)?;
-        if lzvn {
-            let Part::Lzvn(n) = plan.parts[range.start] else { unreachable!() };
-            let d = data.get(at..at + n as usize).ok_or_else(corrupt)?;
-            if seg_len(seg) != n as u64 {
+            if si != plan.segs.len() {
                 return Err(corrupt());
             }
-            let mut payload = Vec::new();
-            lzvn::write(d, &lzvn::ops(&seg.matches, seg.tail), &mut payload)?;
-            f(Block::Lzvn(n, payload), at)?;
+            break;
+        }
+        let (ms, tail) = plan.seg(si)?;
+        if lzvn {
+            let Part::Lzvn(n) = plan.parts[range.start] else { unreachable!() };
+            data.get(at..at + n as usize).ok_or_else(corrupt)?;
+            if seg_len(ms, tail) != n as u64 {
+                return Err(corrupt());
+            }
+            f(View::Lzvn(n, ms, tail), at)?;
             done += 1;
             at += n as usize;
             continue;
         }
-        let mut ts = triples(seg);
+        let mut ts = triples(ms, tail);
         for p in &plan.parts[range.clone()] {
             let Part::Lzfse(n, side) = p else { unreachable!() };
             let n = *n as usize;
+            if n > c.lmd {
+                return Err(corrupt());
+            }
             let start = at;
-            let mut lmd = Vec::with_capacity(n);
-            let mut lits = Vec::new();
-            let (mut prev, mut z) = (0, side.zd.iter());
+            lmd.clear();
+            lits.clear();
+            let mut prev = 0;
             for _ in 0..n {
                 let (l, m, d) = ts.next().ok_or_else(corrupt)?;
                 let d = match d {
                     Some(d) if d == prev => 0,
                     Some(d) => d,
-                    None => *z.next().ok_or_else(corrupt)?,
+                    None => *zd.next().ok_or_else(corrupt)?,
                 };
                 if d != 0 {
                     prev = d;
                 }
-                lits.extend_from_slice(data.get(at..at + l as usize).ok_or_else(corrupt)?);
-                at += (l + m) as usize;
-                lmd.push([l, m, d]);
+                let l = data.get(at..at + l as usize).ok_or_else(corrupt)?;
+                if l.len() > c.lits - lits.len() {
+                    return Err(corrupt());
+                }
+                lits.extend_from_slice(l);
+                at += l.len() + m as usize;
+                lmd.push([l.len() as u32, m, d]);
             }
-            if z.next().is_some() || side.pad.len() > 3 || (lits.len() + side.pad.len()) % 4 != 0 {
+            let pad = side.pad();
+            if pad.len() > 3 || !(lits.len() + pad.len()).is_multiple_of(4) || pad.len() > c.lits - lits.len() {
                 return Err(corrupt());
             }
-            lits.extend_from_slice(&side.pad);
-            let freqs = match &side.freqs {
-                Some(f) => (**f).clone(),
-                None => counted(&lits, &lmd),
+            lits.extend_from_slice(pad);
+            (most_lmd, most_lits) = (most_lmd.max(n), most_lits.max(lits.len()));
+            let counted;
+            let freqs = if side.own {
+                freqs.next().ok_or_else(corrupt)?
+            } else {
+                counted = self::counted(&lits, &lmd);
+                &counted
             };
-            let b = Lzfse {
-                lits,
-                lmd,
+            let b = LzfseRef {
+                lits: &lits,
+                lmd: &lmd,
                 freqs,
                 lit_start: side.lit_start,
                 lmd_start: side.lmd_start,
                 lit_low: side.lit_low,
                 lmd_low: side.lmd_low,
             };
-            f(Block::Lzfse(Box::new(b)), start)?;
+            f(View::Lzfse(b), start)?;
             done += 1;
         }
         if ts.next().is_some() {
             return Err(corrupt());
         }
     }
-    if at != data.len() || segs.next().is_some() {
+    if at != data.len() || zd.next().is_some() || freqs.next().is_some() || (most_lmd, most_lits) != (c.lmd, c.lits) {
         return Err(corrupt());
     }
     Ok(())
@@ -310,34 +499,18 @@ fn counted(lits: &[u8], lmd: &[[u32; 3]]) -> Freqs {
     f
 }
 
-/// Writes the stream of `plan` over `data` onto `out`.
-pub fn join(data: &[u8], plan: &Plan, out: &mut Vec<u8>) -> Result<()> {
-    each_block(data, plan, &mut |b, at| bvx::write_block(&data[at..], &b, out))?;
+/// Writes the stream of `plan` over `data` onto `out`, of the counts `c` (as [`each_block`]).
+pub fn join(data: &[u8], plan: &Plan, c: &Counts, out: &mut Vec<u8>) -> Result<()> {
+    each_block(data, plan, c, &mut |b, at| match b {
+        View::Stored(n) => {
+            bvx::write_stored(&data[at..at + n as usize], out);
+            Ok(())
+        }
+        View::Lzvn(n, ms, tail) => {
+            bvx::write_lzvn(n, out, |out| lzvn::write(&data[at..at + n as usize], ms, tail, out))
+        }
+        View::Lzfse(b) => bvx::write_v2(&b, out),
+    })?;
     out.extend_from_slice(&bvx::END);
     Ok(())
-}
-
-/// The shape of each LZFSE block of `plan`: the literals padding its own to a multiple of 4,
-/// and its triples of no match.
-pub fn shapes(plan: &Plan) -> Result<Vec<(usize, usize)>> {
-    let mut out = Vec::new();
-    let mut segs = plan.segs.iter();
-    for (range, lzvn) in segments(&plan.parts) {
-        let seg = segs.next().ok_or_else(corrupt)?;
-        if lzvn {
-            continue;
-        }
-        let mut ts = triples(seg);
-        for p in &plan.parts[range] {
-            let Part::Lzfse(n, _) = p else { unreachable!() };
-            let (mut lits, mut none) = (0, 0);
-            for _ in 0..*n {
-                let t = ts.next().ok_or_else(corrupt)?;
-                lits += t.0 as usize;
-                none += t.2.is_none() as usize;
-            }
-            out.push(((4 - lits % 4) % 4, none));
-        }
-    }
-    Ok(out)
 }

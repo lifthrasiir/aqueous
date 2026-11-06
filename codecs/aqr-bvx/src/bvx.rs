@@ -88,6 +88,32 @@ pub struct Lzfse {
     pub lmd_low: u32,
 }
 
+impl Lzfse {
+    pub fn view(&self) -> LzfseRef<'_> {
+        LzfseRef {
+            lits: &self.lits,
+            lmd: &self.lmd,
+            freqs: &self.freqs,
+            lit_start: self.lit_start,
+            lmd_start: self.lmd_start,
+            lit_low: self.lit_low,
+            lmd_low: self.lmd_low,
+        }
+    }
+}
+
+/// An LZFSE block to write, as [`Lzfse`] but borrowed.
+#[derive(Clone, Copy)]
+pub struct LzfseRef<'a> {
+    pub lits: &'a [u8],
+    pub lmd: &'a [[u32; 3]],
+    pub freqs: &'a Freqs,
+    pub lit_start: [u32; 4],
+    pub lmd_start: [u32; 3],
+    pub lit_low: u32,
+    pub lmd_low: u32,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Block {
     /// So many bytes of data stored.
@@ -320,35 +346,65 @@ pub fn write(data: &[u8], blocks: &[Block], out: &mut Vec<u8>) -> Result<()> {
 /// Writes a block whose data starts `data` (which a stored block takes its bytes from).
 pub fn write_block(data: &[u8], b: &Block, out: &mut Vec<u8>) -> Result<()> {
     match b {
-        Block::Stored(n) => {
-            let d = data.get(..*n as usize).ok_or_else(corrupt)?;
-            out.extend_from_slice(&STORED);
-            out.extend_from_slice(&n.to_le_bytes());
-            out.extend_from_slice(d);
-        }
+        Block::Stored(n) => write_stored(data.get(..*n as usize).ok_or_else(corrupt)?, out),
         Block::Lzvn(n, payload) => {
             out.extend_from_slice(&LZVN);
             out.extend_from_slice(&n.to_le_bytes());
             out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
             out.extend_from_slice(payload);
         }
-        Block::Lzfse(b) => write_v2(b, out)?,
+        Block::Lzfse(b) => write_v2(&b.view(), out)?,
     }
     Ok(())
 }
 
-/// Writes an LZFSE block.
-pub fn write_v2(b: &Lzfse, out: &mut Vec<u8>) -> Result<()> {
-    let f = &b.freqs;
-    let lit_t = Table::new(&f.lit, LIT_STATES)?;
-    let l_t = Table::new(&f.l, L_STATES)?;
-    let m_t = Table::new(&f.m, M_STATES)?;
-    let d_t = Table::new(&f.d, D_STATES)?;
+/// Writes a stored block of `d` (of fewer than 2^32 bytes).
+pub fn write_stored(d: &[u8], out: &mut Vec<u8>) {
+    out.extend_from_slice(&STORED);
+    out.extend_from_slice(&(d.len() as u32).to_le_bytes());
+    out.extend_from_slice(d);
+}
+
+/// Writes an LZVN block of `n` bytes of data, its payload written onto `out` by `payload`.
+pub fn write_lzvn(n: u32, out: &mut Vec<u8>, payload: impl FnOnce(&mut Vec<u8>) -> Result<()>) -> Result<()> {
+    out.extend_from_slice(&LZVN);
+    out.extend_from_slice(&n.to_le_bytes());
+    let at = out.len();
+    out.extend_from_slice(&[0; 4]);
+    payload(out)?;
+    let m = u32::try_from(out.len() - at - 4).map_err(|_| corrupt())?;
+    out[at..at + 4].copy_from_slice(&m.to_le_bytes());
+    Ok(())
+}
+
+/// Bytes that [`write_v2`] takes of the heap: its tables (on WebAssembly, of 16 bytes for each
+/// symbol).
+pub const WRITE_V2_HEAP: [u64; 4] = [16 * LIT_SYMS as u64, 16 * L_SYMS as u64, 16 * M_SYMS as u64, 16 * D_SYMS as u64];
+
+/// Writes an LZFSE block, its streams written in place.
+pub fn write_v2(b: &LzfseRef<'_>, out: &mut Vec<u8>) -> Result<()> {
+    let f = b.freqs;
+    let lit_t = Table::encoding(&f.lit, LIT_STATES)?;
+    let l_t = Table::encoding(&f.l, L_STATES)?;
+    let m_t = Table::encoding(&f.m, M_STATES)?;
+    let d_t = Table::encoding(&f.d, D_STATES)?;
     if !b.lits.len().is_multiple_of(4) || b.lits.len() >= 1 << 20 || b.lmd.len() >= 1 << 20 {
         return Err(corrupt());
     }
+    let n_raw = b.lmd.iter().try_fold(0u32, |n, t| n.checked_add(t[0])?.checked_add(t[1])).ok_or_else(corrupt)?;
+    let head = out.len();
+    out.extend_from_slice(&V2);
+    out.extend_from_slice(&n_raw.to_le_bytes());
+    out.extend_from_slice(&[0; 24]);
 
-    let mut w = fse::Writer::default();
+    let mut h = fse::Writer::new(out);
+    for v in f.all() {
+        let (c, n) = fse::freq_code(v as u32);
+        h.put(c, n);
+    }
+    let (h, _) = h.finish();
+
+    let mut w = fse::Writer::new(out);
     zeros(&mut w, b.lit_low);
     let mut x = b.lit_start;
     for (i, &c) in b.lits.iter().enumerate().rev() {
@@ -361,7 +417,7 @@ pub fn write_v2(b: &Lzfse, out: &mut Vec<u8>) -> Result<()> {
     }
     let (lit_s, lit_unused) = w.finish();
 
-    let mut w = fse::Writer::default();
+    let mut w = fse::Writer::new(out);
     zeros(&mut w, b.lmd_low);
     let mut y = b.lmd_start;
     let tables = [
@@ -385,38 +441,25 @@ pub fn write_v2(b: &Lzfse, out: &mut Vec<u8>) -> Result<()> {
     }
     let (lmd_s, lmd_unused) = w.finish();
 
-    let mut h = fse::Writer::default();
-    for v in f.all() {
-        let (c, n) = fse::freq_code(v as u32);
-        h.put(c, n);
-    }
-    let (h, _) = h.finish();
-    let n_raw: u32 = b.lmd.iter().map(|t| t[0] + t[1]).sum();
-    let header = 32 + h.len() as u64;
-    let f0 =
-        b.lits.len() as u64 | (lit_s.len() as u64) << 20 | (b.lmd.len() as u64) << 40 | ((7 - lit_unused) as u64) << 60;
+    let header = 32 + h as u64;
+    let f0 = b.lits.len() as u64 | (lit_s as u64) << 20 | (b.lmd.len() as u64) << 40 | ((7 - lit_unused) as u64) << 60;
     let f1 = x[0] as u64
         | (x[1] as u64) << 10
         | (x[2] as u64) << 20
         | (x[3] as u64) << 30
-        | (lmd_s.len() as u64) << 40
+        | (lmd_s as u64) << 40
         | ((7 - lmd_unused) as u64) << 60;
     let f2 = header | (y[0] as u64) << 32 | (y[1] as u64) << 42 | (y[2] as u64) << 52;
-    if lit_s.len() >= 1 << 20 || lmd_s.len() >= 1 << 20 {
+    if lit_s >= 1 << 20 || lmd_s >= 1 << 20 {
         return Err(corrupt());
     }
-    out.extend_from_slice(&V2);
-    out.extend_from_slice(&n_raw.to_le_bytes());
-    for f in [f0, f1, f2] {
-        out.extend_from_slice(&f.to_le_bytes());
+    for (i, f) in [f0, f1, f2].into_iter().enumerate() {
+        out[head + 8 + 8 * i..][..8].copy_from_slice(&f.to_le_bytes());
     }
-    out.extend_from_slice(&h);
-    out.extend_from_slice(&lit_s);
-    out.extend_from_slice(&lmd_s);
     Ok(())
 }
 
-fn zeros(w: &mut fse::Writer, mut n: u32) {
+fn zeros(w: &mut fse::Writer<'_>, mut n: u32) {
     while n > 0 {
         let k = n.min(32);
         w.put(0, k);
