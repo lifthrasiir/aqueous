@@ -1139,15 +1139,21 @@ impl Drop for Joined<'_, '_, '_> {
 }
 
 /// The content hashes of the outputs of program `p` (each with the checksums Checksum
-/// instructions take of it), worked out without running a module: of literals and slices by
-/// their bytes, of concatenations, packed byte sequences and splits by those of their items,
-/// and of applications by `records` (of their modules as `identify` tells them, of the hashes
-/// of their inputs). None where any is not told so (an application not recorded, a patch, a
-/// value but an output of a checksum).
+/// instructions take of it), running a module only where they are not told otherwise: of
+/// literals and slices by their bytes (the blocks decoded a few at a time, each once), of
+/// concatenations, packed byte sequences and splits by those of their items, and of applications
+/// by `records` (of their modules as `identify` tells them, of the hashes of their inputs). A
+/// value whose hash is not told so, but is needed (an input of an application, an output), is
+/// evaluated (the blocks it slices decoded again, of `raw`), its hash made as it is pulled, and
+/// an application evaluated so told to `records` ([`Records::learn`]). None where a value but an
+/// output has a checksum.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn hashed(
     p: &Program,
     env: &Env,
     contents: &Contents,
+    raw: &[(&[u8], bool, Option<usize>)],
+    dictionaries: &[dict::Dictionary],
     records: &dyn Records,
     identify: &dyn Fn(&[u8]) -> Option<String>,
     threads: usize,
@@ -1186,55 +1192,185 @@ pub(super) fn hashed(
     for h in hashes {
         sliced.extend(h?);
     }
+    // what the hashes do not tell, evaluated as decoding does (the blocks decoded again)
+    let resources =
+        |a: &Apply| -> Vec<Resource> { a.resources.iter().map(|&i| env.resources[p.resources[i]].clone()).collect() };
+    let loaded = |a: &Apply| {
+        let m = p.modules[a.module];
+        env.loaded[m].get_or_init(|| env.runner.load(&env.modules[m])).as_ref().map_err(Failure::clone)
+    };
+    let apply = |a: Ap<'_, '_>, inputs: &[&[u8]]| {
+        let a = block(a);
+        super::apply(env, p.modules[a.module], a, inputs, &resources(a))
+    };
+    let part = |a: Ap<'_, '_>| loaded(block(a)).is_ok_and(|l| l.is_part());
+    let apply_part = |a: Ap<'_, '_>, ins: &mut [&mut dyn PartIn], outs: &mut [&mut dyn PartOut]| {
+        let a = block(a);
+        loaded(a)?.apply_part(a.params, &resources(a), ins, outs, &a.output_sizes, a.memory_limit)
+    };
+    let fresh = Fresh { raw, dictionaries, cache: Mutex::default() };
+    let running = Threads::default();
+    let ev = Eval {
+        g: &g,
+        apply: &apply,
+        part: &part,
+        apply_part: &apply_part,
+        blocks: &fresh,
+        fans: (0..g.fans).map(|_| Mutex::new(Fan::Idle)).collect(),
+        threads: &running,
+    };
+    let _joined = Joined(&ev);
     let names: Vec<Option<String>> = p.modules.iter().map(|&m| identify(&env.modules[m])).collect();
-    let whole = |pieces: &[Ch]| pieces.iter().fold(Ch::EMPTY, |h, &c| h.cat(c));
-    // (of each node, the pieces of each output's hash)
-    let mut vals: Vec<Option<Vec<Vec<Ch>>>> = Vec::with_capacity(g.ops.len());
-    for op in &g.ops {
-        let get = |v: Val| vals[v.node].as_ref().map(|o| &o[v.out]);
-        let made: Option<Vec<Vec<Ch>>> = match *op {
-            Op::Literal(l) => Some(vec![vec![Ch::of(l)]]),
-            Op::Slice { .. } => Some(vec![vec![sliced[&vals.len()]]]),
+    let key = |a: &Apply, ins: &[Ch]| -> Option<u128> {
+        let name = names[a.module].as_deref()?;
+        let res: Vec<Ch> = a.resources.iter().map(|&i| Ch::of(&env.resources[p.resources[i]])).collect();
+        Some(record_key(name, a.params, &res, ins, &a.output_sizes))
+    };
+    let mut h = Hashing { at: At { ev: &ev, ahead: None }, vals: Vec::with_capacity(g.ops.len()), records, key: &key };
+    for (n, op) in g.ops.iter().enumerate() {
+        let outs = match *op {
+            Op::Apply(_, _, Some(_)) | Op::Split(..) => g.out_count(n),
+            _ => 1,
+        };
+        let get = |vals: &[Vec<Option<Vec<Ch>>>], v: Val| vals[v.node][v.out].clone();
+        let made: Vec<Option<Vec<Ch>>> = match *op {
+            Op::Literal(l) => vec![Some(vec![Ch::of(l)])],
+            Op::Slice { .. } => vec![Some(vec![sliced[&n]])],
+            Op::Absent | Op::Patch(..) => vec![None],
             Op::Concat(ref items) => {
-                items.iter().map(|&v| get(v).cloned()).collect::<Option<Vec<_>>>().map(|p| vec![p.concat()])
+                vec![items.iter().map(|&v| get(&h.vals, v)).collect::<Option<Vec<_>>>().map(|p| p.concat())]
             }
             Op::Pack(ref items) => {
-                let mut h = Vec::new();
-                packed::put_header(&mut h, items.iter().map(|&v| g.len(v)));
-                let items = items.iter().map(|&v| get(v).cloned()).collect::<Option<Vec<_>>>();
-                items.map(|p| vec![[vec![Ch::of(&h)], p.concat()].concat()])
+                let mut head = Vec::new();
+                packed::put_header(&mut head, items.iter().map(|&v| g.len(v)));
+                let items = items.iter().map(|&v| get(&h.vals, v)).collect::<Option<Vec<_>>>();
+                vec![items.map(|p| [vec![Ch::of(&head)], p.concat()].concat())]
             }
-            Op::Split(x, sizes, _) => get(x).and_then(|p| cut(p, sizes)),
-            Op::Patch(..) | Op::Absent => None,
-            Op::Apply(Ap::One(_) | Ap::Shared(_), ..) => None,
+            Op::Split(x, sizes, _) => match get(&h.vals, x).and_then(|p| cut(&p, sizes)) {
+                Some(pieces) => pieces.into_iter().map(Some).collect(),
+                None => vec![None; outs],
+            },
+            Op::Apply(Ap::One(_) | Ap::Shared(_), ..) => vec![None; outs],
             Op::Apply(Ap::Block(a), ref inputs, fan) => {
-                let ins = inputs.iter().map(|&v| get(v).map(|p| whole(p))).collect::<Option<Vec<Ch>>>();
-                match (ins, &names[a.module]) {
-                    (Some(ins), Some(name)) => {
-                        let res: Vec<Ch> =
-                            a.resources.iter().map(|&i| Ch::of(&env.resources[p.resources[i]])).collect();
-                        let key = record_key(name, a.params, &res, &ins, &a.output_sizes);
-                        records.outputs(key).and_then(|pieces| match fan {
-                            // (of several outputs: a piece each)
-                            Some(_) => (pieces.len() == a.output_sizes.len()
-                                && pieces.iter().zip(&a.output_sizes).all(|(c, &n)| c.len() == n))
-                            .then(|| pieces.into_iter().map(|c| vec![c]).collect()),
-                            None => (whole(&pieces).len() == a.output_sizes[0]).then(|| vec![pieces]),
-                        })
+                h.vals.push(vec![None; outs]);
+                // (the inputs' hashes, made where they are not told)
+                let mut ins = Vec::with_capacity(inputs.len());
+                for &v in inputs {
+                    ins.push(h.need(v)?);
+                }
+                h.vals.pop();
+                let told = key(a, &ins).and_then(|k| records.outputs(k));
+                match (told, fan) {
+                    (Some(pieces), Some(_))
+                        if pieces.len() == outs && pieces.iter().zip(&a.output_sizes).all(|(c, &n)| c.len() == n) =>
+                    {
+                        pieces.into_iter().map(|c| Some(vec![c])).collect()
                     }
-                    _ => None,
+                    (Some(pieces), None) if joined(&pieces).len() == a.output_sizes[0] => vec![Some(pieces)],
+                    _ => vec![None; outs],
                 }
             }
         };
-        let Some(made) = made else { return Ok(None) };
-        vals.push(Some(made));
+        h.vals.push(made);
     }
-    Ok(Some(
-        g.roots
-            .iter()
-            .map(|r| (whole(&vals[r.node].as_ref().expect("made")[r.out]), g.sums.get(r).cloned().unwrap_or_default()))
-            .collect(),
-    ))
+    let roots = g.roots.iter().map(|&r| Ok((h.need(r)?, g.sums.get(&r).cloned().unwrap_or_default())));
+    roots.collect::<Decoded<Vec<_>>>().map(Some)
+}
+
+/// The hash of pieces of hashes put together.
+fn joined(pieces: &[Ch]) -> Ch {
+    pieces.iter().fold(Ch::EMPTY, |h, &c| h.cat(c))
+}
+
+impl Graph<'_, '_> {
+    /// The outputs of node `n`.
+    fn out_count(&self, n: usize) -> usize {
+        match self.ops[n] {
+            Op::Apply(a, _, Some(_)) => a.sizes().len(),
+            Op::Split(_, sizes, _) => sizes.len(),
+            _ => 1,
+        }
+    }
+}
+
+/// The hashes of the values of a graph as they are known ([`hashed`]): each node's outputs' (as
+/// pieces), those not told none, and how they are evaluated where they are needed.
+struct Hashing<'r, 'e, 'a> {
+    at: At<'r, 'e, 'a>,
+    vals: Vec<Vec<Option<Vec<Ch>>>>,
+    records: &'r dyn Records,
+    key: &'r dyn Fn(&Apply, &[Ch]) -> Option<u128>,
+}
+
+impl Hashing<'_, '_, '_> {
+    /// The hash of value `v` (of a node told already), evaluated where it is not told: a
+    /// concatenation or a packed byte sequence by its items, an application of a single output
+    /// by its inputs' hashes and its output (told to the records), anything else by its bytes.
+    fn need(&mut self, v: Val) -> Decoded<Ch> {
+        if let Some(p) = &self.vals[v.node][v.out] {
+            return Ok(joined(p));
+        }
+        let g = self.at.ev.g;
+        let h = match g.ops[v.node] {
+            Op::Concat(ref items) => {
+                items.iter().try_fold(Ch::EMPTY, |h, &c| Ok::<_, Failure>(h.cat(self.need(c)?)))?
+            }
+            Op::Pack(ref items) => {
+                let mut head = Vec::new();
+                packed::put_header(&mut head, items.iter().map(|&v| g.len(v)));
+                items.iter().try_fold(Ch::of(&head), |h, &c| Ok::<_, Failure>(h.cat(self.need(c)?)))?
+            }
+            Op::Apply(Ap::Block(a), ref inputs, None) => {
+                let ins = inputs.iter().map(|&i| self.need(i)).collect::<Decoded<Vec<Ch>>>()?;
+                let out = self.stream(v)?;
+                if let Some(k) = (self.key)(a, &ins) {
+                    self.records.learn(k, &[out]);
+                }
+                out
+            }
+            _ => self.stream(v)?,
+        };
+        self.vals[v.node][v.out] = Some(vec![h]);
+        Ok(h)
+    }
+
+    /// The hash of value `v`, evaluated, as it is pulled.
+    fn stream(&self, v: Val) -> Decoded<Ch> {
+        let mut s = self.at.ev.source(v);
+        let mut h = Ch::EMPTY;
+        while let Some(c) = s.next(self.at)? {
+            h = h.then(&c);
+        }
+        Ok(h)
+    }
+}
+
+/// The non-leaf blocks of an archive decoded as they are asked for, again where they were let go
+/// of: `raw` (data as stored, whether of Zstandard, and of a dictionary), the last few kept.
+struct Fresh<'c> {
+    raw: &'c [(&'c [u8], bool, Option<usize>)],
+    dictionaries: &'c [dict::Dictionary],
+    cache: Mutex<VecDeque<(usize, Arc<Vec<u8>>)>>,
+}
+
+impl Blocks for Fresh<'_> {
+    fn block(&self, o: usize) -> Decoded<Arc<Vec<u8>>> {
+        if let Some((_, d)) = self.cache.lock().unwrap().iter().find(|(b, _)| *b == o) {
+            return Ok(d.clone());
+        }
+        let (d, zstd, dict) = self.raw[o];
+        let d = Arc::new(decoded_with(d, zstd, true, dict.map(|d| &self.dictionaries[d]))?);
+        let mut cache = self.cache.lock().unwrap();
+        if cache.len() > AHEAD_BLOCKS {
+            cache.pop_front();
+        }
+        cache.push_back((o, d.clone()));
+        Ok(d)
+    }
+
+    fn release(&self, _: usize) {}
+
+    fn add(&self, _: usize, _: usize) {}
 }
 
 /// The pieces of hashes `pieces` cut into `sizes`, where they are cut there.

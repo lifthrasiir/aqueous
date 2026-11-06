@@ -3808,8 +3808,8 @@ mod tests {
     }
 
     /// The formulas recompressors make are evaluated beforehand: the archive is verified by the
-    /// hashes recorded, without running a module (not of a file it is not, nor without the
-    /// records); decoding it takes the applications recorded as the file's from the file, and
+    /// hashes recorded (not as a file it is not; without the records, by evaluating what they do
+    /// not tell); decoding it takes the applications recorded as the file's from the file, and
     /// runs the module where they are not there.
     #[test]
     fn verified_beforehand() {
@@ -3830,7 +3830,8 @@ mod tests {
         let mut other = d.clone();
         other[1000] ^= 1;
         assert_eq!(hashed(&c, &other, &memo, &opt), Some(false));
-        assert_eq!(hashed(&c, &d, &Default::default(), &opt), None);
+        // (without the records: evaluated where they do not tell)
+        assert_eq!(hashed(&c, &d, &Default::default(), &opt), Some(true));
         let memo = memo.into_inner();
         let decode = |c: &[u8], memo: verify::Memo| {
             let files = |_: usize, range: Range<usize>| d.get(range).map(<[u8]>::to_vec);
@@ -3850,6 +3851,26 @@ mod tests {
         assert_eq!(decode(&c, memo), (Ok(d.clone()), f.applies().len()));
         // without the memo, the same, with the modules run
         assert_eq!(decode(&c, Default::default()), (Ok(d.clone()), 0));
+    }
+
+    /// The records of applications of large outputs hold for other batches and archives: one
+    /// whose formula is evaluated once though it is in several (`enwik9` and the entry of
+    /// `enwik9.zip` in another batch) is verified by its hashes there too, not decoded.
+    #[test]
+    fn large_records_for_others() {
+        let text = unruled(3_000_000);
+        let mut z = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(6));
+        std::io::Write::write_all(&mut z, &text).unwrap();
+        let d = z.finish().unwrap();
+        let opt = Options { smaller: false, ..Options::default() };
+        let mut cx = Cx::new(&d, &opt);
+        cx.pre = Some(Arc::new(verify::Prevalidator::spawn(2, &[&d])));
+        let f = recompress_at(&d, &opt, 0, Kind::Unknown, &cx);
+        drop(verify::Prevalidator::finish_shared(cx.pre.take().unwrap()));
+        assert!(!f.applies().is_empty());
+        let c = cx.enc.encode(&f, Some(aqr::checksum(&d))).unwrap();
+        // (the memo of the batch it was evaluated in gone)
+        assert_eq!(hashed(&c, &d, &Default::default(), &opt), Some(true));
     }
 
     /// A module run whose output is a whole file is run once: the same application again takes

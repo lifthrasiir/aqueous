@@ -1903,7 +1903,10 @@ fn check_in(
     let Ok(mut a) = aqr::open(c, &natives) else { return all() };
     // by the hashes recorded, without running a module, where they tell a leaf's outputs; the
     // other leaves decoded
-    let hashes = a.hashed_leaves(&*m.memo.lock().unwrap(), &aqr_decompress::identify, threads);
+    // (the memo taken out meanwhile: what is evaluated runs the modules by `m`, which takes it)
+    let memo = std::mem::take(&mut *m.memo.lock().unwrap());
+    let hashes = a.hashed_leaves(&memo, &aqr_decompress::identify, threads);
+    *m.memo.lock().unwrap() = memo;
     let Ok(hashes) = hashes else { return all() };
     let mut only = vec![false; hashes.len()];
     for (i, h) in hashes.iter().enumerate() {

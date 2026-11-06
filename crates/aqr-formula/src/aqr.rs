@@ -2882,9 +2882,16 @@ impl<'n> Archive<'_, 'n> {
                     contents.read(raw);
                     Some(vec![(Ch::of(&d), Vec::new())])
                 }
-                (LeafBlock::Formula { .. }, Some(p)) => {
-                    eval::hashed(p, &env(leaf).0, &contents, records, identify, threads)?
-                }
+                (LeafBlock::Formula { .. }, Some(p)) => eval::hashed(
+                    p,
+                    &env(leaf).0,
+                    &contents,
+                    &blocks.non_leaf,
+                    &blocks.dictionaries,
+                    records,
+                    identify,
+                    threads,
+                )?,
                 _ => return invalid("a file whose block is lost"),
             });
         }

@@ -79,6 +79,11 @@ pub type Hashed = (Ch, Vec<u64>);
 /// outputs (each output, or of an output split, each piece), as they were.
 pub trait Records: Sync {
     fn outputs(&self, key: u128) -> Option<Vec<Ch>>;
+
+    /// An application evaluated otherwise (in verifying) gave outputs of these hashes.
+    fn learn(&self, key: u128, outputs: &[Ch]) {
+        let _ = (key, outputs);
+    }
 }
 
 #[cfg(test)]

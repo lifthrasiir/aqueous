@@ -47,9 +47,29 @@ pub(crate) struct Memo(HashMap<Key, Record>, pub Limits);
 
 impl Records for Memo {
     fn outputs(&self, key: u128) -> Option<Vec<Ch>> {
-        self.0.get(&key).map(|r| r.outputs.clone())
+        match self.0.get(&key) {
+            Some(r) => Some(r.outputs.clone()),
+            None => LARGE.lock().unwrap().get(&key).cloned(),
+        }
+    }
+
+    fn learn(&self, key: u128, outputs: &[Ch]) {
+        if outputs.iter().map(Ch::len).sum::<u64>() >= LARGE_OUTPUT {
+            LARGE.lock().unwrap().insert(key, outputs.to_vec());
+        }
     }
 }
+
+/// Bytes of the outputs of an application at least for its record to be kept for every archive
+/// and batch after it ([`LARGE`]).
+const LARGE_OUTPUT: u64 = 1 << 20;
+
+/// The hashes of the outputs of the applications of large outputs recorded so far in the process,
+/// by [`key`]: the formula of a file evaluated once though it is in several (`enwik9` and the
+/// entry of `enwik9.zip` in another batch) is recorded once, and a record holds wherever the
+/// application is (of the same module, parameters and inputs). Of large outputs only, as they
+/// are what decoding instead would cost: a few of them.
+static LARGE: std::sync::LazyLock<Mutex<HashMap<Key, Vec<Ch>>>> = std::sync::LazyLock::new(Mutex::default);
 
 /// Runs the modules, recording every application ([`Record`]): of the applications in `known`
 /// (by address), the range of a file it is.
@@ -279,7 +299,15 @@ fn evaluate((f, d, at): Job, threads: usize, memo: &mut Memo) {
     let Recording { seen, limits, .. } = r;
     drop(f);
     if good {
-        memo.0.extend(seen.into_inner().unwrap());
+        let seen = seen.into_inner().unwrap();
+        let mut large = LARGE.lock().unwrap();
+        for (k, r) in &seen {
+            if r.outputs.iter().map(Ch::len).sum::<u64>() >= LARGE_OUTPUT {
+                large.insert(*k, r.outputs.clone());
+            }
+        }
+        drop(large);
+        memo.0.extend(seen);
         memo.1.extend(limits.into_inner().unwrap());
     }
 }
