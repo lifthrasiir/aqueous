@@ -502,23 +502,29 @@ fn skip(r: &mut Reader, tag: u8) -> Result<()> {
 /// Bytes that flate-set derives of each deflated body ([`deflated`]).
 pub const DERIVED: usize = 20;
 
-/// The deflated bodies in `flate` (what flate-set gives with what it derives of them, or
+/// The deflated bodies in `flate` (what flate-set gives, each after what it derives of it, or
 /// nothing where there are none), `n` of them: each body with the CRC-32 and size of its data.
 pub fn deflated(flate: &[u8], n: usize) -> Result<Vec<(&[u8], Entry)>> {
-    let at = n.checked_mul(DERIVED).and_then(|d| flate.len().checked_sub(d)).ok_or_else(corrupt)?;
-    let (mut streams, derived) = flate.split_at(at);
-    let mut out = Vec::with_capacity(n);
-    for d in derived.as_chunks::<DERIVED>().0 {
-        let u64_at = |i: usize| u64::from_le_bytes(d[i..i + 8].try_into().unwrap());
-        let csize = usize::try_from(u64_at(12)).ok().filter(|&c| c <= streams.len()).ok_or_else(corrupt)?;
-        let (body, rest) = streams.split_at(csize);
-        streams = rest;
-        out.push((body, Entry { crc: u32_at(d, 0), csize: csize as u64, usize: u64_at(4) }));
+    let mut out = Vec::with_capacity(n.min(flate.len() / DERIVED));
+    let mut rest = flate;
+    for _ in 0..n {
+        let (d, body) = rest.split_first_chunk::<DERIVED>().ok_or_else(corrupt)?;
+        let entry = entry_of(d)?;
+        let csize = usize::try_from(entry.csize).ok().filter(|&c| c <= body.len()).ok_or_else(corrupt)?;
+        out.push((&body[..csize], entry));
+        rest = &body[csize..];
     }
-    if !streams.is_empty() {
+    if !rest.is_empty() {
         return Err(corrupt());
     }
     Ok(out)
+}
+
+/// The entry of what flate-set derives of a body (`Derived::ZipBefore`): the CRC-32 (u32), the
+/// size of the data (u64) and of the body (u64).
+pub fn entry_of(d: &[u8; DERIVED]) -> Result<Entry> {
+    let u64_at = |i: usize| u64::from_le_bytes(d[i..i + 8].try_into().unwrap());
+    Ok(Entry { crc: u32_at(d, 0), csize: u64_at(12), usize: u64_at(4) })
 }
 
 /// The archive of `len` bytes that `layout` makes from `data` (the contents of the stored
@@ -536,50 +542,107 @@ pub fn build(layout: &[u8], data: &[u8], flate: &[u8], kept: &[u8], len: u64) ->
 pub fn assemble(layout: &[u8], data: &[u8], bodies: &[(&[u8], Entry)], kept: &[u8], len: u64) -> Result<Vec<u8>> {
     let len = usize::try_from(len).map_err(|_| corrupt())?;
     let mut out: Vec<u8> = Vec::with_capacity(len.min(u32::MAX as usize));
-    assemble_into(layout, data, bodies, kept, len, &mut out)?;
+    assemble_into(layout, &mut Slices::new(data, bodies, kept), len, &mut out)?;
     Ok(out)
 }
 
-/// [`assemble`] into `out` (an output of at most `len` bytes).
-pub fn assemble_into(
-    layout: &[u8],
-    data: &[u8],
-    bodies: &[(&[u8], Entry)],
-    kept: &[u8],
-    len: usize,
-    out: &mut dyn Out,
-) -> Result<()> {
+/// The inputs other than the layout, as [`assemble_into`] takes them, in order.
+pub trait Inputs {
+    /// The next `n` bytes of the contents of the stored bodies.
+    fn data(&mut self, n: u64) -> Result<&[u8]>;
+    /// The next `n` bytes kept.
+    fn kept(&mut self, n: u64) -> Result<&[u8]>;
+    /// The entry of the next deflated body.
+    fn entry(&mut self) -> Result<Entry>;
+    /// The body of the entry given last, of `n` bytes, put to `out`.
+    fn body(&mut self, n: u64, out: &mut dyn Out) -> Result<()>;
+    /// Whether they are all taken.
+    fn done(&self) -> bool;
+}
+
+/// [`Inputs`] of slices: the contents of the stored bodies, the deflated bodies, the bytes kept.
+pub struct Slices<'a> {
+    data: &'a [u8],
+    dp: usize,
+    bodies: std::slice::Iter<'a, (&'a [u8], Entry)>,
+    body: &'a [u8],
+    kept: &'a [u8],
+    kp: usize,
+}
+
+impl<'a> Slices<'a> {
+    pub fn new(data: &'a [u8], bodies: &'a [(&'a [u8], Entry)], kept: &'a [u8]) -> Slices<'a> {
+        Slices { data, dp: 0, bodies: bodies.iter(), body: &[], kept, kp: 0 }
+    }
+}
+
+impl Inputs for Slices<'_> {
+    fn data(&mut self, n: u64) -> Result<&[u8]> {
+        Ok(&self.data[take(self.data, &mut self.dp, n)?])
+    }
+
+    fn kept(&mut self, n: u64) -> Result<&[u8]> {
+        Ok(&self.kept[take(self.kept, &mut self.kp, n)?])
+    }
+
+    fn entry(&mut self) -> Result<Entry> {
+        let &(body, entry) = self.bodies.next().ok_or_else(corrupt)?;
+        self.body = body;
+        Ok(entry)
+    }
+
+    fn body(&mut self, n: u64, out: &mut dyn Out) -> Result<()> {
+        if n != self.body.len() as u64 {
+            return Err(corrupt());
+        }
+        out.put(self.body);
+        Ok(())
+    }
+
+    fn done(&self) -> bool {
+        self.dp == self.data.len() && self.kp == self.kept.len() && self.bodies.len() == 0
+    }
+}
+
+/// Where the body of a local entry comes from as it is put.
+enum Source<'a> {
+    Bytes(&'a [u8]),
+    Deflated,
+    /// The archive so far (an earlier entry's body).
+    Within(Range<usize>),
+}
+
+/// [`assemble`] of `inputs` into `out` (an output of at most `len` bytes), which is told to hold
+/// what it is to give back: the local headers' names and extra fields, and the bodies that a
+/// later entry takes again.
+pub fn assemble_into(layout: &[u8], inputs: &mut dyn Inputs, len: usize, out: &mut dyn Out) -> Result<()> {
+    let again = taken_again(layout)?;
     // Bytes are added only where they fit within `len`.
     let room =
         |out: &dyn Out, n: usize| if n <= len - out.len() { Ok(()) } else { Err(Error("output past its length")) };
     let mut r = Reader { d: layout, at: 0 };
     let mut st = State::new(varint::unzz(r.varint()?));
-    let (mut dp, mut kp) = (0, 0);
-    let mut bodies = bodies.iter();
     while r.at < layout.len() {
         let pos = out.len() as u64;
         match r.u8()? {
             GAP => {
-                let k = take(kept, &mut kp, r.varint()?)?;
+                let k = inputs.kept(r.varint()?)?;
                 room(out, k.len())?;
-                out.put(&kept[k]);
+                out.put(k);
             }
             LOCAL => {
                 // the body, from an input or from the archive so far, and its entry
-                let (kind, body, within, entry): (Body, &[u8], Option<Range<usize>>, Entry) = match r.u8()? {
+                let (kind, body, entry): (Body, Source, Entry) = match r.u8()? {
                     0 => {
-                        let b = &data[take(data, &mut dp, r.varint()?)?];
+                        let b = inputs.data(r.varint()?)?;
                         let n = b.len() as u64;
-                        (Body::Stored, b, None, Entry { crc: aqr_common::crc32::hash(b), csize: n, usize: n })
+                        (Body::Stored, Source::Bytes(b), Entry { crc: aqr_common::crc32::hash(b), csize: n, usize: n })
                     }
-                    1 => {
-                        let &(s, entry) = bodies.next().ok_or_else(corrupt)?;
-                        (Body::Deflated, s, None, entry)
-                    }
+                    1 => (Body::Deflated, Source::Deflated, inputs.entry()?),
                     2 => {
-                        let k = &kept[take(kept, &mut kp, r.varint()?)?];
+                        let k = inputs.kept(r.varint()?)?;
                         let crc = u32::from_le_bytes(r.take(4)?.try_into().unwrap());
-                        (Body::Kept, k, None, Entry { crc, csize: k.len() as u64, usize: r.varint()? })
+                        (Body::Kept, Source::Bytes(k), Entry { crc, csize: k.len() as u64, usize: r.varint()? })
                     }
                     3 => {
                         let back = r.varint()?;
@@ -589,7 +652,7 @@ pub fn assemble_into(
                             .and_then(|b| st.seen.len().checked_sub(b))
                             .map(|i| &st.seen[i])
                             .ok_or_else(corrupt)?;
-                        (Body::Same, &[][..], Some(s.body.clone()), s.entry)
+                        (Body::Same, Source::Within(s.body.clone()), s.entry)
                     }
                     _ => return Err(corrupt()),
                 };
@@ -606,18 +669,28 @@ pub fn assemble_into(
                 let mut dfields = State::desc(&entry, desc);
                 let dx = r.take(desc.fields())?;
                 dfields.iter_mut().zip(dx).for_each(|(a, b)| *a ^= b);
-                let blen = within.as_ref().map_or(body.len(), |w| w.len());
+                let blen = match &body {
+                    Source::Bytes(b) => b.len(),
+                    Source::Deflated => usize::try_from(entry.csize).map_err(|_| corrupt())?,
+                    Source::Within(w) => w.len(),
+                };
                 room(out, 30 + name.len() + extra.len())?;
                 out.put(&zip::LOCAL);
                 out.put(&fixed);
                 let name_at = out.len();
+                // (the central directory may take them again)
+                out.hold(name.len() + extra.len());
                 out.put(name);
                 out.put(&extra);
                 let body_at = out.len();
                 room(out, blen)?;
-                match within {
-                    Some(w) => out.put_within(w),
-                    None => out.put(body),
+                if again.get(st.seen.len()).is_some_and(|&a| a) {
+                    out.hold(blen);
+                }
+                match body {
+                    Source::Bytes(b) => out.put(b),
+                    Source::Deflated => inputs.body(blen as u64, out)?,
+                    Source::Within(w) => out.put_within(w),
                 }
                 room(out, desc.bytes())?;
                 if desc.sig() {
@@ -703,7 +776,7 @@ pub fn assemble_into(
             _ => return Err(corrupt()),
         }
     }
-    if dp != data.len() || kp != kept.len() || bodies.next().is_some() {
+    if !inputs.done() {
         return Err(corrupt());
     }
     Ok(())
@@ -711,7 +784,83 @@ pub fn assemble_into(
 
 /// How the bodies of the local entries of a layout are made, in order.
 pub fn bodies(layout: &[u8]) -> Result<Vec<Body>> {
+    scan(layout).map(|s| s.0)
+}
+
+/// Of each local entry of a layout, in order, whether a later one takes its body again.
+pub fn taken_again(layout: &[u8]) -> Result<Vec<bool>> {
+    scan(layout).map(|s| s.1)
+}
+
+/// What [`assemble_into`] holds of a layout's inputs at once, as the module's estimate needs it.
+#[derive(Debug, Default)]
+pub struct Sizes {
+    /// Local entries.
+    pub entries: u64,
+    /// The largest stored body and piece kept (a gap, or a body kept).
+    pub stored: u64,
+    pub kept: u64,
+    /// The bodies taken again by later entries: their bytes where the layout tells them (stored
+    /// or kept), and how many are deflated (whose bytes it does not tell).
+    pub again: u64,
+    pub again_deflated: u64,
+}
+
+/// The [`Sizes`] of a layout.
+pub fn sizes(layout: &[u8]) -> Result<Sizes> {
+    let (kinds, again) = scan(layout)?;
+    let mut s = Sizes { entries: kinds.len() as u64, ..Sizes::default() };
+    // the bytes of each local entry's body where the layout tells them
+    let mut lens = Vec::with_capacity(kinds.len());
+    let mut r = Reader { d: layout, at: 0 };
+    r.varint()?;
+    while r.at < layout.len() {
+        let tag = r.u8()?;
+        match tag {
+            GAP => {
+                s.kept = s.kept.max(r.varint()?);
+                continue;
+            }
+            LOCAL => {
+                let len = match r.u8()? {
+                    0 => Some(r.varint()?),
+                    1 => None,
+                    2 => {
+                        let n = r.varint()?;
+                        r.take(4)?;
+                        r.varint()?;
+                        Some(n)
+                    }
+                    _ => {
+                        // (the body of the entry it takes again)
+                        let back = usize::try_from(r.varint()?).map_err(|_| corrupt())?;
+                        *lens.get(lens.len().wrapping_sub(back)).ok_or_else(corrupt)?
+                    }
+                };
+                match kinds[lens.len()] {
+                    Body::Stored => s.stored = s.stored.max(len.unwrap_or(0)),
+                    Body::Kept => s.kept = s.kept.max(len.unwrap_or(0)),
+                    _ => {}
+                }
+                if again[lens.len()] {
+                    match len {
+                        Some(n) => s.again += n,
+                        None => s.again_deflated += 1,
+                    }
+                }
+                lens.push(len);
+            }
+            _ => {}
+        }
+        skip(&mut r, tag)?;
+    }
+    Ok(s)
+}
+
+/// [`bodies`] and [`taken_again`].
+fn scan(layout: &[u8]) -> Result<(Vec<Body>, Vec<bool>)> {
     let mut out = Vec::new();
+    let mut again = Vec::new();
     let mut r = Reader { d: layout, at: 0 };
     r.varint()?;
     while r.at < layout.len() {
@@ -728,12 +877,22 @@ pub fn bodies(layout: &[u8]) -> Result<Vec<Body>> {
                     r.take(4)?;
                     r.varint()?;
                 }
+                3 => {
+                    let back = r.varint()?;
+                    let i = usize::try_from(back)
+                        .ok()
+                        .filter(|&b| b > 0)
+                        .and_then(|b| again.len().checked_sub(b))
+                        .ok_or_else(corrupt)?;
+                    again[i] = true;
+                }
                 _ => {
                     r.varint()?;
                 }
             }
+            again.push(false);
         }
         skip(&mut r, tag)?;
     }
-    Ok(out)
+    Ok((out, again))
 }

@@ -54,27 +54,34 @@ Contents:
 
 ## 2. The module
 
-- **Module**: name `zip-recons`, version 3.
+- **Module**: name `zip-recons`, version 4.
 - **Params**: none (empty).
 - **Resources**: none.
 - **Inputs**: exactly four:
   1. `data`: the contents of the stored bodies, in order;
-  2. `deflated`: the deflated bodies one after another, then for each in order, 20 bytes:
-     `le32` the CRC-32 of its data, `le64` the length of its data, `le64` the length of the
-     body. Empty where there is no deflated body;
+  2. `deflated`: for each deflated body in order, 20 bytes, `le32` the CRC-32 of its data,
+     `le64` the length of its data, `le64` the length of the body, then the body. Empty where
+     there is no deflated body;
   3. `layout` (class `zip/layout`): §3;
   4. `kept` (class `zip/kept`): the gaps and the bodies kept as they are, in order.
 - **Output**: the archive of §3. Its length must be the `len` the application declares.
 
-With `n` deflated bodies in the layout (§3.2), the last `20n` bytes of `deflated` are the
-table, and the bytes before it are cut into the bodies by the lengths it gives, which must use
-them up exactly.
+With `n` deflated bodies in the layout (§3.2), `deflated` is cut into `n` such entries, each
+body of the length before it, which must use it up exactly. (Version 3 had the bodies first and
+the 20 bytes of each after them all: a body's CRC-32 then came after the body, whose local
+header needs it, so that the archive could not be made in order without holding the bodies.)
+
+It is a part module, of windows of 16 pages for its inputs and its output, which it reads and
+writes in order: it holds the layout, and of the other inputs a record's or a body's at a time
+but for the deflated bodies, which go through as they are read. It holds the names and extra
+fields of the local headers (which central directory headers may take) and the bodies that later
+entries take again (§3.2), and nothing else of the output.
 
 The encoder gives `data` as the contents themselves, slices of streams of class `raw` (or
 `zip/<kind>`, §5); it is a content of the application and may be recompressed in turn. It gives
-`deflated` as an application of aqr-flate's module `flate-set` with params `[1]` (aqr-flate's
-`FORMAT.md`, "Formula module"), which outputs exactly that: the streams, then the CRC-32 and
-lengths of each. Its data is the contents of the deflated bodies (a content too), its records
+`deflated` as an application of aqr-flate's module `flate-set` with params `[4]` (aqr-flate's
+`FORMAT.md`, "Formula module"), which outputs exactly that: before each stream, the CRC-32 and
+lengths of it. Its data is the contents of the deflated bodies (a content too), its records
 a stream of class `flate/record`, and its index one of class `flate/index`.
 
 ## 3. The layout

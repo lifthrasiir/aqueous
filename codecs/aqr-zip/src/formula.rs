@@ -22,16 +22,22 @@ use crate::module::{par_jobs, par_map};
 
 /// An archive rebuilt from the contents of its entries, the deflated bodies given by aqr-flate's
 /// module ([`decode`]).
-pub const MODULE: Module = Module::new("zip-recons", 3).with_memory(memory);
+pub const MODULE: Module = Module::new("zip-recons", 4).with_memory(memory);
 
-/// The memory of the module: the inputs and the archive; for each entry (a byte of the layout
-/// at least), its body's kind and what the predictions keep of a local header (about 96 bytes
-/// on 32 bits), both vectors growing twice at a time; for each deflated body (`DERIVED` bytes
-/// of `flate` each), its place and entry; and a name and an extra field copied at a time.
+/// The memory of the module, a part module ([`crate::module::decode_part`]): the layout (read,
+/// then copied), what it holds of the inputs at once (the largest stored body and piece kept, a
+/// window's piece of each), the local headers' names and extra fields (within the layout) and the
+/// bodies taken again (those deflated, of the deflated bodies' bytes at most) with a copy of the
+/// largest; for each entry (a byte of the layout at least) what the predictions keep of a local
+/// header (about 96 bytes on 32 bits) and its run held, growing twice at a time.
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let &[_, flate, layout, _] = u.inputs else { return None };
-    let deflated = layout.min(flate / layout::DERIVED as u64);
-    Some(u.whole(3 * (96 + 1) * layout + 32 * deflated + 2 * 0xffff, 4))
+    let &[_, flate, layout_len, _] = u.inputs else { return None };
+    let s = layout::sizes(u.content(2)?).ok()?;
+    let again = s.again + if s.again_deflated > 0 { flate } else { 0 };
+    let window = crate::module::WINDOW as u64 * aqr_formula::PAGE;
+    // (a stored body and a piece kept each in a vector made for it, those before maybe not reused)
+    let held = 2 * layout_len + 2 * (s.stored + s.kept) + 2 * window + layout_len + 2 * again;
+    Some(u.initial() + aqr_formula::SMALL + held + 3 * (96 + 64) * s.entries + 8 * aqr_formula::PAGE)
 }
 
 /// Bodies shorter than this are not looked for among earlier ones.
@@ -380,8 +386,8 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     let flate_len = deflated.iter().map(|b| b.0.len()).sum::<usize>() + derived.len();
     let mut check = aqr_common::out::Check::new(input);
     let stored_all = stored_all.into_bytes();
-    if layout::assemble_into(&layout, &stored_all, &deflated, &kept, input.len(), &mut check).is_err() || !check.same()
-    {
+    let mut inputs = layout::Slices::new(&stored_all, &deflated, &kept);
+    if layout::assemble_into(&layout, &mut inputs, input.len(), &mut check).is_err() || !check.same() {
         return None;
     }
     drop((deflated, stored_all));
@@ -406,8 +412,8 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         None => Node::Concat(Vec::new()),
         Some((records, index)) => {
             let data = data.push(&mut f, 1, "zip");
-            let a =
-                aqr_flate::formula::apply(opt.profile, data, records, index, flate_len as u64, Derived::Zip).ok()?;
+            let a = aqr_flate::formula::apply(opt.profile, data, records, index, flate_len as u64, Derived::ZipBefore)
+                .ok()?;
             Node::Apply(Box::new(a))
         }
     };

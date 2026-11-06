@@ -142,6 +142,8 @@ struct Stream {
     zlib: Option<(u8, u8)>,
     blocks: u64,
     stored: u64,
+    /// Bytes of the stored blocks.
+    stored_bytes: u64,
     /// The most tokens of a block, and of all.
     largest: u64,
     tokens: u64,
@@ -230,10 +232,13 @@ impl Stream {
             })
             .sum();
         let rest = total.checked_sub(fixed)?;
-        let (mut largest, mut stored) = (0, 0);
+        let (mut largest, mut stored, mut stored_bytes) = (0, 0, 0);
         for b in &layout.blocks {
             match *b {
-                Shape::Stored { .. } => stored += 1,
+                Shape::Stored { len, .. } => {
+                    stored += 1;
+                    stored_bytes += len as u64;
+                }
                 Shape::Coded { count, .. } => largest = largest.max(count.unwrap_or(rest)),
             }
         }
@@ -244,11 +249,18 @@ impl Stream {
             zlib,
             blocks: layout.blocks.len() as u64,
             stored,
+            stored_bytes,
             largest: largest as u64,
             tokens: total as u64,
             trailing: layout.trailing.len() as u64,
             segs,
         })
+    }
+
+    /// Bytes of the stream at most: 6 for each token (48 bits at most), the stored blocks' data,
+    /// a block's header (a dynamic one of some 300 bytes at most), the trailing bytes.
+    fn most(&self) -> u64 {
+        TOKEN * self.tokens + self.stored_bytes + 320 * self.blocks + self.trailing + 64
     }
 
     /// Bytes of the table, chain or emulator and the contexts that decoding segment `s` makes
@@ -346,12 +358,10 @@ impl Stream {
         let pending = Lin::of(TOKEN * round);
         // the writer's output, reserved as it first writes: the stream alone, or half the data and
         // grown by pushes (the old and new one held: three times the stream)
+        // (the stream's bytes at most `Stream::most`)
         let out = match alone {
             true => Lin::l(1),
-            false => Lin {
-                a: n / 2 + 64,
-                l: 3,
-            },
+            false => Lin::of((n / 2 + 64).max(self.most()) + 2 * self.most()),
         };
         // and the blocks written (a few thousand at a time); on threads, runs of them by writers
         // of their own, grown by pushes (a token is 6 bytes at most, as TOKEN), appended
@@ -547,8 +557,15 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     while i < items.len() {
         if streams[i].n >= LARGE {
             let (peak, t) = streams[i].pulled(Lin::of(inst), items[i].1.len() as u64, l);
-            high = high.max(peak);
-            tasks.extend(t.into_iter().map(|(k, grown)| (k, Lin::of(grown))));
+            if derived.before() {
+                // its output held, grown by pushes (`Stream::most`, nor more than the output), and
+                // no tasks
+                let stream = streams[i].most().min(l);
+                high = high.max(peak.add(Lin::of(2 * stream)));
+            } else {
+                high = high.max(peak);
+                tasks.extend(t.into_iter().map(|(k, grown)| (k, Lin::of(grown))));
+            }
             i += 1;
             continue;
         }
@@ -564,19 +581,23 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
         let sizes: Vec<u64> = streams[i..j].iter().map(|s| s.n).collect();
         let groups = groups(&sizes);
         // a group's streams in turn, the earlier ones' bytes held, from `w0`
+        // (the streams' bytes `Stream::most` at most, nor more than the output)
         let group = |g: &Group, w0: Lin| {
-            let mut kept = Lin::default();
-            let mut peak = Lin::default();
+            let (mut kept, mut peak) = (0, Lin::default());
             for &s in &g.items {
-                peak = peak.max(streams[i + s].run(w0.add(kept), 1, alone));
-                kept = Lin::l(1);
+                peak = peak.max(streams[i + s].run(w0.add(Lin::of(kept.min(l))), 1, alone));
+                kept += streams[i + s].most();
             }
-            peak.max(
-                w0.add(Lin::of(9 * g.items.len() as u64 + 16))
-                    .add(Lin::l(2)),
-            )
+            peak.max(w0.add(Lin::of(9 * g.items.len() as u64 + 16 + 2 * kept.min(l))))
         };
-        if groups.len() == 1 {
+        // the run's streams (`Stream::most`, nor more than the output)
+        let made = Lin::of(streams[i..j].iter().map(Stream::most).sum::<u64>().min(l));
+        if derived.before() {
+            // (no tasks: the groups in turn, the earlier ones' streams held)
+            for g in &groups {
+                high = high.max(group(g, w0.add(made)));
+            }
+        } else if groups.len() == 1 {
             high = high.max(group(&groups[0], w0));
         } else {
             // each group a task, up to SLOTS at once, growing as it runs from nothing
@@ -592,10 +613,7 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
             tasks.push((grown.len().min(SLOTS), sum));
         }
         // the streams made, held as they are written
-        high = high.max(w0.add(Lin {
-            a: 32 * (j - i) as u64,
-            l: 1,
-        }));
+        high = high.max(w0.add(Lin::of(32 * (j - i) as u64)).add(made));
         i = j;
     }
     let mut peak = high;

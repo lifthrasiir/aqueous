@@ -95,9 +95,17 @@ pub enum Derived {
     /// The Adler-32 of the data (u32, big endian: a zlib stream's trailer), the length of the
     /// data (u64) and the length of the stream (u64): what a git pack's entries need.
     Zlib = 3,
+    /// What [`Derived::Zip`] derives, but before each stream rather than after them all: so that
+    /// whoever takes the output in order (a ZIP archive's local headers) has it first.
+    ZipBefore = 4,
 }
 
 impl Derived {
+    /// Whether it comes before each stream ([`Derived::ZipBefore`]), else after them all.
+    pub fn before(self) -> bool {
+        self == Derived::ZipBefore
+    }
+
     /// The params of the module.
     pub fn params(self) -> Vec<u8> {
         match self {
@@ -112,6 +120,7 @@ impl Derived {
             [1] => Ok(Derived::Zip),
             [2] => Ok(Derived::Gzip),
             [3] => Ok(Derived::Zlib),
+            [4] => Ok(Derived::ZipBefore),
             _ => Err(Error::Corrupt),
         }
     }
@@ -120,7 +129,7 @@ impl Derived {
     pub fn bytes(self) -> usize {
         match self {
             Derived::None => 0,
-            Derived::Zip | Derived::Zlib => 20,
+            Derived::Zip | Derived::Zlib | Derived::ZipBefore => 20,
             Derived::Gzip => 8,
         }
     }
@@ -136,7 +145,7 @@ impl Derived {
     pub fn sum(self) -> Sum {
         match self {
             Derived::None => Sum::None,
-            Derived::Zip | Derived::Gzip => Sum::Crc(Default::default()),
+            Derived::Zip | Derived::Gzip | Derived::ZipBefore => Sum::Crc(Default::default()),
             Derived::Zlib => Sum::Adler(Default::default()),
         }
     }
@@ -151,9 +160,9 @@ impl Derived {
         };
         match self {
             Derived::None => {}
-            Derived::Zip | Derived::Zlib => {
+            Derived::Zip | Derived::Zlib | Derived::ZipBefore => {
                 out.extend_from_slice(&match self {
-                    Derived::Zip => sum.to_le_bytes(),
+                    Derived::Zip | Derived::ZipBefore => sum.to_le_bytes(),
                     _ => sum.to_be_bytes(),
                 });
                 out.extend_from_slice(&data.to_le_bytes());
@@ -343,6 +352,14 @@ pub fn decode(
         return Err(Error::Corrupt);
     }
     let lens: Vec<usize> = streams.iter().map(|s| s.len()).collect();
+    if derived.before() {
+        let mut out = Vec::with_capacity(total);
+        for (((d, _), n), s) in items.iter().zip(lens).zip(&streams) {
+            derived.put(d, n, &mut out);
+            out.extend_from_slice(s);
+        }
+        return Ok(out);
+    }
     // (a stream alone as it is)
     let mut out = match streams.len() {
         1 => streams.pop().unwrap(),
@@ -362,12 +379,14 @@ pub fn decode(
 pub const SET_WINDOW: u32 = 16;
 pub const SET_RECORDS_WINDOW: u32 = 4;
 
-/// Threads of `flate-set` in WebAssembly (its task slots); natively, the pool's. The output is the
-/// same whatever their number.
+/// Threads of `flate-set` in WebAssembly (its task slots; one where what is derived comes before
+/// each stream); natively, the pool's. The output is the same whatever their number.
 pub const SET_THREADS: usize = 8;
 
-fn set_threads() -> usize {
+fn set_threads(derived: Derived) -> usize {
     match cfg!(target_family = "wasm") {
+        // (where what is derived comes before a stream, the stream is held: tasks would copy it)
+        true if derived.before() => 1,
         true => SET_THREADS,
         false => aqr_common::pool::size().max(1),
     }
@@ -567,18 +586,40 @@ fn set_part(params_len: u64, resources: [u64; 2], inputs: [u64; 3], size: u64) -
             };
             let mut pull = crate::Pull::new(&mut read);
             let (mut stream, mut failed) = (0u64, None);
+            // (held, where what is derived of it comes first: of the output left at most)
+            let mut held = Vec::new();
             let m = model.as_ref().expect("a model");
-            crate::reconstruct_pulled(d, &mut pull, &record, m.data(), set_threads(), &mut |b| {
-                stream += b.len() as u64;
-                if let Err(e) = out.write(b) {
-                    failed.get_or_insert(e);
-                }
-            })?;
+            crate::reconstruct_pulled(
+                d,
+                &mut pull,
+                &record,
+                m.data(),
+                set_threads(derived),
+                &mut |b| {
+                    stream += b.len() as u64;
+                    let r = match derived.before() {
+                        true if stream <= size - out.at => {
+                            held.extend_from_slice(b);
+                            Ok(())
+                        }
+                        true => Err(Error::Corrupt),
+                        false => out.write(b),
+                    };
+                    if let Err(e) = r {
+                        failed.get_or_insert(e);
+                    }
+                },
+            )?;
             drop(pull);
             if let Some(e) = failed {
                 return Err(e);
             }
             derived.put_sum(sum, d as u64, stream, &mut derive);
+            if derived.before() {
+                out.write(&derive)?;
+                out.write(&held)?;
+                derive.clear();
+            }
             i += 1;
             continue;
         }
@@ -607,7 +648,7 @@ fn set_part(params_len: u64, resources: [u64; 2], inputs: [u64; 3], size: u64) -
         let sizes: Vec<usize> = cut.iter().map(|c| c.0.len()).collect();
         // (a stream alone, of the output's length at most, as `decode` reserves it)
         let alone = lens.len() == 1;
-        let streams = par_jobs(&sizes, set_threads(), |k, per| {
+        let streams = par_jobs(&sizes, set_threads(derived), |k, per| {
             let (d, r) = (&data[cut[k].0.clone()], &records[cut[k].1.clone()]);
             let cap = match alone {
                 true => size.min(8 * (d.len() + r.len()) as u64 + 64) as usize,
@@ -617,8 +658,12 @@ fn set_part(params_len: u64, resources: [u64; 2], inputs: [u64; 3], size: u64) -
         });
         for (k, s) in streams.into_iter().enumerate() {
             let s = s.ok_or(Error::Corrupt)?;
-            out.write(&s)?;
             derived.put(&data[cut[k].0.clone()], s.len(), &mut derive);
+            if derived.before() {
+                out.write(&derive)?;
+                derive.clear();
+            }
+            out.write(&s)?;
         }
         i = j;
     }

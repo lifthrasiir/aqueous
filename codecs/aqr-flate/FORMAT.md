@@ -996,7 +996,7 @@ instance, with the rule `literals` (in the catalog or in full):
 
 ### Parameters and inputs
 
-**Parameters**: what is derived of each stream, after all of them:
+**Parameters**: what is derived of each stream, after all of them (or before each, `04`):
 
 | params | for each stream, in order |
 |---|---|
@@ -1004,6 +1004,7 @@ instance, with the rule `literals` (in the catalog or in full):
 | `01` | the CRC-32 of its data (u32), the length of its data (u64), the length of the stream (u64): 20 bytes, what a ZIP archive's headers say of an entry |
 | `02` | the CRC-32 of its data (u32), the length of its data mod 2^32 (u32): 8 bytes, a gzip member's trailer |
 | `03` | the Adler-32 of its data (u32, big endian, as a zlib stream's trailer), the length of its data (u64), the length of the stream (u64): 20 bytes, what a git pack's entries need |
+| `04` | as `01`, but **before** the stream rather than after them all: what a ZIP archive's local header needs before the entry's body |
 
 The CRC-32 is ZIP's and gzip's (reflected polynomial `0xEDB88320`, register set to
 `0xFFFFFFFF` and inverted at the end), the Adler-32 zlib's (RFC 1950). Integers are little
@@ -1028,7 +1029,8 @@ before its first segment, rounded down to a multiple of 1 MiB, to 256 KiB after 
 (the tokens are those of the whole data: the tables and the zlib emulator address positions
 modulo powers of two up to 256 KiB, and read no further), and the stream is written in rounds
 of about 2 MiB. Smaller streams are rebuilt side by side in runs of up to 8 MiB of data, their
-data and records held. What is derived of the streams is held until they are all written.
+data and records held. What is derived of the streams is held until they are all written; with params `04`, a stream
+is held instead, until what is derived of it is written before it.
 
 The module has no classes of its own: the maker of the formula names the inputs (e.g. `raw`,
 `flate/record` and `flate/index` in aqr-compress and aqr-zip, slices of `pdf/pool-<class>`

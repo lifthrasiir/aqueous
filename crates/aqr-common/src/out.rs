@@ -20,6 +20,10 @@ pub trait Out {
 
     /// Bytes `r` of what is out so far.
     fn out(&self, r: Range<usize>) -> &[u8];
+
+    /// That the next `n` bytes put may be read back ([`Out::out`], [`Out::put_within`]): of an
+    /// output that keeps no more of what is out than it is told (all is kept by default).
+    fn hold(&mut self, _n: usize) {}
 }
 
 impl Out for Vec<u8> {

@@ -363,6 +363,43 @@ fn inflate_same_as_wasm() {
     }
 }
 
+/// DEFLATE streams rebuilt (flate-set) natively and as WebAssembly alike: alone and several,
+/// small and large (2 MiB of data or more), with what each params value derives of them.
+#[test]
+fn flate_set_same_as_wasm() {
+    use aqr_flate::formula::Derived;
+    let enc = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
+    let text: Vec<u8> = (0..300_000).flat_map(|i| format!("line {} of {}\n", i % 211, i % 17).into_bytes()).collect();
+    let p = aqr_flate::zlib::Params { level: 6, ..Default::default() };
+    let parts: Vec<(Vec<u8>, Vec<u8>, usize)> = [&text[..1000], &text[..], &text[..30_000]]
+        .iter()
+        .map(|d| {
+            let raw = aqr_flate::zlib::compress(d, p).unwrap();
+            let (data, record) = aqr_flate::deconstruct(&raw).unwrap();
+            (data, record, raw.len())
+        })
+        .collect();
+    for set in [&[0][..], &[1], &[0, 2], &[2, 1, 0]] {
+        for derived in [Derived::None, Derived::Zip, Derived::Gzip, Derived::ZipBefore] {
+            let mut f = Formula::default();
+            let data = f.push("raw", set.iter().flat_map(|&i| parts[i].0.clone()).collect::<Vec<u8>>());
+            let records = f.push("flate/record", set.iter().flat_map(|&i| parts[i].1.clone()).collect::<Vec<u8>>());
+            let lens: Vec<(usize, usize)> = set.iter().map(|&i| (parts[i].0.len(), parts[i].1.len())).collect();
+            let index = match aqr_flate::module::index(&lens) {
+                i if i.is_empty() => Node::Concat(Vec::new()),
+                i => f.push("flate/index", i),
+            };
+            let len = set.iter().map(|&i| (parts[i].2 + derived.bytes()) as u64).sum();
+            let a = aqr_flate::formula::apply(aqr_flate::DEFAULT_PROFILE, data, records, index, len, derived).unwrap();
+            f.root = Node::Apply(Box::new(a));
+            let c = enc.encode(&f, None).unwrap();
+            let n = aqr::decode(&c, &Native::default()).unwrap();
+            let w = decode_wasm(&c);
+            assert!(w.as_ref().is_ok_and(|w| *w == n), "{set:?} {derived:?}: {:?}", w.err());
+        }
+    }
+}
+
 /// lzop files natively and as WebAssembly alike, and their records damaged in turn failing alike
 /// (or giving the same).
 #[test]
