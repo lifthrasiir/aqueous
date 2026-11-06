@@ -47,25 +47,32 @@ fn level_of(count: u32, max: u32) -> u8 {
 
 /// Normalised frequencies (summing to `1 << BITS`) from quantised levels (both sides).
 fn freqs_from_levels<const BITS: u32>(levels: &[u8]) -> Result<Vec<u32>, Corrupt> {
+    let mut f = Vec::with_capacity(levels.len());
+    f.extend(levels.iter().map(|&l| l as u32));
+    normalise::<BITS>(&mut f)?;
+    Ok(f)
+}
+
+/// [`freqs_from_levels`] in place: `f` the levels, made their frequencies.
+fn normalise<const BITS: u32>(f: &mut [u32]) -> Result<(), Corrupt> {
     const { check_bits(BITS) };
     let scale = 1u32 << BITS;
-    let n = levels.len();
-    let nz = levels.iter().filter(|&&l| l > 0).count();
-    let mut f = vec![0u32; n];
+    let n = f.len();
+    let nz = f.iter().filter(|&&l| l > 0).count();
     if nz == 0 {
         // An unused table: any valid one will do.
         f[0] = scale;
-        return Ok(f);
+        return Ok(());
     }
     if nz > scale as usize {
         return Err(Corrupt("too many symbols for the probability resolution"));
     }
-    let sum: u64 = levels.iter().map(|&l| WEIGHT[l as usize]).sum();
+    let sum: u64 = f.iter().map(|&l| WEIGHT[l as usize]).sum();
     let mut tot = 0u32;
-    for i in 0..n {
-        if levels[i] > 0 {
-            f[i] = ((WEIGHT[levels[i] as usize] * scale as u64 / sum) as u32).max(1);
-            tot += f[i];
+    for v in f.iter_mut() {
+        if *v > 0 {
+            *v = ((WEIGHT[*v as usize] * scale as u64 / sum) as u32).max(1);
+            tot += *v;
         }
     }
     // Fix the rounding on the largest frequencies (first index wins ties).
@@ -83,7 +90,7 @@ fn freqs_from_levels<const BITS: u32>(levels: &[u8]) -> Result<Vec<u32>, Corrupt
             tot -= d;
         }
     }
-    Ok(f)
+    Ok(())
 }
 
 /// Writes the levels of `counts` (a used table) and returns the frequencies both sides
@@ -120,7 +127,20 @@ pub fn write_table<const BITS: u32, const MSB: bool>(w: &mut BitW<MSB>, counts: 
 
 /// Reads a table of `n` symbols written by [`write_table`].
 pub fn read_table<const BITS: u32, const MSB: bool>(r: &mut BitR<MSB>, n: usize) -> Result<Vec<u32>, Corrupt> {
-    let mut levels = vec![0u8; n];
+    let mut f = Vec::with_capacity(n);
+    read_table_into::<BITS, MSB>(r, n, &mut f)?;
+    Ok(f)
+}
+
+/// [`read_table`], the frequencies appended to `out` (in its room, where it has it).
+pub fn read_table_into<const BITS: u32, const MSB: bool>(
+    r: &mut BitR<MSB>,
+    n: usize,
+    out: &mut Vec<u32>,
+) -> Result<(), Corrupt> {
+    let start = out.len();
+    out.resize(start + n, 0);
+    let levels = &mut out[start..];
     let mut prev = 0i32;
     let mut i = 0;
     while i < n {
@@ -139,11 +159,11 @@ pub fn read_table<const BITS: u32, const MSB: bool>(r: &mut BitR<MSB>, n: usize)
         if !(1..LEVELS as i32).contains(&l) {
             return Err(Corrupt("bad table"));
         }
-        levels[i] = l as u8;
+        levels[i] = l as u32;
         prev = l;
         i += 1;
     }
-    freqs_from_levels::<BITS>(&levels)
+    normalise::<BITS>(levels)
 }
 
 /// Estimated bits to code `counts` with its own exact table (data only).
@@ -201,8 +221,8 @@ impl Symbol for u16 {
 
 /// log2 of the per-table stride of the flat symbol arrays: the largest alphabet, rounded
 /// up to a power of two.
-fn stride_log(freqs: &[Vec<u32>]) -> u32 {
-    freqs.iter().map(|f| f.len()).max().unwrap_or(1).next_power_of_two().trailing_zeros()
+fn stride_log<'a>(freqs: impl Iterator<Item = &'a [u32]>) -> u32 {
+    freqs.map(|f| f.len()).max().unwrap_or(1).next_power_of_two().trailing_zeros()
 }
 
 /// Decoding tables, flat: per table the symbol of every slot, and per symbol its frequency
@@ -218,12 +238,18 @@ pub struct Tables<S: Symbol, const BITS: u32> {
 impl<S: Symbol, const BITS: u32> Tables<S, BITS> {
     /// `freqs[t]` must sum to `1 << BITS` (from [`write_table`] or [`read_table`]).
     pub fn new(freqs: &[Vec<u32>]) -> Self {
+        Self::of(freqs.len(), |t| &freqs[t])
+    }
+
+    /// [`Tables::new`] of `n` tables, table `t` `freqs(t)`.
+    pub fn of<'a>(n: usize, freqs: impl Fn(usize) -> &'a [u32]) -> Self {
         const { check_bits(BITS) };
         let scale = 1usize << BITS;
-        let shift = S::STRIDE_LOG.unwrap_or_else(|| stride_log(freqs));
-        let mut lut = vec![S::default(); freqs.len() * scale];
-        let mut fc = vec![0u32; freqs.len() << shift];
-        for (t, f) in freqs.iter().enumerate() {
+        let shift = S::STRIDE_LOG.unwrap_or_else(|| stride_log((0..n).map(&freqs)));
+        let mut lut = vec![S::default(); n * scale];
+        let mut fc = vec![0u32; n << shift];
+        for t in 0..n {
+            let f = freqs(t);
             assert!(f.len() <= S::MAX);
             let l = &mut lut[t * scale..];
             let mut acc = 0u32;
@@ -233,7 +259,13 @@ impl<S: Symbol, const BITS: u32> Tables<S, BITS> {
                 acc += fs;
             }
         }
-        Tables { lut, fc, shift, n: freqs.len() }
+        Tables { lut, fc, shift, n }
+    }
+
+    /// Bytes of the tables' two blocks, of `n` tables of `alphabet` symbols at most.
+    pub fn bytes(n: usize, alphabet: usize) -> [u64; 2] {
+        let shift = S::STRIDE_LOG.unwrap_or_else(|| alphabet.max(1).next_power_of_two().trailing_zeros());
+        [(n << BITS) as u64 * size_of::<S>() as u64, 4 * (n << shift) as u64]
     }
 
     /// The number of tables.
@@ -320,7 +352,7 @@ impl Entry for (u8, u8) {
 /// byte stream the decoder reads forward. `freqs` are the tables' frequencies.
 pub fn encode<const BITS: u32>(syms: &[impl Entry], freqs: &[Vec<u32>]) -> Vec<u8> {
     const { check_bits(BITS) };
-    let shift = stride_log(freqs);
+    let shift = stride_log(freqs.iter().map(|f| &f[..]));
     let mut enc = vec![0u64; freqs.len() << shift];
     for (t, f) in freqs.iter().enumerate() {
         let mut acc = 0;

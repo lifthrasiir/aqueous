@@ -285,6 +285,16 @@ fn put_chunk(pred: Pred, syms: &[(u8, u8)], bits: Vec<u8>, out: &mut Vec<u8>) {
 }
 
 /// Decodes the raster of layout `f` from `coded` and `pad` into `out` (appending).
+/// Bytes that [`decode`] takes of [`aqr_api::stack`] for layout `f` and an output reserved for
+/// `len` bytes, in its blocks' order: the output, the rows of samples and residuals, a chunk's
+/// frequencies and its tables.
+pub fn decode_plan(f: &Format, len: u64) -> u64 {
+    use aqr_api::stack::block;
+    let row = block(2 * (f.width * f.channels) as u64);
+    let [lut, fc] = Tables::bytes(TABLES, TOKENS);
+    block(len) + 4 * row + block(4 * (TABLES * TOKENS) as u64) + block(lut) + block(fc)
+}
+
 pub fn decode(coded: &[u8], pad: &[u8], f: Format, out: &mut Vec<u8>) -> Result<(), Error> {
     let corrupt = Error("corrupt raster");
     if !f.valid() {
@@ -295,7 +305,7 @@ pub fn decode(coded: &[u8], pad: &[u8], f: Format, out: &mut Vec<u8>) -> Result<
     if pad.len() != pb * f.height {
         return Err(Error("padding"));
     }
-    out.reserve(f.len().unwrap());
+    out.reserve_exact(f.len().unwrap());
     let per = chunk_rows(&f);
     let (mut prev, mut cur) = (vec![0u16; rs], vec![0u16; rs]);
     let (mut res_prev, mut res_cur) = (vec![0u16; rs], vec![0u16; rs]);
@@ -317,19 +327,24 @@ pub fn decode(coded: &[u8], pad: &[u8], f: Format, out: &mut Vec<u8>) -> Result<
         };
         let (tb, st, bits) = (part(nt)?, part(ns)?, part(nb)?);
         let mut r = BitR::new(tb);
-        let used: Vec<bool> = (0..TABLES).map(|_| r.bits(1) == 1).collect();
-        let mut freqs = Vec::with_capacity(TABLES);
-        for &u in &used {
-            freqs.push(if u {
-                rans32::read_table::<PROB_BITS, false>(&mut r, TOKENS).map_err(|_| Error("corrupt raster tables"))?
-            } else {
-                vec![]
-            });
+        let mut used = [false; TABLES];
+        for u in &mut used {
+            *u = r.bits(1) == 1;
+        }
+        // (the tables one after another, each ending where `ends` tells; none for one not used)
+        let (mut freqs, mut ends) = (Vec::with_capacity(TABLES * TOKENS), [0; TABLES]);
+        for (&u, end) in used.iter().zip(&mut ends) {
+            if u {
+                rans32::read_table_into::<PROB_BITS, false>(&mut r, TOKENS, &mut freqs)
+                    .map_err(|_| Error("corrupt raster tables"))?;
+            }
+            *end = freqs.len();
         }
         if r.overrun() {
             return Err(Error("corrupt raster tables"));
         }
-        let tables = Tables::new(&freqs);
+        let of = |t: usize| &freqs[if t == 0 { 0 } else { ends[t - 1] }..ends[t]];
+        let tables = Tables::of(TABLES, of);
         let mut dec = rans32::Decoder::new(st);
         let mut bits = BitR::new(bits);
         let mut read = 0usize;

@@ -1562,6 +1562,26 @@ fn msf_plan_holds() {
     }
 }
 
+/// raster-recons-16 lays its memory out as a stack, its limit its plan: of rasters of one channel
+/// and of three, padded or not, of one chunk of rows and of more.
+#[test]
+fn raster16_plan_holds() {
+    use aqr_raw::image::raster16::Format;
+    for (width, height, channels, pad) in [(300, 90, 1, 0), (800, 1000, 3, 6), (2000, 1200, 1, 0)] {
+        let fmt = Format { width, height, channels, stride: 2 * width * channels + pad, big_endian: true };
+        let mut d = Vec::with_capacity(fmt.len().unwrap());
+        for y in 0..height {
+            for x in 0..width * channels {
+                d.extend_from_slice(&(((x + 2 * y) * 37 + (x * y) % 11) as u16 * 13).to_be_bytes());
+            }
+            d.extend(std::iter::repeat_n(0x5a, pad));
+        }
+        let mut f = Formula::default();
+        f.root = aqr_raw::formula::raster16::apply(&mut f, &d, fmt).expect("taken");
+        plan_holds(&format!("raster16 {width}x{height}x{channels}"), f, &d);
+    }
+}
+
 /// git-pack-recons and git-pack-index-recons lay their memory out as stacks, their limits their
 /// plans: of a pack of more entries than the stack's holes, alone and with its index and reverse
 /// index after it.

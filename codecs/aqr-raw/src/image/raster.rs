@@ -205,19 +205,33 @@ fn get_chunk<'a>(coded: &'a [u8], at: &mut usize) -> Result<(Tables, rans32::Dec
     let st = coded.get(*at..at.checked_add(ns).ok_or(Error("corrupt raster"))?).ok_or(corrupt)?;
     *at += ns;
     let mut r = BitR::new(tb);
-    let used: Vec<bool> = (0..TABLES).map(|_| r.bits(1) == 1).collect();
-    let mut freqs = Vec::with_capacity(TABLES);
-    for &u in &used {
-        freqs.push(if u {
-            rans32::read_table::<PROB_BITS, false>(&mut r, 256).map_err(|_| Error("corrupt raster tables"))?
-        } else {
-            vec![]
-        });
+    let mut used = [false; TABLES];
+    for u in &mut used {
+        *u = r.bits(1) == 1;
+    }
+    // (the tables one after another, each ending where `ends` tells; none for one not used)
+    let (mut freqs, mut ends) = (Vec::with_capacity(TABLES * 256), [0; TABLES]);
+    for (&u, end) in used.iter().zip(&mut ends) {
+        if u {
+            rans32::read_table_into::<PROB_BITS, false>(&mut r, 256, &mut freqs)
+                .map_err(|_| Error("corrupt raster tables"))?;
+        }
+        *end = freqs.len();
     }
     if r.overrun() {
         return Err(Error("corrupt raster tables"));
     }
-    Ok((Tables::new(&freqs), rans32::Decoder::new(st), st))
+    let of = |t: usize| &freqs[if t == 0 { 0 } else { ends[t - 1] }..ends[t]];
+    Ok((Tables::of(TABLES, of), rans32::Decoder::new(st), st))
+}
+
+/// Bytes that [`decode`] takes of [`aqr_api::stack`] for layout `f` and an output reserved for
+/// `len` bytes, in its blocks' order: the output, the rows, a chunk's frequencies and its tables.
+pub fn decode_plan(f: &Format, len: u64) -> u64 {
+    use aqr_api::stack::block;
+    let rows = block((MARGIN + 2 * (f.channels + f.row_bytes())) as u64);
+    let [lut, fc] = Tables::bytes(TABLES, 256);
+    block(len) + 2 * rows + block(4 * (TABLES * 256) as u64) + block(lut) + block(fc)
 }
 
 /// Decodes the raster of layout `f` from `coded` and `pad` into `out` (appending).
@@ -228,7 +242,7 @@ pub fn decode(coded: &[u8], pad: &[u8], f: Format, out: &mut Vec<u8>) -> Result<
     }
     // (all of it at once, as the output the module gives back is of it anyway: a flat image,
     // which takes next to nothing coded, grows no vector twice as large)
-    out.reserve(len);
+    out.reserve_exact(len);
     match f.channels {
         1 => decode_bpp::<1>(coded, pad, &f, out),
         2 => decode_bpp::<2>(coded, pad, &f, out),

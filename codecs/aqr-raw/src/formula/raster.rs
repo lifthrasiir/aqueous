@@ -9,13 +9,11 @@ use aqr_formula::{Formula, Kind, Module, Node};
 
 pub use crate::module::raster::decode;
 
-pub const MODULE: Module = Module::new("raster-recons", 1).with_memory(memory);
+pub const MODULE: Module = Module::new("raster-recons", 1).with_plan(memory);
 
-/// The memory of the module: the inputs and the raster, two rows of samples and residuals
-/// (with their margins), and a chunk's entropy tables (under 1 MiB, made anew a chunk at a time).
+/// The memory of the module: its initial memory, and its plan ([`crate::module::raster::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let f = Format::from_bytes(u.params)?;
-    Some(u.whole(4 * (f.row_bytes() as u64 + 64) + (1 << 20), 3))
+    Some(u.initial() + crate::module::raster::plan(u.params, u.inputs, u.output())?)
 }
 
 /// The application giving `samples` (exactly the raster of `fmt`), its inputs pushed to `f`.

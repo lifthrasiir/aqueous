@@ -239,6 +239,11 @@ P = W_main + Σ_태스크 (W_spawn + 태스크의 계획 버퍼) + 채널 메시
 - Wasm의 CRC-32는 처음 쓸 때 표 16KiB를 잡아 끝까지 쥔다(`crc32::WASM_TABLES`). 계획에 넣는다.
 - 실측 = 계획이다(`git_plans_hold`).
 
+**raster-recons, raster-recons-16.**
+- 청크마다 표를 읽을 때 `rans32::read_table`이 표마다 레벨 버퍼를 잡고 그 아래에서 놓았고, 표 목록(`Vec<Vec<u32>>`)과 사용 여부 목록도 따로 놓였다. 한 청크에 표가 48개(16비트는 128개)라 구멍 자리 64개를 넘길 수 있었다. 이제 aqr-common의 rans32는 레벨을 결과 버퍼 안에서 제자리로 빈도로 바꾸고(`read_table_into`), `Tables::of`는 평평한 버퍼에서 표를 만든다. 래스터는 한 청크의 빈도를 버퍼 하나에 잇달아 읽는다.
+- 출력은 `reserve_exact`로 잡는다.
+- 실측 = 계획이다(`raster_plan_holds`, `raster16_plan_holds`).
+
 ## 다음 순서
 
 1. `Module::memory_usage_in_pages`를 이미 정확한 용량을 쓰는 모듈들(exe, xsv, fasta, zip, git, pdf, png, …)부터 만든다.

@@ -12,6 +12,7 @@ default = ["encode"]
 encode = ["dep:aqr-formula", "dep:aqr-ima", "aqr-common/zstd"]
 
 [dependencies]
+aqr-api = { path = "../../crates/aqr-api", default-features = false }
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 # IMA ADPCM blocks of WAV files, in the formulas.

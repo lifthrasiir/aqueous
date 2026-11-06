@@ -366,25 +366,25 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "pdf-recons",
         version: 2,
-        sha512_256: hex("9c4c7e5147ca68491ee7665da25dfb658cfbddb31f3bb1b5e1c667203e9bb15d"),
+        sha512_256: hex("ea4577d75ed6dc77808f7b1eb3997c58e6634d532d3f7b68d9fd703c9bd180d7"),
         block: include_bytes!("../wasm/pdf-recons.block"),
     },
     Known {
         name: "png-against",
         version: 1,
-        sha512_256: hex("2b3f48c85f95ab9dc1e9b812ab9e3f8979705dd4eca22edeeb3b2c9febca338a"),
+        sha512_256: hex("aa324857187008a4891dc14fd70984927390bcaeaefb916edc26904119d3a220"),
         block: include_bytes!("../wasm/png-against.block"),
     },
     Known {
         name: "png-recons",
         version: 3,
-        sha512_256: hex("361a546e477320bd791450d779dfc02746adf34827bf8efb828a8e9e6e2dac08"),
+        sha512_256: hex("f463d1b4e03a4d48d5d2a271069865ee782c585701954aebcc06cda49577c1cd"),
         block: include_bytes!("../wasm/png-recons.block"),
     },
     Known {
         name: "png-set",
         version: 2,
-        sha512_256: hex("f7e9bdc4c62368c88a13567128d5682aac34953f598dc8828cfec69ae4e045d2"),
+        sha512_256: hex("3341156c324260db939e8456948e5c99e9baadc8f2a07bd9c075037700ba1fbc"),
         block: include_bytes!("../wasm/png-set.block"),
     },
     Known {
@@ -396,7 +396,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "psd-recons",
         version: 1,
-        sha512_256: hex("51405f531e3136ea0b93757caa7c4a55cb26d8c9fea8b2870d46be358704fb2f"),
+        sha512_256: hex("efa98154f44fa4510b50c638572e634012e4681f558b55e48890badc0b039c24"),
         block: include_bytes!("../wasm/psd-recons.block"),
     },
     Known {
@@ -414,13 +414,13 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "raster-recons-16",
         version: 1,
-        sha512_256: hex("9595f7182f109fffea3716e5e9c45ef95d79e4a40262e7586326a272eeacd29d"),
+        sha512_256: hex("18fc29bdd1322fd8d069ff0a57344aafe6b76fae763619a15842c65faa311807"),
         block: include_bytes!("../wasm/raster-recons-16.block"),
     },
     Known {
         name: "raster-recons",
         version: 1,
-        sha512_256: hex("cd9d8f522ba476d4f2f7406eba93e8a78bf86ab6e234364b7fc24aef11827579"),
+        sha512_256: hex("45c7ab855d64b50e0429f92adac65687911ff32013a1254e4c34072964270696"),
         block: include_bytes!("../wasm/raster-recons.block"),
     },
     Known {

@@ -953,6 +953,29 @@ fn raw_images() {
     assert!(modules(&f).is_empty(), "{f}");
 }
 
+/// raster-recons takes its plan at most, to the page: of PNM images of one channel and of three,
+/// of one chunk of rows and of more (raster-recons-16's in aqr-decompress's tests).
+#[test]
+fn raster_plan_holds() {
+    let modules = [aqr_decompress::built(aqr_decompress::RASTER).expect("built").sha512_256];
+    for (magic, w, h, max) in [("P5", 320, 200, 255), ("P6", 1500, 1000, 255)] {
+        let channels = if magic == "P6" { 3 } else { 1 };
+        let mut d = format!("{magic}\n{w} {h}\n{max}\n").into_bytes();
+        for y in 0..h {
+            for x in 0..w * channels {
+                let v = (x + 2 * y) * 37 + (x * y) % 11;
+                if max > 255 {
+                    d.extend_from_slice(&((v * 13) as u16).to_be_bytes());
+                } else {
+                    d.push((v / 3) as u8);
+                }
+            }
+        }
+        let what = format!("{magic} {w}x{h} of {max}");
+        assert_eq!(within_plans(&what, &d, &modules, true), 1, "{what}");
+    }
+}
+
 /// Files anywhere in the data are found, each cut to its end.
 #[test]
 fn scan_embedded() {

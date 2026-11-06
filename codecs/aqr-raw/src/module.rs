@@ -55,6 +55,15 @@ pub mod raster {
     use super::{Error, Result};
     use crate::image::raster::{self, Format};
 
+    /// The memory plan of the module ([`aqr_api::stack`]): what it takes beyond its initial
+    /// memory at most, of params `params` (`None` where they are not a layout), inputs of
+    /// `inputs` bytes and an output of `len`: what `aqr_api::whole` copies, and what decoding
+    /// takes ([`raster::decode_plan`]).
+    pub fn plan(params: &[u8], inputs: &[u64], len: u64) -> Option<u64> {
+        let fmt = Format::from_bytes(params)?;
+        Some(aqr_api::stack::whole(params.len() as u64, &[], inputs) + raster::decode_plan(&fmt, len))
+    }
+
     /// The module: the raster of `len` bytes from `params` (its layout) and `inputs` (the coded
     /// samples and the padding).
     pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
@@ -75,6 +84,12 @@ pub mod raster {
 pub mod raster16 {
     use super::{Error, Result};
     use crate::image::raster16::{self, Format};
+
+    /// The memory plan of the module, as [`super::raster::plan`]'s ([`raster16::decode_plan`]).
+    pub fn plan(params: &[u8], inputs: &[u64], len: u64) -> Option<u64> {
+        let fmt = Format::from_bytes(params)?;
+        Some(aqr_api::stack::whole(params.len() as u64, &[], inputs) + raster16::decode_plan(&fmt, len))
+    }
 
     /// The module: the raster of `len` bytes from `params` (its layout) and `inputs` (the coded
     /// samples and the padding).
