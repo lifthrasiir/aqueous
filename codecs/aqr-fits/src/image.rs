@@ -69,6 +69,22 @@ struct Model {
     noise: i64,
 }
 
+/// Bytes of a `Bit` and of a bias entry on WebAssembly, for the plans.
+pub(crate) const BIT_BYTES: u64 = 4;
+const BIAS_BYTES: u64 = 16;
+#[cfg(target_family = "wasm")]
+const _: () = assert!(size_of::<Bit>() as u64 == BIT_BYTES && size_of::<(i64, i32)>() as u64 == BIAS_BYTES);
+
+/// The memory plan of [`decode`] ([`aqr_api::stack`]), of images `width` wide: the model's
+/// tables and its rows of the residuals' lengths.
+pub fn decode_plan(width: usize) -> u64 {
+    use aqr_api::stack::block;
+    block(BIT_BYTES * (LEN_TREE * ACT) as u64)
+        + block(BIT_BYTES * ((12 * 33) << MODELLED) as u64)
+        + block(BIAS_BYTES * BIAS as u64)
+        + 2 * block(width as u64 + 2)
+}
+
 /// The prediction of a pixel and its contexts.
 struct Pred {
     pred: i64,
@@ -223,10 +239,10 @@ pub fn encode(image: &[u32], s: Shape, known: Option<&[bool]>) -> Coded {
 }
 
 /// Decodes into `image` the pixels not `known` (those are there already).
-pub fn decode(c: &Coded, s: Shape, image: &mut [u32], known: Option<&[bool]>) -> crate::Result<()> {
+pub fn decode(model: &[u8], raw: &[u8], s: Shape, image: &mut [u32], known: Option<&[bool]>) -> crate::Result<()> {
     let mut m = Model::new(s);
-    let mut ac = ArithDecoder::new(&c.model);
-    let mut raw = bits::Reader::new(&c.raw, 0);
+    let mut ac = ArithDecoder::new(model);
+    let mut raw = bits::Reader::new(raw, 0);
     for y in 0..image.len().div_ceil(s.width) {
         let (done, rest) = image.split_at_mut(y * s.width);
         let up = (y > 0).then(|| &done[(y - 1) * s.width..]);
@@ -311,15 +327,23 @@ pub fn encode_as(image: &[u32], s: Shape, known: Option<&[bool]>, mode: Mode) ->
     }
 }
 
-/// Decodes into `image` the pixels of [`encode_as`] in `mode`.
-pub fn decode_as(c: &Coded, s: Shape, image: &mut [u32], known: Option<&[bool]>, mode: Mode) -> crate::Result<()> {
+/// Decodes into `image` the pixels of [`encode_as`] in `mode`, from its coded part `model` and
+/// raw bits `raw`.
+pub fn decode_as(
+    model: &[u8],
+    raw: &[u8],
+    s: Shape,
+    image: &mut [u32],
+    known: Option<&[bool]>,
+    mode: Mode,
+) -> crate::Result<()> {
     match mode {
-        Mode::Predict => decode(c, s, image, known),
+        Mode::Predict => decode(model, raw, s, image, known),
         Mode::Pyramid => {
             if known.is_some() || !image.len().is_multiple_of(s.width) {
                 return Err(crate::corrupt());
             }
-            let v = crate::pyramid::decode(c, s.width, image.len() / s.width)?;
+            let v = crate::pyramid::decode(model, raw, s.width, image.len() / s.width)?;
             for (p, v) in image.iter_mut().zip(v) {
                 *p = v as u32 & s.mask();
             }
@@ -371,7 +395,7 @@ mod tests {
                     let c = encode(&image, s, k);
                     let mut back: Vec<u32> =
                         image.iter().zip(&known).map(|(&p, &kn)| if k.is_some() && kn { p } else { 0 }).collect();
-                    decode(&c, s, &mut back, k).unwrap();
+                    decode(&c.model, &c.raw, s, &mut back, k).unwrap();
                     assert_eq!(back, image);
                 }
             }

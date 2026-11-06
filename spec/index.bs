@@ -6011,12 +6011,12 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/fasta-recons.wasm" title="crates/aqr-modules/wasm/fasta-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-fasta/FORMAT.md" title="codecs/aqr-fasta/FORMAT.md">R</a>
     <tr>
-      <td><code>e958c876dbb3edc813bc68d3cf483a43152c06c4d371369166d469e45c701ecd</code>
+      <td><code>20a656984d70844d4658cb62af20d2437d100e2e174e8ac4bb58a6301f4a5a27</code>
       <td>fits-recons-image@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/fits-recons-image.wasm" title="crates/aqr-modules/wasm/fits-recons-image.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-fits/FORMAT.md" title="codecs/aqr-fits/FORMAT.md">R</a>
     <tr>
-      <td><code>3a860f0ccf2378b995263b755b50956d3a554263c87dfa5df6ddd8a452ac28f4</code>
+      <td><code>aaac27922778006ed720319e6502de670b090639f56f3fa7560def258cd505de</code>
       <td>fits-recons-rice@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/fits-recons-rice.wasm" title="crates/aqr-modules/wasm/fits-recons-rice.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-fits/FORMAT.md" title="codecs/aqr-fits/FORMAT.md">R</a>

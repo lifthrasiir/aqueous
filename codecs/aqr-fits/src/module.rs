@@ -1,7 +1,7 @@
 //! The code of the modules (see `formula`, and FORMAT.md), which needs no aqr-formula, so that
 //! aqr-modules builds it into their Wasm modules.
 
-use crate::image::{self, Coded, Mode, Shape};
+use crate::image::{self, Mode, Shape};
 use crate::table::{self, Column};
 use crate::tiled::{self, Layout};
 use crate::{Error, Result, corrupt};
@@ -98,6 +98,30 @@ pub fn within(n: u64, coded: usize) -> bool {
     n <= (coded as u64 + 64) * 256
 }
 
+/// The memory plan of [`image::decode_as`] ([`aqr_api::stack`]) in `mode`, of `n` pixels `w`
+/// wide.
+fn decoding_plan(mode: Mode, n: u64, w: usize) -> u64 {
+    match mode {
+        Mode::Predict => image::decode_plan(w),
+        Mode::Pyramid => crate::pyramid::decode_plan(w, (n / w as u64) as usize),
+    }
+}
+
+/// The memory plan of `fits-recons-image` ([`aqr_api::stack`]): what it takes beyond its
+/// initial memory at most, of `params`, the model's coded part and raw bits of `model` and
+/// `raw` bytes, and `len` bytes of output: what `aqr_api::whole` copies, the numbers, then the
+/// decoder's state or the output. `None` for params it does not take.
+pub fn image_plan(params: &[u8], model: u64, raw: u64, len: u64) -> Option<u64> {
+    use aqr_api::stack::{block, whole};
+    let p = Pixels::from_bytes(params)?;
+    let n = len / p.bytes() as u64;
+    Some(
+        whole(params.len() as u64, &[], &[model, raw])
+            + block(4 * n)
+            + decoding_plan(p.mode, n, p.width).max(block(len)),
+    )
+}
+
 /// `fits-recons-image`: the data of an image of `len` bytes from `params` ([`Pixels`]) and `inputs`
 /// (the model's coded part and raw bits).
 pub fn image(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
@@ -109,9 +133,57 @@ pub fn image(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
         return Err(corrupt());
     }
     let mut numbers = vec![0u32; len / p.bytes()];
-    let c = Coded { model: model.to_vec(), raw: raw.to_vec() };
-    image::decode_as(&c, p.shape(), &mut numbers, None, p.mode)?;
+    image::decode_as(model, raw, p.shape(), &mut numbers, None, p.mode)?;
     Ok(p.data(&numbers))
+}
+
+/// Bytes of a span on WebAssembly, for the plan.
+const SPAN_BYTES: u64 = 8;
+#[cfg(target_family = "wasm")]
+const _: () = assert!(size_of::<tiled::Span>() as u64 == SPAN_BYTES);
+
+/// The memory plan of `fits-recons-rice` ([`aqr_api::stack`]): what it takes beyond its initial
+/// memory at most, of `params`, inputs of `inputs` bytes, the table's rows `rows` and the bitmap
+/// of the rebuilt tiles `rebuilt` (the first and third inputs). Throughout, what
+/// `aqr_api::whole` copies, the layout's axes, the rebuilt tiles, the spans, the data unit and
+/// the image; then by phase, the largest of
+/// - tiles not rebuilt decoded into the image: which pixels are coded, the runs of a tile and
+///   the tile's axes or its pixels and codes;
+/// - the pixels decoded: which pixels are coded and which are known, and the decoder's state;
+/// - the codes decoded: the codes and their model, and the runs, the pixels and the
+///   differences of a tile;
+/// - the tiles' streams written: the codes, the runs and the pixels of a tile, and its
+///   differences and its stream.
+///
+/// `None` for params or inputs it does not take.
+pub fn rice_plan(params: &[u8], inputs: &[u64], rows: &[u8], rebuilt: &[u8]) -> Option<u64> {
+    use aqr_api::stack::{block, whole};
+    let mut at = 0;
+    let l = Layout::from_bytes(params, &mut at)?;
+    let &[mode] = &params[at..] else { return None };
+    let mode = Mode::from_byte(mode)?;
+    let r = l.rows;
+    let rebuilt = bitmap(rebuilt, r as usize).ok()?;
+    let spans = tiled::spans(&l, rows)?;
+    let (p, axes) = (l.pixels()?, l.dims.len() as u64);
+    let (t, runs) = (l.largest_tile(), 8 * l.largest_runs());
+    let k = tiled::codes(&l, &rebuilt) as u64;
+    let s = spans.iter().zip(&rebuilt).filter(|x| *x.1).map(|x| x.0.len as u64).max().unwrap_or(0);
+    let tile_axes = 3 * block(8 * axes);
+    let base = whole(params.len() as u64, &[], inputs)
+        + 2 * block(8 * axes)
+        + block(r)
+        + block(SPAN_BYTES * r)
+        + block(l.len)
+        + block(4 * p);
+    let kept = block(p) + block(runs) + tile_axes.max(block(4 * t) + block(l.rice.blocks(t as usize) as u64));
+    let known = if rebuilt.iter().all(|&b| b) { 0 } else { block(p) };
+    let decoding = block(p) + known + decoding_plan(mode, p, l.width());
+    let tile = block(runs) + block(4 * t);
+    let model = block(image::BIT_BYTES * (tiled::CODE_TREE * tiled::CODE_TREE) as u64);
+    let codes = block(k) + model + tile + block(4 * t) + tile_axes;
+    let streams = block(k) + tile + tile_axes.max(block(4 * t) + block(s));
+    Some(base + kept.max(decoding).max(codes).max(streams))
 }
 
 /// `fits-recons-rice`: a data unit of tile-compressed image from `params` ([`Layout`]) and `inputs`
@@ -132,9 +204,14 @@ pub fn rice(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     let mut image = vec![0u32; pixels as usize];
     let coded = tiled::pixels_kept(&d, &l, &spans, &rebuilt, &mut image);
     let shape = Shape { width: l.width(), bits: l.rice.bits(), signed: l.rice.bytepix > 1 };
-    let c = Coded { model: model.to_vec(), raw: raw.to_vec() };
-    let known = (!coded.iter().all(|&c| c)).then(|| coded.iter().map(|&c| !c).collect::<Vec<_>>());
-    image::decode_as(&c, shape, &mut image, known.as_deref(), mode)?;
+    let known = (!coded.iter().all(|&c| c)).then(|| {
+        let mut k = Vec::with_capacity(coded.len());
+        k.extend(coded.iter().map(|&c| !c));
+        k
+    });
+    image::decode_as(model, raw, shape, &mut image, known.as_deref(), mode)?;
+    drop(known);
+    drop(coded);
     let codes = tiled::decode_codes(&l, &rebuilt, &image, codes).ok_or_else(corrupt)?;
     tiled::rebuild(&mut d, &l, &spans, &rebuilt, &image, &codes).ok_or(Error("tiles"))?;
     Ok(d)
@@ -145,7 +222,9 @@ fn bitmap(b: &[u8], n: usize) -> Result<Vec<bool>> {
     if b.len() != n.div_ceil(8) {
         return Err(corrupt());
     }
-    Ok((0..n).map(|i| b[i / 8] >> (i % 8) & 1 != 0).collect())
+    let mut v = Vec::with_capacity(n);
+    v.extend((0..n).map(|i| b[i / 8] >> (i % 8) & 1 != 0));
+    Ok(v)
 }
 
 /// The bits of `bitmap`.

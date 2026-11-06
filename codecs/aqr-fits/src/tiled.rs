@@ -140,6 +140,28 @@ impl Layout {
         (start.checked_add(len)? <= self.len).then_some(Span { start: start as usize, len: len as usize })
     }
 
+    /// Pixels of the largest tile, and runs in it ([`Layout::runs`]).
+    pub fn largest_tile(&self) -> u64 {
+        (0..self.dims.len()).map(|k| self.tile[k].min(self.dims[k])).product()
+    }
+
+    pub fn largest_runs(&self) -> u64 {
+        (1..self.dims.len()).map(|k| self.tile[k].min(self.dims[k])).product()
+    }
+
+    /// Pixels of tile `i`.
+    pub fn tile_pixels(&self, i: u64) -> u64 {
+        let mut rest = i;
+        let mut n = 1;
+        for k in 0..self.dims.len() {
+            let count = self.dims[k].div_ceil(self.tile[k]);
+            let lo = rest % count * self.tile[k];
+            rest /= count;
+            n *= self.tile[k].min(self.dims[k] - lo);
+        }
+        n
+    }
+
     /// The runs of tile `i`'s pixels in the image, in its order: (offset, pixels).
     pub fn runs(&self, i: u64, out: &mut Vec<(usize, usize)>) {
         out.clear();
@@ -204,7 +226,7 @@ impl Layout {
         if !(1..=999).contains(&n) {
             return None;
         }
-        let (mut dims, mut tile) = (Vec::new(), Vec::new());
+        let (mut dims, mut tile) = (Vec::with_capacity(n as usize), Vec::with_capacity(n as usize));
         for _ in 0..n {
             dims.push(num()?);
             tile.push(num()?);
@@ -237,7 +259,10 @@ pub struct Parts {
 /// The tiles' spans, if they are in order of their offsets and apart; tiles of no stream
 /// (zero bytes) are left out of the order.
 pub fn spans(l: &Layout, rows: &[u8]) -> Option<Vec<Span>> {
-    let spans: Vec<Span> = (0..l.rows as usize).map(|i| l.span(rows, i)).collect::<Option<_>>()?;
+    let mut spans = Vec::with_capacity(l.rows as usize);
+    for i in 0..l.rows as usize {
+        spans.push(l.span(rows, i)?);
+    }
     let mut end = (l.row * l.rows) as usize;
     for s in spans.iter().filter(|s| s.len > 0) {
         if s.start < end {
@@ -304,7 +329,7 @@ fn get_tile(image: &[u32], runs: &[(usize, usize)], out: &mut Vec<u32>) {
 /// the rebuilt tiles.
 pub fn pixels_kept(d: &[u8], l: &Layout, spans: &[Span], rebuilt: &[bool], image: &mut [u32]) -> Vec<bool> {
     let mut coded = vec![false; image.len()];
-    let mut runs = Vec::new();
+    let mut runs = Vec::with_capacity(l.largest_runs() as usize);
     for (i, s) in spans.iter().enumerate() {
         l.runs(i as u64, &mut runs);
         if rebuilt[i] {
@@ -349,7 +374,7 @@ pub fn layout(l: &Layout, rows: &[u8], residue: &[u8], rebuilt: &[bool]) -> Opti
 
 /// Writes into `d` (of [`layout`]) the streams of the rebuilt tiles from `image` and `codes`.
 pub fn rebuild(d: &mut [u8], l: &Layout, spans: &[Span], rebuilt: &[bool], image: &[u32], codes: &[u8]) -> Option<()> {
-    let (mut runs, mut px) = (Vec::new(), Vec::new());
+    let (mut runs, mut px) = tile_buffers(l);
     let mut c = 0;
     for (i, s) in spans.iter().enumerate() {
         if !rebuilt[i] {
@@ -368,9 +393,21 @@ pub fn rebuild(d: &mut [u8], l: &Layout, spans: &[Span], rebuilt: &[bool], image
     (c == codes.len()).then_some(())
 }
 
+/// The runs and the pixels of a tile, as vectors to hold the largest.
+fn tile_buffers(l: &Layout) -> (Vec<(usize, usize)>, Vec<u32>) {
+    (Vec::with_capacity(l.largest_runs() as usize), Vec::with_capacity(l.largest_tile() as usize))
+}
+
+/// Codes of the rebuilt tiles' blocks.
+pub fn codes(l: &Layout, rebuilt: &[bool]) -> usize {
+    let n = rebuilt.iter().enumerate().filter(|r| *r.1);
+    n.map(|(i, _)| l.rice.blocks(l.tile_pixels(i as u64) as usize)).sum()
+}
+
 /// Calls `f` with each block of the rebuilt tiles: its differences, in order.
 fn blocks(l: &Layout, rebuilt: &[bool], image: &[u32], mut f: impl FnMut(&[u32]) -> Option<()>) -> Option<()> {
-    let (mut runs, mut px, mut z) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut runs, mut px) = tile_buffers(l);
+    let mut z = Vec::with_capacity(px.capacity());
     for (i, _) in rebuilt.iter().enumerate().filter(|r| *r.1) {
         l.runs(i as u64, &mut runs);
         get_tile(image, &runs, &mut px);
@@ -383,7 +420,7 @@ fn blocks(l: &Layout, rebuilt: &[bool], image: &[u32], mut f: impl FnMut(&[u32])
 }
 
 /// Codes, as 5 bits of a tree per context.
-const CODE_TREE: usize = 32;
+pub(crate) const CODE_TREE: usize = 32;
 
 /// The codes of the rebuilt tiles' blocks coded, each in the context of the code that codes
 /// its block the shortest ([`rice::shortest`]). The image is known when they are decoded.
@@ -408,9 +445,9 @@ pub fn encode_codes(l: &Layout, rebuilt: &[bool], image: &[u32], codes: &[u8]) -
 
 /// The codes of [`encode_codes`].
 pub fn decode_codes(l: &Layout, rebuilt: &[bool], image: &[u32], coded: &[u8]) -> Option<Vec<u8>> {
+    let mut codes = Vec::with_capacity(self::codes(l, rebuilt));
     let mut ac = ArithDecoder::new(coded);
     let mut m = vec![Bit::default(); CODE_TREE * CODE_TREE];
-    let mut codes = Vec::new();
     blocks(l, rebuilt, image, |b| {
         let tree = &mut m[rice::shortest(b, l.rice) as usize * CODE_TREE..][..CODE_TREE];
         let mut node = 1;

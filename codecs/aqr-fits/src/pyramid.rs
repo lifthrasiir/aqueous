@@ -215,16 +215,31 @@ fn splits(w: usize, h: usize, levels: usize) -> bool {
     w >= 4 && h >= 4 && levels < LEVELS
 }
 
-/// The coefficients of a level's blocks, as coded: `hc`, `hx'`, `hy'` per block, and the next
-/// level's values.
+/// The coefficients of a level's blocks, as coded: `hc`, `hx'`, `hy'` per block.
 struct Bands {
     c: [Vec<i64>; 3],
-    next: Vec<i64>,
 }
 
-fn transform(v: &[i64], l: &Level) -> Bands {
+impl Bands {
+    fn with_capacity(n: usize) -> Bands {
+        Bands { c: [Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n)] }
+    }
+
+    /// The bands as `n` zeros each (within their capacity).
+    fn zeros(&mut self, n: usize) {
+        for c in &mut self.c {
+            c.clear();
+            c.resize(n, 0);
+        }
+    }
+}
+
+/// The bands of a level's blocks, and the next level's values.
+fn transform(v: &[i64], l: &Level) -> (Bands, Vec<i64>) {
     let (bw, bh) = l.blocks();
-    let mut b = Bands { c: [vec![0; bw * bh], vec![0; bw * bh], vec![0; bw * bh]], next: vec![0; bw * bh] };
+    let mut b = Bands::with_capacity(bw * bh);
+    b.zeros(bw * bh);
+    let mut next = vec![0; bw * bh];
     for i in 0..bh {
         let r0 = (l.py + 2 * i) * l.w + l.px;
         let r1 = r0 + l.w;
@@ -239,14 +254,14 @@ fn transform(v: &[i64], l: &Level) -> Bands {
             b.c[0][k] = hc;
             b.c[1][k] = (hx - p) >> 1;
             b.c[2][k] = (hy - p) >> 1;
-            b.next[k] = h0 >> 2;
+            next[k] = h0 >> 2;
         }
     }
-    b
+    (b, next)
 }
 
-/// The values of the level's blocks from its bands.
-fn inverse(b: &Bands, l: &Level, v: &mut [i64]) {
+/// The values of the level's blocks from its bands and the next level's values.
+fn inverse(b: &Bands, next: &[i64], l: &Level, v: &mut [i64]) {
     let (bw, bh) = l.blocks();
     for i in 0..bh {
         let r0 = (l.py + 2 * i) * l.w + l.px;
@@ -258,7 +273,7 @@ fn inverse(b: &Bands, l: &Level, v: &mut [i64]) {
             let hx = b.c[1][k].wrapping_mul(2).wrapping_add(p);
             let hy = b.c[2][k].wrapping_mul(2).wrapping_add(p);
             let r = (hx.wrapping_add(hy).wrapping_sub(hc)).rem_euclid(4);
-            let h0 = b.next[k].wrapping_mul(4).wrapping_add(r);
+            let h0 = next[k].wrapping_mul(4).wrapping_add(r);
             v[r0 + 2 * j] = h0.wrapping_sub(hx).wrapping_sub(hy).wrapping_add(hc) >> 2;
             v[r0 + 2 * j + 1] = h0.wrapping_sub(hx).wrapping_add(hy).wrapping_sub(hc) >> 2;
             v[r1 + 2 * j] = h0.wrapping_add(hx).wrapping_sub(hy).wrapping_sub(hc) >> 2;
@@ -361,10 +376,10 @@ pub fn encode(v: Vec<i64>, w: usize, h: usize) -> Coded {
     let (mut cw, mut ch) = (w, h);
     while splits(cw, ch, levels.len()) {
         let l = (0..4).map(|p| Level { w: cw, h: ch, px: p & 1, py: p >> 1 }).min_by_key(|l| cost(&cur, l)).unwrap();
-        let mut b = transform(&cur, &l);
+        let (b, next) = transform(&cur, &l);
         let mut edge = Vec::new();
         border(&cur, &l, |at, pred| edge.push(cur[at].wrapping_sub(pred)));
-        cur = std::mem::take(&mut b.next);
+        cur = next;
         (cw, ch) = l.blocks();
         levels.push((l, b, edge));
     }
@@ -403,10 +418,41 @@ pub fn encode(v: Vec<i64>, w: usize, h: usize) -> Coded {
     Coded { model: e.ac.finish(), raw: e.raw.finish() }
 }
 
-/// The `w` × `h` values of [`encode`].
-pub fn decode(c: &Coded, w: usize, h: usize) -> crate::Result<Vec<i64>> {
-    let mut d = Decoder { m: Models::new(), ac: ArithDecoder::new(&c.model), raw: bits::Reader::new(&c.raw, 0) };
-    let mut levels: Vec<Level> = Vec::new();
+/// The size of the next level of a level of `w` × `h` at phase 0, the largest of its phases,
+/// where it is taken apart (`levels` before it).
+fn next_largest(w: usize, h: usize, levels: usize) -> Option<(usize, usize)> {
+    splits(w, h, levels).then_some((w / 2, h / 2))
+}
+
+/// Bytes of a level on WebAssembly, for the plan.
+const LEVEL_BYTES: u64 = 16;
+#[cfg(target_family = "wasm")]
+const _: () = assert!(size_of::<Level>() as u64 == LEVEL_BYTES);
+
+/// The memory plan of [`decode`] ([`aqr_api::stack`]), of `w` × `h` values: the models, the
+/// levels, the values of the first level and of the second (each level's values go to one of
+/// the two by its parity, the next level's in the other), and the bands of the first two levels
+/// (each level's, the parent's of the next, by parity likewise).
+pub fn decode_plan(w: usize, h: usize) -> u64 {
+    use crate::image::BIT_BYTES;
+    use aqr_api::stack::block;
+    let models =
+        block(BIT_BYTES * (CONTEXTS * LEN_TREE) as u64) + block(BIT_BYTES * (MANT_CONTEXTS * MANT_NODES) as u64);
+    let first = next_largest(w, h, 0);
+    let n1 = first.map_or(0, |(w, h)| w * h) as u64;
+    let n2 = first.and_then(|(w, h)| next_largest(w, h, 1)).map_or(0, |(w, h)| w * h) as u64;
+    models
+        + block(LEVEL_BYTES * LEVELS as u64)
+        + block(8 * (w * h) as u64)
+        + block(8 * n1)
+        + 3 * block(8 * n1)
+        + 3 * block(8 * n2)
+}
+
+/// The `w` × `h` values of [`encode`], from its coded part `model` and raw bits `raw`.
+pub fn decode(model: &[u8], raw: &[u8], w: usize, h: usize) -> crate::Result<Vec<i64>> {
+    let mut d = Decoder { m: Models::new(), ac: ArithDecoder::new(model), raw: bits::Reader::new(raw, 0) };
+    let mut levels: Vec<Level> = Vec::with_capacity(LEVELS);
     let (mut cw, mut ch) = (w, h);
     let mut ph = d.m.phase;
     while splits(cw, ch, levels.len()) {
@@ -416,47 +462,58 @@ pub fn decode(c: &Coded, w: usize, h: usize) -> crate::Result<Vec<i64>> {
         (cw, ch) = l.blocks();
         levels.push(l);
     }
-    let mut cur = vec![0i64; cw * ch];
-    let (mut last, mut prev) = (0i64, 0u64);
-    for x in cur.iter_mut() {
-        let dv = d.get(TOP + bucket(prev), MANT_TOP);
-        prev = dv.unsigned_abs();
-        *x = last.wrapping_add(dv);
-        last = *x;
+    // the values of each level by its parity, the first level's (or the last's, of none) in
+    // `even`; the bands likewise
+    let blocks = |lv: usize| levels.get(lv).map_or(0, |l: &Level| l.blocks().0 * l.blocks().1);
+    let mut even: Vec<i64> = Vec::with_capacity(w * h);
+    let mut odd: Vec<i64> = Vec::with_capacity(blocks(0));
+    let mut bands = [Bands::with_capacity(blocks(0)), Bands::with_capacity(blocks(1))];
+    {
+        let cur = if levels.len().is_multiple_of(2) { &mut even } else { &mut odd };
+        cur.resize(cw * ch, 0);
+        let (mut last, mut prev) = (0i64, 0u64);
+        for x in cur.iter_mut() {
+            let dv = d.get(TOP + bucket(prev), MANT_TOP);
+            prev = dv.unsigned_abs();
+            *x = last.wrapping_add(dv);
+            last = *x;
+        }
     }
-    let mut above: Option<(Level, Bands)> = None;
     for lv in (0..levels.len()).rev() {
         let l = levels[lv];
         let (bw, bh) = l.blocks();
-        let mut b = Bands { c: [vec![0; bw * bh], vec![0; bw * bh], vec![0; bw * bh]], next: cur };
-        let up = above.as_ref().map(|(l, b)| (l, b));
+        let (values, next) = if lv.is_multiple_of(2) { (&mut even, &odd) } else { (&mut odd, &even) };
+        let [b0, b1] = &mut bands;
+        let (b, above) = if lv.is_multiple_of(2) { (b0, &*b1) } else { (b1, &*b0) };
+        b.zeros(bw * bh);
+        let up = levels.get(lv + 1).map(|l| (l, above));
         for k in 0..bw * bh {
             for band in 0..3 {
-                let ctx = coef_ctx(&b, band, k, bw, lv, parent(k, bw, up, band));
+                let ctx = coef_ctx(b, band, k, bw, lv, parent(k, bw, up, band));
                 b.c[band][k] = d.get(ctx, mant_ctx(band, lv));
             }
         }
-        let mut values = vec![0i64; l.w * l.h];
-        inverse(&b, &l, &mut values);
-        let mut prev = 0u64;
-        let mut at_pred = Vec::new();
-        border(&values, &l, |at, pred| at_pred.push((at, pred)));
+        values.clear();
+        values.resize(l.w * l.h, 0);
+        inverse(b, next, &l, values);
         // (each border value's prediction is of a block or of a border value before it)
-        for (at, _) in at_pred {
-            let (x, y) = (at % l.w, at / l.w);
-            let mut pred = 0;
-            border_pred(&values, &l, x, y, &mut pred);
-            let dv = d.get(BORDER + bucket(prev), MANT_BORDER);
-            prev = dv.unsigned_abs();
-            values[at] = pred.wrapping_add(dv);
+        let mut prev = 0u64;
+        for y in 0..l.h {
+            for x in 0..l.w {
+                if !l.in_blocks(x, y) {
+                    let mut pred = 0;
+                    border_pred(values, &l, x, y, &mut pred);
+                    let dv = d.get(BORDER + bucket(prev), MANT_BORDER);
+                    prev = dv.unsigned_abs();
+                    values[y * l.w + x] = pred.wrapping_add(dv);
+                }
+            }
         }
-        above = Some((l, b));
-        cur = values;
     }
     if d.ac.overrun() || d.raw.overrun() {
         return Err(crate::corrupt());
     }
-    Ok(cur)
+    Ok(even)
 }
 
 #[cfg(test)]
@@ -472,7 +529,7 @@ mod tests {
                 let v: Vec<i64> =
                     (0..w * h).map(|i| (i as i64 * 3) + rng.below(spread) as i64 - (spread / 2) as i64).collect();
                 let c = encode(v.clone(), w, h);
-                assert_eq!(decode(&c, w, h).unwrap(), v, "{w}x{h} {spread}");
+                assert_eq!(decode(&c.model, &c.raw, w, h).unwrap(), v, "{w}x{h} {spread}");
             }
         }
     }

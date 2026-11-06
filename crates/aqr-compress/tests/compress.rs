@@ -2092,7 +2092,8 @@ fn xsv_mszip_plans_hold() {
 /// plans, exactly: of the HDF5 and FITS fixtures.
 #[test]
 fn hdf5_fits_plans_hold() {
-    let modules = [aqr_decompress::HDF5_FLOAT, aqr_decompress::FITS_TABLE];
+    let modules =
+        [aqr_decompress::FITS_TABLE, aqr_decompress::HDF5_FLOAT, aqr_decompress::FITS_IMAGE, aqr_decompress::FITS_RICE];
     let modules = modules.map(|m| aqr_decompress::built(m).expect("built").sha512_256);
     let mut seen = 0;
     for dir in ["codecs/aqr-hdf5/tests/data", "codecs/aqr-fits/tests/data"] {
@@ -2138,7 +2139,21 @@ fn hdf5_fits_plans_hold() {
         d.extend(format!("{:<8}", format!("row{}", i % 1000)).bytes());
     }
     d.resize(d.len().next_multiple_of(2880), 0);
-    let tables = within_plans("binary table", &d, &modules[1..], true);
+    let tables = within_plans("binary table", &d, &modules[..1], true);
     assert!(tables > 0, "no application of fits-recons-table");
-    assert!(seen + tables >= 3, "{seen} + {tables} applications");
+    // an image of 640 × 480 16-bit pixels, smooth with noise
+    let (w, h) = (640, 480);
+    let mut d =
+        header(&[kv("SIMPLE", "T"), kv("BITPIX", "16"), kv("NAXIS", "2"), kv("NAXIS1", "640"), kv("NAXIS2", "480")]);
+    let mut x = 1u32;
+    for i in 0..w * h {
+        x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+        let v = ((i % w) * 7 + (i / w) * 5) as i32 + (x >> 28) as i32;
+        d.extend((v as i16).to_be_bytes());
+    }
+    d.resize(d.len().next_multiple_of(2880), 0);
+    // (in the pyramid mode, whose plan takes each level's largest phase, a page over here)
+    let images = within_plans("image", &d, &modules[2..3], false);
+    assert!(images > 0, "no application of fits-recons-image");
+    assert!(seen + tables + images >= 12, "{seen} + {tables} + {images} applications");
 }

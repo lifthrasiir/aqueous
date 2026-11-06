@@ -101,17 +101,16 @@ pub fn encode(pixels: &[u32], codes: &[u8], p: Params) -> Option<Vec<u8>> {
     if pixels.is_empty() || codes.len() != p.blocks(pixels.len()) {
         return None;
     }
-    let mut z = Vec::new();
+    let mut z = Vec::with_capacity(pixels.len());
     differences(pixels, p, &mut z);
-    let mut w = Writer::with_capacity(pixels.len() * p.bytepix as usize / 2 + 16);
+    let mut w = Writer::with_capacity(stream_bits(&z, codes, p)?.div_ceil(8) as usize);
     w.put(pixels[0], p.bits());
     for (block, &code) in z.chunks(p.block as usize).zip(codes) {
         w.put(code as u32, p.code_bits());
         match code {
-            0 if block.iter().all(|&v| v == 0) => {}
-            0 => return None,
+            0 => {}
             c if c == p.raw_code() => block.iter().for_each(|&v| w.put(v, p.bits())),
-            c if c < p.raw_code() => {
+            c => {
                 let k = c as u32 - 1;
                 for &v in block {
                     w.zeros(v >> k);
@@ -119,10 +118,28 @@ pub fn encode(pixels: &[u32], codes: &[u8], p: Params) -> Option<Vec<u8>> {
                     w.put(v, k);
                 }
             }
-            _ => return None,
         }
     }
     Some(w.finish())
+}
+
+/// Bits of the stream of differences `z` with blocks of `codes`, or None where the codes do not
+/// fit them (see [`encode`]).
+fn stream_bits(z: &[u32], codes: &[u8], p: Params) -> Option<u64> {
+    let mut n = p.bits() as u64;
+    for (block, &code) in z.chunks(p.block as usize).zip(codes) {
+        n += p.code_bits() as u64
+            + match code {
+                0 if block.iter().all(|&v| v == 0) => 0,
+                c if c == p.raw_code() => block.len() as u64 * p.bits() as u64,
+                c if c != 0 && c < p.raw_code() => {
+                    let k = c as u32 - 1;
+                    block.iter().map(|&v| (v >> k) as u64 + 1 + k as u64).sum()
+                }
+                _ => return None,
+            };
+    }
+    Some(n)
 }
 
 /// Tile `d` of `n` pixels taken apart, or None where it is not a stream of [`encode`]'s
