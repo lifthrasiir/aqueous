@@ -221,16 +221,132 @@ impl Seen {
     }
 }
 
+/// What earlier entries predict as the decoder keeps it: [`Seen`]'s, of each type id the
+/// entries of the most its chunks hold, one after another.
+struct Flat {
+    /// Where the entries of each type id start, and where the last's end.
+    starts: [u32; 257],
+    entries: Vec<(u32, u8, u32)>,
+}
+
+impl Flat {
+    /// Of `most[t]` entries of each type id `t`.
+    fn new(most: &[u32; 256]) -> Flat {
+        let mut starts = [0u32; 257];
+        for t in 0..256 {
+            starts[t + 1] = starts[t] + most[t];
+        }
+        let n = starts[256] as usize;
+        let mut entries = Vec::with_capacity(n);
+        entries.resize(n, (0, 0, 0));
+        Flat { starts, entries }
+    }
+
+    fn slot(&self, t: u8, i: usize) -> Option<usize> {
+        let (a, b) = (self.starts[t as usize] as usize, self.starts[t as usize + 1] as usize);
+        (i < b - a).then_some(a + i)
+    }
+
+    fn get(&self, t: u8, i: usize) -> (u32, u8, u32) {
+        self.slot(t, i).map_or((0, 0, 0), |k| self.entries[k])
+    }
+
+    fn set(&mut self, t: u8, i: usize, e: (u32, u8, u32)) {
+        if let Some(k) = self.slot(t, i) {
+            self.entries[k] = e;
+        }
+    }
+}
+
 /// The state of decoding: the streams, what earlier entries predict, the last string index.
 struct Dec<'a> {
     r: Vec<R<'a>>,
-    seen: Seen,
+    seen: Flat,
     last_str: u32,
+}
+
+/// The streams of the module's inputs, as [`unpack`] makes them.
+fn readers<'a>(inputs: &[&'a [u8]]) -> Result<Vec<R<'a>>> {
+    if inputs.len() != INPUTS.len() {
+        return Err(corrupt());
+    }
+    let mut st = Vec::with_capacity(s::N);
+    st.resize_with(s::N, || R::new(&[]));
+    for (group, &d) in INPUTS.iter().zip(inputs) {
+        let mut r = R::new(d);
+        let mut lens = [0usize; s::N];
+        for n in &mut lens[..group.len() - 1] {
+            *n = usize::try_from(r.var()?).map_err(|_| corrupt())?;
+        }
+        for (&l, &n) in group.iter().zip(&lens) {
+            st[l] = R::new(r.bytes(n)?);
+        }
+        st[group[group.len() - 1]] = R::new(r.rest());
+    }
+    Ok(st)
+}
+
+/// Of each type id, the most entries of its type chunks, of the chunks the head stream `head`
+/// tells (of a file of `len` bytes).
+fn type_entries(head: &[u8], len: usize) -> Result<[u32; 256]> {
+    fn walk(h: &mut R, at: usize, end: usize, most: &mut [u32; 256]) -> Result<usize> {
+        let h8 = h.bytes(8)?;
+        let (t, hs, size) = (le16(h8, 0)?, le16(h8, 2)? as usize, le32(h8, 4)? as usize);
+        if hs < 8 || size < hs || at.checked_add(size).is_none_or(|e| e > end) {
+            return Err(corrupt());
+        }
+        let rest = h.bytes(hs - 8)?;
+        let stop = at + size;
+        match h.u8()? {
+            mode::CONTAINER => {
+                let mut p = at + hs;
+                while p < stop {
+                    p = walk(h, p, stop, most)?;
+                }
+            }
+            mode::TYPE if t == ty::TYPE && hs >= 20 => {
+                let tid = rest[0] as usize;
+                most[tid] = most[tid].max(le32(rest, 4)?);
+            }
+            _ => {}
+        }
+        Ok(stop)
+    }
+    let (mut h, mut most, mut p) = (R::new(head), [0u32; 256], 0);
+    while p < len {
+        p = walk(&mut h, p, len, &mut most)?;
+    }
+    Ok(most)
+}
+
+/// Bytes of an [`R`] and of an entry of [`Flat`] on WebAssembly.
+const R_BYTES: u64 = 12;
+const ENTRY_BYTES: u64 = 12;
+#[cfg(target_family = "wasm")]
+const _: () = assert!(size_of::<R>() as u64 == R_BYTES && size_of::<(u32, u8, u32)>() as u64 == ENTRY_BYTES);
+
+/// Bytes that [`decode`] takes of [`aqr_api::stack`], of the first input `head` (where the head
+/// stream is) and a file of `len` bytes (`None` where it does not unpack), in its blocks'
+/// order: the streams, what entries predict, and the file.
+pub fn decode_plan(head: &[u8], len: u64) -> Option<u64> {
+    use aqr_api::stack::block;
+    // (the head stream the first of the first input, after the lengths)
+    let mut r = R::new(head);
+    let n = usize::try_from(r.var().ok()?).ok()?;
+    for _ in 2..INPUTS[0].len() {
+        r.var().ok()?;
+    }
+    debug_assert_eq!(INPUTS[0][0], s::HEAD);
+    let most = type_entries(r.bytes(n).ok()?, usize::try_from(len).ok()?).ok()?;
+    let n: u64 = most.iter().map(|&m| m as u64).sum();
+    Some(block(R_BYTES * s::N as u64) + block(ENTRY_BYTES * n) + block(len))
 }
 
 /// The file of `len` bytes from the module's inputs ([`INPUTS`], FORMAT.md §3).
 pub fn decode(inputs: &[&[u8]], len: usize) -> Result<Vec<u8>> {
-    let mut d = Dec { r: unpack(inputs)?.into_iter().map(R::new).collect(), seen: Seen::default(), last_str: 0 };
+    let r = readers(inputs)?;
+    let seen = Flat::new(&type_entries(r[s::HEAD].rest(), len)?);
+    let mut d = Dec { r, seen, last_str: 0 };
     let mut out = Vec::with_capacity(len);
     while out.len() < len {
         chunk(&mut d, &mut out, len)?;

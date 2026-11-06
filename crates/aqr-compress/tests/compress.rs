@@ -1472,6 +1472,9 @@ fn arsc() {
     d.extend_from_slice(&data);
     let f = roundtrip(&d, &all());
     assert_eq!(modules(&f), ["arsc-recons"]);
+    // (taking its plan, to the page)
+    let module = [aqr_decompress::built(aqr_decompress::ARSC).expect("built").sha512_256];
+    assert_eq!(within_plans("resource table", &d, &module, true), 1);
     assert_eq!(aqr_compress::kind_by_name(b"x/resources.arsc"), aqr_formula::Kind::Format("arsc"));
 }
 

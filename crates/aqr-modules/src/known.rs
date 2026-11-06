@@ -6,7 +6,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "arsc-recons",
         version: 1,
-        sha512_256: hex("20bfc68b4b1c428e44a101e29412af524f8f87c2954ccad92db5015164c63235"),
+        sha512_256: hex("96b145214cf7f09e9352d82dea6c3fca2df5e7685b1a82edde21c90d45792312"),
         block: include_bytes!("../wasm/arsc-recons.block"),
     },
     Known {
@@ -228,7 +228,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "flate-set",
         version: 1,
-        sha512_256: hex("99c0c9f0ee06f762dbfb0e5ff8bfc7cbb5f3bfbd0684adbf3282e8b42f28cd19"),
+        sha512_256: hex("2dc7c565855bf14503e3e25207bd90f184c108c33ad080a36e75b056bc1b99b7"),
         block: include_bytes!("../wasm/flate-set.block"),
     },
     Known {
