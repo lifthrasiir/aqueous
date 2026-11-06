@@ -619,26 +619,36 @@ pub fn par_map_apart<R: Send + crate::wire::Wire>(n: usize, threads: usize, f: i
 
 /// [`par_map_apart`] of work giving bytes, each result given to `each(i, bytes)` in order as
 /// it is joined (on WebAssembly, the task's result itself), rather than all of them at once:
-/// so that the caller holds no more of them than it keeps. The first error of `each` is
+/// so that the caller holds no more of them than it keeps. `start` runs once the tasks are
+/// spawned, before the first result is taken (on the calling thread alone, first): what it
+/// makes the tasks do not copy, and a result given to `each` is above it. The items run as tasks
+/// where `threads` is more than 1 and they are `alone` at least (in WebAssembly; on the calling
+/// thread otherwise, so that what they take is the caller's too). The first error of `each` is
 /// returned (the tasks still joined).
 pub fn par_each_apart<E>(
     n: usize,
     threads: usize,
+    alone: usize,
     f: impl Fn(usize) -> Vec<u8> + Sync,
+    start: impl FnOnce(),
     mut each: impl FnMut(usize, Vec<u8>) -> Result<(), E>,
 ) -> Result<(), E> {
     #[cfg(target_family = "wasm")]
-    if threads > 1 && n > 1 {
+    if threads > 1 && n >= alone.max(1) {
         let g = |i: usize, out: &mut Vec<u8>| *out = f(i);
         // SAFETY: joined below (or as they are dropped), before `g` goes
         let mut t = unsafe { aqr_api::task::spawn(n, &g) };
+        start();
         return (0..n).try_for_each(|i| each(i, t.join(i)));
     }
     #[cfg(not(target_family = "wasm"))]
     if threads > 1 && n > 1 {
+        let _ = alone;
         let all = par_map(n, threads, |i| crate::meter::task(|| f(i)));
+        start();
         return all.into_iter().enumerate().try_for_each(|(i, r)| each(i, r));
     }
+    start();
     (0..n).try_for_each(|i| each(i, f(i)))
 }
 

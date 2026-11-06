@@ -57,6 +57,12 @@ linear fit). `aqr-sqlite bench -m` reports the Rust heap beyond input and output
 encoding and decoding. Build with `--features memprof` for heap use per
 phase. Everything is in memory: there is no streaming over large files.
 
+The Wasm module lays its memory out as a stack (`aqr_api::stack`), its limit its plan
+(`transform::plan`): the groups' decoders (each column's repeated values counted from its tags
+and lengths), every index's keys (their rows counted from the records' codes, their bytes in the
+params), the scans and orders as tasks, each a copy of the instance with its own on top, and
+the pages' buffers and the file.
+
 ### Threads
 
 `-t N` (`formula::Options::threads`, and the `threads` of `formula::encode` and

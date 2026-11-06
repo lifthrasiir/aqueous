@@ -449,8 +449,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "sqlite-recons",
-        version: 1,
-        sha512_256: hex("9687dd1cd57058ff56b280d75847e0d562bb567f0803869b57383e125188d594"),
+        version: 2,
+        sha512_256: hex("68d4f3bd79c74d13a0f01550442d9eff4f55c71e7469de30edc851843d8eaeef"),
         block: include_bytes!("../wasm/sqlite-recons.block"),
     },
     Known {

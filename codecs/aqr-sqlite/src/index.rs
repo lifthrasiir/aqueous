@@ -111,6 +111,21 @@ pub struct Keys<'a> {
     /// Whether the row has all indexed columns.
     pub ok: Vec<bool>,
     pub rowids: std::borrow::Cow<'a, [i64]>,
+    /// Whether its vectors are of the room for its rows ([`Keys::with_capacity`]), not grown.
+    bounded: bool,
+}
+
+/// (Freed in the reverse of the order [`Keys::with_capacity`] takes them, for a stack.)
+impl Drop for Keys<'_> {
+    fn drop(&mut self) {
+        if let std::borrow::Cow::Owned(r) = &mut self.rowids {
+            drop(std::mem::take(r));
+        }
+        drop(std::mem::take(&mut self.ok));
+        drop(std::mem::take(&mut self.rb));
+        drop(std::mem::take(&mut self.bytes));
+        drop(std::mem::take(&mut self.vals));
+    }
 }
 
 /// The decoder's keys (copied out), as the result of a task (on WebAssembly).
@@ -134,6 +149,7 @@ impl Wire for Keys<'static> {
             rb: Wire::get(b)?,
             ok: Wire::get(b)?,
             rowids: std::borrow::Cow::Owned(Wire::get(b)?),
+            bounded: false,
         })
     }
 }
@@ -141,12 +157,84 @@ impl Wire for Keys<'static> {
 impl<'a> Keys<'a> {
     /// To be filled with `push`.
     pub fn new(map: &[u32]) -> Self {
-        Keys { map: map.to_vec(), ..Default::default() }
+        Self::over_rows(map, &[], std::borrow::Cow::Owned(Vec::new()))
+    }
+
+    /// Of no values yet, over `rows` (or none) and of the rowids `rowids`.
+    fn over_rows(map: &[u32], rows: &'a [&'a [u8]], rowids: std::borrow::Cow<'a, [i64]>) -> Self {
+        let (vals, bytes, rb, ok) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        Keys { map: map.to_vec(), vals, rows, bytes, rb, ok, rowids, bounded: false }
+    }
+
+    /// To be filled with `push` (or [`Keys::read`]) with `n` rows of `bytes` bytes of indexed
+    /// columns, in vectors of that room, none grown.
+    pub fn with_capacity(map: &[u32], n: usize, bytes: usize) -> Self {
+        let rb = if map.contains(&ROWID) { n } else { 0 };
+        Keys {
+            map: map.to_vec(),
+            vals: Vec::with_capacity(n * map.len()),
+            rows: &[],
+            bytes: Vec::with_capacity(bytes),
+            rb: Vec::with_capacity(rb),
+            ok: Vec::with_capacity(n),
+            rowids: std::borrow::Cow::Owned(Vec::with_capacity(n)),
+            bounded: true,
+        }
+    }
+
+    /// Bytes of [`aqr_api::stack`] that [`Keys::with_capacity`] takes (on WebAssembly).
+    pub fn plan(m: usize, n: usize, bytes: usize, rowid: bool) -> u64 {
+        use aqr_api::stack::block;
+        let (m, n) = (m as u64, n as u64);
+        block(4 * m) + block(8 * n * m) + block(bytes as u64) + block(8 * n * rowid as u64) + block(n) + block(8 * n)
+    }
+
+    /// Bytes of the keys of `n` rows, `bytes` bytes of indexed columns, as [`Keys::write`]
+    /// writes them: each row's values, the columns' bytes, the rowids as keys (where the rowid
+    /// is indexed), whether each row has all indexed columns, the rowids.
+    pub fn written(m: usize, n: usize, bytes: usize, rowid: bool) -> usize {
+        8 * n * m + bytes + 8 * n * rowid as usize + n + 8 * n
+    }
+
+    /// Writes the keys onto `out` (as [`Keys::written`] tells), to be [`Keys::read`].
+    pub fn write(&self, out: &mut Vec<u8>) {
+        for &(st, off) in &self.vals {
+            out.extend_from_slice(&st.to_le_bytes());
+            out.extend_from_slice(&off.to_le_bytes());
+        }
+        out.extend_from_slice(&self.bytes);
+        self.rb.iter().for_each(|b| out.extend_from_slice(b));
+        out.extend(self.ok.iter().map(|&o| o as u8));
+        self.rowids.iter().for_each(|r| out.extend_from_slice(&r.to_le_bytes()));
+    }
+
+    /// The keys that [`Keys::write`] wrote in `d`, read into these empty ones (of the room for
+    /// them, as [`Keys::with_capacity`] makes it); false where `d` is not that.
+    pub fn read(&mut self, d: &[u8]) -> bool {
+        let (m, n, b) = (self.map.len(), self.ok.capacity(), self.bytes.capacity());
+        let rowid = self.map.contains(&ROWID);
+        if d.len() != Self::written(m, n, b, rowid) {
+            return false;
+        }
+        let (vals, d) = d.split_at(8 * n * m);
+        let (bytes, d) = d.split_at(b);
+        let (rb, d) = d.split_at(8 * n * rowid as usize);
+        let (ok, rowids) = d.split_at(n);
+        let u32_at = |c: &[u8]| u32::from_le_bytes(c.try_into().unwrap());
+        self.vals.extend(vals.as_chunks::<8>().0.iter().map(|c| (u32_at(&c[..4]), u32_at(&c[4..]))));
+        self.bytes.extend_from_slice(bytes);
+        self.rb.extend(rb.as_chunks::<8>().0.iter().copied());
+        if ok.iter().any(|&o| o > 1) {
+            return false;
+        }
+        self.ok.extend(ok.iter().map(|&o| o == 1));
+        self.rowids.to_mut().extend(rowids.as_chunks::<8>().0.iter().map(|c| i64::from_le_bytes(*c)));
+        true
     }
 
     /// Over rows that outlive it.
     pub fn over(map: &[u32], rows: &'a [&'a [u8]], rowids: &'a [i64], cols: &mut Vec<(u64, u32)>) -> Self {
-        let mut k = Keys { map: map.to_vec(), rows, rowids: std::borrow::Cow::Borrowed(rowids), ..Default::default() };
+        let mut k = Self::over_rows(map, rows, std::borrow::Cow::Borrowed(rowids));
         let has_rowid = map.contains(&ROWID);
         for (&row, &rowid) in rows.iter().zip(rowids) {
             k.add(row, rowid, false, cols);
@@ -161,14 +249,25 @@ impl<'a> Keys<'a> {
         self.ok.len()
     }
 
+    /// Bytes of the indexed columns copied.
+    pub fn bytes_len(&self) -> usize {
+        self.bytes.len()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.ok.is_empty()
     }
 
     /// Adds a row (its payload and rowid), copying its indexed columns. `cols` is scratch.
     /// False if the copies outgrow 32-bit offsets.
+    /// (Where the keys were made of a room, false too where it is past it.)
     pub fn push(&mut self, row: &[u8], rowid: i64, cols: &mut Vec<(u64, u32)>) -> bool {
-        self.add(row, rowid, true, cols);
+        if self.bounded && self.ok.len() == self.ok.capacity() {
+            return false;
+        }
+        if !self.add(row, rowid, true, cols) {
+            return false;
+        }
         self.rowids.to_mut().push(rowid);
         if self.map.contains(&ROWID) {
             self.rb.push(rowid.to_be_bytes());
@@ -176,8 +275,16 @@ impl<'a> Keys<'a> {
         self.bytes.len() < u32::MAX as usize
     }
 
-    fn add(&mut self, row: &[u8], _rowid: i64, copy: bool, cols: &mut Vec<(u64, u32)>) {
+    /// Adds a row's indexed columns; false where copying them would take its bytes past their
+    /// room (where they were made of one).
+    fn add(&mut self, row: &[u8], _rowid: i64, copy: bool, cols: &mut Vec<(u64, u32)>) -> bool {
         let ok = parse(row, cols);
+        if copy && self.bounded && ok {
+            let need: usize = self.map.iter().filter_map(|&c| cols.get(c as usize)).map(|&(st, _)| st_size(st)).sum();
+            if self.bytes.len() + need > self.bytes.capacity() {
+                return false;
+            }
+        }
         self.ok.push(ok && self.map.iter().all(|&c| c == ROWID || (c as usize) < cols.len()));
         for &c in &self.map {
             match c {
@@ -196,6 +303,7 @@ impl<'a> Keys<'a> {
                 },
             }
         }
+        true
     }
 
     /// Serial type and content of indexed column `j` of row `r`.
@@ -248,13 +356,15 @@ impl Packed for u128 {
     }
 }
 
-/// Sorts packed keys (rows in ascending order) by their `nb` key bytes: LSD radix sort.
-fn sort_packed<T: Packed + Default>(v: &mut Vec<T>, nb: usize) {
+/// Sorts packed keys (rows in ascending order) by their `nb` key bytes: LSD radix sort, in
+/// `tmp` (of the same room).
+fn sort_packed(v: &mut Vec<u128>, nb: usize, tmp: &mut Vec<u128>) {
     if v.len() < 512 {
         v.sort_unstable();
         return;
     }
-    let mut tmp = vec![T::default(); v.len()];
+    tmp.clear();
+    tmp.resize(v.len(), 0);
     for i in 0..nb as u32 {
         let mut cnt = [0usize; 257];
         for &x in v.iter() {
@@ -268,13 +378,14 @@ fn sort_packed<T: Packed + Default>(v: &mut Vec<T>, nb: usize) {
             tmp[cnt[d]] = x;
             cnt[d] += 1;
         }
-        std::mem::swap(v, &mut tmp);
+        std::mem::swap(v, tmp);
     }
 }
 
-/// The rows of sorted packed keys, runs of equal keys sorted by `full`.
-fn fix_runs<T: Packed>(v: &[T], full: impl Fn(&u32, &u32) -> Ordering) -> Vec<u32> {
-    let mut ix: Vec<u32> = v.iter().map(|x| x.row()).collect();
+/// The rows of sorted packed keys into `ix`, runs of equal keys sorted by `full`.
+fn fix_runs(v: &[u128], full: impl Fn(&u32, &u32) -> Ordering, ix: &mut Vec<u32>) {
+    ix.clear();
+    ix.extend(v.iter().map(|x| x.row()));
     let n = v.len();
     let mut i = 0;
     while i < n {
@@ -287,27 +398,32 @@ fn fix_runs<T: Packed>(v: &[T], full: impl Fn(&u32, &u32) -> Ordering) -> Vec<u3
         }
         i = j;
     }
-    ix
 }
 
 /// Sorts `ix` (which comes in ascending order) by `k`, keeping ties in order: LSD radix
-/// sort over the bytes that vary.
-fn radix_sort(k: &mut Vec<u128>, ix: &mut Vec<u32>) {
+/// sort over the bytes that vary, in `tk` and `ti` (of the same room).
+fn radix_sort(k: &mut Vec<u128>, ix: &mut Vec<u32>, tk: &mut Vec<u128>, ti: &mut Vec<u32>) {
     let n = k.len();
     let k0 = k.first().copied().unwrap_or(0);
     let diff = k.iter().fold(0u128, |a, &x| a | (x ^ k0));
-    let bytes: Vec<u32> = (0..16).filter(|b| (diff >> (8 * b)) as u8 != 0).collect();
-    if n < 512 || bytes.len() > 10 {
-        let mut p: Vec<(u128, u32)> = k.iter().copied().zip(ix.iter().copied()).collect();
-        p.sort_unstable();
-        for (i, (a, b)) in p.into_iter().enumerate() {
-            k[i] = a;
-            ix[i] = b;
-        }
+    let (mut bytes, mut nb) = ([0u32; 16], 0);
+    for b in (0..16).filter(|b| (diff >> (8 * b)) as u8 != 0) {
+        bytes[nb] = b;
+        nb += 1;
+    }
+    if n < 512 || nb > 10 {
+        // (by key and row: the rows come in order, each of its key)
+        ix.sort_unstable_by_key(|&r| (k[r as usize], r));
+        tk.clear();
+        tk.extend(ix.iter().map(|&r| k[r as usize]));
+        std::mem::swap(k, tk);
         return;
     }
-    let (mut tk, mut ti) = (vec![0u128; n], vec![0u32; n]);
-    for &b in &bytes {
+    tk.clear();
+    tk.resize(n, 0);
+    ti.clear();
+    ti.resize(n, 0);
+    for &b in &bytes[..nb] {
         let mut cnt = [0usize; 257];
         for &x in k.iter() {
             cnt[(x >> (8 * b)) as u8 as usize + 1] += 1;
@@ -321,38 +437,83 @@ fn radix_sort(k: &mut Vec<u128>, ix: &mut Vec<u32>) {
             ti[cnt[d]] = i;
             cnt[d] += 1;
         }
-        std::mem::swap(k, &mut tk);
-        std::mem::swap(ix, &mut ti);
+        std::mem::swap(k, tk);
+        std::mem::swap(ix, ti);
     }
+}
+
+/// The buffers [`order_in`] works in, for `n` rows: two of keys, two of rows.
+pub struct OrderBufs {
+    a: Vec<u128>,
+    b: Vec<u128>,
+    ix: Vec<u32>,
+    ti: Vec<u32>,
+}
+
+impl OrderBufs {
+    pub fn with_capacity(n: usize) -> Self {
+        OrderBufs {
+            a: Vec::with_capacity(n),
+            b: Vec::with_capacity(n),
+            ix: Vec::with_capacity(n),
+            ti: Vec::with_capacity(n),
+        }
+    }
+
+    /// Bytes of [`aqr_api::stack`] that [`OrderBufs::with_capacity`] takes.
+    pub fn plan(n: usize) -> u64 {
+        use aqr_api::stack::block;
+        2 * block(16 * n as u64) + 2 * block(4 * n as u64)
+    }
+}
+
+/// The 64 bits of a column's prefix of an index's key, as [`order_in`] makes them: an integer
+/// column's exact code, the first 8 bytes of text or blobs (folded where the column is of
+/// NOCASE), or the rowid; descending columns inverted.
+#[derive(Clone, Copy)]
+enum Code {
+    Int(usize, u64),
+    Bytes(usize, u64, bool),
+    Rowid,
 }
 
 /// The rows of `keys` in the order of an index with key `key` (which `keys` was built
 /// for). Encoder and decoder must agree on it exactly, so ties fall back to the row number.
 pub fn order(keys: &Keys, key: &Key) -> Vec<u32> {
+    let mut out = Vec::new();
+    order_in(keys, key, &mut OrderBufs::with_capacity(keys.len()), &mut out);
+    out
+}
+
+/// [`order`] into `out` (cleared), in `bufs` (of room for the rows of `keys`).
+pub fn order_in(keys: &Keys, key: &Key, bufs: &mut OrderBufs, out: &mut Vec<u32>) {
     let m = key.cols.len();
     let n = keys.len();
     let rowids = &keys.rowids;
-    {
-        let value = |r: usize, j: usize| keys.value(r, j);
-        // A u128 prefix that orders like the key (ties are compared in full): 64 bits per
-        // column. An integer column has an exact code; text and blobs their first 8 bytes.
-        let st_of = |r: usize, j: usize| keys.vals[r * m + j].0 as u64;
-        let code = |j: usize| -> Option<Box<dyn Fn(usize) -> u64 + '_>> {
-            let f = key.flags[j];
-            let inv = if f & F_DESC != 0 { u64::MAX } else { 0 };
-            if (0..n).all(|r| is_int(st_of(r, j))) {
-                return Some(Box::new(move |r| {
-                    let (st, v) = value(r, j);
-                    (int_value(st, v) as u64 ^ (1 << 63)) ^ inv
-                }));
+    let value = |r: usize, j: usize| keys.value(r, j);
+    // A u128 prefix that orders like the key (ties are compared in full): 64 bits per
+    // column. An integer column has an exact code; text and blobs their first 8 bytes.
+    let st_of = |r: usize, j: usize| keys.vals[r * m + j].0 as u64;
+    let code = |j: usize| -> Option<Code> {
+        let f = key.flags[j];
+        let inv = if f & F_DESC != 0 { u64::MAX } else { 0 };
+        if (0..n).all(|r| is_int(st_of(r, j))) {
+            return Some(Code::Int(j, inv));
+        }
+        let text = (0..n).all(|r| class(st_of(r, j)) == 2);
+        let blob = (0..n).all(|r| class(st_of(r, j)) == 3);
+        if !text && !blob {
+            return None;
+        }
+        Some(Code::Bytes(j, inv, text && f & F_NOCASE != 0))
+    };
+    let eval = |c: Code, r: usize| -> u64 {
+        match c {
+            Code::Int(j, inv) => {
+                let (st, v) = value(r, j);
+                (int_value(st, v) as u64 ^ (1 << 63)) ^ inv
             }
-            let text = (0..n).all(|r| class(st_of(r, j)) == 2);
-            let blob = (0..n).all(|r| class(st_of(r, j)) == 3);
-            if !text && !blob {
-                return None;
-            }
-            let fold = text && f & F_NOCASE != 0;
-            Some(Box::new(move |r| {
+            Code::Bytes(j, inv, fold) => {
                 let (_, b) = value(r, j);
                 let mut p = [0u8; 8];
                 let k = b.len().min(8);
@@ -361,65 +522,71 @@ pub fn order(keys: &Keys, key: &Key) -> Vec<u32> {
                     p.make_ascii_lowercase();
                 }
                 u64::from_be_bytes(p) ^ inv
-            }))
-        };
-        let exact0 = m > 0 && (0..n).all(|r| is_int(st_of(r, 0)));
-        let hi = if m > 0 { code(0) } else { None };
-        let lo: Option<Box<dyn Fn(usize) -> u64 + '_>> = if !exact0 {
-            None
-        } else if m == 1 {
-            Some(Box::new(|r: usize| rowids[r] as u64 ^ (1 << 63)))
-        } else {
-            code(1)
-        };
-        let prefix = |r: usize| -> u128 {
-            let h = hi.as_ref().map_or(0, |f| f(r)) as u128;
-            let l = lo.as_ref().map_or(0, |f| f(r)) as u128;
-            (h << 64) | l
-        };
-        let full = |x: &u32, y: &u32| {
-            let (a, b) = (*x as usize, *y as usize);
-            for j in 0..m {
-                let (sa, va) = value(a, j);
-                let (sb, vb) = value(b, j);
-                let o = key_cmp(key.flags[j], sa, va, sb, vb);
-                if o != Ordering::Equal {
-                    return o;
-                }
             }
-            rowids[a].cmp(&rowids[b]).then(a.cmp(&b))
-        };
-        // Only the bytes of the prefix that vary matter: taken most significant first, they
-        // order like it. Few of them pack with the row number into one u64 or u128.
-        let k0 = if n > 0 { prefix(0) } else { 0 };
-        let diff = (0..n).fold(0u128, |a, r| a | (prefix(r) ^ k0));
-        let bytes: Vec<u32> = (0..16).rev().filter(|b| (diff >> (8 * b)) as u8 != 0).collect();
-        let compact = |x: u128| bytes.iter().fold(0u128, |a, &b| (a << 8) | ((x >> (8 * b)) as u8) as u128);
-        if bytes.len() <= 4 {
-            let mut v: Vec<u64> = (0..n).map(|r| ((compact(prefix(r)) as u64) << 32) | r as u64).collect();
-            sort_packed(&mut v, bytes.len());
-            fix_runs(&v, full)
-        } else if bytes.len() <= 12 {
-            let mut v: Vec<u128> = (0..n).map(|r| (compact(prefix(r)) << 32) | r as u128).collect();
-            sort_packed(&mut v, bytes.len());
-            fix_runs(&v, full)
-        } else {
-            let mut k: Vec<u128> = (0..n).map(prefix).collect();
-            let mut ix: Vec<u32> = (0..n as u32).collect();
-            radix_sort(&mut k, &mut ix);
-            let mut i = 0;
-            while i < n {
-                let mut j = i + 1;
-                while j < n && k[j] == k[i] {
-                    j += 1;
-                }
-                if j - i > 1 {
-                    ix[i..j].sort_unstable_by(full);
-                }
-                i = j;
-            }
-            ix
+            Code::Rowid => rowids[r] as u64 ^ (1 << 63),
         }
+    };
+    let exact0 = m > 0 && (0..n).all(|r| is_int(st_of(r, 0)));
+    let hi = if m > 0 { code(0) } else { None };
+    let lo = if !exact0 {
+        None
+    } else if m == 1 {
+        Some(Code::Rowid)
+    } else {
+        code(1)
+    };
+    let prefix = |r: usize| -> u128 {
+        let h = hi.map_or(0, |c| eval(c, r)) as u128;
+        let l = lo.map_or(0, |c| eval(c, r)) as u128;
+        (h << 64) | l
+    };
+    let full = |x: &u32, y: &u32| {
+        let (a, b) = (*x as usize, *y as usize);
+        for j in 0..m {
+            let (sa, va) = value(a, j);
+            let (sb, vb) = value(b, j);
+            let o = key_cmp(key.flags[j], sa, va, sb, vb);
+            if o != Ordering::Equal {
+                return o;
+            }
+        }
+        rowids[a].cmp(&rowids[b]).then(a.cmp(&b))
+    };
+    // Only the bytes of the prefix that vary matter: taken most significant first, they
+    // order like it. Up to 12 of them pack with the row number into a u128.
+    let k0 = if n > 0 { prefix(0) } else { 0 };
+    let diff = (0..n).fold(0u128, |a, r| a | (prefix(r) ^ k0));
+    let (mut bytes, mut nb) = ([0u32; 16], 0);
+    for b in (0..16).rev().filter(|b| (diff >> (8 * b)) as u8 != 0) {
+        bytes[nb] = b;
+        nb += 1;
+    }
+    let compact = |x: u128| bytes[..nb].iter().fold(0u128, |a, &b| (a << 8) | ((x >> (8 * b)) as u8) as u128);
+    let OrderBufs { a, b, ix, ti } = bufs;
+    if nb <= 12 {
+        a.clear();
+        a.extend((0..n).map(|r| (compact(prefix(r)) << 32) | r as u128));
+        sort_packed(a, nb, b);
+        fix_runs(a, full, out);
+    } else {
+        a.clear();
+        a.extend((0..n).map(prefix));
+        ix.clear();
+        ix.extend(0..n as u32);
+        radix_sort(a, ix, b, ti);
+        let mut i = 0;
+        while i < n {
+            let mut j = i + 1;
+            while j < n && a[j] == a[i] {
+                j += 1;
+            }
+            if j - i > 1 {
+                ix[i..j].sort_unstable_by(full);
+            }
+            i = j;
+        }
+        out.clear();
+        out.extend_from_slice(ix);
     }
 }
 

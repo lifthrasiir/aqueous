@@ -1852,6 +1852,44 @@ fn prores_plans_hold() {
     }
 }
 
+/// sqlite-recons lays its memory out as a stack, its limit its plan of the instance and as many
+/// tasks at once as their slots allow: of tables with indexes (more than the slots), a table of
+/// many columns, records over pages (overflow), repeated texts, and a database of no index.
+#[test]
+fn sqlite_plans_hold() {
+    let dir = std::env::temp_dir().join(format!("aqr-sqlite-plans-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut sql = String::from("PRAGMA page_size=1024;");
+    for t in 0..10 {
+        sql += &format!("CREATE TABLE t{t}(a INTEGER, b TEXT, c REAL, d BLOB);");
+        sql += &format!("CREATE INDEX i{t}a ON t{t}(a); CREATE INDEX i{t}b ON t{t}(b, a DESC);");
+        sql += &format!(
+            "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < {}) \
+             INSERT INTO t{t} SELECT x * 7 % 1000, 'w' || (x % 37), x / 3.0, \
+             CASE WHEN x % 50 = 0 THEN randomblob(3000) ELSE randomblob(x % 20) END FROM n;",
+            200 + 150 * t
+        );
+    }
+    let wide: Vec<String> = (0..80).map(|c| format!("c{c} INTEGER")).collect();
+    sql += &format!("CREATE TABLE w({}); CREATE INDEX iw ON w(c3, c70);", wide.join(", "));
+    let vals: Vec<String> = (0..80).map(|c| format!("x * {} % 97", c + 1)).collect();
+    sql += &format!(
+        "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < 500) INSERT INTO w SELECT {} FROM n;",
+        vals.join(", ")
+    );
+    let plain = "PRAGMA page_size=4096; CREATE TABLE p(a, b); WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL \
+        SELECT x + 1 FROM n WHERE x < 3000) INSERT INTO p SELECT x, printf('%050d', x) FROM n;";
+    for (t, sql) in [("indexed", sql.as_str()), ("plain", plain)] {
+        let path = dir.join(format!("{t}.db"));
+        let out = std::process::Command::new("sqlite3").arg(&path).arg(sql).output().expect("sqlite3");
+        assert!(out.status.success(), "{t}: {}", String::from_utf8_lossy(&out.stderr));
+        let d = std::fs::read(&path).unwrap();
+        let f = aqr_sqlite::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
+        plan_holds(&format!("sqlite {t}"), f, &d);
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// git-pack-recons and git-pack-index-recons lay their memory out as stacks, their limits their
 /// plans: of a pack of more entries than the stack's holes, alone and with its index and reverse
 /// index after it.

@@ -149,18 +149,18 @@ fn verification_catches_differences() {
     use aqr_sqlite::transform::{self, S_BYTES, S_FILL};
     let Some(db) = build("verify", SCHEMA) else { return };
     let enc = transform::encode(&db).unwrap();
-    assert!(transform::verify(&enc.geom, &db, &enc.streams));
+    assert!(transform::verify(&enc.geom, &db, &enc.streams).is_some());
     for s in [S_FILL, S_BYTES] {
         let mut streams = enc.streams.clone();
         let k = streams[s].len() / 2;
         streams[s][k] ^= 1;
-        assert!(!transform::verify(&enc.geom, &db, &streams), "stream {s}");
+        assert!(transform::verify(&enc.geom, &db, &streams).is_none(), "stream {s}");
     }
     let mut other = db.clone();
     let k = other.len() - 7;
     other[k] ^= 0x40;
-    assert!(!transform::verify(&enc.geom, &other, &enc.streams));
-    assert!(!transform::verify(&enc.geom, &db[..db.len() - 1], &enc.streams));
+    assert!(transform::verify(&enc.geom, &other, &enc.streams).is_none());
+    assert!(transform::verify(&enc.geom, &db[..db.len() - 1], &enc.streams).is_none());
 }
 
 /// The same streams whatever the number of threads, and every thread count rebuilds the file.

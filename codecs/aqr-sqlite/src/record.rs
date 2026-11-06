@@ -468,7 +468,57 @@ pub struct ColDec<'a> {
     distinct: Vec<(u32, u32)>,
 }
 
-impl ColDec<'_> {
+/// The records of codes of records `rec` (read on a copy).
+fn count_records(mut rec: Rd) -> Result<usize> {
+    let mut n = 0;
+    while !rec.at_end() {
+        if rec.uv()? == R_RAW {
+            rec.usize()?;
+        }
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// The values a column's decoder keeps to repeat, as its tags and lengths tell (read on copies):
+/// a text or blob of [`MIN_REP`] bytes or more each. (Over the bytes, the tags but those of texts
+/// and blobs passed by: a pass over every value.)
+fn distinct_of(tag: Rd, len: Rd) -> usize {
+    let (d, mut at) = (len.d, len.p);
+    // (the next length, or None past the end)
+    let mut next = || -> Option<u64> {
+        let (mut v, mut shift) = (0u64, 0);
+        loop {
+            let &b = d.get(at)?;
+            at += 1;
+            v |= ((b & 0x7f) as u64).checked_shl(shift).unwrap_or(0);
+            if b < 0x80 {
+                return Some(v);
+            }
+            shift += 7;
+        }
+    };
+    let mut n = 0;
+    for &t in tag.rest() {
+        match t {
+            T_TEXT | T_BLOB => match next() {
+                Some(k) => n += (k >= MIN_REP as u64 && k <= u32::MAX as u64) as usize,
+                None => break,
+            },
+            T_TEXT_REP | T_BLOB_REP if next().is_none() => break,
+            _ => {}
+        }
+    }
+    n
+}
+
+impl<'a> ColDec<'a> {
+    /// The column's decoder of no values to repeat.
+    fn clone_bare(&self) -> Self {
+        let (tag, int, real, len, bytes) = (self.tag, self.int, self.real, self.len, self.bytes);
+        ColDec { tag, int, mode: self.mode, scale: self.scale, prev: self.prev, real, len, bytes, distinct: Vec::new() }
+    }
+
     #[inline]
     fn next_int(&mut self, last: i64, e: u8) -> Result<i64> {
         let d = self.int.sv()?;
@@ -498,6 +548,17 @@ pub struct GroupDec<'a> {
     prev_rowid: i64,
     prev_rank: i64,
     vals: Vec<(u64, i64)>,
+    /// Its records, as its codes of records tell.
+    records: usize,
+}
+
+/// (Freed in the reverse of the order taken, so that a stack takes each off as it goes: a
+/// column's values to repeat each a block, more than the stack keeps out of order.)
+impl Drop for GroupDec<'_> {
+    fn drop(&mut self) {
+        drop(std::mem::take(&mut self.vals));
+        while self.cols.pop().is_some() {}
+    }
 }
 
 /// What a group's predicted records come from: the indexed columns of its table's rows,
@@ -528,9 +589,39 @@ impl<'a> GroupDec<'a> {
             let real = real.sub(dir.usize()?)?;
             let len = len.sub(dir.usize()?)?;
             let bytes = bytes.sub(dir.usize()?)?;
-            cols.push(ColDec { tag, int, mode, scale, prev: 0, real, len, bytes, distinct: Vec::new() });
+            let distinct = Vec::with_capacity(distinct_of(tag, len));
+            cols.push(ColDec { tag, int, mode, scale, prev: 0, real, len, bytes, distinct });
         }
-        Ok(GroupDec { rec, rowid, rawpay, cols, prev_rowid: 0, prev_rank: 0, vals: Vec::new() })
+        let vals = Vec::with_capacity(nc);
+        let records = count_records(rec)?;
+        Ok(GroupDec { rec, rowid, rawpay, cols, prev_rowid: 0, prev_rank: 0, vals, records })
+    }
+
+    /// A copy of the decoder as it is, of the same room (its columns' values to repeat, its
+    /// values of a record): what decoding all of its records takes, as `new` reserved it.
+    pub fn clone_reserved(&self) -> Self {
+        let mut cols = Vec::with_capacity(self.cols.capacity());
+        for c in &self.cols {
+            let mut distinct = Vec::with_capacity(c.distinct.capacity());
+            distinct.extend_from_slice(&c.distinct);
+            cols.push(ColDec { distinct, ..c.clone_bare() });
+        }
+        let mut vals = Vec::with_capacity(self.vals.capacity());
+        vals.extend_from_slice(&self.vals);
+        let (rec, rowid, rawpay) = (self.rec, self.rowid, self.rawpay);
+        let (prev_rowid, prev_rank) = (self.prev_rowid, self.prev_rank);
+        GroupDec { rec, rowid, rawpay, cols, prev_rowid, prev_rank, vals, records: self.records }
+    }
+
+    /// The group's records (as its codes of records tell).
+    pub fn records(&self) -> Result<usize> {
+        Ok(self.records)
+    }
+
+    /// The room the decoder takes: of its columns, of each column's values to repeat, and of
+    /// a record's values.
+    pub fn room(&self) -> (usize, impl Iterator<Item = usize> + '_, usize) {
+        (self.cols.capacity(), self.cols.iter().map(|c| c.distinct.capacity()), self.vals.capacity())
     }
 
     pub fn at_end(&self) -> bool {
@@ -620,6 +711,9 @@ impl<'a> GroupDec<'a> {
                 _ => return Err(corrupt()),
             };
             s += sqlite_len(st) as u64;
+            if vals.len() == vals.capacity() {
+                return Err(corrupt());
+            }
             vals.push((st, v));
         }
         let mut b = [0u8; 9];
@@ -641,6 +735,9 @@ impl<'a> GroupDec<'a> {
                 _ => {
                     let n = st_size(st);
                     if n >= MIN_REP && n <= u32::MAX as usize {
+                        if c.distinct.len() == c.distinct.capacity() {
+                            return Err(corrupt());
+                        }
                         c.distinct.push((c.bytes.p as u32, n as u32));
                     }
                     out.extend_from_slice(c.bytes.bytes(n)?);

@@ -610,48 +610,131 @@ impl Sink for Checker<'_> {
     }
 }
 
-/// Rebuilds the file from its streams. `len` is the original length.
-pub fn decode(g: &Geom, len: usize, s: &[Vec<u8>]) -> Result<Vec<u8>> {
-    decode_threads(g, len, s, 1)
+/// Rebuilds the file from its streams (of the sizes `sizes`). `len` is the original length.
+pub fn decode(g: &Geom, len: usize, s: &[Vec<u8>], sizes: &Sizes) -> Result<Vec<u8>> {
+    decode_threads(g, len, s, sizes, 1)
 }
 
 /// `decode` with `threads` threads (the first pass over the tables and indexes).
-pub fn decode_threads(g: &Geom, len: usize, s: &[impl AsRef<[u8]>], threads: usize) -> Result<Vec<u8>> {
+pub fn decode_threads(g: &Geom, len: usize, s: &[impl AsRef<[u8]>], sizes: &Sizes, threads: usize) -> Result<Vec<u8>> {
     // The output is no larger than the streams describe: a kind per page, the tail in `raw`
     // (checked before it is allocated).
     if s.len() != NSTREAMS || s[S_KIND].as_ref().len() != g.npages || len % g.psize > s[S_RAW].as_ref().len() {
         return Err(corrupt());
     }
     let mut w = Writer { out: Vec::new(), len };
-    rebuild(g, len, s, &mut w, threads)?;
+    rebuild(g, len, s, &mut w, threads, Some(sizes), None)?;
     w.out();
     Ok(w.out)
 }
 
-/// Whether the streams rebuild `src` exactly, without allocating a copy of it.
-pub fn verify(g: &Geom, src: &[u8], s: &[Vec<u8>]) -> bool {
+/// Whether the streams rebuild `src` exactly (without allocating a copy of it), and the sizes
+/// that decoding takes ([`Sizes`]), as far as it went.
+pub fn check(g: &Geom, src: &[u8], s: &[Vec<u8>]) -> (bool, Sizes) {
     let np = g.npages;
     let mut c = Checker { src, psize: g.psize, seen: vec![false; np + 1], ok: true };
     if src.len() == np * g.psize {
         c.seen[np] = true;
     }
-    rebuild(g, src.len(), s, &mut c, 1).is_ok() && c.ok && c.seen.iter().all(|&x| x)
+    let mut z = Sizes::default();
+    let ok = rebuild(g, src.len(), s, &mut c, 1, None, Some(&mut z)).is_ok() && c.ok && c.seen.iter().all(|&x| x);
+    (ok, z)
 }
 
-fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[impl AsRef<[u8]>], out: &mut S, threads: usize) -> Result<()> {
-    let (ps, np) = (g.psize, g.npages);
-    // A kind per page (which also bounds the output by the streams).
-    if s.len() != NSTREAMS || np == 0 || np.checked_mul(ps) != Some(len - len % ps) || s[S_KIND].as_ref().len() != np {
+/// The sizes of [`check`] where the streams rebuild `src` exactly; else None.
+pub fn verify(g: &Geom, src: &[u8], s: &[Vec<u8>]) -> Option<Sizes> {
+    let (ok, z) = check(g, src, s);
+    ok.then_some(z)
+}
+
+/// What decoding takes that the streams do not tell, as sqlite-recons 2's params give it (after
+/// the geometry): the most bytes of a record, the most columns of a row of a table indexes are
+/// predicted from, and for each index predicted (in the order of the groups) the bytes of the
+/// columns its keys copy. Decoding holds to it; the encoder's check ([`verify`]) finds it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Sizes {
+    pub record: u64,
+    pub cols: u64,
+    pub keys: Vec<u64>,
+}
+
+/// The indexes of each table (as `starts`, by table, into `list`) and the tables that have any.
+struct ByTable {
+    starts: Vec<u32>,
+    list: Vec<u32>,
+    tables: Vec<u32>,
+}
+
+impl ByTable {
+    fn of(meta: &[(bool, Option<(usize, index::Key)>)]) -> Result<ByTable> {
+        let ng = meta.len();
+        // (the counts by table, then where each table's start)
+        let mut starts = vec![0u32; ng + 1];
+        for (_, r) in meta {
+            if let Some((t, _)) = r {
+                *starts.get_mut(*t).filter(|_| *t < ng).ok_or_else(corrupt)? += 1;
+            }
+        }
+        let mut sum = 0;
+        for s in &mut starts {
+            (*s, sum) = (sum, sum + *s);
+        }
+        let mut list = vec![u32::MAX; sum as usize];
+        let mut at = starts.clone();
+        for (i, (_, r)) in meta.iter().enumerate() {
+            if let Some((t, _)) = r {
+                list[at[*t] as usize] = i as u32;
+                at[*t] += 1;
+            }
+        }
+        drop(at);
+        let ntab = (0..ng).filter(|&t| starts[t] < starts[t + 1]).count();
+        let mut tables = Vec::with_capacity(ntab);
+        tables.extend((0..ng as u32).filter(|&t| starts[t as usize] < starts[t as usize + 1]));
+        Ok(ByTable { starts, list, tables })
+    }
+
+    fn of_table(&self, t: usize) -> &[u32] {
+        &self.list[self.starts[t] as usize..self.starts[t + 1] as usize]
+    }
+}
+
+/// The sizes of [`Keys`](index::Keys) of index `i` (the `k`-th predicted) on table `t`: its
+/// columns, rows, bytes copied, whether the rowid is indexed.
+fn key_shape(
+    meta: &[(bool, Option<(usize, index::Key)>)],
+    gds: &[GroupDec],
+    i: usize,
+    bytes: u64,
+) -> Result<(usize, usize, usize, bool)> {
+    let (t, key) = meta[i].1.as_ref().ok_or_else(corrupt)?;
+    let n = gds[*t].records()?;
+    let b = usize::try_from(bytes).map_err(|_| corrupt())?;
+    Ok((key.cols.len(), n, b, key.cols.contains(&index::ROWID)))
+}
+
+/// The next overflow page of a chain, against the last one.
+fn next_ovf(ovf: &mut Rd, last: &mut i64, np: usize) -> Result<usize> {
+    let q = (*last + 1).checked_add(ovf.sv()?).ok_or_else(corrupt)?;
+    if q < 2 || q > np as i64 {
         return Err(corrupt());
     }
-    let mut rd: Vec<Rd> = s.iter().map(|v| Rd::new(v.as_ref())).collect();
+    *last = q;
+    Ok(q as usize)
+}
 
-    // Groups: directory, then records (the tables indexes refer to first).
-    let mut dir = rd[S_DIR];
-    let ng = dir.usize()?;
+/// Rebuilds the file onto `out`: of the sizes `given` (the module's, which bound it), or finding
+/// them into `found` (the encoder's check).
+/// A group's directory entry but its decoder: whether it is a table's, and the table and key
+/// of an index predicted from it.
+type Meta = (bool, Option<(usize, index::Key)>);
+
+/// The `ng` groups of the directory `dir` (after their count) over the streams `rd`: their
+/// decoders and entries, the decoders' parts covering their streams exactly.
+fn read_groups<'a>(dir: &mut Rd<'a>, rd: &[Rd<'a>], ng: usize) -> Result<(Vec<GroupDec<'a>>, Vec<Meta>)> {
     let mut gstreams: [Rd; 8] = rd[S_REC..S_REC + 8].try_into().unwrap();
-    let mut gds = Vec::with_capacity(ng.min(1 << 20));
-    let mut meta = Vec::with_capacity(ng.min(1 << 20));
+    let mut gds = Vec::with_capacity(ng);
+    let mut meta = Vec::with_capacity(ng);
     for _ in 0..ng {
         let table = dir.u8()? != 0;
         let r = match dir.usize()? {
@@ -661,7 +744,7 @@ fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[impl AsRef<[u8]>], out: &mut S, t
                 if m > 1 << 16 {
                     return Err(corrupt());
                 }
-                let mut key = index::Key::default();
+                let mut key = index::Key { cols: Vec::with_capacity(m), flags: Vec::with_capacity(m) };
                 for _ in 0..m {
                     let c = u32::try_from(dir.uv()?).map_err(|_| corrupt())?;
                     let f = dir.u8()?;
@@ -679,79 +762,349 @@ fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[impl AsRef<[u8]>], out: &mut S, t
             return Err(corrupt());
         }
         meta.push((table, r));
-        gds.push(GroupDec::new(&mut dir, &mut gstreams)?);
+        gds.push(GroupDec::new(dir, &mut gstreams)?);
     }
-    // The groups' parts cover their streams exactly.
     if !dir.at_end() || gstreams.iter().any(|r| !r.at_end()) {
         return Err(corrupt());
     }
+    Ok((gds, meta))
+}
+
+/// Bytes of [`aqr_api::stack`] of the wasm32 sizes of what `rebuild` holds: a stream's reader,
+/// a group's decoder, a column's, a group's entry, a group's context, an index's keys.
+const RD_BYTES: u64 = 12;
+const GROUP_BYTES: u64 = 80;
+const COL_BYTES: u64 = 88;
+const META_BYTES: u64 = 32;
+const CTX_BYTES: u64 = 96;
+const KEYS_BYTES: u64 = 84;
+#[cfg(target_arch = "wasm32")]
+const _: () = assert!(
+    size_of::<Rd>() == RD_BYTES as usize
+        && size_of::<GroupDec>() == GROUP_BYTES as usize
+        && size_of::<crate::record::ColDec>() == COL_BYTES as usize
+        && size_of::<Meta>() == META_BYTES as usize
+        && size_of::<Option<RefCtx>>() == CTX_BYTES as usize
+        && size_of::<index::Keys>() == KEYS_BYTES as usize
+);
+
+/// The memory plan of decoding on WebAssembly ([`aqr_api::stack`]), of geometry `g`, a file
+/// of `len` bytes, the streams `s` and the sizes `z`, given the instance's memory as it starts
+/// (`initial` bytes, whole pages), `held` bytes of the stack taken before, and the task slots:
+/// the most the instance and its tasks take at once, in bytes, however the tasks run. As
+/// `rebuild` takes it: the readers, the groups' decoders and entries, their contexts, the
+/// indexes by table and a record's buffers; then the tables' scans as tasks, the instance
+/// reserving every index's keys and taking each scan's; then the indexes' orders as tasks, the
+/// instance reserving and taking each; then the pages' buffers and the file.
+pub fn plan(g: &Geom, len: u64, s: &[&[u8]], z: &Sizes, initial: u64, held: u64, slots: usize) -> Option<u64> {
+    use aqr_api::stack::block;
+    let pages = |n: u64| n.div_ceil(1 << 16) << 16;
+    let topk = |mut t: Vec<u64>| {
+        t.sort_unstable_by(|a, b| b.cmp(a));
+        t.iter().take(slots).sum::<u64>()
+    };
+    if s.len() != NSTREAMS {
+        return None;
+    }
+    let rd: Vec<Rd> = s.iter().map(|v| Rd::new(v)).collect();
+    let mut dir = rd[S_DIR];
+    let ng = dir.usize().ok()?;
+    let (gds, meta) = read_groups(&mut dir, &rd, ng).ok()?;
+    let by = ByTable::of(&meta).ok()?;
+    let n = |v: u64| usize::try_from(v).ok();
+    let (rec, cols) = (n(z.record)?, n(z.cols)?);
+    let decoder = |gd: &GroupDec| {
+        let (nc, distinct, nv) = gd.room();
+        block(COL_BYTES * nc as u64) + distinct.map(|d| block(8 * d as u64)).sum::<u64>() + block(16 * nv as u64)
+    };
+    let ng64 = ng as u64;
+    let mut top =
+        initial + held + block(RD_BYTES * NSTREAMS as u64) + block(GROUP_BYTES * ng64) + block(META_BYTES * ng64);
+    for ((_, r), gd) in meta.iter().zip(&gds) {
+        if let Some((_, key)) = r {
+            top += block(4 * key.cols.len() as u64) + block(key.cols.len() as u64);
+        }
+        top += decoder(gd);
+    }
+    top += block(CTX_BYTES * ng64)
+        + block(4 * (ng64 + 1))
+        + block(4 * by.list.len() as u64)
+        + block(4 * by.tables.len() as u64)
+        + block(rec as u64)
+        + block(16 * cols as u64);
+    // (each index's keys: its shape, in the order of the groups)
+    let mut k = 0;
+    let mut shapes = vec![None; ng];
+    for (i, (_, r)) in meta.iter().enumerate() {
+        if r.is_some() {
+            shapes[i] = Some(key_shape(&meta, &gds, i, *z.keys.get(k)?).ok()?);
+            k += 1;
+        }
+    }
+    if k != z.keys.len() {
+        return None;
+    }
+    let keys_plan = |i: usize| shapes[i].map_or(0, |(m, n, b, rowid)| index::Keys::plan(m, n, b, rowid));
+    let written = |i: usize| shapes[i].map_or(0, |(m, n, b, rowid)| index::Keys::written(m, n, b, rowid) as u64);
+    let (mut end, mut most) = (pages(top), 0);
+    if !by.tables.is_empty() {
+        let scans: Vec<u64> = by
+            .tables
+            .iter()
+            .map(|&t| {
+                let idx = by.of_table(t as usize);
+                let w: u64 = idx.iter().map(|&i| written(i as usize)).sum();
+                let own = block(16 * cols as u64)
+                    + block(rec as u64)
+                    + block(w)
+                    + block(KEYS_BYTES * idx.len() as u64)
+                    + idx.iter().map(|&i| keys_plan(i as usize)).sum::<u64>()
+                    + decoder(&gds[t as usize]);
+                end.max(pages(top + own))
+            })
+            .collect();
+        let joined = by
+            .tables
+            .iter()
+            .map(|&t| block(by.of_table(t as usize).iter().map(|&i| written(i as usize)).sum()))
+            .max()
+            .unwrap_or(0);
+        top += block(by.tables.len() as u64) + (0..ng).map(keys_plan).sum::<u64>();
+        end = end.max(pages(top + joined));
+        most = most.max(end + topk(scans));
+        // the orders
+        let idxs: Vec<usize> = (0..ng).filter(|&i| shapes[i].is_some()).collect();
+        top += block(4 * idxs.len() as u64);
+        end = end.max(pages(top));
+        let rows = |i: usize| shapes[i].map_or(0, |s| s.1) as u64;
+        let orders: Vec<u64> = idxs
+            .iter()
+            .map(|&i| {
+                let own = 2 * block(4 * rows(i)) + index::OrderBufs::plan(rows(i) as usize);
+                end.max(pages(top + own))
+            })
+            .collect();
+        let joined = idxs.iter().map(|&i| block(4 * rows(i))).max().unwrap_or(0);
+        top += block(idxs.len() as u64)
+            + block(12 * idxs.len() as u64)
+            + idxs.iter().map(|&i| block(4 * rows(i))).sum::<u64>();
+        end = end.max(pages(top + joined));
+        most = most.max(end + topk(orders));
+    }
+    let ps = g.psize as u64;
+    // (the spans of a page: two usizes each, on wasm32)
+    top += 2 * block(ps) + block(ps + 32) + block(8 * (ps / 2 + 2)) + block(len);
+    Some(most.max(end).max(pages(top)))
+}
+
+fn rebuild<S: Sink>(
+    g: &Geom,
+    len: usize,
+    s: &[impl AsRef<[u8]>],
+    out: &mut S,
+    threads: usize,
+    given: Option<&Sizes>,
+    mut found: Option<&mut Sizes>,
+) -> Result<()> {
+    let (ps, np) = (g.psize, g.npages);
+    // A kind per page (which also bounds the output by the streams).
+    if s.len() != NSTREAMS || np == 0 || np.checked_mul(ps) != Some(len - len % ps) || s[S_KIND].as_ref().len() != np {
+        return Err(corrupt());
+    }
+    let mut rd: Vec<Rd> = s.iter().map(|v| Rd::new(v.as_ref())).collect();
+
+    // Groups: directory, then records (the tables indexes refer to first).
+    let mut dir = rd[S_DIR];
+    let ng = dir.usize()?;
+    // (a group takes a byte of the directory at least)
+    if ng > s[S_DIR].as_ref().len() {
+        return Err(corrupt());
+    }
+    let (mut gds, meta) = read_groups(&mut dir, &rd, ng)?;
     // The indexed columns of the tables indexes are predicted from: a first pass over each
     // such table (on a copy of its cursors), for all its indexes at once. Then every group
     // decodes record by record as the pages need them.
-    let mut ctxs: Vec<Option<RefCtx>> = (0..ng).map(|_| None).collect();
-    let mut scratch = Vec::new();
-    let mut cols = Vec::new();
     if meta.iter().any(|(_, r)| matches!(r, Some((t, _)) if *t >= ng)) {
         return Err(corrupt());
     }
-    let mut by_table: Vec<Vec<usize>> = vec![Vec::new(); ng];
-    for (i, (_, r)) in meta.iter().enumerate() {
-        if let Some((t, _)) = r {
-            by_table[*t].push(i);
-        }
-    }
-    for (t, idx) in by_table.iter().enumerate() {
-        if !idx.is_empty() && (meta[t].1.is_some() || !meta[t].0) {
+    let mut ctxs: Vec<Option<RefCtx>> = (0..ng).map(|_| None).collect();
+    let by = ByTable::of(&meta)?;
+    for (t, _) in meta.iter().enumerate() {
+        if !by.of_table(t).is_empty() && (meta[t].1.is_some() || !meta[t].0) {
             return Err(corrupt());
         }
     }
-    // The first pass over a table, for all its indexes at once.
-    let scan = |t: usize, cols: &mut Vec<(u64, u32)>, scratch: &mut Vec<u8>| -> Result<Vec<index::Keys<'static>>> {
-        let mut keys: Vec<index::Keys> =
-            by_table[t].iter().map(|&i| index::Keys::new(&meta[i].1.as_ref().unwrap().1.cols)).collect();
-        let mut gd = gds[t].clone();
+    // (the bytes of each index's keys, in the order of the groups)
+    let nidx = meta.iter().filter(|(_, r)| r.is_some()).count();
+    let key_bytes = |i: usize| -> u64 {
+        let k = meta[..i].iter().filter(|(_, r)| r.is_some()).count();
+        given.map_or(0, |z| z.keys[k])
+    };
+    let (rec_cap, cols_cap) = match given {
+        Some(z) => {
+            if z.keys.len() != nidx {
+                return Err(corrupt());
+            }
+            let n = |v: u64| usize::try_from(v).map_err(|_| corrupt());
+            (n(z.record)?, n(z.cols)?)
+        }
+        None => (0, 0),
+    };
+    let mut scratch = Vec::with_capacity(rec_cap);
+    let mut cols = Vec::with_capacity(cols_cap);
+    let bounded = given.is_some();
+    // The first pass over a table, for all its indexes at once: their keys (of the room the
+    // sizes give, where they are given) written onto `out` (taken first: below the rest).
+    #[allow(clippy::type_complexity)]
+    let scan = |t: usize,
+                cols: &mut Vec<(u64, u32)>,
+                scratch: &mut Vec<u8>|
+     -> Result<(Vec<u8>, Vec<index::Keys<'static>>, usize, usize)> {
+        let idx = by.of_table(t);
+        let mut size = 0;
+        for &i in idx {
+            let (m, n, b, rowid) = key_shape(&meta, &gds, i as usize, key_bytes(i as usize))?;
+            size += index::Keys::written(m, n, b, rowid);
+        }
+        let mut written = Vec::with_capacity(if bounded { size } else { 0 });
+        let mut keys: Vec<index::Keys> = Vec::with_capacity(idx.len());
+        for &i in idx {
+            let (_, n, b, _) = key_shape(&meta, &gds, i as usize, key_bytes(i as usize))?;
+            let map = &meta[i as usize].1.as_ref().unwrap().1.cols;
+            keys.push(if bounded { index::Keys::with_capacity(map, n, b) } else { index::Keys::new(map) });
+        }
+        let mut gd = gds[t].clone_reserved();
+        let (mut most_rec, mut most_cols) = (0, 0);
         while !gd.at_end() {
             scratch.clear();
             let rowid = gd.next(true, g.fmt4, None, scratch)?;
+            if bounded && scratch.len() > rec_cap {
+                return Err(corrupt());
+            }
             for k in &mut keys {
                 if !k.push(scratch, rowid, cols) {
                     return Err(corrupt());
                 }
+                most_cols = most_cols.max(cols.len());
             }
+            most_rec = most_rec.max(scratch.len());
         }
-        Ok(keys)
+        if bounded {
+            keys.iter().for_each(|k| k.write(&mut written));
+        }
+        drop(gd);
+        Ok((written, keys, most_rec, most_cols))
     };
-    let tables: Vec<usize> = (0..ng).filter(|&t| !by_table[t].is_empty()).collect();
-    if threads > 1 && !tables.is_empty() {
-        // Tables in parallel, then every index's order in parallel (as tasks on WebAssembly).
-        let mut res =
-            crate::par::map_apart(threads, ng, &tables, || (Vec::new(), Vec::new()), |(c, sc), t| scan(t, c, sc));
-        for &t in &tables {
-            for (&i, keys) in by_table[t].iter().zip(res[t].take().unwrap()?) {
-                ctxs[i] = Some(RefCtx { keys, perm: Vec::new() });
-            }
-        }
-        let idxs: Vec<usize> = (0..ng).filter(|&i| ctxs[i].is_some()).collect();
-        let perms = crate::par::map_apart(
+    let parallel = threads > 1 && !by.tables.is_empty() && bounded;
+    if parallel {
+        // Tables apart, then every index's order apart (as tasks on WebAssembly): each result,
+        // written, read into what is reserved for it once the tasks are spawned.
+        let nt = by.tables.len();
+        let ctxs_c = std::cell::RefCell::new(&mut ctxs);
+        // (as tasks even alone: what a scan frees in the instance would be holes, a column each)
+        aqr_common::pool::par_each_apart(
+            nt,
             threads,
-            ng,
-            &idxs,
-            || (),
-            |_, i| index::order(&ctxs[i].as_ref().unwrap().keys, &meta[i].1.as_ref().unwrap().1),
-        );
-        for (i, perm) in perms.into_iter().enumerate() {
-            if let (Some(perm), Some(c)) = (perm, ctxs[i].as_mut()) {
-                c.perm = perm;
-            }
+            1,
+            |k| {
+                let mut sc = (Vec::with_capacity(cols_cap), Vec::with_capacity(rec_cap));
+                match scan(by.tables[k] as usize, &mut sc.0, &mut sc.1) {
+                    Ok((written, mut keys, ..)) => {
+                        // (the keys given back from the last, then the buffers)
+                        while keys.pop().is_some() {}
+                        drop(keys);
+                        written
+                    }
+                    Err(_) => Vec::new(),
+                }
+            },
+            || {
+                let mut ctxs = ctxs_c.borrow_mut();
+                for i in 0..ng {
+                    if meta[i].1.is_some()
+                        && let Ok((_, n, b, _)) = key_shape(&meta, &gds, i, key_bytes(i))
+                    {
+                        let map = &meta[i].1.as_ref().unwrap().1.cols;
+                        ctxs[i] = Some(RefCtx { keys: index::Keys::with_capacity(map, n, b), perm: Vec::new() });
+                    }
+                }
+            },
+            |k, d| {
+                let mut ctxs = ctxs_c.borrow_mut();
+                let mut at = 0;
+                for &i in by.of_table(by.tables[k] as usize) {
+                    let (m, n, b, rowid) = key_shape(&meta, &gds, i as usize, key_bytes(i as usize))?;
+                    let w = index::Keys::written(m, n, b, rowid);
+                    let keys = &mut ctxs[i as usize].as_mut().ok_or_else(corrupt)?.keys;
+                    if !keys.read(d.get(at..at + w).ok_or_else(corrupt)?) {
+                        return Err(corrupt());
+                    }
+                    at += w;
+                }
+                if at != d.len() { Err(corrupt()) } else { Ok(()) }
+            },
+        )?;
+        let mut idxs = Vec::with_capacity(nidx);
+        idxs.extend((0..ng).filter(|&i| ctxs[i].is_some()));
+        let ctxs_ref = &ctxs;
+        let perms_c = std::cell::RefCell::new(Vec::<Vec<u32>>::new());
+        aqr_common::pool::par_each_apart(
+            idxs.len(),
+            threads,
+            1,
+            |k| {
+                let i = idxs[k];
+                let keys = &ctxs_ref[i].as_ref().unwrap().keys;
+                let mut d = Vec::with_capacity(4 * keys.len());
+                let mut bufs = index::OrderBufs::with_capacity(keys.len());
+                let mut perm = Vec::with_capacity(keys.len());
+                index::order_in(keys, &meta[i].1.as_ref().unwrap().1, &mut bufs, &mut perm);
+                perm.iter().for_each(|r| d.extend_from_slice(&r.to_le_bytes()));
+                d
+            },
+            || {
+                let mut perms = perms_c.borrow_mut();
+                perms.reserve_exact(idxs.len());
+                for &i in &idxs {
+                    perms.push(Vec::with_capacity(ctxs_ref[i].as_ref().unwrap().keys.ok.capacity()));
+                }
+            },
+            |k, d| {
+                let mut perms = perms_c.borrow_mut();
+                let p = &mut perms[k];
+                if d.len() != 4 * p.capacity() {
+                    return Err(corrupt());
+                }
+                p.extend(d.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)));
+                Ok(())
+            },
+        )?;
+        for (&i, perm) in idxs.iter().zip(perms_c.into_inner()) {
+            ctxs[i].as_mut().unwrap().perm = perm;
         }
     } else {
-        for &t in &tables {
-            let idx = &by_table[t];
-            let keys = scan(t, &mut cols, &mut scratch)?;
-            for (&i, keys) in idx.iter().zip(keys) {
-                let perm = index::order(&keys, &meta[i].1.as_ref().unwrap().1);
-                ctxs[i] = Some(RefCtx { keys, perm });
+        for &t in &by.tables {
+            let (_, keys, most_rec, most_cols) = scan(t as usize, &mut cols, &mut scratch)?;
+            if let Some(z) = found.as_deref_mut() {
+                z.record = z.record.max(most_rec as u64);
+                z.cols = z.cols.max(most_cols as u64);
             }
+            for (&i, keys) in by.of_table(t as usize).iter().zip(keys) {
+                if let Some(z) = found.as_deref_mut() {
+                    z.keys.push(keys.bytes_len() as u64);
+                }
+                let perm = index::order(&keys, &meta[i as usize].1.as_ref().unwrap().1);
+                ctxs[i as usize] = Some(RefCtx { keys, perm });
+            }
+        }
+        if let Some(z) = found.as_deref_mut() {
+            // (in the order of the groups, rather than of the tables)
+            let mut order: Vec<usize> =
+                by.tables.iter().flat_map(|&t| by.of_table(t as usize)).map(|&i| i as usize).collect();
+            let found = std::mem::take(&mut z.keys);
+            let mut pairs: Vec<(usize, u64)> = order.drain(..).zip(found).collect();
+            pairs.sort_unstable();
+            z.keys = pairs.into_iter().map(|p| p.1).collect();
         }
     }
     crate::mem::mark("dec: tables, index orders");
@@ -761,9 +1114,10 @@ fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[impl AsRef<[u8]>], out: &mut S, t
     let [kind, raw, _, _, _, _, _, _, _, _, _, grp, phdr, child, ikey, cptr, ovf, fill] = &mut rd[..] else {
         unreachable!()
     };
-    let mut cell = Vec::new();
-    let mut iv: Vec<(usize, usize)> = Vec::new();
-    let mut chain: Vec<usize> = Vec::new();
+    // (a cell is its child, two varints, what is on the page and its first overflow page: no
+    // more than the page; a page holds fewer cells than half its bytes)
+    let mut cell = Vec::with_capacity(ps + 32);
+    let mut iv: Vec<(usize, usize)> = Vec::with_capacity(ps / 2 + 2);
     let (mut prev_child, mut prev_ikey, mut last_ovf) = (0i64, 0i64, 0i64);
     let u = g.usable;
     let mut vb = [0u8; 9];
@@ -825,7 +1179,9 @@ fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[impl AsRef<[u8]>], out: &mut S, t
                 prev_child = c;
                 cell.extend_from_slice(&(c as u32).to_be_bytes());
             }
-            chain.clear();
+            // (the cell's overflow pages: how many, and the first, each next one read as its page
+            // is written)
+            let (mut novf, mut first) = (0, 0usize);
             let mut local = 0;
             let mut pay: &[u8] = &[];
             if k == 5 {
@@ -836,6 +1192,12 @@ fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[impl AsRef<[u8]>], out: &mut S, t
             } else {
                 scratch.clear();
                 let rowid = gds[gi].next(k == 13, g.fmt4, ctxs[gi].as_ref(), &mut scratch)?;
+                if given.is_some() && scratch.len() > rec_cap {
+                    return Err(corrupt());
+                }
+                if let Some(z) = found.as_deref_mut() {
+                    z.record = z.record.max(scratch.len() as u64);
+                }
                 let p = &scratch[..];
                 pay = p;
                 let plen = pay.len() as u64;
@@ -848,15 +1210,9 @@ fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[impl AsRef<[u8]>], out: &mut S, t
                 local = g.local(plen, k == 13);
                 cell.extend_from_slice(&pay[..local]);
                 if local < pay.len() {
-                    for _ in 0..g.ovf_pages(plen, local) {
-                        let q = (last_ovf + 1).checked_add(ovf.sv()?).ok_or_else(corrupt)?;
-                        if q < 2 || q > np as i64 {
-                            return Err(corrupt());
-                        }
-                        last_ovf = q;
-                        chain.push(q as usize);
-                    }
-                    cell.extend_from_slice(&(chain[0] as u32).to_be_bytes());
+                    novf = g.ovf_pages(plen, local);
+                    first = next_ovf(ovf, &mut last_ovf, np)?;
+                    cell.extend_from_slice(&(first as u32).to_be_bytes());
                 }
             }
             let size = cell.len();
@@ -869,16 +1225,17 @@ fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[impl AsRef<[u8]>], out: &mut S, t
             iv.push((off, off + size));
             minoff = minoff.min(off);
             // Overflow pages.
-            let mut at = local;
-            for (j, &q) in chain.iter().enumerate() {
+            let (mut at, mut q) = (local, first);
+            for j in 0..novf {
                 let ob = (q - 1) * ps;
-                let next = chain.get(j + 1).copied().unwrap_or(0) as u32;
+                let next = if j + 1 < novf { next_ovf(ovf, &mut last_ovf, np)? } else { 0 };
                 let take = (pay.len() - at).min(u - 4);
-                op[..4].copy_from_slice(&next.to_be_bytes());
+                op[..4].copy_from_slice(&(next as u32).to_be_bytes());
                 op[4..4 + take].copy_from_slice(&pay[at..at + take]);
                 op[4 + take..].copy_from_slice(fill.bytes(ps - 4 - take)?);
                 out.put(ob, &op);
                 at += take;
+                q = next;
             }
         }
         if interior {
@@ -916,5 +1273,9 @@ fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[impl AsRef<[u8]>], out: &mut S, t
     if used.iter().any(|r| !r.at_end()) || gds.iter().any(|gd| !gd.finished()) {
         return Err(corrupt());
     }
+    // (in WebAssembly the decoders, keys and orders are left as they are: the module ends with
+    // the file, below which a stack would keep each as a hole, more than it keeps)
+    #[cfg(target_family = "wasm")]
+    std::mem::forget((gds, meta, ctxs, by));
     Ok(())
 }

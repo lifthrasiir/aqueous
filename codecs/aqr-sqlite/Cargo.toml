@@ -6,6 +6,7 @@ description = "Lossless SQLite3 database recompression: bit-exact reconstruction
 publish = false
 
 [dependencies]
+aqr-api = { path = "../../crates/aqr-api", default-features = false }
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }

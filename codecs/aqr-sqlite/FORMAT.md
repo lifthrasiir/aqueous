@@ -43,7 +43,7 @@ Contents:
 
 ### 2.1 Interface
 
-- **Module**: name `sqlite-recons`, version 1.
+- **Module**: name `sqlite-recons`, version 2.
 - **Params**:
 
   ```text
@@ -52,7 +52,16 @@ Contents:
   u8      fmt4        nonzero: the database's schema format is 4 or later
   ```
 
-  Nothing else; trailing bytes are an error.
+  then what decoding holds, which it must not pass:
+
+  ```text
+  varint  record      the most bytes of a record decoded (of a group, or predicted)
+  varint  cols        the most columns of a row of a table that indexes are predicted from
+  varint  keys[k]     for each index predicted, in the order of the groups: the bytes of the
+                      indexed columns of its table's rows (the rowid aside)
+  ```
+
+  `k` is the number of predicted indexes the directory has; the params end there.
 - **Inputs**: exactly 18 slots, slot `i` being stream `i` of §2.2, with the layout given
   there. An empty stream is an empty slot. Their classes are `sqlr/<name>`: `sqlr/kind`,
   `sqlr/raw`, `sqlr/dir`, `sqlr/rec`, `sqlr/rowid`, `sqlr/rawpay`, `sqlr/tag`, `sqlr/int`,
@@ -683,7 +692,9 @@ Within a group, the order is `rec`, `rowid`, `rawpay`, then every column's parts
 
 A decoder must reject the following rather than produce output:
 
-- Params that are cut short, or have bytes after `fmt4`; a number of inputs other than 18;
+- Params that are cut short, or of another number of `keys` than the predicted indexes; a
+  record, a row's columns or an index's bytes past what the params give; a number of inputs
+  other than 18;
   a stream or a part cut short anywhere (a varint, a value).
 - `P` not a power of two in 512..65536, `U` outside 480..`P`, or `np = 0`.
 - `kind` shorter or longer than `np`.

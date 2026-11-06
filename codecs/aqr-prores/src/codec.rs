@@ -514,7 +514,9 @@ pub fn decode(coded: &[u8], gaps: &[u8], limits: &Limits, len: usize, threads: u
     aqr_common::pool::par_each_apart(
         stripes,
         threads,
+        2,
         |s| stripe_dec(s, &info, streams[1 + s], limits).unwrap_or_default(),
+        || (),
         |s, part| {
             // (an empty part where a stripe failed: it has a byte at least otherwise)
             if Some(part.len() as u64) != limits.results[s].checked_add(1) {
