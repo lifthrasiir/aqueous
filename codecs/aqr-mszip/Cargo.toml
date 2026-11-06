@@ -11,6 +11,7 @@ default = ["encode"]
 encode = ["dep:aqr-formula", "dep:aqr-flate", "aqr-lzx/encode"]
 
 [dependencies]
+aqr-api = { path = "../../crates/aqr-api", default-features = false }
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-flate = { path = "../aqr-flate", optional = true }
 aqr-lzx = { path = "../aqr-lzx", default-features = false }

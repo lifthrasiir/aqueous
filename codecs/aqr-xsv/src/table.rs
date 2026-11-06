@@ -89,6 +89,7 @@ pub struct View<'a> {
 }
 
 /// A column's parts of the streams, read from the front, and its state.
+#[repr(C)]
 struct Column<'a> {
     pred: u8,
     types: &'a [u8],
@@ -122,6 +123,17 @@ fn byte(s: &mut &[u8]) -> Result<u8> {
     let (&b, rest) = s.split_first().ok_or_else(corrupt)?;
     *s = rest;
     Ok(b)
+}
+
+/// Bytes of a [`Column`] on WebAssembly (32-bit pointers), for the plan.
+const COLUMN_BYTES: u64 = 56;
+#[cfg(target_family = "wasm")]
+const _: () = assert!(size_of::<Column>() as u64 == COLUMN_BYTES);
+
+/// What [`build`] takes of an [`aqr_api::stack`] at most, of `ncols` columns and a file of `len`
+/// bytes: the columns, and the file.
+pub fn build_plan(ncols: usize, len: u64) -> u64 {
+    aqr_api::stack::block(COLUMN_BYTES * ncols as u64) + aqr_api::stack::block(len)
 }
 
 /// The file of `len` bytes of the table of dialect `d` and `ncols` columns from its streams `v`.

@@ -17,11 +17,11 @@ use crate::mszip::{self, BitW};
 
 pub use crate::module::{decode, index};
 
-pub const MODULE: aqr_formula::Module = aqr_formula::Module::new("mszip-recons", 1).with_memory(memory);
+pub const MODULE: aqr_formula::Module = aqr_formula::Module::new("mszip-recons", 1).with_plan(memory);
 
-/// The memory of the module: its inputs and its output, nothing else of size.
+/// The memory of the module: its initial memory, and its plan ([`crate::module::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    Some(u.whole(0, 1))
+    Some(u.initial() + crate::module::plan(u.inputs, u.content(3)?, u.output()))
 }
 
 /// Files' contents of at least this many bytes are slices of their own, apart from the others of

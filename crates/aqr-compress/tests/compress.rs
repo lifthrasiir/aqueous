@@ -2058,3 +2058,32 @@ fn recs_plans_hold() {
     }
     assert!(seen.iter().all(|&n| n > 0), "{seen:?} applications of recs-fields, -entries, -floats");
 }
+
+/// xsv-recons and mszip-recons lay their memory out as stacks, their limits their plans: of CSV
+/// and TSV tables (exactly, to the page), and of the cabinet fixtures (within their plans: theirs
+/// counts the codes of fixed and of dynamic DEFLATE blocks, either of which a cabinet may lack).
+#[test]
+fn xsv_mszip_plans_hold() {
+    let (xsv, mszip) = (aqr_decompress::XSV, aqr_decompress::MSZIP);
+    let [xsv, mszip] = [xsv, mszip].map(|m| aqr_decompress::built(m).expect("built").sha512_256);
+    let mut seen = 0;
+    for delim in [",", "\t"] {
+        let mut t = format!("id{delim}name{delim}price{delim}when\n");
+        for i in 0..20_000 {
+            t += &format!(
+                "{i}{delim}\"item {}\"{delim}{}.{:02}{delim}2026-11-{:02}\n",
+                i % 977,
+                i % 300,
+                i % 100,
+                1 + i % 28
+            );
+        }
+        seen += within_plans(&format!("table {delim}"), t.as_bytes(), &[xsv], true);
+    }
+    let dir = format!("{}/../../codecs/aqr-mszip/tests/data", env!("CARGO_MANIFEST_DIR"));
+    for e in std::fs::read_dir(dir).unwrap() {
+        let path = e.unwrap().path();
+        seen += within_plans(&path.to_string_lossy(), &std::fs::read(&path).unwrap(), &[mszip], false);
+    }
+    assert!(seen >= 5, "{seen} applications");
+}

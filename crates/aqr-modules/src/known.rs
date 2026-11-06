@@ -228,7 +228,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "flate-set",
         version: 1,
-        sha512_256: hex("99c0c9f0ee06f762dbfb0e5ff8bfc7cbb5f3bfbd0684adbf3282e8b42f28cd19"),
+        sha512_256: hex("2dc7c565855bf14503e3e25207bd90f184c108c33ad080a36e75b056bc1b99b7"),
         block: include_bytes!("../wasm/flate-set.block"),
     },
     Known {
@@ -318,7 +318,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "lzx-recons",
         version: 1,
-        sha512_256: hex("2674b76a2903d2620a9f66ad4401130adbe6cbe3bf3311e13579a8928ad52d6d"),
+        sha512_256: hex("3b8bb70018e13759d301b04912d53548570cb50d5ebf0ab01476e542e9b6b7e0"),
         block: include_bytes!("../wasm/lzx-recons.block"),
     },
     Known {
@@ -330,7 +330,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "mszip-recons",
         version: 1,
-        sha512_256: hex("5684440219312dbb24c0130c8799d7bab7313f81297d67f479bb3323ef64fe7d"),
+        sha512_256: hex("5b17654279c9dba3e1d38b73e0fa32e6ac4925ad61f15ada666c365ede7e29c3"),
         block: include_bytes!("../wasm/mszip-recons.block"),
     },
     Known {
@@ -480,7 +480,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "xsv-recons",
         version: 1,
-        sha512_256: hex("15b8aad959a47f89a2023a5609897474e3419603018baebf88520a279aa1c66e"),
+        sha512_256: hex("7c00e13cec4251b470acfc9843655c60cc396d7c0803571b96b02589bd29eeba"),
         block: include_bytes!("../wasm/xsv-recons.block"),
     },
     Known {

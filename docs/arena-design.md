@@ -198,6 +198,11 @@ P = W_main + Σ_태스크 (W_spawn + 태스크의 계획 버퍼) + 채널 메시
 - ima는 채널마다의 니블 목록(`Vec<Vec<u8>>`)을 펼쳤다. 블록마다 앞 채널의 목록을 `clone`하던 것이 `copy_within`이 됐다(스택에서는 블록마다 구멍이 쌓였을 것이다).
 - 실측 = 계획이다(aqr-decompress `snappy_plan_holds`, `more_plans_hold`: 뿌리 적용에 계획만큼의 한도를 선언하는 `plan_holds`).
 
+**xsv-recons, mszip-recons.** 이미 LIFO였다.
+- xsv: 방언의 두 사본, 열 목록, 출력.
+- mszip: 출력, 블록 목록(이제 정확한 용량), DEFLATE 블록의 코드들. 고정 블록의 코드는 인스턴스에서 처음 쓸 때 `OnceLock`으로 잡혀 끝까지 남는데, 그 아래의 것도 끝까지 살아 있어 최대치에 한 번 더해질 뿐이다.
+- 실측 = 계획이다(`xsv_mszip_plans_hold`).
+
 ## 다음 순서
 
 1. `Module::memory_usage_in_pages`를 이미 정확한 용량을 쓰는 모듈들(exe, xsv, fasta, zip, git, pdf, png, …)부터 만든다.

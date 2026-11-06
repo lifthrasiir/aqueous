@@ -29,10 +29,10 @@ pub fn index(blocks: &[Block]) -> Vec<u8> {
     out
 }
 
-/// The blocks of `index`.
+/// The blocks of `index` (reserved for them all: two varints each).
 fn blocks(index: &[u8]) -> Result<Vec<Block>> {
     let mut at = 0;
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(if index.is_empty() { 0 } else { aqr_common::streams::streams(index) });
     while at < index.len() {
         let mut get = || varint::get(index, &mut at).ok().and_then(|n| usize::try_from(n).ok()).ok_or_else(corrupt);
         let (kept, v) = (get()?, get()?);
@@ -49,6 +49,21 @@ fn take<'a>(from: &mut &'a [u8], n: usize) -> Result<&'a [u8]> {
     let (a, b) = from.split_at_checked(n).ok_or_else(corrupt)?;
     *from = b;
     Ok(a)
+}
+
+/// Bytes of a [`Block`] on WebAssembly, for the plan.
+const BLOCK_BYTES: u64 = 12;
+#[cfg(target_family = "wasm")]
+const _: () = assert!(size_of::<Block>() as u64 == BLOCK_BYTES);
+
+/// The memory plan of the module ([`aqr_api::stack`]): what it takes beyond its initial memory
+/// at most, of inputs of `inputs` bytes (the fourth the index `index`) and an output of `len`:
+/// what `aqr_api::whole` copies, the output, the blocks of the index, and on top of them what
+/// cutting DEFLATE blocks takes ([`mszip::cut_plan`]).
+pub fn plan(inputs: &[u64], index: &[u8], len: u64) -> u64 {
+    use aqr_api::stack::{block, whole};
+    let n = if index.is_empty() { 0 } else { aqr_common::streams::streams(index) as u64 };
+    whole(0, &[], inputs) + block(len) + block(BLOCK_BYTES * n) + mszip::cut_plan()
 }
 
 /// The module: of the inputs (the joined streams, the raw bytes, the bytes kept, the index), each

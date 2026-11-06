@@ -717,6 +717,7 @@ dependencies = [
 name = "aqr-mszip"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
  "aqr-common",
  "aqr-decompress",
  "aqr-flate",
@@ -976,6 +977,7 @@ dependencies = [
 name = "aqr-xsv"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
  "aqr-common",
  "aqr-formula",
  "aqr-num",
