@@ -1053,11 +1053,9 @@ impl Made {
         let Made { mut f, gaps } = self;
         if let Some(gaps) = gaps {
             // (of the store where it is large, see [`Options::spill`])
-            let mut data = aqr_formula::store::Buffer::new(gaps.iter().map(Range::len).sum());
-            let mut at = 0;
+            let mut data = aqr_formula::store::Writer::new(Some(gaps.iter().map(Range::len).sum()));
             for g in gaps {
-                data[at..at + g.len()].copy_from_slice(&d[g.clone()]);
-                at += g.len();
+                data.write(&d[g]);
             }
             f.streams[0].data = data.into_bytes();
         }

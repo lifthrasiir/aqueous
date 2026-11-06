@@ -8,7 +8,7 @@
 use std::ops::Range;
 use std::sync::Mutex;
 
-use aqr_formula::store::Buffer;
+use aqr_formula::store::{Buffer, Writer};
 use aqr_formula::{Bytes, Formula, Kind, Node};
 use aqr_lzx::formula::Stream;
 
@@ -159,17 +159,17 @@ fn encode_as(input: &[u8], shared: Option<&Bytes>, threads: usize) -> Option<For
         }
         let p = planned_of[g[0]];
         let d = match planned[p] == *g {
-            true => buffers[p].take().expect("a buffer as planned"),
+            true => buffers[p].take().expect("a buffer as planned").into_bytes(),
             false => {
-                let mut d = Buffer::new(at);
+                let mut d = Writer::new(Some(at));
                 for &i in g {
                     let from = buffers[planned_of[i]].as_ref().expect("a buffer as planned");
-                    d[offset[i]..offset[i] + lens[i]].copy_from_slice(&from[planned_at[i]..][..lens[i]]);
+                    d.write(&from[planned_at[i]..][..lens[i]]);
                 }
-                d
+                d.into_bytes()
             }
         };
-        data.push(Some(d.into_bytes()));
+        data.push(Some(d));
     }
     drop(buffers);
 
@@ -272,15 +272,15 @@ fn made_again<'a>(
         parts.map(|p| p.iter().map(|&(c, n)| (at(c)..at(c) + c.len(), n)).collect()).collect();
     let whole = whole.clone();
     Bytes::lazy(len, move || {
-        let mut b = Buffer::new(len);
-        let mut at = 0;
+        let mut b = Writer::new(Some(len));
+        let mut piece = Vec::new();
         for p in &parts {
             let chunks: Vec<(&[u8], usize)> = p.iter().map(|(r, n)| (&whole[r.clone()], *n)).collect();
-            let n = aqr_lzx::recons::data_len(&chunks);
-            aqr_lzx::recons::data_into(&chunks, &mut b[at..at + n]).expect("chunks split before");
+            piece.resize(aqr_lzx::recons::data_len(&chunks), 0);
+            aqr_lzx::recons::data_into(&chunks, &mut piece).expect("chunks split before");
+            b.write(&piece);
             // (of a file mapped, let go of again: see `encode_as`)
             chunks.iter().for_each(|&(c, _)| aqr_formula::store::let_go(c));
-            at += n;
         }
         b.into_bytes()
     })

@@ -4,7 +4,7 @@
 
 use std::borrow::Cow;
 
-use aqr_formula::store::Buffer;
+use aqr_formula::store::Writer;
 use aqr_formula::{Formula, Kind, Node};
 
 use crate::{File, Piece};
@@ -76,8 +76,8 @@ pub fn build(input: &[u8], files: &[File], pieces: &[Piece], opt: &Options) -> F
         let d = &input[pieces[j].span.clone()];
         aqr_formula::store::find(d).unwrap_or_else(|| {
             // (of the store where one is set: aqr-compress's spill, see aqr_formula::store)
-            let mut b = Buffer::new(d.len());
-            b.copy_from_slice(d);
+            let mut b = Writer::new(Some(d.len()));
+            b.write(d);
             b.into_bytes()
         })
     };
@@ -92,7 +92,7 @@ pub fn build(input: &[u8], files: &[File], pieces: &[Piece], opt: &Options) -> F
         None => _ = f.push_content("raw", Kind::Unknown, Vec::new()),
     }
     // (filled below, in the order of the pieces)
-    let mut rest = Buffer::new(rest_len);
+    let mut rest = Writer::new(Some(rest_len));
     f.push(REST, Vec::new());
     for (n, (kind, js)) in kinds.iter().enumerate() {
         // (the first of `raw` stream 0, if any)
@@ -105,7 +105,7 @@ pub fn build(input: &[u8], files: &[File], pieces: &[Piece], opt: &Options) -> F
     let parts = pieces.iter().zip(&stream_of).map(|(p, &s)| match p.file {
         None => {
             let n = p.span.len();
-            rest[at..at + n].copy_from_slice(&input[p.span.clone()]);
+            rest.write(&input[p.span.clone()]);
             at += n;
             Node::slice(REST_AT, (at - n) as u64, n as u64)
         }

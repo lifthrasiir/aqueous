@@ -109,9 +109,9 @@ impl Modules for Recording<'_> {
         if let Some(k) = self.keys.lock().unwrap().remove(&(a as *const Apply as usize)) {
             // (compressed, and moved to the store where one is set, see [`crate::Options::spill`])
             let packed = zstd::bulk::compress(&out, PACKED_LEVEL).expect("compressed");
-            let mut b = aqr_formula::store::Buffer::new(packed.len());
-            b.copy_from_slice(&packed);
-            self.seen.lock().unwrap().push((k, Output::Packed(b.into_bytes(), out.len())));
+            let mut b: aqr_formula::Bytes = packed.into();
+            aqr_formula::store::spill(&mut b);
+            self.seen.lock().unwrap().push((k, Output::Packed(b, out.len())));
         }
     }
 

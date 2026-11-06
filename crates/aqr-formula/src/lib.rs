@@ -986,9 +986,9 @@ impl Formula {
             let data = if s.data.is_shared() && at < s.data.len() as u64 {
                 // (bytes shared copied only as far as they are kept, to the store where one is set:
                 // they were most likely of it)
-                let mut d = store::Buffer::new(at as usize);
+                let mut d = store::Writer::new(Some(at as usize));
                 for m in &merged {
-                    d[m.2 as usize..(m.2 + m.1 - m.0) as usize].copy_from_slice(&s.data[m.0 as usize..m.1 as usize]);
+                    d.write(&s.data[m.0 as usize..m.1 as usize]);
                 }
                 d.into_bytes()
             } else {
