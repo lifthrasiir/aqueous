@@ -150,6 +150,7 @@ pub fn apply_framed(framing: Framing, streams: &[StreamParams], data: Node, len:
         inputs: vec![data],
         len,
         memory_limit: aqr_formula::NO_LIMIT,
+        task_limits: Vec::new(),
     }
 }
 

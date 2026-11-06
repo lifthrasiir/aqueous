@@ -723,8 +723,11 @@ pub struct Apply {
     /// Bytes of the output.
     pub len: u64,
     /// The memory limit its instruction declares ([`NO_LIMIT`] until [`Formula::declare_memory`]
-    /// sets it).
+    /// sets it): of all of the application where it has no task limits, else of its instance.
     pub memory_limit: u64,
+    /// The memory limit of a task of each class of the module (the spec's task limits, of an
+    /// ApplyV2 instruction); none for an Apply instruction.
+    pub task_limits: Vec<u64>,
 }
 
 /// The memory limit of an application declaring none.
@@ -811,7 +814,15 @@ impl Node {
     }
 
     pub fn apply_with(module: Module, resources: Vec<Resource>, params: Vec<u8>, inputs: Vec<Node>, len: u64) -> Node {
-        Node::Apply(Box::new(Apply { module, resources, params, inputs, len, memory_limit: NO_LIMIT }))
+        Node::Apply(Box::new(Apply {
+            module,
+            resources,
+            params,
+            inputs,
+            len,
+            memory_limit: NO_LIMIT,
+            task_limits: Vec::new(),
+        }))
     }
 
     /// The output of `patch`, of `len` bytes, against `source` ([`patch::make`]).
@@ -1969,7 +1980,15 @@ mod tests {
     }
 
     fn cut(inputs: Vec<Node>) -> Apply {
-        Apply { module: CUT, resources: vec![], params: vec![], inputs, len: 0, memory_limit: crate::NO_LIMIT }
+        Apply {
+            module: CUT,
+            resources: vec![],
+            params: vec![],
+            inputs,
+            len: 0,
+            memory_limit: crate::NO_LIMIT,
+            task_limits: Vec::new(),
+        }
     }
 
     /// Outputs of applications of several outputs, taken by the root and by later ones; shown,
@@ -2012,6 +2031,7 @@ mod tests {
             inputs: vec![s.root.clone()],
             len: 0,
             memory_limit: crate::NO_LIMIT,
+            task_limits: Vec::new(),
         };
         let [x, y] = <[Node; 2]>::try_from(s.split(rev, vec![5, 3])).unwrap();
         s.root = Node::concat([y, x]);

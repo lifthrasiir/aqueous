@@ -56,6 +56,7 @@ pub fn apply_recons(module: Module, params: Vec<u8>, data: Node, records: Node, 
         inputs: vec![data, records, index],
         len,
         memory_limit: aqr_formula::NO_LIMIT,
+        task_limits: Vec::new(),
     }
 }
 

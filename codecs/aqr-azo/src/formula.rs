@@ -35,5 +35,6 @@ pub fn apply(data: Node, records: Node, index: Node, len: u64) -> Apply {
         inputs: vec![data, records, index],
         len,
         memory_limit: aqr_formula::NO_LIMIT,
+        task_limits: Vec::new(),
     }
 }

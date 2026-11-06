@@ -785,10 +785,15 @@ fn load(wat: &str) -> aqr::Decoded<Box<dyn Loaded>> {
 
 /// `wat` applied ([`Wasm`]), and applied alike in the sandbox.
 fn apply(wat: &str, inputs: &[&[u8]], sizes: &[u64], limit: u64) -> aqr::Decoded<Vec<Vec<u8>>> {
-    let r = load(wat)?.apply(b"pp", &[], inputs, sizes, limit);
+    apply_v2(wat, inputs, sizes, limit, &[])
+}
+
+/// [`apply`] with task limits (the spec's ApplyV2).
+fn apply_v2(wat: &str, inputs: &[&[u8]], sizes: &[u64], limit: u64, tasks: &[u64]) -> aqr::Decoded<Vec<Vec<u8>>> {
+    let r = load(wat)?.apply(b"pp", &[], inputs, sizes, limit, tasks);
     #[cfg(feature = "sandbox")]
     {
-        let s = SANDBOX.load(&module(wat))?.apply(b"pp", &[], inputs, sizes, limit);
+        let s = SANDBOX.load(&module(wat))?.apply(b"pp", &[], inputs, sizes, limit, tasks);
         assert!(s == r, "in the sandbox: {:?}, in this process: {:?}", s.as_ref().err(), r.as_ref().err());
     }
     r
@@ -935,13 +940,13 @@ fn part() {
     assert!(l.is_part());
     let pulled = Arc::new(AtomicU64::new(0));
     let (mut feed, mut drain) = (Feed(&d, pulled.clone(), None), Drain(Vec::new(), pulled, None));
-    l.apply_part(b"pp", &[], &mut [&mut feed], &mut [&mut drain], &[d.len() as u64], 4 << 16).unwrap();
+    l.apply_part(b"pp", &[], &mut [&mut feed], &mut [&mut drain], &[d.len() as u64], 4 << 16, &[]).unwrap();
     assert!(drain.0 == d);
     assert!(drain.2.is_some_and(|n| n < 1 << 16), "{:?}", drain.2);
     let upstream = Failure::Invalid("upstream".into());
     let mut feed = Feed(&d, Arc::default(), Some(upstream.clone()));
     let mut drain = Drain(Vec::new(), Arc::default(), None);
-    let r = l.apply_part(b"pp", &[], &mut [&mut feed], &mut [&mut drain], &[d.len() as u64], 4 << 16);
+    let r = l.apply_part(b"pp", &[], &mut [&mut feed], &mut [&mut drain], &[d.len() as u64], 4 << 16, &[]);
     assert_eq!(r, Err(upstream));
 }
 
@@ -1310,6 +1315,75 @@ fn task_slots() {
     assert_eq!(apply(&two(Some(1)), &[&input[..2]], &[2], u64::MAX).unwrap(), [&input[..2]]);
     invalid(apply(&two(Some(2)), &[&input[..3]], &[3], u64::MAX), "deadlock");
     assert_eq!(apply(&two(None), &[&input], &[16], u64::MAX).unwrap(), std::slice::from_ref(&input));
+}
+
+/// Tasks of `aqr_spawn_v2`: a task of class 0 per byte of the input, started from one region (the
+/// input at 0x100, placed at 0x30000: past the module's page) and giving the byte plus 1, with
+/// its memory size checked (5 pages: the region's end). `nested` has each task spawn one of class
+/// `nested` first.
+fn regions(nested: Option<u32>) -> String {
+    let inner = match nested {
+        Some(c) => {
+            format!("(drop (call $spawn2 (i32.const {c}) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0)))")
+        }
+        None => String::new(),
+    };
+    format!(
+        r#"(module {MEMORIES}
+            (@custom "aqr_task_slots" "\04\02")
+            (import "aqr" "aqr_spawn_v2" (func $spawn2 (param i32 i32 i32 i32 i32) (result i32)))
+            (import "aqr" "aqr_result" (func $result (param i32 i32)))
+            (import "aqr" "aqr_join" (func $join (param i32 i32) (result i32)))
+            (import "aqr" "aqr_take" (func $take (param i32 i32 i32 i32)))
+            (func (export "aqr_task") (param $arg i32) (param $i i32)
+                (if (i32.ne (memory.size 0) (i32.const 4)) (then unreachable))
+                ;; the spawner's bytes at 0x100 are not there
+                (if (i32.ne (i32.load8_u (i32.const 0x100)) (i32.const 0)) (then unreachable))
+                {inner}
+                (i32.store8 (i32.const 0x8000)
+                    (i32.add (i32.load8_u (i32.add (i32.const 0x30000) (local.get $i))) (i32.const 1)))
+                (call $result (i32.const 0x8000) (i32.const 1)))
+            (func (export "aqr_apply_whole") (param i64) (param $n i64) (param i64)
+                (local $h i32) (local $i i32)
+                (memory.copy 0 2 (i32.const 0x100) (i64.const 0) (i32.wrap_i64 (local.get $n)))
+                ;; the record: from 0x100, n bytes, to 0x30000
+                (i32.store (i32.const 0x200) (i32.const 0x100))
+                (i32.store (i32.const 0x204) (i32.wrap_i64 (local.get $n)))
+                (i32.store (i32.const 0x208) (i32.const 0x30000))
+                (local.set $h (call $spawn2 (i32.const 0) (i32.const 1) (i32.const 0x200) (i32.const 0)
+                    (i32.wrap_i64 (local.get $n))))
+                (loop $next (if (i32.lt_u (local.get $i) (i32.wrap_i64 (local.get $n))) (then
+                    (if (i32.ne (call $join (local.get $h) (local.get $i)) (i32.const 1)) (then unreachable))
+                    (call $take (local.get $h) (local.get $i) (i32.add (i32.const 0x4000) (local.get $i)) (i32.const 1))
+                    (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                    (br $next))))
+                (memory.copy 3 0 (i64.const 0) (i32.const 0x4000) (i32.wrap_i64 (local.get $n)))))"#
+    )
+}
+
+/// `aqr_spawn_v2`: tasks of the regions named, under their class's limit each with task limits
+/// (and not in the instance's), spawning only classes above their own.
+#[test]
+fn tasks_of_regions() {
+    let m = regions(None);
+    assert_eq!(apply(&m, &[b"abc"], &[3], u64::MAX).unwrap(), [b"bcd"]);
+    // a task is 4 pages, the instance 4 (its working memory, and the parameters, input and output a
+    // page each)
+    let pages = |n: u64| n << 16;
+    assert_eq!(apply_v2(&m, &[b"abc"], &[3], pages(4), &[pages(4), 1]).unwrap(), [b"bcd"]);
+    assert!(matches!(apply_v2(&m, &[b"abc"], &[3], pages(4), &[pages(3), 1]), Err(Failure::Resource(_))));
+    // without task limits, the tasks' memories are in the memory limit (short of one task here)
+    assert!(matches!(apply(&m, &[b"abc"], &[3], pages(4 + 3)), Err(Failure::Resource(_))));
+    assert_eq!(apply(&m, &[b"a"], &[1], pages(4 + 4)).unwrap(), [b"b"]);
+    // as many task limits as classes
+    invalid(apply_v2(&m, &[b"abc"], &[3], u64::MAX, &[u64::MAX]), "task limits");
+    // a task of class 0 spawning one of class 1, not of class 0 (with task limits; without, either)
+    let up = regions(Some(1));
+    assert_eq!(apply_v2(&up, &[b"ab"], &[2], u64::MAX, &[u64::MAX, u64::MAX]).unwrap(), [b"bc"]);
+    let same = regions(Some(0));
+    invalid(apply_v2(&same, &[b"ab"], &[2], u64::MAX, &[u64::MAX, u64::MAX]), "spawning one of class 0");
+    // a class past the module's
+    invalid(apply(&regions(Some(2)), &[b"ab"], &[2], u64::MAX), "class 2");
 }
 
 /// The task slots of a module: one custom section of one byte from 1 to 64 where it spawns

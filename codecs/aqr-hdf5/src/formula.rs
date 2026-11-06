@@ -360,6 +360,7 @@ fn floats(
             inputs,
             len: p.out_len().unwrap(),
             memory_limit: aqr_formula::NO_LIMIT,
+            task_limits: Vec::new(),
         };
         for (&j, o) in js.iter().zip(f.split(a, vec![bytes as u64; js.len()])) {
             let n = match fletcher {

@@ -102,6 +102,7 @@ enum HostFn {
     Heartbeat,
     Log,
     Spawn,
+    SpawnV2,
     Result,
     Join,
     Take,
@@ -135,8 +136,8 @@ struct Compiled {
     windows: Vec<(Mem, u64)>,
     /// The number of parameters of the entry point.
     arity: usize,
-    /// Its task slots: how many of the tasks an instance spawns run at once (0 without tasks).
-    slots: usize,
+    /// The task slots of each class of its tasks (none without tasks).
+    slots: Vec<usize>,
     /// SHA-512/256 of the module.
     hash: [u8; 32],
 }
@@ -191,6 +192,7 @@ fn func_of(name: &str) -> Option<(HostFn, &'static [wp::ValType], &'static [wp::
         "aqr_heartbeat" => (HostFn::Heartbeat, &[], &[]),
         "aqr_log" => (HostFn::Log, &[I32, I32], &[]),
         "aqr_spawn" => (HostFn::Spawn, &[I32, I32], &[I32]),
+        "aqr_spawn_v2" => (HostFn::SpawnV2, &[I32, I32, I32, I32, I32], &[I32]),
         "aqr_result" => (HostFn::Result, &[I32, I32], &[]),
         "aqr_join" => (HostFn::Join, &[I32, I32], &[I32]),
         "aqr_take" => (HostFn::Take, &[I32, I32, I32, I32], &[]),
@@ -334,7 +336,7 @@ fn compile(wasm: &[u8]) -> Decoded<Compiled> {
     if !windows.is_empty() && !part {
         return invalid("a whole module of a memory of a maximum");
     }
-    let spawns = imports.iter().any(|i| matches!(i, Import::Func(HostFn::Spawn)));
+    let spawns = imports.iter().any(|i| matches!(i, Import::Func(HostFn::Spawn | HostFn::SpawnV2)));
     if spawns {
         let ft = task.and_then(|f| funcs.get(f as usize)).and_then(|&t| types.get(t as usize));
         let Some(ft) = ft else { return invalid(format!("tasks spawned without {TASK}")) };
@@ -342,14 +344,14 @@ fn compile(wasm: &[u8]) -> Decoded<Compiled> {
             return invalid(format!("{TASK} of another type"));
         }
     }
-    let slots = match (spawns, &slots[..]) {
-        (true, [d]) => match d[..] {
-            [n @ 1..=64] => n as usize,
-            _ => return invalid(format!("{TASK_SLOTS} not a byte from 1 to 64")),
-        },
+    let slots: Vec<usize> = match (spawns, &slots[..]) {
+        (true, [d]) if !d.is_empty() && d.iter().all(|n| (1..=64).contains(n)) => {
+            d.iter().map(|&n| n as usize).collect()
+        }
+        (true, [_]) => return invalid(format!("{TASK_SLOTS} not bytes from 1 to 64")),
         (true, []) => return invalid(format!("tasks spawned without {TASK_SLOTS}")),
         (true, _) => return invalid(format!("{TASK_SLOTS} more than once")),
-        (false, []) => 0,
+        (false, []) => Vec::new(),
         (false, _) => return invalid(format!("{TASK_SLOTS} without tasks")),
     };
     let module = Module::new(&ENGINE, wasm).map_err(|e| Failure::Invalid(format!("not compiled: {e}")))?;
@@ -432,6 +434,10 @@ impl std::error::Error for TaskFailed {}
 /// What the instances of an application share.
 struct App {
     limit: u64,
+    /// The task limits (none: all of the application under `limit`), and then the slots of each
+    /// class over the application.
+    task_limits: Vec<u64>,
+    classes: Vec<Arc<Slots>>,
     /// The size of the memories of all the instances and of the messages queued.
     total: Mutex<u64>,
     /// The largest `total` so far, and the most the application's instance and any one task held
@@ -542,14 +548,68 @@ impl Slots {
     }
 }
 
-/// What a task runs: `aqr_task(arg, i)` in an instance of `c` whose working memory is
-/// `snapshot`.
+/// `aqr_spawn_v2`'s work for the instance of `c`: `n` tasks of class `class` starting as `start`
+/// gives, appended to the handles; the index of their handle.
+fn spawn(c: &mut Caller<'_, State>, class: usize, start: Start, arg: u32, n: u32) -> wasmtime::Result<i32> {
+    let s = c.data_mut();
+    let classes = s.c.0.slots.len();
+    if class >= classes {
+        return violation(format!("a task of class {class} of {classes}"));
+    }
+    // (with task limits, a task spawns only classes above its own: none waits holding a slot)
+    if s.own_limit() && class <= s.class {
+        return violation(format!("a task of class {} spawning one of class {class}", s.class));
+    }
+    let slots = match s.app.task_limits.is_empty() {
+        true => {
+            if s.slots.len() < classes {
+                s.slots.resize_with(classes, Arc::default);
+            }
+            s.slots[class].clone()
+        }
+        false => s.app.classes[class].clone(),
+    };
+    let most = s.c.0.slots[class];
+    let cells: Vec<Option<Arc<Cell>>> = (0..n)
+        .map(|i| {
+            let cell = Arc::new(Cell::default());
+            let job = Job { c: s.c.clone(), app: s.app.clone(), class, start: start.clone(), arg, i };
+            let (done, app) = (cell.clone(), s.app.clone());
+            let task = Box::pin(async move {
+                let r = job.run().await;
+                // (a task failing fails the application at once: those waiting for it through
+                // channels would wait for ever)
+                if let Err(f) = &r {
+                    app.failed.lock().unwrap().get_or_insert_with(|| f.clone());
+                    app.exec.stop();
+                }
+                done.finish(r)
+            });
+            slots.start(&s.app.exec, most, task);
+            Some(cell)
+        })
+        .collect();
+    s.spawned.push(cells);
+    Ok((s.spawned.len() - 1) as i32)
+}
+
+/// What a task runs: `aqr_task(arg, i)` in an instance of `c`, of class `class`, whose working
+/// memory starts as `start` gives.
 struct Job {
     c: Shared,
     app: Arc<App>,
-    snapshot: Arc<Snapshot>,
+    class: usize,
+    start: Start,
     arg: u32,
     i: u32,
+}
+
+/// What a task's working memory starts as: a copy of the spawning instance's (`aqr_spawn`), or
+/// regions of it, each written at its offset (`aqr_spawn_v2`).
+#[derive(Clone)]
+enum Start {
+    Copy(Arc<Snapshot>),
+    Regions(Arc<Vec<(u64, Vec<u8>)>>),
 }
 
 /// An output of an application: where it goes, its memory, and (of a part module) the bytes
@@ -615,17 +675,20 @@ struct State {
     /// The outputs, their memories and (of a part module) the bytes committed so far.
     outputs: Vec<Output>,
     last_log: Option<Vec<u8>>,
-    /// Whether the instance is a task, and its result.
+    /// Whether the instance is a task (and its class), and its result.
     task: bool,
+    class: usize,
     result: Vec<u8>,
     /// The tasks spawned, by handle; taken where `None`.
     spawned: Vec<Vec<Option<Arc<Cell>>>>,
-    /// The tasks spawned running, and those to start.
-    slots: Arc<Slots>,
+    /// Of each class, the tasks spawned running and those to start (without task limits; with
+    /// them, the application's `classes`).
+    slots: Vec<Arc<Slots>>,
 }
 
 impl State {
-    fn new(c: Shared, app: Arc<App>, task: bool) -> State {
+    fn new(c: Shared, app: Arc<App>, task: Option<usize>) -> State {
+        let (class, task) = (task.unwrap_or(0), task.is_some());
         let id = if task { app.next.fetch_add(1, Ordering::Relaxed) } else { 0 };
         State {
             c,
@@ -637,10 +700,17 @@ impl State {
             outputs: Vec::new(),
             last_log: None,
             task,
+            class,
             result: Vec::new(),
             spawned: Vec::new(),
-            slots: Arc::default(),
+            slots: Vec::new(),
         }
+    }
+
+    /// Whether its memories are under a limit of their own (a task's, with task limits) rather
+    /// than in the application's total.
+    fn own_limit(&self) -> bool {
+        self.task && !self.app.task_limits.is_empty()
     }
 
     /// Whether a task spawned is yet to be taken.
@@ -657,7 +727,9 @@ impl State {
 impl Drop for State {
     /// The memories given back, and the channels this instance sends to closed.
     fn drop(&mut self) {
-        let _ = self.app.account(0, self.mine);
+        if !self.own_limit() {
+            let _ = self.app.account(0, self.mine);
+        }
         let mut waiting = Vec::new();
         for ch in self.app.chans.lock().unwrap().iter_mut().filter(|ch| ch.sender == Some(self.id)) {
             ch.closed = true;
@@ -669,8 +741,14 @@ impl Drop for State {
 
 impl ResourceLimiter for State {
     fn memory_growing(&mut self, current: usize, desired: usize, _: Option<usize>) -> wasmtime::Result<bool> {
-        self.app.account(desired as u64, current as u64)?;
-        self.mine = self.mine - current as u64 + desired as u64;
+        let mine = self.mine - current as u64 + desired as u64;
+        match self.own_limit() {
+            // (a task under its class's limit on its own)
+            true if mine > self.app.task_limits[self.class] => return Err(wasmtime::Error::new(OverLimit)),
+            true => {}
+            false => self.app.account(desired as u64, current as u64)?,
+        }
+        self.mine = mine;
         match self.task {
             true => self.app.task_peak.fetch_max(self.mine, Ordering::Relaxed),
             false => self.app.instance_peak.fetch_max(self.mine, Ordering::Relaxed),
@@ -792,6 +870,7 @@ impl Loaded for Shared {
         outputs: &mut [&mut dyn PartOut],
         sizes: &[u64],
         memory_limit: u64,
+        task_limits: &[u64],
     ) -> Decoded<()> {
         let _s = aqr_common::trace::span("wasm");
         if !self.0.part {
@@ -801,7 +880,7 @@ impl Loaded for Shared {
             return invalid("outputs of other sizes than declared");
         }
         let lens: Vec<u64> = inputs.iter().map(|i| i.len()).collect();
-        self.check(params, resources, &lens, sizes, memory_limit)?;
+        self.check(params, resources, &lens, sizes, memory_limit, task_limits)?;
         // SAFETY: the inputs and outputs outlive the store, which is dropped within `run_fed`,
         // and are not reached but by it meanwhile
         let feeds = (inputs.iter_mut()).map(|i| {
@@ -813,7 +892,7 @@ impl Loaded for Shared {
                 n,
             )
         });
-        self.run_fed(params, resources, feeds.collect(), drains.collect(), memory_limit)
+        self.run_fed(params, resources, feeds.collect(), drains.collect(), memory_limit, task_limits)
     }
 
     fn apply(
@@ -823,13 +902,14 @@ impl Loaded for Shared {
         inputs: &[&[u8]],
         sizes: &[u64],
         memory_limit: u64,
+        task_limits: &[u64],
     ) -> Decoded<Vec<Vec<u8>>> {
         let _s = aqr_common::trace::span("wasm");
-        self.check(params, resources, &lens(inputs), sizes, memory_limit)?;
+        self.check(params, resources, &lens(inputs), sizes, memory_limit, task_limits)?;
         // (zeroed by the system as they are written, as a copy out of the memories would be)
         let mut outs: Vec<Vec<u8>> = sizes.iter().map(|&s| vec![0; s as usize]).collect();
         let mut bufs: Vec<&mut [u8]> = outs.iter_mut().map(|o| &mut o[..]).collect();
-        self.run(params, resources, inputs, &mut bufs, memory_limit)?;
+        self.run(params, resources, inputs, &mut bufs, memory_limit, task_limits)?;
         Ok(outs)
     }
 }
@@ -845,10 +925,11 @@ impl Shared {
         inputs: &[&[u8]],
         outs: &mut [&mut [u8]],
         memory_limit: u64,
+        task_limits: &[u64],
     ) -> Decoded<()> {
         let sizes: Vec<u64> = outs.iter().map(|o| o.len() as u64).collect();
-        self.check(params, resources, &lens(inputs), &sizes, memory_limit)?;
-        self.run(params, resources, inputs, outs, memory_limit)
+        self.check(params, resources, &lens(inputs), &sizes, memory_limit, task_limits)?;
+        self.run(params, resources, inputs, outs, memory_limit, task_limits)
     }
 
     /// The application checked against the module and the memory limit, before anything of it
@@ -860,6 +941,7 @@ impl Shared {
         inputs: &[u64],
         sizes: &[u64],
         memory_limit: u64,
+        task_limits: &[u64],
     ) -> Decoded<()> {
         let c = &*self.0;
         if sizes.is_empty() {
@@ -878,6 +960,9 @@ impl Shared {
             if n {
                 return invalid("a memory imported beyond those given");
             }
+        }
+        if !task_limits.is_empty() && task_limits.len() != c.slots.len() {
+            return invalid(format!("{} task limits for {} classes of tasks", task_limits.len(), c.slots.len()));
         }
         let total = self.imported(params, resources, inputs, sizes) + c.working.0 as u128 * 65536;
         if total > memory_limit as u128 {
@@ -909,6 +994,7 @@ impl Shared {
         inputs: &[&[u8]],
         outs: &mut [&mut [u8]],
         memory_limit: u64,
+        task_limits: &[u64],
     ) -> Decoded<()> {
         // SAFETY: the inputs and outputs outlive the store, which is dropped within `run_fed`,
         // and so do the references to them in it; the outputs are not reached but by it
@@ -916,7 +1002,7 @@ impl Shared {
         let feeds = inputs.iter().map(|i| Feed::Bytes(unsafe { std::slice::from_raw_parts(i.as_ptr(), i.len()) }));
         let drains =
             (outs.iter_mut()).map(|o| Drain::Buf(unsafe { std::slice::from_raw_parts_mut(o.as_mut_ptr(), o.len()) }));
-        self.run_fed(params, resources, feeds.collect(), drains.collect(), memory_limit)
+        self.run_fed(params, resources, feeds.collect(), drains.collect(), memory_limit, task_limits)
     }
 
     /// [`Shared::run`] of the inputs and outputs as the instance takes them, which outlive it.
@@ -927,6 +1013,7 @@ impl Shared {
         feeds: Vec<Feed>,
         drains: Vec<Drain>,
         memory_limit: u64,
+        task_limits: &[u64],
     ) -> Decoded<()> {
         let c = &*self.0;
         let sizes: Vec<u64> = drains.iter().map(Drain::len).collect();
@@ -943,6 +1030,8 @@ impl Shared {
         let exec = Exec::new();
         let app = Arc::new(App {
             limit: memory_limit,
+            task_limits: task_limits.to_vec(),
+            classes: c.slots.iter().map(|_| Arc::default()).collect(),
             total: Mutex::new(0),
             peak: AtomicU64::new(0),
             instance_peak: AtomicU64::new(0),
@@ -952,7 +1041,7 @@ impl Shared {
             next: AtomicU64::new(1),
             failed: Mutex::default(),
         });
-        let mut state = State::new(self.clone(), app.clone(), false);
+        let mut state = State::new(self.clone(), app.clone(), None);
         state.inputs = feeds.into_iter().map(|f| (f, None, 0, 0)).collect();
         state.outputs = drains.into_iter().map(|buf| Output { buf, memory: None, done: 0 }).collect();
         let mut store = Store::new(&ENGINE, state);
@@ -1035,6 +1124,26 @@ impl Shared {
 
 /// The pages of the working memory of `wasm` as it is instantiated: the minimum of its import
 /// (the module's data and stack), for its memory estimate ([`aqr_formula::Usage`]).
+/// The task slots of each class of tasks of `wasm` (its custom section `aqr_task_slots`; none
+/// where it has none), unchecked.
+pub fn task_slots(wasm: &[u8]) -> Vec<u64> {
+    for p in wp::Parser::new(0).parse_all(wasm) {
+        if let Ok(wp::Payload::CustomSection(c)) = p
+            && c.name() == TASK_SLOTS
+        {
+            return c.data().iter().map(|&n| n as u64).collect();
+        }
+    }
+    Vec::new()
+}
+
+/// The most the memories of an application may take: `memory_limit`, and with task limits, those
+/// of as many tasks of each class at once as its task `slots` ([`task_slots`]).
+pub fn application_bound(memory_limit: u64, task_limits: &[u64], slots: &[u64]) -> u64 {
+    let tasks = task_limits.iter().zip(slots).fold(0u64, |t, (&l, &n)| t.saturating_add(l.saturating_mul(n)));
+    memory_limit.saturating_add(tasks)
+}
+
 pub fn initial_pages(wasm: &[u8]) -> Option<u64> {
     for p in wp::Parser::new(0).parse_all(wasm) {
         if let wp::Payload::ImportSection(r) = p.ok()? {
@@ -1112,9 +1221,16 @@ impl Job {
     /// Runs the task, giving its result.
     async fn run(self) -> Decoded<Vec<u8>> {
         let c = &*self.c.0;
-        let mut store = Store::new(&ENGINE, State::new(self.c.clone(), self.app.clone(), true));
+        let mut store = Store::new(&ENGINE, State::new(self.c.clone(), self.app.clone(), Some(self.class)));
         store.limiter(|s| s);
-        let pages = (self.snapshot.as_slice().len() / 65536) as u32;
+        let pages = match &self.start {
+            Start::Copy(s) => s.as_slice().len() / 65536,
+            // (the minimum, and the regions within it)
+            Start::Regions(r) => {
+                let end = r.iter().map(|(d, b)| d + b.len() as u64).max().unwrap_or(0);
+                (end.div_ceil(65536) as usize).max(c.working.0 as usize)
+            }
+        } as u32;
         // every memory but the working one empty
         let (instance, _) = instantiate(&mut store, c, &mut |m| match m {
             Mem::Working => (MemoryType::new(pages, c.working.1.map(|m| m as u32)), None),
@@ -1124,8 +1240,15 @@ impl Job {
         // the working memory a copy of the snapshot (on write where the system can), over
         // what the data segments wrote
         let w = store.data().working.expect("a working memory");
-        self.snapshot.copy_to(w.data_mut(&mut store), usize::try_from(c.clean).unwrap_or(usize::MAX));
-        drop(self.snapshot);
+        match self.start {
+            Start::Copy(s) => s.copy_to(w.data_mut(&mut store), usize::try_from(c.clean).unwrap_or(usize::MAX)),
+            Start::Regions(r) => {
+                let m = w.data_mut(&mut store);
+                for (d, b) in r.iter() {
+                    m[*d as usize..][..b.len()].copy_from_slice(b);
+                }
+            }
+        }
         let task = instance.get_typed_func::<(i32, i32), ()>(&mut store, TASK).expect("aqr_task");
         if let Err(e) = task.call_async(&mut store, (self.arg as i32, self.i as i32)).await {
             return Err(failure(&store, e));
@@ -1278,33 +1401,42 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
         }),
         HostFn::Spawn => {
             Func::wrap(&mut *store, |mut c: Caller<'_, State>, arg: i32, n: i32| -> wasmtime::Result<i32> {
+                // (aqr_spawn_v2 of class 0 and all of the working memory at offset 0)
                 let w = c.data().working.expect("a working memory");
-                let snapshot = Arc::new(Snapshot::new(w.data(&c)));
-                let s = c.data_mut();
-                let cells: Vec<Option<Arc<Cell>>> = (0..n as u32)
-                    .map(|i| {
-                        let cell = Arc::new(Cell::default());
-                        let job =
-                            Job { c: s.c.clone(), app: s.app.clone(), snapshot: snapshot.clone(), arg: arg as u32, i };
-                        let (done, app) = (cell.clone(), s.app.clone());
-                        let task = Box::pin(async move {
-                            let r = job.run().await;
-                            // (a task failing fails the application at once: those waiting for
-                            // it through channels would wait for ever)
-                            if let Err(f) = &r {
-                                app.failed.lock().unwrap().get_or_insert_with(|| f.clone());
-                                app.exec.stop();
-                            }
-                            done.finish(r)
-                        });
-                        s.slots.start(&s.app.exec, s.c.0.slots, task);
-                        Some(cell)
-                    })
-                    .collect();
-                s.spawned.push(cells);
-                Ok((s.spawned.len() - 1) as i32)
+                let start = Start::Copy(Arc::new(Snapshot::new(w.data(&c))));
+                spawn(&mut c, 0, start, arg as u32, n as u32)
             })
         }
+        HostFn::SpawnV2 => Func::wrap(
+            &mut *store,
+            |mut c: Caller<'_, State>,
+             class: i32,
+             count: i32,
+             records: i32,
+             arg: i32,
+             n: i32|
+             -> wasmtime::Result<i32> {
+                let (count, records) = (count as u32 as usize, records as u32 as usize);
+                let w = c.data().working.expect("a working memory");
+                let m = w.data(&c);
+                let Some(recs) = count.checked_mul(12).and_then(|l| m.get(records..records.checked_add(l)?)) else {
+                    return violation(format!("aqr_spawn_v2's {count} records at {records} out of bounds"));
+                };
+                let mut regions = Vec::with_capacity(count);
+                for r in recs.chunks_exact(12) {
+                    let u = |k: usize| u32::from_le_bytes(r[k..k + 4].try_into().unwrap()) as usize;
+                    let (src, len, dst) = (u(0), u(4), u(8));
+                    let Some(b) = src.checked_add(len).and_then(|e| m.get(src..e)) else {
+                        return violation(format!("aqr_spawn_v2's region {src}+{len} out of bounds"));
+                    };
+                    if (dst + len) as u64 > 1 << 32 {
+                        return violation(format!("aqr_spawn_v2's region to {dst}+{len} past 4 GiB"));
+                    }
+                    regions.push((dst as u64, b.to_vec()));
+                }
+                spawn(&mut c, class as u32 as usize, Start::Regions(Arc::new(regions)), arg as u32, n as u32)
+            },
+        ),
         HostFn::Result => Func::wrap(&mut *store, |mut c: Caller<'_, State>, ptr: i32, len: i32| {
             if !c.data().task {
                 return violation("aqr_result outside a task".into());

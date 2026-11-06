@@ -767,6 +767,7 @@ mod tests {
             inputs: vec![a],
             len: 0,
             memory_limit: crate::NO_LIMIT,
+            task_limits: Vec::new(),
         };
         let [o0, o1] = <[crate::Node; 2]>::try_from(f.share(cut, vec![3, 5])).unwrap();
         let rev = crate::Node::apply(REV, vec![1, 2, 3], vec![o0], 1);

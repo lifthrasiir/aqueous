@@ -754,6 +754,7 @@ impl Loaded for NativeLoaded<'_> {
         outputs: &mut [&mut dyn PartOut],
         sizes: &[u64],
         _: u64,
+        _: &[u64],
     ) -> aqr::Decoded<()> {
         let Some(entry) = self.part() else { return Err(Failure::Resource("not a part module".into())) };
         let _s = aqr_common::trace::span(self.module.name);
@@ -774,6 +775,7 @@ impl Loaded for NativeLoaded<'_> {
         inputs: &[&[u8]],
         sizes: &[u64],
         _: u64,
+        _: &[u64],
     ) -> aqr::Decoded<Vec<Vec<u8>>> {
         let &[len] = sizes else { return Err(Failure::Invalid(format!("{}: {} outputs", self.module, sizes.len()))) };
         let resources: Vec<&[u8]> = resources.iter().map(|r| &r[..]).collect();

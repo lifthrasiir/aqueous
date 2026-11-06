@@ -93,5 +93,6 @@ pub fn apply_joined(
         inputs: vec![data, record, Node::concat(kept), index],
         len,
         memory_limit: aqr_formula::NO_LIMIT,
+        task_limits: Vec::new(),
     }
 }

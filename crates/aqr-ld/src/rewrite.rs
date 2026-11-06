@@ -213,7 +213,7 @@ pub fn rewrite(wasm: &[u8]) -> Result<Vec<u8>, String> {
     if entry == WHOLE && !part_funcs.is_empty() {
         return Err(format!("whole module imports {}", part_funcs.join(", ")));
     }
-    let spawns = m.imports.iter().any(|i| i.module == "aqr" && i.name == "aqr_spawn");
+    let spawns = m.imports.iter().any(|i| i.module == "aqr" && matches!(&i.name[..], "aqr_spawn" | "aqr_spawn_v2"));
     if spawns {
         task(&mut m, task_body)?;
     }
@@ -227,10 +227,10 @@ pub fn rewrite(wasm: &[u8]) -> Result<Vec<u8>, String> {
     // (as the linker wrote it: sections of one name from several objects are one, concatenated)
     let slots = task_slots(wasm)?;
     match (spawns, slots) {
-        (true, Some(n @ 1..=64)) => {
-            m.customs.add(walrus::RawCustomSection { name: TASK_SLOTS.into(), data: vec![n] });
+        (true, Some(n)) if !n.is_empty() && n.iter().all(|b| (1..=64).contains(b)) => {
+            m.customs.add(walrus::RawCustomSection { name: TASK_SLOTS.into(), data: n });
         }
-        (true, Some(_)) => return Err(format!("{TASK_SLOTS} not a byte from 1 to 64 (two of them?)")),
+        (true, Some(_)) => return Err(format!("{TASK_SLOTS} not bytes from 1 to 64 (two of them?)")),
         (true, None) => return Err(format!("tasks spawned without {TASK_SLOTS} (whole!'s slots)")),
         (false, _) => {}
     }
@@ -275,17 +275,17 @@ fn windows(wasm: &[u8]) -> Result<HashMap<String, u64>, String> {
     Ok(out)
 }
 
-/// The byte of the custom section [`TASK_SLOTS`] of `wasm`, if it has one; 0 where it is not a
-/// single byte.
-fn task_slots(wasm: &[u8]) -> Result<Option<u8>, String> {
+/// The bytes of the custom section [`TASK_SLOTS`] of `wasm` (a byte for each class of tasks), if
+/// it has one; empty where it has several (the linker joins sections of one name).
+fn task_slots(wasm: &[u8]) -> Result<Option<Vec<u8>>, String> {
     let mut found = None;
     for p in wasmparser::Parser::new(0).parse_all(wasm) {
         if let wasmparser::Payload::CustomSection(c) = p.map_err(|e| e.to_string())?
             && c.name() == TASK_SLOTS
         {
-            found = Some(match (found, c.data()) {
-                (None, &[n]) => n,
-                _ => 0,
+            found = Some(match found {
+                None => c.data().to_vec(),
+                Some(_) => Vec::new(),
             });
         }
     }

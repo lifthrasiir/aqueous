@@ -94,6 +94,7 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
         inputs: vec![input_data, record, index],
         len: 0,
         memory_limit: aqr_formula::NO_LIMIT,
+        task_limits: Vec::new(),
     };
     let mut outputs: Vec<Option<Node>> =
         f.split(a, lens.iter().map(|&(_, _, s)| s as u64).collect()).into_iter().map(Some).collect();

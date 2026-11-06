@@ -344,6 +344,7 @@ pub fn encode_with(
             inputs: vec![data, records, index],
             len: lzma_sizes.iter().sum(),
             memory_limit: aqr_formula::NO_LIMIT,
+            task_limits: Vec::new(),
         };
         nodes[3] = outputs(&mut f, a, lzma_sizes).into_iter();
     }

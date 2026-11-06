@@ -288,6 +288,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         inputs: vec![joined, raw, kept, index],
         len: sizes.iter().sum(),
         memory_limit: aqr_formula::NO_LIMIT,
+        task_limits: Vec::new(),
     };
     let nodes = match sizes.len() {
         1 => vec![Node::Apply(Box::new(a))],

@@ -143,7 +143,7 @@ pub fn encode_set(
     }
     let inputs = vec![Node::pack(sks), Node::pack(indexes), Node::pack(records)];
     let a =
-        Apply { module: SET_MODULE, resources: vec![], params, inputs, len: 0, memory_limit: aqr_formula::NO_LIMIT };
+        Apply { module: SET_MODULE, resources: vec![], params, inputs, len: 0, memory_limit: aqr_formula::NO_LIMIT, task_limits: Vec::new() };
     let outputs = f.split(a, files.iter().map(|d| d.len() as u64).collect());
     f.root = Node::Concat(outputs);
     Some(f)

@@ -1177,6 +1177,7 @@ mod tests {
             inputs: vec![solid(2, 6)],
             len: 0,
             memory_limit: crate::NO_LIMIT,
+            task_limits: Vec::new(),
         };
         let outs = f.share(cut, vec![2, 4]);
         let rev = Node::apply(REV, vec![1, 2, 3], vec![x, solid(0, 2)], 7);

@@ -207,6 +207,7 @@ pub fn encode_xz(input: &[u8], threads: usize) -> Option<Formula> {
                 inputs,
                 len: 0,
                 memory_limit: aqr_formula::NO_LIMIT,
+                task_limits: Vec::new(),
             };
             f.split(a, sizes).into_iter().map(Some).collect()
         }

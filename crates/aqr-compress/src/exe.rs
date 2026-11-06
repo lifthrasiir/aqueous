@@ -752,6 +752,7 @@ fn symbols(f: &mut Formula, d: &[u8], sections: &mut Vec<(u64, usize, usize, Arc
             inputs,
             len: 0,
             memory_limit: aqr_formula::NO_LIMIT,
+            task_limits: Vec::new(),
         };
         let k = outputs.len();
         outputs.extend(f.split(a, vec![sym.len() as u64, strsize as u64]).into_iter().map(Some));

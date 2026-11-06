@@ -107,6 +107,7 @@ mod tests {
             inputs: vec![],
             len: 0,
             memory_limit: NO_LIMIT,
+            task_limits: Vec::new(),
         };
         let none: Vec<&[u8]> = Vec::new();
         let small = limit(&a, &[1 << 20], &[4 << 20], &none);

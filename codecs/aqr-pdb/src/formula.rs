@@ -111,6 +111,7 @@ fn symbols_apply(
         inputs,
         len: 0,
         memory_limit: aqr_formula::NO_LIMIT,
+        task_limits: Vec::new(),
     };
     let outputs = f.split(a, subs.iter().map(|r| r.len() as u64).collect());
     Some((subs, outputs))

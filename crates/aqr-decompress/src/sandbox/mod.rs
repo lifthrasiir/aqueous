@@ -171,14 +171,17 @@ impl Loaded for Remote<'_> {
         inputs: &[&[u8]],
         sizes: &[u64],
         memory_limit: u64,
+        task_limits: &[u64],
     ) -> aqr::Decoded<Vec<Vec<u8>>> {
+        // (the worker's memory bound: its tasks' too)
+        let bound = crate::wasm::application_bound(memory_limit, task_limits, &crate::wasm::task_slots(&self.wasm));
         self.sandbox.with_worker(|w| {
             if !w.loaded.contains(&self.hash)
                 && let Err(f) = w.load(self.hash, &self.wasm)?
             {
                 return Ok(Err(f));
             }
-            w.apply(self.hash, params, resources, inputs, sizes, memory_limit)
+            w.apply(self.hash, params, resources, inputs, sizes, memory_limit, task_limits, bound)
         })
     }
 }
@@ -260,12 +263,14 @@ impl Worker {
         inputs: &[&[u8]],
         sizes: &[u64],
         memory_limit: u64,
+        task_limits: &[u64],
+        bound: u64,
     ) -> io::Result<aqr::Decoded<Vec<Vec<u8>>>> {
         // the bytes sent, held by the worker beside the memories it makes of them
         let sent = params.len() as u64
             + resources.iter().map(|r| r.len() as u64).sum::<u64>()
             + inputs.iter().map(|i| i.len() as u64).sum::<u64>();
-        self.child.limit_memory(OVERHEAD.saturating_add(memory_limit).saturating_add(sent))?;
+        self.child.limit_memory(OVERHEAD.saturating_add(bound).saturating_add(sent))?;
         // the inputs and outputs in the arena where they are many and fit in the memories (else
         // the application fails before any of them is made)
         let lens = inputs.iter().map(|i| i.len() as u64).chain(sizes.iter().copied());
@@ -314,6 +319,10 @@ impl Worker {
             put_u64(w, s)?;
         }
         put_u64(w, memory_limit)?;
+        put_u64(w, task_limits.len() as u64)?;
+        for &l in task_limits {
+            put_u64(w, l)?;
+        }
         w.flush()?;
         let r = get_result(&mut self.from)?;
         let outs = match (&placed, r) {

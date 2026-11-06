@@ -362,6 +362,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Formula> {
                     inputs: vec![node, rc_node.clone()],
                     len,
                     memory_limit: aqr_formula::NO_LIMIT,
+                    task_limits: Vec::new(),
                 };
                 let outputs = f.split(a, parts.iter().map(|p| p.data_len as u64).collect());
                 for (p, o) in parts.into_iter().zip(outputs) {

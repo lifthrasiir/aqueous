@@ -75,6 +75,8 @@ fn requests(r: &mut impl Read, w: &mut impl Write) -> io::Result<()> {
                 let n = get_count(r, u64::MAX)?;
                 let sizes = (0..n).map(|_| get_u64(r)).collect::<io::Result<Vec<_>>>()?;
                 let limit = get_u64(r)?;
+                let n = get_count(r, u64::MAX)?;
+                let task_limits = (0..n).map(|_| get_u64(r)).collect::<io::Result<Vec<_>>>()?;
                 let Some(l) = loaded.get(&hash) else {
                     put_result(w, &Err(Failure::Resource("a module not loaded in the worker".into())))?;
                     w.flush()?;
@@ -83,7 +85,9 @@ fn requests(r: &mut impl Read, w: &mut impl Write) -> io::Result<()> {
                 match inputs {
                     Inputs::Inline(inputs) => {
                         let inputs: Vec<&[u8]> = inputs.iter().map(|i| &i[..]).collect();
-                        match aqr_common::pool::run(|| l.apply(&params, &resources, &inputs, &sizes, limit)) {
+                        match aqr_common::pool::run(|| {
+                            l.apply(&params, &resources, &inputs, &sizes, limit, &task_limits)
+                        }) {
                             Ok(outs) => {
                                 put_result(w, &Ok(()))?;
                                 put_u64(w, outs.len() as u64)?;
@@ -110,8 +114,9 @@ fn requests(r: &mut impl Read, w: &mut impl Write) -> io::Result<()> {
                             i.iter().map(at).map(|(p, n)| unsafe { std::slice::from_raw_parts(p, n) }).collect();
                         let mut outs: Vec<&mut [u8]> =
                             o.iter().map(at).map(|(p, n)| unsafe { std::slice::from_raw_parts_mut(p, n) }).collect();
-                        let res =
-                            aqr_common::pool::run(|| l.apply_into(&params, &resources, &inputs, &mut outs, limit));
+                        let res = aqr_common::pool::run(|| {
+                            l.apply_into(&params, &resources, &inputs, &mut outs, limit, &task_limits)
+                        });
                         put_result(w, &res)?;
                         if a.len() as u64 > KEEP {
                             arena = None;

@@ -114,6 +114,7 @@ const RESOURCE_BYTES: u8 = 0x03;
 const SWAP: u8 = 0x0f;
 const SLICE: u8 = 0x10;
 const APPLY: u8 = 0x11;
+const APPLY_V2: u8 = 0x16;
 const CONCAT: u8 = 0x12;
 const PACK: u8 = 0x13;
 const SPLIT: u8 = 0x14;
@@ -1112,7 +1113,7 @@ impl Emit<'_> {
 
     fn apply(&mut self, a: &crate::Apply, sizes: &[u64]) {
         let out = &mut *self.out;
-        out.push(APPLY);
+        out.push(if a.task_limits.is_empty() { APPLY } else { APPLY_V2 });
         varint::put(out, self.modules.iter().position(|&m| m == a.module).unwrap() as u64);
         varint::put(out, a.resources.len() as u64);
         for r in &a.resources {
@@ -1121,6 +1122,10 @@ impl Emit<'_> {
         varint::put(out, a.params.len() as u64);
         out.extend_from_slice(&a.params);
         varint::put(out, a.memory_limit);
+        if !a.task_limits.is_empty() {
+            varint::put(out, a.task_limits.len() as u64);
+            a.task_limits.iter().for_each(|&n| varint::put(out, n));
+        }
         varint::put(out, a.inputs.len() as u64);
         varint::put(out, sizes.len() as u64);
         sizes.iter().for_each(|&n| varint::put(out, n));
@@ -2371,8 +2376,10 @@ pub trait Runner: Sync {
 /// A module made ready to apply ([`Runner::load`]).
 pub trait Loaded: Send + Sync {
     /// The outputs of an application, of `sizes` bytes each: from `inputs`, the resource
-    /// blocks given in order and `params`, with the memories of at most `memory_limit` bytes.
-    /// The decoder checks the outputs against `sizes`.
+    /// blocks given in order and `params`, with the memories of at most `memory_limit` bytes and
+    /// those of each task of class `c` of at most `task_limits[c]` (the spec's task limits; none:
+    /// all of the application's under `memory_limit`). The decoder checks the outputs against
+    /// `sizes`.
     fn apply(
         &self,
         params: &[u8],
@@ -2380,6 +2387,7 @@ pub trait Loaded: Send + Sync {
         inputs: &[&[u8]],
         sizes: &[u64],
         memory_limit: u64,
+        task_limits: &[u64],
     ) -> Decoded<Vec<Vec<u8>>>;
 
     /// Whether it is applied as a part module ([`Loaded::apply_part`]) rather than whole.
@@ -2397,8 +2405,9 @@ pub trait Loaded: Send + Sync {
         outputs: &mut [&mut dyn PartOut],
         sizes: &[u64],
         memory_limit: u64,
+        task_limits: &[u64],
     ) -> Decoded<()> {
-        let _ = (params, resources, inputs, outputs, sizes, memory_limit);
+        let _ = (params, resources, inputs, outputs, sizes, memory_limit, task_limits);
         resource("not a part module")
     }
 }
@@ -2471,6 +2480,7 @@ impl<M: crate::Modules + Sync> Runner for Natives<'_, M> {
                 inputs: &[&[u8]],
                 sizes: &[u64],
                 memory_limit: u64,
+                task_limits: &[u64],
             ) -> Decoded<Vec<Vec<u8>>> {
                 let a = crate::Apply {
                     module: self.module,
@@ -2479,6 +2489,7 @@ impl<M: crate::Modules + Sync> Runner for Natives<'_, M> {
                     inputs: Vec::new(),
                     len: sizes.iter().sum(),
                     memory_limit,
+                    task_limits: task_limits.to_vec(),
                 };
                 match sizes {
                     [_] => self.m.apply(&a, inputs).map(|out| vec![out]),
@@ -3742,6 +3753,8 @@ struct Apply<'a> {
     resources: Vec<usize>,
     params: &'a [u8],
     memory_limit: u64,
+    /// Of an ApplyV2 instruction: the task limits (else none).
+    task_limits: Vec<u64>,
     num_inputs: usize,
     output_sizes: Vec<u64>,
 }
@@ -3841,9 +3854,11 @@ impl Program<'_> {
         };
         for insn in &self.insns {
             let limit = match insn {
-                Insn::Apply(a) if a.memory_limit != crate::NO_LIMIT => {
+                // (the instance's share: of all of the application's where there are no task limits)
+                Insn::Apply(a) if a.memory_limit != crate::NO_LIMIT && a.task_limits.is_empty() => {
                     a.memory_limit / (1 + slots[self.modules[a.module]])
                 }
+                Insn::Apply(a) if a.memory_limit != crate::NO_LIMIT => a.memory_limit,
                 _ => 0,
             };
             let (ins, outs): (u64, Vec<u64>) = match insn {
@@ -4056,7 +4071,7 @@ fn read<'a>(d: &'a [u8], outputs: u64, env: &Env<'a, '_>, non_leaf: usize, used:
                 b_used[block] = true;
                 Insn::Slice { block, start: r.num()?, len: r.num()? }
             }
-            APPLY => {
+            APPLY | APPLY_V2 => {
                 let module = r.index(modules.len())?;
                 m_used[module] = true;
                 let n = r.count()?;
@@ -4064,12 +4079,27 @@ fn read<'a>(d: &'a [u8], outputs: u64, env: &Env<'a, '_>, non_leaf: usize, used:
                 res.iter().for_each(|&i| r_used[i] = true);
                 let params = r.bytes()?;
                 let memory_limit = r.num()?;
+                let task_limits = match op {
+                    APPLY_V2 => match r.nums()? {
+                        l if l.is_empty() => return invalid("an ApplyV2 instruction of no task limits"),
+                        l => l,
+                    },
+                    _ => Vec::new(),
+                };
                 let num_inputs = usize::try_from(r.num()?).unwrap_or(usize::MAX);
                 let output_sizes = r.nums()?;
                 if output_sizes.is_empty() {
                     return invalid("an application without outputs");
                 }
-                Insn::Apply(Apply { module, resources: res, params, memory_limit, num_inputs, output_sizes })
+                Insn::Apply(Apply {
+                    module,
+                    resources: res,
+                    params,
+                    memory_limit,
+                    task_limits,
+                    num_inputs,
+                    output_sizes,
+                })
             }
             CONCAT => Insn::Concat(r.index(depth + 1)?),
             PACK => Insn::Pack(r.index(depth + 1)?),
@@ -4270,7 +4300,7 @@ type Taker<'a> = dyn FnMut(&[u8]) -> Decoded<()> + 'a;
 fn apply(env: &Env, module: usize, a: &Apply, inputs: &[&[u8]], resources: &[Resource]) -> Decoded<Vec<Vec<u8>>> {
     let loaded = env.loaded[module].get_or_init(|| env.runner.load(&env.modules[module]));
     let loaded = loaded.as_ref().map_err(Failure::clone)?;
-    let outputs = loaded.apply(a.params, resources, inputs, &a.output_sizes, a.memory_limit)?;
+    let outputs = loaded.apply(a.params, resources, inputs, &a.output_sizes, a.memory_limit, &a.task_limits)?;
     if outputs.len() != a.output_sizes.len() || outputs.iter().zip(&a.output_sizes).any(|(o, &n)| o.len() as u64 != n) {
         return invalid(format!("module block {module}: outputs of other sizes than declared"));
     }
@@ -4368,6 +4398,7 @@ mod tests {
             inputs: vec![a],
             len: 0,
             memory_limit: crate::NO_LIMIT,
+            task_limits: Vec::new(),
         };
         let [o0, o1] = <[Node; 2]>::try_from(f.share(cut, vec![6000, 4000])).unwrap();
         f.root = Node::concat([o1, Node::patch(o0, d, 6000)]);
@@ -4397,6 +4428,7 @@ mod tests {
             inputs,
             len: 0,
             memory_limit: crate::NO_LIMIT,
+            task_limits: Vec::new(),
         };
         let [o0, o1] = <[Node; 2]>::try_from(f.share(cut(vec![a]), vec![3, 5])).unwrap();
         let [p0, p1] = <[Node; 2]>::try_from(f.share(cut(vec![o1, Node::slice(0, 0, 2)]), vec![1, 6])).unwrap();
@@ -4622,6 +4654,7 @@ mod tests {
             inputs: vec![a],
             len: 0,
             memory_limit: crate::NO_LIMIT,
+            task_limits: Vec::new(),
         };
         let [o0, o1] = <[Node; 2]>::try_from(f.split(split, vec![40, d.len() as u64 - 40])).unwrap();
         let mut parts = vec![rev(vec![o1], d.len() as u64 - 40)];
@@ -4665,6 +4698,7 @@ mod tests {
             inputs: vec![a],
             len: 0,
             memory_limit: crate::NO_LIMIT,
+            task_limits: Vec::new(),
         };
         let [o0, o1, o2] = <[Node; 3]>::try_from(f.split(rev, vec![3, 0, 5])).unwrap();
         f.root = Node::concat([o2, Node::slice(0, 0, 1), o1, o0]);
@@ -4689,6 +4723,7 @@ mod tests {
             inputs,
             len: 0,
             memory_limit: crate::NO_LIMIT,
+            task_limits: Vec::new(),
         };
         let [o0, o1, o2] = <[Node; 3]>::try_from(f.split(rev(vec![a]), vec![100, n - 300, 200])).unwrap();
         let cut = crate::Apply { module: CUT, params: vec![], ..rev(vec![Node::slice(0, 7, 3000)]) };
@@ -4725,6 +4760,9 @@ mod tests {
     /// The applications [`PartCut`] made as part modules.
     static PARTS: AtomicUsize = AtomicUsize::new(0);
 
+    /// The memory and task limits of the applications of `rev@1` with a memory limit of 1234.
+    static LIMITS: std::sync::Mutex<Vec<Vec<u64>>> = std::sync::Mutex::new(Vec::new());
+
     struct Stand {
         cut: bool,
     }
@@ -4740,8 +4778,19 @@ mod tests {
     }
 
     impl Loaded for Stand {
-        fn apply(&self, _: &[u8], _: &[Resource], inputs: &[&[u8]], sizes: &[u64], _: u64) -> Decoded<Vec<Vec<u8>>> {
+        fn apply(
+            &self,
+            _: &[u8],
+            _: &[Resource],
+            inputs: &[&[u8]],
+            sizes: &[u64],
+            memory_limit: u64,
+            task_limits: &[u64],
+        ) -> Decoded<Vec<Vec<u8>>> {
             assert!(!self.cut, "a part module applied whole");
+            if memory_limit == 1234 {
+                LIMITS.lock().unwrap().push(task_limits.to_vec());
+            }
             assert_eq!(sizes.len(), 1);
             Ok(vec![inputs.concat().into_iter().rev().collect()])
         }
@@ -4758,6 +4807,7 @@ mod tests {
             outputs: &mut [&mut dyn PartOut],
             sizes: &[u64],
             _: u64,
+            _: &[u64],
         ) -> Decoded<()> {
             PARTS.fetch_add(1, Ordering::Relaxed);
             let (mut j, mut left, mut pulled) = (0, sizes[0], 0u64);
@@ -4787,6 +4837,35 @@ mod tests {
         }
     }
 
+    /// The task limits of an application go into the archive as an ApplyV2 instruction and come
+    /// back to the module as they were; one of none is an Apply instruction.
+    #[test]
+    fn task_limits() {
+        let mut f = Formula::default();
+        let d: Vec<u8> = (0..1000u32).map(|i| i as u8).collect();
+        f.push("a", d.clone());
+        let rev = |task_limits: Vec<u64>| {
+            Node::Apply(Box::new(crate::Apply {
+                module: REV,
+                resources: vec![],
+                params: vec![],
+                inputs: vec![Node::slice(0, 0, 1000)],
+                len: 1000,
+                memory_limit: 1234,
+                task_limits,
+            }))
+        };
+        f.root = Node::concat([rev(vec![7, 9]), rev(Vec::new())]);
+        let r: Vec<u8> = d.iter().rev().copied().collect();
+        let want = [&r[..], &r].concat();
+        let c = encode(&f, Some(checksum(&want)), Level::Zstd(1)).unwrap();
+        LIMITS.lock().unwrap().clear();
+        assert!(decode(&c, &PartCut).unwrap() == want);
+        let mut seen = std::mem::take(&mut *LIMITS.lock().unwrap());
+        seen.sort();
+        assert_eq!(seen, [vec![], vec![7, 9]]);
+    }
+
     /// Part modules applied as their outputs are pulled, each on a thread of its own: one of a
     /// single output in another's input (more than its queue holds, so that it waits for it to
     /// be pulled), whose outputs are pulled out of their turn; decoded and written out alike.
@@ -4805,6 +4884,7 @@ mod tests {
             inputs,
             len: 0,
             memory_limit: crate::NO_LIMIT,
+            task_limits: Vec::new(),
         };
         let inner = f.share(cut(vec![a.clone()], vec![]), vec![n]).pop().unwrap();
         let [o0, o1] = <[Node; 2]>::try_from(f.share(cut(vec![inner], vec![]), vec![n - 1000, 1000])).unwrap();
@@ -4857,6 +4937,7 @@ mod tests {
                 inputs: vec![Node::slice(0, k * 2000, 2000)],
                 len: 0,
                 memory_limit: crate::NO_LIMIT,
+                task_limits: Vec::new(),
             };
             for (i, o) in f.split(rev, vec![2; 1000]).into_iter().enumerate() {
                 inner.push(Node::slice(0, i as u64, 1));
