@@ -460,8 +460,10 @@ Wasm threads도 쓰지 않는다. task 수와 분할은 데이터로 정하며 �
 - 동시 실행 수를 적용 전체에서 세면 같은 클래스의 task들이 시작하는 순서가 서로 다른 spawner 사이의 시점에 달린다.
   출력은 KPN이므로 같지만, 채널로 서로를 기다리는 task들(파이프라인)이 모두 돌 수 있는지는 시작 순서에 달릴 수 있다.
   "파이프라인은 같은 spawn의 task끼리"로 묶을지, 그런 클래스의 동시 실행 수를 spawn 하나의 task 수 이상으로 요구할지.
-- [정함] `Apply`의 한도 목록: 지금의 `memory_limit`(적용의 인스턴스) 뒤에 LEB128 `n`과 클래스마다 한도 `n`개(모두
-  LEB128). `n`이 모듈의 `aqr_task_slots` 길이와 다르면 invalid archive이다.
+- [정함] 한도 목록은 새 명령 ApplyV2(opcode 16)에 둔다: Apply의 피연산자에서 `memory_limit`(적용의 인스턴스) 뒤에
+  LEB128 `n`과 클래스마다 한도 `n`개(모두 LEB128). `n`이 모듈의 `aqr_task_slots` 길이와 다르면 invalid archive이다.
+  Apply(opcode 11)는 한도 목록이 빈 것이고 지금의 규칙을 따른다(이미 나온 아카이브). 명세 "ApplyV2 instruction",
+  "Tasks".
 
 > **근거: 사본을 다르게 하는 것이 필요한 이유.** 2026-11-06의 측정(Wasm, 10스레드, 작업 메모리의 최대): flate-set이
 > enwik8.gz에서 322 MB(배치 데이터 + 쌓인 토큰 + 쓰는 중인 출력이 task 8개에 복사), 데이터를 앞에 두는 ZIP에서
