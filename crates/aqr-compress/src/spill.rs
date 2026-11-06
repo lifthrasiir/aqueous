@@ -167,14 +167,19 @@ impl Drop for View {
         let mut state = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         state.regions.remove(&(self.segment.at(self.start) as usize));
         if state.segments.contains_key(&self.segment.id) {
-            let (at, len) = state.release(self.segment.id, self.start, self.len.next_multiple_of(REGION_ALIGN));
-            // the bytes of the free run it is of now given back (with the state held, so that
-            // no region takes them meanwhile): else they stay in the file and the system's cache
-            // until the segment goes
+            let len = self.len.next_multiple_of(REGION_ALIGN);
+            let (run, run_len) = state.release(self.segment.id, self.start, len);
+            // the pages of the free run it is of now that it has bytes of given back (with the
+            // state held, so that no region takes them meanwhile): else they stay in the file and
+            // the system's cache until the segment goes. (Not all of the run: those of the
+            // regions dropped before it were given back as they were, and giving back a run of
+            // many small regions as each goes would take time as the square of their number.)
+            let lo = (self.start / ALIGN * ALIGN).max(run);
+            let hi = (self.start + len).next_multiple_of(ALIGN).min(run + run_len);
             let s = &self.segment;
-            // SAFETY: a free run of the segment's mapping, of all of its file: no region's bytes,
-            // and those of one taken of it after are written before they are read
-            unsafe { aqr_common::pages::discard(&s.file, s.base, s.at(at), len) };
+            // SAFETY: within a free run of the segment's mapping, of all of its file: no
+            // region's bytes, and those of one taken of it after are written before they are read
+            unsafe { aqr_common::pages::discard(&s.file, s.base, s.at(lo), hi - lo) };
         }
     }
 }
