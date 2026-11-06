@@ -179,6 +179,82 @@ impl fmt::Display for Module {
     }
 }
 
+/// The contents of the entries of an archive given one after another, as
+/// [`Formula::push_by_kind`] makes streams of them: each kind's written as it comes
+/// ([`store::Writer`]), so that whoever gives them holds none.
+pub struct ByKind {
+    own: usize,
+    /// The kinds in the order of their first entry (Unknown first), each's writer and length.
+    order: Vec<Kind>,
+    writers: Vec<store::Writer>,
+    lens: Vec<usize>,
+    /// Each part's kind (index), start and length, and whether the next of its kind joins it.
+    parts: Vec<(usize, usize, usize, bool)>,
+    /// Whether all are of [`Kind::Unknown`] and shorter than `own`.
+    simple: bool,
+}
+
+impl ByKind {
+    /// Entries of at least `own` bytes are slices of their own.
+    pub fn new(own: usize) -> ByKind {
+        ByKind {
+            own,
+            order: vec![Kind::Unknown],
+            writers: vec![store::Writer::new(None)],
+            lens: vec![0],
+            parts: Vec::new(),
+            simple: true,
+        }
+    }
+
+    /// The contents `d` of the next entry, of `kind`.
+    pub fn add(&mut self, kind: Kind, d: &[u8]) {
+        let len = d.len();
+        self.simple &= kind == Kind::Unknown && len < self.own;
+        let k = match self.order.iter().position(|&o| o == kind) {
+            Some(k) => k,
+            None => {
+                self.order.push(kind);
+                self.writers.push(store::Writer::new(None));
+                self.lens.push(0);
+                self.order.len() - 1
+            }
+        };
+        let from = self.lens[k];
+        self.writers[k].write(d);
+        self.lens[k] += len;
+        let open = !matches!(kind, Kind::Format(_)) && len < self.own;
+        match self.parts.last_mut() {
+            _ if len == 0 => {}
+            Some(p) if p.0 == k && p.3 && open => p.2 += len,
+            _ => self.parts.push((k, from, len, open)),
+        }
+    }
+
+    /// The streams made (those of [`Kind::Unknown`] stream `raw` of `f`, the others added after
+    /// its streams, of class `{prefix}/{kind}`), and the node of their slices in order.
+    pub fn push(self, f: &mut Formula, raw: usize, prefix: &str) -> Node {
+        let mut kinds = self.order.into_iter().zip(self.writers);
+        let (_, unknown) = kinds.next().expect("the unknown kind");
+        f.streams[raw].data = unknown.into_bytes();
+        if self.simple {
+            return Node::slice(raw, 0, self.lens[0] as u64);
+        }
+        let base = f.streams.len() - 1;
+        for (kind, w) in kinds {
+            let class: Cow<'static, str> = match kind {
+                Kind::Format(name) => format!("{prefix}/{name}").into(),
+                kind => format!("{prefix}/{kind}").into(),
+            };
+            f.push_as(class, kind, w);
+        }
+        let stream = |k| if k == 0 { raw } else { base + k };
+        let mut parts: Vec<Node> =
+            self.parts.into_iter().map(|(k, start, len, _)| Node::slice(stream(k), start as u64, len as u64)).collect();
+        if parts.len() == 1 { parts.pop().unwrap() } else { Node::Concat(parts) }
+    }
+}
+
 /// Data extracted by a recompressor, which `slice` nodes point into.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stream {
@@ -1383,62 +1459,19 @@ impl Formula {
     pub fn push_by_kind(
         &mut self,
         raw: usize,
-        mut data: Vec<u8>,
+        data: Vec<u8>,
         ends: &[(Kind, usize)],
         prefix: &str,
         own: usize,
     ) -> Node {
-        if ends.iter().all(|k| k.0 == Kind::Unknown)
-            && ends.iter().scan(0, |s, &(_, e)| Some(e - std::mem::replace(s, e))).all(|n| n < own)
-        {
-            let len = data.len() as u64;
-            self.streams[raw].data = data.into();
-            return Node::slice(raw, 0, len);
-        }
-        // the stream of each kind, by its first entry
-        let mut order: Vec<Kind> = vec![Kind::Unknown];
-        ends.iter().for_each(|k| {
-            if !order.contains(&k.0) {
-                order.push(k.0)
-            }
-        });
-        let mut of_kind: Vec<Vec<u8>> = vec![Vec::new(); order.len()];
-        // (each the kind's index, start and length, and whether the next of its kind joins it)
-        let (mut parts, mut start, mut at) = (Vec::<(usize, usize, usize, bool)>::with_capacity(ends.len()), 0, 0);
+        let mut by = ByKind::new(own);
+        let mut start = 0;
         for &(kind, end) in ends {
-            let k = order.iter().position(|&o| o == kind).unwrap();
-            let len = end - start;
-            let from = if k == 0 {
-                data.copy_within(start..end, at);
-                at += len;
-                at - len
-            } else {
-                of_kind[k].extend_from_slice(&data[start..end]);
-                of_kind[k].len() - len
-            };
-            let open = !matches!(kind, Kind::Format(_)) && len < own;
-            match parts.last_mut() {
-                _ if len == 0 => {}
-                Some(p) if p.0 == k && p.3 && open => p.2 += len,
-                _ => parts.push((k, from, len, open)),
-            }
+            by.add(kind, &data[start..end]);
             start = end;
         }
-        data.truncate(at);
-        data.shrink_to_fit();
-        self.streams[raw].data = data.into();
-        let base = self.streams.len() - 1;
-        for (kind, d) in order.into_iter().zip(of_kind).skip(1) {
-            let class: Cow<'static, str> = match kind {
-                Kind::Format(name) => format!("{prefix}/{name}").into(),
-                kind => format!("{prefix}/{kind}").into(),
-            };
-            self.push_as(class, kind, d);
-        }
-        let stream = |k| if k == 0 { raw } else { base + k };
-        let mut parts: Vec<Node> =
-            parts.into_iter().map(|(k, start, len, _)| Node::slice(stream(k), start as u64, len as u64)).collect();
-        if parts.len() == 1 { parts.pop().unwrap() } else { Node::Concat(parts) }
+        drop(data);
+        by.push(self, raw, prefix)
     }
 
     /// The modules and resources of the formula's blocks, each once: those of its applications

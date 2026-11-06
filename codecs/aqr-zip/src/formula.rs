@@ -11,7 +11,7 @@ use aqr_flate::formula::Derived;
 use aqr_flate::{Hints, Parsed};
 use aqr_formula::aqr::Encoder;
 use aqr_formula::probe::{self, Held, Probe};
-use aqr_formula::{Formula, Kind, Module, Node};
+use aqr_formula::{ByKind, Bytes, Formula, Kind, Module, Node};
 
 use crate::layout::{self, Made, Writer};
 use crate::zip::{self, DEFLATED, ENCRYPTED, Rec, STORED};
@@ -169,13 +169,15 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     let candidates: Vec<usize> = (0..locals.len())
         .filter(|&i| made[i].is_none() && locals[i].method(input) == DEFLATED && flags(locals[i]) & ENCRYPTED == 0)
         .collect();
-    let fopt = aqr_flate::Options { zlib: opt.zlib, ..aqr_flate::Options::for_profile(opt.profile).ok()? };
-    // The bodies of `jobs` made from their data, each refused of more than it is given; None
+    // (the data written to the store: of every body parsed at once)
+    let fopt = aqr_flate::Options { zlib: opt.zlib, store: true, ..aqr_flate::Options::for_profile(opt.profile).ok()? };
+    // The bodies of `jobs` made from their data (the data and record), each refused of more than
+    // it is given; None
     // where one has more. They are parsed first, the large ones' records estimated where there
     // is a probe; those are probed, what the other entries of their kind hold of their data
     // counted as nothing (the contents of a kind compress together: and an entry turned down
     // is not there for the others either), and only the bodies that may pay are rebuilt.
-    let split = |jobs: &[(usize, u64)]| -> Option<Vec<Option<Made>>> {
+    let split = |jobs: &[(usize, u64)]| -> Option<Vec<Option<(Bytes, Vec<u8>)>>> {
         let fopt = |threads: usize, max: u64| aqr_flate::Options {
             threads,
             max_data: usize::try_from(max).unwrap_or(usize::MAX),
@@ -252,12 +254,10 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
             |&j, _| {
                 let (p, fopt) = parsed[j].lock().unwrap().take()?;
                 let body = &locals[jobs[j].0].body;
-                match p.deconstruct(&fopt, &Hints::default()) {
+                match p.deconstruct_bytes(&fopt, &Hints::default()) {
                     // kept, the body would also take its CRC-32 and size
                     // (and tiny records are much alike, so that they compress well together)
-                    Ok((data, record, _)) => {
-                        (record.len() < body.len() + 16).then_some(Made::Deflated { data, record })
-                    }
+                    Ok((data, record, _)) => (record.len() < body.len() + 16).then_some((data, record)),
                     Err(_) => None,
                 }
             },
@@ -301,11 +301,14 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         }
     };
     let mut inflated = 0;
+    // (each deflated body's data and record)
+    let mut bodies: Vec<Option<(Bytes, Vec<u8>)>> = (0..locals.len()).map(|_| None).collect();
     for (&i, m) in chosen.iter().zip(split) {
-        if let Some(Made::Deflated { data, .. }) = &m {
+        if let Some((data, _)) = &m {
             inflated += data.len() as u64;
+            made[i] = Some(Made::Deflated { usize: data.len() as u64 });
         }
-        made[i] = m;
+        bodies[i] = m;
     }
     for (i, l) in locals.iter().enumerate() {
         if made[i].is_none() {
@@ -317,59 +320,50 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
             });
         }
     }
-    let mut made: Vec<Made> = made.into_iter().map(Option::unwrap).collect();
-    let crcs = par_map(&made.iter().zip(&locals).collect::<Vec<_>>(), opt.threads, |(m, l)| match m {
-        Made::Stored => aqr_common::crc32::hash(&input[l.body.clone()]),
-        Made::Deflated { data, .. } => aqr_common::crc32::hash(data),
-        _ => 0,
-    });
+    let made: Vec<Made> = made.into_iter().map(Option::unwrap).collect();
+    let crcs =
+        par_map(&made.iter().zip(&locals).zip(&bodies).collect::<Vec<_>>(), opt.threads, |((m, l), b)| match (m, b) {
+            (Made::Stored, _) => aqr_common::crc32::hash(&input[l.body.clone()]),
+            (Made::Deflated { .. }, Some((data, _))) => aqr_common::crc32::hash(data),
+            _ => 0,
+        });
 
     let mut w = Writer::new(input, base);
-    // The contents of the stored bodies and the data of the deflated ones apart, each of the
-    // size they take, each body's dropped once in place; the records one after another.
-    let sizes = made.iter().zip(&locals).fold((0, 0, 0), |(s, n, r), (m, l)| match m {
-        Made::Stored => (s + l.body.len(), n, r),
-        Made::Deflated { data, record } => (s, n + data.len(), r + record.len()),
-        _ => (s, n, r),
-    });
-    // (the data of a body that is all of it taken as it is)
-    let (mut stored, mut data, mut records) = (Vec::new(), Vec::new(), Vec::with_capacity(sizes.2));
-    let put = |data: &mut Vec<u8>, d: &[u8], size: usize| {
-        data.reserve_exact(size - data.len());
-        data.extend_from_slice(d);
-    };
-    // the kind of each entry's contents and their end, of the stored and the deflated; the
-    // lengths of each deflated body's data and record, and what flate-set derives of it
-    let (mut stored_kinds, mut kinds) = (Vec::<(Kind, usize)>::new(), Vec::<(Kind, usize)>::new());
+    // The contents of the stored bodies and the data of the deflated ones apart, by kind,
+    // each body's data dropped once written; the records one after another.
+    let records_len = bodies.iter().flatten().map(|b| b.1.len()).sum();
+    let (mut stored, mut data) = (ByKind::new(OWN_MIN), ByKind::new(OWN_MIN));
+    // (the stored bodies one after another, for the check below)
+    let stored_len =
+        made.iter().zip(&locals).filter(|(m, _)| matches!(m, Made::Stored)).map(|(_, l)| l.body.len()).sum();
+    let mut stored_all = aqr_formula::store::Writer::new(Some(stored_len));
+    let mut records = Vec::with_capacity(records_len);
+    // the lengths of each deflated body's data and record, and what flate-set derives of it
     let (mut lens, mut derived) = (Vec::new(), Vec::new());
     // (the deflated bodies as they are, for the check below)
     let mut deflated = Vec::new();
-    let mut locals = locals.iter().zip(made.iter_mut()).zip(crcs);
+    let mut locals = locals.iter().zip(made.iter()).zip(bodies.iter_mut()).zip(crcs);
     for r in &recs {
         match r {
             Rec::Gap(g) => w.gap(g.clone()),
             Rec::Local(_) => {
-                let ((l, m), crc) = locals.next().unwrap();
+                let (((l, m), body), crc) = locals.next().unwrap();
                 w.local(l, m, crc);
                 let kind = (opt.kind)(&input[l.name.clone()]);
-                match m {
-                    Made::Stored => {
-                        put(&mut stored, &input[l.body.clone()], sizes.0);
-                        stored_kinds.push((kind, stored.len()));
+                match (m, body.take()) {
+                    (Made::Stored, _) => {
+                        stored.add(kind, &input[l.body.clone()]);
+                        stored_all.write(&input[l.body.clone()]);
                     }
-                    Made::Deflated { data: dd, record } => {
+                    (Made::Deflated { .. }, Some((dd, record))) => {
                         lens.push((dd.len(), record.len()));
                         derived.extend_from_slice(&crc.to_le_bytes());
                         derived.extend_from_slice(&(dd.len() as u64).to_le_bytes());
                         derived.extend_from_slice(&(l.body.len() as u64).to_le_bytes());
                         let entry = layout::Entry { crc, csize: l.body.len() as u64, usize: dd.len() as u64 };
                         deflated.push((&input[l.body.clone()], entry));
-                        match dd.len() == sizes.1 {
-                            true => data = std::mem::take(dd),
-                            false => put(&mut data, &std::mem::take(dd), sizes.1),
-                        }
-                        records.extend_from_slice(record);
-                        kinds.push((kind, data.len()));
+                        data.add(kind, &dd);
+                        records.extend_from_slice(&record);
                     }
                     _ => {}
                 }
@@ -385,10 +379,12 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     // but aqr-flate, which is cheap (compared with the archive as it is made, not kept).
     let flate_len = deflated.iter().map(|b| b.0.len()).sum::<usize>() + derived.len();
     let mut check = aqr_common::out::Check::new(input);
-    if layout::assemble_into(&layout, &stored, &deflated, &kept, input.len(), &mut check).is_err() || !check.same() {
+    let stored_all = stored_all.into_bytes();
+    if layout::assemble_into(&layout, &stored_all, &deflated, &kept, input.len(), &mut check).is_err() || !check.same()
+    {
         return None;
     }
-    drop(deflated);
+    drop((deflated, stored_all));
     // (the inputs the first streams, the kinds' after them)
     let mut f = Formula::default();
     f.push("raw", Vec::new());
@@ -405,11 +401,11 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
             Some((records, index))
         }
     };
-    let stored = f.push_by_kind(0, stored, &stored_kinds, "zip", OWN_MIN);
+    let stored = stored.push(&mut f, 0, "zip");
     let flate = match flate {
         None => Node::Concat(Vec::new()),
         Some((records, index)) => {
-            let data = f.push_by_kind(1, data, &kinds, "zip", OWN_MIN);
+            let data = data.push(&mut f, 1, "zip");
             let a =
                 aqr_flate::formula::apply(opt.profile, data, records, index, flate_len as u64, Derived::Zip).ok()?;
             Node::Apply(Box::new(a))

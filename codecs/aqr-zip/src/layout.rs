@@ -280,8 +280,8 @@ pub struct Writer<'a> {
 pub enum Made {
     /// Stored: the body is the data.
     Stored,
-    /// Deflated, with the bytes of data and record.
-    Deflated { data: Vec<u8>, record: Vec<u8> },
+    /// Deflated, of so many bytes of data.
+    Deflated { usize: u64 },
     /// Kept, with the CRC-32 and size of the data given.
     Kept { crc: u32, usize: u64 },
     /// The body of local entry `i` (in order) again.
@@ -312,7 +312,7 @@ impl<'a> Writer<'a> {
         let n = l.body.len() as u64;
         let (body, entry) = match made {
             Made::Stored => (Body::Stored, Entry { crc, csize: n, usize: n }),
-            Made::Deflated { data, .. } => (Body::Deflated, Entry { crc, csize: n, usize: data.len() as u64 }),
+            Made::Deflated { usize } => (Body::Deflated, Entry { crc, csize: n, usize: *usize }),
             Made::Kept { crc, usize } => (Body::Kept, Entry { crc: *crc, csize: n, usize: *usize }),
             Made::Same(i) => (Body::Same, self.st.seen[*i].entry),
         };

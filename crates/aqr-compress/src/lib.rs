@@ -2638,8 +2638,9 @@ fn heap_per_byte(format: Format) -> f64 {
         // what is left is the tokens an adaptive profile keeps (6 bytes each; enwik8 at -8: 7.5)
         Gzip | Zlib => 8.0,
         Raw | Flac | Png | Gif | Clip | Dds | GitPack | Lzma | Xz | SevenZip => 12.0,
-        // every DEFLATE body parsed beforehand
-        Zip => 14.0,
+        // the bodies' data written out as it is decoded; in verification, zip-recons with the
+        // bodies and the archive whole (enwik9.zip: 1.0)
+        Zip => 3.0,
         // the data decoded and its tokens kept (6 bytes each)
         Bvx | Fits => 36.0,
     }

@@ -466,10 +466,21 @@ impl<const HEAD: bool> Collect<HEAD> {
             )
         };
         #[cfg(feature = "encode")]
-        if let Some(mut w) = self.out.take().and_then(|o| o.writer) {
-            w.write(&data);
+        if let Some(out) = self.out.take() {
             tokens.shrink_to_fit();
-            return (w.into_bytes(), tokens, self.chunks);
+            let data = match out.writer {
+                Some(mut w) => {
+                    w.write(&data);
+                    w.into_bytes()
+                }
+                // (a short stream to the store at once, where it takes it)
+                None => {
+                    let mut b = data.into();
+                    aqr_formula::store::spill(&mut b);
+                    b
+                }
+            };
+            return (data, tokens, self.chunks);
         }
         // (the room grown into given back: up to as much again as the data, held as long as it)
         data.shrink_to_fit();

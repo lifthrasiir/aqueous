@@ -248,9 +248,9 @@ pub struct Options {
     /// The bytes of data that the stream's container tells (0: none), made room for at once
     /// rather than as it comes: a wrong size costs only more room made later.
     pub size: usize,
-    /// Write the data of a long stream to aqr-formula's store as it is made (with the feature
-    /// `encode`; [`aqr_formula::store::Writer`]) rather than hold it: [`Parsed::data`] is then
-    /// a mapping of it, and [`Parsed::deconstruct_bytes`] gives it as it is.
+    /// Write the data to aqr-formula's store (with the feature `encode`; that of a long stream
+    /// as it is made, [`aqr_formula::store::Writer`]) rather than hold it: [`Parsed::data`] is
+    /// then a mapping of it, and [`Parsed::deconstruct_bytes`] gives it as it is.
     pub store: bool,
 }
 
