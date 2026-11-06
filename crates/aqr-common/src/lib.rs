@@ -9,6 +9,8 @@
 //! - [`msb`]: MSB-first bit I/O of the formats themselves (MP3, FLAC).
 //! - [`mem`]: the global allocator of the binaries ([`mem::Mapped`]), a counting one, peak and
 //!   large-allocation probes, peak RSS.
+//! - [`meter`]: the heap of a module's application measured as its instances would take it in
+//!   WebAssembly (natively).
 //! - [`rng`]: deterministic pseudo-random numbers and noise, for tests and benchmarks.
 //! - [`pool`]: the pool of threads every thread of the process runs on.
 //! - [`budget`]: the heap the work may take at once (`aqr -M`), and the system's memory.
@@ -32,6 +34,11 @@ pub mod crc32;
 pub mod cursor;
 pub mod lz;
 pub mod mem;
+#[cfg(not(target_family = "wasm"))]
+pub mod meter;
+#[cfg(target_family = "wasm")]
+#[path = "meter_none.rs"]
+pub mod meter;
 pub mod msb;
 pub mod out;
 pub mod packed;

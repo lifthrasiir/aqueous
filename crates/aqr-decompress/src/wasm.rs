@@ -434,8 +434,11 @@ struct App {
     limit: u64,
     /// The size of the memories of all the instances and of the messages queued.
     total: Mutex<u64>,
-    /// The largest `total` so far.
+    /// The largest `total` so far, and the most the application's instance and any one task held
+    /// (their working memories, the instance's other memories with it).
     peak: AtomicU64,
+    instance_peak: AtomicU64,
+    task_peak: AtomicU64,
     exec: Arc<Exec>,
     chans: Mutex<Vec<Chan>>,
     /// The identity of the next task (0 is the application's instance).
@@ -668,6 +671,10 @@ impl ResourceLimiter for State {
     fn memory_growing(&mut self, current: usize, desired: usize, _: Option<usize>) -> wasmtime::Result<bool> {
         self.app.account(desired as u64, current as u64)?;
         self.mine = self.mine - current as u64 + desired as u64;
+        match self.task {
+            true => self.app.task_peak.fetch_max(self.mine, Ordering::Relaxed),
+            false => self.app.instance_peak.fetch_max(self.mine, Ordering::Relaxed),
+        };
         Ok(true)
     }
 
@@ -938,6 +945,8 @@ impl Shared {
             limit: memory_limit,
             total: Mutex::new(0),
             peak: AtomicU64::new(0),
+            instance_peak: AtomicU64::new(0),
+            task_peak: AtomicU64::new(0),
             exec: exec.clone(),
             chans: Mutex::default(),
             next: AtomicU64::new(1),
@@ -1015,6 +1024,8 @@ impl Shared {
                 imported,
                 limit: memory_limit,
                 working: app.peak.load(Ordering::Relaxed).saturating_sub(imported),
+                instance: app.instance_peak.load(Ordering::Relaxed).saturating_sub(imported),
+                task: app.task_peak.load(Ordering::Relaxed),
                 ok: r.is_ok(),
             });
         }
@@ -1077,6 +1088,10 @@ pub struct Applied {
     /// The peak of everything else in the memory limit's total: the working memories of the
     /// application's instance and of its tasks, and the messages queued in its channels.
     pub working: u64,
+    /// Of that, the most the application's instance held (its working memory) and the most one
+    /// task did.
+    pub instance: u64,
+    pub task: u64,
     pub ok: bool,
 }
 

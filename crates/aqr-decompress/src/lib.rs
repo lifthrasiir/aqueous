@@ -627,6 +627,49 @@ impl Default for Native {
     }
 }
 
+/// An application of a module run natively, measured ([`record_native`]): as
+/// [`aqr_common::meter`] tells of the heap it took.
+#[derive(Debug, Clone)]
+pub struct Metered {
+    pub module: Module,
+    pub params: Vec<u8>,
+    /// The lengths of the inputs and the outputs.
+    pub inputs: Vec<u64>,
+    pub sizes: Vec<u64>,
+    pub measured: aqr_common::meter::Measured,
+}
+
+static METERED: std::sync::Mutex<Option<Vec<Metered>>> = std::sync::Mutex::new(None);
+
+/// Starts measuring the applications run natively from now on and keeping what they took
+/// (`true`), or stops (`false`); returns those kept so far.
+pub fn record_native(on: bool) -> Vec<Metered> {
+    let mut a = METERED.lock().unwrap();
+    let kept = a.take().unwrap_or_default();
+    if on {
+        *a = Some(Vec::new());
+    }
+    kept
+}
+
+/// `f`, an application of `m`, measured where [`record_native`] is on.
+fn metered<R>(m: Module, params: &[u8], inputs: &[u64], sizes: &[u64], f: impl FnOnce() -> R) -> R {
+    if METERED.lock().unwrap().is_none() {
+        return f();
+    }
+    let (r, measured) = aqr_common::meter::measure(f);
+    if let Some(log) = METERED.lock().unwrap().as_mut() {
+        log.push(Metered {
+            module: m,
+            params: params.to_vec(),
+            inputs: inputs.to_vec(),
+            sizes: sizes.to_vec(),
+            measured,
+        });
+    }
+    r
+}
+
 /// A module run natively.
 struct NativeLoaded<'a> {
     native: &'a Native,
@@ -715,9 +758,12 @@ impl Loaded for NativeLoaded<'_> {
         let Some(entry) = self.part() else { return Err(Failure::Resource("not a part module".into())) };
         let _s = aqr_common::trace::span(self.module.name);
         let resources: Vec<&[u8]> = resources.iter().map(|r| &r[..]).collect();
-        streamed(&entry, params, &resources, inputs, outputs, sizes).map_err(|f| match f {
-            Failure::Invalid(m) => Failure::Invalid(format!("{}: {m}", self.module)),
-            f => f,
+        let lens: Vec<u64> = inputs.iter().map(|i| i.len()).collect();
+        metered(self.module, params, &lens, sizes, || {
+            streamed(&entry, params, &resources, inputs, outputs, sizes).map_err(|f| match f {
+                Failure::Invalid(m) => Failure::Invalid(format!("{}: {m}", self.module)),
+                f => f,
+            })
         })
     }
 
@@ -754,9 +800,12 @@ impl Native {
     /// The output of `m` on `inputs` with `resources` (see [`Modules::apply`]).
     pub fn run(&self, m: Module, params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
         let _s = aqr_common::trace::span(m.name);
-        catch_unwind(AssertUnwindSafe(|| self.run_unchecked(m, params, resources, inputs, len)))
-            .unwrap_or_else(|_| Err("panicked".into()))
-            .map_err(|e| Error::new(format!("{m}: {e}")))
+        let lens: Vec<u64> = inputs.iter().map(|i| i.len() as u64).collect();
+        metered(m, params, &lens, &[len], || {
+            catch_unwind(AssertUnwindSafe(|| self.run_unchecked(m, params, resources, inputs, len)))
+                .unwrap_or_else(|_| Err("panicked".into()))
+                .map_err(|e| Error::new(format!("{m}: {e}")))
+        })
     }
 
     fn run_unchecked(

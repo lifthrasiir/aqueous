@@ -8,10 +8,16 @@
 //! bytes), the peak of the working memories, that peak over m, and the module's estimate of it
 //! (`Module::memory_usage_in_pages`, in bytes) over the peak, `!` where it is below the peak;
 //! and the memory limit declared over the total (the peak and the memories imported), `-` for
-//! none.
+//! none; then the most the application's instance held and what the native measurement
+//! (`aqr_common::meter`) took for it, and the most one task held and the native measurement's
+//! (a task's own, and with the copy of the instance it starts from).
 
 use aqr_decompress::Wasm;
 use aqr_formula::aqr;
+
+// (the allocator that tells aqr-common's meter of the blocks: the native measurement)
+#[global_allocator]
+static ALLOC: aqr_common::mem::Mapped = aqr_common::mem::Mapped;
 
 fn main() {
     let mut args = std::env::args().skip(1).peekable();
@@ -21,9 +27,18 @@ fn main() {
         // (the workers of the pool, which poll the tasks with the calling thread)
         aqr_common::pool::init(t.saturating_sub(1).max(1));
     }
-    println!("{:<22} {:>12} {:>12} {:>12} {:>7} {:>7} {:>7}", "module", "m", "I", "working", "w/m", "est/w", "lim/t");
+    let threads = aqr_common::pool::size() + 1;
+    println!(
+        "{:<22} {:>12} {:>12} {:>12} {:>7} {:>7} {:>7} {:>11} {:>11} {:>11} {:>11}",
+        "module", "m", "I", "working", "w/m", "est/w", "lim/t", "inst", "n.inst", "task", "n.task"
+    );
     for f in args {
         let c = std::fs::read(&f).unwrap_or_else(|e| panic!("{f}: {e}"));
+        // the native measurement first ([`aqr_decompress::record_native`]), by the applications'
+        // shapes (module, parameters, lengths)
+        aqr_decompress::record_native(true);
+        let _ = aqr::decode_value(&c, &aqr_decompress::Native { threads });
+        let mut native = aqr_decompress::record_native(false);
         aqr_decompress::record_applications(true);
         let r = aqr::decode_value(&c, &Wasm);
         let applied = aqr_decompress::record_applications(false);
@@ -45,13 +60,28 @@ fn main() {
                 u64::MAX => format!("{:>7}", "-"),
                 l => format!("{:>7.2}", l as f64 / (a.working + a.imported) as f64),
             };
+            // the native measurement of the same shape, taken once
+            let n = native
+                .iter()
+                .position(|n| {
+                    n.module.name == name && n.params == a.params_data && n.inputs == a.inputs && n.sizes == a.sizes
+                })
+                .map(|k| native.swap_remove(k).measured);
+            let (ni, nt) = match n {
+                Some(n) => (n.peak.to_string(), format!("{} {}", n.task, n.task_with_copy)),
+                None => ("-".into(), "-".into()),
+            };
             println!(
-                "  {:<20} {:>12} {:>12} {:>12} {:>7.2} {est} {lim}{}",
+                "  {:<20} {:>12} {:>12} {:>12} {:>7.2} {est} {lim} {:>11} {:>11} {:>11} {:>11}{}",
                 name,
                 m,
                 i,
                 a.working,
                 a.working as f64 / m.max(1) as f64,
+                a.instance,
+                ni,
+                a.task,
+                nt,
                 if a.ok { "" } else { " failed" }
             );
         }

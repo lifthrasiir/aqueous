@@ -90,6 +90,7 @@ unsafe impl GlobalAlloc for Counting {
         if !p.is_null() {
             add(l.size());
         }
+        crate::meter::allocated(p, l.size());
         p
     }
     unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
@@ -97,15 +98,18 @@ unsafe impl GlobalAlloc for Counting {
         if !p.is_null() {
             add(l.size());
         }
+        crate::meter::allocated(p, l.size());
         p
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        crate::meter::freed(p, l.size());
         unsafe { System.dealloc(p, l) };
         large_removed(l.size());
         CUR.fetch_sub(l.size(), Relaxed);
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
         let q = unsafe { System.realloc(p, l, n) };
+        crate::meter::reallocated(p, l.size(), q, n);
         if !q.is_null() {
             large_removed(l.size());
             large_added(n);
@@ -310,6 +314,7 @@ unsafe impl GlobalAlloc for Mapped {
             large_added(l.size());
         }
         crate::trace::allocated(p, l.size());
+        crate::meter::allocated(p, l.size());
         p
     }
     #[inline]
@@ -319,12 +324,14 @@ unsafe impl GlobalAlloc for Mapped {
             large_added(l.size());
         }
         crate::trace::allocated(p, l.size());
+        crate::meter::allocated(p, l.size());
         p
     }
     #[inline]
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
         large_removed(l.size());
         crate::trace::freed(p, l.size());
+        crate::meter::freed(p, l.size());
         unsafe { self.raw_dealloc(p, l) }
     }
     #[inline]
@@ -335,6 +342,7 @@ unsafe impl GlobalAlloc for Mapped {
             large_added(n);
         }
         crate::trace::reallocated(p, l.size(), q, n);
+        crate::meter::reallocated(p, l.size(), q, n);
         q
     }
 }

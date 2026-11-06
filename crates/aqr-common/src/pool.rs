@@ -194,8 +194,9 @@ struct Open {
     left: Erased,
     room: usize,
     state: Arc<OpenState>,
-    /// What the map is of ([`crate::trace`]).
+    /// What the map is of ([`crate::trace`]), and its meter.
     cx: Option<crate::trace::Context>,
+    meter: Option<Arc<crate::meter::Meter>>,
 }
 
 #[derive(Default)]
@@ -233,11 +234,13 @@ fn join_open() -> bool {
         let Some(o) = open.iter_mut().find(|o| o.room > 0 && unsafe { o.left.call() }) else { return false };
         o.room -= 1;
         *o.state.running.lock().unwrap() += 1;
-        (o.work, o.state.clone(), o.cx.clone())
+        (o.work, o.state.clone(), (o.cx.clone(), o.meter.clone()))
     };
+    let (cx, meter) = cx;
     let p = pool();
     p.jobs.lock().unwrap().push_back(Box::new(move || {
         let _cx = crate::trace::adopt(cx);
+        let _m = crate::meter::enter(meter);
         // SAFETY: counted in `running`, which the map waits for
         let r = catch_unwind(AssertUnwindSafe(|| unsafe { work.call() }));
         if let Err(e) = r {
@@ -322,12 +325,14 @@ impl Reservation {
 unsafe fn push_job<'a>(job: Box<dyn FnOnce() + Send + 'a>, scope: Option<Arc<ScopeState>>) {
     // SAFETY: as the caller makes sure
     let job: Job = unsafe { std::mem::transmute::<Box<dyn FnOnce() + Send + 'a>, Job>(job) };
-    // (run under the spans of the thread spawning it)
+    // (run under the spans and the meter of the thread spawning it)
     let cx = crate::trace::context();
+    let meter = crate::meter::current();
     let p = pool();
     p.jobs.lock().unwrap().push_back(Box::new(move || {
         {
             let _cx = crate::trace::adopt(cx);
+            let _m = crate::meter::enter(meter);
             // (the job's part of the slot dropped with it, before the scope is told)
             job();
         }
@@ -548,6 +553,7 @@ fn par_for(n: usize, threads: usize, f: &(dyn Fn(usize) + Sync)) {
             room: want - hs.len(),
             state: state.clone(),
             cx: crate::trace::context(),
+            meter: crate::meter::current(),
         });
         (id, state)
     });
@@ -602,6 +608,11 @@ pub fn par_map_apart<R: Send + crate::wire::Wire>(n: usize, threads: usize, f: i
                 R::get(&mut s).filter(|_| s.is_empty()).expect("the result of a task")
             })
             .collect();
+    }
+    // (each item a task of the meter, if any, as it is on WebAssembly)
+    #[cfg(not(target_family = "wasm"))]
+    if threads > 1 && n > 1 {
+        return par_map(n, threads, |i| crate::meter::task(|| f(i)));
     }
     par_map(n, threads, f)
 }
