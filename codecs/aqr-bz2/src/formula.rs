@@ -12,20 +12,16 @@ use crate::{compress, stream};
 
 pub use crate::module::{decode, decode_alz};
 
-pub const MODULE: Module = Module::new("bz2-recons", 1).with_memory(memory);
+pub const MODULE: Module = Module::new("bz2-recons", 1).with_plan(memory);
 
 /// ALZip's bzip2 streams (`FORMAT.md`, §8).
-pub const MODULE_ALZ: Module = Module::new("bz2-alz-recons", 1).with_memory(memory_alz);
+pub const MODULE_ALZ: Module = Module::new("bz2-alz-recons", 1).with_plan(memory_alz);
 
 /// Bytes of data taken, at most (a stream of zeros grows forty-thousandfold).
 pub const MAX_DATA: usize = 1 << 30;
 
-/// Bytes of a block's work for each of its symbols: the block written twice and its suffix
-/// array, the types and the reduced text of SA-IS, then RLE1, the BWT and the MTF symbols.
-const WORK_PER_SYMBOL: u64 = 2 + 4 * 2 + 2 + 4 * 2 + 2 + 1 + 2;
-
-/// The memory of the module: the input and the output, the blocks compressed before they are
-/// joined (as large as the output), and a block's work.
+/// The memory of the module: its initial memory, and its plan ([`crate::module::plan`]), of
+/// the data (whose blocks' symbols it reads).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     memory_framed(u, Framing::Bzip2)
 }
@@ -35,12 +31,8 @@ fn memory_alz(u: &aqr_formula::Usage<'_>) -> Option<u64> {
 }
 
 fn memory_framed(u: &aqr_formula::Usage<'_>, framing: Framing) -> Option<u64> {
-    let &[data] = u.inputs else { return None };
-    let streams = get_framed(u.params, framing).ok()?;
-    let level = streams.iter().map(|s| s.level).max()? as u64;
-    let syms = (100_000 * level).min(data + data / 4 + 5);
-    let out = u.outputs.iter().sum::<u64>();
-    Some(u.whole(WORK_PER_SYMBOL * syms + out, 12))
+    let (&[len], [data]) = (u.outputs, u.all_contents::<1>()?) else { return None };
+    Some(u.initial() + crate::module::plan(framing, u.params, data, len)?)
 }
 
 /// Whether `d` starts with a bzip2 stream, as far as its header and first magic tell.

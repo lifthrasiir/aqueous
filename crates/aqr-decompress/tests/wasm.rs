@@ -1652,6 +1652,48 @@ fn bvx_plans_hold() {
     }
 }
 
+/// bz2-recons and bz2-alz-recons lay their memory out as stacks, their limits their plans: of
+/// the fixtures (a periodic block given its rank among them), of streams one after another, of
+/// several blocks (the last the smaller), and of ALZip's.
+#[test]
+fn bz2_plans_hold() {
+    let mut rng = aqr_common::rng::Rng::new(9);
+    let words: Vec<&[u8]> = vec![b"bzip2 ", b"block ", b"sort ", b"aaaaaaaaaa", b"the ", b"rotation "];
+    let mut text = Vec::new();
+    while text.len() < 330_000 {
+        text.extend_from_slice(words[rng.below(words.len() as u64) as usize]);
+        let n = rng.below(3) as usize;
+        text.extend(rng.bytes(n));
+    }
+    let blocks = aqr_bz2::compress::stream(1, &aqr_bz2::compress::blocks(&text, 1, 1));
+    let mut streams: Vec<(String, Vec<u8>)> = ["text-1", "periodic-1", "random-1", "empty-9", "runs-1", "skewed-2"]
+        .map(|t| (t.to_owned(), fixture(&format!("codecs/aqr-bz2/tests/data/{t}.bz2"))))
+        .into();
+    let two =
+        [fixture("codecs/aqr-bz2/tests/data/text-5.bz2"), fixture("codecs/aqr-bz2/tests/data/runs-1.bz2")].concat();
+    streams.push(("two streams".into(), two));
+    streams.push(("blocks".into(), blocks));
+    for (t, d) in streams {
+        let mut f = aqr_bz2::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
+        if let Node::Concat(nodes) = &f.root {
+            f.root = nodes[0].clone();
+        }
+        plan_holds(&format!("bz2 {t}"), f, &d);
+    }
+    let (mut streams, mut data, mut all) = (Vec::new(), Vec::new(), Vec::new());
+    for t in ["a", "b", "text"] {
+        let d = fixture(&format!("codecs/aqr-bz2/tests/data/alz/{t}.dlz"));
+        let (p, dd) = aqr_bz2::formula::take_alz(&d, 1, usize::MAX, &mut |_, _, _| true).expect(t);
+        streams.push(p);
+        data.extend_from_slice(&dd);
+        all.extend_from_slice(&d);
+    }
+    let mut f = Formula::default();
+    let data = f.push("raw", data);
+    f.root = Node::Apply(Box::new(aqr_bz2::formula::apply_alz(&streams, data, all.len() as u64)));
+    plan_holds("bz2 alz", f, &all);
+}
+
 /// git-pack-recons and git-pack-index-recons lay their memory out as stacks, their limits their
 /// plans: of a pack of more entries than the stack's holes, alone and with its index and reverse
 /// index after it.

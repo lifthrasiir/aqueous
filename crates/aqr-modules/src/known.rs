@@ -102,13 +102,13 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "bz2-alz-recons",
         version: 1,
-        sha512_256: hex("a071b70241db9117b6fa00791718c8980d34e5bfe72454f08bea0bbc7636284f"),
+        sha512_256: hex("f1f512877d8d3395e26da038ba695085ce5bce6be530349ef695de0a9b258b81"),
         block: include_bytes!("../wasm/bz2-alz-recons.block"),
     },
     Known {
         name: "bz2-recons",
         version: 1,
-        sha512_256: hex("eef0331cb43e4d3e6f3a57baf0267b979d29b651d854b5debcc3e50df092c140"),
+        sha512_256: hex("3801354bd2adf5904371c3b32ab04ffbac7b817f8a53a5a17e6c40f767f34d58"),
         block: include_bytes!("../wasm/bz2-recons.block"),
     },
     Known {
@@ -228,7 +228,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "flate-set",
         version: 1,
-        sha512_256: hex("2dc7c565855bf14503e3e25207bd90f184c108c33ad080a36e75b056bc1b99b7"),
+        sha512_256: hex("99c0c9f0ee06f762dbfb0e5ff8bfc7cbb5f3bfbd0684adbf3282e8b42f28cd19"),
         block: include_bytes!("../wasm/flate-set.block"),
     },
     Known {
@@ -318,7 +318,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "lzx-recons",
         version: 1,
-        sha512_256: hex("3b8bb70018e13759d301b04912d53548570cb50d5ebf0ab01476e542e9b6b7e0"),
+        sha512_256: hex("2674b76a2903d2620a9f66ad4401130adbe6cbe3bf3311e13579a8928ad52d6d"),
         block: include_bytes!("../wasm/lzx-recons.block"),
     },
     Known {

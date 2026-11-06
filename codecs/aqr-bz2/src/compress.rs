@@ -30,33 +30,57 @@ fn runs(d: &[u8]) -> impl Iterator<Item = usize> + '_ {
 }
 
 /// Where the blocks of `data` start, at `level`: none for no data, else 0 and the others.
+pub fn boundaries(data: &[u8], level: u8) -> Vec<usize> {
+    let mut starts = Vec::new();
+    each_block(data, level, &mut |a, _, _| {
+        starts.push(a);
+        Ok(())
+    })
+    .expect("nothing failing");
+    starts
+}
+
+/// `f(start, end, syms)` for each block of `data` at `level`, in order: where it starts and
+/// ends, and its symbols of RLE1 output. None for no data.
 ///
 /// libbzip2 adds a byte to the block after checking that the block is not full (`nblockMAX`
 /// symbols of RLE1 output). A run is added as it ends, so a block is full once a run's
 /// symbols make it so, and the next byte, if there is one, ends it: the run that byte is part
 /// of, under way, starts the next block.
-pub fn boundaries(data: &[u8], level: u8) -> Vec<usize> {
+pub fn each_block(
+    data: &[u8],
+    level: u8,
+    f: &mut dyn FnMut(usize, usize, usize) -> crate::Result<()>,
+) -> crate::Result<()> {
     let max = block_max(level);
-    let mut starts = Vec::new();
-    if data.is_empty() {
-        return starts;
-    }
-    starts.push(0);
-    let (mut at, mut syms) = (0, 0);
+    let (mut start, mut at, mut syms) = (0, 0, 0);
     let mut prev = None;
     for n in runs(data) {
         if let Some(p) = prev {
             // the run before ends at `at`, the start of this one
             syms += rle_syms(p);
             if syms >= max && at + 1 < data.len() {
-                starts.push(at);
-                syms = 0;
+                f(start, at, syms)?;
+                (start, syms) = (at, 0);
             }
         }
         prev = Some(n);
         at += n;
     }
-    starts
+    match prev {
+        Some(p) => f(start, at, syms + rle_syms(p)),
+        None => Ok(()),
+    }
+}
+
+/// Bytes of [`aqr_api::stack`] that compressing a block of `syms` symbols of RLE1 output takes
+/// ([`write_block`]): the block written twice, its suffix array (the last symbols of the BWT
+/// and the MTF symbols written over it after), [`sais::bwt_work`] (the selectors kept in it
+/// after) and the suffixes' types.
+pub fn block_plan(syms: usize) -> u64 {
+    use aqr_api::stack::block;
+    let m = syms as u64;
+    block(2 * m) + block(8 * m) + block(4 * sais::bwt_work(syms) as u64) + block(2 * m)
 }
 
 /// A block compressed: from its magic to its last symbol, MSB first.
@@ -119,9 +143,9 @@ impl Block {
     }
 }
 
-/// RLE1 of a block's data: each run of 4 to 255 equal bytes as 4 of them and a count of more.
-fn rle1(d: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(d.len() + d.len() / 4 + 5);
+/// RLE1 of a block's data appended to `out`: each run of 4 to 255 equal bytes as 4 of them and
+/// a count of more.
+fn rle1(d: &[u8], out: &mut Vec<u8>) {
     let mut i = 0;
     for n in runs(d) {
         let c = d[i];
@@ -132,7 +156,6 @@ fn rle1(d: &[u8]) -> Vec<u8> {
             out.extend_from_slice(&[c, c, c, c, (n - 4) as u8]);
         }
     }
-    out
 }
 
 /// Compresses a block of data (none of it empty), cut where [`boundaries`] cuts.
@@ -143,14 +166,39 @@ pub fn block(d: &[u8]) -> Block {
 /// [`block`] in a stream of `framing`.
 pub fn block_framed(d: &[u8], framing: Framing) -> Block {
     assert!(!d.is_empty());
+    let mut w = BitWriter::with_capacity(d.len() / 2 + 1024);
+    let (crc, orig_ptr, syms) = write_block(d, framing, None, &mut w).expect("no rank given");
+    let nbits = w.len();
+    let mut bits = w.finish();
+    bits.resize(bits.len() + PAD, 0);
+    Block { bits, nbits, crc, orig_ptr, syms, orig_at: orig_ptr_bit(framing) }
+}
+
+/// A block of data (none of it empty) compressed onto `w` ([`block_framed`]), of rank `rank`
+/// where given in place of its own: its CRC, its rank and its symbols of RLE1 output. Fails only
+/// for a rank given past the symbols. Takes [`block_plan`] of the symbols.
+pub fn write_block(
+    d: &[u8],
+    framing: Framing,
+    rank: Option<u32>,
+    w: &mut BitWriter,
+) -> crate::Result<(u32, u32, usize)> {
     let crc = crc::hash(d);
-    let rle = rle1(d);
+    let m = runs(d).map(rle_syms).sum::<usize>();
+    let mut twice = Vec::with_capacity(2 * m);
+    rle1(d, &mut twice);
+    twice.extend_from_within(..);
     let mut used = [false; 256];
-    rle.iter().for_each(|&c| used[c as usize] = true);
-    let (last, orig_ptr) = sais::bwt(&rle);
-    let syms = last.len();
-    drop(rle);
-    let mut w = BitWriter::with_capacity(last.len() / 2 + 1024);
+    twice[..m].iter().for_each(|&c| used[c as usize] = true);
+    let mut sa = vec![0u32; 2 * m];
+    let mut ws = vec![0u32; sais::bwt_work(m)];
+    let mut st = vec![0u8; 2 * m];
+    let own = sais::bwt_in(&twice, &mut sa, &mut ws, &mut st);
+    let orig_ptr = match rank {
+        Some(p) if p as usize >= m => return Err(crate::corrupt()),
+        Some(p) => p,
+        None => own,
+    };
     match framing {
         Framing::Bzip2 => {
             w.put((BLOCK_MAGIC >> 24) as u32, 24);
@@ -160,22 +208,19 @@ pub fn block_framed(d: &[u8], framing: Framing) -> Block {
         }
         Framing::Alz => w.put(ALZ_BLOCK_MAGIC, 32),
     }
-    debug_assert_eq!(w.len(), orig_ptr_bit(framing));
     w.put(orig_ptr, 24);
-    let (mtf, freq, n_used) = mtf(&last, &used);
-    drop(last);
-    entropy(&mut w, &mtf, &freq, n_used, &used);
-    let nbits = w.len();
-    let mut bits = w.finish();
-    bits.resize(bits.len() + PAD, 0);
-    Block { bits, nbits, crc, orig_ptr, syms, orig_at: orig_ptr_bit(framing) }
+    let (k, freq, n_used) = mtf(&mut sa, m, &used);
+    entropy(w, &sa[..k], &freq, n_used, &used, &mut ws);
+    Ok((crc, orig_ptr, m))
 }
 
 /// MTF over the symbols in use, renumbered in byte order, with runs of the front symbol coded
 /// as RUNA (0) and RUNB (1): a run of `r` is `r + 1` in binary, its leading 1 dropped, least
 /// significant digit first, RUNA for a 0 and RUNB for a 1 (bijective base 2). MTF index `j`
-/// is `j + 1`, then EOB. Gives the symbols, their frequencies and the symbols in use.
-fn mtf(last: &[u8], used: &[bool; 256]) -> (Vec<u16>, Vec<u32>, usize) {
+/// is `j + 1`, then EOB. Of the `m` symbols at the start of `sa`, the MTF symbols written over
+/// them (no more of them than were read, and EOB, so `sa` must have more than `m`): gives how
+/// many, their frequencies and the symbols in use.
+fn mtf(sa: &mut [u32], m: usize, used: &[bool; 256]) -> (usize, [u32; MAX_ALPHA], usize) {
     let mut seq = [0u8; 256];
     let mut n_used = 0;
     for c in 0..256 {
@@ -185,16 +230,18 @@ fn mtf(last: &[u8], used: &[bool; 256]) -> (Vec<u16>, Vec<u32>, usize) {
         }
     }
     let eob = n_used + 1;
-    let mut freq = vec![0u32; eob + 1];
-    let mut out = Vec::with_capacity(last.len() + 1);
-    let mut front: Vec<u8> = (0..n_used).map(|i| i as u8).collect();
-    let mut run = 0usize;
-    let flush = |run: &mut usize, out: &mut Vec<u16>, freq: &mut Vec<u32>| {
+    let mut freq = [0u32; MAX_ALPHA];
+    let mut front = [0u8; 256];
+    front.iter_mut().enumerate().for_each(|(i, f)| *f = i as u8);
+    let front = &mut front[..n_used];
+    let (mut run, mut k) = (0usize, 0);
+    let flush = |run: &mut usize, sa: &mut [u32], k: &mut usize, freq: &mut [u32; MAX_ALPHA]| {
         if *run > 0 {
             let mut r = *run - 1;
             loop {
-                let s = (r & 1) as u16;
-                out.push(s);
+                let s = (r & 1) as u32;
+                sa[*k] = s;
+                *k += 1;
                 freq[s as usize] += 1;
                 if r < 2 {
                     break;
@@ -204,23 +251,24 @@ fn mtf(last: &[u8], used: &[bool; 256]) -> (Vec<u16>, Vec<u32>, usize) {
             *run = 0;
         }
     };
-    for &c in last {
-        let s = seq[c as usize];
+    for i in 0..m {
+        let s = seq[sa[i] as usize];
         if front[0] == s {
             run += 1;
             continue;
         }
-        flush(&mut run, &mut out, &mut freq);
+        flush(&mut run, sa, &mut k, &mut freq);
         let j = front.iter().position(|&x| x == s).unwrap();
         front.copy_within(0..j, 1);
         front[0] = s;
-        out.push(j as u16 + 1);
+        sa[k] = j as u32 + 1;
+        k += 1;
         freq[j + 1] += 1;
     }
-    flush(&mut run, &mut out, &mut freq);
-    out.push(eob as u16);
+    flush(&mut run, sa, &mut k, &mut freq);
+    sa[k] = eob as u32;
     freq[eob] += 1;
-    (out, freq, n_used)
+    (k + 1, freq, n_used)
 }
 
 /// Code lengths of the tables at first: higher costs for symbols outside a table's range.
@@ -238,8 +286,9 @@ const PASSES: usize = 4;
 /// shorter where it ends past the share, for every other table (2nd, 4th, ... cut), neither the
 /// first nor the last cut. Then four passes: each group of 50 symbols takes the table that codes
 /// it cheapest (the first among equals), each table's lengths are rebuilt from the frequencies
-/// of the groups that took it. The selectors of the last pass are written.
-fn entropy(w: &mut BitWriter, mtf: &[u16], freq: &[u32], n_used: usize, used: &[bool; 256]) {
+/// of the groups that took it. The selectors of the last pass are written; they are kept in
+/// `sel` (a word for each group).
+fn entropy(w: &mut BitWriter, mtf: &[u32], freq: &[u32], n_used: usize, used: &[bool; 256], sel: &mut [u32]) {
     let alpha = n_used + 2;
     let n = mtf.len();
     let groups = match n {
@@ -269,12 +318,11 @@ fn entropy(w: &mut BitWriter, mtf: &[u16], freq: &[u32], n_used: usize, used: &[
         left -= got;
     }
 
-    let mut selectors = Vec::with_capacity(n.div_ceil(GROUP));
+    let selectors = &mut sel[..n.div_ceil(GROUP)];
     let mut rfreq = [[0u32; MAX_ALPHA]; MAX_GROUPS];
     for _ in 0..PASSES {
-        selectors.clear();
         rfreq.iter_mut().for_each(|f| f.fill(0));
-        for g in mtf.chunks(GROUP) {
+        for (g, sel) in mtf.chunks(GROUP).zip(selectors.iter_mut()) {
             let mut best = (u32::MAX, 0);
             for (t, l) in len[..groups].iter().enumerate() {
                 let c: u32 = g.iter().map(|&s| l[s as usize] as u32).sum();
@@ -283,7 +331,7 @@ fn entropy(w: &mut BitWriter, mtf: &[u16], freq: &[u32], n_used: usize, used: &[
                 }
             }
             let t = best.1;
-            selectors.push(t as u8);
+            *sel = t as u32;
             g.iter().for_each(|&s| rfreq[t][s as usize] += 1);
         }
         for t in 0..groups {
@@ -292,7 +340,10 @@ fn entropy(w: &mut BitWriter, mtf: &[u16], freq: &[u32], n_used: usize, used: &[
     }
 
     // the symbols in use: which of the 16 ranges of 16 bytes have any, then those ranges
-    let any16: Vec<bool> = used.chunks(16).map(|r| r.iter().any(|&u| u)).collect();
+    let mut any16 = [false; 16];
+    for (a, r) in any16.iter_mut().zip(used.chunks(16)) {
+        *a = r.iter().any(|&u| u);
+    }
     any16.iter().for_each(|&a| w.put(a as u32, 1));
     for (r, _) in used.chunks(16).zip(&any16).filter(|(_, a)| **a) {
         r.iter().for_each(|&u| w.put(u as u32, 1));
@@ -301,8 +352,8 @@ fn entropy(w: &mut BitWriter, mtf: &[u16], freq: &[u32], n_used: usize, used: &[
     // the selectors, MTF coded in unary
     w.put(groups as u32, 3);
     w.put(selectors.len() as u32, 15);
-    let mut front: Vec<u8> = (0..groups as u8).collect();
-    for &s in &selectors {
+    let mut front = [0, 1, 2, 3, 4, 5];
+    for &s in selectors.iter() {
         let j = front.iter().position(|&x| x == s).unwrap();
         front.copy_within(0..j, 1);
         front[0] = s;
@@ -326,8 +377,11 @@ fn entropy(w: &mut BitWriter, mtf: &[u16], freq: &[u32], n_used: usize, used: &[
         }
     }
 
-    let codes: Vec<Vec<u32>> = len[..groups].iter().map(|l| huffman::codes(&l[..alpha])).collect();
-    for (g, &t) in mtf.chunks(GROUP).zip(&selectors) {
+    let mut codes = [[0u32; MAX_ALPHA]; MAX_GROUPS];
+    for (c, l) in codes.iter_mut().zip(&len[..groups]) {
+        huffman::codes_into(&l[..alpha], &mut c[..alpha]);
+    }
+    for (g, &t) in mtf.chunks(GROUP).zip(selectors.iter()) {
         let (l, c) = (&len[t as usize], &codes[t as usize]);
         g.iter().for_each(|&s| w.put(c[s as usize], l[s as usize] as u32));
     }
@@ -415,11 +469,11 @@ mod tests {
         for (r, want) in
             [(1, vec![0]), (2, vec![1]), (3, vec![0, 0]), (4, vec![1, 0]), (5, vec![0, 1]), (6, vec![1, 1])]
         {
-            let mut last = vec![b'a'; r];
-            last.push(b'b');
-            let (m, _, _) = mtf(&last, &used);
-            assert_eq!(&m[..want.len()], &want[..], "run {r}");
-            assert_eq!(&m[want.len()..], &[2, 3]);
+            let mut sa = vec![b'a' as u32; r];
+            sa.extend([b'b' as u32, 0]);
+            let (k, _, _) = mtf(&mut sa, r + 1, &used);
+            assert_eq!(&sa[..want.len()], &want[..], "run {r}");
+            assert_eq!(&sa[want.len()..k], &[2, 3]);
         }
     }
 }

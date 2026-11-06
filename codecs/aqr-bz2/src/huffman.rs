@@ -104,6 +104,12 @@ pub fn code_lengths(len: &mut [u8], freq: &[u32], max_len: u32) {
 /// Canonical codes for `len`: by length, then by symbol.
 pub fn codes(len: &[u8]) -> Vec<u32> {
     let mut code = vec![0u32; len.len()];
+    codes_into(len, &mut code);
+    code
+}
+
+/// [`codes`] into `code` (as many as `len`).
+pub fn codes_into(len: &[u8], code: &mut [u32]) {
     let mut next = 0u32;
     for l in 1..=MAX_LEN as u8 {
         for (c, &x) in code.iter_mut().zip(len) {
@@ -114,7 +120,6 @@ pub fn codes(len: &[u8]) -> Vec<u32> {
         }
         next <<= 1;
     }
-    code
 }
 
 /// Bits of a decoder's first-level table.
