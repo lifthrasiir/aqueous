@@ -30,6 +30,7 @@ pub mod chan;
 pub mod emu;
 mod io;
 mod packed;
+pub mod stack;
 #[cfg(feature = "alloc")]
 pub mod task;
 #[cfg(target_family = "wasm")]

@@ -72,7 +72,11 @@ pub(crate) fn limit(a: &Apply, lens: &[u64], outputs: &[u64], contents: &dyn Con
     let imported: u64 = [&[a.params.len() as u64][..], &resources].concat().iter().map(|&n| fit(n, None)).sum::<u64>()
         + lens.iter().enumerate().map(|(k, &n)| fit(n, window(false, k))).sum::<u64>()
         + outputs.iter().enumerate().map(|(j, &n)| fit(n, window(true, j))).sum::<u64>();
-    imported.saturating_add(room(pages.saturating_mul(PAGE)))
+    // (a plan is what the module takes at most: no room for an estimate's error)
+    match a.module.planned {
+        true => imported.saturating_add(pages.saturating_mul(PAGE)),
+        false => imported.saturating_add(room(pages.saturating_mul(PAGE))),
+    }
 }
 
 /// Declares the memory limits of `f`'s applications: those declared already kept (of a formula

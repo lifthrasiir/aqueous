@@ -1786,3 +1786,35 @@ fn memory_declared() {
         }
     }
 }
+
+/// lz4-recons lays its memory out as a stack (`aqr_api::stack`), and its limit is its plan,
+/// declared without room: each fixture decoded as WebAssembly within it, its working memory
+/// that of the plan (to the page). Of blocks (mozlz4) and frames, empty to large, every size of
+/// block and checksums.
+#[test]
+fn lz4_plan_holds() {
+    let lz4 = aqr_decompress::built(LZ4).expect("built").sha512_256;
+    let dir = format!("{}/../../codecs/aqr-lz4/tests/data", env!("CARGO_MANIFEST_DIR"));
+    let mut seen = 0;
+    for e in std::fs::read_dir(dir).unwrap() {
+        let path = e.unwrap().path();
+        if path.to_string_lossy().contains("linked") {
+            continue;
+        }
+        let d = std::fs::read(&path).unwrap();
+        let c = compress(&d, &Options { smaller: false, ..all() });
+        let alone = WASM.write().unwrap_or_else(PoisonError::into_inner);
+        aqr_decompress::record_applications(true);
+        let out = aqr::decode(&c, &aqr_decompress::Wasm);
+        let applied = aqr_decompress::record_applications(false);
+        drop(alone);
+        assert!(out.as_ref().is_ok_and(|o| o == &d), "{path:?}: {:?}", out.err());
+        for a in applied.iter().filter(|a| a.hash == lz4) {
+            let plan = a.limit - a.imported;
+            println!("{:?}: plan {plan} working {}", path.file_name().unwrap(), a.working);
+            assert!(a.working <= plan && plan - a.working < 1 << 16, "{path:?}: plan {plan}, working {}", a.working);
+            seen += 1;
+        }
+    }
+    assert!(seen > 10, "{seen} applications of lz4-recons");
+}

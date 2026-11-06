@@ -47,6 +47,9 @@ pub struct Module {
     pub name: &'static str,
     pub version: u16,
     pub memory: Option<Estimate>,
+    /// Whether `memory` is the module's plan rather than an estimate: what its working memory
+    /// takes exactly at most, by construction (`aqr_api::stack`), declared without room.
+    pub planned: bool,
 }
 
 /// What an application gives its module, for its memory estimate ([`Module::memory_usage_in_pages`]).
@@ -144,12 +147,18 @@ pub const PAGE: u64 = 65536;
 impl Module {
     /// The module `name@version`, of no memory estimate.
     pub const fn new(name: &'static str, version: u16) -> Module {
-        Module { name, version, memory: None }
+        Module { name, version, memory: None, planned: false }
     }
 
     /// The module estimating its memory by `memory`.
     pub const fn with_memory(self, memory: Estimate) -> Module {
         Module { memory: Some(memory), ..self }
+    }
+
+    /// The module of the memory plan `memory`: of a module whose working memory is laid out in
+    /// advance (`aqr_api::stack`), so that it takes what the plan gives at most.
+    pub const fn with_plan(self, memory: Estimate) -> Module {
+        Module { memory: Some(memory), planned: true, ..self }
     }
 
     /// The pages that the working memories of an application of `usage` take at most, which

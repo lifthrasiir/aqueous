@@ -11,17 +11,12 @@ use crate::module::{BLOCK, FRAME};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("lz4-recons", 1).with_memory(memory);
+pub const MODULE: Module = Module::new("lz4-recons", 1).with_plan(memory);
 
-/// The memory of the module: the data and the stream, the compressor's table, and for a frame
-/// a block compressed apart (of at most 4 MiB of data) before it is appended.
+/// The memory of the module: its initial memory, and its plan ([`crate::module::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let &[data] = u.inputs else { return None };
-    let block = match u.params.first() {
-        Some(&FRAME) => block::bound(data.min(4 << 20) as usize) as u64,
-        _ => 0,
-    };
-    Some(u.whole(block::TABLE_BYTES + block, 2))
+    let (&[data], &[len]) = (u.inputs, u.outputs) else { return None };
+    Some(u.initial() + crate::module::plan(u.params, data, len)?)
 }
 
 /// Firefox's container: this, the data's length (u32, little endian), then a block.

@@ -107,6 +107,19 @@ pub fn encodable(flg: u8, bd: u8) -> bool {
     flg_valid(flg) && flg & INDEPENDENT != 0 && flg & DICT_ID == 0 && block_max(bd).is_some()
 }
 
+/// What [`encode_in`] takes at most of an [`aqr_api::stack`] (see `module::plan`), of `data`
+/// bytes into a vector of `capacity` at first, with the FLG and BD bytes given (which must be
+/// [`encodable`]): the frame, the compressor's table, and the block compressed last (of the
+/// block's data less a byte at most).
+pub(crate) fn plan(data: u64, flg: u8, bd: u8, capacity: u64) -> Option<u64> {
+    use aqr_api::stack::block;
+    let max = block_max(bd)? as u64;
+    let frame = capacity.min(header_len(flg) as u64 + data + data / max * 8 + 12);
+    let largest = data.min(max);
+    let compressed = largest.saturating_sub(1).min(block::bound(usize::try_from(largest).ok()?) as u64);
+    Some(block(frame) + block(block::TABLE_BYTES) + block(compressed))
+}
+
 /// The frame of `data` that `LZ4F_compressFrame` writes with the FLG and BD bytes given (which
 /// must be [`encodable`]) at the fast level of `acceleration`. With `expect`, None where the
 /// frame is not that, found a block at a time.

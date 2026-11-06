@@ -10,6 +10,26 @@ use crate::{Error, Result, corrupt, frame};
 pub(crate) const BLOCK: u8 = 0;
 pub(crate) const FRAME: u8 = 1;
 
+/// The memory plan of the module ([`aqr_api::stack`]): what it takes beyond its initial memory
+/// at most, of parameters `params`, an input of `input` bytes and an output of `len`. What
+/// `aqr_api::whole` copies; then the output, reserved before anything else of its own and
+/// returned, and on top of it the compressor's table and (of a frame) each block compressed
+/// apart before it is appended, taken off in turn. `None` for parameters it does not take.
+pub fn plan(params: &[u8], input: u64, len: u64) -> Option<u64> {
+    use aqr_api::stack::{block, whole};
+    let mut p = 1;
+    varint::get(params, &mut p).ok()?;
+    let own = match (params.first(), &params[p.min(params.len())..]) {
+        (Some(&BLOCK), []) => {
+            let n = usize::try_from(input).ok()?;
+            block(len.min(crate::block::bound(n) as u64)) + block(crate::block::TABLE_BYTES)
+        }
+        (Some(&FRAME), &[flg, bd]) if frame::encodable(flg, bd) => frame::plan(input, flg, bd, len)?,
+        _ => return None,
+    };
+    Some(whole(params.len() as u64, &[], &[input]) + own)
+}
+
 /// The module: the LZ4 stream of `len` bytes that the compressor of `params` makes of the
 /// single input (see `FORMAT.md`).
 pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Result<Vec<u8>> {
