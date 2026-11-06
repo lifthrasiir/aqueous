@@ -395,10 +395,91 @@ impl Stream {
     }
 }
 
-/// A group of the streams `par_jobs` runs together (a task each), and whether it is a large one.
+impl Stream {
+    /// [`Stream::run`] of the stream rebuilt from its data pulled ([`crate::reconstruct_pulled`]),
+    /// its record of `record` bytes held: the instance's memory at most, from `w0`, and that of
+    /// each batch's tasks besides (`Seg::task` each; the tasks copy the instance's memory, which
+    /// the caller gives). A batch has a segment for each thread; the data it reads is held at the
+    /// most, the next batch decoded once the blocks of one are written, the stored blocks written
+    /// a few MiB at a time.
+    fn pulled(&self, w0: Lin, record: u64, l: u64) -> (Lin, Vec<(usize, u64)>) {
+        let batch = SLOTS;
+        let n = self.n;
+        let grow = if self.blocks > 1 << 16 { 3 } else { 1 };
+        let stat = 12 * grow * self.blocks
+            + 4 * self.blocks
+            + 24 * self.stored
+            + 64 * self.segs.len() as u64
+            + self.trailing
+            + if self.adaptive {
+                0
+            } else {
+                9 * std::mem::size_of::<crate::code::Model>() as u64
+            }
+            + aqr_formula::SMALL;
+        let me = w0.add(Lin::of(stat + record));
+        let nready = self.blocks.min(1 << 12);
+        let batches: Vec<&[Seg]> = self.segs.chunks(batch).collect();
+        let tokens = |b: &[Seg]| b.iter().map(|s| s.count).sum::<u64>();
+        let results = |b: &[Seg]| TOKEN * tokens(b) + 24 * b.len() as u64;
+        let most = batches.iter().map(|b| tokens(b)).max().unwrap_or(0);
+        let round = self.tokens.min(2 * self.largest + most);
+        let pending = Lin::of(TOKEN * round);
+        // the data a batch reads (see `reconstruct_pulled`), and the stored blocks written (a
+        // block more) while it is held
+        let (back, ahead, align) = (crate::BACK as u64, crate::AHEAD as u64, crate::ALIGN as u64);
+        let span = batches
+            .iter()
+            .map(|b| {
+                let lo = b[0].pos.saturating_sub(back) / align * align;
+                b.last().map_or(n, |s| s.end).saturating_add(ahead).min(n) - lo
+            })
+            .max()
+            .unwrap_or(0)
+            .saturating_add(crate::ROUND as u64 + 65536)
+            .min(n);
+        // the writer's output of a round of blocks (`ROUND`, a block more: its tokens of 6 bytes at
+        // most; the streams' bytes `l` at most), grown by pushes, and its room as it is taken
+        let written = (crate::ROUND as u64 + (TOKEN * self.largest).max(65536)).min(l);
+        let out = Lin::of(2 * written + (1 << 20) + 64);
+        let ready = 3600 * nready;
+        let runs = Lin::of(ready + 3 * (written + 16 * nready));
+        let merge = Lin::of(batches.iter().map(|b| results(b)).max().unwrap_or(0));
+        // the instance: all at once at most, or a batch's results with its decoding (no tasks)
+        let work = |segs: &[Seg]| {
+            segs.iter()
+                .map(|s| self.decoder(s) + TOKEN * s.count)
+                .max()
+                .unwrap_or(0)
+        };
+        let alone = batches
+            .iter()
+            .map(|b| results(b) + work(b))
+            .max()
+            .unwrap_or(0);
+        let inst = me
+            .add(Lin::of(span))
+            .add(pending)
+            .add(out)
+            .add(runs.max(merge).max(Lin::of(alone)));
+        // a batch's tasks: how many, and the most they grow
+        let tasks = batches
+            .iter()
+            .filter(|b| b.len() > 1)
+            .map(|b| {
+                let mut costs: Vec<u64> = b.iter().map(|s| self.task(s)).collect();
+                costs.sort_unstable_by(|a, b| b.cmp(a));
+                let k = costs.len().min(SLOTS);
+                (k, costs[..k].iter().sum())
+            })
+            .collect();
+        (inst, tasks)
+    }
+}
+
+/// A group of the streams `par_jobs` runs together (a task each).
 struct Group {
     items: Vec<usize>,
-    large: bool,
 }
 
 /// The groups of streams with data of `sizes` bytes, as `par_jobs` makes them on WebAssembly.
@@ -418,22 +499,21 @@ fn groups(sizes: &[u64]) -> Vec<Group> {
         }
         out.push(Group {
             items: order[start..k].to_vec(),
-            large: sizes[order[start]] >= LARGE,
         });
     }
     out
 }
 
-/// What the module holds at most besides its inputs and output: see [`Lin`] and the code.
+/// What the module holds at most besides its windows: see [`Lin`] and the code of
+/// [`crate::module::decode_part`].
 ///
-/// The instance holds the cut streams, the rules, the models or priors and the lists of
-/// `par_jobs` (pushed: three times). The groups of streams run as tasks (more than one of them)
-/// or in the instance: those of small streams on one thread, one after another with the earlier
-/// ones' results held and then their encoding; a large one a stream on its own, with
-/// threads, which decodes its segments a batch of 32 at a time as tasks that copy its memory, each
-/// with the table or chain its rule makes for the segment, the zlib emulator or the contexts, the
-/// tokens, and their encoding, and merges the tokens of a batch in `pending` and writes the blocks
-/// complete (see [`Stream::run`]). Then the streams, and the output made (or made larger).
+/// The instance holds the parameters, the resources and the index copied, the lengths, what is
+/// derived of the streams, the rules and the models or priors. A stream of [`LARGE`] bytes of
+/// data or more is rebuilt from its data pulled ([`Stream::pulled`]), its record held. The others
+/// go in runs of `module::RUN` bytes of data at most, their data and records held, rebuilt as
+/// `decode` rebuilds them: in groups by `par_jobs` (a task each where there are several), each
+/// group's streams in turn with the earlier ones' bytes held; then their bytes, which the output
+/// bounds, held as they are written.
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     let derived = Derived::from_params(u.params).ok()?;
     let [data, records, index] = u.all_contents()?;
@@ -446,72 +526,87 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
         .map(|&(d, r)| Stream::parse(d.len() as u64, r, profile))
         .collect::<Option<Vec<_>>>()?;
     let m = crate::profile_data(profile).ok()?;
-    let sizes: Vec<u64> = streams.iter().map(|s| s.n).collect();
-    let groups = groups(&sizes);
-    // the instance: the items, the rules, the models (static, a vector made then boxed) or the
-    // priors, the sizes, and the order and groups (pushed)
     let model = match m.coding {
         Coding::Static(_) => 9 * std::mem::size_of::<crate::code::Model>() as u64,
         Coding::Adaptive(_) => 3 * crate::adapt::NUM as u64,
     };
-    let lists = 3 * 16 * k
-        + 3 * RULE_MEM * m.rules.len() as u64
-        + model
-        + 4 * k
-        + 3 * 4 * k
-        + 3 * 8 * groups.len() as u64;
-    let mem = u.base() + lists + 2 * aqr_formula::PAGE;
-    let mut peak = Lin::of(mem);
-    let total_n: u64 = sizes.iter().sum();
-    // (the data's share of the streams' bytes if reserved: half of it, 64 more)
-    let caps = Lin {
-        a: total_n / 2 + 64 * k,
-        l: 2,
-    };
-    let threads = |g: &Group| if g.large { SLOTS } else { 1 };
-    // (a stream alone is reserved at the output's length)
+    // (the index and the lists grown as they are read or pushed: twice them)
+    let lists = 2 * index.len() as u64
+        + 2 * 16 * k
+        + 2 * derived.bytes() as u64 * k
+        + RULE_MEM * m.rules.len() as u64
+        + model;
+    let copied = u.params.len() as u64 + u.resources.iter().sum::<u64>();
+    let inst = u.initial() + copied + lists + aqr_formula::SMALL + 4 * aqr_formula::PAGE;
+    // The instance's memory at most (`high`), which tasks copy, all of it (WebAssembly's memory
+    // never shrinks); then the tasks, of `grown` bytes besides each.
+    let mut high = Lin::of(inst);
+    let mut tasks: Vec<(usize, Lin)> = Vec::new();
     let alone = k == 1;
-    // a group's streams in turn, the earlier ones' bytes held, then the result's encoding
-    let group = |g: &Group, w0: Lin| {
-        let mut held = Lin::default();
-        let mut peak = Lin::default();
-        for &i in &g.items {
-            let r = streams[i].run(w0.add(held), threads(g), alone);
-            peak = peak.max(r);
-            held = Lin::l(1);
+    let mut i = 0;
+    while i < items.len() {
+        if streams[i].n >= LARGE {
+            let (peak, t) = streams[i].pulled(Lin::of(inst), items[i].1.len() as u64, l);
+            high = high.max(peak);
+            tasks.extend(t.into_iter().map(|(k, grown)| (k, Lin::of(grown))));
+            i += 1;
+            continue;
         }
-        peak.max(
-            w0.add(Lin::of(9 * g.items.len() as u64 + 16))
-                .add(Lin::l(2)),
-        )
-    };
-    if groups.len() == 1 {
-        // (in the instance, the cap of the streams' vectors as `reconstruct_sized` leaves it,
-        // and the output; a stream alone the output itself)
-        peak = peak.max(group(&groups[0], Lin::of(mem)));
-        if !alone {
-            peak = peak.max(Lin::of(mem).add(caps).add(Lin {
-                a: derived.bytes() as u64 * k,
-                l: 1,
-            }));
+        let mut j = i;
+        let mut held = 0;
+        while j < items.len() && streams[j].n < LARGE && (j == i || held + streams[j].n <= RUN) {
+            held += streams[j].n;
+            j += 1;
         }
-    } else {
-        // each group a task of the instance's memory, up to SLOTS at once; those with most bytes
-        let mut tasks: Vec<Lin> = groups.iter().map(|g| group(g, Lin::of(mem))).collect();
-        tasks.sort_unstable_by_key(|t| std::cmp::Reverse(t.a));
-        let sum = tasks
-            .iter()
-            .take(SLOTS)
-            .fold(Lin::default(), |s, t| s.add(Lin::of(t.a)))
-            .add(Lin::l(
-                tasks.iter().take(SLOTS).map(|t| t.l).max().unwrap_or(0),
-            ));
-        peak = peak.max(Lin::of(mem).add(sum).add(Lin::l(1)));
-        // the streams, the output and an encoding
-        peak = peak.max(Lin::of(mem).add(Lin { a: 32 * k, l: 3 }));
+        let records: u64 = items[i..j].iter().map(|it| it.1.len() as u64).sum();
+        // (the data and records, and the cuts)
+        let w0 = Lin::of(inst + held + records + 32 * (j - i) as u64 + 2 * aqr_formula::PAGE);
+        let sizes: Vec<u64> = streams[i..j].iter().map(|s| s.n).collect();
+        let groups = groups(&sizes);
+        // a group's streams in turn, the earlier ones' bytes held, from `w0`
+        let group = |g: &Group, w0: Lin| {
+            let mut kept = Lin::default();
+            let mut peak = Lin::default();
+            for &s in &g.items {
+                peak = peak.max(streams[i + s].run(w0.add(kept), 1, alone));
+                kept = Lin::l(1);
+            }
+            peak.max(
+                w0.add(Lin::of(9 * g.items.len() as u64 + 16))
+                    .add(Lin::l(2)),
+            )
+        };
+        if groups.len() == 1 {
+            high = high.max(group(&groups[0], w0));
+        } else {
+            // each group a task, up to SLOTS at once, growing as it runs from nothing
+            let mut grown: Vec<Lin> = groups.iter().map(|g| group(g, Lin::default())).collect();
+            grown.sort_unstable_by_key(|t| std::cmp::Reverse(t.a));
+            let sum = grown
+                .iter()
+                .take(SLOTS)
+                .fold(Lin::default(), |s, t| s.add(Lin::of(t.a)))
+                .add(Lin::l(
+                    grown.iter().take(SLOTS).map(|t| t.l).max().unwrap_or(0),
+                ));
+            tasks.push((grown.len().min(SLOTS), sum));
+        }
+        // the streams made, held as they are written
+        high = high.max(w0.add(Lin {
+            a: 32 * (j - i) as u64,
+            l: 1,
+        }));
+        i = j;
+    }
+    let mut peak = high;
+    for (k, grown) in tasks {
+        peak = peak.max(high.mul(k as u64 + 1).add(grown));
     }
     Some(peak.eval(l))
 }
+
+/// Bytes of data of the runs of small streams (as `module::RUN`).
+const RUN: u64 = 4 * LARGE;
 
 /// The application rebuilding streams of `profile` from `data` and `records` (what
 /// [`crate::deconstruct`] gives, one after another) as `index` cuts them ([`index`]), of `len`

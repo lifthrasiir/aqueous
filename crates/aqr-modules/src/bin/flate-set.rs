@@ -1,6 +1,22 @@
-//! `flate-set` (aqr-flate), its streams and segments decoded as tasks: 8 threads, for batches
-//! of 32 segments or about 2 MiB of small streams (the output is the same whatever the number).
+//! `flate-set` (aqr-flate), a part module: a long stream rebuilt from its data pulled a batch of
+//! segments at a time, small ones in runs side by side; segments and streams decoded as tasks: 8
+//! threads (the output is the same whatever the number).
 
 #![no_main]
 
-aqr_modules::whole!(slots 8, resources [res0: 0, res1: 1] inputs [in0: 0, in1: 1, in2: 2], aqr_flate::module::decode);
+#[unsafe(link_section = "aqr_task_slots")]
+#[used]
+static AQR_TASK_SLOTS: [u8; 1] = aqr_modules::task_slots(aqr_flate::module::SET_THREADS as u32);
+
+aqr_api::entry! {
+    part fn apply(params_len, res0_len, res1_len, in0_len, in1_len, in2_len, size)
+        windows(
+            Input 0 = aqr_flate::module::SET_WINDOW,
+            Input 1 = aqr_flate::module::SET_RECORDS_WINDOW,
+            Input 2 = aqr_flate::module::SET_RECORDS_WINDOW,
+            Output 0 = aqr_flate::module::SET_WINDOW,
+        )
+    {
+        aqr_flate::module::decode_part(params_len, res0_len, res1_len, in0_len, in1_len, in2_len, size)
+    }
+}

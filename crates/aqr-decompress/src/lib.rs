@@ -390,7 +390,22 @@ const NATIVE: &[Entry] = &[
     bare(CIL, |p, _, i, n, _| aqr_exe::module::cil(p, i, n).map_err(err)),
     bare(PE_RELOC, |p, _, i, n, _| aqr_exe::module::reloc(p, i, n).map_err(err)),
     bare(MACHO_SYMTAB, |p, _, i, n, _| aqr_exe::module::macho_symtab(p, i, n).map_err(err)),
-    takes(FLATE, |p, r, i, n, t| aqr_flate::formula::decode(p, r, i, n, t).map_err(err)),
+    part(
+        FLATE,
+        true,
+        aqr_api::emu::Entry {
+            kind: aqr_api::emu::Kind::Part,
+            windows: &[
+                aqr_api::Window::Input(0, aqr_flate::module::SET_WINDOW),
+                aqr_api::Window::Input(1, aqr_flate::module::SET_RECORDS_WINDOW),
+                aqr_api::Window::Input(2, aqr_flate::module::SET_RECORDS_WINDOW),
+                aqr_api::Window::Output(0, aqr_flate::module::SET_WINDOW),
+            ],
+            arity: 7,
+            call: |a| aqr_flate::module::decode_part(a[0], a[1], a[2], a[3], a[4], a[5], a[6]),
+        },
+        |p, r, i, n, t| aqr_flate::formula::decode(p, r, i, n, t).map_err(err),
+    ),
     part(
         INFLATE,
         false,

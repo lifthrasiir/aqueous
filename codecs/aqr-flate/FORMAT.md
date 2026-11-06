@@ -1018,9 +1018,17 @@ endian but for the Adler-32.
 | 2 | the index: for each stream, the length of its data and the length of its record (varints); or empty, for a single stream of all the data and all the records | |
 
 The index cuts the data and the records into the streams', which it must use up exactly. All
-the records must be of the same profile. The streams are rebuilt independently of each other
-(in parallel, the module gives each of at least 2 MiB of data threads of its own and runs
-smaller ones side by side).
+the records must be of the same profile. The streams are rebuilt independently of each other.
+
+It is a part module (`module::decode_part`) of windows of 16 pages for the data and the output
+and 4 pages for the records and the index, which it reads and writes in order. A stream of at
+least 2 MiB of data is rebuilt from its data a batch of segments at a time (a segment for each
+of 8 threads: tasks in WebAssembly), its record held: a batch holds its data from 256 KiB
+before its first segment, rounded down to a multiple of 1 MiB, to 256 KiB after its last
+(the tokens are those of the whole data: the tables and the zlib emulator address positions
+modulo powers of two up to 256 KiB, and read no further), and the stream is written in rounds
+of about 2 MiB. Smaller streams are rebuilt side by side in runs of up to 8 MiB of data, their
+data and records held. What is derived of the streams is held until they are all written.
 
 The module has no classes of its own: the maker of the formula names the inputs (e.g. `raw`,
 `flate/record` and `flate/index` in aqr-compress and aqr-zip, slices of `pdf/pool-<class>`
