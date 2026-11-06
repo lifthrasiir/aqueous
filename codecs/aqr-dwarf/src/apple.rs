@@ -143,23 +143,64 @@ pub fn encode(d: &[u8], strs: &[u8]) -> Option<(Vec<u8>, [Vec<u8>; 4])> {
     (decode(&params, &inputs, d.len() as u64).ok()? == d).then_some((params, st))
 }
 
+/// Entries and records of the streams `strps` and `counts`: a varint of the first for each
+/// entry, of the second its records. `None` where the counts do not decode.
+fn counts(strps: &[u8], counts: &[u8]) -> Option<(usize, u64)> {
+    let entries = strps.iter().filter(|&&b| b < 0x80).count();
+    let mut at = 0;
+    let mut records = 0u64;
+    while at < counts.len() {
+        records = records.checked_add(varint::get(counts, &mut at).ok()?)?;
+    }
+    Some((entries, records))
+}
+
+/// Bytes of an entry on WebAssembly, for the plan.
+const ENTRY_BYTES: u64 = 16;
+
+/// The memory plan of [`decode`] ([`aqr_api::stack`]): what it takes beyond its initial memory
+/// at most, of `params`, inputs of `inputs` bytes, of which `strps` and `counts` are the first
+/// two streams, and `len` bytes of output: what `aqr_api::whole` copies, the atoms' sizes, the
+/// entries, their records' DIE offsets and ends, two orders of the entries, and the counts of
+/// the sort or the output. `None` for params or inputs it does not take.
+pub fn plan(params: &[u8], inputs: &[u64], strps: &[u8], counts_in: &[u8], len: u64) -> Option<u64> {
+    use aqr_api::stack::{block, whole};
+    let h = Header::parse(params)?;
+    let (entries, records) = counts(strps, counts_in)?;
+    let e = entries as u64;
+    let sort = block(4 * ((1u64 << 16).max(h.buckets as u64) + 1));
+    Some(
+        whole(params.len() as u64, &[], inputs)
+            + block(4 * h.atoms.len() as u64)
+            + block(ENTRY_BYTES * e)
+            + block(4 * records)
+            + block(4 * e)
+            + 2 * block(4 * e)
+            + sort.max(block(len)),
+    )
+}
+
 /// The table of `len` bytes from `params` (its header) and `inputs` (`.debug_str`, then the
 /// streams of [`STREAM_NAMES`]).
 pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     let h = Header::parse(params).filter(|h| h.bytes.len() == params.len()).ok_or_else(corrupt)?;
-    let &[strs, strps, counts, dies_in, atoms] = inputs else { return Err(corrupt()) };
+    let &[strs, strps, counts_in, dies_in, atoms] = inputs else { return Err(corrupt()) };
     let len = usize::try_from(len).ok().filter(|&l| l <= u32::MAX as usize).ok_or_else(corrupt)?;
     let rest: usize = h.atoms.iter().sum();
     let get = |d: &[u8], at: &mut usize| varint::get(d, at).map_err(|_| corrupt());
     // the entries, by their strings: (bucket, hash, string, first record); their DIE offsets
+    let (n_entries, n_records) = counts(strps, counts_in).ok_or_else(corrupt)?;
+    // (each record is at least a byte of `dies_in`)
+    if n_records > dies_in.len() as u64 {
+        return Err(corrupt());
+    }
     let (mut at, mut ac, mut ad) = (0, 0, 0);
     let (mut strp, mut first) = (0u32, 0u32);
-    let (mut entries, mut dies) = (Vec::new(), Vec::new());
+    let (mut entries, mut dies) = (Vec::with_capacity(n_entries), Vec::with_capacity(n_records as usize));
     let nb = h.buckets;
     while at < strps.len() {
         strp = u32::try_from(strp as u64 + get(strps, &mut at)?).map_err(|_| corrupt())?;
-        let n = get(counts, &mut ac)?;
-        // (each record is at least a byte of `dies_in`)
+        let n = get(counts_in, &mut ac)?;
         if n > (dies_in.len() - ad) as u64 || nb == 0 {
             return Err(corrupt());
         }
@@ -176,20 +217,26 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
             dies.push(die);
         }
     }
-    if ac != counts.len() || ad != dies_in.len() || dies.len() * rest != atoms.len() {
+    if ac != counts_in.len() || ad != dies_in.len() || dies.len() * rest != atoms.len() {
         return Err(corrupt());
     }
     // the records of entry `k`
-    let ends: Vec<u32> = entries.iter().skip(1).map(|e| e.3).chain([dies.len() as u32]).collect();
+    let mut ends: Vec<u32> = Vec::with_capacity(entries.len());
+    ends.extend(entries.iter().skip(1).map(|e| e.3).chain([dies.len() as u32]));
     let records = |k: usize| entries[k].3 as usize..ends[k] as usize;
     // (by hash, then by bucket, each pass stable: entries of one string keep their order)
     if 4 * nb as u64 > len as u64 {
         return Err(corrupt());
     }
-    let mut order: Vec<u32> = (0..entries.len() as u32).collect();
-    order = counting(&order, |k| entries[k as usize].1 as usize & 0xffff, 1 << 16);
-    order = counting(&order, |k| (entries[k as usize].1 >> 16) as usize, 1 << 16);
-    order = counting(&order, |k| entries[k as usize].0 as usize, nb as usize);
+    let mut order: Vec<u32> = Vec::with_capacity(entries.len());
+    order.extend(0..entries.len() as u32);
+    let mut other = vec![0; entries.len()];
+    let mut at = vec![0u32; (1 << 16).max(nb as usize) + 1];
+    counting(&order, &mut other, &mut at, |k| entries[k as usize].1 as usize & 0xffff, 1 << 16);
+    counting(&other, &mut order, &mut at, |k| (entries[k as usize].1 >> 16) as usize, 1 << 16);
+    counting(&order, &mut other, &mut at, |k| entries[k as usize].0 as usize, nb as usize);
+    drop(at);
+    let order = other;
     let same = |a: &u32, b: &u32| entries[*a as usize].1 == entries[*b as usize].1;
     let nh = order.chunk_by(same).count();
     if nh != h.hashes as usize {
@@ -231,20 +278,20 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// `order` sorted by `key` (below `range`), stably.
-fn counting(order: &[u32], key: impl Fn(u32) -> usize, range: usize) -> Vec<u32> {
-    let mut at = vec![0u32; range + 1];
+/// `order` sorted by `key` (below `range`) into `out`, stably, with the counts `at` (more than
+/// `range` of them).
+fn counting(order: &[u32], out: &mut [u32], at: &mut [u32], key: impl Fn(u32) -> usize, range: usize) {
+    let at = &mut at[..range + 1];
+    at.fill(0);
     for &k in order {
         at[key(k) + 1] += 1;
     }
     for i in 1..=range {
         at[i] += at[i - 1];
     }
-    let mut out = vec![0; order.len()];
     for &k in order {
         let a = &mut at[key(k)];
         out[*a as usize] = k;
         *a += 1;
     }
-    out
 }

@@ -5951,13 +5951,13 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/dex-recons.wasm" title="crates/aqr-modules/wasm/dex-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-dex/FORMAT.md" title="codecs/aqr-dex/FORMAT.md">R</a>
     <tr>
-      <td><code>7b33a4c068d632dc8a98cf4ebb46ee33ea61c6cb22525196beb1d483b9fc9ed2</code>
+      <td><code>416dc0d5aaee50fe3c645046bb63db6dfe70a50b681967c815870c3ab599f402</code>
       <td>dwarf-apple@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/dwarf-apple.wasm" title="crates/aqr-modules/wasm/dwarf-apple.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-dwarf/FORMAT.md" title="codecs/aqr-dwarf/FORMAT.md">R</a>
     <tr>
-      <td><code>e6108c29948ea5b40f3ae91587081279800719bd5c4ca147ba83b64ed62719de</code>
-      <td>dwarf-info@1
+      <td><code>4455e093462f274ae1fd91512677ea33e16045c83ae0af39ed1eae34f74ac1cc</code>
+      <td>dwarf-info@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/dwarf-info.wasm" title="crates/aqr-modules/wasm/dwarf-info.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-dwarf/FORMAT.md" title="codecs/aqr-dwarf/FORMAT.md">R</a>
     <tr>

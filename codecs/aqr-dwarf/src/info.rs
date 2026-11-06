@@ -181,7 +181,7 @@ impl<'a> Abbrevs<'a> {
     /// `.debug_abbrev`: the DIEs hold nothing of them.
     fn table(&mut self, off: u64) -> Option<Rc<[Option<Abbrev>]>> {
         if !self.tables.contains_key(&off) {
-            let t = parse_table(self.d, usize::try_from(off).ok()?)?;
+            let t = table_of(self.d, usize::try_from(off).ok()?)?;
             let size = t.len() + t.iter().flatten().map(|a| a.attrs.len()).sum::<usize>();
             self.left = self.left.checked_sub(size)?;
             self.tables.insert(off, t.into());
@@ -190,22 +190,31 @@ impl<'a> Abbrevs<'a> {
     }
 }
 
-fn parse_table(d: &[u8], mut at: usize) -> Option<Vec<Option<Abbrev>>> {
-    let mut t: Vec<Option<Abbrev>> = Vec::new();
+/// What [`parse_table`] gives of a table, in order: each abbreviation (its code, and whether
+/// its DIEs have children), then its attributes (attribute, form).
+enum Item {
+    Abbrev(usize, bool),
+    Attr(u64, u64),
+}
+
+/// Parses the table at `at` of `d`, giving `f` what it holds. `None` where it does not parse
+/// (or `f` gives `None`). A code defined twice is for `f` to turn down.
+fn parse_table(d: &[u8], mut at: usize, mut f: impl FnMut(Item) -> Option<()>) -> Option<()> {
+    let mut entries = 0u64;
     loop {
         let code = varint::get(d, &mut at).ok()?;
         if code == 0 {
-            return Some(t);
+            return Some(());
         }
         // (tables are dense: a code far beyond the entries would cost slots for nothing)
-        let entries = t.iter().filter(|a| a.is_some()).count() as u64;
         if code > MAX_CODE || code > 1024 + 16 * entries {
             return None;
         }
+        entries += 1;
         let _tag = varint::get(d, &mut at).ok()?;
         let children = *d.get(at)? != 0;
         at += 1;
-        let mut attrs = Vec::new();
+        f(Item::Abbrev(code as usize, children))?;
         loop {
             let attr = varint::get(d, &mut at).ok()?;
             let form = varint::get(d, &mut at).ok()?;
@@ -222,28 +231,160 @@ fn parse_table(d: &[u8], mut at: usize) -> Option<Vec<Option<Abbrev>>> {
                     }
                 }
             }
-            attrs.push((attr, form));
+            f(Item::Attr(attr, form))?;
         }
-        let code = code as usize;
-        if t.len() <= code {
-            t.resize(code + 1, None);
-        }
-        if t[code].is_some() {
-            return None;
-        }
-        t[code] = Some(Abbrev { children, attrs });
     }
 }
 
-/// The strings of a string section: the offset of each, in order.
-fn string_starts(s: &[u8]) -> Vec<u32> {
-    let mut starts = Vec::new();
+/// The table at `at` of `d` by code (`None` where there is none).
+fn table_of(d: &[u8], at: usize) -> Option<Vec<Option<Abbrev>>> {
+    let mut t: Vec<Option<Abbrev>> = Vec::new();
+    let mut code = 0;
+    parse_table(d, at, |item| {
+        match item {
+            Item::Abbrev(c, children) => {
+                if t.len() <= c {
+                    t.resize(c + 1, None);
+                }
+                if t[c].is_some() {
+                    return None;
+                }
+                t[c] = Some(Abbrev { children, attrs: Vec::new() });
+                code = c;
+            }
+            Item::Attr(attr, form) => t[code].as_mut()?.attrs.push((attr, form)),
+        }
+        Some(())
+    })?;
+    Some(t)
+}
+
+/// The abbreviation tables a decoder takes, laid out flat: each table's entries (one for each
+/// code up to its highest), each entry's attributes.
+struct Tables {
+    /// The tables by offset, in order: (offset, first slot, slots).
+    tables: Vec<(u64, u32, u32)>,
+    slots: Vec<Entry>,
+    attrs: Vec<(u64, u64)>,
+}
+
+/// An abbreviation of a table: its attributes (from `first`, `n` of them; `n` is `NONE` where
+/// the slot's code is none), and whether its DIEs have children.
+#[derive(Clone, Copy)]
+struct Entry {
+    first: u32,
+    n: u32,
+    children: bool,
+}
+
+const NONE: u32 = u32::MAX;
+
+/// Bytes of a table, a slot and an attribute on WebAssembly, for the plans.
+const TABLE_BYTES: u64 = 16;
+const SLOT_BYTES: u64 = 12;
+const ATTR_BYTES: u64 = 16;
+#[cfg(target_family = "wasm")]
+const _: () = assert!(
+    size_of::<(u64, u32, u32)>() as u64 == TABLE_BYTES
+        && size_of::<Entry>() as u64 == SLOT_BYTES
+        && size_of::<(u64, u64)>() as u64 == ATTR_BYTES
+);
+
+impl Tables {
+    /// The tables of `.debug_abbrev` `d` at `offs` (in order, each once), within
+    /// [`budget`]; `None` where one does not parse.
+    fn new(d: &[u8], offs: &[u64]) -> Option<Tables> {
+        let (slots, attrs) = Tables::sizes(d, offs)?;
+        let mut t = Tables {
+            tables: Vec::with_capacity(offs.len()),
+            slots: vec![Entry { first: 0, n: NONE, children: false }; slots],
+            attrs: Vec::with_capacity(attrs),
+        };
+        let mut base = 0;
+        for &off in offs {
+            let (mut n, mut cur) = (0, 0);
+            let (slots, attrs) = (&mut t.slots, &mut t.attrs);
+            parse_table(d, off as usize, |item| {
+                match item {
+                    Item::Abbrev(code, children) => {
+                        let s = slots.get_mut(base + code)?;
+                        if s.n != NONE {
+                            return None;
+                        }
+                        *s = Entry { first: attrs.len() as u32, n: 0, children };
+                        (cur, n) = (base + code, n.max(code + 1));
+                    }
+                    Item::Attr(attr, form) => {
+                        attrs.push((attr, form));
+                        slots[cur].n += 1;
+                    }
+                }
+                Some(())
+            })?;
+            t.tables.push((off, base as u32, n as u32));
+            base += n;
+        }
+        Some(t)
+    }
+
+    /// The slots and attributes of the tables at `offs`, within [`budget`].
+    fn sizes(d: &[u8], offs: &[u64]) -> Option<(usize, usize)> {
+        let (mut slots, mut attrs) = (0, 0);
+        for &off in offs {
+            let mut n = 0;
+            parse_table(d, usize::try_from(off).ok()?, |item| {
+                match item {
+                    Item::Abbrev(code, _) => n = n.max(code + 1),
+                    Item::Attr(..) => attrs += 1,
+                }
+                Some(())
+            })?;
+            slots += n;
+        }
+        (slots + attrs <= budget(d.len())).then_some((slots, attrs))
+    }
+
+    /// The memory plan of the tables ([`aqr_api::stack`]) of `.debug_abbrev` `d` at `offs`.
+    fn plan(d: &[u8], offs: &[u64]) -> Option<u64> {
+        use aqr_api::stack::block;
+        let (slots, attrs) = Tables::sizes(d, offs)?;
+        Some(
+            block(TABLE_BYTES * offs.len() as u64)
+                + block(SLOT_BYTES * slots as u64)
+                + block(ATTR_BYTES * attrs as u64),
+        )
+    }
+
+    /// The table at `off`: its slots.
+    fn table(&self, off: u64) -> Option<&[Entry]> {
+        let k = self.tables.binary_search_by_key(&off, |t| t.0).ok()?;
+        let (_, first, n) = self.tables[k];
+        Some(&self.slots[first as usize..][..n as usize])
+    }
+
+    fn attrs(&self, s: &Entry) -> &[(u64, u64)] {
+        &self.attrs[s.first as usize..][..s.n as usize]
+    }
+}
+
+/// Strings of a string section: each but the last ends with a NUL.
+fn strings(s: &[u8]) -> usize {
+    s.iter().filter(|&&c| c == 0).count() + (s.last().is_some_and(|&c| c != 0)) as usize
+}
+
+/// The strings of a string section: the offset of each, in order; `None` where there are more
+/// than `most`.
+fn string_starts(s: &[u8], most: usize) -> Option<Vec<u32>> {
+    let mut starts = Vec::with_capacity(most);
     let mut at = 0;
     while at < s.len() {
+        if starts.len() == most {
+            return None;
+        }
         starts.push(at as u32);
         at += s[at..].iter().position(|&c| c == 0).map_or(s.len() - at, |p| p + 1);
     }
-    starts
+    Some(starts)
 }
 
 /// What a unit's header holds of how its DIEs are read.
@@ -281,14 +422,14 @@ impl State {
         State {
             str_next: 0,
             str_prev: vec![0; SLOTS],
-            str_cache: Vec::new(),
+            str_cache: Vec::with_capacity(CACHE),
             prev: vec![0; SLOTS],
             prev_addr: 0,
             prev_strx: 0,
             prev_addrx: 0,
             prev_abbrev_off: 0,
             prev_ref: vec![0; SLOTS],
-            ref_cache: Vec::new(),
+            ref_cache: Vec::with_capacity(REF_CACHE),
         }
     }
 }
@@ -423,11 +564,11 @@ enum Val {
     Bytes(usize, usize),
 }
 
-/// The streams of `.debug_info` `d`, by the tables of `.debug_abbrev` `abbrev` and the strings of
-/// `.debug_str` `strs`, or `None` where it is not rebuilt as it is.
-pub fn encode(d: &[u8], abbrev: &[u8], strs: &[u8]) -> Option<Vec<Vec<u8>>> {
+/// The params ([`Shape`]) and the streams of `.debug_info` `d`, by the tables of `.debug_abbrev`
+/// `abbrev` and the strings of `.debug_str` `strs`, or `None` where it is not rebuilt as it is.
+pub fn encode(d: &[u8], abbrev: &[u8], strs: &[u8]) -> Option<(Vec<u8>, Vec<Vec<u8>>)> {
     let mut abbrevs = Abbrevs::new(abbrev);
-    let strs_starts = string_starts(strs);
+    let strs_starts = string_starts(strs, strings(strs))?;
     // the units, and whether each is coded (else kept as it is): those whose DIEs parse, less
     // those that turn out not to code (whose DIEs are then not indexed, and the rest coded again)
     let mut units = Vec::new();
@@ -467,7 +608,11 @@ pub fn encode(d: &[u8], abbrev: &[u8], strs: &[u8]) -> Option<Vec<Vec<u8>>> {
             continue;
         }
         let inputs: Vec<&[u8]> = [abbrev, strs].into_iter().chain(e.st.iter().map(|s| &s[..])).collect();
-        return (decode(&inputs, d.len() as u64).ok()? == d).then_some(e.st);
+        // (the references after their DIEs those the decoder takes)
+        let mut sh = Shape::of(&inputs, strs_starts.len()).ok()?;
+        let (out, fixups) = decode_as(sh, &inputs, d.len() as u64).ok()?;
+        sh.fixups = fixups;
+        return (out == d).then_some((sh.to_bytes(), e.st));
     }
 }
 
@@ -850,21 +995,196 @@ struct Fixup {
     base: u64,
 }
 
-/// `.debug_info` of `len` bytes from `inputs`: `.debug_abbrev`, `.debug_str`, then the streams of
-/// [`STREAM_NAMES`].
-pub fn decode(inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
-    let [abbrev, strs, streams @ ..] = inputs else { return Err(corrupt()) };
+/// Calls `f` with the abbreviation offset of each unit of the unit stream `d` coded (not
+/// kept as it is), in order, as [`decode`] reads them.
+fn unit_offsets(d: &[u8], mut f: impl FnMut(u64) -> Result<()>) -> Result<()> {
+    let mut r = Reader { d, at: 0 };
+    let mut prev = 0u64;
+    while !r.done() {
+        match r.byte()? {
+            0 => {}
+            1 => {
+                r.get()?;
+                continue;
+            }
+            _ => return Err(corrupt()),
+        }
+        let version = u16::from_le_bytes(r.bytes(2)?.try_into().unwrap());
+        prev = prev.wrapping_add(r.signed()? as u64);
+        match version {
+            2..=4 => {
+                r.byte()?;
+            }
+            5 => {
+                let unit_type = r.byte()?;
+                r.byte()?;
+                r.bytes(match unit_type {
+                    DW_UT_COMPILE | DW_UT_PARTIAL => 0,
+                    DW_UT_SKELETON | DW_UT_SPLIT_COMPILE => 8,
+                    DW_UT_TYPE | DW_UT_SPLIT_TYPE => 12,
+                    _ => return Err(corrupt()),
+                })?;
+            }
+            _ => return Err(corrupt()),
+        }
+        f(prev)?;
+    }
+    Ok(())
+}
+
+/// What [`decode`] holds of its inputs, told by its params: the strings of `.debug_str`, the
+/// DIEs, the DIEs whose children are open, and the references to DIEs after them, at most.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shape {
+    strings: usize,
+    dies: usize,
+    depth: usize,
+    fixups: usize,
+}
+
+impl Shape {
+    /// The params: varints of the strings, the DIEs, the DIEs open and the references after.
+    fn to_bytes(self) -> Vec<u8> {
+        let mut v = Vec::new();
+        for x in [self.strings, self.dies, self.depth, self.fixups] {
+            varint::put(&mut v, x as u64);
+        }
+        v
+    }
+
+    fn from_bytes(b: &[u8]) -> Result<Shape> {
+        let mut at = 0;
+        let mut num = || usize::try_from(varint::get(b, &mut at).map_err(|_| corrupt())?).map_err(|_| corrupt());
+        let s = Shape { strings: num()?, dies: num()?, depth: num()?, fixups: num()? };
+        if at != b.len() {
+            return Err(corrupt());
+        }
+        Ok(s)
+    }
+
+    /// The shape of the inputs of [`decode`], of `strings` strings of `.debug_str`: the codes of
+    /// each unit, as far as they read, of a DIE (whose children open) or of the null entry
+    /// closing them; the references after their DIEs are those of symbols at most.
+    fn of(inputs: &[&[u8]], strings: usize) -> Result<Shape> {
+        let (c, tables) = Counts::new(inputs)?;
+        let mut code = Reader { d: inputs[2 + CODE], at: 0 };
+        let (mut dies, mut depth) = (0, 0);
+        unit_offsets(inputs[2 + UNIT], |off| {
+            let table = tables.table(off).ok_or_else(corrupt)?;
+            let mut open = 0;
+            loop {
+                match code.get()? {
+                    0 => return Ok(()),
+                    1 => open -= (open > 0) as usize,
+                    c => {
+                        dies += 1;
+                        let a = usize::try_from(c - 1).ok().and_then(|c| table.get(c)).ok_or_else(corrupt)?;
+                        if a.n == NONE {
+                            return Err(corrupt());
+                        }
+                        open += a.children as usize;
+                        depth = depth.max(open);
+                    }
+                }
+            }
+        })?;
+        Ok(Shape { strings, dies, depth, fixups: c.refs })
+    }
+}
+
+/// What [`decode`] holds of its inputs, counted before it starts: the units coded, the tables'
+/// offsets (in order, each once), and the references at most (one for each symbol).
+struct Counts {
+    units: usize,
+    offs: Vec<u64>,
+    refs: usize,
+}
+
+impl Counts {
+    /// The counts of the inputs of [`decode`] (`.debug_abbrev`, `.debug_str`, the streams), and
+    /// its tables.
+    fn new(inputs: &[&[u8]]) -> Result<(Counts, Tables)> {
+        let [abbrev, _, streams @ ..] = inputs else { return Err(corrupt()) };
+        if streams.len() != NUM_STREAMS {
+            return Err(corrupt());
+        }
+        let mut units = 0;
+        unit_offsets(streams[UNIT], |_| {
+            units += 1;
+            Ok(())
+        })?;
+        let mut offs = Vec::with_capacity(units);
+        unit_offsets(streams[UNIT], |o| {
+            offs.push(o);
+            Ok(())
+        })?;
+        offs.sort_unstable();
+        offs.dedup();
+        let tables = Tables::new(abbrev, &offs).ok_or_else(corrupt)?;
+        // (each reference is a symbol at least)
+        let refs = streams[REF].iter().filter(|&&b| b < 0x80).count();
+        Ok((Counts { units, offs, refs }, tables))
+    }
+}
+
+/// Bytes of a reader, of an open DIE and of a fixup on WebAssembly, for the plan.
+const READER_BYTES: u64 = 12;
+const OPEN_BYTES: u64 = 24;
+const FIXUP_BYTES: u64 = 24;
+#[cfg(target_family = "wasm")]
+const _: () = assert!(
+    size_of::<Reader>() as u64 == READER_BYTES
+        && size_of::<Option<(usize, usize, u64)>>() as u64 == OPEN_BYTES
+        && size_of::<Fixup>() as u64 == FIXUP_BYTES
+);
+
+/// The memory plan of [`decode`] ([`aqr_api::stack`]) of `params`, `inputs` and `len` bytes of
+/// output: the readers, the strings' offsets, the tables' offsets and the tables, the state,
+/// the output, the DIEs' starts, the references to them before them at most, and the DIEs
+/// open. `None` where the params or inputs are not those it takes.
+pub fn plan(params: &[u8], inputs: &[&[u8]], len: u64) -> Option<u64> {
+    use aqr_api::stack::block;
+    let sh = Shape::from_bytes(params).ok()?;
+    let (c, _) = Counts::new(inputs).ok()?;
+    let state =
+        block(4 * SLOTS as u64) + block(4 * CACHE as u64) + 2 * block(8 * SLOTS as u64) + block(8 * REF_CACHE as u64);
+    Some(
+        block(READER_BYTES * NUM_STREAMS as u64)
+            + block(4 * sh.strings as u64)
+            + block(8 * c.units as u64)
+            + Tables::plan(inputs[0], &c.offs)?
+            + state
+            + block(len)
+            + block(4 * sh.dies as u64)
+            + block(FIXUP_BYTES * sh.fixups as u64)
+            + block(OPEN_BYTES * sh.depth as u64),
+    )
+}
+
+/// `.debug_info` of `len` bytes from `params` ([`Shape`]) and `inputs`: `.debug_abbrev`,
+/// `.debug_str`, then the streams of [`STREAM_NAMES`].
+pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
+    Ok(decode_as(Shape::from_bytes(params)?, inputs, len)?.0)
+}
+
+/// [`decode`] of the shape `sh`; also the references after their DIEs.
+fn decode_as(sh: Shape, inputs: &[&[u8]], len: u64) -> Result<(Vec<u8>, usize)> {
+    let [_, strs, streams @ ..] = inputs else { return Err(corrupt()) };
     if streams.len() != NUM_STREAMS {
         return Err(corrupt());
     }
     let len = usize::try_from(len).map_err(|_| corrupt())?;
-    let mut r: Vec<Reader> = streams.iter().map(|d| Reader { d, at: 0 }).collect();
-    let strs = string_starts(strs);
-    let mut abbrevs = Abbrevs::new(abbrev);
+    let mut r: Vec<Reader> = Vec::with_capacity(NUM_STREAMS);
+    r.extend(streams.iter().map(|d| Reader { d, at: 0 }));
+    let strs = string_starts(strs, sh.strings).ok_or_else(corrupt)?;
+    let (_counts, tables) = Counts::new(inputs)?;
     let mut s = State::new();
     let mut out = Vec::with_capacity(len);
-    // the start of each DIE decoded, and the references to those not yet
-    let (mut dies, mut fixups) = (Vec::<u32>::new(), Vec::new());
+    // the start of each DIE decoded, the references to those not yet, and of each DIE whose
+    // children are open, its sibling to derive where they close
+    let mut dies = Vec::<u32>::with_capacity(sh.dies);
+    let mut fixups = Vec::with_capacity(sh.fixups);
+    let mut open: Vec<Option<(usize, usize, u64)>> = Vec::with_capacity(sh.depth);
     while !r[UNIT].done() {
         match r[UNIT].byte()? {
             0 => {}
@@ -907,9 +1227,8 @@ pub fn decode(inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
         if !matches!(h.addr_size, 4 | 8) {
             return Err(corrupt());
         }
-        let table = abbrevs.table(abbrev_off).ok_or_else(corrupt)?;
-        // of each DIE whose children are open, its sibling to derive where they close
-        let mut open: Vec<Option<(usize, usize, u64)>> = Vec::new();
+        let table = tables.table(abbrev_off).ok_or_else(corrupt)?;
+        open.clear();
         let resolve = |out: &mut Vec<u8>, (at, size, base): (usize, usize, u64)| -> Result<()> {
             let v = (out.len() as u64).wrapping_sub(base);
             if size < 8 && v >> (8 * size) != 0 {
@@ -934,12 +1253,16 @@ pub fn decode(inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
                 continue;
             }
             let code = c - 1;
+            if dies.len() == sh.dies {
+                return Err(corrupt());
+            }
             dies.push(u32::try_from(out.len()).map_err(|_| corrupt())?);
             varint::put(&mut out, code);
             // (an index not of usize, of wasm32, is none, as of 64 bits)
-            let a = usize::try_from(code).ok().and_then(|c| table.get(c)?.as_ref()).ok_or_else(corrupt)?;
+            let a =
+                usize::try_from(code).ok().and_then(|c| table.get(c)).filter(|a| a.n != NONE).ok_or_else(corrupt)?;
             let (mut low_pc, mut sibling) = (None, None);
-            for &(attr, form) in &a.attrs {
+            for &(attr, form) in tables.attrs(a) {
                 let mut form = form;
                 while form == DW_FORM_INDIRECT {
                     form = r[DATA].get()?;
@@ -978,6 +1301,9 @@ pub fn decode(inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
                         match usize::try_from(i).ok().and_then(|i| dies.get(i)) {
                             Some(&t) => put_num(&mut out, form, (t as u64).wrapping_sub(base), h)?,
                             None => {
+                                if fixups.len() == sh.fixups {
+                                    return Err(corrupt());
+                                }
                                 fixups.push(Fixup { at: out.len(), size, index: i, base });
                                 out.resize(out.len() + size, 0);
                             }
@@ -1042,6 +1368,9 @@ pub fn decode(inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
                 }
             }
             if a.children {
+                if open.len() == sh.depth {
+                    return Err(corrupt());
+                }
                 open.push(sibling);
             } else if let Some(sib) = sibling {
                 resolve(&mut out, sib)?;
@@ -1051,6 +1380,7 @@ pub fn decode(inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
         let n = u32::try_from(out.len() - start - 4).ok().filter(|&n| n < 0xffff_fff0).ok_or_else(corrupt)?;
         out[start..start + 4].copy_from_slice(&n.to_le_bytes());
     }
+    let n = fixups.len();
     for f in fixups {
         let t = *usize::try_from(f.index).ok().and_then(|i| dies.get(i)).ok_or_else(corrupt)? as u64;
         let v = t.wrapping_sub(f.base);
@@ -1062,7 +1392,7 @@ pub fn decode(inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     if out.len() != len || !r.iter().all(Reader::done) {
         return Err(corrupt());
     }
-    Ok(out)
+    Ok((out, n))
 }
 
 /// Whether `form` is a number in LEB128.

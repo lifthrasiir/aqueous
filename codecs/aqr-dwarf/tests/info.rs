@@ -198,18 +198,18 @@ fn unit4(start: usize, n: usize, str_at: &[u32], first: usize, prev_type: Option
     u
 }
 
-fn round_trip(d: &[u8], abbrev: &[u8], strs: &[u8]) -> Vec<Vec<u8>> {
-    let st = encode(d, abbrev, strs).expect("taken");
+fn round_trip(d: &[u8], abbrev: &[u8], strs: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
+    let (params, st) = encode(d, abbrev, strs).expect("taken");
     let inputs: Vec<&[u8]> = [abbrev, strs].into_iter().chain(st.iter().map(|s| &s[..])).collect();
-    assert_eq!(decode(&inputs, d.len() as u64).unwrap(), d);
+    assert_eq!(decode(&params, &inputs, d.len() as u64).unwrap(), d);
     // through the module: the streams packed
     let mut packed = vec![abbrev.to_vec(), strs.to_vec()];
     for (_, which) in INPUTS {
         packed.push(aqr_dwarf::pack(&which.iter().map(|&k| &st[k][..]).collect::<Vec<_>>()));
     }
     let p: Vec<&[u8]> = packed.iter().map(|v| &v[..]).collect();
-    assert_eq!(aqr_dwarf::module::info(&[], &p, d.len() as u64).unwrap(), d);
-    st
+    assert_eq!(aqr_dwarf::module::info(&params, &p, d.len() as u64).unwrap(), d);
+    (params, st)
 }
 
 fn section(units: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
@@ -229,7 +229,7 @@ fn section(units: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
 #[test]
 fn version4() {
     let (d, abbrev, strs) = section(5);
-    let st = round_trip(&d, &abbrev, &strs);
+    let (_, st) = round_trip(&d, &abbrev, &strs);
     // every unit coded
     assert!(st.iter().zip(aqr_dwarf::info::STREAM_NAMES).all(|(s, n)| n != "raw" || s.is_empty()));
     assert_eq!(st.len(), NUM_STREAMS);
@@ -263,7 +263,7 @@ fn units_kept() {
     u[..4].copy_from_slice(&len.to_le_bytes());
     d.extend_from_slice(&u);
     d.extend_from_slice(&[0xff, 0xff]);
-    let st = round_trip(&d, &abbrev, &strs);
+    let (_, st) = round_trip(&d, &abbrev, &strs);
     let raw = aqr_dwarf::info::STREAM_NAMES.iter().position(|&n| n == "raw").unwrap();
     assert_eq!(st[raw].len(), u.len() + 2);
 }
@@ -271,10 +271,10 @@ fn units_kept() {
 #[test]
 fn corrupt_inputs() {
     let (d, abbrev, strs) = section(2);
-    let st = round_trip(&d, &abbrev, &strs);
+    let (params, st) = round_trip(&d, &abbrev, &strs);
     let run = |st: &[Vec<u8>], len: usize| {
         let inputs: Vec<&[u8]> = [&abbrev[..], &strs[..]].into_iter().chain(st.iter().map(|s| &s[..])).collect();
-        decode(&inputs, len as u64)
+        decode(&params, &inputs, len as u64)
     };
     assert!(run(&st, d.len() + 1).is_err());
     assert!(run(&st, d.len() - 1).is_err());

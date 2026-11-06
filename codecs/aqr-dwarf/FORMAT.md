@@ -106,8 +106,10 @@ attributes and their forms, then its attributes' values; a DIE of an abbreviatio
 children is followed by them, closed by a null entry (code 0). The module parses the DIEs by
 the abbreviations and codes each value by what it is (DWARF 5, §7.5).
 
-- **Module**: name `dwarf-info`, version 1.
-- **Params**: none (zero bytes).
+- **Module**: name `dwarf-info`, version 2.
+- **Params**: four varints: `S`, the strings of `.debug_str` (§3.2); `D`, the DIEs; `O`, the
+  DIEs open at once (§3.4); `F`, the references to DIEs not decoded yet (§3.5), at most. They
+  bound the module's memory: a section of more of any fails. Version 1 took no params.
 - **Resources**: none.
 - **Inputs**: exactly 5: `.debug_abbrev`, `.debug_str` (empty where there is none), then three
   inputs of packed streams, each of class `dwarf-info/NAME`:

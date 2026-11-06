@@ -652,6 +652,24 @@ fn macho_dwarf() {
     assert!(!modules(&f).contains(&DWARF_APPLE.name));
 }
 
+/// dwarf-apple and dwarf-info take their plans at most, to the page.
+#[test]
+fn dwarf_plans_hold() {
+    let modules = [aqr_decompress::DWARF_APPLE, aqr_decompress::DWARF_INFO];
+    let modules = modules.map(|m| aqr_decompress::built(m).expect("built").sha512_256);
+    for n in [2000, 50_000] {
+        let seen = within_plans(&format!("dSYM of {n} names"), &dsym(n), &modules[..1], true);
+        assert_eq!(seen, 1, "dSYM of {n} names");
+    }
+    for n in [3000, 40_000] {
+        let [info, abbrev, strs] = dwarf(n);
+        let sections = [(".debug_abbrev", &abbrev[..]), (".debug_info", &info[..]), (".debug_str", &strs[..])];
+        let d = elf_with(&x86_64_code(), &sections);
+        let seen = within_plans(&format!("DWARF of {n}"), &d, &modules[1..], true);
+        assert_eq!(seen, 1, "DWARF of {n}");
+    }
+}
+
 /// In a universal file, the code of each image is filtered by its architecture, that of
 /// others (PowerPC) kept with the rest; found in other data too.
 #[test]

@@ -42,14 +42,14 @@ fn main() {
 
 fn info(dir: &std::path::Path, d: &[u8], abbrev: &[u8], strs: &[u8]) {
     let t = std::time::Instant::now();
-    let Some(st) = aqr_dwarf::info::encode(d, abbrev, strs) else {
+    let Some((params, st)) = aqr_dwarf::info::encode(d, abbrev, strs) else {
         println!("{}/debug_info: not taken", dir.display());
         return;
     };
     let enc = t.elapsed();
     let inputs: Vec<&[u8]> = [abbrev, strs].into_iter().chain(st.iter().map(|s| &s[..])).collect();
     let t = std::time::Instant::now();
-    let back = aqr_dwarf::info::decode(&inputs, d.len() as u64).unwrap();
+    let back = aqr_dwarf::info::decode(&params, &inputs, d.len() as u64).unwrap();
     let dec = t.elapsed();
     assert!(back == d);
     let zs: Vec<usize> = st.iter().map(|s| z(s)).collect();

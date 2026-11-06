@@ -126,13 +126,13 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "dwarf-apple",
         version: 1,
-        sha512_256: hex("7b33a4c068d632dc8a98cf4ebb46ee33ea61c6cb22525196beb1d483b9fc9ed2"),
+        sha512_256: hex("416dc0d5aaee50fe3c645046bb63db6dfe70a50b681967c815870c3ab599f402"),
         block: include_bytes!("../wasm/dwarf-apple.block"),
     },
     Known {
         name: "dwarf-info",
-        version: 1,
-        sha512_256: hex("e6108c29948ea5b40f3ae91587081279800719bd5c4ca147ba83b64ed62719de"),
+        version: 2,
+        sha512_256: hex("4455e093462f274ae1fd91512677ea33e16045c83ae0af39ed1eae34f74ac1cc"),
         block: include_bytes!("../wasm/dwarf-info.block"),
     },
     Known {
