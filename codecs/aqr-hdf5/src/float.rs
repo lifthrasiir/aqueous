@@ -271,7 +271,19 @@ pub fn decode(
     if d.overrun() || bits.overrun() {
         return None;
     }
-    Some(o.into_iter().map(|o| k.unordered(o) << shift).collect())
+    // (where they are: the samples' memory is the result's)
+    o.iter_mut().for_each(|o| *o = k.unordered(*o) << shift);
+    Some(o)
+}
+
+/// What [`decode`] takes of an [`aqr_api::stack`] at most, of `n` samples and `order`
+/// coefficients a block: the values and the ordered samples (8 bytes each), the model, and the
+/// coefficients; of which the samples are the result, the values below them (a hole while it is).
+pub fn decode_plan(n: u64, order: u64) -> u64 {
+    use aqr_api::stack::block;
+    // (a counter, 4 bytes)
+    let model = block(CONTEXTS as u64 * 128 * 4);
+    2 * block(8 * n) + model + block(8 * order)
 }
 
 /// The least-squares coefficients of order `order` predicting samples `start..end` of `x`

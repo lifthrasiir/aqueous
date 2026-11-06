@@ -97,6 +97,19 @@ pub fn within(n: u64, coded: usize) -> bool {
 
 /// `hdf5-recons-float`: the chunks of `len` bytes from `params` ([`Floats`]) and `inputs` (the
 /// coefficients, the arithmetic code and the raw bits).
+/// The memory plan of `hdf5-recons-float` ([`aqr_api::stack`]): what it takes beyond its initial
+/// memory at most, of `params`, inputs of `inputs` bytes and an output of `len`: what
+/// `aqr_api::whole` copies, what decoding takes ([`float::decode_plan`]), and the output on top
+/// of the samples (their values a hole below them). `None` for params it does not take.
+pub fn float_plan(params: &[u8], inputs: &[u64], len: u64) -> Option<u64> {
+    use aqr_api::stack::{block, whole};
+    let p = Floats::from_bytes(params)?;
+    let n = p.samples()? as u64;
+    let decoding = float::decode_plan(n, p.order as u64);
+    let output = 2 * block(8 * n) + block(len);
+    Some(whole(params.len() as u64, &[], inputs) + decoding.max(output))
+}
+
 pub fn float(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     let p = Floats::from_bytes(params).ok_or_else(corrupt)?;
     let &[coefs, model, raw] = inputs else { return Err(corrupt()) };

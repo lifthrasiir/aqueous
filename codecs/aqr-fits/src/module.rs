@@ -169,13 +169,40 @@ pub fn table_params(rows: usize, cols: &[Column]) -> Vec<u8> {
     v
 }
 
+/// The columns of `fits-recons-table`'s params: a varint and a byte each, after the rows.
+fn table_columns(params: &[u8]) -> Option<usize> {
+    let mut at = 0;
+    varint::get(params, &mut at).ok()?;
+    let mut n = 0;
+    while at < params.len() {
+        varint::get(params, &mut at).ok()?;
+        at += 1;
+        n += 1;
+    }
+    (at == params.len()).then_some(n)
+}
+
+/// Bytes of a table's column on WebAssembly, for the plan.
+const COLUMN_BYTES: u64 = 12;
+#[cfg(target_family = "wasm")]
+const _: () = assert!(size_of::<table::Column>() as u64 == COLUMN_BYTES);
+
+/// The memory plan of `fits-recons-table` ([`aqr_api::stack`]): what it takes beyond its
+/// initial memory at most, of `params` and planes of `planes` bytes: what `aqr_api::whole` copies,
+/// the columns, and the rows. `None` for params it does not take.
+pub fn table_plan(params: &[u8], planes: u64) -> Option<u64> {
+    use aqr_api::stack::{block, whole};
+    let n = table_columns(params)? as u64;
+    Some(whole(params.len() as u64, &[], &[planes]) + block(COLUMN_BYTES * n) + block(planes))
+}
+
 /// `fits-recons-table`: the rows of a binary table, `len` bytes, from `params` ([`table_params`]) and
 /// `inputs` (their planes).
 pub fn table(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     let &[planes] = inputs else { return Err(corrupt()) };
     let mut at = 0;
     let rows = varint::get(params, &mut at).map_err(|_| corrupt())?;
-    let mut cols = Vec::new();
+    let mut cols = Vec::with_capacity(table_columns(params).ok_or_else(corrupt)?);
     while at < params.len() {
         let len = usize::try_from(varint::get(params, &mut at).map_err(|_| corrupt())?).map_err(|_| corrupt())?;
         let &b = params.get(at).ok_or_else(corrupt)?;

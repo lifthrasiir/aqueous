@@ -15,18 +15,12 @@ use crate::hdf5::{self, DEFLATE, FLETCHER32, FLOAT as FLOATS, File, SHUFFLE};
 use crate::module::{self, Floats};
 
 /// The chunks of a dataset of floats from the float model's coded parts ([`module::float`]).
-pub const FLOAT: Module = Module::new("hdf5-recons-float", 1).with_memory(float_memory);
+pub const FLOAT: Module = Module::new("hdf5-recons-float", 1).with_plan(float_memory);
 
-/// Bytes of the float model's tables (`float::Model`: 65 × 128 and 65 × 4 bits of 4 bytes).
-const FLOAT_MODEL: u64 = 4 * (65 * 128 + 65 * 4);
-
-/// The memory of `hdf5-recons-float`, from the samples `n` (the output over a sample's bytes):
-/// the values, their integers of the floats' order and the samples' bits (8 bytes each), and
-/// the model's tables; the output is made from the bits, after.
+/// The memory of `hdf5-recons-float`: its initial memory, and its plan
+/// ([`crate::module::float_plan`]).
 fn float_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let p = Floats::from_bytes(u.params)?;
-    let n = p.samples()? as u64;
-    Some(u.whole(3 * 8 * n + FLOAT_MODEL + 8 * float::MAX_ORDER as u64, 4))
+    Some(u.initial() + crate::module::float_plan(u.params, u.inputs, u.output())?)
 }
 
 /// Samples of a dataset fewer than this are not coded by the float model.

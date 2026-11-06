@@ -65,6 +65,7 @@ pub fn fields(h: &Header) -> Option<Vec<Field>> {
 /// How a field of a row is stored apart from the rows: its bytes in planes, one per byte of
 /// its elements, each perhaps as the differences from the row above.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
 pub struct Column {
     /// Bytes of the field.
     pub len: usize,

@@ -203,6 +203,11 @@ P = W_main + Σ_태스크 (W_spawn + 태스크의 계획 버퍼) + 채널 메시
 - mszip: 출력, 블록 목록(이제 정확한 용량), DEFLATE 블록의 코드들. 고정 블록의 코드는 인스턴스에서 처음 쓸 때 `OnceLock`으로 잡혀 끝까지 남는데, 그 아래의 것도 끝까지 살아 있어 최대치에 한 번 더해질 뿐이다.
 - 실측 = 계획이다(`xsv_mszip_plans_hold`).
 
+**pdb-msf, hdf5-recons-float, fits-recons-table.**
+- `collect::<Result<Vec<_>>>()`, `push`, `collect`로 만들던 목록들의 용량은 Vec의 성장 정책에 달렸다. 개수를 아는 곳은 정확히 잡게 했다(pdb의 크기와 블록 목록과 순서, fits의 열).
+- hdf5는 결과를 `into_iter().map().collect()`로 만들었는데, 제자리 재사용은 std의 최적화일 뿐 보장되지 않는다. 제자리에서 바꾸게 했다. 그 아래의 값 목록은 결과가 남는 동안 구멍이다.
+- 실측 = 계획이다(`msf_plan_holds`, `hdf5_fits_plans_hold`).
+
 ## 다음 순서
 
 1. `Module::memory_usage_in_pages`를 이미 정확한 용량을 쓰는 모듈들(exe, xsv, fasta, zip, git, pdf, png, …)부터 만든다.

@@ -43,13 +43,22 @@ struct Layout {
     map: u32,
     /// The directory's blocks.
     dir: Vec<u32>,
-    /// Each stream's size (`u32::MAX` for a stream of none) and blocks.
-    streams: Vec<(u32, Vec<u32>)>,
+    /// Each stream's size (`u32::MAX` for a stream of none).
+    sizes: Vec<u32>,
+    /// Where each stream's blocks start in `lists`, and where the last's end.
+    starts: Vec<usize>,
+    /// The streams' blocks, one after another.
+    lists: Vec<u32>,
 }
 
 impl Layout {
     fn dir_bytes(&self) -> u64 {
-        4 + 4 * self.streams.len() as u64 + 4 * self.streams.iter().map(|s| s.1.len() as u64).sum::<u64>()
+        4 + 4 * self.sizes.len() as u64 + 4 * self.lists.len() as u64
+    }
+
+    /// The size and the blocks of stream `k`.
+    fn stream(&self, k: usize) -> (u32, &[u32]) {
+        (self.sizes[k], &self.lists[self.starts[k]..self.starts[k + 1]])
     }
 
     /// Of each block, the bytes at its start that the layout and the streams fill (the rest
@@ -71,8 +80,9 @@ impl Layout {
         for (k, &b) in self.dir.iter().enumerate() {
             set(b, (dir - k as u64 * bs as u64).min(bs as u64) as u32)?;
         }
-        for (size, blocks) in &self.streams {
-            let size = if *size == u32::MAX { 0 } else { *size as u64 };
+        for s in 0..self.sizes.len() {
+            let (size, blocks) = self.stream(s);
+            let size = if size == u32::MAX { 0 } else { size as u64 };
             for (k, &b) in blocks.iter().enumerate() {
                 set(b, (size - k as u64 * bs as u64).min(bs as u64) as u32)?;
             }
@@ -87,14 +97,18 @@ impl Layout {
     /// where the blocks are covered once: [`Layout::covered`].)
     fn order(&self) -> Vec<usize> {
         let mut first = vec![u32::MAX; self.blocks as usize];
-        let mut none = Vec::new();
-        for (k, (_, blocks)) in self.streams.iter().enumerate() {
-            match blocks.first().and_then(|&b| first.get_mut(b as usize)) {
+        // (each a stream's index, of which there are no more)
+        let mut none = Vec::with_capacity(self.sizes.len());
+        for k in 0..self.sizes.len() {
+            match self.stream(k).1.first().and_then(|&b| first.get_mut(b as usize)) {
                 Some(f) => *f = k as u32,
                 None => none.push(k),
             }
         }
-        first.into_iter().filter(|&k| k != u32::MAX).map(|k| k as usize).chain(none).collect()
+        let mut out = Vec::with_capacity(self.sizes.len());
+        out.extend(first.iter().filter(|&&k| k != u32::MAX).map(|&k| k as usize));
+        out.extend_from_slice(&none);
+        out
     }
 }
 
@@ -131,15 +145,21 @@ fn parse(d: &[u8]) -> Option<Layout> {
     bytes.truncate(dir_bytes as usize);
     let ns = u32le(&bytes, 0)? as usize;
     let mut at = 4 + 4 * ns;
-    let mut streams = Vec::with_capacity(ns.min(bytes.len() / 4));
+    // (each stream's size and block 4 bytes of the directory)
+    let room = bytes.len() / 4;
+    let (mut sizes, mut starts) = (Vec::with_capacity(ns.min(room)), Vec::with_capacity(ns.min(room) + 1));
+    let mut lists = Vec::with_capacity(room);
+    starts.push(0);
     for k in 0..ns {
         let size = u32le(&bytes, 4 + 4 * k)?;
-        let m = blocks_of(size, block_size);
-        let list = (0..m).map(|j| u32le(&bytes, at + 4 * j)).collect::<Option<Vec<_>>>()?;
-        at += 4 * m;
-        streams.push((size, list));
+        for _ in 0..blocks_of(size, block_size) {
+            lists.push(u32le(&bytes, at)?);
+            at += 4;
+        }
+        sizes.push(size);
+        starts.push(lists.len());
     }
-    let l = Layout { block_size, fpm, blocks, unknown, map, dir, streams };
+    let l = Layout { block_size, fpm, blocks, unknown, map, dir, sizes, starts, lists };
     (at == bytes.len() && l.dir_bytes() == dir_bytes as u64).then_some(l)
 }
 
@@ -157,11 +177,11 @@ pub fn encode_streams(d: &[u8]) -> Option<([Vec<u8>; 3], Spans)> {
     let cov = l.covered()?;
     let bs = l.block_size as usize;
     let mut streams = Vec::new();
-    let mut spans = vec![None; l.streams.len()];
+    let mut spans = vec![None; l.sizes.len()];
     for k in l.order() {
-        let (size, blocks) = &l.streams[k];
-        spans[k] = (*size != u32::MAX).then(|| streams.len()..streams.len() + *size as usize);
-        let size = if *size == u32::MAX { 0 } else { *size as usize };
+        let (size, blocks) = l.stream(k);
+        spans[k] = (size != u32::MAX).then(|| streams.len()..streams.len() + size as usize);
+        let size = if size == u32::MAX { 0 } else { size as usize };
         for (k, &b) in blocks.iter().enumerate() {
             let n = (size - k * bs).min(bs);
             streams.extend_from_slice(&d[b as usize * bs..][..n]);
@@ -174,13 +194,13 @@ pub fn encode_streams(d: &[u8]) -> Option<([Vec<u8>; 3], Spans)> {
     put(&mut layout, l.blocks as u64);
     put(&mut layout, l.unknown as u64);
     put(&mut layout, l.map as u64);
-    put(&mut layout, l.streams.len() as u64);
-    for (size, _) in &l.streams {
+    put(&mut layout, l.sizes.len() as u64);
+    for size in &l.sizes {
         put(&mut layout, size.wrapping_add(1) as u64);
     }
     // the blocks, as deltas from the block after the previous: the directory's, then the streams'
     let mut prev = l.map;
-    for &b in l.dir.iter().chain(l.streams.iter().flat_map(|s| &s.1)) {
+    for &b in l.dir.iter().chain(&l.lists) {
         varint::put_signed(&mut layout, b as i64 - prev as i64 - 1);
         prev = b;
     }
@@ -209,6 +229,30 @@ impl Reader<'_> {
     }
 }
 
+/// What [`decode`] takes of an [`aqr_api::stack`] at most besides what `aqr_api::whole` copies,
+/// of `layout` and a file of `len` bytes: the streams' sizes, the directory's blocks, where the
+/// streams' blocks start and their blocks, the blocks' coverage, the file, the directory, and the
+/// streams' order (each block's first stream, the streams of none, the order). `None` where
+/// the layout does not start as one.
+pub fn decode_plan(layout: &[u8], len: u64) -> Option<u64> {
+    use aqr_api::stack::block;
+    let mut r = Reader { d: layout, at: 0 };
+    let block_size = 1u32 << r.get().ok().filter(|l| (9..=16).contains(l))?;
+    // (the free page map, the blocks, a field unknown, the directory's map)
+    let (_, blocks, _, _) = (r.u32().ok()?, r.u32().ok()? as u64, r.u32().ok()?, r.u32().ok()?);
+    let ns = r.get().ok()?;
+    let mut total = 0;
+    for _ in 0..ns {
+        total += blocks_of(r.u32().ok()?.wrapping_sub(1), block_size) as u64;
+    }
+    let dir_bytes = 4 + 4 * ns + 4 * total;
+    let dir_blocks = dir_bytes.div_ceil(block_size as u64);
+    // (where the streams' blocks start a `usize` each, 4 bytes on WebAssembly)
+    let layout = block(4 * ns) + block(4 * dir_blocks) + block(4 * (ns + 1)) + block(4 * total);
+    let order = block(4 * blocks) + 2 * block(4 * ns);
+    Some(layout + block(4 * blocks) + block(len) + block(dir_bytes) + order)
+}
+
 /// The file of `len` bytes from `inputs` ([`INPUT_NAMES`]).
 pub fn decode(inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     let &[streams, layout, rest] = inputs else { return Err(corrupt()) };
@@ -229,7 +273,10 @@ pub fn decode(inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     if ns > (layout.len() - r.at) as u64 {
         return Err(corrupt());
     }
-    let sizes: Vec<u32> = (0..ns).map(|_| r.u32().map(|s| s.wrapping_sub(1))).collect::<Result<_>>()?;
+    let mut sizes: Vec<u32> = Vec::with_capacity(ns as usize);
+    for _ in 0..ns {
+        sizes.push(r.u32()?.wrapping_sub(1));
+    }
     let total: u64 = sizes.iter().map(|&s| blocks_of(s, block_size) as u64).sum();
     let dir_bytes = 4 + 4 * ns + 4 * total;
     let dir_blocks = dir_bytes.div_ceil(bs as u64);
@@ -243,15 +290,22 @@ pub fn decode(inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
         prev = u32::try_from(b.wrapping_add(1)).map_err(|_| corrupt())?;
         Ok(prev)
     };
-    let dir = (0..dir_blocks).map(|_| next()).collect::<Result<Vec<_>>>()?;
-    let mut list = Vec::with_capacity(sizes.len());
+    let mut dir = Vec::with_capacity(dir_blocks as usize);
+    for _ in 0..dir_blocks {
+        dir.push(next()?);
+    }
+    let (mut starts, mut lists) = (Vec::with_capacity(sizes.len() + 1), Vec::with_capacity(total as usize));
+    starts.push(0);
     for &s in &sizes {
-        list.push((s, (0..blocks_of(s, block_size)).map(|_| next()).collect::<Result<Vec<_>>>()?));
+        for _ in 0..blocks_of(s, block_size) {
+            lists.push(next()?);
+        }
+        starts.push(lists.len());
     }
     if r.at != layout.len() {
         return Err(corrupt());
     }
-    let l = Layout { block_size, fpm, blocks, unknown, map, dir, streams: list };
+    let l = Layout { block_size, fpm, blocks, unknown, map, dir, sizes, starts, lists };
     let cov = l.covered().ok_or_else(corrupt)?;
     let mut out = vec![0u8; len];
     // the superblock
@@ -266,13 +320,11 @@ pub fn decode(inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     }
     let mut dir = Vec::with_capacity(dir_bytes as usize);
     dir.extend_from_slice(&(ns as u32).to_le_bytes());
-    for &s in &sizes {
+    for &s in &l.sizes {
         dir.extend_from_slice(&s.to_le_bytes());
     }
-    for (_, blocks) in &l.streams {
-        for b in blocks {
-            dir.extend_from_slice(&b.to_le_bytes());
-        }
+    for b in &l.lists {
+        dir.extend_from_slice(&b.to_le_bytes());
     }
     for (chunk, &b) in dir.chunks(bs).zip(&l.dir) {
         out[b as usize * bs..][..chunk.len()].copy_from_slice(chunk);
@@ -280,8 +332,8 @@ pub fn decode(inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     // the streams
     let mut at = 0;
     for k in l.order() {
-        let (size, blocks) = &l.streams[k];
-        let size = if *size == u32::MAX { 0 } else { *size as usize };
+        let (size, blocks) = l.stream(k);
+        let size = if size == u32::MAX { 0 } else { size as usize };
         for (k, &b) in blocks.iter().enumerate() {
             let n = (size - k * bs).min(bs);
             let s = streams.get(at..at + n).ok_or_else(corrupt)?;

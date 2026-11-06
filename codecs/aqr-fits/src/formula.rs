@@ -16,12 +16,12 @@ pub use crate::module::{image as decode_image, rice as decode_rice, table as dec
 
 pub const IMAGE: Module = Module::new("fits-recons-image", 1).with_memory(image_memory);
 pub const RICE: Module = Module::new("fits-recons-rice", 1).with_memory(rice_memory);
-pub const TABLE: Module = Module::new("fits-recons-table", 1).with_memory(table_memory);
+pub const TABLE: Module = Module::new("fits-recons-table", 1).with_plan(table_memory);
 
-/// The memory of `fits-recons-table`: the planes and the rows, and the columns (a varint and a
-/// byte of the params at least each, 12 bytes on 32 bits, their vector doubling).
+/// The memory of [`TABLE`]: its initial memory, and its plan ([`crate::module::table_plan`]).
 fn table_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    Some(u.whole(3 * 12 * u.params.len() as u64 / 2, 1))
+    let &[planes] = u.inputs else { return None };
+    Some(u.initial() + crate::module::table_plan(u.params, planes)?)
 }
 
 /// Bytes of the prediction model's tables ([`image`]'s `Model`, a `Bit` 4 bytes, a bias entry 16

@@ -2087,3 +2087,58 @@ fn xsv_mszip_plans_hold() {
     }
     assert!(seen >= 5, "{seen} applications");
 }
+
+/// hdf5-recons-float and fits-recons-table lay their memory out as stacks, their limits their
+/// plans, exactly: of the HDF5 and FITS fixtures.
+#[test]
+fn hdf5_fits_plans_hold() {
+    let modules = [aqr_decompress::HDF5_FLOAT, aqr_decompress::FITS_TABLE];
+    let modules = modules.map(|m| aqr_decompress::built(m).expect("built").sha512_256);
+    let mut seen = 0;
+    for dir in ["codecs/aqr-hdf5/tests/data", "codecs/aqr-fits/tests/data"] {
+        for e in std::fs::read_dir(format!("{}/../../{dir}", env!("CARGO_MANIFEST_DIR"))).unwrap() {
+            let path = e.unwrap().path();
+            if path.extension().is_some_and(|x| x == "py") {
+                continue;
+            }
+            seen += within_plans(&path.to_string_lossy(), &std::fs::read(&path).unwrap(), &modules, true);
+        }
+    }
+    // a binary table of 20000 rows: an integer, a float, a string
+    let card = |s: String| format!("{s:<80}").into_bytes();
+    let header = |cards: &[String]| {
+        let mut h: Vec<u8> = cards.iter().flat_map(|c| card(c.clone())).collect();
+        h.extend(card("END".into()));
+        h.resize(h.len().next_multiple_of(2880), b' ');
+        h
+    };
+    let kv = |k: &str, v: &str| format!("{k:<8}= {v:>20}");
+    let rows = 20_000;
+    let mut d = header(&[kv("SIMPLE", "T"), kv("BITPIX", "8"), kv("NAXIS", "0")]);
+    let cards: Vec<String> = [
+        ("XTENSION", "'BINTABLE'".to_string()),
+        ("BITPIX", "8".into()),
+        ("NAXIS", "2".into()),
+        ("NAXIS1", "16".into()),
+        ("NAXIS2", rows.to_string()),
+        ("PCOUNT", "0".into()),
+        ("GCOUNT", "1".into()),
+        ("TFIELDS", "3".into()),
+        ("TFORM1", "'1J      '".into()),
+        ("TFORM2", "'1E      '".into()),
+        ("TFORM3", "'8A      '".into()),
+    ]
+    .iter()
+    .map(|(k, v)| kv(k, v))
+    .collect();
+    d.extend(header(&cards));
+    for i in 0..rows {
+        d.extend((i as i32 * 3).to_be_bytes());
+        d.extend((i as f32 * 0.25).to_be_bytes());
+        d.extend(format!("{:<8}", format!("row{}", i % 1000)).bytes());
+    }
+    d.resize(d.len().next_multiple_of(2880), 0);
+    let tables = within_plans("binary table", &d, &modules[1..], true);
+    assert!(tables > 0, "no application of fits-recons-table");
+    assert!(seen + tables >= 3, "{seen} + {tables} applications");
+}

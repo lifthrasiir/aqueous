@@ -1541,3 +1541,73 @@ fn mo_file(pairs: &[(Vec<u8>, Vec<u8>)], hash: usize) -> Vec<u8> {
     d.extend_from_slice(&strings);
     d
 }
+
+/// pdb-msf lays its memory out as a stack, its limit its plan: of MSF files of streams of blocks
+/// in order and shuffled, of 512 and 4096 bytes, more streams than the stack's holes.
+#[test]
+fn msf_plan_holds() {
+    let streams: Vec<Option<Vec<u8>>> = (0..300)
+        .map(|k| match k % 7 {
+            3 => None,
+            _ => Some((0..(k * 997) % 9000).map(|i| (i * 31 + k) as u8).collect()),
+        })
+        .collect();
+    for (bs, shuffle) in [(512, false), (512, true), (4096, true)] {
+        let d = msf_file(bs, &streams, shuffle, 0x5a);
+        let inputs = aqr_pdb::msf::encode(&d).expect("taken");
+        let mut f = Formula::default();
+        let nodes = inputs.into_iter().map(|i| f.push("raw", i)).collect();
+        f.root = Node::apply(aqr_decompress::PDB_MSF, Vec::new(), nodes, d.len() as u64);
+        plan_holds(&format!("msf {bs} {shuffle}"), f, &d);
+    }
+}
+
+/// An MSF file of block size `bs` holding `streams` (`None` a stream of none), their blocks in
+/// order but where `shuffle`, free blocks of `stale` bytes among them (as aqr-pdb's tests make
+/// them).
+fn msf_file(bs: usize, streams: &[Option<Vec<u8>>], shuffle: bool, stale: u8) -> Vec<u8> {
+    let u32s = |v: &[u32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+    let blocks_of = |n: usize| n.div_ceil(bs);
+    // blocks: 0 superblock, 1-2 free page maps, 3 the directory's list, then the rest
+    let mut next = 4u32;
+    let mut lists = Vec::new();
+    for s in streams {
+        let n = s.as_ref().map_or(0, |s| blocks_of(s.len()));
+        let mut l: Vec<u32> = (next..next + n as u32).collect();
+        if shuffle {
+            l.reverse();
+        }
+        next += n as u32 + 1;
+        lists.push(l);
+    }
+    let mut dir = (streams.len() as u32).to_le_bytes().to_vec();
+    for s in streams {
+        dir.extend_from_slice(&s.as_ref().map_or(u32::MAX, |s| s.len() as u32).to_le_bytes());
+    }
+    for l in &lists {
+        dir.extend(u32s(l));
+    }
+    let dir_blocks: Vec<u32> = (next..next + blocks_of(dir.len()) as u32).collect();
+    let nb = next as usize + dir_blocks.len();
+    let mut d = vec![stale; nb * bs];
+    d[..bs].fill(0);
+    d[..32].copy_from_slice(aqr_pdb::msf::MAGIC);
+    for (k, v) in [bs as u32, 1, nb as u32, dir.len() as u32, 0, 3].into_iter().enumerate() {
+        d[32 + 4 * k..36 + 4 * k].copy_from_slice(&v.to_le_bytes());
+    }
+    d[bs..3 * bs].fill(0xff);
+    d[3 * bs..4 * bs].fill(0);
+    d[3 * bs..3 * bs + 4 * dir_blocks.len()].copy_from_slice(&u32s(&dir_blocks));
+    for (chunk, &b) in dir.chunks(bs).zip(&dir_blocks) {
+        d[b as usize * bs..][..bs].fill(0);
+        d[b as usize * bs..][..chunk.len()].copy_from_slice(chunk);
+    }
+    for (s, l) in streams.iter().zip(&lists) {
+        let Some(s) = s else { continue };
+        for (chunk, &b) in s.chunks(bs).zip(l) {
+            d[b as usize * bs..][..bs].fill(0);
+            d[b as usize * bs..][..chunk.len()].copy_from_slice(chunk);
+        }
+    }
+    d
+}

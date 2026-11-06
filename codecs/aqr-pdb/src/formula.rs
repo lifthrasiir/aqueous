@@ -10,7 +10,7 @@ use crate::{dbi, msf, symbols};
 
 pub use crate::module::{msf as decode, symbols as decode_symbols};
 
-pub const MODULE: Module = Module::new("pdb-msf", 1).with_memory(memory);
+pub const MODULE: Module = Module::new("pdb-msf", 1).with_plan(memory);
 pub const SYMBOLS: Module = Module::new("pdb-symbols", 1).with_memory(symbols_memory);
 
 /// Files of modules' symbols shorter than this in all are left as they are: the modules' blocks
@@ -19,13 +19,9 @@ pub const SYMBOLS: Module = Module::new("pdb-symbols", 1).with_memory(symbols_me
 /// 13% larger through it).
 const MIN_SYMBOLS: usize = 512 << 10;
 
-/// The memory of [`MODULE`]: the output; the coverage of each block (4 bytes each, of the
-/// output's blocks, of 512 bytes at least); the streams' lists of blocks (about 32 bytes each
-/// and 4 bytes a block) and the directory (4 bytes a stream and a block), each stream and
-/// block a byte of the layout at least.
+/// The memory of [`MSF`]: its initial memory, and its plan ([`crate::module::msf_plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let layout = *u.inputs.get(1)?;
-    Some(u.whole(u.output() / 128 + 48 * layout, 4))
+    Some(u.initial() + crate::module::msf_plan(u.inputs, u.content(1)?, u.output())?)
 }
 
 /// The memory of [`SYMBOLS`]: the output; the scopes open (16 bytes each, each a record at

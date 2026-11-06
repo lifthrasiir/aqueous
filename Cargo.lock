@@ -401,6 +401,7 @@ dependencies = [
 name = "aqr-fits"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
  "aqr-common",
  "aqr-formula",
  "zstd",
@@ -503,6 +504,7 @@ dependencies = [
 name = "aqr-hdf5"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
  "aqr-common",
  "aqr-flate",
  "aqr-formula",
@@ -772,6 +774,7 @@ dependencies = [
 name = "aqr-pdb"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
  "aqr-common",
  "aqr-formula",
  "zstd",

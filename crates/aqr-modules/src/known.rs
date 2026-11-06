@@ -210,7 +210,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "fits-recons-table",
         version: 1,
-        sha512_256: hex("84aa801613da6bb64dc04a68d5c8d00ace9f7d072a0535a4b86d74c6a40c5c2a"),
+        sha512_256: hex("aa24b0e80a0856cdc07a600f5023252f7578c66e94c0ac355efd434f85ecd49e"),
         block: include_bytes!("../wasm/fits-recons-table.block"),
     },
     Known {
@@ -258,7 +258,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "hdf5-recons-float",
         version: 1,
-        sha512_256: hex("474890dd097d245654a484974f694c3cdd4ce42e999124cd887db9ba33f20081"),
+        sha512_256: hex("4ad552ee1c7a4ad4c52bb9a6ef51dbe117ed787875f21d6ea71b5c7b20b3438d"),
         block: include_bytes!("../wasm/hdf5-recons-float.block"),
     },
     Known {
@@ -354,7 +354,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "pdb-msf",
         version: 1,
-        sha512_256: hex("fb736a82991e6e3350c215dc41b1a6502cf7a5743cc85c55b4b267d7a9a9e1b1"),
+        sha512_256: hex("a3008d37eae4a8bf1474f79975da0e834212a7e79cb98f5992553a8c6ce0130e"),
         block: include_bytes!("../wasm/pdb-msf.block"),
     },
     Known {
