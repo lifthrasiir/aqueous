@@ -17,26 +17,24 @@ use crate::{Choice, Form, Shape, fields, floats};
 
 pub use crate::module::{Field, Float, How, decode_entries, decode_fields, decode_floats};
 
-pub const FIELDS: Module = Module::new("recs-fields", 1).with_memory(fields_memory);
-pub const ENTRIES: Module = Module::new("recs-entries", 1).with_memory(entries_memory);
-pub const FLOATS: Module = Module::new("recs-floats", 1).with_memory(floats_memory);
+pub const FIELDS: Module = Module::new("recs-fields", 1).with_plan(fields_memory);
+pub const ENTRIES: Module = Module::new("recs-entries", 1).with_plan(entries_memory);
+pub const FLOATS: Module = Module::new("recs-floats", 1).with_plan(floats_memory);
 
-/// The memory of `recs-fields`: the planes and the records, the fields (of the params), and the
-/// values of the field a field refers to, 8 bytes a record, one field at a time.
+/// The memories of the modules: the initial memory, and the plans
+/// ([`crate::module::fields_plan`], `entries_plan`, `floats_plan`).
 fn fields_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let (n, _, fields) = crate::module::parse_fields(u.params).ok()?;
-    let refs = fields.iter().any(|f| matches!(f.how, crate::module::How::Sub(_) | crate::module::How::XorRef(_)));
-    Some(u.whole(if refs { 8 * n as u64 } else { 0 } + 24 * fields.len() as u64, 2))
+    let &[planes] = u.inputs else { return None };
+    Some(u.initial() + crate::module::fields_plan(u.params, planes)?)
 }
 
-/// The memory of `recs-entries`: the heads and tails, and the entries.
 fn entries_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    Some(u.whole(0, 0))
+    Some(u.initial() + crate::module::entries_plan(u.params.len() as u64, u.inputs, u.output()))
 }
 
-/// The memory of `recs-floats`: the lifted records and the records.
 fn floats_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    Some(u.whole(0, 0))
+    let &[lifted] = u.inputs else { return None };
+    Some(u.initial() + crate::module::floats_plan(u.params, lifted)?)
 }
 
 /// A file shorter than this is not looked into.

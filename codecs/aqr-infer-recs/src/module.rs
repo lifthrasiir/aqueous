@@ -39,6 +39,7 @@ pub enum How {
 
 /// A field of a record: `width` bytes (1, 2, 4 or 8) at `off`, a number of either endianness.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
 pub struct Field {
     pub off: usize,
     pub width: usize,
@@ -218,6 +219,25 @@ pub fn decode_planes(planes: &[u8], n: usize, k: usize, fields: &[Field]) -> Opt
     Some(m)
 }
 
+/// Bytes of a [`Field`] and a [`Float`] on WebAssembly (32-bit `usize`), for the plans.
+const FIELD_BYTES: u64 = 20;
+const FLOAT_BYTES: u64 = 24;
+#[cfg(target_family = "wasm")]
+const _: () = assert!(size_of::<Field>() as u64 == FIELD_BYTES && size_of::<Float>() as u64 == FLOAT_BYTES);
+
+/// The memory plan of `recs-fields` ([`aqr_api::stack`]): what it takes beyond its initial memory
+/// at most, of `params` and planes of `planes` bytes: what `aqr_api::whole` copies, the fields,
+/// the records, and on top of them the values of the field a field refers to (8 bytes a
+/// record), one field at a time. `None` for params it does not take.
+pub fn fields_plan(params: &[u8], planes: u64) -> Option<u64> {
+    use aqr_api::stack::{block, whole};
+    let (n, k, fields) = parse_fields(params).ok()?;
+    let refs = fields.iter().any(|f| matches!(f.how, How::Sub(_) | How::XorRef(_)));
+    let n = n as u64;
+    let own = block(FIELD_BYTES * fields.len() as u64) + block(n * k as u64) + if refs { block(8 * n) } else { 0 };
+    Some(whole(params.len() as u64, &[], &[planes]) + own)
+}
+
 /// The module `recs-fields`: the records of `params` from the planes of their fields.
 pub fn decode_fields(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     let &[planes] = inputs else { return Err(corrupt()) };
@@ -258,6 +278,12 @@ pub fn parse_entries(p: &[u8]) -> Result<(usize, usize, Rule)> {
     Ok((n, head, r))
 }
 
+/// The memory plan of `recs-entries` ([`aqr_api::stack`]): what `aqr_api::whole` copies of
+/// `params` and inputs of `inputs` bytes, and the output of `len`.
+pub fn entries_plan(params: u64, inputs: &[u64], len: u64) -> u64 {
+    aqr_api::stack::whole(params, &[], inputs) + aqr_api::stack::block(len)
+}
+
 /// The module `recs-entries`: the entries of `params`, each its head (of `heads`, one after
 /// another) and as much of `tails` as its length leaves.
 pub fn decode_entries(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
@@ -286,6 +312,7 @@ pub fn decode_entries(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u
 /// q over k), give or take a few units in the last place: stored as q, `wq` bytes, and that
 /// difference, `wr` bytes, both little-endian two's complement.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
 pub struct Float {
     pub off: usize,
     /// An f64, else an f32.
@@ -429,6 +456,16 @@ pub fn unlift(lifted: &[u8], n: usize, k: usize, floats: &[Float]) -> Option<Vec
         m.extend_from_slice(&r[at..]);
     }
     Some(m)
+}
+
+/// The memory plan of `recs-floats` ([`aqr_api::stack`]): what `aqr_api::whole` copies of
+/// `params` and lifted records of `lifted` bytes, the float fields, and the records. `None` for
+/// params it does not take.
+pub fn floats_plan(params: &[u8], lifted: u64) -> Option<u64> {
+    use aqr_api::stack::{block, whole};
+    let (n, k, floats) = parse_floats(params).ok()?;
+    let own = block(FLOAT_BYTES * floats.len() as u64) + block((n * k) as u64);
+    Some(whole(params.len() as u64, &[], &[lifted]) + own)
 }
 
 /// The module `recs-floats`: the records of `params` from their lifted records.

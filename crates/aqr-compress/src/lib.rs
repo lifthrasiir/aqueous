@@ -642,6 +642,13 @@ pub fn recompress(d: &[u8], opt: &Options) -> Formula {
     recompress_at(d, opt, 0, Kind::Unknown, &Cx::new(d, opt))
 }
 
+/// Declares the memory limits of `f`'s applications as the compressor does without having run
+/// them (their modules' plans or estimates): for tests of formulas made apart.
+#[doc(hidden)]
+pub fn declare_memory(f: &mut Formula) {
+    memory::declare(f, &Native { threads: 1 }, &memory::Limits::default());
+}
+
 /// `d` as an archive, with the checksum of `d`.
 pub fn compress(d: &[u8], opt: &Options) -> Vec<u8> {
     let mut c = Vec::new();

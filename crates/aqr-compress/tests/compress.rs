@@ -2010,3 +2010,51 @@ fn asar_bundle_plans_hold() {
     seen += within_plans("asar of a few", &asar_of(&files[..3]), &modules, true);
     assert!(seen >= 15, "{seen} applications");
 }
+
+/// The modules of aqr-infer-recs lay their memory out as stacks, their limits their plans,
+/// exactly: of a table of fields, entries by their lengths, and a catalogue of float fields
+/// (as aqr-infer-recs' test makes it), each formula declared as the compressor declares it and
+/// decoded as WebAssembly.
+#[test]
+fn recs_plans_hold() {
+    let modules = [RECS_FIELDS, RECS_ENTRIES, aqr_infer_recs::formula::FLOATS]
+        .map(|m| aqr_decompress::built(m).expect("built").sha512_256);
+    // stars of 28 bytes: two f64 and two f32 fields of radians by constants of their own
+    let mut r = 3u64;
+    let mut below = |n: u64| {
+        r = r.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (r >> 33) % n
+    };
+    let mut catalogue = Vec::new();
+    for _ in 0..20_000 {
+        let (ra, dec) = (below(86_400_000), below(3_600_000) as f64 - 1_800_000.0);
+        catalogue.extend((ra as f64 / 3_600_000.0 * 15.0 * 0.0174532925199433).to_le_bytes());
+        catalogue.extend((dec * (std::f64::consts::PI / 64_800_000.0)).to_le_bytes());
+        catalogue.extend((600 + below(400) as i32).to_le_bytes());
+        catalogue.extend((((below(2000) as f64 - 1000.0) * std::f64::consts::PI / 432_000_000.0) as f32).to_le_bytes());
+        catalogue.extend((((below(2000) as f64 - 1000.0) * std::f64::consts::PI / 648_000_000.0) as f32).to_le_bytes());
+    }
+    let mut seen = [0; 3];
+    for (what, d, chains) in
+        [("table", table(20_000), false), ("entries", entries(3_000), true), ("catalogue", catalogue, false)]
+    {
+        let choices = aqr_infer_recs::choose(&d, aqr_infer_recs::candidates(&d, chains, 1), 1).0;
+        let mut f = aqr_infer_recs::formula::formula(&d, &choices);
+        aqr_compress::declare_memory(&mut f);
+        let c = encoder().encode(&f, None).unwrap();
+        let alone = WASM.write().unwrap_or_else(PoisonError::into_inner);
+        aqr_decompress::record_applications(true);
+        let out = aqr::decode(&c, &aqr_decompress::Wasm);
+        let applied = aqr_decompress::record_applications(false);
+        drop(alone);
+        assert!(out.as_ref().is_ok_and(|o| o == &d), "{what}: {:?}", out.err());
+        for a in &applied {
+            let Some(k) = modules.iter().position(|&h| h == a.hash) else { continue };
+            let plan = a.limit - a.imported;
+            println!("{what}: plan {plan} working {}", a.working);
+            assert!(a.working <= plan && plan - a.working < 1 << 16, "{what}: plan {plan}, working {}", a.working);
+            seen[k] += 1;
+        }
+    }
+    assert!(seen.iter().all(|&n| n > 0), "{seen:?} applications of recs-fields, -entries, -floats");
+}

@@ -520,6 +520,7 @@ dependencies = [
 name = "aqr-infer-recs"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
  "aqr-common",
  "aqr-formula",
  "xxhash-rust",

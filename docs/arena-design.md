@@ -190,6 +190,10 @@ P = W_main + Σ_태스크 (W_spawn + 태스크의 계획 버퍼) + 채널 메시
 
 **asar-recons, bundle-recons.** 이미 LIFO였다(asar: 본체 목록과 출력; bundle: 출력과 cpio 머리의 사본). 실측 = 계획이다(`asar_bundle_plans_hold`).
 
+**recs-fields, recs-entries, recs-floats.** 이미 LIFO였다(필드 목록, 출력, recs-fields는 필드마다 위에 참조 값 목록).
+- `Field`와 `Float`는 `repr(C)`로 두고, wasm32 크기는 상수로 확인한다.
+- 실측 = 계획이다(`recs_plans_hold`). 직접 만든 수식에는 aqr-compress의 숨은 `declare_memory`로 한도를 선언한다.
+
 ## 다음 순서
 
 1. `Module::memory_usage_in_pages`를 이미 정확한 용량을 쓰는 모듈들(exe, xsv, fasta, zip, git, pdf, png, …)부터 만든다.

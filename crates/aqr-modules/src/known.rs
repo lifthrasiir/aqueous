@@ -318,7 +318,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "lzx-recons",
         version: 1,
-        sha512_256: hex("3b8bb70018e13759d301b04912d53548570cb50d5ebf0ab01476e542e9b6b7e0"),
+        sha512_256: hex("2674b76a2903d2620a9f66ad4401130adbe6cbe3bf3311e13579a8928ad52d6d"),
         block: include_bytes!("../wasm/lzx-recons.block"),
     },
     Known {
@@ -396,7 +396,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "psd-recons",
         version: 1,
-        sha512_256: hex("51405f531e3136ea0b93757caa7c4a55cb26d8c9fea8b2870d46be358704fb2f"),
+        sha512_256: hex("1144ced2ff7f9a0db2819386fda939c61c421ec679c25a1bc393b796606d70b5"),
         block: include_bytes!("../wasm/psd-recons.block"),
     },
     Known {
@@ -426,19 +426,19 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "recs-entries",
         version: 1,
-        sha512_256: hex("aefdf6024d34247838a429e8b9eface31d24f7a727d55624e6ec170dc66d3f2c"),
+        sha512_256: hex("6e86d6dd787b62aa0526c8d2fa52f5237063722f7d034caac16a75a250fa7285"),
         block: include_bytes!("../wasm/recs-entries.block"),
     },
     Known {
         name: "recs-fields",
         version: 1,
-        sha512_256: hex("e3def8abd3dc153b63c6fabf978bac33287bf6159eb512e66c75f958ab77bcf4"),
+        sha512_256: hex("7b61921b8434ae7e6a184bf0e01948490e04f0e31f43c6ccfc58d11da91afecd"),
         block: include_bytes!("../wasm/recs-fields.block"),
     },
     Known {
         name: "recs-floats",
         version: 1,
-        sha512_256: hex("9d5c6eb78065c54133e74c91d46204ef67d4528953892094a9e4d8c3986dccfb"),
+        sha512_256: hex("10666b0db53ae13fbff6ee9dc3b2ed7dfcd58d858d7909e7ad6dc17c0c1567f7"),
         block: include_bytes!("../wasm/recs-floats.block"),
     },
     Known {
