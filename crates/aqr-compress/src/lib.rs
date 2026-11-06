@@ -383,10 +383,6 @@ pub(crate) struct Cx {
     /// The prevalidation of those taken, by where their data is: put off until it is known
     /// whether they are taken into a set ([`sets`]), whose files are not evaluated alone.
     deferred: RefCell<Vec<(usize, verify::Deferred)>>,
-    /// Where the data of a content is that is let go of once its formula is made
-    /// ([`make_later`]): data within it is not shared from the store by the prevalidator's memo
-    /// (which would hold it), but copied as other data is.
-    let_go: Option<Range<usize>>,
     /// Where the contents made apart of the formula of this data are sealed, if they are
     /// ([`seal`]): those of a formula whose formulas above all make their files apart, of a
     /// file archived alone. Taken by what may use it: [`recompress_with`], for [`nested`] only
@@ -538,7 +534,6 @@ impl Cx {
             pre: None,
             ready: Default::default(),
             deferred: Default::default(),
-            let_go: None,
             sealing: Default::default(),
             parts_checked: Default::default(),
             skip: Default::default(),
@@ -574,12 +569,6 @@ impl Cx {
 
     pub(crate) fn inflate_left(&self) -> u64 {
         self.inflate.get()
-    }
-
-    /// Whether the prevalidator's memo may share data `d` where it is of the store
-    /// ([`Cx::let_go`]).
-    fn shares(&self, d: &[u8]) -> bool {
-        self.let_go.as_ref().is_none_or(|r| !r.contains(&(d.as_ptr() as usize)))
     }
 
     /// Whether the files archived together hold `data` ([`Held`]), but for the one `within`
@@ -893,10 +882,11 @@ fn finish(
     // (read back from its file, its blocks let go of as they are decoded: not all of the archive
     // resident by the end; not where it is decrypted into memory of its own)
     let mapped = out.mapped();
+    let memo = std::cell::RefCell::new(memo);
     let decodes = |c: &[u8]| {
         let _s = aqr_common::trace::span("verify");
         let files = |_: usize, range: Range<usize>| d.get(range).map(<[u8]>::to_vec);
-        let m = verify::Cached::new(Native { threads: opt.threads }, memo, &files);
+        let m = verify::Cached::new(Native { threads: opt.threads }, std::mem::take(&mut *memo.borrow_mut()), &files);
         // (compared as it is written out, not held whole: a file of parts streams, see
         // `aqr::Archive::write_file`)
         let runner = aqr_decompress::natives(&m);
@@ -922,8 +912,13 @@ fn finish(
         notes.inspect(|n| n.send(Note::Verified(0, d.len() as u64)));
         decodes
     };
+    // by the hashes recorded, without running a module; else decoded
+    let verified = |c: &[u8]| match hashed(c, d, &memo, opt) {
+        Some(same) => same,
+        None => decodes(c),
+    };
     let r = match n {
-        Ok(n) if !opt.verify || decodes(&out.written()?) => (n, f),
+        Ok(n) if !opt.verify || verified(&out.written()?) => (n, f),
         // a leaf of other bytes than `d` is not encoded with its checksum
         _ => {
             out.restart()?;
@@ -935,6 +930,34 @@ fn finish(
         }
     };
     Ok((r.0 + mirroring.map_or(0, |m| m.added() as usize), r.1))
+}
+
+/// Whether archive `c` of file `d` gives it back by its content hashes, worked out without
+/// running a module by what `memo` recorded (`aqr::Archive::hashed`): its outputs' hashes those
+/// of the parts of `d` they are, which their checksums are of. None where any application is not
+/// recorded.
+fn hashed(c: &[u8], d: &[u8], memo: &std::cell::RefCell<verify::Memo>, opt: &Options) -> Option<bool> {
+    use aqr_formula::chash::Ch;
+    let _s = aqr_common::trace::span("verify");
+    let native = Native { threads: opt.threads };
+    let runner = aqr_decompress::natives(&native);
+    let Ok(a) = aqr::open(c, &runner) else { return Some(false) };
+    let roots = match a.hashed(&*memo.borrow(), &aqr_decompress::identify, opt.threads) {
+        Ok(Some(roots)) => roots,
+        Ok(None) => return None,
+        Err(_) => return Some(false),
+    };
+    let (mut at, mut whole) = (0usize, Ch::EMPTY);
+    for (h, sums) in roots {
+        let Some(part) = d.get(at..at.saturating_add(h.len() as usize)) else { return Some(false) };
+        if sums.iter().any(|&s| s != aqr::checksum(part)) {
+            return Some(false);
+        }
+        (at, whole) = (at + part.len(), whole.cat(h));
+    }
+    let same = at == d.len() && whole == Ch::of(d);
+    aqr_formula::store::let_go(d);
+    Some(same)
 }
 
 /// Bytes of the input compared in verifying ([`finish`]) between the pages let go of: few calls,
@@ -1211,11 +1234,11 @@ fn recompress_sealed(
     if let Some(pre) = cx.pre.as_ref().filter(|_| !lazy) {
         match prepared && format == Format::Png {
             true => pre
-                .job(shared.clone(), d, cx.shares(d))
+                .job(shared.clone(), d)
                 .into_iter()
                 .for_each(|j| cx.deferred.borrow_mut().push((d.as_ptr() as usize, j))),
             false if format == Format::Text && !cx.once.evaluated(d) => {}
-            false => pre.submit(shared.clone(), d, cx.shares(d)),
+            false => pre.submit(shared.clone(), d),
         }
     }
     let mark = cx.deferred.borrow().len();
@@ -1250,7 +1273,7 @@ fn recompress_sealed(
     if lazy {
         f.streams.iter_mut().filter(|s| s.data.is_lazy()).for_each(|s| s.data = s.data.made());
         if let Some(pre) = cx.pre.as_ref().filter(|_| !cx.parts_checked.get()) {
-            pre.submit(Arc::new(f.clone()), d, cx.shares(d));
+            pre.submit(Arc::new(f.clone()), d);
         }
     }
     let mut taken = Vec::new();
@@ -1814,7 +1837,6 @@ fn make_later(
     let lazy: Vec<Option<usize>> = lazy.into_iter().zip(&owned).map(|(l, o)| l.filter(|_| o.is_some())).collect();
     let pre = cx.pre.clone().filter(|_| lazy.iter().flatten().any(|s| apps.contains_key(s)));
     cx.parts_checked.set(cx.parts_checked.get() || pre.is_some());
-    let parent_let_go = cx.let_go.clone();
     // the contents' formulas sealed as they are made, in their order, where this formula's
     // contents are: each in its slot, those of a stream taken that take no place as they are;
     // those that would pass the bound of the description not (kept as they are), the bound
@@ -1883,13 +1905,11 @@ fn make_later(
                 false => fr.streams[x].data.clone(),
             });
             let out = &of[*at..*at + app.len() as usize];
-            let share = parent_let_go.as_ref().is_none_or(|r| !r.contains(&(out.as_ptr() as usize)));
-            pre.submit(Arc::new(part), out, share);
+            pre.submit(Arc::new(part), out);
             // (its output hashed: of a WIM file mapped, its chunks, read through again)
             aqr_formula::store::let_go(out);
         }
         let mut own = apart.cx(d.len(), opt);
-        own.let_go = mine.is_some().then_some(d.as_ptr_range()).map(|r| r.start as usize..r.end as usize);
         *own.sealing.get_mut() =
             sealing.as_ref().zip(slots.as_ref()).map(|(s, slots)| seal::Sealing { slot: slots[i], ..s.clone() });
         own.ready.borrow_mut().extend(std::mem::take(&mut *ready[i].lock().unwrap()));
@@ -3787,8 +3807,10 @@ mod tests {
         assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
     }
 
-    /// The formulas recompressors make are evaluated beforehand: decoding the archive takes
-    /// every application's output from the memo, and runs the module where it is not there.
+    /// The formulas recompressors make are evaluated beforehand: the archive is verified by the
+    /// hashes recorded, without running a module (not of a file it is not, nor without the
+    /// records); decoding it takes the applications recorded as the file's from the file, and
+    /// runs the module where they are not there.
     #[test]
     fn verified_beforehand() {
         // (of no records, which aqr-infer-recs would take, nor words, which aqr-wrt would)
@@ -3802,9 +3824,14 @@ mod tests {
         let f = recompress_at(&d, &opt, 0, Kind::Unknown, &cx);
         let memo = verify::Prevalidator::finish_shared(cx.pre.take().unwrap());
         assert!(!f.applies().is_empty());
-        // the DEFLATE stream is not kept again, but known to be the file's
-        assert_eq!(memo.bytes(), 0);
         let c = cx.enc.encode(&f, Some(aqr::checksum(&d))).unwrap();
+        let memo = std::cell::RefCell::new(memo);
+        assert_eq!(hashed(&c, &d, &memo, &opt), Some(true));
+        let mut other = d.clone();
+        other[1000] ^= 1;
+        assert_eq!(hashed(&c, &other, &memo, &opt), Some(false));
+        assert_eq!(hashed(&c, &d, &Default::default(), &opt), None);
+        let memo = memo.into_inner();
         let decode = |c: &[u8], memo: verify::Memo| {
             let files = |_: usize, range: Range<usize>| d.get(range).map(<[u8]>::to_vec);
             let m = verify::Cached::new(Native { threads: 1 }, memo, &files);

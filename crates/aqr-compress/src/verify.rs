@@ -1,16 +1,16 @@
 //! Verification of the archive that [`compress`](crate::compress) makes (docs/xform-design.md §6):
-//! it is decoded, and must give the file back. The applications of modules are evaluated
-//! beforehand, on threads of their own while the file is still recompressed: each formula a
-//! recompressor makes is evaluated as it is made ([`Prevalidator`]), and where it gives what it
-//! stands for, the outputs of its applications are kept by what they were applied to ([`Memo`]).
-//! Decoding the archive then takes an application's output from there where its module,
-//! parameters, resources and inputs are the same ([`Cached`]), rather than running the module
-//! again: modules are pure functions, so that this is the output it would give. Everything else
-//! of the archive (its blocks, the formula block, the streams, the checksums) is decoded as it
-//! would be. An application whose output is part of the file (that of a formula of a file in
-//! the file, at its top) is not kept in the memo, but known to give that part of the file; one
-//! whose output is a stream of the store (a content's formula's, the content spilled) shares
-//! it rather than a copy ([`aqr_formula::store::find`]).
+//! it must give the file back. The applications of modules are evaluated beforehand, on threads
+//! of their own while the file is still recompressed: each formula a recompressor makes is
+//! evaluated as it is made ([`Prevalidator`]), and where it gives what it stands for, each of its
+//! applications is recorded by its module, parameters and the content hashes of its resources
+//! and inputs ([`aqr_formula::chash`]), with the hashes of its output's pieces ([`Memo`]); no
+//! output is kept. The archive is then verified by its hashes: of its data by their bytes, and of
+//! each application by the record of the hashes of its inputs, without running a module, the
+//! whole the file's hash (`aqr::Archive::hashed`). As content hashes compose over
+//! concatenation, a record holds of an application however the formula was laid out after (its
+//! contents put in, its streams merged, cut into blocks). Where an application is not recorded
+//! (a formula not evaluated beforehand, or failing), the archive is decoded instead, running the
+//! modules but where an application is recorded as a range of a file ([`Cached`]).
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -18,73 +18,45 @@ use std::sync::{Arc, Mutex};
 
 use crate::memory::{self, Limits};
 use aqr_decompress::Native;
+use aqr_formula::chash::{Ch, Records, record_key};
 use aqr_formula::{Apply, Formula, Modules, Node, Result, Shared};
 use xxhash_rust::xxh3::Xxh3;
 
-/// What an application is: its module, parameters, resources and inputs, hashed.
+/// What an application is ([`record_key`]).
 type Key = u128;
 
-fn key(a: &Apply, inputs: &[&[u8]]) -> Key {
-    let mut h = Xxh3::new();
-    let mut part = |b: &[u8]| {
-        h.update(&(b.len() as u64).to_le_bytes());
-        h.update(b);
-    };
-    part(a.module.name.as_bytes());
-    part(&a.module.version.to_le_bytes());
-    part(&a.params);
-    part(&(a.resources.len() as u64).to_le_bytes());
-    a.resources.iter().for_each(|r| part(r));
-    part(&(inputs.len() as u64).to_le_bytes());
-    inputs.iter().for_each(|i| part(i));
-    part(&a.len.to_le_bytes());
-    h.digest128()
+/// The key of application `a` of outputs of `sizes` on `inputs`.
+fn key(a: &Apply, inputs: &[&[u8]], sizes: &[u64]) -> Key {
+    let resources: Vec<Ch> = a.resources.iter().map(|r| Ch::of(r)).collect();
+    let inputs: Vec<Ch> = inputs.iter().map(|i| Ch::of(i)).collect();
+    record_key(&a.module.to_string(), &a.params, &resources, &inputs, sizes)
 }
 
-/// An application's output: its bytes, a range of a file (by index), or its bytes compressed
-/// (a Zstandard frame at [`PACKED_LEVEL`], and their length).
+/// What an application gave: the hashes of the pieces of its output (each output, or each piece
+/// of an output split), and the range of a file (by index) it is, where it is one.
 #[derive(Clone)]
-enum Output {
-    /// (of the store where one is set, see [`crate::Options::spill`])
-    Bytes(aqr_formula::Bytes),
-    File(usize, Range<usize>),
-    Packed(aqr_formula::Bytes, usize),
+struct Record {
+    outputs: Vec<Ch>,
+    file: Option<(usize, Range<usize>)>,
 }
 
-/// The zstd level of the outputs kept in the memo that are copies ([`Output::Packed`]): they are
-/// read once, and are most of what compressing a large file holds at its end (3 GB of the
-/// Windows Server DVD's 9).
-const PACKED_LEVEL: i32 = 1;
-
-/// Outputs of applications, by [`key`]; and their memory limits, worked out as they are run
-/// ([`crate::memory`]).
+/// The applications evaluated beforehand, by [`key`]; and their memory limits, worked out as they
+/// are run ([`crate::memory`]).
 #[derive(Default)]
-pub(crate) struct Memo(HashMap<Key, Output>, pub Limits);
+pub(crate) struct Memo(HashMap<Key, Record>, pub Limits);
 
-impl Memo {
-    /// Bytes of the outputs kept.
-    #[cfg(test)]
-    pub fn bytes(&self) -> usize {
-        self.0
-            .values()
-            .map(|o| match o {
-                Output::Bytes(b) | Output::Packed(b, _) => b.len(),
-                Output::File(..) => 0,
-            })
-            .sum()
+impl Records for Memo {
+    fn outputs(&self, key: u128) -> Option<Vec<Ch>> {
+        self.0.get(&key).map(|r| r.outputs.clone())
     }
 }
 
-/// Runs the modules, keeping the output of every application by its key: as it is known for
-/// the applications in `known` (by address: a range of a file, or bytes of the store), else
-/// the bytes themselves once the evaluation is done with them ([`Modules::keep`]), rather than
-/// a copy as they are made.
+/// Runs the modules, recording every application ([`Record`]): of the applications in `known`
+/// (by address), the range of a file it is.
 struct Recording<'f> {
     native: Native,
-    known: Vec<(usize, Output)>,
-    seen: Mutex<Vec<(Key, Output)>>,
-    /// The keys of the applications whose outputs are to be kept, by address.
-    keys: Mutex<HashMap<usize, Key>>,
+    known: Vec<(usize, (usize, Range<usize>))>,
+    seen: Mutex<Vec<(Key, Record)>>,
     limits: Mutex<Limits>,
     /// Applications run beforehand ([`Ahead`]).
     ahead: Mutex<Ahead<'f>>,
@@ -97,28 +69,24 @@ impl Modules for Recording<'_> {
             Some(out) => out,
             None => self.native.apply(a, inputs)?,
         };
-        match self.known.iter().find(|(at, _)| std::ptr::addr_eq(a, *at as *const Apply)) {
-            Some((_, o)) => self.seen.lock().unwrap().push((key(a, inputs), o.clone())),
-            None => _ = self.keys.lock().unwrap().insert(a as *const Apply as usize, key(a, inputs)),
-        }
+        let file = self.known.iter().find(|(at, _)| std::ptr::addr_eq(a, *at as *const Apply)).map(|(_, f)| f.clone());
+        let r = Record { outputs: vec![Ch::of(&out)], file };
+        self.seen.lock().unwrap().push((key(a, inputs, &[a.len]), r));
         self.limit(a, &[a.len], inputs);
         Ok(out)
     }
 
-    fn keep(&self, a: &Apply, out: Vec<u8>) {
-        if let Some(k) = self.keys.lock().unwrap().remove(&(a as *const Apply as usize)) {
-            // (compressed, and moved to the store where one is set, see [`crate::Options::spill`])
-            let packed = zstd::bulk::compress(&out, PACKED_LEVEL).expect("compressed");
-            let mut b: aqr_formula::Bytes = packed.into();
-            aqr_formula::store::spill(&mut b);
-            self.seen.lock().unwrap().push((k, Output::Packed(b, out.len())));
-        }
-    }
-
-    // (not kept)
     fn apply_shared(&self, s: &Shared, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
         self.limit(&s.apply, &s.sizes, inputs);
-        self.native.apply_shared(s, inputs)
+        let outs = self.native.apply_shared(s, inputs)?;
+        // (one output split into pieces, as the archive has it: or several outputs)
+        let sizes = match s.split {
+            true => vec![s.sizes.iter().sum()],
+            false => s.sizes.clone(),
+        };
+        let r = Record { outputs: outs.iter().map(|o| Ch::of(o)).collect(), file: None };
+        self.seen.lock().unwrap().push((key(&s.apply, inputs, &sizes), r));
+        Ok(outs)
     }
 }
 
@@ -131,10 +99,8 @@ impl Recording<'_> {
     }
 }
 
-/// Runs the modules where the output of an application is not in the memo; `hits` counts those
-/// that are. An output is taken out of the memo when it is used: decoding an archive evaluates
-/// an application once. `files` gives a range of a file (by index) that the formulas evaluated
-/// beforehand are of, where it can (else the module is run).
+/// Runs the modules but where an application is recorded as a range of a file, which `files`
+/// gives (by index) where it can (else the module is run); `hits` counts those.
 ///
 /// The output of a module run that is a whole file of [`Cached::whole`] (by its length and
 /// XXH3-128) is that file's bytes: the same application again (10gb: `enwik9` coded once, for
@@ -166,37 +132,30 @@ impl<'a> Cached<'a> {
 
 impl Modules for Cached<'_> {
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
-        let k = key(a, inputs);
-        let hit = self.memo.lock().unwrap().0.remove(&k);
-        if hit.is_some() {
-            *self.hits.lock().unwrap() += 1;
-        }
+        let k = key(a, inputs, &[a.len]);
         let file = |i: usize, range: Range<usize>| match (self.files)(i, range) {
             Some(d) => Ok(d),
             None => self.native.apply(a, inputs),
         };
-        match hit {
-            Some(Output::Bytes(out)) => Ok(out.into_vec()),
-            Some(Output::Packed(c, n)) => Ok(zstd::bulk::decompress(&c, n).expect("an output kept")),
-            Some(Output::File(i, range)) => file(i, range),
-            None => {
-                let ran = self.ran.lock().unwrap().get(&k).copied();
-                if let Some(i) = ran {
-                    return file(i, 0..a.len as usize);
-                }
-                let out = self.native.apply(a, inputs)?;
-                if let Some(of_len) = self.whole.get(&out.len()) {
-                    let h = hash(&out);
-                    if let Some(&(i, _)) = of_len.iter().find(|f| f.1 == h) {
-                        self.ran.lock().unwrap().insert(k, i);
-                    }
-                }
-                Ok(out)
+        if let Some((i, range)) = self.memo.lock().unwrap().0.get(&k).and_then(|r| r.file.clone()) {
+            *self.hits.lock().unwrap() += 1;
+            return file(i, range);
+        }
+        let ran = self.ran.lock().unwrap().get(&k).copied();
+        if let Some(i) = ran {
+            return file(i, 0..a.len as usize);
+        }
+        let out = self.native.apply(a, inputs)?;
+        if let Some(of_len) = self.whole.get(&out.len()) {
+            let h = hash(&out);
+            if let Some(&(i, _)) = of_len.iter().find(|f| f.1 == h) {
+                self.ran.lock().unwrap().insert(k, i);
             }
         }
+        Ok(out)
     }
 
-    // (not in the memo)
+    // (not recorded as files)
     fn apply_shared(&self, s: &Shared, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
         self.native.apply_shared(s, inputs)
     }
@@ -216,12 +175,11 @@ pub(crate) struct Prevalidator {
 }
 
 /// A formula, the hash of its data, and where the data is: in a file (the file's index, and the
-/// offset), or in the store (a stream spilled, its bytes shared), if it is.
+/// offset), if it is.
 type Job = (Arc<Formula>, Key, Where);
 
 enum Where {
     File(usize, usize),
-    Store(aqr_formula::Bytes),
     Elsewhere,
 }
 
@@ -245,17 +203,17 @@ impl Prevalidator {
         Prevalidator { memo: Arc::default(), running: Mutex::default(), threads, files }
     }
 
-    /// Has formula `f` of data `d` evaluated: where it gives `d`, its applications' outputs go
-    /// to the memo (sharing `d` where it is of the store and `share`, else copied).
-    pub fn submit(&self, f: Arc<Formula>, d: &[u8], share: bool) {
-        if let Some(j) = self.job(f, d, share) {
+    /// Has formula `f` of data `d` evaluated: where it gives `d`, its applications are recorded
+    /// in the memo.
+    pub fn submit(&self, f: Arc<Formula>, d: &[u8]) {
+        if let Some(j) = self.job(f, d) {
             self.send(j);
         }
     }
 
     /// What [`Prevalidator::submit`] would have evaluated, to [`Prevalidator::send`] later (or
     /// not): `None` for a formula without applications.
-    pub fn job(&self, f: Arc<Formula>, d: &[u8], share: bool) -> Option<Deferred> {
+    pub fn job(&self, f: Arc<Formula>, d: &[u8]) -> Option<Deferred> {
         let at = d.as_ptr() as usize;
         let within = self.files[..self.files.partition_point(|f| f.0.start <= at)]
             .last()
@@ -264,8 +222,7 @@ impl Prevalidator {
         if f.applies().is_empty() {
             return None;
         }
-        let shared = || share.then(|| aqr_formula::store::find(d)).flatten();
-        let within = within.or_else(|| shared().map(Where::Store)).unwrap_or(Where::Elsewhere);
+        let within = within.unwrap_or(Where::Elsewhere);
         Some(Deferred((f, hash(d), within)))
     }
 
@@ -300,21 +257,19 @@ impl Prevalidator {
     }
 }
 
-/// Evaluates job `j` on `threads` threads, keeping its applications' outputs in `memo` where it
-/// gives what it stands for. The data is not kept again where it is in a file or the store:
-/// the outputs of the applications at the top of its formula are where they make it.
+/// Evaluates job `j` on `threads` threads, recording its applications in `memo` where it gives
+/// what it stands for: those at the top of its formula as the ranges of a file they are, where
+/// its data is in one.
 fn evaluate((f, d, at): Job, threads: usize, memo: &mut Memo) {
     let native = Native { threads };
     let top = top(&f.root).into_iter();
     let r = Recording {
         native,
         known: match at {
-            Where::File(i, at) => top.map(|(a, r)| (a, Output::File(i, at + r.start..at + r.end))).collect(),
-            Where::Store(b) => top.map(|(a, r)| (a, Output::Bytes(b.slice(r)))).collect(),
+            Where::File(i, at) => top.map(|(a, r)| (a, (i, at + r.start..at + r.end))).collect(),
             Where::Elsewhere => Vec::new(),
         },
         seen: Mutex::default(),
-        keys: Mutex::default(),
         limits: Mutex::default(),
         ahead: Mutex::new(Ahead::of(&f, threads)),
     };
@@ -329,16 +284,7 @@ fn evaluate((f, d, at): Job, threads: usize, memo: &mut Memo) {
             .is_ok()
                 && h.digest128() == d
         }
-        _ => match f.eval(&r) {
-            Ok(out) if hash(&out) == d => {
-                // (the output of the formula, where it is an application's)
-                if let Node::Apply(a) = &f.root {
-                    r.keep(a, out);
-                }
-                true
-            }
-            _ => false,
-        },
+        _ => matches!(f.eval(&r), Ok(out) if hash(&out) == d),
     };
     let Recording { seen, limits, ahead, .. } = r;
     drop(ahead);

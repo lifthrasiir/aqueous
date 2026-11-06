@@ -56,6 +56,31 @@ impl Ch {
     }
 }
 
+/// What an application is, as the verification knows it: its module (`name@version`), its
+/// parameters, and the hashes of its resources and inputs, and its outputs' sizes, hashed.
+pub fn record_key(module: &str, params: &[u8], resources: &[Ch], inputs: &[Ch], sizes: &[u64]) -> u128 {
+    let mut h = xxhash_rust::xxh3::Xxh3::new();
+    let mut part = |b: &[u8]| {
+        h.update(&(b.len() as u64).to_le_bytes());
+        h.update(b);
+    };
+    part(module.as_bytes());
+    part(params);
+    part(&resources.iter().flat_map(|r| r.to_bytes()).collect::<Vec<u8>>());
+    part(&inputs.iter().flat_map(|i| i.to_bytes()).collect::<Vec<u8>>());
+    part(&sizes.iter().flat_map(|n| n.to_le_bytes()).collect::<Vec<u8>>());
+    h.digest128()
+}
+
+/// An output's content hash, and the checksums a formula block takes of it.
+pub type Hashed = (Ch, Vec<u64>);
+
+/// The applications evaluated beforehand, by [`record_key`]: the hashes of the pieces of their
+/// outputs (each output, or of an output split, each piece), as they were.
+pub trait Records: Sync {
+    fn outputs(&self, key: u128) -> Option<Vec<Ch>>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

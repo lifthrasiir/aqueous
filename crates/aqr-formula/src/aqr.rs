@@ -2773,6 +2773,17 @@ impl<'n> Archive<'_, 'n> {
         self.each_leaf_into(threads, None, None, f)
     }
 
+    /// [`Archive::each_leaf`] of the leaves (by index) marked in `only`: the others not evaluated,
+    /// nor their formula blocks read, nor the non-leaf blocks only they slice decoded.
+    pub fn each_leaf_only(
+        &self,
+        threads: usize,
+        only: &[bool],
+        f: impl Fn(usize, Decoded<Vec<Vec<u8>>>) -> Decoded<()> + Sync,
+    ) -> Decoded<()> {
+        self.each_leaf_into(threads, Some(only), None, f)
+    }
+
     /// The file of an archive of a single file, written to `sink` as it is evaluated: of a
     /// single leaf, a formula's output is not held whole, but written as its pieces are pulled
     /// ([`eval::run`]). Returns its length.
@@ -2796,6 +2807,88 @@ impl<'n> Archive<'_, 'n> {
             outputs?.iter().try_for_each(|d| sink(d))
         })?;
         Ok(n)
+    }
+
+    /// The content hashes of the outputs of an archive without a metadata block, in order (of
+    /// the leaves, and of each leaf's outputs), each with the checksums its formula block takes
+    /// of it: [`Archive::hashed_leaves`], None where any leaf's is not told.
+    pub fn hashed(
+        &self,
+        records: &dyn crate::chash::Records,
+        identify: &dyn Fn(&[u8]) -> Option<String>,
+        threads: usize,
+    ) -> Decoded<Option<Vec<crate::chash::Hashed>>> {
+        if self.tree.is_some() {
+            return invalid("an archive of a tree");
+        }
+        let leaves = self.hashed_leaves(records, identify, threads)?;
+        Ok(leaves.into_iter().collect::<Option<Vec<_>>>().map(|l| l.concat()))
+    }
+
+    /// The content hashes of each leaf's outputs, each with the checksums its formula block takes
+    /// of it, worked out without running a module where `records` tell the applications' outputs
+    /// by the hashes of their inputs (of their modules as `identify` tells them by their Wasm
+    /// modules), the blocks decoded on up to `threads` threads: see [`eval`]'s `hashed`. None
+    /// for a leaf whose are not told so.
+    pub fn hashed_leaves(
+        &self,
+        records: &dyn crate::chash::Records,
+        identify: &dyn Fn(&[u8]) -> Option<String>,
+        threads: usize,
+    ) -> Decoded<Vec<Option<Vec<crate::chash::Hashed>>>> {
+        use crate::chash::Ch;
+        let blocks = &self.blocks;
+        let mut used = vec![false; blocks.non_leaf.len()];
+        let env = |leaf: &LeafBlock| blocks.env(leaf, &self.loaded, self.runner);
+        let formulas: Vec<Option<Vec<u8>>> = (blocks.leaves.iter())
+            .map(|leaf| match *leaf {
+                LeafBlock::Formula { data, .. } => {
+                    let (d, dict) = blocks.formulas[data];
+                    decoded_with(d, true, true, dict.map(|d| &blocks.dictionaries[d])).map(Some)
+                }
+                _ => Ok(None),
+            })
+            .collect::<Decoded<_>>()?;
+        let programs: Vec<Option<Program>> = (blocks.leaves.iter().zip(&formulas))
+            .map(|(leaf, d)| match (leaf, d) {
+                (&LeafBlock::Formula { outputs, .. }, Some(d)) => {
+                    let (env, end) = env(leaf);
+                    read(d, outputs, &env, end, &mut used).map(Some)
+                }
+                _ => Ok(None),
+            })
+            .collect::<Decoded<_>>()?;
+        let mut refs = vec![0; blocks.non_leaf.len()];
+        for p in programs.iter().flatten() {
+            for insn in &p.insns {
+                if let &Insn::Slice { block, .. } = insn {
+                    refs[p.blocks[block]] += 1;
+                }
+            }
+        }
+        let tally = Tally { tell: None, decompressed: AtomicU64::new(0), evaluated: AtomicU64::new(0), totals: (0, 0) };
+        let contents = Contents {
+            refs: refs.into_iter().map(AtomicUsize::new).collect(),
+            data: blocks.non_leaf.iter().map(|&(d, zstd, dict)| Waited::new(Slot::Raw(d, zstd, dict))).collect(),
+            dictionaries: &blocks.dictionaries,
+            tally: &tally,
+            let_go: self.let_go,
+        };
+        let mut out = Vec::new();
+        for (leaf, p) in blocks.leaves.iter().zip(&programs) {
+            out.push(match (leaf, p) {
+                (&LeafBlock::Stored(raw, zstd, checked, dict), _) => {
+                    let d = decoded_with(raw, zstd, checked, dict.map(|d| &blocks.dictionaries[d]))?;
+                    contents.read(raw);
+                    Some(vec![(Ch::of(&d), Vec::new())])
+                }
+                (LeafBlock::Formula { .. }, Some(p)) => {
+                    eval::hashed(p, &env(leaf).0, &contents, records, identify, threads)?
+                }
+                _ => return invalid("a file whose block is lost"),
+            });
+        }
+        Ok(out)
     }
 
     /// How far the archive conforms to the archival profile (spec, "Archival profile"), as its

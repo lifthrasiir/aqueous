@@ -1597,8 +1597,9 @@ struct File {
     /// Whether it is found as an entry or member of another ([`together`]).
     entry: bool,
     len: usize,
-    /// Its XXH3-128 ([`check`]) and its checksum ([`aqr::checksum`]).
+    /// Its XXH3-128 ([`check`]), its content hash and its checksum ([`aqr::checksum`]).
     hash: u128,
+    ch: aqr_formula::chash::Ch,
     sum: u64,
     /// The format it starts like ([`detect`]).
     format: Option<&'static str>,
@@ -1606,7 +1607,8 @@ struct File {
 
 impl File {
     fn of(c: usize, d: &[u8], hash: u128, kind: Kind, entry: bool) -> File {
-        File { c, kind, entry, len: d.len(), hash, sum: aqr::checksum(d), format: detect(d).map(|f| f.name()) }
+        let ch = aqr_formula::chash::Ch::of(d);
+        File { c, kind, entry, len: d.len(), hash, ch, sum: aqr::checksum(d), format: detect(d).map(|f| f.name()) }
     }
 
     /// Whether `d` is the file's data.
@@ -1899,6 +1901,29 @@ fn check_in(
     let bad = Mutex::new(Vec::new());
     let all = || (0..files.len()).collect();
     let Ok(mut a) = aqr::open(c, &natives) else { return all() };
+    // by the hashes recorded, without running a module, where they tell a leaf's outputs; the
+    // other leaves decoded
+    let hashes = a.hashed_leaves(&*m.memo.lock().unwrap(), &aqr_decompress::identify, threads);
+    let Ok(hashes) = hashes else { return all() };
+    let mut only = vec![false; hashes.len()];
+    for (i, h) in hashes.iter().enumerate() {
+        let l = by_block[i];
+        match h {
+            Some(roots) => {
+                notes.send(Note::Verified(batch, of_leaf[l].iter().map(|&(_, k)| files[k].len as u64).sum()));
+                let same = |o: usize, f: &File| {
+                    roots.get(o).is_some_and(|(h, sums)| *h == f.ch && sums.iter().all(|&s| s == f.sum))
+                };
+                bad.lock().unwrap().extend(of_leaf[l].iter().filter(|&&(o, k)| !same(o, &files[k])).map(|&(_, k)| k));
+            }
+            None => only[i] = true,
+        }
+    }
+    if !only.contains(&true) {
+        let mut bad = bad.into_inner().unwrap();
+        bad.sort_unstable();
+        return bad;
+    }
     // within the process's budget, as `aqr` decodes an archive: a large leaf waits for others to
     // be done rather than run along with them (10gb: `enwik9` and `enwik9.zip`, 1.5 GB each), and
     // then takes the output of a module that is a whole file from the file where the leaf before
@@ -1906,7 +1931,7 @@ fn check_in(
     a.set_budget(aqr_common::budget::global());
     // (each leaf told of as of its first file)
     a.set_items(by_block.iter().map(|&l| of_leaf[l].first().map(|&(_, k)| files[k].c)).collect());
-    let r = a.each_leaf(threads, |i, outputs| {
+    let r = a.each_leaf_only(threads, &only, |i, outputs| {
         let l = by_block[i];
         notes.send(Note::Verified(batch, of_leaf[l].iter().map(|&(_, k)| files[k].len as u64).sum()));
         let mut bad = bad.lock().unwrap();
