@@ -2303,8 +2303,97 @@ pub fn reconstruct_into(
     threads: usize,
     sink: &mut dyn FnMut(&[u8]),
 ) -> Result<()> {
-    rebuild(data, meta, model, threads, Ok(sink)).map(drop)
+    rebuild(
+        Source::Whole(data),
+        data.len(),
+        meta,
+        model,
+        threads,
+        Ok(sink),
+    )
+    .map(drop)
 }
+
+/// [`reconstruct_into`] of the `n` bytes of data that `pull` reads a piece at a time, in order:
+/// what it holds of the data at once is what a batch of segments reads (from a little before
+/// the first to a little after the last), the batches decoded one after another rather than
+/// the next one while the blocks of one are written.
+pub fn reconstruct_pulled(
+    n: usize,
+    pull: &mut Pull,
+    meta: &[u8],
+    model: ModelData,
+    threads: usize,
+    sink: &mut dyn FnMut(&[u8]),
+) -> Result<()> {
+    rebuild(
+        Source::Pulled(&mut *pull),
+        n,
+        meta,
+        model,
+        threads,
+        Ok(sink),
+    )?;
+    // (all of the data read, the bytes after the last stored block too)
+    pull.cover(n, n)
+}
+
+/// The data of a stream that [`reconstruct_pulled`] reads a piece at a time: what is held of
+/// it (from position `at` on), and what appends the next bytes of it.
+pub struct Pull<'r> {
+    buf: Vec<u8>,
+    at: usize,
+    read: &'r mut dyn FnMut(&mut Vec<u8>, usize) -> Result<()>,
+}
+
+impl<'r> Pull<'r> {
+    /// The data that `read` gives in order: called with a vector and a count `k`, it appends the
+    /// next `k` bytes of the data to it.
+    pub fn new(read: &'r mut dyn FnMut(&mut Vec<u8>, usize) -> Result<()>) -> Pull<'r> {
+        Pull {
+            buf: Vec::new(),
+            at: 0,
+            read,
+        }
+    }
+
+    /// The data held from `lo` (what is before it let go of, where held) to `hi` at least.
+    fn cover(&mut self, lo: usize, hi: usize) -> Result<()> {
+        let end = self.at + self.buf.len();
+        if lo > self.at {
+            let gone = (lo - self.at).min(self.buf.len());
+            self.buf.drain(..gone);
+            self.at += gone;
+            // (data before `lo` not read yet: read and let go of)
+            while self.at < lo {
+                let k = (lo - self.at).min(1 << 20);
+                (self.read)(&mut self.buf, k)?;
+                self.buf.clear();
+                self.at += k;
+            }
+        }
+        let end = end.max(self.at);
+        if hi > end {
+            (self.read)(&mut self.buf, hi - end)?;
+        }
+        Ok(())
+    }
+}
+
+/// Where [`rebuild`] reads the data: all of it at once, or a part at a time.
+enum Source<'a, 'r> {
+    Whole(&'a [u8]),
+    Pulled(&'a mut Pull<'r>),
+}
+
+/// Bytes of data that a segment's decoding reads before its start and after its end at most (the
+/// table's or chain's window, the zlib emulator's two windows, matches and the emulator's
+/// lookahead), with room to spare; and the multiple of which the data a batch reads starts at
+/// ([`reconstruct_pulled`]), so that tables and windows addressed by position modulo a power of
+/// two (up to it) see the data at the same places.
+const BACK: usize = 256 << 10;
+const AHEAD: usize = 256 << 10;
+const ALIGN: usize = 1 << 20;
 
 /// [`reconstruct_with`], written into a vector reserved for `cap` bytes as the first are
 /// written (on WebAssembly, after the first segments' tasks are spawned, which copy the memory
@@ -2316,7 +2405,14 @@ pub fn reconstruct_sized(
     threads: usize,
     cap: usize,
 ) -> Result<Vec<u8>> {
-    rebuild(data, meta, model, threads, Err(cap))
+    rebuild(
+        Source::Whole(data),
+        data.len(),
+        meta,
+        model,
+        threads,
+        Err(cap),
+    )
 }
 
 /// Where [`reconstruct_into`] gives the stream it rebuilds, a piece at a time.
@@ -2324,14 +2420,14 @@ type Pieces<'a> = &'a mut dyn FnMut(&[u8]);
 
 /// [`reconstruct_into`] given `Ok(sink)`, else [`reconstruct_sized`] given `Err(cap)`.
 fn rebuild(
-    data: &[u8],
+    mut src: Source,
+    n: usize,
     meta: &[u8],
     model: ModelData,
     threads: usize,
     mut to: core::result::Result<Pieces, usize>,
 ) -> Result<Vec<u8>> {
     let threads = threads.max(1);
-    let n = data.len();
     let profile = record_profile(meta)?;
     if !profiles().contains(&profile) {
         return Err(Error::Param(format!("unknown profile {profile}")));
@@ -2447,15 +2543,20 @@ fn rebuild(
         return Err(Error::Corrupt);
     }
 
-    let decode = |i: usize| -> Result<(Vec<Token>, usize)> {
+    // segment `i` decoded of `data`, the data from position `off` on (its positions so many less)
+    let decode = |i: usize, data: &[u8], off: usize| -> Result<(Vec<Token>, usize)> {
         let (first, count, misses, pos, body, cp) = segs[i];
         let end = segs.get(i + 1).map_or(n, |s| s.3);
         let range = Range {
             first,
             count,
-            pos,
-            end,
+            pos: pos.checked_sub(off).ok_or(Error::Corrupt)?,
+            end: end - off,
             skips: &skips,
+        };
+        let cp = match cp {
+            Some(cp) => Some(cp.shifted(off).ok_or(Error::Corrupt)?),
+            None => None,
         };
         let mut out = Vec::with_capacity(count);
         let p = match (&models, priors) {
@@ -2484,13 +2585,13 @@ fn rebuild(
             }
             _ => unreachable!(),
         };
-        Ok((out, p))
+        Ok((out, p + off))
     };
 
     let hr = &mut BitReader::new(hdrs);
     let mut recipe = header::Recipe::default();
     let mut w = write::Writer::new(match to {
-        Ok(_) => (data.len() / 2).min(1 << 20) + 64,
+        Ok(_) => (n / 2).min(1 << 20) + 64,
         Err(_) => 0,
     });
     // (the room to reserve before writing, if not yet)
@@ -2512,28 +2613,54 @@ fn rebuild(
         .unwrap_or(0);
     let round = total.min(2 * counts.iter().copied().max().unwrap_or(0) + most);
     // (as tasks on WebAssembly)
-    let decode_batch = |s0: usize| {
+    let decode_batch = |s0: usize, data: &[u8], off: usize| {
         let s1 = (s0 + batch).min(segs.len());
         (
             s0,
-            aqr_common::pool::par_map_apart(s1 - s0, threads, |j| decode(s0 + j)),
+            aqr_common::pool::par_map_apart(s1 - s0, threads, |j| decode(s0 + j, data, off)),
         )
     };
+    // the data the batch from segment `s0` reads: from before its first segment to after its
+    // last one (see BACK)
+    let reads = |s0: usize| {
+        let s1 = (s0 + batch).min(segs.len());
+        let lo = segs[s0].3.saturating_sub(BACK) / ALIGN * ALIGN;
+        (
+            lo,
+            segs.get(s1).map_or(n, |s| s.3).saturating_add(AHEAD).min(n),
+        )
+    };
+    let whole = match &src {
+        Source::Whole(d) => Some(*d),
+        Source::Pulled(_) => None,
+    };
     // the next batch is decoded while the blocks of this one are written (before them, on a
-    // single thread)
+    // single thread), with the data whole; else after them, the data of one batch held
     enum Batch<'s, T> {
         Done(T),
         Running(aqr_common::pool::Handle<'s, T>),
     }
     aqr_common::pool::scope((threads > 1) as usize, |scope| -> Result<()> {
-        let start = |s0: usize| {
-            if scope.workers() > 0 {
-                Batch::Running(scope.spawn(move || decode_batch(s0)))
-            } else {
-                Batch::Done(decode_batch(s0))
-            }
+        let start = |s0: usize, src: &mut Source| -> Result<_> {
+            Ok(match (whole, src) {
+                (Some(d), _) if scope.workers() > 0 => {
+                    Batch::Running(scope.spawn(move || decode_batch(s0, d, 0)))
+                }
+                (Some(d), _) => Batch::Done(decode_batch(s0, d, 0)),
+                (None, Source::Pulled(p)) => {
+                    let (lo, hi) = reads(s0);
+                    p.cover(lo, hi)?;
+                    Batch::Done(decode_batch(s0, &p.buf, p.at))
+                }
+                (None, Source::Whole(_)) => unreachable!("whole"),
+            })
         };
-        let mut next = (!segs.is_empty()).then(|| start(0));
+        let mut next = match segs.is_empty() {
+            true => None,
+            false => Some(start(0, &mut src)?),
+        };
+        // (the batch to decode once this one is written, with the data pulled)
+        let mut after = None;
         loop {
             let more = next.is_some();
             if let Some(h) = next.take() {
@@ -2543,7 +2670,10 @@ fn rebuild(
                 };
                 let s1 = s0 + results.len();
                 if s1 < segs.len() {
-                    next = Some(start(s1));
+                    match whole {
+                        Some(_) => next = Some(start(s1, &mut src)?),
+                        None => after = Some(s1),
+                    }
                 }
                 for (i, r) in (s0..s1).zip(results) {
                     let (t, p) = r?;
@@ -2563,7 +2693,16 @@ fn rebuild(
             // on the threads
             while bi < nb && (k + counts[bi] <= decoded || !more) {
                 let mut ready = vec![];
-                while ready.len() < 1 << 12 && bi < nb && (k + counts[bi] <= decoded || !more) {
+                // (with the data pulled, stored blocks of a few MiB at a time: their data held)
+                let mut stored = 0;
+                while ready.len() < 1 << 12
+                    && bi < nb
+                    && (k + counts[bi] <= decoded || !more)
+                    && (whole.is_some() || stored < 4 << 20)
+                {
+                    if let Some(Shape::Stored { len, .. }) = shapes.as_slice().first() {
+                        stored += *len as usize;
+                    }
                     let c = counts[bi];
                     pending.get(k - base..k - base + c).ok_or(Error::Corrupt)?;
                     ready.push((shapes.next().unwrap(), k - base..k - base + c));
@@ -2596,7 +2735,24 @@ fn rebuild(
                 if let Some(c) = cap.take() {
                     w.reserve(c);
                 }
-                w.blocks(&blocks, &pending, data, threads)
+                let (data, at) = match &mut src {
+                    Source::Whole(d) => (*d, 0),
+                    Source::Pulled(p) => {
+                        // the data of the blocks (stored ones read it), what is before them let
+                        // go of but where the next batch reads it
+                        let span: usize = blocks
+                            .iter()
+                            .map(|(b, r)| match b.body {
+                                Body::Stored { len, .. } => len as usize,
+                                _ => pending[r.clone()].iter().map(|t| t.span()).sum(),
+                            })
+                            .sum();
+                        let lo = after.map_or(w.pos(), |s1| reads(s1).0.min(w.pos()));
+                        p.cover(lo, (w.pos() + span).min(n))?;
+                        (&p.buf[..], p.at)
+                    }
+                };
+                w.blocks(&blocks, &pending, data, at, threads)
                     .map_err(|_| Error::Corrupt)?;
             }
             if let Ok(sink) = &mut to {
@@ -2605,6 +2761,9 @@ fn rebuild(
             if k - base > pending.len() / 2 {
                 pending.drain(..k - base);
                 base = k;
+            }
+            if let Some(s1) = after.take() {
+                next = Some(start(s1, &mut src)?);
             }
             if !more {
                 return Ok(());

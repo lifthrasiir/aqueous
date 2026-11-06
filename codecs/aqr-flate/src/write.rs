@@ -212,23 +212,34 @@ impl Writer {
     }
 
     /// Writes `blocks`, each with its tokens `toks[r]`, as [`Writer::block`] would one after
-    /// another: the runs of blocks between stored ones, whose bits do not depend on where they
-    /// start, are written apart on up to `threads` threads, a few thousand tokens at a time,
-    /// then appended.
+    /// another, `data` being the data from position `at` on (where stored blocks are read): the
+    /// runs of blocks between stored ones, whose bits do not depend on where they start, are
+    /// written apart on up to `threads` threads, a few thousand tokens at a time, then appended.
     pub fn blocks(
         &mut self,
         blocks: &[(Block, Range<usize>)],
         toks: &[Token],
         data: &[u8],
+        at: usize,
         threads: usize,
     ) -> Result<()> {
         let tokens = |r: &Range<usize>| {
             toks.get(r.clone())
                 .ok_or(Error::Invalid("tokens past the end"))
         };
+        // the data from `pos` on, where block `b` is stored (a coded block reads none, and the
+        // data before `at` is not at hand)
+        let rest = |b: &Block, pos: usize| match b.body {
+            Body::Stored { .. } => pos
+                .checked_sub(at)
+                .and_then(|p| data.get(p..))
+                .ok_or(Error::Invalid("stored block's data not at hand")),
+            _ => Ok(&[][..]),
+        };
         if threads <= 1 {
             for (b, r) in blocks {
-                self.block(b, tokens(r)?, data)?;
+                let pos = self.pos;
+                self.block_of(b, tokens(r)?, rest(b, pos)?)?;
             }
             return Ok(());
         }
@@ -249,9 +260,10 @@ impl Writer {
             if stored(&run[0].0) {
                 return Ok(None);
             }
+            // (coded blocks only: no data read)
             let mut w = Writer::new(64);
             for (b, r) in run {
-                w.block(b, tokens(r)?, data)?;
+                w.block_of(b, tokens(r)?, &[])?;
             }
             Ok(Some(w))
         });
@@ -260,7 +272,8 @@ impl Writer {
                 Some(w) => self.append(w),
                 None => {
                     let (b, r) = &blocks[run.start];
-                    self.block(b, tokens(r)?, data)?;
+                    let pos = self.pos;
+                    self.block_of(b, tokens(r)?, rest(b, pos)?)?;
                 }
             }
         }
@@ -453,7 +466,7 @@ mod tests {
                 .count();
             for threads in [1, 2, 3, 8] {
                 let mut w = Writer::new(64);
-                w.blocks(&blocks, &f.tokens, &f.data, threads).unwrap();
+                w.blocks(&blocks, &f.tokens, &f.data, 0, threads).unwrap();
                 assert!(
                     w.finish(f.stream.tail_pad, &f.stream.trailing).unwrap() == raw,
                     "{spec}, {threads} threads"

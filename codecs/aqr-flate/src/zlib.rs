@@ -113,6 +113,24 @@ pub struct Checkpoint {
     pub source: usize,
 }
 
+impl Checkpoint {
+    /// The checkpoint of the data from position `off` on (its positions so many less), where
+    /// it is within it: `off` a multiple of the window's size, the window's origin keeps to one.
+    pub fn shifted(&self, off: usize) -> Option<Checkpoint> {
+        Some(Checkpoint {
+            cursor: self.cursor.checked_sub(off)?,
+            origin: self.origin.checked_sub(off)?,
+            fed: self.fed.checked_sub(off)?,
+            // (0 where there is no match: then it is not a position)
+            source: match self.length {
+                ..=2 => self.source,
+                _ => self.source.checked_sub(off)?,
+            },
+            ..*self
+        })
+    }
+}
+
 /// The parsers of FORMAT.md.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
