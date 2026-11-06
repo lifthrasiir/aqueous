@@ -92,7 +92,9 @@ impl DerefMut for Buffer {
 }
 
 /// Bytes of a stream made in order: written to the store as they come where one is set (and
-/// they are not told to be few), else gathered on the heap.
+/// they are not told to be few), else gathered on the heap. A stream of a formula is pushed of
+/// it as it is (`Formula::push(class, writer)`), so that a recompressor making a long stream
+/// holds none of it.
 pub struct Writer(WriterRepr);
 
 enum WriterRepr {
@@ -135,6 +137,23 @@ impl Writer {
             WriterRepr::Heap(v) => v.into(),
             WriterRepr::Stored(w) => w.finish(),
         }
+    }
+}
+
+impl From<Writer> for Bytes {
+    fn from(w: Writer) -> Bytes {
+        w.into_bytes()
+    }
+}
+
+impl std::io::Write for Writer {
+    fn write(&mut self, d: &[u8]) -> std::io::Result<usize> {
+        Writer::write(self, d);
+        Ok(d.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -222,4 +241,62 @@ pub fn find(d: &[u8]) -> Option<Bytes> {
 /// [`spill`] of every stream of `f`.
 pub fn spill_streams(f: &mut crate::Formula) {
     f.streams.iter_mut().for_each(|s| spill(&mut s.data));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A store of regions on the heap, of `cap` bytes at most each.
+    struct Small {
+        cap: usize,
+    }
+
+    struct SmallWriter(Vec<u8>, usize);
+
+    impl StoreWriter for SmallWriter {
+        fn write(&mut self, d: &[u8]) -> bool {
+            if self.0.len() + d.len() > self.1 {
+                return false;
+            }
+            self.0.extend_from_slice(d);
+            true
+        }
+
+        fn finish(self: Box<Self>) -> Bytes {
+            Bytes::shared(Arc::new(self.0))
+        }
+    }
+
+    impl Store for Small {
+        fn writer(&self, len: Option<usize>) -> Option<Box<dyn StoreWriter>> {
+            Some(Box::new(SmallWriter(Vec::new(), len.unwrap_or(self.cap).min(self.cap))))
+        }
+    }
+
+    /// A writer writes to the store as it goes, and the rest to the heap where its region has no
+    /// room; a formula's stream is pushed of it as it is.
+    #[test]
+    fn written_in_order() {
+        let _g = set(Some(Arc::new(Small { cap: 10_000 })));
+        let piece: Vec<u8> = (0..3000u32).map(|i| i as u8).collect();
+        let mut w = Writer::new(None);
+        for _ in 0..3 {
+            w.write(&piece);
+        }
+        let b = w.into_bytes();
+        assert!(b.is_shared() && b.len() == 9000);
+        // (past the store's room: the rest on the heap, after what it has)
+        let mut w = Writer::new(None);
+        for _ in 0..5 {
+            std::io::Write::write_all(&mut w, &piece).unwrap();
+        }
+        let mut f = crate::Formula::default();
+        f.root = f.push("a", w);
+        assert!(f.streams[0].data == piece.repeat(5) && !f.streams[0].data.is_shared());
+        // (few bytes told: the heap's)
+        let mut w = Writer::new(Some(100));
+        w.write(&piece[..100]);
+        assert!(!w.into_bytes().is_shared());
+    }
 }
