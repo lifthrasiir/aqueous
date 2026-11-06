@@ -79,8 +79,8 @@ fn within(at: usize, len: usize) -> (usize, usize) {
 ///
 /// # Safety
 ///
-/// `base` is the start of a mapping (shared, writable) of all of `file`, `at..at + len` within
-/// it, and nothing reads or writes those bytes until they are written again.
+/// `base` is the start of a mapping (shared) of all of `file`, `at..at + len` within it, and
+/// nothing reads or writes those bytes until they are written again.
 pub unsafe fn discard(file: &File, base: *const u8, at: *const u8, len: usize) {
     let (start, n) = within(at as usize, len);
     if n == 0 {

@@ -1,6 +1,7 @@
 //! Where large buffers of streams are made: vectors of the heap by default; with a [`Store`]
-//! set (aqr-compress's spill, a file beside the output), regions of it, mapped, whose pages
-//! the system writes out and drops as memory runs short, rather than holding them all.
+//! set (aqr-compress's spill, files beside the output), regions of it, written as they are made
+//! and read through a mapping read only, so that the system writes their pages out and drops
+//! them as memory runs short rather than the process holding them all.
 
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,15 +14,25 @@ pub const MIN: usize = 4 << 10;
 
 /// Regions of bytes outside the heap.
 pub trait Store: Send + Sync {
-    /// A region of `n` bytes, zeroed: where to write it, and its bytes as the store holds them
-    /// (not to be read until written). None where there is no room.
-    fn region(&self, n: usize) -> Option<(*mut u8, Bytes)>;
+    /// A region to write, of `len` bytes at most where told, else of as many as are written
+    /// (within what the store takes of a region: tens of GiB). None where there is no room.
+    fn writer(&self, len: Option<usize>) -> Option<Box<dyn StoreWriter>>;
 
     /// `d` as bytes of the store, sharing them, where it is within a region of it still held
     /// (and the store would rather share the region than have it copied).
     fn find(&self, _d: &[u8]) -> Option<Bytes> {
         None
     }
+}
+
+/// A region of a store being written ([`Store::writer`]).
+pub trait StoreWriter: Send {
+    /// `d` written after what is: false where the region has no room for it (nothing written
+    /// of it).
+    fn write(&mut self, d: &[u8]) -> bool;
+
+    /// The bytes written, as the store holds them.
+    fn finish(self: Box<Self>) -> Bytes;
 }
 
 static STORE: RwLock<Option<Arc<dyn Store>>> = RwLock::new(None);
@@ -43,43 +54,26 @@ fn store() -> Option<Arc<dyn Store>> {
     STORE.read().unwrap().clone()
 }
 
-/// A buffer of a stream's bytes being made: of the store where it is large and one is set,
-/// else of the heap.
-pub struct Buffer(Repr);
-
-enum Repr {
-    Heap(Vec<u8>),
-    Stored { at: *mut u8, len: usize, bytes: Bytes },
-}
-
-// (the region is the buffer's alone until it is made bytes)
-unsafe impl Send for Buffer {}
-unsafe impl Sync for Buffer {}
+/// A buffer of a stream's bytes being made, written anywhere: of the heap, moved to the store
+/// where it is large and one is set as it is made bytes. (Bytes made in order are better made by
+/// a [`Writer`], which holds none of them.)
+pub struct Buffer(Vec<u8>);
 
 impl Buffer {
     /// A buffer of `n` bytes, zeroed.
     pub fn new(n: usize) -> Buffer {
-        if n >= MIN
-            && let Some((at, bytes)) = store().and_then(|s| s.region(n))
-        {
-            return Buffer(Repr::Stored { at, len: n, bytes });
-        }
-        Buffer(Repr::Heap(vec![0; n]))
+        Buffer(vec![0; n])
     }
 
     /// Its first `n` bytes only.
     pub fn truncate(&mut self, n: usize) {
-        match &mut self.0 {
-            Repr::Heap(v) => v.truncate(n),
-            Repr::Stored { len, .. } => *len = (*len).min(n),
-        }
+        self.0.truncate(n);
     }
 
     pub fn into_bytes(self) -> Bytes {
-        match self.0 {
-            Repr::Heap(v) => v.into(),
-            Repr::Stored { len, bytes, .. } => bytes.prefix(len),
-        }
+        let mut b: Bytes = self.0.into();
+        spill(&mut b);
+        b
     }
 }
 
@@ -87,20 +81,59 @@ impl Deref for Buffer {
     type Target = [u8];
 
     fn deref(&self) -> &[u8] {
-        match &self.0 {
-            Repr::Heap(v) => v,
-            // SAFETY: the region of the store, of at least `len` bytes, is this buffer's
-            &Repr::Stored { at, len, .. } => unsafe { std::slice::from_raw_parts(at, len) },
-        }
+        &self.0
     }
 }
 
 impl DerefMut for Buffer {
     fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
+}
+
+/// Bytes of a stream made in order: written to the store as they come where one is set (and
+/// they are not told to be few), else gathered on the heap.
+pub struct Writer(WriterRepr);
+
+enum WriterRepr {
+    Heap(Vec<u8>),
+    Stored(Box<dyn StoreWriter>),
+}
+
+impl Writer {
+    /// A writer of `len` bytes at most where told.
+    pub fn new(len: Option<usize>) -> Writer {
+        let stored = match len {
+            Some(n) if n < MIN => None,
+            _ => store().and_then(|s| s.writer(len)),
+        };
+        Writer(match stored {
+            Some(w) => WriterRepr::Stored(w),
+            None => WriterRepr::Heap(Vec::with_capacity(len.unwrap_or(0))),
+        })
+    }
+
+    pub fn write(&mut self, d: &[u8]) {
         match &mut self.0 {
-            Repr::Heap(v) => v,
-            // SAFETY: as above, and no one else writes it or reads it until it is made bytes
-            &mut Repr::Stored { at, len, .. } => unsafe { std::slice::from_raw_parts_mut(at, len) },
+            WriterRepr::Heap(v) => v.extend_from_slice(d),
+            WriterRepr::Stored(w) => {
+                if !w.write(d) {
+                    // (no room in its region: the rest on the heap, after what it has)
+                    let WriterRepr::Stored(w) = std::mem::replace(&mut self.0, WriterRepr::Heap(Vec::new())) else {
+                        unreachable!("stored")
+                    };
+                    let mut v = w.finish().to_vec();
+                    v.extend_from_slice(d);
+                    self.0 = WriterRepr::Heap(v);
+                }
+            }
+        }
+    }
+
+    pub fn into_bytes(self) -> Bytes {
+        match self.0 {
+            WriterRepr::Heap(v) => v.into(),
+            WriterRepr::Stored(w) => w.finish(),
         }
     }
 }
@@ -111,10 +144,10 @@ pub fn spill(b: &mut Bytes) {
     if b.is_shared() || b.sunk_in().is_some() || b.is_lazy() || b.len() < MIN {
         return;
     }
-    let Some((at, bytes)) = store().and_then(|s| s.region(b.len())) else { return };
-    // SAFETY: the region is of `b.len()` bytes and no one else's
-    unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), at, b.len()) };
-    *b = bytes;
+    let Some(mut w) = store().and_then(|s| s.writer(Some(b.len()))) else { return };
+    if w.write(b) {
+        *b = w.finish();
+    }
 }
 
 /// Bytes shared already (files mapped, say) that [`find`] shares rather than copies, while

@@ -8,15 +8,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use aqr_compress::Options;
 use aqr_compress::spill::Spill;
 use aqr_formula::Bytes;
-use aqr_formula::store::Store;
+use aqr_formula::store::{Store, StoreWriter};
 
-/// A spill counting the bytes of the regions taken.
+/// A spill counting the bytes of the regions taken (as they are told).
 struct Counting(Spill, AtomicUsize);
 
 impl Store for Counting {
-    fn region(&self, n: usize) -> Option<(*mut u8, Bytes)> {
-        self.1.fetch_add(n, Ordering::Relaxed);
-        self.0.region(n)
+    fn writer(&self, len: Option<usize>) -> Option<Box<dyn StoreWriter>> {
+        self.1.fetch_add(len.unwrap_or(0), Ordering::Relaxed);
+        self.0.writer(len)
     }
 
     fn find(&self, d: &[u8]) -> Option<Bytes> {

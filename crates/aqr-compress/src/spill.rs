@@ -1,18 +1,20 @@
 //! The spill: files beside the output that large buffers of streams are regions of
-//! ([`aqr_formula::store`]), mapped, so that what compressing a large file holds (the data of
-//! a WIM file, the formulas of its contents) is written out and dropped by the system as
-//! memory runs short rather than all held (`docs/streaming-encoder-design.md`). A file is a
-//! segment of the regions, `PREFIX._$pill$PID.N` (the spill's prefix, the process's id, the
-//! segment's number; aqr's prefix is `.` and the output's name, beside it), closed once they
-//! are all dropped, and gone once closed: deleted on close (Windows, hidden and not indexed
-//! until then), or unlinked as it is made (Unix). The bytes of a region dropped are taken
-//! again for regions after it (the smallest free run that fits), so the spill takes about the
-//! space of the regions held, not of all made, even where they are dropped out of turn. A
-//! segment starts with [`MAGIC`], so that one left behind is not taken for a file of another
-//! kind. The pages of the bytes free are given back to the system ([`aqr_common::pages::discard`]),
-//! so that the resident set and the files hold about the regions held too (but on Windows,
-//! which cannot drop changed pages of a file without writing them: there they stay, for the
-//! regions after them).
+//! ([`aqr_formula::store`]), written as they are made (positioned writes) and read through
+//! mappings read only, so that what compressing a large file holds (the data of a WIM file, the
+//! formulas of its contents) is in the system's cache of the files, written out and dropped by
+//! the system as memory runs short, rather than all held by the process
+//! (`docs/streaming-encoder-design.md`).
+//!
+//! A file is a segment of the regions, `PREFIX._$pill$PID.N` (the spill's prefix, the process's
+//! id, the segment's number; aqr's prefix is `.` and the output's name, beside it), sparse,
+//! closed once they are all dropped, and gone once closed: deleted on close (Windows, hidden and
+//! not indexed until then), or unlinked as it is made (Unix). A region of a known length is taken
+//! of the free runs of the segments (the smallest that fits; the bytes of a region dropped are
+//! taken again by those after it, so that the spill takes about the space of the regions held,
+//! not of all made); one of a length not known has a segment of its own of [`GROWN`] bytes, its
+//! file sparse, the rest of it free once it is written. A segment starts with [`MAGIC`], so that
+//! one left behind is not taken for a file of another kind. The bytes of a region dropped are
+//! given back to the system ([`aqr_common::pages::discard`]: a hole punched in the file).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
@@ -22,10 +24,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 
 use aqr_formula::Bytes;
-use memmap2::{MmapMut, MmapOptions};
+use aqr_formula::store::StoreWriter;
+use memmap2::{Mmap, MmapOptions};
 
 /// Bytes of a segment, a file and a mapping each; a region larger is a segment of its own.
 const SEGMENT: usize = 256 << 20;
+/// Bytes of the segment of a region of a length not known: what it may grow to (of the file,
+/// sparse, and of the address space).
+const GROWN: usize = 64 << 30;
 /// Segments are of multiples of this (the mappings' granularity on Windows), the regions in
 /// them at multiples of [`REGION_ALIGN`].
 const ALIGN: usize = 64 << 10;
@@ -48,9 +54,8 @@ struct State {
     /// The segment made last for regions, held (not closed while it has none, so that one
     /// region taken and dropped after another does not make a file each time).
     open: Option<Arc<Segment>>,
-    /// The segments regions are taken from, by number: and the end of the bytes ever taken of
-    /// each (zeros after it, as the file was made).
-    segments: HashMap<u64, (Weak<Segment>, usize)>,
+    /// The segments regions are taken from, by number.
+    segments: HashMap<u64, Weak<Segment>>,
     /// The free runs of bytes of those segments, by segment and start: their lengths.
     free: BTreeMap<(u64, usize), usize>,
     /// The same by length, then segment and start.
@@ -89,8 +94,8 @@ impl State {
     }
 
     /// `n` bytes of a segment taken from its free runs, the smallest that fits: the segment,
-    /// where they start, and whether they were taken before (not zeros).
-    fn take(&mut self, n: usize) -> Option<(Arc<Segment>, usize, bool)> {
+    /// and where they start.
+    fn take(&mut self, n: usize) -> Option<(Arc<Segment>, usize)> {
         loop {
             let &(len, id, at) = self.by_len.range((n, 0, 0)..).next()?;
             self.remove(id, at);
@@ -98,32 +103,29 @@ impl State {
                 self.insert(id, at + n, len - n);
             }
             // (one dropped is not taken from: it drops its runs as soon as it has the state)
-            let Some((segment, top)) = self.segments.get_mut(&id) else { continue };
-            let Some(segment) = segment.upgrade() else { continue };
-            let used = at < *top;
-            *top = (*top).max(at + n);
-            return Some((segment, at, used));
+            let Some(segment) = self.segments.get(&id).and_then(Weak::upgrade) else { continue };
+            return Some((segment, at));
         }
     }
 }
 
 struct Segment {
-    /// The mapping, kept for its bytes (only through `base`), then its file (dropped after it).
-    _map: MmapMut,
-    _file: File,
-    base: *mut u8,
+    /// The mapping, read only, kept for its bytes (only through `base`), and its file.
+    _map: Mmap,
+    file: File,
+    base: *const u8,
     len: usize,
     /// Its number, and the state of the spill, whose free runs and regions it is of.
     id: u64,
     state: Weak<Mutex<State>>,
 }
 
-// (each region of a segment is written by its buffer alone, before it is read)
+// (each region of a segment is written by its writer alone, before it is read)
 unsafe impl Send for Segment {}
 unsafe impl Sync for Segment {}
 
 impl Segment {
-    fn at(&self, offset: usize) -> *mut u8 {
+    fn at(&self, offset: usize) -> *const u8 {
         debug_assert!(offset <= self.len);
         // SAFETY: within the mapping
         unsafe { self.base.add(offset) }
@@ -132,7 +134,7 @@ impl Segment {
 
 impl Drop for Segment {
     fn drop(&mut self) {
-        // (never dropped with the state held: see [`Spill::region`])
+        // (never dropped with the state held: see [`Spill::writer`])
         let Some(state) = self.state.upgrade() else { return };
         let mut state = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if state.segments.remove(&self.id).is_some() {
@@ -166,16 +168,57 @@ impl Drop for View {
         state.regions.remove(&(self.segment.at(self.start) as usize));
         if state.segments.contains_key(&self.segment.id) {
             let (at, len) = state.release(self.segment.id, self.start, self.len.next_multiple_of(REGION_ALIGN));
-            // its pages given back, those of the free run it is of now (with the state held, so
-            // that no region takes them meanwhile): else they stay in the resident set, changed,
-            // until the segment goes, as the system has no cause to write them out and drop them
-            // where memory is plenty (a segment is 256 MiB); left on Windows, where giving them
-            // back has them written (see there)
+            // the bytes of the free run it is of now given back (with the state held, so that
+            // no region takes them meanwhile): else they stay in the file and the system's cache
+            // until the segment goes
             let s = &self.segment;
-            // SAFETY: a free run of the segment's mapping, of all of its file: no region's
-            // bytes, and those of one taken of it after are zeroed before they are read
-            unsafe { aqr_common::pages::discard(&s._file, s.base, s.at(at), len) };
+            // SAFETY: a free run of the segment's mapping, of all of its file: no region's bytes,
+            // and those of one taken of it after are written before they are read
+            unsafe { aqr_common::pages::discard(&s.file, s.base, s.at(at), len) };
         }
+    }
+}
+
+/// A region being written: of its segment, where it starts, the bytes it may take and those
+/// written; and whether it is of a segment of its own of a length not known.
+struct Region {
+    segment: Arc<Segment>,
+    start: usize,
+    cap: usize,
+    len: usize,
+    grown: bool,
+}
+
+impl StoreWriter for Region {
+    fn write(&mut self, d: &[u8]) -> bool {
+        if self.len + d.len() > self.cap {
+            return false;
+        }
+        if write_at(&self.segment.file, d, (self.start + self.len) as u64).is_err() {
+            return false;
+        }
+        self.len += d.len();
+        true
+    }
+
+    fn finish(self: Box<Self>) -> Bytes {
+        let Region { segment, start, cap, len, grown } = *self;
+        let state = segment.state.upgrade().expect("the spill of a region being written");
+        let mut state = state.lock().unwrap();
+        // the rest of it free (of a segment of its own: of the segment, which regions are taken of
+        // from now on)
+        let used = len.next_multiple_of(REGION_ALIGN);
+        if grown {
+            state.segments.insert(segment.id, Arc::downgrade(&segment));
+        }
+        if used < cap {
+            state.release(segment.id, start + used, cap - used);
+        }
+        let at = segment.at(start) as usize;
+        let view = Arc::new(View { segment, start, len, _counted: aqr_common::trace::outside(len) });
+        state.regions.insert(at, Arc::downgrade(&view));
+        drop(state);
+        Bytes::shared(view)
     }
 }
 
@@ -191,7 +234,7 @@ impl Spill {
     }
 
     /// A new segment of `n` bytes (the magic, and regions to fill the rest), a file of its own
-    /// (of the next number not taken).
+    /// (of the next number not taken), sparse.
     fn grow(&self, state: &mut State, n: usize) -> io::Result<Arc<Segment>> {
         let mut o = OpenOptions::new();
         o.read(true).write(true).create_new(true);
@@ -215,46 +258,49 @@ impl Spill {
         if cfg!(unix) {
             std::fs::remove_file(path)?;
         }
+        sparse(&file)?;
         file.set_len(n as u64)?;
-        // SAFETY: the file is this segment's alone
-        let mut map = unsafe { MmapOptions::new().len(n).map_mut(&file)? };
-        map[..MAGIC.len()].copy_from_slice(&MAGIC);
-        let base = map.as_mut_ptr();
+        write_at(&file, &MAGIC, 0)?;
+        // SAFETY: the file is this segment's alone, written only by the positioned writes of its
+        // regions' writers (each its own bytes), read by its regions after
+        let map = unsafe { MmapOptions::new().len(n).map(&file)? };
+        let base = map.as_ptr();
         let state_of = Arc::downgrade(&self.state);
-        Ok(Arc::new(Segment { _map: map, _file: file, base, len: n, id, state: state_of }))
+        Ok(Arc::new(Segment { _map: map, file, base, len: n, id, state: state_of }))
     }
 }
 
 impl aqr_formula::store::Store for Spill {
-    fn region(&self, n: usize) -> Option<(*mut u8, Bytes)> {
-        let need = n.next_multiple_of(REGION_ALIGN);
+    fn writer(&self, len: Option<usize>) -> Option<Box<dyn StoreWriter>> {
         let mut state = self.state.lock().unwrap();
         // (the segment made before, if it is let go, dropped once the state is)
         let mut before = None;
-        let (segment, start, used) = if n > SEGMENT / 2 {
-            (self.grow(&mut state, (HEADER + n).next_multiple_of(ALIGN)).ok()?, HEADER, false)
-        } else {
-            match state.take(need) {
-                Some(taken) => taken,
-                None => {
-                    let s = self.grow(&mut state, SEGMENT).ok()?;
-                    state.segments.insert(s.id, (Arc::downgrade(&s), HEADER + need));
-                    state.insert(s.id, HEADER + need, SEGMENT - HEADER - need);
-                    before = state.open.replace(s.clone());
-                    (s, HEADER, false)
+        let (segment, start, cap, grown) = match len {
+            None => {
+                let s = self.grow(&mut state, GROWN).ok()?;
+                (s, HEADER, GROWN - HEADER, true)
+            }
+            Some(n) if n > SEGMENT / 2 => {
+                let size = (HEADER + n).next_multiple_of(ALIGN);
+                (self.grow(&mut state, size).ok()?, HEADER, size - HEADER, true)
+            }
+            Some(n) => {
+                let need = n.max(1).next_multiple_of(REGION_ALIGN);
+                match state.take(need) {
+                    Some((s, at)) => (s, at, need, false),
+                    None => {
+                        let s = self.grow(&mut state, SEGMENT).ok()?;
+                        state.segments.insert(s.id, Arc::downgrade(&s));
+                        state.insert(s.id, HEADER + need, SEGMENT - HEADER - need);
+                        before = state.open.replace(s.clone());
+                        (s, HEADER, need, false)
+                    }
                 }
             }
         };
-        let at = segment.at(start);
-        let view = Arc::new(View { segment, start, len: n, _counted: aqr_common::trace::outside(n) });
-        state.regions.insert(at as usize, Arc::downgrade(&view));
         drop(state);
         drop(before);
-        if used {
-            // SAFETY: the region's bytes, no one else's
-            unsafe { std::ptr::write_bytes(at, 0, n) };
-        }
-        Some((at, Bytes::shared(view)))
+        Some(Box::new(Region { segment, start, cap, len: 0, grown }))
     }
 
     fn find(&self, d: &[u8]) -> Option<Bytes> {
@@ -267,50 +313,132 @@ impl aqr_formula::store::Store for Spill {
     }
 }
 
+/// `file` made sparse, so that its bytes not written take no room: as it is already (Unix's
+/// file systems), or told so (Windows: `FSCTL_SET_SPARSE`).
+#[cfg(unix)]
+fn sparse(_: &File) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn sparse(f: &File) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    unsafe extern "system" {
+        fn DeviceIoControl(
+            device: *mut core::ffi::c_void,
+            code: u32,
+            input: *const core::ffi::c_void,
+            input_len: u32,
+            output: *mut core::ffi::c_void,
+            output_len: u32,
+            returned: *mut u32,
+            overlapped: *mut core::ffi::c_void,
+        ) -> i32;
+    }
+    const FSCTL_SET_SPARSE: u32 = 0x0009_00c4;
+    let mut returned = 0;
+    // SAFETY: the file's own handle, no buffers, and a place for the bytes returned
+    let ok = unsafe {
+        DeviceIoControl(
+            f.as_raw_handle().cast(),
+            FSCTL_SET_SPARSE,
+            std::ptr::null(),
+            0,
+            std::ptr::null_mut(),
+            0,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+}
+
+#[cfg(unix)]
+fn write_at(f: &File, d: &[u8], at: u64) -> io::Result<()> {
+    std::os::unix::fs::FileExt::write_all_at(f, d, at)
+}
+
+#[cfg(windows)]
+fn write_at(f: &File, mut d: &[u8], mut at: u64) -> io::Result<()> {
+    while !d.is_empty() {
+        let n = std::os::windows::fs::FileExt::seek_write(f, d, at)?;
+        (d, at) = (&d[n..], at + n as u64);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use aqr_formula::store::Store;
 
     use super::*;
 
-    /// The bytes of a region dropped are taken again, zeroed, by the regions after it (the
-    /// smallest free run that fits), and runs side by side are joined: regions dropped out of
-    /// turn take no more segments.
+    /// A region of `n` bytes of `fill`, of `spill`: where its bytes are, and its bytes.
+    fn take(spill: &Spill, n: usize, fill: u8) -> (usize, Bytes) {
+        let mut w = spill.writer(Some(n)).unwrap();
+        assert!(w.write(&vec![fill; n]));
+        let b = w.finish();
+        assert!(b.len() == n && b.iter().all(|&x| x == fill));
+        (b.as_ptr().addr(), b)
+    }
+
+    /// The bytes of a region dropped are taken again by the regions after it (the smallest free
+    /// run that fits), and runs side by side are joined: regions dropped out of turn take no
+    /// more segments. A region takes no more than what is written of it.
     #[test]
     fn taken_again() {
         let dir = std::env::temp_dir().join(format!("aqr-compress-taken-again-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let spill = Spill::create(&dir.join("again")).unwrap();
-        let take = |n: usize| {
-            let (at, bytes) = spill.region(n).unwrap();
-            assert!(bytes.iter().all(|&b| b == 0));
-            // SAFETY: the region's bytes, not read before
-            unsafe { std::ptr::write_bytes(at, 0xff, n) };
-            (at.addr(), bytes)
-        };
-        let (a, ra) = take(100 << 10);
-        let (b, rb) = take(10 << 10);
-        let (c, rc) = take(200 << 10);
+        let (a, ra) = take(&spill, 100 << 10, 1);
+        let (b, rb) = take(&spill, 10 << 10, 2);
+        let (c, rc) = take(&spill, 200 << 10, 3);
         assert_eq!((b - a, c - b), (100 << 10, 10 << 10));
         // (the smallest run that fits: `b`'s, not the rest of the segment)
         drop(rb);
-        let (e, re) = take(8 << 10);
+        let (e, re) = take(&spill, 8 << 10, 4);
         assert_eq!(e, b);
         // (the rest of `b`'s, `c`'s and the rest of the segment joined, `a`'s too small)
         drop((ra, rc));
-        let (d, rd) = take(150 << 10);
+        let (d, rd) = take(&spill, 150 << 10, 5);
         assert_eq!(d, b + (8 << 10));
-        assert_eq!(take(100 << 10).0, a);
+        assert_eq!(take(&spill, 100 << 10, 6).0, a);
+        // (of 1000 bytes told, 10 written, more than told refused: the rest free for the next)
+        let mut w = spill.writer(Some(1000)).unwrap();
+        assert!(w.write(&[7; 10]) && !w.write(&[7; 999]));
+        let (small, rs) = (w.finish(), take(&spill, 16, 8));
+        assert_eq!((small.len(), rs.0 - small.as_ptr().addr()), (10, 16));
         // hundreds of regions taken and dropped in turn take one segment
         let mut held = vec![rd, re];
         for i in 0..400 {
-            held.push(take((256 << 10) + i * 2048).1);
+            held.push(take(&spill, (256 << 10) + i * 2048, i as u8).1);
             if i % 3 != 0 {
                 held.swap_remove(held.len() / 2);
             }
         }
         assert_eq!(spill.state.lock().unwrap().made, 1);
-        drop((held, spill));
+        drop((held, small, rs, spill));
+        std::fs::remove_dir(&dir).unwrap();
+    }
+
+    /// A region of a length not known grows as it is written, within a segment of its own, the
+    /// rest of which regions after it are taken of.
+    #[test]
+    fn grown() {
+        let dir = std::env::temp_dir().join(format!("aqr-compress-grown-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let spill = Spill::create(&dir.join("grown")).unwrap();
+        let mut w = spill.writer(None).unwrap();
+        let piece: Vec<u8> = (0..(3 << 20) + 7).map(|i| (i * 13) as u8).collect();
+        for _ in 0..100 {
+            assert!(w.write(&piece));
+        }
+        let b = w.finish();
+        assert!(b.len() == 100 * piece.len() && b.chunks(piece.len()).all(|c| c == &piece[..]));
+        let (at, small) = take(&spill, 4096, 9);
+        assert_eq!(at, b.as_ptr().addr() + b.len().next_multiple_of(REGION_ALIGN));
+        assert_eq!(spill.state.lock().unwrap().made, 1);
+        drop((b, small, spill));
         std::fs::remove_dir(&dir).unwrap();
     }
 
@@ -324,65 +452,20 @@ mod tests {
         let spill = Spill::create(&dir.join("back")).unwrap();
         let page = aqr_common::pages::size();
         // the pages of `n` bytes at `at` resident
-        let resident = |at: *mut u8, n: usize| {
+        let resident = |at: usize, n: usize| {
             let mut v = vec![0u8; n.div_ceil(page)];
             // SAFETY: pages of a mapping of the spill, and a byte for each
-            assert_eq!(unsafe { libc::mincore(at.cast(), n, v.as_mut_ptr()) }, 0);
+            assert_eq!(unsafe { libc::mincore(at as *mut libc::c_void, n, v.as_mut_ptr()) }, 0);
             v.iter().filter(|&&b| b & 1 != 0).count()
         };
         let n = 64 * page;
-        let (a, ra) = spill.region(n).unwrap();
-        let (b, rb) = spill.region(n).unwrap();
-        // SAFETY: the regions' bytes, not read before
-        unsafe { std::ptr::write_bytes(a, 0xff, n) };
-        unsafe { std::ptr::write_bytes(b, 0xff, n) };
+        let (a, ra) = take(&spill, n, 0xff);
+        let (b, rb) = take(&spill, n, 0xff);
         assert_eq!((resident(a, n), resident(b, n)), (64, 64));
         drop(ra);
         // (ext4 keeps the last page of a hole in its cache: of the file, not the process's)
         assert!(resident(a, n) <= 1 && resident(b, n) == 64);
-        // taken again, zeroed
-        let (c, rc) = spill.region(n).unwrap();
-        assert_eq!(c, a);
-        assert!(rc.iter().all(|&x| x == 0));
-        drop((rb, rc, spill));
-        std::fs::remove_dir(&dir).unwrap();
-    }
-
-    /// The pages of a region dropped stay in the working set on Windows: taken out of it, they
-    /// would be written to the file (their bytes of no use) as soon as the system goes, as it
-    /// cannot drop changed pages of a file otherwise, and be counted in use until then.
-    #[cfg(windows)]
-    #[test]
-    fn dropped_left_in_place() {
-        #[repr(C)]
-        struct WorkingSetEx {
-            at: *mut core::ffi::c_void,
-            attributes: usize,
-        }
-        unsafe extern "system" {
-            fn K32QueryWorkingSetEx(process: isize, info: *mut WorkingSetEx, n: u32) -> i32;
-        }
-        let dir = std::env::temp_dir().join(format!("aqr-compress-left-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let spill = Spill::create(&dir.join("left")).unwrap();
-        let page = aqr_common::pages::size();
-        // the pages of `n` bytes at `at` in the working set (bit 0, valid)
-        let resident = |at: *mut u8, n: usize| {
-            let mut v: Vec<WorkingSetEx> =
-                (0..n / page).map(|i| WorkingSetEx { at: at.wrapping_add(i * page).cast(), attributes: 0 }).collect();
-            let size = (v.len() * size_of::<WorkingSetEx>()) as u32;
-            // SAFETY: the process's own pseudo-handle, and an entry for each page
-            assert_ne!(unsafe { K32QueryWorkingSetEx(-1, v.as_mut_ptr(), size) }, 0);
-            v.iter().filter(|e| e.attributes & 1 != 0).count()
-        };
-        let n = 64 * page;
-        let (a, ra) = spill.region(n).unwrap();
-        // SAFETY: the region's bytes, not read before
-        unsafe { std::ptr::write_bytes(a, 0xff, n) };
-        assert_eq!(resident(a, n), 64);
-        drop(ra);
-        assert_eq!(resident(a, n), 64);
-        drop(spill);
+        drop((rb, spill));
         std::fs::remove_dir(&dir).unwrap();
     }
 
@@ -400,11 +483,8 @@ mod tests {
         let segment = spill.grow(&mut spill.state.lock().unwrap(), SEGMENT).unwrap();
         assert!(head(&segment) == magic);
         drop(segment);
-        let (at, bytes) = spill.region(100).unwrap();
-        assert!(at.addr() % 4096 == 0);
-        // SAFETY: the region's bytes, not read before (the magic kept, as no region overlaps it)
-        unsafe { std::ptr::write_bytes(at, 0xff, 100) };
-        assert!(bytes.iter().all(|&b| b == 0xff));
+        let (at, bytes) = take(&spill, 100, 0xff);
+        assert!(at % 4096 == 0);
         let segment = spill.state.lock().unwrap().open.clone().unwrap();
         assert!(head(&segment) == magic);
         // (on Windows the file goes as the spill closes it)
