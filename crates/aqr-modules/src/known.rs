@@ -240,13 +240,13 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "git-pack-index-recons",
         version: 1,
-        sha512_256: hex("bf0f6cc2917b1c4284ad8cf3bdff91fdb186b7c003c91fc3294cc32e022af58f"),
+        sha512_256: hex("4b7f8a8eb1ab1fab8ad3d77abade574bd6905a7f63ed823075a6af375f9df6b0"),
         block: include_bytes!("../wasm/git-pack-index-recons.block"),
     },
     Known {
         name: "git-pack-recons",
         version: 1,
-        sha512_256: hex("8de96ff114cf1746e7fe70b380d47d009392a1f711f5b2032a790127f7ea22e2"),
+        sha512_256: hex("8c5a4f7b78c392edcc0fb149de7ad70950885b1833e0ddaa6cf87ef6e9bc11e2"),
         block: include_bytes!("../wasm/git-pack-recons.block"),
     },
     Known {
@@ -396,7 +396,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "psd-recons",
         version: 1,
-        sha512_256: hex("1144ced2ff7f9a0db2819386fda939c61c421ec679c25a1bc393b796606d70b5"),
+        sha512_256: hex("51405f531e3136ea0b93757caa7c4a55cb26d8c9fea8b2870d46be358704fb2f"),
         block: include_bytes!("../wasm/psd-recons.block"),
     },
     Known {

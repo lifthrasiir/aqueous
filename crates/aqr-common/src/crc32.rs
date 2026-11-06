@@ -5,6 +5,9 @@
 #[cfg(not(target_family = "wasm"))]
 pub use crc32fast::{Hasher, hash};
 
+/// Bytes of the tables that a module takes of its memory on its first CRC, and holds to its end.
+pub const WASM_TABLES: u64 = 16 * 256 * 4;
+
 #[cfg(target_family = "wasm")]
 pub use sliced::{Hasher, hash};
 

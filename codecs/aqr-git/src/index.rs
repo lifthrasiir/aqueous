@@ -28,24 +28,44 @@ pub fn rev_len(n: usize) -> usize {
     REV_MAGIC.len() + n * 4 + 2 * ID
 }
 
-/// The pack's index, and its reverse index where `rev`, after `out`: of the entries starting
-/// at `starts` (in order, the last the end of the entries, where the trailer starts) in
-/// `pack`, of the ids `ids` in the same order.
-pub fn build(pack: &[u8], starts: &[usize], ids: &[u8], rev: bool, out: &mut Vec<u8>) -> Result<()> {
+/// Entries of `starts` (as [`build`] takes them) at an offset past `OFF32_LIMIT`.
+fn large(starts: &[usize]) -> usize {
+    starts[..starts.len().saturating_sub(1)].iter().filter(|&&s| s as u64 > OFF32_LIMIT).count()
+}
+
+/// Bytes that [`build`] writes of the entries starting at `starts`: the index, and the reverse
+/// index where `rev`.
+pub fn len(starts: &[usize], rev: bool) -> usize {
+    let n = starts.len().saturating_sub(1);
+    idx_len(n, large(starts)) + if rev { rev_len(n) } else { 0 }
+}
+
+/// Bytes that [`build`] takes of [`aqr_api::stack`] for `n` entries: the entries in the index's
+/// order, and on WebAssembly the CRC-32's tables (made on its first use, held after).
+pub fn plan(n: u64) -> u64 {
+    use aqr_api::stack::block;
+    block(4 * n) + block(aqr_common::crc32::WASM_TABLES)
+}
+
+/// The pack's index, and its reverse index where `rev`, written to `out` (of [`len`] bytes): of
+/// the entries starting at `starts` (in order, the last the end of the entries, where the
+/// trailer starts) in `pack`, of the ids `ids` in the same order.
+pub fn build(pack: &[u8], starts: &[usize], ids: &[u8], rev: bool, out: &mut [u8]) -> Result<()> {
     let n = starts.len().checked_sub(1).ok_or_else(corrupt)?;
     let end = starts[n];
     let trailer = pack.get(end..end + ID).ok_or_else(corrupt)?;
-    if ids.len() != n * ID || u32::try_from(n).is_err() {
+    if ids.len() != n * ID || u32::try_from(n).is_err() || out.len() != len(starts, rev) {
         return Err(corrupt());
     }
     let id = |j: usize| &ids[j * ID..][..ID];
-    // the entries in the index's order (stable: of the same id, as in the pack)
-    let mut order: Vec<u32> = (0..n as u32).collect();
-    order.sort_by(|&a, &b| id(a as usize).cmp(id(b as usize)));
-    let large = (0..n).filter(|&j| starts[j] as u64 > OFF32_LIMIT).count();
-    let at = out.len();
-    out.reserve(idx_len(n, large) + if rev { rev_len(n) } else { 0 });
-    out.extend_from_slice(&IDX_MAGIC);
+    // the entries in the index's order (of the same id, as in the pack)
+    let mut order: Vec<u32> = Vec::with_capacity(n);
+    order.extend(0..n as u32);
+    order.sort_unstable_by(|&a, &b| id(a as usize).cmp(id(b as usize)).then(a.cmp(&b)));
+    let idx = idx_len(n, large(starts));
+    let (o, r) = out.split_at_mut(idx);
+    let mut w = Put(&mut *o);
+    w.put(&IDX_MAGIC);
     let mut fanout = [0u32; 256];
     for j in 0..n {
         fanout[id(j)[0] as usize] += 1;
@@ -53,48 +73,55 @@ pub fn build(pack: &[u8], starts: &[usize], ids: &[u8], rev: bool, out: &mut Vec
     let mut sum = 0;
     for c in fanout {
         sum += c;
-        out.extend_from_slice(&sum.to_be_bytes());
+        w.put(&sum.to_be_bytes());
     }
     for &j in &order {
-        out.extend_from_slice(id(j as usize));
+        w.put(id(j as usize));
     }
     for &j in &order {
         let j = j as usize;
         let entry = pack.get(starts[j]..starts[j + 1]).ok_or_else(corrupt)?;
-        out.extend_from_slice(&aqr_common::crc32::hash(entry).to_be_bytes());
+        w.put(&aqr_common::crc32::hash(entry).to_be_bytes());
     }
-    let mut big = Vec::with_capacity(large);
+    // the offsets, the 64-bit ones after them
+    let (offs, big) = w.0.split_at_mut(4 * n);
+    let (mut offs, mut big, mut b) = (Put(offs), Put(big), 0u32);
     for &j in &order {
         let s = starts[j as usize] as u64;
-        let o = if s > OFF32_LIMIT {
-            big.push(s);
-            0x8000_0000 | (big.len() - 1) as u32
+        if s > OFF32_LIMIT {
+            offs.put(&(0x8000_0000 | b).to_be_bytes());
+            big.put(&s.to_be_bytes());
+            b += 1;
         } else {
-            s as u32
-        };
-        out.extend_from_slice(&o.to_be_bytes());
+            offs.put(&(s as u32).to_be_bytes());
+        }
     }
-    for s in big {
-        out.extend_from_slice(&s.to_be_bytes());
-    }
-    out.extend_from_slice(trailer);
-    let sum = pack::sha1(&out[at..]);
-    out.extend_from_slice(&sum);
+    big.put(trailer);
+    let sum = pack::sha1(&o[..idx - ID]);
+    o[idx - ID..].copy_from_slice(&sum);
     if rev {
-        let at = out.len();
-        out.extend_from_slice(&REV_MAGIC);
-        let mut place = vec![0u32; n];
+        r[..REV_MAGIC.len()].copy_from_slice(&REV_MAGIC);
+        let places = &mut r[REV_MAGIC.len()..][..4 * n];
         for (k, &j) in order.iter().enumerate() {
-            place[j as usize] = k as u32;
+            places[4 * j as usize..][..4].copy_from_slice(&(k as u32).to_be_bytes());
         }
-        for p in place {
-            out.extend_from_slice(&p.to_be_bytes());
-        }
-        out.extend_from_slice(trailer);
-        let sum = pack::sha1(&out[at..]);
-        out.extend_from_slice(&sum);
+        let at = REV_MAGIC.len() + 4 * n;
+        r[at..at + ID].copy_from_slice(trailer);
+        let sum = pack::sha1(&r[..at + ID]);
+        r[at + ID..].copy_from_slice(&sum);
     }
     Ok(())
+}
+
+/// Writes bytes onto the front of a slice (of room for them).
+struct Put<'a>(&'a mut [u8]);
+
+impl Put<'_> {
+    fn put(&mut self, b: &[u8]) {
+        let (a, rest) = std::mem::take(&mut self.0).split_at_mut(b.len());
+        a.copy_from_slice(b);
+        self.0 = rest;
+    }
 }
 
 /// The offsets that index `idx` tells, of its entries in its order, or None where it is not
@@ -154,7 +181,7 @@ pub fn ids(pack: &[u8], starts: &[usize], idx: &[u8], rev: Option<&[u8]>) -> Opt
         }
         ids[j * ID..][..ID].copy_from_slice(&idx[names + k * ID..][..ID]);
     }
-    let mut made = Vec::new();
+    let mut made = vec![0; len(starts, rev.is_some())];
     build(pack, starts, &ids, rev.is_some(), &mut made).ok()?;
     let (i, r) = made.split_at(made.len().min(idx.len()));
     (i == idx && r == rev.unwrap_or_default()).then_some(ids)

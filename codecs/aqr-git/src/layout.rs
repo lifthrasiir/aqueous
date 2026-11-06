@@ -176,7 +176,8 @@ pub fn build(layout: &[u8], deflated: &[u8], kept: &[u8], len: u64) -> Result<Ve
 }
 
 /// [`build`] into a vector of `more` bytes of room past the pack, and where `starts` is given,
-/// the offset of each entry pushed to it, then that of the end of the entries.
+/// the offset of each entry pushed to it (reserved for them), then that of the end of the
+/// entries.
 pub fn build_with(
     layout: &[u8],
     deflated: &[u8],
@@ -187,10 +188,19 @@ pub fn build_with(
 ) -> Result<Vec<u8>> {
     let rebuilt = tags(layout)?.iter().filter(|&&t| t & REBUILT != 0).count();
     let table_at = deflated.len().checked_sub(rebuilt.checked_mul(DERIVED).ok_or_else(corrupt)?).ok_or_else(corrupt)?;
-    let cap = usize::try_from(len).map_err(|_| corrupt())?;
-    let mut out = Vec::with_capacity(cap.min(kept.len() + deflated.len() + layout.len() * 4 + ID).saturating_add(more));
+    let cap = usize::try_from(len).ok().and_then(|l| l.checked_add(more)).ok_or_else(corrupt)?;
+    let mut out = Vec::with_capacity(cap);
     build_into(layout, Some(&deflated[..table_at]), &deflated[table_at..], kept, len, &mut out, starts)?;
     Ok(out)
+}
+
+/// Bytes that [`build_with`] takes of [`aqr_api::stack`] for a pack of `len` bytes and `more`
+/// past it: the pack, an entry's header, and where `starts`, the entries' offsets (4 bytes each
+/// on WebAssembly) of the entries of `layout` (`None` where it does not start as one).
+pub fn plan(layout: &[u8], len: u64, more: u64, starts: bool) -> Option<u64> {
+    use aqr_api::stack::block;
+    let n = tags(layout).ok()?.len() as u64;
+    Some(block(len.checked_add(more)?) + block(10) + if starts { block(4 * (n + 1)) } else { 0 })
 }
 
 /// Whether `layout`, `table` (what [`build`] takes after the streams) and `kept` give `pack`
@@ -220,7 +230,7 @@ fn build_into(
     out.put(k.take(HEADER)?)?;
     let mut zlib = ZLIB_FIRST;
     if let Some(s) = &mut starts {
-        s.reserve(n + 1);
+        s.reserve_exact(n + 1);
     }
     for &tag in tags {
         if let Some(s) = &mut starts {

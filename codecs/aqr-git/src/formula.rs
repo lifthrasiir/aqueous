@@ -21,32 +21,21 @@ pub use crate::module::{decode, decode_index};
 
 /// A pack rebuilt from the data of its entries, the DEFLATE streams given by aqr-flate's module
 /// ([`decode`]).
-pub const MODULE: Module = Module::new("git-pack-recons", 1).with_memory(memory);
+pub const MODULE: Module = Module::new("git-pack-recons", 1).with_plan(memory);
 
-/// The memory of the module: the inputs and the pack, reserved for the bytes the inputs give
-/// at most and growing past them (twice at a time, the old and new held at once) where that is
-/// less than the pack.
+/// The memory of the module: its initial memory, and its plan ([`crate::module::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let &[deflated, layout, kept] = u.inputs else { return None };
-    let reserved = kept + deflated + 4 * layout + ID as u64;
-    let growth = if reserved < u.output() { 2 * u.output() } else { 0 };
-    Some(u.whole(growth, 1))
+    Some(u.initial() + crate::module::plan(u.inputs, u.content(1)?, u.output())?)
 }
 
 /// A pack with its index and reverse index after it ([`decode_index`]): the pack as
 /// [`MODULE`] makes it, the indexes of the ids of its entries.
-pub const INDEX_MODULE: Module = Module::new("git-pack-index-recons", 1).with_memory(index_memory);
+pub const INDEX_MODULE: Module = Module::new("git-pack-index-recons", 1).with_plan(index_memory);
 
-/// The memory of [`INDEX_MODULE`]: [`MODULE`]'s, the indexes reserved past the pack and made
-/// apart, the entries' offsets, and their order and places.
+/// The memory of [`INDEX_MODULE`]: its initial memory, and its plan
+/// ([`crate::module::index_plan`]).
 fn index_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let &[deflated, layout, kept, ids] = u.inputs else { return None };
-    let mut at = 1;
-    let pack = aqr_common::varint::get(u.params, &mut at).ok()?;
-    let more = u.output().checked_sub(pack)?;
-    let reserved = kept + deflated + 4 * layout + ID as u64 + more;
-    let growth = if reserved < u.output() { 2 * u.output() } else { 0 };
-    Some(u.whole(growth + more + ids / ID as u64 * 16, 4))
+    Some(u.initial() + crate::module::index_plan(u.params, u.inputs, u.content(1)?, u.output())?)
 }
 
 #[derive(Debug, Clone)]
