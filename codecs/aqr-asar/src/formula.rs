@@ -13,17 +13,16 @@ use crate::layout::{self, BLOCKS, Body, HASH, HOLE, OFFSET, PREFIX, SIZE};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("asar-recons", 1).with_memory(memory);
+pub const MODULE: Module = Module::new("asar-recons", 1).with_plan(memory);
 
 /// The classes of the header (with holes) and of the index, streams 1 and 2.
 pub const HEADER: &str = "asar/header";
 pub const INDEX: &str = "asar/index";
 
-/// The memory of the module: the inputs and the archive, and the bodies of the index (16 bytes
-/// each, of two bytes of the index at least).
+/// The memory of the module: its initial memory, and its plan ([`crate::module::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let &[_, _, index] = u.inputs else { return None };
-    Some(u.whole(index * 8, 1))
+    let &[len] = u.outputs else { return None };
+    Some(u.initial() + crate::module::plan(u.inputs, u.content(2)?, len)?)
 }
 
 /// Bodies of at least this many bytes are slices of their own, apart from the others of their

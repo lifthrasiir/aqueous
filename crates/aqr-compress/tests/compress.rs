@@ -1707,12 +1707,9 @@ fn bundles() {
     assert_eq!(aqr_compress::kind_by_name(b"x/y.tar"), aqr_formula::Kind::Format("tar"));
 }
 
-/// asar archives go to aqr-asar, and their files to their recompressors by their names.
-#[test]
-fn asar() {
-    let jpeg = fixture("codecs/aqr-jpeg/tests/data/gradient.jpg");
-    let png = picture(64, 48, None);
-    let files: [(&str, &[u8]); 3] = [("a.txt", &text(5000)), ("img/b.jpg", &jpeg), ("img/d.png", &png)];
+/// An asar archive of `files` (name, contents), as @electron/asar writes one: a header of
+/// their sizes and offsets, then their contents.
+fn asar_of(files: &[(&str, &[u8])]) -> Vec<u8> {
     let (mut json, mut data) = (String::from("{\"files\":{"), Vec::new());
     for (k, (name, body)) in files.iter().enumerate() {
         let entry = format!("{{\"size\":{},\"offset\":\"{}\"}}", body.len(), data.len());
@@ -1726,7 +1723,17 @@ fn asar() {
     d.extend_from_slice(json.as_bytes());
     d.resize(d.len() + pad, 0);
     d.extend_from_slice(&data);
-    let f = roundtrip(&d, &all());
+    d
+}
+
+/// asar archives go to aqr-asar, and their files to their recompressors by their names.
+#[test]
+fn asar() {
+    let jpeg = fixture("codecs/aqr-jpeg/tests/data/gradient.jpg");
+    let png = picture(64, 48, None);
+    let text = text(5000);
+    let files: [(&str, &[u8]); 3] = [("a.txt", &text), ("img/b.jpg", &jpeg), ("img/d.png", &png)];
+    let f = roundtrip(&asar_of(&files), &all());
     assert_eq!(modules(&f), [ASAR.name, JPEG.name, PNG.name], "{f}");
     assert_eq!(aqr_compress::kind_by_name(b"resources/app.asar"), aqr_formula::Kind::Format("asar"));
 }
@@ -1983,4 +1990,23 @@ fn lzo_plan_holds() {
         seen += within_plans(&path.to_string_lossy(), &std::fs::read(&path).unwrap(), &[lzo], true);
     }
     assert!(seen >= 5, "{seen} applications of lzo-recons");
+}
+
+/// asar-recons and bundle-recons lay their memory out as stacks, their limits their plans,
+/// exactly: of the ar, tar and cpio fixtures, and of asar archives of a few files and of many.
+#[test]
+fn asar_bundle_plans_hold() {
+    let modules = [ASAR, BUNDLE].map(|m| aqr_decompress::built(m).expect("built").sha512_256);
+    let dir = format!("{}/../../codecs/aqr-bundle/tests/data", env!("CARGO_MANIFEST_DIR"));
+    let mut seen = 0;
+    for e in std::fs::read_dir(dir).unwrap() {
+        let path = e.unwrap().path();
+        seen += within_plans(&path.to_string_lossy(), &std::fs::read(&path).unwrap(), &modules, true);
+    }
+    let bodies: Vec<(String, Vec<u8>)> =
+        (0..2000).map(|i| (format!("d{}/f{i}.txt", i % 30), text(100 + i % 700))).collect();
+    let files: Vec<(&str, &[u8])> = bodies.iter().map(|(n, b)| (&n[..], &b[..])).collect();
+    seen += within_plans("asar of many", &asar_of(&files), &modules, true);
+    seen += within_plans("asar of a few", &asar_of(&files[..3]), &modules, true);
+    assert!(seen >= 15, "{seen} applications");
 }

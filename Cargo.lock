@@ -119,6 +119,7 @@ dependencies = [
 name = "aqr-asar"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
  "aqr-common",
  "aqr-formula",
  "sha2",
@@ -149,6 +150,7 @@ version = "0.1.0"
 name = "aqr-bundle"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
  "aqr-common",
  "aqr-formula",
  "zstd",

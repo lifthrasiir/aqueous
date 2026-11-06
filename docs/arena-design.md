@@ -188,6 +188,8 @@ P = W_main + Σ_태스크 (W_spawn + 태스크의 계획 버퍼) + 채널 메시
 - aqr-common `streams::cut`이 목록을 색인의 varint 수로 정확히 잡는다.
 - 실측 = 계획이다(`snappy_plan_holds`, `lzo_plan_holds`).
 
+**asar-recons, bundle-recons.** 이미 LIFO였다(asar: 본체 목록과 출력; bundle: 출력과 cpio 머리의 사본). 실측 = 계획이다(`asar_bundle_plans_hold`).
+
 ## 다음 순서
 
 1. `Module::memory_usage_in_pages`를 이미 정확한 용량을 쓰는 모듈들(exe, xsv, fasta, zip, git, pdf, png, …)부터 만든다.
