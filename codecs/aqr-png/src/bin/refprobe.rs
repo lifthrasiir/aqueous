@@ -61,7 +61,7 @@ fn load(path: &Path) -> Option<Image> {
         path: path.to_owned(),
         key: (ih.width, ih.height, ih.color),
         stride,
-        data: f.data,
+        data: f.data.into(),
         raw,
         tokens: f.tokens,
         record,

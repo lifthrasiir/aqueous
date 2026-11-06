@@ -84,18 +84,18 @@ pub(crate) fn gzip(d: &[u8], contents: Kind, opt: &Options, depth: u32, cx: &Cx)
         outside.extend_from_slice(&d[prev..to]);
     };
     for (profile, run) in runs {
-        let (mut data, mut records, mut lens, mut sizes) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        let mut gaps = Vec::with_capacity(run.len());
-        for m in &run {
+        let derived = run[0].derived;
+        let total = run.iter().map(|m| m.data.len()).sum();
+        let (mut data, mut records) = (aqr_formula::store::Writer::new(Some(total)), Vec::new());
+        let (mut lens, mut sizes, mut gaps) = (Vec::new(), Vec::new(), Vec::with_capacity(run.len()));
+        for m in run {
             gaps.push((prev, m.raw.start));
             lens.push((m.data.len(), m.record.len()));
             sizes.push(m.raw.len() as u64);
-            data.extend_from_slice(&m.data);
+            data.write(&m.data);
             records.extend_from_slice(&m.record);
             prev = m.raw.end + m.derived.bytes();
         }
-        let derived = run[0].derived;
-        drop(run);
         let records = f.push("flate/record", records);
         let data = f.push_as("raw", kind, data);
         if let [(from, to)] = gaps[..] {
@@ -275,7 +275,7 @@ fn wrap(
 /// container's checksum after it as aqr-flate's module derives it.
 struct Member {
     raw: Range<usize>,
-    data: Vec<u8>,
+    data: aqr_formula::Bytes,
     record: Vec<u8>,
     derived: Derived,
 }
@@ -300,6 +300,7 @@ fn member(
         threads: opt.threads,
         max_data: usize::try_from(cx.inflate_left()).unwrap_or(usize::MAX),
         zlib,
+        store: true,
         ..aqr_flate::Options::for_profile(profile).ok()?
     };
     let parsed = Parsed::head(d.get(start..)?, &fopt);
@@ -328,7 +329,7 @@ fn member(
     // (the coding of the stream told of as the first half of it: the second is its data's, made
     // in turn, [`crate::recompress_with`])
     let _watch = aqr_common::progress::alias(parsed.data(), &d[raw.start..raw.start + raw.len() / 2]);
-    let r = parsed.deconstruct(&fopt, hints);
+    let r = parsed.deconstruct_bytes(&fopt, hints);
     let (data, record, _) = r.ok()?;
     if record.len() >= raw.len() {
         return None;
@@ -367,9 +368,7 @@ fn assemble(class: &'static str, d: &[u8], kind: Kind, profile: u16, m: Member) 
     let record = f.push("flate/record", record);
     let data = match git {
         Some(h) => {
-            let mut data = data;
-            data.drain(..h);
-            let body = f.push_as("raw", kind, data);
+            let body = f.push_as("raw", kind, data.slice(h..data.len()));
             Node::concat([Node::slice(0, around, h as u64), body])
         }
         None => f.push_as("raw", kind, data),

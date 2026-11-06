@@ -2634,11 +2634,14 @@ fn heap_per_byte(format: Format) -> f64 {
         Sqlite | Pe | MachO | Elf | Jpeg | Lz4 | Lzo | LevelDb | Bzip2 | Hdf5 | Cab | Chm | Alz | Egg | Lha | Rar => {
             9.0
         }
+        // the data written out as it is decoded: the tokens of an adaptive profile kept (6 bytes
+        // each; enwik8 at -8: 7.5), and the module's output and inputs in verification (4.7)
+        Gzip | Zlib => 8.0,
         Raw | Flac | Png | Gif | Clip | Dds | GitPack | Lzma | Xz | SevenZip => 12.0,
         // every DEFLATE body parsed beforehand
         Zip => 14.0,
         // the data decoded and its tokens kept (6 bytes each)
-        Gzip | Zlib | Bvx | Fits => 36.0,
+        Bvx | Fits => 36.0,
     }
 }
 

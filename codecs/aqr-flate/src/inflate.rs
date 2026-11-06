@@ -16,7 +16,7 @@ use crate::{Error, Result};
 pub struct Flat {
     /// The blocks, without their tokens.
     pub stream: Stream,
-    pub data: Vec<u8>,
+    pub data: Data,
     pub tokens: Vec<Token>,
     /// Per block, its first token (or where it would be, for stored blocks), then the end.
     pub starts: Vec<usize>,
@@ -27,6 +27,13 @@ pub struct Flat {
     /// it holds; else empty (it holds all).
     pub chunks: Vec<Chunk>,
 }
+
+/// The data of a [`Flat`]: with the feature `encode`, bytes of aqr-formula's store where the
+/// parse was told to write it there ([`parse_segments_head`]'s `store`), else of the heap.
+#[cfg(feature = "encode")]
+pub type Data = aqr_formula::Bytes;
+#[cfg(not(feature = "encode"))]
+pub type Data = Vec<u8>;
 
 /// A run of tokens that [`parse_segments_head`] keeps: from the token of index `token` (in
 /// the stream), at `pos` bytes of data, `count` tokens, at index `kept` of [`Flat::tokens`].
@@ -304,10 +311,15 @@ struct Collect<const HEAD: bool> {
     tokens: (*mut Token, usize, usize),
     /// With `HEAD`, the tokens are kept in runs only (the first of `first` bytes of data, the
     /// others of [`CHUNK`] bytes as [`next_chunk`] places them): whether they are now, at how
-    /// many bytes of data that changes, and where the next run starts.
+    /// many bytes of data that changes, and where the next run starts (both as `data` holds
+    /// the data: from `base` on).
     keeping: bool,
     turn: usize,
     next: usize,
+    /// Where the data goes to aqr-formula's store as it is made ([`Collect::new`]), what of it
+    /// is written: out of the hot fields, as it is seldom used.
+    #[cfg(feature = "encode")]
+    out: Option<Box<Out>>,
     /// Tokens seen, and the runs kept.
     seen: usize,
     chunks: Vec<Chunk>,
@@ -328,7 +340,19 @@ fn grow<T>(v: (*mut T, usize, usize), extra: usize) -> (*mut T, usize, usize) {
 }
 
 impl<const HEAD: bool> Collect<HEAD> {
-    fn new(data: usize, tokens: usize, first: usize) -> Collect<HEAD> {
+    /// Room for `data` bytes of data and `tokens` tokens, the first run of `first` bytes; the
+    /// data written to aqr-formula's store as it is made where `store` (with the feature
+    /// `encode`): then the room is for a window of it.
+    fn new(data: usize, tokens: usize, first: usize, store: bool) -> Collect<HEAD> {
+        let store = store && cfg!(feature = "encode");
+        let data = if store { data.min(STORE_WINDOW) } else { data };
+        #[cfg(feature = "encode")]
+        let out = store.then(|| {
+            Box::new(Out {
+                writer: None,
+                base: 0,
+            })
+        });
         let mut d = std::mem::ManuallyDrop::new(Vec::<u8>::with_capacity(data));
         let mut t = std::mem::ManuallyDrop::new(Vec::<Token>::with_capacity(tokens));
         Collect {
@@ -338,6 +362,8 @@ impl<const HEAD: bool> Collect<HEAD> {
             turn: first,
             next: next_chunk(0).max(first),
             seen: 0,
+            #[cfg(feature = "encode")]
+            out,
             chunks: if HEAD {
                 vec![Chunk {
                     token: 0,
@@ -374,7 +400,8 @@ impl<const HEAD: bool> Collect<HEAD> {
             self.keeping = false;
             self.turn = self.next;
         } else {
-            let pos = self.data.1;
+            let base = self.base();
+            let pos = base + self.data.1;
             self.chunks.push(Chunk {
                 token: self.seen,
                 kept: self.tokens.1,
@@ -382,12 +409,50 @@ impl<const HEAD: bool> Collect<HEAD> {
                 count: 0,
             });
             self.keeping = true;
-            self.turn = pos + CHUNK;
-            self.next = next_chunk(pos);
+            self.turn = self.data.1 + CHUNK;
+            self.next = next_chunk(pos) - base;
         }
     }
 
-    fn into_vecs(mut self) -> (Vec<u8>, Vec<Token>, Vec<Chunk>) {
+    /// Bytes of data before what `data` holds ([`Out`]).
+    fn base(&self) -> usize {
+        #[cfg(feature = "encode")]
+        return self.out.as_ref().map_or(0, |o| o.base);
+        #[cfg(not(feature = "encode"))]
+        0
+    }
+
+    /// Room for `extra` more bytes of data: the data written out but the last [`HISTORY`]
+    /// bytes where it goes out ([`Collect::new`]), else more of it. (Without the feature
+    /// `encode`, `grow` alone, as it was.)
+    #[cfg_attr(feature = "encode", cold, inline(never))]
+    #[cfg_attr(not(feature = "encode"), inline(always))]
+    fn room(&mut self, extra: usize) {
+        #[cfg(feature = "encode")]
+        if let Some(out) = &mut self.out
+            && self.data.1 + extra > STORE_FROM
+        {
+            let w = out
+                .writer
+                .get_or_insert_with(|| aqr_formula::store::Writer::new(None));
+            let cut = self.data.1.saturating_sub(HISTORY);
+            // SAFETY: the first `data.1` bytes are made.
+            let made = unsafe { std::slice::from_raw_parts(self.data.0, self.data.1) };
+            w.write(&made[..cut]);
+            // SAFETY: within the first `data.1` bytes.
+            unsafe { std::ptr::copy(self.data.0.add(cut), self.data.0, self.data.1 - cut) };
+            self.data.1 -= cut;
+            out.base += cut;
+            self.turn = self.turn.saturating_sub(cut);
+            self.next = self.next.saturating_sub(cut);
+            if self.data.2 - self.data.1 >= extra {
+                return;
+            }
+        }
+        self.data = grow(self.data, extra);
+    }
+
+    fn into_vecs(mut self) -> (Data, Vec<Token>, Vec<Chunk>) {
         if self.keeping
             && let Some(c) = self.chunks.last_mut()
         {
@@ -400,18 +465,40 @@ impl<const HEAD: bool> Collect<HEAD> {
                 Vec::from_raw_parts(self.tokens.0, self.tokens.1, self.tokens.2),
             )
         };
+        #[cfg(feature = "encode")]
+        if let Some(mut w) = self.out.take().and_then(|o| o.writer) {
+            w.write(&data);
+            tokens.shrink_to_fit();
+            return (w.into_bytes(), tokens, self.chunks);
+        }
         // (the room grown into given back: up to as much again as the data, held as long as it)
         data.shrink_to_fit();
         tokens.shrink_to_fit();
-        (data, tokens, self.chunks)
+        (data.into(), tokens, self.chunks)
     }
 }
+
+/// The data of a [`Collect`] going out as it is made: the writer (once there is more than
+/// [`STORE_FROM`] bytes of it), and how many bytes are before what the collector holds.
+#[cfg(feature = "encode")]
+struct Out {
+    writer: Option<aqr_formula::store::Writer>,
+    base: usize,
+}
+
+/// Bytes of data from which [`Collect`] writes it out as it is made, where told to.
+const STORE_FROM: usize = 1 << 20;
+
+/// Bytes of the window of data that [`Collect`] holds where the data is written out as it is
+/// made: [`HISTORY`] bytes back, and a stored block's (65,535 at most) or a match's (with its
+/// overshoot) beyond [`STORE_FROM`].
+const STORE_WINDOW: usize = HISTORY + STORE_FROM + 65535 + ROOM;
 
 impl<const HEAD: bool> Sink for Collect<HEAD> {
     #[inline(always)]
     fn reserve(&mut self) {
         if self.data.2 - self.data.1 < ROOM {
-            self.data = grow(self.data, ROOM);
+            self.room(ROOM);
         }
         if self.tokens.2 - self.tokens.1 < 3 {
             self.tokens = grow(self.tokens, 3);
@@ -452,7 +539,7 @@ impl<const HEAD: bool> Sink for Collect<HEAD> {
 
     fn stored(&mut self, bytes: &[u8]) {
         if self.data.2 - self.data.1 < bytes.len() + ROOM {
-            self.data = grow(self.data, bytes.len() + ROOM);
+            self.room(bytes.len() + ROOM);
         }
         // SAFETY: room made just above.
         unsafe {
@@ -469,34 +556,44 @@ pub fn parse(raw: &[u8]) -> Result<Flat> {
 
 /// Parses `raw`, with segments of about `segment` bytes in [`Stats`].
 pub fn parse_segments(raw: &[u8], segment: usize) -> Result<Flat> {
-    parse_segments_max(raw, segment, usize::MAX, 0)
+    parse_segments_max(raw, segment, usize::MAX, 0, false)
 }
 
-/// [`parse_segments`] refusing data of more than `max` bytes (as [`parse_head_max`] does).
-pub fn parse_segments_max(raw: &[u8], segment: usize, max: usize, size: usize) -> Result<Flat> {
+/// [`parse_segments`] refusing data of more than `max` bytes (as [`parse_head_max`] does); the
+/// data written to aqr-formula's store as it is made where `store` (with the feature `encode`),
+/// rather than held.
+pub fn parse_segments_max(
+    raw: &[u8],
+    segment: usize,
+    max: usize,
+    size: usize,
+    store: bool,
+) -> Result<Flat> {
     collect(
         raw,
         segment,
         max,
-        Collect::<false>::new(room(raw, max, size), raw.len(), usize::MAX),
+        Collect::<false>::new(room(raw, max, size), raw.len(), usize::MAX, store),
     )
 }
 
 /// [`parse_segments`] keeping only the tokens that start before `prefix` bytes of data, and
 /// in runs further on ([`Flat::chunks`]): all else (the data, the blocks, the statistics) as
-/// it gives; refusing data of more than `max` bytes.
+/// it gives; refusing data of more than `max` bytes; the data written to aqr-formula's store as
+/// it is made where `store` (as [`parse_segments_max`]).
 pub fn parse_segments_head(
     raw: &[u8],
     segment: usize,
     prefix: usize,
     max: usize,
     size: usize,
+    store: bool,
 ) -> Result<Flat> {
     collect(
         raw,
         segment,
         max,
-        Collect::<true>::new(room(raw, max, size), prefix / 2 + 64, prefix),
+        Collect::<true>::new(room(raw, max, size), prefix / 2 + 64, prefix, store),
     )
 }
 
@@ -1496,6 +1593,49 @@ fn data_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Parsing with the data written out as it is made (through a window) gives what parsing
+    /// it whole does: the data, the tokens kept, their runs, the cuts, the stored blocks, the
+    /// bytes after the stream.
+    #[test]
+    fn written_out_as_whole() {
+        use crate::zlib::{Params, compress};
+        let text: Vec<u8> = (0..300_000)
+            .flat_map(|i| format!("line {} of {}\n", i % 977, i % 13).into_bytes())
+            .collect();
+        let mut d = text.clone();
+        d.extend(aqr_common::rng::noise(1_500_000));
+        d.extend(&text[..2_000_000]);
+        for level in [1, 6, 9] {
+            let raw = compress(
+                &d,
+                Params {
+                    level,
+                    ..Params::default()
+                },
+            )
+            .unwrap();
+            let raw = [&raw[..], b"after"].concat();
+            for head in [false, true] {
+                let parse = |store| match head {
+                    true => parse_segments_head(&raw, 1 << 20, 16 << 10, usize::MAX, 0, store),
+                    false => parse_segments_max(&raw, 1 << 20, usize::MAX, 0, store),
+                };
+                let (a, b) = (parse(false).unwrap(), parse(true).unwrap());
+                assert_eq!(a.data, d);
+                assert!(!a.skips.is_empty() && a.data.len() > 4 * STORE_FROM);
+                assert!(a.data == b.data, "level {level}");
+                assert_eq!(a.tokens, b.tokens);
+                assert_eq!(a.chunks, b.chunks);
+                assert_eq!(a.skips, b.skips);
+                assert_eq!(
+                    (a.stats.cuts, a.stats.cut_pos),
+                    (b.stats.cuts, b.stats.cut_pos)
+                );
+                assert_eq!(a.stream.trailing, b.stream.trailing);
+            }
+        }
+    }
 
     /// [`data`] gives the data of streams of every block type (fixed, dynamic, stored; matches
     /// overlapping themselves), as [`parse`] does, and refuses a length not the data's, bytes

@@ -33,7 +33,7 @@ fn inflate(zlib: &[u8]) -> Result<Vec<u8>> {
         return err("short zlib stream");
     }
     let f = aqr_flate::inflate::parse(&zlib[2..]).map_err(|e| Error(format!("zip channel: {e}")))?;
-    Ok(f.data)
+    Ok(f.data.into())
 }
 
 /// Undoes the row-wise delta of "ZIP with prediction".

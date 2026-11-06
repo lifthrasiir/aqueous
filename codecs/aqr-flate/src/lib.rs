@@ -248,6 +248,10 @@ pub struct Options {
     /// The bytes of data that the stream's container tells (0: none), made room for at once
     /// rather than as it comes: a wrong size costs only more room made later.
     pub size: usize,
+    /// Write the data of a long stream to aqr-formula's store as it is made (with the feature
+    /// `encode`; [`aqr_formula::store::Writer`]) rather than hold it: [`Parsed::data`] is then
+    /// a mapping of it, and [`Parsed::deconstruct_bytes`] gives it as it is.
+    pub store: bool,
 }
 
 impl Options {
@@ -280,6 +284,7 @@ impl Default for Options {
             verify: false,
             max_data: usize::MAX,
             size: 0,
+            store: false,
         }
     }
 }
@@ -595,8 +600,9 @@ impl Flat {
         verify: bool,
         max: usize,
         size: usize,
+        store: bool,
     ) -> Result<Flat> {
-        let f = inflate::parse_segments_max(raw, segment, max, size)?;
+        let f = inflate::parse_segments_max(raw, segment, max, size, store)?;
         if verify {
             // The writer must round-trip what the parser saw, or nothing downstream can.
             let mut stream = f.stream.clone();
@@ -706,7 +712,14 @@ impl<'a> Parsed<'a> {
         let streamed = opts.profile < ADAPTIVE && !opts.verify;
         let mut f = if streamed {
             let prefix = opts.prefix.max(ESTIMATE_FIRST);
-            inflate::parse_segments_head(raw, opts.segment, prefix, opts.max_data, opts.size)?
+            inflate::parse_segments_head(
+                raw,
+                opts.segment,
+                prefix,
+                opts.max_data,
+                opts.size,
+                opts.store,
+            )?
         } else {
             Flat::new(
                 raw,
@@ -715,6 +728,7 @@ impl<'a> Parsed<'a> {
                 opts.verify,
                 opts.max_data,
                 opts.size,
+                opts.store,
             )?
         };
         let raw = if head {
@@ -836,6 +850,26 @@ impl<'a> Parsed<'a> {
     /// Deconstructs the stream with `opts` (those it was parsed with), as
     /// [`deconstruct_hinted`] does.
     pub fn deconstruct(self, opts: &Options, hints: &Hints) -> Result<(Vec<u8>, Vec<u8>, Report)> {
+        self.deconstruct_data(opts, hints)
+            .map(|(d, m, r)| (d.into(), m, r))
+    }
+
+    /// [`Parsed::deconstruct`] giving the data as it was made: in aqr-formula's store where it
+    /// was written there ([`Options::store`]).
+    #[cfg(feature = "encode")]
+    pub fn deconstruct_bytes(
+        self,
+        opts: &Options,
+        hints: &Hints,
+    ) -> Result<(aqr_formula::Bytes, Vec<u8>, Report)> {
+        self.deconstruct_data(opts, hints)
+    }
+
+    fn deconstruct_data(
+        self,
+        opts: &Options,
+        hints: &Hints,
+    ) -> Result<(inflate::Data, Vec<u8>, Report)> {
         self.chosen(opts)?;
         let chosen = self.chosen.into_inner().expect("chosen");
         deconstruct_parsed(
@@ -1006,7 +1040,7 @@ fn deconstruct_parsed(
     chosen: Chosen,
     opts: &Options,
     hints: &Hints,
-) -> Result<(Vec<u8>, Vec<u8>, Report)> {
+) -> Result<(inflate::Data, Vec<u8>, Report)> {
     let Chosen {
         headers,
         fp,
@@ -1968,7 +2002,7 @@ pub struct Prepared {
 impl Prepared {
     /// The first `prefix` bytes of data of a raw stream.
     pub fn new(raw: &[u8], prefix: usize) -> Result<Prepared> {
-        let f = Flat::new(raw, usize::MAX, 1, false, usize::MAX, 0)?;
+        let f = Flat::new(raw, usize::MAX, 1, false, usize::MAX, 0, false)?;
         Ok(Prepared::from_flat(&f, prefix))
     }
 
@@ -2091,7 +2125,7 @@ impl Prepared {
 /// A stream's fingerprint and the estimated cost in bits of each rule over the first
 /// `prefix` bytes of its data, for deriving rule catalogs.
 pub fn analyze(raw: &[u8], rules: &[Rule], prefix: usize) -> Result<((u64, u64), Vec<f64>, usize)> {
-    let f = Flat::new(raw, usize::MAX, 1, false, usize::MAX, 0)?;
+    let f = Flat::new(raw, usize::MAX, 1, false, usize::MAX, 0, false)?;
     let fp = fingerprint(&f, headers(&f).1.unwrap_or(u32::MAX));
     let mut p = Prepared::from_flat(&f, prefix);
     let costs = rules.iter().map(|&r| p.cost(r)).collect::<Result<_>>()?;
@@ -2645,7 +2679,7 @@ mod tests {
             .unwrap()
             .compress(&d)
             .unwrap();
-        let f = Flat::new(&raw, 16 << 10, 1, false, usize::MAX, 0).unwrap();
+        let f = Flat::new(&raw, 16 << 10, 1, false, usize::MAX, 0, false).unwrap();
         let ranges = segment_ranges(&f);
         assert!(ranges.len() > 4);
         let (catalog, priors) = (
