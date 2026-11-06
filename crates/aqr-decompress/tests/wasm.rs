@@ -1793,6 +1793,31 @@ fn obj_plans_hold() {
     }
 }
 
+/// bcn-recons lays its memory out as a stack, its limit its plan of the instance and as many
+/// tasks at once as their slots allow: of each format, mipmaps, layers, sides not of whole
+/// blocks, and surfaces in stripes (16 of the largest, more than the slots).
+#[test]
+fn bcn_plans_hold() {
+    use aqr_tex::layout::{Format, Layout};
+    let mut rng = aqr_common::rng::Rng::new(11);
+    for (format, width, height, mips, layers) in [
+        (Format::Bc1, 1024, 1024, 3, 1),
+        (Format::Bc5, 1024, 520, 2, 2),
+        (Format::Bc3, 2048, 2048, 2, 1),
+        (Format::Bc2, 64, 64, 7, 1),
+        (Format::Bc4, 1030, 514, 4, 1),
+        (Format::Bc1, 2048, 64, 1, 1),
+    ] {
+        let l = Layout { format, width, height, mips, layers };
+        let blocks = rng.bytes(l.len() as usize);
+        let (main, apart, _) = aqr_tex::texture::encode(&l, &blocks, 4);
+        let mut f = Formula::default();
+        let inputs = vec![f.push("bcn/coded", main), f.push("bcn/stripes", apart)];
+        f.root = Node::apply(aqr_tex::formula::MODULE, l.to_bytes(), inputs, l.len());
+        plan_holds(&format!("bcn {format:?} {width}x{height} {mips} {layers}"), f, &blocks);
+    }
+}
+
 /// git-pack-recons and git-pack-index-recons lay their memory out as stacks, their limits their
 /// plans: of a pack of more entries than the stack's holes, alone and with its index and reverse
 /// index after it.

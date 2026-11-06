@@ -22,9 +22,77 @@ pub struct Plane<const C: usize> {
     px: Vec<[u8; C]>,
 }
 
+/// Buffers that the models' surfaces and the planes upsampled work in, kept to be used again:
+/// the endpoints and choices of a surface's blocks, and the columns and rows of an upsampling.
+#[derive(Default)]
+pub struct Work {
+    keys: Vec<u32>,
+    choices: Vec<u8>,
+    cols: Vec<(u32, u32)>,
+    across: Vec<u16>,
+}
+
+impl Work {
+    /// Room for surfaces of `blocks` blocks, upsamplings to `cols` columns of `across` values.
+    pub fn with_capacity(blocks: usize, cols: usize, across: usize) -> Work {
+        Work {
+            keys: Vec::with_capacity(blocks),
+            choices: Vec::with_capacity(blocks),
+            cols: Vec::with_capacity(cols),
+            across: Vec::with_capacity(across),
+        }
+    }
+
+    /// Bytes that [`Work::with_capacity`] takes of [`aqr_api::stack`].
+    pub fn plan(blocks: usize, cols: usize, across: usize) -> u64 {
+        use aqr_api::stack::block;
+        block(4 * blocks as u64) + block(blocks as u64) + block(8 * cols as u64) + block(2 * across as u64)
+    }
+
+    /// The keys and choices of a surface of `n` blocks (none read before it is written).
+    fn blocks(&mut self, n: usize) -> (&mut [u32], &mut [u8]) {
+        self.keys.clear();
+        self.keys.resize(n, 0);
+        self.choices.clear();
+        self.choices.resize(n, NONE);
+        (&mut self.keys, &mut self.choices)
+    }
+}
+
+/// The values of `across` that upsampling a plane of `h` rows to the rows from `y0`, `h1` of
+/// them, takes for each value of a row (as [`Plane::upsampled`] does).
+pub fn across_rows(h: usize, y0: usize, h1: usize) -> usize {
+    let lo = (y0 / 2).min(h - 1).saturating_sub(1);
+    let hi = ((y0 + h1).saturating_sub(1) / 2 + 1).min(h - 1);
+    hi + 1 - lo
+}
+
 impl<const C: usize> Plane<C> {
-    fn new(bw: usize, bh: usize) -> Self {
-        Plane { w: bw * 4, h: bh * 4, px: vec![[0; C]; bw * bh * 16] }
+    /// A plane of `bw` × `bh` blocks in `px` (cleared, and filled within its room).
+    fn new_in(mut px: Vec<[u8; C]>, bw: usize, bh: usize) -> Self {
+        px.clear();
+        px.resize(bw * bh * 16, [0; C]);
+        Plane { w: bw * 4, h: bh * 4, px }
+    }
+
+    /// The plane's buffer, to be used again.
+    pub fn into_px(self) -> Vec<[u8; C]> {
+        self.px
+    }
+
+    /// The plane of nothing yet of a surface `bw` blocks wide, in `px` (to be grown).
+    pub fn empty_in(mut px: Vec<[u8; C]>, bw: usize) -> Self {
+        px.clear();
+        Plane { w: bw * 4, h: 0, px }
+    }
+
+    /// The plane grown by `bh` rows of blocks below it (within its room); the first of them.
+    fn grow(&mut self, bw: usize, bh: usize) -> usize {
+        debug_assert_eq!(self.w, bw * 4);
+        let y0 = self.h;
+        self.px.resize(self.px.len() + bw * bh * 16, [0; C]);
+        self.h += bh * 4;
+        y0
     }
 
     #[inline(always)]
@@ -40,8 +108,8 @@ impl<const C: usize> Plane<C> {
     /// The plane of the rows of blocks `rows` of a surface `bw` blocks wide from this one, of
     /// the next smaller mipmap, bilinearly: each pixel (x, y) of the surface is between four of
     /// this one, (x/2, y/2) and the one beside it towards (x, y) across and down (the sides
-    /// repeated), weighted 9, 3, 3 and 1.
-    pub fn upsampled(&self, bw: usize, rows: std::ops::Range<usize>) -> Plane<C> {
+    /// repeated), weighted 9, 3, 3 and 1. In `px`, with `work`.
+    pub fn upsampled(&self, bw: usize, rows: std::ops::Range<usize>, px: Vec<[u8; C]>, work: &mut Work) -> Plane<C> {
         let (w, y0, h) = (bw * 4, rows.start * 4, rows.len() * 4);
         let near = |v: usize, n: usize| {
             let c = (v / 2).min(n - 1);
@@ -53,18 +121,25 @@ impl<const C: usize> Plane<C> {
         let hi = ((y0 + h).saturating_sub(1) / 2 + 1).min(self.h - 1);
         // (the columns of each x taken once for all rows; then rows of channels flat, which
         // the compiler vectorizes)
-        let cols: Vec<(usize, usize)> = (0..w).map(|x| near(x, self.w)).collect();
+        let cols = &mut work.cols;
+        cols.clear();
+        cols.extend((0..w).map(|x| near(x, self.w)).map(|(c, n)| (c as u32, n as u32)));
         let wc = w * C;
-        let mut across = vec![0u16; (hi + 1 - lo) * wc];
+        let across = &mut work.across;
+        across.clear();
+        across.resize((hi + 1 - lo) * wc, 0);
         for (r, row) in across.chunks_exact_mut(wc).enumerate() {
             let src = &self.px[(lo + r) * self.w..][..self.w];
-            for (o, &(c, n)) in row.as_chunks_mut::<C>().0.iter_mut().zip(&cols) {
+            for (o, &(c, n)) in row.as_chunks_mut::<C>().0.iter_mut().zip(cols.iter()) {
+                let (c, n) = (c as usize, n as usize);
                 for k in 0..C {
                     o[k] = 3 * src[c][k] as u16 + src[n][k] as u16;
                 }
             }
         }
-        let mut px = vec![[0u8; C]; w * h];
+        let mut px = px;
+        px.clear();
+        px.resize(w * h, [0u8; C]);
         for (y, row) in px.chunks_exact_mut(w).enumerate() {
             let (c, n) = near(y0 + y, self.h);
             let (a, b) = (&across[(c - lo) * wc..][..wc], &across[(n - lo) * wc..][..wc]);
@@ -73,17 +148,6 @@ impl<const C: usize> Plane<C> {
             }
         }
         Plane { w, h, px }
-    }
-
-    /// The planes of stripes of a surface, one above another, as the plane of the surface.
-    pub fn stack(stripes: Vec<Plane<C>>) -> Plane<C> {
-        let w = stripes.first().map_or(0, |p| p.w);
-        let mut px = Vec::with_capacity(stripes.iter().map(|p| p.px.len()).sum());
-        for p in stripes {
-            debug_assert_eq!(p.w, w);
-            px.extend(p.px);
-        }
-        Plane { w, h: px.len() / w.max(1), px }
     }
 
     /// Pixel (x, y) predicted by those before it: by MED (LOCO-I's median edge detector) of the
@@ -139,8 +203,9 @@ fn len(v: u32) -> usize {
 /// [`RECENT`] or more forgotten (which changes the rank of no other key).
 #[derive(Clone)]
 pub struct Recent {
-    /// The time of each key's last use.
-    last: std::collections::HashMap<u32, u32, Fast>,
+    /// The time of each key's last use: a table of [`SLOTS`] (key, time), by open addressing
+    /// (a time of [`EMPTY`] for none), at most half of them used.
+    last: Vec<(u32, u32)>,
     /// The key used at each time.
     keys: Vec<u32>,
     /// 1 at the times that are some key's last use, a bit each (`WINDOW / 64` words), and the
@@ -158,31 +223,15 @@ const WINDOW: usize = 4 * RECENT as usize;
 /// Words of a group of times.
 const GROUP: usize = 16;
 const GROUPS: usize = WINDOW / 64 / GROUP;
+/// Entries of the table of keys (twice the keys of a window), and the time of an empty one.
+const SLOTS: usize = 2 * WINDOW;
+const EMPTY: u32 = u32::MAX;
 
-/// A hash of a key by a multiplication: keys are not chosen against it (the encoder sees
+/// The slot of a key by a multiplication: keys are not chosen against it (the encoder sees
 /// them first, and a decoder of a crafted stream only runs slower).
-#[derive(Default, Clone, Copy)]
-pub struct Fast(u64);
-
-impl std::hash::BuildHasher for Fast {
-    type Hasher = Fast;
-    fn build_hasher(&self) -> Fast {
-        Fast(0)
-    }
-}
-
-impl std::hash::Hasher for Fast {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-    fn write(&mut self, b: &[u8]) {
-        for &x in b {
-            self.write_u32(x as u32);
-        }
-    }
-    fn write_u32(&mut self, v: u32) {
-        self.0 = (self.0 ^ v as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(29);
-    }
+#[inline(always)]
+fn slot(key: u32) -> usize {
+    ((key as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 40) as usize & (SLOTS - 1)
 }
 
 impl Default for Recent {
@@ -194,7 +243,7 @@ impl Default for Recent {
 impl Recent {
     pub fn new() -> Recent {
         Recent {
-            last: Default::default(),
+            last: vec![(0, EMPTY); SLOTS],
             keys: Vec::with_capacity(WINDOW),
             bits: vec![0; WINDOW / 64],
             groups: vec![0; GROUPS],
@@ -202,25 +251,67 @@ impl Recent {
         }
     }
 
-    /// The window renumbered: the last [`RECENT`] keys used, in order, at times from 0.
+    /// As [`Colour::copy_from`].
+    pub fn copy_from(&mut self, o: &Recent) {
+        self.last.clone_from(&o.last);
+        self.keys.clone_from(&o.keys);
+        self.bits.clone_from(&o.bits);
+        self.groups.clone_from(&o.groups);
+        self.live = o.live;
+    }
+
+    /// Bytes that [`Recent::new`] takes of [`aqr_api::stack`].
+    pub fn plan() -> u64 {
+        use aqr_api::stack::block;
+        block(8 * SLOTS as u64) + block(4 * WINDOW as u64) + block(WINDOW as u64 / 8) + block(4 * GROUPS as u64)
+    }
+
+    /// The table's entry of `key`: where it is, or where it goes.
+    #[inline(always)]
+    fn find(&self, key: u32) -> usize {
+        let mut i = slot(key);
+        while self.last[i].1 != EMPTY && self.last[i].0 != key {
+            i = (i + 1) & (SLOTS - 1);
+        }
+        i
+    }
+
+    /// The time of `key`'s last use, if any.
+    #[inline(always)]
+    fn get(&self, key: u32) -> Option<u32> {
+        let (_, t) = self.last[self.find(key)];
+        (t != EMPTY).then_some(t)
+    }
+
+    /// The window renumbered: the last [`RECENT`] keys used, in order, at times from 0. (They
+    /// are gathered at the end of the window as it is read from the end, then moved to its
+    /// start.)
     fn compact(&mut self) {
-        let mut kept: Vec<u32> = Vec::with_capacity(RECENT as usize);
-        for (t, &k) in self.keys.iter().enumerate().rev() {
-            if kept.len() == RECENT as usize {
+        let mut n = 0;
+        for t in (0..self.keys.len()).rev() {
+            if n == RECENT as usize {
                 break;
             }
-            if self.last.get(&k) == Some(&(t as u32)) {
-                kept.push(k);
+            let k = self.keys[t];
+            if self.get(k) == Some(t as u32) {
+                n += 1;
+                let at = self.keys.len() - n;
+                self.keys[at] = k;
             }
         }
-        kept.reverse();
-        self.last.clear();
-        self.keys.clear();
+        let from = self.keys.len() - n;
+        self.keys.copy_within(from.., 0);
+        self.keys.truncate(n);
+        self.last.fill((0, EMPTY));
         self.bits.fill(0);
         self.groups.fill(0);
         self.live = 0;
-        for k in kept {
-            self.touch(k);
+        for t in 0..n {
+            let k = self.keys[t];
+            let i = self.find(k);
+            self.last[i] = (k, t as u32);
+            self.live += 1;
+            self.flip(t, 1);
         }
     }
 
@@ -247,7 +338,7 @@ impl Recent {
 
     /// The rank of `key`, if it was used.
     pub fn rank(&self, key: u32) -> Option<u32> {
-        let &t = self.last.get(&key)?;
+        let t = self.get(key)?;
         Some(self.after(t as usize))
     }
 
@@ -284,9 +375,10 @@ impl Recent {
             self.compact();
         }
         let now = self.keys.len();
-        match self.last.insert(key, now as u32) {
-            Some(t) => self.flip(t as usize, -1),
-            None => self.live += 1,
+        let i = self.find(key);
+        match std::mem::replace(&mut self.last[i], (key, now as u32)).1 {
+            EMPTY => self.live += 1,
+            t => self.flip(t as usize, -1),
         }
         self.keys.push(key);
         self.flip(now, 1);
@@ -311,10 +403,30 @@ struct Choice {
     rank_next: Vec<Bit>,
 }
 
+/// Bytes of [`aqr_api::stack`] of a vector of `n` adaptive bits.
+fn bits(n: usize) -> u64 {
+    aqr_api::stack::block((n * size_of::<Bit>()) as u64)
+}
+
 impl Choice {
+    const SIZES: [usize; 5] = [25 * 2, 25, 5, 16, 16];
+
     fn new() -> Choice {
         let v = |n| vec![Bit::default(); n];
-        Choice { left: v(25 * 2), up: v(25), hit: v(5), rank: v(16), rank_next: v(16) }
+        let [l, u, h, r, n] = Self::SIZES;
+        Choice { left: v(l), up: v(u), hit: v(h), rank: v(r), rank_next: v(n) }
+    }
+
+    fn plan() -> u64 {
+        Self::SIZES.iter().map(|&n| bits(n)).sum()
+    }
+
+    fn copy_from(&mut self, o: &Choice) {
+        self.left.clone_from(&o.left);
+        self.up.clone_from(&o.up);
+        self.hit.clone_from(&o.hit);
+        self.rank.clone_from(&o.rank);
+        self.rank_next.clone_from(&o.rank_next);
     }
 
     /// The choice of a block whose endpoints are `key` (when encoding), between `left`, `up`
@@ -400,34 +512,45 @@ const COLOUR_IDX: usize = 16 * 16 * 4 * 2;
 impl Colour {
     /// The plane of the colour blocks at the start of each `stride` of `blocks`, of `bw` × `bh`
     /// blocks (as [`Colour::surface`] gives it).
-    pub fn plane(four_always: bool, blocks: &[u8], stride: usize, (bw, bh): (usize, usize)) -> Plane<3> {
-        let mut plane = Plane::<3>::new(bw, bh);
+    pub fn plane(four_always: bool, blocks: &[u8], stride: usize, (bw, bh): (usize, usize), plane: &mut Plane<3>) {
+        let y0 = plane.grow(bw, bh);
         for (i, b) in blocks.chunks(stride).take(bw * bh).enumerate() {
             let (c0, c1) = (u16::from_le_bytes([b[0], b[1]]), u16::from_le_bytes([b[2], b[3]]));
             let pal = bc::colours(c0, c1, four_always).map(|c| c.map(|v| v as u8));
             let ix = u32::from_le_bytes(b[4..8].try_into().unwrap());
             for p in 0..16 {
-                plane.set(i % bw * 4 + p % 4, i / bw * 4 + p / 4, pal[(ix >> (2 * p) & 3) as usize]);
+                plane.set(i % bw * 4 + p % 4, y0 + i / bw * 4 + p / 4, pal[(ix >> (2 * p) & 3) as usize]);
             }
         }
-        plane
     }
+
+    const SIZES: [usize; 4] = [6 * 8 * 8 * 16, 6 * 8 * 8 * 16, COLOUR_IDX * 4, 25 * 4];
 
     pub fn new(four_always: bool) -> Colour {
         let v = |n| vec![Bit::default(); n];
-        Colour {
-            four_always,
-            choice: Choice::new(),
-            res: v(6 * 8 * 8 * 16),
-            res_next: v(6 * 8 * 8 * 16),
-            idx: v(COLOUR_IDX * 4),
-            flat: v(25 * 4),
-        }
+        let [r, n, i, f] = Self::SIZES;
+        Colour { four_always, choice: Choice::new(), res: v(r), res_next: v(n), idx: v(i), flat: v(f) }
+    }
+
+    /// Bytes that [`Colour::new`] takes of [`aqr_api::stack`].
+    pub fn plan() -> u64 {
+        Choice::plan() + Self::SIZES.iter().map(|&n| bits(n)).sum::<u64>()
+    }
+
+    /// These models made those of `o`, in their vectors.
+    pub fn copy_from(&mut self, o: &Colour) {
+        self.four_always = o.four_always;
+        self.choice.copy_from(&o.choice);
+        self.res.clone_from(&o.res);
+        self.res_next.clone_from(&o.res_next);
+        self.idx.clone_from(&o.idx);
+        self.flat.clone_from(&o.flat);
     }
 
     /// Codes the colour blocks of a surface of `bw` × `bh` blocks, the 8 bytes of each at the
     /// start of each `stride` of `blocks` (given when encoding, filled in when decoding), the
-    /// surface before being `prev`; gives its plane.
+    /// surface before being `prev`; gives its plane (in `px`, with `work`).
+    #[allow(clippy::too_many_arguments)]
     pub fn surface(
         &mut self,
         s: &mut impl Side,
@@ -436,10 +559,10 @@ impl Colour {
         (bw, bh): (usize, usize),
         prev: Option<&Plane<3>>,
         recent: &mut Recent,
+        (px, work): (Vec<[u8; 3]>, &mut Work),
     ) -> Result<Plane<3>> {
-        let mut plane = Plane::<3>::new(bw, bh);
-        let mut keys = vec![0u32; bw * bh];
-        let mut choices = vec![NONE; bw * bh];
+        let mut plane = Plane::<3>::new_in(px, bw, bh);
+        let (keys, choices) = work.blocks(bw * bh);
         for by in 0..bh {
             for bx in 0..bw {
                 let i = by * bw + bx;
@@ -595,32 +718,43 @@ const VALUE_IDX: usize = 20 * 20 * 4 * 2;
 
 impl Value {
     /// As [`Colour::plane`], of BC4 blocks.
-    pub fn plane(blocks: &[u8], stride: usize, (bw, bh): (usize, usize)) -> Plane<1> {
-        let mut plane = Plane::<1>::new(bw, bh);
+    pub fn plane(blocks: &[u8], stride: usize, (bw, bh): (usize, usize), plane: &mut Plane<1>) {
+        let y0 = plane.grow(bw, bh);
         for (i, b) in blocks.chunks(stride).take(bw * bh).enumerate() {
             let vals = bc::values(b[0], b[1]);
             let mut ix = [0; 8];
             ix[..6].copy_from_slice(&b[2..8]);
             let ix = u64::from_le_bytes(ix);
             for p in 0..16 {
-                plane.set(i % bw * 4 + p % 4, i / bw * 4 + p / 4, [vals[(ix >> (3 * p) & 7) as usize] as u8]);
+                plane.set(i % bw * 4 + p % 4, y0 + i / bw * 4 + p / 4, [vals[(ix >> (3 * p) & 7) as usize] as u8]);
             }
         }
-        plane
     }
+
+    const SIZES: [usize; 4] = [2 * 8 * 16 * 16, 2 * 8 * 16 * 16, VALUE_IDX * 8, 81 * 8];
 
     pub fn new() -> Value {
         let v = |n| vec![Bit::default(); n];
-        Value {
-            choice: Choice::new(),
-            res: v(2 * 8 * 16 * 16),
-            res_next: v(2 * 8 * 16 * 16),
-            idx: v(VALUE_IDX * 8),
-            flat: v(81 * 8),
-        }
+        let [r, n, i, f] = Self::SIZES;
+        Value { choice: Choice::new(), res: v(r), res_next: v(n), idx: v(i), flat: v(f) }
+    }
+
+    /// Bytes that [`Value::new`] takes of [`aqr_api::stack`].
+    pub fn plan() -> u64 {
+        Choice::plan() + Self::SIZES.iter().map(|&n| bits(n)).sum::<u64>()
+    }
+
+    /// As [`Colour::copy_from`].
+    pub fn copy_from(&mut self, o: &Value) {
+        self.choice.copy_from(&o.choice);
+        self.res.clone_from(&o.res);
+        self.res_next.clone_from(&o.res_next);
+        self.idx.clone_from(&o.idx);
+        self.flat.clone_from(&o.flat);
     }
 
     /// As [`Colour::surface`], of the BC4 blocks at the start of each `stride` of `blocks`.
+    #[allow(clippy::too_many_arguments)]
     pub fn surface(
         &mut self,
         s: &mut impl Side,
@@ -629,10 +763,10 @@ impl Value {
         (bw, bh): (usize, usize),
         prev: Option<&Plane<1>>,
         recent: &mut Recent,
+        (px, work): (Vec<[u8; 1]>, &mut Work),
     ) -> Result<Plane<1>> {
-        let mut plane = Plane::<1>::new(bw, bh);
-        let mut keys = vec![0u32; bw * bh];
-        let mut choices = vec![NONE; bw * bh];
+        let mut plane = Plane::<1>::new_in(px, bw, bh);
+        let (keys, choices) = work.blocks(bw * bh);
         for by in 0..bh {
             for bx in 0..bw {
                 let i = by * bw + bx;
@@ -775,19 +909,28 @@ pub struct Alpha {
 
 impl Alpha {
     /// As [`Colour::plane`], of BC2's alpha.
-    pub fn plane(blocks: &[u8], stride: usize, (bw, bh): (usize, usize)) -> Plane<1> {
-        let mut plane = Plane::<1>::new(bw, bh);
+    pub fn plane(blocks: &[u8], stride: usize, (bw, bh): (usize, usize), plane: &mut Plane<1>) {
+        let y0 = plane.grow(bw, bh);
         for (i, b) in blocks.chunks(stride).take(bw * bh).enumerate() {
             let v = u64::from_le_bytes(b[..8].try_into().unwrap());
             for p in 0..16 {
-                plane.set(i % bw * 4 + p % 4, i / bw * 4 + p / 4, [(v >> (4 * p) & 15) as u8]);
+                plane.set(i % bw * 4 + p % 4, y0 + i / bw * 4 + p / 4, [(v >> (4 * p) & 15) as u8]);
             }
         }
-        plane
     }
 
     pub fn new() -> Alpha {
         Alpha { a: vec![Bit::default(); 17 * 17 * 16] }
+    }
+
+    /// Bytes that [`Alpha::new`] takes of [`aqr_api::stack`].
+    pub fn plan() -> u64 {
+        bits(17 * 17 * 16)
+    }
+
+    /// As [`Colour::copy_from`].
+    pub fn copy_from(&mut self, o: &Alpha) {
+        self.a.clone_from(&o.a);
     }
 
     /// As [`Colour::surface`], of the 8 bytes of alpha at the start of each `stride` of
@@ -799,8 +942,9 @@ impl Alpha {
         stride: usize,
         (bw, bh): (usize, usize),
         prev: Option<&Plane<1>>,
+        px: Vec<[u8; 1]>,
     ) -> Plane<1> {
-        let mut plane = Plane::<1>::new(bw, bh);
+        let mut plane = Plane::<1>::new_in(px, bw, bh);
         for by in 0..bh {
             for bx in 0..bw {
                 let b: &mut [u8; 8] = (&mut blocks[(by * bw + bx) * stride..][..8]).try_into().unwrap();
