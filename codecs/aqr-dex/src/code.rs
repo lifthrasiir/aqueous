@@ -166,9 +166,11 @@ pub fn payload_head(ident: u16) -> usize {
     if ident == 0x0300 { 3 } else { 1 }
 }
 
-/// The recent indices of each kind, the most recent first, and the last that missed.
+/// The recent indices of each kind (as many as `len` tells), the most recent first, and the
+/// last that missed.
 pub struct Caches {
-    recent: [Vec<u32>; KINDS],
+    recent: [[u32; CACHE]; KINDS],
+    len: [usize; KINDS],
     last: [u32; KINDS],
 }
 
@@ -177,44 +179,53 @@ pub const CACHE: usize = 128;
 
 impl Default for Caches {
     fn default() -> Self {
-        Caches { recent: Default::default(), last: [0; KINDS] }
+        Caches { recent: [[0; CACHE]; KINDS], len: [0; KINDS], last: [0; KINDS] }
     }
 }
 
 impl Caches {
+    /// `v` to the front of the cache of `k`, from its place `i` there (none: dropping the last
+    /// where it is full).
+    fn used(&mut self, k: Kind, i: Option<usize>, v: u32) {
+        let (r, n) = (&mut self.recent[k as usize], &mut self.len[k as usize]);
+        let end = match i {
+            Some(i) => i,
+            None => {
+                *n = (*n + 1).min(CACHE);
+                *n - 1
+            }
+        };
+        r.copy_within(..end, 1);
+        r[0] = v;
+    }
+
     /// Codes index `v` of kind `k` into `hit` and its stream of misses.
     pub fn encode(&mut self, k: Kind, v: u32, st: &mut St) {
-        let r = &mut self.recent[k as usize];
-        match r.iter().position(|&x| x == v) {
-            Some(i) => {
-                varint::put(&mut st[k.hits()], i as u64 + 1);
-                r.remove(i);
-            }
+        let r = &self.recent[k as usize][..self.len[k as usize]];
+        let at = r.iter().position(|&x| x == v);
+        match at {
+            Some(i) => varint::put(&mut st[k.hits()], i as u64 + 1),
             None => {
                 varint::put(&mut st[k.hits()], 0);
                 varint::put(&mut st[k.stream()], varint::zz(v as i64 - self.last[k as usize] as i64));
                 self.last[k as usize] = v;
-                r.truncate(CACHE - 1);
             }
         }
-        r.insert(0, v);
+        self.used(k, at, v);
     }
 
     /// An index of kind `k` from `hit` and its stream of misses, below `max` + 1.
     pub fn decode(&mut self, k: Kind, raw: &mut Raw, max: u32) -> Result<u32> {
         let i = raw[k.hits()].var()? as usize;
-        let r = &mut self.recent[k as usize];
-        let v = if i > 0 {
-            let v = *r.get(i - 1).ok_or_else(corrupt)?;
-            r.remove(i - 1);
-            v
+        let (v, at) = if i > 0 {
+            let r = &self.recent[k as usize][..self.len[k as usize]];
+            (*r.get(i - 1).ok_or_else(corrupt)?, Some(i - 1))
         } else {
             let v = crate::dex::moved(self.last[k as usize], raw[k.stream()].var()?, max)?;
             self.last[k as usize] = v;
-            r.truncate(CACHE - 1);
-            v
+            (v, None)
         };
-        r.insert(0, v);
+        self.used(k, at, v);
         Ok(v)
     }
 }
@@ -301,9 +312,9 @@ pub fn encode(u: &[u16], caches: &mut Caches, words: &[u8], st: &mut St) -> Opti
     Some(outs)
 }
 
-/// The `n` code units of an instruction array from the streams, appended to `out`; the most
+/// The `n` code units of an instruction array from the streams, written to `out`; the most
 /// words of arguments its invocations pass.
-pub fn decode(n: usize, caches: &mut Caches, words: &[u8], raw: &mut Raw, out: &mut Vec<u8>) -> Result<u64> {
+pub fn decode(n: usize, caches: &mut Caches, words: &[u8], raw: &mut Raw, out: &mut crate::dex::W) -> Result<u64> {
     let mut outs = 0;
     let mut i = 0;
     let mut ins = [0u16; 5];
@@ -321,11 +332,11 @@ pub fn decode(n: usize, caches: &mut Caches, words: &[u8], raw: &mut Raw, out: &
                 }
                 let total = payload_units(ident, &next[..head]).ok_or_else(corrupt)?;
                 let end = (i as u64).checked_add(total).filter(|&e| e <= n as u64).ok_or_else(corrupt)?;
-                out.extend_from_slice(&ident.to_le_bytes());
+                out.put(&ident.to_le_bytes())?;
                 for x in &next[..head] {
-                    out.extend_from_slice(&x.to_le_bytes());
+                    out.put(&x.to_le_bytes())?;
                 }
-                out.extend_from_slice(raw[s::INS_PAYLOAD].bytes(2 * (total as usize - 1 - head))?);
+                out.put(raw[s::INS_PAYLOAD].bytes(2 * (total as usize - 1 - head))?)?;
                 i = end as usize;
                 continue;
             }
@@ -364,7 +375,7 @@ pub fn decode(n: usize, caches: &mut Caches, words: &[u8], raw: &mut Raw, out: &
             set(&mut ins, fl, v);
         }
         for x in &ins[..units] {
-            out.extend_from_slice(&x.to_le_bytes());
+            out.put(&x.to_le_bytes())?;
         }
         i += units;
     }

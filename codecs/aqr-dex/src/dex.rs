@@ -510,7 +510,16 @@ pub fn param_words<'a>(
         }
         Some(w as u8)
     };
-    (0..(m.count as usize).min(b.len() / 8)).map(|i| words(i).unwrap_or(0)).collect()
+    let n = param_words_len(b.len(), m.count);
+    let mut out = Vec::with_capacity(n);
+    out.extend((0..n).map(|i| words(i).unwrap_or(0)));
+    out
+}
+
+/// The words of parameters [`param_words`] gives, of a file of `len` bytes and `methods`
+/// method ids.
+fn param_words_len(len: usize, methods: u32) -> usize {
+    (methods as usize).min(len / 8)
 }
 
 /// The offsets of the `count` debug info items from `off` in `d`.
@@ -550,7 +559,9 @@ pub fn debug_items(d: &[u8], off: usize, count: u32) -> Result<Vec<u32>> {
 pub struct Debug {
     pub offs: Vec<u32>,
     next: usize,
-    recent: Vec<usize>,
+    /// The most recent, as many as `len` tells, the most recent first.
+    recent: [usize; DEBUG_RECENT],
+    len: usize,
 }
 
 /// The debug info items [`Debug`] keeps as the most recent.
@@ -558,16 +569,23 @@ pub const DEBUG_RECENT: usize = 128;
 
 impl Debug {
     pub fn new(offs: Vec<u32>) -> Self {
-        Debug { offs, next: 0, recent: Vec::new() }
+        Debug { offs, next: 0, recent: [0; DEBUG_RECENT], len: 0 }
+    }
+
+    fn recent(&self) -> &[usize] {
+        &self.recent[..self.len]
     }
 
     fn used(&mut self, j: usize, at: Option<usize>) {
-        if let Some(i) = at {
-            self.recent.remove(i);
-        } else {
-            self.recent.truncate(DEBUG_RECENT - 1);
-        }
-        self.recent.insert(0, j);
+        let end = match at {
+            Some(i) => i,
+            None => {
+                self.len = (self.len + 1).min(DEBUG_RECENT);
+                self.len - 1
+            }
+        };
+        self.recent.copy_within(..end, 1);
+        self.recent[0] = j;
         if j == self.next {
             self.next += 1;
         }
@@ -579,21 +597,21 @@ impl Debug {
             return Some(0);
         }
         let j = self.offs.binary_search(&off).ok()?;
-        let at = self.recent.iter().position(|&r| r == j);
+        let at = self.recent().iter().position(|&r| r == j);
         let v = match at {
             _ if j == self.next => 1,
             Some(i) => 2 + i as u64,
-            None => 2 + self.recent.len() as u64 + j as u64,
+            None => 2 + self.len as u64 + j as u64,
         };
         self.used(j, at);
         Some(v)
     }
 
     pub fn decode(&mut self, v: u64) -> Result<u32> {
-        let n = self.recent.len() as u64;
+        let n = self.len as u64;
         let (j, at) = match v {
             0 => return Ok(0),
-            1 => (self.next, self.recent.iter().position(|&r| r == self.next)),
+            1 => (self.next, self.recent().iter().position(|&r| r == self.next)),
             _ if v - 2 < n => (self.recent[(v - 2) as usize], Some((v - 2) as usize)),
             _ => {
                 let j = usize::try_from(v - 2 - n).map_err(|_| corrupt())?;
@@ -744,10 +762,16 @@ struct Out {
 }
 
 impl Out {
-    fn take(&mut self, at: usize, n: usize) -> Result<&mut [u8]> {
+    /// `n` bytes at `at` taken: where they are.
+    fn mark(&mut self, at: usize, n: usize) -> Result<std::ops::Range<usize>> {
         let end = at.checked_add(n).filter(|&e| e <= self.b.len()).ok_or_else(corrupt)?;
         self.taken.push((at, end));
-        Ok(&mut self.b[at..end])
+        Ok(at..end)
+    }
+
+    fn take(&mut self, at: usize, n: usize) -> Result<&mut [u8]> {
+        let r = self.mark(at, n)?;
+        Ok(&mut self.b[r])
     }
 
     fn put(&mut self, at: usize, src: &[u8]) -> Result<()> {
@@ -770,29 +794,111 @@ impl Out {
     }
 }
 
+/// Writes bytes into the file from a place on, within it.
+pub struct W<'a> {
+    b: &'a mut [u8],
+    pub at: usize,
+}
+
+impl W<'_> {
+    pub fn put(&mut self, src: &[u8]) -> Result<()> {
+        let end = self.at.checked_add(src.len()).filter(|&e| e <= self.b.len()).ok_or_else(corrupt)?;
+        self.b[self.at..end].copy_from_slice(src);
+        self.at = end;
+        Ok(())
+    }
+
+    fn uleb(&mut self, v: u32) -> Result<()> {
+        let (mut b, mut n, mut v) = ([0u8; 5], 0, v);
+        loop {
+            let c = (v & 0x7f) as u8;
+            v >>= 7;
+            b[n] = c | if v != 0 { 0x80 } else { 0 };
+            n += 1;
+            if v == 0 {
+                break;
+            }
+        }
+        self.put(&b[..n])
+    }
+}
+
+impl<'a> Raw<'a> {
+    /// The streams from the module's inputs, as [`unpack`] makes them.
+    fn of(inputs: &[&'a [u8]]) -> Result<Raw<'a>> {
+        if inputs.len() != INPUTS.len() {
+            return Err(corrupt());
+        }
+        let mut st = Vec::with_capacity(s::N);
+        st.resize_with(s::N, || R::new(&[]));
+        for (group, &d) in INPUTS.iter().zip(inputs) {
+            let mut r = R::new(d);
+            let mut lens = [0usize; MOST_GROUP];
+            for n in &mut lens[..group.len() - 1] {
+                *n = usize::try_from(r.var()?).map_err(|_| corrupt())?;
+            }
+            for (&l, &n) in group.iter().zip(&lens) {
+                st[l] = R::new(r.bytes(n)?);
+            }
+            st[group[group.len() - 1]] = R::new(r.rest());
+        }
+        Ok(Raw(st))
+    }
+}
+
+/// The streams of an input at most.
+const MOST_GROUP: usize = {
+    let (mut most, mut k) = (0, 0);
+    while k < INPUTS.len() {
+        if INPUTS[k].len() > most {
+            most = INPUTS[k].len();
+        }
+        k += 1;
+    }
+    most
+};
+
+/// What the head stream tells first: the header, the flags, the map's entries and how each
+/// item's section is rebuilt.
+struct Head<'a> {
+    header: &'a [u8],
+    flags: u8,
+    count: u32,
+    map: &'a [u8],
+    modes: &'a [u8],
+}
+
+impl<'a> Head<'a> {
+    fn read(head: &mut R<'a>) -> Result<Head<'a>> {
+        let header = head.bytes(HEADER)?;
+        let flags = head.u8()?;
+        if flags > 3 {
+            return Err(corrupt());
+        }
+        let count = le32(head.bytes(4)?, 0)?;
+        let map = head.bytes((count as usize).checked_mul(12).filter(|&n| n <= head.left()).ok_or_else(corrupt)?)?;
+        let modes = head.bytes(count as usize)?;
+        Ok(Head { header, flags, count, map, modes })
+    }
+}
+
 /// The file of `len` bytes from the module's inputs ([`INPUTS`], FORMAT.md §3).
 pub fn decode(inputs: &[&[u8]], len: usize) -> Result<Vec<u8>> {
     let mut o = Out { b: vec![0; len], taken: Vec::new() };
-    let mut raw = Raw(unpack(inputs)?.into_iter().map(R::new).collect());
-    let head = &mut raw[s::HEAD];
-    let header = head.bytes(HEADER)?;
-    let flags = head.u8()?;
-    if flags > 3 {
-        return Err(corrupt());
-    }
-    o.put(0, header)?;
-    let map_off = le32(header, 0x34)? as usize;
-    let count = le32(head.bytes(4)?, 0)?;
-    let map_bytes = head.bytes((count as usize).checked_mul(12).filter(|&n| n <= head.left()).ok_or_else(corrupt)?)?;
-    o.put(map_off, &count.to_le_bytes())?;
-    o.put(map_off.checked_add(4).ok_or_else(corrupt)?, map_bytes)?;
-    let items = items(map_bytes);
-    let modes = head.bytes(items.len())?;
+    let mut raw = Raw::of(inputs)?;
+    let h = Head::read(&mut raw[s::HEAD])?;
+    let items = items(h.map);
+    // (the header, the map and each section put, at most)
+    o.taken.reserve_exact(TAKES + items.len());
+    o.put(0, h.header)?;
+    let map_off = le32(h.header, 0x34)? as usize;
+    o.put(map_off, &h.count.to_le_bytes())?;
+    o.put(map_off.checked_add(4).ok_or_else(corrupt)?, h.map)?;
 
     // The sections as they are, and which item of each type is taken.
-    let mut taken = Types::default();
-    let mut kept = Types::default();
-    for (i, (it, &m)) in items.iter().zip(modes).enumerate() {
+    let mut taken = Types(Vec::with_capacity(items.len()));
+    let mut kept = Types(Vec::with_capacity(items.len()));
+    for (i, (it, &m)) in items.iter().zip(h.modes).enumerate() {
         match m {
             mode::REST => {}
             mode::RAW => {
@@ -820,12 +926,11 @@ pub fn decode(inputs: &[&[u8]], len: usize) -> Result<Vec<u8>> {
     let mut strings = Strings::default();
     match (table(ty::STRING_ID)?, taken.get(&ty::STRING_DATA)) {
         (Some((off, n)), Some(data)) if data.count as usize == n => {
-            strings = decode_strings(&mut raw, n, data.off)?;
-            let ids = o.take(off, 4 * n)?;
-            for (id, &at) in ids.as_chunks_mut::<4>().0.iter_mut().zip(&strings.items) {
-                id.copy_from_slice(&(data.off + at).to_le_bytes());
-            }
-            o.put(data.off as usize, &strings.data)?;
+            let ids = o.mark(off, 4 * n)?;
+            let mut w = W { b: &mut o.b, at: data.off as usize };
+            strings = decode_strings(&mut raw, &mut w, n, ids.start)?;
+            let end = w.at;
+            o.mark(data.off as usize, end - data.off as usize)?;
         }
         (None, None) => {}
         _ => return Err(corrupt()),
@@ -845,10 +950,10 @@ pub fn decode(inputs: &[&[u8]], len: usize) -> Result<Vec<u8>> {
     if let Some((off, n)) = table(ty::PROTO_ID)? {
         let types = kept.get(&ty::TYPE_ID).or(taken.get(&ty::TYPE_ID)).ok_or_else(corrupt)?;
         let (types_off, types_n) = (types.off as usize, types.count as usize);
-        let shorties = strings.index();
-        let mut e = Vec::with_capacity(12 * n);
+        let shorties = StringIndex::new(&strings, &o.b);
+        let at = o.mark(off, 12 * n)?.start;
         let mut prev = 0;
-        for _ in 0..n {
+        for k in 0..n {
             let ret = moved(prev, raw[s::PROTO_RET].var()?, u32::MAX)?;
             prev = ret;
             let params = match raw[s::PROTO_PARAMS].var()? {
@@ -857,22 +962,21 @@ pub fn decode(inputs: &[&[u8]], len: usize) -> Result<Vec<u8>> {
             };
             let shorty = match raw[s::PROTO_SHORTY].var()? {
                 0 => {
+                    let b = &o.b;
                     let desc = |t: u32| -> Result<&[u8]> {
                         if t as usize >= types_n {
                             return Err(corrupt());
                         }
-                        strings.get(le32(&o.b, types_off + 4 * t as usize)?).ok_or_else(corrupt)
+                        strings.get(b, le32(b, types_off + 4 * t as usize)?).ok_or_else(corrupt)
                     };
-                    let shorty = shorty(&o.b, ret, params, desc)?;
-                    *shorties.get(shorty.as_slice()).ok_or_else(corrupt)?
+                    shorties.shorty(&strings, b, ret, params, desc)?
                 }
                 k => u32::try_from(k - 1).map_err(|_| corrupt())?,
             };
-            for v in [shorty, ret, params] {
-                e.extend_from_slice(&v.to_le_bytes());
+            for (j, v) in [shorty, ret, params].into_iter().enumerate() {
+                o.b[at + 12 * k + 4 * j..][..4].copy_from_slice(&v.to_le_bytes());
             }
         }
-        o.put(off, &e)?;
     }
 
     // Fields and methods.
@@ -881,18 +985,17 @@ pub fn decode(inputs: &[&[u8]], len: usize) -> Result<Vec<u8>> {
         (ty::METHOD_ID, s::METHOD_CLASS, s::METHOD_NAME, s::METHOD_PROTO),
     ] {
         if let Some((off, n)) = table(t)? {
-            let mut e = Vec::with_capacity(8 * n);
+            let e = o.take(off, 8 * n)?;
             let (mut pc, mut pn) = (0, 0);
-            for _ in 0..n {
+            for e in e.as_chunks_mut::<8>().0 {
                 let c = moved(pc, raw[class].var()?, u16::MAX as u32)?;
                 let z = raw[name].var()?;
                 let nm = if c == pc { moved(pn, z, u32::MAX)? } else { u32::try_from(z).map_err(|_| corrupt())? };
-                e.extend_from_slice(&(c as u16).to_le_bytes());
-                e.extend_from_slice(raw[other].bytes(2)?);
-                e.extend_from_slice(&nm.to_le_bytes());
+                e[..2].copy_from_slice(&(c as u16).to_le_bytes());
+                e[2..4].copy_from_slice(raw[other].bytes(2)?);
+                e[4..].copy_from_slice(&nm.to_le_bytes());
                 (pc, pn) = (c, nm);
             }
-            o.put(off, &e)?;
         }
     }
 
@@ -906,9 +1009,11 @@ pub fn decode(inputs: &[&[u8]], len: usize) -> Result<Vec<u8>> {
             };
             let item = |t: u16| kept.get(&t).or(taken.get(&t)).copied();
             let words =
-                param_words(&o.b, item(ty::METHOD_ID), item(ty::PROTO_ID), item(ty::TYPE_ID), |i| strings.get(i));
-            let (data, offs) = decode_code(&mut raw, it.off, it.count, Debug::new(debug), &words)?;
-            o.put(it.off as usize, &data)?;
+                param_words(&o.b, item(ty::METHOD_ID), item(ty::PROTO_ID), item(ty::TYPE_ID), |i| strings.get(&o.b, i));
+            let mut w = W { b: &mut o.b, at: it.off as usize };
+            let offs = decode_code(&mut raw, &mut w, it.count, Debug::new(debug), &words)?;
+            let end = w.at;
+            o.mark(it.off as usize, end - it.off as usize)?;
             offs
         }
         (None, None) => Vec::new(),
@@ -917,10 +1022,15 @@ pub fn decode(inputs: &[&[u8]], len: usize) -> Result<Vec<u8>> {
     // Classes and their data.
     if let Some((off, n)) = table(ty::CLASS_DEF)? {
         let data = taken.get(&ty::CLASS_DATA).copied();
-        let mut code = Code::new(code);
-        // (the data of each class with its rank in the section and its class)
-        let mut cd: Vec<(u32, usize, Vec<u8>)> = Vec::new();
-        let mut e = Vec::with_capacity(32 * n);
+        let (code_n, mut code) = (code.len(), Code::new(code));
+        let mut window = Vec::with_capacity(code_n);
+        // (the data of the classes one after another, of room for its section, and of each its
+        // rank in the section, its class and where it is)
+        let (mut cd, mut ranks) = match data {
+            Some(d) => (Vec::with_capacity(class_data_room(&items, d, len)), Vec::with_capacity(d.count as usize)),
+            None => (Vec::new(), Vec::new()),
+        };
+        let e = o.mark(off, 32 * n)?.start;
         let mut prev = [0u32; 4];
         for i in 0..n {
             prev[0] = moved(prev[0], raw[s::CDEF_CLASS].var()?, u32::MAX)?;
@@ -937,10 +1047,10 @@ pub fn decode(inputs: &[&[u8]], len: usize) -> Result<Vec<u8>> {
                 *v = match (k, data) {
                     _ if z == 0 => 0,
                     (1, Some(_)) => {
-                        let rank = moved(cd.len() as u32, z - 1, u32::MAX)?;
-                        let mut b = Vec::new();
-                        class_data(&mut raw, &mut b, &mut code)?;
-                        cd.push((rank, i, b));
+                        let rank = moved(ranks.len() as u32, z - 1, u32::MAX)?;
+                        let start = cd.len();
+                        class_data(&mut raw, &mut cd, &mut code, &mut window)?;
+                        ranks.push((rank, i as u32, start as u32, cd.len() as u32));
                         // (set below, once the data is laid out)
                         0
                     }
@@ -950,27 +1060,28 @@ pub fn decode(inputs: &[&[u8]], len: usize) -> Result<Vec<u8>> {
                     }
                 };
             }
-            for v in [prev[0], flags, sup, ifaces, src, offs[0], offs[1], offs[2]] {
-                e.extend_from_slice(&v.to_le_bytes());
+            for (j, v) in [prev[0], flags, sup, ifaces, src, offs[0], offs[1], offs[2]].into_iter().enumerate() {
+                o.b[e + 32 * i + 4 * j..][..4].copy_from_slice(&v.to_le_bytes());
             }
         }
         if let Some(d) = data {
-            if cd.len() != d.count as usize {
+            if ranks.len() != d.count as usize {
                 return Err(corrupt());
             }
-            cd.sort_unstable_by_key(|c| c.0);
-            let mut all = Vec::new();
-            for (r, (rank, i, b)) in cd.into_iter().enumerate() {
+            ranks.sort_unstable_by_key(|c| c.0);
+            let all = o.mark(d.off as usize, cd.len())?;
+            let mut at = all.start;
+            for (r, &(rank, i, start, end)) in ranks.iter().enumerate() {
                 if rank as usize != r {
                     return Err(corrupt());
                 }
-                let at = d.off.checked_add(u32::try_from(all.len()).map_err(|_| corrupt())?).ok_or_else(corrupt)?;
-                e[32 * i + 24..32 * i + 28].copy_from_slice(&at.to_le_bytes());
-                all.extend_from_slice(&b);
+                let i = i as usize;
+                o.b[e + 32 * i + 24..e + 32 * i + 28].copy_from_slice(&(at as u32).to_le_bytes());
+                let b = &cd[start as usize..end as usize];
+                o.b[at..at + b.len()].copy_from_slice(b);
+                at += b.len();
             }
-            o.put(d.off as usize, &all)?;
         }
-        o.put(off, &e)?;
     } else if taken.contains_key(&ty::CLASS_DATA) {
         return Err(corrupt());
     }
@@ -978,97 +1089,252 @@ pub fn decode(inputs: &[&[u8]], len: usize) -> Result<Vec<u8>> {
     for r in &raw.0 {
         r.done()?;
     }
-    if flags & 2 != 0 {
+    if h.flags & 2 != 0 {
         let sig = Sha1::digest(o.b.get(32..).ok_or_else(corrupt)?);
         o.b[12..32].copy_from_slice(&sig);
     }
-    if flags & 1 != 0 {
+    if h.flags & 1 != 0 {
         let sum = aqr_common::adler32::hash(o.b.get(12..).ok_or_else(corrupt)?);
         o.b[8..12].copy_from_slice(&sum.to_le_bytes());
     }
     Ok(o.b)
 }
 
-/// The `count` code items from `off` on (FORMAT.md §4.7), and their offsets.
-fn decode_code(raw: &mut Raw, off: u32, count: u32, mut debug: Debug, words: &[u8]) -> Result<(Vec<u8>, Vec<u32>)> {
-    let mut d = Vec::new();
-    let mut offs = Vec::new();
-    let mut caches = crate::code::Caches::default();
-    let at = |d: &Vec<u8>| off.checked_add(u32::try_from(d.len()).map_err(|_| corrupt())?).ok_or_else(corrupt);
-    for _ in 0..count {
-        while at(&d)? % 4 != 0 {
-            d.push(0);
-        }
-        offs.push(at(&d)?);
-        let start = d.len();
-        for _ in 0..2 {
-            let v = u16::try_from(raw[s::CODE_HEAD].var()?).map_err(|_| corrupt())?;
-            d.extend_from_slice(&v.to_le_bytes());
-        }
-        // (the outs, set below)
-        d.extend_from_slice(&[0, 0]);
-        let tries = u16::try_from(raw[s::CODE_TRIES].var()?).map_err(|_| corrupt())?;
-        d.extend_from_slice(&tries.to_le_bytes());
-        let debug = debug.decode(raw[s::CODE_DEBUG].var()?)?;
-        d.extend_from_slice(&debug.to_le_bytes());
-        let n = raw[s::CODE_LEN].var32()?;
-        d.extend_from_slice(&n.to_le_bytes());
-        let outs = crate::code::decode(n as usize, &mut caches, words, raw, &mut d)?;
-        let outs = moved(outs.min(0xffff) as u32, raw[s::CODE_HEAD].var()?, 0xffff)?;
-        d[start + 4..start + 6].copy_from_slice(&(outs as u16).to_le_bytes());
-        if tries > 0 {
-            let k = handlers(raw[s::CODE_TRY].rest(), n as u64, tries as u64)?;
-            d.extend_from_slice(raw[s::CODE_TRY].bytes(k)?);
-        }
-    }
-    Ok((d, offs))
+/// The ranges [`decode`] takes at most besides the sections kept: the header, the map's count
+/// and entries, and the sections it takes.
+const TAKES: usize = 3 + 10;
+
+/// The bytes the class data of item `d` may take: to the next section, else the end.
+fn class_data_room(items: &[Item], d: Item, len: usize) -> usize {
+    let next = items.iter().filter(|e| e.off > d.off).map(|e| e.off as usize).min().unwrap_or(len);
+    next.saturating_sub(d.off as usize)
 }
 
-/// The string data as it is rebuilt.
+/// Bytes that [`decode`] takes of [`aqr_api::stack`] at most, of the first input `sections`
+/// and a file of `len` bytes (`None` where its head does not parse), in its blocks' order: the
+/// file, the streams, the ranges taken, the map's items, the items taken and kept, the type
+/// lists, the strings; then the larger of the prototypes' index of the strings and of the code
+/// (the debug info items, the parameters' words, the code items) with the classes (the code
+/// items used and a class's window of them, the classes' data and their ranks).
+pub fn decode_plan(sections: &[u8], len: u64) -> Option<u64> {
+    use aqr_api::stack::block;
+    let mut r = R::new(sections);
+    let mut lens = [0usize; MOST_GROUP];
+    for n in &mut lens[..INPUTS[0].len() - 1] {
+        *n = usize::try_from(r.var().ok()?).ok()?;
+    }
+    let head = INPUTS[0].iter().position(|&l| l == s::HEAD)?;
+    for &n in &lens[..head] {
+        r.bytes(n).ok()?;
+    }
+    let mut hr = R::new(r.bytes(lens[head]).ok()?);
+    let h = Head::read(&mut hr).ok()?;
+    let items = items(h.map);
+    let n = items.len() as u64;
+    let (mut taken, mut kept) = (Types(Vec::new()), Types(Vec::new()));
+    for (it, &m) in items.iter().zip(h.modes) {
+        match m {
+            mode::RAW => _ = kept.insert(it.ty, *it),
+            mode::TAKEN => _ = taken.insert(it.ty, *it),
+            _ => {}
+        }
+    }
+    let size = usize::try_from(len).ok()?;
+    let count = |t: &Types, ty: u16| t.get(&ty).map_or(0, |it| it.count as u64);
+    let lists = kept.get(&ty::TYPE_LIST).map_or(0, |it| block(4 * (it.count as u64).min(len / 4)));
+    let strings = count(&taken, ty::STRING_ID);
+    let held = block(len)
+        + block(R_BYTES * s::N as u64)
+        + block(8 * (TAKES as u64 + n))
+        + 3 * block(12 * n)
+        + lists
+        + if taken.get(&ty::STRING_DATA).is_some() { block(8 * strings) } else { 0 };
+    let protos = if taken.get(&ty::PROTO_ID).is_some() { block(4 * StringIndex::slots(strings) as u64) } else { 0 };
+    let code = match (kept.get(&ty::CODE), taken.get(&ty::CODE)) {
+        (Some(it), _) => block(4 * (it.count as u64).min(len / 16)),
+        (None, Some(it)) => {
+            let debug = kept.get(&ty::DEBUG_INFO).map_or(0, |d| block(4 * (d.count as u64).min(len)));
+            let item = |t: u16| kept.get(&t).or(taken.get(&t)).copied();
+            let words = match (item(ty::METHOD_ID), item(ty::PROTO_ID), item(ty::TYPE_ID)) {
+                (Some(m), Some(_), Some(_)) => block(param_words_len(size, m.count) as u64),
+                _ => 0,
+            };
+            debug + words + block(4 * it.count as u64)
+        }
+        (None, None) => 0,
+    };
+    let code_n = match (kept.get(&ty::CODE), taken.get(&ty::CODE)) {
+        (Some(it), _) => (it.count as u64).min(len / 16),
+        (None, Some(it)) => it.count as u64,
+        (None, None) => 0,
+    };
+    let classes = match taken.get(&ty::CLASS_DEF) {
+        Some(_) => {
+            let data = taken
+                .get(&ty::CLASS_DATA)
+                .map_or(0, |&d| block(class_data_room(&items, d, size) as u64) + block(RANK_BYTES * d.count as u64));
+            block(code_n) + block(4 * code_n) + data
+        }
+        None => 0,
+    };
+    Some(held + protos.max(code + classes))
+}
+
+/// Bytes of an [`R`] on WebAssembly.
+const R_BYTES: u64 = 12;
+#[cfg(target_family = "wasm")]
+const _: () = assert!(size_of::<R>() as u64 == R_BYTES);
+/// Bytes of a class's rank, class and where its data is.
+const RANK_BYTES: u64 = 16;
+
+/// The `count` code items from `w`'s place on (FORMAT.md §4.7), and their offsets.
+fn decode_code(raw: &mut Raw, w: &mut W, count: u32, mut debug: Debug, words: &[u8]) -> Result<Vec<u32>> {
+    let mut offs = Vec::with_capacity(count as usize);
+    let mut caches = crate::code::Caches::default();
+    for _ in 0..count {
+        while !w.at.is_multiple_of(4) {
+            w.put(&[0])?;
+        }
+        offs.push(u32::try_from(w.at).map_err(|_| corrupt())?);
+        let start = w.at;
+        for _ in 0..2 {
+            let v = u16::try_from(raw[s::CODE_HEAD].var()?).map_err(|_| corrupt())?;
+            w.put(&v.to_le_bytes())?;
+        }
+        // (the outs, set below)
+        w.put(&[0, 0])?;
+        let tries = u16::try_from(raw[s::CODE_TRIES].var()?).map_err(|_| corrupt())?;
+        w.put(&tries.to_le_bytes())?;
+        let debug = debug.decode(raw[s::CODE_DEBUG].var()?)?;
+        w.put(&debug.to_le_bytes())?;
+        let n = raw[s::CODE_LEN].var32()?;
+        w.put(&n.to_le_bytes())?;
+        let outs = crate::code::decode(n as usize, &mut caches, words, raw, w)?;
+        let outs = moved(outs.min(0xffff) as u32, raw[s::CODE_HEAD].var()?, 0xffff)?;
+        w.b[start + 4..start + 6].copy_from_slice(&(outs as u16).to_le_bytes());
+        if tries > 0 {
+            let k = handlers(raw[s::CODE_TRY].rest(), n as u64, tries as u64)?;
+            w.put(raw[s::CODE_TRY].bytes(k)?)?;
+        }
+    }
+    Ok(offs)
+}
+
+/// The strings as they are rebuilt in the file: where the bytes of each are and how many.
 #[derive(Default)]
 struct Strings {
-    /// The items, one after the other.
-    data: Vec<u8>,
-    /// Where each item starts in `data`.
-    items: Vec<u32>,
-    /// Where the bytes of each string are in `data` and how many.
     spans: Vec<(u32, u32)>,
 }
 
 impl Strings {
-    fn get(&self, i: u32) -> Option<&[u8]> {
+    fn get<'a>(&self, b: &'a [u8], i: u32) -> Option<&'a [u8]> {
         let &(at, n) = self.spans.get(i as usize)?;
-        Some(&self.data[at as usize..(at + n) as usize])
-    }
-
-    fn index(&self) -> HashMap<&[u8], u32, BuildHasherDefault<Fnv>> {
-        string_index((0..self.spans.len() as u32).map(|i| self.get(i).unwrap()))
+        b.get(at as usize..(at + n) as usize)
     }
 }
 
-fn decode_strings(raw: &mut Raw, n: usize, base: u32) -> Result<Strings> {
-    let mut st = Strings::default();
-    let mut prev = (0, 0);
-    let mut s = Vec::new();
-    for _ in 0..n {
-        let k = raw[s::STR_PREFIX].var()?;
+/// The `n` strings' items written by `w`, their ids (the items' offsets) at `ids` in the file.
+fn decode_strings(raw: &mut Raw, w: &mut W, n: usize, ids: usize) -> Result<Strings> {
+    let mut st = Strings { spans: Vec::with_capacity(n) };
+    let mut prev = (0usize, 0usize);
+    for i in 0..n {
+        let k = usize::try_from(raw[s::STR_PREFIX].var()?).map_err(|_| corrupt())?;
         let suffix = raw[s::STR_SUFFIX].until0()?;
-        if k > prev.1 as u64 {
+        if k > prev.1 {
             return Err(corrupt());
         }
-        s.clear();
-        s.extend_from_slice(&st.data[prev.0 as usize..][..k as usize]);
-        s.extend_from_slice(suffix);
-        let item = u32::try_from(st.data.len()).ok().filter(|&i| base.checked_add(i).is_some()).ok_or_else(corrupt)?;
-        put_uleb(&mut st.data, utf16_len(&s));
-        let at = u32::try_from(st.data.len()).map_err(|_| corrupt())?;
-        st.items.push(item);
-        st.spans.push((at, s.len() as u32));
-        st.data.extend_from_slice(&s);
-        st.data.push(0);
-        prev = (at, s.len() as u32);
+        let item = u32::try_from(w.at).map_err(|_| corrupt())?;
+        w.b.get_mut(ids + 4 * i..ids + 4 * i + 4).ok_or_else(corrupt)?.copy_from_slice(&item.to_le_bytes());
+        w.uleb(utf16_len(&w.b[prev.0..prev.0 + k]) + utf16_len(suffix))?;
+        let at = w.at;
+        let len = k + suffix.len();
+        let end = at.checked_add(len + 1).filter(|&e| e <= w.b.len()).ok_or_else(corrupt)?;
+        w.b.copy_within(prev.0..prev.0 + k, at);
+        w.b[at + k..at + len].copy_from_slice(suffix);
+        w.b[at + len] = 0;
+        w.at = end;
+        st.spans.push((u32::try_from(at).map_err(|_| corrupt())?, len as u32));
+        prev = (at, len);
     }
     Ok(st)
+}
+
+/// The index of each string (the first of equal ones) by its bytes: a table of open addressing
+/// (linear probing) of the strings' indices (1 on, 0 for none), 2/3 full at most.
+struct StringIndex(Vec<u32>);
+
+impl StringIndex {
+    fn slots(n: u64) -> usize {
+        (n + n / 2 + 1) as usize
+    }
+
+    fn hash(chars: impl Iterator<Item = u8>) -> u64 {
+        let mut h = Fnv::default();
+        for c in chars {
+            h.write(&[c]);
+        }
+        h.finish()
+    }
+
+    fn slot(&self, h: u64) -> usize {
+        (((h >> 32) * self.0.len() as u64) >> 32) as usize
+    }
+
+    fn new(strings: &Strings, b: &[u8]) -> StringIndex {
+        let n = strings.spans.len();
+        let mut t = StringIndex(vec![0; StringIndex::slots(n as u64)]);
+        for i in 0..n as u32 {
+            let s = strings.get(b, i).unwrap();
+            let mut j = t.slot(StringIndex::hash(s.iter().copied()));
+            loop {
+                match t.0[j] {
+                    0 => {
+                        t.0[j] = i + 1;
+                        break;
+                    }
+                    k if strings.get(b, k - 1) == Some(s) => break,
+                    _ => j = if j + 1 == t.0.len() { 0 } else { j + 1 },
+                }
+            }
+        }
+        t
+    }
+
+    /// The string of the shorty of the prototype of return type `ret` and parameters at
+    /// `params` in `b` (0 for none), the descriptors of types given by `desc`.
+    fn shorty<'a>(
+        &self,
+        strings: &Strings,
+        b: &[u8],
+        ret: u32,
+        params: u32,
+        desc: impl Fn(u32) -> Result<&'a [u8]>,
+    ) -> Result<u32> {
+        let p = params as usize;
+        let n = if params == 0 { 0 } else { le32(b, p)? as usize };
+        let ch = |k: usize| -> Result<u8> {
+            let t = if k == 0 { ret } else { le16(b, p + 4 + 2 * (k - 1))? as u32 };
+            shorty_char(desc(t)?).ok_or_else(corrupt)
+        };
+        // (each letter checked as it is taken)
+        for k in 0..=n {
+            ch(k)?;
+        }
+        let chars = || (0..=n).map(|k| ch(k).unwrap());
+        let mut j = self.slot(StringIndex::hash(chars()));
+        loop {
+            match self.0[j] {
+                0 => return Err(corrupt()),
+                k => {
+                    let s = strings.get(b, k - 1).ok_or_else(corrupt)?;
+                    if s.len() == n + 1 && s.iter().copied().eq(chars()) {
+                        return Ok(k - 1);
+                    }
+                }
+            }
+            j = if j + 1 == self.0.len() { 0 } else { j + 1 };
+        }
+    }
 }
 
 /// The shorty of the prototype of return type `ret` and parameters at `params` in `d` (0 for
@@ -1102,8 +1368,16 @@ impl Code {
     /// The window of a class of `methods` methods: the items not used from the first not used,
     /// as many as its methods at most.
     pub fn window(&self, methods: usize) -> Vec<usize> {
+        let mut w = Vec::new();
+        self.window_into(methods, &mut w);
+        w
+    }
+
+    /// [`Code::window`] into `w`.
+    pub fn window_into(&self, methods: usize, w: &mut Vec<usize>) {
         let end = self.offs.len().min(self.cursor.saturating_add(methods));
-        (self.cursor..end).filter(|&j| !self.used[j]).collect()
+        w.clear();
+        w.extend((self.cursor..end).filter(|&j| !self.used[j]));
     }
 
     pub fn cursor(&self) -> usize {
@@ -1122,8 +1396,9 @@ impl Code {
     }
 }
 
-/// A class's data from the streams, appended to `cd`; the offsets of its code by `code`.
-fn class_data(raw: &mut Raw, cd: &mut Vec<u8>, code: &mut Code) -> Result<()> {
+/// A class's data from the streams, appended to `cd`; the offsets of its code by `code`, its
+/// window in `window` (of room for all the code items).
+fn class_data(raw: &mut Raw, cd: &mut Vec<u8>, code: &mut Code, window: &mut Vec<usize>) -> Result<()> {
     let mut sizes = [0u32; 4];
     for v in &mut sizes {
         *v = raw[s::CDATA_SIZES].var32()?;
@@ -1134,7 +1409,7 @@ fn class_data(raw: &mut Raw, cd: &mut Vec<u8>, code: &mut Code) -> Result<()> {
         put_uleb(cd, raw[s::CDATA_FFLAGS].var32()?);
     }
     let methods = sizes[2] as usize + sizes[3] as usize;
-    let mut window = code.window(methods);
+    code.window_into(methods, window);
     for _ in 0..methods {
         put_uleb(cd, raw[s::CDATA_MDIFF].var32()?);
         put_uleb(cd, raw[s::CDATA_MFLAGS].var32()?);

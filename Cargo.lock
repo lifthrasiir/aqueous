@@ -349,6 +349,7 @@ dependencies = [
 name = "aqr-dex"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
  "aqr-common",
  "aqr-formula",
  "sha1",

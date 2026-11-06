@@ -8,13 +8,11 @@ use crate::encode;
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("dex-recons", 2).with_memory(memory);
+pub const MODULE: Module = Module::new("dex-recons", 2).with_plan(memory);
 
-/// The memory of the module: the file, the strings and the classes' data as they are rebuilt
-/// before they are copied into it (at most the file again), and the index of the strings.
+/// The memory of the module: its initial memory, and its plan ([`crate::module::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let len = u.outputs.iter().sum::<u64>();
-    Some(u.whole(2 * len, 2))
+    Some(u.initial() + crate::module::plan(u.params.len() as u64, u.inputs, u.content(0)?, u.output())?)
 }
 
 /// Whether `d` starts like a DEX file.

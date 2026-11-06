@@ -1438,6 +1438,9 @@ fn dex() {
     let f = roundtrip(&d, &all());
     assert_eq!(modules(&f), ["dex-recons"]);
     assert_eq!(aqr_compress::kind_by_name(b"x/classes.dex"), aqr_formula::Kind::Format("dex"));
+    // (taking its plan, to the page)
+    let module = [aqr_decompress::built(aqr_decompress::DEX).expect("built").sha512_256];
+    assert_eq!(within_plans("DEX of strings", &d, &module, true), 1);
 }
 
 /// A resource table goes to aqr-arsc, by its start or its name.
