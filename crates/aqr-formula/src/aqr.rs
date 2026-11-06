@@ -32,7 +32,7 @@
 
 mod dict;
 pub mod envelope;
-mod eval;
+pub(crate) mod eval;
 pub mod inspect;
 mod listing;
 mod locate;

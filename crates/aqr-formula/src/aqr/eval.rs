@@ -28,6 +28,36 @@ struct Val {
     out: usize,
 }
 
+/// An application of a graph: an Apply instruction of a formula block, or an application of a
+/// [`crate::Formula`] (of a single output, or of several of its `shared`, as a Split of an
+/// application of one where its outputs are split).
+#[derive(Clone, Copy)]
+enum Ap<'p, 'a> {
+    Block(&'p Apply<'a>),
+    One(&'p crate::Apply),
+    Shared(&'p crate::Shared),
+}
+
+/// The Apply instruction of application `a` of a formula block.
+fn block<'p, 'a>(a: Ap<'p, 'a>) -> &'p Apply<'a> {
+    match a {
+        Ap::Block(a) => a,
+        _ => unreachable!("of a formula block"),
+    }
+}
+
+impl<'p> Ap<'p, '_> {
+    /// The sizes of its outputs.
+    fn sizes(&self) -> &'p [u64] {
+        match *self {
+            Ap::Block(a) => &a.output_sizes,
+            Ap::One(a) => std::slice::from_ref(&a.len),
+            Ap::Shared(s) if s.split => std::slice::from_ref(&s.apply.len),
+            Ap::Shared(s) => &s.sizes,
+        }
+    }
+}
+
 /// What a node of the graph makes: of an instruction, or a piece of a Split of a slice or a
 /// literal. Of several outputs, it has the index of its state among the evaluation's ([`Fan`]).
 enum Op<'p, 'a> {
@@ -38,7 +68,7 @@ enum Op<'p, 'a> {
         start: u64,
         len: u64,
     },
-    Apply(&'p Apply<'a>, Vec<Val>, Option<usize>),
+    Apply(Ap<'p, 'a>, Vec<Val>, Option<usize>),
     Concat(Vec<Val>),
     Pack(Vec<Val>),
     Split(Val, &'p [u64], usize),
@@ -79,10 +109,10 @@ impl<'p, 'a> Graph<'p, 'a> {
                     let inputs = stack.split_off(stack.len() - a.num_inputs);
                     let node = g.ops.len();
                     match a.output_sizes[..] {
-                        [len] => stack.push(g.push(Op::Apply(a, inputs, None), len)),
+                        [len] => stack.push(g.push(Op::Apply(Ap::Block(a), inputs, None), len)),
                         _ => {
                             let fan = g.fan();
-                            g.push(Op::Apply(a, inputs, Some(fan)), 0);
+                            g.push(Op::Apply(Ap::Block(a), inputs, Some(fan)), 0);
                             stack.extend((0..a.output_sizes.len()).map(|out| Val { node, out }));
                         }
                     }
@@ -158,7 +188,7 @@ impl<'p, 'a> Graph<'p, 'a> {
 
     fn len(&self, v: Val) -> u64 {
         match self.ops[v.node] {
-            Op::Apply(a, _, Some(_)) => a.output_sizes[v.out],
+            Op::Apply(a, _, Some(_)) => a.sizes()[v.out],
             Op::Split(_, sizes, _) => sizes[v.out],
             _ => self.lens[v.node],
         }
@@ -242,10 +272,10 @@ type Src<'a> = Box<dyn Source<'a> + 'a>;
 struct Eval<'e, 'a> {
     g: &'e Graph<'e, 'a>,
     #[allow(clippy::type_complexity)]
-    apply: &'e (dyn Fn(&Apply<'a>, &[&[u8]]) -> Decoded<Vec<Vec<u8>>> + Sync),
-    part: &'e (dyn Fn(&Apply<'a>) -> bool + Sync),
+    apply: &'e (dyn Fn(Ap<'e, 'a>, &[&[u8]]) -> Decoded<Vec<Vec<u8>>> + Sync),
+    part: &'e (dyn Fn(Ap<'e, 'a>) -> bool + Sync),
     #[allow(clippy::type_complexity)]
-    apply_part: &'e (dyn Fn(&Apply<'a>, &mut [&mut dyn PartIn], &mut [&mut dyn PartOut]) -> Decoded<()> + Sync),
+    apply_part: &'e (dyn Fn(Ap<'e, 'a>, &mut [&mut dyn PartIn], &mut [&mut dyn PartOut]) -> Decoded<()> + Sync),
     blocks: &'e dyn Blocks,
     fans: Vec<Mutex<Fan<'a>>>,
     threads: &'e Threads,
@@ -364,7 +394,7 @@ impl<'a> Source<'a> for Made {
 }
 
 /// The outputs of application `a` on `inputs`, pulled whole.
-fn applied<'a>(at: At<'_, '_, 'a>, a: &Apply<'a>, inputs: &[Val]) -> Decoded<Vec<Vec<u8>>> {
+fn applied<'e, 'a>(at: At<'_, 'e, 'a>, a: Ap<'e, 'a>, inputs: &[Val]) -> Decoded<Vec<Vec<u8>>> {
     let inputs = inputs.iter().map(|&v| whole(at, v)).collect::<Decoded<Vec<_>>>()?;
     let bytes: Vec<&[u8]> = inputs.iter().map(|i| &**i).collect();
     (at.ev.apply)(a, &bytes)
@@ -600,9 +630,13 @@ pub(super) fn run<'a>(
         let m = p.modules[a.module];
         env.loaded[m].get_or_init(|| env.runner.load(&env.modules[m])).as_ref().map_err(Failure::clone)
     };
-    let apply = |a: &Apply<'a>, inputs: &[&[u8]]| super::apply(env, p.modules[a.module], a, inputs, &resources(a));
-    let part = |a: &Apply<'a>| loaded(a).is_ok_and(|l| l.is_part());
-    let apply_part = |a: &Apply<'a>, ins: &mut [&mut dyn PartIn], outs: &mut [&mut dyn PartOut]| {
+    let apply = |a: Ap<'_, 'a>, inputs: &[&[u8]]| {
+        let a = block(a);
+        super::apply(env, p.modules[a.module], a, inputs, &resources(a))
+    };
+    let part = |a: Ap<'_, 'a>| loaded(block(a)).is_ok_and(|l| l.is_part());
+    let apply_part = |a: Ap<'_, 'a>, ins: &mut [&mut dyn PartIn], outs: &mut [&mut dyn PartOut]| {
+        let a = block(a);
         loaded(a)?.apply_part(a.params, &resources(a), ins, outs, &a.output_sizes, a.memory_limit)
     };
     let running = Threads::default();
@@ -617,22 +651,34 @@ pub(super) fn run<'a>(
     };
     // (the threads of part modules let go of and joined before what they borrow goes)
     let _joined = Joined(&ev);
+    emit(&g, &ev, Some(contents), sink, threads)
+}
+
+/// The outputs of graph `g` evaluated by `ev` (of the non-leaf blocks in `contents` where it
+/// slices any), written to `sink` where given as [`run`] writes them.
+fn emit<'e, 'a>(
+    g: &'e Graph<'e, 'a>,
+    ev: &Eval<'e, 'a>,
+    contents: Option<&Contents>,
+    sink: Option<&mut Taker<'_>>,
+    threads: usize,
+) -> Decoded<Vec<Vec<u8>>> {
     let Some(sink) = sink else {
-        return blocks_ahead(&g, contents, |ahead| {
-            let at = At { ev: &ev, ahead };
+        return blocks_ahead(g, contents, |ahead| {
+            let at = At { ev, ahead };
             g.roots.iter().map(|&r| whole(at, r).map(Whole::into_vec)).collect()
         });
     };
     // the parts of each output, through its concatenations (but those a Checksum instruction
     // covers, which are pulled as they are: the output's own hashed as it is written), and the
     // applications among them, made ahead
-    let roots: Vec<(Vec<Val>, bool)> = g.roots.iter().map(|&r| parts_of(&g, r)).collect();
+    let roots: Vec<(Vec<Val>, bool)> = g.roots.iter().map(|&r| parts_of(g, r)).collect();
     let heavy: Vec<(Val, u64)> =
         roots.iter().flat_map(|(parts, _)| parts).filter(|&&v| ev.made_whole(v)).map(|&v| (v, g.len(v))).collect();
     let slots: Vec<Waited<Option<Decoded<Vec<u8>>>>> = heavy.iter().map(|_| Waited::new(None)).collect();
     let mut emit = |parts: Option<&PartsAhead<'_, '_, '_, 'a>>| -> Decoded<Vec<Vec<u8>>> {
-        blocks_ahead(&g, contents, |ahead| {
-            let at = At { ev: &ev, ahead };
+        blocks_ahead(g, contents, |ahead| {
+            let at = At { ev, ahead };
             let mut k = 0;
             for (&r, (of, own)) in g.roots.iter().zip(&roots) {
                 write(at, r, of, *own, &mut *sink, parts, &mut k)?;
@@ -646,7 +692,7 @@ pub(super) fn run<'a>(
     aqr_common::pool::scope(threads.min(AHEAD_PARTS), |s| {
         let parts = (s.workers() > 0).then(|| PartsAhead {
             scope: s,
-            ev: &ev,
+            ev,
             heavy: &heavy,
             slots: &slots,
             spawned: Cell::new(0),
@@ -765,7 +811,8 @@ impl PartsAhead<'_, '_, '_, '_> {
 /// `f` given what to tell of each block as it is first sliced, by which the blocks after it (in
 /// the order `g` first slices them) are decoded ahead on workers of the pool where they are
 /// free, [`AHEAD_BLOCKS`] at most at once.
-fn blocks_ahead<R>(g: &Graph, contents: &Contents, f: impl FnOnce(Option<&(dyn Fn(usize) + Sync)>) -> R) -> R {
+fn blocks_ahead<R>(g: &Graph, contents: Option<&Contents>, f: impl FnOnce(Option<&(dyn Fn(usize) + Sync)>) -> R) -> R {
+    let Some(contents) = contents else { return f(None) };
     let mut firsts: Vec<usize> = Vec::new();
     let mut first_at: HashMap<usize, usize> = HashMap::new();
     for op in &g.ops {
@@ -960,7 +1007,7 @@ impl<'a> Source<'a> for Queued {
 fn start(at: At, node: usize, cap: usize) -> Vec<Arc<Queue>> {
     let ev = at.ev;
     let Op::Apply(a, ref inputs, _) = ev.g.ops[node] else { unreachable!("an application") };
-    let qs: Vec<Arc<Queue>> = a.output_sizes.iter().map(|_| Queue::new(cap)).collect();
+    let qs: Vec<Arc<Queue>> = a.sizes().iter().map(|_| Queue::new(cap)).collect();
     ev.threads.queues.lock().unwrap().extend(qs.iter().map(Arc::downgrade));
     let outs = qs.clone();
     let run = move || {
@@ -974,9 +1021,9 @@ fn start(at: At, node: usize, cap: usize) -> Vec<Arc<Queue>> {
             let mut ins_dyn: Vec<&mut dyn PartIn> = ins.iter_mut().map(|i| i as &mut dyn PartIn).collect();
             let mut outs_dyn: Vec<&mut dyn PartOut> = pushed.iter_mut().map(|o| o as &mut dyn PartOut).collect();
             (ev.apply_part)(a, &mut ins_dyn, &mut outs_dyn)?;
-            match pushed.iter().zip(&a.output_sizes).all(|(o, &n)| o.n == n) {
+            match pushed.iter().zip(a.sizes()).all(|(o, &n)| o.n == n) {
                 true => Ok(()),
-                false => invalid(format!("module block {}: outputs of other sizes than declared", a.module)),
+                false => invalid("a part module's outputs of other sizes than declared"),
             }
         }));
         let r = r.unwrap_or_else(|_| invalid("a part module panicked"));
@@ -1147,7 +1194,8 @@ pub(super) fn hashed(
             }
             Op::Split(x, sizes, _) => get(x).and_then(|p| cut(p, sizes)),
             Op::Patch(..) => None,
-            Op::Apply(a, ref inputs, fan) => {
+            Op::Apply(Ap::One(_) | Ap::Shared(_), ..) => None,
+            Op::Apply(Ap::Block(a), ref inputs, fan) => {
                 let ins = inputs.iter().map(|&v| get(v).map(|p| whole(p))).collect::<Option<Vec<Ch>>>();
                 match (ins, &names[a.module]) {
                     (Some(ins), Some(name)) => {
@@ -1194,4 +1242,155 @@ fn cut(pieces: &[Ch], sizes: &[u64]) -> Option<Vec<Vec<Ch>>> {
         out.push(these);
     }
     it.next().is_none().then_some(out)
+}
+
+impl<'f> Graph<'f, 'f> {
+    /// The graph of formula `f` (its outputs checked to be taken once): its slices literals of the
+    /// bytes of its streams; each application of several outputs a node before what takes them,
+    /// one of a single output split as a formula block has it (a Split instruction).
+    fn of_formula(f: &'f crate::Formula) -> crate::Result<Self> {
+        f.check_outputs()?;
+        let mut g = Graph { ops: Vec::new(), lens: Vec::new(), fans: 0, sums: HashMap::new(), roots: Vec::new() };
+        let mut outputs: Vec<Vec<Val>> = Vec::with_capacity(f.shared.len());
+        for s in &f.shared {
+            let inputs = s.apply.inputs.iter().map(|n| g.node(f, n, &outputs)).collect::<crate::Result<Vec<_>>>()?;
+            let n = s.sizes.len();
+            let vals = match s.split {
+                true => {
+                    let a = g.push(Op::Apply(Ap::Shared(s), inputs, None), s.apply.len);
+                    let (node, fan) = (g.ops.len(), g.fan());
+                    g.push(Op::Split(a, &s.sizes, fan), 0);
+                    (0..n).map(|out| Val { node, out }).collect()
+                }
+                false => {
+                    let (node, fan) = (g.ops.len(), g.fan());
+                    g.push(Op::Apply(Ap::Shared(s), inputs, Some(fan)), 0);
+                    (0..n).map(|out| Val { node, out }).collect()
+                }
+            };
+            outputs.push(vals);
+        }
+        let root = g.node(f, &f.root, &outputs)?;
+        g.roots = vec![root];
+        Ok(g)
+    }
+
+    /// The value of node `n` of formula `f`, of the `outputs` of its applications of several.
+    fn node(&mut self, f: &'f crate::Formula, n: &'f crate::Node, outputs: &[Vec<Val>]) -> crate::Result<Val> {
+        use crate::{Error, Node};
+        Ok(match n {
+            &Node::Slice { stream, start, len } => {
+                let s = f.streams.get(stream).ok_or_else(|| Error::new(format!("no stream #{stream}")))?;
+                if s.data.sunk_in().is_some() || s.data.is_lazy() {
+                    return Err(Error::new(format!("stream #{stream} not at hand")));
+                }
+                let d = usize::try_from(start)
+                    .ok()
+                    .zip(usize::try_from(len).ok())
+                    .and_then(|(a, l)| s.data.get(a..a.checked_add(l)?))
+                    .ok_or_else(|| Error::new(format!("slice [{start}, +{len}) out of stream #{stream}")))?;
+                self.push(Op::Literal(d), len)
+            }
+            Node::Concat(ns) => {
+                let items = ns.iter().map(|n| self.node(f, n, outputs)).collect::<crate::Result<Vec<_>>>()?;
+                let len = items.iter().map(|&v| self.len(v)).sum();
+                self.push(Op::Concat(items), len)
+            }
+            Node::Pack(ns) => {
+                let items = ns.iter().map(|n| self.node(f, n, outputs)).collect::<crate::Result<Vec<_>>>()?;
+                let len = packed::header_len(items.len()) + items.iter().map(|&v| self.len(v)).sum::<u64>();
+                self.push(Op::Pack(items), len)
+            }
+            Node::Apply(a) => {
+                let inputs = a.inputs.iter().map(|n| self.node(f, n, outputs)).collect::<crate::Result<Vec<_>>>()?;
+                self.push(Op::Apply(Ap::One(a), inputs, None), a.len)
+            }
+            &Node::Output { shared, index, .. } => outputs[shared][index],
+            Node::ModuleBytes(_, d) => self.push(Op::Literal(d), d.len() as u64),
+            Node::ResourceBytes(r) => {
+                let d = r.stored_data().ok_or_else(|| Error::new("the bytes of a resource not stored"))?;
+                self.push(Op::Literal(d), d.len() as u64)
+            }
+            Node::Patch(p) => {
+                let (source, patch) = (self.node(f, &p.source, outputs)?, self.node(f, &p.patch, outputs)?);
+                self.push(Op::Patch(source, patch, p.len), p.len)
+            }
+        })
+    }
+}
+
+/// What takes the output of a formula as it is evaluated ([`eval_formula`]).
+pub(crate) type FormulaSink<'s> = dyn FnMut(&[u8]) -> crate::Result<()> + 's;
+
+/// No blocks: a formula's graph slices none.
+struct NoBlocks;
+
+impl Blocks for NoBlocks {
+    fn block(&self, _: usize) -> Decoded<Arc<Vec<u8>>> {
+        invalid("a block of a formula")
+    }
+
+    fn release(&self, _: usize) {}
+
+    fn add(&self, _: usize, _: usize) {}
+}
+
+/// The output of formula `f`, its modules run by `m` (whole: of an application of several
+/// outputs split, by [`crate::Modules::apply_shared`], its pieces put together), written to `part`
+/// in pieces as it is pulled where given (and none returned), its applications among what its
+/// output concatenates made ahead on up to `threads` threads.
+pub(crate) fn eval_formula<M: crate::Modules + Sync>(
+    f: &crate::Formula,
+    m: &M,
+    part: Option<&mut FormulaSink<'_>>,
+    threads: usize,
+) -> crate::Result<Vec<u8>> {
+    use crate::Error;
+    let g = Graph::of_formula(f)?;
+    let failed = |e: Error| Failure::Invalid(e.0);
+    let apply = |a: Ap<'_, '_>, inputs: &[&[u8]]| -> Decoded<Vec<Vec<u8>>> {
+        match a {
+            Ap::One(a) => m.apply(a, inputs).map(|o| vec![o]).map_err(failed),
+            Ap::Shared(s) if s.split => m.apply_shared(s, inputs).map(|p| vec![p.concat()]).map_err(failed),
+            Ap::Shared(s) => m.apply_shared(s, inputs).map_err(failed),
+            Ap::Block(_) => unreachable!("of a formula"),
+        }
+        .and_then(|outs| {
+            match outs.len() == a.sizes().len() && outs.iter().zip(a.sizes()).all(|(o, &n)| o.len() as u64 == n) {
+                true => Ok(outs),
+                false => invalid("outputs of other sizes than declared"),
+            }
+        })
+    };
+    let part_module = |_: Ap<'_, '_>| false;
+    let apply_part = |_: Ap<'_, '_>, _: &mut [&mut dyn PartIn], _: &mut [&mut dyn PartOut]| -> Decoded<()> {
+        unreachable!("no part modules in a formula's evaluation")
+    };
+    let running = Threads::default();
+    let ev = Eval {
+        g: &g,
+        apply: &apply,
+        part: &part_module,
+        apply_part: &apply_part,
+        blocks: &NoBlocks,
+        fans: (0..g.fans).map(|_| Mutex::new(Fan::Idle)).collect(),
+        threads: &running,
+    };
+    let _joined = Joined(&ev);
+    let err = |f: Failure| match f {
+        Failure::Invalid(m) | Failure::Resource(m) | Failure::Decryption(m) => Error::new(m),
+        f => Error::new(format!("{f:?}")),
+    };
+    match part {
+        None => emit(&g, &ev, None, None, threads).map_err(err).map(|mut o| o.pop().unwrap_or_default()),
+        Some(part) => {
+            // (the callback's failure told apart from the evaluation's)
+            let mut given: Option<Error> = None;
+            let mut take = |d: &[u8]| part(d).map_err(|e| Failure::Invalid(given.insert(e).0.clone()));
+            match emit(&g, &ev, None, Some(&mut take), threads) {
+                Ok(_) => Ok(Vec::new()),
+                Err(f) => Err(given.take().unwrap_or_else(|| err(f))),
+            }
+        }
+    }
 }

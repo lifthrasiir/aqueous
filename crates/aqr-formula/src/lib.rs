@@ -1545,10 +1545,8 @@ impl Formula {
     /// The output, with every module run by `m`. Fails on slices out of their stream, on
     /// modules whose output is not of the declared size, and on outputs not taken once
     /// ([`Formula::check_outputs`]).
-    pub fn eval(&self, m: &impl Modules) -> Result<Vec<u8>> {
-        let outputs = self.shared_outputs(m)?;
-        // the output of a single application, or a stream, as it is
-        Ok(self.bytes(&self.root, m, &outputs)?.into_owned())
+    pub fn eval(&self, m: &(impl Modules + Sync)) -> Result<Vec<u8>> {
+        aqr::eval::eval_formula(self, m, None, 1)
     }
 
     /// A formula of node `n` of this one (of no outputs of applications of several outputs) and
@@ -1568,46 +1566,10 @@ impl Formula {
         Formula { streams: own, root: n, shared: Vec::new() }
     }
 
-    /// [`Formula::eval`], the output given to `part` a piece at a time as it is made, rather than
-    /// held whole: each of what the root concatenates (and what they do) in turn, let go once
-    /// given (or kept, [`Modules::keep`]).
-    pub fn eval_parts(&self, m: &impl Modules, part: &mut dyn FnMut(&[u8]) -> Result<()>) -> Result<()> {
-        let outputs = self.shared_outputs(m)?;
-        self.parts_into(&self.root, m, &outputs, part)
-    }
-
-    fn parts_into(
-        &self,
-        n: &Node,
-        m: &impl Modules,
-        outputs: &[Vec<Vec<u8>>],
-        part: &mut dyn FnMut(&[u8]) -> Result<()>,
-    ) -> Result<()> {
-        match n {
-            Node::Concat(ns) => ns.iter().try_for_each(|n| self.parts_into(n, m, outputs, part)),
-            _ => {
-                let b = self.bytes(n, m, outputs)?;
-                part(&b)?;
-                keep_all(m, [n], [b]);
-                Ok(())
-            }
-        }
-    }
-
-    /// The outputs of the applications of several outputs, in order (checked first).
-    fn shared_outputs(&self, m: &impl Modules) -> Result<Vec<Vec<Vec<u8>>>> {
-        self.check_outputs()?;
-        let mut outputs: Vec<Vec<Vec<u8>>> = Vec::with_capacity(self.shared.len());
-        for s in &self.shared {
-            let inputs = s.apply.inputs.iter().map(|n| self.bytes(n, m, &outputs)).collect::<Result<Vec<_>>>()?;
-            let out = m.apply_shared(s, &inputs.iter().map(|i| &**i).collect::<Vec<_>>())?;
-            keep_all(m, &s.apply.inputs, inputs);
-            if out.len() != s.sizes.len() || out.iter().zip(&s.sizes).any(|(o, &n)| o.len() as u64 != n) {
-                return Err(Error::new(format!("{} made outputs of other sizes than {:?}", s.apply.module, s.sizes)));
-            }
-            outputs.push(out);
-        }
-        Ok(outputs)
+    /// [`Formula::eval`], the output given to `part` a piece at a time as it is pulled, rather than
+    /// held whole (by the evaluator of formula blocks).
+    pub fn eval_parts(&self, m: &(impl Modules + Sync), part: &mut dyn FnMut(&[u8]) -> Result<()>) -> Result<()> {
+        aqr::eval::eval_formula(self, m, Some(part), 1).map(drop)
     }
 
     /// Sets every application's memory limit ([`Apply::memory_limit`]) to what `limit` gives of
@@ -1670,7 +1632,6 @@ impl Formula {
             _ => {
                 let b = self.bytes(n, m, outputs)?;
                 out.extend_from_slice(&b);
-                keep_all(m, [n], [b]);
                 Ok(())
             }
         }
@@ -1711,32 +1672,16 @@ impl Formula {
             Node::Patch(p) => {
                 let (source, patch) = (self.bytes(&p.source, m, outputs)?, self.bytes(&p.patch, m, outputs)?);
                 let out = patch::apply(&source, &patch, p.len)?;
-                keep_all(m, [&p.source, &p.patch], [source, patch]);
                 Ok(Cow::Owned(out))
             }
             Node::Apply(a) => {
                 let inputs = a.inputs.iter().map(|n| self.bytes(n, m, outputs)).collect::<Result<Vec<_>>>()?;
                 let out = m.apply(a, &inputs.iter().map(|i| &**i).collect::<Vec<_>>())?;
-                keep_all(m, &a.inputs, inputs);
                 if out.len() as u64 != a.len {
                     return Err(Error::new(format!("{} made {} bytes, not {}", a.module, out.len(), a.len)));
                 }
                 Ok(Cow::Owned(out))
             }
-        }
-    }
-}
-
-/// The outputs of the applications among `nodes` in `made` (the bytes of each) given back to
-/// `m` ([`Modules::keep`]).
-fn keep_all<'a, 'n>(
-    m: &impl Modules,
-    nodes: impl IntoIterator<Item = &'n Node>,
-    made: impl IntoIterator<Item = Cow<'a, [u8]>>,
-) {
-    for (n, b) in nodes.into_iter().zip(made) {
-        if let (Node::Apply(a), Cow::Owned(out)) = (n, b) {
-            m.keep(a, out);
         }
     }
 }
@@ -1852,13 +1797,6 @@ impl fmt::Display for Formula {
 pub trait Modules {
     /// The output of `a` on `inputs`, the evaluated `a.inputs` (with `a.resources`).
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>>;
-
-    /// The output `a` gave, once the evaluation ([`Formula::eval`]) is done with it: the
-    /// application it is an input of has been applied, or it is put in its place. Dropped by
-    /// default.
-    fn keep(&self, a: &Apply, out: Vec<u8>) {
-        let _ = (a, out);
-    }
 
     /// The outputs of `s` on `inputs`, the evaluated `s.apply.inputs`: by default those split
     /// from the output of [`Modules::apply`] ([`Shared::split`]), or that output if `s` has one.
@@ -2048,7 +1986,8 @@ mod tests {
         ]);
         let mut c = f.clone();
         c.compact();
-        assert_eq!(c.eval(&Rev), f.eval(&Rev));
+        // (failing alike: the streams it names are numbered anew)
+        assert_eq!(c.eval(&Rev).ok(), f.eval(&Rev).ok());
         // shared bytes: only those kept copied, the same as of its own
         let mut s = f.clone();
         s.streams[0].data = Bytes::shared(Arc::new(b"0123456789".to_vec()));
