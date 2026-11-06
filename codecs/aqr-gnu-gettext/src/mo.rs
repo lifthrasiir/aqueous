@@ -115,6 +115,18 @@ pub fn hash_table(keys: impl ExactSizeIterator<Item = impl AsRef<[u8]>>, size: u
     Some(t)
 }
 
+/// What [`build`] takes of an [`aqr_api::stack`] at most, of a file of `len` bytes whose rest is
+/// `rest`: the file, the strings' lengths and offsets (two 32-bit words a string, originals and
+/// translations), and where it has a hash table the originals (a slice each) and the table on
+/// top of them. `None` where `rest` does not start as a file.
+pub fn build_plan(rest: &[u8], len: u64) -> Option<u64> {
+    use aqr_api::stack::block;
+    let l = Layout::of(rest)?;
+    let (n, size) = (l.n as u64, l.hash_size as u64);
+    let hash = if size > 0 { block(8 * n) + block(4 * size) } else { 0 };
+    Some(block(len) + block(8 * 2 * n) + hash)
+}
+
 /// The file of `len` bytes from `rest` (the file without the parts derived), `start` (where the
 /// strings start) and `nuls` (for each string, originals then translations, the NULs within
 /// it: varints).

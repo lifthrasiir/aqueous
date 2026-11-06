@@ -19,6 +19,17 @@ pub fn params(l: Layout) -> Vec<u8> {
 }
 
 /// The module: the blocks, `len` bytes, from `params` (their layout) and `inputs` (the record).
+/// The memory plan of the module ([`aqr_api::stack`]): what it takes beyond its initial memory
+/// at most, of `params`, a record of `record` bytes and an output of `len`: what `aqr_api::whole`
+/// copies, and what decoding takes ([`codec::decode_plan`]). `None` for params it does not take.
+pub fn plan(params: &[u8], record: u64, len: u64) -> Option<u64> {
+    let mut at = 0;
+    let channels = varint::get(params, &mut at).ok()?;
+    let per_channel = varint::get(params, &mut at).ok()?;
+    let l = Layout::new(channels as usize, per_channel as usize)?;
+    Some(aqr_api::stack::whole(params.len() as u64, &[], &[record]) + codec::decode_plan(l, len))
+}
+
 pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     let &[record] = inputs else { return Err(corrupt()) };
     let mut at = 0;

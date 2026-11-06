@@ -18,6 +18,14 @@ pub fn plan(input: u64, len: u64) -> u64 {
     aqr_api::stack::whole(1, &[], &[input]) + snappy::compress_plan(input, len)
 }
 
+/// The memory plan of `leveldb-recons` ([`aqr_api::stack`]): what it takes beyond its initial
+/// memory at most, of inputs of `inputs` bytes (the second the layout `layout`) and an output of
+/// `len`: what `aqr_api::whole` copies, the table and the compressor's table on top of it.
+pub fn table_plan(inputs: [u64; 3], layout: &[u8], len: u64) -> Option<u64> {
+    let own = leveldb::build_plan(inputs[0], layout, inputs[2], len)?;
+    Some(aqr_api::stack::whole(1, &[], &inputs) + own)
+}
+
 /// The module `leveldb-recons`: a LevelDB table of `len` bytes (see `FORMAT.md`).
 pub fn decode_table(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Result<Vec<u8>> {
     let (&[h], &[data, layout, kept]) = (params, inputs) else { return Err(corrupt()) };

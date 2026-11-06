@@ -494,6 +494,7 @@ dependencies = [
 name = "aqr-gnu-gettext"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
  "aqr-common",
  "aqr-formula",
 ]
@@ -512,6 +513,7 @@ dependencies = [
 name = "aqr-ima"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
  "aqr-common",
  "aqr-formula",
 ]
@@ -920,6 +922,7 @@ dependencies = [
 name = "aqr-wasm"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
  "aqr-common",
  "aqr-formula",
  "zstd",

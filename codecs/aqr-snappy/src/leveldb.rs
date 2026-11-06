@@ -118,6 +118,25 @@ pub fn build(data: &[u8], layout: &[u8], kept: &[u8], hash: Hash) -> Result<Vec<
     build_in(data, layout, kept, hash, usize::MAX)
 }
 
+/// What [`build_in`] takes of an [`aqr_api::stack`] at most, of data and bytes kept of these
+/// lengths, `layout`, and a vector of `capacity` at first: the table, and on top of it the
+/// table of the largest block compressed (`None` where the layout does not hold).
+pub fn build_plan(data: u64, layout: &[u8], kept: u64, capacity: u64) -> Option<u64> {
+    let mut lp = 0;
+    let mut table = 0;
+    while lp < layout.len() {
+        let n = varint::get(layout, &mut lp).ok()?;
+        let code = *layout.get(lp)?;
+        lp += 1;
+        match code {
+            CODE_SNAPPY => table = table.max(snappy::table_plan(n)),
+            CODE_KEPT => lp += 1,
+            _ => {}
+        }
+    }
+    Some(aqr_api::stack::block(capacity.min(data / 2 + kept + FOOTER as u64)) + table)
+}
+
 /// [`build`] into a vector of `capacity` bytes at first (the length expected, where it is
 /// known).
 pub fn build_in(data: &[u8], layout: &[u8], kept: &[u8], hash: Hash, capacity: usize) -> Result<Vec<u8>> {

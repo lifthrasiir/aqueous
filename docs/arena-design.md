@@ -194,6 +194,10 @@ P = W_main + Σ_태스크 (W_spawn + 태스크의 계획 버퍼) + 채널 메시
 - `Field`와 `Float`는 `repr(C)`로 두고, wasm32 크기는 상수로 확인한다.
 - 실측 = 계획이다(`recs_plans_hold`). 직접 만든 수식에는 aqr-compress의 숨은 `declare_memory`로 한도를 선언한다.
 
+**leveldb-recons, wasm-recons, ima-recons, gnu-gettext-recons.** leveldb, wasm, gettext는 이미 LIFO였다.
+- ima는 채널마다의 니블 목록(`Vec<Vec<u8>>`)을 펼쳤다. 블록마다 앞 채널의 목록을 `clone`하던 것이 `copy_within`이 됐다(스택에서는 블록마다 구멍이 쌓였을 것이다).
+- 실측 = 계획이다(aqr-decompress `snappy_plan_holds`, `more_plans_hold`: 뿌리 적용에 계획만큼의 한도를 선언하는 `plan_holds`).
+
 ## 다음 순서
 
 1. `Module::memory_usage_in_pages`를 이미 정확한 용량을 쓰는 모듈들(exe, xsv, fasta, zip, git, pdf, png, …)부터 만든다.

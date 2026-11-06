@@ -8,12 +8,11 @@ use crate::wasm::{self, CUSTOM, DATA, STREAM_NAMES, STREAMS};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("wasm-recons", 1).with_memory(memory);
+pub const MODULE: Module = Module::new("wasm-recons", 1).with_plan(memory);
 
-/// The memory of the module: the streams and the module (whose sections and functions are
-/// made in place), and the list of locals of the function being made.
+/// The memory of the module: its initial memory, and its plan ([`crate::module::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    Some(u.whole(0, 0))
+    Some(u.initial() + crate::module::plan(u.inputs, u.output()))
 }
 
 /// The classes of the streams, in order.

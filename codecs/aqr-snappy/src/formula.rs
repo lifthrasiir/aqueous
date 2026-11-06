@@ -15,7 +15,7 @@ pub use crate::module::{decode, decode_table};
 pub const MODULE: Module = Module::new("snappy-recons", 2).with_plan(memory);
 
 /// A LevelDB table ([`encode`], [`decode_table`]).
-pub const TABLE_MODULE: Module = Module::new("leveldb-recons", 1).with_memory(table_memory);
+pub const TABLE_MODULE: Module = Module::new("leveldb-recons", 1).with_plan(table_memory);
 
 /// The memory of `snappy-recons`: its initial memory, and its plan ([`crate::module::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
@@ -23,9 +23,11 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.initial() + crate::module::plan(input, len))
 }
 
-/// The memory of `leveldb-recons`: the inputs and the table, the stream's table and a buffer.
+/// The memory of `leveldb-recons`: its initial memory, and its plan
+/// ([`crate::module::table_plan`]).
 fn table_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    Some(u.whole(snappy::TABLE_BYTES, 1))
+    let (&[data, layout, kept], &[len]) = (u.inputs, u.outputs) else { return None };
+    Some(u.initial() + crate::module::table_plan([data, layout, kept], u.content(1)?, len)?)
 }
 
 /// The application of the module making the Snappy stream of `len` bytes that `data` compresses

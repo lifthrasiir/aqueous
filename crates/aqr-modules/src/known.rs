@@ -228,7 +228,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "flate-set",
         version: 1,
-        sha512_256: hex("2dc7c565855bf14503e3e25207bd90f184c108c33ad080a36e75b056bc1b99b7"),
+        sha512_256: hex("99c0c9f0ee06f762dbfb0e5ff8bfc7cbb5f3bfbd0684adbf3282e8b42f28cd19"),
         block: include_bytes!("../wasm/flate-set.block"),
     },
     Known {
@@ -252,7 +252,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "gnu-gettext-recons",
         version: 1,
-        sha512_256: hex("3c375aead2201f56b1323d77429eeb5056b84d2adc3761c0b2d13f4f02a15c9c"),
+        sha512_256: hex("bd1b1486d14d86f52de31b308f7e05c8fe8b3306a125f967848758a527e57931"),
         block: include_bytes!("../wasm/gnu-gettext-recons.block"),
     },
     Known {
@@ -264,7 +264,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "ima-recons",
         version: 2,
-        sha512_256: hex("6c088db9a421b6219497c107f329d922d2f5ebd27167af5b8fef778fecf42dd6"),
+        sha512_256: hex("05478b095f2e98f2a55c3feb82da7ee6a20fb2af6d21e23f5cf823992843b396"),
         block: include_bytes!("../wasm/ima-recons.block"),
     },
     Known {
@@ -282,7 +282,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "leveldb-recons",
         version: 1,
-        sha512_256: hex("19913afd8d62b829cd50f712648a18615fa0683821655d74d0a25add2827a040"),
+        sha512_256: hex("f35fcf835e5c2d2c2b03324155e89bf38a5a8b3790a3a5be7f0d91b6a5ddd5f4"),
         block: include_bytes!("../wasm/leveldb-recons.block"),
     },
     Known {
@@ -444,7 +444,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "snappy-recons",
         version: 2,
-        sha512_256: hex("634726d8c3af3d7c9ff83e1328a0d3db095b477a7cf6567a3b5831574b529823"),
+        sha512_256: hex("70b6e9181d77881e3a49afd82bc3dae0cb17f654d49f5220ef6572fededae65a"),
         block: include_bytes!("../wasm/snappy-recons.block"),
     },
     Known {
@@ -462,7 +462,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "wasm-recons",
         version: 1,
-        sha512_256: hex("0b49f94fc13fbe29b0a8b16c0bbd6f51d941c3c52d79014a598cf8b3df9c51a3"),
+        sha512_256: hex("9b2f1021885d459895a06fc5a669bff3c961ce9b75122cd40e46ed5c994dccdf"),
         block: include_bytes!("../wasm/wasm-recons.block"),
     },
     Known {

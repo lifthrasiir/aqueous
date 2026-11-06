@@ -21,6 +21,7 @@ const INDEX: [i32; 8] = [-1, -1, -1, -1, 2, 4, 6, 8];
 
 /// The decoder's state: the predictor and the step index (0 to 88).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 struct State {
     pred: i32,
     idx: usize,
@@ -213,6 +214,22 @@ impl Layout {
     }
 }
 
+/// Bytes of an `Option<State>` and a [`Bit`] on WebAssembly (32-bit `usize`), for the plan.
+const STATE_BYTES: u64 = 12;
+const BIT_BYTES: u64 = 4;
+#[cfg(target_family = "wasm")]
+const _: () = assert!(size_of::<Option<State>>() as u64 == STATE_BYTES && size_of::<Bit>() as u64 == BIT_BYTES);
+
+/// What [`decode`] takes of an [`aqr_api::stack`] at most, of an output of `len` bytes of `l`:
+/// the output, and on top of it what coding takes ([`code`]): the model's two lists, each
+/// channel's state and context, its nibbles, and a block.
+pub fn decode_plan(l: Layout, len: u64) -> u64 {
+    use aqr_api::stack::block;
+    let (ch, bs, n) = (l.channels as u64, l.block() as u64, l.nibbles() as u64);
+    let model = block(3 * BIT_BYTES * ch) + block(BIT_BYTES * (BUCKETS * PREV * PREV * 16) as u64);
+    block(len) + model + block(STATE_BYTES * ch) + block(4 * ch) + block(ch * n) + block(bs)
+}
+
 /// Codes the blocks of `d` (whole blocks of `l`) with `c`, writing them to `out` (decoding;
 /// encoding gives `d` back).
 fn code<C: Coder>(cod: &mut C, l: Layout, d: Option<&[u8]>, blocks: usize, out: &mut Vec<u8>) {
@@ -220,8 +237,8 @@ fn code<C: Coder>(cod: &mut C, l: Layout, d: Option<&[u8]>, blocks: usize, out: 
     let mut m = Model::new(ch);
     let mut end: Vec<Option<State>> = vec![None; ch];
     let mut same_before = vec![2usize; ch];
-    // each channel's nibbles of the block
-    let mut nib = vec![vec![0u8; n]; ch];
+    // each channel's nibbles of the block, one channel's after another
+    let mut nib = vec![0u8; ch * n];
     let mut block = vec![0u8; bs];
     for k in 0..blocks {
         let src = d.map(|d| &d[k * bs..(k + 1) * bs]);
@@ -244,7 +261,7 @@ fn code<C: Coder>(cod: &mut C, l: Layout, d: Option<&[u8]>, blocks: usize, out: 
                         let (a, b) = (4 * ch + 4 * (w * ch + c), 4 * ch + 4 * (w * ch + c - 1));
                         block.copy_within(b..b + 4, a);
                     }
-                    nib[c] = nib[c - 1].clone();
+                    nib.copy_within((c - 1) * n..c * n, c * n);
                     end[c] = end[c - 1];
                     continue;
                 }
@@ -256,10 +273,10 @@ fn code<C: Coder>(cod: &mut C, l: Layout, d: Option<&[u8]>, blocks: usize, out: 
             let mut prev = PREV - 1;
             for j in 0..n {
                 let want = src.map_or(0, |s| s[at(c, j)] >> (4 * (j % 2)) & 15);
-                let lr = if c > 0 { nib[c - 1][j] as usize } else { PREV - 1 };
+                let lr = if c > 0 { nib[(c - 1) * n + j] as usize } else { PREV - 1 };
                 let base = ((bucket(Some(s)) * PREV + prev) * PREV + lr) * 16;
                 let v = Model::tree(cod, &mut m.nibble[base..base + 16], 4, want as u32) as u8;
-                nib[c][j] = v;
+                nib[c * n + j] = v;
                 let p = at(c, j);
                 block[p] = if j % 2 == 0 { (block[p] & 0xF0) | v } else { (block[p] & 0x0F) | v << 4 };
                 s.step(v);

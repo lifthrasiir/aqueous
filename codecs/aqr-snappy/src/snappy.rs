@@ -124,9 +124,12 @@ pub fn compress_in(src: &[u8], hash: Hash, capacity: usize) -> Result<Vec<u8>> {
 /// What [`compress_in`] takes of an [`aqr_api::stack`] at most, of `n` bytes into a vector of
 /// `capacity` at first: the stream, and the table on top of it.
 pub fn compress_plan(n: u64, capacity: u64) -> u64 {
-    use aqr_api::stack::block;
-    let table = 2 * table_size(n.min(FRAGMENT as u64) as usize) as u64;
-    block(capacity.min(32 + n + n / 6)) + block(table)
+    aqr_api::stack::block(capacity.min(32 + n + n / 6)) + table_plan(n)
+}
+
+/// What [`compress_onto`] takes of an [`aqr_api::stack`] besides `out`, of `n` bytes: its table.
+pub fn table_plan(n: u64) -> u64 {
+    aqr_api::stack::block(2 * table_size(n.min(FRAGMENT as u64) as usize) as u64)
 }
 
 /// [`compress`] appended to `out`.

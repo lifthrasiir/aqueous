@@ -1408,49 +1408,136 @@ fn task_slots_declared() {
     invalid(load(plain), "aqr_task_slots");
 }
 
+/// Formula `f` of a root application of slices, its plan declared as its limit alone (no room),
+/// archived and decoded as WebAssembly: `want`, and the application's working memory its plan,
+/// to the page.
+fn plan_holds(what: &str, mut f: Formula, want: &[u8]) {
+    let pages = |n: u64| n.div_ceil(65536) * 65536;
+    let Node::Apply(a) = &mut f.root else { panic!("{what}: not an application") };
+    let inputs: Vec<Vec<u8>> = (a.inputs.iter())
+        .map(|n| match *n {
+            Node::Slice { stream, start, len } => f.streams[stream].data[start as usize..][..len as usize].to_vec(),
+            _ => panic!("{what}: an input not a slice"),
+        })
+        .collect();
+    let contents: Vec<&[u8]> = inputs.iter().map(|i| &i[..]).collect();
+    let lens: Vec<u64> = inputs.iter().map(|i| i.len() as u64).collect();
+    let resources: Vec<u64> = a.resources.iter().map(|r| r.len() as u64).collect();
+    let usage = aqr_formula::Usage {
+        params: &a.params,
+        resources: &resources,
+        inputs: &lens,
+        outputs: &[a.len],
+        contents: &contents,
+        initial_pages: aqr_decompress::initial_pages_of(a.module).unwrap(),
+    };
+    assert!(a.module.planned, "{what}: {} not planned", a.module);
+    let plan = a.module.memory_usage_in_pages(&usage).unwrap() * 65536;
+    let imported = [a.params.len() as u64, a.len].iter().chain(&resources).chain(&lens).map(|&n| pages(n)).sum::<u64>();
+    let limit = imported + plan;
+    a.memory_limit = limit;
+    let c = Encoder::new(Level::Zstd(3)).with_modules(wasm_of).encode(&f, None).unwrap();
+    // (the applications kept by one test at a time: the log is the process's)
+    static RECORDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let recording = RECORDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    aqr_decompress::record_applications(true);
+    let out = aqr::decode(&c, &Wasm);
+    let applied = aqr_decompress::record_applications(false);
+    drop(recording);
+    assert!(out.as_ref().is_ok_and(|o| o == want), "{what}: {:?}", out.err());
+    // (those of this application: other tests' run meanwhile, without limits)
+    let mine: Vec<_> = applied.iter().filter(|a| a.limit == limit).collect();
+    assert!(!mine.is_empty(), "{what}: not applied");
+    for a in mine {
+        assert!(a.working <= plan && plan - a.working < 65536, "{what}: plan {plan}, working {}", a.working);
+    }
+}
+
 /// snappy-recons lays its memory out as a stack, its limit its plan: each stream of the
-/// fixtures rebuilt as WebAssembly within the limit of its plan alone (no room), its working
-/// memory that of the plan to the page.
+/// fixtures rebuilt as WebAssembly within the limit of its plan alone, its working memory that
+/// of the plan to the page.
 #[test]
 fn snappy_plan_holds() {
     let dir = format!("{}/../../codecs/aqr-snappy/tests/data", env!("CARGO_MANIFEST_DIR"));
     let mut seen = 0;
     for e in std::fs::read_dir(dir).unwrap() {
         let path = e.unwrap().path();
-        if path.extension().is_none_or(|x| x != "snappy") {
+        let what = path.to_string_lossy();
+        let d = std::fs::read(&path).unwrap();
+        // (LevelDB tables, leveldb-recons)
+        if path.extension().is_some_and(|x| x == "ldb") {
+            plan_holds(&what, aqr_snappy::formula::encode(&d, 1).unwrap(), &d);
+            seen += 1;
             continue;
         }
-        let s = std::fs::read(&path).unwrap();
+        let s = d;
         let d = aqr_snappy::snappy::decode(&s, 1 << 24).unwrap();
         let hash = aqr_snappy::formula::find_hash(&d, &s).unwrap();
         let mut f = Formula::default();
-        let data = f.push("raw", d.clone());
-        let mut root = aqr_snappy::formula::stream(hash, data, s.len() as u64);
-        let Node::Apply(a) = &mut root else { panic!("an application") };
-        let pages = |n: u64| n.div_ceil(65536) * 65536;
-        let none: Vec<&[u8]> = Vec::new();
-        let usage = aqr_formula::Usage {
-            params: &a.params,
-            resources: &[],
-            inputs: &[d.len() as u64],
-            outputs: &[s.len() as u64],
-            contents: &none,
-            initial_pages: aqr_decompress::initial_pages_of(a.module).unwrap(),
-        };
-        let plan = a.module.memory_usage_in_pages(&usage).unwrap() * 65536;
-        let limit = pages(a.params.len() as u64) + pages(d.len() as u64) + pages(s.len() as u64) + plan;
-        a.memory_limit = limit;
-        f.root = root;
-        let c = Encoder::new(Level::Zstd(3)).with_modules(wasm_of).encode(&f, None).unwrap();
-        aqr_decompress::record_applications(true);
-        let out = aqr::decode(&c, &Wasm);
-        let applied = aqr_decompress::record_applications(false);
-        assert!(out.as_ref().is_ok_and(|o| *o == s), "{path:?}: {:?}", out.err());
-        // (those of this application: other tests' run meanwhile, without limits)
-        for a in applied.iter().filter(|a| a.limit == limit) {
-            assert!(a.working <= plan && plan - a.working < 65536, "{path:?}: plan {plan}, working {}", a.working);
-            seen += 1;
-        }
+        let data = f.push("raw", d);
+        f.root = aqr_snappy::formula::stream(hash, data, s.len() as u64);
+        plan_holds(&what, f, &s);
+        seen += 1;
     }
     assert!(seen >= 10, "{seen} streams");
+}
+
+/// wasm-recons, gnu-gettext-recons and ima-recons lay their memory out as stacks, their limits
+/// their plans: of modules aqr-modules built; of `.mo` files with and without a hash table; of
+/// IMA ADPCM blocks of noise (any header) of one channel and of six.
+#[test]
+fn more_plans_hold() {
+    for m in ["flate-set", "lz4-recons", "bcj-x86", "png-set"] {
+        let d = fixture(&format!("crates/aqr-modules/wasm/{m}.wasm"));
+        plan_holds(m, aqr_wasm::formula::encode(&d, 1).unwrap(), &d);
+    }
+    let pairs: Vec<(Vec<u8>, Vec<u8>)> = (0..3000)
+        .map(|i| (format!("message {i:05}").into_bytes(), format!("Nachricht {i} von vielen").into_bytes()))
+        .collect();
+    for (hash, n) in [(0, 3000), (4099, 3000), (7, 3)] {
+        let d = mo_file(&pairs[..n], hash);
+        plan_holds(&format!("mo {hash} {n}"), aqr_gnu_gettext::formula::encode(&d, 1).unwrap(), &d);
+    }
+    for (channels, per) in [(1, 1024), (6, 36)] {
+        let l = aqr_ima::codec::Layout::new(channels, per).unwrap();
+        let d = aqr_common::rng::noise(200 * l.block());
+        let mut f = Formula::default();
+        let (node, n) = aqr_ima::formula::blocks(&mut f, l, &d).unwrap();
+        assert_eq!(n, d.len());
+        f.root = node;
+        plan_holds(&format!("ima {channels}"), f, &d);
+    }
+}
+
+/// A `.mo` file of `pairs` (original, translation), sorted as msgfmt sorts them, little-endian, a
+/// hash table of `hash` slots (none for 0).
+fn mo_file(pairs: &[(Vec<u8>, Vec<u8>)], hash: usize) -> Vec<u8> {
+    let mut pairs = pairs.to_vec();
+    pairs.sort();
+    let w = |v: usize| (v as u32).to_le_bytes();
+    let n = pairs.len();
+    let (o, t) = (28, 28 + 8 * n);
+    let h = t + 8 * n;
+    let mut d: Vec<u8> = [0x9504_12de, 0, n, o, t, hash, h].iter().flat_map(|&v| w(v)).collect();
+    let mut at = h + 4 * hash;
+    let (mut tables, mut strings) = ([Vec::new(), Vec::new()], Vec::new());
+    for (k, table) in tables.iter_mut().enumerate() {
+        for p in &pairs {
+            let s = if k == 0 { &p.0 } else { &p.1 };
+            table.extend_from_slice(&w(s.len()));
+            table.extend_from_slice(&w(at));
+            strings.extend_from_slice(s);
+            strings.push(0);
+            at += s.len() + 1;
+        }
+    }
+    d.extend_from_slice(&tables[0]);
+    d.extend_from_slice(&tables[1]);
+    if hash > 0 {
+        for v in aqr_gnu_gettext::mo::hash_table(pairs.iter().map(|p| &p.0), hash).unwrap() {
+            d.extend_from_slice(&w(v as usize));
+        }
+    }
+    d.extend_from_slice(&strings);
+    d
 }
