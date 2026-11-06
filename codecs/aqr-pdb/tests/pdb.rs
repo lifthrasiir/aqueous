@@ -196,9 +196,13 @@ fn symbols_round_trip() {
     let whole: Vec<Vec<u8>> = mods.iter().map(|m| [&m[..], b"lines"].concat()).collect();
     let info = |m: &Vec<u8>| aqr_pdb::dbi::Module { stream: 0, symbols: m.len(), c11: 0, c13: 0 };
     let subs: Vec<(&[u8], aqr_pdb::dbi::Module)> = whole.iter().zip(&mods).map(|(w, m)| (&w[..], info(m))).collect();
-    let st = symbols::encode(&subs).expect("taken");
+    let (params, st) = symbols::encode(&subs).expect("taken");
     let refs: Vec<&[u8]> = st.iter().map(|v| &v[..]).collect();
-    assert_eq!(symbols::decode(&refs).unwrap(), whole.concat());
+    assert_eq!(symbols::decode(&params, &refs).unwrap(), whole.concat());
+    // (two blocks within a procedure and two inline sites, the second within the first, in it)
+    assert_eq!(params, [3]);
+    // fewer scopes open at once than there are
+    assert!(symbols::decode(&[2], &refs).is_err());
     // every parent and end derived
     let scope = symbols::STREAM_NAMES.iter().position(|&n| n == "scope").unwrap();
     assert!(st[scope].iter().all(|&b| b == 0));
@@ -209,8 +213,9 @@ fn symbols_round_trip() {
         .collect();
     let p: Vec<&[u8]> = packed.iter().map(|v| &v[..]).collect();
     let len = whole.iter().map(Vec::len).sum::<usize>() as u64;
-    assert_eq!(aqr_pdb::module::symbols(&[], &p, len).unwrap(), whole.concat());
-    assert!(aqr_pdb::module::symbols(&[], &p, len + 1).is_err());
+    assert_eq!(aqr_pdb::module::symbols(&params, &p, len).unwrap(), whole.concat());
+    assert!(aqr_pdb::module::symbols(&params, &p, len + 1).is_err());
+    assert!(aqr_pdb::module::symbols(&[], &p, len).is_err());
 }
 
 #[test]
@@ -218,7 +223,7 @@ fn symbols_corrupt() {
     let (_, mods) = pdb(false);
     let info = |m: &Vec<u8>| aqr_pdb::dbi::Module { stream: 0, symbols: m.len(), c11: 0, c13: 0 };
     let subs: Vec<(&[u8], aqr_pdb::dbi::Module)> = mods.iter().map(|m| (&m[..], info(m))).collect();
-    let st = symbols::encode(&subs).unwrap();
+    let (params, st) = symbols::encode(&subs).unwrap();
     for k in 0..st.len() {
         if st[k].is_empty() {
             continue;
@@ -226,7 +231,7 @@ fn symbols_corrupt() {
         let mut s = st.clone();
         s[k].pop();
         let refs: Vec<&[u8]> = s.iter().map(|v| &v[..]).collect();
-        assert!(symbols::decode(&refs).is_err(), "stream {k} cut");
+        assert!(symbols::decode(&params, &refs).is_err(), "stream {k} cut");
     }
     for seed in 0..300usize {
         let mut s = st.clone();
@@ -235,7 +240,7 @@ fn symbols_corrupt() {
             let i = seed * 7919 % s[k].len();
             s[k][i] ^= 1 << (seed % 8);
             let refs: Vec<&[u8]> = s.iter().map(|v| &v[..]).collect();
-            let _ = symbols::decode(&refs);
+            let _ = symbols::decode(&params, &refs);
         }
     }
 }

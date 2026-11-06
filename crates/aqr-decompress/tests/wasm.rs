@@ -1562,6 +1562,74 @@ fn msf_plan_holds() {
     }
 }
 
+/// pdb-symbols lays its memory out as a stack, its limit its plan: of modules of blocks nested
+/// shallow and deep, their lines inlinee lines of few inlinees and of many.
+#[test]
+fn pdb_symbols_plan_holds() {
+    for (mods, n, depth, entries, ids) in [(3, 3000, 5, 20_000, 5000), (1, 400, 200, 0, 1), (40, 50, 3, 300, 300)] {
+        let what = format!("symbols {mods} {n} {depth} {entries}");
+        let whole: Vec<(Vec<u8>, usize, usize)> = (0..mods).map(|k| pdb_module(k, n, depth, entries, ids)).collect();
+        let info =
+            |&(_, symbols, c13): &(Vec<u8>, usize, usize)| aqr_pdb::dbi::Module { stream: 0, symbols, c11: 0, c13 };
+        let parts: Vec<(&[u8], aqr_pdb::dbi::Module)> = whole.iter().map(|w| (&w.0[..], info(w))).collect();
+        let (params, st) = aqr_pdb::symbols::encode(&parts).expect("taken");
+        let mut f = Formula::default();
+        let nodes = (aqr_pdb::symbols::INPUTS.iter())
+            .map(|(_, which)| f.push("raw", aqr_pdb::pack(&which.iter().map(|&k| &st[k][..]).collect::<Vec<_>>())))
+            .collect();
+        let want: Vec<u8> = whole.iter().flat_map(|w| w.0.iter().copied()).collect();
+        f.root = Node::apply(aqr_decompress::PDB_SYMBOLS, params, nodes, want.len() as u64);
+        plan_holds(&what, f, &want);
+    }
+}
+
+/// A module's stream: symbols of `n` blocks (S_BLOCK32, each holding a local) nested `depth`
+/// deep in turn, then C13 lines of inlinee lines of `entries` entries of `ids` inlinees; with the
+/// bytes of its symbols and of its C13 lines.
+fn pdb_module(k: u32, n: u32, depth: u32, entries: u32, ids: u32) -> (Vec<u8>, usize, usize) {
+    let record = |m: &mut Vec<u8>, kind: u16, payload: &[u8]| {
+        let len = (payload.len() + 4).next_multiple_of(4);
+        m.extend_from_slice(&((len - 2) as u16).to_le_bytes());
+        m.extend_from_slice(&kind.to_le_bytes());
+        m.extend_from_slice(payload);
+        m.resize(m.len() + len - 4 - payload.len(), 0);
+    };
+    let mut m = 4u32.to_le_bytes().to_vec();
+    let mut open: Vec<usize> = Vec::new();
+    for i in 0..n {
+        let parent = open.last().map_or(0, |&q| q as u32);
+        let mut b: Vec<u8> = [parent, 0, 0x40 * i + k, 8 + i % 5].iter().flat_map(|v| v.to_le_bytes()).collect();
+        b.extend_from_slice(&[1, 0, 0]);
+        open.push(m.len());
+        record(&mut m, 0x1103, &b);
+        let mut local = (0x74 + i % 3).to_le_bytes().to_vec();
+        local.extend_from_slice(&[1, 0]);
+        local.extend_from_slice(format!("x{i}\0").as_bytes());
+        record(&mut m, 0x113e, &local);
+        if open.len() as u32 == depth || i + 1 == n {
+            while let Some(q) = open.pop() {
+                let end = m.len() as u32;
+                m[q + 8..q + 12].copy_from_slice(&end.to_le_bytes());
+                record(&mut m, 0x0006, &[]);
+            }
+        }
+    }
+    let symbols = m.len();
+    if entries > 0 {
+        m.extend_from_slice(&0xf6u32.to_le_bytes());
+        m.extend_from_slice(&(4 + 12 * entries).to_le_bytes());
+        m.extend_from_slice(&0u32.to_le_bytes());
+        for e in 0..entries {
+            let id = 0x1000 + (e * 7919 + k) % ids;
+            for v in [id, 0x18 * (id % 9), 100 + e / 3 + id % 50] {
+                m.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+    }
+    let c13 = m.len() - symbols;
+    (m, symbols, c13)
+}
+
 /// An MSF file of block size `bs` holding `streams` (`None` a stream of none), their blocks in
 /// order but where `shuffle`, free blocks of `stale` bytes among them (as aqr-pdb's tests make
 /// them).

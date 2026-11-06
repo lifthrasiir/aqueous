@@ -359,8 +359,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "pdb-symbols",
-        version: 1,
-        sha512_256: hex("4d611f6036f564bd8f22591ef170c1bff08f9f3b79b65cc5ab763aafff9628cd"),
+        version: 2,
+        sha512_256: hex("88cc5f4bacf8abe68bd5d95002795b146ebf9147597387a98ad33fbc14fea4bd"),
         block: include_bytes!("../wasm/pdb-symbols.block"),
     },
     Known {

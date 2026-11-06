@@ -71,7 +71,7 @@ contributions and the publics' hash) and two of .NET are kept as before.
 | `std` | 2.1 -> 3.7 | 45 | 0.67 -> 0.79 | 898 |
 
 Peak RSS compressing `uniform.pdb` 331 -> 453 MB, testing 136 MB. The modules' Wasm blocks are
-7.4 KB (`pdb-msf`) and 11.0 KB (`pdb-symbols`).
+4.5 KB (`pdb-msf`) and 7.0 KB (`pdb-symbols`).
 
 ## Status
 

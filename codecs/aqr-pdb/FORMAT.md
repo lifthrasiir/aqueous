@@ -92,8 +92,9 @@ closes them. The symbols are followed by the module's C11 lines, its C13 lines (
 each a `u32` kind, a `u32` length, its body and zeros to 4 bytes) and the rest (its global
 references). The module rebuilds the streams of many modules, one after another.
 
-- **Module**: name `pdb-symbols`, version 1.
-- **Params**: none (zero bytes).
+- **Module**: name `pdb-symbols`, version 2.
+- **Params**: a varint, the scopes open at once at most (§3.4), no more than the records (half
+  the bytes of `kind`, below); nothing after it.
 - **Resources**: none.
 - **Inputs**: exactly 6 of packed streams, each of class `pdb-symbols/NAME`:
 
@@ -186,9 +187,9 @@ stream written as a compressed integer: below 2^7 a byte, below 2^14 two bytes (
 of `annlen`; 1, 2, 4: one of `annlen`; 6, 7, 11: one of `annline`; others one of `annother`.
 The record may not grow past its end, and zeros fill it to its end.
 
-After a record that opens a scope, it is open (innermost); after one that closes one, the
-innermost open closes (if any), its end, where to derive, set to the closing record's
-offset `q`. The record must have ended at its length.
+After a record that opens a scope, it is open (innermost; no more may be open at once than the
+params tell); after one that closes one, the innermost open closes (if any), its end, where to
+derive, set to the closing record's offset `q`. The record must have ended at its length.
 
 ### 3.5 C13 lines
 

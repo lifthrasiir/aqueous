@@ -135,7 +135,7 @@ struct State {
     /// inlinee's file and line.
     c13: [u32; 5],
     /// Of each inlinee, the file and line of its last entry in inlinee lines.
-    inlinees: std::collections::HashMap<u32, (u32, u32)>,
+    inlinees: Inlinees,
     item_prev: u32,
     item_cache: Vec<u32>,
     type_prev: u32,
@@ -179,16 +179,89 @@ fn used(cache: &mut Vec<u32>, prev: &mut u32, v: u32) {
 }
 
 impl State {
-    fn new() -> State {
+    /// The state at first, of `inlinees` entries of inlinee lines at most (more grow its table).
+    fn new(inlinees: usize) -> State {
         State {
             prev: vec![0; SLOTS],
             c13: [0; 5],
-            inlinees: std::collections::HashMap::new(),
+            inlinees: Inlinees::new(inlinees),
             item_prev: 0,
-            item_cache: Vec::new(),
+            item_cache: Vec::with_capacity(CACHE),
             type_prev: 0,
-            type_cache: Vec::new(),
+            type_cache: Vec::with_capacity(CACHE),
         }
+    }
+
+    /// Bytes that [`State::new`] takes of [`aqr_api::stack`], in its blocks' order.
+    fn plan(inlinees: usize) -> u64 {
+        use aqr_api::stack::block;
+        block(4 * SLOTS as u64) + block(Inlinees::bytes(inlinees)) + 2 * block(4 * CACHE as u64)
+    }
+}
+
+/// A table of the inlinees' files and lines by their ids (open addressing, linear probing),
+/// kept 2/3 full at most: room made for `n` of them, more growing it.
+struct Inlinees {
+    /// The id, file and line of each, [`VACANT`] the id of none.
+    slots: Vec<[u32; 3]>,
+    len: usize,
+    /// Of the id [`VACANT`].
+    vacant: Option<(u32, u32)>,
+}
+
+const VACANT: u32 = u32::MAX;
+
+impl Inlinees {
+    fn slots(n: usize) -> usize {
+        n + n / 2 + 1
+    }
+
+    fn bytes(n: usize) -> u64 {
+        12 * Inlinees::slots(n) as u64
+    }
+
+    fn new(n: usize) -> Inlinees {
+        Inlinees { slots: vec![[VACANT, 0, 0]; Inlinees::slots(n)], len: 0, vacant: None }
+    }
+
+    /// The slot of `id` (not [`VACANT`]), or the vacant one where it would go.
+    fn find(&self, id: u32) -> usize {
+        let n = self.slots.len();
+        let mut i = ((id.wrapping_mul(0x9e37_79b9) as u64 * n as u64) >> 32) as usize;
+        while self.slots[i][0] != id && self.slots[i][0] != VACANT {
+            i = if i + 1 == n { 0 } else { i + 1 };
+        }
+        i
+    }
+
+    fn get(&self, id: u32) -> Option<(u32, u32)> {
+        if id == VACANT {
+            return self.vacant;
+        }
+        let [k, file, line] = self.slots[self.find(id)];
+        (k == id).then_some((file, line))
+    }
+
+    fn insert(&mut self, id: u32, file: u32, line: u32) {
+        if id == VACANT {
+            self.vacant = Some((file, line));
+            return;
+        }
+        let mut i = self.find(id);
+        if self.slots[i][0] == VACANT {
+            if 3 * (self.len + 1) > 2 * self.slots.len() {
+                let old = std::mem::replace(self, Inlinees::new(2 * self.len + 4));
+                self.vacant = old.vacant;
+                for s in old.slots.into_iter().filter(|s| s[0] != VACANT) {
+                    let j = self.find(s[0]);
+                    self.slots[j] = s;
+                    self.len += 1;
+                }
+                i = self.find(id);
+            }
+            self.len += 1;
+        }
+        self.slots[i] = [id, file, line];
     }
 }
 
@@ -200,16 +273,17 @@ fn u16le(d: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes(*d.get(at..)?.first_chunk()?))
 }
 
-/// The streams of the modules' streams `mods` (each with what the DBI stream tells of it), or
-/// `None` where they are not rebuilt as they are. A module's C13 lines are coded by their
-/// subsections; its C11 lines and what follows (its global references) go to `lines` as they
-/// are.
-pub fn encode(mods: &[(&[u8], crate::dbi::Module)]) -> Option<Vec<Vec<u8>>> {
+/// The params and the streams of the modules' streams `mods` (each with what the DBI stream
+/// tells of it), or `None` where they are not rebuilt as they are. A module's C13 lines are coded
+/// by their subsections; its C11 lines and what follows (its global references) go to `lines`
+/// as they are.
+pub fn encode(mods: &[(&[u8], crate::dbi::Module)]) -> Option<(Vec<u8>, Vec<Vec<u8>>)> {
     let mut st = vec![Vec::new(); NUM_STREAMS];
-    let mut s = State::new();
+    let mut s = State::new(0);
+    let mut most = 0;
     for &(m, info) in mods {
         let (sym, rest) = m.split_at_checked(info.symbols)?;
-        module(&mut st, &mut s, sym);
+        most = most.max(module(&mut st, &mut s, sym));
         // the C11 lines, the C13 lines (where they are whole within), the rest
         let c11 = info.c11.min(rest.len());
         let c13 = if info.c13 <= rest.len() - c11 { info.c13 } else { 0 };
@@ -222,8 +296,10 @@ pub fn encode(mods: &[(&[u8], crate::dbi::Module)]) -> Option<Vec<Vec<u8>>> {
         varint::put(&mut st[LEN], (rest.len() - c11 - c13) as u64);
         st[LINES].extend_from_slice(&rest[c11 + c13..]);
     }
+    let mut params = Vec::new();
+    varint::put(&mut params, most as u64);
     let refs: Vec<&[u8]> = st.iter().map(|v| &v[..]).collect();
-    let back = decode_sized(&refs, mods.iter().map(|m| m.0.len()).sum()).ok()?;
+    let back = decode_sized(&params, &refs, mods.iter().map(|m| m.0.len()).sum()).ok()?;
     let mut at = 0;
     for &(m, _) in mods {
         if back.get(at..at + m.len())? != m {
@@ -231,7 +307,18 @@ pub fn encode(mods: &[(&[u8], crate::dbi::Module)]) -> Option<Vec<Vec<u8>>> {
         }
         at += m.len();
     }
-    (at == back.len()).then_some(st)
+    (at == back.len()).then_some((params, st))
+}
+
+/// The scopes open at once at most, of params `params`, as many as the records of kinds `kinds`
+/// (of 2 bytes each) at most.
+fn most_open(params: &[u8], kinds: &[u8]) -> Result<usize> {
+    let mut at = 0;
+    let most = varint::get(params, &mut at).map_err(|_| corrupt())?;
+    if at != params.len() || most > kinds.len() as u64 / 2 {
+        return Err(corrupt());
+    }
+    Ok(most as usize)
 }
 
 const DEBUG_S_LINES: u32 = 0xf2;
@@ -326,11 +413,11 @@ fn lines(st: &mut [Vec<u8>], s: &mut State, c: &[u8]) {
                     st[C13INLID].extend_from_slice(&item.to_le_bytes());
                     // the file and line from the inlinee's last entry, else the previous entry's
                     let (file, line) = (u32le(e, 4).unwrap(), u32le(e, 8).unwrap());
-                    let (pf, pl) = s.inlinees.get(&item).copied().unwrap_or((s.c13[3], s.c13[4]));
+                    let (pf, pl) = s.inlinees.get(item).unwrap_or((s.c13[3], s.c13[4]));
                     varint::put_signed(&mut st[C13INL], file as i64 - pf as i64);
                     varint::put_signed(&mut st[C13INLLINE], line as i64 - pl as i64);
                     (s.c13[3], s.c13[4]) = (file, line);
-                    s.inlinees.insert(item, (file, line));
+                    s.inlinees.insert(item, file, line);
                 }
             }
             _ => {
@@ -405,11 +492,11 @@ fn lines_decode(r: &mut [Reader], s: &mut State, out: &mut Vec<u8>, size: usize)
                 out.extend_from_slice(&0u32.to_le_bytes());
                 for _ in 0..(len - 4) / 12 {
                     let item = u32::from_le_bytes(r[C13INLID].bytes(4)?.try_into().unwrap());
-                    let (mut file, mut line) = s.inlinees.get(&item).copied().unwrap_or((s.c13[3], s.c13[4]));
+                    let (mut file, mut line) = s.inlinees.get(item).unwrap_or((s.c13[3], s.c13[4]));
                     let file = moved(&mut r[C13INL], &mut file)?;
                     let line = moved(&mut r[C13INLLINE], &mut line)?;
                     (s.c13[3], s.c13[4]) = (file, line);
-                    s.inlinees.insert(item, (file, line));
+                    s.inlinees.insert(item, file, line);
                     out.extend_from_slice(&item.to_le_bytes());
                     out.extend_from_slice(&file.to_le_bytes());
                     out.extend_from_slice(&line.to_le_bytes());
@@ -470,11 +557,12 @@ fn records(m: &[u8]) -> (Vec<(usize, u16, usize, usize)>, usize) {
     (out, q.min(m.len()))
 }
 
-fn module(st: &mut [Vec<u8>], s: &mut State, m: &[u8]) {
+/// Module substream `m` coded: the scopes open at once at most in it.
+fn module(st: &mut [Vec<u8>], s: &mut State, m: &[u8]) -> usize {
     varint::put(&mut st[LEN], m.len() as u64);
     if m.len() < 4 {
         st[RAW].extend_from_slice(m);
-        return;
+        return 0;
     }
     st[TAIL].extend_from_slice(&m[..4]);
     let (recs, end) = records(m);
@@ -492,7 +580,7 @@ fn module(st: &mut [Vec<u8>], s: &mut State, m: &[u8]) {
             None => {}
         }
     }
-    let mut stack: Vec<u32> = Vec::new();
+    let (mut stack, mut most): (Vec<u32>, usize) = (Vec::new(), 0);
     for (i, &(q, kind, p, e)) in recs.iter().enumerate() {
         st[KIND].extend_from_slice(&kind.to_le_bytes());
         let len = (e - q - 2) as u64;
@@ -507,7 +595,10 @@ fn module(st: &mut [Vec<u8>], s: &mut State, m: &[u8]) {
             st[RAW].extend_from_slice(&m[p..e]);
         }
         match scope {
-            Some(true) => stack.push(q as u32),
+            Some(true) => {
+                stack.push(q as u32);
+                most = most.max(stack.len());
+            }
             Some(false) => {
                 stack.pop();
             }
@@ -518,6 +609,7 @@ fn module(st: &mut [Vec<u8>], s: &mut State, m: &[u8]) {
     varint::put(&mut st[LEN], 1 << 1);
     varint::put(&mut st[LEN], (m.len() - end) as u64);
     st[RAW].extend_from_slice(&m[end..]);
+    most
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -701,6 +793,11 @@ struct Reader<'a> {
     at: usize,
 }
 
+/// Bytes of a [`Reader`] on WebAssembly.
+const READER_BYTES: u64 = 12;
+#[cfg(target_family = "wasm")]
+const _: () = assert!(size_of::<Reader>() as u64 == READER_BYTES);
+
 impl<'a> Reader<'a> {
     fn get(&mut self) -> Result<u64> {
         varint::get(self.d, &mut self.at).map_err(|_| corrupt())
@@ -717,25 +814,29 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// The symbol substreams, one after another, from the streams of [`STREAM_NAMES`].
-pub fn decode(streams: &[&[u8]]) -> Result<Vec<u8>> {
-    decode_sized(streams, 0)
+/// The symbol substreams, one after another, from `params` and the streams of
+/// [`STREAM_NAMES`].
+pub fn decode(params: &[u8], streams: &[&[u8]]) -> Result<Vec<u8>> {
+    decode_sized(params, streams, 0)
 }
 
 /// [`decode`], the output's room made for `len` bytes (what the module is to give) at first.
-pub fn decode_sized(streams: &[&[u8]], len: usize) -> Result<Vec<u8>> {
+pub fn decode_sized(params: &[u8], streams: &[&[u8]], len: usize) -> Result<Vec<u8>> {
     if streams.len() != NUM_STREAMS {
         return Err(corrupt());
     }
-    let mut r: Vec<Reader> = streams.iter().map(|d| Reader { d, at: 0 }).collect();
-    let mut s = State::new();
+    let most = most_open(params, streams[KIND])?;
+    let mut r = Vec::with_capacity(NUM_STREAMS);
+    r.extend(streams.iter().map(|d| Reader { d, at: 0 }));
+    let mut s = State::new(streams[C13INLID].len() / 4);
     let mut out = Vec::with_capacity(len);
+    let mut open = Vec::with_capacity(most);
     while !r[LEN].done() {
         let size = usize::try_from(r[LEN].get()?).map_err(|_| corrupt())?;
         if size < 4 {
             out.extend_from_slice(r[RAW].bytes(size)?);
         } else {
-            symbols(&mut r, &mut s, &mut out, size)?;
+            symbols(&mut r, &mut s, &mut out, size, &mut open)?;
         }
         // what follows the symbols: the C11 lines, the C13 lines, the rest
         let n = usize::try_from(r[LEN].get()?).map_err(|_| corrupt())?;
@@ -753,13 +854,32 @@ pub fn decode_sized(streams: &[&[u8]], len: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// A module's symbols of `size` bytes (4 at least), appended to `out`.
-fn symbols(r: &mut [Reader], s: &mut State, out: &mut Vec<u8>, size: usize) -> Result<()> {
+/// Bytes that [`decode_sized`] takes of [`aqr_api::stack`] at most, of params `params`, a
+/// stream of kinds `kinds` and of inlinees' ids of `inlinee_ids` bytes and an output of `len`
+/// bytes (`None` where the params are not so), in its blocks' order: the readers, the state
+/// ([`State::plan`], of an entry of inlinee lines for each 4 bytes of ids), the output, the scopes
+/// open.
+pub fn decode_plan(params: &[u8], kinds: &[u8], inlinee_ids: usize, len: u64) -> Option<u64> {
+    use aqr_api::stack::block;
+    let most = most_open(params, kinds).ok()?;
+    Some(
+        block(READER_BYTES * NUM_STREAMS as u64)
+            + State::plan(inlinee_ids / 4)
+            + block(len)
+            + block(OPEN_BYTES * most as u64),
+    )
+}
+
+/// Bytes of a scope open: where it opened (in the module), and where its end goes (0 where none).
+const OPEN_BYTES: u64 = 8;
+
+/// A module's symbols of `size` bytes (4 at least), appended to `out`, the scopes open in
+/// `stack` (of their capacity at most).
+fn symbols(r: &mut [Reader], s: &mut State, out: &mut Vec<u8>, size: usize, stack: &mut Vec<(u32, u32)>) -> Result<()> {
     let start = out.len();
     {
         out.extend_from_slice(r[TAIL].bytes(4)?);
-        // the scopes open: where each opened (in the module), and where its end goes
-        let mut stack: Vec<(u32, Option<usize>)> = Vec::new();
+        stack.clear();
         loop {
             let v = r[LEN].get()?;
             if v == 2 {
@@ -776,7 +896,7 @@ fn symbols(r: &mut [Reader], s: &mut State, out: &mut Vec<u8>, size: usize) -> R
             out.extend_from_slice(&(len as u16).to_le_bytes());
             out.extend_from_slice(&kind.to_le_bytes());
             let (fields, scope) = layout(kind);
-            let mut end_at = None;
+            let mut end_at = 0;
             if raw {
                 out.extend_from_slice(r[RAW].bytes(len - 2)?);
             } else {
@@ -792,7 +912,7 @@ fn symbols(r: &mut [Reader], s: &mut State, out: &mut Vec<u8>, size: usize) -> R
                         End => {
                             match r[SCOPE].get()? {
                                 0 => {
-                                    end_at = Some(out.len());
+                                    end_at = u32::try_from(out.len() - start).map_err(|_| corrupt())?;
                                     out.extend_from_slice(&[0; 4]);
                                 }
                                 v => out.extend_from_slice(&u32::try_from(v - 1).map_err(|_| corrupt())?.to_le_bytes()),
@@ -863,9 +983,15 @@ fn symbols(r: &mut [Reader], s: &mut State, out: &mut Vec<u8>, size: usize) -> R
                 }
             }
             match scope {
-                Some(true) => stack.push((q, end_at)),
+                Some(true) => {
+                    if stack.len() == stack.capacity() {
+                        return Err(corrupt());
+                    }
+                    stack.push((q, end_at));
+                }
                 Some(false) => {
-                    if let Some((_, Some(at))) = stack.pop() {
+                    if let Some((_, at)) = stack.pop().filter(|s| s.1 > 0) {
+                        let at = start + at as usize;
                         out[at..at + 4].copy_from_slice(&q.to_le_bytes());
                     }
                 }
@@ -876,7 +1002,7 @@ fn symbols(r: &mut [Reader], s: &mut State, out: &mut Vec<u8>, size: usize) -> R
             }
         }
         // a scope's end to derive that no record closed
-        if stack.iter().any(|s| s.1.is_some()) {
+        if stack.iter().any(|s| s.1 > 0) {
             return Err(corrupt());
         }
         let n = usize::try_from(r[LEN].get()?).map_err(|_| corrupt())?;

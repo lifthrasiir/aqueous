@@ -6146,8 +6146,8 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/pdb-msf.wasm" title="crates/aqr-modules/wasm/pdb-msf.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-pdb/FORMAT.md" title="codecs/aqr-pdb/FORMAT.md">R</a>
     <tr>
-      <td><code>4d611f6036f564bd8f22591ef170c1bff08f9f3b79b65cc5ab763aafff9628cd</code>
-      <td>pdb-symbols@1
+      <td><code>88cc5f4bacf8abe68bd5d95002795b146ebf9147597387a98ad33fbc14fea4bd</code>
+      <td>pdb-symbols@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/pdb-symbols.wasm" title="crates/aqr-modules/wasm/pdb-symbols.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-pdb/FORMAT.md" title="codecs/aqr-pdb/FORMAT.md">R</a>
     <tr>

@@ -11,7 +11,7 @@ use crate::{dbi, msf, symbols};
 pub use crate::module::{msf as decode, symbols as decode_symbols};
 
 pub const MODULE: Module = Module::new("pdb-msf", 1).with_plan(memory);
-pub const SYMBOLS: Module = Module::new("pdb-symbols", 1).with_memory(symbols_memory);
+pub const SYMBOLS: Module = Module::new("pdb-symbols", 2).with_plan(symbols_memory);
 
 /// Files of modules' symbols shorter than this in all are left as they are: the modules' blocks
 /// (about 14 KB) would cost more than the symbols coded save, and the container alone saves
@@ -19,18 +19,14 @@ pub const SYMBOLS: Module = Module::new("pdb-symbols", 1).with_memory(symbols_me
 /// 13% larger through it).
 const MIN_SYMBOLS: usize = 512 << 10;
 
-/// The memory of [`MSF`]: its initial memory, and its plan ([`crate::module::msf_plan`]).
+/// The memory of [`MODULE`]: its initial memory, and its plan ([`crate::module::msf_plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.initial() + crate::module::msf_plan(u.inputs, u.content(1)?, u.output())?)
 }
 
-/// The memory of [`SYMBOLS`]: the output; the scopes open (16 bytes each, each a record at
-/// least, each 2 bytes of the kinds in the first input at least); the inlinees' last files and
-/// lines (about 32 bytes each in a hash map, each an entry of inlinee lines at least, each 4
-/// bytes of the C13 lines' input at least).
+/// The memory of [`SYMBOLS`]: its initial memory, and its plan ([`crate::module::symbols_plan`]).
 fn symbols_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let (head, c13) = (*u.inputs.first()?, *u.inputs.get(4)?);
-    Some(u.whole(8 * head + 8 * c13 + (16 << 10), 3))
+    Some(u.initial() + crate::module::symbols_plan(u.params, u.inputs, u.content(0)?, u.content(4)?, u.output())?)
 }
 
 /// Whether `d` starts like an MSF file.
@@ -87,7 +83,7 @@ fn symbols_apply(
         return None;
     }
     let parts: Vec<(&[u8], dbi::Module)> = subs.iter().map(|(r, m)| (&streams[r.clone()], *m)).collect();
-    let st = symbols::encode(&parts)?;
+    let (params, st) = symbols::encode(&parts)?;
     let subs: Vec<Range<usize>> = subs.into_iter().map(|s| s.0).collect();
     let inputs = symbols::INPUTS
         .iter()
@@ -103,7 +99,7 @@ fn symbols_apply(
     let a = Apply {
         module: SYMBOLS,
         resources: vec![],
-        params: vec![],
+        params,
         inputs,
         len: 0,
         memory_limit: aqr_formula::NO_LIMIT,

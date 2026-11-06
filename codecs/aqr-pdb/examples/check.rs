@@ -65,7 +65,7 @@ fn symbols(streams: &[u8], spans: &[Option<std::ops::Range<usize>>]) {
         mods.iter().filter_map(|&m| stream(m.stream).filter(|s| m.symbols <= s.len()).map(|s| (s, m))).collect();
     let raw: Vec<u8> = subs.iter().flat_map(|&(s, _)| s).copied().collect();
     let t = std::time::Instant::now();
-    let Some(st) = aqr_pdb::symbols::encode(&subs) else {
+    let Some((_, st)) = aqr_pdb::symbols::encode(&subs) else {
         println!("  symbols: not taken");
         return;
     };
