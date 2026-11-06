@@ -179,6 +179,11 @@ P = W_main + Σ_태스크 (W_spawn + 태스크의 계획 버퍼) + 채널 메시
   17 MB에서 working memory 19.2 MB). 레이아웃 머리에 그 합(`again`)을 적게 했다(version 5, FORMAT.md §3.1).
   이제 2.29 MB이다(dlmalloc 때의 실측은 3.6 MB).
 
+**aqr-bcj(필터 10개).** 분기 변환기 8개와 BCJ2는 `whole`의 사본과 출력 하나, Delta(부분형)는 힙이 없다.
+- BCJ2는 call과 jump 스트림이 번갈아 자랐다. 한 번 훑어 두 길이를 세고, 세 스트림의 합(= 데이터 길이)인 출력 하나에 각자의 자리로 쓴다.
+- fixture 13개에서 실측 = 계획이다(`bcj_plans_hold`).
+- 나뉜 출력(split)의 한도가 조각마다 페이지를 올려 세던 것을 출력 하나로 고쳤다(aqr-compress `verify.rs`).
+
 ## 다음 순서
 
 1. `Module::memory_usage_in_pages`를 이미 정확한 용량을 쓰는 모듈들(exe, xsv, fasta, zip, git, pdf, png, …)부터 만든다.

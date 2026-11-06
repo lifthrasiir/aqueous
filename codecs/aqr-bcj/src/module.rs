@@ -91,9 +91,13 @@ pub fn bcj2(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     if d.len() as u64 != len {
         return Err(Error("output of another length"));
     }
-    let mut s = bcj2::encode(d, rc)?;
-    s.main.reserve_exact(s.call.len() + s.jump.len());
-    s.main.extend_from_slice(&s.call);
-    s.main.extend_from_slice(&s.jump);
-    Ok(s.main)
+    bcj2::encode_joined(d, rc)
+}
+
+/// The memory plans of the modules ([`aqr_api::stack`]): what each takes beyond its initial
+/// memory at most, of parameters of `params` bytes, inputs of `inputs` bytes and an output of
+/// `len`. A branch converter, Delta and BCJ2 (as whole modules): what `aqr_api::whole` copies,
+/// and the output; Delta as a part module nothing.
+pub fn plan(params: u64, inputs: &[u64], len: u64) -> u64 {
+    aqr_api::stack::whole(params, &[], inputs) + aqr_api::stack::block(len)
 }

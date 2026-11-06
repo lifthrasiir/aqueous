@@ -7,32 +7,28 @@ use aqr_formula::{Module, Node};
 use crate::bra::{self, Arch};
 use crate::{Result, delta, module};
 
-/// The memory of a filter of one output: the input and the output.
+/// The memory of a whole module: its initial memory, and its plan ([`module::plan`]) of its
+/// output (of BCJ2, its streams one after another).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    Some(u.whole(0, 0))
+    Some(u.initial() + module::plan(u.params.len() as u64, u.inputs, u.output()))
 }
 
-/// The memory of BCJ2: the inputs, the output and the three streams before it.
-fn memory_bcj2(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    Some(u.whole(u.output(), 3))
-}
-
-pub const X86: Module = Module::new("bcj-x86", 1).with_memory(memory);
-pub const POWERPC: Module = Module::new("bcj-powerpc", 1).with_memory(memory);
-pub const IA64: Module = Module::new("bcj-ia64", 1).with_memory(memory);
-pub const ARM: Module = Module::new("bcj-arm", 1).with_memory(memory);
-pub const ARM_THUMB: Module = Module::new("bcj-armthumb", 1).with_memory(memory);
-pub const SPARC: Module = Module::new("bcj-sparc", 1).with_memory(memory);
-pub const ARM64: Module = Module::new("bcj-arm64", 1).with_memory(memory);
-pub const RISCV: Module = Module::new("bcj-riscv", 1).with_memory(memory);
-/// The memory of a part module of no buffers of its own ([`module::delta_part`]): as it is
-/// instantiated, and the small allocations.
+pub const X86: Module = Module::new("bcj-x86", 1).with_plan(memory);
+pub const POWERPC: Module = Module::new("bcj-powerpc", 1).with_plan(memory);
+pub const IA64: Module = Module::new("bcj-ia64", 1).with_plan(memory);
+pub const ARM: Module = Module::new("bcj-arm", 1).with_plan(memory);
+pub const ARM_THUMB: Module = Module::new("bcj-armthumb", 1).with_plan(memory);
+pub const SPARC: Module = Module::new("bcj-sparc", 1).with_plan(memory);
+pub const ARM64: Module = Module::new("bcj-arm64", 1).with_plan(memory);
+pub const RISCV: Module = Module::new("bcj-riscv", 1).with_plan(memory);
+/// The memory of Delta as a part module ([`module::delta_part`]): its initial memory alone (it
+/// allocates nothing).
 fn memory_part(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    Some(u.initial() + aqr_formula::SMALL)
+    Some(u.initial())
 }
 
-pub const DELTA: Module = Module::new("bcj-delta", 1).with_memory(memory_part);
-pub const BCJ2: Module = Module::new("bcj2", 1).with_memory(memory_bcj2);
+pub const DELTA: Module = Module::new("bcj-delta", 1).with_plan(memory_part);
+pub const BCJ2: Module = Module::new("bcj2", 1).with_plan(memory);
 
 /// Every module of this crate.
 pub const MODULES: [Module; 10] = [X86, POWERPC, IA64, ARM, ARM_THUMB, SPARC, ARM64, RISCV, DELTA, BCJ2];

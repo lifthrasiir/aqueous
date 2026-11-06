@@ -77,13 +77,46 @@ pub struct Streams {
 /// The streams of `data` with the bits that `rc` codes. Fails where `rc` ends before a bit, or a
 /// bit takes out a target that is not there.
 pub fn encode(data: &[u8], rc: &[u8]) -> Result<Streams> {
+    let mut s = Streams { main: Vec::with_capacity(data.len()), ..Default::default() };
+    walk(data, rc, |b| s.main.push(b), |call, t| if call { &mut s.call } else { &mut s.jump }.extend(t))?;
+    Ok(s)
+}
+
+/// [`encode`]'s streams one after another (the main, call and jump streams), in a vector of
+/// exactly `data.len()` bytes, which they take: their lengths found first, then each written
+/// where it goes.
+pub fn encode_joined(data: &[u8], rc: &[u8]) -> Result<Vec<u8>> {
+    let (mut calls, mut jumps) = (0usize, 0usize);
+    walk(data, rc, |_| {}, |call, _| *if call { &mut calls } else { &mut jumps } += 4)?;
+    let mut out = vec![0; data.len()];
+    let (main_s, rest) = out.split_at_mut(data.len() - calls - jumps);
+    let (call_s, jump_s) = rest.split_at_mut(calls);
+    let (mut m, mut c, mut j) = (0, 0, 0);
+    walk(
+        data,
+        rc,
+        |b| {
+            main_s[m] = b;
+            m += 1;
+        },
+        |call, t| {
+            let (s, at) = if call { (&mut *call_s, &mut c) } else { (&mut *jump_s, &mut j) };
+            s[*at..*at + 4].copy_from_slice(&t);
+            *at += 4;
+        },
+    )?;
+    Ok(out)
+}
+
+/// The decisions of [`encode`] on `data` with the bits that `rc` codes: each byte of the main
+/// stream to `main`, each target taken out to `target` (whether a call's, and its bytes).
+fn walk(data: &[u8], rc: &[u8], mut main: impl FnMut(u8), mut target: impl FnMut(bool, [u8; 4])) -> Result<()> {
     let mut rc = Rc::new(rc).ok_or(Error("bad range coder"))?;
     let mut probs = [1024u16; 258];
-    let mut s = Streams { main: Vec::with_capacity(data.len()), ..Default::default() };
     let (mut i, mut prev) = (0, 0u8);
     while i < data.len() {
         let b = data[i];
-        s.main.push(b);
+        main(b);
         i += 1;
         if !candidate(prev, b) || !rc.bit(&mut probs[context(prev, b)]).ok_or_else(corrupt)? {
             prev = b;
@@ -91,12 +124,11 @@ pub fn encode(data: &[u8], rc: &[u8]) -> Result<Streams> {
         }
         let t = data.get(i..i + 4).ok_or_else(corrupt)?;
         let abs = u32::from_le_bytes(t.try_into().unwrap()).wrapping_add(i as u32 + 4);
-        let out = if b == 0xe8 { &mut s.call } else { &mut s.jump };
-        out.extend(abs.to_be_bytes());
+        target(b == 0xe8, abs.to_be_bytes());
         prev = t[3];
         i += 4;
     }
-    Ok(s)
+    Ok(())
 }
 
 /// The data of `size` bytes that the streams give. Fails where they do not give that, or are not

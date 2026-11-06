@@ -1896,6 +1896,13 @@ fn zip_of(entries: &[(String, Vec<u8>, bool)]) -> Vec<u8> {
 /// `d` compressed and decoded as WebAssembly, the applications of the module of hash `module`
 /// within their plans: how many there were.
 fn zip_within_plan(what: &str, d: &[u8], module: [u8; 32]) -> usize {
+    within_plans(what, d, &[module], false)
+}
+
+/// `d` compressed and decoded as WebAssembly, the applications of the modules of hashes
+/// `modules` within their plans (and their plans exactly, to the page, where `exact`): how many
+/// there were.
+fn within_plans(what: &str, d: &[u8], modules: &[[u8; 32]], exact: bool) -> usize {
     let mut seen = 0;
     {
         let c = compress(d, &Options { smaller: false, ..all() });
@@ -1906,10 +1913,11 @@ fn zip_within_plan(what: &str, d: &[u8], module: [u8; 32]) -> usize {
         drop(alone);
         let path = what;
         assert!(out.as_ref().is_ok_and(|o| o == d), "{path:?}: {:?}", out.err());
-        for a in applied.iter().filter(|a| a.hash == module) {
+        for a in applied.iter().filter(|a| modules.contains(&a.hash)) {
             let plan = a.limit - a.imported;
             println!("{path}: plan {plan} working {}", a.working);
             assert!(a.working <= plan, "{path:?}: plan {plan}, working {}", a.working);
+            assert!(!exact || plan - a.working < 1 << 16, "{path:?}: plan {plan}, working {}", a.working);
             seen += 1;
         }
     }
@@ -1943,4 +1951,22 @@ fn zip_again_checked() {
         aqr::decode(&c, &aqr_decompress::Wasm)
     };
     assert!(w.is_err(), "decoded as WebAssembly");
+}
+
+/// The filters of aqr-bcj (the branch converters, Delta, BCJ2) lay their memory out as a stack,
+/// their limits their plans, exactly: of the filtered streams of `.xz` and 7z fixtures.
+#[test]
+fn bcj_plans_hold() {
+    use aqr_decompress::*;
+    let filters =
+        [BCJ_X86, BCJ_POWERPC, BCJ_IA64, BCJ_ARM, BCJ_ARM_THUMB, BCJ_SPARC, BCJ_ARM64, BCJ_RISCV, BCJ_DELTA, BCJ2];
+    let modules: Vec<[u8; 32]> = filters.iter().map(|&m| built(m).expect("built").sha512_256).collect();
+    let mut seen = 0;
+    for t in ["x86", "powerpc", "ia64", "arm", "armthumb", "sparc", "arm64", "riscv", "delta", "chain"] {
+        seen += within_plans(t, &fixture(&format!("codecs/aqr-lzma/tests/data/filter-{t}.xz")), &modules, true);
+    }
+    for t in ["bcj2", "arm64", "delta"] {
+        seen += within_plans(t, &fixture(&format!("codecs/aqr-7z/tests/data/filter-{t}.7z")), &modules, true);
+    }
+    assert!(seen >= 13, "{seen} applications of the filters");
 }
