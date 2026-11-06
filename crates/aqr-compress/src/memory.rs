@@ -78,7 +78,7 @@ pub(crate) fn limit(a: &Apply, lens: &[u64], outputs: &[u64], contents: &dyn Con
 /// Declares the memory limits of `f`'s applications: those declared already kept (of a formula
 /// sealed, whose inputs are no longer at hand), else those of `known` (worked out as the
 /// prevalidation ran them), else worked out, the inputs made by `m` as estimates ask for them.
-pub(crate) fn declare(f: &mut Formula, m: &impl Modules, known: &Limits) {
+pub(crate) fn declare(f: &mut Formula, m: &(impl Modules + Sync), known: &Limits) {
     let declared = f.declare_memory(m, &|a, contents| {
         if a.memory_limit != aqr_formula::NO_LIMIT {
             return Some(a.memory_limit);

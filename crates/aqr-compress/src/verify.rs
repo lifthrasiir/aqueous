@@ -53,22 +53,16 @@ impl Records for Memo {
 
 /// Runs the modules, recording every application ([`Record`]): of the applications in `known`
 /// (by address), the range of a file it is.
-struct Recording<'f> {
+struct Recording {
     native: Native,
     known: Vec<(usize, (usize, Range<usize>))>,
     seen: Mutex<Vec<(Key, Record)>>,
     limits: Mutex<Limits>,
-    /// Applications run beforehand ([`Ahead`]).
-    ahead: Mutex<Ahead<'f>>,
 }
 
-impl Modules for Recording<'_> {
+impl Modules for Recording {
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
-        let early = self.ahead.lock().unwrap().take(a, &self.native);
-        let out = match early {
-            Some(out) => out,
-            None => self.native.apply(a, inputs)?,
-        };
+        let out = self.native.apply(a, inputs)?;
         let file = self.known.iter().find(|(at, _)| std::ptr::addr_eq(a, *at as *const Apply)).map(|(_, f)| f.clone());
         let r = Record { outputs: vec![Ch::of(&out)], file };
         self.seen.lock().unwrap().push((key(a, inputs, &[a.len]), r));
@@ -90,7 +84,7 @@ impl Modules for Recording<'_> {
     }
 }
 
-impl Recording<'_> {
+impl Recording {
     /// The memory limit of `a` of outputs of `sizes` on `inputs`, kept.
     fn limit(&self, a: &Apply, sizes: &[u64], inputs: &[&[u8]]) {
         let lens: Vec<u64> = inputs.iter().map(|i| i.len() as u64).collect();
@@ -271,110 +265,23 @@ fn evaluate((f, d, at): Job, threads: usize, memo: &mut Memo) {
         },
         seen: Mutex::default(),
         limits: Mutex::default(),
-        ahead: Mutex::new(Ahead::of(&f, threads)),
     };
-    let good = match &f.root {
-        // (what it concatenates hashed as it is made, not held whole)
-        Node::Concat(_) => {
-            let mut h = Xxh3::new();
-            f.eval_parts(&r, &mut |p| {
-                h.update(p);
-                Ok(())
-            })
-            .is_ok()
-                && h.digest128() == d
-        }
-        _ => matches!(f.eval(&r), Ok(out) if hash(&out) == d),
-    };
-    let Recording { seen, limits, ahead, .. } = r;
-    drop(ahead);
+    // (its output hashed as it is made, not held whole; the applications among what it
+    // concatenates made ahead on the threads)
+    let mut h = Xxh3::new();
+    let good = f
+        .eval_parts(&r, threads, &mut |p| {
+            h.update(p);
+            Ok(())
+        })
+        .is_ok()
+        && h.digest128() == d;
+    let Recording { seen, limits, .. } = r;
     drop(f);
     if good {
         memo.0.extend(seen.into_inner().unwrap());
         memo.1.extend(limits.into_inner().unwrap());
     }
-}
-
-/// The applications of a formula among what its root concatenates whose inputs are slices of
-/// its streams, run beforehand on up to `threads` threads (those that fail left out): the
-/// evaluation of a formula is in turn, and a file of many applications (an FSB5 bank of many
-/// Vorbis samples) would run them all on one thread. They are run `threads` at a time (of
-/// [`AHEAD_BYTES`] of outputs at most, but one), as the first of them is asked for, so that
-/// their outputs are not all held at once (a file of JSON lines in segments of its own).
-/// The most bytes of the outputs of a window of [`Ahead`] (but one).
-const AHEAD_BYTES: u64 = 256 << 20;
-
-struct Ahead<'f> {
-    applies: Vec<(&'f Apply, Vec<&'f [u8]>)>,
-    threads: usize,
-    /// The first of `applies` not run yet.
-    next: usize,
-    outs: HashMap<usize, Vec<u8>>,
-}
-
-impl<'f> Ahead<'f> {
-    fn of(f: &'f Formula, threads: usize) -> Ahead<'f> {
-        let mut applies = ahead(f);
-        if applies.len() < 2 {
-            applies.clear();
-        }
-        Ahead { applies, threads: threads.max(1), next: 0, outs: HashMap::new() }
-    }
-
-    /// The output of `a`, where it is run beforehand (with those after it, of a window).
-    fn take(&mut self, a: &Apply, native: &Native) -> Option<Vec<u8>> {
-        let at = a as *const Apply as usize;
-        if let Some(out) = self.outs.remove(&at) {
-            return Some(out);
-        }
-        let i = self.next + self.applies[self.next..].iter().position(|(x, _)| std::ptr::addr_eq(*x, a))?;
-        let mut end = i + 1;
-        let mut bytes = a.len;
-        while end < self.applies.len() && end - i < self.threads && bytes + self.applies[end].0.len <= AHEAD_BYTES {
-            bytes += self.applies[end].0.len;
-            end += 1;
-        }
-        let window = &self.applies[i..end];
-        let outs =
-            aqr_common::pool::par_map(window.len(), self.threads, |k| native.apply(window[k].0, &window[k].1).ok());
-        for ((a, _), o) in window.iter().zip(outs) {
-            if let Some(o) = o {
-                self.outs.insert(*a as *const Apply as usize, o);
-            }
-        }
-        self.next = end;
-        self.outs.remove(&at)
-    }
-}
-
-/// The applications of `f` among what its root concatenates whose inputs are slices of its
-/// streams, in order ([`Ahead`]).
-fn ahead(f: &Formula) -> Vec<(&Apply, Vec<&[u8]>)> {
-    let mut applies = Vec::new();
-    let mut walk = vec![&f.root];
-    while let Some(n) = walk.pop() {
-        match n {
-            // (in the order they are evaluated)
-            Node::Concat(ns) => walk.extend(ns.iter().rev()),
-            Node::Apply(a) => {
-                let inputs: Option<Vec<&[u8]>> = a
-                    .inputs
-                    .iter()
-                    .map(|i| match *i {
-                        Node::Slice { stream, start, len } => {
-                            f.streams.get(stream)?.data.get(start as usize..)?.get(..len as usize)
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                if let Some(inputs) = inputs {
-                    applies.push((&**a, inputs));
-                }
-            }
-            _ => {}
-        }
-    }
-    applies
 }
 
 /// The applications at the top of `n`, by address, with the ranges of their outputs in its

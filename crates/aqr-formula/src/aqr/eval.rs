@@ -62,6 +62,8 @@ impl<'p> Ap<'p, '_> {
 /// literal. Of several outputs, it has the index of its state among the evaluation's ([`Fan`]).
 enum Op<'p, 'a> {
     Literal(&'a [u8]),
+    /// Of a formula's stream not at hand (sunk, or not made): failing where it is pulled.
+    Absent,
     /// Of a non-leaf block, by its ordinal among all.
     Slice {
         block: usize,
@@ -320,6 +322,7 @@ impl<'a> Eval<'_, 'a> {
     fn source(&self, v: Val) -> Src<'a> {
         let s: Src<'a> = match self.g.ops[v.node] {
             Op::Literal(l) => Box::new(Once(Some(Chunk::Borrowed(l)).filter(|c| !c.is_empty()))),
+            Op::Absent => Box::new(Absent),
             Op::Slice { block, start, len } => Box::new(SliceSource { block, start, len, done: false }),
             Op::Apply(a, _, None) if (self.part)(a) => Box::new(Queued { node: v.node, q: None }),
             Op::Apply(_, _, None) | Op::Patch(..) => Box::new(Made { node: v.node, done: false }),
@@ -331,6 +334,15 @@ impl<'a> Eval<'_, 'a> {
             true => Box::new(Summed { inner: s, v, hash: Xxh64::new(0), done: false }),
             false => s,
         }
+    }
+}
+
+/// A value not at hand ([`Op::Absent`]).
+struct Absent;
+
+impl<'a> Source<'a> for Absent {
+    fn next(&mut self, _: At<'_, '_, 'a>) -> Decoded<Option<Chunk<'a>>> {
+        invalid("a stream not at hand")
     }
 }
 
@@ -1193,7 +1205,7 @@ pub(super) fn hashed(
                 items.map(|p| vec![[vec![Ch::of(&h)], p.concat()].concat()])
             }
             Op::Split(x, sizes, _) => get(x).and_then(|p| cut(p, sizes)),
-            Op::Patch(..) => None,
+            Op::Patch(..) | Op::Absent => None,
             Op::Apply(Ap::One(_) | Ap::Shared(_), ..) => None,
             Op::Apply(Ap::Block(a), ref inputs, fan) => {
                 let ins = inputs.iter().map(|&v| get(v).map(|p| whole(p))).collect::<Option<Vec<Ch>>>();
@@ -1282,7 +1294,7 @@ impl<'f> Graph<'f, 'f> {
             &Node::Slice { stream, start, len } => {
                 let s = f.streams.get(stream).ok_or_else(|| Error::new(format!("no stream #{stream}")))?;
                 if s.data.sunk_in().is_some() || s.data.is_lazy() {
-                    return Err(Error::new(format!("stream #{stream} not at hand")));
+                    return Ok(self.push(Op::Absent, len));
                 }
                 let d = usize::try_from(start)
                     .ok()
@@ -1335,16 +1347,14 @@ impl Blocks for NoBlocks {
     fn add(&self, _: usize, _: usize) {}
 }
 
-/// The output of formula `f`, its modules run by `m` (whole: of an application of several
-/// outputs split, by [`crate::Modules::apply_shared`], its pieces put together), written to `part`
-/// in pieces as it is pulled where given (and none returned), its applications among what its
-/// output concatenates made ahead on up to `threads` threads.
-pub(crate) fn eval_formula<M: crate::Modules + Sync>(
+/// `go` given the graph of formula `f` and its evaluation, its modules run by `m` (whole: of an
+/// application of several outputs split, by [`crate::Modules::apply_shared`], its pieces put
+/// together, so that what records them has their pieces), its threads joined after.
+fn with_formula<M: crate::Modules + Sync, R>(
     f: &crate::Formula,
     m: &M,
-    part: Option<&mut FormulaSink<'_>>,
-    threads: usize,
-) -> crate::Result<Vec<u8>> {
+    go: impl FnOnce(&Eval) -> crate::Result<R>,
+) -> crate::Result<R> {
     use crate::Error;
     let g = Graph::of_formula(f)?;
     let failed = |e: Error| Failure::Invalid(e.0);
@@ -1377,20 +1387,83 @@ pub(crate) fn eval_formula<M: crate::Modules + Sync>(
         threads: &running,
     };
     let _joined = Joined(&ev);
-    let err = |f: Failure| match f {
-        Failure::Invalid(m) | Failure::Resource(m) | Failure::Decryption(m) => Error::new(m),
-        f => Error::new(format!("{f:?}")),
-    };
-    match part {
-        None => emit(&g, &ev, None, None, threads).map_err(err).map(|mut o| o.pop().unwrap_or_default()),
+    go(&ev)
+}
+
+/// A failure of the evaluation as a formula's.
+fn formula_error(f: Failure) -> crate::Error {
+    match f {
+        Failure::Invalid(m) | Failure::Resource(m) | Failure::Decryption(m) => crate::Error::new(m),
+        f => crate::Error::new(format!("{f:?}")),
+    }
+}
+
+/// The output of formula `f`, its modules run by `m` ([`with_formula`]), written to `part` in
+/// pieces as it is pulled where given (and none returned), its applications among what its
+/// output concatenates made ahead on up to `threads` threads.
+pub(crate) fn eval_formula<M: crate::Modules + Sync>(
+    f: &crate::Formula,
+    m: &M,
+    part: Option<&mut FormulaSink<'_>>,
+    threads: usize,
+) -> crate::Result<Vec<u8>> {
+    with_formula(f, m, |ev| match part {
+        None => emit(ev.g, ev, None, None, threads).map_err(formula_error).map(|mut o| o.pop().unwrap_or_default()),
         Some(part) => {
             // (the callback's failure told apart from the evaluation's)
-            let mut given: Option<Error> = None;
+            let mut given: Option<crate::Error> = None;
             let mut take = |d: &[u8]| part(d).map_err(|e| Failure::Invalid(given.insert(e).0.clone()));
-            match emit(&g, &ev, None, Some(&mut take), threads) {
+            match emit(ev.g, ev, None, Some(&mut take), threads) {
                 Ok(_) => Ok(Vec::new()),
-                Err(f) => Err(given.take().unwrap_or_else(|| err(f))),
+                Err(f) => Err(given.take().unwrap_or_else(|| formula_error(f))),
             }
         }
+    })
+}
+
+/// What `limit` gives of each application of formula `f` in `order`, given its inputs made (by
+/// `m`) only as it asks for them: None where it gives none, or an input asked for cannot be made.
+pub(crate) fn limits_of<M: crate::Modules + Sync>(
+    f: &crate::Formula,
+    m: &M,
+    order: &[&crate::Apply],
+    limit: &dyn Fn(&crate::Apply, &dyn crate::Contents) -> Option<u64>,
+) -> crate::Result<Vec<Option<u64>>> {
+    with_formula(f, m, |ev| {
+        let g = ev.g;
+        // (the node of each application, by its address)
+        let mut node_of: HashMap<usize, usize> = HashMap::new();
+        for (n, op) in g.ops.iter().enumerate() {
+            match *op {
+                Op::Apply(Ap::One(a), ..) => _ = node_of.insert(a as *const crate::Apply as usize, n),
+                Op::Apply(Ap::Shared(s), ..) => _ = node_of.insert(&s.apply as *const crate::Apply as usize, n),
+                _ => {}
+            }
+        }
+        let at = At { ev, ahead: None };
+        Ok(order
+            .iter()
+            .map(|&a| {
+                let n = *node_of.get(&(a as *const crate::Apply as usize))?;
+                let Op::Apply(_, ref inputs, _) = g.ops[n] else { unreachable!("an application") };
+                let made: Vec<std::cell::OnceCell<Option<Vec<u8>>>> =
+                    inputs.iter().map(|_| Default::default()).collect();
+                limit(a, &Asked { at, inputs, made })
+            })
+            .collect())
+    })
+}
+
+/// The inputs of an application made as they are asked for ([`limits_of`]).
+struct Asked<'r, 'e, 'a> {
+    at: At<'r, 'e, 'a>,
+    inputs: &'r [Val],
+    made: Vec<std::cell::OnceCell<Option<Vec<u8>>>>,
+}
+
+impl crate::Contents for Asked<'_, '_, '_> {
+    fn input(&self, k: usize) -> Option<&[u8]> {
+        let v = *self.inputs.get(k)?;
+        self.made[k].get_or_init(|| whole(self.at, v).ok().map(Whole::into_vec)).as_deref()
     }
 }
