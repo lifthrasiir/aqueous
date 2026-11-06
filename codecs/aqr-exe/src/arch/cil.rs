@@ -145,8 +145,10 @@ struct Tables {
     header_len: usize,
     /// Row counts, by table.
     rows: [u32; 64],
-    /// Column widths, by table (empty for tables not present).
-    widths: Vec<Vec<usize>>,
+    /// Column widths, by table (none for tables not present: [`Tables::widths`]).
+    widths: [[usize; MAX_COLS]; SCHEMA.len()],
+    /// Columns, by table (0 for tables not present).
+    cols: [u8; SCHEMA.len()],
     /// Bytes of the rows of every table, in order.
     rows_len: usize,
 }
@@ -194,20 +196,43 @@ impl Tables {
                 }
             }
         };
-        let mut widths = Vec::with_capacity(SCHEMA.len());
+        let (mut widths, mut ncols) = ([[0; MAX_COLS]; SCHEMA.len()], [0; SCHEMA.len()]);
         let mut rows_len = 0usize;
         for (t, cols) in SCHEMA.iter().enumerate() {
             if valid >> t & 1 == 0 {
-                widths.push(Vec::new());
                 continue;
             }
-            let w: Vec<usize> = cols.iter().map(|&c| width(c)).collect();
-            rows_len = rows_len.checked_add(w.iter().sum::<usize>().checked_mul(rows[t] as usize)?)?;
-            widths.push(w);
+            for (w, &c) in widths[t].iter_mut().zip(*cols) {
+                *w = width(c);
+            }
+            ncols[t] = cols.len() as u8;
+            rows_len = rows_len.checked_add(widths[t].iter().sum::<usize>().checked_mul(rows[t] as usize)?)?;
         }
-        Some(Tables { header_len: p, rows, widths, rows_len })
+        Some(Tables { header_len: p, rows, widths, cols: ncols, rows_len })
+    }
+
+    /// The column widths of table `t` (none where it is not present).
+    fn widths(&self, t: usize) -> &[usize] {
+        &self.widths[t][..self.cols[t] as usize]
+    }
+
+    /// The column widths of each table, in order.
+    fn all_widths(&self) -> impl Iterator<Item = &[usize]> {
+        (0..SCHEMA.len()).map(|t| self.widths(t))
     }
 }
+
+/// Columns of a table at most.
+const MAX_COLS: usize = {
+    let (mut most, mut t) = (0, 0);
+    while t < SCHEMA.len() {
+        if SCHEMA[t].len() > most {
+            most = SCHEMA[t].len();
+        }
+        t += 1;
+    }
+    most
+};
 
 /// A stream of the metadata root: its offset from the root, size and name.
 struct MetaStream<'a> {
@@ -300,23 +325,55 @@ fn rid_stream(table: u8) -> usize {
 /// The tokens' move-to-front caches, a row number of each entry, and the last row number
 /// of each table to miss its cache.
 struct Tokens {
-    cache: Vec<Vec<u32>>,
+    /// The caches' entries: [`CACHE`] of each table's, at its slot (made as its first token
+    /// comes).
+    entries: Vec<u32>,
+    /// Of each table, its slot ([`NO_SLOT`] where none yet) and its entries.
+    slot: [u16; 256],
+    len: [u16; 256],
     last: [u32; 256],
 }
 
+const NO_SLOT: u16 = u16::MAX;
+
 impl Tokens {
-    fn new() -> Tokens {
-        Tokens { cache: vec![Vec::new(); 256], last: [0; 256] }
+    /// Caches with room made for `tables` of them (more growing it).
+    fn new(tables: usize) -> Tokens {
+        Tokens { entries: Vec::with_capacity(tables * CACHE), slot: [NO_SLOT; 256], len: [0; 256], last: [0; 256] }
     }
 
-    fn insert(&mut self, table: u8, rid: u32) {
-        let c = &mut self.cache[table as usize];
-        // (a table's cache made at its size as its first token comes)
-        if c.capacity() == 0 {
-            c.reserve_exact(CACHE + 1);
+    /// The cache of `table`, the most recent first.
+    #[cfg(feature = "encode")]
+    fn cache(&self, table: u8) -> &[u32] {
+        match self.slot[table as usize] {
+            NO_SLOT => &[],
+            s => &self.entries[s as usize * CACHE..][..self.len[table as usize] as usize],
         }
-        c.insert(0, rid);
-        c.truncate(CACHE);
+    }
+
+    /// Entry `k` of the cache of `table`, moved to its front.
+    fn hit(&mut self, table: u8, k: usize) -> Option<u32> {
+        let (s, n) = (self.slot[table as usize], self.len[table as usize] as usize);
+        if s == NO_SLOT || k >= n {
+            return None;
+        }
+        let c = &mut self.entries[s as usize * CACHE..][..n];
+        c[..=k].rotate_right(1);
+        Some(c[0])
+    }
+
+    /// `rid` put at the front of the cache of `table`, its last entry dropped where it is full.
+    fn insert(&mut self, table: u8, rid: u32) {
+        let t = table as usize;
+        if self.slot[t] == NO_SLOT {
+            self.slot[t] = (self.entries.len() / CACHE) as u16;
+            self.entries.resize(self.entries.len() + CACHE, 0);
+        }
+        let n = self.len[t] as usize;
+        let c = &mut self.entries[self.slot[t] as usize * CACHE..][..CACHE];
+        c.copy_within(..n.min(CACHE - 1), 1);
+        c[0] = rid;
+        self.len[t] = (n + 1).min(CACHE) as u16;
     }
 }
 
@@ -473,12 +530,10 @@ mod encode {
                     i += 4;
                     let (table, rid) = ((t >> 24) as u8, t & 0xff_ffff);
                     st[TOKT].push(table);
-                    let c = &mut tokens.cache[table as usize];
-                    match c.iter().position(|&r| r == rid) {
+                    match tokens.cache(table).iter().position(|&r| r == rid) {
                         Some(k) => {
                             st[TOKI].push(k as u8 + 1);
-                            c.remove(k);
-                            c.insert(0, rid);
+                            tokens.hit(table, k);
                         }
                         None => {
                             st[TOKI].push(0);
@@ -538,7 +593,7 @@ mod encode {
         // the method bodies, of every RVA of the MethodDef table in the section
         let mut bodies = Vec::new();
         if let Some((at, t)) = &tables {
-            let w = &t.widths[METHOD_DEF];
+            let w = t.widths(METHOD_DEF);
             if !w.is_empty() {
                 let row: usize = w.iter().sum();
                 let start = at + table_offset(t, METHOD_DEF);
@@ -552,7 +607,7 @@ mod encode {
             }
         }
         // (each after the last taken, clear of the metadata)
-        let mut tokens = Tokens::new();
+        let mut tokens = Tokens::new(0);
         let mut taken_bodies = Vec::new();
         let mut body_ranges = Vec::new();
         let (mut at, mut next) = (0, 0);
@@ -581,7 +636,7 @@ mod encode {
         if let Some((at, t)) = &tables {
             let mut p = *at;
             let mut last_body: i64 = -1;
-            for (table, w) in t.widths.iter().enumerate() {
+            for (table, w) in t.all_widths().enumerate() {
                 let row: usize = w.iter().sum();
                 let nr = t.rows[table] as usize;
                 let mut off = 0;
@@ -653,7 +708,7 @@ mod encode {
 
     /// The offset of table `table`'s rows from the first table's.
     fn table_offset(t: &Tables, table: usize) -> usize {
-        (0..table).map(|u| t.widths[u].iter().sum::<usize>() * t.rows[u] as usize).sum()
+        (0..table).map(|u| t.widths(u).iter().sum::<usize>() * t.rows[u] as usize).sum()
     }
 }
 
@@ -663,6 +718,48 @@ pub use encode::*;
 #[cfg(feature = "decode")]
 mod decode {
     use super::*;
+
+    /// The tables that the tokens of `tokt` (the stream of their tables) are of: each has a
+    /// cache (its first token misses it).
+    fn token_tables(tokt: &[u8]) -> usize {
+        let mut seen = [0u64; 4];
+        for &t in tokt {
+            seen[t as usize / 64] |= 1 << (t % 64);
+        }
+        seen.iter().map(|w| w.count_ones() as usize).sum()
+    }
+
+    /// Bytes that [`decode`] takes of [`aqr_api::stack`] at most, of the streams `META`,
+    /// `BODYPOS` and `TOKT` and a section of `len` bytes (`None` where the metadata root does
+    /// not parse), in its blocks' order: the section, the root's stream headers, the parts taken
+    /// (the root, its streams, the method bodies: one a position, which is a varint), the tokens'
+    /// caches, the bodies' positions, and the column of a table's values (as many as the
+    /// largest table's rows).
+    pub fn decode_plan(meta: &[u8], bodypos: &[u8], tokt: &[u8], len: u64) -> Option<u64> {
+        use aqr_api::stack::block;
+        let nbodies = bodypos.iter().filter(|&&b| b < 0x80).count() as u64;
+        let (root_len, streams) = parse_root(meta)?;
+        let n = streams.len() as u64;
+        let tables = streams.iter().any(|m| m.name == b"#~" || m.name == b"#-");
+        let rows = match tables {
+            true => Tables::parse(meta.get(root_len..)?).map_or(0, |t| t.rows.iter().copied().max().unwrap_or(0)),
+            false => 0,
+        };
+        let caches = 4 * (token_tables(tokt) * CACHE) as u64;
+        Some(
+            block(len)
+                + block(STREAM_BYTES * n)
+                + block(8 * (1 + n + nbodies))
+                + block(caches)
+                + block(4 * nbodies)
+                + block(4 * rows as u64),
+        )
+    }
+
+    /// Bytes of a [`MetaStream`] on WebAssembly.
+    const STREAM_BYTES: u64 = 16;
+    #[cfg(target_family = "wasm")]
+    const _: () = assert!(core::mem::size_of::<MetaStream>() as u64 == STREAM_BYTES);
 
     fn unzigzag(z: u32) -> i32 {
         ((z >> 1) as i32) ^ -((z & 1) as i32)
@@ -741,13 +838,7 @@ mod decode {
                         tokens.insert(table, rid);
                         rid
                     } else {
-                        let c = &mut tokens.cache[table as usize];
-                        if k > c.len() {
-                            return None;
-                        }
-                        let rid = c.remove(k - 1);
-                        c.insert(0, rid);
-                        rid
+                        tokens.hit(table, k - 1)?
                     };
                     put(code, &mut i, &((table as u32) << 24 | rid).to_le_bytes())?;
                 }
@@ -793,8 +884,8 @@ mod decode {
             }
         }
 
-        // the method bodies
-        let mut tokens = Tokens::new();
+        // the method bodies (and the caches of the tables that tokens are of)
+        let mut tokens = Tokens::new(token_tables(s[TOKT]));
         let mut bodies = Vec::with_capacity(nbodies);
         let mut at = 0usize;
         while !s[BODYPOS].is_empty() {
@@ -848,7 +939,7 @@ mod decode {
         if let Some((mut p, t)) = tables {
             let mut last_body: i64 = -1;
             let mut vals = Vec::with_capacity(t.rows.iter().copied().max().unwrap_or(0) as usize);
-            for (table, w) in t.widths.iter().enumerate() {
+            for (table, w) in t.all_widths().enumerate() {
                 let row: usize = w.iter().sum();
                 let nr = t.rows[table] as usize;
                 let mut off = 0;
@@ -913,7 +1004,7 @@ mod decode {
 }
 
 #[cfg(feature = "decode")]
-pub use decode::decode;
+pub use decode::{decode, decode_plan};
 
 #[cfg(test)]
 mod tests {

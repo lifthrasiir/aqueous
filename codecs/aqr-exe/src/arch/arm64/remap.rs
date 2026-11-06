@@ -337,6 +337,16 @@ mod decode {
 #[cfg(feature = "decode")]
 pub use decode::decode;
 
+/// Bytes that [`decode`] takes of [`aqr_api::stack`], of the streams from [`BLF`] on and a
+/// section of `len` bytes, in its blocks' order: the values flagged of BLs and of ADRPs, their
+/// maps (one an entry of a map's stream, which is a varint), and the section.
+pub fn decode_plan(streams: [&[u8]; 4], len: u64) -> u64 {
+    use crate::arch::x86::remap::{map_values, ones};
+    use aqr_api::stack::block;
+    let flagged = block(4 * ones(&streams[..1])) + block(4 * ones(&streams[1..2]));
+    flagged + block(8 * map_values(streams[2])) + block(8 * map_values(streams[3])) + block(len)
+}
+
 #[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;

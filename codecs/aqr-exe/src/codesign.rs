@@ -108,7 +108,11 @@ fn varint(s: &mut &[u8]) -> Option<u64> {
 pub fn decode(params: &[u8], body: &[u8], sigs: &[u8], len: usize) -> Option<Vec<u8>> {
     let mut p = params;
     let n = varint(&mut p)?;
-    let mut list = Vec::new();
+    // (an entry 4 bytes of the params at least)
+    if n > p.len() as u64 / 4 {
+        return None;
+    }
+    let mut list = Vec::with_capacity(n as usize);
     for _ in 0..n {
         let mut v = [0usize; 3];
         for x in &mut v {
@@ -141,6 +145,40 @@ pub fn decode(params: &[u8], body: &[u8], sigs: &[u8], len: usize) -> Option<Vec
     }
     Some(out)
 }
+
+/// Bytes that [`decode`] takes of [`aqr_api::stack`], of `params` and the signatures `sigs` and
+/// a file of `len` bytes (`None` where they are not of one), in its blocks' order: the
+/// signatures' entries, the file, and the code slots of a signature at a time (the most of them).
+#[cfg(feature = "decode")]
+pub fn decode_plan(params: &[u8], sigs: &[u8], len: u64) -> Option<u64> {
+    use aqr_api::stack::block;
+    let mut p = params;
+    let n = varint(&mut p)?;
+    if n > p.len() as u64 / 4 {
+        return None;
+    }
+    let (mut s, mut most) = (0usize, 0);
+    for _ in 0..n {
+        let mut v = [0usize; 3];
+        for x in &mut v {
+            *x = usize::try_from(varint(&mut p)?).ok()?;
+        }
+        let mask = varint(&mut p)?;
+        let sig = sigs.get(s..s.checked_add(v[2])?)?;
+        for k in (0..MOST_BLOBS).filter(|&k| mask >> k & 1 != 0) {
+            let sl = slots(sig, k)?;
+            most = most.max(sl.count * sl.size);
+        }
+        s += v[2];
+    }
+    Some(block(ENTRY_BYTES * n) + block(len) + block(most as u64))
+}
+
+/// Bytes of an entry of [`decode`]'s list on WebAssembly.
+#[cfg(feature = "decode")]
+const ENTRY_BYTES: u64 = 24;
+#[cfg(all(feature = "decode", target_family = "wasm"))]
+const _: () = assert!(core::mem::size_of::<(usize, usize, usize, u64)>() as u64 == ENTRY_BYTES);
 
 /// A file's signatures, of [`encode`]: the params, the signatures (code slots zeroed) and where
 /// they are in the file, in order.

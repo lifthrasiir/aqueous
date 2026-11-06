@@ -1180,6 +1180,34 @@ fn elf_versions_remapped() {
     assert!(!both.is_empty());
 }
 
+/// aqr-exe's filters against other versions (`exe-recons/x86-remap`, `exe-recons/arm64-remap`,
+/// `exe-recons/arm64-delta`) take their plans, to the page, decoded in WebAssembly.
+#[test]
+fn exe_remap_plans_hold() {
+    let modules = [aqr_decompress::X86_REMAP, aqr_decompress::ARM64_REMAP, aqr_decompress::ARM64_DELTA];
+    let hashes = modules.map(|m| aqr_decompress::built(m).expect("built").sha512_256);
+    let x86 = |pad| macho(0x0100_0007, &x86_functions(40_000, pad, 0x1_0000_0200));
+    let arm64 = |shift| macho_arm64(&arm64_functions(26_000, shift));
+    let opt = Options { block: 2 << 20, ..Options::default() };
+    let mut seen = [0; 3];
+    for (what, a, b) in [("x86", x86(0), x86(48)), ("arm64", arm64(0), arm64(37))] {
+        let (tree, contents) = tree_of(&[("a", a), ("b", b)]);
+        let inputs: Vec<Input> = contents.iter().map(|(n, d)| Input { name: n.as_bytes(), data: d }).collect();
+        let c = compress_tree(&tree, &inputs, &opt).archive;
+        aqr_decompress::record_applications(true);
+        let out = aqr_formula::aqr::decode_value_with(&c, &aqr_decompress::Wasm, 1);
+        let applied = aqr_decompress::record_applications(false);
+        assert!(out.is_ok(), "{what}: {:?}", out.err());
+        for a in &applied {
+            let Some(k) = hashes.iter().position(|&h| h == a.hash) else { continue };
+            let plan = a.limit - a.imported;
+            assert!(a.working <= plan && plan - a.working < 1 << 16, "{what}: plan {plan}, working {}", a.working);
+            seen[k] += 1;
+        }
+    }
+    assert!(seen.iter().all(|&n| n > 0), "{seen:?}");
+}
+
 /// The same of x86-64 code (`exe-recons/x86-remap`).
 #[test]
 fn x86_versions_remapped() {

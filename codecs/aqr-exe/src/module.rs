@@ -11,6 +11,64 @@ use crate::{reloc, symtab};
 
 pub type Result<T> = core::result::Result<T, &'static str>;
 
+/// The memory plan ([`aqr_api::stack`]) of [`arm64`] and [`reloc`]: what each takes beyond its
+/// initial memory at most, of params, resources and inputs of these lengths and an output of
+/// `len`: what `aqr_api::whole` copies, and the output.
+pub fn plan(params: u64, resources: &[u64], inputs: &[u64], len: u64) -> u64 {
+    aqr_api::stack::whole(params, resources, inputs) + aqr_api::stack::block(len)
+}
+
+/// The memory plan of [`x86`] and [`x86_remap`], as [`plan`]'s of params `params`: the output
+/// with the sentinel after it (`None` where the params are too short).
+pub fn x86_plan(params: &[u8], resources: &[u64], inputs: &[u64], len: u64) -> Option<u64> {
+    let sentinel = *params.get(8)? as u64;
+    Some(plan(params.len() as u64, resources, inputs, len.checked_add(sentinel)?))
+}
+
+/// The memory plan of [`x86_remap`], as [`x86_plan`]'s of the streams from `x86::remap::CALLF` on
+/// `flags` (the three flag streams and the map).
+pub fn x86_remap_plan(params: &[u8], resources: &[u64], inputs: &[u64], flags: [&[u8]; 4], len: u64) -> Option<u64> {
+    let room = len.checked_add(*params.get(8)? as u64)?;
+    let whole = aqr_api::stack::whole(params.len() as u64, resources, inputs);
+    Some(whole + x86::remap::decode_plan(flags, room))
+}
+
+/// The memory plan of [`arm64_remap`], as [`plan`]'s of the streams from
+/// `arm64::remap::BLF` on `flags` (the two flag streams and the two maps).
+pub fn arm64_remap_plan(params: u64, inputs: &[u64], flags: [&[u8]; 4], len: u64) -> u64 {
+    aqr_api::stack::whole(params, &[], inputs) + arm64::remap::decode_plan(flags, len)
+}
+
+/// The memory plan of [`arm64_delta`], as [`plan`]'s: the output and the table of predictions.
+pub fn arm64_delta_plan(inputs: &[u64], len: u64) -> u64 {
+    use aqr_api::stack::block;
+    aqr_api::stack::whole(0, &[], inputs) + block(len) + block(8 << arm64::delta::TABLE_BITS)
+}
+
+/// The memory plan of [`macho_codesign`], as [`plan`]'s of the signatures `sigs` (`None` where
+/// the params are not of them).
+pub fn macho_codesign_plan(params: &[u8], inputs: &[u64], sigs: &[u8], len: u64) -> Option<u64> {
+    Some(aqr_api::stack::whole(params.len() as u64, &[], inputs) + crate::codesign::decode_plan(params, sigs, len)?)
+}
+
+/// The memory plan of [`cil`], as [`plan`]'s of the streams `META`, `BODYPOS` and `TOKT`
+/// (`None` where the metadata root does not parse).
+pub fn cil_plan(params: u64, inputs: &[u64], streams: [&[u8]; 3], len: u64) -> Option<u64> {
+    let [meta, bodypos, tokt] = streams;
+    Some(aqr_api::stack::whole(params, &[], inputs) + cil::decode_plan(meta, bodypos, tokt, len)?)
+}
+
+/// The memory plan of [`macho_symtab`], as [`plan`]'s of the streams of the entries' types and
+/// names.
+pub fn macho_symtab_plan(params: u64, inputs: &[u64], types: &[u8], names: &[u8], len: u64) -> u64 {
+    aqr_api::stack::whole(params, &[], inputs) + symtab::decode_plan(types, names, len)
+}
+
+/// The output's room of [`x86`] and [`x86_remap`] (the sentinel decoded after it, then cut).
+fn x86_room(len: u64, sentinel: u8) -> usize {
+    usize::try_from(len).ok().and_then(|n| n.checked_add(sentinel as usize)).unwrap_or(usize::MAX)
+}
+
 /// The x86 disfilter on a code section. Parameters: the origin (u64, little endian), the
 /// sentinel size (u8) and 1 for x86-64 or 0 for x86-32; resources: the opcode classes
 /// ([`x86::Opcodes`]); inputs: the streams of [`x86::STREAM_NAMES`].
@@ -25,8 +83,7 @@ pub fn x86(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64) -> Re
         return Err("bad resources");
     };
     let origin = u64::from_le_bytes(*p.first_chunk().unwrap());
-    // (no larger but where it is not the output)
-    let cap = usize::try_from(len).unwrap_or(usize::MAX);
+    let cap = x86_room(len, p[8]);
     of_len(x86::decode_with(&x86::DecodedStreams::new(origin, p[8], streams), p[9] != 0, &opcodes, cap), len)
 }
 
@@ -44,8 +101,7 @@ pub fn x86_remap(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64)
         return Err("bad resources");
     };
     let origin = u64::from_le_bytes(*p.first_chunk().unwrap());
-    // (no larger but where it is not the output)
-    let cap = usize::try_from(len).unwrap_or(usize::MAX);
+    let cap = x86_room(len, p[8]);
     of_len(x86::remap::decode(origin, p[8], streams, p[9] != 0, &opcodes, cap), len)
 }
 

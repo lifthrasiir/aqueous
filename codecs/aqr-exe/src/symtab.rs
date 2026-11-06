@@ -4,7 +4,8 @@
 //! once, front coded, in the order of the string table, which is that of their first use
 //! (`exe-recons/macho-symtab`, FORMAT.md §S).
 
-use alloc::collections::{BTreeMap, BTreeSet};
+#[cfg(feature = "encode")]
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::util::to_u32;
@@ -49,9 +50,138 @@ struct Model {
     begin: u64,
     size: u64,
     /// The values of the entries of a section that are no stabs.
-    addrs: BTreeSet<u64>,
+    addrs: Addrs,
     /// The string of the last entry of each value that has one past the head.
-    by_value: BTreeMap<u64, u32>,
+    by_value: Values,
+}
+
+/// Whether an entry of type `t` is of a section and no stab (its value one of [`Model::addrs`]).
+fn of_section(t: u8) -> bool {
+    t & N_STAB == 0 && t & N_TYPE == N_SECT
+}
+
+/// None of [`Addrs`]' nodes.
+const NIL: u32 = u32::MAX;
+
+/// An ordered set of values: a treap in an arena (its priorities a hash of the keys), of room
+/// for so many at first (more growing it).
+struct Addrs {
+    /// Each node's value, and its children's (lesser, greater) nodes.
+    nodes: Vec<(u64, [u32; 2])>,
+    root: u32,
+}
+
+impl Addrs {
+    fn new(n: usize) -> Addrs {
+        Addrs { nodes: Vec::with_capacity(n), root: NIL }
+    }
+
+    fn priority(k: u64) -> u64 {
+        (k ^ k >> 29).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+    }
+
+    fn insert(&mut self, k: u64) {
+        self.root = self.insert_at(self.root, k);
+    }
+
+    /// `k` put in the subtree at `t`: its root after.
+    fn insert_at(&mut self, t: u32, k: u64) -> u32 {
+        if t == NIL {
+            self.nodes.push((k, [NIL; 2]));
+            return (self.nodes.len() - 1) as u32;
+        }
+        let key = self.nodes[t as usize].0;
+        if k == key {
+            return t;
+        }
+        let d = (k > key) as usize;
+        let c = self.insert_at(self.nodes[t as usize].1[d], k);
+        self.nodes[t as usize].1[d] = c;
+        if Addrs::priority(self.nodes[c as usize].0) <= Addrs::priority(key) {
+            return t;
+        }
+        // (the child up)
+        self.nodes[t as usize].1[d] = self.nodes[c as usize].1[1 - d];
+        self.nodes[c as usize].1[1 - d] = t;
+        c
+    }
+
+    /// The least value of at least `lo`.
+    fn at_least(&self, lo: u64) -> Option<u64> {
+        let (mut t, mut best) = (self.root, None);
+        while t != NIL {
+            let (k, kids) = self.nodes[t as usize];
+            if k >= lo {
+                best = Some(k);
+                t = kids[0];
+            } else {
+                t = kids[1];
+            }
+        }
+        best
+    }
+}
+
+/// A map of values to strings: a table of open addressing (linear probing), kept 2/3 full at
+/// most, of room for so many at first (more growing it).
+struct Values {
+    /// The value and string of each, [`VACANT`] the value of none.
+    slots: Vec<(u64, u32)>,
+    len: usize,
+    /// Of the value [`VACANT`].
+    vacant: Option<u32>,
+}
+
+const VACANT: u64 = u64::MAX;
+
+impl Values {
+    fn slots(n: usize) -> usize {
+        n + n / 2 + 1
+    }
+
+    fn new(n: usize) -> Values {
+        Values { slots: alloc::vec![(VACANT, 0); Values::slots(n)], len: 0, vacant: None }
+    }
+
+    /// The slot of `v` (not [`VACANT`]), or the vacant one where it would go.
+    fn find(&self, v: u64) -> usize {
+        let n = self.slots.len();
+        let mut i = (((v.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 32) * n as u64) >> 32) as usize;
+        while self.slots[i].0 != v && self.slots[i].0 != VACANT {
+            i = if i + 1 == n { 0 } else { i + 1 };
+        }
+        i
+    }
+
+    fn get(&self, v: u64) -> Option<u32> {
+        if v == VACANT {
+            return self.vacant;
+        }
+        let (k, id) = self.slots[self.find(v)];
+        (k == v).then_some(id)
+    }
+
+    fn insert(&mut self, v: u64, id: u32) {
+        if v == VACANT {
+            self.vacant = Some(id);
+            return;
+        }
+        let mut i = self.find(v);
+        if self.slots[i].0 == VACANT {
+            if 3 * (self.len + 1) > 2 * self.slots.len() {
+                let old = core::mem::replace(self, Values::new(2 * self.len + 4));
+                self.vacant = old.vacant;
+                for e in old.slots.into_iter().filter(|e| e.0 != VACANT) {
+                    let j = self.find(e.0);
+                    self.slots[j] = e;
+                    self.len += 1;
+                }
+                i = self.find(v);
+            }
+            self.len += 1;
+        }
+        self.slots[i] = (v, id);
+    }
 }
 
 /// The prediction of a value: of `VALUE`, or of `SIZE` for the size of a function.
@@ -61,8 +191,9 @@ enum Pred {
 }
 
 impl Model {
-    fn new() -> Model {
-        Model { last: [0; 256], begin: 0, size: 0, addrs: BTreeSet::new(), by_value: BTreeMap::new() }
+    /// The model at first, of room for `addrs` values of sections and `values` strings by value.
+    fn new(addrs: usize, values: usize) -> Model {
+        Model { last: [0; 256], begin: 0, size: 0, addrs: Addrs::new(addrs), by_value: Values::new(values) }
     }
 
     fn key(t: u8) -> usize {
@@ -73,7 +204,7 @@ impl Model {
         match t {
             N_BNSYM => Pred::Value(self.begin.wrapping_add(self.size)),
             N_FUN if sect == 0 => {
-                Pred::Size(self.addrs.range(self.begin.saturating_add(1)..).next().map_or(0, |a| a - self.begin))
+                Pred::Size(self.addrs.at_least(self.begin.saturating_add(1)).map_or(0, |a| a - self.begin))
             }
             N_FUN | N_ENSYM => Pred::Value(self.begin),
             _ => Pred::Value(self.last[Model::key(t)]),
@@ -84,9 +215,7 @@ impl Model {
         match t {
             N_BNSYM => self.begin = v,
             N_FUN if sect == 0 => self.size = v,
-            _ if t & N_STAB == 0 && t & N_TYPE == N_SECT => {
-                self.addrs.insert(v);
-            }
+            _ if of_section(t) => self.addrs.insert(v),
             _ => {}
         }
         self.last[Model::key(t)] = v;
@@ -111,7 +240,7 @@ pub fn encode(symtab: &[u8], strtab: &[u8], ext: u32) -> Option<(Vec<u8>, [Vec<u
         return None;
     }
     let mut st: [Vec<u8>; NUM_STREAMS] = Default::default();
-    let mut m = Model::new();
+    let mut m = Model::new(0, 0);
     let (mut ids, mut next, mut prev) = (BTreeMap::new(), head, &[][..]);
     for i in (ext..n).chain(0..ext) {
         let e = &entries[i as usize];
@@ -127,7 +256,7 @@ pub fn encode(symtab: &[u8], strtab: &[u8], ext: u32) -> Option<(Vec<u8>, [Vec<u
             st[5].push(HEAD + x as u8);
         } else {
             let id = match ids.get(&x) {
-                Some(&id) if m.by_value.get(&v) == Some(&id) => {
+                Some(&id) if m.by_value.get(v) == Some(id) => {
                     st[5].push(SAME_VALUE);
                     id
                 }
@@ -163,6 +292,23 @@ pub fn encode(symtab: &[u8], strtab: &[u8], ext: u32) -> Option<(Vec<u8>, [Vec<u
     (back[..symtab.len()] == *symtab && back[symtab.len()..] == *strtab).then_some((params, st))
 }
 
+/// Of the entries of types `types` and names `names` (streams of [`decode`]): the values of
+/// sections (no stabs), the names past the head (each a string by value), the new strings.
+fn counts(types: &[u8], names: &[u8]) -> [usize; 3] {
+    let addrs = types.iter().filter(|&&t| of_section(t)).count();
+    let values = names.iter().filter(|&&c| c < HEAD).count();
+    [addrs, values, names.iter().filter(|&&c| c == NEW).count()]
+}
+
+/// Bytes that [`decode`] takes of [`aqr_api::stack`], of the streams of types `types` and names
+/// `names` and an output of `len` bytes, in its blocks' order: the output, the model's values
+/// of sections (16 bytes each) and strings by value, and the new strings' offsets.
+pub fn decode_plan(types: &[u8], names: &[u8], len: u64) -> u64 {
+    use aqr_api::stack::block;
+    let [addrs, values, new] = counts(types, names);
+    block(len) + block(16 * addrs as u64) + block(16 * Values::slots(values) as u64) + block(4 * new as u64)
+}
+
 /// The symbol table and its string table after it, `len` bytes, from the parameters `params`
 /// and the streams of [`STREAM_NAMES`]; `None` where they are not valid (FORMAT.md §S4).
 pub fn decode(params: &[u8], streams: [&[u8]; NUM_STREAMS], len: usize) -> Option<Vec<u8>> {
@@ -181,8 +327,9 @@ pub fn decode(params: &[u8], streams: [&[u8]; NUM_STREAMS], len: usize) -> Optio
     let mut out = Vec::with_capacity(len);
     out.resize(symtab, 0);
     out.extend_from_slice(head);
-    let mut m = Model::new();
-    let (mut offsets, mut prev, mut prefixes) = (Vec::<u32>::new(), symtab..symtab, prefixes.iter());
+    let [n_addrs, n_values, new] = counts(types, names);
+    let mut m = Model::new(n_addrs, n_values);
+    let (mut offsets, mut prev, mut prefixes) = (Vec::<u32>::with_capacity(new), symtab..symtab, prefixes.iter());
     for k in 0..n {
         let i = (ext as usize + k) % n;
         let (t, sect) = (types[k], sects[k]);
@@ -205,7 +352,7 @@ pub fn decode(params: &[u8], streams: [&[u8]; NUM_STREAMS], len: usize) -> Optio
                 offsets.push((start - symtab) as u32);
                 Some(offsets.len() - 1)
             }
-            SAME_VALUE => Some(*m.by_value.get(&v)? as usize),
+            SAME_VALUE => Some(m.by_value.get(v)? as usize),
             BACK => Some(offsets.len().checked_sub(1)?.checked_sub(usize::try_from(get_varint(&mut backs)?).ok()?)?),
             c => {
                 let x = (c - HEAD) as usize;

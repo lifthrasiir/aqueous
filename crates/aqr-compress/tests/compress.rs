@@ -491,6 +491,16 @@ fn pe_rest_scanned() {
     assert_eq!(modules(&f), [X86.name, FLATE.name], "{f}");
 }
 
+/// aqr-exe's x86 and ARM64 filters take their plans at most, to the page.
+#[test]
+fn exe_plans_hold() {
+    let modules = [aqr_decompress::X86, aqr_decompress::ARM64];
+    let modules = modules.map(|m| aqr_decompress::built(m).expect("built").sha512_256);
+    assert_eq!(within_plans("PE of x86-64", &pe().0, &modules, true), 1);
+    let d = macho(CPU_TYPE_ARM64, &arm64_code()).0;
+    assert_eq!(within_plans("Mach-O of ARM64", &d, &modules, true), 1);
+}
+
 const CPU_TYPE_X86_64: u32 = 0x0100_0007;
 const CPU_TYPE_ARM64: u32 = 0x0100_000c;
 

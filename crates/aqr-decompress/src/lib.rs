@@ -28,104 +28,97 @@ pub use wasm::{Applied, initial_pages, record_applications};
 /// aqr-exe's x86 disfilter on a code section. Parameters: the origin (u64, little endian),
 /// the sentinel size (u8) and 1 for x86-64 or 0 for x86-32; resources: the opcode classes
 /// (`x86::Opcodes`); inputs: the streams of `x86::STREAM_NAMES`.
-pub const X86: Module = Module::new("exe-recons/x86", 3).with_memory(exe);
+pub const X86: Module = Module::new("exe-recons/x86", 3).with_plan(x86);
+
+/// The memory of [`X86`]: its initial memory, and its plan (`aqr_exe::module::x86_plan`).
+fn x86(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    Some(u.initial() + aqr_exe::module::x86_plan(u.params, u.resources, u.inputs, u.output())?)
+}
 
 /// aqr-exe's x86 disfilter on a code section, its references remapped to those of another
 /// image. Parameters and resources as [`X86`]'s; inputs: the streams of
 /// `x86::remap::STREAM_NAMES`.
-pub const X86_REMAP: Module = Module::new("exe-recons/x86-remap", 1).with_memory(x86_remap);
+pub const X86_REMAP: Module = Module::new("exe-recons/x86-remap", 1).with_plan(x86_remap);
 
-/// The memory of [`X86_REMAP`]: the whole of it, with of each reference flagged (at most one a
-/// flag set, 8 a byte of them) its value and where it is (16 bytes), and the values and their
-/// shifts (8 bytes each).
+/// The memory of [`X86_REMAP`]: its initial memory, and its plan
+/// (`aqr_exe::module::x86_remap_plan`).
 fn x86_remap(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    use aqr_exe::arch::x86::remap::{ADDRF, CALLF, JUMPF};
-    let flags = u.inputs.get(CALLF)? + u.inputs.get(JUMPF)? + u.inputs.get(ADDRF)?;
-    Some(u.whole((16 + 8 + 8) * 8 * flags, 4))
+    use aqr_exe::arch::x86::remap::CALLF;
+    let flags = [u.content(CALLF)?, u.content(CALLF + 1)?, u.content(CALLF + 2)?, u.content(CALLF + 3)?];
+    Some(u.initial() + aqr_exe::module::x86_remap_plan(u.params, u.resources, u.inputs, flags, u.output())?)
 }
 
 /// aqr-exe's ARM64 filter on a code section. Parameters: the origin (u64, little endian);
 /// inputs: the streams of `arm64::STREAM_NAMES`.
-pub const ARM64: Module = Module::new("exe-recons/arm64", 1).with_memory(exe);
+pub const ARM64: Module = Module::new("exe-recons/arm64", 1).with_plan(exe);
 
 /// aqr-exe's ARM64 filter on a code section, its BL and ADRP targets remapped to those of
 /// another image. Parameters: the origin (u64, little endian); inputs: the streams of
 /// `arm64::remap::STREAM_NAMES`.
-pub const ARM64_REMAP: Module = Module::new("exe-recons/arm64-remap", 1).with_memory(arm64_remap);
+pub const ARM64_REMAP: Module = Module::new("exe-recons/arm64-remap", 1).with_plan(arm64_remap);
 
-/// The memory of [`ARM64_REMAP`]: the whole of it, with the values flagged (4 bytes each) and
-/// their map (8 bytes each), at most an instruction each that the flags tell (8 a byte of them).
+/// The memory of [`ARM64_REMAP`]: its initial memory, and its plan
+/// (`aqr_exe::module::arm64_remap_plan`).
 fn arm64_remap(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    use aqr_exe::arch::arm64::remap::{ADRPF, BLF};
-    let flags = u.inputs.get(BLF)? + *u.inputs.get(ADRPF)?;
-    Some(u.whole((4 + 8) * 8 * flags, 4))
+    use aqr_exe::arch::arm64::remap::{ADRPF, ADRPMAP, BLF, BLMAP};
+    let flags = [u.content(BLF)?, u.content(ADRPF)?, u.content(BLMAP)?, u.content(ADRPMAP)?];
+    Some(u.initial() + aqr_exe::module::arm64_remap_plan(u.params.len() as u64, u.inputs, flags, u.output()))
 }
 
 /// aqr-exe's stream of ARM64 code against that of another version (an input of
 /// [`ARM64_REMAP`]'s). No parameters; inputs: the other version's stream, then the streams of
 /// `arm64::delta::STREAM_NAMES`.
-pub const ARM64_DELTA: Module = Module::new("exe-recons/arm64-delta", 1).with_memory(arm64_delta);
+pub const ARM64_DELTA: Module = Module::new("exe-recons/arm64-delta", 1).with_plan(arm64_delta);
 
-/// The memory of [`ARM64_DELTA`]: the whole of it, with its table of predictions.
+/// The memory of [`ARM64_DELTA`]: its initial memory, and its plan
+/// (`aqr_exe::module::arm64_delta_plan`).
 fn arm64_delta(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    Some(u.whole(8 << aqr_exe::arch::arm64::delta::TABLE_BITS, 1))
+    Some(u.initial() + aqr_exe::module::arm64_delta_plan(u.inputs, u.output()))
 }
 
 /// aqr-exe's Mach-O file with its code signatures' code slots derived. Parameters: the
 /// signatures (`codesign`); inputs: the file without them, then the signatures.
-pub const MACHO_CODESIGN: Module = Module::new("exe-recons/macho-codesign", 1).with_memory(macho_codesign);
+pub const MACHO_CODESIGN: Module = Module::new("exe-recons/macho-codesign", 1).with_plan(macho_codesign);
 
-/// The memory of [`MACHO_CODESIGN`]: the whole of it, with the slots of a signature computed
-/// at once (no more than the signatures).
+/// The memory of [`MACHO_CODESIGN`]: its initial memory, and its plan
+/// (`aqr_exe::module::macho_codesign_plan`).
 fn macho_codesign(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    Some(u.whole(*u.inputs.get(1)?, 1))
+    Some(u.initial() + aqr_exe::module::macho_codesign_plan(u.params, u.inputs, u.content(1)?, u.output())?)
 }
 
 /// aqr-exe's CIL filter on the section holding the metadata of a .NET image. Parameters: the
 /// section's RVA and the offset of the metadata root in it (u32 each, little endian); inputs:
 /// the streams of `cil::STREAM_NAMES`.
-pub const CIL: Module = Module::new("exe-recons/cil", 1).with_memory(cil);
+pub const CIL: Module = Module::new("exe-recons/cil", 1).with_plan(cil);
 
-/// The memory of [`CIL`]: the whole of it, with what the decoder keeps besides the output: the
-/// root's stream headers (16 bytes each, at least 12 bytes of the metadata stream per header);
-/// per method body (one per varint of the body positions' stream, counted), its range among
-/// those taken (8 bytes) and its position (4), and the ranges of the root's streams; the column
-/// of a table's values (4 bytes a row, reserved for the largest table: at most as many rows as
-/// the tables' stream has bytes and the output has); and the tokens' caches of the 256 tables
-/// (24 bytes each, and 1 KiB of each table a token is of, at most one a token's table byte).
+/// The memory of [`CIL`]: its initial memory, and its plan (`aqr_exe::module::cil_plan`).
 fn cil(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    use aqr_exe::arch::cil::{BODYPOS, META, TABLES, TOKT};
-    let (&meta, &tables, &tokt) = (u.inputs.get(META)?, u.inputs.get(TABLES)?, u.inputs.get(TOKT)?);
-    let bodies = u.content(BODYPOS)?.iter().filter(|&&b| b < 0x80).count() as u64;
-    let output = u.output();
-    let roots = 16 * (meta / 12 + 1);
-    let method_bodies = (8 + 4) * bodies + 8 * (meta / 12 + 2);
-    let column = 4 * tables.min(output);
-    let caches = 256 * 24 + 1024 * tokt.min(256);
-    Some(u.whole(roots + method_bodies + column + caches, 4))
+    use aqr_exe::arch::cil::{BODYPOS, META, TOKT};
+    let streams = [u.content(META)?, u.content(BODYPOS)?, u.content(TOKT)?];
+    Some(u.initial() + aqr_exe::module::cil_plan(u.params.len() as u64, u.inputs, streams, u.output())?)
 }
 
 /// aqr-exe's base relocations of a PE image. Parameters: `log2` of what the blocks' sizes are
 /// multiples of (u8); inputs: the streams of `reloc::STREAM_NAMES`.
-pub const PE_RELOC: Module = Module::new("exe-recons/pe-reloc", 1).with_memory(exe);
+pub const PE_RELOC: Module = Module::new("exe-recons/pe-reloc", 1).with_plan(exe);
 
 /// aqr-exe's symbol table of a 64-bit Mach-O image, and its string table after it. Parameters:
 /// the number of entries and the first external one (u32 each, little endian), then the string
 /// table's head; inputs: the streams of `symtab::STREAM_NAMES`.
-pub const MACHO_SYMTAB: Module = Module::new("exe-recons/macho-symtab", 1).with_memory(macho_symtab);
+pub const MACHO_SYMTAB: Module = Module::new("exe-recons/macho-symtab", 1).with_plan(macho_symtab);
 
-/// The memory of [`MACHO_SYMTAB`]: the whole of it, with the decoder's maps of the entries'
-/// values (the addresses, and the values' strings: at most an entry each, about 32 bytes each in
-/// a B-tree's nodes half full) and the strings' offsets (4 bytes each, at most an entry each).
+/// The memory of [`MACHO_SYMTAB`]: its initial memory, and its plan
+/// (`aqr_exe::module::macho_symtab_plan`; the streams of the entries' types and names first and
+/// sixth).
 fn macho_symtab(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let n = u32::from_le_bytes(*u.params.first_chunk()?) as u64;
-    Some(u.whole((2 * 32 + 4) * n, 1))
+    let (types, names) = (u.content(0)?, u.content(5)?);
+    Some(u.initial() + aqr_exe::module::macho_symtab_plan(u.params.len() as u64, u.inputs, types, names, u.output()))
 }
 
-/// The memory of aqr-exe's x86, ARM64 and relocation filters: the streams and the output, and
-/// the small (the x86 opcode classes and call cache).
+/// The memory of aqr-exe's x86, ARM64 and relocation filters: their initial memory, and their
+/// plan (`aqr_exe::module::plan`).
 fn exe(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    Some(u.whole(0, 0))
+    Some(u.initial() + aqr_exe::module::plan(u.params.len() as u64, u.resources, u.inputs, u.output()))
 }
 
 /// aqr-flate reconstruction of raw DEFLATE streams, one after another, and what is derived of

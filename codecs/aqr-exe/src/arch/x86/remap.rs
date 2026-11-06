@@ -349,7 +349,8 @@ mod decode {
             return None;
         }
         fixups.sort_unstable();
-        let mut vals: Vec<u64> = fixups.iter().map(|f| f.0).collect();
+        let mut vals: Vec<u64> = Vec::with_capacity(fixups.len());
+        vals.extend(fixups.iter().map(|f| f.0));
         vals.dedup();
         let shifts = shifts(&vals, streams[MAP], is64)?;
         let mut j = 0;
@@ -367,6 +368,26 @@ mod decode {
 
 #[cfg(feature = "decode")]
 pub use decode::decode;
+
+/// The values of a map of [`decode`]'s (`MAP`, or ARM64's): one a varint.
+pub(crate) fn map_values(map: &[u8]) -> u64 {
+    map.iter().filter(|&&b| b < 0x80).count() as u64
+}
+
+/// The flags set in flag streams `flags`.
+pub(crate) fn ones(flags: &[&[u8]]) -> u64 {
+    flags.iter().flat_map(|f| f.iter()).map(|b| b.count_ones() as u64).sum()
+}
+
+/// Bytes that [`decode`] takes of [`aqr_api::stack`], of the streams from [`CALLF`] on and a
+/// section of `room` bytes reserved, in its blocks' order: each reference flagged (its value and
+/// where it is), the section, the values flagged, and their shifts (one of each value of the
+/// map).
+pub fn decode_plan(streams: [&[u8]; 4], room: u64) -> u64 {
+    use aqr_api::stack::block;
+    let n = ones(&streams[..3]);
+    block(16 * n) + block(room) + block(8 * n) + block(8 * map_values(streams[3]))
+}
 
 #[cfg(all(test, feature = "encode", feature = "decode", not(target_family = "wasm")))]
 mod tests {
