@@ -54,7 +54,7 @@ Contents:
 
 ## 2. The module
 
-- **Module**: name `zip-recons`, version 4.
+- **Module**: name `zip-recons`, version 5.
 - **Params**: none (empty).
 - **Resources**: none.
 - **Inputs**: exactly four:
@@ -69,13 +69,15 @@ Contents:
 With `n` deflated bodies in the layout (§3.2), `deflated` is cut into `n` such entries, each
 body of the length before it, which must use it up exactly. (Version 3 had the bodies first and
 the 20 bytes of each after them all: a body's CRC-32 then came after the body, whose local
-header needs it, so that the archive could not be made in order without holding the bodies.)
+header needs it, so that the archive could not be made in order without holding the bodies.
+Version 4 had no `again` in the layout, §3.1.)
 
 It is a part module, of windows of 16 pages for its inputs and its output, which it reads and
 writes in order: it holds the layout, and of the other inputs a record's or a body's at a time
 but for the deflated bodies, which go through as they are read. It holds the names and extra
 fields of the local headers (which central directory headers may take) and the bodies that later
-entries take again (§3.2), and nothing else of the output.
+entries take again (§3.2), and nothing else of the output: so many bytes as the layout tells
+(§3.1), which it may reserve before it starts.
 
 The encoder gives `data` as the contents themselves, slices of streams of class `raw` (or
 `zip/<kind>`, §5); it is a content of the application and may be recompressed in turn. It gives
@@ -88,8 +90,11 @@ a stream of class `flate/record`, and its index one of class `flate/index`.
 
 ### 3.1 Records
 
-The layout is `svarint base` and then records, each a tag byte and its fields, until the
-layout ends. The archive is the output of the records in order. Positions are byte offsets in
+The layout is `svarint base`, `varint again` and then records, each a tag byte and its fields,
+until the layout ends. `again` is the bytes of the deflated bodies that later entries take
+again (§3.2: a body 3 naming an entry whose body is deflated, or is in turn that of an earlier
+entry whose body is), each counted once; the lengths of the others taken again, and of the
+names and extra fields, the layout tells as it is. The archive is the output of the records in order. Positions are byte offsets in
 the archive; the *offset* of position `q` is `q − base`, taken modulo `2^64`.
 
 | tag | record | fields in the layout |
@@ -251,7 +256,7 @@ its offset `clip32` of the offset of `start(q)`, comment length `c`. Then `count
 - The limit bounds the data inflated in all. The bodies are measured by a parse that keeps no
   data, then inflated in order of their expansion, the least first, while they fit: past it, the
   most expanding (zip bombs, 42.zip's zeros) are kept as they are, and cost no memory.
-- `base` is the base found. The layout is checked by building the archive from it with the
+- `base` is the base found, and `again` what the bodies chosen give (§3.1). The layout is checked by building the archive from it with the
   deflated bodies as they are, without aqr-flate, which must give the input; else there is no
   formula. An archive without a local entry has none either.
 - The contents are streams by the kind of each entry's name (`Options::kind`): those of unknown
@@ -275,5 +280,6 @@ The module fails if:
   of `data` or `kept`;
 - `deflated` is shorter than its table, or its bodies run past the bytes before the table or
   do not use them up exactly;
+- the deflated bodies taken again are more than `again` bytes;
 - `data` or `kept` is not used up exactly;
 - the output is not `len` bytes long.

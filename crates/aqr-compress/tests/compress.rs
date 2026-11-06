@@ -1915,3 +1915,32 @@ fn zip_within_plan(what: &str, d: &[u8], module: [u8; 32]) -> usize {
     }
     seen
 }
+
+/// A ZIP layout's `again` (the bytes of the deflated bodies taken again, which zip-recons
+/// reserves) bounds them: one byte short, the archive is invalid, natively and as WebAssembly.
+#[test]
+fn zip_again_checked() {
+    let big: Vec<u8> = (0..20_000).flat_map(|i| format!("line {i} of the body\n").into_bytes()).collect();
+    let entries = [("a.txt".to_string(), big.clone(), true), ("b.txt".into(), big, true)];
+    let d = zip_of(&entries);
+    let mut f = recompress(&d, &all());
+    let s = f.streams.iter().position(|s| s.class == "zip/layout").expect("a layout");
+    let layout = f.streams[s].data.to_vec();
+    let mut at = 0;
+    aqr_common::varint::get(&layout, &mut at).unwrap();
+    let start = at;
+    let again = aqr_common::varint::get(&layout, &mut at).unwrap();
+    assert!(again > 0, "no deflated body taken again");
+    let mut short = layout[..start].to_vec();
+    aqr_common::varint::put(&mut short, again - 1);
+    short.extend_from_slice(&layout[at..]);
+    assert_eq!(short.len(), layout.len());
+    *f.streams[s].data.to_mut() = short;
+    assert!(f.eval(&Native::default()).is_err(), "evaluated natively");
+    let c = encoder().encode(&f, None).unwrap();
+    let w = {
+        let _shared = WASM.read().unwrap_or_else(PoisonError::into_inner);
+        aqr::decode(&c, &aqr_decompress::Wasm)
+    };
+    assert!(w.is_err(), "decoded as WebAssembly");
+}

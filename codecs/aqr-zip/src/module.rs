@@ -227,7 +227,7 @@ const _: () = assert!(size_of::<(usize, usize)>() as u64 == RUN_BYTES);
 /// takes beyond its initial memory at most, of a layout of `inputs[2]` bytes `layout` and inputs
 /// of `inputs` bytes. In order: the layout (a window's piece on top as it is read), the marks of
 /// bodies taken again (the lengths of the bodies on top while they are summed), the bytes held
-/// and their runs, the buffers of the inputs (the largest stored body and piece kept, and what
+/// (`layout::Prepared::held`) and their runs, the buffers of the inputs (the largest stored body and piece kept, and what
 /// is derived of a deflated body), the local entries seen; and on top of them, of a record, the
 /// extra field made apart (or a central header's name and extra field) and a window's piece of
 /// an input.
@@ -236,7 +236,7 @@ pub fn plan(inputs: [u64; 4], layout: &[u8]) -> Option<u64> {
     let p = layout::Prepared::new(layout).ok()?;
     let c = p.counts;
     let w = WINDOW as u64 * 65536;
-    let held = c.names + p.again_bytes + if p.again_deflated > 0 { inputs[1] } else { 0 };
+    let held = p.held();
     let piece = |n: u64| block(n.min(w));
     let base = block(inputs[2]);
     let reading = base + piece(inputs[2]);
@@ -270,7 +270,7 @@ fn zip_part(params_len: u64, inputs: [u64; 4], size: u64) -> Result<()> {
     let layout = std::mem::take(&mut l.buf);
     let prepared = layout::Prepared::new(&layout)?;
     let c = prepared.counts;
-    let held = c.names + prepared.again_bytes + if prepared.again_deflated > 0 { inputs[1] } else { 0 };
+    let held = prepared.held();
     let mut out = Written {
         at: 0,
         held: Vec::with_capacity(size_of(held)?),

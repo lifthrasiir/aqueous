@@ -175,9 +175,9 @@ P = W_main + Σ_태스크 (W_spawn + 태스크의 계획 버퍼) + 채널 메시
 결과:
 - fixture 11개와 만든 ZIP(엔트리 3000개, 큰 본체와 그 반복)에서 실측 ≤ 계획이다(`zip_plan_holds`).
 - 모듈 30,473 → 25,880 B.
-- 남은 느슨함: deflate된 본체가 다시 쓰이면 그 길이를 레이아웃이 알려 주지 않아, 잡아 둘 바이트를 flate 입력 길이로 위에서 묶는다.
-  zip.zip(17 MB)에서 working memory가 19.2 MB이다(그 전의 실측은 3.6 MB).
-  인코더는 그 길이를 아니 레이아웃에 적으면 정확해진다(형식 변경, version 5).
+- deflate된 본체가 다시 쓰이면 그 길이를 레이아웃이 알려 주지 않았다(처음에는 flate 입력 길이로 위를 묶어, zip.zip
+  17 MB에서 working memory 19.2 MB). 레이아웃 머리에 그 합(`again`)을 적게 했다(version 5, FORMAT.md §3.1).
+  이제 2.29 MB이다(dlmalloc 때의 실측은 3.6 MB).
 
 ## 다음 순서
 

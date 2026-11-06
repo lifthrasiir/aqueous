@@ -52,10 +52,12 @@ struct Seen {
     extra: Range<usize>,
     body: Range<usize>,
     entry: Entry,
+    /// Whether its body is a deflated one (or that of an earlier entry whose body is).
+    deflated: bool,
 }
 
 /// Bytes of a [`Seen`] on WebAssembly (32-bit `usize`), for the module's plan.
-pub(crate) const SEEN_BYTES: u64 = 88;
+pub(crate) const SEEN_BYTES: u64 = 96;
 #[cfg(target_family = "wasm")]
 const _: () = assert!(size_of::<Seen>() as u64 == SEEN_BYTES);
 
@@ -331,9 +333,12 @@ pub enum Made {
 }
 
 impl<'a> Writer<'a> {
-    pub fn new(d: &'a [u8], base: i64) -> Writer<'a> {
+    /// A writer of the layout of archive `d` from `base`, of `again` bytes of deflated bodies
+    /// that later entries take again (§3.1 of FORMAT.md).
+    pub fn new(d: &'a [u8], base: i64, again: u64) -> Writer<'a> {
         let mut layout = Vec::new();
         varint::put_signed(&mut layout, base);
+        varint::put(&mut layout, again);
         Writer { d, st: State::new(base), layout, kept: Vec::new(), kept_ends: Vec::new(), locals: Default::default() }
     }
 
@@ -396,6 +401,11 @@ impl<'a> Writer<'a> {
             extra: l.extra.clone(),
             body: l.body.clone(),
             entry,
+            deflated: match made {
+                Made::Deflated { .. } => true,
+                Made::Same(i) => self.st.seen[*i].deflated,
+                _ => false,
+            },
         });
     }
 
@@ -488,6 +498,12 @@ impl<'a> Reader<'a> {
         }
         self.take(n as usize)
     }
+}
+
+/// The base of a layout and the bytes of its deflated bodies taken again (its header), its
+/// records after them.
+fn header(r: &mut Reader) -> Result<(i64, u64)> {
+    Ok((varint::unzz(r.varint()?), r.varint()?))
 }
 
 /// The next `n` bytes of an input at `*p`.
@@ -681,7 +697,7 @@ impl Counts {
     pub fn of(layout: &[u8]) -> Result<Counts> {
         let mut c = Counts::default();
         let mut r = Reader { d: layout, at: 0 };
-        r.varint()?;
+        header(&mut r)?;
         while r.at < layout.len() {
             match r.u8()? {
                 GAP => c.kept = c.kept.max(r.varint()?),
@@ -726,13 +742,22 @@ impl Counts {
 }
 
 /// A layout read for its assembly ([`assemble_prepared`]): its [`Counts`], of each local entry
-/// whether a later one takes its body again, and the bytes of those bodies where the layout
-/// tells them (stored or kept) and how many are deflated (whose bytes it does not tell).
+/// whether a later one takes its body again, and the bytes of those bodies (where stored or kept
+/// as the layout tells them, where deflated as its header does).
 pub struct Prepared {
     pub counts: Counts,
     again: Vec<bool>,
     pub again_bytes: u64,
-    pub again_deflated: u64,
+    /// Of them, the deflated bodies' (the layout's `again`).
+    deflated: u64,
+}
+
+impl Prepared {
+    /// Bytes that the assembly holds of the output at most: the local headers' names and extra
+    /// fields, and the bodies taken again.
+    pub fn held(&self) -> u64 {
+        self.counts.names.saturating_add(self.again_bytes)
+    }
 }
 
 impl Prepared {
@@ -744,7 +769,7 @@ impl Prepared {
         let mut again = Vec::with_capacity(n);
         let mut lens: Vec<Option<u64>> = Vec::with_capacity(n);
         let mut r = Reader { d: layout, at: 0 };
-        r.varint()?;
+        let (_, deflated) = header(&mut r)?;
         while r.at < layout.len() {
             let tag = r.u8()?;
             if tag == LOCAL {
@@ -772,11 +797,10 @@ impl Prepared {
             }
             skip(&mut r, tag)?;
         }
-        let taken = || lens.iter().zip(&again).filter(|(_, a)| **a);
-        let again_bytes = taken().map(|(l, _)| l.unwrap_or(0)).sum();
-        let again_deflated = taken().filter(|(l, _)| l.is_none()).count() as u64;
+        let known = lens.iter().zip(&again).filter(|(_, a)| **a).map(|(l, _)| l.unwrap_or(0));
+        let again_bytes = known.fold(deflated, u64::saturating_add);
         drop(lens);
-        Ok(Prepared { counts, again, again_bytes, again_deflated })
+        Ok(Prepared { counts, again, again_bytes, deflated })
     }
 }
 
@@ -795,8 +819,9 @@ pub fn assemble_prepared(
     let room =
         |out: &dyn Out, n: usize| if n <= len - out.len() { Ok(()) } else { Err(Error("output past its length")) };
     let mut r = Reader { d: layout, at: 0 };
-    let mut st = State::new(varint::unzz(r.varint()?));
+    let mut st = State::new(header(&mut r)?.0);
     st.seen.reserve_exact(again.len());
+    let mut held_deflated = 0u64;
     while r.at < layout.len() {
         let pos = out.len() as u64;
         match r.u8()? {
@@ -807,13 +832,17 @@ pub fn assemble_prepared(
             }
             LOCAL => {
                 // the body, from an input or from the archive so far, and its entry
+                let mut deflated = false;
                 let (kind, body, entry): (Body, Source, Entry) = match r.u8()? {
                     0 => {
                         let b = inputs.data(r.varint()?)?;
                         let n = b.len() as u64;
                         (Body::Stored, Source::Bytes(b), Entry { crc: aqr_common::crc32::hash(b), csize: n, usize: n })
                     }
-                    1 => (Body::Deflated, Source::Deflated, inputs.entry()?),
+                    1 => {
+                        deflated = true;
+                        (Body::Deflated, Source::Deflated, inputs.entry()?)
+                    }
                     2 => {
                         let k = inputs.kept(r.varint()?)?;
                         let crc = u32::from_le_bytes(r.take(4)?.try_into().unwrap());
@@ -827,6 +856,7 @@ pub fn assemble_prepared(
                             .and_then(|b| st.seen.len().checked_sub(b))
                             .map(|i| &st.seen[i])
                             .ok_or_else(corrupt)?;
+                        deflated = s.deflated;
                         (Body::Same, Source::Within(s.body.clone()), s.entry)
                     }
                     _ => return Err(corrupt()),
@@ -860,6 +890,13 @@ pub fn assemble_prepared(
                 let body_at = out.len();
                 room(out, blen)?;
                 if again.get(st.seen.len()).is_some_and(|&a| a) {
+                    // (no more of deflated bodies than the layout tells: §3.1)
+                    if deflated {
+                        held_deflated = held_deflated.saturating_add(blen as u64);
+                        if held_deflated > prepared.deflated {
+                            return Err(corrupt());
+                        }
+                    }
                     out.hold(blen);
                 }
                 match body {
@@ -880,6 +917,7 @@ pub fn assemble_prepared(
                     extra: name_at + name.len()..body_at,
                     body: body_at..body_at + blen,
                     entry,
+                    deflated,
                 });
             }
             CENTRAL => {
@@ -967,7 +1005,7 @@ fn scan(layout: &[u8]) -> Result<(Vec<Body>, Vec<bool>)> {
     let mut out = Vec::new();
     let mut again = Vec::new();
     let mut r = Reader { d: layout, at: 0 };
-    r.varint()?;
+    header(&mut r)?;
     while r.at < layout.len() {
         let tag = r.u8()?;
         if tag == LOCAL {

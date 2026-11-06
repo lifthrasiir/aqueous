@@ -22,7 +22,7 @@ use crate::module::{par_jobs, par_map};
 
 /// An archive rebuilt from the contents of its entries, the deflated bodies given by aqr-flate's
 /// module ([`decode`]).
-pub const MODULE: Module = Module::new("zip-recons", 4).with_plan(memory);
+pub const MODULE: Module = Module::new("zip-recons", 5).with_plan(memory);
 
 /// The memory of the module: its initial memory, and its plan ([`crate::module::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
@@ -324,7 +324,23 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
             _ => 0,
         });
 
-    let mut w = Writer::new(input, base);
+    // the bytes of the deflated bodies that later entries take again (of an entry whose body is
+    // that of an earlier one, the body it takes)
+    let mut deflated = vec![false; made.len()];
+    let mut taken = vec![false; made.len()];
+    for (i, m) in made.iter().enumerate() {
+        deflated[i] = match *m {
+            Made::Deflated { .. } => true,
+            Made::Same(j) => {
+                taken[j] = true;
+                deflated[j]
+            }
+            _ => false,
+        };
+    }
+    let again = (0..made.len()).filter(|&i| taken[i] && deflated[i]).map(|i| locals[i].body.len() as u64).sum();
+    drop((deflated, taken));
+    let mut w = Writer::new(input, base, again);
     // The contents of the stored bodies and the data of the deflated ones apart, by kind,
     // each body's data dropped once written; the records one after another.
     let records_len = bodies.iter().flatten().map(|b| b.1.len()).sum();
