@@ -40,6 +40,8 @@ const REGION_ALIGN: usize = 16;
 /// its regions after them.
 const MAGIC: [u8; 6] = [0x69, 0x0a, 0xf9, 0xa6, 0x29, 0x7f];
 const HEADER: usize = 4 << 10;
+/// Bytes of the segment's own copied at once through the heap ([`Segment::maps`]).
+const BOUNCE: usize = 1 << 20;
 
 pub struct Spill {
     /// The path the files' names extend.
@@ -130,6 +132,17 @@ impl Segment {
         // SAFETY: within the mapping
         unsafe { self.base.add(offset) }
     }
+
+    /// Whether `d` is of the segment's mapping. Its bytes are not written to its file from
+    /// there: on macOS (APFS) a write whose pages are those of its source, mapped of the same
+    /// file, waits for itself for good (uninterruptible, not even killed), the bytes apart or
+    /// not, and regions side by side share pages. (Seen as a run of `aqr -c` at 0% CPU, in
+    /// `pwrite`; reproduced in C with one thread, 64 KiB written after 64 KiB of the file
+    /// mapped, their pages shared.)
+    fn maps(&self, d: &[u8]) -> bool {
+        let (base, at) = (self.base as usize, d.as_ptr() as usize);
+        !d.is_empty() && at < base + self.len && base < at + d.len()
+    }
 }
 
 impl Drop for Segment {
@@ -199,7 +212,19 @@ impl StoreWriter for Region {
         if self.len + d.len() > self.cap {
             return false;
         }
-        if write_at(&self.segment.file, d, (self.start + self.len) as u64).is_err() {
+        let at = (self.start + self.len) as u64;
+        let written = if self.segment.maps(d) {
+            // (bytes of its own segment: through the heap, see [`Segment::maps`])
+            let mut copy = Vec::with_capacity(d.len().min(BOUNCE));
+            d.chunks(BOUNCE).enumerate().try_for_each(|(i, c)| {
+                copy.clear();
+                copy.extend_from_slice(c);
+                write_at(&self.segment.file, &copy, at + (i * BOUNCE) as u64)
+            })
+        } else {
+            write_at(&self.segment.file, d, at)
+        };
+        if written.is_err() {
             return false;
         }
         self.len += d.len();
@@ -471,6 +496,34 @@ mod tests {
         // (ext4 keeps the last page of a hole in its cache: of the file, not the process's)
         assert!(resident(a, n) <= 1 && resident(b, n) == 64);
         drop((rb, spill));
+        std::fs::remove_dir(&dir).unwrap();
+    }
+
+    /// A region written with bytes of a region of the same segment, not read yet, sharing a
+    /// page with it (regions side by side): copied, not waiting for good (macOS: see
+    /// [`Segment::maps`]). Run on a thread of its own, so that a write that waits fails the
+    /// test rather than holding it.
+    #[test]
+    fn of_its_own_segment() {
+        let dir = std::env::temp_dir().join(format!("aqr-compress-own-segment-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let spill = Arc::new(Spill::create(&dir.join("own")).unwrap());
+        let n = 40000;
+        let data: Vec<u8> = (0..n).map(|i| (i * 7) as u8).collect();
+        let mut w = spill.writer(Some(n)).unwrap();
+        assert!(w.write(&data));
+        let ra = w.finish();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let s = spill.clone();
+        std::thread::spawn(move || {
+            let mut w = s.writer(Some(n)).unwrap();
+            assert!(w.write(&ra));
+            tx.send((ra, w.finish())).unwrap();
+        });
+        let (ra, b) = rx.recv_timeout(std::time::Duration::from_secs(20)).expect("the write waits for good");
+        assert_eq!(b.as_ptr().addr(), ra.as_ptr().addr() + n.next_multiple_of(REGION_ALIGN));
+        assert!(ra[..] == data[..] && b[..] == data[..]);
+        drop((ra, b, spill));
         std::fs::remove_dir(&dir).unwrap();
     }
 
