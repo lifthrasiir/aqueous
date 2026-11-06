@@ -121,6 +121,14 @@ pub fn compress_in(src: &[u8], hash: Hash, capacity: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// What [`compress_in`] takes of an [`aqr_api::stack`] at most, of `n` bytes into a vector of
+/// `capacity` at first: the stream, and the table on top of it.
+pub fn compress_plan(n: u64, capacity: u64) -> u64 {
+    use aqr_api::stack::block;
+    let table = 2 * table_size(n.min(FRAGMENT as u64) as usize) as u64;
+    block(capacity.min(32 + n + n / 6)) + block(table)
+}
+
 /// [`compress`] appended to `out`.
 pub fn compress_onto(src: &[u8], hash: Hash, out: &mut Vec<u8>) -> Result<()> {
     let n = u32::try_from(src.len()).map_err(|_| Error("input too long for Snappy"))?;

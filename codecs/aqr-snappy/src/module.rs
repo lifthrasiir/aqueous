@@ -11,6 +11,13 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Res
     of_len(snappy::compress_in(data, hash, cap(len))?, len)
 }
 
+/// The memory plan of `snappy-recons` ([`aqr_api::stack`]): what it takes beyond its initial
+/// memory at most, of an input of `input` bytes and an output of `len`: what `aqr_api::whole`
+/// copies, and the stream and its table.
+pub fn plan(input: u64, len: u64) -> u64 {
+    aqr_api::stack::whole(1, &[], &[input]) + snappy::compress_plan(input, len)
+}
+
 /// The module `leveldb-recons`: a LevelDB table of `len` bytes (see `FORMAT.md`).
 pub fn decode_table(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Result<Vec<u8>> {
     let (&[h], &[data, layout, kept]) = (params, inputs) else { return Err(corrupt()) };

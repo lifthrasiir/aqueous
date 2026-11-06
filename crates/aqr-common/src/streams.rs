@@ -17,6 +17,20 @@ pub fn index(lens: &[(usize, usize)]) -> Vec<u8> {
     out
 }
 
+/// The streams that `index` cuts into ([`cut`]): a varint each of their two lengths, one where
+/// it is empty.
+pub fn streams(index: &[u8]) -> usize {
+    match index.is_empty() {
+        true => 1,
+        false => count(index) / 2,
+    }
+}
+
+/// The varints of `index`: its bytes that end one (of the high bit clear).
+fn count(index: &[u8]) -> usize {
+    index.iter().filter(|&&b| b < 0x80).count()
+}
+
 /// The data and records of streams, each its own.
 pub type Streams<'a> = Vec<(&'a [u8], &'a [u8])>;
 
@@ -28,7 +42,8 @@ pub fn cut<'a, E>(data: &'a [u8], records: &'a [u8], index: &[u8], corrupt: impl
         return Ok(vec![(data, records)]);
     }
     let (mut at, mut d, mut r) = (0, data, records);
-    let mut out = Vec::new();
+    // (reserved for them all: the varints counted, two a stream)
+    let mut out = Vec::with_capacity(count(index) / 2);
     while at < index.len() {
         let mut take = |from: &mut &'a [u8]| {
             let n = varint::get(index, &mut at).map_err(|_| corrupt())?;

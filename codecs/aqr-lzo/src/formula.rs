@@ -8,13 +8,12 @@ use crate::{lzop, recons};
 
 pub use crate::module::{decode, index};
 
-pub const MODULE: Module = Module::new("lzo-recons", 1).with_memory(memory);
+pub const MODULE: Module = Module::new("lzo-recons", 1).with_plan(memory);
 
-/// The memory of the module, the streams written onto the output as their parses are decoded:
-/// the inputs and the output, and a stream's match finder (four rings of 2^16 positions) and
-/// coding contexts (some KiB).
+/// The memory of the module: its initial memory, and its plan ([`crate::module::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    Some(u.whole(recons::MF_BYTES, 1))
+    let &[len] = u.outputs else { return None };
+    Some(u.initial() + crate::module::plan(u.inputs, u.content(2)?, len))
 }
 
 /// Whether `d` starts like an lzop file whose structure holds ([`lzop::parse`]).

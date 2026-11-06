@@ -456,6 +456,18 @@ pub fn join(data: &[u8], record: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// [`join`] appended to `out`, written as the parse is decoded (which is not held).
+/// What [`join_onto`] takes of an [`aqr_api::stack`] at most besides `out` (on WebAssembly): the
+/// match finder's rings, the coder's contexts, and the pairs of a position, in that order.
+pub fn join_plan() -> u64 {
+    use aqr_api::stack::block;
+    const BIT: u64 = size_of::<Bit>() as u64;
+    // (a pair of `usize`s, on 32 bits)
+    const PAIR: u64 = 8;
+    let rings = 4 * block(RING as u64 * 4);
+    let ctx = [8 * 12 * 12 * 4, 8 * 9, 4 * 12, 12 * 64, 5 * 12, 2 * 8].iter().map(|&n| block(n * BIT)).sum::<u64>();
+    rings + ctx + block((DEPTH as u64 + 1) * PAIR)
+}
+
 pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>) -> Result<()> {
     let mut w = lzo1x::Writer::new(data, out);
     let mut p = Parse::default();

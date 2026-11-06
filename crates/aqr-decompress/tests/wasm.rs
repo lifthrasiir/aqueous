@@ -1407,3 +1407,50 @@ fn task_slots_declared() {
         (func (export "aqr_apply_whole") (param i64)))"#;
     invalid(load(plain), "aqr_task_slots");
 }
+
+/// snappy-recons lays its memory out as a stack, its limit its plan: each stream of the
+/// fixtures rebuilt as WebAssembly within the limit of its plan alone (no room), its working
+/// memory that of the plan to the page.
+#[test]
+fn snappy_plan_holds() {
+    let dir = format!("{}/../../codecs/aqr-snappy/tests/data", env!("CARGO_MANIFEST_DIR"));
+    let mut seen = 0;
+    for e in std::fs::read_dir(dir).unwrap() {
+        let path = e.unwrap().path();
+        if path.extension().is_none_or(|x| x != "snappy") {
+            continue;
+        }
+        let s = std::fs::read(&path).unwrap();
+        let d = aqr_snappy::snappy::decode(&s, 1 << 24).unwrap();
+        let hash = aqr_snappy::formula::find_hash(&d, &s).unwrap();
+        let mut f = Formula::default();
+        let data = f.push("raw", d.clone());
+        let mut root = aqr_snappy::formula::stream(hash, data, s.len() as u64);
+        let Node::Apply(a) = &mut root else { panic!("an application") };
+        let pages = |n: u64| n.div_ceil(65536) * 65536;
+        let none: Vec<&[u8]> = Vec::new();
+        let usage = aqr_formula::Usage {
+            params: &a.params,
+            resources: &[],
+            inputs: &[d.len() as u64],
+            outputs: &[s.len() as u64],
+            contents: &none,
+            initial_pages: aqr_decompress::initial_pages_of(a.module).unwrap(),
+        };
+        let plan = a.module.memory_usage_in_pages(&usage).unwrap() * 65536;
+        let limit = pages(a.params.len() as u64) + pages(d.len() as u64) + pages(s.len() as u64) + plan;
+        a.memory_limit = limit;
+        f.root = root;
+        let c = Encoder::new(Level::Zstd(3)).with_modules(wasm_of).encode(&f, None).unwrap();
+        aqr_decompress::record_applications(true);
+        let out = aqr::decode(&c, &Wasm);
+        let applied = aqr_decompress::record_applications(false);
+        assert!(out.as_ref().is_ok_and(|o| *o == s), "{path:?}: {:?}", out.err());
+        // (those of this application: other tests' run meanwhile, without limits)
+        for a in applied.iter().filter(|a| a.limit == limit) {
+            assert!(a.working <= plan && plan - a.working < 65536, "{path:?}: plan {plan}, working {}", a.working);
+            seen += 1;
+        }
+    }
+    assert!(seen >= 10, "{seen} streams");
+}

@@ -5,6 +5,17 @@ use crate::{Error, Result, corrupt, recons};
 
 pub use aqr_common::streams::index;
 
+/// The memory plan of the module ([`aqr_api::stack`]): what it takes beyond its initial memory
+/// at most, of inputs of `inputs` bytes (the third the index `index`) and an output of `len`: what
+/// `aqr_api::whole` copies, the streams cut, the output, and on top of it what each stream's
+/// parse takes as it is decoded, in turn.
+pub fn plan(inputs: &[u64], index: &[u8], len: u64) -> u64 {
+    use aqr_api::stack::{block, whole};
+    // (a pair of slices, on 32 bits)
+    let streams = 16 * aqr_common::streams::streams(index) as u64;
+    whole(0, &[], inputs) + block(streams) + block(len) + recons::join_plan()
+}
+
 /// The module: the LZO1X streams of `len` bytes in all that the data and records of the inputs
 /// (data, records, index) rebuild, one after another (see `FORMAT.md`). Streams are rebuilt
 /// side by side on up to `threads` threads.

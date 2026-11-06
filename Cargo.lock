@@ -608,6 +608,7 @@ dependencies = [
 name = "aqr-lzo"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
  "aqr-common",
  "aqr-formula",
 ]
@@ -853,6 +854,7 @@ dependencies = [
 name = "aqr-snappy"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
  "aqr-common",
  "aqr-formula",
  "zstd",

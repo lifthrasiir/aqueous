@@ -184,6 +184,10 @@ P = W_main + Σ_태스크 (W_spawn + 태스크의 계획 버퍼) + 채널 메시
 - fixture 13개에서 실측 = 계획이다(`bcj_plans_hold`).
 - 나뉜 출력(split)의 한도가 조각마다 페이지를 올려 세던 것을 출력 하나로 고쳤다(aqr-compress `verify.rs`).
 
+**snappy-recons, lzo-recons.** 이미 LIFO였다(snappy: 출력과 표; lzo: 스트림 목록, 출력, 스트림마다 매치 탐색기의 링과 문맥).
+- aqr-common `streams::cut`이 목록을 색인의 varint 수로 정확히 잡는다.
+- 실측 = 계획이다(`snappy_plan_holds`, `lzo_plan_holds`).
+
 ## 다음 순서
 
 1. `Module::memory_usage_in_pages`를 이미 정확한 용량을 쓰는 모듈들(exe, xsv, fasta, zip, git, pdf, png, …)부터 만든다.

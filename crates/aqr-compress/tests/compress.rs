@@ -1970,3 +1970,17 @@ fn bcj_plans_hold() {
     }
     assert!(seen >= 13, "{seen} applications of the filters");
 }
+
+/// lzo-recons lays its memory out as a stack, its limit its plan, exactly: of the fixtures (lzop
+/// files, and raw LZO1X streams).
+#[test]
+fn lzo_plan_holds() {
+    let lzo = aqr_decompress::built(LZO).expect("built").sha512_256;
+    let dir = format!("{}/../../codecs/aqr-lzo/tests/data", env!("CARGO_MANIFEST_DIR"));
+    let mut seen = 0;
+    for e in std::fs::read_dir(dir).unwrap() {
+        let path = e.unwrap().path();
+        seen += within_plans(&path.to_string_lossy(), &std::fs::read(&path).unwrap(), &[lzo], true);
+    }
+    assert!(seen >= 5, "{seen} applications of lzo-recons");
+}
