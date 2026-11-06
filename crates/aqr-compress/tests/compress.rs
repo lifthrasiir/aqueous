@@ -1818,3 +1818,100 @@ fn lz4_plan_holds() {
     }
     assert!(seen > 10, "{seen} applications of lz4-recons");
 }
+
+/// zip-recons lays its memory out as a stack too, its limit its plan: each fixture decoded as
+/// WebAssembly within it (stored, deflated, kept and repeated bodies, descriptors, zip64).
+#[test]
+fn zip_plan_holds() {
+    let zip = aqr_decompress::built(ZIP).expect("built").sha512_256;
+    let dir = format!("{}/../../codecs/aqr-zip/tests/data", env!("CARGO_MANIFEST_DIR"));
+    let mut seen = 0;
+    for e in std::fs::read_dir(dir).unwrap() {
+        let path = e.unwrap().path();
+        let d = std::fs::read(&path).unwrap();
+        seen += zip_within_plan(&path.to_string_lossy(), &d, zip);
+    }
+    // many entries, a large stored body, bodies taken again (stored and deflated), noise
+    let text = |n: usize, s: usize| {
+        (0..n).flat_map(|i| format!("line {i}: entry {s} of the set\n").into_bytes()).collect::<Vec<u8>>()
+    };
+    let mut entries: Vec<(String, Vec<u8>, bool)> =
+        (0..3000).map(|i| (format!("dir{}/file{i:05}.txt", i % 40), text(20 + i % 50, i), true)).collect();
+    let big = text(200_000, 7);
+    for (name, deflate) in
+        [("big-stored", false), ("big-deflated", true), ("again-stored", false), ("again-deflated", true)]
+    {
+        entries.push((name.into(), big.clone(), deflate));
+    }
+    entries.push(("noise".into(), noise(3 << 20), false));
+    seen += zip_within_plan("made", &zip_of(&entries), zip);
+    assert!(seen > 5, "{seen} applications of zip-recons");
+}
+
+/// A ZIP archive of `entries` (name, data, whether deflated), local headers then the central
+/// directory, without descriptors.
+fn zip_of(entries: &[(String, Vec<u8>, bool)]) -> Vec<u8> {
+    let (mut out, mut central) = (Vec::new(), Vec::new());
+    for (name, data, deflate) in entries {
+        let body = match deflate {
+            true => {
+                let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(6));
+                e.write_all(data).unwrap();
+                e.finish().unwrap()
+            }
+            false => data.clone(),
+        };
+        let crc = aqr_common::crc32::hash(data);
+        let fields = |out: &mut Vec<u8>| {
+            out.extend_from_slice(&[20, 0, 0, 0, if *deflate { 8 } else { 0 }, 0, 0, 0, 0, 0]);
+            out.extend_from_slice(&crc.to_le_bytes());
+            out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(&[0, 0]);
+        };
+        let at = out.len() as u32;
+        out.extend_from_slice(b"PK\x03\x04");
+        fields(&mut out);
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&body);
+        central.extend_from_slice(b"PK\x01\x02\x14\x00");
+        fields(&mut central);
+        central.extend_from_slice(&[0; 8]);
+        central.extend_from_slice(&[0, 0, 0, 0]);
+        central.extend_from_slice(&at.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+    }
+    let (cd, n) = (out.len() as u32, entries.len() as u16);
+    out.extend_from_slice(&central);
+    out.extend_from_slice(b"PK\x05\x06\0\0\0\0");
+    out.extend_from_slice(&n.to_le_bytes());
+    out.extend_from_slice(&n.to_le_bytes());
+    out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+    out.extend_from_slice(&cd.to_le_bytes());
+    out.extend_from_slice(&[0, 0]);
+    out
+}
+
+/// `d` compressed and decoded as WebAssembly, the applications of the module of hash `module`
+/// within their plans: how many there were.
+fn zip_within_plan(what: &str, d: &[u8], module: [u8; 32]) -> usize {
+    let mut seen = 0;
+    {
+        let c = compress(d, &Options { smaller: false, ..all() });
+        let alone = WASM.write().unwrap_or_else(PoisonError::into_inner);
+        aqr_decompress::record_applications(true);
+        let out = aqr::decode(&c, &aqr_decompress::Wasm);
+        let applied = aqr_decompress::record_applications(false);
+        drop(alone);
+        let path = what;
+        assert!(out.as_ref().is_ok_and(|o| o == d), "{path:?}: {:?}", out.err());
+        for a in applied.iter().filter(|a| a.hash == module) {
+            let plan = a.limit - a.imported;
+            println!("{path}: plan {plan} working {}", a.working);
+            assert!(a.working <= plan, "{path:?}: plan {plan}, working {}", a.working);
+            seen += 1;
+        }
+    }
+    seen
+}

@@ -22,22 +22,12 @@ use crate::module::{par_jobs, par_map};
 
 /// An archive rebuilt from the contents of its entries, the deflated bodies given by aqr-flate's
 /// module ([`decode`]).
-pub const MODULE: Module = Module::new("zip-recons", 4).with_memory(memory);
+pub const MODULE: Module = Module::new("zip-recons", 4).with_plan(memory);
 
-/// The memory of the module, a part module ([`crate::module::decode_part`]): the layout (read,
-/// then copied), what it holds of the inputs at once (the largest stored body and piece kept, a
-/// window's piece of each), the local headers' names and extra fields (within the layout) and the
-/// bodies taken again (those deflated, of the deflated bodies' bytes at most) with a copy of the
-/// largest; for each entry (a byte of the layout at least) what the predictions keep of a local
-/// header (about 96 bytes on 32 bits) and its run held, growing twice at a time.
+/// The memory of the module: its initial memory, and its plan ([`crate::module::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let &[_, flate, layout_len, _] = u.inputs else { return None };
-    let s = layout::sizes(u.content(2)?).ok()?;
-    let again = s.again + if s.again_deflated > 0 { flate } else { 0 };
-    let window = crate::module::WINDOW as u64 * aqr_formula::PAGE;
-    // (a stored body and a piece kept each in a vector made for it, those before maybe not reused)
-    let held = 2 * layout_len + 2 * (s.stored + s.kept) + 2 * window + layout_len + 2 * again;
-    Some(u.initial() + aqr_formula::SMALL + held + 3 * (96 + 64) * s.entries + 8 * aqr_formula::PAGE)
+    let &[data, flate, layout, kept] = u.inputs else { return None };
+    Some(u.initial() + crate::module::plan([data, flate, layout, kept], u.content(2)?)?)
 }
 
 /// Bodies shorter than this are not looked for among earlier ones.

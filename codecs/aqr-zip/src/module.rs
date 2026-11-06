@@ -52,7 +52,7 @@ pub const WINDOW: u32 = 16;
 struct In<const K: u32> {
     at: u64,
     len: u64,
-    /// What it gave last.
+    /// What it gave last, of a capacity for the most it gives at once (reserved as it is made).
     buf: Vec<u8>,
 }
 
@@ -60,16 +60,17 @@ impl<const K: u32> In<K>
 where
     aqr_api::Input<K>: aqr_api::Memory,
 {
-    fn new(len: u64) -> In<K> {
-        In { at: 0, len, buf: Vec::new() }
+    fn new(len: u64, most: u64) -> Result<In<K>> {
+        Ok(In { at: 0, len, buf: Vec::with_capacity(usize::try_from(most).map_err(|_| corrupt())?) })
     }
 
-    /// Its next `n` bytes, given to `f` a window's at most at a time.
+    /// Its next `n` bytes, given to `f` a window's at most at a time (in a piece on top of the
+    /// rest, made for them).
     fn each(&mut self, n: u64, f: &mut dyn FnMut(&[u8])) -> Result<()> {
         use aqr_api::{Input, Memory};
         let end = self.at.checked_add(n).filter(|&e| e <= self.len).ok_or_else(corrupt)?;
         let w = Input::<K>::size();
-        let mut piece = Vec::new();
+        let mut piece = Vec::with_capacity(n.min(w) as usize);
         while self.at < end {
             let k = (end - self.at).min(w - self.at % w);
             piece.resize(k as usize, 0);
@@ -82,11 +83,13 @@ where
         Ok(())
     }
 
-    /// Its next `n` bytes, held until the next call.
+    /// Its next `n` bytes (no more than it was made for), held until the next call.
     fn take(&mut self, n: u64) -> Result<&[u8]> {
         let mut buf = std::mem::take(&mut self.buf);
         buf.clear();
-        buf.reserve_exact(usize::try_from(n).map_err(|_| corrupt())?);
+        if n > buf.capacity() as u64 {
+            return Err(corrupt());
+        }
         self.each(n, &mut |d| buf.extend_from_slice(d))?;
         self.buf = buf;
         Ok(&self.buf)
@@ -124,21 +127,63 @@ impl layout::Inputs for Pulled {
     }
 }
 
-/// The output of [`decode_part`], written through its window as it is put, the bytes it is told
-/// to hold kept (each run by where it starts).
+/// The output of [`decode_part`], written through its window as it is put; the bytes it is told
+/// to hold kept, one after another in `held` (reserved for all of them), each run of them by
+/// where it starts in the output and in `held` (in `runs`, reserved for one an entry).
 struct Written {
     at: usize,
-    held: Vec<(usize, Vec<u8>)>,
+    held: Vec<u8>,
+    runs: Vec<(usize, usize)>,
     holding: usize,
-    /// Whether bytes not held were asked for (the archive is invalid).
+    /// Whether bytes not held were asked for, or more held than reserved (the archive is
+    /// invalid).
     failed: bool,
 }
 
 impl Written {
-    fn held(&self, r: &std::ops::Range<usize>) -> Option<&[u8]> {
-        let i = self.held.partition_point(|h| h.0 <= r.start).checked_sub(1)?;
-        let (start, d) = &self.held[i];
-        d.get(r.start - start..r.end.checked_sub(*start)?)
+    /// Where bytes `r` of the output are in `held`, if they are held.
+    fn held(&self, r: &std::ops::Range<usize>) -> Option<std::ops::Range<usize>> {
+        let i = self.runs.partition_point(|h| h.0 <= r.start).checked_sub(1)?;
+        let (start, from) = self.runs[i];
+        let to = self.runs.get(i + 1).map_or(self.held.len(), |h| h.1);
+        let (a, b) = (from + (r.start - start), from + r.end.checked_sub(start)?);
+        (b <= to).then_some(a..b)
+    }
+
+    /// Keeps of `n` bytes put now (`d`, else those of `held` from `within`) the first that it is
+    /// to hold, as a new run unless they follow the last one.
+    fn keep(&mut self, d: &[u8], within: Option<usize>, n: usize) {
+        let k = self.holding.min(n);
+        if k == 0 {
+            return;
+        }
+        let follows = matches!(self.runs.last(), Some(&(s, f)) if s + (self.held.len() - f) == self.at);
+        // (no more than reserved: past it, an invalid archive)
+        if self.held.len() + k > self.held.capacity() || !follows && self.runs.len() == self.runs.capacity() {
+            self.failed = true;
+            return;
+        }
+        if !follows {
+            self.runs.push((self.at, self.held.len()));
+        }
+        match within {
+            Some(at) => self.held.extend_from_within(at..at + k),
+            None => self.held.extend_from_slice(&d[..k]),
+        }
+        self.holding -= k;
+    }
+
+    /// Writes `d` to the output through its window.
+    fn write(at: &mut usize, mut d: &[u8]) {
+        use aqr_api::{Memory, Output};
+        let w = Output::<0>::size() as usize;
+        while !d.is_empty() {
+            let k = d.len().min(w - *at % w);
+            Output::<0>::write((*at % w) as u64, &d[..k]);
+            *at += k;
+            Output::<0>::commit(*at as u64);
+            d = &d[k..];
+        }
     }
 }
 
@@ -147,37 +192,25 @@ impl aqr_common::out::Out for Written {
         self.at
     }
 
-    fn put(&mut self, mut d: &[u8]) {
-        use aqr_api::{Memory, Output};
-        let k = self.holding.min(d.len());
-        if k > 0 {
-            match self.held.last_mut() {
-                Some((start, h)) if *start + h.len() == self.at => h.extend_from_slice(&d[..k]),
-                _ => self.held.push((self.at, d[..k].to_vec())),
-            }
-            self.holding -= k;
-        }
+    fn put(&mut self, d: &[u8]) {
         // (within the output's size: told by `assemble_into`'s room)
-        let w = Output::<0>::size() as usize;
-        while !d.is_empty() {
-            let k = d.len().min(w - self.at % w);
-            Output::<0>::write((self.at % w) as u64, &d[..k]);
-            self.at += k;
-            Output::<0>::commit(self.at as u64);
-            d = &d[k..];
-        }
+        self.keep(d, None, d.len());
+        Written::write(&mut self.at, d);
     }
 
     fn put_within(&mut self, r: std::ops::Range<usize>) {
-        match self.held(&r).map(<[u8]>::to_vec) {
-            Some(d) => self.put(&d),
-            None => self.failed = true,
-        }
+        let Some(h) = self.held(&r) else {
+            self.failed = true;
+            return;
+        };
+        // (what it is to hold of them copied within `held` first, where it is: reserved)
+        self.keep(&[], Some(h.start), h.len());
+        Written::write(&mut self.at, &self.held[h]);
     }
 
     fn out(&self, r: std::ops::Range<usize>) -> &[u8] {
         // (where not held, nothing, and the archive found invalid at the end)
-        self.held(&r).unwrap_or_default()
+        self.held(&r).map_or(&[][..], |h| &self.held[h])
     }
 
     fn hold(&mut self, n: usize) {
@@ -185,12 +218,44 @@ impl aqr_common::out::Out for Written {
     }
 }
 
+/// Bytes of a run of the bytes held ([`Written::runs`]) on WebAssembly.
+const RUN_BYTES: u64 = 8;
+#[cfg(target_family = "wasm")]
+const _: () = assert!(size_of::<(usize, usize)>() as u64 == RUN_BYTES);
+
+/// The memory plan of the module as a part module ([`aqr_api::stack`]): what [`decode_part`]
+/// takes beyond its initial memory at most, of a layout of `inputs[2]` bytes `layout` and inputs
+/// of `inputs` bytes. In order: the layout (a window's piece on top as it is read), the marks of
+/// bodies taken again (the lengths of the bodies on top while they are summed), the bytes held
+/// and their runs, the buffers of the inputs (the largest stored body and piece kept, and what
+/// is derived of a deflated body), the local entries seen; and on top of them, of a record, the
+/// extra field made apart (or a central header's name and extra field) and a window's piece of
+/// an input.
+pub fn plan(inputs: [u64; 4], layout: &[u8]) -> Option<u64> {
+    use aqr_api::stack::block;
+    let p = layout::Prepared::new(layout).ok()?;
+    let c = p.counts;
+    let w = WINDOW as u64 * 65536;
+    let held = c.names + p.again_bytes + if p.again_deflated > 0 { inputs[1] } else { 0 };
+    let piece = |n: u64| block(n.min(w));
+    let base = block(inputs[2]);
+    let reading = base + piece(inputs[2]);
+    let again = base + block(c.entries);
+    let summing = again + block(16 * c.entries);
+    let held = again + block(held) + block(RUN_BYTES * c.entries);
+    let bufs = held + block(c.stored) + block(c.kept) + block(layout::DERIVED as u64);
+    let seen = bufs + block(layout::SEEN_BYTES * c.entries);
+    let pieces = [c.stored, c.kept, layout::DERIVED as u64, inputs[1]].into_iter().map(piece).max().unwrap_or(0);
+    let record = (block(c.extra) + pieces).max(block(c.name) + block(c.extra));
+    Some(reading.max(summing).max(seen + record))
+}
+
 /// The module as a part module (its entry point, of `aqr_api::entry!`): what [`decode`] gives,
 /// its inputs read and its output written through windows ([`WINDOW`]), the layout held, and of
 /// the others an entry's at a time: the contents of a stored body (whose CRC-32 comes before
 /// it), the bytes kept of a record; a deflated body goes through. The local headers' names and
 /// extra fields are held for the central directory, and the bodies that later entries take
-/// again.
+/// again. Its memory is laid out as [`plan`] tells.
 pub fn decode_part(params_len: u64, data_len: u64, flate_len: u64, layout_len: u64, kept_len: u64, size: u64) {
     aqr_api::finish(zip_part(params_len, [data_len, flate_len, layout_len, kept_len], size));
 }
@@ -199,11 +264,27 @@ fn zip_part(params_len: u64, inputs: [u64; 4], size: u64) -> Result<()> {
     if params_len != 0 {
         return Err(corrupt());
     }
-    let layout = In::<2>::new(inputs[2]).take(inputs[2])?.to_vec();
-    let mut pulled = Pulled { data: In::new(inputs[0]), flate: In::new(inputs[1]), kept: In::new(inputs[3]) };
-    let mut out = Written { at: 0, held: Vec::new(), holding: 0, failed: false };
-    let len = usize::try_from(size).map_err(|_| corrupt())?;
-    layout::assemble_into(&layout, &mut pulled, len, &mut out)?;
+    let size_of = |n: u64| usize::try_from(n).map_err(|_| corrupt());
+    let mut l = In::<2>::new(inputs[2], inputs[2])?;
+    l.take(inputs[2])?;
+    let layout = std::mem::take(&mut l.buf);
+    let prepared = layout::Prepared::new(&layout)?;
+    let c = prepared.counts;
+    let held = c.names + prepared.again_bytes + if prepared.again_deflated > 0 { inputs[1] } else { 0 };
+    let mut out = Written {
+        at: 0,
+        held: Vec::with_capacity(size_of(held)?),
+        runs: Vec::with_capacity(size_of(c.entries)?),
+        holding: 0,
+        failed: false,
+    };
+    let mut pulled = Pulled {
+        data: In::new(inputs[0], c.stored)?,
+        kept: In::new(inputs[3], c.kept)?,
+        flate: In::new(inputs[1], layout::DERIVED as u64)?,
+    };
+    let len = size_of(size)?;
+    layout::assemble_prepared(&layout, &prepared, &mut pulled, len, &mut out)?;
     if out.failed || out.at != len {
         return Err(corrupt());
     }

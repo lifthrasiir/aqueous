@@ -2,6 +2,10 @@
 
 #![no_main]
 
+// (its memory laid out as a stack: what it takes is its plan, `aqr_zip::module::plan`)
+#[global_allocator]
+static STACK: aqr_api::stack::Stack = aqr_api::stack::Stack::new();
+
 aqr_api::entry! {
     part fn apply(params_len, in0_len, in1_len, in2_len, in3_len, size)
         windows(

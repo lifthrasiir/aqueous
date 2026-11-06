@@ -35,6 +35,7 @@ pub enum Body {
 
 /// What an entry's fields are predicted from.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(C)]
 pub struct Entry {
     pub crc: u32,
     pub csize: u64,
@@ -43,6 +44,7 @@ pub struct Entry {
 
 /// A local entry seen, by where its parts are in the archive.
 #[derive(Debug, Clone)]
+#[repr(C)]
 struct Seen {
     pos: u64,
     fixed: [u8; LOCAL_FIXED],
@@ -50,6 +52,45 @@ struct Seen {
     extra: Range<usize>,
     body: Range<usize>,
     entry: Entry,
+}
+
+/// Bytes of a [`Seen`] on WebAssembly (32-bit `usize`), for the module's plan.
+pub(crate) const SEEN_BYTES: u64 = 88;
+#[cfg(target_family = "wasm")]
+const _: () = assert!(size_of::<Seen>() as u64 == SEEN_BYTES);
+
+/// A few values (at most `N`), as a slice: of fields made without a vector.
+pub(crate) struct Few<T, const N: usize> {
+    v: [T; N],
+    n: usize,
+}
+
+impl<T: Copy + Default, const N: usize> Few<T, N> {
+    fn new() -> Few<T, N> {
+        Few { v: [T::default(); N], n: 0 }
+    }
+
+    fn push(&mut self, x: T) {
+        self.v[self.n] = x;
+        self.n += 1;
+    }
+
+    fn extend(&mut self, xs: &[T]) {
+        xs.iter().for_each(|&x| self.push(x));
+    }
+}
+
+impl<T, const N: usize> std::ops::Deref for Few<T, N> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        &self.v[..self.n]
+    }
+}
+
+impl<T, const N: usize> std::ops::DerefMut for Few<T, N> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        &mut self.v[..self.n]
+    }
 }
 
 /// The records so far, as far as predictions go.
@@ -156,13 +197,14 @@ impl State {
         if flags & DESCRIPTOR != 0 { [(0, 8); 2] } else { [(e.usize, 8), (e.csize, 8)] }
     }
 
-    fn desc(e: &Entry, desc: Desc) -> Vec<u8> {
+    fn desc(e: &Entry, desc: Desc) -> Few<u8, 20> {
+        let mut p = Few::new();
         if desc == Desc::None {
-            return Vec::new();
+            return p;
         }
-        let mut p = e.crc.to_le_bytes().to_vec();
+        p.extend(&e.crc.to_le_bytes());
         for v in [e.csize, e.usize] {
-            p.extend_from_slice(&v.to_le_bytes()[..if desc.long() { 8 } else { 4 }]);
+            p.extend(&v.to_le_bytes()[..if desc.long() { 8 } else { 4 }]);
         }
         p
     }
@@ -187,9 +229,9 @@ impl State {
     }
 
     /// The zip64 values of a central header with `fixed`, in the order they come.
-    fn central_zip64(&self, local: Option<usize>, fixed: &[u8]) -> Vec<(u64, usize)> {
+    fn central_zip64(&self, local: Option<usize>, fixed: &[u8]) -> Few<(u64, usize), 4> {
         let (e, off) = local.map_or((Entry::default(), 0), |i| (self.seen[i].entry, self.rel(self.seen[i].pos)));
-        let mut vals = Vec::new();
+        let mut vals = Few::new();
         for (at, v) in [(20, e.usize), (16, e.csize), (38, off)] {
             if u32_at(fixed, at) == u32::MAX {
                 vals.push((v, 8));
@@ -616,12 +658,145 @@ enum Source<'a> {
 /// what it is to give back: the local headers' names and extra fields, and the bodies that a
 /// later entry takes again.
 pub fn assemble_into(layout: &[u8], inputs: &mut dyn Inputs, len: usize, out: &mut dyn Out) -> Result<()> {
-    let again = taken_again(layout)?;
+    assemble_prepared(layout, &Prepared::new(layout)?, inputs, len, out)
+}
+
+/// What a layout tells of the buffers its assembly takes, read through once without allocating
+/// ([`Counts::of`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Counts {
+    /// Local entries.
+    pub entries: u64,
+    /// The largest stored body, and piece kept (a gap, or a body kept).
+    pub stored: u64,
+    pub kept: u64,
+    /// The bytes of all the local headers' names and extra fields (which are held).
+    pub names: u64,
+    /// The longest name and extra field, of a local or a central header.
+    pub name: u64,
+    pub extra: u64,
+}
+
+impl Counts {
+    pub fn of(layout: &[u8]) -> Result<Counts> {
+        let mut c = Counts::default();
+        let mut r = Reader { d: layout, at: 0 };
+        r.varint()?;
+        while r.at < layout.len() {
+            match r.u8()? {
+                GAP => c.kept = c.kept.max(r.varint()?),
+                LOCAL => {
+                    match r.u8()? {
+                        0 => c.stored = c.stored.max(r.varint()?),
+                        1 => {}
+                        2 => {
+                            c.kept = c.kept.max(r.varint()?);
+                            r.take(4)?;
+                            r.varint()?;
+                        }
+                        3 => _ = r.varint()?,
+                        _ => return Err(corrupt()),
+                    }
+                    let desc = Desc::from_u8(r.u8()?).ok_or_else(corrupt)?;
+                    let (name, extra) = (r.bytes(0xffff)?.len() as u64, r.bytes(0xffff)?.len() as u64);
+                    (c.names, c.name, c.extra) = (c.names + name + extra, c.name.max(name), c.extra.max(extra));
+                    r.take(LOCAL_FIXED + desc.fields())?;
+                    c.entries += 1;
+                }
+                CENTRAL => {
+                    r.varint()?;
+                    let same = r.u8()?;
+                    if same > 3 {
+                        return Err(corrupt());
+                    }
+                    if same & 1 == 0 {
+                        c.name = c.name.max(r.bytes(0xffff)?.len() as u64);
+                    }
+                    if same & 2 == 0 {
+                        c.extra = c.extra.max(r.bytes(0xffff)?.len() as u64);
+                    }
+                    r.bytes(0xffff)?;
+                    r.take(CENTRAL_FIXED)?;
+                }
+                tag => skip(&mut r, tag)?,
+            }
+        }
+        Ok(c)
+    }
+}
+
+/// A layout read for its assembly ([`assemble_prepared`]): its [`Counts`], of each local entry
+/// whether a later one takes its body again, and the bytes of those bodies where the layout
+/// tells them (stored or kept) and how many are deflated (whose bytes it does not tell).
+pub struct Prepared {
+    pub counts: Counts,
+    again: Vec<bool>,
+    pub again_bytes: u64,
+    pub again_deflated: u64,
+}
+
+impl Prepared {
+    /// Of `layout`: its marks of bodies taken again reserved for its entries, and the lengths
+    /// of their bodies above them while they are summed.
+    pub fn new(layout: &[u8]) -> Result<Prepared> {
+        let counts = Counts::of(layout)?;
+        let n = usize::try_from(counts.entries).map_err(|_| corrupt())?;
+        let mut again = Vec::with_capacity(n);
+        let mut lens: Vec<Option<u64>> = Vec::with_capacity(n);
+        let mut r = Reader { d: layout, at: 0 };
+        r.varint()?;
+        while r.at < layout.len() {
+            let tag = r.u8()?;
+            if tag == LOCAL {
+                let len = match r.u8()? {
+                    0 => Some(r.varint()?),
+                    1 => None,
+                    2 => {
+                        let k = r.varint()?;
+                        r.take(4)?;
+                        r.varint()?;
+                        Some(k)
+                    }
+                    _ => {
+                        let i = usize::try_from(r.varint()?)
+                            .ok()
+                            .filter(|&b| b > 0)
+                            .and_then(|b| again.len().checked_sub(b))
+                            .ok_or_else(corrupt)?;
+                        again[i] = true;
+                        lens[i]
+                    }
+                };
+                again.push(false);
+                lens.push(len);
+            }
+            skip(&mut r, tag)?;
+        }
+        let taken = || lens.iter().zip(&again).filter(|(_, a)| **a);
+        let again_bytes = taken().map(|(l, _)| l.unwrap_or(0)).sum();
+        let again_deflated = taken().filter(|(l, _)| l.is_none()).count() as u64;
+        drop(lens);
+        Ok(Prepared { counts, again, again_bytes, again_deflated })
+    }
+}
+
+/// [`assemble_into`] of a layout prepared: what it holds besides `prepared` the local entries
+/// seen, reserved for them all, and of each record its fields made apart, in turn (no more than
+/// a name and an extra field at once, and what the inputs and `out` take).
+pub fn assemble_prepared(
+    layout: &[u8],
+    prepared: &Prepared,
+    inputs: &mut dyn Inputs,
+    len: usize,
+    out: &mut dyn Out,
+) -> Result<()> {
+    let again = &prepared.again;
     // Bytes are added only where they fit within `len`.
     let room =
         |out: &dyn Out, n: usize| if n <= len - out.len() { Ok(()) } else { Err(Error("output past its length")) };
     let mut r = Reader { d: layout, at: 0 };
     let mut st = State::new(varint::unzz(r.varint()?));
+    st.seen.reserve_exact(again.len());
     while r.at < layout.len() {
         let pos = out.len() as u64;
         match r.u8()? {
@@ -787,77 +962,7 @@ pub fn bodies(layout: &[u8]) -> Result<Vec<Body>> {
     scan(layout).map(|s| s.0)
 }
 
-/// Of each local entry of a layout, in order, whether a later one takes its body again.
-pub fn taken_again(layout: &[u8]) -> Result<Vec<bool>> {
-    scan(layout).map(|s| s.1)
-}
-
-/// What [`assemble_into`] holds of a layout's inputs at once, as the module's estimate needs it.
-#[derive(Debug, Default)]
-pub struct Sizes {
-    /// Local entries.
-    pub entries: u64,
-    /// The largest stored body and piece kept (a gap, or a body kept).
-    pub stored: u64,
-    pub kept: u64,
-    /// The bodies taken again by later entries: their bytes where the layout tells them (stored
-    /// or kept), and how many are deflated (whose bytes it does not tell).
-    pub again: u64,
-    pub again_deflated: u64,
-}
-
-/// The [`Sizes`] of a layout.
-pub fn sizes(layout: &[u8]) -> Result<Sizes> {
-    let (kinds, again) = scan(layout)?;
-    let mut s = Sizes { entries: kinds.len() as u64, ..Sizes::default() };
-    // the bytes of each local entry's body where the layout tells them
-    let mut lens = Vec::with_capacity(kinds.len());
-    let mut r = Reader { d: layout, at: 0 };
-    r.varint()?;
-    while r.at < layout.len() {
-        let tag = r.u8()?;
-        match tag {
-            GAP => {
-                s.kept = s.kept.max(r.varint()?);
-                continue;
-            }
-            LOCAL => {
-                let len = match r.u8()? {
-                    0 => Some(r.varint()?),
-                    1 => None,
-                    2 => {
-                        let n = r.varint()?;
-                        r.take(4)?;
-                        r.varint()?;
-                        Some(n)
-                    }
-                    _ => {
-                        // (the body of the entry it takes again)
-                        let back = usize::try_from(r.varint()?).map_err(|_| corrupt())?;
-                        *lens.get(lens.len().wrapping_sub(back)).ok_or_else(corrupt)?
-                    }
-                };
-                match kinds[lens.len()] {
-                    Body::Stored => s.stored = s.stored.max(len.unwrap_or(0)),
-                    Body::Kept => s.kept = s.kept.max(len.unwrap_or(0)),
-                    _ => {}
-                }
-                if again[lens.len()] {
-                    match len {
-                        Some(n) => s.again += n,
-                        None => s.again_deflated += 1,
-                    }
-                }
-                lens.push(len);
-            }
-            _ => {}
-        }
-        skip(&mut r, tag)?;
-    }
-    Ok(s)
-}
-
-/// [`bodies`] and [`taken_again`].
+/// [`bodies`], and of each local entry whether a later one takes its body again.
 fn scan(layout: &[u8]) -> Result<(Vec<Body>, Vec<bool>)> {
     let mut out = Vec::new();
     let mut again = Vec::new();
