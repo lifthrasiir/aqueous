@@ -449,6 +449,7 @@ dependencies = [
  "aqr-common",
  "chacha20",
  "chacha20poly1305",
+ "crc-fast",
  "getrandom",
  "hkdf",
  "hmac",
@@ -1290,6 +1291,16 @@ name = "cranelift-srcgen"
 version = "0.136.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b533db1679b4b728568bd490da6533cf50974c48a4d7534e78f1e0e02bc39769"
+
+[[package]]
+name = "crc-fast"
+version = "1.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e75b2483e97a5a7da73ac68a05b629f9c53cff58d8ed1c77866079e18b00dba5"
+dependencies = [
+ "digest",
+ "spin",
+]
 
 [[package]]
 name = "crc32fast"
@@ -2313,6 +2324,12 @@ checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
 dependencies = [
  "serde",
 ]
+
+[[package]]
+name = "spin"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "023a211cb3138dbc438680b32560ad89f699977624c9f8dbb95a47d5b4c07dd3"
 
 [[package]]
 name = "stable_deref_trait"

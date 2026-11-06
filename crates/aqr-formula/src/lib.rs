@@ -28,6 +28,7 @@
 //! [`aqr`] stores a formula as an Aqueous archive of the file alone.
 
 pub mod aqr;
+pub mod chash;
 pub mod packed;
 pub mod patch;
 mod pieces;

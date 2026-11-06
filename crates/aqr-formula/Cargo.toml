@@ -6,6 +6,7 @@ description = "Entry formulas: what a recompressor makes of a file, as slices, c
 publish = false
 
 [dependencies]
+crc-fast = { version = "1.10", default-features = false, features = ["std"] }
 aqr-common = { path = "../aqr-common" }
 chacha20 = "0.9"
 chacha20poly1305 = { version = "0.10", default-features = false }
