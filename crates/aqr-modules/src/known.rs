@@ -389,8 +389,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "prores-recons",
-        version: 1,
-        sha512_256: hex("20ec61f36d3fda0f44f0a1eb3f0d841a67c697194e02649abb34f7de0083464b"),
+        version: 2,
+        sha512_256: hex("bff77320bd771849bf5a91a97883b128066da94787208c666176f59eee3f7198"),
         block: include_bytes!("../wasm/prores-recons.block"),
     },
     Known {

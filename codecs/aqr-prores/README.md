@@ -50,8 +50,11 @@ threads. Splitting rows costs little spatial context (SD at 32 stripes, a slice 
 their cost a small part of any chunk, and a large file's 64 MiB chunks decode on 16 threads.
 
 The parameters give what decoding holds (blocks of a frame and of a stripe, bytes of a frame,
-of the headers and of what each stripe writes), exactly as the encoder found it; the decoder
-holds to them, and the memory estimate (tasks counted with their copies) follows from them.
+of the headers and of what each stripe writes, and the counts of the records and bytes the
+first stream makes), exactly as the encoder found it; the decoder holds to them. The module
+lays its memory out as a stack (`aqr_api::stack`), so its limit is its plan (`codec::plan`):
+the instance's memory and as many stripes' tasks at once as its 16 slots allow, each a copy of
+the instance with its own on top.
 
 ## The model (`src/model.rs`)
 
@@ -127,4 +130,3 @@ Left:
   recordings; the corpus has one Apple-encoded film.
 - MP4 or Matroska holding ProRes are not taken (`.mp4` stays compressed data; Matroska goes to
   aqr-mkv).
-- `scripts/module-memory.sh` has two ProRes samples, not yet measured (`estimates_hold`).

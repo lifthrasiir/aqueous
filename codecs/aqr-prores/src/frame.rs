@@ -41,7 +41,11 @@ pub struct Header {
 impl Header {
     /// The header whose bytes (from its size field on) are `raw`.
     pub fn new(raw: Vec<u8>) -> Result<Header> {
-        let h = &raw;
+        Ok(Header { raw: Vec::new(), ..Self::fields(&raw)? }).map(|h| Header { raw, ..h })
+    }
+
+    /// The header of bytes `h`, its fields only (its `raw` empty).
+    pub fn fields(h: &[u8]) -> Result<Header> {
         if h.len() < 20 || be16(h, 0) != h.len() || h[12] >> 6 < 2 || be16(h, 8) == 0 || be16(h, 10) == 0 {
             return Err(bad("bad frame header"));
         }
@@ -53,7 +57,7 @@ impl Header {
             chroma: h[12] >> 6,
             interlace: (h[12] >> 2) & 3,
             alpha: h[17] & 15,
-            raw,
+            raw: Vec::new(),
         })
     }
 
@@ -109,7 +113,7 @@ pub struct Frame {
 }
 
 /// Slice widths in macroblocks along a row of `mbw`: `1 << log2` while they fit, then halves.
-fn row_slices(mbw: usize, log2: u32) -> impl Iterator<Item = usize> {
+pub(crate) fn row_slices(mbw: usize, log2: u32) -> impl Iterator<Item = usize> {
     let mut x = 0;
     std::iter::from_fn(move || {
         if x >= mbw {
@@ -127,22 +131,28 @@ fn row_slices(mbw: usize, log2: u32) -> impl Iterator<Item = usize> {
 impl Slice {
     /// Appends the slice's bytes to `out`, its sizes from its coefficients; returns how many.
     pub fn write_onto(&self, out: &mut Vec<u8>) -> usize {
-        let s0 = out.len();
-        out.extend_from_slice(&self.header);
-        let mut sizes = [0usize; 3];
-        for (k, (c, tail)) in self.comps.iter().enumerate() {
-            let at = out.len();
-            coef::encode(out, c, *tail);
-            sizes[k] = out.len() - at;
-        }
-        out.extend_from_slice(&self.alpha);
-        for (k, n) in sizes.into_iter().enumerate() {
-            if k < 2 || self.header.len() >= 8 {
-                out[s0 + 2 + 2 * k..s0 + 4 + 2 * k].copy_from_slice(&(n as u16).to_be_bytes());
-            }
-        }
-        out.len() - s0
+        write_slice(out, &self.header, &self.comps, &self.alpha)
     }
+}
+
+/// Appends a slice's bytes to `out`: its header `header`, its components' coefficients and
+/// tails, its alpha; its sizes from its coefficients. Returns how many.
+pub fn write_slice(out: &mut Vec<u8>, header: &[u8], comps: &[(Vec<i16>, Tail); 3], alpha: &[u8]) -> usize {
+    let s0 = out.len();
+    out.extend_from_slice(header);
+    let mut sizes = [0usize; 3];
+    for (k, (c, tail)) in comps.iter().enumerate() {
+        let at = out.len();
+        coef::encode(out, c, *tail);
+        sizes[k] = out.len() - at;
+    }
+    out.extend_from_slice(alpha);
+    for (k, n) in sizes.into_iter().enumerate() {
+        if k < 2 || header.len() >= 8 {
+            out[s0 + 2 + 2 * k..s0 + 4 + 2 * k].copy_from_slice(&(n as u16).to_be_bytes());
+        }
+    }
+    out.len() - s0
 }
 
 impl Picture {

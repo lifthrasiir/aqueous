@@ -166,6 +166,22 @@ impl Model {
         (n * size_of::<Bit>()) as u64
     }
 
+    /// A model of room for planes of `n` blocks in its scratch.
+    pub fn with_scratch(n: usize) -> Self {
+        let mut m = Model::new();
+        m.nzs.reserve_exact(n);
+        m.res.reserve_exact(n);
+        m
+    }
+
+    /// Bytes of [`aqr_api::stack`] that [`Model::with_scratch`] takes.
+    pub fn plan(n: usize) -> u64 {
+        use aqr_api::stack::block;
+        let m = Model::new();
+        let bits = [m.zero.len(), m.size.len(), m.mant.len(), m.sign.len(), m.nz.len(), m.dc.len(), m.dc_sign.len()];
+        bits.iter().map(|&k| block((k * size_of::<Bit>()) as u64)).sum::<u64>() + 2 * block(n as u64)
+    }
+
     pub fn new() -> Self {
         let b = Bit::default();
         Model {

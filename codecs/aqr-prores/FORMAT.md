@@ -131,8 +131,8 @@ padding.
 
 ## 3. The module
 
-- **Module**: name `prores-recons`, version 1.
-- **Params**: `5 + k` varints (unsigned LEB128, shortest form), what decoding holds (§4.4):
+- **Module**: name `prores-recons`, version 2.
+- **Params**: `11 + k` varints (unsigned LEB128, shortest form), what decoding holds (§4.4):
 
   ```text
   blocks         most blocks of a frame (all its pictures' components), at most 2^24
@@ -141,7 +141,17 @@ padding.
   stripe_blocks  most blocks of a stripe of a picture (§6), at most blocks
   k              the number of stripes, 1 to 64
   result[k]      bytes each stripe writes (§4.3)
+  items          the frames stream 0 tells (kept or modelled)
+  frames         of them, the modelled frames
+  pictures       the modelled frames' pictures
+  slices         the pictures' slices
+  widths         the pictures' slices along a row, added up
+  bytes          the bytes stream 0 gives: of the frames kept, of the frame headers and picture
+                 headers it codes (those not the same as before), of the slices' headers and
+                 alpha, of the trailers not of zeros
   ```
+
+  Decoding stream 0 must give exactly these counts; else it fails.
 
 - **Resources**: none.
 - **Inputs**: exactly two, the chunk `C` (§4; class `prores/coded`) and the bytes between its

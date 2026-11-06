@@ -1818,6 +1818,40 @@ fn bcn_plans_hold() {
     }
 }
 
+/// prores-recons lays its memory out as a stack, its limit its plan of the instance and as many
+/// tasks at once as their slots allow: of 4:2:2, 4:4:4 with alpha, interlaced frames, and of a
+/// chunk of 17 stripes (more than the slots); each application of a file on its own.
+#[test]
+fn prores_plans_hold() {
+    for t in ["ks-422", "ks-4444-alpha", "ks-interlaced", "aw-422hq x80", "aw-422hq x600"] {
+        let d = match t.split_once(" x") {
+            Some((t, n)) => fixture(&format!("codecs/aqr-prores/tests/data/{t}.mov")).repeat(n.parse().unwrap()),
+            None => fixture(&format!("codecs/aqr-prores/tests/data/{t}.mov")),
+        };
+        let f = aqr_prores::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
+        let parts = match &f.root {
+            Node::Concat(nodes) => nodes.clone(),
+            n => vec![n.clone()],
+        };
+        let (mut at, mut applied) = (0, 0);
+        for n in parts {
+            let len = match &n {
+                Node::Apply(a) => a.len,
+                Node::Slice { len, .. } => *len,
+                _ => panic!("{t}: a node of another kind"),
+            } as usize;
+            if let Node::Apply(_) = n {
+                let mut g = f.clone();
+                g.root = n;
+                plan_holds(&format!("prores {t} {applied}"), g, &d[at..at + len]);
+                applied += 1;
+            }
+            at += len;
+        }
+        assert!(applied > 0, "{t}");
+    }
+}
+
 /// git-pack-recons and git-pack-index-recons lay their memory out as stacks, their limits their
 /// plans: of a pack of more entries than the stack's holes, alone and with its index and reverse
 /// index after it.

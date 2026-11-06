@@ -16,7 +16,7 @@ use aqr_common::arith::{ArithDecoder, ArithEncoder, Bit};
 use aqr_common::msb::{BitReader, BitWriter, padded};
 
 use crate::coef::Tail;
-use crate::frame::{self, Frame, Header, Slice};
+use crate::frame::{self, Frame, Header};
 use crate::model::{Coder, Model};
 use crate::plane::{self, Plane};
 use crate::{Error, Result};
@@ -153,6 +153,31 @@ pub struct Limits {
     pub stripe_blocks: u64,
     /// Bytes each stripe writes (its slices, and their lengths), one for each stripe.
     pub results: Vec<u64>,
+    /// What decoding the first stream makes ([`Counts`]).
+    pub counts: Counts,
+}
+
+/// What the first stream tells, as decoding holds it: items, modelled frames, pictures, slices,
+/// slices along a row of each picture, and the bytes kept (frames kept, the frames' and
+/// pictures' headers where they change, the slices' headers and alpha, trailers not of zeros).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Counts {
+    pub items: u64,
+    pub frames: u64,
+    pub pics: u64,
+    pub slices: u64,
+    pub widths: u64,
+    pub bytes: u64,
+}
+
+impl Counts {
+    pub fn to_array(self) -> [u64; 6] {
+        [self.items, self.frames, self.pics, self.slices, self.widths, self.bytes]
+    }
+
+    pub fn from_array([items, frames, pics, slices, widths, bytes]: [u64; 6]) -> Counts {
+        Counts { items, frames, pics, slices, widths, bytes }
+    }
 }
 
 /// Bytes counted for what the first stream tells ([`Limits::side`]): of an item, a frame kept, a
@@ -259,6 +284,10 @@ fn encode_with(span: &[u8], frames: &[Range<usize>], k: usize) -> Coded {
         coded.extend_from_slice(a);
         coded.extend_from_slice(r);
     }
+    // (what decoding the first stream makes, as it makes it)
+    let (a, r) = &streams[0];
+    let (info, _) = side_dec(a, &padded(r), &limits, false).expect("the first stream decodes");
+    limits.counts = info.counts();
     Coded { coded, gaps, limits }
 }
 
@@ -319,26 +348,155 @@ fn side_enc(c: &mut Enc, st: &mut SideState, f: &Frame) {
     }
 }
 
-/// A picture as the first stream tells it: its header (its size zeroed), the widths of its
-/// slices along a row, its rows, and its slices with empty coefficients.
-struct PicSide {
-    header: Vec<u8>,
-    widths: Vec<usize>,
-    rows: usize,
-    slices: Vec<Slice>,
+/// A range of [`SideInfo::bytes`], or of one of its vectors.
+#[derive(Debug, Clone, Copy, Default)]
+struct Span {
+    at: u32,
+    len: u32,
 }
 
-/// A frame as the first stream tells it.
-struct FrameSide {
-    header: Header,
-    pics: Vec<PicSide>,
-    trailer: Vec<u8>,
+impl Span {
+    fn range(self) -> Range<usize> {
+        self.at as usize..(self.at + self.len) as usize
+    }
 }
 
-/// What comes after a gap: a frame kept as it is, or one modelled.
-enum Item {
-    Kept(Vec<u8>),
-    Modelled(FrameSide),
+/// What comes after a gap: a frame kept as it is (its bytes), or one modelled (its frame).
+#[derive(Debug, Clone, Copy)]
+struct ItemRec {
+    gap: u32,
+    kept: bool,
+    what: Span,
+}
+
+/// A modelled frame as the first stream tells it: its header's bytes and what decoding needs
+/// of it, its first picture, and its trailer (`len` zeros where `zeros`).
+#[derive(Debug, Clone, Copy)]
+struct FrameRec {
+    header: Span,
+    width: u32,
+    chroma: u8,
+    pics: u8,
+    zeros: bool,
+    first: u32,
+    trailer: Span,
+}
+
+/// A picture: its header (its size zeroed), the widths of its slices along a row, its rows of
+/// slices, and its first slice.
+#[derive(Debug, Clone, Copy)]
+struct PicRec {
+    header: Span,
+    widths: Span,
+    rows: u32,
+    first: u32,
+}
+
+/// A slice: its header (its sizes zeroed), its alpha, its macroblocks and its tails.
+#[derive(Debug, Clone, Copy)]
+struct SliceRec {
+    header: Span,
+    alpha: Span,
+    mbs: u32,
+    tails: [Tail; 3],
+}
+
+/// Bytes of the records (the same on every target).
+const ITEM_BYTES: u64 = 16;
+const FRAME_BYTES: u64 = 28;
+const PIC_BYTES: u64 = 24;
+const SLICE_BYTES: u64 = 44;
+const _: () = assert!(
+    size_of::<ItemRec>() == ITEM_BYTES as usize
+        && size_of::<FrameRec>() == FRAME_BYTES as usize
+        && size_of::<PicRec>() == PIC_BYTES as usize
+        && size_of::<SliceRec>() == SLICE_BYTES as usize
+);
+
+/// What the first stream tells, flat ([`Counts`]); of vectors reserved for the counts given,
+/// none grown, or grown as they go where none are given (the encoder's count).
+#[derive(Default)]
+struct SideInfo {
+    items: Vec<ItemRec>,
+    frames: Vec<FrameRec>,
+    pics: Vec<PicRec>,
+    slices: Vec<SliceRec>,
+    widths: Vec<u32>,
+    bytes: Vec<u8>,
+    bounded: bool,
+}
+
+impl SideInfo {
+    fn with(c: &Counts) -> Result<SideInfo> {
+        let n = |v: u64| usize::try_from(v).map_err(|_| Error("bad parameters"));
+        Ok(SideInfo {
+            items: Vec::with_capacity(n(c.items)?),
+            frames: Vec::with_capacity(n(c.frames)?),
+            pics: Vec::with_capacity(n(c.pics)?),
+            slices: Vec::with_capacity(n(c.slices)?),
+            widths: Vec::with_capacity(n(c.widths)?),
+            bytes: Vec::with_capacity(n(c.bytes)?),
+            bounded: true,
+        })
+    }
+
+    /// Bytes of [`aqr_api::stack`] that [`SideInfo::with`] takes.
+    fn plan(c: &Counts) -> u64 {
+        use aqr_api::stack::block;
+        block(ITEM_BYTES * c.items)
+            + block(FRAME_BYTES * c.frames)
+            + block(PIC_BYTES * c.pics)
+            + block(SLICE_BYTES * c.slices)
+            + block(4 * c.widths)
+            + block(c.bytes)
+    }
+
+    fn counts(&self) -> Counts {
+        let n = |v: usize| v as u64;
+        Counts {
+            items: n(self.items.len()),
+            frames: n(self.frames.len()),
+            pics: n(self.pics.len()),
+            slices: n(self.slices.len()),
+            widths: n(self.widths.len()),
+            bytes: n(self.bytes.len()),
+        }
+    }
+
+    /// Whether every vector was filled to the counts given.
+    fn full(&self) -> bool {
+        let f = |len: usize, cap: usize| len == cap;
+        f(self.items.len(), self.items.capacity())
+            && f(self.frames.len(), self.frames.capacity())
+            && f(self.pics.len(), self.pics.capacity())
+            && f(self.slices.len(), self.slices.capacity())
+            && f(self.widths.len(), self.widths.capacity())
+            && f(self.bytes.len(), self.bytes.capacity())
+    }
+
+    /// Pictures of a frame, at most.
+    fn fields(&self) -> usize {
+        self.frames.iter().map(|f| f.pics as usize).max().unwrap_or(1)
+    }
+}
+
+/// Pushes `x` onto `v`, where it has room (or grows as it goes, where `!bounded`).
+fn push<T>(v: &mut Vec<T>, x: T, bounded: bool) -> Result<u32> {
+    if bounded && v.len() == v.capacity() {
+        return Err(Error("corrupt chunk"));
+    }
+    v.push(x);
+    u32::try_from(v.len() - 1).map_err(|_| Error("corrupt chunk"))
+}
+
+/// `n` bytes of `c`'s raw bits appended to `info`'s bytes.
+fn take_bytes(c: &mut Dec, info: &mut SideInfo, n: usize) -> Result<Span> {
+    if (info.bounded && info.bytes.capacity() - info.bytes.len() < n) || n > c.raw_bits / 8 {
+        return Err(Error("corrupt chunk"));
+    }
+    let at = info.bytes.len();
+    info.bytes.extend((0..n).map(|_| c.raw(0, 8) as u8));
+    Ok(Span { at: at as u32, len: n as u32 })
 }
 
 /// Decodes a chunk into its span of `len` bytes, with `gaps` the bytes between its frames, its
@@ -349,31 +507,23 @@ pub fn decode(coded: &[u8], gaps: &[u8], limits: &Limits, len: usize, threads: u
     if !(1..=MAX_STRIPES).contains(&stripes) {
         return Err(bad());
     }
-    // The streams: their lengths, then them.
-    let table = 8 * (1 + stripes);
-    let mut at = coded.get(..table).ok_or(bad())?.len();
-    let mut streams = Vec::with_capacity(1 + stripes);
-    for k in 0..1 + stripes {
-        let n = |o: usize| u32::from_le_bytes(coded[8 * k + o..8 * k + o + 4].try_into().unwrap()) as usize;
-        let (a, r) = (n(0), n(4));
-        let arith = coded.get(at..at.checked_add(a).ok_or(bad())?).ok_or(bad())?;
-        at += a;
-        let raw = coded.get(at..at.checked_add(r).ok_or(bad())?).ok_or(bad())?;
-        at += r;
-        streams.push((arith, padded(raw)));
-    }
-    if at != coded.len() {
-        return Err(bad());
-    }
-    let (items, last) = side_dec(&streams[0], limits)?;
-    let parts = aqr_common::pool::par_map_apart(stripes, threads, |s| {
-        let (arith, raw) = &streams[1 + s];
-        stripe_dec(s, &items, Dec::new(arith, raw), limits).unwrap_or_default()
-    });
-    // (an empty part where a stripe failed: it has a byte at least otherwise)
-    if parts.iter().zip(&limits.results).any(|(p, n)| Some(p.len() as u64) != n.checked_add(1)) {
-        return Err(bad());
-    }
+    let streams = streams(coded, stripes)?;
+    let side_raw = padded(streams[0].1);
+    let (info, last) = side_dec(streams[0].0, &side_raw, limits, true)?;
+    let mut parts: Vec<Vec<u8>> = Vec::with_capacity(stripes);
+    aqr_common::pool::par_each_apart(
+        stripes,
+        threads,
+        |s| stripe_dec(s, &info, streams[1 + s], limits).unwrap_or_default(),
+        |s, part| {
+            // (an empty part where a stripe failed: it has a byte at least otherwise)
+            if Some(part.len() as u64) != limits.results[s].checked_add(1) {
+                return Err(bad());
+            }
+            parts.push(part);
+            Ok(())
+        },
+    )?;
     let mut cursors: Vec<&[u8]> = parts.iter().map(|p| &p[1..]).collect();
     let mut out = Vec::with_capacity(len);
     let mut g = 0;
@@ -382,43 +532,58 @@ pub fn decode(coded: &[u8], gaps: &[u8], limits: &Limits, len: usize, threads: u
         g += n;
         if out.len() > len { Err(bad()) } else { Ok(()) }
     };
-    for (n, item) in &items {
-        gap(&mut out, *n)?;
-        match item {
-            Item::Kept(d) => out.extend_from_slice(d),
-            Item::Modelled(f) => {
-                let base = out.len();
-                out.extend_from_slice(&[0, 0, 0, 0]);
-                out.extend_from_slice(b"icpf");
-                out.extend_from_slice(&f.header.raw);
-                for p in &f.pics {
-                    let p0 = out.len();
-                    out.extend_from_slice(&p.header);
-                    let mut table = out.len();
-                    out.resize(table + 2 * p.slices.len(), 0);
-                    for (s, cur) in cursors.iter_mut().enumerate() {
-                        let count = stripe_rows(p.rows, s, stripes).len() * p.widths.len();
-                        let lens = cur.get(..4 * count).ok_or(bad())?;
-                        let mut total = 0;
-                        for l in lens.as_chunks::<4>().0 {
-                            let l = u32::from_le_bytes(*l) as usize;
-                            out[table..table + 2].copy_from_slice(&u16::try_from(l).map_err(|_| bad())?.to_be_bytes());
-                            table += 2;
-                            total += l;
-                        }
-                        out.extend_from_slice(cur.get(4 * count..4 * count + total).ok_or(bad())?);
-                        *cur = &cur[4 * count + total..];
-                    }
-                    let size = u32::try_from(out.len() - p0).map_err(|_| bad())?;
-                    out[p0 + 1..p0 + 5].copy_from_slice(&size.to_be_bytes());
-                }
-                out.extend_from_slice(&f.trailer);
-                if (out.len() - base) as u64 > limits.frame {
+    let b = &info.bytes;
+    for item in &info.items {
+        gap(&mut out, item.gap as usize)?;
+        if item.kept {
+            out.extend_from_slice(&b[item.what.range()]);
+        } else {
+            let f = &info.frames[item.what.at as usize];
+            let base = out.len();
+            out.extend_from_slice(&[0, 0, 0, 0]);
+            out.extend_from_slice(b"icpf");
+            out.extend_from_slice(&b[f.header.range()]);
+            for p in &info.pics[f.first as usize..][..f.pics as usize] {
+                let p0 = out.len();
+                out.extend_from_slice(&b[p.header.range()]);
+                let mut table = out.len();
+                let n = p.rows as usize * p.widths.len as usize;
+                if out.len() + 2 * n > len {
                     return Err(bad());
                 }
-                let size = u32::try_from(out.len() - base).map_err(|_| bad())?;
-                out[base..base + 4].copy_from_slice(&size.to_be_bytes());
+                out.resize(table + 2 * n, 0);
+                for (s, cur) in cursors.iter_mut().enumerate() {
+                    let count = stripe_rows(p.rows as usize, s, stripes).len() * p.widths.len as usize;
+                    let lens = cur.get(..4 * count).ok_or(bad())?;
+                    let mut total = 0;
+                    for l in lens.as_chunks::<4>().0 {
+                        let l = u32::from_le_bytes(*l) as usize;
+                        out[table..table + 2].copy_from_slice(&u16::try_from(l).map_err(|_| bad())?.to_be_bytes());
+                        table += 2;
+                        total += l;
+                    }
+                    let d = cur.get(4 * count..4 * count + total).ok_or(bad())?;
+                    if out.len() + d.len() > len {
+                        return Err(bad());
+                    }
+                    out.extend_from_slice(d);
+                    *cur = &cur[4 * count + total..];
+                }
+                let size = u32::try_from(out.len() - p0).map_err(|_| bad())?;
+                out[p0 + 1..p0 + 5].copy_from_slice(&size.to_be_bytes());
             }
+            if out.len() + f.trailer.len as usize > len {
+                return Err(bad());
+            }
+            match f.zeros {
+                true => out.resize(out.len() + f.trailer.len as usize, 0),
+                false => out.extend_from_slice(&b[f.trailer.range()]),
+            }
+            if (out.len() - base) as u64 > limits.frame {
+                return Err(bad());
+            }
+            let size = u32::try_from(out.len() - base).map_err(|_| bad())?;
+            out[base..base + 4].copy_from_slice(&size.to_be_bytes());
         }
         if out.len() > len {
             return Err(bad());
@@ -431,70 +596,111 @@ pub fn decode(coded: &[u8], gaps: &[u8], limits: &Limits, len: usize, threads: u
     Ok(out)
 }
 
-/// Decodes the first stream: each frame after its gap, and the last gap.
-fn side_dec(stream: &(&[u8], Vec<u8>), limits: &Limits) -> Result<(Vec<(usize, Item)>, usize)> {
+/// The streams of a coded chunk of `stripes` stripes: their lengths, then them (the arithmetic
+/// coded bytes and the raw bits of each).
+fn streams(coded: &[u8], stripes: usize) -> Result<Vec<(&[u8], &[u8])>> {
     let bad = || Error("corrupt chunk");
-    let mut c = Dec::new(stream.0, &stream.1);
-    let mut st = SideState::default();
+    let table = 8 * (1 + stripes);
+    let mut at = coded.get(..table).ok_or(bad())?.len();
+    let mut streams = Vec::with_capacity(1 + stripes);
+    for k in 0..1 + stripes {
+        let n = |o: usize| u32::from_le_bytes(coded[8 * k + o..8 * k + o + 4].try_into().unwrap()) as usize;
+        let (a, r) = (n(0), n(4));
+        let arith = coded.get(at..at.checked_add(a).ok_or(bad())?).ok_or(bad())?;
+        at += a;
+        let raw = coded.get(at..at.checked_add(r).ok_or(bad())?).ok_or(bad())?;
+        at += r;
+        streams.push((arith, raw));
+    }
+    if at != coded.len() {
+        return Err(bad());
+    }
+    Ok(streams)
+}
+
+/// Decodes the first stream (`arith`, and `raw` its raw bits padded): each frame after its gap,
+/// and the last gap; into vectors of [`Counts`] of `limits` where `bounded`.
+fn side_dec(arith: &[u8], raw: &[u8], limits: &Limits, bounded: bool) -> Result<(SideInfo, usize)> {
+    let bad = || Error("corrupt chunk");
+    let mut info = if bounded { SideInfo::with(&limits.counts)? } else { SideInfo::default() };
+    let mut c = Dec::new(arith, raw);
+    let mut st = SideSpans::default();
     let count = c.raw(0, 32) as usize;
-    let mut items = Vec::with_capacity(count.min(1 << 16));
     let mut side = 0;
     for _ in 0..count {
-        let gap = c.raw(0, 32) as usize;
+        let gap = c.raw(0, 32);
         side += SIDE_ITEM;
         let item = if c.bit(&mut st.bits.modelled, false) {
-            Item::Modelled(frame_side_dec(&mut c, &mut st, limits, &mut side)?)
+            let f = frame_side_dec(&mut c, &mut st, &mut info, limits, &mut side)?;
+            ItemRec { gap, kept: false, what: Span { at: push(&mut info.frames, f, bounded)?, len: 0 } }
         } else {
             let n = c.raw(0, 32) as usize;
             side += n as u64;
-            if n as u64 > limits.frame || side > limits.side || n > c.raw_bits / 8 {
+            if n as u64 > limits.frame || side > limits.side {
                 return Err(bad());
             }
-            let mut v = Vec::new();
-            bytes(&mut c, &mut v, n);
-            Item::Kept(v)
+            ItemRec { gap, kept: true, what: take_bytes(&mut c, &mut info, n)? }
         };
         if c.overrun() {
             return Err(bad());
         }
-        items.push((gap, item));
+        push(&mut info.items, item, bounded)?;
     }
     let last = c.raw(0, 32) as usize;
-    if c.overrun() {
+    if c.overrun() || (bounded && !info.full()) {
         return Err(bad());
     }
-    Ok((items, last))
+    Ok((info, last))
 }
 
-fn frame_side_dec(c: &mut Dec, st: &mut SideState, limits: &Limits, side: &mut u64) -> Result<FrameSide> {
+/// What the next frame's headers are coded against, as decoding keeps it: the spans of the
+/// last frame header and picture headers.
+#[derive(Default)]
+struct SideSpans {
+    bits: Side,
+    header: Span,
+    pics: [Span; 2],
+}
+
+fn frame_side_dec(
+    c: &mut Dec,
+    st: &mut SideSpans,
+    info: &mut SideInfo,
+    limits: &Limits,
+    side: &mut u64,
+) -> Result<FrameRec> {
     let bad = |s| Error(s);
+    let bounded = info.bounded;
     if !c.bit(&mut st.bits.same_header, false) {
         let n = c.raw(0, 16) as usize;
-        bytes(c, &mut st.header, n);
+        st.header = take_bytes(c, info, n)?;
     }
-    let header = Header::new(st.header.clone())?;
+    let header = Header::fields(&info.bytes[st.header.range()])?;
     let npics = header.pictures();
-    st.pics.resize(npics, Vec::new());
     let mbw = header.width.div_ceil(16);
-    let mut pics = Vec::with_capacity(npics);
+    let first = info.pics.len() as u32;
     let mut blocks = 0u64;
     // (the bytes of the frame so far, but its slices' coefficients)
-    let mut size = 8 + header.raw.len() as u64;
+    let mut size = 8 + st.header.len as u64;
     for pi in 0..npics {
         if !c.bit(&mut st.bits.same_pic, false) {
             let n = c.raw(0, 8) as usize;
-            bytes(c, &mut st.pics[pi], n);
+            st.pics[pi] = take_bytes(c, info, n)?;
         }
-        let ph = st.pics[pi].clone();
-        if ph.len() < 8 || (ph[0] >> 3) as usize != ph.len() || ph[7] >> 4 > 3 {
+        let ph = &info.bytes[st.pics[pi].range()];
+        if ph.len() < 8 || (ph[0] >> 3) as usize != ph.len() || ph[7] >> 4 > 3 || ph[1..5] != [0; 4] {
             return Err(bad("bad picture header"));
         }
-        let ws = frame::widths(&header, &ph);
-        let n = u16::from_be_bytes([ph[5], ph[6]]) as usize;
-        if n == 0 || !n.is_multiple_of(ws.len()) || n / ws.len() > 4096 || mbw > 8192 {
+        let (n, log2) = (u16::from_be_bytes([ph[5], ph[6]]) as usize, (ph[7] >> 4) as u32);
+        let w0 = info.widths.len();
+        for w in frame::row_slices(mbw, log2) {
+            push(&mut info.widths, w as u32, bounded)?;
+        }
+        let nw = info.widths.len() - w0;
+        if n == 0 || !n.is_multiple_of(nw) || n / nw > 4096 || mbw > 8192 {
             return Err(bad("bad slice count"));
         }
-        let rows = n / ws.len();
+        let rows = n / nw;
         blocks += picture_blocks(&header, mbw, rows);
         *side += SIDE_PICTURE;
         let k = limits.results.len();
@@ -502,9 +708,9 @@ fn frame_side_dec(c: &mut Dec, st: &mut SideState, limits: &Limits, side: &mut u
         if blocks > limits.blocks || most > limits.stripe_blocks || *side > limits.side {
             return Err(bad("frame past the chunk's limits"));
         }
-        size += (ph.len() + 2 * n) as u64;
+        size += (st.pics[pi].len as usize + 2 * n) as u64;
         let (mut b0, mut q) = (0u8, 0u8);
-        let mut slices = Vec::with_capacity(n);
+        let first_slice = info.slices.len() as u32;
         for si in 0..n {
             if !c.bit(&mut st.bits.same_byte0, false) {
                 b0 = c.raw(0, 8) as u8;
@@ -513,22 +719,26 @@ fn frame_side_dec(c: &mut Dec, st: &mut SideState, limits: &Limits, side: &mut u
                 q = c.raw(0, 8) as u8;
             }
             let hs = (b0 >> 3) as usize;
-            if hs < 6 {
+            if hs < 6 || (bounded && info.bytes.capacity() - info.bytes.len() < hs) {
                 return Err(bad("bad slice header"));
             }
-            let mut sh = vec![0u8; hs];
-            (sh[0], sh[1]) = (b0, q);
+            let at = info.bytes.len();
+            info.bytes.extend_from_slice(&[b0, q]);
+            info.bytes.resize(at + hs, 0);
             for i in slice_extra(hs) {
-                sh[i] = c.raw(0, 8) as u8;
+                info.bytes[at + i] = c.raw(0, 8) as u8;
             }
-            let mut alpha = Vec::new();
-            if header.alpha != 0 {
-                let n = c.raw(0, 16) as usize;
-                bytes(c, &mut alpha, n);
-            }
-            size += (hs + alpha.len()) as u64;
-            *side += SIDE_SLICE + (hs + alpha.len()) as u64;
-            let mbs = ws[si % ws.len()];
+            let sh = Span { at: at as u32, len: hs as u32 };
+            let alpha = match header.alpha {
+                0 => Span::default(),
+                _ => {
+                    let n = c.raw(0, 16) as usize;
+                    take_bytes(c, info, n)?
+                }
+            };
+            size += (hs + alpha.len as usize) as u64;
+            *side += SIDE_SLICE + (hs + alpha.len as usize) as u64;
+            let mbs = info.widths[w0 + si % nw];
             let mut tails = [Tail::default(); 3];
             for t in &mut tails {
                 if c.bit(&mut st.bits.tail, false) {
@@ -537,78 +747,168 @@ fn frame_side_dec(c: &mut Dec, st: &mut SideState, limits: &Limits, side: &mut u
                     size += t.zero_bytes as u64;
                 }
             }
-            // (the coefficients are allocated by the stripes)
-            let comps = tails.map(|t| (Vec::new(), t));
-            slices.push(Slice { header: sh, mbs, comps, alpha, sizes: [0; 3] });
+            push(&mut info.slices, SliceRec { header: sh, alpha, mbs, tails }, bounded)?;
             if size > limits.frame || *side > limits.side || c.overrun() {
                 return Err(bad("corrupt chunk"));
             }
         }
-        let mut header = ph;
-        header[1..5].fill(0);
-        pics.push(PicSide { header, widths: ws, rows, slices });
+        let p = PicRec {
+            header: st.pics[pi],
+            widths: Span { at: w0 as u32, len: nw as u32 },
+            rows: rows as u32,
+            first: first_slice,
+        };
+        push(&mut info.pics, p, bounded)?;
     }
     let n = c.raw(0, 32) as usize;
-    *side += (header.raw.len() + n) as u64;
+    *side += (st.header.len as usize + n) as u64;
     if size + n as u64 > limits.frame || *side > limits.side {
         return Err(bad("corrupt chunk"));
     }
-    let trailer = if n > 0 && c.bit(&mut st.bits.trailer_zero, false) {
-        vec![0; n]
-    } else {
-        let mut v = Vec::new();
-        bytes(c, &mut v, n);
-        v
+    let (zeros, trailer) = match n > 0 && c.bit(&mut st.bits.trailer_zero, false) {
+        true => (true, Span { at: 0, len: n as u32 }),
+        false => (false, take_bytes(c, info, n)?),
     };
-    Ok(FrameSide { header, pics, trailer })
+    Ok(FrameRec {
+        header: st.header,
+        width: header.width as u32,
+        chroma: header.chroma,
+        pics: npics as u8,
+        zeros,
+        first,
+        trailer,
+    })
 }
 
-/// Decodes stripe `s` of every frame of `items` and writes its slices: for each modelled frame
+/// The planes a stripe decodes its pictures' components into, of luma and chroma: of
+/// `stripe_blocks` blocks of a picture's stripe (all components), luma takes at most half of
+/// them (4:2:2) and each chroma component a third (4:4:4).
+fn plane_caps(stripe_blocks: u64) -> (usize, usize) {
+    ((stripe_blocks / 2) as usize, (stripe_blocks / 3) as usize)
+}
+
+/// Blocks of a slice's component at most (8 macroblocks of 4 blocks).
+const SLICE_COMP_BLOCKS: usize = 32;
+
+/// Bytes of [`aqr_api::stack`] that decoding stripe `s` of `limits` takes in its task, of
+/// `raw` bytes of raw bits: those padded, its result, its model, its planes (two sets of
+/// `fields` pictures: of the frame before and of this one), and a slice's coefficients.
+fn stripe_plan(limits: &Limits, s: usize, raw: u64, fields: u64) -> u64 {
+    use aqr_api::stack::block;
+    let (luma, chroma) = plane_caps(limits.stripe_blocks);
+    let plane = |n: usize| block(128 * n as u64) + block(n as u64);
+    let planes = 2 * fields * (plane(luma) + 2 * plane(chroma));
+    block(raw + aqr_common::msb::PAD as u64)
+        + block(limits.results[s] + 1)
+        + Model::plan(luma)
+        + planes
+        + 3 * block(2 * 64 * SLICE_COMP_BLOCKS as u64)
+}
+
+/// The memory plan of decoding a chunk on WebAssembly ([`aqr_api::stack`]), of params `limits`,
+/// the coded chunk `coded` and an output of `len` bytes, given the instance's memory as it
+/// starts (`initial` bytes, whole pages), `held` bytes of the stack taken before, and the task
+/// slots: the most the instance and its tasks take at once, in bytes, however the tasks run.
+/// The instance takes the streams' slices, the first stream's raw bits padded, what it tells
+/// ([`SideInfo`]) and the vector of the stripes' results; then the tasks run, the instance
+/// taking each result as it is joined; then the output.
+pub fn plan(limits: &Limits, coded: &[u8], len: u64, initial: u64, held: u64, slots: usize) -> Option<u64> {
+    use aqr_api::stack::block;
+    let pages = |n: u64| n.div_ceil(1 << 16) << 16;
+    let k = limits.results.len();
+    let streams = streams(coded, k).ok()?;
+    let c = &limits.counts;
+    let fields = if c.pics > c.frames { 2 } else { 1 };
+    let top = initial
+        + held
+        + block(16 * (1 + k as u64))
+        + block((streams[0].1.len() + aqr_common::msb::PAD) as u64)
+        + SideInfo::plan(c)
+        + block(12 * k as u64);
+    let end = pages(top);
+    let mut tasks: Vec<u64> =
+        (0..k).map(|s| end.max(pages(top + stripe_plan(limits, s, streams[1 + s].1.len() as u64, fields)))).collect();
+    let results: u64 = limits.results.iter().map(|&r| block(r + 1)).sum();
+    // (the handles taken, then each result as it is joined; the handles given back after)
+    let taken = if k > 1 { block(k as u64) } else { 0 };
+    let joined = pages(top + taken + results);
+    let most = match k {
+        1 => 0,
+        _ => {
+            tasks.sort_unstable_by(|a, b| b.cmp(a));
+            joined + tasks.iter().take(slots).sum::<u64>()
+        }
+    };
+    // (on one stripe, decoded in the instance: its work on top, then given back)
+    let alone = match k {
+        1 => pages(top + stripe_plan(limits, 0, streams[1].1.len() as u64, fields)),
+        _ => 0,
+    };
+    Some(most.max(alone).max(pages(top + taken + results + block(len))))
+}
+
+/// Decodes stripe `s` of every frame of `info` and writes its slices: for each modelled frame
 /// and picture, the lengths of its slices in the stripe (u32, little-endian), then their bytes;
 /// after a byte 1. None where the stream does not decode.
-fn stripe_dec(s: usize, items: &[(usize, Item)], mut c: Dec, limits: &Limits) -> Option<Vec<u8>> {
+fn stripe_dec(s: usize, info: &SideInfo, (arith, raw): (&[u8], &[u8]), limits: &Limits) -> Option<Vec<u8>> {
     let k = limits.results.len();
-    let mut ss = StripeState::default();
-    let mut out = vec![1u8];
-    for (_, item) in items {
-        let Item::Modelled(f) = item else {
-            ss.prev = None;
+    // (the result first: below what is given back as the stripe ends)
+    let cap = usize::try_from(limits.results[s].checked_add(1)?).ok()?;
+    let mut out = Vec::with_capacity(cap);
+    out.push(1u8);
+    let raw = padded(raw);
+    let mut c = Dec::new(arith, &raw);
+    let (luma, chroma) = plane_caps(limits.stripe_blocks);
+    let mut model = Model::with_scratch(luma);
+    let fields = info.fields();
+    let set = || -> Vec<[Plane; 3]> { (0..fields).map(|_| plane::with_capacity(luma, chroma)).collect() };
+    let (mut prev, mut cur) = (set(), set());
+    let mut slice: [(Vec<i16>, Tail); 3] =
+        std::array::from_fn(|_| (Vec::with_capacity(64 * SLICE_COMP_BLOCKS), Tail::default()));
+    // (the pictures of the frame before, none after a frame kept as it is)
+    let mut before = 0;
+    let b = &info.bytes;
+    for item in &info.items {
+        if item.kept {
+            before = 0;
             continue;
-        };
-        let mut planes = Vec::with_capacity(f.pics.len());
-        for (pi, p) in f.pics.iter().enumerate() {
-            let rs = stripe_rows(p.rows, s, k);
-            let mut pl = plane::empty(&f.header, &p.widths, rs.len());
-            let prev = ss.prev.as_ref().and_then(|v| v.get(pi));
+        }
+        let f = &info.frames[item.what.at as usize];
+        let mbw = (f.width as usize).div_ceil(16);
+        for (pi, p) in info.pics[f.first as usize..][..f.pics as usize].iter().enumerate() {
+            let rs = stripe_rows(p.rows as usize, s, k);
+            let widths = &info.widths[p.widths.range()];
+            let pl = &mut cur[pi];
+            if !plane::reset(pl, f.chroma, mbw, rs.len()) {
+                return None;
+            }
+            let prev = (pi < before).then(|| &prev[pi]);
             for (k, q) in pl.iter_mut().enumerate() {
-                ss.model.plane(&mut c, q, prev.map(|x| &x[k]), (k > 0) as usize);
+                model.plane(&mut c, q, prev.map(|x| &x[k]), (k > 0) as usize);
             }
             if c.overrun() {
                 return None;
             }
-            let nw = p.widths.len();
-            let mut slices: Vec<Slice> = p.slices[rs.start * nw..rs.end * nw]
-                .iter()
-                .map(|sl| {
-                    let cb = if f.header.chroma == 3 { 4 * sl.mbs } else { 2 * sl.mbs };
-                    let blocks = [4 * sl.mbs, cb, cb];
-                    let comps = std::array::from_fn(|k| (vec![0; 64 * blocks[k]], sl.comps[k].1));
-                    Slice { header: sl.header.clone(), mbs: sl.mbs, comps, alpha: sl.alpha.clone(), sizes: [0; 3] }
-                })
-                .collect();
-            plane::scatter(&pl, &mut slices, &f.header, &p.widths);
+            let nw = widths.len();
+            let first = p.first as usize + rs.start * nw;
+            let n = rs.len() * nw;
             let lens = out.len();
-            out.resize(lens + 4 * slices.len(), 0);
-            for (i, sl) in slices.iter().enumerate() {
-                let n = sl.write_onto(&mut out) as u32;
-                out[lens + 4 * i..lens + 4 * i + 4].copy_from_slice(&n.to_le_bytes());
-            }
-            if out.len() as u64 > limits.results[s].saturating_add(1) {
+            if lens + 4 * n > cap {
                 return None;
             }
-            planes.push(pl);
+            out.resize(lens + 4 * n, 0);
+            for (i, sl) in info.slices[first..first + n].iter().enumerate() {
+                let x0: usize = widths[..i % nw].iter().map(|&w| w as usize).sum();
+                plane::gather(pl, f.chroma, i / nw, x0, sl.mbs as usize, &mut slice, sl.tails);
+                let n = frame::write_slice(&mut out, &b[sl.header.range()], &slice, &b[sl.alpha.range()]) as u32;
+                out[lens + 4 * i..lens + 4 * i + 4].copy_from_slice(&n.to_le_bytes());
+                if out.len() > cap {
+                    return None;
+                }
+            }
         }
-        ss.prev = Some(planes);
+        std::mem::swap(&mut prev, &mut cur);
+        before = f.pics as usize;
     }
     (!c.overrun()).then_some(out)
 }
@@ -616,7 +916,7 @@ fn stripe_dec(s: usize, items: &[(usize, Item)], mut c: Dec, limits: &Limits) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frame::Picture;
+    use crate::frame::{Picture, Slice};
 
     /// A frame of `w` x `h` (4:2:2 or 4:4:4) with sparse random coefficients from `seed`.
     fn synthetic(w: u16, h: u16, chroma: u8, interlace: u8, seed: u64) -> Vec<u8> {

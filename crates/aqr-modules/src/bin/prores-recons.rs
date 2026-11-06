@@ -2,4 +2,8 @@
 
 #![no_main]
 
+// (its memory laid out as a stack: what it takes is its plan, `aqr_prores::module::plan`)
+#[global_allocator]
+static STACK: aqr_api::stack::Stack = aqr_api::stack::Stack::new();
+
 aqr_modules::whole!(slots 16, inputs [in0: 0, in1: 1], |p, _, i, len, threads| aqr_prores::module::decode(p, i, len, threads));

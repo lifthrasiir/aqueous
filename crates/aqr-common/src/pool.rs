@@ -617,6 +617,31 @@ pub fn par_map_apart<R: Send + crate::wire::Wire>(n: usize, threads: usize, f: i
     par_map(n, threads, f)
 }
 
+/// [`par_map_apart`] of work giving bytes, each result given to `each(i, bytes)` in order as
+/// it is joined (on WebAssembly, the task's result itself), rather than all of them at once:
+/// so that the caller holds no more of them than it keeps. The first error of `each` is
+/// returned (the tasks still joined).
+pub fn par_each_apart<E>(
+    n: usize,
+    threads: usize,
+    f: impl Fn(usize) -> Vec<u8> + Sync,
+    mut each: impl FnMut(usize, Vec<u8>) -> Result<(), E>,
+) -> Result<(), E> {
+    #[cfg(target_family = "wasm")]
+    if threads > 1 && n > 1 {
+        let g = |i: usize, out: &mut Vec<u8>| *out = f(i);
+        // SAFETY: joined below (or as they are dropped), before `g` goes
+        let mut t = unsafe { aqr_api::task::spawn(n, &g) };
+        return (0..n).try_for_each(|i| each(i, t.join(i)));
+    }
+    #[cfg(not(target_family = "wasm"))]
+    if threads > 1 && n > 1 {
+        let all = par_map(n, threads, |i| crate::meter::task(|| f(i)));
+        return all.into_iter().enumerate().try_for_each(|(i, r)| each(i, r));
+    }
+    (0..n).try_for_each(|i| each(i, f(i)))
+}
+
 /// `f(i, admit(i))` for each `i` of `0..n`, each on a worker of its own, up to `threads` at
 /// once: the calling thread lets them in, in order, as `admit` does (which may wait, as for
 /// memory), each on a worker as one is free, and the worker is given back as `f` returns. So
