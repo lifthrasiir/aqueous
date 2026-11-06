@@ -1199,7 +1199,7 @@ fn recompress_sealed(
     cx: &Cx,
     sealing: &mut Option<seal::Sealing>,
 ) -> Option<Formula> {
-    if !format_on(format, opt) {
+    if !format_on(format, opt) || !fits(format, d.len()) {
         return None;
     }
     let _s = aqr_common::trace::span(format.name());
@@ -2359,6 +2359,9 @@ fn pure(format: Format, d: &[u8], p: &Pure) -> Option<Option<Formula>> {
     if let Recompressor::Cx(_) = r {
         return None;
     }
+    if !fits(format, d.len()) {
+        return Some(None);
+    }
     #[cfg(test)]
     tests::PURE.with(|n| n.set(n.get() + 1));
     let code = || {
@@ -2606,6 +2609,49 @@ fn recompressor(format: Format) -> Recompressor {
         Format::Iso => Cx(|d, _, _, _, _| bundle::iso(d)),
         Format::Asar => Cx(|d, _, _, _, _| bundle::asar(d)),
     }
+}
+
+/// Bytes of heap the recompressor of `format` takes at most for each byte of its input, as far
+/// as it holds what it makes of all of it (an estimate, rounded up: of its data decoded, its
+/// streams, its models), or none where it holds a bounded part of it at a time (chunks,
+/// segments, entries made apart, slices of the input). An input whose estimate is more than a
+/// recompression may take ([`fits`]) is not recompressed so: data a recompressor cannot take
+/// in parts is kept as it is rather than letting it take all the memory there is.
+fn heap_per_byte(format: Format) -> f64 {
+    use Format::*;
+    // (of the peaks measured in docs/file-formats.md, "memory / input", rounded up; those not
+    // measured as the code holds them)
+    match format {
+        // in parts (segments, chunks, the data of each application made as it is needed), or
+        // slices of the input and entries made apart
+        Jsonl | ProRes | Wim | Iso | Ar | Tar | Cpio | Asar | Aqr | Ppmd => 0.0,
+        // blocks of 64 MiB, chunks of 8 Mi-bases, or slices with an index of frames
+        Obj | Fasta | Mkv => 3.0,
+        // text, coded whole (enwik9: 1.5)
+        Text | GnuGettext => 2.0,
+        Records | Xsv | Sized => 5.0,
+        Pdf | Psd | Mp3 | Ogg | Fsb5 | Dex | Pdb | Arsc | Wasm => 7.0,
+        Sqlite | Pe | MachO | Elf | Jpeg | Lz4 | Lzo | LevelDb | Bzip2 | Hdf5 | Cab | Chm | Alz | Egg | Lha | Rar => {
+            9.0
+        }
+        Raw | Flac | Png | Gif | Clip | Dds | GitPack | Lzma | Xz | SevenZip => 12.0,
+        // every DEFLATE body parsed beforehand
+        Zip => 14.0,
+        // the data decoded and its tokens kept (6 bytes each)
+        Gzip | Zlib | Bvx | Fits => 36.0,
+    }
+}
+
+/// Whether recompressing `len` bytes as `format` takes no more heap ([`heap_per_byte`]) than
+/// one recompression may: the budget of the process (`aqr -M`), or half the system's memory
+/// where more.
+fn fits(format: Format, len: usize) -> bool {
+    let limit = aqr_common::budget::global().limit().max(aqr_common::budget::total().unwrap_or(0) / 2);
+    fits_within(format, len, limit)
+}
+
+fn fits_within(format: Format, len: usize, limit: u64) -> bool {
+    heap_per_byte(format) * len as f64 <= limit as f64
 }
 
 /// Makes the formulas of the files of [`pure`] formats among the contents of `f` beforehand,
@@ -3851,6 +3897,18 @@ mod tests {
         assert_eq!(decode(&c, memo), (Ok(d.clone()), f.applies().len()));
         // without the memo, the same, with the modules run
         assert_eq!(decode(&c, Default::default()), (Ok(d.clone()), 0));
+    }
+
+    /// An input that a recompressor would take more heap for than a recompression may is not
+    /// recompressed so; one taken in parts is, whatever its size.
+    #[test]
+    fn too_large_kept() {
+        let limit = 512 << 20;
+        assert!(fits_within(Format::Png, 40 << 20, limit));
+        assert!(!fits_within(Format::Png, 50 << 20, limit));
+        assert!(fits_within(Format::Text, 200 << 20, limit) && !fits_within(Format::Text, 300 << 20, limit));
+        assert!(fits_within(Format::Iso, usize::MAX >> 8, limit));
+        assert!(fits_within(Format::Jsonl, usize::MAX >> 8, limit));
     }
 
     /// The records of applications of large outputs hold for other batches and archives: one
