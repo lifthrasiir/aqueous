@@ -73,11 +73,37 @@ pub(crate) fn block_end(src: &[u8], p: usize, bsize: usize) -> usize {
     e
 }
 
-/// A block as stored: whole, or its streams (raw length, how, data).
+/// A block as stored: whole, or its streams (raw length, how, data): on the stack, so that
+/// the module takes nothing of its plan for each block.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Stored<'a> {
     /// The block itself.
     Whole(&'a [u8]),
-    Coded(Box<[(usize, u8, &'a [u8]); NSTREAMS]>),
+    Coded([(usize, u8, &'a [u8]); NSTREAMS]),
+}
+
+/// What the index tells of the coded blocks, that the module reserves before the first: each
+/// stream's longest in a block, the template stream's bytes in all, and whether any block is
+/// coded, any stream of rANS.
+pub(crate) struct Sizes {
+    pub(crate) longest: [usize; NSTREAMS],
+    pub(crate) templates: usize,
+    pub(crate) coded: bool,
+    pub(crate) ans: bool,
+}
+
+impl Sizes {
+    /// Bytes of [`aqr_api::stack`] that [`decode_blocks`] takes on one thread, of a file of
+    /// `len` bytes: the decoder's state ([`block::Decoder::reserve`]) and the streams, held to
+    /// the end, and a table of rANS while a stream is decoded.
+    pub(crate) fn plan(&self, len: usize) -> u64 {
+        use aqr_api::stack::block;
+        if !self.coded {
+            return 0;
+        }
+        let streams: u64 = self.longest.iter().map(|&n| block(n as u64)).sum();
+        block::Decoder::plan(len / 2, self.templates) + streams + if self.ans { block(ans::DECODE_TABLE) } else { 0 }
+    }
 }
 
 /// Unpacks the streams of a coded block into `streams`, or a whole block into `out`.
@@ -104,10 +130,11 @@ fn unpack(b: &Stored, streams: &mut Streams, out: &mut Vec<u8>) -> Result<()> {
 }
 
 /// Decodes blocks onto `w` until `len` bytes are written; `next(left)` gives the next block
-/// (`left`: bytes still to come). On an error, what was written is not the original.
+/// (`left`: bytes still to come), of `sizes`. On an error, what was written is not the original.
 pub(crate) fn decode_blocks<'a>(
     next: &mut impl FnMut(usize) -> Result<(usize, Stored<'a>)>,
     len: usize,
+    sizes: &Sizes,
     w: &mut Vec<u8>,
     threads: usize,
 ) -> Result<()> {
@@ -119,9 +146,14 @@ pub(crate) fn decode_blocks<'a>(
     // (each block decoded onto `w` itself)
     let mut done = 0;
     let mut dec = block::Decoder::default();
-    // (a line takes 2 bytes at least)
-    dec.reserve(len / 2);
     let mut streams = new_streams();
+    if sizes.coded {
+        // (a line takes 2 bytes at least)
+        dec.reserve(len / 2, sizes.templates);
+        for (s, &n) in streams.iter_mut().zip(&sizes.longest) {
+            s.reserve_exact(n);
+        }
+    }
     let start = w.len();
     while done < len {
         let (n, b) = next(len - done)?;
@@ -142,6 +174,7 @@ pub(crate) fn decode_blocks<'a>(
 type Unpacked = Result<(Box<Streams>, Vec<u8>)>;
 
 /// Work for the decompressing pool: a block to unpack, or a decoded block to print.
+#[allow(clippy::large_enum_variant)]
 enum DJob<'a> {
     Unpack(usize, Stored<'a>),
     Print(usize, usize, block::Deferred),

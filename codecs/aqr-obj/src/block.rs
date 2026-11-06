@@ -908,8 +908,10 @@ pub struct Decoder {
     arena: Vec<u8>,
     recent: [Recent; 3],
     corners: Corners,
+    /// Whether `tpls` and `arena` are reserved, and not to be grown ([`Decoder::reserve`]).
+    reserved: bool,
     /// Corners of the current face line.
-    fbuf: Vec<(i64, i64, i64)>,
+    face: [(i64, i64, i64); MAX_CORNERS],
 }
 
 impl Default for Decoder {
@@ -920,7 +922,8 @@ impl Default for Decoder {
             arena: vec![],
             recent: [Recent::new(false), Recent::new(false), Recent::new(false)],
             corners: Corners::new(),
-            fbuf: vec![],
+            reserved: false,
+            face: [(0, 0, 0); MAX_CORNERS],
         }
     }
 }
@@ -932,10 +935,32 @@ pub struct DecMark {
 }
 
 impl Decoder {
-    /// Reserves the rings of recent lines and the corners for a file of `n` lines at most.
-    pub fn reserve(&mut self, n: usize) {
+    /// Reserves the rings of recent lines for a file of `n` lines at most, the corners, and the
+    /// templates of `tpl` bytes of the template stream at most, none of them grown after.
+    pub fn reserve(&mut self, n: usize, tpl: usize) {
         self.recent.iter_mut().for_each(|r| r.reserve(n));
-        self.corners.reserve(n);
+        self.corners.reserve();
+        let (t, a) = Self::templates(tpl);
+        self.tpls.reserve_exact(t);
+        self.arena.reserve_exact(a);
+        self.reserved = true;
+    }
+
+    /// The templates of `tpl` bytes of the template stream at most, and their bytes (each takes
+    /// 3 bytes of it at least: its length, its kind and count).
+    fn templates(tpl: usize) -> (usize, usize) {
+        ((tpl / 3).min(MAX_TEMPLATES), tpl.min(MAX_TEMPLATE_BYTES))
+    }
+
+    /// Bytes of [`aqr_api::stack`] that [`Decoder::reserve`] takes, in the order it takes them.
+    pub(crate) fn plan(n: usize, tpl: usize) -> u64 {
+        use aqr_api::stack::block;
+        let ring = block(crate::recent::ENTRY_BYTES * n.min(crate::recent::RECENT) as u64);
+        let (t, a) = Self::templates(tpl);
+        3 * ring
+            + block(crate::corner::CORNER_BYTES * crate::corner::CORNERS as u64)
+            + block(8 * t as u64)
+            + block(a as u64)
     }
 
     pub fn mark(&self) -> DecMark {
@@ -984,7 +1009,13 @@ impl Decoder {
             if id == self.tpls.len() as u64 {
                 let n = tpl.uv() as usize;
                 let Some(k) = tpl.bytes(n) else { return false };
-                if !valid_key(k) || self.tpls.len() >= MAX_TEMPLATES || self.arena.len() + n > MAX_TEMPLATE_BYTES {
+                let full = self.reserved
+                    && (self.tpls.len() == self.tpls.capacity() || self.arena.len() + n > self.arena.capacity());
+                if !valid_key(k)
+                    || full
+                    || self.tpls.len() >= MAX_TEMPLATES
+                    || self.arena.len() + n > MAX_TEMPLATE_BYTES
+                {
                     return false;
                 }
                 self.tpls.push((self.arena.len() as u32, n as u32));
@@ -1063,9 +1094,8 @@ impl Decoder {
                 }
             } else {
                 let n = k[1] as usize;
-                let mut face = std::mem::take(&mut self.fbuf);
-                face.clear();
-                face.resize(n, (0, 0, 0));
+                let face = &mut self.face;
+                face[..n].fill((0, 0, 0));
                 let mut pv = None;
                 for c in face[..n].iter_mut() {
                     let (pat, sl) = (k[i], k[i + 2] as usize);
@@ -1089,8 +1119,7 @@ impl Decoder {
                     }
                     pv = Some(v);
                 }
-                self.corners.face(&face);
-                self.fbuf = face;
+                self.corners.face(&face[..n]);
             }
             out.bytes(&k[i + 1..]);
         }

@@ -62,7 +62,12 @@ independent segments (state reset every so many blocks); not done.
 ### Memory
 
 The heap beyond input and output does not grow with the file: blocks of 4 MB, rings of the
-last 65,536 lines per kind, a table of 65,536 vertices, and templates up to 4 MB.
+last 65,536 lines per kind, a table of 65,536 vertices, and templates up to 4 MB. The Wasm
+module lays it out as a stack (`aqr_api::stack`), its limit its plan (`module::plan`): the file,
+the rings (for the lines the file could have, up to 65,536), the whole vertex table, the
+templates for as many bytes of templates as the index tells (up to 4 MB), each stream for its
+longest in a block, all reserved before the first block; and a table of rANS as a stream is
+decoded.
 
 ## Corpus
 

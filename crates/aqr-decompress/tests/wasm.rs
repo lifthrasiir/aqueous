@@ -1740,6 +1740,56 @@ fn jsonl_plans_hold() {
     }
 }
 
+/// obj-recons lays its memory out as a stack, its limit its plan: of a mesh in blocks (some
+/// stored whole), of unit normals and equal lines, and of faces of indexes past the vertices.
+#[test]
+fn obj_plans_hold() {
+    use aqr_obj::codec::Options;
+    let mut r = 5u64;
+    let mut rnd = || {
+        r ^= r << 13;
+        r ^= r >> 7;
+        r ^= r << 17;
+        r
+    };
+    let mut mesh = String::new();
+    let (w, h) = (60, 60);
+    for y in 0..h {
+        for x in 0..w {
+            mesh += &format!("v {x}.0 {y}.0 {}\nvt 0.{x:02} 0.{y:02}\nvn 0 0 1\n", (x * y) % 7);
+        }
+    }
+    mesh += "# a comment\ng part\nusemtl stone\n";
+    for y in 0..h - 1 {
+        for x in 0..w - 1 {
+            let a = y * w + x + 1;
+            let (b, c, d) = (a + 1, a + w + 1, a + w);
+            mesh += &format!("f {a}/{a}/{a} {b}/{b}/{b} {c}/{c}/{c}\nf {a}/{a}/{a} {c}/{c}/{c} {d}/{d}/{d}\n");
+        }
+    }
+    let mut normals = String::new();
+    for i in 0..20000 {
+        let mut g = || (rnd() >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0;
+        let (x, y, z) = (g(), g(), g());
+        let l = (x * x + y * y + z * z).sqrt().max(1e-9);
+        normals += &format!("vn {:.6} {:.6} {:.6}\n", x / l, y / l, z / l);
+        normals += &format!("v {}.5 1.25 2.75{}\n", i % 50, if i % 3 == 0 { " 1.0" } else { "" });
+    }
+    let mut far = String::from("v 1 2 3\nv 4 5 6\nv 7 8 9\n");
+    for i in 0..3000 {
+        far += &format!("f 1 {} 99999{}\nv {i} 0 0\n", 2 + i % 2, i % 10);
+    }
+    for (t, d, opt) in [
+        ("mesh", mesh, Options { block: 1 << 15, force_whole: 0x0101, ..Default::default() }),
+        ("normals", normals, Options::default()),
+        ("far", far, Options { block: 1 << 12, ..Default::default() }),
+    ] {
+        let d = d.into_bytes();
+        let f = aqr_obj::formula::encode_with(&d, &opt).unwrap_or_else(|| panic!("{t}"));
+        plan_holds(&format!("obj {t}"), f, &d);
+    }
+}
+
 /// git-pack-recons and git-pack-index-recons lay their memory out as stacks, their limits their
 /// plans: of a pack of more entries than the stack's holes, alone and with its index and reverse
 /// index after it.

@@ -34,6 +34,10 @@ pub(crate) struct Corner {
     n: i64,
 }
 
+// (the plan's size: the same on 32 bits)
+const _: () = assert!(size_of::<Corner>() == CORNER_BYTES as usize);
+pub(crate) const CORNER_BYTES: u64 = 40;
+
 pub(crate) struct Corners(Vec<Corner>);
 
 impl Corners {
@@ -42,9 +46,9 @@ impl Corners {
         Corners(vec![])
     }
 
-    /// Room for the vertices of a file of `n` lines at most, so that the table is not grown.
-    pub(crate) fn reserve(&mut self, n: usize) {
-        self.0.reserve_exact(n.min(CORNERS));
+    /// Room for every slot, so that the table is not grown (an index may be any number).
+    pub(crate) fn reserve(&mut self) {
+        self.0.reserve_exact(CORNERS);
     }
 
     #[inline]

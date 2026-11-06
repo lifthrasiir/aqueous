@@ -40,6 +40,10 @@ impl Entry {
 /// the last line with them. Entries carry their line number (a slot holds one line in
 /// RECENT). The encoder clears all after undoing a block, so that it only refers to lines
 /// the decoder has.
+// (the plan's size: the same on 32 bits)
+const _: () = assert!(size_of::<Entry>() == ENTRY_BYTES as usize);
+pub(crate) const ENTRY_BYTES: u64 = 40;
+
 pub(crate) struct Recent {
     ring: Vec<Entry>,
     table: Vec<u64>,

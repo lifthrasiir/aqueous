@@ -151,6 +151,9 @@ pub fn encode(src: &[u8], out: &mut Vec<u8>) -> Option<()> {
     Some(())
 }
 
+/// Bytes of the table [`decode`] makes (and frees) as it decodes.
+pub(crate) const DECODE_TABLE: u64 = 6 * (1 << 12);
+
 /// Decodes into `out` (cleared) LEB128 values until it holds `n` bytes. False if the data
 /// does not decode to exactly that (corrupt data may decode to something wrong: the file
 /// checksum catches it).
@@ -178,6 +181,7 @@ pub fn decode(src: &[u8], n: usize, out: &mut Vec<u8>) -> bool {
     }
     // slot -> (symbol, frequency, cumulative)
     let mut slots = vec![(0u16, 0u16, 0u16); M as usize];
+    const { assert!(DECODE_TABLE == 6 * M as u64) };
     let mut c = 0usize;
     for s in 0..NSYM {
         for e in &mut slots[c..c + f[s] as usize] {
