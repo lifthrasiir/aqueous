@@ -1448,8 +1448,11 @@ fn plan_holds(what: &str, mut f: Formula, want: &[u8]) {
     // (those of this application: other tests' run meanwhile, without limits)
     let mine: Vec<_> = applied.iter().filter(|a| a.limit == limit).collect();
     assert!(!mine.is_empty(), "{what}: not applied");
+    // (of tasks, what they would take running as many at once as their slots allow)
     for a in mine {
-        assert!(a.working <= plan && plan - a.working < 65536, "{what}: plan {plan}, working {}", a.working);
+        let worst = a.worst();
+        assert!(a.working <= worst, "{what}: working {} past {worst}", a.working);
+        assert!(worst <= plan && plan - worst < 65536, "{what}: plan {plan}, working at most {worst}");
     }
 }
 

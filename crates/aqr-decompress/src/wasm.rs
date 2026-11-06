@@ -445,6 +445,9 @@ struct App {
     peak: AtomicU64,
     instance_peak: AtomicU64,
     task_peak: AtomicU64,
+    /// Of each spawn of the application's instance, by handle (where applications are kept):
+    /// [`SpawnPeaks`].
+    spawns: Mutex<Vec<SpawnPeaks>>,
     exec: Arc<Exec>,
     chans: Mutex<Vec<Chan>>,
     /// The identity of the next task (0 is the application's instance).
@@ -483,8 +486,9 @@ struct Cell(Mutex<Spawned>);
 
 #[derive(Default)]
 struct Spawned {
-    /// Its result, once it is done (taken with it).
+    /// Its result, once it is done (taken with it), and the most its memories took.
     result: Option<Decoded<Vec<u8>>>,
+    peak: u64,
     joined: bool,
     /// The instances waiting for it.
     waiting: Vec<Waker>,
@@ -570,10 +574,15 @@ fn spawn(c: &mut Caller<'_, State>, class: usize, start: Start, arg: u32, n: u32
         false => s.app.classes[class].clone(),
     };
     let most = s.c.0.slots[class];
+    // (where applications are kept, of the application's instance: by handle)
+    if !s.task && APPLIED.lock().unwrap().is_some() {
+        s.app.spawns.lock().unwrap().push(SpawnPeaks { slots: most, instance: 0, tasks: Vec::new() });
+    }
     let cells: Vec<Option<Arc<Cell>>> = (0..n)
         .map(|i| {
             let cell = Arc::new(Cell::default());
-            let job = Job { c: s.c.clone(), app: s.app.clone(), class, start: start.clone(), arg, i };
+            let job =
+                Job { c: s.c.clone(), app: s.app.clone(), class, start: start.clone(), arg, i, cell: cell.clone() };
             let (done, app) = (cell.clone(), s.app.clone());
             let task = Box::pin(async move {
                 let r = job.run().await;
@@ -602,6 +611,8 @@ struct Job {
     start: Start,
     arg: u32,
     i: u32,
+    /// Where its peak goes.
+    cell: Arc<Cell>,
 }
 
 /// What a task's working memory starts as: a copy of the spawning instance's (`aqr_spawn`), or
@@ -667,8 +678,9 @@ struct State {
     c: Shared,
     app: Arc<App>,
     id: u64,
-    /// The bytes of the memories of this instance, in the total of `app`.
+    /// The bytes of the memories of this instance, in the total of `app`, and the most of them.
     mine: u64,
+    peak: u64,
     working: Option<Memory>,
     /// The data of the inputs of a part module, their memories and visible ranges.
     inputs: Vec<(Feed, Option<Memory>, u64, u64)>,
@@ -695,6 +707,7 @@ impl State {
             app,
             id,
             mine: 0,
+            peak: 0,
             working: None,
             inputs: Vec::new(),
             outputs: Vec::new(),
@@ -749,6 +762,7 @@ impl ResourceLimiter for State {
             false => self.app.account(desired as u64, current as u64)?,
         }
         self.mine = mine;
+        self.peak = self.peak.max(mine);
         match self.task {
             true => self.app.task_peak.fetch_max(self.mine, Ordering::Relaxed),
             false => self.app.instance_peak.fetch_max(self.mine, Ordering::Relaxed),
@@ -1036,6 +1050,7 @@ impl Shared {
             peak: AtomicU64::new(0),
             instance_peak: AtomicU64::new(0),
             task_peak: AtomicU64::new(0),
+            spawns: Mutex::default(),
             exec: exec.clone(),
             chans: Mutex::default(),
             next: AtomicU64::new(1),
@@ -1115,6 +1130,10 @@ impl Shared {
                 working: app.peak.load(Ordering::Relaxed).saturating_sub(imported),
                 instance: app.instance_peak.load(Ordering::Relaxed).saturating_sub(imported),
                 task: app.task_peak.load(Ordering::Relaxed),
+                spawns: std::mem::take(&mut *app.spawns.lock().unwrap())
+                    .into_iter()
+                    .map(|s| SpawnPeaks { instance: s.instance.saturating_sub(imported), ..s })
+                    .collect(),
                 ok: r.is_ok(),
             });
         }
@@ -1201,7 +1220,34 @@ pub struct Applied {
     /// task did.
     pub instance: u64,
     pub task: u64,
+    /// Of each spawn of the application's instance: [`SpawnPeaks`].
+    pub spawns: Vec<SpawnPeaks>,
     pub ok: bool,
+}
+
+/// A spawn of an application's instance, as it ran: the task slots of its class, the most the
+/// instance's memories took as it took the tasks' results (but those imported), and the most
+/// each task's took, in the order they were taken.
+#[derive(Debug, Clone)]
+pub struct SpawnPeaks {
+    pub slots: usize,
+    pub instance: u64,
+    pub tasks: Vec<u64>,
+}
+
+impl Applied {
+    /// The most that `working` could be however the tasks ran (of the spawns of the instance;
+    /// the tasks' own spawns and the channels' messages aside): the instance's peak, or the
+    /// instance as it took a spawn's results and as many of its tasks at once as their slots
+    /// allow, the largest of them.
+    pub fn worst(&self) -> u64 {
+        let spawn = |s: &SpawnPeaks| {
+            let mut t = s.tasks.clone();
+            t.sort_unstable_by(|a, b| b.cmp(a));
+            s.instance + t.iter().take(s.slots).sum::<u64>()
+        };
+        self.spawns.iter().map(spawn).fold(self.instance, u64::max)
+    }
 }
 
 static APPLIED: Mutex<Option<Vec<Applied>>> = Mutex::new(None);
@@ -1256,6 +1302,7 @@ impl Job {
         if store.data().untaken() {
             return invalid("tasks not taken");
         }
+        self.cell.0.lock().unwrap().peak = store.data().peak;
         Ok(std::mem::take(&mut store.data_mut().result))
     }
 }
@@ -1478,10 +1525,16 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
                 let Some(cell) = joined else {
                     return violation(format!("aqr_take({h}, {i}) of a task not joined, or taken"));
                 };
-                let r = match cell.0.lock().unwrap().result.take() {
-                    Some(Ok(r)) => r,
+                let (r, peak) = match &mut *cell.0.lock().unwrap() {
+                    Spawned { result: r @ Some(Ok(_)), peak, .. } => (r.take().unwrap().unwrap(), *peak),
                     _ => unreachable!("joined"),
                 };
+                if !c.data().task
+                    && let Some(s) = c.data().app.spawns.lock().unwrap().get_mut(h as u32 as usize)
+                {
+                    s.instance = s.instance.max(c.data().mine);
+                    s.tasks.push(peak);
+                }
                 let Some((w, range)) = working_range(&c, dst, len).filter(|_| len as u32 as usize <= r.len()) else {
                     return violation(format!("aqr_take({h}, {i}, {dst}, {len}) out of bounds"));
                 };
