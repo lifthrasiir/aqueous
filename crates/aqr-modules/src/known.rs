@@ -366,7 +366,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "pdf-recons",
         version: 2,
-        sha512_256: hex("d06c310c7b62ea912d26e7f350dc771158a3289d937d468c1a0bf22f4ca8058e"),
+        sha512_256: hex("4daea3079bc3f4cd860c35865add526ac03511f00604f26bd0c9d91eb3f51bcb"),
         block: include_bytes!("../wasm/pdf-recons.block"),
     },
     Known {
