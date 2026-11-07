@@ -29,9 +29,12 @@ Contents:
 
 ## 2. The module
 
-- **Module**: name `wrt-recons`, version 2.
-- **Params**: the pieces of the coded text, one or more, each a pair of varints: the length of
-  its coded text, then the length of its text. The coded texts of the pieces follow each other
+- **Module**: name `wrt-recons`, version 3.
+- **Params**: first the shape of the dictionary, four varints: its count of entries (§3), then
+  the lengths of the layout's three lists (one, two and three bytes); the module fails where
+  they are not the dictionary's. A memory plan goes by them, as a resource's contents are not at
+  hand for it. Then the pieces of the coded text, one or more, each a pair of varints: the
+  length of its coded text, then the length of its text. The coded texts of the pieces follow each other
   in the input, and their lengths must add up to the input's length. The lengths of their texts
   must add up to the declared length.
 - **Resources**: one, the dictionary (§3).
@@ -40,7 +43,8 @@ Contents:
   includes malformed params, a malformed dictionary, coded text that ends inside a code, and a
   piece giving a text of a length other than its own.
 
-Version 1 had no params: the coded text was one piece, of the declared length.
+Version 1 had no params: the coded text was one piece, of the declared length. Version 2 had
+the pieces alone; version 3 the shape before them.
 
 ## 3. The dictionary
 
@@ -170,8 +174,10 @@ The piece's text ends where its coded text does. A step must not be cut by the e
 
 ## 6. The module `wrt-recons-hangul`
 
-- **Module**: name `wrt-recons-hangul`, version 1.
-- **Params**: the pieces of the coded text, as in §2.
+- **Module**: name `wrt-recons-hangul`, version 2.
+- **Params**: first a varint, the dictionary's count of entries (§6.1; the module fails where it
+  is not the dictionary's); then the pieces of the coded text, as in §2. Version 1 had the
+  pieces alone.
 - **Resources**: one, the dictionary.
 - **Inputs**: one, `text`, the coded text.
 - **Output**: the texts of the pieces, in order. Any inconsistency is an error, as in §2.

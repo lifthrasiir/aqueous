@@ -467,14 +467,14 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "wrt-recons-hangul",
-        version: 1,
-        sha512_256: hex("1135063cb56a6a6e15bf01df2c75d2802fa70b668878fd934efcfb6d9817a74a"),
+        version: 2,
+        sha512_256: hex("9d5c184ff4736bf54e10966f57542fc74977c9fe2684f1668c05c4d303a59bae"),
         block: include_bytes!("../wasm/wrt-recons-hangul.block"),
     },
     Known {
         name: "wrt-recons",
-        version: 2,
-        sha512_256: hex("d3ef93b7b6cb6a501eedfe39f521386601b84f5db7cb899db86a681e3605c081"),
+        version: 3,
+        sha512_256: hex("d7a2ad763a9c9ef48cfb8a35ba24b6654e03fa8fbe2879f50109750c8dacc8f8"),
         block: include_bytes!("../wasm/wrt-recons.block"),
     },
     Known {

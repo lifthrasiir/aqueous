@@ -13,27 +13,17 @@ use crate::words::{self, Dictionary};
 
 pub use crate::module::{decode, decode_hangul};
 
-pub const MODULE: Module = Module::new("wrt-recons", 2).with_memory(memory);
-pub const HANGUL: Module = Module::new("wrt-recons-hangul", 1).with_memory(memory_hangul);
+pub const MODULE: Module = Module::new("wrt-recons", 3).with_plan(plan_recons);
+pub const HANGUL: Module = Module::new("wrt-recons-hangul", 2).with_plan(plan_hangul);
 
-/// The memory of [`MODULE`]: the whole of it with the dictionary parsed (`D` bytes of resource,
-/// copied once more into the parsed dictionary), and the list of entries (12 bytes each, at most
-/// `D / 2` of them, a vector grown by pushes: three times its final length while it grows); and
-/// per piece of the parameters, as [`memory_hangul`] counts.
-fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let &[dict] = u.resources else { return None };
-    let pieces = u.params.len() as u64 / 2 + 1;
-    Some(u.whole(dict + 3 * 12 * (dict / 2) + pieces * (3 * 8 + 24 + 24 + 8), 8))
+/// The memory of [`MODULE`]: its plan ([`crate::plan::recons`]).
+fn plan_recons(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    crate::plan::recons(u.initial(), u.params, u.resources, u.inputs, u.output())
 }
 
-/// The memory of [`HANGUL`]: as [`memory`], with entries of 8 bytes; and, per piece of the
-/// parameters (two varints at least, so `P / 2` of them at most), its pair of lengths (8 bytes
-/// in a vector grown by pushes, three times while it grows), its job (a mutex around two
-/// slices, 24) and the mutex of its result in the pool (24) and the result (8).
-fn memory_hangul(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let &[dict] = u.resources else { return None };
-    let pieces = u.params.len() as u64 / 2 + 1;
-    Some(u.whole(dict + 3 * 8 * (dict / 2) + pieces * (3 * 8 + 24 + 24 + 8), 8))
+/// The memory of [`HANGUL`]: its plan ([`crate::plan::recons_hangul`]).
+fn plan_hangul(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    crate::plan::recons_hangul(u.initial(), u.params, u.resources, u.inputs, u.output())
 }
 
 /// The names of the inputs' streams, in order.
@@ -174,7 +164,7 @@ fn coded(input: &[u8], shared: &Shared, own: usize, threads: usize) -> Option<Fo
         }
         let (text, pieces) = dict.encode(input, threads);
         let inputs = vec![f.push_as("wrt/hangul", Kind::Text, text)];
-        f.root = Node::apply_with(HANGUL, vec![resource.clone()], words::params(&pieces), inputs, len);
+        f.root = Node::apply_with(HANGUL, vec![resource.clone()], hangul::params(&resource[..], &pieces), inputs, len);
     } else {
         let (dict, resource) = shared.words.as_ref()?;
         if !pays(input, |s| dict.encode_piece(s), own) {
@@ -182,7 +172,7 @@ fn coded(input: &[u8], shared: &Shared, own: usize, threads: usize) -> Option<Fo
         }
         let (text, pieces) = dict.encode(input, threads);
         let inputs = vec![f.push_as("wrt/text", Kind::Text, text)];
-        f.root = Node::apply_with(MODULE, vec![resource.clone()], words::params(&pieces), inputs, len);
+        f.root = Node::apply_with(MODULE, vec![resource.clone()], words::params(&resource[..], &pieces), inputs, len);
     }
     Some(f)
 }

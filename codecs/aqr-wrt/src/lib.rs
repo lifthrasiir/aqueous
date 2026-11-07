@@ -11,6 +11,8 @@
 pub mod formula;
 pub mod hangul;
 pub mod module;
+#[cfg(feature = "encode")]
+pub mod plan;
 pub mod words;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -6236,13 +6236,13 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/wasm-recons.wasm" title="crates/aqr-modules/wasm/wasm-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-wasm/FORMAT.md" title="codecs/aqr-wasm/FORMAT.md">R</a>
     <tr>
-      <td><code>1135063cb56a6a6e15bf01df2c75d2802fa70b668878fd934efcfb6d9817a74a</code>
-      <td>wrt-recons-hangul@1
+      <td><code>9d5c184ff4736bf54e10966f57542fc74977c9fe2684f1668c05c4d303a59bae</code>
+      <td>wrt-recons-hangul@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/wrt-recons-hangul.wasm" title="crates/aqr-modules/wasm/wrt-recons-hangul.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-wrt/FORMAT.md" title="codecs/aqr-wrt/FORMAT.md">R</a>
     <tr>
-      <td><code>d3ef93b7b6cb6a501eedfe39f521386601b84f5db7cb899db86a681e3605c081</code>
-      <td>wrt-recons@2
+      <td><code>d7a2ad763a9c9ef48cfb8a35ba24b6654e03fa8fbe2879f50109750c8dacc8f8</code>
+      <td>wrt-recons@3
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/wrt-recons.wasm" title="crates/aqr-modules/wasm/wrt-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-wrt/FORMAT.md" title="codecs/aqr-wrt/FORMAT.md">R</a>
     <tr>

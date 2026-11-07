@@ -371,12 +371,41 @@ const UTF8: u8 = 6;
 /// A dictionary as the decoder takes it: its resource, what each byte of the coded text is
 /// and its place in its list, and where each entry is in the resource.
 struct Parsed {
-    bytes: Vec<u8>,
     class: [u8; 256],
     place: [u8; 256],
     n1: usize,
     two: usize,
     entries: Vec<(usize, usize)>,
+}
+
+/// Bytes of an entry of [`Parsed`] on WebAssembly (32-bit pointers), checked there by an
+/// assertion.
+pub const ENTRY: u64 = 8;
+
+#[cfg(target_family = "wasm")]
+const _: () = assert!(size_of::<(usize, usize)>() as u64 == ENTRY);
+
+/// The count of entries of the dictionary `bytes`, as [`Parsed`] holds them: what the module's
+/// memory plan follows.
+pub fn entries_of(bytes: &[u8]) -> Result<usize> {
+    Ok(Parsed::of(bytes)?.entries.len())
+}
+
+/// The parameters of `wrt-recons-hangul`: the count of the dictionary's entries (which the
+/// module's memory plan goes by), then the coded and text lengths of the pieces (each a pair of
+/// varints).
+pub fn params(dict: &[u8], lens: &[(usize, usize)]) -> Vec<u8> {
+    let mut p = Vec::new();
+    varint::put(&mut p, entries_of(dict).unwrap_or(0) as u64);
+    p.extend_from_slice(&crate::words::params_of(lens));
+    p
+}
+
+/// The count of entries that `params` tell, and the rest of them, the pieces'.
+pub fn header(params: &[u8]) -> Result<(usize, &[u8])> {
+    let mut at = 0;
+    let n = varint::get(params, &mut at).ok().and_then(|n| usize::try_from(n).ok()).ok_or_else(corrupt)?;
+    Ok((n, &params[at..]))
 }
 
 impl Parsed {
@@ -406,7 +435,8 @@ impl Parsed {
             }
             (class[b as usize], place[b as usize]) = (ONE, i as u8);
         }
-        let mut entries = Vec::new();
+        // (reserved for them all: as many as lines' ends)
+        let mut entries = Vec::with_capacity(bytes[at..].iter().filter(|&&b| b == b'\n').count());
         while at < bytes.len() {
             let e = at + bytes[at..].iter().position(|&b| b == b'\n').ok_or_else(corrupt)?;
             if e == at {
@@ -419,11 +449,12 @@ impl Parsed {
         if entries.len() > capacity {
             return Err(corrupt());
         }
-        Ok(Parsed { bytes: bytes.to_vec(), class, place, n1, two, entries })
+        Ok(Parsed { class, place, n1, two, entries })
     }
 
-    /// Piece `text` decoded into `out`, which it must fill.
-    fn piece(&self, text: &[u8], out: &mut [u8]) -> Result<()> {
+    /// Piece `text` decoded into `out`, which it must fill; `dict` is the resource this was
+    /// parsed of.
+    fn piece(&self, dict: &[u8], text: &[u8], out: &mut [u8]) -> Result<()> {
         let (class, place) = (&self.class, &self.place);
         let (n1, n2) = (self.n1, 256 * self.two);
         let byte = |j: usize| text.get(j).copied().ok_or_else(corrupt);
@@ -490,7 +521,7 @@ impl Parsed {
                 _ => return Err(corrupt()),
             };
             let &(s, e) = self.entries.get(k).ok_or_else(corrupt)?;
-            put(&mut o, &self.bytes[s..e])?;
+            put(&mut o, &dict[s..e])?;
         }
         if o != out.len() {
             return Err(corrupt());
@@ -499,38 +530,59 @@ impl Parsed {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 thread_local! {
-    /// The dictionary last parsed on the thread, as the texts of an archive share one.
-    static PARSED: std::cell::RefCell<Option<std::sync::Arc<Parsed>>> = const { std::cell::RefCell::new(None) };
+    /// The dictionary last parsed on the thread (and its resource), as the texts of an archive
+    /// share one.
+    static PARSED: std::cell::RefCell<Option<(Vec<u8>, std::sync::Arc<Parsed>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `dict` parsed: the parse of the last on the thread where it is the same, natively. In Wasm an
+/// instance parses it once and holds nothing else of it.
+#[cfg(not(target_family = "wasm"))]
+fn parsed(dict: &[u8]) -> Result<impl std::borrow::Borrow<Parsed>> {
+    PARSED.with(|c| {
+        let mut c = c.borrow_mut();
+        match &*c {
+            Some((bytes, p)) if bytes == dict => Ok(p.clone()),
+            _ => {
+                let p = std::sync::Arc::new(Parsed::of(dict)?);
+                *c = Some((dict.to_vec(), p.clone()));
+                Ok(p)
+            }
+        }
+    })
+}
+
+#[cfg(target_family = "wasm")]
+fn parsed(dict: &[u8]) -> Result<impl std::borrow::Borrow<Parsed>> {
+    Parsed::of(dict)
 }
 
 /// The text of `len` bytes from `text` coded with the dictionary of resource `dict`
 /// ([`Dictionary::to_bytes`]), in pieces of `params` ([`params`]), decoded on up to `threads`
 /// threads.
 pub fn decode(params: &[u8], dict: &[u8], text: &[u8], len: usize, threads: usize) -> Result<Vec<u8>> {
-    let p = PARSED.with(|c| {
-        let mut c = c.borrow_mut();
-        match &*c {
-            Some(p) if p.bytes == dict => Ok(p.clone()),
-            _ => {
-                let p = std::sync::Arc::new(Parsed::of(dict)?);
-                *c = Some(p.clone());
-                Ok(p)
-            }
-        }
-    })?;
-    in_pieces(params, text, len, threads, |x, o| p.piece(x, o))
+    let (entries, params) = header(params)?;
+    let p = parsed(dict)?;
+    let p: &Parsed = std::borrow::Borrow::borrow(&p);
+    // (what the memory plan went by)
+    if p.entries.len() != entries {
+        return Err(corrupt());
+    }
+    in_pieces(params, text, len, threads, |x, o| p.piece(dict, x, o))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::words::params;
     use aqr_common::rng::Rng;
 
     fn back_with(dict: &Dictionary, d: &[u8], threads: usize) -> Vec<u8> {
         let (text, lens) = dict.encode(d, threads);
-        let (r, p) = (dict.to_bytes(), params(&lens));
+        let r = dict.to_bytes();
+        let p = params(&r, &lens);
         let out = decode(&p, &r, &text, d.len(), threads).unwrap();
         assert!(out == d, "{:?}", String::from_utf8_lossy(&out));
         assert!(decode(&p, &r, &text, d.len() + 1, 1).is_err());
@@ -636,12 +688,13 @@ mod tests {
         let d = "나는 사람이다. 사람은 나다. 나는 사람이다.\n".repeat(4).into_bytes();
         let dict = Dictionary::of(&[&d], 1).unwrap();
         let (text, lens) = dict.encode(&d, 1);
-        let (r, p) = (dict.to_bytes(), params(&lens));
+        let r = dict.to_bytes();
+        let p = params(&r, &lens);
         assert!(decode(&p, &r, &text, d.len(), 1).is_ok());
         // pieces not of the text's lengths, none
-        assert!(decode(&params(&[(text.len() - 1, d.len())]), &r, &text, d.len(), 1).is_err());
+        assert!(decode(&params(&r, &[(text.len() - 1, d.len())]), &r, &text, d.len(), 1).is_err());
         assert!(decode(&[], &r, &[], 0, 1).is_err());
-        let one = |t: &[u8], n: usize| decode(&params(&[(t.len(), n)]), &r, t, n, 1);
+        let one = |t: &[u8], n: usize| decode(&params(&r, &[(t.len(), n)]), &r, t, n, 1);
         // a syllable past the last, a code past the entries, cut codes and escapes
         assert!(one(&[0xab, 0xa3], 3).is_ok() && one(&[0xab, 0xa4], 3).is_err());
         assert!(one(&[LEADS[0], 200], 9).is_err());
@@ -650,7 +703,7 @@ mod tests {
         assert!(one("é".as_bytes(), 2).is_ok() && one(b"\xc3\x29", 2).is_err());
         assert!(one(b"\xe4\xb8", 3).is_err());
         // malformed dictionaries: a code of one byte not ASCII or LF, an empty entry, too many leads
-        let bad = |r: &[u8]| decode(&params(&[(1, 1)]), r, b"a", 1, 1).is_err();
+        let bad = |r: &[u8]| decode(&params(r, &[(1, 1)]), r, b"a", 1, 1).is_err();
         assert!(!bad(&[0, 0, b'x', b'\n']));
         assert!(bad(&[1, 0x80, 0]) && bad(&[1, b'\n', 0]) && bad(&[0, 0, b'\n']) && bad(&[0, 33]));
         assert!(bad(&[0, 0, b'x']));

@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use aqr_common::varint;
 
@@ -448,19 +448,33 @@ fn layout(bytes: &[u64; 256], counts: &[u64]) -> Layout {
     }
 }
 
-/// A dictionary as the decoder takes it: its resource, the layout, and where each entry is in
-/// the resource and whether it is a word.
+/// A dictionary as the decoder takes it: the layout, and where each entry is in the resource
+/// (which `piece` is given again) and whether it is a word.
 struct Parsed {
-    bytes: Vec<u8>,
     layout: Layout,
     entries: Vec<(usize, usize, bool)>,
+}
+
+/// Bytes of an entry of [`Parsed`] on WebAssembly (32-bit pointers), checked there by an
+/// assertion.
+pub const ENTRY: u64 = 12;
+
+#[cfg(target_family = "wasm")]
+const _: () = assert!(size_of::<(usize, usize, bool)>() as u64 == ENTRY);
+
+/// The lengths of the layout's three lists and the count of entries of the dictionary
+/// `bytes`, as [`Parsed`] holds them: what the module's memory plan follows.
+pub fn shape(bytes: &[u8]) -> Result<([usize; 3], usize)> {
+    let p = Parsed::of(bytes)?;
+    Ok(([p.layout.one.len(), p.layout.two.len(), p.layout.three.len()], p.entries.len()))
 }
 
 impl Parsed {
     fn of(bytes: &[u8]) -> Result<Parsed> {
         let mut at = 0;
         let layout = Layout::read(bytes, &mut at)?;
-        let mut entries = Vec::new();
+        // (reserved for them all: as many as lines' ends)
+        let mut entries = Vec::with_capacity(bytes[at..].iter().filter(|&&b| b == b'\n').count());
         while at < bytes.len() {
             let e = at + bytes[at..].iter().position(|&b| b == b'\n').ok_or_else(corrupt)?;
             let t = &bytes[at..e];
@@ -474,12 +488,13 @@ impl Parsed {
         if entries.len() as u64 > layout.capacity() {
             return Err(corrupt());
         }
-        Ok(Parsed { bytes: bytes.to_vec(), layout, entries })
+        Ok(Parsed { layout, entries })
     }
 
-    /// The text `out` from the coded text `text` of a piece, which must fill all of `out`.
-    fn piece(&self, text: &[u8], out: &mut [u8]) -> Result<()> {
-        let (layout, entries, dict) = (&self.layout, &self.entries, &self.bytes[..]);
+    /// The text `out` from the coded text `text` of a piece, which must fill all of `out`;
+    /// `dict` is the resource this was parsed of.
+    fn piece(&self, dict: &[u8], text: &[u8], out: &mut [u8]) -> Result<()> {
+        let (layout, entries) = (&self.layout, &self.entries);
         let (class, place) = layout.classes();
         let (n1, n2) = (layout.one.len(), layout.two.len() * 256);
         let byte = |j: usize| text.get(j).copied().ok_or_else(corrupt);
@@ -567,14 +582,50 @@ impl Parsed {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 thread_local! {
-    /// The dictionary last parsed on the thread, as the texts of an archive share one.
-    static PARSED: std::cell::RefCell<Option<Arc<Parsed>>> = const { std::cell::RefCell::new(None) };
+    /// The dictionary last parsed on the thread (and its resource), as the texts of an archive
+    /// share one.
+    static PARSED: std::cell::RefCell<Option<(Vec<u8>, std::sync::Arc<Parsed>)>> = const { std::cell::RefCell::new(None) };
 }
 
-/// The coded and text lengths of the pieces (each a pair of varints), as the modules'
-/// parameters.
-pub fn params(lens: &[(usize, usize)]) -> Vec<u8> {
+/// `dict` parsed: the parse of the last on the thread where it is the same, natively. In Wasm an
+/// instance parses it once and holds nothing else of it.
+#[cfg(not(target_family = "wasm"))]
+fn parsed(dict: &[u8]) -> Result<impl std::borrow::Borrow<Parsed>> {
+    PARSED.with(|c| {
+        let mut c = c.borrow_mut();
+        match &*c {
+            Some((bytes, p)) if bytes == dict => Ok(p.clone()),
+            _ => {
+                let p = std::sync::Arc::new(Parsed::of(dict)?);
+                *c = Some((dict.to_vec(), p.clone()));
+                Ok(p)
+            }
+        }
+    })
+}
+
+#[cfg(target_family = "wasm")]
+fn parsed(dict: &[u8]) -> Result<impl std::borrow::Borrow<Parsed>> {
+    Parsed::of(dict)
+}
+
+/// The parameters of `wrt-recons`: the shape of the dictionary `dict` (its count of entries and
+/// the lengths of its layout's three lists, which the module's memory plan goes by), then the
+/// coded and text lengths of the pieces (each a pair of varints).
+pub fn params(dict: &[u8], lens: &[(usize, usize)]) -> Vec<u8> {
+    let mut p = Vec::new();
+    let (lists, entries) = shape(dict).unwrap_or_default();
+    for n in [entries, lists[0], lists[1], lists[2]] {
+        varint::put(&mut p, n as u64);
+    }
+    p.extend_from_slice(&params_of(lens));
+    p
+}
+
+/// The coded and text lengths of the pieces, each a pair of varints.
+pub(crate) fn params_of(lens: &[(usize, usize)]) -> Vec<u8> {
     let mut p = Vec::new();
     for &(c, t) in lens {
         varint::put(&mut p, c as u64);
@@ -583,8 +634,29 @@ pub fn params(lens: &[(usize, usize)]) -> Vec<u8> {
     p
 }
 
+/// The shape that `params` tell of the dictionary (its count of entries and the lengths of the
+/// layout's lists) and the rest of them, the pieces'.
+pub fn header(params: &[u8]) -> Result<(usize, [usize; 3], &[u8])> {
+    let mut at = 0;
+    let mut get = || varint::get(params, &mut at).ok().and_then(|n| usize::try_from(n).ok()).ok_or_else(corrupt);
+    let (entries, a, b, c) = (get()?, get()?, get()?, get()?);
+    Ok((entries, [a, b, c], &params[at..]))
+}
+
+/// Calls `f` with the coded and text lengths of each piece of `params` ([`params`]), in order.
+fn each_piece(params: &[u8], mut f: impl FnMut(usize, usize) -> Result<()>) -> Result<()> {
+    let mut at = 0;
+    while at < params.len() {
+        let mut get = || varint::get(params, &mut at).ok().and_then(|n| usize::try_from(n).ok()).ok_or_else(corrupt);
+        let (c, t) = (get()?, get()?);
+        f(c, t)?;
+    }
+    Ok(())
+}
+
 /// The text of `len` bytes from coded text `text` in the pieces of `params` ([`params`]), each
-/// decoded by `piece` (its coded text, and its text to fill) on up to `threads` threads.
+/// decoded by `piece` (its coded text, and its text to fill) on up to `threads` threads; in Wasm,
+/// which has none, one after another, the parameters read again for each and nothing held.
 pub(crate) fn in_pieces(
     params: &[u8],
     text: &[u8],
@@ -592,27 +664,36 @@ pub(crate) fn in_pieces(
     threads: usize,
     piece: impl Fn(&[u8], &mut [u8]) -> Result<()> + Sync,
 ) -> Result<Vec<u8>> {
-    let mut lens = Vec::new();
-    let (mut at, mut coded, mut total) = (0, 0usize, 0usize);
-    while at < params.len() {
-        let mut get = || varint::get(params, &mut at).ok().and_then(|n| usize::try_from(n).ok()).ok_or_else(corrupt);
-        let (c, t) = (get()?, get()?);
+    let (mut coded, mut total, mut pieces) = (0usize, 0usize, 0usize);
+    each_piece(params, |c, t| {
         coded = coded.checked_add(c).ok_or_else(corrupt)?;
         total = total.checked_add(t).ok_or_else(corrupt)?;
-        lens.push((c, t));
-    }
-    if lens.is_empty() || coded != text.len() || total != len {
+        pieces += 1;
+        Ok(())
+    })?;
+    if pieces == 0 || coded != text.len() || total != len {
         return Err(corrupt());
     }
     let mut out = vec![0; len];
-    let mut jobs = Vec::with_capacity(lens.len());
+    if threads <= 1 || pieces == 1 || cfg!(target_family = "wasm") {
+        let (mut rest, mut text) = (&mut out[..], text);
+        each_piece(params, |c, t| {
+            let (o, r) = std::mem::take(&mut rest).split_at_mut(t);
+            let (x, y) = text.split_at(c);
+            (rest, text) = (r, y);
+            piece(x, o)
+        })?;
+        return Ok(out);
+    }
+    let mut jobs = Vec::with_capacity(pieces);
     let (mut rest, mut text) = (&mut out[..], text);
-    for &(c, t) in &lens {
-        let (o, r) = rest.split_at_mut(t);
+    each_piece(params, |c, t| {
+        let (o, r) = std::mem::take(&mut rest).split_at_mut(t);
         let (x, y) = text.split_at(c);
         jobs.push(Mutex::new((x, o)));
         (rest, text) = (r, y);
-    }
+        Ok(())
+    })?;
     let done = aqr_common::pool::par_map(jobs.len(), threads, |i| {
         let mut j = jobs[i].lock().unwrap();
         let (x, o) = &mut *j;
@@ -626,18 +707,14 @@ pub(crate) fn in_pieces(
 /// ([`Dictionary::to_bytes`]), in pieces of `params` ([`params`]), decoded on up to `threads`
 /// threads.
 pub fn decode(params: &[u8], dict: &[u8], text: &[u8], len: usize, threads: usize) -> Result<Vec<u8>> {
-    let p = PARSED.with(|c| {
-        let mut c = c.borrow_mut();
-        match &*c {
-            Some(p) if p.bytes == dict => Ok(p.clone()),
-            _ => {
-                let p = Arc::new(Parsed::of(dict)?);
-                *c = Some(p.clone());
-                Ok(p)
-            }
-        }
-    })?;
-    in_pieces(params, text, len, threads, |x, o| p.piece(x, o))
+    let (entries, lists, params) = header(params)?;
+    let p = parsed(dict)?;
+    let p: &Parsed = std::borrow::Borrow::borrow(&p);
+    // (what the memory plan went by)
+    if p.entries.len() != entries || [p.layout.one.len(), p.layout.two.len(), p.layout.three.len()] != lists {
+        return Err(corrupt());
+    }
+    in_pieces(params, text, len, threads, |x, o| p.piece(dict, x, o))
 }
 
 #[cfg(test)]
@@ -655,7 +732,8 @@ mod tests {
     fn back_with(dict: &Dictionary, d: &[u8]) -> Vec<u8> {
         let (text, lens) = dict.encode(d, 1);
         assert_eq!(Layout::parse(&dict.layout.params()).unwrap(), dict.layout);
-        let (r, p) = (dict.to_bytes(), params(&lens));
+        let r = dict.to_bytes();
+        let p = params(&r, &lens);
         let out = decode(&p, &r, &text, d.len(), 1).unwrap();
         assert!(out == d, "{:?}", String::from_utf8_lossy(&out));
         assert!(decode(&p, &r, &text, d.len() + 1, 1).is_err());
@@ -745,14 +823,15 @@ mod tests {
         assert_eq!(one.to_bytes(), four.to_bytes());
         let (text, lens) = one.encode(&d, 4);
         assert!(text == one.encode_piece(&d) && lens.len() == 4);
-        let (r, p) = (one.to_bytes(), params(&lens));
+        let r = one.to_bytes();
+        let p = params(&r, &lens);
         for threads in [1, 4] {
             assert!(decode(&p, &r, &text, d.len(), threads).unwrap() == d);
         }
         // pieces not where they were coded, or none
         let mut moved = lens.clone();
         (moved[0].0, moved[1].0) = (moved[0].0 - 1, moved[1].0 + 1);
-        assert!(decode(&params(&moved), &r, &text, d.len(), 4).is_err());
+        assert!(decode(&params(&r, &moved), &r, &text, d.len(), 4).is_err());
         assert!(decode(&[], &r, &text, d.len(), 4).is_err());
     }
 
@@ -764,7 +843,7 @@ mod tests {
         let l = &dict.layout;
         let p = l.params();
         // (as one piece)
-        let decode = |r: &[u8], text: &[u8], len: usize| decode(&params(&[(text.len(), len)]), r, text, len, 1);
+        let decode = |r: &[u8], text: &[u8], len: usize| decode(&params(r, &[(text.len(), len)]), r, text, len, 1);
         let bad = |entries: &[u8], text: &[u8]| decode(&[&p[..], entries].concat(), text, d.len()).is_err();
         // an entry empty, unterminated or of letters not all lower case; a code past the entries
         assert!(!bad(b"cat\nthe\nand\n", &text));

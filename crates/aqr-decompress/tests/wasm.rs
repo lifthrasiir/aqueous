@@ -2175,6 +2175,34 @@ fn lha_plans_hold() {
     }
 }
 
+/// wrt-recons and wrt-recons-hangul lay their memory out as stacks, their limits their plans: of
+/// text of words and markup, of Hangul, and of a little more than a piece of 16 MiB (two
+/// pieces).
+#[test]
+fn wrt_plans_hold() {
+    let mut rng = aqr_common::rng::Rng::new(3);
+    let words =
+        ["The", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog;", "<b>THE</b>", "&amp;", "dog.\n"];
+    let mut text = Vec::new();
+    while text.len() < 300_000 {
+        text.extend_from_slice(words[rng.below(words.len() as u64) as usize].as_bytes());
+        text.push(b' ');
+    }
+    let hangul_words = ["사람은", "나는", "한국어로", "글을", "쓴다.", "그리고", "(English)", "읽는다,", "말이다.\n"];
+    let mut korean = Vec::new();
+    while korean.len() < 400_000 {
+        korean.extend_from_slice(hangul_words[rng.below(hangul_words.len() as u64) as usize].as_bytes());
+        korean.push(b' ');
+    }
+    // pieces: text past 16 MiB, cut where a byte of no token is
+    let line = "Some words, and <b>some</b> MORE words &amp; others\n";
+    let big = line.repeat((17 << 20) / line.len()).into_bytes();
+    for (what, d) in [("words", text), ("hangul", korean), ("pieces", big)] {
+        let f = aqr_wrt::formula::encode(&d, 2).unwrap_or_else(|| panic!("{what}"));
+        plan_holds(&format!("wrt {what}"), f, &d);
+    }
+}
+
 /// azo-recons lays its memory out as a stack, its limit its plan: of the streams of the EGG
 /// fixtures (one of several blocks), alone and one after another, and a stream cut short in its
 /// last block.
