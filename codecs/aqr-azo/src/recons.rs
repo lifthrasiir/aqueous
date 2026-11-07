@@ -19,6 +19,9 @@ pub const DEPTH: usize = 32;
 
 const NONE: u32 = u32::MAX;
 
+/// The most pairs found at a position: [`DEPTH`] candidates on each key's chain.
+pub const PAIRS: usize = DEPTH * KEYS.len();
+
 /// Bucket of a length: itself below 8, else 8-11 by its bit length.
 #[inline]
 fn lb(l: usize) -> usize {
@@ -30,6 +33,9 @@ fn lb(l: usize) -> usize {
 fn db(d: usize) -> usize {
     (d >= 16) as usize + (d >= 256) as usize + (d >= 4096) as usize + (d >= 65536) as usize
 }
+
+/// The remembered matches that fit at a position, at most (the history's size).
+pub const VIABLE: usize = 128;
 
 /// The keys of the match finder's chains: their first bytes, 2 as they are, the others hashed.
 pub const KEYS: [usize; 5] = [2, 3, 5, 8, 16];
@@ -50,8 +56,10 @@ fn key(d: &[u8], p: usize, k: usize) -> usize {
 /// The match finder: every position before the current one, on a chain of each of [`KEYS`].
 struct Mf<'a> {
     d: &'a [u8],
-    head: Vec<Vec<u32>>,
-    prev: Vec<Vec<u32>>,
+    /// The heads of the chains of each key, 65536 each, one after another.
+    head: Vec<u32>,
+    /// The previous position of each position on each key's chain, `d.len()` each.
+    prev: Vec<u32>,
     /// Positions below this are inserted.
     next: usize,
     found: Vec<(usize, usize)>,
@@ -61,10 +69,10 @@ impl<'a> Mf<'a> {
     fn new(d: &'a [u8]) -> Self {
         Mf {
             d,
-            head: KEYS.iter().map(|_| vec![NONE; 1 << 16]).collect(),
-            prev: KEYS.iter().map(|_| vec![NONE; d.len()]).collect(),
+            head: vec![NONE; KEYS.len() << 16],
+            prev: vec![NONE; KEYS.len() * d.len()],
             next: 0,
-            found: Vec::new(),
+            found: Vec::with_capacity(PAIRS),
         }
     }
 
@@ -75,9 +83,9 @@ impl<'a> Mf<'a> {
             let p = self.next;
             for (c, &k) in KEYS.iter().enumerate() {
                 if p + k <= d.len() {
-                    let h = key(d, p, k);
-                    self.prev[c][p] = self.head[c][h];
-                    self.head[c][h] = p as u32;
+                    let h = c << 16 | key(d, p, k);
+                    self.prev[c * d.len() + p] = self.head[h];
+                    self.head[h] = p as u32;
                 }
             }
             self.next += 1;
@@ -95,7 +103,7 @@ impl<'a> Mf<'a> {
             if pos + k > d.len() || k > cap {
                 break;
             }
-            let mut q = self.head[c][key(d, pos, k)];
+            let mut q = self.head[c << 16 | key(d, pos, k)];
             let mut best = k - 1;
             for _ in 0..DEPTH {
                 if q == NONE {
@@ -112,7 +120,7 @@ impl<'a> Mf<'a> {
                         }
                     }
                 }
-                q = self.prev[c][p];
+                q = self.prev[c * d.len() + p];
             }
             if best == cap {
                 break;
@@ -160,21 +168,24 @@ struct Ctx {
     escape: Vec<Bit>,
 }
 
+/// The lengths of the vectors of [`Ctx`], in the order of its fields.
+pub const CTX_LENS: [usize; 11] = [4 * 12 * 6 * 8 * 3, 4 * 4 * 8, 4 * 8, 4, 64, 4 * 4 * 8, 4, 4, 64, 3 * 4 * 4 * 2, 64];
+
 impl Ctx {
     fn new() -> Self {
-        let v = |n: usize| vec![Bit::default(); n];
+        let v = |i: usize| vec![Bit::default(); CTX_LENS[i]];
         Ctx {
-            is_match: v(4 * 12 * 6 * 8 * 3),
-            is_reuse: v(4 * 4 * 8),
-            is_recent: v(4 * 8),
-            which_recent: v(4),
-            rank: v(64),
-            is_near: v(4 * 4 * 8),
-            which_near: v(4),
-            full: v(4),
-            shorter: v(64),
-            pair: v(3 * 4 * 4 * 2),
-            escape: v(64),
+            is_match: v(0),
+            is_reuse: v(1),
+            is_recent: v(2),
+            which_recent: v(3),
+            rank: v(4),
+            is_near: v(5),
+            which_near: v(6),
+            full: v(7),
+            shorter: v(8),
+            pair: v(9),
+            escape: v(10),
         }
     }
 }
@@ -190,16 +201,19 @@ trait Bits: Coder {
 
 impl<C: Coder> Bits for C {}
 
+/// What takes the tokens the decoder decodes, one by one.
+type Sink<'a> = &'a mut dyn FnMut(Token) -> Result<()>;
+
 /// The walk over a block's data coding its tokens (`tokens` given to the encoder; the
-/// decoder's are pushed onto it).
-fn walk(d: &[u8], bits: &mut impl Bits, tokens: &mut Vec<Token>, encoding: bool) -> Result<()> {
+/// decoder's are given to `sink`).
+fn walk(d: &[u8], bits: &mut impl Bits, tokens: &[Token], sink: Sink, encoding: bool) -> Result<()> {
     let n = d.len();
     let mut mf = Mf::new(d);
     let mut ctx = Ctx::new();
     let mut hist = History::default();
-    let mut pairs = Vec::new();
-    let mut next_pairs = Vec::new();
-    let mut viable = Vec::new();
+    let mut pairs = Vec::with_capacity(PAIRS);
+    let mut next_pairs = Vec::with_capacity(PAIRS);
+    let mut viable = Vec::with_capacity(VIABLE);
     let (mut pos, mut prev, mut k) = (1, LIT, 0);
     // (the position whose pairs `next_pairs` holds, found for the lazy context)
     let mut ahead = 0;
@@ -254,7 +268,7 @@ fn walk(d: &[u8], bits: &mut impl Bits, tokens: &mut Vec<Token>, encoding: bool)
         };
         let c = (((prev * 12 + most) * 6 + if fl == 0 { 5 } else { db(longest.1) }) * 8 + order) * 3 + lazy;
         if !bits.bit(&mut ctx.is_match[c], given != Token::Literal) {
-            tokens_push(tokens, encoding, Token::Literal);
+            tokens_push(sink, encoding, Token::Literal)?;
             pos += 1;
             prev = LIT;
             continue;
@@ -269,7 +283,7 @@ fn walk(d: &[u8], bits: &mut impl Bits, tokens: &mut Vec<Token>, encoding: bool)
                 // the rank among the remembered matches that fit, or past them all for one that
                 // does not (then its place itself)
                 viable.clear();
-                viable.extend((0..128).filter(|&i| fits(reuse_of(i), hist.lengths[i])));
+                viable.extend((0..VIABLE).filter(|&i| fits(reuse_of(i), hist.lengths[i])));
                 let g = if let Token::Reuse(i) = given {
                     viable.iter().position(|&v| v == i as usize).unwrap_or(viable.len()) as u32
                 } else {
@@ -332,7 +346,7 @@ fn walk(d: &[u8], bits: &mut impl Bits, tokens: &mut Vec<Token>, encoding: bool)
         if !fits(dist, len) {
             return Err(Error("a match that does not fit"));
         }
-        tokens_push(tokens, encoding, t);
+        tokens_push(sink, encoding, t)?;
         prev = match t {
             Token::ReuseRecent(_) | Token::Reuse(_) => REUSE,
             Token::Near(..) => NEAR,
@@ -349,9 +363,10 @@ fn walk(d: &[u8], bits: &mut impl Bits, tokens: &mut Vec<Token>, encoding: bool)
     Ok(())
 }
 
-fn tokens_push(tokens: &mut Vec<Token>, encoding: bool, t: Token) {
-    if !encoding {
-        tokens.push(t);
+fn tokens_push(sink: Sink, encoding: bool, t: Token) -> Result<()> {
+    match encoding {
+        true => Ok(()),
+        false => sink(t),
     }
 }
 
@@ -368,25 +383,43 @@ fn code_len(bits: &mut impl Bits, ctx: &mut Ctx, kind: usize, full: u32, len: u3
 /// The record of the block of `data` parsed as `tokens` (after its first byte).
 pub fn record_block(data: &[u8], tokens: &[Token]) -> Result<Vec<u8>> {
     let mut e = ArithEncoder::new(Vec::new());
-    walk(data, &mut e, &mut tokens.to_vec(), true)?;
+    walk(data, &mut e, tokens, &mut |_| Ok(()), true)?;
     Ok(e.finish())
-}
-
-/// Bytes of the working memory of a block of `n` bytes, besides its data and record: the match
-/// finder's heads and chains, the tokens (as their vector grows), the code (likewise), the
-/// models.
-pub fn block_memory(n: u64) -> u64 {
-    let heads = (KEYS.len() << 18) as u64;
-    heads + 4 * KEYS.len() as u64 * n + 2 * std::mem::size_of::<Token>() as u64 * n + 2 * n + (1 << 20)
 }
 
 /// The tokens of the block of `data` that `record` codes.
 pub fn tokens_of(data: &[u8], record: &[u8]) -> Result<Vec<Token>> {
     let mut dec = ArithDecoder::new(record);
     let mut tokens = Vec::new();
-    walk(data, &mut dec, &mut tokens, false)?;
+    walk(
+        data,
+        &mut dec,
+        &[],
+        &mut |t| {
+            tokens.push(t);
+            Ok(())
+        },
+        false,
+    )?;
     Ok(tokens)
 }
+
+/// Bytes of what the module holds on WebAssembly (32-bit pointers), checked there by assertions:
+/// a stream's data and record, a block's data and record, a pair, a position.
+pub mod wasm {
+    pub const STREAM: u64 = 16;
+    pub const BLOCK: u64 = 16;
+    pub const PAIR: u64 = 8;
+    pub const WORD: u64 = 4;
+}
+
+#[cfg(target_family = "wasm")]
+const _: () = {
+    assert!(size_of::<(&[u8], &[u8])>() as u64 == wasm::STREAM);
+    assert!(size_of::<(&[u8], Option<&[u8]>)>() as u64 == wasm::BLOCK);
+    assert!(size_of::<(usize, usize)>() as u64 == wasm::PAIR);
+    assert!(size_of::<usize>() as u64 == wasm::WORD);
+};
 
 /// The size of the blocks of streams ALZip writes, but for their last, and the largest taken.
 pub const BLOCK: usize = 1 << 19;
@@ -449,20 +482,27 @@ pub fn split(input: &[u8], limit: usize, threads: usize) -> Result<Split> {
     Ok(Split { data, record, used: st.end })
 }
 
-/// The code of a coded block of data `piece` and record `r`.
-fn code_of(piece: &[u8], r: &[u8]) -> Result<Vec<u8>> {
-    let tokens = tokens_of(piece, r)?;
-    let code = azo::encode_block(piece, &tokens, &mut azo::Model::default())?;
+/// The code of a coded block of data `piece` and record `r`, written onto the end of `out`:
+/// the tokens the record decodes are encoded as they come, so nothing is held but the models.
+fn code_onto(piece: &[u8], r: &[u8], out: Vec<u8>) -> Result<Vec<u8>> {
+    let start = out.len();
+    let mut model = azo::Model::default();
+    let mut e = azo::BlockEncoder::new(piece, &mut model, azo::Encoder::onto(out));
+    walk(piece, &mut ArithDecoder::new(r), &[], &mut |t| e.token(t), false)?;
+    let out = e.finish()?;
     // (a block coded as long as its data would be read as stored)
-    if code.len() == piece.len() {
+    if out.len() - start == piece.len() {
         return Err(Error("a block coded as long as its data"));
     }
-    Ok(code)
+    Ok(out)
 }
 
-/// The stream that `record` and `data` rebuild, written onto `out`; its blocks on up to `threads`
-/// threads (natively; one after another, written as they are made, on one).
-pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>, threads: usize) -> Result<()> {
+/// A block's data and, where it is coded, its record.
+type Piece<'a> = (&'a [u8], Option<&'a [u8]>);
+
+/// The blocks of a stream's data and record: whether its x86 flag is set, and for each block
+/// its data and, where it is coded, its record. The vector is reserved at its size.
+fn blocks<'a>(data: &'a [u8], record: &'a [u8]) -> Result<(u8, Vec<Piece<'a>>)> {
     let mut at = 0;
     let &x86 = record.first().ok_or_else(corrupt)?;
     if x86 > 1 {
@@ -474,7 +514,7 @@ pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>, threads: usize) 
         return Err(corrupt());
     }
     // each block's data, and its record where it is coded
-    let mut blocks = Vec::new();
+    let mut blocks = Vec::with_capacity(data.len().div_ceil(size));
     for piece in data.chunks(size) {
         let &kind = record.get(at).ok_or_else(corrupt)?;
         at += 1;
@@ -492,33 +532,64 @@ pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>, threads: usize) 
     if at != record.len() {
         return Err(corrupt());
     }
+    Ok((x86, blocks))
+}
+
+/// The coded blocks' sizes of a stream's data and record, and the blocks in all: what the
+/// module's memory plan follows ([`crate::plan`]).
+pub fn block_sizes(data: &[u8], record: &[u8]) -> Result<(usize, Vec<usize>)> {
+    let (_, blocks) = blocks(data, record)?;
+    Ok((blocks.len(), blocks.iter().filter(|b| b.1.is_some()).map(|b| b.0.len()).collect()))
+}
+
+/// The stream that `record` and `data` rebuild, written onto `out`; its blocks on up to `threads`
+/// threads (natively; one after another, written as they are made, on one).
+pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>, threads: usize) -> Result<()> {
+    let (x86, blocks) = blocks(data, record)?;
     out.extend_from_slice(&[azo::VERSION, x86]);
-    let block = |out: &mut Vec<u8>, n: usize, code: &[u8]| {
-        out.extend_from_slice(&(n as u32).to_be_bytes());
-        out.extend_from_slice(&(code.len() as u32).to_be_bytes());
-        out.extend_from_slice(&((n ^ code.len()) as u32).to_be_bytes());
-        out.extend_from_slice(code);
+    let header = |n: usize, c: usize| {
+        let mut h = [0; azo::BLOCK_HEADER];
+        h[..4].copy_from_slice(&(n as u32).to_be_bytes());
+        h[4..8].copy_from_slice(&(c as u32).to_be_bytes());
+        h[8..].copy_from_slice(&((n ^ c) as u32).to_be_bytes());
+        h
     };
     if threads <= 1 || blocks.len() <= 1 || cfg!(target_family = "wasm") {
         for &(piece, r) in &blocks {
             match r {
-                None => block(out, piece.len(), piece),
-                Some(r) => block(out, piece.len(), &code_of(piece, r)?),
+                None => {
+                    out.extend_from_slice(&header(piece.len(), piece.len()));
+                    out.extend_from_slice(piece);
+                }
+                Some(r) => {
+                    // (the code written after the room for its header, which is then filled)
+                    let at = out.len();
+                    out.extend_from_slice(&[0; azo::BLOCK_HEADER]);
+                    *out = code_onto(piece, r, std::mem::take(out))?;
+                    let c = out.len() - at - azo::BLOCK_HEADER;
+                    out[at..at + azo::BLOCK_HEADER].copy_from_slice(&header(piece.len(), c));
+                }
             }
         }
     } else {
         let codes = aqr_common::pool::par_map(blocks.len(), threads, |i| match blocks[i] {
             (_, None) => Ok(None),
-            (piece, Some(r)) => code_of(piece, r).map(Some),
+            (piece, Some(r)) => code_onto(piece, r, Vec::new()).map(Some),
         });
         for (&(piece, _), c) in blocks.iter().zip(codes) {
             match c? {
-                None => block(out, piece.len(), piece),
-                Some(c) => block(out, piece.len(), &c),
+                None => {
+                    out.extend_from_slice(&header(piece.len(), piece.len()));
+                    out.extend_from_slice(piece);
+                }
+                Some(c) => {
+                    out.extend_from_slice(&header(piece.len(), c.len()));
+                    out.extend_from_slice(&c);
+                }
             }
         }
     }
-    block(out, 0, &[]);
+    out.extend_from_slice(&header(0, 0));
     Ok(())
 }
 

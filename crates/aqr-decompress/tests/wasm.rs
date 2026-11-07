@@ -2040,6 +2040,42 @@ fn bvx_plans_hold() {
     }
 }
 
+/// azo-recons lays its memory out as a stack, its limit its plan: of the streams of the EGG
+/// fixtures (one of several blocks), alone and one after another, and a stream cut short in its
+/// last block.
+#[test]
+fn azo_plans_hold() {
+    let stream = |name: &str| {
+        let d = fixture(&format!("codecs/aqr-egg/tests/data/{name}.egg"));
+        let at = d.windows(4).position(|w| w == 0x02B5_0C13u32.to_le_bytes()).unwrap() + 4;
+        let len = u32::from_le_bytes(d[at + 6..at + 10].try_into().unwrap()) as usize;
+        d[at + 18..at + 18 + len].to_vec()
+    };
+    let (numbers, short) = (stream("azonumbers"), stream("azoshort_txt"));
+    let cases: [(&str, Vec<&[u8]>); 4] = [
+        ("numbers", vec![&numbers]),
+        ("short", vec![&short]),
+        ("both", vec![&short, &numbers]),
+        ("three", vec![&short, &numbers, &short]),
+    ];
+    for (what, streams) in cases {
+        let (mut data, mut records, mut lens, mut all) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for s in streams {
+            let sp = aqr_azo::recons::split(s, usize::MAX, 2).unwrap();
+            lens.push((sp.data.len(), sp.record.len()));
+            data.extend_from_slice(&sp.data);
+            records.extend_from_slice(&sp.record);
+            all.extend_from_slice(s);
+        }
+        let mut f = Formula::default();
+        let data = f.push("raw", data);
+        let record = f.push("azo/record", records);
+        let index = f.push("azo/index", aqr_azo::formula::index(&lens));
+        f.root = Node::Apply(Box::new(aqr_azo::formula::apply(data, record, index, all.len() as u64)));
+        plan_holds(&format!("azo {what}"), f, &all);
+    }
+}
+
 /// bz2-recons and bz2-alz-recons lay their memory out as stacks, their limits their plans: of
 /// the fixtures (a periodic block given its rank among them), of streams one after another, of
 /// several blocks (the last the smaller), and of ALZip's.

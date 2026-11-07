@@ -148,6 +148,8 @@ impl Coder for Decoder<'_> {
 /// The range encoder of a block's code.
 pub struct Encoder {
     out: Vec<u8>,
+    /// Where the code starts in `out` (bytes before it are another's).
+    start: usize,
     /// Bits in the last byte of `out` (0 to 7; 0 where it is full or there is none).
     used: u32,
     low: u64,
@@ -158,11 +160,16 @@ pub struct Encoder {
 
 impl Default for Encoder {
     fn default() -> Self {
-        Encoder { out: Vec::new(), used: 0, low: 0, up: MASK, pending: 0 }
+        Encoder::onto(Vec::new())
     }
 }
 
 impl Encoder {
+    /// An encoder writing its code onto the end of `out`, which [`Encoder::finish`] gives back.
+    pub fn onto(out: Vec<u8>) -> Self {
+        Encoder { start: out.len(), out, used: 0, low: 0, up: MASK, pending: 0 }
+    }
+
     fn put(&mut self, bit: u64) {
         if self.used == 0 {
             self.out.push(0);
@@ -193,12 +200,12 @@ impl Encoder {
 
     /// The code, ended as ALZip ends it: one more bit put off, bit 30 of `low` and the bits put
     /// off, zeros to a byte; then the zero bytes at the end dropped (the decoder reads zeros past
-    /// the end).
+    /// the end). Gives back the vector it wrote onto, the code at its end.
     pub fn finish(mut self) -> Vec<u8> {
         self.pending += 1;
         let b = (self.low >> 30) & 1;
         self.put_pending(b);
-        while self.out.last() == Some(&0) {
+        while self.out.len() > self.start && self.out.last() == Some(&0) {
             self.out.pop();
         }
         self.out
@@ -312,6 +319,12 @@ struct Predict {
 }
 
 impl Predict {
+    /// Bytes of the vectors of a predictor, in the order [`Predict::new`] makes them.
+    const fn bytes(keys: usize, bits: u32, shift: u32) -> [u64; 3] {
+        let n = 1u64 << bits;
+        [4 * keys as u64 * n, 4 * (keys >> shift) as u64 * n, 4 * keys as u64]
+    }
+
     fn new(keys: usize, bits: u32, shift: u32) -> Self {
         let n = 1 << bits;
         Predict { bits, shift, fine: vec![512; keys * n], coarse: vec![512; (keys >> shift) * n], lucky: vec![0; keys] }
@@ -334,6 +347,15 @@ impl Predict {
         v
     }
 }
+
+const ALPHA: (usize, u32, u32) = (256, 8, 5);
+const LENGTH: (usize, u32, u32) = (128, 7, 4);
+
+/// Bytes of the vectors of a [`Model`], in the order [`Model::default`] makes them.
+pub const MODEL_BYTES: [u64; 10] = {
+    let (a, l) = (Predict::bytes(ALPHA.0, ALPHA.1, ALPHA.2), Predict::bytes(LENGTH.0, LENGTH.1, LENGTH.2));
+    [8, 512, 8, 512, a[0], a[1], a[2], l[0], l[1], l[2]]
+};
 
 /// The models of a block.
 #[derive(Clone)]
@@ -362,8 +384,8 @@ impl Default for Model {
             dist_short: BoolState::new(),
             dist_recent: vec![512; 2],
             dist_code: vec![512; 128],
-            alpha: Predict::new(256, 8, 5),
-            length: Predict::new(128, 7, 4),
+            alpha: Predict::new(ALPHA.0, ALPHA.1, ALPHA.2),
+            length: Predict::new(LENGTH.0, LENGTH.1, LENGTH.2),
             history: History::default(),
         }
     }
@@ -544,31 +566,56 @@ pub fn decode_block(code: &[u8], size: usize, model: &mut Model) -> Result<Block
     Ok(Block { data, tokens, spans, bits: c.bits_read() })
 }
 
-/// Encodes the block of `data` (before the x86 filter) parsed as `tokens` with `model`.
-pub fn encode_block(data: &[u8], tokens: &[Token], model: &mut Model) -> Result<Vec<u8>> {
-    let mut c = Encoder::default();
-    if data.is_empty() {
-        return Ok(c.finish());
+/// A block's tokens encoded one by one as they come (the encoding of [`encode_block`]).
+pub struct BlockEncoder<'a> {
+    data: &'a [u8],
+    model: &'a mut Model,
+    c: Encoder,
+    pos: usize,
+}
+
+impl<'a> BlockEncoder<'a> {
+    /// The encoding of the block of `data` (before the x86 filter) with `model` onto `c`: its
+    /// first byte put.
+    pub fn new(data: &'a [u8], model: &'a mut Model, mut c: Encoder) -> Self {
+        if let Some(&b) = data.first() {
+            model.literal(&mut c, 0, b);
+        }
+        BlockEncoder { data, model, c, pos: data.len().min(1) }
     }
-    model.literal(&mut c, 0, data[0]);
-    let mut pos = 1;
-    for &t in tokens {
-        if pos >= data.len() {
+
+    /// The next token encoded.
+    pub fn token(&mut self, t: Token) -> Result<()> {
+        if self.pos >= self.data.len() {
             return Err(corrupt());
         }
-        let (_, m) = model.token(&mut c, pos as u32, t);
+        let (_, m) = self.model.token(&mut self.c, self.pos as u32, t);
         match m {
             None => {
-                model.literal(&mut c, data[pos - 1], data[pos]);
-                pos += 1;
+                self.model.literal(&mut self.c, self.data[self.pos - 1], self.data[self.pos]);
+                self.pos += 1;
             }
-            Some(m) => pos += m.len as usize,
+            Some(m) => self.pos += m.len as usize,
         }
+        Ok(())
     }
-    if pos != data.len() {
-        return Err(corrupt());
+
+    /// The encoder, ended, with its code: where the tokens covered the data.
+    pub fn finish(self) -> Result<Vec<u8>> {
+        if self.pos != self.data.len() {
+            return Err(corrupt());
+        }
+        Ok(self.c.finish())
     }
-    Ok(c.finish())
+}
+
+/// Encodes the block of `data` (before the x86 filter) parsed as `tokens` with `model`.
+pub fn encode_block(data: &[u8], tokens: &[Token], model: &mut Model) -> Result<Vec<u8>> {
+    let mut e = BlockEncoder::new(data, model, Encoder::default());
+    for &t in tokens {
+        e.token(t)?;
+    }
+    e.finish()
 }
 
 /// The x86 filter of a block's data as the decoder applies it: the addresses of calls and jumps

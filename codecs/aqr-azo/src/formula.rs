@@ -4,18 +4,17 @@
 
 use aqr_formula::{Apply, Module, Node};
 
-use crate::recons::{self, BLOCK};
+use crate::recons;
 
 pub use crate::module::{decode, index};
 pub use crate::recons::Split;
 
-pub const MODULE: Module = Module::new("azo-recons", 1).with_memory(memory);
+pub const MODULE: Module = Module::new("azo-recons", 1).with_plan(plan);
 
-/// The memory of the module, the streams written onto the output one after another: the inputs
-/// and the output, and a block's work ([`recons::block_memory`]) of the largest block.
-fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let &[data, ..] = u.inputs else { return None };
-    Some(u.whole(recons::block_memory(data.min(BLOCK as u64)), 16))
+/// The memory of the module: its plan ([`crate::plan::decode`]).
+fn plan(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let files = u.all_contents::<3>()?;
+    crate::plan::decode(u.initial(), u.params, u.inputs, u.output(), files)
 }
 
 /// The AZO stream that is all of `d`, of `size` bytes of data (at most `limit`): its data and

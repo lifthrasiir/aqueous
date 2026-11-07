@@ -8,6 +8,8 @@ pub mod azo;
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod module;
+#[cfg(feature = "encode")]
+pub mod plan;
 pub mod recons;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
