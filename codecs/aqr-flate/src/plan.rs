@@ -56,8 +56,9 @@ pub struct Stream {
     zlib: Option<(u8, u8)>,
     blocks: u64,
     stored: u64,
-    /// The most tokens of a block, and of all.
+    /// The most tokens of a block, and of all; each block's (0 for a stored one).
     largest: u64,
+    counts: Vec<u64>,
     pub tokens: u64,
     trailing: u64,
     pub segs: Vec<Seg>,
@@ -145,10 +146,17 @@ impl Stream {
             .sum();
         let rest = total.checked_sub(fixed)?;
         let (mut largest, mut stored) = (0, 0);
+        let mut counts = Vec::with_capacity(layout.blocks.len());
         for b in &layout.blocks {
             match *b {
-                Shape::Stored { .. } => stored += 1,
-                Shape::Coded { count, .. } => largest = largest.max(count.unwrap_or(rest)),
+                Shape::Stored { .. } => {
+                    stored += 1;
+                    counts.push(0);
+                }
+                Shape::Coded { count, .. } => {
+                    largest = largest.max(count.unwrap_or(rest));
+                    counts.push(count.unwrap_or(rest) as u64);
+                }
             }
         }
         Some(Stream {
@@ -159,6 +167,7 @@ impl Stream {
             blocks: layout.blocks.len() as u64,
             stored,
             largest: largest as u64,
+            counts,
             tokens: total as u64,
             trailing: layout.trailing.len() as u64,
             segs,
@@ -298,6 +307,12 @@ fn rebuild(m: &mut Mem, st: &Stream, how: How) {
         .max()
         .unwrap_or(0);
     let round = st.tokens.min(2 * st.largest + most);
+    // a round of blocks to write (and the shapes they are made of), all rounds of as much room:
+    // taken whenever the next block's tokens are all decoded, after the batch that decodes them
+    // and before the next batch's tasks, which copy the memory as the round has grown it
+    let writing = st.blocks.min(crate::ROUND_BLOCKS as u64);
+    let write = |m: &mut Mem| m.peak(block(wasm::READY * writing) + block(wasm::BLOCK * writing));
+    let (mut next, mut k, mut decoded) = (0, 0, 0);
     for (b, segs) in st.segs.chunks(batch).enumerate() {
         let s0 = b * batch;
         let (off, len) = match how {
@@ -342,11 +357,18 @@ fn rebuild(m: &mut Mem, st: &Stream, how: How) {
                 m.peak(decoder(st, s, off, len));
             }
         }
+        decoded += segs.iter().map(|s| s.count).sum::<u64>();
+        if next < st.counts.len() && k + st.counts[next] <= decoded {
+            write(m);
+            while next < st.counts.len() && k + st.counts[next] <= decoded {
+                k += st.counts[next];
+                next += 1;
+            }
+        }
     }
-    // a round's blocks to write (and the shapes they are made of), all rounds of as much room
-    if st.blocks > 0 {
-        let r = st.blocks.min(crate::ROUND_BLOCKS as u64);
-        m.peak(block(wasm::READY * r) + block(wasm::BLOCK * r));
+    // (the blocks left, once all are decoded)
+    if next < st.counts.len() {
+        write(m);
     }
     m.top = t0;
 }

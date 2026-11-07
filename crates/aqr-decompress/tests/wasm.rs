@@ -515,11 +515,15 @@ fn flate_plans_hold() {
     for profile in [aqr_flate::DEFAULT_PROFILE, aqr_flate::ADAPTIVE] {
         let mut o = aqr_flate::Options::for_profile(profile).unwrap();
         o.segment = 200_000;
+        // (the last with blocks of a hundred tokens, thousands of them: a round of blocks written
+        // after the first batch, before the next one's tasks)
+        let small = aqr_flate::zlib::Params { mem: 1, ..p };
         let parts: Vec<(Vec<u8>, Vec<u8>, usize)> =
-            [&text[..1000], &text[..], &mixed[..], &text[..30_000], &noise[..5000]]
+            [&text[..1000], &text[..], &mixed[..], &text[..30_000], &noise[..5000], &text[..]]
                 .iter()
-                .map(|d| {
-                    let raw = aqr_flate::zlib::compress(d, p).unwrap();
+                .enumerate()
+                .map(|(i, d)| {
+                    let raw = aqr_flate::zlib::compress(d, if i == 5 { small } else { p }).unwrap();
                     let (data, record) = aqr_flate::deconstruct_with(&raw, &o).unwrap();
                     assert_eq!(aqr_flate::reconstruct(&data, &record).unwrap(), raw);
                     (raw, (data, record))
@@ -527,7 +531,7 @@ fn flate_plans_hold() {
                 .map(|(raw, (d, r))| (d, r, raw.len()))
                 .collect();
         let raws: Vec<Vec<u8>> = parts.iter().map(|(d, r, _)| aqr_flate::reconstruct(d, r).unwrap()).collect();
-        for set in [&[0][..], &[1], &[0, 3, 4], &[3, 1, 0, 2], &[2]] {
+        for set in [&[0][..], &[1], &[0, 3, 4], &[3, 1, 0, 2], &[2], &[5]] {
             for derived in [Derived::None, Derived::Zip, Derived::ZipBefore] {
                 let mut f = Formula::default();
                 let data = f.push("raw", set.iter().flat_map(|&i| parts[i].0.clone()).collect::<Vec<u8>>());
