@@ -52,17 +52,21 @@ fn inputs(splits: &[(Vec<u8>, Split)]) -> ([Vec<u8>; 3], Vec<u8>) {
     ([data, records, aqr_lzma::formula::index(&lens)], all)
 }
 
-/// The module whole and through windows, `lzma2` or not, on `inputs`: the same, and `want`.
+/// The module whole (on one thread and on four: streams, and a stream's parts, side by side) and
+/// through windows, `lzma2` or not, on `inputs`: the same, and `want`.
 fn same(what: &str, i: &[Vec<u8>; 3], want: &[u8], lzma2: bool) {
     let r: Vec<&[u8]> = i.iter().map(|v| &v[..]).collect();
-    let whole = if lzma2 {
-        module::decode2(&[], &r, want.len() as u64, 1)
-    } else {
-        module::decode(&[], &r, want.len() as u64, 1)
-    };
     let streamed = module::decode_streamed(&[], &r, want.len() as u64, lzma2);
-    assert!(whole.as_deref().ok() == Some(want), "{what}: whole");
     assert!(streamed.as_deref().ok() == Some(want), "{what}: streamed");
+    for threads in [1, 4] {
+        let whole = if lzma2 {
+            module::decode2(&[], &r, want.len() as u64, threads)
+        } else {
+            module::decode(&[], &r, want.len() as u64, threads)
+        };
+        assert!(whole.as_deref().ok() == Some(want), "{what}: whole on {threads} threads");
+        assert!(whole == streamed, "{what}: whole on {threads} threads differs from streamed");
+    }
 }
 
 #[test]

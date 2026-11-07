@@ -350,6 +350,9 @@ enum Run {
     Whole(Decode),
     /// And its `decode` applied whole, where it has one (else the emulation's).
     Part(aqr_api::emu::Entry, Option<Decode>),
+    /// A part module in Wasm that natively is applied whole, by its threaded `decode` (which
+    /// spreads streams and parts over threads; the output is the same as the streamed one's).
+    Threaded(Decode),
 }
 
 /// [`Entry`] of a module taking resources.
@@ -366,6 +369,13 @@ const fn bare(module: Module, decode: Decode) -> Entry {
 /// applied whole, taking resources where `resources`.
 const fn part(module: Module, resources: bool, entry: aqr_api::emu::Entry, decode: Decode) -> Entry {
     Entry { module, resources, decode: Run::Part(entry, Some(decode)) }
+}
+
+/// [`Entry`] of a module that is a part module in Wasm but natively is applied whole, on threads
+/// (its `decode`), as streaming gives one thread: the memory of a native run is not held to the
+/// module's plan.
+const fn threaded(module: Module, decode: Decode) -> Entry {
+    Entry { module, resources: false, decode: Run::Threaded(decode) }
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -439,38 +449,8 @@ const NATIVE: &[Entry] = &[
         |p, _, i, n, _| aqr_flate::module::inflate(p, i, n).map_err(err),
     ),
     bare(LZ4, |p, _, i, n, t| aqr_lz4::formula::decode(p, i, n, t).map_err(err)),
-    part(
-        LZMA,
-        false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_lzma::module::WINDOW),
-                aqr_api::Window::Input(1, aqr_lzma::module::WINDOW),
-                aqr_api::Window::Input(2, aqr_lzma::module::WINDOW),
-                aqr_api::Window::Output(0, aqr_lzma::module::WINDOW),
-            ],
-            arity: 5,
-            call: |a| aqr_lzma::module::decode_part(a[0], [a[1], a[2], a[3]], a[4]),
-        },
-        |p, _, i, n, t| aqr_lzma::formula::decode(p, i, n, t).map_err(err),
-    ),
-    part(
-        LZMA2,
-        false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_lzma::module::WINDOW),
-                aqr_api::Window::Input(1, aqr_lzma::module::WINDOW),
-                aqr_api::Window::Input(2, aqr_lzma::module::WINDOW),
-                aqr_api::Window::Output(0, aqr_lzma::module::WINDOW),
-            ],
-            arity: 5,
-            call: |a| aqr_lzma::module::decode2_part(a[0], [a[1], a[2], a[3]], a[4]),
-        },
-        |p, _, i, n, t| aqr_lzma::formula::decode2(p, i, n, t).map_err(err),
-    ),
+    threaded(LZMA, |p, _, i, n, t| aqr_lzma::formula::decode(p, i, n, t).map_err(err)),
+    threaded(LZMA2, |p, _, i, n, t| aqr_lzma::formula::decode2(p, i, n, t).map_err(err)),
     bra!(BCJ_X86, X86),
     bra!(BCJ_POWERPC, PowerPc),
     bra!(BCJ_IA64, Ia64),
@@ -702,10 +682,10 @@ pub fn identify(wasm: &[u8]) -> Option<String> {
     known(wasm).map(|m| m.to_string())
 }
 
-/// Whether the module named `name` (without its version) is a part module, applied as its inputs
-/// stream.
+/// Whether the module named `name` (without its version) is a part module (in Wasm, applied as its
+/// inputs stream; natively some are applied whole, on threads).
 pub fn is_part(name: &str) -> bool {
-    NATIVE.iter().any(|e| e.module.name == name && matches!(e.decode, Run::Part(..)))
+    NATIVE.iter().any(|e| e.module.name == name && matches!(e.decode, Run::Part(..) | Run::Threaded(..)))
 }
 
 /// The Wasm module of `m` that aqr-modules built, for [`aqr::Encoder::with_modules`].
@@ -812,7 +792,7 @@ impl NativeLoaded<'_> {
     fn part(&self) -> Option<aqr_api::emu::Entry> {
         NATIVE.iter().find(|e| e.module == self.module).and_then(|e| match e.decode {
             Run::Part(entry, _) => Some(entry),
-            Run::Whole(_) => None,
+            Run::Whole(_) | Run::Threaded(..) => None,
         })
     }
 }
@@ -955,7 +935,7 @@ impl Native {
             return Err("resources given".into());
         }
         match e.decode {
-            Run::Whole(decode) | Run::Part(_, Some(decode)) => {
+            Run::Whole(decode) | Run::Part(_, Some(decode)) | Run::Threaded(decode) => {
                 decode(params, resources, inputs, len, self.threads.max(1))
             }
             Run::Part(entry, None) => match aqr_api::emu::apply(&entry, inputs, resources, params, &[len]) {
