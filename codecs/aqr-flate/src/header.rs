@@ -38,6 +38,40 @@ pub fn freqs(tokens: &[Token]) -> ([u32; 288], [u32; 32]) {
     (lf, df)
 }
 
+/// Writes the frequencies of a block as [`freqs`] counts them, every one a gamma code (the end
+/// of block, always once, and the symbols no token has, left out): for a block of tokens too
+/// many to hold ([`crate::BIG`]), whose header is read before its tokens.
+pub fn put_freqs(w: &mut BitWriter, lf: &[u32; 288], df: &[u32; 32]) {
+    for (i, &f) in lf[..LIT_SYMS].iter().enumerate() {
+        if i != 256 {
+            put_gamma(w, f as u64);
+        }
+    }
+    for &f in &df[..DIST_SYMS] {
+        put_gamma(w, f as u64);
+    }
+}
+
+/// Reads what [`put_freqs`] wrote, for a block of `count` tokens.
+pub fn get_freqs(r: &mut BitReader, count: usize) -> Result<([u32; 288], [u32; 32])> {
+    let (mut lf, mut df) = ([0u32; 288], [0u32; 32]);
+    for (i, f) in lf[..LIT_SYMS].iter_mut().enumerate() {
+        *f = if i == 256 {
+            1
+        } else {
+            get_usize(r, count)? as u32
+        };
+    }
+    for f in &mut df[..DIST_SYMS] {
+        *f = get_usize(r, count)? as u32;
+    }
+    Ok((lf, df))
+}
+
+/// The literal/length and distance symbols that tokens use.
+const LIT_SYMS: usize = 286;
+const DIST_SYMS: usize = 30;
+
 /// Number of candidate code lengths ([`lens_candidate`]).
 const NUM_LENS: usize = 1 + 3 * 7 + 1;
 

@@ -271,6 +271,13 @@ and each batch's tasks. What decoding holds is reserved once at the size it take
 - a pulled stream's data and writer are reserved for the most they hold (`pull_room`,
   `writer_room`), which they hold to; a batch's tasks give their tokens back 5 bytes each,
   decoded into the pending tokens as they are taken;
+- what is held of tokens does not grow with the blocks (flate-set 4): a block of `BIG` = 256K
+  tokens or more has its symbol frequencies in the record (the header stream, about 1 KB a
+  block), so its header is read before its tokens and they are written 64K at a time as the
+  batches decode them, none held; the pending tokens are the most that a smaller block holds
+  and a batch's, compacted after every round, and the writer's room is a round's. A 100 MB
+  stream of 6 blocks, the largest of 7.3M tokens (text8.zip), fell from 351 MiB (an instance
+  of 159 MiB and tasks, copies of it, of 192) to 103 MiB (an instance of 36 MiB and tasks of 67), whatever the block size;
 - small streams are rebuilt in groups, a task each, onto a result of room for their lengths,
   which the index tells (flate-set 2);
 - a stream of params `04` (a ZIP archive's local header comes first) is not held for the

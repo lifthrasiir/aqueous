@@ -242,12 +242,21 @@ first of them.
 
 The header stream holds, for each dynamic block in order, its Huffman header, coded against
 the headers that known encoders would build for the block's tokens. Decoding a header needs
-the block's symbol frequencies, so headers are read after the tokens:
+the block's symbol frequencies, so headers are read once the tokens are:
 
 - `lf[0..288)`: `lf[256] = 1` (the end of block); each literal `b` counts in `lf[b]`; each
   match counts in `lf[257 + c]`, with `c` its length code (RFC 1951), or `c = 27` for length
   258 written as symbol 284 with extra bits 31;
 - `df[0..32)`: each match counts in `df[c]`, with `c` its distance code.
+
+A dynamic block of `BIG` = 2^18 tokens or more has its frequencies in the header stream, right
+before its header: for `i` in `0..286` but 256, gamma(`lf[i]`), then for `i` in `0..30`
+gamma(`df[i]`), each at most the block's token count (`lf[256]` is 1, the rest are 0). Its header is
+then read from them without the tokens, which a decoder writes as it decodes them, holding none
+of the block's (a fixed block of that many tokens is written so too, with nothing in the header
+stream). The tokens written must have exactly those frequencies, else the record is invalid. A
+block with fewer tokens has no frequencies in the stream; the decoder counts them from the tokens
+it holds.
 
 A *recipe* carries over from one dynamic block to the next. It holds a candidate index for
 the code lengths, the run-length coding and the code-length code, all 0 at the start
@@ -920,7 +929,8 @@ zlib's, `zlib(cf, 7)`; code 1 is `pm(cf, 7)`.
    note where the stored blocks fall between tokens.
 2. Decode the segments (in parallel if wanted), each from its position and with its own
    table, models or contexts, and emulator.
-3. Read the header of each dynamic block from the header stream, against its tokens.
+3. Read the header of each dynamic block from the header stream, against its tokens (or, from
+   `BIG` tokens on, against the frequencies that precede it).
 4. Write the DEFLATE stream (RFC 1951), bits least significant first. Each block starts with
    BFINAL (1 for the last block) and BTYPE in 2 bits.
    - A stored block: its padding value in the bits up to the next byte boundary (it must fit
@@ -953,7 +963,7 @@ tables. `deconstruct` keeps to tighter limits; see [Domain](#domain).
 ## Formula module
 
 The same representation as a module of entry formulas (`aqr-formula`), in
-`formula::apply` and `formula::decode`. The module is `flate-set`, version 3. It rebuilds one
+`formula::apply` and `formula::decode`. The module is `flate-set`, version 4. It rebuilds one
 or more DEFLATE streams of one profile, each with its trailing bytes, as in
 [Rebuilding the stream](#rebuilding-the-stream), with the model data of its
 [resources](#resources) in place of the profile's files. Its output is the streams one after
@@ -990,6 +1000,7 @@ instance, with the rule `literals` (in the catalog or in full):
 - static profiles: the default model for every field (it uses all 72 symbols);
 - every match a miss of kind 1 (or 3 for alt258), with entry 0 and a raw distance; every
   literal is a hit;
+- every dynamic block of `BIG` tokens or more preceded by its frequencies in the header stream;
 - every dynamic header coded with bit 0: candidate 0, HLIT and HDIST explicit, the
   differences from candidate 0's lengths, the run-length coding written out, and the
   explicit code-length code with an explicit HCLEN.

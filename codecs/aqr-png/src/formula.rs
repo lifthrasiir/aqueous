@@ -10,13 +10,13 @@ use aqr_formula::{Apply, Formula, Kind, Module, Node};
 
 pub use crate::module::{decode, decode_against, decode_set};
 
-pub const MODULE: Module = Module::new("png-recons", 3).with_task_plan(plan_recons);
+pub const MODULE: Module = Module::new("png-recons", 4).with_task_plan(plan_recons);
 
 /// The module of a file coded against a reference file ([`encode_against`], [`decode_against`]).
-pub const AGAINST_MODULE: Module = Module::new("png-against", 1).with_task_plan(plan_against);
+pub const AGAINST_MODULE: Module = Module::new("png-against", 2).with_task_plan(plan_against);
 
 /// The module of sets of files ([`encode_set`], [`decode_set`]).
-pub const SET_MODULE: Module = Module::new("png-set", 2).with_task_plan(plan_set);
+pub const SET_MODULE: Module = Module::new("png-set", 3).with_task_plan(plan_set);
 
 /// The class of the stream that [`encode_against`] puts the reference file in.
 pub const REFERENCE: &str = "png/reference";

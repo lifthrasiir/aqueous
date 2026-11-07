@@ -167,32 +167,41 @@ impl Writer {
 
     /// [`Writer::block`] given the data from [`Writer::pos`] on (which stored blocks take).
     pub fn block_of(&mut self, b: &Block, toks: &[Token], rest: &[u8]) -> Result<()> {
+        if let Body::Stored { pad, len } = &b.body {
+            let w = &mut self.w;
+            w.put(1, b.last as u32);
+            w.put(2, b.body.btype() as u32);
+            if *pad as u32 >> w.pad_len() != 0 {
+                return Err(Error::Invalid("padding wider than its bits"));
+            }
+            w.put(w.pad_len(), *pad as u32);
+            w.put(16, *len as u32);
+            w.put(16, !*len as u32);
+            w.flush();
+            w.out.extend_from_slice(
+                rest.get(..*len as usize)
+                    .ok_or(Error::Invalid("stored block past end"))?,
+            );
+            self.pos += *len as usize;
+            return Ok(());
+        }
+        let open = self.open(b)?;
+        self.put(&open, toks)?;
+        self.close(&open)
+    }
+
+    /// Opens a coded block `b` (fixed or dynamic): writes its header, and gives the tables its
+    /// tokens are written with ([`Writer::put`], any number of times, then [`Writer::close`]).
+    pub fn open(&mut self, b: &Block) -> Result<Open> {
         let w = &mut self.w;
         w.put(1, b.last as u32);
         w.put(2, b.body.btype() as u32);
         match &b.body {
-            Body::Stored { pad, len } => {
-                if *pad as u32 >> w.pad_len() != 0 {
-                    return Err(Error::Invalid("padding wider than its bits"));
-                }
-                w.put(w.pad_len(), *pad as u32);
-                w.put(16, *len as u32);
-                w.put(16, !*len as u32);
-                w.flush();
-                w.out.extend_from_slice(
-                    rest.get(..*len as usize)
-                        .ok_or(Error::Invalid("stored block past end"))?,
-                );
-                self.pos += *len as usize;
-            }
-            Body::Fixed { .. } => {
-                // (made again for each block rather than kept: no memory taken as it goes)
-                let (lt, dt) = (
-                    table(&huffman::fixed_lit_lens()),
-                    table(&huffman::FIXED_DIST_LENS),
-                );
-                self.pos += write_tokens(w, toks, &lt, &dt)?;
-            }
+            // (made again for each block rather than kept: no memory taken as it goes)
+            Body::Fixed { .. } => Ok(Open {
+                lit: table(&huffman::fixed_lit_lens()),
+                dist: table(&huffman::FIXED_DIST_LENS),
+            }),
             Body::Dynamic { header: h, .. } => {
                 w.put(5, h.hlit as u32 - 257);
                 w.put(5, h.hdist as u32 - 1);
@@ -210,10 +219,28 @@ impl Writer {
                     w.put(l as u32, clc[op.sym as usize] as u32);
                     w.put(RleOp::extra_bits(op.sym), op.extra as u32);
                 }
-                let (lt, dt) = (table(h.lit_lens()), table(h.dist_lens()));
-                self.pos += write_tokens(w, toks, &lt, &dt)?;
+                Ok(Open {
+                    lit: table(h.lit_lens()),
+                    dist: table(h.dist_lens()),
+                })
             }
+            Body::Stored { .. } => Err(Error::Invalid("a stored block has no tokens")),
         }
+    }
+
+    /// Writes tokens of the block `open` opened.
+    pub fn put(&mut self, open: &Open, toks: &[Token]) -> Result<()> {
+        self.pos += write_tokens(&mut self.w, toks, &open.lit, &open.dist)?;
+        Ok(())
+    }
+
+    /// Ends the block `open` opened.
+    pub fn close(&mut self, open: &Open) -> Result<()> {
+        let (c, l) = open.lit[256];
+        if l == 0 {
+            return Err(Error::Invalid("symbol without a code"));
+        }
+        self.w.put(l, c);
         Ok(())
     }
 
@@ -356,7 +383,13 @@ impl Writer {
     }
 }
 
-/// Writes a block's tokens and its end; returns the bytes they cover.
+/// The tables of a coded block being written a few tokens at a time ([`Writer::open`]).
+pub struct Open {
+    lit: [(u32, u32); 288],
+    dist: [(u32, u32); 288],
+}
+
+/// Writes a block's tokens (not its end); returns the bytes they cover.
 ///
 /// The bit buffer is flushed once per token, branch-free: its 8 bytes are stored at the end
 /// of the output (in capacity reserved for the whole block) and the output grows by the
@@ -439,11 +472,9 @@ fn write_tokens(
     // SAFETY: the bytes up to `len` are written.
     unsafe { w.out.set_len(len) };
     (w.acc, w.n) = (acc, n);
-    let (c, l) = lt[256];
-    if !ok || l == 0 {
+    if !ok {
         return Err(Error::Invalid("symbol without a code"));
     }
-    w.put(l, c);
     Ok(span)
 }
 

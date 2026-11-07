@@ -56,7 +56,8 @@ pub struct Stream {
     zlib: Option<(u8, u8)>,
     blocks: u64,
     stored: u64,
-    /// The most tokens of a block, and of all; each block's (0 for a stored one).
+    /// The most tokens of a block held until all are decoded (of fewer than [`crate::BIG`]),
+    /// and of all; each block's (0 for a stored one).
     largest: u64,
     counts: Vec<u64>,
     pub tokens: u64,
@@ -145,7 +146,7 @@ impl Stream {
             })
             .sum();
         let rest = total.checked_sub(fixed)?;
-        let (mut largest, mut stored) = (0, 0);
+        let mut stored = 0;
         let mut counts = Vec::with_capacity(layout.blocks.len());
         for b in &layout.blocks {
             match *b {
@@ -153,12 +154,11 @@ impl Stream {
                     stored += 1;
                     counts.push(0);
                 }
-                Shape::Coded { count, .. } => {
-                    largest = largest.max(count.unwrap_or(rest));
-                    counts.push(count.unwrap_or(rest) as u64);
-                }
+                Shape::Coded { count, .. } => counts.push(count.unwrap_or(rest)),
             }
         }
+        let largest = crate::held_most(&counts);
+        let counts = counts.into_iter().map(|c| c as u64).collect();
         Some(Stream {
             n,
             rule,
@@ -306,13 +306,13 @@ fn rebuild(m: &mut Mem, st: &Stream, how: How) {
         .map(|b| b.iter().map(|s| s.count).sum::<u64>())
         .max()
         .unwrap_or(0);
-    let round = st.tokens.min(2 * st.largest + most);
+    let round = st.tokens.min(st.largest + most);
     // a round of blocks to write (and the shapes they are made of), all rounds of as much room:
     // taken whenever the next block's tokens are all decoded, after the batch that decodes them
     // and before the next batch's tasks, which copy the memory as the round has grown it
     let writing = st.blocks.min(crate::ROUND_BLOCKS as u64);
     let write = |m: &mut Mem| m.peak(block(wasm::READY * writing) + block(wasm::BLOCK * writing));
-    let (mut next, mut k, mut decoded) = (0, 0, 0);
+    let (mut next, mut k, mut decoded, mut opened) = (0, 0, 0, false);
     for (b, segs) in st.segs.chunks(batch).enumerate() {
         let s0 = b * batch;
         let (off, len) = match how {
@@ -358,11 +358,31 @@ fn rebuild(m: &mut Mem, st: &Stream, how: How) {
             }
         }
         decoded += segs.iter().map(|s| s.count).sum::<u64>();
-        if next < st.counts.len() && k + st.counts[next] <= decoded {
-            write(m);
-            while next < st.counts.len() && k + st.counts[next] <= decoded {
-                k += st.counts[next];
-                next += 1;
+        // (a block of BIG tokens or more is opened, its header read, with its first tokens, and
+        // written as they come: nothing held)
+        let big = |c: u64| c >= crate::BIG as u64;
+        while next < st.counts.len() {
+            let c = st.counts[next];
+            if big(c) {
+                if !opened && decoded > k {
+                    write(m);
+                    opened = true;
+                }
+                if decoded < k + c {
+                    break;
+                }
+                (k, next, opened) = (k + c, next + 1, false);
+            } else if k + c <= decoded {
+                write(m);
+                while next < st.counts.len()
+                    && !big(st.counts[next])
+                    && k + st.counts[next] <= decoded
+                {
+                    k += st.counts[next];
+                    next += 1;
+                }
+            } else {
+                break;
             }
         }
     }

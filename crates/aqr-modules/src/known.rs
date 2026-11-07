@@ -113,8 +113,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "clip-recons",
-        version: 2,
-        sha512_256: hex("81bfaaca8db962a577372e70a90a637d986c72c65fdd2d25858910313484e91c"),
+        version: 3,
+        sha512_256: hex("941e110b48475f7c595d4da19d22f84bb7fe69d7e88d8d32847f2f6f31460084"),
         block: include_bytes!("../wasm/clip-recons.block"),
     },
     Known {
@@ -227,8 +227,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "flate-set",
-        version: 3,
-        sha512_256: hex("0bac3072db47829265c6045ea6c1504c6a28b6560c574521f5d153175d82a0ec"),
+        version: 4,
+        sha512_256: hex("ff4d7aa779486abe55f6537b916d33c33d048ebf01ae7a9902effd680262f9ce"),
         block: include_bytes!("../wasm/flate-set.block"),
     },
     Known {
@@ -365,26 +365,26 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "pdf-recons",
-        version: 2,
-        sha512_256: hex("4daea3079bc3f4cd860c35865add526ac03511f00604f26bd0c9d91eb3f51bcb"),
+        version: 3,
+        sha512_256: hex("e8353b1f7883ec89ba51ebc59cbc5cf979e1b7e609f7b983754b265c00a30b0c"),
         block: include_bytes!("../wasm/pdf-recons.block"),
     },
     Known {
         name: "png-against",
-        version: 1,
-        sha512_256: hex("e65416244d21766bcf27b04e924112818fe5b839db53d8b5eff184fdcd31be9b"),
+        version: 2,
+        sha512_256: hex("1522ad440b0fef25f5543bd47c9c279fe26290f9f64c5e790dd09a18e3655446"),
         block: include_bytes!("../wasm/png-against.block"),
     },
     Known {
         name: "png-recons",
-        version: 3,
-        sha512_256: hex("523bdc2ecfd13dc1788e5273d1ca187e99537277038f894f5972b62cd4f2fe3b"),
+        version: 4,
+        sha512_256: hex("063ba1f7dafb62b17559ef8c3c53fb1e7a7417aaf5f58bd852f5f0fe137730e1"),
         block: include_bytes!("../wasm/png-recons.block"),
     },
     Known {
         name: "png-set",
-        version: 2,
-        sha512_256: hex("271e9d0ef5005a8d84e757a9d1023f434e044eee25a1f4750ac26d0d973f5f6a"),
+        version: 3,
+        sha512_256: hex("b8d458934a404e9409cb38f52852a8e575cb0148256c4be069548d75734a4c0f"),
         block: include_bytes!("../wasm/png-set.block"),
     },
     Known {

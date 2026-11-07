@@ -536,6 +536,15 @@ fn flate_plans_hold() {
     }
     let mixed: Vec<u8> = [&text[..100_000], &noise[..], &text[100_000..300_000]].concat();
     let p = aqr_flate::zlib::Params { level: 6, ..Default::default() };
+    // (huge blocks, from literals only so that there are many tokens: a block of 2.3M of them
+    // in all but one, and in another blocks around BIG, one of which straddles it. Those of BIG
+    // tokens or more are written as their tokens are decoded, the others held.)
+    let big = aqr_flate::BIG;
+    let literals = &text[..2_300_000];
+    let huffman = aqr_flate::zlib::Params { strategy: aqr_flate::zlib::Strategy::HuffmanOnly, ..p };
+    let huffman = aqr_flate::zlib::compress(literals, huffman).unwrap();
+    let one_block = recut(&huffman, literals, &[]);
+    let around_big = recut(&huffman, literals, &[big - 1, big, 7, big + 1, 40_000, 2 * big]);
     for profile in [aqr_flate::DEFAULT_PROFILE, aqr_flate::ADAPTIVE] {
         let mut o = aqr_flate::Options::for_profile(profile).unwrap();
         o.segment = 200_000;
@@ -543,11 +552,15 @@ fn flate_plans_hold() {
         // after the first batch, before the next one's tasks)
         let small = aqr_flate::zlib::Params { mem: 1, ..p };
         let parts: Vec<(Vec<u8>, Vec<u8>, usize)> =
-            [&text[..1000], &text[..], &mixed[..], &text[..30_000], &noise[..5000], &text[..]]
+            [&text[..1000], &text[..], &mixed[..], &text[..30_000], &noise[..5000], &text[..], literals, literals]
                 .iter()
                 .enumerate()
                 .map(|(i, d)| {
-                    let raw = aqr_flate::zlib::compress(d, if i == 5 { small } else { p }).unwrap();
+                    let raw = match i {
+                        6 => one_block.clone(),
+                        7 => around_big.clone(),
+                        _ => aqr_flate::zlib::compress(d, if i == 5 { small } else { p }).unwrap(),
+                    };
                     let (data, record) = aqr_flate::deconstruct_with(&raw, &o).unwrap();
                     assert_eq!(aqr_flate::reconstruct(&data, &record).unwrap(), raw);
                     (raw, (data, record))
@@ -555,7 +568,7 @@ fn flate_plans_hold() {
                 .map(|(raw, (d, r))| (d, r, raw.len()))
                 .collect();
         let raws: Vec<Vec<u8>> = parts.iter().map(|(d, r, _)| aqr_flate::reconstruct(d, r).unwrap()).collect();
-        for set in [&[0][..], &[1], &[0, 3, 4], &[3, 1, 0, 2], &[2], &[5]] {
+        for set in [&[0][..], &[1], &[0, 3, 4], &[3, 1, 0, 2], &[2], &[5], &[6], &[7, 3]] {
             for derived in [Derived::None, Derived::Zip, Derived::ZipBefore] {
                 let mut f = Formula::default();
                 let data = f.push("raw", set.iter().flat_map(|&i| parts[i].0.clone()).collect::<Vec<u8>>());
@@ -589,6 +602,34 @@ fn flate_plans_hold() {
             }
         }
     }
+}
+
+/// The DEFLATE stream `raw` of `data` cut in blocks of `counts` tokens (the last takes the rest),
+/// each dynamic as zlib writes it.
+fn recut(raw: &[u8], data: &[u8], counts: &[usize]) -> Vec<u8> {
+    use aqr_flate::deflate::{self, Block, Body, Stream};
+    let (stream, parsed) = aqr_flate::deflate::parse(raw).unwrap();
+    assert!(parsed == data);
+    let tokens: Vec<_> = stream
+        .blocks
+        .iter()
+        .flat_map(|b| match &b.body {
+            Body::Dynamic { tokens, .. } | Body::Fixed { tokens } => tokens.clone(),
+            Body::Stored { .. } => panic!("stored"),
+        })
+        .collect();
+    let mut rest = &tokens[..];
+    let mut blocks = vec![];
+    for (i, &c) in counts.iter().chain(&[tokens.len()]).enumerate() {
+        let (t, r) = rest.split_at(c.min(rest.len()));
+        rest = r;
+        let header = aqr_flate::header::zlib_header(t);
+        blocks.push(Block { last: i == counts.len(), body: Body::Dynamic { header, tokens: t.to_vec() } });
+    }
+    let stream = Stream { blocks, tail_pad: 0, trailing: vec![] };
+    let raw = deflate::write(&stream, data).unwrap();
+    assert!(deflate::parse(&raw).unwrap().1 == data);
+    raw
 }
 
 /// flate-inflate lays its memory out as a stack, its limit its plan, the same whatever the

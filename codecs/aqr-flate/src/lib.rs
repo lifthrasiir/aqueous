@@ -352,8 +352,13 @@ fn headers(f: &Flat) -> (Vec<u8>, Option<u32>) {
     let mut w = BitWriter::new();
     let mut recipe = header::Recipe::default();
     let mut first = None;
-    for (b, (lf, df)) in f.stream.blocks.iter().zip(&f.stats.freqs) {
+    for (i, (b, (lf, df))) in f.stream.blocks.iter().zip(&f.stats.freqs).enumerate() {
         if let Body::Dynamic { header, .. } = &b.body {
+            // (a block of BIG tokens or more has its frequencies told, for it is written as its
+            // tokens are decoded)
+            if f.starts[i + 1] - f.starts[i] >= BIG {
+                header::put_freqs(&mut w, lf, df);
+            }
             header::write(&mut w, lf, df, header, &mut recipe);
             first.get_or_insert(recipe.key());
         }
@@ -2441,6 +2446,102 @@ pub(crate) const BACK: usize = 256 << 10;
 pub(crate) const AHEAD: usize = 256 << 10;
 pub(crate) const ALIGN: usize = 1 << 20;
 
+/// Tokens of a coded block from which it is written as its tokens are decoded, not once they
+/// all are: its symbol frequencies are in the headers (before its header, if dynamic), and
+/// nothing of it is held ([`STEP`] tokens at a time are written). The decoder knows it from the
+/// layout's token counts. Blocks below it are held until their last token is decoded; a block of
+/// a million tokens would cost 6 MB a block, 6 bytes a token.
+pub const BIG: usize = 256 << 10;
+
+/// A block of [`BIG`] tokens or more being written as its tokens are decoded ([`rebuild`]).
+struct Big {
+    open: write::Open,
+    /// Tokens to come.
+    left: usize,
+    /// The frequencies the headers tell and those of the tokens written (dynamic blocks only,
+    /// those of an empty block to start with).
+    want: Option<([u32; 288], [u32; 32])>,
+    have: ([u32; 288], [u32; 32]),
+}
+
+impl Big {
+    /// Starts the block of `count` tokens of `shape`, `last` or not: reads its frequencies and its
+    /// header if it is dynamic, and writes the header.
+    fn open(
+        w: &mut write::Writer,
+        shape: Shape,
+        last: bool,
+        count: usize,
+        hr: &mut BitReader,
+        recipe: &mut header::Recipe,
+    ) -> Result<Big> {
+        let (body, want) = match shape {
+            Shape::Coded { btype: 2, .. } => {
+                let (lf, df) = header::get_freqs(hr, count)?;
+                let header = header::read_freqs(hr, &lf, &df, recipe)?;
+                (
+                    Body::Dynamic {
+                        header,
+                        tokens: vec![],
+                    },
+                    Some((lf, df)),
+                )
+            }
+            Shape::Coded { .. } => (Body::Fixed { tokens: vec![] }, None),
+            Shape::Stored { .. } => return Err(Error::Corrupt),
+        };
+        let mut have = ([0; 288], [0; 32]);
+        have.0[256] = 1;
+        Ok(Big {
+            open: w.open(&Block { last, body }).map_err(|_| Error::Corrupt)?,
+            left: count,
+            want,
+            have,
+        })
+    }
+
+    /// Writes the next tokens of the block.
+    fn put(&mut self, w: &mut write::Writer, toks: &[Token]) -> Result<()> {
+        if self.want.is_some() {
+            let (lf, df) = header::freqs(toks);
+            for (a, b) in self
+                .have
+                .0
+                .iter_mut()
+                .zip(&lf)
+                .chain(self.have.1.iter_mut().zip(&df))
+            {
+                *a += b;
+            }
+            // (the end of block, counted once by each)
+            self.have.0[256] -= 1;
+        }
+        w.put(&self.open, toks).map_err(|_| Error::Corrupt)
+    }
+
+    /// Ends the block, whose tokens must have the frequencies the headers told.
+    fn close(self, w: &mut write::Writer) -> Result<()> {
+        if self.want.is_some_and(|want| want != self.have) {
+            return Err(Error::Corrupt);
+        }
+        w.close(&self.open).map_err(|_| Error::Corrupt)
+    }
+}
+
+/// The most tokens of a block that is held until all of them are decoded (those of fewer than
+/// [`BIG`]), given the blocks' token counts.
+pub(crate) fn held_most(counts: &[usize]) -> usize {
+    counts
+        .iter()
+        .copied()
+        .filter(|&c| c < BIG)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Tokens of a block of [`BIG`] tokens or more that are written at a time.
+const STEP: usize = 16 * write::TOKEN_CHUNK;
+
 /// Bytes that [`reconstruct_pulled`] writes at once at most (a block more), and then gives the
 /// sink, counting a token as 6 bytes (the most it takes) and a stored block's data: the stream
 /// written, and the data of the stored blocks, held.
@@ -2450,9 +2551,11 @@ pub(crate) const ROUND: usize = 2 << 20;
 pub(crate) const ROUND_BLOCKS: usize = 1 << 12;
 
 /// Bytes of the writer of a stream written a round at a time on WebAssembly
-/// ([`reconstruct_pulled`]), of `blocks` blocks of `largest` tokens at most, and `trailing`
-/// bytes after them: what a round writes at most ([`ROUND`] counted, and its last block, a token as
-/// 6 bytes and a stored block's data; each block's header), and what writing reserves past it.
+/// ([`reconstruct_pulled`]), of `blocks` blocks, `largest` tokens at most in those of fewer than
+/// [`BIG`] ([`held_most`]), and `trailing` bytes after them: what a round writes at most
+/// ([`ROUND`] counted, and its last block, a token as 6 bytes and a stored block's data; each
+/// block's header), and what writing reserves past it (a block of [`BIG`] tokens or more is
+/// written [`STEP`] tokens at a time, the bytes given at once).
 pub(crate) fn writer_room(largest: usize, blocks: usize, trailing: usize) -> usize {
     let largest = 6 * largest;
     ROUND
@@ -2706,7 +2809,7 @@ fn rebuild(
     let (mut w, mut cap) = match &mut to {
         Ok(_) if cfg!(target_family = "wasm") => (
             write::Writer::new(writer_room(
-                counts.iter().copied().max().unwrap_or(0),
+                held_most(&counts),
                 counts.len(),
                 layout.trailing.len(),
             )),
@@ -2718,6 +2821,7 @@ fn rebuild(
     };
     let nb = layout.blocks.len();
     let mut shapes = layout.blocks.into_iter();
+    let mut big: Option<Big> = None;
     // tokens decoded (from token `base` on), the next block (from token `k` on)
     let (mut pending, mut base, mut decoded) = (Vec::<Token>::new(), 0usize, 0usize);
     let (mut bi, mut k) = (0usize, 0usize);
@@ -2730,14 +2834,15 @@ fn rebuild(
         (Source::Pulled(_), false) => PULLED_BATCH * threads,
         _ => 4 * threads,
     };
-    // the most tokens pending at once: under twice the largest block's left after writing (or
-    // drained), and a batch's (reserved at the first, after the first batch's tasks are spawned)
+    // the most tokens pending at once: under the largest held block's left after writing (the
+    // blocks of BIG tokens or more are written as they are decoded, none left), and a batch's
+    // (reserved at the first, after the first batch's tasks are spawned)
     let most = segs
         .chunks(batch)
         .map(|b| b.iter().map(|s| s.1).sum::<usize>())
         .max()
         .unwrap_or(0);
-    let round = total.min(2 * counts.iter().copied().max().unwrap_or(0) + most);
+    let round = total.min(held_most(&counts) + most);
     // (on WebAssembly decoded where the batch is taken, into the pending tokens)
     #[cfg(not(target_family = "wasm"))]
     let decode_batch = |s0: usize, data: &[u8], off: usize| {
@@ -2912,7 +3017,54 @@ fn rebuild(
             // the blocks whose tokens are all decoded, a few thousand at a time: their symbols
             // counted on the threads, their headers read in order, and then they are written
             // on the threads
-            while bi < nb && (k + counts[bi] <= decoded || !more) {
+            loop {
+                if bi == nb {
+                    break;
+                }
+                // a block of BIG tokens or more is written as its tokens are decoded, not held
+                if counts[bi] >= BIG {
+                    if let Some(c) = cap.take() {
+                        w.reserve(c);
+                    }
+                    if big.is_none() {
+                        big = Some(Big::open(
+                            &mut w,
+                            shapes.next().unwrap(),
+                            bi + 1 == nb,
+                            counts[bi],
+                            hr,
+                            &mut recipe,
+                        )?);
+                    }
+                    let b = big.as_mut().unwrap();
+                    while b.left > 0 && decoded > k {
+                        let s = STEP.min(b.left).min(decoded - k);
+                        let toks = pending.get(k - base..k - base + s).ok_or(Error::Corrupt)?;
+                        b.put(&mut w, toks)?;
+                        (k, b.left) = (k + s, b.left - s);
+                        if let Ok(sink) = &mut to {
+                            sink(w.written());
+                            w.forget_written();
+                        }
+                    }
+                    if b.left > 0 {
+                        // (the rest to come)
+                        match more {
+                            true => break,
+                            false => return Err(Error::Corrupt),
+                        }
+                    }
+                    big.take().unwrap().close(&mut w)?;
+                    bi += 1;
+                    if let Ok(sink) = &mut to {
+                        sink(w.written());
+                        w.forget_written();
+                    }
+                    continue;
+                }
+                if !(k + counts[bi] <= decoded || !more) {
+                    break;
+                }
                 // (the room of the whole output reserved before what a round takes)
                 if let Some(c) = cap.take() {
                     w.reserve(c);
@@ -2926,6 +3078,7 @@ fn rebuild(
                 let mut round = 0;
                 while ready.len() < ROUND_BLOCKS
                     && bi < nb
+                    && counts[bi] < BIG
                     && (k + counts[bi] <= decoded || !more)
                     && (whole.is_some() || round < ROUND)
                 {
@@ -3011,7 +3164,8 @@ fn rebuild(
                 sink(w.written());
                 w.forget_written();
             }
-            if k - base > pending.len() / 2 {
+            // (what is written let go of where the next batch would not fit)
+            if k > base && pending.len() + most > round {
                 pending.drain(..k - base);
                 base = k;
             }
