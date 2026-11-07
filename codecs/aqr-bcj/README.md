@@ -35,7 +35,8 @@ commit before as the baseline).
   2.17 -> 2.27 GB. Each folder is one LZMA or LZMA2 stream (250 and 124 MB of data), split and
   rebuilt on one thread; the times look like the two are rebuilt one after the other (not
   looked into).
-- The modules are 9.0 to 9.9 KB (`bcj2` 12 KB), of module blocks of 3.6 to 5.1 KB.
+- The modules are 2.4 to 3.2 KB (`bcj2` 4.4 KB, `bcj-delta` 1.9 KB), of module blocks of 1.3 to 2.1 KB;
+  they are part modules whose memory does not depend on the length of the data.
 
 ## Tests
 
