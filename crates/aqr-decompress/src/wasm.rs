@@ -101,8 +101,10 @@ enum HostFn {
     Commit,
     Heartbeat,
     Log,
+    /// `aqr_spawn` of five parameters, or (of a released module) of two, which spawns tasks of
+    /// class 0 from all of the working memory.
     Spawn,
-    SpawnV2,
+    SpawnEarlier,
     Result,
     Join,
     Take,
@@ -138,6 +140,9 @@ struct Compiled {
     arity: usize,
     /// The task slots of each class of its tasks (none without tasks).
     slots: Vec<usize>,
+    /// Whether it is a module of a release, run by the rules before the current ones: an
+    /// `aqr_spawn` of two parameters, and applications with no task limits.
+    released: bool,
     /// SHA-512/256 of the module.
     hash: [u8; 32],
 }
@@ -147,12 +152,19 @@ pub fn load(wasm: &[u8], hash: [u8; 32]) -> Decoded<Box<dyn Loaded>> {
     Ok(Box::new(compiled(wasm, hash)?))
 }
 
+/// [`load`] of a module as if it were of a release (not kept), for tests of the earlier rules.
+#[doc(hidden)]
+pub fn load_released(wasm: &[u8]) -> Decoded<Box<dyn Loaded>> {
+    Ok(Box::new(Shared(Arc::new(Compiled { released: true, ..compile(wasm, true)? }))))
+}
+
 /// [`load`], of the module itself (for [`Shared::apply_into`]).
 pub(crate) fn compiled(wasm: &[u8], hash: [u8; 32]) -> Decoded<Shared> {
     if let Some(c) = COMPILED.lock().unwrap().get(&hash) {
         return Ok(c.clone());
     }
-    let c = Shared(Arc::new(Compiled { hash, ..compile(wasm)? }));
+    let released = aqr_formula::aqr::is_released(&hash);
+    let c = Shared(Arc::new(Compiled { hash, released, ..compile(wasm, released)? }));
     COMPILED.lock().unwrap().insert(hash, c.clone());
     Ok(c)
 }
@@ -183,7 +195,7 @@ fn memory_of(name: &str) -> Option<Mem> {
 
 /// The host function `name`, of its parameters and results.
 #[allow(clippy::type_complexity)]
-fn func_of(name: &str) -> Option<(HostFn, &'static [wp::ValType], &'static [wp::ValType])> {
+fn func_of(name: &str, released: bool) -> Option<(HostFn, &'static [wp::ValType], &'static [wp::ValType])> {
     use wp::ValType::{I32, I64};
     Some(match name {
         "aqr_request" => (HostFn::Request, &[I32, I64], &[]),
@@ -191,8 +203,8 @@ fn func_of(name: &str) -> Option<(HostFn, &'static [wp::ValType], &'static [wp::
         "aqr_commit" => (HostFn::Commit, &[I32, I64], &[]),
         "aqr_heartbeat" => (HostFn::Heartbeat, &[], &[]),
         "aqr_log" => (HostFn::Log, &[I32, I32], &[]),
-        "aqr_spawn" => (HostFn::Spawn, &[I32, I32], &[I32]),
-        "aqr_spawn_v2" => (HostFn::SpawnV2, &[I32, I32, I32, I32, I32], &[I32]),
+        "aqr_spawn" if released => (HostFn::SpawnEarlier, &[I32, I32], &[I32]),
+        "aqr_spawn" => (HostFn::Spawn, &[I32, I32, I32, I32, I32], &[I32]),
         "aqr_result" => (HostFn::Result, &[I32, I32], &[]),
         "aqr_join" => (HostFn::Join, &[I32, I32], &[I32]),
         "aqr_take" => (HostFn::Take, &[I32, I32, I32, I32], &[]),
@@ -204,8 +216,9 @@ fn func_of(name: &str) -> Option<(HostFn, &'static [wp::ValType], &'static [wp::
     })
 }
 
-/// Checks `wasm` against the profile (the spec, "Module execution"), and compiles it.
-fn compile(wasm: &[u8]) -> Decoded<Compiled> {
+/// Checks `wasm` against the profile (the spec, "Module execution"), and compiles it; `released`
+/// if it is a module of a release, which may import the earlier `aqr_spawn`.
+fn compile(wasm: &[u8], released: bool) -> Decoded<Compiled> {
     let bad = |e: wp::BinaryReaderError| Failure::Invalid(format!("not a module of the profile: {e}"));
     Validator::new_with_features(WasmFeatures::WASM2 | WasmFeatures::MULTI_MEMORY | WasmFeatures::MEMORY64)
         .validate_all(wasm)
@@ -256,7 +269,7 @@ fn compile(wasm: &[u8]) -> Decoded<Compiled> {
                             imports.push(Import::Memory(mem));
                         }
                         wp::TypeRef::Func(t) => {
-                            let Some((f, params, results)) = func_of(i.name) else {
+                            let Some((f, params, results)) = func_of(i.name, released) else {
                                 return invalid(format!("an import {}", i.name));
                             };
                             let ft = types.get(t as usize).ok_or_else(|| Failure::Invalid("a bad type".into()))?;
@@ -336,7 +349,7 @@ fn compile(wasm: &[u8]) -> Decoded<Compiled> {
     if !windows.is_empty() && !part {
         return invalid("a whole module of a memory of a maximum");
     }
-    let spawns = imports.iter().any(|i| matches!(i, Import::Func(HostFn::Spawn | HostFn::SpawnV2)));
+    let spawns = imports.iter().any(|i| matches!(i, Import::Func(HostFn::Spawn | HostFn::SpawnEarlier)));
     if spawns {
         let ft = task.and_then(|f| funcs.get(f as usize)).and_then(|&t| types.get(t as usize));
         let Some(ft) = ft else { return invalid(format!("tasks spawned without {TASK}")) };
@@ -362,7 +375,19 @@ fn compile(wasm: &[u8]) -> Decoded<Compiled> {
         None
     };
     let arity = ft.params().len();
-    Ok(Compiled { module, imports, working, clean, working_module, part, windows, arity, slots, hash: [0; 32] })
+    Ok(Compiled {
+        module,
+        imports,
+        working,
+        clean,
+        working_module,
+        part,
+        windows,
+        arity,
+        slots,
+        released,
+        hash: [0; 32],
+    })
 }
 
 /// A module defining a memory of 32 bits of `limits` (in pages), exported as `m`.
@@ -548,7 +573,7 @@ impl Slots {
     }
 }
 
-/// `aqr_spawn_v2`'s work for the instance of `c`: `n` tasks of class `class` starting as `start`
+/// `aqr_spawn`'s work for the instance of `c`: `n` tasks of class `class` starting as `start`
 /// gives, appended to the handles; the index of their handle.
 fn spawn(c: &mut Caller<'_, State>, class: usize, start: Start, arg: u32, n: u32) -> wasmtime::Result<i32> {
     let s = c.data_mut();
@@ -604,8 +629,8 @@ struct Job {
     i: u32,
 }
 
-/// What a task's working memory starts as: a copy of the spawning instance's (`aqr_spawn`), or
-/// regions of it, each written at its offset (`aqr_spawn_v2`).
+/// What a task's working memory starts as: a copy of the spawning instance's (all of it as one
+/// region, or the earlier `aqr_spawn`), or regions of it, each written at its offset.
 #[derive(Clone)]
 enum Start {
     Copy(Arc<Snapshot>),
@@ -961,7 +986,8 @@ impl Shared {
                 return invalid("a memory imported beyond those given");
             }
         }
-        if !task_limits.is_empty() && task_limits.len() != c.slots.len() {
+        // (no limits for a module with classes: the earlier Apply, of the modules of releases)
+        if task_limits.len() != c.slots.len() && !(task_limits.is_empty() && c.released) {
             return invalid(format!("{} task limits for {} classes of tasks", task_limits.len(), c.slots.len()));
         }
         let total = self.imported(params, resources, inputs, sizes) + c.working.0 as u128 * 65536;
@@ -1399,15 +1425,15 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
                 c.data_mut().last_log = msg;
             }
         }),
-        HostFn::Spawn => {
+        HostFn::SpawnEarlier => {
             Func::wrap(&mut *store, |mut c: Caller<'_, State>, arg: i32, n: i32| -> wasmtime::Result<i32> {
-                // (aqr_spawn_v2 of class 0 and all of the working memory at offset 0)
+                // (aqr_spawn of class 0 and all of the working memory at offset 0)
                 let w = c.data().working.expect("a working memory");
                 let start = Start::Copy(Arc::new(Snapshot::new(w.data(&c))));
                 spawn(&mut c, 0, start, arg as u32, n as u32)
             })
         }
-        HostFn::SpawnV2 => Func::wrap(
+        HostFn::Spawn => Func::wrap(
             &mut *store,
             |mut c: Caller<'_, State>,
              class: i32,
@@ -1420,17 +1446,24 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
                 let w = c.data().working.expect("a working memory");
                 let m = w.data(&c);
                 let Some(recs) = count.checked_mul(12).and_then(|l| m.get(records..records.checked_add(l)?)) else {
-                    return violation(format!("aqr_spawn_v2's {count} records at {records} out of bounds"));
+                    return violation(format!("aqr_spawn's {count} records at {records} out of bounds"));
                 };
+                // (all of the working memory at offset 0, as aqr-api's tasks start: a snapshot,
+                // copied on write where the system can)
+                let word = |k: usize| u32::from_le_bytes(recs.get(k..k + 4).unwrap_or(&[1; 4]).try_into().unwrap());
+                if count == 1 && word(0) == 0 && word(4) as usize == m.len() && word(8) == 0 {
+                    let start = Start::Copy(Arc::new(Snapshot::new(m)));
+                    return spawn(&mut c, class as u32 as usize, start, arg as u32, n as u32);
+                }
                 let mut regions = Vec::with_capacity(count);
                 for r in recs.chunks_exact(12) {
                     let u = |k: usize| u32::from_le_bytes(r[k..k + 4].try_into().unwrap()) as usize;
                     let (src, len, dst) = (u(0), u(4), u(8));
                     let Some(b) = src.checked_add(len).and_then(|e| m.get(src..e)) else {
-                        return violation(format!("aqr_spawn_v2's region {src}+{len} out of bounds"));
+                        return violation(format!("aqr_spawn's region {src}+{len} out of bounds"));
                     };
                     if (dst + len) as u64 > 1 << 32 {
-                        return violation(format!("aqr_spawn_v2's region to {dst}+{len} past 4 GiB"));
+                        return violation(format!("aqr_spawn's region to {dst}+{len} past 4 GiB"));
                     }
                     regions.push((dst as u64, b.to_vec()));
                 }

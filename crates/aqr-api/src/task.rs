@@ -81,9 +81,22 @@ pub struct Tasks<'a> {
 /// core::mem::forget(aqr_api::task::spawn(1, &f));
 /// ```
 pub unsafe fn spawn<'a, F: Fn(usize, &mut Vec<u8>) + Sync + 'a>(n: usize, f: &'a F) -> Tasks<'a> {
+    // SAFETY: as the caller makes sure
+    unsafe { spawn_class(0, n, f) }
+}
+
+/// [`spawn`] of tasks of class `class` of the module (the bytes of its custom section
+/// `aqr_task_slots`; the application's instance spawns any class, a task one above its own).
+/// Natively the class is of no matter: every task has a thread.
+///
+/// # Safety
+/// As [`spawn`].
+pub unsafe fn spawn_class<'a, F: Fn(usize, &mut Vec<u8>) + Sync + 'a>(class: u32, n: usize, f: &'a F) -> Tasks<'a> {
+    #[cfg(not(target_family = "wasm"))]
+    let _ = class;
     #[cfg(target_family = "wasm")]
     let t = Tasks {
-        handle: spawn_record(run::<F>, f as *const F as *const (), n),
+        handle: spawn_record(class, run::<F>, f as *const F as *const (), n),
         taken: alloc::vec![false; n],
         _f: PhantomData,
     };
@@ -95,15 +108,27 @@ pub unsafe fn spawn<'a, F: Fn(usize, &mut Vec<u8>) + Sync + 'a>(n: usize, f: &'a
     t
 }
 
+/// What `aqr_spawn` is given: the record of the function, which the tasks get as their
+/// argument, and the region record that makes the tasks start from all of the working memory
+/// (source and destination 0, its length).
+#[cfg(target_family = "wasm")]
+#[repr(C)]
+pub(crate) struct Frame {
+    /// First: the tasks' stack starts below it.
+    pub(crate) rec: Record,
+    pub(crate) region: [u32; 3],
+}
+
 /// `aqr_spawn` of the record of `run` and `data`, which this frame holds: never inlined, so
 /// that the frame is below those of its callers, whose data the tasks (whose stack starts
 /// below the record) find as they were. (The record within a caller's frame could be above
 /// some of its data, which the tasks' frames would then overwrite.)
 #[cfg(target_family = "wasm")]
 #[inline(never)]
-fn spawn_record(run: unsafe fn(*const (), usize, &mut Vec<u8>), data: *const (), n: usize) -> u32 {
-    let rec = Record { run, data };
-    crate::sys::spawn(core::hint::black_box(&rec), n)
+fn spawn_record(class: u32, run: unsafe fn(*const (), usize, &mut Vec<u8>), data: *const (), n: usize) -> u32 {
+    let len = (core::arch::wasm32::memory_size::<0>() as u32) << 16;
+    let frame = Frame { rec: Record { run, data }, region: [0, len, 0] };
+    crate::sys::spawn(class, core::hint::black_box(&frame), n)
 }
 
 impl Tasks<'_> {

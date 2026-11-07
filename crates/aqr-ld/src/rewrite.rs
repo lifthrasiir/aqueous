@@ -135,7 +135,8 @@ pub fn rewrite(wasm: &[u8]) -> Result<Vec<u8>, String> {
             "request" | "release" | "commit" => (Op::Host, "", &[I32, I64], &[]),
             "heartbeat" => (Op::Host, "", &[], &[]),
             "log" | "result" => (Op::Host, "", &[I32, I32], &[]),
-            "spawn" | "join" => (Op::Host, "", &[I32, I32], &[I32]),
+            "spawn" => (Op::Host, "", &[I32, I32, I32, I32, I32], &[I32]),
+            "join" => (Op::Host, "", &[I32, I32], &[I32]),
             "take" => (Op::Host, "", &[I32, I32, I32, I32], &[]),
             "chan" => (Op::Host, "", &[I32], &[I32]),
             "send" => (Op::Host, "", &[I32, I32, I32], &[]),
@@ -213,7 +214,7 @@ pub fn rewrite(wasm: &[u8]) -> Result<Vec<u8>, String> {
     if entry == WHOLE && !part_funcs.is_empty() {
         return Err(format!("whole module imports {}", part_funcs.join(", ")));
     }
-    let spawns = m.imports.iter().any(|i| i.module == "aqr" && matches!(&i.name[..], "aqr_spawn" | "aqr_spawn_v2"));
+    let spawns = m.imports.iter().any(|i| i.module == "aqr" && i.name == "aqr_spawn");
     if spawns {
         task(&mut m, task_body)?;
     }

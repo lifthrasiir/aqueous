@@ -22,6 +22,8 @@ pub mod sandbox;
 #[cfg(feature = "wasm")]
 mod wasm;
 use aqr_formula::{Apply, Error, Module, Modules, Result};
+#[doc(hidden)]
+pub use wasm::load_released;
 #[cfg(feature = "wasm")]
 pub use wasm::{Applied, initial_pages, record_applications};
 

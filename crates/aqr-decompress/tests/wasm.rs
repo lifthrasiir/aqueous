@@ -1195,7 +1195,7 @@ fn apply(wat: &str, inputs: &[&[u8]], sizes: &[u64], limit: u64) -> aqr::Decoded
     apply_v2(wat, inputs, sizes, limit, &[])
 }
 
-/// [`apply`] with task limits (the spec's ApplyV2).
+/// [`apply`] with task limits.
 fn apply_v2(wat: &str, inputs: &[&[u8]], sizes: &[u64], limit: u64, tasks: &[u64]) -> aqr::Decoded<Vec<Vec<u8>>> {
     let r = load(wat)?.apply(b"pp", &[], inputs, sizes, limit, tasks);
     #[cfg(feature = "sandbox")]
@@ -1204,6 +1204,16 @@ fn apply_v2(wat: &str, inputs: &[&[u8]], sizes: &[u64], limit: u64, tasks: &[u64
         assert!(s == r, "in the sandbox: {:?}, in this process: {:?}", s.as_ref().err(), r.as_ref().err());
     }
     r
+}
+
+/// [`apply`] of a module as one of a release is, with no task limits and the earlier `aqr_spawn`.
+fn apply_earlier(wat: &str, inputs: &[&[u8]], sizes: &[u64], limit: u64) -> aqr::Decoded<Vec<Vec<u8>>> {
+    load_earlier(wat)?.apply(b"pp", &[], inputs, sizes, limit, &[])
+}
+
+/// [`load`] of a module as one of a release.
+fn load_earlier(wat: &str) -> aqr::Decoded<Box<dyn Loaded>> {
+    aqr_decompress::load_released(&module(wat))
 }
 
 const MEMORIES: &str = r#"
@@ -1457,7 +1467,7 @@ fn unknown_module_runs() {
     assert!(Encoder::new(Level::Zstd(3)).with_modules(wasm_of).encode(&f, None).is_err());
 }
 
-/// The imports of tasks.
+/// The imports of tasks of the earlier `aqr_spawn` (two parameters), which modules of releases have.
 const TASKS: &str = r#"
     (@custom "aqr_task_slots" "\08")
     (import "aqr" "aqr_spawn" (func $spawn (param i32 i32) (result i32)))
@@ -1500,32 +1510,35 @@ fn incr(entry_tail: &str) -> String {
 #[test]
 fn tasks() {
     let ok = incr("");
-    assert_eq!(apply(&ok, &[b"abc"], &[6], u64::MAX).unwrap(), [b"bcdabc"]);
-    assert_eq!(apply(&ok, &[b""], &[0], u64::MAX).unwrap(), [b""]);
+    assert_eq!(apply_earlier(&ok, &[b"abc"], &[6], u64::MAX).unwrap(), [b"bcdabc"]);
+    assert_eq!(apply_earlier(&ok, &[b""], &[0], u64::MAX).unwrap(), [b""]);
     let many: Vec<u8> = (0..200u8).map(|b| b % 32 + 64).collect();
     let want: Vec<u8> = many.iter().map(|b| b + 1).chain(many.iter().copied()).collect();
-    assert_eq!(apply(&ok, &[&many], &[400], u64::MAX).unwrap(), [want]);
+    assert_eq!(apply_earlier(&ok, &[&many], &[400], u64::MAX).unwrap(), [want]);
     // a task trapping ('!'), as the application does
-    invalid(apply(&ok, &[b"a!c"], &[6], u64::MAX), "trap");
+    invalid(apply_earlier(&ok, &[b"a!c"], &[6], u64::MAX), "trap");
     // the memory of the tasks counts: 4 pages for the module's memories, and one per task
-    assert!(apply(&ok, &[b"a"], &[2], 5 << 16).is_ok());
-    assert!(matches!(apply(&ok, &[b"a"], &[2], 4 << 16), Err(Failure::Resource(_))));
+    assert!(apply_earlier(&ok, &[b"a"], &[2], 5 << 16).is_ok());
+    assert!(matches!(apply_earlier(&ok, &[b"a"], &[2], 4 << 16), Err(Failure::Resource(_))));
 
     // results taken but for one, a result outside a task, a take before the join
     let skip = incr("")
         .replace("(i32.lt_u (local.get $i) (i32.wrap_i64 (local.get $n)))", "(i32.lt_u (local.get $i) (i32.const 1))");
-    invalid(apply(&skip, &[b"ab"], &[4], u64::MAX), "tasks not taken");
-    invalid(apply(&incr("(call $result (i32.const 0) (i32.const 1))"), &[b"a"], &[2], u64::MAX), "outside a task");
+    invalid(apply_earlier(&skip, &[b"ab"], &[4], u64::MAX), "tasks not taken");
+    invalid(
+        apply_earlier(&incr("(call $result (i32.const 0) (i32.const 1))"), &[b"a"], &[2], u64::MAX),
+        "outside a task",
+    );
     let early = incr("").replace(
         "(if (i32.ne (call $join",
         "(call $take (local.get $h) (i32.const 0) (i32.const 0) (i32.const 0)) (if (i32.ne (call $join",
     );
-    invalid(apply(&early, &[b"a"], &[2], u64::MAX), "not joined");
+    invalid(apply_earlier(&early, &[b"a"], &[2], u64::MAX), "not joined");
 
     // the profile: tasks need aqr_task, and nothing starts
-    invalid(load(&incr("").replace(r#"(export "aqr_task")"#, "")), "without aqr_task");
+    invalid(load_earlier(&incr("").replace(r#"(export "aqr_task")"#, "")), "without aqr_task");
     invalid(
-        load(
+        load_earlier(
             r#"(module (import "aqr" "aqr_memory" (memory 1)) (func $s) (start $s)
             (func (export "aqr_apply_whole") (param i64 i64 i64)))"#,
         ),
@@ -1555,7 +1568,7 @@ fn tasks_over_data() {
                 (call $take (local.get $h) (i32.const 0) (i32.const 0x4000) (i32.const 2))
                 (memory.copy 3 0 (i64.const 0) (i32.const 0x4000) (i32.const 2))))"#
     );
-    assert_eq!(apply(&m, &[b""], &[2], u64::MAX).unwrap(), [[0, 7]]);
+    assert_eq!(apply_earlier(&m, &[b""], &[2], u64::MAX).unwrap(), [[0, 7]]);
 }
 
 /// The imports of channels.
@@ -1622,25 +1635,25 @@ fn piped(before: &str, after: &str) -> String {
 #[test]
 fn channels() {
     let ok = piped("", "");
-    assert_eq!(apply(&ok, &[b"abc"], &[3], u64::MAX).unwrap(), [b"cde"]);
-    assert_eq!(apply(&ok, &[b""], &[0], u64::MAX).unwrap(), [b""]);
+    assert_eq!(apply_earlier(&ok, &[b"abc"], &[3], u64::MAX).unwrap(), [b"cde"]);
+    assert_eq!(apply_earlier(&ok, &[b""], &[0], u64::MAX).unwrap(), [b""]);
     let many: Vec<u8> = (0..3000u32).map(|i| (i % 200) as u8).collect();
     let want: Vec<u8> = many.iter().map(|b| b + 2).collect();
     for _ in 0..20 {
-        assert_eq!(apply(&ok, &[&many], &[3000], u64::MAX).unwrap(), std::slice::from_ref(&want));
+        assert_eq!(apply_earlier(&ok, &[&many], &[3000], u64::MAX).unwrap(), std::slice::from_ref(&want));
     }
     // a message longer than the buffer stays, its length told
     let small = piped(
         "",
         "(if (i32.ne (call $recv (i32.load (i32.const 0x104)) (i32.const 0x4000) (i32.const 0)) (i32.const 1)) (then unreachable))",
     );
-    assert_eq!(apply(&small, &[b"ab"], &[2], u64::MAX).unwrap(), [b"cd"]);
+    assert_eq!(apply_earlier(&small, &[b"ab"], &[2], u64::MAX).unwrap(), [b"cd"]);
     // the module sending to the channel the task 0 sends to
     let two = piped("(call $send (i32.load (i32.const 0x100)) (i32.const 0x10c) (i32.const 1))", "");
-    invalid(apply(&two, &[b"ab"], &[2], u64::MAX), "two instances");
+    invalid(apply_earlier(&two, &[b"ab"], &[2], u64::MAX), "two instances");
     // the module receiving from the channel the task 1 receives from
     let two = piped("", "(drop (call $recv (i32.load (i32.const 0x100)) (i32.const 0x4000) (i32.const 1)))");
-    invalid(apply(&two, &[b"ab"], &[2], u64::MAX), "two instances");
+    invalid(apply_earlier(&two, &[b"ab"], &[2], u64::MAX), "two instances");
     // waiting for a channel nobody sends to
     let dead = format!(
         r#"(module {MEMORIES} {TASKS} {CHANS}
@@ -1648,13 +1661,13 @@ fn channels() {
             (func (export "aqr_apply_whole") (param i64 i64 i64)
                 (drop (call $recv (call $chan (i32.const 1)) (i32.const 0) (i32.const 0)))))"#
     );
-    invalid(apply(&dead, &[b""], &[0], u64::MAX), "deadlock");
+    invalid(apply_earlier(&dead, &[b""], &[0], u64::MAX), "deadlock");
     // a task waiting so, joined
     let dead = piped("(i32.store (i32.const 0x108) (i32.const 0))", "").replace(
         "(call $close (local.get $c1))",
         "(drop (call $recv (call $chan (i32.const 1)) (i32.const 0) (i32.const 0)))",
     );
-    invalid(apply(&dead, &[b"ab"], &[0], u64::MAX), "deadlock");
+    invalid(apply_earlier(&dead, &[b"ab"], &[0], u64::MAX), "deadlock");
 }
 
 /// A task per byte of the input, task `i` receiving its byte from channel `i` (which the module
@@ -1715,16 +1728,16 @@ fn task_slots() {
     // 4 pages for the module's memories, 1 a task running and the messages queued (16 tasks at
     // once would take 20 pages)
     let limit = (4 + 8) << 16 | 0x100;
-    assert_eq!(apply(&all, &[&input], &[16], limit).unwrap(), std::slice::from_ref(&input));
-    assert_eq!(apply(&slotted(Some(7)), &[&input[..8]], &[8], u64::MAX).unwrap(), [&input[..8]]);
-    invalid(apply(&slotted(Some(8)), &[&input[..9]], &[9], u64::MAX), "deadlock");
+    assert_eq!(apply_earlier(&all, &[&input], &[16], limit).unwrap(), std::slice::from_ref(&input));
+    assert_eq!(apply_earlier(&slotted(Some(7)), &[&input[..8]], &[8], u64::MAX).unwrap(), [&input[..8]]);
+    invalid(apply_earlier(&slotted(Some(8)), &[&input[..9]], &[9], u64::MAX), "deadlock");
     let two = |w| slotted(w).replace(r#""aqr_task_slots" "\08""#, r#""aqr_task_slots" "\02""#);
-    assert_eq!(apply(&two(Some(1)), &[&input[..2]], &[2], u64::MAX).unwrap(), [&input[..2]]);
-    invalid(apply(&two(Some(2)), &[&input[..3]], &[3], u64::MAX), "deadlock");
-    assert_eq!(apply(&two(None), &[&input], &[16], u64::MAX).unwrap(), std::slice::from_ref(&input));
+    assert_eq!(apply_earlier(&two(Some(1)), &[&input[..2]], &[2], u64::MAX).unwrap(), [&input[..2]]);
+    invalid(apply_earlier(&two(Some(2)), &[&input[..3]], &[3], u64::MAX), "deadlock");
+    assert_eq!(apply_earlier(&two(None), &[&input], &[16], u64::MAX).unwrap(), std::slice::from_ref(&input));
 }
 
-/// Tasks of `aqr_spawn_v2`: a task of class 0 per byte of the input, started from one region (the
+/// Tasks of `aqr_spawn`: a task of class 0 per byte of the input, started from one region (the
 /// input at 0x100, placed at 0x30000: past the module's page) and giving the byte plus 1, with
 /// its memory size checked (5 pages: the region's end). `nested` has each task spawn one of class
 /// `nested` first.
@@ -1738,7 +1751,7 @@ fn regions(nested: Option<u32>) -> String {
     format!(
         r#"(module {MEMORIES}
             (@custom "aqr_task_slots" "\04\02")
-            (import "aqr" "aqr_spawn_v2" (func $spawn2 (param i32 i32 i32 i32 i32) (result i32)))
+            (import "aqr" "aqr_spawn" (func $spawn2 (param i32 i32 i32 i32 i32) (result i32)))
             (import "aqr" "aqr_result" (func $result (param i32 i32)))
             (import "aqr" "aqr_join" (func $join (param i32 i32) (result i32)))
             (import "aqr" "aqr_take" (func $take (param i32 i32 i32 i32)))
@@ -1768,29 +1781,72 @@ fn regions(nested: Option<u32>) -> String {
     )
 }
 
-/// `aqr_spawn_v2`: tasks of the regions named, under their class's limit each with task limits
+/// `aqr_spawn`: tasks of the regions named, under their class's limit each with task limits
 /// (and not in the instance's), spawning only classes above their own.
 #[test]
 fn tasks_of_regions() {
     let m = regions(None);
-    assert_eq!(apply(&m, &[b"abc"], &[3], u64::MAX).unwrap(), [b"bcd"]);
+    assert_eq!(apply_v2(&m, &[b"abc"], &[3], u64::MAX, &[u64::MAX, u64::MAX]).unwrap(), [b"bcd"]);
     // a task is 4 pages, the instance 4 (its working memory, and the parameters, input and output a
     // page each)
     let pages = |n: u64| n << 16;
     assert_eq!(apply_v2(&m, &[b"abc"], &[3], pages(4), &[pages(4), 1]).unwrap(), [b"bcd"]);
     assert!(matches!(apply_v2(&m, &[b"abc"], &[3], pages(4), &[pages(3), 1]), Err(Failure::Resource(_))));
-    // without task limits, the tasks' memories are in the memory limit (short of one task here)
-    assert!(matches!(apply(&m, &[b"abc"], &[3], pages(4 + 3)), Err(Failure::Resource(_))));
-    assert_eq!(apply(&m, &[b"a"], &[1], pages(4 + 4)).unwrap(), [b"b"]);
-    // as many task limits as classes
+    // as many task limits as classes, none being no limits only for modules of releases
     invalid(apply_v2(&m, &[b"abc"], &[3], u64::MAX, &[u64::MAX]), "task limits");
-    // a task of class 0 spawning one of class 1, not of class 0 (with task limits; without, either)
+    invalid(apply_v2(&m, &[b"abc"], &[3], u64::MAX, &[]), "task limits");
+    // a task of class 0 spawning one of class 1, not of class 0
     let up = regions(Some(1));
     assert_eq!(apply_v2(&up, &[b"ab"], &[2], u64::MAX, &[u64::MAX, u64::MAX]).unwrap(), [b"bc"]);
     let same = regions(Some(0));
     invalid(apply_v2(&same, &[b"ab"], &[2], u64::MAX, &[u64::MAX, u64::MAX]), "spawning one of class 0");
     // a class past the module's
-    invalid(apply(&regions(Some(2)), &[b"ab"], &[2], u64::MAX), "class 2");
+    invalid(apply_v2(&regions(Some(2)), &[b"ab"], &[2], u64::MAX, &[u64::MAX, u64::MAX]), "class 2");
+}
+
+/// `incr`'s module (a task per byte) with the current `aqr_spawn`, of one region of all of the
+/// working memory as aqr-api's tasks start.
+fn incr_spawn() -> String {
+    incr("")
+        .replace(
+            r#"(import "aqr" "aqr_spawn" (func $spawn (param i32 i32) (result i32)))"#,
+            r#"(import "aqr" "aqr_spawn" (func $spawn5 (param i32 i32 i32 i32 i32) (result i32)))"#,
+        )
+        .replace(
+            r#"(func (export "aqr_task")"#,
+            r#"(func $spawn (param $arg i32) (param $n i32) (result i32)
+                (i32.store (i32.const 0xf004) (i32.shl (memory.size 0) (i32.const 16)))
+                (call $spawn5 (i32.const 0) (i32.const 1) (i32.const 0xf000) (local.get $arg) (local.get $n)))
+            (func (export "aqr_task")"#,
+        )
+}
+
+/// The current `aqr_spawn` (five parameters) is the only spawn of a module that is not of a release,
+/// and a module with classes is applied with a task limit for each.
+#[test]
+fn spawn_of_one_region() {
+    let m = incr_spawn();
+    let pages = |n: u64| n << 16;
+    // (the instance 4 pages; a task 1: its working memory)
+    assert_eq!(apply_v2(&m, &[b"abc"], &[6], pages(4), &[pages(1)]).unwrap(), [b"bcdabc"]);
+    assert!(matches!(apply_v2(&m, &[b"abc"], &[6], pages(4), &[pages(1) - 1]), Err(Failure::Resource(_))));
+    // the instance's limit does not count the tasks'
+    assert!(matches!(apply_v2(&m, &[b"abc"], &[6], pages(4) - 1, &[pages(1)]), Err(Failure::Resource(_))));
+    // no task limits for a module with classes: not a valid application
+    invalid(apply_v2(&m, &[b"abc"], &[6], u64::MAX, &[]), "task limits");
+    // the earlier spawn of two parameters: an import of another type for a module not of a release
+    // (which is run as before, without limits)
+    let earlier = incr("");
+    invalid(load(&earlier), "aqr_spawn of another type");
+    assert_eq!(apply_earlier(&earlier, &[b"abc"], &[6], u64::MAX).unwrap(), [b"bcdabc"]);
+    assert_eq!(
+        load_earlier(&earlier).unwrap().apply(b"pp", &[], &[b"abc"], &[6], u64::MAX, &[pages(1)]).unwrap(),
+        [b"bcdabc"]
+    );
+    // and aqr_spawn_v2 is no import at all, of a release or not
+    let v2 = m.replace("\"aqr_spawn\"", "\"aqr_spawn_v2\"");
+    invalid(load(&v2), "aqr_spawn_v2");
+    invalid(load_earlier(&v2), "aqr_spawn_v2");
 }
 
 /// The task slots of a module: one custom section of one byte from 1 to 64 where it spawns
@@ -1799,20 +1855,20 @@ fn tasks_of_regions() {
 fn task_slots_declared() {
     let ok = slotted(None);
     let with = |data: &str| ok.replace(r#""aqr_task_slots" "\08""#, &format!(r#""aqr_task_slots" "{data}""#));
-    invalid(load(&ok.replace(r#"(@custom "aqr_task_slots" "\08")"#, "")), "aqr_task_slots");
-    invalid(load(&with("\\00")), "aqr_task_slots");
-    invalid(load(&with("\\41")), "aqr_task_slots");
-    invalid(load(&with("\\08\\00")), "aqr_task_slots");
-    invalid(load(&with("\\88")), "aqr_task_slots");
+    invalid(load_earlier(&ok.replace(r#"(@custom "aqr_task_slots" "\08")"#, "")), "aqr_task_slots");
+    invalid(load_earlier(&with("\\00")), "aqr_task_slots");
+    invalid(load_earlier(&with("\\41")), "aqr_task_slots");
+    invalid(load_earlier(&with("\\08\\00")), "aqr_task_slots");
+    invalid(load_earlier(&with("\\88")), "aqr_task_slots");
     invalid(
-        load(&ok.to_string().replacen("(module", r#"(module (@custom "aqr_task_slots" "\08")"#, 1)),
+        load_earlier(&ok.to_string().replacen("(module", r#"(module (@custom "aqr_task_slots" "\08")"#, 1)),
         "aqr_task_slots",
     );
-    invalid(load(&with("\\c0\\00")), "aqr_task_slots");
-    assert!(load(&with("\\40")).is_ok());
+    invalid(load_earlier(&with("\\c0\\00")), "aqr_task_slots");
+    assert!(load_earlier(&with("\\40")).is_ok());
     let plain = r#"(module (import "aqr" "aqr_memory" (memory 1)) (@custom "aqr_task_slots" "\08")
         (func (export "aqr_apply_whole") (param i64)))"#;
-    invalid(load(plain), "aqr_task_slots");
+    invalid(load_earlier(plain), "aqr_task_slots");
 }
 
 /// Formula `f` of a root application of slices, its plan declared as its limit alone (no room),

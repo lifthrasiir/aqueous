@@ -4335,6 +4335,14 @@ fn released(w: &[u8]) -> bool {
     crate::released::RELEASED.contains(&hex.as_str()) || cfg!(test) && tests_released(&hex)
 }
 
+/// Whether a Wasm module of SHA-512/256 `hash` is of a release ([`crate::released::RELEASED`]):
+/// the modules the reserved Apply instruction is valid for, which a host runs by the rules
+/// before the current ones (an `aqr_spawn` of two parameters, no task limits).
+pub fn is_released(hash: &[u8; 32]) -> bool {
+    let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+    crate::released::RELEASED.contains(&hex.as_str())
+}
+
 #[cfg(test)]
 static TEST_RELEASED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 

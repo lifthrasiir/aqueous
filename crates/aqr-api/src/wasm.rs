@@ -14,7 +14,7 @@ unsafe extern "C" {
     #[link_name = "log"]
     fn log_(ptr: *const u8, len: usize);
     #[link_name = "spawn"]
-    fn spawn_(rec: *const u8, n: u32) -> u32;
+    fn spawn_(class: u32, count: u32, records: *const u32, arg: *const u8, n: u32) -> u32;
     #[link_name = "result"]
     fn result_(ptr: *const u8, len: usize);
     #[link_name = "join"]
@@ -58,9 +58,10 @@ pub fn log(msg: &[u8]) {
 
 #[cfg(feature = "alloc")]
 #[inline]
-pub fn spawn(rec: &crate::task::Record, n: usize) -> u32 {
+pub(crate) fn spawn(class: u32, frame: &crate::task::Frame, n: usize) -> u32 {
     let n = u32::try_from(n).unwrap_or_else(|_| trap());
-    unsafe { spawn_(rec as *const crate::task::Record as *const u8, n) }
+    // one region record, all of the working memory; the argument the function's record
+    unsafe { spawn_(class, 1, frame.region.as_ptr(), &frame.rec as *const crate::task::Record as *const u8, n) }
 }
 
 #[cfg(feature = "alloc")]
