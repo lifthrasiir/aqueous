@@ -1147,6 +1147,7 @@ impl Emit<'_> {
         out.extend_from_slice(&a.params);
         varint::put(out, a.memory_limit);
         let classes = self.classes.get(at).copied().unwrap_or(0).max(a.task_limits.len());
+        debug_assert!(classes <= TASK_CLASSES, "{classes} classes of tasks, past the description bound's");
         varint::put(out, classes as u64);
         let limits = a.task_limits.iter().copied().chain(std::iter::repeat(crate::NO_LIMIT));
         limits.take(classes).for_each(|n| varint::put(out, n));
@@ -1171,6 +1172,11 @@ fn takes_output(n: &Node) -> bool {
         Node::Patch(p) => takes_output(&p.source) || takes_output(&p.patch),
     }
 }
+
+/// The classes of tasks that [`description_bound`] allows an application's module, of task limits
+/// not yet declared (each as large as a memory limit): no module has more (checked as
+/// instructions are written).
+const TASK_CLASSES: usize = 2;
 
 /// Bytes of the instructions pushing node `n` at most, wherever the streams of its formula are
 /// among others (up to 2^21 of them, and 2^14 modules and resources each): the bounds of
@@ -1202,8 +1208,9 @@ pub fn description_bound(n: &Node) -> usize {
                 + varint::len(a.params.len() as u64)
                 + a.params.len()
                 + varint::len(MEMORY_LIMIT)
-                + varint::len(a.task_limits.len() as u64)
+                + varint::len(TASK_CLASSES as u64)
                 + a.task_limits.iter().map(|&n| varint::len(n)).sum::<usize>()
+                + varint::len(MEMORY_LIMIT) * TASK_CLASSES.saturating_sub(a.task_limits.len())
                 + varint::len(a.inputs.len() as u64)
                 + 1
                 + varint::len(a.len)
@@ -6389,6 +6396,30 @@ mod tests {
             list.iter().all(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
         );
         assert!(list.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    /// An application of a module of classes of tasks takes a task limit for each: the bound
+    /// of a formula not yet declared counts them.
+    #[test]
+    fn bound_counts_task_limits() {
+        let mut f = Formula::raw("a", vec![0; 100]);
+        for limits in [vec![], vec![1 << 28, 1 << 28]] {
+            f.root = Node::Apply(Box::new(crate::Apply {
+                module: REV,
+                resources: vec![],
+                params: vec![],
+                inputs: vec![Node::slice(0, 0, 100)],
+                len: 100,
+                memory_limit: crate::NO_LIMIT,
+                task_limits: limits,
+            }));
+            let ordinals = ordinals_of(&f);
+            let mut out = Vec::new();
+            Emit { ordinals: &ordinals, modules: &[REV], classes: &[2], resources: &[], out: &mut out, stack: vec![] }
+                .node(&f.root);
+            let bound = description_bound(&f.root);
+            assert!(bound >= out.len(), "{bound} < {}", out.len());
+        }
     }
 
     #[test]
