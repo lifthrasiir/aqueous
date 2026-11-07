@@ -33,6 +33,17 @@ across the file: through the archive their inflated bytes come to 0.041 (16 colo
 and 0.291 (256 or fewer) of their zlib bytes, the model of whole pixels, which codes each tile
 on its own, 0.414 and 0.607 (`aqr-clip bench`; with the best model of each class, 0.437).
 
+## Memory
+
+`clip-recons` lays its memory out as a stack (`aqr_api::stack`), so what it takes is its plan,
+which the encoder declares as the module's limit (`plan::decode`; docs/arena-design.md): the
+vectors of `module::parse`, each reserved at the size it ends at, then the file, which the
+batches of tiles (tasks, each giving back its zlib streams as one block of bytes) fill in place.
+The file is the only block whose size is the output's; a task holds its model, the pixels of a
+tile, its streams and zlib's emulator. The plan equals what the module takes, to the page
+(`clip_plans_hold` in aqr-decompress's `wasm.rs`, and the 15 files of the corpus). The format
+did not change; the module's version is 2.
+
 ## Format
 
 A `CSFCHUNK` container (see `src/clip.rs`): `Head`, `Exta` chunks (external data: a layer's

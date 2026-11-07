@@ -79,11 +79,97 @@ pub fn pieces<'a>(
     whole: bool,
     modelled: &mut dyn FnMut(Layout, &'a [u8]) -> bool,
 ) -> Result<Vec<Piece>> {
-    let mut out: Vec<Piece> = Vec::new();
-    let keep = |out: &mut Vec<Piece>, n: usize| match out.last_mut() {
-        Some(Piece::Keep(m)) => *m += n,
-        _ => out.push(Piece::Keep(n)),
-    };
+    let mut out = Sink::new(None);
+    walk(src, whole, modelled, &mut out)?;
+    Ok(out.v)
+}
+
+/// Which blocks of a skeleton are modelled, by the runs of the index (alternately modelled and
+/// kept blocks, the first run modelled): [`Runs::flag`] for each block with a tile in order.
+pub struct Runs<'a> {
+    runs: &'a [usize],
+    run: usize,
+    left: usize,
+    on: bool,
+}
+
+impl<'a> Runs<'a> {
+    pub fn new(runs: &'a [usize]) -> Runs<'a> {
+        Runs { runs, run: 0, left: runs.first().copied().unwrap_or(0), on: true }
+    }
+
+    /// Whether the next block is modelled (kept past the runs).
+    pub fn flag(&mut self) -> bool {
+        while self.left == 0 && self.run + 1 < self.runs.len() {
+            self.run += 1;
+            self.left = self.runs[self.run];
+            self.on = !self.on;
+        }
+        if self.left == 0 {
+            return false;
+        }
+        self.left -= 1;
+        self.on
+    }
+}
+
+/// The pieces of the skeleton `src` where the runs `runs` say which of its blocks are modelled,
+/// in a vector of room for exactly them: the walk is made twice, the first counting them.
+pub fn skeleton_pieces(src: &[u8], runs: &[usize]) -> Result<Vec<Piece>> {
+    let mut count = Sink::counting();
+    let mut r = Runs::new(runs);
+    walk(src, false, &mut |_, _| r.flag(), &mut count)?;
+    let mut out = Sink::new(Some(count.count));
+    let mut r = Runs::new(runs);
+    walk(src, false, &mut |_, _| r.flag(), &mut out)?;
+    Ok(out.v)
+}
+
+/// Where the pieces of a walk go: counted only, or into a vector (of room reserved for them,
+/// where they were counted before).
+struct Sink {
+    v: Vec<Piece>,
+    count: usize,
+    keeping: bool,
+    fill: bool,
+}
+
+impl Sink {
+    /// A sink filling a vector of room for `room` pieces (growing, if more come).
+    fn new(room: Option<usize>) -> Sink {
+        Sink { v: Vec::with_capacity(room.unwrap_or(0)), count: 0, keeping: false, fill: true }
+    }
+
+    /// A sink only counting.
+    fn counting() -> Sink {
+        Sink { v: Vec::new(), count: 0, keeping: false, fill: false }
+    }
+
+    /// `n` bytes the skeleton keeps, merged with those kept just before.
+    fn keep(&mut self, n: usize) {
+        if !self.keeping {
+            self.piece(Piece::Keep(n));
+            self.keeping = true;
+        } else if let Some(Piece::Keep(m)) = self.v.last_mut() {
+            *m += n;
+        }
+    }
+
+    fn piece(&mut self, p: Piece) {
+        self.count += 1;
+        self.keeping = false;
+        if self.fill {
+            self.v.push(p);
+        }
+    }
+}
+
+fn walk<'a>(
+    src: &'a [u8],
+    whole: bool,
+    modelled: &mut dyn FnMut(Layout, &'a [u8]) -> bool,
+    out: &mut Sink,
+) -> Result<()> {
     if !src.starts_with(b"CSFCHUNK") {
         return Err(invalid("not a .clip file"));
     }
@@ -91,7 +177,7 @@ pub fn pieces<'a>(
     if first < 24 || first > src.len() {
         return Err(invalid("header"));
     }
-    keep(&mut out, first);
+    out.keep(first);
     // p: in src; the walk ends where src does
     let (mut p, mut database) = (first, false);
     while p < src.len() {
@@ -100,7 +186,7 @@ pub fn pieces<'a>(
         }
         let kind = src.get(p + 4..p + 8).ok_or_else(|| invalid("truncated"))?;
         let n = u64be(src, p + 8)?;
-        keep(&mut out, 16);
+        out.keep(16);
         p += 16;
         let body_end =
             |p: usize, n: usize| p.checked_add(n).filter(|&e| e <= src.len()).ok_or_else(|| invalid("truncated"));
@@ -109,14 +195,14 @@ pub fn pieces<'a>(
                 return Err(invalid("two databases"));
             }
             database = true;
-            out.push(Piece::Database(n));
+            out.piece(Piece::Database(n));
             if whole {
                 p = body_end(p, n)?;
             }
             continue;
         }
         if kind != b"Exta" {
-            keep(&mut out, n);
+            out.keep(n);
             p = body_end(p, n)?;
             continue;
         }
@@ -129,17 +215,20 @@ pub fn pieces<'a>(
         }
         let data = p + head;
         if string_is(src, data + 4, BEGIN).is_none() {
-            keep(&mut out, n);
+            out.keep(n);
             p = body_end(p, n)?;
             continue;
         }
-        keep(&mut out, head);
+        out.keep(head);
         // o: bytes of the data so far, in the file
         let (mut q, mut o) = (data, 0usize);
         while o < size {
             if let Some(r) = string_is(src, q + 4, BEGIN) {
                 let rec = u32be(src, q)? as usize;
-                let f: Vec<u32> = (0..5).map(|i| u32be(src, r + 4 * i)).collect::<Result<_>>()?;
+                let mut f = [0u32; 5];
+                for (i, v) in f.iter_mut().enumerate() {
+                    *v = u32be(src, r + 4 * i)?;
+                }
                 let (mut r, mut from, mut absent) = (r + 20, q, 0);
                 if f[4] != 0 {
                     let zl = u32::from_le_bytes(
@@ -152,8 +241,8 @@ pub fn pieces<'a>(
                     let z = if whole { src.get(r + 8..r + 8 + zl).ok_or_else(|| invalid("truncated"))? } else { &[] };
                     match layout {
                         Some(l) if modelled(l, z) => {
-                            keep(&mut out, r + 8 - q);
-                            out.push(Piece::Tile(l, zl));
+                            out.keep(r + 8 - q);
+                            out.piece(Piece::Tile(l, zl));
                             r += 8 + if whole { zl } else { 0 };
                             (from, absent) = (r, zl);
                         }
@@ -161,7 +250,7 @@ pub fn pieces<'a>(
                     }
                 }
                 let e = string_is(src, r, END).ok_or_else(|| invalid("block end"))?;
-                keep(&mut out, e - from);
+                out.keep(e - from);
                 // the record's size counts all of it, the stream included
                 if e - q + if whole { 0 } else { absent } != rec {
                     return Err(invalid("block size"));
@@ -177,7 +266,7 @@ pub fn pieces<'a>(
                     .and_then(|b| b.checked_add(r - q))
                     .filter(|&t| q + t <= src.len())
                     .ok_or_else(|| invalid("table"))?;
-                keep(&mut out, t);
+                out.keep(t);
                 q += t;
                 o += t;
             }
@@ -187,31 +276,51 @@ pub fn pieces<'a>(
         }
         p = q;
     }
-    Ok(out)
+    Ok(())
+}
+
+/// A batch of the modelled tiles: its layout and the tiles it holds, `n` places of [`Parsed::order`]
+/// from `from`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Batch {
+    pub layout: Layout,
+    pub from: usize,
+    pub n: usize,
 }
 
 /// The batches of the modelled tiles (of layouts `tiles`, in file order): the tiles of each
 /// layout in file order, `per` at a time, the layouts in the order colour, one plane, two planes.
-/// Each batch is its layout and the tiles' places in `tiles`.
-pub fn batches(tiles: &[Layout], per: usize) -> Vec<(Layout, Vec<usize>)> {
-    let mut out = Vec::new();
-    for l in [Layout::Color, Layout::One, Layout::Two] {
-        let of: Vec<usize> = (0..tiles.len()).filter(|&i| tiles[i] == l).collect();
-        out.extend(of.chunks(per.max(1)).map(|c| (l, c.to_vec())));
+/// Each batch is its layout and the places in `tiles` of its tiles, which the other vector holds
+/// batch after batch.
+pub fn batches(tiles: &[Layout], per: usize) -> (Vec<Batch>, Vec<usize>) {
+    let per = per.max(1);
+    let layouts = [Layout::Color, Layout::One, Layout::Two];
+    let count = |l: Layout| tiles.iter().filter(|&&t| t == l).count();
+    let mut out = Vec::with_capacity(layouts.iter().map(|&l| count(l).div_ceil(per)).sum());
+    let mut order = Vec::with_capacity(tiles.len());
+    for l in layouts {
+        let from = order.len();
+        order.extend((0..tiles.len()).filter(|&i| tiles[i] == l));
+        let n = order.len() - from;
+        out.extend((0..n.div_ceil(per)).map(|k| Batch { layout: l, from: from + k * per, n: per.min(n - k * per) }));
     }
-    out
+    (out, order)
 }
 
 /// The layouts of the modelled tiles of `pieces`.
 pub fn layouts(pieces: &[Piece]) -> Vec<Layout> {
-    pieces.iter().filter_map(|p| if let Piece::Tile(l, _) = p { Some(*l) } else { None }).collect()
+    let tile = |p: &Piece| if let Piece::Tile(l, _) = p { Some(*l) } else { None };
+    let mut out = Vec::with_capacity(pieces.iter().filter(|p| tile(p).is_some()).count());
+    out.extend(pieces.iter().filter_map(tile));
+    out
 }
 
 /// The distinct tiles among modelled tiles of layouts `all` (file order), given the references
 /// `refs` (in order: a tile's place, and how many distinct tiles back the one it repeats is):
 /// their layouts, and for every tile the distinct tile it is or repeats.
 pub fn sources(all: &[Layout], refs: &[(usize, usize)]) -> Result<(Vec<Layout>, Vec<usize>)> {
-    let (mut distinct, mut srcs) = (Vec::new(), Vec::with_capacity(all.len()));
+    let mut distinct = Vec::with_capacity(all.len().saturating_sub(refs.len()));
+    let mut srcs = Vec::with_capacity(all.len());
     let mut refs = refs.iter().peekable();
     for (i, &l) in all.iter().enumerate() {
         match refs.next_if(|r| r.0 == i) {
@@ -234,42 +343,75 @@ pub fn sources(all: &[Layout], refs: &[(usize, usize)]) -> Result<(Vec<Layout>, 
 /// Largest batch.
 pub const MAX_BATCH: usize = 1 << 16;
 
-/// The module: the file of `len` bytes from the skeleton, the index (the runs of modelled and
-/// kept blocks, the repeated tiles, then the bytes of each batch's stream), the tiles' streams
-/// and the database;
-/// the parameter is the tiles a batch holds. `threads`: the batches decoded at once (the same
-/// bytes whatever the number).
-pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
-    let &[skeleton, index, tiles, database] = inputs else {
-        return Err(invalid("inputs"));
-    };
+/// Bytes of what the module holds on WebAssembly (32-bit pointers), checked there by
+/// assertions: a piece of the skeleton, a batch, a distinct tile's place.
+pub mod wasm {
+    pub const PIECE: u64 = 8;
+    pub const BATCH: u64 = 12;
+    pub const PLACE: u64 = 8;
+    /// A `usize`.
+    pub const WORD: u64 = 4;
+}
+
+#[cfg(target_family = "wasm")]
+const _: () = {
+    assert!(size_of::<Piece>() as u64 == wasm::PIECE);
+    assert!(size_of::<Batch>() as u64 == wasm::BATCH);
+    assert!(size_of::<(usize, usize)>() as u64 == wasm::PLACE);
+};
+
+/// What the module reads of its inputs before it decodes, laid out in the order it is taken (the
+/// module's memory plan follows it, see `crate::plan`).
+pub struct Parsed {
+    /// The runs of modelled and kept blocks of the skeleton.
+    pub runs: Vec<usize>,
+    /// The skeleton's walk.
+    pub pieces: Vec<Piece>,
+    /// The layouts of the modelled tiles, in file order.
+    pub all: Vec<Layout>,
+    /// The references: a tile's place, and how many distinct tiles back the one it repeats is.
+    pub refs: Vec<(usize, usize)>,
+    /// The distinct tiles' layouts, and for each tile of the file the distinct tile it is.
+    pub distinct: Vec<Layout>,
+    pub srcs: Vec<usize>,
+    /// The batches, and the distinct tiles they hold ([`batches`]).
+    pub batches: Vec<Batch>,
+    pub order: Vec<usize>,
+    /// The bytes of each batch's stream, and where they start.
+    pub lens: Vec<usize>,
+    pub starts: Vec<usize>,
+    /// Each distinct tile's place in the file, and the length of its zlib stream.
+    pub places: Vec<(usize, usize)>,
+}
+
+/// The varint at `at` of the index.
+fn num(index: &[u8], at: &mut usize) -> Result<usize> {
+    varint::get(index, at).ok().and_then(|v| usize::try_from(v).ok()).ok_or_else(|| invalid("index"))
+}
+
+/// The module's parameter: the tiles a batch holds.
+pub fn per_batch(params: &[u8]) -> Result<usize> {
     let mut at = 0;
     let per = varint::get(params, &mut at).map_err(|_| invalid("parameters"))? as usize;
     if at != params.len() || per == 0 || per > MAX_BATCH {
         return Err(invalid("parameters"));
     }
-    // the index
+    Ok(per)
+}
+
+/// The index and the skeleton read, for a file of `len` bytes whose database holds `database`
+/// bytes and whose tiles' streams `tiles`: every vector reserved at the size it ends at.
+pub fn parse(per: usize, skeleton: &[u8], index: &[u8], database: usize, tiles: usize, len: u64) -> Result<Parsed> {
     let mut at = 0;
     let nruns = num(index, &mut at)?;
     if nruns > index.len() {
         return Err(invalid("index"));
     }
-    let runs: Vec<usize> = (0..nruns).map(|_| num(index, &mut at)).collect::<Result<_>>()?;
-    let (mut run, mut left, mut on) = (0, runs.first().copied().unwrap_or(0), true);
-    let mut flags = |_: Layout, _: &[u8]| -> bool {
-        while left == 0 && run + 1 < runs.len() {
-            run += 1;
-            left = runs[run];
-            on = !on;
-        }
-        if left == 0 {
-            // past the runs: kept
-            return false;
-        }
-        left -= 1;
-        on
-    };
-    let pieces = pieces(skeleton, false, &mut flags)?;
+    let mut runs = Vec::with_capacity(nruns);
+    for _ in 0..nruns {
+        runs.push(num(index, &mut at)?);
+    }
+    let pieces = skeleton_pieces(skeleton, &runs)?;
     let all = layouts(&pieces);
     // the references: where (the tiles skipped since the last) and to which distinct tile back
     let nrefs = num(index, &mut at)?;
@@ -284,75 +426,155 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
         next = p + 1;
     }
     let (distinct, srcs) = sources(&all, &refs)?;
-    let bs = batches(&distinct, per);
-    let lens: Vec<usize> = (0..bs.len()).map(|_| num(index, &mut at)).collect::<Result<_>>()?;
+    let (batches, order) = batches(&distinct, per);
+    let mut lens = Vec::with_capacity(batches.len());
+    for _ in 0..batches.len() {
+        lens.push(num(index, &mut at)?);
+    }
     if at != index.len() {
         return Err(invalid("index"));
     }
-    let mut starts = Vec::with_capacity(lens.len() + 1);
+    let mut starts = Vec::with_capacity(lens.len());
     let mut s = 0usize;
     for &n in &lens {
         starts.push(s);
         s = s.checked_add(n).ok_or_else(|| invalid("index"))?;
     }
-    if s != tiles.len() {
+    if s != tiles {
         return Err(invalid("tiles"));
     }
-    let streams = pool::par_map_apart(bs.len(), threads, |b| {
-        decode_batch(bs[b].0, bs[b].1.len(), &tiles[starts[b]..starts[b] + lens[b]])
-    });
-    // each distinct tile's stream, by its place among them
-    let mut zs: Vec<&[u8]> = vec![&[]; distinct.len()];
-    for ((_, places), st) in bs.iter().zip(&streams) {
-        let st = st.as_ref().ok_or_else(|| invalid("tiles"))?;
-        for (&i, z) in places.iter().zip(st) {
-            zs[i] = z;
-        }
-    }
-    let mut out = Vec::with_capacity(usize::try_from(len).map_err(|_| invalid("length"))?);
-    let (mut s, mut t) = (0usize, 0usize);
+    // where each distinct tile goes in the file, as the pieces lay it out
+    let len = usize::try_from(len).map_err(|_| invalid("length"))?;
+    let mut places = vec![(0, 0); distinct.len()];
+    let (mut pos, mut kept, mut t, mut seen) = (0usize, 0usize, 0usize, 0usize);
     for p in &pieces {
         match *p {
             Piece::Keep(n) => {
-                out.extend_from_slice(skeleton.get(s..s + n).ok_or_else(|| invalid("skeleton"))?);
-                s += n;
+                kept += n;
+                pos += n;
             }
             Piece::Tile(_, n) => {
-                let z = zs[srcs[t]];
-                if z.len() != n {
+                let d = srcs[t];
+                if d == seen {
+                    places[d] = (pos, n);
+                    seen += 1;
+                } else if places[d].1 != n {
                     return Err(invalid("a tile's stream"));
                 }
-                out.extend_from_slice(z);
                 t += 1;
+                pos += n;
             }
             Piece::Database(n) => {
-                if database.len() != n {
+                if database != n {
                     return Err(invalid("database"));
                 }
-                out.extend_from_slice(database);
+                pos += n;
             }
         }
     }
-    if s != skeleton.len() || out.len() as u64 != len {
+    if kept != skeleton.len() || pos != len {
         return Err(invalid("length"));
+    }
+    Ok(Parsed { runs, pieces, all, refs, distinct, srcs, batches, order, lens, starts, places })
+}
+
+/// The module: the file of `len` bytes from the skeleton, the index (the runs of modelled and
+/// kept blocks, the repeated tiles, then the bytes of each batch's stream), the tiles' streams
+/// and the database;
+/// the parameter is the tiles a batch holds. `threads`: the batches decoded at once (the same
+/// bytes whatever the number).
+///
+/// The memory is laid out as a stack, in the order of the code (`crate::plan` follows it): the
+/// vectors of [`parse`], then the file, which the batches (as tasks, given each one's zlib
+/// streams as bytes) fill in the places of their tiles, the repeated tiles last.
+pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
+    let &[skeleton, index, tiles, database] = inputs else {
+        return Err(invalid("inputs"));
+    };
+    let per = per_batch(params)?;
+    let p = parse(per, skeleton, index, database.len(), tiles.len(), len)?;
+    let out = std::cell::RefCell::new(Vec::new());
+    pool::par_each_apart(
+        p.batches.len(),
+        threads,
+        2,
+        |b| decode_batch(&p, b, &tiles[p.starts[b]..p.starts[b] + p.lens[b]]).unwrap_or_default(),
+        // the file but its tiles (after the tasks are spawned: they do not copy it)
+        || {
+            let mut o = vec![0u8; len as usize];
+            let (mut pos, mut s) = (0usize, 0usize);
+            for piece in &p.pieces {
+                match *piece {
+                    Piece::Keep(n) => {
+                        o[pos..pos + n].copy_from_slice(&skeleton[s..s + n]);
+                        s += n;
+                        pos += n;
+                    }
+                    Piece::Tile(_, n) => pos += n,
+                    Piece::Database(n) => {
+                        o[pos..pos + n].copy_from_slice(database);
+                        pos += n;
+                    }
+                }
+            }
+            *out.borrow_mut() = o;
+        },
+        |b, bytes| {
+            let Batch { from, n, .. } = p.batches[b];
+            let places = &p.order[from..from + n];
+            if bytes.is_empty() || bytes.len() != places.iter().map(|&i| p.places[i].1).sum::<usize>() {
+                return Err(invalid("tiles"));
+            }
+            let (mut o, mut at) = (out.borrow_mut(), 0);
+            for &i in places {
+                let (pos, n) = p.places[i];
+                o[pos..pos + n].copy_from_slice(&bytes[at..at + n]);
+                at += n;
+            }
+            Ok(())
+        },
+    )?;
+    let mut out = out.into_inner();
+    // the repeated tiles, after the tile they repeat
+    let (mut pos, mut t, mut seen) = (0usize, 0usize, 0usize);
+    for piece in &p.pieces {
+        match *piece {
+            Piece::Keep(n) | Piece::Database(n) => pos += n,
+            Piece::Tile(_, n) => {
+                let d = p.srcs[t];
+                if d == seen {
+                    seen += 1;
+                } else {
+                    let from = p.places[d].0;
+                    out.copy_within(from..from + n, pos);
+                }
+                t += 1;
+                pos += n;
+            }
+        }
     }
     Ok(out)
 }
 
-/// The varint at `at` of the index.
-fn num(index: &[u8], at: &mut usize) -> Result<usize> {
-    varint::get(index, at).ok().and_then(|v| usize::try_from(v).ok()).ok_or_else(|| invalid("index"))
-}
-
-/// The zlib streams of a batch of `n` tiles of layout `l`; `None` if its stream is corrupt.
-pub fn decode_batch(l: Layout, n: usize, stream: &[u8]) -> Option<Vec<Vec<u8>>> {
+/// The zlib streams of batch `b`, one after the other, from its stream of arithmetic code
+/// `stream`; `None` if it is corrupt or a stream is not the length its tile has in the file. The
+/// bytes are reserved with the room the writer asks past them.
+pub fn decode_batch(p: &Parsed, b: usize, stream: &[u8]) -> Option<Vec<u8>> {
+    let Batch { layout: l, from, n } = p.batches[b];
+    let places = &p.order[from..from + n];
     let mut m = Model::new(Escape::Med, true);
     let mut d = dynamic::Dec(ArithDecoder::new(stream));
-    let (mut px, mut t, mut out) = (vec![0u64; AREA], Vec::new(), Vec::with_capacity(n));
-    for _ in 0..n {
+    let (mut px, mut t) = (vec![0u64; AREA], Vec::with_capacity(l.bytes()));
+    let sum: usize = places.iter().map(|&i| p.places[i].1).sum();
+    let mut out = Vec::with_capacity(sum + crate::zlib::ROOM);
+    for &i in places {
         m.tile(&mut d, l, &mut px);
         tile::unpixels(l, &px, &mut t);
-        out.push(crate::zlib::deflate(&t)?);
+        let before = out.len();
+        out = crate::zlib::deflate_onto(&t, out)?;
+        if out.len() - before != p.places[i].1 {
+            return None;
+        }
     }
     (!d.0.overrun()).then_some(out)
 }

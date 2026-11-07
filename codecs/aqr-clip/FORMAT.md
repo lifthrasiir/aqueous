@@ -50,8 +50,10 @@ Other formats this one uses are specified elsewhere:
 
 ## 2. Module
 
-The module is `clip-recons`, version 1, implemented by `module::decode`. Its output is the
-`.clip` file (the original) of `total` bytes, the length the application gives.
+The module is `clip-recons`, version 2, implemented by `module::decode`. Its output is the
+`.clip` file (the original) of `total` bytes, the length the application gives. (Version 2 reads
+the same inputs as version 1 and gives the same output; it differs only in how it uses memory,
+which the encoder declares as the module's limit.)
 
 **Parameters**: a varint `batch`, the tiles a batch holds, `1 ≤ batch ≤ 65536`; nothing may
 follow it.

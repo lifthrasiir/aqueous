@@ -5941,8 +5941,8 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bz2-recons.wasm" title="crates/aqr-modules/wasm/bz2-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bz2/FORMAT.md" title="codecs/aqr-bz2/FORMAT.md">R</a>
     <tr>
-      <td><code>ad575cb760b0ed3434f294c2a210ab76527ce8c97d0ea8815a4e2bf8180297c5</code>
-      <td>clip-recons@1
+      <td><code>dbb7f5732a5142a7e45436342bb2c2601aeeeea3265cc610327239c34c65e762</code>
+      <td>clip-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/clip-recons.wasm" title="crates/aqr-modules/wasm/clip-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-clip/FORMAT.md" title="codecs/aqr-clip/FORMAT.md">R</a>
     <tr>

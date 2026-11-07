@@ -1231,12 +1231,19 @@ fn flush_block(
 /// as a raw DEFLATE stream (without the zlib header and Adler-32); `None` for invalid
 /// parameters.
 pub fn compress(data: &[u8], p: Params) -> Option<Vec<u8>> {
+    compress_onto(data, p, Vec::with_capacity(data.len() / 4 + 64))
+}
+
+/// [`compress`] appended to `out`, which is given back: written within its capacity where that
+/// holds the stream and [`crate::write::TOKEN_SLACK`] bytes more, so that it is the only block
+/// the stream takes (besides the emulator's, and the tokens of a block).
+pub fn compress_onto(data: &[u8], p: Params, out: Vec<u8>) -> Option<Vec<u8>> {
     if !p.valid() {
         return None;
     }
     let mut e = Emulator::new(data, p);
     let limit = p.block_tokens();
-    let mut w = crate::write::Writer::new(data.len() / 4 + 64);
+    let mut w = crate::write::Writer::append_to(out);
     let mut start = 0;
     loop {
         let mut tokens = Vec::with_capacity(limit.min(data.len() - start + 1));

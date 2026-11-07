@@ -145,12 +145,15 @@ const CROSS: usize = 4;
 /// Samples' trees of [`Escape::Left`].
 const TREES: usize = 10;
 
-/// Bytes of a [`Model`]'s bits (`copy`, `listed`, `samples` and the Elias-gamma codes) and its
-/// list.
-#[cfg(feature = "encode")]
-pub(crate) const MODEL_BYTES: usize = size_of::<Bit>() * (CANDS * COPY_CTX + CANDS + 1 + TREES * 256)
-    + size_of::<Gamma>() * (SLOTS * 2 * ACT * CROSS + 1 + RUN_CTX)
-    + size_of::<u64>() * (LIST + 1);
+/// Bytes of the vectors [`Model::new`] reserves, in the order it does: `copy`, `samples`,
+/// `residuals`, `list` and `length`.
+pub const MODEL_BLOCKS: [usize; 5] = [
+    size_of::<[Bit; COPY_CTX]>() * CANDS,
+    size_of::<[Bit; 256]>() * TREES,
+    size_of::<Gamma>() * (SLOTS * 2 * ACT * CROSS),
+    size_of::<u64>() * (LIST + 1),
+    size_of::<Gamma>() * RUN_CTX,
+];
 
 pub struct Model {
     escape: Escape,

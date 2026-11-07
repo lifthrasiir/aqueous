@@ -113,8 +113,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "clip-recons",
-        version: 1,
-        sha512_256: hex("ad575cb760b0ed3434f294c2a210ab76527ce8c97d0ea8815a4e2bf8180297c5"),
+        version: 2,
+        sha512_256: hex("dbb7f5732a5142a7e45436342bb2c2601aeeeea3265cc610327239c34c65e762"),
         block: include_bytes!("../wasm/clip-recons.block"),
     },
     Known {

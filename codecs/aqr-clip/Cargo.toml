@@ -12,6 +12,7 @@ default = ["encode"]
 encode = ["dep:aqr-formula", "dep:aqr-sqlite", "dep:aqr-psd", "dep:aqr-raw"]
 
 [dependencies]
+aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-flate = { path = "../aqr-flate", default-features = false }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }

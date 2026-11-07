@@ -125,6 +125,33 @@ fn clip_as_wasm() {
     }
 }
 
+/// clip-recons lays its memory out as a stack, its limit its plan: a file of one batch (decoded
+/// by the instance), none, of a few and of more batches than slots (tasks), repeated tiles
+/// among them.
+#[test]
+fn clip_plans_hold() {
+    use aqr_clip::tile::Layout;
+    let one = clip::clip_file(&[clip::external(1, &clip::block_data(&[clip::made(Layout::Color, 1)]))], None);
+    let none = clip::clip_file(&[clip::external(1, &clip::block_data(&[clip::Block::Empty]))], Some(&[5u8; 100]));
+    let files = [
+        ("one batch", one),
+        ("none", none),
+        ("few", clip::sample(0)),
+        ("many", clip::sample(150)),
+        ("more than slots", clip::sample(640)),
+    ];
+    for (what, d) in files {
+        let f = aqr_clip::formula::encode(&d, 1).unwrap_or_else(|| panic!("{what}"));
+        if let Node::Apply(a) = &f.root {
+            assert_eq!(a.module, aqr_clip::formula::MODULE, "{what}: not modelled");
+        } else {
+            // (nothing to model: no application)
+            continue;
+        }
+        plan_holds(&format!("clip {what}"), f, &d);
+    }
+}
+
 /// PSD and PSB files of the shapes of aqr-psd's tests, the same natively and as WebAssembly
 /// (whose decoding of a group once called `Instant::now`, which WebAssembly has not).
 #[test]

@@ -8,6 +8,8 @@ pub mod dynamic;
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod module;
+#[cfg(feature = "encode")]
+pub mod plan;
 // (a keyword: `aqr_clip::r#static`)
 #[cfg(feature = "encode")]
 pub mod r#static;
