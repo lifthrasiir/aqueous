@@ -166,6 +166,22 @@ impl Stream {
     }
 }
 
+/// The bytes that the module `flate-inflate` takes at most, of the module's initial memory
+/// (`initial` bytes), as [`crate::inflate::data_streamed`] lays it out: the stream read and the
+/// data made (reserved to the most they hold, whatever the lengths), the two tables of the most
+/// that a code takes (every block's codes, the fixed ones too, built in them), and over them
+/// the code-length table of a dynamic header, made and dropped.
+pub fn inflate(initial: u64) -> u64 {
+    use crate::inflate::{CL_BITS, DIST_ENTRIES, INPUT, LIT_ENTRIES, OUTPUT};
+    let mut m = Mem::new(initial);
+    m.take(INPUT as u64);
+    m.take(OUTPUT as u64);
+    m.take(4 * LIT_ENTRIES as u64);
+    m.take(4 * DIST_ENTRIES as u64);
+    m.peak(block(4 << CL_BITS));
+    m.plan(1)
+}
+
 /// How [`rebuild`] rebuilds a stream: from its data pulled (on `threads` threads, a segment a
 /// task where more than one), or of its data whole, appended to a vector of room for it (on
 /// one thread).

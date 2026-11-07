@@ -42,13 +42,12 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
 /// The module `flate-inflate`: the data of a raw DEFLATE stream ([`crate::module::inflate`]),
 /// for a file whose data a DEFLATE stream archived along with it holds (the body of a ZIP
 /// archive's entry, a gzip member or a zlib stream, not rebuilt): the stream is then stored once.
-pub const INFLATE: Module = Module::new("flate-inflate", 1).with_memory(memory_inflate);
+pub const INFLATE: Module = Module::new("flate-inflate", 1).with_plan(memory_inflate);
 
-/// The memory of [`INFLATE`], a part module: what it holds of the stream and of the data, with
-/// the pages of slack of each, its tables among the small allocations.
+/// The memory of [`INFLATE`], a part module: its plan ([`crate::plan::inflate`]), the same
+/// whatever the lengths.
 fn memory_inflate(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let held = (crate::inflate::INPUT + crate::inflate::OUTPUT) as u64;
-    Some(u.initial() + aqr_formula::SMALL + held + 2 * aqr_formula::PAGE)
+    Some(crate::plan::inflate(u.initial()))
 }
 
 /// The application of [`INFLATE`] to `raw`, a raw DEFLATE stream of `len` bytes of data.

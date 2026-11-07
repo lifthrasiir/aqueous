@@ -1140,7 +1140,8 @@ more or less data than `len`, or a distance reaching before its data is invalid,
 application. It is a part module (`module::inflate_part`) of windows of a page for its input
 and its output: it reads the stream and writes the data as it goes, holding 64 KiB of the
 stream, the last 32 KiB of the data (for the distances) and 256 KiB more before writing them
-out, besides the tables of one block, whatever the lengths of either.
+out, besides the two tables of the codes of one block, whatever the lengths of either (its
+memory is laid out as a stack, a plan that does not depend on them).
 
 ## Encoder choices (informative)
 

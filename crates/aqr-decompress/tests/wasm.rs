@@ -557,6 +557,66 @@ fn flate_plans_hold() {
     }
 }
 
+/// flate-inflate lays its memory out as a stack, its limit its plan, the same whatever the
+/// lengths: streams of several MB of many blocks (more than the stack's holes) of every kind in
+/// turn (stored, fixed, dynamic) and of every size (a few tokens to a whole window and past it),
+/// stored runs of noise, and a stream of one fixed block.
+#[test]
+fn inflate_plans_hold() {
+    use aqr_flate::deflate::{self, Body};
+    let text: Vec<u8> =
+        (0..250_000).flat_map(|i| format!("line {} of {}\n", i % 211, i * 7 % 1013).into_bytes()).collect();
+    let mut noise = Vec::with_capacity(300_000);
+    let mut x = 7u32;
+    while noise.len() < 300_000 {
+        x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+        noise.push((x >> 24) as u8);
+    }
+    let mixed: Vec<u8> = [&text[..1_500_000], &noise[..], &text[1_500_000..]].concat();
+    assert!(mixed.len() > 3_000_000, "{}", mixed.len());
+    let mut seen = 0;
+    for (what, data, mem) in [("text mem 1", &text, 1), ("mixed mem 8", &mixed, 8), ("mixed mem 3", &mixed, 3)] {
+        let p = aqr_flate::zlib::Params { level: 6, mem, ..Default::default() };
+        let raw = aqr_flate::zlib::compress(data, p).unwrap();
+        let (mut stream, parsed) = deflate::parse(&raw).unwrap();
+        assert!(parsed == *data);
+        // (blocks of a few hundred tokens, and of the default's sixteen thousand)
+        let few = if mem == 8 { 32 } else { 64 };
+        assert!(stream.blocks.len() > few, "{what}: {} blocks", stream.blocks.len());
+        let mut raws = vec![("zlib", raw)];
+        // (every kind of block in turn: dynamic ones as fixed ones, as stored ones where they
+        // fit)
+        for (i, b) in stream.blocks.iter_mut().enumerate() {
+            let tokens = match &b.body {
+                Body::Dynamic { tokens, .. } => tokens.clone(),
+                _ => continue,
+            };
+            let span: usize = tokens.iter().map(|t| t.span()).sum();
+            match i % 4 {
+                1 => b.body = Body::Fixed { tokens },
+                2 if span <= 65535 => b.body = Body::Stored { pad: 0, len: span as u16 },
+                _ => {}
+            }
+        }
+        let kinds: Vec<usize> = (0..3).map(|k| stream.blocks.iter().filter(|b| b.body.btype() == k).count()).collect();
+        assert!(kinds.iter().all(|&n| n >= few / 4), "{what}: {kinds:?}");
+        raws.push(("mixed blocks", deflate::write(&stream, data).unwrap()));
+        for (kind, raw) in raws {
+            let mut f = Formula::default();
+            let s = f.push("flate/deflated", raw);
+            f.root = aqr_flate::formula::inflated(s, data.len() as u64);
+            plan_holds(&format!("inflate {what} {kind}"), f, data);
+            seen += 1;
+        }
+    }
+    // (one fixed block: "abc" with its end of block)
+    let mut f = Formula::default();
+    let s = f.push("flate/deflated", vec![0x4b, 0x4c, 0x4a, 0x06, 0x00]);
+    f.root = aqr_flate::formula::inflated(s, 3);
+    plan_holds("inflate one fixed block", f, b"abc");
+    assert_eq!(seen, 6);
+}
+
 /// A PNG chunk of `kind` and `data`, appended to `out`.
 fn png_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
     out.extend_from_slice(&(data.len() as u32).to_be_bytes());

@@ -166,7 +166,7 @@ const SUB: u32 = 1 << 31;
 /// Primary table bits of the literal/length, distance and code-length codes.
 const LIT_BITS: u32 = 11;
 const DIST_BITS: u32 = 8;
-const CL_BITS: u32 = 7;
+pub(crate) const CL_BITS: u32 = 7;
 
 /// A two-level decoding table: a primary table indexed by `bits` bits, entry = symbol |
 /// code length << 16 (0: no code), and for longer codes subtables indexed by the bits that
@@ -185,6 +185,14 @@ impl Table {
             bits,
             mask: (1 << bits) - 1,
         }
+    }
+
+    /// A table to be built, with room for `entries` entries: [`Table::build`] then never
+    /// allocates, for lengths that make no more.
+    fn reserved(bits: u32, entries: usize) -> Table {
+        let mut t = Table::empty(bits);
+        t.t.reserve_exact(entries);
+        t
     }
 
     fn new(lens: &[u8], bits: u32) -> Result<Table> {
@@ -1316,12 +1324,28 @@ const FLUSH: usize = 256 << 10;
 const AHEAD_TOKEN: usize = 32;
 const AHEAD_HEADER: usize = 1024;
 
+/// Entries of the most that a table can take, of a code of 288 symbols (literal/length) or 32
+/// (distance): the primary table of `1 << bits` entries, and the subtables of the symbols
+/// longer than `bits` bits, for which a code of 15 bits at most is `15 - bits` bits beyond it.
+/// Canonical codes are dense and by length: the long codes follow the short ones, which fill
+/// whole primary entries, in order of length, and none of them straddles an entry. A subtable
+/// that one length fills has an entry for each symbol; the others, where the lengths change
+/// (once for each length but the first, and the last where the code ends) have at most
+/// `1 << (15 - bits)` entries, and one of them at least has a symbol.
+const fn table_entries(bits: u32, symbols: usize) -> usize {
+    let sub = 1usize << (15 - bits);
+    (1 << bits) + symbols + (15 - bits as usize) * (sub - 1)
+}
+pub(crate) const LIT_ENTRIES: usize = table_entries(LIT_BITS, 288);
+pub(crate) const DIST_ENTRIES: usize = table_entries(DIST_BITS, 32);
+
 /// Bytes [`data_streamed`] reads at most at once.
 const READ: usize = 64 << 10;
 
 /// Bytes [`data_streamed`] holds at most of the stream and of the data: what it reads at once
-/// beside those ahead, and [`HISTORY`] and [`FLUSH`] beside a match (at most 258 bytes).
-pub const INPUT: usize = READ + AHEAD_HEADER;
+/// beside those ahead (a header's, and the 8 bytes of the bits loaded, which stay when the bytes
+/// before them are let go of), and [`HISTORY`] and [`FLUSH`] beside a match (at most 258 bytes).
+pub const INPUT: usize = READ + AHEAD_HEADER + 8;
 pub const OUTPUT: usize = HISTORY + FLUSH + 258;
 
 /// [`data`] of a stream read a piece at a time and its data written out a piece at a time,
@@ -1348,14 +1372,14 @@ pub fn data_streamed(
         read,
         write,
     };
-    static FIXED: std::sync::OnceLock<(Table, Table)> = std::sync::OnceLock::new();
-    let fixed = FIXED.get_or_init(|| {
-        (
-            Table::new(&huffman::fixed_lit_lens(), LIT_BITS).unwrap(),
-            Table::new(&huffman::FIXED_DIST_LENS, DIST_BITS).unwrap(),
-        )
-    });
-    let (mut lit, mut dist) = (Table::empty(LIT_BITS), Table::empty(DIST_BITS));
+    // (the two tables are made for the most entries any code can take, and every block's codes,
+    // the fixed ones too, are built in them: no allocation after this)
+    let (mut lit, mut dist) = (
+        Table::reserved(LIT_BITS, LIT_ENTRIES),
+        Table::reserved(DIST_BITS, DIST_ENTRIES),
+    );
+    // (whether they hold the fixed codes now)
+    let mut fixed = false;
     loop {
         s.ahead(AHEAD_HEADER)?;
         let mut b = s.bits();
@@ -1393,11 +1417,17 @@ pub fn data_streamed(
                 }
             }
             1 => {
+                if !fixed {
+                    lit.build(&huffman::fixed_lit_lens())?;
+                    dist.build(&huffman::FIXED_DIST_LENS)?;
+                    fixed = true;
+                }
                 s.state = (b.pos, b.buf, b.n);
-                s.tokens(&fixed.0, &fixed.1)?;
+                s.tokens(&lit, &dist)?;
             }
             2 => {
                 let header = parse_header(&mut b)?;
+                fixed = false;
                 lit.build(header.lit_lens())?;
                 dist.build(header.dist_lens())?;
                 s.state = (b.pos, b.buf, b.n);
@@ -1712,6 +1742,61 @@ fn data_tokens(
 mod tests {
     use super::*;
 
+    /// A table made for the most entries of a code never allocates in building one: for random
+    /// codes of 288 and 32 symbols (incomplete ones too) of long lengths among short ones.
+    #[test]
+    fn reserved_tables_do_not_grow() {
+        let mut rng = aqr_common::rng::Rng::new(5);
+        let mut lit = Table::reserved(LIT_BITS, LIT_ENTRIES);
+        let mut dist = Table::reserved(DIST_BITS, DIST_ENTRIES);
+        let (lit_ptr, dist_ptr) = (lit.t.as_ptr(), dist.t.as_ptr());
+        let (cap_lit, cap_dist) = (lit.t.capacity(), dist.t.capacity());
+        assert!(cap_lit >= LIT_ENTRIES && cap_dist >= DIST_ENTRIES);
+        let (mut most_lit, mut most_dist) = (0, 0);
+        for round in 0..4000 {
+            for (t, n, max_len) in [
+                (&mut lit, 288, 11 + round % 5),
+                (&mut dist, 32, 8 + round % 8),
+            ] {
+                // (the lengths of an undersubscribed code: a few lengths favoured, symbols
+                // of others by chance, dropped where the code would not fit)
+                let favoured: Vec<u64> = (0..3).map(|_| 1 + rng.below(15)).collect();
+                let mut lens = vec![0u8; n];
+                let mut left = 1u64 << 15;
+                for l in lens.iter_mut() {
+                    let want = match rng.below(4) {
+                        0 => 1 + rng.below(max_len as u64),
+                        1 => 1 + rng.below(15),
+                        _ => favoured[rng.below(3) as usize],
+                    } as u8;
+                    let cost = 1u64 << (15 - want);
+                    if rng.below(12) != 0 && cost <= left {
+                        left -= cost;
+                        *l = want;
+                    }
+                }
+                t.build(&lens).unwrap();
+                assert!(t.t.len() <= t.t.capacity());
+                if n == 288 {
+                    most_lit = most_lit.max(t.t.len());
+                } else {
+                    most_dist = most_dist.max(t.t.len());
+                }
+            }
+        }
+        assert_eq!((lit.t.as_ptr(), lit.t.capacity()), (lit_ptr, cap_lit));
+        assert_eq!((dist.t.as_ptr(), dist.t.capacity()), (dist_ptr, cap_dist));
+        assert!(
+            most_lit <= LIT_ENTRIES && most_dist <= DIST_ENTRIES,
+            "{most_lit} {most_dist}"
+        );
+        eprintln!("most entries: {most_lit} of {LIT_ENTRIES}, {most_dist} of {DIST_ENTRIES}");
+        // (the fixed codes in the same tables)
+        lit.build(&huffman::fixed_lit_lens()).unwrap();
+        dist.build(&huffman::FIXED_DIST_LENS).unwrap();
+        assert_eq!((lit.t.len(), dist.t.len()), (1 << LIT_BITS, 1 << DIST_BITS));
+    }
+
     /// Parsing with the data written out as it is made (through a window) gives what parsing
     /// it whole does: the data, the tokens kept, their runs, the cuts, the stored blocks, the
     /// bytes after the stream.
@@ -1810,9 +1895,16 @@ mod tests {
         data_streamed(
             raw.len() as u64,
             &mut |v: &mut Vec<u8>, n: usize| {
-                let k = n.min(piece).min(raw.len() - at);
+                // (a piece of 0: to the end of a window of a page, as the module reads)
+                let k = n.min(raw.len() - at);
+                let k = match piece {
+                    0 => k.min(65536 - at % 65536),
+                    _ => k.min(piece),
+                };
                 v.extend_from_slice(&raw[at..at + k]);
                 at += k;
+                // (the stream held never passes what the module reserves)
+                assert!(v.len() <= INPUT, "{} past {INPUT}", v.len());
                 Ok(())
             },
             &mut |d: &[u8]| {
@@ -1900,6 +1992,31 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    /// The stream [`data_streamed`] holds never passes [`INPUT`], whatever the pieces it is read
+    /// in, among many small blocks (a header read when a few bytes short of [`AHEAD_HEADER`]
+    /// are left).
+    #[test]
+    fn streamed_input_bounded() {
+        // (where the stream left ahead is a few bytes short of a header's, as often as it
+        // happens: texts of many lengths of lines, so that blocks end in many places)
+        for k in 0..80 {
+            let text: Vec<u8> = (0..30000)
+                .flat_map(|i| {
+                    format!("line {} of {}{}\n", i % 977, i * 7 % 1013, "x".repeat(k)).into_bytes()
+                })
+                .collect();
+            let p = crate::zlib::Params {
+                mem: 1 + k as u8 % 3,
+                ..Default::default()
+            };
+            let raw = crate::zlib::compress(&text, p).unwrap();
+            for piece in [usize::MAX, 0, 1000] {
+                let (out, _) = streamed(&raw, text.len(), piece).unwrap();
+                assert!(out == text, "{k} {piece}");
             }
         }
     }
