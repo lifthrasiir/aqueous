@@ -372,7 +372,7 @@ P = W_main + Σ_태스크 (W_spawn + 태스크의 계획 버퍼) + 채널 메시
 **wrt-recons(판 3), wrt-recons-hangul(판 2).**
 - 디코더는 사전을 `Parsed`로 풀면서 자원 전체를 한 번 더 복사했고(`bytes.to_vec()`), 항목 목록을 push로 키웠으며, 조각마다 작업 목록(`Mutex`)과 결과를 모았다. 이제 Wasm에서는 사전을 복사하지 않고(`piece`가 자원을 다시 받는다), 항목은 줄바꿈 수를 세어 정확히 잡으며, 조각은 params를 한 번 더 읽어 차례로 풀어 쓴다(검증 한 번, 해독 한 번; 목록이 없다). 네이티브는 이전처럼 스레드마다 마지막 사전을 쥐고 조각을 병렬로 푼다.
 - 자원의 내용은 계획이 볼 수 없다. 그래서 params가 사전의 모양을 말한다: 항목 수(wrt-recons는 레이아웃 목록 세 개의 길이도). 모듈은 풀어 낸 사전과 맞지 않으면 실패한다(형식이 바뀌어 wrt-recons 3, wrt-recons-hangul 2; `FORMAT.md`).
-- 계획 = `plan::recons`, `plan::recons_hangul`: whole의 복사, (레이아웃 목록, 항목), 출력. 실측 = 계획이다(`wrt_plans_hold`: 단어와 마크업, 한글, 16 MiB를 넘어 조각이 둘인 글).
+- 계획 = `plan::recons`, `plan::recons_hangul`: whole의 복사, (레이아웃 목록, 항목), 출력. 실측 = 계획이다(`wrt_plans_hold`: 단어와 마크업, 한글, 16 MiB를 넘어 조각이 둘인 글, 항목이 10만 개인 사전, 32 MiB를 넘어 적용이 나뉜 글). 글이 32 MiB를 넘으면 인코더가 세그먼트마다 적용 하나로 나누므로(`words::SEGMENT`, `FORMAT.md` §5) 적용 하나의 계획은 글의 길이와 무관하게 약 105 MiB 이하다.
 
 **psd-recons.**
 - head의 span과 group은 벡터 안의 벡터(`plane_lens`, `exceptions`, `planes`, `same_as`)였고 `with_capacity(n.min(1 << 16))`에 push로 키웠다. 레이어를 읽는 `psd::parse`는 레이어마다 채널·이름·태그 벡터를 만들었고 채널 길이를 `lens`에 push로 모았다. 렌더러(`RowRenderer`)는 연산 목록·레이어 줄·행 버퍼 다섯·캔버스 줄을 쓰면서 키웠고, 모델의 `Player`는 청크마다 표(402개 문맥)와 빈도를 새로 만들고 앞의 표를 놓았다. 앞에서부터 놓는 벡터의 벡터는 항목마다 구멍을 남겨 64개를 넘고, 청크마다 표가 구멍으로 쌓인다.
