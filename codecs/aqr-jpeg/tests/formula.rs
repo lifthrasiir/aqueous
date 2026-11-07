@@ -35,7 +35,7 @@ fn plain() {
     for (name, data) in [("sequential", GRADIENT), ("progressive", PROGRESSIVE)] {
         let f = roundtrip(name, data);
         assert_eq!(f.applies().len(), 1);
-        assert_eq!(f.applies()[0].params, [(data == PROGRESSIVE) as u8]);
+        assert_eq!(f.applies()[0].params[0], (data == PROGRESSIVE) as u8);
     }
 }
 

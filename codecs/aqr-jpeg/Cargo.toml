@@ -9,6 +9,7 @@ default = ["encode"]
 encode = ["dep:aqr-formula"]
 
 [dependencies]
+aqr-api = { path = "../../crates/aqr-api", default-features = false }
 aqr-common = { path = "../../crates/aqr-common" }
 memchr = "2"
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }

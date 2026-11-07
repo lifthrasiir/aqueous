@@ -1,9 +1,10 @@
 # aqr-jpeg: the `jpeg-recons` module
 
-This document specifies module `jpeg-recons` version 2 of aqr-formula (`aqr_jpeg::formula`)
+This document specifies module `jpeg-recons` version 3 of aqr-formula (`aqr_jpeg::formula`)
 completely enough to reimplement both directions. The module rebuilds one JPEG file, the
-*original*, bit-exactly from one parameter and nine input slots. (Version 1 had slot 1 as the
-plain concatenation of the embedded JPEGs, with their lengths in the head.)
+*original*, bit-exactly from its params and nine input slots. (Version 1 had slot 1 as the
+plain concatenation of the embedded JPEGs, with their lengths in the head; version 2 had only
+the frame type as its params.)
 
 Sections 1–9 are normative for decoders. Section 10 is about the encoder: everything there is
 the encoder's free choice within the constraints given, except where it says otherwise.
@@ -23,8 +24,37 @@ the encoder's free choice within the constraints given, except where it says oth
 
 ## 2. The module
 
-**Param**: one byte, the frame type: 0 = sequential (SOF0 / SOF1), 1 = progressive (SOF2).
-Other values are invalid. The output length is given by the formula.
+**Params**: the frame type, then the sizes of what decoding re-emits, which bound its memory:
+
+```text
+u8      frame       0 = sequential (SOF0 / SOF1), 1 = progressive (SOF2); other values are invalid
+varint  n           stripes of the striped scan re-emitted (0 where there is none)
+per such stripe:
+  varint  mid       bits of its MCUs after the first up to the first restart boundary
+  varint  body      bits of its MCUs from that boundary on (byte-aligned at each boundary)
+varint  m           scans re-emitted whole (those not raw, in scan order)
+per such scan:
+  varint  bytes     its entropy-coded bytes, unstuffed
+```
+
+Trailing bytes are an error. The output length is given by the formula.
+
+The *striped scan* is the only scan of a sequential frame, of every component, with
+`Ss, Se, Ah, Al = 0, 63, 0, 0`, and every component's block grid its MCU grid (`bw = mcux·h`,
+`bh = mcuy·v`; `h = v = 1` for one component), unless it is raw or truncated before its first
+complete MCU. Such a scan is re-emitted a stripe at a time (section 5): `n` counts the stripes
+from the first up to the one holding its last MCU coded (all of them unless truncated), and
+the frame has no scan re-emitted whole (`m = 0`). Otherwise `n = 0` and `m` is the number of
+scans that are not raw, of which `bytes` is what section 9 emits of it before byte stuffing:
+its entropy-coded data with every `FF 00` as `FF` and without its RST markers (of a truncated
+scan, what section 9 emits up to where the tail takes over).
+
+A stripe's MCUs are those of its rows of MCUs. Its first MCU, when not at a restart boundary,
+continues the previous stripe's DC predictions; `mid` counts the bits of the MCUs after that
+one up to the first boundary (0 where it is at one), and `body` the bits from there to the
+stripe's end, each boundary's padding included. The values are those of the original's scan
+data: a decoder may take them as the room it gives its bit writers, and a smaller value makes
+it take more memory than the formula declares.
 
 **Inputs**, in order. Each is a byte string; those that hold lists of streams but slot 1
 concatenate them and give their lengths in `lens`.
@@ -98,7 +128,7 @@ varint  n_stripes
 
 Flag bits:
 
-| bit | param 0 | param 1 |
+| bit | frame 0 | frame 1 |
 |---|---|---|
 | 0 (1) | pad_zero: padding uses 0-bits instead of 1-bits | pad_zero |
 | 1 (2) | raw: the scan's data is stored verbatim | raw |
@@ -122,13 +152,15 @@ in the original (stuffed, RST markers included). For a truncated scan it is the 
 ### 2.6 Decoding
 
 1. Read the head, then rebuild the blob (2.3) from slots 1 and 2.
-2. Parse the blob as a JPEG (section 4). The frame must be progressive exactly when the param
-   is 1. Every scan's entropy-coded data in the blob must be empty (`start = end`).
+2. Parse the blob as a JPEG (section 4). The frame must be progressive exactly when the
+   frame type is 1. Every scan's entropy-coded data in the blob must be empty
+   (`start = end`).
 3. Read the scan info, the raw scan data and tails, the tables and the stripes from their
-   slots, checking that each is used up as 2 requires.
+   slots, checking that each is used up as 2 requires, and that the params count the striped
+   scan's stripes and the scans re-emitted whole as section 2 says.
 4. Decode the coefficient arrays (sections 5–8).
 5. Re-emit every non-raw scan (section 9), with sequential or progressive semantics as the
-   param says.
+   frame type says.
 6. Output the blob with each scan's data (re-emitted, or the raw entry) inserted at that
    scan's `start` offset in the blob, in scan order. The output must have the length the
    formula declares.
@@ -480,7 +512,7 @@ The encoder must give every coded symbol a nonzero frequency.
   buffer cut at the RST positions. Each piece is stuffed (`FF` becomes `FF 00`), and the
   `r`-th RST position (0-based) gets the marker `FF (D0 + r mod 8)`.
 
-### 9.2 Sequential frames (param 0)
+### 9.2 Sequential frames (frame 0)
 
 For each MCU `m` in `0 .. emit`, where `emit = nmcu` (or `min(mcus, nmcu)` if truncated), apply
 the restart rule. Then code each block:
@@ -507,7 +539,7 @@ After the last MCU:
 
 Then finish (9.1).
 
-### 9.3 Progressive frames (param 1)
+### 9.3 Progressive frames (frame 1)
 
 The scan kind comes from its parameters. Any other combination is an error. Let
 `ok = Al ≤ 13 and (Ah = 0 or Al + 1 = Ah)`:

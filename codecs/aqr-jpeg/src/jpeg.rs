@@ -56,10 +56,40 @@ pub(crate) fn err<T>(s: impl Into<String>) -> Result<T, Error> {
     Err(Error(s.into()))
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Copy, Default)]
 pub struct HuffSpec {
     pub counts: [u8; 16], // number of codes of length 1..=16
-    pub vals: Vec<u8>,
+    pub vals: Vals,
+}
+
+/// The symbols of a Huffman table, at most 256 (held in place, so that a scan's tables take no
+/// allocation of their own).
+#[derive(Clone, Copy)]
+pub struct Vals {
+    b: [u8; 256],
+    n: u16,
+}
+
+impl Default for Vals {
+    fn default() -> Self {
+        Vals { b: [0; 256], n: 0 }
+    }
+}
+
+impl Vals {
+    /// The symbols `v`, or None where there are more than 256.
+    pub fn of(v: &[u8]) -> Option<Vals> {
+        let mut b = [0; 256];
+        b.get_mut(..v.len())?.copy_from_slice(v);
+        Some(Vals { b, n: v.len() as u16 })
+    }
+}
+
+impl std::ops::Deref for Vals {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.b[..self.n as usize]
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -143,13 +173,47 @@ pub(crate) fn scan_end(d: &[u8], start: usize) -> usize {
     d.len()
 }
 
+/// The scans (SOS markers) of `d` as [`parse`] walks it.
+fn count_scans(d: &[u8]) -> usize {
+    let (mut i, mut n) = (2, 0);
+    loop {
+        while i < d.len() && d[i] != 0xFF {
+            i += 1;
+        }
+        while i < d.len() && d[i] == 0xFF {
+            i += 1;
+        }
+        if i >= d.len() {
+            return n;
+        }
+        let m = d[i];
+        i += 1;
+        match m {
+            0xD9 => return n,
+            0x01 | 0xD0..=0xD8 => continue,
+            _ => {}
+        }
+        let Ok(len) = be16(d, i) else { return n };
+        if len < 2 || i + len > d.len() {
+            return n;
+        }
+        if m == 0xDA {
+            n += 1;
+            i = scan_end(d, i + len);
+            continue;
+        }
+        i += len;
+    }
+}
+
 /// Parse a JPEG (or a JPEG with its entropy-coded data removed: scans then come out empty).
 pub fn parse(d: &[u8]) -> Result<Jpeg, Error> {
     if d.len() < 4 || d[0] != 0xFF || d[1] != 0xD8 {
         return err("not a JPEG");
     }
-    let mut j =
-        Jpeg { width: 0, height: 0, progressive: false, comps: Vec::new(), qt: [[0; 64]; 4], scans: Vec::new() };
+    // (the scans counted first, for their vector's room)
+    let scans = Vec::with_capacity(count_scans(d));
+    let mut j = Jpeg { width: 0, height: 0, progressive: false, comps: Vec::new(), qt: [[0; 64]; 4], scans };
     let mut dc: [Option<HuffSpec>; 4] = Default::default();
     let mut ac: [Option<HuffSpec>; 4] = Default::default();
     let mut qt_seen = [[0u16; 64]; 4];
@@ -195,6 +259,7 @@ pub fn parse(d: &[u8]) -> Result<Jpeg, Error> {
                 if n == 0 || n > 4 || j.width == 0 || j.height == 0 {
                     return err("bad frame header");
                 }
+                j.comps.reserve_exact(n);
                 for c in 0..n {
                     let s = seg.get(6 + 3 * c..9 + 3 * c).ok_or(Error("truncated SOF".into()))?;
                     let (h, v) = ((s[1] >> 4) as usize, (s[1] & 15) as usize);
@@ -230,7 +295,8 @@ pub fn parse(d: &[u8]) -> Result<Jpeg, Error> {
                     let mut counts = [0u8; 16];
                     counts.copy_from_slice(seg.get(p + 1..p + 17).ok_or(Error("truncated DHT".into()))?);
                     let n: usize = counts.iter().map(|&c| c as usize).sum();
-                    let vals = seg.get(p + 17..p + 17 + n).ok_or(Error("truncated DHT".into()))?.to_vec();
+                    let vals = seg.get(p + 17..p + 17 + n).ok_or(Error("truncated DHT".into()))?;
+                    let vals = Vals::of(vals).ok_or(Error("bad DHT".into()))?;
                     let spec = Some(HuffSpec { counts, vals });
                     if tc == 0 {
                         dc[th] = spec
@@ -267,7 +333,7 @@ pub fn parse(d: &[u8]) -> Result<Jpeg, Error> {
                 if ns == 0 || ns > 4 {
                     return err("bad SOS");
                 }
-                let mut comps = Vec::new();
+                let mut comps = Vec::with_capacity(ns);
                 for s in 0..ns {
                     let cid = byte(seg, 1 + 2 * s)?;
                     let t = byte(seg, 2 + 2 * s)?;
@@ -275,11 +341,7 @@ pub fn parse(d: &[u8]) -> Result<Jpeg, Error> {
                     if comps.iter().any(|c: &ScanComp| c.ci == ci) {
                         return err("duplicate scan component");
                     }
-                    comps.push(ScanComp {
-                        ci,
-                        dc: dc[(t >> 4) as usize & 3].clone(),
-                        ac: ac[(t & 15) as usize & 3].clone(),
-                    });
+                    comps.push(ScanComp { ci, dc: dc[(t >> 4) as usize & 3], ac: ac[(t & 15) as usize & 3] });
                 }
                 let ss = byte(seg, 1 + 2 * ns)?;
                 let se = byte(seg, 2 + 2 * ns)?;
@@ -425,7 +487,7 @@ impl Table {
     /// symbols, AC symbols (r, 0) other than EOB / ZRL, DC sizes > 15.
     pub fn new(spec: &HuffSpec, is_ac: bool) -> Result<Table, Error> {
         let mut seen = [false; 256];
-        for &v in &spec.vals {
+        for &v in spec.vals.iter() {
             let bad = if is_ac { v & 15 == 0 && v != 0 && v != 0xF0 } else { v > 15 };
             if bad || std::mem::replace(&mut seen[v as usize], true) {
                 return err("non-standard Huffman table");
@@ -490,7 +552,7 @@ impl Table {
             }
             pair[idx] = p;
         }
-        Ok(Table { pair, fast, maxcode, valoff, vals: spec.vals.clone(), is_ac })
+        Ok(Table { pair, fast, maxcode, valoff, vals: spec.vals.to_vec(), is_ac })
     }
 
     /// Slow path for codes longer than FAST_BITS: returns (code length, symbol).
@@ -1500,7 +1562,7 @@ fn discard_all(j: &Jpeg, scratch: &mut ([i16; 64], u64)) -> Vec<CompPtr> {
 /// Decode a sequential scan that codes every component stripe by stripe, so that only a few
 /// stripes' coefficients are held at a time (zigzag order, with nonzero masks): the MCUs
 /// `ranges[k]` (whole MCU rows, in order, covering the scan) are decoded into the buffers
-/// `take(k)` gives, which hold exactly their rows, and handed on by `put(k, buffers)`, in any
+/// `take(k)` gives, which hold exactly their rows, and handed on by `put(k, buffers, trunc)` (with the MCUs and boundary of a truncation at or before them), in any
 /// order and from any thread. A truncated scan is handled as `decode_scan` does (the blocks
 /// after the truncation are zero). As soon as the scan is known not to be reproducible (it
 /// fails to decode, or fails a check), the rest is left undecoded and the info returned says
@@ -1517,7 +1579,7 @@ pub(crate) fn decode_striped(
     ranges: &[(usize, usize)],
     serial_only: bool,
     take: impl Fn(usize) -> Vec<Coefs> + Sync,
-    put: impl Fn(usize, Vec<Coefs>) + Sync,
+    put: impl Fn(usize, Vec<Coefs>, Option<(usize, bool)>) + Sync,
 ) -> Option<ScanInfo> {
     use crate::par::prelude::*;
     let rejected = ScanInfo { standard: false, ..Default::default() };
@@ -1576,19 +1638,20 @@ pub(crate) fn decode_striped(
                     if failed(&chk) {
                         return Some((chk, None));
                     }
-                    put(k, b);
+                    put(k, b, None);
                 }
                 End::Trunc(t) => {
                     // the blocks from the truncation on are zero
                     clear_held(s, &c.layout, t.mcus, m1, &mut b);
-                    put(k, b);
+                    let trunc = Some((t.mcus, t.boundary));
+                    put(k, b, trunc);
                     for k in k + 1..ranges.len() {
                         let mut b = take(k);
                         for o in &mut b {
                             o.blocks.fill([0; 64]);
                             o.masks.fill(0);
                         }
-                        put(k, b);
+                        put(k, b, trunc);
                     }
                     return Some((chk, Some(t)));
                 }
@@ -1621,7 +1684,7 @@ pub(crate) fn decode_striped(
                 if m1 == nmcu || m1.is_multiple_of(ri) {
                     c.check_segment_end(br.used(), (m1 - 1) / ri, &mut chk);
                 }
-                put(k, b);
+                put(k, b, None);
                 Some(chk)
             })
             .collect();
@@ -1668,7 +1731,7 @@ pub(crate) fn decode_striped(
             }
             let ok = items.into_par_iter().enumerate().all(|(i, (mut b, off))| {
                 rebase(&c.layout, &mut b, off) && {
-                    put(wi * w + i, b);
+                    put(wi * w + i, b, None);
                     true
                 }
             });
@@ -1973,6 +2036,58 @@ impl BitOut {
     }
 }
 
+/// What the Huffman coder writes its bits to: a [`BitOut`], or a [`BitCount`] that only counts
+/// them (to measure what a part takes, without writing it).
+pub(crate) trait BitSink {
+    fn reserve(&mut self, bytes: usize);
+    fn put(&mut self, len: u32, bits: u64);
+    fn pad(&mut self, zero: bool);
+    /// The whole bytes written.
+    fn pos(&self) -> usize;
+}
+
+impl BitSink for BitOut {
+    #[inline(always)]
+    fn reserve(&mut self, bytes: usize) {
+        BitOut::reserve(self, bytes)
+    }
+    #[inline(always)]
+    fn put(&mut self, len: u32, bits: u64) {
+        BitOut::put(self, len, bits)
+    }
+    #[inline(always)]
+    fn pad(&mut self, zero: bool) {
+        BitOut::pad(self, zero)
+    }
+    #[inline(always)]
+    fn pos(&self) -> usize {
+        self.pos
+    }
+}
+
+/// Bits counted, as a [`BitOut`] would write them.
+#[cfg(feature = "encode")]
+#[derive(Default)]
+pub(crate) struct BitCount(pub(crate) usize);
+
+#[cfg(feature = "encode")]
+impl BitSink for BitCount {
+    #[inline(always)]
+    fn reserve(&mut self, _: usize) {}
+    #[inline(always)]
+    fn put(&mut self, len: u32, _: u64) {
+        self.0 += len as usize;
+    }
+    #[inline(always)]
+    fn pad(&mut self, _: bool) {
+        self.0 = self.0.next_multiple_of(8);
+    }
+    #[inline(always)]
+    fn pos(&self) -> usize {
+        self.0 / 8
+    }
+}
+
 /// Append `src` to `out` with 0xFF -> 0xFF 0x00 stuffing.
 pub(crate) fn stuff_into(src: &[u8], out: &mut Vec<u8>) {
     let mut i = 0;
@@ -1999,23 +2114,48 @@ pub(crate) fn size_bits(v: i32) -> (u32, u32) {
 /// Large scans are encoded as chunks of MCUs in parallel (see `encode_chunked`).
 pub fn encode_scan(j: &Jpeg, s: &Scan, info: &ScanInfo, coefs: &[Coefs], out: &mut Vec<u8>) -> Result<(), Error> {
     out.clear();
-    let mut dct = Vec::new();
-    let mut act = Vec::new();
+    let (dct, act, layout) = scan_tables(j, s)?;
+    let nmcu = s.mcux * s.mcuy;
+    let blocks_per_mcu: usize = layout.iter().map(|&(_, h, v)| h * v).sum();
+    // (in chunks where there are threads to code them on)
+    let threads = crate::par::current_num_threads();
+    let chunks = (nmcu * blocks_per_mcu / CHUNK_BLOCKS).min(threads * 4);
+    if threads > 1 && chunks >= 2 && info.truncated.is_none() {
+        return encode_chunked(s, info, coefs, out, &layout, &dct, &act, chunks);
+    }
+    let mut buf = take_scratch();
+    let r = encode_scan_onto(j, s, info, coefs, &mut buf, out);
+    put_scratch(buf);
+    r.map(drop)
+}
+
+/// The Huffman tables of scan `s`'s components, and its layout.
+#[allow(clippy::type_complexity)]
+fn scan_tables(j: &Jpeg, s: &Scan) -> Result<(Vec<EncTable>, Vec<EncTable>, Vec<(usize, usize, usize)>), Error> {
+    let (mut dct, mut act) = (Vec::with_capacity(s.comps.len()), Vec::with_capacity(s.comps.len()));
     for sc in &s.comps {
         let (Some(dc), Some(ac)) = (&sc.dc, &sc.ac) else { return err("missing Huffman table") };
         dct.push(EncTable::new(dc));
         act.push(EncTable::new(ac));
     }
-    let layout = scan_layout(j, s);
-    let nmcu = s.mcux * s.mcuy;
-    let blocks_per_mcu: usize = layout.iter().map(|&(_, h, v)| h * v).sum();
-    let chunks = (nmcu * blocks_per_mcu / CHUNK_BLOCKS).min(crate::par::current_num_threads() * 4);
-    if chunks >= 2 && info.truncated.is_none() {
-        return encode_chunked(s, info, coefs, out, &layout, &dct, &act, chunks);
-    }
-    let mut w = BitOut { acc: 0, n: 0, buf: take_scratch(), pos: 0 };
+    Ok((dct, act, scan_layout(j, s)))
+}
+
+/// [`encode_scan`] appended to `out`, on one thread, with `buf` the bit writer's bytes (grown
+/// as it goes where it has not the room, [`crate::codec::writer_len`]): gives the scan's
+/// unstuffed bytes.
+pub(crate) fn encode_scan_onto(
+    j: &Jpeg,
+    s: &Scan,
+    info: &ScanInfo,
+    coefs: &[Coefs],
+    buf: &mut Vec<u8>,
+    out: &mut Vec<u8>,
+) -> Result<usize, Error> {
+    let (dct, act, layout) = scan_tables(j, s)?;
+    let mut w = BitOut { acc: 0, n: 0, buf: std::mem::take(buf), pos: 0 };
     let r = encode_scan_into(s, info, coefs, out, &layout, &dct, &act, &mut w);
-    put_scratch(w.buf);
+    *buf = w.buf;
     r
 }
 
@@ -2039,13 +2179,13 @@ pub(crate) fn put_scratch(v: Vec<u8>) {
 /// position (into `seg_ends`) before every MCU > m0 that starts a restart interval.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn encode_mcus(
+fn encode_mcus<W: BitSink>(
     s: &Scan,
     coefs: &[Coefs],
     layout: &[(usize, usize, usize)],
     dct: &[EncTable],
     act: &[EncTable],
-    w: &mut BitOut,
+    w: &mut W,
     (m0, m1): (usize, usize),
     pad_zero: bool,
     pred: &mut [i32; 4],
@@ -2055,7 +2195,7 @@ fn encode_mcus(
     for m in m0..m1 {
         if m > m0 && m % ri == 0 {
             w.pad(pad_zero);
-            seg_ends.push(w.pos);
+            seg_ends.push(w.pos());
             *pred = [0; 4];
         }
         let (mx, my) = (m % s.mcux, m / s.mcux);
@@ -2076,8 +2216,8 @@ fn encode_mcus(
 
 /// Code one block: its DC as the difference to `*pred`, then its AC coefficients.
 #[inline(always)]
-fn encode_block(
-    w: &mut BitOut,
+fn encode_block<W: BitSink>(
+    w: &mut W,
     blk: &[i16; 64],
     mask: u64,
     pred: &mut i32,
@@ -2297,9 +2437,11 @@ fn encode_scan_into(
     dct: &[EncTable],
     act: &[EncTable],
     w: &mut BitOut,
-) -> Result<(), Error> {
+) -> Result<usize, Error> {
     let nmcu = s.mcux * s.mcuy;
-    let mut seg_ends = Vec::new(); // unstuffed offsets where an RST marker follows
+    let ri = if s.ri > 0 { s.ri } else { nmcu };
+    // unstuffed offsets where an RST marker follows
+    let mut seg_ends = Vec::with_capacity(nmcu.div_ceil(ri) + info.trailing_rst as usize);
     let mut pred = [0i32; 4];
     let emit = info.truncated.as_ref().map_or(nmcu, |t| t.mcus.min(nmcu));
     encode_mcus(s, coefs, layout, dct, act, w, (0, emit), info.pad_zero, &mut pred, &mut seg_ends)?;
@@ -2325,7 +2467,6 @@ fn encode_scan_into(
         seg_ends.push(w.pos);
     }
     // stuffing + RST markers
-    out.reserve(w.pos + w.pos / 64 + seg_ends.len() * 2 + 16);
     let mut start = 0;
     for (r, &end) in seg_ends.iter().enumerate() {
         stuff_into(&w.buf[start..end], out);
@@ -2333,7 +2474,7 @@ fn encode_scan_into(
         start = end;
     }
     stuff_into(&w.buf[start..w.pos], out);
-    Ok(())
+    Ok(w.pos)
 }
 
 // ---------------------------------------------------------------- stripe-wise re-emission
@@ -2377,13 +2518,6 @@ impl BitStr {
     fn kept(&self) -> &[u8] {
         &self.buf[..(self.n / 8 + 9).min(self.buf.len())]
     }
-
-    /// The last `k` (<= 8) bits.
-    fn tail(&self, k: u32) -> u32 {
-        let at = self.n - k as usize;
-        let v = u16::from_be_bytes([self.buf[at / 8], self.buf[at / 8 + 1]]) as u32;
-        ((v << (at % 8)) & 0xFFFF) >> (16 - k)
-    }
 }
 
 impl BitOut {
@@ -2392,6 +2526,11 @@ impl BitOut {
     }
     /// Append the bits of `src`.
     fn append(&mut self, src: &BitStr) {
+        self.append_bits((&src.buf, src.n))
+    }
+    /// Append the first `n` bits of `buf` (with 8 spare bytes past them).
+    fn append_bits(&mut self, (buf, n): (&[u8], usize)) {
+        let src = BitRef { buf, n };
         let nb = src.n / 8;
         self.reserve(nb + 8);
         let p = self.n;
@@ -2416,6 +2555,23 @@ impl BitOut {
     }
 }
 
+/// The first `n` bits of `buf` (with 8 spare bytes past them).
+struct BitRef<'a> {
+    buf: &'a [u8],
+    n: usize,
+}
+
+/// Bytes past a bit writer's position that its writes take at most: a block's (`reserve` of
+/// 256 bytes and its 8 of slack), and a [`BitStr`]'s 16 and 8 as it is made.
+pub(crate) const SLACK: usize = 64 * 4 + 8 + 24;
+
+impl BitOut {
+    /// A writer of `n` bytes of room (which it does not grow, of a scan whose bytes it is told).
+    pub(crate) fn with_len(n: usize) -> BitOut {
+        BitOut { acc: 0, n: 0, buf: vec![0; n], pos: 0 }
+    }
+}
+
 /// A stripe's share of a scan (see `encode_striped`): MCUs `m0..m1`.
 struct Part {
     /// MCU m0's blocks (in coding order), when its DC predictions continue the previous stripe
@@ -2433,80 +2589,184 @@ struct Part {
     end: [i32; 4],
 }
 
-/// As the result of a task (on WebAssembly).
-impl Wire for Part {
-    fn put(&self, out: &mut Vec<u8>) {
-        self.head.put(out);
-        self.mid.put(out);
-        self.brk.put(out);
-        self.body.put(out);
-        (self.rst, self.end).put(out);
-    }
-
-    fn size(&self) -> usize {
-        self.head.size() + self.mid.size() + 1 + self.body.size() + 8 + 16
-    }
-
-    fn get(b: &mut &[u8]) -> Option<Self> {
-        let (head, mid) = (Wire::get(b)?, Wire::get(b)?);
-        let (brk, body, rst, end) = Wire::get(b)?;
-        Some(Part { head, mid, brk, body, rst, end })
+impl Part {
+    /// The part as bytes (for [`PartRef::read`]): its counts, its head's blocks and masks, its
+    /// bits (each of 8 spare bytes) and RST offsets, its predictions.
+    fn write(&self) -> Vec<u8> {
+        let ends = self.body.as_ref().map_or(&[][..], |(_, e)| &e[..]);
+        let (mk, bk) = (self.mid.n / 8 + 9, self.body.as_ref().map_or(0, |(b, _)| b.n / 8 + 9));
+        let mut out = Vec::with_capacity(PartRef::written(self.head.len(), mk, bk, ends.len()));
+        // (each bits' bytes and 8 spare, zeros past those it has)
+        let bits = |out: &mut Vec<u8>, b: &BitStr, n: usize| {
+            let k = b.kept();
+            out.extend_from_slice(&k[..k.len().min(n)]);
+            out.resize(out.len() + n - k.len().min(n), 0);
+        };
+        for v in [self.head.len(), self.mid.n, self.body.as_ref().map_or(usize::MAX, |b| b.0.n), ends.len(), self.rst] {
+            out.extend_from_slice(&(v as u64).to_le_bytes());
+        }
+        out.push(self.brk as u8);
+        self.end.iter().for_each(|e| out.extend_from_slice(&e.to_le_bytes()));
+        for (b, m) in &self.head {
+            b.iter().for_each(|c| out.extend_from_slice(&c.to_le_bytes()));
+            out.extend_from_slice(&m.to_le_bytes());
+        }
+        bits(&mut out, &self.mid, mk);
+        if let Some((b, _)) = &self.body {
+            bits(&mut out, b, bk);
+        }
+        ends.iter().for_each(|&e| out.extend_from_slice(&(e as u64).to_le_bytes()));
+        out
     }
 }
 
-/// Re-emit a sequential scan that codes every component stripe by stripe, returning its bytes
-/// in pieces: `fill(k, buffers)` puts the coefficients of stripe k (MCUs `ranges[k]`, whole MCU
-/// rows, in order, covering the scan) into the buffers, and only a stripe per worker is held at
-/// a time. Each stripe is coded on its own, but for its first MCU where that continues the
-/// previous stripe's DC predictions: such heads are coded once all stripes are, then the parts'
-/// bits are joined as in `encode_chunked`. A truncated scan ends as in `encode_scan_into` (the
-/// stripes after its complete MCUs are not filled at all); it needs at least one such MCU.
-pub(crate) fn encode_striped(
-    j: &Jpeg,
-    s: &Scan,
-    info: &ScanInfo,
-    ranges: &[(usize, usize)],
-    fill: impl Fn(usize, &mut Vec<Coefs>) -> Result<(), Error> + Sync,
-) -> Result<Vec<Vec<u8>>, Error> {
-    use crate::par::prelude::*;
-    let mut dct = Vec::new();
-    let mut act = Vec::new();
-    for sc in &s.comps {
-        let (Some(dc), Some(ac)) = (&sc.dc, &sc.ac) else { return err("missing Huffman table") };
-        dct.push(EncTable::new(dc));
-        act.push(EncTable::new(ac));
+/// A bit string and its length in bits.
+type BitSpan<'a> = (&'a [u8], usize);
+
+/// A [`Part`] as [`Part::write`] wrote it, read where it is.
+struct PartRef<'a> {
+    head: &'a [u8],
+    mid: (&'a [u8], usize),
+    brk: bool,
+    body: Option<(BitSpan<'a>, &'a [u8])>,
+    rst: usize,
+    end: [i32; 4],
+}
+
+/// Bytes of a block and its mask, as a part writes them.
+const HEAD_BLOCK: usize = 64 * 2 + 8;
+/// Bytes of a part's counts, its restart boundary and its predictions.
+const PART_HEAD: usize = 5 * 8 + 1 + 16;
+
+impl<'a> PartRef<'a> {
+    /// Bytes of a part of `head` blocks, `mid` and `body` bytes of bits (kept), `ends` RSTs.
+    fn written(head: usize, mid: usize, body: usize, ends: usize) -> usize {
+        PART_HEAD + HEAD_BLOCK * head + mid + body + 8 * ends
     }
-    let layout = scan_layout(j, s);
-    let nmcu = s.mcux * s.mcuy;
-    let ri = if s.ri > 0 { s.ri } else { nmcu };
-    let nseg = nmcu.div_ceil(ri);
-    let pad_zero = info.pad_zero;
-    // MCUs up to `emit` are coded; a restart boundary (padding, RST) follows MCU m1 - 1 of a
-    // part where `brk_at(m1)`
-    let emit = info.truncated.as_ref().map_or(nmcu, |t| t.mcus.min(nmcu));
-    if emit == 0 {
-        return err("no complete MCU");
+
+    fn read(d: &'a [u8]) -> Option<PartRef<'a>> {
+        let u =
+            |i: usize| -> Option<usize> { usize::try_from(u64::from_le_bytes(*d.get(8 * i..)?.first_chunk()?)).ok() };
+        let (head, mid_n, body_n, ends, rst) = (u(0)?, u(1)?, u(2)?, u(3)?, u(4)?);
+        let brk = match *d.get(40)? {
+            0 => false,
+            1 => true,
+            _ => return None,
+        };
+        let mut end = [0i32; 4];
+        for (k, e) in end.iter_mut().enumerate() {
+            *e = i32::from_le_bytes(*d.get(41 + 4 * k..)?.first_chunk()?);
+        }
+        let mut at = PART_HEAD;
+        let mut take = |n: usize| -> Option<&'a [u8]> {
+            let x = d.get(at..at.checked_add(n)?)?;
+            at += n;
+            Some(x)
+        };
+        let head = take(head.checked_mul(HEAD_BLOCK)?)?;
+        let mid = (take(mid_n / 8 + 9)?, mid_n);
+        let body = match body_n {
+            usize::MAX => None,
+            n => Some(((take(n / 8 + 9)?, n), take(ends.checked_mul(8)?)?)),
+        };
+        (at == d.len()).then_some(PartRef { head, mid, brk, body, rst, end })
     }
-    let brk_at = |m1: usize| match &info.truncated {
-        Some(t) if m1 == emit => t.boundary,
-        _ => m1 < nmcu && m1.is_multiple_of(ri),
-    };
-    let ranges: Vec<(usize, usize)> =
-        ranges.iter().take_while(|r| r.0 < emit).map(|&(m0, m1)| (m0, m1.min(emit))).collect();
-    let pool = std::sync::Mutex::new(Vec::<Vec<Coefs>>::new());
-    let part = |k: usize| -> Result<Part, Error> {
-        let (m0, m1) = ranges[k];
-        let mut b = pool.lock().unwrap().pop().unwrap_or_default();
-        fill(k, &mut b)?;
+
+    /// Block `i` of the head and its mask.
+    fn block(&self, i: usize) -> ([i16; 64], u64) {
+        let b = &self.head[i * HEAD_BLOCK..][..HEAD_BLOCK];
+        let mut blk = [0i16; 64];
+        for (k, c) in blk.iter_mut().enumerate() {
+            *c = i16::from_le_bytes([b[2 * k], b[2 * k + 1]]);
+        }
+        (blk, u64::from_le_bytes(b[128..136].try_into().unwrap()))
+    }
+}
+
+/// A scan that codes every component stripe by stripe, as its stripes are coded again: its
+/// tables and layout, and where it ends (the MCUs coded, and whether a restart boundary
+/// follows them).
+pub(crate) struct Striped<'a> {
+    s: &'a Scan,
+    layout: Vec<(usize, usize, usize)>,
+    dct: Vec<EncTable>,
+    act: Vec<EncTable>,
+    nmcu: usize,
+    ri: usize,
+    emit: usize,
+    /// a truncated scan's restart boundary after its last complete MCU
+    boundary: Option<bool>,
+    pad_zero: bool,
+}
+
+impl<'a> Striped<'a> {
+    /// Of scan `s` of `j`, truncated after `trunc`'s MCUs (and boundary) where given.
+    pub(crate) fn new(j: &Jpeg, s: &'a Scan, trunc: Option<(usize, bool)>, pad_zero: bool) -> Result<Self, Error> {
+        let (mut dct, mut act) = (Vec::with_capacity(s.comps.len()), Vec::with_capacity(s.comps.len()));
+        for sc in &s.comps {
+            let (Some(dc), Some(ac)) = (&sc.dc, &sc.ac) else { return err("missing Huffman table") };
+            dct.push(EncTable::new(dc));
+            act.push(EncTable::new(ac));
+        }
+        let nmcu = s.mcux * s.mcuy;
+        let ri = if s.ri > 0 { s.ri } else { nmcu };
+        let emit = trunc.map_or(nmcu, |t| t.0.min(nmcu));
+        if emit == 0 {
+            return err("no complete MCU");
+        }
+        Ok(Striped { s, layout: scan_layout(j, s), dct, act, nmcu, ri, emit, boundary: trunc.map(|t| t.1), pad_zero })
+    }
+
+    /// Whether a restart boundary (padding, RST) follows MCU m1 - 1 of a part.
+    fn brk_at(&self, m1: usize) -> bool {
+        match self.boundary {
+            Some(b) if m1 == self.emit => b,
+            _ => m1 < self.nmcu && m1.is_multiple_of(self.ri),
+        }
+    }
+
+    /// The stripes' MCUs that are coded, of `ranges` (each stripe's).
+    pub(crate) fn coded(&self, ranges: &[(usize, usize)]) -> impl Iterator<Item = (usize, usize)> {
+        let emit = self.emit;
+        ranges.iter().take_while(move |r| r.0 < emit).map(move |&(m0, m1)| (m0, m1.min(emit)))
+    }
+
+    /// Blocks of an MCU.
+    fn mcu_blocks(&self) -> usize {
+        self.layout.iter().map(|&(_, h, v)| h * v).sum()
+    }
+
+    /// RST offsets of the body of a part of MCUs `m0..m1` (with its boundary after it).
+    pub(crate) fn body_ends(&self, (m0, m1): (usize, usize)) -> usize {
+        let r1 = if m0 % self.ri != 0 { (m0 / self.ri + 1) * self.ri } else { m0 };
+        if r1 >= m1 {
+            return 0;
+        }
+        (r1 + 1..m1).filter(|m| m.is_multiple_of(self.ri)).count() + self.brk_at(m1) as usize
+    }
+
+    /// The part of MCUs `m0..m1` of the coefficients `b` (held from MCU m0 on); its bit writers
+    /// of `bits` (the bits of its mid and body) where given, else grown as they go. Gives its
+    /// bits too (of its mid and body, as `bits` tells them).
+    fn part(&self, (m0, m1): (usize, usize), b: &[Coefs], bits: Option<(usize, usize)>) -> Result<Part, Error> {
+        let (s, ri) = (self.s, self.ri);
         let head = m0 % ri != 0;
         // the first restart boundary from m0 on
         let r1 = if head { (m0 / ri + 1) * ri } else { m0 };
         let mut pred = [0i32; 4];
-        let mut part = Part { head: Vec::new(), mid: BitStr::default(), brk: false, body: None, rst: 0, end: [0; 4] };
-        let mut ends = Vec::new();
+        let writer = |n: Option<usize>| n.map_or_else(BitOut::new, |n| BitOut::with_len(n / 8 + SLACK));
+        let mut part = Part {
+            head: Vec::with_capacity(if head { self.mcu_blocks() } else { 0 }),
+            mid: BitStr::default(),
+            brk: false,
+            body: None,
+            rst: 0,
+            end: [0; 4],
+        };
+        let mut ends = Vec::with_capacity(self.body_ends((m0, m1)));
         if head {
             let (mx, my) = (m0 % s.mcux, m0 / s.mcux);
-            for (si, &(ci, ch, cv)) in layout.iter().enumerate() {
+            for (si, &(ci, ch, cv)) in self.layout.iter().enumerate() {
                 let o = &b[ci];
                 for v in 0..cv {
                     for h in 0..ch {
@@ -2519,76 +2779,293 @@ pub(crate) fn encode_striped(
                 }
             }
             if m0 + 1 < r1.min(m1) {
-                let mut w = BitOut::new();
-                encode_mcus(s, &b, &layout, &dct, &act, &mut w, (m0 + 1, r1.min(m1)), pad_zero, &mut pred, &mut ends)?;
+                let mut w = writer(bits.map(|b| b.0));
+                encode_mcus(
+                    s,
+                    b,
+                    &self.layout,
+                    &self.dct,
+                    &self.act,
+                    &mut w,
+                    (m0 + 1, r1.min(m1)),
+                    self.pad_zero,
+                    &mut pred,
+                    &mut ends,
+                )?;
                 part.mid = BitStr::of(w);
             }
-            part.brk = r1 < m1 || (r1 == m1 && brk_at(m1));
+            part.brk = r1 < m1 || (r1 == m1 && self.brk_at(m1));
             part.rst = r1 / ri - 1;
         } else {
             part.rst = m0 / ri;
         }
         if r1 < m1 {
-            let mut w = BitOut::new();
+            let mut w = writer(bits.map(|b| b.1));
             pred = [0; 4];
-            encode_mcus(s, &b, &layout, &dct, &act, &mut w, (r1, m1), pad_zero, &mut pred, &mut ends)?;
-            if brk_at(m1) {
-                w.pad(pad_zero);
+            encode_mcus(
+                s,
+                b,
+                &self.layout,
+                &self.dct,
+                &self.act,
+                &mut w,
+                (r1, m1),
+                self.pad_zero,
+                &mut pred,
+                &mut ends,
+            )?;
+            if self.brk_at(m1) {
+                w.pad(self.pad_zero);
                 ends.push(w.pos);
             }
             part.body = Some((BitStr::of(w), ends));
         }
         part.end = pred;
+        Ok(part)
+    }
+
+    /// The bits of the part of MCUs `range` of the coefficients `b` (its mid's and body's), as
+    /// the encoder measures them for the decoder ([`encode_striped`]).
+    #[cfg(feature = "encode")]
+    pub(crate) fn part_bits(&self, (m0, m1): (usize, usize), b: &[Coefs]) -> Result<(usize, usize), Error> {
+        let (s, ri) = (self.s, self.ri);
+        let head = m0 % ri != 0;
+        let r1 = if head { (m0 / ri + 1) * ri } else { m0 };
+        let mut pred = [0i32; 4];
+        let mut ends = Vec::new();
+        let mut mid = BitCount(0);
+        if head {
+            // (the head's DC predictions, as `part` takes them)
+            let (mx, my) = (m0 % s.mcux, m0 / s.mcux);
+            for (si, &(ci, ch, cv)) in self.layout.iter().enumerate() {
+                let o = &b[ci];
+                let Some(bi) = o.index(mx * ch + ch - 1, my * cv + cv - 1) else {
+                    return err("block outside the component");
+                };
+                pred[si] = o.blocks[bi][0] as i32;
+            }
+            if m0 + 1 < r1.min(m1) {
+                let range = (m0 + 1, r1.min(m1));
+                encode_mcus(
+                    s,
+                    b,
+                    &self.layout,
+                    &self.dct,
+                    &self.act,
+                    &mut mid,
+                    range,
+                    self.pad_zero,
+                    &mut pred,
+                    &mut ends,
+                )?;
+            }
+        }
+        let mut body = BitCount(0);
+        if r1 < m1 {
+            pred = [0; 4];
+            encode_mcus(
+                s,
+                b,
+                &self.layout,
+                &self.dct,
+                &self.act,
+                &mut body,
+                (r1, m1),
+                self.pad_zero,
+                &mut pred,
+                &mut ends,
+            )?;
+            if self.brk_at(m1) {
+                body.pad(self.pad_zero);
+            }
+        }
+        Ok((mid.0, body.0))
+    }
+
+    /// Bytes of the room that [`encode_striped`] takes of the part of MCUs `range` of bits
+    /// `bits`, in its task: its head, its writers (and their RST offsets), what it writes for
+    /// the result.
+    pub(crate) fn part_plan(&self, range: (usize, usize), bits: (usize, usize)) -> u64 {
+        use aqr_api::stack::block;
+        let head = if !range.0.is_multiple_of(self.ri) { self.mcu_blocks() } else { 0 };
+        let r1 = if head > 0 { (range.0 / self.ri + 1) * self.ri } else { range.0 };
+        let mid = head > 0 && range.0 + 1 < r1.min(range.1);
+        let body = r1 < range.1;
+        let ends = self.body_ends(range);
+        let (mk, bk) = (if mid { bits.0 / 8 + 9 } else { 9 }, if body { bits.1 / 8 + 9 } else { 0 });
+        block(136 * head as u64)
+            + block(4 * ends as u64)
+            + if mid { block((bits.0 / 8 + SLACK) as u64) } else { 0 }
+            + if body { block((bits.1 / 8 + SLACK) as u64) } else { 0 }
+            + block(PartRef::written(head, mk, bk, if body { ends } else { 0 }) as u64)
+    }
+
+    /// Bytes a part's result has, of MCUs `range` and bits `bits`.
+    pub(crate) fn part_written(&self, range: (usize, usize), bits: (usize, usize)) -> usize {
+        let head = if !range.0.is_multiple_of(self.ri) { self.mcu_blocks() } else { 0 };
+        let r1 = if head > 0 { (range.0 / self.ri + 1) * self.ri } else { range.0 };
+        let mid = head > 0 && range.0 + 1 < r1.min(range.1);
+        let body = r1 < range.1;
+        let (mk, bk) = (if mid { bits.0 / 8 + 9 } else { 9 }, if body { bits.1 / 8 + 9 } else { 0 });
+        PartRef::written(head, mk, bk, if body { self.body_ends(range) } else { 0 })
+    }
+
+    /// Bytes of a head's writer, and of the writer a part is put together in (of `bits`, and a
+    /// tail of `tail` bytes).
+    pub(crate) fn head_len(&self) -> usize {
+        self.mcu_blocks() * 64 * 4 + SLACK
+    }
+
+    pub(crate) fn join_len(&self, bits: (usize, usize), tail: usize) -> usize {
+        1 + self.head_len() + bits.0 / 8 + bits.1 / 8 + tail + 2 * SLACK
+    }
+}
+
+/// Re-emit a sequential scan that codes every component stripe by stripe onto `out`: the
+/// `blob`'s bytes up to the scan, the scan, the rest of the blob. `fill(k, buffers)` puts the
+/// coefficients of stripe k (MCUs `ranges[k]`, whole MCU rows, in order, covering the scan) into
+/// the buffers, and only a stripe per task is held at a time. Each stripe is coded on its own
+/// (`bits` the bits of each one's mid and body, as the encoder measured them: its writers'
+/// room), but for its first MCU where that continues the previous stripe's DC predictions:
+/// such heads are coded once all stripes are, then each part's bits are joined to the bits
+/// before it and stuffed onto `out` in turn. `out` is reserved for `len` bytes once the parts
+/// are coded (so that their tasks do not copy it). A truncated scan ends as in
+/// `encode_scan_into` (the stripes after its complete MCUs are not filled at all); it needs at
+/// least one such MCU.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_striped(
+    j: &Jpeg,
+    s: &Scan,
+    info: &ScanInfo,
+    ranges: &[(usize, usize)],
+    bits: &[(usize, usize)],
+    fill: impl Fn(usize, &mut Vec<Coefs>) -> Result<(), Error> + Sync,
+    (blob, len): (&[u8], usize),
+    out: &mut Vec<u8>,
+) -> Result<(), Error> {
+    let trunc = info.truncated.as_ref().map(|t| (t.mcus, t.boundary));
+    let st = Striped::new(j, s, trunc, info.pad_zero)?;
+    let mut coded = Vec::with_capacity(ranges.len());
+    coded.extend(st.coded(ranges));
+    if coded.len() != bits.len() {
+        return err("stripe sizes of another count");
+    }
+    let nseg = st.nmcu.div_ceil(st.ri);
+    let pool = std::sync::Mutex::new(Vec::<Vec<Coefs>>::new());
+    let part = |k: usize| -> Vec<u8> {
+        let mut b = pool.lock().unwrap().pop().unwrap_or_default();
+        let p = fill(k, &mut b).and_then(|_| st.part(coded[k], &b, Some(bits[k])));
         // (a task's own, dropped before its result is made)
         if !cfg!(target_family = "wasm") {
             pool.lock().unwrap().push(b);
         }
-        Ok(part)
+        p.map_or_else(|_| Vec::new(), |p| p.write())
     };
-    // (as tasks on WebAssembly, where rayon has no threads)
-    let parts: Vec<Part> = if cfg!(target_family = "wasm") {
-        aqr_common::pool::par_map_apart(ranges.len(), ranges.len(), part).into_iter().collect::<Result<_, Error>>()?
-    } else {
-        (0..ranges.len()).into_par_iter().map(part).collect::<Result<_, Error>>()?
-    };
+    let mut parts: Vec<Vec<u8>> = Vec::with_capacity(coded.len());
+    aqr_common::pool::par_each_apart(
+        coded.len(),
+        // (in WebAssembly as tasks even alone, as the plan has them)
+        if cfg!(target_family = "wasm") { coded.len().max(2) } else { crate::par::current_num_threads() },
+        1,
+        part,
+        || (),
+        |_, d| {
+            if d.is_empty() {
+                return err("a stripe failed");
+            }
+            parts.push(d);
+            Ok(())
+        },
+    )?;
     drop(pool);
-    // the heads, and the bits (<= 7) each part's first byte takes from what precedes it
-    let mut heads = Vec::with_capacity(parts.len());
-    let mut carries = Vec::with_capacity(parts.len());
+    out.reserve_exact(len);
+    out.extend_from_slice(blob.get(..s.start).ok_or(Error("bad scan position".into()))?);
+    // each part's head, the bits (<= 7) its first byte takes from what precedes it, then it
     let (mut pos, mut last8) = (0usize, 0u32);
-    let push = |pos: &mut usize, last8: &mut u32, x: &BitStr| {
-        let k = x.n.min(8) as u32;
+    let tail8 = |b: &[u8], n: usize, k: u32| -> u32 {
+        let at = n - k as usize;
+        let v = u16::from_be_bytes([b[at / 8], b[at / 8 + 1]]) as u32;
+        ((v << (at % 8)) & 0xFFFF) >> (16 - k)
+    };
+    let push = |pos: &mut usize, last8: &mut u32, (b, n): (&[u8], usize)| {
+        let k = n.min(8) as u32;
         if k > 0 {
-            *last8 = (*last8 << k) | x.tail(k);
-            *pos += x.n;
+            *last8 = (*last8 << k) | tail8(b, n, k);
+            *pos += n;
         }
     };
-    for k in 0..parts.len() {
-        let p = &parts[k];
-        carries.push((((pos % 8) as u32), last8 & ((1 << (pos % 8)) - 1)));
-        let mut w = BitOut::new();
+    let last = parts.len() - 1;
+    let mut prev_end = [0i32; 4];
+    for (k, d) in parts.iter().enumerate() {
+        let p = PartRef::read(d).ok_or(Error("bad stripe part".into()))?;
+        let (c, carry) = ((pos % 8) as u32, last8 & ((1 << (pos % 8)) - 1));
+        let mut hw = BitOut::with_len(st.head_len());
         if !p.head.is_empty() {
-            let mut pred = parts[k - 1].end;
+            let mut pred = prev_end;
             let mut i = 0;
-            for (si, &(_, ch, cv)) in layout.iter().enumerate() {
+            for (si, &(_, ch, cv)) in st.layout.iter().enumerate() {
                 for _ in 0..ch * cv {
-                    let (blk, mask) = &p.head[i];
-                    encode_block(&mut w, blk, *mask, &mut pred[si], &dct[si], &act[si])?;
+                    let (blk, mask) = p.block(i);
+                    encode_block(&mut hw, &blk, mask, &mut pred[si], &st.dct[si], &st.act[si])?;
                     i += 1;
                 }
             }
         }
-        let head = BitStr::of(w);
-        push(&mut pos, &mut last8, &head);
-        push(&mut pos, &mut last8, &p.mid);
+        let head = BitStr::of(hw);
+        push(&mut pos, &mut last8, (&head.buf, head.n));
+        push(&mut pos, &mut last8, p.mid);
         if p.brk {
             pos = pos.next_multiple_of(8);
         }
-        if let Some((b, _)) = &p.body {
+        if let Some((b, _)) = p.body {
             debug_assert!(pos.is_multiple_of(8));
             push(&mut pos, &mut last8, b);
         }
-        heads.push(head);
+        // the part joined behind the carry, stuffed onto `out`
+        let tail = info.truncated.as_ref().map_or(0, |t| t.tail.len());
+        let mut w = BitOut::with_len(st.join_len(bits[k], tail));
+        let mut ends = Vec::with_capacity(st.body_ends(coded[k]) + 1);
+        if c > 0 {
+            w.reserve(8);
+            w.put(c, carry);
+        }
+        w.append(&head);
+        w.append_bits(p.mid);
+        if p.brk {
+            w.pad(info.pad_zero);
+            ends.push(w.pos);
+        }
+        if let Some((b, e)) = p.body {
+            let base = w.pos;
+            w.append_bits(b);
+            ends.extend(e.as_chunks::<8>().0.iter().map(|x| base + u64::from_le_bytes(*x) as usize));
+        }
+        if k == last {
+            match &info.truncated {
+                None => w.pad(info.pad_zero),
+                Some(t) => {
+                    // the tail starts with the (identical) partial byte: it overwrites it
+                    w.reserve(t.tail.len());
+                    w.buf[w.pos..w.pos + t.tail.len()].copy_from_slice(&t.tail);
+                    (w.pos, w.n) = (w.pos + t.tail.len(), 0);
+                }
+            }
+        }
+        // the bytes up to the last whole one (a partial one is the next part's carry)
+        let mut from = 0;
+        for (r, &e) in (p.rst..).zip(&ends) {
+            stuff_into(&w.buf[from..e], out);
+            out.extend_from_slice(&[0xFF, 0xD0 + (r & 7) as u8]);
+            from = e;
+        }
+        stuff_into(&w.buf[from..w.pos], out);
+        if k == last {
+            for t in 0..info.trailing_rst as usize {
+                out.extend_from_slice(&[0xFF, 0xD0 + ((nseg - 1 + t) & 7) as u8]);
+            }
+        }
+        prev_end = p.end;
+        drop((ends, w, head));
     }
     if let Some(t) = &info.truncated
         && pos != t.bits
@@ -2596,59 +3073,11 @@ pub(crate) fn encode_striped(
         // our bits must end exactly where the stored tail begins
         return err("truncation point mismatch");
     }
-    let last = parts.len() - 1;
-    // each part is dropped as soon as its piece is made
-    parts
-        .into_par_iter()
-        .zip(heads)
-        .zip(carries)
-        .enumerate()
-        .map(|(k, ((p, head), (c, carry)))| {
-            let mut w = BitOut::new();
-            let mut ends = Vec::new();
-            if c > 0 {
-                w.reserve(8);
-                w.put(c, carry);
-            }
-            w.append(&head);
-            w.append(&p.mid);
-            if p.brk {
-                w.pad(pad_zero);
-                ends.push(w.pos);
-            }
-            if let Some((b, e)) = &p.body {
-                let base = w.pos;
-                w.append(b);
-                ends.extend(e.iter().map(|x| base + x));
-            }
-            if k == last {
-                match &info.truncated {
-                    None => w.pad(pad_zero),
-                    Some(t) => {
-                        // the tail starts with the (identical) partial byte: it overwrites it
-                        w.reserve(t.tail.len());
-                        w.buf[w.pos..w.pos + t.tail.len()].copy_from_slice(&t.tail);
-                        (w.pos, w.n) = (w.pos + t.tail.len(), 0);
-                    }
-                }
-            }
-            // the bytes up to the last whole one (a partial one is the next part's carry)
-            let mut piece = Vec::with_capacity(w.pos + w.pos / 64 + 2 * ends.len() + 16);
-            let mut from = 0;
-            for (r, &e) in (p.rst..).zip(&ends) {
-                stuff_into(&w.buf[from..e], &mut piece);
-                piece.extend_from_slice(&[0xFF, 0xD0 + (r & 7) as u8]);
-                from = e;
-            }
-            stuff_into(&w.buf[from..w.pos], &mut piece);
-            if k == last {
-                for t in 0..info.trailing_rst as usize {
-                    piece.extend_from_slice(&[0xFF, 0xD0 + ((nseg - 1 + t) & 7) as u8]);
-                }
-            }
-            Ok(piece)
-        })
-        .collect()
+    out.extend_from_slice(&blob[s.start..]);
+    // (in WebAssembly the parts are left as they are: below the output, each would be a hole)
+    #[cfg(target_family = "wasm")]
+    std::mem::forget(parts);
+    Ok(())
 }
 
 #[cfg(test)]

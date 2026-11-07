@@ -219,6 +219,14 @@ be reproducible is left undecoded from there on. Progressive files and files wit
 scans hold their coefficients whole as before. Buffers kept per thread for reuse are dropped
 above 16 MB.
 
+The module lays its memory out as a stack (`aqr_api::stack`), so its limit is its plan
+(`module::plan`, `codec::core_plan`): what decoding holds, reserved once at the size it
+takes. What the streams do not tell before the scans are coded again (the bits of each
+stripe's part, the unstuffed bytes of each scan coded whole) the encoder measures and puts in
+the params (jpeg-recons 3), and the bit writers take that room. Each stripe of a striped scan
+is a task (8 slots), whose part comes back as flat bytes that the instance joins onto the
+output, reserved once the parts are coded.
+
 ### 7. Formula module and robustness
 
 The format is specified in [FORMAT.md](FORMAT.md).

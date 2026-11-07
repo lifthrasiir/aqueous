@@ -22,6 +22,16 @@ use aqr_common::varint;
 #[cfg(feature = "encode")]
 use std::borrow::Cow;
 
+/// What decoding re-emits that the streams do not tell, measured by the encoder (jpeg-recons
+/// 3's params, after the frame type): of a scan coded a stripe at a time, the bits of each coded
+/// stripe's mid and body (`jpeg::encode_striped`); else the unstuffed bytes of each scan that is
+/// not raw, in order. They are the room of the bit writers decoding takes, which it holds to.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Sizes {
+    pub stripes: Vec<(usize, usize)>,
+    pub scans: Vec<usize>,
+}
+
 /// scan flags (progressive scans use only the first two)
 const F_PAD_ZERO: u8 = 1;
 pub(crate) const F_RAW: u8 = 2;
@@ -123,6 +133,7 @@ fn find_embedded(blob: &[u8]) -> Vec<(usize, usize)> {
 #[cfg(feature = "encode")]
 pub(crate) struct Core<'a> {
     pub progressive: bool,
+    pub sizes: Sizes,
     pub blob: Vec<u8>,
     pub info: Vec<u8>,
     /// raw scan data / truncated tails, in scan order
@@ -150,7 +161,12 @@ fn striped_scan(j: &Jpeg) -> Option<&Scan> {
 /// Scan info and (for a reproducible scan) model of a `striped_scan` file, its coefficients
 /// decoded and modelled a stripe at a time; None for other files.
 #[cfg(feature = "encode")]
-fn model_striped(j: &Jpeg, input: &[u8], clean: &mut Clean) -> Option<(ScanInfo, Option<model::Encoded>)> {
+#[allow(clippy::type_complexity)]
+fn model_striped(
+    j: &Jpeg,
+    input: &[u8],
+    clean: &mut Clean,
+) -> Option<(ScanInfo, Option<(model::Encoded, Vec<(usize, usize)>)>)> {
     let s = striped_scan(j)?;
     jpeg::destuff(&input[s.start..s.end], clean);
     let ns = model::stripe_count(j);
@@ -158,18 +174,30 @@ fn model_striped(j: &Jpeg, input: &[u8], clean: &mut Clean) -> Option<(ScanInfo,
     let pool = std::sync::Mutex::new(Vec::<Vec<Coefs>>::new());
     for serial_only in [false, true] {
         let m = model::Modeller::new(j, ns);
+        // each coded stripe's bits as decoding codes it again (None where it fails)
+        let bits = std::sync::Mutex::new(vec![None; ns]);
         let take = |k| {
             let mut b = pool.lock().unwrap().pop().unwrap_or_default();
             model::hold_stripe(j, k, ns, &mut b);
             b
         };
-        let put = |k, b: Vec<Coefs>| {
+        let put = |k: usize, b: Vec<Coefs>, trunc: Option<(usize, bool)>| {
             m.stripe(j, k, &b);
+            if let Ok(st) = jpeg::Striped::new(j, s, trunc, false)
+                && let Some(r) = st.coded(&ranges).nth(k)
+            {
+                bits.lock().unwrap()[k] = st.part_bits(r, &b).ok();
+            }
             pool.lock().unwrap().push(b);
         };
         match jpeg::decode_striped(j, s, clean, &ranges, serial_only, take, put) {
             Some(info) if !info.standard => return Some((info, None)),
-            Some(info) => return Some((info, Some(m.finish().0))),
+            Some(info) => {
+                let st = jpeg::Striped::new(j, s, info.truncated.as_ref().map(|t| (t.mcus, t.boundary)), false).ok()?;
+                let n = st.coded(&ranges).count();
+                let bits: Option<Vec<_>> = bits.into_inner().unwrap().into_iter().take(n).collect();
+                return Some((info, Some((m.finish().0, bits?))));
+            }
             None => {} // start over serially
         }
     }
@@ -180,7 +208,7 @@ fn model_striped(j: &Jpeg, input: &[u8], clean: &mut Clean) -> Option<(ScanInfo,
 pub(crate) fn encode_core<'a>(input: &'a [u8], coefs: &mut Vec<Coefs>, clean: &mut Clean) -> Result<Core<'a>, Error> {
     let j = jpeg::parse(input)?;
     let none = || Err(Error("no scan could be modelled".into()));
-    let (infos, model) = match model_striped(&j, input, clean) {
+    let (infos, model, sizes) = match model_striped(&j, input, clean) {
         Some((_, None)) => {
             if std::env::var_os("JRC_VERIFY_STRIPED").is_some()
                 && let Ok(infos) = jpeg::decode_all(&j, input, Order::Zigzag, coefs, clean)
@@ -190,7 +218,7 @@ pub(crate) fn encode_core<'a>(input: &'a [u8], coefs: &mut Vec<Coefs>, clean: &m
             }
             return none();
         }
-        Some((info, Some(model))) => {
+        Some((info, Some((model, bits)))) => {
             if std::env::var_os("JRC_VERIFY_STRIPED").is_some() {
                 // test oracle: the outcome must equal that of decoding the scan whole
                 let infos = jpeg::decode_all(&j, input, Order::Zigzag, coefs, clean)?;
@@ -201,7 +229,7 @@ pub(crate) fn encode_core<'a>(input: &'a [u8], coefs: &mut Vec<Coefs>, clean: &m
                     && e.stripes.iter().zip(&model.stripes).all(|(a, b)| a.rans == b.rans && a.raw == b.raw);
                 assert!(same, "striped decoding: model differs");
             }
-            (vec![info], model)
+            (vec![info], model, Sizes { stripes: bits, scans: Vec::new() })
         }
         None => {
             let infos = if j.progressive {
@@ -212,7 +240,21 @@ pub(crate) fn encode_core<'a>(input: &'a [u8], coefs: &mut Vec<Coefs>, clean: &m
             if infos.iter().all(|i| i.raw) {
                 return none();
             }
-            (infos, model::encode(&j, coefs).0)
+            // each scan's unstuffed bytes, as decoding codes it again: those of the scan itself
+            // (destuffed, without its RST markers) where it is reproduced as it is, those coded
+            // again of one cut short
+            let mut scans = Vec::new();
+            for (s, i) in j.scans.iter().zip(&infos) {
+                match (i.raw, &i.truncated) {
+                    (true, _) => {}
+                    (false, None) => {
+                        jpeg::destuff(&input[s.start..s.end], clean);
+                        scans.push(clean.data.len() - jpeg::PAD);
+                    }
+                    (false, Some(_)) => scans.push(scan_bytes(&j, s, i, coefs)?),
+                }
+            }
+            (infos, model::encode(&j, coefs).0, Sizes { stripes: Vec::new(), scans })
         }
     };
     // blob: everything but the entropy-coded data
@@ -247,7 +289,7 @@ pub(crate) fn encode_core<'a>(input: &'a [u8], coefs: &mut Vec<Coefs>, clean: &m
         }
     }
     put_varint(&mut info, model.stripes.len() as u64);
-    Ok(Core { progressive: j.progressive, blob, info, scans, model })
+    Ok(Core { progressive: j.progressive, sizes, blob, info, scans, model })
 }
 
 /// An embedded JPEG of the blob: the byte range, and either its coding `coded` or (None) the
@@ -325,7 +367,11 @@ pub(crate) trait CoreSource<'a> {
 /// The entry list of a head, as (gap, back reference) with None for coded entries.
 pub(crate) fn parse_entries(head: &[u8], p: &mut usize) -> Result<Vec<(usize, Option<usize>)>, Error> {
     let n = get_varint(head, p)?;
-    let mut entries = Vec::new();
+    // (an entry takes two bytes at least)
+    if n > head.len() as u64 {
+        return Err(Error("bad entry count".into()));
+    }
+    let mut entries = Vec::with_capacity(n as usize);
     for i in 0..n {
         let gap = get_varint(head, p)? as usize;
         let kind = *head.get(*p).ok_or(Error("truncated".into()))?;
@@ -369,6 +415,7 @@ pub(crate) fn decode_core<'a>(
     progressive: bool,
     r: &mut impl CoreSource<'a>,
     coefs: &mut Vec<Coefs>,
+    (sizes, len): (&Sizes, usize),
 ) -> Result<Vec<u8>, Error> {
     let j = jpeg::parse(blob)?;
     if j.progressive != progressive {
@@ -382,7 +429,7 @@ pub(crate) fn decode_core<'a>(
     }
     let mut infos = Vec::with_capacity(j.scans.len());
     let mut raws = Vec::with_capacity(j.scans.len());
-    let mut tails = Vec::new(); // (scan, mcus, bits, boundary)
+    let mut tails = Vec::with_capacity(j.scans.len()); // (scan, mcus, bits, boundary)
     for k in 0..j.scans.len() {
         let f = *info.get(p).ok_or(Error("truncated".into()))?;
         p += 1;
@@ -428,28 +475,26 @@ pub(crate) fn decode_core<'a>(
         }
     }
     let tables = r.tables()?;
-    let stripes: Vec<(&[u8], &[u8])> = (0..nstripes).map(|_| r.stripe()).collect::<Result<_, Error>>()?;
+    let mut stripes: Vec<(&[u8], &[u8])> = Vec::with_capacity(nstripes as usize);
+    for _ in 0..nstripes {
+        stripes.push(r.stripe()?);
+    }
     r.finish()?;
     let t = model::read_tables_section(tables)?;
+    let mut out = Vec::new();
     if let Some(s) = striped_scan(&j)
         && !raws[0]
         && infos[0].truncated.as_ref().is_none_or(|t| t.mcus > 0)
     {
         // a stripe at a time
-        if s.end != s.start {
+        if s.end != s.start || !sizes.scans.is_empty() {
             return Err(Error("blob contains entropy-coded data".into()));
         }
         let ns = stripes.len();
         model::check_stripes(&j, ns)?;
         let ranges = model::stripe_mcus(&j, s.mcux, ns);
         let fill = |k, b: &mut Vec<Coefs>| model::decode_stripe(&j, &t, k, ns, stripes[k], b);
-        let pieces = jpeg::encode_striped(&j, s, &infos[0], &ranges, fill)?;
-        let mut out = Vec::with_capacity(blob.len() + pieces.iter().map(|p| p.len()).sum::<usize>());
-        out.extend_from_slice(&blob[..s.start]);
-        for p in pieces {
-            out.extend_from_slice(&p);
-        }
-        out.extend_from_slice(&blob[s.start..]);
+        jpeg::encode_striped(&j, s, &infos[0], &ranges, &sizes.stripes, fill, (blob, len), &mut out)?;
         if std::env::var_os("JRC_VERIFY_STRIPED").is_some() {
             // test oracle: the scan must equal the one re-emitted from whole components
             model::decode_whole(&j, &t, &stripes, coefs)?;
@@ -457,43 +502,218 @@ pub(crate) fn decode_core<'a>(
             jpeg::encode_scan(&j, s, &infos[0], coefs, &mut scan)?;
             assert!(out[s.start..out.len() - (blob.len() - s.start)] == scan, "striped re-emission differs");
         }
+        // (in WebAssembly what decoding made is left as it is: below the output, each a hole)
+        #[cfg(target_family = "wasm")]
+        std::mem::forget((ranges, t, stripes, raw_data, raws, infos, j));
         return Ok(out);
     }
     model::decode_whole(&j, &t, &stripes, coefs)?;
-    // scans are re-emitted independently of each other (in parallel; sequential scans are also
-    // split internally, see `jpeg::encode_scan`)
-    use crate::par::prelude::*;
-    let coefs = &*coefs;
-    let scans: Vec<Option<Vec<u8>>> = j
-        .scans
-        .par_iter()
-        .zip(&infos)
-        .zip(&raw_data)
-        .map(|((s, info), raw)| -> Result<Option<Vec<u8>>, Error> {
-            if s.end != s.start {
-                return Err(Error("blob contains entropy-coded data".into()));
-            }
-            if raw.is_some() {
-                return Ok(None);
-            }
-            let mut scan = Vec::new();
-            if j.progressive {
-                progressive::encode_scan(&j, s, info, coefs, &mut scan)?;
-            } else {
-                jpeg::encode_scan(&j, s, info, coefs, &mut scan)?;
-            }
-            Ok(Some(scan))
-        })
-        .collect::<Result<_, _>>()?;
-    let total: usize = scans.iter().flatten().map(|v| v.len()).sum::<usize>()
-        + raw_data.iter().flatten().map(|r| r.len()).sum::<usize>();
-    let mut out = Vec::with_capacity(blob.len() + total);
-    let mut q = 0;
-    for ((s, scan), raw) in j.scans.iter().zip(&scans).zip(&raw_data) {
-        out.extend_from_slice(&blob[q..s.start]);
-        out.extend_from_slice(scan.as_deref().or(*raw).unwrap());
+    // the scans re-emitted in turn onto the output (reserved after the coefficients), through
+    // one bit writer of room for the largest
+    let coded = j.scans.iter().zip(&raw_data).filter(|(_, r)| r.is_none());
+    if coded.clone().count() != sizes.scans.len() {
+        return Err(Error("scan sizes of another count".into()));
+    }
+    let room = coded.zip(&sizes.scans).map(|((s, _), &n)| writer_len(&j, s, n)).max().unwrap_or(0);
+    out.reserve_exact(len);
+    let mut buf = vec![0u8; room];
+    let mut be = if j.progressive { progressive::corrections() } else { Vec::new() };
+    let (mut q, mut sz) = (0, sizes.scans.iter());
+    for ((s, info), raw) in j.scans.iter().zip(&infos).zip(&raw_data) {
+        if s.end != s.start {
+            return Err(Error("blob contains entropy-coded data".into()));
+        }
+        out.extend_from_slice(blob.get(q..s.start).ok_or(Error("bad scan position".into()))?);
         q = s.start;
+        if let Some(raw) = raw {
+            out.extend_from_slice(raw);
+            continue;
+        }
+        let n = *sz.next().expect("counted");
+        if buf.len() < writer_len(&j, s, n) {
+            return Err(Error("bad scan size".into()));
+        }
+        let at = out.len();
+        let pos = if j.progressive {
+            progressive::encode_onto(&j, s, info, coefs, &mut buf, &mut be, &mut out)?
+        } else {
+            jpeg::encode_scan_onto(&j, s, info, coefs, &mut buf, &mut out)?
+        };
+        if pos != n || out.len() > len {
+            return Err(Error("bad scan size".into()));
+        }
+        let _ = at;
     }
     out.extend_from_slice(&blob[q..]);
+    #[cfg(target_family = "wasm")]
+    std::mem::forget((j, infos, raws, raw_data, stripes, t, buf, be));
     Ok(out)
+}
+
+/// The memory plan of [`decode_core`] on WebAssembly ([`aqr_api::stack`]), of the same blob,
+/// frame type, streams (`r`), sizes and output (`len` bytes), given `top` bytes of the stack
+/// taken before (the instance's initial memory with it) and the task slots: the most the
+/// instance and its tasks take at once, in bytes, however the tasks run. As `decode_core`
+/// takes it: the parsed JPEG, the scans' info, the stripes' streams listed, the tables; then
+/// a scan coded a stripe at a time (each stripe a task, the instance taking each part, then the
+/// output, a part put together at a time), or the components whole, the output, the bit writer
+/// and a scan's tables at a time.
+pub(crate) fn core_plan<'a>(
+    blob: &[u8],
+    progressive: bool,
+    r: &mut impl CoreSource<'a>,
+    (sizes, len): (&Sizes, usize),
+    mut top: u64,
+    slots: usize,
+) -> Option<u64> {
+    use aqr_api::stack::block;
+    let pages = |n: u64| n.div_ceil(1 << 16) << 16;
+    let topk = |mut t: Vec<u64>| {
+        t.sort_unstable_by(|a, b| b.cmp(a));
+        t.iter().take(slots).sum::<u64>()
+    };
+    let j = jpeg::parse(blob).ok()?;
+    if j.progressive != progressive {
+        return None;
+    }
+    let n = |k: usize| k as u64;
+    let ns = j.scans.len();
+    top += block(36 * n(ns)) + block(32 * n(j.comps.len()));
+    top += j.scans.iter().map(|s| block(556 * n(s.comps.len()))).sum::<u64>();
+    top += block(32 * n(ns)) + block(n(ns)) + block(16 * n(ns)) + block(8 * n(ns));
+    // the scans' info, as `decode_core` reads it (the tails' bytes, and each scan raw or not)
+    let info = r.info().ok()?;
+    let mut p = 0;
+    get_varint(info, &mut p).ok()?;
+    let (mut flags, mut trailing) = (Vec::with_capacity(ns), Vec::with_capacity(ns));
+    for _ in 0..ns {
+        let f = *info.get(p)?;
+        p += 1;
+        trailing.push(0);
+        if f & F_RAW == 0 {
+            *trailing.last_mut()? = usize::try_from(get_varint(info, &mut p).ok()?).ok()?;
+            if f & F_TRUNCATED != 0 {
+                get_varint(info, &mut p).ok()?;
+                get_varint(info, &mut p).ok()?;
+            }
+        }
+        flags.push(f);
+    }
+    let nstripes = usize::try_from(get_varint(info, &mut p).ok()?).ok()?;
+    let (mut trunc_tail, mut raws) = (0, Vec::with_capacity(ns));
+    for &f in &flags {
+        raws.push(f & F_RAW != 0);
+        if f & F_RAW != 0 {
+            r.scan().ok()?;
+        } else if f & F_TRUNCATED != 0 {
+            let t = r.scan().ok()?.len();
+            top += block(n(t));
+            trunc_tail = t;
+        }
+    }
+    r.tables().ok()?;
+    let mut stripes = Vec::with_capacity(nstripes);
+    for _ in 0..nstripes {
+        let (w, b) = r.stripe().ok()?;
+        stripes.push((w.len(), b.len()));
+    }
+    top += block(16 * n(nstripes)) + model::tables_plan();
+    if let Some(s) = striped_scan(&j)
+        && !raws[0]
+    {
+        let trunc = match flags[0] & F_TRUNCATED != 0 {
+            true => {
+                // (the truncation's MCUs and boundary, read again)
+                let mut p = 1;
+                get_varint(info, &mut p).ok()?;
+                get_varint(info, &mut p).ok()?;
+                let mcus = get_varint(info, &mut p).ok()? as usize;
+                Some((mcus, flags[0] & F_BOUNDARY != 0))
+            }
+            false => None,
+        };
+        if trunc.is_some_and(|t| t.0 == 0) {
+            return None;
+        }
+        let ranges = model::stripe_mcus(&j, s.mcux, nstripes);
+        let st = jpeg::Striped::new(&j, s, trunc, false).ok()?;
+        let coded: Vec<(usize, usize)> = st.coded(&ranges).collect();
+        if coded.len() != sizes.stripes.len() {
+            return None;
+        }
+        let nc = n(s.comps.len());
+        top += block(8 * n(nstripes))
+            + 2 * block(1024 * nc)
+            + block(12 * nc)
+            + block(8 * n(coded.len()))
+            + block(12 * n(coded.len()));
+        let end = pages(top);
+        let tasks: Vec<u64> = coded
+            .iter()
+            .zip(&sizes.stripes)
+            .enumerate()
+            .map(|(k, (&range, &bits))| {
+                let (rows, decode) = model::stripe_plan(&j, k, nstripes, stripes[k]);
+                end.max(pages(top + rows + decode.max(st.part_plan(range, bits))))
+            })
+            .collect();
+        top += block(n(coded.len()));
+        top +=
+            coded.iter().zip(&sizes.stripes).map(|(&range, &bits)| block(n(st.part_written(range, bits)))).sum::<u64>();
+        let taken = end.max(pages(top));
+        let most = taken + topk(tasks);
+        top += block(n(len));
+        let join = coded
+            .iter()
+            .zip(&sizes.stripes)
+            .map(|(&range, &bits)| {
+                block(n(st.head_len()))
+                    + block(n(st.join_len(bits, trunc_tail)))
+                    + block(4 * n(st.body_ends(range) + 1))
+            })
+            .max()
+            .unwrap_or(0);
+        return Some(most.max(taken).max(pages(top + join)));
+    }
+    let (held, decoding) = model::whole_plan(&j, &stripes);
+    top += held;
+    let decoded = pages(top + decoding);
+    let coded = j.scans.iter().zip(&raws).zip(&trailing).filter(|((_, r), _)| !**r).map(|((s, _), &t)| (s, t));
+    let room = coded.clone().zip(&sizes.scans).map(|((s, _), &k)| writer_len(&j, s, k)).max().unwrap_or(0);
+    top += block(n(len)) + block(n(room)) + if progressive { block(n(progressive::CORRECTIONS)) } else { 0 };
+    let scan = coded
+        .map(|(s, trailing)| {
+            let nc = n(s.comps.len());
+            let nmcu = s.mcux * s.mcuy;
+            let ri = if s.ri > 0 { s.ri } else { nmcu.max(1) };
+            // (an RST offset for each restart interval, and those trailing)
+            let ends = block(4 * n(nmcu.div_ceil(ri) + trailing));
+            match progressive {
+                true => block(4 * 1024) + block(12 * nc) + ends,
+                false => 2 * block(1024 * nc) + block(12 * nc) + ends,
+            }
+        })
+        .max()
+        .unwrap_or(0);
+    Some(decoded.max(pages(top + scan)))
+}
+
+/// Bytes of the bit writer re-emitting scan `s` of `n` unstuffed bytes takes (what its writes
+/// keep past its position: a block's, an MCU row's of the progressive coder, its last flush).
+pub(crate) fn writer_len(j: &Jpeg, s: &Scan, n: usize) -> usize {
+    match j.progressive {
+        true => n + progressive::row_room(j, s) + 1024 + jpeg::SLACK,
+        false => n + jpeg::SLACK,
+    }
+}
+
+/// The unstuffed bytes of scan `s` as decoding codes it again (of info `info`, from `coefs`).
+#[cfg(feature = "encode")]
+fn scan_bytes(j: &Jpeg, s: &Scan, info: &ScanInfo, coefs: &[Coefs]) -> Result<usize, Error> {
+    let mut out = Vec::new();
+    let mut buf = Vec::new();
+    match j.progressive {
+        true => progressive::encode_onto(j, s, info, coefs, &mut buf, &mut progressive::corrections(), &mut out),
+        false => jpeg::encode_scan_onto(j, s, info, coefs, &mut buf, &mut out),
+    }
 }

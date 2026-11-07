@@ -1413,13 +1413,19 @@ fn task_slots_declared() {
 /// to the page.
 fn plan_holds(what: &str, mut f: Formula, want: &[u8]) {
     let pages = |n: u64| n.div_ceil(65536) * 65536;
-    let Node::Apply(a) = &mut f.root else { panic!("{what}: not an application") };
+    let Node::Apply(a) = &f.root else { panic!("{what}: not an application") };
+    // (an input of another node evaluated natively)
     let inputs: Vec<Vec<u8>> = (a.inputs.iter())
         .map(|n| match *n {
             Node::Slice { stream, start, len } => f.streams[stream].data[start as usize..][..len as usize].to_vec(),
-            _ => panic!("{what}: an input not a slice"),
+            ref n => {
+                let mut g = f.clone();
+                g.root = n.clone();
+                g.eval(&Native::default()).unwrap_or_else(|e| panic!("{what}: an input: {e}"))
+            }
         })
         .collect();
+    let Node::Apply(a) = &mut f.root else { unreachable!() };
     let contents: Vec<&[u8]> = inputs.iter().map(|i| &i[..]).collect();
     let lens: Vec<u64> = inputs.iter().map(|i| i.len() as u64).collect();
     let resources: Vec<u64> = a.resources.iter().map(|r| r.len() as u64).collect();
@@ -1890,6 +1896,28 @@ fn sqlite_plans_hold() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// jpeg-recons lays its memory out as a stack, its limit its plan of the instance and as many
+/// tasks at once as their slots allow: of a sequential scan coded a stripe at a time (more
+/// stripes than the slots; with and without restart intervals, and of intervals across the
+/// stripes; cut short), and of scans coded whole (a progressive file, a sequential one).
+#[test]
+fn jpeg_plans_hold() {
+    let mut files: Vec<(String, Vec<u8>)> = vec![
+        ("gradient".into(), fixture("codecs/aqr-jpeg/tests/data/gradient.jpg")),
+        ("progressive".into(), fixture("codecs/aqr-jpeg/tests/data/prog_script_recode.jpg")),
+    ];
+    for (w, h, ri) in [(2048, 2048, 0), (2048, 1536, 64), (1024, 768, 7)] {
+        files.push((format!("{w}x{h} ri {ri}"), jpeg_synthetic(w, h, ri)));
+    }
+    let mut cut = jpeg_synthetic(2048, 1024, 0);
+    cut.truncate(cut.len() * 2 / 3);
+    files.push(("cut short".into(), cut));
+    for (t, d) in files {
+        let f = aqr_jpeg::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
+        plan_holds(&format!("jpeg {t}"), f, &d);
+    }
+}
+
 /// git-pack-recons and git-pack-index-recons lay their memory out as stacks, their limits their
 /// plans: of a pack of more entries than the stack's holes, alone and with its index and reverse
 /// index after it.
@@ -2060,5 +2088,71 @@ fn msf_file(bs: usize, streams: &[Option<Vec<u8>>], shuffle: bool, stale: u8) ->
             d[b as usize * bs..][..chunk.len()].copy_from_slice(chunk);
         }
     }
+    d
+}
+
+fn jpeg_segment(out: &mut Vec<u8>, marker: u8, body: &[u8]) {
+    out.extend_from_slice(&[0xFF, marker]);
+    out.extend_from_slice(&(body.len() as u16 + 2).to_be_bytes());
+    out.extend_from_slice(body);
+}
+
+/// A baseline 4:4:4 JPEG of `w` x `h` pixels (restart interval `ri` MCUs, 0 for none):
+/// smooth DC and a few small low-frequency AC coefficients per block.
+fn jpeg_synthetic(w: usize, h: usize, ri: u16) -> Vec<u8> {
+    let mut d = vec![0xFF, 0xD8];
+    let mut dqt = vec![0u8];
+    dqt.extend((0..64).map(|k| 2 + k as u8 / 4));
+    jpeg_segment(&mut d, 0xDB, &dqt);
+    let mut sof = vec![8];
+    sof.extend_from_slice(&(h as u16).to_be_bytes());
+    sof.extend_from_slice(&(w as u16).to_be_bytes());
+    sof.push(3);
+    for id in 1..=3 {
+        sof.extend_from_slice(&[id, 0x11, 0]);
+    }
+    jpeg_segment(&mut d, 0xC0, &sof);
+    // DC: the standard luminance table; AC: EOB, ZRL and the (run, 1) symbols
+    let mut dht = vec![0x00, 0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0];
+    dht.extend(0..12);
+    dht.extend_from_slice(&[0x10, 0, 1, 2, 3, 6, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    dht.push(0x00);
+    dht.extend((0..16).map(|r| r << 4 | 1));
+    dht.push(0xF0);
+    jpeg_segment(&mut d, 0xC4, &dht);
+    if ri > 0 {
+        jpeg_segment(&mut d, 0xDD, &ri.to_be_bytes());
+    }
+    jpeg_segment(&mut d, 0xDA, &[3, 1, 0x00, 2, 0x00, 3, 0x00, 0, 63, 0]);
+    let at = d.len();
+    d.extend_from_slice(&[0xFF, 0xD9]);
+    let j = aqr_jpeg::jpeg::parse(&d).unwrap();
+    let mut x = 0x9E37_79B9_7F4A_7C15u64;
+    let coefs: Vec<aqr_jpeg::jpeg::Coefs> = j
+        .comps
+        .iter()
+        .map(|c| {
+            let n = c.bw * c.bh;
+            let mut o =
+                aqr_jpeg::jpeg::Coefs { bw: c.bw, bh: c.bh, y0: 0, blocks: vec![[0; 64]; n], masks: vec![0; n] };
+            for i in 0..n {
+                let (bx, by) = ((i % c.bw) as i32, (i / c.bw) as i32);
+                let b = &mut o.blocks[i];
+                b[0] = ((bx * 3 + by * 2) % 200 - 100) as i16;
+                for _ in 0..3 {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    b[1 + (x % 9) as usize] = if x & 1024 != 0 { 1 } else { -1 };
+                }
+                o.masks[i] = b.iter().enumerate().fold(0, |m, (k, &v)| m | ((v != 0) as u64) << k);
+            }
+            o
+        })
+        .collect();
+    let mut scan = Vec::new();
+    let info = aqr_jpeg::jpeg::ScanInfo { standard: true, ..Default::default() };
+    aqr_jpeg::jpeg::encode_scan(&j, &j.scans[0], &info, &coefs, &mut scan).unwrap();
+    d.splice(at..at, scan);
     d
 }

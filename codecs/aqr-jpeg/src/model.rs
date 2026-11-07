@@ -871,7 +871,10 @@ fn write_tables(freq: &[u16], plan: &TablePlan, hist: &[u32]) -> Vec<u8> {
 
 fn read_tables(d: &[u8]) -> Result<Vec<u16>, Error> {
     let mut r = SmallBits { d, bp: 0 };
-    let used: Vec<bool> = groups().map(|_| r.bit().map(|b| b != 0)).collect::<Result<_, _>>()?;
+    let mut used: Vec<bool> = Vec::with_capacity(groups().count());
+    for _ in groups() {
+        used.push(r.bit()? != 0);
+    }
     let mut inherit = vec![false; used.len()];
     let mut need = vec![false; P_SYM];
     for (gi, ((lo, _), &u)) in groups().zip(&used).enumerate() {
@@ -1388,6 +1391,75 @@ pub fn encode(j: &Jpeg, coefs: &[Coefs]) -> (Encoded, Phases) {
     (e, Phases { walk, norm, rans })
 }
 
+/// Bytes of [`aqr_api::stack`] that [`read_tables_section`] takes (what it frees is below what
+/// it keeps): the groups' flags, the parents' and grandparents' needs and frequencies, the
+/// frequencies, their sums, the decoder's table and lookup.
+pub(crate) fn tables_plan() -> u64 {
+    use aqr_api::stack::block;
+    let (ng, p, g, n) = (groups().count() as u64, P_SYM as u64, G_SYM as u64, N_SYM as u64);
+    2 * block(ng)
+        + 2 * block(p)
+        + block(g)
+        + block(2 * g)
+        + block(2 * p)
+        + 2 * block(2 * n)
+        + block(4 * n)
+        + block(n / 16 * 64)
+}
+
+/// Bytes of [`aqr_api::stack`] that decoding stripe `si` of `ns` takes, of its stored words
+/// and raw bytes (`words`, `raw` bytes): its rows held (the buffers of a fresh [`Coefs`] list),
+/// and the padded words and raw bytes as it decodes.
+pub(crate) fn stripe_plan(j: &Jpeg, si: usize, ns: usize, (words, raw): (usize, usize)) -> (u64, u64) {
+    use aqr_api::stack::block;
+    let rows: u64 = j
+        .comps
+        .iter()
+        .enumerate()
+        .map(|(ci, c)| {
+            let n = (c.bw * stripe_rows(j, ci, si, ns).len()).max(4) as u64;
+            block(128 * n) + block(8 * n)
+        })
+        .sum();
+    let walk = (0..j.comps.len()).map(|ci| walk_plan(j, ci, stripe_rows(j, ci, si, ns).len())).max().unwrap_or(0);
+    (block(4 * 36) + rows, block(4 * (words / 4 + SRC_PAD) as u64) + block((raw + RAW_PAD) as u64) + walk)
+}
+
+/// Bytes of [`aqr_api::stack`] that `walk_dec` takes of component `ci`'s `rows` rows of blocks:
+/// each block's counts and DC residual's size, and a row of its blocks' DC.
+fn walk_plan(j: &Jpeg, ci: usize, rows: usize) -> u64 {
+    use aqr_api::stack::block;
+    let bw = j.comps[ci].bw as u64;
+    2 * block(bw * rows as u64) + block(4 * bw)
+}
+
+/// Bytes of [`aqr_api::stack`] that [`decode_whole`] keeps (the components whole), and that
+/// it takes as it decodes a stripe at a time (the most, of `stripes` stored words and raw
+/// bytes).
+pub(crate) fn whole_plan(j: &Jpeg, stripes: &[(usize, usize)]) -> (u64, u64) {
+    use aqr_api::stack::block;
+    let held: u64 = j
+        .comps
+        .iter()
+        .map(|c| {
+            let n = (c.bw * c.bh).max(4) as u64;
+            block(128 * n) + block(8 * n)
+        })
+        .sum();
+    let ns = stripes.len();
+    let most = stripes
+        .iter()
+        .enumerate()
+        .map(|(si, &(w, r))| {
+            let walk =
+                (0..j.comps.len()).map(|ci| walk_plan(j, ci, stripe_rows(j, ci, si, ns).len())).max().unwrap_or(0);
+            block(4 * (w / 4 + SRC_PAD) as u64) + block((r + RAW_PAD) as u64) + walk
+        })
+        .max()
+        .unwrap_or(0);
+    (block(4 * 36) + held, most)
+}
+
 /// Decoding tables from a stored table section.
 pub(crate) fn read_tables_section(tables: &[u8]) -> Result<Tables, Error> {
     Ok(build_tables(read_tables(tables)?, false))
@@ -1453,11 +1525,25 @@ pub(crate) fn decode_whole(
     check_stripes(j, ns)?;
     out.resize_with(j.comps.len(), Coefs::default);
     out.truncate(j.comps.len());
+    for (c, o) in j.comps.iter().zip(out.iter_mut()) {
+        o.hold(c.bw, 0..c.bh);
+    }
+    // (in WebAssembly, a stripe at a time: each of its components' rows taken as it goes)
+    if cfg!(target_family = "wasm") {
+        for (si, &s) in stripes.iter().enumerate() {
+            let rows = out.iter_mut().zip(&j.comps).enumerate().map(|(ci, (o, c))| {
+                let r = stripe_rows(j, ci, si, ns);
+                let (a, b) = (r.start * c.bw, r.end * c.bw);
+                (&mut o.blocks[a..b], &mut o.masks[a..b])
+            });
+            decode_rows(j, t, s, rows)?;
+        }
+        return Ok(());
+    }
     // per stripe, per component: that stripe's rows of blocks and masks
     type Rows<'a> = (&'a mut [[i16; 64]], &'a mut [u64]);
     let mut parts: Vec<Vec<Rows>> = (0..ns).map(|_| Vec::new()).collect();
     for (ci, (c, o)) in j.comps.iter().zip(out.iter_mut()).enumerate() {
-        o.hold(c.bw, 0..c.bh);
         let (mut blocks, mut masks) = (&mut o.blocks[..], &mut o.masks[..]);
         for (si, p) in parts.iter_mut().enumerate() {
             let n = stripe_rows(j, ci, si, ns).len() * c.bw;

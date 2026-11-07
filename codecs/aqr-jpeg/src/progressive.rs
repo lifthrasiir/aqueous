@@ -24,7 +24,7 @@ struct SymDec {
 impl SymDec {
     fn new(spec: &HuffSpec) -> Result<SymDec, Error> {
         let mut seen = [false; 256];
-        for &v in &spec.vals {
+        for &v in spec.vals.iter() {
             if std::mem::replace(&mut seen[v as usize], true) {
                 return err("duplicate Huffman symbol");
             }
@@ -55,7 +55,7 @@ impl SymDec {
             code <<= 1;
         }
         maxcode[17] = i32::MAX;
-        Ok(SymDec { look, maxcode, valoff, vals: spec.vals.clone() })
+        Ok(SymDec { look, maxcode, valoff, vals: spec.vals.to_vec() })
     }
 
     /// Decode one symbol; the caller has refilled `b` (>= 16 valid bits).
@@ -531,7 +531,7 @@ const MAX_CORR_BITS: usize = 1000;
 
 /// Up to 64 bits, MSB-first (the correction bits of one block).
 #[derive(Clone, Copy, Default)]
-struct BitList {
+pub(crate) struct BitList {
     v: u64,
     n: u32,
 }
@@ -562,6 +562,41 @@ thread_local! {
 /// Re-emit progressive scan `s` from final zigzag-ordered coefficients.
 pub fn encode_scan(j: &Jpeg, s: &Scan, info: &ScanInfo, coefs: &[Coefs], out: &mut Vec<u8>) -> Result<(), Error> {
     out.clear();
+    let mut buf = jpeg::take_scratch();
+    let mut be = BE.with(|b| std::mem::take(&mut *b.borrow_mut()));
+    be.resize(0x8000, BitList::default());
+    let r = encode_onto(j, s, info, coefs, &mut buf, &mut be, out);
+    BE.with(|b| *b.borrow_mut() = be);
+    jpeg::put_scratch(buf);
+    r.map(drop)
+}
+
+/// The correction bits of the blocks of an EOB run, as [`encode_onto`] takes them.
+pub(crate) fn corrections() -> Vec<BitList> {
+    vec![BitList::default(); 0x8000]
+}
+
+/// Bytes of [`aqr_api::stack`] that [`corrections`] takes.
+pub(crate) const CORRECTIONS: usize = 0x8000 * size_of::<BitList>();
+
+/// Bytes the bit writer keeps past its position for an MCU row of scan `s` of `j`.
+pub(crate) fn row_room(j: &Jpeg, s: &Scan) -> usize {
+    let layout = jpeg::scan_layout(j, s);
+    BLOCK_BYTES * s.mcux * layout.iter().map(|&(_, h, v)| h * v).sum::<usize>() + 16
+}
+
+/// [`encode_scan`] appended to `out`, with `buf` the bit writer's bytes (grown as it goes where
+/// it has not the room, [`crate::codec::writer_len`]) and `be` [`corrections`]: gives the
+/// scan's unstuffed bytes.
+pub(crate) fn encode_onto(
+    j: &Jpeg,
+    s: &Scan,
+    info: &ScanInfo,
+    coefs: &[Coefs],
+    buf: &mut Vec<u8>,
+    be: &mut [BitList],
+    out: &mut Vec<u8>,
+) -> Result<usize, Error> {
     let kind = kind(s)?;
     let mut tabs = Vec::new();
     for sc in &s.comps {
@@ -577,13 +612,7 @@ pub fn encode_scan(j: &Jpeg, s: &Scan, info: &ScanInfo, coefs: &[Coefs], out: &m
         });
     }
     let layout = jpeg::scan_layout(j, s);
-    let mut buf = jpeg::take_scratch();
-    let mut be = BE.with(|b| std::mem::take(&mut *b.borrow_mut()));
-    be.resize(0x8000, BitList::default());
-    let r = encode_blocks(s, info, coefs, kind, &layout, &tabs, &mut buf, &mut be, out);
-    BE.with(|b| *b.borrow_mut() = be);
-    jpeg::put_scratch(buf);
-    r
+    encode_blocks(s, info, coefs, kind, &layout, &tabs, buf, be, out)
 }
 
 /// The encoder proper. All hot state (bit buffer, EOB run) is in locals and the loop makes no
@@ -599,13 +628,13 @@ fn encode_blocks(
     buf: &mut Vec<u8>,
     be: &mut [BitList],
     out: &mut Vec<u8>,
-) -> Result<(), Error> {
+) -> Result<usize, Error> {
     let nmcu = s.mcux * s.mcuy;
     let ri = if s.ri > 0 { s.ri } else { nmcu };
     let (al, ss, se) = (s.al as u32, s.ss as usize, s.se as usize);
     let band = if ss > 0 { band_mask(ss, se) } else { 0 };
     let row_bytes = BLOCK_BYTES * s.mcux * layout.iter().map(|&(_, h, v)| h * v).sum::<usize>();
-    let mut seg_ends = Vec::new();
+    let mut seg_ends = Vec::with_capacity(nmcu.div_ceil(ri) + info.trailing_rst as usize);
     let mut pred = [0i32; 4];
     // MSB-first bit writer: `n` (< 8) pending bits in the low end of `acc`
     let (mut acc, mut n, mut pos) = (0u64, 0u32, 0usize);
@@ -855,7 +884,6 @@ fn encode_blocks(
     for _ in 0..info.trailing_rst {
         seg_ends.push(pos);
     }
-    out.reserve(pos + pos / 64 + seg_ends.len() * 2 + 16);
     let mut start = 0;
     for (r, &end) in seg_ends.iter().enumerate() {
         jpeg::stuff_into(&buf[start..end], out);
@@ -863,7 +891,7 @@ fn encode_blocks(
         start = end;
     }
     jpeg::stuff_into(&buf[start..pos], out);
-    Ok(())
+    Ok(pos)
 }
 
 /// Decode all scans of a progressive JPEG `d` into zigzag-ordered coefficients with masks, and
