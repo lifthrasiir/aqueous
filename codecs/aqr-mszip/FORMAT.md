@@ -62,6 +62,15 @@ The output is, for each block of the index in order, the bytes kept before it, t
 The bytes kept after the last block follow. Inputs 0 and 1 must be used up exactly, and the
 output be the application's size.
 
+Version 2 is a part module (windows of four pages for each input and for the output): the
+inputs are taken and the output put in order, and the memory it takes does not depend on the
+lengths. The joined stream is held 96 KiB at least (160 KiB at most) from the byte of the next
+bit, which an MSZIP block's DEFLATE blocks must lie within: a CAB file's `CFDATA` is of at most
+65535 bytes, and spans at most 78639 of the joined stream (the stored blocks' padding is by
+where they start, one byte in five at most). The module fails on a block that spans more, which
+the formula's encoder does not make. Version 1 was a whole module that held its inputs twice
+and its output, and so about three times the file.
+
 ## The data
 
 An MSZIP folder's data is input 0 of `flate-set`, given its record; one application takes all

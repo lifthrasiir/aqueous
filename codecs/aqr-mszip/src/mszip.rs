@@ -25,6 +25,11 @@ impl<'a> BitR<'a> {
         BitR { d, pos: 0 }
     }
 
+    /// A reader of `d` from bit `pos`.
+    pub fn at(d: &'a [u8], pos: usize) -> BitR<'a> {
+        BitR { d, pos }
+    }
+
     /// The bit position.
     pub fn pos(&self) -> usize {
         self.pos

@@ -489,7 +489,23 @@ const NATIVE: &[Entry] = &[
     bare(BZ2, |p, _, i, n, t| aqr_bz2::formula::decode(p, i, n, t).map_err(err)),
     bare(BZ2_ALZ, |p, _, i, n, t| aqr_bz2::formula::decode_alz(p, i, n, t).map_err(err)),
     bare(LZX, |p, _, i, n, t| aqr_lzx::formula::decode(p, i, n, t).map_err(err)),
-    bare(MSZIP, |p, _, i, n, _| aqr_mszip::module::decode(p, i, n).map_err(err)),
+    part(
+        MSZIP,
+        false,
+        aqr_api::emu::Entry {
+            kind: aqr_api::emu::Kind::Part,
+            windows: &[
+                aqr_api::Window::Input(0, aqr_mszip::module::WINDOW),
+                aqr_api::Window::Input(1, aqr_mszip::module::WINDOW),
+                aqr_api::Window::Input(2, aqr_mszip::module::WINDOW),
+                aqr_api::Window::Input(3, aqr_mszip::module::WINDOW),
+                aqr_api::Window::Output(0, aqr_mszip::module::WINDOW),
+            ],
+            arity: 6,
+            call: |a| aqr_mszip::module::decode_part(a[0], a[1], a[2], a[3], a[4], a[5]),
+        },
+        |p, _, i, n, _| aqr_mszip::module::decode(p, i, n).map_err(err),
+    ),
     bare(SNAPPY, |p, _, i, n, t| aqr_snappy::formula::decode(p, i, n, t).map_err(err)),
     bare(LEVELDB, |p, _, i, n, t| aqr_snappy::formula::decode_table(p, i, n, t).map_err(err)),
     part(

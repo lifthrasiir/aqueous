@@ -329,8 +329,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "mszip-recons",
-        version: 1,
-        sha512_256: hex("5b17654279c9dba3e1d38b73e0fa32e6ac4925ad61f15ada666c365ede7e29c3"),
+        version: 2,
+        sha512_256: hex("57fdb061a4e2bbc30c471c088608d528582ef0d4343b84b340e08e5f396d7352"),
         block: include_bytes!("../wasm/mszip-recons.block"),
     },
     Known {

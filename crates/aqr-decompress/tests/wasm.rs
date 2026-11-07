@@ -511,8 +511,9 @@ fn bra_plans_hold() {
 fn bcj2_plans_hold() {
     for n in [70usize << 20, 1_000_003, 300] {
         let mut rng = aqr_common::rng::Rng::new(3);
-        let mut d: Vec<u8> =
-            (0..n).map(|i| if i % 7 == 0 { [0xe8, 0xe9, 0x0f][rng.below(3) as usize] } else { rng.below(256) as u8 }).collect();
+        let mut d: Vec<u8> = (0..n)
+            .map(|i| if i % 7 == 0 { [0xe8, 0xe9, 0x0f][rng.below(3) as usize] } else { rng.below(256) as u8 })
+            .collect();
         d[n.saturating_sub(16)..].fill(0x41);
         let mut rc: Vec<u8> = (0..n / 4 + 64).map(|_| rng.below(255) as u8).collect();
         rc[0] = 0;
@@ -570,7 +571,6 @@ fn plan_holds_shared(what: &str, mut f: Formula, want: &[u8]) {
     let limit = imported.map(pages).sum::<u64>() + plan.instance;
     f.shared[0].apply.memory_limit = limit;
     let c = Encoder::new(Level::Zstd(3)).with_modules(wasm_of).encode(&f, None).unwrap();
-    static RECORDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let recording = RECORDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     aqr_decompress::record_applications(true);
     let out = aqr::decode(&c, &Wasm);
@@ -578,7 +578,7 @@ fn plan_holds_shared(what: &str, mut f: Formula, want: &[u8]) {
     drop(recording);
     assert!(out.as_ref().is_ok_and(|o| o == want), "{what}: {:?}", out.err());
     let mine: Vec<_> = applied.iter().filter(|a| a.limit == limit).collect();
-    assert!(!mine.is_empty(), "{what}: not applied");
+    assert!(!mine.is_empty(), "{what}: not applied: limit {limit}, applied {:?}", applied.iter().map(|a| (a.limit, a.ok)).collect::<Vec<_>>());
     for a in mine {
         assert!(a.working <= plan.instance, "{what}: working {} past {}", a.working, plan.instance);
         assert!(
@@ -587,6 +587,107 @@ fn plan_holds_shared(what: &str, mut f: Formula, want: &[u8]) {
             plan.instance,
             a.instance
         );
+    }
+}
+
+/// mszip-recons (a part module of windows of four pages) takes the same plan whatever the
+/// lengths: folders of stored DEFLATE blocks past the 85 MiB where a whole module's copies of
+/// its inputs and output would be over the application bound, with Huffman blocks (dynamic and
+/// fixed) among them, raw blocks and bytes kept; and a few blocks.
+#[test]
+fn mszip_plans_hold() {
+    use aqr_mszip::module::{self, Block};
+    use aqr_mszip::mszip::{self, BitW};
+    // a MSZIP block: signature, and a stored final DEFLATE block of `data` or a Huffman stream
+    let block = |data: &[u8], strategy: Option<aqr_flate::zlib::Strategy>| -> Vec<u8> {
+        let mut b = b"CK".to_vec();
+        match strategy {
+            None => {
+                b.push(1);
+                b.extend((data.len() as u16).to_le_bytes());
+                b.extend((!(data.len() as u16)).to_le_bytes());
+                b.extend(data);
+            }
+            Some(strategy) => {
+                let p = aqr_flate::zlib::Params { level: 6, strategy, ..Default::default() };
+                b.extend(aqr_flate::zlib::compress(data, p).unwrap());
+            }
+        }
+        b
+    };
+    let mut rng = aqr_common::rng::Rng::new(11);
+    for n in [3usize, 2900] {
+        let (mut w, mut raw, mut kept, mut entries, mut want) =
+            (BitW::new(Vec::new()), vec![], vec![], vec![], Vec::new());
+        // (a chunk of noise as a text of its own: Huffman blocks of both kinds)
+        let text: Vec<u8> = (0..30_000u32).flat_map(|i| format!("w{:04} ", i * i % 7919).into_bytes()).collect();
+        for folder in 0..2u8 {
+            let blocks: Vec<Vec<u8>> = (0..n / 2 + 1)
+                .map(|i| match i % 50 {
+                    7 => block(&text[i..i + 20_000], Some(aqr_flate::zlib::Strategy::Default)),
+                    9 => block(&text[i..i + 20_000], Some(aqr_flate::zlib::Strategy::Fixed)),
+                    _ => block(&(0..32768).map(|_| rng.below(256) as u8).collect::<Vec<_>>(), None),
+                })
+                .collect();
+            let refs: Vec<&[u8]> = blocks.iter().map(|b| &b[..]).collect();
+            for (i, (j, b)) in mszip::join(&refs, &mut w).unwrap().iter().zip(&blocks).enumerate() {
+                let header = [folder, i as u8, 7, 7, 7, 7, 7, 7];
+                kept.extend(header);
+                want.extend(header);
+                entries.push(Block::Mszip { kept: 8, blocks: j.blocks });
+                want.extend(b);
+                if i % 100 == 99 {
+                    let r: Vec<u8> = (0..5000 + i).map(|_| rng.below(256) as u8).collect();
+                    kept.extend(header);
+                    want.extend(header);
+                    entries.push(Block::Raw { kept: 8, len: r.len() });
+                    raw.extend(&r);
+                    want.extend(&r);
+                }
+            }
+        }
+        kept.extend([9; 5]);
+        want.extend([9; 5]);
+        w.align();
+        let mut f = Formula::default();
+        let inputs = [f.push("mszip/joined", w.out), f.push("raw", raw), f.push("mszip/kept", kept), {
+            f.push("mszip/index", module::index(&entries))
+        }];
+        let a = aqr_formula::Apply {
+            module: aqr_mszip::formula::MODULE,
+            resources: vec![],
+            params: vec![],
+            inputs: inputs.to_vec(),
+            len: want.len() as u64,
+            memory_limit: aqr_formula::NO_LIMIT,
+            task_limits: vec![],
+        };
+        f.root = Node::Apply(Box::new(a));
+        // (the plan is the same for a few bytes)
+        let m = aqr_mszip::formula::MODULE;
+        let plan = |lens: &[u64], out: u64| {
+            let none: Vec<&[u8]> = Vec::new();
+            let usage = aqr_formula::Usage {
+                params: &[],
+                resources: &[],
+                inputs: lens,
+                outputs: &[out],
+                contents: &none,
+                initial_pages: aqr_decompress::initial_pages_of(m).unwrap(),
+            };
+            m.plan_for(&usage).unwrap().instance
+        };
+        assert_eq!(plan(&[10, 10, 10, 10], 40), plan(&[1 << 30, 1 << 20, 1 << 20, 1 << 20], 1 << 30));
+        assert!(plan(&[10, 10, 10, 10], 40) <= 4 << 20);
+        assert_eq!(
+            aqr::decode(
+                &Encoder::new(Level::Zstd(1)).with_modules(wasm_of).encode(&f, None).unwrap(),
+                &Native::default()
+            )
+            .unwrap(),
+            want
+        );
+        plan_holds(&format!("mszip {n}"), f, &want);
     }
 }
 
@@ -2184,6 +2285,10 @@ fn task_slots_declared() {
     invalid(load_earlier(plain), "aqr_task_slots");
 }
 
+/// Held by the tests that keep the applications run ([`aqr_decompress::record_applications`]):
+/// the log is the process's.
+static RECORDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Formula `f` of a root application of slices, its plan declared as its limit alone (no room),
 /// archived and decoded as WebAssembly: `want`, and the application's working memory its plan,
 /// to the page.
@@ -2242,7 +2347,6 @@ fn plan_holds_bounded(
     (a.memory_limit, a.task_limits) = (limit, plan.tasks.clone());
     let c = Encoder::new(Level::Zstd(3)).with_modules(wasm_of).encode(&f, None).unwrap();
     // (the applications kept by one test at a time: the log is the process's)
-    static RECORDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let recording = RECORDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let bound = limit + plan.tasks.iter().sum::<u64>();
     aqr_decompress::record_applications(true);
@@ -2264,7 +2368,7 @@ fn plan_holds_bounded(
     }
     // (those of this application: other tests' run meanwhile, without limits)
     let mine: Vec<_> = applied.iter().filter(|a| a.limit == limit).collect();
-    assert!(!mine.is_empty(), "{what}: not applied");
+    assert!(!mine.is_empty(), "{what}: not applied: limit {limit}, applied {:?}", applied.iter().map(|a| (a.limit, a.ok)).collect::<Vec<_>>());
     for a in mine {
         assert!(a.working <= plan.instance, "{what}: working {} past {}", a.working, plan.instance);
         assert!(
