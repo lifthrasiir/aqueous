@@ -21,10 +21,17 @@ on the whole data does; xz's filters (`xz-file-format.txt`) are the same.
 ## Branch converters
 
 Modules `bcj-x86`, `bcj-powerpc`, `bcj-ia64`, `bcj-arm`, `bcj-armthumb`, `bcj-sparc`,
-`bcj-arm64`, `bcj-riscv`, each version 1. **Parameters**: none, or the start address `pc`
+`bcj-arm64`, `bcj-riscv`, each version 2. **Parameters**: none, or the start address `pc`
 (le32), whose bits of the architecture's alignment must be 0: 1 for ARM Thumb and RISC-V, 15
 for IA-64, 3 for the others, none for x86. **Inputs**: one, the data. **Output**: the data
-converted, of its length. **Resources**: none.
+converted, of its length. **Resources**: none. Part modules, of windows of a page for the input
+and the output: the data is converted a piece at a time, and a piece goes on from where the last
+left off (what a scan carries from one piece to the next is x86's `mask` and IA-64's `q`; the
+others are told by the position alone, and RISC-V's scan resumes at the first halfword it had
+not looked at). The bytes at the end of a piece that the scan cannot decide yet (at most 16)
+start the next one, and what remains at the end of the data stays as it is. The output is that
+of version 1, a whole module that held the input and the output more than once (about four
+times the data); the memory the module takes does not depend on the length of the data.
 
 **x86.** `mask = 0`, `pos = 0`, `ip = pc + 5`; nothing if `N < 5`. Repeat:
 

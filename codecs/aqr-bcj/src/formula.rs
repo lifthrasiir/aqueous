@@ -13,16 +13,16 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.initial() + module::plan(u.params.len() as u64, u.inputs, u.output()))
 }
 
-pub const X86: Module = Module::new("bcj-x86", 1).with_plan(memory);
-pub const POWERPC: Module = Module::new("bcj-powerpc", 1).with_plan(memory);
-pub const IA64: Module = Module::new("bcj-ia64", 1).with_plan(memory);
-pub const ARM: Module = Module::new("bcj-arm", 1).with_plan(memory);
-pub const ARM_THUMB: Module = Module::new("bcj-armthumb", 1).with_plan(memory);
-pub const SPARC: Module = Module::new("bcj-sparc", 1).with_plan(memory);
-pub const ARM64: Module = Module::new("bcj-arm64", 1).with_plan(memory);
-pub const RISCV: Module = Module::new("bcj-riscv", 1).with_plan(memory);
-/// The memory of Delta as a part module ([`module::delta_part`]): its initial memory alone (it
-/// allocates nothing).
+pub const X86: Module = Module::new("bcj-x86", 2).with_plan(memory_part);
+pub const POWERPC: Module = Module::new("bcj-powerpc", 2).with_plan(memory_part);
+pub const IA64: Module = Module::new("bcj-ia64", 2).with_plan(memory_part);
+pub const ARM: Module = Module::new("bcj-arm", 2).with_plan(memory_part);
+pub const ARM_THUMB: Module = Module::new("bcj-armthumb", 2).with_plan(memory_part);
+pub const SPARC: Module = Module::new("bcj-sparc", 2).with_plan(memory_part);
+pub const ARM64: Module = Module::new("bcj-arm64", 2).with_plan(memory_part);
+pub const RISCV: Module = Module::new("bcj-riscv", 2).with_plan(memory_part);
+/// The memory of the part modules ([`module::bra_part`], [`module::delta_part`]): their initial
+/// memory alone (they allocate nothing).
 fn memory_part(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.initial())
 }

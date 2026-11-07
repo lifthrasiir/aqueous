@@ -192,6 +192,8 @@ P = W_main + Σ_태스크 (W_spawn + 태스크의 계획 버퍼) + 채널 메시
 
 **bundle-recons(판 2).** whole이던 것을 part 모듈로 바꿨다(창 16쪽 × 입력 둘과 출력). 데이터와 레이아웃을 64 KiB 조각으로 차례로 받아 `layout::build_into`가 아카이브를 조각으로 내보내므로 아무것도 쥐지 않는다. 계획 = 조각 버퍼 둘(`module::plan`)이라 아카이브 길이와 무관하다(whole은 3배). `decimal`의 `String`을 없앴다(계획 밖 블록). cpio crc 형식의 검사합은 본체보다 머리가 먼저 나가므로 예측하지 않고 그대로 둔다(형식 변경). 실측 = 계획이다(`bundle_plans_hold`: 픽스처 전부와 창을 넘는 tar).
 
+**bcj-x86 외 일곱(판 2).** whole이던 분기 변환기를 part 모듈로 바꿨다(창 1쪽 × 입력과 출력, bcj-delta와 같다). 4 KiB 버퍼 하나로 조각씩 변환하고, `bra::Converter`가 조각 사이의 상태(x86의 mask, IA-64의 주소)를 넘기며, 조각 끝에서 정하지 못한 최대 16바이트는 다음 조각의 앞이 된다. 아무것도 쥐지 않으므로 계획 = 초기 메모리뿐이고 길이와 무관하다(whole은 입력의 약 4배라 63 MiB 입력이 256 MiB였다). 출력은 판 1과 바이트까지 같다. 실측 = 계획이다(`bra_plans_hold`: x86 70 MiB, 나머지 여덟 구조의 창을 넘는 30만 바이트를 start 유무로).
+
 **recs-fields, recs-entries, recs-floats.** 이미 LIFO였다(필드 목록, 출력, recs-fields는 필드마다 위에 참조 값 목록).
 - `Field`와 `Float`는 `repr(C)`로 두고, wasm32 크기는 상수로 확인한다.
 - 실측 = 계획이다(`recs_plans_hold`). 직접 만든 수식에는 aqr-compress의 숨은 `declare_memory`로 한도를 선언한다.

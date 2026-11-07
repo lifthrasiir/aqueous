@@ -377,6 +377,26 @@ fn bcj(m: Module, p: &[u8], i: &[&[u8]], n: u64) -> std::result::Result<Vec<u8>,
     aqr_bcj::formula::decode(m, p, i, n).ok_or("not of aqr-bcj")?.map_err(err)
 }
 
+/// [`Entry`] of a branch converter of aqr-bcj, a part module of windows of a page.
+macro_rules! bra {
+    ($module:ident, $arch:ident) => {
+        part(
+            $module,
+            false,
+            aqr_api::emu::Entry {
+                kind: aqr_api::emu::Kind::Part,
+                windows: &[
+                    aqr_api::Window::Input(0, aqr_bcj::module::BRA_WINDOW),
+                    aqr_api::Window::Output(0, aqr_bcj::module::BRA_WINDOW),
+                ],
+                arity: 3,
+                call: |a| aqr_bcj::module::bra_part(aqr_bcj::bra::Arch::$arch, a[0], a[1], a[2]),
+            },
+            |p, _, i, n, _| bcj($module, p, i, n),
+        )
+    };
+}
+
 /// Every module of this crate, as it runs natively.
 const NATIVE: &[Entry] = &[
     takes(X86, |p, r, i, n, _| aqr_exe::module::x86(p, r, i, n).map_err(err)),
@@ -421,14 +441,14 @@ const NATIVE: &[Entry] = &[
     bare(LZ4, |p, _, i, n, t| aqr_lz4::formula::decode(p, i, n, t).map_err(err)),
     bare(LZMA, |p, _, i, n, t| aqr_lzma::formula::decode(p, i, n, t).map_err(err)),
     bare(LZMA2, |p, _, i, n, t| aqr_lzma::formula::decode2(p, i, n, t).map_err(err)),
-    bare(BCJ_X86, |p, _, i, n, _| bcj(BCJ_X86, p, i, n)),
-    bare(BCJ_POWERPC, |p, _, i, n, _| bcj(BCJ_POWERPC, p, i, n)),
-    bare(BCJ_IA64, |p, _, i, n, _| bcj(BCJ_IA64, p, i, n)),
-    bare(BCJ_ARM, |p, _, i, n, _| bcj(BCJ_ARM, p, i, n)),
-    bare(BCJ_ARM_THUMB, |p, _, i, n, _| bcj(BCJ_ARM_THUMB, p, i, n)),
-    bare(BCJ_SPARC, |p, _, i, n, _| bcj(BCJ_SPARC, p, i, n)),
-    bare(BCJ_ARM64, |p, _, i, n, _| bcj(BCJ_ARM64, p, i, n)),
-    bare(BCJ_RISCV, |p, _, i, n, _| bcj(BCJ_RISCV, p, i, n)),
+    bra!(BCJ_X86, X86),
+    bra!(BCJ_POWERPC, PowerPc),
+    bra!(BCJ_IA64, Ia64),
+    bra!(BCJ_ARM, Arm),
+    bra!(BCJ_ARM_THUMB, ArmThumb),
+    bra!(BCJ_SPARC, Sparc),
+    bra!(BCJ_ARM64, Arm64),
+    bra!(BCJ_RISCV, RiscV),
     part(
         BCJ_DELTA,
         false,

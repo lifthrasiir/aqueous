@@ -101,3 +101,59 @@ pub fn bcj2(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
 pub fn plan(params: u64, inputs: &[u64], len: u64) -> u64 {
     aqr_api::stack::whole(params, &[], inputs) + aqr_api::stack::block(len)
 }
+
+/// The pages of the windows of a branch converter's input and output (as a part module,
+/// [`bra_part`]).
+pub const BRA_WINDOW: u32 = 1;
+
+/// Bytes of the buffer of [`bra_part`]: the pieces it converts, with the bytes a step leaves
+/// (at most 16) before them.
+const BRA_BUF: usize = 4096 + 16;
+
+/// The module `bcj-{arch}` as a part module (its entry point, of `aqr_api::entry!`): its input
+/// converted a piece at a time through windows of [`BRA_WINDOW`] pages, whatever the length of
+/// the data ([`bra::Converter`] carries what a piece needs of the ones before it): the same as
+/// [`bra`], with nothing held but the buffer on the stack.
+#[inline(always)]
+pub fn bra_part(arch: Arch, params_len: u64, in0_len: u64, size: u64) {
+    use aqr_api::{Input, Memory, Output, Params};
+    if size != in0_len {
+        return aqr_api::finish(Err(Error("output of another length")));
+    }
+    let mut p = [0; 4];
+    if params_len != 0 && params_len != 4 {
+        return aqr_api::finish(Err(Error("bad parameters")));
+    }
+    Params::read(0, &mut p[..params_len as usize]);
+    let pc = match start(arch, &p[..params_len as usize]) {
+        Ok(pc) => pc,
+        Err(e) => return aqr_api::finish(Err(e)),
+    };
+    let mut conv = bra::Converter::new(arch, pc, true);
+    let (w_in, w_out) = (Input::<0>::size(), Output::<0>::size());
+    let mut buf = [0; BRA_BUF];
+    // (the bytes the last step left at the front of the buffer; the offsets read and put out)
+    let (mut have, mut read, mut put) = (0, 0u64, 0u64);
+    let mut out = |mut d: &[u8]| {
+        while !d.is_empty() {
+            let n = (d.len() as u64).min(w_out - put % w_out) as usize;
+            Output::<0>::write(put % w_out, &d[..n]);
+            put += n as u64;
+            Output::<0>::commit(put);
+            d = &d[n..];
+        }
+    };
+    while read < size {
+        let n = (size - read).min((BRA_BUF - have) as u64).min(w_in - read % w_in);
+        Input::<0>::request(read + n);
+        Input::<0>::read(read % w_in, &mut buf[have..have + n as usize]);
+        Input::<0>::release(read + n);
+        read += n;
+        have += n as usize;
+        let done = conv.step(&mut buf[..have]);
+        out(&buf[..done]);
+        buf.copy_within(done..have, 0);
+        have -= done;
+    }
+    out(&buf[..have]);
+}

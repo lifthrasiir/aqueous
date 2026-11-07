@@ -64,16 +64,50 @@ fn conv(v: u32, c: u32, enc: bool) -> u32 {
 
 /// Converts `d` of `arch` (encoding if `enc`), its first byte at `pc`.
 pub fn convert(arch: Arch, d: &mut [u8], pc: u32, enc: bool) {
-    match arch {
-        Arch::X86 => x86(d, pc, enc),
-        Arch::PowerPc => ppc(d, pc, enc),
-        Arch::Ia64 => ia64(d, pc, enc),
-        Arch::Arm => arm(d, pc, enc),
-        Arch::ArmThumb => armt(d, pc, enc),
-        Arch::Sparc => sparc(d, pc, enc),
-        Arch::Arm64 => arm64(d, pc, enc),
-        Arch::RiscV if enc => riscv_enc(d, pc),
-        Arch::RiscV => riscv_dec(d, pc),
+    Converter::new(arch, pc, enc).step(d);
+}
+
+/// A converter fed the data in pieces, with the same result as [`convert`] on all of it: each
+/// piece is given with the bytes the last [`Converter::step`] left, and everything before what
+/// a step returns is final. What is left at the end of the data stays as it is, as in [`convert`].
+#[derive(Debug, Clone, Copy)]
+pub struct Converter {
+    arch: Arch,
+    enc: bool,
+    /// The address of the first byte of the next piece.
+    pc: u32,
+    /// What the scan carries from a piece to the next: x86's mask of the opcodes before, IA-64's
+    /// running address.
+    state: u32,
+}
+
+impl Converter {
+    #[inline(always)]
+    pub fn new(arch: Arch, pc: u32, enc: bool) -> Converter {
+        let state = if arch == Arch::Ia64 { pc.wrapping_sub(1 << 4) >> (4 - 1) } else { 0 };
+        Converter { arch, enc, pc, state }
+    }
+
+    /// Converts the front of `d`, the next bytes of the data (more of them to come, or none: the
+    /// result is the same), and returns how many bytes are final; the rest are to start the next
+    /// piece, unchanged. Each step makes progress but for the last bytes it needs more after
+    /// (at most 16 of them).
+    #[inline(always)]
+    pub fn step(&mut self, d: &mut [u8]) -> usize {
+        let (pc, enc) = (self.pc, self.enc);
+        let n = match self.arch {
+            Arch::X86 => x86(d, pc, enc, &mut self.state),
+            Arch::PowerPc => ppc(d, pc, enc),
+            Arch::Ia64 => ia64(d, &mut self.state, enc),
+            Arch::Arm => arm(d, pc, enc),
+            Arch::ArmThumb => armt(d, pc, enc),
+            Arch::Sparc => sparc(d, pc, enc),
+            Arch::Arm64 => arm64(d, pc, enc),
+            Arch::RiscV if enc => riscv_enc(d, pc),
+            Arch::RiscV => riscv_dec(d, pc),
+        };
+        self.pc = pc.wrapping_add(n as u32);
+        n
     }
 }
 
@@ -86,13 +120,13 @@ fn ms_byte(b: u8) -> bool {
 /// x86: E8 (call) and E9 (jmp) of a 32-bit offset whose high byte is 0x00 or 0xFF. A mask of
 /// the E8/E9 bytes among the last three before tells which candidates are skipped, so that an
 /// instruction's bytes are not taken for another's.
-fn x86(d: &mut [u8], pc: u32, enc: bool) {
+fn x86(d: &mut [u8], pc: u32, enc: bool, state: &mut u32) -> usize {
     if d.len() < 5 {
-        return;
+        return 0;
     }
     let limit = d.len() - 4;
     let ip = pc.wrapping_add(5);
-    let mut mask = 0u32;
+    let mut mask = *state;
     let mut pos = 0usize;
     loop {
         let mut p = pos;
@@ -102,7 +136,9 @@ fn x86(d: &mut [u8], pc: u32, enc: bool) {
         let dist = p - pos;
         pos = p;
         if p >= limit {
-            return;
+            // (the distance to this end counted in the mask for the next piece)
+            *state = if dist > 2 { 0 } else { mask >> dist };
+            return pos;
         }
         if dist > 2 {
             mask = 0;
@@ -139,7 +175,7 @@ fn x86(d: &mut [u8], pc: u32, enc: bool) {
 }
 
 /// PowerPC: `bl` (big-endian, opcode 18 with AA = 0 and LK = 1).
-fn ppc(d: &mut [u8], pc: u32, enc: bool) {
+fn ppc(d: &mut [u8], pc: u32, enc: bool) -> usize {
     for i in (0..d.len() & !3).step_by(4) {
         let v = be32(d, i);
         if v & 0xfc00_0003 == 0x4800_0001 {
@@ -147,10 +183,11 @@ fn ppc(d: &mut [u8], pc: u32, enc: bool) {
             set_be32(d, i, (v & 0x03ff_ffff) | 0x4800_0000);
         }
     }
+    d.len() & !3
 }
 
 /// ARM: `bl` (little-endian, condition "always").
-fn arm(d: &mut [u8], pc: u32, enc: bool) {
+fn arm(d: &mut [u8], pc: u32, enc: bool) -> usize {
     for i in (0..d.len() & !3).step_by(4) {
         if d[i + 3] == 0xeb {
             let c = pc.wrapping_add(i as u32).wrapping_add(8) >> 2;
@@ -158,10 +195,11 @@ fn arm(d: &mut [u8], pc: u32, enc: bool) {
             set_le32(d, i, (v & 0x00ff_ffff) | 0xeb00_0000);
         }
     }
+    d.len() & !3
 }
 
 /// ARM Thumb: the pair of halfwords of `bl`.
-fn armt(d: &mut [u8], pc: u32, enc: bool) {
+fn armt(d: &mut [u8], pc: u32, enc: bool) -> usize {
     let n = d.len() & !1;
     let mut i = 0;
     while i + 4 <= n {
@@ -176,10 +214,11 @@ fn armt(d: &mut [u8], pc: u32, enc: bool) {
             i += 2;
         }
     }
+    i
 }
 
 /// SPARC: `call` (big-endian) of a target within ±2^24 bytes.
-fn sparc(d: &mut [u8], pc: u32, enc: bool) {
+fn sparc(d: &mut [u8], pc: u32, enc: bool) -> usize {
     const FLAG: u32 = 1 << 22;
     for i in (0..d.len() & !3).step_by(4) {
         let mut v = be32(d, i);
@@ -197,10 +236,11 @@ fn sparc(d: &mut [u8], pc: u32, enc: bool) {
         v |= 1 << 30;
         set_be32(d, i, v);
     }
+    d.len() & !3
 }
 
 /// ARM64: `bl`, and `adrp` of a target within ±2^32 bytes.
-fn arm64(d: &mut [u8], pc: u32, enc: bool) {
+fn arm64(d: &mut [u8], pc: u32, enc: bool) -> usize {
     const FLAG: u32 = 1 << 20;
     const MASK: u32 = (1 << 24) - (FLAG << 1);
     for i in (0..d.len() & !3).step_by(4) {
@@ -227,12 +267,13 @@ fn arm64(d: &mut [u8], pc: u32, enc: bool) {
         w |= 0x00ff_ffe0 & (z & ((FLAG << 1) - 1)).wrapping_sub(FLAG);
         set_le32(d, i, w);
     }
+    d.len() & !3
 }
 
 /// IA-64: the `br.call` slots of bundles of the templates that have branch slots.
-fn ia64(d: &mut [u8], pc: u32, enc: bool) {
+fn ia64(d: &mut [u8], state: &mut u32, enc: bool) -> usize {
     let n = d.len() & !15;
-    let mut pc = pc.wrapping_sub(1 << 4) >> (4 - 1);
+    let mut pc = *state;
     let mut b = 0;
     while b < n {
         let mut m = (0x334b_0000u32 >> (d[b] & 0x1e)) & 3;
@@ -269,6 +310,8 @@ fn ia64(d: &mut [u8], pc: u32, enc: bool) {
         }
         b += 16;
     }
+    *state = pc;
+    n
 }
 
 /// RISC-V: where a scan of halfwords (from `p`, below `lim`) finds the next JAL or AUIPC, its
@@ -306,10 +349,10 @@ fn riscv_check2(v: u32, r: u32) -> bool {
 }
 
 /// RISC-V encoding: JAL, and AUIPC with the instruction after it.
-fn riscv_enc(d: &mut [u8], pc: u32) {
+fn riscv_enc(d: &mut [u8], pc: u32) -> usize {
     let size = d.len() & !1;
     if size <= 6 {
-        return;
+        return 0;
     }
     let lim = size - 6;
     let mut p = 0;
@@ -358,13 +401,14 @@ fn riscv_enc(d: &mut [u8], pc: u32) {
             }
         }
     }
+    p
 }
 
 /// RISC-V decoding, the inverse of [`riscv_enc`].
-fn riscv_dec(d: &mut [u8], pc: u32) {
+fn riscv_dec(d: &mut [u8], pc: u32) -> usize {
     let size = d.len() & !1;
     if size <= 6 {
-        return;
+        return 0;
     }
     let lim = size - 6;
     let mut p = 0;
@@ -413,4 +457,5 @@ fn riscv_dec(d: &mut [u8], pc: u32) {
             }
         }
     }
+    p
 }

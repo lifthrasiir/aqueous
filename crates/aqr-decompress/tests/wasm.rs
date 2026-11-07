@@ -439,6 +439,70 @@ fn delta_streamed() {
     }
 }
 
+/// The branch converters (bcj-*, part modules of windows of a page) take the same plan whatever
+/// the length: x86 on data past the 64 MiB that a whole module's four copies would put over the
+/// application bound, and each of the others on data past their windows and buffers, with and
+/// without a start address.
+#[test]
+fn bra_plans_hold() {
+    use aqr_bcj::bra::{self, Arch};
+    // (calls and jumps of near targets, and bytes of every kind, in a repeating text so that it
+    // archives fast)
+    let code = |n: usize| -> Vec<u8> {
+        let unit: Vec<u8> = (0..4099u32)
+            .map(|i| match i % 11 {
+                0 => 0xe8,
+                1 => 0xe9,
+                2 | 3 => 0xff,
+                4 => 0,
+                5 => 0xeb,
+                6 => 0x94,
+                _ => (i * i / 3) as u8,
+            })
+            .collect();
+        unit.iter().copied().cycle().take(n).collect()
+    };
+    for (arch, pc, n) in [(Arch::X86, 0, 70 << 20), (Arch::X86, 0x1000, 300_001)] {
+        let d = code(n);
+        // (a plan of the initial memory and a few pages, the same for a hundred bytes and for all of it)
+        let m = aqr_bcj::formula::module_of(arch);
+        let plan = |len: u64| {
+            let none: Vec<&[u8]> = Vec::new();
+            let usage = aqr_formula::Usage {
+                params: &[],
+                resources: &[],
+                inputs: &[len],
+                outputs: &[len],
+                contents: &none,
+                initial_pages: aqr_decompress::initial_pages_of(m).unwrap(),
+            };
+            m.plan_for(&usage).unwrap()
+        };
+        assert_eq!(plan(100).instance, plan(n as u64).instance);
+        assert!(plan(n as u64).instance <= 4 << 20, "{arch:?}: instance {}", plan(n as u64).instance);
+        let mut want = d.clone();
+        bra::convert(arch, &mut want, pc, true);
+        assert!(want != d);
+        let mut f = Formula::default();
+        let data = f.push("raw", d);
+        let params = if pc == 0 { Vec::new() } else { u32::to_le_bytes(pc).to_vec() };
+        f.root = Node::apply(aqr_bcj::formula::module_of(arch), params, vec![data], want.len() as u64);
+        plan_holds(&format!("bcj {arch:?} {n}"), f, &want);
+    }
+    for arch in Arch::ALL {
+        for pc in [0, 0x1000] {
+            let d = code(300_001);
+            let mut want = d.clone();
+            bra::convert(arch, &mut want, pc, true);
+            let mut f = Formula::default();
+            let data = f.push("raw", d);
+            let params = if pc == 0 { Vec::new() } else { u32::to_le_bytes(pc).to_vec() };
+            f.root = Node::apply(aqr_bcj::formula::module_of(arch), params, vec![data], want.len() as u64);
+            plan_holds(&format!("bcj {arch:?} {pc}"), f, &want);
+        }
+    }
+}
+
 /// DEFLATE streams inflated (flate-inflate) natively and as WebAssembly alike, and damaged in
 /// turn failing alike (or giving the same).
 #[test]

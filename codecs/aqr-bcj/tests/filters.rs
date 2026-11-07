@@ -182,3 +182,51 @@ fn bcj2_streams() {
         assert!(bcj2::decode(&s, &rc, n + 1).is_err());
     }
 }
+
+/// `d` converted by pieces of `chunk` bytes: each step's final bytes put out, the rest kept for
+/// the next piece.
+fn streamed(arch: Arch, d: &[u8], pc: u32, enc: bool, chunk: usize) -> Vec<u8> {
+    let mut c = bra::Converter::new(arch, pc, enc);
+    let (mut out, mut buf) = (Vec::new(), Vec::new());
+    for piece in d.chunks(chunk.max(1)) {
+        buf.extend_from_slice(piece);
+        let n = c.step(&mut buf);
+        out.extend_from_slice(&buf[..n]);
+        buf.drain(..n);
+        assert!(buf.len() <= 16 + chunk, "{arch:?}: {} bytes kept", buf.len());
+    }
+    out.extend_from_slice(&buf);
+    out
+}
+
+/// The branch converters fed in pieces of any size give what one call on all the data gives (the
+/// states carried: x86's mask, IA-64's address, RISC-V's scan).
+#[test]
+fn pieces_same_as_whole() {
+    fn dense(n: usize, seed: u64) -> Vec<u8> {
+        // (few kinds of bytes, so that x86 candidates follow each other with zero or 0xFF bytes)
+        let mut x = seed;
+        (0..n)
+            .map(|_| {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                [0xe8, 0xe9, 0x00, 0xff, 0x0f, 0x85, 0x41][(x >> 40) as usize % 7]
+            })
+            .collect()
+    }
+    for n in [0, 3, 5, 6, 7, 8, 9, 16, 33, 100, 1000, 20_000] {
+        for d in [biased(n, 7 + n as u64), dense(n, 3 + n as u64)] {
+            for arch in Arch::ALL {
+                for pc in [0u32, 0x1000, 0xdead_bee0] {
+                    for enc in [true, false] {
+                        let mut want = d.clone();
+                        bra::convert(arch, &mut want, pc, enc);
+                        for chunk in [1, 2, 3, 4, 5, 7, 8, 13, 16, 17, 64, 255, 4096] {
+                            let got = streamed(arch, &d, pc, enc, chunk);
+                            assert!(got == want, "{arch:?} n={n} pc={pc:#x} enc={enc} chunk={chunk}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

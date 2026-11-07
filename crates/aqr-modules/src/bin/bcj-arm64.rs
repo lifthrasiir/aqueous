@@ -1,9 +1,15 @@
-//! `bcj-arm64` (aqr-bcj).
+//! `bcj-arm64` (aqr-bcj), a part module.
 
 #![no_main]
 
-// (its memory laid out as a stack: what it takes is its plan, `aqr_bcj::module::plan`)
+// (its memory laid out as a stack: what it takes is its plan, `aqr_bcj::formula`'s `memory_part`)
 #[global_allocator]
 static STACK: aqr_api::stack::Stack = aqr_api::stack::Stack::new();
 
-aqr_modules::whole!(inputs [in0: 0], |p, _, i, len| aqr_bcj::module::bra(aqr_bcj::bra::Arch::Arm64, p, i, len));
+aqr_api::entry! {
+    part fn apply(params_len, in0_len, size)
+        windows(Input 0 = aqr_bcj::module::BRA_WINDOW, Output 0 = aqr_bcj::module::BRA_WINDOW)
+    {
+        aqr_bcj::module::bra_part(aqr_bcj::bra::Arch::Arm64, params_len, in0_len, size)
+    }
+}
