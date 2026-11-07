@@ -145,7 +145,30 @@ The piece's text ends where its coded text does. A step must not be cut by the e
     ending with a byte that is neither a space nor in any token (such as LF, `"` or `,`). The
     pieces then code to the same bytes as the whole, minified JSON among them, and the params
     tell where they are, for them to be rebuilt on threads of their own too. A shorter text is
-    one piece.
+    one piece. Where no such byte is within 1 MiB past the 16 MiB, the cut is at the first byte
+    that does not continue a character of UTF-8; the pieces then code to other bytes than the
+    whole, but each to its text (the module rebuilds any bytes).
+  - A text is further cut into *segments* (below), so that no application holds much of it.
+- **Segments.**
+  - The module holds all of its output, its input and the parsed dictionary in memory, so
+    that an application of the text's whole would need about three times the text. A text
+    longer than 32 MiB is therefore cut into segments of about 32 MiB, as the pieces are cut
+    (after the first byte that is neither in a token nor a space, once 32 MiB are past, or
+    where none is, as above; every cut is also a cut of the pieces). Each segment is an
+    application of the module with the one dictionary of the whole text, in the formula's
+    concatenation of the applications in order. The coded texts of the segments are one
+    stream, one after another, so that the archive compresses them as it did the text coded
+    in one application (a stream of its own for each segment compresses a little worse, in
+    blocks of its size); a segment's application takes its part of it as its input, with the
+    pieces inside it (two, at most) in its params. An application of a segment needs about three
+    times its 32 MiB and the dictionary (about 105 MiB on Wasm), whatever the text's length.
+  - The dictionary is that of all of the text (§ Dictionary), not of a sample, so the
+    segments' coded texts together are the bytes that the text coded in one application had:
+    segmenting costs only each application's params and node, a few tens of bytes (enwik8:
+    50 bytes of 25.75 MB). The resource is stored once.
+  - The modules are unchanged (versions 3 and 2): a segment is a text, and a text of one
+    segment is what a short text always was. Archives of texts in one application decode as
+    before.
 - **What is taken.**
   - Text of at least 256 KiB in which at most 1 in 1000 bytes are not text bytes. Text bytes
     are the printable ones, tab, CR, LF, form feed, and every byte from 0x80 on.
@@ -250,6 +273,9 @@ A step must not be cut by the end of the piece.
     last ends where the first ASCII byte other than a space after its first 16 MiB begins. No
     token holds such a byte, nor is it within a character of UTF-8, so the pieces code to the
     same bytes as the whole. A text that holds another codes to bytes that hold the other's code,
-    except where the other's edges cut a token.
+    except where the other's edges cut a token. Where no such byte is within 1 MiB, the cut is
+    at the first byte that does not continue a character, as in §5.
+  - Segments are of about 32 MiB, cut at the same bytes, as §5 tells: each an application of
+    the module with the one dictionary of the whole text.
 - **Shared dictionary.** The texts of Hangul of a batch share a dictionary of their own, as §5
   tells of the others.

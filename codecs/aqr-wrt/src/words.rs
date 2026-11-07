@@ -263,12 +263,39 @@ fn apart(c: u8) -> bool {
 
 /// `d` in pieces ([`PIECE`]).
 fn pieces(d: &[u8]) -> Vec<&[u8]> {
+    split(d, PIECE, apart, 1)
+}
+
+/// Text is coded and decoded in segments of about this many bytes, each an application of the
+/// module with the one dictionary of all of them (FORMAT.md, "Segments"): what the module holds
+/// of a text at once.
+pub const SEGMENT: usize = 32 << 20;
+
+/// `d` in segments of about `size` bytes ([`SEGMENT`]), cut as pieces are.
+pub fn segments(d: &[u8], size: usize) -> Vec<&[u8]> {
+    split(d, size, apart, 1)
+}
+
+/// The most bytes past `size` that [`split`] looks for a byte to cut at.
+const GAP: usize = 1 << 20;
+
+/// `d` in parts of about `size` bytes, each but the last ending where the first byte of `apart`
+/// after its first `size` bytes is (`after` bytes of it with the part, 0 or 1), so that the
+/// parts code to the same bytes as the whole. Where none is within [`GAP`] bytes, the cut is at
+/// the first byte that does not continue a character of UTF-8: the parts then code to other
+/// bytes, but still to the same text, each on its own.
+pub(crate) fn split(d: &[u8], size: usize, apart: impl Fn(u8) -> bool, after: usize) -> Vec<&[u8]> {
     let mut out = Vec::new();
     let mut at = 0;
-    while d.len() - at > PIECE {
-        let Some(e) = d[at + PIECE..].iter().position(|&b| apart(b)) else { break };
-        out.push(&d[at..at + PIECE + e + 1]);
-        at += PIECE + e + 1;
+    while d.len() - at > size {
+        let from = at + size;
+        let window = &d[from..(from + GAP).min(d.len())];
+        let cut = match window.iter().position(|&b| apart(b)) {
+            Some(e) => from + e + after,
+            None => from + window.iter().position(|&b| b & 0xC0 != 0x80).unwrap_or(window.len()),
+        };
+        out.push(&d[at..cut]);
+        at = cut;
     }
     out.push(&d[at..]);
     out
@@ -615,12 +642,17 @@ fn parsed(dict: &[u8]) -> Result<impl std::borrow::Borrow<Parsed>> {
 /// the lengths of its layout's three lists, which the module's memory plan goes by), then the
 /// coded and text lengths of the pieces (each a pair of varints).
 pub fn params(dict: &[u8], lens: &[(usize, usize)]) -> Vec<u8> {
+    [head(dict), params_of(lens)].concat()
+}
+
+/// The shape of the dictionary `dict` as the first of the parameters ([`params`]), for the
+/// applications of segments that share it.
+pub fn head(dict: &[u8]) -> Vec<u8> {
     let mut p = Vec::new();
     let (lists, entries) = shape(dict).unwrap_or_default();
     for n in [entries, lists[0], lists[1], lists[2]] {
         varint::put(&mut p, n as u64);
     }
-    p.extend_from_slice(&params_of(lens));
     p
 }
 
@@ -815,8 +847,6 @@ mod tests {
         // (a line of minified JSON, cut where no token is)
         let json = r#"{"t":"Some words","u":"</b>&amp;&#38;","v":"x"},"#;
         d.extend_from_slice(&json.repeat((PIECE * 3 / 2) / json.len()).into_bytes());
-        // (a piece that cannot be cut)
-        d.extend_from_slice(&b"the end ".repeat(PIECE / 4));
         assert!(pieces(&d).len() == 4 && pieces(&d).concat() == d);
         let one = Dictionary::of(&[&d], 1).unwrap();
         let four = Dictionary::of(&[&d], 4).unwrap();
@@ -833,6 +863,19 @@ mod tests {
         (moved[0].0, moved[1].0) = (moved[0].0 - 1, moved[1].0 + 1);
         assert!(decode(&params(&r, &moved), &r, &text, d.len(), 4).is_err());
         assert!(decode(&[], &r, &text, d.len(), 4).is_err());
+    }
+
+    /// Text with no byte to cut at is cut anyway, each part coded on its own.
+    #[test]
+    fn uncuttable() {
+        let d = b"the end ".repeat(PIECE * 3 / 8);
+        let parts = split(&d, PIECE, apart, 1);
+        assert!(parts.len() == 3 && parts.concat() == d && parts[0].len() == PIECE);
+        let dict = Dictionary::of(&[&d], 2).unwrap();
+        let (text, lens) = dict.encode(&d, 2);
+        assert_eq!(lens.len(), 3);
+        let r = dict.to_bytes();
+        assert!(decode(&params(&r, &lens), &r, &text, d.len(), 2).unwrap() == d);
     }
 
     #[test]

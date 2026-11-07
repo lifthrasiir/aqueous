@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use aqr_common::varint;
 
-use crate::words::{PIECE, in_pieces};
+use crate::words::{PIECE, in_pieces, split};
 use crate::{Result, corrupt};
 
 /// The longest token coded by an entry, in bytes (16 syllables, or 15 and the space before).
@@ -106,15 +106,17 @@ fn tokens(d: &[u8], mut f: impl FnMut(usize, usize)) {
 /// than a space: no token holds one, nor is it in the middle of a character of UTF-8, so that
 /// the pieces code to the same bytes as the whole. (Text of JSON may have no LF at all.)
 fn pieces(d: &[u8]) -> Vec<&[u8]> {
-    let mut out = Vec::new();
-    let mut at = 0;
-    while d.len() - at > PIECE {
-        let Some(e) = d[at + PIECE..].iter().position(|&b| b < 0x80 && b != b' ') else { break };
-        out.push(&d[at..at + PIECE + e]);
-        at += PIECE + e;
-    }
-    out.push(&d[at..]);
-    out
+    split(d, PIECE, apart, 0)
+}
+
+/// `d` in segments of about `size` bytes ([`SEGMENT`]), cut as pieces are.
+pub fn segments(d: &[u8], size: usize) -> Vec<&[u8]> {
+    split(d, size, apart, 0)
+}
+
+/// Whether `c` is an ASCII byte other than a space, where a piece may be cut.
+fn apart(c: u8) -> bool {
+    c < 0x80 && c != b' '
 }
 
 /// The hash of a token: tokens of the same hash are counted as one ([`count`]), the first
@@ -395,9 +397,14 @@ pub fn entries_of(bytes: &[u8]) -> Result<usize> {
 /// module's memory plan goes by), then the coded and text lengths of the pieces (each a pair of
 /// varints).
 pub fn params(dict: &[u8], lens: &[(usize, usize)]) -> Vec<u8> {
+    [head(dict), crate::words::params_of(lens)].concat()
+}
+
+/// The count of the dictionary's entries as the first of the parameters ([`params`]), for the
+/// applications of segments that share it.
+pub fn head(dict: &[u8]) -> Vec<u8> {
     let mut p = Vec::new();
     varint::put(&mut p, entries_of(dict).unwrap_or(0) as u64);
-    p.extend_from_slice(&crate::words::params_of(lens));
     p
 }
 

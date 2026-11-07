@@ -3683,8 +3683,9 @@ fn lzma2_plans_hold() {
 }
 
 /// wrt-recons and wrt-recons-hangul lay their memory out as stacks, their limits their plans: of
-/// text of words and markup, of Hangul, and of a little more than a piece of 16 MiB (two
-/// pieces).
+/// text of words and markup, of Hangul, of a little more than a piece of 16 MiB (two pieces), of
+/// dictionaries of ten thousands of entries (codes of three bytes), and of text of several
+/// segments of 32 MiB (an application each, sharing the dictionary).
 #[test]
 fn wrt_plans_hold() {
     let mut rng = aqr_common::rng::Rng::new(3);
@@ -3707,6 +3708,45 @@ fn wrt_plans_hold() {
     for (what, d) in [("words", text), ("hangul", korean), ("pieces", big)] {
         let f = aqr_wrt::formula::encode(&d, 2).unwrap_or_else(|| panic!("{what}"));
         plan_holds(&format!("wrt {what}"), f, &d);
+    }
+    // big dictionaries: 100,000 words of letters (and of syllables) in turn, each used 5 times
+    let vocab = |rng: &mut aqr_common::rng::Rng, hangul: bool| -> Vec<String> {
+        (0..100_000)
+            .map(|_| match hangul {
+                false => (0..4 + rng.below(6)).map(|_| (b'a' + rng.below(26) as u8) as char).collect(),
+                true => {
+                    (0..2 + rng.below(3)).map(|_| char::from_u32(0xAC00 + rng.below(11172) as u32).unwrap()).collect()
+                }
+            })
+            .collect()
+    };
+    for (what, hangul) in [("words", false), ("hangul", true)] {
+        let vocab = vocab(&mut rng, hangul);
+        let mut d = Vec::new();
+        for _ in 0..5 {
+            for w in &vocab {
+                d.extend_from_slice(w.as_bytes());
+                d.push(if rng.below(12) == 0 { b'\n' } else { b' ' });
+            }
+        }
+        let f = aqr_wrt::formula::encode(&d, 2).unwrap_or_else(|| panic!("{what}"));
+        // (codes of three bytes in use: more entries than those of two bytes and one hold)
+        let Node::Apply(a) = &f.root else { panic!("{what}") };
+        let entries = if hangul {
+            aqr_wrt::hangul::entries_of(&a.resources[0]).unwrap()
+        } else {
+            aqr_wrt::words::shape(&a.resources[0]).unwrap().1
+        };
+        assert!(entries > 40_000, "{what}: {entries}");
+        plan_holds(&format!("wrt big dictionary {what}"), f, &d);
+    }
+    // segments: text of 70 MiB, three of them, and of Hangul of 34 MiB, two
+    let long = line.repeat((70 << 20) / line.len()).into_bytes();
+    let ko_line = "사람은 나는 한국어로 글을 쓴다. 그리고 (English) 읽는다, 말이다.\n";
+    let ko_long = ko_line.repeat((34 << 20) / ko_line.len()).into_bytes();
+    for (what, d, n) in [("words", long, 3), ("hangul", ko_long, 2)] {
+        let f = aqr_wrt::formula::encode(&d, 2).unwrap_or_else(|| panic!("{what}"));
+        assert_eq!(applications_hold(&format!("wrt segments {what}"), &f, &d, |_| 0), n, "{what}");
     }
 }
 

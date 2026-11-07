@@ -38,6 +38,11 @@ Measured 2026-10-26 on an Apple M4 (10 cores), through `aqr` at level `mid`.
     they are (version 2). `enwik9` decodes at 409 MB/s on a thread and 2,875 MB/s on 10
     (`aqr-wrt-bench`, 2.5 -> 0.35 s against version 1's single pass). In Wasm the module
     still decodes on one thread.
+- A text of more than 32 MiB is cut into segments of about 32 MiB, each an application of the
+  module with the one dictionary of the whole text (FORMAT.md, §5 "Segments"), so that no
+  application needs more than about 105 MiB however long the text is (one of the whole needed
+  three times the text: 2.9 GiB for `enwik9`). The coded text is the same bytes, so the
+  archive is 50 bytes larger on `enwik8` (3 segments) and the modules are the same.
 
 Text of Hangul, measured 2026-10-29 on the same machine through `aqr -5`: 512 MiB from the
 middle of the namuwiki dump of 2021-03-01 (JSON of one line, 72% of its bytes above 0x7F).

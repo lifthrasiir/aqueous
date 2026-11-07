@@ -155,26 +155,86 @@ pub fn encode_with(input: &[u8], shared: &Shared, threads: usize) -> Option<Form
 }
 
 fn coded(input: &[u8], shared: &Shared, own: usize, threads: usize) -> Option<Formula> {
+    coded_in(input, shared, own, threads, words::SEGMENT)
+}
+
+/// [`coded`] in segments of about `segment` bytes.
+fn coded_in(input: &[u8], shared: &Shared, own: usize, threads: usize, segment: usize) -> Option<Formula> {
     let mut f = Formula::default();
-    let len = input.len() as u64;
     if korean(input) {
         let (dict, resource) = shared.hangul.as_ref()?;
         if !pays(input, |s| dict.encode_piece(s), own) {
             return None;
         }
-        let (text, pieces) = dict.encode(input, threads);
-        let inputs = vec![f.push_as("wrt/hangul", Kind::Text, text)];
-        f.root = Node::apply_with(HANGUL, vec![resource.clone()], hangul::params(&resource[..], &pieces), inputs, len);
+        let head = hangul::head(&resource[..]);
+        let segments = Segments { module: HANGUL, resource, head: &head, class: "wrt/hangul", threads };
+        f.root = segments.apply(&mut f, hangul::segments(input, segment), |s, n| dict.encode(s, n));
     } else {
         let (dict, resource) = shared.words.as_ref()?;
         if !pays(input, |s| dict.encode_piece(s), own) {
             return None;
         }
-        let (text, pieces) = dict.encode(input, threads);
-        let inputs = vec![f.push_as("wrt/text", Kind::Text, text)];
-        f.root = Node::apply_with(MODULE, vec![resource.clone()], words::params(&resource[..], &pieces), inputs, len);
+        let head = words::head(&resource[..]);
+        let segments = Segments { module: MODULE, resource, head: &head, class: "wrt/text", threads };
+        f.root = segments.apply(&mut f, words::segments(input, segment), |s, n| dict.encode(s, n));
     }
     Some(f)
+}
+
+/// The applications of a text's segments ([`words::SEGMENT`]) of one module and dictionary.
+struct Segments<'a> {
+    module: Module,
+    resource: &'a Resource,
+    /// The first of the parameters, that of the dictionary.
+    head: &'a [u8],
+    /// The class of the coded texts' streams.
+    class: &'static str,
+    threads: usize,
+}
+
+impl Segments<'_> {
+    /// The node of the text of `segments` coded by `code` (a segment, and the threads it may
+    /// use: its coded text, and the coded and text lengths of its pieces), put into `f`: the
+    /// segment's application, or the segments' one after another. The coded texts are one
+    /// stream, one after another (so that the archive compresses them as the text coded whole,
+    /// in blocks of the sink's size), each application taking its own part of it. At most
+    /// `threads` segments are coded at once, and their coded texts are written to the store as
+    /// they come, so that the encoder holds those alone in memory.
+    fn apply<C>(&self, f: &mut Formula, segments: Vec<&[u8]>, code: C) -> Node
+    where
+        C: Fn(&[u8], usize) -> (Vec<u8>, Vec<(usize, usize)>) + Sync,
+    {
+        let mut coded = aqr_formula::store::Writer::new(None);
+        // (each segment's start in the stream, its length, and the lengths of its pieces)
+        let mut parts: Vec<(u64, u64, Vec<(usize, usize)>)> = Vec::with_capacity(segments.len());
+        let mut at = 0u64;
+        for batch in segments.chunks(self.threads.max(1)) {
+            let inner = (self.threads / batch.len()).max(1);
+            let done = aqr_common::pool::par_map(batch.len(), self.threads, |i| {
+                let c = code(batch[i], inner);
+                aqr_common::progress::done(batch[i]);
+                c
+            });
+            for (text, pieces) in done {
+                coded.write(&text);
+                parts.push((at, text.len() as u64, pieces));
+                at += text.len() as u64;
+            }
+        }
+        let stream = f.streams.len();
+        f.push_as(self.class, Kind::Text, coded);
+        let mut nodes: Vec<Node> = (parts.into_iter().zip(&segments))
+            .map(|((start, len, pieces), segment)| {
+                let params = [self.head, &words::params_of(&pieces)].concat();
+                let input = Node::slice(stream, start, len);
+                Node::apply_with(self.module, vec![self.resource.clone()], params, vec![input], segment.len() as u64)
+            })
+            .collect();
+        match nodes.len() {
+            1 => nodes.pop().unwrap(),
+            _ => Node::concat(nodes),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -182,13 +242,37 @@ mod tests {
     use super::*;
     use crate::Result;
 
+    /// The text of formula `f` (an application, or segments' one after another), of `len` bytes.
     fn eval(f: &Formula, len: usize) -> Result<Vec<u8>> {
-        let Node::Apply(a) = &f.root else { panic!() };
-        let resources: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
-        let inputs: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
-        match a.module {
-            m if m == HANGUL => decode_hangul(&a.params, &resources, &inputs, len as u64, 2),
-            _ => decode(&a.params, &resources, &inputs, len as u64, 2),
+        let apply = |a: &aqr_formula::Apply, len: u64| {
+            let resources: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
+            let inputs: Vec<&[u8]> = a
+                .inputs
+                .iter()
+                .map(|n| match n {
+                    &Node::Slice { stream, start, len } => &f.streams[stream].data[start as usize..][..len as usize],
+                    _ => panic!("not a slice"),
+                })
+                .collect();
+            match a.module {
+                m if m == HANGUL => decode_hangul(&a.params, &resources, &inputs, len, 2),
+                _ => decode(&a.params, &resources, &inputs, len, 2),
+            }
+        };
+        match &f.root {
+            Node::Apply(a) => apply(a, len as u64),
+            Node::Concat(ns) => {
+                let mut out = Vec::new();
+                for n in ns {
+                    let Node::Apply(a) = n else { panic!("not an application") };
+                    out.extend(apply(a, a.len)?);
+                }
+                if out.len() != len {
+                    return Err(crate::corrupt());
+                }
+                Ok(out)
+            }
+            _ => panic!("not an application"),
         }
     }
 
@@ -267,5 +351,47 @@ mod tests {
         }
         let words = Shared::of(&[&other], 1).unwrap();
         assert!(words.hangul.is_none() && encode_with(d, &words, 1).is_none());
+    }
+
+    /// Text of segments: each an application of the one dictionary, to the same coded bytes as
+    /// the text in one (the segments cut where a byte of no token is), the text back. Segments
+    /// are 300 KB here, as the formula takes them in a test.
+    #[test]
+    fn segments() {
+        let mut rng = aqr_common::rng::Rng::new(5);
+        let words = ["The", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog;", "<b>THE</b>", "&amp;"];
+        let ko = ["사람은", "나는", "한국어로", "글을", "쓴다.", "그리고", "(English)", "읽는다,", "말이다.\n"];
+        for (what, list, module) in [("words", &words[..], MODULE), ("hangul", &ko[..], HANGUL)] {
+            let mut d = Vec::new();
+            while d.len() < 1_000_000 {
+                d.extend_from_slice(list[rng.below(list.len() as u64) as usize].as_bytes());
+                d.push(if rng.below(9) == 0 { b'\n' } else { b' ' });
+            }
+            let shared = Shared::of(&[&d], 2).unwrap();
+            let whole = coded_in(&d, &shared, 0, 2, usize::MAX).unwrap();
+            let f = coded_in(&d, &shared, 0, 2, 300_000).unwrap();
+            let Node::Concat(nodes) = &f.root else { panic!("{what}") };
+            assert_eq!(nodes.len(), 4, "{what}");
+            for n in nodes {
+                let Node::Apply(a) = n else { panic!("{what}") };
+                assert_eq!((a.module, a.resources.len()), (module, 1), "{what}");
+                assert!(a.len >= 300_000 && a.len < 310_000 || n == nodes.last().unwrap(), "{what}: {}", a.len);
+            }
+            assert_eq!(eval(&f, d.len()).unwrap(), d, "{what}");
+            // (one dictionary: its resource is the same in all)
+            let Node::Apply(first) = &nodes[0] else { panic!() };
+            assert!(nodes.iter().all(|n| matches!(n, Node::Apply(a) if a.resources == first.resources)));
+            // (the coded texts together are the whole's)
+            let joined: Vec<u8> = f.streams.iter().flat_map(|s| s.data.to_vec()).collect();
+            assert_eq!(joined, whole.streams[0].data.to_vec(), "{what}");
+            assert_eq!(f.streams.len(), 1, "{what}");
+            assert!(eval(&f, d.len() - 1).is_err(), "{what}");
+        }
+        // text with no byte to cut at: cut anyway after the gap, the text back
+        let d = "abc ".repeat(1_000_000 / 4).into_bytes();
+        let shared = Shared::of(&[&d], 1).unwrap();
+        let f = coded_in(&d, &shared, 0, 1, 300_000).unwrap();
+        assert!(matches!(&f.root, Node::Concat(ns) if ns.len() >= 2));
+        assert_eq!(eval(&f, d.len()).unwrap(), d);
     }
 }
