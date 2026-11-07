@@ -54,7 +54,7 @@ Contents:
 
 ## 2. The module
 
-- **Module**: name `zip-recons`, version 5.
+- **Module**: name `zip-recons`, version 6.
 - **Params**: none (empty).
 - **Resources**: none.
 - **Inputs**: exactly four:
@@ -90,11 +90,12 @@ a stream of class `flate/record`, and its index one of class `flate/index`.
 
 ### 3.1 Records
 
-The layout is `svarint base`, `varint again` and then records, each a tag byte and its fields,
-until the layout ends. `again` is the bytes of the deflated bodies that later entries take
+The layout is `svarint base`, `varint again`, `varint body` and then records, each a tag byte
+and its fields, until the layout ends. `again` is the bytes of the deflated bodies that later entries take
 again (§3.2: a body 3 naming an entry whose body is deflated, or is in turn that of an earlier
 entry whose body is), each counted once; the lengths of the others taken again, and of the
-names and extra fields, the layout tells as it is. The archive is the output of the records in order. Positions are byte offsets in
+names and extra fields, the layout tells as it is. `body` is the length of the largest deflated
+body (0 without any); a deflated body longer is invalid (version 5 had no `body`). The archive is the output of the records in order. Positions are byte offsets in
 the archive; the *offset* of position `q` is `q − base`, taken modulo `2^64`.
 
 | tag | record | fields in the layout |

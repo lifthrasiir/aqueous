@@ -246,7 +246,7 @@ pub fn plan(inputs: [u64; 4], layout: &[u8]) -> Option<u64> {
     let held = again + block(held) + block(RUN_BYTES * c.entries);
     let bufs = held + block(c.stored) + block(c.kept) + block(layout::DERIVED as u64);
     let seen = bufs + block(layout::SEEN_BYTES * c.entries);
-    let pieces = [c.stored, c.kept, layout::DERIVED as u64, inputs[1]].into_iter().map(piece).max().unwrap_or(0);
+    let pieces = [c.stored, c.kept, layout::DERIVED as u64, c.body].into_iter().map(piece).max().unwrap_or(0);
     let record = (block(c.extra) + pieces).max(block(c.name) + block(c.extra));
     Some(reading.max(summing).max(seen + record))
 }

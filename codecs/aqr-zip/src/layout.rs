@@ -334,11 +334,13 @@ pub enum Made {
 
 impl<'a> Writer<'a> {
     /// A writer of the layout of archive `d` from `base`, of `again` bytes of deflated bodies
-    /// that later entries take again (§3.1 of FORMAT.md).
-    pub fn new(d: &'a [u8], base: i64, again: u64) -> Writer<'a> {
+    /// that later entries take again and deflated bodies of `body` bytes at most (§3.1 of
+    /// FORMAT.md).
+    pub fn new(d: &'a [u8], base: i64, again: u64, body: u64) -> Writer<'a> {
         let mut layout = Vec::new();
         varint::put_signed(&mut layout, base);
         varint::put(&mut layout, again);
+        varint::put(&mut layout, body);
         Writer { d, st: State::new(base), layout, kept: Vec::new(), kept_ends: Vec::new(), locals: Default::default() }
     }
 
@@ -500,10 +502,10 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// The base of a layout and the bytes of its deflated bodies taken again (its header), its
-/// records after them.
-fn header(r: &mut Reader) -> Result<(i64, u64)> {
-    Ok((varint::unzz(r.varint()?), r.varint()?))
+/// The base of a layout, the bytes of its deflated bodies taken again and its largest deflated
+/// body (its header), its records after them.
+fn header(r: &mut Reader) -> Result<(i64, u64, u64)> {
+    Ok((varint::unzz(r.varint()?), r.varint()?, r.varint()?))
 }
 
 /// The next `n` bytes of an input at `*p`.
@@ -691,13 +693,15 @@ pub struct Counts {
     /// The longest name and extra field, of a local or a central header.
     pub name: u64,
     pub extra: u64,
+    /// The largest deflated body (the layout's header tells it).
+    pub body: u64,
 }
 
 impl Counts {
     pub fn of(layout: &[u8]) -> Result<Counts> {
         let mut c = Counts::default();
         let mut r = Reader { d: layout, at: 0 };
-        header(&mut r)?;
+        c.body = header(&mut r)?.2;
         while r.at < layout.len() {
             match r.u8()? {
                 GAP => c.kept = c.kept.max(r.varint()?),
@@ -769,7 +773,7 @@ impl Prepared {
         let mut again = Vec::with_capacity(n);
         let mut lens: Vec<Option<u64>> = Vec::with_capacity(n);
         let mut r = Reader { d: layout, at: 0 };
-        let (_, deflated) = header(&mut r)?;
+        let (_, deflated, _) = header(&mut r)?;
         while r.at < layout.len() {
             let tag = r.u8()?;
             if tag == LOCAL {
@@ -901,6 +905,8 @@ pub fn assemble_prepared(
                 }
                 match body {
                     Source::Bytes(b) => out.put(b),
+                    // (no larger than the layout's header tells)
+                    Source::Deflated if blen as u64 > prepared.counts.body => return Err(corrupt()),
                     Source::Deflated => inputs.body(blen as u64, out)?,
                     Source::Within(w) => out.put_within(w),
                 }

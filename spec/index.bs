@@ -6251,8 +6251,8 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/xsv-recons.wasm" title="crates/aqr-modules/wasm/xsv-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-xsv/FORMAT.md" title="codecs/aqr-xsv/FORMAT.md">R</a>
     <tr>
-      <td><code>69df75f392eecbc43145737db87f75320f4fc660d0f54e1c7068470b6e01143c</code>
-      <td>zip-recons@5
+      <td><code>35655bef184bfc8f075b21ae9876c8b437544f2d577f1e97a08ec16722a0275f</code>
+      <td>zip-recons@6
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/zip-recons.wasm" title="crates/aqr-modules/wasm/zip-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-zip/FORMAT.md" title="codecs/aqr-zip/FORMAT.md">R</a>
   </tbody>
