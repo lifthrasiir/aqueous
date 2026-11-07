@@ -10,27 +10,12 @@ use crate::{lzx, recons};
 
 pub use crate::module::{Part, decode, index};
 
-pub const MODULE: aqr_formula::Module = aqr_formula::Module::new("lzx-recons", 1).with_memory(memory);
+pub const MODULE: aqr_formula::Module = aqr_formula::Module::new("lzx-recons", 2).with_plan(plan);
 
-/// Bytes the module works in besides its inputs and output for a stream of `n` bytes of data
-/// with a window of `window` bytes: the match finder (chains of 2 and 3 bytes), its data and
-/// its parse (a token at most a byte), and 64 KiB for the rest (contexts, trees).
-pub const fn work(window: usize, n: usize) -> u64 {
-    (2 * 65536 + 2 * window) as u64 * 4 + (n * (1 + std::mem::size_of::<lzx::Tok>())) as u64 + (64 << 10)
-}
-
-/// [`work`] of WIM's chunks.
-pub const WORK: u64 = work(recons::CHUNK, recons::CHUNK);
-
-fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let v = crate::module::variant(u.params).ok()?;
-    if !v.cab {
-        return Some(u.whole(WORK, 1));
-    }
-    // (CAB's streams one after another: the largest's, and its output once more as it is written)
-    let parts = crate::module::parts(u.content(3)?).ok()?;
-    let n = parts.iter().map(|p| p.data).max().unwrap_or(0);
-    Some(u.whole(work(v.window(), n) + n as u64, 1))
+/// The memory of the module: its plan ([`crate::plan::decode`]).
+fn plan(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let files = u.all_contents::<4>()?;
+    crate::plan::decode(u.initial(), u.params, u.inputs, u.output(), files)
 }
 
 /// The streams split on up to `threads` threads, each a stream of chunks (their bytes and

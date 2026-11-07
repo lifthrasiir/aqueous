@@ -8,6 +8,8 @@
 pub mod formula;
 pub mod lzx;
 pub mod module;
+#[cfg(feature = "encode")]
+pub mod plan;
 pub mod recons;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

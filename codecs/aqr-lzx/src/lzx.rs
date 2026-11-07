@@ -660,21 +660,67 @@ pub fn write_onto(data: &[u8], parse: &Parse, w: &mut BitW) -> Option<()> {
 
 /// [`write_as`] onto `w`, at a word's start.
 pub fn write_onto_as(data: &[u8], parse: &Parse, v: Variant, w: &mut BitW) -> Option<()> {
-    let mut lens = Lens::new(v);
-    let mut reps = REPS;
-    let (mut at, mut t, mut f) = (0, 0, 0);
-    let n = data.len();
-    let mut frame_end = if v.cab { FRAME.min(n) } else { usize::MAX };
-    if v.cab {
-        w.bits(1, parse.e8.is_some() as u32);
-        if let Some(e8) = parse.e8 {
-            w.bits(16, e8 >> 16);
-            w.bits(16, e8 & 0xffff);
-        }
-    } else if parse.e8.is_some() || !parse.frame_pad.is_empty() {
-        return None;
-    }
+    let mut wr = BlockWriter::new(v);
+    wr.start(data.len());
+    wr.head(w, parse.e8)?;
+    let (mut t, mut f) = (0, 0);
     for b in &parse.blocks {
+        f += wr.block(w, b, parse.toks.get(t..t + b.toks)?, parse.frame_pad.get(f..)?, data)?;
+        t += b.toks;
+    }
+    (t == parse.toks.len() && f == parse.frame_pad.len()).then_some(())?;
+    wr.finish(w, parse.tail_bits, &parse.trailing)
+}
+
+/// The writer of a chunk or stream of `v` block by block: what the blocks before leave
+/// for the ones after them (the code lengths, the repeat offsets, where the data is).
+pub struct BlockWriter {
+    v: Variant,
+    lens: Lens,
+    reps: [u32; 3],
+    at: usize,
+    n: usize,
+    frame_end: usize,
+}
+
+impl BlockWriter {
+    pub fn new(v: Variant) -> BlockWriter {
+        BlockWriter { v, lens: Lens::new(v), reps: REPS, at: 0, n: 0, frame_end: 0 }
+    }
+
+    /// Starts a chunk or stream of `n` bytes of data (as translated by e8).
+    pub fn start(&mut self, n: usize) {
+        self.lens.main.fill(0);
+        self.lens.len = [0; LEN];
+        self.reps = REPS;
+        self.at = 0;
+        self.n = n;
+        self.frame_end = if self.v.cab { FRAME.min(n) } else { usize::MAX };
+    }
+
+    /// Writes the header (CAB's: whether the data is e8 translated, and its size).
+    pub fn head(&mut self, w: &mut BitW, e8: Option<u32>) -> Option<()> {
+        if self.v.cab {
+            w.bits(1, e8.is_some() as u32);
+            if let Some(e8) = e8 {
+                w.bits(16, e8 >> 16);
+                w.bits(16, e8 & 0xffff);
+            }
+        } else if e8.is_some() {
+            return None;
+        }
+        Some(())
+    }
+
+    /// Writes block `b` of tokens `toks` over `data` (the whole chunk or stream), `pads` the
+    /// padding of the frames its tokens end (the first of the slice given, and so on): how many
+    /// of them it used.
+    pub fn block(&mut self, w: &mut BitW, b: &Block, toks: &[Tok], pads: &[u16], data: &[u8]) -> Option<usize> {
+        let (v, n) = (self.v, self.n);
+        let (mut at, mut f) = (self.at, 0);
+        if !v.cab && !pads.is_empty() {
+            return None;
+        }
         w.bits(3, b.kind as u32);
         if v.cab {
             (b.size < 1 << 24 && !b.default_size).then_some(())?;
@@ -697,7 +743,8 @@ pub fn write_onto_as(data: &[u8], parse: &Parse, v: Variant, w: &mut BitW) -> Op
                 write_tree(w, &b.trees[0])?;
                 write_tree(w, &b.trees[1])?;
                 write_tree(w, &b.trees[2])?;
-                lens.apply(b)?;
+                self.lens.apply(b)?;
+                let lens = &self.lens;
                 let (main, len_tree) = (Huff::new(&lens.main, false)?, Huff::new(&lens.len, false)?);
                 let aligned = Huff::new(&b.aligned, false)?;
                 let code = |w: &mut BitW, h: &Huff, l: &[u8], s: usize| -> Option<()> {
@@ -705,7 +752,8 @@ pub fn write_onto_as(data: &[u8], parse: &Parse, v: Variant, w: &mut BitW) -> Op
                     w.bits(l as u32, h.codes[s] as u32);
                     Some(())
                 };
-                for tok in parse.toks.get(t..t + b.toks)? {
+                (toks.len() == b.toks).then_some(())?;
+                for tok in toks {
                     match *tok {
                         Tok::Lit => {
                             code(w, &main, &lens.main, *data.get(at)? as usize)?;
@@ -717,14 +765,14 @@ pub fn write_onto_as(data: &[u8], parse: &Parse, v: Variant, w: &mut BitW) -> Op
                             let header = (len - MIN_MATCH).min(7);
                             let (slot, fo) = match rep {
                                 Some(k) if k < 3 => {
-                                    reps.swap(0, k as usize);
-                                    (reps[0] == off).then_some(())?;
+                                    self.reps.swap(0, k as usize);
+                                    (self.reps[0] == off).then_some(())?;
                                     (k as usize, 0)
                                 }
                                 Some(_) => return None,
                                 None => {
                                     let fo = off + 2;
-                                    reps = [off, reps[0], reps[1]];
+                                    self.reps = [off, self.reps[0], self.reps[1]];
                                     (slot(fo), fo)
                                 }
                             };
@@ -746,13 +794,12 @@ pub fn write_onto_as(data: &[u8], parse: &Parse, v: Variant, w: &mut BitW) -> Op
                             at += len;
                         }
                     }
-                    if at >= frame_end && frame_end < n {
-                        w.align(*parse.frame_pad.get(f)?)?;
+                    if at >= self.frame_end && self.frame_end < n {
+                        w.align(*pads.get(f)?)?;
                         f += 1;
-                        frame_end = (frame_end + FRAME).min(n);
+                        self.frame_end = (self.frame_end + FRAME).min(n);
                     }
                 }
-                t += b.toks;
                 (at == end).then_some(())?;
             }
             UNCOMPRESSED => {
@@ -760,27 +807,39 @@ pub fn write_onto_as(data: &[u8], parse: &Parse, v: Variant, w: &mut BitW) -> Op
                 ((b.align_bits as u32) < 1 << pad).then_some(())?;
                 w.bits(pad, b.align_bits as u32);
                 b.reps.iter().for_each(|r| w.out.extend_from_slice(&r.to_le_bytes()));
-                reps = b.reps;
-                w.out.extend_from_slice(&data[at..end]);
+                self.reps = b.reps;
+                w.out.extend_from_slice(data.get(at..end)?);
                 (end - at == b.size || end == n).then_some(())?;
                 if b.size % 2 == 1 {
                     w.out.extend(b.pad_byte);
                 }
                 at = end;
-                while frame_end <= at && frame_end < n {
-                    frame_end = (frame_end + FRAME).min(n);
+                while self.frame_end <= at && self.frame_end < n {
+                    self.frame_end = (self.frame_end + FRAME).min(n);
                 }
             }
             _ => return None,
         }
+        self.at = at;
+        Some(f)
     }
-    (at == n && t == parse.toks.len() && f == parse.frame_pad.len()).then_some(())?;
-    if w.partial() > 0 {
-        let k = 16 - w.partial();
-        w.bits(k, parse.tail_bits as u32 & ((1 << k) - 1));
+
+    /// Ends the chunk or stream: the bits padding its last word, and the bytes after it.
+    pub fn finish(&mut self, w: &mut BitW, tail_bits: u16, trailing: &[u8]) -> Option<()> {
+        self.tail(w, tail_bits)?;
+        w.out.extend_from_slice(trailing);
+        Some(())
     }
-    w.out.extend_from_slice(&parse.trailing);
-    Some(())
+
+    /// Ends the chunk or stream but for the bytes after it: the bits padding its last word.
+    pub fn tail(&mut self, w: &mut BitW, tail_bits: u16) -> Option<()> {
+        (self.at == self.n).then_some(())?;
+        if w.partial() > 0 {
+            let k = 16 - w.partial();
+            w.bits(k, tail_bits as u32 & ((1 << k) - 1));
+        }
+        Some(())
+    }
 }
 
 /// Undoes e8 translation: the data a chunk decodes to into the file's.

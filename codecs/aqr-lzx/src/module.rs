@@ -40,7 +40,7 @@ pub fn parts(index: &[u8]) -> Result<Vec<Part>> {
 /// What `index` cuts the inputs into: for each stream, the bytes kept before it, its data and
 /// its record; and the bytes kept after the last.
 #[allow(clippy::type_complexity)]
-fn cut<'a>(
+pub(crate) fn cut<'a>(
     data: &'a [u8],
     records: &'a [u8],
     kept: &'a [u8],
@@ -74,6 +74,13 @@ pub fn variant(params: &[u8]) -> Result<Variant> {
     }
 }
 
+/// The bytes of data a chunk of the streams of `v` comes to at most, of those of `lens` bytes of
+/// data: a CAB stream is one, WIM's chunks are of [`recons::CHUNK`].
+pub fn spare_data(v: Variant, lens: impl Iterator<Item = usize>) -> usize {
+    let most = lens.max().unwrap_or(0);
+    if v.cab { most } else { most.min(recons::CHUNK) }
+}
+
 /// The module: of the inputs (data, records, bytes kept, index), each stream of LZX chunks (or,
 /// with `params` the window's bits, each CAB stream) that its data and record rebuild after the
 /// bytes kept before it, then the bytes kept after the last, `len` bytes in all (see
@@ -89,9 +96,13 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
     let len = usize::try_from(len).map_err(|_| corrupt())?;
     let mut out = Vec::with_capacity(len);
     if threads <= 1 || streams.len() <= 1 || cfg!(target_family = "wasm") {
+        // (the streams one after another on the match finder and chunk made once, for the largest)
+        let mut spare = recons::Spare::new(v.window(), spare_data(v, streams.iter().map(|s| s.1.len())));
         for &(kept, data, record) in &streams {
             out.extend_from_slice(kept);
-            join_onto(data, record, &mut out)?;
+            let (s, done) = recons::join_in(spare, v, data, record, &mut out);
+            spare = s;
+            done?;
             if out.len() > len {
                 return Err(Error("output of another length"));
             }

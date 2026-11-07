@@ -289,6 +289,13 @@ chain start at its head for `pos` and go on by `prev[c mod W]` while they are ne
 
 ### 4.3 A chunk or stream
 
+A record starts with two **capacities**, `T` and `P`, two gammas under one table of 32 adaptive
+bits of their own (fresh at the start, and not `trail`): the most tokens of any block of the
+stream, and the most frames' padding of any block (§4.4). `T` is at most the length `N` of the
+stream's data and `P` at most `N / 32768 + 2`; a block of more tokens than `T` or more padding
+than `P` fails. They let a decoder reserve the tokens and padding of a block once (module
+version 2; version 1 had none). The encoder writes the greatest of its blocks'.
+
 The record of a WIM stream is, for each chunk of its data (32768 bytes each, the last shorter),
 the chunk's part below; the record of a CAB stream is one part, over its whole data. Within a
 part, `piece` is the chunk's (or stream's) data as the module is given it:
@@ -416,7 +423,7 @@ the pretree's lengths: P = huffman(g, 15), g counting each symbol and each 19's 
 
 ## 5. Formula module
 
-The module is `lzx-recons`, version 1. It rebuilds one or more streams, each from its data and
+The module is `lzx-recons`, version 2 (version 1 had no capacities in the record, §4.3). It rebuilds one or more streams, each from its data and
 its record, between bytes it is given as they are: its output is a part of a container as it is.
 
 **Parameters**: none for streams of the WIM variant; one byte `w`, `15 ≤ w ≤ 21`, for streams of
@@ -442,6 +449,16 @@ each other (each record's contexts fresh). The output must be the application's 
 
 The module fails on other parameters, another count of inputs or resources, an index that does
 not cut the inputs exactly, a record that fails (§4), or an output of another length.
+
+**Memory** *(informative)*: the module lays its memory out as a stack (`aqr_api::stack`), and
+the plan of its memory is exact (`aqr-lzx`'s `plan::decode`): besides the inputs and the output,
+the match finder (four bytes each of the two heads of 65,536 and the two rings of the window)
+and a chunk's data (a CAB stream is one: the largest stream's data; WIM's chunks the most of
+32,768 bytes), made once for all the streams; for each stream its contexts, the code lengths
+(twice), the tokens (8 bytes each, `T`) and the padding (2 bytes each, `P`) of a block, and
+128 KiB (`SCRATCH`) for the work of a block's trees (taken once and given back, so that the plan
+does not depend on the trees). A block is written onto the end of the output as soon as its
+record is read.
 
 ## 6. Encoder choices *(informative)*
 

@@ -2789,6 +2789,68 @@ fn rar3_plans_hold() {
     }
 }
 
+/// lzx-recons lays its memory out as a stack, its limit its plan: of WIM chunks (aqr-lzx's
+/// fixture) in one stream and in two with bytes kept between and after, and of a CAB stream
+/// (a window of 64 KiB, e8).
+#[test]
+fn lzx_plans_hold() {
+    let d = fixture("codecs/aqr-lzx/tests/data/greedy.chunks");
+    let (mut chunks, mut at) = (Vec::new(), 0);
+    while at < d.len() {
+        let n = u32::from_le_bytes(d[at..at + 4].try_into().unwrap()) as usize;
+        let len = u32::from_le_bytes(d[at + 4..at + 8].try_into().unwrap()) as usize;
+        chunks.push((&d[at + 8..at + 8 + len], n));
+        at += 8 + len;
+    }
+    for (what, streams) in [
+        ("one", vec![chunks.clone()]),
+        ("two", vec![chunks[..1].to_vec(), chunks[1..].to_vec()]),
+        ("a chunk", vec![chunks[..1].to_vec()]),
+    ] {
+        let mut f = Formula::default();
+        f.push("raw", Vec::new());
+        f.push("kept", b"<before><between><after>".to_vec());
+        let mut parts = Vec::new();
+        let mut want = Vec::new();
+        for (i, (s, sp)) in streams.iter().zip(aqr_lzx::formula::split(&streams, 1)).enumerate() {
+            let sp = sp.unwrap();
+            let at = f.streams[0].data.len() as u64;
+            f.streams[0].data.extend_from_slice(&sp.data);
+            let kept = if i == 0 { Node::slice(1, 0, 8) } else { Node::slice(1, 8, 9) };
+            want.extend_from_slice(if i == 0 { b"<before>" } else { b"<between>" });
+            s.iter().for_each(|c| want.extend_from_slice(c.0));
+            parts.push(aqr_lzx::formula::Stream {
+                kept,
+                data: Node::slice(0, at, sp.data.len() as u64),
+                record: sp.record,
+            });
+        }
+        want.extend_from_slice(b"<after>");
+        f.root = aqr_lzx::formula::apply(&mut f, parts, Node::slice(1, 17, 7), want.len() as u64);
+        plan_holds(&format!("lzx {what}"), f, &want);
+    }
+    let s = fixture("codecs/aqr-lzx/tests/data/greedy.cab-lzx");
+    let v = aqr_lzx::lzx::Variant::cab(s[0]).unwrap();
+    let n = u32::from_le_bytes(s[1..5].try_into().unwrap()) as usize;
+    let (mut src, mut at) = (Vec::new(), 5);
+    while at < s.len() {
+        let len = u32::from_le_bytes(s[at..at + 4].try_into().unwrap()) as usize;
+        src.extend_from_slice(&s[at + 4..at + 4 + len]);
+        at += 4 + len;
+    }
+    let sp = aqr_lzx::recons::split_stream(&src, n, v).unwrap();
+    let mut f = Formula::default();
+    f.push("raw", sp.data.clone());
+    let stream = aqr_lzx::formula::Stream {
+        kept: Node::Concat(Vec::new()),
+        data: Node::slice(0, 0, n as u64),
+        record: sp.record,
+    };
+    let a = aqr_lzx::formula::apply_as(&mut f, v, vec![stream], Node::Concat(Vec::new()), src.len() as u64);
+    f.root = Node::Apply(Box::new(a));
+    plan_holds("lzx cab", f, &src);
+}
+
 /// wrt-recons and wrt-recons-hangul lay their memory out as stacks, their limits their plans: of
 /// text of words and markup, of Hangul, and of a little more than a piece of 16 MiB (two
 /// pieces).
