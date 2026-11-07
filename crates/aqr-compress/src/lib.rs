@@ -2693,10 +2693,16 @@ fn heap_per_byte(format: Format) -> f64 {
         // in parts (segments, chunks, the data of each application made as it is needed), or
         // slices of the input and entries made apart
         Jsonl | ProRes | Wim | Iso | Ar | Tar | Cpio | Asar | Aqr | Ppmd => 0.0,
-        // blocks of 64 MiB, chunks of 8 Mi-bases, or slices with an index of frames
-        Obj | Fasta | Mkv => 3.0,
-        // text: the counts of the dictionary (enwik8: 1.1, enwik9: 0.4, per byte of the input) and
-        // the coded texts of the segments being made, which are spilled
+        // blocks of 64 MiB, or slices with an index of frames
+        Obj | Mkv => 3.0,
+        // FASTA: segments of 256 MiB, the encoder holding a whole segment (heap peaks of
+        // `aqr -c --stats` with verification, hg19: chr21 49 MB -> 160 MB = 3.3 per byte, as a
+        // small input takes its tables whole; chr1 254 MB -> 308 MB = 1.2; chr1+chr20 319 MB ->
+        // 482 MB = 1.5, two segments), 2.0 for the largest ratio of the inputs that count
+        Fasta => 2.0,
+        // text: the counts of the dictionary and the coded texts of the segments of 32 MiB being
+        // made, which are spilled (heap peaks of `aqr -c --stats` with verification: enwik8 109
+        // MB = 1.09 per byte of the input, enwik9 601 MB = 0.60), enwik8's rounded up
         Text => 1.2,
         // coded whole (enwik9: 1.5)
         GnuGettext => 2.0,
