@@ -183,17 +183,17 @@ start of a record.
 
 ### Packets
 
-The body codes the packets in order until they cover `D`. A record may have **breaks**
-(positions in `D`, in order, from the chunks of an [LZMA2 segment](#lzma2-segments); an LZMA
-stream has none): at a break the state `s` and `reps` become 0 where it resets them, and the
-bytes it stores are skipped (no packet covers them); no packet goes past the next break. At each
-position `pos`, with the state `s` and `reps` as the stream has them there (but for resets at
-breaks: there they become 0), after inserting the positions before `pos`:
+The body codes the packets in order until they cover `D`. The body of a segment of
+[LZMA2](#lzma2-segments) has the **chunks'** headers among them (below): at the start of a chunk
+the state `s` and `reps` become 0 where it resets them, and the bytes it stores are skipped (no
+packet covers them); no packet goes past the end of its chunk. At each position `pos`, with the
+state `s` and `reps` as the stream has them there (but for resets at chunks: there they become
+0), after inserting the positions before `pos`:
 
 ```text
-E = the next break after pos, or N
+E = the end of the chunk, or N for LZMA
 cap = min(273, E − pos)
-rl[k] = lcp(pos − reps[k] − 1, pos, cap) if reps[k] < pos, else 0      (k = 0 … 3)
+rl[k] = lcp(pos − reps[k] − 1, pos, cap) if reps[k] < min(pos, R), else 0      (k = 0 … 3)
 b0 = bucket(rl[0]),  bh = bucket(first(pos)),  brest = bucket(max(rl[1], rl[2], rl[3]))
 
 bit is_match[s][bh][b0]: 0 a literal (done)
@@ -235,19 +235,21 @@ A body in parts (flag bit 1; an LZMA stream's, never a segment's) codes its pack
 stretches of their own, so that they decode side by side:
 
 ```text
-varint  k        the parts after the first, at least 1 and below N
-k times:         each of those parts:
-  varint  gap    its start's distance from the previous one's (the first starts at 0), > 0
-  u8      s      the state there, below 12
-  4 varint reps  reps[0 … 3] there (each below 2^32)
-k times: varint  the length of each part's body but the last's
-the bodies, one after another (the last one to the end)
+varint  k        the parts after the first, at least 1 and below N, and at most the
+                 length of the body divided by 7
+k + 1 times:     each part:
+  varint  span     the bytes of data it covers, > 0
+  varint  len      the length of its body
+  u8      s        the state at its start, below 12        (all but the first)
+  4 varint reps    reps[0 … 3] there, each below R         (all but the first)
+  len bytes        its body
 ```
 
-The starts are below `N`, and each is the position of a packet. A part's body is coded as
-[above](#coding), with its own coder and all its contexts fresh, from its start (the state and
-`reps` it gives; 0 for the first) to the next part's start (or `N`): the packets must cover
-that exactly, and the walk ends there. Within a part everything is as above: in particular the
+The spans add up to `N`; the first part starts at 0 with the state and `reps` 0, each other at
+the sum of the spans before it, which is the position of a packet. A part's body is coded as
+[above](#coding), with its own coder and all its contexts fresh, from its start to the end of
+its span: the packets must cover that exactly, and the walk ends there. The bodies end
+the record. Within a part everything is as above: in particular the
 match finder holds the positions before `pos` (those of earlier parts too; with no breaks, `E`
 is `N`, so a match may reach past the part's end into the data). As the match finder looks no
 farther back than `R`, a decoder may start one of a part with only the positions from
@@ -285,17 +287,27 @@ chunk.
 ```text
 u8      flags    bit 0: the stream's end byte (0) follows the segment; the others 0
 le32    dict     the dictionary size (as in an LZMA record: R = max(dict, 4096))
-varint  n        the number of chunks; then for each:
-  u8      c        its control byte, without the bits of its size: 1, 2, 0x80, 0xA0, 0xC0 or 0xE0
-  varint  len      the bytes of its data, less one: below 2^16 if stored, else below 2^21
-  u8      props    the properties byte, where c ≥ 0xC0
 the body
 ```
 
-The first chunk resets the dictionary (`c` is 1 or 0xE0); no other does. The data's length is
-the sum of the chunks'. The body is coded as an LZMA record's (`D` the segment's data), with a
-break at the start of each chunk: resetting the state where `c ≥ 0xA0`, and skipping the data
-of a stored chunk.
+The body is coded as an LZMA record's (`D` the segment's data), with a **chunk header** where
+each chunk starts: at the position where the chunk before it ends (0 for the first), unless that
+is `N` (so the chunks cover `D`, and an empty segment has none). A header codes, in the
+[coding](#coding) above and the contexts `chunk_kind` (7 trees of 3 bits), `chunk_len` (32
+adaptive bits) and `chunk_props` (a tree of 8 bits), all fresh at the start of the body:
+
+```text
+kind = tree(3) chunk_kind[prev];  c = [1, 2, 0x80, 0xA0, 0xC0, 0xE0][kind] (fails if kind ≥ 6)
+x = the bytes of data of the chunk: bitlen(x) − 1 in unary, its bit k the adaptive bit chunk_len[min(k, 31)]
+    (fails past 31), then the bits of x below its top one, raw, highest first
+if c ≥ 0xC0: tree(8) chunk_props: the properties byte, below 225, with lc + lp ≤ 4
+```
+
+where `prev` is the kind of the chunk before it (6 for the first). The first chunk resets the
+dictionary (`c` is 1 or 0xE0); no other does. A stored chunk has 2^16 bytes of data at most, an
+LZMA chunk 2^21, and none more than are left of `D`. After a header the state and `reps` are
+reset where `c ≥ 0xA0`, and the data of a stored chunk is skipped; the packets of an LZMA chunk
+follow, ending at its end.
 
 **Rebuilding**: the chunks in order, each its header (the control byte with the high bits of
 its size, the sizes, the properties byte) and its bytes: a stored chunk's data, or the packets
@@ -312,22 +324,26 @@ candidates, so that a walk takes one cache miss for them); natively, those of ea
 decoded at once, with the packets of the parts decoded and not yet encoded (a Wasm module goes
 through the parts with one match finder).
 
-The Wasm modules lay their memory out as a stack with nothing grown: the output (its length is
-the application's), then for each stream, freed after it, the parts' list, the literal model
-(`2 × 0x300 × 2^(lc+lp)` bytes; for LZMA2, the chunks' list, the model at its largest, 24 KiB,
-where there is an LZMA chunk, and the breaks), the match finder's tables (one position
-of each hash, 12.5 MiB) and rings, the walk's
-contexts and candidates, and an LZMA2 chunk's coder (64 KiB and 16). All of it follows from the
-lengths and the records' starts, so that no size is stored for it: the encoder declares it as the
-memory limit (`plan.rs`).
+The Wasm modules are [part modules](#the-module-as-a-part-module): they hold nothing of the
+lengths of their inputs and output, and lay their memory out as a stack with nothing grown. For
+each stream, freed after it: the **window** of its data (`R` and an eighth of it or 64 KiB,
+64 KiB and 1 KiB of lookahead and 4 KiB of alignment, or all of the data where that is less),
+the match finder's tables (one position of each hash, 12.5 MiB) and rings (`12 × S`), the
+literal model (`2 × 0x300 × 2^(lc+lp)` bytes; for LZMA2 at its largest, 24 KiB), a piece of the
+stream (16 KiB) for LZMA, the walk's contexts and candidates, and for LZMA2 a chunk's coder (64
+KiB and 16). Before them, the pieces in which the index and the records are read. All of it
+follows from the dictionaries and the streams' lengths (a stream shorter than its dictionary
+holds less) and the records' starts, so that no size is stored for it: the encoder declares it
+as the memory limit (`plan.rs`).
 
 ## Formula module
 
-The module is `lzma-recons`, version 2 (version 1 did not have [parts](#parts)). It rebuilds
-one or more streams, each from its data and its record, and its output is the streams one after
-another. A container cuts the output
-by the streams' lengths (a Split instruction of the formula), and adds what lies around them
-(the 13-byte header of a `.lzma` file; a 7z archive's headers).
+The module is `lzma-recons`, version 3 (version 1 did not have [parts](#parts); in version 2 the
+parts' table preceded their bodies, a part's end was the next one's start, and a last distance
+beyond `R` was taken). It rebuilds one or more streams, each from its data and its record, and
+its output is the streams one after another. A container cuts the output by the streams'
+lengths (a Split instruction of the formula), and adds what lies around them (the 13-byte
+header of a `.lzma` file; a 7z archive's headers).
 
 **Parameters**: none (empty).
 
@@ -348,7 +364,21 @@ The module fails on any parameters, any other count of inputs or resources, an i
 does not cut the inputs exactly, a record that fails above, or an output whose length is not
 the application's declared output size.
 
-The module `lzma2-recons`, version 1, is the same for the segments of LZMA2 streams: each
+### The module as a part module
+
+Both modules are part modules (the specification's "Module execution"): the inputs are read once
+each, in order, through windows of 16 pages, and the output is written once, in order, through
+one. A stream is rebuilt as the module reads: its record's header, then the body (and for LZMA
+the parts' headers) through the range decoder; its data into a window that holds the bytes from
+`R` before the position of the walk to 66 KiB after it (a stored chunk of LZMA2 is copied from
+there; nothing reaches farther), dropping the older ones; the stream's bytes put to the output
+as the range encoder makes them, in pieces. What the walk looks at in the data is as if it held
+all of it: the match finder's queries stay within `R` before the position and `cap` (273) after
+it, and what it hashes ahead within 32 + 16. The bytes read of the record must be all of it, as
+the data and output must be all of theirs.
+
+The module `lzma2-recons`, version 2 (in version 1 the chunks' headers were a list at the start
+of the record), is the same for the segments of LZMA2 streams: each
 "stream" above is a segment, from its data and [its record](#the-record-of-a-segment), and the
 output is the segments' bytes one after another (the segments of an LZMA2 stream, then its end
 byte, make the stream). A `.xz` file cuts the output by its blocks' streams, and adds the rest

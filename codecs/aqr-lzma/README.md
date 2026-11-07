@@ -60,18 +60,34 @@ just before on the same machine.
   records about 6% smaller on the `.tar.lzma`.
 - Every member of those `.tar.lzma` (421 MB) and the data of that 7z folder are files of the
   benchmark, so with the data shared the streams cost about 14 MB instead of 96.5 MB.
-- Memory: the data, the stream and `12 × S` bytes of chains, `S` the dictionary size rounded
-  up to a power of 2 (at most the data's), and 132.5 MiB of tables (12.5 MiB for less than
-  1 MiB of data, without the buckets). The modules never keep the buckets: with one position
-  of each hash their tables are 12.5 MiB at any length, and the records are byte for byte the
-  same (the `.tar.lzma` of the 10gb and the 7z folders above, checked), at the cost of a
-  rebuild about twice as slow in the match finder (32 -> 19 MB/s on the 7 largest `.tar.lzma`,
-  one thread, natively with one position; the modules run as Wasm only as the fallback of
-  the known hash, which runs natively with 16). That brings the `.tar.lzma` of 8 MiB
-  dictionaries under the encoder's bound of 256 MiB per application (up to 354 MiB needed
-  before), where they were stored whole. The bench on the 7z folder (data, packets, stream and
-  record held at once) peaked at 1.39 GB (1.29 GB before the buckets); that on the `.tar.lzma`,
-  4 at once, at 1.80 GB (1.31 GB).
+- Memory: natively the data, the stream and `12 × S` bytes of chains, `S` the dictionary size
+  rounded up to a power of 2 (at most the data's), and 132.5 MiB of tables (12.5 MiB for less
+  than 1 MiB of data, without the buckets). The modules never keep the buckets: with one
+  position of each hash their tables are 12.5 MiB at any length, and the records are byte for
+  byte the same (the `.tar.lzma` of the 10gb and the 7z folders above, checked), at the cost of
+  a rebuild about twice as slow in the match finder (32 -> 19 MB/s on the 7 largest
+  `.tar.lzma`, one thread, natively with one position; the known hash runs natively with 16
+  in the encoder). That brought the `.tar.lzma` of 8 MiB dictionaries under the encoder's
+  bound of 256 MiB per application (up to 354 MiB needed before), where they were stored
+  whole.
+- The modules are part modules (FORMAT.md, "The module as a part module"): the data goes
+  through a window that holds the dictionary `R`, an eighth more and 66 KiB ahead (all of it
+  where it is shorter; the match finder and the model look no farther), the record is read and
+  the stream written in pieces, so that a module takes `12 × S` + 12.5 MiB + about `1.13 R` +
+  0.1 MiB, and 1.1 MiB of initial memory, whatever the lengths (they were the data, the
+  stream and the record held whole besides: 584 MiB for a 220 MB `.xz` of an 8 MiB dictionary).
+  By the dictionary (the plan, for data over it; `lzma_plans_hold` checks it to the page,
+  with 67 MiB of data too): 4 KiB 12.8 MiB, 1 MiB 25.8 MiB, 4 MiB 65 MiB, **8 MiB (XZ
+  Utils `-6`) 118 MiB**, 16 MiB 223 MiB, 32 MiB 433 MiB, 64 MiB (7-Zip's) 853 MiB; the bound
+  of the encoder (256 MiB per application, with 4 MiB of windows) is passed from 32 MiB on,
+  where the stream is stored whole. A stream shorter than its dictionary holds less (a ring
+  of `min(S, N)`, a window of `N`).
+  Measured on 2026-11-08 (M4, `-9`, the bound of 256 MiB): a tree of 367 MB beside its
+  `xz -6` (8 MiB dictionary, one block of 369 MB of data, 100.4 MB) archives to 96.9 MB where
+  it was 187.2 MB (the stream stored whole, 1059 MiB needed), the same as with no bound; the
+  7 largest `.tar.lzma` of the 10gb, 41,740,374 -> 41,741,808 B (the module's block is 1.4 KB
+  larger); the whole 10gb, 2,361,761,993 -> 2,361,767,581 B. The match finder's indexing by the
+  window's base costs the split and the rebuild 4.7% of their instructions natively.
 - A stream of more than 64 MiB of data is coded in parts of 64 MiB, each with contexts of its
   own, which split and rebuild side by side (FORMAT.md, "Parts"). Natively, the match finders
   of a process take at most 1 GiB of chains at once (one of a 64 MiB dictionary), or as much
@@ -93,8 +109,8 @@ The tests of damaged and random records catch an overflow only in a debug build
 
 ## Status
 
-The module `lzma-recons` (natively and as a Wasm module of aqr-modules) and `.lzma` files in
-aqr-compress are done: in an archive of several files, a `.lzma` file is put in a batch with
+The module `lzma-recons` (natively and as a Wasm module of aqr-modules, a part module) and
+`.lzma` files in aqr-compress are done: in an archive of several files, a `.lzma` file is put in a batch with
 the files its stream holds (the members of a tar archive, or the whole), so that their data is
 stored once. So are the module `lzma2-recons` and `.xz` files (their blocks of LZMA2 alone),
 which aqr-compress takes alike, anywhere in data too; blocks of filters before LZMA2 (aqr-bcj's:

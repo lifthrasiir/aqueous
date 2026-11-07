@@ -8,11 +8,12 @@
 
 use std::ops::Range;
 
-use aqr_common::varint;
-
 use crate::lzma::{END, Error, Kind, Model, Packet, Props};
+use crate::mf::Mf;
 use crate::rc::{Decoder, Encoder};
-use crate::recons::{self, Break, Split};
+use crate::recons::{self, Ev, Split};
+use crate::stream::{Body, Pull, Put, Reader};
+use crate::window::{View, Window};
 
 /// The most data a chunk holds.
 pub const CHUNK_DATA: usize = 1 << 21;
@@ -22,19 +23,6 @@ pub const CHUNK_CODED: usize = 1 << 16;
 pub const CHUNK_ROOM: usize = CHUNK_CODED + 16;
 /// The literal probabilities of the largest properties of LZMA2 (`lc + lp` = 4).
 pub const LIT_MAX: usize = 0x300 << 4;
-
-/// Bytes of what the module holds on WebAssembly (32-bit pointers), checked there by assertions:
-/// a chunk, a break of the record's walk.
-pub mod wasm {
-    pub const CHUNK: u64 = 24;
-    pub const BREAK: u64 = 12;
-}
-
-#[cfg(target_family = "wasm")]
-const _: () = {
-    assert!(size_of::<Chunk>() as u64 == wasm::CHUNK);
-    assert!(size_of::<Break>() as u64 == wasm::BREAK);
-};
 
 /// A chunk: its control byte (1 or 2 for stored data, else that of an LZMA chunk without the
 /// bits of its size: 0x80 resetting nothing, 0xA0 the state, 0xC0 the state with new
@@ -53,7 +41,7 @@ impl Chunk {
     }
 
     /// Whether it starts a segment.
-    fn resets_dict(&self) -> bool {
+    pub fn resets_dict(&self) -> bool {
         self.control == 1 || self.control == 0xE0
     }
 }
@@ -181,136 +169,126 @@ pub fn decode(input: &[u8], limit: usize) -> Result<Decoded, Error> {
     Ok(Decoded { segments, used: at })
 }
 
-/// Writes a segment's chunks, given its packets one after another.
+/// Writes a segment's chunks, given each one's header and then its packets.
 pub struct Writer<'a> {
-    chunks: &'a [Chunk],
-    /// The next chunk to write, and its start in the data.
-    next: usize,
-    start: usize,
+    sink: &'a mut dyn Put,
     /// The LZMA chunk being coded: its end in the data, its coder and itself.
-    open: Option<(usize, Encoder, Chunk)>,
+    open: Option<(usize, Encoder<'static>, Chunk)>,
     model: Option<Model>,
-    /// The memory of the model's literal probabilities until it has one, of the room for the
-    /// largest ([`LIT_MAX`]) where there is an LZMA chunk, else none.
+    /// The memory of the model's literal probabilities until it has one: room for the largest
+    /// ([`LIT_MAX`]).
     lit: Vec<u16>,
     props: Option<Props>,
     /// The position of the next packet.
     pos: usize,
-    out: Vec<u8>,
 }
 
 impl<'a> Writer<'a> {
-    /// Writing onto the end of `out`.
-    pub fn new(chunks: &'a [Chunk], out: Vec<u8>) -> Self {
-        let lit = Vec::with_capacity(if chunks.iter().any(|c| !c.stored()) { LIT_MAX } else { 0 });
-        Writer { chunks, next: 0, start: 0, open: None, model: None, lit, props: None, pos: 0, out }
+    /// Writing to `sink`.
+    pub fn to(sink: &'a mut dyn Put) -> Self {
+        Writer { sink, open: None, model: None, lit: Vec::with_capacity(LIT_MAX), props: None, pos: 0 }
     }
 
-    /// Writes the chunks that end by the position, and opens the LZMA chunk at it.
-    fn reach(&mut self, data: &[u8]) -> Option<()> {
-        loop {
-            if let Some((end, ..)) = self.open {
-                if self.pos < end {
-                    return Some(());
-                }
-                let (_, c, ch) = self.open.take()?;
-                let coded = c.finish();
-                if coded.len() > CHUNK_CODED {
-                    return None;
-                }
-                let (u, p) = (ch.len - 1, coded.len() - 1);
-                self.out.extend([ch.control | (u >> 16) as u8, (u >> 8) as u8, u as u8, (p >> 8) as u8, p as u8]);
-                self.out.extend(ch.props.map(Props::byte));
-                self.out.extend(coded);
-            }
-            let Some(&ch) = self.chunks.get(self.next) else { return Some(()) };
-            if self.pos != self.start {
-                return None;
-            }
-            self.next += 1;
-            let span = self.start..self.start + ch.len;
-            self.start = span.end;
-            if ch.stored() {
-                let u = ch.len - 1;
-                self.out.extend([ch.control, (u >> 8) as u8, u as u8]);
-                self.out.extend_from_slice(data.get(span.clone())?);
-                self.pos = span.end;
-                continue;
-            }
-            if ch.control >= 0xA0 {
-                self.props = ch.props.or(self.props);
-                match &mut self.model {
-                    Some(m) => m.reset(self.props?),
-                    None => self.model = Some(Model::with_lit(self.props?, std::mem::take(&mut self.lit))),
-                }
-            }
-            self.model.as_ref()?;
-            self.open = Some((span.end, Encoder::new(Vec::with_capacity(CHUNK_ROOM)), ch));
+    /// Writes the LZMA chunk open, if any, once the packets reach its end.
+    fn close(&mut self) -> Option<()> {
+        let Some((end, c, ch)) = self.open.take() else { return Some(()) };
+        if self.pos != end {
+            return None;
         }
+        let coded = c.finish();
+        if coded.len() > CHUNK_CODED {
+            return None;
+        }
+        let (u, p) = (ch.len - 1, coded.len() - 1);
+        let head = [ch.control | (u >> 16) as u8, (u >> 8) as u8, u as u8, (p >> 8) as u8, p as u8];
+        self.sink.put(&head)?;
+        if let Some(p) = ch.props {
+            self.sink.put(&[p.byte()])?;
+        }
+        self.sink.put(&coded)
     }
 
-    /// Codes the next packet of `data`. None where it is not in an LZMA chunk.
-    pub fn push(&mut self, data: &[u8], pk: Packet) -> Option<()> {
-        self.reach(data)?;
+    /// Starts the chunk `ch` at the position of the next packet, after the one before it: a
+    /// stored chunk is written from `v`, which holds its data, an LZMA chunk is opened.
+    pub fn begin(&mut self, v: &View, ch: Chunk) -> Option<()> {
+        self.close()?;
+        let end = self.pos + ch.len;
+        if ch.stored() {
+            let u = ch.len - 1;
+            self.sink.put(&[ch.control, (u >> 8) as u8, u as u8])?;
+            self.sink.put(v.d.get(self.pos.checked_sub(v.base)?..end.checked_sub(v.base)?)?)?;
+            self.pos = end;
+            return Some(());
+        }
+        if ch.control >= 0xA0 {
+            self.props = ch.props.or(self.props);
+            match &mut self.model {
+                Some(m) => m.reset(self.props?),
+                None => self.model = Some(Model::with_lit(self.props?, std::mem::take(&mut self.lit))),
+            }
+        }
+        self.model.as_ref()?;
+        self.open = Some((end, Encoder::new(Vec::with_capacity(CHUNK_ROOM)), ch));
+        Some(())
+    }
+
+    /// Codes the next packet, of the data seen through `v`. None where it is not in an LZMA
+    /// chunk.
+    pub fn push(&mut self, v: &View, pk: Packet) -> Option<()> {
         let (end, c, _) = self.open.as_mut()?;
         if self.pos + pk.len as usize > *end {
             return None;
         }
-        self.model.as_mut()?.code(c, data, self.pos, pk);
+        self.model.as_mut()?.code_at(c, v.d, v.base, self.pos, pk);
         self.pos += pk.len as usize;
         Some(())
     }
 
-    /// The chunks, once every one is written (None otherwise, or where one codes in too many
-    /// bytes).
-    pub fn finish(mut self, data: &[u8]) -> Option<Vec<u8>> {
-        self.reach(data)?;
-        (self.open.is_none() && self.next == self.chunks.len() && self.pos == data.len()).then_some(self.out)
+    /// Ends the segment: the last chunk is written (None where it codes in too many bytes, or
+    /// the packets stop short of its end), and the stream's end byte where `end`.
+    pub fn finish(mut self, end: bool) -> Option<()> {
+        self.close()?;
+        if end { self.sink.put(&[0]) } else { Some(()) }
     }
 }
 
 /// The chunks of the packets of `data`. None where they do not fit.
 pub fn encode(data: &[u8], chunks: &[Chunk], packets: &[Packet]) -> Option<Vec<u8>> {
-    let mut w = Writer::new(chunks, Vec::with_capacity(data.len() / 4));
-    for &pk in packets {
-        w.push(data, pk)?;
+    let mut out = Vec::with_capacity(data.len() / 4);
+    let v = View::whole(data);
+    let mut w = Writer::to(&mut out);
+    let (mut pos, mut next) = (0, 0);
+    for &c in chunks {
+        w.begin(&v, c)?;
+        pos += c.len;
+        if c.stored() {
+            continue;
+        }
+        let start = pos - c.len;
+        let mut at = start;
+        while at < pos {
+            let pk = *packets.get(next)?;
+            next += 1;
+            w.push(&v, pk)?;
+            at += pk.len as usize;
+        }
     }
-    w.finish(data)
-}
-
-/// The breaks of the record's walk: at each chunk, where the state is reset by it, and its data
-/// skipped where it is stored.
-fn breaks(chunks: &[Chunk]) -> Vec<Break> {
-    let mut at = 0;
-    chunks
-        .iter()
-        .map(|c| {
-            let b = Break { at, reset: c.control >= 0xA0, stored: if c.stored() { c.len } else { 0 } };
-            at += c.len;
-            b
-        })
-        .collect()
+    w.finish(false)?;
+    (pos == data.len() && next == packets.len()).then_some(out)
 }
 
 /// The flag of a record telling that the stream's end byte follows the segment.
 const END_BYTE: u8 = 1;
 
 /// The record of a segment: its header (a flags byte, bit 0 telling that the stream's end byte
-/// follows; the dictionary size, le32; the number of chunks, then for each its control byte,
-/// its data's length less one and the properties it sets, varints but the bytes), then the
-/// record of its packets ([`recons::deconstruct`]); and the cost of that by [`recons::Cat`] in
-/// bits. None where the packets do not fit.
+/// follows; the dictionary size, le32), then the record of its packets and chunks
+/// ([`recons::deconstruct`]); and the cost of that by [`recons::Cat`] in bits. None where the
+/// packets do not fit.
 pub fn deconstruct(seg: &Segment, dict: u32, end: bool) -> Option<(Vec<u8>, [f64; recons::CATS])> {
-    let (body, cost) = recons::deconstruct(&seg.data, &seg.packets, dict, &breaks(&seg.chunks))?;
-    let mut r = Vec::with_capacity(16 + 4 * seg.chunks.len() + body.len());
+    let (body, cost) = recons::deconstruct(&seg.data, &seg.packets, dict, Some(&seg.chunks))?;
+    let mut r = Vec::with_capacity(HEADER + body.len());
     r.push(if end { END_BYTE } else { 0 });
     r.extend(dict.to_le_bytes());
-    varint::put(&mut r, seg.chunks.len() as u64);
-    for c in &seg.chunks {
-        r.push(c.control);
-        varint::put(&mut r, c.len as u64 - 1);
-        r.extend(c.props.map(Props::byte));
-    }
     r.extend(body);
     Some((r, cost))
 }
@@ -337,54 +315,24 @@ pub fn split(input: &[u8], dict: u32, limit: usize, threads: usize) -> Result<Ve
     Ok(out)
 }
 
+/// The bytes of a segment's record before its body: the flags and the dictionary size.
+pub const HEADER: usize = 5;
+
 /// What a segment's record tells before the segment is rebuilt: whether the stream's end byte
-/// follows it, the dictionary size, the chunks, and the record of the packets.
+/// follows it, the dictionary size, and the record of the packets and chunks.
 pub struct Head<'a> {
     pub end: bool,
     pub dict: u32,
-    pub chunks: Vec<Chunk>,
     pub body: &'a [u8],
 }
 
-/// The [`Head`] of the record of a segment of `n` bytes of data. None where it is not one.
-pub fn head_of(record: &[u8], n: usize) -> Option<Head<'_>> {
-    let (&flags, rest) = record.split_first()?;
-    let (dict, rest) = rest.split_first_chunk::<4>()?;
-    if flags & !END_BYTE != 0 {
+/// The [`Head`] of the record of a segment. None where it is not one.
+pub fn head_of(record: &[u8]) -> Option<Head<'_>> {
+    let (head, body) = record.split_at_checked(HEADER)?;
+    if head[0] & !END_BYTE != 0 {
         return None;
     }
-    let mut at = 0;
-    // (each chunk has a byte of data at least, and two bytes of record)
-    let count = usize::try_from(varint::get(rest, &mut at).ok()?).ok().filter(|&c| c <= n && c <= rest.len() / 2)?;
-    let mut chunks = Vec::with_capacity(count);
-    let mut sum = 0usize;
-    for i in 0..count {
-        let &control = rest.get(at)?;
-        at += 1;
-        let len = usize::try_from(varint::get(rest, &mut at).ok()?).ok()?.checked_add(1)?;
-        let props = match control {
-            0xC0.. => {
-                let p = Props::from_byte(*rest.get(at)?).filter(|p| p.lc + p.lp <= 4)?;
-                at += 1;
-                Some(p)
-            }
-            _ => None,
-        };
-        let c = Chunk { control, len, props };
-        let max = if c.stored() { CHUNK_CODED } else { CHUNK_DATA };
-        let valid = matches!(control, 1 | 2 | 0x80 | 0xA0 | 0xC0 | 0xE0) && (i == 0) == c.resets_dict();
-        if !valid || len > max {
-            return None;
-        }
-        sum = sum.checked_add(len)?;
-        chunks.push(c);
-    }
-    (sum == n).then_some(Head {
-        end: flags & END_BYTE != 0,
-        dict: u32::from_le_bytes(*dict),
-        chunks,
-        body: &rest[at..],
-    })
+    Some(Head { end: head[0] & END_BYTE != 0, dict: u32::from_le_bytes(head[1..5].try_into().unwrap()), body })
 }
 
 /// The bytes of a segment (and the stream's end byte, where its record says so) from its data
@@ -395,18 +343,56 @@ pub fn join(data: &[u8], record: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// [`join`] written onto the end of `out`: where it has the room, it takes no more memory than
-/// the segment's rebuilding does ([`crate::plan`]).
+/// [`join`] written onto the end of `out`.
 pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>) -> Option<()> {
-    let h = head_of(record, data.len())?;
-    let mut w = Writer::new(&h.chunks, std::mem::take(out));
-    let mut ok = true;
-    recons::reconstruct(data, h.body, h.dict, &breaks(&h.chunks), |pk| {
-        ok = ok && w.push(data, pk).is_some();
-    })?;
-    *out = w.finish(data).filter(|_| ok)?;
-    if h.end {
-        out.push(0);
+    let h = head_of(record)?;
+    // (an empty segment has no chunks to code: the coder's flush alone)
+    if data.is_empty() && h.body.len() != 1 {
+        return None;
     }
-    Some(())
+    let mut w = Writer::to(out);
+    recons::reconstruct(data, h.body, h.dict, true, |v, ev| match ev {
+        Ev::Chunk(c) => w.begin(v, c),
+        Ev::Packet(pk) => w.push(v, pk),
+    })?;
+    w.finish(h.end)
+}
+
+/// [`join`] as a part module does it: the `n` bytes of data read in order from `data` into a
+/// window, the record read in order from `rec` (`rec_len` bytes of it), the segment put to
+/// `sink` in pieces; nothing of the lengths is held. The same bytes.
+pub fn join_stream(
+    data: &mut dyn Pull,
+    n: usize,
+    rec: &mut Reader,
+    rec_len: u64,
+    sink: &mut dyn Put,
+) -> crate::Result<()> {
+    let mut ok = || -> Option<()> {
+        let flags = rec.byte()?;
+        let mut dict = [0; 4];
+        for b in &mut dict {
+            *b = rec.byte()?;
+        }
+        if flags & !END_BYTE != 0 {
+            return None;
+        }
+        let reach = recons::reach(u32::from_le_bytes(dict));
+        let mut win = Window::fed(data, n, reach);
+        let mut mf = Mf::new(n, reach);
+        let mut w = Writer::to(sink);
+        let body = rec_len.checked_sub(HEADER as u64)?;
+        if n == 0 && body != 1 {
+            return None;
+        }
+        let mut d = Body::new(rec, body);
+        recons::walk_chunks(&mut d, &mut mf, &mut win, reach, |v, ev| match ev {
+            Ev::Chunk(c) => w.begin(v, c),
+            Ev::Packet(pk) => w.push(v, pk),
+        })?;
+        d.finish()?;
+        win.finish()?;
+        w.finish(flags & END_BYTE != 0)
+    };
+    ok().ok_or_else(crate::corrupt)
 }

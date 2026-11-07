@@ -3,6 +3,8 @@
 //! The model is written once, over [`Bits`], so that decoding and encoding cannot disagree.
 
 use crate::rc::{Bits, Decoder, Encoder, HALF};
+use crate::stream::Put;
+use crate::window::View;
 
 pub const MIN_LEN: u32 = 2;
 pub const MAX_LEN: u32 = 273;
@@ -187,17 +189,28 @@ impl Model {
 
     /// Codes the packet at `pos` of `out` (which holds everything before `pos`, and the
     /// packet's bytes too when encoding). Returns the packet, with `dist` the distance used.
+    #[inline]
     pub fn code<B: Bits>(&mut self, c: &mut B, out: &[u8], pos: usize, pk: Packet) -> Packet {
+        self.code_at(c, out, 0, pos, pk)
+    }
+
+    /// [`Model::code`] where `out` holds the bytes from position `base` on (a multiple of 16
+    /// or 0, so that `pos`'s low bits are those of its place in `out`), and those from
+    /// `pos - 1` and the packet's last distance back.
+    pub fn code_at<B: Bits>(&mut self, c: &mut B, out: &[u8], base: usize, pos: usize, pk: Packet) -> Packet {
         let ps = pos & ((1 << self.props.pb) - 1);
         let st = self.state;
         if c.bit(&mut self.is_match[st][ps], (pk.kind != Kind::Lit) as u32) == 0 {
-            let prev = if pos > 0 { out[pos - 1] as usize } else { 0 };
+            let prev = if pos > 0 { out[pos - 1 - base] as usize } else { 0 };
             let ls = ((pos & ((1 << self.props.lp) - 1)) << self.props.lc) + (prev >> (8 - self.props.lc));
             let p = &mut self.lit[0x300 * ls..0x300 * (ls + 1)];
-            let byte = out.get(pos).copied().unwrap_or(0) as u32;
+            let byte = out.get(pos - base).copied().unwrap_or(0) as u32;
             let mut s = 1u32;
             if st >= 7 {
-                let mut mb = pos.checked_sub(self.reps[0] as usize + 1).map_or(0, |i| out[i]) as u32;
+                let mut mb = pos
+                    .checked_sub(self.reps[0] as usize + 1)
+                    .and_then(|i| out.get(i.wrapping_sub(base)))
+                    .map_or(0, |&b| b) as u32;
                 while s < 0x100 {
                     let mbit = mb >> 7 & 1;
                     mb <<= 1;
@@ -359,38 +372,60 @@ pub fn plausible(input: &[u8], props: Props, n: usize) -> bool {
 }
 
 /// An encoder taking packets one by one.
-pub struct StreamEncoder {
-    c: Encoder,
+pub struct StreamEncoder<'a> {
+    c: Encoder<'a>,
     m: Model,
     pos: usize,
 }
 
-impl StreamEncoder {
+impl<'a> StreamEncoder<'a> {
     /// Writing onto `out`.
     pub fn new(props: Props, out: Vec<u8>) -> Self {
         StreamEncoder { c: Encoder::new(out), m: Model::new(props), pos: 0 }
     }
 
-    /// Codes the next packet of `data`.
-    pub fn push(&mut self, data: &[u8], pk: Packet) {
-        self.m.code(&mut self.c, data, self.pos, pk);
+    /// Writing to `sink` in pieces.
+    pub fn to(props: Props, sink: &'a mut dyn Put) -> Self {
+        StreamEncoder { c: Encoder::to(sink), m: Model::new(props), pos: 0 }
+    }
+
+    /// Codes the next packet, of the data seen through `v` (which holds the bytes it looks at).
+    pub fn push(&mut self, v: &View, pk: Packet) {
+        self.m.code_at(&mut self.c, v.d, v.base, self.pos, pk);
         self.pos += pk.len as usize;
     }
 
     /// Ends the stream, with the end marker if `marker`.
-    pub fn finish(mut self, data: &[u8], marker: bool) -> Vec<u8> {
-        if marker {
-            self.m.code(&mut self.c, data, self.pos, Packet { kind: Kind::Match, len: MIN_LEN as u16, dist: END });
-        }
+    pub fn finish(mut self, v: &View, marker: bool) -> Vec<u8> {
+        self.end(v, marker);
         self.c.finish()
+    }
+
+    /// [`StreamEncoder::finish`] for one writing to a sink. None where it refused some.
+    pub fn finish_to(mut self, v: &View, marker: bool) -> Option<()> {
+        self.end(v, marker);
+        self.c.finish_to()
+    }
+
+    fn end(&mut self, v: &View, marker: bool) {
+        if marker {
+            self.m.code_at(
+                &mut self.c,
+                v.d,
+                v.base,
+                self.pos,
+                Packet { kind: Kind::Match, len: MIN_LEN as u16, dist: END },
+            );
+        }
     }
 }
 
 /// Encodes the packets of `data`, and the end marker if `marker`.
 pub fn encode(data: &[u8], props: Props, packets: &[Packet], marker: bool) -> Vec<u8> {
+    let v = View::whole(data);
     let mut e = StreamEncoder::new(props, Vec::with_capacity(data.len() / 4));
     for &pk in packets {
-        e.push(data, pk);
+        e.push(&v, pk);
     }
-    e.finish(data, marker)
+    e.finish(&v, marker)
 }

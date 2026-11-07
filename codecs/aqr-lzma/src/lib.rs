@@ -19,6 +19,8 @@ pub mod module;
 pub mod plan;
 pub mod rc;
 pub mod recons;
+pub mod stream;
+pub mod window;
 pub mod xz;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

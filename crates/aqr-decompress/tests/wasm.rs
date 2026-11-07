@@ -578,7 +578,11 @@ fn plan_holds_shared(what: &str, mut f: Formula, want: &[u8]) {
     drop(recording);
     assert!(out.as_ref().is_ok_and(|o| o == want), "{what}: {:?}", out.err());
     let mine: Vec<_> = applied.iter().filter(|a| a.limit == limit).collect();
-    assert!(!mine.is_empty(), "{what}: not applied: limit {limit}, applied {:?}", applied.iter().map(|a| (a.limit, a.ok)).collect::<Vec<_>>());
+    assert!(
+        !mine.is_empty(),
+        "{what}: not applied: limit {limit}, applied {:?}",
+        applied.iter().map(|a| (a.limit, a.ok)).collect::<Vec<_>>()
+    );
     for a in mine {
         assert!(a.working <= plan.instance, "{what}: working {} past {}", a.working, plan.instance);
         assert!(
@@ -2368,7 +2372,11 @@ fn plan_holds_bounded(
     }
     // (those of this application: other tests' run meanwhile, without limits)
     let mine: Vec<_> = applied.iter().filter(|a| a.limit == limit).collect();
-    assert!(!mine.is_empty(), "{what}: not applied: limit {limit}, applied {:?}", applied.iter().map(|a| (a.limit, a.ok)).collect::<Vec<_>>());
+    assert!(
+        !mine.is_empty(),
+        "{what}: not applied: limit {limit}, applied {:?}",
+        applied.iter().map(|a| (a.limit, a.ok)).collect::<Vec<_>>()
+    );
     for a in mine {
         assert!(a.working <= plan.instance, "{what}: working {} past {}", a.working, plan.instance);
         assert!(
@@ -3817,6 +3825,28 @@ fn lzma_data(n: usize, seed: u64) -> Vec<u8> {
     d
 }
 
+/// The plan of the instance of the application at the root of `f` (its inputs evaluated).
+fn instance_plan(what: &str, f: &Formula) -> u64 {
+    let Node::Apply(a) = &f.root else { panic!("{what}: not an application") };
+    let inputs: Vec<Vec<u8>> = (a.inputs.iter())
+        .map(|n| match *n {
+            Node::Slice { stream, start, len } => f.streams[stream].data[start as usize..][..len as usize].to_vec(),
+            _ => panic!("{what}: an input that is no slice"),
+        })
+        .collect();
+    let contents: Vec<&[u8]> = inputs.iter().map(|i| &i[..]).collect();
+    let lens: Vec<u64> = inputs.iter().map(|i| i.len() as u64).collect();
+    let usage = aqr_formula::Usage {
+        params: &a.params,
+        resources: &[],
+        inputs: &lens,
+        outputs: &[a.len],
+        contents: &contents,
+        initial_pages: aqr_decompress::initial_pages_of(a.module).unwrap(),
+    };
+    a.module.plan_for(&usage).unwrap().instance
+}
+
 /// An LZMA stream of `d` (parsed greedily, matches within `dict`) and its split, the record in
 /// parts of `part` bytes of data.
 fn lzma_stream(
@@ -3895,6 +3925,24 @@ fn lzma_plans_hold() {
     mixed.insert(30, lzma_stream(&big, props(8, 4, 0), 1 << 20, false, usize::MAX));
     mixed.push(lzma_stream(&big[..1000], props(0, 0, 0), 1 << 12, true, usize::MAX));
     cases.push(("mixed".into(), mixed));
+    // (a stream of more than 64 MiB of data, in two parts, of a small dictionary: the plan is
+    // the same as for a stream of 3 MiB of the same dictionary, whatever the length; and a
+    // dictionary of 1 MiB)
+    let big = lzma_data((64 << 20) + (3 << 20), 40);
+    let long = lzma_stream(&big, props(3, 0, 2), 1 << 16, false, 64 << 20);
+    assert!(aqr_lzma::recons::head_of(&long.1.record, big.len()).unwrap().parts == 2);
+    let short = lzma_stream(&big[..3 << 20], props(3, 0, 2), 1 << 16, false, usize::MAX);
+    let plan_of = |s: &(Vec<u8>, aqr_lzma::recons::Split)| {
+        let mut f = Formula::default();
+        let data = f.push("raw", s.1.data.clone());
+        let record = f.push("lzma/record", s.1.record.clone());
+        let index = f.push("lzma/index", Vec::new());
+        f.root = Node::apply(aqr_lzma::formula::MODULE, Vec::new(), vec![data, record, index], s.0.len() as u64);
+        instance_plan("lzma length", &f)
+    };
+    assert_eq!(plan_of(&long), plan_of(&short), "the plan grows with the length");
+    assert!(plan_of(&long) < 16 << 20, "{}", plan_of(&long));
+    cases.push(("long".into(), vec![long]));
     for (what, streams) in cases {
         let (mut data, mut records, mut lens, mut all) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (s, sp) in &streams {
@@ -4008,6 +4056,22 @@ fn lzma2_plans_hold() {
         ));
     }
     cases.push(("70 segments".into(), end(segs), 1 << 14));
+    // (more than 64 MiB of data in one segment of a small dictionary: the plan is the same as for
+    // 3 MiB of it)
+    let long = end(segment(7, (64 << 20) + (3 << 20), props(3, 0, 2), 1 << 16, 100_000, &[0x80, 0xA0], 0));
+    let short = end(segment(7, 3 << 20, props(3, 0, 2), 1 << 16, 100_000, &[0x80, 0xA0], 0));
+    let plan_of = |stream: &[u8]| {
+        let sp = lzma2::split(stream, 1 << 16, 1 << 28, 1).unwrap();
+        let mut f = Formula::default();
+        let data = f.push("raw", sp[0].data.clone());
+        let record = f.push("lzma2/record", sp[0].record.clone());
+        let index = f.push("lzma2/index", Vec::new());
+        f.root = Node::apply(aqr_lzma::formula::LZMA2, Vec::new(), vec![data, record, index], stream.len() as u64);
+        instance_plan("lzma2 length", &f)
+    };
+    assert_eq!(plan_of(&long), plan_of(&short), "the plan grows with the length");
+    assert!(plan_of(&long) < 16 << 20, "{}", plan_of(&long));
+    cases.push(("long".into(), long, 1 << 16));
     for (what, stream, dict) in cases {
         let sp = lzma2::split(&stream, dict, 1 << 28, 1).unwrap_or_else(|e| panic!("{what}: {e:?}"));
         let (mut data, mut records, mut lens) = (Vec::new(), Vec::new(), Vec::new());

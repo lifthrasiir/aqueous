@@ -1,5 +1,7 @@
 //! LZMA's range coder: 11-bit probabilities adapted by 1/32, and bits of probability 1/2.
 
+use crate::stream::{PIECE, Put};
+
 pub const BITS: u32 = 11;
 pub const ONE: u16 = 1 << BITS;
 pub const HALF: u16 = ONE / 2;
@@ -14,17 +16,39 @@ pub trait Bits {
     fn direct(&mut self, n: u32, v: u32) -> u32;
 }
 
-pub struct Encoder {
+pub struct Encoder<'a> {
     low: u64,
     range: u32,
     cache: u8,
     pending: u64,
     pub out: Vec<u8>,
+    /// Where `out` is put when it holds `limit` bytes (none: `out` grows), and whether that
+    /// failed.
+    sink: Option<&'a mut dyn Put>,
+    limit: usize,
+    failed: bool,
 }
 
-impl Encoder {
+impl<'a> Encoder<'a> {
     pub fn new(out: Vec<u8>) -> Self {
-        Encoder { low: 0, range: u32::MAX, cache: 0, pending: 1, out }
+        Encoder { low: 0, range: u32::MAX, cache: 0, pending: 1, out, sink: None, limit: usize::MAX, failed: false }
+    }
+
+    /// An encoder whose bytes go to `sink` in pieces of [`PIECE`] bytes, in room for them
+    /// alone.
+    pub fn to(sink: &'a mut dyn Put) -> Self {
+        let mut e = Encoder::new(Vec::with_capacity(PIECE));
+        (e.sink, e.limit) = (Some(sink), PIECE);
+        e
+    }
+
+    /// Puts the bytes held to the sink.
+    #[cold]
+    fn spill(&mut self) {
+        if let Some(s) = self.sink.as_deref_mut() {
+            self.failed |= s.put(&self.out).is_none();
+        }
+        self.out.clear();
     }
 
     fn shift_low(&mut self) {
@@ -32,6 +56,9 @@ impl Encoder {
             let carry = (self.low >> 32) as u8;
             let mut b = self.cache;
             loop {
+                if self.out.len() == self.limit {
+                    self.spill();
+                }
                 self.out.push(b.wrapping_add(carry));
                 b = 0xff;
                 self.pending -= 1;
@@ -51,9 +78,19 @@ impl Encoder {
         }
         self.out
     }
+
+    /// [`Encoder::finish`] for an encoder of a sink: what is left goes to it. None where it
+    /// refused any.
+    pub fn finish_to(mut self) -> Option<()> {
+        for _ in 0..5 {
+            self.shift_low();
+        }
+        self.spill();
+        (!self.failed).then_some(())
+    }
 }
 
-impl Bits for Encoder {
+impl Bits for Encoder<'_> {
     #[inline(always)]
     fn bit(&mut self, p: &mut u16, b: u32) -> u32 {
         let bound = (self.range >> BITS) * *p as u32;

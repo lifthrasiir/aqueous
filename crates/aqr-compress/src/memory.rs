@@ -81,9 +81,11 @@ pub(crate) fn limit(a: &Apply, lens: &[u64], outputs: &[u64], contents: &dyn Con
 
 /// The bound on the minimal bound of an application ([`Plan::minimal`]) that the encoder keeps
 /// to by default: 256 MiB, half of what the decoders support ([`aqr_formula::SUPPORTED_BOUND`]),
-/// so that a decoder may run applications side by side. Text, FASTA, rasters, flate-set and
-/// bundle fit it at any length (segments, a part module); lzma-recons with large dictionaries
-/// does not, and falls back.
+/// so that a decoder may run applications side by side. Text, FASTA, rasters, flate-set, bundle,
+/// mszip and the LZMA modules fit it at any length (segments, part modules); the LZMA modules'
+/// rings and tables follow the dictionary (12 bytes for each of its bytes rounded up to a power
+/// of 2, and 12.5 MiB), so those of dictionaries over 16 MiB (7-Zip's 64 MiB) do not, and fall
+/// back.
 pub const DEFAULT_BOUND: u64 = 256 << 20;
 
 /// Modules allowed a larger bound than [`DEFAULT_BOUND`] by default, with their bounds (at most

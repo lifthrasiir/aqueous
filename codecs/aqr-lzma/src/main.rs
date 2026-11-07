@@ -113,7 +113,7 @@ fn run(arg: &str) -> Row {
         return r;
     }
     let t = Instant::now();
-    let Some((record, cost)) = recons::deconstruct(&dec.data, &dec.packets, h.dict, &[]) else {
+    let Some((record, cost)) = recons::deconstruct(&dec.data, &dec.packets, h.dict, None) else {
         r.note = "deconstruct failed";
         return r;
     };

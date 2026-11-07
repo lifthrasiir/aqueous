@@ -3,7 +3,9 @@
 //! sees only what lies before it, as when the stream was made, and no farther back than the
 //! stream's dictionary allows (the chains are rings of that size).
 
-pub use aqr_common::lz::lcp_up;
+pub use crate::window::View;
+
+use aqr_common::lz::lcp_up;
 
 const NONE: u32 = u32::MAX;
 const HASH_BITS: u32 = 20;
@@ -66,18 +68,19 @@ impl<const K: usize> Chain<K> {
         (h.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (64 - HASH_BITS)) as usize
     }
 
-    /// Asks for the bucket of position `p`, to be inserted soon.
+    /// Asks for the bucket of the position at `r` of `d`, to be inserted soon.
     #[inline(always)]
-    fn ahead(&self, d: &[u8], p: usize) {
-        if p + K <= d.len() {
-            prefetch_w(&self.recent[self.base + Self::hash(d, p) * self.w]);
+    fn ahead(&self, d: &[u8], r: usize) {
+        if r + K <= d.len() {
+            prefetch_w(&self.recent[self.base + Self::hash(d, r) * self.w]);
         }
     }
 
+    /// Inserts position `p`, at `r` of `d` (the data up to `end`, relative to `d`).
     #[inline]
-    fn insert(&mut self, d: &[u8], p: usize) {
-        if p + K <= d.len() {
-            let at = self.base + Self::hash(d, p) * self.w;
+    fn insert(&mut self, d: &[u8], r: usize, end: usize, p: usize) {
+        if r + K <= end {
+            let at = self.base + Self::hash(d, r) * self.w;
             self.prev[p & self.mask] = self.recent[at];
             if self.w == RECENT {
                 let r: &mut [u32; RECENT] = (&mut self.recent[at..at + RECENT]).try_into().unwrap();
@@ -87,10 +90,10 @@ impl<const K: usize> Chain<K> {
         }
     }
 
-    /// The candidates for `pos`, nearest first, within reach.
+    /// The candidates for `pos`, at `r` of `d`, nearest first, within reach.
     #[inline]
-    fn walk(&self, d: &[u8], pos: usize) -> impl Iterator<Item = usize> {
-        let r = self.bucket(Self::hash(d, pos));
+    fn walk(&self, d: &[u8], r: usize, pos: usize) -> impl Iterator<Item = usize> {
+        let r = self.bucket(Self::hash(d, r));
         let (mut i, mut c) = (0, r[0]);
         std::iter::from_fn(move || {
             if c == NONE || pos - c as usize > self.reach {
@@ -104,21 +107,25 @@ impl<const K: usize> Chain<K> {
     }
 
     /// The nearest candidate matching `n` bytes, among `limit`.
-    fn nearest(&self, d: &[u8], pos: usize, n: usize, limit: usize) -> Option<usize> {
-        self.walk(d, pos).take(limit).find(|&c| d[c + n - 1] == d[pos + n - 1] && lcp_up(d, c, pos, n) >= n)
+    fn nearest(&self, v: &View, pos: usize, n: usize, limit: usize) -> Option<usize> {
+        let (d, b) = (v.d, v.base);
+        let r = pos - b;
+        self.walk(d, r, pos).take(limit).find(|&c| d[c - b + n - 1] == d[r + n - 1] && lcp_up(d, c - b, r, n) >= n)
     }
 
     /// Goes through `depth` candidates for matches longer than `best`, up to `nice`, keeping
     /// them in `found`. Returns the longest, or 0 for none.
-    fn longest(&mut self, d: &[u8], pos: usize, depth: usize, nice: usize, cap: usize, mut best: usize) -> usize {
+    fn longest(&mut self, v: &View, pos: usize, depth: usize, nice: usize, cap: usize, mut best: usize) -> usize {
         debug_assert!(depth <= self.found.capacity());
         let mut found = std::mem::take(&mut self.found);
         found.clear();
-        if pos + K <= d.len() {
-            for c in self.walk(d, pos).take(depth) {
+        if pos + K <= v.end {
+            let (d, b) = (v.d, v.base);
+            let r = pos - b;
+            for c in self.walk(d, r, pos).take(depth) {
                 // A longer match must agree at `best` first.
-                if best < cap && d[c + best] == d[pos + best] {
-                    let n = lcp_up(d, c, pos, cap);
+                if best < cap && d[c - b + best] == d[r + best] {
+                    let n = lcp_up(d, c - b, r, cap);
                     if n > best {
                         best = n;
                         found.push((n as u32, c as u32));
@@ -205,8 +212,11 @@ fn h3(d: &[u8], p: usize) -> usize {
     ((k3(d, p) as u32).wrapping_mul(0x9e37_79b1) >> (32 - HASH3_BITS)) as usize
 }
 
-pub struct Mf<'a> {
-    d: &'a [u8],
+/// A match finder over data of `n` bytes, seen through a [`View`] of it that each query gives:
+/// the positions are those of the data, and the view holds the bytes from `pos - reach` of the
+/// query to its `pos` and the 66 KiB after it, or to the end of the data (a window, or all of
+/// the data).
+pub struct Mf {
     /// How far back a match may be: `pos - c` at most this.
     reach: usize,
     head2: Vec<u32>,
@@ -222,7 +232,7 @@ pub struct Mf<'a> {
     _admitted: gate::Admitted,
 }
 
-impl<'a> Mf<'a> {
+impl Mf {
     /// Bytes of the chains of a match finder of [`Mf::new`].
     #[cfg(not(target_arch = "wasm32"))]
     fn chains(n: usize, reach: usize) -> usize {
@@ -244,24 +254,24 @@ impl<'a> Mf<'a> {
         }
     }
 
-    /// A match finder for matches at most `reach` back (LZMA's dictionary size).
-    pub fn new(d: &'a [u8], reach: usize) -> Self {
-        Self::keeping(d, reach, recent(d.len()))
+    /// A match finder over data of `n` bytes, for matches at most `reach` back (LZMA's
+    /// dictionary size).
+    pub fn new(n: usize, reach: usize) -> Self {
+        Self::keeping(n, reach, recent(n))
     }
 
     /// [`Mf::new`] keeping `w` positions of each hash together (1 or [`RECENT`]).
-    fn keeping(d: &'a [u8], reach: usize, w: usize) -> Self {
-        let ring = reach.clamp(1, d.len().max(1)).next_power_of_two();
+    fn keeping(n: usize, reach: usize, w: usize) -> Self {
+        let ring = reach.clamp(1, n.max(1)).next_power_of_two();
         #[cfg(not(target_arch = "wasm32"))]
-        let _admitted = gate::admit(Self::chains(d.len(), reach));
+        let _admitted = gate::admit(Self::chains(n, reach));
         Mf {
-            d,
             reach,
             head2: vec![NONE; 1 << 16],
             head3: vec![NONE; 1 << HASH3_BITS],
-            short: Chain::new(ring, d.len(), reach, w, DEPTH),
-            mid: Chain::new(ring, d.len(), reach, 1, 0),
-            long: Chain::new(ring, d.len(), reach, w, DEPTH),
+            short: Chain::new(ring, n, reach, w, DEPTH),
+            mid: Chain::new(ring, n, reach, 1, 0),
+            long: Chain::new(ring, n, reach, w, DEPTH),
             next: 0,
             found_at: usize::MAX,
             #[cfg(not(target_arch = "wasm32"))]
@@ -271,27 +281,29 @@ impl<'a> Mf<'a> {
 
     /// [`Mf::new`] holding no position before `from`: from `pos − reach` on, the same as one
     /// holding them all, as no query looks farther back.
-    pub fn starting(d: &'a [u8], reach: usize, from: usize) -> Self {
-        let mut mf = Mf::new(d, reach);
+    pub fn starting(n: usize, reach: usize, from: usize) -> Self {
+        let mut mf = Mf::new(n, reach);
         mf.next = from;
         mf
     }
 
     /// Adds the positions before `pos`.
-    pub fn advance(&mut self, pos: usize) {
-        let d = self.d;
+    pub fn advance(&mut self, v: &View, pos: usize) {
+        let (d, b) = (v.d, v.base);
+        let end = v.end - b;
         for p in self.next..pos {
-            self.short.ahead(d, p + AHEAD);
-            self.long.ahead(d, p + AHEAD);
-            self.mid.ahead(d, p + AHEAD);
-            self.short.insert(d, p);
-            self.mid.insert(d, p);
-            self.long.insert(d, p);
-            if p + 3 <= d.len() {
-                self.head3[h3(d, p)] = p as u32;
+            let r = p - b;
+            self.short.ahead(d, r + AHEAD);
+            self.long.ahead(d, r + AHEAD);
+            self.mid.ahead(d, r + AHEAD);
+            self.short.insert(d, r, end, p);
+            self.mid.insert(d, r, end, p);
+            self.long.insert(d, r, end, p);
+            if r + 3 <= end {
+                self.head3[h3(d, r)] = p as u32;
             }
-            if p + 2 <= d.len() {
-                self.head2[k2(d, p)] = p as u32;
+            if r + 2 <= end {
+                self.head2[k2(d, r)] = p as u32;
             }
         }
         self.next = self.next.max(pos);
@@ -299,26 +311,25 @@ impl<'a> Mf<'a> {
 
     /// The newest position with the same `k` (2 or 3) bytes as `pos`, within reach.
     #[inline]
-    fn head(&self, k: usize, pos: usize) -> Option<usize> {
-        let d = self.d;
-        if pos + k > d.len() {
+    fn head(&self, v: &View, k: usize, pos: usize) -> Option<usize> {
+        if pos + k > v.end {
             return None;
         }
-        let c = if k == 2 { self.head2[k2(d, pos)] } else { self.head3[h3(d, pos)] };
-        (c != NONE && pos - c as usize <= self.reach && (k == 2 || k3(d, c as usize) == k3(d, pos)))
+        let (d, b) = (v.d, v.base);
+        let c = if k == 2 { self.head2[k2(d, pos - b)] } else { self.head3[h3(d, pos - b)] };
+        (c != NONE && pos - c as usize <= self.reach && (k == 2 || k3(d, c as usize - b) == k3(d, pos - b)))
             .then_some(c as usize)
     }
 
     /// The nearest position before `pos` whose next `n` bytes are those at `pos`, looking at
     /// no more than `limit` candidates of a chain. Free up to what [`Mf::longest`] found at
     /// `pos`.
-    pub fn nearest(&self, pos: usize, n: usize, limit: usize) -> Option<usize> {
-        let d = self.d;
-        if pos + n > d.len() || n < 2 {
+    pub fn nearest(&self, v: &View, pos: usize, n: usize, limit: usize) -> Option<usize> {
+        if pos + n > v.end || n < 2 {
             return None;
         }
         if n < 4 {
-            return self.head(n, pos);
+            return self.head(v, n, pos);
         }
         // Each chain is gone through nearest first, so the first match found as long is the
         // nearest.
@@ -330,23 +341,23 @@ impl<'a> Mf<'a> {
             }
         }
         if n >= LONG {
-            self.long.nearest(d, pos, n, limit)
+            self.long.nearest(v, pos, n, limit)
         } else if n >= MID {
-            self.mid.nearest(d, pos, n, limit)
+            self.mid.nearest(v, pos, n, limit)
         } else {
-            self.short.nearest(d, pos, n, limit)
+            self.short.nearest(v, pos, n, limit)
         }
     }
 
     /// After [`Mf::longest`] at `pos`: the matches there, each longer than all those nearer
     /// (their lengths and positions, at most `cap` long), as a binary-tree match finder gives
     /// them to an optimal parser. A length up to one's is nearest at its position.
-    pub fn pairs(&self, pos: usize, cap: usize, out: &mut Vec<(u32, u32)>) {
+    pub fn pairs(&self, v: &View, pos: usize, cap: usize, out: &mut Vec<(u32, u32)>) {
         out.clear();
         out.extend(self.short.found.iter().chain(&self.long.found));
         for k in [2, 3] {
-            if let Some(c) = self.head(k, pos) {
-                out.push((lcp_up(self.d, c, pos, cap) as u32, c as u32));
+            if let Some(c) = self.head(v, k, pos) {
+                out.push((v.lcp(c, pos, cap) as u32, c as u32));
             }
         }
         out.sort_unstable_by_key(|&(_, c)| std::cmp::Reverse(c));
@@ -360,19 +371,18 @@ impl<'a> Mf<'a> {
 
     /// The length of the match at the newest candidate of 4 bytes (at most `cap`), or 2 or 3
     /// for the newest of 2 or 3 bytes: a cheap hint of what `pos` offers.
-    pub fn first(&self, pos: usize, cap: usize) -> usize {
-        let d = self.d;
-        if pos + 4 <= d.len()
-            && let Some(c) = self.short.walk(d, pos).next()
+    pub fn first(&self, v: &View, pos: usize, cap: usize) -> usize {
+        if pos + 4 <= v.end
+            && let Some(c) = self.short.walk(v.d, pos - v.base, pos).next()
         {
-            let n = lcp_up(d, c, pos, cap);
+            let n = v.lcp(c, pos, cap);
             if n >= 4 {
                 return n;
             }
         }
-        if self.head(3, pos).is_some() {
+        if self.head(v, 3, pos).is_some() {
             3
-        } else if self.head(2, pos).is_some() {
+        } else if self.head(v, 2, pos).is_some() {
             2
         } else {
             0
@@ -382,19 +392,18 @@ impl<'a> Mf<'a> {
     /// The longest match at `pos` (at most `cap`) among the nearest 2- and 3-byte matches,
     /// `depth` candidates of 4 bytes and `depth` of 16, stopping at one of `nice` bytes. A query
     /// of [`Mf::nearest`] at `pos` then costs nothing up to that length.
-    pub fn longest(&mut self, pos: usize, depth: usize, nice: usize, cap: usize) -> usize {
-        let d = self.d;
+    pub fn longest(&mut self, v: &View, pos: usize, depth: usize, nice: usize, cap: usize) -> usize {
         self.found_at = pos;
-        let mut best = if self.head(3, pos).is_some() {
+        let mut best = if self.head(v, 3, pos).is_some() {
             3
-        } else if self.head(2, pos).is_some() {
+        } else if self.head(v, 2, pos).is_some() {
             2
         } else {
             0
         };
-        best = best.max(self.short.longest(d, pos, depth, nice, cap, best));
+        best = best.max(self.short.longest(v, pos, depth, nice, cap, best));
         if best < nice && best < cap {
-            best = best.max(self.long.longest(d, pos, depth, nice, cap, LONG - 1));
+            best = best.max(self.long.longest(v, pos, depth, nice, cap, LONG - 1));
         } else {
             self.long.found.clear();
         }
@@ -464,19 +473,20 @@ mod tests {
         const REACH: usize = 1 << 16;
         let mut r = aqr_common::rng::Rng::new(5);
         let d: Vec<u8> = (0..RECENT_FROM).map(|_| b"abc"[r.below(3) as usize]).collect();
-        let (mut a, mut b) = (Mf::keeping(&d, REACH, RECENT), Mf::keeping(&d, REACH, 1));
+        let v = View::whole(&d);
+        let (mut a, mut b) = (Mf::keeping(d.len(), REACH, RECENT), Mf::keeping(d.len(), REACH, 1));
         let (mut pa, mut pb) = (vec![], vec![]);
         for pos in (0..d.len()).step_by(97) {
             let cap = 273.min(d.len() - pos);
-            a.advance(pos);
-            b.advance(pos);
-            assert_eq!(a.first(pos, cap), b.first(pos, cap), "{pos}");
-            assert_eq!(a.longest(pos, 16, 64, cap), b.longest(pos, 16, 64, cap), "{pos}");
-            a.pairs(pos, cap, &mut pa);
-            b.pairs(pos, cap, &mut pb);
+            a.advance(&v, pos);
+            b.advance(&v, pos);
+            assert_eq!(a.first(&v, pos, cap), b.first(&v, pos, cap), "{pos}");
+            assert_eq!(a.longest(&v, pos, 16, 64, cap), b.longest(&v, pos, 16, 64, cap), "{pos}");
+            a.pairs(&v, pos, cap, &mut pa);
+            b.pairs(&v, pos, cap, &mut pb);
             assert_eq!(pa, pb, "{pos}");
             for n in [4, 6, MID, 12, LONG, 24] {
-                assert_eq!(a.nearest(pos, n, 64), b.nearest(pos, n, 64), "{pos} {n}");
+                assert_eq!(a.nearest(&v, pos, n, 64), b.nearest(&v, pos, n, 64), "{pos} {n}");
             }
         }
     }
@@ -488,13 +498,14 @@ mod tests {
         const REACH: usize = 4096;
         let mut r = aqr_common::rng::Rng::new(3);
         let d: Vec<u8> = (0..4 * REACH).map(|_| b"ab"[r.below(2) as usize]).collect();
-        let mut mf = Mf::new(&d, REACH);
+        let v = View::whole(&d);
+        let mut mf = Mf::new(d.len(), REACH);
         assert_eq!([mf.short.prev.len(), mf.mid.prev.len(), mf.long.prev.len()], [REACH; 3]);
         for pos in (REACH..d.len() - LONG).step_by(7) {
-            mf.advance(pos);
+            mf.advance(&v, pos);
             for n in [4, MID, LONG] {
-                let want = (pos - REACH..pos).rev().find(|&c| lcp_up(&d, c, pos, n) >= n);
-                assert_eq!(mf.nearest(pos, n, usize::MAX), want, "{pos} {n}");
+                let want = (pos - REACH..pos).rev().find(|&c| v.lcp(c, pos, n) >= n);
+                assert_eq!(mf.nearest(&v, pos, n, usize::MAX), want, "{pos} {n}");
             }
         }
     }

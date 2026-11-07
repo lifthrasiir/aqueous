@@ -9,7 +9,11 @@ use aqr_common::varint;
 
 use crate::arith::{ArithDecoder, ArithEncoder, Bit};
 use crate::lzma::{self, Kind, MAX_LEN, MIN_LEN, Packet, Props, StreamEncoder};
-use crate::mf::{DEPTH, Mf, lcp_up};
+use crate::lzma2::{CHUNK_CODED, CHUNK_DATA, Chunk};
+use crate::mf::{DEPTH, Mf};
+use crate::stream::{Body, Pull, Put, Reader};
+use crate::window::{View, Window};
+use crate::{Result, corrupt};
 
 /// A match this long ends the search for the longest.
 const NICE: usize = 64;
@@ -30,8 +34,10 @@ pub enum Cat {
     Len,
     Dist,
     RepLen,
+    /// An LZMA2 chunk's header.
+    Head,
 }
-pub const CATS: usize = 4;
+pub const CATS: usize = 5;
 
 struct Tree9([Bit; 512]);
 
@@ -43,7 +49,8 @@ impl Default for Tree9 {
 
 /// Bits of the contexts held in one allocation ([`Ctx`]): the lengths of the lists of
 /// probabilities, in order.
-pub const CTX_LENS: [usize; 11] = [12 * 64, 12 * 64, 12 * 64, 12 * 8, 64, 64, 8 * 16, 4 * 8, 8 * 512, 8 * 512, 64];
+pub const CTX_LENS: [usize; 14] =
+    [12 * 64, 12 * 64, 12 * 64, 12 * 8, 64, 64, 8 * 16, 4 * 8, 8 * 512, 8 * 512, 64, 7 * 8, 32, 256];
 /// The bits of all of them.
 pub const CTX_BITS: usize = {
     let (mut i, mut n) = (0, 0);
@@ -95,6 +102,10 @@ struct Ctx<'a> {
     rep_full: [[Bit; 8]; 4],
     /// Eight trees of 512.
     rep_len: &'a mut [Bit],
+    /// An LZMA2 chunk's control (by the last one's), the length of its data and its properties.
+    chunk_kind: &'a mut [Bit],
+    chunk_len: &'a mut [Bit],
+    chunk_props: &'a mut [Bit],
 }
 
 impl<'a> Ctx<'a> {
@@ -106,7 +117,7 @@ impl<'a> Ctx<'a> {
             rest = b;
             a
         };
-        let [a, b, c, d, e, f, g, h, i, j, k] = CTX_LENS.map(&mut take);
+        let [a, b, c, d, e, f, g, h, i, j, k, l, m, n] = CTX_LENS.map(&mut take);
         Ctx {
             is_match: a,
             is_rep: b,
@@ -125,12 +136,15 @@ impl<'a> Ctx<'a> {
             far_bucket: k,
             rep_full: [[Bit::default(); 8]; 4],
             rep_len: j,
+            chunk_kind: l,
+            chunk_len: m,
+            chunk_props: n,
         }
     }
 }
 
 /// The side of the record's coder, as [`crate::rc::Bits`] for LZMA's.
-trait Side {
+pub(crate) trait Side {
     fn bit(&mut self, b: &mut Bit, v: bool, cat: Cat) -> bool;
     /// `n` bits of probability 1/2.
     fn raw(&mut self, n: u32, v: u32, cat: Cat) -> u32;
@@ -141,6 +155,23 @@ trait Side {
             m = m << 1 | self.bit(&mut t[m], v >> i & 1 != 0, cat) as usize;
         }
         m as u32 - (1 << n)
+    }
+
+    /// `v` as `x = v + 1` (wrapping): the bit length of `x` less 1 in unary (adaptive bits of
+    /// `t`, the last one for the lengths beyond), then the bits of `x` below its top one, raw.
+    /// None where the unary runs past 32 bits.
+    fn gamma(&mut self, t: &mut [Bit], v: u32, cat: Cat) -> Option<u32> {
+        let x = v.wrapping_add(1);
+        let n = 31 - x.max(1).leading_zeros();
+        let mut k = 0;
+        while self.bit(&mut t[(k as usize).min(t.len() - 1)], k < n, cat) {
+            k += 1;
+            if k > 31 {
+                return None;
+            }
+        }
+        let y = 1u32 << k | self.raw(k, x & ((1 << k) - 1), cat);
+        Some(y - 1)
     }
 
     fn tree9(&mut self, t: &mut [Bit], v: u32, cat: Cat) -> u32 {
@@ -169,16 +200,6 @@ impl<C: aqr_common::arith::Coder> Side for C {
         aqr_common::arith::Coder::set_cat(self, cat as usize);
         aqr_common::arith::Coder::raws(self, n, v as u64) as u32
     }
-}
-
-/// A place in the data where packets end and none goes past (the start of an LZMA2 chunk), in
-/// order: there the state and the last distances may be reset, and bytes stored as they are
-/// (not coded as packets) skipped.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Break {
-    pub at: usize,
-    pub reset: bool,
-    pub stored: usize,
 }
 
 /// Where the packets of a part of a record start ([`split_with`]), and the state and the last
@@ -236,24 +257,69 @@ fn step(state: &mut u8, reps: &mut [u32; 4], pk: Packet) {
     reps[0] = d;
 }
 
-/// Walks the packets of `data` from `part` to `end` (a packet's start, or the end of the data)
-/// with matches at most `reach` back, under contexts of their own and with `mf` (holding the
-/// positions within reach before `part`), coding them (`Some`) or decoding them (`None`, until
-/// `end` is reached), and gives each to `emit`. None where the record does not fit the data, or
-/// a packet goes past a break or `end`. Breaks are of a walk over all the data.
+/// What a walk gives: the header of an LZMA2 chunk, where it starts, and the packets in it.
+#[derive(Clone, Copy)]
+pub enum Ev {
+    Chunk(Chunk),
+    Packet(Packet),
+}
+
+/// The chunks of an LZMA2 segment: not there (LZMA), coded in the record, given to code them, or
+/// decoded from it. A walk of chunks goes over all the data. A chunk's header is coded where
+/// the walk reaches its start; the packets in it end by its end.
+#[derive(Clone, Copy)]
+pub enum Chunks<'a> {
+    Off,
+    Encode(&'a [Chunk]),
+    Decode,
+}
+
+/// The controls of the chunks: by the index the header codes.
+const CONTROLS: [u8; 6] = [1, 2, 0x80, 0xA0, 0xC0, 0xE0];
+
+/// A chunk's header, given (coding) or not (decoding) and the chunk that came before it (the
+/// index of its control, or [`CONTROLS`]'s length for none): the header and the index of its
+/// control. None where it is no chunk of LZMA2.
+fn code_chunk<S: Side>(s: &mut S, x: &mut Ctx, prev: usize, given: Option<Chunk>) -> Option<(Chunk, usize)> {
+    let kind = given.and_then(|c| CONTROLS.iter().position(|&k| k == c.control)).unwrap_or(0);
+    let kind = s.tree(&mut x.chunk_kind[prev * 8..], 3, kind as u32, Cat::Head) as usize;
+    let control = *CONTROLS.get(kind)?;
+    let len = s.gamma(x.chunk_len, given.map_or(0, |c| c.len as u32).wrapping_sub(1), Cat::Head)?;
+    let props = match control {
+        0xC0.. => {
+            let b = given.and_then(|c| c.props).map_or(0, |p| p.byte() as u32);
+            let b = s.tree(x.chunk_props, 8, b, Cat::Head);
+            Some(Props::from_byte(b as u8).filter(|p| p.lc + p.lp <= 4)?)
+        }
+        _ => None,
+    };
+    Some((Chunk { control, len: (len as usize).checked_add(1)?, props }, kind))
+}
+
+/// Walks the packets of the data of `win` from `part` to `end` (a packet's start, or the end of
+/// the data) with matches at most `reach` back, under contexts of their own and with `mf`
+/// (holding the positions within reach before `part`), coding them (`Some`) or decoding them
+/// (`None`, until `end` is reached), and gives each to `on` (with the data it looks at in
+/// view), after the header of the chunk that holds it. None where the record does not fit the
+/// data, or a packet goes past a chunk or `end`, or `on` fails.
 #[allow(clippy::too_many_arguments)]
 fn walk<S: Side>(
     s: &mut S,
     mf: &mut Mf,
-    data: &[u8],
+    win: &mut Window,
     reach: usize,
-    breaks: &[Break],
+    chunks: Chunks,
     part: Part,
     end: usize,
     mut given: Option<&[Packet]>,
-    mut emit: impl FnMut(Packet),
+    mut on: impl FnMut(&View, Ev) -> Option<()>,
 ) -> Option<()> {
-    if !breaks.is_empty() && (part.at != 0 || end != data.len()) {
+    let total = win.total();
+    if !matches!(chunks, Chunks::Off) && (part.at != 0 || end != total) {
+        return None;
+    }
+    // (a last distance is within reach: the window holds no more)
+    if part.reps.iter().any(|&r| r as usize >= reach) {
         return None;
     }
     // (the contexts, then the pairs: dropped in the reverse order)
@@ -262,37 +328,58 @@ fn walk<S: Side>(
     let (mut state, mut reps) = (part.state as usize, part.reps);
     let mut pairs = Vec::with_capacity(PAIRS);
     let mut pos = part.at;
-    let (mut i, mut bi) = (0, 0);
+    let (mut i, mut ci, mut prev, mut chunk_end) = (0, 0, CONTROLS.len(), 0);
     loop {
-        while let Some(b) = breaks.get(bi).filter(|b| b.at <= pos) {
-            if b.at < pos {
+        win.ensure(pos)?;
+        if !matches!(chunks, Chunks::Off) {
+            // (a chunk's header where the last one ends)
+            while pos == chunk_end && pos < total {
+                let want = match chunks {
+                    Chunks::Encode(c) => Some(*c.get(ci)?),
+                    _ => None,
+                };
+                let (c, kind) = code_chunk(s, &mut x, prev, want)?;
+                let max = if c.stored() { CHUNK_CODED } else { CHUNK_DATA };
+                if want.is_some_and(|g| g != c) || (ci == 0) != c.resets_dict() || c.len > max || c.len > total - pos {
+                    return None;
+                }
+                on(&win.view(), Ev::Chunk(c))?;
+                (ci, prev) = (ci + 1, kind);
+                if c.control >= 0xA0 {
+                    (state, reps) = (0, [0; 4]);
+                }
+                if c.stored() {
+                    pos += c.len;
+                    chunk_end = pos;
+                    win.ensure(pos)?;
+                } else {
+                    chunk_end = pos + c.len;
+                }
+            }
+            if pos > chunk_end {
                 return None;
             }
-            if b.reset {
-                (state, reps) = (0, [0; 4]);
-            }
-            pos = pos.checked_add(b.stored)?;
-            bi += 1;
         }
         if pos >= end {
             break;
         }
-        // (packets end at the next break)
-        let end = breaks.get(bi).map_or(data.len(), |b| b.at.min(data.len()));
+        let v = win.view();
+        // (packets end at the next chunk's start)
+        let lim = if matches!(chunks, Chunks::Off) { total } else { chunk_end };
         let pk = match &mut given {
             Some(g) => *g.get(i)?,
             None => Packet::LIT,
         };
         i += 1;
-        mf.advance(pos);
-        let cap = (MAX_LEN as usize).min(end - pos);
+        mf.advance(&v, pos);
+        let cap = (MAX_LEN as usize).min(lim - pos);
         let mut rl = [0usize; 4];
         for k in 0..4 {
-            if (reps[k] as usize) < pos {
-                rl[k] = lcp_up(data, pos - reps[k] as usize - 1, pos, cap);
+            if (reps[k] as usize) < pos.min(reach) {
+                rl[k] = v.lcp(pos - reps[k] as usize - 1, pos, cap);
             }
         }
-        let hint = mf.first(pos, cap);
+        let hint = mf.first(&v, pos, cap);
         let (bm, b0) = (bucket(hint), bucket(rl[0]));
         let brest = bucket(rl[1].max(rl[2]).max(rl[3]));
         let ctx = state * 64 + bm * 8 + b0;
@@ -304,7 +391,7 @@ fn walk<S: Side>(
             } else {
                 state - 6
             };
-            emit(Packet::LIT);
+            on(&v, Ev::Packet(Packet::LIT))?;
             pos += 1;
             continue;
         }
@@ -325,7 +412,7 @@ fn walk<S: Side>(
                         return None;
                     }
                     state = if state < 7 { 9 } else { 11 };
-                    emit(Packet::SHORT_REP);
+                    on(&v, Ev::Packet(Packet::SHORT_REP))?;
                     pos += 1;
                     continue;
                 }
@@ -353,8 +440,8 @@ fn walk<S: Side>(
             state = if state < 7 { 8 } else { 11 };
             Packet { kind: [Kind::Rep0, Kind::Rep1, Kind::Rep2, Kind::Rep3][k], len: n as u16, dist: d }
         } else {
-            mf.longest(pos, DEPTH, NICE, cap);
-            mf.pairs(pos, cap, &mut pairs);
+            mf.longest(&v, pos, DEPTH, NICE, cap);
+            mf.pairs(&v, pos, cap, &mut pairs);
             let m = pairs.len();
             let j = pairs.iter().position(|&(l, _)| l as usize >= pk.len as usize).map_or(m, |i| m - 1 - i);
             let mut jj = s.tree(&mut x.pair[m.min(7) * 16..][..16], 4, j.min(15) as u32, Cat::Len) as usize;
@@ -392,7 +479,7 @@ fn walk<S: Side>(
             if n < MIN_LEN as usize || n > cap {
                 return None;
             }
-            let near = mf.nearest(pos, n, LIMIT);
+            let near = mf.nearest(&v, pos, n, LIMIT);
             let is_near = near.is_some_and(|q| pk.dist as usize == pos - q - 1);
             let d = if s.bit(&mut x.far, !is_near, Cat::Dist) {
                 // The last distance nearest to it, the sign, and the offset by its bit length.
@@ -401,7 +488,7 @@ fn walk<S: Side>(
                 let k = s.tree(&mut x.far_rep, 2, k as u32, Cat::Dist) as usize;
                 let neg = s.bit(&mut x.far_sign[k], off(k) < 0, Cat::Dist);
                 let m = off(k).unsigned_abs() as u32;
-                let b = s.tree(&mut x.far_bucket, 6, 32 - m.leading_zeros(), Cat::Dist);
+                let b = s.tree(x.far_bucket, 6, 32 - m.leading_zeros(), Cat::Dist);
                 if b > 32 {
                     return None;
                 }
@@ -414,7 +501,7 @@ fn walk<S: Side>(
             } else {
                 (pos - near? - 1) as u32
             };
-            if d as usize >= pos.min(reach) || lcp_up(data, pos - d as usize - 1, pos, n) < n {
+            if d as usize >= pos.min(reach) || v.lcp(pos - d as usize - 1, pos, n) < n {
                 return None;
             }
             reps.copy_within(0..3, 1);
@@ -422,28 +509,60 @@ fn walk<S: Side>(
             state = if state < 7 { 7 } else { 10 };
             Packet { kind: Kind::Match, len: n as u16, dist: d }
         };
-        emit(pk);
+        on(&v, Ev::Packet(pk))?;
         pos += pk.len as usize;
     }
-    (pos == end && (end < data.len() || bi == breaks.len()) && given.is_none_or(|g| g.len() == i)).then_some(())
+    let all = match chunks {
+        Chunks::Encode(c) => ci == c.len(),
+        _ => true,
+    };
+    (pos == end && all && given.is_none_or(|g| g.len() == i)).then_some(())
+}
+
+/// [`walk`] over all the data of `win`, decoding the packets and chunks of an LZMA2 segment from
+/// `s`.
+pub(crate) fn walk_chunks<S: Side>(
+    s: &mut S,
+    mf: &mut Mf,
+    win: &mut Window,
+    reach: usize,
+    on: impl FnMut(&View, Ev) -> Option<()>,
+) -> Option<()> {
+    let n = win.total();
+    walk(s, mf, win, reach, Chunks::Decode, Part::START, n, None, on)
 }
 
 /// The record of the packets of `data` (from [`crate::lzma::decode`]) for a dictionary of
-/// `dict` bytes, with `breaks` (none for LZMA), and its cost by [`Cat`] in bits. None where the
-/// packets do not cover the data exactly.
-pub fn deconstruct(data: &[u8], packets: &[Packet], dict: u32, breaks: &[Break]) -> Option<(Vec<u8>, [f64; CATS])> {
+/// `dict` bytes, with the `chunks` of an LZMA2 segment (none for LZMA), and its cost by [`Cat`]
+/// in bits. None where the packets do not cover the data exactly.
+pub fn deconstruct(
+    data: &[u8],
+    packets: &[Packet],
+    dict: u32,
+    chunks: Option<&[Chunk]>,
+) -> Option<(Vec<u8>, [f64; CATS])> {
     let mut e = Enc::with(ArithEncoder::new(vec![]));
-    let mut mf = Mf::new(data, reach(dict));
-    walk(&mut e, &mut mf, data, reach(dict), breaks, Part::START, data.len(), Some(packets), |_| ())?;
+    let mut mf = Mf::new(data.len(), reach(dict));
+    let chunks = chunks.map_or(Chunks::Off, Chunks::Encode);
+    let mut win = Window::whole(data);
+    walk(&mut e, &mut mf, &mut win, reach(dict), chunks, Part::START, data.len(), Some(packets), |_, _| Some(()))?;
     Some((e.c.finish(), e.cost))
 }
 
-/// The packets of `data` from its record, given to `emit` as they come. None where the record
-/// does not fit the data (some packets may have been given by then).
-pub fn reconstruct(data: &[u8], record: &[u8], dict: u32, breaks: &[Break], emit: impl FnMut(Packet)) -> Option<()> {
+/// The packets of `data` from its record, given to `on` as they come, the chunks of an LZMA2
+/// segment (`chunks`) too. None where the record does not fit the data (some packets may have
+/// been given by then).
+pub fn reconstruct(
+    data: &[u8],
+    record: &[u8],
+    dict: u32,
+    chunks: bool,
+    on: impl FnMut(&View, Ev) -> Option<()>,
+) -> Option<()> {
     let mut d = ArithDecoder::new(record);
-    let mut mf = Mf::new(data, reach(dict));
-    walk(&mut d, &mut mf, data, reach(dict), breaks, Part::START, data.len(), None, emit)?;
+    let mut mf = Mf::new(data.len(), reach(dict));
+    let chunks = if chunks { Chunks::Decode } else { Chunks::Off };
+    walk(&mut d, &mut mf, &mut Window::whole(data), reach(dict), chunks, Part::START, data.len(), None, on)?;
     (!d.overrun()).then_some(())
 }
 
@@ -482,83 +601,86 @@ fn deconstruct_parts(
         let (part, first) = parts[k];
         let (end, last) = parts.get(k + 1).map_or((data.len(), packets.len()), |&(p, i)| (p.at, i));
         let mut e = Enc::with(ArithEncoder::new(vec![]));
-        walk(&mut e, mf, data, reach, &[], part, end, Some(&packets[first..last]), |_| ())?;
+        let mut win = Window::whole(data);
+        walk(&mut e, mf, &mut win, reach, Chunks::Off, part, end, Some(&packets[first..last]), |_, _| Some(()))?;
         Some(e.c.finish())
     };
     let bodies: Vec<Option<Vec<u8>>> = if threads <= 1 || Mf::at_once(data.len(), reach) < 2 {
-        let mut mf = Mf::new(data, reach);
+        let mut mf = Mf::new(data.len(), reach);
         (0..parts.len()).map(|k| code(k, &mut mf)).collect()
     } else {
         aqr_common::pool::par_map(parts.len(), threads, |k| {
-            code(k, &mut Mf::starting(data, reach, parts[k].0.at.saturating_sub(reach)))
+            code(k, &mut Mf::starting(data.len(), reach, parts[k].0.at.saturating_sub(reach)))
         })
     };
     let bodies: Vec<Vec<u8>> = bodies.into_iter().collect::<Option<_>>()?;
     let mut out = Vec::new();
     varint::put(&mut out, parts.len() as u64 - 1);
-    for w in parts.windows(2) {
-        let p = w[1].0;
-        varint::put(&mut out, (p.at - w[0].0.at) as u64);
-        out.push(p.state);
-        p.reps.iter().for_each(|&r| varint::put(&mut out, r as u64));
+    for (k, body) in bodies.iter().enumerate() {
+        let (p, _) = parts[k];
+        let end = parts.get(k + 1).map_or(data.len(), |q| q.0.at);
+        varint::put(&mut out, (end - p.at) as u64);
+        varint::put(&mut out, body.len() as u64);
+        if k > 0 {
+            out.push(p.state);
+            p.reps.iter().for_each(|&r| varint::put(&mut out, r as u64));
+        }
+        out.extend_from_slice(body);
     }
-    bodies[..bodies.len() - 1].iter().for_each(|b| varint::put(&mut out, b.len() as u64));
-    bodies.iter().for_each(|b| out.extend_from_slice(b));
     Some(out)
 }
 
 /// The number of parts of a body of a record cut into them (see [`deconstruct_parts`]) for data
-/// of `n` bytes: the first varint, and one; None where it is not a count of them.
+/// of `n` bytes: the first varint, and one; None where it is not a count of them. Each part
+/// after the first has seven bytes of its header at least.
 fn parts_count(body: &[u8], n: usize) -> Option<usize> {
     let k =
         usize::try_from(varint::get(body, &mut 0).ok()?).ok().filter(|&k| k >= 1 && k < n && k <= body.len() / 7)?;
     Some(k + 1)
 }
 
-/// The parts of a body of a record cut into them (see [`deconstruct_parts`]), each with its
-/// body, in a vector of exactly [`parts_count`] of them; None where the body is not one of data
-/// of `n` bytes.
-fn parts_in(body: &[u8], n: usize) -> Option<Vec<(Part, &[u8])>> {
+/// A part of a record cut into them: where its packets start and end, and its body.
+struct PartRec<'a> {
+    part: Part,
+    end: usize,
+    body: &'a [u8],
+}
+
+/// The parts of a body of a record cut into them (see [`deconstruct_parts`]) of data of `n`
+/// bytes, a dictionary of `reach`: None where it is not one.
+fn parts_in(body: &[u8], n: usize, reach: usize) -> Option<Vec<PartRec<'_>>> {
     let mut at = 0;
     let get = |at: &mut usize| varint::get(body, at).ok();
     let count = parts_count(body, n)?;
     get(&mut at)?;
     let mut parts = Vec::with_capacity(count);
-    parts.push((Part::START, &body[..0]));
-    for _ in 1..count {
-        let gap = usize::try_from(get(&mut at)?).ok().filter(|&g| g > 0)?;
-        let pos = parts.last()?.0.at.checked_add(gap).filter(|&p| p < n)?;
-        let state = *body.get(at).filter(|&&s| s < 12)?;
-        at += 1;
-        let mut reps = [0u32; 4];
-        for r in &mut reps {
-            *r = u32::try_from(get(&mut at)?).ok()?;
+    let mut pos = 0usize;
+    for k in 0..count {
+        let span = usize::try_from(get(&mut at)?).ok().filter(|&s| s > 0 && s <= n - pos)?;
+        let len = usize::try_from(get(&mut at)?).ok()?;
+        let (mut state, mut reps) = (0u8, [0u32; 4]);
+        if k > 0 {
+            state = *body.get(at).filter(|&&s| s < 12)?;
+            at += 1;
+            for r in &mut reps {
+                *r = u32::try_from(get(&mut at)?).ok().filter(|&r| (r as usize) < reach)?;
+            }
         }
-        parts.push((Part { at: pos, state, reps }, &body[..0]));
+        let b = body.get(at..)?.get(..len)?;
+        at += len;
+        parts.push(PartRec { part: Part { at: pos, state, reps }, end: pos + span, body: b });
+        pos += span;
     }
-    // (the bodies' lengths, each but the last's; the bodies themselves after them)
-    let mut lens_at = at;
-    for _ in 1..count {
-        get(&mut at)?;
-    }
-    let mut rest = body.get(at..)?;
-    for part in &mut parts[..count - 1] {
-        let len = usize::try_from(get(&mut lens_at)?).ok()?;
-        let (b, r) = rest.split_at_checked(len)?;
-        rest = r;
-        part.1 = b;
-    }
-    parts[count - 1].1 = rest;
-    Some(parts)
+    (pos == n && at == body.len()).then_some(parts)
 }
 
-/// The stream of `data` from the `parts` of its record (each with its body), on up to `threads`
-/// threads where more than one match finder works at once ([`Mf::at_once`]: the parts' packets
-/// decoded side by side, then encoded in order), with the end marker if `marker`; else one goes
-/// through the parts with one match finder. Written onto the end of `out`.
+/// The stream of `data` from the `parts` of its record, on up to `threads` threads where more
+/// than one match finder works at once ([`Mf::at_once`]: the parts' packets decoded side by
+/// side, then encoded in order), with the end marker if `marker`; else one goes through the
+/// parts with one match finder. Written onto the end of `out`.
 fn rebuild_parts(
     data: &[u8],
-    parts: &[(Part, &[u8])],
+    parts: &[PartRec],
     props: Props,
     dict: u32,
     marker: bool,
@@ -566,38 +688,51 @@ fn rebuild_parts(
     out: &mut Vec<u8>,
 ) -> Option<()> {
     let reach = reach(dict);
-    let end = |k: usize| parts.get(k + 1).map_or(data.len(), |p| p.0.at);
+    let whole = View::whole(data);
     let mut e = StreamEncoder::new(props, std::mem::take(out));
     if threads <= 1 || parts.len() == 1 || Mf::at_once(data.len(), reach) < 2 {
-        let mut mf = Mf::new(data, reach);
-        for (k, &(part, b)) in parts.iter().enumerate() {
-            let mut d = ArithDecoder::new(b);
-            walk(&mut d, &mut mf, data, reach, &[], part, end(k), None, |pk| e.push(data, pk))?;
+        let mut mf = Mf::new(data.len(), reach);
+        for p in parts {
+            let mut d = ArithDecoder::new(p.body);
+            let on = |v: &View, ev| {
+                if let Ev::Packet(pk) = ev {
+                    e.push(v, pk);
+                }
+                Some(())
+            };
+            walk(&mut d, &mut mf, &mut Window::whole(data), reach, Chunks::Off, p.part, p.end, None, on)?;
             if d.overrun() {
                 return None;
             }
         }
     } else {
         let packets = aqr_common::pool::par_map(parts.len(), threads, |k| {
-            let (part, b) = parts[k];
-            let mut d = ArithDecoder::new(b);
-            let mut mf = Mf::starting(data, reach, part.at.saturating_sub(reach));
+            let p = &parts[k];
+            let mut d = ArithDecoder::new(p.body);
+            let mut mf = Mf::starting(data.len(), reach, p.part.at.saturating_sub(reach));
             let mut out = Vec::new();
-            walk(&mut d, &mut mf, data, reach, &[], part, end(k), None, |pk| out.push(pk))?;
+            let on = |_: &View, ev| {
+                if let Ev::Packet(pk) = ev {
+                    out.push(pk);
+                }
+                Some(())
+            };
+            walk(&mut d, &mut mf, &mut Window::whole(data), reach, Chunks::Off, p.part, p.end, None, on)?;
             (!d.overrun()).then_some(out)
         });
         for p in packets {
-            p?.into_iter().for_each(|pk| e.push(data, pk));
+            p?.into_iter().for_each(|pk| e.push(&whole, pk));
         }
     }
-    *out = e.finish(data, marker);
+    *out = e.finish(&whole, marker);
     Some(())
 }
 
 /// The stream of `data` from its record, with the end marker if `marker`.
 pub fn rebuild(data: &[u8], record: &[u8], props: Props, dict: u32, marker: bool) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(data.len() / 4);
-    rebuild_parts(data, &[(Part::START, record)], props, dict, marker, 1, &mut out)?;
+    let part = [PartRec { part: Part::START, end: data.len(), body: record }];
+    rebuild_parts(data, &part, props, dict, marker, 1, &mut out)?;
     Some(out)
 }
 
@@ -607,7 +742,7 @@ pub fn reach(dict: u32) -> usize {
 }
 
 /// The bytes of a record before its body: the properties byte, the dictionary size (le32) and
-/// the flags (bit 0: the stream ends with an end marker).
+/// the flags (bit 0: the stream ends with an end marker; bit 1: the body is cut into parts).
 pub const HEADER: usize = 6;
 
 /// A stream split into its data and its record.
@@ -630,7 +765,7 @@ pub fn split(
     size: Option<u64>,
     limit: usize,
     threads: usize,
-) -> Result<Split, lzma::Error> {
+) -> std::result::Result<Split, lzma::Error> {
     split_with(input, props, dict, size, limit, PART, threads)
 }
 
@@ -643,14 +778,14 @@ pub fn split_with(
     limit: usize,
     part: usize,
     threads: usize,
-) -> Result<Split, lzma::Error> {
+) -> std::result::Result<Split, lzma::Error> {
     let dec = lzma::decode(input, props, size, limit)?;
     if lzma::encode(&dec.data, props, &dec.packets, dec.marker) != input[..dec.used] {
         return Err(lzma::Error::Encoded);
     }
     let parts = parts_of(&dec.packets, part.max(1));
     let body = match parts.len() {
-        1 => deconstruct(&dec.data, &dec.packets, dict, &[]).map(|(b, _)| b),
+        1 => deconstruct(&dec.data, &dec.packets, dict, None).map(|(b, _)| b),
         _ => deconstruct_parts(&dec.data, &dec.packets, dict, &parts, threads),
     };
     let body = body.ok_or(lzma::Error::Corrupt)?;
@@ -694,21 +829,80 @@ pub fn join(data: &[u8], record: &[u8], threads: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// [`join`] written onto the end of `out`: where it has the room, it takes no more memory than
-/// the stream's rebuilding does ([`crate::plan`]). None also leaves `out` as it was not.
+/// [`join`] written onto the end of `out`.
 pub fn join_onto(data: &[u8], record: &[u8], threads: usize, out: &mut Vec<u8>) -> Option<()> {
     let h = head_of(record, data.len())?;
     let one;
     let many;
-    let parts: &[(Part, &[u8])] = match h.parts {
+    let parts: &[PartRec] = match h.parts {
         1 => {
-            one = [(Part::START, h.body)];
+            one = [PartRec { part: Part::START, end: data.len(), body: h.body }];
             &one
         }
         _ => {
-            many = parts_in(h.body, data.len())?;
+            many = parts_in(h.body, data.len(), reach(h.dict))?;
             &many
         }
     };
     rebuild_parts(data, parts, h.props, h.dict, h.marker, threads, out)
+}
+
+/// [`join`] as a part module does it: the `n` bytes of data read in order from `data` into a
+/// window, the record read in order from `rec` (`rec_len` bytes of it, the stream's), the stream
+/// put to `sink` in pieces; nothing of the lengths is held. The same bytes, one thread.
+pub fn join_stream(data: &mut dyn Pull, n: usize, rec: &mut Reader, rec_len: u64, sink: &mut dyn Put) -> Result<()> {
+    let taken = rec.taken();
+    let mut ok = || -> Option<()> {
+        let props = Props::from_byte(rec.byte()?)?;
+        let mut dict = [0; 4];
+        for b in &mut dict {
+            *b = rec.byte()?;
+        }
+        let dict = u32::from_le_bytes(dict);
+        let flags = rec.byte()?;
+        let body = rec_len.checked_sub(HEADER as u64)?;
+        let parts = match flags {
+            0 | 1 => 1,
+            2 | 3 => {
+                let k = usize::try_from(rec.num().ok()?).ok();
+                k.filter(|&k| k >= 1 && k < n && k as u64 <= body / 7)? + 1
+            }
+            _ => return None,
+        };
+        let reach = reach(dict);
+        let mut win = Window::fed(data, n, reach);
+        let mut mf = Mf::new(n, reach);
+        let mut e = StreamEncoder::to(props, sink);
+        let mut pos = 0usize;
+        for k in 0..parts {
+            let (mut part, mut end, mut len) = (Part::START, n, body);
+            if parts > 1 {
+                let span = usize::try_from(rec.num().ok()?).ok().filter(|&s| s > 0 && s <= n - pos)?;
+                len = rec.num().ok()?;
+                end = pos + span;
+                if k > 0 {
+                    let state = rec.byte().filter(|&s| s < 12)?;
+                    let mut reps = [0u32; 4];
+                    for r in &mut reps {
+                        *r = u32::try_from(rec.num().ok()?).ok().filter(|&r| (r as usize) < reach)?;
+                    }
+                    part = Part { at: pos, state, reps };
+                }
+            }
+            let mut d = Body::new(rec, len);
+            let on = |v: &View, ev| {
+                if let Ev::Packet(pk) = ev {
+                    e.push(v, pk);
+                }
+                Some(())
+            };
+            walk(&mut d, &mut mf, &mut win, reach, Chunks::Off, part, end, None, on)?;
+            d.finish()?;
+            pos = end;
+        }
+        win.finish()?;
+        e.finish_to(&win.view(), flags & 1 != 0)?;
+        (pos == n && rec.taken() - taken == rec_len).then_some(())
+    };
+    ok().ok_or_else(corrupt)
 }

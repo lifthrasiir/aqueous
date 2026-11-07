@@ -161,7 +161,8 @@ fn damaged_records() {
                 // (fails, or gives some bytes: never panics)
                 let _ = lzma2::join(&sp.data, &r);
             }
-            assert!(sp.data.is_empty() || lzma2::join(&sp.data[1..], &sp.record).is_none(), "{name}");
+            // (an empty segment's record may be one byte, as a one-byte segment's with its chunk is)
+            assert!(sp.data.len() <= 1 || lzma2::join(&sp.data[1..], &sp.record).is_none(), "{name}");
         }
     }
 }

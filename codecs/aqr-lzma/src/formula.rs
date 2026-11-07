@@ -11,19 +11,19 @@ use crate::{alone, lzma2, recons, xz};
 
 pub use crate::module::{decode, decode2, index};
 
-pub const MODULE: Module = Module::new("lzma-recons", 2).with_plan(plan);
+pub const MODULE: Module = Module::new("lzma-recons", 3).with_plan(plan);
 
 /// The module rebuilding the segments of LZMA2 streams, one after another.
-pub const LZMA2: Module = Module::new("lzma2-recons", 1).with_plan(plan2);
+pub const LZMA2: Module = Module::new("lzma2-recons", 2).with_plan(plan2);
 
 /// The memory of [`MODULE`]: its plan ([`crate::plan::decode`]).
 fn plan(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    crate::plan::decode(u.initial(), u.params, u.inputs, u.output(), u.all_contents::<3>()?)
+    crate::plan::decode(u.initial(), u.all_contents::<3>()?)
 }
 
 /// The memory of [`LZMA2`]: its plan ([`crate::plan::decode2`]).
 fn plan2(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    crate::plan::decode2(u.initial(), u.params, u.inputs, u.output(), u.all_contents::<3>()?)
+    crate::plan::decode2(u.initial(), u.all_contents::<3>()?)
 }
 
 /// The most data a stream is decoded to (and an `.xz` file's streams, in all).

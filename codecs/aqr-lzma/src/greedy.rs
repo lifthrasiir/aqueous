@@ -6,21 +6,22 @@ use aqr_common::{crc32, varint};
 
 use crate::lzma::{self, Kind, MAX_LEN, Packet, Props};
 use crate::lzma2::{self, Chunk};
-use crate::mf::{Mf, lcp_up};
+use crate::mf::{Mf, View};
 use crate::{alone, xz};
 
 /// The packets of `data` with matches at most `dict` back.
 pub fn packets(data: &[u8], dict: usize) -> Vec<Packet> {
-    let mut mf = Mf::new(data, dict);
+    let v = View::whole(data);
+    let mut mf = Mf::new(data.len(), dict);
     let mut out = vec![];
     let (mut pos, mut rep0) = (0, 0usize);
     let mut pairs = vec![];
     while pos < data.len() {
-        mf.advance(pos);
+        mf.advance(&v, pos);
         let cap = (MAX_LEN as usize).min(data.len() - pos);
-        let n = mf.longest(pos, 16, cap, cap);
-        mf.pairs(pos, cap, &mut pairs);
-        let r = if rep0 < pos { lcp_up(data, pos - rep0 - 1, pos, cap) } else { 0 };
+        let n = mf.longest(&v, pos, 16, cap, cap);
+        mf.pairs(&v, pos, cap, &mut pairs);
+        let r = if rep0 < pos { v.lcp(pos - rep0 - 1, pos, cap) } else { 0 };
         let pk = if r >= 2 && r >= n {
             Packet { kind: Kind::Rep0, len: r as u16, dist: rep0 as u32 }
         } else if n >= 2
