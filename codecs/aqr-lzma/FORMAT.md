@@ -315,7 +315,8 @@ through the parts with one match finder).
 The Wasm modules lay their memory out as a stack with nothing grown: the output (its length is
 the application's), then for each stream, freed after it, the parts' list, the literal model
 (`2 × 0x300 × 2^(lc+lp)` bytes; for LZMA2, the chunks' list, the model at its largest, 24 KiB,
-where there is an LZMA chunk, and the breaks), the match finder's tables and rings, the walk's
+where there is an LZMA chunk, and the breaks), the match finder's tables (one position
+of each hash, 12.5 MiB) and rings, the walk's
 contexts and candidates, and an LZMA2 chunk's coder (64 KiB and 16). All of it follows from the
 lengths and the records' starts, so that no size is stored for it: the encoder declares it as the
 memory limit (`plan.rs`).

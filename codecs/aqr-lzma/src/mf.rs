@@ -144,24 +144,27 @@ const RECENT: usize = 16;
 const RECENT_FROM: usize = 1 << 20;
 
 /// The positions kept of each hash on the chains [`Mf::longest`] goes through, for data of `n`
-/// bytes.
+/// bytes. In a module, one always: the tables of 16 would be 128 MiB of its plan, to rebuild
+/// twice as fast, and the candidates (so the record) are the same. Natively the speed is wanted
+/// ([`blocks`] is the module's).
 fn recent(n: usize) -> usize {
-    if n >= RECENT_FROM { RECENT } else { 1 }
+    if n >= RECENT_FROM && cfg!(not(target_arch = "wasm32")) { RECENT } else { 1 }
 }
 
 /// Bytes of the tables of a match finder over data of `n` bytes besides its rings.
-pub fn tables(n: usize) -> usize {
+#[cfg(not(target_arch = "wasm32"))]
+fn tables(n: usize) -> usize {
     4 * ((2 * recent(n) + 1) << HASH_BITS) + 4 * (1 << 16) + 4 * (1 << HASH3_BITS)
 }
 
-/// The sizes in bytes of the allocations of a match finder over data of `n` bytes for matches at
-/// most `reach` back ([`Mf::new`]), in the order it makes them: the two heads, then each chain's
-/// ring, buckets and list of matches found. They are all it holds (besides the stack's alignment
-/// of each to 16 bytes).
+/// The sizes in bytes of the allocations of a match finder in a module (one position of each
+/// hash, [`recent`]) over data of `n` bytes for matches at most `reach` back ([`Mf::new`]), in
+/// the order it makes them: the two heads, then each chain's ring, buckets and list of matches
+/// found. They are all it holds (besides the stack's alignment of each to 16 bytes).
 pub fn blocks(n: usize, reach: usize) -> [u64; 11] {
     let ring = reach.clamp(1, n.max(1)).next_power_of_two().min(n.max(1)) as u64;
     let chain = |w: usize, found: usize| [4 * ring, 4 * ((w << HASH_BITS) as u64 + 15), 8 * found as u64];
-    let (short, mid, long) = (chain(recent(n), DEPTH), chain(1, 0), chain(recent(n), DEPTH));
+    let (short, mid, long) = (chain(1, DEPTH), chain(1, 0), chain(1, DEPTH));
     let [a, b, c, d, e, f, g, h, i] = [short, mid, long].concat().try_into().unwrap();
     [4 << 16, 4 << HASH3_BITS, a, b, c, d, e, f, g, h, i]
 }

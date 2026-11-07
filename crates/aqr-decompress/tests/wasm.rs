@@ -3581,9 +3581,9 @@ fn lzma_stream(
 
 /// lzma-recons lays its memory out as a stack, its limit its plan: of streams alone and in an
 /// index (more than 64 of them), of every extreme of the properties (the literal model of 6 MiB
-/// at lc + lp = 12) and the dictionary (4 KiB, and past the data), data of megabytes (the
-/// chains' buckets of 16 positions from 1 MiB) and of bytes, records in parts (more than 64),
-/// with the end marker or without.
+/// at lc + lp = 12) and the dictionary (4 KiB, and past the data), data of megabytes (where
+/// the native chains' buckets have 16 positions and the module's one) and of bytes, records in
+/// parts (more than 64), with the end marker or without.
 #[test]
 fn lzma_plans_hold() {
     use aqr_lzma::lzma::Props;
@@ -3608,7 +3608,7 @@ fn lzma_plans_hold() {
             vec![lzma_stream(&d, props(lc, lp, pb), dict, k % 2 == 0, usize::MAX)],
         ));
     }
-    // (megabytes, to the buckets of 16 positions: a small and a large dictionary, the extremes)
+    // (megabytes, where the native buckets have 16 positions and the module's one: a small and a large dictionary, the extremes)
     for (k, &(lc, lp, dict)) in [(8, 4, 1 << 12), (3, 0, 1 << 26), (0, 0, 1 << 21)].iter().enumerate() {
         let d = lzma_data(3 << 20, 10 + k as u64);
         cases.push((

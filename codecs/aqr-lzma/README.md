@@ -62,7 +62,14 @@ just before on the same machine.
   benchmark, so with the data shared the streams cost about 14 MB instead of 96.5 MB.
 - Memory: the data, the stream and `12 × S` bytes of chains, `S` the dictionary size rounded
   up to a power of 2 (at most the data's), and 132.5 MiB of tables (12.5 MiB for less than
-  1 MiB of data, without the buckets). The bench on the 7z folder (data, packets, stream and
+  1 MiB of data, without the buckets). The modules never keep the buckets: with one position
+  of each hash their tables are 12.5 MiB at any length, and the records are byte for byte the
+  same (the `.tar.lzma` of the 10gb and the 7z folders above, checked), at the cost of a
+  rebuild about twice as slow in the match finder (32 -> 19 MB/s on the 7 largest `.tar.lzma`,
+  one thread, natively with one position; the modules run as Wasm only as the fallback of
+  the known hash, which runs natively with 16). That brings the `.tar.lzma` of 8 MiB
+  dictionaries under the encoder's bound of 256 MiB per application (up to 354 MiB needed
+  before), where they were stored whole. The bench on the 7z folder (data, packets, stream and
   record held at once) peaked at 1.39 GB (1.29 GB before the buckets); that on the `.tar.lzma`,
   4 at once, at 1.80 GB (1.31 GB).
 - A stream of more than 64 MiB of data is coded in parts of 64 MiB, each with contexts of its
