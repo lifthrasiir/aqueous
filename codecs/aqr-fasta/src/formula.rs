@@ -33,8 +33,9 @@ pub fn starts(d: &[u8]) -> bool {
 /// about it ([`cuts`]), each an application of its own, the model restarting at each. The
 /// module's memory is the same whatever the length (it is a part module), so this is not a bound
 /// of memory but of what the encoder holds of a file at once (its parts and bases, as many
-/// segments as it has threads) and of how long one application runs.
-pub const SEGMENT: usize = 1 << 30;
+/// segments as it has threads) and of how long one application runs: 256 MiB keeps every human
+/// chromosome whole (chr1 is 242 MiB) while a longer file still decodes in parallel.
+pub const SEGMENT: usize = 256 << 20;
 
 /// The formula of FASTA file `input`, or `None` where it is not one this crate takes
 /// ([`fasta`]). It is the same whatever `threads` is (the segments, if more than one, are coded

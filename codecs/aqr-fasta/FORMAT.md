@@ -143,8 +143,8 @@ layout, the case, the other runs and the bases.
 ## 7. Segments *(encoder)*
 
 - The module holds nothing of the file's length, so a segment is no bound of memory. An
-  application is a file as any other, and the encoder keeps a file in one (the `SEGMENT` of 1 GiB:
-  a file longer is cut into equal parts of up to that) so that the model starts once. Version 2
+  application is a file as any other, and the encoder keeps a file in one (the `SEGMENT` of 256 MiB:
+  a file longer is cut into equal parts of up to that, decoding in parallel) so that the model starts once. Version 2
   was a whole module, holding its output, a copy of it, its inputs twice and the model (about 2.5
   times the file), and cut a file at 96 MiB: chr1 of hg19 (254 MB) in three, 51.97 MB against
   51.73 MB in one.

@@ -31,7 +31,7 @@ Measured 2026-10-26 on an Apple M4 (10 cores), on hg19 (93 chromosome files of t
   halved at 250 (1.790, and a division per base). A match model of 24-base hashes (last
   occurrence, its prediction weighed by an adaptive table of its length) brought 1.787 to
   1.773 on 60 MB at four times the time, not taken. Models started anew every 64 Mbase cost
-  1.6%, every 16 Mbase 4.0%: a file is one stream, cut (FORMAT.md §7) only past 1 GiB.
+  1.6%, every 16 Mbase 4.0%: a file is one stream, cut (FORMAT.md §7) only past 256 MiB.
 - The module is a part module (version 3): its five inputs are read and its output written in
   order through windows, in pieces of 64 KiB, and the bases are decoded as the file is built.
   Nothing of the file's length is held: an application's memory plan is 3.4 MiB with the module's
