@@ -37,7 +37,8 @@ another coder's output, and the output no bind pair takes is the folder's. A fol
   (main, call, jump) compressor coders reading packed streams, its input 3 (the range coder's)
   a packed stream. One application of `bcj2` takes the folder's data and that packed stream
   (a stream of the formula, of class `bcj2/rc`, which is also the packed stream in place) and
-  is split into the three streams, each the input 0 of its compressor.
+  has three outputs (version 2 of the module; its version 1 had one, split into them), the
+  three streams, each the input 0 of its compressor.
 
 The compressors are:
 

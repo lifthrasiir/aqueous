@@ -11,30 +11,53 @@
 
 use crate::{Error, Result, corrupt};
 
-/// The range decoder of the bits.
-struct Rc<'a> {
+/// The bytes of the range coder's stream, in order.
+pub trait RcBytes {
+    /// The next byte, None at the end of the stream.
+    fn next(&mut self) -> Option<u8>;
+}
+
+/// A stream held in memory.
+struct Slice<'a> {
     d: &'a [u8],
     pos: usize,
+}
+
+impl RcBytes for Slice<'_> {
+    fn next(&mut self) -> Option<u8> {
+        let b = *self.d.get(self.pos)?;
+        self.pos += 1;
+        Some(b)
+    }
+}
+
+/// The range decoder of the bits.
+pub struct Rc<B> {
+    bytes: B,
     range: u32,
     code: u32,
 }
 
-impl<'a> Rc<'a> {
-    fn new(d: &'a [u8]) -> Option<Self> {
-        if d.len() < 5 || d[0] != 0 {
+impl<B: RcBytes> Rc<B> {
+    /// The decoder of a stream, which starts with a byte 0 and `code` (not `2^32 - 1`). None where
+    /// it is not.
+    pub fn new(mut bytes: B) -> Option<Self> {
+        if bytes.next()? != 0 {
             return None;
         }
-        let code = u32::from_be_bytes(d[1..5].try_into().unwrap());
-        (code != u32::MAX).then_some(Rc { d, pos: 5, range: u32::MAX, code })
+        let mut code = 0u32;
+        for _ in 0..4 {
+            code = code << 8 | bytes.next()? as u32;
+        }
+        (code != u32::MAX).then_some(Rc { bytes, range: u32::MAX, code })
     }
 
     /// The next bit (normalized before it, as the decoder does). None where the stream ends
     /// before it.
-    fn bit(&mut self, p: &mut u16) -> Option<bool> {
+    pub fn bit(&mut self, p: &mut u16) -> Option<bool> {
         if self.range < 1 << 24 {
             self.range <<= 8;
-            self.code = self.code << 8 | *self.d.get(self.pos)? as u32;
-            self.pos += 1;
+            self.code = self.code << 8 | self.bytes.next()? as u32;
         }
         let bound = (self.range >> 11) * *p as u32;
         Some(if self.code < bound {
@@ -52,13 +75,13 @@ impl<'a> Rc<'a> {
 
 /// Whether `b` after `prev` is an opcode whose target may be taken out.
 #[inline]
-fn candidate(prev: u8, b: u8) -> bool {
+pub(crate) fn candidate(prev: u8, b: u8) -> bool {
     b & 0xfe == 0xe8 || prev == 0x0f && b & 0xf0 == 0x80
 }
 
 /// The probability of a candidate's bit.
 #[inline]
-fn context(prev: u8, b: u8) -> usize {
+pub(crate) fn context(prev: u8, b: u8) -> usize {
     match b {
         0xe8 => 2 + prev as usize,
         0xe9 => 1,
@@ -111,7 +134,7 @@ pub fn encode_joined(data: &[u8], rc: &[u8]) -> Result<Vec<u8>> {
 /// The decisions of [`encode`] on `data` with the bits that `rc` codes: each byte of the main
 /// stream to `main`, each target taken out to `target` (whether a call's, and its bytes).
 fn walk(data: &[u8], rc: &[u8], mut main: impl FnMut(u8), mut target: impl FnMut(bool, [u8; 4])) -> Result<()> {
-    let mut rc = Rc::new(rc).ok_or(Error("bad range coder"))?;
+    let mut rc = Rc::new(Slice { d: rc, pos: 0 }).ok_or(Error("bad range coder"))?;
     let mut probs = [1024u16; 258];
     let (mut i, mut prev) = (0, 0u8);
     while i < data.len() {
@@ -134,7 +157,7 @@ fn walk(data: &[u8], rc: &[u8], mut main: impl FnMut(u8), mut target: impl FnMut
 /// The data of `size` bytes that the streams give. Fails where they do not give that, or are not
 /// used up (but for what `rc` holds after its last bit).
 pub fn decode(s: &Streams, rc: &[u8], size: usize) -> Result<Vec<u8>> {
-    let mut rc = Rc::new(rc).ok_or(Error("bad range coder"))?;
+    let mut rc = Rc::new(Slice { d: rc, pos: 0 }).ok_or(Error("bad range coder"))?;
     let mut probs = [1024u16; 258];
     let mut out = Vec::with_capacity(size);
     let (mut m, mut c, mut j) = (0, 0, 0);

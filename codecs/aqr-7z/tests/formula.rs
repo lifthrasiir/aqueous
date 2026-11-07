@@ -1,8 +1,11 @@
 use aqr_7z::formula::{self, Options};
 use aqr_formula::{Apply, Formula, Kind, Node};
 
-fn eval(f: &Formula) -> aqr_formula::Result<Vec<u8>> {
-    f.eval(&|a: &Apply, inputs: &[&[u8]]| {
+/// The modules of the formulas; BCJ2, of three outputs, gives them one after another.
+struct Modules;
+
+impl aqr_formula::Modules for Modules {
+    fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
         if let Some(r) = aqr_bcj::formula::decode(a.module, &a.params, inputs, a.len) {
             return r.map_err(|e| aqr_formula::Error::new(e.to_string()));
         }
@@ -12,7 +15,18 @@ fn eval(f: &Formula) -> aqr_formula::Result<Vec<u8>> {
             m => panic!("{m}"),
         };
         decode(&a.params, inputs, a.len, 2).map_err(|e| aqr_formula::Error::new(e.to_string()))
-    })
+    }
+
+    fn apply_shared(&self, s: &aqr_formula::Shared, inputs: &[&[u8]]) -> aqr_formula::Result<Vec<Vec<u8>>> {
+        let all = self.apply(&s.apply, inputs)?;
+        assert_eq!(all.len() as u64, s.apply.len);
+        let mut rest = &all[..];
+        Ok(s.sizes.iter().map(|&n| rest.split_off(..n as usize).unwrap().to_vec()).collect())
+    }
+}
+
+fn eval(f: &Formula) -> aqr_formula::Result<Vec<u8>> {
+    f.eval(&Modules)
 }
 
 /// The archives of 7-Zip 26 (`scripts/gen-fixtures.py`), by name.

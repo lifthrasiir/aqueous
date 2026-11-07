@@ -463,7 +463,23 @@ const NATIVE: &[Entry] = &[
         },
         |p, _, i, n, _| bcj(BCJ_DELTA, p, i, n),
     ),
-    bare(BCJ2, |p, _, i, n, _| bcj(BCJ2, p, i, n)),
+    part(
+        BCJ2,
+        false,
+        aqr_api::emu::Entry {
+            kind: aqr_api::emu::Kind::Part,
+            windows: &[
+                aqr_api::Window::Input(0, aqr_bcj::module::BCJ2_WINDOW),
+                aqr_api::Window::Input(1, aqr_bcj::module::BCJ2_WINDOW),
+                aqr_api::Window::Output(0, aqr_bcj::module::BCJ2_WINDOW),
+                aqr_api::Window::Output(1, aqr_bcj::module::BCJ2_WINDOW),
+                aqr_api::Window::Output(2, aqr_bcj::module::BCJ2_WINDOW),
+            ],
+            arity: 6,
+            call: |a| aqr_bcj::module::bcj2_part(a[0], a[1], a[2], a[3], a[4], a[5]),
+        },
+        |p, _, i, n, _| bcj(BCJ2, p, i, n),
+    ),
     bare(LZO, |p, _, i, n, t| aqr_lzo::formula::decode(p, i, n, t).map_err(err)),
     bare(AZO, |p, _, i, n, t| aqr_azo::formula::decode(p, i, n, t).map_err(err)),
     bare(LHA, |p, _, i, n, t| aqr_lha::formula::decode(p, i, n, t).map_err(err)),
@@ -846,10 +862,11 @@ impl Loaded for NativeLoaded<'_> {
         _: u64,
         _: &[u64],
     ) -> aqr::Decoded<Vec<Vec<u8>>> {
-        let &[len] = sizes else { return Err(Failure::Invalid(format!("{}: {} outputs", self.module, sizes.len()))) };
         let resources: Vec<&[u8]> = resources.iter().map(|r| &r[..]).collect();
-        let out = self.native.run(self.module, params, &resources, inputs, len);
-        Ok(vec![out.map_err(|e| Failure::Invalid(e.0))?])
+        let total: u64 = sizes.iter().sum();
+        let out = self.native.run(self.module, params, &resources, inputs, total).map_err(|e| Failure::Invalid(e.0))?;
+        // (a module of several outputs gives them one after another, as its whole `decode` does)
+        split_outputs(self.module, out, sizes).map_err(Failure::Invalid)
     }
 }
 
@@ -908,6 +925,37 @@ impl Modules for Native {
         let resources: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
         self.run(a.module, &a.params, &resources, inputs, a.len)
     }
+
+    /// A module of several outputs gives them one after another natively (its whole `decode`).
+    fn apply_shared(&self, s: &aqr_formula::Shared, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
+        let all = self.apply(&s.apply, inputs)?;
+        if all.len() as u64 != s.apply.len {
+            return Err(Error::new(format!("{} made {} bytes, not {}", s.apply.module, all.len(), s.apply.len)));
+        }
+        match (s.split, &s.sizes[..]) {
+            (false, &[_]) => Ok(vec![all]),
+            (_, sizes) => split_outputs(s.apply.module, all, sizes).map_err(Error::new),
+        }
+    }
+}
+
+/// The outputs of `module` of `sizes` bytes, cut from `all`, the outputs one after another (what
+/// the whole `decode` of a module of several outputs gives).
+fn split_outputs(module: Module, mut all: Vec<u8>, sizes: &[u64]) -> std::result::Result<Vec<Vec<u8>>, String> {
+    if let &[_] = sizes {
+        return Ok(vec![all]);
+    }
+    if all.len() as u64 != sizes.iter().sum::<u64>() {
+        return Err(format!("{module}: output of another length"));
+    }
+    let mut rest = &mut all[..];
+    let mut outs = Vec::with_capacity(sizes.len());
+    for &n in sizes {
+        let (a, b) = std::mem::take(&mut rest).split_at_mut(n as usize);
+        outs.push(a.to_vec());
+        rest = b;
+    }
+    Ok(outs)
 }
 
 #[cfg(test)]

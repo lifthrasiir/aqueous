@@ -503,6 +503,93 @@ fn bra_plans_hold() {
     }
 }
 
+/// bcj2 (a part module of three outputs through windows of a page) takes the same plan whatever
+/// the lengths: data past the 64 MiB that a whole module's copies would put over the application
+/// bound, past its windows, and a few bytes; the range coder's stream is noise, so about half the
+/// candidates have their targets taken out (the streams that `aqr_bcj::bcj2::encode` gives).
+#[test]
+fn bcj2_plans_hold() {
+    for n in [70usize << 20, 1_000_003, 300] {
+        let mut rng = aqr_common::rng::Rng::new(3);
+        let mut d: Vec<u8> =
+            (0..n).map(|i| if i % 7 == 0 { [0xe8, 0xe9, 0x0f][rng.below(3) as usize] } else { rng.below(256) as u8 }).collect();
+        d[n.saturating_sub(16)..].fill(0x41);
+        let mut rc: Vec<u8> = (0..n / 4 + 64).map(|_| rng.below(255) as u8).collect();
+        rc[0] = 0;
+        let s = aqr_bcj::bcj2::encode(&d, &rc).unwrap();
+        let sizes = [s.main.len() as u64, s.call.len() as u64, s.jump.len() as u64];
+        assert!(n < 1000 || sizes[1] > 1000 && sizes[2] > 1000, "{n}: targets taken out");
+        let mut f = Formula::default();
+        let (data, rc) = (f.push("raw", d), f.push("bcj2/rc", rc));
+        let a = aqr_formula::Apply {
+            module: aqr_bcj::formula::BCJ2,
+            resources: vec![],
+            params: vec![],
+            inputs: vec![data, rc],
+            len: 0,
+            memory_limit: aqr_formula::NO_LIMIT,
+            task_limits: vec![],
+        };
+        let outs = f.share(a, sizes.to_vec());
+        f.root = Node::concat(outs);
+        let want = [&s.main[..], &s.call, &s.jump].concat();
+        plan_holds_shared(&format!("bcj2 {n}"), f, &want);
+    }
+}
+
+/// [`plan_holds`] of an application of several outputs, the first of the formula's (`f.shared[0]`),
+/// whose outputs the root takes: a module that takes no tasks.
+fn plan_holds_shared(what: &str, mut f: Formula, want: &[u8]) {
+    let pages = |n: u64| n.div_ceil(65536) * 65536;
+    let a = f.shared[0].apply.clone();
+    let sizes = f.shared[0].sizes.clone();
+    let inputs: Vec<Vec<u8>> = (a.inputs.iter())
+        .map(|n| match *n {
+            Node::Slice { stream, start, len } => f.streams[stream].data[start as usize..][..len as usize].to_vec(),
+            _ => panic!("{what}: an input that is no slice"),
+        })
+        .collect();
+    let contents: Vec<&[u8]> = inputs.iter().map(|i| &i[..]).collect();
+    let lens: Vec<u64> = inputs.iter().map(|i| i.len() as u64).collect();
+    let usage = aqr_formula::Usage {
+        params: &a.params,
+        resources: &[],
+        inputs: &lens,
+        outputs: &sizes,
+        contents: &contents,
+        initial_pages: aqr_decompress::initial_pages_of(a.module).unwrap(),
+    };
+    let plan = a.module.plan_for(&usage).unwrap();
+    assert!(plan.tasks.is_empty(), "{what}: tasks");
+    // (the same plan for a hundred bytes: it does not depend on the lengths)
+    let none: Vec<&[u8]> = Vec::new();
+    let small = aqr_formula::Usage { inputs: &[100, 100], outputs: &[100, 0, 0], contents: &none, ..usage };
+    assert!(sizes.iter().sum::<u64>() < 1000 || a.module.plan_for(&small).unwrap().instance == plan.instance, "{what}");
+    assert!(plan.instance <= 4 << 20, "{what}: instance {}", plan.instance);
+    let imported = std::iter::once(a.params.len() as u64).chain(sizes.iter().copied()).chain(lens.iter().copied());
+    let limit = imported.map(pages).sum::<u64>() + plan.instance;
+    f.shared[0].apply.memory_limit = limit;
+    let c = Encoder::new(Level::Zstd(3)).with_modules(wasm_of).encode(&f, None).unwrap();
+    static RECORDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let recording = RECORDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    aqr_decompress::record_applications(true);
+    let out = aqr::decode(&c, &Wasm);
+    let applied = aqr_decompress::record_applications(false);
+    drop(recording);
+    assert!(out.as_ref().is_ok_and(|o| o == want), "{what}: {:?}", out.err());
+    let mine: Vec<_> = applied.iter().filter(|a| a.limit == limit).collect();
+    assert!(!mine.is_empty(), "{what}: not applied");
+    for a in mine {
+        assert!(a.working <= plan.instance, "{what}: working {} past {}", a.working, plan.instance);
+        assert!(
+            a.instance <= plan.instance && plan.instance - a.instance < 65536,
+            "{what}: instance plan {}, took {}",
+            plan.instance,
+            a.instance
+        );
+    }
+}
+
 /// DEFLATE streams inflated (flate-inflate) natively and as WebAssembly alike, and damaged in
 /// turn failing alike (or giving the same).
 #[test]

@@ -2,7 +2,7 @@
 
 #![no_main]
 
-// (its memory laid out as a stack: what it takes is its plan, `aqr_bcj::module::plan`)
+// (its memory laid out as a stack: what it takes is its plan, `aqr_bcj::formula`'s `memory_part`)
 #[global_allocator]
 static STACK: aqr_api::stack::Stack = aqr_api::stack::Stack::new();
 

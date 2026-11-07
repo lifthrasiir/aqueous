@@ -96,9 +96,14 @@ holds the `n` bytes before each, whatever the length of the data.
 
 ## BCJ2
 
-Module `bcj2`, version 1. **Parameters**: none. **Inputs**: two: the data `D`, and the stream
-of BCJ2's range coder `R`. **Output**: the main, call and jump streams, one after another, of
-`N` bytes in all. A container cuts them by their lengths (a Split instruction).
+Module `bcj2`, version 2. **Parameters**: none. **Inputs**: two: the data `D`, and the stream
+of BCJ2's range coder `R`. **Outputs**: three, the main, call and jump streams, of the sizes the
+application declares (their sum is `N`; each of the last two a multiple of 4). A part module, of
+windows of a page for its inputs and outputs: `D` and `R` are taken in order, the outputs put
+in order, and the memory it takes does not depend on the lengths. It fails where the streams it
+makes are not of the sizes declared. Version 1 was a whole module of one output, the three
+streams one after another (about four times `N` of memory), which a container cut by their
+lengths (a Split instruction).
 
 `R` starts with a byte 0, then `code` (be32, not `2^32 − 1`); `range = 2^32 − 1`. A bit of a
 probability `p` (11 bits, initially 1024): first, if `range < 2^24`, `range <<= 8` and `code =

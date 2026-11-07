@@ -77,8 +77,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "bcj2",
-        version: 1,
-        sha512_256: hex("4a25715b22c5a9e27c7ef2d7e044256852f2df537707cd42da89a02d3b4f330c"),
+        version: 2,
+        sha512_256: hex("4c223c70286d04e9b4c63344706de56a40dd85d3f21bec10cca3ebf49f8f998a"),
         block: include_bytes!("../wasm/bcj2.block"),
     },
     Known {

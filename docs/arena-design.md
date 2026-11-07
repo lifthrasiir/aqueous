@@ -194,6 +194,8 @@ P = W_main + Σ_태스크 (W_spawn + 태스크의 계획 버퍼) + 채널 메시
 
 **bcj-x86 외 일곱(판 2).** whole이던 분기 변환기를 part 모듈로 바꿨다(창 1쪽 × 입력과 출력, bcj-delta와 같다). 4 KiB 버퍼 하나로 조각씩 변환하고, `bra::Converter`가 조각 사이의 상태(x86의 mask, IA-64의 주소)를 넘기며, 조각 끝에서 정하지 못한 최대 16바이트는 다음 조각의 앞이 된다. 아무것도 쥐지 않으므로 계획 = 초기 메모리뿐이고 길이와 무관하다(whole은 입력의 약 4배라 63 MiB 입력이 256 MiB였다). 출력은 판 1과 바이트까지 같다. 실측 = 계획이다(`bra_plans_hold`: x86 70 MiB, 나머지 여덟 구조의 창을 넘는 30만 바이트를 start 유무로).
 
+**bcj2(판 2).** whole이던 것을 출력 셋의 part 모듈로 바꿨다(창 1쪽 × 입력 둘과 출력 셋). 한 패스에서 main, call, jump가 함께 나오므로 출력을 셋으로 갈랐고, 크기는 컨테이너가 아는 세 스트림의 길이를 Apply의 출력 크기로 그대로 쓴다(params에 적을 것이 없다). 데이터와 범위 부호기 스트림을 4 KiB 조각으로 차례로 받고 출력마다 4 KiB 버퍼를 둬 창으로 내보내며(`Pull`, `Push`), 후보 바이트 뒤의 목표 4바이트가 조각을 넘지 않도록 5바이트를 미리 채운다. 계획 = 초기 메모리뿐이고 길이와 무관하다(whole은 4배). 선언한 크기와 실제 스트림이 다르면 실패한다. aqr-7z는 `Formula::split`(출력 하나를 Split) 대신 `Formula::share`(출력 셋)로 식을 만든다. 네이티브(`Native`)는 `apply_shared`를 덮어 whole `decode`가 이어 붙여 준 출력을 크기대로 자르므로 `decode`는 그대로다. 실측 = 계획이다(`bcj2_plans_hold`: 70 MiB와 창을 넘는 100만 바이트, 잡음의 범위 부호기 스트림으로 목표의 절반쯤이 빠진다).
+
 **recs-fields, recs-entries, recs-floats.** 이미 LIFO였다(필드 목록, 출력, recs-fields는 필드마다 위에 참조 값 목록).
 - `Field`와 `Float`는 `repr(C)`로 두고, wasm32 크기는 상수로 확인한다.
 - 실측 = 계획이다(`recs_plans_hold`). 직접 만든 수식에는 aqr-compress의 숨은 `declare_memory`로 한도를 선언한다.

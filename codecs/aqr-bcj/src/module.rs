@@ -94,14 +94,6 @@ pub fn bcj2(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     bcj2::encode_joined(d, rc)
 }
 
-/// The memory plans of the modules ([`aqr_api::stack`]): what each takes beyond its initial
-/// memory at most, of parameters of `params` bytes, inputs of `inputs` bytes and an output of
-/// `len`. A branch converter, Delta and BCJ2 (as whole modules): what `aqr_api::whole` copies,
-/// and the output; Delta as a part module nothing.
-pub fn plan(params: u64, inputs: &[u64], len: u64) -> u64 {
-    aqr_api::stack::whole(params, &[], inputs) + aqr_api::stack::block(len)
-}
-
 /// The pages of the windows of a branch converter's input and output (as a part module,
 /// [`bra_part`]).
 pub const BRA_WINDOW: u32 = 1;
@@ -156,4 +148,171 @@ pub fn bra_part(arch: Arch, params_len: u64, in0_len: u64, size: u64) {
         have -= done;
     }
     out(&buf[..have]);
+}
+
+/// The pages of the windows of `bcj2`'s inputs and outputs (as a part module, [`bcj2_part`]).
+pub const BCJ2_WINDOW: u32 = 1;
+
+/// Bytes of the buffers of [`bcj2_part`]'s data, range coder's stream and each output.
+const BCJ2_BUF: usize = 4096;
+
+/// The `K`-th input of a part module taken in order through its window, in pieces.
+struct Pull<const K: u32> {
+    /// The offset of the next byte to read from the input, and its length.
+    at: u64,
+    len: u64,
+    buf: [u8; BCJ2_BUF],
+    /// The bytes of `buf` not taken yet are `lo..hi`.
+    lo: usize,
+    hi: usize,
+}
+
+impl<const K: u32> Pull<K>
+where
+    aqr_api::Input<K>: aqr_api::Memory,
+{
+    fn new(len: u64) -> Pull<K> {
+        Pull { at: 0, len, buf: [0; BCJ2_BUF], lo: 0, hi: 0 }
+    }
+
+    /// Reads on until the buffer holds `want` bytes not taken (or the input has no more).
+    fn fill(&mut self, want: usize) {
+        use aqr_api::{Input, Memory};
+        if self.hi - self.lo >= want || self.at == self.len {
+            return;
+        }
+        self.buf.copy_within(self.lo..self.hi, 0);
+        (self.hi, self.lo) = (self.hi - self.lo, 0);
+        let w = Input::<K>::size();
+        while self.hi < BCJ2_BUF && self.at < self.len {
+            let n = (self.len - self.at).min((BCJ2_BUF - self.hi) as u64).min(w - self.at % w);
+            Input::<K>::request(self.at + n);
+            Input::<K>::read(self.at % w, &mut self.buf[self.hi..self.hi + n as usize]);
+            Input::<K>::release(self.at + n);
+            self.at += n;
+            self.hi += n as usize;
+        }
+    }
+
+    /// The offset of the next byte not taken.
+    fn position(&self) -> u64 {
+        self.at - (self.hi - self.lo) as u64
+    }
+}
+
+impl<const K: u32> bcj2::RcBytes for Pull<K>
+where
+    aqr_api::Input<K>: aqr_api::Memory,
+{
+    fn next(&mut self) -> Option<u8> {
+        self.fill(1);
+        let b = *self.buf[..self.hi].get(self.lo)?;
+        self.lo += 1;
+        Some(b)
+    }
+}
+
+/// The `K`-th output of a part module put in order through its window, of `size` bytes in all.
+struct Push<const K: u32> {
+    at: u64,
+    size: u64,
+    buf: [u8; BCJ2_BUF],
+    n: usize,
+}
+
+impl<const K: u32> Push<K>
+where
+    aqr_api::Output<K>: aqr_api::Memory + aqr_api::Writable,
+{
+    fn new(size: u64) -> Push<K> {
+        Push { at: 0, size, buf: [0; BCJ2_BUF], n: 0 }
+    }
+
+    #[inline]
+    fn put(&mut self, d: &[u8]) -> Result<()> {
+        if self.n + d.len() > BCJ2_BUF {
+            self.flush()?;
+        }
+        self.buf[self.n..self.n + d.len()].copy_from_slice(d);
+        self.n += d.len();
+        Ok(())
+    }
+
+    /// Puts out the buffer; fails where that is past `size`.
+    fn flush(&mut self) -> Result<()> {
+        use aqr_api::{Memory, Output};
+        if self.n as u64 > self.size - self.at {
+            return Err(Error("output of another length"));
+        }
+        let mut d = &self.buf[..self.n];
+        while !d.is_empty() {
+            let w = Output::<K>::size();
+            let k = (d.len() as u64).min(w - self.at % w) as usize;
+            Output::<K>::write(self.at % w, &d[..k]);
+            self.at += k as u64;
+            Output::<K>::commit(self.at);
+            d = &d[k..];
+        }
+        self.n = 0;
+        Ok(())
+    }
+
+    /// Puts out what is left; fails where the output is not `size` bytes.
+    fn finish(mut self) -> Result<()> {
+        self.flush()?;
+        match self.at == self.size {
+            true => Ok(()),
+            false => Err(Error("output of another length")),
+        }
+    }
+}
+
+/// The module `bcj2` as a part module (its entry point, of `aqr_api::entry!`): the main, call and
+/// jump streams, its three outputs, put in order through windows of [`BCJ2_WINDOW`] pages from
+/// the data and the range coder's stream taken in order, whatever the lengths: [`bcj2`]'s
+/// output is theirs one after another. The sizes of the outputs are the streams' lengths.
+pub fn bcj2_part(params_len: u64, in0_len: u64, in1_len: u64, size0: u64, size1: u64, size2: u64) {
+    aqr_api::finish(bcj2_stream(params_len, in0_len, in1_len, [size0, size1, size2]));
+}
+
+fn bcj2_stream(params_len: u64, data_len: u64, rc_len: u64, sizes: [u64; 3]) -> Result<()> {
+    use bcj2::{candidate, context};
+    if params_len != 0 {
+        return Err(corrupt());
+    }
+    // (each of the targets 4 bytes; the streams one after another make the data's length)
+    let total = sizes[0].checked_add(sizes[1]).and_then(|n| n.checked_add(sizes[2]));
+    if total != Some(data_len) {
+        return Err(Error("output of another length"));
+    }
+    let mut rc = bcj2::Rc::new(Pull::<1>::new(rc_len)).ok_or(Error("bad range coder"))?;
+    let mut probs = [1024u16; 258];
+    let mut data = Pull::<0>::new(data_len);
+    let (mut main, mut call, mut jump) = (Push::<0>::new(sizes[0]), Push::<1>::new(sizes[1]), Push::<2>::new(sizes[2]));
+    let mut prev = 0u8;
+    loop {
+        // (a byte and the target after it)
+        data.fill(5);
+        if data.lo == data.hi {
+            break;
+        }
+        let b = data.buf[data.lo];
+        data.lo += 1;
+        main.put(&[b])?;
+        if !candidate(prev, b) || !rc.bit(&mut probs[context(prev, b)]).ok_or_else(corrupt)? {
+            prev = b;
+            continue;
+        }
+        let t: [u8; 4] = data.buf[data.lo..data.hi].get(..4).ok_or_else(corrupt)?.try_into().unwrap();
+        let abs = u32::from_le_bytes(t).wrapping_add(data.position() as u32 + 4);
+        match b == 0xe8 {
+            true => call.put(&abs.to_be_bytes())?,
+            false => jump.put(&abs.to_be_bytes())?,
+        }
+        prev = t[3];
+        data.lo += 4;
+    }
+    main.finish()?;
+    call.finish()?;
+    jump.finish()
 }

@@ -151,20 +151,25 @@ fn bcj2_of(d: &[u8]) -> (bcj2::Streams, Vec<u8>) {
     (s, rc.out)
 }
 
+/// x86-like: calls and jumps to targets within the data, among other bytes.
+fn calls_and_jumps(n: usize) -> Vec<u8> {
+    let mut d = biased(n, 9);
+    let mut x = 1u64;
+    for i in (0..n.saturating_sub(5)).step_by(7) {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+        if x >> 62 == 0 {
+            let t = ((x >> 20) as usize % n) as i64 - (i + 5) as i64;
+            d[i] = [0xe8, 0xe9][(x >> 40) as usize & 1];
+            d[i + 1..i + 5].copy_from_slice(&(t as i32).to_le_bytes());
+        }
+    }
+    d
+}
+
 #[test]
 fn bcj2_streams() {
     for n in [1, 5, 1000, 200_000] {
-        // x86-like: calls and jumps to targets within the data, among other bytes
-        let mut d = biased(n, 9);
-        let mut x = 1u64;
-        for i in (0..n.saturating_sub(5)).step_by(7) {
-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
-            if x >> 62 == 0 {
-                let t = ((x >> 20) as usize % n) as i64 - (i + 5) as i64;
-                d[i] = [0xe8, 0xe9][(x >> 40) as usize & 1];
-                d[i + 1..i + 5].copy_from_slice(&(t as i32).to_le_bytes());
-            }
-        }
+        let d = calls_and_jumps(n);
         let (s, rc) = bcj2_of(&d);
         if n > 1000 {
             assert!(!s.call.is_empty() && !s.jump.is_empty());
@@ -227,6 +232,48 @@ fn pieces_same_as_whole() {
                     }
                 }
             }
+        }
+    }
+}
+
+/// The part module `bcj2` (three outputs through windows of a page) gives the streams that
+/// [`bcj2::encode`] does, on data and streams past its windows, and fails on outputs of other
+/// sizes and on damaged input.
+#[test]
+fn bcj2_part_same_as_streams() {
+    use aqr_api::Window;
+    use aqr_api::emu::{self, Entry, Kind};
+    const ENTRY: Entry = Entry {
+        kind: Kind::Part,
+        windows: &[
+            Window::Input(0, module::BCJ2_WINDOW),
+            Window::Input(1, module::BCJ2_WINDOW),
+            Window::Output(0, module::BCJ2_WINDOW),
+            Window::Output(1, module::BCJ2_WINDOW),
+            Window::Output(2, module::BCJ2_WINDOW),
+        ],
+        arity: 6,
+        call: |a| module::bcj2_part(a[0], a[1], a[2], a[3], a[4], a[5]),
+    };
+    for n in [1, 5, 6, 1000, 200_000, 1_000_000] {
+        let d = calls_and_jumps(n);
+        let (s, rc) = bcj2_of(&d);
+        let sizes = [s.main.len() as u64, s.call.len() as u64, s.jump.len() as u64];
+        let out = emu::apply(&ENTRY, &[&d, &rc], &[], &[], &sizes).unwrap_or_else(|e| panic!("{n}: {e:?}"));
+        assert!(out[0] == s.main && out[1] == s.call && out[2] == s.jump, "{n}");
+        if n >= 1_000_000 {
+            assert!(s.call.len() > 65536 && s.jump.len() > 65536);
+        }
+        // sizes that are not the streams' (the same total or not), parameters, a stream cut short
+        if sizes[1] >= 4 {
+            let other = [sizes[0] + 4, sizes[1] - 4, sizes[2]];
+            assert!(emu::apply(&ENTRY, &[&d, &rc], &[], &[], &other).is_err(), "{n}: other sizes");
+        }
+        assert!(emu::apply(&ENTRY, &[&d, &rc], &[], &[], &[sizes[0] + 1, sizes[1], sizes[2]]).is_err());
+        assert!(emu::apply(&ENTRY, &[&d, &rc], &[], &[0], &sizes).is_err(), "{n}: parameters");
+        assert!(emu::apply(&ENTRY, &[&d, &rc[..4]], &[], &[], &sizes).is_err(), "{n}: stream cut short");
+        if n >= 1000 {
+            assert!(emu::apply(&ENTRY, &[&d, &rc[..rc.len() / 2]], &[], &[], &sizes).is_err(), "{n}: cut");
         }
     }
 }

@@ -5928,8 +5928,8 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bcj-x86.wasm" title="crates/aqr-modules/wasm/bcj-x86.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bcj/FORMAT.md" title="codecs/aqr-bcj/FORMAT.md">R</a>
     <tr>
-      <td><code>4a25715b22c5a9e27c7ef2d7e044256852f2df537707cd42da89a02d3b4f330c</code>
-      <td>bcj2@1
+      <td><code>4c223c70286d04e9b4c63344706de56a40dd85d3f21bec10cca3ebf49f8f998a</code>
+      <td>bcj2@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bcj2.wasm" title="crates/aqr-modules/wasm/bcj2.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bcj/FORMAT.md" title="codecs/aqr-bcj/FORMAT.md">R</a>
     <tr>

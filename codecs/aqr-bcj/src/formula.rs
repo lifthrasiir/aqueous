@@ -7,12 +7,6 @@ use aqr_formula::{Module, Node};
 use crate::bra::{self, Arch};
 use crate::{Result, delta, module};
 
-/// The memory of a whole module: its initial memory, and its plan ([`module::plan`]) of its
-/// output (of BCJ2, its streams one after another).
-fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    Some(u.initial() + module::plan(u.params.len() as u64, u.inputs, u.output()))
-}
-
 pub const X86: Module = Module::new("bcj-x86", 2).with_plan(memory_part);
 pub const POWERPC: Module = Module::new("bcj-powerpc", 2).with_plan(memory_part);
 pub const IA64: Module = Module::new("bcj-ia64", 2).with_plan(memory_part);
@@ -21,14 +15,14 @@ pub const ARM_THUMB: Module = Module::new("bcj-armthumb", 2).with_plan(memory_pa
 pub const SPARC: Module = Module::new("bcj-sparc", 2).with_plan(memory_part);
 pub const ARM64: Module = Module::new("bcj-arm64", 2).with_plan(memory_part);
 pub const RISCV: Module = Module::new("bcj-riscv", 2).with_plan(memory_part);
-/// The memory of the part modules ([`module::bra_part`], [`module::delta_part`]): their initial
+/// The memory of the part modules ([`module::bra_part`], [`module::delta_part`], [`module::bcj2_part`]): their initial
 /// memory alone (they allocate nothing).
 fn memory_part(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.initial())
 }
 
 pub const DELTA: Module = Module::new("bcj-delta", 1).with_plan(memory_part);
-pub const BCJ2: Module = Module::new("bcj2", 1).with_plan(memory);
+pub const BCJ2: Module = Module::new("bcj2", 2).with_plan(memory_part);
 
 /// Every module of this crate.
 pub const MODULES: [Module; 10] = [X86, POWERPC, IA64, ARM, ARM_THUMB, SPARC, ARM64, RISCV, DELTA, BCJ2];
