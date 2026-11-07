@@ -7,52 +7,23 @@ use aqr_formula::{Apply, Formula, Module, Node};
 
 use aqr_bcj::formula::{self as bcj, Filter};
 
-use crate::{alone, lzma2, mf, recons, xz};
+use crate::{alone, lzma2, recons, xz};
 
 pub use crate::module::{decode, decode2, index};
 
-pub const MODULE: Module = Module::new("lzma-recons", 2).with_memory(memory);
+pub const MODULE: Module = Module::new("lzma-recons", 2).with_plan(plan);
 
 /// The module rebuilding the segments of LZMA2 streams, one after another.
-pub const LZMA2: Module = Module::new("lzma2-recons", 1).with_memory(memory);
+pub const LZMA2: Module = Module::new("lzma2-recons", 1).with_plan(plan2);
 
-/// The memory of the module, a stream rebuilt at a time: the inputs and the streams; the match
-/// finder's chains, 12 bytes a position of the largest of their rings ([`ring`]), and its other
-/// tables (132.5 MiB, or 12.5 MiB for less than 1 MiB of data); the literal model, 6 MiB at most (lc + lp up to 12); and the encoder's output,
-/// reserved for a quarter of the data and growing twice at a time.
-fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let &[data, ..] = u.inputs else { return None };
-    let m = u.output();
-    Some(
-        u.whole(12 * ring(u).unwrap_or(data) + mf::tables(data as usize) as u64 + (6 << 20) + (data / 4).max(3 * m), 6),
-    )
+/// The memory of [`MODULE`]: its plan ([`crate::plan::decode`]).
+fn plan(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    crate::plan::decode(u.initial(), u.params, u.inputs, u.output(), u.all_contents::<3>()?)
 }
 
-/// The positions of the largest ring of the match finders of the streams (FORMAT.md, "Tables"):
-/// by their records' dictionary sizes (after the first byte of an LZMA or a segment's record) and
-/// their data's lengths, as the index cuts them. None where the inputs are not at hand or do not
-/// cut so.
-fn ring(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let [data, records, index] = u.all_contents::<3>()?;
-    let mut streams = Vec::new();
-    if index.is_empty() {
-        streams.push((data.len(), records));
-    } else {
-        let (mut at, mut r) = (0, records);
-        while at < index.len() {
-            let d = aqr_common::varint::get(index, &mut at).ok()? as usize;
-            let n = aqr_common::varint::get(index, &mut at).ok()? as usize;
-            streams.push((d, r.get(..n)?));
-            r = &r[n..];
-        }
-    }
-    streams
-        .iter()
-        .map(|&(d, r)| {
-            let dict = u32::from_le_bytes(r.get(1..5)?.try_into().ok()?).max(1 << 12) as usize;
-            Some(dict.min(d.max(1)).next_power_of_two() as u64)
-        })
-        .try_fold(1, |most, s| Some(most.max(s?)))
+/// The memory of [`LZMA2`]: its plan ([`crate::plan::decode2`]).
+fn plan2(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    crate::plan::decode2(u.initial(), u.params, u.inputs, u.output(), u.all_contents::<3>()?)
 }
 
 /// The most data a stream is decoded to (and an `.xz` file's streams, in all).

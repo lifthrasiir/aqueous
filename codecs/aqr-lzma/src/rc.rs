@@ -54,7 +54,7 @@ impl Encoder {
 }
 
 impl Bits for Encoder {
-    #[inline]
+    #[inline(always)]
     fn bit(&mut self, p: &mut u16, b: u32) -> u32 {
         let bound = (self.range >> BITS) * *p as u32;
         if b == 0 {
@@ -72,6 +72,7 @@ impl Bits for Encoder {
         b
     }
 
+    #[inline]
     fn direct(&mut self, n: u32, v: u32) -> u32 {
         for i in (0..n).rev() {
             self.range >>= 1;

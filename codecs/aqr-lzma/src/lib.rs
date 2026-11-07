@@ -15,6 +15,8 @@ pub mod lzma;
 pub mod lzma2;
 pub mod mf;
 pub mod module;
+#[cfg(feature = "encode")]
+pub mod plan;
 pub mod rc;
 pub mod recons;
 pub mod xz;

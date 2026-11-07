@@ -86,7 +86,7 @@ pub struct Model {
     pub reps: [u32; 4],
 }
 
-#[inline]
+#[inline(always)]
 fn tree<B: Bits>(c: &mut B, p: &mut [u16], n: u32, v: u32) -> u32 {
     let mut m = 1;
     for i in (0..n).rev() {
@@ -95,7 +95,7 @@ fn tree<B: Bits>(c: &mut B, p: &mut [u16], n: u32, v: u32) -> u32 {
     m - (1 << n)
 }
 
-#[inline]
+#[inline(always)]
 fn rtree<B: Bits>(c: &mut B, p: &mut [u16], n: u32, v: u32) -> u32 {
     let (mut m, mut s) = (1, 0);
     for i in 0..n {
@@ -125,11 +125,34 @@ pub fn slot_of(d: u32) -> u32 {
     }
 }
 
+/// The literal model's probabilities for `props`.
+pub const fn lit_len(props: Props) -> usize {
+    0x300 << (props.lc + props.lp)
+}
+
 impl Model {
     pub fn new(props: Props) -> Self {
+        Self::with_capacity(props, 0)
+    }
+
+    /// [`Model::new`] with room in its literal probabilities for `capacity` of them (at least
+    /// `props`'): [`Model::reset`] then keeps them.
+    pub fn with_capacity(props: Props, capacity: usize) -> Self {
+        Self::with_lit(props, Vec::with_capacity(capacity.max(lit_len(props))))
+    }
+
+    /// Back to the model of `props`, in the same memory where its literal probabilities fit.
+    pub fn reset(&mut self, props: Props) {
+        *self = Self::with_lit(props, std::mem::take(&mut self.lit));
+    }
+
+    /// The model of `props` with `lit` (cleared) for its literal probabilities.
+    pub fn with_lit(props: Props, mut lit: Vec<u16>) -> Self {
+        lit.clear();
+        lit.resize(lit_len(props), HALF);
         Model {
             props,
-            lit: vec![HALF; 0x300 << (props.lc + props.lp)],
+            lit,
             is_match: [[HALF; POS_MAX]; STATES],
             is_rep: [HALF; STATES],
             is_rep_g0: [HALF; STATES],
@@ -343,8 +366,9 @@ pub struct StreamEncoder {
 }
 
 impl StreamEncoder {
-    pub fn new(props: Props, capacity: usize) -> Self {
-        StreamEncoder { c: Encoder::new(Vec::with_capacity(capacity)), m: Model::new(props), pos: 0 }
+    /// Writing onto `out`.
+    pub fn new(props: Props, out: Vec<u8>) -> Self {
+        StreamEncoder { c: Encoder::new(out), m: Model::new(props), pos: 0 }
     }
 
     /// Codes the next packet of `data`.
@@ -364,7 +388,7 @@ impl StreamEncoder {
 
 /// Encodes the packets of `data`, and the end marker if `marker`.
 pub fn encode(data: &[u8], props: Props, packets: &[Packet], marker: bool) -> Vec<u8> {
-    let mut e = StreamEncoder::new(props, data.len() / 4);
+    let mut e = StreamEncoder::new(props, Vec::with_capacity(data.len() / 4));
     for &pk in packets {
         e.push(data, pk);
     }

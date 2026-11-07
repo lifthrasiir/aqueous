@@ -9,10 +9,8 @@ use aqr_common::varint;
 
 use crate::arith::{ArithDecoder, ArithEncoder, Bit};
 use crate::lzma::{self, Kind, MAX_LEN, MIN_LEN, Packet, Props, StreamEncoder};
-use crate::mf::{Mf, lcp_up};
+use crate::mf::{DEPTH, Mf, lcp_up};
 
-/// Candidates looked at for the longest match at a match, on each of two chains.
-const DEPTH: usize = 16;
 /// A match this long ends the search for the longest.
 const NICE: usize = 64;
 /// Candidates looked at for the nearest match of a length beyond those: a distance not found
@@ -43,45 +41,90 @@ impl Default for Tree9 {
     }
 }
 
-#[derive(Default)]
-struct Ctx {
-    is_match: Vec<Bit>,
-    is_rep: Vec<Bit>,
-    g0: Vec<Bit>,
-    rep0_long: Vec<Bit>,
-    g1: Vec<Bit>,
-    g2: Vec<Bit>,
+/// Bits of the contexts held in one allocation ([`Ctx`]): the lengths of the lists of
+/// probabilities, in order.
+pub const CTX_LENS: [usize; 11] = [12 * 64, 12 * 64, 12 * 64, 12 * 8, 64, 64, 8 * 16, 4 * 8, 8 * 512, 8 * 512, 64];
+/// The bits of all of them.
+pub const CTX_BITS: usize = {
+    let (mut i, mut n) = (0, 0);
+    while i < CTX_LENS.len() {
+        n += CTX_LENS[i];
+        i += 1;
+    }
+    n
+};
+
+/// Bytes of what the module holds on WebAssembly (32-bit pointers), checked there by assertions:
+/// a context's bit, a part with its body, a packet's candidate (length, position).
+pub mod wasm {
+    pub const BIT: u64 = 4;
+    pub const PART: u64 = 32;
+    pub const PAIR: u64 = 8;
+}
+
+#[cfg(target_family = "wasm")]
+const _: () = {
+    assert!(size_of::<Bit>() as u64 == wasm::BIT);
+    assert!(size_of::<(Part, &[u8])>() as u64 == wasm::PART);
+    assert!(size_of::<(u32, u32)>() as u64 == wasm::PAIR);
+};
+
+/// The matches [`Mf::pairs`] gives at most: those found on each of two chains, and one for each
+/// of the 2- and 3-byte keys.
+pub const PAIRS: usize = 2 * DEPTH + 2;
+
+struct Ctx<'a> {
+    is_match: &'a mut [Bit],
+    is_rep: &'a mut [Bit],
+    g0: &'a mut [Bit],
+    rep0_long: &'a mut [Bit],
+    g1: &'a mut [Bit],
+    g2: &'a mut [Bit],
     /// A match: which pair (from the longest), whether at its length, else how much shorter.
-    pair: Vec<Bit>,
+    pair: &'a mut [Bit],
     pair_more: Tree9,
-    pair_full: Vec<Bit>,
-    pair_short: Vec<Tree9>,
+    pair_full: &'a mut [Bit],
+    /// Eight trees of 512.
+    pair_short: &'a mut [Bit],
     match_len: Tree9,
     far: Bit,
     /// A distance not found: its offset from the nearest of the last four.
     far_rep: [Bit; 4],
     far_sign: [Bit; 4],
-    far_bucket: Vec<Bit>,
+    far_bucket: &'a mut [Bit],
     rep_full: [[Bit; 8]; 4],
-    rep_len: Vec<Tree9>,
+    /// Eight trees of 512.
+    rep_len: &'a mut [Bit],
 }
 
-impl Ctx {
-    fn new() -> Self {
-        let v = |n| vec![Bit::default(); n];
+impl<'a> Ctx<'a> {
+    /// Over `store` ([`CTX_BITS`] of them, all at their start).
+    fn new(store: &'a mut [Bit]) -> Self {
+        let mut rest = store;
+        let mut take = |n: usize| {
+            let (a, b) = std::mem::take(&mut rest).split_at_mut(n);
+            rest = b;
+            a
+        };
+        let [a, b, c, d, e, f, g, h, i, j, k] = CTX_LENS.map(&mut take);
         Ctx {
-            is_match: v(12 * 64),
-            is_rep: v(12 * 64),
-            g0: v(12 * 64),
-            rep0_long: v(12 * 8),
-            g1: v(64),
-            g2: v(64),
-            pair: v(8 * 16),
-            pair_full: v(4 * 8),
-            pair_short: (0..8).map(|_| Tree9::default()).collect(),
-            rep_len: (0..8).map(|_| Tree9::default()).collect(),
-            far_bucket: v(64),
-            ..Default::default()
+            is_match: a,
+            is_rep: b,
+            g0: c,
+            rep0_long: d,
+            g1: e,
+            g2: f,
+            pair: g,
+            pair_more: Tree9::default(),
+            pair_full: h,
+            pair_short: i,
+            match_len: Tree9::default(),
+            far: Bit::default(),
+            far_rep: [Bit::default(); 4],
+            far_sign: [Bit::default(); 4],
+            far_bucket: k,
+            rep_full: [[Bit::default(); 8]; 4],
+            rep_len: j,
         }
     }
 }
@@ -100,10 +143,11 @@ trait Side {
         m as u32 - (1 << n)
     }
 
-    fn tree9(&mut self, t: &mut Tree9, v: u32, cat: Cat) -> u32 {
+    fn tree9(&mut self, t: &mut [Bit], v: u32, cat: Cat) -> u32 {
+        let t = &mut t[..512];
         let mut m = 1;
         for i in (0..9).rev() {
-            m = m << 1 | self.bit(&mut t.0[m], v >> i & 1 != 0, cat) as usize;
+            m = m << 1 | self.bit(&mut t[m], v >> i & 1 != 0, cat) as usize;
         }
         m as u32 - 512
     }
@@ -212,9 +256,11 @@ fn walk<S: Side>(
     if !breaks.is_empty() && (part.at != 0 || end != data.len()) {
         return None;
     }
-    let mut x = Ctx::new();
+    // (the contexts, then the pairs: dropped in the reverse order)
+    let mut store = vec![Bit::default(); CTX_BITS];
+    let mut x = Ctx::new(&mut store);
     let (mut state, mut reps) = (part.state as usize, part.reps);
-    let mut pairs = vec![];
+    let mut pairs = Vec::with_capacity(PAIRS);
     let mut pos = part.at;
     let (mut i, mut bi) = (0, 0);
     loop {
@@ -295,7 +341,7 @@ fn walk<S: Side>(
             let n = if s.bit(&mut x.rep_full[k][bucket(l)], pk.len as usize == l, Cat::RepLen) {
                 l
             } else {
-                s.tree9(&mut x.rep_len[bucket(l)], (pk.len as u32).wrapping_sub(MIN_LEN), Cat::RepLen) as usize
+                s.tree9(&mut x.rep_len[bucket(l) * 512..], (pk.len as u32).wrapping_sub(MIN_LEN), Cat::RepLen) as usize
                     + MIN_LEN as usize
             };
             if n < MIN_LEN as usize || n > l {
@@ -313,12 +359,12 @@ fn walk<S: Side>(
             let j = pairs.iter().position(|&(l, _)| l as usize >= pk.len as usize).map_or(m, |i| m - 1 - i);
             let mut jj = s.tree(&mut x.pair[m.min(7) * 16..][..16], 4, j.min(15) as u32, Cat::Len) as usize;
             if jj == 15 {
-                jj += s.tree9(&mut x.pair_more, j.wrapping_sub(15) as u32, Cat::Len) as usize;
+                jj += s.tree9(&mut x.pair_more.0, j.wrapping_sub(15) as u32, Cat::Len) as usize;
             }
             let n = if jj >= m {
                 // Longer than any found.
                 let top = pairs.last().map_or(MIN_LEN as usize - 1, |&(l, _)| l as usize);
-                let n = s.tree9(&mut x.match_len, (pk.len as u32).wrapping_sub(MIN_LEN), Cat::Len) as usize
+                let n = s.tree9(&mut x.match_len.0, (pk.len as u32).wrapping_sub(MIN_LEN), Cat::Len) as usize
                     + MIN_LEN as usize;
                 if jj > m || n <= top {
                     return None;
@@ -331,8 +377,11 @@ fn walk<S: Side>(
                 if s.bit(&mut x.pair_full[jj.min(3) * 8 + bucket(top)], pk.len as usize == top, Cat::Len) {
                     top
                 } else {
-                    let v =
-                        s.tree9(&mut x.pair_short[bucket(top)], (top as u32).wrapping_sub(pk.len as u32 + 1), Cat::Len);
+                    let v = s.tree9(
+                        &mut x.pair_short[bucket(top) * 512..],
+                        (top as u32).wrapping_sub(pk.len as u32 + 1),
+                        Cat::Len,
+                    );
                     let n = (top as u32).wrapping_sub(v + 1) as usize;
                     if n < lo || n >= top {
                         return None;
@@ -458,48 +507,55 @@ fn deconstruct_parts(
     Some(out)
 }
 
+/// The number of parts of a body of a record cut into them (see [`deconstruct_parts`]) for data
+/// of `n` bytes: the first varint, and one; None where it is not a count of them.
+fn parts_count(body: &[u8], n: usize) -> Option<usize> {
+    let k =
+        usize::try_from(varint::get(body, &mut 0).ok()?).ok().filter(|&k| k >= 1 && k < n && k <= body.len() / 7)?;
+    Some(k + 1)
+}
+
 /// The parts of a body of a record cut into them (see [`deconstruct_parts`]), each with its
-/// body; None where the body is not one of data of `n` bytes.
+/// body, in a vector of exactly [`parts_count`] of them; None where the body is not one of data
+/// of `n` bytes.
 fn parts_in(body: &[u8], n: usize) -> Option<Vec<(Part, &[u8])>> {
     let mut at = 0;
     let get = |at: &mut usize| varint::get(body, at).ok();
-    let k = usize::try_from(get(&mut at)?).ok().filter(|&k| k >= 1 && k < n)?;
-    let mut parts = vec![Part::START];
-    for _ in 0..k {
+    let count = parts_count(body, n)?;
+    get(&mut at)?;
+    let mut parts = Vec::with_capacity(count);
+    parts.push((Part::START, &body[..0]));
+    for _ in 1..count {
         let gap = usize::try_from(get(&mut at)?).ok().filter(|&g| g > 0)?;
-        let pos = parts.last()?.at.checked_add(gap).filter(|&p| p < n)?;
+        let pos = parts.last()?.0.at.checked_add(gap).filter(|&p| p < n)?;
         let state = *body.get(at).filter(|&&s| s < 12)?;
         at += 1;
         let mut reps = [0u32; 4];
         for r in &mut reps {
             *r = u32::try_from(get(&mut at)?).ok()?;
         }
-        parts.push(Part { at: pos, state, reps });
+        parts.push((Part { at: pos, state, reps }, &body[..0]));
     }
-    let mut lens = Vec::with_capacity(k);
-    for _ in 0..k {
-        lens.push(usize::try_from(get(&mut at)?).ok()?);
+    // (the bodies' lengths, each but the last's; the bodies themselves after them)
+    let mut lens_at = at;
+    for _ in 1..count {
+        get(&mut at)?;
     }
     let mut rest = body.get(at..)?;
-    let mut out = Vec::with_capacity(k + 1);
-    for (i, p) in parts.into_iter().enumerate() {
-        let b = match lens.get(i) {
-            Some(&len) => {
-                let (b, r) = rest.split_at_checked(len)?;
-                rest = r;
-                b
-            }
-            None => rest,
-        };
-        out.push((p, b));
+    for part in &mut parts[..count - 1] {
+        let len = usize::try_from(get(&mut lens_at)?).ok()?;
+        let (b, r) = rest.split_at_checked(len)?;
+        rest = r;
+        part.1 = b;
     }
-    Some(out)
+    parts[count - 1].1 = rest;
+    Some(parts)
 }
 
 /// The stream of `data` from the `parts` of its record (each with its body), on up to `threads`
 /// threads where more than one match finder works at once ([`Mf::at_once`]: the parts' packets
 /// decoded side by side, then encoded in order), with the end marker if `marker`; else one goes
-/// through the parts with one match finder.
+/// through the parts with one match finder. Written onto the end of `out`.
 fn rebuild_parts(
     data: &[u8],
     parts: &[(Part, &[u8])],
@@ -507,10 +563,11 @@ fn rebuild_parts(
     dict: u32,
     marker: bool,
     threads: usize,
-) -> Option<Vec<u8>> {
+    out: &mut Vec<u8>,
+) -> Option<()> {
     let reach = reach(dict);
     let end = |k: usize| parts.get(k + 1).map_or(data.len(), |p| p.0.at);
-    let mut e = StreamEncoder::new(props, data.len() / 4);
+    let mut e = StreamEncoder::new(props, std::mem::take(out));
     if threads <= 1 || parts.len() == 1 || Mf::at_once(data.len(), reach) < 2 {
         let mut mf = Mf::new(data, reach);
         for (k, &(part, b)) in parts.iter().enumerate() {
@@ -533,16 +590,19 @@ fn rebuild_parts(
             p?.into_iter().for_each(|pk| e.push(data, pk));
         }
     }
-    Some(e.finish(data, marker))
+    *out = e.finish(data, marker);
+    Some(())
 }
 
 /// The stream of `data` from its record, with the end marker if `marker`.
 pub fn rebuild(data: &[u8], record: &[u8], props: Props, dict: u32, marker: bool) -> Option<Vec<u8>> {
-    rebuild_parts(data, &[(Part::START, record)], props, dict, marker, 1)
+    let mut out = Vec::with_capacity(data.len() / 4);
+    rebuild_parts(data, &[(Part::START, record)], props, dict, marker, 1, &mut out)?;
+    Some(out)
 }
 
 /// How far back a match may be: decoders keep at least 4 KiB.
-fn reach(dict: u32) -> usize {
+pub fn reach(dict: u32) -> usize {
     dict.max(1 << 12) as usize
 }
 
@@ -551,6 +611,7 @@ fn reach(dict: u32) -> usize {
 pub const HEADER: usize = 6;
 
 /// A stream split into its data and its record.
+#[derive(Clone)]
 pub struct Split {
     pub data: Vec<u8>,
     pub record: Vec<u8>,
@@ -601,17 +662,53 @@ pub fn split_with(
     Ok(Split { data: dec.data, record, used: dec.used })
 }
 
-/// The stream of `data` from its record, its parts on up to `threads` threads. None where the
-/// record is not one of `data`'s.
-pub fn join(data: &[u8], record: &[u8], threads: usize) -> Option<Vec<u8>> {
+/// What a record tells of a stream before it is rebuilt: its properties, its dictionary size,
+/// whether it ends with a marker, its number of parts (1, or [`parts_count`] of at least 2) and the
+/// body.
+pub struct Head<'a> {
+    pub props: Props,
+    pub dict: u32,
+    pub marker: bool,
+    pub parts: usize,
+    pub body: &'a [u8],
+}
+
+/// The [`Head`] of the record of a stream of `n` bytes of data. None where it is not one.
+pub fn head_of(record: &[u8], n: usize) -> Option<Head<'_>> {
     let (head, body) = record.split_at_checked(HEADER)?;
     let props = Props::from_byte(head[0])?;
     let dict = u32::from_le_bytes(head[1..5].try_into().unwrap());
-    let marker = head[5] & 1 != 0;
     let parts = match head[5] {
-        0 | 1 => vec![(Part::START, body)],
-        2 | 3 => parts_in(body, data.len())?,
+        0 | 1 => 1,
+        2 | 3 => parts_count(body, n)?,
         _ => return None,
     };
-    rebuild_parts(data, &parts, props, dict, marker, threads)
+    Some(Head { props, dict, marker: head[5] & 1 != 0, parts, body })
+}
+
+/// The stream of `data` from its record, its parts on up to `threads` threads. None where the
+/// record is not one of `data`'s.
+pub fn join(data: &[u8], record: &[u8], threads: usize) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(data.len() / 4);
+    join_onto(data, record, threads, &mut out)?;
+    Some(out)
+}
+
+/// [`join`] written onto the end of `out`: where it has the room, it takes no more memory than
+/// the stream's rebuilding does ([`crate::plan`]). None also leaves `out` as it was not.
+pub fn join_onto(data: &[u8], record: &[u8], threads: usize, out: &mut Vec<u8>) -> Option<()> {
+    let h = head_of(record, data.len())?;
+    let one;
+    let many;
+    let parts: &[(Part, &[u8])] = match h.parts {
+        1 => {
+            one = [(Part::START, h.body)];
+            &one
+        }
+        _ => {
+            many = parts_in(h.body, data.len())?;
+            &many
+        }
+    };
+    rebuild_parts(data, parts, h.props, h.dict, h.marker, threads, out)
 }

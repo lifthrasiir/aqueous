@@ -3169,6 +3169,240 @@ fn pdf_plans_hold() {
     }
 }
 
+/// Data of `n` bytes of 20 letters and repeats of them, from `seed`.
+fn lzma_data(n: usize, seed: u64) -> Vec<u8> {
+    let mut x = seed;
+    let mut d = Vec::with_capacity(n);
+    while d.len() < n {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        if d.len() > 64 && x >> 60 < 6 {
+            let len = 2 + (x >> 8) as usize % 30;
+            let src = (x >> 20) as usize % (d.len() - len.min(d.len()) + 1);
+            for j in 0..len {
+                d.push(d[src + j]);
+            }
+        } else {
+            d.push(b'a' + (x >> 40) as u8 % 20);
+        }
+    }
+    d.truncate(n);
+    d
+}
+
+/// An LZMA stream of `d` (parsed greedily, matches within `dict`) and its split, the record in
+/// parts of `part` bytes of data.
+fn lzma_stream(
+    d: &[u8],
+    props: aqr_lzma::lzma::Props,
+    dict: u32,
+    marker: bool,
+    part: usize,
+) -> (Vec<u8>, aqr_lzma::recons::Split) {
+    let packets = aqr_lzma::greedy::packets(d, dict as usize);
+    let s = aqr_lzma::lzma::encode(d, props, &packets, marker);
+    let size = (!marker).then_some(d.len() as u64);
+    let sp = aqr_lzma::recons::split_with(&s, props, dict, size, 1 << 28, part, 1).unwrap();
+    assert_eq!(sp.used, s.len());
+    (s, sp)
+}
+
+/// lzma-recons lays its memory out as a stack, its limit its plan: of streams alone and in an
+/// index (more than 64 of them), of every extreme of the properties (the literal model of 6 MiB
+/// at lc + lp = 12) and the dictionary (4 KiB, and past the data), data of megabytes (the
+/// chains' buckets of 16 positions from 1 MiB) and of bytes, records in parts (more than 64),
+/// with the end marker or without.
+#[test]
+fn lzma_plans_hold() {
+    use aqr_lzma::lzma::Props;
+    let props = |lc, lp, pb| Props { lc, lp, pb };
+    let mut cases: Vec<(String, Vec<(Vec<u8>, aqr_lzma::recons::Split)>)> = Vec::new();
+    for t in ["text-p6", "binary-p9e", "binary-lc4pb4", "binary-lc0lp2pb0", "runs-dict4k", "empty-p6", "binary-dict4k"]
+    {
+        let d = fixture(&format!("codecs/aqr-lzma/tests/data/{t}.lzma"));
+        let h = aqr_lzma::alone::parse(&d).unwrap();
+        let sp = aqr_lzma::recons::split(&d[aqr_lzma::alone::HEADER..], h.props, h.dict, h.size, 1 << 28, 1).unwrap();
+        cases.push((t.into(), vec![(d[aqr_lzma::alone::HEADER..].to_vec(), sp)]));
+    }
+    // (properties and dictionaries, data of 300 KB)
+    for (k, &(lc, lp, pb, dict)) in
+        [(0, 0, 0, 1 << 12), (8, 4, 4, 1 << 20), (4, 0, 2, 1 << 12), (0, 4, 0, 1 << 26), (3, 0, 2, 1 << 16)]
+            .iter()
+            .enumerate()
+    {
+        let d = lzma_data(300_000, k as u64);
+        cases.push((
+            format!("lc{lc} lp{lp} dict {dict}"),
+            vec![lzma_stream(&d, props(lc, lp, pb), dict, k % 2 == 0, usize::MAX)],
+        ));
+    }
+    // (megabytes, to the buckets of 16 positions: a small and a large dictionary, the extremes)
+    for (k, &(lc, lp, dict)) in [(8, 4, 1 << 12), (3, 0, 1 << 26), (0, 0, 1 << 21)].iter().enumerate() {
+        let d = lzma_data(3 << 20, 10 + k as u64);
+        cases.push((
+            format!("big lc{lc} lp{lp} dict {dict}"),
+            vec![lzma_stream(&d, props(lc, lp, 2), dict, false, usize::MAX)],
+        ));
+    }
+    // (parts: 80 of them)
+    let d = lzma_data(400_000, 20);
+    cases.push(("parts".into(), vec![lzma_stream(&d, props(3, 0, 2), 1 << 18, true, 5000)]));
+    cases.push(("few parts".into(), vec![lzma_stream(&d, props(1, 1, 1), 1 << 14, false, 150_000)]));
+    // (streams in an index: 100 of them, of 1 byte to 20 KB, of all the properties)
+    let mut many = Vec::new();
+    for k in 0..100usize {
+        let d = lzma_data([1, 7, 300, 5000, 20000][k % 5], 100 + k as u64);
+        many.push(lzma_stream(
+            &d,
+            props(k as u32 % 9, k as u32 / 9 % 5, k as u32 % 5),
+            1 << (12 + k % 9),
+            k % 3 == 0,
+            usize::MAX,
+        ));
+    }
+    cases.push(("100 streams".into(), many.clone()));
+    cases.push(("5 streams".into(), many[95..].to_vec()));
+    // (a big stream after small ones, and the reverse: the top comes back each time)
+    let big = lzma_data(1 << 20, 30);
+    let mut mixed = many[..70].to_vec();
+    mixed.insert(30, lzma_stream(&big, props(8, 4, 0), 1 << 20, false, usize::MAX));
+    mixed.push(lzma_stream(&big[..1000], props(0, 0, 0), 1 << 12, true, usize::MAX));
+    cases.push(("mixed".into(), mixed));
+    for (what, streams) in cases {
+        let (mut data, mut records, mut lens, mut all) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for (s, sp) in &streams {
+            lens.push((sp.data.len(), sp.record.len()));
+            data.extend_from_slice(&sp.data);
+            records.extend_from_slice(&sp.record);
+            all.extend_from_slice(s);
+        }
+        let mut f = Formula::default();
+        let data = f.push("raw", data);
+        let record = f.push("lzma/record", records);
+        let index = f.push("lzma/index", aqr_lzma::formula::index(&lens));
+        f.root = Node::apply(aqr_lzma::formula::MODULE, Vec::new(), vec![data, record, index], all.len() as u64);
+        plan_holds(&format!("lzma {what}"), f, &all);
+    }
+}
+
+/// The chunks of at most `max` bytes of data over `packets`, never splitting one, the first
+/// `first` and the others these controls in turn.
+fn lzma2_chunks(
+    packets: &[aqr_lzma::lzma::Packet],
+    props: aqr_lzma::lzma::Props,
+    max: usize,
+    first: u8,
+    controls: &[u8],
+) -> Vec<aqr_lzma::lzma2::Chunk> {
+    let mut out: Vec<aqr_lzma::lzma2::Chunk> = Vec::new();
+    let mut len = 0;
+    let push = |out: &mut Vec<_>, len| {
+        let control = if out.is_empty() { first } else { controls[(out.len() - 1) % controls.len()] };
+        out.push(aqr_lzma::lzma2::Chunk { control, len, props: (control >= 0xC0).then_some(props) });
+    };
+    for pk in packets {
+        if len + pk.len as usize > max {
+            push(&mut out, len);
+            len = 0;
+        }
+        len += pk.len as usize;
+    }
+    push(&mut out, len);
+    out
+}
+
+/// lzma2-recons lays its memory out as a stack, its limit its plan: of segments alone and in an
+/// index (70 segments of one stream), of streams of more than 64 chunks of every kind (the model
+/// reset in place), stored chunks, the properties at their extremes (lc + lp = 4) and the
+/// dictionary (4 KiB, and past the data), data of megabytes, and `.xz` files of blocks.
+#[test]
+fn lzma2_plans_hold() {
+    use aqr_lzma::lzma::Props;
+    use aqr_lzma::lzma2::{self, Chunk};
+    let props = |lc, lp, pb| Props { lc, lp, pb };
+    // (a segment: data, properties, dictionary, bytes of data per chunk, controls after the
+    // first, and bytes stored in a first chunk of its own)
+    let segment = |seed: u64, n: usize, p: Props, dict: usize, max: usize, controls: &[u8], stored: usize| {
+        let d = lzma_data(n, seed);
+        let packets = aqr_lzma::greedy::packets(&d[stored..], dict);
+        let mut chunks = lzma2_chunks(&packets, p, max, if stored > 0 { 0xC0 } else { 0xE0 }, controls);
+        if stored > 0 {
+            chunks.insert(0, Chunk { control: 1, len: stored, props: None });
+        }
+        lzma2::encode(&d, &chunks, &packets).expect("chunks of the packets")
+    };
+    let mut cases: Vec<(String, Vec<u8>, u32)> = Vec::new();
+    for t in ["text-p6", "binary-p9e", "binary-lc4pb4", "binary-lc0lp2pb0", "runs-dict4k", "empty-p6", "binary-dict4k"]
+    {
+        cases.push((t.into(), fixture(&format!("codecs/aqr-lzma/tests/data/{t}.lzma2")), 8 << 20));
+    }
+    let mut end = |mut s: Vec<u8>| {
+        s.push(0);
+        s
+    };
+    // (more than 64 chunks, resetting the state and the properties in turn)
+    cases.push((
+        "chunks".into(),
+        end(segment(1, 400_000, props(3, 0, 2), 1 << 16, 3000, &[0x80, 0xA0, 0xC0, 0x80, 0xC0], 0)),
+        1 << 16,
+    ));
+    cases.push((
+        "chunks lc0 lp4".into(),
+        end(segment(2, 300_000, props(0, 4, 4), 1 << 12, 2500, &[0xC0, 0xA0], 0)),
+        1 << 12,
+    ));
+    cases.push((
+        "chunks lc4 lp0".into(),
+        end(segment(3, 300_000, props(4, 0, 0), 1 << 26, 2500, &[0x80, 0xC0], 0)),
+        1 << 26,
+    ));
+    // (stored data first)
+    cases.push(("stored".into(), end(segment(4, 50_000, props(2, 2, 2), 1 << 16, 6000, &[0x80, 0xA0], 100)), 1 << 16));
+    // (megabytes: the buckets of 16 positions)
+    cases.push(("big".into(), end(segment(5, 3 << 20, props(3, 0, 2), 1 << 22, 40_000, &[0x80, 0xA0], 0)), 1 << 22));
+    cases.push((
+        "big small dict".into(),
+        end(segment(6, 2 << 20, props(0, 0, 0), 1 << 12, 40_000, &[0x80, 0xC0], 0)),
+        1 << 12,
+    ));
+    // (70 segments in a stream, each from the dictionary reset, of all sizes)
+    let mut segs = Vec::new();
+    for k in 0..70usize {
+        let n = [1, 50, 700, 9000, 30_000][k % 5];
+        let p = props(k as u32 % 5, (4 - k as u32 % 5).min(k as u32 / 5 % 5), k as u32 % 5);
+        segs.extend(segment(
+            50 + k as u64,
+            n,
+            p,
+            1 << 14,
+            4000,
+            &[0x80, 0xA0, 0xC0],
+            if k % 7 == 3 && n >= 700 { 80 } else { 0 },
+        ));
+    }
+    cases.push(("70 segments".into(), end(segs), 1 << 14));
+    for (what, stream, dict) in cases {
+        let sp = lzma2::split(&stream, dict, 1 << 28, 1).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        let (mut data, mut records, mut lens) = (Vec::new(), Vec::new(), Vec::new());
+        for x in &sp {
+            lens.push((x.data.len(), x.record.len()));
+            data.extend_from_slice(&x.data);
+            records.extend_from_slice(&x.record);
+        }
+        let mut f = Formula::default();
+        let data = f.push("raw", data);
+        let record = f.push("lzma2/record", records);
+        let index = f.push("lzma2/index", aqr_lzma::formula::index(&lens));
+        f.root = Node::apply(aqr_lzma::formula::LZMA2, Vec::new(), vec![data, record, index], stream.len() as u64);
+        plan_holds(&format!("lzma2 {what}"), f, &stream);
+    }
+    // (an .xz file of a block; several by a split are in the real files of the corpus)
+    for t in ["crc64"] {
+        let d = fixture(&format!("codecs/aqr-lzma/tests/data/{t}.xz"));
+        let f = aqr_lzma::formula::encode_xz(&d, 1).unwrap_or_else(|| panic!("{t}"));
+        applications_hold(&format!("xz {t}"), &f, &d, |_| 0);
+    }
+}
+
 /// wrt-recons and wrt-recons-hangul lay their memory out as stacks, their limits their plans: of
 /// text of words and markup, of Hangul, and of a little more than a piece of 16 MiB (two
 /// pieces).

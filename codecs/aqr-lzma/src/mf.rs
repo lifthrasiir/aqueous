@@ -14,6 +14,9 @@ const HASH3_BITS: u32 = 16;
 pub const MID: usize = 8;
 /// The key of the chain of long matches.
 pub const LONG: usize = 16;
+/// Candidates looked at for the longest match on each of two chains: [`Mf::longest`]'s `depth`
+/// at most, which the chains' lists of matches found are reserved for.
+pub const DEPTH: usize = 16;
 
 /// Positions by a hash of their next `K` bytes, the newest first.
 struct Chain<const K: usize> {
@@ -35,12 +38,13 @@ struct Chain<const K: usize> {
 }
 
 impl<const K: usize> Chain<K> {
-    fn new(ring: usize, len: usize, reach: usize, w: usize) -> Self {
+    /// A chain whose list of matches found has room for `found` of them.
+    fn new(ring: usize, len: usize, reach: usize, w: usize, found: usize) -> Self {
         let prev = vec![NONE; ring.min(len.max(1))];
         // The buckets on cache lines of 64 bytes (an allocation this large is often not).
         let recent = vec![NONE; (w << HASH_BITS) + 15];
         let base = recent.as_ptr().align_offset(64).min(15);
-        Chain { recent, base, w, prev, mask: ring - 1, reach, found: vec![] }
+        Chain { recent, base, w, prev, mask: ring - 1, reach, found: Vec::with_capacity(found) }
     }
 
     #[inline(always)]
@@ -107,6 +111,7 @@ impl<const K: usize> Chain<K> {
     /// Goes through `depth` candidates for matches longer than `best`, up to `nice`, keeping
     /// them in `found`. Returns the longest, or 0 for none.
     fn longest(&mut self, d: &[u8], pos: usize, depth: usize, nice: usize, cap: usize, mut best: usize) -> usize {
+        debug_assert!(depth <= self.found.capacity());
         let mut found = std::mem::take(&mut self.found);
         found.clear();
         if pos + K <= d.len() {
@@ -147,6 +152,18 @@ fn recent(n: usize) -> usize {
 /// Bytes of the tables of a match finder over data of `n` bytes besides its rings.
 pub fn tables(n: usize) -> usize {
     4 * ((2 * recent(n) + 1) << HASH_BITS) + 4 * (1 << 16) + 4 * (1 << HASH3_BITS)
+}
+
+/// The sizes in bytes of the allocations of a match finder over data of `n` bytes for matches at
+/// most `reach` back ([`Mf::new`]), in the order it makes them: the two heads, then each chain's
+/// ring, buckets and list of matches found. They are all it holds (besides the stack's alignment
+/// of each to 16 bytes).
+pub fn blocks(n: usize, reach: usize) -> [u64; 11] {
+    let ring = reach.clamp(1, n.max(1)).next_power_of_two().min(n.max(1)) as u64;
+    let chain = |w: usize, found: usize| [4 * ring, 4 * ((w << HASH_BITS) as u64 + 15), 8 * found as u64];
+    let (short, mid, long) = (chain(recent(n), DEPTH), chain(1, 0), chain(recent(n), DEPTH));
+    let [a, b, c, d, e, f, g, h, i] = [short, mid, long].concat().try_into().unwrap();
+    [4 << 16, 4 << HASH3_BITS, a, b, c, d, e, f, g, h, i]
 }
 
 /// How far ahead [`Mf::advance`] asks for the buckets it will insert into: the data is all at
@@ -239,9 +256,9 @@ impl<'a> Mf<'a> {
             reach,
             head2: vec![NONE; 1 << 16],
             head3: vec![NONE; 1 << HASH3_BITS],
-            short: Chain::new(ring, d.len(), reach, w),
-            mid: Chain::new(ring, d.len(), reach, 1),
-            long: Chain::new(ring, d.len(), reach, w),
+            short: Chain::new(ring, d.len(), reach, w, DEPTH),
+            mid: Chain::new(ring, d.len(), reach, 1, 0),
+            long: Chain::new(ring, d.len(), reach, w, DEPTH),
             next: 0,
             found_at: usize::MAX,
             #[cfg(not(target_arch = "wasm32"))]

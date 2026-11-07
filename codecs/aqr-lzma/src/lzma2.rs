@@ -18,6 +18,23 @@ use crate::recons::{self, Break, Split};
 pub const CHUNK_DATA: usize = 1 << 21;
 /// The most bytes an LZMA chunk codes its packets in, and a stored chunk holds.
 pub const CHUNK_CODED: usize = 1 << 16;
+/// The room an LZMA chunk's coder is given, more than it codes in ([`CHUNK_CODED`]) by its flush.
+pub const CHUNK_ROOM: usize = CHUNK_CODED + 16;
+/// The literal probabilities of the largest properties of LZMA2 (`lc + lp` = 4).
+pub const LIT_MAX: usize = 0x300 << 4;
+
+/// Bytes of what the module holds on WebAssembly (32-bit pointers), checked there by assertions:
+/// a chunk, a break of the record's walk.
+pub mod wasm {
+    pub const CHUNK: u64 = 24;
+    pub const BREAK: u64 = 12;
+}
+
+#[cfg(target_family = "wasm")]
+const _: () = {
+    assert!(size_of::<Chunk>() as u64 == wasm::CHUNK);
+    assert!(size_of::<Break>() as u64 == wasm::BREAK);
+};
 
 /// A chunk: its control byte (1 or 2 for stored data, else that of an LZMA chunk without the
 /// bits of its size: 0x80 resetting nothing, 0xA0 the state, 0xC0 the state with new
@@ -173,6 +190,9 @@ pub struct Writer<'a> {
     /// The LZMA chunk being coded: its end in the data, its coder and itself.
     open: Option<(usize, Encoder, Chunk)>,
     model: Option<Model>,
+    /// The memory of the model's literal probabilities until it has one, of the room for the
+    /// largest ([`LIT_MAX`]) where there is an LZMA chunk, else none.
+    lit: Vec<u16>,
     props: Option<Props>,
     /// The position of the next packet.
     pos: usize,
@@ -180,9 +200,10 @@ pub struct Writer<'a> {
 }
 
 impl<'a> Writer<'a> {
-    pub fn new(chunks: &'a [Chunk], capacity: usize) -> Self {
-        let out = Vec::with_capacity(capacity);
-        Writer { chunks, next: 0, start: 0, open: None, model: None, props: None, pos: 0, out }
+    /// Writing onto the end of `out`.
+    pub fn new(chunks: &'a [Chunk], out: Vec<u8>) -> Self {
+        let lit = Vec::with_capacity(if chunks.iter().any(|c| !c.stored()) { LIT_MAX } else { 0 });
+        Writer { chunks, next: 0, start: 0, open: None, model: None, lit, props: None, pos: 0, out }
     }
 
     /// Writes the chunks that end by the position, and opens the LZMA chunk at it.
@@ -218,10 +239,13 @@ impl<'a> Writer<'a> {
             }
             if ch.control >= 0xA0 {
                 self.props = ch.props.or(self.props);
-                self.model = Some(Model::new(self.props?));
+                match &mut self.model {
+                    Some(m) => m.reset(self.props?),
+                    None => self.model = Some(Model::with_lit(self.props?, std::mem::take(&mut self.lit))),
+                }
             }
             self.model.as_ref()?;
-            self.open = Some((span.end, Encoder::new(Vec::with_capacity(CHUNK_CODED + 16)), ch));
+            self.open = Some((span.end, Encoder::new(Vec::with_capacity(CHUNK_ROOM)), ch));
         }
     }
 
@@ -247,7 +271,7 @@ impl<'a> Writer<'a> {
 
 /// The chunks of the packets of `data`. None where they do not fit.
 pub fn encode(data: &[u8], chunks: &[Chunk], packets: &[Packet]) -> Option<Vec<u8>> {
-    let mut w = Writer::new(chunks, data.len() / 4);
+    let mut w = Writer::new(chunks, Vec::with_capacity(data.len() / 4));
     for &pk in packets {
         w.push(data, pk)?;
     }
@@ -313,19 +337,28 @@ pub fn split(input: &[u8], dict: u32, limit: usize, threads: usize) -> Result<Ve
     Ok(out)
 }
 
-/// The bytes of a segment (and the stream's end byte, where its record says so) from its data
-/// and record. None where the record is not one of `data`'s.
-pub fn join(data: &[u8], record: &[u8]) -> Option<Vec<u8>> {
+/// What a segment's record tells before the segment is rebuilt: whether the stream's end byte
+/// follows it, the dictionary size, the chunks, and the record of the packets.
+pub struct Head<'a> {
+    pub end: bool,
+    pub dict: u32,
+    pub chunks: Vec<Chunk>,
+    pub body: &'a [u8],
+}
+
+/// The [`Head`] of the record of a segment of `n` bytes of data. None where it is not one.
+pub fn head_of(record: &[u8], n: usize) -> Option<Head<'_>> {
     let (&flags, rest) = record.split_first()?;
     let (dict, rest) = rest.split_first_chunk::<4>()?;
     if flags & !END_BYTE != 0 {
         return None;
     }
     let mut at = 0;
-    let n = varint::get(rest, &mut at).ok()?;
-    let mut chunks = Vec::new();
+    // (each chunk has a byte of data at least, and two bytes of record)
+    let count = usize::try_from(varint::get(rest, &mut at).ok()?).ok().filter(|&c| c <= n && c <= rest.len() / 2)?;
+    let mut chunks = Vec::with_capacity(count);
     let mut sum = 0usize;
-    for i in 0..n {
+    for i in 0..count {
         let &control = rest.get(at)?;
         at += 1;
         let len = usize::try_from(varint::get(rest, &mut at).ok()?).ok()?.checked_add(1)?;
@@ -346,17 +379,34 @@ pub fn join(data: &[u8], record: &[u8]) -> Option<Vec<u8>> {
         sum = sum.checked_add(len)?;
         chunks.push(c);
     }
-    if sum != data.len() {
-        return None;
-    }
-    let mut w = Writer::new(&chunks, data.len() / 4 + 16);
+    (sum == n).then_some(Head {
+        end: flags & END_BYTE != 0,
+        dict: u32::from_le_bytes(*dict),
+        chunks,
+        body: &rest[at..],
+    })
+}
+
+/// The bytes of a segment (and the stream's end byte, where its record says so) from its data
+/// and record. None where the record is not one of `data`'s.
+pub fn join(data: &[u8], record: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(data.len() / 4 + 16);
+    join_onto(data, record, &mut out)?;
+    Some(out)
+}
+
+/// [`join`] written onto the end of `out`: where it has the room, it takes no more memory than
+/// the segment's rebuilding does ([`crate::plan`]).
+pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>) -> Option<()> {
+    let h = head_of(record, data.len())?;
+    let mut w = Writer::new(&h.chunks, std::mem::take(out));
     let mut ok = true;
-    recons::reconstruct(data, &rest[at..], u32::from_le_bytes(*dict), &breaks(&chunks), |pk| {
+    recons::reconstruct(data, h.body, h.dict, &breaks(&h.chunks), |pk| {
         ok = ok && w.push(data, pk).is_some();
     })?;
-    let mut out = w.finish(data).filter(|_| ok)?;
-    if flags & END_BYTE != 0 {
+    *out = w.finish(data).filter(|_| ok)?;
+    if h.end {
         out.push(0);
     }
-    Some(out)
+    Some(())
 }

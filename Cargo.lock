@@ -620,6 +620,7 @@ dependencies = [
 name = "aqr-lzma"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
  "aqr-bcj",
  "aqr-common",
  "aqr-formula",
