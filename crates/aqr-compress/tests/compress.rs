@@ -243,10 +243,11 @@ fn lz4_nested() {
     let flac = fixture("codecs/aqr-flac/tests/data/s16_f5.flac");
     let f = roundtrip(&mozlz4(&gzip(&flac)), &all());
     assert_eq!(modules(&f), [LZ4.name, FLATE.name, FLAC.name]);
-    // found in data, and archived smaller than raw, with the module
+    // found in data, and archived smaller than raw, with the modules (its records taken as
+    // JSON lines too)
     let d = [text(5000), mozlz4(&records(1_000_000)), text(5000)].concat();
     let f = roundtrip(&d, &Options::default());
-    assert_eq!(modules(&f), [LZ4.name]);
+    assert_eq!(modules(&f), [LZ4.name, JSONL.name]);
 }
 
 fn bzip2(d: &[u8]) -> Vec<u8> {
