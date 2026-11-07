@@ -2394,8 +2394,10 @@ fn pure(format: Format, d: &[u8], p: &Pure) -> Option<Option<Formula>> {
     tests::PURE.with(|n| n.set(n.get() + 1));
     let code = || {
         #[cfg(test)]
-        if format == Format::Text {
-            tests::TEXTS.lock().unwrap().push(d.len());
+        match format {
+            Format::Text => tests::TEXTS.lock().unwrap().push(d.len()),
+            Format::Fasta => tests::FASTAS.lock().unwrap().push(d.len()),
+            _ => {}
         }
         catch_unwind(AssertUnwindSafe(|| match r {
             Recompressor::Pure(e) => e(d, p.opt.threads),
@@ -2655,8 +2657,11 @@ fn heap_per_byte(format: Format) -> f64 {
         Jsonl | ProRes | Wim | Iso | Ar | Tar | Cpio | Asar | Aqr | Ppmd => 0.0,
         // blocks of 64 MiB, chunks of 8 Mi-bases, or slices with an index of frames
         Obj | Fasta | Mkv => 3.0,
-        // text, coded whole (enwik9: 1.5)
-        Text | GnuGettext => 2.0,
+        // text: the counts of the dictionary (enwik8: 1.1, enwik9: 0.4, per byte of the input) and
+        // the coded texts of the segments being made, which are spilled
+        Text => 1.2,
+        // coded whole (enwik9: 1.5)
+        GnuGettext => 2.0,
         Records | Xsv | Sized => 5.0,
         Pdf | Psd | Mp3 | Ogg | Fsb5 | Dex | Pdb | Arsc | Wasm => 7.0,
         Sqlite | Pe | MachO | Elf | Jpeg | Lz4 | Lzo | LevelDb | Bzip2 | Hdf5 | Cab | Chm | Alz | Egg | Lha | Rar => {
@@ -2796,6 +2801,8 @@ mod tests {
 
     /// The lengths of the texts given to aqr-wrt, on any thread.
     pub(crate) static TEXTS: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+    /// The lengths of the files given to aqr-fasta, on any thread.
+    pub(crate) static FASTAS: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
 
     /// An ar, tar or cpio archive is worth what the files in it are: a probe counts them, not
     /// the archive, and scans data of its kind.
@@ -3704,25 +3711,31 @@ mod tests {
         assert!(told.iter().any(|f| f.bytes == gz.len() as u64));
     }
 
-    /// A text or FASTA file whose application is over the bound whatever the coding makes is
-    /// not coded at all ([`memory::least`]), and told as given up.
+    /// A FASTA file whose application is over the bound whatever the coding makes is not coded at
+    /// all ([`memory::least`]), and told as given up.
     #[test]
     fn over_bound_not_coded() {
-        let text: Vec<u8> =
-            (0..40000).flat_map(|i| format!("line {} of the text\n", i * 7 % 1000).into_bytes()).collect();
-        assert!(text.len() >= aqr_wrt::formula::MIN_LEN);
+        let mut rng = aqr_common::rng::Rng::new(4);
+        let mut fasta = b">chr\n".to_vec();
+        for _ in 0..4000 {
+            fasta.extend((0..60).map(|_| b"ACGT"[rng.below(4) as usize]));
+            fasta.push(b'\n');
+        }
         let _ = fallbacks();
-        TEXTS.lock().unwrap().clear();
+        FASTAS.lock().unwrap().clear();
         let opt = Options { smaller: false, application_bound: Some(1), ..Options::default() };
-        let f = recompress(&text, &opt);
+        let f = recompress(&fasta, &opt);
         assert!(f.applies().is_empty());
         let told = fallbacks();
-        assert!(told.iter().any(|f| f.module == "wrt-recons" && f.bytes == text.len() as u64 && !f.kept), "{told:?}");
-        assert!(TEXTS.lock().unwrap().is_empty());
+        assert!(
+            told.iter().any(|f| f.module == "fasta-recons" && f.bytes == fasta.len() as u64 && !f.kept),
+            "{told:?}"
+        );
+        assert!(FASTAS.lock().unwrap().is_empty());
         // (not over a bound it may meet)
         let opt = Options { smaller: false, ..Options::default() };
-        assert!(!recompress(&text, &opt).applies().is_empty());
-        assert!(!TEXTS.lock().unwrap().is_empty());
+        assert!(!recompress(&fasta, &opt).applies().is_empty());
+        assert_eq!(*FASTAS.lock().unwrap(), [fasta.len()]);
     }
 
     /// The members of a gzip stream after its first (as gzip, pigz's `--independent` and
@@ -3985,7 +3998,7 @@ mod tests {
         let limit = 512 << 20;
         assert!(fits_within(Format::Png, 40 << 20, limit));
         assert!(!fits_within(Format::Png, 50 << 20, limit));
-        assert!(fits_within(Format::Text, 200 << 20, limit) && !fits_within(Format::Text, 300 << 20, limit));
+        assert!(fits_within(Format::Text, 400 << 20, limit) && !fits_within(Format::Text, 500 << 20, limit));
         assert!(fits_within(Format::Iso, usize::MAX >> 8, limit));
         assert!(fits_within(Format::Jsonl, usize::MAX >> 8, limit));
     }

@@ -81,8 +81,9 @@ pub(crate) fn limit(a: &Apply, lens: &[u64], outputs: &[u64], contents: &dyn Con
 
 /// The bound on the minimal bound of an application ([`Plan::minimal`]) that the encoder keeps
 /// to by default: 512 MiB for now, the most that the decoders support
-/// ([`aqr_formula::SUPPORTED_BOUND`]). The target stays 256 MiB: it goes back to it once wrt,
-/// fasta and the others over it stream (14 applications over 512 MiB in the survey, 61 over 256).
+/// ([`aqr_formula::SUPPORTED_BOUND`]). The target stays 256 MiB: it goes back to it once fasta
+/// and the others over it stream (wrt has: its segments need about 105 MiB; 14 applications over
+/// 512 MiB in the survey, 61 over 256).
 pub const DEFAULT_BOUND: u64 = 512 << 20;
 
 /// Modules allowed a larger bound than [`DEFAULT_BOUND`] by default, with their bounds (at most
@@ -101,20 +102,12 @@ pub(crate) fn bound_of(bound: Option<u64>, module: Module) -> u64 {
 
 /// The least minimal bound ([`Plan::minimal`]) that the application of the recompressor of
 /// `format` on `len` bytes can come to, which is told before coding where the plan depends on
-/// the lengths alone in part: the module and the bound. Only that of text (aqr-wrt: the output
-/// taken in the instance and again in the module's memory) and FASTA (aqr-fasta: its bases'
-/// model and the output) are known so far; the true bound is checked after coding as ever.
+/// the lengths alone in part: the module and the bound. Only that of FASTA (aqr-fasta: its
+/// bases' model and the output) is known so far; the true bound is checked after coding as ever.
 pub(crate) fn least(format: crate::detect::Format, len: u64) -> Option<(Module, u64)> {
     use crate::detect::Format;
     let fit = |m: Module, n: u64| aqr_decompress::initial_pages_of(m).map(|p| (p * PAGE, n.div_ceil(PAGE) * PAGE));
     match format {
-        Format::Text => [aqr_wrt::formula::MODULE, aqr_wrt::formula::HANGUL]
-            .into_iter()
-            .filter_map(|m| {
-                let (initial, imported) = fit(m, len)?;
-                Some((m, imported + aqr_wrt::plan::least(initial, len)))
-            })
-            .min_by_key(|m| m.1),
         Format::Fasta => {
             let m = aqr_fasta::formula::MODULE;
             let (initial, imported) = fit(m, len)?;
