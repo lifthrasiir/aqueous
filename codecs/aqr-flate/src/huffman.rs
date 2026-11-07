@@ -2,6 +2,7 @@
 //! builders of known encoders that serve as predictions.
 
 use crate::bits::BitReader;
+use crate::deflate::{HEADER_LENS, Lens, Ops};
 use crate::{Error, Result};
 
 pub const LEN_BASE: [u16; 29] = [
@@ -48,6 +49,13 @@ pub const FIXED_DIST_LENS: [u8; 30] = [5; 30];
 
 /// Canonical code words, bit-reversed for LSB-first emission.
 pub fn codes(lens: &[u8]) -> Vec<u16> {
+    let mut c = vec![0; lens.len()];
+    codes_to(lens, &mut c);
+    c
+}
+
+/// [`codes`] into `out` (as long as `lens`).
+pub fn codes_to(lens: &[u8], out: &mut [u16]) {
     let mut count = [0u16; 16];
     for &l in lens {
         count[l as usize] += 1;
@@ -59,16 +67,16 @@ pub fn codes(lens: &[u8]) -> Vec<u16> {
         code = (code + count[b - 1]) << 1;
         next[b] = code;
     }
-    lens.iter()
-        .map(|&l| {
-            if l == 0 {
-                return 0;
+    for (o, &l) in out.iter_mut().zip(lens) {
+        *o = match l {
+            0 => 0,
+            _ => {
+                let c = next[l as usize];
+                next[l as usize] += 1;
+                c.reverse_bits() >> (16 - l)
             }
-            let c = next[l as usize];
-            next[l as usize] += 1;
-            c.reverse_bits() >> (16 - l)
-        })
-        .collect()
+        };
+    }
 }
 
 /// Kraft sum check: rejects oversubscribed codes. Incomplete codes are allowed (whether a
@@ -232,7 +240,7 @@ pub fn zlib_lens(freq: &[u32], max_length: u8) -> Vec<u8> {
 }
 
 /// One instruction of the code-length encoding: a symbol 0..=18 and its extra bits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RleOp {
     pub sym: u8,
     pub extra: u8,
@@ -261,7 +269,7 @@ impl RleOp {
 
 /// zlib's run-length coding of one tree's lengths (FORMAT.md, "Run-length codings"),
 /// appended to `out`.
-pub fn rle_zlib(lens: &[u8], out: &mut Vec<RleOp>) {
+pub fn rle_zlib(lens: &[u8], out: &mut Ops) {
     let op = |sym: u8, extra: usize| RleOp {
         sym,
         extra: extra as u8,
@@ -305,7 +313,7 @@ pub fn rle_zlib(lens: &[u8], out: &mut Vec<RleOp>) {
 
 /// libdeflate's run-length coding of the concatenated lengths (FORMAT.md, "Run-length
 /// codings"), appended to `out`.
-pub fn rle_libdeflate(lens: &[u8], out: &mut Vec<RleOp>) {
+pub fn rle_libdeflate(lens: &[u8], out: &mut Ops) {
     let op = |sym: u8, extra: usize| RleOp {
         sym,
         extra: extra as u8,
@@ -338,22 +346,26 @@ pub fn rle_libdeflate(lens: &[u8], out: &mut Vec<RleOp>) {
 }
 
 /// Expands code-length ops back to lengths. Fails on a leading repeat or overrun.
-pub fn rle_expand(ops: &[RleOp], total: usize) -> Result<Vec<u8>> {
-    let mut lens = Vec::with_capacity(total);
+pub fn rle_expand(ops: &[RleOp], total: usize) -> Result<Lens> {
+    if total > HEADER_LENS {
+        return Err(Error::Invalid("code lengths overrun"));
+    }
+    let mut lens = Lens::new();
     for op in ops {
-        match op.sym {
-            0..=15 => lens.push(op.sym),
-            16 => {
-                let &prev = lens
+        let (v, k) = match op.sym {
+            0..=15 => (op.sym, 1),
+            16 => (
+                *lens
                     .last()
-                    .ok_or(Error::Invalid("repeat with no previous length"))?;
-                lens.extend(std::iter::repeat_n(prev, op.count()));
-            }
-            _ => lens.extend(std::iter::repeat_n(0, op.count())),
-        }
-        if lens.len() > total {
+                    .ok_or(Error::Invalid("repeat with no previous length"))?,
+                op.count(),
+            ),
+            _ => (0, op.count()),
+        };
+        if lens.len() + k > total {
             return Err(Error::Invalid("code lengths overrun"));
         }
+        lens.resize(lens.len() + k, v);
     }
     if lens.len() != total {
         return Err(Error::Invalid("code lengths underrun"));
@@ -394,9 +406,9 @@ mod tests {
             .chain([3, 3, 3])
             .collect();
         for f in [rle_zlib, rle_libdeflate] {
-            let mut ops = vec![];
+            let mut ops = Ops::new();
             f(&lens, &mut ops);
-            assert_eq!(rle_expand(&ops, lens.len()).unwrap(), lens);
+            assert_eq!(*rle_expand(&ops, lens.len()).unwrap(), lens[..]);
         }
     }
 }

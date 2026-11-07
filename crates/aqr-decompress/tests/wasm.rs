@@ -384,7 +384,8 @@ fn flate_set_same_as_wasm() {
             let mut f = Formula::default();
             let data = f.push("raw", set.iter().flat_map(|&i| parts[i].0.clone()).collect::<Vec<u8>>());
             let records = f.push("flate/record", set.iter().flat_map(|&i| parts[i].1.clone()).collect::<Vec<u8>>());
-            let lens: Vec<(usize, usize)> = set.iter().map(|&i| (parts[i].0.len(), parts[i].1.len())).collect();
+            let lens: Vec<(usize, usize, usize)> =
+                set.iter().map(|&i| (parts[i].0.len(), parts[i].1.len(), parts[i].2)).collect();
             let index = match aqr_flate::module::index(&lens) {
                 i if i.is_empty() => Node::Concat(Vec::new()),
                 i => f.push("flate/index", i),
@@ -396,6 +397,69 @@ fn flate_set_same_as_wasm() {
             let n = aqr::decode(&c, &Native::default()).unwrap();
             let w = decode_wasm(&c);
             assert!(w.as_ref().is_ok_and(|w| *w == n), "{set:?} {derived:?}: {:?}", w.err());
+        }
+    }
+}
+
+/// flate-set lays its memory out as a stack, its limit its plan of the instance and as many tasks
+/// at once as their slots allow: streams alone and several (runs of small ones, groups of them
+/// as tasks), large ones pulled (more segments than the slots: several batches), of a static
+/// profile and an adaptive one with zlib emulation (segments resumed), stored blocks among them,
+/// with what each params value derives (ZipBefore on one thread).
+#[test]
+fn flate_plans_hold() {
+    use aqr_flate::formula::Derived;
+    let text: Vec<u8> =
+        (0..400_000).flat_map(|i| format!("line {} of {}\n", i % 211, i * 7 % 1013).into_bytes()).collect();
+    let mut noise = Vec::with_capacity(200_000);
+    let mut x = 7u32;
+    while noise.len() < 200_000 {
+        x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+        noise.push((x >> 24) as u8);
+    }
+    let mixed: Vec<u8> = [&text[..100_000], &noise[..], &text[100_000..300_000]].concat();
+    let p = aqr_flate::zlib::Params { level: 6, ..Default::default() };
+    for profile in [aqr_flate::DEFAULT_PROFILE, aqr_flate::ADAPTIVE] {
+        let mut o = aqr_flate::Options::for_profile(profile).unwrap();
+        o.segment = 200_000;
+        let parts: Vec<(Vec<u8>, Vec<u8>, usize)> =
+            [&text[..1000], &text[..], &mixed[..], &text[..30_000], &noise[..5000]]
+                .iter()
+                .map(|d| {
+                    let raw = aqr_flate::zlib::compress(d, p).unwrap();
+                    let (data, record) = aqr_flate::deconstruct_with(&raw, &o).unwrap();
+                    assert_eq!(aqr_flate::reconstruct(&data, &record).unwrap(), raw);
+                    (raw, (data, record))
+                })
+                .map(|(raw, (d, r))| (d, r, raw.len()))
+                .collect();
+        let raws: Vec<Vec<u8>> = parts.iter().map(|(d, r, _)| aqr_flate::reconstruct(d, r).unwrap()).collect();
+        for set in [&[0][..], &[1], &[0, 3, 4], &[3, 1, 0, 2], &[2]] {
+            for derived in [Derived::None, Derived::Zip, Derived::ZipBefore] {
+                let mut f = Formula::default();
+                let data = f.push("raw", set.iter().flat_map(|&i| parts[i].0.clone()).collect::<Vec<u8>>());
+                let records = f.push("flate/record", set.iter().flat_map(|&i| parts[i].1.clone()).collect::<Vec<u8>>());
+                let lens: Vec<(usize, usize, usize)> =
+                    set.iter().map(|&i| (parts[i].0.len(), parts[i].1.len(), parts[i].2)).collect();
+                let index = match aqr_flate::module::index(&lens) {
+                    i if i.is_empty() => Node::Concat(Vec::new()),
+                    i => f.push("flate/index", i),
+                };
+                let len = set.iter().map(|&i| (parts[i].2 + derived.bytes()) as u64).sum();
+                let a = aqr_flate::formula::apply(profile, data, records, index, len, derived).unwrap();
+                f.root = Node::Apply(Box::new(a));
+                let mut want = Vec::new();
+                for &i in set {
+                    if derived.before() {
+                        derived.put(&parts[i].0, parts[i].2, &mut want);
+                    }
+                    want.extend_from_slice(&raws[i]);
+                }
+                if !derived.before() {
+                    set.iter().for_each(|&i| derived.put(&parts[i].0, parts[i].2, &mut want));
+                }
+                plan_holds(&format!("flate {profile} {set:?} {derived:?}"), f, &want);
+            }
         }
     }
 }

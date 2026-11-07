@@ -8,10 +8,10 @@
 //! first, with a single bit.
 
 use super::code::{get_usize, put_gamma};
-use super::trees;
+use super::trees::{self, Lens288};
 use super::write::{LEN_CODE, dist_code};
 use crate::bits::{BitReader, BitWriter};
-use crate::deflate::{DynHeader, Token};
+use crate::deflate::{DynHeader, Lens, Ops, Token};
 use crate::huffman::{self, CL_ORDER, RleOp};
 use crate::{Error, Result};
 
@@ -45,7 +45,7 @@ const NUM_LENS: usize = 1 + 3 * 7 + 1;
 /// (the reader needs only the one it is told): zlib's, then package-merge (zopfli's) of the
 /// counts as they are, smoothed by zopfli and by brotli (ECT) at limits 15 down to 9, then
 /// package-merge without the distance patch.
-fn lens_candidate(k: usize, lf: &[u32], df: &[u32]) -> Option<(Vec<u8>, Vec<u8>)> {
+fn lens_candidate(k: usize, lf: &[u32], df: &[u32]) -> Option<(Lens288, Lens288)> {
     builder(*ORDER.get(k)?, lf, df)
 }
 
@@ -60,7 +60,7 @@ const ORDER: [usize; NUM_LENS] = [
 /// speed.
 const FEW: usize = 5;
 
-fn builder(k: usize, lf: &[u32], df: &[u32]) -> Option<(Vec<u8>, Vec<u8>)> {
+fn builder(k: usize, lf: &[u32], df: &[u32]) -> Option<(Lens288, Lens288)> {
     Some(match k {
         0 => {
             // zlib's trees, from the counts at hand.
@@ -72,31 +72,28 @@ fn builder(k: usize, lf: &[u32], df: &[u32]) -> Option<(Vec<u8>, Vec<u8>)> {
         }
         1..=21 => {
             let (v, mb) = ((k - 1) / 7, 15 - (k - 1) % 7);
-            let wide = |f: &[u32]| f.iter().map(|&x| x as u64).collect::<Vec<u64>>();
             let (mut l, mut d) = (wide(lf), wide(df));
+            let (l, d) = (&mut l[..lf.len()], &mut d[..df.len()]);
             match v {
                 1 => {
-                    trees::smooth_zopfli(&mut l);
-                    trees::smooth_zopfli(&mut d);
+                    trees::smooth_zopfli(l);
+                    trees::smooth_zopfli(d);
                 }
                 2 => {
-                    trees::smooth_brotli(&mut d);
-                    trees::smooth_brotli(&mut l);
+                    trees::smooth_brotli(d);
+                    trees::smooth_brotli(l);
                 }
                 _ => {}
             }
-            let ll = trees::package_merge(&l, mb);
-            let mut dd = trees::package_merge(&d, mb);
+            let ll = trees::package_merge(l, mb);
+            let mut dd = trees::package_merge(d, mb);
             trees::patch_distances(&mut dd);
             (ll, dd)
         }
-        22 => {
-            let wide = |f: &[u32]| f.iter().map(|&x| x as u64).collect::<Vec<u64>>();
-            (
-                trees::package_merge(&wide(lf), 15),
-                trees::package_merge(&wide(df), 15),
-            )
-        }
+        22 => (
+            trees::package_merge(&wide(lf)[..lf.len()], 15),
+            trees::package_merge(&wide(df)[..df.len()], 15),
+        ),
         _ => return None,
     })
 }
@@ -106,8 +103,8 @@ const NUM_OPS: usize = 3 + trees::ZOPFLI_FLAGS;
 
 /// The `k`-th candidate run-length coding of `lens` (`hlit` literal/length lengths, then
 /// distance): zlib's per tree and concatenated, libdeflate's, then zopfli/ECT's.
-fn ops_candidate(k: usize, lens: &[u8], hlit: usize) -> Option<Vec<RleOp>> {
-    let mut c = vec![];
+fn ops_candidate(k: usize, lens: &[u8], hlit: usize) -> Option<Ops> {
+    let mut c = Ops::new();
     match k {
         0 => {
             huffman::rle_zlib(&lens[..hlit], &mut c);
@@ -132,10 +129,10 @@ fn cl_candidate(ops: &[RleOp], k: usize) -> Option<[u8; 19]> {
         cf[op.sym as usize] += 1;
     }
     Some(match k {
-        0 => trees::zlib_lens(&cf, 7).try_into().unwrap(),
+        0 => (*trees::zlib_lens(&cf, 7)).try_into().unwrap(),
         1 => {
             let cf64 = cf.map(|c| c as u64);
-            trees::package_merge(&cf64, 7).try_into().unwrap()
+            (*trees::package_merge(&cf64, 7)).try_into().unwrap()
         }
         _ => return None,
     })
@@ -151,8 +148,19 @@ fn last_nonzero(l: &[u8]) -> usize {
 }
 
 /// Lengths of a candidate cut to `hlit` and `hdist`.
-fn cut(ll: &[u8], d: &[u8], hlit: usize, hdist: usize) -> Vec<u8> {
-    ll[..hlit].iter().chain(&d[..hdist]).copied().collect()
+fn cut(ll: &[u8], d: &[u8], hlit: usize, hdist: usize) -> Lens {
+    let mut l = Lens::from_slice(&ll[..hlit]);
+    l.extend_from_slice(&d[..hdist]);
+    l
+}
+
+/// Counts widened (288 at most).
+fn wide(f: &[u32]) -> [u64; 288] {
+    let mut w = [0; 288];
+    for (w, &x) in w.iter_mut().zip(f) {
+        *w = x as u64;
+    }
+    w
 }
 
 /// How the previous block's header was made: which candidate lengths, run-length coding and
@@ -274,7 +282,7 @@ pub fn write(
     w.bits(1, 0);
     let (hlit, hdist) = (h.hlit as usize, h.hdist as usize);
     // The closest candidate (the first among equals): differences, index, lengths.
-    type Closest = (usize, usize, (Vec<u8>, Vec<u8>));
+    type Closest = (usize, usize, (Lens288, Lens288));
     let mut best: Option<Closest>;
     // The recipe's lengths first. Without exact candidates last time, they are all there is
     // to it (searching is costly), short of a periodic look.
@@ -468,9 +476,9 @@ fn write_ops(w: &mut BitWriter, lens: &[u8], ops: &[RleOp]) {
     }
 }
 
-fn read_ops(r: &mut BitReader, lens: &[u8]) -> Result<Vec<RleOp>> {
+fn read_ops(r: &mut BitReader, lens: &[u8]) -> Result<Ops> {
     let n = get_usize(r, lens.len())?;
-    let mut ops = Vec::with_capacity(n);
+    let mut ops = Ops::new();
     let mut i = 0;
     for _ in 0..n {
         let cur = *lens.get(i).ok_or(Error::Corrupt)?;

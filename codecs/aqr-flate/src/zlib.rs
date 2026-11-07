@@ -509,7 +509,8 @@ impl<'a> Engine<'a> {
             track,
             blind: false,
             lanes: params.iter().map(|&p| Lane::new(p)).collect(),
-            jobs: vec![],
+            // (a job a lane at most, cleared before the next)
+            jobs: Vec::with_capacity(params.len()),
         }
     }
 
@@ -1536,3 +1537,10 @@ mod tests {
         }
     }
 }
+
+#[cfg(target_family = "wasm")]
+const _: () = {
+    use crate::plan::wasm;
+    assert!(size_of::<Lane>() == wasm::LANE as usize && size_of::<Job>() == wasm::JOB as usize);
+    assert!(SLACK as u64 == wasm::WINDOW_SLACK);
+};

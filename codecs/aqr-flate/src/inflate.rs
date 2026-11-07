@@ -958,7 +958,7 @@ fn parse_header(b: &mut Bits) -> Result<DynHeader> {
     }
     let cl = Table::new(&cl_lens, CL_BITS)?;
     let total = hlit as usize + hdist as usize;
-    let mut ops = Vec::with_capacity(total);
+    let mut ops = crate::deflate::Ops::new();
     let mut n = 0;
     while n < total {
         b.refill();

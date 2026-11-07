@@ -47,7 +47,7 @@ fn part_as_whole() {
         let records: Vec<u8> = set.iter().flat_map(|&i| parts[i].1.clone()).collect();
         let idx = index(
             &set.iter()
-                .map(|&i| (parts[i].0.len(), parts[i].1.len()))
+                .map(|&i| (parts[i].0.len(), parts[i].1.len(), parts[i].2))
                 .collect::<Vec<_>>(),
         );
         for derived in [

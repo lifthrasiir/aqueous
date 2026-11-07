@@ -4,6 +4,10 @@
 
 #![no_main]
 
+// (its memory laid out as a stack: what it takes is its plan, `aqr_flate::plan::plan`)
+#[global_allocator]
+static STACK: aqr_api::stack::Stack = aqr_api::stack::Stack::new();
+
 #[unsafe(link_section = "aqr_task_slots")]
 #[used]
 static AQR_TASK_SLOTS: [u8; 1] = aqr_modules::task_slots(aqr_flate::module::SET_THREADS as u32);

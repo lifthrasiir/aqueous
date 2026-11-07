@@ -3,7 +3,11 @@
 //! brotli's (as ECT uses it) smoothing of counts, zopfli's / ECT's run-length coding of code
 //! lengths, and zlib's code lengths.
 
+use crate::deflate::{Ops, Short};
 use crate::huffman::RleOp;
+
+/// Code lengths of up to 288 symbols, in place.
+pub type Lens288 = Short<u8, 288>;
 
 /// zopfli's `ZopfliLengthLimitedCodeLengths` (boundary package-merge, after Katajainen,
 /// Moffat and Turpin, with leaves sorted by weight then symbol), computed as the classic
@@ -12,40 +16,48 @@ use crate::huffman::RleOp;
 /// equal weights (as zopfli takes a leaf only when it is
 /// strictly lighter); the lengths count the levels at which each leaf is among the items
 /// needed.
-pub fn package_merge(freqs: &[u64], maxbits: usize) -> Vec<u8> {
+pub fn package_merge(freqs: &[u64], maxbits: usize) -> Lens288 {
     // Without the limit biting, the plain Huffman code with the same tie breaking (much
     // cheaper) is the same; the tests check that against the package-merge below.
     if let Some(l) = huffman_lens(freqs, maxbits) {
         return l;
     }
     let n = freqs.len();
-    let mut out = vec![0u8; n];
-    let mut leaves: Vec<u64> = (0..n)
-        .filter(|&i| freqs[i] > 0)
-        .map(|i| freqs[i] << 9 | i as u64)
-        .collect();
-    let ns = leaves.len();
+    let mut out = Lens288::zeroed(n);
+    let (mut leaves, mut ns) = ([0u64; 288], 0);
+    for i in (0..n).filter(|&i| freqs[i] > 0) {
+        leaves[ns] = freqs[i] << 9 | i as u64;
+        ns += 1;
+    }
+    let leaves = &mut leaves[..ns];
     if ns == 0 || (1usize << maxbits) < ns {
         return out;
     }
     if ns <= 2 {
-        for &l in &leaves {
+        for &l in leaves.iter() {
             out[(l & 511) as usize] = 1;
         }
         return out;
     }
     leaves.sort_unstable();
-    let w: Vec<u64> = leaves.iter().map(|&l| l >> 9).collect();
+    let mut w = [0u64; 288];
+    for (w, &l) in w.iter_mut().zip(leaves.iter()) {
+        *w = l >> 9;
+    }
     let levels = maxbits.min(ns - 1);
-    // lists[j]: the merged list of level j (0: leaves only, the deepest). Only weights and
-    // whether an item is a leaf are needed.
+    // lists[j]: the merged list of level j (0: leaves only, the deepest), of len[j] items.
+    // Only weights and whether an item is a leaf are needed.
     // Items are weight << 1 | (is a leaf).
-    let mut lists: Vec<Vec<u64>> = Vec::with_capacity(levels);
-    lists.push(w.iter().map(|&x| x << 1 | 1).collect());
+    let mut lists = [[0u64; 576]; 15];
+    let mut len = [0usize; 15];
+    for i in 0..ns {
+        lists[0][i] = w[i] << 1 | 1;
+    }
+    len[0] = ns;
     for j in 1..levels {
-        let prev = &lists[j - 1];
-        let mut cur = Vec::with_capacity(ns + prev.len() / 2);
-        let (mut li, mut pi) = (0, 0);
+        let (below, above) = lists.split_at_mut(j);
+        let (prev, cur) = (&below[j - 1][..len[j - 1]], &mut above[0]);
+        let (mut li, mut pi, mut k) = (0, 0, 0);
         let np = prev.len() / 2;
         while li < ns || pi < np {
             let pw = if pi < np {
@@ -54,27 +66,28 @@ pub fn package_merge(freqs: &[u64], maxbits: usize) -> Vec<u8> {
                 u64::MAX
             };
             if li < ns && w[li] < pw {
-                cur.push(w[li] << 1 | 1);
+                cur[k] = w[li] << 1 | 1;
                 li += 1;
             } else {
-                cur.push(pw << 1);
+                cur[k] = pw << 1;
                 pi += 1;
             }
+            k += 1;
         }
-        lists.push(cur);
+        len[j] = k;
     }
     // From the top level down: the first `need` items are used; their packages need twice as
     // many items from the level below. A leaf's length is the number of levels using it.
     let mut need = 2 * ns - 2;
-    let mut count = vec![0usize; levels];
+    let mut count = [0usize; 15];
     for j in (0..levels).rev() {
-        let items = &lists[j][..need.min(lists[j].len())];
+        let items = &lists[j][..need.min(len[j])];
         let leaves_used = items.iter().map(|&x| (x & 1) as usize).sum::<usize>();
         count[j] = leaves_used;
         need = 2 * (items.len() - leaves_used);
     }
     for (i, &l) in leaves.iter().enumerate() {
-        out[(l & 511) as usize] = count.iter().filter(|&&c| i < c).count() as u8;
+        out[(l & 511) as usize] = count[..levels].iter().filter(|&&c| i < c).count() as u8;
     }
     out
 }
@@ -82,24 +95,28 @@ pub fn package_merge(freqs: &[u64], maxbits: usize) -> Vec<u8> {
 /// Optimal code lengths by Huffman's two-queue algorithm, leaves sorted by (weight,
 /// symbol) and a package taken before a leaf of equal weight, as [`package_merge`] does; or
 /// `None` if they exceed `maxbits`.
-pub fn huffman_lens(freqs: &[u64], maxbits: usize) -> Option<Vec<u8>> {
+pub fn huffman_lens(freqs: &[u64], maxbits: usize) -> Option<Lens288> {
     let n = freqs.len();
-    let mut out = vec![0u8; n];
-    let mut leaves: Vec<u64> = (0..n)
-        .filter(|&i| freqs[i] > 0)
-        .map(|i| freqs[i] << 9 | i as u64)
-        .collect();
-    let ns = leaves.len();
+    let mut out = Lens288::zeroed(n);
+    let (mut leaves, mut ns) = ([0u64; 288], 0);
+    for i in (0..n).filter(|&i| freqs[i] > 0) {
+        leaves[ns] = freqs[i] << 9 | i as u64;
+        ns += 1;
+    }
+    let leaves = &mut leaves[..ns];
     if ns <= 2 {
-        for &l in &leaves {
+        for &l in leaves.iter() {
             out[(l & 511) as usize] = 1;
         }
         return Some(out);
     }
     leaves.sort_unstable();
     // Nodes 0..ns are the leaves, then the packages as made (in order of weight).
-    let mut weight: Vec<u64> = leaves.iter().map(|&l| l >> 9).collect();
-    let mut parent = vec![0u32; 2 * ns - 1];
+    let mut weight = [0u64; 575];
+    for (w, &l) in weight.iter_mut().zip(leaves.iter()) {
+        *w = l >> 9;
+    }
+    let mut parent = [0u32; 575];
     let (mut li, mut pi) = (0, ns);
     // The lightest leaf or package left (a package on equal weights).
     let take = |weight: &[u64], li: &mut usize, pi: &mut usize| -> usize {
@@ -111,15 +128,16 @@ pub fn huffman_lens(freqs: &[u64], maxbits: usize) -> Option<Vec<u8>> {
             *pi - 1
         }
     };
+    // (the nodes made so far: `k`)
     for k in ns..2 * ns - 1 {
-        let a = take(&weight, &mut li, &mut pi);
-        let b = take(&weight, &mut li, &mut pi);
+        let a = take(&weight[..k], &mut li, &mut pi);
+        let b = take(&weight[..k], &mut li, &mut pi);
         parent[a] = k as u32;
         parent[b] = k as u32;
-        weight.push(weight[a] + weight[b]);
+        weight[k] = weight[a] + weight[b];
     }
     // Depths from the root down (packages are made after their children).
-    let mut depth = vec![0u8; 2 * ns - 1];
+    let mut depth = [0u8; 575];
     for k in (0..2 * ns - 2).rev() {
         depth[k] = depth[parent[k] as usize] + 1;
         if depth[k] as usize > maxbits {
@@ -146,8 +164,8 @@ pub fn patch_distances(d: &mut [u8]) {
 
 /// The positions below `c.len()` that lie in a long enough run of equal counts (5 or more
 /// zeros, 7 or more of anything else), as the smoothings treat them.
-fn settled_positions(c: &[u64]) -> Vec<bool> {
-    let mut settled = vec![false; c.len()];
+fn settled_positions(c: &[u64]) -> [bool; 288] {
+    let mut settled = [false; 288];
     let mut start = 0;
     for run in c.chunk_by(|a, b| a == b) {
         if run.len() >= if run[0] == 0 { 5 } else { 7 } {
@@ -233,12 +251,12 @@ pub fn smooth_brotli(counts: &mut [u64]) {
 
 /// zopfli's / ECT's run-length coding of `lens` (FORMAT.md, "Run-length codings") with the
 /// flags `use_16`, `use_17`, `use_18`, `fuse_8` and `fuse_7`.
-pub fn encode_tree(lens: &[u8], [use_16, use_17, use_18, fuse_8, fuse_7]: [bool; 5]) -> Vec<RleOp> {
+pub fn encode_tree(lens: &[u8], [use_16, use_17, use_18, fuse_8, fuse_7]: [bool; 5]) -> Ops {
     let op = |sym: u8, extra: usize| RleOp {
         sym,
         extra: extra as u8,
     };
-    let mut out = vec![];
+    let mut out = Ops::new();
     let mut i = 0;
     while i < lens.len() {
         let v = lens[i];
@@ -293,7 +311,7 @@ pub const ZOPFLI_FLAGS: usize = 20;
 
 /// The `k`-th run-length coding of `lens` (cut to HLIT and HDIST) by zopfli/ECT, by flag
 /// combination.
-pub fn zopfli_ops(lens: &[u8], k: usize) -> Option<Vec<RleOp>> {
+pub fn zopfli_ops(lens: &[u8], k: usize) -> Option<Ops> {
     let i = (0..32u32).filter(|i| i & 1 != 0 || i & 24 == 0).nth(k)?;
     let flags = [i & 1 != 0, i & 2 != 0, i & 4 != 0, i & 8 != 0, i & 16 != 0];
     Some(encode_tree(lens, flags))
@@ -301,12 +319,12 @@ pub fn zopfli_ops(lens: &[u8], k: usize) -> Option<Vec<RleOp>> {
 
 /// zlib's code lengths, as [`crate::huffman::zlib_lens`] gives them; this one is on the hot
 /// path of header coding and should be fast.
-pub fn zlib_lens(freq: &[u32], max_length: u8) -> Vec<u8> {
+pub fn zlib_lens(freq: &[u32], max_length: u8) -> Lens288 {
     const NODES: usize = 2 * 288;
     let n = freq.len();
     let max_len = max_length as usize;
     if !(2..=288).contains(&n) || !(1..=15).contains(&max_len) {
-        return crate::huffman::zlib_lens(freq, max_length);
+        return Lens288::from_slice(&crate::huffman::zlib_lens(freq, max_length));
     }
     // A heap entry packs (frequency, depth, id) so that the weight, all that is compared,
     // is `entry >> 10`; frequencies stay below 2^41, depths below 2^9, ids below 2^10.
@@ -409,7 +427,7 @@ pub fn zlib_lens(freq: &[u32], max_length: u8) -> Vec<u8> {
             left -= 1;
         }
     }
-    let mut out = vec![0u8; n];
+    let mut out = Lens288::zeroed(n);
     for &node in &list[..listed] {
         if node as isize <= top {
             out[node as usize] = len[node as usize];
@@ -491,8 +509,8 @@ mod tests {
                 })
                 .collect();
             assert_eq!(
-                zlib_lens(&freq, max_length),
-                crate::huffman::zlib_lens(&freq, max_length),
+                *zlib_lens(&freq, max_length),
+                crate::huffman::zlib_lens(&freq, max_length)[..],
                 "{freq:?}"
             );
         }

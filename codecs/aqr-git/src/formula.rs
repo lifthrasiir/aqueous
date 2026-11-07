@@ -247,7 +247,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
                     w.rebuilt(e.t, d.len() as u64, &input[e.header.clone()], &input[e.base.clone()], e.zlib(input));
                     Derived::Zlib.put(&d, e.deflate.len(), &mut derived);
                     streams += e.deflate.len();
-                    lens.push((d.len(), r.len()));
+                    lens.push((d.len(), r.len(), e.deflate.len()));
                     data.extend_from_slice(&d);
                     records.extend_from_slice(&r);
                     kinds.push((kind(e.t), data.len()));

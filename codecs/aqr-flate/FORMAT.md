@@ -953,7 +953,7 @@ tables. `deconstruct` keeps to tighter limits; see [Domain](#domain).
 ## Formula module
 
 The same representation as a module of entry formulas (`aqr-formula`), in
-`formula::apply` and `formula::decode`. The module is `flate-set`, version 1. It rebuilds one
+`formula::apply` and `formula::decode`. The module is `flate-set`, version 2. It rebuilds one
 or more DEFLATE streams of one profile, each with its trailing bytes, as in
 [Rebuilding the stream](#rebuilding-the-stream), with the model data of its
 [resources](#resources) in place of the profile's files. Its output is the streams one after
@@ -1016,10 +1016,12 @@ endian but for the Adler-32.
 |---|---|---|
 | 0 | the data `D` of every stream, one after another | no: whatever the streams held (text, image rows, …) |
 | 1 | the [records](#the-record) of every stream, one after another: each the profile (u16) and the body | mostly: the corrections are rANS or arithmetic coded, and the main and header streams pack their fields in bits; general-purpose compression gains little |
-| 2 | the index: for each stream, the length of its data and the length of its record (varints); or empty, for a single stream of all the data and all the records | |
+| 2 | the index: for each stream, the length of its data, the length of its record and the length of the stream it rebuilds (varints); or empty, for a single stream of all the data and all the records, as long as the output less what is derived of it | |
 
-The index cuts the data and the records into the streams', which it must use up exactly. All
-the records must be of the same profile. The streams are rebuilt independently of each other.
+The index cuts the data and the records into the streams', which it must use up exactly, and
+the streams' lengths must add up to the output less what is derived (version 1's index had no
+streams' lengths). Each stream must be as long as the index says. All the records must be of
+the same profile. The streams are rebuilt independently of each other.
 
 It is a part module (`module::decode_part`) of windows of 16 pages for the data and the output
 and 4 pages for the records and the index, which it reads and writes in order. A stream of at
@@ -1029,8 +1031,10 @@ before its first segment, rounded down to a multiple of 1 MiB, to 256 KiB after 
 (the tokens are those of the whole data: the tables and the zlib emulator address positions
 modulo powers of two up to 256 KiB, and read no further), and the stream is written in rounds
 of about 2 MiB. Smaller streams are rebuilt side by side in runs of up to 8 MiB of data, their
-data and records held. What is derived of the streams is held until they are all written; with params `04`, a stream
-is held instead, until what is derived of it is written before it.
+data and records held, in groups of up to 2 MiB of data (a task each in WebAssembly, which gives
+the group's streams back, of the lengths the index tells). What is derived of the streams is
+held until they are all written; with params `04`, a stream is held instead, until what is
+derived of it is written before it.
 
 The module has no classes of its own: the maker of the formula names the inputs (e.g. `raw`,
 `flate/record` and `flate/index` in aqr-compress and aqr-zip, slices of `pdf/pool-<class>`
@@ -1038,7 +1042,8 @@ and `pdf/meta` in aqr-pdf).
 
 The module fails on any other parameters, any other count of inputs or resources, an index
 that does not cut the data and records exactly (a truncated varint, a length past what is
-left, bytes left over), records of different profiles, an invalid resource or record that it
+left, bytes left over, streams' lengths that do not add up), records of different profiles, a
+stream of another length than the index's, an invalid resource or record that it
 detects, or an output whose length is not the application's declared output size. The
 specification ("Module execution") makes such a failure an invalid archive failure.
 

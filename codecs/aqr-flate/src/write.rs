@@ -95,15 +95,23 @@ pub(super) fn dist_code(d: usize) -> usize {
     }
 }
 
-/// (code, length) per symbol; length 0 for symbols without a code.
-fn table(lens: &[u8], n: usize) -> Vec<(u32, u32)> {
-    let codes = huffman::codes(lens);
-    let mut t = vec![(0, 0); n];
-    for (i, (&l, &c)) in lens.iter().zip(&codes).enumerate().take(n) {
+/// (code, length) per symbol (of the first 288); length 0 for symbols without a code. (One
+/// size for both trees: one function in the modules.)
+fn table(lens: &[u8]) -> [(u32, u32); 288] {
+    let mut codes = [0u16; 288];
+    let lens = &lens[..lens.len().min(288)];
+    huffman::codes_to(lens, &mut codes[..lens.len()]);
+    let mut t = [(0, 0); 288];
+    for (i, (&l, &c)) in lens.iter().zip(&codes).enumerate() {
         t[i] = (c as u32, l as u32);
     }
     t
 }
+
+/// Tokens written at once (their room reserved).
+pub const TOKEN_CHUNK: usize = 4096;
+/// Bytes that writing reserves past what it writes at most.
+pub const TOKEN_SLACK: usize = 6 * TOKEN_CHUNK + 16;
 
 /// Writes `stream` (whose blocks' tokens are left out) with the tokens of block `i` being
 /// `tokens[starts[i]..starts[i + 1]]`; `data` supplies stored blocks.
@@ -159,7 +167,6 @@ impl Writer {
 
     /// [`Writer::block`] given the data from [`Writer::pos`] on (which stored blocks take).
     pub fn block_of(&mut self, b: &Block, toks: &[Token], rest: &[u8]) -> Result<()> {
-        static FIXED: std::sync::OnceLock<[Vec<(u32, u32)>; 2]> = std::sync::OnceLock::new();
         let w = &mut self.w;
         w.put(1, b.last as u32);
         w.put(2, b.body.btype() as u32);
@@ -179,13 +186,12 @@ impl Writer {
                 self.pos += *len as usize;
             }
             Body::Fixed { .. } => {
-                let fixed = FIXED.get_or_init(|| {
-                    [
-                        table(&huffman::fixed_lit_lens(), 288),
-                        table(&huffman::FIXED_DIST_LENS, 32),
-                    ]
-                });
-                self.pos += write_tokens(w, toks, &fixed[0], &fixed[1])?;
+                // (made again for each block rather than kept: no memory taken as it goes)
+                let (lt, dt) = (
+                    table(&huffman::fixed_lit_lens()),
+                    table(&huffman::FIXED_DIST_LENS),
+                );
+                self.pos += write_tokens(w, toks, &lt, &dt)?;
             }
             Body::Dynamic { header: h, .. } => {
                 w.put(5, h.hlit as u32 - 257);
@@ -194,7 +200,8 @@ impl Writer {
                 for &s in &CL_ORDER[..h.hclen as usize] {
                     w.put(3, h.cl_lens[s] as u32);
                 }
-                let clc = huffman::codes(&h.cl_lens);
+                let mut clc = [0u16; 19];
+                huffman::codes_to(&h.cl_lens, &mut clc);
                 for op in &h.ops {
                     let l = h.cl_lens[op.sym as usize];
                     if l == 0 {
@@ -203,8 +210,7 @@ impl Writer {
                     w.put(l as u32, clc[op.sym as usize] as u32);
                     w.put(RleOp::extra_bits(op.sym), op.extra as u32);
                 }
-                let lt = table(h.lit_lens(), 288);
-                let dt = table(h.dist_lens(), 32);
+                let (lt, dt) = (table(h.lit_lens()), table(h.dist_lens()));
                 self.pos += write_tokens(w, toks, &lt, &dt)?;
             }
         }
@@ -316,6 +322,21 @@ impl Writer {
         self.w.out.clear();
     }
 
+    /// The bytes written so far and not yet taken (a few bits may be held back), which
+    /// [`Writer::forget_written`] then lets go of, the room they took kept.
+    pub fn written(&self) -> &[u8] {
+        &self.w.out
+    }
+
+    pub fn forget_written(&mut self) {
+        self.w.out.clear();
+    }
+
+    /// Bytes of room left.
+    pub fn room(&self) -> usize {
+        self.w.out.capacity() - self.w.out.len()
+    }
+
     /// The bytes written so far and not yet taken (a few bits may be held back).
     pub fn take(&mut self) -> Vec<u8> {
         let cap = self.w.out.capacity().min(1 << 20);
@@ -341,15 +362,19 @@ impl Writer {
 /// of the output (in capacity reserved for the whole block) and the output grows by the
 /// whole bytes among them. A token takes at most 15 + 5 + 15 + 13 = 48 bits, so with
 /// fewer than 8 pending the buffer never overflows.
+///
+/// Room is reserved a chunk of [`TOKEN_CHUNK`] tokens at a time: a writer of room for its
+/// output and [`TOKEN_SLACK`] more never grows.
 fn write_tokens(
     w: &mut Bits,
     toks: &[Token],
     lt: &[(u32, u32)],
     dt: &[(u32, u32)],
 ) -> Result<usize> {
-    // Up to 6 bytes per token and the end of block, and the 8 of the last store.
-    w.out.reserve(toks.len() * 6 + 16);
-    let base = w.out.as_mut_ptr();
+    // Up to 6 bytes per token and the end of block, and the 8 of the last store, a chunk of
+    // tokens at a time (so that what is reserved past what is written is bounded).
+    w.out.reserve(16);
+    let mut base = w.out.as_mut_ptr();
     let mut len = w.out.len();
     let (mut acc, mut n) = (w.acc, w.n);
     // Whole bytes out first, so that fewer than 8 bits are pending.
@@ -362,7 +387,13 @@ fn write_tokens(
     }
     let mut span = 0;
     let mut ok = true;
-    for &t in toks {
+    for (i, &t) in toks.iter().enumerate() {
+        if i % TOKEN_CHUNK == 0 {
+            // SAFETY: the bytes up to `len` are written.
+            unsafe { w.out.set_len(len) };
+            w.out.reserve((toks.len() - i).min(TOKEN_CHUNK) * 6 + 16);
+            base = w.out.as_mut_ptr();
+        }
         match t {
             Token::Lit(b) => {
                 let (c, l) = lt[b as usize];
@@ -397,8 +428,8 @@ fn write_tokens(
                 span += ml as usize;
             }
         }
-        // SAFETY: `len` grows by at most 6 per token, and the capacity covers 6 per token
-        // and 8 more.
+        // SAFETY: `len` grows by at most 6 per token, and the capacity covers 6 per token of
+        // the chunk and 8 more.
         unsafe { (base.add(len) as *mut u64).write_unaligned(acc.to_le()) };
         let k = n >> 3;
         len += k as usize;

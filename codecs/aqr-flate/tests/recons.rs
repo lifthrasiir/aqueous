@@ -443,7 +443,11 @@ fn formula_module_of_several_streams() {
         .collect();
     let data: Vec<u8> = parts.iter().flat_map(|p| p.0.clone()).collect();
     let records: Vec<u8> = parts.iter().flat_map(|p| p.1.clone()).collect();
-    let lens: Vec<(usize, usize)> = parts.iter().map(|p| (p.0.len(), p.1.len())).collect();
+    let lens: Vec<(usize, usize, usize)> = parts
+        .iter()
+        .zip(&raws)
+        .map(|(p, r)| (p.0.len(), p.1.len(), r.len()))
+        .collect();
     let index = formula::index(&lens);
     let res = formula::resources(profile).unwrap();
     let res: Vec<&[u8]> = res.iter().map(|r| &r[..]).collect();

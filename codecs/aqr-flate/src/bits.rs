@@ -17,6 +17,11 @@ impl<'a> BitReader<'a> {
         self.pos
     }
 
+    /// Bits left to read.
+    pub fn bits_left(&self) -> usize {
+        (8 * self.data.len()).saturating_sub(self.pos)
+    }
+
     /// Up to 32 bits without consuming them; bits past the end read as zero.
     pub fn peek(&self, n: u32) -> u32 {
         debug_assert!(n <= 32);

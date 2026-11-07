@@ -238,8 +238,8 @@ let layout = aqr_flate::inflate::parse_into(&raw, usize::MAX, &mut Count(0))?;
 - The collecting sink keeps its vectors as raw parts grown by value, so that their lengths
   stay in registers in the token loop.
 - The writer flushes its 64-bit buffer once per token without a branch: the 8 bytes go to
-  the end of the output (capacity is reserved per block) and the output grows by the whole
-  bytes among them.
+  the end of the output (capacity is reserved per 4096 tokens) and the output grows by the
+  whole bytes among them.
 - `header::read_freqs` reads a header against frequencies the caller counted itself (as
   aqr-png does while decoding), sparing `header::read`'s pass over the tokens.
 
@@ -258,6 +258,21 @@ Speeds are of the decompressed data.
 Metadata sizes are unchanged. In `eval`, parsing takes 0.14 s either way and joining 0.68 s
 instead of 0.71 s (the built-in row of the λ table above; the other rows were measured with
 the old writer and would gain about as much).
+
+## Memory of `flate-set`
+
+The module lays its memory out as a stack (`aqr_api::stack`), so its limit is its plan
+(`plan::plan`): the instance's memory taken block by block in the order the module takes it,
+and each batch's tasks. What decoding holds is reserved once at the size it takes:
+
+- headers are read and kept without the heap (`deflate::Short`: a header's lengths and
+  run-length ops in place, the candidates' builders on arrays);
+- a round's blocks are reserved for the most a round writes (4096), and freed with it;
+- a pulled stream's data and writer are reserved for the most they hold (`pull_room`,
+  `writer_room`), which they hold to; a batch's tasks give their tokens back 5 bytes each,
+  decoded into the pending tokens as they are taken;
+- small streams are rebuilt in groups, a task each, onto a result of room for their lengths,
+  which the index tells (flate-set 2).
 
 ## Next steps
 

@@ -223,7 +223,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
                 let base = flate_data.len();
                 flate_ends.extend(ends.into_iter().map(|(k, e)| (k, base + e)));
                 flate_data.extend_from_slice(&data);
-                lens.push((data.len(), record.len()));
+                lens.push((data.len(), record.len(), joined));
                 records.extend_from_slice(&record);
                 joined_len += joined as u64;
             }

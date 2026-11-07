@@ -39,6 +39,7 @@ pub mod huffman;
 pub mod inflate;
 pub mod matchfind;
 pub mod module;
+pub mod plan;
 #[doc(hidden)]
 pub mod table;
 pub mod tokens;
@@ -2226,7 +2227,11 @@ fn read_blocks(r: &mut BitReader, n: usize) -> Result<Layout> {
     // Every block but the last covers at least a byte (stored blocks aside, which are bounded
     // by the metadata's length anyway).
     let nblocks = get_usize(r, n + (r.bit_pos() + 1) * 8 + (1 << 20))?;
-    let mut blocks = Vec::with_capacity(nblocks.min(1 << 16));
+    // (exactly as many: a block takes two bits at least)
+    if nblocks > r.bits_left() / 2 {
+        return Err(Error::Corrupt);
+    }
+    let mut blocks = Vec::with_capacity(nblocks);
     let (mut prev_count, mut prev_stored) = (None, None);
     let mut rest_used = false;
     for _ in 0..nblocks {
@@ -2262,7 +2267,10 @@ fn read_blocks(r: &mut BitReader, n: usize) -> Result<Layout> {
     }
     let tail_pad = get_pad(r)?;
     let ntrail = get_usize(r, 1 << 30)?;
-    let mut trailing = Vec::with_capacity(ntrail.min(1 << 20));
+    if ntrail > r.bits_left() / 8 {
+        return Err(Error::Corrupt);
+    }
+    let mut trailing = Vec::with_capacity(ntrail);
     for _ in 0..ntrail {
         trailing.push(r.bits(8)? as u8);
     }
@@ -2376,12 +2384,46 @@ impl<'r> Pull<'r> {
         }
         let end = end.max(self.at);
         if hi > end {
-            // (no more room than is held at most)
+            // (on WebAssembly within the room reserved for the most held, [`Pull::reserve`];
+            // else no more room than is held at most)
+            if cfg!(target_family = "wasm") && hi - end > buf.capacity() - buf.len() {
+                return Err(Error::Corrupt);
+            }
             buf.reserve_exact(hi - end);
             (self.read)(buf, hi - end)?;
         }
         Ok(())
     }
+}
+
+impl Pull<'_> {
+    /// Room for `n` bytes held at once (before any is).
+    fn reserve(&mut self, n: usize) {
+        std::sync::Arc::make_mut(&mut self.buf).reserve_exact(n);
+    }
+}
+
+/// Bytes of data that [`reconstruct_pulled`] holds at once at most on WebAssembly, of `n`
+/// bytes of data and `k` segments, segment `i` starting at `pos(i)`, decoded `batch` at a time:
+/// what a batch reads to what the next one reads (its blocks written in between), or a round of
+/// stored blocks.
+pub(crate) fn pull_room(n: usize, k: usize, pos: impl Fn(usize) -> usize, batch: usize) -> usize {
+    let reads = |s0: usize| {
+        let s1 = (s0 + batch).min(k);
+        let lo = pos(s0).saturating_sub(BACK) / ALIGN * ALIGN;
+        (
+            lo,
+            if s1 < k { pos(s1) } else { n }
+                .saturating_add(AHEAD)
+                .min(n),
+        )
+    };
+    let mut most = ROUND + u16::MAX as usize;
+    for s0 in (0..k).step_by(batch.max(1)) {
+        let next = if s0 + batch < k { s0 + batch } else { s0 };
+        most = most.max(reads(next).1 - reads(s0).0);
+    }
+    most
 }
 
 /// Where [`rebuild`] reads the data: all of it at once, or a part at a time.
@@ -2404,6 +2446,27 @@ pub(crate) const ALIGN: usize = 1 << 20;
 /// written, and the data of the stored blocks, held.
 pub(crate) const ROUND: usize = 2 << 20;
 
+/// Blocks written in a round at most.
+pub(crate) const ROUND_BLOCKS: usize = 1 << 12;
+
+/// Bytes of the writer of a stream written a round at a time on WebAssembly
+/// ([`reconstruct_pulled`]), of `blocks` blocks of `largest` tokens at most, and `trailing`
+/// bytes after them: what a round writes at most ([`ROUND`] counted, and its last block, a token as
+/// 6 bytes and a stored block's data; each block's header), and what writing reserves past it.
+pub(crate) fn writer_room(largest: usize, blocks: usize, trailing: usize) -> usize {
+    let largest = 6 * largest;
+    ROUND
+        + largest.max(u16::MAX as usize)
+        + write::TOKEN_SLACK
+        + HEADER_BYTES * blocks.min(ROUND_BLOCKS)
+        + trailing
+        + 64
+}
+
+/// Bytes of a dynamic block's header at most: 3 bits of the block's type, 14 of its counts, 19
+/// code-length code lengths and 320 lengths of 7 bits each and their extra bits.
+pub(crate) const HEADER_BYTES: usize = (3 + 14 + 19 * 3 + 320 * (7 + 7usize)).div_ceil(8);
+
 /// Segments of a batch for each thread where [`reconstruct_pulled`] runs natively.
 const PULLED_BATCH: usize = 2;
 
@@ -2423,8 +2486,34 @@ pub fn reconstruct_sized(
         meta,
         model,
         threads,
-        Err(cap),
+        Err(To::Sized(cap)),
     )
+}
+
+/// [`reconstruct_sized`] appending to `out` (from a byte boundary), which it gives back with the
+/// stream: within its room where it has room for the stream and [`write::TOKEN_SLACK`] more.
+pub fn reconstruct_onto(
+    data: &[u8],
+    meta: &[u8],
+    model: ModelData,
+    threads: usize,
+    out: Vec<u8>,
+) -> Result<Vec<u8>> {
+    rebuild(
+        Source::Whole(data),
+        data.len(),
+        meta,
+        model,
+        threads,
+        Err(To::Onto(out)),
+    )
+}
+
+/// Where [`rebuild`] writes a stream it gives whole: into a vector reserved for so many bytes
+/// as the first are written, or appended to one.
+enum To {
+    Sized(usize),
+    Onto(Vec<u8>),
 }
 
 /// Where [`reconstruct_into`] gives the stream it rebuilds, a piece at a time.
@@ -2437,7 +2526,7 @@ fn rebuild(
     meta: &[u8],
     model: ModelData,
     threads: usize,
-    mut to: core::result::Result<Pieces, usize>,
+    mut to: core::result::Result<Pieces, To>,
 ) -> Result<Vec<u8>> {
     let threads = threads.max(1);
     let profile = record_profile(meta)?;
@@ -2534,7 +2623,12 @@ fn rebuild(
         .sum();
     let rest = total.checked_sub(fixed).ok_or(Error::Corrupt)?;
     let mut counts = Vec::with_capacity(layout.blocks.len());
-    let mut skips = vec![];
+    let stored = layout
+        .blocks
+        .iter()
+        .filter(|b| matches!(b, Shape::Stored { .. }))
+        .count();
+    let mut skips = Vec::with_capacity(stored);
     let mut k = 0;
     let mut rest_seen = false;
     for b in &layout.blocks {
@@ -2555,8 +2649,9 @@ fn rebuild(
         return Err(Error::Corrupt);
     }
 
-    // segment `i` decoded of `data`, the data from position `off` on (its positions so many less)
-    let decode = |i: usize, data: &[u8], off: usize| -> Result<(Vec<Token>, usize)> {
+    // segment `i` decoded of `data`, the data from position `off` on (its positions so many
+    // less), its tokens appended to `out`: where it ends
+    let decode_into = |i: usize, data: &[u8], off: usize, out: &mut Vec<Token>| -> Result<usize> {
         let (first, count, misses, pos, body, cp) = segs[i];
         let end = segs.get(i + 1).map_or(n, |s| s.3);
         let range = Range {
@@ -2570,11 +2665,10 @@ fn rebuild(
             Some(cp) => Some(cp.shifted(off).ok_or(Error::Corrupt)?),
             None => None,
         };
-        let mut out = Vec::with_capacity(count);
         let p = match (&models, priors) {
             (Some(models), _) => {
                 let mut player = tokens::Player::new(body, models, misses)?;
-                let p = tokens::code_range(&mut player, data, rule, &range, None, Some(&mut out))?;
+                let p = tokens::code_range(&mut player, data, rule, &range, None, Some(out))?;
                 if !player.done() {
                     return Err(Error::Corrupt);
                 }
@@ -2589,7 +2683,7 @@ fn rebuild(
                     _ => None,
                 };
                 let mut a = adapt::Adaptive::new(adapt::Dec::new(body), priors, emu);
-                let p = tokens::code_range(&mut a, data, rule, &range, None, Some(&mut out))?;
+                let p = tokens::code_range(&mut a, data, rule, &range, None, Some(out))?;
                 if a.b.failed() {
                     return Err(Error::Corrupt);
                 }
@@ -2597,17 +2691,31 @@ fn rebuild(
             }
             _ => unreachable!(),
         };
-        Ok((out, p + off))
+        Ok(p + off)
+    };
+    #[cfg(not(target_family = "wasm"))]
+    let decode = |i: usize, data: &[u8], off: usize| -> Result<(Vec<Token>, usize)> {
+        let mut out = Vec::with_capacity(segs[i].1);
+        let p = decode_into(i, data, off, &mut out)?;
+        Ok((out, p))
     };
 
     let hr = &mut BitReader::new(hdrs);
     let mut recipe = header::Recipe::default();
-    let mut w = write::Writer::new(match to {
-        Ok(_) => (n / 2).min(1 << 20) + 64,
-        Err(_) => 0,
-    });
     // (the room to reserve before writing, if not yet)
-    let mut cap = to.as_ref().err().copied();
+    let (mut w, mut cap) = match &mut to {
+        Ok(_) if cfg!(target_family = "wasm") => (
+            write::Writer::new(writer_room(
+                counts.iter().copied().max().unwrap_or(0),
+                counts.len(),
+                layout.trailing.len(),
+            )),
+            None,
+        ),
+        Ok(_) => (write::Writer::new((n / 2).min(1 << 20) + 64), None),
+        Err(To::Sized(c)) => (write::Writer::new(0), Some(*c)),
+        Err(To::Onto(out)) => (write::Writer::append_to(std::mem::take(out)), None),
+    };
     let nb = layout.blocks.len();
     let mut shapes = layout.blocks.into_iter();
     // tokens decoded (from token `base` on), the next block (from token `k` on)
@@ -2630,7 +2738,8 @@ fn rebuild(
         .max()
         .unwrap_or(0);
     let round = total.min(2 * counts.iter().copied().max().unwrap_or(0) + most);
-    // (as tasks on WebAssembly)
+    // (on WebAssembly decoded where the batch is taken, into the pending tokens)
+    #[cfg(not(target_family = "wasm"))]
     let decode_batch = |s0: usize, data: &[u8], off: usize| {
         let s1 = (s0 + batch).min(segs.len());
         (
@@ -2638,6 +2747,65 @@ fn rebuild(
             aqr_common::pool::par_map_apart(s1 - s0, threads, |j| decode(s0 + j, data, off)),
         )
     };
+    #[cfg(target_family = "wasm")]
+    let decode_batch = |s0: usize, _: &[u8], _: usize| s0;
+    // the batch from segment `s0` decoded (of `data`, from position `off` on) into the
+    // pending tokens (reserved for the most at once at the first, once its tasks are spawned):
+    // its segments as tasks, each giving its end and its tokens, 5 bytes each; or one after
+    // another on one thread. The batch's end and where its last segment's data ends.
+    #[cfg(target_family = "wasm")]
+    let into_pending =
+        |s0: usize, data: &[u8], off: usize, pending: &mut Vec<Token>| -> Result<(usize, usize)> {
+            let s1 = (s0 + batch).min(segs.len());
+            let check = |i: usize, p: usize| match p == segs.get(i + 1).map_or(p, |s| s.3) {
+                true => Ok(p),
+                false => Err(Error::Corrupt),
+            };
+            let mut end = 0;
+            if threads == 1 {
+                if pending.capacity() == 0 {
+                    pending.reserve_exact(round);
+                }
+                for i in s0..s1 {
+                    end = check(i, decode_into(i, data, off, pending)?)?;
+                }
+                return Ok((s1, end));
+            }
+            let task = |j: usize| {
+                let mut t = Vec::with_capacity(segs[s0 + j].1);
+                match decode_into(s0 + j, data, off, &mut t) {
+                    Ok(p) => {
+                        let mut b = Vec::with_capacity(9 + 5 * t.len());
+                        b.push(0);
+                        b.extend_from_slice(&(p as u64).to_le_bytes());
+                        t.iter()
+                            .for_each(|t| b.extend_from_slice(&deflate::token_bytes(*t)));
+                        b
+                    }
+                    Err(_) => vec![1],
+                }
+            };
+            let pend = std::cell::RefCell::new(pending);
+            let reserve = || {
+                let mut p = pend.borrow_mut();
+                if p.capacity() == 0 {
+                    p.reserve_exact(round);
+                }
+            };
+            aqr_common::pool::par_each_apart(s1 - s0, threads, 1, task, reserve, |j, b| {
+                let (&[0], rest) = b.split_at_checked(1).ok_or(Error::Corrupt)? else {
+                    return Err(Error::Corrupt);
+                };
+                let (p, toks) = rest.split_at_checked(8).ok_or(Error::Corrupt)?;
+                let mut pending = pend.borrow_mut();
+                for t in toks.as_chunks::<5>().0 {
+                    pending.push(deflate::token_of(*t).ok_or(Error::Corrupt)?);
+                }
+                end = check(s0 + j, u64::from_le_bytes(p.try_into().unwrap()) as usize)?;
+                Ok(())
+            })?;
+            Ok((s1, end))
+        };
     // the data the batch from segment `s0` reads: from before its first segment to after its
     // last one (see BACK)
     let reads = |s0: usize| {
@@ -2652,11 +2820,18 @@ fn rebuild(
         Source::Whole(d) => Some(*d),
         Source::Pulled(_) => None,
     };
+    // (on WebAssembly the data held reserved for the most at once)
+    if let Source::Pulled(p) = &mut src
+        && cfg!(target_family = "wasm")
+    {
+        p.reserve(pull_room(n, segs.len(), |i| segs[i].3, batch));
+    }
     // the next batch is decoded while the blocks of this one are written (before them, on a
     // single thread), the data of both held where it is pulled; on WebAssembly, with the data
     // pulled, after them, the data of one batch held (the tasks copy it)
     enum Batch<'s, T> {
         Done(T),
+        #[cfg_attr(target_family = "wasm", allow(dead_code))]
         Running(aqr_common::pool::Handle<'s, T>),
     }
     aqr_common::pool::scope((threads > 1) as usize, |scope| -> Result<()> {
@@ -2683,11 +2858,26 @@ fn rebuild(
         loop {
             let more = next.is_some();
             if let Some(h) = next.take() {
+                #[cfg(not(target_family = "wasm"))]
                 let (s0, results) = match h {
                     Batch::Done(b) => b,
                     Batch::Running(h) => h.join().map_err(|_| Error::Corrupt)?,
                 };
+                #[cfg(not(target_family = "wasm"))]
                 let s1 = s0 + results.len();
+                #[cfg(target_family = "wasm")]
+                let (s0, s1) = {
+                    let Batch::Done(s0) = h else {
+                        unreachable!("no workers")
+                    };
+                    let (data, off) = match &src {
+                        Source::Whole(d) => (*d, 0),
+                        Source::Pulled(p) => (&p.buf[..], p.at),
+                    };
+                    let (s1, e) = into_pending(s0, data, off, &mut pending)?;
+                    (decoded, end) = (decoded + segs[s0..s1].iter().map(|s| s.1).sum::<usize>(), e);
+                    (s0, s1)
+                };
                 if s1 < segs.len() {
                     if whole.is_some() {
                         next = Some(start(s1, &mut src)?);
@@ -2705,6 +2895,7 @@ fn rebuild(
                         after = Some(s1);
                     }
                 }
+                #[cfg(not(target_family = "wasm"))]
                 for (i, r) in (s0..s1).zip(results) {
                     let (t, p) = r?;
                     if p != segs.get(i + 1).map_or(p, |s| s.3) {
@@ -2722,10 +2913,18 @@ fn rebuild(
             // counted on the threads, their headers read in order, and then they are written
             // on the threads
             while bi < nb && (k + counts[bi] <= decoded || !more) {
-                let mut ready = vec![];
+                // (the room of the whole output reserved before what a round takes)
+                if let Some(c) = cap.take() {
+                    w.reserve(c);
+                }
+                // (on WebAssembly, room for the most blocks of a round, which goes with it)
+                let mut ready = match cfg!(target_family = "wasm") {
+                    true => Vec::with_capacity(nb.min(ROUND_BLOCKS)),
+                    false => vec![],
+                };
                 // (with the data pulled, a round of so many bytes at a time: see ROUND)
                 let mut round = 0;
-                while ready.len() < 1 << 12
+                while ready.len() < ROUND_BLOCKS
                     && bi < nb
                     && (k + counts[bi] <= decoded || !more)
                     && (whole.is_some() || round < ROUND)
@@ -2740,13 +2939,26 @@ fn rebuild(
                     k += c;
                     bi += 1;
                 }
-                let freqs = par_map(ready.len(), threads, |j| match ready[j] {
+                let freqs_of = |r: &(Shape, std::ops::Range<usize>)| match r {
                     (Shape::Coded { btype: 1, .. }, _) | (Shape::Stored { .. }, _) => None,
-                    (Shape::Coded { .. }, ref r) => Some(header::freqs(&pending[r.clone()])),
-                });
+                    (Shape::Coded { .. }, r) => Some(header::freqs(&pending[r.clone()])),
+                };
+                // (on WebAssembly counted as they are taken, on one thread anyway)
+                #[cfg(not(target_family = "wasm"))]
+                let freqs = par_map(ready.len(), threads, |j| freqs_of(&ready[j]));
                 let first = bi - ready.len();
-                let mut blocks = Vec::with_capacity(ready.len());
-                for (j, ((shape, r), f)) in ready.into_iter().zip(freqs).enumerate() {
+                let mut blocks = Vec::with_capacity(match cfg!(target_family = "wasm") {
+                    true => nb.min(ROUND_BLOCKS),
+                    false => ready.len(),
+                });
+                #[cfg(not(target_family = "wasm"))]
+                let mut freqs = freqs.into_iter();
+                for (j, item) in ready.into_iter().enumerate() {
+                    #[cfg(not(target_family = "wasm"))]
+                    let f = freqs.next().expect("a block's counts");
+                    #[cfg(target_family = "wasm")]
+                    let f = freqs_of(&item);
+                    let (shape, r) = item;
                     let body = match (shape, f) {
                         (Shape::Stored { pad, len }, _) => Body::Stored { pad, len },
                         (_, Some((lf, df))) => Body::Dynamic {
@@ -2762,9 +2974,6 @@ fn rebuild(
                         },
                         r,
                     ));
-                }
-                if let Some(c) = cap.take() {
-                    w.reserve(c);
                 }
                 let (data, at) = match &mut src {
                     Source::Whole(d) => (*d, 0),
@@ -2785,14 +2994,22 @@ fn rebuild(
                         (&p.buf[..], p.at)
                     }
                 };
-                w.blocks(&blocks, &pending, data, at, threads)
+                // (on WebAssembly on one thread: no writers of their own)
+                let writers = if cfg!(target_family = "wasm") {
+                    1
+                } else {
+                    threads
+                };
+                w.blocks(&blocks, &pending, data, at, writers)
                     .map_err(|_| Error::Corrupt)?;
                 if let (Ok(sink), None) = (&mut to, whole) {
-                    sink(&w.take());
+                    sink(w.written());
+                    w.forget_written();
                 }
             }
             if let Ok(sink) = &mut to {
-                sink(&w.take());
+                sink(w.written());
+                w.forget_written();
             }
             if k - base > pending.len() / 2 {
                 pending.drain(..k - base);
@@ -2940,3 +3157,26 @@ mod tests {
         assert_eq!(coded(&again), coded(&code(catalog[1], p, Emulation::New)));
     }
 }
+
+// (what the plan of `flate-set` counts them, `plan::wasm`)
+#[cfg(target_family = "wasm")]
+const _: () = {
+    use plan::wasm;
+    assert!(size_of::<Shape>() == wasm::SHAPE as usize);
+    assert!(
+        size_of::<(
+            usize,
+            usize,
+            [usize; 2],
+            usize,
+            &[u8],
+            Option<zlib::Checkpoint>
+        )>() == wasm::SEG as usize
+    );
+    assert!(size_of::<Token>() == wasm::TOKEN as usize);
+    assert!(size_of::<(Shape, std::ops::Range<usize>)>() == wasm::READY as usize);
+    assert!(size_of::<(deflate::Block, std::ops::Range<usize>)>() == wasm::BLOCK as usize);
+    assert!(size_of::<Rule>() == wasm::RULE as usize);
+    assert!(size_of::<code::Model>() == wasm::MODEL as usize);
+    assert!(aqr_common::pool::SCOPE_BYTES == wasm::SCOPE as usize);
+};

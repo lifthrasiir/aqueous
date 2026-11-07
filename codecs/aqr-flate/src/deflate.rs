@@ -49,6 +49,31 @@ impl aqr_common::wire::Wire for Token {
     }
 }
 
+/// A token in 5 bytes (as tasks give them back): its kind, then its byte, or its length and
+/// distance.
+pub fn token_bytes(t: Token) -> [u8; 5] {
+    match t {
+        Token::Lit(b) => [0, b, 0, 0, 0],
+        Token::Match { len, dist, alt258 } => {
+            let (l, d) = (len.to_le_bytes(), dist.to_le_bytes());
+            [1 + alt258 as u8, l[0], l[1], d[0], d[1]]
+        }
+    }
+}
+
+/// The token of [`token_bytes`].
+pub fn token_of(b: [u8; 5]) -> Option<Token> {
+    Some(match b[0] {
+        0 => Token::Lit(b[1]),
+        t @ (1 | 2) => Token::Match {
+            len: u16::from_le_bytes([b[1], b[2]]),
+            dist: u16::from_le_bytes([b[3], b[4]]),
+            alt258: t == 2,
+        },
+        _ => return None,
+    })
+}
+
 impl Token {
     /// Number of bytes this token produces.
     pub fn span(self) -> usize {
@@ -58,6 +83,129 @@ impl Token {
         }
     }
 }
+
+/// Up to `N` values in place (no allocation): what a block's header holds and what its
+/// candidates are made of, so that headers are read and kept without the heap.
+#[derive(Clone, Copy)]
+pub struct Short<T: Copy + Default, const N: usize> {
+    v: [T; N],
+    n: u16,
+}
+
+impl<T: Copy + Default, const N: usize> Short<T, N> {
+    pub fn new() -> Self {
+        Short {
+            v: [T::default(); N],
+            n: 0,
+        }
+    }
+
+    /// The first `n` values of `T::default()` (as `vec![x; n]` of the default).
+    pub fn zeroed(n: usize) -> Self {
+        assert!(n <= N, "{n} values past {N}");
+        Short {
+            v: [T::default(); N],
+            n: n as u16,
+        }
+    }
+
+    pub fn from_slice(s: &[T]) -> Self {
+        let mut x = Self::new();
+        x.extend_from_slice(s);
+        x
+    }
+
+    #[inline]
+    pub fn push(&mut self, t: T) {
+        assert!((self.n as usize) < N, "{N} values at most");
+        self.v[self.n as usize] = t;
+        self.n += 1;
+    }
+
+    pub fn extend_from_slice(&mut self, s: &[T]) {
+        let n = self.n as usize;
+        assert!(n + s.len() <= N, "{N} values at most");
+        self.v[n..n + s.len()].copy_from_slice(s);
+        self.n += s.len() as u16;
+    }
+
+    pub fn resize(&mut self, n: usize, t: T) {
+        assert!(n <= N, "{N} values at most");
+        let m = self.n as usize;
+        if n > m {
+            self.v[m..n].fill(t);
+        }
+        self.n = n as u16;
+    }
+
+    pub fn truncate(&mut self, n: usize) {
+        self.n = self.n.min(n as u16);
+    }
+
+    pub fn clear(&mut self) {
+        self.n = 0;
+    }
+}
+
+impl<T: Copy + Default, const N: usize> Default for Short<T, N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: Copy + Default, const N: usize> std::ops::Deref for Short<T, N> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        &self.v[..self.n as usize]
+    }
+}
+
+impl<T: Copy + Default, const N: usize> std::ops::DerefMut for Short<T, N> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        &mut self.v[..self.n as usize]
+    }
+}
+
+impl<T: Copy + Default + PartialEq, const N: usize> PartialEq for Short<T, N> {
+    fn eq(&self, o: &Self) -> bool {
+        **self == **o
+    }
+}
+
+impl<T: Copy + Default + Eq, const N: usize> Eq for Short<T, N> {}
+
+impl<T: Copy + Default + std::fmt::Debug, const N: usize> std::fmt::Debug for Short<T, N> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        (**self).fmt(f)
+    }
+}
+
+impl<T: Copy + Default, const N: usize> Extend<T> for Short<T, N> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, it: I) {
+        it.into_iter().for_each(|t| self.push(t));
+    }
+}
+
+impl<T: Copy + Default, const N: usize> FromIterator<T> for Short<T, N> {
+    fn from_iter<I: IntoIterator<Item = T>>(it: I) -> Self {
+        let mut x = Self::new();
+        x.extend(it);
+        x
+    }
+}
+
+impl<'a, T: Copy + Default, const N: usize> IntoIterator for &'a Short<T, N> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// Code lengths or run-length ops of a header: `hlit + hdist` (320) at most.
+pub const HEADER_LENS: usize = 320;
+pub type Lens = Short<u8, HEADER_LENS>;
+pub type Ops = Short<RleOp, HEADER_LENS>;
 
 /// Dynamic Huffman block header, exactly as transmitted.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -72,9 +220,9 @@ pub struct DynHeader {
     /// `hclen` in transmission order are zero.
     pub cl_lens: [u8; 19],
     /// The run-length coded sequence that expands to `lens`.
-    pub ops: Vec<RleOp>,
+    pub ops: Ops,
     /// `hlit + hdist` code lengths, literal/length first.
-    pub lens: Vec<u8>,
+    pub lens: Lens,
 }
 
 impl DynHeader {
@@ -86,6 +234,8 @@ impl DynHeader {
     }
 }
 
+// (a dynamic block's header in place: blocks are read and written without the heap)
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Body {
     Stored {
@@ -188,7 +338,7 @@ fn parse_header(r: &mut BitReader) -> Result<DynHeader> {
     }
     let cl = huffman::Decoder::new(&cl_lens)?;
     let total = hlit as usize + hdist as usize;
-    let mut ops = Vec::new();
+    let mut ops = Ops::new();
     let mut n = 0;
     while n < total {
         let sym = cl.decode(r)? as u8;

@@ -14,6 +14,10 @@ const HASH_BITS: u32 = 15;
 const MIN_BITS: u32 = 10;
 /// Entries per bucket of the second table.
 const LW: usize = 1;
+
+/// The entries of a position's buckets (as many as the ways and the long table's, 16 at most),
+/// in place.
+pub type Entries = crate::deflate::Short<usize, 16>;
 /// The `W` of [`Core::walk`] and its callers for a table of any shape (its fields telling it).
 const ANY: usize = 0;
 /// Entries of the chain ring (twice the window, so that a link is never overwritten while
@@ -25,7 +29,7 @@ const CHAIN: usize = 2 * WINDOW;
 pub trait Cands {
     /// The entries of `p`'s buckets before `p`, most recent first (first table, then the
     /// second's not already listed).
-    fn entries(&mut self, d: &[u8], p: usize) -> Vec<usize>;
+    fn entries(&mut self, d: &[u8], p: usize) -> Entries;
     /// The index in [`Cands::entries`] of the entry at `p - dist`, if any.
     fn index_of(&mut self, d: &[u8], p: usize, dist: usize) -> Option<usize> {
         self.entries(d, p).iter().position(|&c| p - c == dist)
@@ -78,8 +82,8 @@ pub trait Search: Cands {
 pub struct NoTable;
 
 impl Cands for NoTable {
-    fn entries(&mut self, _: &[u8], _: usize) -> Vec<usize> {
-        vec![]
+    fn entries(&mut self, _: &[u8], _: usize) -> Entries {
+        Entries::new()
     }
 }
 
@@ -120,8 +124,8 @@ impl ChainTable {
 }
 
 impl Cands for ChainTable {
-    fn entries(&mut self, _: &[u8], _: usize) -> Vec<usize> {
-        vec![]
+    fn entries(&mut self, _: &[u8], _: usize) -> Entries {
+        Entries::new()
     }
 
     fn index_of(&mut self, _: &[u8], _: usize, _: usize) -> Option<usize> {
@@ -213,8 +217,8 @@ impl MultiChain {
 }
 
 impl Cands for MultiChain {
-    fn entries(&mut self, _: &[u8], _: usize) -> Vec<usize> {
-        vec![]
+    fn entries(&mut self, _: &[u8], _: usize) -> Entries {
+        Entries::new()
     }
 
     fn index_of(&mut self, _: &[u8], _: usize, _: usize) -> Option<usize> {
@@ -716,12 +720,12 @@ impl Core {
 }
 
 impl Cands for Core {
-    fn entries(&mut self, d: &[u8], p: usize) -> Vec<usize> {
+    fn entries(&mut self, d: &[u8], p: usize) -> Entries {
         self.ensure_any(d, p);
         if p + self.key > d.len() {
-            return vec![];
+            return Entries::new();
         }
-        let mut v: Vec<usize> = self
+        let mut v: Entries = self
             .bucket_any(self.h1(d, p))
             .iter()
             .map(|&e| e as usize)
@@ -780,7 +784,7 @@ impl Cands for Core {
 }
 
 impl<const W: usize, const K: usize, const L: bool> Cands for Table<W, K, L> {
-    fn entries(&mut self, d: &[u8], p: usize) -> Vec<usize> {
+    fn entries(&mut self, d: &[u8], p: usize) -> Entries {
         self.0.entries(d, p)
     }
 

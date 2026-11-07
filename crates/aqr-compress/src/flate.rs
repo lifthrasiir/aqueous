@@ -90,7 +90,7 @@ pub(crate) fn gzip(d: &[u8], contents: Kind, opt: &Options, depth: u32, cx: &Cx)
         let (mut lens, mut sizes, mut gaps) = (Vec::new(), Vec::new(), Vec::with_capacity(run.len()));
         for m in run {
             gaps.push((prev, m.raw.start));
-            lens.push((m.data.len(), m.record.len()));
+            lens.push((m.data.len(), m.record.len(), m.raw.len()));
             sizes.push(m.raw.len() as u64);
             data.write(&m.data);
             records.extend_from_slice(&m.record);

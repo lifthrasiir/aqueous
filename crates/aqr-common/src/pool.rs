@@ -391,6 +391,10 @@ impl<T> Handle<'_, T> {
 }
 
 /// The workers of a [`Scope`], and a panic of what was spawned on them that nobody joined.
+/// Bytes of the block that [`scope`] takes of the heap (its state, shared with what it spawns:
+/// an `Arc`'s counts and the state), with or without workers.
+pub const SCOPE_BYTES: usize = 2 * size_of::<usize>() + size_of::<ScopeState>();
+
 #[derive(Default)]
 struct ScopeState {
     workers: Mutex<Workers>,

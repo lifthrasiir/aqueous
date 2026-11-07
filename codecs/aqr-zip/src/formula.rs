@@ -368,7 +368,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
                         stored_all.write(&input[l.body.clone()]);
                     }
                     (Made::Deflated { .. }, Some((dd, record))) => {
-                        lens.push((dd.len(), record.len()));
+                        lens.push((dd.len(), record.len(), l.body.len()));
                         derived.extend_from_slice(&crc.to_le_bytes());
                         derived.extend_from_slice(&(dd.len() as u64).to_le_bytes());
                         derived.extend_from_slice(&(l.body.len() as u64).to_le_bytes());

@@ -317,6 +317,7 @@ pub fn encode_with(
     let flate_sizes = sizes(1);
     if !flate_sizes.is_empty() {
         let records = f.push_as("flate/record", Kind::Compressed, flate_records);
+        let flate_lens: Vec<_> = flate_lens.iter().zip(&flate_sizes).map(|(&(d, r), &s)| (d, r, s as usize)).collect();
         let index = match aqr_flate::formula::index(&flate_lens) {
             i if i.is_empty() => Node::Concat(Vec::new()),
             i => f.push("flate/index", i),
