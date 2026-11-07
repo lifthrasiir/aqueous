@@ -1142,7 +1142,7 @@ impl Shared {
 }
 
 /// The pages of the working memory of `wasm` as it is instantiated: the minimum of its import
-/// (the module's data and stack), for its memory estimate ([`aqr_formula::Usage`]).
+/// (the module's data and stack), for its memory plan ([`aqr_formula::Usage`]).
 /// The task slots of each class of tasks of `wasm` (its custom section `aqr_task_slots`; none
 /// where it has none), unchecked.
 pub fn task_slots(wasm: &[u8]) -> Vec<u64> {

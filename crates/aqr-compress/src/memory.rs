@@ -1,20 +1,15 @@
 //! The memory limits declared for the applications of modules (spec, "Module execution"): the
 //! memories of the parameters, resources, inputs and outputs (a part module's inputs and
-//! outputs within their windows), and the module's estimate of its
-//! working memories ([`aqr_formula::Module::memory_usage_in_pages`]) with room for an estimate's
-//! error. The inputs are those that the recompressors made: the prevalidation, which evaluates
-//! the formulas as they are made ([`crate::verify`]), has the limits worked out where it runs an
-//! application, and [`declare`] works out the others, making their inputs as estimates ask.
+//! outputs within their windows), and the module's plan of its working memories
+//! ([`aqr_formula::Module::plan_in_pages`]), which is exact and has no room. The inputs are those
+//! that the recompressors made: the prevalidation, which evaluates the formulas as they are made
+//! ([`crate::verify`]), has the limits worked out where it runs an application, and [`declare`]
+//! works out the others, making their inputs as plans ask.
 
 use std::collections::HashMap;
 
 use aqr_formula::{Apply, Contents, Formula, Modules, NO_LIMIT, Node, PAGE, Usage};
 use xxhash_rust::xxh3::Xxh3;
-
-/// The limit declared of an estimate `e`: `e` and a quarter, and 1 MiB.
-fn room(e: u64) -> u64 {
-    e.saturating_add(e / 4).saturating_add(1 << 20)
-}
 
 /// What an application is but for its inputs' bytes: its module, parameters, resources'
 /// lengths, inputs' lengths and output's length, hashed. Applications alike in all of these
@@ -52,17 +47,17 @@ impl Limits {
 }
 
 /// The limit of application `a` of inputs of `lens` bytes (the bytes themselves in
-/// `contents`) and outputs of `outputs` bytes: [`NO_LIMIT`] for a module of no estimate or
-/// none built (tests'), and where its estimate fails, which is a bug of the estimate (declaring
+/// `contents`) and outputs of `outputs` bytes: [`NO_LIMIT`] for a module of no plan or
+/// none built (tests'), and where its plan fails, which is a bug of the plan (declaring
 /// none rather than losing the archive).
 pub(crate) fn limit(a: &Apply, lens: &[u64], outputs: &[u64], contents: &dyn Contents) -> u64 {
-    let Some(initial_pages) = a.module.memory.and(aqr_decompress::initial_pages_of(a.module)) else {
+    let Some(initial_pages) = a.module.plan.and(aqr_decompress::initial_pages_of(a.module)) else {
         return NO_LIMIT;
     };
     let resources: Vec<u64> = a.resources.iter().map(|r| r.len() as u64).collect();
     let usage = Usage { params: &a.params, resources: &resources, inputs: lens, outputs, contents, initial_pages };
-    let Some(pages) = a.module.memory_usage_in_pages(&usage) else {
-        eprintln!("aqr-compress: no memory estimate of {} (a bug), none declared", a.module);
+    let Some(pages) = a.module.plan_in_pages(&usage) else {
+        eprintln!("aqr-compress: no memory plan of {} (a bug), none declared", a.module);
         return NO_LIMIT;
     };
     // (an input's or output's within its window, of a part module)
@@ -72,16 +67,13 @@ pub(crate) fn limit(a: &Apply, lens: &[u64], outputs: &[u64], contents: &dyn Con
     let imported: u64 = [&[a.params.len() as u64][..], &resources].concat().iter().map(|&n| fit(n, None)).sum::<u64>()
         + lens.iter().enumerate().map(|(k, &n)| fit(n, window(false, k))).sum::<u64>()
         + outputs.iter().enumerate().map(|(j, &n)| fit(n, window(true, j))).sum::<u64>();
-    // (a plan is what the module takes at most: no room for an estimate's error)
-    match a.module.planned {
-        true => imported.saturating_add(pages.saturating_mul(PAGE)),
-        false => imported.saturating_add(room(pages.saturating_mul(PAGE))),
-    }
+    // (a plan is what the module takes at most: no room)
+    imported.saturating_add(pages.saturating_mul(PAGE))
 }
 
 /// Declares the memory limits of `f`'s applications: those declared already kept (of a formula
 /// sealed, whose inputs are no longer at hand), else those of `known` (worked out as the
-/// prevalidation ran them), else worked out, the inputs made by `m` as estimates ask for them.
+/// prevalidation ran them), else worked out, the inputs made by `m` as plans ask for them.
 pub(crate) fn declare(f: &mut Formula, m: &(impl Modules + Sync), known: &Limits) {
     let declared = f.declare_memory(m, &|a, contents| {
         if a.memory_limit != aqr_formula::NO_LIMIT {

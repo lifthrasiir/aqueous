@@ -548,7 +548,7 @@ pub fn built(m: Module) -> Option<&'static aqr_modules::Known> {
 }
 
 /// The pages of the working memory of the Wasm module of `m` (aqr-modules') as it is
-/// instantiated, for its memory estimate ([`aqr_formula::Usage::initial_pages`]); read once.
+/// instantiated, for its memory plan ([`aqr_formula::Usage::initial_pages`]); read once.
 #[cfg(feature = "wasm")]
 pub fn initial_pages_of(m: Module) -> Option<u64> {
     use std::collections::HashMap;

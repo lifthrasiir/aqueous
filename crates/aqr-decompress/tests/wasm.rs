@@ -1839,8 +1839,7 @@ fn plan_holds_queued(what: &str, mut f: Formula, want: &[u8], queued: impl Fn(&a
         contents: &contents,
         initial_pages: aqr_decompress::initial_pages_of(a.module).unwrap(),
     };
-    assert!(a.module.planned, "{what}: {} not planned", a.module);
-    let plan = a.module.memory_usage_in_pages(&usage).unwrap() * 65536;
+    let plan = a.module.plan_in_pages(&usage).unwrap() * 65536;
     let queued = queued(&usage);
     let imported = [a.params.len() as u64, a.len].iter().chain(&resources).chain(&lens).map(|&n| pages(n)).sum::<u64>();
     let limit = imported + plan;
@@ -3339,7 +3338,7 @@ fn lzma2_plans_hold() {
     {
         cases.push((t.into(), fixture(&format!("codecs/aqr-lzma/tests/data/{t}.lzma2")), 8 << 20));
     }
-    let mut end = |mut s: Vec<u8>| {
+    let end = |mut s: Vec<u8>| {
         s.push(0);
         s
     };

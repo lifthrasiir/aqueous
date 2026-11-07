@@ -1,4 +1,4 @@
-//! The modules' memory estimates (`Module::memory_usage_in_pages`) against what their
+//! The modules' memory plans (`Module::plan_in_pages`) against what their
 //! applications take as WebAssembly, on the samples of `scripts/module-memory.sh` (in
 //! `cache/memory/samples`, made by the script): ignored where they are not there.
 
@@ -7,7 +7,7 @@ use aqr_formula::{PAGE, Usage, aqr};
 
 #[test]
 #[ignore = "the samples of scripts/module-memory.sh"]
-fn estimates_hold() {
+fn plans_hold_on_samples() {
     let dir = format!("{}/cache/memory/samples", env!("CARGO_MANIFEST_DIR"));
     let mut archives: Vec<_> = std::fs::read_dir(&dir)
         .expect("the samples (scripts/module-memory.sh)")
@@ -34,13 +34,13 @@ fn estimates_hold() {
                 contents: &contents,
                 initial_pages: aqr_decompress::initial_pages(&k.read_wasm().unwrap()).unwrap(),
             };
-            let Some(pages) = m.memory_usage_in_pages(&usage) else { continue };
+            let Some(pages) = m.plan_in_pages(&usage) else { continue };
             checked += 1;
             if pages * PAGE < a.working {
                 below.push(format!("{}: {m}: {} < {}", path.display(), pages * PAGE, a.working));
             }
         }
     }
-    assert!(checked > 0, "no application of a module with an estimate");
-    assert!(below.is_empty(), "estimates below what was taken:\n{}", below.join("\n"));
+    assert!(checked > 0, "no application of a module with a plan");
+    assert!(below.is_empty(), "plans below what was taken:\n{}", below.join("\n"));
 }

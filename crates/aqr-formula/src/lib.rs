@@ -41,18 +41,17 @@ use std::sync::Arc;
 
 /// A module, by name and version of its input format. Eventually a Wasm module identified by
 /// its hash; a native implementation stands in for it (§5.7). It is its name and version (as
-/// equal and hashed); `memory` estimates the memory of its applications.
+/// equal and hashed); `plan` gives the memory of its applications.
 #[derive(Debug, Clone, Copy)]
 pub struct Module {
     pub name: &'static str,
     pub version: u16,
-    pub memory: Option<Estimate>,
-    /// Whether `memory` is the module's plan rather than an estimate: what its working memory
-    /// takes exactly at most, by construction (`aqr_api::stack`), declared without room.
-    pub planned: bool,
+    /// The module's memory plan: what its working memory takes at most, by construction
+    /// (`aqr_api::stack`), declared without room. None only for a stand-in of a test.
+    pub plan: Option<Planner>,
 }
 
-/// What an application gives its module, for its memory estimate ([`Module::memory_usage_in_pages`]).
+/// What an application gives its module, for its memory plan ([`Module::plan_in_pages`]).
 #[derive(Clone, Copy)]
 pub struct Usage<'a> {
     pub params: &'a [u8],
@@ -101,7 +100,7 @@ impl<'a> Usage<'a> {
         self.initial_pages * PAGE
     }
 
-    /// The [`Estimate`] of a module that spawns no tasks, copies its parameters, resources and
+    /// The plan of a module that spawns no tasks, copies its parameters, resources and
     /// inputs (`aqr_api::whole`) and gives back its outputs from vectors of their sizes, taking
     /// `extra` bytes besides in `buffers` large allocations: all but the small allocations, for
     /// which there is [`SMALL`], and a page for each large one (the allocator's, as it grows the
@@ -120,11 +119,11 @@ impl<'a> Usage<'a> {
     }
 }
 
-/// Bytes of an [`Estimate`] for the small allocations of a module (of no more than a few KiB in
+/// Bytes of a plan for the small allocations of a module (of no more than a few KiB in
 /// all, whatever the input).
 pub const SMALL: u64 = 64 << 10;
 
-/// The inputs of an application, as an estimate reads them ([`Usage::contents`]).
+/// The inputs of an application, as a plan reads them ([`Usage::contents`]).
 pub trait Contents {
     /// The `k`-th input; None where there is none, or it could not be made.
     fn input(&self, k: usize) -> Option<&[u8]>;
@@ -136,35 +135,32 @@ impl Contents for Vec<&[u8]> {
     }
 }
 
-/// A module's memory estimate: the bytes that the working memories of an application take at
+/// A module's memory plan: the bytes that the working memories of an application take at
 /// most, of its instance and its tasks, with the messages queued in its channels (the memory
 /// limit less the other memories); None where it cannot tell.
-pub type Estimate = fn(&Usage<'_>) -> Option<u64>;
+pub type Planner = fn(&Usage<'_>) -> Option<u64>;
 
 /// Bytes of a page of WebAssembly memory.
 pub const PAGE: u64 = 65536;
 
 impl Module {
-    /// The module `name@version`, of no memory estimate.
+    /// The module `name@version`, of no memory plan: for a stand-in in a test, as every module
+    /// built into a Wasm module has a plan ([`Module::with_plan`]), and none is declared a limit
+    /// without it.
     pub const fn new(name: &'static str, version: u16) -> Module {
-        Module { name, version, memory: None, planned: false }
+        Module { name, version, plan: None }
     }
 
-    /// The module estimating its memory by `memory`.
-    pub const fn with_memory(self, memory: Estimate) -> Module {
-        Module { memory: Some(memory), ..self }
-    }
-
-    /// The module of the memory plan `memory`: of a module whose working memory is laid out in
+    /// The module of the memory plan `plan`: of a module whose working memory is laid out in
     /// advance (`aqr_api::stack`), so that it takes what the plan gives at most.
-    pub const fn with_plan(self, memory: Estimate) -> Module {
-        Module { memory: Some(memory), planned: true, ..self }
+    pub const fn with_plan(self, plan: Planner) -> Module {
+        Module { plan: Some(plan), ..self }
     }
 
     /// The pages that the working memories of an application of `usage` take at most, which
-    /// the module may take to be there (see [`Estimate`]); None where it has no estimate.
-    pub fn memory_usage_in_pages(&self, usage: &Usage<'_>) -> Option<u64> {
-        Some((self.memory?)(usage)?.div_ceil(PAGE))
+    /// the module may take to be there (see [`Planner`]); None where it has no plan.
+    pub fn plan_in_pages(&self, usage: &Usage<'_>) -> Option<u64> {
+        Some((self.plan?)(usage)?.div_ceil(PAGE))
     }
 }
 

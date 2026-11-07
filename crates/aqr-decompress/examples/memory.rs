@@ -5,8 +5,8 @@
 //! at most (the calling one and N − 1 workers; by default as many as the machine has).
 //!
 //! Columns: the module, m (the outputs' bytes), I (the parameters', resources' and inputs'
-//! bytes), the peak of the working memories, that peak over m, and the module's estimate of it
-//! (`Module::memory_usage_in_pages`, in bytes) over the peak, `!` where it is below the peak;
+//! bytes), the peak of the working memories, that peak over m, and the module's plan of it
+//! (`Module::plan_in_pages`, in bytes) over the peak, `!` where it is below the peak;
 //! and the memory limit declared over the total (the peak and the memories imported), `-` for
 //! none; then the most the application's instance held and what the native measurement
 //! (`aqr_common::meter`) took for it, and the most one task held and the native measurement's
@@ -30,7 +30,7 @@ fn main() {
     let threads = aqr_common::pool::size() + 1;
     println!(
         "{:<22} {:>12} {:>12} {:>12} {:>7} {:>7} {:>7} {:>11} {:>11} {:>11} {:>11}",
-        "module", "m", "I", "working", "w/m", "est/w", "lim/t", "inst", "n.inst", "task", "n.task"
+        "module", "m", "I", "working", "w/m", "plan/w", "lim/t", "inst", "n.inst", "task", "n.task"
     );
     for f in args {
         let c = std::fs::read(&f).unwrap_or_else(|e| panic!("{f}: {e}"));
@@ -51,7 +51,7 @@ fn main() {
             let name = known.map_or("(unknown)", |k| k.name);
             let m: u64 = a.sizes.iter().sum();
             let i = a.params + a.resources.iter().sum::<u64>() + a.inputs.iter().sum::<u64>();
-            let est = known.and_then(|k| estimate(k, &a));
+            let est = known.and_then(|k| plan(k, &a));
             let est = match est {
                 Some(e) => format!("{:>7.2}{}", e as f64 / a.working as f64, if e < a.working { "!" } else { "" }),
                 None => format!("{:>7}", "-"),
@@ -88,8 +88,8 @@ fn main() {
     }
 }
 
-/// The estimate of the module `k` of what `a` took, in bytes.
-fn estimate(k: &aqr_modules::Known, a: &aqr_decompress::Applied) -> Option<u64> {
+/// The plan of the module `k` of what `a` took, in bytes.
+fn plan(k: &aqr_modules::Known, a: &aqr_decompress::Applied) -> Option<u64> {
     let m = aqr_decompress::MODULES.iter().find(|m| m.name == k.name && m.version == k.version)?;
     let contents: Vec<&[u8]> = a.contents.iter().map(|c| &c[..]).collect();
     let usage = aqr_formula::Usage {
@@ -100,5 +100,5 @@ fn estimate(k: &aqr_modules::Known, a: &aqr_decompress::Applied) -> Option<u64> 
         contents: &contents,
         initial_pages: aqr_decompress::initial_pages(&k.read_wasm().ok()?)?,
     };
-    Some(m.memory_usage_in_pages(&usage)? * aqr_formula::PAGE)
+    Some(m.plan_in_pages(&usage)? * aqr_formula::PAGE)
 }
