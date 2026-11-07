@@ -192,7 +192,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "fasta-recons",
         version: 1,
-        sha512_256: hex("b758e410872d778674d79b8582d699c8d6b2e7994449017b838e082a2cbf240b"),
+        sha512_256: hex("70767ff7b4cdee62a1ae6eff899b5a0a3b02ea2e566b3347e44556d95d3f212f"),
         block: include_bytes!("../wasm/fasta-recons.block"),
     },
     Known {

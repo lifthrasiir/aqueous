@@ -2076,6 +2076,31 @@ fn azo_plans_hold() {
     }
 }
 
+/// fasta-recons lays its memory out as a stack, its limit its plan: of files of several records,
+/// lower case and runs of other letters, a header alone, lines of other widths, and one large
+/// enough for the model and the file to pass a few pages.
+#[test]
+fn fasta_plans_hold() {
+    let mut big = b">chr\n".to_vec();
+    for i in 0..30_000 {
+        let line: Vec<u8> =
+            (0..60).map(|j| if i % 700 < 3 { b'N' } else { b"ACGTacgtGa"[(i * 7 + j * 3 + j / 7) % 10] }).collect();
+        big.extend_from_slice(&line);
+        big.push(b'\n');
+    }
+    let files: [(&str, Vec<u8>); 5] = [
+        ("plain", b">a\nACGT\nAC\n".to_vec()),
+        ("mixed", b">a b c\nACGTacgtNNNNnnnnACGT\nAC\n>b\nRYKMacgt\nAC".to_vec()),
+        ("header", b">x".to_vec()),
+        ("widths", b">a\nACG\nACGT\nA\n>b\nNNNN\nNNNN\nNA\n".to_vec()),
+        ("big", big),
+    ];
+    for (what, d) in files {
+        let f = aqr_fasta::formula::encode(&d, 1).unwrap_or_else(|| panic!("{what}"));
+        plan_holds(&format!("fasta {what}"), f, &d);
+    }
+}
+
 /// bz2-recons and bz2-alz-recons lay their memory out as stacks, their limits their plans: of
 /// the fixtures (a periodic block given its rank among them), of streams one after another, of
 /// several blocks (the last the smaller), and of ALZip's.

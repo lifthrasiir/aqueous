@@ -10,11 +10,11 @@ use crate::fasta::{self};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("fasta-recons", 1).with_memory(memory);
+pub const MODULE: Module = Module::new("fasta-recons", 1).with_plan(plan);
 
-/// The memory of the module: the streams and the file, and the bases' model.
-fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    Some(u.whole(bases::MODEL_BYTES, 1))
+/// The memory of the module: its plan ([`crate::plan::decode`]).
+fn plan(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    Some(crate::plan::decode(u.initial(), u.params, u.inputs, u.output()))
 }
 
 /// The names of the inputs' streams, in order.
