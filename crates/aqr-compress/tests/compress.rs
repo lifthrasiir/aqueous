@@ -1823,7 +1823,7 @@ fn bundles_not_deeper() {
     assert_eq!(modules(&f), [FLATE.name, BUNDLE.name, ZIP.name, JPEG.name], "{f}");
 }
 
-/// The archive declares each application's memory limit from its module's estimate, and the
+/// The archive declares each application's memory limit from its module's plan, and the
 /// modules run as WebAssembly within it: a FLAC file (a pipeline of tasks) and a JPEG, kept
 /// recompressed however small, with verification on and off (the limits worked out by the
 /// prevalidation, or of their own).

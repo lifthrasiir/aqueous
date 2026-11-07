@@ -651,7 +651,7 @@ pub fn recompress(d: &[u8], opt: &Options) -> Formula {
 }
 
 /// Declares the memory limits of `f`'s applications as the compressor does without having run
-/// them (their modules' plans or estimates): for tests of formulas made apart.
+/// them (from their modules' plans): for tests of formulas made apart.
 #[doc(hidden)]
 pub fn declare_memory(f: &mut Formula) {
     memory::declare(f, &Native { threads: 1 }, &memory::Limits::default());
