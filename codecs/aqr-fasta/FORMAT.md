@@ -15,6 +15,7 @@ Contents:
 4. [Bases](#4-bases)
 5. [Rebuilding the file](#5-rebuilding-the-file)
 6. [Encoding](#6-encoding-encoder)
+7. [Segments](#7-segments-encoder)
 
 ## 1. Conventions
 
@@ -26,15 +27,16 @@ Contents:
 
 ## 2. The module
 
-- **Module**: name `fasta-recons`, version 1.
+- **Module**: name `fasta-recons`, version 2 (version 1 differs in `final` below: only the
+  values 0 and 1, and a file always begins with a header).
 - **Params**:
 
   ```text
   varint  W        the usual length of a sequence line
-  u8      final    1 if the file ends with LF, else 0
+  u8      flags    bit 0: the file ends with LF; bit 1: the first record has no header
   ```
 
-  Nothing else may follow.
+  Nothing else may follow; the other bits of `flags` are 0.
 - **Resources**: none.
 - **Inputs**: five, in order: `headers`, `layout`, `case`, `other` (§3) and `bases` (§4).
 - **Output**: the file of the declared length (§5). Any inconsistency (a part ending early
@@ -43,11 +45,12 @@ Contents:
 ## 3. Parts
 
 A FASTA file here is a sequence of *records*. A record is a header line (`>` and any bytes but
-LF) and zero or more sequence lines (letters only). Lines are separated by LF; the file ends
+LF) and zero or more sequence lines (letters only); where bit 1 of `flags` is set the first
+record has no header line, and the file is the rest of a record's lines after a cut (§7). Lines are separated by LF; the file ends
 with LF or not (`final`). The *sequence* of the file is the letters of all sequence lines of
 all records, in order.
 
-- **headers**: of each record, its header line without the `>`, followed by LF.
+- **headers**: of each record that has one, its header line without the `>`, followed by LF.
 - **layout**: of each record, in order:
 
   ```text
@@ -111,9 +114,10 @@ After the B bases, x must be 2^23 and every byte of `bases` read; else it is an 
 
 ## 5. Rebuilding the file
 
-For each record, in order: unless it is the first, LF; then `>`, its header (the next one of
-`headers`, up to its LF); then each of its lines: LF, and the line's letters, the next ones of
-the sequence (§3), each in the case of its run. After the last record, LF if `final` is 1.
+For each record, in order: unless it is the first, LF; then, unless it is the first of a file with
+bit 1 of `flags` set, `>` and its header (the next one of `headers`, up to its LF); then each of
+its lines: LF, and the line's letters, the next ones of
+the sequence (§3), each in the case of its run. After the last record, LF if bit 0 of `flags` is set.
 Every part must be read to its end: the headers (but the empty piece after the last LF), the
 layout, the case, the other runs and the bases.
 
@@ -127,3 +131,27 @@ layout, the case, the other runs and the bases.
   bases backward, so that they decode forward.
 - The other parts are as they are, for the archive to compress; the bases are of
   `Kind::Compressed`.
+
+## 7. Segments *(encoder)*
+
+- An application holds its output, a copy of the output imported, its inputs twice and the
+  model: about 2.5 times the file. A file longer than 96 MiB (`SEGMENT`) is therefore cut into
+  segments of equal parts (as long as the file allows), each an application of the module, in
+  the formula's concatenation of them in order. A segment needs about 245 MiB on Wasm at most
+  (bases that are random, whose code is a quarter of them), the less the shorter.
+- A cut is at an LF that no LF precedes or follows, and a sequence line (not a header) follows:
+  the first of the cuts at or after the file's equal parts. The LF begins the next segment; the
+  segment before ends without it. The first segment is a file as any other; the next ones are
+  files of `flags` bit 1 set: their first record, the rest of the last of the segment before,
+  has no header, and the lines of each begin with their LF. A file with no such LF past a part
+  is cut no further.
+- W is the file's, the same in every segment (a record cut where its lines are of W stays
+  regular on both sides). The case runs and the runs of other letters begin anew in each, as
+  does the model of the bases: each segment's bases are coded by the model from its start.
+- The five streams are each one stream of the formula, the segments' parts one after another,
+  and each application takes its slice of each (a stream of its own for each segment would be
+  a block of its own in a batch, and compress worse). `threads` segments are coded at once and
+  the coded bases are written to the store as they come.
+- Restarting the model costs: each segment after the first about 0.1 MB for chr1 of hg19
+  (51.73 MB in one application, 51.97 MB in three; the pieces are of 85 MB). A file of one
+  segment is coded as it always was.

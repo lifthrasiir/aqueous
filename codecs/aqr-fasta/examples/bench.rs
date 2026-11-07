@@ -25,10 +25,25 @@ fn main() {
             continue;
         };
         let e = t.elapsed().as_secs_f64();
-        let aqr_formula::Node::Apply(a) = &f.root else { unreachable!() };
-        let inputs: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
+        // (the application, or the segments' one after another)
+        let nodes = match &f.root {
+            aqr_formula::Node::Concat(ns) => ns.clone(),
+            n => vec![n.clone()],
+        };
         let t = Instant::now();
-        let out = aqr_fasta::formula::decode(&a.params, &inputs, d.len() as u64, 1).unwrap();
+        let mut out = Vec::new();
+        for n in &nodes {
+            let aqr_formula::Node::Apply(a) = n else { unreachable!() };
+            let inputs: Vec<&[u8]> = (a.inputs.iter())
+                .map(|n| match n {
+                    &aqr_formula::Node::Slice { stream, start, len } => {
+                        &f.streams[stream].data[start as usize..][..len as usize]
+                    }
+                    _ => unreachable!(),
+                })
+                .collect();
+            out.extend(aqr_fasta::formula::decode(&a.params, &inputs, a.len, 1).unwrap());
+        }
         let dt = t.elapsed().as_secs_f64();
         assert!(out == d, "{path}: not given back");
         let sizes: Vec<usize> =

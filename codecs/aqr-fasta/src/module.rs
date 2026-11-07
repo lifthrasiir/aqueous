@@ -5,14 +5,14 @@ use crate::fasta::{self, View};
 use crate::{Result, bases, corrupt};
 use aqr_common::varint;
 
-/// The module: the file of `len` bytes from `params` (the line width, whether it ends with a
-/// line's end) and `inputs` (the streams of `STREAM_NAMES`).
+/// The module: the file of `len` bytes from `params` (the line width, and a byte of whether it
+/// ends with a line's end and whether its first record has no header) and `inputs` (the streams of `STREAM_NAMES`).
 pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Result<Vec<u8>> {
     let &[headers, layout, case, other, coded] = inputs else { return Err(corrupt()) };
     let mut at = 0;
     let width = varint::get(params, &mut at).map_err(|_| corrupt())?;
     let &[nl] = &params[at..] else { return Err(corrupt()) };
-    if nl > 1 {
+    if nl > 3 {
         return Err(corrupt());
     }
     let len = usize::try_from(len).map_err(|_| corrupt())?;
@@ -23,7 +23,11 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Res
     }
     // (the bases as they are decoded: a file's worth of them not held)
     let mut bases = bases::Decoder::new(coded, n as usize)?;
-    let out = fasta::build(View { width, final_newline: nl == 1, headers, layout, case, other }, &mut bases, len)?;
+    let out = fasta::build(
+        View { width, final_newline: nl & 1 == 1, headless: nl & 2 != 0, headers, layout, case, other },
+        &mut bases,
+        len,
+    )?;
     bases.finish()?;
     Ok(out)
 }

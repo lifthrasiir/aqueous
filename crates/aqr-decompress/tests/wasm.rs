@@ -3788,7 +3788,8 @@ fn azo_plans_hold() {
 
 /// fasta-recons lays its memory out as a stack, its limit its plan: of files of several records,
 /// lower case and runs of other letters, a header alone, lines of other widths, and one large
-/// enough for the model and the file to pass a few pages.
+/// enough for the model and the file to pass a few pages, and of 100 MiB (two segments of an
+/// application each, the second the rest of a record).
 #[test]
 fn fasta_plans_hold() {
     let mut big = b">chr\n".to_vec();
@@ -3803,11 +3804,34 @@ fn fasta_plans_hold() {
         ("mixed", b">a b c\nACGTacgtNNNNnnnnACGT\nAC\n>b\nRYKMacgt\nAC".to_vec()),
         ("header", b">x".to_vec()),
         ("widths", b">a\nACG\nACGT\nA\n>b\nNNNN\nNNNN\nNA\n".to_vec()),
-        ("big", big),
+        ("big", big.clone()),
     ];
     for (what, d) in files {
         let f = aqr_fasta::formula::encode(&d, 1).unwrap_or_else(|| panic!("{what}"));
         plan_holds(&format!("fasta {what}"), f, &d);
+    }
+    // segments: records of 22 MiB, 110 MiB in all, and one record of lines of one width
+    let mut rng = aqr_common::rng::Rng::new(5);
+    let block = big;
+    let mut records = Vec::new();
+    for r in 0..5 {
+        records.extend_from_slice(format!(">record {r}\n").as_bytes());
+        for k in 0..(22 << 20) / block.len() {
+            let b = &block[block.iter().position(|&c| c == b'\n').unwrap() + 1..];
+            records.extend_from_slice(b);
+            if k % 4 == 3 {
+                records.extend_from_slice(b"ACGTNNNNacgt\n");
+            }
+        }
+    }
+    let one: Vec<u8> = b">one\n"
+        .iter()
+        .copied()
+        .chain((0..100 << 20).map(|i: usize| if i % 61 == 60 { b'\n' } else { b"ACGT"[rng.below(4) as usize] }))
+        .collect();
+    for (what, d, n) in [("records", records, 2), ("one record", one, 2)] {
+        let f = aqr_fasta::formula::encode(&d, 2).unwrap_or_else(|| panic!("{what}"));
+        assert_eq!(applications_hold(&format!("fasta segments {what}"), &f, &d, |_| 0), n, "{what}");
     }
 }
 

@@ -6023,8 +6023,8 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/exe-recons-x86.wasm" title="crates/aqr-modules/wasm/exe-recons-x86.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-exe/FORMAT.md" title="codecs/aqr-exe/FORMAT.md">R</a>
     <tr>
-      <td><code>70767ff7b4cdee62a1ae6eff899b5a0a3b02ea2e566b3347e44556d95d3f212f</code>
-      <td>fasta-recons@1
+      <td><code>8545e06566fc6cdeb37786fb86f183fed7a7f15b501b1800a290804f91e2c442</code>
+      <td>fasta-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/fasta-recons.wasm" title="crates/aqr-modules/wasm/fasta-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-fasta/FORMAT.md" title="codecs/aqr-fasta/FORMAT.md">R</a>
     <tr>

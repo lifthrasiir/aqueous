@@ -20,6 +20,9 @@ pub struct Parts {
     pub width: u64,
     /// Whether the file ends with a line's end.
     pub final_newline: bool,
+    /// Whether the first record has no header: the file is the rest of a record's lines after
+    /// a cut, starting with the line's end that precedes the first of them.
+    pub headless: bool,
     /// The headers, without their `>`, each ended by LF.
     pub headers: Vec<u8>,
     /// Of each record: its letters (varint), then 0 where its lines are of `width` (but the
@@ -39,6 +42,7 @@ pub struct Parts {
 pub struct View<'a> {
     pub width: u64,
     pub final_newline: bool,
+    pub headless: bool,
     pub headers: &'a [u8],
     pub layout: &'a [u8],
     pub case: &'a [u8],
@@ -50,6 +54,7 @@ impl Parts {
         View {
             width: self.width,
             final_newline: self.final_newline,
+            headless: self.headless,
             headers: &self.headers,
             layout: &self.layout,
             case: &self.case,
@@ -103,7 +108,39 @@ const CLASS: [u8; 256] = {
 /// docs).
 #[cfg(feature = "encode")]
 pub fn parse(d: &[u8]) -> Option<Parts> {
-    if d.first() != Some(&b'>') || memchr::memchr(b'\r', d).is_some() {
+    parse_part(d, width_of(d)?, false)
+}
+
+/// The most common length of a sequence line of FASTA file `d` (the longer of those as common),
+/// or `None` where it does not start with a header.
+#[cfg(feature = "encode")]
+pub fn width_of(d: &[u8]) -> Option<u64> {
+    if d.first() != Some(&b'>') {
+        return None;
+    }
+    let body = d.strip_suffix(b"\n").unwrap_or(d);
+    let mut widths = std::collections::HashMap::<usize, u64>::new();
+    let mut at = 0;
+    for end in memchr::memchr_iter(b'\n', body).chain([body.len()]) {
+        if body.get(at) != Some(&b'>') {
+            *widths.entry(end - at).or_default() += 1;
+        }
+        at = end + 1;
+    }
+    Some(widths.iter().max_by_key(|&(&w, &n)| (n, w)).map_or(0, |(&w, _)| w) as u64)
+}
+
+/// The parts of `d`, a FASTA file or, where `continues`, the rest of one from a line's end that
+/// is followed by a sequence line (the first record has no header), whose sequence lines are
+/// of `width` as the whole's are; `None` where it is not one this crate takes.
+#[cfg(feature = "encode")]
+pub fn parse_part(d: &[u8], width: u64, continues: bool) -> Option<Parts> {
+    let d = match (continues, d.split_first()) {
+        (false, _) if d.first() == Some(&b'>') => d,
+        (true, Some((b'\n', rest))) => rest,
+        _ => return None,
+    };
+    if memchr::memchr(b'\r', d).is_some() {
         return None;
     }
     let final_newline = d.last() == Some(&b'\n');
@@ -120,25 +157,22 @@ pub fn parse(d: &[u8]) -> Option<Parts> {
             Some(l)
         })
     };
-    let mut widths = std::collections::HashMap::<usize, u64>::new();
-    for (_, l) in lines() {
-        if l.first() != Some(&b'>') {
-            *widths.entry(l.len()).or_default() += 1;
-        }
-    }
-    let width = widths.iter().max_by_key(|&(&w, &n)| (n, w)).map_or(0, |(&w, _)| w) as u64;
-    let mut p = Parts { width, final_newline, ..Parts::default() };
+    let mut p = Parts { width, final_newline, headless: continues, ..Parts::default() };
     let mut bases = Packer::with_capacity(d.len());
     let (mut upper, mut run, mut letters) = (true, 0u64, 0u64);
     // the other letters' current run: its letter and length, and the bases before it
     let (mut other, mut olen, mut gap, mut runs) = (0u8, 0u64, 0u64, 0u64);
     let mut lines = lines().peekable();
-    while let Some((_, h)) = lines.next() {
-        if h.first() != Some(&b'>') {
-            return None;
+    let mut headless = continues;
+    while lines.peek().is_some() {
+        if !std::mem::take(&mut headless) {
+            let (_, h) = lines.next()?;
+            if h.first() != Some(&b'>') {
+                return None;
+            }
+            p.headers.extend_from_slice(&h[1..]);
+            p.headers.push(b'\n');
         }
-        p.headers.extend_from_slice(&h[1..]);
-        p.headers.push(b'\n');
         // the sequence's lines up to the next header: how many, their letters, and whether all
         // but the last (not empty) are of the width; and where they are in the body
         let (mut count, mut n, mut regular, mut last) = (0u64, 0u64, width > 0, 0usize);
@@ -314,13 +348,14 @@ pub fn build(p: View, mut bases: impl Iterator<Item = u8>, len: usize) -> Result
     };
     let mut first = true;
     while !layout.done() {
-        let h = headers.next().ok_or_else(corrupt)?;
         if !first {
             out.push(b'\n');
         }
+        if !(first && p.headless) {
+            out.push(b'>');
+            out.extend_from_slice(headers.next().ok_or_else(corrupt)?);
+        }
         first = false;
-        out.push(b'>');
-        out.extend_from_slice(h);
         let n = layout.num()?;
         let kind = *layout.d.get(layout.at).ok_or_else(corrupt)?;
         layout.at += 1;

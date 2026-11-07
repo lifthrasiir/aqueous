@@ -31,7 +31,11 @@ Measured 2026-10-26 on an Apple M4 (10 cores), on hg19 (93 chromosome files of t
   halved at 250 (1.790, and a division per base). A match model of 24-base hashes (last
   occurrence, its prediction weighed by an adaptive table of its length) brought 1.787 to
   1.773 on 60 MB at four times the time, not taken. Models started anew every 64 Mbase cost
-  1.6%, every 16 Mbase 4.0%: a file is one stream.
+  1.6%, every 16 Mbase 4.0%: a file is one stream, cut (FORMAT.md §7) only where an application
+  could not hold it: past 96 MiB, into equal segments of up to that (chr1: three, +0.45%).
+- A file longer than 96 MiB is cut into segments, each an application, so that none needs more
+  than about 245 MiB (one of chr1 needed 588 MiB: its output twice, its inputs twice and the
+  model); the five streams stay one each, with a slice for each application (FORMAT.md §7).
 - The bases are decoded as the file is built, never held: a file decodes in its own size and
   the coded bases. Held, they took as much again (10gb decompression 8.66 → 7.49 GB of peak
   footprint, ten chromosomes decoded at once).
