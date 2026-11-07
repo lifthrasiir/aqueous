@@ -401,8 +401,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "rar3-recons",
-        version: 1,
-        sha512_256: hex("58ede935d0de6ae6ba009252373849ca2217061cb38d6f5e4fca5de4d3835e08"),
+        version: 2,
+        sha512_256: hex("c4bd41d21394500590ea019717ce486151cacfc6645165bf2124fbd6e1de5ec0"),
         block: include_bytes!("../wasm/rar3-recons.block"),
     },
     Known {

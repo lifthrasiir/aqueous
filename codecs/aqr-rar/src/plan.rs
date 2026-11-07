@@ -6,8 +6,9 @@
 
 use aqr_api::stack::{Sim, block, whole};
 
+use crate::recons3;
 use crate::recons5::{self, CTX_LENS, SCRATCH, wasm};
-use crate::{lz5, rec::Mf};
+use crate::{lz3, lz5, rec::Mf};
 
 /// The memory plan of `rar5-recons` ([`crate::module::decode5`]): of its initial memory
 /// (`initial` bytes), parameters `params`, inputs of `inputs` bytes, an output of `len`, and the
@@ -48,6 +49,52 @@ pub fn decode5(initial: u64, params: &[u8], inputs: &[u64], len: u64, files: [&[
             m.take(wasm::CODE * l as u64);
         }
         m.peak(block(SCRATCH as u64));
+        m.top = top;
+    }
+    Some(m.plan(1))
+}
+
+/// The memory plan of `rar3-recons` ([`crate::module::decode3`]): of its initial memory
+/// (`initial` bytes), parameters `params`, inputs of `inputs` bytes, an output of `len`, and the
+/// inputs themselves.
+pub fn decode3(initial: u64, params: &[u8], inputs: &[u64], len: u64, files: [&[u8]; 3]) -> Option<u64> {
+    use recons3::wasm as w;
+    let [data, records, index] = files;
+    let streams = aqr_common::streams::cut(data, records, index, || ()).ok()?;
+    let mut m = Sim::new(initial);
+    m.take(whole(params.len() as u64, &[], inputs));
+    m.take(w::STREAM * streams.len() as u64);
+    m.take(len);
+    for (data, record) in streams {
+        let n = data.len();
+        let s = recons3::start_of(record, n).ok()?;
+        let top = m.top;
+        let files = s.sizes.len() as u64;
+        // (`recons3::join_onto`: the contexts, the files' sizes, the unfiltered data, what the
+        // record holds (`Held`) in the order its vectors are made, the delta copy, the walk's
+        // finder and pairs, the codes written, the PPMd model, then the tables' work)
+        for l in recons3::CTX_LENS {
+            m.take(w::BIT * l as u64);
+        }
+        m.take(4 * files);
+        m.take(n as u64);
+        m.take(w::FLT * s.filters as u64);
+        m.take(s.raws as u64);
+        m.take(4 * files);
+        m.take(w::REG * s.regions as u64);
+        m.take(w::FIL * files);
+        m.take(s.tails as u64);
+        m.take(w::TOKEN * s.tokens as u64);
+        m.take(w::BLK * s.blocks as u64);
+        m.peak(block(s.delta as u64));
+        let (heads, rings) = Mf::slots(n);
+        let pairs = block(w::PAIR * Mf::PAIRS as u64);
+        m.peak(block(4 * heads as u64) + block(4 * rings as u64) + pairs + 2 * pairs);
+        for l in [lz3::MAIN, lz3::DIST, lz3::LOW, lz3::LEN] {
+            m.take(w::CODE * l as u64);
+        }
+        m.take((s.model as u64) << 20);
+        m.peak(block(recons3::SCRATCH as u64));
         m.top = top;
     }
     Some(m.plan(1))

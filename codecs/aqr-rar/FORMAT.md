@@ -550,12 +550,28 @@ contexts, all fresh at the start; those of RAR5's name are as §5.1's:
 | `region` | 328 | §6.5 (`[106..328)` unused) |
 | `filter` | 202 | §6.3 |
 | `misc` | 8 × 32 | gammas: `misc_0` to `misc_3` as §5.1; `misc_4` escape 5's lengths, `misc_5` escape 4's distances, `misc_6` its lengths; `misc_7` unused |
+| `count` | 8 × 32 | gammas, `count_i` = `count[32i .. 32i+32)`: the counts of §6.2 |
 
 ### 6.2 Layout
 
-After the byte 3: the header as §5.2's (`n`, the sizes, `R`); the filters of each file (§6.3);
-the unfiltered data and its corrections (§6.4); the regions of each file (§6.5); the walk
-(§6.6); the blocks and their tables (§6.7).
+After the byte 3: the header as §5.2's (`n`, the sizes, `R`); the counts; the filters of each
+file (§6.3); the unfiltered data and its corrections (§6.4); the regions of each file (§6.5); the
+walk (§6.6); the blocks and their tables (§6.7).
+
+The **counts** are eight gammas, `count_0` to `count_7`, each failing above its bound (`N` the
+length of `D`, `m` the number of files): `F`, the count of filters (at most `N + 64 m`); `Q`, the
+bytes of the filters' records (at most `300 F` and the record's length); `G`, the count of
+regions (at most `N + 65 m`); `L`, the bytes of the files' tails (at most `8 m` and the record's
+length); `B`, the count of LZ blocks (at most `K + 64 G`); `K`, the count of elements of the walk
+(at most `N + F`); `Z`, the most bytes of a filter, which the decoder copies (at most `N`); `P`,
+the most MiB of a PPMd model of the stream (at most 256, and at most the module's limit, §7).
+They let a decoder reserve what it holds (module version 2; version 1 had none): the filters,
+the bytes of their records, the regions, the tails, the blocks and the walk's elements must come
+to exactly `F`, `Q`, `G`, `L`, `B` and `K`; a filter longer than `Z` fails, and a PPMd block of a
+model of more than `P` MiB fails (§6.5). An **element** is an LZ region's token (a filter record
+among them where it is declared, §6.6) or, in a PPMd region, a run of literals (as many as lie
+between matches and filters), a match or a filter record. A program list longer than 16 programs
+fails (§6.3).
 
 ### 6.3 Filters
 
@@ -656,7 +672,7 @@ pos = 0;  pp = 0;  regions = []
 loop:
   p = bit region[pp] where regions is empty or pp = 1, else 1   (1 a PPMd region)
   p = 1: F = raw_7;  M = raw_8 where F & 0x20, else 0
-         fails where F & 0x20 and M + 1 is more than the module's limit (§7)
+         fails where F & 0x20 and M + 1 is more than P (§6.2)
   n = size − pos if bit region[2 + p], else gamma(region[8 + 32p .. 40 + 32p)),
       failing if n > size − pos
   p = 1 and F & 0x40: e = esc(U[fs + pos .. fs + pos + n));
@@ -779,7 +795,7 @@ The stream is each part written (§3.3). A decoder fails on any failure above or
 ## 7. Formula modules
 
 The modules are `rar5-recons`, version 2 (version 1 had no counts in the record, §5.2), and
-`rar3-recons`, version 1. Each rebuilds one or
+`rar3-recons`, version 2 (version 1 had none, §6.2). Each rebuilds one or
 more streams, each from its data and its record (§5 or §6), and its output is each stream's
 files' parts one after another, the streams in turn. A container cuts the output by the parts'
 lengths (a Split instruction of the formula) and adds what lies around them.
@@ -814,9 +830,13 @@ in them, the match finder (four bytes each of `head_c` and `prev_c`, from 80 KiB
 the tables being written, and 64 KiB (`SCRATCH`) for the work of a block's tables (taken once
 and given back, so that the plan does not depend on the tables). The blocks are written onto the
 end of the output as they are made, each after its tables are read from the record. For
-`rar3-recons`: besides the inputs and the output, the work of the largest stream of `n` bytes of
-data: `U` and the parts written (`2n`), the tokens (twice), the match finder, 1 MiB more, and the
-parameter's MiB of PPMd model.
+`rar3-recons` too, its plan exact (`plan::decode3`): for each stream in turn the contexts, the
+files' sizes, `U`, the filters (32 bytes each on WebAssembly) and their records' bytes, the
+regions, files' parts, tails, elements (12 bytes each) and blocks (12 bytes each), the delta
+copy (`Z`), the walk's match finder and pairs, the four codes, the PPMd model (`P` MiB, made
+once and used by every block of the stream at the size it names), and the 64 KiB of the tables'
+work. A PPMd block's symbols are made from the data and the elements as they are coded, none
+kept; the LZ blocks' tables are read from the record as each block is reached.
 
 ## 8. Encoder choices *(informative)*
 

@@ -3,8 +3,7 @@
 //! blocks' symbols), and written again from those. A solid stream runs on through its files:
 //! the history, the codes, the distances, the PPMd model and the filters' programs carry over.
 
-use aqr_common::crc32;
-use aqr_common::msb::{BitReader, BitWriter, padded};
+use aqr_common::msb::{BitReader, BitWriter, ZeroReader, padded};
 
 use crate::huff::{self, Decoder};
 use crate::ppmd3::{self, Ppmd};
@@ -42,6 +41,9 @@ pub enum Token {
     },
     /// The filter record of [`Stream::filters`] at this index.
     Filter(u32),
+    /// A run of bytes of a PPMd block that are literals, as the rebuilding of a stream keeps them
+    /// (the bytes themselves are the data's); no block of a decoded stream has one.
+    Lits(u32),
 }
 
 /// The tables of an LZ block: whether the previous lengths are kept (the new ones sent as
@@ -138,6 +140,9 @@ pub fn bonus(dist: u32) -> u32 {
     (dist >= 0x2000) as u32 + (dist >= 0x40000) as u32
 }
 
+/// The most programs a stream defines (RAR defines each of the five once).
+pub const MAX_PROGS: usize = 16;
+
 /// A program of the filters' state: its filter, its last length.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Prog {
@@ -163,10 +168,9 @@ pub(crate) fn parse_filter(
     if raw.len() != skip + len {
         return Err(corrupt());
     }
-    let body = padded(&raw[skip..]);
     let n = (raw.len() - skip) * 8;
-    let mut r = BitReader::new(&body, 0);
-    let num = |r: &mut BitReader| -> Result<u32> {
+    let mut r = ZeroReader::new(&raw[skip..], 0);
+    let num = |r: &mut ZeroReader| -> Result<u32> {
         let v = match r.get(2) {
             0 => r.get(4),
             1 => {
@@ -216,10 +220,19 @@ pub(crate) fn parse_filter(
         if c == 0 || c > 0x10000 || r.pos + 8 * c > n {
             return Err(corrupt());
         }
-        let code: Vec<u8> = (0..c).map(|_| r.get(8) as u8).collect();
-        let crc = crc32::hash(&code);
+        // (the program's CRC-32 as its bytes are read: no copy of them, no tables)
+        let mut crc = !0u32;
+        for _ in 0..c {
+            crc ^= r.get(8);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xedb8_8320 & (crc & 1).wrapping_neg());
+            }
+        }
         let kind =
-            STANDARD.iter().position(|&s| s == (c as u32, crc)).ok_or(Error("a filter of no standard program"))?;
+            STANDARD.iter().position(|&s| s == (c as u32, !crc)).ok_or(Error("a filter of no standard program"))?;
+        if progs.len() == MAX_PROGS {
+            return Err(Error("more programs than the format keeps"));
+        }
         progs.push(Prog { kind: kind as u8, len: 0 });
     }
     if g & 0x08 != 0 {
@@ -640,7 +653,10 @@ fn copy(out: &mut Vec<u8>, d: usize, n: usize, dict: u64) -> Result<()> {
 /// The writer of a stream, file after file.
 pub struct Encoder3 {
     prev: [u8; LENS],
-    codes: Option<[Vec<(u16, u8)>; 4]>,
+    bases: [u32; DIST],
+    /// The codes of the last table (the vectors made once, filled in place), if any were sent.
+    codes: [Vec<(u16, u8)>; 4],
+    have: bool,
     low: (u32, u32),
     ppmd: Option<Ppmd>,
 }
@@ -653,73 +669,122 @@ impl Default for Encoder3 {
 
 impl Encoder3 {
     pub fn new() -> Self {
-        Encoder3 { prev: [0; LENS], codes: None, low: (0, 0), ppmd: None }
+        let codes = [MAIN, DIST, LOW, LEN].map(Vec::with_capacity);
+        Encoder3 { prev: [0; LENS], bases: dist_bases(), codes, have: false, low: (0, 0), ppmd: None }
+    }
+
+    /// A writer whose PPMd model holds `mib` MiB of memory, as much as any of the stream's blocks
+    /// uses (none where `mib` is 0): the model is made at once, and never again.
+    pub fn with_model(mib: u32) -> Result<Self> {
+        let mut e = Self::new();
+        if mib != 0 {
+            e.ppmd = Some(ppmd3::with_capacity(mib << 20)?);
+        }
+        Ok(e)
+    }
+
+    /// The code lengths of the last table written (zeros before any).
+    pub fn prev(&self) -> &[u8; LENS] {
+        &self.prev
     }
 
     /// Writes a file's part `st` onto `out`; `header` whether its first block has a header (the
     /// last file's `next_header`; true for a stream's first file).
     pub fn file(&mut self, st: &Stream, header: bool, out: &mut Vec<u8>) -> Result<()> {
-        let bases = dist_bases();
-        let mut w = BitWriter::new();
+        let mut w = BitWriter::default();
+        w.out = std::mem::take(out);
         let n = st.blocks.len();
+        let raw = |i: u32| st.filters.get(i as usize).map(|f| &f.raw[..]);
         for (bi, b) in st.blocks.iter().enumerate() {
             let last = bi + 1 == n;
             match b {
                 Block::Lz { table, tokens } => {
-                    match table {
-                        Some(t) => {
-                            align(&mut w);
-                            w.put(0, 1);
-                            self.write_table(&mut w, t)?;
-                        }
-                        None if bi == 0 && !header => {}
-                        None => return Err(Error("an LZ block without a table")),
-                    }
-                    let codes = self.codes.as_ref().ok_or(Error("a block without codes"))?;
-                    for t in tokens {
-                        write_token(&mut w, codes, &bases, &mut self.low, st, t)?;
-                    }
-                    huff::write(&mut w, &codes[0], 256)?;
-                    if last {
-                        w.put(0, 1);
-                        w.put(st.next_header as u32, 1);
-                    } else {
-                        w.put(1, 1);
-                    }
+                    let end = last.then_some(st.next_header);
+                    self.lz_block(&mut w, table.as_deref(), bi == 0 && !header, tokens, &raw, end)?
                 }
                 Block::Ppmd { flags, mem, esc, syms } => {
                     if bi == 0 && !header {
                         return Err(Error("a PPMd block without a header"));
                     }
-                    align(&mut w);
-                    w.put(1, 1);
-                    w.put(*flags as u32, 7);
-                    if flags & 0x20 != 0 {
-                        w.put(*mem as u32, 8);
-                        ppmd3::start(&mut self.ppmd, order(*flags)?, (*mem as u32 + 1) << 20)?;
-                    } else if self.ppmd.is_none() {
-                        return Err(corrupt());
-                    }
-                    if flags & 0x40 != 0 {
-                        w.put(*esc as u32, 8);
-                    }
-                    let bytes = std::mem::take(&mut w).finish();
-                    out.extend_from_slice(&bytes);
-                    let model = self.ppmd.as_mut().ok_or_else(corrupt)?;
-                    let mut rc = ppmd3::Writer::new();
-                    for &s in syms {
-                        ppmd3::encode(model, &mut rc, s);
-                    }
-                    out.extend(rc.finish());
-                    if last {
-                        out.extend_from_slice(&st.tail);
-                        return Ok(());
-                    }
+                    self.ppmd_block(&mut w, *flags, *mem, *esc, |put| {
+                        syms.iter().for_each(|&s| put(s));
+                        Ok(())
+                    })?
                 }
             }
         }
-        out.extend(w.finish());
+        *out = w.finish();
         out.extend_from_slice(&st.tail);
+        Ok(())
+    }
+
+    /// Writes an LZ block onto `w` (whose output is the stream's): after `table` if it has one
+    /// (else `no_table_ok`: a file going on with the codes of the one before), its `tokens`
+    /// (`raw` the bytes of the filter records they name), and then the end of the file's part
+    /// (`end` the bit after it) or of the block.
+    pub fn lz_block<'r>(
+        &mut self,
+        w: &mut BitWriter,
+        table: Option<&Table>,
+        no_table_ok: bool,
+        tokens: &[Token],
+        raw: &dyn Fn(u32) -> Option<&'r [u8]>,
+        end: Option<bool>,
+    ) -> Result<()> {
+        match table {
+            Some(t) => {
+                align(w);
+                w.put(0, 1);
+                self.write_table(w, t)?;
+            }
+            None if no_table_ok => {}
+            None => return Err(Error("an LZ block without a table")),
+        }
+        if !self.have {
+            return Err(Error("a block without codes"));
+        }
+        for t in tokens {
+            write_token(w, &self.codes, &self.bases, &mut self.low, raw, t)?;
+        }
+        huff::write(w, &self.codes[0], 256)?;
+        match end {
+            Some(next_header) => {
+                w.put(0, 1);
+                w.put(next_header as u32, 1);
+            }
+            None => w.put(1, 1),
+        }
+        Ok(())
+    }
+
+    /// Writes a PPMd block onto `w`: its header, the model started where `flags` say, and the
+    /// symbols that `feed` gives to the function it is called with, coded; then `w` is at a byte
+    /// boundary.
+    pub fn ppmd_block(
+        &mut self,
+        w: &mut BitWriter,
+        flags: u8,
+        mem: u8,
+        esc: u8,
+        feed: impl FnOnce(&mut dyn FnMut(u8)) -> Result<()>,
+    ) -> Result<()> {
+        align(w);
+        w.put(1, 1);
+        w.put(flags as u32, 7);
+        if flags & 0x20 != 0 {
+            w.put(mem as u32, 8);
+            ppmd3::start(&mut self.ppmd, order(flags)?, (mem as u32 + 1) << 20)?;
+        } else if self.ppmd.is_none() {
+            return Err(corrupt());
+        }
+        if flags & 0x40 != 0 {
+            w.put(esc as u32, 8);
+        }
+        let out = std::mem::take(w).finish();
+        let model = self.ppmd.as_mut().ok_or_else(corrupt)?;
+        let mut rc = ppmd3::Writer::with_output(out);
+        feed(&mut |s| ppmd3::encode(model, &mut rc, s))?;
+        w.out = rc.finish();
         Ok(())
     }
 
@@ -759,7 +824,10 @@ impl Encoder3 {
         let (a, rest) = t.lens.split_at(MAIN);
         let (b, rest) = rest.split_at(DIST);
         let (c, d) = rest.split_at(LOW);
-        self.codes = Some([huff::codes(a)?, huff::codes(b)?, huff::codes(c)?, huff::codes(d)?]);
+        for (lens, codes) in [a, b, c, d].into_iter().zip(&mut self.codes) {
+            huff::codes_into(lens, codes)?;
+        }
+        self.have = true;
         Ok(())
     }
 }
@@ -800,12 +868,12 @@ pub fn rle(lens: &[u8; LENS], prev: &[u8; LENS]) -> Vec<(u8, u32, u32)> {
     out
 }
 
-fn write_token(
+fn write_token<'r>(
     w: &mut BitWriter,
     codes: &[Vec<(u16, u8)>; 4],
     bases: &[u32; DIST],
     low: &mut (u32, u32),
-    st: &Stream,
+    raw: &dyn Fn(u32) -> Option<&'r [u8]>,
     t: &Token,
 ) -> Result<()> {
     let [main, dist, lowc, len] = codes;
@@ -813,11 +881,11 @@ fn write_token(
         Token::Lit(b) => huff::write(w, main, b as usize)?,
         Token::Filter(i) => {
             huff::write(w, main, 257)?;
-            let f = st.filters.get(i as usize).ok_or_else(corrupt)?;
-            for &b in &f.raw {
+            for &b in raw(i).ok_or_else(corrupt)? {
                 w.put(b as u32, 8);
             }
         }
+        Token::Lits(_) => return Err(corrupt()),
         Token::Last => huff::write(w, main, 258)?,
         Token::Rep { idx, len: l } => {
             if idx > 3 || !(2..=257).contains(&l) {
@@ -883,6 +951,7 @@ pub fn symbols(t: &Token, bases: &[u32; DIST], low: &mut (u32, u32), mut f: impl
     match *t {
         Token::Lit(b) => f(0, b as usize),
         Token::Filter(_) => f(0, 257),
+        Token::Lits(_) => {}
         Token::Last => f(0, 258),
         Token::Rep { idx, len } => {
             f(0, 259 + idx as usize);

@@ -2505,6 +2505,290 @@ fn rar5_plans_hold() {
     }
 }
 
+mod rar3_gen {
+    use aqr_common::rng::Rng;
+    use aqr_rar::huff;
+    use aqr_rar::lz3::{self, Block, Encoder3, Stream, Table, Token, bonus};
+
+    /// What the streams so far have: the bytes, the four last distances, the last match.
+    #[derive(Default)]
+    pub struct State {
+        hist: usize,
+        rep: [usize; 4],
+        last: (usize, usize),
+    }
+
+    /// A part of a file: LZ blocks of `n` bytes cut into blocks of up to `most` tokens, or PPMd
+    /// blocks (their memories in MiB, less one) of `n` bytes in all.
+    pub enum Seg {
+        Lz { n: usize, most: usize },
+        Ppmd { n: usize, mems: Vec<u8> },
+    }
+
+    pub struct File {
+        pub segs: Vec<Seg>,
+        pub next_header: bool,
+        pub tail: Vec<u8>,
+    }
+
+    /// LZ tokens covering `n` bytes.
+    fn lz_tokens(rng: &mut Rng, st: &mut State, n: usize) -> Vec<Token> {
+        let (mut out, mut pos) = (Vec::new(), 0);
+        while pos < n {
+            let left = n - pos;
+            let mut made = None;
+            match rng.below(10) {
+                3..=5 if st.hist > 0 => {
+                    let near = if rng.below(3) == 0 { 300 } else { 1 << 20 };
+                    let dist = 1 + rng.below(st.hist.min(near) as u64) as usize;
+                    let b = bonus(dist as u32) as usize;
+                    if left >= 3 + b {
+                        let most = (left - 3 - b).min(if rng.below(30) == 0 { 255 } else { 12 });
+                        let len = 3 + b + rng.below(most as u64 + 1) as usize;
+                        st.rep.copy_within(0..3, 1);
+                        st.rep[0] = dist;
+                        st.last = (dist, len);
+                        made = Some(Token::Copy { len: len as u32, dist: dist as u32, run: false });
+                    }
+                }
+                6 | 7 => {
+                    let idx = rng.below(4) as usize;
+                    if st.rep[idx] != 0 && left >= 2 {
+                        let len = 2 + rng.below((left - 1).min(12) as u64) as usize;
+                        let d = st.rep[idx];
+                        st.rep.copy_within(0..idx, 1);
+                        st.rep[0] = d;
+                        st.last = (d, len);
+                        made = Some(Token::Rep { idx: idx as u8, len: len as u32 });
+                    }
+                }
+                8 if st.hist > 0 && left >= 2 => {
+                    let dist = 1 + rng.below(st.hist.min(256) as u64) as usize;
+                    st.rep.copy_within(0..3, 1);
+                    st.rep[0] = dist;
+                    st.last = (dist, 2);
+                    made = Some(Token::Short { dist: dist as u32 });
+                }
+                9 if st.last.0 != 0 && st.last.1 <= left.min(40) => made = Some(Token::Last),
+                _ => {}
+            }
+            let t = made.unwrap_or(Token::Lit(b'a' + rng.below(5) as u8));
+            let len = match t {
+                Token::Lit(_) => 1,
+                Token::Last => st.last.1,
+                Token::Short { .. } => 2,
+                Token::Copy { len, .. } | Token::Rep { len, .. } => len as usize,
+                _ => unreachable!(),
+            };
+            out.push(t);
+            pos += len;
+            st.hist += len;
+        }
+        out
+    }
+
+    /// The symbols of a PPMd block of `n` bytes, `esc` the escape.
+    fn ppmd_syms(rng: &mut Rng, st: &mut State, n: usize, esc: u8) -> Vec<u8> {
+        let (mut syms, mut pos) = (Vec::new(), 0);
+        while pos < n {
+            let left = n - pos;
+            let r = rng.below(60);
+            if r == 0 && st.hist >= 2 && left >= 32 {
+                let dist = 2 + rng.below((st.hist - 1).min(100000) as u64) as usize;
+                let len = 32 + rng.below((left - 31).min(256) as u64) as usize;
+                let d = dist - 2;
+                syms.extend([esc, 4, (d >> 16) as u8, (d >> 8) as u8, d as u8, (len - 32) as u8]);
+                pos += len;
+                st.hist += len;
+            } else if r == 1 && st.hist >= 1 && left >= 4 {
+                let len = 4 + rng.below((left - 3).min(256) as u64) as usize;
+                syms.extend([esc, 5, (len - 4) as u8]);
+                pos += len;
+                st.hist += len;
+            } else if r == 2 {
+                syms.extend([esc, 1]);
+                pos += 1;
+                st.hist += 1;
+            } else {
+                syms.push(b'a' + rng.below(6) as u8);
+                pos += 1;
+                st.hist += 1;
+            }
+        }
+        syms
+    }
+
+    /// The streams of `files` (a solid group) written: their parts, their sizes.
+    pub fn parts(rng: &mut Rng, files: Vec<File>) -> (Vec<Vec<u8>>, Vec<usize>) {
+        let mut st = State::default();
+        let mut esc_now = 2u8;
+        // the blocks of each file, the LZ blocks' tokens first, their tables after
+        let mut built: Vec<(Vec<Block>, bool, Vec<u8>)> = Vec::new();
+        let mut sizes = Vec::new();
+        for f in &files {
+            let mut blocks = Vec::new();
+            let mut size = 0;
+            let nsegs = f.segs.len();
+            for (si, seg) in f.segs.iter().enumerate() {
+                match seg {
+                    Seg::Lz { n, most } => {
+                        let toks = lz_tokens(rng, &mut st, *n);
+                        for c in toks.chunks((*most).max(1)) {
+                            blocks.push(Block::Lz { table: None, tokens: c.to_vec() });
+                        }
+                        if toks.is_empty() {
+                            blocks.push(Block::Lz { table: None, tokens: Vec::new() });
+                        }
+                        size += n;
+                    }
+                    Seg::Ppmd { n, mems } => {
+                        let k = mems.len();
+                        for (bi, &mem) in mems.iter().enumerate() {
+                            let part = n / k + if bi == 0 { n % k } else { 0 };
+                            let fresh = bi == 0 || rng.below(2) == 0;
+                            let new_esc = bi == 0 || rng.below(3) == 0;
+                            let e = [2u8, 0x7e, 0xff][rng.below(3) as usize];
+                            if new_esc {
+                                esc_now = e;
+                            }
+                            let flags = (fresh as u8) << 5 | (new_esc as u8) << 6 | 6;
+                            let mut syms = ppmd_syms(rng, &mut st, part, esc_now);
+                            // (the last block of the file ends the stream, the others their block)
+                            let last = si + 1 == nsegs && bi + 1 == k;
+                            syms.extend([esc_now, if last { 2 } else { 0 }]);
+                            blocks.push(Block::Ppmd { flags, mem: if fresh { mem } else { 0 }, esc: e, syms });
+                        }
+                        size += n;
+                    }
+                }
+            }
+            let ends_ppmd = matches!(f.segs.last(), Some(Seg::Ppmd { .. }));
+            built.push((blocks, ends_ppmd || f.next_header, f.tail.clone()));
+            sizes.push(size);
+        }
+        // the tables: each LZ block has one but a file's first after a file that goes on with its codes
+        let mut header = true;
+        let mut flat = Vec::new();
+        for (fi, (blocks, next, _)) in built.iter().enumerate() {
+            for (bi, b) in blocks.iter().enumerate() {
+                if matches!(b, Block::Lz { .. }) {
+                    flat.push((fi, bi, !(bi == 0 && !header)));
+                }
+            }
+            header = *next;
+        }
+        let bases = lz3::bases();
+        let mut prev = [0u8; lz3::LENS];
+        for k in 0..flat.len() {
+            let (fi, bi, has) = flat[k];
+            if !has {
+                continue;
+            }
+            let mut c = [vec![0u32; lz3::MAIN], vec![0; lz3::DIST], vec![0; lz3::LOW], vec![0; lz3::LEN]];
+            let mut low = (0, 0);
+            let mut j = k;
+            loop {
+                let (f, b, _) = flat[j];
+                let Block::Lz { tokens, .. } = &built[f].0[b] else { unreachable!() };
+                for t in tokens {
+                    lz3::symbols(t, &bases, &mut low, |a, s| c[a][s] += 1);
+                }
+                c[0][256] += 1;
+                j += 1;
+                if j == flat.len() || flat[j].2 {
+                    break;
+                }
+            }
+            let mut lens = [0u8; lz3::LENS];
+            let mut at = 0;
+            for f in &c {
+                let l = huff::lengths(f, huff::MAX);
+                lens[at..at + l.len()].copy_from_slice(&l);
+                at += l.len();
+            }
+            let keep = rng.below(2) == 0;
+            let from = if keep { prev } else { [0; lz3::LENS] };
+            let mut pc = vec![0u32; lz3::PRE];
+            lz3::rle(&lens, &from).iter().for_each(|r| pc[r.0 as usize] += 1);
+            let pre: [u8; lz3::PRE] = huff::lengths(&pc, huff::MAX).try_into().unwrap();
+            if let Block::Lz { table, .. } = &mut built[fi].0[bi] {
+                *table = Some(Box::new(Table { keep, pre, lens }));
+            }
+            prev = lens;
+        }
+        let (mut enc, mut out, mut header) = (Encoder3::new(), Vec::new(), true);
+        let mut parts = Vec::new();
+        for (blocks, next, tail) in built {
+            let at = out.len();
+            let s = Stream { blocks, next_header: next, filters: Vec::new(), tail };
+            enc.file(&s, header, &mut out).unwrap();
+            header = next;
+            parts.push(out[at..].to_vec());
+        }
+        (parts, sizes)
+    }
+}
+
+/// rar3-recons lays its memory out as a stack, its limit its plan: of the fixtures' archives (LZ
+/// and PPMd, with filters) and of generated streams: LZ files with many blocks, a solid group of
+/// many files, PPMd blocks of models of several sizes among LZ blocks, tails other than RAR's.
+#[test]
+fn rar3_plans_hold() {
+    for t in ["r4_m3", "r4_solid", "r4_ppmd", "r4_audio"] {
+        let d = fixture(&format!("codecs/aqr-rar/tests/data/{t}.rar"));
+        let f = aqr_rar::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
+        assert!(module_applications_hold(&format!("rar3 {t}"), &f, "rar3-recons") > 0, "{t}");
+    }
+    use rar3_gen::{File, Seg};
+    let lz = |n, most| Seg::Lz { n, most };
+    let pp = |n, mems: &[u8]| Seg::Ppmd { n, mems: mems.to_vec() };
+    let trailer = vec![0x00, 0xbf, 0x88, 0x67, 0xf6, 0xa9, 0xff, 0xd4];
+    let file = |segs, next_header, tail: &[u8]| File { segs, next_header, tail: tail.to_vec() };
+    let cases: Vec<(&str, Vec<File>)> = vec![
+        ("many blocks", vec![file(vec![lz(60000, 90)], true, &[])]),
+        ("many files", (0..80).map(|i| file(vec![lz(500, 40)], i % 3 != 0, &[])).collect()),
+        ("ppmd", vec![file(vec![pp(30000, &[1, 0, 2])], true, &trailer)]),
+        (
+            "mixed",
+            vec![
+                file(vec![lz(3000, 100), pp(8000, &[0, 1]), lz(2000, 50), pp(4000, &[2])], true, &trailer),
+                file(vec![lz(1000, 30)], false, &[7, 8]),
+                file(vec![lz(1500, 30), pp(5000, &[0])], true, &[1, 2, 3]),
+            ],
+        ),
+        ("past the rings", vec![file(vec![lz(300000, 20000)], true, &[])]),
+        ("small", vec![file(vec![lz(3, 1)], true, &[])]),
+    ];
+    let mut rng = aqr_common::rng::Rng::new(9);
+    for (what, files) in cases {
+        let (parts, sizes) = rar3_gen::parts(&mut rng, files);
+        let refs: Vec<&[u8]> = parts.iter().map(|p| &p[..]).collect();
+        let sp = aqr_rar::recons3::split(&refs, &sizes, 1 << 22).unwrap_or_else(|e| panic!("{what}: {e}"));
+        let all = parts.concat();
+        let start = aqr_rar::recons3::start_of(&sp.record, sp.data.len()).unwrap();
+        eprintln!(
+            "rar3 {what}: {} blocks, {} regions, {} files, {} elements, model {} MiB",
+            start.blocks,
+            start.regions,
+            sizes.len(),
+            start.tokens,
+            start.model
+        );
+        if what == "many blocks" || what == "many files" {
+            assert!(start.blocks > 64 || sizes.len() > 64, "{what}");
+        }
+        let mut f = Formula::default();
+        let data = f.push("raw", sp.data.clone());
+        let record = f.push("rar/record", sp.record.clone());
+        let index = f.push("rar/index", aqr_rar::formula::index(&[(sp.data.len(), sp.record.len())]));
+        let params = aqr_rar::formula::params3(sp.ppmd);
+        let a =
+            aqr_rar::formula::apply_recons(aqr_rar::formula::MODULE3, params, data, record, index, all.len() as u64);
+        f.root = Node::Apply(Box::new(a));
+        plan_holds(&format!("rar3 {what}"), f, &all);
+    }
+}
+
 /// wrt-recons and wrt-recons-hangul lay their memory out as stacks, their limits their plans: of
 /// text of words and markup, of Hangul, and of a little more than a piece of 16 MiB (two
 /// pieces).

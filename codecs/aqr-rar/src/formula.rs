@@ -15,33 +15,18 @@ use crate::{rar4, rar5, recons3, recons5};
 pub use crate::module::{decode3, decode5, index, params3};
 
 pub const MODULE5: Module = Module::new("rar5-recons", 2).with_plan(plan5);
-pub const MODULE3: Module = Module::new("rar3-recons", 1).with_memory(memory3);
-
-/// The largest stream's data (by the index, else all the data).
-fn largest(u: &aqr_formula::Usage<'_>, data: u64) -> u64 {
-    (|| {
-        let i = u.contents.input(2).filter(|i| !i.is_empty())?;
-        let (mut at, mut most) = (0, 0u64);
-        while at < i.len() {
-            most = most.max(aqr_common::varint::get(i, &mut at).ok()?);
-            aqr_common::varint::get(i, &mut at).ok()?;
-        }
-        Some(most)
-    })()
-    .unwrap_or(data)
-}
-
-/// The memory of `rar3-recons`: the largest PPMd model (the params').
-fn memory3(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let &[data, ..] = u.inputs else { return None };
-    let ppmd = crate::module::ppmd_of(u.params).ok()? as u64;
-    Some(u.whole(recons3::memory(largest(u, data)) + (ppmd << 20), 16))
-}
+pub const MODULE3: Module = Module::new("rar3-recons", 2).with_plan(plan3);
 
 /// The memory of `rar5-recons`: its plan ([`crate::plan::decode5`]).
 fn plan5(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     let files = u.all_contents::<3>()?;
     crate::plan::decode5(u.initial(), u.params, u.inputs, u.output(), files)
+}
+
+/// The memory of `rar3-recons`: its plan ([`crate::plan::decode3`]).
+fn plan3(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let files = u.all_contents::<3>()?;
+    crate::plan::decode3(u.initial(), u.params, u.inputs, u.output(), files)
 }
 
 /// The application of `module` (of `params`: none for [`MODULE5`], [`params3`] for [`MODULE3`])

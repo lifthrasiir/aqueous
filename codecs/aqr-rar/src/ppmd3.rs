@@ -6,11 +6,17 @@ use crate::{Error, Result, corrupt};
 
 pub type Ppmd = Model;
 
-/// Starts `m` afresh: of `order`, `mem` bytes (its memory kept where of that size).
+/// A model holding `cap` bytes of memory, for streams whose blocks use no more ([`start`] then
+/// takes none from the allocator).
+pub fn with_capacity(cap: u32) -> Result<Ppmd> {
+    Model::new(cap).ok_or(Error("a PPMd model of no memory to have"))
+}
+
+/// Starts `m` afresh: of `order`, `mem` bytes (its memory kept where it holds that much).
 pub fn start(m: &mut Option<Ppmd>, order: u32, mem: u32) -> Result<()> {
-    if m.as_ref().map(Model::size) != Some(mem) {
+    if !m.as_mut().is_some_and(|model| model.set_size(mem)) {
         *m = None;
-        *m = Some(Model::new(mem).ok_or(Error("a PPMd model of no memory to have"))?);
+        *m = Some(with_capacity(mem)?);
     }
     m.as_mut().unwrap().init(order);
     Ok(())
@@ -44,6 +50,11 @@ pub struct Writer(RangeEncoder);
 impl Writer {
     pub fn new() -> Writer {
         Writer(RangeEncoder::new())
+    }
+
+    /// Writing onto the end of `out`.
+    pub fn with_output(out: Vec<u8>) -> Writer {
+        Writer(RangeEncoder::with_output(out))
     }
 
     /// The bytes, flushed.

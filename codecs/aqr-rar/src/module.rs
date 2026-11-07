@@ -69,5 +69,5 @@ pub fn ppmd_of(params: &[u8]) -> Result<u32> {
 /// params' size.
 pub fn decode3(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
     let limit = ppmd_of(params)?;
-    decode_with(inputs, len, threads, &move |d, r, o| crate::recons3::join_onto(d, r, o, limit).map(drop))
+    decode_with(inputs, len, threads, &move |d, r, o| crate::recons3::join_onto(d, r, o, limit))
 }

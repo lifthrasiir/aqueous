@@ -268,9 +268,24 @@ impl Model {
         Some(m)
     }
 
-    /// The memory size given to [`Model::new`].
+    /// The memory size in use (that given to [`Model::new`], or to [`Model::set_size`]).
     pub fn size(&self) -> u32 {
         self.size
+    }
+
+    /// The most bytes of memory the model holds: the size that [`Model::set_size`] may set.
+    pub fn capacity(&self) -> u32 {
+        self.mem.len() as u32
+    }
+
+    /// Uses `size` bytes of the memory held, no more than [`Model::capacity`] (the model is to
+    /// be started afresh by [`Model::init`] after). False where it does not fit.
+    pub fn set_size(&mut self, size: u32) -> bool {
+        if size > self.capacity() || size < MIN_MEM {
+            return false;
+        }
+        self.size = size;
+        true
     }
 
     /// The order given to the last [`Model::init`].

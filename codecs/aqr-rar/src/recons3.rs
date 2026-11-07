@@ -9,6 +9,8 @@
 //! predicted from what they mean and the programs before them, the tables by Huffman's
 //! construction over the symbols they serve.
 
+use std::ops::Range;
+
 use aqr_common::arith::{ArithDecoder, Bit};
 use aqr_common::msb::BitWriter;
 
@@ -180,34 +182,65 @@ struct Ctx {
     region: Vec<Bit>,
     filter: Vec<Bit>,
     misc: Vec<Bit>,
+    count: Vec<Bit>,
 }
+
+/// The lengths of the vectors of [`Ctx`], in the order of its fields.
+pub const CTX_LENS: [usize; 24] = [
+    2 * 12 * 9 * 3 * 3,
+    3 * 12,
+    4 * 4,
+    12,
+    12 * 32,
+    3 * 4 * 4 * 2,
+    12,
+    12 * 32,
+    12 * 16,
+    12 * 24,
+    3 * 2,
+    8,
+    2,
+    2 * 6,
+    2,
+    2,
+    3 + 32,
+    4,
+    2,
+    16 * 2,
+    8 + 32 * 2 + 128 * 2,
+    8 + 32 * 6 + 2,
+    32 * 8,
+    32 * 8,
+];
 
 impl Ctx {
     fn new() -> Self {
+        let v = |i: usize| bits(CTX_LENS[i]);
         Ctx {
-            is_match: bits(2 * 12 * 9 * 3 * 3),
-            is_rep: bits(3 * 12),
-            rep_idx: bits(4 * 4),
-            rep_full: bits(12),
-            rep_shorter: bits(12 * 32),
-            pair: bits(3 * 4 * 4 * 2),
-            full: bits(12),
-            shorter: bits(12 * 32),
-            escape: bits(12 * 16),
-            rank: bits(12 * 24),
-            form: bits(3 * 2),
-            form_alt: bits(8),
-            run: bits(2),
-            pp_match: bits(2 * 6),
-            pp_kind: bits(2),
-            pp_full: bits(2),
-            cut: bits(3 + 32),
-            keep: bits(4),
-            predicted: bits(2),
-            lens: bits(16 * 2),
-            region: bits(8 + 32 * 2 + 128 * 2),
-            filter: bits(8 + 32 * 6 + 2),
-            misc: bits(32 * 8),
+            is_match: v(0),
+            is_rep: v(1),
+            rep_idx: v(2),
+            rep_full: v(3),
+            rep_shorter: v(4),
+            pair: v(5),
+            full: v(6),
+            shorter: v(7),
+            escape: v(8),
+            rank: v(9),
+            form: v(10),
+            form_alt: v(11),
+            run: v(12),
+            pp_match: v(13),
+            pp_kind: v(14),
+            pp_full: v(15),
+            cut: v(16),
+            keep: v(17),
+            predicted: v(18),
+            lens: v(19),
+            region: v(20),
+            filter: v(21),
+            misc: v(22),
+            count: v(23),
         }
     }
 }
@@ -232,6 +265,7 @@ fn lz_len(tokens: &[Token], last: &mut u32) -> usize {
                 2
             }
             Token::Filter(_) => 0,
+            Token::Lits(n) => n as usize,
         };
     }
     n
@@ -346,158 +380,160 @@ fn esc_of(r: Region, esc: u8) -> u8 {
     }
 }
 
-/// Each file's LZ regions' tokens with the filters put back where they are declared
-/// (`Token::Filter(i)` the file's filter `i`), by region (None for PPMd regions).
-fn merge_filters(parts: &[Part]) -> Result<Vec<Vec<Option<Vec<Token>>>>> {
-    let mut out = Vec::new();
-    let mut last = 0u32;
-    for p in parts {
-        let mut fs = p.filters.iter().enumerate().filter(|f| !f.1.1).map(|(i, f)| (i, f.0)).peekable();
-        let mut pos = 0usize;
-        let nr = p.regions.len();
-        let mut regions = Vec::with_capacity(nr);
-        for (ri, &(r, n)) in p.regions.iter().enumerate() {
-            if !matches!(r, Region::Lz) {
-                regions.push(None);
-                pos += n;
-                continue;
-            }
-            let end = pos + n;
-            let mut v = Vec::with_capacity(p.tokens[ri].len());
-            let mut at = pos;
-            for t in &p.tokens[ri] {
-                while let Some(&(i, d)) = fs.peek() {
-                    if d > at {
-                        break;
-                    }
-                    if d < at {
-                        return Err(Error("a filter declared within a match"));
-                    }
-                    v.push(Token::Filter(i as u32));
-                    fs.next();
-                }
-                v.push(*t);
-                at += lz_len(std::slice::from_ref(t), &mut last);
-            }
-            // (at the region's end, unless an LZ region follows: none does)
-            while let Some(&(i, d)) = fs.peek() {
-                if d != end {
-                    break;
-                }
-                v.push(Token::Filter(i as u32));
-                fs.next();
-            }
-            if at != end {
-                return Err(corrupt());
-            }
-            regions.push(Some(v));
-            pos = end;
-        }
-        if fs.next().is_some() {
-            return Err(Error("a filter declared out of the LZ blocks"));
-        }
-        out.push(regions);
-    }
-    Ok(out)
+/// A filter as the decoder keeps it: where declared (in the file), whether in a PPMd block, where
+/// it starts in the file, its length, the filter, r0 and r1, and its record's bytes (the range of
+/// the stream's [`Held::raws`]).
+#[derive(Clone, Copy, Debug)]
+struct Flt {
+    decl: usize,
+    in_ppmd: bool,
+    at: usize,
+    len: u32,
+    kind: u8,
+    regs: [u32; 2],
+    raw: (usize, usize),
 }
 
-/// The streams the parts make: each LZ region's blocks with their filters, each PPMd region's
-/// symbols.
-fn put_together(parts: &[Part]) -> Result<Vec<Stream>> {
-    let lz = merge_filters(parts)?;
-    let mut out = Vec::new();
-    let mut esc = 2u8;
-    for (p, lz) in parts.iter().zip(lz) {
-        let mut st = Stream {
-            next_header: p.next_header,
-            tail: p.tail.clone(),
-            filters: p.filters.iter().map(|f| f.2.clone()).collect(),
-            ..Stream::default()
-        };
-        let nr = p.regions.len();
-        let mut pf = p.filters.iter().filter(|f| f.1).peekable();
-        let mut pos = 0usize;
-        for (ri, (&(r, n), v)) in p.regions.iter().zip(lz).enumerate() {
-            match r {
-                Region::Lz => {
-                    let v = v.ok_or_else(corrupt)?;
-                    let mut k = 0;
-                    for (bn, table) in &p.blocks[ri] {
-                        let tokens = v.get(k..k + bn).ok_or_else(corrupt)?.to_vec();
-                        k += bn;
-                        st.blocks.push(Block::Lz { table: table.clone(), tokens });
-                    }
-                    if k != v.len() {
-                        return Err(Error("tokens past the blocks"));
-                    }
-                }
-                Region::Ppmd { flags, mem, esc: e } => {
-                    esc = esc_of(r, esc);
-                    let mut syms = Vec::with_capacity(n + 2);
-                    let mut at = pos;
-                    let mut put = |syms: &mut Vec<u8>, at: usize, end: bool| {
-                        while let Some(f) = pf.next_if(|f| f.0 == at || (end && f.0 <= at)) {
-                            syms.extend([esc, 3]);
-                            syms.extend_from_slice(&f.2.raw);
-                        }
-                    };
-                    for t in &p.tokens[ri] {
-                        put(&mut syms, at, false);
-                        at += match *t {
-                            Token::Copy { len, .. } | Token::Rep { len, .. } => len as usize,
-                            _ => 1,
-                        };
-                        match *t {
-                            Token::Lit(b) if b == esc => syms.extend([esc, 1]),
-                            Token::Lit(b) => syms.push(b),
-                            Token::Copy { len, dist, .. } => {
-                                let d = dist - 2;
-                                syms.extend([esc, 4, (d >> 16) as u8, (d >> 8) as u8, d as u8, (len - 32) as u8])
-                            }
-                            Token::Rep { len, .. } => syms.extend([esc, 5, (len - 4) as u8]),
-                            _ => return Err(corrupt()),
-                        }
-                    }
-                    put(&mut syms, at, true);
-                    syms.extend([esc, if ri + 1 == nr { 2 } else { 0 }]);
-                    st.blocks.push(Block::Ppmd { flags, mem, esc: e, syms });
-                }
-            }
-            pos += n;
+/// A region of a file as the decoder keeps it, with where its tokens and its LZ blocks end in
+/// [`Held::toks`] and [`Held::blocks`].
+#[derive(Clone, Copy, Debug)]
+struct Reg {
+    region: Region,
+    n: usize,
+    toks: usize,
+    blocks: usize,
+}
+
+/// A file's part as the decoder keeps it: where its regions end in [`Held::regs`] and its tail in
+/// [`Held::tails`], and whether the next file starts with a header.
+#[derive(Clone, Copy, Debug)]
+struct Fil {
+    regs: usize,
+    tail: usize,
+    next_header: bool,
+}
+
+/// An LZ block: where its tokens start in [`Held::toks`], their count, and its table (0 none, 1 a
+/// table of lengths coded afresh, 2 one of lengths kept from the table before).
+#[derive(Clone, Copy, Debug)]
+struct Blk {
+    start: usize,
+    n: usize,
+    tab: u8,
+}
+
+/// What a stream's record holds, all of it in vectors made once at their final sizes (the
+/// counts of its start), filled as the record is read.
+struct Held {
+    flt: Vec<Flt>,
+    raws: Vec<u8>,
+    /// The end of each file's filters in `flt`.
+    fends: Vec<usize>,
+    regs: Vec<Reg>,
+    files: Vec<Fil>,
+    tails: Vec<u8>,
+    /// The tokens of the regions in turn: of an LZ region the tokens with the filters among them,
+    /// of a PPMd region its runs of literals, matches and filters.
+    toks: Vec<Token>,
+    blocks: Vec<Blk>,
+}
+
+impl Held {
+    fn new(s: &Start) -> Held {
+        let files = s.sizes.len();
+        Held {
+            flt: Vec::with_capacity(s.filters),
+            raws: Vec::with_capacity(s.raws),
+            fends: Vec::with_capacity(files),
+            regs: Vec::with_capacity(s.regions),
+            files: Vec::with_capacity(files),
+            tails: Vec::with_capacity(s.tails),
+            toks: Vec::with_capacity(s.tokens),
+            blocks: Vec::with_capacity(s.blocks),
         }
-        if pf.next().is_some() {
-            return Err(Error("a filter declared out of the PPMd blocks"));
-        }
-        out.push(st);
     }
-    Ok(out)
+
+    /// The range of the file `fi`'s filters in `flt`, and of its regions in `regs`.
+    fn ranges(&self, fi: usize) -> (Range<usize>, Range<usize>) {
+        let before = |v: &[usize], i: usize| if i == 0 { 0 } else { v[i - 1] };
+        let regs = (if fi == 0 { 0 } else { self.files[fi - 1].regs })..self.files[fi].regs;
+        (before(&self.fends, fi)..self.fends[fi], regs)
+    }
+}
+
+/// Bytes of what the module holds on WebAssembly (32-bit pointers), checked there by assertions:
+/// a stream's data and record, a filter, a region, a file's part, a block, a token, a pair, an
+/// adaptive bit, a code.
+pub mod wasm {
+    pub const STREAM: u64 = 16;
+    pub const FLT: u64 = 32;
+    pub const REG: u64 = 16;
+    pub const FIL: u64 = 12;
+    pub const BLK: u64 = 12;
+    pub const TOKEN: u64 = 12;
+    pub const PAIR: u64 = 8;
+    pub const BIT: u64 = 4;
+    pub const CODE: u64 = 4;
+}
+
+#[cfg(target_family = "wasm")]
+const _: () = {
+    assert!(size_of::<(&[u8], &[u8])>() as u64 == wasm::STREAM);
+    assert!(size_of::<Flt>() as u64 == wasm::FLT);
+    assert!(size_of::<Reg>() as u64 == wasm::REG);
+    assert!(size_of::<Fil>() as u64 == wasm::FIL);
+    assert!(size_of::<Blk>() as u64 == wasm::BLK);
+    assert!(size_of::<Token>() as u64 == wasm::TOKEN);
+    assert!(size_of::<(usize, usize)>() as u64 == wasm::PAIR);
+    assert!(size_of::<Bit>() as u64 == wasm::BIT);
+    assert!(size_of::<(u16, u8)>() as u64 == wasm::CODE);
+};
+
+/// The first index at or after `from` of `fl`'s filters in a PPMd block (if `ppmd`) or not.
+#[inline]
+fn next_kind(fl: &[Flt], from: usize, ppmd: bool) -> usize {
+    (from..fl.len()).find(|&i| fl[i].in_ppmd == ppmd).unwrap_or(fl.len())
+}
+
+/// `t` pushed onto `toks`, which must have room reserved for it.
+#[inline]
+fn push(toks: &mut Vec<Token>, t: Token) -> Result<()> {
+    if toks.len() == toks.capacity() {
+        return Err(Error("more tokens than the record counts"));
+    }
+    toks.push(t);
+    Ok(())
+}
+
+/// Bytes put onto `v`, which must have room reserved for them.
+fn put_bytes(v: &mut Vec<u8>, b: &[u8]) -> Result<()> {
+    if v.capacity() - v.len() < b.len() {
+        return Err(Error("more bytes than the record counts"));
+    }
+    v.extend_from_slice(b);
+    Ok(())
 }
 
 /// The files' filters, coded: each where it is declared and what it does, its record against
-/// RAR's for it. The programs' state runs on through the stream.
-fn code_filters(
-    bits: &mut impl Bits,
-    ctx: &mut Ctx,
-    sizes: &[usize],
-    parts: &mut [Part],
-    encoding: bool,
-) -> Result<()> {
+/// RAR's for it. The programs' state runs on through the stream. The filters are put onto the
+/// end of `h` (room for them reserved); the encoder's `given` are the files' parts.
+fn code_filters(bits: &mut impl Bits, ctx: &mut Ctx, sizes: &[usize], given: &[Part], h: &mut Held) -> Result<()> {
     bits.cat(Cat::Head);
     let f = &mut ctx.filter;
-    let mut progs: Vec<Prog> = Vec::new();
+    let encoding = !given.is_empty();
+    let mut progs: Vec<Prog> = Vec::with_capacity(lz3::MAX_PROGS);
     let mut last_prog = 0usize;
     let mut base = 0u64;
     for (i, &size) in sizes.iter().enumerate() {
-        let given = if encoding { std::mem::take(&mut parts[i].filters) } else { Vec::new() };
-        let n = bits.gamma(g32(&mut f[8..], 0), given.len() as u64)? as usize;
-        if n > size + 64 {
+        let gf: &[(usize, bool, FilterRec)] = if encoding { &given[i].filters } else { &[] };
+        let n = bits.gamma(g32(&mut f[8..], 0), gf.len() as u64)? as usize;
+        if n > size + 64 || n > h.flt.capacity() - h.flt.len() {
             return Err(corrupt());
         }
-        let mut out = Vec::with_capacity(n);
         let (mut end, mut decl) = (0usize, 0usize);
         for k in 0..n {
-            let g = given.get(k).map(|g| (g.0, &g.2));
-            let in_ppmd = bits.bit(&mut f[201], given.get(k).is_some_and(|g| g.1));
+            let g = gf.get(k).map(|g| (g.0, &g.2));
+            let in_ppmd = bits.bit(&mut f[201], gf.get(k).is_some_and(|g| g.1));
             let kind = bits.tree(&mut f[0..8], 3, g.map_or(0, |g| g.1.kind as u32)) as u8;
             if kind as usize >= PROGRAMS.len() {
                 return Err(corrupt());
@@ -522,28 +558,33 @@ fn code_filters(
                 *reg = u32::try_from(bits.gamma(g32(&mut f[8..], 4 + r), g.map_or(0, |g| g.1.regs[r]) as u64)?)
                     .map_err(|_| corrupt())?;
             }
-            let pred = filter_raw(&progs, last_prog, base + d as u64, base + at as u64, len, kind, regs);
-            let raw = match pred {
-                Some(p) if bits.bit(&mut f[200], g.is_none_or(|g| g.1.raw == p)) => p,
+            let from = h.raws.len();
+            match filter_raw(&progs, last_prog, base + d as u64, base + at as u64, len, kind, regs) {
+                Some(p) if bits.bit(&mut f[200], g.is_none_or(|g| g.1.raw == p)) => put_bytes(&mut h.raws, &p)?,
                 _ => {
                     let gr = g.map_or(&[][..], |g| &g.1.raw[..]);
                     let n = bits.gamma(g32(&mut f[8..], 0), gr.len() as u64)? as usize;
-                    if n == 0 || n > 0x10003 {
+                    if n == 0 || n > 0x10003 || h.raws.capacity() - from < n {
                         return Err(corrupt());
                     }
-                    (0..n).map(|i| bits.raws(8, gr.get(i).copied().unwrap_or(0) as u64) as u8).collect()
+                    for i in 0..n {
+                        h.raws.push(bits.raws(8, gr.get(i).copied().unwrap_or(0) as u64) as u8);
+                    }
                 }
-            };
-            let (start, flen, fkind, fregs) = lz3::parse_filter(&raw, &mut progs, &mut last_prog, base + d as u64)?;
+            }
+            let (start, flen, fkind, fregs) =
+                lz3::parse_filter(&h.raws[from..], &mut progs, &mut last_prog, base + d as u64)?;
             if start != base + at as u64 || flen != len || fkind != kind || fregs != regs {
                 return Err(Error("a filter record of another meaning"));
             }
-            out.push((d, in_ppmd, FilterRec { raw, at, len, kind, regs }));
+            if let Some(g) = g {
+                if g.0 != d || gf[k].1 != in_ppmd || g.1.at != at || g.1.raw[..] != h.raws[from..] {
+                    return Err(Error("filters coded otherwise"));
+                }
+            }
+            h.flt.push(Flt { decl: d, in_ppmd, at, len, kind, regs, raw: (from, h.raws.len()) });
         }
-        if encoding && out != given {
-            return Err(Error("filters coded otherwise"));
-        }
-        parts[i].filters = out;
+        h.fends.push(h.flt.len());
         base += size as u64;
         if bits.failed() {
             return Err(corrupt());
@@ -553,12 +594,12 @@ fn code_filters(
 }
 
 /// The contents `d` of a file filtered again by `filters` (the inverse of [`lz3::unfilter`]
-/// where it has one), in place.
-fn refilter(d: &mut [u8], filters: &[(usize, bool, FilterRec)]) -> Result<()> {
+/// where it has one), in place. A filter's bytes are copied, no more than `most` of them.
+fn refilter(d: &mut [u8], filters: &[Flt], most: usize) -> Result<()> {
     let mut end = 0;
-    for (_, _, f) in filters {
+    for f in filters {
         let (at, len) = (f.at, f.len as usize);
-        if at < end || at.checked_add(len).is_none_or(|e| e > d.len()) {
+        if at < end || at.checked_add(len).is_none_or(|e| e > d.len()) || len > most {
             return Err(Error("a filter out of place"));
         }
         end = at + len;
@@ -606,8 +647,8 @@ fn refilter(d: &mut [u8], filters: &[(usize, bool, FilterRec)]) -> Result<()> {
                 if len < 3 || s > len || s < 3 || b > 2 {
                     return Err(corrupt());
                 }
-                // undo the green, then the prediction
-                let mut o = src.clone();
+                // undo the green, then the prediction (on the copy, which is not needed after)
+                let mut o = src;
                 let mut i = b;
                 while i + 2 < len {
                     let g = o[i + 1];
@@ -691,29 +732,32 @@ fn predict_esc(d: &[u8]) -> u8 {
 }
 
 /// The files' regions, coded: their kinds, lengths and PPMd blocks' parameters; how each file
-/// ends (whether the next starts with a header; the bytes after the end).
+/// ends (whether the next starts with a header; the bytes after the end). They are put onto the
+/// end of `h` (room for them reserved); PPMd blocks use no more than `model` MiB.
 fn code_regions(
     bits: &mut impl Bits,
     ctx: &mut Ctx,
     u: &[u8],
     sizes: &[usize],
-    parts: &mut [Part],
-    encoding: bool,
-    ppmd_limit: u32,
+    given: &[Part],
+    h: &mut Held,
+    model: u32,
 ) -> Result<()> {
     bits.cat(Cat::Blocks);
     let r = &mut ctx.region;
+    let encoding = !given.is_empty();
     let mut fs = 0usize;
-    let mut esc = 2u8;
     for (i, &size) in sizes.iter().enumerate() {
-        let given = if encoding { std::mem::take(&mut parts[i].regions) } else { Vec::new() };
-        let mut out = Vec::new();
+        let gp = given.get(i);
+        let gr: &[(Region, usize)] = gp.map_or(&[], |p| &p.regions);
+        let from = h.regs.len();
         let mut pos = 0usize;
         let mut prev_ppmd = false;
         loop {
-            let g = given.get(out.len()).copied();
+            let made = h.regs.len() - from;
+            let g = gr.get(made).copied();
             // (LZ and PPMd regions alternate, but for PPMd blocks in turn)
-            let ppmd = if prev_ppmd || out.is_empty() {
+            let ppmd = if prev_ppmd || made == 0 {
                 bits.bit(&mut r[prev_ppmd as usize], matches!(g, Some((Region::Ppmd { .. }, _))))
             } else {
                 true
@@ -725,7 +769,7 @@ fn code_regions(
                 };
                 let flags = bits.raws(7, gf as u64) as u8;
                 let mem = if flags & 0x20 != 0 { bits.raws(8, gm as u64) as u8 } else { 0 };
-                if flags & 0x20 != 0 && mem as u32 + 1 > ppmd_limit {
+                if flags & 0x20 != 0 && mem as u32 + 1 > model {
                     return Err(Error("a PPMd model larger than the module's"));
                 }
                 (Region::Ppmd { flags, mem, esc: ge }, g.map_or(0, |g| g.1))
@@ -751,44 +795,50 @@ fn code_regions(
                 }
                 r => r,
             };
-            esc = esc_of(region, esc);
-            out.push((region, n));
+            if h.regs.len() == h.regs.capacity() {
+                return Err(Error("more regions than the record counts"));
+            }
+            h.regs.push(Reg { region, n, toks: 0, blocks: 0 });
             pos += n;
             prev_ppmd = ppmd;
-            if pos == size && !bits.bit(&mut r[5 + ppmd as usize], given.len() > out.len()) {
+            if pos == size && !bits.bit(&mut r[5 + ppmd as usize], gr.len() > made + 1) {
                 break;
             }
-            if out.len() > size + 64 || bits.failed() {
+            if made > size + 64 || bits.failed() {
                 return Err(corrupt());
             }
         }
-        if encoding && out != given {
-            return Err(Error("regions coded otherwise"));
+        if encoding {
+            let same = h.regs[from..].iter().map(|r| (r.region, r.n)).eq(gr.iter().copied());
+            if !same {
+                return Err(Error("regions coded otherwise"));
+            }
         }
-        let ends_ppmd = matches!(out.last(), Some((Region::Ppmd { .. }, _)));
-        parts[i].regions = out;
+        let ends_ppmd = matches!(h.regs.last(), Some(Reg { region: Region::Ppmd { .. }, .. }));
         // how the file ends
-        let p = &mut parts[i];
-        if !ends_ppmd {
-            p.next_header = bits.bit(&mut r[7], p.next_header);
-        } else if !p.next_header && encoding {
+        let gnext = gp.is_some_and(|p| p.next_header);
+        let next_header = if !ends_ppmd {
+            bits.bit(&mut r[7], gnext)
+        } else if !gnext && encoding {
             return Err(corrupt());
         } else {
-            p.next_header = true;
-        }
+            true
+        };
         let expect: &[u8] = if ends_ppmd { &TRAILER } else { &[] };
-        if !bits.bit(&mut r[72 + ends_ppmd as usize], p.tail == expect) {
-            let n = bits.gamma(&mut r[74..106], p.tail.len() as u64)? as usize;
-            if n > 1 << 20 {
+        let gtail: &[u8] = gp.map_or(&[], |p| &p.tail);
+        if !bits.bit(&mut r[72 + ends_ppmd as usize], gtail == expect) {
+            let n = bits.gamma(&mut r[74..106], gtail.len() as u64)? as usize;
+            if n > 1 << 20 || h.tails.capacity() - h.tails.len() < n {
                 return Err(corrupt());
             }
-            let t: Vec<u8> = (0..n).map(|k| bits.raws(8, p.tail.get(k).copied().unwrap_or(0) as u64) as u8).collect();
-            p.tail = t;
+            for k in 0..n {
+                h.tails.push(bits.raws(8, gtail.get(k).copied().unwrap_or(0) as u64) as u8);
+            }
         } else {
-            p.tail = expect.to_vec();
+            put_bytes(&mut h.tails, expect)?;
         }
+        h.files.push(Fil { regs: h.regs.len(), tail: h.tails.len(), next_header });
         fs += size;
-        let _ = esc;
     }
     Ok(())
 }
@@ -822,49 +872,65 @@ impl Form {
     }
 }
 
-/// The walk over the unfiltered data `u` of the files' regions, coding their tokens.
+/// The walk over the unfiltered data `u` of the files' regions, coding their tokens (the
+/// encoder's `given` are the files' parts). The tokens are put onto the end of `h.toks` (room
+/// for them reserved), the filters among them where they are declared; where each region's end.
 fn walk(
     u: &[u8],
     sizes: &[usize],
     reach: usize,
     bits: &mut impl Bits,
     ctx: &mut Ctx,
-    parts: &mut [Part],
-    encoding: bool,
+    given: &[Part],
+    h: &mut Held,
 ) -> Result<()> {
+    let encoding = !given.is_empty();
+    let Held { flt, fends, regs, files, toks, .. } = h;
     let mut mf = Mf::new(u, reach);
-    let (mut pairs, mut next_pairs) = (Vec::new(), Vec::new());
+    let (mut pairs, mut next_pairs) = (Vec::with_capacity(Mf::PAIRS), Vec::with_capacity(Mf::PAIRS));
     let mut rep = [0usize; 4];
     let mut last = (0usize, 0usize);
     let mut fs = 0usize;
     for (fi, &size) in sizes.iter().enumerate() {
         let mut pos = fs;
-        let nr = parts[fi].regions.len();
-        for ri in 0..nr {
-            let (region, n) = parts[fi].regions[ri];
+        let (r0, r1) = (if fi == 0 { 0 } else { files[fi - 1].regs }, files[fi].regs);
+        let fl = &flt[if fi == 0 { 0 } else { fends[fi - 1] }..fends[fi]];
+        // (the next filter in an LZ block, and in a PPMd block)
+        let (mut lzc, mut ppc) = (next_kind(fl, 0, false), next_kind(fl, 0, true));
+        for gi in r0..r1 {
+            let (region, n) = (regs[gi].region, regs[gi].n);
             let re = pos + n;
-            let given = if encoding { std::mem::take(&mut parts[fi].tokens[ri]) } else { Vec::new() };
-            let mut made = Vec::new();
+            let given: &[Token] = if encoding { &given[fi].tokens[gi - r0] } else { &[] };
             let mut k = 0usize;
             if let Region::Ppmd { .. } = region {
                 // where the matches are: runs of a byte (the escape 5), others (the escape 4)
                 bits.cat(Cat::Start);
                 let mut prev = 0usize;
+                let mut run = 0u32;
                 while pos < re {
+                    // (the filters declared here; one declared within a match stays)
+                    while ppc < fl.len() && fl[ppc].decl == pos - fs {
+                        if run > 0 {
+                            push(toks, Token::Lits(run))?;
+                            run = 0;
+                        }
+                        push(toks, Token::Filter(ppc as u32))?;
+                        ppc = next_kind(fl, ppc + 1, true);
+                    }
                     mf.advance(pos);
                     let g = if encoding { *given.get(k).ok_or_else(corrupt)? } else { Token::Lit(0) };
                     k += 1;
-                    let run = if pos > 0 { lcp_up(u, pos - 1, pos, 259.min(re - pos)) } else { 0 };
-                    let rc = if run < 4 { 0 } else { 1 + lb(run).min(11) / 3 };
+                    let rl = if pos > 0 { lcp_up(u, pos - 1, pos, 259.min(re - pos)) } else { 0 };
+                    let rc = if rl < 4 { 0 } else { 1 + lb(rl).min(11) / 3 };
                     if !bits.bit(&mut ctx.pp_match[prev * 6 + rc.min(5)], !matches!(g, Token::Lit(_))) {
-                        made.push(Token::Lit(u[pos]));
+                        run += 1;
                         pos += 1;
                         prev = 0;
                         continue;
                     }
-                    let five = bits.bit(&mut ctx.pp_kind[(run >= 4) as usize], matches!(g, Token::Rep { .. }));
+                    let five = bits.bit(&mut ctx.pp_kind[(rl >= 4) as usize], matches!(g, Token::Rep { .. }));
                     let t = if five {
-                        let top = run.min(259);
+                        let top = rl.min(259);
                         let l = match g {
                             Token::Rep { len, .. } => len as usize,
                             _ => 0,
@@ -874,7 +940,7 @@ fn walk(
                         } else {
                             bits.gamma(g32(&mut ctx.misc, 4), l.wrapping_sub(4) as u64)? as usize + 4
                         };
-                        if !(4..=259).contains(&l) || l > run {
+                        if !(4..=259).contains(&l) || l > rl {
                             return Err(corrupt());
                         }
                         Token::Rep { idx: 0, len: l as u32 }
@@ -897,13 +963,41 @@ fn walk(
                         Token::Copy { len, .. } | Token::Rep { len, .. } => len as usize,
                         _ => unreachable!(),
                     };
-                    made.push(t);
+                    if run > 0 {
+                        push(toks, Token::Lits(run))?;
+                        run = 0;
+                    }
+                    push(toks, t)?;
                     prev = 1;
+                }
+                // (the filters declared at the end, or within a match)
+                while ppc < fl.len() && fl[ppc].decl <= pos - fs {
+                    if run > 0 {
+                        push(toks, Token::Lits(run))?;
+                        run = 0;
+                    }
+                    push(toks, Token::Filter(ppc as u32))?;
+                    ppc = next_kind(fl, ppc + 1, true);
+                }
+                if run > 0 {
+                    push(toks, Token::Lits(run))?;
                 }
             } else {
                 let mut prev = 0usize;
                 let mut ahead = usize::MAX;
                 while pos < re {
+                    // (the filters declared here; one declared within a match is past)
+                    while lzc < fl.len() {
+                        let d = fl[lzc].decl;
+                        if d > pos - fs {
+                            break;
+                        }
+                        if d < pos - fs {
+                            return Err(Error("a filter declared within a match"));
+                        }
+                        push(toks, Token::Filter(lzc as u32))?;
+                        lzc = next_kind(fl, lzc + 1, false);
+                    }
                     mf.advance(pos);
                     let cap = (re - pos).min(CAP);
                     let ok = |c: [usize; 4]| move |l: usize, d: usize| writable(l, d) && !c.contains(&d);
@@ -949,7 +1043,7 @@ fn walk(
                         if encoding && g != Token::Lit(u[pos]) {
                             return Err(Error("a literal not of the data"));
                         }
-                        made.push(Token::Lit(u[pos]));
+                        push(toks, Token::Lit(u[pos]))?;
                         pos += 1;
                         prev = 0;
                         continue;
@@ -1107,19 +1201,30 @@ fn walk(
                     if encoding && t != g {
                         return Err(Error("a match coded otherwise"));
                     }
-                    made.push(t);
+                    push(toks, t)?;
                     pos += len;
                     prev = 1;
                     if bits.failed() {
                         return Err(corrupt());
                     }
                 }
+                // (the filters declared at the end)
+                while lzc < fl.len() && fl[lzc].decl == re - fs {
+                    push(toks, Token::Filter(lzc as u32))?;
+                    lzc = next_kind(fl, lzc + 1, false);
+                }
             }
             if encoding && k != given.len() {
                 return Err(Error("tokens past the data"));
             }
-            parts[fi].tokens[ri] = made;
+            regs[gi].toks = toks.len();
             pos = re;
+        }
+        if lzc < fl.len() {
+            return Err(Error("a filter declared out of the LZ blocks"));
+        }
+        if ppc < fl.len() {
+            return Err(Error("a filter declared out of the PPMd blocks"));
         }
         fs += size;
     }
@@ -1127,124 +1232,121 @@ fn walk(
 }
 
 /// The LZ blocks of the regions, coded: their sizes against RAR's buffer of symbols, whether
-/// they keep the lengths before, their tables against Huffman's lengths. Every LZ block has a
-/// table but a file's first where the file before says it goes on with its codes.
-fn code_blocks(bits: &mut impl Bits, ctx: &mut Ctx, parts: &mut [Part], encoding: bool) -> Result<()> {
+/// they keep the lengths before. Every LZ block has a table but a file's first where the file
+/// before says it goes on with its codes. The blocks are put onto the end of `h.blocks` (room for
+/// them reserved), where each region's end.
+fn code_blocks(bits: &mut impl Bits, ctx: &mut Ctx, given: &[Part], h: &mut Held) -> Result<()> {
     bits.cat(Cat::Blocks);
-    let bases = lz3::bases();
-    let lz = merge_filters(parts)?;
-    // the blocks' sizes and keep bits; all the blocks in turn
-    let mut flat: Vec<(usize, usize, usize)> = Vec::new();
+    let encoding = !given.is_empty();
+    let Held { regs, files, blocks, .. } = h;
     let mut header = true;
     let mut after_ppmd = false;
-    for (fi, p) in parts.iter_mut().enumerate() {
-        for (ri, t) in lz[fi].iter().enumerate() {
-            let Some(t) = t else {
+    for fi in 0..files.len() {
+        let (r0, r1) = (if fi == 0 { 0 } else { files[fi - 1].regs }, files[fi].regs);
+        for gi in r0..r1 {
+            let t0 = if gi == 0 { 0 } else { regs[gi - 1].toks };
+            let tn = regs[gi].toks - t0;
+            if !matches!(regs[gi].region, Region::Lz) {
                 after_ppmd = true;
+                regs[gi].blocks = blocks.len();
                 continue;
-            };
-            let given = if encoding { std::mem::take(&mut p.blocks[ri]) } else { Vec::new() };
-            let mut made: Vec<(usize, Option<Box<Table>>)> = Vec::new();
+            }
+            let gb: &[(usize, Option<Box<Table>>)] = if encoding { &given[fi].blocks[gi - r0] } else { &[] };
+            let from = blocks.len();
             let mut at = 0;
             loop {
-                let first_of_file = ri == 0 && made.is_empty();
-                let k = (t.len() - at).min(SYMBOLS - first_of_file as usize);
-                let g = given.get(made.len());
+                let made = blocks.len() - from;
+                let first_of_file = gi == r0 && made == 0;
+                let k = (tn - at).min(SYMBOLS - first_of_file as usize);
+                let g = gb.get(made);
                 let gn = g.map_or(0, |g| g.0);
                 let n = if bits.bit(&mut ctx.cut[first_of_file as usize], gn == k) {
                     k
                 } else {
                     bits.gamma(&mut ctx.cut[3..35], gn as u64)? as usize
                 };
-                if at + n > t.len() {
+                if at + n > tn || blocks.len() == blocks.capacity() {
                     return Err(corrupt());
                 }
-                let table = if first_of_file && !header {
-                    None
+                let tab = if first_of_file && !header {
+                    0
                 } else {
-                    let kc = (made.is_empty() as usize) * 2 + after_ppmd as usize;
+                    let kc = (made == 0) as usize * 2 + after_ppmd as usize;
                     let gk = g.is_none_or(|g| g.1.as_ref().is_some_and(|t| t.keep));
-                    let keep = bits.bit(&mut ctx.keep[kc], gk);
-                    Some(Box::new(Table { keep, pre: [0; lz3::PRE], lens: [0; lz3::LENS] }))
+                    1 + bits.bit(&mut ctx.keep[kc], gk) as u8
                 };
-                flat.push((fi, ri, made.len()));
-                made.push((n, table));
+                blocks.push(Blk { start: t0 + at, n, tab });
                 after_ppmd = false;
                 at += n;
-                if at == t.len() && !bits.bit(&mut ctx.cut[2], given.len() > made.len()) {
+                if at == tn && !bits.bit(&mut ctx.cut[2], gb.len() > made + 1) {
                     break;
                 }
-                if made.len() > t.len() + 64 || bits.failed() {
+                if made > tn + 64 || bits.failed() {
                     return Err(corrupt());
                 }
             }
             if encoding {
-                let same = made.len() == given.len()
-                    && made
-                        .iter()
-                        .zip(&given)
-                        .all(|(a, b)| a.0 == b.0 && a.1.as_ref().map(|t| t.keep) == b.1.as_ref().map(|t| t.keep));
+                let same = blocks.len() - from == gb.len()
+                    && blocks[from..].iter().zip(gb).all(|(a, b)| {
+                        a.n == b.0
+                            && (a.tab == 0) == b.1.is_none()
+                            && (a.tab == 2) == b.1.as_ref().is_some_and(|t| t.keep)
+                    });
                 if !same {
                     return Err(Error("blocks coded otherwise"));
                 }
-                // (the tables as they are, coded below)
-                made = given;
             }
-            p.blocks[ri] = made;
+            regs[gi].blocks = blocks.len();
         }
-        header = p.next_header || matches!(p.regions.last(), Some((Region::Ppmd { .. }, _)));
-    }
-    // the tables, each over the symbols of its block and the blocks without tables after it,
-    // the 256 ending each block counted
-    let mut prev = [0u8; lz3::LENS];
-    let mut k = 0;
-    while k < flat.len() {
-        let (fi, ri, bi) = flat[k];
-        if parts[fi].blocks[ri][bi].1.is_none() {
-            k += 1;
-            continue;
-        }
-        let mut c = [vec![0u32; lz3::MAIN], vec![0; lz3::DIST], vec![0; lz3::LOW], vec![0; lz3::LEN]];
-        let mut low = (0u32, 0u32);
-        let mut j = k;
-        loop {
-            let (f, r, b) = flat[j];
-            let at: usize = parts[f].blocks[r][..b].iter().map(|x| x.0).sum();
-            let n = parts[f].blocks[r][b].0;
-            let t = lz[f][r].as_ref().ok_or_else(corrupt)?;
-            for tk in &t[at..at + n] {
-                lz3::symbols(tk, &bases, &mut low, |a, s| c[a][s] += 1);
-            }
-            c[0][256] += 1;
-            j += 1;
-            if j == flat.len() || parts[flat[j].0].blocks[flat[j].1][flat[j].2].1.is_some() {
-                break;
-            }
-        }
-        let mut lens = Vec::with_capacity(lz3::LENS);
-        for f in &c {
-            lens.extend(huff::lengths(f, huff::MAX));
-        }
-        let tb = parts[fi].blocks[ri][bi].1.as_mut().ok_or_else(corrupt)?;
-        let given = encoding.then_some((tb.lens, tb.pre));
-        let lens = code_lens(bits, ctx, 0, lens, given.as_ref().map(|g| &g.0[..]))?;
-        let lens: [u8; lz3::LENS] = lens.try_into().unwrap();
-        if !tb.keep {
-            prev = [0; lz3::LENS];
-        }
-        let mut pc = vec![0u32; lz3::PRE];
-        lz3::rle(&lens, &prev).iter().for_each(|r| pc[r.0 as usize] += 1);
-        let pre = huff::lengths(&pc, huff::MAX);
-        let pre = code_lens(bits, ctx, 1, pre, given.as_ref().map(|g| &g.1[..]))?;
-        tb.lens = lens;
-        tb.pre = pre.try_into().unwrap();
-        prev = lens;
-        if bits.failed() {
-            return Err(corrupt());
-        }
-        k = j;
+        header = files[fi].next_header;
     }
     Ok(())
+}
+
+/// The table of the LZ block `k` of `blocks` (of `tab` 1 or 2), coded: the lengths of Huffman's
+/// construction over the symbols of its tokens and those of the blocks without tables after it
+/// (the 256 ending each counted), or as they are (`given`), and the code lengths against the
+/// lengths `prev` of the table before.
+fn code_table(
+    bits: &mut impl Bits,
+    ctx: &mut Ctx,
+    blocks: &[Blk],
+    toks: &[Token],
+    k: usize,
+    prev: &[u8; lz3::LENS],
+    given: Option<&Table>,
+) -> Result<Table> {
+    let keep = blocks[k].tab == 2;
+    let bases = lz3::bases();
+    let mut c = [vec![0u32; lz3::MAIN], vec![0; lz3::DIST], vec![0; lz3::LOW], vec![0; lz3::LEN]];
+    let mut low = (0u32, 0u32);
+    let mut j = k;
+    loop {
+        let b = blocks[j];
+        for tk in toks.get(b.start..b.start + b.n).ok_or_else(corrupt)? {
+            lz3::symbols(tk, &bases, &mut low, |a, s| c[a][s] += 1);
+        }
+        c[0][256] += 1;
+        j += 1;
+        if j == blocks.len() || blocks[j].tab != 0 {
+            break;
+        }
+    }
+    let mut lens = Vec::with_capacity(lz3::LENS);
+    for f in &c {
+        lens.extend(huff::lengths(f, huff::MAX));
+    }
+    let lens = code_lens(bits, ctx, 0, lens, given.map(|g| &g.lens[..]))?;
+    let lens: [u8; lz3::LENS] = lens.try_into().unwrap();
+    let prev = if keep { *prev } else { [0; lz3::LENS] };
+    let mut pc = vec![0u32; lz3::PRE];
+    lz3::rle(&lens, &prev).iter().for_each(|r| pc[r.0 as usize] += 1);
+    let pre = huff::lengths(&pc, huff::MAX);
+    let pre = code_lens(bits, ctx, 1, pre, given.map(|g| &g.pre[..]))?;
+    if bits.failed() {
+        return Err(corrupt());
+    }
+    Ok(Table { keep, pre: pre.try_into().unwrap(), lens })
 }
 
 /// Code lengths predicted `pred`, coded as they are (`given`): all as predicted, or each.
@@ -1262,6 +1364,130 @@ fn code_lens(bits: &mut impl Bits, ctx: &mut Ctx, c: usize, pred: Vec<u8>, given
     Ok(out)
 }
 
+/// Bytes the tables' work takes at most (the counts, the lengths, Huffman's heap, the run-length
+/// coding): with room for the vectors that grow, and for the holes that leaves. The decoder takes
+/// them from the stack once before the blocks and gives them back, so that what it takes does not
+/// depend on the data.
+pub const SCRATCH: usize = 64 << 10;
+
+/// The stream written onto the end of `out` (room for it reserved): each file's blocks in turn,
+/// the tables of the LZ blocks read from the record (`bits`, `ctx`) as they are reached, which is
+/// the record's order, and the PPMd blocks' symbols made of the data `u` and the tokens. The end
+/// of each file's part in `out` is put in `ends` if given; the encoder gives its parts `given`.
+#[allow(clippy::too_many_arguments)]
+fn write_stream(
+    bits: &mut impl Bits,
+    ctx: &mut Ctx,
+    enc: &mut Encoder3,
+    u: &[u8],
+    sizes: &[usize],
+    h: &Held,
+    given: &[Part],
+    out: &mut Vec<u8>,
+    mut ends: Option<&mut Vec<usize>>,
+) -> Result<()> {
+    let encoding = !given.is_empty();
+    if !encoding {
+        std::hint::black_box(Vec::<u8>::with_capacity(SCRATCH));
+    }
+    let (mut fs, mut esc, mut header) = (0usize, 2u8, true);
+    for (fi, &size) in sizes.iter().enumerate() {
+        let (franges, rranges) = h.ranges(fi);
+        let fl = &h.flt[franges];
+        let raw = |i: u32| fl.get(i as usize).map(|f| &h.raws[f.raw.0..f.raw.1]);
+        let mut w = BitWriter::default();
+        w.out = std::mem::take(out);
+        let mut pos = 0usize;
+        let mut first = true;
+        for gi in rranges.clone() {
+            let r = h.regs[gi];
+            let (t0, b0) = if gi == 0 { (0, 0) } else { (h.regs[gi - 1].toks, h.regs[gi - 1].blocks) };
+            match r.region {
+                Region::Lz => {
+                    for bj in b0..r.blocks {
+                        let b = h.blocks[bj];
+                        let table = if b.tab == 0 {
+                            None
+                        } else {
+                            let gt = if encoding {
+                                given[fi].blocks[gi - rranges.start][bj - b0].1.as_deref()
+                            } else {
+                                None
+                            };
+                            Some(code_table(bits, ctx, &h.blocks, &h.toks, bj, enc.prev(), gt)?)
+                        };
+                        let end = (gi + 1 == rranges.end && bj + 1 == r.blocks).then_some(h.files[fi].next_header);
+                        let tokens = h.toks.get(b.start..b.start + b.n).ok_or_else(corrupt)?;
+                        enc.lz_block(&mut w, table.as_ref(), first && !header, tokens, &raw, end)?;
+                        first = false;
+                    }
+                }
+                Region::Ppmd { flags, mem, esc: e } => {
+                    if first && !header {
+                        return Err(Error("a PPMd block without a header"));
+                    }
+                    esc = esc_of(r.region, esc);
+                    let last = gi + 1 == rranges.end;
+                    let data = u.get(fs + pos..fs + pos + r.n).ok_or_else(corrupt)?;
+                    enc.ppmd_block(&mut w, flags, mem, e, |put| {
+                        let mut at = 0usize;
+                        for t in &h.toks[t0..r.toks] {
+                            match *t {
+                                Token::Lits(k) => {
+                                    for &b in data.get(at..at + k as usize).ok_or_else(corrupt)? {
+                                        if b == esc {
+                                            put(esc);
+                                            put(1);
+                                        } else {
+                                            put(b);
+                                        }
+                                    }
+                                    at += k as usize;
+                                }
+                                Token::Filter(i) => {
+                                    put(esc);
+                                    put(3);
+                                    for &b in raw(i).ok_or_else(corrupt)? {
+                                        put(b);
+                                    }
+                                }
+                                Token::Copy { len, dist, .. } => {
+                                    let d = dist - 2;
+                                    for s in [esc, 4, (d >> 16) as u8, (d >> 8) as u8, d as u8, (len - 32) as u8] {
+                                        put(s);
+                                    }
+                                    at += len as usize;
+                                }
+                                Token::Rep { len, .. } => {
+                                    for s in [esc, 5, (len - 4) as u8] {
+                                        put(s);
+                                    }
+                                    at += len as usize;
+                                }
+                                _ => return Err(corrupt()),
+                            }
+                        }
+                        put(esc);
+                        put(if last { 2 } else { 0 });
+                        Ok(())
+                    })?;
+                    first = false;
+                }
+            }
+            pos += r.n;
+        }
+        *out = w.finish();
+        let t0 = if fi == 0 { 0 } else { h.files[fi - 1].tail };
+        out.extend_from_slice(&h.tails[t0..h.files[fi].tail]);
+        header = h.files[fi].next_header;
+        if let Some(e) = ends.as_mut() {
+            e.push(out.len());
+        }
+        fs += size;
+    }
+    Ok(())
+}
+
 pub use crate::recons5::Split;
 
 /// Splits the stream of the files of `parts` (their packed data in turn, of `sizes` bytes each)
@@ -1269,6 +1495,51 @@ pub use crate::recons5::Split;
 /// gives.
 pub fn split(packed: &[&[u8]], sizes: &[usize], dict: u64) -> Result<Split> {
     split_with(packed, sizes, dict, true)
+}
+
+/// The count of the elements the walk puts in [`Held::toks`] for `parts`: an LZ region's
+/// tokens and filters, a PPMd region's runs of literals, matches and filters.
+fn elements(parts: &[Part]) -> usize {
+    let mut k = 0;
+    for p in parts {
+        k += p.filters.iter().filter(|f| !f.1).count();
+        // (the filters in PPMd blocks, put where declared, the first one blocking the others)
+        let pp: Vec<usize> = p.filters.iter().filter(|f| f.1).map(|f| f.0).collect();
+        let (mut pc, mut pos) = (0, 0);
+        for (ri, &(region, n)) in p.regions.iter().enumerate() {
+            if let Region::Lz = region {
+                k += p.tokens[ri].len();
+                pos += n;
+                continue;
+            }
+            let mut run = false;
+            for t in &p.tokens[ri] {
+                while pc < pp.len() && pp[pc] == pos {
+                    k += 1 + run as usize;
+                    run = false;
+                    pc += 1;
+                }
+                match *t {
+                    Token::Copy { len, .. } | Token::Rep { len, .. } => {
+                        k += 1 + run as usize;
+                        run = false;
+                        pos += len as usize;
+                    }
+                    _ => {
+                        run = true;
+                        pos += 1;
+                    }
+                }
+            }
+            while pc < pp.len() && pp[pc] <= pos {
+                k += 1 + run as usize;
+                run = false;
+                pc += 1;
+            }
+            k += run as usize;
+        }
+    }
+    k
 }
 
 /// [`split`], failing at once at a PPMd block unless `ppmd`.
@@ -1302,39 +1573,7 @@ pub fn split_with(packed: &[&[u8]], sizes: &[usize], dict: u64, ppmd: bool) -> R
         })
         .max()
         .unwrap_or(0);
-    let mut e = Enc::new(Cat::Head as usize);
-    let mut ctx = Ctx::new();
-    e.gamma(g32(&mut ctx.misc, 1), sizes.len() as u64 - 1)?;
-    for &s in sizes {
-        e.gamma(g32(&mut ctx.misc, 1), s as u64)?;
-    }
-    e.gamma(g32(&mut ctx.misc, 1), reach as u64)?;
-    let mut parts = take_apart(&streams)?;
-    code_filters(&mut e, &mut ctx, sizes, &mut parts, true)?;
-    let mut v = data.clone();
-    refile(&mut v, sizes, &parts)?;
-    code_fixes(&mut e, &mut ctx, Some(&u), &mut v)?;
-    code_regions(&mut e, &mut ctx, &u, sizes, &mut parts, true, u32::MAX)?;
-    walk(&u, sizes, reach, &mut e, &mut ctx, &mut parts, true)?;
-    code_blocks(&mut e, &mut ctx, &mut parts, true)?;
-    let made = put_together(&parts)?;
-    if made != streams {
-        return Err(Error("streams put together otherwise"));
-    }
-    let mut enc = Encoder3::new();
-    let mut out = Vec::new();
-    let mut header = true;
-    for (st, &p) in made.iter().zip(packed) {
-        let at = out.len();
-        enc.file(st, header, &mut out)?;
-        header = st.next_header;
-        if out[at..] != *p {
-            return Err(Error("a stream encoded otherwise"));
-        }
-    }
-    let mut record = vec![3u8];
-    record.extend(e.c.finish());
-    let ppmd = streams
+    let model = streams
         .iter()
         .flat_map(|s| &s.blocks)
         .map(|b| match b {
@@ -1343,66 +1582,201 @@ pub fn split_with(packed: &[&[u8]], sizes: &[usize], dict: u64, ppmd: bool) -> R
         })
         .max()
         .unwrap_or(0);
-    Ok(Split { data, record, cost: e.cost, ppmd })
+    let mut e = Enc::new(Cat::Head as usize);
+    let mut ctx = Ctx::new();
+    e.gamma(g32(&mut ctx.misc, 1), sizes.len() as u64 - 1)?;
+    for &s in sizes {
+        e.gamma(g32(&mut ctx.misc, 1), s as u64)?;
+    }
+    e.gamma(g32(&mut ctx.misc, 1), reach as u64)?;
+    let parts = take_apart(&streams)?;
+    let sum = |f: &dyn Fn(&Part) -> usize| parts.iter().map(f).sum::<usize>();
+    let counts = Counts {
+        filters: sum(&|p| p.filters.len()),
+        raws: sum(&|p| p.filters.iter().map(|f| f.2.raw.len()).sum()),
+        regions: sum(&|p| p.regions.len()),
+        tails: sum(&|p| p.tail.len()),
+        blocks: sum(&|p| p.blocks.iter().map(Vec::len).sum()),
+        tokens: elements(&parts),
+        delta: parts.iter().flat_map(|p| &p.filters).map(|f| f.2.len as usize).max().unwrap_or(0),
+        model,
+    };
+    counts.code(&mut e, &mut ctx)?;
+    let mut h = Held {
+        flt: Vec::with_capacity(counts.filters),
+        raws: Vec::with_capacity(counts.raws),
+        fends: Vec::new(),
+        regs: Vec::with_capacity(counts.regions),
+        files: Vec::new(),
+        tails: Vec::with_capacity(counts.tails),
+        toks: Vec::with_capacity(counts.tokens),
+        blocks: Vec::with_capacity(counts.blocks),
+    };
+    code_filters(&mut e, &mut ctx, sizes, &parts, &mut h)?;
+    let mut v = data.clone();
+    refile(&mut v, sizes, &h, counts.delta)?;
+    code_fixes(&mut e, &mut ctx, Some(&u), &mut v)?;
+    code_regions(&mut e, &mut ctx, &u, sizes, &parts, &mut h, u32::MAX)?;
+    walk(&u, sizes, reach, &mut e, &mut ctx, &parts, &mut h)?;
+    if h.toks.len() != counts.tokens {
+        return Err(Error("a count of tokens that does not fit"));
+    }
+    code_blocks(&mut e, &mut ctx, &parts, &mut h)?;
+    // (the stream written again from what the record has)
+    let mut enc = Encoder3::with_model(model)?;
+    let (mut out, mut ends) = (Vec::new(), Vec::new());
+    write_stream(&mut e, &mut ctx, &mut enc, &u, sizes, &h, &parts, &mut out, Some(&mut ends))?;
+    let mut at = 0;
+    for (&end, &p) in ends.iter().zip(packed) {
+        if out[at..end] != *p {
+            return Err(Error("a stream encoded otherwise"));
+        }
+        at = end;
+    }
+    let mut record = vec![3u8];
+    record.extend(e.c.finish());
+    start_of(&record, data.len())?;
+    Ok(Split { data, record, cost: e.cost, ppmd: model })
 }
 
-/// The files' contents `data` of `sizes` filtered again by the filters of `parts`, in place.
-fn refile(data: &mut [u8], sizes: &[usize], parts: &[Part]) -> Result<()> {
-    let mut at = 0;
+/// The files' contents `data` of `sizes` filtered again by the filters of `h`, in place; the
+/// filters copy no more than `most` bytes.
+fn refile(data: &mut [u8], sizes: &[usize], h: &Held, most: usize) -> Result<()> {
+    let (mut at, mut from) = (0, 0);
     for (i, &s) in sizes.iter().enumerate() {
-        refilter(&mut data[at..at + s], &parts[i].filters)?;
-        at += s;
+        refilter(&mut data[at..at + s], &h.flt[from..h.fends[i]], most)?;
+        (at, from) = (at + s, h.fends[i]);
     }
     Ok(())
 }
 
-/// The stream that `data` and `record` rebuild, written onto `out`, its PPMd models of at most
-/// `ppmd_limit` MiB; the sizes of its files' parts.
-pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>, ppmd_limit: u32) -> Result<Vec<usize>> {
+/// The counts a record starts with, after the sizes of the files and the reach: what a decoder
+/// reserves, and the record must come to exactly: filters, the bytes of their records, regions,
+/// the bytes after the files' parts, blocks, elements of the walk (`Held::toks`), the most bytes
+/// of a filter (that the filters copy), and the MiB of the largest PPMd model.
+struct Counts {
+    filters: usize,
+    raws: usize,
+    regions: usize,
+    tails: usize,
+    blocks: usize,
+    tokens: usize,
+    delta: usize,
+    model: u32,
+}
+
+impl Counts {
+    fn code(&self, bits: &mut impl Bits, ctx: &mut Ctx) -> Result<()> {
+        let c = &mut ctx.count;
+        let all = [self.filters, self.raws, self.regions, self.tails, self.blocks, self.tokens, self.delta];
+        for (i, v) in all.into_iter().chain([self.model as usize]).enumerate() {
+            bits.gamma(g32(c, i), v as u64)?;
+        }
+        Ok(())
+    }
+}
+
+/// What a record starts with: the sizes of the stream's files, its reach, and the counts.
+pub struct Start {
+    pub sizes: Vec<usize>,
+    pub reach: usize,
+    pub filters: usize,
+    pub raws: usize,
+    pub regions: usize,
+    pub tails: usize,
+    pub blocks: usize,
+    pub tokens: usize,
+    pub delta: usize,
+    pub model: u32,
+}
+
+/// The start of `record` for a stream of `n` bytes of data, with the decoder and the contexts as
+/// they are after it.
+fn start<'a>(record: &'a [u8], n: usize, ctx: &mut Ctx) -> Result<(Start, Dec<'a>)> {
     let (&tag, rest) = record.split_first().ok_or_else(corrupt)?;
     if tag != 3 {
         return Err(corrupt());
     }
     let mut dec = Dec(ArithDecoder::new(rest));
-    let mut ctx = Ctx::new();
-    let n = dec.gamma(g32(&mut ctx.misc, 1), 0)? as usize + 1;
-    if n > data.len() + 1 {
+    let files = dec.gamma(g32(&mut ctx.misc, 1), 0)? as usize + 1;
+    if files > n + 1 {
         return Err(corrupt());
     }
-    let mut sizes = Vec::with_capacity(n);
+    let mut sizes = Vec::with_capacity(files);
     let mut total = 0usize;
-    for _ in 0..n {
+    for _ in 0..files {
         let s = dec.gamma(g32(&mut ctx.misc, 1), 0)? as usize;
-        total = total.checked_add(s).filter(|&t| t <= data.len()).ok_or_else(corrupt)?;
+        total = total.checked_add(s).filter(|&t| t <= n).ok_or_else(corrupt)?;
         sizes.push(s);
     }
-    if total != data.len() {
+    if total != n {
         return Err(corrupt());
     }
     let reach = dec.gamma(g32(&mut ctx.misc, 1), 0)? as usize;
-    let mut parts = vec![Part::default(); n];
-    code_filters(&mut dec, &mut ctx, &sizes, &mut parts, false)?;
+    // (what a record can hold: filters fewer than the bytes and 64 a file, a record's bytes
+    // as RAR writes it or as the record gives them, regions and blocks as the checks of
+    // `code_regions` and `code_blocks` bound them, a token a byte at least)
+    let mut i = 0;
+    let mut count = |most: usize| -> Result<usize> {
+        let v = dec.gamma(g32(&mut ctx.count, i), 0)? as usize;
+        i += 1;
+        if v > most {
+            return Err(corrupt());
+        }
+        Ok(v)
+    };
+    let filters = count(n + 64 * files)?;
+    let raws = count(300 * filters + record.len())?;
+    let regions = count(n + 65 * files)?;
+    let tails = count(8 * files + record.len())?;
+    // (the blocks are bounded by the tokens, counted after them)
+    let blocks = count(usize::MAX)?;
+    let tokens = count(n + filters)?;
+    let delta = count(n)?;
+    let model = count(256)? as u32;
+    if blocks > tokens + 64 * regions {
+        return Err(corrupt());
+    }
+    Ok((Start { sizes, reach, filters, raws, regions, tails, blocks, tokens, delta, model }, dec))
+}
+
+/// The start of `record` for a stream of `n` bytes of data: what the memory plan follows
+/// ([`crate::plan`]).
+pub fn start_of(record: &[u8], n: usize) -> Result<Start> {
+    Ok(start(record, n, &mut Ctx::new())?.0)
+}
+
+/// The stream that `data` and `record` rebuild, written onto `out` (room for it reserved), its
+/// PPMd models of at most `ppmd_limit` MiB.
+pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>, ppmd_limit: u32) -> Result<()> {
+    let mut ctx = Ctx::new();
+    let (st, mut dec) = start(record, data.len(), &mut ctx)?;
+    if st.model > ppmd_limit {
+        return Err(Error("a PPMd model larger than the module's"));
+    }
+    let sizes = &st.sizes[..];
     let mut u = data.to_vec();
-    refile(&mut u, &sizes, &parts)?;
+    let mut h = Held::new(&st);
+    code_filters(&mut dec, &mut ctx, sizes, &[], &mut h)?;
+    if h.flt.len() != st.filters || h.raws.len() != st.raws {
+        return Err(Error("a count of filters that does not fit"));
+    }
+    refile(&mut u, sizes, &h, st.delta)?;
     code_fixes(&mut dec, &mut ctx, None, &mut u)?;
-    code_regions(&mut dec, &mut ctx, &u, &sizes, &mut parts, false, ppmd_limit)?;
-    for p in &mut parts {
-        p.tokens = vec![Vec::new(); p.regions.len()];
-        p.blocks = vec![Vec::new(); p.regions.len()];
+    code_regions(&mut dec, &mut ctx, &u, sizes, &[], &mut h, st.model)?;
+    if h.regs.len() != st.regions || h.tails.len() != st.tails {
+        return Err(Error("a count of regions that does not fit"));
     }
-    walk(&u, &sizes, reach, &mut dec, &mut ctx, &mut parts, false)?;
-    code_blocks(&mut dec, &mut ctx, &mut parts, false)?;
-    let streams = put_together(&parts)?;
-    let mut enc = Encoder3::new();
-    let mut sizes = Vec::with_capacity(n);
-    let mut header = true;
-    for st in &streams {
-        let at = out.len();
-        enc.file(st, header, out)?;
-        header = st.next_header;
-        sizes.push(out.len() - at);
+    walk(&u, sizes, st.reach, &mut dec, &mut ctx, &[], &mut h)?;
+    if h.toks.len() != st.tokens {
+        return Err(Error("a count of tokens that does not fit"));
     }
-    Ok(sizes)
+    code_blocks(&mut dec, &mut ctx, &[], &mut h)?;
+    if h.blocks.len() != st.blocks {
+        return Err(Error("a count of blocks that does not fit"));
+    }
+    let mut enc = Encoder3::with_model(st.model)?;
+    write_stream(&mut dec, &mut ctx, &mut enc, &u, sizes, &h, &[], out, None)
 }
 
 /// [`join_onto`] onto a new vector.
@@ -1410,11 +1784,4 @@ pub fn join(data: &[u8], record: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     join_onto(data, record, &mut out, u32::MAX)?;
     Ok(out)
-}
-
-/// Bytes of the working memory of a stream of `n` bytes of data, besides its data and record
-/// and the PPMd models.
-pub fn memory(n: u64) -> u64 {
-    let (heads, rings) = Mf::slots(n as usize);
-    n + 4 * (heads + rings) as u64 + 4 * std::mem::size_of::<Token>() as u64 * n / 2 + n + (1 << 20)
 }
