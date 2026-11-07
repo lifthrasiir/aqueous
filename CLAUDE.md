@@ -119,12 +119,22 @@ optimization picked by hash.
 - aqr-decompress: a known hash runs natively, anything else in wasmtime.
 - No variable arity: use Split and separate modules (png-against, leveldb-recons, …).
 - Model data (aqr-flate's) is a resource, not embedded in the module.
-- Threads in Wasm: fork-join tasks (`aqr_spawn`/`aqr_join`/`aqr_take`; `aqr_common::pool::
-  par_map_apart` with `wire::Wire`) and channels (flac/pcm pipelines); the spec's "Module
-  execution" has the rules, `docs/xform-design.md` the design. The spawn record must stay in a
-  never-inlined frame (`spawn_record`), or the task's stack clobbers the caller's locals. A module
-  spawning tasks declares its task slots with `whole!(slots N, …)` (the custom section
-  `aqr_task_slots`, which aqr-ld checks), its code given N as its threads. Other
+- Threads in Wasm: fork-join tasks (`aqr_spawn(class, count, records, arg, n)`, the only spawn;
+  `aqr_join`/`aqr_take`; `aqr_common::pool::par_map_apart` with `wire::Wire`) and channels
+  (flac/pcm pipelines); the spec's "Module execution" has the rules, `docs/xform-design.md` §5.5
+  the design. aqr-api's `task::spawn` is class 0 with one region record for all of the working
+  memory; `spawn_class(class, ..)` and `spawn_gang(class, ..)` name the class. The spawn record
+  must stay in a never-inlined frame (`spawn_record`), or the task's stack clobbers the caller's
+  locals. A module spawning tasks declares its classes in the custom section `aqr_task_slots`
+  (one byte each: slots 1..=64 in the low 7 bits, a gang class with the top bit; aqr-ld checks
+  it): `whole!(slots N, …)` for one class of N slots, its code given N as its threads, or
+  `whole!(gang N, …)` for one gang class of a slot, whose gang is N tasks. A gang's tasks start
+  together and its limit covers their memories and the messages queued in its channels; the
+  channels made (`aqr_chan`) belong to the instance's next spawn, which must be of a gang class
+  (the emulation checks the same, by `spawn_gang`), and only that gang's tasks and the spawner
+  take their ends. The decoder picks each class's concurrency from 1 to its slots
+  (`choose_concurrency`: lowered to fit `-M` when one is given). The earlier two-parameter
+  `aqr_spawn` and `Apply` of opcode 11 are for the modules of releases only. Other
   `par_map`/`scope` uses run serially in Wasm. Port a pipeline only when its speedup is worth
   the module's growth; report both (png, psd and mp3 were measured and not ported).
 - Memory: each Module carries the exact plan of its working memory (`Module::new(..).with_plan`,
