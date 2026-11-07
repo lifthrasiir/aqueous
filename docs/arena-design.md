@@ -188,7 +188,9 @@ P = W_main + Σ_태스크 (W_spawn + 태스크의 계획 버퍼) + 채널 메시
 - aqr-common `streams::cut`이 목록을 색인의 varint 수로 정확히 잡는다.
 - 실측 = 계획이다(`snappy_plan_holds`, `lzo_plan_holds`).
 
-**asar-recons, bundle-recons.** 이미 LIFO였다(asar: 본체 목록과 출력; bundle: 출력과 cpio 머리의 사본). 실측 = 계획이다(`asar_bundle_plans_hold`).
+**asar-recons.** 이미 LIFO였다(본체 목록과 출력). 실측 = 계획이다(`asar_bundle_plans_hold`).
+
+**bundle-recons(판 2).** whole이던 것을 part 모듈로 바꿨다(창 16쪽 × 입력 둘과 출력). 데이터와 레이아웃을 64 KiB 조각으로 차례로 받아 `layout::build_into`가 아카이브를 조각으로 내보내므로 아무것도 쥐지 않는다. 계획 = 조각 버퍼 둘(`module::plan`)이라 아카이브 길이와 무관하다(whole은 3배). `decimal`의 `String`을 없앴다(계획 밖 블록). cpio crc 형식의 검사합은 본체보다 머리가 먼저 나가므로 예측하지 않고 그대로 둔다(형식 변경). 실측 = 계획이다(`bundle_plans_hold`: 픽스처 전부와 창을 넘는 tar).
 
 **recs-fields, recs-entries, recs-floats.** 이미 LIFO였다(필드 목록, 출력, recs-fields는 필드마다 위에 참조 값 목록).
 - `Field`와 `Float`는 `repr(C)`로 두고, wasm32 크기는 상수로 확인한다.
@@ -243,6 +245,7 @@ P = W_main + Σ_태스크 (W_spawn + 태스크의 계획 버퍼) + 채널 메시
 - 청크마다 표를 읽을 때 `rans32::read_table`이 표마다 레벨 버퍼를 잡고 그 아래에서 놓았고, 표 목록(`Vec<Vec<u32>>`)과 사용 여부 목록도 따로 놓였다. 한 청크에 표가 48개(16비트는 128개)라 구멍 자리 64개를 넘길 수 있었다. 이제 aqr-common의 rans32는 레벨을 결과 버퍼 안에서 제자리로 빈도로 바꾸고(`read_table_into`), `Tables::of`는 평평한 버퍼에서 표를 만든다. 래스터는 한 청크의 빈도를 버퍼 하나에 잇달아 읽는다.
 - 출력은 `reserve_exact`로 잡는다.
 - 실측 = 계획이다(`raster_plan_holds`, `raster16_plan_holds`).
+- 48 MiB를 넘는 래스터는 인코더가 같은 높이의 띠로 잘라 띠마다 같은 모듈의 적용 하나씩 둔다(`raster::BAND`, `FORMAT.md` §9.1). 적용 하나의 계획은 입력·출력 둘씩이라 띠의 약 4배(192 MiB)다. 모듈은 그대로다(`raster_bands_plans_hold`).
 
 **aqr-exe의 모듈 9개.**
 - 할당자가 mini-alloc(놓지 않는 범프 할당자)이었다. 아홉이 같은 라이브러리의 할당자를 쓰므로 함께 스택으로 바꿨다. 스택은 놓인 블록이 구멍으로만 남아, 범프보다 많이 쓰는 일은 없다. 다만 구멍이 64개를 넘으면 트랩한다. macho-symtab의 BTreeMap과 BTreeSet이 실제 Mach-O(zsh)에서 그랬다.
@@ -330,6 +333,8 @@ P = W_main + Σ_태스크 (W_spawn + 태스크의 계획 버퍼) + 채널 메시
 - 크기: pcm은 블록(4096, 또는 그보다 짧은 파일)과 채널 수로 정해진다. flac은 프레임의 최대 블록, 최대 채널 수, 최대 바이트를 encoder가 params에 적는다(형식 변경). decoder는 이를 넘는 프레임을 거부한다(네이티브 경로에서도). 일꾼의 비트 쓰개는 처음에 프레임 바이트 + 8 × 블록으로 잡고 재사용한다(`write_frame_with`). 예산을 넘는 프레임을 인스턴스가 다시 쓰던 경로(Again)는 Wasm에서 없어졌다. 일꾼의 예산이 프레임의 최대 바이트다.
 - rANS 표: `builtin::parse`가 `Vec<Vec<u16>>`(문맥 124개)를 만들었다가 놓았고, `Tables::new`는 HashMap을 썼다. 이제 `parse_flat`과 `Tables::from_flat`으로 남는 것만 정확히 잡는다(정규 문맥은 앞의 것과 비교해서 찾는다). decoder 표의 alias는 모든 문맥의 버킷 수만큼 잡는다(계획이 자원 내용을 모르므로).
 - 계획 = 인스턴스(spawn 전: whole, 표, 스트림 목록, 채널 끝; spawn 뒤: 핸들, 출력, 받는 버퍼) + 태스크 8개 모두 + 채널이 담을 수 있는 메시지(채널마다 2개 × 가장 큰 메시지). 실측(worst) = 계획 − 메시지 몫이다(`pcm_plans_hold`: 16비트 스테레오, 8비트 모노, 24비트 6채널, 32비트, 8채널, 블록보다 짧은 것; `flac_plans_hold`: 픽스처 12개; 그리고 10gb 코퍼스의 WAV/AIFF/FLAC과 FLAC 코퍼스, 98개).
+
+**flate-set(판 3).** ZipBefore(ZIP 항목의 CRC-32와 길이가 본체보다 먼저 나온다)는 CRC를 알기 전까지 스트림을 통째로 쥐었다(판 2: 항목의 압축 길이만큼; enwik9.zip의 322 MB 항목이 353 MiB). 판 3은 2 MiB 이상 데이터의 스트림마다 index에 CRC-32를 넣어(`index_before`) 20바이트를 그것으로 먼저 쓰고, 스트림은 만드는 대로 내보내며 끝에서 데이터의 CRC와 맞는지 본다. 쥘 것이 없으므로 ZipBefore도 스레드 하나로 묶지 않는다. 같은 항목은 108 MiB.
 
 **flate-set(판 2).**
 - 블록 헤더(`DynHeader`)의 길이와 run-length op가 `Vec`였고, 헤더를 읽는 후보 계산(zlib, package-merge, 평활화, zopfli의 op)이 임시 벡터를 잡았다 놓았다. 라운드마다 블록 수천 개의 헤더가 그 사이에 남아 구멍이 64개를 넘는다. 이제 헤더는 제자리 배열(`deflate::Short`, 320개)이고 후보 계산은 스택 배열에서 한다. 쓰개의 부호표(고정 블록 것까지)도 배열이다. 버킷 항목(`Cands::entries`)도 제자리다.
