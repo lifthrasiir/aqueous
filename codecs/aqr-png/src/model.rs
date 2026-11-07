@@ -68,7 +68,7 @@ impl Geometry {
         } else {
             &[(0, 0, 1, 1)]
         };
-        let mut passes = vec![];
+        let mut passes = Vec::with_capacity(list.len());
         // The raw buffer starts with a margin: the channel decorrelation reads the byte
         // before the first pixel's neighbours.
         let (mut at, mut at2, mut pad) = (0usize, 8usize, 0usize);
@@ -121,7 +121,7 @@ pub const TABLES_REF: usize = T_SAME + 4;
 const _: () = assert!(TABLES_REF <= 256);
 const ESC: u32 = 255;
 
-fn alphabet(t: usize) -> usize {
+pub(crate) fn alphabet(t: usize) -> usize {
     if t < T_ESC {
         256
     } else if t == T_ESC {
@@ -164,21 +164,44 @@ impl Reference {
         if payload.len() < 2 {
             return Err(crate::Error::Unsupported("no zlib stream"));
         }
-        // (about a token per byte of the stream, more for photos)
-        let n = payload.len() + payload.len() / 4;
-        let mut sink = RefSink { p: 0, r: Reference { pos: Vec::with_capacity(n), tokens: Vec::with_capacity(n) } };
-        let mut o = 0;
-        loop {
-            let l = inflate::parse_head(&payload[o + 2..], usize::MAX, &mut sink)?;
-            match next_stream(payload, o + 2 + l.end).filter(|&next| parses(&payload[next + 2..])) {
-                Some(next) => o = next,
-                None => break,
-            }
-        }
+        // (the tokens counted first, then kept in room for exactly as many)
+        // (one sink, so that the parser is one function in the modules)
+        let mut count = RefSink { p: 0, n: 0, keep: false, r: Reference::with_capacity(0) };
+        each_stream(payload, &mut count)?;
+        let mut sink = RefSink { p: 0, n: 0, keep: true, r: Reference::with_capacity(count.n) };
+        each_stream(payload, &mut sink)?;
         if sink.p > u32::MAX as usize {
             return Err(crate::Error::Unsupported("image data of 4 GiB or more"));
         }
         Ok(sink.r)
+    }
+
+    /// Its tokens.
+    pub fn len(&self) -> usize {
+        self.tokens.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tokens.is_empty()
+    }
+
+    /// Appends its positions (u32 LE) and tokens (5 bytes each, `deflate::token_bytes`): 9
+    /// bytes a token.
+    pub fn put_fixed(&self, out: &mut Vec<u8>) {
+        self.pos.iter().for_each(|p| out.extend_from_slice(&p.to_le_bytes()));
+        self.tokens.iter().for_each(|&t| out.extend_from_slice(&aqr_flate::deflate::token_bytes(t)));
+    }
+
+    /// The reference that [`Reference::put_fixed`] wrote as `b` (9 bytes a token), reserved
+    /// exactly.
+    pub fn get_fixed(b: &[u8]) -> Reference {
+        let k = b.len() / 9;
+        let mut r = Reference::with_capacity(k);
+        r.pos.extend(b[..4 * k].as_chunks::<4>().0.iter().map(|&p| u32::from_le_bytes(p)));
+        r.tokens.extend(
+            b[4 * k..].as_chunks::<5>().0.iter().map(|&t| aqr_flate::deflate::token_of(t).unwrap_or(Token::Lit(0))),
+        );
+        r
     }
 
     /// None yet, for [`Reference::span`] of `tokens` tokens in all (the vectors never grow
@@ -202,21 +225,42 @@ impl Reference {
     }
 }
 
-/// The parser's sink for a [`Reference`]: the position, and the tokens so far.
+/// Parses the zlib streams of `payload` as [`encode`] finds them into `sink`.
+fn each_stream<S: Sink>(payload: &[u8], sink: &mut S) -> crate::Result<()> {
+    let mut o = 0;
+    loop {
+        let l = inflate::parse_head(&payload[o + 2..], usize::MAX, sink)?;
+        match next_stream(payload, o + 2 + l.end).filter(|&next| parses(&payload[next + 2..])) {
+            Some(next) => o = next,
+            None => return Ok(()),
+        }
+    }
+}
+
+/// The parser's sink for a [`Reference`]: the position, the tokens so far, and where not `keep`
+/// only their count.
 struct RefSink {
     p: usize,
+    n: usize,
+    keep: bool,
     r: Reference,
 }
 
 impl Sink for RefSink {
     fn lit(&mut self, b: u8) {
-        self.r.pos.push(self.p as u32);
-        self.r.tokens.push(Token::Lit(b));
+        if self.keep {
+            self.r.pos.push(self.p as u32);
+            self.r.tokens.push(Token::Lit(b));
+        }
+        self.n += 1;
         self.p += 1;
     }
     fn mat(&mut self, len: u16, dist: u16, _: bool) {
-        self.r.pos.push(self.p as u32);
-        self.r.tokens.push(Token::Match { len, dist, alt258: false });
+        if self.keep {
+            self.r.pos.push(self.p as u32);
+            self.r.tokens.push(Token::Match { len, dist, alt258: false });
+        }
+        self.n += 1;
         self.p += len as usize;
     }
     fn stored(&mut self, b: &[u8]) {
@@ -371,14 +415,19 @@ impl<'a> Player<'a> {
         let (tb, st, raw) = (part(lens[0])?, part(lens[1])?, part(lens[2])?);
         let mut r = BitR::new(tb);
         let used: Vec<bool> = (0..tables).map(|_| r.bits(1) == 1).collect();
-        let mut freqs = Vec::with_capacity(tables);
-        for (t, &u) in used.iter().enumerate() {
-            freqs.push(if u { rans::read_table(&mut r, alphabet(t))? } else { vec![] });
+        // the used tables' frequencies one after another (reserved exactly), where table `t`'s
+        // are
+        let size = |t: usize| if used[t] { alphabet(t) } else { 0 };
+        let mut freqs = Vec::with_capacity((0..tables).map(size).sum());
+        for t in (0..tables).filter(|&t| used[t]) {
+            rans::read_table_into(&mut r, alphabet(t), &mut freqs)?;
         }
         if r.overrun() {
             return Err(crate::corrupt());
         }
-        Ok(Player { tables: Tables::new(&freqs), dec: Decoder::new(st), raw: BitR::new(raw) })
+        let at = |t: usize| (0..t).map(size).sum::<usize>();
+        let tables = Tables::of(tables, |t| &freqs[at(t)..at(t) + size(t)]);
+        Ok(Player { tables, dec: Decoder::new(st), raw: BitR::new(raw) })
     }
 }
 

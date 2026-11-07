@@ -814,6 +814,7 @@ dependencies = [
 name = "aqr-png"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
  "aqr-common",
  "aqr-flate",
  "aqr-formula",

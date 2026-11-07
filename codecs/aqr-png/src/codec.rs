@@ -55,7 +55,7 @@ const PLAIN: u8 = 0;
 /// IDAT: all of the data is image payload.
 const IDAT: u8 = 1;
 /// fdAT: a sequence number (in the skeleton), then image payload.
-const FDAT: u8 = 2;
+pub(crate) const FDAT: u8 = 2;
 
 /// The images of a chunk list: runs of chunks of the same image class, with the geometry
 /// their payload has (the IHDR's, or the frame's from the last fcTL), if valid.
@@ -66,7 +66,9 @@ fn images<'a>(
 ) -> Vec<(std::ops::Range<usize>, Option<Ihdr>)> {
     let ihdr = if classes.first() == Some(&PLAIN) && &kinds(0) == b"IHDR" { Ihdr::parse(data(0)) } else { None };
     let mut frame: Option<Ihdr> = None;
-    let mut out = vec![];
+    // (as many as runs of image chunks)
+    let runs = classes.iter().enumerate().filter(|&(i, &c)| c != PLAIN && (i == 0 || classes[i - 1] != c)).count();
+    let mut out = Vec::with_capacity(runs);
     let mut i = 0;
     while i < classes.len() {
         let c = classes[i];
@@ -397,16 +399,16 @@ fn write_record(kind: Kind, enc: model::Encoded, threads: usize, rec: &mut Vec<u
 
 /// The chunks of a file without its image payloads, as the skeleton gives them.
 pub(crate) struct Skeleton<'a> {
-    chunks: Vec<SkChunk<'a>>,
-    classes: Vec<u8>,
-    trailer: &'a [u8],
+    pub(crate) chunks: Vec<SkChunk<'a>>,
+    pub(crate) classes: Vec<u8>,
+    pub(crate) trailer: &'a [u8],
     /// The images, as in [`images`].
     pub images: Vec<(std::ops::Range<usize>, Option<Ihdr>)>,
 }
 
-struct SkChunk<'a> {
+pub(crate) struct SkChunk<'a> {
     kind: [u8; 4],
-    len: usize,
+    pub(crate) len: usize,
     crc: Option<u32>,
     /// The whole data (plain chunks) or the sequence number (fdAT).
     data: &'a [u8],
@@ -416,8 +418,12 @@ impl<'a> Skeleton<'a> {
     pub(crate) fn parse(sk: &'a [u8]) -> Result<Skeleton<'a>> {
         let mut k = 0;
         let nchunks = get_varint(sk, &mut k)? as usize;
-        let mut chunks = Vec::with_capacity(nchunks.min(1 << 16));
-        let mut classes = Vec::with_capacity(nchunks.min(1 << 16));
+        // (exactly as many: a chunk takes 6 bytes at least)
+        if nchunks > sk.len() / 6 {
+            return Err(crate::corrupt());
+        }
+        let mut chunks = Vec::with_capacity(nchunks);
+        let mut classes = Vec::with_capacity(nchunks);
         for _ in 0..nchunks {
             let kind: [u8; 4] = get_bytes(sk, &mut k, 4)?.try_into().unwrap();
             let len = get_varint(sk, &mut k)? as usize;
@@ -469,17 +475,53 @@ impl<'a> Skeleton<'a> {
             let r = if recs[i].first() == Some(&2) { reference_of(ih, refs.and_then(|r| r.get(i))) } else { None };
             image_payload(recs[i], img_len(&imgs[i].0), ih, threads, r, keep)
         };
-        let payloads = if threads > 1 && imgs.len() > 1 {
+        // each image's payload, and its own reference
+        let mut payloads: Vec<Vec<u8>> = Vec::with_capacity(imgs.len());
+        let mut own: Option<References> = keep.then(|| Vec::with_capacity(imgs.len()));
+        if threads > 1 && imgs.len() > 1 {
             let workers = threads.min(imgs.len());
             let inner = (threads / workers).max(1);
-            // (as tasks on WebAssembly)
-            let res = aqr_common::pool::par_map_apart(imgs.len(), workers, |i| image_payload(i, inner));
-            res.into_iter().collect::<Result<Vec<_>>>()?
+            // (as tasks on WebAssembly: each the payload, its reference's positions and tokens
+            // (in the payload's room), and a 0; or a 1)
+            let task = |i: usize| match image_payload(i, inner) {
+                Ok((mut p, r)) => {
+                    if let Some(r) = r {
+                        r.put_fixed(&mut p);
+                    }
+                    p.push(0);
+                    p
+                }
+                Err(_) => vec![1],
+            };
+            aqr_common::pool::par_each_apart(
+                imgs.len(),
+                workers,
+                2,
+                task,
+                || {},
+                |i, mut b| {
+                    let n = img_len(&imgs[i].0);
+                    if b.last() != Some(&0) || b.len() < 1 + n || (b.len() - 1 - n) % 9 != 0 {
+                        return Err(crate::corrupt());
+                    }
+                    if let Some(own) = &mut own {
+                        let r = model::Reference::get_fixed(&b[n..b.len() - 1]);
+                        own.push((imgs[i].1, imgs[i].1.and(Some(r))));
+                    }
+                    b.truncate(n);
+                    payloads.push(b);
+                    Ok(())
+                },
+            )?;
         } else {
-            (0..imgs.len()).map(|i| image_payload(i, threads)).collect::<Result<Vec<_>>>()?
-        };
-        let (payloads, own): (Vec<Vec<u8>>, Vec<Option<model::Reference>>) = payloads.into_iter().unzip();
-        let own = keep.then(|| imgs.iter().map(|i| i.1).zip(own).collect());
+            for (i, img) in imgs.iter().enumerate() {
+                let (p, r) = image_payload(i, threads)?;
+                if let Some(own) = &mut own {
+                    own.push((img.1, r));
+                }
+                payloads.push(p);
+            }
+        }
 
         // Reassemble the file.
         let total: usize = cs.iter().map(|c| c.len + 12).sum::<usize>() + 8 + self.trailer.len();
@@ -527,7 +569,12 @@ fn image_payload(
     keep: bool,
 ) -> Result<(Vec<u8>, Option<model::Reference>)> {
     let (payload, own) = match rec.first() {
-        Some(0) if rec.len() == len + 1 => (rec[1..].to_vec(), None),
+        Some(0) if rec.len() == len + 1 => {
+            // (and room for a byte after it, as a task gives it)
+            let mut p = Vec::with_capacity(len + 1);
+            p.extend_from_slice(&rec[1..]);
+            (p, None)
+        }
         Some(&k @ (1 | 2)) => {
             let ih = ih.as_ref().ok_or_else(crate::corrupt)?;
             let g = Geometry::new(ih).ok_or_else(crate::corrupt)?;
@@ -574,57 +621,75 @@ fn rebuild(
     };
     let layout = part(&mut at)?;
     let headers = part(&mut at)?;
+    // (read twice: the blocks counted, then the streams and spans made of exactly as many)
+    let (mut streams, mut spans) = (Vec::new(), Vec::new());
     let mut r = BitR::new(layout);
-    let kind = if r.bits(1) == 1 { Kind::Bytes } else { Kind::Image };
-    let n = r.gamma()? as usize;
-    let nstreams = r.gamma()? as usize + 1;
-    if nstreams > layout.len() {
-        return Err(crate::corrupt());
-    }
-    let mut streams = Vec::with_capacity(nstreams);
-    let mut spans = vec![];
-    for _ in 0..nstreams {
-        let zhdr = [r.bits(8) as u8, r.bits(8) as u8];
-        let nblocks = r.gamma()? as usize;
-        if nblocks > layout.len() * 8 {
+    let (mut kind, mut n) = (Kind::Image, 0);
+    for fill in [false, true] {
+        r = BitR::new(layout);
+        kind = if r.bits(1) == 1 { Kind::Bytes } else { Kind::Image };
+        n = r.gamma()? as usize;
+        let nstreams = r.gamma()? as usize + 1;
+        if nstreams > layout.len() {
             return Err(crate::corrupt());
         }
-        let std_last = r.bits(1) == 1;
-        let mut blocks = Vec::with_capacity(nblocks);
-        let mut prev_count = 0usize;
-        for i in 0..nblocks {
-            let last = if std_last { i + 1 == nblocks } else { r.bits(1) == 1 };
-            let body = match r.bits(2) {
-                0 => {
-                    let pad = r.bits(8) as u8;
-                    let len = r.bits(16) as u16;
-                    spans.push(Span::Stored(len as usize));
-                    Body::Stored { pad, len }
-                }
-                t @ (1 | 2) => {
-                    let count = if r.bits(1) == 1 { prev_count } else { r.gamma()? as usize };
-                    prev_count = count;
-                    spans.push(Span::Tokens(count));
-                    if t == 1 {
-                        Body::Fixed { tokens: vec![] }
-                    } else {
-                        Body::Dynamic { header: Default::default(), tokens: vec![] }
-                    }
-                }
-                _ => return Err(crate::corrupt()),
-            };
-            blocks.push(Block { last, body });
-            if r.overrun() {
+        if fill {
+            streams.reserve_exact(nstreams);
+        }
+        let mut total = 0usize;
+        for _ in 0..nstreams {
+            let zhdr = [r.bits(8) as u8, r.bits(8) as u8];
+            let nblocks = r.gamma()? as usize;
+            if nblocks > layout.len() * 8 {
                 return Err(crate::corrupt());
             }
+            total += nblocks;
+            let std_last = r.bits(1) == 1;
+            let mut blocks = Vec::with_capacity(if fill { nblocks } else { 0 });
+            let mut prev_count = 0usize;
+            for i in 0..nblocks {
+                let last = if std_last { i + 1 == nblocks } else { r.bits(1) == 1 };
+                let (body, span) = match r.bits(2) {
+                    0 => {
+                        let pad = r.bits(8) as u8;
+                        let len = r.bits(16) as u16;
+                        (Body::Stored { pad, len }, Span::Stored(len as usize))
+                    }
+                    t @ (1 | 2) => {
+                        let count = if r.bits(1) == 1 { prev_count } else { r.gamma()? as usize };
+                        prev_count = count;
+                        match t {
+                            1 => (Body::Fixed { tokens: vec![] }, Span::Tokens(count)),
+                            _ => (Body::Dynamic { header: Default::default(), tokens: vec![] }, Span::Tokens(count)),
+                        }
+                    }
+                    _ => return Err(crate::corrupt()),
+                };
+                if fill {
+                    blocks.push(Block { last, body });
+                    spans.push(span);
+                }
+                if r.overrun() {
+                    return Err(crate::corrupt());
+                }
+            }
+            let tail_pad = r.bits(8) as u8;
+            let ntrail = r.gamma()? as usize;
+            if ntrail > layout.len() * 8 {
+                return Err(crate::corrupt());
+            }
+            if fill {
+                let trailing: Vec<u8> = (0..ntrail).map(|_| r.bits(8) as u8).collect();
+                streams.push(StreamLayout { zhdr, blocks, tail_pad, trailing });
+            } else {
+                for _ in 0..ntrail {
+                    r.bits(8);
+                }
+            }
         }
-        let tail_pad = r.bits(8) as u8;
-        let ntrail = r.gamma()? as usize;
-        if ntrail > layout.len() * 8 {
-            return Err(crate::corrupt());
+        if !fill {
+            spans.reserve_exact(total);
         }
-        let trailing: Vec<u8> = (0..ntrail).map(|_| r.bits(8) as u8).collect();
-        streams.push(StreamLayout { zhdr, blocks, tail_pad, trailing });
     }
     let nalts = r.gamma()? as usize;
     if nalts > layout.len() * 8 {
@@ -654,7 +719,8 @@ fn rebuild(
     // on another one as this one decodes. (The writer reserves room for the longest codes
     // of a block's tokens ahead.)
     let most = spans.iter().map(|s| if let Span::Tokens(c) = *s { c } else { 0 }).max().unwrap_or(0);
-    let mut emit = Payload::new(streams, alts, headers, len + 6 * most + 64)?;
+    // (and room for the reference kept, 9 bytes a token, as a task gives it with the payload)
+    let mut emit = Payload::new(streams, alts, headers, payload_room(len, most, keep.then_some(ntok)))?;
     // (positions as the reference's are 32-bit)
     let mut own = (keep && n <= u32::MAX as usize).then(|| model::Reference::with_capacity(ntok));
     // (the writer on a worker of the pool, if one is free)
@@ -718,6 +784,12 @@ fn rebuild(
         }
         Ok((out, own))
     }
+}
+
+/// Bytes of the payload of an image of `len` bytes, of blocks of `most` tokens at most: what
+/// writing reserves past it, and a reference of `kept` tokens and a byte after it.
+pub(crate) fn payload_room(len: usize, most: usize, kept: Option<usize>) -> usize {
+    len + 6 * most + 64 + kept.map_or(0, |k| 9 * k)
 }
 
 /// Blocks in flight between the model and the writer.
@@ -892,3 +964,16 @@ mod tests {
         assert!(matches!(rebuild(&g, &rec_of(true)[1..], payload.len(), 1, None, false), Err(Error::Corrupt)));
     }
 }
+
+// (what the plan counts them, `plan::wasm`)
+#[cfg(target_family = "wasm")]
+const _: () = {
+    use crate::plan::wasm;
+    assert!(size_of::<SkChunk>() == wasm::CHUNK as usize);
+    assert!(size_of::<(std::ops::Range<usize>, Option<Ihdr>)>() == wasm::IMAGE as usize);
+    assert!(size_of::<StreamLayout>() == wasm::STREAM as usize);
+    assert!(size_of::<Block>() == wasm::BLOCK as usize);
+    assert!(size_of::<Span>() == wasm::SPAN as usize);
+    assert!(size_of::<model::Pass>() == wasm::PASS as usize);
+    assert!(size_of::<(Option<Ihdr>, Option<model::Reference>)>() == wasm::REFERENCES as usize);
+};

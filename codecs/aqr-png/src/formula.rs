@@ -11,7 +11,7 @@ use aqr_formula::{Apply, Formula, Kind, Module, Node};
 
 pub use crate::module::{decode, decode_against, decode_set};
 
-pub const MODULE: Module = Module::new("png-recons", 3).with_memory(memory);
+pub const MODULE: Module = Module::new("png-recons", 3).with_plan(plan_recons);
 
 /// The module of a file coded against a reference file ([`encode_against`], [`decode_against`]).
 pub const AGAINST_MODULE: Module = Module::new("png-against", 1).with_memory(memory_against);
@@ -142,8 +142,15 @@ pub fn encode_set(
         records.push(f.push_as("png/records", Kind::Compressed, recs));
     }
     let inputs = vec![Node::pack(sks), Node::pack(indexes), Node::pack(records)];
-    let a =
-        Apply { module: SET_MODULE, resources: vec![], params, inputs, len: 0, memory_limit: aqr_formula::NO_LIMIT, task_limits: Vec::new() };
+    let a = Apply {
+        module: SET_MODULE,
+        resources: vec![],
+        params,
+        inputs,
+        len: 0,
+        memory_limit: aqr_formula::NO_LIMIT,
+        task_limits: Vec::new(),
+    };
     let outputs = f.split(a, files.iter().map(|d| d.len() as u64).collect());
     f.root = Node::Concat(outputs);
     Some(f)
@@ -152,11 +159,10 @@ pub fn encode_set(
 // The modules' memory. The decoders are rebuilt here as sums of bytes on 32 bits: the file's
 // skeleton and the images' records are read as `codec::Skeleton` and `codec::rebuild` do.
 
-/// The memory of `png-recons`: [`rebuild`] of the file in the memory as it is started.
-fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+/// The memory of `png-recons`: its plan ([`crate::plan::recons`]).
+fn plan_recons(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     let (&[], Some([sk, index, records])) = (u.params, u.all_contents()) else { return None };
-    let f = File::parse(sk, index, records, false)?;
-    Some(slack(rebuild(&f, u.base(), THREADS, u.output()).peak))
+    crate::plan::recons(u.initial(), u.inputs, (sk, index, records))
 }
 
 /// The memory of `png-against`: the same after the reference file's images are parsed
@@ -667,7 +673,7 @@ mod tests {
             contents: &vec![sk, index, records],
             initial_pages: 17,
         };
-        let est = memory(&u).expect("an estimate");
+        let est = plan_recons(&u).expect("a plan");
         assert!(est > u.base() + 2 * file.len() as u64, "{est}");
         // a variant of the file, against it
         let other = common::apng(&[(64, 48), (32, 32), (64, 48)], 2);

@@ -10,6 +10,7 @@ use crate::{Result, corrupt};
 /// length of each image's record, as varints) and the records.
 pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
     let (&[], &[sk, index, records]) = (params, inputs) else { return Err(corrupt()) };
+    crc_tables();
     Ok(rebuild(sk, index, records, None, len, threads, false)?.0)
 }
 
@@ -17,6 +18,7 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
 /// a fourth input.
 pub fn decode_against(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
     let (&[], &[sk, index, records, reference]) = (params, inputs) else { return Err(corrupt()) };
+    crc_tables();
     Ok(rebuild(sk, index, records, Some(&codec::references(reference)), len, threads, false)?.0)
 }
 
@@ -24,6 +26,7 @@ pub fn decode_against(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize)
 /// records of the files, each against its parent as the parameters give them with its size,
 /// one after another in `len` bytes.
 pub fn decode_set(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
+    crc_tables();
     let mut at = 0;
     let n = codec::get_varint(params, &mut at)?;
     // (each parameter takes a byte at least)
@@ -80,6 +83,12 @@ pub fn decode_set(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> 
     let mut all = Vec::with_capacity(len as usize);
     out.into_iter().for_each(|f| all.extend_from_slice(&f.unwrap()));
     Ok(all)
+}
+
+/// The tables of the chunks' CRC-32 made first: in WebAssembly they take memory as they are
+/// first used (`aqr_common::crc32::WASM_TABLES`).
+fn crc_tables() {
+    aqr_common::crc32::hash(&[]);
 }
 
 /// The file of `len` bytes of the skeleton `sk`, the index and the records, against the images

@@ -464,6 +464,112 @@ fn flate_plans_hold() {
     }
 }
 
+/// A PNG chunk of `kind` and `data`, appended to `out`.
+fn png_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(kind);
+    out.extend_from_slice(data);
+    out.extend_from_slice(&aqr_common::crc32::hash(&[&kind[..], data].concat()).to_be_bytes());
+}
+
+/// The filtered rows of a picture of `w` by `h` pixels of `bpp` bytes (a pass of it), smooth with
+/// noise, each row's filter in turn.
+fn png_rows(w: usize, h: usize, bpp: usize, seed: u32) -> Vec<u8> {
+    let mut x = seed;
+    let mut d = Vec::with_capacity(h * (w * bpp + 1));
+    for y in 0..h {
+        d.push((y % 5) as u8);
+        for i in 0..w * bpp {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            // (an alpha channel opaque)
+            d.push(if bpp == 4 && i % 4 == 3 { 255 } else { ((i / bpp + y) as u32 / 3 + (x >> 29)) as u8 });
+        }
+    }
+    d
+}
+
+/// A PNG file of a picture of `w` by `h` pixels of `depth` bits and color type `color`
+/// (interlaced where `interlace`), its data in IDAT chunks of `idat` bytes; with `frames` more
+/// frames of it (an APNG).
+fn png_file(w: u32, h: u32, depth: u8, color: u8, interlace: bool, idat: usize, frames: u32) -> Vec<u8> {
+    let channels = [1, 0, 3, 1, 2, 0, 4][color as usize];
+    let bpp = (channels * depth as usize).div_ceil(8);
+    let p = aqr_flate::zlib::Params { level: 6, ..Default::default() };
+    let data = |seed: u32| {
+        let rows = match interlace {
+            false => png_rows(w as usize, h as usize, bpp, seed),
+            true => [(0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4), (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2)]
+                .iter()
+                .filter_map(|&(x0, y0, dx, dy)| {
+                    let (pw, ph) =
+                        ((w as usize).saturating_sub(x0).div_ceil(dx), (h as usize).saturating_sub(y0).div_ceil(dy));
+                    (pw > 0 && ph > 0).then(|| png_rows(pw, ph, bpp, seed))
+                })
+                .flatten()
+                .collect(),
+        };
+        let z = aqr_flate::zlib::compress(&rows, p).unwrap();
+        let mut zs = vec![0x78, 0x9c];
+        zs.extend_from_slice(&z);
+        zs.extend_from_slice(&adler32(&rows).to_be_bytes());
+        zs
+    };
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut ihdr = [w.to_be_bytes(), h.to_be_bytes()].concat();
+    ihdr.extend_from_slice(&[depth, color, 0, 0, interlace as u8]);
+    png_chunk(&mut out, b"IHDR", &ihdr);
+    let mut seq = 0u32;
+    let fctl =
+        |seq: u32| [&seq.to_be_bytes()[..], &w.to_be_bytes(), &h.to_be_bytes(), &[0; 8], &[0, 1, 0, 10, 0, 0]].concat();
+    if frames > 0 {
+        png_chunk(&mut out, b"acTL", &[(frames + 1).to_be_bytes(), 0u32.to_be_bytes()].concat());
+        png_chunk(&mut out, b"fcTL", &fctl(seq));
+        seq += 1;
+    }
+    for c in data(1).chunks(idat) {
+        png_chunk(&mut out, b"IDAT", c);
+    }
+    for f in 0..frames {
+        png_chunk(&mut out, b"fcTL", &fctl(seq));
+        seq += 1;
+        for c in data(2 + f).chunks(idat) {
+            png_chunk(&mut out, b"fdAT", &[&seq.to_be_bytes()[..], c].concat());
+            seq += 1;
+        }
+    }
+    png_chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+/// The Adler-32 of `d`.
+fn adler32(d: &[u8]) -> u32 {
+    let (mut a, mut b) = (1u32, 0u32);
+    for &x in d {
+        a = (a + x as u32) % 65521;
+        b = (b + a) % 65521;
+    }
+    b << 16 | a
+}
+
+/// png-recons lays its memory out as a stack, its limit its plan of the instance and as many
+/// tasks at once as their slots allow: of RGB, RGBA interlaced and 16-bit gray pictures, a large
+/// one (its data in windows), IDAT chunks of several sizes, and APNGs (each frame a task).
+#[test]
+fn png_plans_hold() {
+    let files = [
+        ("rgb", png_file(300, 200, 8, 2, false, 1 << 20, 0)),
+        ("rgba interlaced", png_file(257, 131, 8, 6, true, 8192, 0)),
+        ("gray16", png_file(200, 150, 16, 0, false, 1000, 0)),
+        ("large", png_file(1400, 1100, 8, 2, false, 1 << 16, 0)),
+        ("apng", png_file(160, 120, 8, 6, false, 1 << 20, 3)),
+        ("apng of many", png_file(160, 120, 8, 6, false, 1 << 20, 11)),
+    ];
+    for (what, d) in files {
+        let f = aqr_png::formula::encode(&d, 1).unwrap_or_else(|| panic!("{what}"));
+        plan_holds(&format!("png {what}"), f, &d);
+    }
+}
+
 /// lzop files natively and as WebAssembly alike, and their records damaged in turn failing alike
 /// (or giving the same).
 #[test]

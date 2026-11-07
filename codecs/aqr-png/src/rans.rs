@@ -21,6 +21,11 @@ pub fn write_table(w: &mut BitW, counts: &[u32]) -> Vec<u32> {
     rans32::write_table::<PROB_BITS, false>(w, counts)
 }
 
+/// [`read_table`], appended to `out`.
+pub fn read_table_into(r: &mut BitR, n: usize, out: &mut Vec<u32>) -> Result<()> {
+    rans32::read_table_into::<PROB_BITS, false>(r, n, out).map_err(|_| crate::corrupt())
+}
+
 pub fn read_table(r: &mut BitR, n: usize) -> Result<Vec<u32>> {
     rans32::read_table::<PROB_BITS, false>(r, n).map_err(|_| crate::corrupt())
 }

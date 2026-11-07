@@ -36,6 +36,64 @@ pub fn whole(params: u64, resources: &[u64], inputs: &[u64]) -> u64 {
     block(params) + list(resources) + list(inputs)
 }
 
+/// Bytes of a memory of pages holding `n` bytes.
+pub const fn pages(n: u64) -> u64 {
+    n.div_ceil(65536) * 65536
+}
+
+/// A module's memory as its plan follows it, taken block by block in the order the module takes
+/// it: the top of the stack, the most it reached (the memory never shrinks), and the module's
+/// spawns: its memory as it took their results, and each task's (a copy of the memory as it was
+/// spawned, and what it took over it).
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, Default)]
+pub struct Sim {
+    pub top: u64,
+    pub high: u64,
+    pub spawns: alloc::vec::Vec<(u64, alloc::vec::Vec<u64>)>,
+}
+
+#[cfg(feature = "alloc")]
+impl Sim {
+    /// Of a module whose initial memory (and what it took before) is `top` bytes.
+    pub fn new(top: u64) -> Sim {
+        Sim { top, high: top, spawns: alloc::vec::Vec::new() }
+    }
+
+    /// A block of `n` bytes taken and kept (until the top is set back).
+    pub fn take(&mut self, n: u64) {
+        self.top += block(n);
+        self.high = self.high.max(self.top);
+    }
+
+    /// `n` bytes (of blocks) taken and given back at once.
+    pub fn peak(&mut self, n: u64) {
+        self.high = self.high.max(self.top + n);
+    }
+
+    /// The memory of a task taking `own` bytes over a copy of the memory as it is now.
+    pub fn task(&self, own: u64) -> u64 {
+        pages(self.high).max(pages(self.top + own))
+    }
+
+    /// A spawn of tasks of memories `tasks` ([`Sim::task`]) whose results are now taken.
+    pub fn spawned(&mut self, tasks: alloc::vec::Vec<u64>) {
+        self.spawns.push((pages(self.high), tasks));
+    }
+
+    /// The most the module takes, its tasks running `slots` at once: its own memory at most, or
+    /// as it takes a spawn's results with as many of its tasks as their slots allow, the
+    /// largest.
+    pub fn plan(self, slots: usize) -> u64 {
+        let spawn = |(inst, mut tasks): (u64, alloc::vec::Vec<u64>)| {
+            tasks.sort_unstable_by(|a, b| b.cmp(a));
+            inst + tasks.iter().take(slots).sum::<u64>()
+        };
+        let high = pages(self.high);
+        self.spawns.into_iter().map(spawn).fold(high, u64::max)
+    }
+}
+
 #[cfg(target_family = "wasm")]
 pub use imp::Stack;
 

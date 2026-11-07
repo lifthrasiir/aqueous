@@ -338,6 +338,10 @@ P = W_main + Σ_태스크 (W_spawn + 태스크의 계획 버퍼) + 채널 메시
 - 작은 스트림: 2 MiB까지 묶은 그룹마다 태스크 하나. 결과는 스트림 길이의 합만큼 잡아 그 위에 이어 쓴다(`reconstruct_onto`). 쓰기는 토큰 4096개마다 자리를 잡아 여유가 고정된다(`TOKEN_SLACK`). 스트림 길이는 디코더가 미리 모르므로 index에 적는다(형식 변경). 모델은 첫 레코드의 프로필로 스트림 전에 만든다. CRC 표(16 KiB, Wasm에서 처음 쓸 때 만든다)도 처음에 만든다.
 - 계획 = `plan::plan`: 인스턴스가 잡는 블록을 순서대로 따라가며 꼭대기와 최고점을 세고, spawn마다 태스크(그때의 메모리 복사 + 제 몫)를 센다. Wasm 구조체 크기는 `plan::wasm`에 두고 Wasm 빌드에서 assert로 확인한다. 실측 = 계획이다(`flate_plans_hold`: 정적·적응 프로필(zlib 에뮬레이션), 끌어오는 큰 스트림(배치 여럿), 작은 스트림 묶음, 저장 블록, 파생 값 None·Zip·ZipBefore; 그리고 10gb 코퍼스의 ZIP·PDF·JAR 등 64개 파일의 적용 76개).
 
+**png-recons.**
+- 이미지의 layout을 읽으며 span 목록을 push로 키웠고, 모델 표의 빈도를 표마다 `Vec`로 읽어 표를 만든 뒤 놓았고(구멍), 태스크의 결과(payload와 참조)를 `Wire`로 보냈다. 이제 layout은 두 번 읽는다(블록을 먼저 센다). 빈도는 버퍼 하나에 읽는다. payload는 쓰개가 앞서 잡는 여유와 결과의 바이트, 그리고 지킬 참조(토큰마다 9바이트)의 자리까지 처음에 잡는다. 태스크는 그 payload를 그대로 돌려주고, 인스턴스는 받은 대로 쥔다(`par_each_apart`). 그대로 둔 이미지(mode 0)도 바이트 하나의 자리를 더 잡는다. CRC 표는 처음에 만든다.
+- 계획 = `plan::recons`: 스켈레톤, 레코드 목록, 이미지마다(그 레코드를 `codec::rebuild`처럼 읽어) 남는 블록과 그 위에 잠깐 잡는 디코더 창을 `aqr_api::stack::Sim`으로 따라간다(flate-set의 것을 옮겼다). 실측 = 계획이다(`png_plans_hold`: RGB, 비월 RGBA, 16비트 회색, 창으로 나누는 큰 그림, APNG 둘(태스크가 슬롯보다 많은 것까지); 그리고 10gb 코퍼스의 PNG 1661개 중 png-recons가 쓰인 125개).
+
 ## 다음 순서
 
 1. `Module::memory_usage_in_pages`를 이미 정확한 용량을 쓰는 모듈들(exe, xsv, fasta, zip, git, pdf, png, …)부터 만든다.

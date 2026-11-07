@@ -190,6 +190,14 @@ Neither side holds the inflated data, the raw image or the stream's tokens whole
   data on photos), since the static tables are counted over all of them before the rANS
   stream is coded backwards. They are freed before the record is copied out.
 
+`png-recons` lays its memory out as a stack (`aqr_api::stack`), so its limit is its plan
+(`plan::recons`): the skeleton and its records listed, each image's layout and model tables
+reserved exactly (the layout read twice, its blocks counted first; the tables' frequencies in
+one buffer), its payload of room for what writing reserves past it, the decoder's windows; the
+images as tasks of several, each giving its payload back with a byte (and its reference, 9
+bytes a token, where kept), the file made of them; the CRC tables first. (`png-against` and
+`png-set` are not planned yet: the reference file's parse takes memory as it goes.)
+
 Peak heap of `formula::encode` and of the evaluation (`tests/memory.rs` checks it, on a
 9.4 MB image), fitted over the 364 files of the sets above that are coded: 4.2 MB + 3.7×
 the file for the first, 2.9 MB + 1.1× for the second (the constants are mostly the

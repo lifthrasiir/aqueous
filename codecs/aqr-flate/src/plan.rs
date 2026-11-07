@@ -35,38 +35,7 @@ pub mod wasm {
     pub const RUN: u64 = 20;
 }
 
-const PAGE: u64 = 1 << 16;
-
-fn pages(n: u64) -> u64 {
-    n.div_ceil(PAGE) * PAGE
-}
-
-/// The instance's memory as it is taken: the top of its stack, the most it reached (its memory
-/// never shrinks), and its spawns: the instance's memory as it took their results, and each
-/// task's memory.
-struct Mem {
-    top: u64,
-    high: u64,
-    spawns: Vec<(u64, Vec<u64>)>,
-}
-
-impl Mem {
-    /// A block of `n` bytes taken (and kept, until the top is set back).
-    fn take(&mut self, n: u64) {
-        self.top += block(n);
-        self.high = self.high.max(self.top);
-    }
-
-    /// Blocks of `n` bytes taken and given back at once.
-    fn peak(&mut self, n: u64) {
-        self.high = self.high.max(self.top + n);
-    }
-
-    /// A task taking `own` bytes over a copy of the memory as it is now.
-    fn task(&self, own: u64) -> u64 {
-        pages(self.high).max(pages(self.top + own))
-    }
-}
+use aqr_api::stack::Sim as Mem;
 
 /// A segment of a record: tokens, and the data from its start to the next one's.
 pub struct Seg {
@@ -346,7 +315,7 @@ fn rebuild(m: &mut Mem, st: &Stream, how: How) {
             for s in segs {
                 m.peak(block(9 + 5 * s.count));
             }
-            m.spawns.push((pages(m.high), tasks));
+            m.spawned(tasks);
             // (the handles given back: a hole below the pending tokens the first time)
             if b > 0 {
                 m.top = t;
@@ -495,7 +464,7 @@ pub fn plan(
                         .sum::<u64>(),
                 ));
             }
-            m.spawns.push((pages(m.high), tasks));
+            m.spawned(tasks);
         } else {
             for g in 0..groups {
                 let (room, most) = group(g);
@@ -505,10 +474,5 @@ pub fn plan(
         m.top = t1;
         i = j;
     }
-    let spawn = |(inst, mut tasks): (u64, Vec<u64>)| {
-        tasks.sort_unstable_by(|a, b| b.cmp(a));
-        inst + tasks.iter().take(slots).sum::<u64>()
-    };
-    let high = pages(m.high);
-    Some(m.spawns.into_iter().map(spawn).fold(high, u64::max))
+    Some(m.plan(slots))
 }
