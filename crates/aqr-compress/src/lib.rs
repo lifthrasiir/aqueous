@@ -132,7 +132,7 @@ mod hdf5;
 mod inflated;
 pub mod mapped;
 mod memory;
-pub use memory::{DEFAULT_BOUND, Fallback, fallbacks};
+pub use memory::{DEFAULT_BOUND, Fallback, bound_text, fallbacks};
 mod nsis;
 mod progress;
 mod seal;
@@ -3719,11 +3719,19 @@ mod tests {
         let _ = fallbacks();
         assert!(made(None) > 0);
         assert!(fallbacks().is_empty());
+        // (what fell back tells the exact minimal bound the application is declared with)
+        let mut f = recompress(&gz, &Options { smaller: false, ..Options::default() });
+        memory::declare(&mut f, &Native { threads: 1 }, &memory::Limits::default());
+        let declared = f.applies().iter().map(|a| aqr_formula::minimal_bound(a.memory_limit, &a.task_limits)).max();
+        let _ = fallbacks();
         // (the plan of an application is more than a byte)
         assert_eq!(made(Some(1)), 0);
         let told = fallbacks();
         assert!(!told.is_empty() && told.iter().all(|f| f.needed > 1 && !f.kept), "{told:?}");
         assert!(told.iter().any(|f| f.bytes == gz.len() as u64));
+        assert_eq!(told.iter().map(|f| f.needed).max(), declared);
+        assert_eq!(bound_text(256 << 20), "268435456 B = 256.00 MiB");
+        assert_eq!(bound_text((256 << 20) + 1), "268435457 B = 256.01 MiB");
     }
 
     /// The members of a gzip stream after its first (as gzip, pigz's `--independent` and

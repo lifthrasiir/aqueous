@@ -617,7 +617,11 @@ fn outliers(run: &Run) -> String {
         let what = if kept { "applications kept over the bound" } else { "recompressions not used for the bound" };
         say(
             &mut out,
-            format!("{module}: {n} {what} ({} of data, up to {} MiB needed)", size(bytes as f64), most >> 20),
+            format!(
+                "{module}: {n} {what} ({} of data, up to {} needed, minimal bound)",
+                size(bytes as f64),
+                aqr_compress::bound_text(most)
+            ),
         );
     }
     if said == 0 {

@@ -107,12 +107,21 @@ pub(crate) fn bound_of(bound: Option<u64>, module: Module) -> u64 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fallback {
     pub module: &'static str,
-    /// The minimal bound of the application (the largest of the formula's), in bytes.
+    /// The minimal bound of the application (the largest of the formula's), in bytes: exact, the
+    /// plan's instance limit with its memories imported and the sum of its task limits, as the
+    /// application would declare them.
     pub needed: u64,
     /// The bytes of the data the recompressor was given.
     pub bytes: u64,
     /// The application was kept (made by a step after the recompressors), not given up.
     pub kept: bool,
+}
+
+/// A minimal bound told exactly, for logs: its bytes, and MiB rounded up (never less than it
+/// is, so that a bound just passed does not read as met).
+pub fn bound_text(bytes: u64) -> String {
+    let hundredths = (bytes as u128 * 100).div_ceil(1 << 20);
+    format!("{bytes} B = {}.{:02} MiB", hundredths / 100, hundredths % 100)
 }
 
 static FALLBACKS: Mutex<Vec<Fallback>> = Mutex::new(Vec::new());

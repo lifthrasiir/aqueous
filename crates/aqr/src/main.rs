@@ -853,9 +853,9 @@ fn tell_fallbacks(fallbacks: &[aqr_compress::Fallback]) {
     for ((module, kept), (n, bytes, most)) in by_module {
         let what = if kept { "kept over the bound" } else { "not used for the bound" };
         eprintln!(
-            "application bound: {module}: {n} {what}, {} of data, up to {} MiB needed",
+            "application bound: {module}: {n} {what}, {} of data, up to {} needed (minimal bound)",
             size(bytes as f64),
-            most >> 20
+            aqr_compress::bound_text(most)
         );
     }
 }
