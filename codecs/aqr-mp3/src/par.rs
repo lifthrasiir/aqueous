@@ -11,7 +11,7 @@
 //!   rANS decoder are built on another while the headers are read; the output is assembled
 //!   in parallel pieces.
 
-use crate::bits::{BitReader, BitWriter};
+use crate::bits::{BitReader, BitWriter, FastWriter};
 use crate::codec::{
     self, Dec, Error, Frames, N_BYTE_STREAMS, S_CRC, S_GAPS, S_HDR, S_JUNK, S_RAWGR, S_SEGS, S_SIDE, S_TAILBITS,
 };
@@ -357,17 +357,11 @@ pub(crate) fn decode(
             // The reservoir whole, for the output assembled in parallel pieces; room for the
             // largest reservation (a granule's) at its end.
             let cap = fr.frames.iter().map(|f| f.3).sum::<usize>() + 4096;
-            let r_out = codec::main_pass(
-                &mut fr,
-                streams[S_TAILBITS],
-                streams[S_RAWGR],
-                streams[S_GAPS],
-                &mut side,
-                &mut dc,
-                &mut (),
-                cap,
-            )?
-            .finish();
+            let (tail, raw_gr, gaps) =
+                (codec::padded(streams[S_TAILBITS]), codec::padded(streams[S_RAWGR]), codec::padded(streams[S_GAPS]));
+            let mut w = FastWriter::with_capacity(cap);
+            codec::main_pass(&mut fr, [&tail, &raw_gr, &gaps], &mut side, &mut dc, &mut (), &mut w)?;
+            let r_out = w.finish();
             drop(side);
             let out = assemble(&fr, streams[S_JUNK], streams[S_CRC], &r_out, threads)?;
             if !dc.rans.in_bounds() {

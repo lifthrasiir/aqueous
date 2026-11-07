@@ -724,6 +724,7 @@ dependencies = [
 name = "aqr-mp3"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
  "aqr-common",
  "aqr-formula",
  "memchr",

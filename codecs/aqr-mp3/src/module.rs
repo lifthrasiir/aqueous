@@ -38,6 +38,8 @@ pub fn decode(
         codec::tables()
     } else {
         own = codec::tables_from(res).ok_or_else(|| corrupt("tables"))?;
+        // (the decoder's tables now, not at the first symbol: the plan has them here)
+        own.prepare_dec(1);
         &own
     };
     let &[.., words, raw] = inputs else { return Err(corrupt("inputs")) };
@@ -56,3 +58,22 @@ pub fn decode(
     }
     Ok(out)
 }
+
+/// Bytes of the structures the module holds, on WebAssembly (32-bit pointers; checked there by
+/// assertions): what its memory plan ([`crate::plan`]) is made of.
+pub mod wasm {
+    /// A frame of the list (header, side information, the payload's place and length), and the
+    /// models of the main pass and of the side information (boxed).
+    pub const FRAME: u64 = 108;
+    pub const STATE: u64 = 6048;
+    pub const SIDE_MODEL: u64 = 18806;
+}
+
+// (the sizes of the structures on WebAssembly, which the memory plan uses)
+#[cfg(target_family = "wasm")]
+const _: () = {
+    use crate::frame::{Header, SideInfo};
+    assert!(size_of::<(Header, SideInfo, usize, usize)>() == wasm::FRAME as usize);
+    assert!(size_of::<crate::model::State>() == wasm::STATE as usize);
+    assert!(size_of::<crate::side::SideModel>() == wasm::SIDE_MODEL as usize);
+};

@@ -169,6 +169,27 @@ impl Tables {
         Tables { off, n, freqs, canon, dec: OnceLock::new(), enc: OnceLock::new() }
     }
 
+    /// [`Tables::from_flat`] with the canonical contexts given: `canon[c]` is the first context
+    /// with the frequencies of `c`, or a context before `c` that has them (contexts of one table
+    /// share it). Nothing is compared or searched, and only the offsets are made here, after the
+    /// vectors given; the frequencies of each context must be valid, as `from_flat` requires.
+    pub fn from_canon(n: Vec<u16>, freqs: Vec<u16>, canon: Vec<u32>) -> Tables {
+        assert_eq!(n.len(), canon.len());
+        assert_eq!(n.iter().map(|&k| k as usize).sum::<usize>(), freqs.len());
+        let mut off = Vec::with_capacity(n.len());
+        let mut at = 0u32;
+        for &k in &n {
+            assert!((1..=256).contains(&k));
+            off.push(at);
+            at += k as u32;
+        }
+        for (c, &k) in canon.iter().enumerate() {
+            let k = k as usize;
+            assert!(k <= c && canon[k] as usize == k && n[k] == n[c]);
+        }
+        Tables { off, n, freqs, canon, dec: OnceLock::new(), enc: OnceLock::new() }
+    }
+
     /// Bytes of the blocks that the decoder's tables of contexts of alphabets `n` take, built
     /// on one thread (`block` the bytes a block of so many takes): by context, its first
     /// bucket; room for the alias entries of every context (the canonical ones written); those

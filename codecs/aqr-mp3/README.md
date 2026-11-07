@@ -76,6 +76,7 @@ any main data that cannot be reproduced.
 | `src/rc.rs` | Adaptive binary range coder (LZMA style) |
 | `src/codec.rs` | Whole-file encode / decode, byte streams |
 | `src/formula.rs` | The module `mp3-recons`: formula of a file, decoding |
+| `src/plan.rs` | The module's memory plan on WebAssembly (`aqr_api::stack`) |
 | `src/par.rs` | Encoding and decoding with more than one thread |
 | `../../crates/aqr-common` | Alias-table rANS with lazy table construction (`rans64`, re-exported as `rans`), bit readers and writers (`msb`, as `bits`), LEB128 |
 | `src/bin/train.rs` | Training of the built-in tables (`model/builtin.bin`) |
@@ -146,7 +147,8 @@ how they set these fields, so per-file adaptation pays here. 1.7% of the input.
   unchanged). No coefficient arrays in between. The failure path rolls the coder back.
 - **Assembly** (one thread): each frame is written out once its side information is
   complete and its payload final in the reservoir, which is kept from the next frame's
-  payload on only.
+  payload on only, in a window of 512 KiB that does not grow (the gaps are copied in pieces
+  of 64 KiB, the reservoir handed on between them).
 - **Huffman decoding**: register bit buffer with branchless refill; an 11-bit LUT
   resolves code and signs (tables without linbits) or the code (with linbits, escapes
   extracted from the same 64-bit window).
@@ -221,4 +223,7 @@ the calling thread, in order. Around them (`src/par.rs`):
 - **Memory**: about 61 MB of peak RSS through `aqr-show` whatever the file (see Results), the
   encoder's inverse maps 4 MB of it at most. The tables are also the resource every archive
   carries (about 38 KB archived). Decoding with more than one thread still holds the
-  reservoir whole.
+  reservoir whole. On WebAssembly (the module is on the stack allocator) the memory is exactly
+  its plan, `src/plan.rs`: the output, the tables (made of the memory they keep, their
+  contexts sharing the canonical one of their table), the frames (counted first), the padded
+  inputs, the models and the window, each made at its final size in that order.

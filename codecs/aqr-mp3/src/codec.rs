@@ -46,9 +46,71 @@ pub fn builtin_raw() -> &'static Arc<[u8]> {
 /// positive multiple of it, so that the encoder holds the symbols of one run at a time.
 pub const RUN_FRAMES: usize = 1024;
 
-/// The tables of the model in the uncompressed form `raw`, if it is valid.
+/// The sum of the alphabets of all contexts: the frequencies the tables keep.
+pub fn total_symbols() -> usize {
+    (0..model::N_CTX).map(model::alphabet).sum()
+}
+
+/// The tables of the model in the uncompressed form `raw`, if it is valid (as
+/// [`Model::parse`] says), made of the memory they keep ([`crate::plan`]): the contexts of a
+/// table share its canonical context, so nothing is searched.
 pub fn tables_from(raw: &[u8]) -> Option<Tables> {
-    Some(Tables::new(&Model::parse(raw)?.freqs()))
+    let (n_ctx, words) = (model::N_CTX, raw.len() / 2);
+    let w = |i: usize| u16::from_le_bytes([raw[2 * i], raw[2 * i + 1]]);
+    if !raw.len().is_multiple_of(2) || words < 1 + n_ctx {
+        return None;
+    }
+    let k = w(0) as usize;
+    if k > n_ctx {
+        // (every table is used by a context)
+        return None;
+    }
+    let mut n: Vec<u16> = Vec::with_capacity(n_ctx);
+    n.extend((0..n_ctx).map(|c| model::alphabet(c) as u16));
+    let mut canon: Vec<u32> = Vec::with_capacity(n_ctx);
+    let mut freqs: Vec<u16> = Vec::with_capacity(total_symbols());
+    // By table: its place in `raw` (first its size) and the first context that uses it
+    let mut info: Vec<(u32, u32)> = Vec::with_capacity(n_ctx);
+    info.resize(k, (0, u32::MAX));
+    for c in 0..n_ctx {
+        let i = info.get_mut(w(1 + c) as usize)?;
+        if i.1 == u32::MAX {
+            *i = (n[c] as u32, c as u32);
+        } else if i.0 != n[c] as u32 {
+            return None;
+        }
+    }
+    let mut at = 1 + n_ctx;
+    for (size, first) in info.iter_mut() {
+        if *first == u32::MAX {
+            return None;
+        }
+        let end = at + *size as usize;
+        let f = raw.get(2 * at..2 * end)?;
+        // (the frequencies nonzero, summing to the scale)
+        let (mut sum, mut zero) = (0u32, false);
+        for b in f.as_chunks::<2>().0 {
+            let x = u16::from_le_bytes(*b);
+            sum += x as u32;
+            zero |= x == 0;
+        }
+        if zero || sum != rans::PROB_SCALE {
+            return None;
+        }
+        *size = at as u32;
+        at = end;
+    }
+    if at != words {
+        return None;
+    }
+    for c in 0..n_ctx {
+        let (at, first) = info[w(1 + c) as usize];
+        let f = &raw[2 * at as usize..][..2 * n[c] as usize];
+        freqs.extend(f.as_chunks::<2>().0.iter().map(|b| u16::from_le_bytes(*b)));
+        canon.push(first);
+    }
+    drop(info);
+    Some(Tables::from_canon(n, freqs, canon))
 }
 
 /// Frequency tables shared by contexts: context `c` codes with `tables[map[c]]`.
@@ -484,6 +546,11 @@ pub fn decode(c: &Coded, t: &Tables) -> Result<Vec<u8>, Error> {
 }
 
 /// [`decode`] of the coded form in parts: the byte streams, the rANS words and the raw bits.
+///
+/// The blocks are made in the order that [`crate::plan`] follows, each at the size it ends at,
+/// and dropped in the opposite order: the output, the frames, the padded raw bits, the rANS
+/// words, the padded tail, raw granules and gaps, the side information's model and the
+/// reservoir's window (and in the main pass, its state).
 pub(crate) fn decode_parts(
     t: &Tables,
     len: u64,
@@ -491,18 +558,17 @@ pub(crate) fn decode_parts(
     words: &[u8],
     raw: &[u8],
 ) -> Result<Vec<u8>, Error> {
-    let raw_buf = {
-        let mut p = Vec::with_capacity(raw.len() + R_PAD);
-        p.extend_from_slice(raw);
-        p.resize(raw.len() + R_PAD, 0);
-        p
-    };
+    let mut out = Vec::new();
+    out.try_reserve_exact(usize::try_from(len).map_err(|_| Error("length"))?).map_err(|_| Error("length"))?;
+    let mut fr = parse_frames(s[S_SEGS], s[S_HDR], len)?;
+    let raw_buf = padded(raw);
     let mut dc =
         Dec { rans: rans::Decoder::from_le_bytes(t, words), raw: huff::BitBuf::new(&BitReader::new(&raw_buf, 0)) };
-    let mut fr = parse_frames(s[S_SEGS], s[S_HDR], len)?;
+    let (tail, raw_gr, gaps) = (padded(s[S_TAILBITS]), padded(s[S_RAWGR]), padded(s[S_GAPS]));
     let mut side = InlineSide { rc: rc::Decoder::new(s[S_SIDE]), m: SideModel::new() };
-    let mut out = Assembler::new(&fr, s[S_JUNK], s[S_CRC]);
-    let w = main_pass(&mut fr, s[S_TAILBITS], s[S_RAWGR], s[S_GAPS], &mut side, &mut dc, &mut out, WINDOW)?;
+    let mut w = FastWriter::with_capacity(WINDOW);
+    let mut out = Assembler::new(out, s[S_JUNK], s[S_CRC]);
+    main_pass(&mut fr, [&tail, &raw_gr, &gaps], &mut side, &mut dc, &mut out, &mut w)?;
     let out = out.finish(&fr, &w)?;
     if !dc.rans.in_bounds() {
         return Err(Error("rans stream exhausted"));
@@ -510,23 +576,53 @@ pub(crate) fn decode_parts(
     Ok(out)
 }
 
+/// `v` and [`R_PAD`] zero bytes, in a block of exactly that.
+pub(crate) fn padded(v: &[u8]) -> Vec<u8> {
+    let mut p = Vec::with_capacity(v.len() + R_PAD);
+    p.extend_from_slice(v);
+    p.resize(v.len() + R_PAD, 0);
+    p
+}
+
 /// The file structure: junk and frame runs, and the frames.
+///
+/// The vectors are made in the opposite order of their fields here (junk, runs, frames, flens),
+/// each of the size it ends at ([`counts`]), so that they are dropped last first.
 pub(crate) struct Frames {
-    /// Junk lengths and frame runs (count, free format length), alternating.
-    pub(crate) junk: Vec<usize>,
-    pub(crate) runs: Vec<(usize, usize)>,
+    pub(crate) flens: Vec<usize>,
     /// Header, side information, payload offset in the reservoir, payload length.
     pub(crate) frames: Vec<(Header, SideInfo, usize, usize)>,
-    pub(crate) flens: Vec<usize>,
+    /// Junk lengths and frame runs (count, free format length), alternating.
+    pub(crate) runs: Vec<(usize, usize)>,
+    pub(crate) junk: Vec<usize>,
     r_len: usize,
+}
+
+/// The number of frame runs and of frames that SEGS tells.
+pub(crate) fn counts(segs: &[u8]) -> Result<(usize, usize), Error> {
+    let mut rs = Rd { d: segs, p: 0 };
+    let (mut runs, mut frames) = (0usize, 0usize);
+    loop {
+        rs.uv()?;
+        if rs.p == rs.d.len() {
+            return Ok((runs, frames));
+        }
+        frames = frames.saturating_add(rs.uv()? as usize);
+        rs.uv()?;
+        runs += 1;
+    }
 }
 
 /// Reads the segments and the headers; the side information is left to [`main_pass`].
 pub(crate) fn parse_frames(segs: &[u8], hdr: &[u8], file_len: u64) -> Result<Frames, Error> {
+    let (n_runs, nframes) = counts(segs)?;
+    if nframes > hdr.len() / 4 {
+        return Err(Error("frame count"));
+    }
     let mut rs = Rd { d: segs, p: 0 };
     let mut rh = Rd { d: hdr, p: 0 };
-    let mut junk = Vec::new();
-    let mut runs = Vec::new();
+    let mut junk = Vec::with_capacity(n_runs + 1);
+    let mut runs = Vec::with_capacity(n_runs);
     loop {
         junk.push(rs.uv()? as usize);
         if rs.p == rs.d.len() {
@@ -538,10 +634,6 @@ pub(crate) fn parse_frames(segs: &[u8], hdr: &[u8], file_len: u64) -> Result<Fra
             return Err(Error("free format length"));
         }
         runs.push((n, free));
-    }
-    let nframes: usize = runs.iter().map(|r| r.0).sum();
-    if nframes > hdr.len() / 4 {
-        return Err(Error("frame count"));
     }
 
     let mut frames: Vec<(Header, SideInfo, usize, usize)> = Vec::with_capacity(nframes);
@@ -617,8 +709,20 @@ impl Sink for () {
     fn ready(&mut self, _fr: &Frames, _fi: usize, _w: &mut FastWriter) {}
 }
 
-/// Initial size of the reservoir's buffer for [`Assembler`] (it grows as needed).
-const WINDOW: usize = 1 << 20;
+/// Size of the reservoir's buffer for [`Assembler`], which does not grow in decoding a valid
+/// stream: what is kept after [`Sink::ready`] is under [`DISCARD_MIN`] and the payload of the
+/// first frame not written yet (65536 + 5 bytes at most, free format's), and until the next
+/// call the main pass writes a piece of a gap ([`GAP_PIECE`]) or one frame's granules (about
+/// 2 KiB) at most.
+pub(crate) const WINDOW: usize = 512 << 10;
+
+/// Bytes of a gap copied at a time (the sink is handed the reservoir between them, so that
+/// it is kept in [`WINDOW`]).
+const GAP_PIECE: usize = 64 << 10;
+
+/// Bytes a frame's side information takes at most (32), with room to spare: the writer of it
+/// is made of that, and is not grown.
+pub(crate) const SIDE_ROOM: usize = 40;
 
 /// Bytes of the reservoir dropped at a time by [`Assembler`], at least.
 const DISCARD_MIN: usize = 256 << 10;
@@ -641,18 +745,9 @@ pub(crate) struct Assembler<'a> {
 }
 
 impl<'a> Assembler<'a> {
-    pub(crate) fn new(fr: &Frames, junk_s: &'a [u8], crc_s: &'a [u8]) -> Assembler<'a> {
-        let total = junk_s.len() + fr.flens.iter().sum::<usize>();
-        Assembler {
-            junk_s,
-            crc: Rd { d: crc_s, p: 0 },
-            out: Vec::with_capacity(total),
-            k: 0,
-            jp: 0,
-            left: 0,
-            fi: 0,
-            err: None,
-        }
+    /// Writing to `out`, of which the capacity is the file's length.
+    pub(crate) fn new(out: Vec<u8>, junk_s: &'a [u8], crc_s: &'a [u8]) -> Assembler<'a> {
+        Assembler { junk_s, crc: Rd { d: crc_s, p: 0 }, out, k: 0, jp: 0, left: 0, fi: 0, err: None }
     }
 
     /// Writes the frames before `ready` whose payloads lie within `r` (the reservoir from byte
@@ -672,7 +767,7 @@ impl<'a> Assembler<'a> {
             }
             let hb = h.0.to_be_bytes();
             self.out.extend_from_slice(&hb);
-            let mut sw = BitWriter::new();
+            let mut sw = BitWriter::with_capacity(SIDE_ROOM);
             si.write(*h, &mut sw);
             let side = sw.finish();
             if h.protected() {
@@ -716,46 +811,35 @@ impl Sink for Assembler<'_> {
     }
 }
 
-/// Rebuilds the reservoir (the main data of all frames) into a writer of `capacity` bytes to
-/// begin with, handing it to `sink` as it goes, and completes the side information of the
-/// frames (main_data_begin, part2_3_length). Returns the writer, the whole reservoir written.
-#[allow(clippy::too_many_arguments)]
+/// Rebuilds the reservoir (the main data of all frames) into the writer `w`, handing it to
+/// `sink` as it goes, and completes the side information of the frames (main_data_begin,
+/// part2_3_length). `bufs` are the padded bit strings TAIL, RAWGR and GAPS ([`padded`]). On
+/// return `w` holds the whole reservoir written (but what the sink dropped).
 pub(crate) fn main_pass<C: Coder, S: SideSrc, K: Sink>(
     fr: &mut Frames,
-    tail: &[u8],
-    raw_gr: &[u8],
-    gaps: &[u8],
+    bufs: [&[u8]; 3],
     side: &mut S,
     dc: &mut C,
     sink: &mut K,
-    capacity: usize,
-) -> Result<FastWriter, Error> {
-    let pad = |v: &[u8]| {
-        let mut p = v.to_vec();
-        p.resize(v.len() + R_PAD, 0);
-        p
-    };
-    let tail_buf = pad(tail);
-    let raw_gr_buf = pad(raw_gr);
-    let gaps_buf = pad(gaps);
+    w: &mut FastWriter,
+) -> Result<(), Error> {
+    let [tail_buf, raw_gr_buf, gaps_buf] = bufs;
     let (mut tail, mut raw_gr, mut gaps) =
-        (BitReader::new(&tail_buf, 0), BitReader::new(&raw_gr_buf, 0), BitReader::new(&gaps_buf, 0));
+        (BitReader::new(tail_buf, 0), BitReader::new(raw_gr_buf, 0), BitReader::new(gaps_buf, 0));
     let r_len = fr.r_len;
 
-    let mut w = FastWriter::with_capacity(capacity);
     let mut st = State::new();
     let mut end = 0usize;
     let mut scf = [0u8; 39];
     for fi in 0..fr.frames.len() {
-        sink.ready(fr, fi, &mut w);
+        sink.ready(fr, fi, w);
         if fi > 0 && fi % RUN_FRAMES == 0 {
             dc.restart();
         }
-        let (h, si, pay, len) = &mut fr.frames[fi];
-        let (h, pay, len) = (*h, *pay, *len);
+        let (h, mut si, pay, len) = fr.frames[fi];
         let mut placed = false;
         let mut resid = 0;
-        side.frame(h, si, &mut placed, &mut resid);
+        side.frame(h, &mut si, &mut placed, &mut resid);
         if !placed {
             for gr in 0..h.granules() {
                 for ch in 0..h.channels() {
@@ -763,9 +847,10 @@ pub(crate) fn main_pass<C: Coder, S: SideSrc, K: Sink>(
                     side.granule(h, &mut si.gr[gr][ch], ch, false, &mut raw);
                 }
             }
-            if place(si, h, pay, len, end).is_some() {
+            if place(&si, h, pay, len, end).is_some() {
                 return Err(Error("placement"));
             }
+            fr.frames[fi].1 = si;
             continue;
         }
         let pred = pay as i64 - end.div_ceil(8) as i64;
@@ -776,7 +861,7 @@ pub(crate) fn main_pass<C: Coder, S: SideSrc, K: Sink>(
         }
         si.main_data_begin = mdb as u16;
         let start = (pay - mdb as usize) * 8;
-        w.copy(&mut gaps, start - end);
+        copy_gap(w, &mut gaps, start - end, sink, fr, fi);
         for gr in 0..h.granules() {
             for ch in 0..h.channels() {
                 let mut raw = false;
@@ -787,7 +872,7 @@ pub(crate) fn main_pass<C: Coder, S: SideSrc, K: Sink>(
                     continue;
                 }
                 let gr_start = w.len();
-                let lay = scf_layout(h, si, gr, ch);
+                let lay = scf_layout(h, &si, gr, ch);
                 let nscf: usize = (0..4).filter(|&k| !lay.copy[k]).map(|k| lay.count[k] as usize).sum();
                 let (mut nq, mut tl) = (0, 0);
                 side.part3(ch, &mut nq, &mut tl);
@@ -808,7 +893,7 @@ pub(crate) fn main_pass<C: Coder, S: SideSrc, K: Sink>(
                 if g.table_select.iter().any(|&t| t == 4 || t == 14) {
                     return Err(Error("table"));
                 }
-                model::decode_granule(dc, &mut st, h, si, gr, ch, &scf[..nscf], nq, &mut w);
+                model::decode_granule(dc, &mut st, h, &si, gr, ch, &scf[..nscf], nq, w);
                 if tl > 4095 {
                     return Err(Error("tail"));
                 }
@@ -820,6 +905,7 @@ pub(crate) fn main_pass<C: Coder, S: SideSrc, K: Sink>(
                 si.gr[gr][ch].part2_3_length = p23 as u16;
             }
         }
+        fr.frames[fi].1 = si;
         end = w.len();
         if end > (pay + len) * 8 {
             return Err(Error("main data overflow"));
@@ -828,15 +914,27 @@ pub(crate) fn main_pass<C: Coder, S: SideSrc, K: Sink>(
     if !side.in_bounds() {
         return Err(Error("side stream exhausted"));
     }
-    w.copy(&mut gaps, r_len * 8 - end);
-    sink.ready(fr, fr.frames.len(), &mut w);
-    Ok(w)
+    copy_gap(w, &mut gaps, r_len * 8 - end, sink, fr, fr.frames.len());
+    sink.ready(fr, fr.frames.len(), w);
+    Ok(())
+}
+
+/// Copies `bits` gap bits to `w` in pieces, handing the reservoir to `sink` after each (the
+/// frames before `fi` have their side information).
+fn copy_gap<K: Sink>(w: &mut FastWriter, gaps: &mut BitReader, mut bits: usize, sink: &mut K, fr: &Frames, fi: usize) {
+    while bits > GAP_PIECE * 8 {
+        w.copy(gaps, GAP_PIECE * 8);
+        bits -= GAP_PIECE * 8;
+        sink.ready(fr, fi, w);
+    }
+    w.copy(gaps, bits);
 }
 
 /// The output file: junk, and per frame header, CRC, side information and main data, from
 /// the whole reservoir `r_out`.
 pub(crate) fn assemble(fr: &Frames, junk_s: &[u8], crc_s: &[u8], r_out: &[u8]) -> Result<Vec<u8>, Error> {
-    let mut a = Assembler::new(fr, junk_s, crc_s);
+    let total = junk_s.len() + fr.flens.iter().sum::<usize>();
+    let mut a = Assembler::new(Vec::with_capacity(total), junk_s, crc_s);
     a.write(fr, fr.frames.len(), 0, r_out)?;
     Ok(a.out)
 }

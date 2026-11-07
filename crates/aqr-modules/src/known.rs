@@ -324,7 +324,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "mp3-recons",
         version: 5,
-        sha512_256: hex("f14f87e079c1e74017e0757e6c0013a4bccb61aafe3ff56c5fe89cce5e228701"),
+        sha512_256: hex("ff2901cc3432027ca7475bc9d43e27999641c6b923d1f4f36945ab388a5eb058"),
         block: include_bytes!("../wasm/mp3-recons.block"),
     },
     Known {

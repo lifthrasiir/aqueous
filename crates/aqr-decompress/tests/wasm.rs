@@ -1904,6 +1904,54 @@ fn flac_plans_hold() {
     assert!(seen >= 12, "{seen}");
 }
 
+/// mp3-recons lays its memory out as a stack, its limit its plan: of every fixture, of a file
+/// of 5 MB (well past its window, 12000 frames) and of the same with 4000 frames whose
+/// main_data_begin is out of range (their payloads are one gap, many pieces long) and its
+/// last frames cut.
+#[test]
+fn mp3_plans_hold() {
+    use aqr_mp3::frame::Header;
+    let dir = format!("{}/../../codecs/aqr-mp3/tests/data", env!("CARGO_MANIFEST_DIR"));
+    let mut seen = 0;
+    let mut big = Vec::new();
+    for e in std::fs::read_dir(dir).unwrap() {
+        let path = e.unwrap().path();
+        let d = std::fs::read(&path).unwrap();
+        let what = path.file_name().unwrap().to_string_lossy().into_owned();
+        let f = aqr_mp3::formula::encode(&d, 1).unwrap_or_else(|| panic!("{what}"));
+        plan_holds(&what, f, &d);
+        seen += 1;
+        if what == "cbr128.mp3" {
+            big = d.iter().copied().cycle().take(5 << 20).collect();
+        }
+    }
+    assert!(seen >= 8, "{seen}");
+    let f = aqr_mp3::formula::encode(&big, 1).unwrap();
+    plan_holds("5 MB", f, &big);
+    // (frames at their sync words: the fixture is CBR, with no CRC)
+    let mut frames = Vec::new();
+    let mut p = 0;
+    while p + 4 <= big.len() && big[p] == 0xff {
+        let h = Header::from_bytes(&big[p..]);
+        if !h.valid_any() {
+            break;
+        }
+        frames.push(p);
+        p += h.frame_len_free(0);
+    }
+    assert!(frames.len() > 10000, "{}", frames.len());
+    for &p in &frames[3000..7000] {
+        // main_data_begin 511 (past the start of the payload)
+        big[p + 4] = 0xff;
+        big[p + 5] |= 0x80;
+    }
+    // (their payloads are gaps: past the window)
+    let c = aqr_mp3::codec::encode(&big);
+    assert!(c.streams[6].len() > 512 << 10, "{:?} {}", c.streams.iter().map(|s| s.len()).collect::<Vec<_>>(), frames.len());
+    let f = aqr_mp3::formula::encode(&big, 1).unwrap();
+    plan_holds("gap", f, &big);
+}
+
 /// snappy-recons lays its memory out as a stack, its limit its plan: each stream of the
 /// fixtures rebuilt as WebAssembly within the limit of its plan alone, its working memory that
 /// of the plan to the page.

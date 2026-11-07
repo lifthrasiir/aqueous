@@ -11,6 +11,8 @@ pub mod huff_tables;
 pub mod model;
 pub mod module;
 mod par;
+#[cfg(feature = "encode")]
+pub mod plan;
 pub mod rc;
 pub mod side;
 pub mod stream;

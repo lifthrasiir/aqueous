@@ -381,6 +381,12 @@ P = W_main + Σ_태스크 (W_spawn + 태스크의 계획 버퍼) + 채널 메시
 - 보고서(`Report`)는 디코더에서 `quiet`이라 아무것도 잡지 않는다. ZIP 채널은 더 이상 줄 단위로 읽지 않는다(통째로 풀면 레이어 수에 따라 메모리가 자란다): 그런 레이어가 있는 파일은 힌트 없이 코딩하며, 있는 힌트 그룹은 오류다(FORMAT.md 9절). 채널 필드가 없는 채널은 0으로 읽는다(벡터를 잡지 않는다).
 - 계획 = `plan::decode`: whole의 복사, 출력, `get_head`의 벡터, `decode_pixels`의 `done`·`planes_left`, `Player`의 블록 넷, 그리고 그룹마다(그룹이 끝나면 꼭대기를 되돌린다) 그룹이 잡는 것을 `decode_group`의 순서로: 행마다 쓰는 것, 싱크의 앞 행, 읽개와 싱크의 칸, 힌트 그룹이면 건너뛴 파일의 구조(스켈레톤의 틈에 영(0)을 채워 `psd::parse`로 읽는다)의 벡터들과 렌더러의 블록들(`RowRenderer::shape`), 같은 파일의 행 버퍼들. 태스크는 없다(Wasm은 스레드 하나). Wasm 구조체 크기는 `module::wasm`에 두고 Wasm 빌드에서 assert로 확인한다. 실측 = 계획이다(`psd_plans_hold`: RLE·raw, 힌트 있는 파일과 없는 파일, PSB, 레이어 200개와 중첩 그룹, 청크가 여럿인 모델; 그리고 코퍼스의 파일 40개, 적용 50개).
 
+**mp3-recons.**
+- 디코더는 모델 표를 `Model::parse`(벡터의 벡터)와 `freqs()`(문맥마다 복사)와 `Tables::new`(해시맵)로 만들었고, 프레임 목록(`junk`, `runs`)은 push로 키웠으며, 쓰는 창(1 MiB)은 넘치면 두 배로 자랐다. 출력을 쓸 때 프레임마다 `BitWriter`를 push로 키웠고, 뒤의 패딩 복사본 셋은 `main_pass` 안에서 잡아 돌려준 창 밑에 구멍을 남겼다.
+- 이제 표는 `codec::tables_from`이 아는 만큼만 잡는다: 알파벳, 문맥마다 같은 표를 쓰는 첫 문맥(canon, `Tables::from_canon` 새로 만듦: 비교도 해시도 없다), 빈도, 그 위에 표의 자리를 잠깐 두었다 놓고, 오프셋과 디코더의 별칭 표(`prepare_dec`를 처음 심볼 전에 부른다). `SideModel`은 `Vec` 없이 배열이어서 블록 하나다. 프레임 목록은 SEGS를 먼저 세어(`counts`) 정확한 크기로 잡고 필드를 만든 순서의 거꾸로 선언했다.
+- 출력을 먼저 잡고 그 위에 프레임, 패딩 입력들, rANS 단어, 모델, 창, `State`를 잡는다(거꾸로 놓인다). 창은 512 KiB 고정이고 자라지 않는다: `Sink::ready`가 남기는 것은 `DISCARD_MIN`과 아직 쓰지 못한 첫 프레임의 payload(65541바이트 이하)이고, 틈(gap)은 64 KiB 조각으로 복사하며 조각마다 `ready`를 부른다. 그래서 프레임 목록을 쥔 `main_pass`는 프레임의 side information을 지역 변수로 두었다가 끝에 되돌려 쓴다. `Assembler`는 출력을 받고, 프레임의 side information 쓰개는 40바이트로 잡는다.
+- 형식은 바뀌지 않는다(모듈 버전 5 그대로). 계획 = `plan::decode`: whole의 복사, 표, 출력, 프레임 목록, 입력 복사본, 모델, 창을 `Sim`으로 따라가며 SEGS만 읽는다. Wasm 구조체 크기는 `module::wasm`에 두고 Wasm 빌드에서 assert로 확인한다. 실측 = 계획이다(`mp3_plans_hold`: 픽스처 전부, 5 MB 파일, 프레임 4000개가 한 틈인 파일; 그리고 mp3 코퍼스의 파일들).
+
 ## 다음 순서
 
 1. `Module::memory_usage_in_pages`를 이미 정확한 용량을 쓰는 모듈들(exe, xsv, fasta, zip, git, pdf, png, …)부터 만든다.

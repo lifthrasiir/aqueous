@@ -4,6 +4,7 @@
 use crate::frame::{Granule, Header, SideInfo, sfb_widths};
 use crate::rc::{BitCoder, P_INIT, Prob, SIntProbs, UIntProbs};
 
+/// (One block of memory: no vectors, so that it is made and dropped at once.)
 pub struct SideModel {
     placed: Prob,
     mdb: SIntProbs,
@@ -15,16 +16,16 @@ pub struct SideModel {
     block_type: [[Prob; 4]; 4],
     mixed: Prob,
     /// By region, previous table of that region.
-    table: Vec<[Prob; 32]>,
+    table: [[Prob; 32]; 3 * 32],
     /// region0_count by the band where the big values end; region1_count by that and
     /// region0_count.
-    r0: Vec<[Prob; 16]>,
-    r1: Vec<[Prob; 8]>,
+    r0: [[Prob; 16]; 24],
+    r1: [[Prob; 8]; 24 * 16],
     sbg: [[Prob; 8]; 3],
     gain: [SIntProbs; 2],
     big_values: [SIntProbs; 2],
     sfc1: [[Prob; 16]; 16],
-    sfc2: Vec<Prob>,
+    sfc2: [Prob; 512],
     preflag: [Prob; 2],
     scale: [Prob; 2],
     c1t: [Prob; 2],
@@ -62,14 +63,14 @@ impl SideModel {
             ws: [[P_INIT; 2]; 2],
             block_type: [[P_INIT; 4]; 4],
             mixed: P_INIT,
-            table: vec![[P_INIT; 32]; 3 * 32],
-            r0: vec![[P_INIT; 16]; 24],
-            r1: vec![[P_INIT; 8]; 24 * 16],
+            table: [[P_INIT; 32]; 3 * 32],
+            r0: [[P_INIT; 16]; 24],
+            r1: [[P_INIT; 8]; 24 * 16],
             sbg: [[P_INIT; 8]; 3],
             gain: Default::default(),
             big_values: Default::default(),
             sfc1: [[P_INIT; 16]; 16],
-            sfc2: vec![P_INIT; 512],
+            sfc2: [P_INIT; 512],
             preflag: [P_INIT; 2],
             scale: [P_INIT; 2],
             c1t: [P_INIT; 2],
