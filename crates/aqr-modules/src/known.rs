@@ -42,7 +42,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "bcj-delta",
         version: 1,
-        sha512_256: hex("e32f88ddf71bbf7469af0fac4b63266ad09ec24849f4bc381e9c6d3cd2db44af"),
+        sha512_256: hex("e747d54fc2eee4aea21fb7f2b9bfd3db264f038cb470ace60c0e54302a7d40f8"),
         block: include_bytes!("../wasm/bcj-delta.block"),
     },
     Known {
@@ -78,7 +78,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "bcj2",
         version: 2,
-        sha512_256: hex("4c223c70286d04e9b4c63344706de56a40dd85d3f21bec10cca3ebf49f8f998a"),
+        sha512_256: hex("e364c14f9288585c0ab8eaf846c8576a94d9f9acfe45459461c308918fb60205"),
         block: include_bytes!("../wasm/bcj2.block"),
     },
     Known {
