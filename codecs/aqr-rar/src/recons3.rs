@@ -1415,5 +1415,6 @@ pub fn join(data: &[u8], record: &[u8]) -> Result<Vec<u8>> {
 /// Bytes of the working memory of a stream of `n` bytes of data, besides its data and record
 /// and the PPMd models.
 pub fn memory(n: u64) -> u64 {
-    n + Mf::memory(n) + 4 * std::mem::size_of::<Token>() as u64 * n / 2 + n + (1 << 20)
+    let (heads, rings) = Mf::slots(n as usize);
+    n + 4 * (heads + rings) as u64 + 4 * std::mem::size_of::<Token>() as u64 * n / 2 + n + (1 << 20)
 }

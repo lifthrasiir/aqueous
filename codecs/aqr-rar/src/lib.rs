@@ -10,6 +10,8 @@ pub mod huff;
 pub mod lz3;
 pub mod lz5;
 pub mod module;
+#[cfg(feature = "encode")]
+pub mod plan;
 pub mod ppmd;
 pub mod ppmd3;
 pub mod rar4;

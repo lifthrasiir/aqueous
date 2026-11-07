@@ -405,13 +405,16 @@ fn copy(out: &mut Vec<u8>, d: usize, n: usize) -> Result<()> {
 /// The writer of a stream, file after file (the codes carry over).
 pub struct Encoder5 {
     pub v1: bool,
-    codes: Option<[Vec<(u16, u8)>; 4]>,
+    /// The codes of the last tables (the vectors made once, filled in place), if any were sent.
+    codes: [Vec<(u16, u8)>; 4],
+    have: bool,
     last: u32,
 }
 
 impl Encoder5 {
     pub fn new(v1: bool) -> Self {
-        Encoder5 { v1, codes: None, last: 0 }
+        let codes = [MAIN, dists(v1), LOW, REPLEN].map(Vec::with_capacity);
+        Encoder5 { v1, codes, have: false, last: 0 }
     }
 
     /// Writes a file's part `st` onto `out`.
@@ -420,41 +423,60 @@ impl Encoder5 {
         for b in &st.blocks {
             let tokens = st.tokens.get(at..at + b.tokens).ok_or_else(corrupt)?;
             at += b.tokens;
-            let mut w = BitWriter::with_capacity(tokens.len() * 2 + 64);
-            if let Some(t) = &b.tables {
-                write_tables(&mut w, t, self.v1)?;
-                let [a, b, c, d] = split_lens(&t.lens, self.v1);
-                self.codes = Some([huff::codes(a)?, huff::codes(b)?, huff::codes(c)?, huff::codes(d)?]);
-            }
-            let codes = self.codes.as_ref().ok_or(Error("a block without codes"))?;
-            for t in tokens {
-                write_token(&mut w, codes, t, &mut self.last)?;
-            }
-            let bits = w.len();
-            if bits == 0 {
-                return Err(Error("an empty block"));
-            }
-            let body = w.finish();
-            let s = body.len();
-            let k = if s < 1 << 8 {
-                1
-            } else if s < 1 << 16 {
-                2
-            } else if s < 1 << 24 {
-                3
-            } else {
-                return Err(Error("a block too long"));
-            };
-            let used = bits - (s - 1) * 8;
-            let flags = (used - 1) as u8 | ((k - 1) as u8) << 3 | (b.last as u8) << 6 | (b.tables.is_some() as u8) << 7;
-            let check = 0x5a ^ flags ^ (s as u8) ^ ((s >> 8) as u8) ^ ((s >> 16) as u8);
-            out.extend_from_slice(&[flags, check]);
-            out.extend_from_slice(&(s as u32).to_le_bytes()[..k]);
-            out.extend_from_slice(&body);
+            self.block(tokens, b.tables.as_ref(), b.last, out)?;
         }
         if at != st.tokens.len() {
             return Err(Error("tokens past the blocks"));
         }
+        Ok(())
+    }
+
+    /// Writes a block of `tokens` (after `tables` if it sends any) onto the end of `out`, its
+    /// body where it is written (the header made room for, then closed up).
+    pub fn block(&mut self, tokens: &[Token], tables: Option<&Tables>, last: bool, out: &mut Vec<u8>) -> Result<()> {
+        // (flags, check and three bytes of the size, of which the block takes the first one to three)
+        let start = out.len();
+        out.extend_from_slice(&[0; 5]);
+        let base = (start + 5) * 8;
+        let mut w = BitWriter::default();
+        w.out = std::mem::take(out);
+        if let Some(t) = tables {
+            write_tables(&mut w, t, self.v1)?;
+            let [a, b, c, d] = split_lens(&t.lens, self.v1);
+            for (lens, codes) in [a, b, c, d].into_iter().zip(&mut self.codes) {
+                huff::codes_into(lens, codes)?;
+            }
+            self.have = true;
+        }
+        if !self.have {
+            return Err(Error("a block without codes"));
+        }
+        for t in tokens {
+            write_token(&mut w, &self.codes, t, &mut self.last)?;
+        }
+        let bits = w.len() - base;
+        if bits == 0 {
+            return Err(Error("an empty block"));
+        }
+        *out = w.finish();
+        let s = out.len() - (start + 5);
+        let k = if s < 1 << 8 {
+            1
+        } else if s < 1 << 16 {
+            2
+        } else if s < 1 << 24 {
+            3
+        } else {
+            return Err(Error("a block too long"));
+        };
+        let used = bits - (s - 1) * 8;
+        let flags = (used - 1) as u8 | ((k - 1) as u8) << 3 | (last as u8) << 6 | (tables.is_some() as u8) << 7;
+        let check = 0x5a ^ flags ^ (s as u8) ^ ((s >> 8) as u8) ^ ((s >> 16) as u8);
+        out.copy_within(start + 5.., start + 2 + k);
+        out.truncate(out.len() - (3 - k));
+        out[start] = flags;
+        out[start + 1] = check;
+        out[start + 2..start + 2 + k].copy_from_slice(&(s as u32).to_le_bytes()[..k]);
         Ok(())
     }
 }

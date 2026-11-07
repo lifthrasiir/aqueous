@@ -346,7 +346,7 @@ The contexts, all fresh at the start; `misc_i` is `misc[32i..32i+32)`:
 | `predicted` | 2 | 0 the code lengths, 1 the precode's |
 | `lens` | 16 | the length predicted (both kinds of lengths) |
 | `filter` | 220 | §5.3 (`[180..212)` and `[216..220)` unused) |
-| `misc` | 8 × 32 | gammas: `misc_0` far distances, `misc_1` the header, `misc_2` the count of corrections, `misc_3` their gaps; `misc_4` to `misc_7` unused |
+| `misc` | 8 × 32 | gammas: `misc_0` far distances, `misc_1` the header, `misc_2` the count of corrections, `misc_3` their gaps; `misc_4` the count of tokens, `misc_5` of filters, `misc_6` of blocks, `misc_7` the longest delta filter (§5.2) |
 
 ### 5.2 Layout
 
@@ -356,6 +356,10 @@ The contexts, all fresh at the start; `misc_i` is `misc[32i..32i+32)`:
 n = 1 + gamma(misc_1);  fails if n > |D| + 1
 size_0 … size_{n−1}: each gamma(misc_1);  fails unless they add up to |D|
 R = gamma(misc_1)
+K = gamma(misc_4), the count of tokens (without filters);  fails if K > |D|
+F = gamma(misc_5), the count of filters;  fails if F > |D|
+B = gamma(misc_6), the count of blocks;  fails if B > K + F + 64 n
+Z = gamma(misc_7), the longest delta filter, in bytes;  fails if Z > |D|
 the filters of each file (§5.3)
 the unfiltered data and its corrections (§5.4)
 the walk (§5.5)
@@ -364,6 +368,12 @@ the blocks (§5.6) and their tables (§5.7)
 
 File `f` is `D[s_f .. s_f + size_f)` of the data and `U[s_f .. s_f + size_f)` of the unfiltered
 data, `s_f` the sum of the sizes before it.
+
+The counts let a decoder reserve what it holds (module version 2; version 1 had none): the
+filters of all files must be exactly `F`, the walk must make exactly `K` tokens (and the filters
+put among them, `K + F` in all), the blocks must be exactly `B`; and a delta filter longer than
+`Z` fails (the decoder copies a delta filter's bytes, no more than `Z`). The encoder writes the
+counts of the stream, and `Z` as the longest delta filter, 0 where there is none.
 
 ### 5.3 Filters
 
@@ -768,7 +778,8 @@ The stream is each part written (§3.3). A decoder fails on any failure above or
 
 ## 7. Formula modules
 
-The modules are `rar5-recons`, version 1, and `rar3-recons`, version 1. Each rebuilds one or
+The modules are `rar5-recons`, version 2 (version 1 had no counts in the record, §5.2), and
+`rar3-recons`, version 1. Each rebuilds one or
 more streams, each from its data and its record (§5 or §6), and its output is each stream's
 files' parts one after another, the streams in turn. A container cuts the output by the parts'
 lengths (a Split instruction of the formula) and adds what lies around them.
@@ -794,10 +805,18 @@ The module fails on other parameters, any other count of inputs or resources, an
 does not cut the inputs exactly, a record that fails (§5, §6), or an output whose length is not
 the application's declared output size.
 
-**Memory** *(informative)*: besides the inputs and the output, the work of the largest stream of
-`n` bytes of data: `U` and the parts written (`2n`), the tokens (twice), the match finder (four
-bytes each of `head_c` and `prev_c`, from 80 KiB up to about 72 MiB), 1 MiB more; for `rar3-recons`
-also the parameter's MiB of PPMd model.
+**Memory** *(informative)*: `rar5-recons` lays its memory out as a stack (`aqr_api::stack`), and
+the plan of its memory is exact (`aqr-rar`'s `plan::decode5`): besides the inputs and the output,
+for each stream in turn, the contexts, the files' sizes, `U` (`|D|`), the filters and the files'
+ends in them, a delta filter's copy of its bytes (`Z`), the tokens (`K + F`) and the files' ends
+in them, the match finder (four bytes each of `head_c` and `prev_c`, from 80 KiB up to about
+72 MiB) and the pairs of two positions, the blocks (`B`) and their files' ends, the four codes of
+the tables being written, and 64 KiB (`SCRATCH`) for the work of a block's tables (taken once
+and given back, so that the plan does not depend on the tables). The blocks are written onto the
+end of the output as they are made, each after its tables are read from the record. For
+`rar3-recons`: besides the inputs and the output, the work of the largest stream of `n` bytes of
+data: `U` and the parts written (`2n`), the tokens (twice), the match finder, 1 MiB more, and the
+parameter's MiB of PPMd model.
 
 ## 8. Encoder choices *(informative)*
 

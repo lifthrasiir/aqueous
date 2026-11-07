@@ -8,7 +8,7 @@ use crate::{Error, Result, corrupt};
 pub use aqr_common::streams::index;
 
 /// What joins a stream's data and record onto an output: the sizes of its files' parts.
-type Join<'a> = &'a (dyn Fn(&[u8], &[u8], &mut Vec<u8>) -> Result<Vec<usize>> + Sync);
+type Join<'a> = &'a (dyn Fn(&[u8], &[u8], &mut Vec<u8>) -> Result<()> + Sync);
 
 /// A module: the streams of `len` bytes in all that the data and records of the inputs (data,
 /// records, index) rebuild with `join`, one after another (see `FORMAT.md`). Streams are rebuilt
@@ -69,5 +69,5 @@ pub fn ppmd_of(params: &[u8]) -> Result<u32> {
 /// params' size.
 pub fn decode3(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
     let limit = ppmd_of(params)?;
-    decode_with(inputs, len, threads, &move |d, r, o| crate::recons3::join_onto(d, r, o, limit))
+    decode_with(inputs, len, threads, &move |d, r, o| crate::recons3::join_onto(d, r, o, limit).map(drop))
 }

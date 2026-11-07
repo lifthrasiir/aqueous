@@ -79,8 +79,14 @@ const NONE: u32 = u32::MAX;
 pub struct Mf<'a> {
     d: &'a [u8],
     reach: usize,
-    head: Vec<Vec<u32>>,
-    prev: Vec<Vec<u32>>,
+    /// The heads of the chains of each key, `1 << bits` each, one after another.
+    head: Vec<u32>,
+    /// The previous position on each key's chain, of the positions within a ring ([`Mf::ring`]),
+    /// one ring after another.
+    prev: Vec<u32>,
+    /// The start and mask of each ring in `prev`.
+    ring_at: [usize; 5],
+    mask: [usize; 5],
     /// Positions below this are inserted.
     next: usize,
     found: Vec<(usize, usize)>,
@@ -113,24 +119,39 @@ impl<'a> Mf<'a> {
     /// Candidates looked at for an escape's rank.
     pub const LIMIT: usize = 4096;
 
+    /// The most pairs found at a position: [`Mf::DEPTH`] candidates on each key's chain.
+    pub const PAIRS: usize = Self::DEPTH * Self::KEYS.len();
+
+    /// Slots of the ring of the chain `c` for `n` bytes of data.
+    pub fn ring(n: usize, c: usize) -> usize {
+        n.max(2).next_power_of_two().min(1 << Self::KEYS[c].1)
+    }
+
+    /// Slots of the heads and of the rings of a match finder of `n` bytes of data.
+    pub fn slots(n: usize) -> (usize, usize) {
+        (Self::KEYS.len() << head_bits(n as u64), (0..Self::KEYS.len()).map(|c| Self::ring(n, c)).sum())
+    }
+
     pub fn new(d: &'a [u8], reach: usize) -> Self {
-        let span = d.len().max(2).next_power_of_two();
         let bits = head_bits(d.len() as u64);
+        let (heads, rings) = Self::slots(d.len());
+        let (mut ring_at, mut mask, mut at) = ([0; 5], [0; 5], 0);
+        for c in 0..Self::KEYS.len() {
+            let r = Self::ring(d.len(), c);
+            (ring_at[c], mask[c]) = (at, r - 1);
+            at += r;
+        }
         Mf {
             d,
             reach,
-            head: Self::KEYS.iter().map(|_| vec![NONE; 1 << bits]).collect(),
-            prev: Self::KEYS.iter().map(|&(_, b)| vec![NONE; span.min(1 << b)]).collect(),
+            head: vec![NONE; heads],
+            prev: vec![NONE; rings],
+            ring_at,
+            mask,
             next: 0,
-            found: Vec::new(),
+            found: Vec::with_capacity(Self::PAIRS),
             bits,
         }
-    }
-
-    /// Bytes of the match finder of `n` bytes of data.
-    pub fn memory(n: u64) -> u64 {
-        let span = n.max(2).next_power_of_two();
-        Self::KEYS.iter().map(|&(_, b)| 4 * (span.min(1 << b) + (1 << head_bits(n)))).sum()
     }
 
     /// Inserts the positions up to `pos`.
@@ -140,10 +161,9 @@ impl<'a> Mf<'a> {
             let p = self.next;
             for (c, &(k, _)) in Self::KEYS.iter().enumerate() {
                 if p + k <= d.len() {
-                    let h = key(d, p, k, self.bits);
-                    let mask = self.prev[c].len() - 1;
-                    self.prev[c][p & mask] = self.head[c][h];
-                    self.head[c][h] = p as u32;
+                    let h = c << self.bits | key(d, p, k, self.bits);
+                    self.prev[self.ring_at[c] + (p & self.mask[c])] = self.head[h];
+                    self.head[h] = p as u32;
                 }
             }
             self.next += 1;
@@ -153,7 +173,7 @@ impl<'a> Mf<'a> {
     /// The farthest a chain `c` reaches back from `pos`.
     #[inline]
     fn far(&self, c: usize, pos: usize) -> usize {
-        self.reach.min(self.prev[c].len() - 1).min(pos)
+        self.reach.min(self.mask[c]).min(pos)
     }
 
     /// The longest matches at `pos` along the first [`Mf::DEPTH`] candidates of each chain,
@@ -169,9 +189,9 @@ impl<'a> Mf<'a> {
             if pos + k > d.len() || k > cap {
                 break;
             }
-            let mask = self.prev[c].len() - 1;
+            let (mask, at) = (self.mask[c], self.ring_at[c]);
             let far = self.far(c, pos);
-            let mut q = self.head[c][key(d, pos, k, self.bits)];
+            let mut q = self.head[c << self.bits | key(d, pos, k, self.bits)];
             let mut top = k - 1;
             for _ in 0..Self::DEPTH {
                 if q == NONE {
@@ -180,7 +200,7 @@ impl<'a> Mf<'a> {
                 let p = q as usize;
                 // (the position itself, inserted where the next was looked at ahead)
                 if p >= pos {
-                    q = self.prev[c][p & mask];
+                    q = self.prev[at + (p & mask)];
                     continue;
                 }
                 if pos - p > far {
@@ -196,7 +216,7 @@ impl<'a> Mf<'a> {
                         }
                     }
                 }
-                q = self.prev[c][p & mask];
+                q = self.prev[at + (p & mask)];
             }
             best = best.max(top);
             if best == cap {
@@ -263,9 +283,9 @@ impl<'a> Mf<'a> {
         if pos + k > d.len() || pos + len > d.len() {
             return;
         }
-        let mask = self.prev[c].len() - 1;
+        let (mask, at) = (self.mask[c], self.ring_at[c]);
         let far = self.far(c, pos);
-        let mut q = self.head[c][key(d, pos, k, self.bits)];
+        let mut q = self.head[c << self.bits | key(d, pos, k, self.bits)];
         for _ in 0..Self::LIMIT {
             if q == NONE {
                 return;
@@ -273,7 +293,7 @@ impl<'a> Mf<'a> {
             let p = q as usize;
             // (the position itself, inserted where the next was looked at ahead)
             if p >= pos {
-                q = self.prev[c][p & mask];
+                q = self.prev[at + (p & mask)];
                 continue;
             }
             if pos - p > far {
@@ -282,7 +302,7 @@ impl<'a> Mf<'a> {
             if d[p + len - 1] == d[pos + len - 1] && d[p..p + len] == d[pos..pos + len] && !f(p) {
                 return;
             }
-            q = self.prev[c][p & mask];
+            q = self.prev[at + (p & mask)];
         }
     }
 }

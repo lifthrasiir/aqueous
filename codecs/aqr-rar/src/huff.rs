@@ -26,6 +26,13 @@ pub struct Decoder {
 /// The codes of `lens` (0 for no code): each symbol's code and length. Over-subscribed lengths
 /// are an error; incomplete ones are not.
 pub fn codes(lens: &[u8]) -> Result<Vec<(u16, u8)>> {
+    let mut out = Vec::with_capacity(lens.len());
+    codes_into(lens, &mut out)?;
+    Ok(out)
+}
+
+/// [`codes`] put in `out` (replacing what it held, within its capacity where that suffices).
+pub fn codes_into(lens: &[u8], out: &mut Vec<(u16, u8)>) -> Result<()> {
     let mut count = [0u32; MAX + 1];
     for &l in lens {
         if l as usize > MAX {
@@ -42,17 +49,16 @@ pub fn codes(lens: &[u8]) -> Result<Vec<(u16, u8)>> {
             return Err(corrupt());
         }
     }
-    Ok(lens
-        .iter()
-        .map(|&l| {
-            if l == 0 {
-                return (0, 0);
-            }
-            let c = next[l as usize];
-            next[l as usize] += 1;
-            (c as u16, l)
-        })
-        .collect())
+    out.clear();
+    out.extend(lens.iter().map(|&l| {
+        if l == 0 {
+            return (0, 0);
+        }
+        let c = next[l as usize];
+        next[l as usize] += 1;
+        (c as u16, l)
+    }));
+    Ok(())
 }
 
 impl Decoder {

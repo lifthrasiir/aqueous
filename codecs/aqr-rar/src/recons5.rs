@@ -74,30 +74,77 @@ struct Ctx {
     misc: Vec<Bit>,
 }
 
+/// The lengths of the vectors of [`Ctx`], in the order of its fields.
+pub const CTX_LENS: [usize; 18] = [
+    2 * 12 * 9 * 3 * 3,
+    3 * 12,
+    4 * 4,
+    12,
+    12 * 32,
+    3 * 4 * 4 * 2,
+    12,
+    12 * 32,
+    12 * 16,
+    12 * 24,
+    2 * 2,
+    8,
+    2 + 32 + 1,
+    4,
+    2,
+    16,
+    5 * 4 + 32 * 6 + 8,
+    32 * 8,
+];
+
 impl Ctx {
     fn new() -> Self {
+        let v = |i: usize| bits(CTX_LENS[i]);
         Ctx {
-            is_match: bits(2 * 12 * 9 * 3 * 3),
-            is_rep: bits(3 * 12),
-            rep_idx: bits(4 * 4),
-            rep_full: bits(12),
-            rep_shorter: bits(12 * 32),
-            pair: bits(3 * 4 * 4 * 2),
-            full: bits(12),
-            shorter: bits(12 * 32),
-            escape: bits(12 * 16),
-            rank: bits(12 * 24),
-            form: bits(2 * 2),
-            form_alt: bits(8),
-            cut: bits(2 + 32 + 1),
-            tables: bits(4),
-            predicted: bits(2),
-            lens: bits(16),
-            filter: bits(5 * 4 + 32 * 6 + 8),
-            misc: bits(32 * 8),
+            is_match: v(0),
+            is_rep: v(1),
+            rep_idx: v(2),
+            rep_full: v(3),
+            rep_shorter: v(4),
+            pair: v(5),
+            full: v(6),
+            shorter: v(7),
+            escape: v(8),
+            rank: v(9),
+            form: v(10),
+            form_alt: v(11),
+            cut: v(12),
+            tables: v(13),
+            predicted: v(14),
+            lens: v(15),
+            filter: v(16),
+            misc: v(17),
         }
     }
 }
+
+/// Bytes of what the module holds on WebAssembly (32-bit pointers), checked there by assertions:
+/// a stream's data and record, a token, a filter with where it is declared, a block's tokens and
+/// whether it has tables, a pair, an adaptive bit, a code.
+pub mod wasm {
+    pub const STREAM: u64 = 16;
+    pub const TOKEN: u64 = 16;
+    pub const FILTER: u64 = 16;
+    pub const BLOCK: u64 = 8;
+    pub const PAIR: u64 = 8;
+    pub const BIT: u64 = 4;
+    pub const CODE: u64 = 4;
+}
+
+#[cfg(target_family = "wasm")]
+const _: () = {
+    assert!(size_of::<(&[u8], &[u8])>() as u64 == wasm::STREAM);
+    assert!(size_of::<Token>() as u64 == wasm::TOKEN);
+    assert!(size_of::<(usize, Filter)>() as u64 == wasm::FILTER);
+    assert!(size_of::<(usize, bool)>() as u64 == wasm::BLOCK);
+    assert!(size_of::<(usize, usize)>() as u64 == wasm::PAIR);
+    assert!(size_of::<Bit>() as u64 == wasm::BIT);
+    assert!(size_of::<(u16, u8)>() as u64 == wasm::CODE);
+};
 
 /// A slice of 32 adaptive bits of `t` for gammas, the `i`th.
 fn g32(t: &mut [Bit], i: usize) -> &mut [Bit] {
@@ -139,65 +186,24 @@ fn take_apart(streams: &[Stream]) -> Parts {
     p
 }
 
-/// The tokens of each file with their filters put back where they are declared.
-fn put_together(p: &Parts) -> Result<Vec<Vec<Token>>> {
-    let mut last = 0u32;
-    let mut out = Vec::new();
-    for (tokens, filters) in p.tokens.iter().zip(&p.filters) {
-        let mut v = Vec::with_capacity(tokens.len() + filters.len());
-        let mut fs = filters.iter().peekable();
-        let mut pos = 0usize;
-        for t in tokens {
-            while let Some(&&(at, f)) = fs.peek() {
-                if at > pos {
-                    break;
-                }
-                if at < pos {
-                    return Err(Error("a filter declared within a copy"));
-                }
-                v.push(Token::Filter(f));
-                fs.next();
-            }
-            v.push(*t);
-            match *t {
-                Token::Lit(_) => pos += 1,
-                Token::Copy { len, .. } | Token::Rep { len, .. } => {
-                    pos += len as usize;
-                    last = len;
-                }
-                Token::Last => pos += last as usize,
-                Token::Filter(_) => {}
-            }
-        }
-        for &(at, f) in fs {
-            if at != pos {
-                return Err(Error("a filter declared past the file"));
-            }
-            v.push(Token::Filter(f));
-        }
-        out.push(v);
-    }
-    Ok(out)
-}
-
-/// The filters of a file declared at `filters`, placed.
-fn placed(filters: &[(usize, Filter)]) -> Vec<Placed> {
-    filters.iter().map(|&(at, f)| Placed { at: at + f.start as usize, f }).collect()
-}
-
-/// The contents `d` of a file filtered again by `placed`, in place: the unfiltered data, where
-/// the filters' inverses give it.
-fn refilter(d: &mut [u8], placed: &[Placed]) -> Result<()> {
+/// The contents `d` of a file filtered again by `filters` (where each is declared, the filter),
+/// in place: the unfiltered data, where the filters' inverses give it. The delta filters copy
+/// their bytes, no more than `delta` of them.
+fn refilter(d: &mut [u8], filters: &[(usize, Filter)], delta: usize) -> Result<()> {
     let mut end = 0;
-    for p in placed {
-        let (at, len) = (p.at, p.f.len as usize);
+    for &(decl, f) in filters {
+        let (at, len) = (decl + f.start as usize, f.len as usize);
         if at < end || at.checked_add(len).is_none_or(|e| e > d.len()) {
             return Err(Error("a filter out of place"));
         }
         end = at + len;
         let r = &mut d[at..end];
+        let p = Placed { at, f };
         match p.f.kind {
             0 => {
+                if len > delta {
+                    return Err(corrupt());
+                }
                 let c = p.f.channels as usize;
                 let src: Vec<u8> = r.to_vec();
                 let mut k = 0;
@@ -246,23 +252,31 @@ fn refilter(d: &mut [u8], placed: &[Placed]) -> Result<()> {
     Ok(())
 }
 
-/// The filters of the files, coded.
-fn code_filters(bits: &mut impl Bits, ctx: &mut Ctx, sizes: &[usize], p: &mut Parts, encoding: bool) -> Result<()> {
+/// The filters of the files, coded: those of each file after the last one's in `list` (where
+/// each is declared, the filter; room for them all reserved), `ends` the end of each file's.
+/// The encoder's `given` are the filters of each file.
+fn code_filters(
+    bits: &mut impl Bits,
+    ctx: &mut Ctx,
+    sizes: &[usize],
+    given: &[Vec<(usize, Filter)>],
+    list: &mut Vec<(usize, Filter)>,
+    ends: &mut Vec<usize>,
+) -> Result<()> {
     bits.cat(Cat::Head);
     let f = &mut ctx.filter;
+    let encoding = !given.is_empty();
+    let none = Filter { start: 0, len: 0, kind: 0, channels: 0, start_bytes: 1, len_bytes: 1 };
     for (i, &size) in sizes.iter().enumerate() {
-        let given = if encoding { std::mem::take(&mut p.filters[i]) } else { Vec::new() };
+        let given = if encoding { &given[i][..] } else { &[] };
+        let first = list.len();
         let n = bits.gamma(&mut f[20..52], given.len() as u64)? as usize;
-        if n > size {
+        if n > size || n > list.capacity() - first {
             return Err(corrupt());
         }
         let (mut kind, mut end, mut decl) = (4usize, 0usize, 0usize);
-        let mut out = Vec::with_capacity(n);
         for k in 0..n {
-            let (gd, gf) = given
-                .get(k)
-                .copied()
-                .unwrap_or((0, Filter { start: 0, len: 0, kind: 0, channels: 0, start_bytes: 1, len_bytes: 1 }));
+            let (gd, gf) = given.get(k).copied().unwrap_or((0, none));
             let fk = bits.tree(&mut f[kind * 4..kind * 4 + 4], 2, gf.kind as u32) as u8;
             kind = fk as usize;
             let channels = if fk == 0 {
@@ -307,12 +321,12 @@ fn code_filters(bits: &mut impl Bits, ctx: &mut Ctx, sizes: &[usize], p: &mut Pa
             } else {
                 bits.raws(2, (gf.len_bytes as u64).wrapping_sub(1)) as u8 + 1
             };
-            out.push((d, Filter { start, len: len as u32, kind: fk, channels, start_bytes: sb, len_bytes: lb }));
+            list.push((d, Filter { start, len: len as u32, kind: fk, channels, start_bytes: sb, len_bytes: lb }));
         }
-        if encoding && out != given {
+        if encoding && list[first..] != *given {
             return Err(Error("filters coded otherwise"));
         }
-        p.filters[i] = out;
+        ends.push(list.len());
         if bits.failed() {
             return Err(corrupt());
         }
@@ -372,29 +386,46 @@ impl Form {
     }
 }
 
-/// The walk over the unfiltered data `u` of the files of `sizes`, coding their tokens
-/// (`tokens` given to the encoder, made by the decoder), the matches within `reach`.
+/// The walk over the unfiltered data `u` of the files of `sizes`, coding their tokens (those of
+/// each file `given` to the encoder, none to the decoder), the matches within `reach`. The tokens
+/// are put onto the end of `out` (room for them reserved) with the files' filters (`filters`, in
+/// turn, `fends` the end of each file's) where they are declared, `ends` the end of each file's.
+#[allow(clippy::too_many_arguments)]
 fn walk(
     u: &[u8],
     sizes: &[usize],
     reach: usize,
     bits: &mut impl Bits,
     ctx: &mut Ctx,
-    tokens: &mut [Vec<Token>],
-    encoding: bool,
+    given: &[Vec<Token>],
+    (filters, fends): (&[(usize, Filter)], &[usize]),
+    out: &mut Vec<Token>,
+    ends: &mut Vec<usize>,
 ) -> Result<()> {
+    let encoding = !given.is_empty();
     let mut mf = Mf::new(u, reach);
-    let (mut pairs, mut next_pairs) = (Vec::new(), Vec::new());
+    let (mut pairs, mut next_pairs) = (Vec::with_capacity(Mf::PAIRS), Vec::with_capacity(Mf::PAIRS));
     let mut cache = [0usize; 4];
     let mut last = 0u32;
     let mut fs = 0usize;
     for (fi, &size) in sizes.iter().enumerate() {
         let fe = fs + size;
-        let given = if encoding { std::mem::take(&mut tokens[fi]) } else { Vec::new() };
-        let mut made = Vec::new();
+        let given = if encoding { &given[fi][..] } else { &[] };
+        let mut fl = &filters[if fi == 0 { 0 } else { fends[fi - 1] }..fends[fi]];
         let (mut pos, mut prev, mut k) = (fs, 0usize, 0usize);
         let mut ahead = usize::MAX;
         while pos < fe {
+            // (the filters declared here; one declared within a copy is past)
+            while let Some(&(at, f)) = fl.first() {
+                if at > pos - fs {
+                    break;
+                }
+                if at < pos - fs {
+                    return Err(Error("a filter declared within a copy"));
+                }
+                push(out, Token::Filter(f))?;
+                fl = &fl[1..];
+            }
             mf.advance(pos);
             let cap = (fe - pos).min(CAP);
             let in_cache = |c: &[usize; 4], d: usize| c.contains(&d);
@@ -442,7 +473,7 @@ fn walk(
                 if encoding && g != Token::Lit(u[pos]) {
                     return Err(Error("a literal not of the data"));
                 }
-                made.push(Token::Lit(u[pos]));
+                push(out, Token::Lit(u[pos]))?;
                 pos += 1;
                 prev = 0;
                 continue;
@@ -578,7 +609,7 @@ fn walk(
             if encoding && t != g {
                 return Err(Error("a match coded otherwise"));
             }
-            made.push(t);
+            push(out, t)?;
             pos += len;
             prev = 1;
             if bits.failed() {
@@ -588,114 +619,172 @@ fn walk(
         if encoding && k != given.len() {
             return Err(Error("tokens past the data"));
         }
-        tokens[fi] = made;
+        // (the filters declared at the end)
+        for &(at, f) in fl {
+            if at != size {
+                return Err(Error("a filter declared past the file"));
+            }
+            push(out, Token::Filter(f))?;
+        }
+        ends.push(out.len());
         fs = fe;
     }
     Ok(())
 }
 
-/// The blocks of the files' tokens `tokens` (with their filters), coded: their sizes against
-/// RAR's buffer, whether they send tables, the tables against Huffman's lengths.
+/// `t` pushed onto `out`, which must have room reserved for it.
+#[inline]
+fn push(out: &mut Vec<Token>, t: Token) -> Result<()> {
+    if out.len() == out.capacity() {
+        return Err(Error("more tokens than the record counts"));
+    }
+    out.push(t);
+    Ok(())
+}
+
+/// The blocks of the files' tokens `tokens` (with their filters; `ends` the end of each file's),
+/// coded: their sizes against RAR's buffer, whether they send tables. The blocks are put onto
+/// the end of `blocks` (room for them reserved) with the end of each file's in `bends`; the
+/// encoder gives the `streams`.
 fn code_blocks(
     bits: &mut impl Bits,
     ctx: &mut Ctx,
-    tokens: Vec<Vec<Token>>,
+    tokens: &[Token],
+    ends: &[usize],
     streams: Option<&[Stream]>,
-    v1: bool,
-) -> Result<Vec<Stream>> {
+    blocks: &mut Vec<(usize, bool)>,
+    bends: &mut Vec<usize>,
+) -> Result<()> {
     bits.cat(Cat::Blocks);
-    let encoding = streams.is_some();
-    // the blocks' sizes and whether they have tables
-    let mut blocks: Vec<Vec<(usize, bool)>> = Vec::new();
-    for (fi, t) in tokens.iter().enumerate() {
-        let given: Vec<(usize, bool)> = if let Some(streams) = streams {
-            if streams[fi].tokens != *t {
-                return Err(Error("tokens put together otherwise"));
+    let mut fs = 0;
+    for (fi, &fe) in ends.iter().enumerate() {
+        let t = &tokens[fs..fe];
+        let given: &[Block] = match streams {
+            Some(streams) => {
+                if streams[fi].tokens != *t {
+                    return Err(Error("tokens put together otherwise"));
+                }
+                &streams[fi].blocks
             }
-            streams[fi].blocks.iter().map(|b| (b.tokens, b.tables.is_some())).collect()
-        } else {
-            Vec::new()
+            None => &[],
         };
-        let mut made = Vec::new();
+        let from = blocks.len();
         let mut at = 0;
         loop {
-            let first = made.is_empty();
+            let made = blocks.len() - from;
+            let first = made == 0;
             let room = UNITS - first as usize;
             let (mut k, mut used) = (0, 0);
             while at + k < t.len() && used + units(&t[at + k]) <= room {
                 used += units(&t[at + k]);
                 k += 1;
             }
-            let g = given.get(made.len()).copied().unwrap_or((0, false));
+            let g = given.get(made).map_or((0, false), |b| (b.tokens, b.tables.is_some()));
             let n = if bits.bit(&mut ctx.cut[first as usize], g.0 == k) {
                 k
             } else {
                 bits.gamma(&mut ctx.cut[2..34], g.0 as u64)? as usize
             };
-            if at + n > t.len() || (n == 0 && at < t.len()) {
+            if at + n > t.len() || (n == 0 && at < t.len()) || blocks.len() == blocks.capacity() {
                 return Err(corrupt());
             }
             let tc = (first as usize) * 2 + (fi > 0) as usize;
             let tables = bits.bit(&mut ctx.tables[tc], g.1);
-            made.push((n, tables));
+            blocks.push((n, tables));
             at += n;
             // (after the last token, blocks of tables alone may follow)
-            if at == t.len() && !bits.bit(&mut ctx.cut[34], given.len() > made.len()) {
+            if at == t.len() && !bits.bit(&mut ctx.cut[34], given.len() > made + 1) {
                 break;
             }
-            if bits.failed() || made.len() > t.len() + 64 {
+            if bits.failed() || made > t.len() + 64 {
                 return Err(corrupt());
             }
         }
-        if encoding && made != given {
+        if streams.is_some() && !blocks[from..].iter().zip(given).all(|(m, g)| *m == (g.tokens, g.tables.is_some()))
+            || blocks.len() - from != given.len() && streams.is_some()
+        {
             return Err(Error("blocks coded otherwise"));
         }
-        blocks.push(made);
+        bends.push(blocks.len());
+        fs = fe;
     }
-    // the tables, each over the tokens it serves (up to the next tables, across the files)
-    let mut spans: Vec<(usize, usize, usize, usize)> = Vec::new(); // (file, block, from file, from token)
-    let mut serve: Vec<Vec<Token>> = Vec::new();
-    for (fi, bs) in blocks.iter().enumerate() {
-        let mut at = 0;
-        for (bi, &(n, tables)) in bs.iter().enumerate() {
-            let toks = &tokens[fi][at..at + n];
-            if tables {
-                spans.push((fi, bi, fi, at));
-                serve.push(toks.to_vec());
-            } else if let Some(s) = serve.last_mut() {
-                s.extend_from_slice(toks);
-            }
+    Ok(())
+}
+
+/// The tables of a block over the tokens `serve` (those it serves: up to the next tables, across
+/// the files), coded: the lengths of Huffman's construction, or as they are (`given`).
+fn code_tables(
+    bits: &mut impl Bits,
+    ctx: &mut Ctx,
+    serve: &[Token],
+    v1: bool,
+    given: Option<&Tables>,
+) -> Result<Tables> {
+    let c = lz5::counts(serve, v1);
+    let mut lens = Vec::with_capacity(lz5::lens_len(v1));
+    for f in &c {
+        lens.extend(huff::lengths(f, huff::MAX));
+    }
+    let lens = code_lens(bits, ctx, 0, lens, given.map(|g| &g.lens[..]))?;
+    let mut pc = vec![0u32; lz5::PRE];
+    lz5::rle(&lens).iter().for_each(|r| pc[r.0 as usize] += 1);
+    let pre = huff::lengths(&pc, huff::MAX);
+    let pre = code_lens(bits, ctx, 1, pre, given.map(|g| &g.pre[..]))?;
+    if bits.failed() {
+        return Err(corrupt());
+    }
+    Ok(Tables { pre: pre.try_into().unwrap(), lens })
+}
+
+/// Bytes the tables' work takes at most (the counts, the lengths, the heap, the run-length
+/// coding, the tables): with room for the vectors that grow, and for the holes that leaves. The
+/// decoder takes them from the stack once before the blocks and gives them back, so that what it
+/// takes does not depend on the data.
+pub const SCRATCH: usize = 64 << 10;
+
+/// The blocks of the files written onto the end of `out`: each block after its tables, if it
+/// sends any (coded as they come: `streams` are the encoder's), in the order of the stream. The
+/// end of each file's part in `out` is put in `parts` if given.
+#[allow(clippy::too_many_arguments)]
+fn write_blocks(
+    bits: &mut impl Bits,
+    ctx: &mut Ctx,
+    enc: &mut Encoder5,
+    tokens: &[Token],
+    (blocks, bends): (&[(usize, bool)], &[usize]),
+    streams: Option<&[Stream]>,
+    out: &mut Vec<u8>,
+    mut parts: Option<&mut Vec<usize>>,
+) -> Result<()> {
+    if streams.is_none() {
+        std::hint::black_box(Vec::<u8>::with_capacity(SCRATCH));
+    }
+    let (mut at, mut bi) = (0, 0);
+    for (fi, &bend) in bends.iter().enumerate() {
+        let from = bi;
+        while bi < bend {
+            let (n, has) = blocks[bi];
+            let tables = if has {
+                // the tokens it serves, up to the next tables
+                let (mut end, mut j) = (at + n, bi + 1);
+                while j < blocks.len() && !blocks[j].1 {
+                    end += blocks[j].0;
+                    j += 1;
+                }
+                let given = streams.and_then(|s| s[fi].blocks[bi - from].tables.as_ref());
+                Some(code_tables(bits, ctx, &tokens[at..end], enc.v1, given)?)
+            } else {
+                None
+            };
+            enc.block(&tokens[at..at + n], tables.as_ref(), bi + 1 == bend, out)?;
             at += n;
+            bi += 1;
+        }
+        if let Some(p) = parts.as_mut() {
+            p.push(out.len());
         }
     }
-    let mut made_tables: Vec<Vec<Option<Tables>>> = blocks.iter().map(|bs| vec![None; bs.len()]).collect();
-    for ((fi, bi, _, _), toks) in spans.iter().zip(&serve) {
-        let given = streams.and_then(|s| s[*fi].blocks[*bi].tables.clone());
-        let c = lz5::counts(toks, v1);
-        let mut lens = Vec::with_capacity(lz5::lens_len(v1));
-        for f in &c {
-            lens.extend(huff::lengths(f, huff::MAX));
-        }
-        let lens = code_lens(bits, ctx, 0, lens, given.as_ref().map(|g| &g.lens[..]))?;
-        let mut pc = vec![0u32; lz5::PRE];
-        lz5::rle(&lens).iter().for_each(|r| pc[r.0 as usize] += 1);
-        let pre = huff::lengths(&pc, huff::MAX);
-        let pre = code_lens(bits, ctx, 1, pre, given.as_ref().map(|g| &g.pre[..]))?;
-        made_tables[*fi][*bi] = Some(Tables { pre: pre.try_into().unwrap(), lens });
-        if bits.failed() {
-            return Err(corrupt());
-        }
-    }
-    let mut out = Vec::with_capacity(blocks.len());
-    for ((bs, mut tables), tokens) in blocks.iter().zip(made_tables).zip(tokens) {
-        let blocks = bs
-            .iter()
-            .enumerate()
-            .map(|(bi, &(n, _))| Block { tables: tables[bi].take(), tokens: n, last: bi + 1 == bs.len() })
-            .collect();
-        out.push(Stream { blocks, tokens });
-    }
-    Ok(out)
+    Ok(())
 }
 
 /// Code lengths predicted `pred`, coded as they are (`given`): all as predicted, or each.
@@ -722,6 +811,64 @@ pub struct Split {
     pub cost: [f64; CATS],
     /// The largest PPMd model of a new model's block, in MiB (RAR 3.x's streams; 0 for none).
     pub ppmd: u32,
+}
+
+/// What a record starts with: the sizes of the stream's files, its reach, and the counts the
+/// decoder reserves (and the walk must make exactly): tokens (filters not counted), filters,
+/// blocks, and the most bytes of a delta filter.
+pub struct Start {
+    pub v1: bool,
+    pub sizes: Vec<usize>,
+    pub reach: usize,
+    pub tokens: usize,
+    pub filters: usize,
+    pub blocks: usize,
+    pub delta: usize,
+}
+
+/// The start of `record` for a stream of `n` bytes of data, with the decoder and the contexts as
+/// they are after it.
+fn start<'a>(record: &'a [u8], n: usize, ctx: &mut Ctx) -> Result<(Start, Dec<'a>)> {
+    let (&v1, rest) = record.split_first().ok_or_else(corrupt)?;
+    if v1 > 1 {
+        return Err(corrupt());
+    }
+    let mut dec = Dec(ArithDecoder::new(rest));
+    let files = dec.gamma(g32(&mut ctx.misc, 1), 0)? as usize + 1;
+    if files > n + 1 {
+        return Err(corrupt());
+    }
+    let mut sizes = Vec::with_capacity(files);
+    let mut total = 0usize;
+    for _ in 0..files {
+        let s = dec.gamma(g32(&mut ctx.misc, 1), 0)? as usize;
+        total = total.checked_add(s).filter(|&t| t <= n).ok_or_else(corrupt)?;
+        sizes.push(s);
+    }
+    if total != n {
+        return Err(corrupt());
+    }
+    let reach = dec.gamma(g32(&mut ctx.misc, 1), 0)? as usize;
+    // (a token covers a byte at least, a file has fewer filters than bytes; blocks are bounded as
+    // `code_blocks` bounds them)
+    let mut count = |i: usize, most: usize| -> Result<usize> {
+        let v = dec.gamma(g32(&mut ctx.misc, i), 0)? as usize;
+        if v > most {
+            return Err(corrupt());
+        }
+        Ok(v)
+    };
+    let tokens = count(4, n)?;
+    let filters = count(5, n)?;
+    let blocks = count(6, tokens + filters + 64 * files)?;
+    let delta = count(7, n)?;
+    Ok((Start { v1: v1 == 1, sizes, reach, tokens, filters, blocks, delta }, dec))
+}
+
+/// The start of `record` for a stream of `n` bytes of data: what the memory plan follows
+/// ([`crate::plan`]).
+pub fn start_of(record: &[u8], n: usize) -> Result<Start> {
+    Ok(start(record, n, &mut Ctx::new())?.0)
 }
 
 /// Splits the stream of the files of `parts` (their packed data in turn, of `sizes` bytes each):
@@ -757,80 +904,78 @@ pub fn split(parts: &[&[u8]], sizes: &[usize], v1: bool, dict: u64) -> Result<Sp
         e.gamma(g32(&mut ctx.misc, 1), s as u64)?;
     }
     e.gamma(g32(&mut ctx.misc, 1), reach as u64)?;
-    let mut p = take_apart(&streams);
-    code_filters(&mut e, &mut ctx, sizes, &mut p, true)?;
+    let p = take_apart(&streams);
+    let tokens = p.tokens.iter().map(Vec::len).sum::<usize>();
+    let filters = p.filters.iter().map(Vec::len).sum::<usize>();
+    let blocks = streams.iter().map(|s| s.blocks.len()).sum::<usize>();
+    let delta =
+        (p.filters.iter().flatten()).filter(|(_, f)| f.kind == 0).map(|(_, f)| f.len as usize).max().unwrap_or(0);
+    for (i, v) in [(4, tokens), (5, filters), (6, blocks), (7, delta)] {
+        e.gamma(g32(&mut ctx.misc, i), v as u64)?;
+    }
+    let (mut flist, mut fends) = (Vec::with_capacity(filters), Vec::new());
+    code_filters(&mut e, &mut ctx, sizes, &p.filters, &mut flist, &mut fends)?;
     let mut v = data.clone();
-    refile(&mut v, sizes, &p)?;
+    refile(&mut v, sizes, &flist, &fends, delta)?;
     code_fixes(&mut e, &mut ctx, Some(&u), &mut v)?;
-    walk(&u, sizes, reach, &mut e, &mut ctx, &mut p.tokens, true)?;
-    let tokens = put_together(&p)?;
-    let made = code_blocks(&mut e, &mut ctx, tokens, Some(&streams), v1)?;
+    let (mut merged, mut ends) = (Vec::with_capacity(tokens + filters), Vec::new());
+    walk(&u, sizes, reach, &mut e, &mut ctx, &p.tokens, (&flist, &fends), &mut merged, &mut ends)?;
+    let (mut bl, mut bends) = (Vec::with_capacity(blocks), Vec::new());
+    code_blocks(&mut e, &mut ctx, &merged, &ends, Some(&streams), &mut bl, &mut bends)?;
     // (the stream written again from what the record has)
     let mut enc = Encoder5::new(v1);
-    let mut out = Vec::new();
-    for (st, &part) in made.iter().zip(parts) {
-        let at = out.len();
-        enc.file(st, &mut out)?;
-        if out[at..] != *part {
+    let (mut out, mut ends_out) = (Vec::new(), Vec::new());
+    write_blocks(&mut e, &mut ctx, &mut enc, &merged, (&bl, &bends), Some(&streams), &mut out, Some(&mut ends_out))?;
+    let mut at = 0;
+    for (&end, &part) in ends_out.iter().zip(parts) {
+        if out[at..end] != *part {
             return Err(Error("a stream encoded otherwise"));
         }
+        at = end;
     }
     let mut record = vec![v1 as u8];
     record.extend(e.c.finish());
     Ok(Split { data, record, cost: e.cost, ppmd: 0 })
 }
 
-/// The files' contents `data` of `sizes` filtered again by the filters of `p`, in place.
-fn refile(data: &mut [u8], sizes: &[usize], p: &Parts) -> Result<()> {
-    let mut at = 0;
+/// The files' contents `data` of `sizes` filtered again by the filters `list` (`ends` the end of
+/// each file's), in place.
+fn refile(data: &mut [u8], sizes: &[usize], list: &[(usize, Filter)], ends: &[usize], delta: usize) -> Result<()> {
+    let (mut at, mut from) = (0, 0);
     for (i, &s) in sizes.iter().enumerate() {
-        refilter(&mut data[at..at + s], &placed(&p.filters[i]))?;
-        at += s;
+        refilter(&mut data[at..at + s], &list[from..ends[i]], delta)?;
+        (at, from) = (at + s, ends[i]);
     }
     Ok(())
 }
 
-/// The stream that `data` and `record` rebuild, written onto `out`; the sizes of its files'
-/// parts.
-pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>) -> Result<Vec<usize>> {
-    let (&v1, rest) = record.split_first().ok_or_else(corrupt)?;
-    if v1 > 1 {
-        return Err(corrupt());
-    }
-    let v1 = v1 == 1;
-    let mut dec = Dec(ArithDecoder::new(rest));
+/// The stream that `data` and `record` rebuild, written onto `out` (room for it reserved).
+pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>) -> Result<()> {
     let mut ctx = Ctx::new();
-    let n = dec.gamma(g32(&mut ctx.misc, 1), 0)? as usize + 1;
-    if n > data.len() + 1 {
-        return Err(corrupt());
-    }
-    let mut sizes = Vec::with_capacity(n);
-    let mut total = 0usize;
-    for _ in 0..n {
-        let s = dec.gamma(g32(&mut ctx.misc, 1), 0)? as usize;
-        total = total.checked_add(s).filter(|&t| t <= data.len()).ok_or_else(corrupt)?;
-        sizes.push(s);
-    }
-    if total != data.len() {
-        return Err(corrupt());
-    }
-    let reach = dec.gamma(g32(&mut ctx.misc, 1), 0)? as usize;
-    let mut p = Parts { tokens: vec![Vec::new(); n], filters: vec![Vec::new(); n] };
-    code_filters(&mut dec, &mut ctx, &sizes, &mut p, false)?;
+    let (st, mut dec) = start(record, data.len(), &mut ctx)?;
+    let Start { v1, sizes, reach, tokens, filters, blocks, delta } = st;
+    let files = sizes.len();
     let mut u = data.to_vec();
-    refile(&mut u, &sizes, &p)?;
-    code_fixes(&mut dec, &mut ctx, None, &mut u)?;
-    walk(&u, &sizes, reach, &mut dec, &mut ctx, &mut p.tokens, false)?;
-    let tokens = put_together(&p)?;
-    let streams = code_blocks(&mut dec, &mut ctx, tokens, None, v1)?;
-    let mut enc = Encoder5::new(v1);
-    let mut parts = Vec::with_capacity(n);
-    for st in &streams {
-        let at = out.len();
-        enc.file(st, out)?;
-        parts.push(out.len() - at);
+    let (mut flist, mut fends) = (Vec::with_capacity(filters), Vec::with_capacity(files));
+    code_filters(&mut dec, &mut ctx, &sizes, &[], &mut flist, &mut fends)?;
+    if flist.len() != filters {
+        return Err(Error("a count of filters that does not fit"));
     }
-    Ok(parts)
+    refile(&mut u, &sizes, &flist, &fends, delta)?;
+    code_fixes(&mut dec, &mut ctx, None, &mut u)?;
+    // (the tokens and the filters among them reserved: their counts are the record's)
+    let (mut merged, mut ends) = (Vec::with_capacity(tokens + filters), Vec::with_capacity(files));
+    walk(&u, &sizes, reach, &mut dec, &mut ctx, &[], (&flist, &fends), &mut merged, &mut ends)?;
+    if merged.len() != tokens + filters {
+        return Err(Error("a count of tokens that does not fit"));
+    }
+    let (mut bl, mut bends) = (Vec::with_capacity(blocks), Vec::with_capacity(files));
+    code_blocks(&mut dec, &mut ctx, &merged, &ends, None, &mut bl, &mut bends)?;
+    if bl.len() != blocks {
+        return Err(Error("a count of blocks that does not fit"));
+    }
+    let mut enc = Encoder5::new(v1);
+    write_blocks(&mut dec, &mut ctx, &mut enc, &merged, (&bl, &bends), None, out, None)
 }
 
 /// [`join_onto`] onto a new vector.
@@ -838,10 +983,4 @@ pub fn join(data: &[u8], record: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     join_onto(data, record, &mut out)?;
     Ok(out)
-}
-
-/// Bytes of the working memory of a stream of `n` bytes of data, besides its data and record:
-/// the unfiltered data, the match finder, the tokens (twice), the streams written.
-pub fn memory(n: u64) -> u64 {
-    n + Mf::memory(n) + 4 * std::mem::size_of::<Token>() as u64 * n / 2 + n + (1 << 20)
 }

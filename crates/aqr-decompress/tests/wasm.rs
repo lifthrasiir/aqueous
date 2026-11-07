@@ -222,7 +222,10 @@ fn psd_plans_hold() {
     let (lots, ..) = many(200);
     let files = [
         ("raw and rle", psd(300, 40, &layers(300, 40, true), packbits::NO_TILES, 0, &[])),
-        ("greedy, one raw", psd(260, 35, &layers(260, 35, false), Rle::Greedy { min_run: 3, split_rest: true }, 0, &[0])),
+        (
+            "greedy, one raw",
+            psd(260, 35, &layers(260, 35, false), Rle::Greedy { min_run: 3, split_rest: true }, 0, &[0]),
+        ),
         ("tiles and exceptions", psd(800, 400, &layers(800, 400, true), enc, 3, &[])),
         ("hinted", psd::hinted_file(300, 200)),
         ("psb", psd::psb(300, 40, enc)),
@@ -1947,7 +1950,12 @@ fn mp3_plans_hold() {
     }
     // (their payloads are gaps: past the window)
     let c = aqr_mp3::codec::encode(&big);
-    assert!(c.streams[6].len() > 512 << 10, "{:?} {}", c.streams.iter().map(|s| s.len()).collect::<Vec<_>>(), frames.len());
+    assert!(
+        c.streams[6].len() > 512 << 10,
+        "{:?} {}",
+        c.streams.iter().map(|s| s.len()).collect::<Vec<_>>(),
+        frames.len()
+    );
     let f = aqr_mp3::formula::encode(&big, 1).unwrap();
     plan_holds("gap", f, &big);
 }
@@ -2283,6 +2291,217 @@ fn lha_plans_hold() {
         let index = f.push("lha/index", aqr_lha::formula::index(&lens));
         f.root = Node::Apply(Box::new(aqr_lha::formula::apply_recons(data, record, index, all.len() as u64)));
         plan_holds(&format!("lha {what}"), f, &all);
+    }
+}
+
+mod rar5_gen {
+    use aqr_common::rng::Rng;
+    use aqr_rar::huff;
+    use aqr_rar::lz5::{self, Block, Encoder5, Filter, Stream, Tables, Token, bonus};
+
+    fn min_bytes(v: u32) -> u8 {
+        1 + (v > 0xff) as u8 + (v > 0xffff) as u8 + (v > 0xff_ffff) as u8
+    }
+
+    /// The tokens of the files of `sizes` (a solid group), of literals and copies near and far,
+    /// repeated distances and the last copy again, and up to `filters` filters in each file.
+    pub fn tokens(rng: &mut Rng, sizes: &[usize], filters: usize) -> Vec<Vec<Token>> {
+        let (mut hist, mut cache, mut last) = (0usize, [0usize; 4], 0u32);
+        let mut files = Vec::new();
+        for &size in sizes {
+            let (mut toks, mut pos, mut fend, mut want) = (Vec::new(), 0usize, 0usize, filters);
+            while pos < size {
+                let left = size - pos;
+                if want > 0 && rng.below(10) == 0 {
+                    let at = pos + rng.below(6) as usize;
+                    if at >= fend && at < size {
+                        let most = (size - at).min(if rng.below(200) == 0 { 20000 } else { 300 });
+                        let (start, len) = ((at - pos) as u32, 1 + rng.below(most as u64) as u32);
+                        let kind = rng.below(4) as u8;
+                        let channels = if kind == 0 { 1 + rng.below(32) as u8 } else { 0 };
+                        let (start_bytes, len_bytes) = (min_bytes(start), min_bytes(len));
+                        toks.push(Token::Filter(Filter { start, len, kind, channels, start_bytes, len_bytes }));
+                        (fend, want) = (at + len as usize, want - 1);
+                        continue;
+                    }
+                }
+                let made = match rng.below(10) {
+                    4..=6 if hist > 0 => {
+                        let near = if rng.below(3) == 0 { 100 } else { 1 << 20 };
+                        let dist = 1 + rng.below(hist.min(near) as u64) as usize;
+                        let b = bonus(dist) as usize;
+                        if left < 2 + b {
+                            None
+                        } else {
+                            let most = (left - b - 1).min(if rng.below(50) == 0 { 4096 } else { 10 });
+                            let len = (2 + rng.below(most as u64) as usize + b) as u32;
+                            cache.copy_within(0..3, 1);
+                            cache[0] = dist;
+                            last = len;
+                            Some(Token::Copy { len, dist })
+                        }
+                    }
+                    7 | 8 => {
+                        let idx = rng.below(4) as usize;
+                        if cache[idx] == 0 || left < 2 {
+                            None
+                        } else {
+                            let len = 2 + rng.below((left - 1).min(12) as u64) as u32;
+                            let d = cache[idx];
+                            cache.copy_within(0..idx, 1);
+                            cache[0] = d;
+                            last = len;
+                            Some(Token::Rep { idx: idx as u8, len })
+                        }
+                    }
+                    9 if last != 0 && cache[0] != 0 && (last as usize) <= left.min(30) => Some(Token::Last),
+                    _ => None,
+                };
+                let t = made.unwrap_or(Token::Lit(b'a' + rng.below(5) as u8));
+                let n = match t {
+                    Token::Lit(_) => 1,
+                    Token::Copy { len, .. } | Token::Rep { len, .. } => len as usize,
+                    _ => last as usize,
+                };
+                toks.push(t);
+                pos += n;
+                hist += n;
+            }
+            files.push(toks);
+        }
+        files
+    }
+
+    /// The tables over the tokens `serve`: Huffman's lengths, or those of every symbol present.
+    fn tables(serve: &[Token], v1: bool, every: bool) -> Tables {
+        let mut c = lz5::counts(serve, v1);
+        if every {
+            c.iter_mut().flatten().for_each(|x| *x += 1);
+        }
+        let lens: Vec<u8> = c.iter().flat_map(|f| huff::lengths(f, huff::MAX)).collect();
+        let mut pc = vec![0u32; lz5::PRE];
+        lz5::rle(&lens).iter().for_each(|r| pc[r.0 as usize] += 1);
+        let pre = huff::lengths(&pc, huff::MAX).try_into().unwrap();
+        Tables { pre, lens }
+    }
+
+    /// The tokens of each file cut into blocks of up to `most` tokens, some with tables (the
+    /// first always), and written: the files' parts.
+    pub fn parts(rng: &mut Rng, files: Vec<Vec<Token>>, v1: bool, most: usize, every: bool) -> Vec<Vec<u8>> {
+        let mut shapes: Vec<Vec<(usize, bool)>> = Vec::new();
+        for t in &files {
+            let (mut at, mut v) = (0, Vec::new());
+            while at < t.len() {
+                let n = (1 + rng.below(most as u64) as usize).min(t.len() - at);
+                v.push((n, shapes.is_empty() && v.is_empty() || rng.below(3) == 0));
+                at += n;
+            }
+            shapes.push(v);
+        }
+        // (each table serves the tokens up to the next, across the files)
+        let all: Vec<Token> = files.iter().flatten().copied().collect();
+        let flat: Vec<(usize, bool)> = shapes.iter().flatten().copied().collect();
+        let (mut starts, mut at) = (Vec::new(), 0);
+        for &(n, _) in &flat {
+            starts.push(at);
+            at += n;
+        }
+        let mut tabs = Vec::new();
+        for (i, &(_, has)) in flat.iter().enumerate() {
+            if has {
+                let next = (i + 1..flat.len()).find(|&j| flat[j].1).map_or(all.len(), |j| starts[j]);
+                tabs.push(Some(tables(&all[starts[i]..next], v1, every && rng.below(2) == 0)));
+            } else {
+                tabs.push(None);
+            }
+        }
+        let (mut enc, mut out, mut i) = (Encoder5::new(v1), Vec::new(), 0);
+        let mut parts = Vec::new();
+        for (t, shape) in files.into_iter().zip(shapes) {
+            let blocks = (shape.iter().enumerate())
+                .map(|(k, &(tokens, _))| {
+                    i += 1;
+                    Block { tables: tabs[i - 1].clone(), tokens, last: k + 1 == shape.len() }
+                })
+                .collect();
+            let at = out.len();
+            enc.file(&Stream { blocks, tokens: t }, &mut out).unwrap();
+            parts.push(out[at..].to_vec());
+        }
+        parts
+    }
+}
+
+/// The applications of the module `name` in `f` (in its root, and its shared applications), each
+/// as [`plan_holds`] checks it against what it gives natively. Returns their number.
+fn module_applications_hold(what: &str, f: &Formula, name: &str) -> usize {
+    let mut found = Vec::new();
+    f.root.visit(&mut |n| {
+        if let Node::Apply(a) = n {
+            found.push((**a).clone());
+        }
+    });
+    found.extend(f.shared.iter().map(|s| s.apply.clone()));
+    let mut count = 0;
+    for a in found.into_iter().filter(|a| a.module.name == name) {
+        // (what the rar module gives natively on its inputs)
+        let inputs: Vec<Vec<u8>> = (a.inputs.iter())
+            .map(|n| {
+                let mut g = Formula { shared: Vec::new(), ..f.clone() };
+                g.root = n.clone();
+                g.eval(&Native::default()).unwrap()
+            })
+            .collect();
+        let refs: Vec<&[u8]> = inputs.iter().map(|i| &i[..]).collect();
+        let want = aqr_rar::formula::apply(&a, &refs, 1).unwrap();
+        let mut g = Formula { shared: Vec::new(), ..f.clone() };
+        g.root = Node::Apply(Box::new(a));
+        plan_holds(&format!("{what} {count}"), g, &want);
+        count += 1;
+    }
+    count
+}
+
+/// rar5-recons lays its memory out as a stack, its limit its plan: of the fixtures' archives and
+/// of generated streams (RAR 6's and RAR 7's algorithm): a file with many blocks and filters,
+/// tables written otherwise than predicted, a solid group of many files, a file past the rings of
+/// the match finder.
+#[test]
+fn rar5_plans_hold() {
+    for t in ["r5_m3", "r5_solid"] {
+        let d = fixture(&format!("codecs/aqr-rar/tests/data/{t}.rar"));
+        let f = aqr_rar::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
+        assert!(module_applications_hold(&format!("rar5 {t}"), &f, "rar5-recons") > 0, "{t}");
+    }
+    let cases: [(&str, bool, Vec<usize>, usize, usize, bool); 6] = [
+        ("blocks and filters", false, vec![60000], 80, 100, false),
+        ("version 1, tables otherwise", true, vec![100000], 300, 80, true),
+        ("many files", false, vec![700; 80], 1, 100, true),
+        ("past the rings", false, vec![300000], 10, 20000, false),
+        ("small", false, vec![3], 0, 1, false),
+        ("small files", true, vec![5, 1, 9], 1, 3, false),
+    ];
+    let mut rng = aqr_common::rng::Rng::new(5);
+    for (what, v1, sizes, filters, most, every) in cases {
+        let files = rar5_gen::tokens(&mut rng, &sizes, filters);
+        let parts = rar5_gen::parts(&mut rng, files, v1, most, every);
+        let refs: Vec<&[u8]> = parts.iter().map(|p| &p[..]).collect();
+        let sp = aqr_rar::recons5::split(&refs, &sizes, v1, 1 << 40).unwrap_or_else(|e| panic!("{what}: {e}"));
+        let all = parts.concat();
+        // (more than the 64 holes that the stack would trap past: blocks, filters, files)
+        let start = aqr_rar::recons5::start_of(&sp.record, sp.data.len()).unwrap();
+        eprintln!("rar5 {what}: {} blocks, {} filters, {} files", start.blocks, start.filters, sizes.len());
+        if what != "small" && what != "small files" && what != "past the rings" {
+            assert!(start.blocks > 64 && (start.filters > 64 || sizes.len() > 64), "{what}");
+        }
+        let mut f = Formula::default();
+        let data = f.push("raw", sp.data.clone());
+        let record = f.push("rar/record", sp.record.clone());
+        let index = f.push("rar/index", aqr_rar::formula::index(&[(sp.data.len(), sp.record.len())]));
+        let a =
+            aqr_rar::formula::apply_recons(aqr_rar::formula::MODULE5, vec![], data, record, index, all.len() as u64);
+        f.root = Node::Apply(Box::new(a));
+        plan_holds(&format!("rar5 {what}"), f, &all);
     }
 }
 
