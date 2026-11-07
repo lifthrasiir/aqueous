@@ -167,6 +167,13 @@
 //!   instance's limit and, of each class of tasks, its concurrency times its task limit): a
 //!   decoder lowers the concurrency of the classes to fit, and an application that does not
 //!   fit with one unit each fails as a resource failure before it starts.
+//! - `--application-bound SIZE` is about the most memory an application of a module may need at
+//!   its least (its memory limit plus the sum of its task limits, `aqr -I -v` tells them), apart
+//!   from `-M`, the budget of the whole run. Compressing (256 MiB by default, `unlimited` allowed),
+//!   a recompressor whose formula has an application over it is not used for that data, which
+//!   is kept as it would be if no recompressor took it (`-v` and `--stats` tell what fell back);
+//!   decompressing (512 MiB by default, which the spec has every decoder support), an archive
+//!   with an application over it fails as a resource failure before the module is applied.
 //! - `--stats` tells, after each archive made or decoded, what stands out of its files by kind
 //!   and of where the time went, sampled as it ran ([`stats`]); `--stats=FILE.json` writes all
 //!   of it as well, and `--stats=FILE.html` a page showing it (opened on a terminal). Either
@@ -321,6 +328,12 @@ General:
   -M, --memory MEM      about the most heap to take at once: a SIZE, N% of the
                         system's memory, avail (most of what is available now), or 0
                         (no limit); by default 2 GB, or half the system's if less
+      --application-bound SIZE
+                        the most memory an application of a module may need (its
+                        memory limit and the sum of its task limits): compressing,
+                        recompressions needing more are not used (default 256M, or
+                        unlimited); decompressing, an archive needing more fails
+                        (default 512M, which every decoder supports); independent of -M
   -h, --help            show this help
   -V, --version         show the version
 
@@ -514,6 +527,7 @@ fn parse() -> Result<Args, String> {
     let mut only_inputs = false;
     let mut format = None;
     let mut memory = None;
+    let mut application_bound = None;
     // (`-C`: the directory so far, by input the one it was given in, and the last given)
     let (mut dir, mut dirs, mut last_dir) = (PathBuf::new(), Vec::new(), None);
     while let Some(arg) = argv.next() {
@@ -587,6 +601,13 @@ fn parse() -> Result<Args, String> {
             "-A" | "--archival" => a.opt.mirrors = true,
             "--no-check" => a.opt.verify = false,
             "--stats" => stats = true,
+            "--application-bound" => {
+                let v = text(value("--application-bound")?);
+                application_bound = Some(bound_of(&v)?);
+            }
+            s if s.starts_with("--application-bound=") => {
+                application_bound = Some(bound_of(&s["--application-bound=".len()..])?)
+            }
             "--ipc" => a.ipc = true,
             "-P" | "--passphrase" => a.passphrase = true,
             "--each" => a.each = true,
@@ -629,6 +650,16 @@ fn parse() -> Result<Args, String> {
         // (what a user asked for also bounds the memories of an application of a module in Wasm:
         // its concurrency is lowered to fit, and it fails if it does not at 1)
         aqr_decompress::set_application_bound(limit);
+    }
+    match application_bound {
+        // (compressing: the most an application may need to be made, which the archive's check
+        // by decoding then has to allow; decompressing: the most one is let to need)
+        Some(b) if !a.decompress => {
+            a.opt.application_bound = Some(b);
+            aqr_formula::set_application_limit(b.max(aqr_formula::SUPPORTED_BOUND));
+        }
+        Some(b) => aqr_formula::set_application_limit(b),
+        None => {}
     }
     if a.info {
         if a.rm || a.each || a.dereference || a.output.is_some() || !renames.is_empty() || last_dir.is_some() {
@@ -809,6 +840,32 @@ fn size_of(s: &str) -> Option<usize> {
         _ => (s, 0),
     };
     n.parse::<usize>().ok()?.checked_mul(1 << shift)
+}
+
+/// Tells on standard error the recompressions not used for the bound of `--application-bound`
+/// (and the applications kept over it), by module.
+fn tell_fallbacks(fallbacks: &[aqr_compress::Fallback]) {
+    let mut by_module: std::collections::BTreeMap<(&str, bool), (u64, u64, u64)> = Default::default();
+    for f in fallbacks {
+        let e = by_module.entry((f.module, f.kept)).or_default();
+        (e.0, e.1, e.2) = (e.0 + 1, e.1 + f.bytes, e.2.max(f.needed));
+    }
+    for ((module, kept), (n, bytes, most)) in by_module {
+        let what = if kept { "kept over the bound" } else { "not used for the bound" };
+        eprintln!(
+            "application bound: {module}: {n} {what}, {} of data, up to {} MiB needed",
+            size(bytes as f64),
+            most >> 20
+        );
+    }
+}
+
+/// Of `--application-bound`, the bytes: a size, or `unlimited`.
+fn bound_of(v: &str) -> Result<u64, String> {
+    match v {
+        "unlimited" => Ok(u64::MAX),
+        v => size_of(v).map(|n| n as u64).ok_or("--application-bound takes a size (256M, 1G, ...) or unlimited".into()),
+    }
 }
 
 /// Bytes of a size, for people.
@@ -1169,7 +1226,9 @@ fn compress_into(
             aqr_compress::Source::intact(&g, 0)?;
             Ok(r)
         })?;
+        let fallbacks = aqr_compress::fallbacks();
         if !a.quiet && a.verbose {
+            tell_fallbacks(&fallbacks);
             let modules: Vec<String> = f.applies().iter().map(|m| m.module.to_string()).collect();
             let format = detect(&d).map_or("-", |f| f.name());
             eprintln!(
@@ -1205,6 +1264,7 @@ fn compress_into(
                     same_as: None,
                     modules: f.applies().iter().map(|m| m.module.to_string()).collect(),
                 }],
+                fallbacks: fallbacks.clone(),
                 trace: rec.finish(),
             });
         }
@@ -1284,7 +1344,11 @@ fn compress_into(
             }
         })?,
     };
+    let fallbacks = aqr_compress::fallbacks();
     if !a.quiet {
+        if a.verbose {
+            tell_fallbacks(&fallbacks);
+        }
         eprintln!("archive overhead (header, modules, metadata): {}", size(r.overhead as f64));
         if r.mirrors > 0 {
             eprintln!("mirror blocks: {}", size(r.mirrors as f64));
@@ -1313,6 +1377,7 @@ fn compress_into(
             written: r.len as u64,
             overhead: Some(r.overhead as u64),
             contents,
+            fallbacks: fallbacks.clone(),
             trace: rec.finish(),
         });
     }
@@ -2471,6 +2536,7 @@ fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Forma
             written: total,
             overhead: None,
             contents,
+            fallbacks: Vec::new(),
             trace: rec.finish(),
         });
     }
@@ -2829,6 +2895,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
             written: total,
             overhead: None,
             contents,
+            fallbacks: Vec::new(),
             trace: rec.finish(),
         });
     }

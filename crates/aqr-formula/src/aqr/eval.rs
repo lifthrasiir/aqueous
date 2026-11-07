@@ -649,6 +649,7 @@ pub(super) fn run<'a>(
     let part = |a: Ap<'_, 'a>| loaded(block(a)).is_ok_and(|l| l.is_part());
     let apply_part = |a: Ap<'_, 'a>, ins: &mut [&mut dyn PartIn], outs: &mut [&mut dyn PartOut]| {
         let a = block(a);
+        super::within_limit(a, p.modules[a.module])?;
         loaded(a)?.apply_part(a.params, &resources(a), ins, outs, &a.output_sizes, a.memory_limit, &a.task_limits)
     };
     let running = Threads::default();
@@ -1206,6 +1207,7 @@ pub(super) fn hashed(
     let part = |a: Ap<'_, '_>| loaded(block(a)).is_ok_and(|l| l.is_part());
     let apply_part = |a: Ap<'_, '_>, ins: &mut [&mut dyn PartIn], outs: &mut [&mut dyn PartOut]| {
         let a = block(a);
+        super::within_limit(a, p.modules[a.module])?;
         loaded(a)?.apply_part(a.params, &resources(a), ins, outs, &a.output_sizes, a.memory_limit, &a.task_limits)
     };
     let fresh = Fresh { raw, dictionaries, cache: Mutex::default() };

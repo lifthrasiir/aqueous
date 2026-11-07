@@ -1743,6 +1743,7 @@ fn analyze(i: usize, files: &[File], data: Vec<Bytes>, raw: &HashSet<usize>, opt
     let memo = cx.pre.take().map(verify::Prevalidator::finish_shared).unwrap_or_default();
     cx.files = None;
     crate::memory::declare(&mut f, &Native { threads: opt.threads }, &memo.1);
+    crate::memory::note_kept(&f, opt.application_bound, u64::MAX);
     notes.send(Note::Analyzed(i));
     let Cx { enc, .. } = cx;
     laid(f, files, enc, memo, opt)

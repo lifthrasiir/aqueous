@@ -7,8 +7,9 @@
 //! works out the others, making their inputs as plans ask.
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 
-use aqr_formula::{Apply, Contents, Formula, Modules, NO_LIMIT, Node, PAGE, Plan, Usage};
+use aqr_formula::{Apply, Contents, Formula, Module, Modules, NO_LIMIT, Node, PAGE, Plan, Usage};
 use xxhash_rust::xxh3::Xxh3;
 
 /// What an application is but for its inputs' bytes: its module, parameters, resources'
@@ -76,6 +77,91 @@ pub(crate) fn limit(a: &Apply, lens: &[u64], outputs: &[u64], contents: &dyn Con
         + outputs.iter().enumerate().map(|(j, &n)| fit(n, window(true, j))).sum::<u64>();
     // (a plan is what the module takes at most: no room)
     Plan { instance: imported.saturating_add(plan.instance), tasks: plan.tasks }
+}
+
+/// The bound on the minimal bound of an application ([`Plan::minimal`]) that the encoder keeps
+/// to by default: 256 MiB, the decoders supporting up to [`aqr_formula::SUPPORTED_BOUND`].
+pub const DEFAULT_BOUND: u64 = 256 << 20;
+
+/// Modules allowed a larger bound than [`DEFAULT_BOUND`] by default, with their bounds (at most
+/// [`aqr_formula::SUPPORTED_BOUND`]): where 256 MiB loses much and splitting is no help. None yet.
+const EXCEPTIONS: &[(&str, u64)] = &[];
+
+/// The most that the minimal bound of an application of `module` may be, under the `bound` of
+/// [`crate::Options::application_bound`]: that given, or by default [`DEFAULT_BOUND`] or the
+/// module's exception to it.
+pub(crate) fn bound_of(bound: Option<u64>, module: Module) -> u64 {
+    match bound {
+        Some(b) => b,
+        None => EXCEPTIONS.iter().find(|e| e.0 == module.name).map_or(DEFAULT_BOUND, |e| e.1.max(DEFAULT_BOUND)),
+    }
+}
+
+/// A recompression not used, or an application kept, for its minimal bound over the bound: what
+/// [`fallbacks`] tells.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fallback {
+    pub module: &'static str,
+    /// The minimal bound of the application (the largest of the formula's), in bytes.
+    pub needed: u64,
+    /// The bytes of the data the recompressor was given.
+    pub bytes: u64,
+    /// The application was kept (made by a step after the recompressors), not given up.
+    pub kept: bool,
+}
+
+static FALLBACKS: Mutex<Vec<Fallback>> = Mutex::new(Vec::new());
+
+/// The recompressions given up so far, and the applications kept over the bound, for their
+/// bound ([`crate::Options::application_bound`]); emptied.
+pub fn fallbacks() -> Vec<Fallback> {
+    std::mem::take(&mut *FALLBACKS.lock().unwrap())
+}
+
+/// The application of `f` of the largest minimal bound over the bound of its module under
+/// `bound` ([`bound_of`]): its module and the bound, if any. Its inputs are made by `m` as
+/// plans ask.
+pub(crate) fn exceeding(f: &Formula, m: &(impl Modules + Sync), bound: Option<u64>) -> Option<(Module, u64)> {
+    let worst: Mutex<Option<(Module, u64)>> = Mutex::new(None);
+    let plans = f.plans(m, &|a, contents| {
+        let p = match a.memory_limit {
+            NO_LIMIT => {
+                let lens: Vec<u64> = a.inputs.iter().map(Node::len).collect();
+                limit(a, &lens, &[a.len], contents)
+            }
+            _ => Plan { instance: a.memory_limit, tasks: a.task_limits.clone() },
+        };
+        let needed = p.minimal();
+        let mut w = worst.lock().unwrap();
+        if needed > bound_of(bound, a.module) && w.is_none_or(|(_, n)| needed > n) {
+            *w = Some((a.module, needed));
+        }
+        Some(p)
+    });
+    drop(plans);
+    worst.into_inner().unwrap()
+}
+
+/// Records a recompression given up for the data of `bytes` bytes.
+pub(crate) fn gave_up(module: Module, needed: u64, bytes: u64) {
+    FALLBACKS.lock().unwrap().push(Fallback { module: module.name, needed, bytes, kept: false });
+}
+
+/// Records the applications of `f`, whose limits are declared, that are over the bound under
+/// `bound` ([`bound_of`]) though the recompressors kept to it: the sets and the like make them
+/// after. `bytes` is the length of the data `f` stands for.
+pub(crate) fn note_kept(f: &Formula, bound: Option<u64>, bytes: u64) {
+    for a in f.applies() {
+        let needed = aqr_formula::minimal_bound(a.memory_limit, &a.task_limits);
+        if needed > bound_of(bound, a.module) {
+            FALLBACKS.lock().unwrap().push(Fallback {
+                module: a.module.name,
+                needed,
+                bytes: a.len.min(bytes),
+                kept: true,
+            });
+        }
+    }
 }
 
 /// Declares the memory limits of `f`'s applications: those declared already kept (of a formula

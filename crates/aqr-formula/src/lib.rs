@@ -61,6 +61,13 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// The minimal bound of an application of this plan (spec, "Module execution"): the
+    /// instance's limit plus one task of each class (the concurrency 1); [`NO_LIMIT`] (not
+    /// known) counts for nothing.
+    pub fn minimal(&self) -> u64 {
+        minimal_bound(self.instance, &self.tasks)
+    }
+
     /// The plan of a module of one class of tasks.
     pub fn one(instance: u64, task: u64) -> Plan {
         Plan { instance, tasks: vec![task] }
@@ -774,6 +781,34 @@ pub struct Apply {
 
 /// The memory limit of an application declaring none.
 pub const NO_LIMIT: u64 = u64::MAX;
+
+/// The most that a decoder has to support of the minimal bound of an application
+/// ([`minimal_bound`]), 512 MiB; encoders keep to less by default (spec, "Module execution").
+pub const SUPPORTED_BOUND: u64 = 1 << 29;
+
+/// What the decoder fails an application over, as bytes of its minimal bound
+/// ([`set_application_limit`]); [`SUPPORTED_BOUND`] by default.
+static APPLICATION_LIMIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(SUPPORTED_BOUND);
+
+/// Sets the most that an application may have as its minimal bound ([`minimal_bound`]) for this
+/// process; a larger one fails as a resource failure before its module is applied
+/// (`u64::MAX`: no limit, as an encoder that is allowed larger ones sets it).
+pub fn set_application_limit(bytes: u64) {
+    APPLICATION_LIMIT.store(bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The limit set ([`set_application_limit`]).
+pub fn application_limit() -> u64 {
+    APPLICATION_LIMIT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The minimal bound of an application of memory limit `memory_limit` and task limits
+/// `task_limits`: the memory limit plus the sum of the task limits (one task of each class at
+/// once). A limit of [`NO_LIMIT`] counts for nothing.
+pub fn minimal_bound(memory_limit: u64, task_limits: &[u64]) -> u64 {
+    let known = |l: u64| if l == NO_LIMIT { 0 } else { l };
+    task_limits.iter().fold(known(memory_limit), |t, &l| t.saturating_add(known(l)))
+}
 
 impl Node {
     pub fn slice(stream: usize, start: u64, len: u64) -> Node {
@@ -1662,6 +1697,19 @@ impl Formula {
         part: &mut dyn FnMut(&[u8]) -> Result<()>,
     ) -> Result<()> {
         aqr::eval::eval_formula(self, m, Some(part), threads).map(drop)
+    }
+
+    /// What `limit` gives of each application ([`Formula::applies`]) and its inputs, which are
+    /// made (by `m`) only as `limit` reads them, without setting anything: None where it gives
+    /// none or an input asked for cannot be made.
+    pub fn plans<M: Modules + Sync>(
+        &self,
+        m: &M,
+        limit: &dyn Fn(&Apply, &dyn Contents) -> Option<Plan>,
+    ) -> Result<Vec<(&Apply, Option<Plan>)>> {
+        let applies = self.applies();
+        let limits = aqr::eval::limits_of(self, m, &applies, limit)?;
+        Ok(applies.into_iter().zip(limits).collect())
     }
 
     /// Sets every application's memory limit ([`Apply::memory_limit`]) and task limits to what

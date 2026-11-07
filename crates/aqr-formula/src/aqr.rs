@@ -4369,6 +4369,24 @@ fn tests_released(_: &str) -> bool {
     false
 }
 
+/// Fails (a resource failure) where the minimal bound of application `a` of module block
+/// `module` is over the limit of the process ([`crate::set_application_limit`], 512 MiB by
+/// default), before its module is applied. Not for the earlier Apply, whose limit was an estimate.
+fn within_limit(a: &Apply, module: usize) -> Decoded<()> {
+    if a.old {
+        return Ok(());
+    }
+    let (needed, limit) = (crate::minimal_bound(a.memory_limit, &a.task_limits), crate::application_limit());
+    if needed > limit {
+        let mib = needed.div_ceil(1 << 20);
+        return Err(Failure::Resource(format!(
+            "module block {module}: an application needs at least {needed} bytes of memory ({mib} MiB) \
+             but is limited to {limit}; allow it with --application-bound={mib}M"
+        )));
+    }
+    Ok(())
+}
+
 /// The outputs of application `a` of module block `module`.
 fn apply(env: &Env, module: usize, a: &Apply, inputs: &[&[u8]], resources: &[Resource]) -> Decoded<Vec<Vec<u8>>> {
     let loaded = env.loaded[module].get_or_init(|| env.runner.load(&env.modules[module]));
@@ -4388,6 +4406,7 @@ fn apply(env: &Env, module: usize, a: &Apply, inputs: &[&[u8]], resources: &[Res
             a.task_limits.len()
         ));
     }
+    within_limit(a, module)?;
     let outputs = loaded.apply(a.params, resources, inputs, &a.output_sizes, a.memory_limit, &a.task_limits)?;
     checked_outputs(outputs, a, module)
 }
@@ -4974,6 +4993,45 @@ mod tests {
         let mut seen = std::mem::take(&mut *LIMITS.lock().unwrap());
         seen.sort();
         assert_eq!(seen, [vec![7, 9], vec![7, 9]]);
+    }
+
+    /// An application whose minimal bound (the memory limit and the sum of the task limits) is
+    /// over the decoder's limit, 512 MiB by default, fails as a resource failure before its
+    /// module is applied; one of exactly that is applied.
+    #[test]
+    fn minimal_bound_limit() {
+        assert_eq!(crate::application_limit(), 512 << 20);
+        let d: Vec<u8> = (0..1000u32).map(|i| i as u8).collect();
+        // (a module of two classes of tasks)
+        fn two_classes(m: Module) -> Option<Wasm> {
+            let mut w = stand_in(m);
+            let name = b"aqr_task_slots";
+            w.extend_from_slice(&[0, name.len() as u8 + 3, name.len() as u8]);
+            w.extend_from_slice(name);
+            w.extend_from_slice(&[8, 4]);
+            Some(Wasm::Bytes(Cow::Owned(w)))
+        }
+        let at = |memory_limit: u64, task_limits: Vec<u64>| {
+            let mut f = Formula::default();
+            f.push("a", d.clone());
+            f.root = Node::Apply(Box::new(crate::Apply {
+                module: REV,
+                resources: vec![],
+                params: vec![],
+                inputs: vec![Node::slice(0, 0, 1000)],
+                len: 1000,
+                memory_limit,
+                task_limits,
+            }));
+            let want: Vec<u8> = d.iter().rev().copied().collect();
+            let c = Encoder::new(Level::Zstd(1)).with_modules(two_classes).encode(&f, Some(checksum(&want))).unwrap();
+            decode(&c, &PartCut).map(|r| r == want)
+        };
+        let m = 1 << 20;
+        assert!(at(512 * m, vec![0, 0]).unwrap());
+        assert!(at(256 * m, vec![128 * m, 128 * m]).unwrap());
+        assert!(matches!(at(512 * m + 1, vec![0, 0]), Err(Failure::Resource(t)) if t.contains("--application-bound")));
+        assert!(matches!(at(m, vec![512 * m, 0]), Err(Failure::Resource(_))));
     }
 
     /// Part modules applied as their outputs are pulled, each on a thread of its own: one of a

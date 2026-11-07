@@ -132,6 +132,7 @@ mod hdf5;
 mod inflated;
 pub mod mapped;
 mod memory;
+pub use memory::{DEFAULT_BOUND, Fallback, fallbacks};
 mod nsis;
 mod progress;
 mod seal;
@@ -240,6 +241,12 @@ pub struct Options {
     /// drive, but where that is a drive of the network): the system writes them out as memory
     /// runs short. None by default.
     pub spill: Option<std::path::PathBuf>,
+    /// The most bytes that an application of a module may have as its minimal bound (its memory
+    /// limit and the sum of its task limits; spec, "Module execution"): a recompression whose
+    /// formula has a larger one is not used, its data kept as it would be without it
+    /// ([`memory::fallbacks`] tells). None, the default: 256 MiB ([`memory::DEFAULT_BOUND`]),
+    /// or more for a module with an exception ([`memory`]); decoders support up to 512 MiB.
+    pub application_bound: Option<u64>,
 }
 
 /// The bytes of a segment of an archive of several files by default ([`Options::segment`]).
@@ -326,6 +333,7 @@ impl Default for Options {
             batch: 512 << 20,
             segment: SEGMENT,
             spill: None,
+            application_bound: None,
         }
     }
 }
@@ -859,6 +867,7 @@ fn finish(
         false => out,
     };
     memory::declare(&mut f, &Native { threads: opt.threads }, &memo.1);
+    memory::note_kept(&f, opt.application_bound, d.len() as u64);
     // the streams of a class together, as they compress smaller: as pieces of the streams, not
     // copied, their blocks compressed as they are written; then the sink's
     // (of a file mapped, let go of as it is read: of all of it, again)
@@ -1224,6 +1233,14 @@ fn recompress_sealed(
         },
     }?;
     let mut f = f;
+    // (an application over the bound: this recompression is not used, as if the recompressor did
+    // not take the data; a formula of data not made yet is not looked at)
+    if !f.streams.iter().any(|s| s.data.is_lazy())
+        && let Some((module, needed)) = memory::exceeding(&f, &Native { threads: 1 }, opt.application_bound)
+    {
+        memory::gave_up(module, needed, d.len() as u64);
+        return None;
+    }
     aqr_formula::store::spill_streams(&mut f);
     if format == Format::Text {
         cx.note_coded(&f, d);
@@ -3655,6 +3672,32 @@ mod tests {
         let (n, applies) = deconstructed(&gz("text.txt", &text, 1), false);
         assert_eq!(n, 1);
         assert!(applies > 0);
+    }
+
+    /// A recompression whose formula has an application over `application_bound` is not used,
+    /// and what fell back is told ([`fallbacks`]); under the default bound it is used.
+    #[test]
+    fn application_bound_falls_back() {
+        let mut z = flate2::GzBuilder::new().filename("text.txt").write(Vec::new(), flate2::Compression::new(1));
+        let text: Vec<u8> =
+            (0..30000).flat_map(|i| format!("line {} of the text\n", i * 7 % 1000).into_bytes()).collect();
+        std::io::Write::write_all(&mut z, &text).unwrap();
+        let gz = z.finish().unwrap();
+        let made = |application_bound| {
+            let opt = Options { smaller: false, application_bound, ..Options::default() };
+            let f = recompress(&gz, &opt);
+            let back = f.eval(&Native::default());
+            assert!(back.as_ref().is_ok_and(|b| *b == gz));
+            f.applies().len()
+        };
+        let _ = fallbacks();
+        assert!(made(None) > 0);
+        assert!(fallbacks().is_empty());
+        // (the plan of an application is more than a byte)
+        assert_eq!(made(Some(1)), 0);
+        let told = fallbacks();
+        assert!(!told.is_empty() && told.iter().all(|f| f.needed > 1 && !f.kept), "{told:?}");
+        assert!(told.iter().any(|f| f.bytes == gz.len() as u64));
     }
 
     /// The members of a gzip stream after its first (as gzip, pigz's `--independent` and

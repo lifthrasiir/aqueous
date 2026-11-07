@@ -148,6 +148,7 @@ impl Stats {
                 written: 0,
                 overhead: None,
                 contents: Vec::new(),
+                fallbacks: Vec::new(),
                 trace: c.watch.trace(),
             };
             runs.push(json(&run, true));
@@ -242,6 +243,9 @@ pub struct Run {
     pub written: u64,
     pub overhead: Option<u64>,
     pub contents: Vec<Content>,
+    /// Compressing: the recompressions given up, and the applications kept, for the bound of
+    /// `--application-bound` ([`aqr_compress::fallbacks`]).
+    pub fallbacks: Vec<aqr_compress::Fallback>,
     pub trace: Trace,
 }
 
@@ -603,6 +607,19 @@ fn outliers(run: &Run) -> String {
             );
         }
     }
+    // the applications over the bound of --application-bound: their recompressions given up
+    let mut by_module: std::collections::BTreeMap<(&str, bool), (u64, u64, u64)> = Default::default();
+    for f in &run.fallbacks {
+        let e = by_module.entry((f.module, f.kept)).or_default();
+        (e.0, e.1, e.2) = (e.0 + 1, e.1 + f.bytes, e.2.max(f.needed));
+    }
+    for ((module, kept), (n, bytes, most)) in by_module {
+        let what = if kept { "applications kept over the bound" } else { "recompressions not used for the bound" };
+        say(
+            &mut out,
+            format!("{module}: {n} {what} ({} of data, up to {} MiB needed)", size(bytes as f64), most >> 20),
+        );
+    }
     if said == 0 {
         out += "  nothing stands out\n";
     }
@@ -690,6 +707,14 @@ fn json(run: &Run, partial: bool) -> String {
         }
         o.push('}');
     });
+    if run.mode == "compress" {
+        o += ",\"fallbacks\":";
+        array(&mut o, &run.fallbacks, |o, f| {
+            *o += "{\"module\":";
+            string(o, f.module);
+            _ = write!(o, ",\"needed\":{},\"bytes\":{},\"kept\":{}}}", f.needed, f.bytes, f.kept);
+        });
+    }
     let t = &run.trace;
     o += ",\"trace\":{\"interval\":";
     number(&mut o, t.interval.as_secs_f64());

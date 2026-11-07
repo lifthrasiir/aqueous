@@ -1296,14 +1296,18 @@ fn zip_of(name: &str, data: &[u8], deflated: &[u8]) -> Vec<u8> {
 }
 
 /// Files whose formulas' streams are larger than what is copied rather than waited for once
-/// evaluated (made beforehand as files of the batch): archived, not waited for forever.
+/// evaluated (made beforehand as files of the batch): archived, not waited for forever. (Of 70 MB each, whose raster
+/// module needs 267 MiB: over the default bound.)
 #[test]
 fn large_formulas() {
     let pgm = |seed: u64| {
         let (w, h) = (8192, 8500);
         [format!("P5\n{w} {h}\n255\n").into_bytes(), aqr_common::rng::Rng::new(seed).bytes(w * h)].concat()
     };
-    let (_, r) = archived(&[("a.pgm", pgm(1)), ("b.pgm", pgm(2))], &Options { smaller: false, ..Options::default() });
+    let (_, r) = archived(
+        &[("a.pgm", pgm(1)), ("b.pgm", pgm(2))],
+        &Options { smaller: false, application_bound: Some(512 << 20), ..Options::default() },
+    );
     // (the fork of the first file last)
     assert!(r.files[..2].iter().all(|f| !f.modules.is_empty()), "{r:?}");
 }
