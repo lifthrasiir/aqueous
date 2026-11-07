@@ -12,8 +12,9 @@
 //! - a value a Checksum instruction covers is hashed as it is pulled, and checked at its end.
 //!
 //! Written out ([`run`] with a sink), the parts of each output, through its concatenations, are
-//! written in turn, those made by applications made ahead on workers of the pool; the blocks
-//! are decoded ahead of their first slice as they are.
+//! written in turn, those made by applications made ahead (a whole module's on workers of the
+//! pool, a part module's on a thread of its own, its output queued until written, within the
+//! bound of the bytes held ahead); the blocks are decoded ahead of their first slice as they are.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -313,9 +314,15 @@ enum Fan<'a> {
 
 impl<'a> Eval<'_, 'a> {
     /// Whether value `v` is made whole by an application, ahead where it is a part of an
-    /// output written out ([`run`]): not a part module's, which is pulled as it is made.
+    /// output written out ([`run`]): not a part module's ([`Eval::made_streamed`]).
     fn made_whole(&self, v: Val) -> bool {
         matches!(self.g.ops[v.node], Op::Apply(a, _, None) if !(self.part)(a))
+    }
+
+    /// Whether value `v` is an application of a part module of a single output, which is
+    /// started ahead as well ([`run`]), its output queued whole until it is written.
+    fn made_streamed(&self, v: Val) -> bool {
+        matches!(self.g.ops[v.node], Op::Apply(a, _, None) if (self.part)(a))
     }
 
     /// The source of value `v`.
@@ -523,7 +530,7 @@ impl<'a> Source<'a> for Fanned {
         if let Fan::Idle = *f {
             *f = match *op {
                 Op::Apply(a, _, _) if (ev.part)(a) => {
-                    Fan::Part(start(at, v.node, usize::MAX).into_iter().map(Some).collect())
+                    Fan::Part(start(at, v.node, usize::MAX, HELD_BYTES).into_iter().map(Some).collect())
                 }
                 Op::Apply(a, ref inputs, _) => match applied(at, a, inputs) {
                     Ok(outs) => Fan::Made(outs.into_iter().map(Some).collect()),
@@ -686,9 +693,13 @@ fn emit<'e, 'a>(
     // covers, which are pulled as they are: the output's own hashed as it is written), and the
     // applications among them, made ahead
     let roots: Vec<(Vec<Val>, bool)> = g.roots.iter().map(|&r| parts_of(g, r)).collect();
-    let heavy: Vec<(Val, u64)> =
-        roots.iter().flat_map(|(parts, _)| parts).filter(|&&v| ev.made_whole(v)).map(|&v| (v, g.len(v))).collect();
-    let slots: Vec<Waited<Option<Decoded<Vec<u8>>>>> = heavy.iter().map(|_| Waited::new(None)).collect();
+    let heavy: Vec<(Val, u64)> = roots
+        .iter()
+        .flat_map(|(parts, _)| parts)
+        .filter(|&&v| ev.made_whole(v) || ev.made_streamed(v))
+        .map(|&v| (v, g.len(v)))
+        .collect();
+    let slots: Vec<Waited<Option<Decoded<Ahead>>>> = heavy.iter().map(|_| Waited::new(None)).collect();
     let mut emit = |parts: Option<&PartsAhead<'_, '_, '_, 'a>>| -> Decoded<Vec<Vec<u8>>> {
         blocks_ahead(g, contents, |ahead| {
             let at = At { ev, ahead };
@@ -710,6 +721,7 @@ fn emit<'e, 'a>(
             slots: &slots,
             spawned: Cell::new(0),
             running: Arc::default(),
+            queues: RefCell::default(),
         });
         emit(parts.as_ref())
     })
@@ -753,10 +765,23 @@ fn write(
         sink(d)
     };
     for &v in parts {
-        if at.ev.made_whole(v) {
+        if at.ev.made_whole(v) || at.ev.made_streamed(v) {
             *k += 1;
             if let Some(a) = ahead {
-                put(&a.take(*k - 1)?)?;
+                match a.take(*k - 1)? {
+                    Ahead::Bytes(d) => put(&d)?,
+                    Ahead::Queue(q) => {
+                        while let Some(c) = q.pop()? {
+                            put(&c)?;
+                        }
+                    }
+                    Ahead::Here => {
+                        let mut s = at.ev.source(v);
+                        while let Some(c) = s.next(at)? {
+                            put(&c)?;
+                        }
+                    }
+                }
                 continue;
             }
         }
@@ -772,44 +797,69 @@ fn write(
 }
 
 /// The applications among the parts of the outputs, evaluated ahead ([`run`]): each its value
-/// and length, its bytes once made (on a worker of `scope`), and those spawned so far.
+/// and length, its bytes once made (a whole module's on a worker of `scope`; a part module's
+/// output queued whole as it is made, on a thread of its own), and those spawned so far.
 struct PartsAhead<'s, 'env, 'e, 'a> {
     scope: &'s aqr_common::pool::Scope<'s, 'env>,
     ev: &'s Eval<'e, 'a>,
     heavy: &'s [(Val, u64)],
     /// Each told of its part made ahead.
-    slots: &'s [Waited<Option<Decoded<Vec<u8>>>>],
+    slots: &'s [Waited<Option<Decoded<Ahead>>>],
     spawned: Cell<usize>,
     running: Arc<AtomicUsize>,
+    /// The queues of the part modules started, to count those still at work.
+    queues: RefCell<Vec<Arc<Queue>>>,
+}
+
+/// A part made ahead of its turn to be written.
+enum Ahead {
+    /// A whole module's output.
+    Bytes(Vec<u8>),
+    /// A part module's output, as it is made.
+    Queue(Arc<Queue>),
+    /// Not made ahead: to be pulled now.
+    Here,
 }
 
 impl PartsAhead<'_, '_, '_, '_> {
-    /// The bytes of part `k` (taken in order): made ahead and waited for, else made now; the
-    /// parts after it spawned on the scope's workers while they are free.
-    fn take(&self, k: usize) -> Decoded<Vec<u8>> {
+    /// Part `k` (taken in order): made ahead and waited for, else to be made now; the parts
+    /// after it started while the pool's workers are free and what they hold is within
+    /// [`AHEAD_PART_BYTES`].
+    fn take(&self, k: usize) -> Decoded<Ahead> {
         let here = k >= self.spawned.get();
         let mut next = self.spawned.get().max(k + 1);
         // (the bytes of those made ahead and not yet taken)
         let mut held: u64 = self.heavy[k + 1..next].iter().map(|h| h.1).sum();
         while next < self.heavy.len()
-            && self.running.load(Ordering::Relaxed) < self.scope.workers()
+            && self.running() < self.scope.workers()
             && (next == k + 1 || held + self.heavy[next].1 <= AHEAD_PART_BYTES)
         {
             let (v, len) = self.heavy[next];
             held += len;
-            let (ev, slot, running) = (self.ev, &self.slots[next], self.running.clone());
-            running.fetch_add(1, Ordering::Relaxed);
-            self.scope.spawn(move || {
-                let d = whole(At { ev, ahead: None }, v).map(Whole::into_vec);
-                *slot.lock().unwrap() = Some(d);
-                running.fetch_sub(1, Ordering::Relaxed);
-                slot.notify_all();
-            });
+            if self.ev.made_streamed(v) {
+                // (its queue holds all of it, in memory as the bound above goes: it never waits)
+                let q = start(At { ev: self.ev, ahead: None }, v.node, (len as usize).max(1), len as usize).pop();
+                let q = q.expect("an output");
+                self.queues.borrow_mut().push(q.clone());
+                *self.slots[next].lock().unwrap() = Some(Ok(Ahead::Queue(q)));
+            } else {
+                let (ev, slot, running) = (self.ev, &self.slots[next], self.running.clone());
+                running.fetch_add(1, Ordering::Relaxed);
+                self.scope.spawn(move || {
+                    let d = whole(At { ev, ahead: None }, v).map(|w| Ahead::Bytes(w.into_vec()));
+                    *slot.lock().unwrap() = Some(d);
+                    running.fetch_sub(1, Ordering::Relaxed);
+                    slot.notify_all();
+                });
+            }
             next += 1;
         }
         self.spawned.set(next);
         if here {
-            return whole(At { ev: self.ev, ahead: None }, self.heavy[k].0).map(Whole::into_vec);
+            return match self.ev.made_streamed(self.heavy[k].0) {
+                true => Ok(Ahead::Here),
+                false => whole(At { ev: self.ev, ahead: None }, self.heavy[k].0).map(|w| Ahead::Bytes(w.into_vec())),
+            };
         }
         let mut d = self.slots[k].lock().unwrap();
         loop {
@@ -818,6 +868,13 @@ impl PartsAhead<'_, '_, '_, '_> {
             }
             d = self.slots[k].wait(d).unwrap();
         }
+    }
+
+    /// The applications ahead at work: whole modules' and part modules' not yet done.
+    fn running(&self) -> usize {
+        let mut queues = self.queues.borrow_mut();
+        queues.retain(|q| !q.over());
+        self.running.load(Ordering::Relaxed) + queues.len()
     }
 }
 
@@ -930,8 +987,8 @@ struct QueueState {
 }
 
 impl Queue {
-    fn new(cap: usize) -> Arc<Queue> {
-        let state = QueueState { pieces: Spool::new(HELD_BYTES), done: false, failed: None, gone: false };
+    fn new(cap: usize, held: usize) -> Arc<Queue> {
+        let state = QueueState { pieces: Spool::new(held), done: false, failed: None, gone: false };
         Arc::new(Queue { state: Mutex::new(state), changed: std::sync::Condvar::new(), cap })
     }
 
@@ -951,6 +1008,12 @@ impl Queue {
         drop(q);
         self.changed.notify_all();
         Ok(())
+    }
+
+    /// Whether the application is over: all committed, or failed, or no longer pulled.
+    fn over(&self) -> bool {
+        let q = self.lock();
+        q.done || q.failed.is_some() || q.gone
     }
 
     /// All committed (`r` of the application succeeding), or the application failed.
@@ -1010,17 +1073,17 @@ impl Drop for Queued {
 impl<'a> Source<'a> for Queued {
     fn next(&mut self, at: At<'_, '_, 'a>) -> Decoded<Option<Chunk<'a>>> {
         let node = self.node;
-        let q = self.q.get_or_insert_with(|| start(at, node, QUEUE_BYTES).pop().expect("an output"));
+        let q = self.q.get_or_insert_with(|| start(at, node, QUEUE_BYTES, HELD_BYTES).pop().expect("an output"));
         q.pop()
     }
 }
 
 /// Starts the application of a part module of node `node` on a thread of its own, each of its
 /// outputs to a queue of `cap` bytes: their queues.
-fn start(at: At, node: usize, cap: usize) -> Vec<Arc<Queue>> {
+fn start(at: At, node: usize, cap: usize, held: usize) -> Vec<Arc<Queue>> {
     let ev = at.ev;
     let Op::Apply(a, ref inputs, _) = ev.g.ops[node] else { unreachable!("an application") };
-    let qs: Vec<Arc<Queue>> = a.sizes().iter().map(|_| Queue::new(cap)).collect();
+    let qs: Vec<Arc<Queue>> = a.sizes().iter().map(|_| Queue::new(cap, held)).collect();
     ev.threads.queues.lock().unwrap().extend(qs.iter().map(Arc::downgrade));
     let outs = qs.clone();
     let run = move || {

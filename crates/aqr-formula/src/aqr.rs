@@ -4923,6 +4923,17 @@ mod tests {
             _: &[u64],
         ) -> Decoded<()> {
             PARTS.fetch_add(1, Ordering::Relaxed);
+            if params == [0xaa] {
+                // (met by the others: applied one after another, they would wait in vain)
+                RENDEZVOUS.fetch_add(1, Ordering::SeqCst);
+                let start = std::time::Instant::now();
+                while RENDEZVOUS.load(Ordering::SeqCst) < 2 {
+                    if start.elapsed().as_secs() >= 10 {
+                        return invalid("not applied at the same time");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
             let (mut j, mut left, mut pulled) = (0, sizes[0], 0u64);
             for i in inputs {
                 let mut at = 0;
@@ -5084,6 +5095,31 @@ mod tests {
         f.root = f.share(cut(vec![inner], vec![0xff]), vec![n]).pop().unwrap();
         let c = encode(&f, None, Level::Zstd(1)).unwrap();
         assert_eq!(decode(&c, &PartCut), invalid("failed midway"));
+    }
+
+    static RENDEZVOUS: AtomicUsize = AtomicUsize::new(0);
+
+    /// The applications of part modules among the parts of an output run at the same time on
+    /// the pool (each waits for another to have begun), their outputs written in order.
+    #[test]
+    fn parts_ahead() {
+        let mut f = Formula::default();
+        let d: Vec<u8> = (0..3000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        f.push("a", d.clone());
+        let cut = |k: u64| Node::apply(CUT, vec![0xaa], vec![Node::slice(0, k * 1000, 1000)], 1000);
+        f.root = Node::concat([cut(0), cut(1), cut(2)]);
+        let want = d.clone();
+        let c = encode(&f, Some(checksum(&want)), Level::Zstd(1)).unwrap();
+        let archive = open(&c, &PartCut).unwrap();
+        let mut out = Vec::new();
+        RENDEZVOUS.store(0, Ordering::SeqCst);
+        archive
+            .write_file(4, &mut |p: &[u8]| {
+                out.extend_from_slice(p);
+                Ok(())
+            })
+            .unwrap();
+        assert!(out == want);
     }
 
     /// Many outputs of applications taken in order with slices between them, in a concatenation
