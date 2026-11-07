@@ -94,3 +94,30 @@ fn single_file() {
     let (ok, _, err) = aqr_in(&d, &["-I", "f.bin.aqr", "f.bin"]);
     assert!(!ok && err.contains("single file"), "{err}");
 }
+
+/// `-I -v` lists each application's memory limits and the most the archive needs.
+#[test]
+fn applications_limits() {
+    let d = scratch("apps");
+    let mut x = 12345u32;
+    let text: Vec<u8> = (0..60000u32)
+        .flat_map(|i| {
+            x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+            format!("line {} of text {} {}\n", i, x >> 20, i % 97).into_bytes()
+        })
+        .collect();
+    fs::write(d.join("t.txt"), &text).unwrap();
+    assert!(Command::new("gzip").args(["-k", "-9", "t.txt"]).current_dir(&d).status().unwrap().success());
+    fs::remove_file(d.join("t.txt")).unwrap();
+    let (ok, _, err) = aqr_in(&d, &["-q", "-9", "-o", "t.aqr", "t.txt.gz"]);
+    assert!(ok, "{err}");
+
+    let (ok, out, err) = aqr_in(&d, &["-I", "t.aqr"]);
+    assert!(ok, "{err}");
+    assert!(!out.contains("applications:"), "{out}");
+    let (ok, out, err) = aqr_in(&d, &["-I", "-v", "t.aqr"]);
+    assert!(ok, "{err}");
+    let line = out.lines().find(|l| l.contains("minimal")).expect(&out);
+    assert!(line.contains("instance") && line.contains("full") && line.contains("chain"), "{out}");
+    assert!(out.contains("most memory needed:"), "{out}");
+}

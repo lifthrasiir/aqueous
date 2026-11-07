@@ -9,6 +9,7 @@
 //!   what does not hold of its references. The last segment is the archive as it is now
 //!   (`[current]`). An archive of a single file (of no metadata block) has its file told too:
 //!   the formula of each output of each leaf block, the file all of them one after another.
+//!   With `-v`, each segment also lists its applications' memory limits (`applications:`).
 //! - `-I ARCHIVE PATH...`: each path's entry as each segment has it (`segment #k`; an archive of
 //!   several segments has its entries before an update too), the one the archive has as it is
 //!   now `[current]` (the spec's merging of segments, "Merging segments", as
@@ -103,7 +104,7 @@ fn info_of(a: &Args, input: &Path) -> Result<String, String> {
         if encrypted {
             let _ = writeln!(s, "  payload: {} B", payload.len());
         }
-        archive(&mut s, &i).map_err(|e| err(&e))?;
+        archive(&mut s, &i, a.verbose).map_err(|e| err(&e))?;
     } else {
         if i.segments[0].metadata.is_none() {
             return Err(err(&"an archive of a single file, not of paths"));
@@ -120,7 +121,7 @@ fn info_of(a: &Args, input: &Path) -> Result<String, String> {
 }
 
 /// The archive itself, of `-I ARCHIVE`.
-fn archive(s: &mut String, i: &Inspection) -> aqr::Decoded<()> {
+fn archive(s: &mut String, i: &Inspection, verbose: bool) -> aqr::Decoded<()> {
     let _ = writeln!(s, "  kind: {} archive", if i.overlay { "overlay" } else { "standalone" });
     let last = i.segments.last().and_then(|g| g.metadata.as_ref());
     let _ =
@@ -212,6 +213,9 @@ fn archive(s: &mut String, i: &Inspection) -> aqr::Decoded<()> {
             g.leaves.len() - formulas,
             g.non_leaf.len()
         );
+        if verbose {
+            applications(s, i, k)?;
+        }
         if !g.archive_extra.is_empty() {
             let _ = writeln!(s, "  archive extra:");
             for m in &g.archive_extra {
@@ -243,6 +247,41 @@ fn archive(s: &mut String, i: &Inspection) -> aqr::Decoded<()> {
             s.push_str(&f);
         }
     }
+    Ok(())
+}
+
+/// Segment `k`'s applications (`-v`), one line each: the module, the instance's limit, the task
+/// limits (a unit of each class), the least memory it needs (the instance and one unit of each
+/// class), the most (every slot a unit), the sum of the minimal bounds of the chain of part
+/// applications feeding it and itself, and the bytes it outputs; then the largest of the minimal
+/// bounds and of the chains, which the archive needs of the host.
+fn applications(s: &mut String, i: &Inspection, k: usize) -> aqr::Decoded<()> {
+    let apps = i.applications(k, &aqr_decompress::is_part)?;
+    let _ = writeln!(s, "  applications: {}", apps.len());
+    for a in &apps {
+        let tasks: Vec<String> = a.applied.tasks.iter().map(|t| t.to_string()).collect();
+        match (a.applied.minimal(), a.full, a.chain) {
+            (Some(m), Some(f), Some(c)) => {
+                let _ = write!(
+                    s,
+                    "    {}{}: instance {} B, tasks [{}] B, minimal {m} B, full {f} B, chain {c} B",
+                    a.name,
+                    if a.part { " (part)" } else { "" },
+                    a.applied.instance,
+                    tasks.join(" ")
+                );
+            }
+            _ => _ = write!(s, "    {}: no limit declared", a.name),
+        }
+        let _ = writeln!(s, ", output {} B", a.applied.output);
+    }
+    let most = |f: &dyn Fn(&inspect::Application) -> Option<u64>| apps.iter().filter_map(f).max().unwrap_or(0);
+    let _ = writeln!(
+        s,
+        "  most memory needed: {} B by one application, {} B by a chain of part applications",
+        most(&|a| a.applied.minimal()),
+        most(&|a| a.chain)
+    );
     Ok(())
 }
 

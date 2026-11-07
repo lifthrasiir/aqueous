@@ -37,6 +37,19 @@ pub struct Inspection<'c> {
     names: Vec<Vec<String>>,
 }
 
+/// An application in a formula ([`Inspection::applications`]).
+#[derive(Debug, Clone)]
+pub struct Application {
+    pub name: String,
+    pub applied: super::listing::Applied,
+    /// The most memory it needs, every slot a unit.
+    pub full: Option<u64>,
+    /// Whether its module is a part module.
+    pub part: bool,
+    /// The sum of the minimal bounds of it and the chain of part applications feeding it.
+    pub chain: Option<u64>,
+}
+
 /// A block of the archive.
 #[derive(Debug, Clone)]
 pub struct Block {
@@ -447,6 +460,31 @@ impl Inspection<'_> {
                 out
             })
             .collect())
+    }
+
+    /// Of segment `segment`, each application in its formulas: its module's name, the limits it
+    /// declares and its output bytes; its full bound (the slots of each class a unit); and, where
+    /// `part` tells a module (by name) is a part module, the largest sum of minimal bounds of a
+    /// chain of part applications ending in it, each fed directly by the outputs of others (which
+    /// the evaluator runs at once). Nothing is decoded but the formulas.
+    pub fn applications(&self, segment: usize, part: &dyn Fn(&str) -> bool) -> Decoded<Vec<Application>> {
+        let names = &self.names[segment];
+        let name_of = |m: usize| names[m].clone();
+        let (g, _) = graph(&self.parsed[segment], &name_of)?;
+        let mut out: Vec<Application> = Vec::new();
+        for a in g.applications() {
+            let name = names[a.module].clone();
+            let full = a.full(&super::class_slots(&self.parsed[segment].modules[a.module]));
+            let is_part = part(&name);
+            let minimal = a.minimal();
+            // (the applications are in the order they were made, inputs first)
+            let chain = minimal.map(|m| {
+                let fed = a.from.iter().filter(|&&j| out[j].part).filter_map(|&j| out[j].chain);
+                m.saturating_add(if is_part { fed.fold(0, u64::saturating_add) } else { 0 })
+            });
+            out.push(Application { name, applied: a, full, part: is_part, chain });
+        }
+        Ok(out)
     }
 
     /// By segment and entry number, what each entry is in the archive as it is: segments

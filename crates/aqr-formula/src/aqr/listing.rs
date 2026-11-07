@@ -37,6 +37,35 @@ pub struct Listed {
     pub nodes: usize,
 }
 
+/// An application of a formula ([`Graph::applications`]).
+#[derive(Debug, Clone)]
+pub struct Applied {
+    /// Its module block (by index among all).
+    pub module: usize,
+    /// The memory limit of its instance ([`crate::NO_LIMIT`]: none declared) and the task limits.
+    pub instance: u64,
+    pub tasks: Vec<u64>,
+    /// The bytes of its outputs.
+    pub output: u64,
+    /// The applications (by index in [`Graph::applications`]'s list) whose outputs are directly its inputs.
+    pub from: Vec<usize>,
+}
+
+impl Applied {
+    /// The least memory it needs: its instance and a unit of each class (none where undeclared).
+    pub fn minimal(&self) -> Option<u64> {
+        (self.instance != crate::NO_LIMIT).then(|| self.tasks.iter().fold(self.instance, |a, &t| a.saturating_add(t)))
+    }
+
+    /// The most memory it needs: its instance and every slot of each class (`slots`) a unit.
+    pub fn full(&self, slots: &[u64]) -> Option<u64> {
+        (self.instance != crate::NO_LIMIT).then(|| {
+            let units = self.tasks.iter().zip(slots).map(|(&t, &n)| t.saturating_mul(n));
+            units.fold(self.instance, u64::saturating_add)
+        })
+    }
+}
+
 /// The most characters of a summary, but for its first node.
 const SUMMARY: usize = 48;
 /// The most groups of alike children shown of a node.
@@ -61,6 +90,7 @@ enum Shape {
         params: Vec<u8>,
         params_len: usize,
         memory_limit: u64,
+        task_limits: Vec<u64>,
     },
     Concat,
     Pack,
@@ -161,7 +191,7 @@ impl Graph<'_> {
             &Shape::Slice(b, start) => {
                 let _ = write!(out, "  of non-leaf block #{} at {}, from {start}", b + 1, non_leaf_at[b]);
             }
-            Shape::Apply { module, resources, params, params_len, memory_limit, .. } => {
+            Shape::Apply { module, resources, params, params_len, memory_limit, task_limits, .. } => {
                 let _ = write!(out, "  module #{}", module + 1);
                 if !resources.is_empty() {
                     let r: Vec<String> = resources.iter().map(|r| format!("#{}", r + 1)).collect();
@@ -172,6 +202,10 @@ impl Graph<'_> {
                 }
                 if *memory_limit != crate::NO_LIMIT {
                     let _ = write!(out, ", memory limit {memory_limit} B");
+                    if !task_limits.is_empty() {
+                        let t: Vec<String> = task_limits.iter().map(|t| format!("{t}")).collect();
+                        let _ = write!(out, ", task limits {} B", t.join(" "));
+                    }
                 }
             }
             Shape::Stored(_, true) => out.push_str("  checked"),
@@ -188,6 +222,30 @@ impl Graph<'_> {
         for &k in &node.kids {
             self.dump(k, indent + 2, non_leaf_at, seen, out);
         }
+    }
+
+    /// Each application (an instruction of several outputs once): its module block, memory limit and
+    /// task limits, and the bytes of its outputs.
+    pub(super) fn applications(&self) -> Vec<Applied> {
+        let mut out: Vec<Applied> = Vec::new();
+        let mut index: std::collections::HashMap<usize, usize> = Default::default();
+        for n in &self.nodes {
+            let Shape::Apply { module, memory_limit, task_limits, .. } = &n.shape else { continue };
+            match index.get(&n.insn) {
+                Some(&k) => out[k].output += n.size,
+                None => {
+                    // (the inputs are nodes made before it)
+                    let mut from: Vec<usize> =
+                        n.kids.iter().filter_map(|&k| index.get(&self.nodes[k].insn).copied()).collect();
+                    from.sort_unstable();
+                    from.dedup();
+                    index.insert(n.insn, out.len());
+                    let (instance, tasks) = (*memory_limit, task_limits.clone());
+                    out.push(Applied { module: *module, instance, tasks, output: n.size, from });
+                }
+            }
+        }
+        out
     }
 
     /// Node `n` summarized down to `depth` levels below it (`*` past them).
@@ -401,6 +459,7 @@ pub(super) fn graph<'f>(blocks: &Blocks, name: &'f dyn Fn(usize) -> String) -> D
                                     params: params.clone(),
                                     params_len: a.params.len(),
                                     memory_limit: a.memory_limit,
+                                    task_limits: a.task_limits.clone(),
                                 };
                                 st.push(g.add(shape, kids.clone(), at, size));
                             }

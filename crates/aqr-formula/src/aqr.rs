@@ -42,7 +42,7 @@ pub mod sink;
 mod spool;
 mod tree;
 
-pub use listing::Listed;
+pub use listing::{Applied, Listed};
 pub use locate::{block_at, footer_of, locate, trim};
 pub use mirror::Mirroring;
 pub use segment::{Batch, ContentAt, Layout, Leaf, Placed, Segment, SegmentWriter, crossing, kill};
@@ -1243,6 +1243,16 @@ fn task_slots(w: &[u8]) -> u64 {
             b.iter().map(|&n| u64::from(n & 0x7f)).sum()
         }
         _ => 0,
+    }
+}
+
+/// The task slots of each class of Wasm module `w` (none where it has none, or not a valid one).
+pub fn class_slots(w: &[u8]) -> Vec<u64> {
+    match custom_section(w, "aqr_task_slots") {
+        Some(b) if !b.is_empty() && b.iter().all(|&n| matches!(n & 0x7f, 1..=64)) => {
+            b.iter().map(|&n| u64::from(n & 0x7f)).collect()
+        }
+        _ => Vec::new(),
     }
 }
 

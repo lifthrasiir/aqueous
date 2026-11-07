@@ -589,6 +589,12 @@ pub fn identify(wasm: &[u8]) -> Option<String> {
     known(wasm).map(|m| m.to_string())
 }
 
+/// Whether the module named `name` (without its version) is a part module, applied as its inputs
+/// stream.
+pub fn is_part(name: &str) -> bool {
+    NATIVE.iter().any(|e| e.module.name == name && matches!(e.decode, Run::Part(..)))
+}
+
 /// The Wasm module of `m` that aqr-modules built, for [`aqr::Encoder::with_modules`].
 pub fn wasm_of(m: Module) -> Option<aqr::Wasm> {
     use std::borrow::Cow;
