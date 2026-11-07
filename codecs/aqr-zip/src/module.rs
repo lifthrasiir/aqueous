@@ -223,14 +223,14 @@ const RUN_BYTES: u64 = 8;
 #[cfg(target_family = "wasm")]
 const _: () = assert!(size_of::<(usize, usize)>() as u64 == RUN_BYTES);
 
-/// The memory plan of the module as a part module ([`aqr_api::stack`]): what [`decode_part`]
-/// takes beyond its initial memory at most, of a layout of `inputs[2]` bytes `layout` and inputs
-/// of `inputs` bytes. In order: the layout (a window's piece on top as it is read), the marks of
-/// bodies taken again (the lengths of the bodies on top while they are summed), the bytes held
-/// (`layout::Prepared::held`) and their runs, the buffers of the inputs (the largest stored body and piece kept, and what
-/// is derived of a deflated body), the local entries seen; and on top of them, of a record, the
-/// extra field made apart (or a central header's name and extra field) and a window's piece of
-/// an input.
+/// The memory plan of the module as a part module ([`aqr_api::stack`]): what [`decode_part`] takes
+/// beyond its initial memory at most, of a layout of `inputs[2]` bytes `layout` and inputs of
+/// `inputs` bytes. In order: the CRC-32 tables, the layout (a window's piece on top as it is read),
+/// the marks of bodies taken again (the lengths of the bodies on top while they are summed), the
+/// bytes held (`layout::Prepared::held`) and their runs, the buffers of the inputs (the largest
+/// stored body and piece kept, and what is derived of a deflated body), the local entries seen; and
+/// on top of them, of a record, the extra field made apart (or a central header's name and extra
+/// field) and a window's piece of an input.
 pub fn plan(inputs: [u64; 4], layout: &[u8]) -> Option<u64> {
     use aqr_api::stack::block;
     let p = layout::Prepared::new(layout).ok()?;
@@ -238,7 +238,8 @@ pub fn plan(inputs: [u64; 4], layout: &[u8]) -> Option<u64> {
     let w = WINDOW as u64 * 65536;
     let held = p.held();
     let piece = |n: u64| block(n.min(w));
-    let base = block(inputs[2]);
+    // (the CRC's tables, then the layout)
+    let base = block(aqr_common::crc32::WASM_TABLES) + block(inputs[2]);
     let reading = base + piece(inputs[2]);
     let again = base + block(c.entries);
     let summing = again + block(16 * c.entries);
@@ -265,6 +266,8 @@ fn zip_part(params_len: u64, inputs: [u64; 4], size: u64) -> Result<()> {
         return Err(corrupt());
     }
     let size_of = |n: u64| usize::try_from(n).map_err(|_| corrupt());
+    // (the CRC's tables made first, which in WebAssembly take memory as they are first used)
+    aqr_common::crc32::hash(&[]);
     let mut l = In::<2>::new(inputs[2], inputs[2])?;
     l.take(inputs[2])?;
     let layout = std::mem::take(&mut l.buf);

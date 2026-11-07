@@ -173,7 +173,9 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     // is a probe; those are probed, what the other entries of their kind hold of their data
     // counted as nothing (the contents of a kind compress together: and an entry turned down
     // is not there for the others either), and only the bodies that may pay are rebuilt.
-    let split = |jobs: &[(usize, u64)]| -> Option<Vec<Option<(Bytes, Vec<u8>)>>> {
+    // (each job's data and record, where it is a stream that deconstructs)
+    type Split = Option<Vec<Option<(Bytes, Vec<u8>)>>>;
+    let split = |jobs: &[(usize, u64)]| -> Split {
         let fopt = |threads: usize, max: u64| aqr_flate::Options {
             threads,
             max_data: usize::try_from(max).unwrap_or(usize::MAX),
