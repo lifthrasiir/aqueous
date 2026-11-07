@@ -2998,6 +2998,9 @@ a [=list=] of declared output sizes |sizes|, a memory limit and a [=list=] of <d
         and the |c|-th task limit (from 0) to that of each [=unit=] of [=class=] |c| on its own:
         the memories of the [=task=] for a class that is not a [=gang class=],
         and the memories of the tasks of the [=gang=] and the messages queued in the [=channels=] of the gang for a [=gang class=].
+        An implementation MAY return a [=resource failure=] here, before it instantiates |module|, if the memory limit
+        and the sum of the task limits (a [=concurrency=] of 1 for each class, the least it can choose)
+        exceed what the implementation has, which is implementation-defined.
     6. Instantiate |module| with the memories and the host functions below.
     7. Invoke the [=entry point=] with the arguments of type `i64`, in order:
         the length of |params|, the length of the [=stored content=] of each item of |resources|,

@@ -163,6 +163,10 @@
 //!   available as it starts), or 0 (no limit); 2 GB by default, at most half the system's. The
 //!   pages of files mapped (the inputs, the spill) are not counted: the system writes them out
 //!   or drops them, rather than swapping, as memory runs short.
+//!   A `-M` given also bounds the memories of an application of a module in WebAssembly (the
+//!   instance's limit and, of each class of tasks, its concurrency times its task limit): a
+//!   decoder lowers the concurrency of the classes to fit, and an application that does not
+//!   fit with one unit each fails as a resource failure before it starts.
 //! - `--stats` tells, after each archive made or decoded, what stands out of its files by kind
 //!   and of where the time went, sampled as it ran ([`stats`]); `--stats=FILE.json` writes all
 //!   of it as well, and `--stats=FILE.html` a page showing it (opened on a terminal). Either
@@ -619,7 +623,13 @@ fn parse() -> Result<Args, String> {
         a.opt.threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     }
     let system = (aqr_common::budget::total(), aqr_common::budget::available());
-    aqr_common::budget::global().set_limit(budget(memory.as_deref(), system)?);
+    let limit = budget(memory.as_deref(), system)?;
+    aqr_common::budget::global().set_limit(limit);
+    if memory.is_some() {
+        // (what a user asked for also bounds the memories of an application of a module in Wasm:
+        // its concurrency is lowered to fit, and it fails if it does not at 1)
+        aqr_decompress::set_application_bound(limit);
+    }
     if a.info {
         if a.rm || a.each || a.dereference || a.output.is_some() || !renames.is_empty() || last_dir.is_some() {
             return Err("-I takes an archive and its paths alone".into());

@@ -173,15 +173,29 @@ impl Loaded for Remote<'_> {
         memory_limit: u64,
         task_limits: &[u64],
     ) -> aqr::Decoded<Vec<Vec<u8>>> {
-        // (the worker's memory bound: its tasks' too)
-        let bound = crate::wasm::application_bound(memory_limit, task_limits, &crate::wasm::task_slots(&self.wasm));
+        // (the concurrency chosen here, and the worker's memory bound: its tasks' at that)
+        let slots: Vec<u64> = crate::wasm::task_slots(&self.wasm);
+        let concurrency = match crate::wasm::choose_concurrency(
+            &slots.iter().map(|&s| s as usize).collect::<Vec<_>>(),
+            memory_limit,
+            task_limits,
+            crate::wasm::application_bound_set(),
+        ) {
+            Ok(c) => c,
+            Err(f) => return Err(f),
+        };
+        let bound = crate::wasm::application_bound(
+            memory_limit,
+            task_limits,
+            &concurrency.iter().map(|&c| c as u64).collect::<Vec<_>>(),
+        );
         self.sandbox.with_worker(|w| {
             if !w.loaded.contains(&self.hash)
                 && let Err(f) = w.load(self.hash, &self.wasm)?
             {
                 return Ok(Err(f));
             }
-            w.apply(self.hash, params, resources, inputs, sizes, memory_limit, task_limits, bound)
+            w.apply(self.hash, params, resources, inputs, sizes, memory_limit, task_limits, &concurrency, bound)
         })
     }
 }
@@ -264,6 +278,7 @@ impl Worker {
         sizes: &[u64],
         memory_limit: u64,
         task_limits: &[u64],
+        concurrency: &[usize],
         bound: u64,
     ) -> io::Result<aqr::Decoded<Vec<Vec<u8>>>> {
         // the bytes sent, held by the worker beside the memories it makes of them
@@ -322,6 +337,10 @@ impl Worker {
         put_u64(w, task_limits.len() as u64)?;
         for &l in task_limits {
             put_u64(w, l)?;
+        }
+        put_u64(w, concurrency.len() as u64)?;
+        for &c in concurrency {
+            put_u64(w, c as u64)?;
         }
         w.flush()?;
         let r = get_result(&mut self.from)?;

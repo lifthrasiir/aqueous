@@ -1986,7 +1986,20 @@ fn plan_holds(what: &str, f: Formula, want: &[u8]) {
 /// the memories of the tasks of a unit of each class added up the plan to the page (a gang's
 /// tasks do not all live at once in a short stream: the sum is of the ones that ended; and the
 /// messages its channels queue are up to the plan), the most it held at once within it.
-fn plan_holds_queued(what: &str, mut f: Formula, want: &[u8], queued: impl Fn(&aqr_formula::Usage) -> u64) {
+fn plan_holds_queued(what: &str, f: Formula, want: &[u8], queued: impl Fn(&aqr_formula::Usage) -> u64) {
+    plan_holds_bounded(what, f, want, queued, false)
+}
+
+/// [`plan_holds_queued`], decoded under the bound of the plan's instance limit and one unit of each
+/// class (`bounded`: the concurrency of every class is 1, whatever its slots, and the plans hold
+/// all the same), else of no bound.
+fn plan_holds_bounded(
+    what: &str,
+    mut f: Formula,
+    want: &[u8],
+    queued: impl Fn(&aqr_formula::Usage) -> u64,
+    bounded: bool,
+) {
     let pages = |n: u64| n.div_ceil(65536) * 65536;
     let Node::Apply(a) = &f.root else { panic!("{what}: not an application") };
     // (an input of another node evaluated natively)
@@ -2021,11 +2034,24 @@ fn plan_holds_queued(what: &str, mut f: Formula, want: &[u8], queued: impl Fn(&a
     // (the applications kept by one test at a time: the log is the process's)
     static RECORDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let recording = RECORDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let bound = limit + plan.tasks.iter().sum::<u64>();
     aqr_decompress::record_applications(true);
-    let out = aqr::decode(&c, &Wasm);
+    let out = match bounded {
+        true => aqr::decode(&c, &aqr_decompress::WasmBounded(bound)),
+        false => aqr::decode(&c, &Wasm),
+    };
     let applied = aqr_decompress::record_applications(false);
+    // (the same under a bound short of one unit of each class: a failure before anything starts)
+    aqr_decompress::record_applications(true);
+    let short = bounded.then(|| aqr::decode(&c, &aqr_decompress::WasmBounded(bound - 1)));
+    let kept = aqr_decompress::record_applications(false);
     drop(recording);
     assert!(out.as_ref().is_ok_and(|o| o == want), "{what}: {:?}", out.err());
+    if let Some(short) = short {
+        assert!(matches!(short, Err(Failure::Resource(_))), "{what}: {:?}", short.map(drop));
+        let ran = kept.iter().any(|a| a.limit == limit);
+        assert!(!ran, "{what}: an application started under a bound short of its memories");
+    }
     // (those of this application: other tests' run meanwhile, without limits)
     let mine: Vec<_> = applied.iter().filter(|a| a.limit == limit).collect();
     assert!(!mine.is_empty(), "{what}: not applied");
@@ -2038,6 +2064,9 @@ fn plan_holds_queued(what: &str, mut f: Formula, want: &[u8], queued: impl Fn(&a
             a.instance
         );
         assert_eq!(a.tasks.len(), plan.tasks.len(), "{what}: classes");
+        if bounded {
+            assert_eq!(a.concurrency, vec![1; plan.tasks.len()], "{what}: concurrency");
+        }
         for (c, &p) in plan.tasks.iter().enumerate() {
             // (a gang's limit also holds the messages its channels may queue, which only the
             // module's input decides how many it does)
@@ -2051,6 +2080,26 @@ fn plan_holds_queued(what: &str, mut f: Formula, want: &[u8], queued: impl Fn(&a
 /// Each application of `f` (the root, or the parts of a concatenation) of `d` as
 /// [`plan_holds_queued`] checks it.
 fn applications_hold(what: &str, f: &Formula, d: &[u8], queued: impl Fn(&aqr_formula::Usage) -> u64 + Copy) -> usize {
+    applications_hold_with(what, f, d, queued, false)
+}
+
+/// [`applications_hold`] under the bound of one unit each ([`plan_holds_bounded`]).
+fn applications_hold_bounded(
+    what: &str,
+    f: &Formula,
+    d: &[u8],
+    queued: impl Fn(&aqr_formula::Usage) -> u64 + Copy,
+) -> usize {
+    applications_hold_with(what, f, d, queued, true)
+}
+
+fn applications_hold_with(
+    what: &str,
+    f: &Formula,
+    d: &[u8],
+    queued: impl Fn(&aqr_formula::Usage) -> u64 + Copy,
+    bounded: bool,
+) -> usize {
     let parts = match &f.root {
         Node::Concat(nodes) => nodes.clone(),
         n => vec![n.clone()],
@@ -2065,7 +2114,7 @@ fn applications_hold(what: &str, f: &Formula, d: &[u8], queued: impl Fn(&aqr_for
         if let Node::Apply(_) = n {
             let mut g = f.clone();
             g.root = n;
-            plan_holds_queued(&format!("{what} {applied}"), g, &d[at..at + len], queued);
+            plan_holds_bounded(&format!("{what} {applied}"), g, &d[at..at + len], queued, bounded);
             applied += 1;
         }
         at += len;
@@ -2110,6 +2159,53 @@ fn wav_of(n: u32, channels: u16, bytes: u16) -> Vec<u8> {
         }
     }
     d
+}
+
+/// flate-set, pcm-recons and flac-recons decoded at the concurrency 1 of every class (the bound
+/// of the instance's limit and one unit each) as of the plan: the same bytes, the plan holding
+/// (the units of a class run one after another, a gang's tasks together), and a bound short of
+/// that fails as a resource failure before anything starts.
+#[test]
+fn bounded_to_one_unit() {
+    use aqr_flate::formula::Derived;
+    // flate-set: segments of 100_000 bytes, 15 of them to the 8 slots
+    let text: Vec<u8> =
+        (0..120_000).flat_map(|i| format!("line {} of {}\n", i % 211, i * 7 % 1013).into_bytes()).collect();
+    let mut o = aqr_flate::Options::for_profile(aqr_flate::DEFAULT_PROFILE).unwrap();
+    o.segment = 100_000;
+    let raw = aqr_flate::zlib::compress(&text, aqr_flate::zlib::Params { level: 6, ..Default::default() }).unwrap();
+    let (data, record) = aqr_flate::deconstruct_with(&raw, &o).unwrap();
+    let mut f = Formula::default();
+    let data_node = f.push("raw", data.clone());
+    let records = f.push("flate/record", record.clone());
+    let index = f.push("flate/index", aqr_flate::module::index(&[(data.len(), record.len(), raw.len())]));
+    let a = aqr_flate::formula::apply(
+        aqr_flate::DEFAULT_PROFILE,
+        data_node,
+        records,
+        index,
+        raw.len() as u64,
+        Derived::None,
+    )
+    .unwrap();
+    f.root = Node::Apply(Box::new(a));
+    plan_holds_bounded("flate", f.clone(), &raw, |_| 0, true);
+    plan_holds_bounded("flate", f, &raw, |_| 0, false);
+
+    // the pipelines of PCM and FLAC, a gang each
+    let queued = |u: &aqr_formula::Usage| {
+        aqr_raw::module::pcm::plan(u.params, u.resources, u.inputs, u.outputs[0], u.initial()).unwrap().1
+    };
+    let d = wav_of(300_000, 2, 2);
+    let f = aqr_raw::formula::encode(&d, 1).unwrap();
+    assert!(applications_hold_bounded("pcm", &f, &d, queued) > 0);
+    let queued = |u: &aqr_formula::Usage| {
+        aqr_flac::module::plan(u.params, u.resources, u.inputs, u.outputs[0], u.initial()).unwrap().1
+    };
+    let dir = format!("{}/../../codecs/aqr-flac/tests/data", env!("CARGO_MANIFEST_DIR"));
+    let d = std::fs::read(format!("{dir}/s16_junk.flac")).unwrap();
+    let f = aqr_flac::formula::encode(&d, 1).unwrap();
+    assert!(applications_hold_bounded("flac", &f, &d, queued) > 0);
 }
 
 /// pcm-recons lays its memory out as a stack, its limit its plan: the pipeline's first stage,

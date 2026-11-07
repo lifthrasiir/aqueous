@@ -22,8 +22,11 @@ pub mod sandbox;
 #[cfg(feature = "wasm")]
 mod wasm;
 use aqr_formula::{Apply, Error, Module, Modules, Result};
+#[cfg(feature = "wasm")]
 #[doc(hidden)]
 pub use wasm::load_released;
+#[cfg(feature = "wasm")]
+pub use wasm::set_application_bound;
 #[cfg(feature = "wasm")]
 pub use wasm::{Applied, initial_pages, record_applications};
 
@@ -607,6 +610,20 @@ pub struct Wasm;
 impl Runner for Wasm {
     fn load(&self, wasm: &[u8]) -> aqr::Decoded<Box<dyn Loaded + '_>> {
         wasm::load(wasm, Sha512_256::digest(wasm).into())
+    }
+}
+
+/// [`Wasm`] with its own bound on the memories of an application (`.0` bytes: the instance's
+/// limit and, of each class of tasks, its concurrency times its task limit; see
+/// [`set_application_bound`], which sets one for the process), for tests.
+#[cfg(feature = "wasm")]
+#[derive(Debug, Clone, Copy)]
+pub struct WasmBounded(pub u64);
+
+#[cfg(feature = "wasm")]
+impl Runner for WasmBounded {
+    fn load(&self, wasm: &[u8]) -> aqr::Decoded<Box<dyn Loaded + '_>> {
+        wasm::load_bounded(wasm, Sha512_256::digest(wasm).into(), self.0)
     }
 }
 

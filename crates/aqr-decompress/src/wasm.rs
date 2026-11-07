@@ -81,7 +81,7 @@ static COMPILED: LazyLock<Mutex<HashMap<[u8; 32], Shared>>> = LazyLock::new(Defa
 
 /// A module compiled, as [`load`] gives it.
 #[derive(Clone)]
-pub(crate) struct Shared(Arc<Compiled>);
+pub(crate) struct Shared(Arc<Compiled>, Option<u64>);
 
 /// A memory imported by a module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,10 +154,17 @@ pub fn load(wasm: &[u8], hash: [u8; 32]) -> Decoded<Box<dyn Loaded>> {
     Ok(Box::new(compiled(wasm, hash)?))
 }
 
+/// [`load`] with the bound of the application's memories `bound` ([`set_application_bound`])
+/// of its own, for tests.
+#[doc(hidden)]
+pub fn load_bounded(wasm: &[u8], hash: [u8; 32], bound: u64) -> Decoded<Box<dyn Loaded>> {
+    Ok(Box::new(Shared(compiled(wasm, hash)?.0, Some(bound))))
+}
+
 /// [`load`] of a module as if it were of a release (not kept), for tests of the earlier rules.
 #[doc(hidden)]
 pub fn load_released(wasm: &[u8]) -> Decoded<Box<dyn Loaded>> {
-    Ok(Box::new(Shared(Arc::new(Compiled { released: true, ..compile(wasm, true)? }))))
+    Ok(Box::new(Shared(Arc::new(Compiled { released: true, ..compile(wasm, true)? }), None)))
 }
 
 /// [`load`], of the module itself (for [`Shared::apply_into`]).
@@ -166,7 +173,7 @@ pub(crate) fn compiled(wasm: &[u8], hash: [u8; 32]) -> Decoded<Shared> {
         return Ok(c.clone());
     }
     let released = aqr_formula::aqr::is_released(&hash);
-    let c = Shared(Arc::new(Compiled { hash, released, ..compile(wasm, released)? }));
+    let c = Shared(Arc::new(Compiled { hash, released, ..compile(wasm, released)? }), None);
     COMPILED.lock().unwrap().insert(hash, c.clone());
     Ok(c)
 }
@@ -1040,6 +1047,7 @@ impl Loaded for Shared {
         }
         let lens: Vec<u64> = inputs.iter().map(|i| i.len()).collect();
         self.check(params, resources, &lens, sizes, memory_limit, task_limits)?;
+        let concurrency = self.concurrency(memory_limit, task_limits)?;
         // SAFETY: the inputs and outputs outlive the store, which is dropped within `run_fed`,
         // and are not reached but by it meanwhile
         let feeds = (inputs.iter_mut()).map(|i| {
@@ -1051,7 +1059,7 @@ impl Loaded for Shared {
                 n,
             )
         });
-        self.run_fed(params, resources, feeds.collect(), drains.collect(), memory_limit, task_limits)
+        self.run_fed(params, resources, feeds.collect(), drains.collect(), memory_limit, task_limits, &concurrency)
     }
 
     fn apply(
@@ -1064,16 +1072,39 @@ impl Loaded for Shared {
         task_limits: &[u64],
     ) -> Decoded<Vec<Vec<u8>>> {
         let _s = aqr_common::trace::span("wasm");
-        self.check(params, resources, &lens(inputs), sizes, memory_limit, task_limits)?;
-        // (zeroed by the system as they are written, as a copy out of the memories would be)
-        let mut outs: Vec<Vec<u8>> = sizes.iter().map(|&s| vec![0; s as usize]).collect();
-        let mut bufs: Vec<&mut [u8]> = outs.iter_mut().map(|o| &mut o[..]).collect();
-        self.run(params, resources, inputs, &mut bufs, memory_limit, task_limits)?;
-        Ok(outs)
+        let concurrency = self.concurrency(memory_limit, task_limits)?;
+        self.apply_with(params, resources, inputs, sizes, memory_limit, task_limits, &concurrency)
     }
 }
 
 impl Shared {
+    /// [`Loaded::apply`] at the `concurrency` chosen.
+    pub(crate) fn apply_with(
+        &self,
+        params: &[u8],
+        resources: &[Resource],
+        inputs: &[&[u8]],
+        sizes: &[u64],
+        memory_limit: u64,
+        task_limits: &[u64],
+        concurrency: &[usize],
+    ) -> Decoded<Vec<Vec<u8>>> {
+        // (checked, as `apply_into` is, by the caller that is not `apply`: here again, cheaply)
+        self.check(params, resources, &lens(inputs), sizes, memory_limit, task_limits)?;
+        // (zeroed by the system as they are written, as a copy out of the memories would be)
+        let mut outs: Vec<Vec<u8>> = sizes.iter().map(|&s| vec![0; s as usize]).collect();
+        let mut bufs: Vec<&mut [u8]> = outs.iter_mut().map(|o| &mut o[..]).collect();
+        self.run(params, resources, inputs, &mut bufs, memory_limit, task_limits, concurrency)?;
+        Ok(outs)
+    }
+
+    /// The concurrency of each class of an application of memory limit `memory_limit` and task
+    /// limits `task_limits` ([`choose_concurrency`] under the bound of the process or this module's).
+    fn concurrency(&self, memory_limit: u64, task_limits: &[u64]) -> Decoded<Vec<usize>> {
+        let bound = self.1.unwrap_or_else(|| BOUND.load(Ordering::Relaxed));
+        choose_concurrency(&self.0.slots, memory_limit, task_limits, bound)
+    }
+
     /// [`Loaded::apply`], the outputs written into `outs` (of the sizes declared), every byte
     /// of them where it succeeds.
     #[cfg(feature = "sandbox")]
@@ -1085,10 +1116,11 @@ impl Shared {
         outs: &mut [&mut [u8]],
         memory_limit: u64,
         task_limits: &[u64],
+        concurrency: &[usize],
     ) -> Decoded<()> {
         let sizes: Vec<u64> = outs.iter().map(|o| o.len() as u64).collect();
         self.check(params, resources, &lens(inputs), &sizes, memory_limit, task_limits)?;
-        self.run(params, resources, inputs, outs, memory_limit, task_limits)
+        self.run(params, resources, inputs, outs, memory_limit, task_limits, concurrency)
     }
 
     /// The application checked against the module and the memory limit, before anything of it
@@ -1155,6 +1187,7 @@ impl Shared {
         outs: &mut [&mut [u8]],
         memory_limit: u64,
         task_limits: &[u64],
+        concurrency: &[usize],
     ) -> Decoded<()> {
         // SAFETY: the inputs and outputs outlive the store, which is dropped within `run_fed`,
         // and so do the references to them in it; the outputs are not reached but by it
@@ -1162,7 +1195,7 @@ impl Shared {
         let feeds = inputs.iter().map(|i| Feed::Bytes(unsafe { std::slice::from_raw_parts(i.as_ptr(), i.len()) }));
         let drains =
             (outs.iter_mut()).map(|o| Drain::Buf(unsafe { std::slice::from_raw_parts_mut(o.as_mut_ptr(), o.len()) }));
-        self.run_fed(params, resources, feeds.collect(), drains.collect(), memory_limit, task_limits)
+        self.run_fed(params, resources, feeds.collect(), drains.collect(), memory_limit, task_limits, concurrency)
     }
 
     /// [`Shared::run`] of the inputs and outputs as the instance takes them, which outlive it.
@@ -1174,6 +1207,7 @@ impl Shared {
         drains: Vec<Drain>,
         memory_limit: u64,
         task_limits: &[u64],
+        concurrency: &[usize],
     ) -> Decoded<()> {
         let c = &*self.0;
         let sizes: Vec<u64> = drains.iter().map(Drain::len).collect();
@@ -1192,7 +1226,7 @@ impl Shared {
             limit: memory_limit,
             task_limits: task_limits.to_vec(),
             classes: c.slots.iter().map(|_| Arc::default()).collect(),
-            concurrency: c.slots.clone(),
+            concurrency: concurrency.to_vec(),
             gangs: AtomicU64::new(0),
             total: Mutex::new(0),
             peak: AtomicU64::new(0),
@@ -1279,6 +1313,7 @@ impl Shared {
                 instance: app.instance_peak.load(Ordering::Relaxed).saturating_sub(imported),
                 tasks: app.task_peaks.iter().map(|p| p.load(Ordering::Relaxed)).collect(),
                 task_memories: app.memory_peaks.iter().map(|p| p.load(Ordering::Relaxed)).collect(),
+                concurrency: app.concurrency.clone(),
                 ok: r.is_ok(),
             });
         }
@@ -1288,6 +1323,55 @@ impl Shared {
 
 /// The pages of the working memory of `wasm` as it is instantiated: the minimum of its import
 /// (the module's data and stack), for its memory plan ([`aqr_formula::Usage`]).
+/// The most the memories of an application may come to, for [`choose_concurrency`]: set from the
+/// budget a user gave (`aqr -M`), none by default.
+static BOUND: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Bounds the memories of the applications from now on to `bytes` (`u64::MAX`: no bound): the
+/// instance's limit and, for each class of tasks, its concurrency times its task limit. A decoder
+/// lowers the concurrency of the classes to fit, and fails an application that does not fit
+/// even at 1 with a resource failure before it starts.
+pub fn set_application_bound(bytes: u64) {
+    BOUND.store(bytes, Ordering::Relaxed);
+}
+
+/// The bound set ([`set_application_bound`]).
+pub(crate) fn application_bound_set() -> u64 {
+    BOUND.load(Ordering::Relaxed)
+}
+
+/// The concurrency of each class of an application of the task `slots` of a module, its memory
+/// limit and task limits: the slots, lowered by one for the class of the largest task limit
+/// that is above 1 while the memory limit and the sum of concurrency times task limit exceed
+/// `bound`; a resource failure if even 1 each exceeds it. A limit of [`aqr_formula::NO_LIMIT`]
+/// (not known) counts for nothing, and the earlier Apply (no task limits) has the slots.
+pub(crate) fn choose_concurrency(
+    slots: &[usize],
+    memory_limit: u64,
+    task_limits: &[u64],
+    bound: u64,
+) -> Decoded<Vec<usize>> {
+    let mut concurrency = slots.to_vec();
+    if bound == u64::MAX || task_limits.len() != slots.len() {
+        return Ok(concurrency);
+    }
+    let known = |l: u64| if l == aqr_formula::NO_LIMIT { 0 } else { l as u128 };
+    let total = |c: &[usize]| {
+        known(memory_limit) + c.iter().zip(task_limits).map(|(&n, &l)| n as u128 * known(l)).sum::<u128>()
+    };
+    while total(&concurrency) > bound as u128 {
+        let lower = (0..slots.len()).filter(|&c| concurrency[c] > 1).max_by_key(|&c| known(task_limits[c]));
+        let Some(c) = lower else {
+            return Err(Failure::Resource(format!(
+                "the memory of an application, at least {} bytes, is over the bound of {bound} bytes",
+                total(&concurrency)
+            )));
+        };
+        concurrency[c] -= 1;
+    }
+    Ok(concurrency)
+}
+
 /// The task slots of each class of tasks of `wasm` (its custom section `aqr_task_slots`, the low
 /// 7 bits of each byte; none where it has none), unchecked.
 pub fn task_slots(wasm: &[u8]) -> Vec<u64> {
@@ -1302,9 +1386,9 @@ pub fn task_slots(wasm: &[u8]) -> Vec<u64> {
 }
 
 /// The most the memories of an application may take: `memory_limit`, and with task limits, those
-/// of as many tasks of each class at once as its task `slots` ([`task_slots`]).
-pub fn application_bound(memory_limit: u64, task_limits: &[u64], slots: &[u64]) -> u64 {
-    let tasks = task_limits.iter().zip(slots).fold(0u64, |t, (&l, &n)| t.saturating_add(l.saturating_mul(n)));
+/// of as many units of each class at once as its `concurrency` ([`choose_concurrency`]).
+pub fn application_bound(memory_limit: u64, task_limits: &[u64], concurrency: &[u64]) -> u64 {
+    let tasks = task_limits.iter().zip(concurrency).fold(0u64, |t, (&l, &n)| t.saturating_add(l.saturating_mul(n)));
     memory_limit.saturating_add(tasks)
 }
 
@@ -1369,6 +1453,8 @@ pub struct Applied {
     /// added up as each ended (`task_memories`).
     pub tasks: Vec<u64>,
     pub task_memories: Vec<u64>,
+    /// The concurrency of each class of tasks ([`choose_concurrency`]) it ran at.
+    pub concurrency: Vec<usize>,
     pub ok: bool,
 }
 
@@ -1791,5 +1877,38 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
                 Ok(())
             })
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The concurrency is lowered one at a time in the class of the largest limit, each to 1 before the
+    /// next; the earlier Apply, no bound and unknown limits leave the slots.
+    #[test]
+    fn concurrency_chosen() {
+        let (m, t) = (1000, [100, 400, 50]);
+        let slots = [8, 4, 8];
+        let at = |bound| choose_concurrency(&slots, m, &t, bound);
+        // 1000 + 800 + 1600 + 400
+        assert_eq!(at(3800).unwrap(), [8, 4, 8]);
+        assert_eq!(at(u64::MAX).unwrap(), [8, 4, 8]);
+        assert_eq!(at(3799).unwrap(), [8, 3, 8]);
+        assert_eq!(at(2600).unwrap(), [8, 1, 8]);
+        // then the next largest
+        assert_eq!(at(2599).unwrap(), [7, 1, 8]);
+        assert_eq!(at(2200).unwrap(), [4, 1, 8]);
+        assert_eq!(at(1900).unwrap(), [1, 1, 8]);
+        assert_eq!(at(1899).unwrap(), [1, 1, 7]);
+        assert_eq!(at(1000 + 100 + 400 + 50).unwrap(), [1, 1, 1]);
+        // short of one each
+        assert!(matches!(at(1549), Err(Failure::Resource(_))));
+        // no limits (the earlier Apply), and a class of unknown limit (it counts for nothing)
+        assert_eq!(choose_concurrency(&slots, m, &[], 10).unwrap(), [8, 4, 8]);
+        let unknown = [100, aqr_formula::NO_LIMIT, 50];
+        assert_eq!(choose_concurrency(&slots, m, &unknown, 2000).unwrap(), [6, 4, 8]);
+        assert!(choose_concurrency(&slots, aqr_formula::NO_LIMIT, &unknown, 100).is_err());
+        assert_eq!(choose_concurrency(&slots, aqr_formula::NO_LIMIT, &unknown, 150).unwrap(), [1, 4, 1]);
     }
 }
