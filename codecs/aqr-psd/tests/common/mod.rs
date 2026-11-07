@@ -72,6 +72,20 @@ pub fn image(w: usize, h: usize, seed: u32) -> Vec<u8> {
 
 /// `raw`: which layers are stored raw (the others RLE).
 pub fn psd(width: usize, height: usize, layers: &[Layer], enc: Encoder, mangle: usize, raw: &[usize]) -> Vec<u8> {
+    psd_sections(width, height, layers, enc, mangle, raw, &[])
+}
+
+/// [`psd`] with the section type (`lsct`) of the layers given: 3 for the divider that opens a
+/// group, 1 for the folder that closes it (layers of no pixels), 0 or none for the others.
+pub fn psd_sections(
+    width: usize,
+    height: usize,
+    layers: &[Layer],
+    enc: Encoder,
+    mangle: usize,
+    raw: &[usize],
+    sections: &[u32],
+) -> Vec<u8> {
     let mut o = Vec::new();
     o.extend_from_slice(b"8BPS");
     be16(&mut o, 1);
@@ -138,6 +152,11 @@ pub fn psd(width: usize, height: usize, layers: &[Layer], enc: Encoder, mangle: 
         extra.extend_from_slice(b"8BIMluni");
         be32(&mut extra, 4);
         be32(&mut extra, 0);
+        if let Some(&t) = sections.get(k).filter(|&&t| t != 0) {
+            extra.extend_from_slice(b"8BIMlsct");
+            be32(&mut extra, 4);
+            be32(&mut extra, t);
+        }
         be32(&mut li, extra.len() as u32);
         li.extend_from_slice(&extra);
     }
@@ -201,7 +220,12 @@ pub fn layers(w: usize, h: usize, alpha: bool) -> Vec<Layer> {
 
 /// A file whose composite is its layers rendered (so the composite is coded with the hint).
 pub fn hinted_file(w: usize, h: usize) -> Vec<u8> {
-    let file = psd(w, h, &layers(w, h, true), packbits::NO_TILES, 0, &[]);
+    hinted(w, h, &layers(w, h, true), &[])
+}
+
+/// [`hinted_file`] of `layers`, of the section types `sections` ([`psd_sections`]).
+pub fn hinted(w: usize, h: usize, layers: &[Layer], sections: &[u32]) -> Vec<u8> {
+    let file = psd_sections(w, h, layers, packbits::NO_TILES, 0, &[], sections);
     let p = aqr_psd::parse(&file).unwrap();
     let rgb = aqr_psd::composite::render(&p, &file, false, &mut Default::default()).unwrap();
     let mut planes = Vec::new();

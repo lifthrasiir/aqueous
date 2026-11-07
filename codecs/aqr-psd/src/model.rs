@@ -20,7 +20,7 @@
 //! static per chunk of [`CHUNK`] symbols: counted, written, then the chunk coded with rANS,
 //! which bounds the encoder's buffer.
 
-use crate::psd::{Error, Result};
+use crate::psd::{Error, Lifo, Result};
 use crate::rans::{self, BitR, BitW, Decoder, Tables};
 use aqr_common::varint;
 
@@ -648,17 +648,27 @@ fn code_row_any<C: Coder>(c: &mut C, r: &RowCtx, p: &mut [u8], res: &mut [u8]) {
 
 /// The state of a group being coded row by row: planes of `w` samples, alpha (if any) last.
 pub struct GroupCoder {
-    w: usize,
-    has_alpha: bool,
-    /// Planes not coded: their rows are given (copies of planes coded before).
-    known: Vec<bool>,
+    // (the vectors in the reverse of the order they are made in: see `Lifo`)
+    hint_prev: Lifo<Vec<u8>>,
+    res: Lifo<Vec<u8>>,
+    res_prev: Lifo<Vec<u8>>,
+    prev: Lifo<Vec<u8>>,
     /// Planes equal to another plane coded before them in a row; not coded.
     same_as: Vec<Option<usize>>,
+    /// Planes not coded: their rows are given (copies of planes coded before).
+    known: Vec<bool>,
+    w: usize,
+    has_alpha: bool,
     top: bool,
-    prev: Vec<Vec<u8>>,
-    res_prev: Vec<Vec<u8>>,
-    res: Vec<Vec<u8>>,
-    hint_prev: Vec<Vec<u8>>,
+}
+
+/// `planes` rows of `w` zeros, made in order and dropped last first.
+pub fn zero_rows(planes: usize, w: usize) -> Lifo<Vec<u8>> {
+    let mut rows = Vec::with_capacity(planes);
+    for _ in 0..planes {
+        rows.push(vec![0; w]);
+    }
+    Lifo::new(rows)
 }
 
 impl GroupCoder {
@@ -669,10 +679,10 @@ impl GroupCoder {
             known,
             same_as,
             top: true,
-            prev: vec![vec![0; w]; planes],
-            res_prev: vec![vec![0; w]; planes],
-            res: vec![vec![0; w]; planes],
-            hint_prev: vec![vec![0; w]; planes],
+            prev: zero_rows(planes, w),
+            res_prev: zero_rows(planes, w),
+            res: zero_rows(planes, w),
+            hint_prev: zero_rows(planes, w),
         }
     }
 
@@ -915,11 +925,15 @@ fn unused() -> Vec<u32> {
 
 /// Decodes symbols chunk by chunk.
 pub struct Player<'a> {
+    // (the vectors in the reverse of the order they are made in: see `Lifo`)
+    /// The chunk's used tables, compacted, in the room made once for the most there can be.
+    tables: Tables,
+    freqs: Vec<u32>,
+    room: usize,
+    /// The index of every model table among the chunk's.
+    map: Vec<u16>,
     src: &'a [u8],
     at: usize,
-    /// The chunk's used tables, compacted, and the index of every model table among them.
-    tables: Tables,
-    map: Vec<u16>,
     dec: Decoder<'a>,
     left: usize,
     /// Set when the stream turns out corrupt; decoding then yields zeros.
@@ -927,13 +941,31 @@ pub struct Player<'a> {
     ended: bool,
 }
 
+/// The tables of a stream of `n` bytes that a chunk uses, and the unused one, at most: its head
+/// has a bit for each of them.
+pub fn player_tables(n: usize) -> usize {
+    TABLES.min(n.saturating_mul(8)) + 1
+}
+
+/// The table of every unused context.
+static UNUSED: [u32; 256] = {
+    let mut f = [0u32; 256];
+    f[0] = rans::PROB_SCALE;
+    f
+};
+
 impl<'a> Player<'a> {
     pub fn new(src: &'a [u8]) -> Player<'a> {
+        let room = player_tables(src.len());
+        let map = vec![0; TABLES];
+        let freqs = Vec::with_capacity(256 * (room - 1));
         let mut p = Player {
             src,
             at: 0,
-            tables: Tables::new(&[]),
-            map: vec![0; TABLES],
+            tables: Tables::with_room(room),
+            freqs,
+            room,
+            map,
             dec: Decoder::new(&[]),
             left: 0,
             failed: false,
@@ -959,11 +991,18 @@ impl<'a> Player<'a> {
             self.at += hl;
             let mut r = BitR::new(head);
             // Table 0 stands for every unused one.
-            let mut freqs = vec![unused()];
+            let freqs = &mut self.freqs;
+            freqs.clear();
+            let mut used = 1;
             for t in 0..TABLES {
                 if r.bits(1) == 1 {
-                    self.map[t] = freqs.len() as u16;
-                    freqs.push(rans::read_table(&mut r, 256).map_err(|_| corrupt())?);
+                    // (the head has a bit for each of them: no more than the room)
+                    if used == self.room {
+                        return Err(corrupt());
+                    }
+                    self.map[t] = used as u16;
+                    used += 1;
+                    rans::read_table_into(&mut r, 256, freqs).map_err(|_| corrupt())?;
                 } else {
                     self.map[t] = 0;
                 }
@@ -974,7 +1013,8 @@ impl<'a> Player<'a> {
             let bl = varint::get(src, &mut self.at).map_err(|_| corrupt())? as usize;
             let body = src.get(self.at..self.at.checked_add(bl).ok_or_else(corrupt)?).ok_or_else(corrupt)?;
             self.at += bl;
-            self.tables = Tables::new(&freqs);
+            let freqs = &self.freqs;
+            self.tables.rebuild(used, |t| if t == 0 { &UNUSED[..] } else { &freqs[256 * (t - 1)..256 * t] });
             self.dec = Decoder::new(body);
             self.left = n;
             Ok(())

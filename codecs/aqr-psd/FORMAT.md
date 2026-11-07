@@ -17,7 +17,6 @@ Other formats this one uses are specified elsewhere:
 
 - The modules of the formulas of embedded files: `png-recons` in aqr-png's `FORMAT.md`,
   `jpeg-recons` in aqr-jpeg's `FORMAT.md`.
-- DEFLATE (ZIP channels, read when rendering the hint): RFC 1951.
 
 ## Contents
 
@@ -742,7 +741,7 @@ them:
   skipping a row only advances by its count. A row past the data is an error when read.
 - Raw (0): the channel's data past its compression field must have at least `width · height`
   bytes when the renderer is built.
-- ZIP (2, 3): decoded whole when the renderer is built (section 9).
+- ZIP (2, 3): an error when the renderer is built (section 9).
 - No compression field: all samples 0.
 - Other compressions: an error when the renderer is built.
 
@@ -908,19 +907,12 @@ setsat(c, s):
 
 ## 9. ZIP channels
 
-A ZIP channel (compression 2 or 3) holds a zlib stream: the first 2 bytes (the zlib header,
-not checked; fewer than 2 bytes is an error) are skipped and the rest is decoded as DEFLATE
-(RFC 1951) up to the end of its final block. Bytes after that (the Adler-32) are ignored.
-Errors: a reserved block type; a stored block whose `NLEN` is not the complement of `LEN`; an
-over-subscribed code (incomplete codes are allowed, but decoding a bit pattern no code has is
-an error); a dynamic header without a code for 256, a repeat (16) with no previous length, or
-code lengths running past `HLIT + HDIST`; literal/length symbols 286, 287 and distance symbols
-30, 31 (the fixed code has 32 five-bit distance codes, of which 30 and 31 are these; length
-symbol 284 with extra bits 31 is length 258, as in zlib); a distance before the start of the data; and the data ending before the final block
-does. The output must be exactly `rowbytes · height` bytes, `rowbytes = ceil(width · depth / 8)`.
-
-For compression 3 with depth 8, each row (of `width` bytes) is undone as
-`row[i] += row[i − 1]` for `i = 1 .. width−1`, in order.
+The module does not read ZIP channels (compression 2 or 3): their bytes stay in the skeleton,
+and a hinted group (section 8) whose file has one in a layer the renderer builds rows of
+(8.1) is invalid, since the renderer's memory is laid out in advance and a channel decoded whole
+would not be. The reference encoder does not code a hint where building the renderer fails.
+(Earlier versions of the module decoded them as DEFLATE, RFC 1951, whole, when the renderer was
+built; the files they could not take are now coded without the hint.)
 
 ## 10. Encoder
 

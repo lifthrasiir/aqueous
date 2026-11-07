@@ -1,6 +1,5 @@
 //! Row by row access to the planes of pixel data, without decoding whole planes.
 
-use crate::pixels;
 use crate::psd::{Compression, Error, Psd, Result};
 
 fn err<T>(s: &str) -> Result<T> {
@@ -50,8 +49,8 @@ enum Source<'a> {
         first: usize,
     },
     Raw(&'a [u8]),
-    /// Fallback for ZIP: the whole plane, decoded.
-    Full(Vec<u8>),
+    /// A channel without data (its field is cut short): rows of zeros.
+    Zero,
 }
 
 /// The rows of one plane, in order.
@@ -98,7 +97,9 @@ impl<'a> PlaneRows<'a> {
         Ok(PlaneRows { src, w, h, next: 0, pos: 0 })
     }
 
-    /// A channel of a layer; ZIP channels are decoded whole.
+    /// A channel of a layer. ZIP channels are not read by rows (they would be decoded whole, and
+    /// the memory of the module is laid out in advance): the hint is not made of layers that have
+    /// them.
     pub fn channel(psd: &'a Psd, d: &'a [u8], layer: usize, ch: usize) -> Result<Self> {
         let c = &psd.layer_info.layers[layer].channels[ch];
         let (w, h) = (psd.row_bytes(c.width) as usize, c.height as usize);
@@ -106,10 +107,8 @@ impl<'a> PlaneRows<'a> {
             Some(comp @ (Compression::Rle | Compression::Raw)) => {
                 Self::new(psd.psb, comp, &d[c.span.start + 2..c.span.end], w, h, 0, 1)
             }
-            Some(_) => {
-                Ok(PlaneRows { src: Source::Full(pixels::layer_channel(psd, d, layer, ch)?), w, h, next: 0, pos: 0 })
-            }
-            None => Ok(PlaneRows { src: Source::Full(vec![0; w * h]), w, h, next: 0, pos: 0 }),
+            Some(_) => err("not row-decodable"),
+            None => Ok(PlaneRows { src: Source::Zero, w, h, next: 0, pos: 0 }),
         }
     }
 
@@ -144,7 +143,7 @@ impl<'a> PlaneRows<'a> {
                 self.pos += n;
             }
             Source::Raw(d) => out[..w].copy_from_slice(&d[self.next * w..(self.next + 1) * w]),
-            Source::Full(d) => out[..w].copy_from_slice(&d[self.next * w..(self.next + 1) * w]),
+            Source::Zero => out[..w].fill(0),
         }
         self.next += 1;
         Ok(())
@@ -162,3 +161,9 @@ impl<'a> PlaneRows<'a> {
         Ok(())
     }
 }
+
+// (the sizes of the structures on WebAssembly, which the memory plan uses)
+#[cfg(target_family = "wasm")]
+const _: () = {
+    assert!(size_of::<Option<PlaneRows>>() == crate::module::wasm::PLANE_ROWS as usize);
+};

@@ -14,6 +14,8 @@ pub mod model;
 pub mod module;
 pub mod packbits;
 pub mod pixels;
+#[cfg(feature = "encode")]
+pub mod plan;
 pub mod psd;
 pub mod rans;
 pub mod rows;

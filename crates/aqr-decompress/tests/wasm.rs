@@ -177,6 +177,69 @@ fn psd_as_wasm() {
     }
 }
 
+/// psd-recons lays its memory out as a stack, its limit its plan: files of PackBits and raw
+/// channels (coded on their own and with the layers rendered as the hint), of a PSB, of many
+/// layers with masks, alpha and groups (several nested), and of a model of several chunks.
+#[test]
+fn psd_plans_hold() {
+    use aqr_psd::packbits::{self, Encoder as Rle};
+    use psd::{Layer, image, layers, psd};
+    let enc = Rle::Photoshop { phase: 77, period: 368 };
+    // layers of several sizes, positions, masks and alpha; every `group`th starts a group of
+    // two layers, nested in the one before
+    let many = |n: usize| {
+        let mut ls = Vec::new();
+        let mut sections = Vec::new();
+        let (w0, h0) = (96, 64);
+        let mut open = 0;
+        for k in 0..n {
+            if k % 5 == 0 {
+                ls.push(Layer { top: 0, left: 0, w: 0, h: 0, channels: vec![], mask: None });
+                sections.push(3);
+                open += 1;
+            }
+            let (w, h) = (30 + k % 40, 20 + k % 30);
+            let mut channels = vec![(0, image(w, h, k as u32)), (1, image(w, h, 3 * k as u32)), (2, image(w, h, 7))];
+            if k % 3 == 0 {
+                channels.insert(0, (-1, image(w, h, 5).iter().map(|&b| if b < 80 { 0 } else { b }).collect()));
+            }
+            let mask = (k % 4 == 1).then_some((k as i32 % 7, 2, w - 3, h - 2, 255 - k as u8 % 3));
+            if let Some((_, _, mw, mh, _)) = mask {
+                channels.push((-2, image(mw, mh, 11)));
+            }
+            ls.push(Layer { top: (k % 9) as i32 - 3, left: (k % 11) as i32 - 5, w, h, channels, mask });
+            sections.push(0);
+            if k % 5 == 4 || k + 1 == n {
+                ls.push(Layer { top: 0, left: 0, w: 0, h: 0, channels: vec![], mask: None });
+                sections.push(if open % 2 == 0 { 2 } else { 1 });
+                open -= 1;
+            }
+        }
+        (psd::hinted(w0, h0, &ls, &sections), ls, sections)
+    };
+    let (small, ..) = many(3);
+    let (nested, ..) = many(40);
+    let (lots, ..) = many(200);
+    let files = [
+        ("raw and rle", psd(300, 40, &layers(300, 40, true), packbits::NO_TILES, 0, &[])),
+        ("greedy, one raw", psd(260, 35, &layers(260, 35, false), Rle::Greedy { min_run: 3, split_rest: true }, 0, &[0])),
+        ("tiles and exceptions", psd(800, 400, &layers(800, 400, true), enc, 3, &[])),
+        ("hinted", psd::hinted_file(300, 200)),
+        ("psb", psd::psb(300, 40, enc)),
+        ("hinted, few layers", small),
+        ("hinted, groups", nested),
+        ("hinted, many layers", lots),
+        ("several chunks", psd::hinted_file(900, 700)),
+    ];
+    for (what, d) in files {
+        let f = aqr_psd::formula::encode(&d, 1).unwrap_or_else(|| panic!("{what}"));
+        if !matches!(&f.root, Node::Apply(a) if a.module == aqr_psd::formula::MODULE) {
+            panic!("{what}: not modelled");
+        }
+        plan_holds(&format!("psd {what}"), f, &d);
+    }
+}
+
 /// Formulas of the modules built, archived with them: the same natively and as WebAssembly.
 #[test]
 fn same_as_wasm() {

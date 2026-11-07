@@ -12,17 +12,32 @@
 
 use std::collections::BTreeMap;
 
-use crate::psd::{Layer, Psd, Result};
+use crate::psd::{Layer, Lifo, Psd, Result};
 use crate::rows::PlaneRows;
 
 #[derive(Debug, Default)]
 pub struct Report {
+    /// Whether nothing is to be told (the decoder's: nothing is allocated for it).
+    pub quiet: bool,
     /// Layers rendered with the normal blend mode in place of their own, by mode.
     pub blend_fallback: BTreeMap<String, usize>,
     /// Layers without pixels that are not group markers (adjustment and fill layers).
     pub skipped: usize,
     /// Layers with layer effects, rendered without them.
     pub effects: usize,
+}
+
+impl Report {
+    /// A report that tells nothing.
+    pub fn quiet() -> Report {
+        Report { quiet: true, ..Default::default() }
+    }
+
+    fn fallback(&mut self, mode: &[u8; 4]) {
+        if !self.quiet {
+            *self.blend_fallback.entry(String::from_utf8_lossy(mode).into()).or_default() += 1;
+        }
+    }
 }
 
 fn lum(c: [f32; 3]) -> f32 {
@@ -203,7 +218,7 @@ fn composite_mode(dst: &mut [u8; 4], s: [u8; 3], a: u32, f: BlendFn) {
     dst[3] = oa8 as u8;
 }
 
-fn section(l: &Layer, d: &[u8]) -> u32 {
+pub(crate) fn section(l: &Layer, d: &[u8]) -> u32 {
     l.tag(b"lsct")
         .and_then(|t| d.get(t.data.start..t.data.start + 4))
         .map_or(0, |b| u32::from_be_bytes(b.try_into().unwrap()))
@@ -257,16 +272,30 @@ struct Row {
 
 /// Renders the composite row by row.
 pub struct RowRenderer<'a> {
+    // (the vectors in the reverse of the order they are made in: see `Lifo`)
+    clip: Vec<u8>,
+    /// Row buffers: color planes, alpha and mask of a layer.
+    buf: [Vec<u8>; 5],
+    stack: Lifo<Row>,
+    layers: Vec<Option<LayerRows<'a>>>,
+    ops: Vec<Op>,
     w: usize,
     h: usize,
     y: usize,
-    ops: Vec<Op>,
-    layers: Vec<Option<LayerRows<'a>>>,
-    stack: Vec<Row>,
-    /// Row buffers: color planes, alpha and mask of a layer.
-    buf: [Vec<u8>; 5],
-    clip: Vec<u8>,
     clip_range: (usize, usize),
+}
+
+/// The vectors of a renderer, as [`RowRenderer::new`] makes them: how many items each has room
+/// for (the plan of the module's memory is made of them).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shape {
+    /// The room for operations and for layers, made first.
+    pub ops: usize,
+    pub layers: usize,
+    /// The canvas rows, of the width of the file.
+    pub levels: usize,
+    /// The room of each of the five row buffers.
+    pub widest: usize,
 }
 
 impl<'a> RowRenderer<'a> {
@@ -275,10 +304,15 @@ impl<'a> RowRenderer<'a> {
     pub fn new(psd: &'a Psd, d: &'a [u8], rep: &mut Report) -> Result<Self> {
         let (w, h) = (psd.width as usize, psd.height as usize);
         let layers = &psd.layer_info.layers;
+        // The room of the operations and layers first, then the temporary vectors above them,
+        // which are freed before the others are made (the memory of the module is a stack).
+        let dividers = layers.iter().filter(|l| section(l, d) == 3).count();
+        let mut ops = Vec::with_capacity(2 * layers.len() + dividers);
+        let mut rows = Vec::with_capacity(layers.len());
         // Layers are stored bottom to top: a group's divider record (section type 3) first,
         // its folder record (type 1 or 2) last. Match them.
         let mut folder_of = vec![usize::MAX; layers.len()];
-        let mut open = Vec::new();
+        let mut open = Vec::with_capacity(dividers);
         for (i, l) in layers.iter().enumerate() {
             match section(l, d) {
                 3 => open.push(i),
@@ -295,10 +329,8 @@ impl<'a> RowRenderer<'a> {
         let direct = |f: usize| {
             f != usize::MAX && !layers[f].hidden() && &layers[f].blend == b"pass" && layers[f].opacity == 255
         };
-        let mut ops = Vec::new();
-        let mut rows = Vec::with_capacity(layers.len());
         let mut skip_folder = vec![false; layers.len()];
-        let mut depth = 0usize;
+        let (mut depth, mut deepest) = (0usize, 0usize);
         for (i, l) in layers.iter().enumerate() {
             rows.push(None);
             match section(l, d) {
@@ -308,6 +340,7 @@ impl<'a> RowRenderer<'a> {
                     } else {
                         ops.push(Op::Push);
                         depth += 1;
+                        deepest = deepest.max(depth);
                     }
                     ops.push(Op::ClearClip);
                     continue;
@@ -320,7 +353,7 @@ impl<'a> RowRenderer<'a> {
                     depth -= 1;
                     let mode = blend_fn(&l.blend);
                     if !l.hidden() && mode.is_none() {
-                        *rep.blend_fallback.entry(String::from_utf8_lossy(&l.blend).into()).or_default() += 1;
+                        rep.fallback(&l.blend);
                     }
                     ops.push(Op::Pop { opacity: l.opacity as u32, mode: mode.flatten(), hidden: l.hidden() });
                     continue;
@@ -353,7 +386,7 @@ impl<'a> RowRenderer<'a> {
             }
             if !l.hidden() {
                 if blend_fn(&l.blend).is_none() {
-                    *rep.blend_fallback.entry(String::from_utf8_lossy(&l.blend).into()).or_default() += 1;
+                    rep.fallback(&l.blend);
                 }
                 if has_effects(l) {
                     rep.effects += 1;
@@ -407,18 +440,39 @@ impl<'a> RowRenderer<'a> {
             }
             _ => true,
         });
-        let row = || Row { px: vec![[0; 4]; w], x0: w, x1: 0 };
-        Ok(RowRenderer {
-            w,
-            h,
-            y: 0,
-            ops,
-            layers: rows,
-            stack: vec![row()],
-            buf: Default::default(),
-            clip: vec![0; w],
-            clip_range: (0, 0),
-        })
+        // (the temporary vectors, the last made first)
+        drop((skip_folder, open, folder_of));
+        // The widest row of a layer drawn or of a mask is the room of the row buffers.
+        let widest = ops
+            .iter()
+            .filter_map(|op| match *op {
+                Op::Layer(i) => rows[i].as_ref(),
+                _ => None,
+            })
+            .map(|l| l.w.max(l.mask.as_ref().map_or(0, |m| m.3)))
+            .max()
+            .unwrap_or(0);
+        // (a level of canvas for each group open at once, and the file's)
+        let mut stack = Vec::with_capacity(deepest + 1);
+        for _ in 0..=deepest {
+            stack.push(Row { px: vec![[0; 4]; w], x0: w, x1: 0 });
+        }
+        let mut buf: [Vec<u8>; 5] = Default::default();
+        for b in buf.iter_mut().rev() {
+            *b = Vec::with_capacity(widest);
+        }
+        let clip = vec![0; w];
+        Ok(RowRenderer { clip, buf, stack: Lifo::new(stack), layers: rows, ops, w, h, y: 0, clip_range: (0, 0) })
+    }
+
+    /// The room of the vectors that [`RowRenderer::new`] made.
+    pub fn shape(&self) -> Shape {
+        Shape {
+            ops: self.ops.capacity(),
+            layers: self.layers.capacity(),
+            levels: self.stack.len(),
+            widest: self.buf[0].capacity(),
+        }
     }
 
     /// Skips the next row (cheaply: the layers' rows are skipped when the next one is drawn).
@@ -443,9 +497,6 @@ impl<'a> RowRenderer<'a> {
                 Op::ClearClip => self.clip_range = (0, 0),
                 Op::Push => {
                     level += 1;
-                    if self.stack.len() <= level {
-                        self.stack.push(Row { px: vec![[0; 4]; w], x0: w, x1: 0 });
-                    }
                     let r = &mut self.stack[level];
                     if r.x0 < r.x1 {
                         r.px[r.x0..r.x1].fill([0; 4]);
@@ -629,3 +680,11 @@ pub fn render(psd: &Psd, d: &[u8], with_alpha: bool, rep: &mut Report) -> Result
     }
     Ok(out)
 }
+
+// (the sizes of the structures on WebAssembly, which the memory plan uses)
+#[cfg(target_family = "wasm")]
+const _: () = {
+    assert!(size_of::<Op>() == crate::module::wasm::OP as usize);
+    assert!(size_of::<Option<LayerRows>>() == crate::module::wasm::LAYER_ROWS as usize);
+    assert!(size_of::<Row>() == crate::module::wasm::ROW as usize);
+};

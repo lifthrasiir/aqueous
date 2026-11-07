@@ -177,17 +177,19 @@ pub struct Mask {
     pub real_rect: Option<Rect>,
 }
 
+/// A layer. The vectors come first, last made first (fields are dropped in order): on WebAssembly
+/// the memory is a stack ([`aqr_api::stack`]), and a block freed below the top is a hole.
 #[derive(Debug, Clone)]
 pub struct Layer {
+    pub tags: Vec<Tag>,
+    pub name: Vec<u8>,
+    pub channels: Vec<Channel>,
     pub rect: Rect,
     pub blend: [u8; 4],
     pub opacity: u8,
     pub clipping: u8,
     pub flags: u8,
-    pub name: Vec<u8>,
     pub mask: Option<Mask>,
-    pub channels: Vec<Channel>,
-    pub tags: Vec<Tag>,
     /// The layer record, its tags included.
     pub record: Span,
 }
@@ -201,18 +203,70 @@ impl Layer {
     }
 }
 
+/// A vector dropped last first: its items were made in order, and on WebAssembly the memory is a
+/// stack ([`aqr_api::stack`]), where a block freed below the top is a hole, of which there are 64
+/// at most.
+#[derive(Debug, Clone)]
+pub struct Lifo<T>(Vec<T>);
+
+impl<T> Lifo<T> {
+    pub fn new(v: Vec<T>) -> Lifo<T> {
+        Lifo(v)
+    }
+}
+
+impl<T> Default for Lifo<T> {
+    fn default() -> Lifo<T> {
+        Lifo(Vec::new())
+    }
+}
+
+impl<T> std::ops::Deref for Lifo<T> {
+    type Target = Vec<T>;
+    fn deref(&self) -> &Vec<T> {
+        &self.0
+    }
+}
+
+impl<T> std::ops::DerefMut for Lifo<T> {
+    fn deref_mut(&mut self) -> &mut Vec<T> {
+        &mut self.0
+    }
+}
+
+impl<'a, T> IntoIterator for &'a Lifo<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<T> Drop for Lifo<T> {
+    fn drop(&mut self) {
+        while self.0.pop().is_some() {}
+    }
+}
+
+/// The layers of a file.
+pub type Layers = Lifo<Layer>;
+
 #[derive(Debug, Clone, Default)]
 pub struct LayerInfo {
     /// Negative layer count in the file: the first alpha channel is the composite's
     /// transparency.
     pub merged_alpha: bool,
-    pub layers: Vec<Layer>,
+    pub layers: Layers,
     /// Count, records and channel data.
     pub span: Span,
 }
 
+/// A parsed file. The vectors come first, last made first (see [`Layer`]).
 #[derive(Debug, Clone)]
 pub struct Psd {
+    pub global_tags: Vec<Tag>,
+    pub layer_info: LayerInfo,
+    pub resources: Vec<Resource>,
     pub psb: bool,
     pub channels: u16,
     pub height: u64,
@@ -220,13 +274,10 @@ pub struct Psd {
     pub depth: u16,
     pub mode: u16,
     pub color_mode: Span,
-    pub resources: Vec<Resource>,
     pub resource_section: Span,
     pub layer_section: Span,
-    /// Layers, from the layer info section or from a `Layr`/`Lr16`/`Lr32` global tag.
-    pub layer_info: LayerInfo,
+    // (layer_info: the layers from the layer info section or from a `Layr`/`Lr16`/`Lr32` global tag)
     pub global_mask: Option<Span>,
-    pub global_tags: Vec<Tag>,
     /// Compression field and data of the composite image, to the end of the file.
     pub composite: Span,
 }
@@ -296,7 +347,6 @@ fn layer_info(rd: &mut Rd, psb: bool) -> Result<LayerInfo> {
     }
     let count = rd.u16()? as i16;
     let mut layers = Vec::with_capacity(count.unsigned_abs() as usize);
-    let mut lens = Vec::new();
     for _ in 0..count.unsigned_abs() {
         let rs = rd.p;
         let rect = rd.rect()?;
@@ -304,8 +354,8 @@ fn layer_info(rd: &mut Rd, psb: bool) -> Result<LayerInfo> {
         let mut channels = Vec::with_capacity(nc);
         for _ in 0..nc {
             let id = rd.u16()? as i16;
-            lens.push(rd.len(psb)?);
-            channels.push(Channel { id, width: rect.width(), height: rect.height(), span: 0..0 });
+            // (the length of the data, in the span until the data is placed)
+            channels.push(Channel { id, width: rect.width(), height: rect.height(), span: 0..rd.len(psb)? });
         }
         if rd.bytes(4)? != b"8BIM" {
             return err(format!("bad blend signature at {}", rd.p - 4));
@@ -353,13 +403,12 @@ fn layer_info(rd: &mut Rd, psb: bool) -> Result<LayerInfo> {
         let tags = tags(&mut ex, psb)?;
         layers.push(Layer { rect, blend, opacity, clipping, flags, name, mask, channels, tags, record: rs..rd.p });
     }
-    let mut lens = lens.into_iter();
     for l in &mut layers {
         for c in &mut l.channels {
-            c.span = rd.skip(lens.next().unwrap())?;
+            c.span = rd.skip(c.span.end)?;
         }
     }
-    Ok(LayerInfo { merged_alpha: count < 0, layers, span: start..rd.p })
+    Ok(LayerInfo { merged_alpha: count < 0, layers: Layers::new(layers), span: start..rd.p })
 }
 
 pub fn parse(d: &[u8]) -> Result<Psd> {
@@ -512,3 +561,12 @@ pub fn linked(psd: &Psd, d: &[u8]) -> Vec<Linked> {
     }
     out
 }
+
+// (the sizes of the structures on WebAssembly, which the memory plan uses)
+#[cfg(target_family = "wasm")]
+const _: () = {
+    assert!(size_of::<Layer>() == crate::module::wasm::LAYER as usize);
+    assert!(size_of::<Channel>() == crate::module::wasm::CHANNEL as usize);
+    assert!(size_of::<Tag>() == crate::module::wasm::TAG as usize);
+    assert!(size_of::<Resource>() == crate::module::wasm::RESOURCE as usize);
+};

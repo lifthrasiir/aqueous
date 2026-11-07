@@ -262,6 +262,37 @@ impl<S: Symbol, const BITS: u32> Tables<S, BITS> {
         Tables { lut, fc, shift, n }
     }
 
+    /// No tables, with room for `n` of them that [`Tables::rebuild`] makes (of symbols with a
+    /// fixed stride): the memory is taken here, once.
+    pub fn with_room(n: usize) -> Self {
+        let shift = S::STRIDE_LOG.expect("a fixed stride");
+        Tables { lut: Vec::with_capacity(n << BITS), fc: Vec::with_capacity(n << shift), shift, n: 0 }
+    }
+
+    /// [`Tables::of`] of `n` tables in the room of these tables (as [`Tables::with_room`] made
+    /// them: `n` at most), nothing taken.
+    pub fn rebuild<'a>(&mut self, n: usize, freqs: impl Fn(usize) -> &'a [u32]) {
+        const { check_bits(BITS) };
+        assert!(n << BITS <= self.lut.capacity() && n << self.shift <= self.fc.capacity());
+        let (scale, shift) = (1usize << BITS, self.shift);
+        self.lut.clear();
+        self.lut.resize(n * scale, S::default());
+        self.fc.clear();
+        self.fc.resize(n << shift, 0);
+        for t in 0..n {
+            let f = freqs(t);
+            assert!(f.len() <= S::MAX);
+            let l = &mut self.lut[t * scale..];
+            let mut acc = 0u32;
+            for (s, &fs) in f.iter().enumerate() {
+                self.fc[(t << shift) + s] = fs | acc << 16;
+                l[acc as usize..(acc + fs) as usize].fill(S::new(s));
+                acc += fs;
+            }
+        }
+        self.n = n;
+    }
+
     /// Bytes of the tables' two blocks, of `n` tables of `alphabet` symbols at most.
     pub fn bytes(n: usize, alphabet: usize) -> [u64; 2] {
         let shift = S::STRIDE_LOG.unwrap_or_else(|| alphabet.max(1).next_power_of_two().trailing_zeros());

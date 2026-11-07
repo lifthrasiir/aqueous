@@ -374,6 +374,13 @@ P = W_main + Σ_태스크 (W_spawn + 태스크의 계획 버퍼) + 채널 메시
 - 자원의 내용은 계획이 볼 수 없다. 그래서 params가 사전의 모양을 말한다: 항목 수(wrt-recons는 레이아웃 목록 세 개의 길이도). 모듈은 풀어 낸 사전과 맞지 않으면 실패한다(형식이 바뀌어 wrt-recons 3, wrt-recons-hangul 2; `FORMAT.md`).
 - 계획 = `plan::recons`, `plan::recons_hangul`: whole의 복사, (레이아웃 목록, 항목), 출력. 실측 = 계획이다(`wrt_plans_hold`: 단어와 마크업, 한글, 16 MiB를 넘어 조각이 둘인 글).
 
+**psd-recons.**
+- head의 span과 group은 벡터 안의 벡터(`plane_lens`, `exceptions`, `planes`, `same_as`)였고 `with_capacity(n.min(1 << 16))`에 push로 키웠다. 레이어를 읽는 `psd::parse`는 레이어마다 채널·이름·태그 벡터를 만들었고 채널 길이를 `lens`에 push로 모았다. 렌더러(`RowRenderer`)는 연산 목록·레이어 줄·행 버퍼 다섯·캔버스 줄을 쓰면서 키웠고, 모델의 `Player`는 청크마다 표(402개 문맥)와 빈도를 새로 만들고 앞의 표를 놓았다. 앞에서부터 놓는 벡터의 벡터는 항목마다 구멍을 남겨 64개를 넘고, 청크마다 표가 구멍으로 쌓인다.
+- 이제 벡터는 모두 끝 크기로 한 번 잡는다(head는 항목이 head 바이트보다 많을 수 없다는 한도로 거른다). `psd::Lifo`는 벡터를 뒤에서부터 놓는다(span, group, 레이어, 캔버스 줄). 구조체의 벡터는 만든 순서의 거꾸로 선언했다(`Layer`, `Psd`, `Coding::Rle`, `GroupDef`, `GroupCoder`, `RowRenderer`). 레이어 파서는 채널 길이를 그 채널의 span에 임시로 적는다. 행 버퍼 다섯은 그릴 레이어와 마스크의 가장 넓은 폭으로 처음에 잡는다. 캔버스 줄은 가장 깊은 그룹까지 처음에 만든다(예전엔 줄을 처음 쓸 때). 임시 벡터(`folder_of`, `open`, `skip_folder`)는 남는 벡터 뒤에 잡고 `new`가 끝나기 전에 놓는다. PackBits 싱크의 앞 행은 그룹마다 블록 하나에서 나눈다. 행 하나를 PackBits로 쓰는 버퍼는 폭의 두 배로 잡는다(토큰은 표본 하나에 바이트 둘 이하).
+- `Player`는 표를 한 번만 잡는다. 청크가 쓰는 표는 head의 비트 수보다 많을 수 없으므로 `min(402, 8 × 모델 바이트) + 1`개의 자리(`Tables::with_room`)와 빈도 벡터를 처음에 잡고, 청크마다 그 자리에 다시 만든다(`Tables::rebuild`). 쓰는 표가 그보다 많은 청크는 오류다.
+- 보고서(`Report`)는 디코더에서 `quiet`이라 아무것도 잡지 않는다. ZIP 채널은 더 이상 줄 단위로 읽지 않는다(통째로 풀면 레이어 수에 따라 메모리가 자란다): 그런 레이어가 있는 파일은 힌트 없이 코딩하며, 있는 힌트 그룹은 오류다(FORMAT.md 9절). 채널 필드가 없는 채널은 0으로 읽는다(벡터를 잡지 않는다).
+- 계획 = `plan::decode`: whole의 복사, 출력, `get_head`의 벡터, `decode_pixels`의 `done`·`planes_left`, `Player`의 블록 넷, 그리고 그룹마다(그룹이 끝나면 꼭대기를 되돌린다) 그룹이 잡는 것을 `decode_group`의 순서로: 행마다 쓰는 것, 싱크의 앞 행, 읽개와 싱크의 칸, 힌트 그룹이면 건너뛴 파일의 구조(스켈레톤의 틈에 영(0)을 채워 `psd::parse`로 읽는다)의 벡터들과 렌더러의 블록들(`RowRenderer::shape`), 같은 파일의 행 버퍼들. 태스크는 없다(Wasm은 스레드 하나). Wasm 구조체 크기는 `module::wasm`에 두고 Wasm 빌드에서 assert로 확인한다. 실측 = 계획이다(`psd_plans_hold`: RLE·raw, 힌트 있는 파일과 없는 파일, PSB, 레이어 200개와 중첩 그룹, 청크가 여럿인 모델; 그리고 코퍼스의 파일 40개, 적용 50개).
+
 ## 다음 순서
 
 1. `Module::memory_usage_in_pages`를 이미 정확한 용량을 쓰는 모듈들(exe, xsv, fasta, zip, git, pdf, png, …)부터 만든다.

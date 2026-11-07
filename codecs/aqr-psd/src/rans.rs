@@ -26,6 +26,11 @@ pub fn read_table(r: &mut BitR, n: usize) -> Result<Vec<u32>> {
     rans32::read_table::<PROB_BITS, false>(r, n).map_err(|_| Error("corrupt entropy coded data".into()))
 }
 
+/// [`read_table`], the frequencies appended to `out` (in its room, where it has it).
+pub fn read_table_into(r: &mut BitR, n: usize, out: &mut Vec<u32>) -> Result<()> {
+    rans32::read_table_into::<PROB_BITS, false>(r, n, out).map_err(|_| Error("corrupt entropy coded data".into()))
+}
+
 /// Encodes `syms` (table index, symbol), in order; returns the byte stream the decoder
 /// reads forward. `freqs` are the tables' frequencies.
 pub fn encode(syms: &[(u16, u16)], freqs: &[Vec<u32>]) -> Vec<u8> {

@@ -18,7 +18,7 @@
 use crate::composite::{self, RowRenderer};
 use crate::model::{self, GroupCoder};
 use crate::packbits::{self, Encoder};
-use crate::psd::{self, Compression, Error, Psd, Result};
+use crate::psd::{self, Compression, Error, Lifo, Psd, Result};
 #[cfg(feature = "encode")]
 use crate::rows;
 use crate::rows::PlaneRows;
@@ -137,15 +137,16 @@ fn nested_compress_(codec: Codec, data: &[u8], depth: usize, par: &Par) -> Optio
 }
 
 #[derive(Debug, Clone)]
-enum Coding<'a> {
+pub(crate) enum Coding<'a> {
     Raw,
     Rle {
         count_bytes: usize,
         encoder: Encoder,
-        /// Bytes of each plane's rows (without the counts).
-        plane_lens: Vec<usize>,
+        // (the vectors in the reverse of the order they are made in: see `Lifo`)
         /// Rows (plane * h + row) not reproduced by `encoder`, and their bytes.
         exceptions: Vec<(usize, &'a [u8])>,
+        /// Bytes of each plane's rows (without the counts).
+        plane_lens: Vec<usize>,
     },
     /// An embedded file, coded as a formula of its own.
     Nested,
@@ -158,30 +159,31 @@ enum Coding<'a> {
 /// A span of pixel data taken out of the file: `planes` planes of `h` rows of `w` bytes.
 /// `gap` is the number of skeleton bytes before it (after the previous span).
 #[derive(Debug, Clone)]
-struct Span<'a> {
-    start: usize,
-    end: usize,
+pub(crate) struct Span<'a> {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
     // (read by the encoder alone, which writes it in the skeleton)
     #[cfg_attr(not(feature = "encode"), allow(dead_code))]
-    gap: usize,
-    planes: usize,
-    w: usize,
-    h: usize,
-    coding: Coding<'a>,
+    pub(crate) gap: usize,
+    pub(crate) planes: usize,
+    pub(crate) w: usize,
+    pub(crate) h: usize,
+    pub(crate) coding: Coding<'a>,
 }
 
 /// A plane of a span: (span index, plane index).
 type PlaneRef = (usize, usize);
 
 #[derive(Debug, Clone)]
-struct GroupDef {
-    planes: Vec<PlaneRef>,
-    has_alpha: bool,
+pub(crate) struct GroupDef {
+    // (the vectors in the reverse of the order they are made in: see `Lifo`)
+    /// Per plane, the plane (index in the group) it equals, coded before it in a row.
+    pub(crate) same_as: Vec<Option<usize>>,
+    pub(crate) planes: Vec<PlaneRef>,
+    pub(crate) has_alpha: bool,
     /// Coded with the composite rendered from the layers as hint (all planes in one span,
     /// which is the composite's).
-    hinted: bool,
-    /// Per plane, the plane (index in the group) it equals, coded before it in a row.
-    same_as: Vec<Option<usize>>,
+    pub(crate) hinted: bool,
 }
 
 /// Checks the row counts of RLE data against its length, and a sample of rows (every
@@ -679,19 +681,28 @@ fn put_head(o: &mut Vec<u8>, spans: &[Span], groups: &[GroupDef]) {
     }
 }
 
-struct Head<'a> {
-    spans: Vec<Span<'a>>,
-    groups: Vec<GroupDef>,
+pub(crate) struct Head<'a> {
+    // (in the reverse of the order they are made in: see `Lifo`)
+    pub(crate) groups: Lifo<GroupDef>,
+    /// Per span, the planes in a group (bit p for plane p): kept, as it is freed before the groups'
+    /// vectors' room is.
+    #[allow(dead_code)]
+    pub(crate) owned: Vec<u64>,
+    pub(crate) spans: Lifo<Span<'a>>,
 }
 /// Reads the head stream (all of `src`) of a file of `total` bytes; spans get their
 /// positions in the output.
-fn get_head(src: &[u8], total: usize) -> Result<Head<'_>> {
+pub(crate) fn get_head(src: &[u8], total: usize) -> Result<Head<'_>> {
     let mut at = 0;
     if total as u64 > 1 << 42 {
         return Err(corrupt());
     }
     let n = get_usize(src, &mut at)?;
-    let mut spans: Vec<Span> = Vec::with_capacity(n.min(1 << 16));
+    // (a span takes 3 bytes of the head at least, and the vectors are made at the room they end at)
+    if n > src.len() {
+        return Err(corrupt());
+    }
+    let mut spans: Vec<Span> = Vec::with_capacity(n);
     let mut pos = 0usize;
     for _ in 0..n {
         let gap = get_usize(src, &mut at)?;
@@ -734,7 +745,10 @@ fn get_head(src: &[u8], total: usize) -> Result<Head<'_>> {
                     return Err(corrupt());
                 }
                 let ne = get_usize(src, &mut at)?;
-                let mut exceptions = Vec::with_capacity(ne.min(1 << 16));
+                if ne > src.len() {
+                    return Err(corrupt());
+                }
+                let mut exceptions = Vec::with_capacity(ne);
                 let mut r = 0usize;
                 for i in 0..ne {
                     let dr = get_usize(src, &mut at)?;
@@ -762,9 +776,11 @@ fn get_head(src: &[u8], total: usize) -> Result<Head<'_>> {
         spans.push(Span { start, end, gap, planes, w, h, coding });
     }
     let ng = get_usize(src, &mut at)?;
-    let mut groups = Vec::with_capacity(ng.min(1 << 16));
-    // Per span, the planes in a group (bit p for plane p).
+    if ng > src.len() {
+        return Err(corrupt());
+    }
     let mut owned = vec![0u64; spans.len()];
+    let mut groups = Vec::with_capacity(ng);
     for _ in 0..ng {
         let np = get_usize(src, &mut at)?;
         let flags = get_u8(src, &mut at)?;
@@ -790,8 +806,8 @@ fn get_head(src: &[u8], total: usize) -> Result<Head<'_>> {
         }
         // Planes are unique; a plane equal to another is a copy of it, coded before it in a
         // row; a hinted group is all of one span.
-        let order = GroupCoder::order(np, has_alpha);
-        let rank = |k: usize| order.iter().position(|&o| o == k).unwrap();
+        // (the place of plane `k` in `GroupCoder::order`: the alpha plane first)
+        let rank = |k: usize| if has_alpha { (k + 1) % np } else { k };
         for (k, &(s, p)) in planes.iter().enumerate() {
             if planes[..k].contains(&(s, p)) {
                 return Err(corrupt());
@@ -813,7 +829,7 @@ fn get_head(src: &[u8], total: usize) -> Result<Head<'_>> {
         if hinted && (np < 3 || planes.iter().any(|p| p.0 != planes[0].0)) {
             return Err(corrupt());
         }
-        groups.push(GroupDef { planes, has_alpha, hinted, same_as });
+        groups.push(GroupDef { same_as, planes, has_alpha, hinted });
     }
     // Every plane of pixel data is in exactly one group.
     for (s, &o) in spans.iter().zip(&owned) {
@@ -824,7 +840,7 @@ fn get_head(src: &[u8], total: usize) -> Result<Head<'_>> {
     if at != src.len() {
         return Err(corrupt());
     }
-    Ok(Head { spans, groups })
+    Ok(Head { groups: Lifo::new(groups), owned, spans: Lifo::new(spans) })
 }
 
 /// Rows pipelined through helper threads: batches of this many samples at most...
@@ -1105,8 +1121,8 @@ fn encode_rows_piped<'a>(
             }
             Some(misses)
         });
-        let mut rows = vec![vec![0u8; w]; n];
-        let mut hint_rows = vec![vec![0u8; w]; hn];
+        let mut rows = model::zero_rows(n, w);
+        let mut hint_rows = model::zero_rows(hn, w);
         let mut t_model = 0f64;
         let mut ok = true;
         for i in 0..h.div_ceil(per) {
@@ -1383,9 +1399,16 @@ struct RowSink<'s> {
     exceptions: &'s [(usize, &'s [u8])],
     /// Row index within the span (plane * h + row).
     row: usize,
-    /// The previous row, and where its bytes (from the encoder, not an exception) went.
-    prev: Vec<u8>,
+    /// The previous row (of `w` bytes; none for raw data), and where its bytes (from the encoder,
+    /// not an exception) went.
+    prev: &'s mut [u8],
     prev_at: Option<(usize, usize)>,
+}
+
+/// The room for the bytes of a row of `w` samples encoded as PackBits: a token takes two bytes
+/// at most for each of the samples it has (a run of one, or a literal of one).
+fn row_room(w: usize) -> usize {
+    2 * w
 }
 
 impl RowSink<'_> {
@@ -1418,8 +1441,7 @@ impl RowSink<'_> {
         };
         if self.count_bytes > 0 {
             self.prev_at = (!exception).then_some((self.data_at, bytes.len()));
-            self.prev.clear();
-            self.prev.extend_from_slice(row);
+            self.prev.copy_from_slice(row);
         }
         if self.data_at + bytes.len() > self.end {
             return Err(corrupt());
@@ -1523,7 +1545,7 @@ fn decode_rows_piped(
         });
         let writer = sc.spawn(move || -> Result<()> {
             let mut sinks: Vec<RowSink> = sinks.into_iter().flatten().collect();
-            let mut buf = Vec::with_capacity(w + w / 64 + 8);
+            let mut buf = Vec::with_capacity(row_room(w));
             let mut t = 0f64;
             // Ends when the decoding thread is done (or gone).
             while let Ok(b) = out_full_rx.recv() {
@@ -1544,8 +1566,8 @@ fn decode_rows_piped(
             }
             sinks.iter().try_for_each(RowSink::finish)
         });
-        let mut rows = vec![vec![0u8; w]; n];
-        let mut hint_rows = vec![vec![0u8; w]; hn];
+        let mut rows = model::zero_rows(n, w);
+        let mut hint_rows = model::zero_rows(hn, w);
         let mut t_model = 0f64;
         let main = (|| -> Result<()> {
             let mut out_b = out_free_rx.recv().map_err(|_| corrupt())?;
@@ -1627,6 +1649,10 @@ fn decode_group(
     let (s0, _) = g.planes[0];
     let (w, h) = (spans[s0].w, spans[s0].h);
     let mut known = vec![false; n];
+    // (the previous rows of the sinks of PackBits planes, in a block)
+    let rle = g.planes.iter().filter(|&&(s, _)| matches!(spans[s].coding, Coding::Rle { .. })).count();
+    let mut prev_rows = vec![0u8; rle * w];
+    let mut prev_free = &mut prev_rows[..];
     let mut readers: Vec<Option<PlaneRows>> = Vec::with_capacity(n);
     let mut sinks: Vec<Option<RowSink>> = Vec::with_capacity(n);
     for (k, &(s, p)) in g.planes.iter().enumerate() {
@@ -1655,7 +1681,7 @@ fn decode_group(
                     encoder: packbits::NO_TILES,
                     exceptions: &[],
                     row: 0,
-                    prev: Vec::new(),
+                    prev: &mut [],
                     prev_at: None,
                 });
             }
@@ -1664,6 +1690,8 @@ fn decode_group(
                 let rows = sp.planes * sp.h;
                 let data_at = base + rows * count_bytes + plane_lens[..p].iter().sum::<usize>();
                 let first = exceptions.partition_point(|e| e.0 < p * h);
+                let (prev, rest) = std::mem::take(&mut prev_free).split_at_mut(w);
+                prev_free = rest;
                 sink = Some(RowSink {
                     count_at: base + p * h * count_bytes,
                     data_at,
@@ -1672,7 +1700,7 @@ fn decode_group(
                     encoder: *encoder,
                     exceptions: &exceptions[first..],
                     row: p * h,
-                    prev: Vec::with_capacity(w),
+                    prev,
                     prev_at: None,
                 });
             }
@@ -1685,7 +1713,7 @@ fn decode_group(
     let mut hint = None;
     if g.hinted {
         psd = hint_psd(left, w, h)?;
-        hint = Some(RowRenderer::new(&psd, left, &mut composite::Report::default())?);
+        hint = Some(RowRenderer::new(&psd, left, &mut composite::Report::quiet())?);
     }
     let mut gc = GroupCoder::new(w, n, g.has_alpha, known, g.same_as.clone());
     // (the writer and the reader, if any, on workers of the pool, if they are free)
@@ -1694,9 +1722,9 @@ fn decode_group(
     if let Some(workers) = workers.filter(|r| r.len() == need) {
         return decode_rows_piped(workers, player, &mut gc, w, h, readers, hint, sinks, right);
     }
-    let mut hint_rows = vec![vec![0u8; w]; if g.hinted { n } else { 0 }];
-    let mut rows = vec![vec![0u8; w]; n];
-    let mut buf = Vec::with_capacity(w + w / 64 + 8);
+    let mut hint_rows = model::zero_rows(if g.hinted { n } else { 0 }, w);
+    let mut rows = model::zero_rows(n, w);
+    let mut buf = Vec::with_capacity(row_room(w));
     let timing = std::env::var_os("PSDR_STATS").is_some();
     let mut t = [0f64; 4];
     // (the clock read only if timing: WebAssembly has none)
@@ -1764,10 +1792,11 @@ pub(crate) fn decode_formula(
     len: u64,
     threads: usize,
 ) -> Result<Vec<u8>> {
-    let total = usize::try_from(len).map_err(|_| corrupt())?;
-    let Head { spans, groups } = get_head(head, total)?;
+    let total = usize::try_from(len).ok().filter(|&t| t as u64 <= 1 << 42).ok_or_else(corrupt)?;
+    // (the file first, then the head's vectors above it: they are freed before it is given back)
     let mut out = vec![0u8; total];
-    read_skeleton(&mut out, skeleton, &spans)?;
+    let Head { spans, groups, .. } = &get_head(head, total)?;
+    read_skeleton(&mut out, skeleton, spans)?;
     let mut at = 0;
     for s in spans.iter().filter(|s| matches!(s.coding, Coding::Nested)) {
         out[s.start..s.end].copy_from_slice(get_bytes(embedded, &mut at, s.end - s.start)?);
@@ -1775,21 +1804,31 @@ pub(crate) fn decode_formula(
     if at != embedded.len() {
         return Err(corrupt());
     }
-    decode_pixels(&mut out, &spans, &groups, model, threads)?;
+    decode_pixels(&mut out, spans, groups, model, threads)?;
     Ok(out)
+}
+
+/// Where the part of the file before the group's first written span ends: everything before it
+/// is complete when the group is decoded.
+pub(crate) fn group_split(g: &GroupDef, spans: &[Span], total: usize) -> usize {
+    (g.planes.iter())
+        .filter(|p| !matches!(spans[p.0].coding, Coding::Copy { .. }))
+        .map(|p| spans[p.0].start)
+        .min()
+        .unwrap_or(total)
 }
 
 /// Decodes the pixels of all groups into `out` (skeleton in place), and the copies.
 /// The embedded files are in `out` already, as a hinted group renders the file's layers.
 fn decode_pixels(out: &mut Vec<u8>, spans: &[Span], groups: &[GroupDef], coded: &[u8], threads: usize) -> Result<()> {
     let total = out.len();
-    let mut player = model::Player::new(coded);
     let mut done = vec![false; spans.len()];
     let mut planes_left = vec![0usize; spans.len()];
     for (i, s) in spans.iter().enumerate() {
         done[i] = matches!(s.coding, Coding::Nested);
         planes_left[i] = s.planes;
     }
+    let mut player = model::Player::new(coded);
     let copy_ready = |out: &mut Vec<u8>, done: &mut [bool]| {
         for (i, s) in spans.iter().enumerate() {
             if let Coding::Copy { of } = s.coding
@@ -1803,13 +1842,7 @@ fn decode_pixels(out: &mut Vec<u8>, spans: &[Span], groups: &[GroupDef], coded: 
     };
     for g in groups {
         // Everything before the group's first written span is complete.
-        let split = g
-            .planes
-            .iter()
-            .filter(|p| !matches!(spans[p.0].coding, Coding::Copy { .. }))
-            .map(|p| spans[p.0].start)
-            .min()
-            .unwrap_or(total);
+        let split = group_split(g, spans, total);
         // Known planes (copies of earlier groups) are read from their source.
         for (k, &(s, _)) in g.planes.iter().enumerate() {
             if let Coding::Copy { of } = spans[s].coding
@@ -1838,3 +1871,12 @@ fn decode_pixels(out: &mut Vec<u8>, spans: &[Span], groups: &[GroupDef], coded: 
     }
     Ok(())
 }
+
+// (the sizes of the structures on WebAssembly, which the memory plan uses)
+#[cfg(target_family = "wasm")]
+const _: () = {
+    assert!(size_of::<Span>() == crate::module::wasm::SPAN as usize);
+    assert!(size_of::<GroupDef>() == crate::module::wasm::GROUP as usize);
+    assert!(size_of::<Option<RowSink>>() == crate::module::wasm::ROW_SINK as usize);
+    assert!(size_of::<(usize, &[u8])>() == crate::module::wasm::EXCEPTION as usize);
+};

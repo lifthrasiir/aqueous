@@ -55,8 +55,22 @@ on one thread, in order; around it:
   several embedded files run at once.
 - `PSDR_STATS` times are summed over threads.
 
-Memory: batches in flight add at most about 10 MB per helper pair (5 batches of about 1 MB,
+Memory of the native pipeline (WebAssembly runs one thread): batches in flight add at most about 10 MB per helper pair (5 batches of about 1 MB,
 twice), and fewer rows than the group has.
+
+## Memory (the module)
+
+`psd-recons` lays its memory out as a stack (`aqr_api::stack`), so what it takes is its plan,
+which the encoder declares as the module's limit (`plan::decode`; docs/arena-design.md): the
+file, the head's vectors (spans, their planes' lengths and exceptions, groups; each reserved at
+the size it ends at), the model's player (its tables made once, with room for as many as the
+stream's head can have bits), and for each group, in the order `decode_group` makes them, the
+rows, the PackBits sinks' previous rows (one block), and for a hinted group the parsed layers
+and the renderer's vectors. Vectors of vectors are dropped last first (`psd::Lifo`), or there
+would be a hole for each. The plan equals what the module takes, to the page
+(`psd_plans_hold` in aqr-decompress's `wasm.rs`, and a sample of the corpus). The format did not
+change, but for one thing: ZIP channels are no longer decoded for the hint (FORMAT.md, section
+9), so a file with them in its layers is coded without the hint.
 
 ## Results
 

@@ -850,6 +850,7 @@ dependencies = [
 name = "aqr-psd"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
  "aqr-common",
  "aqr-flate",
  "aqr-formula",
