@@ -259,14 +259,16 @@ The contexts, all fresh at the start:
 | `rank` | 12 × 24 (gamma) | from `24 lb(n)` |
 | `cut` | 2 | `[a cut was learnt]` (§6.3) |
 | `predicted` | 1 | |
-| `misc` | 64: two gammas | `[0..32)` the reach, header bits, far distances; `[32..64)` the tail |
+| `misc` | 96: three gammas | `[0..32)` the reach, header bits, far distances; `[32..64)` the tail; `[64..96)` the count of tokens |
 
 with `lb(l) = l` for `l < 8` else `min(5 + bitlen(l), 11)`; `db(d) = [d ≥ 16] + [d ≥ 256] + [d ≥
 1024] + [d ≥ 4096] + [d ≥ 16384]`; `prev` 0 after a literal (and at the start), 1 after a
 match.
 
-The code is: `R = gamma(misc[0..32])`, `R ≤ W`; the walk (§6.2); the blocks (§6.3); the end
-(§6.4).
+The code is: `R = gamma(misc[0..32])`, `R ≤ W`; `K = gamma(misc[64..96])`, the count of the
+stream's tokens, `K ≤ N` (a token covers a byte at least); the walk (§6.2), which must make
+exactly `K` tokens; the blocks (§6.3); the end (§6.4). The count lets a decoder reserve the tokens
+it holds until the blocks are written.
 
 ### 6.2 The walk
 
@@ -332,7 +334,7 @@ code read more than 4 bytes past its end.
 
 ## 7. Formula module
 
-The module is `lha-recons`, version 1. It rebuilds one or more streams, each from its data and
+The module is `lha-recons`, version 2 (version 1 had no count of tokens in the record). It rebuilds one or more streams, each from its data and
 its record, and its output is the streams one after another. A container cuts the output by
 the streams' lengths (a Split instruction of the formula), and adds what lies around them.
 

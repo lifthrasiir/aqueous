@@ -16,6 +16,21 @@ use crate::{Error, Result, corrupt};
 
 pub use aqr_common::lz::lcp;
 
+/// Bytes of what the module holds on WebAssembly (32-bit pointers), checked there by assertions:
+/// a stream's data and record, a token, a pair, a node's link.
+pub mod wasm {
+    pub const STREAM: u64 = 16;
+    pub const TOKEN: u64 = 8;
+    pub const PAIR: u64 = 8;
+}
+
+#[cfg(target_family = "wasm")]
+const _: () = {
+    assert!(size_of::<(&[u8], &[u8])>() as u64 == wasm::STREAM);
+    assert!(size_of::<Token>() as u64 == wasm::TOKEN);
+    assert!(size_of::<(usize, usize)>() as u64 == wasm::PAIR);
+};
+
 /// Candidates looked at on each chain for the longest matches.
 pub const DEPTH: usize = 32;
 
@@ -53,36 +68,54 @@ fn key(d: &[u8], p: usize, k: usize) -> usize {
 struct Mf<'a> {
     d: &'a [u8],
     reach: usize,
-    head: Vec<Vec<u32>>,
-    prev: Vec<Vec<u32>>,
+    /// The heads of the chains of each key, 65536 each, one after another.
+    head: Vec<u32>,
+    /// The previous position on each key's chain, of the positions within a ring of `mask + 1`
+    /// slots, one ring after another.
+    prev: Vec<u32>,
+    mask: usize,
     /// Positions below this are inserted.
     next: usize,
     found: Vec<(usize, usize)>,
 }
+
+/// Slots of the rings of the chains for a stream of `n` bytes.
+pub fn ring_slots(n: usize) -> usize {
+    RING.min(n.next_power_of_two())
+}
+
+/// Slots of the tree's nodes for a stream of `n` bytes within `reach`.
+pub fn tree_slots(n: usize, reach: usize) -> usize {
+    (reach + 1).next_power_of_two().min(n.next_power_of_two().max(1))
+}
+
+/// The most pairs found at a position: [`DEPTH`] candidates on each key's chain.
+pub const PAIRS: usize = DEPTH * KEYS.len();
 
 impl<'a> Mf<'a> {
     fn new(d: &'a [u8], reach: usize) -> Self {
         Mf {
             d,
             reach,
-            head: KEYS.iter().map(|_| vec![NONE; 1 << 16]).collect(),
-            prev: KEYS.iter().map(|_| vec![NONE; RING.min(d.len().next_power_of_two())]).collect(),
+            head: vec![NONE; KEYS.len() << 16],
+            prev: vec![NONE; KEYS.len() * ring_slots(d.len())],
+            mask: ring_slots(d.len()) - 1,
             next: 0,
-            found: Vec::new(),
+            found: Vec::with_capacity(PAIRS),
         }
     }
 
     /// Inserts the positions up to `pos`.
     fn advance(&mut self, pos: usize) {
         let d = self.d;
-        let mask = self.prev[0].len() - 1;
+        let mask = self.mask;
         while self.next < pos {
             let p = self.next;
             for (c, &k) in KEYS.iter().enumerate() {
                 if p + k <= d.len() {
-                    let h = key(d, p, k);
-                    self.prev[c][p & mask] = self.head[c][h];
-                    self.head[c][h] = p as u32;
+                    let h = c << 16 | key(d, p, k);
+                    self.prev[c * (mask + 1) + (p & mask)] = self.head[h];
+                    self.head[h] = p as u32;
                 }
             }
             self.next += 1;
@@ -94,14 +127,14 @@ impl<'a> Mf<'a> {
     fn pairs(&mut self, pos: usize, cap: usize, out: &mut Vec<(usize, usize)>) {
         out.clear();
         let d = self.d;
-        let mask = self.prev[0].len() - 1;
+        let mask = self.mask;
         let found = &mut self.found;
         found.clear();
         for (c, &k) in KEYS.iter().enumerate() {
             if pos + k > d.len() || k > cap {
                 break;
             }
-            let mut q = self.head[c][key(d, pos, k)];
+            let mut q = self.head[c << 16 | key(d, pos, k)];
             let mut best = k - 1;
             for _ in 0..DEPTH {
                 if q == NONE || pos - q as usize > self.reach {
@@ -118,7 +151,7 @@ impl<'a> Mf<'a> {
                         }
                     }
                 }
-                q = self.prev[c][p & mask];
+                q = self.prev[c * (mask + 1) + (p & mask)];
             }
             if best == cap {
                 break;
@@ -160,7 +193,7 @@ const FULL: usize = MAX_MATCH;
 
 impl<'a> Bst<'a> {
     fn new(d: &'a [u8], reach: usize) -> Self {
-        let r = (reach + 1).next_power_of_two().min(d.len().next_power_of_two().max(1));
+        let r = tree_slots(d.len(), reach);
         let nil = (r + 256) as u32;
         Bst {
             d,
@@ -328,8 +361,8 @@ impl Mf<'_> {
         if pos + 3 > d.len() {
             return;
         }
-        let mask = self.prev[0].len() - 1;
-        let mut q = self.head[0][key(d, pos, 3)];
+        let mask = self.mask;
+        let mut q = self.head[key(d, pos, 3)];
         for _ in 0..LIMIT {
             if q == NONE || pos.saturating_sub(q as usize) > self.reach {
                 return;
@@ -339,10 +372,15 @@ impl Mf<'_> {
             if p < pos && d[p + len - 1] == d[pos + len - 1] && d[p..p + len] == d[pos..pos + len] && !f(p) {
                 return;
             }
-            q = self.prev[0][p & mask];
+            q = self.prev[p & mask];
         }
     }
 }
+
+/// Bytes the headers' work of a block takes at most, of the Huffman codes, the tables written and
+/// read, the codes made of them, and what a header read as it is takes: with room for the
+/// vectors that grow (each size they pass) and for the holes that leaves.
+pub const SCRATCH: usize = 256 << 10;
 
 /// Candidates looked at on the chain of 3 bytes for an escape's rank.
 pub const LIMIT: usize = 4096;
@@ -369,20 +407,23 @@ struct Ctx {
     misc: Vec<Bit>,
 }
 
+/// The lengths of the vectors of [`Ctx`], in the order of its fields.
+pub const CTX_LENS: [usize; 10] = [2 * 12 * 7 * 3, 3 * 2, 3 * 4 * 4 * 2, 12, 12 * 32, 12 * 16, 12 * 24, 2, 1, 96];
+
 impl Ctx {
     fn new() -> Self {
-        let v = |n: usize| vec![Bit::default(); n];
+        let v = |i: usize| vec![Bit::default(); CTX_LENS[i]];
         Ctx {
-            is_match: v(2 * 12 * 7 * 3),
-            bst: v(3 * 2),
-            pair: v(3 * 4 * 4 * 2),
-            full: v(12),
-            shorter: v(12 * 32),
-            escape: v(12 * 16),
-            rank: v(12 * 24),
-            cut: v(2),
-            predicted: v(1),
-            misc: v(64),
+            is_match: v(0),
+            bst: v(1),
+            pair: v(2),
+            full: v(3),
+            shorter: v(4),
+            escape: v(5),
+            rank: v(6),
+            cut: v(7),
+            predicted: v(8),
+            misc: v(9),
         }
     }
 }
@@ -437,8 +478,8 @@ fn walk(
     let n = d.len();
     let mut mf = Mf::new(d, reach);
     let mut bst = Bst::new(d, reach);
-    let mut pairs = Vec::new();
-    let mut next_pairs = Vec::new();
+    let mut pairs = Vec::with_capacity(PAIRS);
+    let mut next_pairs = Vec::with_capacity(PAIRS);
     let (mut pos, mut prev, mut k) = (0, 0, 0);
     // (the position whose pairs `next_pairs` holds, found for the lazy context)
     let mut ahead = usize::MAX;
@@ -654,9 +695,24 @@ fn head_bits(h: &Head, m: Method) -> Result<(u32, Vec<u8>)> {
 
 /// The blocks, the padding and the tail of `st` (its tokens known), coded: each block's size as
 /// cut or as it is, its header as predicted or as it is.
-fn code_blocks(bits: &mut impl Bits, ctx: &mut Ctx, st: &mut Stream, m: Method, encoding: bool) -> Result<Vec<u8>> {
+///
+/// The stream is written onto the end of `out` (which the decoder reserves room in, so that it
+/// does not grow). The headers' work (the Huffman codes of a block, the tables, the codes read)
+/// takes memory of sizes that the tokens decide, all of it within [`SCRATCH`] bytes: the decoder
+/// takes them from the stack once before, so that what the module takes does not depend on them.
+fn code_blocks(
+    bits: &mut impl Bits,
+    ctx: &mut Ctx,
+    st: &mut Stream,
+    m: Method,
+    encoding: bool,
+    out: Vec<u8>,
+) -> Result<Vec<u8>> {
     bits.cat(Cat::Blocks);
-    let mut w = lzh::Writer::default();
+    if !encoding {
+        std::hint::black_box(Vec::<u8>::with_capacity(SCRATCH));
+    }
+    let mut w = lzh::Writer::onto(out);
     let mut cut = Cut::new();
     let mut at = 0;
     let mut b = 0;
@@ -700,9 +756,6 @@ fn code_blocks(bits: &mut impl Bits, ctx: &mut Ctx, st: &mut Stream, m: Method, 
         };
         let k = lzh::codes(&h, m)?;
         lzh::write_block(&mut w, &h, &k, toks, m)?;
-        if !encoding {
-            st.heads.push(h);
-        }
         at += size;
         b += 1;
         if bits.failed() {
@@ -712,20 +765,28 @@ fn code_blocks(bits: &mut impl Bits, ctx: &mut Ctx, st: &mut Stream, m: Method, 
     if encoding && b != st.heads.len() {
         return Err(corrupt());
     }
+    // (the heads of the encoder's stream are known; the decoder keeps none)
     st.tokens = tokens;
     // the padding, and the bytes after it
     st.pad_bits = ((8 - w.pending() % 8) % 8) as u8;
     st.pad = bits.raws(st.pad_bits as u32, st.pad as u64) as u8;
-    let n = bits.gamma(&mut ctx.misc[32..], st.tail.len() as u32)? as usize;
+    let n = bits.gamma(&mut ctx.misc[32..64], st.tail.len() as u32)? as usize;
     if !encoding {
         if n > 1 << 24 {
             return Err(corrupt());
         }
-        st.tail = (0..n).map(|_| bits.raws(8, 0) as u8).collect();
-    } else {
-        for &x in &st.tail {
-            bits.raws(8, x as u64);
+        // (the tail is written as it is read)
+        lzh::pad_onto(&mut w, st.pad, st.pad_bits)?;
+        for _ in 0..n {
+            w.out.push(bits.raws(8, 0) as u8);
         }
+        if bits.failed() {
+            return Err(corrupt());
+        }
+        return Ok(w.out);
+    }
+    for &x in &st.tail {
+        bits.raws(8, x as u64);
     }
     if bits.failed() {
         return Err(corrupt());
@@ -756,10 +817,11 @@ fn record(input: &[u8], st: &mut Stream, m: Method) -> Result<(Vec<u8>, [f64; CA
     let mut e = Enc::new(Cat::Blocks as usize);
     let mut ctx = Ctx::new();
     e.gamma(&mut ctx.misc[..32], reach as u32)?;
+    e.gamma(&mut ctx.misc[64..], st.tokens.len() as u32)?;
     let mut tokens = std::mem::take(&mut st.tokens);
     walk(&st.data, reach, &mut e, &mut ctx, &mut tokens, true)?;
     st.tokens = tokens;
-    let out = code_blocks(&mut e, &mut ctx, st, m, true)?;
+    let out = code_blocks(&mut e, &mut ctx, st, m, true, Vec::new())?;
     if out != input {
         return Err(Error("a stream encoded otherwise"));
     }
@@ -768,21 +830,49 @@ fn record(input: &[u8], st: &mut Stream, m: Method) -> Result<(Vec<u8>, [f64; CA
     Ok((record, e.cost))
 }
 
-/// The stream that `data` and `record` rebuild, written onto `out`.
-pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>) -> Result<()> {
+/// What a record starts with: the stream's method, its reach and its count of tokens.
+pub struct Start {
+    pub method: Method,
+    pub reach: usize,
+    pub tokens: usize,
+}
+
+/// The start of `record` for a stream of `n` bytes of data, with the decoder and the contexts
+/// as they are after it.
+fn start<'a>(record: &'a [u8], n: usize, ctx: &mut Ctx) -> Result<(Start, ArithDecoder<'a>)> {
     let (&mn, rest) = record.split_first().ok_or_else(corrupt)?;
-    let m = Method::of_number(mn).ok_or_else(corrupt)?;
+    let method = Method::of_number(mn).ok_or_else(corrupt)?;
     let mut dec = ArithDecoder::new(rest);
-    let mut ctx = Ctx::new();
     let reach = dec.gamma(&mut ctx.misc[..32], 0)? as usize;
-    if reach > m.window() {
+    if reach > method.window() {
         return Err(corrupt());
     }
-    let mut tokens = Vec::new();
+    // (a token covers a byte at least)
+    let tokens = dec.gamma(&mut ctx.misc[64..], 0)? as usize;
+    if tokens > n {
+        return Err(corrupt());
+    }
+    Ok((Start { method, reach, tokens }, dec))
+}
+
+/// The start of `record` for a stream of `n` bytes of data: what the memory plan follows
+/// ([`crate::plan`]).
+pub fn start_of(record: &[u8], n: usize) -> Result<Start> {
+    Ok(start(record, n, &mut Ctx::new())?.0)
+}
+
+/// The stream that `data` and `record` rebuild, written onto `out`.
+pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>) -> Result<()> {
+    let mut ctx = Ctx::new();
+    let (Start { method: m, reach, tokens: count }, mut dec) = start(record, data.len(), &mut ctx)?;
+    // (the tokens reserved: their count is the record's)
+    let mut tokens = Vec::with_capacity(count);
     walk(data, reach, &mut dec, &mut ctx, &mut tokens, false)?;
+    if tokens.len() != count {
+        return Err(Error("a count of tokens that does not fit"));
+    }
     let mut st = Stream { tokens, ..Stream::default() };
-    let s = code_blocks(&mut dec, &mut ctx, &mut st, m, false)?;
-    out.extend_from_slice(&s);
+    *out = code_blocks(&mut dec, &mut ctx, &mut st, m, false, std::mem::take(out))?;
     Ok(())
 }
 
@@ -791,15 +881,4 @@ pub fn join(data: &[u8], record: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     join_onto(data, record, &mut out)?;
     Ok(out)
-}
-
-/// Bytes of the working memory of a stream of `n` bytes of data, besides its data and record:
-/// the match finder's heads and chains, the tree, the tokens (as their vector grows), the stream
-/// written, the models.
-pub fn memory(n: u64) -> u64 {
-    let slots = (RING as u64).min(n.next_power_of_two());
-    let heads = (KEYS.len() << 18) as u64;
-    let rings = 4 * KEYS.len() as u64 * slots;
-    let tree = 12 * (slots + 257);
-    heads + rings + tree + 2 * std::mem::size_of::<Token>() as u64 * n + 2 * n + (1 << 16)
 }

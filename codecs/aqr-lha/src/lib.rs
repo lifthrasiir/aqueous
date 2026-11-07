@@ -9,6 +9,8 @@ pub mod huff;
 pub mod lha;
 pub mod lzh;
 pub mod module;
+#[cfg(feature = "encode")]
+pub mod plan;
 pub mod recons;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

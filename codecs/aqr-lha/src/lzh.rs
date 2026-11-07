@@ -296,6 +296,11 @@ pub struct Writer {
 }
 
 impl Writer {
+    /// A writer appending to the end of `out`.
+    pub fn onto(out: Vec<u8>) -> Writer {
+        Writer { out, acc: 0, n: 0 }
+    }
+
     #[inline]
     pub fn put(&mut self, n: u32, v: u32) {
         debug_assert!(n <= 32);
@@ -608,13 +613,19 @@ pub fn write_block(w: &mut Writer, h: &Head, k: &Codes, tokens: &[Token], m: Met
 
 /// Ends a stream written onto `w`: its padding bits and the bytes after them.
 pub fn finish(mut w: Writer, pad: u8, pad_bits: u8, tail: &[u8]) -> Result<Vec<u8>> {
+    pad_onto(&mut w, pad, pad_bits)?;
+    w.out.extend_from_slice(tail);
+    Ok(w.out)
+}
+
+/// The padding bits of a stream written onto `w`: `pad_bits` of them, as many as it needs.
+pub fn pad_onto(w: &mut Writer, pad: u8, pad_bits: u8) -> Result<()> {
     let want = (8 - w.pending() % 8) % 8;
     if pad_bits as u32 != want || (pad as u32) >> pad_bits != 0 {
         return Err(corrupt());
     }
     w.put(want, pad as u32);
-    w.out.extend_from_slice(tail);
-    Ok(w.out)
+    Ok(())
 }
 
 /// The stream of `st`'s headers and tokens (its data unused).

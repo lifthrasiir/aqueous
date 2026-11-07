@@ -14,25 +14,12 @@ use crate::recons;
 
 pub use crate::module::{decode, index};
 
-pub const MODULE: Module = Module::new("lha-recons", 1).with_memory(memory);
+pub const MODULE: Module = Module::new("lha-recons", 2).with_plan(plan);
 
-/// The memory of the module, the streams written onto the output one after another: the inputs
-/// and the output, and a stream's work ([`recons::memory`]) of the largest stream (by the index,
-/// else all the data).
-fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let &[data, ..] = u.inputs else { return None };
-    // (the index's lengths of data, every other varint)
-    let largest = (|| {
-        let i = u.contents.input(2).filter(|i| !i.is_empty())?;
-        let (mut at, mut most) = (0, 0u64);
-        while at < i.len() {
-            most = most.max(aqr_common::varint::get(i, &mut at).ok()?);
-            aqr_common::varint::get(i, &mut at).ok()?;
-        }
-        Some(most)
-    })()
-    .unwrap_or(data);
-    Some(u.whole(recons::memory(largest), 16))
+/// The memory of the module: its plan ([`crate::plan::decode`]).
+fn plan(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let files = u.all_contents::<3>()?;
+    crate::plan::decode(u.initial(), u.params, u.inputs, u.output(), files)
 }
 
 /// The application of [`MODULE`] rebuilding streams of `len` bytes in all from their data

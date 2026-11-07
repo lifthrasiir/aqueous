@@ -2040,6 +2040,141 @@ fn bvx_plans_hold() {
     }
 }
 
+mod lha_gen {
+    use aqr_common::rng::Rng;
+    use aqr_lha::lzh::{Method, Stream, Token};
+
+    /// Data of runs copied from before, so that matches abound, some far.
+    pub fn data(rng: &mut Rng, n: usize) -> Vec<u8> {
+        let mut d = Vec::with_capacity(n);
+        while d.len() < n {
+            if d.len() > 16 && rng.below(3) != 0 {
+                let back = 1 + rng.below(d.len().min(70000) as u64) as usize;
+                let len = 3 + rng.below(40) as usize;
+                for _ in 0..len {
+                    d.push(d[d.len() - back]);
+                }
+            } else {
+                d.push(b'a' + rng.below(6) as u8);
+            }
+        }
+        d.truncate(n);
+        d
+    }
+
+    /// A random parse of `d` within the window of `m`: literals, and matches of any lengths and
+    /// distances that fit, not only the nearest nor the longest.
+    pub fn parse(rng: &mut Rng, d: &[u8], m: Method) -> Vec<Token> {
+        let mut out = Vec::new();
+        let mut pos = 0;
+        while pos < d.len() {
+            let mut took = false;
+            if rng.below(3) != 0 && pos > 0 {
+                for _ in 0..8 {
+                    let dist = 1 + rng.below(pos.min(m.window()) as u64) as usize;
+                    let l = aqr_lha::recons::lcp(d, pos - dist, pos).min(256);
+                    if l >= 3 {
+                        let len = 3 + rng.below((l - 2) as u64) as usize;
+                        out.push(Token::Match { len: len as u16, dist: dist as u32 });
+                        pos += len;
+                        took = true;
+                        break;
+                    }
+                }
+            }
+            if !took {
+                out.push(Token::Literal(d[pos]));
+                pos += 1;
+            }
+        }
+        out
+    }
+
+    /// A stream of `tokens` in blocks of random sizes, some headers written otherwise than predicted
+    /// (runs of zeros as single zeros, the zeros at 3-5 not skipped), random padding, bytes after it.
+    pub fn stream(rng: &mut Rng, d: &[u8], tokens: Vec<Token>, m: Method) -> Stream {
+        let mut heads = Vec::new();
+        let mut at = 0;
+        while at < tokens.len() {
+            let size = (1 + rng.below(3000) as usize).min(tokens.len() - at);
+            let mut h = aqr_lha::huff::head(&tokens[at..at + size], m);
+            if rng.below(3) == 0 && h.c.n != 0 {
+                let lens = aqr_lha::lzh::c_lens(&h.c).unwrap();
+                h.c.items = lens[..h.c.n as usize]
+                    .iter()
+                    .map(|&l| aqr_lha::lzh::Item { sym: if l == 0 { 0 } else { l + 2 }, extra: 0 })
+                    .collect();
+                let tl = aqr_lha::huff::lengths(&aqr_lha::huff::t_freqs(&h.c.items));
+                h.t = aqr_lha::huff::pt_table(tl, true);
+                if h.t.n > 3 && h.t.skip > 0 && rng.below(2) == 0 {
+                    h.t.skip = 0;
+                }
+            }
+            heads.push(h);
+            at += size;
+        }
+        let mut st = Stream { data: d.to_vec(), heads, tokens, ..Stream::default() };
+        // (the padding found by writing it: whatever bits there are to the byte's end)
+        let probe = aqr_lha::lzh::encode(&Stream { pad_bits: 0, ..st.clone() }, m);
+        let bits = match probe {
+            Ok(_) => 0,
+            Err(_) => (1..8).find(|&b| aqr_lha::lzh::encode(&Stream { pad_bits: b, ..st.clone() }, m).is_ok()).unwrap(),
+        };
+        st.pad_bits = bits;
+        st.pad = rng.below(1 << bits) as u8;
+        if rng.below(2) == 0 {
+            st.tail = (0..rng.below(5)).map(|_| rng.below(256) as u8).collect();
+        }
+        st
+    }
+}
+
+/// lha-recons lays its memory out as a stack, its limit its plan: of the fixtures' streams (one
+/// and several in a call), and of random parses of every method, from a byte to 150 KB (past the
+/// rings of the chains), headers written otherwise than predicted, bytes after the padding.
+#[test]
+fn lha_plans_hold() {
+    let mut cases: Vec<(String, Vec<(Vec<u8>, usize, aqr_lha::lzh::Method)>)> = Vec::new();
+    let mut fixtures = Vec::new();
+    for name in ["amiga_lh4", "dos255e_lh5", "os2_h3_lh5", "unix_h0_lh5", "unix_h1_lh6", "unix_h2_lh7", "unix_lh6_long"]
+    {
+        let d = fixture(&format!("codecs/aqr-lha/tests/data/{name}.lzh"));
+        for e in aqr_lha::lha::parse(&d).unwrap().entries {
+            if let Some(m) = aqr_lha::lzh::Method::of(&e.method) {
+                fixtures.push((d[e.data.clone()].to_vec(), e.size as usize, m));
+            }
+        }
+    }
+    cases.push(("fixtures".into(), fixtures.clone()));
+    cases.push(("one".into(), fixtures[..1].to_vec()));
+    let mut rng = aqr_common::rng::Rng::new(7);
+    for k in 0..12 {
+        let m = aqr_lha::lzh::Method::of_number(4 + (k % 4) as u8).unwrap();
+        let n = [1, 100, 5000, 40000, 150000, 3][k % 6];
+        let d = lha_gen::data(&mut rng, n);
+        let tokens = lha_gen::parse(&mut rng, &d, m);
+        let st = lha_gen::stream(&mut rng, &d, tokens, m);
+        let s = aqr_lha::lzh::encode(&st, m).unwrap();
+        cases.push((format!("random {k}"), vec![(s, d.len(), m)]));
+    }
+    for (what, streams) in cases {
+        let (mut data, mut records, mut lens, mut all) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for (s, size, m) in &streams {
+            let sp = aqr_lha::recons::split(s, *size, *m).unwrap();
+            lens.push((sp.data.len(), sp.record.len()));
+            data.extend(sp.data);
+            records.extend(sp.record);
+            all.extend_from_slice(s);
+        }
+        let mut f = Formula::default();
+        let data = f.push("raw", data);
+        let record = f.push("lha/record", records);
+        let index = f.push("lha/index", aqr_lha::formula::index(&lens));
+        f.root = Node::Apply(Box::new(aqr_lha::formula::apply_recons(data, record, index, all.len() as u64)));
+        plan_holds(&format!("lha {what}"), f, &all);
+    }
+}
+
 /// azo-recons lays its memory out as a stack, its limit its plan: of the streams of the EGG
 /// fixtures (one of several blocks), alone and one after another, and a stream cut short in its
 /// last block.

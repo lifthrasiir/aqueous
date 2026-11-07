@@ -287,8 +287,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "lha-recons",
-        version: 1,
-        sha512_256: hex("e781e4a1d7adf7af8692cec5b22120c70a6eb64debc9544df2793c15e5788dc7"),
+        version: 2,
+        sha512_256: hex("79a2a2fe577d6a5ee7bab705d4386491d82c98579156f45f3b9f18829e4a0111"),
         block: include_bytes!("../wasm/lha-recons.block"),
     },
     Known {
