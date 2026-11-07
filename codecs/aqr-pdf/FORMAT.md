@@ -103,6 +103,15 @@ They are not streams: the formula gives each as a `pack` of one node per item. F
 - slot 5, for each `JPEG` item: the formula of aqr-jpeg on the item's bytes, embedded; an item
   that aqr-jpeg cannot code is a `RAW` item.
 
+**Memory** *(informative)*: the module lays its memory out as a stack (`aqr_api::stack`), and
+the plan of its memory is exact (`aqr-pdf`'s `plan::decode`), from the table, the token tables
+and the layouts, which the plan reads as the decoder does: besides the inputs, the token
+coder's contexts and decoding tables (made once, at the sizes the tables part gives), the three
+packed slots unpacked (8 bytes an item), the output and where each item went in it (8 bytes an
+item); and the most any one token stream takes: its blocks (with their headers) and listed
+matches, the window, the writer's room for its greatest block, and the tokens of the greatest.
+Nothing else is made as it goes (no format change: the module stays version 2).
+
 ## 3. Items
 
 ### 3.1 Table

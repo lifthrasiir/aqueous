@@ -24,6 +24,11 @@ pub fn read_table(r: &mut BitR, n: usize) -> Result<Vec<u32>> {
     Ok(rans32::read_table::<PROB_BITS, true>(r, n)?)
 }
 
+/// [`read_table`], the frequencies appended to `out`.
+pub fn read_table_into(r: &mut BitR, n: usize, out: &mut Vec<u32>) -> Result<()> {
+    Ok(rans32::read_table_into::<PROB_BITS, true>(r, n, out)?)
+}
+
 /// Encodes `syms` (table, symbol) in order; returns the stream the decoder reads forward.
 pub fn encode(syms: &[(u16, u16)], freqs: &[Vec<u32>]) -> Vec<u8> {
     rans32::encode::<PROB_BITS>(syms, freqs)

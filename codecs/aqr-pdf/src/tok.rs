@@ -36,6 +36,8 @@ const DIST_CTX: usize = 8;
 const LIT_CTX: usize = 256;
 /// Tables per class at the finest resolution.
 const PER_CLASS: usize = LIT_CTX + DIST_CTX;
+/// Most literal tables of a slot at a resolution.
+const MAX_IDS: usize = if PIX_CTX > LIT_CTX { PIX_CTX } else { LIT_CTX };
 
 /// The length code of every length 3-258.
 static LEN_CODE: [u8; 259] = {
@@ -911,7 +913,9 @@ fn rebuild<M: LitModel>(
     out: &mut Vec<u8>,
 ) -> Result<()> {
     // (room for the most tokens of a block)
-    let mut tokens = Vec::with_capacity(blocks.iter().map(|b| b.1).max().unwrap_or(0));
+    let mut tokens = Vec::with_capacity(
+        blocks.iter().filter(|b| !matches!(b.0.body, Body::Stored { .. })).map(|b| b.1).max().unwrap_or(0),
+    );
     let (mut t0, mut alts) = (0, alts.iter().copied().peekable());
     for (b, n) in blocks {
         if let Body::Stored { .. } = b.body {
@@ -943,6 +947,98 @@ fn rebuild<M: LitModel>(
     Ok(())
 }
 
+/// Bytes of the contexts of a decoder on WebAssembly (the slots' tables of 2 bytes each).
+pub fn ctx_bytes() -> u64 {
+    (SLOTS * PER_CLASS * 2) as u64
+}
+
+/// A stream's layout as the layout part codes it: its blocks (with their bytes or token
+/// counts), the padding after the last, and the tokens (indices) whose matches are sent as 258
+/// of the other length code.
+pub struct StreamLayout {
+    pub blocks: Vec<(Block, usize)>,
+    pub tail_pad: u8,
+    pub alts: Vec<usize>,
+}
+
+/// The next stream's layout from `l` (`bits` the layout part's bits), of `plain` bytes of data.
+/// The blocks and alts are made at their sizes.
+pub fn read_layout(l: &mut BitR, bits: usize, plain: usize) -> Result<StreamLayout> {
+    let nblocks = l.gamma()? as usize;
+    if nblocks > bits / 3 {
+        return Err(Error::Corrupt);
+    }
+    let std_last = l.bits(1) == 1;
+    // Per block: stored length, or token count.
+    let mut blocks = Vec::with_capacity(nblocks);
+    let mut prev_count = 0usize;
+    let mut ntok = 0usize;
+    for i in 0..nblocks {
+        let last = if std_last { i + 1 == nblocks } else { l.bits(1) == 1 };
+        let (body, n) = match l.bits(2) {
+            0 => {
+                let pad = l.bits(8) as u8;
+                let len = l.bits(16) as u16;
+                (Body::Stored { pad, len }, len as usize)
+            }
+            t @ (1 | 2) => {
+                let count = if l.bits(1) == 1 { prev_count } else { l.gamma()? as usize };
+                if count > plain {
+                    return Err(Error::Corrupt);
+                }
+                prev_count = count;
+                ntok += count;
+                if t == 1 {
+                    (Body::Fixed { tokens: vec![] }, count)
+                } else {
+                    (Body::Dynamic { header: DynHeader::default(), tokens: vec![] }, count)
+                }
+            }
+            _ => return Err(Error::Corrupt),
+        };
+        blocks.push((Block { last, body }, n));
+    }
+    let tail_pad = l.bits(8) as u8;
+    let nalts = l.gamma()? as usize;
+    if nalts > ntok {
+        return Err(Error::Corrupt);
+    }
+    let mut alts = Vec::with_capacity(nalts);
+    let mut last = 0usize;
+    for k in 0..nalts {
+        let d = l.gamma()? as usize;
+        // Increasing: each match is listed once.
+        if k > 0 && d == 0 {
+            return Err(Error::Corrupt);
+        }
+        last += d;
+        alts.push(last);
+    }
+    if l.overrun() || ntok > plain {
+        return Err(Error::Corrupt);
+    }
+    Ok(StreamLayout { blocks, tail_pad, alts })
+}
+
+/// Bytes of the window of a stream of `plain` bytes of data laid out as `px` (when it is
+/// made).
+pub fn window_room(px: Option<Pixels>, plain: usize) -> usize {
+    let keep = px.map_or(WINDOW, |p| WINDOW.max(p.stride.saturating_add(p.bpp + 1)));
+    Window::most(keep, plain)
+}
+
+/// Bytes a block's header takes at most, and the bits held back and the end of block after.
+const HEADER_BYTES: usize = 720;
+
+/// Bytes of room the writer of a stream needs for its blocks, each (whether it is stored, its
+/// bytes or tokens): its output is moved on after each, so the room for the greatest, which
+/// writing then never grows.
+pub fn writer_room(blocks: impl Iterator<Item = (bool, usize)>) -> usize {
+    // (a stored block's bytes and 8 more; the most a token takes, 6 bytes, and 16 more)
+    let most = blocks.map(|(stored, n)| if stored { n + 8 } else { 6 * n + 16 }).max().unwrap_or(0);
+    HEADER_BYTES + most
+}
+
 /// The decoder of a file's token streams, in the order they were added.
 pub struct DecoderState<'a> {
     tables: Tables,
@@ -959,28 +1055,48 @@ pub struct DecoderState<'a> {
 
 impl<'a> DecoderState<'a> {
     /// A decoder of the parts given by [`Encoder::finish`] (not all empty).
+    ///
+    /// The tables are counted first, so that what they take is made once at its size: the
+    /// decoding tables, then one vector of all the frequencies (and where each table starts),
+    /// which go when the decoding tables are built.
     pub fn new(parts: [&'a [u8]; PARTS]) -> Result<DecoderState<'a>> {
         let [layout, tb, st, raw, headers] = parts;
-        let mut tr = BitR::new(tb);
-        let mut freqs: Vec<Vec<u32>> = vec![];
         let mut ctx = vec![[0u16; PER_CLASS]; SLOTS];
+        let (lit, dist) = Self::count_tables(tb)?;
+        // (the dummy table, of one symbol, makes the strides no wider than the tables are)
+        let n = lit + dist + 1;
+        let alphabet = if lit > 0 {
+            LIT_ALPHA
+        } else if dist > 0 {
+            DIST_ALPHA
+        } else {
+            1
+        };
+        let shift = alphabet.next_power_of_two().trailing_zeros();
+        let mut tables = Tables::with_room_shift(n, shift);
+        let mut freqs: Vec<u32> = Vec::with_capacity(lit * LIT_ALPHA + dist * DIST_ALPHA + 1);
+        let mut starts: Vec<usize> = Vec::with_capacity(n + 1);
+        let mut tr = BitR::new(tb);
         let mut read = |tr: &mut BitR, n: usize| -> Result<Option<u16>> {
             if tr.bits(1) == 0 {
                 return Ok(None);
             }
-            freqs.push(rans::read_table(tr, n)?);
-            Ok(Some((freqs.len() - 1) as u16))
+            starts.push(freqs.len());
+            rans::read_table_into(tr, n, &mut freqs)?;
+            Ok(Some((starts.len() - 1) as u16))
         };
         // Unused contexts point at a table of their own (decoding them is an error later).
-        let mut unused = vec![];
+        let mut unused = [false; SLOTS];
         for (ci, cx) in ctx.iter_mut().enumerate() {
             if tr.bits(1) == 0 {
-                unused.push(ci);
+                unused[ci] = true;
                 continue;
             }
             let res = tr.bits(2) as u8;
-            let ids: Vec<Option<u16>> =
-                (0..slot_tables(ci, res)).map(|_| read(&mut tr, LIT_ALPHA)).collect::<Result<_>>()?;
+            let mut ids = [None; MAX_IDS];
+            for id in ids.iter_mut().take(slot_tables(ci, res)) {
+                *id = read(&mut tr, LIT_ALPHA)?;
+            }
             let nfine = if ci == PIXEL { PIX_CTX } else { LIT_CTX };
             for (b, t) in cx.iter_mut().enumerate().take(nfine) {
                 *t = ids[coarse(ci, res, b)].unwrap_or(u16::MAX);
@@ -992,8 +1108,10 @@ impl<'a> DecoderState<'a> {
                 return Err(Error::Corrupt);
             }
         }
-        let dummy = freqs.len() as u16;
-        freqs.push(vec![rans::PROB_SCALE]);
+        let dummy = starts.len() as u16;
+        starts.push(freqs.len());
+        freqs.push(rans::PROB_SCALE);
+        starts.push(freqs.len());
         for cx in ctx.iter_mut() {
             for t in cx.iter_mut() {
                 if *t == u16::MAX {
@@ -1001,11 +1119,12 @@ impl<'a> DecoderState<'a> {
                 }
             }
         }
-        for ci in unused {
+        for (ci, _) in unused.iter().enumerate().filter(|u| *u.1) {
             ctx[ci] = [dummy; PER_CLASS];
         }
+        tables.rebuild(starts.len() - 1, |t| &freqs[starts[t]..starts[t + 1]]);
         Ok(DecoderState {
-            tables: Tables::new(&freqs),
+            tables,
             ctx,
             dec: Decoder::new(st),
             raw: BitR::new(raw),
@@ -1014,6 +1133,38 @@ impl<'a> DecoderState<'a> {
             headers: BitReader::new(headers),
             recipe: Recipe::default(),
         })
+    }
+
+    /// The tables a table part has: the literal ones and the distance ones. Each is read into
+    /// room made once.
+    pub fn count_tables(tb: &[u8]) -> Result<(usize, usize)> {
+        let mut tr = BitR::new(tb);
+        let mut room: Vec<u32> = Vec::with_capacity(LIT_ALPHA);
+        let (mut lit, mut dist) = (0, 0);
+        for ci in 0..SLOTS {
+            if tr.bits(1) == 0 {
+                continue;
+            }
+            let res = tr.bits(2) as u8;
+            for _ in 0..slot_tables(ci, res) {
+                if tr.bits(1) == 1 {
+                    room.clear();
+                    rans::read_table_into(&mut tr, LIT_ALPHA, &mut room)?;
+                    lit += 1;
+                }
+            }
+            for _ in 0..DIST_CTX {
+                if tr.bits(1) == 1 {
+                    room.clear();
+                    rans::read_table_into(&mut tr, DIST_ALPHA, &mut room)?;
+                    dist += 1;
+                }
+            }
+            if tr.overrun() {
+                return Err(Error::Corrupt);
+            }
+        }
+        Ok((lit, dist))
     }
 
     /// Rebuilds the next stream (class `c`, `plain` bytes of data, pixels as given to
@@ -1026,60 +1177,7 @@ impl<'a> DecoderState<'a> {
         if px.is_some_and(|p| !tiles(p)) {
             return Err(Error::Corrupt);
         }
-        let l = &mut self.layout;
-        let nblocks = l.gamma()? as usize;
-        if nblocks > self.layout_bits / 3 {
-            return Err(Error::Corrupt);
-        }
-        let std_last = l.bits(1) == 1;
-        // Per block: stored length, or token count.
-        let mut blocks = Vec::with_capacity(nblocks);
-        let mut prev_count = 0usize;
-        let mut ntok = 0usize;
-        for i in 0..nblocks {
-            let last = if std_last { i + 1 == nblocks } else { l.bits(1) == 1 };
-            let (body, n) = match l.bits(2) {
-                0 => {
-                    let pad = l.bits(8) as u8;
-                    let len = l.bits(16) as u16;
-                    (Body::Stored { pad, len }, len as usize)
-                }
-                t @ (1 | 2) => {
-                    let count = if l.bits(1) == 1 { prev_count } else { l.gamma()? as usize };
-                    if count > plain {
-                        return Err(Error::Corrupt);
-                    }
-                    prev_count = count;
-                    ntok += count;
-                    if t == 1 {
-                        (Body::Fixed { tokens: vec![] }, count)
-                    } else {
-                        (Body::Dynamic { header: DynHeader::default(), tokens: vec![] }, count)
-                    }
-                }
-                _ => return Err(Error::Corrupt),
-            };
-            blocks.push((Block { last, body }, n));
-        }
-        let tail_pad = l.bits(8) as u8;
-        let nalts = l.gamma()? as usize;
-        if nalts > ntok {
-            return Err(Error::Corrupt);
-        }
-        let mut alts = Vec::with_capacity(nalts);
-        let mut last = 0usize;
-        for k in 0..nalts {
-            let d = l.gamma()? as usize;
-            // Increasing: each match is listed once.
-            if k > 0 && d == 0 {
-                return Err(Error::Corrupt);
-            }
-            last += d;
-            alts.push(last);
-        }
-        if l.overrun() || ntok > plain {
-            return Err(Error::Corrupt);
-        }
+        let StreamLayout { mut blocks, tail_pad, alts } = read_layout(&mut self.layout, self.layout_bits, plain)?;
 
         let slot = if px.is_some() { PIXEL } else { c as usize };
         let mut cur = Cursor {
@@ -1092,7 +1190,7 @@ impl<'a> DecoderState<'a> {
         };
         // (a writer of its own, as it reserves room for a block's tokens at the worst: each
         // block's bytes then moved to `out`)
-        let mut w = Writer::new(1 << 16);
+        let mut w = Writer::new(writer_room(blocks.iter().map(|(b, n)| (matches!(b.body, Body::Stored { .. }), *n))));
         let (headers, recipe) = (&mut self.headers, &mut self.recipe);
         match px {
             None => rebuild(&mut cur, &mut Prev(0), &mut blocks, &alts, headers, recipe, &mut w, out)?,

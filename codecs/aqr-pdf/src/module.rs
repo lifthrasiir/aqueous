@@ -17,6 +17,26 @@ pub const PNG: u8 = 5;
 pub const NMODES: usize = 6;
 pub const MODES: [&str; NMODES] = ["raw", "dup", "full", "jpeg", "tok", "png"];
 
+/// Bytes of what the module holds on WebAssembly (32-bit pointers), checked there by assertions:
+/// a block of a layout with its tokens or bytes, a token, a place in the output, a slice of an
+/// item of a packed input, a word.
+pub mod wasm {
+    pub const BLOCK: u64 = 1008;
+    pub const TOKEN: u64 = 6;
+    pub const PLACED: u64 = 8;
+    pub const ITEM: u64 = 8;
+    pub const WORD: u64 = 4;
+}
+
+#[cfg(target_family = "wasm")]
+const _: () = {
+    assert!(size_of::<(aqr_flate::deflate::Block, usize)>() as u64 == wasm::BLOCK);
+    assert!(size_of::<aqr_flate::deflate::Token>() as u64 == wasm::TOKEN);
+    assert!(size_of::<(usize, usize)>() as u64 == wasm::PLACED);
+    assert!(size_of::<&[u8]>() as u64 == wasm::ITEM);
+    assert!(size_of::<usize>() as u64 == wasm::WORD);
+};
+
 /// Where the items' data is next in each slot: a byte, or an item of a packed one.
 #[derive(Default)]
 struct Cursors {
@@ -48,7 +68,9 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Res
     let tokens = if toks.iter().all(|t| t.is_empty()) { None } else { Some(tok::DecoderState::new(toks)?) };
     let unpack = |p| packed::unpack(p).ok_or(Error::Corrupt);
     let slots = Slots { skel, raw, deflate: unpack(deflate)?, png: unpack(png)?, jpeg: unpack(jpeg)? };
-    let mut o = Out::new(len, skel, tokens);
+    // (the items counted first, so that the places they go to are reserved)
+    let items = scan_table(table, len, |_, _| ()).ok_or(Error::Corrupt)?;
+    let mut o = Out::new(len, skel, tokens, items);
     let (mut t, mut cur) = (Reader::new(table), Cursors::default());
     let mut index = 0;
     while !t.at_end() {
@@ -66,6 +88,49 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Res
         return Err(Error::Corrupt);
     }
     o.finish(cur.sk)
+}
+
+/// The items of `table` (of a file of `len` bytes), calling `stream` for each token stream with
+/// its inflated length and pixel layout (bytes per pixel and stride); None where the table is
+/// no table. What the memory plan and the decoder both count by.
+pub fn scan_table(table: &[u8], len: usize, mut stream: impl FnMut(usize, Option<(u64, u64)>)) -> Option<usize> {
+    let (mut t, mut items) = (Reader::new(table), 0usize);
+    while !t.at_end() {
+        t.upto(len).ok()?;
+        match t.u8().ok()? {
+            RAW => drop(t.upto(len).ok()?),
+            DUP => drop(t.upto(items).ok()?),
+            TOK => {
+                let flags = t.u8().ok()?;
+                if flags & !7 != 0 {
+                    return None;
+                }
+                if flags & 1 != 0 {
+                    t.bytes(2).ok()?;
+                }
+                t.u8().ok().filter(|&c| (c as usize) < CLASSES.len())?;
+                let n = t.upto(len.saturating_mul(1032)).ok()?;
+                let px = if flags & 4 != 0 {
+                    let bpp = t.upto(64).ok()? as u64;
+                    Some((bpp, t.upto((1u64 << 34).min(usize::MAX as u64) as usize).ok()? as u64))
+                } else {
+                    None
+                };
+                stream(n, px);
+            }
+            FULL => {
+                let flags = t.u8().ok()?;
+                if flags & !3 != 0 {
+                    return None;
+                }
+                t.bytes(2 * (flags & 1) as usize + 4 * (flags >> 1) as usize).ok()?;
+            }
+            JPEG | PNG => {}
+            _ => return None,
+        }
+        items += 1;
+    }
+    Some(items)
 }
 
 /// The next item of the table, the `index`th; `len` is the file's length.
@@ -178,8 +243,8 @@ struct Out<'a> {
 }
 
 impl<'a> Out<'a> {
-    fn new(len: usize, skel: &'a [u8], tokens: Option<tok::DecoderState<'a>>) -> Self {
-        Out { out: Vec::with_capacity(len), skel, tokens, placed: vec![], len }
+    fn new(len: usize, skel: &'a [u8], tokens: Option<tok::DecoderState<'a>>, items: usize) -> Self {
+        Out { out: Vec::with_capacity(len), skel, tokens, placed: Vec::with_capacity(items), len }
     }
 
     /// The output once all items are in: the rest of the skeleton, from `sk`, follows. It must

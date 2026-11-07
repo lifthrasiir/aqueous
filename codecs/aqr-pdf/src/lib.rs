@@ -10,6 +10,8 @@ pub mod kind;
 pub mod lex;
 pub mod module;
 pub mod objects;
+#[cfg(feature = "encode")]
+pub mod plan;
 pub mod rans;
 pub mod scan;
 pub mod tok;

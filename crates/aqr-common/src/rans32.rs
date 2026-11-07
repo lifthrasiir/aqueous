@@ -269,6 +269,12 @@ impl<S: Symbol, const BITS: u32> Tables<S, BITS> {
         Tables { lut: Vec::with_capacity(n << BITS), fc: Vec::with_capacity(n << shift), shift, n: 0 }
     }
 
+    /// [`Tables::with_room`] of tables whose strides are `1 << shift` (the alphabet's size
+    /// rounded up to a power of two, as [`Tables::of`] finds it for symbols of no fixed stride).
+    pub fn with_room_shift(n: usize, shift: u32) -> Self {
+        Tables { lut: Vec::with_capacity(n << BITS), fc: Vec::with_capacity(n << shift), shift, n: 0 }
+    }
+
     /// [`Tables::of`] of `n` tables in the room of these tables (as [`Tables::with_room`] made
     /// them: `n` at most), nothing taken.
     pub fn rebuild<'a>(&mut self, n: usize, freqs: impl Fn(usize) -> &'a [u32]) {

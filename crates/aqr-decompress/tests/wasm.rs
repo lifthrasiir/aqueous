@@ -2432,9 +2432,19 @@ mod rar5_gen {
     }
 }
 
+/// What the module of a RAR application gives natively.
+fn rar_run(a: &aqr_formula::Apply, i: &[&[u8]]) -> Vec<u8> {
+    aqr_rar::formula::apply(a, i, 1).unwrap()
+}
+
 /// The applications of the module `name` in `f` (in its root, and its shared applications), each
 /// as [`plan_holds`] checks it against what it gives natively. Returns their number.
-fn module_applications_hold(what: &str, f: &Formula, name: &str) -> usize {
+fn module_applications_hold(
+    what: &str,
+    f: &Formula,
+    name: &str,
+    run: &dyn Fn(&aqr_formula::Apply, &[&[u8]]) -> Vec<u8>,
+) -> usize {
     let mut found = Vec::new();
     f.root.visit(&mut |n| {
         if let Node::Apply(a) = n {
@@ -2444,17 +2454,38 @@ fn module_applications_hold(what: &str, f: &Formula, name: &str) -> usize {
     found.extend(f.shared.iter().map(|s| s.apply.clone()));
     let mut count = 0;
     for a in found.into_iter().filter(|a| a.module.name == name) {
-        // (what the rar module gives natively on its inputs)
-        let inputs: Vec<Vec<u8>> = (a.inputs.iter())
-            .map(|n| {
-                let mut g = Formula { shared: Vec::new(), ..f.clone() };
-                g.root = n.clone();
-                g.eval(&Native::default()).unwrap()
-            })
-            .collect();
+        // (the inputs as they come: each by itself, or where they hold outputs of other
+        // applications, all at once)
+        let mut outputs = false;
+        a.inputs.iter().for_each(|n| n.visit(&mut |n| outputs |= matches!(n, Node::Output { .. })));
+        let inputs: Vec<Vec<u8>> = if outputs {
+            let mut g = f.clone();
+            g.root = Node::Concat(a.inputs.clone());
+            let all = g.eval(&Native::default()).unwrap();
+            let mut at = 0;
+            a.inputs
+                .iter()
+                .map(|n| {
+                    at += n.len() as usize;
+                    all[at - n.len() as usize..at].to_vec()
+                })
+                .collect()
+        } else {
+            (a.inputs.iter())
+                .map(|n| {
+                    let mut g = Formula { shared: Vec::new(), ..f.clone() };
+                    g.root = n.clone();
+                    g.eval(&Native::default()).unwrap()
+                })
+                .collect()
+        };
         let refs: Vec<&[u8]> = inputs.iter().map(|i| &i[..]).collect();
-        let want = aqr_rar::formula::apply(&a, &refs, 1).unwrap();
-        let mut g = Formula { shared: Vec::new(), ..f.clone() };
+        let want = run(&a, &refs);
+        // (the application on inputs of their own)
+        let mut g = Formula::default();
+        let mut a = a;
+        const NAMES: [&str; 12] = ["i0", "i1", "i2", "i3", "i4", "i5", "i6", "i7", "i8", "i9", "i10", "i11"];
+        a.inputs = inputs.iter().zip(NAMES).map(|(i, name)| g.push(name, i.clone())).collect();
         g.root = Node::Apply(Box::new(a));
         plan_holds(&format!("{what} {count}"), g, &want);
         count += 1;
@@ -2471,7 +2502,7 @@ fn rar5_plans_hold() {
     for t in ["r5_m3", "r5_solid"] {
         let d = fixture(&format!("codecs/aqr-rar/tests/data/{t}.rar"));
         let f = aqr_rar::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
-        assert!(module_applications_hold(&format!("rar5 {t}"), &f, "rar5-recons") > 0, "{t}");
+        assert!(module_applications_hold(&format!("rar5 {t}"), &f, "rar5-recons", &rar_run) > 0, "{t}");
     }
     let cases: [(&str, bool, Vec<usize>, usize, usize, bool); 6] = [
         ("blocks and filters", false, vec![60000], 80, 100, false),
@@ -2737,7 +2768,7 @@ fn rar3_plans_hold() {
     for t in ["r4_m3", "r4_solid", "r4_ppmd", "r4_audio"] {
         let d = fixture(&format!("codecs/aqr-rar/tests/data/{t}.rar"));
         let f = aqr_rar::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
-        assert!(module_applications_hold(&format!("rar3 {t}"), &f, "rar3-recons") > 0, "{t}");
+        assert!(module_applications_hold(&format!("rar3 {t}"), &f, "rar3-recons", &rar_run) > 0, "{t}");
     }
     use rar3_gen::{File, Seg};
     let lz = |n, most| Seg::Lz { n, most };
@@ -2849,6 +2880,133 @@ fn lzx_plans_hold() {
     let a = aqr_lzx::formula::apply_as(&mut f, v, vec![stream], Node::Concat(Vec::new()), src.len() as u64);
     f.root = Node::Apply(Box::new(a));
     plan_holds("lzx cab", f, &src);
+}
+
+mod pdf_gen {
+    use aqr_flate::zlib::{Params, compress};
+
+    /// `data` as a zlib stream at `level`.
+    pub fn zlib(data: &[u8], level: u8) -> Vec<u8> {
+        let raw = compress(data, Params { level, ..Params::default() }).unwrap();
+        let (mut a, mut b) = (1u32, 0u32);
+        for &x in data {
+            a = (a + x as u32) % 65521;
+            b = (b + a) % 65521;
+        }
+        let mut out = vec![0x78, [0x01, 0x5e, 0x9c, 0xda][(level as usize / 3).min(3)]];
+        out.extend_from_slice(&raw);
+        out.extend_from_slice(&(b << 16 | a).to_be_bytes());
+        out
+    }
+
+    /// A PDF of the given objects (dictionary body, optional stream data), with an xref table.
+    pub fn pdf(objs: &[(String, Option<Vec<u8>>)]) -> Vec<u8> {
+        let mut f = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n".to_vec();
+        let mut offs = vec![];
+        for (i, (d, s)) in objs.iter().enumerate() {
+            offs.push(f.len());
+            f.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+            match s {
+                Some(s) => {
+                    f.extend_from_slice(format!("<< {d} /Length {} >>\nstream\n", s.len()).as_bytes());
+                    f.extend_from_slice(s);
+                    f.extend_from_slice(b"\nendstream\n");
+                }
+                None => f.extend_from_slice(format!("{d}\n").as_bytes()),
+            }
+            f.extend_from_slice(b"endobj\n");
+        }
+        let x = f.len();
+        f.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+        for o in offs {
+            f.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+        }
+        f.extend_from_slice(
+            format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{x}\n%%EOF\n", objs.len() + 1).as_bytes(),
+        );
+        f
+    }
+
+    /// Page content: text operators and numbers, somewhat repetitive.
+    pub fn content(seed: u32, n: usize) -> Vec<u8> {
+        let mut s = String::from("BT /F1 12 Tf\n");
+        let mut x = seed;
+        for i in 0..n {
+            x = x.wrapping_mul(1103515245).wrapping_add(12345);
+            s += &format!(
+                "{} {} Td ({}) Tj\n",
+                (x >> 16) % 600,
+                i % 800,
+                ["Hello", "PDF", "world", "recompression"][(x >> 8) as usize % 4]
+            );
+        }
+        s += "ET\n";
+        s.into_bytes()
+    }
+
+    /// Pixels of an image of `w` by `h` of `bpp` bytes: a gradient with noise.
+    pub fn pixels(w: usize, h: usize, bpp: usize, seed: u32) -> Vec<u8> {
+        let mut x = seed;
+        (0..w * h * bpp)
+            .map(|i| {
+                x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+                ((i / bpp % w) * 255 / w + (i / bpp / w) * 3) as u8 ^ (x >> 29) as u8
+            })
+            .collect()
+    }
+
+    /// A document of `pages` pages (a content stream each, of text and of compression levels
+    /// that vary) and some images, a stream of binary data, a stored stream.
+    pub fn document(pages: usize, images: usize) -> Vec<u8> {
+        let mut objs: Vec<(String, Option<Vec<u8>>)> = vec![("<< /Type /Catalog /Pages 2 0 R >>".into(), None)];
+        objs.push(("<< /Type /Pages /Kids [] /Count 0 >>".into(), None));
+        for p in 0..pages {
+            let c = content(p as u32 + 1, 40 + p % 7 * 30);
+            objs.push((format!("/Filter /FlateDecode /N {p}"), Some(zlib(&c, 1 + (p % 9) as u8))));
+            objs.push((format!("<< /Type /Page /Parent 2 0 R /Contents {} 0 R >>", objs.len()), None));
+        }
+        for i in 0..images {
+            let (w, h, bpp) = (30 + i * 7, 20 + i * 3, [1, 3][i % 2]);
+            let cs = if bpp == 3 { "/DeviceRGB" } else { "/DeviceGray" };
+            let px = pixels(w, h, bpp, i as u32 + 9);
+            objs.push((
+                format!("/Type /XObject /Subtype /Image /Width {w} /Height {h} /BitsPerComponent 8 /ColorSpace {cs} /Filter /FlateDecode"),
+                Some(zlib(&px, 6)),
+            ));
+        }
+        objs.push(("/Filter /FlateDecode".into(), Some(zlib(&[7u8; 3000], 9))));
+        objs.push(("/Filter /FlateDecode".into(), Some(zlib(b"", 6))));
+        objs.push(("/Type /Stored".into(), Some(b"plain bytes not compressed".to_vec())));
+        pdf(&objs)
+    }
+}
+
+/// pdf-recons lays its memory out as a stack, its limit its plan: of generated documents of
+/// many objects and streams (pages of text at several levels, images of 8 bits a pixel and
+/// of 24, empty and stored streams), and of a small one.
+#[test]
+fn pdf_plans_hold() {
+    let run = |a: &aqr_formula::Apply, i: &[&[u8]]| aqr_pdf::formula::apply(a, i, 1).unwrap();
+    // (the last two allow the token coder only, none through aqr-flate's records)
+    let cases = [("small", 8, 2, true), ("pages", 90, 0, true), ("images", 5, 12, true), ("many", 140, 20, true)];
+    for (what, pages, images, full) in cases.into_iter().chain([("tokens", 140, 20, false), ("pixels", 6, 90, false)]) {
+        let d = pdf_gen::document(pages, images);
+        let opts = aqr_pdf::encode::Options { full, ..Default::default() };
+        let f = aqr_pdf::formula::encode_with(&d, &opts).unwrap_or_else(|| panic!("{what}: no formula"));
+        let found = module_applications_hold(&format!("pdf {what}"), &f, "pdf-recons", &run);
+        assert!(found > 0, "{what}");
+        // (the table's items and token streams: more than the 64 holes that would trap)
+        let mut g = Formula { shared: Vec::new(), ..f.clone() };
+        let a = f.applies().into_iter().find(|a| a.module.name == "pdf-recons").unwrap();
+        g.root = a.inputs[0].clone();
+        let table = g.eval(&Native::default()).unwrap();
+        let mut streams = 0;
+        let items = aqr_pdf::module::scan_table(&table, d.len(), |_, _| streams += 1).unwrap();
+        eprintln!("pdf {what}: {} bytes, {items} items, {streams} token streams", d.len());
+        if pages > 80 {
+            assert!(items > 64, "{what}");
+        }
+    }
 }
 
 /// wrt-recons and wrt-recons-hangul lay their memory out as stacks, their limits their plans: of
