@@ -9,8 +9,7 @@ pub mod fasta;
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod module;
-#[cfg(feature = "encode")]
-pub mod plan;
+pub mod stream;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error(pub &'static str);

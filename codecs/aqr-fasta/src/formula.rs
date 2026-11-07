@@ -10,11 +10,11 @@ use crate::fasta;
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("fasta-recons", 2).with_plan(plan);
+pub const MODULE: Module = Module::new("fasta-recons", 3).with_plan(plan);
 
-/// The memory of the module: its plan ([`crate::plan::decode`]).
+/// The memory of the module: its plan ([`crate::module::plan`]).
 fn plan(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    Some(crate::plan::decode(u.initial(), u.params, u.inputs, u.output()))
+    Some(crate::module::plan(u.initial()))
 }
 
 /// The names of the inputs' streams, in order.
@@ -30,10 +30,11 @@ pub fn starts(d: &[u8]) -> bool {
 }
 
 /// The bytes of a segment, about: a file longer than this is cut into segments of equal parts of
-/// about it ([`cuts`]), each an application of its own. An application needs about twice its
-/// segment, the bases' model and twice its inputs (the coded bases a quarter of it at most):
-/// about 245 MiB on Wasm at this length (random bases, whose codes are a quarter of it).
-pub const SEGMENT: usize = 96 << 20;
+/// about it ([`cuts`]), each an application of its own, the model restarting at each. The
+/// module's memory is the same whatever the length (it is a part module), so this is not a bound
+/// of memory but of what the encoder holds of a file at once (its parts and bases, as many
+/// segments as it has threads) and of how long one application runs.
+pub const SEGMENT: usize = 1 << 30;
 
 /// The formula of FASTA file `input`, or `None` where it is not one this crate takes
 /// ([`fasta`]). It is the same whatever `threads` is (the segments, if more than one, are coded
@@ -63,11 +64,12 @@ fn cuts(d: &[u8], segment: usize) -> Vec<usize> {
     starts
 }
 
-/// [`encode`] in segments of `segment` bytes. A file in one segment is an application of the
+/// [`encode`] in segments of `segment` bytes (the test of segments, and of the memory plan with
+/// them, at lengths shorter than [`SEGMENT`]). A file in one segment is an application of the
 /// five streams; more are applications of slices of five streams in which the segments' parts
 /// follow one another (so that the archive compresses them as it would the file's in one), the
 /// bases' coded forms written to the store as they come.
-fn encode_in(input: &[u8], threads: usize, segment: usize) -> Option<Formula> {
+pub fn encode_in(input: &[u8], threads: usize, segment: usize) -> Option<Formula> {
     let width = fasta::width_of(input)?;
     let starts = cuts(input, segment);
     let range = |k: usize| starts[k]..starts.get(k + 1).copied().unwrap_or(input.len());
@@ -208,6 +210,49 @@ mod tests {
                 assert_eq!(eval(&f), d, "{seed}/{segment}");
             }
         }
+    }
+
+    /// Streams longer than the pieces they are taken in (a header, a line, a run of N, the
+    /// case's runs, the coded bases), and each of them damaged: truncated or with a byte more.
+    #[test]
+    fn pieces() {
+        let mut rng = aqr_common::rng::Rng::new(11);
+        let mut d = b">".to_vec();
+        d.extend((0..200_000).map(|i| b'a' + (i % 26) as u8));
+        d.extend_from_slice(b"\n");
+        // a line of 300,000 letters, of runs of N and of lower case
+        for i in 0..300_000 {
+            d.push(match (i / 70_000, rng.below(4)) {
+                (1, _) => b'N',
+                (_, 0) => b'a',
+                (_, 1) => b'c',
+                (_, 2) => b'G',
+                _ => b'T',
+            });
+        }
+        d.extend_from_slice(b"\n>second\n");
+        d.extend((0..400_000).map(|i| if i % 1000 == 999 { b'\n' } else { b"ACGT"[rng.below(4) as usize] }));
+        let f = encode(&d, 1).unwrap();
+        assert_eq!(eval(&f), d);
+        let Node::Apply(a) = &f.root else { panic!() };
+        let inputs: Vec<&[u8]> = (a.inputs.iter())
+            .map(|n| match n {
+                &Node::Slice { stream, start, len } => &f.streams[stream].data[start as usize..][..len as usize],
+                _ => panic!(),
+            })
+            .collect();
+        assert!(inputs.iter().map(|i| i.len()).max().unwrap() > 1 << 16);
+        for k in 0..5 {
+            let mut cut = inputs.iter().map(|i| i.to_vec()).collect::<Vec<_>>();
+            cut[k].pop();
+            let refs: Vec<&[u8]> = cut.iter().map(|c| &c[..]).collect();
+            assert!(decode(&a.params, &refs, a.len, 1).is_err(), "truncated {k}");
+            cut[k].extend_from_slice(&[1, 1]);
+            let refs: Vec<&[u8]> = cut.iter().map(|c| &c[..]).collect();
+            assert!(decode(&a.params, &refs, a.len, 1).is_err(), "longer {k}");
+        }
+        assert!(decode(&a.params, &inputs, a.len + 1, 1).is_err());
+        assert!(decode(&a.params, &inputs, a.len - 1, 1).is_err());
     }
 
     #[test]

@@ -31,14 +31,18 @@ Measured 2026-10-26 on an Apple M4 (10 cores), on hg19 (93 chromosome files of t
   halved at 250 (1.790, and a division per base). A match model of 24-base hashes (last
   occurrence, its prediction weighed by an adaptive table of its length) brought 1.787 to
   1.773 on 60 MB at four times the time, not taken. Models started anew every 64 Mbase cost
-  1.6%, every 16 Mbase 4.0%: a file is one stream, cut (FORMAT.md §7) only where an application
-  could not hold it: past 96 MiB, into equal segments of up to that (chr1: three, +0.45%).
-- A file longer than 96 MiB is cut into segments, each an application, so that none needs more
-  than about 245 MiB (one of chr1 needed 588 MiB: its output twice, its inputs twice and the
-  model); the five streams stay one each, with a slice for each application (FORMAT.md §7).
-- The bases are decoded as the file is built, never held: a file decodes in its own size and
-  the coded bases. Held, they took as much again (10gb decompression 8.66 → 7.49 GB of peak
-  footprint, ten chromosomes decoded at once).
+  1.6%, every 16 Mbase 4.0%: a file is one stream, cut (FORMAT.md §7) only past 1 GiB.
+- The module is a part module (version 3): its five inputs are read and its output written in
+  order through windows, in pieces of 64 KiB, and the bases are decoded as the file is built.
+  Nothing of the file's length is held: an application's memory plan is 3.4 MiB with the module's
+  initial memory (the model's 2 MiB, six pieces), 9.5 MiB at most with the windows, whatever the
+  length. Version 2 held its output, a copy of
+  it, its inputs twice and the model, 2.5 times the file (588 MiB for chr1), and cut a file at
+  96 MiB into segments (chr1: three, +0.45%, 51.97 MB against 51.73 MB), so as to fit the
+  application bound of 256 MiB (245 MiB at most, random bases). chr1 decodes natively in 18.3
+  G instructions against 21.3, resident 115 MB against 368 (Wasm 363 MB against 532, 2.2 s
+  of user time against 2.7); the module block grew 687 B. Held, the bases took as much again
+  (10gb decompression 8.66 → 7.49 GB of peak footprint, ten chromosomes decoded at once).
 - Encoding holds the bases packed four to a byte and codes them 8 Mbase at a time, from the
   last chunk, the model kept at the start of each (2 MiB a chunk): chr1 takes about 0.25 GB
   where it took 1.3 GB (the lines listed, a byte a base, and the start and frequency of every

@@ -11,6 +11,7 @@ use aqr_common::varint;
 use crate::bases::Packed;
 #[cfg(feature = "encode")]
 use crate::bases::Packer;
+use crate::stream::{Reader, Slice, Writer};
 use crate::{Result, corrupt};
 
 /// A FASTA file's parts.
@@ -37,29 +38,17 @@ pub struct Parts {
     pub bases: Packed,
 }
 
-/// [`Parts`] borrowed, as a module's inputs are.
+/// What a file is but its streams: the scalars of a module's parameters.
 #[derive(Debug, Clone, Copy)]
-pub struct View<'a> {
+pub struct Shape {
     pub width: u64,
     pub final_newline: bool,
     pub headless: bool,
-    pub headers: &'a [u8],
-    pub layout: &'a [u8],
-    pub case: &'a [u8],
-    pub other: &'a [u8],
 }
 
 impl Parts {
-    pub fn view(&self) -> View<'_> {
-        View {
-            width: self.width,
-            final_newline: self.final_newline,
-            headless: self.headless,
-            headers: &self.headers,
-            layout: &self.layout,
-            case: &self.case,
-            other: &self.other,
-        }
+    pub fn shape(&self) -> Shape {
+        Shape { width: self.width, final_newline: self.final_newline, headless: self.headless }
     }
 }
 
@@ -251,125 +240,90 @@ pub fn parse_part(d: &[u8], width: u64, continues: bool) -> Option<Parts> {
     Some(p)
 }
 
-/// Reads varints.
-struct Rd<'a> {
-    d: &'a [u8],
-    at: usize,
+/// The four streams of a file other than the bases, read as they are consumed.
+pub struct Streams<'a> {
+    pub headers: Reader<'a>,
+    pub layout: Reader<'a>,
+    pub case: Reader<'a>,
+    pub other: Reader<'a>,
 }
 
-impl Rd<'_> {
-    fn num(&mut self) -> Result<u64> {
-        varint::get(self.d, &mut self.at).map_err(|_| corrupt())
-    }
-
-    fn done(&self) -> bool {
-        self.at == self.d.len()
-    }
-}
-
-/// The number of bases of parts whose layout and other letters are `layout` and `other`: their
-/// letters, but the other ones.
-pub fn bases_len(layout: &[u8], other: &[u8]) -> Result<u64> {
-    let mut letters = 0u64;
-    let mut r = Rd { d: layout, at: 0 };
-    while !r.done() {
-        letters = letters.checked_add(r.num()?).ok_or_else(corrupt)?;
-        if r.d.get(r.at) == Some(&1) {
-            r.at += 1;
-            let n = r.num()?;
-            for _ in 0..n {
-                r.num()?;
-            }
-        } else {
-            r.at += 1;
-        }
-    }
-    let mut o = Rd { d: other, at: 0 };
-    let mut others = 0u64;
-    while !o.done() {
-        o.num()?;
-        others = others.checked_add(o.num()?).ok_or_else(corrupt)?;
-        o.at += 1;
-    }
-    letters.checked_sub(others).ok_or_else(corrupt)
-}
-
-/// The file of `p` and `bases` (taken as they come), of `len` bytes; fails where they do not
-/// make one of that length.
-pub fn build(p: View, mut bases: impl Iterator<Item = u8>, len: usize) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(len);
-    let mut layout = Rd { d: p.layout, at: 0 };
-    let mut case = Rd { d: p.case, at: 0 };
-    let mut other = Rd { d: p.other, at: 0 };
-    let mut headers = p.headers.split(|&b| b == b'\n');
+/// The file of `shape`, its `streams` and `bases` (taken as they come) put to `w`; fails where
+/// they do not make a file of `w`'s length. Everything must be read to its end but the bases
+/// (the caller checks the coder's end).
+pub fn build<B: Iterator<Item = u8>>(shape: Shape, s: &mut Streams, bases: &mut B, w: &mut Writer) -> Result<()> {
+    let Streams { headers, layout, case, other } = s;
+    let width = shape.width;
     // the letters as they come: the bases left before the next run of another letter, and
     // the case's run left
     // (after the last run, none: as many bases as there are)
-    let next_other = |o: &mut Rd| -> Result<(u64, u64, u8)> {
+    let next_other = |o: &mut Reader| -> Result<(u64, u64, u8)> {
         if o.done() {
             return Ok((u64::MAX, 0, 0));
         }
         let (gap, n) = (o.num()?, o.num()?);
-        let c = *o.d.get(o.at).ok_or_else(corrupt)?;
-        o.at += 1;
+        let c = o.byte().ok_or_else(corrupt)?;
         if n == 0 || base(c).is_some() || !c.is_ascii_uppercase() {
             return Err(corrupt());
         }
         Ok((gap, n, c))
     };
-    let (mut gap, mut olen, mut oc) = next_other(&mut other)?;
+    let (mut gap, mut olen, mut oc) = next_other(other)?;
     let (mut upper, mut run) = (true, case.num()?);
-    let mut line = |out: &mut Vec<u8>, mut n: u64| -> Result<()> {
+    let mut line = |w: &mut Writer, mut n: u64| -> Result<()> {
         while n > 0 {
             while run == 0 {
                 (upper, run) = (!upper, case.num()?);
             }
-            // a piece of one case, and of bases or another letter alone
-            let mut k = n.min(run);
+            // a piece of one case, and of bases or another letter alone, that fits the piece
+            // put
+            let mut k = n.min(run).min(w.room() as u64);
             let lower = if upper { 0 } else { 0x20 };
             if gap == 0 {
                 k = k.min(olen);
-                out.extend(std::iter::repeat_n(oc | lower, k as usize));
+                w.repeat(oc | lower, k as usize);
                 olen -= k;
                 if olen == 0 {
-                    (gap, olen, oc) = next_other(&mut other)?;
+                    (gap, olen, oc) = next_other(other)?;
                 }
             } else {
                 k = k.min(gap);
                 for _ in 0..k {
                     let b = bases.next().ok_or_else(corrupt)?;
-                    out.push(LETTERS[b as usize & 3] | lower);
+                    w.push(LETTERS[b as usize & 3] | lower);
                 }
                 gap = gap.saturating_sub(k);
             }
             (n, run) = (n - k, run - k);
+            if w.over() {
+                return Err(corrupt());
+            }
         }
         Ok(())
     };
     let mut first = true;
     while !layout.done() {
         if !first {
-            out.push(b'\n');
+            w.put(b"\n")?;
         }
-        if !(first && p.headless) {
-            out.push(b'>');
-            out.extend_from_slice(headers.next().ok_or_else(corrupt)?);
+        if !(first && shape.headless) {
+            w.put(b">")?;
+            headers.line_into(w)?;
         }
         first = false;
         let n = layout.num()?;
-        let kind = *layout.d.get(layout.at).ok_or_else(corrupt)?;
-        layout.at += 1;
+        let kind = layout.byte().ok_or_else(corrupt)?;
         match kind {
             0 if n == 0 => {}
             0 => {
-                if p.width == 0 {
+                if width == 0 {
                     return Err(corrupt());
                 }
                 let mut left = n;
                 while left > 0 {
-                    let k = left.min(p.width);
-                    out.push(b'\n');
-                    line(&mut out, k)?;
+                    let k = left.min(width);
+                    w.put(b"\n")?;
+                    line(w, k)?;
                     left -= k;
                 }
             }
@@ -379,8 +333,8 @@ pub fn build(p: View, mut bases: impl Iterator<Item = u8>, len: usize) -> Result
                 for _ in 0..lines {
                     let k = layout.num()?;
                     total = total.checked_add(k).ok_or_else(corrupt)?;
-                    out.push(b'\n');
-                    line(&mut out, k)?;
+                    w.put(b"\n")?;
+                    line(w, k)?;
                 }
                 if total != n {
                     return Err(corrupt());
@@ -388,27 +342,37 @@ pub fn build(p: View, mut bases: impl Iterator<Item = u8>, len: usize) -> Result
             }
             _ => return Err(corrupt()),
         }
-        if out.len() > len {
-            return Err(corrupt());
-        }
     }
-    if p.final_newline {
-        out.push(b'\n');
+    if shape.final_newline {
+        w.put(b"\n")?;
     }
-    // everything taken: the headers, the case, the bases and the other letters
-    let rest = headers.next();
-    if out.len() != len
-        || rest.is_some_and(|r| !r.is_empty())
-        || headers.next().is_some()
-        || bases.next().is_some()
-        || !case.done()
-        || run != 0
-        || olen != 0
-        || !other.done()
-    {
+    // everything taken: the headers, the case and the other letters
+    if !headers.done() || !case.done() || run != 0 || olen != 0 || !other.done() {
         return Err(corrupt());
     }
-    Ok(out)
+    Ok(())
+}
+
+/// The file of `p` and `bases`, of `len` bytes, from the streams as they are; fails where they
+/// do not make one of that length. (For tests, and where the file is built whole.)
+pub fn rebuild<B: Iterator<Item = u8>>(shape: Shape, streams: [&[u8]; 4], mut bases: B, len: u64) -> Result<Vec<u8>> {
+    let [h, l, c, o] = streams;
+    let (mut h, mut l, mut c, mut o) = (Slice(h), Slice(l), Slice(c), Slice(o));
+    let mut s = Streams {
+        headers: Reader::new(&mut h),
+        layout: Reader::new(&mut l),
+        case: Reader::new(&mut c),
+        other: Reader::new(&mut o),
+    };
+    let mut out = Vec::with_capacity(len.min(1 << 30) as usize);
+    let mut w = Writer::new(&mut out, len);
+    build(shape, &mut s, &mut bases, &mut w)?;
+    w.finish()?;
+    // (as many bases as the file takes)
+    match bases.next() {
+        None => Ok(out),
+        Some(_) => Err(corrupt()),
+    }
 }
 
 #[cfg(test)]
@@ -417,10 +381,11 @@ mod tests {
 
     fn back(d: &[u8]) {
         let p = parse(d).unwrap_or_else(|| panic!("not taken: {:?}", String::from_utf8_lossy(d)));
-        assert_eq!(bases_len(&p.layout, &p.other).unwrap(), p.bases.len() as u64);
         let bases = || p.bases.iter(0..p.bases.len());
-        assert_eq!(build(p.view(), bases(), d.len()).unwrap(), d, "{p:?}");
-        assert!(build(p.view(), bases(), d.len() + 1).is_err());
+        let streams = [&p.headers[..], &p.layout, &p.case, &p.other];
+        assert_eq!(rebuild(p.shape(), streams, bases(), d.len() as u64).unwrap(), d, "{p:?}");
+        assert!(rebuild(p.shape(), streams, bases(), d.len() as u64 + 1).is_err());
+        assert!(rebuild(p.shape(), streams, bases(), d.len() as u64 - 1).is_err());
     }
 
     #[test]

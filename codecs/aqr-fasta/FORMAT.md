@@ -27,8 +27,10 @@ Contents:
 
 ## 2. The module
 
-- **Module**: name `fasta-recons`, version 2 (version 1 differs in `final` below: only the
-  values 0 and 1, and a file always begins with a header).
+- **Module**: name `fasta-recons`, version 3, a part module (its inputs and output are
+  read and written in order through windows). Version 2 was a whole module, and took the last
+  header without its LF; version 1 differed in `flags` below too: only the values 0 and 1, and a
+  file always begins with a header.
 - **Params**:
 
   ```text
@@ -41,6 +43,11 @@ Contents:
 - **Inputs**: five, in order: `headers`, `layout`, `case`, `other` (§3) and `bases` (§4).
 - **Output**: the file of the declared length (§5). Any inconsistency (a part ending early
   or with bytes left, a length other than the declared one) is an error.
+- **Execution**: every input is read once, front to back, and the output written front to back,
+  so that the module holds a piece of each (64 KiB) and the model of §4 (2 MiB), whatever the
+  lengths: the memory plan of the application is 3.4 MiB with the module's initial memory
+  (1.1 MiB), and its windows are of 16 pages each (the inputs, the output): 9.5 MiB at most in
+  all. The five inputs are read together, as the file is built.
 
 ## 3. Parts
 
@@ -50,7 +57,8 @@ record has no header line, and the file is the rest of a record's lines after a 
 with LF or not (`final`). The *sequence* of the file is the letters of all sequence lines of
 all records, in order.
 
-- **headers**: of each record that has one, its header line without the `>`, followed by LF.
+- **headers**: of each record that has one, its header line without the `>`, followed by LF (the
+  last too).
 - **layout**: of each record, in order:
 
   ```text
@@ -134,11 +142,12 @@ layout, the case, the other runs and the bases.
 
 ## 7. Segments *(encoder)*
 
-- An application holds its output, a copy of the output imported, its inputs twice and the
-  model: about 2.5 times the file. A file longer than 96 MiB (`SEGMENT`) is therefore cut into
-  segments of equal parts (as long as the file allows), each an application of the module, in
-  the formula's concatenation of them in order. A segment needs about 245 MiB on Wasm at most
-  (bases that are random, whose code is a quarter of them), the less the shorter.
+- The module holds nothing of the file's length, so a segment is no bound of memory. An
+  application is a file as any other, and the encoder keeps a file in one (the `SEGMENT` of 1 GiB:
+  a file longer is cut into equal parts of up to that) so that the model starts once. Version 2
+  was a whole module, holding its output, a copy of it, its inputs twice and the model (about 2.5
+  times the file), and cut a file at 96 MiB: chr1 of hg19 (254 MB) in three, 51.97 MB against
+  51.73 MB in one.
 - A cut is at an LF that no LF precedes or follows, and a sequence line (not a header) follows:
   the first of the cuts at or after the file's equal parts. The LF begins the next segment; the
   segment before ends without it. The first segment is a file as any other; the next ones are
@@ -152,6 +161,4 @@ layout, the case, the other runs and the bases.
   and each application takes its slice of each (a stream of its own for each segment would be
   a block of its own in a batch, and compress worse). `threads` segments are coded at once and
   the coded bases are written to the store as they come.
-- Restarting the model costs: each segment after the first about 0.1 MB for chr1 of hg19
-  (51.73 MB in one application, 51.97 MB in three; the pieces are of 85 MB). A file of one
-  segment is coded as it always was.
+- Restarting the model costs: each segment after the first about 0.1 MB for chr1 of hg19.

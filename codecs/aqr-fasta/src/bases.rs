@@ -3,6 +3,7 @@
 //! to 2^16 that move by 1/64 towards each base seen; the top 12 bits of the first three are
 //! its frequencies, the fourth what is left of 4096.
 
+use crate::stream::Reader;
 use crate::{Result, corrupt};
 
 /// Bases of the context: 9, a table of 2 MiB, so that several decoders at once keep theirs
@@ -308,32 +309,37 @@ fn encode_in(s: &Packed, chunk: usize) -> Vec<u8> {
 
 /// The `n` bases of coded form `c`; fails where `c` is not exactly of them.
 pub fn decode(c: &[u8], n: usize) -> Result<Vec<u8>> {
-    let mut d = Decoder::new(c, n)?;
-    let s = d.by_ref().collect();
+    let mut src = crate::stream::Slice(c);
+    let mut d = Decoder::new(Reader::new(&mut src))?;
+    let s = d.by_ref().take(n).collect();
     d.finish()?;
     Ok(s)
 }
 
-/// The `n` bases of coded form `c` as they are decoded, without the bases themselves held
-/// ([`Decoder::finish`] tells whether `c` was exactly of them).
+/// The bases of a coded form as they are decoded, as many as are asked for, without the bases
+/// themselves held ([`Decoder::finish`] tells whether the form was exactly of those).
 pub struct Decoder<'c> {
     t: Model,
-    c: &'c [u8],
-    at: usize,
+    c: Reader<'c>,
     x: u32,
     h: usize,
-    left: usize,
+    /// Whether a byte was asked for past the end of the coded form.
+    over: bool,
 }
 
 impl<'c> Decoder<'c> {
-    pub fn new(c: &'c [u8], n: usize) -> Result<Self> {
-        let x = u32::from_be_bytes(*c.first_chunk().ok_or_else(corrupt)?);
-        Ok(Decoder { t: model(), c, at: 4, x, h: 0, left: n })
+    pub fn new(mut c: Reader<'c>) -> Result<Self> {
+        let mut x = [0; 4];
+        for b in &mut x {
+            *b = c.byte().ok_or_else(corrupt)?;
+        }
+        Ok(Decoder { t: model(), c, x: u32::from_be_bytes(x), h: 0, over: false })
     }
 
-    /// Whether every base was decoded, the state back where the coder started, every byte read.
-    pub fn finish(self) -> Result<()> {
-        if self.left != 0 || self.x != LOW || self.at != self.c.len() {
+    /// Whether the state is back where the coder started and every byte was read, as after
+    /// every base.
+    pub fn finish(mut self) -> Result<()> {
+        if self.over || self.x != LOW || !self.c.done() {
             return Err(corrupt());
         }
         Ok(())
@@ -341,9 +347,13 @@ impl<'c> Decoder<'c> {
 
     #[inline(always)]
     fn byte(&mut self) -> u32 {
-        let b = self.c.get(self.at).copied().unwrap_or(0);
-        self.at += 1;
-        b as u32
+        match self.c.byte() {
+            Some(b) => b as u32,
+            None => {
+                self.over = true;
+                0
+            }
+        }
     }
 }
 
@@ -352,10 +362,6 @@ impl Iterator for Decoder<'_> {
 
     #[inline(always)]
     fn next(&mut self) -> Option<u8> {
-        if self.left == 0 {
-            return None;
-        }
-        self.left -= 1;
         let (t, h, mut x) = (&mut self.t, self.h, self.x);
         // the contexts two bases on, a Line of them: loaded as this one decodes (both halves,
         // for lines of 64 bytes)
@@ -381,10 +387,6 @@ impl Iterator for Decoder<'_> {
         }
         self.x = x;
         Some(b as u8)
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.left, Some(self.left))
     }
 }
 

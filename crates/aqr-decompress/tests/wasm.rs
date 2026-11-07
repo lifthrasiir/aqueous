@@ -3880,10 +3880,11 @@ fn azo_plans_hold() {
     }
 }
 
-/// fasta-recons lays its memory out as a stack, its limit its plan: of files of several records,
-/// lower case and runs of other letters, a header alone, lines of other widths, and one large
-/// enough for the model and the file to pass a few pages, and of 100 MiB (two segments of an
-/// application each, the second the rest of a record).
+/// fasta-recons is a part module whose plan is the same whatever the lengths, to the page: of files
+/// of several records, lower case and runs of other letters, a header alone, lines of other
+/// widths, and one large enough for the model to pass a few pages; of 110 MiB in one
+/// application; and of 100 MiB cut in two segments of an application each, the second the rest of
+/// a record.
 #[test]
 fn fasta_plans_hold() {
     let mut big = b">chr\n".to_vec();
@@ -3923,8 +3924,11 @@ fn fasta_plans_hold() {
         .copied()
         .chain((0..100 << 20).map(|i: usize| if i % 61 == 60 { b'\n' } else { b"ACGT"[rng.below(4) as usize] }))
         .collect();
-    for (what, d, n) in [("records", records, 2), ("one record", one, 2)] {
-        let f = aqr_fasta::formula::encode(&d, 2).unwrap_or_else(|| panic!("{what}"));
+    // (the plan is a few MiB with the module whatever the lengths)
+    let initial = aqr_decompress::initial_pages_of(aqr_fasta::formula::MODULE).unwrap();
+    assert!(aqr_fasta::module::plan(initial * 65536) < 4 << 20);
+    for (what, d, segment, n) in [("records", records, usize::MAX, 1), ("one record", one, 64 << 20, 2)] {
+        let f = aqr_fasta::formula::encode_in(&d, 2, segment).unwrap_or_else(|| panic!("{what}"));
         assert_eq!(applications_hold(&format!("fasta segments {what}"), &f, &d, |_| 0), n, "{what}");
     }
 }
