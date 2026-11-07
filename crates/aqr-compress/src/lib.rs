@@ -2386,18 +2386,12 @@ fn pure(format: Format, d: &[u8], p: &Pure) -> Option<Option<Formula>> {
     if !fits(format, d.len()) {
         return Some(None);
     }
-    // (an application over the bound whatever the coding makes: not coded to be given up after)
-    if memory::certainly_over(format, d.len() as u64, p.opt.application_bound) {
-        return Some(None);
-    }
     #[cfg(test)]
     tests::PURE.with(|n| n.set(n.get() + 1));
     let code = || {
         #[cfg(test)]
-        match format {
-            Format::Text => tests::TEXTS.lock().unwrap().push(d.len()),
-            Format::Fasta => tests::FASTAS.lock().unwrap().push(d.len()),
-            _ => {}
+        if format == Format::Text {
+            tests::TEXTS.lock().unwrap().push(d.len());
         }
         catch_unwind(AssertUnwindSafe(|| match r {
             Recompressor::Pure(e) => e(d, p.opt.threads),
@@ -2801,8 +2795,6 @@ mod tests {
 
     /// The lengths of the texts given to aqr-wrt, on any thread.
     pub(crate) static TEXTS: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
-    /// The lengths of the files given to aqr-fasta, on any thread.
-    pub(crate) static FASTAS: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
 
     /// An ar, tar or cpio archive is worth what the files in it are: a probe counts them, not
     /// the archive, and scans data of its kind.
@@ -3709,33 +3701,6 @@ mod tests {
         let told = fallbacks();
         assert!(!told.is_empty() && told.iter().all(|f| f.needed > 1 && !f.kept), "{told:?}");
         assert!(told.iter().any(|f| f.bytes == gz.len() as u64));
-    }
-
-    /// A FASTA file whose application is over the bound whatever the coding makes is not coded at
-    /// all ([`memory::least`]), and told as given up.
-    #[test]
-    fn over_bound_not_coded() {
-        let mut rng = aqr_common::rng::Rng::new(4);
-        let mut fasta = b">chr\n".to_vec();
-        for _ in 0..4000 {
-            fasta.extend((0..60).map(|_| b"ACGT"[rng.below(4) as usize]));
-            fasta.push(b'\n');
-        }
-        let _ = fallbacks();
-        FASTAS.lock().unwrap().clear();
-        let opt = Options { smaller: false, application_bound: Some(1), ..Options::default() };
-        let f = recompress(&fasta, &opt);
-        assert!(f.applies().is_empty());
-        let told = fallbacks();
-        assert!(
-            told.iter().any(|f| f.module == "fasta-recons" && f.bytes == fasta.len() as u64 && !f.kept),
-            "{told:?}"
-        );
-        assert!(FASTAS.lock().unwrap().is_empty());
-        // (not over a bound it may meet)
-        let opt = Options { smaller: false, ..Options::default() };
-        assert!(!recompress(&fasta, &opt).applies().is_empty());
-        assert_eq!(*FASTAS.lock().unwrap(), [fasta.len()]);
     }
 
     /// The members of a gzip stream after its first (as gzip, pigz's `--independent` and

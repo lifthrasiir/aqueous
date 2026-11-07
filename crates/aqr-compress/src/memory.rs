@@ -81,9 +81,9 @@ pub(crate) fn limit(a: &Apply, lens: &[u64], outputs: &[u64], contents: &dyn Con
 
 /// The bound on the minimal bound of an application ([`Plan::minimal`]) that the encoder keeps
 /// to by default: 512 MiB for now, the most that the decoders support
-/// ([`aqr_formula::SUPPORTED_BOUND`]). The target stays 256 MiB: it goes back to it once fasta
-/// and the others over it stream (wrt has: its segments need about 105 MiB; 14 applications over
-/// 512 MiB in the survey, 61 over 256).
+/// ([`aqr_formula::SUPPORTED_BOUND`]). The target stays 256 MiB: it goes back to it once the
+/// others over it stream (wrt and fasta have: their segments need about 105 and 170 MiB; 14
+/// applications over 512 MiB in the survey, 61 over 256 before them).
 pub const DEFAULT_BOUND: u64 = 512 << 20;
 
 /// Modules allowed a larger bound than [`DEFAULT_BOUND`] by default, with their bounds (at most
@@ -97,36 +97,6 @@ pub(crate) fn bound_of(bound: Option<u64>, module: Module) -> u64 {
     match bound {
         Some(b) => b,
         None => EXCEPTIONS.iter().find(|e| e.0 == module.name).map_or(DEFAULT_BOUND, |e| e.1.max(DEFAULT_BOUND)),
-    }
-}
-
-/// The least minimal bound ([`Plan::minimal`]) that the application of the recompressor of
-/// `format` on `len` bytes can come to, which is told before coding where the plan depends on
-/// the lengths alone in part: the module and the bound. Only that of FASTA (aqr-fasta: its
-/// bases' model and the output) is known so far; the true bound is checked after coding as ever.
-pub(crate) fn least(format: crate::detect::Format, len: u64) -> Option<(Module, u64)> {
-    use crate::detect::Format;
-    let fit = |m: Module, n: u64| aqr_decompress::initial_pages_of(m).map(|p| (p * PAGE, n.div_ceil(PAGE) * PAGE));
-    match format {
-        Format::Fasta => {
-            let m = aqr_fasta::formula::MODULE;
-            let (initial, imported) = fit(m, len)?;
-            Some((m, imported + aqr_fasta::plan::decode(initial, &[], &[], len)))
-        }
-        _ => None,
-    }
-}
-
-/// Whether the recompressor of `format` is sure to make a formula with an application over the
-/// bound `bound` ([`crate::Options::application_bound`]) for `len` bytes ([`least`]); recorded
-/// as given up if so.
-pub(crate) fn certainly_over(format: crate::detect::Format, len: u64, bound: Option<u64>) -> bool {
-    match least(format, len) {
-        Some((module, needed)) if needed > bound_of(bound, module) => {
-            gave_up(module, needed, len);
-            true
-        }
-        _ => false,
     }
 }
 
