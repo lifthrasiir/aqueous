@@ -9,6 +9,8 @@ pub mod formula;
 pub mod model;
 pub mod module;
 pub mod packet;
+#[cfg(feature = "encode")]
+pub mod plan;
 pub mod setup;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

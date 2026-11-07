@@ -12,6 +12,10 @@ it.
 - `layout`: the packets framed (in chunks of 65535 bytes at most, as aqr-vorbis frames its
   packets), the layout record, and the walk over the pages that the encoder and the decoder
   both make.
+- `plan`: the module's memory on WebAssembly (it is on the stack allocator, `aqr_api::stack`):
+  exactly what the decoder reserves, in this order: the output, the CRC's tables, the layout's
+  lists, the streams' packets (the bytes, ends, lacing values and durations of all streams in
+  one vector each, counted first) and the walk's list.
 - `formula`: the file as its layout and its streams' packets, a Vorbis stream's audio packets
   by aqr-vorbis's `vorbis-recons` in pieces of 2 MiB (on threads), its setup header one stream
   that the pieces and the packets share.

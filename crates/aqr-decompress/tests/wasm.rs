@@ -1960,6 +1960,106 @@ fn mp3_plans_hold() {
     plan_holds("gap", f, &big);
 }
 
+/// The applications of the module `name` in `n`, in order.
+fn applications(n: &Node, name: &str, out: &mut Vec<Node>) {
+    match n {
+        Node::Apply(a) => {
+            if a.module.name == name {
+                out.push(n.clone());
+            }
+            a.inputs.iter().for_each(|i| applications(i, name, out));
+        }
+        Node::Concat(ns) => ns.iter().for_each(|n| applications(n, name, out)),
+        _ => {}
+    }
+}
+
+/// vorbis-recons lays its memory out as a stack, its limit its plan: the Vorbis streams of the
+/// Ogg files (libvorbisenc's and ffmpeg's, chained and grouped), the same with packets cut short
+/// and with bytes after them (odd packets, with tails), and a stream of far more packets than
+/// 64 and of the setup's tables.
+#[test]
+fn vorbis_plans_hold() {
+    let mut seen = 0;
+    for name in ["venc-mono.ogg", "ffmpeg-stereo.ogg", "chained.ogg", "grouped.ogg"] {
+        let d = fixture(&format!("codecs/aqr-ogg/tests/data/{name}"));
+        let f = aqr_ogg::formula::encode(&d, 1).unwrap();
+        let mut apps = Vec::new();
+        applications(&f.root, "vorbis-recons", &mut apps);
+        for (i, node) in apps.into_iter().enumerate() {
+            let mut g = f.clone();
+            g.root = node;
+            let want = g.eval(&Native::default()).unwrap();
+            plan_holds(&format!("vorbis {name} {i}"), g.clone(), &want);
+            seen += 1;
+            // the packets cut short and followed by bytes, coded again
+            let Node::Apply(a) = &g.root else { unreachable!() };
+            let (Node::Slice { stream, start, len }, true) = (&a.inputs[0], a.params.len() == 2) else { panic!() };
+            let setup = g.streams[*stream].data[*start as usize..][..*len as usize].to_vec();
+            let ident = aqr_vorbis::setup::Ident {
+                channels: a.params[0] as usize,
+                blocksizes: [1 << (a.params[1] & 15), 1 << (a.params[1] >> 4)],
+            };
+            let (mut odd, mut at, mut k) = (Vec::new(), 0, 0u32);
+            while at + 2 <= want.len() {
+                let n = u16::from_le_bytes([want[at], want[at + 1]]) as usize;
+                let mut p = want[at + 2..at + 2 + n].to_vec();
+                match k % 7 {
+                    1 => p.truncate(1 + (k as usize * 7) % p.len().max(1)),
+                    3 => p.extend([0x5a, 0, 0xff][..1 + k as usize % 3].iter()),
+                    _ => {}
+                }
+                odd.extend_from_slice(&(p.len() as u16).to_le_bytes());
+                odd.extend_from_slice(&p);
+                at += 2 + n;
+                k += 1;
+            }
+            assert!(k > 64, "{name} {i}: {k} packets");
+            let mut h = Formula::default();
+            let Some((node, used)) = aqr_vorbis::formula::packets(&mut h, &setup, ident, &odd) else { continue };
+            h.root = node;
+            plan_holds(&format!("vorbis odd {name} {i}"), h, &odd[..used]);
+            seen += 1;
+        }
+    }
+    assert!(seen >= 12, "{seen}");
+}
+
+/// ogg-recons lays its memory out as a stack, its limit its plan: the Ogg files (Vorbis, Opus,
+/// FLAC, chained, grouped, with data after them), and files of far more than 64 streams and
+/// pages (the same file chained 70 times).
+#[test]
+fn ogg_plans_hold() {
+    let dir = format!("{}/../../codecs/aqr-ogg/tests/data", env!("CARGO_MANIFEST_DIR"));
+    let mut seen = 0;
+    let mut mono = Vec::new();
+    for e in std::fs::read_dir(dir).unwrap() {
+        let path = e.unwrap().path();
+        let d = std::fs::read(&path).unwrap();
+        let what = path.file_name().unwrap().to_string_lossy().into_owned();
+        let Some((f, _)) = aqr_ogg::formula::encode_any(&d, 1) else { panic!("{what}") };
+        plan_holds(&format!("ogg {what}"), f.clone(), &d);
+        seen += 1;
+        if what == "venc-mono.ogg" {
+            mono = d.clone();
+        }
+        // with bytes after the last page
+        let mut tail = d.clone();
+        tail.extend_from_slice(b"not a page");
+        if let Some((f, _)) = aqr_ogg::formula::encode_any(&tail, 1) {
+            let Node::Concat(ns) = &f.root else { panic!("{what}: {:?}", f.root) };
+            let mut g = f.clone();
+            g.root = ns[0].clone();
+            plan_holds(&format!("ogg tail {what}"), g, &d);
+            seen += 1;
+        }
+    }
+    assert!(seen >= 6, "{seen}");
+    let chained: Vec<u8> = (0..70).flat_map(|_| mono.iter().copied()).collect();
+    let (f, _) = aqr_ogg::formula::encode_any(&chained, 1).unwrap();
+    plan_holds("ogg x70", f, &chained);
+}
+
 /// snappy-recons lays its memory out as a stack, its limit its plan: each stream of the
 /// fixtures rebuilt as WebAssembly within the limit of its plan alone, its working memory that
 /// of the plan to the page.

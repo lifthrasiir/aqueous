@@ -17,13 +17,14 @@ fn setup_parses() {
     assert_eq!(s.codebooks[3].lengths, [4; 16]);
     assert_eq!(s.codebooks[2].lengths, [2, 0, 3, 3, 3, 0, 4, 4, 3]);
     // codewords in entry order, each the lowest free one of its length (Vorbis I §3.2.1)
-    assert_eq!(s.codebooks[2].codewords, [0b00, 0, 0b010, 0b011, 0b100, 0, 0b1010, 0b1011, 0b110]);
-    assert_eq!(s.codebooks[2].lookup.as_ref().unwrap().multiplicands.len(), 3);
-    assert_eq!(s.codebooks[3].lookup.as_ref().unwrap().multiplicands.len(), 64);
-    assert_eq!(s.floors[0].xs, [0, 128, 64, 32, 96, 16, 80]);
+    let words: Vec<u32> = (0..9).map(|e| s.codebooks[2].codeword(e)).collect();
+    assert_eq!(words, [0b00, 0, 0b010, 0b011, 0b100, 0, 0b1010, 0b1011, 0b110]);
+    assert_eq!(s.codebooks[2].lookup.as_ref().unwrap().count, 3);
+    assert_eq!(s.codebooks[3].lookup.as_ref().unwrap().count, 64);
+    assert_eq!(s.floors[0].xs(), [0, 128, 64, 32, 96, 16, 80]);
     assert_eq!(s.residues.iter().map(|r| r.kind).collect::<Vec<_>>(), [2, 0, 1]);
-    assert_eq!(s.mappings[0].coupling, [(0, 1)]);
-    assert_eq!(s.mappings[1].mux, [0, 1]);
+    assert_eq!(s.mappings[0].coupling(), [(0, 1)]);
+    assert_eq!(s.mappings[1].mux(), [0, 1]);
     assert_eq!(s.modes.iter().map(|m| m.blockflag).collect::<Vec<_>>(), [false, true]);
 }
 

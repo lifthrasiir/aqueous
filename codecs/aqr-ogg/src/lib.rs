@@ -10,6 +10,8 @@ pub mod formula;
 pub mod layout;
 pub mod module;
 pub mod page;
+#[cfg(feature = "encode")]
+pub mod plan;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error(pub &'static str);

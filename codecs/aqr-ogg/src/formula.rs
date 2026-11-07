@@ -8,12 +8,12 @@ use std::collections::HashMap;
 use aqr_formula::{Formula, Kind, Module, Node, Usage};
 use aqr_vorbis::setup::{Ident, Setup};
 
-use crate::layout::{self, CHUNK, Layout, Packets, Predictor, Stream, Walk};
+use crate::layout::{self, CHUNK, Layout, Modes, Packets, Predictor, Source, Stream, Walk};
 use crate::page::{self, BOS, Page};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("ogg-recons", 1).with_memory(memory);
+pub const MODULE: Module = Module::new("ogg-recons", 1).with_plan(plan);
 
 /// The classes of the layout record, of the packets of streams no recompressor takes, and of
 /// the header packets of Vorbis streams before their setup headers.
@@ -21,22 +21,10 @@ pub const LAYOUT: &str = "ogg/layout";
 pub const PACKETS: &str = "ogg/packets";
 pub const HEADERS: &str = "ogg/headers";
 
-/// The memory of the module (wasm32 sizes): the inputs and the file; each stream's packets
-/// copied, their ends (as they grow, twice their count), lacing values and durations; the
-/// layout's pages (24 bytes each) and their streams.
-fn memory(u: &Usage<'_>) -> Option<u64> {
+/// The memory of the module: its plan ([`crate::plan::decode`]).
+fn plan(u: &Usage<'_>) -> Option<u64> {
     let [layout, packets] = u.all_contents::<2>()?;
-    let l = Layout::read(layout, u.output()).ok()?;
-    let (mut n, mut at) = (0u64, 0);
-    while let Some(len) = packets.get(at..at + 2) {
-        let len = u16::from_le_bytes([len[0], len[1]]) as usize;
-        n += (len < CHUNK) as u64;
-        at += 2 + len;
-    }
-    let bytes = packets.len() as u64;
-    let pages = l.pages.len() as u64;
-    let extra = bytes + 8 * n + (bytes / 255 + n) + 8 * n + 28 * pages + 64 * l.streams.len() as u64;
-    Some(u.whole(extra, 4 * l.streams.len() as u64 + 2))
+    crate::plan::decode(u.initial(), u.inputs, u.output(), layout, packets)
 }
 
 /// Whether `d` starts with an Ogg page.
@@ -58,8 +46,9 @@ fn predictor(p: &Packets) -> (Predictor, Option<Setup>) {
     if let Some(ident) = vorbis_ident(p.get(0))
         && p.len() >= 3
         && let Ok(s) = Setup::parse(p.get(2), ident)
+        && let Some(modes) = Modes::new(s.modes.iter().map(|m| m.blockflag))
     {
-        return (Predictor::Vorbis(s.modes.iter().map(|m| m.blockflag).collect()), Some(s));
+        return (Predictor::Vorbis(modes), Some(s));
     }
     if p.get(0).starts_with(b"OpusHead") {
         return (Predictor::Opus, None);
@@ -211,7 +200,12 @@ pub fn encode_any(input: &[u8], threads: usize) -> Option<(Formula, bool)> {
     debug_assert!(packets.iter().zip(&opens).zip(&lacing).all(|((p, &o), l)| p.lacing(o).ok().as_ref() == Some(l)));
 
     let mut layout = Layout::default();
-    let mut w = Walk::new(&packets, &lacing, &durations, &of);
+    let sources = packets.iter().zip(&lacing).zip(&durations).map(|((p, l), d)| Source {
+        bytes: &p.bytes,
+        lacing: l,
+        durations: d,
+    });
+    let mut w = Walk::new(sources, of.iter().copied());
     for (p, &s) in pages.iter().zip(&of) {
         let step = w.page(s, p.lacing.len()).ok()?;
         w.settle(s, &step, p.seq, p.granule);
@@ -252,7 +246,7 @@ pub fn encode_any(input: &[u8], threads: usize) -> Option<(Formula, bool)> {
                 f.push_as(PACKETS, kind, p.framed())
             }
         };
-        let predictor = predictors[i].clone();
+        let predictor = predictors[i];
         layout.streams.push(Stream { serial: serials[i], bytes: node.len(), open: opens[i], predictor });
         nodes.push(node);
     }

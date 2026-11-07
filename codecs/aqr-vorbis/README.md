@@ -19,6 +19,15 @@ aqr-fsb gives it the samples of FSB5 banks, aqr-ogg the audio packets of Ogg's V
   code (free) or one of its own the record gives, where it pays.
 - `codec`: the record: the packets, the odd ones (cut short, or of padding not zero), the keys'
   tables, then one rANS stream (aqr-common's `rans64`).
+- `plan`: the module's memory on WebAssembly (it is on the stack allocator, `aqr_api::stack`):
+  exactly what the decoder reserves, in the order it does, from the setup header and the
+  record's header. Nothing grows or is made per packet: the output first, then the setup (four
+  vectors a codebook, its tree last; floors, residues and mappings in fixed room), the keys
+  (the entries by rank in one vector), the header's lists and the tables (the default ones from
+  the books' codes, the own ones from the levels, all in one vector of frequencies, with no
+  hashing), the decoder, the contexts (slots only for the floors' values and the residues'
+  partitions the setup has) and the walk's room; freed top first (`Codebooks`, and fields
+  declared in the reverse of the order they are made in).
 
 Written from the Vorbis I specification alone. Floors of type 0 are not handled (libvorbis has
 not written them since 1.0).

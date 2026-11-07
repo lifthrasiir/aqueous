@@ -342,7 +342,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "ogg-recons",
         version: 1,
-        sha512_256: hex("6e222758c4cb5106c25c4144de6dfd84b4d11312b94817666e2a80b8df9f67a0"),
+        sha512_256: hex("192f4385f28ea6cfb2bebe9d012d8769e2a09cccd7e8d0192ba5430c233cb7fa"),
         block: include_bytes!("../wasm/ogg-recons.block"),
     },
     Known {
@@ -456,7 +456,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "vorbis-recons",
         version: 2,
-        sha512_256: hex("f80c53d445df1d71a6e9452b2a8d787abb7c5fa79cf1a7458ee2f726bd604ae6"),
+        sha512_256: hex("43a6195dacde429fd1c040eb6f6158aa7df420e6ec278c87dddf6e5be114016b"),
         block: include_bytes!("../wasm/vorbis-recons.block"),
     },
     Known {

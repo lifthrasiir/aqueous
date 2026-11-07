@@ -27,6 +27,11 @@ fn tables() -> &'static Tables {
     })
 }
 
+/// Makes the tables now (otherwise at the first use).
+pub fn init() {
+    tables();
+}
+
 /// The CRC of `buf` continued from `crc`.
 pub fn update(mut crc: u32, mut buf: &[u8]) -> u32 {
     let t = tables();

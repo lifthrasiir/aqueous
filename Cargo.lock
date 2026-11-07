@@ -766,6 +766,7 @@ dependencies = [
 name = "aqr-ogg"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
  "aqr-common",
  "aqr-formula",
  "aqr-vorbis",
@@ -941,6 +942,7 @@ version = "0.1.0"
 name = "aqr-vorbis"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
  "aqr-common",
  "aqr-formula",
 ]

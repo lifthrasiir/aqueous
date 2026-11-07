@@ -27,7 +27,53 @@ pub fn frame(out: &mut Vec<u8>, p: &[u8]) {
     out.extend_from_slice(rest);
 }
 
-/// A stream's packets: their bytes one after another, and where each ends.
+/// A stream's packets: their bytes one after another, and where each ends (in the bytes).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PacketsRef<'a> {
+    pub bytes: &'a [u8],
+    pub ends: &'a [usize],
+}
+
+impl<'a> PacketsRef<'a> {
+    pub fn len(&self) -> usize {
+        self.ends.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ends.is_empty()
+    }
+
+    pub fn get(&self, i: usize) -> &'a [u8] {
+        let start = if i == 0 { 0 } else { self.ends[i - 1] };
+        &self.bytes[start..self.ends[i]]
+    }
+
+    /// The room of the lacing values of the packets (see [`PacketsRef::lacing_into`]).
+    pub fn lacing_len(&self, open: bool) -> usize {
+        self.bytes.len() / 255 + self.len() - (open && !self.is_empty()) as usize
+    }
+
+    /// The lacing values of the packets, put at the end of `out` (which has room): of a packet
+    /// of `n` bytes, `n / 255` values 255, then `n mod 255`, but for the last packet of a stream
+    /// left `open` (unended), of a multiple of 255 bytes, more than none.
+    pub fn lacing_into(&self, open: bool, out: &mut Vec<u8>) -> Result<()> {
+        for i in 0..self.len() {
+            let n = self.get(i).len();
+            out.resize(out.len() + n / 255, 255);
+            if !(open && i + 1 == self.len()) {
+                out.push((n % 255) as u8);
+            } else if n == 0 || !n.is_multiple_of(255) {
+                return Err(corrupt());
+            }
+        }
+        if open && self.is_empty() {
+            return Err(corrupt());
+        }
+        Ok(())
+    }
+}
+
+/// A stream's packets, owned.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Packets {
     pub bytes: Vec<u8>,
@@ -37,20 +83,14 @@ pub struct Packets {
 impl Packets {
     /// The packets framed in `d` ([`frame`]), all of it.
     pub fn unframe(d: &[u8]) -> Result<Packets> {
-        let mut p = Packets { bytes: Vec::with_capacity(d.len()), ends: Vec::new() };
-        let mut at = 0;
-        while at < d.len() {
-            let n = u16::from_le_bytes(d.get(at..at + 2).ok_or_else(corrupt)?.try_into().unwrap()) as usize;
-            p.bytes.extend_from_slice(d.get(at + 2..at + 2 + n).ok_or_else(corrupt)?);
-            at += 2 + n;
-            if n < CHUNK {
-                p.ends.push(p.bytes.len());
-            }
-        }
-        if p.ends.last() != Some(&p.bytes.len()) && !p.bytes.is_empty() {
-            return Err(corrupt());
-        }
+        let (bytes, packets) = unframed(d)?;
+        let mut p = Packets { bytes: Vec::with_capacity(bytes), ends: Vec::with_capacity(packets) };
+        unframe_into(d, &mut p.bytes, &mut p.ends)?;
         Ok(p)
+    }
+
+    pub fn as_ref(&self) -> PacketsRef<'_> {
+        PacketsRef { bytes: &self.bytes, ends: &self.ends }
     }
 
     pub fn push(&mut self, p: &[u8]) {
@@ -67,8 +107,7 @@ impl Packets {
     }
 
     pub fn get(&self, i: usize) -> &[u8] {
-        let start = if i == 0 { 0 } else { self.ends[i - 1] };
-        &self.bytes[start..self.ends[i]]
+        self.as_ref().get(i)
     }
 
     /// The packets framed, one after another.
@@ -78,34 +117,94 @@ impl Packets {
         out
     }
 
-    /// The lacing values of the packets: of a packet of `n` bytes, `n / 255` values 255, then
-    /// `n mod 255`, but for the last packet of a stream left `open` (unended), of a multiple of
-    /// 255 bytes, more than none.
+    /// The lacing values of the packets ([`PacketsRef::lacing_into`]).
     pub fn lacing(&self, open: bool) -> Result<Vec<u8>> {
-        let mut out = Vec::with_capacity(self.bytes.len() / 255 + self.len());
-        for i in 0..self.len() {
-            let n = self.get(i).len();
-            out.resize(out.len() + n / 255, 255);
-            if !(open && i + 1 == self.len()) {
-                out.push((n % 255) as u8);
-            } else if n == 0 || !n.is_multiple_of(255) {
-                return Err(corrupt());
-            }
-        }
-        if open && self.is_empty() {
-            return Err(corrupt());
-        }
+        let mut out = Vec::with_capacity(self.as_ref().lacing_len(open));
+        self.as_ref().lacing_into(open, &mut out)?;
         Ok(out)
     }
 }
 
+/// The bytes and packets of the packets framed in `d` ([`frame`]), all of it.
+pub fn unframed(d: &[u8]) -> Result<(usize, usize)> {
+    let (mut at, mut bytes, mut packets, mut last) = (0, 0, 0, 0);
+    while at < d.len() {
+        let n = u16::from_le_bytes(d.get(at..at + 2).ok_or_else(corrupt)?.try_into().unwrap()) as usize;
+        if at + 2 + n > d.len() {
+            return Err(corrupt());
+        }
+        at += 2 + n;
+        bytes += n;
+        if n < CHUNK {
+            packets += 1;
+            last = bytes;
+        }
+    }
+    if last != bytes {
+        return Err(corrupt());
+    }
+    Ok((bytes, packets))
+}
+
+/// The packets framed in `d` put at the ends of `bytes` and `ends` (the latter from the bytes
+/// as they were), which have room for them ([`unframed`]).
+pub fn unframe_into(d: &[u8], bytes: &mut Vec<u8>, ends: &mut Vec<usize>) -> Result<()> {
+    let (start, mut at) = (bytes.len(), 0);
+    while at < d.len() {
+        let n = u16::from_le_bytes(d.get(at..at + 2).ok_or_else(corrupt)?.try_into().unwrap()) as usize;
+        bytes.extend_from_slice(d.get(at + 2..at + 2 + n).ok_or_else(corrupt)?);
+        at += 2 + n;
+        if n < CHUNK {
+            ends.push(bytes.len() - start);
+        }
+    }
+    if ends.last().is_none_or(|&e| e != bytes.len() - start) && bytes.len() > start {
+        return Err(corrupt());
+    }
+    Ok(())
+}
+
+/// The block flags of a Vorbis setup header's modes (1 to 64), one bit each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Modes {
+    n: u8,
+    bits: u64,
+}
+
+impl Modes {
+    /// The flags of `modes`, None where there are none or more than 64.
+    pub fn new(modes: impl IntoIterator<Item = bool>) -> Option<Modes> {
+        let mut m = Modes { n: 0, bits: 0 };
+        for f in modes {
+            if m.n == 64 {
+                return None;
+            }
+            m.bits |= (f as u64) << m.n;
+            m.n += 1;
+        }
+        (m.n > 0).then_some(m)
+    }
+
+    pub fn len(&self) -> usize {
+        self.n as usize
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.n == 0
+    }
+
+    pub fn get(&self, i: usize) -> bool {
+        self.bits >> i & 1 != 0
+    }
+}
+
 /// How a stream's granule positions are predicted: by the samples of its packets (§5.2).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Predictor {
     /// None: each page with a packet ending on it as the one before.
     None,
-    /// Vorbis I, of the block flags of the setup header's modes (1 to 64).
-    Vorbis(Vec<bool>),
+    /// Vorbis I, of the block flags of the setup header's modes.
+    Vorbis(Modes),
     /// Opus (RFC 7845).
     Opus,
 }
@@ -114,6 +213,12 @@ impl Predictor {
     /// The samples each packet of `p` ends, as the predictor counts them.
     pub fn durations(&self, p: &Packets) -> Result<Vec<u64>> {
         let mut out = vec![0; p.len()];
+        self.durations_into(p.as_ref(), &mut out)?;
+        Ok(out)
+    }
+
+    /// [`Predictor::durations`] into `out` (zeros, one for each packet).
+    pub fn durations_into(&self, p: PacketsRef, out: &mut [u64]) -> Result<()> {
         match self {
             Predictor::None => {}
             Predictor::Vorbis(flags) => {
@@ -134,7 +239,7 @@ impl Predictor {
                     if b & 1 != 0 || mode >= flags.len() {
                         continue;
                     }
-                    let size = sizes[flags[mode] as usize];
+                    let size = sizes[flags.get(mode) as usize];
                     *d = prev.map_or(0, |prev| prev / 4 + size / 4);
                     prev = Some(size);
                 }
@@ -158,7 +263,7 @@ impl Predictor {
                 }
             }
         }
-        Ok(out)
+        Ok(())
     }
 }
 
@@ -185,11 +290,12 @@ pub struct Page {
     pub granule: u64,
 }
 
-/// The layout record (FORMAT.md §4).
+/// The layout record (FORMAT.md §4). (Its lists are declared in the reverse of the order they
+/// are made in.)
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Layout {
-    pub streams: Vec<Stream>,
     pub pages: Vec<Page>,
+    pub streams: Vec<Stream>,
 }
 
 impl Layout {
@@ -207,8 +313,8 @@ impl Layout {
             out.push(s.open as u8 | kind << 1);
             if let Predictor::Vorbis(flags) = &s.predictor {
                 varint::put(&mut out, flags.len() as u64);
-                for c in flags.chunks(8) {
-                    out.push(c.iter().enumerate().fold(0, |a, (i, &f)| a | (f as u8) << i));
+                for i in (0..flags.len()).step_by(8) {
+                    out.push((i..flags.len().min(i + 8)).fold(0, |a, j| a | (flags.get(j) as u8) << (j - i)));
                 }
             }
         }
@@ -248,16 +354,16 @@ impl Layout {
                     if !(1..=64).contains(&m) {
                         return Err(corrupt());
                     }
-                    let mut f = Vec::with_capacity(m);
+                    let mut bits = 0u64;
                     for i in 0..m.div_ceil(8) {
                         let b = byte(&mut at)?;
                         let k = (m - 8 * i).min(8);
                         if k < 8 && b >> k != 0 {
                             return Err(corrupt());
                         }
-                        f.extend((0..k).map(|j| b >> j & 1 != 0));
+                        bits |= (b as u64) << (8 * i);
                     }
-                    Predictor::Vorbis(f)
+                    Predictor::Vorbis(Modes { n: m as u8, bits })
                 }
                 2 => Predictor::Opus,
                 _ => return Err(corrupt()),
@@ -295,11 +401,17 @@ impl Layout {
     }
 }
 
+/// A stream's packets' bytes, their lacing values and their durations, as the walk takes them.
+#[derive(Debug, Clone, Copy)]
+pub struct Source<'a> {
+    pub bytes: &'a [u8],
+    pub lacing: &'a [u8],
+    pub durations: &'a [u64],
+}
+
 /// A stream as the walk takes its pages.
 struct Walked<'a> {
-    packets: &'a Packets,
-    lacing: &'a [u8],
-    durations: &'a [u64],
+    source: Source<'a>,
     /// The lacing values, bytes and packets taken so far.
     lace: usize,
     byte: usize,
@@ -313,6 +425,9 @@ struct Walked<'a> {
     /// Its pages not taken.
     left: usize,
 }
+
+/// The bytes of a stream of the walk (checked as WebAssembly).
+pub const WALKED_SIZE: usize = size_of::<Walked>();
 
 /// A page as the walk predicts it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -333,44 +448,31 @@ pub struct Walk<'a> {
 }
 
 impl<'a> Walk<'a> {
-    /// The walk of streams of `packets`, their `lacing` and `durations`, of the pages of
-    /// `streams` (each page's stream).
-    pub fn new(
-        packets: &'a [Packets],
-        lacing: &'a [Vec<u8>],
-        durations: &'a [Vec<u64>],
-        streams: &[usize],
-    ) -> Walk<'a> {
-        let mut w = Walk {
-            streams: (0..packets.len())
-                .map(|i| Walked {
-                    packets: &packets[i],
-                    lacing: &lacing[i],
-                    durations: &durations[i],
-                    lace: 0,
-                    byte: 0,
-                    packet: 0,
-                    pos: 0,
-                    seq: None,
-                    within: false,
-                    left: 0,
-                })
-                .collect(),
-        };
-        streams.iter().for_each(|&s| w.streams[s].left += 1);
+    /// The walk of `streams`, of the pages of `pages` (each page's stream).
+    pub fn new(streams: impl ExactSizeIterator<Item = Source<'a>>, pages: impl Iterator<Item = usize>) -> Walk<'a> {
+        let mut w = Walk { streams: Vec::with_capacity(streams.len()) };
+        for source in streams {
+            w.streams.push(Walked { source, lace: 0, byte: 0, packet: 0, pos: 0, seq: None, within: false, left: 0 });
+        }
+        pages.for_each(|s| w.streams[s].left += 1);
         w
+    }
+
+    /// Whether every stream has a page.
+    pub fn all_paged(&self) -> bool {
+        self.streams.iter().all(|w| w.left > 0)
     }
 
     /// The next page, of stream `s` and `n` lacing values, as predicted.
     pub fn page(&mut self, s: usize, n: usize) -> Result<Step> {
         let w = &mut self.streams[s];
         let lacing = w.lace..w.lace + n;
-        let values = w.lacing.get(lacing.clone()).ok_or_else(corrupt)?;
+        let values = w.source.lacing.get(lacing.clone()).ok_or_else(corrupt)?;
         let body = w.byte..w.byte + values.iter().map(|&v| v as usize).sum::<usize>();
         let first = w.seq.is_none();
         let mut ends = false;
         for _ in values.iter().filter(|&&v| v < 255) {
-            w.pos = w.pos.wrapping_add(w.durations[w.packet]);
+            w.pos = w.pos.wrapping_add(w.source.durations[w.packet]);
             w.packet += 1;
             ends = true;
         }
@@ -398,11 +500,11 @@ impl<'a> Walk<'a> {
     /// The bytes of the lacing values and body of `step` of stream `s`.
     pub fn parts(&self, s: usize, step: &Step) -> (&'a [u8], &'a [u8]) {
         let w = &self.streams[s];
-        (&w.lacing[step.lacing.clone()], &w.packets.bytes[step.body.clone()])
+        (&w.source.lacing[step.lacing.clone()], &w.source.bytes[step.body.clone()])
     }
 
     /// Whether every stream's lacing values are all taken.
     pub fn done(&self) -> bool {
-        self.streams.iter().all(|w| w.lace == w.lacing.len())
+        self.streams.iter().all(|w| w.lace == w.source.lacing.len())
     }
 }

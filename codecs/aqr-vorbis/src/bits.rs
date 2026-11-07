@@ -75,36 +75,87 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Writes a packet.
-#[derive(Debug, Clone, Default)]
+/// Writes a packet: into a vector of its own, or after the bytes of one (a stream's output,
+/// which is never grown: bits past its limit are dropped and [`Writer::over`] tells).
+#[derive(Debug, Clone)]
 pub struct Writer {
     data: Vec<u8>,
+    /// Where the packet starts in `data`.
+    start: usize,
+    /// The length of `data` up to which a byte is written without a check: its capacity, or its
+    /// limit where that is less.
+    room: usize,
+    /// Whether `data` is grown (else the bytes past its `room` are dropped).
+    grow: bool,
+    over: bool,
     acc: u64,
     n: u32,
 }
 
+impl Default for Writer {
+    fn default() -> Self {
+        Writer::new()
+    }
+}
+
 impl Writer {
     pub fn new() -> Self {
-        Writer::default()
+        Writer { data: Vec::new(), start: 0, room: 0, grow: true, over: false, acc: 0, n: 0 }
+    }
+
+    /// A writer after the bytes of `data`, which holds `limit` bytes at most (and is not grown).
+    pub fn after(data: Vec<u8>, limit: usize) -> Self {
+        let room = limit.min(data.capacity());
+        Writer { start: data.len(), room, data, grow: false, over: false, acc: 0, n: 0 }
     }
 
     /// The bits written.
     pub fn pos(&self) -> usize {
-        self.data.len() * 8 + self.n as usize
+        (self.data.len() - self.start) * 8 + self.n as usize
+    }
+
+    /// Whether bits were dropped for the limit.
+    pub fn over(&self) -> bool {
+        self.over
     }
 
     pub fn bit(&mut self, b: u32) {
         self.bits(b & 1, 1);
     }
 
+    #[inline(always)]
+    fn put(&mut self, b: u8) {
+        let len = self.data.len();
+        if len < self.room {
+            // SAFETY: `room` is at most the capacity, so the byte is within it
+            unsafe {
+                self.data.as_mut_ptr().add(len).write(b);
+                self.data.set_len(len + 1);
+            }
+        } else {
+            self.put_beyond(b);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn put_beyond(&mut self, b: u8) {
+        if self.grow {
+            self.data.push(b);
+            self.room = self.data.capacity();
+        } else {
+            self.over = true;
+        }
+    }
+
     /// The low `n` bits of `v` (n ≤ 32).
-    #[inline]
+    #[inline(always)]
     pub fn bits(&mut self, v: u32, n: u32) {
         let v = if n == 32 { v as u64 } else { (v as u64) & ((1u64 << n) - 1) };
         self.acc |= v << self.n;
         self.n += n;
         while self.n >= 8 {
-            self.data.push(self.acc as u8);
+            self.put(self.acc as u8);
             self.acc >>= 8;
             self.n -= 8;
         }
@@ -113,7 +164,7 @@ impl Writer {
     /// The bytes, the last padded with zero bits.
     pub fn finish(mut self) -> Vec<u8> {
         if self.n > 0 {
-            self.data.push(self.acc as u8);
+            self.put(self.acc as u8);
         }
         self.data
     }

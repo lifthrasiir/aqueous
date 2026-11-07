@@ -20,7 +20,7 @@ pub fn params(ident: Ident) -> Vec<u8> {
     p
 }
 
-fn ident(params: &[u8]) -> Result<Ident> {
+pub(crate) fn ident(params: &[u8]) -> Result<Ident> {
     let mut at = 0;
     let channels = varint::get(params, &mut at).map_err(|_| corrupt())?;
     let &[sizes] = &params[at..] else { return Err(corrupt()) };
@@ -35,6 +35,21 @@ fn ident(params: &[u8]) -> Result<Ident> {
 /// stream's channels and block sizes) and `inputs` (the setup header and the record).
 pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     let &[setup, record] = inputs else { return Err(corrupt()) };
+    // (the output first: all else is freed above it, last made first)
+    let len = usize::try_from(len).map_err(|_| corrupt())?;
+    let mut out = Vec::with_capacity(len);
     let setup = Setup::parse(setup, ident(params)?)?;
-    codec::decode(&setup, record, usize::try_from(len).map_err(|_| corrupt())?)
+    codec::decode_into(&setup, record, len, &mut out)?;
+    Ok(out)
 }
+
+/// Bytes of the structures the module holds in vectors, on WebAssembly (32-bit pointers; checked
+/// there by assertions): what its memory plan ([`crate::plan`]) is made of. (The others hold no
+/// pointers and are as large everywhere.)
+pub mod wasm {
+    /// A codebook: its dimensions, lookup, and four vectors.
+    pub const CODEBOOK: u64 = 68;
+}
+
+#[cfg(target_family = "wasm")]
+const _: () = assert!(size_of::<crate::setup::Codebook>() == wasm::CODEBOOK as usize);
