@@ -59,4 +59,24 @@ impl Receiver {
             buf.resize(n, 0);
         }
     }
+
+    /// The next message into `buf`, which then holds it (and no more); false once the channel
+    /// is closed and empty. `buf` is grown only for a message longer than its capacity, so that
+    /// one reserved for the longest is never reallocated.
+    pub fn recv_into(&self, buf: &mut Vec<u8>) -> bool {
+        loop {
+            buf.resize(buf.capacity(), 0);
+            let n = crate::sys::recv(self.0, buf);
+            if n < 0 {
+                buf.clear();
+                return false;
+            }
+            let n = n as usize;
+            if n <= buf.len() {
+                buf.truncate(n);
+                return true;
+            }
+            buf.resize(n, 0);
+        }
+    }
 }

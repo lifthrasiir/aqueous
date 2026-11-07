@@ -439,9 +439,17 @@ pub fn write_frame(f: &Frame, out: &mut Vec<u8>, max_bytes: usize) -> bool {
 /// only ones it counts; returns what is left of it. So it fails exactly when the frame's
 /// long codes take more than `budget` bits.
 #[inline]
-pub fn write_frame_bits(f: &Frame, out: &mut Vec<u8>, mut budget: u64) -> Option<u64> {
+pub fn write_frame_bits(f: &Frame, out: &mut Vec<u8>, budget: u64) -> Option<u64> {
+    write_frame_with(f, out, budget, &mut FastWriter::with_capacity(f.block_size * f.channels * 4 + 64))
+}
+
+/// [`write_frame_bits`] through the writer `w` (emptied first, its room kept), which it grows
+/// only for a frame over its room less what it reserves past its position: a partition's 8
+/// bytes a sample and 24.
+#[inline]
+pub fn write_frame_with(f: &Frame, out: &mut Vec<u8>, mut budget: u64, w: &mut FastWriter) -> Option<u64> {
     let start = out.len();
-    let mut w = FastWriter::with_capacity(f.block_size * f.channels * 4 + 64);
+    w.clear();
     for &b in &f.header {
         w.reserve(8);
         w.put(b as u64, 8);
@@ -458,11 +466,11 @@ pub fn write_frame_bits(f: &Frame, out: &mut Vec<u8>, mut budget: u64) -> Option
             w.put(1, s.wasted as u32);
         }
         match s.typ {
-            SUB_CONSTANT => put_signed(&mut w, s.warm[0], bits),
+            SUB_CONSTANT => put_signed(w, s.warm[0], bits),
             SUB_VERBATIM => {
                 w.reserve(f.block_size * 5 + 8);
                 for &v in &f.verbatim[vi..vi + f.block_size] {
-                    put_signed(&mut w, v, bits);
+                    put_signed(w, v, bits);
                 }
                 vi += f.block_size;
             }
@@ -470,13 +478,13 @@ pub fn write_frame_bits(f: &Frame, out: &mut Vec<u8>, mut budget: u64) -> Option
                 let order = s.order as usize;
                 w.reserve(order * 10 + 16);
                 for &v in &s.warm[..order] {
-                    put_signed(&mut w, v, bits);
+                    put_signed(w, v, bits);
                 }
                 if s.typ >= SUB_LPC {
                     w.put(s.precision as u64 - 1, 4);
                     w.put(s.shift as u64 & 31, 5);
                     for &c in &s.coefs[..order] {
-                        put_signed(&mut w, c as i64, s.precision as u32);
+                        put_signed(w, c as i64, s.precision as u32);
                     }
                 }
                 w.put((s.method as u64) << 4 | s.porder as u64, 6);
@@ -494,11 +502,11 @@ pub fn write_frame_bits(f: &Frame, out: &mut Vec<u8>, mut budget: u64) -> Option
                         w.put(nb as u64, 5);
                         w.reserve(n * 5 + 8);
                         for &v in part {
-                            put_signed(&mut w, v as i64, nb);
+                            put_signed(w, v as i64, nb);
                         }
                     } else {
                         w.put(k as u64, pbits);
-                        if !write_rice(&mut w, k as u32, part, &mut budget) {
+                        if !write_rice(w, k as u32, part, &mut budget) {
                             return None;
                         }
                     }
@@ -507,8 +515,7 @@ pub fn write_frame_bits(f: &Frame, out: &mut Vec<u8>, mut budget: u64) -> Option
             }
         }
     }
-    let bytes = w.finish();
-    out.extend_from_slice(&bytes);
+    out.extend_from_slice(w.bytes());
     let c = crc16(&out[start..]);
     out.extend_from_slice(&c.to_be_bytes());
     Some(budget)

@@ -1,7 +1,7 @@
 //! aqr-flac as a module of entry formulas (see aqr-formula): the coded streams as input
 //! slots.
 //!
-//! No params. Resources: aqr-raw's residual tables. Inputs: the six byte streams
+//! Params: what the frames take at most (`codec::Room`). Resources: aqr-raw's residual tables. Inputs: the six byte streams
 //! (`codec::STREAM_NAMES`), the rANS words (u32 LE) and the two raw bit streams. FORMAT.md
 //! describes the module in full. WAV, AIFF and headerless PCM are aqr-raw's (`pcm-recons`).
 
@@ -11,18 +11,13 @@ use std::borrow::Cow;
 
 pub use crate::module::{Error, Result, decode};
 
-pub const MODULE: Module = Module::new("flac-recons", 3).with_memory(memory);
+pub const MODULE: Module = Module::new("flac-recons", 4).with_plan(memory);
 
-/// The memory of the module: aqr-raw's `pipeline_memory` of frames of the stream's largest
-/// block (STREAMINFO's maximum block size) of all its channels.
+/// The memory of the module: its plan (`module::plan`), the messages its channels may hold
+/// with it.
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let &[.., words, raw0, raw1] = u.inputs else { return None };
-    let prefix = u.content(codec::S_PREFIX)?;
-    let (si, _) = crate::flac::parse_metadata(prefix)?;
-    // (STREAMINFO is the first block: its maximum block size 2 bytes in)
-    let at = prefix.windows(4).position(|w| w == b"fLaC")? + 8;
-    let max = u16::from_be_bytes(prefix.get(at + 2..at + 4)?.try_into().ok()?) as u64;
-    Some(aqr_raw::formula::pcm::pipeline_memory(u, max * si.channels as u64, u64::MAX, words, raw0 + raw1))
+    let &[len] = u.outputs else { return None };
+    Some(crate::module::plan(u.params, u.resources, u.inputs, len, u.initial())?.0)
 }
 
 /// Classes of the input slots, and their kinds: the rANS words and the raw bits do not
@@ -42,12 +37,12 @@ const CLASSES: [(&str, StreamKind); N_BYTE_STREAMS + 3] = [
 /// The formula of `input`, a FLAC file, on `threads` threads (the formula does not depend
 /// on it). None where the input is not FLAC, or the coder panics.
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
-    let c = std::panic::catch_unwind(|| codec::encode_threads(input, threads)).ok()??;
+    let (c, room) = std::panic::catch_unwind(|| codec::encode_threads(input, threads)).ok()??;
     let mut f = Formula::default();
     let [raw0, raw1] = c.raw;
     let slots = c.streams.into_iter().chain([c.words, raw0, raw1]).map(Cow::into_owned);
     let inputs = slots.zip(CLASSES).map(|(s, (class, kind))| f.push_as(class, kind, s)).collect();
-    f.root = Node::apply_with(MODULE, vec![resource()], Vec::new(), inputs, input.len() as u64);
+    f.root = Node::apply_with(MODULE, vec![resource()], crate::module::put_params(&room), inputs, input.len() as u64);
     Some(f)
 }
 

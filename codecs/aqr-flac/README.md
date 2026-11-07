@@ -186,5 +186,10 @@ lengths), unless noted.
   header prediction but were not available for testing.
 - **Not covered** (not coded, or the containing bytes kept as junk): FLAC in Ogg, more than
   8 channels.
-- **Memory**: the whole input, plus 4 bytes per residual for the rANS symbols.
+- **Memory**: the whole input, plus 4 bytes per residual for the rANS symbols. The module
+  lays its memory out as a stack (`aqr_api::stack`), so its limit is its plan
+  (`module::plan`): its pipeline's stages and workers are tasks that pass each item as a
+  message, each taking it into a buffer and a frame reserved for the largest, of the room
+  the params give (the most samples a channel, channels and bytes of a frame: flac-recons
+  4), whatever it is given; and the messages its channels may hold.
 - MD5 signatures are not checked (they are kept with the metadata).

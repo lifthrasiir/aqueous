@@ -65,6 +65,38 @@ fn predict_header(prev: &[u8], prev_block: usize, out: &mut Vec<u8>) {
     out.extend_from_slice(&prev[4 + n..]);
 }
 
+/// What the frames of a file take at most: samples a channel, channels, bytes. Decoding holds
+/// to it (its frames, and its writers, are of room for it: flac-recons' params).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Room {
+    pub block: usize,
+    pub channels: usize,
+    pub frame: usize,
+}
+
+impl Room {
+    /// What the WebAssembly pipeline (`par::apart`) takes of it: a subframe's partitions are
+    /// as many as its samples at most (and 2^15), and a worker's message is a frame's bytes,
+    /// the bits of its long codes and two bytes.
+    pub fn rooms(&self) -> par::apart::Rooms {
+        let (channels, block) = (self.channels, self.block);
+        par::apart::Rooms { channels, block, parts: block.min(1 << 15), out: 2 + 8 + self.frame }
+    }
+
+    /// Bytes of the writer of a frame of the WebAssembly pipeline: the frame's, and what a
+    /// writer reserves past its position (a partition's 8 bytes a sample at most).
+    pub fn writer(&self) -> usize {
+        self.frame + 8 * self.block + 64
+    }
+
+    fn check(&self, f: &Frame) -> Result<(), Error> {
+        match f.block_size <= self.block && f.channels <= self.channels {
+            true => Ok(()),
+            false => Err(Error("frame past its room")),
+        }
+    }
+}
+
 /// Cuts a FLAC file into frames and junk: the junk, the frame headers and the subframe
 /// parameters go to the byte streams; the frames (with their residuals) are returned.
 struct Splitter<'a> {
@@ -78,6 +110,7 @@ struct Splitter<'a> {
     prev_hdr: Vec<u8>,
     prev_block: usize,
     pred: Vec<u8>,
+    room: Room,
 }
 
 impl<'a> Splitter<'a> {
@@ -95,6 +128,7 @@ impl<'a> Splitter<'a> {
             prev_hdr: Vec::new(),
             prev_block: 0,
             pred: Vec::new(),
+            room: Room::default(),
         })
     }
 
@@ -129,6 +163,9 @@ impl<'a> Splitter<'a> {
                 continue;
             };
             self.run += 1;
+            let r = &mut self.room;
+            (r.block, r.channels, r.frame) =
+                (r.block.max(f.block_size), r.channels.max(f.channels), r.frame.max(e - p));
             self.p = e;
             // Header.
             predict_header(&self.prev_hdr, self.prev_block, &mut self.pred);
@@ -147,13 +184,14 @@ impl<'a> Splitter<'a> {
         false
     }
 
-    fn finish(self, s: &mut [Vec<u8>]) {
+    fn finish(self, s: &mut [Vec<u8>]) -> Room {
         put_varint(&mut s[S_LAYOUT], self.run);
+        self.room
     }
 }
 
-/// Encodes a FLAC file; `None` if it has no FLAC stream.
-pub fn encode(input: &[u8]) -> Option<Coded<'static>> {
+/// Encodes a FLAC file, with what its frames take; `None` if it has no FLAC stream.
+pub fn encode(input: &[u8]) -> Option<(Coded<'static>, Room)> {
     let mut s: Vec<Vec<u8>> = vec![Vec::new(); N_BYTE_STREAMS];
     let mut sp = Splitter::new(input, &mut s)?;
     let mut re = ResEncoder::new(input.len());
@@ -161,14 +199,14 @@ pub fn encode(input: &[u8]) -> Option<Coded<'static>> {
     while sp.next(&mut f, &mut s) {
         re.frame(&mut f);
     }
-    sp.finish(&mut s);
+    let room = sp.finish(&mut s);
     let (words, raw) = re.finish();
-    Some(Coded::new(s, words, raw))
+    Some((Coded::new(s, words, raw), room))
 }
 
 /// [`encode`] with `threads` threads: the frames are parsed here, the LMS stage and the
 /// coding run on two other threads, frames passed in batches. The same output.
-pub fn encode_threads(input: &[u8], threads: usize) -> Option<Coded<'static>> {
+pub fn encode_threads(input: &[u8], threads: usize) -> Option<(Coded<'static>, Room)> {
     if threads <= 1 {
         return encode(input);
     }
@@ -220,32 +258,45 @@ pub fn encode_threads(input: &[u8], threads: usize) -> Option<Coded<'static>> {
                 (b.n, samples) = (0, 0);
             }
         }
-        sp.finish(&mut s);
+        let room = sp.finish(&mut s);
         if b.n > 0 {
             ltx.send(b).expect("pipeline");
         }
         drop(ltx);
         let (words, raw) = coder.join().unwrap_or_else(|p| std::panic::resume_unwind(p));
-        Some(Coded::new(s, words, raw))
+        Some((Coded::new(s, words, raw), room))
     })
 }
 
-/// Header state across frames, for decoding.
-#[derive(Default)]
+/// Header state across frames, for decoding, and the room of the frames.
 struct Headers {
     prev_hdr: Vec<u8>,
     prev_block: usize,
     hbuf: Vec<u8>,
+    room: Room,
 }
 
 impl Headers {
+    /// Bytes of the blocks of [`Headers::new`], as `block` rounds them.
+    #[cfg(feature = "encode")]
+    fn plan(block: impl Fn(u64) -> u64) -> u64 {
+        block(par::msg::HEADER as u64) + block(par::msg::HEADER as u64 + 1)
+    }
+
+    fn new(room: Room) -> Self {
+        let hbuf = Vec::with_capacity(par::msg::HEADER + 1);
+        Headers { prev_hdr: Vec::with_capacity(par::msg::HEADER), prev_block: 0, hbuf, room }
+    }
+
     /// Reads the next frame's header and subframe parameters into `f` (residual vectors
     /// sized).
     #[inline]
     fn frame(&mut self, f: &mut Frame, bps: u32, hdr: &mut Rd, sub: &mut Rd, warm: &mut Rd) -> Result<(), Error> {
         let hbuf = &mut self.hbuf;
         let hl = hdr.u8()? as usize;
-        if hl == 0 {
+        if hl > par::msg::HEADER {
+            return Err(Error("bad header"));
+        } else if hl == 0 {
             predict_header(&self.prev_hdr, self.prev_block, hbuf);
         } else {
             hbuf.clear();
@@ -254,7 +305,9 @@ impl Headers {
         hbuf.push(flac::crc8(hbuf));
         let (hlen, block, assign, fbps) = flac::parse_header(hbuf, 0, bps).ok_or(Error("bad header"))?;
         hbuf.pop();
-        debug_assert_eq!(hlen, hbuf.len());
+        if hlen != hbuf.len() {
+            return Err(Error("bad header"));
+        }
         f.header.clone_from(hbuf);
         f.block_size = block;
         f.assign = assign;
@@ -262,6 +315,7 @@ impl Headers {
         f.bps = fbps;
         self.prev_hdr.clone_from(hbuf);
         self.prev_block = block;
+        self.room.check(f)?;
         get_subframes(f, sub, warm, true)
     }
 }
@@ -307,8 +361,8 @@ fn decode_start(c: &Coded) -> Result<flac::StreamInfo, Error> {
     Ok(si)
 }
 
-/// Decodes into `out` (appending).
-pub fn decode(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>) -> Result<(), Error> {
+/// Decodes into `out` (appending), frames of `room`.
+pub fn decode(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>, room: Room) -> Result<(), Error> {
     if c.streams.len() != N_BYTE_STREAMS {
         return Err(Error("stream count"));
     }
@@ -323,7 +377,7 @@ pub fn decode(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>) -> Res
     let raw_buf = [bits::padded(&c.raw[0]), bits::padded(&c.raw[1])];
     let mut rd = ResDecoder::new(t, &c.words, &raw_buf)?;
     let mut f = Frame::default();
-    let mut hs = Headers::default();
+    let mut hs = Headers::new(room);
     loop {
         let run = layout.uv()?;
         for _ in 0..run {
@@ -333,8 +387,12 @@ pub fn decode(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>) -> Res
             hs.frame(&mut f, si.bps, &mut hdr, &mut sub, &mut warm)?;
             rd.frame(&mut f)?;
             check_escapes(&f)?;
+            let at = out.len();
             if !flac::write_frame(&f, out, total_len.saturating_sub(out.len())) {
                 return Err(Error("too long"));
+            }
+            if out.len() - at > room.frame {
+                return Err(Error("frame past its room"));
             }
         }
         if layout.at_end() {
@@ -372,17 +430,13 @@ fn reset_written(w: &mut Written) {
 }
 
 /// The first stage of [`decode_threads`]: frame headers and subframe parameters, junk.
-fn front<'a, X: Default>(
-    e: &mut par::Front<'a, impl par::Pass<'a, X>, X>,
-    c: &'a Coded,
-    bps: u32,
-) -> Result<(), par::Stop<'a>> {
+fn front<'a, X>(e: &mut impl par::Sink<'a, X>, c: &'a Coded, bps: u32, room: Room) -> Result<(), par::Stop<'a>> {
     let mut layout = Rd::new(&c.streams[S_LAYOUT]);
     let mut junk = Rd::new(&c.streams[S_JUNK]);
     let mut hdr = Rd::new(&c.streams[S_HDR]);
     let mut sub = Rd::new(&c.streams[S_SUB]);
     let mut warm = Rd::new(&c.streams[S_WARM]);
-    let mut hs = Headers::default();
+    let mut hs = Headers::new(room);
     loop {
         let run = layout.uv()?;
         for _ in 0..run {
@@ -405,20 +459,27 @@ fn front<'a, X: Default>(
 /// [`decode`] with `threads` threads: a pipeline of the frame parameters, the error
 /// decoding, the LMS stage, and a pool writing the frames (escape checks, Rice coding,
 /// CRCs), then the frames are appended here in order. The same output and errors.
-pub fn decode_threads(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>, threads: usize) -> Result<(), Error> {
+pub fn decode_threads(
+    c: &Coded,
+    t: &Tables,
+    total_len: usize,
+    out: &mut Vec<u8>,
+    room: Room,
+    threads: usize,
+) -> Result<(), Error> {
     if threads <= 1 {
-        return decode(c, t, total_len, out);
+        return decode(c, t, total_len, out, room);
     }
     if c.streams.len() != N_BYTE_STREAMS {
         return Err(Error("stream count"));
     }
     #[cfg(target_family = "wasm")]
-    return decode_apart(c, t, total_len, out, threads);
+    return decode_apart(c, t, total_len, out, room, threads);
     // three stages and a pool of one at least, on workers of the pool
     #[allow(unreachable_code)]
     let workers = aqr_common::pool::reserve((threads - 1).max(4));
     if workers.len() < 4 {
-        return decode(c, t, total_len, out);
+        return decode(c, t, total_len, out, room);
     }
     let pool = workers.len() - 3;
     out.reserve(total_len);
@@ -439,7 +500,7 @@ pub fn decode_threads(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>
         }
         sc.spawn(move || {
             if let Some(mut e) = par::Front::new(par::Chans { recycle: &rrx, tx: &tx1 }, reset_written) {
-                let r = front(&mut e, c, si.bps);
+                let r = front(&mut e, c, si.bps, room);
                 e.finish(r);
             }
         });
@@ -453,7 +514,9 @@ pub fn decode_threads(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>
                     w.wrote.push(Wrote::Err(e));
                     break;
                 }
+                let at = w.bytes.len();
                 w.wrote.push(match flac::write_frame_bits(f, &mut w.bytes, AHEAD_BUDGET) {
+                    Some(_) if w.bytes.len() - at > room.frame => Wrote::Err(Error("frame past its room")),
                     Some(left) => Wrote::Ok(w.bytes.len(), AHEAD_BUDGET - left),
                     None => Wrote::Again,
                 });
@@ -485,8 +548,12 @@ pub fn decode_threads(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>
                                     at = *end;
                                 }
                                 Wrote::Again => {
+                                    let at = out.len();
                                     if flac::write_frame_bits(f, out, budget).is_none() {
                                         return Err(Error("too long"));
+                                    }
+                                    if out.len() - at > room.frame {
+                                        return Err(Error("frame past its room"));
                                     }
                                 }
                                 Wrote::Err(e) => return Err(Error(e.0)),
@@ -528,132 +595,106 @@ pub fn count(input: &[u8], counts: &mut [Vec<u64>]) {
     }
 }
 
-/// An item of a batch as a worker of [`decode_apart`] wrote it.
-#[cfg(target_family = "wasm")]
-enum Piece<'a> {
-    Junk(Item<'a>),
-    /// A frame, up to this offset of the batch's bytes, with these bits of long codes.
-    Wrote(usize, u64),
-    /// A frame over [`AHEAD_BUDGET`], to write in order.
-    Again(Frame),
-    Err(Error),
-    FrameErr(Error),
-}
-
-#[cfg(target_family = "wasm")]
-impl aqr_common::wire::Wire for Piece<'_> {
-    fn put(&self, out: &mut Vec<u8>) {
-        match self {
-            Piece::Junk(j) => {
-                out.push(0);
-                j.put(out);
-            }
-            Piece::Wrote(end, used) => {
-                out.push(1);
-                (*end, *used).put(out);
-            }
-            Piece::Again(f) => {
-                out.push(2);
-                f.put(out);
-            }
-            Piece::Err(e) => {
-                out.push(3);
-                e.put(out);
-            }
-            Piece::FrameErr(e) => {
-                out.push(4);
-                e.put(out);
-            }
-        }
-    }
-
-    fn get(b: &mut &[u8]) -> Option<Self> {
-        use aqr_common::wire::Wire;
-        Some(match u8::get(b)? {
-            0 => Piece::Junk(Item::get(b)?),
-            1 => {
-                let (end, used) = Wire::get(b)?;
-                Piece::Wrote(end, used)
-            }
-            2 => Piece::Again(Frame::get(b)?),
-            3 => Piece::Err(Error::get(b)?),
-            4 => Piece::FrameErr(Error::get(b)?),
-            _ => return None,
-        })
-    }
+/// The memory plan of [`decode_threads`] in WebAssembly on `threads` threads ([`aqr_api::stack`]),
+/// of a file of `total_len` bytes and frames of `room`, rANS words of `words` bytes and raw bits
+/// of `raw`, `top` bytes of the stack taken before (the initial memory with them, and the
+/// decoder's tables): the most it takes with its tasks, and of that what its channels' messages
+/// may hold.
+#[cfg(feature = "encode")]
+pub fn plan(total_len: u64, room: Room, words: u64, raw: [u64; 2], top: u64, threads: usize) -> (u64, u64) {
+    use aqr_api::stack::block;
+    let p = par::apart::Plan {
+        top,
+        workers: threads.saturating_sub(3),
+        rooms: room.rooms(),
+        front: Headers::plan(block),
+        errors: ResDecoder::plan(words, raw, block),
+        work: block(room.writer() as u64 + 16),
+        start: block(total_len),
+    };
+    p.bytes()
 }
 
 /// [`decode_threads`] in WebAssembly: the pipeline of tasks ([`par::apart`]), whose workers
-/// write the frames of batches (escape checks, Rice coding, CRCs), which are appended here in
-/// order, with the checks of [`decode`].
+/// write the frames (escape checks, Rice coding, CRCs), which are appended here in order (to
+/// the output reserved once the tasks are spawned, [`plan`]), with the checks of [`decode`].
 #[cfg(target_family = "wasm")]
-fn decode_apart<'a>(
-    c: &'a Coded,
-    t: &'a Tables,
+fn decode_apart(
+    c: &Coded,
+    t: &Tables,
     total_len: usize,
     out: &mut Vec<u8>,
+    room: Room,
     threads: usize,
 ) -> Result<(), Error> {
-    out.extend_from_slice(&c.streams[S_PREFIX]);
+    use par::apart::{ERR, FRAME, FRAME_ERR, JUNK};
     let si = decode_start(c)?;
     ResDecoder::takes(t)?;
     let errors = |f: &mut dyn FnMut(&mut ResDecoder<'_>)| {
         let raw_buf = [bits::padded(&c.raw[0]), bits::padded(&c.raw[1])];
         f(&mut ResDecoder::new(t, &c.words, &raw_buf).expect("tables checked"))
     };
-    let work = |b: &DecBatch<'a, ()>| -> (Vec<u8>, Vec<Piece<'a>>) {
-        let (mut bytes, mut pieces) = (Vec::new(), Vec::new());
-        for it in &b.items {
-            pieces.push(match it {
-                Item::Junk(j) => Piece::Junk(Item::Junk(j)),
-                Item::Frame(f) => {
-                    if let Err(e) = check_escapes(f) {
-                        pieces.push(Piece::Err(e));
-                        break;
-                    }
-                    match flac::write_frame_bits(f, &mut bytes, AHEAD_BUDGET) {
-                        Some(left) => Piece::Wrote(bytes.len(), AHEAD_BUDGET - left),
-                        None => Piece::Again(f.clone()),
-                    }
+    // (a frame whose long codes take more than its room cannot be of it)
+    let budget = 8 * room.frame as u64;
+    let work = || {
+        let mut w = bits::FastWriter::with_capacity(room.writer());
+        move |it: &Item<'_>, tx: &mut Vec<u8>| match it {
+            Item::Frame(f) => {
+                if check_escapes(f).is_err() {
+                    return tx.push(ERR);
                 }
-                Item::FrameErr(e) => Piece::FrameErr(Error(e.0)),
-                Item::Err(e) => Piece::Err(Error(e.0)),
-            });
-        }
-        (bytes, pieces)
-    };
-    let take = |(bytes, pieces): (Vec<u8>, Vec<Piece<'a>>), _| {
-        // (once the tasks are spawned, which copy the memory as it is then)
-        out.reserve(total_len.saturating_sub(out.len()));
-        let mut at = 0;
-        for p in pieces {
-            let budget = (total_len.saturating_sub(out.len()) as u64).saturating_mul(8);
-            match p {
-                Piece::Junk(Item::Junk(j)) => out.extend_from_slice(j),
-                Piece::Junk(_) => unreachable!("junk"),
-                Piece::Wrote(end, used) => {
-                    if out.len() > total_len || used > budget {
-                        return Err(Error("too long"));
+                let at = tx.len();
+                tx.push(FRAME);
+                tx.extend_from_slice(&[0; 8]);
+                match flac::write_frame_with(f, tx, budget, &mut w) {
+                    Some(left) if tx.len() - at - 9 <= room.frame => {
+                        tx[at + 1..at + 9].copy_from_slice(&(budget - left).to_le_bytes())
                     }
-                    out.extend_from_slice(&bytes[at..end]);
-                    at = end;
+                    _ => (tx.truncate(at), tx.push(ERR)).1,
                 }
-                Piece::Again(f) => {
-                    if out.len() > total_len || flac::write_frame_bits(&f, out, budget).is_none() {
-                        return Err(Error("too long"));
-                    }
-                }
-                Piece::FrameErr(e) => {
-                    if out.len() > total_len {
-                        return Err(Error("too long"));
-                    }
-                    return Err(e);
-                }
-                Piece::Err(e) => return Err(e),
             }
+            Item::Junk(j) => {
+                tx.push(JUNK);
+                tx.extend_from_slice(&(j.as_ptr() as usize as u32).to_le_bytes());
+                tx.extend_from_slice(&(j.len() as u32).to_le_bytes());
+            }
+            Item::FrameErr(_) => tx.push(FRAME_ERR),
+            Item::Err(_) => tx.push(ERR),
         }
-        Ok(())
     };
-    let front = |e: &mut _| front(e, c, si.bps);
-    par::apart::run(threads.saturating_sub(3), front, errors, work, take, Error("pipeline"))
+    let start = || {
+        let mut o = Vec::with_capacity(total_len);
+        o.extend_from_slice(&c.streams[S_PREFIX]);
+        o
+    };
+    let take = |o: &mut Vec<u8>, m: &[u8]| match m[0] {
+        FRAME => {
+            let used = u64::from_le_bytes(m[1..9].try_into().unwrap());
+            let budget = (total_len.saturating_sub(o.len()) as u64).saturating_mul(8);
+            if o.len() > total_len || used > budget || o.len() + m.len() - 9 > total_len {
+                return Err(Error("too long"));
+            }
+            o.extend_from_slice(&m[9..]);
+            Ok(())
+        }
+        JUNK => {
+            let j = par::apart::junk(&m[1..]);
+            if o.len() + j.len() > total_len {
+                return Err(Error("too long"));
+            }
+            o.extend_from_slice(j);
+            Ok(())
+        }
+        FRAME_ERR if o.len() > total_len => Err(Error("too long")),
+        // (an error's message stays in its task)
+        _ => Err(Error("frame")),
+    };
+    let front = |e: &mut par::apart::Out| front(e, c, si.bps, room);
+    let rooms = room.rooms();
+    let s = par::apart::run(threads.saturating_sub(3), rooms, front, errors, work, start, take, Error("pipeline"))?;
+    match out.is_empty() {
+        true => *out = s,
+        false => out.extend_from_slice(&s),
+    }
+    Ok(())
 }

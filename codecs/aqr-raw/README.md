@@ -129,6 +129,13 @@ PCM is cut into it here.
   blocks ahead, one thread runs the LMS stage in order, the calling thread codes. Decoding is
   a pipeline of subframe parameters → error decoding → LMS stage, then a pool reconstructs
   the samples straight into their place in the output.
+- **Memory of the module**: `pcm-recons` lays its memory out as a stack (`aqr_api::stack`),
+  so its limit is its plan (`module::pcm::plan`). In WebAssembly the pipeline's stages and its
+  five workers are tasks that pass each frame as a message of its own (`audio::par::apart`),
+  each taking it into a buffer and a frame reserved for the largest (a block of all channels),
+  so that each takes the same memory whatever it is given; the plan adds the messages its
+  channels may hold. The rANS tables are built of exactly what they keep
+  (`Tables::from_flat`).
 
 ### Images
 

@@ -42,7 +42,8 @@ fn data_files() {
         for threads in [1, 4] {
             let f = check(&name, &d, threads).expect(&name);
             let [a] = f.applies()[..] else { panic!("{name}") };
-            assert!(a.params.is_empty(), "{name}");
+            let room = aqr_flac::module::params(&a.params, d.len() as u64).expect(&name);
+            assert!(room.block > 0 && room.channels > 0 && room.frame > 0, "{name}: {room:?}");
             assert_eq!(a.inputs.len(), 9);
         }
         // These should all be coded, and smaller than the input as archives; an archive

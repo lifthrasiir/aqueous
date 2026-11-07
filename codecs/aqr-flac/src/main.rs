@@ -255,7 +255,7 @@ fn info(args: &[String]) {
     for path in files(args) {
         let d = read(&path);
         match aqr_flac::codec::encode(&d) {
-            Some(c) => {
+            Some((c, _)) => {
                 let sz: Vec<String> = c.streams.iter().map(|s| s.len().to_string()).collect();
                 println!(
                     "{path}: FLAC, {} bytes, streams {}, {} rANS words, {} + {} raw bytes",

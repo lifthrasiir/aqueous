@@ -19,6 +19,24 @@ pub mod pcm {
     use crate::audio::residual::{self, Coded};
     use std::borrow::Cow;
 
+    /// The task slots of the module (aqr-modules' `pcm-recons`), which it is given as its
+    /// threads.
+    pub const SLOTS: usize = 8;
+
+    /// The memory plan of the module ([`aqr_api::stack`]): the most its instance and tasks take
+    /// at once, its initial memory (`initial` bytes) with it, of params `params`, resources and
+    /// inputs of these lengths and `len` bytes of samples (`None` where they are not so): what
+    /// `aqr_api::whole` copies, the tables, the streams listed, and the pipeline
+    /// ([`pcm::plan`]); and of that what its channels' messages may hold.
+    pub fn plan(params: &[u8], resources: &[u64], inputs: &[u64], len: u64, initial: u64) -> Option<(u64, u64)> {
+        use aqr_api::stack::block;
+        let fmt = Format::from_bytes(params)?;
+        let &[_, _, _, words, raw0, raw1] = inputs else { return None };
+        let held = aqr_api::stack::whole(params.len() as u64, resources, inputs);
+        let top = initial + held + residual::tables_plan(block) + block(12 * N_BYTE_STREAMS as u64);
+        Some(pcm::plan(fmt, len, words, [raw0, raw1], top, SLOTS))
+    }
+
     /// The module: the `len` bytes of samples from `params` (their format), `resources` (the
     /// tables) and `inputs` (the streams).
     pub fn decode(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {

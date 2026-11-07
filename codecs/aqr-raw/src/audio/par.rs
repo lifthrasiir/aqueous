@@ -220,23 +220,46 @@ impl<'a, P: Pass<'a, X>, X: Default> Front<'a, P, X> {
         self.samples = 0;
     }
 
+    /// Sends the last batch, with the error that stopped the stream if any.
+    pub fn finish(mut self, end: Result<(), Stop<'a>>) {
+        match end {
+            Ok(()) => {}
+            Err(Stop::Item(it)) => self.cur.items.push(it),
+            Err(Stop::Closed) => return,
+        }
+        self.cur.last = true;
+        let _ = self.pass.send(self.cur);
+    }
+}
+
+/// Where the first stage of decoding puts its items, in order: batches of them sent down the
+/// pipeline ([`Front`]), or each sent as it comes (in WebAssembly, `apart::Out`).
+pub trait Sink<'a, X> {
     /// The batch's own data (for the frames being added).
-    pub fn x(&mut self) -> &mut X {
+    fn x(&mut self) -> &mut X;
+    /// A frame to fill (a used one if there is one).
+    fn frame(&mut self) -> Frame;
+    /// Gives back a frame from [`Sink::frame`] that is not sent.
+    fn unused(&mut self, f: Frame);
+    /// Adds an item of `samples` samples.
+    fn push(&mut self, it: Item<'a>, samples: usize) -> Result<(), Stop<'a>>;
+}
+
+impl<'a, P: Pass<'a, X>, X: Default> Sink<'a, X> for Front<'a, P, X> {
+    fn x(&mut self) -> &mut X {
         &mut self.cur.x
     }
 
-    /// A frame to fill (a used one if there is one).
-    pub fn frame(&mut self) -> Frame {
+    fn frame(&mut self) -> Frame {
         self.free.pop().unwrap_or_default()
     }
 
-    /// Gives back a frame from [`Front::frame`] that is not sent.
-    pub fn unused(&mut self, f: Frame) {
+    fn unused(&mut self, f: Frame) {
         self.free.push(f);
     }
 
-    /// Adds an item of `samples` samples; sends the batch when it is full.
-    pub fn push(&mut self, it: Item<'a>, samples: usize) -> Result<(), Stop<'a>> {
+    /// Sends the batch when it is full.
+    fn push(&mut self, it: Item<'a>, samples: usize) -> Result<(), Stop<'a>> {
         self.cur.items.push(it);
         self.samples += samples;
         if self.samples >= BATCH_SAMPLES || self.cur.items.len() >= BATCH_ITEMS {
@@ -248,17 +271,6 @@ impl<'a, P: Pass<'a, X>, X: Default> Front<'a, P, X> {
             self.take(idx);
         }
         Ok(())
-    }
-
-    /// Sends the last batch, with the error that stopped the stream if any.
-    pub fn finish(mut self, end: Result<(), Stop<'a>>) {
-        match end {
-            Ok(()) => {}
-            Err(Stop::Item(it)) => self.cur.items.push(it),
-            Err(Stop::Closed) => return,
-        }
-        self.cur.last = true;
-        let _ = self.pass.send(self.cur);
     }
 }
 
@@ -329,224 +341,448 @@ pub fn lms_stage<'a, X>(rx: Receiver<DecBatch<'a, X>>, tx: SyncSender<DecBatch<'
     }
 }
 
+/// Frames as the WebAssembly pipeline passes them ([`apart`]): in a buffer reserved for the
+/// largest, read into a frame reserved for it ([`msg::frame_with`]), so that a stage takes the
+/// same memory whatever it is given.
+pub mod msg {
+    use crate::audio::frame::{Frame, SUB_CONSTANT, SUB_LPC, Subframe};
+    use crate::audio::model::Scale;
+
+    /// Bytes of a FLAC frame's header (no CRC) at most.
+    pub const HEADER: usize = 16;
+
+    /// Bytes that [`put_frame`] writes at most of a frame of `channels` channels of `block`
+    /// samples (with its residuals, and the scale states after it), and 2 before it: per
+    /// channel its fields and lengths, 32 warm-up samples and coefficients, and 8 bytes a sample
+    /// (verbatim; else partitions and residuals, of 5 at most).
+    pub const fn item_room(channels: usize, block: usize) -> usize {
+        2 + 1 + HEADER + 7 + 4 + 8 * 8 + channels * (8 + 8 * 32 + 4 * 32 + 8 + 8 * block)
+    }
+
+    /// Bytes of a [`Subframe`] on WebAssembly.
+    pub const SUBFRAME: u64 = 408;
+
+    /// A frame of room for `channels` channels of `block` samples and `parts` partitions a
+    /// subframe: its header, its subframes (and their partitions), its residuals by channel, the
+    /// verbatim samples; [`frame_plan`].
+    pub fn frame_with(channels: usize, block: usize, parts: usize) -> Frame {
+        let header = Vec::with_capacity(HEADER);
+        let mut sub = Vec::with_capacity(channels);
+        sub.extend((0..channels).map(|_| Subframe { params: Vec::with_capacity(parts), ..Default::default() }));
+        let mut res = Vec::with_capacity(channels);
+        res.extend((0..channels).map(|_| Vec::with_capacity(block)));
+        let verbatim = Vec::with_capacity(channels * block);
+        Frame { header, sub, res, verbatim, ..Default::default() }
+    }
+
+    /// Bytes of the blocks of [`frame_with`], as `block` rounds them.
+    pub fn frame_plan(channels: usize, block: usize, parts: usize, bl: impl Fn(u64) -> u64) -> u64 {
+        let (c, b) = (channels as u64, block as u64);
+        bl(HEADER as u64) + bl(SUBFRAME * c) + c * bl(parts as u64) + bl(12 * c) + c * bl(4 * b) + bl(8 * c * b)
+    }
+
+    /// Appends frame `f` (its residuals where `res`, else only their lengths).
+    pub fn put_frame(f: &Frame, res: bool, out: &mut Vec<u8>) {
+        out.push(f.header.len() as u8);
+        out.extend_from_slice(&f.header);
+        out.extend_from_slice(&(f.block_size as u32).to_le_bytes());
+        out.extend_from_slice(&[f.assign, f.channels as u8, f.bps as u8]);
+        out.extend_from_slice(&(f.verbatim.len() as u32).to_le_bytes());
+        f.verbatim.iter().for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
+        for (s, r) in f.sub[..f.channels].iter().zip(&f.res) {
+            let order = s.order as usize;
+            out.extend_from_slice(&[s.typ, s.wasted, s.bits, s.order, s.precision, s.shift as u8, s.method, s.porder]);
+            let warm = if s.typ == SUB_CONSTANT { 1 } else { order };
+            s.warm[..warm].iter().for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
+            if s.typ >= SUB_LPC {
+                s.coefs[..order].iter().for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
+            }
+            out.extend_from_slice(&(s.params.len() as u32).to_le_bytes());
+            out.extend_from_slice(&s.params);
+            out.extend_from_slice(&(r.len() as u32).to_le_bytes());
+            if res {
+                r.iter().for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
+            }
+        }
+    }
+
+    fn take<'b>(b: &mut &'b [u8], n: usize) -> Option<&'b [u8]> {
+        let (x, rest) = b.split_at_checked(n)?;
+        *b = rest;
+        Some(x)
+    }
+
+    fn u32_of(b: &mut &[u8]) -> Option<usize> {
+        Some(u32::from_le_bytes(take(b, 4)?.try_into().unwrap()) as usize)
+    }
+
+    /// Reads into `f` (within its room, which it only grows) what [`put_frame`] wrote at the
+    /// start of `b`, which moves past it; its residuals where `res`, else zeros.
+    pub fn get_frame(b: &mut &[u8], f: &mut Frame, res: bool) -> Option<()> {
+        let n = take(b, 1)?[0] as usize;
+        f.header.clear();
+        f.header.extend_from_slice(take(b, n)?);
+        f.block_size = u32_of(b)?;
+        let &[assign, channels, bps] = take(b, 3)? else { unreachable!() };
+        (f.assign, f.channels, f.bps) = (assign, channels as usize, bps as u32);
+        let n = u32_of(b)?;
+        f.verbatim.clear();
+        f.verbatim.extend(take(b, 8 * n)?.as_chunks::<8>().0.iter().map(|&v| i64::from_le_bytes(v)));
+        if f.sub.len() < f.channels {
+            f.sub.resize(f.channels, Subframe::default());
+        }
+        if f.res.len() < f.channels {
+            f.res.resize(f.channels, Vec::new());
+        }
+        for (s, r) in f.sub[..f.channels].iter_mut().zip(&mut f.res) {
+            let &[typ, wasted, bits, order, precision, shift, method, porder] = take(b, 8)? else { unreachable!() };
+            (s.typ, s.wasted, s.bits, s.order, s.precision, s.shift) =
+                (typ, wasted, bits, order, precision, shift as i8);
+            (s.method, s.porder) = (method, porder);
+            let warm = if typ == SUB_CONSTANT { 1 } else { order as usize };
+            for (w, v) in s.warm.iter_mut().zip(take(b, 8 * warm)?.as_chunks::<8>().0) {
+                *w = i64::from_le_bytes(*v);
+            }
+            if typ >= SUB_LPC {
+                for (c, v) in s.coefs.iter_mut().zip(take(b, 4 * order as usize)?.as_chunks::<4>().0) {
+                    *c = i32::from_le_bytes(*v);
+                }
+            }
+            let n = u32_of(b)?;
+            s.params.clear();
+            s.params.extend_from_slice(take(b, n)?);
+            let n = u32_of(b)?;
+            r.clear();
+            match res {
+                true => r.extend(take(b, 4 * n)?.as_chunks::<4>().0.iter().map(|&v| i32::from_le_bytes(v))),
+                false => r.resize(n, 0),
+            }
+        }
+        Some(())
+    }
+
+    /// Appends the scale states `sc`.
+    pub fn put_scales(sc: &[Scale; 8], out: &mut Vec<u8>) {
+        use aqr_common::wire::Wire;
+        sc.put(out);
+    }
+
+    /// The scale states that [`put_scales`] wrote at the start of `b`.
+    pub fn get_scales(b: &mut &[u8]) -> Option<[Scale; 8]> {
+        aqr_common::wire::Wire::get(b)
+    }
+}
+
 /// The pipeline in WebAssembly, of tasks and channels (`aqr_api::task`, `aqr_api::chan`)
-/// rather than threads: the first stage, [`errors_batch`] and [`lms_batch`] each a task, and
-/// `workers` tasks working on the batches in turn (batch `k` on worker `k mod workers`), whose
-/// results the module takes in the same turn, so in order. The batches pass as bytes ([`Wire`]),
-/// and are not recycled.
+/// rather than threads: the first stage, [`ResDecoder::errors`] and [`LmsDecoder::frame`] each a
+/// task, and `workers` tasks working on the items in turn (item `k` on worker `k mod workers`),
+/// whose results the module takes in the same turn, so in order.
 ///
-/// A stage stops passing batches on after the last one (an error ends the stream), but reads
-/// what comes until its input is closed, so that no stage waits for ever for one that stopped;
-/// and every stage closes its outputs as it ends (a task closes only the channels it sent to).
-#[cfg(target_family = "wasm")]
+/// Every item is a message of its own: a byte telling whether it is the last (an error, or the
+/// end), its kind and what it holds (a frame as [`msg::put_frame`] writes it, the place of junk
+/// in the module's data). Each stage takes its messages into a buffer of room for the largest
+/// and reads each frame into a frame of its own of room for the largest ([`Rooms`]), so that it
+/// takes the same memory whatever it is given: what [`plan`] counts.
+///
+/// A stage stops passing items on after the last one, but reads what comes until its input is
+/// closed, so that no stage waits for ever for one that stopped; and every stage closes its
+/// outputs as it ends (a task closes only the channels it sent to).
 pub mod apart {
-    use super::*;
-    use aqr_api::chan::{self, Receiver, Sender};
-    use aqr_common::wire::Wire;
+    /// Kinds of items.
+    pub const FRAME: u8 = 0;
+    pub const JUNK: u8 = 1;
+    pub const FRAME_ERR: u8 = 2;
+    pub const ERR: u8 = 3;
+    pub const END: u8 = 4;
 
-    impl Wire for Error {
-        fn put(&self, _: &mut Vec<u8>) {}
+    /// Messages a channel holds.
+    const CAP: usize = 2;
 
-        fn get(_: &mut &[u8]) -> Option<Self> {
-            Some(Error("(in a task)"))
+    /// What the frames of a stream take at most: channels, samples a channel, partitions a
+    /// subframe; and the bytes of a worker's message at most (the byte of the last, its kind's
+    /// and what it says of an item).
+    #[derive(Clone, Copy, Debug)]
+    pub struct Rooms {
+        pub channels: usize,
+        pub block: usize,
+        pub parts: usize,
+        pub out: usize,
+    }
+
+    impl Rooms {
+        /// Bytes of a message of the stages.
+        pub fn item(&self) -> usize {
+            super::msg::item_room(self.channels, self.block)
         }
     }
 
-    impl Wire for crate::audio::frame::Subframe {
-        fn put(&self, out: &mut Vec<u8>) {
-            [self.typ, self.wasted, self.bits, self.order, self.precision, self.shift as u8, self.method, self.porder]
-                .put(out);
-            (self.warm, self.coefs).put(out);
-            self.params.put(out);
-        }
+    /// The memory of the pipeline over what the module took before it (`top` bytes of the
+    /// stack, the working memory up to the end of its page then), as [`run`] takes it, of
+    /// `workers` workers and as many task slots: the most the instance and its tasks take at
+    /// once, however they run, and the messages its channels hold at most.
+    ///
+    /// - `front`, `errors`, `work`: what the first stage, the error stage (its residual
+    ///   decoder) and each worker (its scratch, and what it takes as it works) take over their
+    ///   message buffers and frame (in that order: the worker's scratch after its frame).
+    /// - `start`: what the instance takes once the tasks are spawned, before its buffer of
+    ///   results (the output).
+    pub struct Plan {
+        pub top: u64,
+        pub workers: usize,
+        pub rooms: Rooms,
+        pub front: u64,
+        pub errors: u64,
+        pub work: u64,
+        pub start: u64,
+    }
 
-        fn get(b: &mut &[u8]) -> Option<Self> {
-            let [typ, wasted, bits, order, precision, shift, method, porder] = <[u8; 8]>::get(b)?;
-            let (warm, coefs) = Wire::get(b)?;
-            let params = Wire::get(b)?;
-            Some(Self { typ, wasted, bits, order, precision, shift: shift as i8, method, porder, warm, coefs, params })
+    impl Plan {
+        /// The bytes of the working memory at most, and of that what the channels' messages
+        /// may hold.
+        pub fn bytes(&self) -> (u64, u64) {
+            use aqr_api::stack::block;
+            let pages = |n: u64| n.div_ceil(1 << 16) << 16;
+            let w = self.workers.max(1) as u64;
+            let r = &self.rooms;
+            let (item, out) = (block(r.item() as u64), block(r.out as u64));
+            let frame = super::msg::frame_plan(r.channels, r.block, r.parts, block);
+            // (before the spawn: the ends of the channels to the workers and from them)
+            let top = self.top + 2 * block(8 * w);
+            let task = |own: u64| pages(top).max(pages(top + own));
+            let lms = block(8 * size_of::<crate::audio::model::Lms>() as u64);
+            let tasks = task(item + frame + self.front)
+                + task(self.errors + 2 * item + frame)
+                + task(lms + 2 * item + frame)
+                + w * task(item + frame + self.work + out);
+            // (the instance: the tasks' handles, then what it starts, its buffer of results)
+            let instance = pages(top + block(3 + w) + self.start + out);
+            let queued = CAP as u64 * ((2 + w) * r.item() as u64 + w * r.out as u64);
+            (instance + tasks + queued, queued)
         }
     }
 
-    impl Wire for Frame {
-        fn put(&self, out: &mut Vec<u8>) {
-            self.header.put(out);
-            (self.block_size, self.assign, self.channels, self.bps).put(out);
-            self.sub.put(out);
-            self.res.put(out);
-            self.verbatim.put(out);
+    #[cfg(target_family = "wasm")]
+    pub use imp::*;
+
+    #[cfg(target_family = "wasm")]
+    mod imp {
+        use super::super::*;
+        use super::*;
+        use aqr_api::chan::{self, Sender};
+
+        /// The first stage's items, each sent as it comes.
+        pub struct Out {
+            tx: Sender,
+            msg: Vec<u8>,
+            f: Frame,
+            x: (),
         }
 
-        fn get(b: &mut &[u8]) -> Option<Self> {
-            let header = Wire::get(b)?;
-            let (block_size, assign, channels, bps) = Wire::get(b)?;
-            Some(Frame {
-                header,
-                block_size,
-                assign,
-                channels,
-                bps,
-                sub: Wire::get(b)?,
-                res: Wire::get(b)?,
-                verbatim: Wire::get(b)?,
-            })
+        impl Out {
+            fn send(&mut self, it: &Item<'_>, last: bool) {
+                self.msg.clear();
+                self.msg.push(last as u8);
+                put_item(it, &mut self.msg);
+                self.tx.send(&self.msg);
+            }
         }
-    }
 
-    /// An item; the bytes of junk as where they are, in the data of the module, which every
-    /// task has at the same place (made before the tasks are spawned, and not written since).
-    impl Wire for Item<'_> {
-        fn put(&self, out: &mut Vec<u8>) {
-            match self {
+        impl<'a> Sink<'a, ()> for Out {
+            fn x(&mut self) -> &mut () {
+                &mut self.x
+            }
+
+            fn frame(&mut self) -> Frame {
+                std::mem::take(&mut self.f)
+            }
+
+            fn unused(&mut self, f: Frame) {
+                self.f = f;
+            }
+
+            fn push(&mut self, it: Item<'a>, _: usize) -> Result<(), Stop<'a>> {
+                self.send(&it, false);
+                if let Item::Frame(f) = it {
+                    self.f = f;
+                }
+                Ok(())
+            }
+        }
+
+        /// Appends item `it` as the first stage sends it (a frame without its residuals).
+        fn put_item(it: &Item<'_>, out: &mut Vec<u8>) {
+            match it {
                 Item::Frame(f) => {
-                    out.push(0);
-                    f.put(out);
+                    out.push(FRAME);
+                    msg::put_frame(f, false, out);
                 }
                 Item::Junk(j) => {
-                    out.push(1);
-                    (j.as_ptr() as usize, j.len()).put(out);
+                    out.push(JUNK);
+                    out.extend_from_slice(&(j.as_ptr() as usize as u32).to_le_bytes());
+                    out.extend_from_slice(&(j.len() as u32).to_le_bytes());
                 }
-                Item::FrameErr(_) => out.push(2),
-                Item::Err(_) => out.push(3),
+                Item::FrameErr(_) => out.push(FRAME_ERR),
+                Item::Err(_) => out.push(ERR),
             }
         }
 
-        fn get(b: &mut &[u8]) -> Option<Self> {
-            Some(match u8::get(b)? {
-                0 => Item::Frame(Frame::get(b)?),
+        /// The junk whose place `b` gives: in the data of the module, which every task has at
+        /// the same place (made before the tasks are spawned, and not written since).
+        pub fn junk<'a>(b: &[u8]) -> &'a [u8] {
+            let (p, n) =
+                (u32::from_le_bytes(b[..4].try_into().unwrap()), u32::from_le_bytes(b[4..8].try_into().unwrap()));
+            // SAFETY: the junk of the data of the module, as `put_item` took it
+            unsafe { std::slice::from_raw_parts(p as usize as *const u8, n as usize) }
+        }
+
+        /// Runs the pipeline: `front` puts the items, which go through the error and LMS stages
+        /// (`errors` running its argument on the residual decoder, which it makes in the
+        /// stage's task: what it holds is then in that task's memory alone), then a worker made
+        /// by `work` writes what it makes of each (after the byte of the last), which `take`
+        /// takes in order, with what `start` made once the tasks are spawned, until it returns
+        /// `Err` or the last one comes. Gives what `start` made.
+        #[allow(clippy::too_many_arguments)]
+        pub fn run<'a, S, E, W: FnMut(&Item<'a>, &mut Vec<u8>)>(
+            workers: usize,
+            rooms: Rooms,
+            front: impl Fn(&mut Out) -> Result<(), Stop<'a>> + Sync,
+            errors: impl Fn(&mut dyn FnMut(&mut ResDecoder<'_>)) + Sync,
+            work: impl Fn() -> W + Sync,
+            start: impl FnOnce() -> S,
+            mut take: impl FnMut(&mut S, &[u8]) -> Result<(), E>,
+            closed: E,
+        ) -> Result<S, E> {
+            let workers = workers.clamp(1, 64);
+            let (item, frame) = (rooms.item(), || msg::frame_with(rooms.channels, rooms.block, rooms.parts));
+            let (c1, c2) = (chan::channel(CAP), chan::channel(CAP));
+            let c3: Vec<_> = (0..workers).map(|_| chan::channel(CAP)).collect();
+            let c4: Vec<_> = (0..workers).map(|_| chan::channel(CAP)).collect();
+            let task = |i: usize, _: &mut Vec<u8>| match i {
+                0 => {
+                    let msg = Vec::with_capacity(item);
+                    let mut e = Out { tx: c1.0, msg, f: frame(), x: () };
+                    match front(&mut e) {
+                        Ok(()) => c1.0.send(&[1, END]),
+                        Err(Stop::Item(it)) => e.send(&it, true),
+                        Err(Stop::Closed) => {}
+                    }
+                    c1.0.close();
+                }
                 1 => {
-                    let (p, n) = <(usize, usize)>::get(b)?;
-                    // SAFETY: the junk of the data of the module, as `put` took it
-                    Item::Junk(unsafe { std::slice::from_raw_parts(p as *const u8, n) })
-                }
-                2 => Item::FrameErr(Error("(in a task)")),
-                3 => Item::Err(Error("(in a task)")),
-                _ => return None,
-            })
-        }
-    }
-
-    impl Wire for DecBatch<'_, ()> {
-        fn put(&self, out: &mut Vec<u8>) {
-            (self.idx, self.last).put(out);
-            self.items.put(out);
-            self.sc0.put(out);
-        }
-
-        fn get(b: &mut &[u8]) -> Option<Self> {
-            let (idx, last) = Wire::get(b)?;
-            Some(DecBatch { idx, last, items: Wire::get(b)?, sc0: Wire::get(b)?, x: () })
-        }
-    }
-
-    fn send<T: Wire>(tx: &Sender, v: &T) {
-        let mut m = Vec::new();
-        v.put(&mut m);
-        tx.send(&m);
-    }
-
-    fn recv<T: Wire>(rx: &Receiver) -> Option<T> {
-        let m = rx.recv()?;
-        let mut s = &m[..];
-        Some(T::get(&mut s).filter(|_| s.is_empty()).expect("a message of the pipeline"))
-    }
-
-    /// The first stage's batches, sent as they are filled.
-    pub struct Out(Sender);
-
-    impl<'a> Pass<'a, ()> for Out {
-        fn next(&mut self) -> Option<DecBatch<'a, ()>> {
-            Some(DecBatch::default())
-        }
-
-        fn send(&mut self, b: DecBatch<'a, ()>) -> bool {
-            send(&self.0, &b);
-            true
-        }
-    }
-
-    /// Runs the pipeline: `front` fills the batches, then they go through the error and LMS
-    /// stages (`errors` running its argument on the residual decoder, which it makes in the
-    /// stage's task: what it holds is then in that task's memory alone), then `work` makes of
-    /// each a `W` on a worker, which `take` takes in order (with whether the batch was the
-    /// last) until it returns `Err` or the last one comes.
-    pub fn run<'a, W: Wire, E>(
-        workers: usize,
-        front: impl Fn(&mut Front<'a, Out, ()>) -> Result<(), Stop<'a>> + Sync,
-        errors: impl Fn(&mut dyn FnMut(&mut ResDecoder<'_>)) + Sync,
-        work: impl Fn(&DecBatch<'a, ()>) -> W + Sync,
-        mut take: impl FnMut(W, bool) -> Result<(), E>,
-        closed: E,
-    ) -> Result<(), E> {
-        let workers = workers.max(1);
-        let cap = 2;
-        let (c1, c2) = (chan::channel(cap), chan::channel(cap));
-        let c3: Vec<_> = (0..workers).map(|_| chan::channel(cap)).collect();
-        let c4: Vec<_> = (0..workers).map(|_| chan::channel(cap)).collect();
-        let task = |i: usize, _: &mut Vec<u8>| match i {
-            0 => {
-                if let Some(mut e) = Front::new(Out(c1.0), |_| {}) {
-                    let r = front(&mut e);
-                    e.finish(r);
-                }
-                c1.0.close();
-            }
-            1 => {
-                errors(&mut |rd| {
-                    let mut done = false;
-                    while let Some(mut b) = recv::<DecBatch<()>>(&c1.1) {
-                        if !done {
-                            done = errors_batch(rd, &mut b);
-                            send(&c2.0, &b);
+                    errors(&mut |rd| {
+                        let (mut rx, mut tx, mut f) = (Vec::with_capacity(item), Vec::with_capacity(item), frame());
+                        let mut done = false;
+                        while c1.1.recv_into(&mut rx) {
+                            if done {
+                                continue;
+                            }
+                            done = rx[0] != 0;
+                            if rx[1] == FRAME {
+                                let mut b = &rx[2..];
+                                msg::get_frame(&mut b, &mut f, false).expect("a message of the pipeline");
+                                tx.clear();
+                                match rd.errors(&mut f) {
+                                    Ok(sc) => {
+                                        tx.extend_from_slice(&[0, FRAME]);
+                                        msg::put_frame(&f, true, &mut tx);
+                                        msg::put_scales(&sc, &mut tx);
+                                    }
+                                    Err(_) => {
+                                        tx.extend_from_slice(&[1, FRAME_ERR]);
+                                        done = true;
+                                    }
+                                }
+                                c2.0.send(&tx);
+                            } else if rx[1] == END && rd.finish().is_err() {
+                                c2.0.send(&[1, ERR]);
+                            } else {
+                                c2.0.send(&rx);
+                            }
                         }
-                    }
-                });
-                c2.0.close();
-            }
-            2 => {
-                let mut ld = LmsDecoder::default();
-                let (mut k, mut done) = (0, false);
-                while let Some(mut b) = recv::<DecBatch<()>>(&c2.1) {
-                    if !done {
-                        lms_batch(&mut ld, &mut b);
-                        done = b.last;
-                        send(&c3[k % workers].0, &b);
+                    });
+                    c2.0.close();
+                }
+                2 => {
+                    let mut ld = LmsDecoder::default();
+                    let (mut rx, mut tx, mut f) = (Vec::with_capacity(item), Vec::with_capacity(item), frame());
+                    let (mut k, mut done) = (0, false);
+                    while c2.1.recv_into(&mut rx) {
+                        if done {
+                            continue;
+                        }
+                        done = rx[0] != 0;
+                        let to = &c3[k % workers].0;
                         k += 1;
+                        if rx[1] != FRAME {
+                            to.send(&rx);
+                            continue;
+                        }
+                        let mut b = &rx[2..];
+                        msg::get_frame(&mut b, &mut f, true).expect("a message of the pipeline");
+                        let sc = msg::get_scales(&mut b).expect("a message of the pipeline");
+                        ld.frame(&mut f, &sc);
+                        tx.clear();
+                        tx.extend_from_slice(&[0, FRAME]);
+                        msg::put_frame(&f, true, &mut tx);
+                        to.send(&tx);
                     }
+                    c3.iter().for_each(|c| c.0.close());
                 }
-                c3.iter().for_each(|c| c.0.close());
-            }
-            _ => {
-                let j = i - 3;
-                while let Some(b) = recv::<DecBatch<()>>(&c3[j].1) {
-                    send(&c4[j].0, &(b.last, work(&b)));
+                _ => {
+                    let j = i - 3;
+                    let (mut rx, mut f) = (Vec::with_capacity(item), frame());
+                    let mut w = work();
+                    let mut tx = Vec::with_capacity(rooms.out);
+                    while c3[j].1.recv_into(&mut rx) {
+                        tx.clear();
+                        tx.push(rx[0]);
+                        match rx[1] {
+                            FRAME => {
+                                let mut b = &rx[2..];
+                                msg::get_frame(&mut b, &mut f, true).expect("a message of the pipeline");
+                                let it = Item::Frame(std::mem::take(&mut f));
+                                w(&it, &mut tx);
+                                let Item::Frame(g) = it else { unreachable!() };
+                                f = g;
+                            }
+                            JUNK => w(&Item::Junk(junk(&rx[2..])), &mut tx),
+                            FRAME_ERR => w(&Item::FrameErr(Error("(in a task)")), &mut tx),
+                            ERR => w(&Item::Err(Error("(in a task)")), &mut tx),
+                            _ => tx.push(END),
+                        }
+                        c4[j].0.send(&tx);
+                    }
+                    c4[j].0.close();
                 }
-                c4[j].0.close();
-            }
-        };
-        // SAFETY: dropped below, before `task` goes
-        let tasks = unsafe { aqr_api::task::spawn(3 + workers, &task) };
-        let mut k = 0;
-        let mut open = vec![true; workers];
-        let r = loop {
-            let Some((last, w)) = recv::<(bool, W)>(&c4[k % workers].1) else {
-                open[k % workers] = false;
-                break Err(closed);
             };
-            k += 1;
-            let r = take(w, last);
-            if r.is_err() || last {
-                break r;
+            // SAFETY: dropped below, before `task` goes
+            let tasks = unsafe { aqr_api::task::spawn(3 + workers, &task) };
+            let mut s = start();
+            let mut rx = Vec::with_capacity(rooms.out);
+            let (mut k, mut open) = (0, u64::MAX >> (64 - workers));
+            let r = loop {
+                if !c4[k % workers].1.recv_into(&mut rx) {
+                    open &= !(1 << (k % workers));
+                    break Err(closed);
+                }
+                k += 1;
+                if rx[1] == END {
+                    break Ok(());
+                }
+                let r = take(&mut s, &rx[1..]);
+                if r.is_err() || rx[0] != 0 {
+                    break r;
+                }
+            };
+            // (what is left read, in the same turn, for the stages to end)
+            while open != 0 {
+                if open & 1 << (k % workers) != 0 && !c4[k % workers].1.recv_into(&mut rx) {
+                    open &= !(1 << (k % workers));
+                }
+                k += 1;
             }
-        };
-        // (what is left read, in the same turn, for the stages to end)
-        while open.contains(&true) {
-            if open[k % workers] && c4[k % workers].1.recv().is_none() {
-                open[k % workers] = false;
-            }
-            k += 1;
+            drop(tasks);
+            r.map(|()| s)
         }
-        drop(tasks);
-        r
     }
 }

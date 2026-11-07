@@ -43,12 +43,22 @@ aqr-raw's now; the numbers are kept so that the references between sections stay
 
 ## 2. The module
 
-The module is `flac-recons`, version 3 (`aqr_flac::formula`), in entry formulas
+The module is `flac-recons`, version 4 (`aqr_flac::formula`), in entry formulas
 (aqr-formula). `formula::encode` makes the formula and `formula::decode` is the module.
 Its output, the **original**, has the declared length `len`: a FLAC file.
 
-**Params**: none. Any params are an error. (Version 2 took one byte, the kind: 0 for FLAC
-and 1 for PCM, which is aqr-raw's `pcm-recons` now.)
+**Params**: what the frames take at most, which bounds what decoding holds:
+
+```text
+varint  block      the most samples a channel of a frame (its block size)
+varint  channels   the most channels of a frame
+varint  frame      the most bytes of a frame, from its sync code to its CRC-16
+```
+
+Trailing bytes are an error, as are `block > 65536`, `channels > 8` and `frame > len`. A
+frame past them (§6.5) is an error. All three are 0 where the file has no frame. (Version 3
+had no params; version 2 took one byte, the kind: 0 for FLAC and 1 for PCM, which is
+aqr-raw's `pcm-recons` now.)
 
 **Resources**: exactly one, the frequency tables of aqr-raw's `FORMAT.md`, Appendix A (the
 resource of `pcm-recons` too), checked as that document says.
@@ -236,8 +246,10 @@ the coded form is smaller than the input.
 
 A decoder should reject the following rather than produce output:
 
-- Params, or a number of inputs other than nine; rANS words of a length
+- Params other than §2's, or a number of inputs other than nine; rANS words of a length
   that is not a multiple of 4; streams cut short (a varint or a byte stream).
+- A frame of more samples a channel, channels or bytes than the params give (§2), or a
+  header of more than 16 bytes.
 - FLAC: a prefix that does not parse to its own end (§6.1); a header that is not valid
   (§6.6, header rules) or a prediction with no previous header; a subframe type outside
   §3; `wasted ≥ full` or a wasted flag with `wasted = 0`; an order larger than `N`; a

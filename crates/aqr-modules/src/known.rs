@@ -215,8 +215,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "flac-recons",
-        version: 3,
-        sha512_256: hex("fa9e3dedb787c9d1e4517eb87090132c043c9e79a57b7b7e11f7b2b34e2ef431"),
+        version: 4,
+        sha512_256: hex("f0298c1f50673b9cef92a8aab99e3dc16e9d4a3e9dd8641b72d27dcfd01ed45d"),
         block: include_bytes!("../wasm/flac-recons.block"),
     },
     Known {
@@ -324,7 +324,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "mp3-recons",
         version: 5,
-        sha512_256: hex("6c9190a329d67f1b9e4c3018c61dc8303859bba3f5712bbd970c47641b8d2f44"),
+        sha512_256: hex("f14f87e079c1e74017e0757e6c0013a4bccb61aafe3ff56c5fe89cce5e228701"),
         block: include_bytes!("../wasm/mp3-recons.block"),
     },
     Known {
@@ -348,7 +348,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "pcm-recons",
         version: 1,
-        sha512_256: hex("cc73ffe08dd3c002e0e69c877f4fbf793d1de7096b9f8691d9e9912897da4207"),
+        sha512_256: hex("d82912cd79c62c0ff92eb23c88b4343e0020e48165a8d6dda1764a381cf75d41"),
         block: include_bytes!("../wasm/pcm-recons.block"),
     },
     Known {
@@ -414,13 +414,13 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "raster-recons-16",
         version: 1,
-        sha512_256: hex("18fc29bdd1322fd8d069ff0a57344aafe6b76fae763619a15842c65faa311807"),
+        sha512_256: hex("cd5512adc6769cb48add6d69d46dc32cef7a0baa56ade07caac094057f235cf5"),
         block: include_bytes!("../wasm/raster-recons-16.block"),
     },
     Known {
         name: "raster-recons",
         version: 1,
-        sha512_256: hex("45c7ab855d64b50e0429f92adac65687911ff32013a1254e4c34072964270696"),
+        sha512_256: hex("f5f5836a58bfaa8e9bc6525b74771708f03ccb37b8d4970c19b8f55c157b9378"),
         block: include_bytes!("../wasm/raster-recons.block"),
     },
     Known {
@@ -456,7 +456,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "vorbis-recons",
         version: 2,
-        sha512_256: hex("6e76abf31b966bddb1378a5223a93bb70d651074d141de355c33dbd6375af915"),
+        sha512_256: hex("f80c53d445df1d71a6e9452b2a8d787abb7c5fa79cf1a7458ee2f726bd604ae6"),
         block: include_bytes!("../wasm/vorbis-recons.block"),
     },
     Known {

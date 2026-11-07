@@ -143,6 +143,46 @@ impl Tables {
         Tables { off, n, freqs: flat, canon, dec: OnceLock::new(), enc: OnceLock::new() }
     }
 
+    /// [`Tables::new`] of the contexts' alphabets `n` and their frequencies `freqs`, one after
+    /// another (as [`builtin::parse_flat`] gives them): the same tables, made of exactly the
+    /// memory they keep (their offsets and canonical contexts added), and the decoder's then of
+    /// [`Tables::dec_plan`]. The canonical contexts are found by comparing each with the earlier
+    /// ones, for few contexts.
+    pub fn from_flat(n: Vec<u16>, freqs: Vec<u16>) -> Tables {
+        assert_eq!(n.iter().map(|&k| k as usize).sum::<usize>(), freqs.len());
+        let mut off = Vec::with_capacity(n.len());
+        let mut at = 0u32;
+        for &k in &n {
+            off.push(at);
+            at += k as u32;
+        }
+        let f = |c: usize| &freqs[off[c] as usize..][..n[c] as usize];
+        let mut canon: Vec<u32> = Vec::with_capacity(n.len());
+        for c in 0..n.len() {
+            let x = f(c);
+            assert!(!x.is_empty() && x.len() <= 256);
+            assert_eq!(x.iter().map(|&v| v as u32).sum::<u32>(), PROB_SCALE);
+            assert!(x.iter().all(|&v| v >= 1));
+            let k = (0..c).find(|&d| canon[d] as usize == d && f(d) == x).unwrap_or(c);
+            canon.push(k as u32);
+        }
+        Tables { off, n, freqs, canon, dec: OnceLock::new(), enc: OnceLock::new() }
+    }
+
+    /// Bytes of the blocks that the decoder's tables of contexts of alphabets `n` take, built
+    /// on one thread (`block` the bytes a block of so many takes): by context, its first
+    /// bucket; room for the alias entries of every context (the canonical ones written); those
+    /// of every context at a fixed stride, where all have as many buckets.
+    pub fn dec_plan(n: &[u16], block: impl Fn(u64) -> u64) -> u64 {
+        let a = |k: u16| (k as u64).next_power_of_two().max(4);
+        let stride = n.iter().map(|&k| a(k)).max().unwrap_or(4);
+        let flat = match n.iter().all(|&k| a(k) == stride) {
+            true => block(8 * n.len() as u64 * stride),
+            false => 0,
+        };
+        block(4 * n.len() as u64) + block(8 * n.iter().map(|&k| a(k)).sum::<u64>()) + flat
+    }
+
     fn enc(&self) -> &EncTables {
         self.enc.get_or_init(|| {
             let mut enc = vec![0u64; self.freqs.len()];
@@ -188,10 +228,13 @@ impl Tables {
 
     fn build_dec(&self, threads: usize) -> DecTables {
         let mut meta = vec![0u32; self.n.len()];
-        let mut alias = Vec::new();
-        let canon: Vec<usize> = (0..self.n.len()).filter(|&c| self.canon[c] as usize == c).collect();
-        let threads = threads.clamp(1, canon.len().div_ceil(64).max(1));
+        let canonical = || (0..self.n.len()).filter(|&c| self.canon[c] as usize == c);
+        let buckets = |c: usize| (self.n[c] as usize).next_power_of_two().max(4);
+        // (room for as many entries as all contexts have buckets, whatever the canonical ones)
+        let mut alias = Vec::with_capacity((0..self.n.len()).map(buckets).sum());
+        let threads = threads.clamp(1, canonical().count().div_ceil(64).max(1));
         if threads > 1 {
+            let canon: Vec<usize> = canonical().collect();
             // Contiguous runs of contexts, their entries concatenated in order.
             let per = canon.len().div_ceil(threads);
             let chunks: Vec<&[usize]> = canon.chunks(per).collect();
@@ -210,7 +253,7 @@ impl Tables {
                 alias.extend_from_slice(&part);
             }
         } else {
-            for &c in &canon {
+            for c in canonical() {
                 meta[c] = (alias.len() as u32) << 4 | self.alias_entries(c, &mut alias);
             }
         }
@@ -829,6 +872,30 @@ pub mod builtin {
             p = end;
         }
         (p == raw.len()).then_some(out)
+    }
+
+    /// [`parse`] of contexts of alphabets `n`, their frequencies one after another (for
+    /// [`super::Tables::from_flat`]), reserved exactly.
+    pub fn parse_flat(raw: &[u8], id: u32, n: &[u16]) -> Option<Vec<u16>> {
+        let total: usize = n.iter().map(|&k| k as usize).sum();
+        if raw.len() != 4 + 2 * total || u32::from_le_bytes(raw[0..4].try_into().unwrap()) != id {
+            return None;
+        }
+        let mut out = Vec::with_capacity(total);
+        out.extend(raw[4..].as_chunks::<2>().0.iter().map(|&b| u16::from_le_bytes(b)));
+        let mut at = 0;
+        for &k in n {
+            let f = &out[at..at + k as usize];
+            // What `Tables::from_flat` requires.
+            if !(1..=256).contains(&k)
+                || f.contains(&0)
+                || f.iter().map(|&x| x as u32).sum::<u32>() != super::PROB_SCALE
+            {
+                return None;
+            }
+            at += k as usize;
+        }
+        Some(out)
     }
 
     /// [`parse`] of the file `data`.

@@ -382,6 +382,17 @@ impl FastWriter {
         FastWriter { buf: vec![0; bytes + 16], base: 0, pos: 0, acc: 0, n: 0 }
     }
 
+    /// Empties the writer, keeping its room.
+    pub fn clear(&mut self) {
+        (self.base, self.pos, self.acc, self.n) = (0, 0, 0, 0);
+    }
+
+    /// The bytes written, padded with zero bits to a byte boundary (as [`FastWriter::finish`]
+    /// gives them; each write stores its last byte so), the writer kept.
+    pub fn bytes(&self) -> &[u8] {
+        &self.buf[..self.pos + (self.n > 0) as usize]
+    }
+
     /// Makes room for `bytes` more bytes.
     #[inline(always)]
     pub fn reserve(&mut self, bytes: usize) {

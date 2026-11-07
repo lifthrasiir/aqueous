@@ -47,10 +47,21 @@ pub fn builtin_raw() -> Vec<u8> {
     panic!("the built-in tables are of the feature encode")
 }
 
-/// The tables in the uncompressed form `raw`, if they are valid for the layout.
+/// The tables in the uncompressed form `raw`, if they are valid for the layout: made of
+/// exactly the memory they keep, [`tables_plan`].
 pub fn tables_from(raw: &[u8]) -> Option<Tables> {
-    let f = builtin::parse(raw, layout_id(), std::iter::repeat_n(model::N_TOK, model::N_CTX))?;
-    Some(Tables::new(&f))
+    let n = vec![model::N_TOK as u16; model::N_CTX];
+    let f = builtin::parse_flat(raw, layout_id(), &n)?;
+    Some(Tables::from_flat(n, f))
+}
+
+/// Bytes of the blocks of [`tables_from`]'s tables and the decoder's of them, as `block`
+/// rounds them ([`ResDecoder::takes`] builds the decoder's).
+pub fn tables_plan(block: impl Fn(u64) -> u64) -> u64 {
+    let (n, k) = (model::N_CTX as u64, model::N_TOK as u64);
+    // (the alphabets, the frequencies, their offsets, the canonical contexts)
+    let tables = block(2 * n) + block(2 * n * k) + 2 * block(4 * n);
+    tables + Tables::dec_plan(&[model::N_TOK as u16; model::N_CTX], block)
 }
 
 /// Geometric-like tables for when nothing is built in.
@@ -372,6 +383,14 @@ impl<'a> ResDecoder<'a> {
         })
     }
 
+    /// Bytes of the blocks that [`ResDecoder::new`] of `words` bytes of words and raw bits of
+    /// `raw` takes, and the raw bits padded before it (as `block` rounds them).
+    pub fn plan(words: u64, raw: [u64; 2], block: impl Fn(u64) -> u64) -> u64 {
+        let pad = bits::PAD as u64;
+        let src = (words / 4).max(16) + rans::SRC_PAD as u64;
+        block(raw[0] + pad) + block(raw[1] + pad) + block(8 * size_of::<Lms>() as u64) + block(4 * src)
+    }
+
     /// Decodes the frame's residuals; the residual vectors must have their sizes.
     pub fn frame(&mut self, f: &mut Frame) -> Result<(), Error> {
         // The errors, then the LMS stage in place (with the scale state from before the
@@ -511,8 +530,13 @@ pub fn put_subframes(f: &Frame, sub: &mut Vec<u8>, warm: &mut Vec<u8>, rice: boo
 /// channels and sample size must be set. Sizes the residual vectors.
 pub fn get_subframes(f: &mut Frame, sub: &mut Rd, warm: &mut Rd, rice: bool) -> Result<(), Error> {
     let block = f.block_size;
-    f.sub.resize(f.channels, Default::default());
-    f.res.resize(f.channels, Vec::new());
+    // (grown only: a frame reused keeps the room of its subframes)
+    if f.sub.len() < f.channels {
+        f.sub.resize(f.channels, Default::default());
+    }
+    if f.res.len() < f.channels {
+        f.res.resize(f.channels, Vec::new());
+    }
     f.verbatim.clear();
     for ch in 0..f.channels {
         let side = matches!((f.assign, ch), (8, 1) | (9, 0) | (10, 1));

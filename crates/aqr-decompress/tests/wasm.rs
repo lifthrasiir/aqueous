@@ -1411,7 +1411,14 @@ fn task_slots_declared() {
 /// Formula `f` of a root application of slices, its plan declared as its limit alone (no room),
 /// archived and decoded as WebAssembly: `want`, and the application's working memory its plan,
 /// to the page.
-fn plan_holds(what: &str, mut f: Formula, want: &[u8]) {
+fn plan_holds(what: &str, f: Formula, want: &[u8]) {
+    plan_holds_queued(what, f, want, |_| 0)
+}
+
+/// [`plan_holds`] of a module whose channels may hold `queued(usage)` bytes of messages in
+/// its plan: its working memory within the plan, and the instance's and its tasks' at most
+/// the rest of the plan to the page.
+fn plan_holds_queued(what: &str, mut f: Formula, want: &[u8], queued: impl Fn(&aqr_formula::Usage) -> u64) {
     let pages = |n: u64| n.div_ceil(65536) * 65536;
     let Node::Apply(a) = &f.root else { panic!("{what}: not an application") };
     // (an input of another node evaluated natively)
@@ -1439,6 +1446,7 @@ fn plan_holds(what: &str, mut f: Formula, want: &[u8]) {
     };
     assert!(a.module.planned, "{what}: {} not planned", a.module);
     let plan = a.module.memory_usage_in_pages(&usage).unwrap() * 65536;
+    let queued = queued(&usage);
     let imported = [a.params.len() as u64, a.len].iter().chain(&resources).chain(&lens).map(|&n| pages(n)).sum::<u64>();
     let limit = imported + plan;
     a.memory_limit = limit;
@@ -1457,9 +1465,115 @@ fn plan_holds(what: &str, mut f: Formula, want: &[u8]) {
     // (of tasks, what they would take running as many at once as their slots allow)
     for a in mine {
         let worst = a.worst();
-        assert!(a.working <= worst, "{what}: working {} past {worst}", a.working);
-        assert!(worst <= plan && plan - worst < 65536, "{what}: plan {plan}, working at most {worst}");
+        assert!(a.working <= worst + queued, "{what}: working {} past {worst} and {queued} queued", a.working);
+        let held = plan - queued;
+        assert!(
+            worst <= held && held - worst < 65536,
+            "{what}: plan {plan} ({queued} queued), working at most {worst}"
+        );
     }
+}
+
+/// Each application of `f` (the root, or the parts of a concatenation) of `d` as
+/// [`plan_holds_queued`] checks it.
+fn applications_hold(what: &str, f: &Formula, d: &[u8], queued: impl Fn(&aqr_formula::Usage) -> u64 + Copy) -> usize {
+    let parts = match &f.root {
+        Node::Concat(nodes) => nodes.clone(),
+        n => vec![n.clone()],
+    };
+    let (mut at, mut applied) = (0, 0);
+    for n in parts {
+        let len = match &n {
+            Node::Apply(a) => a.len,
+            Node::Slice { len, .. } => *len,
+            _ => panic!("{what}: a node of another kind"),
+        } as usize;
+        if let Node::Apply(_) = n {
+            let mut g = f.clone();
+            g.root = n;
+            plan_holds_queued(&format!("{what} {applied}"), g, &d[at..at + len], queued);
+            applied += 1;
+        }
+        at += len;
+    }
+    applied
+}
+
+/// A WAV file of `n` sample frames of `channels` channels of `bytes` bytes each: tones with
+/// noise, and silence, a constant run and full-scale noise (verbatim subframes) along the way.
+fn wav_of(n: u32, channels: u16, bytes: u16) -> Vec<u8> {
+    let data = n * channels as u32 * bytes as u32;
+    let mut d = Vec::new();
+    d.extend_from_slice(b"RIFF");
+    d.extend_from_slice(&(36 + data).to_le_bytes());
+    d.extend_from_slice(b"WAVEfmt ");
+    d.extend_from_slice(&16u32.to_le_bytes());
+    d.extend_from_slice(&1u16.to_le_bytes());
+    d.extend_from_slice(&channels.to_le_bytes());
+    d.extend_from_slice(&44100u32.to_le_bytes());
+    d.extend_from_slice(&(44100 * channels as u32 * bytes as u32).to_le_bytes());
+    d.extend_from_slice(&(channels * bytes).to_le_bytes());
+    d.extend_from_slice(&(8 * bytes).to_le_bytes());
+    d.extend_from_slice(b"data");
+    d.extend_from_slice(&data.to_le_bytes());
+    let mut r = 1u32;
+    let bits = 8 * bytes as u32;
+    for i in 0..n {
+        for c in 0..channels as u32 {
+            r = r.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let x = match (i / 5000) % 4 {
+                0 | 1 => {
+                    (((i as f64 * (0.01 + 0.003 * c as f64)).sin() * 0.3) * (1u64 << (bits - 1)) as f64) as i64
+                        + (r >> 26) as i64
+                        - 32
+                }
+                2 if i % 5000 < 2500 => 0,
+                2 => 1234,
+                _ => (r as i64) >> (32 - bits),
+            };
+            let x = if bytes == 1 { (x + 128) as u64 } else { x as u64 };
+            d.extend_from_slice(&x.to_le_bytes()[..bytes as usize]);
+        }
+    }
+    d
+}
+
+/// pcm-recons lays its memory out as a stack, its limit its plan: the pipeline's first stage,
+/// its error and LMS stages and its five workers each a task taking the same memory whatever
+/// it is given, all at once, and the messages its channels may hold. Of stereo 16-bit, mono
+/// 8-bit, 24-bit 6 channels, 32-bit and 8 channels, and of fewer samples than a block.
+#[test]
+fn pcm_plans_hold() {
+    let queued = |u: &aqr_formula::Usage| {
+        aqr_raw::module::pcm::plan(u.params, u.resources, u.inputs, u.outputs[0], u.initial()).unwrap().1
+    };
+    for (n, ch, bytes) in
+        [(600_000, 2, 2), (40_000, 1, 1), (30_000, 6, 3), (25_000, 2, 4), (20_000, 8, 2), (1000, 2, 2)]
+    {
+        let d = wav_of(n, ch, bytes);
+        let f = aqr_raw::formula::encode(&d, 1).unwrap_or_else(|| panic!("{n} {ch} {bytes}"));
+        assert!(applications_hold(&format!("pcm {n}x{ch}x{bytes}"), &f, &d, queued) > 0, "{n} {ch} {bytes}");
+    }
+}
+
+/// flac-recons lays its memory out as a stack, its limit its plan (as pcm-recons'), of
+/// frames of the room its params give: of every fixture (junk between frames, 24 and 32 bits,
+/// 6 channels, a cut file, mono 8-bit, silence).
+#[test]
+fn flac_plans_hold() {
+    let queued = |u: &aqr_formula::Usage| {
+        aqr_flac::module::plan(u.params, u.resources, u.inputs, u.outputs[0], u.initial()).unwrap().1
+    };
+    let dir = format!("{}/../../codecs/aqr-flac/tests/data", env!("CARGO_MANIFEST_DIR"));
+    let mut seen = 0;
+    for e in std::fs::read_dir(dir).unwrap() {
+        let path = e.unwrap().path();
+        let d = std::fs::read(&path).unwrap();
+        let what = path.file_name().unwrap().to_string_lossy().into_owned();
+        let f = aqr_flac::formula::encode(&d, 1).unwrap_or_else(|| panic!("{what}"));
+        seen += applications_hold(&what, &f, &d, queued);
+    }
+    assert!(seen >= 12, "{seen}");
 }
 
 /// snappy-recons lays its memory out as a stack, its limit its plan: each stream of the
