@@ -33,3 +33,13 @@ pub fn recons_hangul(initial: u64, params: &[u8], resources: &[u64], inputs: &[u
     m.take(len);
     Some(m.plan())
 }
+
+/// What the plan of `wrt-recons` or `wrt-recons-hangul` comes to at least for an output of `len`,
+/// whatever the dictionary, parameters and inputs (the output is taken in any case), for the
+/// encoder to tell before coding that a text is over a bound.
+pub fn least(initial: u64, len: u64) -> u64 {
+    let mut m = Sim::new(initial);
+    m.take(whole(0, &[], &[]));
+    m.take(len);
+    m.plan()
+}

@@ -244,7 +244,7 @@ pub struct Options {
     /// The most bytes that an application of a module may have as its minimal bound (its memory
     /// limit and the sum of its task limits; spec, "Module execution"): a recompression whose
     /// formula has a larger one is not used, its data kept as it would be without it
-    /// ([`memory::fallbacks`] tells). None, the default: 256 MiB ([`memory::DEFAULT_BOUND`]),
+    /// ([`memory::fallbacks`] tells). None, the default: 512 MiB ([`memory::DEFAULT_BOUND`]; 256 MiB is the target),
     /// or more for a module with an exception ([`memory`]); decoders support up to 512 MiB.
     pub application_bound: Option<u64>,
 }
@@ -2386,6 +2386,10 @@ fn pure(format: Format, d: &[u8], p: &Pure) -> Option<Option<Formula>> {
     if !fits(format, d.len()) {
         return Some(None);
     }
+    // (an application over the bound whatever the coding makes: not coded to be given up after)
+    if memory::certainly_over(format, d.len() as u64, p.opt.application_bound) {
+        return Some(None);
+    }
     #[cfg(test)]
     tests::PURE.with(|n| n.set(n.get() + 1));
     let code = || {
@@ -3698,6 +3702,27 @@ mod tests {
         let told = fallbacks();
         assert!(!told.is_empty() && told.iter().all(|f| f.needed > 1 && !f.kept), "{told:?}");
         assert!(told.iter().any(|f| f.bytes == gz.len() as u64));
+    }
+
+    /// A text or FASTA file whose application is over the bound whatever the coding makes is
+    /// not coded at all ([`memory::least`]), and told as given up.
+    #[test]
+    fn over_bound_not_coded() {
+        let text: Vec<u8> =
+            (0..40000).flat_map(|i| format!("line {} of the text\n", i * 7 % 1000).into_bytes()).collect();
+        assert!(text.len() >= aqr_wrt::formula::MIN_LEN);
+        let _ = fallbacks();
+        TEXTS.lock().unwrap().clear();
+        let opt = Options { smaller: false, application_bound: Some(1), ..Options::default() };
+        let f = recompress(&text, &opt);
+        assert!(f.applies().is_empty());
+        let told = fallbacks();
+        assert!(told.iter().any(|f| f.module == "wrt-recons" && f.bytes == text.len() as u64 && !f.kept), "{told:?}");
+        assert!(TEXTS.lock().unwrap().is_empty());
+        // (not over a bound it may meet)
+        let opt = Options { smaller: false, ..Options::default() };
+        assert!(!recompress(&text, &opt).applies().is_empty());
+        assert!(!TEXTS.lock().unwrap().is_empty());
     }
 
     /// The members of a gzip stream after its first (as gzip, pigz's `--independent` and

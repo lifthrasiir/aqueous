@@ -169,8 +169,8 @@
 //!   fit with one unit each fails as a resource failure before it starts.
 //! - `--application-bound SIZE` is about the most memory an application of a module may need at
 //!   its least (its memory limit plus the sum of its task limits, `aqr -I -v` tells them), apart
-//!   from `-M`, the budget of the whole run. Compressing (256 MiB by default, `unlimited` allowed),
-//!   a recompressor whose formula has an application over it is not used for that data, which
+//!   from `-M`, the budget of the whole run. Compressing (512 MiB by default, to be 256 MiB;
+//!   `unlimited` allowed), a recompressor whose formula has an application over it is not used for that data, which
 //!   is kept as it would be if no recompressor took it (`-v` and `--stats` tell what fell back);
 //!   decompressing (512 MiB by default, which the spec has every decoder support), an archive
 //!   with an application over it fails as a resource failure before the module is applied.
@@ -331,7 +331,7 @@ General:
       --application-bound SIZE
                         the most memory an application of a module may need (its
                         memory limit and the sum of its task limits): compressing,
-                        recompressions needing more are not used (default 256M, or
+                        recompressions needing more are not used (default 512M, to be 256M, or
                         unlimited); decompressing, an archive needing more fails
                         (default 512M, which every decoder supports); independent of -M
   -h, --help            show this help
