@@ -1278,7 +1278,7 @@ fn recompress_sealed(
     };
     drop(shared);
     let watches = told_as_second_half(&f, d);
-    let words = (format == Format::Jsonl).then(|| segment_words(&f, opt, cx)).flatten();
+    let words = (format == Format::Jsonl || format.is_bundle()).then(|| segment_words(&f, opt, cx)).flatten();
     // (where the data put off is, and what the formula is, as the contents may take its streams
     // out of it)
     let bases: Vec<usize> = f.streams.iter().map(|s| addr(&s.data)).collect();
@@ -1334,27 +1334,71 @@ fn addr(b: &Bytes) -> usize {
 /// text's own (as [`archive`]'s batches have it).
 const SEGMENT_WORDS_MIN: usize = 256 << 10;
 
-/// Sets [`Cx::words`] for the contents of `f`, a formula of JSON lines cut into segments, where
-/// none is set: a dictionary of the text of its segments (contents of [`Kind::Text`], at least
-/// [`SEGMENT_WORDS_MIN`] bytes in all), so that it is coded with one dictionary, as it is where
-/// the file is one segment. Returns it, to be unset once they are made.
+/// Sets [`Cx::words`] for the contents of `f`, where none is set: a dictionary of the text of its
+/// contents (for JSON lines cut into segments, those of [`Kind::Text`]; for an archive that only
+/// bundles files, the members that are text as [`made`] tells), at least [`SEGMENT_WORDS_MIN`]
+/// bytes in all, so that it is coded with one dictionary, as it is where the file is one segment,
+/// and the same text of members is coded alike (the files of a tar archive, as they are on their
+/// own in an archive of files). Returns it, to be unset once they are made.
 fn segment_words(f: &Formula, opt: &Options, cx: &Cx) -> Option<Arc<aqr_wrt::formula::Shared>> {
     // (of one segment, the file's text has a dictionary of its own anyway)
-    if cx.words.borrow().is_some() || !matches!(f.root, Node::Concat(_)) {
+    let apart = bundle::bundles(f);
+    if cx.words.borrow().is_some() || !(apart || matches!(f.root, Node::Concat(_))) {
         return None;
     }
-    let texts: Vec<&[u8]> = f
-        .streams
-        .iter()
-        .filter(|s| s.content && s.kind == Kind::Text && aqr_wrt::formula::starts(&s.data))
-        .map(|s| &s.data[..])
-        .collect();
+    let texts: Vec<&[u8]> = match apart {
+        true => {
+            let mut texts = Vec::new();
+            member_texts(&f.root, f, opt, &mut texts);
+            texts
+        }
+        false => f
+            .streams
+            .iter()
+            .filter(|s| s.content && s.kind == Kind::Text && aqr_wrt::formula::starts(&s.data))
+            .map(|s| &s.data[..])
+            .collect(),
+    };
     if texts.len() < 2 || texts.iter().map(|t| t.len()).sum::<usize>() < SEGMENT_WORDS_MIN {
         return None;
     }
     let words = Arc::new(aqr_wrt::formula::Shared::of(&texts, opt.threads)?);
     cx.share_words(Some(words.clone()));
     Some(words)
+}
+
+/// The contents below node `n` of `f` that are text ([`segment_words`]), made already.
+fn member_texts<'a>(n: &Node, f: &'a Formula, opt: &Options, out: &mut Vec<&'a [u8]>) {
+    match n {
+        Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| member_texts(n, f, opt, out)),
+        Node::Apply(a) => {
+            for (i, input) in a.inputs.iter().enumerate() {
+                match content(opt, a.module, i) {
+                    Some(_) => slices_of(input, f, &mut |d| {
+                        if is_text(detect(d)) && aqr_wrt::formula::starts(d) && !aqr_obj::formula::starts(d) {
+                            out.push(d);
+                        }
+                    }),
+                    None => member_texts(input, f, opt, out),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The bytes of the slices below node `n` of `f` that are made already.
+fn slices_of<'a>(n: &Node, f: &'a Formula, each: &mut dyn FnMut(&'a [u8])) {
+    match n {
+        &Node::Slice { stream, start, len } => {
+            let d = f.streams.get(stream).filter(|s| !s.data.is_lazy()).map(|s| &s.data[..]);
+            if let Some(d) = d.and_then(|d| d.get(start as usize..)?.get(..len as usize)) {
+                each(d);
+            }
+        }
+        Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| slices_of(n, f, each)),
+        _ => {}
+    }
 }
 
 /// Tells of the work on the streams of `f` that are data of their own (not of `d`, the data
@@ -3051,28 +3095,7 @@ mod tests {
     /// (which would read the streams sunk).
     #[test]
     fn sealed_over_the_bound_kept_raw() {
-        let tar = |files: &[(&str, &[u8])]| {
-            let mut t = Vec::new();
-            for (name, d) in files {
-                let mut h = [0u8; 512];
-                h[..name.len()].copy_from_slice(name.as_bytes());
-                h[100..107].copy_from_slice(b"0000644");
-                h[108..115].copy_from_slice(b"0000000");
-                h[116..123].copy_from_slice(b"0000000");
-                h[124..135].copy_from_slice(format!("{:011o}", d.len()).as_bytes());
-                h[136..147].copy_from_slice(b"00000000000");
-                h[156] = b'0';
-                h[257..265].copy_from_slice(b"ustar\x0000");
-                h[148..156].fill(b' ');
-                let sum: u32 = h.iter().map(|&b| b as u32).sum();
-                h[148..155].copy_from_slice(format!("{sum:06o}\0").as_bytes());
-                t.extend_from_slice(&h);
-                t.extend_from_slice(d);
-                t.resize(t.len().next_multiple_of(512), 0);
-            }
-            t.resize(t.len() + 1024, 0);
-            t
-        };
+        let tar = tar_of;
         let fixture = |p: &str| std::fs::read(format!("{}/../../{p}", env!("CARGO_MANIFEST_DIR"))).unwrap();
         let mut iso = zstd::stream::decode_all(&fixture("codecs/aqr-iso/tests/data/udf201.iso.zst")[..]).unwrap();
         let jpeg = fixture("codecs/aqr-jpeg/tests/data/gradient.jpg");
@@ -3807,6 +3830,68 @@ mod tests {
             let raw_or_tok = !stream("pdf/raw").is_empty() || !stream("pdf/tok-symbols").is_empty();
             assert_eq!(raw_or_tok, level == Level::MID, "{level:?}");
         }
+    }
+
+    /// A ustar archive of `files`.
+    fn tar_of(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut t = Vec::new();
+        for (name, d) in files {
+            let mut h = [0u8; 512];
+            h[..name.len()].copy_from_slice(name.as_bytes());
+            h[100..107].copy_from_slice(b"0000644");
+            h[108..115].copy_from_slice(b"0000000");
+            h[116..123].copy_from_slice(b"0000000");
+            h[124..135].copy_from_slice(format!("{:011o}", d.len()).as_bytes());
+            h[136..147].copy_from_slice(b"00000000000");
+            h[156] = b'0';
+            h[257..265].copy_from_slice(b"ustar\x0000");
+            h[148..156].fill(b' ');
+            let sum: u32 = h.iter().map(|&b| b as u32).sum();
+            h[148..155].copy_from_slice(format!("{sum:06o}\0").as_bytes());
+            t.extend_from_slice(&h);
+            t.extend_from_slice(d);
+            t.resize(t.len().next_multiple_of(512), 0);
+        }
+        t.resize(t.len() + 1024, 0);
+        t
+    }
+
+    /// The text members of a tar archive are coded with one dictionary, so that the same
+    /// words code alike in files apart (each with a dictionary of its own, the zstd of the
+    /// coded files finds nothing across them).
+    #[test]
+    fn tar_members_share_words() {
+        let words: Vec<String> = (0..300)
+            .map(|i| {
+                let n = i * 7919 + 13;
+                format!(
+                    "{}{}{}",
+                    ["ab", "ka", "to", "mi", "re"][n % 5],
+                    ["lon", "pra", "esh", "ud"][n / 5 % 4],
+                    ["ing", "ed", "s", "ly", "er"][n / 20 % 5]
+                )
+            })
+            .collect();
+        let text = |seed: u64| {
+            let mut x = seed;
+            let mut t = Vec::new();
+            while t.len() < 300_000 {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                t.extend_from_slice(words[(x >> 40) as usize % words.len()].as_bytes());
+                t.push(b' ');
+            }
+            t
+        };
+        let texts: Vec<Vec<u8>> = (1..=4).map(text).collect();
+        let names: Vec<String> = (0..4).map(|i| format!("t{i}.dat")).collect();
+        let files: Vec<(&str, &[u8])> = names.iter().map(|n| n.as_str()).zip(texts.iter().map(|t| &t[..])).collect();
+        let d = tar_of(&files);
+        let opt = Options { threads: 2, ..Options::default() };
+        let (c, f) = compress_formula(&d, &opt);
+        let coded: Vec<_> = f.applies().into_iter().filter(|a| a.module == aqr_decompress::WRT).collect();
+        assert!(coded.len() >= 2, "{} wrt applications", coded.len());
+        assert!(coded.iter().all(|a| a.resources == coded[0].resources));
+        assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
     }
 
     /// A file of text that aqr-wrt does not take is kept raw as text, archived as text is
