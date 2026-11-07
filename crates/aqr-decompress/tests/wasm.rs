@@ -2546,6 +2546,41 @@ fn raster16_plan_holds() {
     }
 }
 
+/// raster-recons and raster-recons-16 in bands: each band's application holds its plan to the
+/// page (8 and 16 bits, padded, bands of equal rows and the last the shorter).
+#[test]
+fn raster_bands_plans_hold() {
+    let (width, height, channels, pad) = (700, 400, 3, 4);
+    let fmt = aqr_raw::image::raster::Format { width, height, channels, stride: width * channels + pad };
+    let mut d = Vec::with_capacity(fmt.len().unwrap());
+    for y in 0..height {
+        for x in 0..width * channels {
+            d.push(((x + 2 * y) * 3 + (x * y) % 11) as u8);
+        }
+        d.extend(std::iter::repeat_n(0x5a, pad));
+    }
+    let mut f = Formula::default();
+    f.root = aqr_raw::formula::raster::apply_in(&mut f, &d, fmt, 2, fmt.stride * 130).unwrap();
+    assert_eq!(applications_hold("raster bands", &f, &d, |_| 0), 4);
+    let fmt = aqr_raw::image::raster16::Format {
+        width,
+        height,
+        channels,
+        stride: 2 * width * channels + pad,
+        big_endian: false,
+    };
+    let mut d = Vec::with_capacity(fmt.len().unwrap());
+    for y in 0..height {
+        for x in 0..width * channels {
+            d.extend_from_slice(&(((x + 2 * y) * 37 + (x * y) % 11) as u16 * 13).to_le_bytes());
+        }
+        d.extend(std::iter::repeat_n(0x5a, pad));
+    }
+    let mut f = Formula::default();
+    f.root = aqr_raw::formula::raster16::apply_in(&mut f, &d, fmt, 2, fmt.stride * 130).unwrap();
+    assert_eq!(applications_hold("raster16 bands", &f, &d, |_| 0), 4);
+}
+
 /// bvx-recons lays its memory out as a stack, its limit its plan: of libcompression's streams,
 /// and of a stream of LZFSE blocks (more than the stack's holes), LZVN and stored blocks in turn.
 #[test]

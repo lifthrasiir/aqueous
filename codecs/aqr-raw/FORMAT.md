@@ -644,6 +644,15 @@ tables that do not parse, and bytes after the last chunk.
 
 ### 9.1 Taking a container apart
 
+*Bands.* A raster of more than 48 MiB (`BAND`) is not one application of its module but
+several, so that each takes a bounded memory (about four times its samples: the inputs and the
+output imported and copied): the rows are cut into bands of equal rows (the last the
+shorter) of about 48 MiB, each an application of the module with its own layout (the height of
+the band), and the formula is the concatenation of them. The bands' coded forms are one stream
+and their paddings another, each application taking its slice. A band is a raster of its own
+(its first row has no row above it, and the model starts anew), which costs a little at each
+cut (+0.006% on a 126 MB BMP in three bands). The modules do not change.
+
 The encoder recognises the containers below by their headers. The samples are the bytes
 `[start, start + n)` of the file, where the header says; the formula is
 `concat(slice(header), apply(module, samples), slice(trailer))` (§2), with the header the

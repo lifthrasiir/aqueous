@@ -139,6 +139,14 @@ PCM is cut into it here.
 
 ### Images
 
+- **Bands**: a raster of more than 48 MiB is cut into bands of rows, each an application of the
+  module of its own (`formula::raster::apply_in`), so that each needs at most about four times
+  its band (192 MiB; a whole raster needed 4x its length and fell back over a 256 MiB bound).
+  A 126 MB 24-bit BMP of a synthetic picture, M4, `-9`: 126,000,089 B at 256M before (fell
+  back to stored), 52,391,685 B without a bound, 52,394,755 B in three bands (+0.006%);
+  compress 33.15 -> 33.31 G instructions, decompress native 13.60 -> 13.73 G, Wasm resident
+  555 -> 415 MB.
+
 - **Pixel model**: a sample is predicted by LOCO-I's MED from its left, upper and upper left
   neighbours; the second and third channels of three or more add the previous channel's
   residual (green and blue from red, or their counterparts in BGR). The context is the

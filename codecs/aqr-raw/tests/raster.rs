@@ -356,3 +356,43 @@ fn corrupt_inputs() {
         }
     }
 }
+
+/// A raster in bands: one application each of equal rows, the streams one each (slices), the
+/// samples back; 8 and 16 bits, with row padding.
+#[test]
+fn bands_of_rows() {
+    for (w, h, ch) in [(50, 40, 1), (37, 61, 3), (64, 9, 4)] {
+        let rb = w * ch;
+        for stride in [rb, rb + 5] {
+            let mut d = Vec::new();
+            for row in picture(w, h, ch).chunks(rb) {
+                d.extend_from_slice(row);
+                d.extend((0..stride - rb).map(|i| i as u8 * 7));
+            }
+            let fmt = Format { width: w, height: h, channels: ch, stride };
+            let mut whole = Formula::default();
+            whole.root = raster::apply(&mut whole, &d, fmt).unwrap();
+            assert!(matches!(whole.root, Node::Apply(_)));
+            for band in [stride * 10, stride * 3 + 1, 1] {
+                let mut f = Formula::default();
+                f.root = raster::apply_in(&mut f, &d, fmt, 3, band).unwrap();
+                let n = h.div_ceil((band / stride).max(1));
+                assert_eq!(f.streams.len(), 2);
+                match &f.root {
+                    Node::Concat(nodes) => assert_eq!(nodes.len(), n),
+                    Node::Apply(_) => assert_eq!(n, 1),
+                    _ => panic!("{w}x{h}x{ch}/{band}"),
+                }
+                assert!(eval(&f).unwrap() == d, "{w}x{h}x{ch} stride {stride} band {band}");
+            }
+        }
+    }
+    let (w, h, ch) = (41, 50, 2);
+    let d = picture16(w, h, ch, false);
+    let fmt =
+        aqr_raw::image::raster16::Format { width: w, height: h, channels: ch, stride: 2 * w * ch, big_endian: false };
+    let mut f = Formula::default();
+    f.root = raster16::apply_in(&mut f, &d, fmt, 2, fmt.stride * 12).unwrap();
+    assert!(matches!(&f.root, Node::Concat(n) if n.len() == 5));
+    assert!(eval(&f).unwrap() == d);
+}
