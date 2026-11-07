@@ -3,7 +3,7 @@
 //! to 2^16 that move by 1/64 towards each base seen; the top 12 bits of the first three are
 //! its frequencies, the fourth what is left of 4096.
 
-use crate::stream::Reader;
+use crate::stream::{PIECE, Reader};
 use crate::{Result, corrupt};
 
 /// Bases of the context: 9, a table of 2 MiB, so that several decoders at once keep theirs
@@ -310,7 +310,7 @@ fn encode_in(s: &Packed, chunk: usize) -> Vec<u8> {
 /// The `n` bases of coded form `c`; fails where `c` is not exactly of them.
 pub fn decode(c: &[u8], n: usize) -> Result<Vec<u8>> {
     let mut src = crate::stream::Slice(c);
-    let mut d = Decoder::new(Reader::new(&mut src))?;
+    let mut d = Decoder::new(Reader::new(&mut src, PIECE))?;
     let s = d.by_ref().take(n).collect();
     d.finish()?;
     Ok(s)

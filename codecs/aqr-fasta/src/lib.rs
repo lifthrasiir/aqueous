@@ -22,6 +22,12 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl From<aqr_api::stream::Corrupt> for Error {
+    fn from(_: aqr_api::stream::Corrupt) -> Error {
+        corrupt()
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[cold]

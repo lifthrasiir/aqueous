@@ -192,7 +192,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "fasta-recons",
         version: 3,
-        sha512_256: hex("58fca59c3768d47e63e3bffdf25c4d719450de8ee0a4e77e30158c86f0cdfdd7"),
+        sha512_256: hex("3e24ee2f6af1d4a1aeab02a6ff46ed13f2ca7d94c8ce806e6de8bbd93d21b657"),
         block: include_bytes!("../wasm/fasta-recons.block"),
     },
     Known {
@@ -300,13 +300,13 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "lzma-recons",
         version: 3,
-        sha512_256: hex("b708e1351e36c2edb6e2ab1db4898baa165c0e9ba736cfeb788232eba4eb8c3e"),
+        sha512_256: hex("6dea22ca473725a761fa37b0a036965d2b56f6ae81cad740d3af9df637927d47"),
         block: include_bytes!("../wasm/lzma-recons.block"),
     },
     Known {
         name: "lzma2-recons",
         version: 2,
-        sha512_256: hex("d20a4415d17b241a0057f71f5e610d55b91fe714b15c342074fe889f8a6ac070"),
+        sha512_256: hex("2be816e9ea79a58bea9926889ee275bc1edab4b552fbbb0dca9c34882b35fba4"),
         block: include_bytes!("../wasm/lzma2-recons.block"),
     },
     Known {

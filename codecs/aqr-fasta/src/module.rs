@@ -3,8 +3,9 @@
 //! output put in order through windows, in pieces, and nothing of their lengths is held.
 
 use crate::fasta::{self, Shape, Streams};
-use crate::stream::{PIECE, Pull, Put, Reader, Slice, Writer};
+use crate::stream::{PIECE, Pull, Reader, Slice, Writer};
 use crate::{Result, bases, corrupt};
+use aqr_api::stream::{In, Written};
 use aqr_common::varint;
 
 /// Pages of the windows of the module as a part module ([`decode_part`]): of each input and of
@@ -39,12 +40,12 @@ fn shape(params: &[u8]) -> Result<Shape> {
 fn run(shape: Shape, inputs: [&mut dyn Pull; 5], w: &mut Writer) -> Result<()> {
     let [headers, layout, case, other, coded] = inputs;
     let mut streams = Streams {
-        headers: Reader::new(headers),
-        layout: Reader::new(layout),
-        case: Reader::new(case),
-        other: Reader::new(other),
+        headers: Reader::new(headers, PIECE),
+        layout: Reader::new(layout, PIECE),
+        case: Reader::new(case, PIECE),
+        other: Reader::new(other, PIECE),
     };
-    let mut bases = bases::Decoder::new(Reader::new(coded))?;
+    let mut bases = bases::Decoder::new(Reader::new(coded, PIECE))?;
     fasta::build(shape, &mut streams, &mut bases, w)?;
     bases.finish()
 }
@@ -62,51 +63,6 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Res
     Ok(out)
 }
 
-/// The `K`-th input of a part module read in order, through its window.
-struct In<const K: u32> {
-    at: u64,
-    len: u64,
-}
-
-impl<const K: u32> Pull for In<K>
-where
-    aqr_api::Input<K>: aqr_api::Memory,
-{
-    fn pull(&mut self, buf: &mut [u8]) -> usize {
-        use aqr_api::{Input, Memory};
-        // (an empty input has no pages)
-        if self.at == self.len {
-            return 0;
-        }
-        let w = Input::<K>::size();
-        let k = (self.len - self.at).min(buf.len() as u64).min(w - self.at % w) as usize;
-        Input::<K>::request(self.at + k as u64);
-        Input::<K>::read(self.at % w, &mut buf[..k]);
-        Input::<K>::release(self.at + k as u64);
-        self.at += k as u64;
-        k
-    }
-}
-
-/// The output of a part module, written through its window.
-struct Written {
-    at: u64,
-}
-
-impl Put for Written {
-    fn put(&mut self, mut d: &[u8]) {
-        use aqr_api::{Memory, Output};
-        let w = Output::<0>::size();
-        while !d.is_empty() {
-            let k = (d.len() as u64).min(w - self.at % w) as usize;
-            Output::<0>::write(self.at % w, &d[..k]);
-            self.at += k as u64;
-            Output::<0>::commit(self.at);
-            d = &d[k..];
-        }
-    }
-}
-
 /// The module as a part module (its entry point, of `aqr_api::entry!`): what [`decode`] gives,
 /// its inputs taken and its output put in order through windows ([`WINDOW`]), in pieces:
 /// nothing is held, whatever the lengths.
@@ -122,13 +78,13 @@ fn part(params_len: u64, lens: [u64; 5], size: u64) -> Result<()> {
     Params::read(0, params);
     let shape = shape(params)?;
     let (mut i0, mut i1, mut i2, mut i3, mut i4) = (
-        In::<0> { at: 0, len: lens[0] },
-        In::<1> { at: 0, len: lens[1] },
-        In::<2> { at: 0, len: lens[2] },
-        In::<3> { at: 0, len: lens[3] },
-        In::<4> { at: 0, len: lens[4] },
+        In::<0>::new(lens[0]),
+        In::<1>::new(lens[1]),
+        In::<2>::new(lens[2]),
+        In::<3>::new(lens[3]),
+        In::<4>::new(lens[4]),
     );
-    let mut out = Written { at: 0 };
+    let mut out = Written::new(size);
     let mut w = Writer::new(&mut out, size);
     run(shape, [&mut i0, &mut i1, &mut i2, &mut i3, &mut i4], &mut w)?;
     w.finish()

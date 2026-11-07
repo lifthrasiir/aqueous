@@ -11,7 +11,7 @@ use aqr_common::varint;
 use crate::bases::Packed;
 #[cfg(feature = "encode")]
 use crate::bases::Packer;
-use crate::stream::{Reader, Slice, Writer};
+use crate::stream::{Lines, PIECE, Reader, Slice, Writer};
 use crate::{Result, corrupt};
 
 /// A FASTA file's parts.
@@ -359,10 +359,10 @@ pub fn rebuild<B: Iterator<Item = u8>>(shape: Shape, streams: [&[u8]; 4], mut ba
     let [h, l, c, o] = streams;
     let (mut h, mut l, mut c, mut o) = (Slice(h), Slice(l), Slice(c), Slice(o));
     let mut s = Streams {
-        headers: Reader::new(&mut h),
-        layout: Reader::new(&mut l),
-        case: Reader::new(&mut c),
-        other: Reader::new(&mut o),
+        headers: Reader::new(&mut h, PIECE),
+        layout: Reader::new(&mut l, PIECE),
+        case: Reader::new(&mut c, PIECE),
+        other: Reader::new(&mut o, PIECE),
     };
     let mut out = Vec::with_capacity(len.min(1 << 30) as usize);
     let mut w = Writer::new(&mut out, len);

@@ -1,127 +1,29 @@
 //! The module's streams taken in pieces: the inputs read in order ([`Pull`], [`Reader`]) and the
 //! output put in order ([`Put`], [`Writer`]), so that a part module holds a piece of each and
-//! nothing of their lengths (FORMAT.md, "The module").
+//! nothing of their lengths (FORMAT.md, "The module"). The reading and the sink are
+//! [`aqr_api::stream`]'s.
 
 use crate::{Result, corrupt};
+pub use aqr_api::stream::{Pull, Put, Reader, Slice};
 
 /// Bytes of the pieces in which a stream is taken or put.
 pub const PIECE: usize = 1 << 16;
 
-/// A stream of bytes taken in order.
-pub trait Pull {
-    /// Copies the next bytes into the front of `buf` (at least one, as many as it has room for
-    /// at most) and tells how many; 0 where the stream has ended.
-    fn pull(&mut self, buf: &mut [u8]) -> usize;
-}
-
-/// A byte slice as a [`Pull`], natively.
-pub struct Slice<'a>(pub &'a [u8]);
-
-impl Pull for Slice<'_> {
-    fn pull(&mut self, buf: &mut [u8]) -> usize {
-        let n = self.0.len().min(buf.len());
-        buf[..n].copy_from_slice(&self.0[..n]);
-        self.0 = &self.0[n..];
-        n
-    }
-}
-
-/// A stream read a byte at a time out of a piece of it ([`PIECE`]).
-pub struct Reader<'a> {
-    src: &'a mut dyn Pull,
-    buf: Vec<u8>,
-    at: usize,
-    end: usize,
-}
-
-impl<'a> Reader<'a> {
-    pub fn new(src: &'a mut dyn Pull) -> Reader<'a> {
-        Reader { src, buf: vec![0; PIECE], at: 0, end: 0 }
-    }
-
-    /// Takes the next piece, if any is left; whether it did.
-    #[cold]
-    fn refill(&mut self) -> bool {
-        self.at = 0;
-        self.end = self.src.pull(&mut self.buf);
-        self.end > 0
-    }
-
-    /// The next byte, or `None` at the end of the stream.
-    #[inline(always)]
-    pub fn byte(&mut self) -> Option<u8> {
-        if self.at == self.end && !self.refill() {
-            return None;
-        }
-        let b = self.buf[self.at];
-        self.at += 1;
-        Some(b)
-    }
-
-    /// Whether every byte was read.
-    pub fn done(&mut self) -> bool {
-        self.at == self.end && !self.refill()
-    }
-
-    /// The next varint (at most ten bytes; bits beyond 64 are an error).
-    #[inline]
-    pub fn num(&mut self) -> Result<u64> {
-        let b = self.byte().ok_or_else(corrupt)?;
-        if b < 0x80 {
-            return Ok(b as u64);
-        }
-        self.num_slow(b)
-    }
-
-    #[cold]
-    fn num_slow(&mut self, first: u8) -> Result<u64> {
-        let mut v = (first & 0x7f) as u64;
-        for shift in (7..64).step_by(7) {
-            let b = self.byte().ok_or_else(corrupt)?;
-            if shift == 63 && b > 1 {
-                return Err(corrupt());
-            }
-            v |= ((b & 0x7f) as u64) << shift;
-            if b < 0x80 {
-                return Ok(v);
-            }
-        }
-        Err(corrupt())
-    }
-
+/// Lines taken out of a [`Reader`].
+pub trait Lines {
     /// Copies the bytes up to the next LF to `w`, and takes the LF; fails at the end of the
     /// stream before one.
-    pub fn line_into(&mut self, w: &mut Writer) -> Result<()> {
-        loop {
-            if self.at == self.end && !self.refill() {
-                return Err(corrupt());
-            }
-            let piece = &self.buf[self.at..self.end];
-            match piece.iter().position(|&b| b == b'\n') {
-                Some(i) => {
-                    w.put(&piece[..i])?;
-                    self.at += i + 1;
-                    return Ok(());
-                }
-                None => {
-                    w.put(piece)?;
-                    self.at = self.end;
-                }
-            }
-        }
-    }
+    fn line_into(&mut self, w: &mut Writer) -> Result<()>;
 }
 
-/// A stream put in order.
-pub trait Put {
-    /// Appends `d`.
-    fn put(&mut self, d: &[u8]);
-}
-
-/// A vector as a [`Put`], natively.
-impl Put for Vec<u8> {
-    fn put(&mut self, d: &[u8]) {
-        self.extend_from_slice(d);
+impl Lines for Reader<'_> {
+    fn line_into(&mut self, w: &mut Writer) -> Result<()> {
+        let mut put = Ok(());
+        let found = self.until(b'\n', |piece| {
+            put = w.put(piece);
+            put.is_ok()
+        });
+        put.and(found.then_some(()).ok_or_else(corrupt))
     }
 }
 
@@ -145,8 +47,11 @@ impl<'a> Writer<'a> {
         if self.flushed + self.buf.len() as u64 > self.len {
             self.over = true;
         } else {
-            self.sink.put(&self.buf);
-            self.flushed += self.buf.len() as u64;
+            // (a sink with no room is the output of another length)
+            match self.sink.put(&self.buf) {
+                Some(()) => self.flushed += self.buf.len() as u64,
+                None => self.over = true,
+            }
         }
         self.buf.clear();
     }

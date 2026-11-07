@@ -3,6 +3,7 @@
 
 use crate::stream::{PIECE, Pull, Put, Reader};
 use crate::{Error, Result, corrupt, lzma2, recons};
+use aqr_api::stream::{In, Written};
 
 pub use aqr_common::streams::index;
 
@@ -62,56 +63,6 @@ pub const WINDOW: u32 = 16;
 /// Bytes of the pieces in which the index is read.
 pub const INDEX_PIECE: usize = 256;
 
-/// The `K`-th input of a part module read in order, through its window.
-struct In<const K: u32> {
-    at: u64,
-    len: u64,
-}
-
-impl<const K: u32> Pull for In<K>
-where
-    aqr_api::Input<K>: aqr_api::Memory,
-{
-    fn pull(&mut self, buf: &mut [u8]) -> usize {
-        use aqr_api::{Input, Memory};
-        // (an empty input has no pages)
-        if self.at == self.len {
-            return 0;
-        }
-        let w = Input::<K>::size();
-        let k = (self.len - self.at).min(buf.len() as u64).min(w - self.at % w) as usize;
-        Input::<K>::request(self.at + k as u64);
-        Input::<K>::read(self.at % w, &mut buf[..k]);
-        Input::<K>::release(self.at + k as u64);
-        self.at += k as u64;
-        k
-    }
-}
-
-/// The output of a part module, `size` bytes in all, written through its window.
-struct Written {
-    at: u64,
-    size: u64,
-}
-
-impl Put for Written {
-    fn put(&mut self, mut d: &[u8]) -> Option<()> {
-        use aqr_api::{Memory, Output};
-        if d.len() as u64 > self.size - self.at {
-            return None;
-        }
-        let w = Output::<0>::size();
-        while !d.is_empty() {
-            let k = (d.len() as u64).min(w - self.at % w) as usize;
-            Output::<0>::write(self.at % w, &d[..k]);
-            self.at += k as u64;
-            Output::<0>::commit(self.at);
-            d = &d[k..];
-        }
-        Some(())
-    }
-}
-
 /// What a part module does for a stream: its data (`n` bytes, read from the pull), its record
 /// and what it writes to the sink.
 type Stream = fn(&mut dyn Pull, usize, &mut Reader, u64, &mut dyn Put) -> Result<()>;
@@ -166,11 +117,10 @@ fn part(params_len: u64, lens: [u64; 3], size: u64, stream: Stream) -> Result<()
     if params_len != 0 {
         return Err(corrupt());
     }
-    let (mut i0, mut i1, mut i2) =
-        (In::<0> { at: 0, len: lens[0] }, In::<1> { at: 0, len: lens[1] }, In::<2> { at: 0, len: lens[2] });
-    let mut out = Written { at: 0, size };
+    let (mut i0, mut i1, mut i2) = (In::<0>::new(lens[0]), In::<1>::new(lens[1]), In::<2>::new(lens[2]));
+    let mut out = Written::new(size);
     run(&mut i0, &mut i1, &mut i2, lens, &mut out, stream)?;
-    match out.at == size {
+    match out.total() == size {
         true => Ok(()),
         false => Err(Error("output of another length")),
     }

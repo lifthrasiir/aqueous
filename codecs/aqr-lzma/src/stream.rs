@@ -1,121 +1,13 @@
 //! The module's streams taken in pieces: the inputs read in order ([`Pull`], [`Reader`], and
 //! the data of [`crate::window::Window`]) and the output put in order ([`Put`]), so that a part
-//! module holds a piece of each and nothing of their lengths (FORMAT.md, "The module").
+//! module holds a piece of each and nothing of their lengths (FORMAT.md, "The module"). They
+//! are [`aqr_api::stream`]'s.
 
+pub use aqr_api::stream::{Pull, Put, Reader, Slice};
 use aqr_common::arith::{Bit, Coder};
-
-use crate::{Result, corrupt};
 
 /// Bytes of the pieces in which the record and the index are taken and the stream is put.
 pub const PIECE: usize = 1 << 14;
-
-/// A stream of bytes taken in order.
-pub trait Pull {
-    /// Copies the next bytes into the front of `buf` (at least one, as many as it has room for
-    /// at most) and tells how many; 0 where the stream has ended.
-    fn pull(&mut self, buf: &mut [u8]) -> usize;
-}
-
-/// A byte slice as a [`Pull`], natively.
-pub struct Slice<'a>(pub &'a [u8]);
-
-impl Pull for Slice<'_> {
-    fn pull(&mut self, buf: &mut [u8]) -> usize {
-        let n = self.0.len().min(buf.len());
-        buf[..n].copy_from_slice(&self.0[..n]);
-        self.0 = &self.0[n..];
-        n
-    }
-}
-
-/// A stream put in order.
-pub trait Put {
-    /// Appends `d`. None where there is no room for it (the output is of another length).
-    fn put(&mut self, d: &[u8]) -> Option<()>;
-}
-
-/// A vector as a [`Put`], natively.
-impl Put for Vec<u8> {
-    fn put(&mut self, d: &[u8]) -> Option<()> {
-        self.extend_from_slice(d);
-        Some(())
-    }
-}
-
-/// A stream read a byte at a time out of a piece of it of `size` bytes.
-pub struct Reader<'a> {
-    src: &'a mut dyn Pull,
-    buf: Vec<u8>,
-    at: usize,
-    end: usize,
-    taken: u64,
-}
-
-impl<'a> Reader<'a> {
-    pub fn new(src: &'a mut dyn Pull, size: usize) -> Reader<'a> {
-        Reader { src, buf: vec![0; size], at: 0, end: 0, taken: 0 }
-    }
-
-    /// The bytes read (or dropped) so far.
-    pub fn taken(&self) -> u64 {
-        self.taken
-    }
-
-    /// Takes the next piece, if any is left; whether it did.
-    #[cold]
-    fn refill(&mut self) -> bool {
-        self.at = 0;
-        self.end = self.src.pull(&mut self.buf);
-        self.end > 0
-    }
-
-    /// The next byte, or `None` at the end of the stream.
-    #[inline(always)]
-    pub fn byte(&mut self) -> Option<u8> {
-        if self.at == self.end && !self.refill() {
-            return None;
-        }
-        let b = self.buf[self.at];
-        self.at += 1;
-        self.taken += 1;
-        Some(b)
-    }
-
-    /// Whether every byte was read.
-    pub fn done(&mut self) -> bool {
-        self.at == self.end && !self.refill()
-    }
-
-    /// Drops the next `n` bytes; None where the stream ends before.
-    pub fn skip(&mut self, mut n: u64) -> Option<()> {
-        while n > 0 {
-            if self.at == self.end && !self.refill() {
-                return None;
-            }
-            let k = ((self.end - self.at) as u64).min(n);
-            self.at += k as usize;
-            self.taken += k;
-            n -= k;
-        }
-        Some(())
-    }
-
-    /// The next varint (at most ten bytes; bits beyond 64 are an error).
-    pub fn num(&mut self) -> Result<u64> {
-        let mut v = 0u64;
-        for shift in (0..64).step_by(7) {
-            let b = self.byte().ok_or_else(corrupt)?;
-            if shift == 63 && b > 1 {
-                return Err(corrupt());
-            }
-            v |= ((b & 0x7f) as u64) << shift;
-            if b < 0x80 {
-                return Ok(v);
-            }
-        }
-        Err(corrupt())
-    }
-}
 
 /// The range decoder of a record ([`aqr_common::arith::ArithDecoder`]) over the next `len`
 /// bytes of a reader, which it reads as it goes (zeros beyond them, as the decoder over a

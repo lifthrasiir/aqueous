@@ -32,6 +32,8 @@ mod io;
 mod packed;
 pub mod stack;
 #[cfg(feature = "alloc")]
+pub mod stream;
+#[cfg(feature = "alloc")]
 pub mod task;
 #[cfg(target_family = "wasm")]
 #[doc(hidden)]
