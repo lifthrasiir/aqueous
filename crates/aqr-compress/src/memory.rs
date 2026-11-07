@@ -80,11 +80,11 @@ pub(crate) fn limit(a: &Apply, lens: &[u64], outputs: &[u64], contents: &dyn Con
 }
 
 /// The bound on the minimal bound of an application ([`Plan::minimal`]) that the encoder keeps
-/// to by default: 512 MiB for now, the most that the decoders support
-/// ([`aqr_formula::SUPPORTED_BOUND`]). The target stays 256 MiB: it goes back to it once the
-/// others over it stream (wrt and fasta have: their segments need about 105 and 170 MiB; 14
-/// applications over 512 MiB in the survey, 61 over 256 before them).
-pub const DEFAULT_BOUND: u64 = 512 << 20;
+/// to by default: 256 MiB, half of what the decoders support ([`aqr_formula::SUPPORTED_BOUND`]),
+/// so that a decoder may run applications side by side. Text, FASTA, rasters, flate-set and
+/// bundle fit it at any length (segments, a part module); lzma-recons with large dictionaries
+/// does not, and falls back.
+pub const DEFAULT_BOUND: u64 = 256 << 20;
 
 /// Modules allowed a larger bound than [`DEFAULT_BOUND`] by default, with their bounds (at most
 /// [`aqr_formula::SUPPORTED_BOUND`]): where 256 MiB loses much and splitting is no help. None yet.

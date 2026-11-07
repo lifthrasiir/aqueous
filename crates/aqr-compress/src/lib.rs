@@ -244,7 +244,7 @@ pub struct Options {
     /// The most bytes that an application of a module may have as its minimal bound (its memory
     /// limit and the sum of its task limits; spec, "Module execution"): a recompression whose
     /// formula has a larger one is not used, its data kept as it would be without it
-    /// ([`memory::fallbacks`] tells). None, the default: 512 MiB ([`memory::DEFAULT_BOUND`]; 256 MiB is the target),
+    /// ([`memory::fallbacks`] tells). None, the default: 256 MiB ([`memory::DEFAULT_BOUND`]),
     /// or more for a module with an exception ([`memory`]); decoders support up to 512 MiB.
     pub application_bound: Option<u64>,
 }

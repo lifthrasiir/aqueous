@@ -3028,7 +3028,7 @@ A decoder MUST support every application whose [=minimal bound=] is at most 512 
 step 5's [=resource failure=] before instantiating is only for a larger one.
 An encoder SHOULD NOT produce an application whose [=minimal bound=] is more.
 
-Note: The reference encoder's default bound is 512 MiB today, aiming at 256 MiB;
+Note: The reference encoder's default bound is 256 MiB, so that a decoder may run applications side by side;
 it falls back, for the data concerned, to what it archives without the recompressor whose application would exceed it;
 an option raises the bound for an archive whose decoders are known to have the memory.
 
