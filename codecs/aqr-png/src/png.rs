@@ -35,26 +35,33 @@ pub struct Chunk<'a> {
 
 /// Splits the file after the signature into chunks; returns the chunks and any trailing bytes
 /// that do not form a complete chunk.
-pub fn chunks(file: &[u8]) -> Option<(Vec<Chunk<'_>>, &[u8])> {
+pub fn chunks<'a>(file: &'a [u8]) -> Option<(Vec<Chunk<'a>>, &'a [u8])> {
     if file.get(..8)? != SIGNATURE {
         return None;
     }
-    let mut v = vec![];
-    let mut at = 8;
-    while at + 12 <= file.len() {
-        let n = u32::from_be_bytes(file[at..at + 4].try_into().unwrap()) as usize;
-        if n > file.len() - at - 12 {
-            break;
+    // (walked twice: the chunks counted, then kept in room for exactly as many)
+    let walk = |f: &mut dyn FnMut(Chunk<'a>)| {
+        let mut at = 8;
+        while at + 12 <= file.len() {
+            let n = u32::from_be_bytes(file[at..at + 4].try_into().unwrap()) as usize;
+            if n > file.len() - at - 12 {
+                break;
+            }
+            let kind: [u8; 4] = file[at + 4..at + 8].try_into().unwrap();
+            let data = &file[at + 8..at + 8 + n];
+            let crc = u32::from_be_bytes(file[at + 8 + n..at + 12 + n].try_into().unwrap());
+            f(Chunk { kind, data, crc });
+            at += 12 + n;
+            if &kind == b"IEND" {
+                break;
+            }
         }
-        let kind = file[at + 4..at + 8].try_into().unwrap();
-        let data = &file[at + 8..at + 8 + n];
-        let crc = u32::from_be_bytes(file[at + 8 + n..at + 12 + n].try_into().unwrap());
-        v.push(Chunk { kind, data, crc });
-        at += 12 + n;
-        if &kind == b"IEND" {
-            break;
-        }
-    }
+        at
+    };
+    let mut k = 0;
+    walk(&mut |_| k += 1);
+    let mut v = Vec::with_capacity(k);
+    let at = walk(&mut |c| v.push(c));
     Some((v, &file[at..]))
 }
 
@@ -73,6 +80,15 @@ impl Ihdr {
             interlace: d[12],
         })
     }
+    /// The 13 bytes of [`Ihdr::parse`].
+    pub fn to_bytes(&self) -> [u8; 13] {
+        let mut b = [0; 13];
+        b[..4].copy_from_slice(&self.width.to_be_bytes());
+        b[4..8].copy_from_slice(&self.height.to_be_bytes());
+        b[8..].copy_from_slice(&[self.depth, self.color, self.compression, self.filter, self.interlace]);
+        b
+    }
+
     pub fn channels(&self) -> usize {
         match self.color {
             0 | 3 => 1,

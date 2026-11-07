@@ -21,6 +21,8 @@ pub mod wasm {
     pub const SPAN: u64 = 8;
     pub const PASS: u64 = 20;
     pub const REFERENCES: u64 = 44;
+    /// A chunk of a file parsed.
+    pub const PNG_CHUNK: u64 = 16;
     /// A token, a reference's position.
     pub const TOKEN: u64 = 6;
     pub const POS: u64 = 4;
@@ -35,8 +37,10 @@ struct Image {
     /// over them.
     kept: Vec<u64>,
     over: u64,
-    /// The tokens of the reference kept.
-    refs: u64,
+    /// The tokens of the reference kept, where one is.
+    refs: Option<u64>,
+    /// The tokens of its payload, where it parses ([`model::Reference::count`]).
+    tokens: Option<u64>,
 }
 
 /// [`Image`] of the record `rec` of an image of `len` bytes (its header `ih`), its reference kept
@@ -44,7 +48,21 @@ struct Image {
 fn image(rec: &[u8], len: usize, ih: &Option<Ihdr>, keep: bool) -> Option<Image> {
     let mode = *rec.first()?;
     match mode {
-        0 => return Some(Image { kept: vec![block(len as u64 + 1)], over: 0, refs: 0 }),
+        0 => {
+            // (kept as it is, and where kept as a reference of a header, parsed: the code
+            // tables, then the reference)
+            let n = model::Reference::count(&rec[1..], &mut aqr_flate::inflate::Codes::new()).ok().map(|n| n as u64);
+            if !(keep && ih.is_some()) {
+                return Some(Image { kept: vec![block(len as u64 + 1)], over: 0, refs: None, tokens: n });
+            }
+            // (its tokens counted, then its payload of room for them, then its reference)
+            let [lit, dist] = aqr_flate::inflate::Codes::BYTES;
+            let mut kept = vec![block(lit), block(dist), block(len as u64 + 1 + 9 * n.unwrap_or(0))];
+            if let Some(n) = n {
+                kept.extend([block(wasm::POS * n), block(wasm::TOKEN * n)]);
+            }
+            return Some(Image { kept, over: 0, refs: n, tokens: n });
+        }
         1 | 2 => {}
         _ => return None,
     }
@@ -125,7 +143,7 @@ fn image(rec: &[u8], len: usize, ih: &Option<Ihdr>, keep: bool) -> Option<Image>
     // the decoder's windows and a block's tokens
     let win = model::Win::of(&g, n, kind == Kind::Image, 4 * model::WINDOW, model::WINDOW);
     let over = block(win.buf as u64) + block(win.raw as u64) + block(wasm::TOKEN * most as u64);
-    Some(Image { kept, over, refs: if own { ntok as u64 } else { 0 } })
+    Some(Image { kept, over, refs: own.then_some(ntok as u64), tokens: Some(ntok as u64) })
 }
 
 /// A file's images, as `codec::Skeleton::rebuild` takes them: each image's record, payload's length
@@ -150,7 +168,9 @@ fn images<'a>(sk: &Skeleton, index: &[u8], records: &'a [u8]) -> Option<Vec<Img<
 /// on `threads` threads, its references kept where `keep`, on the stack of `m`: the skeleton
 /// parsed, its records listed, its images' payloads (and references) rebuilt (each a task, of
 /// several), the file made. Left on `m` as the module leaves it (the file last).
-fn file(m: &mut Sim, sk: &[u8], index: &[u8], records: &[u8], threads: usize, keep: bool) -> Option<()> {
+/// Where `tail`, the file is of room for its references and a byte after it (as a task of
+/// `png-set` gives them).
+fn file(m: &mut Sim, sk: &[u8], index: &[u8], records: &[u8], threads: usize, keep: bool, tail: bool) -> Option<()> {
     let s = Skeleton::parse(sk).ok()?;
     let n = s.chunks.len() as u64;
     m.take(wasm::CHUNK * n);
@@ -164,6 +184,8 @@ fn file(m: &mut Sim, sk: &[u8], index: &[u8], records: &[u8], threads: usize, ke
     if keep {
         m.take(wasm::REFERENCES * k);
     }
+    // (the references kept: each image's tokens, where it has one)
+    let mut refs = Vec::with_capacity(imgs.len());
     if threads > 1 && imgs.len() > 1 {
         let tasks = imgs
             .iter()
@@ -173,11 +195,13 @@ fn file(m: &mut Sim, sk: &[u8], index: &[u8], records: &[u8], threads: usize, ke
         m.take(k);
         for (rec, len, ih) in &imgs {
             let i = image(rec, *len, ih, keep)?;
-            m.take(*len as u64 + 9 * i.refs + 1);
+            let t = i.refs.unwrap_or(0);
+            m.take(*len as u64 + 9 * t + 1);
             if keep {
-                // (the reference got back, reserved exactly)
-                m.take(wasm::POS * i.refs);
-                m.take(wasm::TOKEN * i.refs);
+                // (the reference got back, reserved exactly; of an image with a header)
+                m.take(wasm::POS * t);
+                m.take(wasm::TOKEN * t);
+                refs.push(ih.map(|_| t));
             }
         }
         m.spawned(tasks);
@@ -188,12 +212,24 @@ fn file(m: &mut Sim, sk: &[u8], index: &[u8], records: &[u8], threads: usize, ke
                 m.take(*b);
             }
             m.peak(i.over);
+            refs.push(i.refs);
         }
     }
-    // the file
+    // the file (and its references and a byte after it)
     let total: usize = s.chunks.iter().map(|c| c.len + 12).sum::<usize>() + 8 + s.trailer.len();
-    m.take(total as u64);
+    let tail = match tail && keep {
+        true => references_bytes(&imgs, &refs) + 1,
+        false => tail as u64,
+    };
+    m.take(total as u64 + tail);
     Some(())
+}
+
+/// Bytes of `codec::put_references` of the references of `imgs`, of `refs` tokens each (where
+/// it has one).
+fn references_bytes(imgs: &[Img], refs: &[Option<u64>]) -> u64 {
+    let one = |((_, _, ih), r): (&Img, &Option<u64>)| 1 + 13 * ih.is_some() as u64 + r.map_or(0, |t| 4 + 9 * t);
+    4 + imgs.iter().zip(refs).map(one).sum::<u64>()
 }
 
 /// The memory plan of `png-recons` ([`crate::module::decode`]): of its initial memory (`initial`
@@ -202,6 +238,144 @@ pub fn recons(initial: u64, inputs: &[u64], (sk, index, records): (&[u8], &[u8],
     let mut m = Sim::new(initial);
     m.take(aqr_api::stack::whole(0, &[], inputs));
     m.take(aqr_common::crc32::WASM_TABLES);
-    file(&mut m, sk, index, records, THREADS, false)?;
+    file(&mut m, sk, index, records, THREADS, false, false)?;
+    Some(m.plan(THREADS))
+}
+
+/// `codec::references` of a file of `chunks` chunks, its images' payloads of these bytes and of
+/// these tokens (where they parse, of an image with a header), on the stack of `m` (left as it
+/// leaves it, the references last).
+fn references(m: &mut Sim, chunks: usize, imgs: &[(usize, Option<u64>)]) {
+    m.take(wasm::PNG_CHUNK * chunks as u64);
+    m.take(chunks as u64);
+    m.take(wasm::IMAGE * imgs.len() as u64);
+    let [lit, dist] = aqr_flate::inflate::Codes::BYTES;
+    m.take(lit);
+    m.take(dist);
+    // each image's tokens counted, its payload made at once
+    m.take(8 * imgs.len() as u64);
+    for (cap, _) in imgs {
+        m.peak(block(*cap as u64));
+    }
+    // the references, each of room for its tokens, its payload made again above it
+    m.take(wasm::REFERENCES * imgs.len() as u64);
+    for (cap, n) in imgs {
+        if let Some(n) = n {
+            m.take(wasm::POS * n);
+            m.take(wasm::TOKEN * n);
+            m.peak(block(*cap as u64));
+        }
+    }
+}
+
+/// [`references`] of the reference file `file`.
+fn references_of_file(m: &mut Sim, file: &[u8]) -> Option<()> {
+    let Some((chunks, _)) = crate::png::chunks(file) else { return Some(()) };
+    let classes = codec::classes(&chunks);
+    let imgs = codec::images(&classes, |i| chunks[i].data, |i| chunks[i].kind);
+    let mut codes = aqr_flate::inflate::Codes::new();
+    let imgs: Vec<(usize, Option<u64>)> = (imgs.iter())
+        .map(|(range, ih)| {
+            let payload = codec::payload_of(&chunks[range.clone()], classes[range.start]);
+            let n = ih.and_then(|_| model::Reference::count(&payload, &mut codes).ok());
+            (payload.capacity(), n.map(|n| n as u64))
+        })
+        .collect();
+    references(m, chunks.len(), &imgs);
+    Some(())
+}
+
+/// [`references`] of the file of skeleton `sk`, index `index` and records `records`: its chunks
+/// and images as the skeleton tells them, each image's tokens as its record does.
+fn references_of_parts(m: &mut Sim, sk: &[u8], index: &[u8], records: &[u8]) -> Option<()> {
+    let s = Skeleton::parse(sk).ok()?;
+    let parts = images(&s, index, records)?;
+    let mut imgs = Vec::with_capacity(parts.len());
+    for ((range, _), (rec, len, ih)) in s.images.iter().zip(&parts) {
+        let cap = s.chunks[range.clone()].iter().map(|c| c.len).sum::<usize>();
+        let n = image(rec, *len, ih, false)?.tokens;
+        imgs.push((cap, ih.and(n)));
+    }
+    references(m, s.chunks.len(), &imgs);
+    Some(())
+}
+
+/// The memory plan of `png-against` ([`crate::module::decode_against`]): as [`recons`]'s, the
+/// references of the reference file `reference` made first.
+pub fn against(
+    initial: u64,
+    inputs: &[u64],
+    (sk, index, records, reference): (&[u8], &[u8], &[u8], &[u8]),
+) -> Option<u64> {
+    let mut m = Sim::new(initial);
+    m.take(aqr_api::stack::whole(0, &[], inputs));
+    m.take(aqr_common::crc32::WASM_TABLES);
+    references_of_file(&mut m, reference)?;
+    file(&mut m, sk, index, records, THREADS, false, false)?;
+    Some(m.plan(THREADS))
+}
+
+/// The memory plan of `png-set` ([`crate::module::decode_set`]): of its initial memory
+/// (`initial` bytes), params `params`, inputs of `inputs` bytes and the packed skeletons, indexes
+/// and records of the files. The output first; then by depth in the trees, the files of a depth
+/// each a task (of several, each giving back the file), or the file in the instance, each made of
+/// the references of its parent's file (made of it) and copied to its place, nothing else kept.
+pub fn set(initial: u64, params: &[u8], inputs: &[u64], (sks, indexes, records): (&[u8], &[u8], &[u8])) -> Option<u64> {
+    let mut at = 0;
+    let n = get_varint(params, &mut at).ok()? as usize;
+    let mut parents = Vec::with_capacity(n);
+    for i in 0..n {
+        parents.push(match get_varint(params, &mut at).ok()? {
+            0 => None,
+            p if p as usize <= i => Some(p as usize - 1),
+            _ => return None,
+        });
+    }
+    let sizes = (0..n).map(|_| get_varint(params, &mut at).ok()).collect::<Option<Vec<u64>>>()?;
+    let unpack = |p| aqr_common::packed::unpack(p).filter(|items| items.len() == n);
+    let (sks, indexes, records) = (unpack(sks)?, unpack(indexes)?, unpack(records)?);
+    let mut depth = vec![0usize; n];
+    for i in 0..n {
+        depth[i] = parents[i].map_or(0, |p| depth[p] + 1);
+    }
+    let mut m = Sim::new(initial);
+    m.take(aqr_api::stack::whole(params.len() as u64, &[], inputs));
+    m.take(aqr_common::crc32::WASM_TABLES);
+    // the parents, the sizes, the unpacked inputs, the depths, the files' places, the output, the
+    // files of a depth
+    let k = n as u64;
+    [8 * k, 8 * k, 8 * k, 8 * k, 8 * k, 4 * k, 4 * k, sizes.iter().sum(), 4 * k].into_iter().for_each(|b| m.take(b));
+    // a file of `threads` threads on the stack of `m`: its parent's references, then the file
+    let file = |m: &mut Sim, i: usize, threads: usize, tail: bool| -> Option<()> {
+        if let Some(p) = parents[i] {
+            references_of_parts(m, sks[p], indexes[p], records[p])?;
+        }
+        file(m, sks[i], indexes[i], records[i], threads, false, tail)
+    };
+    for d in 0..=depth.iter().copied().max().unwrap_or(0) {
+        let level: Vec<usize> = (0..n).filter(|&i| depth[i] == d).collect();
+        let workers = THREADS.min(level.len()).max(1);
+        let t = m.top;
+        if workers > 1 {
+            // (each the made file kept with its index, as it is taken)
+            m.take(16 * level.len() as u64);
+            let mut tasks = Vec::with_capacity(level.len());
+            for &i in &level {
+                let mut sub = Sim::new(0);
+                file(&mut sub, i, 1, true)?;
+                tasks.push(m.task(sub.high));
+            }
+            m.take(level.len() as u64);
+            for &i in &level {
+                m.take(sizes[i] + 1);
+            }
+            m.spawned(tasks);
+        } else {
+            for &i in &level {
+                file(&mut m, i, THREADS, false)?;
+            }
+        }
+        m.top = t;
+    }
     Some(m.plan(THREADS))
 }

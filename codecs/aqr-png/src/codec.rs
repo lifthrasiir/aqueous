@@ -59,7 +59,7 @@ pub(crate) const FDAT: u8 = 2;
 
 /// The images of a chunk list: runs of chunks of the same image class, with the geometry
 /// their payload has (the IHDR's, or the frame's from the last fcTL), if valid.
-fn images<'a>(
+pub(crate) fn images<'a>(
     classes: &[u8],
     data: impl Fn(usize) -> &'a [u8],
     kinds: impl Fn(usize) -> [u8; 4],
@@ -105,7 +105,7 @@ pub(crate) struct Parts {
 }
 
 /// The classes of chunks.
-fn classes(chunks: &[png::Chunk]) -> Vec<u8> {
+pub(crate) fn classes(chunks: &[png::Chunk]) -> Vec<u8> {
     chunks
         .iter()
         .map(|c| match &c.kind {
@@ -117,7 +117,7 @@ fn classes(chunks: &[png::Chunk]) -> Vec<u8> {
 }
 
 /// The payload of the image of `chunks` (of class `class`).
-fn payload_of(chunks: &[png::Chunk], class: u8) -> Vec<u8> {
+pub(crate) fn payload_of(chunks: &[png::Chunk], class: u8) -> Vec<u8> {
     let skip = if class == FDAT { 4 } else { 0 };
     let mut payload = Vec::with_capacity(chunks.iter().map(|c| c.data.len()).sum());
     for c in chunks {
@@ -131,16 +131,29 @@ fn payload_of(chunks: &[png::Chunk], class: u8) -> Vec<u8> {
 pub(crate) type References = Vec<(Option<Ihdr>, Option<model::Reference>)>;
 
 /// The [`References`] of `file`.
+///
+/// Its memory: the chunks, their classes and images, the code tables, each image's tokens
+/// counted (its payload made and given back at once), the references (each image's made of room
+/// for its tokens, its payload made again above it and given back).
 pub(crate) fn references(file: &[u8]) -> References {
     let Some((chunks, _)) = png::chunks(file) else { return vec![] };
     let classes = classes(&chunks);
     let imgs = images(&classes, |i| chunks[i].data, |i| chunks[i].kind);
-    imgs.into_iter()
-        .map(|(range, ih)| {
-            let payload = payload_of(&chunks[range.clone()], classes[range.start]);
-            (ih, ih.and_then(|_| model::Reference::parse(&payload).ok()))
-        })
-        .collect()
+    let mut codes = aqr_flate::inflate::Codes::new();
+    let payload = |range: &std::ops::Range<usize>| payload_of(&chunks[range.clone()], classes[range.start]);
+    let counts: Vec<Option<usize>> = (imgs.iter())
+        .map(|(range, ih)| ih.and_then(|_| model::Reference::count(&payload(range), &mut codes).ok()))
+        .collect();
+    let mut out = Vec::with_capacity(imgs.len());
+    for ((range, ih), n) in imgs.iter().zip(counts) {
+        let r = n.and_then(|n| {
+            let mut r = model::Reference::with_capacity(n);
+            r.fill(&payload(range), &mut codes).ok()?;
+            Some(r)
+        });
+        out.push((*ih, r));
+    }
+    out
 }
 
 /// The reference of an image of header `ih` in a reference's image (`img`, of
@@ -455,12 +468,26 @@ impl<'a> Skeleton<'a> {
 
     /// The file, given the records of its images in order and the reference file's images if
     /// any; and, if `keep`, its own as a reference file (as [`references`] of the file).
+    #[cfg(test)]
     pub(crate) fn rebuild(
         &self,
         recs: &[&[u8]],
         threads: usize,
         refs: Option<&References>,
         keep: bool,
+    ) -> Result<(Vec<u8>, Option<References>)> {
+        self.rebuild_with(recs, threads, refs, keep, false)
+    }
+
+    /// [`Skeleton::rebuild`], the file of room for a byte after it where `tail` (as a task gives
+    /// it).
+    pub(crate) fn rebuild_with(
+        &self,
+        recs: &[&[u8]],
+        threads: usize,
+        refs: Option<&References>,
+        keep: bool,
+        tail: bool,
     ) -> Result<(Vec<u8>, Option<References>)> {
         let (cs, classes, imgs) = (&self.chunks, &self.classes, &self.images);
         if recs.len() != imgs.len() {
@@ -525,7 +552,7 @@ impl<'a> Skeleton<'a> {
 
         // Reassemble the file.
         let total: usize = cs.iter().map(|c| c.len + 12).sum::<usize>() + 8 + self.trailer.len();
-        let mut out = Vec::with_capacity(total);
+        let mut out = Vec::with_capacity(total + tail as usize);
         out.extend_from_slice(&png::SIGNATURE);
         let mut img = 0;
         let mut pa = 0;
@@ -570,7 +597,16 @@ fn image_payload(
 ) -> Result<(Vec<u8>, Option<model::Reference>)> {
     let (payload, own) = match rec.first() {
         Some(0) if rec.len() == len + 1 => {
-            // (and room for a byte after it, as a task gives it)
+            // (and room for a byte after it, as a task gives it; where kept as a reference, of
+            // its tokens counted first, the reference and its room in the payload made of them)
+            if keep && ih.is_some() {
+                let mut codes = aqr_flate::inflate::Codes::new();
+                let k = model::Reference::count(&rec[1..], &mut codes).ok();
+                let mut p = Vec::with_capacity(len + 1 + 9 * k.unwrap_or(0));
+                p.extend_from_slice(&rec[1..]);
+                let r = k.and_then(|k| model::Reference::parse_in(&p, &mut codes, k).ok());
+                return Ok((p, r));
+            }
             let mut p = Vec::with_capacity(len + 1);
             p.extend_from_slice(&rec[1..]);
             (p, None)
@@ -976,4 +1012,5 @@ const _: () = {
     assert!(size_of::<Span>() == wasm::SPAN as usize);
     assert!(size_of::<model::Pass>() == wasm::PASS as usize);
     assert!(size_of::<(Option<Ihdr>, Option<model::Reference>)>() == wasm::REFERENCES as usize);
+    assert!(size_of::<png::Chunk>() == wasm::PNG_CHUNK as usize);
 };

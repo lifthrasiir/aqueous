@@ -195,8 +195,13 @@ Neither side holds the inflated data, the raw image or the stream's tokens whole
 reserved exactly (the layout read twice, its blocks counted first; the tables' frequencies in
 one buffer), its payload of room for what writing reserves past it, the decoder's windows; the
 images as tasks of several, each giving its payload back with a byte (and its reference, 9
-bytes a token, where kept), the file made of them; the CRC tables first. (`png-against` and
-`png-set` are not planned yet: the reference file's parse takes memory as it goes.)
+bytes a token, where kept), the file made of them; the CRC tables first. `png-against` and
+`png-set` are planned the same way (`plan::against`, `plan::set`): a reference file's images are
+parsed with code tables of room for the largest code (`aqr_flate::inflate::tokens_of`), their
+tokens counted first and their references reserved exactly; `png-set` reserves its output first
+and copies each file to its place, and in WebAssembly makes a parent's references of its file
+there, where each child is rebuilt, rather than keeping them (which would leave holes on the
+stack: about 7% more time on sets than keeping them, which native decoding still does).
 
 Peak heap of `formula::encode` and of the evaluation (`tests/memory.rs` checks it, on a
 9.4 MB image), fitted over the 364 files of the sets above that are coded: 4.2 MB + 3.7×

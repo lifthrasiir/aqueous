@@ -11,7 +11,7 @@ use crate::{Result, corrupt};
 pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
     let (&[], &[sk, index, records]) = (params, inputs) else { return Err(corrupt()) };
     crc_tables();
-    Ok(rebuild(sk, index, records, None, len, threads, false)?.0)
+    Ok(rebuild(sk, index, records, None, len, threads, (false, false))?.0)
 }
 
 /// The module of a file coded against a reference file: [`decode`] with the reference file as
@@ -19,7 +19,7 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
 pub fn decode_against(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
     let (&[], &[sk, index, records, reference]) = (params, inputs) else { return Err(corrupt()) };
     crc_tables();
-    Ok(rebuild(sk, index, records, Some(&codec::references(reference)), len, threads, false)?.0)
+    Ok(rebuild(sk, index, records, Some(&codec::references(reference)), len, threads, (false, false))?.0)
 }
 
 /// The module of sets: the files rebuilt from `inputs`, the packed skeletons, indexes and
@@ -42,7 +42,10 @@ pub fn decode_set(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> 
             _ => return Err(corrupt()),
         });
     }
-    let sizes = (0..n).map(|_| codec::get_varint(params, &mut at)).collect::<Result<Vec<u64>>>()?;
+    let mut sizes = Vec::with_capacity(n);
+    for _ in 0..n {
+        sizes.push(codec::get_varint(params, &mut at)?);
+    }
     if sizes.iter().try_fold(0u64, |a, &s| a.checked_add(s)) != Some(len) {
         return Err(corrupt());
     }
@@ -55,33 +58,99 @@ pub fn decode_set(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> 
         return Err(corrupt());
     }
     // by depth in the trees, each depth's files at once against their parents (of the depth
-    // before), which keep their references as they are rebuilt (until their children are)
+    // before), each copied to its place in the output. Natively the parents keep their references
+    // as they are rebuilt (until their children are); in WebAssembly they are made of the
+    // parents' files in the output (where a child is rebuilt), so that the instance keeps nothing
+    // but the output (what it would keep of the parents' would be holes on its stack)
+    let wasm = cfg!(target_family = "wasm");
     let mut depth = vec![0usize; n];
-    let mut is_parent = vec![false; n];
     for i in 0..n {
         depth[i] = parents[i].map_or(0, |p| depth[p] + 1);
-        parents[i].inspect(|&p| is_parent[p] = true);
     }
-    let mut out: Vec<Option<Vec<u8>>> = (0..n).map(|_| None).collect();
-    let mut refs: Vec<Option<References>> = (0..n).map(|_| None).collect();
+    let mut starts = Vec::with_capacity(n);
+    sizes.iter().fold(0usize, |at, &s| (starts.push(at), at + s as usize).1);
+    let mut all = vec![0u8; len as usize];
+    let mut kept: Vec<Option<References>> = Vec::with_capacity(if wasm { 0 } else { n });
+    if !wasm {
+        kept.extend((0..n).map(|_| None));
+    }
+    let mut is_parent = vec![false; if wasm { 0 } else { n }];
+    if !wasm {
+        parents.iter().flatten().for_each(|&p| is_parent[p] = true);
+    }
+    let mut level = Vec::with_capacity(n);
     for d in 0..=depth.iter().copied().max().unwrap_or(0) {
-        let level: Vec<usize> = (0..n).filter(|&i| depth[i] == d).collect();
+        level.clear();
+        level.extend((0..n).filter(|&i| depth[i] == d));
         let workers = threads.min(level.len()).max(1);
-        let inner = (threads / workers).max(1);
-        // (as tasks on WebAssembly)
-        let files = aqr_common::pool::par_map_apart(level.len(), workers, |k| {
-            let (i, r) = (level[k], parents[level[k]].and_then(|p| refs[p].as_ref()));
-            rebuild(sks[i], indexes[i], records[i], r, sizes[i], inner, is_parent[i])
-        });
-        // (those of the depth before are done with)
-        level.iter().filter_map(|&i| parents[i]).for_each(|p| refs[p] = None);
-        for (&i, f) in level.iter().zip(files) {
-            let (f, r) = f?;
-            (out[i], refs[i]) = (Some(f), r);
+        // (in WebAssembly the images of a file of a task on that task alone: no task spawns tasks)
+        let inner = if workers > 1 && wasm { 1 } else { (threads / workers).max(1) };
+        let file = |k: usize, all: &[u8], kept: &[Option<References>]| {
+            let i = level[k];
+            let made;
+            let refs = match parents[i] {
+                Some(p) if !wasm => kept[p].as_ref(),
+                Some(p) => {
+                    made = codec::references(&all[starts[p]..][..sizes[p] as usize]);
+                    Some(&made)
+                }
+                None => None,
+            };
+            let keep = !wasm && is_parent[i];
+            rebuild(sks[i], indexes[i], records[i], refs, sizes[i], inner, (keep, wasm && workers > 1))
+        };
+        if wasm && workers > 1 {
+            // (as tasks, each the file and a 0, or a 1)
+            let task = |k: usize| match file(k, &all, &kept) {
+                Ok((mut f, _)) => (f.push(0), f).1,
+                Err(_) => vec![1],
+            };
+            let mut made = Vec::with_capacity(level.len());
+            aqr_common::pool::par_each_apart(
+                level.len(),
+                workers,
+                2,
+                task,
+                || {},
+                |k, b| {
+                    let size = sizes[level[k]] as usize;
+                    match b.len() == size + 1 && b[size] == 0 {
+                        true => {
+                            made.push((k, b));
+                            Ok(())
+                        }
+                        false => Err(corrupt()),
+                    }
+                },
+            )?;
+            for (k, b) in made {
+                all[starts[level[k]]..][..b.len() - 1].copy_from_slice(&b[..b.len() - 1]);
+            }
+        } else {
+            // (one by one where alone, as always in WebAssembly)
+            let files = match workers {
+                1 => Vec::new(),
+                _ => aqr_common::pool::par_map(level.len(), workers, |k| file(k, &all, &kept)),
+            };
+            let mut files = files.into_iter();
+            for k in 0..level.len() {
+                let (f, r) = match workers {
+                    1 => file(k, &all, &kept)?,
+                    _ => files.next().expect("a file")?,
+                };
+                all[starts[level[k]]..][..f.len()].copy_from_slice(&f);
+                if let Some(slot) = kept.get_mut(level[k]) {
+                    *slot = r;
+                }
+            }
+            // (those of the depth before are done with)
+            level.iter().filter_map(|&i| parents[i]).for_each(|p| {
+                if let Some(k) = kept.get_mut(p) {
+                    *k = None;
+                }
+            });
         }
     }
-    let mut all = Vec::with_capacity(len as usize);
-    out.into_iter().for_each(|f| all.extend_from_slice(&f.unwrap()));
     Ok(all)
 }
 
@@ -92,7 +161,8 @@ fn crc_tables() {
 }
 
 /// The file of `len` bytes of the skeleton `sk`, the index and the records, against the images
-/// of a reference file if given; and, if `keep`, the file's own as a reference file.
+/// of a reference file if given; and, if `keep`, the file's own as a reference file; of room for a
+/// byte after it where `tail`.
 fn rebuild(
     sk: &[u8],
     index: &[u8],
@@ -100,7 +170,7 @@ fn rebuild(
     refs: Option<&References>,
     len: u64,
     threads: usize,
-    keep: bool,
+    (keep, tail): (bool, bool),
 ) -> Result<(Vec<u8>, Option<References>)> {
     let skel = Skeleton::parse(sk)?;
     let (mut at, mut from) = (0, 0);
@@ -112,7 +182,7 @@ fn rebuild(
     if at != index.len() || from != records.len() {
         return Err(corrupt());
     }
-    let (out, own) = skel.rebuild(&recs, threads, refs, keep)?;
+    let (out, own) = skel.rebuild_with(&recs, threads, refs, keep, tail)?;
     if out.len() as u64 != len {
         return Err(corrupt());
     }

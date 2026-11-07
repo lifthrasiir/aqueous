@@ -161,19 +161,48 @@ impl Reference {
     /// The reference of the image of payload `payload`: its zlib streams as [`encode`] finds
     /// them. Fails where it would.
     pub fn parse(payload: &[u8]) -> crate::Result<Reference> {
+        let mut codes = inflate::Codes::new();
+        let n = Reference::count(payload, &mut codes)?;
+        Reference::parse_in(payload, &mut codes, n)
+    }
+
+    /// The tokens of [`Reference::parse`] of `payload` (`codes` the tables to decode it with).
+    /// Fails where it would.
+    pub fn count(payload: &[u8], codes: &mut inflate::Codes) -> crate::Result<usize> {
         if payload.len() < 2 {
             return Err(crate::Error::Unsupported("no zlib stream"));
         }
-        // (the tokens counted first, then kept in room for exactly as many)
         // (one sink, so that the parser is one function in the modules)
         let mut count = RefSink { p: 0, n: 0, keep: false, r: Reference::with_capacity(0) };
-        each_stream(payload, &mut count)?;
-        let mut sink = RefSink { p: 0, n: 0, keep: true, r: Reference::with_capacity(count.n) };
-        each_stream(payload, &mut sink)?;
-        if sink.p > u32::MAX as usize {
+        each_stream(payload, &mut count, codes)?;
+        if count.p > u32::MAX as usize {
             return Err(crate::Error::Unsupported("image data of 4 GiB or more"));
         }
-        Ok(sink.r)
+        Ok(count.n)
+    }
+
+    /// [`Reference::parse`] of `payload`, of `n` tokens ([`Reference::count`]), made of room for
+    /// exactly as many.
+    pub fn parse_in(payload: &[u8], codes: &mut inflate::Codes, n: usize) -> crate::Result<Reference> {
+        let mut r = Reference::with_capacity(n);
+        r.fill(payload, codes)?;
+        Ok(r)
+    }
+
+    /// Fills this reference (empty, of room for them) with the tokens of `payload`, as
+    /// [`Reference::parse`] would: of as many as its room, else it fails.
+    pub fn fill(&mut self, payload: &[u8], codes: &mut inflate::Codes) -> crate::Result<()> {
+        if payload.len() < 2 {
+            return Err(crate::Error::Unsupported("no zlib stream"));
+        }
+        let n = self.tokens.capacity();
+        let mut sink = RefSink { p: 0, n: 0, keep: true, r: std::mem::replace(self, Reference::with_capacity(0)) };
+        each_stream(payload, &mut sink, codes)?;
+        *self = sink.r;
+        match sink.n == n && self.pos.capacity() == n {
+            true => Ok(()),
+            false => Err(crate::corrupt()),
+        }
     }
 
     /// Its tokens.
@@ -226,11 +255,14 @@ impl Reference {
 }
 
 /// Parses the zlib streams of `payload` as [`encode`] finds them into `sink`.
-fn each_stream<S: Sink>(payload: &[u8], sink: &mut S) -> crate::Result<()> {
+fn each_stream<S: Sink>(payload: &[u8], sink: &mut S, codes: &mut inflate::Codes) -> crate::Result<()> {
     let mut o = 0;
     loop {
-        let l = inflate::parse_head(&payload[o + 2..], usize::MAX, sink)?;
-        match next_stream(payload, o + 2 + l.end).filter(|&next| parses(&payload[next + 2..])) {
+        let (_, end) = inflate::tokens_of(&payload[o + 2..], sink, codes)?;
+        // (whether the next one parses, through a sink of the same type, keeping nothing)
+        let mut none = RefSink { p: 0, n: 0, keep: false, r: Reference::with_capacity(0) };
+        let next = next_stream(payload, o + 2 + end);
+        match next.filter(|&next| inflate::tokens_of(&payload[next + 2..], &mut none, codes).is_ok()) {
             Some(next) => o = next,
             None => return Ok(()),
         }

@@ -82,6 +82,8 @@ pub struct Stats {
     no_cut: usize,
     /// Bytes of data allowed.
     max: usize,
+    /// Whether the blocks' frequencies are not kept ([`tokens_of`]).
+    lean: bool,
 }
 
 impl Stats {
@@ -764,6 +766,109 @@ pub fn parse_head_max<S: Sink>(
     })
 }
 
+/// Code tables of room for the largest codes ([`tokens_of`]), which they never grow past.
+pub struct Codes {
+    lit: Table,
+    dist: Table,
+}
+
+impl Codes {
+    /// Entries of a table of `n` symbols of `bits` bits first: those, and for each first entry of
+    /// a longer code (as many as the symbols at most) a table of the bits left of 15.
+    const fn room(n: usize, bits: u32) -> usize {
+        let p = 1 << bits;
+        p + if n < p { n } else { p } * (1 << (15 - bits))
+    }
+
+    /// Bytes of the tables' two blocks.
+    pub const BYTES: [u64; 2] = [
+        4 * Codes::room(288, LIT_BITS) as u64,
+        4 * Codes::room(32, DIST_BITS) as u64,
+    ];
+
+    pub fn new() -> Codes {
+        let table = |n: usize, bits: u32| Table {
+            t: Vec::with_capacity(Codes::room(n, bits)),
+            bits,
+            mask: (1 << bits) - 1,
+        };
+        Codes {
+            lit: table(288, LIT_BITS),
+            dist: table(32, DIST_BITS),
+        }
+    }
+}
+
+impl Default for Codes {
+    fn default() -> Codes {
+        Codes::new()
+    }
+}
+
+/// The tokens of the stream at the start of `raw` given to `sink` in order (as [`parse_head`]
+/// gives them), and its data's length and the stream's (where its trailing bytes start): with
+/// no memory but the tables `codes`, which every block's codes are made in.
+pub fn tokens_of<S: Sink>(raw: &[u8], sink: &mut S, codes: &mut Codes) -> Result<(usize, usize)> {
+    let mut b = Bits {
+        d: raw,
+        pos: 0,
+        buf: 0,
+        n: 0,
+    };
+    let mut st = Stats {
+        segment: usize::MAX,
+        next: usize::MAX,
+        no_cut: usize::MAX,
+        max: usize::MAX,
+        lean: true,
+        ..Default::default()
+    };
+    let (mut olen, mut tlen) = (0usize, 0usize);
+    let Codes { lit, dist } = codes;
+    loop {
+        let last = b.get(1) == 1;
+        match b.get(2) {
+            0 => {
+                let k = (b.bit_pos() as u32).wrapping_neg() & 7;
+                b.get(k);
+                let (len, nlen) = (b.get(16) as u16, b.get(16) as u16);
+                b.check()?;
+                if nlen != !len {
+                    return Err(Error::Invalid("stored block length mismatch"));
+                }
+                let at = b.bit_pos() / 8;
+                sink.stored(raw.get(at..at + len as usize).ok_or(Error::Truncated)?);
+                olen += len as usize;
+                b = Bits {
+                    d: raw,
+                    pos: at + len as usize,
+                    buf: 0,
+                    n: 0,
+                };
+            }
+            1 => {
+                lit.build(&huffman::fixed_lit_lens())?;
+                dist.build(&huffman::FIXED_DIST_LENS)?;
+                tokens_into(&mut b, lit, dist, sink, &mut olen, &mut tlen, &mut st)?;
+            }
+            2 => {
+                let header = parse_header(&mut b)?;
+                lit.build(header.lit_lens())?;
+                dist.build(header.dist_lens())?;
+                tokens_into(&mut b, lit, dist, sink, &mut olen, &mut tlen, &mut st)?;
+            }
+            _ => return Err(Error::Invalid("reserved block type")),
+        }
+        b.check()?;
+        if last {
+            break;
+        }
+    }
+    b.get((b.bit_pos() as u32).wrapping_neg() & 7);
+    b.check()?;
+    Ok((olen, b.bit_pos() / 8))
+}
+
 /// A canonical Huffman code, decoded a bit at a time (as zlib's puff does): for finding
 /// streams, where tables would cost more than the few symbols read.
 struct Canon {
@@ -1074,7 +1179,9 @@ fn tokens_into<S: Sink>(
     };
     (*olen, *tlen) = (o, t);
     *bits = b;
-    st.freqs.push((lf, df));
+    if !st.lean {
+        st.freqs.push((lf, df));
+    }
     (st.max_dist, st.far) = (max_dist, far);
     r
 }

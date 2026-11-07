@@ -478,6 +478,10 @@ fn png_rows(w: usize, h: usize, bpp: usize, seed: u32) -> Vec<u8> {
     let mut x = seed;
     let mut d = Vec::with_capacity(h * (w * bpp + 1));
     for y in 0..h {
+        // (a variant (a seed of 100 or more) different in a band of rows)
+        if seed >= 100 && y % 40 == 7 {
+            x = x.wrapping_add(seed);
+        }
         d.push((y % 5) as u8);
         for i in 0..w * bpp {
             x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
@@ -492,6 +496,21 @@ fn png_rows(w: usize, h: usize, bpp: usize, seed: u32) -> Vec<u8> {
 /// (interlaced where `interlace`), its data in IDAT chunks of `idat` bytes; with `frames` more
 /// frames of it (an APNG).
 fn png_file(w: u32, h: u32, depth: u8, color: u8, interlace: bool, idat: usize, frames: u32) -> Vec<u8> {
+    png_file_of(w, h, depth, color, interlace, idat, frames, 0)
+}
+
+/// [`png_file`] of a variant (`variant` more than 0) of the picture, different in some rows.
+#[allow(clippy::too_many_arguments)]
+fn png_file_of(
+    w: u32,
+    h: u32,
+    depth: u8,
+    color: u8,
+    interlace: bool,
+    idat: usize,
+    frames: u32,
+    variant: u32,
+) -> Vec<u8> {
     let channels = [1, 0, 3, 1, 2, 0, 4][color as usize];
     let bpp = (channels * depth as usize).div_ceil(8);
     let p = aqr_flate::zlib::Params { level: 6, ..Default::default() };
@@ -526,13 +545,14 @@ fn png_file(w: u32, h: u32, depth: u8, color: u8, interlace: bool, idat: usize, 
         png_chunk(&mut out, b"fcTL", &fctl(seq));
         seq += 1;
     }
-    for c in data(1).chunks(idat) {
+    let v = if variant > 0 { 100 * variant } else { 0 };
+    for c in data(1 + v).chunks(idat) {
         png_chunk(&mut out, b"IDAT", c);
     }
     for f in 0..frames {
         png_chunk(&mut out, b"fcTL", &fctl(seq));
         seq += 1;
-        for c in data(2 + f).chunks(idat) {
+        for c in data(2 + f + v).chunks(idat) {
             png_chunk(&mut out, b"fdAT", &[&seq.to_be_bytes()[..], c].concat());
             seq += 1;
         }
@@ -567,6 +587,54 @@ fn png_plans_hold() {
     for (what, d) in files {
         let f = aqr_png::formula::encode(&d, 1).unwrap_or_else(|| panic!("{what}"));
         plan_holds(&format!("png {what}"), f, &d);
+    }
+}
+
+/// png-against lays its memory out as a stack, its limit its plan (as png-recons'), the
+/// references of the reference file made first: variants of an RGB picture and of an APNG, each
+/// coded against its picture.
+#[test]
+fn png_against_plans_hold() {
+    let pairs = [
+        ("rgb", png_file_of(300, 200, 8, 2, false, 1 << 20, 0, 0), png_file_of(300, 200, 8, 2, false, 1 << 20, 0, 1)),
+        ("apng", png_file_of(160, 120, 8, 6, false, 5000, 9, 0), png_file_of(160, 120, 8, 6, false, 5000, 9, 1)),
+    ];
+    for (what, reference, d) in pairs {
+        let mut f = aqr_png::formula::encode_against(&d, &reference, 1).unwrap_or_else(|| panic!("{what}"));
+        let Node::Apply(a) = &f.root else { panic!("{what}") };
+        assert_eq!(a.module, aqr_png::formula::AGAINST_MODULE, "{what}: not coded against its reference");
+        let r = f.streams.iter().position(|s| s.class == aqr_png::formula::REFERENCE).unwrap();
+        f.streams[r].data = reference.into();
+        plan_holds(&format!("png-against {what}"), f, &d);
+    }
+}
+
+/// png-set lays its memory out as a stack, its limit its plan of the instance and as many tasks
+/// at once as their slots allow: trees of variants of pictures (a depth of several files, each a
+/// task giving back its file; a depth of one, its images tasks), of RGB pictures and APNGs, a
+/// chain of 70 files and a depth of more files than the slots.
+#[test]
+fn png_set_plans_hold() {
+    let rgb = |v| png_file_of(300, 200, 8, 2, false, 1 << 20, 0, v);
+    let apng = |v| png_file_of(160, 120, 8, 6, false, 5000, 4, v);
+    let sets: [(&str, Vec<Vec<u8>>, Vec<Option<usize>>); 4] = [
+        ("rgb", vec![rgb(0), rgb(1), rgb(2), rgb(3)], vec![None, Some(0), Some(0), Some(1)]),
+        ("apng", vec![apng(0), apng(1), apng(2)], vec![None, Some(0), Some(1)]),
+        // (deeper than the holes the stack keeps)
+        ("chain", (0..70).map(rgb).collect(), (0..70usize).map(|i| i.checked_sub(1)).collect()),
+        ("wide", (0..11).map(rgb).collect(), (0..11).map(|i| (i > 0).then_some(0)).collect()),
+    ];
+    for (what, files, parents) in sets {
+        let refs: Vec<&[u8]> = files.iter().map(|f| &f[..]).collect();
+        let f = aqr_png::formula::encode_set(&refs, &parents, &[], 1).unwrap_or_else(|| panic!("{what}"));
+        let d = files.concat();
+        // (the files' application whole: its output the files one after another)
+        let mut g = f.clone();
+        let mut a = g.shared[0].apply.clone();
+        a.len = d.len() as u64;
+        g.shared.clear();
+        g.root = Node::Apply(Box::new(a));
+        plan_holds(&format!("png-set {what}"), g, &d);
     }
 }
 
