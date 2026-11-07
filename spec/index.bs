@@ -5938,8 +5938,8 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bcn-recons.wasm" title="crates/aqr-modules/wasm/bcn-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-tex/FORMAT.md" title="codecs/aqr-tex/FORMAT.md">R</a>
     <tr>
-      <td><code>e98ee4c9c547e18c5c2758eb788433e8e805568ea93aa891ed3c5d9aaefc21a6</code>
-      <td>bundle-recons@1
+      <td><code>b3a8f4e7dc7f088a1b24e376970e78bb8dce33dc171cb36e1f54b6e489887cd5</code>
+      <td>bundle-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bundle-recons.wasm" title="crates/aqr-modules/wasm/bundle-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bundle/FORMAT.md" title="codecs/aqr-bundle/FORMAT.md">R</a>
     <tr>

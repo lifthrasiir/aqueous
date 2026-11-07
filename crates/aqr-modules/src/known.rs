@@ -89,8 +89,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "bundle-recons",
-        version: 1,
-        sha512_256: hex("e98ee4c9c547e18c5c2758eb788433e8e805568ea93aa891ed3c5d9aaefc21a6"),
+        version: 2,
+        sha512_256: hex("b3a8f4e7dc7f088a1b24e376970e78bb8dce33dc171cb36e1f54b6e489887cd5"),
         block: include_bytes!("../wasm/bundle-recons.block"),
     },
     Known {

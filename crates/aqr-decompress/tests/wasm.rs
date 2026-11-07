@@ -3853,6 +3853,41 @@ fn fasta_plans_hold() {
     }
 }
 
+/// bundle-recons is a part module whose plan is the same whatever the lengths: the fixtures of
+/// every kind of archive, and a tar of bodies past its windows (pieces and several windows,
+/// padding, a gap at the end).
+#[test]
+fn bundle_plans_hold() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../codecs/aqr-bundle/tests/data");
+    let mut names: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+    names.sort();
+    for name in names {
+        let d = std::fs::read(std::path::Path::new(dir).join(&name)).unwrap();
+        let f = aqr_bundle::formula::encode(&d, 1).unwrap_or_else(|| panic!("{name:?}"));
+        plan_holds(&format!("bundle {name:?}"), f, &d);
+    }
+    let mut rng = aqr_common::rng::Rng::new(9);
+    let mut tar = Vec::new();
+    for (i, n) in [3 << 20, 100, 0, (5 << 19) + 7, 1 << 20].into_iter().enumerate() {
+        let mut h = [0u8; 512];
+        h[..8].copy_from_slice(format!("file{i}.bi").as_bytes());
+        h[100..108].copy_from_slice(b"0000644\0");
+        h[124..136].copy_from_slice(format!("{n:011o}\0").as_bytes());
+        h[156] = b'0';
+        h[257..263].copy_from_slice(b"ustar\0");
+        h[263..265].copy_from_slice(b"00");
+        let sum: u32 = h.iter().map(|&b| b as u32).sum::<u32>() + 8 * 32;
+        h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        tar.extend_from_slice(&h);
+        tar.extend((0..n).map(|j| if j % 5 == 0 { rng.below(256) as u8 } else { b"abcdef"[j % 6] }));
+        tar.resize(tar.len().div_ceil(512) * 512, 0);
+    }
+    tar.extend_from_slice(&[0; 1024]);
+    tar.extend_from_slice(b"trailing bytes that are no member");
+    let f = aqr_bundle::formula::encode(&tar, 1).expect("a tar");
+    plan_holds("bundle tar", f, &tar);
+}
+
 /// bz2-recons and bz2-alz-recons lay their memory out as stacks, their limits their plans: of
 /// the fixtures (a periodic block given its rank among them), of streams one after another, of
 /// several blocks (the last the smaller), and of ALZip's.

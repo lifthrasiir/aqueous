@@ -1,4 +1,4 @@
-//! `bundle-recons` (aqr-bundle).
+//! `bundle-recons` (aqr-bundle), a part module.
 
 #![no_main]
 
@@ -6,4 +6,14 @@
 #[global_allocator]
 static STACK: aqr_api::stack::Stack = aqr_api::stack::Stack::new();
 
-aqr_modules::whole!(inputs [in0: 0, in1: 1], |p, _, i, len| aqr_bundle::module::decode(p, i, len, 1));
+aqr_api::entry! {
+    part fn apply(params_len, in0_len, in1_len, size)
+        windows(
+            Input 0 = aqr_bundle::module::WINDOW,
+            Input 1 = aqr_bundle::module::WINDOW,
+            Output 0 = aqr_bundle::module::WINDOW,
+        )
+    {
+        aqr_bundle::module::decode_part(params_len, in0_len, in1_len, size)
+    }
+}

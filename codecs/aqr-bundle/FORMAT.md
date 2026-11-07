@@ -33,13 +33,18 @@ Contents:
 
 ## 2. The module
 
-- **Module**: name `bundle-recons`, version 1.
+- **Module**: name `bundle-recons`, version 2.
 - **Params**: none (empty).
 - **Resources**: none.
 - **Inputs**: exactly two:
   1. `data` (class `raw`): the bodies of the members that are not in the layout, in order;
   2. `layout` (class `bundle/layout`): §3.
 - **Output**: the archive of §3. Its length must be the `len` the application declares.
+
+It is a part module (`module::decode_part`) of windows of 16 pages for each input and the
+output, which it takes and puts in order, in pieces of 64 KiB: it holds nothing, so the
+application takes the same memory (about 1.3 MiB of its own) whatever the lengths. (Version 1
+was a whole module, which held the inputs twice and the output: three times the archive.)
 
 `data` is what the members hold, as it is; it is a content of the application and may be
 recompressed in turn.
@@ -110,8 +115,8 @@ m bytes               the name
 
 The output is the header, the name, its padding (to the alignment, by position: `a = pad(q, A)`
 where `q` is the position after the name), the body, and its padding (`b = pad(q', A)` after the
-body): those given where PAD is set, else zeros. The header's checksum (crc) is predicted from the
-body, so it is decoded once the body is read.
+body): those given where PAD is set, else zeros. The header's checksum (crc) is kept as it is:
+the body is taken after the header is put, so it cannot be predicted (version 1 predicted it).
 
 ## 4. Predictions
 
@@ -123,7 +128,7 @@ body, so it is decoded once the body is read.
 | cpio newc, crc | filesize (54, 8) | `hex(n, 8)` |
 | cpio newc, crc | namesize (94, 8) | `hex(m, 8)` |
 | cpio newc | check (102, 8) | `hex(0, 8)` |
-| cpio crc | check (102, 8) | `hex(c, 8)`, where `c` is the sum of the body's bytes, modulo `2^32` |
+| cpio crc | check (102, 8) | none (as it is) |
 | cpio odc | namesize (59, 6) | `oct(m, 6)` |
 | cpio odc | filesize (65, 11) | `oct(n, 11)` |
 | cpio binary | namesize (20, 2) | `m mod 2^16`, as a word |

@@ -3,7 +3,8 @@
 Archives that only bundle files, rebuilt bit for bit from the contents of their members
 (`FORMAT.md`): ar (System V and GNU, BSD, Windows libraries), tar (v7, ustar, GNU, pax) and cpio
 (newc, crc, odc, binary of either byte order). The headers are kept, their sizes, name sizes and
-checksums derived from the contents; padding of zeros is not stored.
+checksums derived from the contents (but for the checksum of cpio's crc form); padding of zeros
+is not stored.
 
 Nothing is gained on an archive alone: what it is for is that its contents become contents of
 the application, to be recompressed by their formats (a PNG file in a tar archive by aqr-png,
@@ -35,11 +36,23 @@ the commit before aqr-bundle (`e6ec924`), and with `aqr-bundle-check`.
   28 GB/s to decode (`aqr-bundle-check`). The corpus has no cpio archive.
 - A bottle gains little: its tar archive is mostly Mach-O dylibs, whose code aqr-exe takes, but
   that is a few MB of the data; the formula of a bottle of 88 MB (icu4c) archives larger than
-  the tar archive raw. The bottles take more memory, as the members' contents are copied into
-  their streams by kind (on top of the tar archive inflated).
+  the tar archive raw. The bottles take more memory when encoding, as the members' contents are
+  copied into their streams by kind (on top of the tar archive inflated).
 - With aqr-zip's `zip-recons`, the contents of large entries are slices of their own: a tar
   archive in a ZIP archive (silesia's `mozilla`) is taken apart, and found again where the same
   file is archived along with it.
+
+## Memory
+
+`bundle-recons` is a part module: it takes the data and the layout and puts the archive in
+pieces through windows, holding nothing, so its application needs about 1.3 MiB (plus the
+windows) whatever the archive's length (version 1, a whole module, needed three times the
+archive: 299 MiB for gimp.tar's 79 MB, over a 256 MiB bound). gimp.tar of the 10gb corpus, M4,
+`-9`: 10,936,375 B before at no bound and 10,935,835 B after (the generic path that the bound made it
+fall back to is 9,990,651 B on this file alone, 9% smaller); decompress native 1.91 -> 2.04 G
+instructions, resident 180 -> 109 MB, Wasm 1.45 -> 1.49 G, 536 -> 226 MB. The price is the
+checksum of cpio's crc form (version 1 predicted it from the body, which version 2 has not at
+hand when it puts the header): its 4 bytes of each member are stored.
 
 ## Tests
 

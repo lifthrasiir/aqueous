@@ -9,12 +9,11 @@ use crate::{ar, cpio, tar};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("bundle-recons", 1).with_plan(memory);
+pub const MODULE: Module = Module::new("bundle-recons", 2).with_plan(memory);
 
 /// The memory of the module: its initial memory, and its plan ([`crate::module::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let &[len] = u.outputs else { return None };
-    Some(u.initial() + crate::module::plan(u.inputs, len))
+    Some(u.initial() + crate::module::plan())
 }
 
 /// The archives this crate takes.

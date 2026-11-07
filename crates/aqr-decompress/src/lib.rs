@@ -473,7 +473,21 @@ const NATIVE: &[Entry] = &[
         },
         |p, _, i, n, t| aqr_zip::formula::decode(p, i, n, t).map_err(err),
     ),
-    bare(BUNDLE, |p, _, i, n, t| aqr_bundle::formula::decode(p, i, n, t).map_err(err)),
+    part(
+        BUNDLE,
+        false,
+        aqr_api::emu::Entry {
+            kind: aqr_api::emu::Kind::Part,
+            windows: &[
+                aqr_api::Window::Input(0, aqr_bundle::module::WINDOW),
+                aqr_api::Window::Input(1, aqr_bundle::module::WINDOW),
+                aqr_api::Window::Output(0, aqr_bundle::module::WINDOW),
+            ],
+            arity: 4,
+            call: |a| aqr_bundle::module::decode_part(a[0], a[1], a[2], a[3]),
+        },
+        |p, _, i, n, t| aqr_bundle::formula::decode(p, i, n, t).map_err(err),
+    ),
     bare(ASAR, |p, _, i, n, t| aqr_asar::formula::decode(p, i, n, t).map_err(err)),
     bare(GIT_PACK, |p, _, i, n, t| aqr_git::formula::decode(p, i, n, t).map_err(err)),
     bare(GIT_PACK_INDEX, |p, _, i, n, t| aqr_git::formula::decode_index(p, i, n, t).map_err(err)),

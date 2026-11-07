@@ -72,9 +72,19 @@ pub fn pad_to(at: usize, align: usize) -> usize {
 
 /// `v` in decimal, left aligned and padded with spaces, in `out` (its last digits where it does
 /// not fit).
-fn decimal(v: u64, out: &mut [u8]) {
-    let s = v.to_string();
-    let s = &s.as_bytes()[s.len().saturating_sub(out.len())..];
+fn decimal(mut v: u64, out: &mut [u8]) {
+    // (the digits from the last, in a buffer of the most a u64 has: no allocation)
+    let (mut b, mut k) = ([0u8; 20], 20);
+    loop {
+        k -= 1;
+        b[k] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    // (the last digits where they do not fit)
+    let s = &b[k.max(20usize.saturating_sub(out.len()))..];
     out.fill(b' ');
     out[..s.len()].copy_from_slice(s);
 }
@@ -121,13 +131,14 @@ fn tar_sum(h: &[u8]) -> [u8; 8] {
     f
 }
 
-/// Codes cpio header `h` (of `form`) against its prediction: the name's size `m`, the body's
-/// size `n`, and the body's checksum `sum`.
-fn cpio_code(form: Cpio, upper: bool, h: &mut [u8], m: u64, n: u64, sum: u32) {
+/// Codes cpio header `h` (of `form`) against its prediction: the name's size `m` and the body's
+/// size `n`. (The crc form's checksum is kept as it is, as the body is not at hand before the
+/// header is written.)
+fn cpio_code(form: Cpio, upper: bool, h: &mut [u8], m: u64, n: u64) {
     match form {
         Cpio::Newc | Cpio::Crc => {
             let mut p = [0; 8];
-            for (at, v) in [(54, n), (94, m), (102, if form == Cpio::Crc { sum as u64 } else { 0 })] {
+            for (at, v) in [(54, n), (94, m), (102, 0)] {
                 digits(v, 16, upper, &mut p);
                 xor(&mut h[at..at + 8], &p);
             }
@@ -146,11 +157,6 @@ fn cpio_code(form: Cpio, upper: bool, h: &mut [u8], m: u64, n: u64, sum: u32) {
             xor(&mut h[24..26], &word(n));
         }
     }
-}
-
-/// The checksum of cpio's crc form: the bytes summed.
-pub fn byte_sum(d: &[u8]) -> u32 {
-    d.iter().fold(0u32, |s, &b| s.wrapping_add(b as u32))
 }
 
 /// What a member's body is to the archive's contents.
@@ -295,7 +301,7 @@ impl<'a> Writer<'a> {
                 l.extend_from_slice(&[CPIO, form as u8, flags(inline, raw, upper)]);
                 varint::put(l, m as u64);
                 varint::put(l, n as u64);
-                cpio_code(form, upper, &mut h, m as u64, n as u64, byte_sum(&d[body.span.clone()]));
+                cpio_code(form, upper, &mut h, m as u64, n as u64);
                 l.extend_from_slice(&h);
                 l.extend_from_slice(&d[name]);
                 if raw {
@@ -315,30 +321,6 @@ impl<'a> Writer<'a> {
     }
 }
 
-/// Reads the layout.
-struct Reader<'a> {
-    l: &'a [u8],
-    at: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn u8(&mut self) -> Result<u8> {
-        let b = *self.l.get(self.at).ok_or_else(corrupt)?;
-        self.at += 1;
-        Ok(b)
-    }
-
-    fn varint(&mut self) -> Result<usize> {
-        usize::try_from(varint::get(self.l, &mut self.at)?).map_err(|_| corrupt())
-    }
-
-    fn bytes(&mut self, n: usize) -> Result<&'a [u8]> {
-        let b = self.l.get(self.at..).and_then(|r| r.get(..n)).ok_or_else(corrupt)?;
-        self.at += n;
-        Ok(b)
-    }
-}
-
 /// What a record of the layout is, for counting them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Info {
@@ -346,6 +328,101 @@ pub struct Info {
     /// Bytes of the body, and whether it is in the layout.
     pub body: usize,
     pub inline: bool,
+}
+
+/// Where [`build_into`] takes the layout and the data from, in order.
+pub trait Source {
+    /// The next `n` bytes of the layout, given to `f` in pieces.
+    fn layout(&mut self, n: usize, f: &mut dyn FnMut(&[u8])) -> Result<()>;
+    /// The next `n` bytes of the data, given to `f` in pieces.
+    fn data(&mut self, n: usize, f: &mut dyn FnMut(&[u8])) -> Result<()>;
+    /// Whether the layout has more.
+    fn more(&self) -> bool;
+    /// Whether the data is all taken.
+    fn done(&self) -> bool;
+}
+
+impl dyn Source + '_ {
+    /// The next `N` bytes of the layout.
+    fn array<const N: usize>(&mut self) -> Result<[u8; N]> {
+        let (mut a, mut k) = ([0; N], 0);
+        self.layout(N, &mut |b| {
+            a[k..k + b.len()].copy_from_slice(b);
+            k += b.len();
+        })?;
+        Ok(a)
+    }
+
+    fn u8(&mut self) -> Result<u8> {
+        Ok(self.array::<1>()?[0])
+    }
+
+    fn varint(&mut self) -> Result<usize> {
+        // (at most ten bytes)
+        let (mut b, mut k) = ([0u8; 10], 0);
+        loop {
+            let c = self.u8()?;
+            *b.get_mut(k).ok_or_else(corrupt)? = c;
+            k += 1;
+            if c < 0x80 {
+                break;
+            }
+        }
+        usize::try_from(varint::get(&b[..k], &mut 0)?).map_err(|_| corrupt())
+    }
+}
+
+/// The layout and the data in memory.
+pub struct Slices<'a> {
+    layout: &'a [u8],
+    data: &'a [u8],
+}
+
+impl<'a> Slices<'a> {
+    pub fn new(layout: &'a [u8], data: &'a [u8]) -> Slices<'a> {
+        Slices { layout, data }
+    }
+}
+
+impl Source for Slices<'_> {
+    fn layout(&mut self, n: usize, f: &mut dyn FnMut(&[u8])) -> Result<()> {
+        let (b, rest) = self.layout.split_at_checked(n).ok_or_else(corrupt)?;
+        self.layout = rest;
+        f(b);
+        Ok(())
+    }
+
+    fn data(&mut self, n: usize, f: &mut dyn FnMut(&[u8])) -> Result<()> {
+        let (b, rest) = self.data.split_at_checked(n).ok_or_else(corrupt)?;
+        self.data = rest;
+        f(b);
+        Ok(())
+    }
+
+    fn more(&self) -> bool {
+        !self.layout.is_empty()
+    }
+
+    fn done(&self) -> bool {
+        self.data.is_empty()
+    }
+}
+
+/// Where [`build_into`] puts the archive, in order.
+pub trait Sink {
+    /// Bytes put so far.
+    fn len(&self) -> usize;
+    fn put(&mut self, d: &[u8]);
+}
+
+impl<T: aqr_common::out::Out> Sink for T {
+    fn len(&self) -> usize {
+        aqr_common::out::Out::len(self)
+    }
+
+    fn put(&mut self, d: &[u8]) {
+        aqr_common::out::Out::put(self, d)
+    }
 }
 
 /// The archive of `len` bytes rebuilt from `layout` and `data` (the bodies that are data, in
@@ -356,112 +433,116 @@ pub fn build(layout: &[u8], data: &[u8], len: u64) -> Result<Vec<u8>> {
 
 /// [`build`], telling `info` what each record is.
 pub fn build_with(layout: &[u8], data: &[u8], len: u64, info: &mut dyn FnMut(Info)) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(usize::try_from(len).map_err(|_| corrupt())?);
+    build_into(&mut Slices::new(layout, data), &mut out, len, info)?;
+    Ok(out)
+}
+
+/// The archive of `len` bytes rebuilt from `src` into `out`, telling `info` what each record is.
+/// Nothing is held: the layout and the data are taken, and the archive put, in pieces.
+pub fn build_into(src: &mut dyn Source, out: &mut dyn Sink, len: u64, info: &mut dyn FnMut(Info)) -> Result<()> {
     let len = usize::try_from(len).map_err(|_| corrupt())?;
-    let mut out = Vec::with_capacity(len);
-    let mut r = Reader { l: layout, at: 0 };
-    let mut taken = 0;
-    // the next `n` bytes of data, or of the layout where `inline`
-    fn body<'a>(r: &mut Reader<'a>, data: &'a [u8], taken: &mut usize, inline: bool, n: usize) -> Result<&'a [u8]> {
-        if inline {
-            return r.bytes(n);
-        }
-        let b = data.get(*taken..).and_then(|d| d.get(..n)).ok_or_else(corrupt)?;
-        *taken += n;
-        Ok(b)
-    }
-    let room = |out: &Vec<u8>, n: usize| {
+    let room = |out: &dyn Sink, n: usize| {
         if out.len().saturating_add(n) > len { Err(Error("past the length")) } else { Ok(()) }
     };
-    while r.at < layout.len() {
-        let tag = r.u8()?;
+    // the body: the next `n` bytes of the layout where `inline`, else of the data
+    fn body(src: &mut dyn Source, out: &mut dyn Sink, inline: bool, n: usize) -> Result<()> {
+        match inline {
+            true => src.layout(n, &mut |b| out.put(b)),
+            false => src.data(n, &mut |b| out.put(b)),
+        }
+    }
+    // `p` bytes of padding: zeros, or as the layout has them
+    fn pad(src: &mut dyn Source, out: &mut dyn Sink, raw: bool, mut p: usize) -> Result<()> {
+        if raw {
+            return src.layout(p, &mut |b| out.put(b));
+        }
+        while p > 0 {
+            let k = p.min(64);
+            out.put(&[0; 64][..k]);
+            p -= k;
+        }
+        Ok(())
+    }
+    while src.more() {
+        let tag = src.u8()?;
         let (mut size, mut inline) = (0, false);
         match tag {
             GAP => {
-                let n = r.varint()?;
-                out.extend_from_slice(r.bytes(n)?);
+                let n = src.varint()?;
+                src.layout(n, &mut |b| out.put(b))?;
             }
             ZEROS => {
-                let n = r.varint()?;
-                room(&out, n)?;
-                out.resize(out.len() + n, 0);
+                let n = src.varint()?;
+                room(out, n)?;
+                pad(src, out, false, n)?;
             }
             AR => {
-                let flags = r.u8()?;
+                let flags = src.u8()?;
                 if flags & !(INLINE | PAD) != 0 {
                     return Err(corrupt());
                 }
-                let (pre, n) = (r.varint()?, r.varint()?);
-                let mut h: [u8; AR_HEADER] = r.bytes(AR_HEADER)?.try_into().unwrap();
+                let (pre, n) = (src.varint()?, src.varint()?);
+                let mut h: [u8; AR_HEADER] = src.array()?;
                 xor(&mut h[48..58], &ar_size(pre.checked_add(n).ok_or_else(corrupt)? as u64));
-                out.extend_from_slice(&h);
-                out.extend_from_slice(r.bytes(pre)?);
+                out.put(&h);
+                src.layout(pre, &mut |b| out.put(b))?;
                 inline = flags & INLINE != 0;
-                out.extend_from_slice(body(&mut r, data, &mut taken, inline, n)?);
+                body(src, out, inline, n)?;
                 if (pre + n) % 2 == 1 && flags & PAD == 0 {
-                    out.push(r.u8()? ^ b'\n');
+                    out.put(&[src.u8()? ^ b'\n']);
                 }
                 size = n;
             }
             TAR => {
-                let flags = r.u8()?;
+                let flags = src.u8()?;
                 if flags & !(INLINE | PAD) != 0 {
                     return Err(corrupt());
                 }
-                let n = r.varint()?;
-                let mut h: [u8; TAR_BLOCK] = r.bytes(TAR_BLOCK)?.try_into().unwrap();
+                let n = src.varint()?;
+                let mut h: [u8; TAR_BLOCK] = src.array()?;
                 xor(&mut h[124..136], &tar_size(n as u64));
                 let sum = tar_sum(&h);
                 xor(&mut h[148..156], &sum);
-                out.extend_from_slice(&h);
+                out.put(&h);
                 inline = flags & INLINE != 0;
-                out.extend_from_slice(body(&mut r, data, &mut taken, inline, n)?);
-                let p = pad_to(n, TAR_BLOCK);
-                match flags & PAD {
-                    0 => out.resize(out.len() + p, 0),
-                    _ => out.extend_from_slice(r.bytes(p)?),
-                }
+                body(src, out, inline, n)?;
+                pad(src, out, flags & PAD != 0, pad_to(n, TAR_BLOCK))?;
                 size = n;
             }
             CPIO => {
-                let form = Cpio::from_u8(r.u8()?).ok_or_else(corrupt)?;
-                let flags = r.u8()?;
+                let form = Cpio::from_u8(src.u8()?).ok_or_else(corrupt)?;
+                let flags = src.u8()?;
                 if flags & !(INLINE | PAD | UPPER) != 0 {
                     return Err(corrupt());
                 }
-                let (m, n) = (r.varint()?, r.varint()?);
+                let (m, n) = (src.varint()?, src.varint()?);
                 let (hl, align) = (form.header(), form.align());
-                let mut h = r.bytes(hl)?.to_vec();
-                let at = out.len();
-                out.extend_from_slice(&h);
-                out.extend_from_slice(r.bytes(m)?);
+                let mut h = [0u8; 110];
+                let h = &mut h[..hl];
+                src.layout(hl, &mut { |b| h[..b.len()].copy_from_slice(b) })?;
+                cpio_code(form, flags & UPPER != 0, h, m as u64, n as u64);
+                out.put(h);
+                src.layout(m, &mut |b| out.put(b))?;
                 let raw = flags & PAD != 0;
-                let pad = |out: &mut Vec<u8>, r: &mut Reader| -> Result<()> {
-                    let p = pad_to(out.len(), align);
-                    match raw {
-                        false => out.resize(out.len() + p, 0),
-                        true => out.extend_from_slice(r.bytes(p)?),
-                    }
-                    Ok(())
-                };
-                pad(&mut out, &mut r)?;
+                let p = pad_to(out.len(), align);
+                pad(src, out, raw, p)?;
                 inline = flags & INLINE != 0;
-                let b = body(&mut r, data, &mut taken, inline, n)?;
-                cpio_code(form, flags & UPPER != 0, &mut h, m as u64, n as u64, byte_sum(b));
-                out[at..at + hl].copy_from_slice(&h);
-                out.extend_from_slice(b);
-                pad(&mut out, &mut r)?;
+                body(src, out, inline, n)?;
+                let p = pad_to(out.len(), align);
+                pad(src, out, raw, p)?;
                 size = n;
             }
             _ => return Err(corrupt()),
         }
-        room(&out, 0)?;
+        room(out, 0)?;
         info(Info { tag, body: size, inline });
     }
-    if taken != data.len() {
+    if !src.done() {
         return Err(Error("data left over"));
     }
     if out.len() != len {
         return Err(Error("not of the length"));
     }
-    Ok(out)
+    Ok(())
 }
