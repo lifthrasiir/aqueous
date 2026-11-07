@@ -84,7 +84,9 @@ The encoder gives `data` as the contents themselves, slices of streams of class 
 `deflated` as an application of aqr-flate's module `flate-set` with params `[4]` (aqr-flate's
 `FORMAT.md`, "Formula module"), which outputs exactly that: before each stream, the CRC-32 and
 lengths of it. Its data is the contents of the deflated bodies (a content too), its records
-a stream of class `flate/record`, and its index one of class `flate/index`.
+a stream of class `flate/record`, and its index one of class `flate/index`, which for a body of
+2 MiB of data or more carries its CRC-32 too (flate-set 3: the module then does not hold the body
+to derive it).
 
 ## 3. The layout
 

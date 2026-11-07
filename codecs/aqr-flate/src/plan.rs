@@ -386,7 +386,8 @@ pub fn plan(
     len: u64,
 ) -> Option<(u64, u64)> {
     let derived = Derived::from_params(params).ok()?;
-    let lens = crate::module::lens_of(
+    let (lens, crcs) = crate::module::lens_of(
+        derived,
         index,
         inputs[0],
         inputs[1],
@@ -395,11 +396,7 @@ pub fn plan(
     .ok()?;
     let k = lens.len() as u64;
     let profile = crate::record_profile(records).ok()?;
-    let threads = if derived.before() {
-        1
-    } else {
-        crate::module::SET_THREADS
-    };
+    let threads = crate::module::SET_THREADS;
     let mut m = Mem {
         top: initial,
         high: initial,
@@ -411,6 +408,7 @@ pub fn plan(
     m.take(resources[1]);
     m.take(inputs[2]);
     m.take(wasm::LENS * k);
+    m.take(4 * crcs.len() as u64);
     m.take(k * derived.bytes() as u64);
     if derived.crc() {
         m.take(aqr_common::crc32::WASM_TABLES);
@@ -430,12 +428,11 @@ pub fn plan(
     let (mut i, mut at) = (0, 0usize);
     let record = |i: usize, at: usize| records.get(at..at + lens[i].1 as usize);
     while i < lens.len() {
-        let (d, r, sn) = lens[i];
+        let (d, r, _) = lens[i];
         if d >= LARGE as u64 {
             let st = Stream::parse(d, record(i, at)?, profile)?;
-            // the record, the stream held (where what is derived comes first), the data pulled
+            // the record, the data pulled
             m.take(r);
-            m.take(if derived.before() { sn } else { 0 });
             m.take(wasm::ARC_VEC);
             rebuild(&mut m, &st, How::Pulled(threads));
             m.top = t1;

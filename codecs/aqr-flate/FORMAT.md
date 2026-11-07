@@ -953,7 +953,7 @@ tables. `deconstruct` keeps to tighter limits; see [Domain](#domain).
 ## Formula module
 
 The same representation as a module of entry formulas (`aqr-formula`), in
-`formula::apply` and `formula::decode`. The module is `flate-set`, version 2. It rebuilds one
+`formula::apply` and `formula::decode`. The module is `flate-set`, version 3. It rebuilds one
 or more DEFLATE streams of one profile, each with its trailing bytes, as in
 [Rebuilding the stream](#rebuilding-the-stream), with the model data of its
 [resources](#resources) in place of the profile's files. Its output is the streams one after
@@ -1016,7 +1016,7 @@ endian but for the Adler-32.
 |---|---|---|
 | 0 | the data `D` of every stream, one after another | no: whatever the streams held (text, image rows, …) |
 | 1 | the [records](#the-record) of every stream, one after another: each the profile (u16) and the body | mostly: the corrections are rANS or arithmetic coded, and the main and header streams pack their fields in bits; general-purpose compression gains little |
-| 2 | the index: for each stream, the length of its data, the length of its record and the length of the stream it rebuilds (varints); or empty, for a single stream of all the data and all the records, as long as the output less what is derived of it | |
+| 2 | the index: for each stream, the length of its data, the length of its record and the length of the stream it rebuilds (varints), and with params `04` for a stream of at least 2 MiB of data the CRC-32 of its data (a fourth varint, below 2^32); or empty, for a single stream of all the data and all the records, as long as the output less what is derived of it (with params `04` and a stream of at least 2 MiB of data, the index is never empty: it has the CRC-32) | |
 
 The index cuts the data and the records into the streams', which it must use up exactly, and
 the streams' lengths must add up to the output less what is derived (version 1's index had no
@@ -1033,8 +1033,11 @@ modulo powers of two up to 256 KiB, and read no further), and the stream is writ
 of about 2 MiB. Smaller streams are rebuilt side by side in runs of up to 8 MiB of data, their
 data and records held, in groups of up to 2 MiB of data (a task each in WebAssembly, which gives
 the group's streams back, of the lengths the index tells). What is derived of the streams is
-held until they are all written; with params `04`, a stream is held instead, until what is
-derived of it is written before it.
+held until they are all written. With params `04`, what is derived of a stream comes before
+it, and for a stream of at least 2 MiB of data the CRC-32 of its data is that of the index:
+the 20 bytes are written from it, the stream follows as it is rebuilt (it is not held), and
+the module fails at the end if the CRC-32 of the data is another. (Version 2 held the stream,
+as long as the output of the application, for the CRC-32 it had yet to derive.)
 
 The module has no classes of its own: the maker of the formula names the inputs (e.g. `raw`,
 `flate/record` and `flate/index` in aqr-compress and aqr-zip, slices of `pdf/pool-<class>`

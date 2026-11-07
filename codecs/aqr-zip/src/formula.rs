@@ -373,7 +373,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
                         stored_all.write(&input[l.body.clone()]);
                     }
                     (Made::Deflated { .. }, Some((dd, record))) => {
-                        lens.push((dd.len(), record.len(), l.body.len()));
+                        lens.push((dd.len(), record.len(), l.body.len(), crc));
                         derived.extend_from_slice(&crc.to_le_bytes());
                         derived.extend_from_slice(&(dd.len() as u64).to_le_bytes());
                         derived.extend_from_slice(&(l.body.len() as u64).to_le_bytes());
@@ -411,7 +411,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         true => None,
         false => {
             let records = f.push("flate/record", records);
-            let index = match aqr_flate::formula::index(&lens) {
+            let index = match aqr_flate::formula::index_before(&lens) {
                 i if i.is_empty() => Node::Concat(Vec::new()),
                 i => f.push("flate/index", i),
             };

@@ -468,6 +468,13 @@ fn inflate_same_as_wasm() {
     }
 }
 
+/// The CRC-32 of `d`.
+fn crc_of(d: &[u8]) -> u32 {
+    let mut t = Vec::new();
+    aqr_flate::formula::Derived::Zip.put(d, 0, &mut t);
+    u32::from_le_bytes(t[..4].try_into().unwrap())
+}
+
 /// DEFLATE streams rebuilt (flate-set) natively and as WebAssembly alike: alone and several,
 /// small and large (2 MiB of data or more), with what each params value derives of them.
 #[test]
@@ -491,7 +498,12 @@ fn flate_set_same_as_wasm() {
             let records = f.push("flate/record", set.iter().flat_map(|&i| parts[i].1.clone()).collect::<Vec<u8>>());
             let lens: Vec<(usize, usize, usize)> =
                 set.iter().map(|&i| (parts[i].0.len(), parts[i].1.len(), parts[i].2)).collect();
-            let index = match aqr_flate::module::index(&lens) {
+            let lens_crc: Vec<_> = set.iter().zip(&lens).map(|(&i, l)| (l.0, l.1, l.2, crc_of(&parts[i].0))).collect();
+            let index = match if derived.before() {
+                aqr_flate::module::index_before(&lens_crc)
+            } else {
+                aqr_flate::module::index(&lens)
+            } {
                 i if i.is_empty() => Node::Concat(Vec::new()),
                 i => f.push("flate/index", i),
             };
@@ -510,7 +522,7 @@ fn flate_set_same_as_wasm() {
 /// at once as their slots allow: streams alone and several (runs of small ones, groups of them
 /// as tasks), large ones pulled (more segments than the slots: several batches), of a static
 /// profile and an adaptive one with zlib emulation (segments resumed), stored blocks among them,
-/// with what each params value derives (ZipBefore on one thread).
+/// with what each params value derives.
 #[test]
 fn flate_plans_hold() {
     use aqr_flate::formula::Derived;
@@ -550,7 +562,13 @@ fn flate_plans_hold() {
                 let records = f.push("flate/record", set.iter().flat_map(|&i| parts[i].1.clone()).collect::<Vec<u8>>());
                 let lens: Vec<(usize, usize, usize)> =
                     set.iter().map(|&i| (parts[i].0.len(), parts[i].1.len(), parts[i].2)).collect();
-                let index = match aqr_flate::module::index(&lens) {
+                let lens_crc: Vec<_> =
+                    set.iter().zip(&lens).map(|(&i, l)| (l.0, l.1, l.2, crc_of(&parts[i].0))).collect();
+                let index = match if derived.before() {
+                    aqr_flate::module::index_before(&lens_crc)
+                } else {
+                    aqr_flate::module::index(&lens)
+                } {
                     i if i.is_empty() => Node::Concat(Vec::new()),
                     i => f.push("flate/index", i),
                 };

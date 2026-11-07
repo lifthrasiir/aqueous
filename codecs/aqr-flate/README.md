@@ -272,7 +272,12 @@ and each batch's tasks. What decoding holds is reserved once at the size it take
   `writer_room`), which they hold to; a batch's tasks give their tokens back 5 bytes each,
   decoded into the pending tokens as they are taken;
 - small streams are rebuilt in groups, a task each, onto a result of room for their lengths,
-  which the index tells (flate-set 2).
+  which the index tells (flate-set 2);
+- a stream of params `04` (a ZIP archive's local header comes first) is not held for the
+  CRC-32 of its data: the index of a stream of 2 MiB or more of data carries it, and the module
+  writes the header from it and checks it at the end (flate-set 3). The application of a
+  322 MB entry (enwik9.zip) needed 353 MiB of memory with the stream held, and about
+  108 MiB without.
 
 ## Next steps
 

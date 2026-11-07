@@ -227,8 +227,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "flate-set",
-        version: 2,
-        sha512_256: hex("c0d95287a21b833d7988c93589fca1c5dea1f91d96f9fec1643db7f64ac279a4"),
+        version: 3,
+        sha512_256: hex("0bac3072db47829265c6045ea6c1504c6a28b6560c574521f5d153175d82a0ec"),
         block: include_bytes!("../wasm/flate-set.block"),
     },
     Known {
