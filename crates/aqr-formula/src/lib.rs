@@ -33,6 +33,7 @@ pub mod packed;
 pub mod patch;
 mod pieces;
 pub mod probe;
+pub mod released;
 pub mod store;
 
 use std::borrow::Cow;

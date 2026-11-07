@@ -136,6 +136,10 @@ optimization picked by hash.
   the `*_plans_hold` tests in aqr-decompress's `tests/wasm.rs` check to the page, instance and
   each class (`plans_hold_on_samples`, ignored, does on `scripts/module-memory.sh`'s samples).
   Tasks spawn only classes above their own.
+- Released modules: the earlier Apply (opcode 11, reserved) is accepted only for the modules of
+  the releases (`crates/aqr-formula/src/released.rs`, the hashes that `known.rs` no longer has),
+  and its memory limit is not enforced. At each release add the tag to the revisions of
+  `scripts/released-modules.sh`, run it and commit the result.
 - Size: aqr-ld trims modules itself (prefer automating in aqr-ld over toolchain flags);
   `AQR_LD_NAMES=1` keeps the name section for size debugging. Module error types must
   implement `Display` (`Debug` of `&str` pulls in core's Unicode tables).

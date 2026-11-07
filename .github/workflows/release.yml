@@ -9,6 +9,10 @@ name: release
 # the caches of main but not of another tag's. The scheduled runs, twice a week on main, keep
 # them there (and catch a build broken, say by nightly, before a tag does).
 #
+# Before tagging: add the tag to the revisions of scripts/released-modules.sh and run it, so that
+# the modules of the release stay valid for the reserved Apply instruction after they are rebuilt
+# (crates/aqr-formula/src/released.rs).
+#
 # The binaries carry the tag as their version (AQR_VERSION, crates/aqr-version: `aqr --version`,
 # Windows' VERSIONINFO, the app's Info.plist); a run not for a tag, `git describe`'s of the
 # shallow clone (0.0.0-gHASH).

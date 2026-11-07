@@ -29,6 +29,18 @@ fn fixture(path: &str) -> Vec<u8> {
     std::fs::read(format!("{}/../../{path}", env!("CARGO_MANIFEST_DIR"))).unwrap()
 }
 
+/// The modules of the releases that the earlier Apply instruction is valid for
+/// (`scripts/released-modules.sh`) are not the current ones (regenerated at a release).
+#[test]
+fn released_modules_not_current() {
+    for h in aqr_formula::released::RELEASED {
+        let current = aqr_modules::KNOWN
+            .iter()
+            .find(|k| k.sha512_256.iter().map(|b| format!("{b:02x}")).collect::<String>() == *h);
+        assert!(current.is_none(), "{h}: {:?} is current", current.map(|k| k.name));
+    }
+}
+
 /// Every module of this crate is built, of its version (else it is stale), and known by its
 /// bytes.
 #[test]

@@ -113,8 +113,11 @@ const MODULE_BYTES: u8 = 0x02;
 const RESOURCE_BYTES: u8 = 0x03;
 const SWAP: u8 = 0x0f;
 const SLICE: u8 = 0x10;
-/// (0x11 is reserved: an earlier Apply, which gave no task limits.)
 const APPLY: u8 = 0x16;
+/// The earlier Apply, which gave no task limits (and a memory limit of all of the application's
+/// memories): reserved, an invalid archive but for the modules of the releases that wrote it
+/// ([`released`]).
+const APPLY_OLD: u8 = 0x11;
 const CONCAT: u8 = 0x12;
 const PACK: u8 = 0x13;
 const SPLIT: u8 = 0x14;
@@ -3784,6 +3787,8 @@ struct Apply<'a> {
     memory_limit: u64,
     /// The task limits, one for each class of the module.
     task_limits: Vec<u64>,
+    /// Whether it is of the opcode [`APPLY_OLD`], without task limits.
+    old: bool,
     num_inputs: usize,
     output_sizes: Vec<u64>,
 }
@@ -4100,7 +4105,7 @@ fn read<'a>(d: &'a [u8], outputs: u64, env: &Env<'a, '_>, non_leaf: usize, used:
                 b_used[block] = true;
                 Insn::Slice { block, start: r.num()?, len: r.num()? }
             }
-            APPLY => {
+            APPLY | APPLY_OLD => {
                 let module = r.index(modules.len())?;
                 m_used[module] = true;
                 let n = r.count()?;
@@ -4108,7 +4113,8 @@ fn read<'a>(d: &'a [u8], outputs: u64, env: &Env<'a, '_>, non_leaf: usize, used:
                 res.iter().for_each(|&i| r_used[i] = true);
                 let params = r.bytes()?;
                 let memory_limit = r.num()?;
-                let task_limits = r.nums()?;
+                let old = op == APPLY_OLD;
+                let task_limits = if old { Vec::new() } else { r.nums()? };
                 let num_inputs = usize::try_from(r.num()?).unwrap_or(usize::MAX);
                 let output_sizes = r.nums()?;
                 if output_sizes.is_empty() {
@@ -4120,6 +4126,7 @@ fn read<'a>(d: &'a [u8], outputs: u64, env: &Env<'a, '_>, non_leaf: usize, used:
                     params,
                     memory_limit,
                     task_limits,
+                    old,
                     num_inputs,
                     output_sizes,
                 })
@@ -4319,11 +4326,41 @@ pub type Sink<'a> = dyn FnMut(&[u8]) -> Decoded<()> + Send + 'a;
 /// be sent.
 type Taker<'a> = dyn FnMut(&[u8]) -> Decoded<()> + 'a;
 
+/// Whether Wasm module `w` is of a release (SHA-512/256 in [`crate::released::RELEASED`]), the
+/// only modules that the reserved Apply instruction ([`APPLY_OLD`]) is valid for.
+fn released(w: &[u8]) -> bool {
+    use sha2::Digest;
+    let sum = sha2::Sha512_256::digest(w);
+    let hex: String = sum.iter().map(|b| format!("{b:02x}")).collect();
+    crate::released::RELEASED.contains(&hex.as_str()) || cfg!(test) && tests_released(&hex)
+}
+
+#[cfg(test)]
+static TEST_RELEASED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn tests_released(hex: &str) -> bool {
+    TEST_RELEASED.lock().unwrap().iter().any(|h| h == hex)
+}
+
+#[cfg(not(test))]
+fn tests_released(_: &str) -> bool {
+    false
+}
+
 /// The outputs of application `a` of module block `module`.
 fn apply(env: &Env, module: usize, a: &Apply, inputs: &[&[u8]], resources: &[Resource]) -> Decoded<Vec<Vec<u8>>> {
     let loaded = env.loaded[module].get_or_init(|| env.runner.load(&env.modules[module]));
     let loaded = loaded.as_ref().map_err(Failure::clone)?;
     let classes = task_classes(&env.modules[module]);
+    if a.old {
+        // (the memory limit was an estimate of all of the application's memories: not enforced)
+        if !released(&env.modules[module]) {
+            return invalid(format!("module block {module}: the reserved Apply instruction of a module not released"));
+        }
+        let outputs = loaded.apply(a.params, resources, inputs, &a.output_sizes, crate::NO_LIMIT, &[])?;
+        return checked_outputs(outputs, a, module);
+    }
     if a.task_limits.len() != classes {
         return invalid(format!(
             "module block {module}: {} task limits for {classes} classes of tasks",
@@ -4331,6 +4368,11 @@ fn apply(env: &Env, module: usize, a: &Apply, inputs: &[&[u8]], resources: &[Res
         ));
     }
     let outputs = loaded.apply(a.params, resources, inputs, &a.output_sizes, a.memory_limit, &a.task_limits)?;
+    checked_outputs(outputs, a, module)
+}
+
+/// `outputs` of application `a` of module block `module`, if they are of the sizes declared.
+fn checked_outputs(outputs: Vec<Vec<u8>>, a: &Apply, module: usize) -> Decoded<Vec<Vec<u8>>> {
     if outputs.len() != a.output_sizes.len() || outputs.iter().zip(&a.output_sizes).any(|(o, &n)| o.len() as u64 != n) {
         return invalid(format!("module block {module}: outputs of other sizes than declared"));
     }
@@ -4629,7 +4671,8 @@ mod tests {
             description_bound(&f.root) >= {
                 let ordinals = ordinals_of(&f);
                 let mut out = Vec::new();
-                Emit { ordinals: &ordinals, modules: &[], classes: &[], resources: &[], out: &mut out, stack: vec![] }.node(&f.root);
+                Emit { ordinals: &ordinals, modules: &[], classes: &[], resources: &[], out: &mut out, stack: vec![] }
+                    .node(&f.root);
                 out.len()
             }
         );
@@ -5008,7 +5051,8 @@ mod tests {
         };
         let ordinals = ordinals_of(&f);
         let mut out = Vec::new();
-        let mut e = Emit { ordinals: &ordinals, modules: &[REV], classes: &[], resources: &[], out: &mut out, stack: vec![] };
+        let mut e =
+            Emit { ordinals: &ordinals, modules: &[REV], classes: &[], resources: &[], out: &mut out, stack: vec![] };
         for (i, s) in f.shared.iter().enumerate() {
             e.shared(i, s);
         }
@@ -6192,14 +6236,61 @@ mod tests {
         assert_eq!(apply(2, &[4]), invalid("module block 0: outputs of other sizes than declared"));
     }
 
+    /// The earlier Apply instruction (opcode 11, no task limits, a memory limit of all the
+    /// application's memories) is valid only for the modules of releases ([`released`]), and
+    /// their memory limit is not enforced.
+    #[test]
+    fn earlier_apply_of_released_modules() {
+        let old = |module: &[u8], limit: u64| {
+            let mut d = vec![1, 0, 0, 1, 0, SLICE, 0, 0, 3, SLICE, 0, 1, 2, APPLY_OLD, 0, 0, 3, 1, 2, 3];
+            varint::put(&mut d, limit);
+            d.extend_from_slice(&[2, 1, 5]);
+            let c = archive(|out| {
+                block(out, MODULE, &always_compressed(&mut CCtx::create(), &[module], 3, 1).unwrap());
+                formula_block(out, 1, &always_compressed(&mut CCtx::create(), &[&d], 3, 1).unwrap());
+                content_block(
+                    out,
+                    false,
+                    &[b"abc"],
+                    compressed(&mut CCtx::create(), &[b"abc"], 3, 1).unwrap().as_deref(),
+                );
+            });
+            decode(&c, &natives())
+        };
+        // a module of the stand-in's kind, told apart by a section of its own
+        let mut released_module = stand_in(REV);
+        released_module.extend_from_slice(&[0, 3, 1, b'r', 0]);
+        let other = stand_in(REV);
+        assert_eq!(old(&other, 1), invalid("module block 0: the reserved Apply instruction of a module not released"));
+        let sum = sha2::Digest::finalize(sha2::Digest::chain_update(sha2::Sha512_256::default(), &released_module));
+        TEST_RELEASED.lock().unwrap().push(sum.iter().map(|b| format!("{b:02x}")).collect());
+        // (the limit of 1 byte is not enforced)
+        assert_eq!(old(&released_module, 1).unwrap(), b"cbcba");
+        assert_eq!(old(&other, 1), invalid("module block 0: the reserved Apply instruction of a module not released"));
+        // the real list: hexadecimal hashes, sorted, none repeated
+        let list = crate::released::RELEASED;
+        assert!(list.len() > 100);
+        assert!(
+            list.iter().all(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+        );
+        assert!(list.windows(2).all(|w| w[0] < w[1]));
+    }
+
     #[test]
     fn bound() {
         let desc = |f: &Formula| {
             let ordinals = ordinals_of(f);
             let resources: Vec<&Resource> = f.applies().into_iter().flat_map(|a| &a.resources).collect();
             let mut out = Vec::new();
-            Emit { ordinals: &ordinals, modules: &[REV], classes: &[], resources: &resources, out: &mut out, stack: vec![] }
-                .node(&f.root);
+            Emit {
+                ordinals: &ordinals,
+                modules: &[REV],
+                classes: &[],
+                resources: &resources,
+                out: &mut out,
+                stack: vec![],
+            }
+            .node(&f.root);
             out.len()
         };
         let mut f = sample();
