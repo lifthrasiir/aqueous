@@ -2306,11 +2306,6 @@ whose structure is determined by the opcode as described in the following sectio
       <td>0
       <td>1
     <tr>
-      <td>11<sub>16</sub>
-      <td>[[#insn-apply|Apply]]
-      <td>[=formula/apply_num_inputs=]
-      <td>[=formula/apply_num_outputs=]
-    <tr>
       <td>12<sub>16</sub>
       <td>[[#insn-concat|Concatenate]]
       <td>[=formula/concat_count=]
@@ -2331,6 +2326,11 @@ whose structure is determined by the opcode as described in the following sectio
       <td>2
       <td>1
     <tr>
+      <td>16<sub>16</sub>
+      <td>[[#insn-apply|Apply]]
+      <td>[=formula/apply_num_inputs=]
+      <td>[=formula/apply_num_outputs=]
+    <tr>
       <td>20<sub>16</sub>
       <td>[[#insn-checksum|Checksum]]
       <td>0
@@ -2344,6 +2344,9 @@ or rearrange the stack,
 10<sub>16</sub> through 1F<sub>16</sub> compute byte sequences from [=referenced items=] or the stack,
 and 20<sub>16</sub> through 2F<sub>16</sub> check them.
 Other opcodes are reserved.
+Opcode 11<sub>16</sub> is reserved as well: it was an earlier Apply instruction, which gave no [=task limits=],
+and a decoder MUST NOT give it another meaning.
+A formula with the opcode 11<sub>16</sub> is an [=invalid archive=] failure.
 
 Issue: A reference to a preceding block in the same segment, e.g. to patch a file stored earlier in the segment, is not yet defined.
 A reference to another file is made by an [=import/import=] ([[#import-block]]) rather than by an instruction,
@@ -2536,7 +2539,7 @@ Opcode 10<sub>16</sub> denotes a **Slice instruction**. Its operands consist of 
 <h4 id=insn-apply>
 Apply instruction</h4>
 
-Opcode 11<sub>16</sub> denotes an **Apply instruction**. Its operands consist of the following:
+Opcode 16<sub>16</sub> denotes an **Apply instruction**. Its operands consist of the following:
 
 <table class=data>
   <thead>
@@ -2564,6 +2567,12 @@ Opcode 11<sub>16</sub> denotes an **Apply instruction**. Its operands consist of
       <td><dfn>apply_memory_limit</dfn>
       <td>[=leb128=]
     <tr>
+      <td><dfn>apply_num_task_limits</dfn>
+      <td>[=leb128=]
+    <tr>
+      <td><dfn>apply_task_limits</dfn>
+      <td>[=leb128=][[=formula/apply_num_task_limits=]]
+    <tr>
       <td><dfn>apply_num_inputs</dfn>
       <td>[=leb128=]
     <tr>
@@ -2579,40 +2588,15 @@ Opcode 11<sub>16</sub> denotes an **Apply instruction**. Its operands consist of
     1. [=formula/apply_module=] MUST be less than [=formula/num_modules=],
         and each item of [=formula/apply_resources=] MUST be less than [=formula/num_resources=].
     2. [=formula/apply_num_outputs=] MUST be at least 1.
+        [=formula/apply_num_task_limits=] MUST be the number of [=classes=] of the module.
     3. Pop [=formula/apply_num_inputs=] items as |inputs|.
     4. Let |outputs| be the result of [=apply a module|applying=]
         the module block at [=formula/module_indices=][[=formula/apply_module=]]
         with |inputs|, the resource blocks at [=formula/resource_indices=][|r|] for each |r| of [=formula/apply_resources=],
         [=formula/apply_params=], [=formula/apply_output_sizes=], [=formula/apply_memory_limit=]
-        and an empty [=list=] of [=task limits=] ([[#module-execution]]).
+        and [=formula/apply_task_limits=] as its [=task limits=] ([[#module-execution]]).
     5. Push each item of |outputs| in order.
 </ol>
-
-<h4 id=insn-apply-v2>
-ApplyV2 instruction</h4>
-
-Opcode 16<sub>16</sub> denotes an **ApplyV2 instruction**.
-Its operands are those of an [[#insn-apply|Apply instruction]] with the following two after [=formula/apply_memory_limit=]:
-
-<table class=data>
-  <thead>
-    <tr>
-      <th>Name
-      <th>Type
-  </thead>
-  <tbody>
-    <tr>
-      <td><dfn>apply_num_task_limits</dfn>
-      <td>[=leb128=]
-    <tr>
-      <td><dfn>apply_task_limits</dfn>
-      <td>[=leb128=][[=formula/apply_num_task_limits=]]
-  </tbody>
-</table>
-
-It is evaluated as the [[#insn-apply|Apply instruction]] is, the module applied with [=formula/apply_task_limits=] as its [=task limits=]
-(which an Apply instruction gives as an empty [=list=]).
-[=formula/apply_num_task_limits=] MUST be at least 1.
 
 <h4 id=insn-concat>
 Concatenate instruction</h4>
@@ -2928,7 +2912,7 @@ which is supplied to modules by formula blocks referencing it ([[#formula-data]]
 <h3 id=module-execution>
 Module execution</h3>
 
-Issue: This section is tentative and follows `docs/xform-design.md` §5.
+Issue: This section is tentative.
 
 A module is a WebAssembly module [[!WASM-CORE-3]] stored as [=module/wasm_module=],
 instantiated and invoked through the embedding interface defined in the Appendix of [[!WASM-CORE-3]].
@@ -2949,11 +2933,13 @@ It MUST conform to the following profile, or an [=invalid archive=] failure occu
     its <dfn>window</dfn> in pages.
 * It exports exactly one of the functions `aqr_apply_whole` and `aqr_apply_part`, the <dfn>entry point</dfn>.
     The module is a <dfn>whole module</dfn> in the former case and a <dfn>part module</dfn> in the latter.
-* If it imports [=aqr_spawn|`aqr_spawn`=] or [=aqr_spawn_v2|`aqr_spawn_v2`=], it exports the function `aqr_task`,
+* If it imports [=aqr_spawn|`aqr_spawn`=], it exports the function `aqr_task`,
     the <dfn>task entry point</dfn>, which has two parameters of type `i32` and no results,
-    and it has exactly one custom section named `aqr_task_slots`, whose content is one or more bytes from 1 to 64:
-    the |c|-th of them (from 0) is the [=task slots=] of its tasks of <dfn>class</dfn> |c|, and their number is its number of classes.
-    Otherwise it has no custom section of that name.
+    and it has exactly one custom section named `aqr_task_slots`, whose content is one or more bytes:
+    the |c|-th of them (from 0) describes its <dfn>class</dfn> |c| of tasks, and their number is its number of classes.
+    The low 7 bits of the byte are the <dfn>task slots</dfn> of the class, which MUST be from 1 to 64,
+    and its top bit is set if the class is a <dfn>gang class</dfn> ([[#tasks]]).
+    Otherwise it has no custom section of that name and no classes.
 
 Issue: Whether the guaranteed limit of 2<sup>27</sup> bytes (128 MiB) for the Zstandard `Window_Size` ([[#zstandard-compression-method]])
 should also apply to the memory limit.
@@ -2977,7 +2963,7 @@ Any other import is an [=invalid archive=] failure.
 :: Functions of a [=part module=], defined below. A [=whole module=] MUST NOT import them.
 : [=aqr_heartbeat|`aqr_heartbeat`=]
 :: A function defined below.
-: [=aqr_spawn|`aqr_spawn`=], [=aqr_spawn_v2|`aqr_spawn_v2`=], [=aqr_result|`aqr_result`=], [=aqr_join|`aqr_join`=], [=aqr_take|`aqr_take`=]
+: [=aqr_spawn|`aqr_spawn`=], [=aqr_result|`aqr_result`=], [=aqr_join|`aqr_join`=], [=aqr_take|`aqr_take`=]
 :: Functions of [=tasks=], defined in [[#tasks]].
 : [=aqr_chan|`aqr_chan`=], [=aqr_send|`aqr_send`=], [=aqr_recv|`aqr_recv`=], [=aqr_close|`aqr_close`=]
 :: Functions of [=channels=], defined in [[#tasks]].
@@ -2989,11 +2975,11 @@ and sized to fit |L| within a [=window=] of |m| pages when both are min(&lceil;|
 
 To <dfn>apply a module</dfn> |module| given a [=list=] of input [=byte sequences=] |inputs|,
 a [=list=] of resource blocks |resources|, a parameter [=byte sequence=] |params|,
-a [=list=] of declared output sizes |sizes|, a memory limit and a [=list=] of <dfn>task limits</dfn>, possibly empty:
+a [=list=] of declared output sizes |sizes|, a memory limit and a [=list=] of <dfn>task limits</dfn>, one for each [=class=]:
 
 <ol class=algorithm>
     1. |sizes| MUST NOT be empty.
-        If the [=task limits=] are not empty, their number MUST be the number of [=classes=] of |module|.
+        The number of the [=task limits=] MUST be the number of [=classes=] of |module|.
     2. Every `aqr_resource`|i| imported MUST satisfy |i| < the number of |resources|,
         every `aqr_input`|k| imported MUST satisfy |k| < the number of |inputs|,
         and every `aqr_output`|j| imported MUST satisfy |j| < the number of |sizes|.
@@ -3008,10 +2994,10 @@ a [=list=] of declared output sizes |sizes|, a memory limit and a [=list=] of <d
             If |module| is a [=part module=], let |W|<sub>out,|j|</sub> be its size in bytes.
     4. Let |outputs| be a [=list=] of as many empty [=byte sequences=] as |sizes|.
     5. If the total size of the memories in bytes exceeds the memory limit, return a [=resource failure=].
-        Where the [=task limits=] are empty, the memory limit applies to the total size of the memories of the application,
-        those of its [=tasks=] included, and of the messages queued in its [=channels=].
-        Otherwise it applies to the total size of the memories of the application's instance and of the messages queued in its [=channels=],
-        and the |c|-th task limit (from 0) to that of the memories of each [=task=] of [=class=] |c| on its own.
+        The memory limit applies to the total size of the memories of the application's instance on its own,
+        and the |c|-th task limit (from 0) to that of each [=unit=] of [=class=] |c| on its own:
+        the memories of the [=task=] for a class that is not a [=gang class=],
+        and the memories of the tasks of the [=gang=] and the messages queued in the [=channels=] of the gang for a [=gang class=].
     6. Instantiate |module| with the memories and the host functions below.
     7. Invoke the [=entry point=] with the arguments of type `i64`, in order:
         the length of |params|, the length of the [=stored content=] of each item of |resources|,
@@ -3021,7 +3007,8 @@ a [=list=] of declared output sizes |sizes|, a memory limit and a [=list=] of <d
         If it exceeds the memory limit or any implementation-defined limit, return a [=resource failure=].
         If any [=task=] of the application fails, return its failure (that of any of them if several fail).
         If every instance of the application [=waits=], return an [=invalid archive=] failure.
-        Once it returns, every [=task=] it spawned MUST be [=task/taken=].
+        Once it returns, every [=task=] it spawned MUST be [=task/taken=],
+        and every [=channel=] it made MUST have been given to a [=gang=].
     8. If |module| is a [=whole module=], set each |outputs|[|j|] to the first |sizes|[|j|] bytes of the memory of the |j|-th output,
         if imported, and to |sizes|[|j|] zero bytes otherwise.
     9. The length of each |outputs|[|j|] MUST be |sizes|[|j|].
@@ -3029,7 +3016,7 @@ a [=list=] of declared output sizes |sizes|, a memory limit and a [=list=] of <d
 </ol>
 
 A `memory.grow` instruction exceeds the memory limit when the total size to which that limit applies would exceed it
-(the memory limit, or the task limit of the class of the task executing it; see step 5 above),
+(the memory limit, or the task limit of the class of the task executing it, for the unit it belongs to; see step 5 above),
 and MUST succeed otherwise if the maximum of the import type of the [=working memory=] allows.
 
 <div class=note>
@@ -3084,27 +3071,32 @@ A violation of any MUST in host functions is signalled as an error to the module
 Tasks</h4>
 
 A <dfn>task</dfn> is an instance of the module of its own, of a [=class=],
-run on the bytes of the [=working memory=] of the instance that spawns it that the spawn names (all of it for [=aqr_spawn=])
+run on the bytes of the [=working memory=] of the instance that spawns it that the spawn names
 and giving back a [=byte sequence=], its <dfn noexport for=task>result</dfn>.
 The application's instance and every task are the instances of the application;
 each instance has a [=list=] of handles, initially empty, each of which is a [=list=] of the tasks spawned at once.
 A task is either pending, running, done (with a result), failed (with an [=invalid archive=] failure or a [=resource failure=]),
 or <dfn for=task>taken</dfn>.
+The application's instance is of no [=class=]: the classes, numbered from 0, are those of tasks,
+and the memory limit, not a task limit, applies to the instance.
+An instance that is a task of class |c| spawns only tasks of a class above |c|, and the application's instance tasks of any class.
 
-Where the [=task limits=] of the application are empty, of the tasks of [=class=] |c| an instance spawns,
-at most as many as the module's <dfn>task slots</dfn> of class |c| (its custom section `aqr_task_slots`) are running at once:
-whenever fewer of them are running, the first of them pending, in the order they were spawned (by handle, then by index), is started.
-Otherwise, of the tasks of [=class=] |c| of the application, at most as many as the [=task slots=] of class |c| are running at once:
-whenever fewer of them are running, the first of them pending, in the order they were spawned over the application, is started;
-and an instance that is a task of class |c| spawns only tasks of a class above |c|.
-A task is pending from its spawn until it is started; from then it is running, and [=run a task|runs=].
-A running task stops running when it is done or failed.
+The tasks spawned at once by one [=aqr_spawn=] of a [=gang class=] are a <dfn>gang</dfn>.
+A <dfn>unit</dfn> is a task of a class that is not a [=gang class=], and a [=gang=] otherwise;
+it is pending until it is started, and then running until all of its tasks are done or failed.
+The tasks of a [=gang=] are started together: all of them or none.
 A pending task is not yet an instance of the application: it has no memories, and it does not [=wait=].
 
+The units of each class start in the order they were spawned over the application (by handle, then by index; no unit overtakes another),
+and an implementation chooses, for each class |c|, its <dfn>concurrency</dfn>, any number from 1 to the [=task slots=] of |c|:
+whenever fewer units of class |c| than that are running, the first of them pending is started.
+A running task stops running when it is done or failed.
+
 A <dfn>channel</dfn> links instances of an application: a [=queue=] of messages ([=byte sequences=]) of at most its <dfn for=channel>capacity</dfn>,
-whether it is <dfn for=channel>closed</dfn>, and its <dfn for=channel>sender</dfn> and <dfn for=channel>receiver</dfn>,
-instances initially none.
+whether it is <dfn for=channel>closed</dfn>, its <dfn for=channel>sender</dfn> and <dfn for=channel>receiver</dfn>,
+instances initially none, and its <dfn for=channel>owner</dfn>, the [=gang=] it belongs to, initially none.
 The application has a [=list=] of channels, initially empty.
+Each instance has a [=list=] of the channels it made that have not yet been <dfn for=channel>given</dfn> to a [=gang=], initially empty.
 When an instance ends (returns or fails), every channel of which it is the sender is closed.
 An instance <dfn>waits</dfn> while it is within [=aqr_join=], [=aqr_send=] or [=aqr_recv=] and the condition it waits for does not hold.
 
@@ -3120,26 +3112,27 @@ To <dfn>run a task</dfn> given a [=list=] of <dfn>regions</dfn> (each a byte off
     3. Invoke the [=task entry point=] with |arg| and |i|.
         If it traps or any host function signals an error, the task fails with an [=invalid archive=] failure.
         If it exceeds the memory limit or any implementation-defined limit, the task fails with a [=resource failure=].
-    4. Once it returns, every task it spawned MUST be [=task/taken=], or the task fails with an [=invalid archive=] failure.
+    4. Once it returns, every task it spawned MUST be [=task/taken=] and every [=channel=] it made MUST have been given to a [=gang=],
+        or the task fails with an [=invalid archive=] failure.
     5. The task is done, with the result last set by [=aqr_result=], or an empty [=byte sequence=] if none.
 </ol>
 
 The host functions of tasks are defined as follows, for the instance |I| calling them,
 where |arg|, |n|, |h|, |i|, |ptr|, |dst| and |len| are of type `i32`, unsigned:
 
-: <dfn>aqr_spawn</dfn>(|arg|, |n|)
-:: As [=aqr_spawn_v2=](0, 1, |r|, |arg|, |n|), |r| pointing to a region record of all of the [=working memory=] of |I| at offset 0
-    (the content |S| of the working memory, of length |W|, from offset 0 to offset 0).
-: <dfn>aqr_spawn_v2</dfn>(|class|, |count|, |records|, |arg|, |n|)
+: <dfn>aqr_spawn</dfn>(|class|, |count|, |records|, |arg|, |n|)
 :: |class| MUST be less than the number of [=classes=] of the module,
-    and where |I| is a task and the [=task limits=] of the application are not empty, above the class of |I|.
+    and above the class of |I| where |I| is a task.
     |records| + 12 &times; |count| MUST be at most the size of the [=working memory=] of |I|.
     Read |count| region records from the working memory of |I| from the offset |records|,
     each three [=u32le=]s: |src|, |len| and |dst|, of which |src| + |len| MUST be at most the size of the working memory
     and |dst| + |len| at most 2<sup>32</sup>;
     let the [=regions=] be, for each in order, (|dst|, the |len| bytes of the working memory of |I| from the offset |src|).
+    If |class| is a [=gang class=], the channels in the list of |I| of those not yet [=channel/given=] are given to the gang of this spawn:
+    set their [=channel/owner=] to it, and empty the list.
+    Otherwise that list MUST be empty.
     Append to the handles of |I| a [=list=] of |n| new pending tasks of class |class|,
-    the |i|-th (from 0) of which is to [=run a task=] given the regions, |arg| and |i| once it is started (as the [=task slots=] allow),
+    the |i|-th (from 0) of which is to [=run a task=] given the regions, |arg| and |i| once it is started (as the [=concurrency=] of the class allows),
     and return the index of that list among the handles of |I|.
 : <dfn>aqr_result</dfn>(|ptr|, |len|)
 :: |I| MUST be a task, and |ptr| + |len| MUST be at most the size of its [=working memory=].
@@ -3157,11 +3150,16 @@ where |arg|, |n|, |h|, |i|, |ptr|, |dst| and |len| are of type `i32`, unsigned:
 
 The host functions of channels are defined as follows, where |c|, |ptr|, |dst|, |len| and |cap| are of type `i32`, unsigned,
 the channel |C| is the |c|-th (from 0) of the application, which MUST exist,
-and taking an end of |C| for |I| means: if that end is none, set it to |I|; otherwise it MUST be |I|.
+and taking an end of |C| for |I| means:
+the [=channel/owner=] of |C| MUST NOT be none, and |I| MUST be a task of it or the instance that spawned it;
+the other end of |C| MUST NOT be |I|;
+and if that end is none, set it to |I|, and otherwise it MUST be |I|.
+A task of a class that is not a [=gang class=] therefore takes no end of a channel.
 
 : <dfn>aqr_chan</dfn>(|cap|)
 :: |cap| MUST be at least 1.
-    Append to the channels of the application a new channel of [=channel/capacity=] |cap|, and return its index.
+    Append to the channels of the application a new channel of [=channel/capacity=] |cap|, and its index to the list of channels of |I| not yet [=channel/given=],
+    and return its index.
 : <dfn>aqr_send</dfn>(|c|, |ptr|, |len|)
 :: Take the [=channel/sender=] of |C| for |I|.
     |C| MUST NOT be [=channel/closed=], and |ptr| + |len| MUST be at most the size of the [=working memory=] of |I|.
@@ -3185,16 +3183,19 @@ and taking an end of |C| for |I| means: if that end is none, set it to |I|; othe
   so the outputs do not depend on when, in what order or how many at once the tasks run.
   Implementations MAY run a task at any time from its start and on any thread,
   as long as an instance waiting does not keep the others from running.
-  The [=task slots=] bound the memory of an application, its memory limit included:
-  a pending task holds no memory under the limit (what implementations keep of its regions is their own),
-  and an application that needs more tasks at once than the [=task slots=], such as a pipeline of more stages,
-  is an [=invalid archive=] whenever its running instances all wait for one that is pending.
-  Where the [=task limits=] are empty, the tasks an instance spawns start in the order it spawned them, whatever the others do,
-  so whether that happens does not depend on when the tasks run either;
-  where they are not, the tasks of a class start in the order they were spawned over the application, which may.
-  A task never waits for a task of its own class or below, so the tasks of the highest class run to their end,
-  and the memory of an application is at most the memory limit and, for each class, its task limit times its task slots,
-  however deep the tasks spawn tasks.
+  A pending unit holds no memory under any limit (what implementations keep of its regions is their own),
+  and the [=concurrency=] of a class, which an implementation picks between 1 and its [=task slots=] to fit the memory it has,
+  bounds the units of the class running at once.
+  The memory of an application is then at most its memory limit and, for each class |c|,
+  the [=concurrency=] of |c| times the task limit of |c|, which is at most the [=task slots=] of |c| times that limit,
+  however deep the tasks spawn tasks and whatever the order the tasks run in.
+  Lowering a [=concurrency=] never deadlocks an application that ends with larger ones:
+  a unit of the highest class never waits for a pending unit of a lower class,
+  and a task of a [=gang=] waits only for the other tasks of the gang, which were started with it,
+  for the instance that spawned the gang, which is running, and for units of higher classes,
+  so, by induction from the highest class, every unit runs to its end.
+  Since every channel is within a gang, an application needing more tasks at once than the [=task slots=],
+  such as a pipeline of more stages, spawns them as one [=gang=], which takes one slot.
   A channel is closed by its sender ending only if it sent to it or closed it,
   so an instance that may send no message to a channel closes it itself.
   Every memory but the working memory is empty to a task, so the data a task works on is in its regions;
@@ -3202,8 +3203,11 @@ and taking an end of |C| for |I| means: if that end is none, set it to |I|; othe
   A region the module does not overwrite where its data segments and stack are, such as one after the minimum of the working memory,
   leaves the task's own data as instantiation made it.
   The tasks of a spawn start from the same regions, which implementations MAY share between them by copying on write.
-  Where the [=task limits=] are empty, whether the memory limit is exceeded may depend on how many tasks are running at once,
-  which only decides a [=resource failure=].
+</div>
+
+<div class=note>
+  Implementations MAY keep decoding archives of earlier versions of the format, which use the reserved opcode 11<sub>16</sub>
+  and an earlier `aqr_spawn` of two parameters, for the modules they know; this is outside this specification.
 </div>
 
 Issue: Whether the memories other than the working memory, read-only, should be visible to tasks,
