@@ -13,13 +13,14 @@ use std::sync::OnceLock;
 
 pub use crate::module::pcm::decode;
 
-pub const MODULE: Module = Module::new("pcm-recons", 1).with_plan(memory);
+pub const MODULE: Module = Module::new("pcm-recons", 1).with_task_plan(memory);
 
 /// The memory of the module: its plan (`module::pcm::plan`), the messages its channels may
 /// hold with it.
-fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+fn memory(u: &aqr_formula::Usage<'_>) -> Option<aqr_formula::Plan> {
     let &[len] = u.outputs else { return None };
-    Some(crate::module::pcm::plan(u.params, u.resources, u.inputs, len, u.initial())?.0)
+    let ((instance, task), _) = crate::module::pcm::plan(u.params, u.resources, u.inputs, len, u.initial())?;
+    Some(aqr_formula::Plan::one(instance, task))
 }
 
 /// Classes of the input slots, and their kinds: the rANS words and the raw bits do not

@@ -12,14 +12,14 @@ const MAX_RATIO: u64 = 8192;
 /// The task slots of the module (aqr-modules' `bcn-recons`), and so its threads.
 pub const SLOTS: usize = 8;
 
-/// The memory plan of the module ([`aqr_api::stack`]): the most its instance and tasks take at
-/// once, its initial memory (`initial` bytes) with it, of params `params`, inputs of `inputs`
+/// The memory plan of the module ([`aqr_api::stack`]): the limits of its instance and its
+/// tasks, its initial memory (`initial` bytes) with it, of params `params`, inputs of `inputs`
 /// bytes and an output of `len` (`None` where they are not so): what `aqr_api::whole` copies,
 /// and what decoding takes ([`texture::plan`]).
-pub fn plan(params: &[u8], inputs: &[u64], initial: u64, len: u64) -> Option<u64> {
+pub fn plan(params: &[u8], inputs: &[u64], initial: u64, len: u64) -> Option<(u64, u64)> {
     let layout = Layout::from_bytes(params).filter(|l| l.len() == len)?;
     let held = aqr_api::stack::whole(params.len() as u64, &[], inputs) + texture::decode_held(&layout);
-    Some(texture::plan(&layout, initial, held, SLOTS))
+    Some(texture::plan(&layout, initial, held))
 }
 
 /// The module: the blocks of `len` bytes of the layout of `params` from `inputs` (the first

@@ -319,11 +319,10 @@ impl Sizes {
 
 /// The memory plan of decoding layout `l` on WebAssembly ([`aqr_api::stack`]), given `held`
 /// bytes of the stack taken before ([`decode`]'s), the instance's memory as it starts (`initial`
-/// bytes, whole pages), and the task slots: the most the instance and its tasks take at once,
-/// in bytes, however the tasks run. The instance takes the walk's buffers once, and as a task's
+/// bytes, whole pages): the most the instance takes, and the most a task does, in bytes. The instance takes the walk's buffers once, and as a task's
 /// stripe is taken, a vector of its blocks; each task a copy of the instance's memory, with its
 /// stripe's blocks, work, planes and planes upsampled on top.
-pub fn plan(l: &Layout, initial: u64, held: u64, slots: usize) -> u64 {
+pub fn plan(l: &Layout, initial: u64, held: u64) -> (u64, u64) {
     use aqr_api::stack::block;
     let pages = |n: u64| n.div_ceil(1 << 16) << 16;
     let (f, bb) = (l.format, l.format.block_bytes() as u64);
@@ -342,7 +341,7 @@ pub fn plan(l: &Layout, initial: u64, held: u64, slots: usize) -> u64 {
             if n == 1 {
                 continue;
             }
-            let mut tasks: Vec<u64> = (1..n)
+            let tasks: Vec<u64> = (1..n)
                 .map(|i| {
                     let (blocks, cols, across, up) = stripe_work(f, &surfaces, m, rows(i, n, sf.bh));
                     let own = block(blocks as u64 * bb)
@@ -355,11 +354,10 @@ pub fn plan(l: &Layout, initial: u64, held: u64, slots: usize) -> u64 {
             // (the handles taken, then each stripe's blocks as it is joined)
             let joined = (1..n).map(|i| rows(i, n, sf.bh).len() as u64 * sf.bw as u64 * bb).max().unwrap_or(0);
             end = end.max(pages(top + block(n as u64 - 1) + block(joined)));
-            tasks.sort_unstable_by(|a, b| b.cmp(a));
-            most = most.max(end + tasks.iter().take(slots).sum::<u64>());
+            most = most.max(tasks.into_iter().max().unwrap_or(0));
         }
     }
-    most.max(end)
+    (end, most)
 }
 
 /// Bytes of a [`Surface`] on WebAssembly.

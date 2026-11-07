@@ -23,12 +23,13 @@ pub mod pcm {
     /// threads.
     pub const SLOTS: usize = 8;
 
-    /// The memory plan of the module ([`aqr_api::stack`]): the most its instance and tasks take
-    /// at once, its initial memory (`initial` bytes) with it, of params `params`, resources and
+    /// The memory plan of the module ([`aqr_api::stack`]): the limits of its instance and its
+    /// tasks, its initial memory (`initial` bytes) with it, of params `params`, resources and
     /// inputs of these lengths and `len` bytes of samples (`None` where they are not so): what
     /// `aqr_api::whole` copies, the tables, the streams listed, and the pipeline
-    /// ([`pcm::plan`]); and of that what its channels' messages may hold.
-    pub fn plan(params: &[u8], resources: &[u64], inputs: &[u64], len: u64, initial: u64) -> Option<(u64, u64)> {
+    /// ([`pcm::plan`]); and what its channels' messages (in the
+    /// instance's) may hold.
+    pub fn plan(params: &[u8], resources: &[u64], inputs: &[u64], len: u64, initial: u64) -> Option<((u64, u64), u64)> {
         use aqr_api::stack::block;
         let fmt = Format::from_bytes(params)?;
         let &[_, _, _, words, raw0, raw1] = inputs else { return None };

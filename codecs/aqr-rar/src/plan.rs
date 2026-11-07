@@ -51,7 +51,7 @@ pub fn decode5(initial: u64, params: &[u8], inputs: &[u64], len: u64, files: [&[
         m.peak(block(SCRATCH as u64));
         m.top = top;
     }
-    Some(m.plan(1))
+    Some(m.plan())
 }
 
 /// The memory plan of `rar3-recons` ([`crate::module::decode3`]): of its initial memory
@@ -97,5 +97,5 @@ pub fn decode3(initial: u64, params: &[u8], inputs: &[u64], len: u64, files: [&[
         m.peak(block(recons3::SCRATCH as u64));
         m.top = top;
     }
-    Some(m.plan(1))
+    Some(m.plan())
 }

@@ -598,10 +598,10 @@ pub fn count(input: &[u8], counts: &mut [Vec<u64>]) {
 /// The memory plan of [`decode_threads`] in WebAssembly on `threads` threads ([`aqr_api::stack`]),
 /// of a file of `total_len` bytes and frames of `room`, rANS words of `words` bytes and raw bits
 /// of `raw`, `top` bytes of the stack taken before (the initial memory with them, and the
-/// decoder's tables): the most it takes with its tasks, and of that what its channels' messages
-/// may hold.
+/// decoder's tables): the limits of its instance and of its tasks, and what its channels'
+/// messages (in the instance's) may hold.
 #[cfg(feature = "encode")]
-pub fn plan(total_len: u64, room: Room, words: u64, raw: [u64; 2], top: u64, threads: usize) -> (u64, u64) {
+pub fn plan(total_len: u64, room: Room, words: u64, raw: [u64; 2], top: u64, threads: usize) -> ((u64, u64), u64) {
     use aqr_api::stack::block;
     let p = par::apart::Plan {
         top,

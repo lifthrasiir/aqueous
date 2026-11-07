@@ -80,7 +80,7 @@ fn main() {
                 a.working as f64 / m.max(1) as f64,
                 a.instance,
                 ni,
-                a.task,
+                a.tasks.iter().copied().max().unwrap_or(0),
                 nt,
                 if a.ok { "" } else { " failed" }
             );
@@ -88,7 +88,7 @@ fn main() {
     }
 }
 
-/// The plan of the module `k` of what `a` took, in bytes.
+/// The plan of the module `k`'s instance, of what `a` took, in bytes.
 fn plan(k: &aqr_modules::Known, a: &aqr_decompress::Applied) -> Option<u64> {
     let m = aqr_decompress::MODULES.iter().find(|m| m.name == k.name && m.version == k.version)?;
     let contents: Vec<&[u8]> = a.contents.iter().map(|c| &c[..]).collect();
@@ -100,5 +100,5 @@ fn plan(k: &aqr_modules::Known, a: &aqr_decompress::Applied) -> Option<u64> {
         contents: &contents,
         initial_pages: aqr_decompress::initial_pages(&k.read_wasm().ok()?)?,
     };
-    Some(m.plan_in_pages(&usage)? * aqr_formula::PAGE)
+    Some(m.plan_for(&usage)?.instance)
 }

@@ -46,5 +46,5 @@ pub fn decode(initial: u64, params: &[u8], resources: &[u64], inputs: &[u64], le
     // `main_pass`'s state, and a frame's side information written
     m.take(wasm::STATE);
     m.peak(block(codec::SIDE_ROOM as u64));
-    Some(m.plan(1))
+    Some(m.plan())
 }

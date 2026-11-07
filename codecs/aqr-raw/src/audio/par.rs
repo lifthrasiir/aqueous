@@ -537,9 +537,9 @@ pub mod apart {
     }
 
     impl Plan {
-        /// The bytes of the working memory at most, and of that what the channels' messages
-        /// may hold.
-        pub fn bytes(&self) -> (u64, u64) {
+        /// The limits of the instance (with what the channels' messages may hold, the tasks being
+        /// of no gang) and of a task of the one class, and what the messages may hold.
+        pub fn bytes(&self) -> ((u64, u64), u64) {
             use aqr_api::stack::block;
             let pages = |n: u64| n.div_ceil(1 << 16) << 16;
             let w = self.workers.max(1) as u64;
@@ -551,13 +551,13 @@ pub mod apart {
             let task = |own: u64| pages(top).max(pages(top + own));
             let lms = block(8 * size_of::<crate::audio::model::Lms>() as u64);
             let tasks = task(item + frame + self.front)
-                + task(self.errors + 2 * item + frame)
-                + task(lms + 2 * item + frame)
-                + w * task(item + frame + self.work + out);
+                .max(task(self.errors + 2 * item + frame))
+                .max(task(lms + 2 * item + frame))
+                .max(task(item + frame + self.work + out));
             // (the instance: the tasks' handles, then what it starts, its buffer of results)
             let instance = pages(top + block(3 + w) + self.start + out);
             let queued = CAP as u64 * ((2 + w) * r.item() as u64 + w * r.out as u64);
-            (instance + tasks + queued, queued)
+            ((instance + queued, tasks), queued)
         }
     }
 

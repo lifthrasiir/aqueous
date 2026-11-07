@@ -1563,8 +1563,8 @@ pub(crate) fn limits_of<M: crate::Modules + Sync>(
     f: &crate::Formula,
     m: &M,
     order: &[&crate::Apply],
-    limit: &dyn Fn(&crate::Apply, &dyn crate::Contents) -> Option<u64>,
-) -> crate::Result<Vec<Option<u64>>> {
+    limit: &dyn Fn(&crate::Apply, &dyn crate::Contents) -> Option<crate::Plan>,
+) -> crate::Result<Vec<Option<crate::Plan>>> {
     with_formula(f, m, |ev| {
         let g = ev.g;
         // (the node of each application, by its address)

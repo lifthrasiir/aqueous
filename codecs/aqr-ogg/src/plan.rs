@@ -34,5 +34,5 @@ pub fn decode(initial: u64, inputs: &[u64], len: u64, layout: &[u8], packets: &[
     m.take(8 * t.packets as u64);
     m.take(12 * (streams + 1));
     m.take(wasm::WALKED * streams);
-    Some(m.plan(1))
+    Some(m.plan())
 }

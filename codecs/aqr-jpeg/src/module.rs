@@ -10,12 +10,12 @@ use crate::model::{get_bytes, get_varint};
 /// The task slots of the module (aqr-modules' `jpeg-recons`).
 pub const SLOTS: usize = 8;
 
-/// The memory plan of the module ([`aqr_api::stack`]): the most its instance and tasks take at
-/// once, its initial memory (`initial` bytes) with it, of params `params`, the nine `inputs`
+/// The memory plan of the module ([`aqr_api::stack`]): the limits of its instance and its tasks,
+/// its initial memory (`initial` bytes) with it, of params `params`, the nine `inputs`
 /// and a JPEG of `len` bytes (`None` where they are not so): what `aqr_api::whole` copies, the
 /// sizes read, the embedded entries and the blob restored, and what decoding takes
 /// ([`codec::core_plan`]).
-pub fn plan(params: &[u8], inputs: &[&[u8]], initial: u64, len: u64) -> Option<u64> {
+pub fn plan(params: &[u8], inputs: &[&[u8]], initial: u64, len: u64) -> Option<(u64, u64)> {
     use aqr_api::stack::{block, whole};
     let (progressive, sizes) = self::params(params).ok()?;
     let &[head, embedded, cut, info, scans, tables, lens, rans, bits] = inputs else { return None };
@@ -38,7 +38,7 @@ pub fn plan(params: &[u8], inputs: &[&[u8]], initial: u64, len: u64) -> Option<u
     top += block(12 * n(entries.len())) + block(8 * n(items.len())) + block(8 * n(emb.len())) + block(n(blob.len()));
     let mut slots = Slots { info, scans, tables, lens, rans, bits, pos: [0; 4] };
     let len = usize::try_from(len).ok()?;
-    codec::core_plan(&blob, progressive, &mut slots, (&sizes, len), top, SLOTS)
+    codec::core_plan(&blob, progressive, &mut slots, (&sizes, len), top)
 }
 
 /// The params of a main image of frame type `progressive` and sizes `z` ([`Sizes`]).

@@ -790,19 +790,15 @@ const _: () = assert!(
 
 /// The memory plan of decoding on WebAssembly ([`aqr_api::stack`]), of geometry `g`, a file
 /// of `len` bytes, the streams `s` and the sizes `z`, given the instance's memory as it starts
-/// (`initial` bytes, whole pages), `held` bytes of the stack taken before, and the task slots:
-/// the most the instance and its tasks take at once, in bytes, however the tasks run. As
+/// (`initial` bytes, whole pages) and `held` bytes of the stack taken before: the most the
+/// instance takes and the most a task does, in bytes. As
 /// `rebuild` takes it: the readers, the groups' decoders and entries, their contexts, the
 /// indexes by table and a record's buffers; then the tables' scans as tasks, the instance
 /// reserving every index's keys and taking each scan's; then the indexes' orders as tasks, the
 /// instance reserving and taking each; then the pages' buffers and the file.
-pub fn plan(g: &Geom, len: u64, s: &[&[u8]], z: &Sizes, initial: u64, held: u64, slots: usize) -> Option<u64> {
+pub fn plan(g: &Geom, len: u64, s: &[&[u8]], z: &Sizes, initial: u64, held: u64) -> Option<(u64, u64)> {
     use aqr_api::stack::block;
     let pages = |n: u64| n.div_ceil(1 << 16) << 16;
-    let topk = |mut t: Vec<u64>| {
-        t.sort_unstable_by(|a, b| b.cmp(a));
-        t.iter().take(slots).sum::<u64>()
-    };
     if s.len() != NSTREAMS {
         return None;
     }
@@ -871,7 +867,7 @@ pub fn plan(g: &Geom, len: u64, s: &[&[u8]], z: &Sizes, initial: u64, held: u64,
             .unwrap_or(0);
         top += block(by.tables.len() as u64) + (0..ng).map(keys_plan).sum::<u64>();
         end = end.max(pages(top + joined));
-        most = most.max(end + topk(scans));
+        most = most.max(scans.into_iter().max().unwrap_or(0));
         // the orders
         let idxs: Vec<usize> = (0..ng).filter(|&i| shapes[i].is_some()).collect();
         top += block(4 * idxs.len() as u64);
@@ -889,12 +885,12 @@ pub fn plan(g: &Geom, len: u64, s: &[&[u8]], z: &Sizes, initial: u64, held: u64,
             + block(12 * idxs.len() as u64)
             + idxs.iter().map(|&i| block(4 * rows(i))).sum::<u64>();
         end = end.max(pages(top + joined));
-        most = most.max(end + topk(orders));
+        most = most.max(orders.into_iter().max().unwrap_or(0));
     }
     let ps = g.psize as u64;
     // (the spans of a page: two usizes each, on wasm32)
     top += 2 * block(ps) + block(ps + 32) + block(8 * (ps / 2 + 2)) + block(len);
-    Some(most.max(end).max(pages(top)))
+    Some((end.max(pages(top)), most))
 }
 
 fn rebuild<S: Sink>(

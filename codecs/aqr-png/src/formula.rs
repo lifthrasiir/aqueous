@@ -10,13 +10,13 @@ use aqr_formula::{Apply, Formula, Kind, Module, Node};
 
 pub use crate::module::{decode, decode_against, decode_set};
 
-pub const MODULE: Module = Module::new("png-recons", 3).with_plan(plan_recons);
+pub const MODULE: Module = Module::new("png-recons", 3).with_task_plan(plan_recons);
 
 /// The module of a file coded against a reference file ([`encode_against`], [`decode_against`]).
-pub const AGAINST_MODULE: Module = Module::new("png-against", 1).with_plan(plan_against);
+pub const AGAINST_MODULE: Module = Module::new("png-against", 1).with_task_plan(plan_against);
 
 /// The module of sets of files ([`encode_set`], [`decode_set`]).
-pub const SET_MODULE: Module = Module::new("png-set", 2).with_plan(plan_set);
+pub const SET_MODULE: Module = Module::new("png-set", 2).with_task_plan(plan_set);
 
 /// The class of the stream that [`encode_against`] puts the reference file in.
 pub const REFERENCE: &str = "png/reference";
@@ -159,21 +159,22 @@ pub fn encode_set(
 // skeleton and the images' records are read as `codec::Skeleton` and `codec::rebuild` do.
 
 /// The memory of `png-recons`: its plan ([`crate::plan::recons`]).
-fn plan_recons(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+fn plan_recons(u: &aqr_formula::Usage<'_>) -> Option<aqr_formula::Plan> {
     let (&[], Some([sk, index, records])) = (u.params, u.all_contents()) else { return None };
-    crate::plan::recons(u.initial(), u.inputs, (sk, index, records))
+    crate::plan::recons(u.initial(), u.inputs, (sk, index, records)).map(|(i, t)| aqr_formula::Plan::one(i, t))
 }
 
 /// The memory of `png-against`: its plan ([`crate::plan::against`]).
-fn plan_against(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+fn plan_against(u: &aqr_formula::Usage<'_>) -> Option<aqr_formula::Plan> {
     let (&[], Some([sk, index, records, reference])) = (u.params, u.all_contents()) else { return None };
     crate::plan::against(u.initial(), u.inputs, (sk, index, records, reference))
+        .map(|(i, t)| aqr_formula::Plan::one(i, t))
 }
 
 /// The memory of `png-set`: its plan ([`crate::plan::set`]).
-fn plan_set(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+fn plan_set(u: &aqr_formula::Usage<'_>) -> Option<aqr_formula::Plan> {
     let [sks, indexes, records] = u.all_contents()?;
-    crate::plan::set(u.initial(), u.params, u.inputs, (sks, indexes, records))
+    crate::plan::set(u.initial(), u.params, u.inputs, (sks, indexes, records)).map(|(i, t)| aqr_formula::Plan::one(i, t))
 }
 
 #[cfg(test)]
@@ -201,7 +202,7 @@ mod tests {
             contents: &vec![sk, index, records],
             initial_pages: 17,
         };
-        let est = plan_recons(&u).expect("a plan");
+        let est = plan_recons(&u).expect("a plan").instance;
         assert!(est > u.base() + 2 * file.len() as u64, "{est}");
         // a variant of the file, against it
         let other = common::apng(&[(64, 48), (32, 32), (64, 48)], 2);
@@ -217,7 +218,7 @@ mod tests {
             contents: &vec![sk, index, records, reference],
             initial_pages: 17,
         };
-        let against = plan_against(&u).expect("a plan");
+        let against = plan_against(&u).expect("a plan").instance;
         assert!(against > u.base() + 2 * other.len() as u64, "{against}");
     }
 }

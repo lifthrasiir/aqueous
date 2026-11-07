@@ -113,8 +113,8 @@ const MODULE_BYTES: u8 = 0x02;
 const RESOURCE_BYTES: u8 = 0x03;
 const SWAP: u8 = 0x0f;
 const SLICE: u8 = 0x10;
-const APPLY: u8 = 0x11;
-const APPLY_V2: u8 = 0x16;
+/// (0x11 is reserved: an earlier Apply, which gave no task limits.)
+const APPLY: u8 = 0x16;
 const CONCAT: u8 = 0x12;
 const PACK: u8 = 0x13;
 const SPLIT: u8 = 0x14;
@@ -582,6 +582,16 @@ impl Encoder {
         self
     }
 
+    /// The classes of tasks of each of `modules` ([`task_classes`] of its Wasm module).
+    pub(crate) fn classes_of(&self, modules: &[Module]) -> Vec<usize> {
+        let class = |m: &Module| match (self.wasm)(*m) {
+            Some(Wasm::Bytes(b)) => task_classes(&b),
+            Some(Wasm::Block(d)) => module_of_block_data(&d).map_or(0, |w| task_classes(&w)),
+            None => 0,
+        };
+        modules.iter().map(class).collect()
+    }
+
     /// The encoder compressing a batch's blocks alike with dictionaries trained for them where
     /// they pay ([`SegmentWriter::batch`]; [`dict`]), as by default, or not.
     pub fn with_dictionaries(mut self, on: bool) -> Encoder {
@@ -901,8 +911,15 @@ impl Encoder {
                 varint::put(&mut data, n as u64);
                 (0..n).for_each(|i| varint::put(&mut data, i as u64));
             }
-            let mut e =
-                Emit { ordinals: &ordinals, modules: &modules, resources: &resources, out: &mut data, stack: vec![] };
+            let classes = self.classes_of(&modules);
+            let mut e = Emit {
+                ordinals: &ordinals,
+                modules: &modules,
+                classes: &classes,
+                resources: &resources,
+                out: &mut data,
+                stack: vec![],
+            };
             for (i, s) in f.shared.iter().enumerate() {
                 e.shared(i, s);
             }
@@ -970,6 +987,9 @@ struct Emit<'a> {
     /// The index of each block of each stream in the formula block's list ([`listed`]).
     ordinals: &'a [Vec<Option<u64>>],
     modules: &'a [Module],
+    /// The classes of tasks of each module (by index; those past the end have none): a
+    /// application declaring fewer task limits is written with [`crate::NO_LIMIT`] for the rest.
+    classes: &'a [usize],
     resources: &'a [&'a Resource],
     out: &'a mut Vec<u8>,
     stack: Vec<Option<(usize, usize)>>,
@@ -1112,9 +1132,10 @@ impl Emit<'_> {
     }
 
     fn apply(&mut self, a: &crate::Apply, sizes: &[u64]) {
+        let at = self.modules.iter().position(|&m| m == a.module).unwrap();
         let out = &mut *self.out;
-        out.push(if a.task_limits.is_empty() { APPLY } else { APPLY_V2 });
-        varint::put(out, self.modules.iter().position(|&m| m == a.module).unwrap() as u64);
+        out.push(APPLY);
+        varint::put(out, at as u64);
         varint::put(out, a.resources.len() as u64);
         for r in &a.resources {
             varint::put(out, self.resources.iter().position(|&s| s == r).unwrap() as u64);
@@ -1122,10 +1143,10 @@ impl Emit<'_> {
         varint::put(out, a.params.len() as u64);
         out.extend_from_slice(&a.params);
         varint::put(out, a.memory_limit);
-        if !a.task_limits.is_empty() {
-            varint::put(out, a.task_limits.len() as u64);
-            a.task_limits.iter().for_each(|&n| varint::put(out, n));
-        }
+        let classes = self.classes.get(at).copied().unwrap_or(0).max(a.task_limits.len());
+        varint::put(out, classes as u64);
+        let limits = a.task_limits.iter().copied().chain(std::iter::repeat(crate::NO_LIMIT));
+        limits.take(classes).for_each(|n| varint::put(out, n));
         varint::put(out, a.inputs.len() as u64);
         varint::put(out, sizes.len() as u64);
         sizes.iter().for_each(|&n| varint::put(out, n));
@@ -1178,6 +1199,8 @@ pub fn description_bound(n: &Node) -> usize {
                 + varint::len(a.params.len() as u64)
                 + a.params.len()
                 + varint::len(MEMORY_LIMIT)
+                + varint::len(a.task_limits.len() as u64)
+                + a.task_limits.iter().map(|&n| varint::len(n)).sum::<usize>()
                 + varint::len(a.inputs.len() as u64)
                 + 1
                 + varint::len(a.len)
@@ -1215,6 +1238,12 @@ fn task_slots(w: &[u8]) -> u64 {
         Some(&[n @ 1..=64]) => n.into(),
         _ => 0,
     }
+}
+
+/// The classes of tasks of Wasm module `w`: the bytes of its custom section `aqr_task_slots`,
+/// none where it has none (a module that is not valid fails when it is loaded).
+pub fn task_classes(w: &[u8]) -> usize {
+    custom_section(w, "aqr_task_slots").map_or(0, <[u8]>::len)
 }
 
 /// The content of the first custom section `name` of Wasm module `w`, if any.
@@ -3753,7 +3782,7 @@ struct Apply<'a> {
     resources: Vec<usize>,
     params: &'a [u8],
     memory_limit: u64,
-    /// Of an ApplyV2 instruction: the task limits (else none).
+    /// The task limits, one for each class of the module.
     task_limits: Vec<u64>,
     num_inputs: usize,
     output_sizes: Vec<u64>,
@@ -4071,7 +4100,7 @@ fn read<'a>(d: &'a [u8], outputs: u64, env: &Env<'a, '_>, non_leaf: usize, used:
                 b_used[block] = true;
                 Insn::Slice { block, start: r.num()?, len: r.num()? }
             }
-            APPLY | APPLY_V2 => {
+            APPLY => {
                 let module = r.index(modules.len())?;
                 m_used[module] = true;
                 let n = r.count()?;
@@ -4079,13 +4108,7 @@ fn read<'a>(d: &'a [u8], outputs: u64, env: &Env<'a, '_>, non_leaf: usize, used:
                 res.iter().for_each(|&i| r_used[i] = true);
                 let params = r.bytes()?;
                 let memory_limit = r.num()?;
-                let task_limits = match op {
-                    APPLY_V2 => match r.nums()? {
-                        l if l.is_empty() => return invalid("an ApplyV2 instruction of no task limits"),
-                        l => l,
-                    },
-                    _ => Vec::new(),
-                };
+                let task_limits = r.nums()?;
                 let num_inputs = usize::try_from(r.num()?).unwrap_or(usize::MAX);
                 let output_sizes = r.nums()?;
                 if output_sizes.is_empty() {
@@ -4300,6 +4323,13 @@ type Taker<'a> = dyn FnMut(&[u8]) -> Decoded<()> + 'a;
 fn apply(env: &Env, module: usize, a: &Apply, inputs: &[&[u8]], resources: &[Resource]) -> Decoded<Vec<Vec<u8>>> {
     let loaded = env.loaded[module].get_or_init(|| env.runner.load(&env.modules[module]));
     let loaded = loaded.as_ref().map_err(Failure::clone)?;
+    let classes = task_classes(&env.modules[module]);
+    if a.task_limits.len() != classes {
+        return invalid(format!(
+            "module block {module}: {} task limits for {classes} classes of tasks",
+            a.task_limits.len()
+        ));
+    }
     let outputs = loaded.apply(a.params, resources, inputs, &a.output_sizes, a.memory_limit, &a.task_limits)?;
     if outputs.len() != a.output_sizes.len() || outputs.iter().zip(&a.output_sizes).any(|(o, &n)| o.len() as u64 != n) {
         return invalid(format!("module block {module}: outputs of other sizes than declared"));
@@ -4599,7 +4629,7 @@ mod tests {
             description_bound(&f.root) >= {
                 let ordinals = ordinals_of(&f);
                 let mut out = Vec::new();
-                Emit { ordinals: &ordinals, modules: &[], resources: &[], out: &mut out, stack: vec![] }.node(&f.root);
+                Emit { ordinals: &ordinals, modules: &[], classes: &[], resources: &[], out: &mut out, stack: vec![] }.node(&f.root);
                 out.len()
             }
         );
@@ -4837,7 +4867,7 @@ mod tests {
         }
     }
 
-    /// The task limits of an application go into the archive as an ApplyV2 instruction and come
+    /// The task limits of an application go into the archive as an Apply instruction and come
     /// back to the module as they were; one of none is an Apply instruction.
     #[test]
     fn task_limits() {
@@ -4855,15 +4885,31 @@ mod tests {
                 task_limits,
             }))
         };
-        f.root = Node::concat([rev(vec![7, 9]), rev(Vec::new())]);
+        f.root = Node::concat([rev(vec![7, 9]), rev(vec![7, 9])]);
         let r: Vec<u8> = d.iter().rev().copied().collect();
         let want = [&r[..], &r].concat();
-        let c = encode(&f, Some(checksum(&want)), Level::Zstd(1)).unwrap();
+        // (a module of two classes of tasks)
+        fn two_classes(m: Module) -> Option<Wasm> {
+            let mut w = stand_in(m);
+            let name = b"aqr_task_slots";
+            w.extend_from_slice(&[0, name.len() as u8 + 3, name.len() as u8]);
+            w.extend_from_slice(name);
+            w.extend_from_slice(&[8, 4]);
+            Some(Wasm::Bytes(Cow::Owned(w)))
+        }
+        let c = Encoder::new(Level::Zstd(1)).with_modules(two_classes).encode(&f, Some(checksum(&want))).unwrap();
+        let mut wrong = f.clone();
+        if let Node::Concat(ns) = &mut wrong.root {
+            let Node::Apply(a) = &mut ns[0] else { unreachable!() };
+            a.task_limits = vec![7, 8, 9];
+        }
+        let bad = Encoder::new(Level::Zstd(1)).with_modules(two_classes).encode(&wrong, Some(checksum(&want))).unwrap();
+        assert!(matches!(decode(&bad, &PartCut), Err(Failure::Invalid(m)) if m.contains("task limits")));
         LIMITS.lock().unwrap().clear();
         assert!(decode(&c, &PartCut).unwrap() == want);
         let mut seen = std::mem::take(&mut *LIMITS.lock().unwrap());
         seen.sort();
-        assert_eq!(seen, [vec![], vec![7, 9]]);
+        assert_eq!(seen, [vec![7, 9], vec![7, 9]]);
     }
 
     /// Part modules applied as their outputs are pulled, each on a thread of its own: one of a
@@ -4962,7 +5008,7 @@ mod tests {
         };
         let ordinals = ordinals_of(&f);
         let mut out = Vec::new();
-        let mut e = Emit { ordinals: &ordinals, modules: &[REV], resources: &[], out: &mut out, stack: vec![] };
+        let mut e = Emit { ordinals: &ordinals, modules: &[REV], classes: &[], resources: &[], out: &mut out, stack: vec![] };
         for (i, s) in f.shared.iter().enumerate() {
             e.shared(i, s);
         }
@@ -4984,7 +5030,9 @@ mod tests {
                     let (_, nr, np) = (num(&mut at), num(&mut at), num(&mut at));
                     assert_eq!((nr, np), (0, 3));
                     at += np;
-                    let (_, ni, no) = (num(&mut at), num(&mut at), num(&mut at));
+                    let (_, nt) = (num(&mut at), num(&mut at));
+                    assert_eq!(nt, 0);
+                    let (ni, no) = (num(&mut at), num(&mut at));
                     let sizes: Vec<usize> = (0..no).map(|_| num(&mut at)).collect();
                     stack.truncate(stack.len() - ni);
                     stack.extend(sizes);
@@ -5891,7 +5939,7 @@ mod tests {
     fn shared_blocks() {
         let mut apply = vec![APPLY, 0, 0, 3, 1, 2, 3];
         varint::put(&mut apply, MEMORY_LIMIT);
-        apply.extend_from_slice(&[2, 1, 4]);
+        apply.extend_from_slice(&[0, 2, 1, 4]);
         let first =
             [&[1, 0, 0, 1, 0, SLICE, 0, 0, 2, SLICE, 0, 1, 2][..], &apply, &[SLICE, 0, 2, 1, CONCAT, 2]].concat();
         let second = [1, 0, 0, 0, SLICE, 0, 0, 3];
@@ -5911,7 +5959,7 @@ mod tests {
     fn progress() {
         let mut apply = vec![APPLY, 0, 0, 3, 1, 2, 3];
         varint::put(&mut apply, MEMORY_LIMIT);
-        apply.extend_from_slice(&[2, 1, 4]);
+        apply.extend_from_slice(&[0, 2, 1, 4]);
         let first =
             [&[1, 0, 0, 1, 0, SLICE, 0, 0, 2, SLICE, 0, 1, 2][..], &apply, &[SLICE, 0, 2, 1, CONCAT, 2]].concat();
         let second = [1, 0, 0, 0, SLICE, 0, 0, 3];
@@ -5962,7 +6010,7 @@ mod tests {
     fn budget() {
         let mut apply = vec![APPLY, 0, 0, 3, 1, 2, 3];
         varint::put(&mut apply, MEMORY_LIMIT);
-        apply.extend_from_slice(&[2, 1, 4]);
+        apply.extend_from_slice(&[0, 2, 1, 4]);
         let first =
             [&[1, 0, 0, 1, 0, SLICE, 0, 0, 2, SLICE, 0, 1, 2][..], &apply, &[SLICE, 0, 2, 1, CONCAT, 2]].concat();
         let second = [1, 0, 0, 0, SLICE, 0, 0, 3];
@@ -6052,14 +6100,15 @@ mod tests {
     }
 
     /// Within a budget, the leaves after one waiting for room that fit go before it, and the
-    /// memory limit of a module of tasks is weighed as an instance's share of it (the rest the
-    /// copies of its working memory): in each archive, the first leaf waits for the last to start.
+    /// memory limit of a module of tasks is weighed as the instance's: in each archive, the first leaf waits for the last to start.
     #[test]
     fn budget_passed() {
         // `rev` of `params`, declaring `limit`; and a leaf of no application
-        let leaf = |params: u8, limit: u64| {
+        let leaf = |params: u8, limit: u64, classes: u8| {
             let mut d = vec![1, 0, 0, 1, 0, SLICE, 0, 0, 2, SLICE, 0, 1, 2, APPLY, 0, 0, 1, params];
             varint::put(&mut d, limit);
+            d.push(classes);
+            (0..classes).for_each(|_| varint::put(&mut d, MEMORY_LIMIT));
             d.extend_from_slice(&[2, 1, 4, SLICE, 0, 2, 1, CONCAT, 2]);
             d
         };
@@ -6089,16 +6138,17 @@ mod tests {
         };
         // the second and the third wait for the first to end, and more leaves than PASSING go
         // before them
-        let mut leaves = vec![leaf(9, 1500), leaf(1, 1800), leaf(1, 1800)];
+        let mut leaves = vec![leaf(9, 1500, 0), leaf(1, 1800, 0), leaf(1, 1800, 0)];
         leaves.extend(std::iter::repeat_n(plain.clone(), 2 * PASSING));
         assert_eq!(run(&stand_in(REV), &leaves), Ok(()));
-        // a module of 8 task slots: an instance and 8 tasks, 1500 bytes each
+        // a module of a class of 8 task slots: its instance of 1500 bytes (the tasks' have limits of
+        // their own)
         let mut slotted = stand_in(REV);
         let name = b"aqr_task_slots";
         slotted.extend_from_slice(&[0, name.len() as u8 + 2, name.len() as u8]);
         slotted.extend_from_slice(name);
         slotted.push(8);
-        assert_eq!(run(&slotted, &[leaf(9, 9 * 1500), plain]), Ok(()));
+        assert_eq!(run(&slotted, &[leaf(9, 1500, 1), plain]), Ok(()));
     }
 
     #[test]
@@ -6132,7 +6182,7 @@ mod tests {
         let apply = |inputs: u8, sizes: &[u8]| {
             let mut d = vec![1, 0, 0, 1, 0, SLICE, 0, 0, 3, SLICE, 0, 1, 2, APPLY, 0, 0, 3, 1, 2, 3];
             varint::put(&mut d, MEMORY_LIMIT);
-            d.extend_from_slice(&[inputs, sizes.len() as u8]);
+            d.extend_from_slice(&[0, inputs, sizes.len() as u8]);
             d.extend_from_slice(sizes);
             decode(&formula(&d, &[b"abc"]), &natives())
         };
@@ -6148,7 +6198,7 @@ mod tests {
             let ordinals = ordinals_of(f);
             let resources: Vec<&Resource> = f.applies().into_iter().flat_map(|a| &a.resources).collect();
             let mut out = Vec::new();
-            Emit { ordinals: &ordinals, modules: &[REV], resources: &resources, out: &mut out, stack: vec![] }
+            Emit { ordinals: &ordinals, modules: &[REV], classes: &[], resources: &resources, out: &mut out, stack: vec![] }
                 .node(&f.root);
             out.len()
         };

@@ -8,12 +8,12 @@ use aqr_formula::{Formula, Module, Node, Usage};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("sqlite-recons", 2).with_plan(memory);
+pub const MODULE: Module = Module::new("sqlite-recons", 2).with_task_plan(memory);
 
 /// The memory of the module: its plan ([`crate::module::plan`]), its initial memory with it.
-fn memory(u: &Usage<'_>) -> Option<u64> {
+fn memory(u: &Usage<'_>) -> Option<aqr_formula::Plan> {
     let s: [&[u8]; NSTREAMS] = u.all_contents()?;
-    crate::module::plan(u.params, &s, u.initial(), u.output())
+    crate::module::plan(u.params, &s, u.initial(), u.output()).map(|(i, t)| aqr_formula::Plan::one(i, t))
 }
 
 #[derive(Clone, Copy, Debug)]

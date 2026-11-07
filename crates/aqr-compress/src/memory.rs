@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use aqr_formula::{Apply, Contents, Formula, Modules, NO_LIMIT, Node, PAGE, Usage};
+use aqr_formula::{Apply, Contents, Formula, Modules, NO_LIMIT, Node, PAGE, Plan, Usage};
 use xxhash_rust::xxh3::Xxh3;
 
 /// What an application is but for its inputs' bytes: its module, parameters, resources'
@@ -33,12 +33,17 @@ pub(crate) fn shape(a: &Apply, inputs: &[u64]) -> Shape {
 
 /// Limits worked out, by [`shape`].
 #[derive(Default)]
-pub(crate) struct Limits(pub HashMap<Shape, u64>);
+pub(crate) struct Limits(pub HashMap<Shape, Plan>);
 
 impl Limits {
-    pub fn put(&mut self, s: Shape, limit: u64) {
-        let l = self.0.entry(s).or_insert(0);
-        *l = (*l).max(limit);
+    /// `limit` for `s`, the larger of it and any before it of each limit.
+    pub fn put(&mut self, s: Shape, limit: Plan) {
+        let l = self.0.entry(s).or_default();
+        l.instance = l.instance.max(limit.instance);
+        if l.tasks.len() < limit.tasks.len() {
+            l.tasks.resize(limit.tasks.len(), 0);
+        }
+        l.tasks.iter_mut().zip(limit.tasks).for_each(|(l, n)| *l = (*l).max(n));
     }
 
     pub fn extend(&mut self, other: Limits) {
@@ -46,19 +51,21 @@ impl Limits {
     }
 }
 
-/// The limit of application `a` of inputs of `lens` bytes (the bytes themselves in
+/// The limits of application `a` of inputs of `lens` bytes (the bytes themselves in
 /// `contents`) and outputs of `outputs` bytes: [`NO_LIMIT`] for a module of no plan or
 /// none built (tests'), and where its plan fails, which is a bug of the plan (declaring
-/// none rather than losing the archive).
-pub(crate) fn limit(a: &Apply, lens: &[u64], outputs: &[u64], contents: &dyn Contents) -> u64 {
+/// none rather than losing the archive): the instance's memory limit with the memories imported,
+/// and a task limit for each class.
+pub(crate) fn limit(a: &Apply, lens: &[u64], outputs: &[u64], contents: &dyn Contents) -> Plan {
+    let none = Plan { instance: NO_LIMIT, tasks: Vec::new() };
     let Some(initial_pages) = a.module.plan.and(aqr_decompress::initial_pages_of(a.module)) else {
-        return NO_LIMIT;
+        return none;
     };
     let resources: Vec<u64> = a.resources.iter().map(|r| r.len() as u64).collect();
     let usage = Usage { params: &a.params, resources: &resources, inputs: lens, outputs, contents, initial_pages };
-    let Some(pages) = a.module.plan_in_pages(&usage) else {
+    let Some(plan) = a.module.plan_for(&usage) else {
         eprintln!("aqr-compress: no memory plan of {} (a bug), none declared", a.module);
-        return NO_LIMIT;
+        return none;
     };
     // (an input's or output's within its window, of a part module)
     let windows = aqr_decompress::windows_of(a.module);
@@ -68,7 +75,7 @@ pub(crate) fn limit(a: &Apply, lens: &[u64], outputs: &[u64], contents: &dyn Con
         + lens.iter().enumerate().map(|(k, &n)| fit(n, window(false, k))).sum::<u64>()
         + outputs.iter().enumerate().map(|(j, &n)| fit(n, window(true, j))).sum::<u64>();
     // (a plan is what the module takes at most: no room)
-    imported.saturating_add(pages.saturating_mul(PAGE))
+    Plan { instance: imported.saturating_add(plan.instance), tasks: plan.tasks }
 }
 
 /// Declares the memory limits of `f`'s applications: those declared already kept (of a formula
@@ -77,11 +84,11 @@ pub(crate) fn limit(a: &Apply, lens: &[u64], outputs: &[u64], contents: &dyn Con
 pub(crate) fn declare(f: &mut Formula, m: &(impl Modules + Sync), known: &Limits) {
     let declared = f.declare_memory(m, &|a, contents| {
         if a.memory_limit != aqr_formula::NO_LIMIT {
-            return Some(a.memory_limit);
+            return Some(Plan { instance: a.memory_limit, tasks: a.task_limits.clone() });
         }
         let lens: Vec<u64> = a.inputs.iter().map(Node::len).collect();
         Some(match known.0.get(&shape(a, &lens)) {
-            Some(&l) => l,
+            Some(l) => l.clone(),
             None => limit(a, &lens, &[a.len], contents),
         })
     });
@@ -108,6 +115,6 @@ mod tests {
         let none: Vec<&[u8]> = Vec::new();
         let small = limit(&a, &[1 << 20], &[4 << 20], &none);
         let large = limit(&a, &[1 << 32], &[1 << 34], &none);
-        assert!(small == large && large < 4 << 20, "{small} {large}");
+        assert!(small == large && large.instance < 4 << 20, "{small:?} {large:?}");
     }
 }

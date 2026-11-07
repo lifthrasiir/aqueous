@@ -689,9 +689,10 @@ fn scratch(channels: usize, block: usize) -> Vec<Vec<i64>> {
 
 /// The memory plan of [`decode_threads`] in WebAssembly on `threads` threads ([`aqr_api::stack`]),
 /// of `len` bytes of samples of `fmt`, rANS words of `words` bytes and raw bits of `raw`, `top`
-/// bytes of the stack taken before (the initial memory with them, and the decoder's tables): the most it takes with its
-/// tasks, and of that what its channels' messages may hold.
-pub fn plan(fmt: Format, len: u64, words: u64, raw: [u64; 2], top: u64, threads: usize) -> (u64, u64) {
+/// bytes of the stack taken before (the initial memory with them, and the decoder's tables): the
+/// limits of its instance and of its tasks, and what its channels' messages (in the instance's) may
+/// hold.
+pub fn plan(fmt: Format, len: u64, words: u64, raw: [u64; 2], top: u64, threads: usize) -> ((u64, u64), u64) {
     use aqr_api::stack::block;
     let rooms = rooms(fmt, (len / fmt.frame_bytes() as u64) as usize);
     let p = par::apart::Plan {

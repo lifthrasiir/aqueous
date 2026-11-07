@@ -552,8 +552,8 @@ pub(crate) fn decode_core<'a>(
 
 /// The memory plan of [`decode_core`] on WebAssembly ([`aqr_api::stack`]), of the same blob,
 /// frame type, streams (`r`), sizes and output (`len` bytes), given `top` bytes of the stack
-/// taken before (the instance's initial memory with it) and the task slots: the most the
-/// instance and its tasks take at once, in bytes, however the tasks run. As `decode_core`
+/// taken before (the instance's initial memory with it): the most the instance takes and the
+/// most a task does, in bytes. As `decode_core`
 /// takes it: the parsed JPEG, the scans' info, the stripes' streams listed, the tables; then
 /// a scan coded a stripe at a time (each stripe a task, the instance taking each part, then the
 /// output, a part put together at a time), or the components whole, the output, the bit writer
@@ -564,14 +564,9 @@ pub(crate) fn core_plan<'a>(
     r: &mut impl CoreSource<'a>,
     (sizes, len): (&Sizes, usize),
     mut top: u64,
-    slots: usize,
-) -> Option<u64> {
+) -> Option<(u64, u64)> {
     use aqr_api::stack::block;
     let pages = |n: u64| n.div_ceil(1 << 16) << 16;
-    let topk = |mut t: Vec<u64>| {
-        t.sort_unstable_by(|a, b| b.cmp(a));
-        t.iter().take(slots).sum::<u64>()
-    };
     let j = jpeg::parse(blob).ok()?;
     if j.progressive != progressive {
         return None;
@@ -661,7 +656,7 @@ pub(crate) fn core_plan<'a>(
         top +=
             coded.iter().zip(&sizes.stripes).map(|(&range, &bits)| block(n(st.part_written(range, bits)))).sum::<u64>();
         let taken = end.max(pages(top));
-        let most = taken + topk(tasks);
+        let most = tasks.into_iter().max().unwrap_or(0);
         top += block(n(len));
         let join = coded
             .iter()
@@ -673,7 +668,7 @@ pub(crate) fn core_plan<'a>(
             })
             .max()
             .unwrap_or(0);
-        return Some(most.max(taken).max(pages(top + join)));
+        return Some((taken.max(pages(top + join)), most));
     }
     let (held, decoding) = model::whole_plan(&j, &stripes);
     top += held;
@@ -695,7 +690,7 @@ pub(crate) fn core_plan<'a>(
         })
         .max()
         .unwrap_or(0);
-    Some(decoded.max(pages(top + scan)))
+    Some((decoded.max(pages(top + scan)), 0))
 }
 
 /// Bytes of the bit writer re-emitting scan `s` of `n` unstuffed bytes takes (what its writes

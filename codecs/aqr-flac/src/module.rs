@@ -38,13 +38,14 @@ pub fn params(p: &[u8], len: u64) -> Result<Room> {
     ok.then_some(room).ok_or_else(bad)
 }
 
-/// The memory plan of the module ([`aqr_api::stack`]): the most its instance and tasks take at
-/// once, its initial memory (`initial` bytes) with it, of params `params`, resources and inputs
+/// The memory plan of the module ([`aqr_api::stack`]): the limits of its instance and its tasks,
+/// its initial memory (`initial` bytes) with it, of params `params`, resources and inputs
 /// of these lengths and a file of `len` bytes (`None` where they are not so): what
 /// `aqr_api::whole` copies, the tables, the streams listed, and the pipeline
-/// ([`codec::plan`]); and of that what its channels' messages may hold.
+/// ([`codec::plan`]); and what its channels' messages (in the
+/// instance's) may hold.
 #[cfg(feature = "encode")]
-pub fn plan(params: &[u8], resources: &[u64], inputs: &[u64], len: u64, initial: u64) -> Option<(u64, u64)> {
+pub fn plan(params: &[u8], resources: &[u64], inputs: &[u64], len: u64, initial: u64) -> Option<((u64, u64), u64)> {
     use aqr_api::stack::block;
     let room = self::params(params, len).ok()?;
     let &[.., words, raw0, raw1] = inputs else { return None };

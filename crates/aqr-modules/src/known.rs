@@ -84,7 +84,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "bcn-recons",
         version: 1,
-        sha512_256: hex("0e187fca8ae96dca11e45f0ab82a45d492f07c25dcc76c40314a9fb81bd34bf6"),
+        sha512_256: hex("2bb1bdd844ef9099c808499a398e5e6d672242016e6d288849d599174af13490"),
         block: include_bytes!("../wasm/bcn-recons.block"),
     },
     Known {
@@ -114,7 +114,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "clip-recons",
         version: 2,
-        sha512_256: hex("dbb7f5732a5142a7e45436342bb2c2601aeeeea3265cc610327239c34c65e762"),
+        sha512_256: hex("47e66dfd9b1e4ada332d90d439038c5a963c506093c4052d87dd0d55b4cc224d"),
         block: include_bytes!("../wasm/clip-recons.block"),
     },
     Known {
@@ -270,7 +270,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "jpeg-recons",
         version: 3,
-        sha512_256: hex("1f084fe6c02259fe4ba32000feba2a987d59301a352dd3d239e032836c004c9f"),
+        sha512_256: hex("14cd211fbed8ceaed31a4c217d52154a04a748fd9df48533050e12226c3f82e8"),
         block: include_bytes!("../wasm/jpeg-recons.block"),
     },
     Known {
@@ -372,13 +372,13 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "png-against",
         version: 1,
-        sha512_256: hex("00d9c33400dafe3d2c7994574005e347e4a59f269fedc037a478f74cceaafdaa"),
+        sha512_256: hex("efe2aa3b802a3d9669e4a60cbf1bb3a6b4706b1e14a3e3cb4350d96b298ea98e"),
         block: include_bytes!("../wasm/png-against.block"),
     },
     Known {
         name: "png-recons",
         version: 3,
-        sha512_256: hex("c2940e5607411a49c238debca28855dac54da8b38ab0e65d7384682690be7452"),
+        sha512_256: hex("ac22db308cc25b05da07b4a713fe921b5916b78da98faa8c7f7a7c2260bdb5d6"),
         block: include_bytes!("../wasm/png-recons.block"),
     },
     Known {
@@ -390,7 +390,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "prores-recons",
         version: 2,
-        sha512_256: hex("bff77320bd771849bf5a91a97883b128066da94787208c666176f59eee3f7198"),
+        sha512_256: hex("26c49ff25a0c4d9b429d02b64b6b75b7b15b7c33ed3ba669b5e4512f72755e62"),
         block: include_bytes!("../wasm/prores-recons.block"),
     },
     Known {

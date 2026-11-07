@@ -15,5 +15,5 @@ pub fn decode(initial: u64, params: &[u8], inputs: &[u64], len: u64) -> u64 {
     // (the bases' decoder makes its model, then the file is reserved)
     m.take(MODEL_BYTES);
     m.take(len);
-    m.plan(1)
+    m.plan()
 }

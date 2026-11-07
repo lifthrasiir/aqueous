@@ -39,15 +39,15 @@ pub fn params(params: &[u8], len: u64) -> Result<(Geom, Sizes)> {
     Ok((Geom { psize, usable, npages: len / psize, fmt4 }, Sizes { record, cols, keys }))
 }
 
-/// The memory plan of the module ([`aqr_api::stack`]): the most its instance and tasks take at
-/// once, its initial memory (`initial` bytes) with it, of params `params`, the streams `s` and
+/// The memory plan of the module ([`aqr_api::stack`]): the limits of its instance and its tasks,
+/// its initial memory (`initial` bytes) with it, of params `params`, the streams `s` and
 /// a database of `len` bytes (`None` where they are not so): what `aqr_api::whole` copies, the
 /// sizes read, and what decoding takes ([`transform::plan`]).
-pub fn plan(params: &[u8], s: &[&[u8]], initial: u64, len: u64) -> Option<u64> {
+pub fn plan(params: &[u8], s: &[&[u8]], initial: u64, len: u64) -> Option<(u64, u64)> {
     let (g, z) = self::params(params, len).ok()?;
     let lens: Vec<u64> = s.iter().map(|i| i.len() as u64).collect();
     let held = aqr_api::stack::whole(params.len() as u64, &[], &lens) + aqr_api::stack::block(8 * z.keys.len() as u64);
-    transform::plan(&g, len, s, &z, initial, held, SLOTS)
+    transform::plan(&g, len, s, &z, initial, held)
 }
 
 /// The module: the database of `len` bytes rebuilt from `params` (page size, usable size,

@@ -809,12 +809,12 @@ fn stripe_plan(limits: &Limits, s: usize, raw: u64, fields: u64) -> u64 {
 
 /// The memory plan of decoding a chunk on WebAssembly ([`aqr_api::stack`]), of params `limits`,
 /// the coded chunk `coded` and an output of `len` bytes, given the instance's memory as it
-/// starts (`initial` bytes, whole pages), `held` bytes of the stack taken before, and the task
-/// slots: the most the instance and its tasks take at once, in bytes, however the tasks run.
+/// starts (`initial` bytes, whole pages), `held` bytes of the stack taken before: the most the
+/// instance takes and the most a task does, in bytes.
 /// The instance takes the streams' slices, the first stream's raw bits padded, what it tells
 /// ([`SideInfo`]) and the vector of the stripes' results; then the tasks run, the instance
 /// taking each result as it is joined; then the output.
-pub fn plan(limits: &Limits, coded: &[u8], len: u64, initial: u64, held: u64, slots: usize) -> Option<u64> {
+pub fn plan(limits: &Limits, coded: &[u8], len: u64, initial: u64, held: u64) -> Option<(u64, u64)> {
     use aqr_api::stack::block;
     let pages = |n: u64| n.div_ceil(1 << 16) << 16;
     let k = limits.results.len();
@@ -828,25 +828,22 @@ pub fn plan(limits: &Limits, coded: &[u8], len: u64, initial: u64, held: u64, sl
         + SideInfo::plan(c)
         + block(12 * k as u64);
     let end = pages(top);
-    let mut tasks: Vec<u64> =
+    let tasks: Vec<u64> =
         (0..k).map(|s| end.max(pages(top + stripe_plan(limits, s, streams[1 + s].1.len() as u64, fields)))).collect();
     let results: u64 = limits.results.iter().map(|&r| block(r + 1)).sum();
     // (the handles taken, then each result as it is joined; the handles given back after)
     let taken = if k > 1 { block(k as u64) } else { 0 };
     let joined = pages(top + taken + results);
-    let most = match k {
-        1 => 0,
-        _ => {
-            tasks.sort_unstable_by(|a, b| b.cmp(a));
-            joined + tasks.iter().take(slots).sum::<u64>()
-        }
+    let (most, task) = match k {
+        1 => (0, 0),
+        _ => (joined, tasks.into_iter().max().unwrap_or(0)),
     };
     // (on one stripe, decoded in the instance: its work on top, then given back)
     let alone = match k {
         1 => pages(top + stripe_plan(limits, 0, streams[1].1.len() as u64, fields)),
         _ => 0,
     };
-    Some(most.max(alone).max(pages(top + taken + results + block(len))))
+    Some((most.max(alone).max(pages(top + taken + results + block(len))), task))
 }
 
 /// Decodes stripe `s` of every frame of `info` and writes its slices: for each modelled frame

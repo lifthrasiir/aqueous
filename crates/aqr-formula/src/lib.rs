@@ -51,6 +51,37 @@ pub struct Module {
     pub plan: Option<Planner>,
 }
 
+/// A module's memory plan: the limit of its application's instance, and of a task of each of
+/// its classes (the spec's task limits), in bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Plan {
+    pub instance: u64,
+    pub tasks: Vec<u64>,
+}
+
+impl Plan {
+    /// The plan of a module of one class of tasks.
+    pub fn one(instance: u64, task: u64) -> Plan {
+        Plan { instance, tasks: vec![task] }
+    }
+}
+
+impl From<(u64, Vec<u64>)> for Plan {
+    fn from((instance, tasks): (u64, Vec<u64>)) -> Plan {
+        Plan { instance, tasks }
+    }
+}
+
+/// How a module gives its [`Plan`]: from the lengths and contents an application gives
+/// ([`Usage`]); None where it cannot tell.
+#[derive(Debug, Clone, Copy)]
+pub enum Planner {
+    /// A module that spawns no tasks: the limit of its instance.
+    Whole(fn(&Usage<'_>) -> Option<u64>),
+    /// A module that spawns tasks.
+    Tasks(fn(&Usage<'_>) -> Option<Plan>),
+}
+
 /// What an application gives its module, for its memory plan ([`Module::plan_in_pages`]).
 #[derive(Clone, Copy)]
 pub struct Usage<'a> {
@@ -135,11 +166,6 @@ impl Contents for Vec<&[u8]> {
     }
 }
 
-/// A module's memory plan: the bytes that the working memories of an application take at
-/// most, of its instance and its tasks, with the messages queued in its channels (the memory
-/// limit less the other memories); None where it cannot tell.
-pub type Planner = fn(&Usage<'_>) -> Option<u64>;
-
 /// Bytes of a page of WebAssembly memory.
 pub const PAGE: u64 = 65536;
 
@@ -151,16 +177,26 @@ impl Module {
         Module { name, version, plan: None }
     }
 
-    /// The module of the memory plan `plan`: of a module whose working memory is laid out in
-    /// advance (`aqr_api::stack`), so that it takes what the plan gives at most.
-    pub const fn with_plan(self, plan: Planner) -> Module {
-        Module { plan: Some(plan), ..self }
+    /// The module of the memory plan `plan`, a module spawning no tasks: whose working memory is
+    /// laid out in advance (`aqr_api::stack`), so that it takes what the plan gives at most.
+    pub const fn with_plan(self, plan: fn(&Usage<'_>) -> Option<u64>) -> Module {
+        Module { plan: Some(Planner::Whole(plan)), ..self }
     }
 
-    /// The pages that the working memories of an application of `usage` take at most, which
-    /// the module may take to be there (see [`Planner`]); None where it has no plan.
-    pub fn plan_in_pages(&self, usage: &Usage<'_>) -> Option<u64> {
-        Some((self.plan?)(usage)?.div_ceil(PAGE))
+    /// [`Module::with_plan`] of a module spawning tasks: with the limit of a task of each class.
+    pub const fn with_task_plan(self, plan: fn(&Usage<'_>) -> Option<Plan>) -> Module {
+        Module { plan: Some(Planner::Tasks(plan)), ..self }
+    }
+
+    /// What the working memories of an application of `usage` take at most, rounded up to pages
+    /// (see [`Planner`]); None where it has no plan.
+    pub fn plan_for(&self, usage: &Usage<'_>) -> Option<Plan> {
+        let page = |n: u64| n.div_ceil(PAGE) * PAGE;
+        let p = match self.plan? {
+            Planner::Whole(f) => Plan { instance: f(usage)?, tasks: Vec::new() },
+            Planner::Tasks(f) => f(usage)?,
+        };
+        Some(Plan { instance: page(p.instance), tasks: p.tasks.into_iter().map(page).collect() })
     }
 }
 
@@ -728,10 +764,10 @@ pub struct Apply {
     /// Bytes of the output.
     pub len: u64,
     /// The memory limit its instruction declares ([`NO_LIMIT`] until [`Formula::declare_memory`]
-    /// sets it): of all of the application where it has no task limits, else of its instance.
+    /// sets it): of its instance.
     pub memory_limit: u64,
-    /// The memory limit of a task of each class of the module (the spec's task limits, of an
-    /// ApplyV2 instruction); none for an Apply instruction.
+    /// The memory limit of a task of each class of the module (the spec's task limits): as many
+    /// as the module has classes.
     pub task_limits: Vec<u64>,
 }
 
@@ -1627,13 +1663,13 @@ impl Formula {
         aqr::eval::eval_formula(self, m, Some(part), threads).map(drop)
     }
 
-    /// Sets every application's memory limit ([`Apply::memory_limit`]) to what `limit` gives of
-    /// it and its inputs, which are made (by `m`) only as `limit` reads them. Fails where it gives
+    /// Sets every application's memory limit ([`Apply::memory_limit`]) and task limits to what
+    /// `limit` gives of it and its inputs, which are made (by `m`) only as `limit` reads them. Fails where it gives
     /// none, or an input asked for cannot be made.
     pub fn declare_memory<M: Modules + Sync>(
         &mut self,
         m: &M,
-        limit: &dyn Fn(&Apply, &dyn Contents) -> Option<u64>,
+        limit: &dyn Fn(&Apply, &dyn Contents) -> Option<Plan>,
     ) -> Result<()> {
         fn visit<'f>(n: &'f Node, out: &mut Vec<&'f Apply>) {
             match n {
@@ -1646,12 +1682,13 @@ impl Formula {
                 Node::Slice { .. } | Node::Output { .. } | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
             }
         }
-        fn visit_mut(n: &mut Node, limits: &mut impl Iterator<Item = u64>) {
+        fn visit_mut(n: &mut Node, limits: &mut impl Iterator<Item = Plan>) {
             match n {
                 Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| visit_mut(n, limits)),
                 Node::Patch(p) => [&mut p.source, &mut p.patch].into_iter().for_each(|n| visit_mut(n, limits)),
                 Node::Apply(a) => {
-                    a.memory_limit = limits.next().expect("a limit for each application");
+                    let l = limits.next().expect("a limit for each application");
+                    (a.memory_limit, a.task_limits) = (l.instance, l.tasks);
                     a.inputs.iter_mut().for_each(|n| visit_mut(n, limits));
                 }
                 Node::Slice { .. } | Node::Output { .. } | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
@@ -1667,11 +1704,12 @@ impl Formula {
             let limits = aqr::eval::limits_of(self, m, &applies, limit)?;
             (applies.iter().zip(limits))
                 .map(|(a, l)| l.ok_or_else(|| Error::new(format!("no memory limit for {}", a.module))))
-                .collect::<Result<Vec<u64>>>()?
+                .collect::<Result<Vec<Plan>>>()?
         };
         let mut limits = limits.into_iter();
         for s in &mut self.shared {
-            s.apply.memory_limit = limits.next().expect("a limit for each application");
+            let l = limits.next().expect("a limit for each application");
+            (s.apply.memory_limit, s.apply.task_limits) = (l.instance, l.tasks);
             s.apply.inputs.iter_mut().for_each(|n| visit_mut(n, &mut limits));
         }
         visit_mut(&mut self.root, &mut limits);

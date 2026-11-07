@@ -20,10 +20,10 @@ pub use crate::module::{
     Derived, decode, index, models_from_bytes, priors_from_bytes, rules_from_bytes,
 };
 
-pub const MODULE: Module = Module::new("flate-set", 2).with_plan(memory);
+pub const MODULE: Module = Module::new("flate-set", 2).with_task_plan(memory);
 
-/// The memory of the module: its plan ([`crate::plan::plan`]) of its task slots.
-fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+/// The memory of the module: its plan ([`crate::plan::plan`]).
+fn memory(u: &aqr_formula::Usage<'_>) -> Option<aqr_formula::Plan> {
     let (&[r0, r1], &[d, r, i]) = (u.resources, u.inputs) else {
         return None;
     };
@@ -35,8 +35,8 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
         [d, r, i],
         contents,
         u.output(),
-        crate::module::SET_THREADS,
     )
+    .map(|(i, t)| aqr_formula::Plan::one(i, t))
 }
 
 /// The module `flate-inflate`: the data of a raw DEFLATE stream ([`crate::module::inflate`]),
@@ -270,6 +270,7 @@ mod tests {
                 initial_pages: 20,
             };
             let est = memory(&u).expect("a plan");
+            let est = est.instance.max(est.tasks[0]);
             assert!(est > u.base() + raw.len() as u64, "{est}");
         }
     }

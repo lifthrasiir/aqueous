@@ -1811,8 +1811,9 @@ fn plan_holds(what: &str, f: Formula, want: &[u8]) {
 }
 
 /// [`plan_holds`] of a module whose channels may hold `queued(usage)` bytes of messages in
-/// its plan: its working memory within the plan, and the instance's and its tasks' at most
-/// the rest of the plan to the page.
+/// its instance's plan: the instance's working memory with them within its plan, the instance's
+/// alone the rest of it to the page, and the most a task of each class took its plan to the
+/// page.
 fn plan_holds_queued(what: &str, mut f: Formula, want: &[u8], queued: impl Fn(&aqr_formula::Usage) -> u64) {
     let pages = |n: u64| n.div_ceil(65536) * 65536;
     let Node::Apply(a) = &f.root else { panic!("{what}: not an application") };
@@ -1839,11 +1840,11 @@ fn plan_holds_queued(what: &str, mut f: Formula, want: &[u8], queued: impl Fn(&a
         contents: &contents,
         initial_pages: aqr_decompress::initial_pages_of(a.module).unwrap(),
     };
-    let plan = a.module.plan_in_pages(&usage).unwrap() * 65536;
+    let plan = a.module.plan_for(&usage).unwrap();
     let queued = queued(&usage);
     let imported = [a.params.len() as u64, a.len].iter().chain(&resources).chain(&lens).map(|&n| pages(n)).sum::<u64>();
-    let limit = imported + plan;
-    a.memory_limit = limit;
+    let limit = imported + plan.instance;
+    (a.memory_limit, a.task_limits) = (limit, plan.tasks.clone());
     let c = Encoder::new(Level::Zstd(3)).with_modules(wasm_of).encode(&f, None).unwrap();
     // (the applications kept by one test at a time: the log is the process's)
     static RECORDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1856,15 +1857,19 @@ fn plan_holds_queued(what: &str, mut f: Formula, want: &[u8], queued: impl Fn(&a
     // (those of this application: other tests' run meanwhile, without limits)
     let mine: Vec<_> = applied.iter().filter(|a| a.limit == limit).collect();
     assert!(!mine.is_empty(), "{what}: not applied");
-    // (of tasks, what they would take running as many at once as their slots allow)
     for a in mine {
-        let worst = a.worst();
-        assert!(a.working <= worst + queued, "{what}: working {} past {worst} and {queued} queued", a.working);
-        let held = plan - queued;
+        assert!(a.working <= plan.instance, "{what}: working {} past {}", a.working, plan.instance);
+        let held = plan.instance - queued;
         assert!(
-            worst <= held && held - worst < 65536,
-            "{what}: plan {plan} ({queued} queued), working at most {worst}"
+            a.instance <= held && held - a.instance < 65536,
+            "{what}: instance plan {} ({queued} queued), took {}",
+            plan.instance,
+            a.instance
         );
+        assert_eq!(a.tasks.len(), plan.tasks.len(), "{what}: classes");
+        for (c, (&took, &p)) in a.tasks.iter().zip(&plan.tasks).enumerate() {
+            assert!(took <= p && p - took < 65536, "{what}: class {c}: plan {p}, took {took}");
+        }
     }
 }
 

@@ -12,13 +12,13 @@ use aqr_formula::{Formula, Kind, Module, Node};
 pub use crate::module::decode;
 use crate::module::in_pool;
 
-pub const MODULE: Module = Module::new("jpeg-recons", 3).with_plan(memory);
+pub const MODULE: Module = Module::new("jpeg-recons", 3).with_task_plan(memory);
 
 /// The memory of the module: its plan ([`crate::module::plan`]), its initial memory with it.
-fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+fn memory(u: &aqr_formula::Usage<'_>) -> Option<aqr_formula::Plan> {
     let &[len] = u.outputs else { return None };
     let inputs: [&[u8]; 9] = u.all_contents()?;
-    crate::module::plan(u.params, &inputs, u.initial(), len)
+    crate::module::plan(u.params, &inputs, u.initial(), len).map(|(i, t)| aqr_formula::Plan::one(i, t))
 }
 
 /// what a formula costs beyond its streams, for deciding whether coding an embedded JPEG pays off

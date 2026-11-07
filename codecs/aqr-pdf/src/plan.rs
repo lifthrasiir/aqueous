@@ -69,5 +69,5 @@ pub fn decode(initial: u64, params: &[u8], inputs: &[u64], len: u64, files: [&[u
                 + block(wasm::TOKEN * tokens as u64),
         );
     }
-    Some(m.plan(1))
+    Some(m.plan())
 }

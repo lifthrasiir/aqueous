@@ -204,7 +204,7 @@ fn file(m: &mut Sim, sk: &[u8], index: &[u8], records: &[u8], threads: usize, ke
                 refs.push(ih.map(|_| t));
             }
         }
-        m.spawned(tasks);
+        m.spawned(0, tasks);
     } else {
         for (rec, len, ih) in &imgs {
             let i = image(rec, *len, ih, keep)?;
@@ -234,12 +234,13 @@ fn references_bytes(imgs: &[Img], refs: &[Option<u64>]) -> u64 {
 
 /// The memory plan of `png-recons` ([`crate::module::decode`]): of its initial memory (`initial`
 /// bytes), inputs of `inputs` bytes, the skeleton `sk`, the index and the records.
-pub fn recons(initial: u64, inputs: &[u64], (sk, index, records): (&[u8], &[u8], &[u8])) -> Option<u64> {
+pub fn recons(initial: u64, inputs: &[u64], (sk, index, records): (&[u8], &[u8], &[u8])) -> Option<(u64, u64)> {
     let mut m = Sim::new(initial);
     m.take(aqr_api::stack::whole(0, &[], inputs));
     m.take(aqr_common::crc32::WASM_TABLES);
     file(&mut m, sk, index, records, THREADS, false, false)?;
-    Some(m.plan(THREADS))
+    let (instance, tasks) = m.plans(1);
+    Some((instance, tasks[0]))
 }
 
 /// `codec::references` of a file of `chunks` chunks, its images' payloads of these bytes and of
@@ -306,13 +307,14 @@ pub fn against(
     initial: u64,
     inputs: &[u64],
     (sk, index, records, reference): (&[u8], &[u8], &[u8], &[u8]),
-) -> Option<u64> {
+) -> Option<(u64, u64)> {
     let mut m = Sim::new(initial);
     m.take(aqr_api::stack::whole(0, &[], inputs));
     m.take(aqr_common::crc32::WASM_TABLES);
     references_of_file(&mut m, reference)?;
     file(&mut m, sk, index, records, THREADS, false, false)?;
-    Some(m.plan(THREADS))
+    let (instance, tasks) = m.plans(1);
+    Some((instance, tasks[0]))
 }
 
 /// The memory plan of `png-set` ([`crate::module::decode_set`]): of its initial memory
@@ -320,7 +322,7 @@ pub fn against(
 /// and records of the files. The output first; then by depth in the trees, the files of a depth
 /// each a task (of several, each giving back the file), or the file in the instance, each made of
 /// the references of its parent's file (made of it) and copied to its place, nothing else kept.
-pub fn set(initial: u64, params: &[u8], inputs: &[u64], (sks, indexes, records): (&[u8], &[u8], &[u8])) -> Option<u64> {
+pub fn set(initial: u64, params: &[u8], inputs: &[u64], (sks, indexes, records): (&[u8], &[u8], &[u8])) -> Option<(u64, u64)> {
     let mut at = 0;
     let n = get_varint(params, &mut at).ok()? as usize;
     let mut parents = Vec::with_capacity(n);
@@ -369,7 +371,7 @@ pub fn set(initial: u64, params: &[u8], inputs: &[u64], (sks, indexes, records):
             for &i in &level {
                 m.take(sizes[i] + 1);
             }
-            m.spawned(tasks);
+            m.spawned(0, tasks);
         } else {
             for &i in &level {
                 file(&mut m, i, THREADS, false)?;
@@ -377,5 +379,6 @@ pub fn set(initial: u64, params: &[u8], inputs: &[u64], (sks, indexes, records):
         }
         m.top = t;
     }
-    Some(m.plan(THREADS))
+    let (instance, tasks) = m.plans(1);
+    Some((instance, tasks[0]))
 }

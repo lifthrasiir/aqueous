@@ -42,5 +42,5 @@ pub fn decode(initial: u64, params: &[u8], inputs: &[u64], len: u64, files: [&[u
         m.peak(block(SCRATCH as u64));
         m.top = top;
     }
-    Some(m.plan(1))
+    Some(m.plan())
 }

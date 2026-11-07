@@ -188,7 +188,7 @@ pub fn inflate(initial: u64) -> u64 {
     m.take(4 * LIT_ENTRIES as u64);
     m.take(4 * DIST_ENTRIES as u64);
     m.peak(block(4 << CL_BITS));
-    m.plan(1)
+    m.plan()
 }
 
 /// How [`rebuild`] rebuilds a stream: from its data pulled (on `threads` threads, a segment a
@@ -346,7 +346,7 @@ fn rebuild(m: &mut Mem, st: &Stream, how: How) {
             for s in segs {
                 m.peak(block(9 + 5 * s.count));
             }
-            m.spawned(tasks);
+            m.spawned(0, tasks);
             // (the handles given back: a hole below the pending tokens the first time)
             if b > 0 {
                 m.top = t;
@@ -375,9 +375,8 @@ fn rebuild(m: &mut Mem, st: &Stream, how: How) {
 
 /// The bytes that the module takes at most, of the module's initial memory (`initial` bytes),
 /// params `params`, resources of `resources` bytes, inputs of `inputs` bytes, `records` and
-/// `index` (the two inputs' contents) and an output of `len` bytes, with tasks running `slots`
-/// at once: the most the instance takes, or the instance as it takes a spawn's results and its
-/// tasks, of the spawn whose sum is the largest.
+/// `index` (the two inputs' contents) and an output of `len` bytes: the most the instance takes,
+/// and the most a task does.
 pub fn plan(
     initial: u64,
     params: &[u8],
@@ -385,8 +384,7 @@ pub fn plan(
     inputs: [u64; 3],
     (records, index): (&[u8], &[u8]),
     len: u64,
-    slots: usize,
-) -> Option<u64> {
+) -> Option<(u64, u64)> {
     let derived = Derived::from_params(params).ok()?;
     let lens = crate::module::lens_of(
         index,
@@ -405,7 +403,7 @@ pub fn plan(
     let mut m = Mem {
         top: initial,
         high: initial,
-        spawns: Vec::new(),
+        classes: Vec::new(),
     };
     // the params, the resources and the index copied, the lengths, what is derived, the model
     m.take(params.len() as u64);
@@ -478,7 +476,7 @@ pub fn plan(
                     let mut sub = Mem {
                         top: 0,
                         high: 0,
-                        spawns: Vec::new(),
+                        classes: Vec::new(),
                     };
                     rebuild(&mut sub, &streams[s], How::Onto);
                     sub.high
@@ -502,7 +500,7 @@ pub fn plan(
                         .sum::<u64>(),
                 ));
             }
-            m.spawned(tasks);
+            m.spawned(0, tasks);
         } else {
             for g in 0..groups {
                 let (room, most) = group(g);
@@ -512,5 +510,6 @@ pub fn plan(
         m.top = t1;
         i = j;
     }
-    Some(m.plan(slots))
+    let (instance, tasks) = m.plans(1);
+    Some((instance, tasks[0]))
 }

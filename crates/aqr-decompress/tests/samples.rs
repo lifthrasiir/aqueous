@@ -3,7 +3,7 @@
 //! `cache/memory/samples`, made by the script): ignored where they are not there.
 
 use aqr_decompress::{MODULES, Wasm};
-use aqr_formula::{PAGE, Usage, aqr};
+use aqr_formula::{Usage, aqr};
 
 #[test]
 #[ignore = "the samples of scripts/module-memory.sh"]
@@ -34,10 +34,15 @@ fn plans_hold_on_samples() {
                 contents: &contents,
                 initial_pages: aqr_decompress::initial_pages(&k.read_wasm().unwrap()).unwrap(),
             };
-            let Some(pages) = m.plan_in_pages(&usage) else { continue };
+            let Some(plan) = m.plan_for(&usage) else { continue };
             checked += 1;
-            if pages * PAGE < a.working {
-                below.push(format!("{}: {m}: {} < {}", path.display(), pages * PAGE, a.working));
+            if plan.instance < a.working {
+                below.push(format!("{}: {m}: {} < {}", path.display(), plan.instance, a.working));
+            }
+            for (c, (&p, &took)) in plan.tasks.iter().zip(&a.tasks).enumerate() {
+                if p < took {
+                    below.push(format!("{}: {m}: class {c}: {p} < {took}", path.display()));
+                }
             }
         }
     }

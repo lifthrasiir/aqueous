@@ -127,12 +127,15 @@ optimization picked by hash.
   `aqr_task_slots`, which aqr-ld checks), its code given N as its threads. Other
   `par_map`/`scope` uses run serially in Wasm. Port a pipeline only when its speedup is worth
   the module's growth; report both (png, psd and mp3 were measured and not ported).
-- Memory: each Module carries the exact plan of its working memory (`Module::new(..).with_plan`
-  in the codec's `formula.rs`; `aqr_api::stack`, `docs/arena-design.md`), from which aqr-compress
-  declares each application's `apply_memory_limit` (`crates/aqr-compress/src/memory.rs`). A
-  module allocates on the stack in the order its plan follows; changing what it allocates means
-  changing its plan, which the `*_plans_hold` tests in aqr-decompress's `tests/wasm.rs` check to
-  the page (`plans_hold_on_samples`, ignored, does on the samples of `scripts/module-memory.sh`).
+- Memory: each Module carries the exact plan of its working memory (`Module::new(..).with_plan`,
+  or `with_task_plan` for a module spawning tasks; the codec's `formula.rs`, `aqr_api::stack`,
+  `docs/arena-design.md`): the limit of the application's instance, and of a task of each class.
+  aqr-compress declares them (`crates/aqr-compress/src/memory.rs`) in the Apply instruction
+  (always opcode 16, one task limit for each class of the module). A module allocates on the
+  stack in the order its plan follows; changing what it allocates means changing its plan, which
+  the `*_plans_hold` tests in aqr-decompress's `tests/wasm.rs` check to the page, instance and
+  each class (`plans_hold_on_samples`, ignored, does on `scripts/module-memory.sh`'s samples).
+  Tasks spawn only classes above their own.
 - Size: aqr-ld trims modules itself (prefer automating in aqr-ld over toolchain flags);
   `AQR_LD_NAMES=1` keeps the name section for size debugging. Module error types must
   implement `Display` (`Debug` of `&str` pulls in core's Unicode tables).

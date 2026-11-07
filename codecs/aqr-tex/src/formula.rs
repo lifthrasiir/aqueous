@@ -12,7 +12,7 @@ use crate::texture;
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("bcn-recons", 1).with_plan(memory);
+pub const MODULE: Module = Module::new("bcn-recons", 1).with_task_plan(memory);
 
 /// Stream classes of a DDS file's bytes around its data, and of its surfaces kept as they are.
 pub const HEADER: &str = "dds/header";
@@ -64,7 +64,7 @@ pub fn apply(f: &mut Formula, blocks: &[u8], l: &Layout, threads: usize) -> Opti
 }
 
 /// The memory of the module: its plan ([`crate::module::plan`]), its initial memory with it.
-fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+fn memory(u: &aqr_formula::Usage<'_>) -> Option<aqr_formula::Plan> {
     let &[len] = u.outputs else { return None };
-    crate::module::plan(u.params, u.inputs, u.initial(), len)
+    crate::module::plan(u.params, u.inputs, u.initial(), len).map(|(i, t)| aqr_formula::Plan::one(i, t))
 }

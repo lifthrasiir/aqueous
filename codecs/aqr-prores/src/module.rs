@@ -47,14 +47,14 @@ pub fn limits(p: &[u8]) -> Result<Limits> {
 /// The task slots of the module (aqr-modules' `prores-recons`), and so its threads.
 pub const SLOTS: usize = 16;
 
-/// The memory plan of the module ([`aqr_api::stack`]): the most its instance and tasks take at
-/// once, its initial memory (`initial` bytes) with it, of params `params`, inputs of `inputs`
+/// The memory plan of the module ([`aqr_api::stack`]): the limits of its instance and its tasks,
+/// its initial memory (`initial` bytes) with it, of params `params`, inputs of `inputs`
 /// bytes, the coded chunk `coded` (the first input) and a span of `len` bytes (`None` where they
 /// are not so): what `aqr_api::whole` copies, and what decoding takes ([`codec::plan`]).
-pub fn plan(params: &[u8], inputs: &[u64], coded: &[u8], initial: u64, len: u64) -> Option<u64> {
+pub fn plan(params: &[u8], inputs: &[u64], coded: &[u8], initial: u64, len: u64) -> Option<(u64, u64)> {
     let l = limits(params).ok()?;
     let held = aqr_api::stack::whole(params.len() as u64, &[], inputs);
-    codec::plan(&l, coded, len, initial, held, SLOTS)
+    codec::plan(&l, coded, len, initial, held)
 }
 
 /// The module: the span of `len` bytes that the inputs (the coded chunk, the bytes between its

@@ -809,8 +809,15 @@ impl Encoder {
         for m in &u.modules {
             varint::put(&mut data, modules.iter().position(|n| n == m).unwrap() as u64);
         }
-        let mut e =
-            Emit { ordinals: &local, modules: &u.modules, resources: &own_resources, out: &mut data, stack: vec![] };
+        let classes = self.classes_of(&u.modules);
+        let mut e = Emit {
+            ordinals: &local,
+            modules: &u.modules,
+            classes: &classes,
+            resources: &own_resources,
+            out: &mut data,
+            stack: vec![],
+        };
         for &i in &u.shared {
             e.shared(i, &f.shared[i]);
         }

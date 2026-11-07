@@ -33,8 +33,9 @@ fn task(p: &Parsed, b: &Batch) -> u64 {
 /// The memory plan of `clip-recons` ([`crate::module::decode`]): of its initial memory (`initial`
 /// bytes), parameters `params`, inputs of `inputs` bytes, an output of `len`, the skeleton and the
 /// index.
-pub fn decode(initial: u64, params: &[u8], inputs: &[u64], len: u64, files: (&[u8], &[u8])) -> Option<u64> {
-    Some(sim(initial, params, inputs, len, files)?.plan(THREADS))
+pub fn decode(initial: u64, params: &[u8], inputs: &[u64], len: u64, files: (&[u8], &[u8])) -> Option<(u64, u64)> {
+    let (instance, tasks) = sim(initial, params, inputs, len, files)?.plans(1);
+    Some((instance, tasks[0]))
 }
 
 /// [`decode`]'s [`Sim`], before its plan is taken.
@@ -65,7 +66,7 @@ pub fn sim(initial: u64, params: &[u8], inputs: &[u64], len: u64, (skeleton, ind
         m.take(nb);
         m.take(len);
         m.peak(p.batches.iter().map(|b| block(sums(b))).max().unwrap_or(0));
-        m.spawned(tasks);
+        m.spawned(0, tasks);
     } else {
         m.take(len);
         if let Some(b) = p.batches.first() {

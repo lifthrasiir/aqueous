@@ -21,7 +21,7 @@ pub fn recons(initial: u64, params: &[u8], resources: &[u64], inputs: &[u64], le
     }
     m.take(words::ENTRY * entries as u64);
     m.take(len);
-    Some(m.plan(1))
+    Some(m.plan())
 }
 
 /// The memory plan of `wrt-recons-hangul`, as [`recons`].
@@ -31,5 +31,5 @@ pub fn recons_hangul(initial: u64, params: &[u8], resources: &[u64], inputs: &[u
     m.take(whole(params.len() as u64, resources, inputs));
     m.take(hangul::ENTRY * entries as u64);
     m.take(len);
-    Some(m.plan(1))
+    Some(m.plan())
 }

@@ -64,7 +64,7 @@ pub fn decode(
         group(&mut m, g, spans, total, skeleton)?;
         m.top = top;
     }
-    Some(m.plan(1))
+    Some(m.plan())
 }
 
 /// `n` rows of `w` bytes, as `model::zero_rows` makes them.

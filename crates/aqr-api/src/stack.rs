@@ -1,8 +1,9 @@
 //! The working memory as a stack: an allocator (on WebAssembly, [`Stack`]) that puts each block
 //! on top of the last one and takes it off as it is freed, so that what a module takes at most is
 //! what it lays out, in the order it does: its plan, which the encoder declares as its memory
-//! limit as it is (aqr-formula's `Module::with_plan`), computed by the functions here from the
-//! sizes of its blocks.
+//! limit (of its instance) and its task limits (of the tasks of each class) as it is
+//! (aqr-formula's `Module::with_plan`), computed by the functions here from the sizes of its
+//! blocks.
 //!
 //! - Blocks are rounded up to [`GRAIN`] bytes ([`block`]), and aligned to it.
 //! - The block on top grows and shrinks where it is (a vector reserved short grows so), and is
@@ -42,22 +43,23 @@ pub const fn pages(n: u64) -> u64 {
 }
 
 /// A module's memory as its plan follows it, taken block by block in the order the module takes
-/// it: the top of the stack, the most it reached (the memory never shrinks), and the module's
-/// spawns: its memory as it took their results, and each task's (a copy of the memory as it was
-/// spawned, and what it took over it).
+/// it: the top of the stack, the most it reached (the memory never shrinks), and the most the
+/// tasks of each class took (a copy of the memory as it was spawned, and what the task took over
+/// it).
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone, Default)]
 pub struct Sim {
     pub top: u64,
     pub high: u64,
-    pub spawns: alloc::vec::Vec<(u64, alloc::vec::Vec<u64>)>,
+    /// The most one task of each class took ([`Sim::task`]), by class.
+    pub classes: alloc::vec::Vec<u64>,
 }
 
 #[cfg(feature = "alloc")]
 impl Sim {
     /// Of a module whose initial memory (and what it took before) is `top` bytes.
     pub fn new(top: u64) -> Sim {
-        Sim { top, high: top, spawns: alloc::vec::Vec::new() }
+        Sim { top, high: top, classes: alloc::vec::Vec::new() }
     }
 
     /// A block of `n` bytes taken and kept (until the top is set back).
@@ -76,21 +78,27 @@ impl Sim {
         pages(self.high).max(pages(self.top + own))
     }
 
-    /// A spawn of tasks of memories `tasks` ([`Sim::task`]) whose results are now taken.
-    pub fn spawned(&mut self, tasks: alloc::vec::Vec<u64>) {
-        self.spawns.push((pages(self.high), tasks));
+    /// A spawn of tasks of class `class` and memories `tasks` ([`Sim::task`]).
+    pub fn spawned(&mut self, class: usize, tasks: alloc::vec::Vec<u64>) {
+        if self.classes.len() <= class {
+            self.classes.resize(class + 1, 0);
+        }
+        let most = tasks.into_iter().max().unwrap_or(0);
+        self.classes[class] = self.classes[class].max(most);
     }
 
-    /// The most the module takes, its tasks running `slots` at once: its own memory at most, or
-    /// as it takes a spawn's results with as many of its tasks as their slots allow, the
-    /// largest.
-    pub fn plan(self, slots: usize) -> u64 {
-        let spawn = |(inst, mut tasks): (u64, alloc::vec::Vec<u64>)| {
-            tasks.sort_unstable_by(|a, b| b.cmp(a));
-            inst + tasks.iter().take(slots).sum::<u64>()
-        };
-        let high = pages(self.high);
-        self.spawns.into_iter().map(spawn).fold(high, u64::max)
+    /// The memory limit of the module's instance, its tasks excluded: the most it took.
+    pub fn plan(&self) -> u64 {
+        pages(self.high)
+    }
+
+    /// The module's plan: the limit of its instance ([`Sim::plan`]), and the limit of a task of
+    /// each of its `classes` classes (0 for a class that never ran).
+    pub fn plans(&self, classes: usize) -> (u64, alloc::vec::Vec<u64>) {
+        debug_assert!(self.classes.len() <= classes, "a task of a class past the module's");
+        let mut tasks = self.classes.clone();
+        tasks.resize(classes, 0);
+        (self.plan(), tasks)
     }
 }
 

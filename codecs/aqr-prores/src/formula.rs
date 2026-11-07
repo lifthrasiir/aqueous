@@ -12,7 +12,7 @@ use crate::module;
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("prores-recons", 2).with_plan(memory);
+pub const MODULE: Module = Module::new("prores-recons", 2).with_task_plan(memory);
 
 /// Frame bytes of a chunk: its application holds about as much (and its output); its stripes
 /// are about 4 MiB each (`codec::STRIPE_BYTES`), 16 of them.
@@ -26,9 +26,9 @@ const GAP: usize = 4 << 20;
 const FIRST: usize = 64 << 20;
 
 /// The memory of the module: its plan ([`crate::module::plan`]), its initial memory with it.
-fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+fn memory(u: &aqr_formula::Usage<'_>) -> Option<aqr_formula::Plan> {
     let &[len] = u.outputs else { return None };
-    module::plan(u.params, u.inputs, u.content(0)?, u.initial(), len)
+    module::plan(u.params, u.inputs, u.content(0)?, u.initial(), len).map(|(i, t)| aqr_formula::Plan::one(i, t))
 }
 
 /// Whether `d` starts as a QuickTime or MXF file and holds a ProRes frame near its start.

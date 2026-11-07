@@ -55,7 +55,7 @@ pub fn decode(initial: u64, params: &[u8], inputs: &[u64], len: u64, files: [&[u
         walk(&mut m, n, h.dict);
         m.top = top;
     }
-    Some(m.plan(1))
+    Some(m.plan())
 }
 
 /// The memory plan of `lzma2-recons` ([`crate::module::decode2`]), as [`decode`] for segments.
@@ -78,5 +78,5 @@ pub fn decode2(initial: u64, params: &[u8], inputs: &[u64], len: u64, files: [&[
         }
         m.top = top;
     }
-    Some(m.plan(1))
+    Some(m.plan())
 }

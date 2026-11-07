@@ -13,15 +13,16 @@ use std::collections::HashMap;
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("clip-recons", 2).with_plan(plan);
+pub const MODULE: Module = Module::new("clip-recons", 2).with_task_plan(plan);
 
 /// Tiles a batch holds: a stream each, decoded on a thread of its own.
 pub const BATCH: usize = 64;
 
 /// The memory of `clip-recons`: its plan ([`crate::plan::decode`]).
-fn plan(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+fn plan(u: &aqr_formula::Usage<'_>) -> Option<aqr_formula::Plan> {
     let (4, Some(skeleton), Some(index)) = (u.inputs.len(), u.content(0), u.content(1)) else { return None };
     crate::plan::decode(u.initial(), u.params, u.inputs, u.output(), (skeleton, index))
+        .map(|(i, t)| aqr_formula::Plan::one(i, t))
 }
 
 /// The formula of `input`, or `None` where it is not a `.clip` file whose structure holds (or
