@@ -60,6 +60,12 @@ pub const fn task_slots(n: u32) -> [u8; 1] {
     [n as u8]
 }
 
+/// The content of the custom section `aqr_task_slots` of one gang class of a single slot (the
+/// spec, "Tasks"), which [`whole!`]'s `gang` defines.
+pub const fn gang_slots() -> [u8; 1] {
+    [0x80 | 1]
+}
+
 /// The entry point of a whole module running `$f`, code taking byte slices (see
 /// `aqr_api::whole`), on the parameters, the resources and the inputs: each resource and input
 /// named with its index, as `inputs [data: 0, layout: 1]`. A module spawning tasks gives its task
@@ -71,6 +77,12 @@ macro_rules! whole {
         #[unsafe(link_section = "aqr_task_slots")]
         #[used]
         static AQR_TASK_SLOTS: [u8; 1] = $crate::task_slots($n);
+        $crate::whole!(@slots $n, $($rest)*);
+    };
+    (gang $n:literal, $($rest:tt)*) => {
+        #[unsafe(link_section = "aqr_task_slots")]
+        #[used]
+        static AQR_TASK_SLOTS: [u8; 1] = $crate::gang_slots();
         $crate::whole!(@slots $n, $($rest)*);
     };
     (@slots $n:literal, $(resources [$($r:ident: $ri:literal),* $(,)?])? $(inputs [$($i:ident: $ii:literal),* $(,)?])?, $f:expr) => {

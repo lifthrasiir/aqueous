@@ -87,6 +87,12 @@ impl Sim {
         self.classes[class] = self.classes[class].max(most);
     }
 
+    /// A spawn of a gang of class `class`, of tasks of memories `tasks` ([`Sim::task`]) with its
+    /// channels holding `queued` bytes of messages at most: a unit of the class takes the sum.
+    pub fn spawned_gang(&mut self, class: usize, tasks: &[u64], queued: u64) {
+        self.spawned(class, alloc::vec![tasks.iter().sum::<u64>() + queued]);
+    }
+
     /// The memory limit of the module's instance, its tasks excluded: the most it took.
     pub fn plan(&self) -> u64 {
         pages(self.high)

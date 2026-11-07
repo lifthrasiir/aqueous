@@ -17,7 +17,7 @@ impl std::fmt::Display for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// The task slots of the module (aqr-modules' `flac-recons`), which it is given as its threads.
+/// The tasks of the module's one gang (aqr-modules' `flac-recons`), which it is given as its threads.
 pub const SLOTS: usize = 8;
 
 /// The params of frames of `room`: its samples a channel, channels and bytes, varints.

@@ -19,7 +19,7 @@ pub mod pcm {
     use crate::audio::residual::{self, Coded};
     use std::borrow::Cow;
 
-    /// The task slots of the module (aqr-modules' `pcm-recons`), which it is given as its
+    /// The tasks of the module's one gang (aqr-modules' `pcm-recons`), which it is given as its
     /// threads.
     pub const SLOTS: usize = 8;
 

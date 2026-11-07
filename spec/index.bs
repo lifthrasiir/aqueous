@@ -6030,7 +6030,7 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/fits-recons-table.wasm" title="crates/aqr-modules/wasm/fits-recons-table.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-fits/FORMAT.md" title="codecs/aqr-fits/FORMAT.md">R</a>
     <tr>
-      <td><code>cc6c25f02d2a898986a0d16f9b0367e130c708574d4c6c6e5c4546f96063910a</code>
+      <td><code>b342135204ab857430e3f347b768cc2236aa17070a79c906e8bec628be9435da</code>
       <td>flac-recons@4
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/flac-recons.wasm" title="crates/aqr-modules/wasm/flac-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-flac/FORMAT.md" title="codecs/aqr-flac/FORMAT.md">R</a>
@@ -6140,7 +6140,7 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/ogg-recons.wasm" title="crates/aqr-modules/wasm/ogg-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-ogg/FORMAT.md" title="codecs/aqr-ogg/FORMAT.md">R</a>
     <tr>
-      <td><code>d16e29e52914ed630a436cd2e3cc7641f5d016ae22139160b1e56245d14bc978</code>
+      <td><code>7e51507cf279b90b1382643093e14ca509215de0950718d40fa40799e361c95c</code>
       <td>pcm-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/pcm-recons.wasm" title="crates/aqr-modules/wasm/pcm-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-raw/FORMAT.md" title="codecs/aqr-raw/FORMAT.md">R</a>

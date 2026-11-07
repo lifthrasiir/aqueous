@@ -138,8 +138,10 @@ struct Compiled {
     windows: Vec<(Mem, u64)>,
     /// The number of parameters of the entry point.
     arity: usize,
-    /// The task slots of each class of its tasks (none without tasks).
+    /// The task slots of each class of its tasks (none without tasks), and whether each is a gang
+    /// class.
     slots: Vec<usize>,
+    gang: Vec<bool>,
     /// Whether it is a module of a release, run by the rules before the current ones: an
     /// `aqr_spawn` of two parameters, and applications with no task limits.
     released: bool,
@@ -357,11 +359,11 @@ fn compile(wasm: &[u8], released: bool) -> Decoded<Compiled> {
             return invalid(format!("{TASK} of another type"));
         }
     }
-    let slots: Vec<usize> = match (spawns, &slots[..]) {
-        (true, [d]) if !d.is_empty() && d.iter().all(|n| (1..=64).contains(n)) => {
-            d.iter().map(|&n| n as usize).collect()
+    let slots: Vec<(usize, bool)> = match (spawns, &slots[..]) {
+        (true, [d]) if !d.is_empty() && d.iter().all(|n| (1..=64).contains(&(n & 0x7f))) => {
+            d.iter().map(|&n| ((n & 0x7f) as usize, n & 0x80 != 0)).collect()
         }
-        (true, [_]) => return invalid(format!("{TASK_SLOTS} not bytes from 1 to 64")),
+        (true, [_]) => return invalid(format!("{TASK_SLOTS} not bytes of 1 to 64 slots")),
         (true, []) => return invalid(format!("tasks spawned without {TASK_SLOTS}")),
         (true, _) => return invalid(format!("{TASK_SLOTS} more than once")),
         (false, []) => Vec::new(),
@@ -384,7 +386,8 @@ fn compile(wasm: &[u8], released: bool) -> Decoded<Compiled> {
         part,
         windows,
         arity,
-        slots,
+        slots: slots.iter().map(|s| s.0).collect(),
+        gang: slots.iter().map(|s| s.1).collect(),
         released,
         hash: [0; 32],
     })
@@ -459,17 +462,25 @@ impl std::error::Error for TaskFailed {}
 /// What the instances of an application share.
 struct App {
     limit: u64,
-    /// The task limits (none: all of the application under `limit`), and then the slots of each
-    /// class over the application.
+    /// The task limits (none: the earlier Apply, all of the application under `limit`), the
+    /// units of each class pending and running over the application, and the concurrency of
+    /// each class (from 1 to its slots).
     task_limits: Vec<u64>,
     classes: Vec<Arc<Slots>>,
+    concurrency: Vec<usize>,
+    /// The identity of the next gang.
+    gangs: AtomicU64,
     /// The size of the memories of all the instances and of the messages queued.
     total: Mutex<u64>,
     /// The largest `total` so far, and the most the application's instance and any one task of
     /// each class held (their working memories, the instance's other memories with it).
     peak: AtomicU64,
     instance_peak: AtomicU64,
+    /// The most a unit of each class held at once (the tasks' memories and, of a gang, the
+    /// messages queued), and the most the memories of the tasks of a unit came to in all (as each
+    /// ended: what a gang's plan adds up, whether or not its tasks were all there at once).
     task_peaks: Vec<AtomicU64>,
+    memory_peaks: Vec<AtomicU64>,
     exec: Arc<Exec>,
     chans: Mutex<Vec<Chan>>,
     /// The identity of the next task (0 is the application's instance).
@@ -497,9 +508,64 @@ struct Chan {
     closed: bool,
     sender: Option<u64>,
     receiver: Option<u64>,
+    /// The gang it belongs to, once a spawn gave it (always, but for the earlier Apply's).
+    owner: Option<Owner>,
     /// The instances waiting to send (a message taken) and to receive (one sent, or closing).
     sending: Vec<Waker>,
     receiving: Vec<Waker>,
+}
+
+/// The gang a channel belongs to: its identity, the instance that spawned it, and its unit, which
+/// the messages queued count toward.
+#[derive(Clone)]
+struct Owner {
+    gang: u64,
+    spawner: u64,
+    unit: Arc<Unit>,
+}
+
+/// What a limit of a class is for: a task, or a gang with its channels' messages. The memories
+/// of its tasks and the bytes of its messages queued together stay within the limit.
+struct Unit {
+    class: usize,
+    limit: u64,
+    /// The bytes of memories and of messages.
+    held: Mutex<(u64, u64)>,
+    /// The memories of the tasks of the unit that ended, added up.
+    ended: AtomicU64,
+}
+
+impl Unit {
+    fn new(class: usize, limit: u64) -> Arc<Unit> {
+        Arc::new(Unit { class, limit, held: Mutex::new((0, 0)), ended: AtomicU64::new(0) })
+    }
+
+    /// Adds `add` bytes of memories and takes `sub` from them, unless it would exceed the limit.
+    fn memory(&self, app: &App, add: u64, sub: u64) -> wasmtime::Result<()> {
+        self.hold(app, |h| (h.0 - sub + add, h.1))
+    }
+
+    /// The same for messages.
+    fn message(&self, app: &App, add: u64, sub: u64) -> wasmtime::Result<()> {
+        self.hold(app, |h| (h.0, h.1 - sub + add))
+    }
+
+    fn hold(&self, app: &App, f: impl FnOnce((u64, u64)) -> (u64, u64)) -> wasmtime::Result<()> {
+        let mut h = self.held.lock().unwrap();
+        let n = f(*h);
+        if n.0.checked_add(n.1).is_none_or(|t| t > self.limit) {
+            return Err(wasmtime::Error::new(OverLimit));
+        }
+        *h = n;
+        app.task_peaks[self.class].fetch_max(n.0 + n.1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// A task of the unit ends with memories of `mine` bytes (which never shrink).
+    fn ended(&self, app: &App, mine: u64) {
+        let sum = self.ended.fetch_add(mine, Ordering::Relaxed) + mine;
+        app.memory_peaks[self.class].fetch_max(sum, Ordering::Relaxed);
+    }
 }
 
 /// A task, as the instance that spawned it sees it.
@@ -532,60 +598,91 @@ fn wake(wakers: Vec<Waker>) {
     wakers.into_iter().for_each(Waker::wake);
 }
 
-/// The tasks an instance spawned: how many are running, and those to start as they end, in the
-/// order spawned. A task to start is not an instance yet: it has no memory, and is not one that
-/// waits (so where those running all wait, it is a deadlock).
+/// The units of a class (of the tasks an instance spawned, with the earlier Apply): how many are
+/// running, and those to start as they end, in the order spawned. A unit is a task, or the tasks
+/// of a gang, started together. A unit to start is not an instance yet: it has no memory, and
+/// is not one that waits (so where those running all wait, it is a deadlock).
 #[derive(Default)]
-struct Slots(Mutex<(usize, VecDeque<Boxed>)>);
+struct Slots(Mutex<(usize, VecDeque<Vec<Boxed>>)>);
 
 type Boxed = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
 impl Slots {
-    /// Runs `task` on `exec` once one of the `slots` is free.
-    fn start(self: &Arc<Self>, exec: &Arc<Exec>, slots: usize, task: Boxed) {
+    /// Runs `unit` on `exec` once fewer than `concurrency` are running.
+    fn start(self: &Arc<Self>, exec: &Arc<Exec>, concurrency: usize, unit: Vec<Boxed>) {
+        if unit.is_empty() {
+            return;
+        }
         let mut s = self.0.lock().unwrap();
-        if s.0 < slots {
+        if s.0 < concurrency {
             s.0 += 1;
             drop(s);
-            self.run(exec, task);
+            self.run(exec, unit);
         } else {
-            s.1.push_back(task);
+            s.1.push_back(unit);
         }
     }
 
-    /// Runs `task`, which holds a slot, and then the next to start in its slot.
-    fn run(self: &Arc<Self>, exec: &Arc<Exec>, task: Boxed) {
-        let (slots, ex) = (self.clone(), exec.clone());
-        exec.spawn(async move {
-            task.await;
-            let next = {
-                let mut s = slots.0.lock().unwrap();
-                let next = s.1.pop_front();
-                if next.is_none() {
-                    s.0 -= 1;
+    /// Runs `unit`, which holds a slot, and then the next to start in its slot once all of its tasks
+    /// have ended.
+    fn run(self: &Arc<Self>, exec: &Arc<Exec>, unit: Vec<Boxed>) {
+        let left = Arc::new(AtomicU64::new(unit.len() as u64));
+        for task in unit {
+            let (slots, ex, left) = (self.clone(), exec.clone(), left.clone());
+            exec.spawn(async move {
+                task.await;
+                if left.fetch_sub(1, Ordering::AcqRel) != 1 {
+                    return;
                 }
-                next
-            };
-            if let Some(next) = next {
-                slots.run(&ex, next);
-            }
-        });
+                let next = {
+                    let mut s = slots.0.lock().unwrap();
+                    let next = s.1.pop_front();
+                    if next.is_none() {
+                        s.0 -= 1;
+                    }
+                    next
+                };
+                if let Some(next) = next {
+                    slots.run(&ex, next);
+                }
+            });
+        }
     }
 }
 
 /// `aqr_spawn`'s work for the instance of `c`: `n` tasks of class `class` starting as `start`
-/// gives, appended to the handles; the index of their handle.
+/// gives, appended to the handles; the index of their handle. The tasks are a unit each, or
+/// one unit (a gang) of a gang class, which the channels made since the last spawn go to.
 fn spawn(c: &mut Caller<'_, State>, class: usize, start: Start, arg: u32, n: u32) -> wasmtime::Result<i32> {
     let s = c.data_mut();
     let classes = s.c.0.slots.len();
     if class >= classes {
         return violation(format!("a task of class {class} of {classes}"));
     }
-    // (with task limits, a task spawns only classes above its own: none waits holding a slot)
-    if s.own_limit() && class <= s.class {
+    let earlier = s.app.task_limits.is_empty();
+    // (a task spawns only classes above its own: none waits holding a slot)
+    if !earlier && s.task && class <= s.class {
         return violation(format!("a task of class {} spawning one of class {class}", s.class));
     }
-    let slots = match s.app.task_limits.is_empty() {
+    let gang = s.c.0.gang[class];
+    let limit = s.app.task_limits.get(class).copied().unwrap_or(u64::MAX);
+    // the gang's channels, and its unit
+    let owner = match (earlier, gang) {
+        (false, true) => {
+            let unit = Unit::new(class, limit);
+            let owner = Owner { gang: s.app.gangs.fetch_add(1, Ordering::Relaxed), spawner: s.id, unit };
+            let mut chans = s.app.chans.lock().unwrap();
+            for ch in std::mem::take(&mut s.pending) {
+                chans[ch].owner = Some(owner.clone());
+            }
+            Some(owner)
+        }
+        (false, false) if !s.pending.is_empty() => {
+            return violation(format!("a spawn of tasks of class {class}, no gang, with channels made and not given"));
+        }
+        _ => None,
+    };
+    let slots = match earlier {
         true => {
             if s.slots.len() < classes {
                 s.slots.resize_with(classes, Arc::default);
@@ -594,26 +691,39 @@ fn spawn(c: &mut Caller<'_, State>, class: usize, start: Start, arg: u32, n: u32
         }
         false => s.app.classes[class].clone(),
     };
-    let most = s.c.0.slots[class];
-    let cells: Vec<Option<Arc<Cell>>> = (0..n)
-        .map(|i| {
-            let cell = Arc::new(Cell::default());
-            let job = Job { c: s.c.clone(), app: s.app.clone(), class, start: start.clone(), arg, i };
-            let (done, app) = (cell.clone(), s.app.clone());
-            let task = Box::pin(async move {
-                let r = job.run().await;
-                // (a task failing fails the application at once: those waiting for it through
-                // channels would wait for ever)
-                if let Err(f) = &r {
-                    app.failed.lock().unwrap().get_or_insert_with(|| f.clone());
-                    app.exec.stop();
-                }
-                done.finish(r)
-            });
-            slots.start(&s.app.exec, most, task);
-            Some(cell)
-        })
-        .collect();
+    let concurrency = if earlier { s.c.0.slots[class] } else { s.app.concurrency[class] };
+    let (mut cells, mut units) = (Vec::new(), Vec::new());
+    for i in 0..n {
+        let cell = Arc::new(Cell::default());
+        // (a unit of its own for a task that is no gang's; none with the earlier Apply)
+        let unit = match (&owner, earlier) {
+            (Some(o), _) => Some(o.unit.clone()),
+            (None, false) => Some(Unit::new(class, limit)),
+            (None, true) => None,
+        };
+        let gang = owner.as_ref().map(|o| o.gang);
+        let job = Job { c: s.c.clone(), app: s.app.clone(), class, unit, gang, start: start.clone(), arg, i };
+        let (done, app) = (cell.clone(), s.app.clone());
+        units.push(Box::pin(async move {
+            let r = job.run().await;
+            // (a task failing fails the application at once: those waiting for it through
+            // channels would wait for ever)
+            if let Err(f) = &r {
+                app.failed.lock().unwrap().get_or_insert_with(|| f.clone());
+                app.exec.stop();
+            }
+            done.finish(r)
+        }) as Boxed);
+        cells.push(Some(cell));
+    }
+    if owner.is_some() {
+        // (the tasks of a gang start together)
+        slots.start(&s.app.exec, concurrency, units);
+    } else {
+        for task in units {
+            slots.start(&s.app.exec, concurrency, vec![task]);
+        }
+    }
     s.spawned.push(cells);
     Ok((s.spawned.len() - 1) as i32)
 }
@@ -624,6 +734,9 @@ struct Job {
     c: Shared,
     app: Arc<App>,
     class: usize,
+    /// The unit it counts toward (none with the earlier Apply), and its gang.
+    unit: Option<Arc<Unit>>,
+    gang: Option<u64>,
     start: Start,
     arg: u32,
     i: u32,
@@ -700,9 +813,13 @@ struct State {
     /// The outputs, their memories and (of a part module) the bytes committed so far.
     outputs: Vec<Output>,
     last_log: Option<Vec<u8>>,
-    /// Whether the instance is a task (and its class), and its result.
+    /// Whether the instance is a task (and its class, unit and gang), and its result.
     task: bool,
     class: usize,
+    unit: Option<Arc<Unit>>,
+    gang: Option<u64>,
+    /// The channels it made that no spawn has given to a gang yet.
+    pending: Vec<usize>,
     result: Vec<u8>,
     /// The tasks spawned, by handle; taken where `None`.
     spawned: Vec<Vec<Option<Arc<Cell>>>>,
@@ -711,9 +828,19 @@ struct State {
     slots: Vec<Arc<Slots>>,
 }
 
+/// What a task is: its class, the unit it counts toward and its gang.
+struct Task {
+    class: usize,
+    unit: Option<Arc<Unit>>,
+    gang: Option<u64>,
+}
+
 impl State {
-    fn new(c: Shared, app: Arc<App>, task: Option<usize>) -> State {
-        let (class, task) = (task.unwrap_or(0), task.is_some());
+    fn new(c: Shared, app: Arc<App>, task: Option<Task>) -> State {
+        let (task, class, unit, gang) = match task {
+            Some(t) => (true, t.class, t.unit, t.gang),
+            None => (false, 0, None, None),
+        };
         let id = if task { app.next.fetch_add(1, Ordering::Relaxed) } else { 0 };
         State {
             c,
@@ -726,21 +853,25 @@ impl State {
             last_log: None,
             task,
             class,
+            unit,
+            gang,
+            pending: Vec::new(),
             result: Vec::new(),
             spawned: Vec::new(),
             slots: Vec::new(),
         }
     }
 
-    /// Whether its memories are under a limit of their own (a task's, with task limits) rather
-    /// than in the application's total.
-    fn own_limit(&self) -> bool {
-        self.task && !self.app.task_limits.is_empty()
-    }
-
-    /// Whether a task spawned is yet to be taken.
-    fn untaken(&self) -> bool {
-        self.spawned.iter().flatten().any(Option::is_some)
+    /// Why the instance may not end as it is: a task spawned is yet to be taken, or channels made
+    /// are yet to be given to a gang.
+    fn left_over<T>(&self) -> Option<Decoded<T>> {
+        if self.spawned.iter().flatten().any(Option::is_some) {
+            return Some(invalid("tasks not taken"));
+        }
+        if !self.pending.is_empty() {
+            return Some(invalid("channels made and not given to a gang"));
+        }
+        None
     }
 
     /// The task `i` of handle `h`, not taken.
@@ -752,8 +883,12 @@ impl State {
 impl Drop for State {
     /// The memories given back, and the channels this instance sends to closed.
     fn drop(&mut self) {
-        if !self.own_limit() {
-            let _ = self.app.account(0, self.mine);
+        match &self.unit {
+            Some(u) => {
+                u.ended(&self.app, self.mine);
+                drop(u.memory(&self.app, 0, self.mine))
+            }
+            None => drop(self.app.account(0, self.mine)),
         }
         let mut waiting = Vec::new();
         for ch in self.app.chans.lock().unwrap().iter_mut().filter(|ch| ch.sender == Some(self.id)) {
@@ -767,11 +902,10 @@ impl Drop for State {
 impl ResourceLimiter for State {
     fn memory_growing(&mut self, current: usize, desired: usize, _: Option<usize>) -> wasmtime::Result<bool> {
         let mine = self.mine - current as u64 + desired as u64;
-        match self.own_limit() {
-            // (a task under its class's limit on its own)
-            true if mine > self.app.task_limits[self.class] => return Err(wasmtime::Error::new(OverLimit)),
-            true => {}
-            false => self.app.account(desired as u64, current as u64)?,
+        match &self.unit {
+            // (a task under its class's limit, with the other tasks of its gang and its channels)
+            Some(u) => u.memory(&self.app, desired as u64, current as u64)?,
+            None => self.app.account(desired as u64, current as u64)?,
         }
         self.mine = mine;
         match self.task {
@@ -1058,10 +1192,13 @@ impl Shared {
             limit: memory_limit,
             task_limits: task_limits.to_vec(),
             classes: c.slots.iter().map(|_| Arc::default()).collect(),
+            concurrency: c.slots.clone(),
+            gangs: AtomicU64::new(0),
             total: Mutex::new(0),
             peak: AtomicU64::new(0),
             instance_peak: AtomicU64::new(0),
             task_peaks: c.slots.iter().map(|_| AtomicU64::new(0)).collect(),
+            memory_peaks: c.slots.iter().map(|_| AtomicU64::new(0)).collect(),
             exec: exec.clone(),
             chans: Mutex::default(),
             next: AtomicU64::new(1),
@@ -1097,8 +1234,8 @@ impl Shared {
             if let Err(e) = entry.call_async(&mut store, &args, &mut []).await {
                 return Err(failure(&store, e));
             }
-            if store.data().untaken() {
-                return invalid("tasks not taken");
+            if let Some(e) = store.data().left_over() {
+                return e;
             }
             if c.part {
                 if store.data().outputs.iter().any(|o| o.done != o.buf.len()) {
@@ -1141,6 +1278,7 @@ impl Shared {
                 working: app.peak.load(Ordering::Relaxed).saturating_sub(imported),
                 instance: app.instance_peak.load(Ordering::Relaxed).saturating_sub(imported),
                 tasks: app.task_peaks.iter().map(|p| p.load(Ordering::Relaxed)).collect(),
+                task_memories: app.memory_peaks.iter().map(|p| p.load(Ordering::Relaxed)).collect(),
                 ok: r.is_ok(),
             });
         }
@@ -1150,14 +1288,14 @@ impl Shared {
 
 /// The pages of the working memory of `wasm` as it is instantiated: the minimum of its import
 /// (the module's data and stack), for its memory plan ([`aqr_formula::Usage`]).
-/// The task slots of each class of tasks of `wasm` (its custom section `aqr_task_slots`; none
-/// where it has none), unchecked.
+/// The task slots of each class of tasks of `wasm` (its custom section `aqr_task_slots`, the low
+/// 7 bits of each byte; none where it has none), unchecked.
 pub fn task_slots(wasm: &[u8]) -> Vec<u64> {
     for p in wp::Parser::new(0).parse_all(wasm) {
         if let Ok(wp::Payload::CustomSection(c)) = p
             && c.name() == TASK_SLOTS
         {
-            return c.data().iter().map(|&n| n as u64).collect();
+            return c.data().iter().map(|&n| (n & 0x7f) as u64).collect();
         }
     }
     Vec::new()
@@ -1226,7 +1364,11 @@ pub struct Applied {
     /// Of that, the most the application's instance held (its working memory, the messages
     /// queued aside), and the most one task of each class did (its working memory).
     pub instance: u64,
+    /// The most a unit of each class held at once: one task's memories, or a gang's with the
+    /// messages queued in its channels; and the most the memories of the tasks of a unit came to
+    /// added up as each ended (`task_memories`).
     pub tasks: Vec<u64>,
+    pub task_memories: Vec<u64>,
     pub ok: bool,
 }
 
@@ -1247,7 +1389,8 @@ impl Job {
     /// Runs the task, giving its result.
     async fn run(self) -> Decoded<Vec<u8>> {
         let c = &*self.c.0;
-        let mut store = Store::new(&ENGINE, State::new(self.c.clone(), self.app.clone(), Some(self.class)));
+        let task = Task { class: self.class, unit: self.unit.clone(), gang: self.gang };
+        let mut store = Store::new(&ENGINE, State::new(self.c.clone(), self.app.clone(), Some(task)));
         store.limiter(|s| s);
         let pages = match &self.start {
             Start::Copy(s) => s.as_slice().len() / 65536,
@@ -1279,8 +1422,8 @@ impl Job {
         if let Err(e) = task.call_async(&mut store, (self.arg as i32, self.i as i32)).await {
             return Err(failure(&store, e));
         }
-        if store.data().untaken() {
-            return invalid("tasks not taken");
+        if let Some(e) = store.data().left_over() {
+            return e;
         }
         Ok(std::mem::take(&mut store.data_mut().result))
     }
@@ -1325,8 +1468,24 @@ fn with_chan<R>(
     r
 }
 
-/// Takes the end `end` of a channel for the instance `id`: a violation if another has it.
-fn end_of(end: &mut Option<u64>, id: u64, what: &str) -> wasmtime::Result<()> {
+/// Takes the sender's end of a channel (the receiver's, if not `send`) for the instance of
+/// state `st`: a violation if another has it. Where the application has task limits, the
+/// channel must belong to a gang, the instance a task of it or the one that spawned it, and
+/// it must not have the other end.
+fn take_end(chan: &mut Chan, send: bool, st: &State) -> wasmtime::Result<()> {
+    let (id, what) = (st.id, if send { "sending" } else { "receiving" });
+    if !st.app.task_limits.is_empty() {
+        let Some(o) = &chan.owner else {
+            return violation(format!("{what} on a channel before a spawn of a gang gave it"));
+        };
+        if st.gang != Some(o.gang) && o.spawner != id {
+            return violation(format!("{what} on a channel by an instance outside its gang"));
+        }
+        if (if send { chan.receiver } else { chan.sender }) == Some(id) {
+            return violation("both ends of a channel taken by one instance".into());
+        }
+    }
+    let end = if send { &mut chan.sender } else { &mut chan.receiver };
     match *end.get_or_insert(id) == id {
         true => Ok(()),
         false => violation(format!("{what} by two instances")),
@@ -1523,7 +1682,7 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
                 Ok(())
             },
         ),
-        HostFn::Chan => Func::wrap(&mut *store, |c: Caller<'_, State>, cap: i32| -> wasmtime::Result<i32> {
+        HostFn::Chan => Func::wrap(&mut *store, |mut c: Caller<'_, State>, cap: i32| -> wasmtime::Result<i32> {
             if cap <= 0 {
                 return violation(format!("aqr_chan({cap})"));
             }
@@ -1534,10 +1693,17 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
                 closed: false,
                 sender: None,
                 receiver: None,
+                owner: None,
                 sending: Vec::new(),
                 receiving: Vec::new(),
             });
-            Ok((chans.len() - 1) as i32)
+            let index = chans.len() - 1;
+            drop(chans);
+            // (the earlier Apply's channels belong to no gang)
+            if !c.data().app.task_limits.is_empty() {
+                c.data_mut().pending.push(index);
+            }
+            Ok(index as i32)
         }),
         HostFn::Send => Func::wrap_async(&mut *store, |c: Caller<'_, State>, (ch, ptr, len): (i32, i32, i32)| {
             Box::new(async move {
@@ -1545,10 +1711,10 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
                     return violation(format!("aqr_send({ch}, {ptr}, {len}) out of bounds"));
                 };
                 let mut msg = Some(w.data(&c)[r].to_vec());
-                let (id, app) = (c.data().id, c.data().app.clone());
+                let app = c.data().app.clone();
                 poll_fn(|cx| {
                     let r = with_chan(&c, ch, |chan, waiting| {
-                        end_of(&mut chan.sender, id, "sending")?;
+                        take_end(chan, true, c.data())?;
                         if chan.closed {
                             return violation(format!("aqr_send({ch}) after closing"));
                         }
@@ -1557,7 +1723,10 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
                             return Ok(false);
                         }
                         let m = msg.take().unwrap();
-                        app.account(m.len() as u64, 0)?;
+                        match &chan.owner {
+                            Some(o) => o.unit.message(&app, m.len() as u64, 0)?,
+                            None => app.account(m.len() as u64, 0)?,
+                        }
                         chan.msgs.push_back(m);
                         waiting.append(&mut chan.receiving);
                         Ok(true)
@@ -1573,10 +1742,10 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
         }),
         HostFn::Recv => Func::wrap_async(&mut *store, |mut c: Caller<'_, State>, (ch, dst, cap): (i32, i32, i32)| {
             Box::new(async move {
-                let (id, app) = (c.data().id, c.data().app.clone());
+                let app = c.data().app.clone();
                 let msg = poll_fn(|cx| {
                     let r = with_chan(&c, ch, |chan, waiting| {
-                        end_of(&mut chan.receiver, id, "receiving")?;
+                        take_end(chan, false, c.data())?;
                         let Some(m) = chan.msgs.front() else {
                             if chan.closed {
                                 return Ok(Some(Err(-1)));
@@ -1588,7 +1757,10 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
                             return Ok(Some(Err(m.len() as i32)));
                         }
                         let m = chan.msgs.pop_front().unwrap();
-                        app.account(0, m.len() as u64)?;
+                        match &chan.owner {
+                            Some(o) => o.unit.message(&app, 0, m.len() as u64)?,
+                            None => app.account(0, m.len() as u64)?,
+                        }
                         waiting.append(&mut chan.sending);
                         Ok(Some(Ok(m)))
                     });
@@ -1612,9 +1784,8 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
             })
         }),
         HostFn::Close => Func::wrap(&mut *store, |c: Caller<'_, State>, ch: i32| -> wasmtime::Result<()> {
-            let id = c.data().id;
             with_chan(&c, ch, |chan, waiting| {
-                end_of(&mut chan.sender, id, "sending")?;
+                take_end(chan, true, c.data())?;
                 chan.closed = true;
                 waiting.append(&mut chan.receiving);
                 Ok(())

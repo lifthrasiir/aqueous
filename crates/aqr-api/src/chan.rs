@@ -3,7 +3,10 @@
 //! while one is empty.
 //!
 //! The ends are numbers, which tasks find in the copy of the working memory they start with:
-//! [`channel`] makes them before the tasks that use them are spawned. Each end is the first
+//! [`channel`] makes them before the tasks that use them are spawned. The channels made belong
+//! to the next spawn of the instance that made them, which must be one of a gang
+//! ([`crate::task::spawn_gang`]); only the tasks of that gang and the instance that spawned it
+//! take their ends, and not both ends of one by one instance. Each end is the first
 //! instance's to use it (the module's or a task's), and another using it fails the application,
 //! so that what an instance receives does not depend on when the others run. A channel is
 //! closed by its sender ([`Sender::close`]), or as the task that sent to it ends: a task that

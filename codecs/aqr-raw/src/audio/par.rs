@@ -518,8 +518,8 @@ pub mod apart {
 
     /// The memory of the pipeline over what the module took before it (`top` bytes of the
     /// stack, the working memory up to the end of its page then), as [`run`] takes it, of
-    /// `workers` workers and as many task slots: the most the instance and its tasks take at
-    /// once, however they run, and the messages its channels hold at most.
+    /// `workers` workers: the most the instance takes, and the most the gang of its tasks (which
+    /// are started together) take, with the messages its channels hold at most.
     ///
     /// - `front`, `errors`, `work`: what the first stage, the error stage (its residual
     ///   decoder) and each worker (its scratch, and what it takes as it works) take over their
@@ -537,8 +537,8 @@ pub mod apart {
     }
 
     impl Plan {
-        /// The limits of the instance (with what the channels' messages may hold, the tasks being
-        /// of no gang) and of a task of the one class, and what the messages may hold.
+        /// The limits of the instance and of the gang (its tasks, whose memories add up, and the
+        /// messages its channels hold, which come with it), and what the messages may hold.
         pub fn bytes(&self) -> ((u64, u64), u64) {
             use aqr_api::stack::block;
             let pages = |n: u64| n.div_ceil(1 << 16) << 16;
@@ -550,14 +550,15 @@ pub mod apart {
             let top = self.top + 2 * block(8 * w);
             let task = |own: u64| pages(top).max(pages(top + own));
             let lms = block(8 * size_of::<crate::audio::model::Lms>() as u64);
-            let tasks = task(item + frame + self.front)
-                .max(task(self.errors + 2 * item + frame))
-                .max(task(lms + 2 * item + frame))
-                .max(task(item + frame + self.work + out));
+            let queued = CAP as u64 * ((2 + w) * r.item() as u64 + w * r.out as u64);
+            let gang = task(item + frame + self.front)
+                + task(self.errors + 2 * item + frame)
+                + task(lms + 2 * item + frame)
+                + w * task(item + frame + self.work + out)
+                + queued;
             // (the instance: the tasks' handles, then what it starts, its buffer of results)
             let instance = pages(top + block(3 + w) + self.start + out);
-            let queued = CAP as u64 * ((2 + w) * r.item() as u64 + w * r.out as u64);
-            ((instance + queued, tasks), queued)
+            ((instance, gang), queued)
         }
     }
 
@@ -756,7 +757,7 @@ pub mod apart {
                 }
             };
             // SAFETY: dropped below, before `task` goes
-            let tasks = unsafe { aqr_api::task::spawn(3 + workers, &task) };
+            let tasks = unsafe { aqr_api::task::spawn_gang(0, 3 + workers, &task) };
             let mut s = start();
             let mut rx = Vec::with_capacity(rooms.out);
             let (mut k, mut open) = (0, u64::MAX >> (64 - workers));

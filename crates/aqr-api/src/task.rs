@@ -86,14 +86,41 @@ pub unsafe fn spawn<'a, F: Fn(usize, &mut Vec<u8>) + Sync + 'a>(n: usize, f: &'a
 }
 
 /// [`spawn`] of tasks of class `class` of the module (the bytes of its custom section
-/// `aqr_task_slots`; the application's instance spawns any class, a task one above its own).
-/// Natively the class is of no matter: every task has a thread.
+/// `aqr_task_slots`; the application's instance spawns any class, a task one above its own), a
+/// class that is not a gang class. The channels made since the instance's last spawn belong to
+/// a gang (see [`spawn_gang`]): there are none here. Natively the class is of no matter: every
+/// task has a thread.
 ///
 /// # Safety
 /// As [`spawn`].
 pub unsafe fn spawn_class<'a, F: Fn(usize, &mut Vec<u8>) + Sync + 'a>(class: u32, n: usize, f: &'a F) -> Tasks<'a> {
+    // SAFETY: as the caller makes sure
+    unsafe { spawn_of(class, false, n, f) }
+}
+
+/// [`spawn_class`] of a gang class: the `n` tasks are a gang, which the channels made since the
+/// instance's last spawn are given to (and no other instance's tasks may take their ends). The
+/// class is a gang class in the module's `aqr_task_slots` (the top bit of its byte). The gang
+/// is started together, so its tasks may wait for each other as channels make them; its memory
+/// limit is of all its tasks and the messages queued in its channels.
+///
+/// # Safety
+/// As [`spawn`].
+pub unsafe fn spawn_gang<'a, F: Fn(usize, &mut Vec<u8>) + Sync + 'a>(class: u32, n: usize, f: &'a F) -> Tasks<'a> {
+    // SAFETY: as the caller makes sure
+    unsafe { spawn_of(class, true, n, f) }
+}
+
+unsafe fn spawn_of<'a, F: Fn(usize, &mut Vec<u8>) + Sync + 'a>(
+    class: u32,
+    gang: bool,
+    n: usize,
+    f: &'a F,
+) -> Tasks<'a> {
     #[cfg(not(target_family = "wasm"))]
     let _ = class;
+    #[cfg(target_family = "wasm")]
+    let _ = gang;
     #[cfg(target_family = "wasm")]
     let t = Tasks {
         handle: spawn_record(class, run::<F>, f as *const F as *const (), n),
@@ -104,7 +131,8 @@ pub unsafe fn spawn_class<'a, F: Fn(usize, &mut Vec<u8>) + Sync + 'a>(class: u32
     let rec = Record { run: run::<F>, data: f as *const F as *const () };
     // SAFETY: `f` outlives the threads, joined as the tasks are dropped (as the caller makes sure)
     #[cfg(not(target_family = "wasm"))]
-    let t = Tasks { threads: unsafe { crate::sys::spawn(&rec, n) }, taken: alloc::vec![false; n], _f: PhantomData };
+    let t =
+        Tasks { threads: unsafe { crate::sys::spawn(&rec, n, gang) }, taken: alloc::vec![false; n], _f: PhantomData };
     t
 }
 

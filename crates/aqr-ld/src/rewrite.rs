@@ -12,9 +12,10 @@
 //!   `aqr_task_body` (`aqr-api`'s);
 //! - every other export but the entry point goes, and so does whatever only they used;
 //! - what only panics need goes (see `trim`), and so do the custom sections: names, producers
-//!   (walrus's too), the linker's relocations; but for `aqr_task_slots` (the task slots, that
-//!   `aqr-modules`'s `whole!` defines), which a module spawning tasks has once, of one byte from 1
-//!   to 64, and one that spawns none loses.
+//!   (walrus's too), the linker's relocations; but for `aqr_task_slots` (the task classes: a byte
+//!   each of 1 to 64 slots in the low 7 bits and the top bit of a gang class, that
+//!   `aqr-modules`'s `whole!` defines), which a module spawning tasks has once, and one that
+//!   spawns none loses.
 
 use std::collections::HashMap;
 
@@ -228,10 +229,10 @@ pub fn rewrite(wasm: &[u8]) -> Result<Vec<u8>, String> {
     // (as the linker wrote it: sections of one name from several objects are one, concatenated)
     let slots = task_slots(wasm)?;
     match (spawns, slots) {
-        (true, Some(n)) if !n.is_empty() && n.iter().all(|b| (1..=64).contains(b)) => {
+        (true, Some(n)) if !n.is_empty() && n.iter().all(|b| (1..=64).contains(&(b & 0x7f))) => {
             m.customs.add(walrus::RawCustomSection { name: TASK_SLOTS.into(), data: n });
         }
-        (true, Some(_)) => return Err(format!("{TASK_SLOTS} not bytes from 1 to 64 (two of them?)")),
+        (true, Some(_)) => return Err(format!("{TASK_SLOTS} not bytes of 1 to 64 slots (two of them?)")),
         (true, None) => return Err(format!("tasks spawned without {TASK_SLOTS} (whole!'s slots)")),
         (false, _) => {}
     }

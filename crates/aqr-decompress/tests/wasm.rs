@@ -1804,21 +1804,28 @@ fn tasks_of_regions() {
     invalid(apply_v2(&regions(Some(2)), &[b"ab"], &[2], u64::MAX, &[u64::MAX, u64::MAX]), "class 2");
 }
 
-/// `incr`'s module (a task per byte) with the current `aqr_spawn`, of one region of all of the
-/// working memory as aqr-api's tasks start.
-fn incr_spawn() -> String {
-    incr("")
-        .replace(
-            r#"(import "aqr" "aqr_spawn" (func $spawn (param i32 i32) (result i32)))"#,
-            r#"(import "aqr" "aqr_spawn" (func $spawn5 (param i32 i32 i32 i32 i32) (result i32)))"#,
-        )
-        .replace(
-            r#"(func (export "aqr_task")"#,
-            r#"(func $spawn (param $arg i32) (param $n i32) (result i32)
+/// `wat` (written for the earlier `aqr_spawn`, `$spawn` of an argument and a count) with the
+/// current `aqr_spawn`, of one region of all of the working memory as aqr-api's tasks start,
+/// and `$spawnc` of a class besides.
+fn current(wat: &str) -> String {
+    wat.replace(
+        r#"(import "aqr" "aqr_spawn" (func $spawn (param i32 i32) (result i32)))"#,
+        r#"(import "aqr" "aqr_spawn" (func $spawn5 (param i32 i32 i32 i32 i32) (result i32)))"#,
+    )
+    .replace(
+        r#"(func (export "aqr_task")"#,
+        r#"(func $spawnc (param $class i32) (param $arg i32) (param $n i32) (result i32)
                 (i32.store (i32.const 0xf004) (i32.shl (memory.size 0) (i32.const 16)))
-                (call $spawn5 (i32.const 0) (i32.const 1) (i32.const 0xf000) (local.get $arg) (local.get $n)))
+                (call $spawn5 (local.get $class) (i32.const 1) (i32.const 0xf000) (local.get $arg) (local.get $n)))
+            (func $spawn (param $arg i32) (param $n i32) (result i32)
+                (call $spawnc (i32.const 0) (local.get $arg) (local.get $n)))
             (func (export "aqr_task")"#,
-        )
+    )
+}
+
+/// `incr`'s module (a task per byte) with the current `aqr_spawn`.
+fn incr_spawn() -> String {
+    current(&incr(""))
 }
 
 /// The current `aqr_spawn` (five parameters) is the only spawn of a module that is not of a release,
@@ -1849,6 +1856,98 @@ fn spawn_of_one_region() {
     invalid(load_earlier(&v2), "aqr_spawn_v2");
 }
 
+/// The pipeline of `piped` as one gang (the class 0 a gang class of a slot): the channels made
+/// before the spawn are the gang's, and its two tasks start together.
+fn gang_piped(before: &str, after: &str) -> String {
+    current(&piped(before, after)).replace(r#""aqr_task_slots" "\08""#, r#""aqr_task_slots" "\81""#)
+}
+
+/// Gangs: the channels made belong to the gang of the next spawn of the instance, which must be of
+/// a gang class; only the gang's tasks and the instance that spawned it take their ends, not both
+/// of a channel, and what they hold (the tasks' memories and the messages queued) is the gang's
+/// limit.
+#[test]
+fn gangs() {
+    let pages = |n: u64| n << 16;
+    let ok = gang_piped("", "");
+    // (the instance 4 pages; the gang two tasks of a page each, and the messages 4 bytes at most)
+    let run = |m: &str, input: &[u8], gang: u64| apply_v2(m, &[input], &[input.len() as u64], pages(4), &[gang]);
+    assert_eq!(run(&ok, b"abc", pages(2) + 4).unwrap(), [b"cde"]);
+    assert_eq!(run(&ok, b"", pages(2) + 4).unwrap(), [b""]);
+    let many: Vec<u8> = (0..3000u32).map(|i| (i % 200) as u8).collect();
+    let want: Vec<u8> = many.iter().map(|b| b + 2).collect();
+    for _ in 0..10 {
+        assert_eq!(run(&ok, &many, pages(2) + 4).unwrap(), std::slice::from_ref(&want));
+    }
+    // the tasks' memories are the gang's: short of the two, or of the messages, is a resource failure
+    assert!(matches!(run(&ok, b"abc", pages(2) - 1), Err(Failure::Resource(_))));
+    assert!(matches!(run(&ok, b"abc", pages(2)), Err(Failure::Resource(_))));
+    // (and the instance's limit does not hold the messages: 4 pages, the memories alone)
+    assert_eq!(apply_v2(&ok, &[b"abc"], &[3], pages(4), &[u64::MAX]).unwrap(), [b"cde"]);
+    // channels made and a spawn of tasks that are no gang
+    let plain = current(&piped("", ""));
+    invalid(apply_v2(&plain, &[b"abc"], &[3], u64::MAX, &[u64::MAX]), "no gang");
+    // channels never given to a gang: made and the instance ends; a channel used before its gang
+    let spawnless = |body: &str| {
+        format!(
+            r#"(module {MEMORIES} {TASKS} {CHANS}
+                (func (export "aqr_task") (param i32 i32))
+                (func (export "aqr_apply_whole") (param i64 i64 i64) (local $c i32) {body}))"#
+        )
+    };
+    let made = current(&spawnless("(drop (call $chan (i32.const 1)))"));
+    invalid(apply_v2(&made, &[b""], &[0], u64::MAX, &[u64::MAX]), "not given to a gang");
+    let early = current(&spawnless("(call $send (call $chan (i32.const 1)) (i32.const 0) (i32.const 0))"));
+    invalid(apply_v2(&early, &[b""], &[0], u64::MAX, &[u64::MAX]), "before a spawn");
+    // both ends of a channel taken by one instance (the instance that spawned the gang)
+    let both = current(&spawnless(
+        r#"(local.set $c (call $chan (i32.const 1)))
+           (drop (call $spawn (i32.const 0) (i32.const 0)))
+           (call $send (local.get $c) (i32.const 0) (i32.const 1))
+           (drop (call $recv (local.get $c) (i32.const 0x4000) (i32.const 1)))"#,
+    ))
+    .replace(r#""aqr_task_slots" "\08""#, r#""aqr_task_slots" "\81""#);
+    invalid(apply_v2(&both, &[b""], &[0], u64::MAX, &[u64::MAX]), "both ends");
+    // a task that is no gang's taking an end: classes 0 (a gang) and 1 (not), a task of class 1 sends
+    let outside = format!(
+        r#"(module {MEMORIES} {TASKS} {CHANS}
+            (func (export "aqr_task") (param $arg i32) (param $i i32)
+                (if (i32.eq (local.get $arg) (i32.const 1))
+                    (then (call $send (i32.const 0) (i32.const 0) (i32.const 1)))))
+            (func (export "aqr_apply_whole") (param i64 i64 i64) (local $h i32)
+                (drop (call $chan (i32.const 1)))
+                (local.set $h (call $spawnc (i32.const 0) (i32.const 0) (i32.const 1)))
+                (drop (call $join (local.get $h) (i32.const 0)))
+                (call $take (local.get $h) (i32.const 0) (i32.const 0) (i32.const 0))
+                (local.set $h (call $spawnc (i32.const 1) (i32.const 1) (i32.const 1)))
+                (drop (call $join (local.get $h) (i32.const 0)))
+                (call $take (local.get $h) (i32.const 0) (i32.const 0) (i32.const 0))))"#
+    );
+    let outside = current(&outside).replace(r#""aqr_task_slots" "\08""#, r#""aqr_task_slots" "\81\02""#);
+    invalid(apply_v2(&outside, &[b""], &[0], u64::MAX, &[u64::MAX, u64::MAX]), "outside its gang");
+    // a task ending with channels it made not given to a gang
+    let task_made = format!(
+        r#"(module {MEMORIES} {TASKS} {CHANS}
+            (func (export "aqr_task") (param i32 i32) (drop (call $chan (i32.const 1))))
+            (func (export "aqr_apply_whole") (param i64 i64 i64) (local $h i32)
+                (local.set $h (call $spawn (i32.const 0) (i32.const 1)))
+                (drop (call $join (local.get $h) (i32.const 0)))))"#
+    );
+    invalid(apply_v2(&current(&task_made), &[b""], &[0], u64::MAX, &[u64::MAX]), "not given to a gang");
+}
+
+/// The tasks of a gang start together: nine tasks of which eight wait for the ninth need nine
+/// at once, which a class of one slot (a gang is one unit) allows, where as tasks eight slots
+/// would not (`task_slots`: a deadlock).
+#[test]
+fn gang_starts_together() {
+    let input: Vec<u8> = (0..9).map(|b| b + 0x41).collect();
+    let gang = current(&slotted(Some(8))).replace(r#""aqr_task_slots" "\08""#, r#""aqr_task_slots" "\81""#);
+    // (nine tasks of a page each, and the messages of 128 channels: one byte each)
+    let limit = (9 << 16) + 0x100;
+    assert_eq!(apply_v2(&gang, &[&input], &[9], u64::MAX, &[limit]).unwrap(), [&input[..]]);
+}
+
 /// The task slots of a module: one custom section of one byte from 1 to 64 where it spawns
 /// tasks, none where it does not.
 #[test]
@@ -1859,13 +1958,17 @@ fn task_slots_declared() {
     invalid(load_earlier(&with("\\00")), "aqr_task_slots");
     invalid(load_earlier(&with("\\41")), "aqr_task_slots");
     invalid(load_earlier(&with("\\08\\00")), "aqr_task_slots");
-    invalid(load_earlier(&with("\\88")), "aqr_task_slots");
+    invalid(load_earlier(&with("\\80")), "aqr_task_slots");
     invalid(
         load_earlier(&ok.to_string().replacen("(module", r#"(module (@custom "aqr_task_slots" "\08")"#, 1)),
         "aqr_task_slots",
     );
     invalid(load_earlier(&with("\\c0\\00")), "aqr_task_slots");
     assert!(load_earlier(&with("\\40")).is_ok());
+    // a gang class, of 8 slots or 64
+    assert!(load_earlier(&with("\\88")).is_ok());
+    assert!(load_earlier(&with("\\c0")).is_ok());
+    assert!(load_earlier(&with("\\08\\88")).is_ok());
     let plain = r#"(module (import "aqr" "aqr_memory" (memory 1)) (@custom "aqr_task_slots" "\08")
         (func (export "aqr_apply_whole") (param i64)))"#;
     invalid(load_earlier(plain), "aqr_task_slots");
@@ -1879,9 +1982,10 @@ fn plan_holds(what: &str, f: Formula, want: &[u8]) {
 }
 
 /// [`plan_holds`] of a module whose channels may hold `queued(usage)` bytes of messages in
-/// its instance's plan: the instance's working memory with them within its plan, the instance's
-/// alone the rest of it to the page, and the most a task of each class took its plan to the
-/// page.
+/// the plan of its class 0, a gang class: the most the instance took its plan to the page, and
+/// the memories of the tasks of a unit of each class added up the plan to the page (a gang's
+/// tasks do not all live at once in a short stream: the sum is of the ones that ended; and the
+/// messages its channels queue are up to the plan), the most it held at once within it.
 fn plan_holds_queued(what: &str, mut f: Formula, want: &[u8], queued: impl Fn(&aqr_formula::Usage) -> u64) {
     let pages = |n: u64| n.div_ceil(65536) * 65536;
     let Node::Apply(a) = &f.root else { panic!("{what}: not an application") };
@@ -1927,16 +2031,19 @@ fn plan_holds_queued(what: &str, mut f: Formula, want: &[u8], queued: impl Fn(&a
     assert!(!mine.is_empty(), "{what}: not applied");
     for a in mine {
         assert!(a.working <= plan.instance, "{what}: working {} past {}", a.working, plan.instance);
-        let held = plan.instance - queued;
         assert!(
-            a.instance <= held && held - a.instance < 65536,
-            "{what}: instance plan {} ({queued} queued), took {}",
+            a.instance <= plan.instance && plan.instance - a.instance < 65536,
+            "{what}: instance plan {}, took {}",
             plan.instance,
             a.instance
         );
         assert_eq!(a.tasks.len(), plan.tasks.len(), "{what}: classes");
-        for (c, (&took, &p)) in a.tasks.iter().zip(&plan.tasks).enumerate() {
-            assert!(took <= p && p - took < 65536, "{what}: class {c}: plan {p}, took {took}");
+        for (c, &p) in plan.tasks.iter().enumerate() {
+            // (a gang's limit also holds the messages its channels may queue, which only the
+            // module's input decides how many it does)
+            let (took, p) = (a.task_memories[c], p - queued * (c == 0) as u64);
+            assert!(took <= p && p - took < 65536, "{what}: class {c}: plan {p} ({queued} queued), took {took}");
+            assert!(a.tasks[c] <= plan.tasks[c], "{what}: class {c}: plan {}, took {}", plan.tasks[c], a.tasks[c]);
         }
     }
 }

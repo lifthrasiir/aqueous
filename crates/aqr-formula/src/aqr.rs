@@ -1235,10 +1235,13 @@ fn stand_in_name(w: &[u8]) -> Option<&str> {
 }
 
 /// The task slots of Wasm module `w` (its custom section `aqr_task_slots`, the spec's "Tasks"),
-/// 0 where it has none, or not a valid one (which loading it fails on).
+/// those of its classes added up (the units that may run at once), 0 where it has none, or not
+/// a valid one (which loading it fails on).
 fn task_slots(w: &[u8]) -> u64 {
     match custom_section(w, "aqr_task_slots") {
-        Some(&[n @ 1..=64]) => n.into(),
+        Some(b) if !b.is_empty() && b.iter().all(|&n| matches!(n & 0x7f, 1..=64)) => {
+            b.iter().map(|&n| u64::from(n & 0x7f)).sum()
+        }
         _ => 0,
     }
 }

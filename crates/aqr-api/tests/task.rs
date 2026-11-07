@@ -84,7 +84,7 @@ aqr_api::entry! {
                 tx1.close();
             }
         };
-        let _t = unsafe { task::spawn(2, &f) };
+        let _t = unsafe { task::spawn_gang(0, 2, &f) };
         let mut at = 0;
         while let Some(m) = rx1.recv() {
             Output::<0>::write(at, &m);
@@ -97,10 +97,71 @@ aqr_api::entry! {
     // the module sending to the channel its task sends to
     whole fn two_senders(params_len, in0_len, size) {
         let (tx, rx) = chan::channel(4);
-        tx.send(b"a");
         let f = |_: usize, _: &mut Vec<u8>| tx.send(b"b");
-        unsafe { task::spawn(1, &f) }.join(0);
+        let mut t = unsafe { task::spawn_gang(0, 1, &f) };
+        tx.send(b"a");
+        t.join(0);
         rx.recv();
+    }
+}
+
+aqr_api::entry! {
+    // channels made and a spawn of tasks that are no gang
+    whole fn plain_spawn(params_len, in0_len, size) {
+        let _c = chan::channel(1);
+        let f = |_: usize, _: &mut Vec<u8>| {};
+        unsafe { task::spawn(1, &f) }.join(0);
+    }
+}
+
+aqr_api::entry! {
+    // channels made and never given to a gang
+    whole fn never_given(params_len, in0_len, size) {
+        let _c = chan::channel(1);
+    }
+}
+
+aqr_api::entry! {
+    // both ends of a channel taken by the module
+    whole fn both_ends(params_len, in0_len, size) {
+        let (tx, rx) = chan::channel(1);
+        let f = |_: usize, _: &mut Vec<u8>| {};
+        let _t = unsafe { task::spawn_gang(0, 1, &f) };
+        tx.send(b"a");
+        rx.recv();
+    }
+}
+
+aqr_api::entry! {
+    // a channel taken before a spawn gave it
+    whole fn not_yet(params_len, in0_len, size) {
+        let (tx, _rx) = chan::channel(1);
+        tx.send(b"a");
+    }
+}
+
+aqr_api::entry! {
+    // a task that is no gang's taking an end of the gang's channel
+    whole fn outside_gang(params_len, in0_len, size) {
+        let (tx, _rx) = chan::channel(1);
+        let nothing = |_: usize, _: &mut Vec<u8>| {};
+        let _g = unsafe { task::spawn_gang(0, 1, &nothing) };
+        let f = |_: usize, _: &mut Vec<u8>| tx.send(b"a");
+        unsafe { task::spawn_class(1, 1, &f) }.join(0);
+    }
+}
+
+aqr_api::entry! {
+    // a gang's task taking the end of a channel of the instance's before the gang's spawn, which
+    // another gang's task made: the tasks of a gang are all a gang's
+    whole fn made_by_task(params_len, in0_len, size) {
+        let g = |_: usize, _: &mut Vec<u8>| {
+            let (tx, _rx) = chan::channel(1);
+            // (a task's channels are given to the gang it spawns)
+            let f = |_: usize, _: &mut Vec<u8>| tx.send(b"a");
+            unsafe { task::spawn_gang(1, 1, &f) }.join(0);
+        };
+        unsafe { task::spawn_gang(0, 1, &g) }.join(0);
     }
 }
 
@@ -112,4 +173,20 @@ fn channels() {
     assert_eq!(apply(&piped::ENTRY, &[b""], &[], b"", &[0]).unwrap(), [b""]);
     let e = apply(&two_senders::ENTRY, &[b""], &[], b"", &[1]).unwrap_err();
     assert!(e.what.contains("two instances"), "{e:?}");
+}
+
+/// Channels belong to the next spawn of their maker, which is of a gang; their ends are taken
+/// by that gang's tasks or the instance that spawned it, one end by one instance.
+#[test]
+fn channel_ownership() {
+    let fails = |e: &aqr_api::emu::Entry, what: &str| {
+        let e = apply(e, &[b""], &[], b"", &[0]).unwrap_err();
+        assert!(e.what.contains(what), "{e:?}");
+    };
+    fails(&plain_spawn::ENTRY, "no gang");
+    fails(&never_given::ENTRY, "not given to a gang");
+    fails(&both_ends::ENTRY, "both ends");
+    fails(&not_yet::ENTRY, "before a spawn");
+    fails(&outside_gang::ENTRY, "outside its gang");
+    assert!(apply(&made_by_task::ENTRY, &[b""], &[], b"", &[0]).is_ok());
 }

@@ -7,4 +7,4 @@
 #[global_allocator]
 static STACK: aqr_api::stack::Stack = aqr_api::stack::Stack::new();
 
-aqr_modules::whole!(slots 8, resources [res0: 0] inputs [in0: 0, in1: 1, in2: 2, in3: 3, in4: 4, in5: 5], aqr_raw::module::pcm::decode);
+aqr_modules::whole!(gang 8, resources [res0: 0] inputs [in0: 0, in1: 1, in2: 2, in3: 3, in4: 4, in5: 5], aqr_raw::module::pcm::decode);

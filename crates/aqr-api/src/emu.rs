@@ -123,6 +123,10 @@ struct Host {
 
 thread_local! {
     static HOST: RefCell<Option<Host>> = const { RefCell::new(None) };
+    /// The channels this thread made that no spawn has given to a gang yet, and the gang it is a
+    /// task of.
+    static PENDING: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+    static GANG: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
 fn sized_to_fit(data: &[u8]) -> Vec<u8> {
@@ -262,6 +266,7 @@ fn run(
         assert!(h.is_none(), "nested emu::apply");
         *h = Some(host);
     });
+    PENDING.with_borrow_mut(Vec::clear);
 
     let mut args = vec![params.len() as u64];
     args.extend(resources.iter().map(|r| r.len() as u64));
@@ -283,6 +288,13 @@ fn run(
         })
     };
     let mut host = HOST.with_borrow_mut(|h| h.take()).unwrap();
+    let result = result.and_then(|()| {
+        // (no spawn gave the channels made last to a gang)
+        match PENDING.with_borrow_mut(std::mem::take).is_empty() {
+            true => Ok(()),
+            false => Err(failure("channels made were not given to a gang".into())),
+        }
+    });
     result.map_err(|f| Failure { log: host.last_log.take(), ..f })?;
     Ok(host)
 }
@@ -310,7 +322,8 @@ fn task_host(kind: Kind) -> Host {
     }
 }
 
-/// A channel: its messages queued, and the threads at its ends as they first use them.
+/// A channel: its messages queued, the threads at its ends as they first use them, and the gang
+/// it belongs to (its identity and the thread that spawned it) once a spawn gave it.
 #[cfg(feature = "alloc")]
 struct Chan {
     cap: usize,
@@ -318,7 +331,12 @@ struct Chan {
     closed: bool,
     sender: Option<std::thread::ThreadId>,
     receiver: Option<std::thread::ThreadId>,
+    owner: Option<(u64, std::thread::ThreadId)>,
 }
+
+/// The identity of the next gang.
+#[cfg(feature = "alloc")]
+static GANGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The channels of the process, and their changes.
 #[cfg(feature = "alloc")]
@@ -358,10 +376,23 @@ fn with_chan<R>(c: u32, mut f: impl FnMut(&mut Chan) -> Result<Option<R>, String
     }
 }
 
-/// Takes the end `end` of a channel for the calling thread.
+/// Takes an end of the channel `ch` for the calling thread, its sender's if `send`: the channel
+/// must belong to a gang, the thread a task of it or the one that spawned it, and not the other
+/// end.
 #[cfg(feature = "alloc")]
-fn end_of(end: &mut Option<std::thread::ThreadId>, what: &str) -> Result<(), String> {
+fn end_of(ch: &mut Chan, send: bool) -> Result<(), String> {
     let me = std::thread::current().id();
+    let Some((gang, spawner)) = ch.owner else {
+        return Err("a channel taken before a spawn of a gang gave it".into());
+    };
+    if GANG.get() != Some(gang) && spawner != me {
+        return Err("a channel taken by an instance outside its gang".into());
+    }
+    let (end, other, what) =
+        if send { (&mut ch.sender, ch.receiver, "sending") } else { (&mut ch.receiver, ch.sender, "receiving") };
+    if other == Some(me) {
+        return Err("both ends of a channel taken by one instance".into());
+    }
     match *end.get_or_insert(me) == me {
         true => Ok(()),
         false => Err(format!("{what} by two instances")),
@@ -515,17 +546,33 @@ pub(crate) mod sys {
     /// # Safety
     /// What `rec` refers to outlives the threads (joined as `Tasks` are dropped).
     #[cfg(feature = "alloc")]
-    pub unsafe fn spawn(rec: &crate::task::Record, n: usize) -> Vec<Option<std::thread::JoinHandle<Vec<u8>>>> {
+    pub unsafe fn spawn(
+        rec: &crate::task::Record,
+        n: usize,
+        gang: bool,
+    ) -> Vec<Option<std::thread::JoinHandle<Vec<u8>>>> {
         struct Send(crate::task::Record);
         // SAFETY: the closure `rec` refers to is `Sync`, and outlives the threads
         unsafe impl std::marker::Send for Send {}
         let kind = super::HOST.with_borrow(|h| h.as_ref().map(|h| h.kind));
+        // (the channels made so far are given to this gang, or there are none to give)
+        let pending = super::PENDING.with_borrow_mut(std::mem::take);
+        let id = super::GANGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if gang {
+            let me = std::thread::current().id();
+            let mut chans = super::CHANS.lock().unwrap_or_else(|e| e.into_inner());
+            pending.iter().for_each(|&c| chans[c as usize].owner = Some((id, me)));
+        } else if !pending.is_empty() {
+            super::trap("a spawn of tasks that are no gang, with channels made and not given".into());
+        }
+        let gang = gang.then_some(id);
         (0..n)
             .map(|i| {
                 let rec = Send(rec.clone());
                 Some(std::thread::spawn(move || {
                     let rec = rec;
                     super::HOST.with_borrow_mut(|h| *h = kind.map(super::task_host));
+                    super::GANG.set(gang);
                     // (the channels it sent to closed as it ends, however it does)
                     struct End;
                     impl Drop for End {
@@ -537,7 +584,11 @@ pub(crate) mod sys {
                         }
                     }
                     let _end = End;
-                    rec.0.call(i)
+                    let out = rec.0.call(i);
+                    if !super::PENDING.with_borrow(Vec::is_empty) {
+                        super::trap("a task ended with channels made and not given to a gang".into());
+                    }
+                    out
                 }))
             })
             .collect()
@@ -552,15 +603,18 @@ pub(crate) mod sys {
             closed: false,
             sender: None,
             receiver: None,
+            owner: None,
         });
-        (chans.len() - 1) as u32
+        let c = (chans.len() - 1) as u32;
+        super::PENDING.with_borrow_mut(|p| p.push(c));
+        c
     }
 
     #[cfg(feature = "alloc")]
     pub fn send(c: u32, msg: &[u8]) {
         let mut msg = Some(msg.to_vec());
         super::with_chan(c, |ch| {
-            super::end_of(&mut ch.sender, "sending")?;
+            super::end_of(ch, true)?;
             if ch.closed {
                 return Err(format!("aqr_send({c}) after closing"));
             }
@@ -575,7 +629,7 @@ pub(crate) mod sys {
     #[cfg(feature = "alloc")]
     pub fn recv(c: u32, dst: &mut [u8]) -> i32 {
         let msg = super::with_chan(c, |ch| {
-            super::end_of(&mut ch.receiver, "receiving")?;
+            super::end_of(ch, false)?;
             Ok(match ch.msgs.front() {
                 None if ch.closed => Some(Err(-1)),
                 None => None,
@@ -595,7 +649,7 @@ pub(crate) mod sys {
     #[cfg(feature = "alloc")]
     pub fn close(c: u32) {
         super::with_chan(c, |ch| {
-            super::end_of(&mut ch.sender, "sending")?;
+            super::end_of(ch, true)?;
             ch.closed = true;
             Ok(Some(()))
         })
