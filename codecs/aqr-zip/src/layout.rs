@@ -610,8 +610,8 @@ pub fn assemble(layout: &[u8], data: &[u8], bodies: &[(&[u8], Entry)], kept: &[u
 pub trait Inputs {
     /// The next `n` bytes of the contents of the stored bodies.
     fn data(&mut self, n: u64) -> Result<&[u8]>;
-    /// The next `n` bytes kept.
-    fn kept(&mut self, n: u64) -> Result<&[u8]>;
+    /// The next `n` bytes kept, put to `out`.
+    fn kept(&mut self, n: u64, out: &mut dyn Out) -> Result<()>;
     /// The entry of the next deflated body.
     fn entry(&mut self) -> Result<Entry>;
     /// The body of the entry given last, of `n` bytes, put to `out`.
@@ -641,8 +641,9 @@ impl Inputs for Slices<'_> {
         Ok(&self.data[take(self.data, &mut self.dp, n)?])
     }
 
-    fn kept(&mut self, n: u64) -> Result<&[u8]> {
-        Ok(&self.kept[take(self.kept, &mut self.kp, n)?])
+    fn kept(&mut self, n: u64, out: &mut dyn Out) -> Result<()> {
+        out.put(&self.kept[take(self.kept, &mut self.kp, n)?]);
+        Ok(())
     }
 
     fn entry(&mut self) -> Result<Entry> {
@@ -667,6 +668,8 @@ impl Inputs for Slices<'_> {
 /// Where the body of a local entry comes from as it is put.
 enum Source<'a> {
     Bytes(&'a [u8]),
+    /// Bytes kept, of this length.
+    Kept(u64),
     Deflated,
     /// The archive so far (an earlier entry's body).
     Within(Range<usize>),
@@ -830,9 +833,9 @@ pub fn assemble_prepared(
         let pos = out.len() as u64;
         match r.u8()? {
             GAP => {
-                let k = inputs.kept(r.varint()?)?;
-                room(out, k.len())?;
-                out.put(k);
+                let n = r.varint()?;
+                room(out, usize::try_from(n).map_err(|_| corrupt())?)?;
+                inputs.kept(n, out)?;
             }
             LOCAL => {
                 // the body, from an input or from the archive so far, and its entry
@@ -848,9 +851,9 @@ pub fn assemble_prepared(
                         (Body::Deflated, Source::Deflated, inputs.entry()?)
                     }
                     2 => {
-                        let k = inputs.kept(r.varint()?)?;
+                        let n = r.varint()?;
                         let crc = u32::from_le_bytes(r.take(4)?.try_into().unwrap());
-                        (Body::Kept, Source::Bytes(k), Entry { crc, csize: k.len() as u64, usize: r.varint()? })
+                        (Body::Kept, Source::Kept(n), Entry { crc, csize: n, usize: r.varint()? })
                     }
                     3 => {
                         let back = r.varint()?;
@@ -880,6 +883,7 @@ pub fn assemble_prepared(
                 dfields.iter_mut().zip(dx).for_each(|(a, b)| *a ^= b);
                 let blen = match &body {
                     Source::Bytes(b) => b.len(),
+                    Source::Kept(n) => usize::try_from(*n).map_err(|_| corrupt())?,
                     Source::Deflated => usize::try_from(entry.csize).map_err(|_| corrupt())?,
                     Source::Within(w) => w.len(),
                 };
@@ -905,6 +909,7 @@ pub fn assemble_prepared(
                 }
                 match body {
                     Source::Bytes(b) => out.put(b),
+                    Source::Kept(n) => inputs.kept(n, out)?,
                     // (no larger than the layout's header tells)
                     Source::Deflated if blen as u64 > prepared.counts.body => return Err(corrupt()),
                     Source::Deflated => inputs.body(blen as u64, out)?,

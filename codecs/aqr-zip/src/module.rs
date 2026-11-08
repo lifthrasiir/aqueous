@@ -110,8 +110,8 @@ impl layout::Inputs for Pulled {
         self.data.take(n)
     }
 
-    fn kept(&mut self, n: u64) -> Result<&[u8]> {
-        self.kept.take(n)
+    fn kept(&mut self, n: u64, out: &mut dyn aqr_common::out::Out) -> Result<()> {
+        self.kept.each(n, &mut |d| out.put(d))
     }
 
     fn entry(&mut self) -> Result<layout::Entry> {
@@ -229,9 +229,10 @@ const _: () = assert!(size_of::<(usize, usize)>() as u64 == RUN_BYTES);
 /// `inputs` bytes. In order: the CRC-32 tables, the layout (a window's piece on top as it is read),
 /// the marks of bodies taken again (the lengths of the bodies on top while they are summed), the
 /// bytes held (`layout::Prepared::held`) and their runs, the buffers of the inputs (the largest
-/// stored body and piece kept, and what is derived of a deflated body), the local entries seen; and
+/// stored body, and what is derived of a deflated body), the local entries seen; and
 /// on top of them, of a record, the extra field made apart (or a central header's name and extra
-/// field) and a window's piece of an input.
+/// field) and a window's piece of an input (the bytes kept go through
+/// it, as the deflated bodies do).
 pub fn plan(inputs: [u64; 4], layout: &[u8]) -> Option<u64> {
     use aqr_api::stack::block;
     let p = layout::Prepared::new(layout).ok()?;
@@ -245,7 +246,7 @@ pub fn plan(inputs: [u64; 4], layout: &[u8]) -> Option<u64> {
     let again = base + block(c.entries);
     let summing = again + block(16 * c.entries);
     let held = again + block(held) + block(RUN_BYTES * c.entries);
-    let bufs = held + block(c.stored) + block(c.kept) + block(layout::DERIVED as u64);
+    let bufs = held + block(c.stored) + block(layout::DERIVED as u64);
     let seen = bufs + block(layout::SEEN_BYTES * c.entries);
     let pieces = [c.stored, c.kept, layout::DERIVED as u64, c.body].into_iter().map(piece).max().unwrap_or(0);
     let record = (block(c.extra) + pieces).max(block(c.name) + block(c.extra));
@@ -286,7 +287,8 @@ fn zip_part(params_len: u64, inputs: [u64; 4], size: u64) -> Result<()> {
     };
     let mut pulled = Pulled {
         data: In::new(inputs[0], c.stored)?,
-        kept: In::new(inputs[3], c.kept)?,
+        // (put through a window's piece at a time: none held)
+        kept: In::new(inputs[3], 0)?,
         flate: In::new(inputs[1], layout::DERIVED as u64)?,
     };
     layout::assemble_prepared(&layout, &prepared, &mut pulled, len, &mut out)?;

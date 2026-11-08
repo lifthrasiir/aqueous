@@ -486,7 +486,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "zip-recons",
         version: 6,
-        sha512_256: hex("2e74ff1a118aaf861590fadc245bb7f01ab42f12051190e55c4d6691d8ed6e47"),
+        sha512_256: hex("8c386543a245aff2e02fbefb76c94763c63bd3d5bcd4245692bda060d0ab09ac"),
         block: include_bytes!("../wasm/zip-recons.block"),
     },
 ];

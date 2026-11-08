@@ -695,6 +695,65 @@ fn mszip_plans_hold() {
     }
 }
 
+/// zip-recons's plan of a ZIP archive whose bytes are mostly kept (a gap before it, a body of
+/// another method, as enwik9.zip's at a low level): the bytes kept go through a window's piece,
+/// not a buffer of the largest piece kept.
+#[test]
+fn zip_plans_hold() {
+    let mut rng = aqr_common::rng::Rng::new(13);
+    let (gap, body) = (rng.bytes(1 << 20), rng.bytes(3 << 20));
+    let (le16, le32) = (
+        |o: &mut Vec<u8>, v: usize| o.extend((v as u16).to_le_bytes()),
+        |o: &mut Vec<u8>, v: usize| o.extend((v as u32).to_le_bytes()),
+    );
+    // one entry of method 99, its CRC-32 and size of the data made up
+    let (name, crc, size) = (b"data.bin", 0x1234_5678, 5 << 20);
+    let mut d = gap.clone();
+    let at = d.len();
+    d.extend(b"PK\x03\x04");
+    [20, 0, 99, 0, 0].into_iter().for_each(|v| le16(&mut d, v));
+    [crc, body.len(), size].into_iter().for_each(|v| le32(&mut d, v));
+    [name.len(), 0].into_iter().for_each(|v| le16(&mut d, v));
+    d.extend(name);
+    d.extend(&body);
+    let cd = d.len();
+    d.extend(b"PK\x01\x02");
+    [20, 20, 0, 99, 0, 0].into_iter().for_each(|v| le16(&mut d, v));
+    [crc, body.len(), size].into_iter().for_each(|v| le32(&mut d, v));
+    [name.len(), 0, 0, 0, 0].into_iter().for_each(|v| le16(&mut d, v));
+    [0, at - gap.len()].into_iter().for_each(|v| le32(&mut d, v));
+    d.extend(name);
+    let end = d.len();
+    d.extend(b"PK\x05\x06");
+    [0, 0, 1, 1].into_iter().for_each(|v| le16(&mut d, v));
+    [end - cd, cd - gap.len()].into_iter().for_each(|v| le32(&mut d, v));
+    le16(&mut d, 0);
+    let f = aqr_zip::formula::encode(&d, 1).expect("a formula");
+    let Node::Apply(a) = &f.root else { panic!("not an application") };
+    // (the layout evaluated for the plan)
+    let layout = {
+        let mut g = f.clone();
+        g.root = a.inputs[2].clone();
+        g.eval(&Native::default()).unwrap()
+    };
+    let lens: Vec<u64> = a.inputs.iter().map(Node::len).collect();
+    let none = Vec::new();
+    let contents: Vec<&[u8]> = vec![&none, &none, &layout, &none];
+    let m = aqr_zip::formula::MODULE;
+    let usage = aqr_formula::Usage {
+        params: &[],
+        resources: &[],
+        inputs: &lens,
+        outputs: &[d.len() as u64],
+        contents: &contents,
+        initial_pages: aqr_decompress::initial_pages_of(m).unwrap(),
+    };
+    let plan = m.plan_for(&usage).unwrap().instance;
+    // (its initial memory and a window: less than the body)
+    assert!(plan < body.len() as u64, "{plan} B, of {} B kept", lens[3]);
+    plan_holds("zip kept", f, &d);
+}
+
 /// DEFLATE streams inflated (flate-inflate) natively and as WebAssembly alike, and damaged in
 /// turn failing alike (or giving the same).
 #[test]
