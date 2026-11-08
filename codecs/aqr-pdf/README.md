@@ -227,6 +227,7 @@ cargo test --release
 | `src/kind.rs`, `src/objects.rs` | Stream classes and filters, indirect objects |
 | `src/flate.rs`, `src/image.rs` | zlib wrapper; image geometry and the PNG wrapper |
 | `src/tok.rs`, `src/rans.rs` | Token mode; static rANS (`aqr_common::rans32` with 12-bit probabilities) |
+| `src/module.rs`, `src/plan.rs` | The decoder alone, for the Wasm module; its memory plan (`aqr_api::stack`) |
 | `src/main.rs` | Command-line tool, bench, fuzz |
 | `examples/` | Corpus surveys and experiments behind the choices here; `memprobe.rs`, peak heap and RSS per file (`LOG=MB` logs large allocations) |
 | `scripts/` | Corpus, baselines, profiling (`profile.py` over samply) |

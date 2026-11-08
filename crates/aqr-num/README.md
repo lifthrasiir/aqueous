@@ -1,8 +1,8 @@
 # aqr-num
 
 Numbers printed as ASCII text, stored as an integer plus how they were printed, and
-printed back bit for bit. Written for aqr-obj, independent of OBJ: any container that
-keeps a two-byte descriptor and an integer at a scale per number can use it. Rendering
+printed back bit for bit. Written for aqr-obj (aqr-xsv uses it too), independent of OBJ: any container
+that keeps a two-byte descriptor and an integer at a scale per number can use it. Rendering
 uses IEEE basic operations and integer arithmetic only, so it gives the same bytes on
 every platform.
 
@@ -110,8 +110,7 @@ cargo test --release
 `%g` of decimals against the C library, exact digits against the standard library,
 shortest digits against the standard library (with the ties above), every valid
 descriptor rendering random values (as from corrupt input) and coding back, writer
-samples, the encoder's choices. aqr-obj's `scripts/format-check.sh` checks that its
-output is unchanged.
+samples, the encoder's choices.
 
 ## Layout
 

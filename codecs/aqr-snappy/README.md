@@ -18,8 +18,8 @@ let f = formula::encode(&table, 1).unwrap();
 // `f` rebuilds `table` when evaluated with `formula::decode_table` as the module `TABLE_MODULE`
 ```
 
-`FORMAT.md` specifies the modules `snappy-recons` and `leveldb-recons`, with the compressor in
-full.
+`FORMAT.md` specifies the modules `snappy-recons` (a part module) and `leveldb-recons`,
+with the compressor in full.
 
 ## The hash
 

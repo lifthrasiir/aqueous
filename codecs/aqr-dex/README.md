@@ -37,7 +37,7 @@ git).
   (two rounds: 226 -> 276 G), most of it aqr-flate's; compressing 6% more (1494 -> 1583 G).
 - The module splits at about 130 MB/s and decodes at about 290 MB/s on a thread (VLC's
   six files; 620 MB/s before the instructions were split).
-  Its Wasm block is 25.2 KB.
+  Its Wasm block is 21.0 KB (25.2 KB before the module was laid out as a stack, `2793c4d6`).
 
 | streams | under zstd -9 | the sections as they are |
 |---|---|---|

@@ -95,7 +95,7 @@ let node = formula::apply(&mut its_formula, samples, layout, 1);
 | `src/image/raster.rs` | Raw rasters: the coder of 8-bit rows of 1 to 4 channels |
 | `src/image/raster16.rs` | Raw rasters of 16-bit samples: MED or mean prediction per chunk, tokens by rANS and raw bits |
 | `src/container.rs` | WAV (PCM and IMA ADPCM), AIFF / AIFC, BMP, PNM, TIFF, DICOM, and samples after a header telling their size: where the samples are, and their layout |
-| `src/formula/` | The modules `pcm-recons` and `raster-recons`, and formulas of containers |
+| `src/formula/` | The modules `pcm-recons`, `raster-recons` and `raster-recons-16`, and formulas of containers |
 | `model/audio.bin` | The residual model's built-in tables (trained by `aqr-flac-train`) |
 | `tests/pcm.rs`, `tests/data` | WAV / AIFF / AIFC files and headerless PCM: round trips on threads, junk, cuts, corrupted inputs, the resource |
 | `tests/ima.rs`, `tests/ima` | IMA ADPCM WAV files of ffmpeg and sox: round trips, junk, cuts, layouts not taken |
@@ -168,12 +168,12 @@ PCM is cut into it here.
 
 ## Open issues and limitations
 
-- **Not covered**: 16-bit images (PNM, PAM, TIFF), fewer than 8 bits per pixel, RLE BMP, ASCII
+- **Not covered**: 16-bit PNM, PAM and TIFF (16-bit rasters are taken in DICOM and after a header telling
+  their size, `raster-recons-16`), fewer than 8 bits per pixel, RLE BMP, ASCII
   PNM, TGA (no reliable signature), float audio, more than 8 channels, compressed AIFC, CAF,
   W64, RF64, ADPCM other than IMA's (Microsoft's 0x02 and others), Apple's IMA4 (AIFC and CAF
-  `ima4`, packets of another layout). 16-bit images need a model of their own (the audio model's
-  token and raw bits are a likely start).
-- **Other containers** with samples inside (TIFF strips, PSD raw channels, DICOM, tracker
+  `ima4`, packets of another layout).
+- **Other containers** with samples inside (other TIFFs, PSD raw channels, tracker
   modules, SoundFont) are for their recompressors to take apart with `formula::apply`; data
   of the formula kind `Pixels` carries no layout yet, so aqr-compress cannot route it here.
 - BMP and PNM are only looked for at the start of a file: two bytes are too weak a signature

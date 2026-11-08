@@ -54,7 +54,7 @@ LHARK's `-lh7-` (another format under the same id), and data past the archive's 
 Left: the methods above (`-lh1-` first, as old archives have it); archives in other data
 (self-extracting programs: a scan for `-lh?-` two bytes into a header); LHA 2.x's choice among
 the matches of the longest length (3% of its matches, most of its record); speed (5 MB/s of data a
-thread to split and to join; an archive's streams go side by side); the module's size (23 KB as a
+thread to split and to join; an archive's streams go side by side); the module's size (20 KB as a
 block in every archive, which small archives do not pay back).
 
 ## Results

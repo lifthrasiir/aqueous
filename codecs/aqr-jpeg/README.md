@@ -249,7 +249,7 @@ The format is specified in [FORMAT.md](FORMAT.md).
   (ZRL placement, padding, fill, trailing RSTs, EOBRUN splits, ...) must roundtrip exactly.
 - With both oracles (`JRC_VERIFY_PROGRESSIVE`, `JRC_VERIFY_PARALLEL`) enabled: 6000 fuzz
   inputs, 600 mutenc rounds and a 208 MB corpus, all passing.
-- `cargo test --release`: `tests/regress.rs`, currently one progressive scan-script violation
+- `cargo rt -p aqr-jpeg`: `tests/regress.rs`, currently one progressive scan-script violation
   found by fuzzing.
 
 ## Tried and dropped

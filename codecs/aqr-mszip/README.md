@@ -1,7 +1,7 @@
 # aqr-mszip
 
 CAB and CHM files taken apart into the contents of their files: a CAB file's MSZIP folders are
-rebuilt bit for bit from their data by aqr-flate's module and this crate's (`mszip-recons`), its
+rebuilt bit for bit from their data by aqr-flate's module and this crate's (`mszip-recons`, a part module), its
 LZX folders by aqr-lzx's (`lzx-recons`), its stored folders are their data; a CHM file's LZX
 section is rebuilt by aqr-lzx's module from the section's files. The rest of the file is kept as
 it is. What it is for is the files: each file's contents are a content of the archive,

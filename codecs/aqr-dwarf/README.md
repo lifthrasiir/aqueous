@@ -78,7 +78,8 @@ Compressing rustc's takes 47.1 G instructions (58.8 G before, 40.6 G with the ta
 peak RSS 0.99 GB (1.56 GB before); clang's 7.4 G (3.2 G before: the file was kept whole, now
 the rest of the image is scanned as well), gcc's 8.6 G (5.5 G). Testing rustc's takes 8.0 G
 instructions (3.1 G before), peak RSS 299 MB (200 MB); clang's 1.04 G (0.87 G), gcc's 1.31 G
-(0.87 G). The modules' Wasm blocks are 12.0 KB (`dwarf-info`) and 7.1 KB (`dwarf-apple`).
+(0.87 G). The modules' Wasm blocks are 9.9 KB (`dwarf-info`) and 4.7 KB (`dwarf-apple`), 12.0 and 7.1 KB
+before they were laid out as stacks (`e468f3f0`).
 
 ## Status
 

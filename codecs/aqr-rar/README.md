@@ -65,7 +65,7 @@ lengths (not Huffman's lengths as RAR 6.24 builds them: 181 of 614 main tables o
 corpus; 8.6% of its record), RAR5's parse (RAR writes literals where matches are, as a parser
 weighing costs does: most of a record of 3%), speed (PPMd rebuilt twice to split, once to join;
 the PPMd port retires 1.55× the instructions of lzma-sdk's C; streams that do not pay are split
-all the same), the modules' sizes (blocks of 29 KB and 43 KB
+all the same), the modules' sizes (blocks of 23 KB and 38 KB
 in every archive, which small archives do not pay back).
 
 ## Results
@@ -94,7 +94,7 @@ slow. At level 9 each archive's formula is weighed against its bytes and three a
 (`paq8hp5l.rar` 204 → 119 KB). At mid the time is one LZ stream of RAR archives (`all_HKCC.rar`,
 4.8 MB) split and turned down. A RAR5 archive of rar 7.23's default `-m3` (wer.dll and a C
 source, 516 KB) is not taken either: its contents archive to 485 KB at level 9, less than the
-record (3%) and the module's block (29 KB) cost.
+record (3%) and the module's block (23 KB) cost.
 
 ## Tests
 

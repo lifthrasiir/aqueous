@@ -24,7 +24,8 @@ another entry at the top comes later, what was made is moved into the directory
 | `.gz` `.bz2` `.xz` `.lzma` `.zst` | | a single file, written as it is decoded |
 
 ```rust
-let opened = aqr_unpack::Opened::open(format, &archive)?;  // the listing read (ZIP, 7z, RAR, ALZ, EGG)
+let mut opened = aqr_unpack::Opened::open(format, &archive)?;  // the listing read (ZIP, 7z, RAR, ALZ, EGG)
+opened.unlock(pass)?;                                       // ZIP's and 7z's encrypted entries: the passphrase
 let done = opened.unpack(threads, &sink)?;                  // sink: entries told, then contents
 // done.tree: the whole tree; done.skipped: entries left out (told to sink.note)
 ```
@@ -51,8 +52,10 @@ let done = opened.unpack(threads, &sink)?;                  // sink: entries tol
   names of ZIP's MS-DOS hosts, of 7z, of RAR 3.x, of ALZ and of EGG.
 
 Left out and told (the run then fails, once the rest is extracted): paths with `..` (a `/` or
-a drive at the start is dropped), encrypted entries, methods and coders not known (Deflate64,
-PPMd of 7z and ZIP, AES, RAR 1.5's and 2.0's algorithms, AZO's x86 filter), sparse files and
+a drive at the start is dropped), encrypted entries (ZIP's ZipCrypto and WinZip's AES, 7z's AES are
+decrypted by the passphrase given, `Opened::unlock`; PKWARE's strong encryption and the other formats'
+are left out), methods and coders not known (Deflate64,
+PPMd of 7z and ZIP, RAR 1.5's and 2.0's algorithms, AZO's x86 filter), sparse files and
 multi-volume parts of tar, RAR, ALZ and EGG (what is past a volume's end, told once), RAR5's hard
 links and copies of files (and the files after a file left out in a RAR or EGG solid group), ALZ's
 and EGG's symbolic links (whose targets neither is known to store). A path given again takes the place of
@@ -81,12 +84,10 @@ close), which hides the rest (aqr 4.1 s, 7-Zip 2.8 s on the ZIP archive then).
 ## Left
 
 - Formats of whose code there is more in the repository: LHA, CAB, CHM, ISO, WIM.
-- ALZ and EGG: volumes (`.a00`…, `.vol2.egg`…), ZipCrypto, AES and LEA (no passwords asked for
-  yet), AZO's x86 filter (aqr-azo's is not ALZip's: such files are left out), an EGG solid
+- ALZ and EGG: volumes (`.a00`…, `.vol2.egg`…), their encryptions (ZipCrypto, AES and LEA), AZO's x86 filter (aqr-azo's is not ALZip's: such files are left out), an EGG solid
   archive of several blocks whose decoders' state goes on across them (the archives seen have
   one), EGG's relative names (a parent's id, flags bit 5; not seen).
-- PPMd (7z, ZIP: aqr-rar's PPMd var.H, with 7z's range coder); Deflate64; AES and ZipCrypto
-  (no passwords asked for yet).
+- PPMd (7z, ZIP: aqr-rar's PPMd var.H, with 7z's range coder); Deflate64; RAR's encryption.
 - RAR: volumes (a file over several archives), hard links (as link groups), self-extracting
   archives (by name, `.exe`, they are not taken); a solid group is decoded whole in memory
   (its window is all of it), its files given as each is done.

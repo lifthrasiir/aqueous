@@ -57,4 +57,3 @@ Left:
 - Compressing what is dropped on the app's icon (a document type of `public.item`, which would
   put Aqueous in every file's "Open With").
 - Quick Look of what an archive holds.
-- Sharing `src/job.rs` with aqr-win's `run.rs`.

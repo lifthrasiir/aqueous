@@ -22,7 +22,8 @@ let f = formula::encode(&file, threads).unwrap();
 
 `FORMAT.md` specifies the module `bz2-recons`, with the compressor in full, and
 `bz2-alz-recons`, the same compressor in ALZip's framing (no header, blocks without CRCs, 4-byte
-magic numbers), for aqr-alz's ALZ archives (`formula::take_alz`, `formula::apply_alz`). The code was written
+magic numbers), for aqr-alz's ALZ archives (`formula::take_alz`, `formula::apply_alz`; aqr-egg's
+bzip2 blocks take `formula::take_whole` and `apply_framed`). The code was written
 from memory of libbzip2's behaviour and checked against libbzip2 1.0.8 as a black box, without
 reading its code (BSD-style, not public domain).
 
@@ -53,7 +54,7 @@ reading its code (BSD-style, not public domain).
 Not reproduced, kept as they are: other compressors (lbzip2, 7-Zip's, Dart's), libbzip2 before
 1.0.3 where a code would be over 17 bits, randomised blocks (bzip2 0.9.0), streams flushed
 early (`BZ_FLUSH`), data over 1 GiB. Left: bzip2 inside ZIP (method 12), 7z, DMG (UDBZ) (ALZ archives' is
-done, by `bz2-alz-recons`);
+done, by `bz2-alz-recons`, and EGG's, by `bz2-recons`: `formula::take_whole`, `apply_framed`);
 tasks in the Wasm module; a stream not reproduced could keep its tables and selectors as a
 record (lbzip2) rather than be kept whole.
 
@@ -80,7 +81,7 @@ snapshot tool all gave libbzip2's streams.
 The compressor runs at 11.9 MB/s of data on one thread and 43.6 MB/s on 8 (`aqr-bz2-check`,
 51 MB of data); libbzip2 itself is in the same class. A block's work is about 30 bytes per
 symbol (27 MB for a block of 900 kB), on each thread. Small files pay the module (18 KB
-compressed) where no other file of the archive does: a 1 KB `.pkl.bz2` alone archives to
+compressed then, a block of 14 KB now) where no other file of the archive does: a 1 KB `.pkl.bz2` alone archives to
 19.5 KB.
 
 ## Without undoing the BWT

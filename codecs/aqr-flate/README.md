@@ -261,6 +261,10 @@ the old writer and would gain about as much).
 
 ## Memory of `flate-set`
 
+`flate-inflate` (the data of a raw stream, for streams archived along but not rebuilt) is a part
+module whose plan is the same whatever the lengths (`plan::inflate`). `flate-set` (version 4)
+is below.
+
 The module lays its memory out as a stack (`aqr_api::stack`), so its limit is its plan
 (`plan::plan`): the instance's memory taken block by block in the order the module takes it,
 and each batch's tasks. What decoding holds is reserved once at the size it takes:

@@ -56,7 +56,7 @@ hand when it puts the header): its 4 bytes of each member are stored.
 
 ## Tests
 
-`cargo test --release -p aqr-bundle`; `aqr-bundle-check [-v] FILE_OR_DIR...` (the archives
+`cargo rt -p aqr-bundle`; `aqr-bundle-check [-v] FILE_OR_DIR...` (the archives
 found, whether each is rebuilt, zstd -3 of the archives against the module's inputs, speeds).
 `scripts/gen-fixtures.sh` makes `tests/data` with the tools of this machine (bsdtar, bsdcpio,
 Python's tarfile, the ar of macOS, llvm-ar and mingw).

@@ -4,8 +4,8 @@ ZIP recompression. An archive is rebuilt bit for bit from the contents of its en
 archive stores the contents instead: they compress better, and are recompressed in turn (a JPEG
 or a gzip in a ZIP is found as such). DEFLATE bodies are rebuilt from the data and a record by
 aqr-flate's module (`flate-set`, one application for all of them), whose output the module
-takes with the CRC-32 and sizes it derives, so `zip-recons` itself has no DEFLATE code. Everything else is kept in a *layout*, with every fixed field stored as its XOR with a
-prediction: CRCs, sizes, offsets and what the central directory repeats of the local headers
+takes with the CRC-32 and sizes it derives, so `zip-recons` itself has no DEFLATE code.
+Everything else is kept in a *layout*, with every fixed field stored as its XOR with a prediction: CRCs, sizes, offsets and what the central directory repeats of the local headers
 cost nothing when they are what they should be, and are kept exactly when they are not.
 
 ```sh

@@ -33,9 +33,9 @@ commit before as the baseline).
   data being the files'.
 - That run takes 27.8 -> 42.3 s and 3.34 -> 4.96 GB at peak; testing it 10.9 -> 16.9 s and
   2.17 -> 2.27 GB. Each folder is one LZMA or LZMA2 stream (250 and 124 MB of data), split and
-  rebuilt on one thread; the times look like the two are rebuilt one after the other (not
-  looked into).
-- The modules are 2.4 to 3.2 KB (`bcj2` 4.4 KB, `bcj-delta` 1.9 KB), of module blocks of 1.3 to 2.1 KB;
+  rebuilt on one thread (before aqr-lzma's parts); the times look like the two are rebuilt one
+  after the other (not looked into).
+- The modules are 2.4 to 3.2 KB (`bcj2` 4.4 KB, `bcj-delta` 1.9 KB), of module blocks of 1.1 to 2.1 KB;
   they are part modules whose memory does not depend on the length of the data.
 
 ## Tests

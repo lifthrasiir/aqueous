@@ -36,6 +36,10 @@ longest matches along hash chains of 2 to 16 bytes it is, mostly the longest; wh
 starts is coded against the matches at the position and the next (ALZip matches lazily, or by
 cost).
 
+`azo-recons` is a whole module with an exact memory plan (`plan.rs`, `aqr_api::stack`): the models,
+the match finder and the contexts of the coded block, written onto the output as the tokens come.
+It spawns no tasks.
+
 ## Status
 
 The x86 filter (bit 0 of a stream's flags) is not known: neither the spec's filter nor the
@@ -46,7 +50,8 @@ AZO by itself for `.sys` and `.com` files only (alzgg's notes), so it is rare.
 
 Left: the x86 filter (with an oracle of ALZip); ALZip's choice between a match and a literal,
 most of the record; speed (5–6 MB/s of data a thread to split and to join, the chains walked
-twice where a match may start; a stream's blocks go side by side).
+twice where a match may start; a stream's blocks go on up to `threads` threads natively, one
+after another in Wasm).
 
 ## Results
 

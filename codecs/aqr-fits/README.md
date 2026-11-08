@@ -23,6 +23,8 @@ the FITS Standard's description, and fpack/funpack (cfitsio 4.7) were used as bl
 the tests' fixtures. Every tile of the corpus (fpack's, the SDO/AIA synoptic images', the
 Legacy Survey's) is rebuilt.
 
+The three modules (FORMAT.md) are whole modules with exact memory plans (`aqr_api::stack`).
+
 ## How it does
 
 Measured 2026-10-28 on an Apple M4, one thread, through `aqr -c -T 1` (one archive per file,
@@ -64,7 +66,8 @@ Left:
   mantissas). SDSS's frames (mantissas cut to 9 bits, sky around zero) would want their own
   mode: an exact fixed-point form (MED residuals of 10.0 bits a pixel against zstd's 12.4)
   coded with each residual's trailing zeros first, as the precision follows the exponent.
-- The modules' blocks (6.5 and 12.6 KB for image and Rice) outweigh the gains on small files.
+- The modules' blocks (7.3 and 13.4 KB for `fits-recons-image` and `fits-recons-rice`, 2.8 KB
+  for `fits-recons-table`) outweigh the gains on small files.
 - `GZIP_1`, `GZIP_2`, `HCOMPRESS_1` and `PLIO_1` tiles are kept as they are, and so are
   compressed tables (§10.3).
 

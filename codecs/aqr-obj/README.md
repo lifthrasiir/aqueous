@@ -192,6 +192,7 @@ cargo test --release
 | `src/corner.rs` | Face corner indices |
 | `src/ans.rs` | rANS for value streams |
 | `src/varint.rs` | Stream cursor (LEB128 from `aqr-common`); heap accounting is `aqr_common::mem` |
+| `src/module.rs` | The decoder alone, for the Wasm module (`plan`: its memory) |
 | `src/main.rs` | Bench, stats, fuzz |
 | `examples/` | Experiments behind the choices above |
 | `scripts/` | Corpus, baselines, comparison, profiling (`profile.py` over samply) |

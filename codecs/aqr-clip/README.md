@@ -20,7 +20,7 @@ aqr-clip speed [-t N] [-b TILES] [-m dynamic|static] FILE...  # one model as a m
 
 Measured on 2026-10-28 on a Ryzen 7 9700X through `aqr-show -t 16` (16 threads), each file
 archived at level `mid` with its round-trip check, then extracted; the decoder modules are in
-the archives (26 KB for `clip-recons`). Repeated tiles as references took the 13 files from
+the archives (26 KB for `clip-recons`; its block is 24 KB now). Repeated tiles as references took the 13 files from
 0.344 to 0.340, 32 to 35 MB/s and 81 to 91 MB/s, and the held-out file from 0.499 to 0.454.
 
 | set | files | MB | ratio | zstd -3 | aqr before | compress | decompress |
@@ -42,7 +42,7 @@ batches of tiles (tasks, each giving back its zlib streams as one block of bytes
 The file is the only block whose size is the output's; a task holds its model, the pixels of a
 tile, its streams and zlib's emulator. The plan equals what the module takes, to the page
 (`clip_plans_hold` in aqr-decompress's `wasm.rs`, and the 15 files of the corpus). The format
-did not change; the module's version is 2.
+did not change by the move to a stack (version 2); the module's version is 3 now.
 
 ## Format
 
@@ -160,4 +160,3 @@ catch whole.
 - Neighbouring tiles as context (the block grid is in the database), mipmaps predicted from
   the layer they come from.
 - The PNG preview of the database through aqr-png, `BlockSize` derived from the blocks.
-- A formula: the tiles, zlib at level 1 / memLevel 9 made again, the rest as it is.

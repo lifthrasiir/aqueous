@@ -59,7 +59,7 @@ small).
 | cmz: H-H1_GWOSC_4KHZ_R1-1126259447-32.hdf5 | 1040814 | 880760 | 880672 |
 
 For reference, `xz -9e` makes 1018200 bytes of the cmz file. Of its archive, 86 KB are the
-modules (`flate-set`'s block is 78.7 KB, `hdf5-recons-float`'s 7.2 KB), which archives of
+modules (`flate-set`'s block was 78.7 KB, `hdf5-recons-float`'s 7.2 KB; now 71.7 and 4.5 KB), which archives of
 several files share: four GWOSC files of 32 s make 3.20 MB together. Files without deflated
 chunks (Keras weights, NWB, most NeXus samples, the test files) are as before. Compression of
 the corpus took 31.5 s by default and 44.5 s at `-9` (one file at a time, the round trip
@@ -69,7 +69,7 @@ included).
 
 Left:
 
-- The archive of a single small file pays for `flate-set` (78.7 KB) to rebuild zlib's streams;
+- The archive of a single small file pays for `flate-set` (71.7 KB) to rebuild zlib's streams;
   a module of zlib's deflate alone would be a fraction of it.
 - At the default level, aqr-flate's records of zlib's level 1 come to about a sixth of GOES's
   streams (shuffled 16-bit integers), which are kept as they are; GWOSC's (floats) cost little.

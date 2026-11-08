@@ -20,6 +20,8 @@ is smaller than the file kept raw; a file named as text (`.csv`, `.tsv`, `.log`,
 as a table too. Without the default feature `encode`, the crate is the module's code alone
 (`module`), which aqr-modules builds into the Wasm module `xsv-recons`.
 
+A table over 64 MiB (`formula::SEGMENT`) is cut at record starts into segments, one application
+each, so that no application needs more than a segment's memory (FORMAT.md, "Segments").
 The format is specified in [FORMAT.md](FORMAT.md).
 
 ## Results

@@ -25,7 +25,10 @@ let f = formula::encode(&pack, 8).unwrap();
 ```
 
 `FORMAT.md` specifies the module `git-pack-recons`, and `git-pack-index-recons`: the pack with
-its index and reverse index after it, of which only the ids of the entries are stored.
+its index and reverse index after it, of which only the ids of the entries are stored. Both
+(version 2) are part modules: the pack's plan is four pieces of readers (136 KiB) whatever its
+length, the index module's 36 bytes an entry (`aqr_api::stream::Reader`; blocks of 6.5 and
+10.2 KB).
 
 ## The rest of a checkout
 

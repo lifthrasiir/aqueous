@@ -79,7 +79,8 @@ one of codec-corpus, and a file named `.gif` that is not one (a Perl module's ta
   defines codes again (§9 of FORMAT.md); the 3 photographs' 1.1 KB.
 
 The module `gif-recons` is 46 KB of Wasm (a block of 14 KB in an archive), which files below
-30 KB or so do not pay for alone.
+30 KB or so do not pay for alone; version 2 (decoded onto its output, laid out as a stack with
+an exact plan, the most pixels an image holds in its params) is 35 KB (a block of 11 KB).
 
 ### Speed against size
 

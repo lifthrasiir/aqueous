@@ -39,7 +39,7 @@ Measured on 2026-10-30 on an Apple M4 (10 cores), through `aqr-7z-check -t 4` an
 - The large one (`mingw480/*.7z`, 37.10 MB) has an LZMA folder of 64 MiB dictionary (23.43 MB,
   249.4 MB of data, its record 4.32 MB) and a folder of BCJ2 (13.58 MB: its main stream of
   LZMA2, its call and jump streams of LZMA). Splitting runs at 30 MB/s of data, rebuilding at
-  24 MB/s, through `aqr-7z-check -t 4` (a stream of LZMA is split and rebuilt on one thread).
+  24 MB/s, through `aqr-7z-check -t 4` (a stream of LZMA was split and rebuilt on one thread then; now in parts, see aqr-lzma).
 - `mingw480` (411.0 MB: the tree of 8,344 files and that archive, whose files are those of the
   tree) archives into 84.45 -> 68.79 MB (the LZMA folder alone) -> 55.36 MB (with BCJ2); the
   tree alone into 47.36 MB. Compressing takes 5.6 -> 27.8 -> 42.3 s and 1.44 -> 3.34 -> 4.96 GB
@@ -64,5 +64,6 @@ Done: the container (headers encoded or plain), folders of LZMA, LZMA2 or Copy, 
 Left:
 
 - PPMd, BZip2, Deflate folders; Swap2/Swap4; encrypted archives are kept as they are.
-- Rebuilding a folder of LZMA is one stream on one thread, slow for large folders (10.7 s for
-  the 10gb archive's), and its match finder takes `12 × S` bytes (768 MiB for 64 MiB).
+- A folder of LZMA over 64 MiB of data is coded in parts rebuilt side by side, and the match
+  finder's reach is cut to fit the encoder's bound on an application (256 MiB by default: 8 MiB
+  for the 64 MiB dictionary, so the records grow); see aqr-lzma's README for the figures.

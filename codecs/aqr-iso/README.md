@@ -44,7 +44,7 @@ Measured 2026-10-30 on an AMD Ryzen 7 9700X (8 cores, Windows; all threads, leve
 others shared), its ISO 9660 tree only a stub telling of UDF; the rest is 6.9 MB, 318 KB at
 zstd -3, and reading the trees takes a millisecond. It gains little, as 2.81 GB of it is
 `sources/install.wim` and 169 MB `boot.wim`, LZX-compressed: what the image gives is these as
-files of their own, for a recompressor of WIM.
+files of their own, which aqr-wim takes apart (written after this measurement).
 
 aqr-compress takes an image as an archive that only bundles files (as aqr-bundle's): its
 formula is not compared against the image raw, and its files are made in parallel.

@@ -25,7 +25,7 @@ git).
 - The 7 APKs through `aqr` (level mid): 188.77 -> 186.27 MB (−1.3%; with aqr-dex, 202.53 MB
   before both); compressing takes 4% fewer instructions (two rounds: 1583 -> 1513 G),
   testing the same (275 G).
-- The module's Wasm block is 7.7 KB.
+- The module's Wasm block is 5.0 KB (7.7 KB before arsc-recons was laid out as a stack, `1105fffe`).
 
 | part | under zstd -9 | as it is, under zstd -9 |
 |---|---|---|

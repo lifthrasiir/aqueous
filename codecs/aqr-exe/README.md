@@ -19,6 +19,8 @@ bit for bit:
 cargo run --release -p aqr-exe --example aqr-exe-bench -- [-l LEVEL] [--no-zstd] [NAME|PATH ...]  # filter round trip, speed, zstd before and after
 cargo run --release -p aqr-exe --example aqr-exe-bench-arm64 -- [-l LEVEL] MACHO...              # the same for ARM64 Mach-O images, against xz's BCJ
 cargo run --release -p aqr-exe --example aqr-exe-bench-remap -- [-x] A B                          # B's ARM64 (x86-64) code remapped to A's, against A's
+cargo run --release -p aqr-exe --example aqr-exe-bench-delta -- ...                              # ARM64 code against another version, by differences
+cargo run --release -p aqr-exe --example aqr-exe-bench-codesign -- ...                           # Mach-O code signatures' page hashes
 build-wasm.bat                                                                       # the decoder as a Wasm module
 ```
 
@@ -83,8 +85,19 @@ as it decodes and adds their shifts once the map is read. aqr-compress remaps th
 Mach-O and ELF files archived together alike, of more than half a solid block of code each.
 
 `FORMAT.md` specifies the modules `exe-recons/x86`, with the opcode tables in full,
-`exe-recons/x86-remap`, `exe-recons/arm64`, `exe-recons/arm64-remap`, `exe-recons/cil`,
-`exe-recons/pe-reloc` and `exe-recons/macho-symtab`.
+`exe-recons/x86-remap`, `exe-recons/arm64`, `exe-recons/arm64-remap`, `exe-recons/arm64-delta`,
+`exe-recons/cil`, `exe-recons/pe-reloc`, `exe-recons/macho-symtab` and `exe-recons/macho-codesign`.
+
+Every module lays its memory out as a stack (`aqr_api::stack`) and declares its plan as its
+limit (`module::plan`; `exe_x86_plans_hold`, `exe_arm64_plans_hold` and
+`exe_macho_codesign_plans_hold` in aqr-decompress's `tests/wasm.rs` check the part modules' to
+the page). `exe-recons/x86` (version 4), `exe-recons/arm64` (2) and
+`exe-recons/macho-codesign` (2) are part modules: their streams are read in pieces and the
+output put out as it goes, so that the plan does not depend on the lengths (a PE of 357 MB
+needed 1241 MiB as a whole module, over the encoder's bound of 256 MiB per application; a
+196.7 MB Mach-O needed 753 MiB). The format of x86 and ARM64 did not change by it. The remaps
+(`x86-remap`, `arm64-remap`), `arm64-delta`, `cil`, `pe-reloc` and `macho-symtab` are whole
+modules.
 
 ## Results
 
@@ -192,7 +205,7 @@ Measured on 2026-10-30 on an Apple M4 through `aqr -c` (level `mid`), before and
 
 Instructions retired: Windows App 115.9 → 117.5 G (+1.3%); Secretive, Deskflow and Blender
 fewer (29.9 → 20.9, 73.8 → 71.0, 675.3 → 649.9 G), what was scanned and inferred in the rest
-taken by the module. The module block is 5.8 KB.
+taken by the module. The module block is 4.9 KB (5.8 KB when measured).
 
 ### ELF
 
@@ -252,7 +265,7 @@ before (the remap left out) and after:
 Instructions retired: the three images 323.5 → 358.0 G (+10.7%), Chrome.app 1327.1 → 1328.6 G,
 aqr's builds 31.1 → 32.8 G; peak RSS 3.22 → 3.54 GB for the three images. Secretive, Deskflow,
 Windows App, Discord, Blender and Pages have no images alike of that much code, and archive as
-before. The module block is 6.0 KB.
+before. The module block is 6.4 KB (6.0 KB when measured).
 
 Of x86-64, measured the same way on 2026-10-30 (`aqr-exe-bench-remap -x`: each of B's 13
 streams against A's):
@@ -275,7 +288,7 @@ images left out of the plan) and after:
 
 Instructions retired: the three images 446.6 → 524.4 G (+17.4%), Chrome.app 1320.5 → 1421.2 G
 (+7.6%); peak RSS 3.58 → 3.69 GB and 5.71 → 6.29 GB, the x86 images parsed once for the plan
-and held through it. Discord and Windows App archive as before. The module block is 8.9 KB.
+and held through it. Discord and Windows App archive as before. The module block is 9.5 KB (8.9 KB when measured).
 `exe-recons/x86`'s bytes changed (its decoder now takes a hook, of no effect there), so that
 archives of an older one run it as WebAssembly.
 
@@ -318,7 +331,7 @@ Against two pieces of 8 MiB of A, the pairs were 90.06, 97.29 and 97.35 MB; agai
 4 MiB the first was 91.56 MB. Of Chrome.app, instructions retired 1439.4 → 1191.8 G (less of
 the code compressed), 27.9 → 27.7 s, peak RSS 6.22 GB as before; `aqr -K` (then `-t`) 4.85–5.33 →
 4.71–4.79 s, 86.6 → 90.3 G instructions, peak RSS 3.24 → 2.80 GB. The other six applications
-of `docs/macos-app-todo.md` archive as before (to a few bytes). The module block is 2.9 KB.
+of `docs/macos-app-todo.md` archive as before (to a few bytes). The module block is 3.2 KB (2.9 KB when measured).
 
 What is left of B's share is mostly not code: of Chrome's first pair (10.58 MB through
 `aqr -c` before the pieces of 16 MiB), the rest of B's file (`__TEXT,__const`, strings,
@@ -348,10 +361,10 @@ before (commit `40205d3`) and after:
 | Google Chrome.app | 346.15 MB | 332.68 MB | −3.9% |
 | all | 1080.60 MB | 1053.10 MB | −2.5% |
 
-Instructions retired 3252.8 → 3285.6 G (+1.0%). The file is put together whole before its
-pages are hashed: `aqr -K` of Pages.app 46.6 → 52.0 G instructions (+11.5%), peak RSS
+Instructions retired 3252.8 → 3285.6 G (+1.0%). The file was put together whole before its
+pages were hashed (not so since the part module, `12312b01`): `aqr -K` of Pages.app 46.6 → 52.0 G instructions (+11.5%), peak RSS
 0.58–0.63 → 0.75–0.84 GB (the time within its noise, 0.74–1.34 s either way); of Google
-Chrome.app 90.0 → 93.5 G (+3.8%), 2.79 → 2.63 GB. The module block is 10.1 KB.
+Chrome.app 90.0 → 93.5 G (+3.8%), 2.79 → 2.63 GB. The module block is 11.4 KB as a part module (10.1 KB when measured).
 
 Taking the signatures out made the rest of Deskflow's two programs, put in one stream, 8.3 MB
 rather than 9.5 MB, below the 8 MiB from which aqr-formula then matched from afar, and the

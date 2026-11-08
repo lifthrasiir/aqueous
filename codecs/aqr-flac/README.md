@@ -156,7 +156,7 @@ The format is specified in [FORMAT.md](FORMAT.md).
 - `aqr-flac bench`: every file's formula evaluates to the input, and so does its `.aqr` archive.
 - `aqr-flac fuzz`: bit flips, truncation, deletion and insertion; the formula, if there is
   one, must evaluate back without panics, the same with threads (1170 mutated inputs of the test data and corpus files, also as raw PCM, when that was aqr-flac's).
-- `cargo test --release`: `tests/formula.rs` and `tests/threads.rs` (and aqr-raw's own tests for the model and PCM).
+- `cargo rt -p aqr-flac`: `tests/formula.rs` and `tests/threads.rs` (and aqr-raw's own tests for the model and PCM).
 
 ## Tried and dropped
 
@@ -196,6 +196,7 @@ lengths), unless noted.
   and decodes their errors; its gang of eight tasks is the LMS stage and seven workers that
   write the frames, which pass as messages, each task taking one into a buffer and a frame
   reserved for the largest, of the room the params give (the most samples a channel, channels
-  and bytes of a frame: flac-recons 4); and the messages its channels may hold. A varint coded
+  and bytes of a frame: flac-recons 4); and the messages its channels may hold. Natively it still decodes whole, on threads
+  (`Run::Threaded` in aqr-decompress), as pcm-recons does. A varint coded
   in more bytes than its value takes is refused (no coder writes one).
 - MD5 signatures are not checked (they are kept with the metadata).

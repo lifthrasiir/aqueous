@@ -20,7 +20,7 @@ PDB files (the MSF 7.00 container of Microsoft's debugging information, as `link
   as it is, scanned as content.
 
 aqr-compress takes PDB files whose modules' symbols are 512 KiB or more: below that, the
-modules' blocks (18 KB) cost more than they save. The other streams are scanned as content
+modules' blocks (12 KB) cost more than they save. The other streams are scanned as content
 (record inference finds the section contributions, hashes and the like): the modules' streams
 being whole outputs, they are a few runs, each inferred once (when the modules' symbols alone
 were outputs, uniform.pdb's were 57 pieces, 1.28 s of inference against 0.29 s at once).

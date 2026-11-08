@@ -55,5 +55,5 @@ Measured 2026-10-26 on an Apple M4 (10 cores), on hg19 (93 chromosome files of t
 
 ## Tests
 
-`cargo test --release -p aqr-fasta`; `aqr-fasta-bench FILE...` (with `PHASES` set, the time of
+`cargo rt -p aqr-fasta`; `aqr-fasta-bench FILE...` (with `PHASES` set, the time of
 the parse and of the bases too).

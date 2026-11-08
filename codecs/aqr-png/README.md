@@ -190,12 +190,14 @@ Neither side holds the inflated data, the raw image or the stream's tokens whole
   data on photos), since the static tables are counted over all of them before the rANS
   stream is coded backwards. They are freed before the record is copied out.
 
-`png-recons` lays its memory out as a stack (`aqr_api::stack`), so its limit is its plan
-(`plan::recons`): the skeleton and its records listed, each image's layout and model tables
-reserved exactly (the layout read twice, its blocks counted first; the tables' frequencies in
-one buffer), its payload of room for what writing reserves past it, the decoder's windows; the
-images as tasks of several, each giving its payload back with a byte (and its reference, 9
-bytes a token, where kept), the file made of them; the CRC tables first. `png-against` and
+`png-recons` is a part module (version 5) laying its memory out as a stack (`aqr_api::stack`), so its
+limit is its plan (`plan::part`, `src/part.rs`): the skeleton and the index read whole, the file's
+chunks taken in pieces of 16 KiB, and the most an image takes (its record's head, layout and model
+tables reserved exactly, the decoder's windows, a block's tokens, room for a block written); each
+image's payload is written block by block and cut into its chunks as it goes. A file of several
+images, each of a payload of 8 MiB or less, is decoded in batches of up to 8 images as tasks
+(8 slots); any other, an image at a time. Natively it still decodes whole, on threads
+(`plan::recons` is the whole module's plan). `png-against` and
 `png-set` are planned the same way (`plan::against`, `plan::set`): a reference file's images are
 parsed with code tables of room for the largest code (`aqr_flate::inflate::tokens_of`), their
 tokens counted first and their references reserved exactly; `png-set` reserves its output first
@@ -262,6 +264,7 @@ the tests (and `aqr-png bench` on the corpus) run through them on small images t
 | `src/rans.rs` | Static rANS: tables, encoder, decoder, bit I/O |
 | `src/codec.rs` | Skeleton, image records, rebuilding the file |
 | `src/formula.rs` | The formula module |
+| `src/part.rs`, `src/plan.rs` | png-recons as a part module; the modules' memory plans |
 | `src/main.rs` | Benchmark tool |
 | `src/bin/probe.rs`, `src/bin/ransbench.rs` | Research tools: token statistics, rANS speed |
 | `bench/` | Comparison with other tools (`bench/fetch.sh` builds them into the workspace's `third_party/`) |
