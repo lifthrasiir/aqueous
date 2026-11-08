@@ -1028,6 +1028,22 @@ mod tests {
         })));
         all.contents(2, |_, _| Ok(())).unwrap();
         assert!(most.1 < *whole.lock().unwrap());
+        // opened by its index: the same, alone and all of them
+        let a = super::super::open_indexed(super::super::Payload::Plain(&out), &natives, 2).unwrap();
+        let got = std::sync::Mutex::new(Vec::new());
+        a.contents_of(2, Some(&[false, true, false]), |c, d| {
+            got.lock().unwrap().push((c, d));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(got.into_inner().unwrap(), [(1, b"zyx".to_vec())]);
+        let got = std::sync::Mutex::new(vec![Vec::new(); 3]);
+        a.contents(2, |c, d| {
+            got.lock().unwrap()[c] = d;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(got.into_inner().unwrap(), [b"olleh".to_vec(), b"zyx".to_vec(), b"wvu".to_vec()]);
     }
 
     /// The bytes of module and resource blocks in a batch: of a module applied by another leaf

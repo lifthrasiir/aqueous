@@ -549,7 +549,7 @@ impl<'c> Envelope<'c> {
     }
 }
 
-impl Unlocked<'_> {
+impl<'c> Unlocked<'c> {
     /// The bytes of the payload.
     pub fn len(&self) -> usize {
         self.chunks.iter().map(|c| c.len() - 16).sum()
@@ -629,6 +629,121 @@ impl Unlocked<'_> {
         let mut d = vec![0; self.len()];
         self.decrypt_into(&mut d, threads)?;
         Ok(d)
+    }
+
+    /// The payload to be decrypted a chunk at a time, as its bytes are read ([`Decrypting`]).
+    pub fn decrypting(self) -> Decrypting<'c> {
+        let len = self.len();
+        let layout = std::alloc::Layout::array::<u8>(len.max(1)).expect("a payload of a file's size");
+        // (zeroed: of pages the system maps as they are touched, so that the chunks not read take
+        // no memory)
+        // SAFETY: a layout of a nonzero size
+        let buf = std::ptr::NonNull::new(unsafe { std::alloc::alloc_zeroed(layout) })
+            .unwrap_or_else(|| std::alloc::handle_alloc_error(layout));
+        let done = (0..self.chunks.len()).map(|_| std::sync::OnceLock::new()).collect();
+        Decrypting { unlocked: self, buf, len, done, decrypted: std::sync::atomic::AtomicUsize::new(0) }
+    }
+}
+
+/// The payload of an encrypted archive, decrypted a chunk at a time as its bytes are first read
+/// ([`Decrypting::get`]), each chunk authenticated: a file read alone decrypts its blocks' chunks
+/// and those of the blocks that tell where they are, not the whole archive.
+pub struct Decrypting<'c> {
+    unlocked: Unlocked<'c>,
+    /// The payload's bytes, of each chunk once it is decrypted ([`Decrypting::done`]).
+    buf: std::ptr::NonNull<u8>,
+    len: usize,
+    /// By chunk, once decrypted: whether it authenticates.
+    done: Vec<std::sync::OnceLock<bool>>,
+    /// The chunks decrypted so far.
+    decrypted: std::sync::atomic::AtomicUsize,
+}
+
+// SAFETY: the bytes of a chunk are written once, by the one initializing its `done`, before any
+// reference to them is made; then only read.
+unsafe impl Send for Decrypting<'_> {}
+unsafe impl Sync for Decrypting<'_> {}
+
+impl Drop for Decrypting<'_> {
+    fn drop(&mut self) {
+        let layout = std::alloc::Layout::array::<u8>(self.len.max(1)).unwrap();
+        // SAFETY: allocated so in `Unlocked::decrypting`, no reference to it left
+        unsafe { std::alloc::dealloc(self.buf.as_ptr(), layout) };
+    }
+}
+
+impl<'c> Decrypting<'c> {
+    /// The bytes of the payload.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The number of chunks.
+    pub fn chunks(&self) -> usize {
+        self.done.len()
+    }
+
+    /// The payload unlocked, to be decrypted otherwise ([`Unlocked::decrypt_lossy`]).
+    pub fn unlocked(&self) -> &Unlocked<'c> {
+        &self.unlocked
+    }
+
+    /// The number of chunks decrypted so far.
+    pub fn decrypted(&self) -> usize {
+        self.decrypted.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Chunk `m` decrypted where it is not yet: whether it authenticates.
+    fn chunk(&self, m: usize) -> bool {
+        *self.done[m].get_or_init(|| {
+            let c = self.unlocked.chunks[m];
+            let n = c.len() - 16;
+            // SAFETY: the bytes of chunk `m`, within the allocation; written by this one call
+            // alone (that of `done[m]`'s initialization), with no reference to them yet
+            let d = unsafe { std::slice::from_raw_parts_mut(self.buf.as_ptr().add(m * CHUNK), n) };
+            d.copy_from_slice(&c[..n]);
+            self.decrypted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tag = Tag::from_slice(&c[n..]);
+            let last = m + 1 == self.done.len();
+            self.unlocked.cipher.decrypt_in_place_detached(&chunk_nonce(m as u64, last), &[], d, tag).is_ok()
+        })
+    }
+
+    /// Bytes `r` of the payload, the chunks they are in decrypted where they are not yet: an
+    /// invalid archive where `r` is past the payload, or a chunk does not authenticate.
+    pub fn get(&self, r: std::ops::Range<usize>) -> Decoded<&[u8]> {
+        if r.start > r.end || r.end > self.len {
+            return invalid("bytes past the payload");
+        }
+        if r.is_empty() {
+            return Ok(&[]);
+        }
+        for m in r.start / CHUNK..=(r.end - 1) / CHUNK {
+            if !self.chunk(m) {
+                return invalid(format!("encrypted chunk {m} does not authenticate"));
+            }
+        }
+        // SAFETY: of chunks decrypted, not to be written again
+        Ok(unsafe { std::slice::from_raw_parts(self.buf.as_ptr().add(r.start), r.len()) })
+    }
+
+    /// The whole payload, the chunks not decrypted yet decrypted on up to `threads` threads.
+    pub fn all(&self, threads: usize) -> Decoded<&[u8]> {
+        /// Chunks decrypted by a task: 4 MiB.
+        const TASK: usize = 64;
+        let n = self.done.len();
+        let r = aqr_common::pool::par_map(n.div_ceil(TASK), threads, |t| {
+            match (t * TASK..n.min((t + 1) * TASK)).find(|&m| !self.chunk(m)) {
+                Some(m) => invalid(format!("encrypted chunk {m} does not authenticate")),
+                None => Ok(()),
+            }
+        });
+        r.into_iter().collect::<Decoded<()>>()?;
+        self.get(0..self.len)
     }
 }
 
@@ -721,6 +836,97 @@ mod tests {
         let mut d = c.clone();
         d[8] = WORK_FACTOR_LIMIT + 1;
         assert!(matches!(open(&d).map(|_| ()), Err(Failure::Resource(_))));
+    }
+
+    /// An encrypted archive of 24 files (of 3 chunks or so each: in parcels of their own, two by
+    /// two of a stream they share, or of a module's application), sealed: its contents as
+    /// they were, and those taken alone of a few chunks of it decrypted, not all.
+    #[test]
+    fn decrypted_as_read() {
+        use super::super::tests::{REV, natives};
+        use super::super::{ContentAt, Entry, EntryNode, Extra, Leaf, Payload, SegmentWriter, Tree, open_indexed};
+        use crate::Node;
+        const N: usize = 24;
+        const LEN: usize = 150_000;
+        let data: Vec<Vec<u8>> = (0..N).map(|k| aqr_common::rng::noise(LEN + k)).collect();
+        let enc = Encoder::new(Level::STORED);
+        let mut w = SegmentWriter::with_size_hint(true);
+        let mut a = w.head().to_vec();
+        let (mut t, mut contents) = (Tree::default(), Vec::new());
+        for k in (0..N).step_by(2) {
+            let mut f = Formula::default();
+            let (x, y) = (&data[k], &data[k + 1]);
+            let leaves = match k % 6 {
+                // (each of a stream of its own)
+                0 => {
+                    let (sx, sy) = (f.push("x", x.clone()), f.push("y", y.clone()));
+                    vec![Leaf { outputs: vec![sx], sums: vec![None] }, Leaf { outputs: vec![sy], sums: vec![None] }]
+                }
+                // (both of one stream, the second's leaf after the first's)
+                2 => {
+                    f.push("xy", [&x[..], y].concat());
+                    vec![
+                        Leaf { outputs: vec![Node::slice(0, 0, x.len() as u64)], sums: vec![None] },
+                        Leaf { outputs: vec![Node::slice(0, x.len() as u64, y.len() as u64)], sums: vec![None] },
+                    ]
+                }
+                // (reversed, by a module)
+                _ => {
+                    let rx: Vec<u8> = x.iter().rev().copied().collect();
+                    let ry: Vec<u8> = y.iter().rev().copied().collect();
+                    let (sx, sy) = (f.push("x", rx), f.push("y", ry));
+                    let rev = |s, n| Node::apply(REV, vec![1, 2, 3], vec![s], n as u64);
+                    vec![
+                        Leaf { outputs: vec![rev(sx, x.len())], sums: vec![None] },
+                        Leaf { outputs: vec![rev(sy, y.len())], sums: vec![None] },
+                    ]
+                }
+            };
+            let batch = w.batch(&enc, &f, &leaves).unwrap();
+            w.commit(&batch);
+            a.extend_from_slice(&batch.bytes);
+            for (i, &leaf) in batch.leaf_at.iter().enumerate() {
+                let c = contents.len();
+                contents.push(ContentAt { leaf, output: 0, size: data[k + i].len() as u64 });
+                let name = format!("f{c}").into_bytes();
+                t.entries.push(Entry { parent: None, name, node: EntryNode::File(c), extra: Extra::default() });
+            }
+        }
+        a.extend_from_slice(&w.finish(&enc, &t, &contents).unwrap().0);
+        let c = sealed(&a, b"pass", true);
+        let unlocked = || open(&c).unwrap().unlock(b"pass").unwrap().decrypting();
+        let natives = natives();
+        // all of them
+        let d = unlocked();
+        let archive = open_indexed(Payload::Sealed(&d), &natives, 2).unwrap();
+        let got = std::sync::Mutex::new(vec![None; N]);
+        archive
+            .contents(2, |c, d| {
+                got.lock().unwrap()[c] = Some(d);
+                Ok(())
+            })
+            .unwrap();
+        assert!(got.into_inner().unwrap().into_iter().map(Option::unwrap).eq(data.iter().cloned()));
+        assert_eq!(d.decrypted(), d.chunks());
+        // each alone: its own chunks (3 or so), those of the metadata block and footer, the first
+        // (its size hint), and those of the blocks between its formula block and its stream
+        for k in 0..N {
+            let d = unlocked();
+            let archive = open_indexed(Payload::Sealed(&d), &natives, 2).unwrap();
+            let mut only = vec![false; N];
+            only[k] = true;
+            let got = std::sync::Mutex::new(None);
+            archive
+                .contents_of(2, Some(&only), |c, d| {
+                    assert_eq!(c, k);
+                    *got.lock().unwrap() = Some(d);
+                    Ok(())
+                })
+                .unwrap();
+            assert!(got.into_inner().unwrap().as_ref() == Some(&data[k]), "{k}");
+            let (n, all) = (d.decrypted(), d.chunks());
+            assert!(n <= 10 && all > 50, "file {k}: {n} of {all} chunks decrypted");
+        }
     }
 
     /// Damaged, an archive is still decrypted: chunks that do not authenticate without it (their

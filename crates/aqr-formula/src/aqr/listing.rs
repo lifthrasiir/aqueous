@@ -290,17 +290,17 @@ impl Graph<'_> {
 
 impl Archive<'_, '_> {
     /// The bytes of the data blocks: the leaf data blocks and the non-leaf blocks, framed.
-    pub fn data_bytes(&self) -> u64 {
-        let b = &self.blocks;
+    pub fn data_bytes(&self) -> Decoded<u64> {
+        let b = self.parsed()?;
         let stored = b.leaves.iter().zip(&b.sizes.leaves).filter(|(l, _)| matches!(l, LeafBlock::Stored(..)));
-        stored.map(|(_, &n)| n).sum::<u64>() + b.sizes.non_leaf.iter().sum::<u64>()
+        Ok(stored.map(|(_, &n)| n).sum::<u64>() + b.sizes.non_leaf.iter().sum::<u64>())
     }
 
     /// Of each content of the tree (by [`super::EntryNode::File`]), what a listing tells
     /// ([`Listed`]); of an archive of a single file, of the file alone. `name` names the module of
     /// Wasm module `wasm` (`None`: not known).
     pub fn listing(&self, name: &dyn Fn(&[u8]) -> Option<String>) -> Decoded<Vec<Listed>> {
-        let blocks = &self.blocks;
+        let blocks = self.parsed()?;
         let sizes = &blocks.sizes;
         let names = module_names(blocks, name);
         let name_of = |m: usize| names[m].clone();
@@ -414,7 +414,8 @@ pub(super) fn graph<'f>(blocks: &Blocks, name: &'f dyn Fn(usize) -> String) -> D
                 g.first_insn.push(insn);
                 vec![g.add(Shape::Stored(zstd, checked), Vec::new(), insn, stored_len(d, zstd, checked))]
             }
-            LeafBlock::Lost => return invalid("a file whose block is lost"),
+            LeafBlock::Lost | LeafBlock::Unread => return invalid("a file whose block is lost"),
+            LeafBlock::Bad(ref e) => return Err(e.clone()),
             LeafBlock::Formula { outputs, data, segment, .. } => {
                 let (d, dict) = blocks.formulas[data];
                 let d = decoded_with(d, true, true, dict.map(|d| &blocks.dictionaries[d]))?;

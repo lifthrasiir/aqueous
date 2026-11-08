@@ -227,7 +227,7 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
         let (data, overhead, whole) = match a.select {
             Some(_) => ("-".into(), "-".into(), rows.iter().filter_map(|r| r.listed.as_ref()).map(|l| l.share).sum()),
             None => {
-                let (data, len) = (archive.data_bytes(), c.len() as u64);
+                let (data, len) = (archive.data_bytes().map_err(|e| err(&e))?, c.len() as u64);
                 (data.to_string(), (len - data.min(len)).to_string(), len)
             }
         };

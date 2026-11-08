@@ -33,6 +33,7 @@
 mod dict;
 pub mod envelope;
 pub(crate) mod eval;
+mod index;
 pub mod inspect;
 mod listing;
 mod locate;
@@ -2635,7 +2636,7 @@ impl Archival {
 /// (and dropped once no slice of it is left), so that evaluating them takes about the memory of
 /// those evaluated at once.
 pub struct Archive<'c, 'n> {
-    blocks: Blocks<'c>,
+    kept: Archived<'c>,
     runner: &'n dyn Runner,
     /// The modules loaded, by module block, as they are first applied.
     loaded: Vec<OnceLock<Decoded<Box<dyn Loaded + 'n>>>>,
@@ -2651,6 +2652,13 @@ pub struct Archive<'c, 'n> {
     items: Vec<Option<usize>>,
     /// Whether the pages of the blocks are let go of as they are read ([`Archive::let_go_read`]).
     let_go: bool,
+}
+
+/// An archive's blocks: all of them read ([`open`]), or as its metadata blocks tell where they
+/// are, read as they are needed ([`open_indexed`]).
+enum Archived<'c> {
+    Parsed(Box<Blocks<'c>>),
+    Indexed(Box<index::Index<'c>>),
 }
 
 /// Archive `c` opened, its modules run by `runner`. An encrypted archive is a decryption
@@ -2680,6 +2688,74 @@ pub fn open_salvaging<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, sealed: bool)
     open_with(c, runner, sealed, true)
 }
 
+/// The bytes of an archive (from its header magic to the end of its footer) as they are read: a
+/// file's (mapped), or the payload of an encrypted archive, decrypted a chunk at a time as it is
+/// read ([`envelope::Decrypting`]).
+#[derive(Clone, Copy)]
+pub enum Payload<'c> {
+    Plain(&'c [u8]),
+    Sealed(&'c envelope::Decrypting<'c>),
+}
+
+impl<'c> Payload<'c> {
+    pub fn len(&self) -> usize {
+        match self {
+            Payload::Plain(c) => c.len(),
+            Payload::Sealed(d) => d.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn sealed(&self) -> bool {
+        matches!(self, Payload::Sealed(_))
+    }
+
+    /// Whether it is an archive of a tree (of a metadata block), as its footer tells: one that
+    /// [`open_indexed`] reads only in part.
+    pub fn of_tree(&self) -> bool {
+        footer_fields(*self).is_ok_and(|f| f.3 != 0)
+    }
+
+    /// Bytes `r`: an invalid archive where they are not there (or of chunks that do not
+    /// authenticate).
+    fn get(&self, r: std::ops::Range<usize>) -> Decoded<&'c [u8]> {
+        match *self {
+            Payload::Plain(c) => c.get(r).ok_or_else(|| Failure::Invalid("truncated block".into())),
+            Payload::Sealed(d) => d.get(r),
+        }
+    }
+
+    /// All of its bytes (decrypted on up to `threads` threads).
+    fn whole(&self, threads: usize) -> Decoded<&'c [u8]> {
+        match *self {
+            Payload::Plain(c) => Ok(c),
+            Payload::Sealed(d) => d.all(threads),
+        }
+    }
+}
+
+/// Archive `p` opened as [`open`] does (an encrypted archive's payload as [`open_payload`]
+/// does), but reading only what tells where its blocks are: the footer and the metadata blocks.
+/// The blocks of a leaf are read as it is evaluated, those of the leaves taken alone
+/// ([`Archive::contents_of`]) only (spec, "Partial access"): a file read alone reads its own
+/// blocks, those it refers to, and the blocks between a formula block and the non-leaf blocks
+/// it refers to (by their ordinals). The whole archive is read where all of it is evaluated or
+/// told of (decrypted on up to `threads` threads), and an archive without a metadata block at
+/// once.
+pub fn open_indexed<'c, 'n>(p: Payload<'c>, runner: &'n dyn Runner, threads: usize) -> Decoded<Archive<'c, 'n>> {
+    let (fields_start, archive_end, size_hint, metadata) = footer_fields(p)?;
+    if metadata == 0 {
+        return open_as(p.whole(threads)?, runner, p.sealed());
+    }
+    let (index, tree, status) = index::open(p, threads, fields_start, archive_end, size_hint, metadata)?;
+    let loaded = (0..index.modules_len()).map(|_| OnceLock::new()).collect();
+    let kept = Archived::Indexed(Box::new(index));
+    Ok(Archive { kept, runner, loaded, tree, status, budget: None, tell: None, items: Vec::new(), let_go: false })
+}
+
 /// [`open`] of an archive, the payload of an encrypted one where `sealed`.
 fn open_as<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, sealed: bool) -> Decoded<Archive<'c, 'n>> {
     open_with(c, runner, sealed, false)
@@ -2687,27 +2763,49 @@ fn open_as<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, sealed: bool) -> Decoded
 
 /// [`open_as`], salvaging where `salvaging` ([`open_salvaging`]).
 fn open_with<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, sealed: bool, salvaging: bool) -> Decoded<Archive<'c, 'n>> {
-    if !c.starts_with(&HEADER_MAGIC) {
+    let (blocks, tree, status) = opened(c, sealed, salvaging)?;
+    let loaded = blocks.modules.iter().map(|_| OnceLock::new()).collect();
+    let kept = Archived::Parsed(Box::new(blocks));
+    Ok(Archive { kept, runner, loaded, tree, status, budget: None, tell: None, items: Vec::new(), let_go: false })
+}
+
+/// Of archive `p`, as its footer tells: where the footer's fields start, where the archive's
+/// blocks end (its footer starts), its size hint and the backward offset of its last metadata
+/// block.
+fn footer_fields(p: Payload) -> Decoded<(usize, usize, u64, u64)> {
+    if p.get(0..HEADER_MAGIC.len().min(p.len()))? != HEADER_MAGIC {
         return invalid("bad header magic");
     }
-    let u16_at = |at: usize| u16::from_le_bytes([c[at], c[at + 1]]) as usize;
-    let (fields_start, archive_end) = c
-        .len()
-        .checked_sub(2)
-        .and_then(|copy| {
-            let fields = copy.checked_sub(u16_at(copy))?;
-            Some((fields, fields.checked_sub(8).filter(|&end| end >= HEADER_MAGIC.len())?))
-        })
-        .ok_or_else(|| Failure::Invalid("truncated footer".into()))?;
-    if c[archive_end..archive_end + 6] != FOOTER_MAGIC || u16_at(archive_end + 6) != u16_at(c.len() - 2) {
+    let truncated = || Failure::Invalid("truncated footer".into());
+    let copy = p.len().checked_sub(2).ok_or_else(truncated)?;
+    let u16_of = |d: &[u8]| u16::from_le_bytes([d[0], d[1]]) as usize;
+    let n = u16_of(p.get(copy..p.len())?);
+    let (fields_start, archive_end) = copy
+        .checked_sub(n)
+        .and_then(|fields| Some((fields, fields.checked_sub(8).filter(|&end| end >= HEADER_MAGIC.len())?)))
+        .ok_or_else(truncated)?;
+    let c = p.get(archive_end..p.len())?;
+    if c[..6] != FOOTER_MAGIC || u16_of(&c[6..8]) != n {
         return invalid("bad footer");
     }
-    let fields = &c[fields_start..c.len() - 2];
+    let fields = &c[8..c.len() - 2];
     let mut at = 0;
     let (size_hint, metadata) = (leb(fields, &mut at)?, leb(fields, &mut at)?);
     if at != fields.len() || size_hint != (archive_end - HEADER_MAGIC.len()) as u64 {
         return invalid("bad footer");
     }
+    Ok((fields_start, archive_end, size_hint, metadata))
+}
+
+/// The blocks of archive `c` (the payload of an encrypted one where `sealed`, salvaged where
+/// `salvaging`), its tree and its status: what [`open_with`] opens.
+#[allow(clippy::type_complexity)]
+fn opened(
+    c: &[u8],
+    sealed: bool,
+    salvaging: bool,
+) -> Decoded<(Blocks<'_>, Option<(Tree, Vec<ContentRef>)>, Option<Status>)> {
+    let (fields_start, archive_end, size_hint, metadata) = footer_fields(Payload::Plain(c))?;
     // (salvaging an encrypted archive's payload, its blocks lost are spacer blocks, its size
     // hint block among them maybe)
     let mut blocks = parse(&c[HEADER_MAGIC.len()..archive_end], 0, size_hint, metadata != 0, sealed && !salvaging)?;
@@ -2735,7 +2833,31 @@ fn open_with<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, sealed: bool, salvagin
         let m = tree::read(&d)?;
         drop(d);
         status = Some(m.status);
-        trees.push(tree_of(m, at, prev, &blocks, k, &outputs, salvaging.then_some(&mut lost))?);
+        let seg = &blocks.segments[k];
+        let (first, end) = (seg.first, seg.end);
+        // (salvaging, those there those the first offsets tell: the others lost with what follows)
+        let to = |offsets: &[u64], at_: &[usize]| {
+            (offsets.len() == at_.len() || salvaging && offsets.len() > at_.len())
+                && offsets.iter().zip(at_).all(|(&o, &b)| at.checked_sub(o as usize) == Some(b))
+        };
+        if !to(&m.modules, &blocks.module_at[first.modules..end.modules])
+            || !to(&m.resources, &blocks.resource_at[first.resources..end.resources])
+            || !to(&m.dictionaries, &blocks.dictionary_at[first.dictionaries..end.dictionaries])
+        {
+            return invalid("module, resource or dictionary offsets not those of the blocks");
+        }
+        // (a leaf of the segment's, by where it is: its outputs, and the dictionary of a file at it
+        // checked)
+        let mut leaf_at = |b: usize, dictionary: Option<u64>| -> Decoded<Option<(usize, Option<u64>)>> {
+            let leaves = &blocks.leaf_at[first.leaves..end.leaves];
+            let Some(leaf) = leaves.binary_search(&b).ok().map(|l| first.leaves + l) else { return Ok(None) };
+            let own = blocks.leaf_dictionary[leaf].map_or(0, |d| (d - first.dictionaries) as u64 + 1);
+            if dictionary.is_some_and(|d| d != own) {
+                return invalid("a file's dictionary not that of its leaf block");
+            }
+            Ok(Some((leaf, Some(outputs[leaf]))))
+        };
+        trees.push(tree_of(m, at, prev, &mut leaf_at, outputs.len(), salvaging.then_some(&mut lost))?);
         prev = at;
     }
     let tree = match trees.len() {
@@ -2750,11 +2872,19 @@ fn open_with<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, sealed: bool, salvagin
         blocks.leaf_dictionary.push(None);
         blocks.sizes.leaves.push(0);
     }
-    let loaded = blocks.modules.iter().map(|_| OnceLock::new()).collect();
-    Ok(Archive { blocks, runner, loaded, tree, status, budget: None, tell: None, items: Vec::new(), let_go: false })
+    Ok((blocks, tree, status))
 }
 
-impl<'n> Archive<'_, 'n> {
+impl<'c, 'n> Archive<'c, 'n> {
+    /// The archive's blocks, all of them read (where they are not yet, now, as [`open`] reads
+    /// them).
+    fn parsed(&self) -> Decoded<&Blocks<'c>> {
+        match &self.kept {
+            Archived::Parsed(b) => Ok(b.as_ref()),
+            Archived::Indexed(i) => i.parsed(self.tree.as_ref().map(|t| &t.1)),
+        }
+    }
+
     /// The tree, where the archive has a metadata block.
     pub fn tree(&self) -> Option<&Tree> {
         self.tree.as_ref().map(|t| &t.0)
@@ -2808,7 +2938,10 @@ impl<'n> Archive<'_, 'n> {
 
     /// The number of leaf blocks.
     pub fn leaves_len(&self) -> usize {
-        self.blocks.leaves.len()
+        match &self.kept {
+            Archived::Parsed(b) => b.leaves.len(),
+            Archived::Indexed(i) => i.leaves_len(),
+        }
     }
 
     /// The bytes of content `c` of the tree, as its metadata block tells.
@@ -2857,7 +2990,7 @@ impl<'n> Archive<'_, 'n> {
             return invalid("an archive of a tree");
         }
         let mut n = 0u64;
-        if self.blocks.leaves.len() != 1 {
+        if self.parsed()?.leaves.len() != 1 {
             let Value::File(d) = self.value(threads)? else { unreachable!("an archive of a single file") };
             sink(&d)?;
             return Ok(d.len() as u64);
@@ -2902,7 +3035,7 @@ impl<'n> Archive<'_, 'n> {
         threads: usize,
     ) -> Decoded<Vec<Option<Vec<crate::chash::Hashed>>>> {
         use crate::chash::Ch;
-        let blocks = &self.blocks;
+        let blocks = self.parsed()?;
         let mut used = vec![false; blocks.non_leaf.len()];
         let env = |leaf: &LeafBlock| blocks.env(leaf, &self.loaded, self.runner);
         let formulas: Vec<Option<Vec<u8>>> = (blocks.leaves.iter())
@@ -2968,13 +3101,13 @@ impl<'n> Archive<'_, 'n> {
     /// no Checksum instruction covers (every formula block read). An archive opened is standalone
     /// and has no shorthand blocks (which are not supported yet).
     pub fn archival(&self) -> Decoded<Archival> {
-        let blocks = &self.blocks;
+        let blocks = self.parsed()?;
         let mut a = Archival::default();
         let mut used = vec![false; blocks.non_leaf.len()];
         for leaf in &blocks.leaves {
             match *leaf {
                 LeafBlock::Stored(_, _, checked, _) => a.unchecked_leaves += !checked as usize,
-                LeafBlock::Lost => {}
+                LeafBlock::Lost | LeafBlock::Unread | LeafBlock::Bad(_) => {}
                 LeafBlock::Formula { outputs, data, .. } => {
                     let (d, dict) = blocks.formulas[data];
                     let d = decoded_with(d, true, true, dict.map(|d| &blocks.dictionaries[d]))?;
@@ -2998,7 +3131,16 @@ impl<'n> Archive<'_, 'n> {
         sink: Option<&Mutex<&mut Sink>>,
         f: impl Fn(usize, Decoded<Vec<Vec<u8>>>) -> Decoded<()> + Sync,
     ) -> Decoded<()> {
-        let blocks = &self.blocks;
+        // (of an archive indexed, those of the leaves taken alone read)
+        let partial;
+        let blocks = match (&self.kept, only) {
+            (Archived::Indexed(i), Some(o)) => {
+                let picked: Vec<usize> = (0..i.leaves_len()).filter(|&l| o.get(l) == Some(&true)).collect();
+                partial = i.blocks_for(&picked);
+                &partial
+            }
+            _ => self.parsed()?,
+        };
         // the leaves evaluated, in order
         let taken = |i: usize| only.is_none_or(|o| o.get(i) == Some(&true));
         let picked: Vec<usize> = (0..blocks.leaves.len()).filter(|&i| taken(i)).collect();
@@ -3120,6 +3262,8 @@ impl<'n> Archive<'_, 'n> {
                 let outputs = match blocks.leaves[i] {
                     _ if failed[i].is_some() => Err(failed[i].clone().expect("a failure")),
                     LeafBlock::Lost => invalid("a file whose block is lost"),
+                    LeafBlock::Bad(ref e) => Err(e.clone()),
+                    LeafBlock::Unread => unreachable!("a leaf taken"),
                     LeafBlock::Stored(raw, zstd, checked, dict) => {
                         let d = decoded_with(raw, zstd, checked, dict.map(|d| &blocks.dictionaries[d]));
                         contents.read(raw);
@@ -3149,7 +3293,7 @@ impl<'n> Archive<'_, 'n> {
         match self.tree() {
             None => {
                 let leaves: Mutex<Vec<Option<Vec<Vec<u8>>>>> =
-                    Mutex::new((0..self.blocks.leaves.len()).map(|_| None).collect());
+                    Mutex::new((0..self.leaves_len()).map(|_| None).collect());
                 self.leaves(threads, |i, outputs| {
                     leaves.lock().unwrap()[i] = Some(outputs);
                     Ok(())
@@ -3194,13 +3338,15 @@ impl<'n> Archive<'_, 'n> {
         let Some((_, refs)) = &self.tree else { return invalid("an archive of a single file") };
         let wanted = |c: usize| only.is_none_or(|o| o.get(c) == Some(&true));
         // by leaf, its outputs taken: output, content, size
-        let mut of: Vec<Vec<(usize, usize, u64)>> = vec![Vec::new(); self.blocks.leaves.len()];
+        let mut of: Vec<Vec<(usize, usize, u64)>> = vec![Vec::new(); self.leaves_len()];
         refs.iter().enumerate().filter(|&(c, _)| wanted(c)).for_each(|(c, &(l, o, n))| of[l].push((o, c, n)));
         let leaves: Option<Vec<bool>> = only.map(|_| of.iter().map(|o| !o.is_empty()).collect());
         self.each_leaf_into(threads, leaves.as_deref(), None, |i, outputs| {
             let mut outputs = outputs?;
             for &(o, c, n) in &of[i] {
-                let d = std::mem::take(&mut outputs[o]);
+                let Some(d) = outputs.get_mut(o).map(std::mem::take) else {
+                    return invalid("a file or a fork of an output its leaf block does not have");
+                };
                 if d.len() as u64 != n {
                     return invalid("a file of another size than its entry's");
                 }
@@ -3211,17 +3357,22 @@ impl<'n> Archive<'_, 'n> {
     }
 }
 
-/// The tree of metadata block `m` at `at` of segment `segment`, the metadata block before it at
-/// `prev` (the end of the header magic, less 1, where it is the first), among `blocks` whose
-/// leaves have `outputs` each; and its contents, each a leaf and an output of it, and the size of
-/// the files of it.
+/// What tells the leaf block at a place of an archive ([`tree_of`]): its index and its outputs
+/// (where they are known), a file's dictionary (1-based in its segment) given to be checked; none
+/// where none is there.
+type LeafAt<'a> = dyn FnMut(usize, Option<u64>) -> Decoded<Option<(usize, Option<u64>)>> + 'a;
+
+/// The tree of metadata block `m` at `at`, the metadata block before it at `prev` (the end of the
+/// header magic, less 1, where it is the first), `leaf_at` telling the leaf block at a place (by
+/// its index, and its outputs where they are known; a file's dictionary given to be checked),
+/// none where none is there; and its contents, each a leaf and an output of it, and the size of
+/// the files of it. Salvaging (`lost`), the leaves not there are numbered from `lost_from`.
 fn tree_of(
     m: tree::Metadata,
     at: usize,
     prev: usize,
-    blocks: &Blocks,
-    segment: usize,
-    outputs: &[u64],
+    leaf_at: &mut LeafAt,
+    lost_from: usize,
     mut lost: Option<&mut Vec<()>>,
 ) -> Decoded<tree::SegmentTree> {
     if m.prev != (at - prev) as u64 {
@@ -3230,43 +3381,29 @@ fn tree_of(
             _ => "a metadata block not pointing to the one before it",
         });
     }
-    let seg = &blocks.segments[segment];
-    let (first, end) = (seg.first, seg.end);
-    // (salvaging, those there those the first offsets tell: the others lost with what follows)
-    let salvaging = lost.is_some();
-    let to = |offsets: &[u64], at_: &[usize]| {
-        (offsets.len() == at_.len() || salvaging && offsets.len() > at_.len())
-            && offsets.iter().zip(at_).all(|(&o, &b)| at.checked_sub(o as usize) == Some(b))
-    };
-    if !to(&m.modules, &blocks.module_at[first.modules..end.modules])
-        || !to(&m.resources, &blocks.resource_at[first.resources..end.resources])
-        || !to(&m.dictionaries, &blocks.dictionary_at[first.dictionaries..end.dictionaries])
-    {
-        return invalid("module, resource or dictionary offsets not those of the blocks");
-    }
     let mut refs: Vec<(usize, usize, u64)> = Vec::new();
     let mut ref_of: HashMap<(usize, usize), usize> = HashMap::new();
     // the content of output `output` of the leaf block at relative offset `offset`, of `size`
     // bytes; and the leaf
     // (salvaging, the leaves lost by where they were, numbered after those there)
     let mut lost_at: HashMap<usize, usize> = HashMap::new();
-    let mut content = |offset: u64, output: u64, size: u64| -> Decoded<(usize, usize)> {
-        let found = at.checked_sub(offset as usize).and_then(|b| {
-            let leaves = &blocks.leaf_at[first.leaves..end.leaves];
-            leaves.binary_search(&b).ok().map(|l| first.leaves + l)
-        });
-        let leaf = match (found, lost.as_deref_mut()) {
-            (Some(leaf), _) => leaf,
+    let mut content = |offset: u64, output: u64, size: u64, dictionary: Option<u64>| -> Decoded<(usize, usize)> {
+        let found = match at.checked_sub(offset as usize) {
+            Some(b) => leaf_at(b, dictionary)?,
+            None => None,
+        };
+        let (leaf, outputs) = match (found, lost.as_deref_mut()) {
+            (Some(found), _) => found,
             (None, Some(lost)) => {
                 let k = *lost_at.entry(at.wrapping_sub(offset as usize)).or_insert_with(|| {
                     lost.push(());
                     lost.len() - 1
                 });
-                blocks.leaves.len() + k
+                (lost_from + k, None)
             }
             (None, None) => return invalid("a file or a fork not at a leaf block"),
         };
-        if leaf >= outputs.len() {
+        if leaf >= lost_from {
             let c = match ref_of.entry((leaf, output as usize)) {
                 MapEntry::Occupied(c) => *c.get(),
                 MapEntry::Vacant(e) => {
@@ -3276,7 +3413,7 @@ fn tree_of(
             };
             return Ok((c, leaf));
         }
-        if output >= outputs[leaf] {
+        if outputs.is_some_and(|n| output >= n) {
             return invalid("a file or a fork of an output its leaf block does not have");
         }
         let output = output as usize;
@@ -3311,12 +3448,7 @@ fn tree_of(
         let node = match read {
             tree::Read::Dir => EntryNode::Dir,
             tree::Read::File { offset, output, size, dictionary } => {
-                let (c, leaf) = content(offset, output, size)?;
-                if leaf < blocks.leaf_dictionary.len()
-                    && blocks.leaf_dictionary[leaf].map_or(0, |d| (d - first.dictionaries) as u64 + 1) != dictionary
-                {
-                    return invalid("a file's dictionary not that of its leaf block");
-                }
+                let (c, _) = content(offset, output, size, Some(dictionary))?;
                 EntryNode::File(c)
             }
             tree::Read::Link(target) => EntryNode::Link(target),
@@ -3338,7 +3470,7 @@ fn tree_of(
     // (after the files, so that their contents are numbered as they are)
     for (k, forks) in m.forks.into_iter().enumerate() {
         for (name, (offset, output, size)) in forks {
-            let c = content(offset, output, size)?.0;
+            let c = content(offset, output, size, None)?.0;
             match k {
                 0 => &mut t.root,
                 k => &mut t.entries[index[k].expect("not a tombstone")].extra,
@@ -3456,6 +3588,10 @@ enum LeafBlock<'c> {
     Formula { outputs: u64, data: usize, modules: usize, resources: usize, non_leaf: usize, segment: usize },
     /// A leaf block a file is at that is not there (salvaging, [`open_salvaging`]).
     Lost,
+    /// A leaf block not read, nor to be evaluated ([`index::Index::blocks_for`]).
+    Unread,
+    /// A leaf block whose blocks do not read, its failure ([`index::Index::blocks_for`]).
+    Bad(Failure),
 }
 
 /// The blocks `d` of an archive of `size_hint` with a metadata block or not, the payload of an
@@ -4703,7 +4839,7 @@ mod tests {
         let want: Vec<u8> = parts.iter().flat_map(|&(s, l)| d[s as usize..][..l as usize].to_vec()).collect();
         let c = encode(&f, Some(checksum(&want)), Level::Zstd(1)).unwrap();
         assert!(decode(&c, &natives()).unwrap() == want);
-        assert_eq!(open(&c, &natives()).unwrap().blocks.non_leaf.len(), 3);
+        assert_eq!(open(&c, &natives()).unwrap().parsed().unwrap().non_leaf.len(), 3);
     }
 
     #[test]
@@ -4727,7 +4863,7 @@ mod tests {
         );
         let c = encode(&f, Some(checksum(&want)), Level::Zstd(1)).unwrap();
         assert!(decode(&c, &natives()).unwrap() == want);
-        assert_eq!(open(&c, &natives()).unwrap().blocks.non_leaf.len(), 3);
+        assert_eq!(open(&c, &natives()).unwrap().parsed().unwrap().non_leaf.len(), 3);
     }
 
     /// A file whose formula is a concatenation (of slices, applications and a concatenation in

@@ -62,8 +62,12 @@
 //!   profile (as every archive is made: each file's content checksummed, nothing outside it), with
 //!   a mirror block of each block whose damage would lose more than a file ([`aqr::Mirroring`]),
 //!   the last metadata block's before the last 4 MiB of the archive (held back as it is made),
-//!   so that a truncation shorter than that leaves it. Decompressing (and testing), any archive
-//!   is repaired in memory ([`aqr::mirror::repair`]): a damaged block restored from its mirror
+//!   so that a truncation shorter than that leaves it. Decompressing, an archive of a tree is
+//!   read by its index ([`aqr::open_indexed`]): of the files taken alone (`-d ARCHIVE PATH...`),
+//!   only their blocks and what tells where they are, an encrypted archive's chunks decrypted as
+//!   they are read ([`aqr::envelope::Decrypting`]). Where it does not open so, and for the files
+//!   that do not decode so, and testing, it is read whole ([`Repair`]) and repaired in memory
+//!   ([`aqr::mirror::repair`]): a damaged block restored from its mirror
 //!   block, the footer made again where the archive is cut short after its last metadata block;
 //!   told so. Cut short before it (its metadata block restored past the bytes lost), it is
 //!   salvaged ([`aqr::open_salvaging`]): the files of the blocks lost are lost. Cut short in a
@@ -2623,6 +2627,86 @@ fn tell_incomplete(status: Option<aqr::Status>, input: &Path) {
     }
 }
 
+/// An archive read whole to be repaired where it is damaged: of an encrypted archive, its payload
+/// decrypted (its chunks that do not authenticate too, erased), its mirror blocks checked, and its
+/// bytes repaired from them where they differ (its footer made again where it is cut short after
+/// its last metadata block).
+struct Repair {
+    decrypted: Option<memmap2::Mmap>,
+    erased: Vec<std::ops::Range<usize>>,
+    mirrors: aqr::mirror::Check,
+    restored: Option<aqr::mirror::Repaired>,
+}
+
+impl Repair {
+    /// The archive of `input` (`plain`, or the payload `decrypting`) read whole and repaired, once
+    /// (into `cell`), its repair told.
+    fn of<'r>(
+        cell: &'r std::cell::OnceCell<Repair>,
+        input: &Path,
+        plain: &[u8],
+        decrypting: Option<&aqr::envelope::Decrypting>,
+        threads: usize,
+    ) -> Result<&'r Repair, String> {
+        if let Some(r) = cell.get() {
+            return Ok(r);
+        }
+        let (decrypted, erased) = match decrypting {
+            Some(d) => {
+                let (d, erased) = decrypt_whole(d, input, threads)?;
+                (Some(d), erased)
+            }
+            None => (None, Vec::new()),
+        };
+        let read = decrypted.as_deref().unwrap_or(plain);
+        let mirrors = aqr::mirror::check(read);
+        let restored = aqr::mirror::repair(read, &mirrors, true, &erased);
+        if let Some(r) = &restored {
+            if r.header {
+                eprintln!("{}: its header magic restored", input.display());
+            }
+            if r.restored > 0 {
+                let s = if r.restored == 1 { "" } else { "s" };
+                eprintln!("{}: {} damaged block{s} restored from mirror blocks", input.display(), r.restored);
+            }
+            if r.footer {
+                eprintln!("{}: its footer made again", input.display());
+            }
+            if !r.lost.is_empty() {
+                let n: usize = r.lost.iter().map(|l| l.len()).sum();
+                eprintln!("{}: {n} bytes lost; salvaging what is left", input.display());
+            }
+        }
+        Ok(cell.get_or_init(|| Repair { decrypted, erased, mirrors, restored }))
+    }
+
+    /// The archive's bytes as they are (`plain`, or the payload decrypted).
+    fn damaged<'r>(&'r self, plain: &'r [u8]) -> &'r [u8] {
+        self.decrypted.as_deref().unwrap_or(plain)
+    }
+
+    /// The archive's bytes repaired.
+    fn read<'r>(&'r self, plain: &'r [u8]) -> &'r [u8] {
+        self.restored.as_ref().map_or(self.damaged(plain), |r| &r.bytes)
+    }
+
+    /// The bytes of the segment cut short, where one is.
+    fn cut_off(&self) -> Option<usize> {
+        self.restored.as_ref().and_then(|r| r.cut_off.as_ref()).map(|c| c.len())
+    }
+
+    /// The archive opened, of its bytes repaired: salvaged where bytes were lost (their files
+    /// lost, the others given back as they check).
+    fn open<'r, 'n>(&'r self, plain: &'r [u8], runner: &'n dyn aqr::Runner) -> Result<aqr::Archive<'r, 'n>, Failure> {
+        let read = self.read(plain);
+        match (self.restored.as_ref().is_some_and(|r| !r.lost.is_empty()), self.decrypted.is_some()) {
+            (true, sealed) => aqr::open_salvaging(read, runner, sealed),
+            (false, true) => aqr::open_payload(read, runner),
+            (false, false) => aqr::open(read, runner),
+        }
+    }
+}
+
 /// Decodes (or tests) `input`, an Aqueous archive, to `to`: whether it was (not skipped, as a
 /// frontend answers).
 fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
@@ -2631,51 +2715,41 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     // (mapped, so that what is read of it is the system's to drop)
     // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
     let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
-    // an encrypted one decrypted into memory (not backed by a file, so that nothing decrypted
-    // is written out but the output)
-    // (and its chunks that do not authenticate, their bytes not to be trusted)
-    let (decrypted, erased) = match aqr::envelope::is_encrypted(&c) || aqr::envelope::is_damaged_encrypted(&c) {
-        true => {
-            let (d, erased) = decrypt(&c, input, a.opt.threads)?;
-            (Some(d), erased)
-        }
-        false => (None, Vec::new()),
+    // an encrypted one decrypted as it is read, into memory (not backed by a file, so that
+    // nothing decrypted is written out but the output)
+    let decrypting = match aqr::envelope::is_encrypted(&c) || aqr::envelope::is_damaged_encrypted(&c) {
+        true => Some(unlock(&c, input)?),
+        false => None,
     };
     let decoder =
         Decoder { native: Native { threads: a.opt.threads }, wasm: a.wasm, sandbox: a.sandbox.then(OnceLock::new) };
     let runner: &dyn aqr::Runner = &decoder;
-    // repaired where it is damaged: its blocks restored from their mirror blocks where they
-    // differ, its footer made again where it is cut short after its last metadata block
-    let read: &[u8] = decrypted.as_deref().unwrap_or_else(|| located(&c, input, a.quiet));
-    let mirrors = aqr::mirror::check(read);
-    let restored = aqr::mirror::repair(read, &mirrors, true, &erased);
-    if let Some(r) = &restored {
-        if r.header {
-            eprintln!("{}: its header magic restored", input.display());
-        }
-        if r.restored > 0 {
-            let s = if r.restored == 1 { "" } else { "s" };
-            eprintln!("{}: {} damaged block{s} restored from mirror blocks", input.display(), r.restored);
-        }
-        if r.footer {
-            eprintln!("{}: its footer made again", input.display());
-        }
-        if !r.lost.is_empty() {
-            let n: usize = r.lost.iter().map(|l| l.len()).sum();
-            eprintln!("{}: {n} bytes lost; salvaging what is left", input.display());
-        }
-    }
-    let cut_off = restored.as_ref().and_then(|r| r.cut_off.as_ref()).map(|c| c.len());
-    let footer_made = restored.as_ref().is_some_and(|r| r.footer);
-    let damaged = read;
-    let read: &[u8] = restored.as_ref().map_or(read, |r| &r.bytes);
-    // (salvaged where bytes were lost: their files lost, the others given back as they check)
-    let mut archive = match (restored.as_ref().is_some_and(|r| !r.lost.is_empty()), decrypted.is_some()) {
-        (true, sealed) => aqr::open_salvaging(read, runner, sealed),
-        (false, true) => aqr::open_payload(read, runner),
-        (false, false) => aqr::open(read, runner),
-    }
-    .map_err(|e| err(&e))?;
+    let plain: &[u8] = match decrypting {
+        Some(_) => &[],
+        None => located(&c, input, a.quiet),
+    };
+    // of a tree, read by its index: the blocks of the files taken alone (but tested: read whole,
+    // its mirror blocks checked too; and of a single file, read whole anyway)
+    let payload = match &decrypting {
+        Some(d) => aqr::Payload::Sealed(d),
+        None => aqr::Payload::Plain(plain),
+    };
+    let indexed = match !a.test && payload.of_tree() {
+        true => aqr::open_indexed(payload, runner, a.opt.threads).ok(),
+        false => None,
+    };
+    let fast = indexed.is_some();
+    // read whole and repaired where it is damaged: where it is tested, where it does not open by
+    // its index, and for its files that do not decode so
+    let repair: std::cell::OnceCell<Repair> = std::cell::OnceCell::new();
+    let mut archive = match indexed {
+        Some(archive) => archive,
+        None => Repair::of(&repair, input, plain, decrypting.as_ref(), a.opt.threads)?
+            .open(plain, runner)
+            .map_err(|e| err(&e))?,
+    };
+    let cut_off = repair.get().and_then(|r| r.cut_off());
+    let footer_made = repair.get().is_some_and(|r| r.restored.as_ref().is_some_and(|r| r.footer));
     // (its footer made again after a metadata block not of the segment meant to be the last:
     // cut short just after it, maybe, segments after it lost whole; after a commit of a writing
     // that went on, too, as one stopped there is not told apart)
@@ -2824,7 +2898,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
                 // (for tests: stopped once so many contents are written, as a signal would)
                 let after = std::env::var("AQR_TEST_STOP_AFTER").ok().and_then(|v| v.parse::<usize>().ok());
                 let written = std::sync::atomic::AtomicUsize::new(0);
-                let r = archive.contents_of(a.opt.threads, wanted.as_deref(), |c, d| {
+                let give = |c, d| {
                     if stopped() {
                         return Err(Failure::Resource("stopped".into()));
                     }
@@ -2837,7 +2911,23 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
                         requested.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
                     Ok(())
-                });
+                };
+                let mut r = archive.contents_of(a.opt.threads, wanted.as_deref(), give);
+                // (read by its index, the files that do not decode so, of it read whole and repaired)
+                let missing = |given: &[bool]| -> Vec<bool> {
+                    (0..given.len()).map(|c| !given[c] && wanted.as_ref().is_none_or(|w| w[c])).collect()
+                };
+                if fast && r.is_err() && writing.lock().unwrap().is_none() && !stopped() {
+                    let again = missing(&given.lock().unwrap());
+                    let repaired = Repair::of(&repair, input, plain, decrypting.as_ref(), a.opt.threads)?;
+                    match repaired.open(plain, runner) {
+                        Ok(mut whole) if whole.contents_len() == again.len() => {
+                            whole.set_budget(aqr_common::budget::global());
+                            r = whole.contents_of(a.opt.threads, Some(&again), give);
+                        }
+                        _ => {}
+                    }
+                }
                 if let Some(m) = writing.into_inner().unwrap() {
                     return Err(m);
                 }
@@ -2872,12 +2962,15 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     let out = out.as_deref();
     // the files of a segment cut short, of no name known: each leaf's outputs (into a directory
     // of their own beside the tree, where the archive is extracted whole)
-    if let Some(cut) = restored.as_ref().and_then(|r| r.cut_off.as_ref()) {
+    if let Some(r) = repair.get()
+        && let Some(cut) = r.restored.as_ref().and_then(|r| r.cut_off.as_ref())
+    {
         let into = match (out, archive.tree()) {
             (Some(o), Some(t)) if a.select.is_none() && !a.test => Some(unnamed_dir(o, t)),
             _ => None,
         };
-        let (n, bytes) = salvage_unnamed(a, damaged, cut, &erased, runner, into.as_deref()).map_err(|e| err(&e))?;
+        let (n, bytes) =
+            salvage_unnamed(a, r.damaged(plain), cut, &r.erased, runner, into.as_deref()).map_err(|e| err(&e))?;
         if n > 0 {
             let s = if n == 1 { "" } else { "s" };
             let (what, bytes) = (input.display(), size(bytes as f64));
@@ -2893,8 +2986,12 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     if !a.quiet {
         summary_d(input, out, files, total, start);
         // (of an archive whose files are all there)
-        if a.test && lost.is_empty() && (a.verbose || !mirrors.mirrors.is_empty() || mirrors.broken > 0) {
-            tell_archival(input, &archive, &mirrors, read, decrypted.is_some().then_some(&c[..]))
+        if a.test
+            && lost.is_empty()
+            && let Some(r) = repair.get()
+            && (a.verbose || !r.mirrors.mirrors.is_empty() || r.mirrors.broken > 0)
+        {
+            tell_archival(input, &archive, &r.mirrors, r.read(plain), decrypting.is_some().then_some(&c[..]))
                 .map_err(|e| err(&e))?;
         }
     }
@@ -3063,6 +3160,13 @@ fn tell_archival(
 /// mirrored header, and its chunks that do not authenticate decrypted without it, told: their
 /// bytes in the payload, not to be trusted.
 fn decrypt(c: &[u8], input: &Path, threads: usize) -> Result<(memmap2::Mmap, Vec<std::ops::Range<usize>>), String> {
+    decrypt_whole(&unlock(c, input)?, input, threads)
+}
+
+/// The payload of encrypted archive `c` (of `input`) unlocked by a passphrase given ([`pass`]),
+/// to be decrypted as it is read; damaged ([`aqr::envelope::open_damaged`]), its header from a
+/// mirrored header, told.
+fn unlock<'c>(c: &'c [u8], input: &Path) -> Result<aqr::envelope::Decrypting<'c>, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
     let (e, opened) = aqr::envelope::open_damaged(c).map_err(|e| err(&e))?;
     if let Some(k) = opened.header_from {
@@ -3076,9 +3180,21 @@ fn decrypt(c: &[u8], input: &Path, threads: usize) -> Result<(memmap2::Mmap, Vec
         Err(Failure::Decryption(_)) => Ok(None),
         Err(f) => Err(err(&f)),
     })?;
-    let Some(u) = unlocked else {
-        return Err(err(&pass::keys().none_opens()));
-    };
+    match unlocked {
+        Some(u) => Ok(u.decrypting()),
+        None => Err(err(&pass::keys().none_opens())),
+    }
+}
+
+/// The payload of `d` (of `input`) decrypted whole on `threads` threads, its chunks that do not
+/// authenticate decrypted without it, told: their bytes in the payload, not to be trusted.
+fn decrypt_whole(
+    d: &aqr::envelope::Decrypting,
+    input: &Path,
+    threads: usize,
+) -> Result<(memmap2::Mmap, Vec<std::ops::Range<usize>>), String> {
+    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
+    let u = d.unlocked();
     let mut d = memmap2::MmapMut::map_anon(u.len()).map_err(|e| err(&e))?;
     let failed = u.decrypt_lossy(&mut d, threads);
     if !failed.is_empty() {
