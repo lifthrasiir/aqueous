@@ -231,10 +231,10 @@ fn listed(
                     l.data.to_string(),
                     l.overhead.to_string(),
                     ratio(l.share, l.size),
-                    "1".into(),
+                    (l.segment + 1).to_string(),
                     format!("{} [{}]", l.formula, l.nodes),
                 ),
-                None => ("-".into(), "-".into(), "-".into(), "1".into(), "-".into()),
+                None => ("-".into(), "-".into(), "-".into(), "-".into(), "-".into()),
             };
             table.push(vec![
                 data,

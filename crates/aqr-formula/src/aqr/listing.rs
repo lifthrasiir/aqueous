@@ -35,6 +35,8 @@ pub struct Listed {
     pub formula: String,
     /// The instructions of its formula making it (none for a leaf data block).
     pub nodes: usize,
+    /// The segment (from 0) of its leaf block (of the first, of a file of several).
+    pub segment: usize,
 }
 
 /// An application of a formula ([`Graph::applications`]).
@@ -306,7 +308,12 @@ impl Archive<'_, '_> {
         let name_of = |m: usize| names[m].clone();
         let (g, leaves) = graph(blocks, &name_of)?;
         // a content, of the outputs (leaf, output) given: its size, the blocks it takes, its formula
-        let taken = |of: &[(usize, usize)]| -> (u64, BTreeSet<Taken>, String, usize) {
+        // (the segment of a leaf; the last of one lost)
+        let segment_of = |l: usize| {
+            let s = blocks.segments.iter().position(|s| (s.first.leaves..s.end.leaves).contains(&l));
+            s.unwrap_or(blocks.segments.len().saturating_sub(1))
+        };
+        let taken = |of: &[(usize, usize)]| -> (u64, BTreeSet<Taken>, String, usize, usize) {
             let mut blocks_of = BTreeSet::new();
             let (mut insns, mut dicts) = (BTreeSet::new(), BTreeSet::new());
             for &(l, _) in of {
@@ -358,7 +365,7 @@ impl Archive<'_, '_> {
                 }
             };
             let size = of.iter().map(|&(l, o)| g.nodes[leaves[l][o]].size).sum();
-            (size, blocks_of, formula, nodes)
+            (size, blocks_of, formula, nodes, of.first().map_or(0, |&(l, _)| segment_of(l)))
         };
         let contents: Vec<_> = match &self.tree {
             Some((_, refs)) => refs.iter().map(|&(l, o, _)| taken(&[(l, o)])).collect(),
@@ -380,13 +387,13 @@ impl Archive<'_, '_> {
         Ok(shares
             .into_iter()
             .zip(contents)
-            .map(|(share, (size, taken, formula, nodes))| {
+            .map(|(share, (size, taken, formula, nodes, segment))| {
                 let (mut data, mut overhead) = (0, 0);
                 for t in taken {
                     let (n, is_data) = bytes(t);
                     *if is_data { &mut data } else { &mut overhead } += n;
                 }
-                Listed { size, data, overhead, share, formula, nodes }
+                Listed { size, data, overhead, share, formula, nodes, segment }
             })
             .collect())
     }

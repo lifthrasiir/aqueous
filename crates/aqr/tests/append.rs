@@ -208,6 +208,14 @@ fn appended() {
     assert_eq!(extracted(&d, "b.aqr"), files(&src));
     let t = ok(&d, &["-K", "b.aqr"]);
     assert!(!stderr(&t).contains("incomplete"), "{}", stderr(&t));
+    // (each file's segment listed: of those appended the second)
+    let t = ok(&d, &["-t", "-v", "b.aqr"]);
+    let listed = String::from_utf8_lossy(&t.stdout).into_owned();
+    let seg = |name: &str| {
+        let line = listed.lines().find(|l| l.ends_with(&format!(" {name}"))).unwrap_or_else(|| panic!("{listed}"));
+        line.split_whitespace().nth(4).unwrap().to_owned()
+    };
+    assert_eq!([seg("t2.txt"), seg("t1.txt"), seg("new/n.txt")], ["1", "2", "2"], "{listed}");
     // (only appended to: the archive before, but for its footer made a spacer block)
     let differ = (0..before.len()).filter(|&k| before[k] != after[k]).count();
     assert!(differ > 0 && differ < 30, "{differ}");
