@@ -116,6 +116,8 @@ impl Writer {
     }
 
     pub fn write(&mut self, d: &[u8]) {
+        // (as a stream is made, a recompression over its heap gives up: `aqr_common::allowance`)
+        aqr_common::allowance::check();
         match &mut self.0 {
             WriterRepr::Heap(v) => v.extend_from_slice(d),
             WriterRepr::Stored(w) => {

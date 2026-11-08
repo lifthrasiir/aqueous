@@ -134,6 +134,26 @@ pub fn global() -> &'static Budget {
     &GLOBAL
 }
 
+/// The heap one recompression may take ([`attempt_limit`]) where set; 0: not set.
+static ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The heap one recompression may take (with what it holds of its contents, and the
+/// recompressions running at once together: [`crate::allowance`]): as set
+/// ([`set_attempt_limit`]: what a user asked for, `aqr -M`), else the budget of the process or
+/// half the system's memory where more, as the budget by default is about what the work takes
+/// together, not a limit of one recompression.
+pub fn attempt_limit() -> u64 {
+    match ATTEMPT.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => global().limit().max(total().unwrap_or(0) / 2),
+        n => n,
+    }
+}
+
+/// Sets [`attempt_limit`] (0: as by default).
+pub fn set_attempt_limit(n: u64) {
+    ATTEMPT.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// The memory of the system: physical, or the limit of the process's container (cgroup) where
 /// lower. None where unknown.
 pub fn total() -> Option<u64> {

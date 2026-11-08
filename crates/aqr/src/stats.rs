@@ -244,7 +244,8 @@ pub struct Run {
     pub overhead: Option<u64>,
     pub contents: Vec<Content>,
     /// Compressing: the recompressions given up, and the applications kept, for the bound of
-    /// `--application-bound` ([`aqr_compress::fallbacks`]).
+    /// `--application-bound`, and the recompressions given up for their heap
+    /// ([`aqr_compress::fallbacks`]).
     pub fallbacks: Vec<aqr_compress::Fallback>,
     pub trace: Trace,
 }
@@ -608,12 +609,25 @@ fn outliers(run: &Run) -> String {
         }
     }
     // the applications over the bound of --application-bound: their recompressions given up
-    let mut by_module: std::collections::BTreeMap<(&str, bool), (u64, u64, u64)> = Default::default();
+    // (and the recompressions given up for their heap)
+    let mut by_module: std::collections::BTreeMap<(&str, bool, bool), (u64, u64, u64)> = Default::default();
     for f in &run.fallbacks {
-        let e = by_module.entry((f.module, f.kept)).or_default();
+        let e = by_module.entry((f.module, f.kept, f.heap)).or_default();
         (e.0, e.1, e.2) = (e.0 + 1, e.1 + f.bytes, e.2.max(f.needed));
     }
-    for ((module, kept), (n, bytes, most)) in by_module {
+    for ((module, kept, heap), (n, bytes, most)) in by_module {
+        if heap {
+            say(
+                &mut out,
+                format!(
+                    "{module}: {n} recompressions given up for their heap ({} of data, {} held as they did, of {} each)",
+                    size(bytes as f64),
+                    size(most as f64),
+                    size(aqr_common::budget::attempt_limit() as f64)
+                ),
+            );
+            continue;
+        }
         let what = if kept { "applications kept over the bound" } else { "recompressions not used for the bound" };
         say(
             &mut out,
@@ -716,7 +730,7 @@ fn json(run: &Run, partial: bool) -> String {
         array(&mut o, &run.fallbacks, |o, f| {
             *o += "{\"module\":";
             string(o, f.module);
-            _ = write!(o, ",\"needed\":{},\"bytes\":{},\"kept\":{}}}", f.needed, f.bytes, f.kept);
+            _ = write!(o, ",\"needed\":{},\"bytes\":{},\"kept\":{},\"heap\":{}}}", f.needed, f.bytes, f.kept, f.heap);
         });
     }
     let t = &run.trace;

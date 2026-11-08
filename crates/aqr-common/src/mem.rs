@@ -91,6 +91,7 @@ unsafe impl GlobalAlloc for Counting {
             add(l.size());
         }
         crate::meter::allocated(p, l.size());
+        crate::allowance::allocated(p, l.size());
         p
     }
     unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
@@ -99,10 +100,12 @@ unsafe impl GlobalAlloc for Counting {
             add(l.size());
         }
         crate::meter::allocated(p, l.size());
+        crate::allowance::allocated(p, l.size());
         p
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
         crate::meter::freed(p, l.size());
+        crate::allowance::freed(p, l.size());
         unsafe { System.dealloc(p, l) };
         large_removed(l.size());
         CUR.fetch_sub(l.size(), Relaxed);
@@ -110,6 +113,7 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
         let q = unsafe { System.realloc(p, l, n) };
         crate::meter::reallocated(p, l.size(), q, n);
+        crate::allowance::reallocated(p, l.size(), q, n);
         if !q.is_null() {
             large_removed(l.size());
             large_added(n);
@@ -315,6 +319,7 @@ unsafe impl GlobalAlloc for Mapped {
         }
         crate::trace::allocated(p, l.size());
         crate::meter::allocated(p, l.size());
+        crate::allowance::allocated(p, l.size());
         p
     }
     #[inline]
@@ -325,6 +330,7 @@ unsafe impl GlobalAlloc for Mapped {
         }
         crate::trace::allocated(p, l.size());
         crate::meter::allocated(p, l.size());
+        crate::allowance::allocated(p, l.size());
         p
     }
     #[inline]
@@ -332,6 +338,7 @@ unsafe impl GlobalAlloc for Mapped {
         large_removed(l.size());
         crate::trace::freed(p, l.size());
         crate::meter::freed(p, l.size());
+        crate::allowance::freed(p, l.size());
         unsafe { self.raw_dealloc(p, l) }
     }
     #[inline]
@@ -343,6 +350,7 @@ unsafe impl GlobalAlloc for Mapped {
         }
         crate::trace::reallocated(p, l.size(), q, n);
         crate::meter::reallocated(p, l.size(), q, n);
+        crate::allowance::reallocated(p, l.size(), q, n);
         q
     }
 }

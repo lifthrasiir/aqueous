@@ -647,6 +647,8 @@ fn parse() -> Result<Args, String> {
     let limit = budget(memory.as_deref(), system)?;
     aqr_common::budget::global().set_limit(limit);
     if memory.is_some() {
+        // (and the heap of a recompression: it gives up past it, the data kept as it is)
+        aqr_common::budget::set_attempt_limit(limit);
         // (what a user asked for also bounds the memories of an application of a module in Wasm:
         // its concurrency is lowered to fit, and it fails if it does not at 1)
         aqr_decompress::set_application_bound(limit);
@@ -843,14 +845,23 @@ fn size_of(s: &str) -> Option<usize> {
 }
 
 /// Tells on standard error the recompressions not used for the bound of `--application-bound`
-/// (and the applications kept over it), by module.
+/// (and the applications kept over it), by module, and those given up for their heap, by format.
 fn tell_fallbacks(fallbacks: &[aqr_compress::Fallback]) {
-    let mut by_module: std::collections::BTreeMap<(&str, bool), (u64, u64, u64)> = Default::default();
+    let mut by_module: std::collections::BTreeMap<(&str, bool, bool), (u64, u64, u64)> = Default::default();
     for f in fallbacks {
-        let e = by_module.entry((f.module, f.kept)).or_default();
+        let e = by_module.entry((f.module, f.kept, f.heap)).or_default();
         (e.0, e.1, e.2) = (e.0 + 1, e.1 + f.bytes, e.2.max(f.needed));
     }
-    for ((module, kept), (n, bytes, most)) in by_module {
+    for ((module, kept, heap), (n, bytes, most)) in by_module {
+        if heap {
+            eprintln!(
+                "heap: {module}: {n} recompressions given up, {} of data, {} held as they did (of {} each)",
+                size(bytes as f64),
+                size(most as f64),
+                size(aqr_common::budget::attempt_limit() as f64)
+            );
+            continue;
+        }
         let what = if kept { "kept over the bound" } else { "not used for the bound" };
         eprintln!(
             "application bound: {module}: {n} {what}, {} of data, up to {} needed (minimal bound)",

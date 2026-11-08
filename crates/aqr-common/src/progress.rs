@@ -107,6 +107,8 @@ impl Sweep {
 
 /// [`done`] of the data at the addresses `at`.
 fn done_at(mut at: Range<usize>) {
+    // (where the work is told, an attempt over its heap gives up: see `crate::allowance`)
+    crate::allowance::check();
     if COUNT.load(Ordering::Relaxed) == 0 || at.is_empty() {
         return;
     }

@@ -9,6 +9,7 @@
 //! - [`msb`]: MSB-first bit I/O of the formats themselves (MP3, FLAC).
 //! - [`mem`]: the global allocator of the binaries ([`mem::Mapped`]), a counting one, peak and
 //!   large-allocation probes, peak RSS.
+//! - [`allowance`]: the heap a recompression may take, and its giving up past it.
 //! - [`meter`]: the heap of a module's application measured as its instances would take it in
 //!   WebAssembly (natively).
 //! - [`rng`]: deterministic pseudo-random numbers and noise, for tests and benchmarks.
@@ -26,6 +27,11 @@
 //! - [`lz`]: what the LZ parsers share (the length of a match).
 
 pub mod adler32;
+#[cfg(not(target_family = "wasm"))]
+pub mod allowance;
+#[cfg(target_family = "wasm")]
+#[path = "allowance_none.rs"]
+pub mod allowance;
 pub mod arith;
 pub mod budget;
 #[cfg(not(target_family = "wasm"))]

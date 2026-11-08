@@ -102,19 +102,24 @@ pub(crate) fn bound_of(bound: Option<u64>, module: Module) -> u64 {
     }
 }
 
-/// A recompression not used, or an application kept, for its minimal bound over the bound: what
-/// [`fallbacks`] tells.
+/// A recompression not used, or an application kept, for its minimal bound over the bound; or a
+/// recompression given up for the heap it took ([`Fallback::heap`]): what [`fallbacks`] tells.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fallback {
+    /// The module of the application; of a recompression given up for its heap, the format.
     pub module: &'static str,
     /// The minimal bound of the application (the largest of the formula's), in bytes: exact, the
     /// plan's instance limit with its memories imported and the sum of its task limits, as the
-    /// application would declare them.
+    /// application would declare them. Of a recompression given up for its heap, the bytes it
+    /// held as it did.
     pub needed: u64,
     /// The bytes of the data the recompressor was given.
     pub bytes: u64,
     /// The application was kept (made by a step after the recompressors), not given up.
     pub kept: bool,
+    /// The recompression gave up as it took more heap than one may
+    /// ([`aqr_common::allowance`], of [`aqr_common::budget::attempt_limit`]).
+    pub heap: bool,
 }
 
 /// A minimal bound told exactly, for logs: its bytes, and MiB rounded up (never less than it
@@ -158,7 +163,13 @@ pub(crate) fn exceeding(f: &Formula, m: &(impl Modules + Sync), bound: Option<u6
 
 /// Records a recompression given up for the data of `bytes` bytes.
 pub(crate) fn gave_up(module: Module, needed: u64, bytes: u64) {
-    FALLBACKS.lock().unwrap().push(Fallback { module: module.name, needed, bytes, kept: false });
+    FALLBACKS.lock().unwrap().push(Fallback { module: module.name, needed, bytes, kept: false, heap: false });
+}
+
+/// Records a recompression as `format` (its name) given up for its heap, of `used` bytes as it
+/// did, for the data of `bytes` bytes.
+pub(crate) fn gave_up_heap(format: &'static str, used: u64, bytes: u64) {
+    FALLBACKS.lock().unwrap().push(Fallback { module: format, needed: used, bytes, kept: false, heap: true });
 }
 
 /// Records the applications of `f`, whose limits are declared, that are over the bound under
@@ -173,6 +184,7 @@ pub(crate) fn note_kept(f: &Formula, bound: Option<u64>, bytes: u64) {
                 needed,
                 bytes: a.len.min(bytes),
                 kept: true,
+                heap: false,
             });
         }
     }

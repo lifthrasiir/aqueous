@@ -241,8 +241,11 @@ impl Prevalidator {
         Some(Deferred((f, hash(d), within)))
     }
 
-    /// Has a formula of [`Prevalidator::job`] evaluated.
+    /// Has a formula of [`Prevalidator::job`] evaluated: not as part of the recompression that
+    /// made it, whose heap it does not count to and which it outlives (applications are held
+    /// to their plans, [`crate::memory`]).
     pub fn send(&self, j: Deferred) {
+        let _a = aqr_common::allowance::enter(aqr_common::allowance::Context::NONE);
         let (memo, threads) = (self.memo.clone(), self.threads);
         let eval = move || {
             let _s = aqr_common::trace::span("prevalidate");

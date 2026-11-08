@@ -1232,7 +1232,11 @@ fn recompress_sealed(
     let f = match ready {
         Some(f) => f,
         None => match recompressor(format) {
-            Recompressor::Cx(r) => catch_unwind(AssertUnwindSafe(|| r(d, contents, opt, depth, cx))).ok().flatten(),
+            Recompressor::Cx(r) => {
+                catch_unwind(AssertUnwindSafe(|| attempted(format, d, || r(d, contents, opt, depth, cx))))
+                    .ok()
+                    .flatten()
+            }
             _ => pure(format, d, &Pure { opt, depth, words, once: &cx.once, held }).flatten(),
         },
     }?;
@@ -2441,15 +2445,45 @@ fn pure(format: Format, d: &[u8], p: &Pure) -> Option<Option<Formula>> {
         if format == Format::Text {
             tests::TEXTS.lock().unwrap().push(d.len());
         }
-        catch_unwind(AssertUnwindSafe(|| match r {
-            Recompressor::Pure(e) => e(d, p.opt.threads),
-            Recompressor::PureWith(e) => e(d, p),
-            Recompressor::Cx(_) => None,
+        catch_unwind(AssertUnwindSafe(|| {
+            attempted(format, d, || match r {
+                Recompressor::Pure(e) => e(d, p.opt.threads),
+                Recompressor::PureWith(e) => e(d, p),
+                Recompressor::Cx(_) => None,
+            })
         }))
         .ok()
         .flatten()
     };
     Some(if format == Format::Text { p.once.code(d, code) } else { code() })
+}
+
+/// What `make`, the recompressor of `format` on `d`, makes, within the heap one recompression
+/// may take ([`aqr_common::allowance::attempt`] of [`aqr_common::budget::attempt_limit`], which
+/// those it makes of the contents share): `None` where it gave up past it, which is told
+/// ([`fallbacks`]), as if it did not take the data.
+fn attempted(format: Format, d: &[u8], make: impl FnOnce() -> Option<Formula>) -> Option<Formula> {
+    let limit = aqr_common::budget::attempt_limit();
+    #[cfg(test)]
+    let (limit, hog) = tests::hog(format, d.len()).map_or((limit, false), |l| (l, true));
+    let make = || {
+        // (more than the limit taken at the start, a reservation of no pages touched, and the
+        // check after it, as the next item on the pool would)
+        #[cfg(test)]
+        let _hog = hog.then(|| {
+            let v = Vec::<u8>::with_capacity(limit as usize + 1);
+            aqr_common::allowance::check();
+            v
+        });
+        make()
+    };
+    match aqr_common::allowance::attempt(limit, make) {
+        Ok(f) => f,
+        Err(e) => {
+            memory::gave_up_heap(format.name(), e.used, d.len() as u64);
+            None
+        }
+    }
 }
 
 /// aqr-bz2's formula of `d` (`depth` formats deep), each stream taken only where its data may
@@ -2736,12 +2770,16 @@ fn heap_per_byte(format: Format) -> f64 {
     }
 }
 
-/// Whether recompressing `len` bytes as `format` takes no more heap ([`heap_per_byte`]) than
-/// one recompression may: the budget of the process (`aqr -M`), or half the system's memory
-/// where more.
+/// Whether recompressing `len` bytes as `format` takes no more heap by its estimate
+/// ([`heap_per_byte`]) than one recompression may ([`aqr_common::budget::attempt_limit`]: what
+/// `aqr -M` asks for, else the budget of the process or half the system's memory where more),
+/// which it is then held to as it runs ([`attempted`]). The estimate turns down up front what
+/// would give up after much of the work. (With `AQR_TEST_NO_ESTIMATE` set and not empty,
+/// everything fits, so that what is held to the limit as it runs can be seen.)
 fn fits(format: Format, len: usize) -> bool {
-    let limit = aqr_common::budget::global().limit().max(aqr_common::budget::total().unwrap_or(0) / 2);
-    fits_within(format, len, limit)
+    static NO_ESTIMATE: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var_os("AQR_TEST_NO_ESTIMATE").is_some_and(|v| !v.is_empty()));
+    *NO_ESTIMATE || fits_within(format, len, aqr_common::budget::attempt_limit())
 }
 
 fn fits_within(format: Format, len: usize, limit: u64) -> bool {
@@ -2858,6 +2896,65 @@ mod tests {
 
     /// The lengths of the texts given to aqr-wrt, on any thread.
     pub(crate) static TEXTS: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+    // (an allocator that tells the heap of recompressions to their allowances, as the binaries'
+    // does: the system's, as some tests here expect of it)
+    #[global_allocator]
+    static ALLOC: aqr_common::mem::Counting = aqr_common::mem::Counting;
+
+    /// The recompressor of a format, given data of a length, takes more heap than one may at
+    /// its start ([`hog`]), on any thread.
+    static HOGS: std::sync::Mutex<Vec<(Format, usize)>> = std::sync::Mutex::new(Vec::new());
+
+    /// The heap that one recompression told of [`HOGS`] may take.
+    const HOG_LIMIT: u64 = 16 << 20;
+
+    /// Held by the tests that look at [`fallbacks`], of the process: one at a time.
+    pub(crate) static FALLBACKS_SEEN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The heap a recompression as `format` of data of `len` bytes may take, where it takes
+    /// more at its start ([`HOGS`], [`attempted`]).
+    pub(crate) fn hog(format: Format, len: usize) -> Option<u64> {
+        HOGS.lock().unwrap().contains(&(format, len)).then_some(HOG_LIMIT)
+    }
+
+    /// A recompression that takes more heap than one may gives up, and the data is kept as it
+    /// is (the archive giving it back), what gave up told ([`fallbacks`]); a recompression
+    /// within it (of its contents) that does so gives up alone.
+    #[test]
+    fn heap_over_falls_back() {
+        let text: Vec<u8> =
+            (0..30011).flat_map(|i| format!("line {} of the hogging text\n", i * 7 % 1000).into_bytes()).collect();
+        let gz = |t: &[u8]| {
+            let mut z = flate2::GzBuilder::new().filename("text.txt").write(Vec::new(), flate2::Compression::new(6));
+            std::io::Write::write_all(&mut z, t).unwrap();
+            z.finish().unwrap()
+        };
+        let outer = gz(&text);
+        let _seen = FALLBACKS_SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        let opt = Options { smaller: false, ..Options::default() };
+        let made = |d: &[u8]| {
+            let f = recompress(d, &opt);
+            assert!(f.eval(&Native::default()).is_ok_and(|b| b == d));
+            f.applies().iter().map(|a| a.module.name).collect::<Vec<_>>()
+        };
+        let mine = |told: Vec<Fallback>, len: usize| -> Vec<Fallback> {
+            told.into_iter().filter(|f| f.heap && f.bytes == len as u64).collect()
+        };
+        assert!(!made(&outer).is_empty());
+        HOGS.lock().unwrap().push((Format::Gzip, outer.len()));
+        assert!(made(&outer).is_empty(), "kept as it is");
+        let told = mine(fallbacks(), outer.len());
+        assert!(told.len() == 1 && told[0].module == "gzip" && told[0].needed > HOG_LIMIT, "{told:?}");
+        // (the text in it given up alone: the gzip stream deconstructed still)
+        HOGS.lock().unwrap().retain(|h| h.1 != outer.len());
+        HOGS.lock().unwrap().push((Format::Text, text.len()));
+        let modules = made(&outer);
+        assert!(!modules.is_empty() && !modules.iter().any(|m| m.contains("wrt")), "{modules:?}");
+        let told = mine(fallbacks(), text.len());
+        assert!(told.len() == 1 && told[0].module == "text", "{told:?}");
+        HOGS.lock().unwrap().clear();
+    }
 
     /// An ar, tar or cpio archive is worth what the files in it are: a probe counts them, not
     /// the archive, and scans data of its kind.
@@ -3735,6 +3832,7 @@ mod tests {
             assert!(back.as_ref().is_ok_and(|b| *b == gz));
             f.applies().len()
         };
+        let _seen = FALLBACKS_SEEN.lock().unwrap_or_else(|e| e.into_inner());
         let _ = fallbacks();
         assert!(made(None) > 0);
         assert!(fallbacks().is_empty());

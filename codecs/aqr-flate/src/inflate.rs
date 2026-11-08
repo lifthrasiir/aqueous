@@ -342,6 +342,9 @@ const ROOM: usize = MAX_MATCH + 16;
 #[inline(never)]
 #[cold]
 fn grow<T>(v: (*mut T, usize, usize), extra: usize) -> (*mut T, usize, usize) {
+    // (a recompression over its heap gives up here, the collector it grows for still whole)
+    #[cfg(feature = "encode")]
+    aqr_common::allowance::check();
     // SAFETY: the parts come from a vector (`Collect::new` or an earlier `grow`) and the
     // first `v.1` elements are initialized.
     let mut w = std::mem::ManuallyDrop::new(unsafe { Vec::from_raw_parts(v.0, v.1, v.2) });
@@ -462,19 +465,32 @@ impl<const HEAD: bool> Collect<HEAD> {
         self.data = grow(self.data, extra);
     }
 
+    /// The vectors, those of no room left in their place.
+    fn take_vecs(&mut self) -> (Vec<u8>, Vec<Token>) {
+        let d = std::mem::replace(
+            &mut self.data,
+            (std::ptr::NonNull::dangling().as_ptr(), 0, 0),
+        );
+        let t = std::mem::replace(
+            &mut self.tokens,
+            (std::ptr::NonNull::dangling().as_ptr(), 0, 0),
+        );
+        // SAFETY: as in `grow` (or the parts of empty vectors, put by an earlier call).
+        unsafe {
+            (
+                Vec::from_raw_parts(d.0, d.1, d.2),
+                Vec::from_raw_parts(t.0, t.1, t.2),
+            )
+        }
+    }
+
     fn into_vecs(mut self) -> (Data, Vec<Token>, Vec<Chunk>) {
         if self.keeping
             && let Some(c) = self.chunks.last_mut()
         {
             c.count = self.tokens.1 - c.kept;
         }
-        // SAFETY: as in `grow`.
-        let (mut data, mut tokens) = unsafe {
-            (
-                Vec::from_raw_parts(self.data.0, self.data.1, self.data.2),
-                Vec::from_raw_parts(self.tokens.0, self.tokens.1, self.tokens.2),
-            )
-        };
+        let (mut data, mut tokens) = self.take_vecs();
         #[cfg(feature = "encode")]
         if let Some(out) = self.out.take() {
             tokens.shrink_to_fit();
@@ -490,12 +506,20 @@ impl<const HEAD: bool> Collect<HEAD> {
                     b
                 }
             };
-            return (data, tokens, self.chunks);
+            return (data, tokens, std::mem::take(&mut self.chunks));
         }
         // (the room grown into given back: up to as much again as the data, held as long as it)
         data.shrink_to_fit();
         tokens.shrink_to_fit();
-        (data.into(), tokens, self.chunks)
+        (data.into(), tokens, std::mem::take(&mut self.chunks))
+    }
+}
+
+/// The vectors freed where it is dropped unfinished: as a parse unwinds (an attempt over its
+/// heap giving up, `aqr_common::allowance`, as the data is written to the store).
+impl<const HEAD: bool> Drop for Collect<HEAD> {
+    fn drop(&mut self) {
+        drop(self.take_vecs());
     }
 }
 
@@ -634,6 +658,9 @@ fn collect<const HEAD: bool>(
     max: usize,
     mut c: Collect<HEAD>,
 ) -> Result<Flat> {
+    // (a recompression over its heap with the room made gives up before the parse)
+    #[cfg(feature = "encode")]
+    aqr_common::allowance::check();
     let l = parse_head_max(raw, segment, max, &mut c);
     let (data, tokens, chunks) = c.into_vecs();
     let mut l = l?;

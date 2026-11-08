@@ -194,9 +194,10 @@ struct Open {
     left: Erased,
     room: usize,
     state: Arc<OpenState>,
-    /// What the map is of ([`crate::trace`]), and its meter.
+    /// What the map is of ([`crate::trace`]), its meter and its allowance.
     cx: Option<crate::trace::Context>,
     meter: Option<Arc<crate::meter::Meter>>,
+    allowance: crate::allowance::Context,
 }
 
 #[derive(Default)]
@@ -234,13 +235,14 @@ fn join_open() -> bool {
         let Some(o) = open.iter_mut().find(|o| o.room > 0 && unsafe { o.left.call() }) else { return false };
         o.room -= 1;
         *o.state.running.lock().unwrap() += 1;
-        (o.work, o.state.clone(), (o.cx.clone(), o.meter.clone()))
+        (o.work, o.state.clone(), (o.cx.clone(), o.meter.clone(), o.allowance.clone()))
     };
-    let (cx, meter) = cx;
+    let (cx, meter, allowance) = cx;
     let p = pool();
     p.jobs.lock().unwrap().push_back(Box::new(move || {
         let _cx = crate::trace::adopt(cx);
         let _m = crate::meter::enter(meter);
+        let _a = crate::allowance::enter(allowance);
         // SAFETY: counted in `running`, which the map waits for
         let r = catch_unwind(AssertUnwindSafe(|| unsafe { work.call() }));
         if let Err(e) = r {
@@ -289,6 +291,11 @@ impl Reservation {
     /// Runs `f` on a worker reserved, which is given back once it returns. Panics where none
     /// is left.
     pub fn spawn<T: Send + 'static>(&mut self, f: impl FnOnce() -> T + Send + 'static) -> Handle<'static, T> {
+        // (an attempt over its heap gives up before the work: see `crate::allowance`)
+        let f = move || {
+            crate::allowance::check();
+            f()
+        };
         // SAFETY: it borrows nothing
         unsafe { self.spawn_unchecked(f, None) }
     }
@@ -325,14 +332,16 @@ impl Reservation {
 unsafe fn push_job<'a>(job: Box<dyn FnOnce() + Send + 'a>, scope: Option<Arc<ScopeState>>) {
     // SAFETY: as the caller makes sure
     let job: Job = unsafe { std::mem::transmute::<Box<dyn FnOnce() + Send + 'a>, Job>(job) };
-    // (run under the spans and the meter of the thread spawning it)
+    // (run under the spans, the meter and the allowance of the thread spawning it)
     let cx = crate::trace::context();
     let meter = crate::meter::current();
+    let allowance = crate::allowance::context();
     let p = pool();
     p.jobs.lock().unwrap().push_back(Box::new(move || {
         {
             let _cx = crate::trace::adopt(cx);
             let _m = crate::meter::enter(meter);
+            let _a = crate::allowance::enter(allowance);
             // (the job's part of the slot dropped with it, before the scope is told)
             job();
         }
@@ -483,6 +492,11 @@ impl<'scope> Scope<'scope, '_> {
         }
         (w.idle, w.running) = (w.idle - 1, w.running + 1);
         drop(w);
+        // (an attempt over its heap gives up before the work: see `crate::allowance`)
+        let f = move || {
+            crate::allowance::check();
+            f()
+        };
         // SAFETY: the scope waits for it before it returns
         unsafe { Reservation { n: 1 }.spawn_unchecked(f, Some(self.state.clone())) }
     }
@@ -528,6 +542,7 @@ fn par_for(n: usize, threads: usize, f: &(dyn Fn(usize) + Sync)) {
             if i >= n {
                 break;
             }
+            crate::allowance::check();
             f(i);
         }
     };
@@ -558,6 +573,7 @@ fn par_for(n: usize, threads: usize, f: &(dyn Fn(usize) + Sync)) {
             state: state.clone(),
             cx: crate::trace::context(),
             meter: crate::meter::current(),
+            allowance: crate::allowance::context(),
         });
         (id, state)
     });
@@ -729,7 +745,10 @@ pub fn dispatch_any<G: Send, R: Send>(
             drop(free);
             drop(w);
             let job = move || {
-                let r = catch_unwind(AssertUnwindSafe(|| f(i, g)));
+                let r = catch_unwind(AssertUnwindSafe(|| {
+                    crate::allowance::check();
+                    f(i, g)
+                }));
                 if r.is_err() {
                     failed.store(true, Ordering::Relaxed);
                 }

@@ -1231,8 +1231,13 @@ fn zip_png_set() {
         (1, 1)
     );
     // smaller than without the set
-    let records =
-        |f: &Formula| -> usize { f.streams.iter().filter(|s| matches!(&*s.class, "png/records" | "png/heads" | "png/rans" | "png/raw")).map(|s| s.data.len()).sum() };
+    let records = |f: &Formula| -> usize {
+        f.streams
+            .iter()
+            .filter(|s| matches!(&*s.class, "png/records" | "png/heads" | "png/rans" | "png/raw"))
+            .map(|s| s.data.len())
+            .sum()
+    };
     let alone: usize = files[..3].iter().map(|d| records(&recompress(d, &all()))).sum();
     let set = records(&f) - records(&recompress(&files[4], &all()));
     assert!(set * 2 < alone, "{set} against {alone}");
