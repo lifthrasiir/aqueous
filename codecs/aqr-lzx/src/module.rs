@@ -46,22 +46,40 @@ pub(crate) fn cut<'a>(
     kept: &'a [u8],
     index: &[u8],
 ) -> Result<(Vec<(&'a [u8], &'a [u8], &'a [u8])>, &'a [u8])> {
-    let (mut at, mut d, mut r, mut k) = (0, data, records, kept);
-    let mut out = Vec::new();
-    while at < index.len() {
-        let mut take = |from: &mut &'a [u8]| {
-            let n = varint::get(index, &mut at).map_err(|_| corrupt())?;
-            let n = usize::try_from(n).ok().filter(|&n| n <= from.len()).ok_or_else(corrupt)?;
+    let (lens, _) = cut_lens(index, [kept.len(), data.len(), records.len()])?;
+    let (mut k, mut d, mut r) = (kept, data, records);
+    let mut out = Vec::with_capacity(lens.len());
+    for [nk, nd, nr] in lens {
+        let mut take = |from: &mut &'a [u8], n: usize| {
             let (a, b) = from.split_at(n);
             *from = b;
-            Ok::<_, Error>(a)
+            a
         };
-        out.push((take(&mut k)?, take(&mut d)?, take(&mut r)?));
-    }
-    if !d.is_empty() || !r.is_empty() {
-        return Err(corrupt());
+        out.push((take(&mut k, nk), take(&mut d, nd), take(&mut r, nr)));
     }
     Ok((out, k))
+}
+
+/// [`cut`] by lengths alone: of the inputs `lens` (bytes kept, data, records) long, the lengths
+/// of each stream's bytes kept, data and record; and of the bytes kept after the last. A plan
+/// takes this, as the data may not be at hand when it is made.
+pub(crate) fn cut_lens(index: &[u8], lens: [usize; 3]) -> Result<(Vec<[usize; 3]>, usize)> {
+    let (mut at, mut left) = (0, lens);
+    let mut out = Vec::new();
+    while at < index.len() {
+        let mut one = [0; 3];
+        // (the order of the index: kept, data, record; of the inputs': kept, data, record)
+        for (n, left) in one.iter_mut().zip(&mut left) {
+            let v = varint::get(index, &mut at).map_err(|_| corrupt())?;
+            *n = usize::try_from(v).ok().filter(|&v| v <= *left).ok_or_else(corrupt)?;
+            *left -= *n;
+        }
+        out.push(one);
+    }
+    if left[1] != 0 || left[2] != 0 {
+        return Err(corrupt());
+    }
+    Ok((out, left[0]))
 }
 
 /// The variant of the streams that `params` tell: none for WIM's chunks, the window's bits for
