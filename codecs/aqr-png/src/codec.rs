@@ -43,6 +43,78 @@ pub(crate) fn get_bytes<'a>(src: &'a [u8], at: &mut usize, n: usize) -> Result<&
     aqr_common::cursor::take(src, at, n).map_err(|_| crate::corrupt())
 }
 
+/// A record of mode 0 or 1 cut where its model payload's two streams start: its *head* (the
+/// mode, the layout, the headers, the lengths and the tables: all of a record of mode 0), then
+/// the rANS stream, then the raw bits. Mode 2 is for the modules that keep their records whole.
+pub(crate) fn split_record(rec: &[u8]) -> Result<(&[u8], &[u8], &[u8])> {
+    match rec.first() {
+        Some(0) => return Ok((rec, &[], &[])),
+        Some(1) => {}
+        _ => return Err(crate::corrupt()),
+    }
+    let mut at = 1;
+    for _ in 0..2 {
+        let n = get_varint(rec, &mut at)? as usize;
+        get_bytes(rec, &mut at, n)?;
+    }
+    let mut lens = [0usize; 3];
+    for l in &mut lens {
+        *l = get_varint(rec, &mut at)? as usize;
+    }
+    get_bytes(rec, &mut at, lens[0])?;
+    let head = at;
+    let st = get_bytes(rec, &mut at, lens[1])?;
+    let raw = get_bytes(rec, &mut at, lens[2])?;
+    if at != rec.len() {
+        return Err(crate::corrupt());
+    }
+    Ok((&rec[..head], st, raw))
+}
+
+/// The inputs of the part module for the records of a file's images: the index of the heads'
+/// lengths, the heads, the rANS streams and the raw bits (each image's after the one before).
+pub(crate) fn split_records(records: &[Vec<u8>]) -> Result<[Vec<u8>; 4]> {
+    let [mut index, mut heads, mut sts, mut raws] = [vec![], vec![], vec![], vec![]];
+    for r in records {
+        let (head, st, raw) = split_record(r)?;
+        varint::put(&mut index, head.len() as u64);
+        heads.extend_from_slice(head);
+        sts.extend_from_slice(st);
+        raws.extend_from_slice(raw);
+    }
+    Ok([index, heads, sts, raws])
+}
+
+/// The index and the records of the whole decoder (index of their lengths, each record in one
+/// piece) of the inputs of the part module: [`split_records`] undone.
+pub(crate) fn join_records(index: &[u8], heads: &[u8], sts: &[u8], raws: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+    let (mut at, mut h, mut s, mut r) = (0, 0, 0, 0);
+    let (mut index_out, mut records) = (vec![], Vec::with_capacity(heads.len() + sts.len() + raws.len()));
+    while at < index.len() {
+        let n = get_varint(index, &mut at)? as usize;
+        let head = get_bytes(heads, &mut h, n)?;
+        records.extend_from_slice(head);
+        let mut lens = [0usize; 3];
+        if head.first() != Some(&0) {
+            let mut k = 1;
+            for _ in 0..2 {
+                let n = get_varint(head, &mut k)? as usize;
+                get_bytes(head, &mut k, n)?;
+            }
+            for l in &mut lens {
+                *l = get_varint(head, &mut k)? as usize;
+            }
+        }
+        records.extend_from_slice(get_bytes(sts, &mut s, lens[1])?);
+        records.extend_from_slice(get_bytes(raws, &mut r, lens[2])?);
+        varint::put(&mut index_out, (head.len() + lens[1] + lens[2]) as u64);
+    }
+    if h != heads.len() || s != sts.len() || r != raws.len() {
+        return Err(crate::corrupt());
+    }
+    Ok((index_out, records))
+}
+
 fn chunk_crc(kind: &[u8; 4], data: &[u8]) -> u32 {
     let mut h = aqr_common::crc32::Hasher::new();
     h.update(kind);
@@ -51,9 +123,9 @@ fn chunk_crc(kind: &[u8; 4], data: &[u8]) -> u32 {
 }
 
 /// How a chunk's data is kept in the skeleton.
-const PLAIN: u8 = 0;
+pub(crate) const PLAIN: u8 = 0;
 /// IDAT: all of the data is image payload.
-const IDAT: u8 = 1;
+pub(crate) const IDAT: u8 = 1;
 /// fdAT: a sequence number (in the skeleton), then image payload.
 pub(crate) const FDAT: u8 = 2;
 
@@ -420,11 +492,11 @@ pub(crate) struct Skeleton<'a> {
 }
 
 pub(crate) struct SkChunk<'a> {
-    kind: [u8; 4],
+    pub(crate) kind: [u8; 4],
     pub(crate) len: usize,
-    crc: Option<u32>,
+    pub(crate) crc: Option<u32>,
     /// The whole data (plain chunks) or the sequence number (fdAT).
-    data: &'a [u8],
+    pub(crate) data: &'a [u8],
 }
 
 impl<'a> Skeleton<'a> {
@@ -632,32 +704,27 @@ fn image_payload(
 }
 
 /// One stream's structure as the layout gives it.
-struct StreamLayout {
+pub(crate) struct StreamLayout {
     zhdr: [u8; 2],
     blocks: Vec<Block>,
     tail_pad: u8,
     trailing: Vec<u8>,
 }
 
-/// Rebuilds a coded image's payload (of `len` bytes, if the record is right) from its record
-/// (past the mode byte), against `reference` if it is coded against one; and, if `keep`, the
-/// image's own reference (that [`model::Reference::parse`] gives of the payload).
-fn rebuild(
-    g: &Geometry,
-    rec: &[u8],
-    len: usize,
-    threads: usize,
-    reference: Option<&model::Reference>,
-    keep: bool,
-) -> Result<(Vec<u8>, Option<model::Reference>)> {
-    let mut at = 0;
-    let part = |at: &mut usize| -> Result<&[u8]> {
-        let n = get_varint(rec, at)? as usize;
-        get_bytes(rec, at, n)
-    };
-    let layout = part(&mut at)?;
-    let headers = part(&mut at)?;
-    // (read twice: the blocks counted, then the streams and spans made of exactly as many)
+/// An image's layout as the record gives it: its model's kind and the bytes of data it covers,
+/// each stream's blocks, the spans the model codes (blocks of tokens, or of stored bytes), and
+/// the tokens (by index) of the matches of length 258 sent as 284 + 31.
+pub(crate) struct Layout {
+    pub kind: Kind,
+    pub n: usize,
+    pub streams: Vec<StreamLayout>,
+    pub spans: Vec<Span>,
+    pub alts: Vec<usize>,
+}
+
+/// The layout the bytes `layout` of a record hold (read twice: the blocks counted, then the
+/// streams and spans made of exactly as many).
+pub(crate) fn parse_layout(layout: &[u8]) -> Result<Layout> {
     let (mut streams, mut spans) = (Vec::new(), Vec::new());
     let mut r = BitR::new(layout);
     let (mut kind, mut n) = (Kind::Image, 0);
@@ -740,6 +807,29 @@ fn rebuild(
     if r.overrun() {
         return Err(crate::corrupt());
     }
+
+    Ok(Layout { kind, n, streams, spans, alts })
+}
+
+/// Rebuilds a coded image's payload (of `len` bytes, if the record is right) from its record
+/// (past the mode byte), against `reference` if it is coded against one; and, if `keep`, the
+/// image's own reference (that [`model::Reference::parse`] gives of the payload).
+fn rebuild(
+    g: &Geometry,
+    rec: &[u8],
+    len: usize,
+    threads: usize,
+    reference: Option<&model::Reference>,
+    keep: bool,
+) -> Result<(Vec<u8>, Option<model::Reference>)> {
+    let mut at = 0;
+    let part = |at: &mut usize| -> Result<&[u8]> {
+        let n = get_varint(rec, at)? as usize;
+        get_bytes(rec, at, n)
+    };
+    let layout = part(&mut at)?;
+    let headers = part(&mut at)?;
+    let Layout { kind, n, streams, spans, alts } = parse_layout(layout)?;
 
     let ntok: usize = spans.iter().map(|s| if let Span::Tokens(c) = s { *c } else { 0 }).sum();
     if ntok > n {
@@ -831,8 +921,22 @@ pub(crate) fn payload_room(len: usize, most: usize, kept: Option<usize>) -> usiz
 /// Blocks in flight between the model and the writer.
 const PIPE_DEPTH: usize = 4;
 
+/// Where a payload's bytes go as they are written, instead of being kept: each piece in order.
+pub(crate) trait Drain {
+    fn put(&mut self, d: &[u8]) -> Result<()>;
+}
+
+/// No drain: the payload is kept (and the payload is `Send`).
+pub(crate) struct Kept;
+
+impl Drain for Kept {
+    fn put(&mut self, _: &[u8]) -> Result<()> {
+        unreachable!("a payload that is kept")
+    }
+}
+
 /// Writes an image's streams block by block, as the model decodes them.
-struct Payload<'a> {
+pub(crate) struct Payload<'a, D = Kept> {
     streams: Vec<StreamLayout>,
     /// The stream being written, its next block, and its writer (appending to the payload).
     si: usize,
@@ -848,11 +952,38 @@ struct Payload<'a> {
     ai: usize,
     hr: BitReader<'a>,
     recipe: header::Recipe,
+    /// Where the bytes go as they are written (else they are kept in `out`), and the room
+    /// that a block takes there.
+    drain: Option<(D, usize)>,
 }
 
-impl<'a> Payload<'a> {
+impl<'a> Payload<'a, Kept> {
     /// `cap`: room for the payload, if the data is right.
     fn new(streams: Vec<StreamLayout>, alts: Vec<usize>, headers: &'a [u8], cap: usize) -> Result<Payload<'a>> {
+        Self::with(streams, alts, headers, cap, None)
+    }
+}
+
+impl<'a, D: Drain> Payload<'a, D> {
+    /// A payload whose bytes go to `drain` as they are written, a block's at a time, of room
+    /// for a block of `block` bytes at most.
+    pub(crate) fn draining(
+        streams: Vec<StreamLayout>,
+        alts: Vec<usize>,
+        headers: &'a [u8],
+        block: usize,
+        drain: D,
+    ) -> Result<Payload<'a, D>> {
+        Self::with(streams, alts, headers, 0, Some((drain, block)))
+    }
+
+    fn with(
+        streams: Vec<StreamLayout>,
+        alts: Vec<usize>,
+        headers: &'a [u8],
+        cap: usize,
+        drain: Option<(D, usize)>,
+    ) -> Result<Payload<'a, D>> {
         let mut e = Payload {
             streams,
             si: 0,
@@ -865,19 +996,20 @@ impl<'a> Payload<'a> {
             ai: 0,
             hr: BitReader::new(headers),
             recipe: header::Recipe::default(),
+            drain,
         };
         e.advance()?;
         Ok(e)
     }
 
     /// Where the next block's data starts.
-    fn at(&self) -> usize {
+    pub(crate) fn at(&self) -> usize {
         self.done + self.w.as_ref().map_or(0, |w| w.pos())
     }
 
     /// Writes the next block: its tokens `toks` and frequencies `freqs` (both corrected for
     /// matches sent as 284 + 31), given the data from [`Payload::at`] on.
-    fn block(&mut self, toks: &mut [Token], freqs: &mut model::Freqs, rest: &[u8]) -> Result<()> {
+    pub(crate) fn block(&mut self, toks: &mut [Token], freqs: &mut model::Freqs, rest: &[u8]) -> Result<()> {
         let t1 = self.t0 + toks.len();
         while let Some(&i) = self.alts.get(self.ai).filter(|&&i| i < t1) {
             match toks.get_mut(i.wrapping_sub(self.t0)) {
@@ -899,6 +1031,10 @@ impl<'a> Payload<'a> {
             *h = header::read_freqs(&mut self.hr, &freqs.0, &freqs.1, &mut self.recipe)?;
         }
         w.block_of(b, toks, rest)?;
+        if let Some((drain, _)) = &mut self.drain {
+            drain.put(w.written())?;
+            w.forget_written();
+        }
         self.bi += 1;
         self.advance()
     }
@@ -907,22 +1043,34 @@ impl<'a> Payload<'a> {
     fn advance(&mut self) -> Result<()> {
         while let Some(s) = self.streams.get(self.si) {
             if self.w.is_none() {
-                self.out.extend_from_slice(&s.zhdr);
-                self.w = Some(aqr_flate::write::Writer::append_to(std::mem::take(&mut self.out)));
+                self.w = Some(match &mut self.drain {
+                    Some((drain, block)) => {
+                        drain.put(&s.zhdr)?;
+                        aqr_flate::write::Writer::new(*block)
+                    }
+                    None => {
+                        self.out.extend_from_slice(&s.zhdr);
+                        aqr_flate::write::Writer::append_to(std::mem::take(&mut self.out))
+                    }
+                });
             }
             if self.bi < s.blocks.len() {
                 break;
             }
             let w = self.w.take().unwrap();
             self.done += w.pos();
-            self.out = w.finish(s.tail_pad, &s.trailing)?;
+            let rest = w.finish(s.tail_pad, &s.trailing)?;
+            match &mut self.drain {
+                Some((drain, _)) => drain.put(&rest)?,
+                None => self.out = rest,
+            }
             (self.si, self.bi) = (self.si + 1, 0);
         }
         Ok(())
     }
 
-    /// The payload and the data bytes its streams cover.
-    fn finish(self) -> Result<(Vec<u8>, usize)> {
+    /// The payload (empty where it was drained) and the data bytes its streams cover.
+    pub(crate) fn finish(self) -> Result<(Vec<u8>, usize)> {
         if self.si != self.streams.len() || self.ai != self.alts.len() {
             return Err(crate::corrupt());
         }

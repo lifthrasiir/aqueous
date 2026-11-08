@@ -377,8 +377,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "png-recons",
-        version: 4,
-        sha512_256: hex("063ba1f7dafb62b17559ef8c3c53fb1e7a7417aaf5f58bd852f5f0fe137730e1"),
+        version: 5,
+        sha512_256: hex("fec38fdbb6b19749610e8c038ca788621419b07b527b828c6374447879e6ed40"),
         block: include_bytes!("../wasm/png-recons.block"),
     },
     Known {

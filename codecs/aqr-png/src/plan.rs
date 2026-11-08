@@ -45,9 +45,11 @@ struct Image {
 
 /// [`Image`] of the record `rec` of an image of `len` bytes (its header `ih`), its reference kept
 /// where `keep` (as `codec::image_payload` and `codec::rebuild` take them).
-fn image(rec: &[u8], len: usize, ih: &Option<Ihdr>, keep: bool) -> Option<Image> {
+fn image(rec: &[u8], len: usize, ih: &Option<Ihdr>, keep: bool, streamed: bool) -> Option<Image> {
     let mode = *rec.first()?;
     match mode {
+        // (as a part module a record kept as it is is streamed: nothing is held)
+        0 if streamed => return Some(Image { kept: vec![], over: 0, refs: None, tokens: None }),
         0 => {
             // (kept as it is, and where kept as a reference of a header, parsed: the code
             // tables, then the reference)
@@ -81,7 +83,7 @@ fn image(rec: &[u8], len: usize, ih: &Option<Ihdr>, keep: bool) -> Option<Image>
     let kind = if r.bits(1) == 1 { Kind::Bytes } else { Kind::Image };
     let n = r.gamma().ok()? as usize;
     let nstreams = r.gamma().ok()? as usize + 1;
-    let (mut streams, mut total, mut most, mut ntok) = (vec![], 0u64, 0usize, 0usize);
+    let (mut streams, mut total, mut most, mut ntok, mut stored) = (vec![], 0u64, 0usize, 0usize, 0usize);
     for _ in 0..nstreams {
         r.bits(16);
         let nblocks = r.gamma().ok()? as usize;
@@ -97,7 +99,7 @@ fn image(rec: &[u8], len: usize, ih: &Option<Ihdr>, keep: bool) -> Option<Image>
             }
             match r.bits(2) {
                 0 => {
-                    r.bits(24);
+                    stored = stored.max((r.bits(24) >> 8) as usize);
                 }
                 1 | 2 => {
                     let count = if r.bits(1) == 1 { prev } else { r.gamma().ok()? as usize };
@@ -133,12 +135,18 @@ fn image(rec: &[u8], len: usize, ih: &Option<Ihdr>, keep: bool) -> Option<Image>
     let used: u64 = (0..tables).filter(|_| r.bits(1) == 1).map(|t| model::alphabet(t) as u64).sum();
     let [lut, fc] = crate::rans::Tables::bytes(tables, 256);
     kept.extend([block(tables as u64), block(4 * used), block(lut), block(fc)]);
-    // (the payload, then the reference kept: they stay, the rest given back below them)
-    let own = keep && n <= u32::MAX as usize;
-    kept.push(block(codec::payload_room(len, most, own.then_some(ntok)) as u64));
-    if own {
-        kept.push(block(wasm::POS * ntok as u64));
-        kept.push(block(wasm::TOKEN * ntok as u64));
+    let own = keep && !streamed && n <= u32::MAX as usize;
+    if streamed {
+        // (a piece of each stream of the model, and the room of a block written)
+        let writer = (6 * most + 512).max(stored + 16) + aqr_flate::write::TOKEN_SLACK;
+        kept.extend([block(crate::part::PIECE as u64), block(crate::part::PIECE as u64), block(writer as u64)]);
+    } else {
+        // (the payload, then the reference kept: they stay, the rest given back below them)
+        kept.push(block(codec::payload_room(len, most, own.then_some(ntok)) as u64));
+        if own {
+            kept.push(block(wasm::POS * ntok as u64));
+            kept.push(block(wasm::TOKEN * ntok as u64));
+        }
     }
     // the decoder's windows and a block's tokens
     let win = model::Win::of(&g, n, kind == Kind::Image, 4 * model::WINDOW, model::WINDOW);
@@ -189,12 +197,12 @@ fn file(m: &mut Sim, sk: &[u8], index: &[u8], records: &[u8], threads: usize, ke
     if threads > 1 && imgs.len() > 1 {
         let tasks = imgs
             .iter()
-            .map(|(rec, len, ih)| image(rec, *len, ih, keep).map(|i| m.task(i.kept.iter().sum::<u64>() + i.over)))
+            .map(|(rec, len, ih)| image(rec, *len, ih, keep, false).map(|i| m.task(i.kept.iter().sum::<u64>() + i.over)))
             .collect::<Option<Vec<u64>>>()?;
         // (the tasks' handles; each result kept as it is taken, with its reference)
         m.take(k);
         for (rec, len, ih) in &imgs {
-            let i = image(rec, *len, ih, keep)?;
+            let i = image(rec, *len, ih, keep, false)?;
             let t = i.refs.unwrap_or(0);
             m.take(*len as u64 + 9 * t + 1);
             if keep {
@@ -207,7 +215,7 @@ fn file(m: &mut Sim, sk: &[u8], index: &[u8], records: &[u8], threads: usize, ke
         m.spawned(0, tasks);
     } else {
         for (rec, len, ih) in &imgs {
-            let i = image(rec, *len, ih, keep)?;
+            let i = image(rec, *len, ih, keep, false)?;
             for b in &i.kept {
                 m.take(*b);
             }
@@ -294,7 +302,7 @@ fn references_of_parts(m: &mut Sim, sk: &[u8], index: &[u8], records: &[u8]) -> 
     let mut imgs = Vec::with_capacity(parts.len());
     for ((range, _), (rec, len, ih)) in s.images.iter().zip(&parts) {
         let cap = s.chunks[range.clone()].iter().map(|c| c.len).sum::<usize>();
-        let n = image(rec, *len, ih, false)?.tokens;
+        let n = image(rec, *len, ih, false, false)?.tokens;
         imgs.push((cap, ih.and(n)));
     }
     references(m, s.chunks.len(), &imgs);
@@ -381,4 +389,36 @@ pub fn set(initial: u64, params: &[u8], inputs: &[u64], (sks, indexes, records):
     }
     let (instance, tasks) = m.plans(1);
     Some((instance, tasks[0]))
+}
+
+/// The memory plan of `png-recons` as a part module ([`crate::part::run`]): of its initial memory
+/// (`initial` bytes), inputs of `inputs` bytes, the skeleton `sk`, the index and the heads of the
+/// records. The inputs are not copied: the skeleton and the index are read whole, a piece of the
+/// heads and one of the output taken, and an image at a time on top of them (the head of its
+/// record, its layout, the model's tables, a piece of each of its streams, the room of a block
+/// written, the decoder's windows and a block's tokens), the most of them.
+pub fn part(initial: u64, inputs: &[u64], (sk, index, heads): (&[u8], &[u8], &[u8])) -> Option<u64> {
+    let s = Skeleton::parse(sk).ok()?;
+    let mut m = Sim::new(initial);
+    m.take(aqr_common::crc32::WASM_TABLES);
+    m.take(inputs[0]);
+    m.take(inputs[1]);
+    let n = s.chunks.len() as u64;
+    m.take(wasm::CHUNK * n);
+    m.take(n);
+    m.take(wasm::IMAGE * s.images.len() as u64);
+    m.take(crate::part::PIECE as u64);
+    m.take(crate::part::PIECE as u64);
+    let (mut at, mut from) = (0, 0);
+    for (range, ih) in &s.images {
+        let n = get_varint(index, &mut at).ok()? as usize;
+        let head = get_bytes(heads, &mut from, n).ok()?;
+        let skip = if s.classes[range.start] == codec::FDAT { 4 } else { 0 };
+        let len = s.chunks[range.clone()].iter().map(|c| c.len - skip).sum::<usize>();
+        let i = image(head, len, ih, false, true)?;
+        // (the head of the record past its mode byte is held; its payload is not)
+        let held = if head.first() == Some(&0) { 0 } else { block(n as u64 - 1) };
+        m.peak(held + i.kept.iter().sum::<u64>() + i.over);
+    }
+    (at == index.len() && from == heads.len()).then(|| m.plan())
 }

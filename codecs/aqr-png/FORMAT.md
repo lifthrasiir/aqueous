@@ -412,7 +412,7 @@ matches the layout lists and 285 for other matches of length 258) and 32 distanc
 
 ## Formula module
 
-The module is `png-recons`, version 3, in `formula::encode` and `formula::decode`; and
+The module is `png-recons`, version 5, in `formula::encode` and `formula::decode`; and
 `png-against`, version 1, in `formula::encode_against` and `formula::decode_against`, for a file
 coded against a reference file. Its output is the PNG file, whose length the application gives.
 The file is rebuilt as in [Rebuilding the file](#rebuilding-the-file), from the skeleton and the
@@ -420,7 +420,7 @@ image records.
 
 **Parameters**: none (empty). A module application with parameters is invalid.
 
-**Inputs**: three for `png-recons`, four for `png-against`, in this order. Any other count is
+**Inputs**: five for `png-recons` (version 5), four for `png-against`, in this order. Any other count is
 invalid.
 
 | slot | class | content |
@@ -434,6 +434,24 @@ invalid.
 replace with whatever node gives it (the output of the reference's own application, say).
 It gives an application of `png-against` only if a record is of kind 2, and of `png-recons`
 otherwise.
+
+`png-recons` takes the records of its images as three inputs, in place of the one that
+`png-against` takes (version 5 of `png-recons`, a part module whose inputs are each read once, in
+order): a coded record is the *head* of its record, then the model payload's rANS stream, then its
+raw bits, and the three are kept apart.
+
+| slot | class | content |
+|---|---|---|
+| 0 | `png/skeleton` | the [skeleton](#skeleton) |
+| 1 | `png/index` | for each image in order, the length of its head: a varint |
+| 2 | `png/heads` | the heads, concatenated in order: a record of kind 0 whole (the byte 0 and the payload), of kind 1 up to the end of the model payload's tables (the byte 1, the layout, the headers, the three lengths and the tables) |
+| 3 | `png/rans` | the rANS streams of the model payloads of the coded images, concatenated in order |
+| 4 | `png/raw` | their raw bits, concatenated in order |
+
+Each coded image takes as many bytes of slots 3 and 4 as its lengths (in the head) say, and the
+slots must be used up exactly. The module is a part module (windows of four pages): it
+puts the file out in order, an image at a time, and holds a block of tokens, the image's model
+tables, layout and rows, whatever the lengths of the file. A record of kind 2 is not taken.
 
 The images are those that the skeleton gives. The index has one varint per image and ends
 exactly there; the records fill slot 2 exactly. Each record is the byte 0 and the payload,

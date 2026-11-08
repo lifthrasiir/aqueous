@@ -7,11 +7,14 @@ use crate::codec::{self, References, Skeleton};
 use crate::{Result, corrupt};
 
 /// The module: the file of `len` bytes rebuilt from `inputs`, the skeleton, the index (the
-/// length of each image's record, as varints) and the records.
+/// length of each image's head, as varints), the heads of the records (all of one kept as it is),
+/// the rANS streams and the raw bits of their models (`codec::split_records`). Whole, on threads;
+/// [`decode_part`] is the same as a part module.
 pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
-    let (&[], &[sk, index, records]) = (params, inputs) else { return Err(corrupt()) };
+    let (&[], &[sk, index, heads, sts, raws]) = (params, inputs) else { return Err(corrupt()) };
     crc_tables();
-    Ok(rebuild(sk, index, records, None, len, threads, (false, false))?.0)
+    let (index, records) = codec::join_records(index, heads, sts, raws)?;
+    Ok(rebuild(sk, &index, &records, None, len, threads, (false, false))?.0)
 }
 
 /// The module of a file coded against a reference file: [`decode`] with the reference file as

@@ -121,7 +121,7 @@ fn forests(files: &[&[u8]], threads: usize, limit: usize) -> Vec<(Vec<usize>, Ve
 
 /// The bytes of the records of `f`.
 fn records(f: &Formula) -> usize {
-    f.streams.iter().filter(|s| s.class == "png/records").map(|s| s.data.len()).sum()
+    f.streams.iter().filter(|s| matches!(&*s.class, "png/records" | "png/heads" | "png/rans" | "png/raw")).map(|s| s.data.len()).sum()
 }
 
 /// The sets of the contents `children` of `f` (each its slice and its formula), a formula of

@@ -431,6 +431,25 @@ pub struct Player<'a> {
     raw: BitR<'a>,
 }
 
+/// The decoding tables of the model of `tables` tables ([`TABLES`] or [`TABLES_REF`]) that
+/// the bytes `tb` (the head of a record's model payload) hold.
+pub(crate) fn tables_of(tb: &[u8], tables: usize) -> crate::Result<Tables> {
+    let mut r = BitR::new(tb);
+    let used: Vec<bool> = (0..tables).map(|_| r.bits(1) == 1).collect();
+    // the used tables' frequencies one after another (reserved exactly), where table `t`'s
+    // are
+    let size = |t: usize| if used[t] { alphabet(t) } else { 0 };
+    let mut freqs = Vec::with_capacity((0..tables).map(size).sum());
+    for t in (0..tables).filter(|&t| used[t]) {
+        rans::read_table_into(&mut r, alphabet(t), &mut freqs)?;
+    }
+    if r.overrun() {
+        return Err(crate::corrupt());
+    }
+    let at = |t: usize| (0..t).map(size).sum::<usize>();
+    Ok(Tables::of(tables, |t| &freqs[at(t)..at(t) + size(t)]))
+}
+
 impl<'a> Player<'a> {
     /// The model payload at `at` of `src`, with `tables` tables ([`TABLES`] or
     /// [`TABLES_REF`]).
@@ -445,21 +464,7 @@ impl<'a> Player<'a> {
             Ok(s)
         };
         let (tb, st, raw) = (part(lens[0])?, part(lens[1])?, part(lens[2])?);
-        let mut r = BitR::new(tb);
-        let used: Vec<bool> = (0..tables).map(|_| r.bits(1) == 1).collect();
-        // the used tables' frequencies one after another (reserved exactly), where table `t`'s
-        // are
-        let size = |t: usize| if used[t] { alphabet(t) } else { 0 };
-        let mut freqs = Vec::with_capacity((0..tables).map(size).sum());
-        for t in (0..tables).filter(|&t| used[t]) {
-            rans::read_table_into(&mut r, alphabet(t), &mut freqs)?;
-        }
-        if r.overrun() {
-            return Err(crate::corrupt());
-        }
-        let at = |t: usize| (0..t).map(size).sum::<usize>();
-        let tables = Tables::of(tables, |t| &freqs[at(t)..at(t) + size(t)]);
-        Ok(Player { tables, dec: Decoder::new(st), raw: BitR::new(raw) })
+        Ok(Player { tables: tables_of(tb, tables)?, dec: Decoder::new(st), raw: BitR::new(raw) })
     }
 }
 
@@ -1936,6 +1941,41 @@ pub fn decode(
         (Kind::Bytes, _, None) => decode_bpp::<0, false, false>(player, g, spans, n, None, emit),
         (Kind::Bytes, _, r) => decode_bpp::<0, false, true>(player, g, spans, n, r, emit),
     }
+}
+
+/// [`decode`] (alone, not against a reference) on any source of symbols: the model's decoder
+/// reading its streams as they come ([`crate::part`]), the caller checking that they end as they
+/// should.
+pub fn decode_io<I: Io>(
+    io: &mut I,
+    kind: Kind,
+    g: &Geometry,
+    spans: &[Span],
+    n: usize,
+    emit: &mut Emit,
+) -> crate::Result<()> {
+    match (kind, g.bpp) {
+        (Kind::Image, 1) => decode_io_bpp::<I, 1, true>(io, g, spans, n, emit),
+        (Kind::Image, 2) => decode_io_bpp::<I, 2, true>(io, g, spans, n, emit),
+        (Kind::Image, 3) => decode_io_bpp::<I, 3, true>(io, g, spans, n, emit),
+        (Kind::Image, 4) => decode_io_bpp::<I, 4, true>(io, g, spans, n, emit),
+        (Kind::Image, _) => Err(crate::corrupt()),
+        (Kind::Bytes, _) => decode_io_bpp::<I, 0, false>(io, g, spans, n, emit),
+    }
+}
+
+fn decode_io_bpp<I: Io, const BPP: usize, const IMAGE: bool>(
+    io: &mut I,
+    g: &Geometry,
+    spans: &[Span],
+    n: usize,
+    emit: &mut Emit,
+) -> crate::Result<()> {
+    let win = Win::new(g, n, IMAGE);
+    let (mut buf, mut raw) = (vec![0u8; win.buf], vec![0u8; win.raw]);
+    let none = Reference::with_capacity(0);
+    let mut fo = Follow::new(&none);
+    decode_loop::<I, BPP, IMAGE, false>(io, g, spans, n, win, &mut buf, &mut raw, &mut fo, emit)
 }
 
 /// The decoder's moving parts as a local value (the tables are only borrowed), so that the

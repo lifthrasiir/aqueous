@@ -81,9 +81,9 @@ fn skeleton_and_slots() {
     let file = single(300, 200, 8, 6, 0, &zlib(&zlib6(), &data), b"trailing bytes");
     let f = roundtrip(&file);
     let classes: Vec<_> = f.streams.iter().map(|s| &*s.class).collect();
-    assert_eq!(classes, ["png/skeleton", "png/index", "png/records"]);
+    assert_eq!(classes, ["png/skeleton", "png/index", "png/heads", "png/rans", "png/raw"]);
     assert_eq!(record_kinds(&f), [1]);
-    assert!(f.streams[2].data.len() < file.len());
+    assert!(f.streams[2..].iter().map(|s| s.data.len()).sum::<usize>() < file.len());
     assert!(f.streams[0].data.ends_with(b"trailing bytes"));
 }
 
@@ -214,7 +214,7 @@ fn picture(w: usize, h: usize, color: u8, seed: u32, rect: Option<(usize, usize,
 
 /// The records' bytes of a formula.
 fn records(f: &Formula) -> usize {
-    f.streams.iter().find(|s| s.class == "png/records").unwrap().data.len()
+    f.streams.iter().filter(|s| matches!(&*s.class, "png/records" | "png/heads" | "png/rans" | "png/raw")).map(|s| s.data.len()).sum()
 }
 
 /// A variant of a picture coded against it: records of kind 2, far smaller than alone, the
@@ -250,7 +250,7 @@ fn reference_not_taken() {
     for reference in [picture(300, 201, 2, 5, None), picture(300, 200, 6, 5, None), b"not a png".to_vec()] {
         let f = formula::encode_against(&variant, &reference, 1).unwrap();
         assert_eq!(record_kinds(&f), [1]);
-        assert_eq!(f.streams.len(), 3);
+        assert_eq!(f.streams.len(), 5);
         assert!(f == formula::encode(&variant, 1).unwrap());
     }
 }
@@ -353,7 +353,7 @@ fn set_of_variants() {
 }
 
 fn records_of(f: &Formula) -> usize {
-    f.streams.iter().find(|s| s.class == "png/records").unwrap().data.len()
+    f.streams.iter().filter(|s| matches!(&*s.class, "png/records" | "png/heads" | "png/rans" | "png/raw")).map(|s| s.data.len()).sum()
 }
 
 /// Sets of bad parameters or inputs fail, damaged ones never panic.

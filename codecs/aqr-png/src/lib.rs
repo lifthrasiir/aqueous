@@ -7,6 +7,7 @@ pub mod filter;
 pub mod formula;
 pub mod model;
 pub mod module;
+pub mod part;
 pub mod plan;
 pub mod png;
 pub mod rans;

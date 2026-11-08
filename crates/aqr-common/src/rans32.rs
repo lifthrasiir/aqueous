@@ -483,36 +483,204 @@ impl<'a> Decoder<'a> {
     /// read from the input).
     #[inline(always)]
     pub fn get<S: Symbol, const BITS: u32>(&mut self, tb: &Tables<S, BITS>, t: usize) -> u32 {
-        let x = self.st[0];
-        let slot = x & ((1 << BITS) - 1);
-        debug_assert!(t < tb.n);
-        // SAFETY: `t` is below the number of tables, `slot` below `1 << BITS`, and every
-        // symbol in the LUT below the stride.
-        let (s, e) = unsafe {
-            let s = tb.lut.get_unchecked((t << BITS) + slot as usize).get();
-            (s, *tb.fc.get_unchecked(tb.base(t) + s))
-        };
-        self.advance((e & 0xffff) * (x >> BITS) + slot - (e >> 16));
-        s as u32
+        let (s, x) = step_get(self.st[0], tb, t);
+        self.advance(x);
+        s
     }
 
     /// Decodes a symbol of a binary table `t`.
     #[inline(always)]
     pub fn bit<S: Symbol, const BITS: u32>(&mut self, tb: &Tables<S, BITS>, t: usize) -> u32 {
-        let x = self.st[0];
-        let slot = x & ((1 << BITS) - 1);
-        debug_assert!(t < tb.n);
-        // SAFETY: as in `get`.
-        let f0 = unsafe { *tb.fc.get_unchecked(tb.base(t)) } & 0xffff;
-        let b = (slot >= f0) as u32;
-        let (lo, f) = if b == 1 { (f0, (1 << BITS) - f0) } else { (0, f0) };
-        self.advance(f * (x >> BITS) + slot - lo);
+        let (b, x) = step_bit(self.st[0], tb, t);
+        self.advance(x);
         b
     }
 
     /// Whether the whole stream was consumed exactly.
     pub fn finished(&self) -> bool {
         self.pos == self.data.len() && self.st.iter().all(|&x| x == RANS_L)
+    }
+}
+
+/// A symbol of table `t` for the state `x`: the symbol, and the state it leads to, before
+/// renormalisation.
+#[inline(always)]
+fn step_get<S: Symbol, const BITS: u32>(x: u32, tb: &Tables<S, BITS>, t: usize) -> (u32, u32) {
+    let slot = x & ((1 << BITS) - 1);
+    debug_assert!(t < tb.n);
+    // SAFETY: `t` is below the number of tables, `slot` below `1 << BITS`, and every symbol in
+    // the LUT below the stride.
+    let (s, e) = unsafe {
+        let s = tb.lut.get_unchecked((t << BITS) + slot as usize).get();
+        (s, *tb.fc.get_unchecked(tb.base(t) + s))
+    };
+    (s as u32, (e & 0xffff) * (x >> BITS) + slot - (e >> 16))
+}
+
+/// As [`step_get`], for a binary table.
+#[inline(always)]
+fn step_bit<S: Symbol, const BITS: u32>(x: u32, tb: &Tables<S, BITS>, t: usize) -> (u32, u32) {
+    let slot = x & ((1 << BITS) - 1);
+    debug_assert!(t < tb.n);
+    // SAFETY: as in `step_get`.
+    let f0 = unsafe { *tb.fc.get_unchecked(tb.base(t)) } & 0xffff;
+    let b = (slot >= f0) as u32;
+    let (lo, f) = if b == 1 { (f0, (1 << BITS) - f0) } else { (0, f0) };
+    (b, f * (x >> BITS) + slot - lo)
+}
+
+/// Bytes taken in pieces from a function that fills what it is given (the number of bytes put,
+/// 0 where there are no more), for the decoders that read a stream as it comes.
+pub struct Feed<F: FnMut(&mut [u8]) -> usize> {
+    more: F,
+    buf: Vec<u8>,
+    at: usize,
+    end: usize,
+    done: bool,
+}
+
+impl<F: FnMut(&mut [u8]) -> usize> Feed<F> {
+    /// A feed holding `piece` bytes (8 at least) at most.
+    pub fn new(more: F, piece: usize) -> Self {
+        Feed { more, buf: vec![0; piece.max(8)], at: 0, end: 0, done: false }
+    }
+
+    /// Makes `need` bytes (at most the piece) held from the position on, if the stream has them.
+    #[cold]
+    fn fill(&mut self, need: usize) -> bool {
+        if self.at > 0 {
+            self.buf.copy_within(self.at..self.end, 0);
+            self.end -= self.at;
+            self.at = 0;
+        }
+        while self.end < need && !self.done {
+            match (self.more)(&mut self.buf[self.end..]) {
+                0 => self.done = true,
+                k => self.end += k,
+            }
+        }
+        self.end >= need
+    }
+
+    #[inline(always)]
+    fn have(&self) -> usize {
+        self.end - self.at
+    }
+}
+
+/// A [`Decoder`] of a stream of `len` bytes taken as it is decoded, with the same symbols and
+/// the same [`StreamDecoder::finished`].
+pub struct StreamDecoder<F: FnMut(&mut [u8]) -> usize> {
+    st: [u32; 4],
+    feed: Feed<F>,
+    /// Bytes taken, those past the stream's end too (as a [`Decoder`]'s position), and the length.
+    pos: u64,
+    len: u64,
+}
+
+impl<F: FnMut(&mut [u8]) -> usize> StreamDecoder<F> {
+    pub fn new(mut feed: Feed<F>, len: u64) -> Self {
+        feed.fill(16);
+        let mut d = StreamDecoder { st: [0; 4], feed, pos: 0, len };
+        for k in 0..4 {
+            let hi = d.word();
+            let lo = d.word();
+            d.st[k] = hi << 16 | lo;
+        }
+        d
+    }
+
+    #[inline(always)]
+    fn word(&mut self) -> u32 {
+        let f = &mut self.feed;
+        self.pos += 2;
+        if f.have() >= 2 || f.fill(2) {
+            let w = u16::from_le_bytes([f.buf[f.at], f.buf[f.at + 1]]);
+            f.at += 2;
+            w as u32
+        } else {
+            0
+        }
+    }
+
+    #[inline(always)]
+    fn advance(&mut self, x: u32) {
+        let x = if x < RANS_L { x << 16 | self.word() } else { x };
+        self.st = [self.st[1], self.st[2], self.st[3], x];
+    }
+
+    /// As [`Decoder::get`].
+    #[inline(always)]
+    pub fn get<S: Symbol, const BITS: u32>(&mut self, tb: &Tables<S, BITS>, t: usize) -> u32 {
+        let (s, x) = step_get(self.st[0], tb, t);
+        self.advance(x);
+        s
+    }
+
+    /// As [`Decoder::bit`].
+    #[inline(always)]
+    pub fn bit<S: Symbol, const BITS: u32>(&mut self, tb: &Tables<S, BITS>, t: usize) -> u32 {
+        let (b, x) = step_bit(self.st[0], tb, t);
+        self.advance(x);
+        b
+    }
+
+    /// As [`Decoder::finished`].
+    pub fn finished(&self) -> bool {
+        self.pos == self.len && self.st.iter().all(|&x| x == RANS_L)
+    }
+}
+
+/// A [`BitR`] (LSB first) of a stream taken as it is read.
+pub struct StreamBits<F: FnMut(&mut [u8]) -> usize> {
+    feed: Feed<F>,
+    acc: u64,
+    n: u32,
+    over: usize,
+}
+
+impl<F: FnMut(&mut [u8]) -> usize> StreamBits<F> {
+    pub fn new(feed: Feed<F>) -> Self {
+        StreamBits { feed, acc: 0, n: 0, over: 0 }
+    }
+
+    #[inline(always)]
+    fn refill(&mut self) {
+        let f = &mut self.feed;
+        if f.have() >= 8 || (f.fill(8) && f.have() >= 8) {
+            self.acc |= u64::from_le_bytes(f.buf[f.at..f.at + 8].try_into().unwrap()) << self.n;
+            let k = (63 - self.n) / 8;
+            f.at += k as usize;
+            self.n += k * 8;
+        } else {
+            while self.n <= 56 {
+                if f.have() > 0 || f.fill(1) {
+                    self.acc |= (f.buf[f.at] as u64) << self.n;
+                    f.at += 1;
+                } else {
+                    self.over += 1;
+                }
+                self.n += 8;
+            }
+        }
+    }
+
+    /// As [`BitR::bits`].
+    #[inline(always)]
+    pub fn bits(&mut self, k: u32) -> u32 {
+        debug_assert!(k <= 32);
+        if self.n < k {
+            self.refill();
+        }
+        let v = (self.acc & ((1u64 << k) - 1)) as u32;
+        self.acc >>= k;
+        self.n -= k;
+        v
+    }
+
+    /// As [`BitR::overrun`].
+    pub fn overrun(&self) -> bool {
+        self.over * 8 > self.n as usize
     }
 }
 

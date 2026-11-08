@@ -10,7 +10,7 @@ use aqr_formula::{Apply, Formula, Kind, Module, Node};
 
 pub use crate::module::{decode, decode_against, decode_set};
 
-pub const MODULE: Module = Module::new("png-recons", 4).with_task_plan(plan_recons);
+pub const MODULE: Module = Module::new("png-recons", 5).with_plan(memory_recons);
 
 /// The module of a file coded against a reference file ([`encode_against`], [`decode_against`]).
 pub const AGAINST_MODULE: Module = Module::new("png-against", 2).with_task_plan(plan_against);
@@ -48,20 +48,22 @@ fn parts(
 }
 
 /// A file's skeleton and the records of its images, as [`encode`] made them.
-type Alone<'a> = (&'a [u8], Vec<&'a [u8]>);
+type Alone<'a> = (&'a [u8], Vec<Vec<u8>>);
 
 /// The skeleton and the records of the images of `f`, a formula of [`encode`].
 fn parts_of(f: &Formula) -> Option<Alone<'_>> {
     let stream = |class: &str| f.streams.iter().find(|s| s.class == class).map(|s| &s.data[..]);
     let Node::Apply(a) = &f.root else { return None };
-    let (sk, index, records) = (stream("png/skeleton")?, stream("png/index")?, stream("png/records")?);
-    if a.module != MODULE || f.streams.len() != 3 {
+    let sk = stream("png/skeleton")?;
+    if a.module != MODULE || f.streams.len() != 5 {
         return None;
     }
+    let (index, records) =
+        codec::join_records(stream("png/index")?, stream("png/heads")?, stream("png/rans")?, stream("png/raw")?).ok()?;
     let (mut at, mut from, mut recs) = (0, 0, vec![]);
     while at < index.len() {
-        let n = codec::get_varint(index, &mut at).ok()? as usize;
-        recs.push(codec::get_bytes(records, &mut from, n).ok()?);
+        let n = codec::get_varint(&index, &mut at).ok()? as usize;
+        recs.push(codec::get_bytes(&records, &mut from, n).ok()?.to_vec());
     }
     (from == records.len()).then_some((sk, recs))
 }
@@ -80,21 +82,33 @@ fn index_records(parts: &Parts) -> (Vec<u8>, Vec<u8>) {
 fn formula(input: &[u8], threads: usize, reference: Option<&[u8]>) -> Option<Formula> {
     let refs = reference.map(codec::references);
     let parts = parts(input, threads, refs.as_ref(), None, true)?;
-    let (index, records) = index_records(&parts);
     let against = parts.records.iter().any(|r| r[0] == 2);
     let mut f = Formula::default();
-    // (the records are entropy coded)
-    let mut inputs = vec![
-        f.push("png/skeleton", parts.skeleton),
-        f.push("png/index", index),
-        f.push_as("png/records", Kind::Compressed, records),
-    ];
-    let module = match reference.filter(|_| against) {
+    let (module, inputs) = match reference.filter(|_| against) {
         Some(r) => {
+            // (whole records, the entropy coded)
+            let (index, records) = index_records(&parts);
+            let mut inputs = vec![
+                f.push("png/skeleton", parts.skeleton),
+                f.push("png/index", index),
+                f.push_as("png/records", Kind::Compressed, records),
+            ];
             inputs.push(f.push(REFERENCE, r.to_vec()));
-            AGAINST_MODULE
+            (AGAINST_MODULE, inputs)
         }
-        None => MODULE,
+        None => {
+            // (the heads of the records, and the streams of their models, each of its own: the
+            // entropy coded)
+            let [index, heads, rans, raw] = codec::split_records(&parts.records).ok()?;
+            let inputs = vec![
+                f.push("png/skeleton", parts.skeleton),
+                f.push("png/index", index),
+                f.push_as("png/heads", Kind::Compressed, heads),
+                f.push_as("png/rans", Kind::Compressed, rans),
+                f.push_as("png/raw", Kind::Compressed, raw),
+            ];
+            (MODULE, inputs)
+        }
     };
     f.root = Node::apply(module, Vec::new(), inputs, input.len() as u64);
     Some(f)
@@ -124,8 +138,11 @@ pub fn encode_set(
     let refs = codec::par_map(files.len(), workers, |i| is_parent[i].then(|| codec::references(files[i])));
     let alone: Vec<Option<Alone>> = (0..files.len()).map(|i| alone.get(i)?.as_ref().and_then(parts_of)).collect();
     let parts = codec::par_map(files.len(), workers, |i| match (parents[i], &alone[i]) {
-        (None, Some(a)) => Some(Parts { skeleton: a.0.to_vec(), records: a.1.iter().map(|r| r.to_vec()).collect() }),
-        (p, a) => parts(files[i], inner, p.and_then(|p| refs[p].as_ref()), a.as_ref().map(|a| &a.1[..]), false),
+        (None, Some(a)) => Some(Parts { skeleton: a.0.to_vec(), records: a.1.clone() }),
+        (p, a) => {
+            let alone: Option<Vec<&[u8]>> = a.as_ref().map(|a| a.1.iter().map(|r| &r[..]).collect());
+            parts(files[i], inner, p.and_then(|p| refs[p].as_ref()), alone.as_deref(), false)
+        }
     });
     let parts: Vec<Parts> = parts.into_iter().collect::<Option<_>>()?;
     let mut params = vec![];
@@ -158,10 +175,10 @@ pub fn encode_set(
 // The modules' memory. The decoders are rebuilt here as sums of bytes on 32 bits: the file's
 // skeleton and the images' records are read as `codec::Skeleton` and `codec::rebuild` do.
 
-/// The memory of `png-recons`: its plan ([`crate::plan::recons`]).
-fn plan_recons(u: &aqr_formula::Usage<'_>) -> Option<aqr_formula::Plan> {
-    let (&[], Some([sk, index, records])) = (u.params, u.all_contents()) else { return None };
-    crate::plan::recons(u.initial(), u.inputs, (sk, index, records)).map(|(i, t)| aqr_formula::Plan::one(i, t))
+/// The memory of `png-recons`, a part module: its plan ([`crate::plan::part`]).
+fn memory_recons(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let (&[], Some([sk, index, heads, _, _])) = (u.params, u.all_contents()) else { return None };
+    crate::plan::part(u.initial(), u.inputs, (sk, index, heads))
 }
 
 /// The memory of `png-against`: its plan ([`crate::plan::against`]).
@@ -187,23 +204,25 @@ mod tests {
         &f.streams.iter().find(|s| s.class == class).expect("a stream").data
     }
 
-    /// The estimates exist for what the encoder makes (frames as tasks, a reference), and
-    /// cover at least the inputs and the output.
+    /// The estimates exist for what the encoder makes (frames, a reference): the part module's
+    /// holds nothing of the file's length (and at least the skeleton and the index), the
+    /// reference's covers at least the inputs and the output.
     #[test]
     fn memory_covers_inputs_and_output() {
         let file = common::apng(&[(64, 48), (32, 32), (64, 48)], 1);
         let f = encode(&file, 1).expect("a formula");
-        let (sk, index, records) = (stream(&f, "png/skeleton"), stream(&f, "png/index"), stream(&f, "png/records"));
+        let s: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
         let u = aqr_formula::Usage {
             params: &[],
             resources: &[],
-            inputs: &[sk.len() as u64, index.len() as u64, records.len() as u64],
+            inputs: &s.iter().map(|s| s.len() as u64).collect::<Vec<_>>(),
             outputs: &[file.len() as u64],
-            contents: &vec![sk, index, records],
+            contents: &s,
             initial_pages: 17,
         };
-        let est = plan_recons(&u).expect("a plan").instance;
-        assert!(est > u.base() + 2 * file.len() as u64, "{est}");
+        let est = memory_recons(&u).expect("a plan");
+        assert!(est > u.base() + (s[0].len() + s[1].len()) as u64, "{est}");
+        assert!(est < u.base() + 2 * file.len() as u64 + (1 << 20), "{est}");
         // a variant of the file, against it
         let other = common::apng(&[(64, 48), (32, 32), (64, 48)], 2);
         let f = encode_against(&other, &file, 1).expect("a formula");

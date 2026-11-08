@@ -700,7 +700,7 @@ const NATIVE: &[Entry] = &[
         },
         |p, _, i, n, t| aqr_git::formula::decode_index(p, i, n, t).map_err(err),
     ),
-    bare(PNG, |p, _, i, n, t| aqr_png::formula::decode(p, i, n, t).map_err(err)),
+    threaded(PNG, |p, _, i, n, t| aqr_png::formula::decode(p, i, n, t).map_err(err)),
     bare(PNG_AGAINST, |p, _, i, n, t| aqr_png::formula::decode_against(p, i, n, t).map_err(err)),
     bare(PNG_SET, |p, _, i, n, t| aqr_png::formula::decode_set(p, i, n, t).map_err(err)),
     bare(GIF, |p, _, i, n, t| aqr_gif::formula::decode(p, i, n, t).map_err(err)),
