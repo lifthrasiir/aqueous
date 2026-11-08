@@ -6167,12 +6167,12 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/pdb-symbols.wasm" title="crates/aqr-modules/wasm/pdb-symbols.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-pdb/FORMAT.md" title="codecs/aqr-pdb/FORMAT.md">R</a>
     <tr>
-      <td><code>e8353b1f7883ec89ba51ebc59cbc5cf979e1b7e609f7b983754b265c00a30b0c</code>
+      <td><code>9c3d886b754ffec858eca29048cfba8f4ea996c627cec26c693d1240d2d68877</code>
       <td>pdf-recons@3
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/pdf-recons.wasm" title="crates/aqr-modules/wasm/pdf-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-pdf/FORMAT.md" title="codecs/aqr-pdf/FORMAT.md">R</a>
     <tr>
-      <td><code>1522ad440b0fef25f5543bd47c9c279fe26290f9f64c5e790dd09a18e3655446</code>
+      <td><code>a1bb2e4cbc0c5b50e80b806edf636d39b413d4622f1b1a2501f1f74595e7c293</code>
       <td>png-against@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/png-against.wasm" title="crates/aqr-modules/wasm/png-against.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-png/FORMAT.md" title="codecs/aqr-png/FORMAT.md">R</a>
@@ -6182,7 +6182,7 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/png-recons.wasm" title="crates/aqr-modules/wasm/png-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-png/FORMAT.md" title="codecs/aqr-png/FORMAT.md">R</a>
     <tr>
-      <td><code>b8d458934a404e9409cb38f52852a8e575cb0148256c4be069548d75734a4c0f</code>
+      <td><code>f2b8623f2fc8bb9d5dfa88899f6ada7636f26c274d16d318b66d9e43101b1610</code>
       <td>png-set@3
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/png-set.wasm" title="crates/aqr-modules/wasm/png-set.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-png/FORMAT.md" title="codecs/aqr-png/FORMAT.md">R</a>
