@@ -2078,10 +2078,41 @@ fn asar_bundle_plans_hold() {
     assert!(seen >= 15, "{seen} applications");
 }
 
+/// `f`, declared as the compressor declares it, decoded as WebAssembly: each application of
+/// the `modules` took its plan, to the page, counted in `seen` (by module). The number of
+/// applications of any of the `modules` in `f` is given.
+fn formula_plans_hold(
+    what: &str,
+    mut f: aqr_formula::Formula,
+    d: &[u8],
+    modules: &[[u8; 32]],
+    seen: &mut [usize],
+) -> usize {
+    aqr_compress::declare_memory(&mut f);
+    let c = encoder().encode(&f, None).unwrap();
+    let alone = WASM.write().unwrap_or_else(PoisonError::into_inner);
+    aqr_decompress::record_applications(true);
+    let out = aqr::decode(&c, &aqr_decompress::Wasm);
+    let applied = aqr_decompress::record_applications(false);
+    drop(alone);
+    assert!(out.as_ref().is_ok_and(|o| o == d), "{what}: {:?}", out.err());
+    let mut n = 0;
+    for a in &applied {
+        let Some(k) = modules.iter().position(|&h| h == a.hash) else { continue };
+        let plan = a.limit - a.imported;
+        println!("{what}: plan {plan} working {}", a.working);
+        assert!(a.working <= plan && plan - a.working < 1 << 16, "{what}: plan {plan}, working {}", a.working);
+        seen[k] += 1;
+        n += 1;
+    }
+    n
+}
+
 /// The modules of aqr-infer-recs lay their memory out as stacks, their limits their plans,
 /// exactly: of a table of fields, entries by their lengths, and a catalogue of float fields
 /// (as aqr-infer-recs' test makes it), each formula declared as the compressor declares it and
-/// decoded as WebAssembly.
+/// decoded as WebAssembly; and of the same cut into groups of rows (applications over slices of
+/// the one stream of planes), several applications of each module.
 #[test]
 fn recs_plans_hold() {
     let modules = [RECS_FIELDS, RECS_ENTRIES, aqr_infer_recs::formula::FLOATS]
@@ -2106,24 +2137,41 @@ fn recs_plans_hold() {
         [("table", table(20_000), false), ("entries", entries(3_000), true), ("catalogue", catalogue, false)]
     {
         let choices = aqr_infer_recs::choose(&d, aqr_infer_recs::candidates(&d, chains, 1), 1).0;
-        let mut f = aqr_infer_recs::formula::formula(&d, &choices);
-        aqr_compress::declare_memory(&mut f);
-        let c = encoder().encode(&f, None).unwrap();
-        let alone = WASM.write().unwrap_or_else(PoisonError::into_inner);
-        aqr_decompress::record_applications(true);
-        let out = aqr::decode(&c, &aqr_decompress::Wasm);
-        let applied = aqr_decompress::record_applications(false);
-        drop(alone);
-        assert!(out.as_ref().is_ok_and(|o| o == &d), "{what}: {:?}", out.err());
-        for a in &applied {
-            let Some(k) = modules.iter().position(|&h| h == a.hash) else { continue };
-            let plan = a.limit - a.imported;
-            println!("{what}: plan {plan} working {}", a.working);
-            assert!(a.working <= plan && plan - a.working < 1 << 16, "{what}: plan {plan}, working {}", a.working);
-            seen[k] += 1;
-        }
+        let whole = aqr_infer_recs::formula::formula(&d, &choices);
+        let n = formula_plans_hold(what, whole, &d, &modules, &mut seen);
+        // (groups of a few thousand rows: the applications of the region over slices)
+        let cut = aqr_infer_recs::formula::formula_in(&d, &choices, 40_000, 3_000);
+        let m = formula_plans_hold(&format!("{what} in groups"), cut, &d, &modules, &mut seen);
+        assert!(m > n, "{what}: {m} applications in groups, {n} in one");
     }
     assert!(seen.iter().all(|&n| n > 0), "{seen:?} applications of recs-fields, -entries, -floats");
+}
+
+/// xsv-recons lays its memory out as a stack, its limit its plan, exactly, for a table in
+/// segments (applications over slices of the seven streams, a Concat of them), as for one
+/// application: CSV and TSV tables of 20000 records, in segments of 40 KB.
+#[test]
+fn xsv_plans_hold() {
+    let modules = [aqr_decompress::built(aqr_decompress::XSV).expect("built").sha512_256];
+    let mut seen = [0];
+    for delim in [",", "\t"] {
+        let mut t = format!("id{delim}name{delim}price{delim}when\n");
+        for i in 0..20_000 {
+            t += &format!(
+                "{i}{delim}\"item {}\"{delim}{}.{:02}{delim}2026-11-{:02}\n",
+                i % 977,
+                i % 300,
+                i % 100,
+                1 + i % 28
+            );
+        }
+        let d = t.as_bytes();
+        let whole = aqr_xsv::formula::encode_in(d, aqr_xsv::formula::SEGMENT, false).expect("a table");
+        let n = formula_plans_hold(&format!("table {delim:?}"), whole, d, &modules, &mut seen);
+        let cut = aqr_xsv::formula::encode_in(d, 40_000, false).expect("a table");
+        let m = formula_plans_hold(&format!("table {delim:?} in segments"), cut, d, &modules, &mut seen);
+        assert!(n == 1 && m >= 10, "{delim:?}: {m} applications in segments, {n} in one");
+    }
 }
 
 /// xsv-recons and mszip-recons lay their memory out as stacks, their limits their plans: of CSV
