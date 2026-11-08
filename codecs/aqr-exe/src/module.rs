@@ -388,3 +388,101 @@ fn x86_run(
     let mut out = Spool { buf: Vec::with_capacity(SPOOL + HOLD + STEP), sink, failed: false, flushed: 0 };
     x86::decode_core(&mut src, &mut out, origin, p[8], p[9] != 0, &opcodes, |_, _, _| Some(())).ok_or("corrupt")
 }
+
+/// Pages of the windows of [`arm64_part`]: of each of the inputs and of the output.
+pub const ARM64_WINDOW: u32 = 1;
+
+/// Bytes [`arm64_part`] puts out at a time.
+const ARM64_OUT: usize = 64 << 10;
+
+/// The memory plan of [`arm64_part`] ([`aqr_api::stack`]): what it takes beyond its initial memory
+/// (`initial` bytes) at most, whatever the lengths: a piece of each stream and the buffer of the
+/// section.
+pub fn arm64_part_plan(initial: u64) -> u64 {
+    let mut m = aqr_api::stack::Sim::new(initial);
+    for _ in 0..arm64::NUM_STREAMS {
+        m.take(PIECE as u64);
+    }
+    m.take(ARM64_OUT as u64);
+    m.plan()
+}
+
+/// [`arm64`] as a part module (its entry point, of `aqr_api::entry!`): its inputs taken and its
+/// output put in order through windows ([`ARM64_WINDOW`]) in pieces, whatever the lengths.
+pub fn arm64_part(params_len: u64, lens: [u64; arm64::NUM_STREAMS], size: u64) {
+    aqr_api::finish(arm64_part_run(params_len, lens, size));
+}
+
+fn arm64_part_run(params_len: u64, lens: [u64; arm64::NUM_STREAMS], size: u64) -> Result<()> {
+    use aqr_api::stream::{In, Pull, Written};
+    use aqr_api::Memory;
+    if params_len != 8 {
+        return Err("bad parameters or inputs");
+    }
+    let mut p = [0u8; 8];
+    aqr_api::Params::read(0, &mut p);
+    let mut ins = (
+        In::<0>::new(lens[0]),
+        In::<1>::new(lens[1]),
+        In::<2>::new(lens[2]),
+        In::<3>::new(lens[3]),
+        In::<4>::new(lens[4]),
+        In::<5>::new(lens[5]),
+        In::<6>::new(lens[6]),
+        In::<7>::new(lens[7]),
+        In::<8>::new(lens[8]),
+        In::<9>::new(lens[9]),
+        In::<10>::new(lens[10]),
+    );
+    let srcs: [&mut dyn Pull; arm64::NUM_STREAMS] =
+        [&mut ins.0, &mut ins.1, &mut ins.2, &mut ins.3, &mut ins.4, &mut ins.5, &mut ins.6, &mut ins.7, &mut ins.8, &mut ins.9, &mut ins.10];
+    let mut out = Written::new(size);
+    arm64_run(u64::from_le_bytes(p), size, srcs, &mut out)?;
+    (out.total() == size).then_some(()).ok_or("output of another length")
+}
+
+/// [`arm64_part`] on whole inputs, natively: what it gives.
+pub fn arm64_streamed(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
+    use aqr_api::stream::{Pull, Slice};
+    let (Some(p), Ok(streams)) = (params.first_chunk::<8>(), <[&[u8]; arm64::NUM_STREAMS]>::try_from(inputs)) else {
+        return Err("bad parameters or inputs");
+    };
+    let mut slices = streams.map(Slice);
+    let srcs: [&mut dyn Pull; arm64::NUM_STREAMS] = slices.each_mut().map(|s| s as &mut dyn Pull);
+    let mut out = Vec::new();
+    arm64_run(u64::from_le_bytes(*p), len, srcs, &mut out)?;
+    (out.len() as u64 == len).then_some(out).ok_or("output of another length")
+}
+
+/// The decoding of [`arm64`] of a section of `len` bytes on the streams `srcs`, put to `sink`,
+/// and every stream read to its end.
+fn arm64_run(
+    origin: u64,
+    len: u64,
+    srcs: [&mut dyn aqr_api::stream::Pull; arm64::NUM_STREAMS],
+    sink: &mut dyn aqr_api::stream::Put,
+) -> Result<()> {
+    let len = usize::try_from(len).map_err(|_| "bad parameters or inputs")?;
+    let mut r = srcs.map(|s| aqr_api::stream::Reader::new(s, PIECE));
+    let mut buf: Vec<u8> = Vec::with_capacity(ARM64_OUT + 4);
+    let mut failed = false;
+    arm64::decode_core(
+        origin,
+        len,
+        |st| r[st].byte(),
+        |d| {
+            buf.extend_from_slice(d);
+            if buf.len() >= ARM64_OUT {
+                failed |= sink.put(&buf).is_none();
+                buf.clear();
+            }
+            Some(())
+        },
+    )
+    .ok_or("corrupt")?;
+    failed |= sink.put(&buf).is_none();
+    if failed {
+        return Err("output of another length");
+    }
+    r.iter_mut().all(|r| r.done()).then_some(()).ok_or("corrupt")
+}

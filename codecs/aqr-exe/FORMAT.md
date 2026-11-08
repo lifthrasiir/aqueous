@@ -490,11 +490,16 @@ conventions of §1 hold.
 
 ## A1. The module
 
-- **Module**: name `exe-recons/arm64`, version 1.
+- **Module**: name `exe-recons/arm64`, version 2.
 - **Params**: exactly 8 bytes, `le64 origin`, the virtual address of the section's first byte.
 - **Resources**: none.
 - **Inputs**: exactly 11, the streams of §A2 in order, each of class `arm64/NAME`.
 - **Output**: the section of §A3, `len` bytes long (the `len` the application declares).
+
+Version 2 is a part module (windows of a page for each input and for the output) of the same
+params, inputs and output: the streams are read in order in pieces and the section is put out
+64 KiB at a time, so that nothing depends on the lengths. The output is version 1's byte for
+byte. Every stream must be read to its end, as in version 1.
 
 ## A2. Streams
 

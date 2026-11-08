@@ -107,3 +107,82 @@ fn damaged_streams_fail_alike() {
     assert!(b.is_err() && (a.is_err() || a.is_ok()));
     assert!(module::x86_streamed(&p[..9], &[&res], &base.iter().map(|v| &v[..]).collect::<Vec<_>>(), 0).is_err());
 }
+
+mod arm64 {
+    use aqr_exe::arch::arm64;
+    use aqr_exe::module;
+
+    /// Code of `n` bytes of words that are BL, ADRP, B, B.cond, CBZ, TBZ and others, from `seed`.
+    fn code(n: usize, seed: u64) -> Vec<u8> {
+        let mut x = seed;
+        let mut next = || {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (x >> 32) as u32
+        };
+        let mut d = Vec::with_capacity(n + 4);
+        while d.len() < n {
+            let r = next();
+            let w = match r >> 29 {
+                0 => 0x9400_0000 | next() & 0x03ff_ffff,              // BL
+                1 => 0x9000_0000 | next() & 0x60ff_ffe0 | r & 0x1f,   // ADRP
+                2 => 0x1400_0000 | next() & 0x03ff_ffff,              // B
+                3 => 0x5400_0000 | next() & 0x00ff_ffff,              // B.cond
+                4 => 0xb400_0000 | next() & 0x00ff_ffff,              // CBZ
+                5 => 0x3600_0000 | next() & 0x00ff_ffff,              // TBZ
+                _ => next(),
+            };
+            d.extend(w.to_le_bytes());
+        }
+        d.truncate(n);
+        d
+    }
+
+    fn same(what: &str, d: &[u8], origin: u64) {
+        let e = arm64::encode(d, origin);
+        let streams: Vec<&[u8]> = e.streams().iter().map(|s| &s[..]).collect();
+        let p = origin.to_le_bytes();
+        assert!(module::arm64(&p, &streams, d.len() as u64).as_deref() == Ok(d), "{what}: whole");
+        assert!(module::arm64_streamed(&p, &streams, d.len() as u64).as_deref() == Ok(d), "{what}: part");
+        assert!(module::arm64_streamed(&p, &streams, d.len() as u64 + 1).is_err(), "{what}: longer");
+        // a byte left over in a stream is refused by both
+        let mut over: Vec<Vec<u8>> = streams.iter().map(|s| s.to_vec()).collect();
+        over[0].push(0);
+        let over: Vec<&[u8]> = over.iter().map(|s| &s[..]).collect();
+        assert!(module::arm64(&p, &over, d.len() as u64).is_err(), "{what}: whole, a byte over");
+        assert!(module::arm64_streamed(&p, &over, d.len() as u64).is_err(), "{what}: part, a byte over");
+    }
+
+    #[test]
+    fn code_through_pieces() {
+        for (k, &n) in [0usize, 1, 3, 4, 5, 4096, 70_001, 3 << 20].iter().enumerate() {
+            same(&format!("{n} bytes"), &code(n, k as u64), 0x1_0000_4000 + 16 * k as u64);
+        }
+    }
+
+    #[test]
+    fn damaged_streams_fail_alike() {
+        let d = code(50_000, 3);
+        let e = arm64::encode(&d, 0x4000);
+        let base: Vec<Vec<u8>> = e.streams().to_vec();
+        let p = 0x4000u64.to_le_bytes();
+        let run = |s: &[Vec<u8>]| {
+            let r: Vec<&[u8]> = s.iter().map(|v| &v[..]).collect();
+            (module::arm64(&p, &r, d.len() as u64), module::arm64_streamed(&p, &r, d.len() as u64))
+        };
+        for st in 0..arm64::NUM_STREAMS {
+            for cut in [0, base[st].len() / 2, base[st].len().saturating_sub(1)] {
+                let mut s = base.clone();
+                s[st].truncate(cut);
+                let (a, b) = run(&s);
+                assert!(a == b, "stream {st} cut at {cut}");
+            }
+            for i in (0..base[st].len()).step_by(base[st].len() / 11 + 1) {
+                let mut s = base.clone();
+                s[st][i] ^= 0x5a;
+                let (a, b) = run(&s);
+                assert!(a == b, "stream {st} damaged at {i}");
+            }
+        }
+        assert!(module::arm64_streamed(&p[..7], &base.iter().map(|v| &v[..]).collect::<Vec<_>>(), 0).is_err());
+    }
+}

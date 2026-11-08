@@ -197,8 +197,33 @@ mod decode {
     pub fn decode(streams: [&[u8]; NUM_STREAMS], origin: u64, len: usize) -> Option<Vec<u8>> {
         let mut s = streams;
         let mut out = Vec::with_capacity(len);
+        decode_core(
+            origin,
+            len,
+            |st| {
+                let (&b, rest) = s[st].split_first()?;
+                s[st] = rest;
+                Some(b)
+            },
+            |d| {
+                out.extend_from_slice(d);
+                Some(())
+            },
+        )?;
+        s.iter().all(|s| s.is_empty()).then_some(out)
+    }
+
+    /// The decoding of [`decode`] on streams that `byte` takes the next byte of, the section
+    /// given to `put` a word at a time (and the tail): nothing is read back, so the streams
+    /// and the section need not be held. `None` where `byte` or `put` is.
+    pub fn decode_core(
+        origin: u64,
+        len: usize,
+        mut byte: impl FnMut(usize) -> Option<u8>,
+        mut put: impl FnMut(&[u8]) -> Option<()>,
+    ) -> Option<()> {
         for k in 0..len / 4 {
-            let mut w = u32::from_be_bytes(take(&mut s[CODE], 4)?.try_into().unwrap());
+            let mut w = u32::from_be_bytes([byte(CODE)?, byte(CODE)?, byte(CODE)?, byte(CODE)?]);
             let pc = origin.wrapping_add(4 * k as u64);
             match kind(w) {
                 Kind::Other => {}
@@ -207,8 +232,8 @@ mod decode {
                         return None;
                     }
                     let mut z = 0u32;
-                    for st in &mut s[first..first + offset_bytes(bits)] {
-                        z = z << 8 | take(st, 1)?[0] as u32;
+                    for st in first..first + offset_bytes(bits) {
+                        z = z << 8 | byte(st)? as u32;
                     }
                     if z >> bits != 0 {
                         return None;
@@ -218,10 +243,12 @@ mod decode {
                 }
                 k => w = retarget(w, k, pc, u32::MAX),
             }
-            out.extend_from_slice(&w.to_le_bytes());
+            put(&w.to_le_bytes())?;
         }
-        out.extend_from_slice(take(&mut s[TAIL], len % 4)?);
-        s.iter().all(|s| s.is_empty()).then_some(out)
+        for _ in 0..len % 4 {
+            put(&[byte(TAIL)?])?;
+        }
+        Some(())
     }
 
     /// The section of `len` bytes at `origin` from streams `s`, read as far as it takes, the
@@ -271,6 +298,8 @@ mod decode {
 pub use decode::decode;
 #[cfg(feature = "decode")]
 pub(crate) use decode::{decode_from, take};
+#[cfg(feature = "decode")]
+pub use decode::decode_core;
 
 #[cfg(test)]
 mod tests {

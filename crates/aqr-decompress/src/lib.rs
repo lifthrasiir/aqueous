@@ -57,7 +57,13 @@ fn x86_remap(u: &aqr_formula::Usage<'_>) -> Option<u64> {
 
 /// aqr-exe's ARM64 filter on a code section. Parameters: the origin (u64, little endian);
 /// inputs: the streams of `arm64::STREAM_NAMES`.
-pub const ARM64: Module = Module::new("exe-recons/arm64", 1).with_plan(exe);
+pub const ARM64: Module = Module::new("exe-recons/arm64", 2).with_plan(arm64);
+
+/// The memory of [`ARM64`], a part module: its plan (`aqr_exe::module::arm64_part_plan`), whatever
+/// the lengths (`None` for parameters other than 8 bytes).
+fn arm64(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    (u.params.len() == 8).then(|| aqr_exe::module::arm64_part_plan(u.initial()))
+}
 
 /// aqr-exe's ARM64 filter on a code section, its BL and ADRP targets remapped to those of
 /// another image. Parameters: the origin (u64, little endian); inputs: the streams of
@@ -445,7 +451,30 @@ const NATIVE: &[Entry] = &[
         |p, r, i, n, _| aqr_exe::module::x86(p, r, i, n).map_err(err),
     ),
     takes(X86_REMAP, |p, r, i, n, _| aqr_exe::module::x86_remap(p, r, i, n).map_err(err)),
-    bare(ARM64, |p, _, i, n, _| aqr_exe::module::arm64(p, i, n).map_err(err)),
+    part(
+        ARM64,
+        false,
+        aqr_api::emu::Entry {
+            kind: aqr_api::emu::Kind::Part,
+            windows: &[
+                aqr_api::Window::Input(0, aqr_exe::module::ARM64_WINDOW),
+                aqr_api::Window::Input(1, aqr_exe::module::ARM64_WINDOW),
+                aqr_api::Window::Input(2, aqr_exe::module::ARM64_WINDOW),
+                aqr_api::Window::Input(3, aqr_exe::module::ARM64_WINDOW),
+                aqr_api::Window::Input(4, aqr_exe::module::ARM64_WINDOW),
+                aqr_api::Window::Input(5, aqr_exe::module::ARM64_WINDOW),
+                aqr_api::Window::Input(6, aqr_exe::module::ARM64_WINDOW),
+                aqr_api::Window::Input(7, aqr_exe::module::ARM64_WINDOW),
+                aqr_api::Window::Input(8, aqr_exe::module::ARM64_WINDOW),
+                aqr_api::Window::Input(9, aqr_exe::module::ARM64_WINDOW),
+                aqr_api::Window::Input(10, aqr_exe::module::ARM64_WINDOW),
+                aqr_api::Window::Output(0, aqr_exe::module::ARM64_WINDOW),
+            ],
+            arity: 13,
+            call: |a| aqr_exe::module::arm64_part(a[0], [a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11]], a[12]),
+        },
+        |p, _, i, n, _| aqr_exe::module::arm64(p, i, n).map_err(err),
+    ),
     bare(ARM64_REMAP, |p, _, i, n, _| aqr_exe::module::arm64_remap(p, i, n).map_err(err)),
     bare(ARM64_DELTA, |p, _, i, n, _| aqr_exe::module::arm64_delta(p, i, n).map_err(err)),
     bare(MACHO_CODESIGN, |p, _, i, n, _| aqr_exe::module::macho_codesign(p, i, n).map_err(err)),

@@ -202,6 +202,8 @@ P = W_main + Σ_태스크 (W_spawn + 태스크의 계획 버퍼) + 채널 메시
 
 **exe-recons/x86(판 4).** whole이던 것(입력 열셋을 복사하고 출력과 sentinel 15 B를 쥐어 코드 구역의 약 2.5배)을 part 모듈로 바꿨다(창 1쪽 × 입력 열셋과 출력, 자원 1). 디코더는 원래 열셋 스트림을 앞에서부터 한 번만 읽고 출력에 덧붙이기만 한다(되읽지 않음, 호출 캐시는 256칸 고정). 그래서 몸통(`decode_hooked`)을 `Src`(스트림을 읽는 쪽)와 `Sink`(출력을 쌓는 쪽)에 대한 제네릭 `decode_core`로 바꿔, 슬라이스·`Vec`의 whole 경로와 `Reader`·`Spool`의 part 경로가 한 코드를 쓰게 했다(바이너리마다 한 쪽만 인스턴스화). 스트림마다 8 KiB 조각, OP 스트림은 한 바이트 미리보기(ModR/M)가 있다. 출력은 64 KiB가 차면 마지막 16 B를 빼고 내보내고(sentinel은 끝에서 15 B까지 깎으므로), 15 B 넘는 sentinel은 거절한다. 계획 = 조각 13개 + 출력 쌓는 버퍼 + 초기 메모리라 길이와 무관하다(whole은 357 MB에서 1240 MiB). 판 3과 바이트까지 같다. 실측 = 계획이다(`exe_x86_plans_hold`: 이 실행 파일의 x86-64·x86-32 코드 0 B~3 MB). x86-remap(전역 정렬 후 고치기)과 pe-reloc은 whole로 둔다.
 
+**exe-recons/arm64(판 2).** whole이던 것을 part 모듈로 바꿨다(창 1쪽 × 입력 열하나와 출력). 디코더는 CODE 스트림의 낱말을 앞에서부터 한 번 읽고 지역 분기의 오프셋 바이트를 각 스트림에서 하나씩 읽어 출력에 덧붙일 뿐이라 형식을 바꾸지 않았다. 몸통을 바이트를 주는 클로저와 낱말을 받는 클로저에 대한 `decode_core`로 바꿔 whole(슬라이스)과 part(`Reader`)가 한 코드를 쓰며, 모든 스트림을 끝까지 읽어야 하는 검사는 두 경로 모두 남는다. 계획 = 조각 11개 + 출력 버퍼 64 KiB + 초기 메모리라 길이와 무관하다(whole은 구역의 약 2배). 판 1과 바이트까지 같다. 실측 = 계획이다(`exe_arm64_plans_hold`: BL·ADRP·지역 분기를 섞은 코드 0 B~3 MB, 꼬리 0~3 B). arm64-remap과 arm64-delta는 whole로 둔다.
+
 **recs-fields, recs-entries, recs-floats.** 이미 LIFO였다(필드 목록, 출력, recs-fields는 필드마다 위에 참조 값 목록).
 - `Field`와 `Float`는 `repr(C)`로 두고, wasm32 크기는 상수로 확인한다.
 - 실측 = 계획이다(`recs_plans_hold`). 직접 만든 수식에는 aqr-compress의 숨은 `declare_memory`로 한도를 선언한다.

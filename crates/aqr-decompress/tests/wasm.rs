@@ -4351,6 +4351,50 @@ fn exe_x86_plans_hold() {
     }
 }
 
+/// exe-recons/arm64 (a part module of windows of a page) takes the same plan whatever the
+/// lengths: code of BL, ADRP and local branches from a few bytes to 3 MB, tails of 0 to 3 bytes.
+#[test]
+fn exe_arm64_plans_hold() {
+    use aqr_exe::arch::arm64;
+    let m = aqr_decompress::ARM64;
+    let plan_of = |n: u64| {
+        let usage = aqr_formula::Usage {
+            params: &[0; 8],
+            resources: &[],
+            inputs: &[n; 11],
+            outputs: &[n],
+            contents: &vec![],
+            initial_pages: aqr_decompress::initial_pages_of(m).unwrap(),
+        };
+        m.plan_for(&usage).unwrap().instance
+    };
+    assert_eq!(plan_of(10), plan_of(3 << 30));
+    assert!(plan_of(10) < 2 << 20, "{}", plan_of(10));
+    let mut rng = aqr_common::rng::Rng::new(8);
+    for n in [0usize, 7, 4096, 200_001, 3 << 20] {
+        let mut code = Vec::with_capacity(n + 4);
+        while code.len() < n {
+            let r = rng.below(1 << 32) as u32;
+            let w = match r >> 29 {
+                0 => 0x9400_0000 | rng.below(1 << 26) as u32,
+                1 => 0x9000_0000 | (rng.below(1 << 32) as u32 & 0x60ff_ffe0) | r & 0x1f,
+                2 => 0x1400_0000 | rng.below(1 << 26) as u32,
+                3 => 0x5400_0000 | rng.below(1 << 24) as u32,
+                _ => rng.below(1 << 32) as u32,
+            };
+            code.extend(w.to_le_bytes());
+        }
+        code.truncate(n);
+        let st = arm64::encode(&code, 0x1_0000_4000);
+        let mut f = Formula::default();
+        let inputs = std::iter::zip(st.streams(), arm64::STREAM_NAMES)
+            .map(|(s, name)| f.push(format!("arm64/{name}"), s.clone()))
+            .collect();
+        f.root = Node::apply(m, 0x1_0000_4000u64.to_le_bytes().to_vec(), inputs, code.len() as u64);
+        plan_holds(&format!("arm64 {n}"), f, &code);
+    }
+}
+
 /// snappy-recons (a part module of windows of four pages) takes the same plan whatever the
 /// lengths, past a fragment: 3 MB and 9 MB, and a few bytes, of both hashes, to the page.
 #[test]
