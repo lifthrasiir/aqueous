@@ -1319,108 +1319,187 @@ pub(crate) fn decode_hooked(
     is64: bool,
     opcodes: &Opcodes,
     capacity: usize,
-    mut hook: impl FnMut(Ref, u64, usize) -> Option<()>,
+    hook: impl FnMut(Ref, u64, usize) -> Option<()>,
 ) -> Option<Vec<u8>> {
-    let origin = streams.origin;
-    let sentinel_size = streams.sentinel_size;
-    let streams = streams.streams.each_ref().map(|stream| Cell::new(&stream[..]));
-
-    let pc = Cell::new(origin);
     let mut code = Vec::with_capacity(capacity);
+    let mut src = Slices(streams.streams.each_ref().map(|s| &s[..]));
+    decode_core(&mut src, &mut code, streams.origin, streams.sentinel_size, is64, opcodes, hook)?;
+    Some(code)
+}
 
-    let read8 = |st: usize| {
+/// The streams of the filter, each read in order ([`decode_core`]).
+#[cfg(feature = "decode")]
+pub trait Src {
+    /// The next byte of stream `st`.
+    fn read8(&mut self, st: usize) -> Option<u8>;
+    /// The next `le32` of stream `st`.
+    fn read32(&mut self, st: usize) -> Option<u32>;
+    /// The next `le64` of stream `st`.
+    fn read64(&mut self, st: usize) -> Option<u64>;
+    /// The next byte of stream `st`, not taken.
+    fn peek8(&mut self, st: usize) -> Option<u8>;
+    /// Whether stream `st` has no bytes left.
+    fn is_empty(&mut self, st: usize) -> bool;
+    /// Appends the next `n` bytes of stream `st` to `out`.
+    fn copy<K: Sink>(&mut self, n: usize, st: usize, out: &mut K) -> Option<()>;
+}
+
+/// The section being built ([`decode_core`]): bytes appended, none read back.
+#[cfg(feature = "decode")]
+pub trait Sink {
+    fn push(&mut self, b: u8);
+    fn extend_from_slice(&mut self, d: &[u8]);
+    /// Appends `n` bytes `b`.
+    fn fill(&mut self, n: usize, b: u8);
+    /// Bytes appended so far.
+    fn len(&self) -> usize;
+    /// Ends the section, `sentinel` bytes shorter; `None` where it is shorter than that.
+    fn finish(&mut self, sentinel: usize) -> Option<()>;
+}
+
+#[cfg(feature = "decode")]
+impl Sink for Vec<u8> {
+    fn push(&mut self, b: u8) {
+        Vec::push(self, b)
+    }
+
+    fn extend_from_slice(&mut self, d: &[u8]) {
+        Vec::extend_from_slice(self, d)
+    }
+
+    fn fill(&mut self, n: usize, b: u8) {
+        self.resize(self.len() + n, b)
+    }
+
+    fn len(&self) -> usize {
+        Vec::len(self)
+    }
+
+    fn finish(&mut self, sentinel: usize) -> Option<()> {
+        self.truncate(self.len().checked_sub(sentinel)?);
+        Some(())
+    }
+}
+
+/// The streams as slices, each taken from the front.
+#[cfg(feature = "decode")]
+struct Slices<'a>([&'a [u8]; NUM_STREAMS]);
+
+#[cfg(feature = "decode")]
+impl Src for Slices<'_> {
+    #[inline(always)]
+    fn read8(&mut self, st: usize) -> Option<u8> {
+        let (&[head], tail) = self.0[st].split_first_chunk::<1>()?;
         if_trace_decode! {
-            print!("({}:", &STREAM_NAMES[st][3..]);
+            print!("({}:{head:02X})", &STREAM_NAMES[st][3..]);
         }
-        let (&[head], tail) = streams[st].get().split_first_chunk::<1>()?;
-        if_trace_decode! {
-            print!("{head:02X})");
-        }
-        streams[st].set(tail);
+        self.0[st] = tail;
         Some(head)
-    };
+    }
 
-    let read32 = |st: usize| {
-        if_trace_decode! {
-            print!("({}:", &STREAM_NAMES[st][3..]);
-        }
-        let (&head, tail) = streams[st].get().split_first_chunk::<4>()?;
+    #[inline(always)]
+    fn read32(&mut self, st: usize) -> Option<u32> {
+        let (&head, tail) = self.0[st].split_first_chunk::<4>()?;
         let head = u32::from_le_bytes(head);
         if_trace_decode! {
-            print!("{head:08X})");
+            print!("({}:{head:08X})", &STREAM_NAMES[st][3..]);
         }
-        streams[st].set(tail);
+        self.0[st] = tail;
         Some(head)
-    };
+    }
 
-    let read64 = |st: usize| {
-        if_trace_decode! {
-            print!("({}:", &STREAM_NAMES[st][3..]);
-        }
-        let (&head, tail) = streams[st].get().split_first_chunk::<8>()?;
+    #[inline(always)]
+    fn read64(&mut self, st: usize) -> Option<u64> {
+        let (&head, tail) = self.0[st].split_first_chunk::<8>()?;
         let head = u64::from_le_bytes(head);
         if_trace_decode! {
-            print!("{head:016X})");
+            print!("({}:{head:016X})", &STREAM_NAMES[st][3..]);
         }
-        streams[st].set(tail);
+        self.0[st] = tail;
         Some(head)
-    };
+    }
 
-    let mut call_cache = CallCache::new();
+    #[inline(always)]
+    fn peek8(&mut self, st: usize) -> Option<u8> {
+        self.0[st].first().copied()
+    }
 
-    let read_call = |cache: &mut CallCache| {
-        let idx = read8(ST_CALL_IDX)?;
-        let target = if let Some(target) = cache.find_target(idx) {
-            target
-        } else if is64 {
-            read64(ST_CALL64)?
-        } else {
-            read32(ST_CALL32)? as u64
-        };
-        cache.record(idx, target);
-        Some(target)
-    };
+    #[inline(always)]
+    fn is_empty(&mut self, st: usize) -> bool {
+        self.0[st].is_empty()
+    }
 
-    let copy = |n: usize, code: &mut Vec<u8>, st: usize| {
+    #[inline(always)]
+    fn copy<K: Sink>(&mut self, n: usize, st: usize, out: &mut K) -> Option<()> {
+        let (head, tail) = self.0[st].split_at_checked(n)?;
         if_trace_decode! {
             print!("({}:", &STREAM_NAMES[st][3..]);
-        }
-        let (head, tail) = streams[st].get().split_at_checked(n)?;
-        if_trace_decode! {
             for &b in head {
                 print!("{:02X}", b);
             }
             print!(")");
         }
-        code.extend_from_slice(head);
-        streams[st].set(tail);
+        out.extend_from_slice(head);
+        self.0[st] = tail;
         Some(())
+    }
+}
+
+/// A call target read from the cache, or from `CALL` where it is not there (§5.4).
+#[cfg(feature = "decode")]
+#[inline(always)]
+fn read_call<S: Src>(src: &mut S, cache: &mut CallCache, is64: bool) -> Option<u64> {
+    let idx = src.read8(ST_CALL_IDX)?;
+    let target = if let Some(target) = cache.find_target(idx) {
+        target
+    } else if is64 {
+        src.read64(ST_CALL64)?
+    } else {
+        src.read32(ST_CALL32)? as u64
     };
+    cache.record(idx, target);
+    Some(target)
+}
+
+/// The filter's decoder: the section of `origin` on, built onto `code` from `src` (less
+/// `sentinel_size` bytes at its end), telling `hook` of each reference as [`decode_hooked`] says.
+/// `None` where the streams do not make one.
+#[cfg(feature = "decode")]
+#[allow(clippy::eq_op)] // `copy(8 / 8, ...)` spells out the bit width
+pub fn decode_core<S: Src, K: Sink>(
+    src: &mut S,
+    code: &mut K,
+    origin: u64,
+    sentinel_size: u8,
+    is64: bool,
+    opcodes: &Opcodes,
+    mut hook: impl FnMut(Ref, u64, usize) -> Option<()>,
+) -> Option<()> {
+    let mut call_cache = CallCache::new();
 
     macro_rules! fatal {
         ($fmt:tt) => {
-            panic!(concat!($fmt, " @ {:06X} {:02X?}"), pc.get(), &code[code.len().max(15) - 15..])
+            return None
         };
     }
 
     let mut prefixes = 0;
     let mut pad = false;
 
-    while pad || !streams[ST_OP].get().is_empty() {
-        pc.set(origin + code.len() as u64);
+    while pad || !src.is_empty(ST_OP) {
         if_trace_decode! {
             println!();
-            print!("{:06X}: ", pc.get());
+            print!("{:06X}: ", origin + code.len() as u64);
         }
 
         if pad {
-            match read8(ST_PAD)? {
+            match src.read8(ST_PAD)? {
                 PAD_NONE => {}
-                PAD_FILL => code.resize(code.len() + pad_fill_len(pc.get()), 0xcc),
+                PAD_FILL => code.fill(pad_fill_len(origin + code.len() as u64), 0xcc),
                 PAD_INT3 => code.push(0xcc),
                 PAD_BYTES => loop {
-                    let pad_size = read8(ST_PAD)?;
-                    copy(pad_size as usize, &mut code, ST_PAD)?;
+                    let pad_size = src.read8(ST_PAD)?;
+                    src.copy(pad_size as usize, ST_PAD, code)?;
                     if pad_size < 0xff {
                         break;
                     }
@@ -1439,46 +1518,46 @@ pub(crate) fn decode_hooked(
             continue;
         }
 
-        let mut op = read8(ST_OP).unwrap();
+        let mut op = src.read8(ST_OP).unwrap();
 
         if op == ESC {
             // The encoder discards any pending prefixes when escaping.
             prefixes = 0;
-            code.push(read8(ST_OP)?);
+            code.push(src.read8(ST_OP)?);
             continue;
         }
 
         if op == JUMPTAB {
-            let count = read8(ST_JUMPTAB_COUNT)? as usize + 1;
+            let count = src.read8(ST_JUMPTAB_COUNT)? as usize + 1;
             if is64 {
                 for _ in 0..count {
-                    code.extend_from_slice(&read64(ST_JUMPTAB64)?.to_le_bytes());
+                    code.extend_from_slice(&src.read64(ST_JUMPTAB64)?.to_le_bytes());
                 }
             } else {
                 for _ in 0..count {
-                    code.extend_from_slice(&(read_call(&mut call_cache)? as u32).to_le_bytes());
+                    code.extend_from_slice(&(read_call(src, &mut call_cache, is64)? as u32).to_le_bytes());
                 }
             }
             continue;
         }
 
         let (pre, evex, vex, rex) = match op {
-            PRE_VEX3 => (op, 0, read8(ST_VEX)?, read8(ST_REX)?),
-            PRE_VEX2 => (op, 0, read8(ST_VEX)?, read8(ST_REX)?),
-            PRE_EVEX => (op, read8(ST_EVEX)?, read8(ST_VEX)?, read8(ST_REX)?),
+            PRE_VEX3 => (op, 0, src.read8(ST_VEX)?, src.read8(ST_REX)?),
+            PRE_VEX2 => (op, 0, src.read8(ST_VEX)?, src.read8(ST_REX)?),
+            PRE_EVEX => (op, src.read8(ST_EVEX)?, src.read8(ST_VEX)?, src.read8(ST_REX)?),
             REX_MARKER | PRE_REX2 if !is64 => fatal!("unsupported REX prefixes in x86-32"),
-            REX_MARKER => (op, 0, 0, read8(ST_REX)?),
-            PRE_REX2 => (op, 0, 0, read8(ST_REX)?),
+            REX_MARKER => (op, 0, 0, src.read8(ST_REX)?),
+            PRE_REX2 => (op, 0, 0, src.read8(ST_REX)?),
             _ => (0, 0, 0, 0),
         };
         if pre != 0 {
-            op = read8(ST_OP)?;
+            op = src.read8(ST_OP)?;
         }
 
         let map;
         if op & 0xf0 == 0x40 {
             map = op & 0x0f;
-            op = read8(ST_OP)?;
+            op = src.read8(ST_OP)?;
         } else {
             map = 0;
         }
@@ -1548,12 +1627,12 @@ pub(crate) fn decode_hooked(
             // 9A/EA: CALL/JMP Ap (16-bit segment + 32-bit address)
             // C8: ENTER Iw,Ib (16-bit immediate + 8-bit immediate)
             OP_CALLF | OP_JMPF | OP_ENTER => {
-                copy(16 / 8, &mut code, ST_IMM16)?;
+                src.copy(16 / 8, ST_IMM16, code)?;
             }
 
             // F6/F7: TEST E,I (/0-1) vs. NOT/NEG/[I]MUL/[I]DIV E (/2-7)
             OP_GRP3_1 | OP_GRP3_2 | OP_MAP4_GRP3_1 | OP_MAP4_GRP3_2
-                if modrm_reg(*streams[ST_MODRM].get().first()?) >= 2 =>
+                if modrm_reg(src.peek8(ST_MODRM)?) >= 2 =>
             {
                 flags = R_;
             }
@@ -1573,76 +1652,76 @@ pub(crate) fn decode_hooked(
 
         pad = pad_followed(op);
 
-        let abs_to_rel = |addr: u64, code: &[u8], delta: usize| addr.wrapping_sub(origin + (code.len() + delta) as u64);
+        let abs_to_rel = |addr: u64, len: usize, delta: usize| addr.wrapping_sub(origin + (len + delta) as u64);
 
         // ModR/M present
         if has_modrm(flags) {
             flags = modrm_to_imm(flags);
 
-            let modrm = read8(ST_MODRM)?;
+            let modrm = src.read8(ST_MODRM)?;
             code.push(modrm);
 
             let (mode, base) = parse_modrm(modrm);
             let addr16 = has_addr16(prefixes, is64);
             let sib;
             if !addr16 && modrm_has_sib((mode, base)) {
-                sib = read8(ST_SIB)?;
+                sib = src.read8(ST_SIB)?;
                 code.push(sib);
             } else {
                 sib = 0;
             }
 
             match mode {
-                0 if addr16 && base == 6 => copy(16 / 8, &mut code, ST_ADDR16)?, // [disp16]
+                0 if addr16 && base == 6 => src.copy(16 / 8, ST_ADDR16, code)?, // [disp16]
                 0 if addr16 => {}
                 0 if base == 5 => {
                     let addr = if is64 {
                         // [eip+disp32] or [rip+disp32]
                         // Note that we haven't fully decoded operands yet, hence a delta.
                         let delta = modrm_imm_size(flags, prefixes);
-                        let v = read64(ST_ADDR64)?;
+                        let v = src.read64(ST_ADDR64)?;
                         hook(Ref::Address, v, code.len())?;
-                        abs_to_rel(v, &code, delta + 4) as u32
+                        abs_to_rel(v, code.len(), delta + 4) as u32
                     } else {
-                        let v = read32(ST_ADDR32)?; // [disp32]
+                        let v = src.read32(ST_ADDR32)?; // [disp32]
                         hook(Ref::Address, v as u64, code.len())?;
                         v
                     };
                     code.extend_from_slice(&addr.to_le_bytes());
                 }
                 // [reg*scale+disp32]
-                0 if sib & 7 == 5 => copy(32 / 8, &mut code, ST_DISP32)?,
+                0 if sib & 7 == 5 => src.copy(32 / 8, ST_DISP32, code)?,
                 // [reg+disp8] or [reg*scale+disp8]
-                1 => copy(8 / 8, &mut code, disp8_stream(base, sib, rex, addr16))?,
-                2 if addr16 => copy(16 / 8, &mut code, ST_DISP16)?, // [regs+disp16]
-                2 => copy(32 / 8, &mut code, ST_DISP32)?,           // [reg+disp32]
+                1 => src.copy(8 / 8, disp8_stream(base, sib, rex, addr16), code)?,
+                2 if addr16 => src.copy(16 / 8, ST_DISP16, code)?, // [regs+disp16]
+                2 => src.copy(32 / 8, ST_DISP32, code)?,           // [reg+disp32]
                 _ => {}
             }
         }
 
         match flags {
-            J4 if has_jump16(prefixes, is64) => copy(16 / 8, &mut code, ST_JUMP16)?,
+            J4 if has_jump16(prefixes, is64) => src.copy(16 / 8, ST_JUMP16, code)?,
             J4 => {
                 let target = if op == OP_CALLN {
-                    read_call(&mut call_cache)?
+                    read_call(src, &mut call_cache, is64)?
                 } else if is64 {
-                    read64(ST_JUMP64)?
+                    src.read64(ST_JUMP64)?
                 } else {
-                    read32(ST_JUMP32)? as u64
+                    src.read32(ST_JUMP32)? as u64
                 };
                 hook(if op == OP_CALLN { Ref::Call } else { Ref::Jump }, target, code.len())?;
-                let target = abs_to_rel(target, &code, 4) as u32;
+                let target = abs_to_rel(target, code.len(), 4) as u32;
                 code.extend_from_slice(&target.to_le_bytes());
             }
 
             A_ => {
                 let lgn = addr_lgn(op, prefixes, is64);
-                copy(1 << lgn, &mut code, addr_stream(lgn))?;
+                src.copy(1 << lgn, addr_stream(lgn), code)?;
             }
 
-            JA if has_jump16(prefixes, is64) => copy(16 / 8, &mut code, ST_AJUMP16)?,
-            JA => copy(32 / 8, &mut code, ST_AJUMP32)?,
-            J1 => copy(8 / 8, &mut code, ST_JUMP8)?,
+            JA if has_jump16(prefixes, is64) => src.copy(16 / 8, ST_AJUMP16, code)?,
+            JA => src.copy(32 / 8, ST_AJUMP32, code)?,
+            J1 => src.copy(8 / 8, ST_JUMP8, code)?,
             N_ => {}
 
             _ => {
@@ -1654,13 +1733,12 @@ pub(crate) fn decode_hooked(
                     flags = N2;
                 }
                 let lgn = (flags - N1) as usize;
-                copy(1 << lgn, &mut code, imm_stream(lgn))?;
+                src.copy(1 << lgn, imm_stream(lgn), code)?;
             }
         }
     }
 
-    code.truncate(code.len().checked_sub(sentinel_size as usize)?);
-    Some(code)
+    code.finish(sentinel_size as usize)
 }
 
 pub mod remap;

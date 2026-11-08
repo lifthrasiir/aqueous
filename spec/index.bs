@@ -6017,8 +6017,8 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/exe-recons-x86-remap.wasm" title="crates/aqr-modules/wasm/exe-recons-x86-remap.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-exe/FORMAT.md" title="codecs/aqr-exe/FORMAT.md">R</a>
     <tr>
-      <td><code>b655afaed0c90ac61b3aefb23cbe7fad9974970bb31f21e46b1c3277abba61f6</code>
-      <td>exe-recons/x86@3
+      <td><code>315e9939bd6a15486b3553991fc21ed3c7e59c22853bf327f5a9acf092069782</code>
+      <td>exe-recons/x86@4
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/exe-recons-x86.wasm" title="crates/aqr-modules/wasm/exe-recons-x86.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-exe/FORMAT.md" title="codecs/aqr-exe/FORMAT.md">R</a>
     <tr>

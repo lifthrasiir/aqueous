@@ -190,3 +190,201 @@ fn of_len(out: Option<Vec<u8>>, len: u64) -> Result<Vec<u8>> {
         None => Err("corrupt"),
     }
 }
+
+/// Pages of the windows of [`x86_part`]: of each of the inputs and of the output.
+pub const X86_WINDOW: u32 = 1;
+
+/// Bytes of the pieces in which [`x86_part`] takes each stream.
+const PIECE: usize = 8 << 10;
+/// Bytes of the section [`x86_part`] holds before it puts them out, and the bytes it holds back
+/// (the sentinel cut off the end is up to 15).
+const SPOOL: usize = 64 << 10;
+const HOLD: usize = 16;
+/// Bytes one step of the decoder appends at most (a padding record of 255 bytes, a jump table of
+/// 256 entries of 8): the room besides [`SPOOL`].
+const STEP: usize = 2048;
+
+/// The memory plan of [`x86_part`] ([`aqr_api::stack`]): what it takes beyond its initial memory
+/// (`initial` bytes) at most, whatever the lengths: a piece of each stream and the section held.
+pub fn x86_part_plan(initial: u64) -> u64 {
+    let mut m = aqr_api::stack::Sim::new(initial);
+    for _ in 0..x86::NUM_STREAMS {
+        m.take(PIECE as u64);
+    }
+    m.take((SPOOL + HOLD + STEP) as u64);
+    m.plan()
+}
+
+/// The 13 streams of [`x86`], each read in order in pieces, with a byte of look-ahead.
+struct Readers<'a> {
+    r: [aqr_api::stream::Reader<'a>; x86::NUM_STREAMS],
+    peeked: [Option<u8>; x86::NUM_STREAMS],
+}
+
+impl x86::Src for Readers<'_> {
+    #[inline]
+    fn read8(&mut self, st: usize) -> Option<u8> {
+        self.peeked[st].take().or_else(|| self.r[st].byte())
+    }
+
+    fn read32(&mut self, st: usize) -> Option<u32> {
+        let mut b = [0; 4];
+        b.iter_mut().try_for_each(|x| Some(*x = self.read8(st)?))?;
+        Some(u32::from_le_bytes(b))
+    }
+
+    fn read64(&mut self, st: usize) -> Option<u64> {
+        let mut b = [0; 8];
+        b.iter_mut().try_for_each(|x| Some(*x = self.read8(st)?))?;
+        Some(u64::from_le_bytes(b))
+    }
+
+    #[inline]
+    fn peek8(&mut self, st: usize) -> Option<u8> {
+        if self.peeked[st].is_none() {
+            self.peeked[st] = self.r[st].byte();
+        }
+        self.peeked[st]
+    }
+
+    #[inline]
+    fn is_empty(&mut self, st: usize) -> bool {
+        self.peeked[st].is_none() && self.r[st].done()
+    }
+
+    #[inline]
+    fn copy<K: x86::Sink>(&mut self, n: usize, st: usize, out: &mut K) -> Option<()> {
+        // (n is at most 255)
+        let mut buf = [0u8; 255];
+        let buf = buf.get_mut(..n)?;
+        buf.iter_mut().try_for_each(|x| Some(*x = self.read8(st)?))?;
+        out.extend_from_slice(buf);
+        Some(())
+    }
+}
+
+/// The section put out as it is built, but for its last [`HOLD`] bytes (the sentinel is cut off
+/// them): once [`SPOOL`] bytes are held, those before them go to `sink`.
+struct Spool<'a> {
+    buf: Vec<u8>,
+    sink: &'a mut dyn aqr_api::stream::Put,
+    failed: bool,
+    /// Bytes put out.
+    flushed: usize,
+}
+
+impl Spool<'_> {
+    fn put(&mut self, n: usize) {
+        if !self.failed && self.sink.put(&self.buf[..n]).is_none() {
+            self.failed = true;
+        }
+        self.buf.drain(..n);
+        self.flushed += n;
+    }
+
+    #[inline]
+    fn spill(&mut self) {
+        if self.buf.len() >= SPOOL {
+            self.put(self.buf.len() - HOLD);
+        }
+    }
+}
+
+impl x86::Sink for Spool<'_> {
+    #[inline]
+    fn push(&mut self, b: u8) {
+        self.buf.push(b);
+        self.spill();
+    }
+
+    #[inline]
+    fn extend_from_slice(&mut self, d: &[u8]) {
+        self.buf.extend_from_slice(d);
+        self.spill();
+    }
+
+    fn fill(&mut self, n: usize, b: u8) {
+        self.buf.resize(self.buf.len() + n, b);
+        self.spill();
+    }
+
+    fn len(&self) -> usize {
+        self.flushed + self.buf.len()
+    }
+
+    fn finish(&mut self, sentinel: usize) -> Option<()> {
+        let n = self.buf.len().checked_sub(sentinel).filter(|_| sentinel <= HOLD && !self.failed)?;
+        self.put(n);
+        (!self.failed).then_some(())
+    }
+}
+
+/// [`x86`] as a part module (its entry point, of `aqr_api::entry!`): its inputs taken and its
+/// output put in order through windows ([`X86_WINDOW`]) in pieces, whatever the lengths. A
+/// sentinel of more than 15 bytes is refused (FORMAT.md allows 0 to 15).
+pub fn x86_part(params_len: u64, res_len: u64, lens: [u64; x86::NUM_STREAMS], size: u64) {
+    aqr_api::finish(x86_part_run(params_len, res_len, lens, size));
+}
+
+fn x86_part_run(params_len: u64, res_len: u64, lens: [u64; x86::NUM_STREAMS], size: u64) -> Result<()> {
+    use aqr_api::stream::{In, Pull, Written};
+    use aqr_api::{Memory, Resource};
+    if params_len < 10 || res_len != 1280 {
+        return Err("bad parameters or resources");
+    }
+    let (mut p, mut table) = ([0u8; 10], [0u8; 1280]);
+    aqr_api::Params::read(0, &mut p);
+    Resource::<0>::read(0, &mut table);
+    let mut ins = (
+        In::<0>::new(lens[0]),
+        In::<1>::new(lens[1]),
+        In::<2>::new(lens[2]),
+        In::<3>::new(lens[3]),
+        In::<4>::new(lens[4]),
+        In::<5>::new(lens[5]),
+        In::<6>::new(lens[6]),
+        In::<7>::new(lens[7]),
+        In::<8>::new(lens[8]),
+        In::<9>::new(lens[9]),
+        In::<10>::new(lens[10]),
+        In::<11>::new(lens[11]),
+        In::<12>::new(lens[12]),
+    );
+    let srcs: [&mut dyn Pull; x86::NUM_STREAMS] = [
+        &mut ins.0, &mut ins.1, &mut ins.2, &mut ins.3, &mut ins.4, &mut ins.5, &mut ins.6, &mut ins.7, &mut ins.8,
+        &mut ins.9, &mut ins.10, &mut ins.11, &mut ins.12,
+    ];
+    let mut out = Written::new(size);
+    x86_run(&p, &table, srcs, &mut out)?;
+    (out.total() == size).then_some(()).ok_or("output of another length")
+}
+
+/// [`x86_part`] on whole inputs, natively: what it gives.
+pub fn x86_streamed(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
+    use aqr_api::stream::{Pull, Slice};
+    let (Some(p), Ok(streams), &[table]) = (params.first_chunk::<10>(), <[&[u8]; x86::NUM_STREAMS]>::try_from(inputs), resources)
+    else {
+        return Err("bad parameters or inputs");
+    };
+    let mut slices = streams.map(Slice);
+    let srcs: [&mut dyn Pull; x86::NUM_STREAMS] = slices.each_mut().map(|s| s as &mut dyn Pull);
+    let mut out = Vec::new();
+    x86_run(p, table, srcs, &mut out)?;
+    (out.len() as u64 == len).then_some(out).ok_or("output of another length")
+}
+
+/// The decoding of [`x86`] on the streams `srcs`, put to `sink`; the length is for the caller to
+/// check.
+fn x86_run(
+    p: &[u8; 10],
+    table: &[u8],
+    srcs: [&mut dyn aqr_api::stream::Pull; x86::NUM_STREAMS],
+    sink: &mut dyn aqr_api::stream::Put,
+) -> Result<()> {
+    let opcodes = x86::Opcodes::from_resource(table).ok_or("bad resources")?;
+    let origin = u64::from_le_bytes(*p.first_chunk().unwrap());
+    let r = srcs.map(|s| aqr_api::stream::Reader::new(s, PIECE));
+    let mut src = Readers { r, peeked: [None; x86::NUM_STREAMS] };
+    let mut out = Spool { buf: Vec::with_capacity(SPOOL + HOLD + STEP), sink, failed: false, flushed: 0 };
+    x86::decode_core(&mut src, &mut out, origin, p[8], p[9] != 0, &opcodes, |_, _, _| Some(())).ok_or("corrupt")
+}

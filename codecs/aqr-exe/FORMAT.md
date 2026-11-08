@@ -49,7 +49,7 @@ Contents:
 
 ## 2. The module
 
-- **Module**: name `exe-recons/x86`, version 3.
+- **Module**: name `exe-recons/x86`, version 4.
 - **Params**: exactly 10 bytes.
 
   ```text
@@ -64,6 +64,12 @@ Contents:
 - **Inputs**: exactly 13, the streams of §3 in order. Each is of class `x86/NAME` (`x86/OP`,
   `x86/SIB`, ...).
 - **Output**: the code of §5. Its length must be the `len` the application declares.
+
+Version 4 is a part module (windows of a page for each input and for the output) of the same
+params, resource, inputs and output: the 13 streams are read in order in pieces, and the output
+is put out as it is built but for its last 16 bytes (the sentinel, which is 15 at most, is cut
+off them; a larger one is refused), so that nothing depends on the lengths. The output is version
+3's byte for byte (version 3 was a whole module that held its inputs twice and its output).
 
 ## 3. Streams
 

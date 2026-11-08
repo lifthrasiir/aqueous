@@ -185,8 +185,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "exe-recons/x86",
-        version: 3,
-        sha512_256: hex("b655afaed0c90ac61b3aefb23cbe7fad9974970bb31f21e46b1c3277abba61f6"),
+        version: 4,
+        sha512_256: hex("315e9939bd6a15486b3553991fc21ed3c7e59c22853bf327f5a9acf092069782"),
         block: include_bytes!("../wasm/exe-recons-x86.block"),
     },
     Known {

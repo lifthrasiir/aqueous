@@ -4315,6 +4315,42 @@ fn bundle_plans_hold() {
     plan_holds("bundle tar", f, &tar);
 }
 
+/// exe-recons/x86 (a part module of windows of a page) takes the same plan whatever the lengths:
+/// x86-64 code of this test's executable from a few bytes to 3 MB (as x86-32 too), padding and
+/// calls and jump tables among it; the plan the same for any length.
+#[test]
+fn exe_x86_plans_hold() {
+    use aqr_exe::arch::x86;
+    let m = aqr_decompress::X86;
+    let exe = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+    let resource = aqr_formula::Resource::new(x86::Opcodes::BUILTIN.to_resource());
+    let plan_of = |n: u64| {
+        let usage = aqr_formula::Usage {
+            params: &[0; 10],
+            resources: &[1280],
+            inputs: &[n; 13],
+            outputs: &[n],
+            contents: &vec![],
+            initial_pages: aqr_decompress::initial_pages_of(m).unwrap(),
+        };
+        m.plan_for(&usage).unwrap().instance
+    };
+    assert_eq!(plan_of(10), plan_of(3 << 30));
+    assert!(plan_of(10) < 2 << 20, "{}", plan_of(10));
+    for (n, is64) in [(0usize, true), (5, true), (999, false), (200_000, true), (3 << 20, true), (3 << 20, false)] {
+        let code = &exe[1000..(1000 + n).min(exe.len())];
+        let st = x86::encode(code, 0x1_4000_0000, is64).unwrap();
+        let mut f = Formula::default();
+        let inputs = std::iter::zip(st.streams(), x86::STREAM_NAMES)
+            .map(|(s, name)| f.push(format!("x86/{}", name.trim_start_matches("ST_")), s.clone()))
+            .collect();
+        let mut params = st.origin().to_le_bytes().to_vec();
+        params.extend([st.sentinel_size(), is64 as u8]);
+        f.root = Node::apply_with(m, vec![resource.clone()], params, inputs, code.len() as u64);
+        plan_holds(&format!("x86 {n} {is64}"), f, code);
+    }
+}
+
 /// snappy-recons (a part module of windows of four pages) takes the same plan whatever the
 /// lengths, past a fragment: 3 MB and 9 MB, and a few bytes, of both hashes, to the page.
 #[test]

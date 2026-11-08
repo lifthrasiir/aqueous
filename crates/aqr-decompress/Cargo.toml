@@ -87,6 +87,7 @@ windows-sys = { version = "0.61", optional = true, features = [
 
 [dev-dependencies]
 aqr-7z = { path = "../../codecs/aqr-7z" }
+aqr-exe = { path = "../../codecs/aqr-exe" }
 wat = "1"
 
 # Tools are named <crate>-<tool>, so that names do not collide in the workspace's target

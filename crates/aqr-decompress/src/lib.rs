@@ -33,11 +33,13 @@ pub use wasm::{Applied, initial_pages, record_applications};
 /// aqr-exe's x86 disfilter on a code section. Parameters: the origin (u64, little endian),
 /// the sentinel size (u8) and 1 for x86-64 or 0 for x86-32; resources: the opcode classes
 /// (`x86::Opcodes`); inputs: the streams of `x86::STREAM_NAMES`.
-pub const X86: Module = Module::new("exe-recons/x86", 3).with_plan(x86);
+pub const X86: Module = Module::new("exe-recons/x86", 4).with_plan(x86);
 
-/// The memory of [`X86`]: its initial memory, and its plan (`aqr_exe::module::x86_plan`).
+/// The memory of [`X86`], a part module: its plan (`aqr_exe::module::x86_part_plan`), whatever the
+/// lengths (`None` for parameters of under 10 bytes).
 fn x86(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    Some(u.initial() + aqr_exe::module::x86_plan(u.params, u.resources, u.inputs, u.output())?)
+    u.params.get(9)?;
+    Some(aqr_exe::module::x86_part_plan(u.initial()))
 }
 
 /// aqr-exe's x86 disfilter on a code section, its references remapped to those of another
@@ -414,7 +416,34 @@ macro_rules! bra {
 
 /// Every module of this crate, as it runs natively.
 const NATIVE: &[Entry] = &[
-    takes(X86, |p, r, i, n, _| aqr_exe::module::x86(p, r, i, n).map_err(err)),
+    part(
+        X86,
+        true,
+        aqr_api::emu::Entry {
+            kind: aqr_api::emu::Kind::Part,
+            windows: &[
+                aqr_api::Window::Input(0, aqr_exe::module::X86_WINDOW),
+                aqr_api::Window::Input(1, aqr_exe::module::X86_WINDOW),
+                aqr_api::Window::Input(2, aqr_exe::module::X86_WINDOW),
+                aqr_api::Window::Input(3, aqr_exe::module::X86_WINDOW),
+                aqr_api::Window::Input(4, aqr_exe::module::X86_WINDOW),
+                aqr_api::Window::Input(5, aqr_exe::module::X86_WINDOW),
+                aqr_api::Window::Input(6, aqr_exe::module::X86_WINDOW),
+                aqr_api::Window::Input(7, aqr_exe::module::X86_WINDOW),
+                aqr_api::Window::Input(8, aqr_exe::module::X86_WINDOW),
+                aqr_api::Window::Input(9, aqr_exe::module::X86_WINDOW),
+                aqr_api::Window::Input(10, aqr_exe::module::X86_WINDOW),
+                aqr_api::Window::Input(11, aqr_exe::module::X86_WINDOW),
+                aqr_api::Window::Input(12, aqr_exe::module::X86_WINDOW),
+                aqr_api::Window::Output(0, aqr_exe::module::X86_WINDOW),
+            ],
+            arity: 16,
+            call: |a| {
+                aqr_exe::module::x86_part(a[0], a[1], [a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14]], a[15])
+            },
+        },
+        |p, r, i, n, _| aqr_exe::module::x86(p, r, i, n).map_err(err),
+    ),
     takes(X86_REMAP, |p, r, i, n, _| aqr_exe::module::x86_remap(p, r, i, n).map_err(err)),
     bare(ARM64, |p, _, i, n, _| aqr_exe::module::arm64(p, i, n).map_err(err)),
     bare(ARM64_REMAP, |p, _, i, n, _| aqr_exe::module::arm64_remap(p, i, n).map_err(err)),

@@ -200,6 +200,8 @@ P = W_main + Σ_태스크 (W_spawn + 태스크의 계획 버퍼) + 채널 메시
 
 **bcj2(판 2).** whole이던 것을 출력 셋의 part 모듈로 바꿨다(창 1쪽 × 입력 둘과 출력 셋). 한 패스에서 main, call, jump가 함께 나오므로 출력을 셋으로 갈랐고, 크기는 컨테이너가 아는 세 스트림의 길이를 Apply의 출력 크기로 그대로 쓴다(params에 적을 것이 없다). 데이터와 범위 부호기 스트림을 4 KiB 조각으로 차례로 받고 출력마다 4 KiB 버퍼를 둬 창으로 내보내며(`Pull`, `Push`), 후보 바이트 뒤의 목표 4바이트가 조각을 넘지 않도록 5바이트를 미리 채운다. 계획 = 초기 메모리뿐이고 길이와 무관하다(whole은 4배). 선언한 크기와 실제 스트림이 다르면 실패한다. aqr-7z는 `Formula::split`(출력 하나를 Split) 대신 `Formula::share`(출력 셋)로 식을 만든다. 네이티브(`Native`)는 `apply_shared`를 덮어 whole `decode`가 이어 붙여 준 출력을 크기대로 자르므로 `decode`는 그대로다. 실측 = 계획이다(`bcj2_plans_hold`: 70 MiB와 창을 넘는 100만 바이트, 잡음의 범위 부호기 스트림으로 목표의 절반쯤이 빠진다).
 
+**exe-recons/x86(판 4).** whole이던 것(입력 열셋을 복사하고 출력과 sentinel 15 B를 쥐어 코드 구역의 약 2.5배)을 part 모듈로 바꿨다(창 1쪽 × 입력 열셋과 출력, 자원 1). 디코더는 원래 열셋 스트림을 앞에서부터 한 번만 읽고 출력에 덧붙이기만 한다(되읽지 않음, 호출 캐시는 256칸 고정). 그래서 몸통(`decode_hooked`)을 `Src`(스트림을 읽는 쪽)와 `Sink`(출력을 쌓는 쪽)에 대한 제네릭 `decode_core`로 바꿔, 슬라이스·`Vec`의 whole 경로와 `Reader`·`Spool`의 part 경로가 한 코드를 쓰게 했다(바이너리마다 한 쪽만 인스턴스화). 스트림마다 8 KiB 조각, OP 스트림은 한 바이트 미리보기(ModR/M)가 있다. 출력은 64 KiB가 차면 마지막 16 B를 빼고 내보내고(sentinel은 끝에서 15 B까지 깎으므로), 15 B 넘는 sentinel은 거절한다. 계획 = 조각 13개 + 출력 쌓는 버퍼 + 초기 메모리라 길이와 무관하다(whole은 357 MB에서 1240 MiB). 판 3과 바이트까지 같다. 실측 = 계획이다(`exe_x86_plans_hold`: 이 실행 파일의 x86-64·x86-32 코드 0 B~3 MB). x86-remap(전역 정렬 후 고치기)과 pe-reloc은 whole로 둔다.
+
 **recs-fields, recs-entries, recs-floats.** 이미 LIFO였다(필드 목록, 출력, recs-fields는 필드마다 위에 참조 값 목록).
 - `Field`와 `Float`는 `repr(C)`로 두고, wasm32 크기는 상수로 확인한다.
 - 실측 = 계획이다(`recs_plans_hold`). 직접 만든 수식에는 aqr-compress의 숨은 `declare_memory`로 한도를 선언한다.
