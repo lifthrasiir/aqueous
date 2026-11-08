@@ -213,7 +213,11 @@ fn picture(w: usize, h: usize, color: u8, seed: u32, rect: Option<(usize, usize,
 
 /// The records' bytes of a formula.
 fn records(f: &Formula) -> usize {
-    f.streams.iter().filter(|s| matches!(&*s.class, "png/records" | "png/heads" | "png/rans" | "png/raw")).map(|s| s.data.len()).sum()
+    f.streams
+        .iter()
+        .filter(|s| matches!(&*s.class, "png/records" | "png/heads" | "png/rans" | "png/raw"))
+        .map(|s| s.data.len())
+        .sum()
 }
 
 /// A variant of a picture coded against it: records of kind 2, far smaller than alone, the
@@ -352,7 +356,11 @@ fn set_of_variants() {
 }
 
 fn records_of(f: &Formula) -> usize {
-    f.streams.iter().filter(|s| matches!(&*s.class, "png/records" | "png/heads" | "png/rans" | "png/raw")).map(|s| s.data.len()).sum()
+    f.streams
+        .iter()
+        .filter(|s| matches!(&*s.class, "png/records" | "png/heads" | "png/rans" | "png/raw"))
+        .map(|s| s.data.len())
+        .sum()
 }
 
 /// Sets of bad parameters or inputs fail, damaged ones never panic.

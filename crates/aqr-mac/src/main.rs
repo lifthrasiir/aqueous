@@ -8,6 +8,27 @@ mod app;
 #[cfg(target_os = "macos")]
 mod job;
 
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("aqr-mac: for macOS only");
+    std::process::exit(1);
+}
+
+#[cfg(target_os = "macos")]
+fn main() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+
+    let mtm = MainThreadMarker::new().expect("on the main thread");
+    app::init_language();
+    let app = NSApplication::sharedApplication(mtm);
+    // (as `LSUIElement` has it, run outside the bundle too)
+    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    let delegate = app::Delegate::new(mtm);
+    app.setDelegate(Some(delegate.as_app_delegate()));
+    app.run();
+}
+
 #[cfg(test)]
 mod tests {
     /// The strings of Info.plist that Finder shows (the types' names, the services' items) are
@@ -31,25 +52,4 @@ mod tests {
             assert!(en.contains(&format!("\"{s}\" = ")), "{s} of Info.plist is not in aqr-l10n");
         }
     }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn main() {
-    eprintln!("aqr-mac: for macOS only");
-    std::process::exit(1);
-}
-
-#[cfg(target_os = "macos")]
-fn main() {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
-
-    let mtm = MainThreadMarker::new().expect("on the main thread");
-    app::init_language();
-    let app = NSApplication::sharedApplication(mtm);
-    // (as `LSUIElement` has it, run outside the bundle too)
-    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-    let delegate = app::Delegate::new(mtm);
-    app.setDelegate(Some(delegate.as_app_delegate()));
-    app.run();
 }

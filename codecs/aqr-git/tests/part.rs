@@ -190,7 +190,8 @@ fn build(i: &[Vec<u8>], len: u64, k: usize, room: usize) -> Option<Vec<u8>> {
 
 #[test]
 fn packs_through_pieces() {
-    let cases: [(&str, Vec<usize>, usize, bool, &[u8]); 7] = [
+    type Case = (&'static str, Vec<usize>, usize, bool, &'static [u8]);
+    let cases: [Case; 7] = [
         ("one", vec![100], 9, true, b""),
         ("small", (0..40).map(|i| 30 + 17 * i).collect(), 20, true, b""),
         ("noise", (0..30).map(|i| 5000 + 3001 * (i % 7)).collect(), 0, true, b"after the pack"),

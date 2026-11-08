@@ -206,8 +206,14 @@ fn damaged_sets_reserve_what_the_data_holds() {
         for v in [1u64, 0, len] {
             aqr_common::varint::put(&mut params, v);
         }
-        let set = vec![aqr_common::packed::pack(&[&i[0]]), aqr_common::packed::pack(&[&ix]), aqr_common::packed::pack(&[&recs])];
-        case(&format!("{name} set"), || assert_eq!(module::decode_set(&params, &[&set[0], &set[1], &set[2]], len, 1).unwrap(), file));
+        let set = vec![
+            aqr_common::packed::pack(&[&i[0]]),
+            aqr_common::packed::pack(&[&ix]),
+            aqr_common::packed::pack(&[&recs]),
+        ];
+        case(&format!("{name} set"), || {
+            assert_eq!(module::decode_set(&params, &[&set[0], &set[1], &set[2]], len, 1).unwrap(), file)
+        });
         // the same file twice, the second against the first
         let other = apng(&[(24, 16), (20, 10), (24, 16)], 9);
         let _ = other;

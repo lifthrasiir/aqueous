@@ -2449,6 +2449,8 @@ pub trait Loaded: Send + Sync {
 
     /// An application as a part module: its inputs pulled as it requests them, its outputs (of
     /// `sizes` bytes) pushed as it commits them, all of them by the time it returns.
+    // ([`Loaded::apply`]'s arguments, and the outputs)
+    #[allow(clippy::too_many_arguments)]
     fn apply_part(
         &self,
         params: &[u8],

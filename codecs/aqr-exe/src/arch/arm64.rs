@@ -298,9 +298,9 @@ mod decode {
 #[cfg(feature = "decode")]
 pub use decode::decode;
 #[cfg(feature = "decode")]
-pub(crate) use decode::{decode_from, take};
-#[cfg(feature = "decode")]
 pub use decode::decode_core;
+#[cfg(feature = "decode")]
+pub(crate) use decode::{decode_from, take};
 
 #[cfg(test)]
 mod tests {

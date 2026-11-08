@@ -224,13 +224,17 @@ impl x86::Src for Readers<'_> {
 
     fn read32(&mut self, st: usize) -> Option<u32> {
         let mut b = [0; 4];
-        b.iter_mut().try_for_each(|x| Some(*x = self.read8(st)?))?;
+        for x in &mut b {
+            *x = self.read8(st)?;
+        }
         Some(u32::from_le_bytes(b))
     }
 
     fn read64(&mut self, st: usize) -> Option<u64> {
         let mut b = [0; 8];
-        b.iter_mut().try_for_each(|x| Some(*x = self.read8(st)?))?;
+        for x in &mut b {
+            *x = self.read8(st)?;
+        }
         Some(u64::from_le_bytes(b))
     }
 
@@ -252,7 +256,9 @@ impl x86::Src for Readers<'_> {
         // (n is at most 255)
         let mut buf = [0u8; 255];
         let buf = buf.get_mut(..n)?;
-        buf.iter_mut().try_for_each(|x| Some(*x = self.read8(st)?))?;
+        for x in buf.iter_mut() {
+            *x = self.read8(st)?;
+        }
         out.extend_from_slice(buf);
         Some(())
     }

@@ -1018,6 +1018,15 @@ async fn defined(store: &mut Store<State>, wm: &Module, pages: u64) -> wasmtime:
     Ok(m)
 }
 
+/// What an application is held to: the memory limit of its instance, the task limits of each
+/// class of the module, and the concurrency chosen of each class.
+#[derive(Clone, Copy)]
+pub(crate) struct Bounds<'a> {
+    pub memory_limit: u64,
+    pub task_limits: &'a [u64],
+    pub concurrency: &'a [usize],
+}
+
 /// The lengths of `inputs`.
 fn lens(inputs: &[&[u8]]) -> Vec<u64> {
     inputs.iter().map(|i| i.len() as u64).collect()
@@ -1059,7 +1068,8 @@ impl Loaded for Shared {
                 n,
             )
         });
-        self.run_fed(params, resources, feeds.collect(), drains.collect(), memory_limit, task_limits, &concurrency)
+        let b = Bounds { memory_limit, task_limits, concurrency: &concurrency };
+        self.run_fed(params, resources, feeds.collect(), drains.collect(), b)
     }
 
     fn apply(
@@ -1073,7 +1083,13 @@ impl Loaded for Shared {
     ) -> Decoded<Vec<Vec<u8>>> {
         let _s = aqr_common::trace::span("wasm");
         let concurrency = self.concurrency(memory_limit, task_limits)?;
-        self.apply_with(params, resources, inputs, sizes, memory_limit, task_limits, &concurrency)
+        self.apply_with(
+            params,
+            resources,
+            inputs,
+            sizes,
+            Bounds { memory_limit, task_limits, concurrency: &concurrency },
+        )
     }
 }
 
@@ -1085,16 +1101,14 @@ impl Shared {
         resources: &[Resource],
         inputs: &[&[u8]],
         sizes: &[u64],
-        memory_limit: u64,
-        task_limits: &[u64],
-        concurrency: &[usize],
+        b: Bounds,
     ) -> Decoded<Vec<Vec<u8>>> {
         // (checked, as `apply_into` is, by the caller that is not `apply`: here again, cheaply)
-        self.check(params, resources, &lens(inputs), sizes, memory_limit, task_limits)?;
+        self.check(params, resources, &lens(inputs), sizes, b.memory_limit, b.task_limits)?;
         // (zeroed by the system as they are written, as a copy out of the memories would be)
         let mut outs: Vec<Vec<u8>> = sizes.iter().map(|&s| vec![0; s as usize]).collect();
         let mut bufs: Vec<&mut [u8]> = outs.iter_mut().map(|o| &mut o[..]).collect();
-        self.run(params, resources, inputs, &mut bufs, memory_limit, task_limits, concurrency)?;
+        self.run(params, resources, inputs, &mut bufs, b)?;
         Ok(outs)
     }
 
@@ -1114,13 +1128,11 @@ impl Shared {
         resources: &[Resource],
         inputs: &[&[u8]],
         outs: &mut [&mut [u8]],
-        memory_limit: u64,
-        task_limits: &[u64],
-        concurrency: &[usize],
+        b: Bounds,
     ) -> Decoded<()> {
         let sizes: Vec<u64> = outs.iter().map(|o| o.len() as u64).collect();
-        self.check(params, resources, &lens(inputs), &sizes, memory_limit, task_limits)?;
-        self.run(params, resources, inputs, outs, memory_limit, task_limits, concurrency)
+        self.check(params, resources, &lens(inputs), &sizes, b.memory_limit, b.task_limits)?;
+        self.run(params, resources, inputs, outs, b)
     }
 
     /// The application checked against the module and the memory limit, before anything of it
@@ -1185,9 +1197,7 @@ impl Shared {
         resources: &[Resource],
         inputs: &[&[u8]],
         outs: &mut [&mut [u8]],
-        memory_limit: u64,
-        task_limits: &[u64],
-        concurrency: &[usize],
+        b: Bounds,
     ) -> Decoded<()> {
         // SAFETY: the inputs and outputs outlive the store, which is dropped within `run_fed`,
         // and so do the references to them in it; the outputs are not reached but by it
@@ -1195,7 +1205,7 @@ impl Shared {
         let feeds = inputs.iter().map(|i| Feed::Bytes(unsafe { std::slice::from_raw_parts(i.as_ptr(), i.len()) }));
         let drains =
             (outs.iter_mut()).map(|o| Drain::Buf(unsafe { std::slice::from_raw_parts_mut(o.as_mut_ptr(), o.len()) }));
-        self.run_fed(params, resources, feeds.collect(), drains.collect(), memory_limit, task_limits, concurrency)
+        self.run_fed(params, resources, feeds.collect(), drains.collect(), b)
     }
 
     /// [`Shared::run`] of the inputs and outputs as the instance takes them, which outlive it.
@@ -1205,10 +1215,9 @@ impl Shared {
         resources: &[Resource],
         feeds: Vec<Feed>,
         drains: Vec<Drain>,
-        memory_limit: u64,
-        task_limits: &[u64],
-        concurrency: &[usize],
+        b: Bounds,
     ) -> Decoded<()> {
+        let Bounds { memory_limit, task_limits, concurrency } = b;
         let c = &*self.0;
         let sizes: Vec<u64> = drains.iter().map(Drain::len).collect();
         let sizes = &sizes[..];
@@ -1703,7 +1712,7 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
                     return spawn(&mut c, class as u32 as usize, start, arg as u32, n as u32);
                 }
                 let mut regions = Vec::with_capacity(count);
-                for r in recs.chunks_exact(12) {
+                for r in recs.as_chunks::<12>().0 {
                     let u = |k: usize| u32::from_le_bytes(r[k..k + 4].try_into().unwrap()) as usize;
                     let (src, len, dst) = (u(0), u(4), u(8));
                     let Some(b) = src.checked_add(len).and_then(|e| m.get(src..e)) else {

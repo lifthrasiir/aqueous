@@ -77,7 +77,7 @@ fn part(params_len: u64, res_len: u64, lens: [u64; SLOTS], size: u64) -> Result<
     if params_len != 0 {
         return Err(corrupt("params"));
     }
-    if lens[N_BYTE_STREAMS] % 4 != 0 {
+    if !lens[N_BYTE_STREAMS].is_multiple_of(4) {
         return Err(corrupt("inputs"));
     }
     // (the reservoir's positions are in bits)

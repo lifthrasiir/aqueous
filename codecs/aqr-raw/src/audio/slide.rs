@@ -51,7 +51,7 @@ impl<'a> Slide<'a> {
 
     #[cold]
     fn fill(&mut self, min: usize) {
-        debug_assert!(min + 1 <= self.cap, "a frame reads more than the window holds");
+        debug_assert!(min < self.cap, "a frame reads more than the window holds");
         self.buf.copy_within(self.at..self.end, 0);
         self.before += self.at as u64;
         self.end -= self.at;

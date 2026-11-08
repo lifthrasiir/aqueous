@@ -28,6 +28,8 @@ pub fn unpackbits(mut src: &[u8], out: &mut Vec<u8>) -> bool {
     true
 }
 
+// (aqr-flate's `Data` is `Vec<u8>` itself without `encode`)
+#[cfg_attr(not(feature = "encode"), allow(clippy::useless_conversion))]
 fn inflate(zlib: &[u8]) -> Result<Vec<u8>> {
     if zlib.len() < 2 {
         return err("short zlib stream");

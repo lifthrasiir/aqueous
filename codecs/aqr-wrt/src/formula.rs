@@ -182,6 +182,9 @@ fn coded_in(input: &[u8], shared: &Shared, own: usize, threads: usize, segment: 
 }
 
 /// The applications of a text's segments ([`words::SEGMENT`]) of one module and dictionary.
+/// The lengths of a segment's pieces, as a coder tells them.
+type Pieces = Vec<(usize, usize)>;
+
 struct Segments<'a> {
     module: Module,
     resource: &'a Resource,
@@ -202,11 +205,11 @@ impl Segments<'_> {
     /// they come, so that the encoder holds those alone in memory.
     fn apply<C>(&self, f: &mut Formula, segments: Vec<&[u8]>, code: C) -> Node
     where
-        C: Fn(&[u8], usize) -> (Vec<u8>, Vec<(usize, usize)>) + Sync,
+        C: Fn(&[u8], usize) -> (Vec<u8>, Pieces) + Sync,
     {
         let mut coded = aqr_formula::store::Writer::new(None);
         // (each segment's start in the stream, its length, and the lengths of its pieces)
-        let mut parts: Vec<(u64, u64, Vec<(usize, usize)>)> = Vec::with_capacity(segments.len());
+        let mut parts: Vec<(u64, u64, Pieces)> = Vec::with_capacity(segments.len());
         let mut at = 0u64;
         for batch in segments.chunks(self.threads.max(1)) {
             let inner = (self.threads / batch.len()).max(1);

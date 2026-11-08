@@ -2234,7 +2234,7 @@ fn hdf5_fits_plans_hold() {
         h
     };
     let kv = |k: &str, v: &str| format!("{k:<8}= {v:>20}");
-    let rows = 20_000;
+    let rows: i32 = 20_000;
     let mut d = header(&[kv("SIMPLE", "T"), kv("BITPIX", "8"), kv("NAXIS", "0")]);
     let cards: Vec<String> = [
         ("XTENSION", "'BINTABLE'".to_string()),
@@ -2254,7 +2254,7 @@ fn hdf5_fits_plans_hold() {
     .collect();
     d.extend(header(&cards));
     for i in 0..rows {
-        d.extend((i as i32 * 3).to_be_bytes());
+        d.extend((i * 3).to_be_bytes());
         d.extend((i as f32 * 0.25).to_be_bytes());
         d.extend(format!("{:<8}", format!("row{}", i % 1000)).bytes());
     }
@@ -2268,7 +2268,7 @@ fn hdf5_fits_plans_hold() {
     let mut x = 1u32;
     for i in 0..w * h {
         x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
-        let v = ((i % w) * 7 + (i / w) * 5) as i32 + (x >> 28) as i32;
+        let v = (i % w) * 7 + (i / w) * 5 + (x >> 28) as i32;
         d.extend((v as i16).to_be_bytes());
     }
     d.resize(d.len().next_multiple_of(2880), 0);

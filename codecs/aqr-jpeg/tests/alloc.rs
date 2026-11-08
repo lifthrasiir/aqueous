@@ -123,7 +123,8 @@ fn archived_sizes_beyond_the_output() {
     assert_eq!(decode(&a.params, &ins, len).unwrap(), GRADIENT);
     let (progressive, sizes) = module::params(&a.params).unwrap();
     let big = 1u64 << 40;
-    let mut cases: Vec<(&str, Vec<u8>, Vec<Vec<u8>>, u64)> = Vec::new();
+    type Case = (&'static str, Vec<u8>, Vec<Vec<u8>>, u64);
+    let mut cases: Vec<Case> = Vec::new();
     // the output itself is asked for and refused (the request is the length)
     let (r, _) = largest(|| decode(&a.params, &ins, big));
     assert!(r.is_err(), "output length: decoded");

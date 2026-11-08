@@ -26,16 +26,28 @@ mod big_alloc {
 
     unsafe impl GlobalAlloc for Largest {
         unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-            if note(l.size()) { unsafe { System.alloc(l) } } else { std::ptr::null_mut() }
+            if note(l.size()) {
+                unsafe { System.alloc(l) }
+            } else {
+                std::ptr::null_mut()
+            }
         }
         unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
-            if note(l.size()) { unsafe { System.alloc_zeroed(l) } } else { std::ptr::null_mut() }
+            if note(l.size()) {
+                unsafe { System.alloc_zeroed(l) }
+            } else {
+                std::ptr::null_mut()
+            }
         }
         unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
             unsafe { System.dealloc(p, l) }
         }
         unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
-            if note(n) { unsafe { System.realloc(p, l, n) } } else { std::ptr::null_mut() }
+            if note(n) {
+                unsafe { System.realloc(p, l, n) }
+            } else {
+                std::ptr::null_mut()
+            }
         }
     }
 

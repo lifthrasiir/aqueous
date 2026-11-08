@@ -139,7 +139,7 @@ pub mod pcm {
         let params = params.get_mut(..params_len as usize).ok_or_else(|| corrupt("params"))?;
         Params::read(0, params);
         let fmt = Format::from_bytes(params).ok_or_else(|| corrupt("params"))?;
-        if lens[3] % 4 != 0 {
+        if !lens[3].is_multiple_of(4) {
             return Err(corrupt("inputs"));
         }
         // No output is larger than 64 times its coded form.

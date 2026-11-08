@@ -850,6 +850,8 @@ impl<'a> Parsed<'a> {
 
     /// Deconstructs the stream with `opts` (those it was parsed with), as
     /// [`deconstruct_hinted`] does.
+    // (`Data` is `Vec<u8>` itself without `encode`)
+    #[cfg_attr(not(feature = "encode"), allow(clippy::useless_conversion))]
     pub fn deconstruct(self, opts: &Options, hints: &Hints) -> Result<(Vec<u8>, Vec<u8>, Report)> {
         self.deconstruct_data(opts, hints)
             .map(|(d, m, r)| (d.into(), m, r))

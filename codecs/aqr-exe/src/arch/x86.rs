@@ -1353,6 +1353,10 @@ pub trait Sink {
     fn fill(&mut self, n: usize, b: u8);
     /// Bytes appended so far.
     fn len(&self) -> usize;
+    /// Whether none are.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     /// Ends the section, `sentinel` bytes shorter; `None` where it is shorter than that.
     fn finish(&mut self, sentinel: usize) -> Option<()>;
 }
@@ -1575,23 +1579,17 @@ pub fn decode_core<S: Src, K: Sink>(
         'prefix: {
             match pre {
                 PRE_VEX3 => {
-                    let Some([x, y]) = unshuffle_vex3([vex, rex], map) else {
-                        fatal!("bad VEX3 prefix");
-                    };
+                    let [x, y] = unshuffle_vex3([vex, rex], map)?; // (else a bad VEX3 prefix)
                     code.extend_from_slice(&[PRE_VEX3, x, y, op]);
                     break 'prefix;
                 }
                 PRE_VEX2 => {
-                    let Some([x]) = unshuffle_vex2([vex, rex], map) else {
-                        fatal!("bad VEX2 prefix");
-                    };
+                    let [x] = unshuffle_vex2([vex, rex], map)?; // (else a bad VEX2 prefix)
                     code.extend_from_slice(&[PRE_VEX2, x, op]);
                     break 'prefix;
                 }
                 PRE_EVEX => {
-                    let Some([x, y, z]) = unshuffle_evex([evex, vex, rex], map) else {
-                        fatal!("bad EVEX prefix");
-                    };
+                    let [x, y, z] = unshuffle_evex([evex, vex, rex], map)?; // (else a bad EVEX prefix)
                     code.extend_from_slice(&[PRE_EVEX, x, y, z, op]);
                     break 'prefix;
                 }
@@ -1631,9 +1629,7 @@ pub fn decode_core<S: Src, K: Sink>(
             }
 
             // F6/F7: TEST E,I (/0-1) vs. NOT/NEG/[I]MUL/[I]DIV E (/2-7)
-            OP_GRP3_1 | OP_GRP3_2 | OP_MAP4_GRP3_1 | OP_MAP4_GRP3_2
-                if modrm_reg(src.peek8(ST_MODRM)?) >= 2 =>
-            {
+            OP_GRP3_1 | OP_GRP3_2 | OP_MAP4_GRP3_1 | OP_MAP4_GRP3_2 if modrm_reg(src.peek8(ST_MODRM)?) >= 2 => {
                 flags = R_;
             }
 

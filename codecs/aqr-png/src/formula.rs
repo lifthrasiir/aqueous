@@ -59,7 +59,8 @@ fn parts_of(f: &Formula) -> Option<Alone<'_>> {
         return None;
     }
     let (index, records) =
-        codec::join_records(stream("png/index")?, stream("png/heads")?, stream("png/rans")?, stream("png/raw")?).ok()?;
+        codec::join_records(stream("png/index")?, stream("png/heads")?, stream("png/rans")?, stream("png/raw")?)
+            .ok()?;
     let (mut at, mut from, mut recs) = (0, 0, vec![]);
     while at < index.len() {
         let n = codec::get_varint(&index, &mut at).ok()? as usize;
@@ -191,7 +192,8 @@ fn plan_against(u: &aqr_formula::Usage<'_>) -> Option<aqr_formula::Plan> {
 /// The memory of `png-set`: its plan ([`crate::plan::set`]).
 fn plan_set(u: &aqr_formula::Usage<'_>) -> Option<aqr_formula::Plan> {
     let [sks, indexes, records] = u.all_contents()?;
-    crate::plan::set(u.initial(), u.params, u.inputs, (sks, indexes, records)).map(|(i, t)| aqr_formula::Plan::one(i, t))
+    crate::plan::set(u.initial(), u.params, u.inputs, (sks, indexes, records))
+        .map(|(i, t)| aqr_formula::Plan::one(i, t))
 }
 
 #[cfg(test)]

@@ -3,8 +3,8 @@
 //! every level, with runs across the blocks' ends, ranks given, and inputs given a few bytes
 //! at a time; and truncated, extended and damaged inputs.
 
-use aqr_bz2::module::{self, StreamParams};
 use aqr_api::stream::{Pull, Put};
+use aqr_bz2::module::{self, StreamParams};
 use aqr_bz2::stream;
 use aqr_bz2::{Framing, compress};
 
@@ -86,7 +86,9 @@ fn same(what: &str, framing: Framing, p: &[u8], d: &[u8], want: Option<&[u8]>) -
 #[test]
 fn streams_through_pieces() {
     // (3 MB at level 1 is 31 blocks; level 9 is 4; many pieces of 64 KiB either way)
-    for (k, &(n, level)) in [(0, 1), (1, 1), (5, 9), (3000, 3), (200_000, 1), (3 << 20, 1), (3 << 20, 9)].iter().enumerate() {
+    for (k, &(n, level)) in
+        [(0, 1), (1, 1), (5, 9), (3000, 3), (200_000, 1), (3 << 20, 1), (3 << 20, 9)].iter().enumerate()
+    {
         let d = data(n, k as u64);
         let sp = StreamParams { level, len: n as u64, orig_ptrs: vec![] };
         let p = params(Framing::Bzip2, &[sp]);

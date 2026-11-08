@@ -575,7 +575,7 @@ mod tests {
         let mut p = Vec::new();
         put(&mut p, 2);
         for (image, at, n, mask) in [(0, sigs[0].1, sigs[0].2, 3), (sigs[0].1 as u64 + 1, sigs[1].1, sigs[1].2, 3)] {
-            [image as u64, at as u64, n as u64, mask].into_iter().for_each(|v| put(&mut p, v));
+            [image, at as u64, n as u64, mask].into_iter().for_each(|v| put(&mut p, v));
         }
         assert!(decode(&p, &body, &s.sigs, d.len()).is_none());
     }

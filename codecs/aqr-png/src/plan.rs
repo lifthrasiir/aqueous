@@ -200,7 +200,9 @@ fn file(m: &mut Sim, sk: &[u8], index: &[u8], records: &[u8], threads: usize, ke
     if threads > 1 && imgs.len() > 1 {
         let tasks = imgs
             .iter()
-            .map(|(rec, len, ih)| image(rec, *len, ih, keep, false).map(|i| m.task(i.kept.iter().sum::<u64>() + i.over)))
+            .map(|(rec, len, ih)| {
+                image(rec, *len, ih, keep, false).map(|i| m.task(i.kept.iter().sum::<u64>() + i.over))
+            })
             .collect::<Option<Vec<u64>>>()?;
         // (the tasks' handles; each result kept as it is taken, with its reference)
         m.take(k);
@@ -333,7 +335,12 @@ pub fn against(
 /// and records of the files. The output first; then by depth in the trees, the files of a depth
 /// each a task (of several, each giving back the file), or the file in the instance, each made of
 /// the references of its parent's file (made of it) and copied to its place, nothing else kept.
-pub fn set(initial: u64, params: &[u8], inputs: &[u64], (sks, indexes, records): (&[u8], &[u8], &[u8])) -> Option<(u64, u64)> {
+pub fn set(
+    initial: u64,
+    params: &[u8],
+    inputs: &[u64],
+    (sks, indexes, records): (&[u8], &[u8], &[u8]),
+) -> Option<(u64, u64)> {
     let mut at = 0;
     let n = get_varint(params, &mut at).ok()?;
     // (each parameter takes a byte at least)

@@ -487,6 +487,8 @@ impl<const HEAD: bool> Collect<HEAD> {
         }
     }
 
+    // (`Data` is `Vec<u8>` itself without `encode`)
+    #[cfg_attr(not(feature = "encode"), allow(clippy::useless_conversion))]
     fn into_vecs(mut self) -> (Data, Vec<Token>, Vec<Chunk>) {
         if self.keeping
             && let Some(c) = self.chunks.last_mut()

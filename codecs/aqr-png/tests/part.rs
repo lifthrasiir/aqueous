@@ -101,15 +101,18 @@ fn kept_and_coded_images_among_each_other() {
     same("apng", &file);
     let noise: Vec<u8> = {
         let mut x = 1u32;
-        (0..40).flat_map(|_| std::iter::once(0).chain((0..60).map(|_| {
-            x = x.wrapping_mul(1103515245).wrapping_add(12345);
-            (x >> 16) as u8
-        })).collect::<Vec<_>>()).collect()
+        (0..40)
+            .flat_map(|_| {
+                std::iter::once(0)
+                    .chain((0..60).map(|_| {
+                        x = x.wrapping_mul(1103515245).wrapping_add(12345);
+                        (x >> 16) as u8
+                    }))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     };
-    same(
-        "noise",
-        &png(&[(b"IHDR", ihdr(60, 40, 8, 0, 0)), (b"IDAT", zlib(&zlib6(), &noise)), (b"IEND", vec![])]),
-    );
+    same("noise", &png(&[(b"IHDR", ihdr(60, 40, 8, 0, 0)), (b"IDAT", zlib(&zlib6(), &noise)), (b"IEND", vec![])]));
 }
 
 #[test]
@@ -149,7 +152,10 @@ fn damaged_inputs_fail_or_agree() {
 fn frames_as_tasks_and_one_at_a_time() {
     // many small frames: batches of them are decoded as tasks, the order of the file kept
     same("many frames", &apng(&[(48, 32); 37], 4));
-    same("frames of sizes", &apng(&[(10, 10), (200, 150), (7, 300), (64, 64), (1, 1), (333, 20), (50, 50), (20, 20), (90, 90), (40, 5)], 8));
+    same(
+        "frames of sizes",
+        &apng(&[(10, 10), (200, 150), (7, 300), (64, 64), (1, 1), (333, 20), (50, 50), (20, 20), (90, 90), (40, 5)], 8),
+    );
     // a frame past the size of a task's among small ones: all one at a time in the instance
     same("a large frame", &apng(&[(40, 40), (2400, 1500), (40, 40)], 5));
 }

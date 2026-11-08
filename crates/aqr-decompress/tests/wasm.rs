@@ -1101,7 +1101,8 @@ fn png_against_plans_hold() {
 fn png_set_plans_hold() {
     let rgb = |v| png_file_of(300, 200, 8, 2, false, 1 << 20, 0, v);
     let apng = |v| png_file_of(160, 120, 8, 6, false, 5000, 4, v);
-    let sets: [(&str, Vec<Vec<u8>>, Vec<Option<usize>>); 4] = [
+    type Set = (&'static str, Vec<Vec<u8>>, Vec<Option<usize>>);
+    let sets: [Set; 4] = [
         ("rgb", vec![rgb(0), rgb(1), rgb(2), rgb(3)], vec![None, Some(0), Some(0), Some(1)]),
         ("apng", vec![apng(0), apng(1), apng(2)], vec![None, Some(0), Some(1)]),
         // (deeper than the holes the stack keeps)
@@ -3093,7 +3094,8 @@ mod lha_gen {
 /// rings of the chains), headers written otherwise than predicted, bytes after the padding.
 #[test]
 fn lha_plans_hold() {
-    let mut cases: Vec<(String, Vec<(Vec<u8>, usize, aqr_lha::lzh::Method)>)> = Vec::new();
+    type Case = (String, Vec<(Vec<u8>, usize, aqr_lha::lzh::Method)>);
+    let mut cases: Vec<Case> = Vec::new();
     let mut fixtures = Vec::new();
     for name in ["amiga_lh4", "dos255e_lh5", "os2_h3_lh5", "unix_h0_lh5", "unix_h1_lh6", "unix_h2_lh7", "unix_lh6_long"]
     {
@@ -3277,14 +3279,12 @@ fn rar_run(a: &aqr_formula::Apply, i: &[&[u8]]) -> Vec<u8> {
     aqr_rar::formula::apply(a, i, 1).unwrap()
 }
 
+/// An application run natively, to its output.
+type RunApply = dyn Fn(&aqr_formula::Apply, &[&[u8]]) -> Vec<u8>;
+
 /// The applications of the module `name` in `f` (in its root, and its shared applications), each
 /// as [`plan_holds`] checks it against what it gives natively. Returns their number.
-fn module_applications_hold(
-    what: &str,
-    f: &Formula,
-    name: &str,
-    run: &dyn Fn(&aqr_formula::Apply, &[&[u8]]) -> Vec<u8>,
-) -> usize {
+fn module_applications_hold(what: &str, f: &Formula, name: &str, run: &RunApply) -> usize {
     let mut found = Vec::new();
     f.root.visit(&mut |n| {
         if let Node::Apply(a) = n {
@@ -3344,7 +3344,8 @@ fn rar5_plans_hold() {
         let f = aqr_rar::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
         assert!(module_applications_hold(&format!("rar5 {t}"), &f, "rar5-recons", &rar_run) > 0, "{t}");
     }
-    let cases: [(&str, bool, Vec<usize>, usize, usize, bool); 6] = [
+    type Case = (&'static str, bool, Vec<usize>, usize, usize, bool);
+    let cases: [Case; 6] = [
         ("blocks and filters", false, vec![60000], 80, 100, false),
         ("version 1, tables otherwise", true, vec![100000], 300, 80, true),
         ("many files", false, vec![700; 80], 1, 100, true),
@@ -3929,7 +3930,8 @@ fn lzma_stream_reach(
 fn lzma_plans_hold() {
     use aqr_lzma::lzma::Props;
     let props = |lc, lp, pb| Props { lc, lp, pb };
-    let mut cases: Vec<(String, Vec<(Vec<u8>, aqr_lzma::recons::Split)>)> = Vec::new();
+    type Case = (String, Vec<(Vec<u8>, aqr_lzma::recons::Split)>);
+    let mut cases: Vec<Case> = Vec::new();
     for t in ["text-p6", "binary-p9e", "binary-lc4pb4", "binary-lc0lp2pb0", "runs-dict4k", "empty-p6", "binary-dict4k"]
     {
         let d = fixture(&format!("codecs/aqr-lzma/tests/data/{t}.lzma"));
@@ -4169,7 +4171,8 @@ fn lzma2_plans_hold() {
         plan_holds(&format!("lzma2 {what}"), f, &stream);
     }
     // (an .xz file of a block; several by a split are in the real files of the corpus)
-    for t in ["crc64"] {
+    {
+        let t = "crc64";
         let d = fixture(&format!("codecs/aqr-lzma/tests/data/{t}.xz"));
         let f = aqr_lzma::formula::encode_xz(&d, 1).unwrap_or_else(|| panic!("{t}"));
         applications_hold(&format!("xz {t}"), &f, &d, |_| 0);

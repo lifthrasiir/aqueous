@@ -577,10 +577,10 @@ fn code_filters(bits: &mut impl Bits, ctx: &mut Ctx, sizes: &[usize], given: &[P
             if start != base + at as u64 || flen != len || fkind != kind || fregs != regs {
                 return Err(Error("a filter record of another meaning"));
             }
-            if let Some(g) = g {
-                if g.0 != d || gf[k].1 != in_ppmd || g.1.at != at || g.1.raw[..] != h.raws[from..] {
-                    return Err(Error("filters coded otherwise"));
-                }
+            if let Some(g) = g
+                && (g.0 != d || gf[k].1 != in_ppmd || g.1.at != at || g.1.raw[..] != h.raws[from..])
+            {
+                return Err(Error("filters coded otherwise"));
             }
             h.flt.push(Flt { decl: d, in_ppmd, at, len, kind, regs, raw: (from, h.raws.len()) });
         }
@@ -897,6 +897,8 @@ fn walk(
         let fl = &flt[if fi == 0 { 0 } else { fends[fi - 1] }..fends[fi]];
         // (the next filter in an LZ block, and in a PPMd block)
         let (mut lzc, mut ppc) = (next_kind(fl, 0, false), next_kind(fl, 0, true));
+        // (by index: `regs[gi]` is written further on)
+        #[allow(clippy::needless_range_loop)]
         for gi in r0..r1 {
             let (region, n) = (regs[gi].region, regs[gi].n);
             let re = pos + n;

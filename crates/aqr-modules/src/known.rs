@@ -90,7 +90,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "bundle-recons",
         version: 2,
-        sha512_256: hex("b3a8f4e7dc7f088a1b24e376970e78bb8dce33dc171cb36e1f54b6e489887cd5"),
+        sha512_256: hex("a46ae60dbf98654908ec8a34cce60f4c2037608ec9c61252fccc570fc2478a60"),
         block: include_bytes!("../wasm/bundle-recons.block"),
     },
     Known {
@@ -186,7 +186,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "exe-recons/x86",
         version: 4,
-        sha512_256: hex("c04f2676907c2ea45975c3b073e160bea53cb2399ac72269679d94135ea8a551"),
+        sha512_256: hex("e7cfed4c5699e924345aed1be53cf792c514395348a13b5e3834f36a5611f5f1"),
         block: include_bytes!("../wasm/exe-recons-x86.block"),
     },
     Known {
@@ -216,7 +216,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "flac-recons",
         version: 5,
-        sha512_256: hex("5ad060a409290d438e056af500a23e70320611004ba37fa74d2cda9697950d35"),
+        sha512_256: hex("13c133d93b50051e14091ce686cb9ad57413e811b172a4103e16815b846e31bb"),
         block: include_bytes!("../wasm/flac-recons.block"),
     },
     Known {
@@ -324,7 +324,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "mp3-recons",
         version: 6,
-        sha512_256: hex("239102fcad924377b645412fc8bfc5bbcfafdf752e5ab3b0d57a29e4cf75649f"),
+        sha512_256: hex("c3d0ff28d4259bf764dad5e708a62327fbcf7b29f14b84d967f9fcbc9af89985"),
         block: include_bytes!("../wasm/mp3-recons.block"),
     },
     Known {
@@ -348,7 +348,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "pcm-recons",
         version: 2,
-        sha512_256: hex("a05e650f9b7e72854be9c503d632ef5e7c83405cec22ecb50183186253a59da1"),
+        sha512_256: hex("51c375cbb6be233943705872ba463b29b8003b2d4d890a646b927affc6c6ecf3"),
         block: include_bytes!("../wasm/pcm-recons.block"),
     },
     Known {

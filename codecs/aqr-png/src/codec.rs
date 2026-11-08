@@ -842,6 +842,7 @@ pub(crate) fn parse_layout(layout: &[u8]) -> Result<Layout> {
 /// Rebuilds a coded image's payload (of `len` bytes, if the record is right) from its record
 /// (past the mode byte), against `reference` if it is coded against one; and, if `keep`, the
 /// image's own reference (that [`model::Reference::parse`] gives of the payload).
+#[allow(clippy::too_many_arguments)]
 fn rebuild(
     g: &Geometry,
     rec: &[u8],

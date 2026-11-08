@@ -54,7 +54,7 @@ fn streams_through_pieces() {
     let sizes = [0usize, 1, 14, 15, 16, 255, 256, 4096, 65_535, 65_536, 65_537, 131_072, 200_001, 3 << 20];
     for (k, &n) in sizes.iter().enumerate() {
         for hash in Hash::ALL {
-            let d = if k % 3 == 2 { (0..n).map(|i| (i * 7919 >> 3) as u8).collect() } else { data(n, k as u64) };
+            let d = if k % 3 == 2 { (0..n).map(|i| ((i * 7919) >> 3) as u8).collect() } else { data(n, k as u64) };
             let want = snappy::compress(&d, hash).unwrap();
             let p = [hash as u8];
             let whole = module::decode(&p, &[&d], want.len() as u64, 1).unwrap();

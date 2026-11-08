@@ -343,7 +343,7 @@ pub(crate) fn run(
         }
         o.ready(&mut w)?;
         rans.slide(&mut fill, WORDS_AHEAD, |b| words.fill(b));
-        if fi > 0 && fi % RUN_FRAMES == 0 {
+        if fi > 0 && fi.is_multiple_of(RUN_FRAMES) {
             rans.restart();
         }
         raw.need(RAW_AHEAD);

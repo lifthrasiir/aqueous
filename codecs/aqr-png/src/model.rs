@@ -99,7 +99,6 @@ impl Geometry {
     pub fn reachable(&self, payload_len: usize) -> bool {
         self.pad as u64 <= MAX_EXPANSION as u64 * payload_len as u64 + 4096
     }
-
 }
 
 /// What literals are coded against.

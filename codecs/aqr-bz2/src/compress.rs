@@ -214,7 +214,7 @@ pub fn write_rle1(
     let mut sa = vec![0u32; 2 * m];
     let mut ws = vec![0u32; sais::bwt_work(m)];
     let mut st = vec![0u8; 2 * m];
-    let own = sais::bwt_in(&twice, &mut sa, &mut ws, &mut st);
+    let own = sais::bwt_in(twice, &mut sa, &mut ws, &mut st);
     let orig_ptr = match rank {
         Some(p) if p as usize >= m => return Err(crate::corrupt()),
         Some(p) => p,

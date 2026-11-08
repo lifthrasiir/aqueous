@@ -854,6 +854,7 @@ impl Pass {
     /// copied in pieces. `bufs` are TAIL, RAWGR and GAPS. The writer may hold gap bits past the
     /// last frame's main data (`gap_before`), not past this frame's.
     #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn frame<C: Coder, S: SideSrc, B: BitIn>(
         &mut self,
         (h, pay, len): (Header, usize, usize),
@@ -974,7 +975,10 @@ pub(crate) fn main_pass<C: Coder, S: SideSrc, K: Sink>(
             dc.restart();
         }
         let (h, mut si, pay, len) = fr.frames[fi];
-        pass.frame((h, pay, len), &mut si, side, dc, &mut bufs, w, &mut |w| Ok(sink.ready(fr, fi, w)))?;
+        pass.frame((h, pay, len), &mut si, side, dc, &mut bufs, w, &mut |w| {
+            sink.ready(fr, fi, w);
+            Ok(())
+        })?;
         fr.frames[fi].1 = si;
     }
     if !side.in_bounds() {
@@ -982,7 +986,10 @@ pub(crate) fn main_pass<C: Coder, S: SideSrc, K: Sink>(
     }
     let n = fr.frames.len();
     let [_, _, gaps] = &mut bufs;
-    pass.finish(r_len, gaps, w, &mut |w| Ok(sink.ready(fr, n, w)))?;
+    pass.finish(r_len, gaps, w, &mut |w| {
+        sink.ready(fr, n, w);
+        Ok(())
+    })?;
     sink.ready(fr, n, w);
     Ok(())
 }

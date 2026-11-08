@@ -760,7 +760,7 @@ pub fn decode_part(
 ) -> Result<(), Error> {
     use par::apart::{ERR, FRAME};
     let frame_bytes = fmt.frame_bytes();
-    if !fmt.valid() || len % frame_bytes as u64 != 0 {
+    if !fmt.valid() || !len.is_multiple_of(frame_bytes as u64) {
         return Err(Error("length"));
     }
     let nframes = (len / frame_bytes as u64) as usize;

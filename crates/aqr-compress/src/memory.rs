@@ -63,7 +63,7 @@ pub(crate) fn limit(a: &Apply, lens: &[u64], outputs: &[u64], contents: &dyn Con
     match aqr_decompress::needed_by(a.module, &a.params, &resources, lens, outputs, contents) {
         Ok(Some(plan)) => plan,
         Ok(None) => none,
-        Err(()) => {
+        Err(aqr_decompress::NoPlan) => {
             eprintln!("aqr-compress: no memory plan of {} (a bug), none declared", a.module);
             none
         }

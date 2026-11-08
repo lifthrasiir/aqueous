@@ -110,7 +110,10 @@ impl<'a> Cursor<'a> {
             return Err(corrupt());
         }
         let mut v = Vec::with_capacity(n);
-        self.take(n, |d| Ok(v.extend_from_slice(d)))?;
+        self.take(n, |d| {
+            v.extend_from_slice(d);
+            Ok(())
+        })?;
         Ok(v)
     }
 
@@ -567,8 +570,13 @@ fn part(params_len: u64, lens: [u64; INPUTS], size: u64) -> Result<()> {
     if params_len != 0 {
         return Err(corrupt());
     }
-    let (mut i0, mut i1, mut i2, mut i3, mut i4) =
-        (In::<0>::new(lens[0]), In::<1>::new(lens[1]), In::<2>::new(lens[2]), In::<3>::new(lens[3]), In::<4>::new(lens[4]));
+    let (mut i0, mut i1, mut i2, mut i3, mut i4) = (
+        In::<0>::new(lens[0]),
+        In::<1>::new(lens[1]),
+        In::<2>::new(lens[2]),
+        In::<3>::new(lens[3]),
+        In::<4>::new(lens[4]),
+    );
     let mut out = Written::new(size);
     let srcs: [(&mut dyn Pull, u64); INPUTS] =
         [(&mut i0, lens[0]), (&mut i1, lens[1]), (&mut i2, lens[2]), (&mut i3, lens[3]), (&mut i4, lens[4])];

@@ -36,13 +36,22 @@ fn plan_without_the_data() {
         len += s.iter().map(|c| c.0.len()).sum::<usize>();
         parts.push(Stream { kept, data: Node::slice(0, at, sp.data.len() as u64), record: sp.record });
     }
-    let Node::Apply(a) = formula::apply(&mut f, parts, Node::slice(1, 17, 7), len as u64) else { panic!("an application") };
+    let Node::Apply(a) = formula::apply(&mut f, parts, Node::slice(1, 17, 7), len as u64) else {
+        panic!("an application")
+    };
     // (its inputs: the data, the records, the bytes kept and the index, the streams made)
     let inputs: Vec<Vec<u8>> = [0, 2, 1, 3].iter().map(|&s| f.streams[s].data.to_vec()).collect();
     let lens: Vec<u64> = inputs.iter().map(|i| i.len() as u64).collect();
     let plan = |data: bool| {
         let c = Inputs(inputs.iter().map(|i| &i[..]).collect(), data);
-        let u = Usage { params: &a.params, resources: &[], inputs: &lens, outputs: &[a.len], contents: &c, initial_pages: 20 };
+        let u = Usage {
+            params: &a.params,
+            resources: &[],
+            inputs: &lens,
+            outputs: &[a.len],
+            contents: &c,
+            initial_pages: 20,
+        };
         MODULE.plan_for(&u)
     };
     assert!(plan(true).is_some());

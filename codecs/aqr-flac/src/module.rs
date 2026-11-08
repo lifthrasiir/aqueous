@@ -102,7 +102,7 @@ fn part(params_len: u64, res_len: u64, lens: [u64; N_BYTE_STREAMS + 3], size: u6
     let params = params.get_mut(..params_len as usize).ok_or_else(|| corrupt("params"))?;
     Params::read(0, params);
     let room = self::params(params, size)?;
-    if lens[N_BYTE_STREAMS] % 4 != 0 {
+    if !lens[N_BYTE_STREAMS].is_multiple_of(4) {
         return Err(corrupt("inputs"));
     }
     // No output is larger than 64 times its coded form.

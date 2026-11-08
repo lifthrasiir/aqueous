@@ -21,7 +21,15 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
 pub fn decode_against(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
     let (&[], &[sk, index, records, reference]) = (params, inputs) else { return Err(corrupt()) };
     crc_tables();
-    Ok(rebuild(sk, |s| whole_recs(s, index, records), Some(&codec::references(reference)), len, threads, (false, false))?.0)
+    Ok(rebuild(
+        sk,
+        |s| whole_recs(s, index, records),
+        Some(&codec::references(reference)),
+        len,
+        threads,
+        (false, false),
+    )?
+    .0)
 }
 
 /// The module of sets: the files rebuilt from `inputs`, the packed skeletons, indexes and
@@ -106,7 +114,14 @@ pub fn decode_set(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> 
                 None => None,
             };
             let keep = !wasm && is_parent[i];
-            rebuild(sks[i], |s| whole_recs(s, indexes[i], records[i]), refs, sizes[i], inner, (keep, wasm && workers > 1))
+            rebuild(
+                sks[i],
+                |s| whole_recs(s, indexes[i], records[i]),
+                refs,
+                sizes[i],
+                inner,
+                (keep, wasm && workers > 1),
+            )
         };
         if wasm && workers > 1 {
             // (as tasks, each the file and a 0, or a 1)
@@ -185,7 +200,13 @@ fn whole_recs<'a>(skel: &Skeleton, index: &[u8], records: &'a [u8]) -> Result<Ve
 
 /// The records of the images of `skel` as `png-recons` has them: the index telling each head's
 /// length in `heads`, the streams of the models following in `sts` and `raws`.
-fn split_recs<'a>(skel: &Skeleton, index: &[u8], heads: &'a [u8], sts: &'a [u8], raws: &'a [u8]) -> Result<Vec<Rec<'a>>> {
+fn split_recs<'a>(
+    skel: &Skeleton,
+    index: &[u8],
+    heads: &'a [u8],
+    sts: &'a [u8],
+    raws: &'a [u8],
+) -> Result<Vec<Rec<'a>>> {
     let (mut at, mut h, mut s, mut r) = (0, 0, 0, 0);
     let mut recs = Vec::with_capacity(skel.images.len());
     for _ in &skel.images {

@@ -173,29 +173,22 @@ impl Loaded for Remote<'_> {
         memory_limit: u64,
         task_limits: &[u64],
     ) -> aqr::Decoded<Vec<Vec<u8>>> {
-        // (the concurrency chosen here, and the worker's memory bound: its tasks' at that)
+        // (the concurrency chosen here)
         let slots: Vec<u64> = crate::wasm::task_slots(&self.wasm);
-        let concurrency = match crate::wasm::choose_concurrency(
+        let concurrency = crate::wasm::choose_concurrency(
             &slots.iter().map(|&s| s as usize).collect::<Vec<_>>(),
             memory_limit,
             task_limits,
             crate::wasm::application_bound_set(),
-        ) {
-            Ok(c) => c,
-            Err(f) => return Err(f),
-        };
-        let bound = crate::wasm::application_bound(
-            memory_limit,
-            task_limits,
-            &concurrency.iter().map(|&c| c as u64).collect::<Vec<_>>(),
-        );
+        )?;
         self.sandbox.with_worker(|w| {
             if !w.loaded.contains(&self.hash)
                 && let Err(f) = w.load(self.hash, &self.wasm)?
             {
                 return Ok(Err(f));
             }
-            w.apply(self.hash, params, resources, inputs, sizes, memory_limit, task_limits, &concurrency, bound)
+            let b = crate::wasm::Bounds { memory_limit, task_limits, concurrency: &concurrency };
+            w.apply(self.hash, params, resources, inputs, sizes, b)
         })
     }
 }
@@ -276,11 +269,15 @@ impl Worker {
         resources: &[Resource],
         inputs: &[&[u8]],
         sizes: &[u64],
-        memory_limit: u64,
-        task_limits: &[u64],
-        concurrency: &[usize],
-        bound: u64,
+        b: crate::wasm::Bounds,
     ) -> io::Result<aqr::Decoded<Vec<Vec<u8>>>> {
+        let crate::wasm::Bounds { memory_limit, task_limits, concurrency } = b;
+        // (the worker's memory bound: its tasks' at the concurrency chosen)
+        let bound = crate::wasm::application_bound(
+            memory_limit,
+            task_limits,
+            &concurrency.iter().map(|&c| c as u64).collect::<Vec<_>>(),
+        );
         // the bytes sent, held by the worker beside the memories it makes of them
         let sent = params.len() as u64
             + resources.iter().map(|r| r.len() as u64).sum::<u64>()

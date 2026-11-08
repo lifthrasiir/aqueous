@@ -412,6 +412,10 @@ impl Source for Slices<'_> {
 pub trait Sink {
     /// Bytes put so far.
     fn len(&self) -> usize;
+    /// Whether none are.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     fn put(&mut self, d: &[u8]);
 }
 

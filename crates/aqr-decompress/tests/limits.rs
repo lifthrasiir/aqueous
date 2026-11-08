@@ -13,15 +13,10 @@ fn wasm_bytes(m: Module) -> Vec<u8> {
     built(m).expect("built").read_wasm().unwrap()
 }
 
+type Outputs = aqr_formula::aqr::Decoded<Vec<Vec<u8>>>;
+
 /// `Native` and `Wasm` apply `m` alike, whatever the limits.
-fn both(
-    m: Module,
-    params: &[u8],
-    inputs: &[&[u8]],
-    sizes: &[u64],
-    limit: u64,
-    tasks: &[u64],
-) -> (aqr_formula::aqr::Decoded<Vec<Vec<u8>>>, aqr_formula::aqr::Decoded<Vec<Vec<u8>>>) {
+fn both(m: Module, params: &[u8], inputs: &[&[u8]], sizes: &[u64], limit: u64, tasks: &[u64]) -> (Outputs, Outputs) {
     let w = wasm_bytes(m);
     let (n, x) = (Native::default(), Wasm);
     let (n, x) = (n.load(&w).unwrap(), x.load(&w).unwrap());
@@ -43,7 +38,7 @@ fn kind(r: &aqr_formula::aqr::Decoded<Vec<Vec<u8>>>) -> &'static str {
 #[test]
 fn declared_limit_holds_natively() {
     let m = aqr_bcj::formula::DELTA;
-    let data: Vec<u8> = (0..300_000u32).map(|i| (i * 7 >> 3) as u8).collect();
+    let data: Vec<u8> = (0..300_000u32).map(|i| ((i * 7) >> 3) as u8).collect();
     let n = data.len() as u64;
     let plan = aqr_decompress::needed_by(m, &[2], &[], &[n], &[n], &Vec::<&[u8]>::new()).unwrap().unwrap();
     assert!(plan.instance > PAGE, "{plan:?}");
@@ -70,7 +65,7 @@ fn plan_needing_contents() {
     let m = aqr_lzx::formula::MODULE;
     let none: Vec<&[u8]> = Vec::new();
     // (the plan asks for the records and the index: not worked out without them)
-    assert_eq!(aqr_decompress::needed_by(m, &[], &[], &[1, 1, 1, 1], &[10], &none), Err(()));
+    assert_eq!(aqr_decompress::needed_by(m, &[], &[], &[1, 1, 1, 1], &[10], &none), Err(aqr_decompress::NoPlan));
     let junk: [&[u8]; 4] = [b"d", b"r", b"k", b"i"];
     for limit in [1 << 20, PAGE] {
         let (nat, wasm) = both(m, &[], &junk, &[10], limit, &[]);

@@ -258,6 +258,9 @@ pub fn index_before(lens: &[(usize, usize, usize, u32)]) -> Vec<u8> {
     out
 }
 
+/// By stream, the lengths of its data, its record and its stream.
+type StreamLens = Vec<(u64, u64, u64)>;
+
 /// The lengths of each stream's data, record and stream that `index` gives (of `data` and
 /// `records` bytes in all, and `streams` of the streams, a single stream's where it is empty),
 /// and the CRC-32 of each one's data as far as `derived` has it given (else empty).
@@ -267,7 +270,7 @@ pub fn lens_of(
     data: u64,
     records: u64,
     streams: u64,
-) -> Result<(Vec<(u64, u64, u64)>, Vec<u32>)> {
+) -> Result<(StreamLens, Vec<u32>)> {
     if index.is_empty() {
         // (a single large stream's CRC-32 would be in the index)
         return match derived.before() {
@@ -850,7 +853,11 @@ impl Run {
             .streams(g)
             .map(|k| {
                 let (d, r, s, ..) = self.lens[k];
-                s.min(8usize.saturating_mul(d.saturating_add(r)).saturating_add(64))
+                s.min(
+                    8usize
+                        .saturating_mul(d.saturating_add(r))
+                        .saturating_add(64),
+                )
             })
             .sum::<usize>()
             + crate::write::TOKEN_SLACK
@@ -946,16 +953,28 @@ mod alloc_tests {
 
     unsafe impl GlobalAlloc for Largest {
         unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-            if note(l.size()) { unsafe { System.alloc(l) } } else { std::ptr::null_mut() }
+            if note(l.size()) {
+                unsafe { System.alloc(l) }
+            } else {
+                std::ptr::null_mut()
+            }
         }
         unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
-            if note(l.size()) { unsafe { System.alloc_zeroed(l) } } else { std::ptr::null_mut() }
+            if note(l.size()) {
+                unsafe { System.alloc_zeroed(l) }
+            } else {
+                std::ptr::null_mut()
+            }
         }
         unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
             unsafe { System.dealloc(p, l) }
         }
         unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
-            if note(n) { unsafe { System.realloc(p, l, n) } } else { std::ptr::null_mut() }
+            if note(n) {
+                unsafe { System.realloc(p, l, n) }
+            } else {
+                std::ptr::null_mut()
+            }
         }
     }
 

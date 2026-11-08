@@ -228,6 +228,8 @@ static OPEN_ID: AtomicUsize = AtomicUsize::new(0);
 
 /// Puts a worker given back on the first open [`par_map`] with items left; whether there was
 /// one.
+// (the allowance's context is `Copy` in Wasm, where it is none)
+#[cfg_attr(target_family = "wasm", allow(clippy::clone_on_copy))]
 fn join_open() -> bool {
     let (work, state, cx) = {
         let mut open = OPEN.lock().unwrap();

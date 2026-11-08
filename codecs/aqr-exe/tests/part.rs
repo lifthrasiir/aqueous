@@ -42,7 +42,10 @@ fn same(what: &str, d: &[u8], origin: u64, is64: bool) {
     assert!(part.as_deref() == Ok(d), "{what}: part");
     // an output of another length, one stream short, and one with a byte over (ignored)
     assert!(module::x86_streamed(&p, &[&res], &streams, d.len() as u64 + 1).is_err(), "{what}: longer");
-    assert!(d.is_empty() || module::x86_streamed(&p, &[&res], &streams, d.len() as u64 - 1).is_err(), "{what}: shorter");
+    assert!(
+        d.is_empty() || module::x86_streamed(&p, &[&res], &streams, d.len() as u64 - 1).is_err(),
+        "{what}: shorter"
+    );
     let mut over: Vec<Vec<u8>> = streams.iter().map(|s| s.to_vec()).collect();
     over[1].push(7);
     let over: Vec<&[u8]> = over.iter().map(|s| &s[..]).collect();
@@ -52,7 +55,11 @@ fn same(what: &str, d: &[u8], origin: u64, is64: bool) {
 
 #[test]
 fn code_through_pieces() {
-    for (k, &(at, n)) in [(0usize, 0usize), (0, 1), (0, 15), (4096, 100), (4096, 20_000), (100_000, 300_000), (0, 3 << 20)].iter().enumerate() {
+    for (k, &(at, n)) in
+        [(0usize, 0usize), (0, 1), (0, 15), (4096, 100), (4096, 20_000), (100_000, 300_000), (0, 3 << 20)]
+            .iter()
+            .enumerate()
+    {
         let d = code(at, n);
         for is64 in [true, false] {
             same(&format!("code {n} at {at}, 64: {is64}"), &d, 0x1_4000_1000 + k as u64 * 16, is64);
@@ -123,12 +130,12 @@ mod arm64 {
         while d.len() < n {
             let r = next();
             let w = match r >> 29 {
-                0 => 0x9400_0000 | next() & 0x03ff_ffff,              // BL
-                1 => 0x9000_0000 | next() & 0x60ff_ffe0 | r & 0x1f,   // ADRP
-                2 => 0x1400_0000 | next() & 0x03ff_ffff,              // B
-                3 => 0x5400_0000 | next() & 0x00ff_ffff,              // B.cond
-                4 => 0xb400_0000 | next() & 0x00ff_ffff,              // CBZ
-                5 => 0x3600_0000 | next() & 0x00ff_ffff,              // TBZ
+                0 => 0x9400_0000 | next() & 0x03ff_ffff,            // BL
+                1 => 0x9000_0000 | next() & 0x60ff_ffe0 | r & 0x1f, // ADRP
+                2 => 0x1400_0000 | next() & 0x03ff_ffff,            // B
+                3 => 0x5400_0000 | next() & 0x00ff_ffff,            // B.cond
+                4 => 0xb400_0000 | next() & 0x00ff_ffff,            // CBZ
+                5 => 0x3600_0000 | next() & 0x00ff_ffff,            // TBZ
                 _ => next(),
             };
             d.extend(w.to_le_bytes());

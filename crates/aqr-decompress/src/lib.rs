@@ -828,13 +828,18 @@ pub fn windows_of(m: Module) -> Vec<(bool, u32, u64)> {
     import_shape(m).map(|s| s.1).unwrap_or_default()
 }
 
+/// [`needed_by`]'s failure: the plan of a module that cannot be worked out (a bug of the plan, or
+/// contents missing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoPlan;
+
 /// The memory an application of `m` needs, as aqr-compress declares it in the Apply instruction
 /// and as the decoder checks it: the memories imported (the parameters, the resources, the
 /// inputs and the outputs, the last two within their windows, a page at least each) with the
 /// module's plan of its working memory for the instance, and the plan's task limits. The lengths
 /// are those of the resources, inputs and outputs; `contents` the inputs, for plans that read
-/// them. `Ok(None)` for a module of no plan or none built (tests'); `Err(())` where its plan
-/// cannot be worked out (a bug of the plan, or contents missing).
+/// them. `Ok(None)` for a module of no plan or none built (tests'); [`NoPlan`] where its plan
+/// cannot be worked out.
 #[cfg(feature = "wasm")]
 pub fn needed_by(
     m: Module,
@@ -843,11 +848,11 @@ pub fn needed_by(
     inputs: &[u64],
     outputs: &[u64],
     contents: &dyn aqr_formula::Contents,
-) -> std::result::Result<Option<aqr_formula::Plan>, ()> {
+) -> std::result::Result<Option<aqr_formula::Plan>, NoPlan> {
     use aqr_formula::{PAGE, Plan, Usage};
     let Some(initial_pages) = m.plan.and(initial_pages_of(m)) else { return Ok(None) };
     let usage = Usage { params, resources, inputs, outputs, contents, initial_pages };
-    let plan = m.plan_for(&usage).ok_or(())?;
+    let plan = m.plan_for(&usage).ok_or(NoPlan)?;
     // (an input's or output's within its window, of a part module)
     let windows = windows_of(m);
     let fit = |n: u64, window: Option<u64>| n.div_ceil(PAGE).min(window.unwrap_or(u64::MAX)).saturating_mul(PAGE);
@@ -1125,7 +1130,7 @@ impl<'a> NativeLoaded<'a> {
                     let tasks = p.tasks.iter().zip(task_limits).all(|(&n, &l)| n <= l);
                     if p.instance <= memory_limit && tasks { Verdict::Within } else { Verdict::Over }
                 }
-                Ok(None) | Err(()) => Verdict::Unknown,
+                Ok(None) | Err(NoPlan) => Verdict::Unknown,
             }
         }
         #[cfg(not(feature = "wasm"))]
