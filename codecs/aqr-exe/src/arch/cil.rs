@@ -10,7 +10,7 @@
 //! their opcodes); the tokens' cache and deltas take 29% off them, and the tables' columns
 //! 30% off the tables (see FORMAT.md).
 
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 
 macro_rules! define_streams {
     ($($i:ident),* $(,)?) => (
@@ -851,7 +851,8 @@ mod decode {
     /// its `streams`; `None` where they do not make one, or are not all read.
     pub fn decode(streams: [&[u8]; NUM_STREAMS], origin: u32, meta: usize, len: usize) -> Option<Vec<u8>> {
         let mut s = streams;
-        let mut out = vec![0u8; len];
+        let mut out = crate::util::room(len)?;
+        out.resize(len, 0);
         // (the method bodies: one a position, which is a varint)
         let nbodies = s[BODYPOS].iter().filter(|&&b| b < 0x80).count();
 
@@ -875,7 +876,8 @@ mod decode {
             } else if tables.is_none() && (m.name == b"#~" || m.name == b"#-") {
                 let t = Tables::parse(s[META])?;
                 let rows_end = start.checked_add(t.header_len)?.checked_add(t.rows_len)?;
-                if rows_end > end {
+                // (the rows within the section, which `out` is the length of)
+                if rows_end > end || rows_end > out.len() {
                     return None;
                 }
                 copy(&mut s[META], &mut out, start, t.header_len)?;
@@ -1009,6 +1011,7 @@ pub use decode::{decode, decode_plan};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use core::array;
 
     const ORIGIN: u32 = 0x2000;

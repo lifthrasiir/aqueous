@@ -71,7 +71,7 @@ fn slots(sig: &[u8], k: usize) -> Option<Slots> {
     };
     let pages = if page == 0 { usize::from(limit > 0) } else { limit.div_ceil(page) };
     let end = hash_offset.checked_add(count.checked_mul(size)?)?;
-    (count == pages && end <= len).then_some(Slots { at: at + hash_offset, count, limit, hash, size, page })
+    (size > 0 && count == pages && end <= len).then_some(Slots { at: at + hash_offset, count, limit, hash, size, page })
 }
 
 /// The code slots `s` of a signature at `sig` of an image from `image`, of `code` (the bytes

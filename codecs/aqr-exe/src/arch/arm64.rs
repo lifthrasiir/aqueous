@@ -196,7 +196,8 @@ mod decode {
     /// do not make one, or are not all read.
     pub fn decode(streams: [&[u8]; NUM_STREAMS], origin: u64, len: usize) -> Option<Vec<u8>> {
         let mut s = streams;
-        let mut out = Vec::with_capacity(len);
+        // (a word a 4 bytes of CODE)
+        let mut out = crate::util::room(len).filter(|_| s[CODE].len() >= len / 4 * 4)?;
         decode_core(
             origin,
             len,
@@ -261,7 +262,7 @@ mod decode {
         len: usize,
         mut target: impl FnMut(bool, u32) -> Option<u32>,
     ) -> Option<Vec<u8>> {
-        let mut out = Vec::with_capacity(len);
+        let mut out = crate::util::room(len).filter(|_| s[CODE].len() >= len / 4 * 4)?;
         for k in 0..len / 4 {
             let mut w = u32::from_be_bytes(take(&mut s[CODE], 4)?.try_into().unwrap());
             let pc = origin.wrapping_add(4 * k as u64);

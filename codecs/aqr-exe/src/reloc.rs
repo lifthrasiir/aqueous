@@ -42,7 +42,7 @@ pub fn encode(d: &[u8], align: u8) -> Option<[Vec<u8>; 2]> {
 /// valid (FORMAT.md §R4).
 pub fn decode(rvas: &[u8], types: &[u8], align: u8, len: usize) -> Option<Vec<u8>> {
     let unit = 1usize << align;
-    let mut out = Vec::with_capacity(len);
+    let mut out = crate::util::room(len)?;
     let (mut rva, mut pos) = (0u32, 0);
     let mut start = None::<(usize, u32)>;
     let close = |out: &mut Vec<u8>, start: usize| {

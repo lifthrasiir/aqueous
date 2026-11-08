@@ -303,7 +303,8 @@ mod decode {
         let mut flags = [Flags { s: streams[BLF], n: 0 }, Flags { s: streams[ADRPF], n: 0 }];
         // (as many as the flags set, at most: no more memory than that)
         let ones = |s: &[u8]| s.iter().map(|b| b.count_ones() as usize).sum::<usize>();
-        let mut vals: [Vec<u32>; 2] = [streams[BLF], streams[ADRPF]].map(|s| Vec::with_capacity(ones(s)));
+        // (each a word of the section)
+        let mut vals: [Vec<u32>; 2] = [streams[BLF], streams[ADRPF]].map(|s| Vec::with_capacity(ones(s).min(len / 4)));
         for w in code.as_chunks::<4>().0 {
             let w = u32::from_be_bytes(*w);
             let (i, f) = match kind(w) {

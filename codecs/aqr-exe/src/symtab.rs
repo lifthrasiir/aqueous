@@ -324,7 +324,7 @@ pub fn decode(params: &[u8], streams: [&[u8]; NUM_STREAMS], len: usize) -> Optio
     if types.len() != n || sects.len() != n || descs.len() != 2 * n || names.len() != n {
         return None;
     }
-    let mut out = Vec::with_capacity(len);
+    let mut out = crate::util::room(len)?;
     out.resize(symtab, 0);
     out.extend_from_slice(head);
     let [n_addrs, n_values, new] = counts(types, names);

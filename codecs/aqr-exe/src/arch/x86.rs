@@ -1321,7 +1321,7 @@ pub(crate) fn decode_hooked(
     capacity: usize,
     hook: impl FnMut(Ref, u64, usize) -> Option<()>,
 ) -> Option<Vec<u8>> {
-    let mut code = Vec::with_capacity(capacity);
+    let mut code = crate::util::room(capacity)?;
     let mut src = Slices(streams.streams.each_ref().map(|s| &s[..]));
     decode_core(&mut src, &mut code, streams.origin, streams.sentinel_size, is64, opcodes, hook)?;
     Some(code)

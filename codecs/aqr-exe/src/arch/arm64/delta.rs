@@ -84,7 +84,7 @@ fn varint(s: &mut &[u8]) -> Option<u64> {
 #[cfg(feature = "decode")]
 pub fn decode(reference: &[u8], streams: [&[u8]; NUM_STREAMS], len: usize) -> Option<Vec<u8>> {
     let [mut ctrl, mut gaps, mut values, mut extra] = streams;
-    let mut out = Vec::with_capacity(len);
+    let mut out = crate::util::room(len)?;
     let mut own = |out: &mut Vec<u8>, n: u64| -> Option<()> {
         let n = usize::try_from(n).ok()?;
         let (e, rest) = (extra.get(..n)?, extra.get(n..)?);

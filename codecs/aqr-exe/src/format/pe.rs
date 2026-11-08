@@ -280,9 +280,10 @@ impl<R: std::io::Read + std::io::Seek> Image<'_, R> {
     fn read(&mut self, rva: u32, size: u32) -> Option<Vec<u8>> {
         let (s_rva, s_off, _) = self.find(rva, size)?;
         self.r.seek(std::io::SeekFrom::Start(s_off as u64 + (rva - s_rva) as u64)).ok()?;
-        let mut buf = vec![0u8; size as usize];
-        self.r.read_exact(&mut buf).ok()?;
-        Some(buf)
+        // (read as far as the file goes: `size` is a header's, and the stored data may lie past it)
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::Read::take(&mut *self.r, size as u64), &mut buf).ok()?;
+        (buf.len() == size as usize).then_some(buf)
     }
 
     /// The metadata that the CLR header `clr` (`IMAGE_COR20_HEADER`) points to, where the

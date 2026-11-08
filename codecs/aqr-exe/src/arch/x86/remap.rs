@@ -337,8 +337,9 @@ mod decode {
         let mut flags = [CALLF, JUMPF, ADDRF].map(|i| Flags { s: streams[i], n: 0 });
         // of each reference flagged, where its field is and its value (as many as the flags set,
         // at most: no more memory than that)
+        // (each a field of 4 bytes of the section, so no more than `capacity` allows)
         let ones: usize = flags.iter().flat_map(|f| f.s).map(|b| b.count_ones() as usize).sum();
-        let mut fixups: Vec<(u64, usize)> = Vec::with_capacity(ones);
+        let mut fixups: Vec<(u64, usize)> = Vec::with_capacity(ones.min(capacity / 4));
         let mut out = decode_hooked(&base, is64, opcodes, capacity, |r, v, at| {
             if flags[flags_of(r) - CALLF].next()? {
                 fixups.push((v & w, at));
