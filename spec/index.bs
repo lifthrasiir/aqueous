@@ -2831,34 +2831,28 @@ whose [=block/type=] is <code>0110&thinsp;00|ss|</code> in binary ([[#block-type
 Their data is [=checksummed Zstandard data=] ([[#shared-external-structure]]),
 except that block 60<sub>16</sub> is a [=shorthand block=] for a [=registered module=] ([[#registered-blocks]]).
 
-The internal structure after decompression is as follows:
+The internal structure after decompression gives a WebAssembly module in the binary format [[!WASM-CORE-3]],
+<dfn for=module>wasm_module</dfn>, in one of two forms told by its first byte:
+
+* If the first byte is 00<sub>16</sub>, the decoded data is the <dfn>stored form</dfn>:
+    [=module/wasm_module=] is the whole decoded data,
+    i.e. the content of an ordinary `.wasm` file, starting with the magic `00 61 73 6D` and the version `01 00 00 00`
+    (hexadecimal).
+* If the first byte is 0D<sub>16</sub>, the decoded data is the [=split form=] ([[#split-modules]]),
+    and [=module/wasm_module=] is joined from it.
+* Otherwise, including when the decoded data is empty, an [=invalid archive=] failure occurs.
 
 <div dfn-for=module>
 
-<table class=data>
-  <thead>
-    <tr>
-      <th>Name
-      <th>Type
-  </thead>
-  <tbody>
-    <tr>
-      <td><dfn>wasm_module</dfn>
-      <td>[=u8=][*]
-  </tbody>
-</table>
-
-[=module/wasm_module=] is a WebAssembly module in the binary format [[!WASM-CORE-3]],
-i.e. the content of an ordinary `.wasm` file, starting with the magic `00 61 73 6D` and the version `01 00 00 00`
-(hexadecimal) and spanning the whole decoded data.
-It MUST decode and validate as a module of the features allowed in [[#module-execution]],
+[=module/wasm_module=] MUST decode and validate as a module of the features allowed in [[#module-execution]],
 and MUST conform to the profile and the interface given there;
 otherwise an [=invalid archive=] failure occurs.
 In short, the module defines no memory of its own and imports every memory and host function from the module name `aqr`,
 has no start function, and exports a single [=entry point=] that the host invokes once per application.
 Custom sections are allowed and don't affect the result.
-The format adds nothing around the module, so that the decoded data can be inspected and run by any WebAssembly tool,
-and a module block for a [=registered module=] has the same [=module/wasm_module=] as the entry.
+The [=stored form=] adds nothing around the module, so that the decoded data can be inspected and run by any WebAssembly tool.
+A module block for a [=registered module=] has the same [=module/wasm_module=] as the entry, whatever its form,
+and a [=shorthand block=] stands for one of the [=stored form=].
 
 The <dfn>module hash</dfn> of a module block is the SHA-512/256 hash [[!FIPS180-4]] of its [=module/wasm_module=],
 which is also the [=registered hash=] of a [=registered module=] ([[#registered-blocks]]).
@@ -2899,6 +2893,209 @@ in which case a [=resource failure=] occurs.
 
   For example, a decompressor at [=level 1=] needs neither an engine nor a sandbox if it implements every registered module natively,
   and one at [=level 2=] needs both but no native implementation.
+</div>
+
+</div>
+
+<h3 id=split-modules>
+Split modules</h3>
+
+<div dfn-for=split>
+
+The <dfn for=/>split form</dfn> of a module block keeps [=module/wasm_module=] as 14 *streams*,
+in which the instructions of its code are split by field,
+and its data segments' bytes and its custom sections are apart from the rest.
+Every byte of [=module/wasm_module=] comes back from the streams as it was, LEB128s of any length included,
+but for the sizes of the sections and the functions split and for the local indices,
+which are written in the shortest form.
+Its structure is as follows:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>count</dfn>
+      <td>[=u8=]
+    <tr>
+      <td><dfn>lengths</dfn>
+      <td>[=leb128=][[=split/count=]]
+    <tr>
+      <td><dfn>payload</dfn>
+      <td>[=u8=][*]
+  </tbody>
+</table>
+
+[=split/count=] MUST be 13 (0D<sub>16</sub>), one less than the number of the streams.
+The stream |s|<sub>|i|</sub> for each |i| in [0, 13) is the [=split/lengths=][|i|] bytes of [=split/payload=]
+after those of |s|<sub>0</sub> through |s|<sub>|i| - 1</sub>,
+and the stream |s|<sub>13</sub> is the rest of [=split/payload=].
+If the sum of [=split/lengths=] exceeds the length of [=split/payload=], an [=invalid archive=] failure occurs.
+The streams are named as follows:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>|i|
+      <th>Name
+      <th>Holds
+  </thead>
+  <tbody>
+    <tr><td>0<td><code>skeleton</code><td>the header; the sections' ids, sizes and counts; how each function is kept
+    <tr><td>1<td><code>sections</code><td>the sections kept as they are but custom sections, and the functions kept as they are
+    <tr><td>2<td><code>custom</code><td>the custom sections' contents
+    <tr><td>3<td><code>locals</code><td>the functions' declarations of locals
+    <tr><td>4<td><code>op</code><td>opcodes, memory arguments' flags and the first bytes of their offsets, the immediates of `i32.const` and `call`
+    <tr><td>5<td><code>local</code><td>the codes of local indices
+    <tr><td>6<td><code>label</code><td>the labels of `br` and `br_if`
+    <tr><td>7<td><code>brtable</code><td>the labels of `br_table`
+    <tr><td>8<td><code>blocktype</code><td>block types
+    <tr><td>9<td><code>offset</code><td>memory arguments' offsets but their first bytes
+    <tr><td>10<td><code>i64</code><td>the immediates of `i64.const`
+    <tr><td>11<td><code>bytes</code><td>float and vector constants, shuffle lanes, lane indices
+    <tr><td>12<td><code>misc</code><td>the other immediates, and the data segments but their bytes
+    <tr><td>13<td><code>data</code><td>the data segments' bytes
+  </tbody>
+</table>
+
+[=module/wasm_module=] is *joined* from the streams by reading each from its start, each read taking its next bytes,
+and appending to the output, initially empty, as follows. The following terms are used:
+
+* A *LEB128 of at most |m| bytes* of a stream is its bytes up to and including the first byte without the MSB set,
+    which MUST be within the |m| bytes;
+    its value is that of the bits of its groups as for [=leb128=], where the groups beyond the 64th bit are dropped.
+    It doesn't have to be in the shortest form.
+    |L|<sub>32</sub> denotes 5, and |L|<sub>64</sub> denotes 10.
+* To *copy* bytes or a LEB128 of a stream is to read them and append them to the output as they are.
+    A LEB128 of |s| without a bound is a LEB128 of at most |L|<sub>32</sub> bytes of |s|.
+* To *write* an integer is to append its [=leb128=] in the shortest form.
+* unzz(|v|) is |v| / 2 if |v| is even, and -(|v| + 1) / 2 otherwise.
+
+<ol class=algorithm>
+    1. Copy 8 bytes of <code>skeleton</code>. They MUST be `00 61 73 6D 01 00 00 00` (hexadecimal).
+    2. While <code>skeleton</code> has bytes left, join a section:
+        1. Copy a byte |id| of <code>skeleton</code>.
+        2. If |id| is 10 (the code section) or 11 (the data section),
+            read a byte |k| of <code>skeleton</code>, which is not copied and MUST be 0 or 1.
+            If |k| is 0, join the content of the section ([[#split-sections]]), and continue to the next section.
+        3. Copy a LEB128 |n| of <code>skeleton</code>,
+            then |n| bytes of <code>custom</code> if |id| is 0, or of <code>sections</code> otherwise.
+    3. Every stream MUST have no bytes left.
+</ol>
+
+Reading past the end of a stream, a LEB128 not within its bound, a byte not allowed,
+or any other condition stated with MUST not holding, results in an [=invalid archive=] failure.
+
+<h4 id=split-sections>
+Code and data sections</h4>
+
+The content of a code or data section split is joined to a separate byte sequence |c|,
+which is then appended to the output preceded by its length written.
+The length MUST be less than 2<sup>32</sup>.
+|c| is joined as follows:
+
+<ol class=algorithm>
+    1. Copy a LEB128 |count| of <code>skeleton</code>.
+    2. Repeat |count| times:
+        * For the code section (|id| = 10), read a byte |f| of <code>skeleton</code>, which is not copied and MUST be 0 or 1.
+            * If |f| is 0, join a function body to a separate byte sequence |b|,
+                and append |b| preceded by its length written, which MUST be less than 2<sup>32</sup>.
+                The body is a LEB128 |n| of <code>locals</code> copied,
+                then |n| times a LEB128 of <code>locals</code> and a byte of <code>locals</code> copied,
+                then an expression ([[#split-expressions]]).
+            * If |f| is 1, copy a LEB128 |n| of <code>sections</code>, then |n| bytes of <code>sections</code>.
+        * For the data section (|id| = 11), copy a data segment:
+            a LEB128 |kind| of <code>misc</code>;
+            if |kind| is 2, a LEB128 of <code>misc</code>;
+            unless |kind| is 1, an expression ([[#split-expressions]]);
+            then a LEB128 |n| of <code>misc</code> and |n| bytes of <code>data</code>.
+</ol>
+
+<h4 id=split-expressions>
+Split expressions</h4>
+
+An expression is joined an instruction at a time, keeping a nesting depth |d|, initially 0,
+and the <dfn>recent locals</dfn> (a [=list=] of integers, initially empty) and |next| (initially 0) made anew for the expression,
+until its end.
+An instruction is its opcode, a byte of <code>op</code> copied, then its immediates as the following table tells, copied in order.
+A byte not in the table is not allowed.
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Opcode
+      <th>Immediates
+  </thead>
+  <tbody>
+    <tr><td>02, 03, 04<td>a LEB128 of <code>blocktype</code>; then |d| increases by 1
+    <tr><td>0B<td>none; the expression ends if |d| is 0, and |d| decreases by 1 otherwise
+    <tr><td>0C, 0D<td>a LEB128 of <code>label</code>
+    <tr><td>0E<td>a LEB128 |n| of <code>brtable</code>, then |n| + 1 LEB128s of <code>brtable</code>
+    <tr><td>10, 12<td>a LEB128 of <code>op</code>
+    <tr><td>11, 13<td>two LEB128s of <code>misc</code>
+    <tr><td>1C<td>a LEB128 |n| of <code>misc</code>, then |n| bytes of <code>misc</code>
+    <tr><td>20, 21, 22<td>a local index (see below)
+    <tr><td>23–26, 3F, 40, D0, D2<td>a LEB128 of <code>misc</code>
+    <tr><td>28–3E<td>a memory argument (see below)
+    <tr><td>41<td>a LEB128 of <code>op</code>
+    <tr><td>42<td>a LEB128 of at most |L|<sub>64</sub> bytes of <code>i64</code>
+    <tr><td>43<td>4 bytes of <code>bytes</code>
+    <tr><td>44<td>8 bytes of <code>bytes</code>
+    <tr><td>00, 01, 05, 0F, 1A, 1B, 45–C4, D1<td>none
+    <tr><td>FC<td>a LEB128 |x| of <code>op</code>, then by |x|:
+        none for 0–7;
+        two LEB128s of <code>misc</code> for 8, 10, 12 and 14;
+        a LEB128 of <code>misc</code> for 9, 11, 13 and 15–17;
+        any other |x| is not allowed
+    <tr><td>FD<td>a LEB128 |x| of <code>op</code>, then by |x|:
+        a memory argument for 0–11, 92 and 93;
+        16 bytes of <code>bytes</code> for 12 and 13;
+        a byte of <code>bytes</code> for 21–34;
+        a memory argument then a byte of <code>bytes</code> for 84–91;
+        none for 14–20, 35–83 and 94–255;
+        any other |x| is not allowed
+  </tbody>
+</table>
+
+Opcodes are hexadecimal, and |x| is decimal.
+A *memory argument* is a LEB128 |a| of <code>op</code>;
+if bit 6 of |a| (2<sup>6</sup>) is set, a LEB128 of <code>misc</code>;
+then the offset, a LEB128 of at most |L|<sub>64</sub> bytes whose first byte is of <code>op</code>
+and, if the MSB of that byte is set, whose other bytes (at most 9) are of <code>offset</code>.
+
+A *local index* |i| is coded by a LEB128 |c| of at most |L|<sub>64</sub> bytes of <code>local</code>,
+which is read and not copied.
+Let |r| be the length of the [=split/recent locals=]:
+
+1. If |c| < |r|, |i| is the item of the [=split/recent locals=] at |c| (from 0).
+    Otherwise, |i| is |next| + unzz(|c| - |r|), which MUST be in [0, 2<sup>32</sup>).
+2. Write |i|.
+3. Remove |i| from the [=split/recent locals=] if there, insert it at the front,
+    and remove the items after the first 256.
+    Then |next| becomes the greater of |next| and |i| + 1.
+
+<div class=note>
+  The streams are the inputs of the registered module `wasm-recons@1` in order ([[#modules-registry]]),
+  which rebuilds a module the same way and checks its declared length too,
+  so a compressor can make both from the same splitting.
+  A compressor splits only the parts it can walk to their ends:
+  a section or a function whose size or local indices aren't in the shortest form, or with an opcode not in the table,
+  is kept as it is, its bytes in <code>sections</code>.
+  The walk takes any byte the table allows, whether WebAssembly does or not;
+  [=module/wasm_module=] has to validate all the same.
+
+  The split form has no length of [=module/wasm_module=],
+  but [=module/wasm_module=] is at most five times as long as [=split/payload=]:
+  every byte is copied once, but for a byte of <code>local</code> or of <code>skeleton</code> (|k|, |f|)
+  each giving at most five bytes written.
+
+  A local index is coded by its rank among those last used, so that the same fragment of code in two functions
+  is coded the same even where they number their locals differently.
+  Over the modules of an implementation (3.6 MB, each module compressed alone by Zstandard at level 22),
+  the split form saves about 16% of the module blocks' data.
 </div>
 
 </div>
