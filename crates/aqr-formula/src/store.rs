@@ -12,6 +12,13 @@ use crate::Bytes;
 /// Bytes a buffer is of at least to be taken from the store; smaller ones stay on the heap.
 pub const MIN: usize = 4 << 10;
 
+/// Bytes a [`Writer`] of a length not told gathers on the heap before it takes a region of the
+/// store (which, of a length not known, is a file of its own sized for all it may grow to): one
+/// finished within them is moved to the store as a region of a length known, of the files shared
+/// by all. (Most such streams are short: an archive's entries of a kind, [`crate::ByKind`]; a file
+/// each made thousands of files of 64 GiB at once.)
+pub const UNTOLD: usize = 8 << 20;
+
 /// Regions of bytes outside the heap.
 pub trait Store: Send + Sync {
     /// A region to write, of `len` bytes at most where told, else of as many as are written
@@ -92,10 +99,15 @@ impl DerefMut for Buffer {
 }
 
 /// Bytes of a stream made in order: written to the store as they come where one is set (and
-/// they are not told to be few), else gathered on the heap. A stream of a formula is pushed of
+/// they are not told to be few; of a length not told, past [`UNTOLD`] bytes), else gathered on
+/// the heap. A stream of a formula is pushed of
 /// it as it is (`Formula::push(class, writer)`), so that a recompressor making a long stream
 /// holds none of it.
-pub struct Writer(WriterRepr);
+pub struct Writer {
+    repr: WriterRepr,
+    /// Of a length not told, and on the heap still ([`UNTOLD`]).
+    untold: bool,
+}
 
 enum WriterRepr {
     Heap(Vec<u8>),
@@ -107,35 +119,54 @@ impl Writer {
     pub fn new(len: Option<usize>) -> Writer {
         let stored = match len {
             Some(n) if n < MIN => None,
+            None => None,
             _ => store().and_then(|s| s.writer(len)),
         };
-        Writer(match stored {
+        let repr = match stored {
             Some(w) => WriterRepr::Stored(w),
             None => WriterRepr::Heap(Vec::with_capacity(len.unwrap_or(0))),
-        })
+        };
+        Writer { repr, untold: len.is_none() }
     }
 
     pub fn write(&mut self, d: &[u8]) {
         // (as a stream is made, a recompression over its heap gives up: `aqr_common::allowance`)
         aqr_common::allowance::check();
-        match &mut self.0 {
+        if self.untold
+            && let WriterRepr::Heap(v) = &self.repr
+            && v.len() + d.len() > UNTOLD
+        {
+            // (long: a region of its own, the bytes so far first; else the heap's for good)
+            self.untold = false;
+            if let Some(mut w) = store().and_then(|s| s.writer(None))
+                && w.write(v)
+            {
+                self.repr = WriterRepr::Stored(w);
+            }
+        }
+        match &mut self.repr {
             WriterRepr::Heap(v) => v.extend_from_slice(d),
             WriterRepr::Stored(w) => {
                 if !w.write(d) {
                     // (no room in its region: the rest on the heap, after what it has)
-                    let WriterRepr::Stored(w) = std::mem::replace(&mut self.0, WriterRepr::Heap(Vec::new())) else {
+                    let WriterRepr::Stored(w) = std::mem::replace(&mut self.repr, WriterRepr::Heap(Vec::new())) else {
                         unreachable!("stored")
                     };
                     let mut v = w.finish().to_vec();
                     v.extend_from_slice(d);
-                    self.0 = WriterRepr::Heap(v);
+                    self.repr = WriterRepr::Heap(v);
                 }
             }
         }
     }
 
     pub fn into_bytes(self) -> Bytes {
-        match self.0 {
+        match self.repr {
+            WriterRepr::Heap(v) if self.untold => {
+                let mut b = v.into();
+                spill(&mut b);
+                b
+            }
             WriterRepr::Heap(v) => v.into(),
             WriterRepr::Stored(w) => w.finish(),
         }
