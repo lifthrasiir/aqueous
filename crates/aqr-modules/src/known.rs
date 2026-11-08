@@ -323,8 +323,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "mp3-recons",
-        version: 5,
-        sha512_256: hex("ff2901cc3432027ca7475bc9d43e27999641c6b923d1f4f36945ab388a5eb058"),
+        version: 6,
+        sha512_256: hex("239102fcad924377b645412fc8bfc5bbcfafdf752e5ab3b0d57a29e4cf75649f"),
         block: include_bytes!("../wasm/mp3-recons.block"),
     },
     Known {

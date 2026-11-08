@@ -195,6 +195,71 @@ impl BitCoder for Decoder<'_> {
     }
 }
 
+/// A decoder that can tell whether it read far past its data.
+pub trait Bounded: BitCoder {
+    /// True if the decoder has not read far past the data (the encoder flushes 4 bytes).
+    fn in_bounds(&self) -> bool;
+}
+
+impl Bounded for Decoder<'_> {
+    fn in_bounds(&self) -> bool {
+        Decoder::in_bounds(self)
+    }
+}
+
+/// [`Decoder`] of a stream taken in pieces ([`aqr_api::stream::Reader`]): the same bits, zeros
+/// past the end.
+pub struct StreamDecoder<'a> {
+    code: u32,
+    range: u32,
+    src: aqr_api::stream::Reader<'a>,
+    /// Bytes taken, past the end too.
+    pos: u64,
+    len: u64,
+}
+
+impl<'a> StreamDecoder<'a> {
+    /// A decoder of the `len` bytes of `src`, which `src` is read in pieces of `piece` bytes.
+    pub fn new(src: &'a mut dyn aqr_api::stream::Pull, len: u64, piece: usize) -> Self {
+        let mut d =
+            StreamDecoder { code: 0, range: u32::MAX, src: aqr_api::stream::Reader::new(src, piece), pos: 0, len };
+        for _ in 0..4 {
+            d.code = d.code << 8 | d.next() as u32;
+        }
+        d
+    }
+
+    #[inline]
+    fn next(&mut self) -> u8 {
+        self.pos += 1;
+        self.src.byte().unwrap_or(0)
+    }
+}
+
+impl Bounded for StreamDecoder<'_> {
+    fn in_bounds(&self) -> bool {
+        self.pos <= self.len + 4
+    }
+}
+
+impl BitCoder for StreamDecoder<'_> {
+    #[inline]
+    fn bit(&mut self, p: &mut Prob, _b: u32) -> u32 {
+        let bound = (self.range >> PROB_BITS) * *p as u32;
+        let one = self.code >= bound;
+        self.code -= if one { bound } else { 0 };
+        self.range = std::hint::select_unpredictable(one, self.range - bound, bound);
+        let up = (ONE - *p) >> MOVE;
+        let down = *p >> MOVE;
+        *p = std::hint::select_unpredictable(one, *p - down, *p + up);
+        while self.range < TOP {
+            self.range <<= 8;
+            self.code = self.code << 8 | self.next() as u32;
+        }
+        one as u32
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

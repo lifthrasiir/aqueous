@@ -671,13 +671,13 @@ pub(crate) trait SideSrc {
     fn in_bounds(&mut self) -> bool;
 }
 
-/// Side information decoded in the main pass itself.
-pub(crate) struct InlineSide<'a> {
-    pub(crate) rc: rc::Decoder<'a>,
+/// Side information decoded in the main pass itself, by the range decoder `R`.
+pub(crate) struct InlineSide<R> {
+    pub(crate) rc: R,
     pub(crate) m: Box<SideModel>,
 }
 
-impl SideSrc for InlineSide<'_> {
+impl<R: rc::Bounded> SideSrc for InlineSide<R> {
     #[inline(always)]
     fn frame(&mut self, h: Header, si: &mut SideInfo, placed: &mut bool, resid: &mut i32) {
         self.m.frame(&mut self.rc, h, si, placed, resid);
@@ -718,14 +718,14 @@ pub(crate) const WINDOW: usize = 512 << 10;
 
 /// Bytes of a gap copied at a time (the sink is handed the reservoir between them, so that
 /// it is kept in [`WINDOW`]).
-const GAP_PIECE: usize = 64 << 10;
+pub(crate) const GAP_PIECE: usize = 64 << 10;
 
 /// Bytes a frame's side information takes at most (32), with room to spare: the writer of it
 /// is made of that, and is not grown.
 pub(crate) const SIDE_ROOM: usize = 40;
 
 /// Bytes of the reservoir dropped at a time by [`Assembler`], at least.
-const DISCARD_MIN: usize = 256 << 10;
+pub(crate) const DISCARD_MIN: usize = 256 << 10;
 
 /// The output file, written as the main pass goes: junk, and per frame header, CRC, side
 /// information and payload, each frame once its side information is complete and its payload
@@ -811,35 +811,65 @@ impl Sink for Assembler<'_> {
     }
 }
 
-/// Rebuilds the reservoir (the main data of all frames) into the writer `w`, handing it to
-/// `sink` as it goes, and completes the side information of the frames (main_data_begin,
-/// part2_3_length). `bufs` are the padded bit strings TAIL, RAWGR and GAPS ([`padded`]). On
-/// return `w` holds the whole reservoir written (but what the sink dropped).
-pub(crate) fn main_pass<C: Coder, S: SideSrc, K: Sink>(
-    fr: &mut Frames,
-    bufs: [&[u8]; 3],
-    side: &mut S,
-    dc: &mut C,
-    sink: &mut K,
-    w: &mut FastWriter,
-) -> Result<(), Error> {
-    let [tail_buf, raw_gr_buf, gaps_buf] = bufs;
-    let (mut tail, mut raw_gr, mut gaps) =
-        (BitReader::new(tail_buf, 0), BitReader::new(raw_gr_buf, 0), BitReader::new(gaps_buf, 0));
-    let r_len = fr.r_len;
+/// A bit string that the main pass copies to the reservoir in pieces: TAIL, RAWGR and GAPS.
+pub(crate) trait BitIn {
+    /// Copies the next `n` bits to `w`; an error where the string ends before.
+    fn copy_to(&mut self, w: &mut FastWriter, n: usize) -> Result<(), Error>;
+}
 
-    let mut st = State::new();
-    let mut end = 0usize;
-    let mut scf = [0u8; 39];
-    for fi in 0..fr.frames.len() {
-        sink.ready(fr, fi, w);
-        if fi > 0 && fi % RUN_FRAMES == 0 {
-            dc.restart();
-        }
-        let (h, mut si, pay, len) = fr.frames[fi];
+/// The whole string ([`padded`]) in memory.
+impl BitIn for BitReader<'_> {
+    #[inline(always)]
+    fn copy_to(&mut self, w: &mut FastWriter, n: usize) -> Result<(), Error> {
+        w.copy(self, n);
+        Ok(())
+    }
+}
+
+/// The largest main_data_begin of any frame (MPEG-1's), in bytes.
+pub(crate) const MAX_MDB: usize = 511;
+
+/// The bits of the reservoir that no frame at `pay` or after reads: those before this position
+/// (a frame's main data starts at most [`MAX_MDB`] bytes before its payload), which are gap
+/// whatever the frames in between do.
+pub(crate) fn gap_before(pay: usize) -> usize {
+    pay.saturating_sub(MAX_MDB) * 8
+}
+
+/// The state of the main pass between frames.
+pub(crate) struct Pass {
+    st: Box<State>,
+    /// The end of the last granule written, in bits of the reservoir.
+    end: usize,
+}
+
+impl Pass {
+    pub(crate) fn new() -> Pass {
+        Pass { st: State::new(), end: 0 }
+    }
+
+    /// The frame with header `h` and payload `len` bytes long at `pay` in the reservoir, whose
+    /// main data is written to `w` and whose side information is completed in `si` (given as it
+    /// is after [`parse_frames`]): `ready` is called with `w` as the gap before the frame is
+    /// copied in pieces. `bufs` are TAIL, RAWGR and GAPS. The writer may hold gap bits past the
+    /// last frame's main data (`gap_before`), not past this frame's.
+    #[inline(always)]
+    pub(crate) fn frame<C: Coder, S: SideSrc, B: BitIn>(
+        &mut self,
+        (h, pay, len): (Header, usize, usize),
+        si: &mut SideInfo,
+        side: &mut S,
+        dc: &mut C,
+        bufs: &mut [B; 3],
+        w: &mut FastWriter,
+        ready: &mut dyn FnMut(&mut FastWriter) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let [tail, raw_gr, gaps] = bufs;
+        let (st, end) = (&mut self.st, self.end);
+        let mut scf = [0u8; 39];
         let mut placed = false;
         let mut resid = 0;
-        side.frame(h, &mut si, &mut placed, &mut resid);
+        side.frame(h, si, &mut placed, &mut resid);
         if !placed {
             for gr in 0..h.granules() {
                 for ch in 0..h.channels() {
@@ -847,36 +877,35 @@ pub(crate) fn main_pass<C: Coder, S: SideSrc, K: Sink>(
                     side.granule(h, &mut si.gr[gr][ch], ch, false, &mut raw);
                 }
             }
-            if place(&si, h, pay, len, end).is_some() {
+            if place(si, h, pay, len, end).is_some() {
                 return Err(Error("placement"));
             }
-            fr.frames[fi].1 = si;
-            continue;
+            return Ok(());
         }
         let pred = pay as i64 - end.div_ceil(8) as i64;
         let mdb = pred + resid as i64;
-        let max_mdb = if h.lsf() { 255 } else { 511 };
+        let max_mdb = if h.lsf() { 255 } else { MAX_MDB as i64 };
         if !(0..=max_mdb).contains(&mdb) || mdb > pay as i64 || (pay - mdb as usize) * 8 < end {
             return Err(Error("main_data_begin"));
         }
         si.main_data_begin = mdb as u16;
         let start = (pay - mdb as usize) * 8;
-        copy_gap(w, &mut gaps, start - end, sink, fr, fi);
+        copy_gap(w, gaps, start - w.len(), ready)?;
         for gr in 0..h.granules() {
             for ch in 0..h.channels() {
                 let mut raw = false;
                 side.granule(h, &mut si.gr[gr][ch], ch, true, &mut raw);
                 let g = si.gr[gr][ch];
                 if raw {
-                    w.copy(&mut raw_gr, g.part2_3_length as usize);
+                    raw_gr.copy_to(w, g.part2_3_length as usize)?;
                     continue;
                 }
                 let gr_start = w.len();
-                let lay = scf_layout(h, &si, gr, ch);
+                let lay = scf_layout(h, si, gr, ch);
                 let nscf: usize = (0..4).filter(|&k| !lay.copy[k]).map(|k| lay.count[k] as usize).sum();
                 let (mut nq, mut tl) = (0, 0);
                 side.part3(ch, &mut nq, &mut tl);
-                model::code_scalefactors(dc, &mut st, &lay, ch, &mut scf[..nscf]);
+                model::code_scalefactors(dc, st, &lay, ch, &mut scf[..nscf]);
                 let mut k = 0;
                 w.reserve(64);
                 for g4 in 0..4 {
@@ -893,11 +922,11 @@ pub(crate) fn main_pass<C: Coder, S: SideSrc, K: Sink>(
                 if g.table_select.iter().any(|&t| t == 4 || t == 14) {
                     return Err(Error("table"));
                 }
-                model::decode_granule(dc, &mut st, h, &si, gr, ch, &scf[..nscf], nq, w);
+                model::decode_granule(dc, st, h, si, gr, ch, &scf[..nscf], nq, w);
                 if tl > 4095 {
                     return Err(Error("tail"));
                 }
-                w.copy(&mut tail, tl);
+                tail.copy_to(w, tl)?;
                 let p23 = w.len() - gr_start;
                 if p23 > 4095 {
                     return Err(Error("part2_3_length"));
@@ -905,29 +934,72 @@ pub(crate) fn main_pass<C: Coder, S: SideSrc, K: Sink>(
                 si.gr[gr][ch].part2_3_length = p23 as u16;
             }
         }
-        fr.frames[fi].1 = si;
-        end = w.len();
-        if end > (pay + len) * 8 {
+        self.end = w.len();
+        if self.end > (pay + len) * 8 {
             return Err(Error("main data overflow"));
         }
+        Ok(())
+    }
+
+    /// After the last frame: the rest of the reservoir, which ends at `r_len` bytes, is gap.
+    pub(crate) fn finish<B: BitIn>(
+        &mut self,
+        r_len: usize,
+        gaps: &mut B,
+        w: &mut FastWriter,
+        ready: &mut dyn FnMut(&mut FastWriter) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        copy_gap(w, gaps, (r_len * 8).checked_sub(w.len()).ok_or(Error("main data overflow"))?, ready)
+    }
+}
+
+/// Rebuilds the reservoir (the main data of all frames) into the writer `w`, handing it to
+/// `sink` as it goes, and completes the side information of the frames (main_data_begin,
+/// part2_3_length). `bufs` are the padded bit strings TAIL, RAWGR and GAPS ([`padded`]). On
+/// return `w` holds the whole reservoir written (but what the sink dropped).
+pub(crate) fn main_pass<C: Coder, S: SideSrc, K: Sink>(
+    fr: &mut Frames,
+    bufs: [&[u8]; 3],
+    side: &mut S,
+    dc: &mut C,
+    sink: &mut K,
+    w: &mut FastWriter,
+) -> Result<(), Error> {
+    let mut bufs = bufs.map(|b| BitReader::new(b, 0));
+    let mut pass = Pass::new();
+    let r_len = fr.r_len;
+    for fi in 0..fr.frames.len() {
+        sink.ready(fr, fi, w);
+        if fi > 0 && fi % RUN_FRAMES == 0 {
+            dc.restart();
+        }
+        let (h, mut si, pay, len) = fr.frames[fi];
+        pass.frame((h, pay, len), &mut si, side, dc, &mut bufs, w, &mut |w| Ok(sink.ready(fr, fi, w)))?;
+        fr.frames[fi].1 = si;
     }
     if !side.in_bounds() {
         return Err(Error("side stream exhausted"));
     }
-    copy_gap(w, &mut gaps, r_len * 8 - end, sink, fr, fr.frames.len());
-    sink.ready(fr, fr.frames.len(), w);
+    let n = fr.frames.len();
+    let [_, _, gaps] = &mut bufs;
+    pass.finish(r_len, gaps, w, &mut |w| Ok(sink.ready(fr, n, w)))?;
+    sink.ready(fr, n, w);
     Ok(())
 }
 
-/// Copies `bits` gap bits to `w` in pieces, handing the reservoir to `sink` after each (the
-/// frames before `fi` have their side information).
-fn copy_gap<K: Sink>(w: &mut FastWriter, gaps: &mut BitReader, mut bits: usize, sink: &mut K, fr: &Frames, fi: usize) {
+/// Copies `bits` gap bits to `w` in pieces, calling `ready` with it after each.
+pub(crate) fn copy_gap<B: BitIn>(
+    w: &mut FastWriter,
+    gaps: &mut B,
+    mut bits: usize,
+    ready: &mut dyn FnMut(&mut FastWriter) -> Result<(), Error>,
+) -> Result<(), Error> {
     while bits > GAP_PIECE * 8 {
-        w.copy(gaps, GAP_PIECE * 8);
+        gaps.copy_to(w, GAP_PIECE * 8)?;
         bits -= GAP_PIECE * 8;
-        sink.ready(fr, fi, w);
+        ready(w)?;
     }
-    w.copy(gaps, bits);
+    gaps.copy_to(w, bits)
 }
 
 /// The output file: junk, and per frame header, CRC, side information and main data, from

@@ -10,12 +10,11 @@ use std::sync::OnceLock;
 use crate::module::SLOTS;
 pub use crate::module::{Error, decode};
 
-pub const MODULE: Module = Module::new("mp3-recons", 5).with_plan(plan);
+pub const MODULE: Module = Module::new("mp3-recons", 6).with_plan(plan);
 
 /// The memory of the module: its plan ([`crate::plan::decode`]).
 fn plan(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    // (SEGS, the first input, tells the runs and frames)
-    crate::plan::decode(u.initial(), u.params, u.resources, u.inputs, u.output(), u.content(0)?)
+    crate::plan::decode(u.initial(), u.params, u.resources, u.inputs, u.output())
 }
 
 /// Classes of the slots, and their kinds: the side information, the rANS words and the raw
@@ -36,6 +35,9 @@ const CLASSES: [(&str, Kind); SLOTS] = [
 /// The formula of `input`: `None` where the coded form is not smaller (or on a failure).
 /// `threads` threads give the same formula.
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
+    if input.len() as u64 > crate::plan::MAX_FILE {
+        return None;
+    }
     let c = std::panic::catch_unwind(|| {
         let c = if threads > 1 && input.len() >= par::PAR_MIN { par::encode(input) } else { codec::encode(input) };
         let n: usize = c.streams.iter().map(Vec::len).sum::<usize>() + c.words.len() + c.raw.len();

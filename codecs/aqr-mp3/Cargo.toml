@@ -7,13 +7,14 @@ edition = "2024"
 default = ["encode"]
 # The formulas (`formula`) and the built-in model; without it, the code of the module alone
 # (`module`).
-encode = ["dep:aqr-formula", "aqr-common/zstd"]
+encode = ["dep:aqr-formula", "aqr-common/zstd", "aqr-raw/encode"]
 
 [dependencies]
 aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 memchr = "2"
+aqr-raw = { path = "../aqr-raw", default-features = false }
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.

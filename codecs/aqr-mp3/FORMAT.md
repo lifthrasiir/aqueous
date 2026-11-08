@@ -1,4 +1,4 @@
-# aqr-mp3 format: module `mp3-recons`, version 5
+# aqr-mp3 format: module `mp3-recons`, version 6
 
 This document specifies the module `mp3-recons` of entry formulas (aqr-formula), which
 rebuilds an MP3 file from a smaller representation, completely enough to write an
@@ -52,7 +52,10 @@ External references:
 
 ## 2. Module
 
-- **Module**: name `mp3-recons`, version 5. Version 4 was the same with the magnitudes of
+- **Module**: name `mp3-recons`, version 6. Version 6 is the same format as version 5, as a
+  part module (section 10.5): the slots are taken in order through windows and the output
+  put in order, so that nothing of their lengths is held. Version 5 was the same with the
+  slots and the output whole in memory. Version 4 was the same with the magnitudes of
   the previous granule in place of their moving average (section 9.2); version 3, besides,
   had a table of its own for every context and a u32 layout id first; version 2, besides, had the rANS stream
   in a single run (section 8) however many frames there are.
@@ -858,7 +861,8 @@ The scalefactors use `scfsi` of the current frame and `gr0_scf` (4.5, 9.4) for c
 ### 10.3 Bit streams
 
 GAPS, RAWGR and TAIL are read front to back, each from its own position, across the whole
-file. Bits past their end read as 0 (an encoder never produces such files).
+file. Bits past their end read as 0 (an encoder never produces such files); a decoder as a
+part module (10.5) fails there instead.
 
 ### 10.4 Assembly
 
@@ -875,6 +879,36 @@ for k in 0..number of runs + 1:
         append side
         append R[pay .. pay + len] (bytes)
 ```
+
+### 10.5 Part module
+
+The module is a part module (the spec's "Module execution"; windows of 16 pages for each of
+the ten inputs and the output): it takes each input in order, and puts its output in
+order, in pieces; it holds nothing that follows their lengths. Its output and errors are
+the whole decoder's (10.2, 10.4), with the following, so that what it holds is bounded.
+
+- SEGS and HDR are read as the frames come: the frame list of section 3 is a queue of
+  frames, each from its side information being complete (the end of its main pass step)
+  until it is written to the output, which is when `R` is complete to the end of its
+  payload and the junk before it is copied from JUNK. Where the queue would hold more than
+  1024 frames, the decoder fails (an encoder never makes such a file: the frames waiting
+  are those whose payloads end within 511 bytes of the next frame's: 170 at most in a
+  file of frames that carry payload, at 8 kbps stereo MPEG-2.5; only free format frames
+  of no payload make more).
+- Before the main pass step of a frame with payload offset `pay`, the next
+  `max(0, (pay − 511) × 8 − |R|)` bits of GAPS are appended to `R` (when `|R|` is below
+  that position): no frame from this one on reaches back past `pay − 511`, so these bits
+  are gap bits whatever follows, and the appending is the same as the one `start − end`
+  asks for (10.2) in two parts. The reservoir is kept only from the first frame not written.
+- Each frame reads at most 4 granules' worth of symbols from the rANS stream (one word a
+  symbol at most) and of raw bits (section 9: 8064 bits a granule) after its run's start,
+  which the decoder holds ahead of it. A frame's granule is checked against the limits of
+  10.2 before any symbol of it is read.
+- A bit string (TAIL, RAWGR, GAPS) or the raw bit stream that ends before the bits that
+  a step copies or reads is an error (10.3 reads zeros there).
+- The length of the file is below 2<sup>29</sup> bytes (the positions of `R` are in bits, in
+  32); the encoder gives no formula for a longer one. The decoder fails on the length
+  above it.
 
 ## 11. Validation
 

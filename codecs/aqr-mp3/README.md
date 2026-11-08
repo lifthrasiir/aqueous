@@ -78,10 +78,12 @@ any main data that cannot be reproduced.
 | `src/formula.rs` | The module `mp3-recons`: formula of a file, decoding |
 | `src/plan.rs` | The module's memory plan on WebAssembly (`aqr_api::stack`) |
 | `src/par.rs` | Encoding and decoding with more than one thread |
+| `src/part.rs` | The module as a part module: inputs read and output put in order through windows |
 | `../../crates/aqr-common` | Alias-table rANS with lazy table construction (`rans64`, re-exported as `rans`), bit readers and writers (`msb`, as `bits`), LEB128 |
 | `src/bin/train.rs` | Training of the built-in tables (`model/builtin.bin`) |
 | `tests/regress.rs`, `tests/data` | Round trips of small LAME encodings (CBR, VBR, mono, CRC, MPEG-2, MPEG-2.5 8 kHz, free format, tags), with junk, cuts, concatenation |
 | `tests/formula.rs` | The formula of the same files, large repetitions of them and non-MP3 data; 1, 2 and 8 threads: identical formulas, round trips, the same errors for corrupted slots |
+| `tests/part.rs` | The part module through the host's emulation against the whole decoding: files past the windows, junk, a gap of many pieces; damaged, cut and extended slots |
 | `tests/memory.rs` | Peak heap of a 16 MB file, encoding and decoding, within a few times the file over the tables |
 | `examples/` | Benchmarks and analysis helpers (examples `aqr-mp3-NAME`: `hot`, `phases`, `perfile`, `ctxdist`, `init`), and `memprobe` (on `aqr_common::mem`) |
 | `tools/` | `gen_huff.py`, `profile.py` (samply + atos self/inclusive time by line), `compare.sh`, `experiment.sh` |
@@ -223,7 +225,10 @@ the calling thread, in order. Around them (`src/par.rs`):
 - **Memory**: about 61 MB of peak RSS through `aqr-show` whatever the file (see Results), the
   encoder's inverse maps 4 MB of it at most. The tables are also the resource every archive
   carries (about 38 KB archived). Decoding with more than one thread still holds the
-  reservoir whole. On WebAssembly (the module is on the stack allocator) the memory is exactly
-  its plan, `src/plan.rs`: the output, the tables (made of the memory they keep, their
-  contexts sharing the canonical one of their table), the frames (counted first), the padded
-  inputs, the models and the window, each made at its final size in that order.
+  reservoir whole. On WebAssembly (the module is on the stack allocator, and a part module,
+  `src/part.rs`) the memory is exactly its plan, `src/plan.rs`, which follows no length: the
+  tables (made of the memory they keep, their contexts sharing the canonical one of their
+  table), the models, the slides of the bit strings, the rANS decoder's window, the readers of
+  the byte streams, the frames waiting for their payloads (1024 at most) and the reservoir's
+  window, each made at its final size in that order. The file is below 512 MiB (the positions
+  of the reservoir are in bits, in 32).

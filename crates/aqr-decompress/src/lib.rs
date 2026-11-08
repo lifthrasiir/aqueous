@@ -706,7 +706,7 @@ const NATIVE: &[Entry] = &[
     bare(GIF, |p, _, i, n, t| aqr_gif::formula::decode(p, i, n, t).map_err(err)),
     bare(PRORES, |p, _, i, n, t| aqr_prores::formula::decode(p, i, n, t).map_err(err)),
     bare(JPEG, |p, _, i, n, t| aqr_jpeg::formula::decode(p, i, n, t).map_err(err)),
-    takes(MP3, |p, r, i, n, t| aqr_mp3::formula::decode(p, r, i, n, t).map_err(err)),
+    threaded_takes(MP3, |p, r, i, n, t| aqr_mp3::formula::decode(p, r, i, n, t).map_err(err)),
     threaded_takes(FLAC, |p, r, i, n, t| aqr_flac::formula::decode(p, r, i, n, t).map_err(err)),
     bare(PSD, |p, _, i, n, t| aqr_psd::formula::decode(p, i, n, t).map_err(err)),
     bare(CLIP, |p, _, i, n, t| aqr_clip::formula::decode(p, i, n, t).map_err(err)),

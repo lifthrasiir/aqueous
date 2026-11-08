@@ -729,6 +729,7 @@ dependencies = [
  "aqr-api",
  "aqr-common",
  "aqr-formula",
+ "aqr-raw",
  "memchr",
 ]
 

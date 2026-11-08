@@ -2596,8 +2596,8 @@ fn flac_plans_hold() {
     assert!(applications_hold("8 MiB of metadata", &f, &big, queued) > 0);
 }
 
-/// mp3-recons lays its memory out as a stack, its limit its plan: of every fixture, of a file
-/// of 5 MB (well past its window, 12000 frames) and of the same with 4000 frames whose
+/// mp3-recons (a part module) lays its memory out as a stack, its limit its plan, whatever the
+/// lengths: of every fixture, of a file of 5 MB (well past its window, 12000 frames) and of the same with 4000 frames whose
 /// main_data_begin is out of range (their payloads are one gap, many pieces long) and its
 /// last frames cut.
 #[test]
@@ -2619,6 +2619,22 @@ fn mp3_plans_hold() {
     }
     assert!(seen >= 8, "{seen}");
     let f = aqr_mp3::formula::encode(&big, 1).unwrap();
+    // (a part module: the same plan for inputs and an output of any length)
+    let Node::Apply(a) = &f.root else { panic!("not an application") };
+    let resources: Vec<u64> = a.resources.iter().map(|r| r.len() as u64).collect();
+    let none: Vec<&[u8]> = Vec::new();
+    let plan_of = |lens: &[u64], out: u64| {
+        let usage = aqr_formula::Usage {
+            params: &a.params,
+            resources: &resources,
+            inputs: lens,
+            outputs: &[out],
+            contents: &none,
+            initial_pages: aqr_decompress::initial_pages_of(a.module).unwrap(),
+        };
+        a.module.plan_for(&usage).unwrap().instance
+    };
+    assert_eq!(plan_of(&[100; 10], 100), plan_of(&[1 << 28; 10], 1 << 28));
     plan_holds("5 MB", f, &big);
     // (frames at their sync words: the fixture is CBR, with no CRC)
     let mut frames = Vec::new();
