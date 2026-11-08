@@ -21,7 +21,6 @@ cargo run --release -p aqr-exe --example aqr-exe-bench-arm64 -- [-l LEVEL] MACHO
 cargo run --release -p aqr-exe --example aqr-exe-bench-remap -- [-x] A B                          # B's ARM64 (x86-64) code remapped to A's, against A's
 cargo run --release -p aqr-exe --example aqr-exe-bench-delta -- ...                              # ARM64 code against another version, by differences
 cargo run --release -p aqr-exe --example aqr-exe-bench-codesign -- ...                           # Mach-O code signatures' page hashes
-build-wasm.bat                                                                       # the decoder as a Wasm module
 ```
 
 ```rust
