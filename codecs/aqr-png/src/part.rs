@@ -298,6 +298,7 @@ impl Drain for ToFile<'_, '_> {
 /// `asm`, its model's streams taken from `sts` and `raws`.
 fn coded_image(
     head: &[u8],
+    len: usize,
     ih: &Option<png::Ihdr>,
     asm: &mut Asm,
     end: usize,
@@ -321,6 +322,10 @@ fn coded_image(
         return Err(corrupt());
     }
     let Layout { kind, n, streams, spans, alts } = codec::parse_layout(layout)?;
+    // (a deflate stream is 1032 times its length at most)
+    if n as u64 > 1032 * len as u64 + 4096 {
+        return Err(corrupt());
+    }
     let ntok: usize = spans.iter().map(|s| if let Span::Tokens(c) = s { *c } else { 0 }).sum();
     if ntok > n {
         return Err(corrupt());
@@ -383,7 +388,7 @@ pub fn run(srcs: [(&mut dyn Pull, u64); INPUTS], sink: &mut dyn Put) -> Result<(
             0 if n == len + 1 => heads.take(len, |d| asm.feed(d, end))?,
             1 => {
                 let head = heads.read(n.checked_sub(1).ok_or_else(corrupt)?)?;
-                coded_image(&head, ih, &mut asm, end, sts, raws)?;
+                coded_image(&head, len, ih, &mut asm, end, sts, raws)?;
             }
             _ => return Err(corrupt()),
         }

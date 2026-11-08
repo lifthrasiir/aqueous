@@ -118,15 +118,15 @@ fn damaged_inputs_fail_or_agree() {
     let file = png(&[(b"IHDR", ihdr(200, 120, 8, 2, 0)), (b"IDAT", zlib(&zlib6(), &data)), (b"IEND", vec![])]);
     let i = inputs(&file).expect("coded");
     let len = file.len() as u64;
-    // The whole decoding reserves the file's length as the skeleton's chunks give it (a damaged
-    // skeleton, a damaged length, may ask for terabytes): the part module alone is run on it.
     let check = |j: &[Vec<u8>], s: usize, what: &str| {
         let r: Vec<&[u8]> = j.iter().map(|v| &v[..]).collect();
-        let b = part::decode_streamed(&[], &r, len);
-        if s != 0 {
-            let a = formula::decode(&[], &r, len, 1);
-            assert!(a.is_err() == b.is_err() && (a.is_err() || a.as_ref().ok() == b.as_ref().ok()), "input {s} {what}: whole {:?}, part {:?}", a.as_ref().map(|v| v.len()), b.as_ref().map(|v| v.len()));
-        }
+        let (a, b) = (formula::decode(&[], &r, len, 1), part::decode_streamed(&[], &r, len));
+        assert!(
+            a.is_err() == b.is_err() && (a.is_err() || a.as_ref().ok() == b.as_ref().ok()),
+            "input {s} {what}: whole {:?}, part {:?}",
+            a.as_ref().map(|v| v.len()),
+            b.as_ref().map(|v| v.len())
+        );
     };
     for s in 0..i.len() {
         for cut in [0, i[s].len() / 2, i[s].len().saturating_sub(1)] {
@@ -137,9 +137,7 @@ fn damaged_inputs_fail_or_agree() {
         let mut j = i.clone();
         j[s].push(7);
         check(&j, s, "extended");
-        // (a damaged skeleton may give an image a geometry of terabytes of rows: the model reserves
-        // them, whole or by parts, and an allocation that fails aborts a native process)
-        for at in (0..i[s].len()).step_by(i[s].len() / 40 + 1).filter(|_| s != 0) {
+        for at in (0..i[s].len()).step_by(i[s].len() / 40 + 1) {
             let mut j = i.clone();
             j[s][at] ^= 0x5a;
             check(&j, s, &format!("damaged at {at}"));

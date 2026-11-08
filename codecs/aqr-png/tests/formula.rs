@@ -188,8 +188,7 @@ fn corrupt_inputs_fail_cleanly() {
     for i in 0..1500 {
         x = x.wrapping_mul(1103515245).wrapping_add(12345);
         let mut copies: Vec<Vec<u8>> = inputs.iter().map(|s| s.to_vec()).collect();
-        // The skeleton is left alone: a damaged IHDR can ask for an image of terabytes.
-        let k = 1 + i % 2;
+        let k = i % copies.len();
         let at = (x as usize >> 4) % copies[k].len();
         copies[k][at] ^= 1 << (i % 8);
         let refs: Vec<&[u8]> = copies.iter().map(|c| &c[..]).collect();

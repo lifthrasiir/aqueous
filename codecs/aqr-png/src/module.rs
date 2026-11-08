@@ -3,7 +3,7 @@
 
 use aqr_common::packed;
 
-use crate::codec::{self, References, Skeleton};
+use crate::codec::{self, Rec, References, Skeleton};
 use crate::{Result, corrupt};
 
 /// The module: the file of `len` bytes rebuilt from `inputs`, the skeleton, the index (the
@@ -13,8 +13,7 @@ use crate::{Result, corrupt};
 pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
     let (&[], &[sk, index, heads, sts, raws]) = (params, inputs) else { return Err(corrupt()) };
     crc_tables();
-    let (index, records) = codec::join_records(index, heads, sts, raws)?;
-    Ok(rebuild(sk, &index, &records, None, len, threads, (false, false))?.0)
+    Ok(rebuild(sk, |s| split_recs(s, index, heads, sts, raws), None, len, threads, (false, false))?.0)
 }
 
 /// The module of a file coded against a reference file: [`decode`] with the reference file as
@@ -22,7 +21,7 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
 pub fn decode_against(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
     let (&[], &[sk, index, records, reference]) = (params, inputs) else { return Err(corrupt()) };
     crc_tables();
-    Ok(rebuild(sk, index, records, Some(&codec::references(reference)), len, threads, (false, false))?.0)
+    Ok(rebuild(sk, |s| whole_recs(s, index, records), Some(&codec::references(reference)), len, threads, (false, false))?.0)
 }
 
 /// The module of sets: the files rebuilt from `inputs`, the packed skeletons, indexes and
@@ -100,7 +99,7 @@ pub fn decode_set(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> 
                 None => None,
             };
             let keep = !wasm && is_parent[i];
-            rebuild(sks[i], indexes[i], records[i], refs, sizes[i], inner, (keep, wasm && workers > 1))
+            rebuild(sks[i], |s| whole_recs(s, indexes[i], records[i]), refs, sizes[i], inner, (keep, wasm && workers > 1))
         };
         if wasm && workers > 1 {
             // (as tasks, each the file and a 0, or a 1)
@@ -163,28 +162,67 @@ fn crc_tables() {
     aqr_common::crc32::hash(&[]);
 }
 
-/// The file of `len` bytes of the skeleton `sk`, the index and the records, against the images
-/// of a reference file if given; and, if `keep`, the file's own as a reference file; of room for a
-/// byte after it where `tail`.
-fn rebuild(
-    sk: &[u8],
-    index: &[u8],
-    records: &[u8],
+/// The records of the images of `skel`, the index telling each one's length in `records`.
+fn whole_recs<'a>(skel: &Skeleton, index: &[u8], records: &'a [u8]) -> Result<Vec<Rec<'a>>> {
+    let (mut at, mut from) = (0, 0);
+    let mut recs = Vec::with_capacity(skel.images.len());
+    for _ in &skel.images {
+        let n = codec::get_varint(index, &mut at)? as usize;
+        recs.push(Rec::of(codec::get_bytes(records, &mut from, n)?)?);
+    }
+    if at != index.len() || from != records.len() {
+        return Err(corrupt());
+    }
+    Ok(recs)
+}
+
+/// The records of the images of `skel` as `png-recons` has them: the index telling each head's
+/// length in `heads`, the streams of the models following in `sts` and `raws`.
+fn split_recs<'a>(skel: &Skeleton, index: &[u8], heads: &'a [u8], sts: &'a [u8], raws: &'a [u8]) -> Result<Vec<Rec<'a>>> {
+    let (mut at, mut h, mut s, mut r) = (0, 0, 0, 0);
+    let mut recs = Vec::with_capacity(skel.images.len());
+    for _ in &skel.images {
+        let n = codec::get_varint(index, &mut at)? as usize;
+        let head = codec::get_bytes(heads, &mut h, n)?;
+        // (the lengths of the streams are in the head, past the mode, the layout and the headers)
+        let mut lens = [0usize; 3];
+        if head.first() != Some(&0) {
+            let mut k = 1;
+            for _ in 0..2 {
+                let n = codec::get_varint(head, &mut k)? as usize;
+                codec::get_bytes(head, &mut k, n)?;
+            }
+            for l in &mut lens {
+                *l = codec::get_varint(head, &mut k)? as usize;
+            }
+        }
+        let st = codec::get_bytes(sts, &mut s, lens[1])?;
+        let raw = codec::get_bytes(raws, &mut r, lens[2])?;
+        recs.push(Rec { head, st, raw });
+    }
+    if at != index.len() || h != heads.len() || s != sts.len() || r != raws.len() {
+        return Err(corrupt());
+    }
+    Ok(recs)
+}
+
+/// The file of `len` bytes of the skeleton `sk` and the records `recs` of its images (taken of
+/// the skeleton parsed), against the images of a reference file if given; and, if `keep`, the
+/// file's own as a reference file; of room for a byte after it where `tail`. The skeleton tells
+/// the file's length: a file of another one is refused before anything is reserved for it.
+fn rebuild<'a>(
+    sk: &'a [u8],
+    recs: impl FnOnce(&Skeleton<'a>) -> Result<Vec<Rec<'a>>>,
     refs: Option<&References>,
     len: u64,
     threads: usize,
     (keep, tail): (bool, bool),
 ) -> Result<(Vec<u8>, Option<References>)> {
     let skel = Skeleton::parse(sk)?;
-    let (mut at, mut from) = (0, 0);
-    let mut recs = Vec::with_capacity(skel.images.len());
-    for _ in &skel.images {
-        let n = codec::get_varint(index, &mut at)? as usize;
-        recs.push(codec::get_bytes(records, &mut from, n)?);
-    }
-    if at != index.len() || from != records.len() {
+    if skel.file_len() as u64 != len {
         return Err(corrupt());
     }
+    let recs = recs(&skel)?;
     let (out, own) = skel.rebuild_with(&recs, threads, refs, keep, tail)?;
     if out.len() as u64 != len {
         return Err(corrupt());

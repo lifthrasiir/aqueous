@@ -92,6 +92,7 @@ impl Geometry {
         }
         Some(Geometry { passes, bpp, len: at, raw_len: at2, pad: pad + 8 })
     }
+
 }
 
 /// What literals are coded against.
@@ -451,19 +452,24 @@ pub(crate) fn tables_of(tb: &[u8], tables: usize) -> crate::Result<Tables> {
 }
 
 impl<'a> Player<'a> {
-    /// The model payload at `at` of `src`, with `tables` tables ([`TABLES`] or
-    /// [`TABLES_REF`]).
-    pub fn new(src: &'a [u8], at: &mut usize, tables: usize) -> crate::Result<Player<'a>> {
+    /// The model payload of a record of head `head` (from `at`: the three lengths, then the
+    /// tables), rANS stream `st` and raw bits `raw` (the lengths in the head tell theirs), with
+    /// `tables` tables ([`TABLES`] or [`TABLES_REF`]).
+    pub fn from_head(
+        head: &'a [u8],
+        at: &mut usize,
+        st: &'a [u8],
+        raw: &'a [u8],
+        tables: usize,
+    ) -> crate::Result<Player<'a>> {
         let mut lens = [0usize; 3];
         for l in &mut lens {
-            *l = crate::codec::get_varint(src, at)? as usize;
+            *l = crate::codec::get_varint(head, at)? as usize;
         }
-        let mut part = |n: usize| -> crate::Result<&'a [u8]> {
-            let s = src.get(*at..at.checked_add(n).ok_or_else(crate::corrupt)?).ok_or_else(crate::corrupt)?;
-            *at += n;
-            Ok(s)
-        };
-        let (tb, st, raw) = (part(lens[0])?, part(lens[1])?, part(lens[2])?);
+        let tb = crate::codec::get_bytes(head, at, lens[0])?;
+        if lens[1] != st.len() || lens[2] != raw.len() {
+            return Err(crate::corrupt());
+        }
         Ok(Player { tables: tables_of(tb, tables)?, dec: Decoder::new(st), raw: BitR::new(raw) })
     }
 }
@@ -752,14 +758,17 @@ impl Win {
 
     /// [`Win::new`] with windows of `step` bytes for data of more than `min` bytes.
     pub(crate) fn of(g: &Geometry, n: usize, image: bool, min: usize, step: usize) -> Win {
-        let raw_len = if image { g.raw_len } else { 0 };
+        // (the raw offsets advance at most twice as fast as the positions: a header that says an
+        // image of terabytes, of data of a few bytes, reserves no more than the data can reach)
+        let rs2 = g.passes.iter().map(|ps| ps.rs2).max().unwrap_or(0);
+        let reach = 2 * (g.pad + n) + 16 * (rs2 + 8) + 4096;
+        let raw_len = if image { g.raw_len.min(reach) } else { 0 };
         // The data, and the overshoot of a match's copy.
         let whole = Win { keep: 0, blim: usize::MAX, rlim: usize::MAX, buf: g.pad + n + 16, raw: raw_len };
         if n <= min {
             return whole;
         }
         let rs = g.passes.iter().map(|ps| ps.rs).max().unwrap_or(0);
-        let rs2 = g.passes.iter().map(|ps| ps.rs2).max().unwrap_or(0);
         let keep = 32768 + rs + 16;
         let room = rs.max(65536) + ROOM;
         let buf = g.pad + keep + step + room;

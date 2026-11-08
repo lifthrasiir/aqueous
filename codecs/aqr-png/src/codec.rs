@@ -43,13 +43,29 @@ pub(crate) fn get_bytes<'a>(src: &'a [u8], at: &mut usize, n: usize) -> Result<&
     aqr_common::cursor::take(src, at, n).map_err(|_| crate::corrupt())
 }
 
-/// A record of mode 0 or 1 cut where its model payload's two streams start: its *head* (the
-/// mode, the layout, the headers, the lengths and the tables: all of a record of mode 0), then
-/// the rANS stream, then the raw bits. Mode 2 is for the modules that keep their records whole.
+/// A record cut where its model payload's two streams start: its *head* (the mode, the layout,
+/// the headers, the lengths and the tables: all of a record of mode 0), then the rANS stream,
+/// then the raw bits.
+#[derive(Clone, Copy)]
+pub(crate) struct Rec<'a> {
+    pub head: &'a [u8],
+    pub st: &'a [u8],
+    pub raw: &'a [u8],
+}
+
+impl<'a> Rec<'a> {
+    /// The record `rec` cut ([`split_record`]).
+    pub(crate) fn of(rec: &'a [u8]) -> Result<Rec<'a>> {
+        let (head, st, raw) = split_record(rec)?;
+        Ok(Rec { head, st, raw })
+    }
+}
+
+/// The parts of a record of mode 0, 1 or 2 ([`Rec`]).
 pub(crate) fn split_record(rec: &[u8]) -> Result<(&[u8], &[u8], &[u8])> {
     match rec.first() {
         Some(0) => return Ok((rec, &[], &[])),
-        Some(1) => {}
+        Some(1 | 2) => {}
         _ => return Err(crate::corrupt()),
     }
     let mut at = 1;
@@ -500,6 +516,11 @@ pub(crate) struct SkChunk<'a> {
 }
 
 impl<'a> Skeleton<'a> {
+    /// The length of the file: the signature, the chunks with their lengths, kinds and CRCs, and the trailer.
+    pub(crate) fn file_len(&self) -> usize {
+        self.chunks.iter().map(|c| c.len + 12).sum::<usize>() + 8 + self.trailer.len()
+    }
+
     pub(crate) fn parse(sk: &'a [u8]) -> Result<Skeleton<'a>> {
         let mut k = 0;
         let nchunks = get_varint(sk, &mut k)? as usize;
@@ -543,7 +564,7 @@ impl<'a> Skeleton<'a> {
     #[cfg(test)]
     pub(crate) fn rebuild(
         &self,
-        recs: &[&[u8]],
+        recs: &[Rec],
         threads: usize,
         refs: Option<&References>,
         keep: bool,
@@ -555,7 +576,7 @@ impl<'a> Skeleton<'a> {
     /// it).
     pub(crate) fn rebuild_with(
         &self,
-        recs: &[&[u8]],
+        recs: &[Rec],
         threads: usize,
         refs: Option<&References>,
         keep: bool,
@@ -571,7 +592,7 @@ impl<'a> Skeleton<'a> {
         };
         let image_payload = |i: usize, threads: usize| {
             let ih = &imgs[i].1;
-            let r = if recs[i].first() == Some(&2) { reference_of(ih, refs.and_then(|r| r.get(i))) } else { None };
+            let r = if recs[i].head.first() == Some(&2) { reference_of(ih, refs.and_then(|r| r.get(i))) } else { None };
             image_payload(recs[i], img_len(&imgs[i].0), ih, threads, r, keep)
         };
         // each image's payload, and its own reference
@@ -623,7 +644,7 @@ impl<'a> Skeleton<'a> {
         }
 
         // Reassemble the file.
-        let total: usize = cs.iter().map(|c| c.len + 12).sum::<usize>() + 8 + self.trailer.len();
+        let total = self.file_len();
         let mut out = Vec::with_capacity(total + tail as usize);
         out.extend_from_slice(&png::SIGNATURE);
         let mut img = 0;
@@ -660,34 +681,34 @@ impl<'a> Skeleton<'a> {
 /// image, for a record coded against it); and, if `keep`, the image's own as a reference (as
 /// [`references`] makes it).
 fn image_payload(
-    rec: &[u8],
+    rec: Rec,
     len: usize,
     ih: &Option<Ihdr>,
     threads: usize,
     reference: Option<&model::Reference>,
     keep: bool,
 ) -> Result<(Vec<u8>, Option<model::Reference>)> {
-    let (payload, own) = match rec.first() {
-        Some(0) if rec.len() == len + 1 => {
+    let (payload, own) = match rec.head.first() {
+        Some(0) if rec.head.len() == len + 1 => {
             // (and room for a byte after it, as a task gives it; where kept as a reference, of
             // its tokens counted first, the reference and its room in the payload made of them)
             if keep && ih.is_some() {
                 let mut codes = aqr_flate::inflate::Codes::new();
-                let k = model::Reference::count(&rec[1..], &mut codes).ok();
+                let k = model::Reference::count(&rec.head[1..], &mut codes).ok();
                 let mut p = Vec::with_capacity(len + 1 + 9 * k.unwrap_or(0));
-                p.extend_from_slice(&rec[1..]);
+                p.extend_from_slice(&rec.head[1..]);
                 let r = k.and_then(|k| model::Reference::parse_in(&p, &mut codes, k).ok());
                 return Ok((p, r));
             }
             let mut p = Vec::with_capacity(len + 1);
-            p.extend_from_slice(&rec[1..]);
+            p.extend_from_slice(&rec.head[1..]);
             (p, None)
         }
         Some(&k @ (1 | 2)) => {
             let ih = ih.as_ref().ok_or_else(crate::corrupt)?;
             let g = Geometry::new(ih).ok_or_else(crate::corrupt)?;
             let reference = if k == 2 { Some(reference.ok_or_else(crate::corrupt)?) } else { None };
-            rebuild(&g, &rec[1..], len, threads, reference, keep)?
+            rebuild(&g, &rec.head[1..], rec.st, rec.raw, len, threads, reference, keep)?
         }
         _ => return Err(crate::corrupt()),
     };
@@ -817,6 +838,8 @@ pub(crate) fn parse_layout(layout: &[u8]) -> Result<Layout> {
 fn rebuild(
     g: &Geometry,
     rec: &[u8],
+    st: &[u8],
+    raw: &[u8],
     len: usize,
     threads: usize,
     reference: Option<&model::Reference>,
@@ -830,13 +853,17 @@ fn rebuild(
     let layout = part(&mut at)?;
     let headers = part(&mut at)?;
     let Layout { kind, n, streams, spans, alts } = parse_layout(layout)?;
+    // (a deflate stream is 1032 times its length at most)
+    if n as u64 > 1032 * len as u64 + 4096 {
+        return Err(crate::corrupt());
+    }
 
     let ntok: usize = spans.iter().map(|s| if let Span::Tokens(c) = s { *c } else { 0 }).sum();
     if ntok > n {
         return Err(crate::corrupt());
     }
     let tables = if reference.is_some() { model::TABLES_REF } else { model::TABLES };
-    let player = model::Player::new(rec, &mut at, tables)?;
+    let player = model::Player::from_head(rec, &mut at, st, raw, tables)?;
     if at != rec.len() {
         return Err(crate::corrupt());
     }
@@ -1109,7 +1136,7 @@ mod tests {
         ];
         for (k, file) in files.iter().enumerate() {
             let parts = parts(file, 1, None, None, true).unwrap();
-            let recs: Vec<&[u8]> = parts.records.iter().map(|r| &r[..]).collect();
+            let recs: Vec<Rec> = parts.records.iter().map(|r| Rec::of(r).unwrap()).collect();
             for threads in [1, 4] {
                 let (out, own) = Skeleton::parse(&parts.skeleton).unwrap().rebuild(&recs, threads, None, true).unwrap();
                 assert!(out == *file);
@@ -1144,8 +1171,13 @@ mod tests {
             write_record(Kind::Image, enc, 1, &mut rec);
             rec
         };
-        assert!(rebuild(&g, &rec_of(false)[1..], payload.len(), 1, None, false).unwrap().0 == payload);
-        assert!(matches!(rebuild(&g, &rec_of(true)[1..], payload.len(), 1, None, false), Err(Error::Corrupt)));
+        let run = |dup: bool| {
+            let r = rec_of(dup);
+            let rec = Rec::of(&r).unwrap();
+            rebuild(&g, &rec.head[1..], rec.st, rec.raw, payload.len(), 1, None, false)
+        };
+        assert!(run(false).unwrap().0 == payload);
+        assert!(matches!(run(true), Err(Error::Corrupt)));
     }
 }
 
