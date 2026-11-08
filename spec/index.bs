@@ -563,7 +563,11 @@ Block types of 2 hexadecimal digits are as follows:
       <td>No
       <td>Reserved
     <tr>
-      <td>C0<sub>16</sub>&nbsp;—&nbsp;C3<sub>16</sub>
+      <td>C0<sub>16</sub>
+      <td>No
+      <td>Reserved ([[#recovery-sets]])
+    <tr>
+      <td>C1<sub>16</sub>&nbsp;—&nbsp;C3<sub>16</sub>
       <td>No
       <td>[=Parity block=] ([[#recovery-sets]])
     <tr>
@@ -4267,13 +4271,16 @@ A recovery set consists of the following blocks, called <dfn>recovery blocks</df
   </thead>
   <tbody>
     <tr>
-      <td>C0<sub>16</sub>&nbsp;—&nbsp;C3<sub>16</sub>
+      <td>C1<sub>16</sub>&nbsp;—&nbsp;C3<sub>16</sub>
       <td><dfn>Parity block</dfn>, holding a single [=parity shard=]
     <tr>
       <td>C4<sub>16</sub>&nbsp;—&nbsp;C7<sub>16</sub>
       <td><dfn>Index block</dfn>, holding the hashes of every [=data shard=]
   </tbody>
 </table>
+
+Block type C0<sub>16</sub> is reserved, as a [=parity block=] is always longer than 255 bytes:
+its [=recovery/shard=] alone takes a [=recovery/slice size=] of at least 4096 bytes.
 
 A recovery set without any parity shard consists of index blocks only,
 which locate damage to the range without restoring it.
