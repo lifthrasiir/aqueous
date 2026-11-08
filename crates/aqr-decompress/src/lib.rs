@@ -453,7 +453,20 @@ const NATIVE: &[Entry] = &[
         },
         |p, _, i, n, _| aqr_flate::module::inflate(p, i, n).map_err(err),
     ),
-    bare(LZ4, |p, _, i, n, t| aqr_lz4::formula::decode(p, i, n, t).map_err(err)),
+    part(
+        LZ4,
+        false,
+        aqr_api::emu::Entry {
+            kind: aqr_api::emu::Kind::Part,
+            windows: &[
+                aqr_api::Window::Input(0, aqr_lz4::part::WINDOW),
+                aqr_api::Window::Output(0, aqr_lz4::part::WINDOW),
+            ],
+            arity: 3,
+            call: |a| aqr_lz4::part::decode_part(a[0], a[1], a[2]),
+        },
+        |p, _, i, n, t| aqr_lz4::formula::decode(p, i, n, t).map_err(err),
+    ),
     threaded(LZMA, |p, _, i, n, t| aqr_lzma::formula::decode(p, i, n, t).map_err(err)),
     threaded(LZMA2, |p, _, i, n, t| aqr_lzma::formula::decode2(p, i, n, t).map_err(err)),
     bra!(BCJ_X86, X86),

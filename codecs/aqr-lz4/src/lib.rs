@@ -11,6 +11,7 @@ pub mod block;
 pub mod formula;
 pub mod frame;
 pub mod module;
+pub mod part;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error(pub &'static str);

@@ -5,18 +5,18 @@
 use aqr_common::varint;
 use aqr_formula::{Formula, Module, Node};
 
-use crate::block::{self, Compressor, MAX_ACCELERATION};
+use crate::block::{self, MAX_ACCELERATION};
 use crate::frame;
 use crate::module::{BLOCK, FRAME};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("lz4-recons", 1).with_plan(memory);
+pub const MODULE: Module = Module::new("lz4-recons", 2).with_plan(memory);
 
-/// The memory of the module: its initial memory, and its plan ([`crate::module::plan`]).
+/// The memory of the module, a part module: its plan ([`crate::part::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let (&[data], &[len]) = (u.inputs, u.outputs) else { return None };
-    Some(u.initial() + crate::module::plan(u.params, data, len)?)
+    let &[data] = u.inputs else { return None };
+    crate::part::plan(u.initial(), u.params, data)
 }
 
 /// Firefox's container: this, the data's length (u32, little endian), then a block.
@@ -60,9 +60,12 @@ fn mozlz4(d: &[u8]) -> Option<Formula> {
     let blk = &d[12..end];
     let mut data = Vec::with_capacity(n);
     block::decode(blk, &mut data, 0, n).ok()?;
-    let a = *ACCELERATIONS.iter().find(|&&a| Compressor::reproduces_fast(&data, a, blk))?;
     let mut params = vec![BLOCK];
-    varint::put(&mut params, a as u64);
+    ACCELERATIONS.iter().find(|&&a| {
+        params.truncate(1);
+        varint::put(&mut params, a as u64);
+        crate::part::reproduces(&params, &data, blk)
+    })?;
     let mut f = Formula::default();
     f.push("lz4", [&d[..12], &d[end..]].concat());
     let data = f.push("raw", data);

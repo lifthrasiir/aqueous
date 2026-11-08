@@ -4315,6 +4315,62 @@ fn bundle_plans_hold() {
     plan_holds("bundle tar", f, &tar);
 }
 
+/// lz4-recons (a part module of windows of four pages) lays its memory out as a stack, its limit
+/// its plan: of mozlz4 files of a block from the narrow table's end to past the view (the
+/// literals not yet written, and the history), and of frames of one block and of several, with
+/// stored blocks among them; the plan is the same for 6 MB and 9 MB of a block, 9 MB and 30 MB of a frame.
+#[test]
+fn lz4_plans_hold() {
+    let words: Vec<&[u8]> = vec![b"lz4 ", b"block ", b"sequence ", b"literals ", b"match ", b"offset "];
+    let mut rng = aqr_common::rng::Rng::new(4);
+    let text = |n: usize, rng: &mut aqr_common::rng::Rng| {
+        let mut t = Vec::new();
+        while t.len() < n {
+            t.extend_from_slice(words[rng.below(words.len() as u64) as usize]);
+            let k = rng.below(4) as usize;
+            t.extend(rng.bytes(k));
+        }
+        t.truncate(n);
+        t
+    };
+    let plan_of = |p: &[u8], n: u64| {
+        let usage = aqr_formula::Usage {
+            params: p,
+            resources: &[],
+            inputs: &[n],
+            outputs: &[n],
+            contents: &vec![],
+            initial_pages: aqr_decompress::initial_pages_of(aqr_lz4::formula::MODULE).unwrap(),
+        };
+        aqr_lz4::formula::MODULE.plan_for(&usage).unwrap().instance
+    };
+    for n in [100usize, 65_546, 65_547, 700_000, 3 << 20] {
+        let t = text(n, &mut rng);
+        let b = aqr_lz4::block::Compressor::compress_fast(&t, 1).unwrap();
+        let d = [&b"mozLz40\0"[..], &(n as u32).to_le_bytes(), &b].concat();
+        let mut f = aqr_lz4::formula::encode(&d, 1).unwrap_or_else(|| panic!("mozlz4 {n}"));
+        if let Node::Concat(nodes) = &f.root {
+            f.root = nodes[1].clone();
+        }
+        plan_holds(&format!("mozlz4 {n}"), f, &b);
+    }
+    for (flg, bd, n) in [(0x64u8, 0x40u8, 3000usize), (0x64, 0x50, 300_000), (0x74, 0x60, 3 << 20), (0x7c, 0x70, 9 << 20)] {
+        let mut t = text(n * 3 / 4, &mut rng);
+        t.extend(rng.bytes(n - t.len()));
+        let d = aqr_lz4::frame::encode(&t, flg, bd, 1, None).unwrap().unwrap();
+        let mut f = aqr_lz4::formula::encode(&d, 1).unwrap_or_else(|| panic!("frame {n}"));
+        if let Node::Concat(nodes) = &f.root {
+            f.root = nodes[0].clone();
+        }
+        plan_holds(&format!("frame {n} {flg:x} {bd:x}"), f, &d);
+    }
+    let block = |n| plan_of(&[0, 1], n);
+    assert_eq!(block(6 << 20), block(9 << 20));
+    assert!(block(9 << 20) < 10 << 20, "{}", block(9 << 20));
+    let frame = |n| plan_of(&[1, 1, 0x64, 0x70], n);
+    assert_eq!(frame(9 << 20), frame(30 << 20));
+}
+
 /// bz2-recons (a part module of windows of four pages) takes the same plan past a block, whatever
 /// the lengths: 3 MB and 9 MB of data at level 1 (a block holds 100 KB of RLE1 output) and 24 MB
 /// of data at level 9, runs and ranks among the blocks, the plan not growing with the data.

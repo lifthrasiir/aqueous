@@ -51,7 +51,7 @@ frames with checksums, kept tables, stored blocks and `--fast=3`), which
 `scripts/gen-fixtures.py` makes with the reference liblz4. It also reproduced 4 of the files
 above (the session store, `addonStartup.json.lz4` and a telemetry ping, 2.36 MB) with `aqr-lz4-check`.
 
-The module (the compressor) runs at 650-1150 MB/s of data on an M4, single-threaded, on the
+The module (a part module since version 2: nothing of the lengths is held) runs at 650-1150 MB/s of data on an M4, single-threaded, on the
 fixtures (`aqr-lz4-check`). That is liblz4's speed class. Frames could be made in parallel, since a
 block of 4 KiB or more clears the state. That is not done.
 

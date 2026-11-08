@@ -217,3 +217,22 @@ The module fails if:
 - there is not exactly one input;
 - `|D|` exceeds `0x7E000000` (liblz4's `LZ4_MAX_INPUT_SIZE`), or the output is not `len`
   bytes long.
+
+## 7. Version 2: a part module
+
+Version 2 takes the same params and input and gives the same output as version 1, byte for
+byte, as a part module (windows of four pages): the input is taken and the output put in
+order, and the memory it takes does not depend on their lengths.
+
+- **A frame** is compressed a piece (block) at a time: the piece, and the block made of it
+  (at most one byte shorter), are held.
+- **A block of less than 65547 bytes** (the narrow table) is held with its block.
+- **A larger block** (the wide table) is compressed from a sliding view of the data. A match
+  reaches back 65535 bytes at most, and a sequence's literals are held until its match is found
+  (its token holds the match's length, and comes before them), so the view keeps the bytes from
+  65536 before the literal start on. A sequence has `LIT_MAX = 4194304` literals at most, and a
+  search probing a position more than `LIT_MAX` past the literal start fails (it never does at
+  acceleration 1 on data that LZ4 compresses; a high acceleration skips far, 65537 over
+  8 MB of text does). The module fails there, and the formula's encoder does not use it for
+  such a stream, which is then stored as it is. The match that follows is measured and its
+  sequence written once the literals have been copied out of the view.
