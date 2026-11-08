@@ -195,9 +195,41 @@ impl Stats {
     }
 }
 
+/// What `--stats` given alone (no input nor any other option) tells: nothing sampled, as nothing
+/// ran.
+const NOTHING: &str = "Nothing happened, which is just as it should be.";
+
+/// `--stats` given alone, no input nor any other option: of `outputs`, each page written with no
+/// data (where files of the JSON are opened; opened in the browser where `open`), each JSON of
+/// [`NOTHING`] as its `message`; and that told on standard error where `tell` (bare `--stats`).
+pub fn alone(tell: bool, outputs: &[PathBuf], open: bool) -> Result<(), String> {
+    if tell {
+        eprintln!("{NOTHING}");
+    }
+    for o in outputs {
+        if is_json(o) {
+            let mut json = String::from("{\"message\":");
+            string(&mut json, NOTHING);
+            json.push_str("}\n");
+            write_whole(o, &json)?;
+        } else {
+            write_whole(o, PAGE)?;
+        }
+        eprintln!("stats written to {}", o.display());
+        if open && is_html(o) {
+            browse(o);
+        }
+    }
+    Ok(())
+}
+
 /// Writes file `o` of `data` (the JSON), replacing it whole.
 fn save(o: &Path, data: &str) -> Result<(), String> {
-    let text = if is_json(o) { data.to_owned() } else { page(data) };
+    write_whole(o, &if is_json(o) { data.to_owned() } else { page(data) })
+}
+
+/// Writes file `o` of `text`, replacing it whole (written aside, then renamed).
+fn write_whole(o: &Path, text: &str) -> Result<(), String> {
     let mut aside = o.file_name().unwrap_or_default().to_owned();
     aside.push(format!(".{}.part", std::process::id()));
     let aside = o.with_file_name(aside);
@@ -781,9 +813,11 @@ fn json(run: &Run, partial: bool) -> String {
     o
 }
 
+/// The page of the data, its place for it holding none (`null`).
+const PAGE: &str = include_str!("stats.html");
+
 /// The page of `data` (the JSON).
 fn page(data: &str) -> String {
-    const PAGE: &str = include_str!("stats.html");
     const HOLE: &str = "/*DATA*/null";
     assert!(PAGE.contains(HOLE), "the page has a place for the data");
     PAGE.replacen(HOLE, data, 1)

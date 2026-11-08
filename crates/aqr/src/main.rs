@@ -178,7 +178,9 @@
 //!   and of where the time went, sampled as it ran ([`stats`]); `--stats=FILE.json` writes all
 //!   of it as well, and `--stats=FILE.html` a page showing it (opened on a terminal). Either
 //!   may be given more than once; the files are written again every 10 seconds as it runs and
-//!   as it is stopped (their `state`). The sampling slows the work a little.
+//!   as it is stopped (their `state`). The sampling slows the work a little. Given alone (no
+//!   input nor other option), `--stats=FILE.html` writes the page with no data, to open files
+//!   of the JSON in.
 //!
 //! Compressing, standard error has the summary of the archive at the end, and on a terminal a
 //! bar of how far it is ([`view`]) until then. With `-v`, a log above the bar tells, for each
@@ -487,6 +489,9 @@ impl Args {
 fn parse() -> Result<Args, String> {
     let mut argv = std::env::args_os();
     let me = argv.next().map(PathBuf::from).unwrap_or_default();
+    // (`--stats` alone, no input nor any other option: [`stats::alone`])
+    let stats_alone = argv.len() > 0
+        && std::env::args_os().skip(1).all(|a| a == "--stats" || a.to_string_lossy().starts_with("--stats="));
     let unaqr = me.file_stem().is_some_and(|s| s.to_string_lossy().starts_with("unaqr"));
     let mut a = Args {
         decompress: unaqr,
@@ -633,6 +638,16 @@ fn parse() -> Result<Args, String> {
             s if s[1..].bytes().all(|b| b.is_ascii_digit()) => a.level = Some(s[1..].to_string()),
             s => return Err(format!("unknown option {s}")),
         }
+    }
+    if stats_alone {
+        let r = stats::alone(stats, &stats_to, std::io::stderr().is_terminal());
+        std::process::exit(match r {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("aqr: {e}");
+                1
+            }
+        });
     }
     if a.inputs.is_empty() {
         return Err("no input".into());
