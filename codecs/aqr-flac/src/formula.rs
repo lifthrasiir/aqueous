@@ -11,7 +11,7 @@ use std::borrow::Cow;
 
 pub use crate::module::{Error, Result, decode};
 
-pub const MODULE: Module = Module::new("flac-recons", 4).with_task_plan(memory);
+pub const MODULE: Module = Module::new("flac-recons", 5).with_task_plan(memory);
 
 /// The memory of the module: its plan (`module::plan`), the messages its channels may hold
 /// with it.

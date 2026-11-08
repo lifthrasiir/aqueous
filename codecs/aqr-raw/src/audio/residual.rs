@@ -6,6 +6,8 @@ use crate::audio::bits::{self, BitReader, FastWriter};
 use crate::audio::frame::{self, ESCAPE, Frame, SUB_CONSTANT, SUB_LPC, SUB_VERBATIM};
 use crate::audio::model::{self, Lms};
 use crate::audio::rans::{self, Tables, builtin};
+use crate::audio::slide::{Slide, Words};
+use aqr_api::stream::Pull;
 use aqr_common::varint;
 use std::borrow::Cow;
 use std::sync::OnceLock;
@@ -413,18 +415,27 @@ impl<'a> ResDecoder<'a> {
 
     #[inline(always)]
     fn decode_errors(&mut self, f: &mut Frame) {
+        let mut raw = self.raw;
+        self.decode_errors_in(f, &mut raw);
+        self.raw = raw;
+    }
+
+    /// [`ResDecoder::decode_errors`] on the raw bit readers `raw` (the decoder's own, or readers of
+    /// the window of a stream being taken in pieces: [`ResStream`]).
+    #[inline(always)]
+    fn decode_errors_in<'b>(&mut self, f: &mut Frame, raw: &mut [BitReader<'b>; 2]) {
         // Without bounds checks if the streams have room for the whole frame.
         let nsym: usize = f.res[..f.channels].iter().map(|r| r.len()).sum();
         let dl = self.dec.local();
-        let fits = dl.room() > nsym && self.raw.iter().all(|r| r.room() > nsym * model::MAX_RAW_BITS);
+        let fits = dl.room() > nsym && raw.iter().all(|r| r.room() > nsym * model::MAX_RAW_BITS);
         let res = res_ptrs(f);
         let dl = if fits {
             let mut v = DecV::<false> { dl, res, _raw: std::marker::PhantomData };
-            for_each_residual(f, &mut self.avg, &mut self.raw, &mut v);
+            for_each_residual(f, &mut self.avg, raw, &mut v);
             v.dl
         } else {
             let mut v = DecV::<true> { dl, res, _raw: std::marker::PhantomData };
-            for_each_residual(f, &mut self.avg, &mut self.raw, &mut v);
+            for_each_residual(f, &mut self.avg, raw, &mut v);
             v.dl
         };
         self.dec.put_back(dl);
@@ -444,6 +455,103 @@ impl<'a> ResDecoder<'a> {
             return Err(Error("rans stream exhausted"));
         }
         Ok(())
+    }
+}
+
+/// The error decoding of a stream taken in pieces (a part module's): [`ResDecoder::errors`] on
+/// a stream of words and two of raw bits that slide forward by frames, each held ahead of the
+/// position for the most a frame reads (a symbol takes a word at most and [`model::MAX_RAW_BITS`]
+/// bits), so that it gives what a decoder of the whole streams does.
+pub struct ResStream<'a> {
+    rd: ResDecoder<'a>,
+    words: Words<'a>,
+    fill: rans::SlideState,
+    raw: [Slide<'a>; 2],
+    raw_len: [u64; 2],
+    /// Residuals of a frame at most.
+    max: usize,
+}
+
+impl<'a> ResStream<'a> {
+    /// Words held, and bytes of each raw stream held ahead, for frames of `max` residuals at most.
+    fn rooms(max: usize) -> (usize, usize) {
+        (2 * max + 2 * 8, max * model::MAX_RAW_BITS / 8 + 2)
+    }
+
+    /// Bytes of the blocks that [`ResStream::new`] takes (as `block` rounds them), for frames of
+    /// `max` residuals at most.
+    pub fn plan(max: usize, block: impl Fn(u64) -> u64) -> u64 {
+        let (words, raw) = Self::rooms(max);
+        block(8 * size_of::<Lms>() as u64) + block(4 * (words + rans::SRC_PAD) as u64) + 2 * Slide::plan(raw, &block)
+    }
+
+    /// The decoder of the streams `words` (`words_len` bytes, a multiple of 4) and `raw`, for
+    /// frames of `max` residuals at most; fails where `t` are not tables a decoder takes.
+    pub fn new(
+        t: &'a Tables,
+        words: &'a mut dyn Pull,
+        words_len: u64,
+        raw: [(&'a mut dyn Pull, u64); 2],
+        max: usize,
+    ) -> Result<Self, Error> {
+        ResDecoder::takes(t)?;
+        if !words_len.is_multiple_of(4) {
+            return Err(Error("words"));
+        }
+        let (w, r) = Self::rooms(max);
+        let rd = ResDecoder {
+            lms: vec![Lms::default(); frame::MAX_CHANNELS],
+            avg: [model::Scale::default(); frame::MAX_CHANNELS],
+            dec: rans::Decoder::streaming(t, (words_len / 4) as usize, w),
+            raw_len: [0; 2],
+            raw: [BitReader::new(&[0; bits::PAD], 0), BitReader::new(&[0; bits::PAD], 0)],
+        };
+        let [(r0, n0), (r1, n1)] = raw;
+        Ok(ResStream {
+            rd,
+            words: Words::new(words),
+            fill: Default::default(),
+            raw: [Slide::new(r0, r), Slide::new(r1, r)],
+            // (as `ResDecoder::new` takes it: the length of the padded stream)
+            raw_len: [n0 + bits::PAD as u64, n1 + bits::PAD as u64],
+            max,
+        })
+    }
+
+    /// [`ResDecoder::errors`] on the next frame.
+    pub fn errors(&mut self, f: &mut Frame) -> Result<[model::Scale; frame::MAX_CHANNELS], Error> {
+        let nsym: usize = f.res[..f.channels].iter().map(|r| r.len()).sum();
+        if nsym > self.max {
+            return Err(Error("frame past its room"));
+        }
+        let words = &mut self.words;
+        self.rd.dec.slide(&mut self.fill, nsym, |b| words.fill(b));
+        let need = nsym * model::MAX_RAW_BITS / 8 + 2;
+        self.raw.iter_mut().for_each(|s| s.need(need));
+        let mut raw = [
+            BitReader::new(self.raw[0].padded(), self.raw[0].bit()),
+            BitReader::new(self.raw[1].padded(), self.raw[1].bit()),
+        ];
+        let sc0 = self.rd.avg;
+        self.rd.decode_errors_in(f, &mut raw);
+        let pos = [raw[0].pos, raw[1].pos];
+        let mut exhausted = false;
+        for k in 0..2 {
+            exhausted |= self.raw[k].taken() * 8 + pos[k] as u64 > self.raw_len[k] * 8;
+            self.raw[k].advance_bits(pos[k]);
+        }
+        match exhausted {
+            true => Err(Error("raw bits exhausted")),
+            false => Ok(sc0),
+        }
+    }
+
+    /// Checks that the rANS stream was not read past its end.
+    pub fn finish(&self) -> Result<(), Error> {
+        match self.rd.dec.streamed_in_bounds(&self.fill) {
+            true => Ok(()),
+            false => Err(Error("rans stream exhausted")),
+        }
     }
 }
 

@@ -2530,27 +2530,40 @@ fn bounded_to_one_unit() {
     assert!(applications_hold_bounded("flac", &f, &d, queued) > 0);
 }
 
-/// pcm-recons lays its memory out as a stack, its limit its plan: the pipeline's first stage,
-/// its error and LMS stages and its five workers each a task taking the same memory whatever
-/// it is given, all at once, and the messages its channels may hold. Of stereo 16-bit, mono
-/// 8-bit, 24-bit 6 channels, 32-bit and 8 channels, and of fewer samples than a block.
+/// pcm-recons (a part module of windows of 16 pages, the instance making the first and the error
+/// stages and its gang of tasks the LMS stage and seven workers) lays its memory out as a stack,
+/// its limit its plan: the same whatever the lengths of its streams and samples, the messages its
+/// channels may hold with it. Of stereo 16-bit, mono 8-bit, 24-bit 6 channels, 32-bit and 8
+/// channels, of fewer samples than a block, and of 100 MB of samples (which a whole module's
+/// copies of its inputs and its output would not hold under the application bound).
 #[test]
 fn pcm_plans_hold() {
     let queued = |u: &aqr_formula::Usage| {
         aqr_raw::module::pcm::plan(u.params, u.resources, u.inputs, u.outputs[0], u.initial()).unwrap().1
     };
-    for (n, ch, bytes) in
-        [(600_000, 2, 2), (40_000, 1, 1), (30_000, 6, 3), (25_000, 2, 4), (20_000, 8, 2), (1000, 2, 2)]
-    {
+    for (n, ch, bytes) in [
+        (600_000, 2, 2),
+        (40_000, 1, 1),
+        (30_000, 6, 3),
+        (25_000, 2, 4),
+        (20_000, 8, 2),
+        (1000, 2, 2),
+        (25_000_000, 2, 2),
+    ] {
         let d = wav_of(n, ch, bytes);
         let f = aqr_raw::formula::encode(&d, 1).unwrap_or_else(|| panic!("{n} {ch} {bytes}"));
         assert!(applications_hold(&format!("pcm {n}x{ch}x{bytes}"), &f, &d, queued) > 0, "{n} {ch} {bytes}");
     }
+    // (the plan is that of a few bytes for any lengths)
+    let fmt = aqr_raw::audio::pcm::Format { channels: 2, bytes: 2, big_endian: false, unsigned: false };
+    let plan =
+        |lens: [u64; 6], len: u64| aqr_raw::module::pcm::plan(&fmt.to_bytes(), &[2400], &lens, len, 1 << 20).unwrap();
+    assert_eq!(plan([10; 6], 4096 * 4), plan([1 << 30; 6], 1 << 40));
 }
 
-/// flac-recons lays its memory out as a stack, its limit its plan (as pcm-recons'), of
-/// frames of the room its params give: of every fixture (junk between frames, 24 and 32 bits,
-/// 6 channels, a cut file, mono 8-bit, silence).
+/// flac-recons (a part module, as pcm-recons) lays its memory out as a stack, its limit its plan,
+/// of frames of the room its params give: of every fixture (junk between frames, 24 and 32 bits,
+/// 6 channels, a cut file, mono 8-bit, silence), and of a file of 8 MiB of metadata and many frames.
 #[test]
 fn flac_plans_hold() {
     let queued = |u: &aqr_formula::Usage| {
@@ -2558,7 +2571,7 @@ fn flac_plans_hold() {
     };
     let dir = format!("{}/../../codecs/aqr-flac/tests/data", env!("CARGO_MANIFEST_DIR"));
     let mut seen = 0;
-    for e in std::fs::read_dir(dir).unwrap() {
+    for e in std::fs::read_dir(&dir).unwrap() {
         let path = e.unwrap().path();
         let d = std::fs::read(&path).unwrap();
         let what = path.file_name().unwrap().to_string_lossy().into_owned();
@@ -2566,6 +2579,21 @@ fn flac_plans_hold() {
         seen += applications_hold(&what, &f, &d, queued);
     }
     assert!(seen >= 12, "{seen}");
+    // (a picture of 8 MiB after the stream info, and the frames of a fixture 400 times)
+    let d = std::fs::read(format!("{dir}/s16_junk.flac")).unwrap();
+    let (_, start) = aqr_flac::flac::parse_metadata(&d).unwrap();
+    let mut big = d[..start].to_vec();
+    let mut at = 4;
+    while big[at] & 0x80 == 0 {
+        at += 4 + ((big[at + 1] as usize) << 16 | (big[at + 2] as usize) << 8 | big[at + 3] as usize);
+    }
+    big[at] &= 0x7f;
+    let picture = 8 << 20;
+    big.extend_from_slice(&[0x86, (picture >> 16) as u8, (picture >> 8) as u8, picture as u8]);
+    big.extend((0..picture).map(|i: u32| (i.wrapping_mul(2654435761) >> 24) as u8));
+    (0..400).for_each(|_| big.extend_from_slice(&d[start..]));
+    let f = aqr_flac::formula::encode(&big, 1).unwrap();
+    assert!(applications_hold("8 MiB of metadata", &f, &big, queued) > 0);
 }
 
 /// mp3-recons lays its memory out as a stack, its limit its plan: of every fixture, of a file

@@ -12,63 +12,6 @@ impl std::fmt::Display for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// `pcm-recons`.
-pub mod pcm {
-    use super::{Error, Result};
-    use crate::audio::pcm::{self, Format, N_BYTE_STREAMS};
-    use crate::audio::residual::{self, Coded};
-    use std::borrow::Cow;
-
-    /// The tasks of the module's one gang (aqr-modules' `pcm-recons`), which it is given as its
-    /// threads.
-    pub const SLOTS: usize = 8;
-
-    /// The memory plan of the module ([`aqr_api::stack`]): the limits of its instance and its
-    /// tasks, its initial memory (`initial` bytes) with it, of params `params`, resources and
-    /// inputs of these lengths and `len` bytes of samples (`None` where they are not so): what
-    /// `aqr_api::whole` copies, the tables, the streams listed, and the pipeline
-    /// ([`pcm::plan`]); and what its channels' messages (in the
-    /// instance's) may hold.
-    pub fn plan(params: &[u8], resources: &[u64], inputs: &[u64], len: u64, initial: u64) -> Option<((u64, u64), u64)> {
-        use aqr_api::stack::block;
-        let fmt = Format::from_bytes(params)?;
-        let &[_, _, _, words, raw0, raw1] = inputs else { return None };
-        let held = aqr_api::stack::whole(params.len() as u64, resources, inputs);
-        let top = initial + held + residual::tables_plan(block) + block(12 * N_BYTE_STREAMS as u64);
-        Some(pcm::plan(fmt, len, words, [raw0, raw1], top, SLOTS))
-    }
-
-    /// The module: the `len` bytes of samples from `params` (their format), `resources` (the
-    /// tables) and `inputs` (the streams).
-    pub fn decode(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
-        let corrupt = |s: &str| Error(format!("corrupt: {s}"));
-        let fmt = Format::from_bytes(params).ok_or_else(|| corrupt("params"))?;
-        let [res] = resources else { return Err(corrupt("resources")) };
-        let t = residual::tables_from(res).ok_or_else(|| corrupt("tables"))?;
-        let [streams @ .., words, raw0, raw1] = inputs else { return Err(corrupt("inputs")) };
-        if streams.len() != N_BYTE_STREAMS || words.len() % 4 != 0 {
-            return Err(corrupt("inputs"));
-        }
-        // No output is larger than 64 times its coded form.
-        let coded_len = inputs.iter().map(|i| i.len() as u64).sum::<u64>();
-        if len > coded_len.saturating_mul(64) + (1 << 20) {
-            return Err(Error("length".into()));
-        }
-        // (the inputs as they are: whatever is in memory when the tasks are spawned is copied)
-        let c = Coded {
-            streams: streams.iter().map(|&s| Cow::Borrowed(s)).collect(),
-            words: Cow::Borrowed(words),
-            raw: [Cow::Borrowed(raw0), Cow::Borrowed(raw1)],
-        };
-        let mut out = Vec::new();
-        pcm::decode_threads(&c, fmt, &t, len as usize, &mut out, threads).map_err(|e| corrupt(e.0))?;
-        if out.len() as u64 != len {
-            return Err(corrupt("length"));
-        }
-        Ok(out)
-    }
-}
-
 /// `raster-recons`.
 pub mod raster {
     use super::{Error, Result};
@@ -122,5 +65,104 @@ pub mod raster16 {
         let mut out = Vec::new();
         raster16::decode(coded, pad, fmt, &mut out).map_err(|e| corrupt(e.0))?;
         Ok(out)
+    }
+}
+
+/// `pcm-recons`.
+pub mod pcm {
+    use super::{Error, Result};
+    use crate::audio::pcm::{self, Format, N_BYTE_STREAMS};
+    use crate::audio::residual::{self, Coded};
+    use aqr_api::stream::{In, Pull, Written};
+    use aqr_api::{Memory, Params, Resource};
+    use std::borrow::Cow;
+
+    /// The tasks of the module's one gang (aqr-modules' `pcm-recons`): the LMS stage and the
+    /// workers.
+    pub const SLOTS: usize = 8;
+
+    /// Pages of the windows of the module as a part module ([`decode_part`]): of each input and
+    /// of the output.
+    pub const WINDOW: u32 = 16;
+
+    /// The memory plan of the module as a part module ([`aqr_api::stack`]): the limits of its
+    /// instance and its tasks, its initial memory (`initial` bytes) with it, of params `params`,
+    /// resources and inputs of these lengths and `len` bytes of samples (`None` where they are not
+    /// so): the tables, the pieces of the streams held ahead, and the pipeline ([`pcm::plan`]); and
+    /// what its channels' messages (in the instance's) may hold. Whatever the lengths of the
+    /// inputs and the samples.
+    pub fn plan(params: &[u8], resources: &[u64], inputs: &[u64], len: u64, initial: u64) -> Option<((u64, u64), u64)> {
+        let fmt = Format::from_bytes(params)?;
+        let (&[res], true) = (resources, inputs.len() == N_BYTE_STREAMS + 3) else { return None };
+        Some(pcm::plan(fmt, len, res, initial, SLOTS - 1))
+    }
+
+    /// The module: the `len` bytes of samples from `params` (their format), `resources` (the
+    /// tables) and `inputs` (the streams), whole, on `threads` threads.
+    pub fn decode(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
+        let corrupt = |s: &str| Error(format!("corrupt: {s}"));
+        let fmt = Format::from_bytes(params).ok_or_else(|| corrupt("params"))?;
+        let [res] = resources else { return Err(corrupt("resources")) };
+        let t = residual::tables_from(res).ok_or_else(|| corrupt("tables"))?;
+        let [streams @ .., words, raw0, raw1] = inputs else { return Err(corrupt("inputs")) };
+        if streams.len() != N_BYTE_STREAMS || words.len() % 4 != 0 {
+            return Err(corrupt("inputs"));
+        }
+        // No output is larger than 64 times its coded form.
+        let coded_len = inputs.iter().map(|i| i.len() as u64).sum::<u64>();
+        if len > coded_len.saturating_mul(64) + (1 << 20) {
+            return Err(Error("length".into()));
+        }
+        let c = Coded {
+            streams: streams.iter().map(|&s| Cow::Borrowed(s)).collect(),
+            words: Cow::Borrowed(words),
+            raw: [Cow::Borrowed(raw0), Cow::Borrowed(raw1)],
+        };
+        let mut out = Vec::new();
+        pcm::decode_threads(&c, fmt, &t, len as usize, &mut out, threads).map_err(|e| corrupt(e.0))?;
+        if out.len() as u64 != len {
+            return Err(corrupt("length"));
+        }
+        Ok(out)
+    }
+
+    /// The module as a part module (its entry point, of `aqr_api::entry!`): what [`decode`]
+    /// gives, its inputs taken and its output put in order through windows ([`WINDOW`]), in
+    /// pieces: it holds neither, whatever their lengths.
+    pub fn decode_part(params_len: u64, res_len: u64, lens: [u64; 6], size: u64) {
+        aqr_api::finish(part(params_len, res_len, lens, size));
+    }
+
+    fn part(params_len: u64, res_len: u64, lens: [u64; 6], size: u64) -> Result<()> {
+        let corrupt = |s: &str| Error(format!("corrupt: {s}"));
+        let mut params = [0; 3];
+        let params = params.get_mut(..params_len as usize).ok_or_else(|| corrupt("params"))?;
+        Params::read(0, params);
+        let fmt = Format::from_bytes(params).ok_or_else(|| corrupt("params"))?;
+        if lens[3] % 4 != 0 {
+            return Err(corrupt("inputs"));
+        }
+        // No output is larger than 64 times its coded form.
+        let coded_len = lens.iter().sum::<u64>();
+        if size > coded_len.saturating_mul(64) + (1 << 20) {
+            return Err(Error("length".into()));
+        }
+        let (mut i0, mut i1, mut i2) = (In::<0>::new(lens[0]), In::<1>::new(lens[1]), In::<2>::new(lens[2]));
+        let (mut i3, mut i4, mut i5) = (In::<3>::new(lens[3]), In::<4>::new(lens[4]), In::<5>::new(lens[5]));
+        let mut out = Written::new(size);
+        let tables = || {
+            let mut raw = vec![0; usize::try_from(res_len).ok()?];
+            Resource::<0>::read(0, &mut raw);
+            residual::tables_from(&raw)
+        };
+        let inputs: [(&mut dyn Pull, u64); 6] = [
+            (&mut i0, lens[0]),
+            (&mut i1, lens[1]),
+            (&mut i2, lens[2]),
+            (&mut i3, lens[3]),
+            (&mut i4, lens[4]),
+            (&mut i5, lens[5]),
+        ];
+        pcm::decode_part(fmt, size, tables, inputs, &mut out, SLOTS - 1).map_err(|e| corrupt(e.0))
     }
 }

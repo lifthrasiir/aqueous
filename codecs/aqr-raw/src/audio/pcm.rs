@@ -9,9 +9,12 @@ use crate::audio::bits;
 use crate::audio::frame::{self, Frame, SUB_CONSTANT, SUB_LPC, SUB_VERBATIM};
 use crate::audio::par::{self, DecBatch, EncBatch, Item};
 use crate::audio::rans::Tables;
+use crate::audio::residual::ResStream;
 use crate::audio::residual::{
     Coded, Error, LmsEncoder, Rd, ResCounter, ResDecoder, ResEncoder, get_subframes, put_subframes,
 };
+use crate::audio::slide::Slide;
+use aqr_api::stream::{Pull, Put};
 use std::sync::mpsc::sync_channel;
 
 /// Byte streams: the channel assignment of each block, the subframe parameters, and the
@@ -602,10 +605,7 @@ pub fn decode_threads(
     if !len.is_multiple_of(frame_bytes) {
         return Err(Error("length"));
     }
-    #[cfg(target_family = "wasm")]
-    return decode_apart(c, fmt, t, len, out, threads);
     // three stages and a pool of one at least, on workers of the pool
-    #[allow(unreachable_code)]
     let workers = aqr_common::pool::reserve((threads - 1).max(4));
     if workers.len() < 4 {
         return decode(c, fmt, t, len, out);
@@ -674,60 +674,98 @@ pub fn decode_threads(
     })
 }
 
-/// What the frames of `nframes` sample frames of `fmt` take at most in the WebAssembly pipeline
-/// (`par::apart`), and a worker's message (the samples of a frame).
+/// What the frames of `nframes` sample frames of `fmt` take at most in the pipeline of a part
+/// module (`par::apart`), and a worker's message (the samples of a frame).
 pub fn rooms(fmt: Format, nframes: usize) -> par::apart::Rooms {
     let block = BLOCK.min(nframes);
     par::apart::Rooms { channels: fmt.channels, block, parts: 0, out: 2 + block * fmt.frame_bytes() }
 }
 
 /// The samples of a frame by channel, of room for `block` each.
-#[cfg(target_family = "wasm")]
 fn scratch(channels: usize, block: usize) -> Vec<Vec<i64>> {
     (0..channels).map(|_| Vec::with_capacity(block)).collect()
 }
 
-/// The memory plan of [`decode_threads`] in WebAssembly on `threads` threads ([`aqr_api::stack`]),
-/// of `len` bytes of samples of `fmt`, rANS words of `words` bytes and raw bits of `raw`, `top`
-/// bytes of the stack taken before (the initial memory with them, and the decoder's tables): the
-/// limits of its instance and of its tasks, and what its channels' messages (in the instance's) may
-/// hold.
-pub fn plan(fmt: Format, len: u64, words: u64, raw: [u64; 2], top: u64, threads: usize) -> ((u64, u64), u64) {
+/// Bytes of a varint of a sample (or a coefficient) of `bits` bits (its zigzag form has as many).
+const fn varint_bytes(bits: u32) -> usize {
+    (bits as usize).div_ceil(7)
+}
+
+/// What a frame reads of each byte stream at most, so many bytes ahead of each stream's position
+/// being enough for it: a stream of the part module holds them in a window ([`Slide`]).
+///
+/// A varint of a sample or a coefficient is taken to be as short as a coder writes it, so a
+/// frame never reads more than this: a stream that codes a value in more bytes (a varint padded
+/// with continuation bytes, which no coder writes) fails where the whole decoding takes it.
+#[derive(Clone, Copy, Debug)]
+pub struct Reads {
+    pub hdr: usize,
+    pub sub: usize,
+    pub warm: usize,
+}
+
+impl Reads {
+    /// Of frames of `block` samples at most of `channels` channels of samples of `bits` bits (a
+    /// side channel's one more), with `parts` bytes of partitions' parameters a subframe at most.
+    pub fn of(channels: usize, block: usize, bits: u32, parts: usize) -> Reads {
+        // (the type and wasted bits' bytes, precision and shift, 32 coefficients of 15 bits
+        // at most, and the method and partitions' parameters)
+        let sub = 2 + 2 + 32 * varint_bytes(15) + 1 + parts;
+        Reads {
+            hdr: 1 + par::msg::HEADER,
+            sub: channels * sub,
+            warm: channels * block.max(32) * varint_bytes(bits + 1),
+        }
+    }
+}
+
+/// The memory plan of [`decode_part`] on `workers` workers ([`aqr_api::stack`]), of `len` bytes
+/// of samples of `fmt`, rANS words of `words` bytes and raw bits of `raw`, a resource of `res`
+/// bytes, `top` bytes of the stack taken before (the initial memory): the limits of its instance
+/// and of its tasks, and what its channels' messages (in the instance's) may hold. Whatever the
+/// lengths of the streams and the samples: none of them is held.
+pub fn plan(fmt: Format, len: u64, res: u64, top: u64, workers: usize) -> ((u64, u64), u64) {
     use aqr_api::stack::block;
-    let rooms = rooms(fmt, (len / fmt.frame_bytes() as u64) as usize);
+    let nframes = (len / fmt.frame_bytes() as u64) as usize;
+    let rooms = rooms(fmt, nframes);
+    let rd = Reads::of(fmt.channels, rooms.block, 8 * fmt.bytes as u32, 0);
+    let slides: u64 = [rd.hdr, rd.sub, rd.warm].iter().map(|&r| Slide::plan(r, block)).sum();
+    let start = block(res)
+        + crate::audio::residual::tables_plan(block)
+        + ResStream::plan(rooms.block * fmt.channels, block)
+        + slides
+        + par::apart::Pipe::<Error>::plan(&rooms, block);
     let p = par::apart::Plan {
         top,
-        workers: threads.saturating_sub(3),
+        workers,
         rooms,
-        front: 0,
-        errors: ResDecoder::plan(words, raw, block),
         work: block(12 * fmt.channels as u64) + fmt.channels as u64 * block(8 * rooms.block as u64),
-        start: block(len),
+        start,
     };
     p.bytes()
 }
 
-/// [`decode_threads`] in WebAssembly: the pipeline of tasks ([`par::apart`]), whose workers
-/// reconstruct the samples of frames, which are appended here in order (to the output reserved
-/// once the tasks are spawned, [`plan`]).
-#[cfg(target_family = "wasm")]
-fn decode_apart(
-    c: &Coded,
+/// [`decode`] as the instance of a part module: the streams taken in pieces (`inputs`: the three
+/// byte streams, the rANS words and the two raw bit streams, with their lengths) and the samples
+/// of `len` bytes put in order to `out`, through a pipeline of tasks ([`par::apart`]) of `workers`
+/// workers; `tables` makes the decoder's tables once the tasks are spawned (their memory is not
+/// in them). The same output and errors as [`decode`].
+pub fn decode_part(
     fmt: Format,
-    t: &Tables,
-    len: usize,
-    out: &mut Vec<u8>,
-    threads: usize,
+    len: u64,
+    tables: impl FnOnce() -> Option<Tables>,
+    inputs: [(&mut dyn Pull, u64); 6],
+    out: &mut dyn Put,
+    workers: usize,
 ) -> Result<(), Error> {
     use par::apart::{ERR, FRAME};
     let frame_bytes = fmt.frame_bytes();
-    let nframes = len / frame_bytes;
-    ResDecoder::takes(t)?;
+    if !fmt.valid() || len % frame_bytes as u64 != 0 {
+        return Err(Error("length"));
+    }
+    let nframes = (len / frame_bytes as u64) as usize;
     let rooms = rooms(fmt, nframes);
-    let errors = |f: &mut dyn FnMut(&mut ResDecoder<'_>)| {
-        let raw_buf = [bits::padded(&c.raw[0]), bits::padded(&c.raw[1])];
-        f(&mut ResDecoder::new(t, &c.words, &raw_buf).expect("tables checked"))
-    };
+    let [(hdr, _), (sub, _), (warm, _), (words, words_len), (raw0, raw0_len), (raw1, raw1_len)] = inputs;
     let work = || {
         let mut ch = scratch(fmt.channels, rooms.block);
         move |it: &Item<'_>, tx: &mut Vec<u8>| match it {
@@ -740,21 +778,56 @@ fn decode_apart(
             _ => tx.push(ERR),
         }
     };
-    let take = |o: &mut Vec<u8>, m: &[u8]| match m[0] {
-        FRAME if o.len() + m.len() - 1 <= len => {
-            o.extend_from_slice(&m[1..]);
-            Ok(())
+    par::apart::run(workers, rooms, work, |link| {
+        let t = tables().ok_or(Error("tables"))?;
+        let max = rooms.block * fmt.channels;
+        let errors = ResStream::new(&t, words, words_len, [(raw0, raw0_len), (raw1, raw1_len)], max)?;
+        let rd = Reads::of(fmt.channels, rooms.block, 8 * fmt.bytes as u32, 0);
+        let (mut hdr, mut sub, mut warm) =
+            (Slide::new(hdr, rd.hdr), Slide::new(sub, rd.sub), Slide::new(warm, rd.warm));
+        let mut written = 0u64;
+        let mut take = |m: &[u8]| match m[0] {
+            FRAME => {
+                written += m.len() as u64 - 1;
+                out.put(&m[1..]).ok_or(Error("length"))
+            }
+            // (an error's message stays in its task)
+            _ => Err(Error("residuals")),
+        };
+        let mut pipe = par::apart::Pipe::new(link, errors, &mut take, Error("pipeline"));
+        let end = front_part(&mut pipe, fmt, nframes, rd, [&mut hdr, &mut sub, &mut warm]);
+        pipe.finish(end)?;
+        match written == len {
+            true => Ok(()),
+            false => Err(Error("length")),
         }
-        FRAME => Err(Error("length")),
-        // (an error's message stays in its task)
-        _ => Err(Error("residuals")),
-    };
-    let front = |e: &mut par::apart::Out| front(e, c, fmt, nframes, |_: &mut (), _| {});
-    let start = || Vec::with_capacity(len);
-    let s = par::apart::run(threads.saturating_sub(3), rooms, front, errors, work, start, take, Error("pipeline"))?;
-    match out.is_empty() {
-        true => *out = s,
-        false => out.extend_from_slice(&s),
+    })
+}
+
+/// The first stage of [`decode_part`]: channel assignments and subframe parameters, read from
+/// windows of their streams.
+fn front_part(
+    pipe: &mut par::apart::Pipe<'_, '_, Error>,
+    fmt: Format,
+    nframes: usize,
+    rd: Reads,
+    [hdr, sub, warm]: [&mut Slide<'_>; 3],
+) -> Result<(), par::apart::Fail> {
+    let mut done = 0;
+    while done < nframes {
+        let n = BLOCK.min(nframes - done);
+        done += n;
+        hdr.need(rd.hdr);
+        sub.need(rd.sub);
+        warm.need(rd.warm);
+        let (mut h, mut s, mut w) = (Rd::new(hdr.data()), Rd::new(sub.data()), Rd::new(warm.data()));
+        let r = pcm_frame(pipe.frame(), &fmt, n, &mut h, &mut s, &mut w);
+        let (h, s, w) = (h.p, s.p, w.p);
+        hdr.advance(h);
+        sub.advance(s);
+        warm.advance(w);
+        r?;
+        pipe.push_frame()?;
     }
     Ok(())
 }

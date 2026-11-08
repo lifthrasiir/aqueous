@@ -55,7 +55,7 @@ finds samples inside a format of its own applies the modules the same way.
 
 | module | version | output | params | resources | inputs |
 |---|---|---|---|---|---|
-| `pcm-recons` | 1 | interleaved integer PCM samples | the sample format (§6.1) | the frequency tables (Appendix A) | 6 (§6.1) |
+| `pcm-recons` | 2 | interleaved integer PCM samples | the sample format (§6.1) | the frequency tables (Appendix A) | 6 (§6.1) |
 | `raster-recons` | 1 | rows of 8-bit samples | the raster layout (§7.1) | none | 2 (§7.1) |
 | `raster-recons-16` | 1 | rows of 16-bit samples | the raster layout (§8.1) | none | 2 (§8.1) |
 
@@ -485,6 +485,11 @@ A decoder should reject the following rather than produce output:
 
 This implementation also bounds its work on corrupt input: it rejects `len > 64 × S +
 2^20`, where S is the total size of the inputs.
+
+Version 2 takes its inputs in order through windows and puts its output in order, holding
+neither: each byte stream is held a frame ahead of its position. So it also refuses a frame
+whose varints are coded in more bytes than their values need (a sample of `b` bits takes
+`ceil(b / 7)` bytes at most, a coefficient 3); no coder writes one.
 
 ## 7. `raster-recons`
 

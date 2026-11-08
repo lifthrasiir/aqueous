@@ -129,13 +129,23 @@ PCM is cut into it here.
   blocks ahead, one thread runs the LMS stage in order, the calling thread codes. Decoding is
   a pipeline of subframe parameters → error decoding → LMS stage, then a pool reconstructs
   the samples straight into their place in the output.
-- **Memory of the module**: `pcm-recons` lays its memory out as a stack (`aqr_api::stack`),
-  so its limit is its plan (`module::pcm::plan`). In WebAssembly the pipeline's stages and its
-  five workers are tasks that pass each frame as a message of its own (`audio::par::apart`),
-  each taking it into a buffer and a frame reserved for the largest (a block of all channels),
-  so that each takes the same memory whatever it is given; the plan adds the messages its
-  channels may hold. The rANS tables are built of exactly what they keep
-  (`Tables::from_flat`).
+- **Memory of the module**: `pcm-recons` (version 2) is a part module with windows of 16 pages
+  and lays its memory out as a stack (`aqr_api::stack`), so its limit is its plan
+  (`module::pcm::plan`), the same whatever the lengths of the samples and the streams: it holds
+  neither its inputs nor its output. The instance reads the streams through windows (a sliding
+  buffer for each, `audio::slide`, that holds ahead of a frame the most a frame can read: the
+  rANS decoder's words and the raw bits of a block of all channels at their worst, and the
+  varints of the frame), makes the frames' parameters and decodes their errors
+  (`residual::ResStream`), and writes the samples it is given back, in order, to the output.
+  The gang of eight tasks is the LMS stage and seven workers (`audio::par::apart`), the
+  frames passing as messages of their own, each task taking one into a buffer and a frame
+  reserved for the largest (a block of all channels); the instance keeps at most
+  `2 * workers - 1` of them in the pipeline, so that no channel it waits on is full. The plan
+  adds the messages the channels may hold. The rANS tables are built of exactly what they
+  keep (`Tables::from_flat`), once the tasks are spawned (they do not need them). A varint
+  coded in more bytes than its value takes (which no coder writes) is refused, as the window
+  would not hold a frame of them. 300 MB of 16-bit stereo: an application needing 2224 MiB
+  (whole) needs 18.4 MiB.
 
 ### Images
 

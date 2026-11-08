@@ -215,8 +215,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "flac-recons",
-        version: 4,
-        sha512_256: hex("b342135204ab857430e3f347b768cc2236aa17070a79c906e8bec628be9435da"),
+        version: 5,
+        sha512_256: hex("5ad060a409290d438e056af500a23e70320611004ba37fa74d2cda9697950d35"),
         block: include_bytes!("../wasm/flac-recons.block"),
     },
     Known {
@@ -347,8 +347,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "pcm-recons",
-        version: 1,
-        sha512_256: hex("7e51507cf279b90b1382643093e14ca509215de0950718d40fa40799e361c95c"),
+        version: 2,
+        sha512_256: hex("a05e650f9b7e72854be9c503d632ef5e7c83405cec22ecb50183186253a59da1"),
         block: include_bytes!("../wasm/pcm-recons.block"),
     },
     Known {
@@ -414,13 +414,13 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "raster-recons-16",
         version: 1,
-        sha512_256: hex("cd5512adc6769cb48add6d69d46dc32cef7a0baa56ade07caac094057f235cf5"),
+        sha512_256: hex("896d0570312ebd78f3f6a3b3672d2d70b9570e514891e3114dc4139572b3ed4b"),
         block: include_bytes!("../wasm/raster-recons-16.block"),
     },
     Known {
         name: "raster-recons",
         version: 1,
-        sha512_256: hex("f5f5836a58bfaa8e9bc6525b74771708f03ccb37b8d4970c19b8f55c157b9378"),
+        sha512_256: hex("e5ec815c0e416b4004c92514838c54b161e4014b1ddd4b560f0dcc562fe655e7"),
         block: include_bytes!("../wasm/raster-recons.block"),
     },
     Known {

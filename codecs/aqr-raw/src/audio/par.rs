@@ -473,21 +473,31 @@ pub mod msg {
     }
 }
 
-/// The pipeline in WebAssembly, of tasks and channels (`aqr_api::task`, `aqr_api::chan`)
-/// rather than threads: the first stage, [`ResDecoder::errors`] and [`LmsDecoder::frame`] each a
-/// task, and `workers` tasks working on the items in turn (item `k` on worker `k mod workers`),
-/// whose results the module takes in the same turn, so in order.
+/// The pipeline of a part module, of tasks and channels (`aqr_api::task`, `aqr_api::chan`): the
+/// module's instance, which alone reaches the windows of its inputs and output, makes the first
+/// stage's items and decodes their errors ([`ResStream`]), and sends each as a message to a task
+/// running [`LmsDecoder::frame`], which deals them to `workers` tasks in turn (item `k` to worker
+/// `k mod workers`); the instance takes what the workers make in the same turn, so in order, and
+/// writes it. So that no channel is full where the instance waits for one, it keeps at most
+/// [`in_flight`] items in the pipeline (each makes one message in a channel to a worker and one
+/// from it, and each has room for [`CAP`]).
 ///
 /// Every item is a message of its own: a byte telling whether it is the last (an error, or the
-/// end), its kind and what it holds (a frame as [`msg::put_frame`] writes it, the place of junk
-/// in the module's data). Each stage takes its messages into a buffer of room for the largest
-/// and reads each frame into a frame of its own of room for the largest ([`Rooms`]), so that it
-/// takes the same memory whatever it is given: what [`plan`] counts.
+/// end), its kind and what it holds (a frame as [`msg::put_frame`] writes it; for junk, only its
+/// length, which the instance copies from its stream where the item comes back). Each task takes
+/// its messages into a buffer of room for the largest and reads each frame into a frame of its own
+/// of room for the largest ([`Rooms`]), so that it takes the same memory whatever it is given:
+/// what [`Plan`] counts.
 ///
-/// A stage stops passing items on after the last one, but reads what comes until its input is
-/// closed, so that no stage waits for ever for one that stopped; and every stage closes its
-/// outputs as it ends (a task closes only the channels it sent to).
+/// The tasks read what comes until their input is closed, so that none waits for ever for one that
+/// stopped, and close their outputs as they end; the instance, once it has the last item, closes
+/// its output and reads what the workers still send.
 pub mod apart {
+    use super::*;
+    use crate::audio::frame::Frame;
+    use crate::audio::residual::ResStream;
+    use aqr_api::chan::{self, Receiver, Sender};
+
     /// Kinds of items.
     pub const FRAME: u8 = 0;
     pub const JUNK: u8 = 1;
@@ -497,6 +507,12 @@ pub mod apart {
 
     /// Messages a channel holds.
     const CAP: usize = 2;
+
+    /// Items in the pipeline at most, with `workers` workers: a worker has at most [`CAP`] of
+    /// them in its channels, and one more would block it, and so the stages before it.
+    pub fn in_flight(workers: usize) -> usize {
+        (workers * CAP).saturating_sub(1).max(1)
+    }
 
     /// What the frames of a stream take at most: channels, samples a channel, partitions a
     /// subframe; and the bytes of a worker's message at most (the byte of the last, its kind's
@@ -521,17 +537,14 @@ pub mod apart {
     /// `workers` workers: the most the instance takes, and the most the gang of its tasks (which
     /// are started together) take, with the messages its channels hold at most.
     ///
-    /// - `front`, `errors`, `work`: what the first stage, the error stage (its residual
-    ///   decoder) and each worker (its scratch, and what it takes as it works) take over their
-    ///   message buffers and frame (in that order: the worker's scratch after its frame).
-    /// - `start`: what the instance takes once the tasks are spawned, before its buffer of
-    ///   results (the output).
+    /// - `work`: what each worker takes (its scratch) over its message buffers and frame (in that
+    ///   order: the worker's scratch after its frame).
+    /// - `start`: what the instance takes once the tasks are spawned: its decoders and streams,
+    ///   and the pipe ([`Pipe::plan`]).
     pub struct Plan {
         pub top: u64,
         pub workers: usize,
         pub rooms: Rooms,
-        pub front: u64,
-        pub errors: u64,
         pub work: u64,
         pub start: u64,
     }
@@ -542,7 +555,7 @@ pub mod apart {
         pub fn bytes(&self) -> ((u64, u64), u64) {
             use aqr_api::stack::block;
             let pages = |n: u64| n.div_ceil(1 << 16) << 16;
-            let w = self.workers.max(1) as u64;
+            let w = self.workers.clamp(1, 64) as u64;
             let r = &self.rooms;
             let (item, out) = (block(r.item() as u64), block(r.out as u64));
             let frame = super::msg::frame_plan(r.channels, r.block, r.parts, block);
@@ -550,240 +563,276 @@ pub mod apart {
             let top = self.top + 2 * block(8 * w);
             let task = |own: u64| pages(top).max(pages(top + own));
             let lms = block(8 * size_of::<crate::audio::model::Lms>() as u64);
-            let queued = CAP as u64 * ((2 + w) * r.item() as u64 + w * r.out as u64);
-            let gang = task(item + frame + self.front)
-                + task(self.errors + 2 * item + frame)
-                + task(lms + 2 * item + frame)
-                + w * task(item + frame + self.work + out)
-                + queued;
-            // (the instance: the tasks' handles, then what it starts, its buffer of results)
-            let instance = pages(top + block(3 + w) + self.start + out);
+            let queued = CAP as u64 * ((1 + w) * r.item() as u64 + w * r.out as u64);
+            let gang = task(lms + 2 * item + frame) + w * task(item + frame + self.work + out) + queued;
+            // (the instance: the tasks' handles, then what it starts)
+            let instance = pages(top + block(1 + w) + self.start);
             ((instance, gang), queued)
         }
     }
 
-    #[cfg(target_family = "wasm")]
-    pub use imp::*;
+    /// Why the first stage stopped early.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Fail {
+        /// An error in decoding a frame (FLAC: after the check of the output length).
+        Frame,
+        /// Any other error.
+        Err,
+        /// The pipeline is stopped already (an error to be returned is kept).
+        Halt,
+    }
 
-    #[cfg(target_family = "wasm")]
-    mod imp {
-        use super::super::*;
-        use super::*;
-        use aqr_api::chan::{self, Sender};
-
-        /// The first stage's items, each sent as it comes.
-        pub struct Out {
-            tx: Sender,
-            msg: Vec<u8>,
-            f: Frame,
-            x: (),
+    impl From<Error> for Fail {
+        fn from(_: Error) -> Self {
+            Fail::Err
         }
+    }
 
-        impl Out {
-            fn send(&mut self, it: &Item<'_>, last: bool) {
-                self.msg.clear();
-                self.msg.push(last as u8);
-                put_item(it, &mut self.msg);
-                self.tx.send(&self.msg);
+    impl From<aqr_common::Corrupt> for Fail {
+        fn from(_: aqr_common::Corrupt) -> Self {
+            Fail::Err
+        }
+    }
+
+    /// The ends of the channels that the instance takes: to the LMS task, and from each worker.
+    /// The channel to the LMS task is closed as the link is dropped, so that the tasks end where
+    /// the instance leaves without a pipe (an error before it was made).
+    pub struct Link<'a> {
+        tx: Sender,
+        rx: &'a [(Sender, Receiver)],
+        rooms: Rooms,
+        closed: bool,
+    }
+
+    impl Link<'_> {
+        fn close(&mut self) {
+            if !std::mem::replace(&mut self.closed, true) {
+                self.tx.close();
             }
         }
+    }
 
-        impl<'a> Sink<'a, ()> for Out {
-            fn x(&mut self) -> &mut () {
-                &mut self.x
-            }
+    impl Drop for Link<'_> {
+        fn drop(&mut self) {
+            self.close();
+        }
+    }
 
-            fn frame(&mut self) -> Frame {
-                std::mem::take(&mut self.f)
-            }
-
-            fn unused(&mut self, f: Frame) {
-                self.f = f;
-            }
-
-            fn push(&mut self, it: Item<'a>, _: usize) -> Result<(), Stop<'a>> {
-                self.send(&it, false);
-                if let Item::Frame(f) = it {
-                    self.f = f;
+    /// Runs the pipeline: spawns the LMS task and `workers` workers, each made by `work` (which
+    /// writes what it makes of each item after the byte of the last), then runs `body` on the
+    /// instance with the ends of the channels, once the tasks are spawned: what it makes before
+    /// the tasks do not copy. Gives what `body` gives, after the tasks have ended.
+    pub fn run<W: FnMut(&Item<'_>, &mut Vec<u8>), R>(
+        workers: usize,
+        rooms: Rooms,
+        work: impl Fn() -> W + Sync,
+        body: impl FnOnce(Link<'_>) -> R,
+    ) -> R {
+        let workers = workers.clamp(1, 64);
+        let (item, frame) = (rooms.item(), || msg::frame_with(rooms.channels, rooms.block, rooms.parts));
+        let c2 = chan::channel(CAP);
+        let c3: Vec<_> = (0..workers).map(|_| chan::channel(CAP)).collect();
+        let c4: Vec<_> = (0..workers).map(|_| chan::channel(CAP)).collect();
+        let task = |i: usize, _: &mut Vec<u8>| match i {
+            0 => {
+                let mut ld = LmsDecoder::default();
+                let (mut rx, mut tx, mut f) = (Vec::with_capacity(item), Vec::with_capacity(item), frame());
+                let (mut k, mut done) = (0, false);
+                while c2.1.recv_into(&mut rx) {
+                    if done {
+                        continue;
+                    }
+                    done = rx[0] != 0;
+                    let to = &c3[k % workers].0;
+                    k += 1;
+                    if rx[1] != FRAME {
+                        to.send(&rx);
+                        continue;
+                    }
+                    let mut b = &rx[2..];
+                    msg::get_frame(&mut b, &mut f, true).expect("a message of the pipeline");
+                    let sc = msg::get_scales(&mut b).expect("a message of the pipeline");
+                    ld.frame(&mut f, &sc);
+                    tx.clear();
+                    tx.extend_from_slice(&[0, FRAME]);
+                    msg::put_frame(&f, true, &mut tx);
+                    to.send(&tx);
                 }
-                Ok(())
+                c3.iter().for_each(|c| c.0.close());
             }
-        }
-
-        /// Appends item `it` as the first stage sends it (a frame without its residuals).
-        fn put_item(it: &Item<'_>, out: &mut Vec<u8>) {
-            match it {
-                Item::Frame(f) => {
-                    out.push(FRAME);
-                    msg::put_frame(f, false, out);
+            _ => {
+                let j = i - 1;
+                let (mut rx, mut f) = (Vec::with_capacity(item), frame());
+                let mut w = work();
+                let mut tx = Vec::with_capacity(rooms.out);
+                while c3[j].1.recv_into(&mut rx) {
+                    tx.clear();
+                    tx.push(rx[0]);
+                    match rx[1] {
+                        FRAME => {
+                            let mut b = &rx[2..];
+                            msg::get_frame(&mut b, &mut f, true).expect("a message of the pipeline");
+                            let it = Item::Frame(std::mem::take(&mut f));
+                            w(&it, &mut tx);
+                            let Item::Frame(g) = it else { unreachable!() };
+                            f = g;
+                        }
+                        JUNK => {
+                            tx.push(JUNK);
+                            tx.extend_from_slice(&rx[2..6]);
+                        }
+                        FRAME_ERR => w(&Item::FrameErr(Error("(in a task)")), &mut tx),
+                        ERR => w(&Item::Err(Error("(in a task)")), &mut tx),
+                        _ => tx.push(END),
+                    }
+                    c4[j].0.send(&tx);
                 }
-                Item::Junk(j) => {
-                    out.push(JUNK);
-                    out.extend_from_slice(&(j.as_ptr() as usize as u32).to_le_bytes());
-                    out.extend_from_slice(&(j.len() as u32).to_le_bytes());
-                }
-                Item::FrameErr(_) => out.push(FRAME_ERR),
-                Item::Err(_) => out.push(ERR),
+                c4[j].0.close();
             }
+        };
+        // SAFETY: dropped below, before `task` goes
+        let tasks = unsafe { aqr_api::task::spawn_gang(0, 1 + workers, &task) };
+        let r = body(Link { tx: c2.0, rx: &c4, rooms, closed: false });
+        drop(tasks);
+        r
+    }
+
+    /// The instance's end of the pipeline: items made are sent down it (the frames' errors decoded
+    /// first), and what the workers make of them is taken in order by `take`, which is given the
+    /// message after its byte of the last (an `Err` ends the stream, as the last does).
+    pub struct Pipe<'a, 't, E> {
+        link: Link<'a>,
+        errors: ResStream<'a>,
+        /// The frame being made.
+        f: Frame,
+        msg: Vec<u8>,
+        rx: Vec<u8>,
+        take: &'t mut dyn FnMut(&[u8]) -> Result<(), E>,
+        closed: Option<E>,
+        sent: usize,
+        got: usize,
+        /// The workers whose channels are not closed.
+        open: u64,
+        /// How the stream ended, once it did.
+        done: Option<Result<(), E>>,
+    }
+
+    impl<'a, 't, E> Pipe<'a, 't, E> {
+        /// Bytes of the blocks that [`Pipe::new`] takes (as `block` rounds them).
+        pub fn plan(rooms: &Rooms, block: impl Fn(u64) -> u64) -> u64 {
+            let frame = super::msg::frame_plan(rooms.channels, rooms.block, rooms.parts, &block);
+            frame + block(rooms.item() as u64) + block(rooms.out as u64)
         }
 
-        /// The junk whose place `b` gives: in the data of the module, which every task has at
-        /// the same place (made before the tasks are spawned, and not written since).
-        pub fn junk<'a>(b: &[u8]) -> &'a [u8] {
-            let (p, n) =
-                (u32::from_le_bytes(b[..4].try_into().unwrap()), u32::from_le_bytes(b[4..8].try_into().unwrap()));
-            // SAFETY: the junk of the data of the module, as `put_item` took it
-            unsafe { std::slice::from_raw_parts(p as usize as *const u8, n as usize) }
-        }
-
-        /// Runs the pipeline: `front` puts the items, which go through the error and LMS stages
-        /// (`errors` running its argument on the residual decoder, which it makes in the
-        /// stage's task: what it holds is then in that task's memory alone), then a worker made
-        /// by `work` writes what it makes of each (after the byte of the last), which `take`
-        /// takes in order, with what `start` made once the tasks are spawned, until it returns
-        /// `Err` or the last one comes. Gives what `start` made.
-        #[allow(clippy::too_many_arguments)]
-        pub fn run<'a, S, E, W: FnMut(&Item<'a>, &mut Vec<u8>)>(
-            workers: usize,
-            rooms: Rooms,
-            front: impl Fn(&mut Out) -> Result<(), Stop<'a>> + Sync,
-            errors: impl Fn(&mut dyn FnMut(&mut ResDecoder<'_>)) + Sync,
-            work: impl Fn() -> W + Sync,
-            start: impl FnOnce() -> S,
-            mut take: impl FnMut(&mut S, &[u8]) -> Result<(), E>,
+        /// The pipe on `link`, taking the messages that come back with `take`; `closed` is the
+        /// error where a worker's channel is closed before its end.
+        pub fn new(
+            link: Link<'a>,
+            errors: ResStream<'a>,
+            take: &'t mut dyn FnMut(&[u8]) -> Result<(), E>,
             closed: E,
-        ) -> Result<S, E> {
-            let workers = workers.clamp(1, 64);
-            let (item, frame) = (rooms.item(), || msg::frame_with(rooms.channels, rooms.block, rooms.parts));
-            let (c1, c2) = (chan::channel(CAP), chan::channel(CAP));
-            let c3: Vec<_> = (0..workers).map(|_| chan::channel(CAP)).collect();
-            let c4: Vec<_> = (0..workers).map(|_| chan::channel(CAP)).collect();
-            let task = |i: usize, _: &mut Vec<u8>| match i {
-                0 => {
-                    let msg = Vec::with_capacity(item);
-                    let mut e = Out { tx: c1.0, msg, f: frame(), x: () };
-                    match front(&mut e) {
-                        Ok(()) => c1.0.send(&[1, END]),
-                        Err(Stop::Item(it)) => e.send(&it, true),
-                        Err(Stop::Closed) => {}
-                    }
-                    c1.0.close();
-                }
-                1 => {
-                    errors(&mut |rd| {
-                        let (mut rx, mut tx, mut f) = (Vec::with_capacity(item), Vec::with_capacity(item), frame());
-                        let mut done = false;
-                        while c1.1.recv_into(&mut rx) {
-                            if done {
-                                continue;
-                            }
-                            done = rx[0] != 0;
-                            if rx[1] == FRAME {
-                                let mut b = &rx[2..];
-                                msg::get_frame(&mut b, &mut f, false).expect("a message of the pipeline");
-                                tx.clear();
-                                match rd.errors(&mut f) {
-                                    Ok(sc) => {
-                                        tx.extend_from_slice(&[0, FRAME]);
-                                        msg::put_frame(&f, true, &mut tx);
-                                        msg::put_scales(&sc, &mut tx);
-                                    }
-                                    Err(_) => {
-                                        tx.extend_from_slice(&[1, FRAME_ERR]);
-                                        done = true;
-                                    }
-                                }
-                                c2.0.send(&tx);
-                            } else if rx[1] == END && rd.finish().is_err() {
-                                c2.0.send(&[1, ERR]);
-                            } else {
-                                c2.0.send(&rx);
-                            }
-                        }
-                    });
-                    c2.0.close();
-                }
-                2 => {
-                    let mut ld = LmsDecoder::default();
-                    let (mut rx, mut tx, mut f) = (Vec::with_capacity(item), Vec::with_capacity(item), frame());
-                    let (mut k, mut done) = (0, false);
-                    while c2.1.recv_into(&mut rx) {
-                        if done {
-                            continue;
-                        }
-                        done = rx[0] != 0;
-                        let to = &c3[k % workers].0;
-                        k += 1;
-                        if rx[1] != FRAME {
-                            to.send(&rx);
-                            continue;
-                        }
-                        let mut b = &rx[2..];
-                        msg::get_frame(&mut b, &mut f, true).expect("a message of the pipeline");
-                        let sc = msg::get_scales(&mut b).expect("a message of the pipeline");
-                        ld.frame(&mut f, &sc);
-                        tx.clear();
-                        tx.extend_from_slice(&[0, FRAME]);
-                        msg::put_frame(&f, true, &mut tx);
-                        to.send(&tx);
-                    }
-                    c3.iter().for_each(|c| c.0.close());
-                }
-                _ => {
-                    let j = i - 3;
-                    let (mut rx, mut f) = (Vec::with_capacity(item), frame());
-                    let mut w = work();
-                    let mut tx = Vec::with_capacity(rooms.out);
-                    while c3[j].1.recv_into(&mut rx) {
-                        tx.clear();
-                        tx.push(rx[0]);
-                        match rx[1] {
-                            FRAME => {
-                                let mut b = &rx[2..];
-                                msg::get_frame(&mut b, &mut f, true).expect("a message of the pipeline");
-                                let it = Item::Frame(std::mem::take(&mut f));
-                                w(&it, &mut tx);
-                                let Item::Frame(g) = it else { unreachable!() };
-                                f = g;
-                            }
-                            JUNK => w(&Item::Junk(junk(&rx[2..])), &mut tx),
-                            FRAME_ERR => w(&Item::FrameErr(Error("(in a task)")), &mut tx),
-                            ERR => w(&Item::Err(Error("(in a task)")), &mut tx),
-                            _ => tx.push(END),
-                        }
-                        c4[j].0.send(&tx);
-                    }
-                    c4[j].0.close();
-                }
-            };
-            // SAFETY: dropped below, before `task` goes
-            let tasks = unsafe { aqr_api::task::spawn_gang(0, 3 + workers, &task) };
-            let mut s = start();
-            let mut rx = Vec::with_capacity(rooms.out);
-            let (mut k, mut open) = (0, u64::MAX >> (64 - workers));
-            let r = loop {
-                if !c4[k % workers].1.recv_into(&mut rx) {
-                    open &= !(1 << (k % workers));
-                    break Err(closed);
-                }
-                k += 1;
-                if rx[1] == END {
-                    break Ok(());
-                }
-                let r = take(&mut s, &rx[1..]);
-                if r.is_err() || rx[0] != 0 {
-                    break r;
-                }
-            };
-            // (what is left read, in the same turn, for the stages to end)
-            while open != 0 {
-                if open & 1 << (k % workers) != 0 && !c4[k % workers].1.recv_into(&mut rx) {
-                    open &= !(1 << (k % workers));
-                }
-                k += 1;
+        ) -> Self {
+            let r = link.rooms;
+            let f = msg::frame_with(r.channels, r.block, r.parts);
+            let (msg, rx) = (Vec::with_capacity(r.item()), Vec::with_capacity(r.out));
+            let open = u64::MAX >> (64 - link.rx.len());
+            Pipe { link, errors, f, msg, rx, take, closed: Some(closed), sent: 0, got: 0, open, done: None }
+        }
+
+        /// The frame to fill for [`Pipe::push_frame`].
+        pub fn frame(&mut self) -> &mut Frame {
+            &mut self.f
+        }
+
+        /// Takes the next message that comes back, for the item that is the oldest in the pipeline.
+        fn recv_one(&mut self) {
+            let j = self.got % self.link.rx.len();
+            if !self.link.rx[j].1.recv_into(&mut self.rx) {
+                self.open &= !(1 << j);
+                self.done = Some(Err(self.closed.take().expect("a channel closed once")));
+                return;
             }
-            drop(tasks);
-            r.map(|()| s)
+            self.got += 1;
+            if self.rx[1] == END {
+                self.done = Some(Ok(()));
+                return;
+            }
+            let r = (self.take)(&self.rx[1..]);
+            if r.is_err() || self.rx[0] != 0 {
+                self.done = Some(r);
+            }
+        }
+
+        /// Sends `m` as the next item, once the pipeline has room for it.
+        fn send(&mut self, m: &[u8]) -> Result<(), Fail> {
+            let limit = in_flight(self.link.rx.len());
+            while self.sent - self.got >= limit && self.done.is_none() {
+                self.recv_one();
+            }
+            if self.done.is_some() {
+                return Err(Fail::Halt);
+            }
+            self.link.tx.send(m);
+            self.sent += 1;
+            Ok(())
+        }
+
+        /// The error stage on the frame made ([`Pipe::frame`]), which goes down the pipeline.
+        pub fn push_frame(&mut self) -> Result<(), Fail> {
+            match self.errors.errors(&mut self.f) {
+                Ok(sc) => {
+                    let mut m = std::mem::take(&mut self.msg);
+                    m.clear();
+                    m.extend_from_slice(&[0, FRAME]);
+                    msg::put_frame(&self.f, true, &mut m);
+                    msg::put_scales(&sc, &mut m);
+                    let r = self.send(&m);
+                    self.msg = m;
+                    r
+                }
+                Err(_) => {
+                    self.send(&[1, FRAME_ERR])?;
+                    Err(Fail::Halt)
+                }
+            }
+        }
+
+        /// Junk of `n` bytes, which the instance copies from its stream where it comes back.
+        pub fn push_junk(&mut self, n: usize) -> Result<(), Fail> {
+            let n = u32::try_from(n).map_err(|_| Fail::Err)?;
+            let mut m = [0; 6];
+            m[1] = JUNK;
+            m[2..].copy_from_slice(&n.to_le_bytes());
+            self.send(&m)
+        }
+
+        /// Ends the stream: the first stage ended with `end` (the stream of the rANS words is
+        /// checked at its end), and the instance has taken everything back; `Ok` where the end of
+        /// the stream came back, else the error that `take` gave or the channels' being closed.
+        pub fn finish(mut self, end: Result<(), Fail>) -> Result<(), E> {
+            match end {
+                Ok(()) => {
+                    let last = if self.errors.finish().is_err() { ERR } else { END };
+                    let _ = self.send(&[1, last]);
+                }
+                Err(Fail::Frame) => drop(self.send(&[1, FRAME_ERR])),
+                Err(Fail::Err) => drop(self.send(&[1, ERR])),
+                Err(Fail::Halt) => {}
+            }
+            self.link.close();
+            while self.done.is_none() {
+                self.recv_one();
+            }
+            // (what is left read, in the same turn, for the stages to end)
+            let w = self.link.rx.len();
+            while self.open != 0 {
+                let j = self.got % w;
+                if self.open & 1 << j != 0 && !self.link.rx[j].1.recv_into(&mut self.rx) {
+                    self.open &= !(1 << j);
+                }
+                self.got += 1;
+            }
+            self.done.take().expect("ended")
         }
     }
 }

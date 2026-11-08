@@ -43,7 +43,7 @@ aqr-raw's now; the numbers are kept so that the references between sections stay
 
 ## 2. The module
 
-The module is `flac-recons`, version 4 (`aqr_flac::formula`), in entry formulas
+The module is `flac-recons`, version 5 (`aqr_flac::formula`), in entry formulas
 (aqr-formula). `formula::encode` makes the formula and `formula::decode` is the module.
 Its output, the **original**, has the declared length `len`: a FLAC file.
 
@@ -58,7 +58,8 @@ varint  frame      the most bytes of a frame, from its sync code to its CRC-16
 Trailing bytes are an error, as are `block > 65536`, `channels > 8` and `frame > len`. A
 frame past them (§6.5) is an error. All three are 0 where the file has no frame. (Version 3
 had no params; version 2 took one byte, the kind: 0 for FLAC and 1 for PCM, which is
-aqr-raw's `pcm-recons` now.)
+aqr-raw's `pcm-recons` now. Version 5 is the same format as version 4, as a part module: the
+streams are taken in order through windows and the output put in order.)
 
 **Resources**: exactly one, the frequency tables of aqr-raw's `FORMAT.md`, Appendix A (the
 resource of `pcm-recons` too), checked as that document says.
@@ -250,6 +251,10 @@ A decoder should reject the following rather than produce output:
   that is not a multiple of 4; streams cut short (a varint or a byte stream).
 - A frame of more samples a channel, channels or bytes than the params give (§2), or a
   header of more than 16 bytes.
+- A varint of a sample or a coefficient coded in more bytes than its value needs (the
+  coder never writes one; zigzag values of at most 33 bits take 5 bytes, coefficients of
+  at most 15 bits take 3). The module of version 5 holds ahead of each stream's position
+  the most that a frame of such varints reads, so it refuses a frame that reads more.
 - FLAC: a prefix that does not parse to its own end (§6.1); a header that is not valid
   (§6.6, header rules) or a prediction with no previous header; a subframe type outside
   §3; `wasted ≥ full` or a wasted flag with `wasted = 0`; an order larger than `N`; a

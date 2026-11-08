@@ -7,11 +7,14 @@
 use crate::bits;
 use crate::flac::{self, ESCAPE, Frame};
 use crate::rans::Tables;
+use aqr_api::stream::{Pull, Put};
 use aqr_raw::audio::par::{self, DecBatch, EncBatch, Item};
+use aqr_raw::audio::residual::ResStream;
 #[cfg(feature = "encode")]
 pub use aqr_raw::audio::residual::freqs_to_bytes;
 pub use aqr_raw::audio::residual::{Coded, Error, Rd, layout_id, put_varint, tables};
 use aqr_raw::audio::residual::{LmsEncoder, ResCounter, ResDecoder, ResEncoder, get_subframes, put_subframes};
+use aqr_raw::audio::slide::Slide;
 use std::sync::mpsc::sync_channel;
 
 /// Byte streams.
@@ -473,10 +476,7 @@ pub fn decode_threads(
     if c.streams.len() != N_BYTE_STREAMS {
         return Err(Error("stream count"));
     }
-    #[cfg(target_family = "wasm")]
-    return decode_apart(c, t, total_len, out, room, threads);
     // three stages and a pool of one at least, on workers of the pool
-    #[allow(unreachable_code)]
     let workers = aqr_common::pool::reserve((threads - 1).max(4));
     if workers.len() < 4 {
         return decode(c, t, total_len, out, room);
@@ -595,45 +595,128 @@ pub fn count(input: &[u8], counts: &mut [Vec<u64>]) {
     }
 }
 
-/// The memory plan of [`decode_threads`] in WebAssembly on `threads` threads ([`aqr_api::stack`]),
-/// of a file of `total_len` bytes and frames of `room`, rANS words of `words` bytes and raw bits
-/// of `raw`, `top` bytes of the stack taken before (the initial memory with them, and the
-/// decoder's tables): the limits of its instance and of its tasks, and what its channels'
-/// messages (in the instance's) may hold.
+/// The memory plan of [`decode_part`] on `workers` workers ([`aqr_api::stack`]), of a file of
+/// `total_len` bytes and frames of `room`, a resource of `res` bytes, `top` bytes of the stack
+/// taken before (the initial memory): the limits of its instance and of its tasks, and what its
+/// channels' messages (in the instance's) may hold. Whatever the lengths of the streams and the
+/// file: none of them is held.
 #[cfg(feature = "encode")]
-pub fn plan(total_len: u64, room: Room, words: u64, raw: [u64; 2], top: u64, threads: usize) -> ((u64, u64), u64) {
+pub fn plan(room: Room, res: u64, top: u64, workers: usize) -> ((u64, u64), u64) {
     use aqr_api::stack::block;
-    let p = par::apart::Plan {
-        top,
-        workers: threads.saturating_sub(3),
-        rooms: room.rooms(),
-        front: Headers::plan(block),
-        errors: ResDecoder::plan(words, raw, block),
-        work: block(room.writer() as u64 + 16),
-        start: block(total_len),
-    };
+    let rooms = room.rooms();
+    let rd = room.reads();
+    let slides: u64 = [rd.hdr, rd.sub, rd.warm, LAYOUT_READ, PIECE].iter().map(|&r| Slide::plan(r, block)).sum();
+    let tables = block(res) + aqr_raw::audio::residual::tables_plan(block);
+    let rest = ResStream::plan(room.block * room.channels, block)
+        + slides
+        + Headers::plan(block)
+        + par::apart::Pipe::<Error>::plan(&rooms, block);
+    // (the prefix is copied in pieces before the rest is made, its piece taken off)
+    let start = tables + rest.max(Slide::plan(PIECE, block));
+    let p = par::apart::Plan { top, workers, rooms, work: block(room.writer() as u64 + 16), start };
     p.bytes()
 }
 
-/// [`decode_threads`] in WebAssembly: the pipeline of tasks ([`par::apart`]), whose workers
-/// write the frames (escape checks, Rice coding, CRCs), which are appended here in order (to
-/// the output reserved once the tasks are spawned, [`plan`]), with the checks of [`decode`].
-#[cfg(target_family = "wasm")]
-fn decode_apart(
-    c: &Coded,
-    t: &Tables,
-    total_len: usize,
-    out: &mut Vec<u8>,
+/// Bytes of a window of a stream copied as it is (the prefix, the junk), and of the layout's: two
+/// varints.
+pub const PIECE: usize = 4096;
+const LAYOUT_READ: usize = 20;
+
+impl Room {
+    /// What a frame reads of each byte stream at most ([`pcm::Reads`]): samples of 32 bits at
+    /// most, a subframe's partitions as many as its samples (and 2^15).
+    pub fn reads(&self) -> aqr_raw::audio::pcm::Reads {
+        aqr_raw::audio::pcm::Reads::of(self.channels, self.block, 32, self.block.min(1 << 15))
+    }
+}
+
+/// Copies `n` bytes of `src` to `out`, in pieces; `written` counts them.
+fn copy_through(src: &mut Slide<'_>, mut n: u64, out: &mut dyn Put, written: &mut u64) -> Result<(), Error> {
+    while n > 0 {
+        src.need(1);
+        let d = src.data();
+        if d.is_empty() {
+            return Err(Error("truncated"));
+        }
+        let k = (d.len() as u64).min(n) as usize;
+        out.put(&d[..k]).ok_or(Error("too long"))?;
+        *written += k as u64;
+        src.advance(k);
+        n -= k as u64;
+    }
+    Ok(())
+}
+
+/// Copies the bytes before the first frame (`flac::parse_metadata`'s walk of them, and the check
+/// that they end where it does) from `src` to `out`, and gives the stream info.
+fn copy_prefix(src: &mut Slide<'_>, out: &mut dyn Put, written: &mut u64) -> Result<flac::StreamInfo, Error> {
+    let bad = Error("metadata");
+    src.need(10);
+    let d = src.data();
+    if d.len() >= 10 && &d[..3] == b"ID3" {
+        let sz = d[6..10].iter().fold(0u64, |a, &b| a << 7 | (b & 0x7f) as u64);
+        copy_through(src, 10 + sz + if d[5] & 0x10 != 0 { 10 } else { 0 }, out, written)?;
+    }
+    src.need(4);
+    if src.data().get(..4) != Some(b"fLaC") {
+        return Err(bad);
+    }
+    copy_through(src, 4, out, written)?;
+    let mut si = None;
+    loop {
+        src.need(4);
+        let h: [u8; 4] = src.data().first_chunk().copied().ok_or(Error("metadata"))?;
+        let (last, typ) = (h[0] & 0x80 != 0, h[0] & 0x7f);
+        let len = (h[1] as u64) << 16 | (h[2] as u64) << 8 | h[3] as u64;
+        copy_through(src, 4, out, written)?;
+        if typ == 0 && len >= 18 {
+            src.need(18);
+            let body = src.data().get(10..18).ok_or(Error("metadata"))?;
+            let x = u64::from_be_bytes(body.try_into().unwrap());
+            si = Some(flac::StreamInfo {
+                sample_rate: (x >> 44) as u32,
+                channels: ((x >> 41) & 7) as u32 + 1,
+                bps: ((x >> 36) & 31) as u32 + 1,
+            });
+        }
+        copy_through(src, len, out, written)?;
+        if last {
+            break;
+        }
+    }
+    src.need(1);
+    match src.at_end() {
+        true => si.ok_or(bad),
+        false => Err(Error("metadata length")),
+    }
+}
+
+/// [`decode`] as the instance of a part module: the streams taken in pieces (`inputs`: the six
+/// byte streams, the rANS words and the two raw bit streams, with their lengths) and the file of
+/// `total_len` bytes put in order to `out`, through a pipeline of tasks ([`par::apart`]) of
+/// `workers` workers, which write the frames (escape checks, Rice coding, CRCs); `tables` makes
+/// the decoder's tables once the tasks are spawned (their memory is not in them). The same output
+/// and errors as [`decode`], with the checks of its limits.
+pub fn decode_part(
     room: Room,
-    threads: usize,
+    total_len: u64,
+    tables: impl FnOnce() -> Option<Tables>,
+    inputs: [(&mut dyn Pull, u64); N_BYTE_STREAMS + 3],
+    out: &mut dyn Put,
+    workers: usize,
 ) -> Result<(), Error> {
     use par::apart::{ERR, FRAME, FRAME_ERR, JUNK};
-    let si = decode_start(c)?;
-    ResDecoder::takes(t)?;
-    let errors = |f: &mut dyn FnMut(&mut ResDecoder<'_>)| {
-        let raw_buf = [bits::padded(&c.raw[0]), bits::padded(&c.raw[1])];
-        f(&mut ResDecoder::new(t, &c.words, &raw_buf).expect("tables checked"))
-    };
+    let [
+        (prefix, _),
+        (layout, _),
+        (junk, _),
+        (hdr, _),
+        (sub, _),
+        (warm, _),
+        (words, words_len),
+        (raw0, n0),
+        (raw1, n1),
+    ] = inputs;
     // (a frame whose long codes take more than its room cannot be of it)
     let budget = 8 * room.frame as u64;
     let work = || {
@@ -653,48 +736,96 @@ fn decode_apart(
                     _ => (tx.truncate(at), tx.push(ERR)).1,
                 }
             }
-            Item::Junk(j) => {
-                tx.push(JUNK);
-                tx.extend_from_slice(&(j.as_ptr() as usize as u32).to_le_bytes());
-                tx.extend_from_slice(&(j.len() as u32).to_le_bytes());
-            }
             Item::FrameErr(_) => tx.push(FRAME_ERR),
-            Item::Err(_) => tx.push(ERR),
+            _ => tx.push(ERR),
         }
     };
-    let start = || {
-        let mut o = Vec::with_capacity(total_len);
-        o.extend_from_slice(&c.streams[S_PREFIX]);
-        o
-    };
-    let take = |o: &mut Vec<u8>, m: &[u8]| match m[0] {
-        FRAME => {
-            let used = u64::from_le_bytes(m[1..9].try_into().unwrap());
-            let budget = (total_len.saturating_sub(o.len()) as u64).saturating_mul(8);
-            if o.len() > total_len || used > budget || o.len() + m.len() - 9 > total_len {
-                return Err(Error("too long"));
-            }
-            o.extend_from_slice(&m[9..]);
-            Ok(())
-        }
-        JUNK => {
-            let j = par::apart::junk(&m[1..]);
-            if o.len() + j.len() > total_len {
-                return Err(Error("too long"));
-            }
-            o.extend_from_slice(j);
-            Ok(())
-        }
-        FRAME_ERR if o.len() > total_len => Err(Error("too long")),
-        // (an error's message stays in its task)
-        _ => Err(Error("frame")),
-    };
-    let front = |e: &mut par::apart::Out| front(e, c, si.bps, room);
     let rooms = room.rooms();
-    let s = par::apart::run(threads.saturating_sub(3), rooms, front, errors, work, start, take, Error("pipeline"))?;
-    match out.is_empty() {
-        true => *out = s,
-        false => out.extend_from_slice(&s),
+    par::apart::run(workers, rooms, work, |link| {
+        let mut written = 0u64;
+        let si = copy_prefix(&mut Slide::new(prefix, PIECE), out, &mut written)?;
+        let t = tables().ok_or(Error("tables"))?;
+        let errors = ResStream::new(&t, words, words_len, [(raw0, n0), (raw1, n1)], room.block * room.channels)?;
+        let rd = room.reads();
+        let (mut hdr, mut sub, mut warm) =
+            (Slide::new(hdr, rd.hdr), Slide::new(sub, rd.sub), Slide::new(warm, rd.warm));
+        let mut layout = Slide::new(layout, LAYOUT_READ);
+        let mut junk = Slide::new(junk, PIECE);
+        let mut take = |m: &[u8]| {
+            // (the length so far is `written`; the file may not be longer than `total_len`)
+            let left = total_len.saturating_sub(written);
+            match m[0] {
+                FRAME => {
+                    let used = u64::from_le_bytes(m[1..9].try_into().unwrap());
+                    if written > total_len || used > left.saturating_mul(8) || (m.len() - 9) as u64 > left {
+                        return Err(Error("too long"));
+                    }
+                    written += (m.len() - 9) as u64;
+                    out.put(&m[9..]).ok_or(Error("too long"))
+                }
+                JUNK => {
+                    let n = u32::from_le_bytes(m[1..5].try_into().unwrap()) as u64;
+                    if n > left {
+                        return Err(Error("too long"));
+                    }
+                    copy_through(&mut junk, n, out, &mut written)
+                }
+                FRAME_ERR if written > total_len => Err(Error("too long")),
+                // (an error's message stays in its task)
+                _ => Err(Error("frame")),
+            }
+        };
+        let mut pipe = par::apart::Pipe::new(link, errors, &mut take, Error("pipeline"));
+        let end = front_part(&mut pipe, si.bps, room, rd, &mut layout, [&mut hdr, &mut sub, &mut warm]);
+        pipe.finish(end)?;
+        match written == total_len {
+            true => Ok(()),
+            false => Err(Error("length")),
+        }
+    })
+}
+
+/// The first stage of [`decode_part`]: frame headers and subframe parameters, and where the
+/// junk goes, read from windows of the streams.
+fn front_part(
+    pipe: &mut par::apart::Pipe<'_, '_, Error>,
+    bps: u32,
+    room: Room,
+    rd: aqr_raw::audio::pcm::Reads,
+    layout: &mut Slide<'_>,
+    [hdr, sub, warm]: [&mut Slide<'_>; 3],
+) -> Result<(), par::apart::Fail> {
+    use par::apart::Fail;
+    let mut hs = Headers::new(room);
+    // (a varint of the layout is ten bytes at most)
+    let uv = |layout: &mut Slide<'_>| {
+        layout.need(10);
+        let mut c = Rd::new(layout.data());
+        let v = c.uv();
+        let p = c.p;
+        layout.advance(p);
+        v
+    };
+    loop {
+        let run = uv(layout)?;
+        for _ in 0..run {
+            hdr.need(rd.hdr);
+            sub.need(rd.sub);
+            warm.need(rd.warm);
+            let (mut h, mut s, mut w) = (Rd::new(hdr.data()), Rd::new(sub.data()), Rd::new(warm.data()));
+            let r = hs.frame(pipe.frame(), bps, &mut h, &mut s, &mut w);
+            let (h, s, w) = (h.p, s.p, w.p);
+            hdr.advance(h);
+            sub.advance(s);
+            warm.advance(w);
+            r.map_err(|_| Fail::Frame)?;
+            pipe.push_frame()?;
+        }
+        layout.need(1);
+        if layout.at_end() {
+            return Ok(());
+        }
+        let n = uv(layout)?;
+        pipe.push_junk(usize::try_from(n).map_err(|_| Fail::Err)?)?;
     }
-    Ok(())
 }

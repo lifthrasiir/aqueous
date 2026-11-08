@@ -186,10 +186,16 @@ lengths), unless noted.
   header prediction but were not available for testing.
 - **Not covered** (not coded, or the containing bytes kept as junk): FLAC in Ogg, more than
   8 channels.
-- **Memory**: the whole input, plus 4 bytes per residual for the rANS symbols. The module
-  lays its memory out as a stack (`aqr_api::stack`), so its limit is its plan
-  (`module::plan`): its pipeline's stages and workers are tasks that pass each item as a
-  message, each taking it into a buffer and a frame reserved for the largest, of the room
-  the params give (the most samples a channel, channels and bytes of a frame: flac-recons
-  4), whatever it is given; and the messages its channels may hold.
+- **Memory**: the encoder holds the whole input, plus 4 bytes per residual for the rANS
+  symbols. The module (flac-recons 5) is a part module with windows of 16 pages and lays its
+  memory out as a stack (`aqr_api::stack`), so its limit is its plan (`module::plan`), the same
+  whatever the lengths of the file and the streams: it holds neither its inputs nor its
+  output (the metadata, which may hold pictures, are copied in pieces; the junk between frames is
+  copied from its stream where its place in the output comes). The instance reads the streams
+  through windows ahead of a frame (`audio::slide`), makes the frames' headers and parameters
+  and decodes their errors; its gang of eight tasks is the LMS stage and seven workers that
+  write the frames, which pass as messages, each task taking one into a buffer and a frame
+  reserved for the largest, of the room the params give (the most samples a channel, channels
+  and bytes of a frame: flac-recons 4); and the messages its channels may hold. A varint coded
+  in more bytes than its value takes is refused (no coder writes one).
 - MD5 signatures are not checked (they are kept with the metadata).

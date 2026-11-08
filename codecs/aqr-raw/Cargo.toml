@@ -12,12 +12,8 @@ default = ["encode"]
 encode = ["dep:aqr-formula", "dep:aqr-ima", "aqr-common/zstd"]
 
 [dependencies]
-aqr-api = { path = "../../crates/aqr-api", default-features = false }
+aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 # IMA ADPCM blocks of WAV files, in the formulas.
 aqr-ima = { path = "../aqr-ima", optional = true }
-
-# Tasks and channels for the pipelines (`audio::par::apart`) in the modules of aqr-modules.
-[target.'cfg(target_family = "wasm")'.dependencies]
-aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }

@@ -9,5 +9,6 @@ pub mod model;
 pub mod par;
 pub mod pcm;
 pub mod residual;
+pub mod slide;
 
 pub use aqr_common::{msb as bits, rans64 as rans};

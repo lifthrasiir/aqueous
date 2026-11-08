@@ -926,6 +926,71 @@ pub mod builtin {
     }
 }
 
+// Decoding a stream taken in pieces (after the rest, which the modules' panic locations follow).
+
+/// How far a decoder of [`Decoder::streaming`] has taken its stream ([`Decoder::slide`]).
+#[derive(Default, Debug, Clone, Copy)]
+pub struct SlideState {
+    /// Words of the window that are the stream's (the rest are zeros).
+    loaded: usize,
+    /// Every word of the stream is in.
+    complete: bool,
+    started: bool,
+    /// Words dropped before the window.
+    base: usize,
+}
+
+impl<'a> Decoder<'a> {
+    /// A decoder of a stream of `words` words that holds `window` of them at most (and
+    /// [`SRC_PAD`] zeros), taking them as [`Decoder::slide`] is given them (before the first symbol).
+    pub fn streaming(t: &'a Tables, words: usize, window: usize) -> Decoder<'a> {
+        let src = vec![0; window.max(2 * LANES) + SRC_PAD];
+        let src_max = src.len() - 1;
+        Decoder { x: [0; LANES], lane: 0, src, pos: 0, src_max, t, real_len: words }
+    }
+
+    /// Of a decoder of [`Decoder::streaming`], makes sure that `need` words (at most the window
+    /// less 2 * 8) are held ahead of the position, unless the stream has no more: the words
+    /// before the position are dropped and `more` is called to fill the room (a prefix of the
+    /// slice it is given, the number of words put, 0 where the stream ends). The first call reads
+    /// the states. With `fill` from [`SlideState::default`] (kept for the stream), the symbols
+    /// decoded are those of a decoder of the whole stream, if every symbol decoded between two
+    /// calls takes a word at most.
+    pub fn slide(&mut self, fill: &mut SlideState, need: usize, mut more: impl FnMut(&mut [u32]) -> usize) {
+        let cap = self.src.len() - SRC_PAD;
+        debug_assert!(need + 2 * LANES <= cap);
+        if fill.started && (fill.complete || self.pos + need <= fill.loaded) {
+            return;
+        }
+        // (the position may be past the words, where the stream has fewer than the states take)
+        let drop = self.pos.min(fill.loaded);
+        if drop > 0 {
+            self.src.copy_within(drop..fill.loaded, 0);
+            self.src[fill.loaded - drop..fill.loaded].fill(0);
+            fill.loaded -= drop;
+            fill.base += drop;
+            self.pos -= drop;
+        }
+        while !fill.complete && fill.loaded < cap {
+            match more(&mut self.src[fill.loaded..cap]) {
+                0 => fill.complete = true,
+                n => fill.loaded += n,
+            }
+        }
+        if !fill.started {
+            fill.started = true;
+            self.restart();
+            // (the 16 words of the states are behind: the room for `need` ahead of them)
+            self.slide(fill, need, more);
+        }
+    }
+
+    /// [`Decoder::in_bounds`] of a decoder of [`Decoder::streaming`].
+    pub fn streamed_in_bounds(&self, fill: &SlideState) -> bool {
+        fill.base + self.pos <= self.real_len
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

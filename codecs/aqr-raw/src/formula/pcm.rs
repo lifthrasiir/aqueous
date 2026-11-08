@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 
 pub use crate::module::pcm::decode;
 
-pub const MODULE: Module = Module::new("pcm-recons", 1).with_task_plan(memory);
+pub const MODULE: Module = Module::new("pcm-recons", 2).with_task_plan(memory);
 
 /// The memory of the module: its plan (`module::pcm::plan`), the messages its channels may
 /// hold with it.

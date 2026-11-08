@@ -378,6 +378,11 @@ const fn threaded(module: Module, decode: Decode) -> Entry {
     Entry { module, resources: false, decode: Run::Threaded(decode) }
 }
 
+/// [`threaded`] of a module taking resources.
+const fn threaded_takes(module: Module, decode: Decode) -> Entry {
+    Entry { module, resources: true, decode: Run::Threaded(decode) }
+}
+
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
@@ -560,7 +565,7 @@ const NATIVE: &[Entry] = &[
     bare(PRORES, |p, _, i, n, t| aqr_prores::formula::decode(p, i, n, t).map_err(err)),
     bare(JPEG, |p, _, i, n, t| aqr_jpeg::formula::decode(p, i, n, t).map_err(err)),
     takes(MP3, |p, r, i, n, t| aqr_mp3::formula::decode(p, r, i, n, t).map_err(err)),
-    takes(FLAC, |p, r, i, n, t| aqr_flac::formula::decode(p, r, i, n, t).map_err(err)),
+    threaded_takes(FLAC, |p, r, i, n, t| aqr_flac::formula::decode(p, r, i, n, t).map_err(err)),
     bare(PSD, |p, _, i, n, t| aqr_psd::formula::decode(p, i, n, t).map_err(err)),
     bare(CLIP, |p, _, i, n, t| aqr_clip::formula::decode(p, i, n, t).map_err(err)),
     bare(BCN, |p, _, i, n, t| aqr_tex::formula::decode(p, i, n, t).map_err(err)),
@@ -604,7 +609,7 @@ const NATIVE: &[Entry] = &[
     bare(JSONL, |p, _, i, n, t| aqr_jsonl::formula::decode(p, i, n, t).map_err(err)),
     takes(WRT, |p, r, i, n, t| aqr_wrt::formula::decode(p, r, i, n, t).map_err(err)),
     takes(WRT_HANGUL, |p, r, i, n, t| aqr_wrt::formula::decode_hangul(p, r, i, n, t).map_err(err)),
-    takes(PCM, |p, r, i, n, t| aqr_raw::formula::pcm::decode(p, r, i, n, t).map_err(err)),
+    threaded_takes(PCM, |p, r, i, n, t| aqr_raw::formula::pcm::decode(p, r, i, n, t).map_err(err)),
     bare(RASTER, |p, _, i, n, t| aqr_raw::formula::raster::decode(p, i, n, t).map_err(err)),
     bare(RASTER_16, |p, _, i, n, _| aqr_raw::formula::raster16::decode(p, i, n).map_err(err)),
     bare(RECS_FIELDS, |p, _, i, n, _| aqr_infer_recs::formula::decode_fields(p, i, n).map_err(err)),
