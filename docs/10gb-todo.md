@@ -78,6 +78,19 @@ footprint는 `peak memory footprint`, resident는 `maximum resident set size`이
   `c9-heapfix-r1.json`; 남은 것은 토큰 6 B씩, `docs/streaming-encoder-design.md`). pe가 바이트의 13.1%로 시간의 35.7%를, zip이 7.2%로 29.7%를 쓴다. spill 최대
   1.65 GB. 풀기는 74.0% 일하고, 10.5–12.4 s에 1.6 worker(`enwik9`의 wrt-recons), 한 파일에 오래
   붙는 것은 `silesia.zip` 11.3 s, `tdm-gcc-4.5.0.exe` 10.6 s, `enwik9.zip` 10.4 s이다.
+- `-9`를 `10e195f4`(할당 상한 감사와 heap 허용량 뒤)에서 한 번 다시 쟀다(표는 그대로;
+  `c9-10e195f4-r1.json`, `k9-10e195f4-r1.json`): **2,345,132,167 B**(`109951ac` 작업 사본의
+  2,345,130,073 B보다 +2,094 B, `4991db82`의 2,345,160,967 B보다 −28,800 B; +2,094 B는 전부 아카이브
+  overhead 4,778,031 → 4,780,125 B이고 79431개 내용의 `archived`는 `c9-heapfix-r1.json`과 하나도
+  다르지 않다. 곧 png/jpeg/exe/flate 감사는 이 코퍼스의 파일을 바꾸지 않았다). 압축 394.1 s(25.4
+  MB/s), 명령어 16.88 T, footprint 3.34 GB(5.01 → 3.34), resident 4.77 GB, heap 최대 2.54 GB(예산의
+  127%, zip 2.40 GB, 10.7 s)로 5.20 GB에서 줄었고, worker 63.6%, spill 최대 1.97 GB(pe 594 MB, 7z 476
+  MB, ar 456 MB, 131 s). fallback은 하나도 없다(`fallbacks: []`, "heap: … recompressions given up"도
+  하한 경고도 찍히지 않았고, 11-08 아침 `f6f22f7a`의 lzma-recons 하한 경고도 사라졌다). `-K`는 통과,
+  36.5 s(35.6 s, 281 MB/s), 명령어 2.106 T, footprint 2.91 GB, resident 3.91 GB, heap 최대 3.06 GB
+  (unzstd 1.34 GB, 24.2 s), worker 68.2%. 시간과 명령어는 한 번 잰 값이라(`f6f22f7a`의 359.4 s,
+  15.98 T, `-K` 38.6 s, 1.941 T와 견주면 압축 시간 +9.6%, 명령어 +5.6%; 직전 `c9-reach-r1`도 410 s,
+  16.83 T) 변화의 원인으로 읽지 않는다.
 - `-5`(mid): worker 65.8%, heap 최대 2.25 GB(analyze 1.36 GB, 105 s). lzma-recons 하나(37.1 MB,
   856.75 MiB 필요)가 하한에 쓰이지 않는다. pe가 바이트의 13.1%로 시간의 30.6%를, zip이 7.2%로
   21.0%를 쓴다. 풀기는 68.1%이고 6.4–8.4 s(wrt-recons of `enwik9`)와 27.4–29.1 s(rar3-recons of
