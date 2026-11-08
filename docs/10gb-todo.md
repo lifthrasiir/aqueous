@@ -41,7 +41,63 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html, 10gb.zpa
 
 ## 측정
 
-2026-11-04, Apple M4(10코어), 커밋 `9e43bca`(README의 수치). 압축은 `cargo aqr -c -f -o OUT
+2026-11-08, Apple M4(10코어), 커밋 `f6f22f7a`. 명령어는 아래와 같고(`-L`은 레벨, 배치는 기본값,
+검증 포함), 둘 다 `--stats --stats=FILE.json`을 켜고 `/usr/bin/time -l`로 쟀다(JSON은
+`crates/aqr/cache/10gb/{c,k}L-f6f22f7a-r{1,2}.json`). 각 레벨을 두 번 재어 빠른 쪽을 적었고
+괄호는 다른 한 번이다. 시간은 aqr 자신이 찍는 초이다. 측정 전에 `uptime`과 `ps`로 다른 부하가
+없음을 확인했다(1코어를 넘는 것은 없었고 `claude` 자신 외에는 1% 안팎).
+
+```
+cargo aqr -c -f -L -o ~/tmp/bench10/L.aqr ~/tmp/10gb --stats --stats=...
+cargo aqr -K ~/tmp/bench10/L.aqr --stats --stats=...
+```
+
+| 레벨 | 크기 | 압축 | 명령어 | footprint | resident | heap 최대 | `-K` | 명령어 | footprint | resident | heap 최대 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `-9` | 2,361,762,633 B | 359.4 s, 27.8 MB/s (373.8) | 15.98 T | 5.01 GB (5.01) | 7.54 GB | 5.20 GB(zip) | 38.6 s, 259 MB/s (38.8) | 1.941 T | 2.61 GB (2.56) | 3.77 GB | 2.93 GB(leaf) |
+| `-5` (mid) | 2,481,296,951 B | 167.4 s, 59.7 MB/s (169.1) | 8.03 T | 2.54 GB (2.56) | 4.35 GB | 2.25 GB(analyze) | 29.1 s, 344 MB/s (29.4) | 1.141 T | 2.49 GB (2.62) | 3.68 GB | 2.98 GB(leaf) |
+| `-2` | 3,029,806,733 B | 93.5 s, 107 MB/s (93.9) | 4.35 T | 2.98 GB (2.98) | 3.71 GB | 2.47 GB(flate-inflate) | 12.1 s, 824 MB/s (12.4) | 0.504 T | 2.04 GB (2.02) | 3.56 GB | 2.23 GB(leaf) |
+| `-1` | 3,881,155,667 B | 19.4 s, 517 MB/s (19.7) | 0.650 T | 3.77 GB (3.73) | 5.02 GB | 2.53 GB(analyze) | 4.72 s, 2117 MB/s (4.73) | 0.132 T | 1.62 GB (1.57) | 4.64 GB | 1.90 GB(unzstd) |
+| `-0` | 8,979,559,362 B | 15.5 s, 645 MB/s (19.9) | 0.178 T | 1.76 GB (1.75) | 2.99 GB | 1.74 GB(encode) | 3.34 s, 2990 MB/s (3.36) | 0.0669 T | 1.80 GB (1.76) | 9.73 GB | 1.97 GB(leaf) |
+
+footprint는 `peak memory footprint`, resident는 `maximum resident set size`이다. `-K`의 resident는
+매핑된 아카이브를 품는다(`-0`의 9.73 GB 중 8.96 GB, `-1`은 3.89 GB, `-2`는 3.04 GB). 명령어는 빠른
+쪽의 것이다. 모든 압축 실행은 79431 파일, 10.00 GB이고 `-K`도 같다.
+
+- 이전(`9e43bca`, 11-04)의 mid는 2,465,370,809 B, 165.7 s, footprint 3.25 GB이고 `-K`는 33.9 s, 2.23 GB였다.
+  이번 mid는 +15.9 MB(pe +12.2, lzma +2.7, ar +1.7 MB; 파일별 `archived`를 그때의 JSON과 견준 것),
+  압축 footprint 3.25 → 2.54 GB, `-K` 33.9 → 29.1 s이다. 낮은 레벨의 이전(`4abcae6`, 11-05)은 `-2`
+  2,707,394,473 B(93.5 s, 14.3 s), `-1` 3,881,155,667 B(29.6 s, 5.5 s), `-0` 8,979,559,362 B(29.6 s,
+  4.1 s)이고, 그 앞의 `83097ad`는 2,497,965,328 B이다. `-1`, `-0`의 크기는 그대로이다.
+- **`-2`는 3.030 GB로 `4abcae6`보다 +322 MB 커졌다.** `enwik9.zip`(322.59 MB)이 recompress되지 않고
+  통째로 들어간다: `--stats`의 fallback이 `zip-recons`가 요구하는 하한 311.82 MiB를 `-2`가 쓰지
+  않았다고 한다(`kept: false`, mid는 같은 파일을 132.8 MB로 줄인다). 원인은 보지 않았다.
+- `-9`: 압축은 worker가 평균 67.4% 일한다. 56.1–77.8 s에 worker 하나만 돈다(lzma-recons, 하한
+  856.75 MiB라 하한에 쓰이지 않고 혼자 돈다). heap 최대 5.20 GB는 예산(2 GB)의 260%이고 그중 5.00 GB를
+  zip이 26.6 s에 쥔다. pe가 바이트의 13.1%로 시간의 35.7%를, zip이 7.2%로 29.7%를 쓴다. spill 최대
+  1.65 GB. 풀기는 74.0% 일하고, 10.5–12.4 s에 1.6 worker(`enwik9`의 wrt-recons), 한 파일에 오래
+  붙는 것은 `silesia.zip` 11.3 s, `tdm-gcc-4.5.0.exe` 10.6 s, `enwik9.zip` 10.4 s이다.
+- `-5`(mid): worker 65.8%, heap 최대 2.25 GB(analyze 1.36 GB, 105 s). lzma-recons 하나(37.1 MB,
+  856.75 MiB 필요)가 하한에 쓰이지 않는다. pe가 바이트의 13.1%로 시간의 30.6%를, zip이 7.2%로
+  21.0%를 쓴다. 풀기는 68.1%이고 6.4–8.4 s(wrt-recons of `enwik9`)와 27.4–29.1 s(rar3-recons of
+  `all_HKCC.rar`)에 worker가 1–2개이며 `tdm-gcc-4.5.0.exe` 7.9 s, `gcc-core-4.6.1…tar.lzma` 6.5 s,
+  `enwik9.zip` 6.3 s가 오래 간다.
+- `-2`: worker 60.3%, pe가 시간의 41.0%. 풀기는 74.3%이고 10.6–12.4 s에 worker 하나
+  (`all_HKCC.rar`의 rar3-recons). fallback은 위의 `enwik9.zip` 하나.
+- `-1`: worker 48.6%, 걸림돌로 지적되는 것이 없다(`nothing stands out`). `-K`는 83.4%이고 같은 내용의
+  `-`(압축되지 않는 파일, 바이트의 11.0%)가 시간의 62.8%를 쓴다.
+- `-0`: worker 36.0%, 12.1–13.4 s와 14.3–15.5 s에 worker 하나(write), 3.0–3.9 s에 1.2개. 두 번째
+  실행은 19.9 s(CPU는 같고 sys가 25.2 → 16.4 s로 달랐다)로 편차가 크다. `-K`는 80.0%이다.
+- I/O 한계를 다시 보았다. `--stats` JSON을 스레드·초로 합산하면 `read`는 `-1`에 17.4, `-0`에 23.0
+  스레드·초로, 11-05에 적은 약 80보다 훨씬 작다(세는 방법이 달랐을 수 있다; 그때의 값은 다시 맞춰 보지
+  않았다). 그래도 압축의 CPU 시간이 `-1`은 user 63.9 + sys 27.0 = 90.9 s, `-0`은 7.9 + 25.2 = 33.1 s로
+  10코어·19.4/15.5 s의 47%, 21%뿐이고 `-0`의 시간이 sys(읽기)에 따라 15.5–19.9 s로 흔들리므로
+  `-1`/`-0`의 압축은 여전히 입력 읽기가 정한다고 본다(별표 유지). `-K`는 `-0`이 CPU 6.5 s(user 4.5 +
+  sys 1.9)를 3.3 s 벽시계에 쓰고 worker는 80% 일한다고 찍으므로, 11-05와 같이 매핑된 아카이브의 페이지를
+  기다린다(별표 유지). `-1`의 `-K`도 CPU 10.3 s를 4.7 s에 쓰는데 worker는 83%라 기다림이 섞인다.
+  `-2`의 `-K`는 CPU 65 s를 12.4 s에 써서(5.2코어) 읽기에 묶이지 않는다.
+
+2026-11-04, Apple M4(10코어), 커밋 `9e43bca`(당시 README의 수치). 압축은 `cargo aqr -c -f -o OUT
 ~/tmp/10gb`(모든 스레드, level mid, 배치 512 MB, 검증 포함), 풀기는 `cargo aqr -K OUT`(아무것도
 쓰지 않는다)이고, 둘 다 `--stats --stats=FILE.json`을 켜고 `/usr/bin/time -l`로 쟀다(JSON은
 `crates/aqr/cache/10gb/`). 각각 두 번 재어 빠른 쪽을 적었다. 두 번째는 같은 명령어로 압축

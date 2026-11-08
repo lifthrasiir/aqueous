@@ -31,18 +31,18 @@ come from.
 ## Sneak peek
 
 Matt Mahoney's 10 GB benchmark (79,431 files, 10.00 GB), on an Apple M4 (10 cores): `aqr` on
-2026-11-04 at commit `9e43bca` (levels below `mid` on 2026-11-05 at `4abcae6`), the others on
-2026-10-27:
+2026-11-08 at commit `f6f22f7`, the others on 2026-10-27:
 
 | method | size | compression | decompression |
 |---|---|---|---|
 | `tar \| zstd -3 -T10` | 4.68 GB | 33 s | |
 | `tar \| zstd -3 -T10 --long=31` | 4.17 GB | 36 s | |
 | zpaq 7.15 | 3.70 GB | (as distributed) | |
-| **`aqr`** (level `mid`) | **2.465 GB** | 166 s (60 MB/s, 3.3 GB peak) | 33.9 s (295 MB/s, 2.2 GB peak) |
-| `aqr -2` (level `low`) | 2.707 GB | 93.5 s (107 MB/s, 2.9 GB peak) | 14.3 s (701 MB/s, 1.8 GB peak) |
-| `aqr -1` (zstd alone) | 3.881 GB | 29.6 s\* (338 MB/s, 3.1 GB peak) | 5.5 s (1.82 GB/s, 2.2 GB peak) |
-| `aqr -0` (uncompressed) | 8.980 GB | 29.6 s\* (338 MB/s, 1.7 GB peak) | 4.1 s\* (2.44 GB/s, 2.1 GB peak) |
+| `aqr -9` | 2.362 GB | 359 s (28 MB/s, 5.0 GB peak) | 38.6 s (259 MB/s, 2.6 GB peak) |
+| **`aqr`** (level `mid`) | **2.481 GB** | 167 s (60 MB/s, 2.5 GB peak) | 29.1 s (344 MB/s, 2.5 GB peak) |
+| `aqr -2` (level `low`) | 3.030 GB | 93.5 s (107 MB/s, 3.0 GB peak) | 12.1 s (824 MB/s, 2.0 GB peak) |
+| `aqr -1` (zstd alone) | 3.881 GB | 19.4 s\* (517 MB/s, 3.8 GB peak) | 4.7 s (2.12 GB/s, 1.6 GB peak) |
+| `aqr -0` (uncompressed) | 8.980 GB | 15.5 s\* (645 MB/s, 1.8 GB peak) | 3.3 s\* (2.99 GB/s, 1.8 GB peak) |
 
 Compression includes the round-trip check of every file. (\* I/O bound: by reading the input
 (the archive, in decompression), not by compressing or decompressing.) Some formats alone, as
