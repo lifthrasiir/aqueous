@@ -98,6 +98,12 @@ struct Group {
     dict: u64,
 }
 
+/// The bytes of data that the files of the stream `g` tell (their headers' sizes); None where
+/// they are more than a `u64` holds.
+fn group_size(files: &[File], g: &Group) -> Option<u64> {
+    g.files.iter().try_fold(0u64, |a, &i| a.checked_add(files[i].size))
+}
+
 /// The archive read: RAR5's or not, its files, its streams.
 fn read(d: &[u8]) -> Option<(bool, Vec<File>, Vec<Group>)> {
     let mut files = Vec::new();
@@ -182,8 +188,9 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     let mut left = opt.limit;
     let mut take = Vec::new();
     for (gi, g) in groups.iter().enumerate() {
-        let size: u64 = g.files.iter().map(|&i| files[i].size).sum();
-        if g.ok && size <= left && usize::try_from(size).is_ok() {
+        let size = group_size(&files, g);
+        if g.ok && size.is_some_and(|size| size <= left && usize::try_from(size).is_ok()) {
+            let size = size.unwrap();
             left -= size;
             take.push(gi);
         }
@@ -316,5 +323,22 @@ pub fn apply(a: &Apply, inputs: &[&[u8]], threads: usize) -> Result<Vec<u8>, Str
             decode3(&a.params, inputs, a.len, threads).map_err(|e| e.to_string())
         }
         m => Err(format!("module {m:?} not of aqr-rar")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_of_a_stream_that_wrap_are_not_a_small_one() {
+        let file = |size| File { name: 0..0, data: 0..0, size, stored: false };
+        let files = [file(1 << 63), file(1 << 63), file(5)];
+        let group = |files: Vec<usize>| Group { files, ok: true, v1: false, dict: 0 };
+        // (two files of 2^63 bytes would sum to 0 where overflow wraps, to be taken as no data
+        // while a decoder is told to make 2^63 bytes of each)
+        assert_eq!(group_size(&files, &group(vec![0, 1])), None);
+        assert_eq!(group_size(&files, &group(vec![0, 2])), Some((1 << 63) + 5));
+        assert_eq!(group_size(&files, &group(vec![2])), Some(5));
     }
 }

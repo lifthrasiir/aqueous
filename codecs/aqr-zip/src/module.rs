@@ -61,7 +61,8 @@ where
     aqr_api::Input<K>: aqr_api::Memory,
 {
     fn new(len: u64, most: u64) -> Result<In<K>> {
-        Ok(In { at: 0, len, buf: Vec::with_capacity(usize::try_from(most).map_err(|_| corrupt())?) })
+        // (it gives no more than it has: a layout telling more is refused by `take`, not reserved for)
+        Ok(In { at: 0, len, buf: Vec::with_capacity(usize::try_from(most.min(len)).map_err(|_| corrupt())?) })
     }
 
     /// Its next `n` bytes, given to `f` a window's at most at a time (in a piece on top of the
@@ -273,10 +274,12 @@ fn zip_part(params_len: u64, inputs: [u64; 4], size: u64) -> Result<()> {
     let layout = std::mem::take(&mut l.buf);
     let prepared = layout::Prepared::new(&layout)?;
     let c = prepared.counts;
+    // (the bodies held are in the output, whose bytes the layout cannot tell above)
+    let len = size_of(size)?;
     let held = prepared.held();
     let mut out = Written {
         at: 0,
-        held: Vec::with_capacity(size_of(held)?),
+        held: Vec::with_capacity(size_of(held)?.min(len)),
         runs: Vec::with_capacity(size_of(c.entries)?),
         holding: 0,
         failed: false,
@@ -286,10 +289,23 @@ fn zip_part(params_len: u64, inputs: [u64; 4], size: u64) -> Result<()> {
         kept: In::new(inputs[3], c.kept)?,
         flate: In::new(inputs[1], layout::DERIVED as u64)?,
     };
-    let len = size_of(size)?;
     layout::assemble_prepared(&layout, &prepared, &mut pulled, len, &mut out)?;
     if out.failed || out.at != len {
         return Err(corrupt());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_reserves_no_more_than_it_has() {
+        // (the layout's claim of the most it takes at once: 2^40 bytes, of an input of 10)
+        let i = In::<0>::new(10, 1 << 40).unwrap();
+        assert!(i.buf.capacity() <= 10, "{}", i.buf.capacity());
+        let i = In::<0>::new(10, 4).unwrap();
+        assert!(i.buf.capacity() >= 4 && i.buf.capacity() <= 10);
+    }
 }

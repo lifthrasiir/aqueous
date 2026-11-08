@@ -733,6 +733,11 @@ pub(crate) fn get_head(src: &[u8], total: usize) -> Result<Head<'_>> {
             cb @ (2 | 4) => {
                 let cb = cb as usize;
                 let (planes, w, h, _) = dims(&mut at)?;
+                // (a row of PackBits takes 2 bytes of the span for 128 pixels at most: no width
+                // above that, for the rows made at that width)
+                if w as u128 > 128 * len as u128 {
+                    return Err(corrupt());
+                }
                 let encoder = get_encoder(src, &mut at)?;
                 let mut plane_lens = Vec::with_capacity(planes);
                 for _ in 0..planes {
@@ -1880,3 +1885,53 @@ const _: () = {
     assert!(size_of::<Option<RowSink>>() == crate::module::wasm::ROW_SINK as usize);
     assert!(size_of::<(usize, &[u8])>() == crate::module::wasm::EXCEPTION as usize);
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn put(out: &mut Vec<u8>, mut v: u64) {
+        while v >= 0x80 {
+            out.push(v as u8 | 0x80);
+            v >>= 7;
+        }
+        out.push(v as u8);
+    }
+
+    /// A head stream of one span of `len` bytes of one plane of `w` × 1 pixels in rows of
+    /// PackBits (the Photoshop encoder), no exceptions, and a group of the plane.
+    fn head(w: u64, len: u64) -> Vec<u8> {
+        let mut h = Vec::new();
+        // one span: its gap, length and kind (rows with 2-byte counts)
+        for v in [1, 0, len] {
+            put(&mut h, v);
+        }
+        h.push(2);
+        // planes, width and height; the encoder (Photoshop, no phase, no period)
+        for v in [1, w, 1] {
+            put(&mut h, v);
+        }
+        h.push(0);
+        // the phase and period; the plane's bytes after the row's count; no exceptions
+        for v in [0, 0, len - 2, 0] {
+            put(&mut h, v);
+        }
+        // one group of one plane: the plane of the span, no flags, not a copy
+        put(&mut h, 1);
+        put(&mut h, 1);
+        h.push(0);
+        for v in [0, 0, 0] {
+            put(&mut h, v);
+        }
+        h
+    }
+
+    #[test]
+    fn rows_wider_than_their_bytes_can_hold_are_corrupt() {
+        // (a row of 2^40 pixels in 10 bytes, for which the decoder makes rows of that width)
+        assert!(get_head(&head(1 << 40, 10), 10).is_err());
+        assert!(get_head(&head(1 << 12, 10), 10).is_err());
+        // (a row of 128 pixels of one run)
+        assert!(get_head(&head(128, 10), 10).is_ok());
+    }
+}

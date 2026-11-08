@@ -306,7 +306,13 @@ fn type_entries(head: &[u8], len: usize) -> Result<[u32; 256]> {
             }
             mode::TYPE if t == ty::TYPE && hs >= 20 => {
                 let tid = rest[0] as usize;
-                most[tid] = most[tid].max(le32(rest, 4)?);
+                let n = le32(rest, 4)?;
+                // (the entries' offsets, 4 bytes each, are in the chunk: no count of a table
+                // above the file's bytes, which the room for the entries follows)
+                if n as usize > size / 4 {
+                    return Err(corrupt());
+                }
+                most[tid] = most[tid].max(n);
             }
             _ => {}
         }
@@ -499,4 +505,32 @@ fn entries(d: &mut Dec, out: &mut Vec<u8>, start: usize, hs: usize, stop: usize)
 /// `prev` moved by the zigzag value `z`, within `u32`.
 pub fn moved(prev: u32, z: u64) -> Result<u32> {
     u32::try_from(prev as i64 + varint::unzz(z)).map_err(|_| corrupt())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A head stream of one type chunk of `n` entries (as the module reads it), in a file of
+    /// `len` bytes.
+    fn head(n: u32, len: u32) -> Vec<u8> {
+        let mut h = Vec::new();
+        h.extend_from_slice(&ty::TYPE.to_le_bytes());
+        h.extend_from_slice(&20u16.to_le_bytes());
+        h.extend_from_slice(&len.to_le_bytes());
+        h.extend_from_slice(&[1, 0, 0, 0]);
+        h.extend_from_slice(&n.to_le_bytes());
+        h.extend_from_slice(&[0; 4]);
+        h.push(mode::TYPE);
+        h
+    }
+
+    #[test]
+    fn counts_of_entries_above_the_file_are_corrupt() {
+        // (a file of 32 bytes cannot hold 4 billion entries, whose room the module would reserve)
+        assert!(type_entries(&head(u32::MAX, 32), 32).is_err());
+        assert!(type_entries(&head(1 << 20, 32), 32).is_err());
+        // (3 offsets in the 12 bytes after the header)
+        assert_eq!(type_entries(&head(3, 32), 32).unwrap()[1], 3);
+    }
 }

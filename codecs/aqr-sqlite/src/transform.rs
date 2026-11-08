@@ -733,6 +733,10 @@ type Meta = (bool, Option<(usize, index::Key)>);
 /// decoders and entries, the decoders' parts covering their streams exactly.
 fn read_groups<'a>(dir: &mut Rd<'a>, rd: &[Rd<'a>], ng: usize) -> Result<(Vec<GroupDec<'a>>, Vec<Meta>)> {
     let mut gstreams: [Rd; 8] = rd[S_REC..S_REC + 8].try_into().unwrap();
+    // (a group takes a byte of the directory at least)
+    if ng > dir.rest().len() {
+        return Err(corrupt());
+    }
     let mut gds = Vec::with_capacity(ng);
     let mut meta = Vec::with_capacity(ng);
     for _ in 0..ng {

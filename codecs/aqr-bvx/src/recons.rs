@@ -857,7 +857,18 @@ pub fn split(s: &[u8], limit: usize) -> Result<Split> {
 /// The plan that `record` codes over `data`, of the counts `c`.
 pub fn plan(data: &[u8], record: &[u8], c: &Counts) -> Result<Plan> {
     let mut dec = ArithDecoder::new(record);
-    let mut p = Plan::with_room(c);
+    // (room for the counts, but no more than the data could be parsed into: a part, a segment, a
+    // match and a triple take a byte of it at least; a plan of more grows its vectors)
+    let most = data.len() + 1;
+    let room = Counts {
+        parts: c.parts.min(most),
+        segs: c.segs.min(most),
+        matches: c.matches.min(most),
+        freqs: c.freqs.min(most),
+        zd: c.zd.min(most),
+        ..*c
+    };
+    let mut p = Plan::with_room(&room);
     code(&mut dec, data, None, &mut p)?;
     code_fill(&mut dec, None, &mut p)?;
     if dec.overrun() {

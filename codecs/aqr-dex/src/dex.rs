@@ -1027,7 +1027,9 @@ pub fn decode(inputs: &[&[u8]], len: usize) -> Result<Vec<u8>> {
         // (the data of the classes one after another, of room for its section, and of each its
         // rank in the section, its class and where it is)
         let (mut cd, mut ranks) = match data {
-            Some(d) => (Vec::with_capacity(class_data_room(&items, d, len)), Vec::with_capacity(d.count as usize)),
+            Some(d) => {
+                (Vec::with_capacity(class_data_room(&items, d, len)), Vec::with_capacity((d.count as usize).min(len)))
+            }
             None => (Vec::new(), Vec::new()),
         };
         let e = o.mark(off, 32 * n)?.start;
@@ -1189,7 +1191,8 @@ const RANK_BYTES: u64 = 16;
 
 /// The `count` code items from `w`'s place on (FORMAT.md §4.7), and their offsets.
 fn decode_code(raw: &mut Raw, w: &mut W, count: u32, mut debug: Debug, words: &[u8]) -> Result<Vec<u32>> {
-    let mut offs = Vec::with_capacity(count as usize);
+    // (a code item takes 16 bytes of the file at least)
+    let mut offs = Vec::with_capacity((count as usize).min(w.b.len() / 16));
     let mut caches = crate::code::Caches::default();
     for _ in 0..count {
         while !w.at.is_multiple_of(4) {
@@ -1430,4 +1433,66 @@ fn class_data(raw: &mut Raw, cd: &mut Vec<u8>, code: &mut Code, window: &mut Vec
     }
     code.advance();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A global allocator that remembers the largest single request of each thread, and refuses
+    /// (as an exhausted heap does) those of 1 GiB and above: the aborted allocation is how a count
+    /// from the input reserving its room before it is checked shows.
+    mod big_alloc {
+        use std::alloc::{GlobalAlloc, Layout, System};
+        use std::cell::Cell;
+
+        pub struct Largest;
+
+        thread_local! {
+            static MOST: Cell<usize> = const { Cell::new(0) };
+        }
+
+        const REFUSED: usize = 1 << 30;
+
+        fn note(n: usize) -> bool {
+            let _ = MOST.try_with(|m| m.set(m.get().max(n)));
+            n < REFUSED
+        }
+
+        unsafe impl GlobalAlloc for Largest {
+            unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+                if note(l.size()) { unsafe { System.alloc(l) } } else { std::ptr::null_mut() }
+            }
+            unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
+                if note(l.size()) { unsafe { System.alloc_zeroed(l) } } else { std::ptr::null_mut() }
+            }
+            unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+                unsafe { System.dealloc(p, l) }
+            }
+            unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
+                if note(n) { unsafe { System.realloc(p, l, n) } } else { std::ptr::null_mut() }
+            }
+        }
+
+        /// The largest single allocation that `f` asked for on this thread.
+        pub fn largest<R>(f: impl FnOnce() -> R) -> (R, usize) {
+            MOST.with(|m| m.set(0));
+            let r = f();
+            (r, MOST.with(Cell::get))
+        }
+    }
+
+    #[global_allocator]
+    static ALLOC: big_alloc::Largest = big_alloc::Largest;
+
+    #[test]
+    fn code_items_of_a_count_beyond_the_file() {
+        let streams: Vec<R> = (0..s::N).map(|_| R::new(&[])).collect();
+        let mut raw = Raw(streams);
+        let mut b = [0u8; 64];
+        let mut w = W { b: &mut b, at: 0 };
+        let (r, most) = big_alloc::largest(|| decode_code(&mut raw, &mut w, u32::MAX, Debug::new(Vec::new()), &[]));
+        assert!(r.is_err());
+        assert!(most < 1 << 20, "{most} bytes reserved");
+    }
 }

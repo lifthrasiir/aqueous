@@ -6,7 +6,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "arsc-recons",
         version: 1,
-        sha512_256: hex("96b145214cf7f09e9352d82dea6c3fca2df5e7685b1a82edde21c90d45792312"),
+        sha512_256: hex("7e5b64d4517145d2de500a59fe797705df2e5f94ecbf38146031d895ece32caa"),
         block: include_bytes!("../wasm/arsc-recons.block"),
     },
     Known {
@@ -96,7 +96,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "bvx-recons",
         version: 2,
-        sha512_256: hex("c6deda73c8980907590e52dbaf14c87d7b44cc3eb18ad07080f25e13897db9e2"),
+        sha512_256: hex("e28002c74b0c7357062b7a98991814fc78f2218728cf5fb4444519182e36ef09"),
         block: include_bytes!("../wasm/bvx-recons.block"),
     },
     Known {
@@ -120,19 +120,19 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "dex-recons",
         version: 2,
-        sha512_256: hex("929c2841d7e0658843e556d32c771e4840ef317cf56c933111c3cbb111efc12e"),
+        sha512_256: hex("5e14bcbbd00d3c3356dc74f825bb85cd6819583ca2b16e606f4342cffc6d541f"),
         block: include_bytes!("../wasm/dex-recons.block"),
     },
     Known {
         name: "dwarf-apple",
         version: 1,
-        sha512_256: hex("416dc0d5aaee50fe3c645046bb63db6dfe70a50b681967c815870c3ab599f402"),
+        sha512_256: hex("4ec450c2be5c856d2ae02cbdd7cb84f7936dbdb1cbfd9871d05198aad82d0921"),
         block: include_bytes!("../wasm/dwarf-apple.block"),
     },
     Known {
         name: "dwarf-info",
         version: 2,
-        sha512_256: hex("4455e093462f274ae1fd91512677ea33e16045c83ae0af39ed1eae34f74ac1cc"),
+        sha512_256: hex("c8a222f7c564d8a6462dc6d43ca147fdacaf05b9cc8e56cc9a7c102f0320b7c8"),
         block: include_bytes!("../wasm/dwarf-info.block"),
     },
     Known {
@@ -396,7 +396,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "psd-recons",
         version: 1,
-        sha512_256: hex("f90d1259a5210ce4aaf547e81d8226b27288c97f8c6a0187b740a4317d5198b6"),
+        sha512_256: hex("73578cc04d0cd5e14b1ac712cacf4853ff27817fb005ea65dd7e9a732b16c666"),
         block: include_bytes!("../wasm/psd-recons.block"),
     },
     Known {
@@ -450,7 +450,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "sqlite-recons",
         version: 2,
-        sha512_256: hex("94719220d2f5ae98bcf4946c95133459d7ec6034c698d2894df1dd5f37fc519c"),
+        sha512_256: hex("85a3c401c7dd5e63493fcca59f208db346ec4f1c8ef5e11ff325352612faebc9"),
         block: include_bytes!("../wasm/sqlite-recons.block"),
     },
     Known {
@@ -486,7 +486,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "zip-recons",
         version: 6,
-        sha512_256: hex("35655bef184bfc8f075b21ae9876c8b437544f2d577f1e97a08ec16722a0275f"),
+        sha512_256: hex("2e74ff1a118aaf861590fadc245bb7f01ab42f12051190e55c4d6691d8ed6e47"),
         block: include_bytes!("../wasm/zip-recons.block"),
     },
 ];

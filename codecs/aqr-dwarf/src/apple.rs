@@ -51,7 +51,8 @@ impl<'a> Header<'a> {
             return None;
         }
         let count = u32le(d, 24)? as usize;
-        if count == 0 || data_len != 8 + 4 * count {
+        // (the atoms' descriptions, 4 bytes each, are in the table)
+        if count == 0 || count > d.len() / 4 || data_len != 8 + 4 * count {
             return None;
         }
         let mut atoms = Vec::with_capacity(count - 1);

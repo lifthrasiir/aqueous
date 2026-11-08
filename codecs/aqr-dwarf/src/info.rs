@@ -1174,6 +1174,11 @@ fn decode_as(sh: Shape, inputs: &[&[u8]], len: u64) -> Result<(Vec<u8>, usize)> 
         return Err(corrupt());
     }
     let len = usize::try_from(len).map_err(|_| corrupt())?;
+    // (a string, a DIE, a DIE open and a reference after take a byte of the input or the output at
+    // least: the vectors are made at the room they end at, but not above that)
+    if sh.strings > strs.len() || sh.dies > len || sh.depth > len || sh.fixups > len {
+        return Err(corrupt());
+    }
     let mut r: Vec<Reader> = Vec::with_capacity(NUM_STREAMS);
     r.extend(streams.iter().map(|d| Reader { d, at: 0 }));
     let strs = string_starts(strs, sh.strings).ok_or_else(corrupt)?;
