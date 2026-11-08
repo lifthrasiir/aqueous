@@ -1098,6 +1098,18 @@ impl Gathered {
             files.iter().for_each(|&i| self.tree.entries[i].extra.link_group = Some(g as i128));
         }
     }
+
+    /// The bytes of the files' contents (and forks') as decompressing writes them: each file of
+    /// a link group for its size, though the content is read, and archived, once.
+    fn input_bytes(&self) -> u64 {
+        let size = |c: &usize| self.contents[*c].2;
+        let files = self.tree.entries.iter().flat_map(|e| match e.node {
+            EntryNode::File(c) => Some(c),
+            _ => None,
+        });
+        let forks = self.tree.entries.iter().flat_map(|e| e.extra.forks.iter().map(|f| f.1));
+        files.chain(forks).chain(self.tree.root.forks.iter().map(|f| f.1)).map(|c| size(&c)).sum()
+    }
 }
 
 /// The files of `Gathered`, read as their batch is made.
@@ -1364,9 +1376,9 @@ fn compress_into(
         if r.mirrors > 0 {
             eprintln!("mirror blocks: {}", size(r.mirrors as f64));
         }
-        summary(out, files, r.read as usize, r.len, start);
+        summary(out, files, g.input_bytes() as usize, r.len, start);
     }
-    end(Some(out), files, r.read, r.len as u64, start);
+    end(Some(out), files, g.input_bytes(), r.len as u64, start);
     if let (Some(s), Some(rec)) = (&a.stats, rec) {
         let contents = (r.files.iter().zip(&g.contents))
             .map(|(f, (p, ..))| stats::Content {
@@ -1455,9 +1467,9 @@ fn pack_into(
     let files = g.tree.entries.iter().filter(|e| matches!(e.node, EntryNode::File(_))).count();
     if !a.quiet {
         w.notes.iter().for_each(|n| eprintln!("{n}"));
-        summary(out, files, w.read as usize, w.len as usize, start);
+        summary(out, files, g.input_bytes() as usize, w.len as usize, start);
     }
-    end(Some(out), files, w.read, w.len, start);
+    end(Some(out), files, g.input_bytes(), w.len, start);
     Ok(g.gone.take().unwrap_or_default())
 }
 
