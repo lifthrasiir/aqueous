@@ -4395,7 +4395,9 @@ fn lz4_plans_hold() {
         }
         plan_holds(&format!("mozlz4 {n}"), f, &b);
     }
-    for (flg, bd, n) in [(0x64u8, 0x40u8, 3000usize), (0x64, 0x50, 300_000), (0x74, 0x60, 3 << 20), (0x7c, 0x70, 9 << 20)] {
+    for (flg, bd, n) in
+        [(0x64u8, 0x40u8, 3000usize), (0x64, 0x50, 300_000), (0x74, 0x60, 3 << 20), (0x7c, 0x70, 9 << 20)]
+    {
         let mut t = text(n * 3 / 4, &mut rng);
         t.extend(rng.bytes(n - t.len()));
         let d = aqr_lz4::frame::encode(&t, flg, bd, 1, None).unwrap().unwrap();
@@ -4720,9 +4722,12 @@ fn jpeg_plans_hold() {
     }
 }
 
-/// git-pack-recons and git-pack-index-recons lay their memory out as stacks, their limits their
-/// plans: of a pack of more entries than the stack's holes, alone and with its index and reverse
-/// index after it.
+/// git-pack-recons and git-pack-index-recons (part modules) lay their memory out as stacks, their
+/// limits their plans: of a pack of more entries than the stack's holes and of entries past
+/// the windows (a stream of 3 MB among them), alone and with its index and reverse index after
+/// it. The plan of the pack is the same whatever the lengths; that of the indexes depends on
+/// the count of entries only (12 bytes for each of the offsets and CRC-32s, 24 for the ids and
+/// their order).
 #[test]
 fn git_plans_hold() {
     struct Git;
@@ -4731,48 +4736,82 @@ fn git_plans_hold() {
             aqr_git::formula::apply(a, inputs, 1).map_err(|e| aqr_formula::Error::new(e.to_string()))
         }
     }
-    let n = 300;
-    let mut pack = b"PACK\0\0\0\x02".to_vec();
-    pack.extend_from_slice(&(n as u32).to_be_bytes());
-    for i in 0..n {
-        let data: Vec<u8> =
-            (0..500 + 37 * (i % 40)).map(|k| b"lorem ipsum dolor sit amet "[(k * 7 + i) % 27]).collect();
-        aqr_git::pack::put_header(aqr_git::pack::BLOB, data.len() as u64, &mut pack);
-        let (level, header) = [(1, [0x78, 0x01]), (6, [0x78, 0x9c]), (9, [0x78, 0xda])][i % 3];
-        pack.extend_from_slice(&header);
-        pack.extend(aqr_flate::zlib::compress(&data, aqr_flate::zlib::Params { level, ..Default::default() }).unwrap());
-        pack.extend_from_slice(&aqr_common::adler32::hash(&data).to_be_bytes());
+    let mut rng = aqr_common::rng::Rng::new(13);
+    for (n, big) in [(300usize, 0usize), (40, 3 << 20), (5, 0)] {
+        let mut pack = b"PACK\0\0\0\x02".to_vec();
+        pack.extend_from_slice(&(n as u32).to_be_bytes());
+        for i in 0..n {
+            let data: Vec<u8> = match (i, big) {
+                (7, big) if big > 0 => {
+                    (0..big).map(|k| if k % 5 == 0 { rng.below(256) as u8 } else { b"abcdef"[k % 6] }).collect()
+                }
+                _ => (0..500 + 37 * (i % 40)).map(|k| b"lorem ipsum dolor sit amet "[(k * 7 + i) % 27]).collect(),
+            };
+            aqr_git::pack::put_header(aqr_git::pack::BLOB, data.len() as u64, &mut pack);
+            let (level, header) = [(1, [0x78, 0x01]), (6, [0x78, 0x9c]), (9, [0x78, 0xda])][i % 3];
+            pack.extend_from_slice(&header);
+            pack.extend(
+                aqr_flate::zlib::compress(&data, aqr_flate::zlib::Params { level, ..Default::default() }).unwrap(),
+            );
+            pack.extend_from_slice(&aqr_common::adler32::hash(&data).to_be_bytes());
+        }
+        let sum = aqr_git::pack::sha1(&pack);
+        pack.extend_from_slice(&sum);
+        let f = aqr_git::formula::encode(&pack, 1).expect("taken");
+        // (the rebuilt streams and what is derived of them as they are given, apart)
+        let Node::Apply(a) = &f.root else { panic!("not an application") };
+        let mut g = f.clone();
+        g.root = Node::Concat(a.inputs[..2].to_vec());
+        let flate = g.eval(&Git).unwrap();
+        let streams = f.shared[0].sizes[0] as usize;
+        let slice = |n: &Node| match *n {
+            Node::Slice { stream, start, len } => f.streams[stream].data[start as usize..][..len as usize].to_vec(),
+            _ => panic!("an input not a slice"),
+        };
+        let (layout, kept) = (slice(&a.inputs[2]), slice(&a.inputs[3]));
+        let [streams, table] = [flate[..streams].to_vec(), flate[streams..].to_vec()];
+        let mut g = Formula::default();
+        let inputs = [&streams, &table, &layout, &kept].map(|i| g.push("raw", i.clone())).to_vec();
+        g.root = Node::apply(aqr_decompress::GIT_PACK, Vec::new(), inputs, pack.len() as u64);
+        plan_holds(&format!("pack {n} {big}"), g, &pack);
+        // with its index and reverse index, of ids at random
+        let mut starts: Vec<usize> = aqr_git::pack::entries(&pack).unwrap().iter().map(|e| e.header.start).collect();
+        starts.push(pack.len() - aqr_git::pack::ID);
+        let ids = aqr_common::rng::noise(n * aqr_git::pack::ID);
+        let mut indexes = vec![0; aqr_git::index::len(&starts, true)];
+        aqr_git::index::build(&pack, &starts, &ids, true, &mut indexes).unwrap();
+        let mut params = vec![aqr_git::module::WITH_REV];
+        aqr_common::varint::put(&mut params, pack.len() as u64);
+        let mut g = Formula::default();
+        let inputs = [&streams, &table, &layout, &kept, &ids].map(|i| g.push("raw", i.clone())).to_vec();
+        let want = [&pack[..], &indexes].concat();
+        g.root = Node::apply(aqr_decompress::GIT_PACK_INDEX, params, inputs, want.len() as u64);
+        plan_holds(&format!("pack {n} {big} and indexes"), g, &want);
     }
-    let sum = aqr_git::pack::sha1(&pack);
-    pack.extend_from_slice(&sum);
-    let f = aqr_git::formula::encode(&pack, 1).expect("taken");
-    // (the rebuilt streams as they are given)
-    let Node::Apply(a) = &f.root else { panic!("not an application") };
-    let mut deflated = f.clone();
-    deflated.root = a.inputs[0].clone();
-    let deflated = deflated.eval(&Git).unwrap();
-    let slice = |n: &Node| match *n {
-        Node::Slice { stream, start, len } => f.streams[stream].data[start as usize..][..len as usize].to_vec(),
-        _ => panic!("an input not a slice"),
+    // the plans, whatever the lengths of the pack
+    let plan_of = |m: aqr_formula::Module, p: &[u8], inputs: &[u64], len: u64| {
+        let usage = aqr_formula::Usage {
+            params: p,
+            resources: &[],
+            inputs,
+            outputs: &[len],
+            contents: &vec![],
+            initial_pages: aqr_decompress::initial_pages_of(m).unwrap(),
+        };
+        m.plan_for(&usage).unwrap().instance
     };
-    let (layout, kept) = (slice(&a.inputs[1]), slice(&a.inputs[2]));
-    let mut g = Formula::default();
-    let inputs = vec![g.push("raw", deflated.clone()), g.push("raw", layout.clone()), g.push("raw", kept.clone())];
-    g.root = Node::apply(aqr_decompress::GIT_PACK, Vec::new(), inputs, pack.len() as u64);
-    plan_holds("pack", g, &pack);
-    // with its index and reverse index, of ids at random
-    let mut starts: Vec<usize> = aqr_git::pack::entries(&pack).unwrap().iter().map(|e| e.header.start).collect();
-    starts.push(pack.len() - aqr_git::pack::ID);
-    let ids = aqr_common::rng::noise(n * aqr_git::pack::ID);
-    let mut indexes = vec![0; aqr_git::index::len(&starts, true)];
-    aqr_git::index::build(&pack, &starts, &ids, true, &mut indexes).unwrap();
-    let mut params = vec![aqr_git::module::WITH_REV];
-    aqr_common::varint::put(&mut params, pack.len() as u64);
-    let mut g = Formula::default();
-    let inputs = [deflated, layout, kept, ids].into_iter().map(|i| g.push("raw", i)).collect();
-    let want = [&pack[..], &indexes].concat();
-    g.root = Node::apply(aqr_decompress::GIT_PACK_INDEX, params, inputs, want.len() as u64);
-    plan_holds("pack and indexes", g, &want);
+    let pack = |l: u64| plan_of(aqr_decompress::GIT_PACK, &[], &[l, l / 10, l / 20, l / 7], 2 * l);
+    assert_eq!(pack(1 << 20), pack(3 << 30));
+    assert!(pack(3 << 30) < 2 << 20, "{}", pack(3 << 30));
+    let index = |n: u64, l: u64| {
+        let mut p = vec![aqr_git::module::WITH_REV];
+        aqr_common::varint::put(&mut p, l);
+        plan_of(aqr_decompress::GIT_PACK_INDEX, &p, &[l, l / 10, l / 20, l / 7, 20 * n], 2 * l)
+    };
+    assert_eq!(index(1000, 1 << 20), index(1000, 3 << 30));
+    let (small, large) = (index(100_000, 1 << 30), index(5_000_000, 1 << 30));
+    let per_entry = (large - small) as f64 / 4_900_000.0;
+    assert!((36.0..36.1).contains(&per_entry), "{per_entry} bytes for an entry");
 }
 
 /// pdb-symbols lays its memory out as a stack, its limit its plan: of modules of blocks nested

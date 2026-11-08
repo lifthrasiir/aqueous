@@ -65,6 +65,23 @@ fn decode(f: &Formula, threads: usize) -> aqr_formula::Result<Vec<u8>> {
     })
 }
 
+/// The inputs of the application `a` of the module in `f`: the streams and what is derived of
+/// them are the outputs of one application of aqr-flate's, taken together.
+fn inputs_of(f: &Formula, a: &aqr_formula::Apply) -> Vec<Vec<u8>> {
+    let mut g = f.clone();
+    g.root = aqr_formula::Node::Concat(a.inputs[..2].to_vec());
+    g.shared.truncate(1);
+    let flate = decode(&g, 1).unwrap();
+    let streams = g.shared[0].sizes[0] as usize;
+    let mut inputs = vec![flate[..streams].to_vec(), flate[streams..].to_vec()];
+    g.shared.clear();
+    for n in &a.inputs[2..] {
+        g.root = n.clone();
+        inputs.push(decode(&g, 1).unwrap());
+    }
+    inputs
+}
+
 fn layout_of(f: &Formula) -> &[u8] {
     &f.streams.iter().find(|s| s.class == "git-pack/layout").unwrap().data
 }
@@ -83,7 +100,7 @@ fn roundtrip_with(d: &[u8], opt: &Options) -> (Formula, Vec<u8>) {
     for threads in [1, 4] {
         assert!(decode(&f, threads).unwrap() == d, "not rebuilt");
     }
-    let tags = layout::tags(layout_of(&f)).unwrap().to_vec();
+    let tags = layout::tags(layout_of(&f)).unwrap();
     (f, tags)
 }
 
@@ -146,13 +163,13 @@ fn trailer_and_what_follows() {
     git(&d, &["gc", "-q"]);
     let p = pack(&d);
     let (f, _) = roundtrip(&p);
-    assert_eq!(layout_of(&f).last(), Some(&layout::TRAILER_DERIVED));
+    assert!(layout::trailer_derived(layout_of(&f)));
     // a wrong trailer is kept, and so is anything after the pack
     let mut q = p.clone();
     *q.last_mut().unwrap() ^= 1;
     q.extend_from_slice(b"after the pack");
     let (f, _) = roundtrip(&q);
-    assert_eq!(layout_of(&f).last(), Some(&0));
+    assert!(!layout::trailer_derived(layout_of(&f)));
     // a pack cut short is not one
     assert!(formula::encode(&p[..p.len() / 2], 1).is_none());
     assert!(formula::encode(b"PACK\0\0\0\x02\0\0\0\x01", 1).is_none());
@@ -171,7 +188,7 @@ fn limit_keeps_entries() {
     assert!(e.inflated <= 6_000);
     assert!(decode(&e.formula, 1).unwrap() == p);
     let tags = layout::tags(layout_of(&e.formula)).unwrap();
-    assert!(rebuilt(tags) > 0 && rebuilt(tags) < tags.len(), "{tags:?}");
+    assert!(rebuilt(&tags) > 0 && rebuilt(&tags) < tags.len(), "{tags:?}");
     std::fs::remove_dir_all(&d).unwrap();
 }
 
@@ -182,16 +199,11 @@ fn corrupt_inputs_fail_cleanly() {
     git(&d, &["gc", "-q"]);
     let p = pack(&d);
     let (f, _) = roundtrip(&p);
-    let deflated = {
-        let aqr_formula::Node::Apply(a) = &f.root else { panic!("an application") };
-        let mut g = f.clone();
-        g.root = a.inputs[0].clone();
-        decode(&g, 1).unwrap()
-    };
-    let (layout, kept) = (layout_of(&f).to_vec(), f.streams.iter().find(|s| s.class == "git-pack/kept").unwrap());
+    let aqr_formula::Node::Apply(a) = &f.root else { panic!("an application") };
+    let inputs = inputs_of(&f, a);
     let len = p.len() as u64;
-    let inputs = [deflated, layout, kept.data.to_vec()];
-    for k in 0..3 {
+    assert_eq!(inputs.len(), 4);
+    for k in 0..4 {
         let mut ins = inputs.clone();
         for i in (0..ins[k].len()).step_by(1.max(ins[k].len() / 200)) {
             ins[k][i] ^= 0x55;
@@ -202,6 +214,11 @@ fn corrupt_inputs_fail_cleanly() {
             ins[k][i] ^= 0x55;
         }
         ins[k].pop();
+        let refs: Vec<&[u8]> = ins.iter().map(|i| &i[..]).collect();
+        assert!(aqr_git::module::decode(&[], &refs, len, 1).is_err());
+        // (and a byte more)
+        let mut ins = inputs.clone();
+        ins[k].push(0);
         let refs: Vec<&[u8]> = ins.iter().map(|i| &i[..]).collect();
         assert!(aqr_git::module::decode(&[], &refs, len, 1).is_err());
     }
@@ -222,7 +239,8 @@ fn pack_with_index(dir: &Path) -> (Vec<u8>, Vec<u8>, Option<Vec<u8>>) {
 fn roundtrip_index(p: &[u8], idx: &[u8], rev: Option<&[u8]>) -> Formula {
     let f = formula::encode_index(roundtrip(p).0, p, idx, rev, 4).expect("encoded");
     let want = [p, idx, rev.unwrap_or_default()].concat();
-    assert!(decode(&f, 1).unwrap() == want, "not rebuilt");
+    let got = decode(&f, 1).unwrap();
+    assert!(got == want, "not rebuilt");
     f
 }
 
@@ -239,8 +257,9 @@ fn index_and_reverse_index() {
     let ids: Vec<_> = f.streams.iter().filter(|s| s.class == "git-pack/ids").collect();
     assert_eq!(ids.len(), 1);
     assert_eq!(ids[0].data.len(), 20 * n);
-    assert_eq!(f.shared.len(), 1);
-    assert_eq!(f.shared[0].sizes, [p.len(), idx.len(), rev.len()].map(|n| n as u64));
+    // (the DEFLATE streams' and the index module's)
+    assert_eq!(f.shared.len(), 2);
+    assert_eq!(f.shared[1].sizes, [p.len(), idx.len(), rev.len()].map(|n| n as u64));
     // without a reverse index
     roundtrip_index(&p, &idx, None);
     // indexes that are not the pack's, or not as git writes them, are not taken
@@ -276,16 +295,8 @@ fn index_corrupt_inputs_fail_cleanly() {
     let (p, idx, rev) = pack_with_index(&d);
     let rev = rev.unwrap();
     let f = roundtrip_index(&p, &idx, Some(&rev));
-    let a = &f.shared[0].apply;
-    let inputs: Vec<Vec<u8>> = a
-        .inputs
-        .iter()
-        .map(|n| {
-            let mut g = f.clone();
-            (g.root, g.shared) = (n.clone(), Vec::new());
-            decode(&g, 1).unwrap()
-        })
-        .collect();
+    let a = &f.shared[1].apply;
+    let inputs = inputs_of(&f, a);
     let len = a.len;
     let run = |params: &[u8], ins: &[Vec<u8>]| {
         let refs: Vec<&[u8]> = ins.iter().map(|i| &i[..]).collect();
@@ -294,7 +305,7 @@ fn index_corrupt_inputs_fail_cleanly() {
     assert!(run(&a.params, &inputs).unwrap() == [&p[..], &idx, &rev].concat());
     // the ids changed: other indexes, as long
     let mut ins = inputs.clone();
-    ins[3][7] ^= 1;
+    ins[4][7] ^= 1;
     assert_eq!(run(&a.params, &ins).unwrap().len() as u64, len);
     // params other than the flags and the pack's length, ids not of whole entries
     let mut more = a.params.clone();
@@ -306,8 +317,8 @@ fn index_corrupt_inputs_fail_cleanly() {
     no_rev[0] = 0;
     assert!(run(&no_rev, &inputs).is_err());
     ins = inputs.clone();
-    ins[3].pop();
+    ins[4].pop();
     assert!(run(&a.params, &ins).is_err());
-    assert!(run(&a.params, &inputs[..3]).is_err());
+    assert!(run(&a.params, &inputs[..4]).is_err());
     std::fs::remove_dir_all(&d).unwrap();
 }

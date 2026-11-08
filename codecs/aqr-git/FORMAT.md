@@ -37,23 +37,31 @@ Contents:
 
 ## 2. The module
 
-- **Module**: name `git-pack-recons`, version 1.
+- **Module**: name `git-pack-recons`, version 2.
 - **Params**: none (empty).
 - **Resources**: none.
-- **Inputs**: exactly three:
-  1. `deflated`: the DEFLATE streams of the rebuilt entries one after another, then for each
-     in order, 20 bytes: the Adler-32 of its data (4 bytes, big endian), the length of its
-     data and the length of the stream (8 bytes each, little endian);
-  2. `layout` (class `git-pack/layout`): §3;
-  3. `kept` (class `git-pack/kept`): the bytes kept as they are, in order.
+- **Inputs**: exactly four:
+  1. `streams`: the DEFLATE streams of the rebuilt entries one after another;
+  2. `table`: for each rebuilt entry in order, 20 bytes: the Adler-32 of its data (4 bytes,
+     big endian), the length of its data and the length of the stream (8 bytes each, little
+     endian);
+  3. `layout` (class `git-pack/layout`): §3;
+  4. `kept` (class `git-pack/kept`): the bytes kept as they are, in order.
 - **Output**: the pack of §3. Its length must be the `len` the application declares.
 
-With `n` rebuilt entries in the layout (§3), the last `20n` bytes of `deflated` are the table,
-and the bytes before it are cut into the streams by the lengths it gives, which must use them
-up exactly.
+With `n` rebuilt entries in the layout (§3), `table` is `20n` bytes, and `streams` is cut into
+the streams by the lengths it gives, which must use them up exactly.
 
-The encoder gives `deflated` as an application of aqr-flate's module `flate-set` with params
-`[3]` (aqr-flate's `FORMAT.md`, "Formula module"), which outputs exactly that. Its data is the
+Version 2 is a part module (windows of 16 pages for `streams`, `kept` and the output, of 4 for
+the others): it takes every input in order, in pieces, and puts the pack in order, holding
+nothing of their lengths (version 1 held its inputs and the pack: a whole module). The inputs
+are version 1's except that `deflated` (the streams and then the table) is cut in two, so that
+both are taken in order, and that the layout is in the order of the pack (§3). The output is
+version 1's byte for byte.
+
+The encoder gives `streams` and `table` as the two outputs of an application of aqr-flate's
+module `flate-set` with params `[3]` (aqr-flate's `FORMAT.md`, "Formula module"), a Split of
+its output, which is exactly their concatenation. Its data is the
 data of the rebuilt entries one after another, a content of the application: slices of
 streams of class `raw` (blobs and deltas), `git-pack/text` (commits and tags) and
 `git-pack/table` (trees), which may be recompressed in turn; its records a stream of class
@@ -66,20 +74,20 @@ The layout is:
 | field | |
 |---|---|
 | `n` | varint: the count of entries |
-| `tags` | `n` bytes, one per entry |
-| per entry, in order | what its tag tells (below) |
 | `trailer` | 1 byte: 1 where the SHA-1 is derived, else 0 |
+| per entry, in order | its tag (1 byte), then what the tag tells (below) |
 
 The output is the first 12 bytes of `kept` (the pack header), then each entry, then, if
 `trailer` is 1, `sha1` of the output so far, then all of `kept` that is left. The layout must
-be used up exactly.
+be used up exactly. (Version 1 had the tags of all entries together before what they tell,
+and `trailer` at the end: a streaming module would hold the tags.)
 
-A tag of 0 is an entry **kept**: its layout field is a varint `L`, and the entry is the next
+A tag of 0 is an entry **kept**: what follows is a varint `L`, and the entry is the next
 `L` bytes of `kept`.
 
 Otherwise bit 3 (`8`) must be set, the entry is **rebuilt**, and only bits 0-5 may be set: bits
 0-2 are its type `t`, bit 4 (`16`) is *header kept* and bit 5 (`32`) *zlib header as before*.
-Its stream, data length `size` and Adler-32 are the next of `deflated`'s (§2). The entry is:
+Its stream is the next of `streams`, and its data length `size` and Adler-32 the next of `table` (§2). The entry is:
 
 1. its header: with *header kept*, a continued field of `kept`; else `header(t, size)`;
 2. if `t` is 6, a continued field of the layout; if `t` is 7, the next 20 bytes of `kept`;
@@ -115,7 +123,7 @@ taken as it is.
 
 The module fails, which the specification ("Module execution") makes an invalid archive
 failure, on params, resources or inputs other than §2's; a layout or `kept` that runs out, or
-a layout not used up; a tag of other bits than §3's; a `deflated` shorter than its table or not
+a layout not used up; a tag of other bits than §3's; a `table` of other than `20n` bytes, or `streams` not
 cut exactly by it; a stream length that does not fit; a `trailer` other than 0 and 1; or an
 output whose length is not `len`.
 
@@ -125,16 +133,22 @@ A pack's index (`.idx`, version 2) and reverse index (`.rev`, version 1) (`gitfo
 follow from the pack and the ids of its entries: only the ids are stored, in the order of the
 entries in the pack.
 
-- **Module**: name `git-pack-index-recons`, version 1.
+- **Module**: name `git-pack-index-recons`, version 2.
 - **Params**: a byte of flags, of which only bit 0 (*with reverse index*) may be set, then a
   varint `P`, using up the params.
 - **Resources**: none.
-- **Inputs**: exactly four: `deflated`, `layout` and `kept` as §2's, then `ids` (class
+- **Inputs**: exactly five: `streams`, `table`, `layout` and `kept` as §2's, then `ids` (class
   `git-pack/ids`): `20n` bytes for some `n`, the ids of the entries in their order.
 - **Output**: the pack of §3 of `P` bytes (`len` §3's) with the offsets `s_0, ..., s_(m-1)` of
   its entries in order and the offset `s_m` after the last (where the trailer starts, derived
   or not); then the index; then, *with reverse index*, the reverse index. `m` must be `n`, and
   `s_m + 20` at most `P`. Its length must be the `len` the application declares.
+
+Version 2 is a part module as §2's: the pack is put in order, and the index follows it
+holding only what each entry needs of the pack, never its bytes: the offset (8 bytes) and
+CRC-32 (4) of each entry, made as it is put, then the ids and the entries in the index's order
+(20 and 4 bytes each); the plan is 36 bytes for each entry and nothing for the pack's length.
+The reverse index's places are the inverse of that order, made where it is.
 
 Let `id_j` be the `j`-th 20 bytes of `ids`, `t` the 20 bytes of the pack from `s_m` (its
 trailer), and `π` the entries `0, ..., n-1` sorted by `id_j` in byte order, of the same id in

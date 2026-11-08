@@ -6062,13 +6062,13 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/gif-recons.wasm" title="crates/aqr-modules/wasm/gif-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-gif/FORMAT.md" title="codecs/aqr-gif/FORMAT.md">R</a>
     <tr>
-      <td><code>4b7f8a8eb1ab1fab8ad3d77abade574bd6905a7f63ed823075a6af375f9df6b0</code>
-      <td>git-pack-index-recons@1
+      <td><code>d7cd04da761d4b79f181894a2c67f24f857762afc415beb907cfc7c234533ab2</code>
+      <td>git-pack-index-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/git-pack-index-recons.wasm" title="crates/aqr-modules/wasm/git-pack-index-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-git/FORMAT.md" title="codecs/aqr-git/FORMAT.md">R</a>
     <tr>
-      <td><code>8c5a4f7b78c392edcc0fb149de7ad70950885b1833e0ddaa6cf87ef6e9bc11e2</code>
-      <td>git-pack-recons@1
+      <td><code>b7ae16ba012c44fd9881c4d01bf3059aecec77c9b72d9690e87babf9c503a563</code>
+      <td>git-pack-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/git-pack-recons.wasm" title="crates/aqr-modules/wasm/git-pack-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-git/FORMAT.md" title="codecs/aqr-git/FORMAT.md">R</a>
     <tr>

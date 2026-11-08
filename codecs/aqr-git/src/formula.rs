@@ -20,22 +20,22 @@ use crate::{Result, corrupt};
 pub use crate::module::{decode, decode_index};
 
 /// A pack rebuilt from the data of its entries, the DEFLATE streams given by aqr-flate's module
-/// ([`decode`]).
-pub const MODULE: Module = Module::new("git-pack-recons", 1).with_plan(memory);
+/// ([`decode`]), a part module.
+pub const MODULE: Module = Module::new("git-pack-recons", 2).with_plan(memory);
 
-/// The memory of the module: its initial memory, and its plan ([`crate::module::plan`]).
+/// The memory of the module: its plan ([`crate::module::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    Some(u.initial() + crate::module::plan(u.inputs, u.content(1)?, u.output())?)
+    Some(crate::module::plan(u.initial()))
 }
 
 /// A pack with its index and reverse index after it ([`decode_index`]): the pack as
 /// [`MODULE`] makes it, the indexes of the ids of its entries.
-pub const INDEX_MODULE: Module = Module::new("git-pack-index-recons", 1).with_plan(index_memory);
+pub const INDEX_MODULE: Module = Module::new("git-pack-index-recons", 2).with_plan(index_memory);
 
-/// The memory of [`INDEX_MODULE`]: its initial memory, and its plan
-/// ([`crate::module::index_plan`]).
+/// The memory of [`INDEX_MODULE`]: its plan ([`crate::module::index_plan`]), of the length of
+/// its ids.
 fn index_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    Some(u.initial() + crate::module::index_plan(u.params, u.inputs, u.content(1)?, u.output())?)
+    crate::module::index_plan(u.initial(), *u.inputs.get(4)?)
 }
 
 #[derive(Debug, Clone)]
@@ -267,6 +267,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         return None;
     }
     let flate_len = streams + derived.len();
+    let streams_len = streams;
     let inflated = data.len() as u64;
     // (the input the first stream, the kinds' after the others)
     let mut f = Formula::default();
@@ -279,7 +280,9 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     };
     let data = f.push_by_kind(0, data, &kinds, "git-pack", OWN_MIN);
     let a = aqr_flate::formula::apply(opt.profile, data, records, index, flate_len as u64, Derived::Zlib).ok()?;
-    f.root = Node::apply(MODULE, Vec::new(), vec![Node::Apply(Box::new(a)), layout, kept], input.len() as u64);
+    // (the streams and what is derived of them apart, so that both are taken in order)
+    let [streams, table]: [Node; 2] = f.split(a, vec![streams_len as u64, derived.len() as u64]).try_into().ok()?;
+    f.root = Node::apply(MODULE, Vec::new(), vec![streams, table, layout, kept], input.len() as u64);
     Some(Encoded { formula: f, inflated })
 }
 

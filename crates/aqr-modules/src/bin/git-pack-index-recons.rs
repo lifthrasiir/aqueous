@@ -1,4 +1,4 @@
-//! `git-pack-index-recons` (aqr-git).
+//! `git-pack-index-recons` (aqr-git), a part module.
 
 #![no_main]
 
@@ -6,4 +6,17 @@
 #[global_allocator]
 static STACK: aqr_api::stack::Stack = aqr_api::stack::Stack::new();
 
-aqr_modules::whole!(inputs [in0: 0, in1: 1, in2: 2, in3: 3], |p, _, i, len| aqr_git::module::decode_index(p, i, len, 1));
+aqr_api::entry! {
+    part fn apply(params_len, in0_len, in1_len, in2_len, in3_len, in4_len, size)
+        windows(
+            Input 0 = aqr_git::module::WINDOW,
+            Input 1 = aqr_git::module::SMALL_WINDOW,
+            Input 2 = aqr_git::module::SMALL_WINDOW,
+            Input 3 = aqr_git::module::WINDOW,
+            Input 4 = aqr_git::module::SMALL_WINDOW,
+            Output 0 = aqr_git::module::WINDOW,
+        )
+    {
+        aqr_git::module::decode_index_part(params_len, in0_len, in1_len, in2_len, in3_len, in4_len, size)
+    }
+}

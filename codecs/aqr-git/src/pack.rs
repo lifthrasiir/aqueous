@@ -49,16 +49,27 @@ pub fn header_size(b: &[u8]) -> u64 {
     size
 }
 
-/// git's header of an entry of type `t` and data of `size` bytes.
-pub fn put_header(t: u8, size: u64, out: &mut Vec<u8>) {
+/// git's header of an entry of type `t` and data of `size` bytes, in the front of the array (of
+/// the count of bytes).
+pub fn header(t: u8, size: u64) -> ([u8; 10], usize) {
+    let mut h = [0; 10];
+    let mut n = 0;
     let mut c = t << 4 | (size & 15) as u8;
     let mut s = size >> 4;
     while s != 0 {
-        out.push(c | 0x80);
+        h[n] = c | 0x80;
+        n += 1;
         c = (s & 0x7f) as u8;
         s >>= 7;
     }
-    out.push(c);
+    h[n] = c;
+    (h, n + 1)
+}
+
+/// [`header`] appended to `out`.
+pub fn put_header(t: u8, size: u64, out: &mut Vec<u8>) {
+    let (h, n) = header(t, size);
+    out.extend_from_slice(&h[..n]);
 }
 
 /// The bytes of an ofs-delta's distance at the start of `b`: bytes while bit 7 is set, then one

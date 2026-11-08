@@ -103,6 +103,31 @@ impl<'a> Reader<'a> {
         Some(())
     }
 
+    /// Hands `f` the next `n` bytes in pieces; None where the stream ends before them, or where
+    /// `f` is None for a piece (it stops there).
+    pub fn each(&mut self, mut n: u64, mut f: impl FnMut(&[u8]) -> Option<()>) -> Option<()> {
+        while n > 0 {
+            if self.at == self.end && !self.refill() {
+                return None;
+            }
+            let k = ((self.end - self.at) as u64).min(n) as usize;
+            f(&self.buf[self.at..self.at + k])?;
+            self.at += k;
+            n -= k as u64;
+        }
+        Some(())
+    }
+
+    /// Fills `out` with the next bytes; None where the stream ends before.
+    pub fn exact(&mut self, out: &mut [u8]) -> Option<()> {
+        let mut at = 0;
+        self.each(out.len() as u64, |b| {
+            out[at..at + b.len()].copy_from_slice(b);
+            at += b.len();
+            Some(())
+        })
+    }
+
     /// The next varint (at most ten bytes; bits beyond 64 are an error).
     #[inline]
     pub fn num(&mut self) -> Result<u64, Corrupt> {

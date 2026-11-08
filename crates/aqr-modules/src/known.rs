@@ -239,14 +239,14 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "git-pack-index-recons",
-        version: 1,
-        sha512_256: hex("4b7f8a8eb1ab1fab8ad3d77abade574bd6905a7f63ed823075a6af375f9df6b0"),
+        version: 2,
+        sha512_256: hex("d7cd04da761d4b79f181894a2c67f24f857762afc415beb907cfc7c234533ab2"),
         block: include_bytes!("../wasm/git-pack-index-recons.block"),
     },
     Known {
         name: "git-pack-recons",
-        version: 1,
-        sha512_256: hex("8c5a4f7b78c392edcc0fb149de7ad70950885b1833e0ddaa6cf87ef6e9bc11e2"),
+        version: 2,
+        sha512_256: hex("b7ae16ba012c44fd9881c4d01bf3059aecec77c9b72d9690e87babf9c503a563"),
         block: include_bytes!("../wasm/git-pack-recons.block"),
     },
     Known {

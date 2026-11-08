@@ -9,7 +9,11 @@
 //! (`RIDX`, the version 1 and the hash function 1, SHA-1), then for each entry in the pack's
 //! order its place in the index, the pack's trailer and its own SHA-1. All numbers big endian.
 
-use crate::pack::{self, ID};
+use aqr_api::stream::{Pull, Put, Slice};
+use sha1::{Digest, Sha1};
+
+use crate::layout::Entries;
+use crate::pack::ID;
 use crate::{Result, corrupt};
 
 pub const IDX_MAGIC: [u8; 8] = [0xff, b't', b'O', b'c', 0, 0, 0, 2];
@@ -40,32 +44,44 @@ pub fn len(starts: &[usize], rev: bool) -> usize {
     idx_len(n, large(starts)) + if rev { rev_len(n) } else { 0 }
 }
 
-/// Bytes that [`build`] takes of [`aqr_api::stack`] for `n` entries: the entries in the index's
-/// order, and on WebAssembly the CRC-32's tables (made on its first use, held after).
-pub fn plan(n: u64) -> u64 {
-    use aqr_api::stack::block;
-    block(4 * n) + block(aqr_common::crc32::WASM_TABLES)
+/// Bytes that [`write`] takes of [`aqr_api::stack`] on top of the entries' offsets and CRC-32s
+/// ([`layout::Entries`]), for `n` entries: the ids, the entries in the index's order, and a
+/// piece for the output, with (on WebAssembly) the CRC-32's tables (made on its first use, held
+/// after).
+pub fn plan(sim: &mut aqr_api::stack::Sim, n: u64) {
+    sim.take(ID as u64 * n);
+    sim.take(4 * n);
+    sim.take(PIECE as u64);
 }
 
-/// The pack's index, and its reverse index where `rev`, written to `out` (of [`len`] bytes): of
-/// the entries starting at `starts` (in order, the last the end of the entries, where the
-/// trailer starts) in `pack`, of the ids `ids` in the same order.
-pub fn build(pack: &[u8], starts: &[usize], ids: &[u8], rev: bool, out: &mut [u8]) -> Result<()> {
-    let n = starts.len().checked_sub(1).ok_or_else(corrupt)?;
-    let end = starts[n];
-    let trailer = pack.get(end..end + ID).ok_or_else(corrupt)?;
-    if ids.len() != n * ID || u32::try_from(n).is_err() || out.len() != len(starts, rev) {
+/// Bytes of the pieces in which [`write`] puts the indexes.
+const PIECE: usize = 1 << 14;
+
+/// The pack's index, and its reverse index where `rev`, put to `out` in order (the bytes put are
+/// [`len`] of the entries): of the entries `entries` (their offsets, the last the end of the
+/// entries, and their CRC-32s), the pack's trailer `trailer`, and the ids of the entries in the
+/// same order pulled from `ids` (`20n` bytes). Returns the bytes put.
+pub fn write(ids: &mut dyn Pull, entries: &Entries, trailer: &[u8; ID], rev: bool, out: &mut dyn Put) -> Result<u64> {
+    let n = entries.crcs.len();
+    // (the reverse index's inversion marks its places with the top bit)
+    if entries.starts.len() != n + 1 || n >= 1 << 31 {
         return Err(corrupt());
     }
-    let id = |j: usize| &ids[j * ID..][..ID];
+    let mut names = vec![0u8; n * ID];
+    let mut got = 0;
+    while got < names.len() {
+        match ids.pull(&mut names[got..]) {
+            0 => return Err(corrupt()),
+            k => got += k,
+        }
+    }
+    let id = |j: usize| &names[j * ID..][..ID];
     // the entries in the index's order (of the same id, as in the pack)
     let mut order: Vec<u32> = Vec::with_capacity(n);
     order.extend(0..n as u32);
     order.sort_unstable_by(|&a, &b| id(a as usize).cmp(id(b as usize)).then(a.cmp(&b)));
-    let idx = idx_len(n, large(starts));
-    let (o, r) = out.split_at_mut(idx);
-    let mut w = Put(&mut *o);
-    w.put(&IDX_MAGIC);
+    let mut w = Hashed { out, buf: Vec::with_capacity(PIECE), sha: Sha1::new(), total: 0 };
+    w.put(&IDX_MAGIC)?;
     let mut fanout = [0u32; 256];
     for j in 0..n {
         fanout[id(j)[0] as usize] += 1;
@@ -73,55 +89,113 @@ pub fn build(pack: &[u8], starts: &[usize], ids: &[u8], rev: bool, out: &mut [u8
     let mut sum = 0;
     for c in fanout {
         sum += c;
-        w.put(&sum.to_be_bytes());
+        w.put(&sum.to_be_bytes())?;
     }
     for &j in &order {
-        w.put(id(j as usize));
+        w.put(id(j as usize))?;
     }
     for &j in &order {
-        let j = j as usize;
-        let entry = pack.get(starts[j]..starts[j + 1]).ok_or_else(corrupt)?;
-        w.put(&aqr_common::crc32::hash(entry).to_be_bytes());
+        w.put(&entries.crcs[j as usize].to_be_bytes())?;
     }
     // the offsets, the 64-bit ones after them
-    let (offs, big) = w.0.split_at_mut(4 * n);
-    let (mut offs, mut big, mut b) = (Put(offs), Put(big), 0u32);
+    let mut big = 0u32;
     for &j in &order {
-        let s = starts[j as usize] as u64;
+        let s = entries.starts[j as usize];
         if s > OFF32_LIMIT {
-            offs.put(&(0x8000_0000 | b).to_be_bytes());
-            big.put(&s.to_be_bytes());
-            b += 1;
+            w.put(&(0x8000_0000 | big).to_be_bytes())?;
+            big += 1;
         } else {
-            offs.put(&(s as u32).to_be_bytes());
+            w.put(&(s as u32).to_be_bytes())?;
         }
     }
-    big.put(trailer);
-    let sum = pack::sha1(&o[..idx - ID]);
-    o[idx - ID..].copy_from_slice(&sum);
+    for &j in &order {
+        let s = entries.starts[j as usize];
+        if s > OFF32_LIMIT {
+            w.put(&s.to_be_bytes())?;
+        }
+    }
+    w.put(trailer)?;
+    w.finish()?;
     if rev {
-        r[..REV_MAGIC.len()].copy_from_slice(&REV_MAGIC);
-        let places = &mut r[REV_MAGIC.len()..][..4 * n];
-        for (k, &j) in order.iter().enumerate() {
-            places[4 * j as usize..][..4].copy_from_slice(&(k as u32).to_be_bytes());
+        w.put(&REV_MAGIC)?;
+        // (each entry's place in the index's order: the inverse of `order`, made where it is)
+        const MARK: u32 = 1 << 31;
+        for i in 0..n {
+            if order[i] & MARK != 0 {
+                continue;
+            }
+            let (mut prev, mut cur) = (i as u32, order[i]);
+            loop {
+                let next = order[cur as usize];
+                order[cur as usize] = prev | MARK;
+                if cur as usize == i {
+                    break;
+                }
+                (prev, cur) = (cur, next);
+            }
         }
-        let at = REV_MAGIC.len() + 4 * n;
-        r[at..at + ID].copy_from_slice(trailer);
-        let sum = pack::sha1(&r[..at + ID]);
-        r[at + ID..].copy_from_slice(&sum);
+        for &p in &order {
+            w.put(&(p & !MARK).to_be_bytes())?;
+        }
+        w.put(trailer)?;
+        w.finish()?;
     }
-    Ok(())
+    Ok(w.total)
 }
 
-/// Writes bytes onto the front of a slice (of room for them).
-struct Put<'a>(&'a mut [u8]);
+/// Bytes put in pieces, and hashed up to the SHA-1 that closes each index.
+struct Hashed<'a> {
+    out: &'a mut dyn Put,
+    buf: Vec<u8>,
+    sha: Sha1,
+    total: u64,
+}
 
-impl Put<'_> {
-    fn put(&mut self, b: &[u8]) {
-        let (a, rest) = std::mem::take(&mut self.0).split_at_mut(b.len());
-        a.copy_from_slice(b);
-        self.0 = rest;
+impl Hashed<'_> {
+    fn put(&mut self, b: &[u8]) -> Result<()> {
+        if b.len() > self.buf.capacity() - self.buf.len() {
+            self.flush()?;
+        }
+        self.buf.extend_from_slice(b);
+        Ok(())
     }
+
+    fn flush(&mut self) -> Result<()> {
+        self.sha.update(&self.buf);
+        self.out.put(&self.buf).ok_or_else(corrupt)?;
+        self.total += self.buf.len() as u64;
+        self.buf.clear();
+        Ok(())
+    }
+
+    /// Ends the index with the SHA-1 of what it has.
+    fn finish(&mut self) -> Result<()> {
+        self.flush()?;
+        let sum: [u8; ID] = std::mem::take(&mut self.sha).finalize().into();
+        self.out.put(&sum).ok_or_else(corrupt)?;
+        self.total += ID as u64;
+        Ok(())
+    }
+}
+
+/// The pack's index, and its reverse index where `rev`, written to `out` (of [`len`] bytes): of
+/// the entries starting at `starts` (in order, the last the end of the entries, where the
+/// trailer starts) in `pack`, of the ids `ids` in the same order.
+pub fn build(pack: &[u8], starts: &[usize], ids: &[u8], rev: bool, out: &mut [u8]) -> Result<()> {
+    let n = starts.len().checked_sub(1).ok_or_else(corrupt)?;
+    let trailer: [u8; ID] = pack.get(starts[n]..starts[n] + ID).ok_or_else(corrupt)?.try_into().unwrap();
+    if ids.len() != n * ID || out.len() != len(starts, rev) {
+        return Err(corrupt());
+    }
+    let crcs = (0..n).map(|j| Ok(aqr_common::crc32::hash(pack.get(starts[j]..starts[j + 1]).ok_or_else(corrupt)?)));
+    let entries = Entries { starts: starts.iter().map(|&s| s as u64).collect(), crcs: crcs.collect::<Result<_>>()? };
+    let mut made = Vec::with_capacity(out.len());
+    write(&mut Slice(ids), &entries, &trailer, rev, &mut made)?;
+    if made.len() != out.len() {
+        return Err(corrupt());
+    }
+    out.copy_from_slice(&made);
+    Ok(())
 }
 
 /// The offsets that index `idx` tells, of its entries in its order, or None where it is not
