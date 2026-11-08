@@ -70,6 +70,7 @@ td.path { text-align: left; max-width: 520px; overflow: hidden; text-overflow: e
     <select id="run" aria-label="Run"></select>
     <label class="file">Open JSON…<input type="file" id="file" accept=".json,application/json"></label>
     <button id="reset">Whole run</button>
+    <button id="pause" style="display:none">Pause reloading</button>
     <span class="hint">Drag across a chart to zoom in; the tables follow the range shown.</span>
   </div>
   <div id="app"><div class="empty">No data. Open or drop a file of <code>aqr --stats=FILE.json</code>.</div></div>
@@ -83,6 +84,8 @@ const PALETTE = ["#4e79a7","#f28e2b","#59a14f","#e15759","#76b7b2","#edc948","#b
 const $ = (s) => document.querySelector(s);
 const tip = $("#tip");
 let DATA = null, RUN = null, VIEW = null;
+// by table (its element's id): the column sorted by and whether descending, kept over reloads
+let SORT = {};
 
 const size = (n) => n < 1e3 ? n.toFixed(0) + " B" : n < 1e6 ? (n / 1e3).toFixed(1) + " KB"
   : n < 1e9 ? (n / 1e6).toFixed(2) + " MB" : (n / 1e9).toFixed(2) + " GB";
@@ -133,9 +136,10 @@ function load(data) {
   show(0);
 }
 
-function show(i) {
+/** Shows run `i`, of the range `zoom` ([from, to]) where given, else the whole run. */
+function show(i, zoom) {
   RUN = prepare(DATA.runs[i]);
-  VIEW = RUN;
+  VIEW = zoom ? { ...RUN, from: zoom[0], to: Math.min(zoom[1], RUN.r.seconds) } : RUN;
   render();
 }
 
@@ -426,8 +430,9 @@ window.addEventListener("resize", () => { if (VIEW) drawAll(); });
 // --- tables ---
 
 function table(el, cols, rows, sortBy) {
-  let key = sortBy, desc = true;
+  let { key, desc } = SORT[el.id] && cols.some((c) => c.k === SORT[el.id].key) ? SORT[el.id] : { key: sortBy, desc: true };
   const draw = () => {
+    SORT[el.id] = { key, desc };
     rows.sort((a, b) => { const x = a[key], y = b[key]; const d = typeof x === "string" ? x.localeCompare(y) : x - y; return desc ? -d : d; });
     el.innerHTML = `<table><thead><tr>${cols.map((c) => `<th class="${c.l ? "l" : ""}" data-k="${c.k}">${c.t}${c.k === key ? (desc ? " ▾" : " ▴") : ""}</th>`).join("")}</tr></thead><tbody>`
       + rows.slice(0, 500).map((r) => `<tr>${cols.map((c) => `<td class="${c.path ? "path" : c.l ? "l" : ""}"${c.path ? ` title="${esc(r[c.k])}"` : ""}>${c.f ? c.f(r[c.k], r) : esc(r[c.k])}</td>`).join("")}</tr>`).join("")
@@ -504,11 +509,92 @@ function tables() {
 // --- loading ---
 
 $("#run").onchange = (e) => show(+e.target.value);
-const read = (f) => f.text().then((s) => load(JSON.parse(s))).catch((e) => alert(`${f.name}: ${e}`));
+const read = (f) => f.text().then((s) => { load(JSON.parse(s)); stopLive(); }).catch((e) => alert(`${f.name}: ${e}`));
 $("#file").onchange = (e) => e.target.files[0] && read(e.target.files[0]);
 document.addEventListener("dragover", (e) => e.preventDefault());
 document.addEventListener("drop", (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) read(f); });
+
+// --- live: reloaded while aqr runs ---
+// aqr writes the page again every 10 s (`EVERY` in stats.rs) while its `state` is "live". A page
+// of file: cannot fetch the file, but can reload itself: before that it keeps what is shown (the
+// run, the range, the tables' order, where the page and the tables are scrolled) in the tab's
+// session storage (window.name where there is none, as for file: pages in some browsers) and
+// shows it again after. A meta refresh would be a new navigation, the scroll lost.
+
+const RELOAD = 10000, KEEP = "aqr-stats-view:";
+let live = false, paused = false;
+
+const keep = {
+  set(v) {
+    const s = JSON.stringify(v);
+    try { sessionStorage.setItem(KEEP, s); return; } catch (e) { /* none: window.name */ }
+    window.name = KEEP + s;
+  },
+  take() {
+    let s = null;
+    try { s = sessionStorage.getItem(KEEP); sessionStorage.removeItem(KEEP); } catch (e) { /* none */ }
+    if (!s && window.name.startsWith(KEEP)) s = window.name.slice(KEEP.length);
+    if (window.name.startsWith(KEEP)) window.name = "";
+    try { return s ? JSON.parse(s) : null; } catch (e) { return null; }
+  },
+};
+
+/** What is shown, to show again after reloading. */
+function viewed() {
+  const run = +$("#run").value || 0;
+  return {
+    run, last: run === DATA.runs.length - 1,
+    zoom: VIEW.from > 0 || VIEW.to < RUN.r.seconds ? [VIEW.from, VIEW.to] : null,
+    sort: SORT, x: window.scrollX, y: window.scrollY,
+    scrolled: [...document.querySelectorAll(".scroll")].map((e) => [e.id, e.scrollTop, e.scrollLeft]),
+  };
+}
+
+function restore(k) {
+  if (!DATA) return;
+  // (the last run followed where it was shown: the archive going on, or the next one after it)
+  const run = k.last ? DATA.runs.length - 1 : Math.min(k.run, DATA.runs.length - 1);
+  SORT = k.sort || {};
+  $("#run").value = run;
+  show(run, run === k.run ? k.zoom : null);
+  for (const [id, top, left] of k.scrolled || []) {
+    const e = document.getElementById(id);
+    if (e) { e.scrollTop = top; e.scrollLeft = left; }
+  }
+  window.scrollTo(k.x || 0, k.y || 0);
+}
+
+function tick() {
+  if (!live || paused) return;
+  // (not while zooming in, nor in a tab not shown)
+  if (drag || document.hidden) { setTimeout(tick, 1000); return; }
+  keep.set(viewed());
+  location.reload();
+}
+
+function stopLive() {
+  live = false;
+  $("#pause").style.display = "none";
+}
+
+$("#pause").onclick = () => {
+  paused = !paused;
+  $("#pause").textContent = paused ? "Resume reloading" : "Pause reloading";
+  if (!paused) setTimeout(tick, RELOAD);
+};
+
 load(JSON.parse($("#data").textContent));
+{
+  const k = keep.take();
+  if (k) restore(k);
+  if (DATA && DATA.state === "live") {
+    live = true;
+    // (the browser's own restoring would scroll before the page is drawn again)
+    history.scrollRestoration = "manual";
+    $("#pause").style.display = "";
+    setTimeout(tick, RELOAD);
+  }
+}
 </script>
 </body>
 </html>

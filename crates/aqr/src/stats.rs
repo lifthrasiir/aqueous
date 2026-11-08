@@ -15,7 +15,9 @@
 //!
 //! The files are written again every [`EVERY`] as it runs, with the archive going on as a run
 //! of its own (`partial`), and as the process ends where it is stopped (by a signal, or
-//! [`crate::stop`]); each replaced whole (written aside, then renamed).
+//! [`crate::stop`]); each replaced whole (written aside, then renamed). A page of a `live`
+//! state reloads itself as often, keeping what it shows (the run, the range, the tables' order,
+//! where it is scrolled).
 //!
 //! The JSON, an object of `version` (1), `aqr` (the version of aqr that wrote it), `args` (the
 //! arguments it was run with, but its own name; none in JSON of aqr before them), `state`
