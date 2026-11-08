@@ -298,6 +298,34 @@ impl Archive<'_, '_> {
         Ok(stored.map(|(_, &n)| n).sum::<u64>() + b.sizes.non_leaf.iter().sum::<u64>())
     }
 
+    /// Of the contents of the tree marked in `only` (by [`super::EntryNode::File`]), their sizes
+    /// and the instructions of their formulas ([`Listed::size`], [`Listed::nodes`]): of an archive
+    /// opened by its index, the blocks of their leaves alone read. None of a content not marked.
+    pub fn sized(&self, only: &[bool]) -> Decoded<Vec<Option<(u64, usize)>>> {
+        let Some((_, refs)) = &self.tree else { return invalid("an archive of a single file") };
+        let taken = |c: usize| only.get(c) == Some(&true);
+        let partial;
+        let blocks = match &self.kept {
+            super::Archived::Indexed(i) => {
+                let mut leaves = vec![false; i.leaves_len()];
+                refs.iter().enumerate().filter(|&(c, _)| taken(c)).for_each(|(_, r)| leaves[r.0] = true);
+                let picked: Vec<usize> = (0..leaves.len()).filter(|&l| leaves[l]).collect();
+                partial = i.blocks_for(&picked);
+                &partial
+            }
+            super::Archived::Parsed(b) => b,
+        };
+        let name = |m: usize| format!("module{}", m + 1);
+        let (g, leaves) = graph(blocks, &name)?;
+        Ok(refs
+            .iter()
+            .enumerate()
+            .map(|(c, &(l, o, _))| {
+                taken(c).then(|| (g.nodes[leaves[l][o]].size, instructions(&g, leaves[l][o], &mut BTreeSet::new())))
+            })
+            .collect())
+    }
+
     /// Of each content of the tree (by [`super::EntryNode::File`]), what a listing tells
     /// ([`Listed`]); of an archive of a single file, of the file alone. `name` names the module of
     /// Wasm module `wasm` (`None`: not known).
@@ -322,11 +350,9 @@ impl Archive<'_, '_> {
             }
             let mut nodes = 0;
             for &(l, o) in of {
+                nodes += instructions(&g, leaves[l][o], &mut insns);
                 for n in g.reach(leaves[l][o]) {
                     let node = &g.nodes[n];
-                    if !matches!(node.shape, Shape::Stored(..)) && insns.insert(node.insn) {
-                        nodes += 1;
-                    }
                     match &node.shape {
                         &Shape::Slice(b, _) => {
                             blocks_of.insert(Taken::NonLeaf(b));
@@ -399,6 +425,15 @@ impl Archive<'_, '_> {
     }
 }
 
+/// The instructions of `g` that output `n` and what it is of, but those of leaf data blocks and
+/// those in `seen` (to which they are added).
+fn instructions(g: &Graph, n: usize, seen: &mut BTreeSet<usize>) -> usize {
+    g.reach(n)
+        .into_iter()
+        .filter(|&k| !matches!(g.nodes[k].shape, Shape::Stored(..)) && seen.insert(g.nodes[k].insn))
+        .count()
+}
+
 /// The names of the module blocks of `blocks`, as `name` names their Wasm modules (`moduleN`
 /// where it does not).
 pub(super) fn module_names(blocks: &Blocks, name: &dyn Fn(&[u8]) -> Option<String>) -> Vec<String> {
@@ -421,7 +456,9 @@ pub(super) fn graph<'f>(blocks: &Blocks, name: &'f dyn Fn(usize) -> String) -> D
                 g.first_insn.push(insn);
                 vec![g.add(Shape::Stored(zstd, checked), Vec::new(), insn, stored_len(d, zstd, checked))]
             }
-            LeafBlock::Lost | LeafBlock::Unread => return invalid("a file whose block is lost"),
+            LeafBlock::Lost => return invalid("a file whose block is lost"),
+            // (of a leaf not taken alone, nothing)
+            LeafBlock::Unread => Vec::new(),
             LeafBlock::Bad(ref e) => return Err(e.clone()),
             LeafBlock::Formula { outputs, data, segment, .. } => {
                 let (d, dict) = blocks.formulas[data];

@@ -178,6 +178,12 @@ fn aqueous() {
     assert_eq!(list(&["-t", "-q", "arch.aqr", "d/e", "./a.txt"]), "a.txt\nd/e/\nd/e/c.txt\n");
     let t = list(&["-t", "arch.aqr", "d/e"]);
     assert!(t.contains("d/e/c.txt") && !t.contains("b.txt") && t.contains("1 file, 1 directory"), "{t}");
+    // (each row as the whole archive's listing has it: its size, time, flags and instructions)
+    let words = |l: &str| l.split_whitespace().collect::<Vec<_>>().join(" ");
+    let whole: Vec<String> = list(&["-t", "arch.aqr"]).lines().map(words).collect();
+    for l in t.lines().filter(|l| l.contains("d/e")) {
+        assert!(whole.contains(&words(l)), "{l}\n{whole:#?}");
+    }
     let t = list(&["-t", "-v", "arch.aqr", "d/b.txt"]);
     assert!(t.contains("d/b.txt") && t.lines().last().unwrap().contains("1 file"), "{t}");
     assert_eq!(list(&["-t", "-q", "--each", "arch.aqr", "arch.aqr"]), format!("{all}{all}"));

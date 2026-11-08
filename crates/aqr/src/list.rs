@@ -10,7 +10,9 @@
 //!
 //! - `-q`: the paths alone, nothing else: of the archive's metadata blocks alone (an encrypted
 //!   one's chunks of them decrypted), of paths given those back from the last as far as they
-//!   tell them ([`aqr::open_indexed_at`]).
+//!   tell them ([`aqr::open_indexed_at`]). Of paths given without `-v`, those and the blocks of
+//!   their files alone are read too ([`aqr::Archive::sized`]); `-v` and the whole archive listed
+//!   read all of its blocks, which a file's share of the blocks it takes is of.
 //! - By default: the size, the modification time, the flags (`x` executable, `r` read-only,
 //!   `h` hidden, `@` extended attributes, `+` forks, `=` a hard link) and the instructions of
 //!   the formula making the file (`[N]`) of each, and the total.
@@ -73,21 +75,48 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
     let file = fs::File::open(input).map_err(|e| err(&e))?;
     // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
     let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
-    // the paths alone: of its metadata blocks alone (of paths selected, those back from the last
-    // as far as they tell them), an encrypted archive decrypted as it is read
-    let decrypting = match a.quiet && aqr::envelope::is_encrypted(&c) {
+    // the paths alone, or those of paths given but of their blocks: of its metadata blocks alone
+    // (of paths given, those back from the last as far as they tell them) and the blocks of
+    // those files, an encrypted archive decrypted as it is read
+    let indexed = a.quiet || a.select.is_some() && !a.verbose;
+    let decrypting = match indexed && aqr::envelope::is_encrypted(&c) {
         true => Some(crate::unlock(&c, input)?),
         false => None,
     };
-    if a.quiet {
+    if indexed {
         let payload = match &decrypting {
             Some(d) => aqr::Payload::Sealed(d),
-            None => aqr::Payload::Plain(crate::located(&c, input, true)),
+            None => aqr::Payload::Plain(crate::located(&c, input, a.quiet)),
         };
         let paths: Option<Vec<Vec<Vec<u8>>>> = a.select.as_ref().map(|s| s.paths.iter().map(|p| p.0.clone()).collect());
         let archive =
             crate::by_index(payload, &aqr::NoModules, a.opt.threads, paths.as_deref()).map_err(|e| err(&e))?;
-        return listed(a, &archive, Vec::new(), &err, None);
+        if a.quiet {
+            return listed(a, &archive, Vec::new(), &err, None);
+        }
+        crate::tell_incomplete(archive.status(), input);
+        // (their sizes and instructions alone, all that is shown without -v)
+        let (Some(sel), Some(t)) = (&a.select, archive.tree()) else {
+            return Err(err(&"an archive of a single file, not of paths"));
+        };
+        sel.check(t, &|_| Vec::new()).map_err(|e| err(&e))?;
+        let only = sel.contents(t, archive.contents_len());
+        let sized = archive.sized(&only).map_err(|e| err(&e))?;
+        let listing = sized
+            .into_iter()
+            .map(|s| {
+                s.map(|(size, nodes)| aqr::Listed {
+                    size,
+                    nodes,
+                    data: 0,
+                    overhead: 0,
+                    share: 0,
+                    formula: String::new(),
+                    segment: 0,
+                })
+            })
+            .collect();
+        return listed(a, &archive, listing, &err, None);
     }
     let decrypted = match aqr::envelope::is_encrypted(&c) {
         // (not listed from chunks that do not authenticate, whose bytes are not to be trusted:
