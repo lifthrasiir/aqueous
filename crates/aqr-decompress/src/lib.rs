@@ -91,12 +91,12 @@ fn arm64_delta(u: &aqr_formula::Usage<'_>) -> Option<u64> {
 
 /// aqr-exe's Mach-O file with its code signatures' code slots derived. Parameters: the
 /// signatures (`codesign`); inputs: the file without them, then the signatures.
-pub const MACHO_CODESIGN: Module = Module::new("exe-recons/macho-codesign", 1).with_plan(macho_codesign);
+pub const MACHO_CODESIGN: Module = Module::new("exe-recons/macho-codesign", 2).with_plan(macho_codesign);
 
-/// The memory of [`MACHO_CODESIGN`]: its initial memory, and its plan
-/// (`aqr_exe::module::macho_codesign_plan`).
+/// The memory of [`MACHO_CODESIGN`], a part module: its plan (`aqr_exe::module::macho_codesign_part_plan`),
+/// whatever the file's length (`None` for params that are not of a file of the output's length).
 fn macho_codesign(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    Some(u.initial() + aqr_exe::module::macho_codesign_plan(u.params, u.inputs, u.content(1)?, u.output())?)
+    aqr_exe::module::macho_codesign_part_plan(u.params, u.output(), u.initial())
 }
 
 /// aqr-exe's CIL filter on the section holding the metadata of a .NET image. Parameters: the
@@ -445,7 +445,12 @@ const NATIVE: &[Entry] = &[
             ],
             arity: 16,
             call: |a| {
-                aqr_exe::module::x86_part(a[0], a[1], [a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14]], a[15])
+                aqr_exe::module::x86_part(
+                    a[0],
+                    a[1],
+                    [a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14]],
+                    a[15],
+                )
             },
         },
         |p, r, i, n, _| aqr_exe::module::x86(p, r, i, n).map_err(err),
@@ -471,13 +476,33 @@ const NATIVE: &[Entry] = &[
                 aqr_api::Window::Output(0, aqr_exe::module::ARM64_WINDOW),
             ],
             arity: 13,
-            call: |a| aqr_exe::module::arm64_part(a[0], [a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11]], a[12]),
+            call: |a| {
+                aqr_exe::module::arm64_part(
+                    a[0],
+                    [a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11]],
+                    a[12],
+                )
+            },
         },
         |p, _, i, n, _| aqr_exe::module::arm64(p, i, n).map_err(err),
     ),
     bare(ARM64_REMAP, |p, _, i, n, _| aqr_exe::module::arm64_remap(p, i, n).map_err(err)),
     bare(ARM64_DELTA, |p, _, i, n, _| aqr_exe::module::arm64_delta(p, i, n).map_err(err)),
-    bare(MACHO_CODESIGN, |p, _, i, n, _| aqr_exe::module::macho_codesign(p, i, n).map_err(err)),
+    part(
+        MACHO_CODESIGN,
+        false,
+        aqr_api::emu::Entry {
+            kind: aqr_api::emu::Kind::Part,
+            windows: &[
+                aqr_api::Window::Input(0, aqr_exe::module::MACHO_CODESIGN_WINDOW),
+                aqr_api::Window::Input(1, aqr_exe::module::MACHO_CODESIGN_WINDOW),
+                aqr_api::Window::Output(0, aqr_exe::module::MACHO_CODESIGN_WINDOW),
+            ],
+            arity: 4,
+            call: |a| aqr_exe::module::macho_codesign_part(a[0], [a[1], a[2]], a[3]),
+        },
+        |p, _, i, n, _| aqr_exe::module::macho_codesign(p, i, n).map_err(err),
+    ),
     bare(CIL, |p, _, i, n, _| aqr_exe::module::cil(p, i, n).map_err(err)),
     bare(PE_RELOC, |p, _, i, n, _| aqr_exe::module::reloc(p, i, n).map_err(err)),
     bare(MACHO_SYMTAB, |p, _, i, n, _| aqr_exe::module::macho_symtab(p, i, n).map_err(err)),

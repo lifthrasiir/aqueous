@@ -45,12 +45,6 @@ pub fn arm64_delta_plan(inputs: &[u64], len: u64) -> u64 {
     aqr_api::stack::whole(0, &[], inputs) + block(len) + block(8 << arm64::delta::TABLE_BITS)
 }
 
-/// The memory plan of [`macho_codesign`], as [`plan`]'s of the signatures `sigs` (`None` where
-/// the params are not of them).
-pub fn macho_codesign_plan(params: &[u8], inputs: &[u64], sigs: &[u8], len: u64) -> Option<u64> {
-    Some(aqr_api::stack::whole(params.len() as u64, &[], inputs) + crate::codesign::decode_plan(params, sigs, len)?)
-}
-
 /// The memory plan of [`cil`], as [`plan`]'s of the streams `META`, `BODYPOS` and `TOKT`
 /// (`None` where the metadata root does not parse).
 pub fn cil_plan(params: u64, inputs: &[u64], streams: [&[u8]; 3], len: u64) -> Option<u64> {
@@ -142,7 +136,8 @@ pub fn arm64_delta(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>>
 }
 
 /// A Mach-O file with its code signatures' code slots derived. Params and inputs (the body,
-/// then the signatures): as [`crate::codesign`] tells.
+/// then the signatures): as [`crate::codesign`] tells. The whole decoding: [`macho_codesign_part`]
+/// is the same on pieces.
 pub fn macho_codesign(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     let (&[body, sigs], Ok(n)) = (inputs, usize::try_from(len)) else {
         return Err("bad parameters or inputs");
@@ -351,8 +346,19 @@ fn x86_part_run(params_len: u64, res_len: u64, lens: [u64; x86::NUM_STREAMS], si
         In::<12>::new(lens[12]),
     );
     let srcs: [&mut dyn Pull; x86::NUM_STREAMS] = [
-        &mut ins.0, &mut ins.1, &mut ins.2, &mut ins.3, &mut ins.4, &mut ins.5, &mut ins.6, &mut ins.7, &mut ins.8,
-        &mut ins.9, &mut ins.10, &mut ins.11, &mut ins.12,
+        &mut ins.0,
+        &mut ins.1,
+        &mut ins.2,
+        &mut ins.3,
+        &mut ins.4,
+        &mut ins.5,
+        &mut ins.6,
+        &mut ins.7,
+        &mut ins.8,
+        &mut ins.9,
+        &mut ins.10,
+        &mut ins.11,
+        &mut ins.12,
     ];
     let mut out = Written::new(size);
     x86_run(&p, &table, srcs, &mut out)?;
@@ -362,7 +368,8 @@ fn x86_part_run(params_len: u64, res_len: u64, lens: [u64; x86::NUM_STREAMS], si
 /// [`x86_part`] on whole inputs, natively: what it gives.
 pub fn x86_streamed(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     use aqr_api::stream::{Pull, Slice};
-    let (Some(p), Ok(streams), &[table]) = (params.first_chunk::<10>(), <[&[u8]; x86::NUM_STREAMS]>::try_from(inputs), resources)
+    let (Some(p), Ok(streams), &[table]) =
+        (params.first_chunk::<10>(), <[&[u8]; x86::NUM_STREAMS]>::try_from(inputs), resources)
     else {
         return Err("bad parameters or inputs");
     };
@@ -434,8 +441,19 @@ fn arm64_part_run(params_len: u64, lens: [u64; arm64::NUM_STREAMS], size: u64) -
         In::<9>::new(lens[9]),
         In::<10>::new(lens[10]),
     );
-    let srcs: [&mut dyn Pull; arm64::NUM_STREAMS] =
-        [&mut ins.0, &mut ins.1, &mut ins.2, &mut ins.3, &mut ins.4, &mut ins.5, &mut ins.6, &mut ins.7, &mut ins.8, &mut ins.9, &mut ins.10];
+    let srcs: [&mut dyn Pull; arm64::NUM_STREAMS] = [
+        &mut ins.0,
+        &mut ins.1,
+        &mut ins.2,
+        &mut ins.3,
+        &mut ins.4,
+        &mut ins.5,
+        &mut ins.6,
+        &mut ins.7,
+        &mut ins.8,
+        &mut ins.9,
+        &mut ins.10,
+    ];
     let mut out = Written::new(size);
     arm64_run(u64::from_le_bytes(p), size, srcs, &mut out)?;
     (out.total() == size).then_some(()).ok_or("output of another length")
@@ -485,4 +503,35 @@ fn arm64_run(
         return Err("output of another length");
     }
     r.iter_mut().all(|r| r.done()).then_some(()).ok_or("corrupt")
+}
+
+/// Pages of the windows of [`macho_codesign_part`]: of each of the inputs and of the output.
+pub const MACHO_CODESIGN_WINDOW: u32 = 1;
+
+/// The memory plan of [`macho_codesign_part`] ([`aqr_api::stack`]): what it takes beyond its initial
+/// memory (`initial` bytes) at most, of params `params` and a file of `len` bytes (`None` where
+/// they are not of one): independent of the length but through the signatures'.
+pub fn macho_codesign_part_plan(params: &[u8], len: u64, initial: u64) -> Option<u64> {
+    crate::codesign::part_plan(params, len, initial)
+}
+
+/// [`macho_codesign`] as a part module (its entry point, of `aqr_api::entry!`): the body and the
+/// signatures taken and the file put out in order through windows ([`MACHO_CODESIGN_WINDOW`]),
+/// the pages hashed as the file goes by.
+pub fn macho_codesign_part(params_len: u64, lens: [u64; 2], size: u64) {
+    aqr_api::finish(macho_codesign_part_run(params_len, lens, size));
+}
+
+fn macho_codesign_part_run(params_len: u64, lens: [u64; 2], size: u64) -> Result<()> {
+    use aqr_api::stream::{In, Pull, Written};
+    use aqr_api::Memory;
+    if lens[0].checked_add(lens[1]) != Some(size) {
+        return Err("bad parameters or inputs");
+    }
+    let mut params = alloc::vec![0u8; usize::try_from(params_len).map_err(|_| "bad parameters or inputs")?];
+    aqr_api::Params::read(0, &mut params);
+    let (mut body, mut sigs) = (In::<0>::new(lens[0]), In::<1>::new(lens[1]));
+    let mut out = Written::new(size);
+    crate::codesign::decode_core(&params, &mut body as &mut dyn Pull, &mut sigs, size, &mut out).ok_or("corrupt")?;
+    (out.total() == size).then_some(()).ok_or("output of another length")
 }

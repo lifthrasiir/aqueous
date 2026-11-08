@@ -747,18 +747,26 @@ which the module computes again. The conventions of §1 hold; the signatures' fi
 big-endian, as Apple's code signing writes them.
 
 ## G1. The module
-- **Module**: name `exe-recons/macho-codesign`, version 1.
+- **Module**: name `exe-recons/macho-codesign`, version 2.
 - **Params**: unsigned LEB128s (10 bytes at most each): `n`, the number of signatures, then of
   each `image`, `at`, `size` and `mask`; nothing after them.
 - **Resources**: none.
 - **Inputs**: exactly 2: the body, then the signatures one after another (`size` bytes each).
 - **Output**: the file, `len` bytes long: `len` must be the body's length and the signatures'.
 
+Version 2 is a part module (windows of a page for each input and for the output): the body is
+copied through while the pages are hashed, and each signature is put out, its slots filled,
+after the code it hashes, so that what it holds is a signature and a piece of the body, not
+the file. The output is version 1's byte for byte for the files it accepted, but for two
+conditions of G2 (an image starts at or after the end of the signature before it; the slots of
+the blobs of a mask lie apart), which version 1 did not require and the encoder now keeps.
+
 ## G2. Decoding
 
 1. **The file.** The signatures in order go at `at` each: the output is the body with each
-   signature put in at `at` (each `at` at least where the one before ends; the body's bytes
-   before it are those before `at` not of an earlier signature).
+   signature put in at `at` (each `at` at least where the one before ends, and each `image` at least there too and at
+   most its own `at`; the body's bytes before it are those before `at` not of an earlier
+   signature).
 2. **Code slots.** For each signature in order, and each bit `k` (0 to 63) set in its `mask`:
    the signature (`sig`, its `size` bytes at `at`) is a SuperBlob, `be32` magic `fade0cc0` and a
    count of blobs above `k`, whose `k`-th index entry (`be32 type`, `be32 offset`, at
@@ -771,14 +779,16 @@ big-endian, as Apple's code signing writes them.
    and `image + codeLimit` must be at most `at`. The `hashSize` bytes at `hashOffset + i ·
    hashSize` of the CodeDirectory (within `L`) become the hash of page `i`: SHA-1 for
    `hashType` 1 (`hashSize` 20), SHA-256 for 2 (32), SHA-256 cut to its first 20 bytes for 3
-   (20), SHA-384 for 4 (48).
+   (20), SHA-384 for 4 (48). The bytes of two blobs' slots do not overlap, and the blobs are
+   read from the signature as it is in the input (the slots zeroed).
 
 ## G3. Validation
 
 The module fails if:
 
 - the params do not read as G1 says, or there are resources, or not exactly 2 inputs;
-- the signatures overlap or go past the output, or the inputs are not of `len` bytes in all;
+- the signatures overlap or go past the output, or an image starts before the end of the
+  signature before it, or the inputs are not of `len` bytes in all;
 - a bit of a mask is not of a CodeDirectory as G2 says, or its slots are not as it says, or
   its hash type and size are none of G2's.
 

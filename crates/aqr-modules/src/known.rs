@@ -161,8 +161,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "exe-recons/macho-codesign",
-        version: 1,
-        sha512_256: hex("4fd80a101e184c8f6258285158242ab286b1ce0ec95768dea11b04b9819017e1"),
+        version: 2,
+        sha512_256: hex("81686dae4a4d6198a668a969fce4d62e9e401cb7d777ea4b058687b2683a136f"),
         block: include_bytes!("../wasm/exe-recons-macho-codesign.block"),
     },
     Known {
@@ -180,13 +180,13 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "exe-recons/x86-remap",
         version: 1,
-        sha512_256: hex("81badef252bb8339a8373299975d8f6ed64cd0ce32e2d2f75dbf09cb9c2cea9b"),
+        sha512_256: hex("8f6bca9ee51aabec01553d6222d3ea749b79c021bac1934080ded7f5269f9050"),
         block: include_bytes!("../wasm/exe-recons-x86-remap.block"),
     },
     Known {
         name: "exe-recons/x86",
         version: 4,
-        sha512_256: hex("4e92d031905815e48053a5a8a994ac5f36211508a20ff229c5bb4745527b8055"),
+        sha512_256: hex("c04f2676907c2ea45975c3b073e160bea53cb2399ac72269679d94135ea8a551"),
         block: include_bytes!("../wasm/exe-recons-x86.block"),
     },
     Known {

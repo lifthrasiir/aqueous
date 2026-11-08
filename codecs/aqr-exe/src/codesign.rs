@@ -24,6 +24,7 @@ fn be32(d: &[u8], p: usize) -> Option<u32> {
 
 /// What the code slots of a CodeDirectory are: where they start (in the signature), their
 /// count, the code limit, the hash, its size and the page size (0: one page, to the limit).
+#[derive(Clone, PartialEq)]
 struct Slots {
     at: usize,
     count: usize,
@@ -35,6 +36,7 @@ struct Slots {
 
 /// The digest of `d` by hash type `t` (1 SHA-1, 2 SHA-256, 3 SHA-256 cut to 20 bytes, 4 SHA-384),
 /// into `out` (of its size); false for another type or size.
+#[cfg(feature = "encode")]
 fn digest(t: u8, d: &[u8], out: &mut [u8]) -> bool {
     use sha2::Digest;
     match (t, out.len()) {
@@ -74,6 +76,7 @@ fn slots(sig: &[u8], k: usize) -> Option<Slots> {
 
 /// The code slots `s` of a signature at `sig` of an image from `image`, of `code` (the bytes
 /// before the signature): `None` where they would hash bytes past it, or of a hash not known.
+#[cfg(feature = "encode")]
 fn hashes(code: &[u8], image: usize, sig: usize, s: &Slots) -> Option<Vec<u8>> {
     if image.checked_add(s.limit).is_none_or(|e| e > sig) {
         return None;
@@ -103,82 +106,251 @@ fn varint(s: &mut &[u8]) -> Option<u64> {
     None
 }
 
+/// A signature of the params: where its image starts, where it lies in the file, how long it
+/// is, and the mask of its blobs.
+#[cfg(feature = "decode")]
+struct Entry {
+    image: u64,
+    at: u64,
+    n: usize,
+    mask: u64,
+}
+
+#[cfg(feature = "decode")]
+fn entry(p: &mut &[u8]) -> Option<Entry> {
+    let (image, at, n, mask) = (varint(p)?, varint(p)?, varint(p)?, varint(p)?);
+    Some(Entry { image, at, n: usize::try_from(n).ok()?, mask })
+}
+
+/// What the params tell of the signatures, checked: their count and the most of their bytes
+/// and of the code directories at a time.
+#[cfg(feature = "decode")]
+struct Scan {
+    count: u64,
+    /// The params after the count.
+    rest_at: usize,
+    max_n: usize,
+    max_jobs: usize,
+}
+
+/// The params of a file of `size` bytes, or `None` where they are not of one: the signatures
+/// in the file's order, each within the file, its image starting at its predecessor's end or
+/// after, and at its own start at the latest.
+#[cfg(feature = "decode")]
+fn scan(params: &[u8], size: u64) -> Option<Scan> {
+    let mut p = params;
+    let count = varint(&mut p)?;
+    // (an entry 4 bytes of the params at least)
+    if count > p.len() as u64 / 4 {
+        return None;
+    }
+    let rest_at = params.len() - p.len();
+    let (mut end, mut max_n, mut max_jobs) = (0u64, 0, 0);
+    for _ in 0..count {
+        let e = entry(&mut p)?;
+        let last = e.at.checked_add(e.n as u64).filter(|&l| l <= size)?;
+        if e.image < end || e.image > e.at {
+            return None;
+        }
+        (end, max_n, max_jobs) = (last, max_n.max(e.n), max_jobs.max(e.mask.count_ones() as usize));
+    }
+    p.is_empty().then_some(Scan { count, rest_at, max_n, max_jobs })
+}
+
+/// A running digest of one page of a hash type of [`digest`].
+#[cfg(feature = "decode")]
+enum Hasher {
+    Sha1(sha1::Sha1),
+    Sha256(sha2::Sha256),
+    /// SHA-256 cut to 20 bytes.
+    Sha256Cut(sha2::Sha256),
+    Sha384(sha2::Sha384),
+}
+
+#[cfg(feature = "decode")]
+impl Hasher {
+    fn new(t: u8, size: usize) -> Option<Hasher> {
+        use sha2::Digest;
+        Some(match (t, size) {
+            (1, 20) => Hasher::Sha1(Digest::new()),
+            (2, 32) => Hasher::Sha256(Digest::new()),
+            (3, 20) => Hasher::Sha256Cut(Digest::new()),
+            (4, 48) => Hasher::Sha384(Digest::new()),
+            _ => return None,
+        })
+    }
+
+    fn update(&mut self, d: &[u8]) {
+        use sha2::Digest;
+        match self {
+            Hasher::Sha1(h) => h.update(d),
+            Hasher::Sha256(h) | Hasher::Sha256Cut(h) => h.update(d),
+            Hasher::Sha384(h) => h.update(d),
+        }
+    }
+
+    /// The digest into `out` (of its size), the hasher begun again.
+    fn finish(&mut self, out: &mut [u8]) {
+        use sha2::Digest;
+        match self {
+            Hasher::Sha1(h) => out.copy_from_slice(&h.finalize_reset()),
+            Hasher::Sha256(h) => out.copy_from_slice(&h.finalize_reset()),
+            Hasher::Sha256Cut(h) => out.copy_from_slice(&h.finalize_reset()[..20]),
+            Hasher::Sha384(h) => out.copy_from_slice(&h.finalize_reset()),
+        }
+    }
+}
+
+/// The code slots of a CodeDirectory being computed as the file goes by: the pages of the
+/// image from `image` for `limit` bytes hashed, their digests put into the signature's slots.
+#[cfg(feature = "decode")]
+struct Job {
+    hasher: Hasher,
+    /// The slots' offset in the signature, a digest's size and the page's.
+    slots: usize,
+    size: usize,
+    page: usize,
+    image: u64,
+    limit: usize,
+    /// Bytes of the image hashed and slots put.
+    fed: usize,
+    done: usize,
+}
+
+/// Bytes of a [`Job`] on WebAssembly.
+#[cfg(feature = "decode")]
+pub const JOB_BYTES: u64 = 272;
+#[cfg(all(feature = "decode", target_family = "wasm"))]
+const _: () = assert!(core::mem::size_of::<Job>() as u64 == JOB_BYTES);
+
+#[cfg(feature = "decode")]
+impl Job {
+    /// The job of slots `s` of a signature at `at` of an image from `image`; `None` for a hash
+    /// not known or an image past the signature.
+    fn new(s: &Slots, image: u64, at: u64) -> Option<Job> {
+        let hasher = Hasher::new(s.hash, s.size)?;
+        if image.checked_add(s.limit as u64).is_none_or(|e| e > at) {
+            return None;
+        }
+        let page = if s.page == 0 { s.limit.max(1) } else { s.page };
+        Some(Job { hasher, slots: s.at, size: s.size, page, image, limit: s.limit, fed: 0, done: 0 })
+    }
+
+    /// The bytes of all its slots (the pages' count is that of the slots, as `slots` checked).
+    fn range(&self) -> core::ops::Range<usize> {
+        self.slots..self.slots + self.limit.div_ceil(self.page) * self.size
+    }
+
+    /// Hashes the part of `data`, which starts at `pos` of the file, that is in the image's
+    /// code, and puts a page's digest into `sig` as it ends.
+    fn feed(&mut self, pos: u64, data: &[u8], sig: &mut [u8]) {
+        let lo = self.image.max(pos);
+        let hi = (self.image + self.limit as u64).min(pos + data.len() as u64);
+        if lo >= hi {
+            return;
+        }
+        let mut d = &data[(lo - pos) as usize..(hi - pos) as usize];
+        while !d.is_empty() {
+            let k = d.len().min(self.page - self.fed % self.page);
+            self.hasher.update(&d[..k]);
+            self.fed += k;
+            d = &d[k..];
+            if self.fed.is_multiple_of(self.page) || self.fed == self.limit {
+                let at = self.slots + self.done * self.size;
+                self.hasher.finish(&mut sig[at..at + self.size]);
+                self.done += 1;
+            }
+        }
+    }
+
+    /// Whether every page is hashed (the image's whole code gone by).
+    fn complete(&self) -> bool {
+        self.fed == self.limit
+    }
+}
+
+/// Bytes of the body that [`decode_core`] takes at a time, and of the signatures.
+#[cfg(feature = "decode")]
+pub const BODY_PIECE: usize = 64 << 10;
+#[cfg(feature = "decode")]
+pub const SIG_PIECE: usize = 8 << 10;
+
+/// The memory plan of [`decode_core`] ([`aqr_api::stack`]): what it takes beyond its initial
+/// memory (`initial` bytes) at most, of params `params` and a file of `size` bytes: the params,
+/// a piece of each input, the largest signature and the jobs of the most blobs. It does not
+/// depend on the file's length but through its signatures'.
+#[cfg(feature = "decode")]
+pub fn part_plan(params: &[u8], size: u64, initial: u64) -> Option<u64> {
+    let s = scan(params, size)?;
+    let mut m = aqr_api::stack::Sim::new(initial);
+    m.take(params.len() as u64);
+    m.take(BODY_PIECE as u64);
+    m.take(SIG_PIECE as u64);
+    m.take(s.max_n as u64);
+    m.take(s.max_jobs as u64 * JOB_BYTES);
+    Some(m.plan())
+}
+
+/// The file of `size` bytes put to `sink` from `params`, `body` and `sigs` (both read in
+/// order), or `None` where they are not of one. Every page is hashed as the file goes by (the
+/// signature follows the code it hashes), the digests put into the signature just before it.
+#[cfg(feature = "decode")]
+pub fn decode_core(
+    params: &[u8],
+    body: &mut dyn aqr_api::stream::Pull,
+    sigs: &mut dyn aqr_api::stream::Pull,
+    size: u64,
+    sink: &mut dyn aqr_api::stream::Put,
+) -> Option<()> {
+    use aqr_api::stream::Reader;
+    let scan = scan(params, size)?;
+    let mut body = Reader::new(body, BODY_PIECE);
+    let mut sigs = Reader::new(sigs, SIG_PIECE);
+    let mut buf = alloc::vec![0u8; scan.max_n];
+    let mut jobs: Vec<Job> = Vec::with_capacity(scan.max_jobs);
+    let mut p = &params[scan.rest_at..];
+    let mut pos = 0u64;
+    for _ in 0..scan.count {
+        let e = entry(&mut p)?;
+        let sig = &mut buf[..e.n];
+        sigs.exact(sig)?;
+        jobs.clear();
+        for k in (0..MOST_BLOBS).filter(|&k| e.mask >> k & 1 != 0) {
+            let s = slots(sig, k)?;
+            let job = Job::new(&s, e.image, e.at)?;
+            // (slots lying over each other would come out by the order of the pages)
+            if jobs.iter().any(|j| j.range().start < job.range().end && job.range().start < j.range().end) {
+                return None;
+            }
+            jobs.push(job);
+        }
+        let mut at = pos;
+        body.each(e.at - pos, |d| {
+            jobs.iter_mut().for_each(|j| j.feed(at, d, &mut buf));
+            at += d.len() as u64;
+            sink.put(d)
+        })?;
+        if !jobs.iter().all(|j| j.complete()) {
+            return None;
+        }
+        sink.put(&buf[..e.n])?;
+        pos = e.at + e.n as u64;
+    }
+    body.each(size - pos, |d| sink.put(d))?;
+    (body.done() && sigs.done()).then_some(())
+}
+
 /// The file of `len` bytes from `params`, `body` and `sigs`, or `None` where they are not of one.
 #[cfg(feature = "decode")]
 pub fn decode(params: &[u8], body: &[u8], sigs: &[u8], len: usize) -> Option<Vec<u8>> {
-    let mut p = params;
-    let n = varint(&mut p)?;
-    // (an entry 4 bytes of the params at least)
-    if n > p.len() as u64 / 4 {
+    use aqr_api::stream::Slice;
+    if body.len().checked_add(sigs.len())? != len {
         return None;
     }
-    let mut list = Vec::with_capacity(n as usize);
-    for _ in 0..n {
-        let mut v = [0usize; 3];
-        for x in &mut v {
-            *x = usize::try_from(varint(&mut p)?).ok()?;
-        }
-        list.push((v[0], v[1], v[2], varint(&mut p)?));
-    }
-    if !p.is_empty() || body.len().checked_add(sigs.len())? != len {
-        return None;
-    }
-    // the file: the body with the signatures in their places, in order
     let mut out = Vec::with_capacity(len);
-    let (mut b, mut s) = (0usize, 0usize);
-    for &(_, at, n, _) in &list {
-        let take = at.checked_sub(out.len())?;
-        out.extend_from_slice(body.get(b..b.checked_add(take)?)?);
-        out.extend_from_slice(sigs.get(s..s.checked_add(n)?)?);
-        (b, s) = (b + take, s + n);
-    }
-    out.extend_from_slice(&body[b..]);
-    if s != sigs.len() {
-        return None;
-    }
-    for &(image, at, n, mask) in &list {
-        for k in (0..MOST_BLOBS).filter(|&k| mask >> k & 1 != 0) {
-            let s = slots(&out[at..at + n], k)?;
-            let h = hashes(&out[..at], image, at, &s)?;
-            out[at + s.at..at + s.at + h.len()].copy_from_slice(&h);
-        }
-    }
+    decode_core(params, &mut Slice(body), &mut Slice(sigs), len as u64, &mut out)?;
     Some(out)
 }
-
-/// Bytes that [`decode`] takes of [`aqr_api::stack`], of `params` and the signatures `sigs` and
-/// a file of `len` bytes (`None` where they are not of one), in its blocks' order: the
-/// signatures' entries, the file, and the code slots of a signature at a time (the most of them).
-#[cfg(feature = "decode")]
-pub fn decode_plan(params: &[u8], sigs: &[u8], len: u64) -> Option<u64> {
-    use aqr_api::stack::block;
-    let mut p = params;
-    let n = varint(&mut p)?;
-    if n > p.len() as u64 / 4 {
-        return None;
-    }
-    let (mut s, mut most) = (0usize, 0);
-    for _ in 0..n {
-        let mut v = [0usize; 3];
-        for x in &mut v {
-            *x = usize::try_from(varint(&mut p)?).ok()?;
-        }
-        let mask = varint(&mut p)?;
-        let sig = sigs.get(s..s.checked_add(v[2])?)?;
-        for k in (0..MOST_BLOBS).filter(|&k| mask >> k & 1 != 0) {
-            let sl = slots(sig, k)?;
-            most = most.max(sl.count * sl.size);
-        }
-        s += v[2];
-    }
-    Some(block(ENTRY_BYTES * n) + block(len) + block(most as u64))
-}
-
-/// Bytes of an entry of [`decode`]'s list on WebAssembly.
-#[cfg(feature = "decode")]
-const ENTRY_BYTES: u64 = 24;
-#[cfg(all(feature = "decode", target_family = "wasm"))]
-const _: () = assert!(core::mem::size_of::<(usize, usize, usize, u64)>() as u64 == ENTRY_BYTES);
 
 /// A file's signatures, of [`encode`]: the params, the signatures (code slots zeroed) and where
 /// they are in the file, in order.
@@ -199,20 +371,29 @@ pub fn encode(d: &[u8], signatures: &[(usize, usize, usize)]) -> Option<Signed> 
     let mut found = Vec::new();
     let mut end = 0;
     for (image, at, n) in signatures {
-        if at < end || at.checked_add(n).is_none_or(|e| e > d.len()) {
+        // (the decoder reads a signature before its image starts, so after the last one's end)
+        if at < end || image < end || image > at || at.checked_add(n).is_none_or(|e| e > d.len()) {
             continue;
         }
         let sig = &d[at..at + n];
         let count = be32(sig, 8).filter(|_| be32(sig, 0) == Some(EMBEDDED_SIGNATURE)).unwrap_or(0) as usize;
         let mut zeroed = sig.to_vec();
         let mut mask = 0u64;
+        let mut found_slots: Vec<(usize, Slots)> = Vec::new();
         for k in 0..count.min(MOST_BLOBS) {
             let Some(s) = slots(sig, k) else { continue };
             let slots = s.at..s.at + s.count * s.size;
-            if hashes(&d[..at], image, at, &s).is_some_and(|h| h == sig[slots.clone()]) {
+            // (slots lying over each other have no one order of the pages)
+            let apart = found_slots.iter().all(|(_, o)| o.at + o.count * o.size <= slots.start || slots.end <= o.at);
+            if apart && hashes(&d[..at], image, at, &s).is_some_and(|h| h == sig[slots.clone()]) {
                 mask |= 1 << k;
                 zeroed[slots].fill(0);
+                found_slots.push((k, s));
             }
+        }
+        // (the blobs read again from the signature zeroed, as the decoder does)
+        if found_slots.iter().any(|(k, s)| slots(&zeroed, *k).as_ref() != Some(s)) {
+            continue;
         }
         if mask != 0 {
             found.push((image, at, n, mask, zeroed));
@@ -335,5 +516,88 @@ mod tests {
         let mut p = s.params.clone();
         p[1] = 1; // the image from 1: past the signature
         assert!(decode(&p, &b, &s.sigs, d.len()).is_none());
+    }
+
+    /// Two images (a fat file's) of code and a signature each, and bytes after them, the pages
+    /// of different sizes and hashes, over several pieces of the body.
+    #[test]
+    fn two_images_over_pieces() {
+        let noise =
+            |n: usize, seed: u32| -> Vec<u8> { (0..n as u32).map(|i| (i.wrapping_mul(seed) >> 5) as u8).collect() };
+        let (a, b) = (noise(200_001, 2654435761), noise(150_000, 40503));
+        let blobs_a = [code_directory(&a, (2, 32), 14, false), code_directory(&a, (1, 20), 12, false)];
+        let (d, sig_a) = signed(&a, &blobs_a);
+        let image_b = d.len() + 100;
+        let mut d = d;
+        d.resize(image_b, 0xaa);
+        let (db, sig_b) = signed(&b, &[code_directory(&b, (4, 48), 12, false), code_directory(&b, (3, 20), 0, false)]);
+        d.extend_from_slice(&db);
+        d.extend_from_slice(&[7; 1000]);
+        let sigs = [sig_a, (image_b, image_b + sig_b.1, sig_b.2)];
+        let s = encode(&d, &sigs).unwrap();
+        assert_eq!(s.ranges.len(), 2);
+        let body = body(&d, &s);
+        assert_eq!(decode(&s.params, &body, &s.sigs, d.len()).as_deref(), Some(&d[..]));
+        // through pieces of every size the sink could be given
+        let mut out = Vec::new();
+        decode_core(
+            &s.params,
+            &mut aqr_api::stream::Slice(&body),
+            &mut aqr_api::stream::Slice(&s.sigs),
+            d.len() as u64,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(out, d);
+        // the plan holds the largest signature and does not depend on the body
+        let n = sig_a.2.max(sig_b.2) as u64;
+        assert!(part_plan(&s.params, d.len() as u64, 0).unwrap() < 1 << 20);
+        assert!(part_plan(&s.params, d.len() as u64, 0).unwrap() >= n);
+        // cut, extended, damaged
+        assert!(decode(&s.params, &body[1..], &s.sigs, d.len()).is_none());
+        assert!(decode(&s.params, &body, &s.sigs[1..], d.len()).is_none());
+        assert!(decode(&s.params, &body[..body.len() - 1], &s.sigs, d.len()).is_none());
+        // (a byte more of the body at the end is a longer file, an extra of the signatures is none)
+        assert!(decode(&s.params, &[&body[..], &[0][..]].concat(), &s.sigs, d.len() + 1).is_some());
+        assert!(decode(&s.params, &[&body[..], &[0][..]].concat(), &s.sigs, d.len()).is_none());
+        assert!(decode(&s.params, &body, &[&s.sigs[..], &[0][..]].concat(), d.len() + 1).is_none());
+        for cut in [1, 5, s.params.len() - 1] {
+            assert!(decode(&s.params[..cut], &body, &s.sigs, d.len()).is_none());
+        }
+        // the second image starting before the first signature's end: not what the encoder makes
+        let put = |out: &mut Vec<u8>, mut v: u64| {
+            while v >= 0x80 {
+                out.push(v as u8 | 0x80);
+                v >>= 7;
+            }
+            out.push(v as u8);
+        };
+        let mut p = Vec::new();
+        put(&mut p, 2);
+        for (image, at, n, mask) in [(0, sigs[0].1, sigs[0].2, 3), (sigs[0].1 as u64 + 1, sigs[1].1, sigs[1].2, 3)] {
+            [image as u64, at as u64, n as u64, mask].into_iter().for_each(|v| put(&mut p, v));
+        }
+        assert!(decode(&p, &body, &s.sigs, d.len()).is_none());
+    }
+
+    /// The code slots of two blobs lying over each other are not computed by the encoder.
+    #[test]
+    fn overlapping_slots_stay() {
+        let code = vec![9u8; 9000];
+        let cd = code_directory(&code, (2, 32), 12, false);
+        // (the second blob the same bytes as the first: its slots at the same place)
+        let mut sig = vec![0u8; 12 + 16];
+        sig[0..4].copy_from_slice(&EMBEDDED_SIGNATURE.to_be_bytes());
+        sig[8..12].copy_from_slice(&2u32.to_be_bytes());
+        for k in 0..2 {
+            sig[16 + 8 * k..20 + 8 * k].copy_from_slice(&28u32.to_be_bytes());
+        }
+        sig.extend_from_slice(&cd);
+        let n = sig.len();
+        sig[4..8].copy_from_slice(&(n as u32).to_be_bytes());
+        let d = [&code[..], &sig].concat();
+        let s = encode(&d, &[(0, code.len(), n)]).unwrap();
+        assert_eq!(s.params.last(), Some(&1)); // blob 0 alone
+        assert_eq!(decode(&s.params, &body(&d, &s), &s.sigs, d.len()).as_deref(), Some(&d[..]));
     }
 }

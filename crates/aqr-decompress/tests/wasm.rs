@@ -4351,6 +4351,93 @@ fn exe_x86_plans_hold() {
     }
 }
 
+/// exe-recons/macho-codesign (a part module of windows of a page) takes the plan of its
+/// signatures whatever the file's length: signed images (a SHA-256 CodeDirectory of 16 KiB
+/// pages and a SHA-256 cut to 20 bytes of 4 KiB pages) of a few bytes to 3 MB of code, one and two of them
+/// (a fat file's), bytes after, and the plan the same for a file of 3 GB with those signatures.
+#[test]
+fn exe_macho_codesign_plans_hold() {
+    use sha2::Digest;
+    let m = aqr_decompress::MACHO_CODESIGN;
+    let code_directory = |code: &[u8], cut: bool| {
+        let (kind, size, page) = if cut { (3u8, 20usize, 4096usize) } else { (2, 32, 16384) };
+        let (hash_offset, ident) = (52usize, b"test\0");
+        let pages: Vec<&[u8]> = code.chunks(page).collect();
+        let mut cd = vec![0u8; 44];
+        cd[0..4].copy_from_slice(&0xfade_0c02u32.to_be_bytes());
+        cd[4..8].copy_from_slice(&((hash_offset + ident.len() + pages.len() * size) as u32).to_be_bytes());
+        cd[8..12].copy_from_slice(&0x20100u32.to_be_bytes());
+        cd[16..20].copy_from_slice(&((hash_offset + ident.len()) as u32).to_be_bytes());
+        cd[20..24].copy_from_slice(&(hash_offset as u32).to_be_bytes());
+        cd[28..32].copy_from_slice(&(pages.len() as u32).to_be_bytes());
+        cd[32..36].copy_from_slice(&(code.len() as u32).to_be_bytes());
+        (cd[36], cd[37], cd[39]) = (size as u8, kind, page.trailing_zeros() as u8);
+        cd.resize(hash_offset, 0);
+        cd.extend_from_slice(ident);
+        for p in pages {
+            cd.extend_from_slice(&sha2::Sha256::digest(p)[..size]);
+        }
+        cd
+    };
+    // (an image of `code` and its signature after it: the file so far, and the signature)
+    let sign = |code: &[u8]| {
+        let blobs = [code_directory(code, false), code_directory(code, true)];
+        let mut sig = vec![0u8; 12 + 8 * blobs.len()];
+        sig[0..4].copy_from_slice(&0xfade_0cc0u32.to_be_bytes());
+        sig[8..12].copy_from_slice(&(blobs.len() as u32).to_be_bytes());
+        for (k, b) in blobs.iter().enumerate() {
+            let at = sig.len() as u32;
+            sig[16 + 8 * k..20 + 8 * k].copy_from_slice(&at.to_be_bytes());
+            sig.extend_from_slice(b);
+        }
+        let n = sig.len() as u32;
+        sig[4..8].copy_from_slice(&n.to_be_bytes());
+        sig
+    };
+    let plan_of = |params: &[u8], n: u64, sigs: u64| {
+        let usage = aqr_formula::Usage {
+            params,
+            resources: &[],
+            inputs: &[n, sigs],
+            outputs: &[n + sigs],
+            contents: &vec![],
+            initial_pages: aqr_decompress::initial_pages_of(m).unwrap(),
+        };
+        m.plan_for(&usage).unwrap().instance
+    };
+    let mut rng = aqr_common::rng::Rng::new(11);
+    for (n, images) in [(0usize, 1usize), (7, 1), (4096, 1), (200_001, 1), (3 << 20, 1), (100_000, 2), (1 << 20, 2)] {
+        let mut d = Vec::new();
+        let mut at = Vec::new();
+        for i in 0..images {
+            let start = d.len();
+            let code: Vec<u8> = (0..n).map(|j| if j % 7 == 0 { rng.below(256) as u8 } else { (j / 3) as u8 }).collect();
+            d.extend_from_slice(&code);
+            let sig = sign(&code);
+            at.push((start, d.len(), sig.len()));
+            d.extend_from_slice(&sig);
+            d.extend(std::iter::repeat_n(i as u8 + 1, 77));
+        }
+        let s = aqr_exe::codesign::encode(&d, &at).expect("signed");
+        let mut body = Vec::new();
+        let mut prev = 0;
+        for r in &s.ranges {
+            body.extend_from_slice(&d[prev..r.start]);
+            prev = r.end;
+        }
+        body.extend_from_slice(&d[prev..]);
+        let mut f = Formula::default();
+        let body_id = f.push("macho/body", body.clone());
+        let sigs_id = f.push("macho/signatures", s.sigs.clone());
+        f.root = Node::apply(m, s.params.clone(), vec![body_id, sigs_id], d.len() as u64);
+        plan_holds(&format!("macho-codesign {n} x{images}"), f, &d);
+        // (only the signatures' bytes count, not the file's)
+        let (b, g) = (body.len() as u64, s.sigs.len() as u64);
+        assert_eq!(plan_of(&s.params, b, g), plan_of(&s.params, (3 << 30) + b, g), "{n}");
+        assert!(plan_of(&s.params, b, g) < 2 << 20, "{n}");
+    }
+}
+
 /// exe-recons/arm64 (a part module of windows of a page) takes the same plan whatever the
 /// lengths: code of BL, ADRP and local branches from a few bytes to 3 MB, tails of 0 to 3 bytes.
 #[test]
