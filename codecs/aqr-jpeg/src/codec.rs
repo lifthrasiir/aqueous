@@ -232,6 +232,7 @@ pub(crate) fn encode_core<'a>(input: &'a [u8], coefs: &mut Vec<Coefs>, clean: &m
             (vec![info], model, Sizes { stripes: bits, scans: Vec::new() })
         }
         None => {
+            check_whole(&j, input.len())?;
             let infos = if j.progressive {
                 progressive::decode_all(&j, input, coefs, clean)?
             } else {
@@ -364,6 +365,36 @@ pub(crate) trait CoreSource<'a> {
 }
 // ---------------------------------------------------------------- decoding
 
+/// Blocks the components held whole may have, for each byte of the JPEG: a block takes a bit of
+/// its DC at least, so a header of more blocks than that over little data is a lie (and the
+/// file is kept as it is, or the archive corrupt), not 2 GiB of coefficients to reserve.
+const BLOCKS_PER_BYTE: usize = 8;
+/// Blocks allowed whatever the length (a truncated file may have few bytes of many blocks).
+const BLOCKS_FREE: usize = 1 << 16;
+
+/// Whether components of `j` may be held whole for a JPEG of `len` bytes.
+fn check_whole(j: &Jpeg, len: usize) -> Result<(), Error> {
+    let blocks: usize = j.comps.iter().map(|c| c.bw * c.bh).sum();
+    if blocks > len.saturating_mul(BLOCKS_PER_BYTE).saturating_add(BLOCKS_FREE) {
+        return Err(Error("more blocks than the data holds".into()));
+    }
+    Ok(())
+}
+
+/// Whether the sizes and the restart markers after the scans, as the params and the scan info
+/// tell them, fit in the output of `len` bytes (which holds each of them as it is, or more).
+fn check_sizes(sizes: &Sizes, trailing: impl Iterator<Item = usize>, len: usize) -> Result<(), Error> {
+    let bad = sizes.scans.iter().any(|&n| n > len)
+        || sizes.stripes.iter().any(|&(a, b)| a / 8 > len || b / 8 > len)
+        || trailing.into_iter().any(|t| t > len / 2);
+    if bad { Err(Error("sizes beyond the output".into())) } else { Ok(()) }
+}
+
+/// `out` with room for `len` bytes more, if it can be had.
+pub(crate) fn reserve_output(out: &mut Vec<u8>, len: usize) -> Result<(), Error> {
+    out.try_reserve_exact(len).map_err(|_| Error("output too large".into()))
+}
+
 /// The entry list of a head, as (gap, back reference) with None for coded entries.
 pub(crate) fn parse_entries(head: &[u8], p: &mut usize) -> Result<Vec<(usize, Option<usize>)>, Error> {
     let n = get_varint(head, p)?;
@@ -457,6 +488,7 @@ pub(crate) fn decode_core<'a>(
             raw: false,
         });
     }
+    check_sizes(sizes, infos.iter().map(|i| i.trailing_rst as usize), len)?;
     let nstripes = get_varint(info, &mut p)?;
     fully_read(info, p, "scan info")?;
     if nstripes == 0 || nstripes > model::MAX_STRIPES as u64 {
@@ -507,6 +539,7 @@ pub(crate) fn decode_core<'a>(
         std::mem::forget((ranges, t, stripes, raw_data, raws, infos, j));
         return Ok(out);
     }
+    check_whole(&j, len)?;
     model::decode_whole(&j, &t, &stripes, coefs)?;
     // the scans re-emitted in turn onto the output (reserved after the coefficients), through
     // one bit writer of room for the largest
@@ -515,7 +548,7 @@ pub(crate) fn decode_core<'a>(
         return Err(Error("scan sizes of another count".into()));
     }
     let room = coded.zip(&sizes.scans).map(|((s, _), &n)| writer_len(&j, s, n)).max().unwrap_or(0);
-    out.reserve_exact(len);
+    reserve_output(&mut out, len)?;
     let mut buf = vec![0u8; room];
     let mut be = if j.progressive { progressive::corrections() } else { Vec::new() };
     let (mut q, mut sz) = (0, sizes.scans.iter());
@@ -595,6 +628,7 @@ pub(crate) fn core_plan<'a>(
         flags.push(f);
     }
     let nstripes = usize::try_from(get_varint(info, &mut p).ok()?).ok()?;
+    check_sizes(sizes, trailing.iter().copied(), len).ok()?;
     let (mut trunc_tail, mut raws) = (0, Vec::with_capacity(ns));
     for &f in &flags {
         raws.push(f & F_RAW != 0);
@@ -670,6 +704,7 @@ pub(crate) fn core_plan<'a>(
             .unwrap_or(0);
         return Some((taken.max(pages(top + join)), most));
     }
+    check_whole(&j, len).ok()?;
     let (held, decoding) = model::whole_plan(&j, &stripes);
     top += held;
     let decoded = pages(top + decoding);

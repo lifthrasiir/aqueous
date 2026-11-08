@@ -2978,7 +2978,7 @@ pub(crate) fn encode_striped(
         },
     )?;
     drop(pool);
-    out.reserve_exact(len);
+    crate::codec::reserve_output(out, len)?;
     out.extend_from_slice(blob.get(..s.start).ok_or(Error("bad scan position".into()))?);
     // each part's head, the bits (<= 7) its first byte takes from what precedes it, then it
     let (mut pos, mut last8) = (0usize, 0u32);
