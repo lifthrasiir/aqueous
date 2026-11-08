@@ -405,6 +405,13 @@ fn repairs_encrypted() {
     let o = aqr_fed(&d, &["-q", "-A", "-P", "-B", "1M", "-o", "e.aqr", "src"], b"secret\n");
     assert!(o.status.success(), "{}", stderr(&o));
     let e = fs::read(d.join("e.aqr")).unwrap();
+    // its paths listed (of its metadata alone), and those of a path
+    let o = aqr_fed(&d, &["-t", "-q", "-P", "e.aqr"], b"secret\n");
+    let listed = String::from_utf8_lossy(&o.stdout).into_owned();
+    let files_listed: Vec<&str> = listed.lines().filter(|l| !l.ends_with('/')).collect();
+    assert!(o.status.success() && files_listed == want.iter().map(|f| &f.0[..]).collect::<Vec<_>>(), "{listed}");
+    let o = aqr_fed(&d, &["-t", "-q", "-P", "e.aqr", "sub"], b"secret\n");
+    assert_eq!(String::from_utf8_lossy(&o.stdout), "sub/\nsub/u.txt\n", "{}", stderr(&o));
     let extract = |name: &str, bytes: &[u8]| {
         fs::write(d.join("x.aqr"), bytes).unwrap();
         let out = d.join(name);

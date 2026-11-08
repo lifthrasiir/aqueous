@@ -8,7 +8,9 @@
 //! `  => SYMLINK: TARGET`, or `JUNCTION`), `<FIFO>`, `<CHR M,N>` and `<BLK M,N>` (devices of their
 //! numbers), `<SPECIAL K>` (a kind not known).
 //!
-//! - `-q`: the paths alone, nothing else.
+//! - `-q`: the paths alone, nothing else: of the archive's metadata blocks alone (an encrypted
+//!   one's chunks of them decrypted), of paths given those back from the last as far as they
+//!   tell them ([`aqr::open_indexed_at`]).
 //! - By default: the size, the modification time, the flags (`x` executable, `r` read-only,
 //!   `h` hidden, `@` extended attributes, `+` forks, `=` a hard link) and the instructions of
 //!   the formula making the file (`[N]`) of each, and the total.
@@ -71,6 +73,22 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
     let file = fs::File::open(input).map_err(|e| err(&e))?;
     // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
     let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
+    // the paths alone: of its metadata blocks alone (of paths selected, those back from the last
+    // as far as they tell them), an encrypted archive decrypted as it is read
+    let decrypting = match a.quiet && aqr::envelope::is_encrypted(&c) {
+        true => Some(crate::unlock(&c, input)?),
+        false => None,
+    };
+    if a.quiet {
+        let payload = match &decrypting {
+            Some(d) => aqr::Payload::Sealed(d),
+            None => aqr::Payload::Plain(crate::located(&c, input, true)),
+        };
+        let paths: Option<Vec<Vec<Vec<u8>>>> = a.select.as_ref().map(|s| s.paths.iter().map(|p| p.0.clone()).collect());
+        let archive =
+            crate::by_index(payload, &aqr::NoModules, a.opt.threads, paths.as_deref()).map_err(|e| err(&e))?;
+        return listed(a, &archive, Vec::new(), &err, None);
+    }
     let decrypted = match aqr::envelope::is_encrypted(&c) {
         // (not listed from chunks that do not authenticate, whose bytes are not to be trusted:
         // decompressing or testing repairs it)
@@ -90,18 +108,29 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
         crate::tell_incomplete(archive.status(), input);
     }
     let name = |wasm: &[u8]| aqr_decompress::identify(wasm).map(|n| n.split('@').next().unwrap_or(&n).to_owned());
-    let mut listed: Vec<Option<aqr::Listed>> =
-        archive.listing(&name).map_err(|e| err(&e))?.into_iter().map(Some).collect();
+    let listing = archive.listing(&name).map_err(|e| err(&e))?.into_iter().map(Some).collect();
+    listed(a, &archive, listing, &err, Some(c.len() as u64))
+}
+
+/// The listing of `archive` (of `len` bytes: none, of the paths alone), the files `listed` (by
+/// content; none, of the paths alone).
+fn listed(
+    a: &Args,
+    archive: &aqr::Archive,
+    mut listed: Vec<Option<aqr::Listed>>,
+    err: &dyn Fn(&dyn std::fmt::Display) -> String,
+    len: Option<u64>,
+) -> Result<String, String> {
     let mut rows = Vec::new();
     match archive.tree() {
         None if a.select.is_some() => return Err(err(&"an archive of a single file, not of paths")),
         None => {
-            let l = listed[0].take().unwrap();
-            let size = size_shown(a, l.size);
+            let l = listed.get_mut(0).and_then(Option::take);
+            let size = l.as_ref().map_or_else(String::new, |l| size_shown(a, l.size));
             rows.push(Row {
                 path: b"<Unnamed>".to_vec(),
                 size,
-                listed: Some(l),
+                listed: l,
                 extra: Extra::default(),
                 is_dir: false,
                 link: None,
@@ -227,7 +256,7 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
         let (data, overhead, whole) = match a.select {
             Some(_) => ("-".into(), "-".into(), rows.iter().filter_map(|r| r.listed.as_ref()).map(|l| l.share).sum()),
             None => {
-                let (data, len) = (archive.data_bytes().map_err(|e| err(&e))?, c.len() as u64);
+                let (data, len) = (archive.data_bytes().map_err(|e| err(&e))?, len.unwrap_or(0));
                 (data.to_string(), (len - data.min(len)).to_string(), len)
             }
         };
