@@ -517,8 +517,12 @@ pub(crate) struct SkChunk<'a> {
 
 impl<'a> Skeleton<'a> {
     /// The length of the file: the signature, the chunks with their lengths, kinds and CRCs, and the trailer.
-    pub(crate) fn file_len(&self) -> usize {
-        self.chunks.iter().map(|c| c.len + 12).sum::<usize>() + 8 + self.trailer.len()
+    ///
+    /// None where it does not fit 64 bits (the sums of damaged lengths would wrap, and pass for a
+    /// length they are not).
+    pub(crate) fn file_len(&self) -> Option<u64> {
+        let chunks = self.chunks.iter().try_fold(0u64, |a, c| a.checked_add(c.len as u64)?.checked_add(12))?;
+        chunks.checked_add(8 + self.trailer.len() as u64)
     }
 
     pub(crate) fn parse(sk: &'a [u8]) -> Result<Skeleton<'a>> {
@@ -586,6 +590,8 @@ impl<'a> Skeleton<'a> {
         if recs.len() != imgs.len() {
             return Err(crate::corrupt());
         }
+        // (the sums of the chunks' lengths are made once they are known not to wrap)
+        let total = usize::try_from(self.file_len().ok_or_else(crate::corrupt)?).map_err(|_| crate::corrupt())?;
         let img_len = |range: &std::ops::Range<usize>| {
             let skip = if classes[range.start] == FDAT { 4 } else { 0 };
             cs[range.clone()].iter().map(|c| c.len - skip).sum::<usize>()
@@ -644,7 +650,6 @@ impl<'a> Skeleton<'a> {
         }
 
         // Reassemble the file.
-        let total = self.file_len();
         let mut out = Vec::with_capacity(total + tail as usize);
         out.extend_from_slice(&png::SIGNATURE);
         let mut img = 0;
@@ -857,9 +862,16 @@ fn rebuild(
     if n as u64 > 1032 * len as u64 + 4096 {
         return Err(crate::corrupt());
     }
+    if !g.reachable(len) {
+        return Err(crate::corrupt());
+    }
 
     let ntok: usize = spans.iter().map(|s| if let Span::Tokens(c) = s { *c } else { 0 }).sum();
     if ntok > n {
+        return Err(crate::corrupt());
+    }
+    // (and a token takes a bit of the stream at least)
+    if ntok as u64 > 8 * len as u64 {
         return Err(crate::corrupt());
     }
     let tables = if reference.is_some() { model::TABLES_REF } else { model::TABLES };
@@ -1178,6 +1190,23 @@ mod tests {
         };
         assert!(run(false).unwrap().0 == payload);
         assert!(matches!(run(true), Err(Error::Corrupt)));
+    }
+
+    /// Chunk lengths whose sum wraps are not a length that the sum passes for.
+    #[test]
+    fn file_len_does_not_wrap() {
+        let chunk = |kind: &[u8; 4], len: usize| SkChunk { kind: *kind, len, crc: None, data: &[] };
+        let skel = |lens: &[usize]| Skeleton {
+            chunks: lens.iter().map(|&l| chunk(b"IDAT", l)).collect(),
+            classes: vec![IDAT; lens.len()],
+            trailer: &[],
+            images: vec![],
+        };
+        assert_eq!(skel(&[5, 7]).file_len(), Some(8 + 17 + 19));
+        // (2 x 2^63 + 24 + 8 is 32 modulo 2^64)
+        let wrapped = skel(&[1 << 63, 1 << 63]);
+        assert_eq!(wrapped.file_len(), None);
+        assert!(matches!(wrapped.rebuild_with(&[], 1, None, false, false), Err(Error::Corrupt)));
     }
 }
 

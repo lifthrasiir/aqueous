@@ -350,8 +350,15 @@ fn coded_image<D: Drain>(
     if n as u64 > 1032 * len as u64 + 4096 {
         return Err(corrupt());
     }
+    if !g.reachable(len) {
+        return Err(corrupt());
+    }
     let ntok: usize = spans.iter().map(|s| if let Span::Tokens(c) = s { *c } else { 0 }).sum();
     if ntok > n {
+        return Err(corrupt());
+    }
+    // (and a token takes a bit of the stream at least)
+    if ntok as u64 > 8 * len as u64 {
         return Err(corrupt());
     }
     let tables = model::tables_of(tb, model::TABLES)?;

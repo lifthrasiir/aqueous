@@ -59,6 +59,13 @@ pub fn decode_set(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> 
     if at != params.len() {
         return Err(corrupt());
     }
+    // (the skeletons tell the files' lengths: files of other ones are refused before the output
+    // is reserved for them)
+    for (sk, &size) in sks.iter().zip(&sizes) {
+        if Skeleton::parse(sk)?.file_len() != Some(size) {
+            return Err(corrupt());
+        }
+    }
     // by depth in the trees, each depth's files at once against their parents (of the depth
     // before), each copied to its place in the output. Natively the parents keep their references
     // as they are rebuilt (until their children are); in WebAssembly they are made of the
@@ -71,7 +78,7 @@ pub fn decode_set(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> 
     }
     let mut starts = Vec::with_capacity(n);
     sizes.iter().fold(0usize, |at, &s| (starts.push(at), at + s as usize).1);
-    let mut all = vec![0u8; len as usize];
+    let mut all = vec![0u8; usize::try_from(len).map_err(|_| corrupt())?];
     let mut kept: Vec<Option<References>> = Vec::with_capacity(if wasm { 0 } else { n });
     if !wasm {
         kept.extend((0..n).map(|_| None));
@@ -219,7 +226,7 @@ fn rebuild<'a>(
     (keep, tail): (bool, bool),
 ) -> Result<(Vec<u8>, Option<References>)> {
     let skel = Skeleton::parse(sk)?;
-    if skel.file_len() as u64 != len {
+    if skel.file_len() != Some(len) {
         return Err(corrupt());
     }
     let recs = recs(&skel)?;

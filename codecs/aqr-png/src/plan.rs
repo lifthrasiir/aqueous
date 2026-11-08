@@ -335,7 +335,12 @@ pub fn against(
 /// the references of its parent's file (made of it) and copied to its place, nothing else kept.
 pub fn set(initial: u64, params: &[u8], inputs: &[u64], (sks, indexes, records): (&[u8], &[u8], &[u8])) -> Option<(u64, u64)> {
     let mut at = 0;
-    let n = get_varint(params, &mut at).ok()? as usize;
+    let n = get_varint(params, &mut at).ok()?;
+    // (each parameter takes a byte at least)
+    if n > params.len() as u64 {
+        return None;
+    }
+    let n = n as usize;
     let mut parents = Vec::with_capacity(n);
     for i in 0..n {
         parents.push(match get_varint(params, &mut at).ok()? {

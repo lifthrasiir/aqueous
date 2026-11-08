@@ -93,6 +93,13 @@ impl Geometry {
         Some(Geometry { passes, bpp, len: at, raw_len: at2, pad: pad + 8 })
     }
 
+    /// Whether a payload of `payload_len` bytes can hold a row of the image at least (a deflate
+    /// stream is 1032 times its length at most): the buffers keep a row before the data, so
+    /// that a header of a row of gigabytes would reserve them for a payload of a few bytes.
+    pub fn reachable(&self, payload_len: usize) -> bool {
+        self.pad as u64 <= MAX_EXPANSION as u64 * payload_len as u64 + 4096
+    }
+
 }
 
 /// What literals are coded against.
@@ -1106,6 +1113,9 @@ pub fn encode_threads(
 ) -> crate::Result<Encoded> {
     if payload.len() < 2 {
         return Err(crate::Error::Unsupported("no zlib stream"));
+    }
+    if !g.reachable(payload.len()) {
+        return Err(crate::Error::Unsupported("image rows beyond the payload"));
     }
     // Streams that expand a lot are mostly long matches: modelling only the literals as
     // they come costs less than computing every pixel's symbol up front.
