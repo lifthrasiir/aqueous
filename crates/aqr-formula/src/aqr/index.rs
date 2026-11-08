@@ -38,6 +38,8 @@ pub(super) struct Index<'c> {
     p: Payload<'c>,
     /// The threads its payload is decrypted on where it is read whole.
     threads: usize,
+    /// Whether it is of all the segments (not only of those some paths were looked up in).
+    whole: bool,
     segments: Vec<SegmentIndex>,
     /// Where each leaf block is (in their order, of all segments), and its segment.
     leaf_at: Vec<usize>,
@@ -55,6 +57,12 @@ pub(super) type Indexed<'c> = (Index<'c>, Option<(Tree, Vec<ContentRef>)>, Optio
 /// The block of `p` at `at`, ending by `end`, by the generic structure: its type, its data and
 /// where it ends (after its padding).
 fn frame<'c>(p: Payload<'c>, at: usize, end: usize) -> Decoded<(u64, &'c [u8], usize)> {
+    let (ty, data, next) = frame_at(p, at, end)?;
+    Ok((ty, p.get(data)?, next))
+}
+
+/// [`frame`], of the block's data where it is alone (not read).
+fn frame_at(p: Payload<'_>, at: usize, end: usize) -> Decoded<(u64, std::ops::Range<usize>, usize)> {
     // (the type and the size field: 10 bytes of LEB128 and 8 at most)
     if at >= end {
         return invalid("truncated block");
@@ -73,7 +81,6 @@ fn frame<'c>(p: Payload<'c>, at: usize, end: usize) -> Decoded<(u64, &'c [u8], u
         .ok()
         .filter(|&n| start.checked_add(n).is_some_and(|e| e <= end))
         .ok_or_else(|| Failure::Invalid("truncated block".into()))?;
-    let data = p.get(start..start + n)?;
     let mut next = start + n;
     if (next - at) % 2 == 1 {
         next += 1;
@@ -81,19 +88,39 @@ fn frame<'c>(p: Payload<'c>, at: usize, end: usize) -> Decoded<(u64, &'c [u8], u
             return invalid("truncated block");
         }
     }
-    Ok((ty, data, next))
+    Ok((ty, start..start + n, next))
+}
+
+/// Whether path `names` (its names in turn) is settled by the segment of metadata `m` (`by`: its
+/// entries by their directory's number and name), the segments looked up from the last back
+/// (spec, "Partial access"): it, or an entry above it, is there as other than a directory (a
+/// tombstone too), so that the segments before it do not change what is at it.
+fn settles(m: &tree::Metadata, by: &HashMap<(usize, &[u8]), usize>, names: &[Vec<u8>]) -> bool {
+    let mut dir = 0;
+    for name in names {
+        match by.get(&(dir, &name[..])) {
+            None => return false,
+            Some(&k) => match m.entries[k - 1].2 {
+                Read::Dir => dir = k,
+                _ => return true,
+            },
+        }
+    }
+    false
 }
 
 /// Archive `p` (of the footer's fields from `fields_start`, and `size_hint`) indexed by its
-/// metadata blocks, the last at `metadata` (the footer's backward offset, not 0).
-pub(super) fn open(
-    p: Payload<'_>,
+/// metadata blocks, the last at `metadata` (the footer's backward offset, not 0). Of `paths`
+/// (each its names in turn), only the segments back from the last as far as each of them is
+/// settled ([`settles`]): its tree of those paths as the archive's has them, of other entries
+/// maybe not.
+pub(super) fn open<'c>(
+    p: Payload<'c>,
     threads: usize,
-    fields_start: usize,
-    archive_end: usize,
-    size_hint: u64,
-    metadata: u64,
-) -> Decoded<Indexed<'_>> {
+    footer: (usize, usize, u64, u64),
+    paths: Option<&[Vec<Vec<u8>>]>,
+) -> Decoded<Indexed<'c>> {
+    let (fields_start, archive_end, size_hint, metadata) = footer;
     if p.sealed() {
         let (ty, data, _) = frame(p, HEADER_MAGIC.len(), archive_end)?;
         let mut q = 0;
@@ -104,9 +131,12 @@ pub(super) fn open(
             return invalid("bad size hint block");
         }
     }
-    // the metadata blocks, from the last back to the first: where each is and ends, and what it
-    // tells
+    // the metadata blocks, from the last back to the first (as far as the paths are settled):
+    // where each is and ends, and what it tells
     let mut metas = Vec::new();
+    let mut open: Vec<&[Vec<u8>]> = paths.map_or_else(Vec::new, |p| p.iter().map(|n| &n[..]).collect());
+    // (where the segments read start: after the metadata block before them, or the header)
+    let start;
     let mut at = usize::try_from(metadata)
         .ok()
         .and_then(|b| fields_start.checked_sub(b))
@@ -122,20 +152,38 @@ pub(super) fn open(
         }
         let m = tree::read(&decoded(data, ty & 0x04 != 0, true)?)?;
         let prev = usize::try_from(m.prev).ok().and_then(|b| at.checked_sub(b));
+        if !open.is_empty() {
+            let by: HashMap<(usize, &[u8]), usize> =
+                m.entries.iter().enumerate().map(|(k, (dir, name, _))| ((*dir, &name[..]), k + 1)).collect();
+            open.retain(|names| !settles(&m, &by, names));
+        }
+        let settled = paths.is_some() && open.is_empty();
         metas.push((at, next, m));
         match prev {
-            Some(p) if p >= HEADER_MAGIC.len() => at = p,
-            Some(p) if p == HEADER_MAGIC.len() - 1 => break,
+            Some(b) if b == HEADER_MAGIC.len() - 1 => {
+                start = HEADER_MAGIC.len();
+                break;
+            }
+            Some(b) if b >= HEADER_MAGIC.len() && settled => {
+                let (ty, _, end) = frame_at(p, b, at)?;
+                if !(0x10..=0x17).contains(&ty) {
+                    return invalid("a metadata block not pointing to the one before it");
+                }
+                start = end;
+                break;
+            }
+            Some(b) if b >= HEADER_MAGIC.len() => at = b,
             _ => return invalid("a first metadata block not pointing to the header"),
         }
     }
+    let whole = start == HEADER_MAGIC.len();
     metas.reverse();
     // each segment's blocks, and the leaf blocks of all (in order)
     let mut segments: Vec<SegmentIndex> = Vec::with_capacity(metas.len());
     let mut leaves: Vec<(usize, usize)> = Vec::new();
     let mut first = Counts::default();
     for (k, (at, _, m)) in metas.iter().enumerate() {
-        let (at, start) = (*at, if k == 0 { HEADER_MAGIC.len() } else { metas[k - 1].1 });
+        let (at, start) = (*at, if k == 0 { start } else { metas[k - 1].1 });
         let within = |o: u64| usize::try_from(o).ok().and_then(|o| at.checked_sub(o)).filter(|&b| b >= start);
         let places = |offsets: &[u64]| -> Decoded<Vec<usize>> {
             let at: Option<Vec<usize>> = offsets.iter().map(|&o| within(o)).collect();
@@ -178,7 +226,8 @@ pub(super) fn open(
     let mut leaf_dictionary = vec![None; leaf_at.len()];
     // each segment's tree, then merged (spec, "Interpreting an archive")
     let mut trees = Vec::with_capacity(metas.len());
-    let mut prev = HEADER_MAGIC.len() - 1;
+    // (the metadata block before the first read, or the end of the header magic less 1)
+    let mut prev = metas[0].0 - metas[0].2.prev as usize;
     let mut status = None;
     for (at, _, m) in metas {
         status = Some(m.status);
@@ -200,7 +249,7 @@ pub(super) fn open(
         1 => trees.pop().map(|t| (t.tree, t.refs)),
         _ => Some(tree::merge(trees)),
     };
-    let index = Index { p, threads, segments, leaf_at, leaf_segment, leaf_dictionary, parsed: OnceLock::new() };
+    let index = Index { p, threads, whole, segments, leaf_at, leaf_segment, leaf_dictionary, parsed: OnceLock::new() };
     Ok((index, tree, status))
 }
 
@@ -235,6 +284,9 @@ impl<'c> Index<'c> {
     /// they are not those its metadata blocks tell, of contents `refs` (of the tree, by leaf).
     pub(super) fn parsed(&self, refs: Option<&Vec<ContentRef>>) -> Decoded<&Blocks<'c>> {
         let r = self.parsed.get_or_init(|| {
+            if !self.whole {
+                return invalid("the archive read for some of its paths alone, not whole");
+            }
             let (blocks, tree, _) = opened(self.p.whole(self.threads)?, self.p.sealed(), false)?;
             let leaves_at = blocks.leaf_at == self.leaf_at;
             if !leaves_at || tree.map(|t| t.1).as_ref() != refs {

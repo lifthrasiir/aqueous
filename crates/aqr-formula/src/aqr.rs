@@ -2746,11 +2746,34 @@ impl<'c> Payload<'c> {
 /// told of (decrypted on up to `threads` threads), and an archive without a metadata block at
 /// once.
 pub fn open_indexed<'c, 'n>(p: Payload<'c>, runner: &'n dyn Runner, threads: usize) -> Decoded<Archive<'c, 'n>> {
-    let (fields_start, archive_end, size_hint, metadata) = footer_fields(p)?;
-    if metadata == 0 {
+    open_indexed_with(p, runner, threads, None)
+}
+
+/// [`open_indexed`], of the entries at `paths` (each its names in turn, as the tree's) alone:
+/// the metadata blocks read back from the last as far as each path is settled, it or an entry
+/// above it found as other than a directory (spec, "Partial access"). Its tree has those paths
+/// (and what is under them) as the archive's has them, but maybe not its other entries; its
+/// leaves are evaluated only as they are taken alone ([`Archive::contents_of`]).
+pub fn open_indexed_at<'c, 'n>(
+    p: Payload<'c>,
+    runner: &'n dyn Runner,
+    threads: usize,
+    paths: &[Vec<Vec<u8>>],
+) -> Decoded<Archive<'c, 'n>> {
+    open_indexed_with(p, runner, threads, Some(paths))
+}
+
+fn open_indexed_with<'c, 'n>(
+    p: Payload<'c>,
+    runner: &'n dyn Runner,
+    threads: usize,
+    paths: Option<&[Vec<Vec<u8>>]>,
+) -> Decoded<Archive<'c, 'n>> {
+    let footer = footer_fields(p)?;
+    if footer.3 == 0 {
         return open_as(p.whole(threads)?, runner, p.sealed());
     }
-    let (index, tree, status) = index::open(p, threads, fields_start, archive_end, size_hint, metadata)?;
+    let (index, tree, status) = index::open(p, threads, footer, paths)?;
     let loaded = (0..index.modules_len()).map(|_| OnceLock::new()).collect();
     let kept = Archived::Indexed(Box::new(index));
     Ok(Archive { kept, runner, loaded, tree, status, budget: None, tell: None, items: Vec::new(), let_go: false })

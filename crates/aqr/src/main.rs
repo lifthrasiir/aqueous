@@ -64,8 +64,9 @@
 //!   the last metadata block's before the last 4 MiB of the archive (held back as it is made),
 //!   so that a truncation shorter than that leaves it. Decompressing, an archive of a tree is
 //!   read by its index ([`aqr::open_indexed`]): of the files taken alone (`-d ARCHIVE PATH...`),
-//!   only their blocks and what tells where they are, an encrypted archive's chunks decrypted as
-//!   they are read ([`aqr::envelope::Decrypting`]). Where it does not open so, and for the files
+//!   only their blocks and what tells where they are, the metadata blocks back from the last as
+//!   far as they tell the paths ([`aqr::open_indexed_at`]), an encrypted archive's chunks
+//!   decrypted as they are read ([`aqr::envelope::Decrypting`]). Where it does not open so, and for the files
 //!   that do not decode so, and testing, it is read whole ([`Repair`]) and repaired in memory
 //!   ([`aqr::mirror::repair`]): a damaged block restored from its mirror
 //!   block, the footer made again where the archive is cut short after its last metadata block;
@@ -2707,6 +2708,20 @@ impl Repair {
     }
 }
 
+/// Archive `p` opened by its index ([`aqr::open_indexed`]), of `paths` alone where they are given
+/// ([`aqr::open_indexed_at`]).
+fn by_index<'c, 'n>(
+    p: aqr::Payload<'c>,
+    runner: &'n dyn aqr::Runner,
+    threads: usize,
+    paths: Option<&[Vec<Vec<u8>>]>,
+) -> Result<aqr::Archive<'c, 'n>, Failure> {
+    match paths {
+        Some(paths) => aqr::open_indexed_at(p, runner, threads, paths),
+        None => aqr::open_indexed(p, runner, threads),
+    }
+}
+
 /// Decodes (or tests) `input`, an Aqueous archive, to `to`: whether it was (not skipped, as a
 /// frontend answers).
 fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
@@ -2734,8 +2749,10 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
         Some(d) => aqr::Payload::Sealed(d),
         None => aqr::Payload::Plain(plain),
     };
+    // (of paths selected, its metadata blocks read back from the last as far as they tell them)
+    let paths: Option<Vec<Vec<Vec<u8>>>> = a.select.as_ref().map(|s| s.paths.iter().map(|p| p.0.clone()).collect());
     let indexed = match !a.test && payload.of_tree() {
-        true => aqr::open_indexed(payload, runner, a.opt.threads).ok(),
+        true => by_index(payload, runner, a.opt.threads, paths.as_deref()).ok(),
         false => None,
     };
     let fast = indexed.is_some();
@@ -2920,12 +2937,17 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
                 if fast && r.is_err() && writing.lock().unwrap().is_none() && !stopped() {
                     let again = missing(&given.lock().unwrap());
                     let repaired = Repair::of(&repair, input, plain, decrypting.as_ref(), a.opt.threads)?;
-                    match repaired.open(plain, runner) {
-                        Ok(mut whole) if whole.contents_len() == again.len() => {
-                            whole.set_budget(aqr_common::budget::global());
-                            r = whole.contents_of(a.opt.threads, Some(&again), give);
-                        }
-                        _ => {}
+                    // (by its index too, so that its contents are numbered as they were, the files
+                    // of blocks lost failing alone; of the whole tree, else salvaged)
+                    let read = repaired.read(plain);
+                    let whole = match by_index(aqr::Payload::Plain(read), runner, a.opt.threads, paths.as_deref()) {
+                        Ok(whole) => Some(whole),
+                        Err(_) if paths.is_none() => repaired.open(plain, runner).ok(),
+                        Err(_) => None,
+                    };
+                    if let Some(mut whole) = whole.filter(|w| w.contents_len() == again.len()) {
+                        whole.set_budget(aqr_common::budget::global());
+                        r = whole.contents_of(a.opt.threads, Some(&again), give);
                     }
                 }
                 if let Some(m) = writing.into_inner().unwrap() {

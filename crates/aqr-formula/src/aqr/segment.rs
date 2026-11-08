@@ -922,7 +922,7 @@ fn uses(f: &Formula, leaf: &Leaf) -> Uses {
 #[cfg(test)]
 mod tests {
     use super::super::tests::{CUT, REV, natives};
-    use super::super::{BLOCK, Level, Value, checksum, decode, decode_value, invalid, leb, locate, open};
+    use super::super::{BLOCK, Level, Value, checksum, decode, decode_value, invalid, leb, locate, open, open_indexed};
     use super::*;
     use crate::{Apply, Kind};
     use tree::{Entry, EntryNode, Extra, Time};
@@ -1445,6 +1445,128 @@ mod tests {
         let mut bad = gone(None, "d");
         bad.extra.mode = Some(0o755);
         assert!(w.finish(&enc, &Tree { root: Extra::default(), entries: vec![bad] }, &[]).is_err());
+    }
+
+    /// Paths looked up back from the last segment ([`super::super::open_indexed_at`]): as far as
+    /// each is settled, the tree of the segments read having it as the whole archive's has it
+    /// (and not entries of the others); a path under a directory taken away, or not there, not
+    /// in it.
+    #[test]
+    fn looked_up() {
+        use super::super::{Payload, open_indexed_at};
+        let enc = Encoder::new(Level::Zstd(3));
+        let mut w = SegmentWriter::new();
+        let mut out = SegmentWriter::header().to_vec();
+        // (of each segment: its entries, a file's by its data)
+        let dir = |p: Option<usize>, n: &'static str| -> (Option<usize>, &str, Option<&str>) { (p, n, None) };
+        let file = |p: Option<usize>, n: &'static str, d: &'static str| (p, n, Some(d));
+        let segments = [
+            vec![
+                dir(None, "d"),
+                file(Some(0), "a", "a0"),
+                file(None, "b", "b0"),
+                file(None, "c", "c0"),
+                dir(None, "e"),
+                file(Some(4), "x", "x0"),
+            ],
+            vec![dir(None, "d"), file(Some(0), "a", "a1"), file(None, "f", "f1")],
+            vec![file(None, "g", "g2"), dir(None, "d"), file(Some(1), "n", "n2")],
+        ];
+        for (k, entries) in segments.iter().enumerate() {
+            let mut f = Formula::default();
+            let mut leaves = Vec::new();
+            for (_, _, d) in entries {
+                if let Some(d) = d {
+                    let s = f.push("s", d.as_bytes().to_vec());
+                    leaves.push(Leaf { outputs: vec![s], sums: vec![None] });
+                }
+            }
+            let b = w.batch(&enc, &f, &leaves).unwrap();
+            w.commit(&b);
+            out.extend_from_slice(&b.bytes);
+            let mut t = Tree::default();
+            let mut contents = Vec::new();
+            for &(parent, name, d) in entries {
+                let node = match d {
+                    Some(d) => {
+                        contents.push(ContentAt { leaf: b.leaf_at[contents.len()], output: 0, size: d.len() as u64 });
+                        EntryNode::File(contents.len() - 1)
+                    }
+                    None => EntryNode::Dir,
+                };
+                t.entries.push(entry(parent, name, node));
+            }
+            // (the middle one taking away "e" and what is under it)
+            if k == 1 {
+                t.entries.push(entry(None, "e", EntryNode::Special(0)));
+            }
+            match k {
+                2 => out.extend_from_slice(&w.finish(&enc, &t, &contents).unwrap().0),
+                _ => out.extend_from_slice(&w.close(&enc, &t, &contents).unwrap()),
+            }
+        }
+        let natives = natives();
+        let names = |p: &str| -> Vec<Vec<u8>> { p.split('/').map(|n| n.as_bytes().to_vec()).collect() };
+        // the entry at a path of a tree, each entry after its parent
+        let find = |t: &Tree, p: &str| {
+            let (mut at, mut names) = (None, names(p).into_iter());
+            let mut name = names.next();
+            for (i, e) in t.entries.iter().enumerate() {
+                if name.as_ref().is_some_and(|n| e.parent == at && &e.name == n) {
+                    (at, name) = (Some(i), names.next());
+                }
+            }
+            if name.is_some() { None } else { at }
+        };
+        // the files under a path (or at it), by their paths, of an archive opened
+        let files = |a: &super::super::Archive, p: &str| -> Vec<(String, Vec<u8>)> {
+            let t = a.tree().unwrap();
+            let Some(top) = find(t, p) else { return Vec::new() };
+            let mut under = vec![false; t.entries.len()];
+            let mut path = vec![String::new(); t.entries.len()];
+            let mut only = vec![false; a.contents_len()];
+            let mut of = std::collections::HashMap::new();
+            for (i, e) in t.entries.iter().enumerate() {
+                under[i] = i == top || e.parent.is_some_and(|q| under[q]);
+                let name = String::from_utf8(e.name.clone()).unwrap();
+                path[i] = e.parent.map_or(name.clone(), |q| format!("{}/{name}", path[q]));
+                if let (true, EntryNode::File(c)) = (under[i], &e.node) {
+                    only[*c] = true;
+                    of.insert(*c, path[i].clone());
+                }
+            }
+            let got = std::sync::Mutex::new(Vec::new());
+            a.contents_of(2, Some(&only), |c, d| {
+                got.lock().unwrap().push((of[&c].clone(), d));
+                Ok(())
+            })
+            .unwrap();
+            let mut got = got.into_inner().unwrap();
+            got.sort();
+            got
+        };
+        let whole = open_indexed(Payload::Plain(&out), &natives, 2).unwrap();
+        let file = |p: &str, d: &str| (p.to_string(), d.as_bytes().to_vec());
+        for (p, want, unread) in [
+            // (the last segment alone: not "c" of the first)
+            ("g", vec![file("g", "g2")], Some("c")),
+            // (the last two: "a" a file of the second)
+            ("d/a", vec![file("d/a", "a1")], Some("c")),
+            ("c", vec![file("c", "c0")], None),
+            ("d", vec![file("d/a", "a1"), file("d/n", "n2")], None),
+            // (under "e", taken away by the second; not there at all)
+            ("e/x", vec![], Some("c")),
+            ("y", vec![], None),
+        ] {
+            let a = open_indexed_at(Payload::Plain(&out), &natives, 2, &[names(p)]).unwrap();
+            assert_eq!(files(&a, p), want, "{p}");
+            assert_eq!(files(&whole, p), want, "{p}");
+            if let Some(u) = unread {
+                assert!(find(a.tree().unwrap(), u).is_none(), "{p}: {u} read");
+            }
+            // (all of it not read so)
+            assert!(unread.is_none() || a.contents(1, |_, _| Ok(())).is_err());
+        }
     }
 
     #[test]
