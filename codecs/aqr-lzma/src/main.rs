@@ -20,6 +20,12 @@ struct Row {
     note: &'static str,
 }
 
+/// The match finder's reach to record (`finder_of`'s byte): `AQR_LZMA_FIN`, 0 (the dictionary's)
+/// by default.
+fn fin() -> u8 {
+    std::env::var("AQR_LZMA_FIN").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+}
+
 /// An `.xz` file: its blocks of LZMA2 alone, the rest counted as record.
 fn run_xz(name: &str, f: &[u8]) -> Row {
     let mut r = Row { name: name.to_string(), stream: f.len(), ..Default::default() };
@@ -50,7 +56,7 @@ fn run_xz(name: &str, f: &[u8]) -> Row {
         r.t_encode += t.elapsed().as_secs_f64();
         for (i, seg) in dec.segments.iter().enumerate() {
             let t = Instant::now();
-            let Some((record, cost)) = lzma2::deconstruct(seg, b.dict, i + 1 == n) else {
+            let Some((record, cost)) = lzma2::deconstruct(seg, b.dict, fin(), i + 1 == n) else {
                 r.note = "deconstruct failed";
                 return r;
             };
@@ -113,7 +119,7 @@ fn run(arg: &str) -> Row {
         return r;
     }
     let t = Instant::now();
-    let Some((record, cost)) = recons::deconstruct(&dec.data, &dec.packets, h.dict, None) else {
+    let Some((record, cost)) = recons::deconstruct(&dec.data, &dec.packets, h.dict, fin(), None) else {
         r.note = "deconstruct failed";
         return r;
     };
@@ -122,7 +128,7 @@ fn run(arg: &str) -> Row {
     r.cost = cost;
     let t = Instant::now();
     drop(dec.packets);
-    let rebuilt = recons::rebuild(&dec.data, &record, h.props, h.dict, dec.marker);
+    let rebuilt = recons::rebuild(&dec.data, &record, h.props, h.dict, fin(), dec.marker);
     r.t_join = t.elapsed().as_secs_f64();
     r.ok = rebuilt.as_deref() == Some(s);
     if !r.ok {

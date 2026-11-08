@@ -125,6 +125,45 @@ fn lzma_through_windows() {
     }
 }
 
+/// Records of a match finder that looks back less than the dictionary, through windows (which
+/// hold the dictionary's reach): LZMA streams of dictionaries over the finder's reach, in parts
+/// too, and LZMA2 segments.
+#[test]
+fn finder_reach_through_windows() {
+    let props = Props { lc: 3, lp: 0, pb: 2 };
+    let mut cases = Vec::new();
+    for (k, &(n, dict, fin, part)) in
+        [(1 << 20, 1u32 << 18, 13u8, usize::MAX), (1 << 20, 1 << 18, 12, 250_000), (600_000, 3 << 16, 15, 90_000)]
+            .iter()
+            .enumerate()
+    {
+        let d = data(n, 70 + k as u64);
+        let packets = greedy::packets(&d, dict as usize);
+        let s = lzma::encode(&d, props, &packets, false);
+        let sp = recons::split_at(&s, props, dict, Some(n as u64), 1 << 28, part, 1, Some(fin)).unwrap();
+        assert_eq!(sp.record[6], fin);
+        cases.push((s, sp));
+    }
+    let splits: Vec<_> = cases;
+    let (i, all) = inputs(&splits);
+    same("lzma, several reaches", &i, &all, false);
+    for (s, sp) in splits {
+        let (i, all) = inputs(&[(s, sp)]);
+        same("lzma, one", &i, &all, false);
+    }
+    let d = data(700_000, 80);
+    let s = greedy::lzma2(&d, 1 << 17);
+    let sp = lzma2::split_at(&s, 1 << 17, 1 << 28, 1, Some(14)).unwrap();
+    assert!(sp.iter().all(|x| x.record[5] == 14));
+    let (mut data, mut records, mut lens) = (vec![], vec![], vec![]);
+    for x in &sp {
+        lens.push((x.data.len(), x.record.len()));
+        data.extend_from_slice(&x.data);
+        records.extend_from_slice(&x.record);
+    }
+    same("lzma2", &[data, records, aqr_lzma::formula::index(&lens)], &s, true);
+}
+
 /// The chunks of at most `max` bytes of data over `packets`, the first `first` and the others
 /// these controls in turn.
 fn chunks(packets: &[lzma::Packet], props: Props, max: usize, first: u8, controls: &[u8]) -> Vec<Chunk> {

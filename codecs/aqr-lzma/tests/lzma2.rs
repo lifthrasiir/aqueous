@@ -166,3 +166,34 @@ fn damaged_records() {
         }
     }
 }
+
+/// Segments recorded with the match finder looking back less than the dictionary: rebuilt as
+/// they were, the reach in each record's sixth byte, and bytes that are not a reach rejected.
+#[test]
+fn finder_reach() {
+    let props = Props { lc: 3, lp: 0, pb: 2 };
+    let d = data(300_000, 41);
+    let dict = 1usize << 16;
+    let s = greedy::lzma2(&d, dict);
+    let own = lzma2::split(&s, dict as u32, 1 << 24, 1).unwrap();
+    assert!(own.iter().all(|x| x.record[5] == 0));
+    for fin in [0u8, 15, 12] {
+        let sp = lzma2::split_at(&s, dict as u32, 1 << 24, 2, Some(fin)).unwrap();
+        let mut out = Vec::new();
+        for (x, o) in sp.iter().zip(&own) {
+            assert_eq!(x.record[5], fin);
+            assert_eq!(lzma2::head_of(&x.record).unwrap().fin, fin);
+            assert!(x.data == o.data);
+            out.extend(lzma2::join(&x.data, &x.record).unwrap_or_else(|| panic!("{fin}")));
+        }
+        assert!(out == s, "{fin}: rebuilt otherwise");
+    }
+    for bad in [1u8, 11, 16, 255] {
+        assert!(lzma2::split_at(&s, dict as u32, 1 << 24, 1, Some(bad)).is_err(), "{bad}");
+        let mut r = own[0].record.clone();
+        r[5] = bad;
+        assert!(lzma2::head_of(&r).is_none(), "{bad}");
+    }
+    assert!(lzma2::head_of(&own[0].record[..lzma2::HEADER - 1]).is_none());
+    let _ = props;
+}

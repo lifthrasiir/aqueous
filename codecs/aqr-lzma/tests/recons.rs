@@ -66,8 +66,8 @@ fn streams_of_known_size() {
         let s = lzma::encode(&data, props, &packets, false);
         let dec = lzma::decode(&s, props, Some(data.len() as u64), 1 << 24).unwrap();
         assert!(dec.data == data && dec.packets == packets && !dec.marker, "{props:?}");
-        let (record, _) = recons::deconstruct(&data, &packets, dict as u32, None).unwrap();
-        assert!(recons::rebuild(&data, &record, props, dict as u32, false).as_deref() == Some(&s[..]), "{props:?}");
+        let (record, _) = recons::deconstruct(&data, &packets, dict as u32, 0, None).unwrap();
+        assert!(recons::rebuild(&data, &record, props, dict as u32, 0, false).as_deref() == Some(&s[..]), "{props:?}");
     }
 }
 
@@ -211,4 +211,71 @@ fn damaged_parts() {
             }
         }
     }
+}
+
+/// The match finder looking back less than the dictionary (the reach `fin` of a record's seventh
+/// byte): the stream rebuilt whatever the threads and the parts, the byte told by the record,
+/// the distances beyond the reach coded all the same (far), and the records of the dictionary's
+/// reach the same as with no choice.
+#[test]
+fn finder_reach() {
+    let data = repetitive(400_000, 29);
+    let (props, dict) = (Props { lc: 3, lp: 0, pb: 2 }, 1u32 << 16);
+    let packets = greedy::packets(&data, dict as usize);
+    let s = lzma::encode(&data, props, &packets, false);
+    let size = Some(data.len() as u64);
+    let own = recons::split(&s, props, dict, size, 1 << 24, 1).unwrap();
+    assert_eq!(own.record[6], 0, "no bound: the dictionary's reach");
+    let mut sizes = vec![];
+    for fin in [0u8, 15, 13, 12] {
+        for part in [usize::MAX, 50_000] {
+            let sp = recons::split_at(&s, props, dict, size, 1 << 24, part, 1, Some(fin)).unwrap();
+            assert_eq!(sp.record[6], fin);
+            assert_eq!(recons::head_of(&sp.record, data.len()).unwrap().fin, fin);
+            if fin == 0 && part == usize::MAX {
+                assert!(sp.record == own.record);
+            }
+            for threads in [1, 2, 4] {
+                let again = recons::split_at(&s, props, dict, size, 1 << 24, part, threads, Some(fin)).unwrap();
+                assert!(again.record == sp.record, "{fin} {part} {threads}");
+                let back = recons::join(&sp.data, &sp.record, threads);
+                assert!(back.as_deref() == Some(&s[..]), "{fin} {part} {threads}: rebuilt otherwise");
+            }
+            if part == usize::MAX {
+                sizes.push(sp.record.len());
+            }
+        }
+    }
+    // (far matches cost more bytes than near ones)
+    assert!(sizes.windows(2).all(|w| w[0] <= w[1]), "{sizes:?}");
+    assert!(sizes[3] > sizes[0], "{sizes:?}");
+}
+
+/// A record's byte of the match finder's reach is 0, or a power of two from 4 KiB below the
+/// dictionary's reach: others are no record.
+#[test]
+fn finder_reach_byte() {
+    let data = repetitive(50_000, 31);
+    let (props, dict) = (Props { lc: 3, lp: 0, pb: 2 }, 1u32 << 16);
+    let packets = greedy::packets(&data, dict as usize);
+    let s = lzma::encode(&data, props, &packets, false);
+    let size = Some(data.len() as u64);
+    // (what the byte means, for a dictionary)
+    assert_eq!(recons::finder_of(dict, 0), Some(1 << 16));
+    assert_eq!(recons::finder_of(dict, 15), Some(1 << 15));
+    assert_eq!(recons::finder_of(dict, 16), None);
+    assert_eq!(recons::finder_of(3 << 14, 15), Some(1 << 15));
+    assert_eq!(recons::finder_of(3 << 14, 16), None);
+    assert_eq!(recons::finder_of(1 << 12, 12), None);
+    assert_eq!(recons::finder_of(1 << 10, 0), Some(1 << 12));
+    for bad in [1u8, 11, 16, 17, 31, 32, 64, 255] {
+        assert!(recons::split_at(&s, props, dict, size, 1 << 24, usize::MAX, 1, Some(bad)).is_err(), "{bad}");
+        let mut r = recons::split(&s, props, dict, size, 1 << 24, 1).unwrap().record;
+        r[6] = bad;
+        assert!(recons::head_of(&r, data.len()).is_none(), "{bad}");
+        assert!(recons::join(&data, &r, 1).is_none(), "{bad}");
+    }
+    // (a header cut short: the byte missing)
+    let r = recons::split(&s, props, dict, size, 1 << 24, 1).unwrap().record;
+    assert!(recons::head_of(&r[..recons::HEADER - 1], data.len()).is_none());
 }

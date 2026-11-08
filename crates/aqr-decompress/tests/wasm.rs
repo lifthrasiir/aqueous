@@ -3884,10 +3884,22 @@ fn lzma_stream(
     marker: bool,
     part: usize,
 ) -> (Vec<u8>, aqr_lzma::recons::Split) {
+    lzma_stream_reach(d, props, dict, marker, part, 0)
+}
+
+/// [`lzma_stream`] with the match finder of the reach `fin` (a record's byte).
+fn lzma_stream_reach(
+    d: &[u8],
+    props: aqr_lzma::lzma::Props,
+    dict: u32,
+    marker: bool,
+    part: usize,
+    fin: u8,
+) -> (Vec<u8>, aqr_lzma::recons::Split) {
     let packets = aqr_lzma::greedy::packets(d, dict as usize);
     let s = aqr_lzma::lzma::encode(d, props, &packets, marker);
     let size = (!marker).then_some(d.len() as u64);
-    let sp = aqr_lzma::recons::split_with(&s, props, dict, size, 1 << 28, part, 1).unwrap();
+    let sp = aqr_lzma::recons::split_at(&s, props, dict, size, 1 << 28, part, 1, Some(fin)).unwrap();
     assert_eq!(sp.used, s.len());
     (s, sp)
 }
@@ -3928,6 +3940,18 @@ fn lzma_plans_hold() {
             format!("big lc{lc} lp{lp} dict {dict}"),
             vec![lzma_stream(&d, props(lc, lp, 2), dict, false, usize::MAX)],
         ));
+    }
+    // (a match finder looking back less than the dictionary: its rings are of its reach, the
+    // window still of the dictionary; alone, in parts, and among streams of the dictionary's)
+    for (k, &(n, dict, fin, part)) in
+        [(3 << 20, 1u32 << 22, 20u8, usize::MAX), (3 << 20, 3 << 20, 12, usize::MAX), (1 << 20, 1 << 26, 16, 300_000)]
+            .iter()
+            .enumerate()
+    {
+        let d = lzma_data(n, 60 + k as u64);
+        let a = lzma_stream_reach(&d, props(3, 0, 2), dict, false, part, fin);
+        let b = lzma_stream(&d[..1000], props(0, 0, 0), 1 << 12, true, usize::MAX);
+        cases.push((format!("reach 2^{fin} dict {dict}"), vec![b.clone(), a, b]));
     }
     // (parts: 80 of them)
     let d = lzma_data(400_000, 20);
@@ -4100,8 +4124,21 @@ fn lzma2_plans_hold() {
     assert_eq!(plan_of(&long), plan_of(&short), "the plan grows with the length");
     assert!(plan_of(&long) < 16 << 20, "{}", plan_of(&long));
     cases.push(("long".into(), long, 1 << 16));
+    // (a match finder looking back 2^14 only: rings of that, the window of the dictionary)
+    cases.push((
+        "reach 2^14".into(),
+        end(segment(8, 3 << 20, props(3, 0, 2), 1 << 22, 40_000, &[0x80, 0xA0], 0)),
+        1 << 22,
+    ));
+    cases.push((
+        "reach 2^14 stored".into(),
+        end(segment(9, 400_000, props(1, 1, 1), 1 << 24, 9000, &[0x80, 0xC0], 70)),
+        1 << 24,
+    ));
     for (what, stream, dict) in cases {
-        let sp = lzma2::split(&stream, dict, 1 << 28, 1).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        let fin = if what.starts_with("reach") { 14 } else { 0 };
+        let sp = lzma2::split_at(&stream, dict, 1 << 28, 1, Some(fin)).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        assert!(sp.iter().all(|x| x.record[5] == fin), "{what}");
         let (mut data, mut records, mut lens) = (Vec::new(), Vec::new(), Vec::new());
         for x in &sp {
             lens.push((x.data.len(), x.record.len()));
@@ -5163,4 +5200,52 @@ fn jpeg_synthetic(w: usize, h: usize, ri: u16) -> Vec<u8> {
     aqr_jpeg::jpeg::encode_scan(&j, &j.scans[0], &info, &coefs, &mut scan).unwrap();
     d.splice(at..at, scan);
     d
+}
+
+/// The reach that the encoder chooses under a bound ([`aqr_lzma::plan::finder_for`]) is the largest
+/// whose application, as aqr-compress declares it (the plan and the windows of the inputs and
+/// output), fits the bound: its estimate is the application's memory to within a megabyte over,
+/// and a bound of exactly the estimate of reach 2^21 gives that reach, one under it a smaller. The bound
+/// is the process's, set back after.
+#[test]
+fn lzma_finder_fits_the_bound() {
+    use aqr_lzma::lzma::Props;
+    use aqr_lzma::plan::{Own, application, finder_for, set_bound};
+    let props = Props { lc: 3, lp: 0, pb: 2 };
+    let dict = 1u32 << 23;
+    let d = lzma_data(10 << 20, 90);
+    // (what memory::limit declares: the plan, and the windows of the inputs and output)
+    let real = |fin: u8| {
+        let (s, sp) = lzma_stream_reach(&d, props, dict, false, usize::MAX, fin);
+        let mut f = Formula::default();
+        let data = f.push("raw", sp.data.clone());
+        let record = f.push("lzma/record", sp.record.clone());
+        let index = f.push("lzma/index", Vec::new());
+        let m = aqr_lzma::formula::MODULE;
+        f.root = Node::apply(m, Vec::new(), vec![data, record, index], s.len() as u64);
+        let windows = aqr_decompress::windows_of(m);
+        let fit = |n: usize, output: bool, i: u32| {
+            let w = windows.iter().find(|w| (w.0, w.1) == (output, i)).map(|w| w.2);
+            (n as u64).div_ceil(65536).min(w.unwrap_or(u64::MAX)) * 65536
+        };
+        let imports =
+            fit(sp.data.len(), false, 0) + fit(sp.record.len(), false, 1) + fit(0, false, 2) + fit(s.len(), true, 0);
+        instance_plan("lzma reach", &f) + imports
+    };
+    for m in [aqr_lzma::formula::MODULE, aqr_lzma::formula::LZMA2] {
+        assert!(aqr_decompress::initial_pages_of(m).unwrap() <= 17, "{m}: aqr_lzma::plan::AROUND");
+    }
+    let (p21, p20) = (real(21), real(20));
+    for (fin, real) in [(21u8, p21), (20, p20)] {
+        let est = application(d.len(), dict, 1 << fin, Own::Lzma(props));
+        eprintln!("2^{fin}: real {real}, estimated {est}, over by {}", est as i64 - real as i64);
+        assert!(est >= real && est - real < 1 << 20, "{est} {real}");
+    }
+    let est21 = application(d.len(), dict, 1 << 21, Own::Lzma(props));
+    set_bound(est21);
+    let (a, b) = (finder_for(d.len(), dict, Own::Lzma(props)), finder_for(d.len(), dict, Own::Lzma(props)));
+    set_bound(est21 - 1);
+    let c = finder_for(d.len(), dict, Own::Lzma(props));
+    set_bound(u64::MAX);
+    assert_eq!([a, b, c], [21, 21, 20], "{p21} {p20}");
 }

@@ -44,7 +44,8 @@ A stream is a sequence of packets over the probability model of the LZMA specifi
 The state (0 … 11) and the four last distances `reps[0..4]` (initially 0) change as the
 specification says. A match's distance must reach no farther back than the start of the data
 or the dictionary allows: `d < min(pos, R)`, where `pos` is the position of the packet and
-`R = max(dict, 4096)` for the dictionary size `dict`.
+`R = max(dict, 4096)` for the dictionary size `dict`. (Below, `R` is also what the match finder
+looks back, unless the record's header says it looks less: its **reach** `F`, then.)
 
 ### Ends
 
@@ -92,7 +93,9 @@ under [Ends](#ends): with `code = 0` at its end, its last bytes are those of thi
 ## The match finder
 
 The record's contexts come from a match finder over `D`. Before the packet at `pos`, it holds
-the positions `0 … pos − 1`, inserted in order; it looks no farther back than `R`.
+the positions `0 … pos − 1`, inserted in order; it looks no farther back than its reach `F` (`R`
+unless the header says less, [below](#the-record)). Everything below holds with `F` for `R`; the
+data window and the distances a packet may have stay `R`'s.
 
 ### Tables
 
@@ -100,8 +103,8 @@ the positions `0 … pos − 1`, inserted in order; it looks no farther back tha
 - `head3[65536]`: by `h3(p) = (k3(p) × 0x9E3779B1, wrapping u32) >> 16`, where
   `k3(p) = D[p] | D[p+1] << 8 | D[p+2] << 16`, for `p + 3 ≤ N`.
 - Three **chains**, of keys `K` = 4, 8 and 16 bytes, for `p + K ≤ N`: `head[2^20]` and a ring
-  `prev[S]`, `S` the least power of 2 at least `min(R, max(N, 1))` (a candidate is at least
-  `pos − R`, and its entry `c mod S` is taken again only by `c + S ≥ pos`, not inserted yet).
+  `prev[S]`, `S` the least power of 2 at least `min(F, max(N, 1))` (a candidate is at least
+  `pos − F`, and its entry `c mod S` is taken again only by `c + S ≥ pos`, not inserted yet).
   Their hashes:
 
   ```text
@@ -121,10 +124,10 @@ above).
 `min(cap, N − b)`. Below, `cap = min(273, N − pos)`.
 
 - **head(k, pos)**, k = 2 or 3: none if `pos + k > N`; else `c = head2[k2(pos)]` or
-  `head3[h3(pos)]`, which counts if `c ≠ NONE`, `pos − c ≤ R` and (for k = 3)
+  `head3[h3(pos)]`, which counts if `c ≠ NONE`, `pos − c ≤ F` and (for k = 3)
   `k3(c) = k3(pos)`.
 - **The candidates** of chain K at `pos` (needs `pos + K ≤ N`): `c = head[h(pos)]`, then
-  `prev[c mod S]`, and so on, as long as `c ≠ NONE` and `pos − c ≤ R`.
+  `prev[c mod S]`, and so on, as long as `c ≠ NONE` and `pos − c ≤ F`.
 - **first(pos)**: if `pos + 4 ≤ N` and chain 4 has a candidate `c`, and `n = lcp(c, pos, cap)`
   is at least 4: `n`. Else 3 if head(3, pos), else 2 if head(2, pos), else 0.
 - **longest(pos)**: `best` = 3 if head(3, pos), else 2 if head(2, pos), else 0. Then a pass
@@ -146,14 +149,22 @@ above).
 
 ## The record
 
-A record is a header of 6 bytes, then the body:
+A record is a header of 7 bytes, then the body:
 
 ```text
 u8    props    lc + 9 (lp + 5 pb), below 225
 le32  dict     the dictionary size
 u8    flags    bit 0: the stream ends with the end marker; bit 1: the body is in parts
                (below); the others 0
+u8    reach    the match finder's reach F: 0 for R; else log2 F, from 12 and with 2^reach < R
 ```
+
+The reach is the encoder's choice of a memory bound: the finder's rings are `12 × S` bytes, 768 MiB
+for a dictionary of 64 MiB, and a finder that looks back less (`F` a power of 2 below `R`) finds
+fewer far matches, which the record then codes as far distances (a distance not found is coded
+the same whatever its size), but holds less. The data window stays `R`: a literal after a far
+match and a far repeat read the data back to `R`. Other bytes are no record (a reach of `R` is
+written as 0).
 
 ### Coding
 
@@ -287,6 +298,7 @@ chunk.
 ```text
 u8      flags    bit 0: the stream's end byte (0) follows the segment; the others 0
 le32    dict     the dictionary size (as in an LZMA record: R = max(dict, 4096))
+u8      reach    the match finder's reach (as in an LZMA record)
 the body
 ```
 
@@ -318,7 +330,7 @@ chunk `0x80` or `0xA0` finds no properties before it in the segment.
 ## Implementation limits
 
 `N < 2^32 − 1`. The reference decoder holds `D`, the stream and the match finder's tables:
-`4 × 3 × S` bytes for the rings, and 12.5 MiB for the heads (132.5 MiB from `N` = 2^20 on: it
+`4 × 3 × S` bytes for the rings (`S` by the reach `F`), and 12.5 MiB for the heads (132.5 MiB from `N` = 2^20 on: it
 keeps the newest 16 positions of each hash of the chains of 4 and 16 bytes together, the same
 candidates, so that a walk takes one cache miss for them); natively, those of each part being
 decoded at once, with the packets of the parts decoded and not yet encoded (a Wasm module goes
@@ -328,7 +340,7 @@ The Wasm modules are [part modules](#the-module-as-a-part-module): they hold not
 lengths of their inputs and output, and lay their memory out as a stack with nothing grown. For
 each stream, freed after it: the **window** of its data (`R` and an eighth of it or 64 KiB,
 64 KiB and 1 KiB of lookahead and 4 KiB of alignment, or all of the data where that is less),
-the match finder's tables (one position of each hash, 12.5 MiB) and rings (`12 × S`), the
+the match finder's tables (one position of each hash, 12.5 MiB) and rings (`12 × S`, by its reach `F`), the
 literal model (`2 × 0x300 × 2^(lc+lp)` bytes; for LZMA2 at its largest, 24 KiB), a piece of the
 stream (16 KiB) for LZMA, the walk's contexts and candidates, and for LZMA2 a chunk's coder (64
 KiB and 16). Before them, the pieces in which the index and the records are read. All of it
@@ -338,10 +350,11 @@ as the memory limit (`plan.rs`).
 
 ## Formula module
 
-The module is `lzma-recons`, version 3 (version 1 did not have [parts](#parts); in version 2 the
+The module is `lzma-recons`, version 4 (version 1 did not have [parts](#parts); in version 2 the
 parts' table preceded their bodies, a part's end was the next one's start, and a last distance
-beyond `R` was taken). It rebuilds one or more streams, each from its data and its record, and
-its output is the streams one after another. A container cuts the output by the streams'
+beyond `R` was taken; in version 3 the header had no reach byte: the match finder's reach was
+`R`). It rebuilds one or more streams, each from its data and its record, and its output is the
+streams one after another. A container cuts the output by the streams'
 lengths (a Split instruction of the formula), and adds what lies around them (the 13-byte
 header of a `.lzma` file; a 7z archive's headers).
 
@@ -377,8 +390,8 @@ all of it: the match finder's queries stay within `R` before the position and `c
 it, and what it hashes ahead within 32 + 16. The bytes read of the record must be all of it, as
 the data and output must be all of theirs.
 
-The module `lzma2-recons`, version 2 (in version 1 the chunks' headers were a list at the start
-of the record), is the same for the segments of LZMA2 streams: each
+The module `lzma2-recons`, version 3 (in version 1 the chunks' headers were a list at the start
+of the record; in version 2 the header had no reach byte), is the same for the segments of LZMA2 streams: each
 "stream" above is a segment, from its data and [its record](#the-record-of-a-segment), and the
 output is the segments' bytes one after another (the segments of an LZMA2 stream, then its end
 byte, make the stream). A `.xz` file cuts the output by its blocks' streams, and adds the rest

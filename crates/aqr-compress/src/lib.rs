@@ -795,7 +795,7 @@ fn compress_with(
         }
     };
     note(Note::Batch { batch: 0, bytes: d.len() as u64, verify: opt.verify, contents: vec![0] });
-    compressing();
+    compressing(opt);
     let _spill = spilling(opt);
     note(Note::Started(0));
     let watch = notes.as_ref().map(|notes| progress::Files::of(notes, [(0, d)]));
@@ -829,9 +829,13 @@ fn compress_with(
 /// keeps to one, within its budget of memory).
 const LZMA_CHAINS: usize = 2 << 30;
 
-/// Lets aqr-lzma's match finders take [`LZMA_CHAINS`], as compressing starts.
-pub(crate) fn compressing() {
+/// Lets aqr-lzma's match finders take [`LZMA_CHAINS`], as compressing starts, and has them keep
+/// the plans of its applications to the application bound of `opt` (by the reach they look back,
+/// which a stream's record tells).
+pub(crate) fn compressing(opt: &Options) {
     aqr_lzma::mf::allow_chains(LZMA_CHAINS);
+    let bound = |m| memory::bound_of(opt.application_bound, m);
+    aqr_lzma::plan::set_bound(bound(aqr_lzma::formula::MODULE).min(bound(aqr_lzma::formula::LZMA2)));
 }
 
 /// The spill of [`Options::spill`] as the store of large buffers, while the guard is kept (and

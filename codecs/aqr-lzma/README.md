@@ -78,10 +78,20 @@ just before on the same machine.
   stream and the record held whole besides: 584 MiB for a 220 MB `.xz` of an 8 MiB dictionary).
   By the dictionary (the plan, for data over it; `lzma_plans_hold` checks it to the page,
   with 67 MiB of data too): 4 KiB 12.8 MiB, 1 MiB 25.8 MiB, 4 MiB 65 MiB, **8 MiB (XZ
-  Utils `-6`) 118 MiB**, 16 MiB 223 MiB, 32 MiB 433 MiB, 64 MiB (7-Zip's) 853 MiB; the bound
-  of the encoder (256 MiB per application, with 4 MiB of windows) is passed from 32 MiB on,
-  where the stream is stored whole. A stream shorter than its dictionary holds less (a ring
-  of `min(S, N)`, a window of `N`).
+  Utils `-6`) 118 MiB**, 16 MiB 223 MiB, 32 MiB 433 MiB, 64 MiB (7-Zip's) 853 MiB. A stream
+  shorter than its dictionary holds less (a ring of `min(S, N)`, a window of `N`).
+- The match finder's reach may be less than the dictionary (the record's `reach` byte; FORMAT.md,
+  "The record"): the encoder takes the largest power of 2 `F` (at most the dictionary) whose
+  plan fits its bound on an application (256 MiB by default; `plan::finder_for`), and the
+  dictionary itself where that fits (the record is then what it was, apart from the byte). The
+  rings follow `F`, the data window stays the dictionary's, so that what a far match leaves
+  (the literal after it, a far repeat) reads the data and nothing extra is stored; a
+  distance beyond `F` is coded as a distance not found, as ever. 7-Zip's 64 MiB: `F` = 8 MiB, a
+  plan of 186 MiB (`F` = 16 MiB would be 282), the two folders' records 6.06 -> 7.60 MB; the
+  7z of `mingw480` (its tree beside it) archives to 50.10 MB where the stream was given up for
+  the bound, 78.89 MB (48.56 MB with a bound of 2 GiB). The 7 largest `.tar.lzma` (8 MiB
+  dictionaries, which fit) have the same archive, a byte more for each record. A long-distance
+  index for the matches beyond `F` was measured and not kept (docs/streaming-encoder-design.md).
   Measured on 2026-11-08 (M4, `-9`, the bound of 256 MiB): a tree of 367 MB beside its
   `xz -6` (8 MiB dictionary, one block of 369 MB of data, 100.4 MB) archives to 96.9 MB where
   it was 187.2 MB (the stream stored whole, 1059 MiB needed), the same as with no bound; the

@@ -281,14 +281,15 @@ pub fn encode(data: &[u8], chunks: &[Chunk], packets: &[Packet]) -> Option<Vec<u
 const END_BYTE: u8 = 1;
 
 /// The record of a segment: its header (a flags byte, bit 0 telling that the stream's end byte
-/// follows; the dictionary size, le32), then the record of its packets and chunks
-/// ([`recons::deconstruct`]); and the cost of that by [`recons::Cat`] in bits. None where the
-/// packets do not fit.
-pub fn deconstruct(seg: &Segment, dict: u32, end: bool) -> Option<(Vec<u8>, [f64; recons::CATS])> {
-    let (body, cost) = recons::deconstruct(&seg.data, &seg.packets, dict, Some(&seg.chunks))?;
+/// follows; the dictionary size, le32; the match finder's reach `fin`, [`recons::finder_of`]),
+/// then the record of its packets and chunks ([`recons::deconstruct`]); and the cost of that by
+/// [`recons::Cat`] in bits. None where the packets do not fit, or `fin` is not a reach.
+pub fn deconstruct(seg: &Segment, dict: u32, fin: u8, end: bool) -> Option<(Vec<u8>, [f64; recons::CATS])> {
+    let (body, cost) = recons::deconstruct(&seg.data, &seg.packets, dict, fin, Some(&seg.chunks))?;
     let mut r = Vec::with_capacity(HEADER + body.len());
     r.push(if end { END_BYTE } else { 0 });
     r.extend(dict.to_le_bytes());
+    r.push(fin);
     r.extend(body);
     Some((r, cost))
 }
@@ -297,6 +298,12 @@ pub fn deconstruct(seg: &Segment, dict: u32, end: bool) -> Option<(Vec<u8>, [f64
 /// and record of each segment, each segment's bytes its `used`, on up to `threads` threads.
 /// Fails where the stream does not decode or is not what encoding its packets gives.
 pub fn split(input: &[u8], dict: u32, limit: usize, threads: usize) -> Result<Vec<Split>, Error> {
+    split_at(input, dict, limit, threads, None)
+}
+
+/// [`split`] with the match finder of the reach `fin` ([`recons::finder_of`]) for each segment;
+/// None for the largest that the memory bound allows for the segment ([`crate::plan::finder_for`]).
+pub fn split_at(input: &[u8], dict: u32, limit: usize, threads: usize, fin: Option<u8>) -> Result<Vec<Split>, Error> {
     let dec = decode(input, limit)?;
     let n = dec.segments.len();
     let records = aqr_common::pool::par_map(n, threads, |i| {
@@ -306,7 +313,8 @@ pub fn split(input: &[u8], dict: u32, limit: usize, threads: usize) -> Result<Ve
         if encode(&s.data, &s.chunks, &s.packets).as_deref() != Some(chunks) {
             return Err(Error::Encoded);
         }
-        deconstruct(s, dict, last).map(|r| r.0).ok_or(Error::Corrupt)
+        let fin = fin.unwrap_or_else(|| crate::plan::finder_for(s.data.len(), dict, crate::plan::Own::Lzma2));
+        deconstruct(s, dict, fin, last).map(|r| r.0).ok_or(Error::Corrupt)
     });
     let mut out = Vec::with_capacity(n);
     for (s, r) in dec.segments.into_iter().zip(records) {
@@ -315,14 +323,17 @@ pub fn split(input: &[u8], dict: u32, limit: usize, threads: usize) -> Result<Ve
     Ok(out)
 }
 
-/// The bytes of a segment's record before its body: the flags and the dictionary size.
-pub const HEADER: usize = 5;
+/// The bytes of a segment's record before its body: the flags, the dictionary size and the match
+/// finder's reach.
+pub const HEADER: usize = 6;
 
 /// What a segment's record tells before the segment is rebuilt: whether the stream's end byte
-/// follows it, the dictionary size, and the record of the packets and chunks.
+/// follows it, the dictionary size, the match finder's reach ([`recons::finder_of`]), and the
+/// record of the packets and chunks.
 pub struct Head<'a> {
     pub end: bool,
     pub dict: u32,
+    pub fin: u8,
     pub body: &'a [u8],
 }
 
@@ -332,7 +343,9 @@ pub fn head_of(record: &[u8]) -> Option<Head<'_>> {
     if head[0] & !END_BYTE != 0 {
         return None;
     }
-    Some(Head { end: head[0] & END_BYTE != 0, dict: u32::from_le_bytes(head[1..5].try_into().unwrap()), body })
+    let dict = u32::from_le_bytes(head[1..5].try_into().unwrap());
+    recons::finder_of(dict, head[5])?;
+    Some(Head { end: head[0] & END_BYTE != 0, dict, fin: head[5], body })
 }
 
 /// The bytes of a segment (and the stream's end byte, where its record says so) from its data
@@ -351,7 +364,7 @@ pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>) -> Option<()> {
         return None;
     }
     let mut w = Writer::to(out);
-    recons::reconstruct(data, h.body, h.dict, true, |v, ev| match ev {
+    recons::reconstruct(data, h.body, h.dict, h.fin, true, |v, ev| match ev {
         Ev::Chunk(c) => w.begin(v, c),
         Ev::Packet(pk) => w.push(v, pk),
     })?;
@@ -374,12 +387,14 @@ pub fn join_stream(
         for b in &mut dict {
             *b = rec.byte()?;
         }
+        let dict = u32::from_le_bytes(dict);
+        let fin = rec.byte()?;
         if flags & !END_BYTE != 0 {
             return None;
         }
-        let reach = recons::reach(u32::from_le_bytes(dict));
+        let reach = recons::reach(dict);
         let mut win = Window::fed(data, n, reach);
-        let mut mf = Mf::new(n, reach);
+        let mut mf = Mf::new(n, recons::finder_of(dict, fin)?);
         let mut w = Writer::to(sink);
         let body = rec_len.checked_sub(HEADER as u64)?;
         if n == 0 && body != 1 {

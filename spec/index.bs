@@ -6112,13 +6112,13 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/lz4-recons.wasm" title="crates/aqr-modules/wasm/lz4-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-lz4/FORMAT.md" title="codecs/aqr-lz4/FORMAT.md">R</a>
     <tr>
-      <td><code>6dea22ca473725a761fa37b0a036965d2b56f6ae81cad740d3af9df637927d47</code>
-      <td>lzma-recons@3
+      <td><code>827ff74b94dc24679ea277958b8d998d213931e5892db4578cccfb37c276ffee</code>
+      <td>lzma-recons@4
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/lzma-recons.wasm" title="crates/aqr-modules/wasm/lzma-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-lzma/FORMAT.md" title="codecs/aqr-lzma/FORMAT.md">R</a>
     <tr>
-      <td><code>2be816e9ea79a58bea9926889ee275bc1edab4b552fbbb0dca9c34882b35fba4</code>
-      <td>lzma2-recons@2
+      <td><code>2d4ab4e49e3847825ce1208edc02e0d397c8afdc9d13350d9ff171ec79fdfa24</code>
+      <td>lzma2-recons@3
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/lzma2-recons.wasm" title="crates/aqr-modules/wasm/lzma2-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-lzma/FORMAT.md" title="codecs/aqr-lzma/FORMAT.md">R</a>
     <tr>

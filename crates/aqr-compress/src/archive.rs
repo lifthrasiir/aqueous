@@ -340,7 +340,7 @@ pub fn compress_tree_into<S: Source + ?Sized>(
 ) -> io::Result<Report> {
     let opt = &crate::verifying(opt);
     let (tracker, notes) = Tracker::new((0..src.len()).map(|c| src.size(c)).collect());
-    crate::compressing();
+    crate::compressing(opt);
     let _spill = crate::spilling(opt);
     std::thread::scope(|s| {
         s.spawn(|| tracker.run(tell));
