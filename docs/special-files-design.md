@@ -247,7 +247,7 @@ FIFO와 device는 사정이 다르다.
 
 - 기본적으로 symlink를 따라가지 않아야 한다(SHOULD). 따라가는 옵션(`tar -h`에 해당)을 줄 때 순환 감지는 compressor의 몫이다.
 - hard link는 `st_nlink > 1`이고 같은 `(st_dev, st_ino)`인 파일로 감지한다. 아카이브 대상 트리 바깥에 있는 링크는 알 수 없으므로 그룹이 하나뿐인 노드가 생길 수 있다.
-- 기존 아카이브에 segment를 덧붙일 때 기존 그룹 번호를 모르는 compressor는 segment-local 번호(0 이상)를 쓴다. 그러면 기존 그룹과 묶이지 않을 뿐, 틀린 결과는 나오지 않는다.
+- 기존 아카이브에 segment를 덧붙이는 aqr-compress는 기존 트리가 쓴 번호를 피해 archive-wide 번호(음수)를 새로 매긴다(`Appending`, `crates/aqr-compress/src/archive.rs`). 기존 그룹을 모르는 compressor는 segment-local 번호(0 이상)를 써도 기존 그룹과 묶이지 않을 뿐, 틀린 결과는 나오지 않는다.
 
 ### 6.4 해제
 
@@ -271,9 +271,9 @@ FIFO와 device는 사정이 다르다.
 
 명세 §Optional metadata에 반영했다.
 
-### 6.6 ZIP 변환 (`zip-extras-design.md`) [제안]
+### 6.6 ZIP 변환 (`zip-extras-design.md`) [잠정]
 
-이 설계가 들어가면 다음과 같이 바뀐다. 명세에는 아직 없다.
+aqr-unpack의 ZIP은 Info-ZIP식 symlink(external attributes의 `S_IFLNK`)를 link node로 읽는다(`crates/aqr-unpack/src/zip.rs`; 내용이 비면 경고하고 버린다). 0x000d와 0x756e의 흡수, device와 FIFO 모드의 엔트리는 아직 없다.
 
 - external attributes가 `S_IFLNK`인 엔트리(Info-ZIP 방식)는 link node가 된다. 원래 내용이 대상이다. 내용이 NUL을 담거나 비어 있으면 일반 파일로 두고 경고한다.
 - 0x000d는 P에서 **M**으로 바뀐다. 가변 부분의 symlink 대상은 link node로, device 번호는 special node로 간다. 0x756e도 흡수하지만, device 번호가 `st_rdev` 원값이라 나눌 수 없으므로 device일 때만 P로 남는다(`zip-extras-design.md` §3.4).
@@ -281,7 +281,9 @@ FIFO와 device는 사정이 다르다.
   - hard link이면 그 이름을 아카이브 안의 경로로 보고, 그 경로의 엔트리와 같은 `link-group`을 준다. APPNOTE는 이것이 아카이브 경로라고 명시하지 않는다. 이름에 해당하는 엔트리가 없으면 일반 파일로 두고 경고한다.
 - `S_IFCHR`/`S_IFBLK`/`S_IFIFO` 모드의 엔트리도 special node가 된다.
 
-### 6.7 tar 등에서의 변환 [제안]
+### 6.7 tar 등에서의 변환 [확정]
+
+aqr-unpack(`tar.rs`, `rar.rs`, `sevenz.rs`)과 aqr-pack(`tar.rs`, `zip.rs`, `sevenz.rs`)이 한다. RAR의 hard link(타입 4)는 아직 "왼 것"으로 알리고 풀지 않는다.
 
 - tar typeflag `1`(hard link): 가리키는 경로의 엔트리와 같은 `link-group`을 주고 내용을 공유한다. 가리키는 엔트리가 일반 파일이 아니면 경고한다.
 - tar typeflag `2`, pax `linkpath`: link node가 된다.
@@ -332,6 +334,6 @@ FIFO와 device는 사정이 다르다.
 
 ### 구현 (I)
 
-- [ ] **I1.** compressor에서 symlink, hard link(`link-group`과 leaf block 공유), FIFO, device를 수집한다.
-- [ ] **I2.** decompressor의 해제 경로에 §6.4의 규칙을 넣는다. 대소문자 구분이 없는 파일 시스템에서 링크와 디렉터리가 충돌하는 시험을 포함한다.
+- [x] **I1.** (`crates/aqr/src/meta.rs`와 `main.rs`; hard link는 `link-group`으로, FIFO·device도 모은다.) compressor에서 symlink, hard link(`link-group`과 leaf block 공유), FIFO, device를 수집한다.
+- [x] **I2.** (`crates/aqr/src/extract.rs`, `meta.rs`; 시험은 `crates/aqr/tests/names_unix.rs`의 `link_through_other_case` 등.) decompressor의 해제 경로에 §6.4의 규칙을 넣는다. 대소문자 구분이 없는 파일 시스템에서 링크와 디렉터리가 충돌하는 시험을 포함한다.
 - [x] **I3.** aqr-git을 모듈 형태로 옮길 때 자체 symlink 목록을 link node로 대신한다(2026-10-28: aqr-git이 팩 모듈이 되어 목록 자체가 없어졌다).

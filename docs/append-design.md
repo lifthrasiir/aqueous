@@ -73,15 +73,10 @@ spec에서 "빈 아카이브"(header와 footer뿐)는 metadata block이 없으�
 덧붙이려면 footer를 뒤로 옮겨야 한다. **두 footer가 잠시 공존하게 두고, 옛 footer를 2바이트로 죽이는
 것을 commit으로 삼는다.** 원자적인 큰 쓰기는 필요 없고 순서만 맞으면 된다.
 
-1. 옛 footer F_k 뒤에(길이가 홀수면 0 한 바이트 다음에) segment의 블록, metadata block M_{k+1},
-   새 footer F_{k+1}을 쓴다. 블록과 M_{k+1}을 `fdatasync`한 뒤 F_{k+1}을 쓰고 다시 sync한다.
-   이 동안은 **옛 상태**다. 아카이브는 처음 만나는 footer에서 끝나므로(Locate 3.2와 같다) F_k 뒤는
-   trailing bytes로 보이고, 읽는 사람에게는 마지막 commit이 보인다.
-2. **commit:** F_k의 첫 2바이트를 spacer header(`00`, 크기 u8 = F_k의 길이 − 2)로 덮어쓰고 sync한다.
-   이제 F_k는 spacer block이 되어 아카이브는 F_{k+1}에서 끝난다. **최종 상태는 지금의 spec 그대로
-   올바르다.**
-3. spacer의 내용은 0이어야 하므로(spec, "Spacer block"의 MUST), 남은 footer 바이트를 0으로 채운다.
-   해석에는 영향이 없으므로 이 쓰기가 찢어지거나 사라져도 상관없다. 다음 `-a`가 다시 채운다.
+순서는 spec의 "Appending to an archive"(commit)가 정한다: 옛 footer F_k 뒤에 segment의 블록, metadata
+block M_{k+1}, 새 footer F_{k+1}을 쓰고 sync한 뒤, F_k의 첫 2바이트를 spacer header로 덮어 sync하고(commit),
+나머지를 0으로 채운다. F_{k+1}을 쓰는 동안은 처음 만나는 footer가 F_k이므로(spec, "trim a located archive")
+읽는 사람에게는 옛 상태가 보인다.
 
 ### 전제와 엣지 케이스
 
@@ -106,14 +101,8 @@ commit은 쓰기 한 번이 찢어지지 않는다는 데 기댄다. 그러니 �
   footer 재구성에 맡긴다. 그 뒤의 footer는 위의 정렬을 따르므로 이 경우는 아카이브마다 한 번 생길 수
   있을 뿐이다. `-v`로 알린다.
 
-**footer의 길이.** 죽이는 header의 길이 h는 F_k의 길이 L(패딩 포함)로 정해진다.
-
-- L ≤ 257이면 type 0, h = 2다.
-- L ≤ 65,538이면 type 1(u16), h = 3이다.
-- 그보다 길면 type 2, h = 5다.
-
-aqr의 footer는 30바이트 이하라 늘 h = 2다. 길이 L의 footer를 L바이트 spacer로 바꿀 수 없는 경우는
-없다(L은 짝수이고 ≥ 10).
+**footer의 길이.** 죽이는 header의 길이는 spec이 정한다(F_k가 257바이트 이하면 2바이트). aqr의 footer는 30바이트
+이하라 늘 2바이트다.
 
 **밀어내는 크기에는 하한이 필요 없다.** 이 방식은 footer를 제자리에서 옮기지 않는다. 새 블록, M_{k+1},
 F_{k+1}은 모두 F_k(와 패딩)의 **끝 뒤에** 쓰므로 옛 footer와 겹치는 일이 없다. 새 segment가 tombstone 하나뿐인
@@ -158,12 +147,8 @@ overlay 아카이브의 footer(`OVERLAY_FOOTER_TYPE`)도 똑같이 죽인다.
 
 최종 상태는 지금의 spec 그대로이므로, 바뀌는 것은 잠시 공존하는 상태를 어떻게 읽을지 하나다.
 
-- **Locate.** 지금의 3.1단계는 끝 footer의 size_hint가 header를 가리키면 파일 전체를 아카이브로 돌려준다.
-  여기에 확인 하나를 더한다(spec, "trim a located archive"). metadata block 뒤(그 뒤의 spacer block을
-  건너뛰고)에 끝 footer가 아닌 footer가 있으면, 아카이브는 그런 footer 중 첫 것에서 끝난다(3.2단계가
-  앞에서부터 읽어 얻는 결과와 같다). 처음에는 마지막 두 metadata block만 보려 했으나, 한 commit이 여러
-  segment일 수 있어서(`--atomic`의 `-a`) 첫 metadata block까지 거슬러 올라간다. 해석은 어차피 모든
-  metadata block을 읽으므로, 디코더는 그때 뒤의 6바이트를 더 보면 된다.
+- **Locate.** spec의 "trim a located archive". 처음에는 마지막 두 metadata block만 보려 했으나, 한 commit이
+  여러 segment일 수 있어서(`--atomic`의 `-a`) 첫 metadata block까지 거슬러 올라간다.
 - **`segment-status`.** 아래 "표식".
 - **compressor의 의무.** 아카이브에 footer는 끝에 하나뿐이다(지금과 같다). 두 footer가 공존하는 것은 쓰는
   도중에만 생기는 상태이고, 덧붙이는 쪽은 그것을 남기지 않는다. 남은 경우 다음에 덧붙이는 쪽이 먼저
@@ -348,8 +333,8 @@ aqr-incomplete = {
 
 ## 시험
 
-- 결정적으로 멈추도록 hook을 둔다(시험용 env `AQR_STOP_AFTER_BATCH=N`). 실제 신호 경로는 하나의 시험으로
-  확인한다.
+- 결정적으로 멈추도록 hook을 둔다(시험용 env `AQR_TEST_STOP_AFTER=N`은 지금 해제에만 있다. 압축은
+  `crates/aqr/tests/append.rs`가 실제 신호로 멈춘다.
 - **정렬.** 아카이브를 홀수 오프셋에 둔 파일(stub을 앞에 붙임)로 시험한다. 새 footer가 `p % 512 = 511`에 오는
   경우 spacer로 옮기는지, 이미 그 자리에 있는 footer에는 예전 방식으로 물러나는지 본다.
 - **명세 경로.** 공존 상태(완결된 꼬리, commit 전)가 옛 상태로 읽히는지 본다. random access와 앞에서부터
@@ -366,6 +351,8 @@ aqr-incomplete = {
 - 회귀 시험은 고치기 전에 실패하는 것을 먼저 확인한다.
 
 ## 작업 순서
+
+1–5는 했다(위 "구현"). 6–7이 남았다.
 
 1. spec: Locate의 공존 상태 확인, compressor의 의무, `segment-status`(-3의 이름과 값), Repair의 알림.
 2. aqr-formula: 읽기(locate의 확인, 합친 트리, `segment-status`), 쓰기(commit마다 footer, 정렬, 패딩, 옛

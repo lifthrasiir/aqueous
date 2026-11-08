@@ -37,6 +37,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     `aqr-num` — numbers printed as text.
   - `aqr-version` — the binaries' version for their build scripts: the tag's (`AQR_VERSION`, set
     by the release workflow) or `git describe`'s, as `env!("AQR_VERSION")` and Windows' `VERSIONINFO`.
+  - `aqr-bincache` — `cargo aqr`: the release `aqr` built and kept by a hash of its sources.
   - `aqr-api`, `aqr-ld` — the Rust interface of modules and the Wasm linker wrapper.
   - `aqr-modules` — Wasm modules built from the recompressors' code (`src/bin`, `wasm/`,
     `src/known.rs`).
@@ -116,7 +117,13 @@ optimization picked by hash.
 - **After changing any code a module links, rerun `crates/aqr-modules/build.sh`** and commit
   the results; a test in aqr-decompress catches stale ones. If you don't rebuild, say so in
   the commit message.
-- aqr-decompress: a known hash runs natively, anything else in wasmtime.
+- aqr-decompress: a known hash runs natively when the application's declared limits hold its
+  plan (`needed_by`: the same function the encoder declares with), anything else in wasmtime.
+- Whole modules take their inputs at once; part modules (`entry! … windows(…)`, spec "Module
+  execution") stream them through windows of fixed pages, so their memory does not grow with
+  the data. Big streams' modules are part modules (lzma, bz2, lz4, snappy, git, exe, png, flac,
+  pcm, mp3, fasta, bundle, bcj, mszip, flate-set, flate-inflate); natively lzma, bz2, png,
+  mp3, flac and pcm still decode whole on threads (`Run::Threaded`), not held to the plan.
 - No variable arity: use Split and separate modules (png-against, leveldb-recons, …).
 - Model data (aqr-flate's) is a resource, not embedded in the module.
 - Threads in Wasm: fork-join tasks (`aqr_spawn(class, count, records, arg, n)`, the only spawn;
@@ -141,11 +148,14 @@ optimization picked by hash.
   or `with_task_plan` for a module spawning tasks; the codec's `formula.rs`, `aqr_api::stack`,
   `docs/arena-design.md`): the limit of the application's instance, and of a task of each class.
   aqr-compress declares them (`crates/aqr-compress/src/memory.rs`) in the Apply instruction
-  (always opcode 16, one task limit for each class of the module). A module allocates on the
-  stack in the order its plan follows; changing what it allocates means changing its plan, which
-  the `*_plans_hold` tests in aqr-decompress's `tests/wasm.rs` check to the page, instance and
-  each class (`plans_hold_on_samples`, ignored, does on `scripts/module-memory.sh`'s samples).
-  Tasks spawn only classes above their own.
+  (always opcode 16, one task limit for each class of the module). An application over
+  `--application-bound` (256 MiB compressing, 512 MiB decompressing) is not used / fails; a
+  recompression runs under a heap allowance (`aqr_common::allowance`), `heap_per_byte` in
+  aqr-compress turning inputs away up front. A module allocates on the stack in the order its
+  plan follows; changing what it allocates means changing its plan, which the `*_plans_hold`
+  tests in aqr-decompress's `tests/wasm.rs` check to the page, instance and each class
+  (`plans_hold_on_samples` in `tests/samples.rs`, ignored, does on `scripts/module-memory.sh`'s
+  samples). Tasks spawn only classes above their own.
 - Released modules: the earlier Apply (opcode 11, reserved) is accepted only for the modules of
   the releases (`crates/aqr-formula/src/released.rs`, the hashes that `known.rs` no longer has),
   and its memory limit is not enforced. At each release add the tag to the revisions of

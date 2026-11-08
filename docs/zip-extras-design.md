@@ -30,6 +30,9 @@ ZIP 아카이브를 Aqueous로 변환할 때 ZIP extra field를 어떻게 다룰
 ## 0. 전제와 목표
 
 - **[확정]** `aqr-zip-extras`의 구조와 규칙은 명세 §`zip-extras`에 반영했다.
+- 구현: aqr-unpack의 ZIP 읽기(`zip.rs`)는 0x7075, 0x000a, 0x5455, 0x7855, 0x7875를 모델 키로 흡수하지만
+  `zip-extras`는 아직 만들지 않는다(`Extra`에 그 필드가 없다). 0x000d와 0x756e(§3.4)의 흡수는 계획이고 아직 읽지
+  않는다. 나머지 ID는 그냥 버려진다.
 - **[확정]** 용도는 **ZIP → Aqueous 단방향 변환**이다. 변환 결과에서 ZIP을 다시 만들어 낼 수 있어야 한다는 요구는 없다.
   > ZIP 파일 자체를 바이트 단위로 보존하는 recons(formula)는 별개의 문제이다. 그쪽은 ZIP을 바이트열로 다루므로 extra field의 의미를 신경 쓸 가능성이 낮다. 따라서 이 문서의 결정은 recons에 아무 제약도 주지 않는다.
 - **[제안]** 위 목표에서 다음 원칙이 나온다.
@@ -67,7 +70,7 @@ ZIP 아카이브를 Aqueous로 변환할 때 ZIP extra field를 어떻게 다룰
 | 0x0009 | OS/2 extended attributes | A I | O | local/central 형식이 다르다(§4.1). |
 | 0x000a | NTFS (PKWARE Win95/WinNT) | A I | **M** | 이름과 달리 *시각*만 담는다. §3.1. |
 | 0x000c | OpenVMS (PKWARE) | A I | O | 블록 안에 CRC가 있지만 블록 자신에 대한 것이므로 배치와 무관하다. |
-| 0x000d | UNIX (PKWARE) | A I | **M** | link 대상과 device 번호까지 모두 흡수한다. §3.4. |
+| 0x000d | UNIX (PKWARE) | A I | **M** | link 대상과 device 번호까지 모두 흡수한다(계획, 아직 읽지 않는다). §3.4. |
 | 0x000e | File stream and fork descriptors, 예약 | A I | O | 정의된 형식이 없다. |
 | 0x000f | Patch Descriptor | A I | O | 엔트리가 어떤 파일에 대한 패치인지 기술한다. 파일에 대한 정보이다. |
 | 0x0014 | PKCS#7 Store for X.509 Certificates | A I | **X** | 서명 체계의 일부이다. |
@@ -113,7 +116,7 @@ ZIP 아카이브를 Aqueous로 변환할 때 ZIP extra field를 어떻게 다룰
 | 0x6854 | THEOS | A I | O | |
 | 0x7075 | Info-ZIP Unicode Path ("up") | A I | **M** | §3.2. |
 | 0x7441 | AtheOS/Syllable | A I | O | BeOS 0x6542의 변형이다(숫자가 little-endian). local/central 형식이 다르다. central은 BSize와 Flags만 담은 5바이트이다(`extrafld.txt`). |
-| 0x756e | ASi UNIX | A I | **P** | device가 아니면 모두 흡수한다. device이면 원본을 보존한다. §3.4. |
+| 0x756e | ASi UNIX | A I | **P** | device가 아니면 모두 흡수한다. device이면 원본을 보존한다(계획, 아직 읽지 않는다). §3.4. |
 | 0x7855 | Info-ZIP UNIX type 2 ("Ux") | A I | **M** | §3.3. |
 | 0x7875 | Info-ZIP UNIX type 3 ("ux") | A I | **M** | version 1만 흡수한다. 다른 version은 O. §3.3. |
 | 0xa220 | Microsoft Open Packaging Growth Hint | A I | **X** | 제자리 편집용으로 확보해 둔 빈 공간일 뿐이다. |
@@ -166,6 +169,8 @@ ZIP 아카이브를 Aqueous로 변환할 때 ZIP extra field를 어떻게 다룰
 명세 §Unix metadata from ZIP을 따른다.
 
 ### 3.4 0x000d와 0x756e
+
+아직 구현하지 않았다(aqr-unpack은 두 필드를 읽지 않는다).
 
 **[제안]** 엔트리 종류의 판정과 Info-ZIP식 symlink는 `special-files-design.md` §6.6을 따른다. 두 필드는 다음과 같이 흡수한다.
 

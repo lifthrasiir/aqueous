@@ -74,9 +74,9 @@ pub(crate) fn limit(a: &Apply, lens: &[u64], outputs: &[u64], contents: &dyn Con
 /// to by default: 256 MiB, half of what the decoders support ([`aqr_formula::SUPPORTED_BOUND`]),
 /// so that a decoder may run applications side by side. Text, FASTA, rasters, flate-set, bundle,
 /// mszip and the LZMA modules fit it at any length (segments, part modules); the LZMA modules'
-/// rings and tables follow the dictionary (12 bytes for each of its bytes rounded up to a power
-/// of 2, and 12.5 MiB), so those of dictionaries over 16 MiB (7-Zip's 64 MiB) do not, and fall
-/// back.
+/// data window follows the dictionary and their match finder's rings its reach, which the
+/// encoder lowers until the plan fits (`aqr_lzma::plan::finder_for`: 7-Zip's 64 MiB dictionary
+/// with a reach of 8 MiB, 186 MiB).
 pub const DEFAULT_BOUND: u64 = 256 << 20;
 
 /// Modules allowed a larger bound than [`DEFAULT_BOUND`] by default, with their bounds (at most

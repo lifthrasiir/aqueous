@@ -25,7 +25,7 @@
     --bad-names=POLICY      auto | keep | replace | fail
 ```
 
-`-C`는 쓰지 않는다: tar 계열의 `-C DIR` 관례와 겹치고 `-c`와 대소문자만 다르다.
+`-C`는 tar 계열의 `-C DIR` 관례대로 `--directory`에 쓴다.
 
 ### `-E`: 해석
 
@@ -110,8 +110,9 @@ Windows의 `Folding::Full`은 원래도 정규화를 접어서 비교하므로 �
 - `keep`이 왕복을 지키는 이유: 압축기는 WTF-8로 유효한 바이트를 `wtf-8` 이름으로
   저장한다(`aqr-formula`의 `tree.rs`의 `name_from`). 그래서 Windows에서 압축하고 Linux에서
   풀었다가 다시 압축해 Windows에서 풀면 원래 이름이 된다.
-- `%XX`는 macOS가 HFS에서 하는 방식과 같다. 원래 이름의 `%`는 이스케이프하지 않으므로 겹칠 수
-  있고, 겹치면 충돌 규칙이 처리한다. 대체는 일방향이며, 보고로 알린다.
+- `%XX`는 macOS가 HFS에서 하는 방식과 같다. 해석되지 않은 바이트와 함께 이름의 `%`와 0x5C도
+  `%25`, `%5C`로 쓴다(`names::escaped`; Windows에서는 0x5C가
+  구분자로 읽히기 때문이다). 그래서 이름 둘이 겹치지 않는다. 대체는 일방향이며, 보고로 알린다.
 - `keep`을 할 수 없는 곳의 `keep`은 `replace`다. `fail`은 대체가 필요한 이름이 있으면 해제를
   실패시킨다(스펙의 "fail or report" 중 fail).
 

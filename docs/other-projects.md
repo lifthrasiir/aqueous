@@ -16,7 +16,7 @@ encode.su 포럼에서 Aqueous와 겹치는 프로젝트를 모으고, 저장소
 - aqr-compress: 헤더 없는 raw deflate를 찾지 않는다(2절).
 - aqr-flate: 프로파일 9(1.0 s, 1.07%)와 10(6.2 s, 0.51%) 사이가 비어 있고, 그 자리에 preflate-rs(1.7 s, 0.78%)가 있다. 후처리기(deft4j류)가 만든 스트림의 비율을 잰다(2절).
 - aqr-mp3: packMP3와의 격차 가운데 남은 후보는 같은 granule 이웃 문맥과 부호 모델이다(5절).
-- aqr-vorbis: FSB5 안의 패킷만 받는다. Ogg 페이지를 재구성하면 `.ogg`가 열린다(5절).
+- aqr-ogg: Vorbis만 받는다. FLAC in Ogg와 Opus는 남았다(5절).
 - aqr-lz4: HC와 legacy frame을 넣으면 커널, initramfs, squashfs가 열린다(3절).
 - aqr-raw: PCM 경로에서 샘플 도메인 LMS 캐스케이드와 Sac식 편향 보정, 래스터에서 이미지별 색 변환 선택을 시험한다(5절, 6절).
 - aqr-flac: 가변 블록 크기 표본으로 시험한다(flacoutcpp, flake)(5절).
@@ -34,7 +34,7 @@ encode.su 포럼에서 Aqueous와 겹치는 프로젝트를 모으고, 저장소
   - Oodle은 게임이 가져온 DLL을 다시 부를 뿐이다(3절).
 - **Fairytale**(https://github.com/schnaader/fairytale, LGPL-3.0, 2018년에 멈춤): 메모리 예산을 넘는 중간 스트림을 버리고 필요할 때 부모 변환을 다시 돌려 되살린다(`attemptRevival`). 포맷 초안은 블록마다 2바이트 체크섬을 두어 기존 아카이브에 추가할 때 빠르게 중복을 판정한다. 둘 다 Aqueous에 없다.
 - **Insighter**(스레드 4541, 비공개, Zig): 10gb의 견줄 상대이다(`10gb-todo.md`). 파서로 컨테이너(TAR, ISO, ZIP, CAB, CFBF, AR, PDF, CHM, WinHelp)를 깊이 7까지 열고, 전역 중복 제거 뒤 종류별 버킷마다 REP식 장거리 중복 제거나 xwrt식 텍스트 전처리를 거쳐 FastLZMA2에 보낸다.
-  - Aqueous에 없는 재압축: libbzip2 아닌 도구의 bzip2(어떤 도구가 만든 것이든 된다고 주장; aqr-bz2는 libbzip2만), LZW(TIFF, PDF; GIF는 aqr-gif), SZDD, MSZIP, LZX(작업 중), Base64 복원, 이미지류 데이터의 stride 인지 델타, AoS→SoA 전치.
+  - Aqueous에 없는 재압축: libbzip2 아닌 도구의 bzip2(어떤 도구가 만든 것이든 된다고 주장; aqr-bz2는 libbzip2만), LZW(TIFF, PDF; GIF는 aqr-gif), SZDD, Base64 복원, 이미지류 데이터의 stride 인지 델타, AoS→SoA 전치.
   - 데이터를 너무 바꾸는 적응형 변환(ADPT)은 뒤단의 중복 제거를 망쳐 기본에서 껐다. 같은 내용이면 같은 출력이 나오는 변환만 버킷에 넣어야 한다는 교훈이다.
 
 ## 2. DEFLATE
@@ -63,7 +63,7 @@ aqr-flate README의 홀드아웃 벤치(807개 스트림, 40.6 MB, M4 한 스레
 | zstd 레벨 1–4(1.5.x 한두 판) | 패키지, 커널, HTTP, OCI, 게임 | 중간(버전별 분기) | libzstd | 높음 |
 | LZ4 옛 가족(1.8.1 이하) | 옛 번들 | 낮음(fixture 추가) | liblz4 이력 | 중간 |
 | LZF | Redis, Krita | 낮음 | liblzf | 중간 |
-| LZX(CAB, WIM, CHM) | Windows 설치·업데이트 | 높음(닫힌 인코더) | wimlib(다른 인코더) | 중간(parse 레코드) |
+| LZX(CAB, WIM, CHM) | Windows 설치·업데이트 | 높음(닫힌 인코더) | wimlib(다른 인코더) | 완료(aqr-lzx, parse 레코드) |
 | GDeflate | DirectStorage 에셋 | 낮음(swizzle만) | MS(MIT) | 낮음 |
 | zstd 레벨 5 이상, 멀티스레드 | 패키지 | 높음 | libzstd | 낮음 |
 | LZMS, XPRESS Huffman | ESD, 프리페치 | 높음 | wimlib, ms-compress | 낮음 |
@@ -71,7 +71,7 @@ aqr-flate README의 홀드아웃 벤치(807개 스트림, 40.6 MB, M4 한 스레
 
 - **LZ4**(`lz4/NEWS`): 출력이 바뀐 것으로 읽히는 버전은 1.7.3, 1.8.1(레벨 10 이상), 1.8.2, 1.10.0(레벨 2 신설, HC 3–9 약 5%)이고, 1.9.x에는 압축률 변경 언급이 없다. 1.10.0은 `nbWorkers`와 무관하게 같은 출력을 낸다. HC는 레벨 3–9가 해시 체인, 10–12가 최적 파서이고 레벨별 파라미터는 고정 표이다. 여러 버전으로 fixture를 만들어 겹치는 가족부터 잰다. 확인할 것: 1.9.x와 1.10.0 fast의 동일성, lz4-java(Minecraft)의 출력.
 - **zstd**: 거의 매 버전 압축률이 바뀌므로 기본 레벨 3의 출력도 버전마다 다르다(OpenZFS의 1.5.2→1.5.7 업그레이드로 MAC이 어긋난 사례가 있다). 반면 `ZSTD_isDeterministicBuild()`가 같은 버전을 표준 옵션으로 빌드하면 빌드끼리 출력이 같다고 보증한다. 최신 1.5.x의 레벨 1–4(fast, dfast)만 포팅하는 것이 aqr-lz4 방식의 연장이다. 바이트 같게 포팅한 공개 구현은 찾지 못했다.
-- **LZX와 Oodle**: 인코더는 닫혀 있고 wimlib은 Microsoft 인코더의 재현이 아니다(저자 말로 호환되지만 바이트가 같지 않다). 비트스트림은 공개 디코더(libmspack, ooz)로 규명되어 있으니 aqr-lzma식 parse 레코드를 먼저 검토한다. 원본 바이트를 내려면 Huffman·tANS 표도 재현해야 하므로 표 구성 규칙이 결정적인지가 관건이다(미검증). CAB의 LZX는 프레임 사이에 32 KiB 상태를 이어 가므로 폴더 하나를 한 스트림으로 다뤄야 한다. ooz는 라이선스가 불분명해 클린룸이 필요하다.
+- **LZX와 Oodle**: LZX는 아래 방식으로 aqr-lzx가 한다(WIM, CAB, CHM). 인코더는 닫혀 있고 wimlib은 Microsoft 인코더의 재현이 아니다(저자 말로 호환되지만 바이트가 같지 않다). 비트스트림은 공개 디코더(libmspack, ooz)로 규명되어 있으니 aqr-lzma식 parse 레코드를 먼저 검토한다. 원본 바이트를 내려면 Huffman·tANS 표도 재현해야 하므로 표 구성 규칙이 결정적인지가 관건이다(미검증). CAB의 LZX는 프레임 사이에 32 KiB 상태를 이어 가므로 폴더 하나를 한 스트림으로 다뤄야 한다. ooz는 라이선스가 불분명해 클린룸이 필요하다.
 - **GDeflate**(DirectStorage의 `GDeflate/`, MIT): 64 KiB 타일마다 DEFLATE 심볼을 32개 하위 스트림에 번갈아 배치한다(규칙은 README에 완결). swizzle을 풀면 보통의 DEFLATE라 aqr-flate가 받는다. 압축기는 libdeflate 포크이다.
 - **LZF**(liblzf, 약 300줄): `VERY_FAST`, `ULTRA_FAST`, `HLOG`, `STRICT_ALIGN`, `INIT_HTAB` 매크로가 출력을 바꾸므로 번들마다 후보 가족을 차례로 시도해야 한다.
 
@@ -97,7 +97,7 @@ packMP3(https://github.com/packjpg/packMP3, LGPL-3.0)는 적응 산술 부호화
 
 - balrogg(https://github.com/iczelia/balrogg, GPL-3.0이라 설계만 참고)는 `.ogg` 1,047개에서 `-1` 90.4%, `-9` 88.2%이다. aqr-vorbis는 The Crew의 FSB5에서 90.7%(큰 스트림), 93.2%(작은 스트림)이다. 표본이 달라 그대로 견줄 수는 없다.
 - balrogg에 있고 aqr-vorbis에 없는 것은 residue의 채널 간 이웃 문맥, 비트 단위 혼합, match model이다. aqr-vorbis는 속도 때문에 정적 표 rANS를 쓴다.
-- `.ogg`에는 Ogg 페이지와 패킷의 재구성(CRC, 페이지 경계, 체인 스트림)이 남았다. balrogg는 체인 Ogg에서 링크 간에 모델을 공유하고, 깨진 CRC나 잘못된 페이지 순서는 거부한다.
+- Ogg 페이지와 패킷의 재구성(CRC, 페이지 경계)은 aqr-ogg가 Vorbis에 대해 한다. balrogg는 체인 Ogg에서 링크 간에 모델을 공유하고, 깨진 CRC나 잘못된 페이지 순서는 거부한다.
 - Opus는 balrogg가 range decoder를 고쳐 심볼을 뽑고 다시 합성하는 것으로 가능함을 보였지만 이득이 3–8%라 후순위이다.
 
 ### 무손실 오디오
@@ -136,7 +136,7 @@ aqr-flac의 FLAC 경로에서 이미 잰 것(LMS 캐스케이드, 채널 간 탭
   - ECM(Neill Corlett, GPL이므로 코드는 가져오지 않고 ECMA-130에서 새로 작성한다)은 섹터를 다시 만들어 원본과 같을 때만 그 종류로 정하고, 복제 방지용 오류 섹터 같은 불일치는 리터럴로 둔다. Mode 1은 데이터 2048 B, Mode 2 Form 1은 서브헤더 8 B와 데이터 2048 B, Form 2는 서브헤더와 데이터 2324 B를 저장한다.
   - 재구성: sync 12 B는 고정, 주소는 섹터 번호(MSF BCD), EDC는 반사형 CRC-32 변형(다항식 0xD8018001), ECC는 GF(2^8) 위의 RSPC P 패리티(43열 × 26행)와 Q 패리티(26대각 × 43)이다. 이득은 Mode 1 섹터당 304/2352 B, 약 13%이다.
   - 더할 것: MSF 주소 예측, Mode 2 서브헤더 8 B 중 중복된 4 B, 2336 B 섹터와 서브코드(96 B/프레임, Q 채널 CRC-16). CD-DA 트랙은 aqr-raw의 PCM 경로로, 데이터 트랙의 ISO 9660은 파일 단위 재귀로 넘긴다.
-  - CHD, CSO, ZSO는 컨테이너로 풀어 같은 경로로 보낸다. CHD(MAME, BSD-3-Clause)의 CD 코덱은 프레임마다 재생성할 수 있으면 sync와 ECC를 빼는 비트맵을 두는 것으로 안다. WIM/ESD는 이미 SHA-1로 중복 제거되어 있고 LZX 재현이 전제라 후순위이다.
+  - CHD, CSO, ZSO는 컨테이너로 풀어 같은 경로로 보낸다. CHD(MAME, BSD-3-Clause)의 CD 코덱은 프레임마다 재생성할 수 있으면 sync와 ECC를 빼는 비트맵을 두는 것으로 안다. WIM은 aqr-wim이 한다(LZX는 aqr-lzx). ESD는 LZMS라 남았다.
 - **비디오**: 공개된 무손실 H.264 재압축기나 MJPEG 중복 제거는 찾지 못했다. 선례 없는 자체 설계가 되고, MJPEG는 aqr-jpeg를 다시 쓰면 되므로 가장 싸다.
 
 ## 8. 실행 파일

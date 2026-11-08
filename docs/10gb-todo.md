@@ -270,7 +270,7 @@ JSON은 `crates/aqr/cache/10gb/{c,k}{2,1,0}-4abcae61-r{1,2}.json`):
      압축이 5.6 → 42.3 s, 풀기(`-K`)가 0.3 → 16.9 s가 되었다. `c286013`부터 64 MiB 넘는 스트림의
      레코드는 64 MiB 단위의 부분으로 나뉘어, 압축에서는 match finder 둘이 나란히 돈다(10gb에서 7z
      34.5 s, 평균 2.3 스레드). 풀기는 match finder 하나(사전 64 MiB의 체인 0.8 GB, 기본 한도
-     1 GiB)라서 그대로이다. 둘로 하면 약 4 s를 줄이지만 0.8 GB가 더 든다. 풀기에서 두 폴더는 한 leaf 안에서
+     1 GiB)라서 그대로였다(`4991db82`의 lzma-recons 4가 도달 거리 R로 계획을 186 MiB로 줄였다; 위). 둘로 하면 약 4 s를 줄이지만 0.8 GB가 더 든다. 풀기에서 두 폴더는 한 leaf 안에서
      차례로 다시 만들어지며(17 s), 10gb 풀기의 가장 긴 경로이다. 최대 footprint는 1.44 → 2.02 GB(풀기
      0.39 → 1.41 GB)이다(`8924d88`, `5c12516`: 사전 크기의 링, 큰 사전의 match finder는 차례로).
    - 시간: match finder의 체인 걷기가 캐시 미스를 하나씩 기다렸다(7z 폴더 0에서 시간의 70%). 4·16바이트
@@ -335,30 +335,26 @@ JSON은 `crates/aqr/cache/10gb/{c,k}{2,1,0}-4abcae61-r{1,2}.json`):
     - 나머지 8개(언인스톨러, Firefox의 helper)는 모두 0.9 MB 밑이고(합쳐 1.7 MB), 압축된 것은 NSIS의
       LZMA solid 데이터 수십 KB씩이라 재현할 값어치가 없다.
 
-지금 2.558 GB이다(2026-10-30, aqr-ppmd 뒤 2,557,815,082 B). 주 목표 2.4 GB까지 158 MB가 남는다.
-확실한 편인 것(2번의 에뮬레이션, 3번, 4번, 6번의 나머지, 8번의 나머지)이 합쳐 130 MB 남짓이고, 그 밖에는 7번(ZPAQ)이 크다. PPMd 없이는 확장 목표에
-못 미친다.
+지금 `-9`는 2.345 GB(2026-11-08, `10e195f4`)로 주 목표 2.4 GB 안이고 확장 목표 2.27 GB까지 75 MB가 남는다. mid(`-5`)는
+2.481 GB(`f6f22f7a`)로 주 목표까지 81 MB이다. 남은 것 가운데 확실한 편은 2번의 에뮬레이션, 3번, 4번, 6번의 나머지, 8번의
+나머지이고, 그 밖에는 7번(ZPAQ)이 크다. PPMd 없이는 확장 목표에 못 미친다. 풀기의 메모리는 `-K`의 footprint가
+`-9`에 2.91 GB, mid에 2.49 GB로 아직 목표 2 GB 밖이다(아래).
 
 ## 메모리
 
-- 압축의 최대는 enwik 묶음(1.46 GB) 배치이다(`ffb9393`에서 2.96–3.49 GB). 다른 배치는 2.7 GB 밑이다.
-  남은 것: 검증의 `enwik9` leaf는 두 블록에 걸친 부호화된 텍스트를 이어 붙인 사본(503 MB)과 텍스트
-  (1 GB)를 갖는다. 미리 평가는 `enwik9.zip`의 inflate된 1 GB를 flate-set의 입력으로 갖는다. macOS
-  malloc의 1 MiB 밑 블록 조각(0.2–0.4 GB)도 있다.
-  - 크고 적용이 꼭대기에만 있는 식을 모두 미리 평가하지 않으면 0.5 GB 남짓 줄지만, hg19가 29.6 →
-    33.4 s로 느려진다(FASTA 디코딩이 놀던 코어에서 검증 단계로 옮겨 간다).
-- 풀기(`921778d`에서 2.60 GB, 목표 2 GB): `aqr`는 leaf를 무게(식이 말하는, 한꺼번에 드는 가장 많은
-  바이트, 적용의 메모리 한도를 넣어)의 합이 프로세스의 budget(`-M`, 기본 2 GB; 검증도 같은 것을 쓴다) 안일
-  때만 동시에 푼다(`Archive::set_budget`, `aqr_common::budget`). budget은 신고된 무게와 실제 heap(64 KiB 이상
-  블록) 중 큰 쪽을 보며, 압축의 batch와 LZMA match finder도 같은 budget에서 들어간다. 첫 leaf가 기다리는 동안에는 뒤의 leaf가
-  예산 안에서 앞지른다(`Gate`).
-  - 무게가 가장 큰 leaf는 `enwik9.zip`과 `enwik9`(각 3.46 GB), `mingw480`의 7z(2.46 GB), 그다음
-    1.87 GB이다. 예산을 넘는 leaf는 아무것도 돌지 않을 때 혼자 들어가고, 도는 동안에는 앞지를 자리도
-    없다. 무게는 크게 잡혔지만 그 leaf가 혼자 돌 때의 실제 heap도 2.0–2.2 GB(`--stats`)라서, 무게를
-    고쳐도 2 GB 안에서 옆에 들일 자리는 거의 없다. 줄이려면 leaf 자체가 덜 들어야 한다(1 GB 텍스트와
-    0.5 GB 코드된 텍스트를 함께 갖는다).
-  - `enwik9`의 wrt 디코딩은 `enwik9`와 `enwik9.zip`의 leaf가 따로 한 번씩 한다(leaf는 다른 leaf의
-    출력을 못 쓴다). `921778d`부터 각각 0.35 s라 크지 않다.
+- 압축: 최대 heap은 `-9`에서 zip(`enwik9.zip`의 토큰 복사, 2.40 GB), mid에서 analyze(1.36 GB)이다(측정 절). 글(32 MiB
+  세그먼트)과 FASTA(256 MiB)는 적용마다 한도 안에 들어 `enwik9` 하나의 heap 최대가 0.60 GB이다
+  (`streaming-encoder-design.md`). 적용 하나의 한도는 기본 256 MiB이고 압축의 recompression은 heap 허용량 안에서
+  돈다(`aqr_common::allowance`). macOS malloc의 1 MiB 밑 블록 조각(0.2–0.4 GB)도 있다.
+- 풀기(목표 2 GB): `aqr`는 leaf를 무게(식이 말하는, 한꺼번에 드는 가장 많은 바이트, 적용의 메모리 한도를 넣어)의 합이
+  프로세스의 budget(`-M`, 기본 2 GB; 검증도 같은 것을 쓴다) 안일 때만 동시에 푼다(`Archive::set_budget`,
+  `aqr_common::budget`). budget은 신고된 무게와 실제 heap(64 KiB 이상 블록) 중 큰 쪽을 보며, 압축의 batch와 LZMA match
+  finder도 같은 budget에서 들어간다. 첫 leaf가 기다리는 동안에는 뒤의 leaf가 예산 안에서 앞지른다(`Gate`). 예산을 넘는
+  leaf는 아무것도 돌지 않을 때 혼자 들어간다. 측정 절의 `-K` heap 최대(`leaf` 2.2–3.0 GB)는 그런 leaf가 혼자 돌 때의
+  것이다. part 모듈로 바뀐 적용은 길이와 무관한 계획이라 무게가 작다(`streaming-encoder-design.md`); 무게가 남은
+  leaf의 목록은 `cargo aqr -I -v`가 적용마다 한도를 말해 준다.
+  - 이전(`921778d`)의 무게는 `enwik9.zip`과 `enwik9`가 각 3.46 GB, `mingw480`의 7z가 2.46 GB였고, `enwik9`의 wrt
+    디코딩은 leaf마다 한 번씩(각 0.35 s)이다. 지금의 무게는 다시 재지 않았다.
 
 ## 따라가지 않는 것
 
