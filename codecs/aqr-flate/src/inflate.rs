@@ -366,7 +366,10 @@ impl<const HEAD: bool> Collect<HEAD> {
                 base: 0,
             })
         });
-        let mut d = std::mem::ManuallyDrop::new(Vec::<u8>::with_capacity(data));
+        // (the room a container's size asks for, which a lying size can make more than there
+        // is: then none at first, and more is made as the data comes)
+        let mut d = std::mem::ManuallyDrop::new(Vec::<u8>::new());
+        let _ = d.try_reserve_exact(data);
         let mut t = std::mem::ManuallyDrop::new(Vec::<Token>::with_capacity(tokens));
         Collect {
             data: (d.as_mut_ptr(), 0, d.capacity()),

@@ -842,9 +842,18 @@ impl Run {
         self.lens[k].3..self.lens[k].3 + self.lens[k].0
     }
 
-    /// Bytes of a group's result: its streams' and a byte, and what writing reserves past them.
+    /// Bytes of a group's result: its streams' and a byte, and what writing reserves past them
+    /// (each stream no more than its data and record could make, as [`decode`] has it, for a
+    /// corrupt length).
     fn result_room(&self, g: usize) -> usize {
-        1 + self.streams(g).map(|k| self.lens[k].2).sum::<usize>() + crate::write::TOKEN_SLACK
+        1 + self
+            .streams(g)
+            .map(|k| {
+                let (d, r, s, ..) = self.lens[k];
+                s.min(8usize.saturating_mul(d.saturating_add(r)).saturating_add(64))
+            })
+            .sum::<usize>()
+            + crate::write::TOKEN_SLACK
     }
 
     /// The result of group `g` (see [`set_part`]) of the run's `data` and `records`.
@@ -913,4 +922,58 @@ pub fn inflate_part(params_len: u64, in0_len: u64, size: u64) {
         size,
     );
     aqr_api::finish(r);
+}
+
+#[cfg(test)]
+mod alloc_tests {
+    use super::Run;
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    /// A global allocator that remembers the largest single request of each thread, and refuses
+    /// (as an exhausted heap does) those of 1 GiB and above, once armed on the thread.
+    struct Largest;
+
+    thread_local! {
+        static MOST: Cell<usize> = const { Cell::new(0) };
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    fn note(n: usize) -> bool {
+        let _ = MOST.try_with(|m| m.set(m.get().max(n)));
+        n < 1 << 30 || !ARMED.try_with(Cell::get).unwrap_or(false)
+    }
+
+    unsafe impl GlobalAlloc for Largest {
+        unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+            if note(l.size()) { unsafe { System.alloc(l) } } else { std::ptr::null_mut() }
+        }
+        unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
+            if note(l.size()) { unsafe { System.alloc_zeroed(l) } } else { std::ptr::null_mut() }
+        }
+        unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+            unsafe { System.dealloc(p, l) }
+        }
+        unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
+            if note(n) { unsafe { System.realloc(p, l, n) } } else { std::ptr::null_mut() }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOC: Largest = Largest;
+
+    /// A stream whose length the index claims to be far beyond what its data and record could
+    /// make has no room reserved for it before it is found wrong.
+    #[test]
+    fn run_group_with_a_corrupt_length() {
+        let run = Run::of(&[(1, 1, 1 << 40)]);
+        let model = crate::profile_data(0).unwrap();
+        MOST.with(|m| m.set(0));
+        ARMED.with(|a| a.set(true));
+        let out = run.group(0, &[0], &[0], model);
+        ARMED.with(|a| a.set(false));
+        assert_eq!(out, [1]);
+        let most = MOST.with(Cell::get);
+        assert!(most < (64 << 20), "{most} bytes reserved");
+    }
 }

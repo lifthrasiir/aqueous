@@ -97,7 +97,7 @@ impl Stream {
             }
         }
         let nseg = get_usize(r, nn + 1).ok()?;
-        let mut segs = Vec::with_capacity(nseg);
+        let mut segs = Vec::with_capacity(nseg.min(r.bits_left()));
         let mut first = 0;
         for i in 0..nseg {
             let count = get_usize(r, nn).ok()?;

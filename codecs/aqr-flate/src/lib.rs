@@ -2688,7 +2688,8 @@ fn rebuild(
     }
     let nseg = get_usize(r, n + 1)?;
     // (first token, count, misses, position, body, emulator state)
-    let mut segs = Vec::with_capacity(nseg);
+    // (a segment takes a bit at least: room for no more than the record has bits)
+    let mut segs = Vec::with_capacity(nseg.min(r.bits_left()));
     let mut first = 0;
     for i in 0..nseg {
         let count = get_usize(r, n)?;
