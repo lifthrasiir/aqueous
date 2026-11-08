@@ -6,6 +6,7 @@
 //! of anything before the first header or of letters other than ASCII ones is not taken, nor
 //! one of more runs of other letters than one per 64 letters (and 16; proteins).
 
+#[cfg(feature = "encode")]
 use aqr_common::varint;
 
 use crate::bases::Packed;

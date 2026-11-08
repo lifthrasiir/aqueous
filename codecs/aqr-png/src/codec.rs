@@ -89,6 +89,7 @@ pub(crate) fn split_record(rec: &[u8]) -> Result<(&[u8], &[u8], &[u8])> {
 
 /// The inputs of the part module for the records of a file's images: the index of the heads'
 /// lengths, the heads, the rANS streams and the raw bits (each image's after the one before).
+#[cfg(feature = "encode")]
 pub(crate) fn split_records(records: &[Vec<u8>]) -> Result<[Vec<u8>; 4]> {
     let [mut index, mut heads, mut sts, mut raws] = [vec![], vec![], vec![], vec![]];
     for r in records {
@@ -103,6 +104,7 @@ pub(crate) fn split_records(records: &[Vec<u8>]) -> Result<[Vec<u8>; 4]> {
 
 /// The index and the records of the whole decoder (index of their lengths, each record in one
 /// piece) of the inputs of the part module: [`split_records`] undone.
+#[cfg(feature = "encode")]
 pub(crate) fn join_records(index: &[u8], heads: &[u8], sts: &[u8], raws: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
     let (mut at, mut h, mut s, mut r) = (0, 0, 0, 0);
     let (mut index_out, mut records) = (vec![], Vec::with_capacity(heads.len() + sts.len() + raws.len()));
