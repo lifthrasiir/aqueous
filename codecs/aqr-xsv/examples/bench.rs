@@ -1,7 +1,7 @@
-//! usage: aqr-xsv-bench FILE...
+//! usage: [SEGMENT=BYTES] aqr-xsv-bench FILE...
 //!
 //! For each table: its streams as zstd -3 compresses them, against the file itself, the
-//! module's encoding and decoding speeds (of the file's bytes), and that it decodes back.
+//! module's encoding (in segments of SEGMENT bytes if given, else of `formula::SEGMENT`) and decoding speeds (of the file's bytes), and that it decodes back.
 
 use std::time::Instant;
 
@@ -12,15 +12,32 @@ fn main() {
     for path in std::env::args().skip(1) {
         let d = std::fs::read(&path).unwrap();
         let t = Instant::now();
-        let Some(f) = aqr_xsv::formula::encode(&d, 1) else {
+        let segment = std::env::var("SEGMENT").ok().and_then(|s| s.parse().ok()).unwrap_or(aqr_xsv::formula::SEGMENT);
+        let Some(f) = aqr_xsv::formula::encode_in(&d, segment, true) else {
             println!("{path}: not taken");
             continue;
         };
         let e = t.elapsed().as_secs_f64();
-        let aqr_formula::Node::Apply(a) = &f.root else { unreachable!() };
-        let inputs: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
+        let apps = match &f.root {
+            aqr_formula::Node::Concat(ns) => ns.iter().collect(),
+            n => vec![n],
+        };
         let t = Instant::now();
-        let out = aqr_xsv::formula::decode(&a.params, &inputs, d.len() as u64, 1).unwrap();
+        let mut out = Vec::new();
+        for n in &apps {
+            let aqr_formula::Node::Apply(a) = n else { unreachable!() };
+            let inputs: Vec<&[u8]> = a
+                .inputs
+                .iter()
+                .map(|n| match n {
+                    &aqr_formula::Node::Slice { stream, start, len } => {
+                        &f.streams[stream].data[start as usize..][..len as usize]
+                    }
+                    _ => unreachable!(),
+                })
+                .collect();
+            out.extend(aqr_xsv::formula::decode(&a.params, &inputs, a.len, 1).unwrap());
+        }
         let dt = t.elapsed().as_secs_f64();
         assert!(out == d, "{path}: not given back");
         let sizes: Vec<(usize, usize)> = f.streams.iter().map(|s| (s.data.len(), z(&s.data))).collect();

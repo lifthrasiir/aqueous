@@ -50,6 +50,15 @@ bytes between the regions are slices of the stream `recs/raw`, all of them one a
   an application of `recs-fields` to a stream `recs/planes`, and the tails, a stream
   `recs/tails`.
 
+A region of more rows than a group (32 MiB of its records, planes or entries, or 4 Mi rows:
+`formula::GROUP_BYTES`, `GROUP_ROWS`) is written as one application of each of these modules
+for each group of rows, the planes being field after field and so not cut finer. The fields
+(and floats) are the region's, chosen once; the groups' planes are one stream `recs/planes` of
+their planes one after another, and the tails likewise of `recs/tails` (entries are cut whole);
+each application takes slices, and the groups are parts of the concatenation. Each group's
+deltas and xors start afresh, as each application does. A region of one group is as described
+above.
+
 The fields are chosen by dynamic programming over the record, on a sample of the records
 (about 64 KiB of them, from four places), each field's cost the order-0 code length of its
 planes under adaptive models; a record may instead be stored as its bytes transposed (each

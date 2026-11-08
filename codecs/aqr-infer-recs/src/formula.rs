@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use aqr_formula::{Formula, Module, Node};
 
 use crate::module::{entries_params, fields_params, floats_params, lifted_width};
+use crate::regions::Region;
 use crate::{Choice, Form, Shape, fields, floats};
 
 pub use crate::module::{Field, Float, How, decode_entries, decode_fields, decode_floats};
@@ -91,8 +92,27 @@ pub fn apply_fields(
     Node::apply(FIELDS, fields_params(records.len() / k, k, fields), vec![planes], records.len() as u64)
 }
 
+/// The bytes of a region that make a group of rows, an application of the modules (at most;
+/// [`GROUP_ROWS`] too): their planes are field after field, so a group cannot be cut finer
+/// than a whole table, and a table of many rows would be decoded whole in one instance.
+pub const GROUP_BYTES: usize = 32 << 20;
+
+/// The most rows of a group: `recs-fields` holds 8 bytes a row more where fields refer to
+/// others.
+pub const GROUP_ROWS: usize = 1 << 22;
+
 /// The formula of `d` with the regions `choices` (sorted, apart) in their forms.
 pub fn formula(d: &[u8], choices: &[Choice]) -> Formula {
+    formula_in(d, choices, GROUP_BYTES, GROUP_ROWS)
+}
+
+/// [`formula`] with groups of `group_bytes` and `group_rows` at most (the test of groups at
+/// small sizes). A region of rows fewer than a group is one application of each module (of
+/// the whole planes); in more, an application of the modules to each group of rows, over
+/// slices of the one stream of planes (and of tails), groups' planes one after another, and a
+/// Concat of the groups. The fields are the region's, chosen once; each group's deltas start
+/// afresh, as each application does.
+pub fn formula_in(d: &[u8], choices: &[Choice], group_bytes: usize, group_rows: usize) -> Formula {
     let mut f = Formula::default();
     let mut raw = Vec::new();
     let mut gaps = Vec::new();
@@ -112,22 +132,58 @@ pub fn formula(d: &[u8], choices: &[Choice]) -> Formula {
         }
         let r = &c.region;
         let fl = r.fields_of(c.form);
-        let (records, tails) = r.records(d);
         let k = r.width();
         let lifts = if c.form == Form::Fields { &r.floats[..] } else { &[] };
-        let (lifted, k2) = (floats::lift(&records, k, lifts), lifted_width(k, lifts));
-        let planes = f.push("recs/planes", fields::encode(&lifted, k2, &fl));
-        let mut recs = Node::apply(FIELDS, fields_params(r.count, k2, &fl), vec![planes], lifted.len() as u64);
-        if !lifts.is_empty() {
-            recs = Node::apply(FLOATS, floats_params(r.count, k, lifts), vec![recs], records.len() as u64);
+        let k2 = lifted_width(k, lifts);
+        // the rows of each group
+        let row_bytes = match &r.shape {
+            Shape::Fixed { .. } => k,
+            Shape::Entries { .. } => (r.end - r.start).div_ceil(r.count.max(1)),
+        };
+        let rows = (group_bytes / row_bytes.max(k2).max(1)).clamp(1, group_rows.max(1));
+        let groups: Vec<std::ops::Range<usize>> =
+            (0..r.count).step_by(rows).map(|a| a..(a + rows).min(r.count)).collect();
+        // the groups' records (a group's heads), planes and tails
+        let mut all = Vec::new();
+        let mut tails = Vec::new();
+        let mut lens = Vec::new();
+        let mut recs: Vec<std::borrow::Cow<[u8]>> = Vec::with_capacity(groups.len());
+        for g in &groups {
+            let (m, t): (std::borrow::Cow<[u8]>, _) = match &r.shape {
+                Shape::Fixed { .. } => (d[r.start + g.start * k..r.start + g.end * k].into(), None),
+                Shape::Entries { head, starts, .. } => {
+                    let head = *head;
+                    let s = &starts[g.start..=g.end];
+                    (Region::heads(d, s, head).into(), Some(s.windows(2).flat_map(move |w| &d[w[0] + head..w[1]])))
+                }
+            };
+            let lifted = floats::lift(&m, k, lifts);
+            let before = all.len();
+            all.extend_from_slice(&fields::encode(&lifted, k2, &fl));
+            let tail_at = tails.len();
+            tails.extend(t.into_iter().flatten());
+            lens.push((all.len() - before, lifted.len(), tail_at, tails.len() - tail_at));
+            recs.push(m);
         }
-        parts.push(match (&r.shape, tails) {
-            (Shape::Entries { rule, head, .. }, Some(tails)) => {
-                let tails = f.push("recs/tails", tails);
-                Node::apply(ENTRIES, entries_params(r.count, *head, rule), vec![recs, tails], (r.end - r.start) as u64)
+        let Node::Slice { stream: planes, .. } = f.push("recs/planes", all) else { unreachable!() };
+        let tails = matches!(r.shape, Shape::Entries { .. }).then(|| f.push("recs/tails", tails));
+        let mut at = 0u64;
+        for ((g, m), &(plen, llen, tail_at, tlen)) in groups.iter().zip(&recs).zip(&lens) {
+            let slice = Node::slice(planes, at, plen as u64);
+            at += plen as u64;
+            let mut node = Node::apply(FIELDS, fields_params(g.len(), k2, &fl), vec![slice], llen as u64);
+            if !lifts.is_empty() {
+                node = Node::apply(FLOATS, floats_params(g.len(), k, lifts), vec![node], m.len() as u64);
             }
-            _ => recs,
-        });
+            parts.push(match (&r.shape, &tails) {
+                (Shape::Entries { rule, head, starts }, Some(Node::Slice { stream, .. })) => {
+                    let tails = Node::slice(*stream, tail_at as u64, tlen as u64);
+                    let len = (starts[g.end] - starts[g.start]) as u64;
+                    Node::apply(ENTRIES, entries_params(g.len(), *head, rule), vec![node, tails], len)
+                }
+                _ => node,
+            });
+        }
     }
     let &(start, len) = gaps.last().unwrap();
     if len > 0 {

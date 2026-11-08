@@ -87,7 +87,7 @@ impl Region {
         Region { start, end, count, shape: Shape::Entries { rule, head, starts }, floats: Vec::new(), fields }
     }
 
-    fn heads(data: &[u8], starts: &[usize], head: usize) -> Vec<u8> {
+    pub(crate) fn heads(data: &[u8], starts: &[usize], head: usize) -> Vec<u8> {
         starts[..starts.len() - 1].iter().flat_map(|&s| &data[s..s + head]).copied().collect()
     }
 

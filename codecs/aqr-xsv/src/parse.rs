@@ -32,6 +32,8 @@ pub struct Table {
     pub fields: Vec<Field>,
     /// The bytes of the records kept as they are.
     pub raw: usize,
+    /// Where the records end: the start of the next one (`d.len()` at the end of the file).
+    pub end: usize,
 }
 
 const UNIT_SEP: &[u8] = "\u{241f}".as_bytes();
@@ -39,9 +41,16 @@ const RECORD_SEP: &[u8] = "\u{241e}".as_bytes();
 
 /// Cuts `d` into records of dialect `dia`, at most `limit` of them.
 pub fn parse(d: &[u8], dia: &Dialect, limit: usize) -> Table {
+    parse_part(d, 0, d.len(), dia, limit)
+}
+
+/// Cuts `d` into records of dialect `dia` from `from` (the start of a record) while a record
+/// starts before `until`, at most `limit` of them. The records are the same as `parse`'s whole
+/// (a record's cut depends on where it starts only); the fields' offsets are those of `d`.
+pub fn parse_part(d: &[u8], from: usize, until: usize, dia: &Dialect, limit: usize) -> Table {
     let mut t = Table::default();
-    let mut p = 0;
-    while p < d.len() && t.records.len() < limit {
+    let mut p = from;
+    while p < d.len() && p < until && t.records.len() < limit {
         let first = t.fields.len();
         match record(d, p, dia, &mut t.fields) {
             Some((next, end)) => {
@@ -57,6 +66,7 @@ pub fn parse(d: &[u8], dia: &Dialect, limit: usize) -> Table {
             }
         }
     }
+    t.end = p;
     t
 }
 

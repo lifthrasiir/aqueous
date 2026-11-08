@@ -126,4 +126,15 @@ column's parts too; a record that would make the file longer than declared is an
   (with fallbacks as `Style::encode` has them), where they print back to the same bytes; zero
   takes the scale of the column's previous number. Others are text.
 - **Predictors.** Of a column, the one whose `nums` part zstd -1 compresses smaller.
+- **Segments.** A file whose records start past 64 MiB (`formula::SEGMENT`) from the first of
+  a segment is cut there, at a record's start (a quoted field holding line ends is within its
+  record). Each segment is an application of the module with the same params (the dialect and
+  C of the whole file) over its part of the streams; the seven streams are one each, the
+  segments' parts one after another and each application's inputs slices of them, and the
+  formula is a Concat of the applications. A column with no field in a segment has empty parts.
+  Each application starts its columns afresh (the previous number's descriptor and value), as
+  it must, and chooses the number style and predictor of each column on its own fields. The
+  encoder parses a segment's records at a time, twice (the first time for C and the bytes kept
+  as they are), so its heap holds one segment's table and the streams. A file in one segment
+  is one application over whole streams.
 - The streams are left to the archive to compress; `text` and `raw` are of `Kind::Text`.

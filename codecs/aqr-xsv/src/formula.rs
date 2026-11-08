@@ -76,6 +76,13 @@ struct Streams {
     desc: Vec<u8>,
 }
 
+impl Streams {
+    /// The lengths of the streams, in the order of [`STREAM_NAMES`].
+    fn lens(&self) -> [usize; 7] {
+        [&self.layout, &self.raw, &self.columns, &self.types, &self.text, &self.nums, &self.desc].map(|v| v.len())
+    }
+}
+
 /// The values of a column, as the stream `nums` holds them by predictor `pred`.
 fn values(vals: &[i64], pred: u8) -> Vec<u8> {
     let mut out = Vec::with_capacity(vals.len() * 2);
@@ -155,33 +162,111 @@ fn column(d: &[u8], t: &Table, ids: &[usize], q: Option<u8>, s: &mut Streams) {
     s.nums.extend_from_slice(&nums);
 }
 
+/// The bytes of a table that make a segment (an application of the module): records are
+/// taken while one starts before this many bytes from the segment's start. A table of fewer
+/// bytes is one application. The module holds its output, its inputs and the table's columns,
+/// so a long table's would take several times its length at once.
+pub const SEGMENT: usize = 64 << 20;
+
 /// The formula of table `input`, or `None` where it is shorter than [`MIN_LEN`], does not
 /// start as a table ([`parse::dialect`]), or a tenth of it or more is not of the table. It is
 /// the same whatever `threads` is (one is used).
 pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
-    if input.len() < MIN_LEN {
-        return None;
-    }
-    let dia = dialect_of(input)?;
-    let t = parse::parse(input, &dia, usize::MAX);
-    (t.raw * 10 < input.len()).then(|| formula(input, &dia, &t))
+    encode_in(input, SEGMENT, true)
 }
 
 /// The formula of `input` as a table of dialect `dia`, whatever it holds.
 pub fn encode_as(input: &[u8], dia: &Dialect) -> Formula {
-    formula(input, dia, &parse::parse(input, dia, usize::MAX))
+    formula(input, dia, SEGMENT, false).0
 }
 
-/// The formula of `input`, cut into records `t` of dialect `dia`.
-fn formula(input: &[u8], dia: &Dialect, t: &Table) -> Formula {
+/// [`encode`] in segments of `segment` bytes (the test of segments at lengths shorter than
+/// [`SEGMENT`]); `check` that no tenth of the table is not of it.
+pub fn encode_in(input: &[u8], segment: usize, check: bool) -> Option<Formula> {
+    if input.len() < MIN_LEN {
+        return None;
+    }
+    let dia = dialect_of(input)?;
+    let (f, raw) = formula(input, &dia, segment, check);
+    (!check || raw * 10 < input.len()).then_some(f)
+}
+
+/// The formula of `input` as a table of dialect `dia`, and the bytes of its records kept as
+/// they are (unless `!check`, when the count may stop early).
+///
+/// The file is cut into segments at records' starts ([`SEGMENT`]); the columns' count is the
+/// whole file's, so that each segment is an application of the same params. The table of a
+/// segment is parsed twice for a file in several (the count first, then the streams), so that
+/// not more than a segment's table is held. A file in one segment is one application of the
+/// streams; in more, an application of slices of the same seven streams, the segments' parts
+/// following one another (so that the archive compresses them as it would the file's whole),
+/// and a Concat of them. Each segment starts its columns afresh (the previous number's
+/// descriptor and value), as each application does.
+fn formula(input: &[u8], dia: &Dialect, segment: usize, check: bool) -> (Formula, usize) {
+    let segment = segment.max(1);
     let width = |r: &Record| match r {
         Record::Fields { fields, .. } => fields.len(),
         Record::Raw(_) => 0,
     };
-    let ncols = t.records.iter().map(width).max().unwrap_or(0).clamp(1, MAX_COLUMNS);
+    // the first pass: the segments, the most fields of a record and the bytes kept as they are
+    let (mut starts, mut widest, mut raw) = (vec![0usize], 0, 0);
+    let mut first: Option<Table> = loop {
+        let from = *starts.last().unwrap();
+        let t = parse::parse_part(input, from, from.saturating_add(segment), dia, usize::MAX);
+        widest = widest.max(t.records.iter().map(width).max().unwrap_or(0));
+        raw += t.raw;
+        let end = t.end;
+        if end >= input.len() {
+            // (a file in one segment keeps its table)
+            break (starts.len() == 1).then_some(t);
+        }
+        starts.push(end);
+        if check && raw * 10 >= input.len() {
+            // (too much is not of the table: the formula is not used)
+            return (Formula::default(), raw);
+        }
+    };
+    let ncols = widest.clamp(1, MAX_COLUMNS);
+    let mut s = Streams::default();
+    let mut parts: Vec<([u64; 7], u64)> = Vec::new();
+    for (k, &from) in starts.iter().enumerate() {
+        let t = match k {
+            0 if first.is_some() => first.take().unwrap(),
+            _ => parse::parse_part(input, from, from.saturating_add(segment), dia, usize::MAX),
+        };
+        let before = s.lens();
+        build(input, dia, &t, ncols, &mut s);
+        let now = s.lens();
+        parts.push((std::array::from_fn(|j| (now[j] - before[j]) as u64), (t.end - from) as u64));
+    }
+    let mut f = Formula::default();
+    let params = dia.to_params(ncols);
+    let kinds = [Kind::Unknown, Kind::Text, Kind::Unknown, Kind::Unknown, Kind::Text, Kind::Unknown, Kind::Unknown];
+    let data = [s.layout, s.raw, s.columns, s.types, s.text, s.nums, s.desc];
+    let whole: Vec<Node> = (STREAM_NAMES.iter().zip(kinds).zip(data))
+        .map(|((name, kind), d)| f.push_as(format!("xsv/{name}"), kind, d))
+        .collect();
+    let base = f.streams.len() - 7;
+    if let [(_, len)] = &parts[..] {
+        f.root = Node::apply(MODULE, params, whole, *len);
+        return (f, raw);
+    }
+    let mut at = [0u64; 7];
+    let nodes: Vec<Node> = (parts.into_iter())
+        .map(|(lens, len)| {
+            let inputs: Vec<Node> = (0..7).map(|j| Node::slice(base + j, at[j], lens[j])).collect();
+            at.iter_mut().zip(lens).for_each(|(a, n)| *a += n);
+            Node::apply(MODULE, params.clone(), inputs, len)
+        })
+        .collect();
+    f.root = Node::concat(nodes);
+    (f, raw)
+}
+
+/// Appends the segment of records `t` of `input`, its columns of the file's `ncols`, to `s`.
+fn build(input: &[u8], dia: &Dialect, t: &Table, ncols: usize, s: &mut Streams) {
     // the fields of each column, in order
     let mut cols: Vec<Vec<usize>> = vec![Vec::new(); ncols];
-    let mut s = Streams::default();
     for r in &t.records {
         match r {
             Record::Raw(range) => {
@@ -198,20 +283,8 @@ fn formula(input: &[u8], dia: &Dialect, t: &Table) -> Formula {
         }
     }
     for ids in &cols {
-        column(input, t, ids, dia.quote, &mut s);
+        column(input, t, ids, dia.quote, s);
     }
-    let mut f = Formula::default();
-    let inputs = vec![
-        f.push("xsv/layout", s.layout),
-        f.push_as("xsv/raw", Kind::Text, s.raw),
-        f.push("xsv/columns", s.columns),
-        f.push("xsv/types", s.types),
-        f.push_as("xsv/text", Kind::Text, s.text),
-        f.push("xsv/nums", s.nums),
-        f.push("xsv/desc", s.desc),
-    ];
-    f.root = Node::apply(MODULE, dia.to_params(ncols), inputs, input.len() as u64);
-    f
 }
 
 #[cfg(test)]
@@ -296,6 +369,79 @@ mod tests {
         assert!(f.streams[4].data.len() < 2000 * 4, "{}", f.streams[4].data.len());
         let f = encode(s.as_bytes(), 1).unwrap();
         assert_eq!(eval(&f, s.len()).unwrap(), s.as_bytes());
+    }
+
+    /// The file of a formula of segments (an application, or a Concat of them).
+    fn eval_segments(f: &Formula) -> Vec<u8> {
+        let apply = |n: &Node| {
+            let Node::Apply(a) = n else { panic!("not an application") };
+            let inputs: Vec<&[u8]> = (a.inputs.iter())
+                .map(|n| match n {
+                    &Node::Slice { stream, start, len } => &f.streams[stream].data[start as usize..][..len as usize],
+                    _ => panic!("not a slice"),
+                })
+                .collect();
+            decode(&a.params, &inputs, a.len, 1).unwrap()
+        };
+        match &f.root {
+            Node::Concat(ns) => ns.iter().flat_map(apply).collect(),
+            n => apply(n),
+        }
+    }
+
+    /// A table of numbers that change slowly, text, quoted fields holding line ends, an
+    /// irregular record and a wide one.
+    fn table(rows: usize) -> Vec<u8> {
+        let mut rng = aqr_common::rng::Rng::new(7);
+        let mut s = String::from("id,t,x,name,note\n");
+        for i in 0..rows {
+            let x = 1000 + i as i64 * 3 + rng.below(5) as i64;
+            match i % 97 {
+                5 | 17 | 30 | 60 => s += &format!("{i},{},{x}.50,\"multi\nline, \"\"q\"\" {i}\",\"a\r\nb\"\n", i * 7),
+                90 => s += "\"bad\"x,1\n",
+                91 => s += &format!("{i},1,2,3,4,5,6\n"),
+                _ => s += &format!("{i},{},{x}.25,name{},n\n", i * 7, rng.below(50)),
+            }
+        }
+        s.into_bytes()
+    }
+
+    #[test]
+    fn segments() {
+        let d = table(3000);
+        let whole = encode_in(&d, usize::MAX, true).unwrap();
+        assert!(matches!(whole.root, Node::Apply(_)));
+        assert_eq!(eval_segments(&whole), d);
+        assert_eq!(whole.streams.len(), 7);
+        for segment in [1, 100, 1000, 4096, 50_000, d.len() / 2] {
+            let f = encode_in(&d, segment, true).unwrap();
+            assert_eq!(eval_segments(&f), d, "segment {segment}");
+            assert_eq!(f.streams.len(), 7);
+            let Node::Concat(ns) = &f.root else { panic!("not segments at {segment}") };
+            let total: u64 = ns
+                .iter()
+                .map(|n| match n {
+                    Node::Apply(a) => a.len,
+                    _ => panic!(),
+                })
+                .sum();
+            assert_eq!(total, d.len() as u64);
+            // (the segments end at records' starts: not within a quoted field's line end)
+            let mut at = 0;
+            for n in ns {
+                let Node::Apply(a) = n else { panic!() };
+                at += a.len as usize;
+                assert!(at == d.len() || d[at - 1] == b'\n');
+                let t = parse::parse_part(&d, at.saturating_sub(a.len as usize), at, &csv(), usize::MAX);
+                assert_eq!(t.end, at);
+            }
+        }
+        // the cut goes after the quoted line end, never within a record
+        let d = b"a,b\n\"x\ny\",2\n\"p\nq\",3\n".repeat(1000);
+        let f = encode_in(&d, 7, false).unwrap();
+        assert_eq!(eval_segments(&f), d);
+        let f = encode_as(&d, &csv());
+        assert!(matches!(f.root, Node::Apply(_)));
     }
 
     #[test]

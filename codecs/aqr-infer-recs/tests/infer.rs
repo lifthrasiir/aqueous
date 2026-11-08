@@ -29,6 +29,28 @@ fn check(data: &[u8], choices: &[Choice]) {
     assert!(zstd_size(&apply(data, choices)) < zstd_size(data));
     let f = formula::formula(data, choices);
     assert_eq!(eval(&f, &f.root), data);
+    // in groups of rows: the same file, the same streams one after another, more applications
+    let (planes, apps) = (f.streams.len(), applications(&f.root));
+    for bytes in [1, 5000, 100_000] {
+        let g = formula::formula_in(data, choices, bytes, 1 << 20);
+        assert_eq!(eval(&g, &g.root), data, "groups of {bytes} bytes");
+        assert_eq!(g.streams.len(), planes);
+        let total = |f: &Formula| f.streams.iter().map(|s| s.data.len()).sum::<usize>();
+        assert_eq!(total(&g), total(&f));
+        assert!(applications(&g.root) > apps, "groups of {bytes} bytes");
+    }
+    // (and of at most 7 rows)
+    let g = formula::formula_in(data, choices, usize::MAX, 7);
+    assert_eq!(eval(&g, &g.root), data);
+}
+
+/// The applications under node n.
+fn applications(n: &Node) -> usize {
+    match n {
+        Node::Concat(parts) => parts.iter().map(applications).sum(),
+        Node::Apply(a) => 1 + a.inputs.iter().map(applications).sum::<usize>(),
+        _ => 0,
+    }
 }
 
 /// The output of node n of formula f, by the modules' code.

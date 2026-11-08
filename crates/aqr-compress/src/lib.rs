@@ -2706,7 +2706,12 @@ fn heap_per_byte(format: Format) -> f64 {
         Text => 1.2,
         // coded whole (enwik9: 1.5)
         GnuGettext => 2.0,
-        Records | Xsv | Sized => 5.0,
+        // tables: segments of 64 MiB parsed one at a time, the streams (0.6 per byte) whole (heap
+        // peaks of `aqr -c --stats` on a synthetic CSV of nine columns: 67 MB 579 MB, 209 MB 671
+        // MB = 3.2 per byte, 628 MB 1.08 GB = 1.7; the tables of the segments are what
+        // there is for a small input, 0.6 GB), 2.0 for the largest ratio of the inputs that count
+        Xsv => 2.0,
+        Records | Sized => 5.0,
         Pdf | Psd | Mp3 | Ogg | Fsb5 | Dex | Pdb | Arsc | Wasm => 7.0,
         Sqlite | Pe | MachO | Elf | Jpeg | Lz4 | Lzo | LevelDb | Bzip2 | Hdf5 | Cab | Chm | Alz | Egg | Lha | Rar => {
             9.0
