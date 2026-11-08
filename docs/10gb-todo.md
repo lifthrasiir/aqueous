@@ -74,7 +74,8 @@ footprint는 `peak memory footprint`, resident는 `maximum resident set size`이
   않았다고 한다(`kept: false`, mid는 같은 파일을 132.8 MB로 줄인다). 원인은 보지 않았다.
 - `-9`: 압축은 worker가 평균 67.4% 일한다. 56.1–77.8 s에 worker 하나만 돈다(lzma-recons, 하한
   856.75 MiB라 하한에 쓰이지 않고 혼자 돈다). heap 최대 5.20 GB는 예산(2 GB)의 260%이고 그중 5.00 GB를
-  zip이 26.6 s에 쥔다. pe가 바이트의 13.1%로 시간의 35.7%를, zip이 7.2%로 29.7%를 쓴다. spill 최대
+  zip이 26.6 s에 쥔다(`enwik9.zip`의 토큰 복사와 사슬 규칙의 일치 목록이 원인이었고 고쳐서 2.51 GB,
+  `c9-heapfix-r1.json`; 남은 것은 토큰 6 B씩, `docs/streaming-encoder-design.md`). pe가 바이트의 13.1%로 시간의 35.7%를, zip이 7.2%로 29.7%를 쓴다. spill 최대
   1.65 GB. 풀기는 74.0% 일하고, 10.5–12.4 s에 1.6 worker(`enwik9`의 wrt-recons), 한 파일에 오래
   붙는 것은 `silesia.zip` 11.3 s, `tdm-gcc-4.5.0.exe` 10.6 s, `enwik9.zip` 10.4 s이다.
 - `-5`(mid): worker 65.8%, heap 최대 2.25 GB(analyze 1.36 GB, 105 s). lzma-recons 하나(37.1 MB,

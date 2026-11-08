@@ -410,7 +410,10 @@ impl Matcher {
         let mask = RING.min(data.len().next_power_of_two()) - 1;
         let mut seq = vec![0u32; mask + 1];
         let mut next = 0;
-        let mut depths = vec![];
+        // (a histogram, the depths of all matches not held: depths above `HIST` count as it)
+        const HIST: usize = 1 << 16;
+        let mut hist = vec![0u64; HIST + 1];
+        let mut n = 0u64;
         for (p, dist) in matches {
             if p >= data.len() || dist > p || dist > WINDOW {
                 continue;
@@ -430,13 +433,23 @@ impl Matcher {
                 }
                 next = until;
             }
-            depths.push(seq[p & mask].saturating_sub(seq[(p - dist) & mask] + 1));
+            let d = seq[p & mask].saturating_sub(seq[(p - dist) & mask] + 1) as usize;
+            hist[d.min(HIST)] += 1;
+            n += 1;
         }
-        if depths.is_empty() {
+        if n == 0 {
             return 0;
         }
-        let k = ((depths.len() - 1) as f64 * q) as usize;
-        *depths.select_nth_unstable(k).1 as usize
+        // the depth at index `k` of the sorted depths
+        let k = ((n - 1) as f64 * q) as u64;
+        let mut below = 0;
+        for (d, &c) in hist.iter().enumerate() {
+            below += c;
+            if below > k {
+                return d;
+            }
+        }
+        HIST
     }
 
     /// Rank of distance `dist` among the candidates of `p` matching at least `len` bytes,
@@ -683,5 +696,36 @@ mod tests {
         let mut m = Matcher::single(data);
         let mut q = |dist| m.depth_quantile(data, [(12, dist)].into_iter(), 0.5);
         assert_eq!((q(4), q(8), q(12)), (0, 1, 2));
+    }
+
+    /// The quantile of many matches is the one of their depths sorted (taken one by one).
+    #[test]
+    fn depth_quantile_of_many_matches() {
+        let data = b"abcXabcYabcZabcQabcRabcSabcTabcUabc";
+        let matches: Vec<(usize, usize)> = [
+            (28, 4),
+            (28, 8),
+            (28, 12),
+            (24, 4),
+            (24, 12),
+            (20, 20),
+            (16, 16),
+        ]
+        .into_iter()
+        .chain([(16, 4), (12, 12), (12, 8), (8, 4), (32, 4)])
+        .collect();
+        let mut depths: Vec<usize> = matches
+            .iter()
+            .map(|&m| Matcher::single(data).depth_quantile(data, [m].into_iter(), 0.0))
+            .collect();
+        depths.sort();
+        assert!(depths.first() != depths.last());
+        let mut by_position = matches.clone();
+        by_position.sort();
+        for q in [0.0, 0.1, 0.25, 0.5, 0.75, 0.995, 1.0] {
+            let k = ((depths.len() - 1) as f64 * q) as usize;
+            let got = Matcher::single(data).depth_quantile(data, by_position.iter().copied(), q);
+            assert_eq!(got, depths[k], "q={q}");
+        }
     }
 }

@@ -2721,12 +2721,16 @@ fn heap_per_byte(format: Format) -> f64 {
             9.0
         }
         // the data written out as it is decoded, and rebuilt in verification a batch at a time:
-        // what is left is the tokens an adaptive profile keeps (6 bytes each; enwik8 at -8: 7.5)
+        // what is left is the tokens an adaptive profile keeps (6 bytes each; enwik8.gz at -8:
+        // 7.6 per byte, 7.0 once the zlib detection and the chain rule stopped copying them)
         Gzip | Zlib => 8.0,
         Raw | Flac | Png | Gif | Clip | Dds | GitPack | Lzma | Xz | SevenZip => 12.0,
         // the bodies' data written out as it is decoded; in verification, zip-recons with the
-        // bodies and the archive whole (enwik9.zip: 1.0)
-        Zip => 3.0,
+        // bodies and the archive whole (enwik9.zip: 1.0); the tokens an adaptive profile keeps
+        // (6 bytes each, 189 M for enwik9.zip, reserved at once as one for each byte of the
+        // stream) at -7 to -9 (enwik9.zip, 322.6 MB: 5.05 GB = 15.7 per byte, 1.96 GB = 6.1 once
+        // the detection and the chain rule stopped copying them), rounded up
+        Zip => 7.0,
         // the data decoded and its tokens kept (6 bytes each)
         Bvx | Fits => 36.0,
     }

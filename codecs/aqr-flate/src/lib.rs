@@ -588,7 +588,8 @@ impl Flat {
         aqr_common::progress::done(&self.data[at(part.start)..at(part.end)]);
     }
 
-    /// The parsed stream with its blocks' tokens in place.
+    /// The parsed stream with its blocks' tokens in place (a copy of them all: for the
+    /// verification only).
     fn stream_with_tokens(&self) -> Stream {
         let mut stream = self.stream.clone();
         for (b, s) in stream.blocks.iter_mut().zip(self.starts.windows(2)) {
@@ -611,13 +612,7 @@ impl Flat {
         let f = inflate::parse_segments_max(raw, segment, max, size, store)?;
         if verify {
             // The writer must round-trip what the parser saw, or nothing downstream can.
-            let mut stream = f.stream.clone();
-            for (b, s) in stream.blocks.iter_mut().zip(f.starts.windows(2)) {
-                if let Body::Fixed { tokens } | Body::Dynamic { tokens, .. } = &mut b.body {
-                    *tokens = f.tokens[s[0]..s[1]].to_vec();
-                }
-            }
-            if deflate::write_threads(&stream, &f.data, threads)? != raw {
+            if deflate::write_threads(&f.stream_with_tokens(), &f.data, threads)? != raw {
                 return Err(Error::Inconsistent);
             }
         }
@@ -1256,9 +1251,9 @@ fn choose_adaptive<'a>(
 ) -> Result<AdaptiveChoice<'a>> {
     let collect = opts.collect;
     let size = |v: &[AdaptiveSeg]| v.iter().map(|s| s.body.len() + 4).sum::<usize>();
-    let stream = opts.zlib.then(|| f.stream_with_tokens());
+    let stream = opts.zlib.then_some(f);
     // Hinted parameters that predict every token leave nothing to choose.
-    if let (Some(stream), Some(p)) = (&stream, hints.params)
+    if let (Some(stream), Some(p)) = (stream, hints.params)
         && crate::detect::plausible(stream, &f.data, p, hints)
     {
         let zr = zlib_ranges(f, p, &ranges);
@@ -1318,7 +1313,7 @@ fn choose_adaptive<'a>(
     let cuts: Vec<usize> = ranges.iter().skip(1).map(|r| r.pos).collect();
     match stream
         .as_ref()
-        .and_then(|s| zlib_params(s, &f.data, hints, &cuts))
+        .and_then(|&s| zlib_params(s, &f.data, hints, &cuts))
     {
         None => passes.store(1, std::sync::atomic::Ordering::Relaxed),
         Some((d, followed)) if d.misses > d.tokens / ZLIB_SETTLES => {
@@ -1516,26 +1511,29 @@ fn chain_rule<'a>(
     ranges: &[Range<'a>],
     collect: bool,
 ) -> Result<Option<(Rule, Option<Vec<AdaptiveSeg>>)>> {
-    let mut matches = vec![];
-    let mut p = 0;
-    let mut skips = f.skips.iter().peekable();
-    for (k, t) in f.tokens.iter().enumerate() {
-        while let Some(&&(at, len)) = skips.peek()
-            && at == k
-        {
-            p += len;
-            skips.next();
-        }
-        if let Token::Match { dist, .. } = *t {
-            matches.push((p, dist as usize));
-        }
-        p += t.span();
-    }
-    if matches.is_empty() {
+    if !f.tokens.iter().any(|t| matches!(t, Token::Match { .. })) {
         return Ok(None);
     }
+    // (the matches as (position, distance), in order; not held, they take 16 bytes each)
+    let matches = {
+        let (mut p, mut skips) = (0, f.skips.iter().peekable());
+        f.tokens.iter().enumerate().filter_map(move |(k, t)| {
+            while let Some(&&(at, len)) = skips.peek()
+                && at == k
+            {
+                p += len;
+                skips.next();
+            }
+            let at = p;
+            p += t.span();
+            match *t {
+                Token::Match { dist, .. } => Some((at, dist as usize)),
+                _ => None,
+            }
+        })
+    };
     let mut m = crate::matchfind::Matcher::single(&f.data);
-    let dq = m.depth_quantile(&f.data, matches.into_iter(), DEPTH_QUANTILE);
+    let dq = m.depth_quantile(&f.data, matches, DEPTH_QUANTILE);
     let cap = tokens::DEPTHS
         .iter()
         .position(|&d| d as usize > dq)
@@ -1609,7 +1607,7 @@ fn chain_rule<'a>(
 /// [`crate::detect`]), and the emulation that found them, if at hand, with its checkpoints
 /// where segments start at `cuts`.
 fn zlib_params<'a>(
-    stream: &Stream,
+    stream: &dyn detect::Tokens,
     data: &'a [u8],
     hints: &Hints,
     cuts: &[usize],
@@ -3284,8 +3282,7 @@ mod tests {
                 ..p
             },
         ];
-        let (found, followed) =
-            detect::detect_refined_at(&f.stream_with_tokens(), &f.data, lanes, &cuts).unwrap();
+        let (found, followed) = detect::detect_refined_at(&f, &f.data, lanes, &cuts).unwrap();
         assert_eq!((found.params, found.complete), (p, true));
         assert!(found.misses > 100);
         let followed = followed.unwrap();

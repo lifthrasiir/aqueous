@@ -8,9 +8,41 @@
 //! lazy levels never emit length-3 matches farther than 4096. The remaining candidates are
 //! then ranked by emulating them over a prefix of the stream.
 
-use crate::deflate::{Body, Stream, Token};
+use crate::deflate::{Block, Body, Stream, Token};
 use crate::header::zlib_header;
 use crate::zlib::{Checkpoint, Emulator, Followed, MultiSlow, Params, Strategy};
+
+/// A stream's blocks and their tokens, as the detection reads them: the tokens in the blocks
+/// ([`Stream`]), or all in one list ([`crate::inflate::Flat`]), without a copy to make a stream
+/// of them.
+pub trait Tokens {
+    fn blocks(&self) -> &[Block];
+    /// The tokens of block `i` (none for a stored one).
+    fn tokens(&self, i: usize) -> &[Token];
+}
+
+impl Tokens for Stream {
+    fn blocks(&self) -> &[Block] {
+        &self.blocks
+    }
+
+    fn tokens(&self, i: usize) -> &[Token] {
+        match &self.blocks[i].body {
+            Body::Fixed { tokens } | Body::Dynamic { tokens, .. } => tokens,
+            Body::Stored { .. } => &[],
+        }
+    }
+}
+
+impl Tokens for crate::inflate::Flat {
+    fn blocks(&self) -> &[Block] {
+        &self.stream.blocks
+    }
+
+    fn tokens(&self, i: usize) -> &[Token] {
+        &self.tokens[self.starts[i]..self.starts[i + 1]]
+    }
+}
 
 /// Tokens emulated per candidate in the first round of ranking; each further round covers
 /// four times as many among the candidates still tied for the fewest misses.
@@ -27,7 +59,7 @@ pub struct Detection {
 }
 
 /// Candidate zlib parameters for `stream`, or nothing if it cannot come from zlib.
-pub fn candidates(stream: &Stream) -> Vec<Params> {
+pub fn candidates(stream: &dyn Tokens) -> Vec<Params> {
     candidates_hinted(stream, &Hints::default())
 }
 
@@ -95,25 +127,25 @@ impl Hints {
 }
 
 /// [`candidates`] consistent with `hints`.
-pub fn candidates_hinted(stream: &Stream, hints: &Hints) -> Vec<Params> {
+pub fn candidates_hinted(stream: &dyn Tokens, hints: &Hints) -> Vec<Params> {
     let mut counts = vec![]; // token counts of non-final Huffman blocks
     let (mut pos, mut max_dist, mut any_match, mut stored_bytes) = (0usize, 0usize, false, 0usize);
     let (mut all_lit, mut all_rle, mut short, mut far3) = (true, true, false, false);
     let mut all_fixed = true;
-    for b in &stream.blocks {
+    for (i, b) in stream.blocks().iter().enumerate() {
         let tokens = match &b.body {
             Body::Stored { len, .. } => {
                 pos += *len as usize;
                 stored_bytes += *len as usize;
                 continue;
             }
-            Body::Fixed { tokens } => tokens,
-            Body::Dynamic { header, tokens } => {
+            Body::Fixed { .. } => stream.tokens(i),
+            Body::Dynamic { header, .. } => {
                 all_fixed = false;
-                if zlib_header(tokens) != *header {
+                if zlib_header(stream.tokens(i)) != *header {
                     return vec![];
                 }
-                tokens
+                stream.tokens(i)
             }
         };
         if !b.last {
@@ -156,10 +188,12 @@ pub fn candidates_hinted(stream: &Stream, hints: &Hints) -> Vec<Params> {
             }
         }
         None => {
-            let last = stream.blocks.last().map_or(0, |b| match &b.body {
-                Body::Fixed { tokens } | Body::Dynamic { tokens, .. } => tokens.len(),
-                Body::Stored { .. } => 0,
-            });
+            let last = match stream.blocks().last() {
+                Some(b) if !matches!(b.body, Body::Stored { .. }) => {
+                    stream.tokens(stream.blocks().len() - 1).len()
+                }
+                _ => 0,
+            };
             // The default, or 9 if the block is too big (see `mem_alternatives`).
             vec![if last < (1 << 14) { 8 } else { 9 }]
         }
@@ -279,9 +313,9 @@ impl<'a> Trial<'a> {
 
     /// Continues until `limit` tokens in total, the end of the stream, or more than
     /// `give_up` misses.
-    fn run(&mut self, stream: &Stream, limit: usize, give_up: usize) {
+    fn run(&mut self, stream: &dyn Tokens, limit: usize, give_up: usize) {
         while !self.lost && !self.d.complete && self.d.tokens < limit && self.d.misses <= give_up {
-            let Some(b) = stream.blocks.get(self.block) else {
+            let Some(b) = stream.blocks().get(self.block) else {
                 self.d.complete = true;
                 break;
             };
@@ -292,7 +326,7 @@ impl<'a> Trial<'a> {
                     self.block += 1;
                     continue;
                 }
-                Body::Fixed { tokens } | Body::Dynamic { tokens, .. } => tokens,
+                Body::Fixed { .. } | Body::Dynamic { .. } => stream.tokens(self.block),
             };
             let Some(&t) = ts.get(self.token) else {
                 self.block += 1;
@@ -325,7 +359,7 @@ impl<'a> Trial<'a> {
 /// Emulates `p` over the first `limit` tokens of `stream`; gives up (`None`) once the misses
 /// exceed `give_up`.
 pub fn trial(
-    stream: &Stream,
+    stream: &dyn Tokens,
     data: &[u8],
     p: Params,
     limit: usize,
@@ -335,7 +369,7 @@ pub fn trial(
 }
 
 fn run_trial<'a>(
-    stream: &Stream,
+    stream: &dyn Tokens,
     data: &'a [u8],
     p: Params,
     limit: usize,
@@ -353,7 +387,7 @@ fn run_trial<'a>(
 /// Whether `p` (one of [`Hints::params`], say) may have made `stream`: allowed by its structure
 /// (with any memLevel it does not tell) and by `hints`, and exact over its first tokens. A
 /// cheap check before coding the whole stream with `p`.
-pub fn plausible(stream: &Stream, data: &[u8], p: Params, hints: &Hints) -> bool {
+pub fn plausible(stream: &dyn Tokens, data: &[u8], p: Params, hints: &Hints) -> bool {
     let alts = mem_alternatives(stream);
     candidates_hinted(stream, hints)
         .iter()
@@ -364,20 +398,16 @@ pub fn plausible(stream: &Stream, data: &[u8], p: Params, hints: &Hints) -> bool
 /// The best zlib parameters for `stream`, if it looks like zlib's output at all. Candidates
 /// are emulated over growing prefixes (successive halving): only those tied for the fewest
 /// misses go on, until one is left or the whole stream has been covered.
-pub fn detect(stream: &Stream, data: &[u8]) -> Option<Detection> {
+pub fn detect(stream: &dyn Tokens, data: &[u8]) -> Option<Detection> {
     detect_among(stream, data, candidates(stream))
 }
 
 /// Other memLevels that `stream` allows when it has no full block to tell it by (memLevel
 /// only sets the hash size and the block size, so this matters for single-block streams).
-pub fn mem_alternatives(stream: &Stream) -> Vec<u8> {
-    let huff: Vec<usize> = stream
-        .blocks
-        .iter()
-        .filter_map(|b| match &b.body {
-            Body::Fixed { tokens } | Body::Dynamic { tokens, .. } => Some(tokens.len()),
-            Body::Stored { .. } => None,
-        })
+pub fn mem_alternatives(stream: &dyn Tokens) -> Vec<u8> {
+    let huff: Vec<usize> = (0..stream.blocks().len())
+        .filter(|&i| !matches!(stream.blocks()[i].body, Body::Stored { .. }))
+        .map(|i| stream.tokens(i).len())
         .collect();
     if huff.len() != 1 {
         return vec![];
@@ -391,14 +421,18 @@ pub fn mem_alternatives(stream: &Stream) -> Vec<u8> {
 
 /// [`detect_among`], then, if the best candidate is not exact over the whole stream and its
 /// memLevel was only guessed, the same candidate with the other possible memLevels.
-pub fn detect_refined(stream: &Stream, data: &[u8], candidates: Vec<Params>) -> Option<Detection> {
+pub fn detect_refined(
+    stream: &dyn Tokens,
+    data: &[u8],
+    candidates: Vec<Params>,
+) -> Option<Detection> {
     detect_refined_followed(stream, data, candidates).map(|(d, _)| d)
 }
 
 /// [`detect_refined`], and the emulation it followed the stream with as far as it went, if
 /// it has it at hand.
 pub fn detect_refined_followed<'a>(
-    stream: &Stream,
+    stream: &dyn Tokens,
     data: &'a [u8],
     candidates: Vec<Params>,
 ) -> Option<(Detection, Option<Followed<'a>>)> {
@@ -408,7 +442,7 @@ pub fn detect_refined_followed<'a>(
 /// [`detect_refined_followed`], the emulation taking its checkpoints right after the tokens
 /// ending at data positions `cuts` (increasing), as far as it went ([`Followed::cps`]).
 pub fn detect_refined_at<'a>(
-    stream: &Stream,
+    stream: &dyn Tokens,
     data: &'a [u8],
     candidates: Vec<Params>,
     cuts: &[usize],
@@ -451,7 +485,7 @@ pub fn common(candidates: Vec<Params>) -> Vec<Params> {
 /// Emulation units for `candidates`: deflate_slow candidates sharing windowBits and memLevel
 /// together (see `MultiSlow`), unless stored blocks would make their states diverge.
 fn units<'a>(
-    stream: &Stream,
+    stream: &dyn Tokens,
     data: &'a [u8],
     candidates: Vec<Params>,
     cuts: &[usize],
@@ -464,7 +498,7 @@ fn units<'a>(
             )
     };
     let has_stored = stream
-        .blocks
+        .blocks()
         .iter()
         .any(|b| matches!(b.body, Body::Stored { .. }));
     let mut units: Vec<Unit> = vec![];
@@ -489,7 +523,7 @@ fn units<'a>(
 
 /// The first of `candidates` (in their order) that predicts the first `TRIAL_TOKENS`
 /// tokens without a miss: a cheap guess, to be verified by coding the whole stream.
-pub fn first_exact(stream: &Stream, data: &[u8], candidates: Vec<Params>) -> Option<Detection> {
+pub fn first_exact(stream: &dyn Tokens, data: &[u8], candidates: Vec<Params>) -> Option<Detection> {
     let mut found: Vec<(usize, Detection)> = vec![];
     for mut u in units(stream, data, candidates, &[]) {
         u.run(stream, TRIAL_TOKENS, 0);
@@ -498,13 +532,17 @@ pub fn first_exact(stream: &Stream, data: &[u8], candidates: Vec<Params>) -> Opt
     found.into_iter().min_by_key(|&(i, _)| i).map(|(_, d)| d)
 }
 
-pub fn detect_among(stream: &Stream, data: &[u8], candidates: Vec<Params>) -> Option<Detection> {
+pub fn detect_among(
+    stream: &dyn Tokens,
+    data: &[u8],
+    candidates: Vec<Params>,
+) -> Option<Detection> {
     detect_among_followed(stream, data, candidates, &[]).map(|(d, _)| d)
 }
 
 /// [`detect_among`], and the emulation of the candidate found as far as it went.
 fn detect_among_followed<'a>(
-    stream: &Stream,
+    stream: &dyn Tokens,
     data: &'a [u8],
     candidates: Vec<Params>,
     cuts: &[usize],
@@ -576,14 +614,14 @@ impl<'a> MultiRun<'a> {
         }
     }
 
-    fn run(&mut self, stream: &Stream, limit: usize, give_up: usize) {
+    fn run(&mut self, stream: &dyn Tokens, limit: usize, give_up: usize) {
         while !self.lost && !self.complete && self.tokens < limit && self.m.any_alive() {
-            let Some(b) = stream.blocks.get(self.block) else {
+            let Some(b) = stream.blocks().get(self.block) else {
                 self.complete = true;
                 break;
             };
             let ts = match &b.body {
-                Body::Fixed { tokens } | Body::Dynamic { tokens, .. } => tokens,
+                Body::Fixed { .. } | Body::Dynamic { .. } => stream.tokens(self.block),
                 Body::Stored { .. } => {
                     self.lost = true;
                     break;
@@ -644,7 +682,7 @@ impl<'a> Unit<'a> {
         }
     }
 
-    fn run(&mut self, stream: &Stream, limit: usize, give_up: usize) {
+    fn run(&mut self, stream: &dyn Tokens, limit: usize, give_up: usize) {
         match self {
             Unit::Single(_, t) => t.run(stream, limit, give_up),
             Unit::Multi(m) => m.run(stream, limit, give_up),
@@ -704,7 +742,7 @@ impl<'a> Unit<'a> {
 /// the first `limit` tokens of `stream`, dropping each once it exceeds `give_up` misses. Not
 /// for streams with stored blocks (whose tokens the lanes would each have to guess).
 pub fn multi_trial(
-    stream: &Stream,
+    stream: &dyn Tokens,
     data: &[u8],
     params: &[Params],
     limit: usize,
@@ -713,10 +751,10 @@ pub fn multi_trial(
     let mut m = MultiSlow::new(data, params);
     let (mut pos, mut tokens) = (0, 0);
     let mut complete = true;
-    'blocks: for b in &stream.blocks {
+    'blocks: for (i, b) in stream.blocks().iter().enumerate() {
         let ts = match &b.body {
             Body::Stored { .. } => return vec![],
-            Body::Fixed { tokens } | Body::Dynamic { tokens, .. } => tokens,
+            Body::Fixed { .. } | Body::Dynamic { .. } => stream.tokens(i),
         };
         for &t in ts {
             if tokens == limit {
