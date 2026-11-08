@@ -23,7 +23,7 @@ impl Hash {
 }
 
 /// Fragments are compressed apart (`kBlockSize`).
-const FRAGMENT: usize = 1 << 16;
+pub(crate) const FRAGMENT: usize = 1 << 16;
 /// Entries of the table of a fragment, at least and at most.
 const MIN_TABLE: usize = 1 << 8;
 const MAX_TABLE: usize = 1 << 15;
@@ -121,12 +121,6 @@ pub fn compress_in(src: &[u8], hash: Hash, capacity: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// What [`compress_in`] takes of an [`aqr_api::stack`] at most, of `n` bytes into a vector of
-/// `capacity` at first: the stream, and the table on top of it.
-pub fn compress_plan(n: u64, capacity: u64) -> u64 {
-    aqr_api::stack::block(capacity.min(32 + n + n / 6)) + table_plan(n)
-}
-
 /// What [`compress_onto`] takes of an [`aqr_api::stack`] besides `out`, of `n` bytes: its table.
 pub fn table_plan(n: u64) -> u64 {
     aqr_api::stack::block(2 * table_size(n.min(FRAGMENT as u64) as usize) as u64)
@@ -147,7 +141,7 @@ pub fn compress_onto(src: &[u8], hash: Hash, out: &mut Vec<u8>) -> Result<()> {
 }
 
 /// Entries of the table for a fragment of `n` bytes (`CalculateTableSize`).
-fn table_size(n: usize) -> usize {
+pub(crate) fn table_size(n: usize) -> usize {
     n.next_power_of_two().clamp(MIN_TABLE, MAX_TABLE)
 }
 
@@ -157,7 +151,7 @@ fn load32(d: &[u8], p: usize) -> u32 {
 
 /// FORMAT.md §3.3: `src` (at most [`FRAGMENT`] bytes) compressed with `table` (cleared, and cut to
 /// [`table_size`] entries, here), appended to `out`; `CRC` for [`Hash::Crc`] (§3.2).
-fn fragment<const CRC: bool>(src: &[u8], table: &mut [u16], out: &mut Vec<u8>) {
+pub(crate) fn fragment<const CRC: bool>(src: &[u8], table: &mut [u16], out: &mut Vec<u8>) {
     let n = src.len();
     if n < MARGIN {
         if n > 0 {

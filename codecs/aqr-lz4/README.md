@@ -62,3 +62,12 @@ block of 4 KiB or more clears the state. That is not done.
   around the thresholds of the tables.
 - aqr-compress `tests/compress.rs` (`lz4_nested`): a mozlz4 around gzip around FLAC, and a
   mozlz4 found in data.
+
+## Status
+
+- The module is a part module (version 2). A block of 65547 bytes or more is compressed from a
+  sliding view, which holds a sequence's literals until its match is measured: a sequence of more
+  than `LIT_MAX` (4 MiB) literals fails, and the encoder does not take such a stream (a very high
+  acceleration that skips far is one; incompressible stretches longer than that are, too, though
+  liblz4 gives them the same way as one run of literals). The trade is accepted for a plan that
+  does not depend on the lengths (about 8.2 MiB for a block, two blocks for a frame).

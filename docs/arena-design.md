@@ -188,6 +188,7 @@ P = W_main + Σ_태스크 (W_spawn + 태스크의 계획 버퍼) + 채널 메시
 **snappy-recons, lzo-recons.** 이미 LIFO였다(snappy: 출력과 표; lzo: 스트림 목록, 출력, 스트림마다 매치 탐색기의 링과 문맥).
 - aqr-common `streams::cut`이 목록을 색인의 varint 수로 정확히 잡는다.
 - 실측 = 계획이다(`snappy_plan_holds`, `lzo_plan_holds`).
+- **snappy-recons 판 3(part 모듈).** 통째로 읽고 쓰던 것을 part 모듈로 바꿨다(창 4쪽 × 입력과 출력). 조각(64 KiB)은 서로 독립(표를 조각마다 비움)이라, 입력을 조각 하나씩 읽어 `fragment`로 압축하고 그 스트림을 창으로 내보낸다. 길이 머리(varint)는 먼저 쓴다. 계획 = 조각 + 표(조각의 `table_size`) + 조각의 스트림 상한(`MaxCompressedLength`)이라 길이와 무관하다(whole은 입력 + 출력 + 표). 네이티브는 whole `decode`를 `part`로 실행한다. 판 2와 바이트까지 같다. `leveldb-recons`는 whole로 둔다. 실측 = 계획이다(`snappy_plans_hold_past_the_fragments`).
 
 **asar-recons.** 이미 LIFO였다(본체 목록과 출력). 실측 = 계획이다(`asar_bundle_plans_hold`).
 

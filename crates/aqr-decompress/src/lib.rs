@@ -534,7 +534,20 @@ const NATIVE: &[Entry] = &[
         },
         |p, _, i, n, _| aqr_mszip::module::decode(p, i, n).map_err(err),
     ),
-    bare(SNAPPY, |p, _, i, n, t| aqr_snappy::formula::decode(p, i, n, t).map_err(err)),
+    part(
+        SNAPPY,
+        false,
+        aqr_api::emu::Entry {
+            kind: aqr_api::emu::Kind::Part,
+            windows: &[
+                aqr_api::Window::Input(0, aqr_snappy::module::WINDOW),
+                aqr_api::Window::Output(0, aqr_snappy::module::WINDOW),
+            ],
+            arity: 3,
+            call: |a| aqr_snappy::module::decode_part(a[0], a[1], a[2]),
+        },
+        |p, _, i, n, t| aqr_snappy::formula::decode(p, i, n, t).map_err(err),
+    ),
     bare(LEVELDB, |p, _, i, n, t| aqr_snappy::formula::decode_table(p, i, n, t).map_err(err)),
     part(
         ZIP,

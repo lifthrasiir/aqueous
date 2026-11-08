@@ -40,7 +40,7 @@ Contents:
 
 ## 2. The modules
 
-- **Modules**: name `snappy-recons`, version 2, for a Snappy stream; name `leveldb-recons`,
+- **Modules**: name `snappy-recons`, version 3, for a Snappy stream; name `leveldb-recons`,
   version 1, for a LevelDB table.
 - **Params**: exactly 1 byte.
 
@@ -56,6 +56,12 @@ Contents:
     `ldb/layout` and `ldb/kept`.
 - **Output**: for `snappy-recons`, `snappy(D)` of §3. For `leveldb-recons`, the table of §4.
   Its length must be the `len` the application declares.
+
+Version 3 of `snappy-recons` is a part module (windows of four pages for the input and the
+output) of the same params, input and output: the fragments (§3.1) are compressed one at a time,
+read from the input and put to the output in order, and nothing but a fragment, its table and
+its stream is held, whatever the lengths. The output is version 2's byte for byte (version 2 was
+a whole module that held its input and output). `leveldb-recons` is still a whole module.
 
 ## 3. Snappy streams
 

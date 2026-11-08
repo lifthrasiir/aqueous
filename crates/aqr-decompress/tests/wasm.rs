@@ -4315,6 +4315,47 @@ fn bundle_plans_hold() {
     plan_holds("bundle tar", f, &tar);
 }
 
+/// snappy-recons (a part module of windows of four pages) takes the same plan whatever the
+/// lengths, past a fragment: 3 MB and 9 MB, and a few bytes, of both hashes, to the page.
+#[test]
+fn snappy_plans_hold_past_the_fragments() {
+    use aqr_snappy::snappy::{self, Hash};
+    let mut rng = aqr_common::rng::Rng::new(6);
+    let words: Vec<&[u8]> = vec![b"snappy ", b"fragment ", b"literal ", b"copy ", b"table "];
+    let mut text = |n: usize| {
+        let mut t = Vec::new();
+        while t.len() < n {
+            t.extend_from_slice(words[rng.below(words.len() as u64) as usize]);
+            let k = rng.below(5) as usize;
+            t.extend(rng.bytes(k));
+        }
+        t.truncate(n);
+        t
+    };
+    let m = aqr_snappy::formula::MODULE;
+    let plan_of = |n: u64| {
+        let usage = aqr_formula::Usage {
+            params: &[0],
+            resources: &[],
+            inputs: &[n],
+            outputs: &[n],
+            contents: &vec![],
+            initial_pages: aqr_decompress::initial_pages_of(m).unwrap(),
+        };
+        m.plan_for(&usage).unwrap().instance
+    };
+    assert_eq!(plan_of(3 << 20), plan_of(900 << 20));
+    assert!(plan_of(900 << 20) < 2 << 20, "{}", plan_of(900 << 20));
+    for (n, hash) in [(7usize, Hash::Mul), (70_000, Hash::Crc), (3 << 20, Hash::Mul), (9 << 20, Hash::Crc)] {
+        let d = text(n);
+        let s = snappy::compress(&d, hash).unwrap();
+        let mut f = Formula::default();
+        let data = f.push("raw", d);
+        f.root = aqr_snappy::formula::stream(hash, data, s.len() as u64);
+        plan_holds(&format!("snappy {n} {hash:?}"), f, &s);
+    }
+}
+
 /// lz4-recons (a part module of windows of four pages) lays its memory out as a stack, its limit
 /// its plan: of mozlz4 files of a block from the narrow table's end to past the view (the
 /// literals not yet written, and the history), and of frames of one block and of several, with

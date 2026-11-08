@@ -1,4 +1,4 @@
-//! `snappy-recons` (aqr-snappy).
+//! `snappy-recons` (aqr-snappy), a part module.
 
 #![no_main]
 
@@ -6,4 +6,13 @@
 #[global_allocator]
 static STACK: aqr_api::stack::Stack = aqr_api::stack::Stack::new();
 
-aqr_modules::whole!(inputs [in0: 0], |p, _, i, len| aqr_snappy::module::decode(p, i, len, 1));
+aqr_api::entry! {
+    part fn apply(params_len, in0_len, size)
+        windows(
+            Input 0 = aqr_snappy::module::WINDOW,
+            Output 0 = aqr_snappy::module::WINDOW,
+        )
+    {
+        aqr_snappy::module::decode_part(params_len, in0_len, size)
+    }
+}
