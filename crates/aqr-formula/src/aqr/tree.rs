@@ -1110,6 +1110,56 @@ fn ended(d: &[u8], at: &mut usize, n: Option<usize>, k: usize) -> bool {
 }
 
 /// Reads a CBOR data item at `*at` of `d`.
+/// Goes over the item at `*at` of `d` at `depth` by its heads alone, as an item not read is
+/// (spec, "Partial access"): well-formed as far as they tell, but neither its texts nor a map's
+/// keys checked.
+fn skip(d: &[u8], at: &mut usize, depth: usize) -> Decoded<()> {
+    if depth > CBOR_DEPTH {
+        return super::resource("optional metadata nested too deep");
+    }
+    let bad = || invalid("bad CBOR in the optional metadata");
+    let (major, ai, arg) = head_of(d, at)?;
+    match (major, arg) {
+        (0 | 1, Some(_)) => {}
+        (2 | 3, Some(n)) => match count(d, *at, Some(n))? {
+            Some(n) => *at += n,
+            None => unreachable!("a definite length"),
+        },
+        // (chunks of the same major type, definite each, up to a break)
+        (2 | 3, None) => {
+            while d.get(*at) != Some(&0xff) {
+                match d.get(*at) {
+                    Some(&c) if c >> 5 == major && c & 0x1f != 31 => skip(d, at, depth + 1)?,
+                    _ => return bad(),
+                }
+            }
+            *at += 1;
+        }
+        (4 | 5, arg) => {
+            let n = count(d, *at, arg)?;
+            let mut k = 0;
+            while !ended(d, at, n, k) {
+                skip(d, at, depth + 1)?;
+                if major == 5 {
+                    if n.is_none() && d.get(*at) == Some(&0xff) {
+                        return bad();
+                    }
+                    skip(d, at, depth + 1)?;
+                }
+                k += 1;
+            }
+        }
+        (6, Some(_)) => skip(d, at, depth + 1)?,
+        (7, Some(v)) => match ai {
+            0..24 | 25..28 => {}
+            24 if v >= 32 => {}
+            _ => return bad(),
+        },
+        _ => return bad(),
+    }
+    Ok(())
+}
+
 fn item<'a>(d: &'a [u8], at: &mut usize, depth: usize) -> Decoded<Cbor<'a>> {
     if depth > CBOR_DEPTH {
         return super::resource("optional metadata nested too deep");
@@ -1253,7 +1303,7 @@ impl<'a> Shared<'a> {
 #[cfg(test)]
 #[allow(clippy::type_complexity)]
 fn extras(d: &[u8], n: usize) -> Decoded<(Vec<Extra>, Vec<Vec<(Vec<u8>, ForkRef)>>)> {
-    extras_given(d, n).map(|(out, forks, ..)| (out, forks))
+    extras_given(d, n, None).map(|(out, forks, ..)| (out, forks))
 }
 
 /// The extras of [`extras`] and their forks, whether each has an entry extra (a map, not null
@@ -1261,9 +1311,11 @@ fn extras(d: &[u8], n: usize) -> Decoded<(Vec<Extra>, Vec<Vec<(Vec<u8>, ForkRef)
 type Extras = (Vec<Extra>, Vec<Vec<(Vec<u8>, ForkRef)>>, Vec<bool>, Status);
 
 /// [`extras`], and whether each has an entry extra (a map, not null nor left out), and the
-/// segment's `segment-status`.
+/// segment's `segment-status`. Of the entries `wanted` tells (by number from the root, where it
+/// is given) alone: the others' entry extras gone over as CBOR, not read (left default, their
+/// forks left out).
 #[allow(clippy::type_complexity)]
-fn extras_given(d: &[u8], n: usize) -> Decoded<Extras> {
+fn extras_given(d: &[u8], n: usize, wanted: Option<&[bool]>) -> Decoded<Extras> {
     let mut out = vec![Extra::default(); n + 1];
     let mut forks = vec![Vec::new(); n + 1];
     let mut given = vec![false; n + 1];
@@ -1310,6 +1362,17 @@ fn extras_given(d: &[u8], n: usize) -> Decoded<Extras> {
             }
             let (x, f) = (&mut out[e], &mut forks[e]);
             e += 1;
+            if wanted.is_some_and(|w| !w[e - 1]) {
+                match d.get(at).map(|&b| b >> 5) {
+                    _ if d.get(at) == Some(&0xf6) => at += 1,
+                    Some(5) => {
+                        given[e - 1] = true;
+                        skip(d, &mut at, 2)?;
+                    }
+                    _ => return invalid("an entry extra not a map"),
+                }
+                continue;
+            }
             match head_of(d, &mut at)? {
                 (7, 22, _) => {}
                 (5, _, arg) => {
@@ -1786,6 +1849,16 @@ pub(crate) enum Read {
 
 /// Reads the internal structure of a metadata block.
 pub(crate) fn read(d: &[u8]) -> Decoded<Metadata> {
+    read_with(d, &mut |_| None)
+}
+
+/// The entries of a metadata block (from 1: each its parent's number, its name, and what it is),
+/// as [`read_with`] tells them.
+pub(crate) type Entries = [(usize, Vec<u8>, Read)];
+
+/// [`read`], the extras read of the entries alone that `wanted` tells, told the entries (by
+/// number from the root; none: all of them): the others' left default, their forks left out.
+pub(crate) fn read_with(d: &[u8], wanted: &mut dyn FnMut(&Entries) -> Option<Vec<bool>>) -> Decoded<Metadata> {
     let mut at = 0;
     let leb = |at: &mut usize| super::leb(d, at);
     let prev = leb(&mut at)?;
@@ -1894,7 +1967,8 @@ pub(crate) fn read(d: &[u8]) -> Decoded<Metadata> {
     if p != entries.len() {
         return invalid("bytes after the entries");
     }
-    let (extras, forks, given, status) = extras_given(opt, n)?;
+    let wanted = wanted(&out);
+    let (extras, forks, given, status) = extras_given(opt, n, wanted.as_deref())?;
     Ok(Metadata {
         prev,
         modules: module_offsets,
@@ -1912,6 +1986,37 @@ pub(crate) fn read(d: &[u8]) -> Decoded<Metadata> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Items gone over by their heads ([`skip`]) end where those read do, and are bad where
+    /// their heads are.
+    #[test]
+    fn skipped_as_read() {
+        let good: [&[u8]; 9] = [
+            &[0xa2, 0x00, 0x01, 0x05, 0xf6],
+            &[0xbf, 0x01, 0x9f, 0x02, 0x03, 0xff, 0xff],
+            &[0x7f, 0x61, b'a', 0x62, b'b', b'c', 0xff],
+            &[0x5f, 0x41, 0x00, 0xff],
+            &[0xc1, 0x1a, 0, 0, 0, 1],
+            &[0xfa, 0, 0, 0, 0],
+            &[0x83, 0x18, 0xff, 0x38, 0x00, 0xf8, 0x20],
+            &[0x82, 0xa1, 0x00, 0x80, 0xf5],
+            &[0x3b, 0, 0, 0, 0, 0, 0, 0, 1],
+        ];
+        for d in good {
+            let (mut a, mut b) = ([d, &[0xf6]].concat(), 0);
+            let mut c = 0;
+            item(&a, &mut b, 1).unwrap();
+            skip(&a, &mut c, 1).unwrap();
+            assert_eq!((b, c), (d.len(), d.len()), "{d:x?}");
+            a.truncate(d.len() - 1);
+            assert!(skip(&a, &mut 0, 1).is_err(), "{d:x?} cut short");
+        }
+        // (a pair of an indefinite map cut by a break, chunks of another type, a simple value of
+        // two bytes below 32, a reserved head)
+        for d in [&[0xbf, 0x00, 0xff][..], &[0x7f, 0x41, 0x00, 0xff], &[0xf8, 0x10], &[0x1c]] {
+            assert!(skip(d, &mut 0, 1).is_err() && item(d, &mut 0, 1).is_err(), "{d:x?}");
+        }
+    }
 
     #[test]
     fn wtf8_names() {
@@ -1995,24 +2100,24 @@ mod tests {
         assert_eq!(optional(&none, &[0], &|_| unreachable!(), Status::None), b"");
         // segment-status, alone and after entry-extras: true, or a map of what was left out
         assert_eq!(optional(&none, &[0], &|_| unreachable!(), Status::Complete), [0xa1, 0x22, 0xf5]);
-        assert_eq!(extras_given(&[0xa1, 0x22, 0xf5], 1).unwrap().3, Status::Complete);
+        assert_eq!(extras_given(&[0xa1, 0x22, 0xf5], 1, None).unwrap().3, Status::Complete);
         let both = optional(&t, &order, &|c| [c as u64 * 2, 0, 9], Status::Complete);
-        let (again, _, _, status) = extras_given(&both, 3).unwrap();
+        let (again, _, _, status) = extras_given(&both, 3, None).unwrap();
         assert!(status == Status::Complete && again == extras(&c, 3).unwrap().0);
-        assert_eq!(extras_given(&c, 3).unwrap().3, Status::None);
-        assert!(extras_given(&[0xa1, 0x22, 0xf4], 1).is_err());
+        assert_eq!(extras_given(&c, 3, None).unwrap().3, Status::None);
+        assert!(extras_given(&[0xa1, 0x22, 0xf4], 1, None).is_err());
         let left = Status::Incomplete { files: Some(3), bytes: Some(300) };
         let m = optional(&none, &[0], &|_| unreachable!(), left);
         assert_eq!(m, [0xa1, 0x22, 0xa2, 0x00, 0x03, 0x01, 0x19, 0x01, 0x2c]);
-        assert_eq!(extras_given(&m, 1).unwrap().3, left);
+        assert_eq!(extras_given(&m, 1, None).unwrap().3, left);
         let bare = Status::Incomplete { files: None, bytes: None };
         assert_eq!(optional(&none, &[0], &|_| unreachable!(), bare), [0xa1, 0x22, 0xa0]);
-        assert_eq!(extras_given(&[0xa1, 0x22, 0xa0], 1).unwrap().3, bare);
+        assert_eq!(extras_given(&[0xa1, 0x22, 0xa0], 1, None).unwrap().3, bare);
         // (other keys let be; a count of another kind, or the same key twice, not)
         let other = Status::Incomplete { files: Some(1), bytes: None };
-        assert_eq!(extras_given(&[0xa1, 0x22, 0xa2, 0x00, 0x01, 0x05, 0xf6], 1).unwrap().3, other);
-        assert!(extras_given(&[0xa1, 0x22, 0xa1, 0x00, 0x20], 1).is_err());
-        assert!(extras_given(&[0xa1, 0x22, 0xa2, 0x00, 0x01, 0x00, 0x02], 1).is_err());
+        assert_eq!(extras_given(&[0xa1, 0x22, 0xa2, 0x00, 0x01, 0x05, 0xf6], 1, None).unwrap().3, other);
+        assert!(extras_given(&[0xa1, 0x22, 0xa1, 0x00, 0x20], 1, None).is_err());
+        assert!(extras_given(&[0xa1, 0x22, 0xa2, 0x00, 0x01, 0x00, 0x02], 1, None).is_err());
         // other keys, tags and indefinite lengths read
         let other = [0xbf, 0x21, 0x9f, 0xa1, 0x22, 0xd8, 0x79, 0x0a, 0xf6, 0xff, 0x01, 0x5f, 0x41, 0x00, 0xff, 0xff];
         let (got, _) = extras(&other, 2).unwrap();

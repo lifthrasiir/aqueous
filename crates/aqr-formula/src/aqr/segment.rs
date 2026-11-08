@@ -1494,7 +1494,9 @@ mod tests {
                     }
                     None => EntryNode::Dir,
                 };
-                t.entries.push(entry(parent, name, node));
+                let mut e = entry(parent, name, node);
+                e.extra.mode = Some(0o600 + 8 * k as u32 + t.entries.len() as u32);
+                t.entries.push(e);
             }
             // (the middle one taking away "e" and what is under it)
             if k == 1 {
@@ -1561,6 +1563,27 @@ mod tests {
             let a = open_indexed_at(Payload::Plain(&out), &natives, 2, &[names(p)]).unwrap();
             assert_eq!(files(&a, p), want, "{p}");
             assert_eq!(files(&whole, p), want, "{p}");
+            // (the extras of those at the path and under it as they are; "f" of the segment
+            // read, not under it, not read)
+            let (t, all) = (a.tree().unwrap(), whole.tree().unwrap());
+            if let Some(top) = find(t, p) {
+                let mut under = vec![false; t.entries.len()];
+                for (i, e) in t.entries.iter().enumerate() {
+                    under[i] = i == top || e.parent.is_some_and(|q| under[q]);
+                }
+                for i in (0..t.entries.len()).filter(|&i| under[i]) {
+                    let w = all.entries.iter().find(|e| e.name == t.entries[i].name && e.node != EntryNode::Dir);
+                    assert!(t.entries[i].extra.mode.is_some(), "{p}: #{i}");
+                    if let Some(w) = w.filter(|_| t.entries[i].node != EntryNode::Dir) {
+                        assert_eq!(t.entries[i].extra.mode, w.extra.mode, "{p}: #{i}");
+                    }
+                }
+            }
+            if p == "d/a" {
+                let f = find(t, "f").expect("of the segment read");
+                assert_eq!(t.entries[f].extra.mode, None);
+                assert!(all.entries[find(all, "f").unwrap()].extra.mode.is_some());
+            }
             if let Some(u) = unread {
                 assert!(find(a.tree().unwrap(), u).is_none(), "{p}: {u} read");
             }

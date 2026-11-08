@@ -91,22 +91,43 @@ fn frame_at(p: Payload<'_>, at: usize, end: usize) -> Decoded<(u64, std::ops::Ra
     Ok((ty, start..start + n, next))
 }
 
-/// Whether path `names` (its names in turn) is settled by the segment of metadata `m` (`by`: its
-/// entries by their directory's number and name), the segments looked up from the last back
-/// (spec, "Partial access"): it, or an entry above it, is there as other than a directory (a
-/// tombstone too), so that the segments before it do not change what is at it.
-fn settles(m: &tree::Metadata, by: &HashMap<(usize, &[u8]), usize>, names: &[Vec<u8>]) -> bool {
+/// Path `names` (its names in turn) in a segment of `entries` (`by`: their numbers by their
+/// directory's number and name): the entry at it, where one is; and whether it is settled, the
+/// segments looked up from the last back (spec, "Partial access"): it, or an entry above it, is
+/// there as other than a directory (a tombstone too), so that the segments before it do not
+/// change what is at it.
+fn look_up(entries: &tree::Entries, by: &HashMap<(usize, &[u8]), usize>, names: &[Vec<u8>]) -> (Option<usize>, bool) {
     let mut dir = 0;
-    for name in names {
-        match by.get(&(dir, &name[..])) {
-            None => return false,
-            Some(&k) => match m.entries[k - 1].2 {
-                Read::Dir => dir = k,
-                _ => return true,
-            },
+    for (d, name) in names.iter().enumerate() {
+        let Some(&k) = by.get(&(dir, &name[..])) else { return (None, false) };
+        match entries[k - 1].2 {
+            _ if d + 1 == names.len() => return (Some(k), !matches!(entries[k - 1].2, Read::Dir)),
+            Read::Dir => dir = k,
+            _ => return (None, true),
         }
     }
-    false
+    (None, false)
+}
+
+/// Of a segment of `entries`, the paths `open` (each its names in turn) looked up ([`look_up`]):
+/// those it settles taken out of `open`; and by entry (by number from the root), whether it is at
+/// one of those or under one, whose extras are to be read.
+fn wanted(entries: &tree::Entries, open: &mut Vec<&[Vec<u8>]>) -> Vec<bool> {
+    let by: HashMap<(usize, &[u8]), usize> =
+        entries.iter().enumerate().map(|(k, (dir, name, _))| ((*dir, &name[..]), k + 1)).collect();
+    let mut wanted = vec![false; entries.len() + 1];
+    open.retain(|names| {
+        let (at, settled) = look_up(entries, &by, names);
+        if let Some(k) = at {
+            wanted[k] = true;
+        }
+        !settled
+    });
+    // (each entry after its parent)
+    for (k, (dir, ..)) in entries.iter().enumerate() {
+        wanted[k + 1] |= *dir != 0 && wanted[*dir];
+    }
+    wanted
 }
 
 /// Archive `p` (of the footer's fields from `fields_start`, and `size_hint`) indexed by its
@@ -150,13 +171,11 @@ pub(super) fn open<'c>(
                 false => "a metadata block not pointing to the one before it",
             });
         }
-        let m = tree::read(&decoded(data, ty & 0x04 != 0, true)?)?;
+        // (of paths looked up, the extras of the entries at them and under them alone)
+        let m = tree::read_with(&decoded(data, ty & 0x04 != 0, true)?, &mut |entries| {
+            paths.map(|_| wanted(entries, &mut open))
+        })?;
         let prev = usize::try_from(m.prev).ok().and_then(|b| at.checked_sub(b));
-        if !open.is_empty() {
-            let by: HashMap<(usize, &[u8]), usize> =
-                m.entries.iter().enumerate().map(|(k, (dir, name, _))| ((*dir, &name[..]), k + 1)).collect();
-            open.retain(|names| !settles(&m, &by, names));
-        }
         let settled = paths.is_some() && open.is_empty();
         metas.push((at, next, m));
         match prev {
