@@ -11,8 +11,9 @@
 //! not indexed until then), or unlinked as it is made (Unix). A region of a known length is taken
 //! of the free runs of the segments (the smallest that fits; the bytes of a region dropped are
 //! taken again by those after it, so that the spill takes about the space of the regions held,
-//! not of all made); one of a length not known has a segment of its own of [`GROWN`] bytes, its
-//! file sparse, the rest of it free once it is written. A segment starts with [`MAGIC`], so that
+//! not of all made); one larger than half a segment has a segment of its own, the rest of it
+//! free once it is written. (A stream of a length not known takes regions growing as it does:
+//! `aqr_formula::store::Writer`.) A segment starts with [`MAGIC`], so that
 //! one left behind is not taken for a file of another kind. The bytes of a region dropped are
 //! given back to the system ([`aqr_common::pages::discard`]: a hole punched in the file).
 
@@ -29,9 +30,6 @@ use memmap2::{Mmap, MmapOptions};
 
 /// Bytes of a segment, a file and a mapping each; a region larger is a segment of its own.
 const SEGMENT: usize = 256 << 20;
-/// Bytes of the segment of a region of a length not known: what it may grow to (of the file,
-/// sparse, and of the address space).
-const GROWN: usize = 64 << 30;
 /// Segments are of multiples of this (the mappings' granularity on Windows), the regions in
 /// them at multiples of [`REGION_ALIGN`].
 const ALIGN: usize = 64 << 10;
@@ -198,13 +196,13 @@ impl Drop for View {
 }
 
 /// A region being written: of its segment, where it starts, the bytes it may take and those
-/// written; and whether it is of a segment of its own of a length not known.
+/// written; and whether it is of a segment of its own.
 struct Region {
     segment: Arc<Segment>,
     start: usize,
     cap: usize,
     len: usize,
-    grown: bool,
+    own: bool,
 }
 
 impl StoreWriter for Region {
@@ -232,13 +230,13 @@ impl StoreWriter for Region {
     }
 
     fn finish(self: Box<Self>) -> Bytes {
-        let Region { segment, start, cap, len, grown } = *self;
+        let Region { segment, start, cap, len, own } = *self;
         let state = segment.state.upgrade().expect("the spill of a region being written");
         let mut state = state.lock().unwrap();
         // the rest of it free (of a segment of its own: of the segment, which regions are taken of
         // from now on)
         let used = len.next_multiple_of(REGION_ALIGN);
-        if grown {
+        if own {
             state.segments.insert(segment.id, Arc::downgrade(&segment));
         }
         if used < cap {
@@ -301,36 +299,29 @@ impl Spill {
 }
 
 impl aqr_formula::store::Store for Spill {
-    fn writer(&self, len: Option<usize>) -> Option<Box<dyn StoreWriter>> {
+    fn writer(&self, n: usize) -> Option<Box<dyn StoreWriter>> {
         let mut state = self.state.lock().unwrap();
         // (the segment made before, if it is let go, dropped once the state is)
         let mut before = None;
-        let (segment, start, cap, grown) = match len {
-            None => {
-                let s = self.grow(&mut state, GROWN).ok()?;
-                (s, HEADER, GROWN - HEADER, true)
-            }
-            Some(n) if n > SEGMENT / 2 => {
-                let size = (HEADER + n).next_multiple_of(ALIGN);
-                (self.grow(&mut state, size).ok()?, HEADER, size - HEADER, true)
-            }
-            Some(n) => {
-                let need = n.max(1).next_multiple_of(REGION_ALIGN);
-                match state.take(need) {
-                    Some((s, at)) => (s, at, need, false),
-                    None => {
-                        let s = self.grow(&mut state, SEGMENT).ok()?;
-                        state.segments.insert(s.id, Arc::downgrade(&s));
-                        state.insert(s.id, HEADER + need, SEGMENT - HEADER - need);
-                        before = state.open.replace(s.clone());
-                        (s, HEADER, need, false)
-                    }
+        let (segment, start, cap, own) = if n > SEGMENT / 2 {
+            let size = HEADER.checked_add(n)?.next_multiple_of(ALIGN);
+            (self.grow(&mut state, size).ok()?, HEADER, size - HEADER, true)
+        } else {
+            let need = n.max(1).next_multiple_of(REGION_ALIGN);
+            match state.take(need) {
+                Some((s, at)) => (s, at, need, false),
+                None => {
+                    let s = self.grow(&mut state, SEGMENT).ok()?;
+                    state.segments.insert(s.id, Arc::downgrade(&s));
+                    state.insert(s.id, HEADER + need, SEGMENT - HEADER - need);
+                    before = state.open.replace(s.clone());
+                    (s, HEADER, need, false)
                 }
             }
         };
         drop(state);
         drop(before);
-        Some(Box::new(Region { segment, start, cap, len: 0, grown }))
+        Some(Box::new(Region { segment, start, cap, len: 0, own }))
     }
 
     fn find(&self, d: &[u8]) -> Option<Bytes> {
@@ -405,7 +396,7 @@ mod tests {
 
     /// A region of `n` bytes of `fill`, of `spill`: where its bytes are, and its bytes.
     fn take(spill: &Spill, n: usize, fill: u8) -> (usize, Bytes) {
-        let mut w = spill.writer(Some(n)).unwrap();
+        let mut w = spill.writer(n).unwrap();
         assert!(w.write(&vec![fill; n]));
         let b = w.finish();
         assert!(b.len() == n && b.iter().all(|&x| x == fill));
@@ -434,7 +425,7 @@ mod tests {
         assert_eq!(d, b + (8 << 10));
         assert_eq!(take(&spill, 100 << 10, 6).0, a);
         // (of 1000 bytes told, 10 written, more than told refused: the rest free for the next)
-        let mut w = spill.writer(Some(1000)).unwrap();
+        let mut w = spill.writer(1000).unwrap();
         assert!(w.write(&[7; 10]) && !w.write(&[7; 999]));
         let (small, rs) = (w.finish(), take(&spill, 16, 8));
         assert_eq!((small.len(), rs.0 - small.as_ptr().addr()), (10, 16));
@@ -451,14 +442,14 @@ mod tests {
         std::fs::remove_dir(&dir).unwrap();
     }
 
-    /// A region of a length not known grows as it is written, within a segment of its own, the
-    /// rest of which regions after it are taken of.
+    /// A region larger than half a segment is of a segment of its own, the rest of which regions
+    /// after it are taken of.
     #[test]
-    fn grown() {
-        let dir = std::env::temp_dir().join(format!("aqr-compress-grown-{}", std::process::id()));
+    fn large() {
+        let dir = std::env::temp_dir().join(format!("aqr-compress-large-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let spill = Spill::create(&dir.join("grown")).unwrap();
-        let mut w = spill.writer(None).unwrap();
+        let spill = Spill::create(&dir.join("large")).unwrap();
+        let mut w = spill.writer(320 << 20).unwrap();
         let piece: Vec<u8> = (0..(3 << 20) + 7).map(|i| (i * 13) as u8).collect();
         for _ in 0..100 {
             assert!(w.write(&piece));
@@ -510,13 +501,13 @@ mod tests {
         let spill = Arc::new(Spill::create(&dir.join("own")).unwrap());
         let n = 40000;
         let data: Vec<u8> = (0..n).map(|i| (i * 7) as u8).collect();
-        let mut w = spill.writer(Some(n)).unwrap();
+        let mut w = spill.writer(n).unwrap();
         assert!(w.write(&data));
         let ra = w.finish();
         let (tx, rx) = std::sync::mpsc::channel();
         let s = spill.clone();
         std::thread::spawn(move || {
-            let mut w = s.writer(Some(n)).unwrap();
+            let mut w = s.writer(n).unwrap();
             assert!(w.write(&ra));
             tx.send((ra, w.finish())).unwrap();
         });

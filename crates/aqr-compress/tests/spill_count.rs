@@ -26,6 +26,22 @@ fn open_files(dir: &Path) -> Vec<String> {
     files.map(|e| e.file_name().to_string_lossy().into_owned()).collect()
 }
 
+/// The lengths of the files of [`open_files`] (as the file system tells them, sparse or not).
+#[cfg(unix)]
+fn open_lens(_: &Path) -> Vec<(String, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let fds = std::fs::read_dir("/dev/fd").unwrap();
+    let paths: Vec<_> = fds.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+    let files = paths.iter().filter_map(|p| std::fs::metadata(p).ok()).filter(|m| m.nlink() == 0);
+    files.map(|m| (format!("{}:{}", m.dev(), m.ino()), m.len())).collect()
+}
+
+#[cfg(not(unix))]
+fn open_lens(dir: &Path) -> Vec<(String, u64)> {
+    let files = std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok());
+    files.map(|e| (e.file_name().to_string_lossy().into_owned(), e.metadata().unwrap().len())).collect()
+}
+
 /// Streams of a length not known (an archive's entries gathered by kind, `ByKind`), small and
 /// kept, are regions of the segments shared by all rather than a file each.
 #[test]
@@ -53,6 +69,17 @@ fn small_streams_share_segments() {
     long.chunks(1 << 20).for_each(|c| w.write(c));
     let b = w.into_bytes();
     assert!(b.is_shared() && b == long);
+    drop(b);
+    // (and its files of about its length, not of all it might grow to: on Windows a mapping
+    // takes commit by its length, which files of 64 GiB each ran out of)
+    let before: Vec<_> = open_files(&dir);
+    let mut w = store::Writer::new(None);
+    let long: Vec<u8> = (0..(300u32 << 20) / 4).flat_map(|i| i.wrapping_mul(2654435761).to_le_bytes()).collect();
+    long.chunks(1 << 20).for_each(|c| w.write(c));
+    let lens: u64 = open_lens(&dir).iter().filter(|f| !before.contains(&f.0)).map(|f| f.1).sum();
+    let b = w.into_bytes();
+    assert!(b.is_shared() && b == long);
+    assert!(lens <= 4 * long.len() as u64, "files of {lens} bytes for a stream of {}", long.len());
     drop(b);
     drop(kept);
     drop(guard);

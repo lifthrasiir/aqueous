@@ -34,7 +34,7 @@ fn dropped_regions_freed() {
     let spill = Spill::create(&dir.join(".out")).unwrap();
     let regions: Vec<_> = (0..3)
         .map(|_| {
-            let mut w = spill.writer(Some(SEGMENT)).unwrap();
+            let mut w = spill.writer(SEGMENT).unwrap();
             assert!(w.write(&[1]));
             w.finish()
         })

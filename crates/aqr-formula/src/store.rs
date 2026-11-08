@@ -13,17 +13,22 @@ use crate::Bytes;
 pub const MIN: usize = 4 << 10;
 
 /// Bytes a [`Writer`] of a length not told gathers on the heap before it takes a region of the
-/// store (which, of a length not known, is a file of its own sized for all it may grow to): one
-/// finished within them is moved to the store as a region of a length known, of the files shared
-/// by all. (Most such streams are short: an archive's entries of a kind, [`crate::ByKind`]; a file
-/// each made thousands of files of 64 GiB at once.)
+/// store: one finished within them is moved to the store as a region of its length, of the files
+/// shared by all. (Most such streams are short: an archive's entries of a kind,
+/// [`crate::ByKind`].)
 pub const UNTOLD: usize = 8 << 20;
+
+/// How much larger a region a [`Writer`] of a length not told takes when the one it has is full:
+/// this many times the bytes it has, copied there, so that the bytes copied are a third of the
+/// stream's at most and its region this many times its length at most. (A region of all a stream
+/// might grow to made a file of 64 GiB each; on Windows a mapping takes commit by its length,
+/// and some hundreds of them ran it out.)
+pub const GROW: usize = 4;
 
 /// Regions of bytes outside the heap.
 pub trait Store: Send + Sync {
-    /// A region to write, of `len` bytes at most where told, else of as many as are written
-    /// (within what the store takes of a region: tens of GiB). None where there is no room.
-    fn writer(&self, len: Option<usize>) -> Option<Box<dyn StoreWriter>>;
+    /// A region to write of `len` bytes at most. None where there is no room.
+    fn writer(&self, len: usize) -> Option<Box<dyn StoreWriter>>;
 
     /// `d` as bytes of the store, sharing them, where it is within a region of it still held
     /// (and the store would rather share the region than have it copied).
@@ -99,60 +104,79 @@ impl DerefMut for Buffer {
 }
 
 /// Bytes of a stream made in order: written to the store as they come where one is set (and
-/// they are not told to be few; of a length not told, past [`UNTOLD`] bytes), else gathered on
-/// the heap. A stream of a formula is pushed of
-/// it as it is (`Formula::push(class, writer)`), so that a recompressor making a long stream
-/// holds none of it.
+/// they are not told to be few; of a length not told, past [`UNTOLD`] bytes, in regions growing
+/// by [`GROW`]), else gathered on the heap. A stream of a formula is pushed of it as it is
+/// (`Formula::push(class, writer)`), so that a recompressor making a long stream holds none of
+/// it.
 pub struct Writer {
     repr: WriterRepr,
-    /// Of a length not told, and on the heap still ([`UNTOLD`]).
+    /// Of a length not told.
     untold: bool,
 }
 
 enum WriterRepr {
     Heap(Vec<u8>),
-    Stored(Box<dyn StoreWriter>),
+    /// A region of the store, and the bytes it takes.
+    Stored(Box<dyn StoreWriter>, usize),
+}
+
+/// A region of the store of `GROW` times `need` bytes (and of [`UNTOLD`] at least), `d` written
+/// to it first.
+fn grown(d: &[u8], need: usize) -> Option<WriterRepr> {
+    let cap = need.max(UNTOLD).checked_mul(GROW)?;
+    let mut w = store()?.writer(cap)?;
+    w.write(d).then_some(WriterRepr::Stored(w, cap))
 }
 
 impl Writer {
     /// A writer of `len` bytes at most where told.
     pub fn new(len: Option<usize>) -> Writer {
         let stored = match len {
-            Some(n) if n < MIN => None,
-            None => None,
-            _ => store().and_then(|s| s.writer(len)),
+            Some(n) if n >= MIN => store().and_then(|s| s.writer(n)).map(|w| WriterRepr::Stored(w, n)),
+            _ => None,
         };
-        let repr = match stored {
-            Some(w) => WriterRepr::Stored(w),
-            None => WriterRepr::Heap(Vec::with_capacity(len.unwrap_or(0))),
-        };
+        let repr = stored.unwrap_or_else(|| WriterRepr::Heap(Vec::with_capacity(len.unwrap_or(0))));
         Writer { repr, untold: len.is_none() }
     }
 
     pub fn write(&mut self, d: &[u8]) {
         // (as a stream is made, a recompression over its heap gives up: `aqr_common::allowance`)
         aqr_common::allowance::check();
-        if self.untold
-            && let WriterRepr::Heap(v) = &self.repr
-            && v.len() + d.len() > UNTOLD
-        {
-            // (long: a region of its own, the bytes so far first; else the heap's for good)
-            self.untold = false;
-            if let Some(mut w) = store().and_then(|s| s.writer(None))
-                && w.write(v)
-            {
-                self.repr = WriterRepr::Stored(w);
-            }
-        }
         match &mut self.repr {
-            WriterRepr::Heap(v) => v.extend_from_slice(d),
-            WriterRepr::Stored(w) => {
+            WriterRepr::Heap(v) => {
+                // (of a length not told and long now: a region of the store, the bytes so far
+                // first; else on the heap)
+                let need = v.len() + d.len();
+                if self.untold
+                    && need > UNTOLD
+                    && let Some(r) = grown(v, need)
+                {
+                    self.repr = r;
+                    return self.write(d);
+                }
+                // (the store refusing it: not asked again)
+                self.untold &= need <= UNTOLD;
+                v.extend_from_slice(d)
+            }
+            WriterRepr::Stored(w, cap) => {
                 if !w.write(d) {
-                    // (no room in its region: the rest on the heap, after what it has)
-                    let WriterRepr::Stored(w) = std::mem::replace(&mut self.repr, WriterRepr::Heap(Vec::new())) else {
+                    let (cap, WriterRepr::Stored(w, _)) =
+                        (*cap, std::mem::replace(&mut self.repr, WriterRepr::Heap(Vec::new())))
+                    else {
                         unreachable!("stored")
                     };
-                    let mut v = w.finish().to_vec();
+                    let had = w.finish();
+                    // (no room in its region: of a length not told, one larger, the bytes so far
+                    // first; else the rest on the heap, after what it has)
+                    if self.untold
+                        && let Some(r) = grown(&had, cap.max(had.len() + d.len()))
+                    {
+                        self.repr = r;
+                        drop(had);
+                        return self.write(d);
+                    }
+                    self.untold = false;
+                    let mut v = had.to_vec();
                     v.extend_from_slice(d);
                     self.repr = WriterRepr::Heap(v);
                 }
@@ -168,7 +192,7 @@ impl Writer {
                 b
             }
             WriterRepr::Heap(v) => v.into(),
-            WriterRepr::Stored(w) => w.finish(),
+            WriterRepr::Stored(w, _) => w.finish(),
         }
     }
 }
@@ -196,7 +220,7 @@ pub fn spill(b: &mut Bytes) {
     if b.is_shared() || b.sunk_in().is_some() || b.is_lazy() || b.len() < MIN {
         return;
     }
-    let Some(mut w) = store().and_then(|s| s.writer(Some(b.len()))) else { return };
+    let Some(mut w) = store().and_then(|s| s.writer(b.len())) else { return };
     if w.write(b) {
         *b = w.finish();
     }
@@ -302,8 +326,8 @@ mod tests {
     }
 
     impl Store for Small {
-        fn writer(&self, len: Option<usize>) -> Option<Box<dyn StoreWriter>> {
-            Some(Box::new(SmallWriter(Vec::new(), len.unwrap_or(self.cap).min(self.cap))))
+        fn writer(&self, len: usize) -> Option<Box<dyn StoreWriter>> {
+            Some(Box::new(SmallWriter(Vec::new(), len.min(self.cap))))
         }
     }
 

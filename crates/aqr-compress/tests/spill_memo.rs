@@ -14,8 +14,8 @@ use aqr_formula::store::{Store, StoreWriter};
 struct Counting(Spill, AtomicUsize);
 
 impl Store for Counting {
-    fn writer(&self, len: Option<usize>) -> Option<Box<dyn StoreWriter>> {
-        self.1.fetch_add(len.unwrap_or(0), Ordering::Relaxed);
+    fn writer(&self, len: usize) -> Option<Box<dyn StoreWriter>> {
+        self.1.fetch_add(len, Ordering::Relaxed);
         self.0.writer(len)
     }
 
