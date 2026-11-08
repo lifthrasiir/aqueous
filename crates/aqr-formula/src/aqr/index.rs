@@ -366,6 +366,7 @@ impl<'c> Index<'c> {
         walked: &mut [Walked],
         items: &mut BTreeMap<usize, (&'c [u8], bool, Option<usize>)>,
         formulas: &mut Vec<(&'c [u8], Option<usize>)>,
+        decoded_formulas: &mut Vec<Option<Vec<u8>>>,
         aux: &mut Auxiliary<'c>,
     ) -> Decoded<(LeafBlock<'c>, Option<usize>)> {
         let (at, s) = (self.leaf_at[l], self.leaf_segment[l]);
@@ -418,6 +419,7 @@ impl<'c> Index<'c> {
                 }
                 self.walk(s, next, need, &mut walked[s], items, aux)?;
                 formulas.push((data, dict));
+                decoded_formulas.push(Some(d));
                 let leaf = LeafBlock::Formula {
                     outputs,
                     data: formulas.len() - 1,
@@ -440,12 +442,12 @@ impl<'c> Index<'c> {
         let mut leaves: Vec<LeafBlock<'c>> = (0..self.leaf_at.len()).map(|_| LeafBlock::Unread).collect();
         let mut walked: Vec<Walked> = (0..self.segments.len()).map(|_| Walked::new()).collect();
         let mut items = BTreeMap::new();
-        let mut formulas = Vec::new();
+        let (mut formulas, mut decoded_formulas) = (Vec::new(), Vec::new());
         let mut aux = Auxiliary::default();
         let mut firsts = Vec::new();
         // (the last first: a formula block's walk takes those of the formula blocks after it)
         for &l in picked.iter().rev() {
-            leaves[l] = match self.leaf(l, &mut walked, &mut items, &mut formulas, &mut aux) {
+            leaves[l] = match self.leaf(l, &mut walked, &mut items, &mut formulas, &mut decoded_formulas, &mut aux) {
                 Ok((leaf, first)) => {
                     firsts.extend(first.map(|f| (l, f)));
                     leaf
@@ -525,6 +527,7 @@ impl<'c> Index<'c> {
             leaf_dictionary: vec![None; self.leaf_at.len()],
             segments,
             formulas,
+            decoded_formulas,
             non_leaf: items.into_values().collect(),
             non_leaf_at,
             modules,

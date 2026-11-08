@@ -3155,8 +3155,14 @@ impl<'c, 'n> Archive<'c, 'n> {
             .enumerate()
             .map(|(i, leaf)| match *leaf {
                 LeafBlock::Formula { data, .. } if taken(i) => {
-                    let (d, dict) = blocks.formulas[data];
-                    decoded_with(d, true, true, dict.map(|d| &blocks.dictionaries[d])).map(Some)
+                    match blocks.decoded_formulas.get(data).and_then(Option::as_deref) {
+                        Some(d) => Ok(Some(std::borrow::Cow::Borrowed(d))),
+                        None => {
+                            let (d, dict) = blocks.formulas[data];
+                            decoded_with(d, true, true, dict.map(|d| &blocks.dictionaries[d]))
+                                .map(|d| Some(std::borrow::Cow::Owned(d)))
+                        }
+                    }
                 }
                 _ => Ok(None),
             })
@@ -3508,6 +3514,10 @@ struct Blocks<'c> {
     /// (an archive has a formula block a leaf, and opening it to take a few of them should not
     /// take all).
     formulas: Vec<(&'c [u8], Option<usize>)>,
+    /// The formula data decoded already, by formula block (none, or shorter: not yet), as the
+    /// formula blocks of the leaves taken are where they are read for what they refer to
+    /// ([`index::Index::blocks_for`]).
+    decoded_formulas: Vec<Option<Vec<u8>>>,
     /// The data of each non-leaf block, whether it is Zstandard data, and its dictionary.
     non_leaf: Vec<(&'c [u8], bool, Option<usize>)>,
     /// Where each non-leaf block starts, in the archive.
@@ -3607,6 +3617,7 @@ fn parse(d: &[u8], base: usize, size_hint: u64, metadata: bool, sealed: bool) ->
         leaf_dictionary: Vec::new(),
         segments: Vec::new(),
         formulas: Vec::new(),
+        decoded_formulas: Vec::new(),
         non_leaf: Vec::new(),
         non_leaf_at: Vec::new(),
         modules: Vec::new(),
