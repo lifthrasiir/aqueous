@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use aqr_formula::{Apply, Contents, Formula, Module, Modules, NO_LIMIT, Node, PAGE, Plan, Usage};
+use aqr_formula::{Apply, Contents, Formula, Module, Modules, NO_LIMIT, Node, Plan};
 use xxhash_rust::xxh3::Xxh3;
 
 /// What an application is but for its inputs' bytes: its module, parameters, resources'
@@ -59,24 +59,15 @@ impl Limits {
 /// and a task limit for each class.
 pub(crate) fn limit(a: &Apply, lens: &[u64], outputs: &[u64], contents: &dyn Contents) -> Plan {
     let none = Plan { instance: NO_LIMIT, tasks: Vec::new() };
-    let Some(initial_pages) = a.module.plan.and(aqr_decompress::initial_pages_of(a.module)) else {
-        return none;
-    };
     let resources: Vec<u64> = a.resources.iter().map(|r| r.len() as u64).collect();
-    let usage = Usage { params: &a.params, resources: &resources, inputs: lens, outputs, contents, initial_pages };
-    let Some(plan) = a.module.plan_for(&usage) else {
-        eprintln!("aqr-compress: no memory plan of {} (a bug), none declared", a.module);
-        return none;
-    };
-    // (an input's or output's within its window, of a part module)
-    let windows = aqr_decompress::windows_of(a.module);
-    let fit = |n: u64, window: Option<u64>| n.div_ceil(PAGE).min(window.unwrap_or(u64::MAX)).saturating_mul(PAGE);
-    let window = |output: bool, i: usize| windows.iter().find(|w| (w.0, w.1 as usize) == (output, i)).map(|w| w.2);
-    let imported: u64 = [&[a.params.len() as u64][..], &resources].concat().iter().map(|&n| fit(n, None)).sum::<u64>()
-        + lens.iter().enumerate().map(|(k, &n)| fit(n, window(false, k))).sum::<u64>()
-        + outputs.iter().enumerate().map(|(j, &n)| fit(n, window(true, j))).sum::<u64>();
-    // (a plan is what the module takes at most: no room)
-    Plan { instance: imported.saturating_add(plan.instance), tasks: plan.tasks }
+    match aqr_decompress::needed_by(a.module, &a.params, &resources, lens, outputs, contents) {
+        Ok(Some(plan)) => plan,
+        Ok(None) => none,
+        Err(()) => {
+            eprintln!("aqr-compress: no memory plan of {} (a bug), none declared", a.module);
+            none
+        }
+    }
 }
 
 /// The bound on the minimal bound of an application ([`Plan::minimal`]) that the encoder keeps

@@ -158,6 +158,11 @@ P = W_main + Σ_태스크 (W_spawn + 태스크의 계획 버퍼) + 채널 메시
 - 모듈마다 `plan(params, 길이들)`을 두고, 디코더의 배치와 인코더의 선언이 같은 함수에서 나온다.
   `Module::with_plan`이면 aqr-compress는 그것을 여유 없이 선언한다(초기 메모리 + 계획을 페이지로 올림).
   `aqr_api::stack::whole`이 `aqr_api::whole`의 사본을 센다.
+- 네이티브로 도는 알려진 모듈도 같은 한도를 지킨다(`NativeLoaded`, aqr-decompress). 실행 전에 적용의 계획
+  (`aqr_decompress::needed_by`: aqr-compress가 선언할 때 쓰는 그 함수)을 Apply의 메모리 한도와 태스크 한도에 대 보고,
+  넘으면 Wasm과 같이 자원 실패(`memory limit exceeded`)다. 계획이 내용을 읽는 모듈(flate-set의 레코드와 색인 등)은
+  입력을 한도 이하일 때만 통째로 당겨 와서 계산하고 그대로 다시 먹인다. 계획을 못 구하면(내용이 없거나 계획 오류)
+  그 모듈을 Wasm으로 돌려 한도를 거기서 강제한다. 옛 Apply(opcode 11)는 한도를 강제하지 않는다.
 - 측정은 계획이 맞는지 보는 테스트로만 쓴다.
 
 **lz4-recons(시험).** 이미 LIFO였다: `whole`의 사본, 출력(정확한 용량, 가장 먼저), 압축기의 표, 프레임이면 블록 하나.

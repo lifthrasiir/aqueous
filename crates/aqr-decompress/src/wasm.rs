@@ -1420,6 +1420,8 @@ pub fn windows(wasm: &[u8]) -> Vec<(bool, u32, u64)> {
                 _ => {}
             }
         }
+        // (the imports are all there is to read: not the thousands of functions after them)
+        break;
     }
     out
 }

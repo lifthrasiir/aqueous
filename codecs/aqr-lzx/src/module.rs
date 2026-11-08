@@ -50,7 +50,7 @@ pub(crate) fn cut<'a>(
     let (mut k, mut d, mut r) = (kept, data, records);
     let mut out = Vec::with_capacity(lens.len());
     for [nk, nd, nr] in lens {
-        let mut take = |from: &mut &'a [u8], n: usize| {
+        let take = |from: &mut &'a [u8], n: usize| {
             let (a, b) = from.split_at(n);
             *from = b;
             a

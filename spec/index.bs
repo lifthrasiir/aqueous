@@ -2866,6 +2866,10 @@ Since every application of a module depends only on [=module/wasm_module=] and i
 a decompressor MAY apply a module whose [=module hash=] it knows
 with an implementation of its own (e.g. native code) instead of instantiating [=module/wasm_module=],
 as long as the result is indistinguishable from the definition, including [=invalid archive=] failures.
+That includes the memory limits an application declares ([[#module-execution]]):
+an implementation of its own MUST fail an application with a [=resource failure=] where the module's memories would exceed them,
+which it can tell from the application's memory requirements before it runs
+(or else by applying the module with an engine, where the limits are enforced as it runs).
 Such a decompressor needs neither the bytes of the module nor a WebAssembly engine,
 whether the module is given by a [=shorthand block=] or in full.
 A decompressor MAY refuse to apply a module as its [=conformance level=] allows ([[#conformance-levels]]),

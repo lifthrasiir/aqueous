@@ -792,36 +792,71 @@ pub fn built(m: Module) -> Option<&'static aqr_modules::Known> {
     aqr_modules::KNOWN.iter().find(|k| k.name == m.name && k.version == m.version)
 }
 
+/// What a module's imports say of its memories, read once: the pages of its working memory as
+/// it is instantiated, and the windows of its inputs and outputs (whether each is an output's,
+/// its index and its pages).
+#[cfg(feature = "wasm")]
+type ImportShape = (Option<u64>, Vec<(bool, u32, u64)>);
+
+#[cfg(feature = "wasm")]
+fn import_shape(m: Module) -> Option<ImportShape> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    type Shapes = HashMap<(&'static str, u16), Option<ImportShape>>;
+    static SHAPES: Mutex<Option<Shapes>> = Mutex::new(None);
+    let k = built(m)?;
+    let mut shapes = SHAPES.lock().unwrap();
+    (shapes.get_or_insert_with(HashMap::new).entry((k.name, k.version)))
+        .or_insert_with(|| {
+            let wasm = aqr_formula::aqr::module_of_block_data(k.block)?;
+            Some((wasm::initial_pages(&wasm), wasm::windows(&wasm)))
+        })
+        .clone()
+}
+
 /// The pages of the working memory of the Wasm module of `m` (aqr-modules') as it is
 /// instantiated, for its memory plan ([`aqr_formula::Usage::initial_pages`]); read once.
 #[cfg(feature = "wasm")]
 pub fn initial_pages_of(m: Module) -> Option<u64> {
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-    type Pages = HashMap<(&'static str, u16), Option<u64>>;
-    static PAGES: Mutex<Option<Pages>> = Mutex::new(None);
-    let k = built(m)?;
-    let mut pages = PAGES.lock().unwrap();
-    *pages
-        .get_or_insert_with(HashMap::new)
-        .entry((k.name, k.version))
-        .or_insert_with(|| aqr_formula::aqr::module_of_block_data(k.block).and_then(|wasm| wasm::initial_pages(&wasm)))
+    import_shape(m)?.0
 }
 
 /// The windows of the memories of the inputs and outputs of the Wasm module of `m` that
 /// aqr-modules built ([`wasm::windows`]): whether each is an output's, its index and its pages.
+#[cfg(feature = "wasm")]
 pub fn windows_of(m: Module) -> Vec<(bool, u32, u64)> {
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-    type Windows = HashMap<(&'static str, u16), Vec<(bool, u32, u64)>>;
-    static WINDOWS: Mutex<Option<Windows>> = Mutex::new(None);
-    let Some(k) = built(m) else { return Vec::new() };
-    let mut windows = WINDOWS.lock().unwrap();
-    (windows.get_or_insert_with(HashMap::new).entry((k.name, k.version)))
-        .or_insert_with(|| {
-            aqr_formula::aqr::module_of_block_data(k.block).map(|w| wasm::windows(&w)).unwrap_or_default()
-        })
-        .clone()
+    import_shape(m).map(|s| s.1).unwrap_or_default()
+}
+
+/// The memory an application of `m` needs, as aqr-compress declares it in the Apply instruction
+/// and as the decoder checks it: the memories imported (the parameters, the resources, the
+/// inputs and the outputs, the last two within their windows, a page at least each) with the
+/// module's plan of its working memory for the instance, and the plan's task limits. The lengths
+/// are those of the resources, inputs and outputs; `contents` the inputs, for plans that read
+/// them. `Ok(None)` for a module of no plan or none built (tests'); `Err(())` where its plan
+/// cannot be worked out (a bug of the plan, or contents missing).
+#[cfg(feature = "wasm")]
+pub fn needed_by(
+    m: Module,
+    params: &[u8],
+    resources: &[u64],
+    inputs: &[u64],
+    outputs: &[u64],
+    contents: &dyn aqr_formula::Contents,
+) -> std::result::Result<Option<aqr_formula::Plan>, ()> {
+    use aqr_formula::{PAGE, Plan, Usage};
+    let Some(initial_pages) = m.plan.and(initial_pages_of(m)) else { return Ok(None) };
+    let usage = Usage { params, resources, inputs, outputs, contents, initial_pages };
+    let plan = m.plan_for(&usage).ok_or(())?;
+    // (an input's or output's within its window, of a part module)
+    let windows = windows_of(m);
+    let fit = |n: u64, window: Option<u64>| n.div_ceil(PAGE).min(window.unwrap_or(u64::MAX)).saturating_mul(PAGE);
+    let window = |output: bool, i: usize| windows.iter().find(|w| (w.0, w.1 as usize) == (output, i)).map(|w| w.2);
+    let imported: u64 = [&[params.len() as u64][..], resources].concat().iter().map(|&n| fit(n, None)).sum::<u64>()
+        + inputs.iter().enumerate().map(|(k, &n)| fit(n, window(false, k))).sum::<u64>()
+        + outputs.iter().enumerate().map(|(j, &n)| fit(n, window(true, j))).sum::<u64>();
+    // (a plan is what the module takes at most: no room)
+    Ok(Some(Plan { instance: imported.saturating_add(plan.instance), tasks: plan.tasks }))
 }
 
 /// The name of the module of `wasm` ([`known`]), for [`aqr::Natives::identified_by`].
@@ -932,9 +967,174 @@ fn metered<R>(m: Module, params: &[u8], inputs: &[u64], sizes: &[u64], f: impl F
 struct NativeLoaded<'a> {
     native: &'a Native,
     module: Module,
+    /// Its Wasm module, which runs where the plan of an application cannot be worked out, as the
+    /// memory limit is enforced there only.
+    wasm: Vec<u8>,
+    fallback: std::sync::OnceLock<aqr::Decoded<Box<dyn Loaded + 'a>>>,
 }
 
-impl NativeLoaded<'_> {
+/// How an application stands against the limits it declares ([`NativeLoaded::verdict`]).
+enum Verdict {
+    /// Within them: it runs natively.
+    Within,
+    /// Over them: the Wasm host would fail it too.
+    Over,
+    /// Not known: it runs as WebAssembly, where the limits are enforced.
+    Unknown,
+}
+
+/// The inputs of a part module's application, pulled whole as a plan asks for their contents
+/// ([`aqr_formula::Contents`]), those no longer than the memory limit: the application would
+/// fail before its first pull otherwise.
+struct Pulled<'a> {
+    inputs: Vec<std::cell::RefCell<&'a mut dyn PartIn>>,
+    contents: Vec<std::cell::OnceCell<Option<Vec<u8>>>>,
+    failed: Vec<std::cell::RefCell<Option<Failure>>>,
+    limit: u64,
+}
+
+impl<'a> Pulled<'a> {
+    fn new<'b: 'a>(inputs: &'a mut [&'b mut dyn PartIn], limit: u64) -> Self {
+        let n = inputs.len();
+        Pulled {
+            inputs: inputs
+                .iter_mut()
+                .map(|i| {
+                    let i: &'a mut (dyn PartIn + 'a) = &mut **i;
+                    std::cell::RefCell::new(i)
+                })
+                .collect(),
+            contents: (0..n).map(|_| Default::default()).collect(),
+            failed: (0..n).map(|_| Default::default()).collect(),
+            limit,
+        }
+    }
+
+    /// The inputs again, those pulled replayed.
+    fn into_replays(self) -> Vec<Replay<'a>> {
+        let parts = self.inputs.into_iter().zip(self.contents).zip(self.failed);
+        parts
+            .map(|((inner, c), f)| Replay {
+                inner: inner.into_inner(),
+                buf: c.into_inner().flatten(),
+                pos: 0,
+                failed: f.into_inner(),
+            })
+            .collect()
+    }
+}
+
+impl aqr_formula::Contents for Pulled<'_> {
+    fn input(&self, k: usize) -> Option<&[u8]> {
+        self.contents
+            .get(k)?
+            .get_or_init(|| {
+                let mut i = self.inputs[k].borrow_mut();
+                let n = i.len();
+                if n > self.limit {
+                    return None;
+                }
+                let mut buf = Vec::with_capacity(n as usize);
+                match i.pull(n, &mut |d| buf.extend_from_slice(d)) {
+                    Ok(()) => Some(buf),
+                    Err(f) => {
+                        *self.failed[k].borrow_mut() = Some(f);
+                        None
+                    }
+                }
+            })
+            .as_deref()
+    }
+}
+
+/// An input of a part module's application that may have been pulled whole already.
+struct Replay<'a> {
+    inner: &'a mut dyn PartIn,
+    buf: Option<Vec<u8>>,
+    pos: u64,
+    /// Its failure to be pulled.
+    failed: Option<Failure>,
+}
+
+impl PartIn for Replay<'_> {
+    fn len(&self) -> u64 {
+        self.inner.len()
+    }
+
+    fn pull(&mut self, hi: u64, put: &mut dyn FnMut(&[u8])) -> aqr::Decoded<()> {
+        let Some(buf) = &self.buf else { return self.inner.pull(hi, put) };
+        let (lo, hi) = (self.pos.min(hi), hi.min(buf.len() as u64));
+        put(&buf[lo as usize..hi as usize]);
+        self.pos = hi;
+        Ok(())
+    }
+}
+
+/// The inputs of an application as a plan reads them.
+struct Slices<'a>(&'a [&'a [u8]]);
+
+impl aqr_formula::Contents for Slices<'_> {
+    fn input(&self, k: usize) -> Option<&[u8]> {
+        self.0.get(k).copied()
+    }
+}
+
+impl<'a> NativeLoaded<'a> {
+    fn new(native: &'a Native, module: Module, wasm: &[u8]) -> Self {
+        NativeLoaded { native, module, wasm: wasm.to_vec(), fallback: Default::default() }
+    }
+
+    /// The module as WebAssembly.
+    fn wasm(&self) -> aqr::Decoded<&(dyn Loaded + 'a)> {
+        #[cfg(feature = "wasm")]
+        {
+            let w = self.fallback.get_or_init(|| Wasm.load(&self.wasm));
+            w.as_ref().map(|b| &**b).map_err(Failure::clone)
+        }
+        #[cfg(not(feature = "wasm"))]
+        Err(Failure::Resource(
+            "memory limit not known, which is enforced only as WebAssembly (the feature wasm)".into(),
+        ))
+    }
+
+    /// Whether the application is within the memory limit and task limits it declares, which the
+    /// Wasm host enforces and native code does not: its plan (what a Wasm instance would need
+    /// at most, [`needed_by`]) against them. The earlier Apply (`NO_LIMIT` and no task limits, of
+    /// the modules of releases) has none to enforce. A plan that cannot be worked out is
+    /// `Unknown`: the module's bytes are at hand, and WebAssembly enforces the limits whatever
+    /// the plan says.
+    #[allow(clippy::too_many_arguments)]
+    fn verdict(
+        &self,
+        params: &[u8],
+        resources: &[Resource],
+        inputs: &[u64],
+        sizes: &[u64],
+        contents: &dyn aqr_formula::Contents,
+        memory_limit: u64,
+        task_limits: &[u64],
+    ) -> Verdict {
+        if memory_limit == aqr_formula::NO_LIMIT && task_limits.is_empty() {
+            return Verdict::Within;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            let resources: Vec<u64> = resources.iter().map(|r| r.len() as u64).collect();
+            match needed_by(self.module, params, &resources, inputs, sizes, contents) {
+                Ok(Some(p)) => {
+                    let tasks = p.tasks.iter().zip(task_limits).all(|(&n, &l)| n <= l);
+                    if p.instance <= memory_limit && tasks { Verdict::Within } else { Verdict::Over }
+                }
+                Ok(None) | Err(()) => Verdict::Unknown,
+            }
+        }
+        #[cfg(not(feature = "wasm"))]
+        {
+            let _ = (params, resources, inputs, sizes, contents);
+            Verdict::Within
+        }
+    }
+
     /// The entry point of its code as a part module, where it is one.
     fn part(&self) -> Option<aqr_api::emu::Entry> {
         NATIVE.iter().find(|e| e.module == self.module).and_then(|e| match e.decode {
@@ -1011,15 +1211,38 @@ impl Loaded for NativeLoaded<'_> {
         inputs: &mut [&mut dyn PartIn],
         outputs: &mut [&mut dyn PartOut],
         sizes: &[u64],
-        _: u64,
-        _: &[u64],
+        memory_limit: u64,
+        task_limits: &[u64],
     ) -> aqr::Decoded<()> {
         let Some(entry) = self.part() else { return Err(Failure::Resource("not a part module".into())) };
+        let lens: Vec<u64> = inputs.iter().map(|i| i.len()).collect();
+        // (a plan reading the inputs' contents has them pulled, those short of the memory limit)
+        let pulled = Pulled::new(inputs, memory_limit);
+        let verdict = self.verdict(params, resources, &lens, sizes, &pulled, memory_limit, task_limits);
+        let mut replays = pulled.into_replays();
+        if let Some(f) = replays.iter().find_map(|r| r.failed.clone()) {
+            return Err(f);
+        }
+        let mut inputs: Vec<&mut dyn PartIn> = replays.iter_mut().map(|r| r as &mut dyn PartIn).collect();
+        match verdict {
+            Verdict::Within => {}
+            Verdict::Over => return Err(Failure::Resource("memory limit exceeded".into())),
+            Verdict::Unknown => {
+                return self.wasm()?.apply_part(
+                    params,
+                    resources,
+                    &mut inputs,
+                    outputs,
+                    sizes,
+                    memory_limit,
+                    task_limits,
+                );
+            }
+        }
         let _s = aqr_common::trace::span(self.module.name);
         let resources: Vec<&[u8]> = resources.iter().map(|r| &r[..]).collect();
-        let lens: Vec<u64> = inputs.iter().map(|i| i.len()).collect();
         metered(self.module, params, &lens, sizes, || {
-            streamed(&entry, params, &resources, inputs, outputs, sizes).map_err(|f| match f {
+            streamed(&entry, params, &resources, &mut inputs, outputs, sizes).map_err(|f| match f {
                 Failure::Invalid(m) => Failure::Invalid(format!("{}: {m}", self.module)),
                 f => f,
             })
@@ -1032,9 +1255,17 @@ impl Loaded for NativeLoaded<'_> {
         resources: &[Resource],
         inputs: &[&[u8]],
         sizes: &[u64],
-        _: u64,
-        _: &[u64],
+        memory_limit: u64,
+        task_limits: &[u64],
     ) -> aqr::Decoded<Vec<Vec<u8>>> {
+        let lens: Vec<u64> = inputs.iter().map(|i| i.len() as u64).collect();
+        match self.verdict(params, resources, &lens, sizes, &Slices(inputs), memory_limit, task_limits) {
+            Verdict::Within => {}
+            Verdict::Over => return Err(Failure::Resource("memory limit exceeded".into())),
+            Verdict::Unknown => {
+                return self.wasm()?.apply(params, resources, inputs, sizes, memory_limit, task_limits);
+            }
+        }
         let resources: Vec<&[u8]> = resources.iter().map(|r| &r[..]).collect();
         let total: u64 = sizes.iter().sum();
         let out = self.native.run(self.module, params, &resources, inputs, total).map_err(|e| Failure::Invalid(e.0))?;
@@ -1048,7 +1279,7 @@ impl Loaded for NativeLoaded<'_> {
 impl Runner for Native {
     fn load(&self, wasm: &[u8]) -> aqr::Decoded<Box<dyn Loaded + '_>> {
         if let Some(module) = known(wasm) {
-            return Ok(Box::new(NativeLoaded { native: self, module }));
+            return Ok(Box::new(NativeLoaded::new(self, module, wasm)));
         }
         #[cfg(feature = "wasm")]
         return Wasm.load(wasm);
