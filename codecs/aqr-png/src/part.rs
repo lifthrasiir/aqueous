@@ -294,14 +294,38 @@ impl Drain for ToFile<'_, '_> {
     }
 }
 
+/// An image's payload kept, by a task, for the instance to put out in its place.
+struct ToVec<'v>(&'v mut Vec<u8>);
+
+impl Drain for ToVec<'_> {
+    fn put(&mut self, d: &[u8]) -> Result<()> {
+        self.0.extend_from_slice(d);
+        Ok(())
+    }
+}
+
+/// The lengths of the model's streams (the tables', the rANS stream's and the raw bits') that
+/// the head `head` (past its mode byte, which is 1) tells.
+pub(crate) fn head_lens(head: &[u8]) -> Result<[u64; 3]> {
+    let mut at = 0;
+    for _ in 0..2 {
+        let n = get_varint(head, &mut at)? as usize;
+        codec::get_bytes(head, &mut at, n)?;
+    }
+    let mut lens = [0u64; 3];
+    for l in &mut lens {
+        *l = get_varint(head, &mut at)?;
+    }
+    Ok(lens)
+}
+
 /// An image whose record has a head `head` (past its mode byte, which is 1): its payload put to
-/// `asm`, its model's streams taken from `sts` and `raws`.
-fn coded_image(
+/// `drain`, its model's streams taken from `sts` and `raws`.
+fn coded_image<D: Drain>(
     head: &[u8],
     len: usize,
     ih: &Option<png::Ihdr>,
-    asm: &mut Asm,
-    end: usize,
+    drain: D,
     sts: &mut dyn Pull,
     raws: &mut dyn Pull,
 ) -> Result<()> {
@@ -344,7 +368,7 @@ fn coded_image(
             dec: StreamDecoder::new(Feed::new(|b| st.pull(b), PIECE), lens[1]),
             raw: StreamBits::new(Feed::new(|b| raw.pull(b), PIECE)),
         };
-        let mut payload = Payload::draining(streams, alts, headers, block, ToFile { asm, end })?;
+        let mut payload = Payload::draining(streams, alts, headers, block, drain)?;
         model::decode_io(&mut live, kind, &g, &spans, n, &mut |toks, freqs, data, from| {
             // The data from where the block starts (none needed but a stored block's).
             let rest = payload.at().checked_sub(from).and_then(|i| data.get(i..)).unwrap_or_default();
@@ -365,30 +389,154 @@ fn coded_image(
     Ok(())
 }
 
+/// Threads the images of a file of small ones are decoded on: the tasks' slots.
+pub const THREADS: usize = 8;
+
+/// A file whose images all have a payload of this many bytes at most, and that has several, has
+/// them decoded as tasks, a batch at a time; any other has them decoded one at a time in the
+/// instance (a task is given a copy of the instance's memory, which a large image would have
+/// made large).
+pub(crate) const SMALL: usize = 8 << 20;
+
+/// Bytes of records that a batch of images holds before it is run (and at most [`THREADS`] of
+/// them).
+pub(crate) const BATCH: usize = 8 << 20;
+
+/// The payload bytes of each image of `skel`.
+pub(crate) fn payload_lens(skel: &Skeleton) -> Vec<usize> {
+    skel.images
+        .iter()
+        .map(|(range, _)| {
+            let skip = if skel.classes[range.start] == FDAT { 4 } else { 0 };
+            skel.chunks[range.clone()].iter().map(|c| c.len - skip).sum()
+        })
+        .collect()
+}
+
+/// Whether the images with these payload lengths are decoded as tasks.
+pub(crate) fn tasks_used(lens: &[usize]) -> bool {
+    lens.len() >= 2 && lens.iter().all(|&l| l <= SMALL)
+}
+
+/// An image of a batch read: its payload kept as it is, or its record (the head past its mode
+/// byte, the model's rANS stream and raw bits).
+enum Item {
+    Kept(Vec<u8>),
+    Coded { head: Vec<u8>, st: Vec<u8>, raw: Vec<u8> },
+}
+
+/// The images `first` on of `skel` that `batch` holds, put out in order: those coded decoded
+/// as tasks (their payloads given back, the first error stopping the rest).
+fn run_batch(skel: &Skeleton, lens: &[usize], asm: &mut Asm, first: usize, batch: &[Item]) -> Result<()> {
+    let mut coded: Vec<usize> = Vec::with_capacity(batch.len());
+    coded.extend((0..batch.len()).filter(|&j| matches!(batch[j], Item::Coded { .. })));
+    let task = |c: usize| -> Vec<u8> {
+        let j = coded[c];
+        let Item::Coded { head, st, raw } = &batch[j] else { unreachable!() };
+        let len = lens[first + j];
+        // (and a byte after it: 0, else a 1 alone for a failure)
+        let mut out = Vec::with_capacity(len + 1);
+        match coded_image(head, len, &skel.images[first + j].1, ToVec(&mut out), &mut Slice(st), &mut Slice(raw)) {
+            Ok(()) => {
+                out.push(0);
+                out
+            }
+            Err(_) => vec![1],
+        }
+    };
+    let put = |asm: &mut Asm, j: usize, payload: &[u8]| -> Result<()> {
+        let end = skel.images[first + j].0.end;
+        asm.plain(skel.images[first + j].0.start)?;
+        asm.feed(payload, end)?;
+        asm.end_image(end)
+    };
+    let mut next = 0;
+    let kept = |asm: &mut Asm, next: &mut usize, to: usize| -> Result<()> {
+        while *next < to {
+            if let Item::Kept(v) = &batch[*next] {
+                put(asm, *next, v)?;
+            }
+            *next += 1;
+        }
+        Ok(())
+    };
+    aqr_common::pool::par_each_apart(
+        coded.len(),
+        THREADS,
+        2,
+        task,
+        || {},
+        |c, bytes| {
+            let j = coded[c];
+            kept(asm, &mut next, j)?;
+            let len = lens[first + j];
+            if bytes.last() != Some(&0) || bytes.len() != len + 1 {
+                return Err(corrupt());
+            }
+            put(asm, j, &bytes[..len])?;
+            next = j + 1;
+            Ok(())
+        },
+    )?;
+    kept(asm, &mut next, batch.len())
+}
+
 /// The module on the five inputs `srcs` (the skeleton, the index, the heads of the records, the
 /// rANS streams and the raw bits), put to `sink`; the length is for the caller to check.
 pub fn run(srcs: [(&mut dyn Pull, u64); INPUTS], sink: &mut dyn Put) -> Result<()> {
-    let [(sk, sk_len), (index, index_len), (heads, heads_len), (sts, _), (raws, _)] = srcs;
+    let [(sk, sk_len), (index, index_len), (heads, heads_len), (sts, sts_len), (raws, raws_len)] = srcs;
     aqr_common::crc32::hash(&[]);
     let sk = whole(sk, sk_len)?;
     let index = whole(index, index_len)?;
     let skel = Skeleton::parse(&sk)?;
+    let lens = payload_lens(&skel);
     let mut asm = Asm::new(&skel, sink)?;
     let mut heads = Cursor::new(heads, heads_len, PIECE);
     let mut at = 0;
-    for (range, ih) in &skel.images {
+    if tasks_used(&lens) {
+        let (mut sts, mut raws) = (Cursor::new(sts, sts_len, PIECE), Cursor::new(raws, raws_len, PIECE));
+        let mut k = 0;
+        while k < skel.images.len() {
+            let mut batch: Vec<Item> = Vec::with_capacity(THREADS);
+            let (first, mut bytes) = (k, 0);
+            while k < skel.images.len() && batch.len() < THREADS && bytes < BATCH {
+                let n = get_varint(&index, &mut at)? as usize;
+                let item = match heads.byte()? {
+                    0 if n == lens[k] + 1 => Item::Kept(heads.read(lens[k])?),
+                    1 => {
+                        let head = heads.read(n.checked_sub(1).ok_or_else(corrupt)?)?;
+                        let l = head_lens(&head)?;
+                        let st = sts.read(l[1].try_into().map_err(|_| corrupt())?)?;
+                        let raw = raws.read(l[2].try_into().map_err(|_| corrupt())?)?;
+                        Item::Coded { head, st, raw }
+                    }
+                    _ => return Err(corrupt()),
+                };
+                bytes += match &item {
+                    Item::Kept(v) => v.len(),
+                    Item::Coded { head, st, raw } => head.len() + st.len() + raw.len(),
+                };
+                batch.push(item);
+                k += 1;
+            }
+            run_batch(&skel, &lens, &mut asm, first, &batch)?;
+        }
+        asm.finish()?;
+        if at != index.len() || !heads.done() || !sts.done() || !raws.done() {
+            return Err(corrupt());
+        }
+        return Ok(());
+    }
+    for (k, (range, ih)) in skel.images.iter().enumerate() {
         let n = get_varint(&index, &mut at)? as usize;
-        let len: usize = skel.chunks[range.clone()]
-            .iter()
-            .map(|c| c.len - if skel.classes[range.start] == FDAT { 4 } else { 0 })
-            .sum();
+        let len = lens[k];
         asm.plain(range.start)?;
         let end = range.end;
         match heads.byte()? {
             0 if n == len + 1 => heads.take(len, |d| asm.feed(d, end))?,
             1 => {
                 let head = heads.read(n.checked_sub(1).ok_or_else(corrupt)?)?;
-                coded_image(&head, len, ih, &mut asm, end, sts, raws)?;
+                coded_image(&head, len, ih, ToFile { asm: &mut asm, end }, sts, raws)?;
             }
             _ => return Err(corrupt()),
         }
@@ -436,3 +584,11 @@ pub fn decode_streamed(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<
     run(srcs, &mut out)?;
     (out.len() as u64 == len).then_some(out).ok_or_else(corrupt)
 }
+
+// (what the plan counts them, `plan::wasm`)
+#[cfg(target_family = "wasm")]
+const _: () = {
+    use crate::plan::wasm;
+    assert!(size_of::<Item>() == wasm::ITEM as usize);
+    assert!(size_of::<usize>() == wasm::LEN as usize);
+};

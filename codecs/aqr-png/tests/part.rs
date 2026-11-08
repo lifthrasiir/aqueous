@@ -144,3 +144,12 @@ fn damaged_inputs_fail_or_agree() {
         }
     }
 }
+
+#[test]
+fn frames_as_tasks_and_one_at_a_time() {
+    // many small frames: batches of them are decoded as tasks, the order of the file kept
+    same("many frames", &apng(&[(48, 32); 37], 4));
+    same("frames of sizes", &apng(&[(10, 10), (200, 150), (7, 300), (64, 64), (1, 1), (333, 20), (50, 50), (20, 20), (90, 90), (40, 5)], 8));
+    // a frame past the size of a task's among small ones: all one at a time in the instance
+    same("a large frame", &apng(&[(40, 40), (2400, 1500), (40, 40)], 5));
+}

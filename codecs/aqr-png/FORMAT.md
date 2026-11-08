@@ -450,7 +450,7 @@ raw bits, and the three are kept apart.
 
 Each coded image takes as many bytes of slots 3 and 4 as its lengths (in the head) say, and the
 slots must be used up exactly. The module is a part module (windows of four pages): it
-puts the file out in order, an image at a time, and holds a block of tokens, the image's model
+puts the file out in order, an image at a time (where it has several images of a payload of 8 MiB at most each, a batch of up to 8 of them and 8 MiB of records at a time, decoded as tasks), and holds a block of tokens, the image's model
 tables, layout and rows, whatever the lengths of the file. A record of kind 2 is not taken.
 
 The images are those that the skeleton gives. The index has one varint per image and ends

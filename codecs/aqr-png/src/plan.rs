@@ -21,6 +21,9 @@ pub mod wasm {
     pub const SPAN: u64 = 8;
     pub const PASS: u64 = 20;
     pub const REFERENCES: u64 = 44;
+    /// A payload's length, an item of a batch (a payload kept, or a record and its streams).
+    pub const LEN: u64 = 4;
+    pub const ITEM: u64 = 36;
     /// A chunk of a file parsed.
     pub const PNG_CHUNK: u64 = 16;
     /// A token, a reference's position.
@@ -393,12 +396,26 @@ pub fn set(initial: u64, params: &[u8], inputs: &[u64], (sks, indexes, records):
 
 /// The memory plan of `png-recons` as a part module ([`crate::part::run`]): of its initial memory
 /// (`initial` bytes), inputs of `inputs` bytes, the skeleton `sk`, the index and the heads of the
-/// records. The inputs are not copied: the skeleton and the index are read whole, a piece of the
-/// heads and one of the output taken, and an image at a time on top of them (the head of its
-/// record, its layout, the model's tables, a piece of each of its streams, the room of a block
-/// written, the decoder's windows and a block's tokens), the most of them.
-pub fn part(initial: u64, inputs: &[u64], (sk, index, heads): (&[u8], &[u8], &[u8])) -> Option<u64> {
+/// records: the limit of its instance, and of a task. The inputs are not copied: the skeleton and
+/// the index are read whole, a piece of each of the others and of the output taken, and on top of
+/// them:
+/// - an image at a time (the head of its record, its layout, the model's tables, a piece of each
+///   of its streams, the room of a block written, the decoder's windows and a block's tokens), the
+///   most of them; or
+/// - where the images are small and several ([`crate::part::tasks_used`]), a batch of them at a
+///   time (their records read, then each a task: a copy of the memory as it is, and its payload,
+///   layout, tables, pieces, windows and tokens over it).
+pub fn part(initial: u64, inputs: &[u64], (sk, index, heads): (&[u8], &[u8], &[u8])) -> Option<(u64, u64)> {
+    use crate::part::{BATCH, PIECE, THREADS};
+    /// An image of a batch: its payload kept as it is (its length), or coded (its head past the
+    /// mode byte, its streams, the room of its task over a copy of the memory).
+    enum Item {
+        Kept(u64),
+        Coded { head: u64, st: u64, raw: u64, len: u64, own: u64 },
+    }
     let s = Skeleton::parse(sk).ok()?;
+    let lens = crate::part::payload_lens(&s);
+    let tasks = crate::part::tasks_used(&lens);
     let mut m = Sim::new(initial);
     m.take(aqr_common::crc32::WASM_TABLES);
     m.take(inputs[0]);
@@ -407,18 +424,70 @@ pub fn part(initial: u64, inputs: &[u64], (sk, index, heads): (&[u8], &[u8], &[u
     m.take(wasm::CHUNK * n);
     m.take(n);
     m.take(wasm::IMAGE * s.images.len() as u64);
-    m.take(crate::part::PIECE as u64);
-    m.take(crate::part::PIECE as u64);
+    // (the payloads' lengths, the output's piece and the heads', and for tasks those of the others)
+    m.take(wasm::LEN * s.images.len() as u64);
+    m.take(PIECE as u64);
+    m.take(PIECE as u64);
+    if tasks {
+        m.take(PIECE as u64);
+        m.take(PIECE as u64);
+    }
+    let run_batch = |m: &mut Sim, batch: &mut Vec<Item>| {
+        if batch.is_empty() {
+            return;
+        }
+        let t = m.top;
+        m.take(wasm::ITEM * THREADS as u64);
+        for it in batch.iter() {
+            match *it {
+                Item::Kept(len) => m.take(len),
+                Item::Coded { head, st, raw, .. } => [head, st, raw].into_iter().for_each(|b| m.take(b)),
+            }
+        }
+        // (the list of the images coded, and what each task gives back, joined over it)
+        m.take(4 * batch.len() as u64);
+        let coded: Vec<(u64, u64)> = (batch.iter())
+            .filter_map(|it| if let Item::Coded { len, own, .. } = *it { Some((len, own)) } else { None })
+            .collect();
+        if coded.len() >= 2 {
+            let tasks = coded.iter().map(|&(_, own)| m.task(own)).collect();
+            m.spawned(0, tasks);
+            m.peak(coded.iter().map(|&(len, _)| block(len + 1)).max().unwrap_or(0));
+        } else if let Some(&(_, own)) = coded.first() {
+            m.peak(own);
+        }
+        m.top = t;
+        batch.clear();
+    };
     let (mut at, mut from) = (0, 0);
-    for (range, ih) in &s.images {
+    let (mut batch, mut bytes) = (Vec::new(), 0usize);
+    for (k, (_, ih)) in s.images.iter().enumerate() {
         let n = get_varint(index, &mut at).ok()? as usize;
         let head = get_bytes(heads, &mut from, n).ok()?;
-        let skip = if s.classes[range.start] == codec::FDAT { 4 } else { 0 };
-        let len = s.chunks[range.clone()].iter().map(|c| c.len - skip).sum::<usize>();
+        let len = lens[k];
         let i = image(head, len, ih, false, true)?;
-        // (the head of the record past its mode byte is held; its payload is not)
-        let held = if head.first() == Some(&0) { 0 } else { block(n as u64 - 1) };
-        m.peak(held + i.kept.iter().sum::<u64>() + i.over);
+        let kept = head.first() == Some(&0);
+        if !tasks {
+            // (the head of the record past its mode byte is held; its payload is not)
+            m.peak(if kept { 0 } else { block(n as u64 - 1) } + i.kept.iter().sum::<u64>() + i.over);
+            continue;
+        }
+        if batch.len() >= THREADS || bytes >= BATCH {
+            run_batch(&mut m, &mut batch);
+            bytes = 0;
+        }
+        if kept {
+            bytes += len;
+            batch.push(Item::Kept(len as u64));
+            continue;
+        }
+        let l = crate::part::head_lens(&head[1..]).ok()?;
+        bytes += n - 1 + (l[1] + l[2]) as usize;
+        // (a task: its payload's room first, then what an image takes but its record)
+        let own = block(len as u64 + 1) + i.kept.iter().sum::<u64>() + i.over;
+        batch.push(Item::Coded { head: n as u64 - 1, st: l[1], raw: l[2], len: len as u64, own });
     }
-    (at == index.len() && from == heads.len()).then(|| m.plan())
+    run_batch(&mut m, &mut batch);
+    let (instance, tasks) = m.plans(1);
+    (at == index.len() && from == heads.len()).then_some((instance, tasks[0]))
 }

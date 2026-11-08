@@ -10,7 +10,7 @@ use aqr_formula::{Apply, Formula, Kind, Module, Node};
 
 pub use crate::module::{decode, decode_against, decode_set};
 
-pub const MODULE: Module = Module::new("png-recons", 5).with_plan(memory_recons);
+pub const MODULE: Module = Module::new("png-recons", 5).with_task_plan(plan_recons);
 
 /// The module of a file coded against a reference file ([`encode_against`], [`decode_against`]).
 pub const AGAINST_MODULE: Module = Module::new("png-against", 2).with_task_plan(plan_against);
@@ -176,9 +176,9 @@ pub fn encode_set(
 // skeleton and the images' records are read as `codec::Skeleton` and `codec::rebuild` do.
 
 /// The memory of `png-recons`, a part module: its plan ([`crate::plan::part`]).
-fn memory_recons(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+fn plan_recons(u: &aqr_formula::Usage<'_>) -> Option<aqr_formula::Plan> {
     let (&[], Some([sk, index, heads, _, _])) = (u.params, u.all_contents()) else { return None };
-    crate::plan::part(u.initial(), u.inputs, (sk, index, heads))
+    crate::plan::part(u.initial(), u.inputs, (sk, index, heads)).map(|(i, t)| aqr_formula::Plan::one(i, t))
 }
 
 /// The memory of `png-against`: its plan ([`crate::plan::against`]).
@@ -220,7 +220,7 @@ mod tests {
             contents: &s,
             initial_pages: 17,
         };
-        let est = memory_recons(&u).expect("a plan");
+        let est = plan_recons(&u).expect("a plan").instance;
         assert!(est > u.base() + (s[0].len() + s[1].len()) as u64, "{est}");
         assert!(est < u.base() + 2 * file.len() as u64 + (1 << 20), "{est}");
         // a variant of the file, against it
