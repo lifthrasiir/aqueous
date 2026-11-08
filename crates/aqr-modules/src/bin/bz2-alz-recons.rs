@@ -1,4 +1,4 @@
-//! `bz2-alz-recons` (aqr-bz2).
+//! `bz2-alz-recons` (aqr-bz2), a part module.
 
 #![no_main]
 
@@ -6,4 +6,13 @@
 #[global_allocator]
 static STACK: aqr_api::stack::Stack = aqr_api::stack::Stack::new();
 
-aqr_modules::whole!(inputs [in0: 0], |p, _, i, len| aqr_bz2::module::decode_alz(p, i, len, 1));
+aqr_api::entry! {
+    part fn apply(params_len, in0_len, size)
+        windows(
+            Input 0 = aqr_bz2::module::WINDOW,
+            Output 0 = aqr_bz2::module::WINDOW,
+        )
+    {
+        aqr_bz2::module::decode_alz_part(params_len, in0_len, size)
+    }
+}

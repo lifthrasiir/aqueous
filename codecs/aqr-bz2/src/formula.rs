@@ -12,15 +12,15 @@ use crate::{compress, stream};
 
 pub use crate::module::{decode, decode_alz};
 
-pub const MODULE: Module = Module::new("bz2-recons", 1).with_plan(memory);
+pub const MODULE: Module = Module::new("bz2-recons", 2).with_plan(memory);
 
 /// ALZip's bzip2 streams (`FORMAT.md`, §8).
-pub const MODULE_ALZ: Module = Module::new("bz2-alz-recons", 1).with_plan(memory_alz);
+pub const MODULE_ALZ: Module = Module::new("bz2-alz-recons", 2).with_plan(memory_alz);
 
 /// Bytes of data taken, at most (a stream of zeros grows forty-thousandfold).
 pub const MAX_DATA: usize = 1 << 30;
 
-/// The memory of the module: its initial memory, and its plan ([`crate::module::plan`]), of
+/// The memory of the module, a part module: its plan ([`crate::module::plan`]), of
 /// the data (whose blocks' symbols it reads).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     memory_framed(u, Framing::Bzip2)
@@ -31,8 +31,8 @@ fn memory_alz(u: &aqr_formula::Usage<'_>) -> Option<u64> {
 }
 
 fn memory_framed(u: &aqr_formula::Usage<'_>, framing: Framing) -> Option<u64> {
-    let (&[len], [data]) = (u.outputs, u.all_contents::<1>()?) else { return None };
-    Some(u.initial() + crate::module::plan(framing, u.params, data, len)?)
+    let [data] = u.all_contents::<1>()?;
+    crate::module::plan(framing, u.initial(), u.params, data)
 }
 
 /// Whether `d` starts with a bzip2 stream, as far as its header and first magic tell.

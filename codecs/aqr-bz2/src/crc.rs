@@ -44,6 +44,14 @@ pub fn update(mut crc: u32, d: &[u8]) -> u32 {
     crc
 }
 
+/// `crc` (not inverted) updated with `n` bytes of `c`.
+pub fn update_run(mut crc: u32, c: u8, n: usize) -> u32 {
+    for _ in 0..n {
+        crc = (crc << 8) ^ TABLE[0][((crc >> 24) as u8 ^ c) as usize];
+    }
+    crc
+}
+
 /// The CRC of a block's data.
 pub fn hash(d: &[u8]) -> u32 {
     !update(!0, d)

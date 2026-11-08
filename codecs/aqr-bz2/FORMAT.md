@@ -59,6 +59,13 @@ Contents:
   rank taking that rank instead of its own (§4.2). Its length must be the `len` the
   application declares.
 
+Version 2 is a part module (windows of four pages for the input and for the output) of the
+same params, input and output: the data is taken in order in pieces, in streams' runs and
+blocks of RLE1 output, and the stream is put in order as a block is written, so that it holds
+the params, a piece of the data and one block at a time, whatever the lengths. A block of the
+data need not be held: only its RLE1 output (§4.1), which is at most `M + 4` bytes. The output
+is version 1's byte for byte.
+
 ## 3. Streams
 
 `stream(D, L)` is `BZh`, then the digit of `L` (`0x30 + L`), then the blocks of §3.1, each

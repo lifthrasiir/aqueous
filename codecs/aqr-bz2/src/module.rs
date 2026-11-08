@@ -3,11 +3,13 @@
 
 use aqr_common::varint;
 
+use aqr_api::stream::{In, Pull, Put, Reader, Slice, Written};
 use aqr_common::msb::{BitReader, BitWriter};
 use aqr_common::pool;
 
 use crate::compress;
-use crate::{ALZ_END_MAGIC, ALZ_LEVEL, END_MAGIC, Error, Framing, MAGIC, Result, corrupt};
+use crate::crc;
+use crate::{ALZ_END_MAGIC, ALZ_LEVEL, END_MAGIC, Error, Framing, MAGIC, Result, block_max, corrupt};
 
 /// The parameters of one stream: its level, bytes of data, and the blocks whose `origPtr`
 /// differs from the one compressing gives (index, `origPtr`).
@@ -123,13 +125,24 @@ impl<'a> Params<'a> {
     }
 }
 
-/// The memory plan of a module of `framing` ([`aqr_api::stack`]): what it takes beyond its
-/// initial memory at most, of params `params`, the data `data` and an output of `len` bytes
-/// (`None` where they are not so). What `aqr_api::whole` copies; the output, reserved first;
-/// then a block compressed at a time onto it, of [`compress::block_plan`] of the most symbols
-/// of a block.
-pub fn plan(framing: Framing, params: &[u8], data: &[u8], len: u64) -> Option<u64> {
-    use aqr_api::stack::{block, whole};
+/// Pages of the windows of the module as a part module ([`decode_part`]): of the input and of
+/// the output.
+pub const WINDOW: u32 = 4;
+
+/// Bytes of the pieces in which the data is taken, and of the buffer of the stream written
+/// before it is handed on: a block's header, selectors and tables take 21 KB at most
+/// (`entropy`), on top of the [`SPILL`] bytes that are held before they are handed on.
+const PIECE: usize = 64 << 10;
+const OUT: usize = 32 << 10;
+const SPILL: usize = 4 << 10;
+
+/// The memory plan of a module of `framing` as a part module ([`aqr_api::stack`]): what
+/// [`decode_part`] takes beyond its initial memory (`initial` bytes) at most, of params
+/// `params` and the data `data` (whose blocks' symbols it reads; `None` where they are not so):
+/// the params copied, a piece of the data, the buffer of the stream, then a block compressed at
+/// a time ([`compress::block_plan`] of the most symbols of a block). Nothing of the lengths is
+/// held but the params and the largest block.
+pub fn plan(framing: Framing, initial: u64, params: &[u8], data: &[u8]) -> Option<u64> {
     let mut r = Params::new(params, framing).ok()?;
     let (mut at, mut most) = (0usize, 0);
     while let Some((level, n, k)) = r.stream().ok()? {
@@ -142,8 +155,184 @@ pub fn plan(framing: Framing, params: &[u8], data: &[u8], len: u64) -> Option<u6
         })
         .ok()?;
     }
-    let own = block(len) + if most > 0 { compress::block_plan(most) } else { 0 };
-    Some(whole(params.len() as u64, &[], &[data.len() as u64]) + own)
+    let mut m = aqr_api::stack::Sim::new(initial);
+    m.take(params.len() as u64);
+    m.take(PIECE as u64);
+    m.take(OUT as u64);
+    if most > 0 {
+        m.peak(compress::block_plan(most));
+    }
+    Some(m.plan())
+}
+
+/// The runs of equal bytes (255 at most) of one stream's data, taken from `r` in order.
+struct Runs<'a, 'b> {
+    r: &'b mut Reader<'a>,
+    /// The byte read past the last run, which starts the next.
+    pending: Option<u8>,
+    /// Bytes of the stream not read yet.
+    left: u64,
+}
+
+impl Runs<'_, '_> {
+    /// The next run: its byte and length.
+    fn next(&mut self) -> Result<Option<(u8, usize)>> {
+        let short = || Error("data of another length");
+        let c = match self.pending.take() {
+            Some(c) => c,
+            None if self.left == 0 => return Ok(None),
+            None => {
+                self.left -= 1;
+                self.r.byte().ok_or_else(short)?
+            }
+        };
+        let mut n = 1;
+        while n < 255 && self.left > 0 {
+            self.left -= 1;
+            match self.r.byte().ok_or_else(short)? {
+                b if b == c => n += 1,
+                b => {
+                    self.pending = Some(b);
+                    break;
+                }
+            }
+        }
+        Ok(Some((c, n)))
+    }
+
+    /// Bytes of the stream past the run just taken.
+    fn rest(&self) -> u64 {
+        self.left + self.pending.is_some() as u64
+    }
+}
+
+/// Puts the bytes the writer holds to `out` where there are [`SPILL`] of them (or any, where
+/// `all`).
+fn spill(w: &mut BitWriter, out: &mut dyn Put, all: bool) -> Result<()> {
+    if all || w.out.len() >= SPILL {
+        out.put(&w.out).ok_or(Error("output of another length"))?;
+        w.out.clear();
+    }
+    Ok(())
+}
+
+/// The module on the data pulled from `data`, put to `out`: [`decode`] as the data comes and the
+/// stream goes, a block of RLE1 output at a time. The output may be of any length; the caller
+/// checks it.
+pub fn run(framing: Framing, params: &[u8], data: &mut dyn Pull, out: &mut dyn Put) -> Result<()> {
+    let mut p = Params::new(params, framing)?;
+    let mut rd = Reader::new(data, PIECE);
+    let mut w = BitWriter::with_capacity(OUT);
+    // (the block's RLE1 output: it grows on top of the stack, then is written twice onto itself)
+    let mut rle: Vec<u8> = Vec::new();
+    while let Some((level, n, k)) = p.stream()? {
+        if framing == Framing::Bzip2 {
+            MAGIC.iter().for_each(|&c| w.put(c as u32, 8));
+            w.put((b'0' + level) as u32, 8);
+        }
+        let max = block_max(level);
+        let mut left = k;
+        let mut next_given = |p: &mut Params| -> Result<Option<(u64, u32)>> {
+            if left == 0 {
+                return Ok(None);
+            }
+            left -= 1;
+            p.orig_ptr().map(|(b, r)| Some((b as u64, r)))
+        };
+        let mut given = next_given(&mut p)?;
+        let (mut combined, mut index) = (0u32, 0u64);
+        let mut runs = Runs { r: &mut rd, pending: None, left: n };
+        let (mut crc, mut syms) = (!0u32, 0usize);
+        // the block in `rle` written, with the rank the params give it
+        let mut flush = |rle: &mut Vec<u8>, crc: u32, w: &mut BitWriter, p: &mut Params| -> Result<()> {
+            let rank = match given {
+                Some((g, r)) if g == index => {
+                    given = next_given(p)?;
+                    Some(r)
+                }
+                _ => None,
+            };
+            index += 1;
+            let (m, crc) = (rle.len(), !crc);
+            rle.reserve_exact(m);
+            compress::write_rle1(rle, crc, framing, rank, w, &mut |w| spill(w, out, false))?;
+            combined = combined.rotate_left(1) ^ crc;
+            rle.clear();
+            Ok(())
+        };
+        while let Some((c, r)) = runs.next()? {
+            // a block full by the runs before this one ends here, unless this is the last byte
+            if syms >= max && r as u64 + runs.rest() > 1 {
+                flush(&mut rle, crc, &mut w, &mut p)?;
+                (crc, syms) = (!0, 0);
+            }
+            if rle.capacity() - rle.len() < 5 {
+                rle.reserve_exact(rle.len().max(16));
+            }
+            if r < 4 {
+                rle.extend(core::iter::repeat_n(c, r));
+            } else {
+                rle.extend_from_slice(&[c, c, c, c, (r - 4) as u8]);
+            }
+            crc = crc::update_run(crc, c, r);
+            syms += if r < 4 { r } else { 5 };
+        }
+        if !rle.is_empty() {
+            flush(&mut rle, crc, &mut w, &mut p)?;
+        }
+        if given.is_some() {
+            return Err(corrupt());
+        }
+        match framing {
+            Framing::Bzip2 => {
+                w.put((END_MAGIC >> 24) as u32, 24);
+                w.put((END_MAGIC & 0xFF_FFFF) as u32, 24);
+                w.put(combined, 32);
+            }
+            Framing::Alz => w.put(ALZ_END_MAGIC, 32),
+        }
+        w.put(0, (8 - w.len() % 8) as u32 % 8);
+        w.flush_aligned();
+        spill(&mut w, out, true)?;
+    }
+    if rd.done() { Ok(()) } else { Err(Error("data of another length")) }
+}
+
+/// The module as a part module (its entry point, of `aqr_api::entry!`): what [`decode`] gives,
+/// its input taken and its output put in order through windows ([`WINDOW`]) in pieces, a block
+/// of RLE1 output held at a time.
+pub fn decode_part(params_len: u64, in_len: u64, size: u64) {
+    aqr_api::finish(part(Framing::Bzip2, params_len, in_len, size));
+}
+
+/// [`decode_part`] of `bz2-alz-recons`.
+pub fn decode_alz_part(params_len: u64, in_len: u64, size: u64) {
+    aqr_api::finish(part(Framing::Alz, params_len, in_len, size));
+}
+
+fn part(framing: Framing, params_len: u64, in_len: u64, size: u64) -> Result<()> {
+    use aqr_api::Memory;
+    let mut params = vec![0; usize::try_from(params_len).map_err(|_| corrupt())?];
+    aqr_api::Params::read(0, &mut params);
+    let mut data = In::<0>::new(in_len);
+    let mut out = Written::new(size);
+    run(framing, &params, &mut data, &mut out)?;
+    match out.total() == size {
+        true => Ok(()),
+        false => Err(Error("output of another length")),
+    }
+}
+
+/// [`decode_part`] (or [`decode_alz_part`], of `framing`) on a whole input, natively: what a part
+/// module gives.
+pub fn decode_streamed(framing: Framing, params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
+    let &[data] = inputs else { return Err(Error("one input wanted")) };
+    let mut out = Vec::new();
+    run(framing, params, &mut Slice(data), &mut out)?;
+    match out.len() as u64 == len {
+        true => Ok(out),
+        false => Err(Error("output of another length")),
+    }
 }
 
 /// The streams of `data`, one after another, compressed as `streams` says.

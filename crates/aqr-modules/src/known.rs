@@ -101,14 +101,14 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "bz2-alz-recons",
-        version: 1,
-        sha512_256: hex("f1f512877d8d3395e26da038ba695085ce5bce6be530349ef695de0a9b258b81"),
+        version: 2,
+        sha512_256: hex("8fa972aa67843d7d4ff55f1c1d030efb47108eac5ddd6e5ae36ecfec1fdfc207"),
         block: include_bytes!("../wasm/bz2-alz-recons.block"),
     },
     Known {
         name: "bz2-recons",
-        version: 1,
-        sha512_256: hex("3801354bd2adf5904371c3b32ab04ffbac7b817f8a53a5a17e6c40f767f34d58"),
+        version: 2,
+        sha512_256: hex("1aa3e162ceb04abf98b6e3d9fb45eaa6b4e6283f08421747824495947eda6a99"),
         block: include_bytes!("../wasm/bz2-recons.block"),
     },
     Known {

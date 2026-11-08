@@ -187,6 +187,27 @@ pub fn write_block(
     let m = runs(d).map(rle_syms).sum::<usize>();
     let mut twice = Vec::with_capacity(2 * m);
     rle1(d, &mut twice);
+    let (orig_ptr, m) = write_rle1(&mut twice, crc, framing, rank, w, &mut |_| Ok(()))?;
+    Ok((crc, orig_ptr, m))
+}
+
+/// Called with the writer where a block has written enough to hand on the bytes it holds
+/// (`w.out`, whole bytes), which it may take out.
+pub type Spill<'a> = &'a mut dyn FnMut(&mut BitWriter) -> crate::Result<()>;
+
+/// [`write_block`] of a block whose RLE1 output is `twice` (its CRC `crc`), with `spill` called as
+/// the block is written (after its header, its tables and each group of its symbols), so that
+/// what it holds stays small. `twice` is left as it was; its capacity should be that of its
+/// length twice (it is written twice onto itself). Gives the rank and the symbols.
+pub fn write_rle1(
+    twice: &mut Vec<u8>,
+    crc: u32,
+    framing: Framing,
+    rank: Option<u32>,
+    w: &mut BitWriter,
+    spill: Spill,
+) -> crate::Result<(u32, usize)> {
+    let m = twice.len();
     twice.extend_from_within(..);
     let mut used = [false; 256];
     twice[..m].iter().for_each(|&c| used[c as usize] = true);
@@ -210,8 +231,9 @@ pub fn write_block(
     }
     w.put(orig_ptr, 24);
     let (k, freq, n_used) = mtf(&mut sa, m, &used);
-    entropy(w, &sa[..k], &freq, n_used, &used, &mut ws);
-    Ok((crc, orig_ptr, m))
+    twice.truncate(m);
+    entropy(w, &sa[..k], &freq, n_used, &used, &mut ws, spill)?;
+    Ok((orig_ptr, m))
 }
 
 /// MTF over the symbols in use, renumbered in byte order, with runs of the front symbol coded
@@ -288,7 +310,15 @@ const PASSES: usize = 4;
 /// it cheapest (the first among equals), each table's lengths are rebuilt from the frequencies
 /// of the groups that took it. The selectors of the last pass are written; they are kept in
 /// `sel` (a word for each group).
-fn entropy(w: &mut BitWriter, mtf: &[u32], freq: &[u32], n_used: usize, used: &[bool; 256], sel: &mut [u32]) {
+fn entropy(
+    w: &mut BitWriter,
+    mtf: &[u32],
+    freq: &[u32],
+    n_used: usize,
+    used: &[bool; 256],
+    sel: &mut [u32],
+    spill: Spill,
+) -> crate::Result<()> {
     let alpha = n_used + 2;
     let n = mtf.len();
     let groups = match n {
@@ -348,6 +378,7 @@ fn entropy(w: &mut BitWriter, mtf: &[u32], freq: &[u32], n_used: usize, used: &[
     for (r, _) in used.chunks(16).zip(&any16).filter(|(_, a)| **a) {
         r.iter().for_each(|&u| w.put(u as u32, 1));
     }
+    spill(w)?;
 
     // the selectors, MTF coded in unary
     w.put(groups as u32, 3);
@@ -359,6 +390,7 @@ fn entropy(w: &mut BitWriter, mtf: &[u32], freq: &[u32], n_used: usize, used: &[
         front[0] = s;
         w.put((1 << (j + 1)) - 2, j as u32 + 1);
     }
+    spill(w)?;
 
     // the tables' lengths, each from the one before: 10 up, 11 down, 0 to the next symbol
     for l in &len[..groups] {
@@ -375,6 +407,7 @@ fn entropy(w: &mut BitWriter, mtf: &[u32], freq: &[u32], n_used: usize, used: &[
             }
             w.put(0, 1);
         }
+        spill(w)?;
     }
 
     let mut codes = [[0u32; MAX_ALPHA]; MAX_GROUPS];
@@ -384,7 +417,9 @@ fn entropy(w: &mut BitWriter, mtf: &[u32], freq: &[u32], n_used: usize, used: &[
     for (g, &t) in mtf.chunks(GROUP).zip(selectors.iter()) {
         let (l, c) = (&len[t as usize], &codes[t as usize]);
         g.iter().for_each(|&s| w.put(c[s as usize], l[s as usize] as u32));
+        spill(w)?;
     }
+    Ok(())
 }
 
 /// The blocks of `data` at `level` compressed, on up to `threads` threads.

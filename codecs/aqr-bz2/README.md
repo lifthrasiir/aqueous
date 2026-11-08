@@ -37,11 +37,12 @@ reading its code (BSD-style, not public domain).
   `BZ2_hbMakeCodeLengths` (FORMAT.md §4.3, §5).
 - Streams one after another (pbzip2, `cat a.bz2 b.bz2`) are one application; what follows
   them, or a stream not reproduced, is sliced as it is.
-- Blocks are compressed in parallel natively; the Wasm module (33 KB) runs on one thread,
-  compressing each block onto the output. SA-IS works in buffers sized by the block alone
+- Blocks are compressed in parallel natively; the Wasm module (33 KB, a part module since
+  version 2: pieces of the data and the stream, one block of RLE1 output) runs on one thread,
+  compressing each block in turn. SA-IS works in buffers sized by the block alone
   (the reduced problem solved inside the suffix array, a byte of type per symbol, the buckets
   of a level made again after the level below), so its memory is a plan of the largest block's
-  symbols: 16 bytes for each, besides the input and the output.
+  symbols: 16 bytes for each, besides the pieces (the input and the output are not held).
 - aqr-compress decodes the first 4 MiB of data or so, and where it is not the start of a file of
   a format (a tar archive) and a probe tells that it would not pay (text, which BWT models
   well), keeps the stream without decoding the rest; else it decodes the rest (the blocks'

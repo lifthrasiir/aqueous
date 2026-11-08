@@ -4315,6 +4315,57 @@ fn bundle_plans_hold() {
     plan_holds("bundle tar", f, &tar);
 }
 
+/// bz2-recons (a part module of windows of four pages) takes the same plan past a block, whatever
+/// the lengths: 3 MB and 9 MB of data at level 1 (a block holds 100 KB of RLE1 output) and 24 MB
+/// of data at level 9, runs and ranks among the blocks, the plan not growing with the data.
+#[test]
+fn bz2_plans_hold_past_the_blocks() {
+    let mut rng = aqr_common::rng::Rng::new(5);
+    let data = |n: usize, rng: &mut aqr_common::rng::Rng| -> Vec<u8> {
+        let mut d = Vec::with_capacity(n);
+        while d.len() < n {
+            let c = b'a' + rng.below(20) as u8;
+            let run = if rng.below(64) == 0 { 4 + rng.below(300) as usize } else { 1 };
+            d.extend(std::iter::repeat_n(c, run));
+        }
+        d.truncate(n);
+        d
+    };
+    let m = aqr_bz2::formula::MODULE;
+    let plan_of = |level: u8, d: &[u8]| {
+        let sp = aqr_bz2::module::StreamParams { level, len: d.len() as u64, orig_ptrs: vec![] };
+        let mut params = Vec::new();
+        aqr_bz2::module::put_params(&mut params, &[sp]);
+        let usage = aqr_formula::Usage {
+            params: &params,
+            resources: &[],
+            inputs: &[d.len() as u64],
+            outputs: &[d.len() as u64],
+            contents: &vec![d],
+            initial_pages: aqr_decompress::initial_pages_of(m).unwrap(),
+        };
+        m.plan_for(&usage).unwrap().instance
+    };
+    let (small, big) = (data(3_000_000, &mut rng), data(9_000_000, &mut rng));
+    assert_eq!(plan_of(1, &small), plan_of(1, &big));
+    assert!(plan_of(1, &big) < 4 << 20, "{}", plan_of(1, &big));
+    let huge = data(24_000_000, &mut rng);
+    assert!(plan_of(9, &huge) < 24 << 20, "{}", plan_of(9, &huge));
+    for (what, level, d) in [("3 MB at 1", 1, small), ("9 MB at 1", 1, big)] {
+        let want = aqr_bz2::compress::stream(level, &aqr_bz2::compress::blocks(&d, level, 4));
+        let streams = [aqr_bz2::module::StreamParams { level, len: d.len() as u64, orig_ptrs: vec![] }];
+        let mut f = Formula::default();
+        let input = f.push("raw", d);
+        f.root = Node::Apply(Box::new(aqr_bz2::formula::apply_framed(
+            aqr_bz2::Framing::Bzip2,
+            &streams,
+            input,
+            want.len() as u64,
+        )));
+        plan_holds(&format!("bz2 {what}"), f, &want);
+    }
+}
+
 /// bz2-recons and bz2-alz-recons lay their memory out as stacks, their limits their plans: of
 /// the fixtures (a periodic block given its rank among them), of streams one after another, of
 /// several blocks (the last the smaller), and of ALZip's.

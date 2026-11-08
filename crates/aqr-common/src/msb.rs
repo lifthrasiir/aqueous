@@ -219,6 +219,17 @@ impl BitWriter {
         self.put(r.get(n as u32), n as u32);
     }
 
+    /// Moves the whole bytes held to `out` where the bits written are a whole number of bytes.
+    pub fn flush_aligned(&mut self) {
+        debug_assert_eq!(self.n % 8, 0);
+        let mut k = self.n;
+        while k > 0 {
+            k -= 8;
+            self.out.push((self.acc >> k) as u8);
+        }
+        self.n = 0;
+    }
+
     /// Pads with zero bits to a byte boundary and returns the bytes.
     pub fn finish(mut self) -> Vec<u8> {
         let pad = (8 - self.n % 8) % 8;
