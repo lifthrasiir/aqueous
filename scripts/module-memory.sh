@@ -14,9 +14,9 @@ mkdir -p $s
 data=/Volumes/Data
 codecs=$root/codecs
 
-cargo build -q --release -p aqr
 cargo build -q --release -p aqr-decompress --example aqr-decompress-memory
-aqr=$root/target/release/aqr
+# (aqr through cargo aqr, which keeps its binaries by the sources; never target/release/aqr)
+aqr=(cargo aqr)
 memory=$root/target/release/examples/aqr-decompress-memory
 
 # a sample `name` made by the shell command `cmd` writing $out, once
@@ -233,7 +233,7 @@ for n in $names; do
     [[ -f $s/$n.aqr ]] && continue
     level=()
     (( ${high[(Ie)$n]} )) && level=(-l 9)
-    $aqr -c -q $level -o $s/$n.aqr $s/$n || echo "module-memory.sh: $n not compressed" >&2
+    "${aqr[@]}" -c -q $level -o $s/$n.aqr $s/$n || echo "module-memory.sh: $n not compressed" >&2
 done
 # (every sample compressed so far)
 for t in 1 8; do
