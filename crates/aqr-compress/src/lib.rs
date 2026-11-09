@@ -1831,8 +1831,10 @@ fn nested(f: &mut Formula, of: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Opt
     let sealing = cx.sealing.take();
     let (prepared, plan) = prepare(f, opt, depth, cx);
     let mut children = Vec::new();
+    // (told once: it walks all of `f`, which an image's thousands of files would each do again)
+    let apart = bundle::contents_apart(f);
     for n in shared_nodes(f).iter().chain([&f.root]) {
-        contents(n, f, opt, depth, cx, &mut children);
+        contents(n, f, apart, opt, depth, cx, &mut children);
     }
     // (sets read their members' bytes from the formula once made: those of a tree's top too)
     let top = depth == 0 && cx.top_sets.is_some();
@@ -2298,18 +2300,28 @@ fn bound_of(f: &Formula) -> usize {
 
 /// The contents below node `n` of `f`, in order: each slice, and its formula where it has any
 /// application. A content is an input of an application ([`Options::contents`]) or a slice of a
-/// stream that is [`Stream::content`], scanned.
-fn contents(n: &Node, f: &Formula, opt: &Options, depth: u32, cx: &Cx, out: &mut Vec<(Node, Option<Made>)>) {
+/// stream that is [`Stream::content`], scanned. `apart` is [`bundle::contents_apart`] of `f`.
+fn contents(
+    n: &Node,
+    f: &Formula,
+    apart: bool,
+    opt: &Options,
+    depth: u32,
+    cx: &Cx,
+    out: &mut Vec<(Node, Option<Made>)>,
+) {
     match n {
-        &Node::Slice { stream, .. } if is_content(f, stream) => content_slices(n, Nest::Scan, f, opt, depth, cx, out),
+        &Node::Slice { stream, .. } if is_content(f, stream) => {
+            content_slices(n, Nest::Scan, f, apart, opt, depth, cx, out)
+        }
         // (patches are made of recompressed data, not looked into)
         Node::Slice { .. } | Node::Output { .. } | Node::Patch(_) | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
-        Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| contents(n, f, opt, depth, cx, out)),
+        Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| contents(n, f, apart, opt, depth, cx, out)),
         Node::Apply(a) => {
             for (i, input) in a.inputs.iter().enumerate() {
                 match content(opt, a.module, i) {
-                    Some(content) => content_slices(input, content.nest, f, opt, depth, cx, out),
-                    None => contents(input, f, opt, depth, cx, out),
+                    Some(content) => content_slices(input, content.nest, f, apart, opt, depth, cx, out),
+                    None => contents(input, f, apart, opt, depth, cx, out),
                 }
             }
         }
@@ -2318,10 +2330,12 @@ fn contents(n: &Node, f: &Formula, opt: &Options, depth: u32, cx: &Cx, out: &mut
 
 /// [`contents`] of node `n`, a content recompressed as `nest`: each of its slices is a content
 /// of the kind of its stream, and the applications in it have contents of their own.
+#[allow(clippy::too_many_arguments)]
 fn content_slices(
     n: &Node,
     nest: Nest,
     f: &Formula,
+    apart: bool,
     opt: &Options,
     depth: u32,
     cx: &Cx,
@@ -2333,7 +2347,7 @@ fn content_slices(
             // (data not made yet is made as it is come to, [`make_later`])
             if let Some(st) = s.filter(|s| s.data.is_lazy())
                 && start + len <= st.data.len() as u64
-                && bundle::contents_apart(f)
+                && apart
                 && let Some(nest) = nest.of(st.kind)
             {
                 cx.later.borrow_mut().push((out.len(), n.clone(), nest));
@@ -2348,7 +2362,7 @@ fn content_slices(
             }
             // (the files of an archive made later, at once, and so are those of an image or a
             // WIM file, and a ZIP archive's entries)
-            if (depth == 0 && cx.top_sets.is_some() || bundle::contents_apart(f))
+            if (depth == 0 && cx.top_sets.is_some() || apart)
                 && let Some(nest) = s.and_then(|s| nest.of(s.kind)).filter(|_| d.is_some())
             {
                 cx.later.borrow_mut().push((out.len(), n.clone(), nest));
@@ -2358,8 +2372,10 @@ fn content_slices(
             let child = s.zip(d).and_then(|(s, d)| made(d, opt, depth + 1, nest.of(s.kind)?, cx));
             out.push((n.clone(), child.filter(|c| takes_place(&c.f))));
         }
-        Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| content_slices(n, nest, f, opt, depth, cx, out)),
-        Node::Apply(_) => contents(n, f, opt, depth, cx, out),
+        Node::Concat(ns) | Node::Pack(ns) => {
+            ns.iter().for_each(|n| content_slices(n, nest, f, apart, opt, depth, cx, out))
+        }
+        Node::Apply(_) => contents(n, f, apart, opt, depth, cx, out),
         Node::Output { .. } | Node::Patch(_) | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
     }
 }
@@ -2860,27 +2876,48 @@ fn pure_contents<'a>(
     opt: &Options,
     out: &mut Vec<(Format, &'a [u8], Option<sets::At>)>,
 ) {
+    let mut found = Vec::new();
+    pure_candidates(n, nest, f, opt, &mut found);
+    // (the scans at once: of an image's thousands of files, they took a second alone)
+    let found = aqr_common::pool::par_map(found.len(), opt.threads, |i| {
+        let (nest, d, at) = found[i];
+        // (a scan takes the file it starts with as one of the format it starts like)
+        let format = match nest {
+            Nest::As(format) => Some(format),
+            Nest::Scan => detect(d),
+            _ => None,
+        };
+        let format = format.filter(|&f| is_pure(f) && format_on(f, opt))?;
+        let n = extent(format, d).filter(|&n| n > 0)?;
+        Some((format, &d[..n], (n == d.len()).then_some(at)))
+    });
+    out.extend(found.into_iter().flatten());
+}
+
+/// The slices [`pure_contents`] looks at below node `n` of `f`, each with how it is taken (its
+/// stream's kind's nest) and its data.
+fn pure_candidates<'a>(
+    n: &Node,
+    nest: Option<Nest>,
+    f: &'a Formula,
+    opt: &Options,
+    out: &mut Vec<(Nest, &'a [u8], sets::At)>,
+) {
     match (n, nest) {
-        (&Node::Slice { stream, .. }, None) if is_content(f, stream) => pure_contents(n, Some(Nest::Scan), f, opt, out),
+        (&Node::Slice { stream, .. }, None) if is_content(f, stream) => {
+            pure_candidates(n, Some(Nest::Scan), f, opt, out)
+        }
         (&Node::Slice { stream, start, len }, Some(nest)) => {
             let Some(s) = f.streams.get(stream).filter(|s| !s.data.is_lazy()) else { return };
             let Some(d) = s.data.get(start as usize..).and_then(|d| d.get(..len as usize)) else { return };
-            // (a scan takes the file it starts with as one of the format it starts like)
-            let format = match nest.of(s.kind) {
-                Some(Nest::As(format)) => Some(format),
-                Some(Nest::Scan) => detect(d),
-                _ => None,
-            };
-            if let Some(format) = format.filter(|&f| is_pure(f) && format_on(f, opt))
-                && let Some(n) = extent(format, d).filter(|&n| n > 0)
-            {
-                out.push((format, &d[..n], (n == d.len()).then_some((stream, start, len))));
+            if let Some(nest) = nest.of(s.kind) {
+                out.push((nest, d, (stream, start, len)));
             }
         }
-        (Node::Concat(ns) | Node::Pack(ns), _) => ns.iter().for_each(|n| pure_contents(n, nest, f, opt, out)),
+        (Node::Concat(ns) | Node::Pack(ns), _) => ns.iter().for_each(|n| pure_candidates(n, nest, f, opt, out)),
         (Node::Apply(a), _) => {
             for (i, input) in a.inputs.iter().enumerate() {
-                pure_contents(input, content(opt, a.module, i).map(|c| c.nest), f, opt, out);
+                pure_candidates(input, content(opt, a.module, i).map(|c| c.nest), f, opt, out);
             }
         }
         _ => {}
