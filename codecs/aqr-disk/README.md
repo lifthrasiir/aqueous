@@ -20,6 +20,7 @@ let f = aqr_disk::formula::encode_with(&image, &opt).unwrap();
 codecs/aqr-disk/scripts/gen-fixtures.sh     # tests/data: partition tables of hdiutil (macOS)
 codecs/aqr-disk/scripts/gen-containers.sh   # tests/data: a disk and its containers by qemu-img (Lima VM)
 powershell -File codecs/aqr-disk/scripts/gen-containers.ps1   # tests/data/win*: Windows' (elevated)
+codecs/aqr-disk/scripts/gen-dmg.sh          # tests/data/dmg-*: a disk of HFS+ and its UDIF images (macOS)
 ```
 
 ## What it reads
@@ -30,6 +31,10 @@ powershell -File codecs/aqr-disk/scripts/gen-containers.ps1   # tests/data/win*:
   is what readers read (an `Image`: each read puts its bytes together from the block table, those
   not allocated zeros), and the files' extents are taken where the container holds them; the
   block tables and headers are the rest. A fixed VHD and a flat VMDK extent are a plain disk.
+  A UDIF image (`.dmg`, `dmg`: the `koly` trailer, the property list's `mish` block tables, from
+  the format's public descriptions) of raw chunks and zeros only (UDRO, UDRW) is a container as
+  well; one of compressed chunks is parsed for aqr-compress, whose formula rebuilds its zlib
+  chunks from the disk.
   Not read: differencing disks and those of a parent or backing file, encrypted ones, compressed
   grains and clusters (streamOptimized VMDK; qcow2's compressed clusters read as zeros: stage 8),
   VHDX's log, VHD's and VHDX's sector bitmaps (an allocated block is taken whole).
@@ -54,7 +59,7 @@ powershell -File codecs/aqr-disk/scripts/gen-containers.ps1   # tests/data/win*:
   pieces split from it; a piece overlapping one before it is left in the rest, and the file's
   contents are those taken.
 
-Not read yet: DMG and compressed containers (stage 7, 8), holes of sparse files and of zeros as nodes of their own (they are
+Not read yet: compressed containers (stage 8; DMGs of other compressions than zlib), holes of sparse files and of zeros as nodes of their own (they are
 in the rest, to zstd), file systems' metadata taken apart (`docs/disk-image-design.md`).
 
 ## How it does
@@ -106,7 +111,9 @@ stage 3). (Most of the time is the verify of one leaf:
 `cargo rt -p aqr-disk`: a disk of qemu-img in each container (the virtual disk as the disk is,
 its files of ext4 and ext2 where the container holds them, the container rebuilt; compressed
 clusters; containers cut short and changed bytes); Windows' own (`scripts/gen-containers.ps1`,
-elevated: diskpart's dynamic VHDX and VHD, Hyper-V's New-VHD's VHDX), their NTFS files; the partition tables of hdiutil (GPT, MBR, APM), logical partitions and
+elevated: diskpart's dynamic VHDX and VHD, Hyper-V's New-VHD's VHDX), their NTFS files; hdiutil's
+UDIF images of each kind (chunks covering the disk, UDRO's a container; cut short and changed
+bytes); the partition tables of hdiutil (GPT, MBR, APM), logical partitions and
 their loops, data that is no table, how extents are laid out, files in pieces (evaluated and
 archived), a toy file system in each table and in all of an image, images cut short and changed
 bytes. aqr-iso's tests read its fixtures on a partition, and aqr-compress's a JPEG file in pieces

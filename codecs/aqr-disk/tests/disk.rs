@@ -141,7 +141,12 @@ fn not_tables() {
 #[test]
 fn pieces_overlapping_and_contiguous() {
     let d = vec![0u8; 100];
-    let file = |name: &str, extents: &[Range<usize>], rank| File { name: name.into(), extents: extents.to_vec(), rank, compressed: None };
+    let file = |name: &str, extents: &[Range<usize>], rank| File {
+        name: name.into(),
+        extents: extents.to_vec(),
+        rank,
+        compressed: None,
+    };
     let files = [
         // two contiguous extents: one piece
         file("a", &[10..20, 20..30], 2),

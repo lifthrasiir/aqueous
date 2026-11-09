@@ -145,3 +145,71 @@ fn windows_containers() {
         assert!(f.eval(&none).unwrap() == d, "{name}: rebuilt");
     }
 }
+
+/// UDIF images (`scripts/gen-dmg.sh`): the chunks of each cover its disk, one after another;
+/// UDRO's a container of the disk as it is, UDZO's zlib chunks inflating to their parts of it.
+#[test]
+fn udif_images() {
+    let disk = fixture("dmg-disk.img");
+    for name in ["dmg-udro.dmg", "dmg-udzo.dmg", "dmg-udbz.dmg", "dmg-ulfo.dmg"] {
+        let d = fixture(name);
+        let u = aqr_disk::dmg::parse(&d).unwrap_or_else(|| panic!("{name}"));
+        assert_eq!(u.len, disk.len() as u64, "{name}");
+        let mut chunks = u.chunks.clone();
+        chunks.sort_by_key(|c| c.disk.start);
+        let mut at = 0;
+        for c in &chunks {
+            assert_eq!(c.disk.start, at, "{name}");
+            at = c.disk.end;
+            let want = &disk[c.disk.start as usize..c.disk.end as usize];
+            match c.how {
+                aqr_disk::dmg::How::Zeros => assert!(want.iter().all(|&b| b == 0), "{name}"),
+                aqr_disk::dmg::How::Raw => assert!(&d[c.file.clone()] == want, "{name}"),
+                aqr_disk::dmg::How::Zlib => {
+                    let mut out = Vec::new();
+                    std::io::Read::read_to_end(&mut flate2::read::ZlibDecoder::new(&d[c.file.clone()]), &mut out)
+                        .unwrap();
+                    assert!(out == want, "{name}");
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(at, u.len, "{name}");
+    }
+    let d = fixture("dmg-udro.dmg");
+    let m = container::open(&d).unwrap();
+    assert_eq!(m.kind, Kind::Dmg);
+    assert!(m.get(0..m.len()).unwrap()[..] == disk[..]);
+    assert!(container::open(&fixture("dmg-udzo.dmg")).is_none());
+}
+
+/// UDIF images cut short or with bytes changed (in the trailer and the property list's block
+/// tables): none, or chunks within the file and the disk; the container of one as well.
+#[test]
+fn udif_images_damaged() {
+    for name in ["dmg-udro.dmg", "dmg-udzo.dmg"] {
+        let d = fixture(name);
+        let u = aqr_disk::dmg::parse(&d).unwrap();
+        let check = |e: &[u8], what: &str| {
+            if let Some(u) = aqr_disk::dmg::parse(e) {
+                for c in &u.chunks {
+                    assert!(c.file.end <= u.koly.start && c.disk.end <= u.len, "{name}, {what}: {c:?}");
+                }
+            }
+            if let Some(m) = container::open(e) {
+                assert_eq!(m.kind, Kind::Dmg, "{name}, {what}");
+            }
+        };
+        for n in [0, 1, 511, 512, 513, d.len() / 2, d.len() - 513, d.len() - 512, d.len() - 1] {
+            check(&d[..n], &format!("cut at {n}"));
+        }
+        let at: Vec<usize> = (u.koly.clone()).chain(u.xml.clone().step_by(7)).collect();
+        for &p in &at {
+            for v in [0x00, 0xff, d[p] ^ 0x01] {
+                let mut e = d.clone();
+                e[p] = v;
+                check(&e, &format!("byte {p} = {v:#x}"));
+            }
+        }
+    }
+}

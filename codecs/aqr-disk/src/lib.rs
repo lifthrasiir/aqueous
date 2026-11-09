@@ -11,6 +11,7 @@
 
 pub mod compressed;
 pub mod container;
+pub mod dmg;
 pub mod formula;
 pub mod image;
 pub mod partition;

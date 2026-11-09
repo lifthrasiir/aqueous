@@ -13,6 +13,7 @@ aqr-lzx = { path = "../aqr-lzx" }
 aqr-xpress = { path = "../aqr-xpress" }
 
 [dev-dependencies]
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 # (file systems to read the containers' disks with)
 aqr-ext = { path = "../aqr-ext" }
 aqr-ntfs = { path = "../aqr-ntfs" }

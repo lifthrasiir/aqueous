@@ -50,6 +50,8 @@ pub enum Kind {
     Vmdk,
     Qcow2,
     Vdi,
+    /// A UDIF image (`.dmg`) of raw chunks (and zeros) only.
+    Dmg,
 }
 
 /// A virtual disk in file `file`: its bytes, of runs in order (each a range of the disk and where
@@ -156,7 +158,37 @@ impl Image for Map<'_> {
 
 /// The virtual disk of container `d`, where it is one of those read.
 pub fn open(d: &[u8]) -> Option<Map<'_>> {
-    vhdx(d).or_else(|| vhd(d)).or_else(|| vmdk(d)).or_else(|| qcow2(d)).or_else(|| vdi(d))
+    vhdx(d).or_else(|| vhd(d)).or_else(|| vmdk(d)).or_else(|| qcow2(d)).or_else(|| vdi(d)).or_else(|| dmg(d))
+}
+
+/// A UDIF image of raw chunks and zeros (UDRO, UDRW with a trailer): the chunks are where the
+/// disk's bytes are (a compressed one is none of these: `crate::dmg`).
+fn dmg(d: &[u8]) -> Option<Map<'_>> {
+    let u = crate::dmg::parse(d)?;
+    let mut chunks: Vec<&crate::dmg::Chunk> = u.chunks.iter().collect();
+    chunks.sort_by_key(|c| c.disk.start);
+    let len = usize::try_from(u.len).ok()?;
+    let mut runs: Vec<(Range<usize>, Option<usize>)> = Vec::new();
+    let mut at = 0usize;
+    for c in chunks {
+        let (s, e) = (usize::try_from(c.disk.start).ok()?, usize::try_from(c.disk.end).ok()?);
+        if s < at {
+            return None;
+        }
+        if s > at {
+            runs.push((at..s, None));
+        }
+        match c.how {
+            crate::dmg::How::Raw if c.file.len() == e - s => runs.push((s..e, Some(c.file.start))),
+            crate::dmg::How::Zeros => runs.push((s..e, None)),
+            _ => return None,
+        }
+        at = e;
+    }
+    if at < len {
+        runs.push((at..len, None));
+    }
+    Some(Map { kind: Kind::Dmg, file: d, len, runs })
 }
 
 /// A dynamic VHD: its footer (the copy at the start), its dynamic header and block allocation

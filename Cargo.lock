@@ -390,6 +390,7 @@ dependencies = [
  "aqr-lzx",
  "aqr-ntfs",
  "aqr-xpress",
+ "flate2",
  "zstd",
 ]
 
