@@ -12,7 +12,7 @@ use crate::{compress, stream};
 
 pub use crate::module::{decode, decode_alz};
 
-pub const MODULE: Module = Module::new("bz2-recons", 2).with_plan(memory);
+pub const MODULE: Module = Module::new("bz2-recons", 2).with_plan(memory).with_contents(&[0]);
 
 /// ALZip's bzip2 streams (`FORMAT.md`, §8).
 pub const MODULE_ALZ: Module = Module::new("bz2-alz-recons", 2).with_plan(memory_alz);

@@ -10,7 +10,7 @@ use crate::{lzx, recons};
 
 pub use crate::module::{Part, decode, index};
 
-pub const MODULE: aqr_formula::Module = aqr_formula::Module::new("lzx-recons", 2).with_plan(plan);
+pub const MODULE: aqr_formula::Module = aqr_formula::Module::new("lzx-recons", 2).with_plan(plan).with_contents(&[0]);
 
 /// The memory of the module: its plan ([`crate::plan::decode`]).
 fn plan(u: &aqr_formula::Usage<'_>) -> Option<u64> {

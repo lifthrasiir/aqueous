@@ -42,7 +42,8 @@ use std::sync::Arc;
 
 /// A module, by name and version of its input format. Eventually a Wasm module identified by
 /// its hash; a native implementation stands in for it (§5.7). It is its name and version (as
-/// equal and hashed); `plan` gives the memory of its applications.
+/// equal and hashed); `plan` gives the memory of its applications, `contents` what of their
+/// inputs an encoder may recompress in turn.
 #[derive(Debug, Clone, Copy)]
 pub struct Module {
     pub name: &'static str,
@@ -50,6 +51,10 @@ pub struct Module {
     /// The module's memory plan: what its working memory takes at most, by construction
     /// (`aqr_api::stack`), declared without room. None only for a stand-in of a test.
     pub plan: Option<Planner>,
+    /// The inputs of its applications that are data as it is, a file or what a file holds,
+    /// rather than a representation of the module's own (the data of a compressed stream, an
+    /// archive's members): what an encoder may look into for files in turn.
+    pub contents: &'static [usize],
 }
 
 /// A module's memory plan: the limit of its application's instance, and of a task of each of
@@ -182,7 +187,12 @@ impl Module {
     /// built into a Wasm module has a plan ([`Module::with_plan`]), and none is declared a limit
     /// without it.
     pub const fn new(name: &'static str, version: u16) -> Module {
-        Module { name, version, plan: None }
+        Module { name, version, plan: None, contents: &[] }
+    }
+
+    /// The module whose inputs `inputs` are data as it is ([`Module::contents`]).
+    pub const fn with_contents(self, inputs: &'static [usize]) -> Module {
+        Module { contents: inputs, ..self }
     }
 
     /// The module of the memory plan `plan`, a module spawning no tasks: whose working memory is

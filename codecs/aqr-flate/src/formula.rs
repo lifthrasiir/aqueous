@@ -20,7 +20,9 @@ pub use crate::module::{
     Derived, decode, index, index_before, models_from_bytes, priors_from_bytes, rules_from_bytes,
 };
 
-pub const MODULE: Module = Module::new("flate-set", 4).with_task_plan(memory);
+pub const MODULE: Module = Module::new("flate-set", 4)
+    .with_task_plan(memory)
+    .with_contents(&[0]);
 
 /// The memory of the module: its plan ([`crate::plan::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<aqr_formula::Plan> {

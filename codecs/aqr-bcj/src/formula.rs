@@ -7,22 +7,22 @@ use aqr_formula::{Module, Node};
 use crate::bra::{self, Arch};
 use crate::{Result, delta, module};
 
-pub const X86: Module = Module::new("bcj-x86", 2).with_plan(memory_part);
-pub const POWERPC: Module = Module::new("bcj-powerpc", 2).with_plan(memory_part);
-pub const IA64: Module = Module::new("bcj-ia64", 2).with_plan(memory_part);
-pub const ARM: Module = Module::new("bcj-arm", 2).with_plan(memory_part);
-pub const ARM_THUMB: Module = Module::new("bcj-armthumb", 2).with_plan(memory_part);
-pub const SPARC: Module = Module::new("bcj-sparc", 2).with_plan(memory_part);
-pub const ARM64: Module = Module::new("bcj-arm64", 2).with_plan(memory_part);
-pub const RISCV: Module = Module::new("bcj-riscv", 2).with_plan(memory_part);
+pub const X86: Module = Module::new("bcj-x86", 2).with_plan(memory_part).with_contents(&[0]);
+pub const POWERPC: Module = Module::new("bcj-powerpc", 2).with_plan(memory_part).with_contents(&[0]);
+pub const IA64: Module = Module::new("bcj-ia64", 2).with_plan(memory_part).with_contents(&[0]);
+pub const ARM: Module = Module::new("bcj-arm", 2).with_plan(memory_part).with_contents(&[0]);
+pub const ARM_THUMB: Module = Module::new("bcj-armthumb", 2).with_plan(memory_part).with_contents(&[0]);
+pub const SPARC: Module = Module::new("bcj-sparc", 2).with_plan(memory_part).with_contents(&[0]);
+pub const ARM64: Module = Module::new("bcj-arm64", 2).with_plan(memory_part).with_contents(&[0]);
+pub const RISCV: Module = Module::new("bcj-riscv", 2).with_plan(memory_part).with_contents(&[0]);
 /// The memory of the part modules ([`module::bra_part`], [`module::delta_part`], [`module::bcj2_part`]): their initial
 /// memory alone (they allocate nothing).
 fn memory_part(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.initial())
 }
 
-pub const DELTA: Module = Module::new("bcj-delta", 1).with_plan(memory_part);
-pub const BCJ2: Module = Module::new("bcj2", 2).with_plan(memory_part);
+pub const DELTA: Module = Module::new("bcj-delta", 1).with_plan(memory_part).with_contents(&[0]);
+pub const BCJ2: Module = Module::new("bcj2", 2).with_plan(memory_part).with_contents(&[0]);
 
 /// Every module of this crate.
 pub const MODULES: [Module; 10] = [X86, POWERPC, IA64, ARM, ARM_THUMB, SPARC, ARM64, RISCV, DELTA, BCJ2];

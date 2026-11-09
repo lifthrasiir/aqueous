@@ -12,10 +12,10 @@ use crate::snappy::{self, Hash};
 pub use crate::module::{decode, decode_table};
 
 /// A Snappy stream ([`stream`], [`decode`]).
-pub const MODULE: Module = Module::new("snappy-recons", 3).with_plan(memory);
+pub const MODULE: Module = Module::new("snappy-recons", 3).with_plan(memory).with_contents(&[0]);
 
 /// A LevelDB table ([`encode`], [`decode_table`]).
-pub const TABLE_MODULE: Module = Module::new("leveldb-recons", 1).with_plan(table_memory);
+pub const TABLE_MODULE: Module = Module::new("leveldb-recons", 1).with_plan(table_memory).with_contents(&[0]);
 
 /// The memory of `snappy-recons`, a part module: its plan ([`crate::module::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {

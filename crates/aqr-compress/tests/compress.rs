@@ -2,7 +2,7 @@ use std::io::Write;
 use std::sync::{PoisonError, RwLock};
 
 use aqr_common::rng::noise;
-use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
+use aqr_compress::{Content, Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
     ARM64, ASAR, BUNDLE, BVX, BZ2, CLIP, DWARF_APPLE, DWARF_INFO, FLAC, FLATE, GIF, HDF5_FLOAT, JPEG, JSONL, LEVELDB,
     LZ4, LZO, MACHO_SYMTAB, MP3, Native, PCM, PDF, PNG, PNG_SET, PRORES, RASTER, RECS_ENTRIES, RECS_FIELDS, SQLITE,
@@ -1011,7 +1011,7 @@ fn scan_embedded() {
     // In the data of a DEFLATE stream.
     let f = roundtrip(&gzip(&[&text(5000)[..], &flac, &text(5000)].concat()), &all());
     assert_eq!(modules(&f), [FLATE.name, flac_name], "{f}");
-    let exact = Options { contents: vec![Content { nest: Nest::Exact, ..CONTENTS[0] }], ..all() };
+    let exact = Options { contents: vec![Content { module: FLATE, input: 0, nest: Nest::Exact }], ..all() };
     let f = roundtrip(&gzip(&[&text(5000)[..], &flac, &text(5000)].concat()), &exact);
     assert_eq!(modules(&f), [FLATE.name], "{f}");
 }

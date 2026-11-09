@@ -11,7 +11,7 @@ use crate::module::{BLOCK, FRAME};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("lz4-recons", 2).with_plan(memory);
+pub const MODULE: Module = Module::new("lz4-recons", 2).with_plan(memory).with_contents(&[0]);
 
 /// The memory of the module, a part module: its plan ([`crate::part::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {

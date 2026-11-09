@@ -13,7 +13,7 @@ use crate::layout::{self, BLOCKS, Body, HASH, HOLE, OFFSET, PREFIX, SIZE};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("asar-recons", 1).with_plan(memory);
+pub const MODULE: Module = Module::new("asar-recons", 1).with_plan(memory).with_contents(&[0]);
 
 /// The classes of the header (with holes) and of the index, streams 1 and 2.
 pub const HEADER: &str = "asar/header";

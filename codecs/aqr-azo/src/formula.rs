@@ -9,7 +9,7 @@ use crate::recons;
 pub use crate::module::{decode, index};
 pub use crate::recons::Split;
 
-pub const MODULE: Module = Module::new("azo-recons", 1).with_plan(plan);
+pub const MODULE: Module = Module::new("azo-recons", 1).with_plan(plan).with_contents(&[0]);
 
 /// The memory of the module: its plan ([`crate::plan::decode`]).
 fn plan(u: &aqr_formula::Usage<'_>) -> Option<u64> {

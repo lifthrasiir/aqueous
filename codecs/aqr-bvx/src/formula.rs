@@ -8,7 +8,7 @@ use crate::{bvx, recons};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("bvx-recons", 2).with_plan(memory);
+pub const MODULE: Module = Module::new("bvx-recons", 2).with_plan(memory).with_contents(&[0]);
 
 /// Bytes of data of a stream taken, at most (a stream of zeros grows a thousandfold).
 pub const MAX_DATA: u64 = 1 << 30;

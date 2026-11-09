@@ -163,10 +163,7 @@ pub use detect::{Format, detect, kind_by_name};
 pub use extent::extent;
 pub use progress::Event;
 
-use aqr_decompress::{
-    ASAR, AZO, BCJ_ARM, BCJ_ARM_THUMB, BCJ_ARM64, BCJ_DELTA, BCJ_IA64, BCJ_POWERPC, BCJ_RISCV, BCJ_SPARC, BCJ_X86,
-    BCJ2, BUNDLE, BVX, BZ2, FLATE, LEVELDB, LZ4, LZMA, LZMA2, LZO, LZX, Native, SNAPPY, ZIP,
-};
+use aqr_decompress::Native;
 use aqr_formula::aqr::{self, Encoder, Level, description_bound};
 use aqr_formula::probe::{Held, Look, Probe};
 use aqr_formula::{Bytes, Stream};
@@ -186,7 +183,7 @@ pub struct Options {
     /// verified below level 2, where nothing is recompressed ([`Options::level`]).
     pub verify: bool,
     /// The inputs whose data is recompressed in turn, by module and position; by default
-    /// [`CONTENTS`].
+    /// [`Content::defaults`].
     pub contents: Vec<Content>,
     /// How the file itself is recompressed.
     pub file: Nest,
@@ -323,7 +320,7 @@ impl Default for Options {
             threads: 1,
             depth: 3,
             verify: true,
-            contents: CONTENTS.to_vec(),
+            contents: Content::defaults(),
             file: Nest::Scan,
             description: usize::MAX,
             level: Level::MID,
@@ -354,35 +351,18 @@ pub struct Content {
     pub nest: Nest,
 }
 
-/// The contents of the modules of aqr-decompress: the data of [`FLATE`], [`LZ4`], [`LZMA`],
-/// [`LZMA2`], [`LZO`], [`AZO`], [`BVX`], [`BZ2`], [`LZX`], [`SNAPPY`], [`LEVELDB`], [`ZIP`], [`BUNDLE`] and [`ASAR`], and
-/// that before the filters of xz and 7z ([`BCJ_X86`] and the others, [`BCJ2`]), scanned.
-pub const CONTENTS: [Content; 24] = [
-    Content { module: FLATE, input: 0, nest: Nest::Scan },
-    Content { module: LZ4, input: 0, nest: Nest::Scan },
-    Content { module: LZMA, input: 0, nest: Nest::Scan },
-    Content { module: LZMA2, input: 0, nest: Nest::Scan },
-    Content { module: LZO, input: 0, nest: Nest::Scan },
-    Content { module: AZO, input: 0, nest: Nest::Scan },
-    Content { module: BVX, input: 0, nest: Nest::Scan },
-    Content { module: BZ2, input: 0, nest: Nest::Scan },
-    Content { module: LZX, input: 0, nest: Nest::Scan },
-    Content { module: SNAPPY, input: 0, nest: Nest::Scan },
-    Content { module: LEVELDB, input: 0, nest: Nest::Scan },
-    Content { module: ZIP, input: 0, nest: Nest::Scan },
-    Content { module: BUNDLE, input: 0, nest: Nest::Scan },
-    Content { module: ASAR, input: 0, nest: Nest::Scan },
-    Content { module: BCJ_X86, input: 0, nest: Nest::Scan },
-    Content { module: BCJ_POWERPC, input: 0, nest: Nest::Scan },
-    Content { module: BCJ_IA64, input: 0, nest: Nest::Scan },
-    Content { module: BCJ_ARM, input: 0, nest: Nest::Scan },
-    Content { module: BCJ_ARM_THUMB, input: 0, nest: Nest::Scan },
-    Content { module: BCJ_SPARC, input: 0, nest: Nest::Scan },
-    Content { module: BCJ_ARM64, input: 0, nest: Nest::Scan },
-    Content { module: BCJ_RISCV, input: 0, nest: Nest::Scan },
-    Content { module: BCJ_DELTA, input: 0, nest: Nest::Scan },
-    Content { module: BCJ2, input: 0, nest: Nest::Scan },
-];
+impl Content {
+    /// The contents of the modules of aqr-decompress, as each declares them
+    /// ([`Module::contents`]), scanned.
+    pub fn defaults() -> Vec<Content> {
+        let inputs = |&module: &Module| module.contents.iter().map(move |&input| (module, input));
+        aqr_decompress::MODULES
+            .iter()
+            .flat_map(inputs)
+            .map(|(module, input)| Content { module, input, nest: Nest::Scan })
+            .collect()
+    }
+}
 
 /// What recompressing a file carries along: the encoder sizing formulas, and the bytes that
 /// DEFLATE, LZFSE and LZVN streams may still inflate to ([`Options::expansion`]).
@@ -2813,6 +2793,7 @@ pub fn classes(f: &Formula) -> Vec<(&str, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aqr_decompress::FLATE;
 
     thread_local! {
         /// The formats given to recompressors, in order.

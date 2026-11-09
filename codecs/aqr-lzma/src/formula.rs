@@ -11,10 +11,10 @@ use crate::{alone, lzma2, recons, xz};
 
 pub use crate::module::{decode, decode2, index};
 
-pub const MODULE: Module = Module::new("lzma-recons", 4).with_plan(plan);
+pub const MODULE: Module = Module::new("lzma-recons", 4).with_plan(plan).with_contents(&[0]);
 
 /// The module rebuilding the segments of LZMA2 streams, one after another.
-pub const LZMA2: Module = Module::new("lzma2-recons", 3).with_plan(plan2);
+pub const LZMA2: Module = Module::new("lzma2-recons", 3).with_plan(plan2).with_contents(&[0]);
 
 /// The memory of [`MODULE`]: its plan ([`crate::plan::decode`]).
 fn plan(u: &aqr_formula::Usage<'_>) -> Option<u64> {
