@@ -106,3 +106,34 @@ fn damaged() {
         }
     }
 }
+
+/// A volume Windows formatted and filled (`scripts/gen-fixtures.ps1`, a fixed VHD of an MBR):
+/// its files read through aqr-disk's partitions, frag.bin's runs in an extension record.
+#[test]
+fn windows_volume() {
+    let d = fixture("windows.vhd");
+    let opt = Options { file_systems: &[aqr_ntfs::FS], kind: |_| Kind::Unknown };
+    let files = aqr_disk::files(&d, opt.file_systems);
+    let got = |name: &str| -> Option<(Vec<u8>, usize)> {
+        let f = files.iter().find(|f| f.name == name.as_bytes())?;
+        Some((f.extents.iter().flat_map(|r| d[r.clone()].to_vec()).collect(), f.extents.len()))
+    };
+    let jpeg = std::fs::read(format!("{}/../aqr-jpeg/tests/data/gradient.jpg", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    let data: Vec<u8> = (0..10000u32).map(|i| ((i * 7 + (i >> 8)) % 251) as u8).collect();
+    let chunk: Vec<u8> = (0..65536u32).map(|i| ((i * 13 + 5) % 253) as u8).collect();
+    let frag: Vec<u8> = (0..1536 * 1024u32).map(|i| ((i * 31 + (i >> 10)) % 249) as u8).collect();
+    assert_eq!(got("readme.txt").unwrap().0, b"Aqueous NTFS fixture\r\n".repeat(40));
+    // (a hard link: one file, of one of its names)
+    assert!(got("link.bin").or_else(|| got("bin/data.bin")).unwrap().0 == data);
+    assert!(got("sparse.bin").unwrap().0 == [&chunk[..], &chunk[..]].concat());
+    assert!(got("photo.jpg").unwrap().0 == jpeg);
+    let (f, pieces) = got("frag.bin").unwrap();
+    assert!(f == frag && pieces > 300, "{pieces}");
+    // resident and compressed: in the rest; WOF's data a stream of its own
+    for name in ["ads.txt", "ads.txt:extra", "packed/text.txt"] {
+        assert!(got(name).is_none(), "{name}");
+    }
+    assert!(got("wof.exe:WofCompressedData").is_some_and(|w| !w.0.is_empty()));
+    let f = formula::encode_with(&d, &opt).unwrap();
+    assert!(f.eval(&none).unwrap() == d);
+}
