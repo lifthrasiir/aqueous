@@ -25,6 +25,7 @@
 //! - [`out`]: output made in order, into a vector or compared with what it should be.
 //! - [`streams`]: streams of data and records one after another, and their index.
 //! - [`lz`]: what the LZ parsers share (the length of a match).
+//! - [`wasm`]: WebAssembly modules split into streams and joined back (aqr-wasm, module blocks).
 
 pub mod adler32;
 #[cfg(not(target_family = "wasm"))]
@@ -62,6 +63,7 @@ pub mod trace;
 #[path = "trace_none.rs"]
 pub mod trace;
 pub mod varint;
+pub mod wasm;
 pub mod wire;
 
 /// Malformed input; `.0` says what was wrong. The crates convert it into their own error.

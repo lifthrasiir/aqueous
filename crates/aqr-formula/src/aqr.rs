@@ -416,14 +416,34 @@ pub enum Wasm {
 const MODULE_LEVEL: i32 = 22;
 
 /// The data of the module block of Wasm module `wasm`, compressed at the highest level, to be
-/// made once ([`Wasm::Block`]).
+/// made once ([`Wasm::Block`]): in the split form where the module splits and that is smaller,
+/// else in the stored form.
 pub fn module_block_data(wasm: &[u8]) -> Result<Vec<u8>> {
-    always_compressed(&mut CCtx::create(), &[wasm], MODULE_LEVEL, 1)
+    let stored = always_compressed(&mut CCtx::create(), &[wasm], MODULE_LEVEL, 1)?;
+    match aqr_common::wasm::to_split_form(wasm) {
+        Some(split) => {
+            let split = always_compressed(&mut CCtx::create(), &[&split], MODULE_LEVEL, 1)?;
+            Ok(if split.len() < stored.len() { split } else { stored })
+        }
+        None => Ok(stored),
+    }
 }
 
 /// The Wasm module of the data of its module block ([`module_block_data`]).
 pub fn module_of_block_data(d: &[u8]) -> Option<Vec<u8>> {
-    stored_decoded(d)
+    module_of_decoded(stored_decoded(d)?).ok()
+}
+
+/// The Wasm module of the decoded data `d` of a module block: `d` itself in the stored form
+/// (first byte 00), joined in the split form (0D), else invalid.
+pub(crate) fn module_of_decoded(d: Vec<u8>) -> Decoded<Vec<u8>> {
+    match d.first() {
+        Some(0) => Ok(d),
+        Some(&aqr_common::wasm::SPLIT_FORM) => {
+            aqr_common::wasm::from_split_form(&d).ok_or_else(|| Failure::Invalid("bad split form of a module".into()))
+        }
+        _ => invalid("a module block of neither the stored nor the split form"),
+    }
 }
 
 /// The decoded data of checksummed Zstandard data `d` (the data of a module or resource block).
@@ -3743,7 +3763,7 @@ fn parse(d: &[u8], base: usize, size_hint: u64, metadata: bool, sealed: bool) ->
             0x61..=0x63 => {
                 b.module_at.push(at);
                 b.sizes.modules.push(size);
-                b.modules.push(decoded(data, true, true)?);
+                b.modules.push(module_of_decoded(decoded(data, true, true)?)?);
                 b.module_data.push(data);
             }
             0x64..=0x67 => {
@@ -6707,5 +6727,49 @@ mod tests {
         let b = description_bound(&g.root);
         assert_eq!(b, sum + description_bound(&Node::slice(0, 0, 1 << 20)) + 3);
         assert!(b >= desc(&g), "{b} < {}", desc(&g));
+    }
+
+    fn real_module(name: &str) -> Vec<u8> {
+        std::fs::read(format!("{}/../aqr-modules/wasm/{name}.wasm", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    }
+
+    /// A module block holds a module in the split form where that is smaller, and either form
+    /// gives the module back.
+    #[test]
+    fn module_block_forms() {
+        for name in ["wasm-recons", "bcj-x86", "flac-recons"] {
+            let wasm = real_module(name);
+            let data = module_block_data(&wasm).unwrap();
+            let decoded = stored_decoded(&data).unwrap();
+            assert_eq!(decoded[0], aqr_common::wasm::SPLIT_FORM, "{name}");
+            let stored = always_compressed(&mut CCtx::create(), &[&wasm], MODULE_LEVEL, 1).unwrap();
+            assert!(data.len() < stored.len(), "{name}: {} against {}", data.len(), stored.len());
+            assert_eq!(module_of_block_data(&data).unwrap(), wasm, "{name}");
+            assert_eq!(module_of_block_data(&stored).unwrap(), wasm, "{name}");
+        }
+        // not splittable: stored
+        let stand_in = stand_in(REV);
+        assert_eq!(module_of_block_data(&module_block_data(&stand_in).unwrap()).unwrap(), stand_in);
+    }
+
+    /// Split forms that are not valid are not modules.
+    #[test]
+    fn invalid_split_forms() {
+        let wasm = real_module("bcj-x86");
+        let good = aqr_common::wasm::to_split_form(&wasm).unwrap();
+        assert_eq!(module_of_decoded(good.clone()).unwrap(), wasm);
+        let bad = |d: Vec<u8>| assert!(module_of_decoded(d).is_err());
+        bad(Vec::new());
+        bad(vec![1, 2, 3]);
+        bad(good[..good.len() - 1].to_vec());
+        bad([&good[..], &[0]].concat());
+        // a count other than 13
+        bad([&[12][..], &good[1..]].concat());
+        // lengths past the payload
+        bad(vec![0x0d; 1]);
+        let mut long = good.clone();
+        long[1] = 0xff;
+        long.insert(2, 0x7f);
+        bad(long);
     }
 }

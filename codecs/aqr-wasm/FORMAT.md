@@ -8,6 +8,10 @@ from it alone, without knowing more of WebAssembly than its LEB128s. Sections ma
 *(encoder)* describe the choices this implementation makes when it builds formulas; the module
 does not depend on them.
 
+The same streams, one after another after their lengths, are the split form of a module block (the
+spec's "Split modules"); the code that splits and joins them is `aqr_common::wasm`, shared with
+aqr-formula, which reads and writes the module blocks.
+
 Nothing is derived from what the module means: every byte comes back from the streams as it
 was, LEB128s of any length included, but for the sizes of the sections and functions split
 (§5) and the local indices (§4.3), which are written in the shortest form. A module the encoder

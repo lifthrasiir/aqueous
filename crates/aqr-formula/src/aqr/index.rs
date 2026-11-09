@@ -18,7 +18,8 @@ use aqr_common::varint;
 use super::tree::{self, Read, Status, Tree};
 use super::{
     BlockSizes, Blocks, ContentRef, Counts, Decoded, Failure, HEADER_MAGIC, LeafBlock, Payload, Resource, SIZE_HINT,
-    Segmented, critical, decoded, decoded_with, defined, dict, invalid, leb, opened, resource, tree_of,
+    Segmented, critical, decoded, decoded_with, defined, dict, invalid, leb, module_of_decoded, opened, resource,
+    tree_of,
 };
 
 /// A segment's blocks as its metadata block tells where they are.
@@ -345,7 +346,7 @@ impl<'c> Index<'c> {
             let at = seg.module_at[m - seg.first.modules];
             match frame(self.p, at, seg.end)? {
                 (0x60, ..) => resource("registered modules are not supported yet"),
-                (0x61..=0x63, data, _) => Ok((decoded(data, true, true)?, data)),
+                (0x61..=0x63, data, _) => Ok((module_of_decoded(decoded(data, true, true)?)?, data)),
                 _ => invalid("module, resource or dictionary offsets not those of the blocks"),
             }
         });
