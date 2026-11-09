@@ -72,8 +72,10 @@ on `wof4k.chunks` and `gen.chunks` and checks its memory plan.
 
 ## Status
 
-The module `xpress-recons` (natively and as a Wasm module of aqr-modules) is done. Containers do
-not use it yet (aqr-disk's WOF, aqr-wim's XPRESS resources).
+The module `xpress-recons` (natively and as a Wasm module of aqr-modules) is done, and aqr-disk
+takes WOF's XPRESS4K, 8K and 16K files apart by it (NTFS volumes in disk images: streams of 8
+MiB of data at most; aqr-disk's README has the figures). aqr-wim's XPRESS resources do not use
+it yet.
 
 Not yet: the engine's own candidate set (the decisions between a literal and a match are most
 of the standard engine's record: Windows' hash table is not known, and positions of the

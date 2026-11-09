@@ -8,7 +8,13 @@ archive stores once. The zlib streams of the entries are rebuilt by aqr-flate's 
 aqr-compress picks it for any DEFLATE stream: the default (static, fast) below level 7, the
 adaptive one with zlib emulation from 7 on. With the adaptive one, the zlib settings git writes
 every object with are found once on a few of the largest streams and tried first on the
-others, which are then emulated exactly, for next to no record. The module `git-pack-recons` derives the
+others, which are then emulated exactly, for next to no record. Below level 7 those few streams
+are made at the adaptive profile first, and where its emulation predicts every token of at
+least half of them, all of the pack is made at it with those settings hinted (no search, which
+is what makes the profile slow), as compressed DMGs' chunks are; else at the default profile,
+and so too where the adaptive formula would need more memory than the application bound. The
+pack of this repository (53.1 MB) went so from 43.02 to 42.19 MB at the default level, in 6.27
+s against 6.47. The module `git-pack-recons` derives the
 entries' headers from the sizes of their data, the zlib headers and checksums, and the pack's
 trailer (SHA-1), and keeps what is not what git writes as it is.
 

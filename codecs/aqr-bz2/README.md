@@ -53,8 +53,9 @@ reading its code (BSD-style, not public domain).
 
 Not reproduced, kept as they are: other compressors (lbzip2, 7-Zip's, Dart's), libbzip2 before
 1.0.3 where a code would be over 17 bits, randomised blocks (bzip2 0.9.0), streams flushed
-early (`BZ_FLUSH`), data over 1 GiB. Left: bzip2 inside ZIP (method 12), 7z, DMG (UDBZ) (ALZ archives' is
-done, by `bz2-alz-recons`, and EGG's, by `bz2-recons`: `formula::take_whole`, `apply_framed`);
+early (`BZ_FLUSH`), data over 1 GiB. Left: bzip2 inside ZIP (method 12) and 7z (ALZ archives'
+is done, by `bz2-alz-recons`, EGG's, by `bz2-recons`, and DMGs' UDBZ chunks, each by its own
+application of `bz2-recons` in aqr-compress's `chunked`: `formula::take_whole`, `apply_framed`);
 tasks in the Wasm module; a stream not reproduced could keep its tables and selectors as a
 record (lbzip2) rather than be kept whole.
 

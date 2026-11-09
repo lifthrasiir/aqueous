@@ -73,8 +73,9 @@ do not panic. aqr-decompress runs the module as WebAssembly on `ntfs.units` and 
 
 ## Status
 
-The module `lznt1-recons` (natively and as a Wasm module of aqr-modules) is done. Containers do
-not use it yet (aqr-disk's NTFS compressed attributes).
+The module `lznt1-recons` (natively and as a Wasm module of aqr-modules) is done, and aqr-disk
+takes NTFS's compressed streams apart by it (the units of NTFS volumes in disk images: stored,
+holes, compressed; aqr-disk's README has the figures).
 
 Not yet: the encoder's own candidate set (the literal decisions are most of the record: Windows'
 hash table is not known); NTFS compression with other cluster sizes (clusters of 512 bytes to

@@ -7,8 +7,13 @@ the rest of the file is a stream as it is. The records are of aqr-flate's profil
 aqr-compress picks it for any DEFLATE stream: the default (static, fast) below level 7, the
 adaptive one with zlib emulation from 7 on. The HDF5 library deflates with zlib's `compress2`,
 so that with the adaptive one every chunk of the corpus is emulated exactly (levels 1, 4, 6
-and 9 seen), for next to no record; with the default one, the records of zlib's level 1 (GOES,
-GOES) come to about a sixth of the streams, and the archive keeps such files as they are.
+and 9 seen), for next to no record; with the default one, the records of zlib's level 1 (GOES)
+come to about a sixth of the streams. So below level 7 a few of the largest chunks are made at
+the adaptive profile first, and where zlib's emulation predicts every token of at least half of
+them, all are made at it with those zlib settings hinted (no search, which is what makes the
+profile slow), as compressed DMGs' chunks are; else at the profile asked for. Where the
+adaptive profile's `flate-set` would need more memory than the application bound
+(`made/gzip1.h5`: 426 MiB of 256), the file is made again at the profile asked for.
 
 ```sh
 cargo run --release -p aqr-hdf5 --example aqr-hdf5-check -- [-v] [-t N] [-p PROFILE] FILE_OR_DIR...
@@ -65,14 +70,20 @@ chunks (Keras weights, NWB, most NeXus samples, the test files) are as before. C
 the corpus took 31.5 s by default and 44.5 s at `-9` (one file at a time, the round trip
 included).
 
+The default level's column is from before the adaptive profile was tried below level 7
+(2026-11-10). With it, a GOES CMIPC file went from 2.28 to 2.24 MB, a GWOSC file (16 kHz,
+32 s) from 3.55 to 3.47 MB (0.22 -> 0.24 s), and `made/gzip6.h5` from 23.67 to 23.28 MB
+(1.61 -> 1.95 s).
+
 ## Status
 
 Left:
 
 - The archive of a single small file pays for `flate-set` (71.7 KB) to rebuild zlib's streams;
   a module of zlib's deflate alone would be a fraction of it.
-- At the default level, aqr-flate's records of zlib's level 1 come to about a sixth of GOES's
-  streams (shuffled 16-bit integers), which are kept as they are; GWOSC's (floats) cost little.
+- A file whose adaptive formula is over the application bound pays for the trial for nothing
+  (about 1.5 s for `made/gzip1.h5` and `made/gzip4-shuffle.h5`): a cheaper test of the bound
+  before making all of its streams.
 - Integer data: images (GOES's 12-bit radiances, OISST) by a 2D predictor (aqr-fits' pixel
   model), shuffle undone; floats of few values (AnnData's counts) by their ranks. The float
   model predicts along the chunk as one line: images of floats would want the row above.

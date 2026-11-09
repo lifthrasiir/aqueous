@@ -195,7 +195,7 @@ optimization picked by hash.
 - aqr-bvx (Apple's LZFSE and LZVN, `bvx2`/`bvxn` blocks; asset catalogs): a record of the parse,
   as aqr-lzo, with the LZFSE compressor's table of candidates (14-bit hash, 4 ways) emulated as
   a context. Apple's lzfse code (BSD) is not read; libcompression is the black box. Left (its
-  README's Status): decmpfs, DMG ULFO, an image model for the data.
+  README's Status): decmpfs, an image model for the data.
 - aqr-gif: the LZW codes coded given the pixels against the longest match (every encoder seen
   writes it), the pixels by a context-mixing model of palette indices (lpaq's style; integers
   only, so Wasm and native agree). Left (its README's Status): frames against the image shown,
@@ -204,7 +204,7 @@ optimization picked by hash.
   libbzip2's code is not read (BSD-style). Python's `bz2` and a shared libbz2
   (`BZ2_hbMakeCodeLengths`) are the black boxes. Equal rotations of periodic blocks order
   otherwise, so their `origPtr` goes in the params. Left (its README's Status): lbzip2 and
-  others, bzip2 in ZIP/7z/DMG, tasks in Wasm.
+  others, bzip2 in ZIP/7z, tasks in Wasm.
 - aqr-azo (AZO, ALZip's compressor in EGG archives): a record of the parse, as aqr-lzo, the
   stream coded again by the spec's models (OctopusET's EGG spec, Appendix A; ALZip's output the
   black box). The x86 filter is not known (the spec's does not give ALZip's CRC-32): filtered

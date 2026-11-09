@@ -3,9 +3,10 @@
 LZX streams split into their data and a record of their parse, and rebuilt bit for bit. The
 archive then stores the data, which compresses better than the streams, which aqr-compress
 recompresses in turn (a WIM image's files, a CAB's executables) and which other files may
-share. Two variants are taken: the chunks of WIM files' resources (32 KiB each, compressed
-apart), and the streams of CAB folders and CHM sections (windows of 32 KiB to 2 MiB, frames of
-32 KiB). aqr-wim and aqr-mszip take those containers apart and make the applications.
+share. Two variants are taken: chunks compressed apart, of WIM files' resources and of WOF's
+LZX files on NTFS (32 KiB each), and the streams of CAB folders and CHM sections (windows of
+32 KiB to 2 MiB, frames of 32 KiB). aqr-wim, aqr-disk and aqr-mszip take those containers apart
+and make the applications.
 
 No encoder is reproduced. Microsoft's encoders are closed and their parse optimal-style, so the
 record codes the parse given the data, under contexts of what a match finder sees there (the
@@ -61,8 +62,8 @@ which aqr-decompress runs as WebAssembly.
 
 ## Status
 
-The module `lzx-recons` (natively and as a Wasm module of aqr-modules), WIM files (aqr-wim)
-and CAB and CHM files (aqr-mszip) are done.
+The module `lzx-recons` (natively and as a Wasm module of aqr-modules), WIM files (aqr-wim),
+WOF's LZX files in disk images (aqr-disk) and CAB and CHM files (aqr-mszip) are done.
 
 Not yet: speed (a large CAB folder is one stream on one thread, which keeps LZX CABs to level
 9); LZX DELTA (MS-PATCH's reference data); LZMS and XPRESS (ESD files, WIMs of other
