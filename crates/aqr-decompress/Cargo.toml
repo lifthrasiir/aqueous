@@ -52,6 +52,7 @@ aqr-gif = { path = "../../codecs/aqr-gif" }
 aqr-prores = { path = "../../codecs/aqr-prores" }
 aqr-lzx = { path = "../../codecs/aqr-lzx" }
 aqr-xpress = { path = "../../codecs/aqr-xpress" }
+aqr-lznt1 = { path = "../../codecs/aqr-lznt1" }
 aqr-mszip = { path = "../../codecs/aqr-mszip" }
 aqr-mp3 = { path = "../../codecs/aqr-mp3" }
 aqr-pdf = { path = "../../codecs/aqr-pdf" }

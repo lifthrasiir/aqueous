@@ -217,6 +217,11 @@ pub const LZX: Module = aqr_lzx::formula::MODULE;
 /// and the index cutting them into the streams'.
 pub const XPRESS: Module = aqr_xpress::formula::MODULE;
 
+/// aqr-lznt1 reconstruction of streams of LZNT1 units (NTFS's compression units, or a buffer's
+/// chunks), one after another, from their data and records. Inputs: the data, the records, the
+/// bytes kept and the index cutting them into the streams'.
+pub const LZNT1: Module = aqr_lznt1::formula::MODULE;
+
 /// A CAB file's MSZIP and stored folders rebuilt from the joined DEFLATE streams of the MSZIP
 /// folders (each its blocks' streams as one) and the stored folders' data. Inputs: the joined
 /// streams, the stored data, the bytes kept (the data blocks' headers) and the index.
@@ -606,6 +611,7 @@ const NATIVE: &[Entry] = &[
     threaded(BZ2_ALZ, |p, _, i, n, t| aqr_bz2::formula::decode_alz(p, i, n, t).map_err(err)),
     bare(LZX, |p, _, i, n, t| aqr_lzx::formula::decode(p, i, n, t).map_err(err)),
     bare(XPRESS, |p, _, i, n, t| aqr_xpress::formula::decode(p, i, n, t).map_err(err)),
+    bare(LZNT1, |p, _, i, n, t| aqr_lznt1::formula::decode(p, i, n, t).map_err(err)),
     part(
         MSZIP,
         false,

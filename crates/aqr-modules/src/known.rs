@@ -310,6 +310,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/lzma2-recons.block"),
     },
     Known {
+        name: "lznt1-recons",
+        version: 1,
+        sha512_256: hex("adadf3417252bde0e47e13ea4ee0c67d953ba808633456cb66f77c5d89177207"),
+        block: include_bytes!("../wasm/lznt1-recons.block"),
+    },
+    Known {
         name: "lzo-recons",
         version: 1,
         sha512_256: hex("a9a9c84319d717df983dd3b56586d7b9ddfbbd16d0c3a856c7d96a759586c1a1"),

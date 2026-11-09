@@ -304,6 +304,7 @@ dependencies = [
  "aqr-lha",
  "aqr-lz4",
  "aqr-lzma",
+ "aqr-lznt1",
  "aqr-lzo",
  "aqr-lzx",
  "aqr-modules",
@@ -665,6 +666,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-lznt1"
+version = "0.1.0"
+dependencies = [
+ "aqr-api",
+ "aqr-common",
+ "aqr-formula",
+ "zstd",
+]
+
+[[package]]
 name = "aqr-lzo"
 version = "0.1.0"
 dependencies = [
@@ -736,6 +747,7 @@ dependencies = [
  "aqr-lha",
  "aqr-lz4",
  "aqr-lzma",
+ "aqr-lznt1",
  "aqr-lzo",
  "aqr-lzx",
  "aqr-mp3",

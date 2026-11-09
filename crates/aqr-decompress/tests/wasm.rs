@@ -1561,6 +1561,85 @@ fn xpress_same_as_wasm() {
     }
 }
 
+/// The formulas of `streams` of aqr-lznt1 (units: bytes and the data's length), with bytes kept
+/// before each and after the last, and the bytes the application gives.
+fn lznt1_formula(streams: &[Vec<(Vec<u8>, usize)>]) -> (Formula, Vec<u8>) {
+    let streams: Vec<Vec<(&[u8], usize)>> =
+        streams.iter().map(|s| s.iter().map(|c| (&c.0[..], c.1)).collect()).collect();
+    let mut f = Formula::default();
+    f.push("raw", Vec::new());
+    f.push("kept", b"<before><between><after>".to_vec());
+    let mut parts = Vec::new();
+    let mut want = Vec::new();
+    for (i, (s, sp)) in streams.iter().zip(aqr_lznt1::formula::split(&streams, 1)).enumerate() {
+        let sp = sp.unwrap();
+        let at = f.streams[0].data.len() as u64;
+        f.streams[0].data.extend_from_slice(&sp.data);
+        let kept = if i == 0 { Node::slice(1, 0, 8) } else { Node::slice(1, 8, 9) };
+        want.extend_from_slice(if i == 0 { b"<before>" } else { b"<between>" });
+        s.iter().for_each(|c| want.extend_from_slice(c.0));
+        parts.push(aqr_lznt1::formula::Stream {
+            kept,
+            data: Node::slice(0, at, sp.data.len() as u64),
+            record: sp.record,
+        });
+    }
+    want.extend_from_slice(b"<after>");
+    f.root = aqr_lznt1::formula::apply(&mut f, parts, Node::slice(1, 17, 7), want.len() as u64);
+    (f, want)
+}
+
+/// Units of LZNT1 (each its bytes and its data's length), of a stream.
+type Units = Vec<(Vec<u8>, usize)>;
+
+/// The streams of aqr-lznt1's fixtures: NTFS's units of 64 KiB (two of a byte pattern, then the
+/// last of a text file, 57,535 bytes with the zeros past them compressed), with a hole and a
+/// stored unit among them; and a buffer of eight chunks.
+fn lznt1_streams() -> Vec<Vec<Units>> {
+    let units = xpress_chunks("codecs/aqr-lznt1/tests/data/ntfs.units");
+    let buffer = xpress_chunks("codecs/aqr-lznt1/tests/data/buf-gen.units");
+    let noise = aqr_common::rng::Rng::new(1).bytes(65536);
+    let mixed = vec![units[0].clone(), (Vec::new(), 65536), (noise, 65536), units[2].clone()];
+    vec![
+        vec![units.clone()],
+        vec![units[..1].to_vec(), units[1..].to_vec()],
+        vec![mixed],
+        vec![buffer.clone(), units[..1].to_vec()],
+        vec![buffer],
+    ]
+}
+
+/// LZNT1 units (aqr-lznt1's fixtures, of Windows) natively and as WebAssembly alike, in one stream
+/// and in two, with a hole and a stored unit, and a buffer of chunks, and their records damaged
+/// in turn failing alike (or giving the same).
+#[test]
+fn lznt1_same_as_wasm() {
+    let enc = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
+    for streams in lznt1_streams() {
+        let (f, want) = lznt1_formula(&streams);
+        let c = enc.encode(&f, None).unwrap();
+        assert!(aqr::decode(&c, &Native::default()).unwrap() == want);
+        assert!(decode_wasm(&c).unwrap() == want);
+        let r = f.streams.iter().position(|s| s.class == "lznt1/record").unwrap();
+        for k in 0..8 {
+            let mut bad = f.clone();
+            let s = &mut bad.streams[r].data;
+            let at = s.len() * k / 8;
+            if k == 7 {
+                s[at..].fill(0xff);
+            } else if at < s.len() {
+                s[at] ^= 1 << k;
+            }
+            let c = enc.encode(&bad, None).unwrap();
+            let (n, w) = (aqr::decode(&c, &Native::default()), decode_wasm(&c));
+            assert_eq!(n.is_ok(), w.is_ok(), "{k}: {n:?} {w:?}");
+            if let (Ok(n), Ok(w)) = (n, w) {
+                assert!(n == w, "{k}");
+            }
+        }
+    }
+}
+
 /// A CAB stream of LZX (aqr-lzx's fixture: a window of 64 KiB, e8) natively and as WebAssembly
 /// alike, and its record damaged in turn failing alike (or giving the same).
 #[test]
@@ -3877,6 +3956,18 @@ fn xpress_plans_hold() {
     ] {
         let (f, want) = xpress_formula(&streams);
         plan_holds(&format!("xpress {what}"), f, &want);
+    }
+}
+
+/// lznt1-recons lays its memory out as a stack, its limit its plan: of NTFS's units (aqr-lznt1's
+/// fixture) in one stream and in two with bytes kept between and after, with a hole and a stored
+/// unit among them, and of a buffer.
+#[test]
+fn lznt1_plans_hold() {
+    for (what, streams) in ["units", "two", "holes and stored", "buffers", "a buffer"].into_iter().zip(lznt1_streams())
+    {
+        let (f, want) = lznt1_formula(&streams);
+        plan_holds(&format!("lznt1 {what}"), f, &want);
     }
 }
 
