@@ -52,7 +52,7 @@ pub enum EntryNode {
     /// A special entry of a kind undefined (`special_kind` beyond 4), as an archive decoded
     /// holds it, not encoded; or, of kind 0, a tombstone to encode (spec, "Merging segments": what
     /// is at its name in the segments before taken away, it of no extra), as one decoded is
-    /// among [`Tree::tombstones`] rather than an entry.
+    /// among `SegmentTree::tombstones` rather than an entry.
     Special(u64),
 }
 
@@ -339,7 +339,7 @@ pub(crate) struct SegmentTree {
     pub tombstones: Vec<(Option<usize>, Vec<u8>)>,
 }
 
-/// An entry of a segment, among those given to [`resolve`]: the segment (by index) and the
+/// An entry of a segment, among those given to `resolve`: the segment (by index) and the
 /// entry (by its index among the segment's).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Origin {
@@ -1563,7 +1563,7 @@ fn time(t: &Cbor) -> Option<Time> {
     Some(Time { secs, nanos: ns.rem_euclid(1_000_000_000) as u32, zone, unit: unit as u64 })
 }
 
-/// A member of a map of the optional metadata, as [`members`] gives it: its key where it is an
+/// A member of a map of the optional metadata, as `members` gives it: its key where it is an
 /// integer, and its key and value in CBOR's diagnostic notation (RFC 8949, section 8).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member {

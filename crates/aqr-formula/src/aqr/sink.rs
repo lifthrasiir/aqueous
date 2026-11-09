@@ -1,7 +1,7 @@
 //! The sink: streams of an archive written as they are made, each non-leaf block compressed as
 //! soon as it is full and held so (of the store where one is set, [`crate::store`]) rather than
 //! the stream's bytes (`docs/streaming-encoder-design.md`). A block is compressed as the encoder
-//! compresses it at the end ([`Encoder::write`]): by its bytes and how its stream is compressed
+//! compresses it at the end (`Encoder::write`): by its bytes and how its stream is compressed
 //! alone, so that an archive of streams written to a sink is the same as of streams held whole.
 //! The encoder writes the blocks as they are ([`Encoder::encode_sunk_to`]).
 //!
@@ -122,7 +122,7 @@ impl Sink {
 
     /// Seals formula `f`: the bytes of its slices (of streams not sunk) written to the sink,
     /// those of each class and kind to its stream (one of its own for a stream of
-    /// [`Kind::Compressed`]), a slice of at least [`Sink::min`] bytes not written where it is
+    /// [`Kind::Compressed`]), a slice of at least `Sink::min` bytes not written where it is
     /// the same as slices sealed before, one after another, or ends after them; the slices then
     /// of the sink's streams (of the formula's streams sunk, one of each), and the streams they
     /// were of dropped. Slices past the end of their stream, and streams kept apart, are left as

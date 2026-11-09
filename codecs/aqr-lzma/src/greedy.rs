@@ -75,7 +75,7 @@ pub fn lzma2(data: &[u8], dict: usize) -> Vec<u8> {
     s
 }
 
-/// An `.xz` file of `data`: a block of LZMA2 ([`lzma2`], a dictionary of 1 MiB) and its CRC-32.
+/// An `.xz` file of `data`: a block of LZMA2 ([`fn@lzma2`], a dictionary of 1 MiB) and its CRC-32.
 pub fn xz(data: &[u8]) -> Vec<u8> {
     let flags = [0, 1];
     let mut f = xz::MAGIC.to_vec();

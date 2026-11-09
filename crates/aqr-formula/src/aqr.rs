@@ -28,7 +28,7 @@
 //! their [`Tree`], and [`SegmentWriter`] writes them a batch at a time, closing a segment where
 //! it is told to. [`decode_value`] decodes any archive (without registered dictionaries or
 //! imports) to its files, the trees of its segments merged. The blocks alike of a batch of its
-//! leaves may take a dictionary trained for them ([`dict`]).
+//! leaves may take a dictionary trained for them (`dict`).
 
 mod dict;
 pub mod envelope;
@@ -526,7 +526,7 @@ impl Encoder {
 
     /// What it kept of the streams, resources and module blocks it compressed, for an encoder
     /// alike to [`adopt`](Encoder::adopt); its Zstandard context dropped with it, so that what
-    /// is kept for later holds none (a context takes up to [`CCTX_KEPT`] outside the heap: one
+    /// is kept for later holds none (a context takes up to `CCTX_KEPT` outside the heap: one
     /// kept for each of the 16,421 files of a batch made apart once took 10 GB).
     pub fn into_kept(self) -> Kept {
         Kept {
@@ -619,7 +619,7 @@ impl Encoder {
     }
 
     /// The encoder compressing a batch's blocks alike with dictionaries trained for them where
-    /// they pay ([`SegmentWriter::batch`]; [`dict`]), as by default, or not.
+    /// they pay ([`SegmentWriter::batch`]; `dict`), as by default, or not.
     pub fn with_dictionaries(mut self, on: bool) -> Encoder {
         self.trains = on;
         self
@@ -704,7 +704,7 @@ impl Encoder {
     }
 
     /// The length of the archive of `f` without a checksum, nor the blocks whose data it takes as
-    /// stored ([`Encoder::module_bytes_len`]), as the archive of it is made: its streams of a
+    /// stored (`Encoder::module_bytes_len`), as the archive of it is made: its streams of a
     /// class and kind merged ([`Formula::merged`], as aqr-compress writes a file alone and an
     /// archive's batches group them). Apart, the many small streams of an archive's entries
     /// (a ZIP of 1,399 files) would count far more than they take.
@@ -1959,7 +1959,7 @@ fn total(pieces: &[&[u8]]) -> usize {
 }
 
 /// The `len` bytes from `start` of `pieces`, as pieces.
-/// Bytes of a non-leaf block at most: a longer stream is several ([`Encoder::stream_blocks`]),
+/// Bytes of a non-leaf block at most: a longer stream is several (`Encoder::stream_blocks`),
 /// as the spec has content larger than a unit of random access split into blocks. As large as
 /// the window of long-distance matching (which every decoder takes): of boot.wim's 494 MB of
 /// data, 32 MiB blocks archived 3.1% larger, 64 MiB 2.7%, 128 MiB 0.5%, and decoding held
@@ -2976,7 +2976,7 @@ impl<'c, 'n> Archive<'c, 'n> {
     /// Has leaves evaluated at once only while their weights fit in `budget` beside what the
     /// rest of the process holds of it (or one alone, of those of this evaluation), taken in
     /// their order but for those of long work on a thread, first, and those going before one
-    /// waiting for room ([`Gate`]): the weight of a leaf is the most bytes its evaluation holds
+    /// waiting for room (`Gate`): the weight of a leaf is the most bytes its evaluation holds
     /// at once, as its formula tells (its literals and slices, the inputs and outputs of an
     /// application as it is made, and its memory limit). None by default.
     pub fn set_budget(&mut self, budget: &'n Budget) {
@@ -3059,7 +3059,7 @@ impl<'c, 'n> Archive<'c, 'n> {
 
     /// The file of an archive of a single file, written to `sink` as it is evaluated: of a
     /// single leaf, a formula's output is not held whole, but written as its pieces are pulled
-    /// ([`eval::run`]). Returns its length.
+    /// (`eval::run`). Returns its length.
     pub fn write_file(&self, threads: usize, sink: &mut Sink) -> Decoded<u64> {
         if self.tree.is_some() {
             return invalid("an archive of a tree");
@@ -3101,7 +3101,7 @@ impl<'c, 'n> Archive<'c, 'n> {
     /// The content hashes of each leaf's outputs, each with the checksums its formula block takes
     /// of it, worked out without running a module where `records` tell the applications' outputs
     /// by the hashes of their inputs (of their modules as `identify` tells them by their Wasm
-    /// modules), the blocks decoded on up to `threads` threads: see [`eval`]'s `hashed`. None
+    /// modules), the blocks decoded on up to `threads` threads: see `eval`'s `hashed`. None
     /// for a leaf whose are not told so.
     pub fn hashed_leaves(
         &self,

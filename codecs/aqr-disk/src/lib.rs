@@ -132,7 +132,7 @@ fn files_on(d: &dyn Image, file_systems: &[FileSystem]) -> Vec<File> {
     out
 }
 
-/// The files of image `d` ([`files_on`] of its disk), their extents of the image: of a
+/// The files of image `d` (`files_on` of its disk), their extents of the image: of a
 /// container, where the disk's are in it, those of blocks it does not hold (zeros) left out.
 pub fn files(d: &[u8], file_systems: &[FileSystem]) -> Vec<File> {
     let Some(m) = container::open(d) else { return files_on(&Plain(d), file_systems) };

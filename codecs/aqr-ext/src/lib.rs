@@ -124,7 +124,7 @@ pub fn inode_tables(d: &dyn Image) -> Vec<u64> {
     volume(d).map(|v| v.tables).unwrap_or_default()
 }
 
-/// Whether `d` is an ext2, ext3 or ext4 volume ([`volume`]).
+/// Whether `d` is an ext2, ext3 or ext4 volume (`volume`).
 pub fn starts(d: &dyn Image) -> bool {
     volume(d).is_some()
 }

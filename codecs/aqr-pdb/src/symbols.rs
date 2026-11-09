@@ -857,7 +857,7 @@ pub fn decode_sized(params: &[u8], streams: &[&[u8]], len: usize) -> Result<Vec<
 /// Bytes that [`decode_sized`] takes of [`aqr_api::stack`] at most, of params `params`, a
 /// stream of kinds `kinds` and of inlinees' ids of `inlinee_ids` bytes and an output of `len`
 /// bytes (`None` where the params are not so), in its blocks' order: the readers, the state
-/// ([`State::plan`], of an entry of inlinee lines for each 4 bytes of ids), the output, the scopes
+/// (`State::plan`, of an entry of inlinee lines for each 4 bytes of ids), the output, the scopes
 /// open.
 pub fn decode_plan(params: &[u8], kinds: &[u8], inlinee_ids: usize, len: u64) -> Option<u64> {
     use aqr_api::stack::block;

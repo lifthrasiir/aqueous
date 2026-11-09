@@ -5,6 +5,8 @@
 //! The codes are coded against what an encoder of the longest match would write: where it
 //! clears, whether a code is the longest match there, else whether a single pixel, else how
 //! much shorter; and whether it is the first code defined for its pixels.
+//!
+//! [`model`]: crate::model
 
 use aqr_common::arith::{ArithDecoder, Bit};
 

@@ -1466,7 +1466,7 @@ fn read_call<S: Src>(src: &mut S, cache: &mut CallCache, is64: bool) -> Option<u
 }
 
 /// The filter's decoder: the section of `origin` on, built onto `code` from `src` (less
-/// `sentinel_size` bytes at its end), telling `hook` of each reference as [`decode_hooked`] says.
+/// `sentinel_size` bytes at its end), telling `hook` of each reference as `decode_hooked` says.
 /// `None` where the streams do not make one.
 #[cfg(feature = "decode")]
 #[allow(clippy::eq_op)] // `copy(8 / 8, ...)` spells out the bit width

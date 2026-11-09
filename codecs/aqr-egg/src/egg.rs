@@ -261,7 +261,7 @@ pub fn parse(d: &[u8]) -> Option<Egg> {
     Some(egg)
 }
 
-/// A file to [`write`]: its name, its block's method, its compressed data and its size.
+/// A file to [`fn@write`]: its name, its block's method, its compressed data and its size.
 pub type Written<'a> = (&'a str, u8, &'a [u8], u32);
 
 /// An archive of `files`, each of one block (of no CRC-32), solid or not, laid out as ALZip lays

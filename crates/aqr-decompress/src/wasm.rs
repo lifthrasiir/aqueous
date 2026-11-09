@@ -1464,7 +1464,7 @@ pub struct Applied {
     /// added up as each ended (`task_memories`).
     pub tasks: Vec<u64>,
     pub task_memories: Vec<u64>,
-    /// The concurrency of each class of tasks ([`choose_concurrency`]) it ran at.
+    /// The concurrency of each class of tasks (`choose_concurrency`) it ran at.
     pub concurrency: Vec<usize>,
     pub ok: bool,
 }

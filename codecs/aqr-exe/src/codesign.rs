@@ -217,7 +217,7 @@ struct Job {
     done: usize,
 }
 
-/// Bytes of a [`Job`] on WebAssembly.
+/// Bytes of a `Job` on WebAssembly.
 #[cfg(feature = "decode")]
 pub const JOB_BYTES: u64 = 272;
 #[cfg(all(feature = "decode", target_family = "wasm"))]

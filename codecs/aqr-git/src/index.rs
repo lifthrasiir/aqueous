@@ -44,10 +44,12 @@ pub fn len(starts: &[usize], rev: bool) -> usize {
     idx_len(n, large(starts)) + if rev { rev_len(n) } else { 0 }
 }
 
-/// Bytes that [`write`] takes of [`aqr_api::stack`] on top of the entries' offsets and CRC-32s
+/// Bytes that [`fn@write`] takes of [`aqr_api::stack`] on top of the entries' offsets and CRC-32s
 /// ([`layout::Entries`]), for `n` entries: the ids, the entries in the index's order, and a
 /// piece for the output, with (on WebAssembly) the CRC-32's tables (made on its first use, held
 /// after).
+///
+/// [`layout::Entries`]: crate::layout::Entries
 pub fn plan(sim: &mut aqr_api::stack::Sim, n: u64) {
     sim.take(ID as u64 * n);
     sim.take(4 * n);

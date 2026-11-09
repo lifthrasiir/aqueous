@@ -834,7 +834,7 @@ pub fn initial_pages_of(m: Module) -> Option<u64> {
 }
 
 /// The windows of the memories of the inputs and outputs of the Wasm module of `m` that
-/// aqr-modules built ([`wasm::windows`]): whether each is an output's, its index and its pages.
+/// aqr-modules built (`wasm::windows`): whether each is an output's, its index and its pages.
 #[cfg(feature = "wasm")]
 pub fn windows_of(m: Module) -> Vec<(bool, u32, u64)> {
     import_shape(m).map(|s| s.1).unwrap_or_default()

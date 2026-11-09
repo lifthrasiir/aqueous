@@ -240,7 +240,7 @@ pub fn index(lens: &[(usize, usize, usize)]) -> Vec<u8> {
 }
 
 /// The index of streams for [`Derived::ZipBefore`]: [`index`] with the CRC-32 of the data of each
-/// stream of [`LARGE`] bytes of data or more after its lengths (`lens` has them as the fourth),
+/// stream of `LARGE` bytes of data or more after its lengths (`lens` has them as the fourth),
 /// so that the module can give what is derived before the stream without holding it. Never
 /// empty (for a single stream too) where there is such a stream.
 pub fn index_before(lens: &[(usize, usize, usize, u32)]) -> Vec<u8> {
@@ -620,9 +620,9 @@ impl Model {
 
 /// The module `flate-set` as a part module (its entry point, of `aqr_api::entry!`): what
 /// [`decode`] gives, its inputs read and its output written through windows ([`SET_WINDOW`]).
-/// A stream of [`LARGE`] bytes of data or more is rebuilt from its data pulled a batch of
+/// A stream of `LARGE` bytes of data or more is rebuilt from its data pulled a batch of
 /// segments at a time ([`crate::reconstruct_pulled`]), its record held; the others in runs of
-/// [`RUN`] bytes of data at most, side by side as [`decode`] does, their data and records held.
+/// `RUN` bytes of data at most, side by side as [`decode`] does, their data and records held.
 /// What is derived of the streams is held until they are all written.
 pub fn decode_part(
     params_len: u64,

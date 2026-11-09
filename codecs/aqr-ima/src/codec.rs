@@ -221,7 +221,7 @@ const BIT_BYTES: u64 = 4;
 const _: () = assert!(size_of::<Option<State>>() as u64 == STATE_BYTES && size_of::<Bit>() as u64 == BIT_BYTES);
 
 /// What [`decode`] takes of an [`aqr_api::stack`] at most, of an output of `len` bytes of `l`:
-/// the output, and on top of it what coding takes ([`code`]): the model's two lists, each
+/// the output, and on top of it what coding takes (`code`): the model's two lists, each
 /// channel's state and context, its nibbles, and a block.
 pub fn decode_plan(l: Layout, len: u64) -> u64 {
     use aqr_api::stack::block;

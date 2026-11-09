@@ -264,7 +264,7 @@ const NONE8: u8 = 255;
 const NONE16: u16 = u16::MAX;
 
 /// The slots of the values a stream's packets have coded so far, as the contexts need them: per
-/// channel `stride` of them (nonzero, Y[0], Y[1], 32 master entries, the Y values), then the
+/// channel `stride` of them (nonzero, `Y[0]`, `Y[1]`, 32 master entries, the Y values), then the
 /// classwords', per (submap, vector) `parts`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Slots {

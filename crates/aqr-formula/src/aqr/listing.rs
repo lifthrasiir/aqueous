@@ -39,7 +39,7 @@ pub struct Listed {
     pub segment: usize,
 }
 
-/// An application of a formula ([`Graph::applications`]).
+/// An application of a formula (`Graph::applications`).
 #[derive(Debug, Clone)]
 pub struct Applied {
     /// Its module block (by index among all).
@@ -49,7 +49,7 @@ pub struct Applied {
     pub tasks: Vec<u64>,
     /// The bytes of its outputs.
     pub output: u64,
-    /// The applications (by index in [`Graph::applications`]'s list) whose outputs are directly its inputs.
+    /// The applications (by index in `Graph::applications`'s list) whose outputs are directly its inputs.
     pub from: Vec<usize>,
 }
 

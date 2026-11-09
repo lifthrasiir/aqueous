@@ -5,7 +5,7 @@
 //!
 //! usage: aqr-win-install [--quiet]
 //!
-//! The two are carried in the binary ([`payload`], packed by `build.rs` from `target/dist`).
+//! The two are carried in the binary (`payload`, packed by `build.rs` from `target/dist`).
 //! Files there already are replaced; one running is renamed aside first (`*.old`, deleted by
 //! the next install or the uninstall).
 

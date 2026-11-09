@@ -564,7 +564,7 @@ pub struct Debug {
     len: usize,
 }
 
-/// The debug info items [`Debug`] keeps as the most recent.
+/// The debug info items [`struct@Debug`] keeps as the most recent.
 pub const DEBUG_RECENT: usize = 128;
 
 impl Debug {

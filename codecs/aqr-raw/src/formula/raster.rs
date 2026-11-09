@@ -17,7 +17,7 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
 }
 
 /// The bytes of a band, about: a raster of more is cut into bands of rows of about this many
-/// bytes ([`bands`]), each an application of the module of its own, whose coder starts anew (no
+/// bytes (`bands`), each an application of the module of its own, whose coder starts anew (no
 /// row above the first). An application needs about four times its band at most (the inputs
 /// imported and copied, the output imported and made): 192 MiB at this length.
 pub const BAND: usize = 48 << 20;

@@ -480,7 +480,7 @@ pub mod msg {
 /// `k mod workers`); the instance takes what the workers make in the same turn, so in order, and
 /// writes it. So that no channel is full where the instance waits for one, it keeps at most
 /// [`in_flight`] items in the pipeline (each makes one message in a channel to a worker and one
-/// from it, and each has room for [`CAP`]).
+/// from it, and each has room for `apart::CAP`).
 ///
 /// Every item is a message of its own: a byte telling whether it is the last (an error, or the
 /// end), its kind and what it holds (a frame as [`msg::put_frame`] writes it; for junk, only its
@@ -492,6 +492,11 @@ pub mod msg {
 /// The tasks read what comes until their input is closed, so that none waits for ever for one that
 /// stopped, and close their outputs as they end; the instance, once it has the last item, closes
 /// its output and reads what the workers still send.
+///
+/// [`ResStream`]: crate::audio::residual::ResStream
+/// [`Rooms`]: apart::Rooms
+/// [`Plan`]: apart::Plan
+/// [`in_flight`]: apart::in_flight
 pub mod apart {
     use super::*;
     use crate::audio::frame::Frame;
@@ -508,7 +513,7 @@ pub mod apart {
     /// Messages a channel holds.
     const CAP: usize = 2;
 
-    /// Items in the pipeline at most, with `workers` workers: a worker has at most [`CAP`] of
+    /// Items in the pipeline at most, with `workers` workers: a worker has at most `CAP` of
     /// them in its channels, and one more would block it, and so the stages before it.
     pub fn in_flight(workers: usize) -> usize {
         (workers * CAP).saturating_sub(1).max(1)

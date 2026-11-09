@@ -14,7 +14,7 @@ pub const SLOTS: usize = 8;
 /// its initial memory (`initial` bytes) with it, of params `params`, the nine `inputs`
 /// and a JPEG of `len` bytes (`None` where they are not so): what `aqr_api::whole` copies, the
 /// sizes read, the embedded entries and the blob restored, and what decoding takes
-/// ([`codec::core_plan`]).
+/// (`codec::core_plan`).
 pub fn plan(params: &[u8], inputs: &[&[u8]], initial: u64, len: u64) -> Option<(u64, u64)> {
     use aqr_api::stack::{block, whole};
     let (progressive, sizes) = self::params(params).ok()?;

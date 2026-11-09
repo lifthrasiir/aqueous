@@ -1,7 +1,7 @@
 //! The memory plan of the module `psd-recons` on WebAssembly ([`aqr_api::stack`]), as
-//! [`crate::codec::decode_formula`] lays it out: the instance's memory taken block by block in
+//! `crate::codec::decode_formula` lays it out: the instance's memory taken block by block in
 //! the order the module takes it ([`Sim`]). What the module takes follows from its head (read here
-//! as the module reads it, [`get_head`]), the lengths of its inputs and output, and for a group
+//! as the module reads it, `get_head`), the lengths of its inputs and output, and for a group
 //! coded with a hint the structure of the file before its composite (parsed and rendered as the
 //! module does it, from the skeleton alone: the pixels do not change it).
 

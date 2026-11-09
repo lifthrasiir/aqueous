@@ -91,7 +91,7 @@ fn volume(d: &dyn Image) -> Option<Volume> {
     Some(Volume { width, cluster: bps * spc, fat, root, heap: first * bps, count, budget })
 }
 
-/// Whether `d` starts like a FAT volume ([`volume`]).
+/// Whether `d` starts like a FAT volume (`volume`).
 pub fn starts(d: &dyn Image) -> bool {
     volume(d).is_some()
 }

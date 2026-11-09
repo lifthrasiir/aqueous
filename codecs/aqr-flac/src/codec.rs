@@ -625,6 +625,8 @@ const LAYOUT_READ: usize = 20;
 impl Room {
     /// What a frame reads of each byte stream at most ([`pcm::Reads`]): samples of 32 bits at
     /// most, a subframe's partitions as many as its samples (and 2^15).
+    ///
+    /// [`pcm::Reads`]: aqr_raw::audio::pcm::Reads
     pub fn reads(&self) -> aqr_raw::audio::pcm::Reads {
         aqr_raw::audio::pcm::Reads::of(self.channels, self.block, 32, self.block.min(1 << 15))
     }

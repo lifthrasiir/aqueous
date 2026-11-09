@@ -2,7 +2,7 @@
 //! instructions of its code by field, its data segments' bytes and its custom sections apart.
 //! LEB128s and bytes are copied as they are, but for the local indices, coded by their ranks
 //! among those used last ([`Mtf`]), so that the module comes back as it was whatever its
-//! encoding. Both directions walk the code by the same functions, through [`Io`].
+//! encoding. Both directions walk the code by the same functions, through `Io`.
 
 use crate::varint;
 

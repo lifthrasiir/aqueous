@@ -149,7 +149,7 @@ mod encode {
 
     impl Remap {
         /// The map of the image of code sections `image` (each its address and its bytes) to
-        /// the reference image `reference`, of their functions matched ([`matching::map`]).
+        /// the reference image `reference`, of their functions matched (`matching::map`).
         pub fn new(reference: &[(u64, &[u8])], image: &[(u64, &[u8])], is64: bool) -> Remap {
             Remap::of(&Image::new(reference, is64), &Image::new(image, is64))
         }

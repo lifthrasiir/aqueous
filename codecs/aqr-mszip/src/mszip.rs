@@ -376,7 +376,7 @@ pub fn join(blocks: &[&[u8]], w: &mut BitW) -> Result<Vec<Joined>> {
 /// end), `r` is taken to the next byte.
 /// What [`cut_onto`] takes of an [`aqr_api::stack`] at most besides `out`: the codes of fixed
 /// blocks (kept once made), and those of a dynamic block's header (its code lengths' code and its
-/// codes, of 288 and 32 symbols at most), each of its symbols and its table of [`FAST`] bits.
+/// codes, of 288 and 32 symbols at most), each of its symbols and its table of `FAST` bits.
 pub fn cut_plan() -> u64 {
     use aqr_api::stack::block;
     let code = |symbols: u64| block(2 * symbols) + block(2 << FAST);

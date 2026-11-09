@@ -145,7 +145,7 @@ pub fn lax(path: &[u8], backslash: bool) -> Vec<Vec<u8>> {
 }
 
 /// Paths of an archive's entries to extract alone, each with what is under it (as names, by
-/// [`split`]); none: everything.
+/// `split`); none: everything.
 #[derive(Debug, Clone, Default)]
 pub struct Select {
     paths: Vec<Vec<Vec<u8>>>,

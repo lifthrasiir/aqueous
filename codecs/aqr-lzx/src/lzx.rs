@@ -299,7 +299,7 @@ impl BitW {
 const FAST: u32 = 10;
 
 /// A canonical Huffman code of code lengths: codes by symbol, and to decode, a table of the
-/// codes of at most [`FAST`] bits by their first bits ((symbol, length), 0 for a longer code)
+/// codes of at most `FAST` bits by their first bits ((symbol, length), 0 for a longer code)
 /// and, for the longer ones, the first code of each length and its symbols in order.
 pub struct Huff {
     pub codes: Vec<u16>,
@@ -653,7 +653,7 @@ pub fn write_as(data: &[u8], parse: &Parse, v: Variant) -> Option<Vec<u8>> {
     Some(w.out)
 }
 
-/// [`write`] onto `w`, whose output is the chunk's alone.
+/// [`fn@write`] onto `w`, whose output is the chunk's alone.
 pub fn write_onto(data: &[u8], parse: &Parse, w: &mut BitW) -> Option<()> {
     write_onto_as(data, parse, WIM, w)
 }

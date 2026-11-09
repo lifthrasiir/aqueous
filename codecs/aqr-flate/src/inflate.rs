@@ -1376,12 +1376,12 @@ const READ: usize = 64 << 10;
 
 /// Bytes [`data_streamed`] holds at most of the stream and of the data: what it reads at once
 /// beside those ahead (a header's, and the 8 bytes of the bits loaded, which stay when the bytes
-/// before them are let go of), and [`HISTORY`] and [`FLUSH`] beside a match (at most 258 bytes).
+/// before them are let go of), and `HISTORY` and `FLUSH` beside a match (at most 258 bytes).
 pub const INPUT: usize = READ + AHEAD_HEADER + 8;
 pub const OUTPUT: usize = HISTORY + FLUSH + 258;
 
 /// [`data`] of a stream read a piece at a time and its data written out a piece at a time,
-/// holding a piece of each and [`HISTORY`] bytes of the data rather than either whole: `read`
+/// holding a piece of each and `HISTORY` bytes of the data rather than either whole: `read`
 /// appends the next bytes of the stream (`len_in` bytes in all) to the vector it is given, at
 /// most so many as it takes from the end of the vector (at least one), and `write` takes the
 /// data in order (`len` bytes in all), in pieces. The decoding of the module `flate-inflate` as

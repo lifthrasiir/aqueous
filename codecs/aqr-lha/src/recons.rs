@@ -407,7 +407,7 @@ struct Ctx {
     misc: Vec<Bit>,
 }
 
-/// The lengths of the vectors of [`Ctx`], in the order of its fields.
+/// The lengths of the vectors of `Ctx`, in the order of its fields.
 pub const CTX_LENS: [usize; 10] = [2 * 12 * 7 * 3, 3 * 2, 3 * 4 * 4 * 2, 12, 12 * 32, 12 * 16, 12 * 24, 2, 1, 96];
 
 impl Ctx {

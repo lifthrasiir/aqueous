@@ -2,7 +2,7 @@
 //! through windows, so that what it holds does not depend on the lengths.
 //!
 //! A frame is cut into the blocks of its pieces, each held with its compressed block. A block
-//! (kind 0) of `65547` bytes or more is compressed by [`wide`] from a sliding view of the data:
+//! (kind 0) of `65547` bytes or more is compressed by `wide_block` from a sliding view of the data:
 //! the 64 KiB a match can reach back, and the literals not yet written (a sequence's token comes
 //! before them and holds the length of its match), which are at most [`LIT_MAX`].
 

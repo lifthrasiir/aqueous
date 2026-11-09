@@ -1,6 +1,6 @@
 //! Streams of bvx blocks: LZFSE (`bvx2`), LZVN (`bvxn`), stored (`bvx-`), and the end (`bvx$`)
 //! (`FORMAT.md` §2, §3). A stream decodes into its data and its blocks, from which it is
-//! written again ([`write`]).
+//! written again ([`fn@write`]).
 
 use crate::fse::{self, BackReader, Table};
 use crate::{Error, Result, corrupt};

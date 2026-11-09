@@ -5,7 +5,7 @@
 //! An output made whole or not at all ([`create`]) is removed and the process stopped as it
 //! would have been. An archive committed as it is written ([`graceful`]: spec, "Appending to an
 //! archive") is stopped in two steps: the first signal only requests that it be ended as it is
-//! ([`requested`]), its writer committing what it wrote; a second one stops the process at once,
+//! ([`REQUESTED`]), its writer committing what it wrote; a second one stops the process at once,
 //! leaving the archive of its last commit (the output removed where nothing was committed yet,
 //! as it is still to be placed: [`placed`]).
 //!

@@ -125,7 +125,7 @@ mod encode {
 
     impl Remap {
         /// The map of the image of code sections `image` (each its address and its bytes) to
-        /// the reference image `reference`, of their functions matched ([`matching::map`]).
+        /// the reference image `reference`, of their functions matched (`matching::map`).
         pub fn new(reference: &[(u64, &[u8])], image: &[(u64, &[u8])]) -> Remap {
             let (maps, stats) = matching::map(&code(reference), &code(image), 2, low(26) as u64);
             Remap { maps: of_u64(maps), stats }

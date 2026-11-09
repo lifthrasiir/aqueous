@@ -4,23 +4,23 @@
 //! usage: aqr-win --register | --unregister | compress[-passphrase|-zip|-7z] PATH... |
 //!        extract ARCHIVE... | test ARCHIVE...
 //!
-//! - `--register` adds the verbs for the user ([`register`]): "Compress with Aqueous" on files
+//! - `--register` adds the verbs for the user (`register`): "Compress with Aqueous" on files
 //!   and folders, and the menu "Aqueous" beside it with the rest ("Compress with passphrase…",
 //!   which encrypts: `aqr -P`; then "Compress into .zip" and ".7z", `aqr --format zip`, `7z`);
 //!   "Extract here" (also the double-click) and "Test" on `.aqr` files and the other archives
 //!   `aqr` extracts. `--unregister` takes them away.
 //! - `--install` and `--uninstall [--quiet]`, of the program that aqr-win-install installed
-//!   ([`install`]): the former run by the installer, the latter by Settings' Apps.
+//!   (`install`): the former run by the installer, the latter by Settings' Apps.
 //! - `compress`: the paths into an archive, a single one into `PATH.aqr`, several into one
 //!   named after their folder (`compress-zip`: `.zip`, `compress-7z`: `.7z`,
-//!   [`register::OTHER_FORMATS`]). `extract`: each archive beside it, a single entry at its top
+//!   `register::OTHER_FORMATS`). `extract`: each archive beside it, a single entry at its top
 //!   as it is, else into its name without `.aqr` (`aqr --each --auto-dir`). `test`: each archive
 //!   checked, and what it holds told.
 //! - Explorer runs a process for each of the paths chosen: those of a verb in a folder are
-//!   gathered into the first of them ([`gather`]).
+//!   gathered into the first of them (`gather`).
 //! - `aqr.exe` is the one beside this program, else the one on `PATH` (`AQR` names another).
 //!
-//! The window is a task dialog ([`dialog`]): what is being done, a bar of how far, the file at
+//! The window is a task dialog (`dialog`): what is being done, a bar of how far, the file at
 //! work and the time left, and a button that stops it (the output being written removed). An
 //! output there already is asked about; an error is shown with what `aqr` said.
 

@@ -65,7 +65,7 @@ enum Kind {
 
 /// Archive `c` (an unencrypted standalone archive of a tree, as it is located) written again
 /// to `out` of tree `t`: the archive's tree ([`super::Archive::tree`]), edited (entries taken
-/// away, moved, their extras changed), its contents those of the archive ([module](self)).
+/// away, moved, their extras changed), its contents those of the archive (module).
 /// Fails on an archive of mirror blocks, or of metadata this crate does not read, and on a tree
 /// of no entries.
 pub fn rewrite(c: &[u8], t: &Tree, level: Level, threads: usize, out: &mut dyn Write) -> Result<Rewritten> {

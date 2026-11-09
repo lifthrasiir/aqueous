@@ -95,7 +95,7 @@ impl Budget {
     }
 
     /// Waits until `f`, looking at the room (each time something is given back or the limit
-    /// changes, and every [`LOOK`] where the heap is measured), takes a unit: what it gives, and
+    /// changes, and every `LOOK` where the heap is measured), takes a unit: what it gives, and
     /// the bytes taken for it. `f` runs with the budget locked; a lock it takes is taken after
     /// the budget's, never before.
     pub fn wait<R>(&self, mut f: impl FnMut(Room) -> Option<(R, u64)>) -> (R, Taken<'_>) {

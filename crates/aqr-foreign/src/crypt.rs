@@ -217,7 +217,7 @@ fn utf16le(passphrase: &[u8]) -> Vec<u8> {
 }
 
 /// 7-Zip's AES-256 key of `passphrase` (UTF-8, taken in UTF-16LE), `salt` and 2^`power`
-/// rounds (or none, [`SEVENZ_RAW`]).
+/// rounds (or none, `SEVENZ_RAW`).
 pub fn sevenz_key(passphrase: &[u8], salt: &[u8], power: u8) -> [u8; 32] {
     let pass = utf16le(passphrase);
     let mut key = [0u8; 32];

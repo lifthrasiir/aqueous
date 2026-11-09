@@ -146,7 +146,7 @@ pub struct Limits {
     pub blocks: u64,
     /// Bytes of a frame.
     pub frame: u64,
-    /// What the first stream tells, by [`side_cost`]: the frames' headers, slices and the frames
+    /// What the first stream tells (`encode_with` counts it): the frames' headers, slices and the frames
     /// kept, as decoding holds them for the stripes.
     pub side: u64,
     /// Blocks of a stripe of a picture.
@@ -812,7 +812,7 @@ fn stripe_plan(limits: &Limits, s: usize, raw: u64, fields: u64) -> u64 {
 /// starts (`initial` bytes, whole pages), `held` bytes of the stack taken before: the most the
 /// instance takes and the most a task does, in bytes.
 /// The instance takes the streams' slices, the first stream's raw bits padded, what it tells
-/// ([`SideInfo`]) and the vector of the stripes' results; then the tasks run, the instance
+/// (`SideInfo`) and the vector of the stripes' results; then the tasks run, the instance
 /// taking each result as it is joined; then the output.
 pub fn plan(limits: &Limits, coded: &[u8], len: u64, initial: u64, held: u64) -> Option<(u64, u64)> {
     use aqr_api::stack::block;

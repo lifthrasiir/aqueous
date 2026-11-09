@@ -11,14 +11,14 @@ use crate::{reloc, symtab};
 
 pub type Result<T> = core::result::Result<T, &'static str>;
 
-/// The memory plan ([`aqr_api::stack`]) of [`arm64`] and [`reloc`]: what each takes beyond its
-/// initial memory at most, of params, resources and inputs of these lengths and an output of
+/// The memory plan ([`aqr_api::stack`]) of [`fn@arm64`] and [`fn@reloc`]: what each takes beyond
+/// its initial memory at most, of params, resources and inputs of these lengths and an output of
 /// `len`: what `aqr_api::whole` copies, and the output.
 pub fn plan(params: u64, resources: &[u64], inputs: &[u64], len: u64) -> u64 {
     aqr_api::stack::whole(params, resources, inputs) + aqr_api::stack::block(len)
 }
 
-/// The memory plan of [`x86`] and [`x86_remap`], as [`plan`]'s of params `params`: the output
+/// The memory plan of [`fn@x86`] and [`x86_remap`], as [`plan`]'s of params `params`: the output
 /// with the sentinel after it (`None` where the params are too short).
 pub fn x86_plan(params: &[u8], resources: &[u64], inputs: &[u64], len: u64) -> Option<u64> {
     let sentinel = *params.get(8)? as u64;
@@ -45,7 +45,7 @@ pub fn arm64_delta_plan(inputs: &[u64], len: u64) -> u64 {
     aqr_api::stack::whole(0, &[], inputs) + block(len) + block(8 << arm64::delta::TABLE_BITS)
 }
 
-/// The memory plan of [`cil`], as [`plan`]'s of the streams `META`, `BODYPOS` and `TOKT`
+/// The memory plan of [`fn@cil`], as [`plan`]'s of the streams `META`, `BODYPOS` and `TOKT`
 /// (`None` where the metadata root does not parse).
 pub fn cil_plan(params: u64, inputs: &[u64], streams: [&[u8]; 3], len: u64) -> Option<u64> {
     let [meta, bodypos, tokt] = streams;
@@ -82,7 +82,7 @@ pub fn x86(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64) -> Re
 }
 
 /// The x86 disfilter on a code section, its references remapped to another image's.
-/// Parameters, resources: as [`x86`]; inputs: the streams of [`x86::remap::STREAM_NAMES`].
+/// Parameters, resources: as [`fn@x86`]; inputs: the streams of [`x86::remap::STREAM_NAMES`].
 pub fn x86_remap(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     let (Some(p), Ok(streams)) = (params.first_chunk::<10>(), <[&[u8]; x86::remap::NUM_STREAMS]>::try_from(inputs))
     else {
@@ -320,7 +320,7 @@ impl x86::Sink for Spool<'_> {
     }
 }
 
-/// [`x86`] as a part module (its entry point, of `aqr_api::entry!`): its inputs taken and its
+/// [`fn@x86`] as a part module (its entry point, of `aqr_api::entry!`): its inputs taken and its
 /// output put in order through windows ([`X86_WINDOW`]) in pieces, whatever the lengths. A
 /// sentinel of more than 15 bytes is refused (FORMAT.md allows 0 to 15).
 pub fn x86_part(params_len: u64, res_len: u64, lens: [u64; x86::NUM_STREAMS], size: u64) {
@@ -420,7 +420,7 @@ pub fn arm64_part_plan(initial: u64) -> u64 {
     m.plan()
 }
 
-/// [`arm64`] as a part module (its entry point, of `aqr_api::entry!`): its inputs taken and its
+/// [`fn@arm64`] as a part module (its entry point, of `aqr_api::entry!`): its inputs taken and its
 /// output put in order through windows ([`ARM64_WINDOW`]) in pieces, whatever the lengths.
 pub fn arm64_part(params_len: u64, lens: [u64; arm64::NUM_STREAMS], size: u64) {
     aqr_api::finish(arm64_part_run(params_len, lens, size));

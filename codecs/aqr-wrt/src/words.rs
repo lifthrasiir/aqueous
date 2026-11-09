@@ -482,7 +482,7 @@ struct Parsed {
     entries: Vec<(usize, usize, bool)>,
 }
 
-/// Bytes of an entry of [`Parsed`] on WebAssembly (32-bit pointers), checked there by an
+/// Bytes of an entry of `Parsed` on WebAssembly (32-bit pointers), checked there by an
 /// assertion.
 pub const ENTRY: u64 = 12;
 
@@ -490,7 +490,7 @@ pub const ENTRY: u64 = 12;
 const _: () = assert!(size_of::<(usize, usize, bool)>() as u64 == ENTRY);
 
 /// The lengths of the layout's three lists and the count of entries of the dictionary
-/// `bytes`, as [`Parsed`] holds them: what the module's memory plan follows.
+/// `bytes`, as `Parsed` holds them: what the module's memory plan follows.
 pub fn shape(bytes: &[u8]) -> Result<([usize; 3], usize)> {
     let p = Parsed::of(bytes)?;
     Ok(([p.layout.one.len(), p.layout.two.len(), p.layout.three.len()], p.entries.len()))

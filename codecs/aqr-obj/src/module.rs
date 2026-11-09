@@ -39,7 +39,7 @@ fn sizes(index: &[u8]) -> Result<Sizes> {
 /// The memory plan of the module ([`aqr_api::stack`]): what it takes beyond its initial memory
 /// at most, of inputs of `inputs` bytes, the index `index` and a file of `len` bytes (`None`
 /// where they are not so): what `aqr_api::whole` copies, the file, and what decoding takes
-/// ([`Sizes::plan`]).
+/// (`Sizes::plan`).
 pub fn plan(inputs: &[u64], index: &[u8], len: u64) -> Option<u64> {
     use aqr_api::stack::{block, whole};
     let s = sizes(index).ok()?;

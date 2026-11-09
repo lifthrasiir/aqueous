@@ -1,4 +1,4 @@
-//! The working memory as a stack: an allocator (on WebAssembly, [`Stack`]) that puts each block
+//! The working memory as a stack: an allocator (on WebAssembly, `Stack`) that puts each block
 //! on top of the last one and takes it off as it is freed, so that what a module takes at most is
 //! what it lays out, in the order it does: its plan, which the encoder declares as its memory
 //! limit (of its instance) and its task limits (of the tasks of each class) as it is

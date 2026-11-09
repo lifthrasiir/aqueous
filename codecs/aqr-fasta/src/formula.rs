@@ -30,7 +30,7 @@ pub fn starts(d: &[u8]) -> bool {
 }
 
 /// The bytes of a segment, about: a file longer than this is cut into segments of equal parts of
-/// about it ([`cuts`]), each an application of its own, the model restarting at each. The
+/// about it (`cuts`), each an application of its own, the model restarting at each. The
 /// module's memory is the same whatever the length (it is a part module), so this is not a bound
 /// of memory but of what the encoder holds of a file at once (its parts and bases, as many
 /// segments as it has threads) and of how long one application runs: 256 MiB keeps every human

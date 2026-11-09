@@ -360,6 +360,8 @@ impl SegmentWriter {
     /// (by [`EntryNode::File`], of leaves of the segment): the bytes to write after its blocks.
     /// The blocks after it are of a segment of their own, which takes nothing of this one's.
     /// Fails on a tree the spec does not allow.
+    ///
+    /// [`EntryNode::File`]: tree::EntryNode::File
     pub fn close(&mut self, enc: &Encoder, t: &Tree, contents: &[ContentAt]) -> Result<Vec<u8>> {
         self.close_as(enc, t, contents, Status::None)
     }
@@ -663,6 +665,8 @@ impl SegmentWriter {
 
     /// The end of the archive: the metadata block of `t`, its contents where `contents` tells
     /// (by [`EntryNode::File`]), and the footer. Fails on a tree the spec does not allow.
+    ///
+    /// [`EntryNode::File`]: tree::EntryNode::File
     pub fn finish(&self, enc: &Encoder, t: &Tree, contents: &[ContentAt]) -> Result<(Vec<u8>, usize)> {
         self.finish_as(enc, t, contents, Status::Complete)
     }

@@ -45,7 +45,7 @@ pub struct Frame {
     /// The size of its content that its header tells, if it does.
     pub content: Option<u64>,
     /// The size its blocks' headers tell, of those raw or RLE (an upper bound of the content
-    /// otherwise: a compressed block holds at most [`BLOCK_MAX`]).
+    /// otherwise: a compressed block holds at most `BLOCK_MAX`).
     pub bound: u64,
 }
 

@@ -165,7 +165,7 @@ fn tables(n: usize) -> usize {
 }
 
 /// The sizes in bytes of the allocations of a match finder in a module (one position of each
-/// hash, [`recent`]) over data of `n` bytes for matches at most `reach` back ([`Mf::new`]), in
+/// hash, `recent`) over data of `n` bytes for matches at most `reach` back ([`Mf::new`]), in
 /// the order it makes them: the two heads, then each chain's ring, buckets and list of matches
 /// found. They are all it holds (besides the stack's alignment of each to 16 bytes).
 pub fn blocks(n: usize, reach: usize) -> [u64; 11] {
@@ -411,7 +411,7 @@ impl Mf {
     }
 }
 
-/// Lets the match finders of the process take up to `bytes` of chains at once ([`gate`]),
+/// Lets the match finders of the process take up to `bytes` of chains at once (`gate`),
 /// where that is more than they may already.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn allow_chains(bytes: usize) {

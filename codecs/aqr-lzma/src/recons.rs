@@ -47,7 +47,7 @@ impl Default for Tree9 {
     }
 }
 
-/// Bits of the contexts held in one allocation ([`Ctx`]): the lengths of the lists of
+/// Bits of the contexts held in one allocation (`Ctx`): the lengths of the lists of
 /// probabilities, in order.
 pub const CTX_LENS: [usize; 14] =
     [12 * 64, 12 * 64, 12 * 64, 12 * 8, 64, 64, 8 * 16, 4 * 8, 8 * 512, 8 * 512, 64, 7 * 8, 32, 256];
@@ -843,7 +843,7 @@ pub fn split_at(
 
 /// What a record tells of a stream before it is rebuilt: its properties, its dictionary size,
 /// the match finder's reach ([`finder_of`]), whether it ends with a marker, its number of parts
-/// (1, or [`parts_count`] of at least 2) and the body.
+/// (1, or `parts_count` of at least 2) and the body.
 pub struct Head<'a> {
     pub props: Props,
     pub dict: u32,

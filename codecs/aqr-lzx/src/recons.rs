@@ -268,7 +268,7 @@ struct Ctx {
     gamma: [Bit; 32],
 }
 
-/// The vectors of [`Ctx`] in the order they are made: how many elements, of how many adaptive
+/// The vectors of `Ctx` in the order they are made: how many elements, of how many adaptive
 /// bits each (a gamma's table has 32).
 pub const CTX_VECS: [(usize, usize); 16] = [
     (8 * 8 * 4, 1),

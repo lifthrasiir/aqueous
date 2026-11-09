@@ -1,5 +1,5 @@
 //! Standard input and output as an input or output, `-`: through files of a temporary
-//! directory of this process ([`Temp`]), as an archive is mapped and read back (verified, its
+//! directory of this process ([`temp`]), as an archive is mapped and read back (verified, its
 //! footer patched as it is committed) rather than streamed. Standard input is read whole into a
 //! file there before the work begins; an archive made for standard output is made whole there
 //! (`--atomic`) and copied out once it is.

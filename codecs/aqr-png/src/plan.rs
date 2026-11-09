@@ -414,7 +414,7 @@ pub fn set(
 /// - an image at a time (the head of its record, its layout, the model's tables, a piece of each
 ///   of its streams, the room of a block written, the decoder's windows and a block's tokens), the
 ///   most of them; or
-/// - where the images are small and several ([`crate::part::tasks_used`]), a batch of them at a
+/// - where the images are small and several (`crate::part::tasks_used`), a batch of them at a
 ///   time (their records read, then each a task: a copy of the memory as it is, and its payload,
 ///   layout, tables, pieces, windows and tokens over it).
 pub fn part(initial: u64, inputs: &[u64], (sk, index, heads): (&[u8], &[u8], &[u8])) -> Option<(u64, u64)> {

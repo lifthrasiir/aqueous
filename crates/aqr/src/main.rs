@@ -4,7 +4,7 @@
 //! [-B SIZE] [-b SIZE] [-S SIZE] [-D] [-A] [--no-check] [-P] [--wasm] [--no-sandbox] [--stats[=FILE]] [-h]
 //! INPUT [--rename TO]...
 //!
-//! aqr -d [OPTIONS] ARCHIVE [PATH [--rename TO]]...; aqr -d --each [OPTIONS] ARCHIVE...; aqr -t [-q | -v] ARCHIVE [PATH]...;
+//! aqr -d \[OPTIONS\] ARCHIVE [PATH [--rename TO]]...; aqr -d --each \[OPTIONS\] ARCHIVE...; aqr -t [-q | -v] ARCHIVE \[PATH\]...;
 //! aqr -t --each [-q | -v] ARCHIVE...; aqr --delete [--compact] [-q] ARCHIVE PATH...;
 //! aqr --move [-q | -v] ARCHIVE PATH --rename TO...; aqr --compact [-q | -v] ARCHIVE
 //!
@@ -2456,7 +2456,7 @@ fn write_whole<T>(
     r
 }
 
-/// The archive `out` appended to, as [`append::prior`] found it, of what `g` holds (to be
+/// The archive `out` appended to, as [`append::Opened::prior`] found it, of what `g` holds (to be
 /// appended), committed as it is written (once as it ends, with `--atomic`): what became of it,
 /// its length and overhead those of what was added (the archive's growth, as the summary tells
 /// it against the bytes read).

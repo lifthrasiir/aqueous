@@ -5,7 +5,7 @@
 //! The skeleton and the index are read whole (a chunk takes bytes of them, not the image's);
 //! the heads of the records, the rANS streams and the raw bits of the models are taken in order
 //! in pieces, and the file is put out as it is made: the chunks of the skeleton as they come,
-//! an image's payload written block by block by [`Payload`] and cut into its chunks as it
+//! an image's payload written block by block by `Payload` and cut into its chunks as it
 //! goes, each chunk's CRC taken over its data on the way. The model of an image holds the
 //! rows it needs and a block of tokens; the layout of an image's blocks is held (a few
 //! bytes a block).

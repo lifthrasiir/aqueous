@@ -2448,7 +2448,7 @@ pub(crate) const ALIGN: usize = 1 << 20;
 
 /// Tokens of a coded block from which it is written as its tokens are decoded, not once they
 /// all are: its symbol frequencies are in the headers (before its header, if dynamic), and
-/// nothing of it is held ([`STEP`] tokens at a time are written). The decoder knows it from the
+/// nothing of it is held (`STEP` tokens at a time are written). The decoder knows it from the
 /// layout's token counts. Blocks below it are held until their last token is decoded; a block of
 /// a million tokens would cost 6 MB a block, 6 bytes a token.
 pub const BIG: usize = 256 << 10;

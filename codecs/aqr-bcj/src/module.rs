@@ -105,7 +105,7 @@ const BRA_BUF: usize = 4096 + 16;
 /// The module `bcj-{arch}` as a part module (its entry point, of `aqr_api::entry!`): its input
 /// converted a piece at a time through windows of [`BRA_WINDOW`] pages, whatever the length of
 /// the data ([`bra::Converter`] carries what a piece needs of the ones before it): the same as
-/// [`bra`], with nothing held but the buffer on the stack.
+/// [`fn@bra`], with nothing held but the buffer on the stack.
 #[inline(always)]
 pub fn bra_part(arch: Arch, params_len: u64, in0_len: u64, size: u64) {
     use aqr_api::{Input, Memory, Output, Params};
@@ -269,7 +269,7 @@ where
 
 /// The module `bcj2` as a part module (its entry point, of `aqr_api::entry!`): the main, call and
 /// jump streams, its three outputs, put in order through windows of [`BCJ2_WINDOW`] pages from
-/// the data and the range coder's stream taken in order, whatever the lengths: [`bcj2`]'s
+/// the data and the range coder's stream taken in order, whatever the lengths: [`fn@bcj2`]'s
 /// output is theirs one after another. The sizes of the outputs are the streams' lengths.
 pub fn bcj2_part(params_len: u64, in0_len: u64, in1_len: u64, size0: u64, size1: u64, size2: u64) {
     aqr_api::finish(bcj2_stream(params_len, in0_len, in1_len, [size0, size1, size2]));

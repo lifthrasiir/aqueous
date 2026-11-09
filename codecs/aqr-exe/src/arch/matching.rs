@@ -61,7 +61,7 @@ impl<T: Copy + Eq + Into<u64>> Code<T> {
     }
 }
 
-/// What [`map`] found.
+/// What `map` found.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Stats {
     pub functions: [usize; 2],

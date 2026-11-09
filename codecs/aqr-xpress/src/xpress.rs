@@ -216,7 +216,7 @@ fn table(src: &[u8], p: usize) -> Option<Box<[u8; SYMS]>> {
 }
 
 /// Reads a chunk `src` of `n` bytes of data: the data and the parse. None where it is not a
-/// stream of this format that [`write`] gives back as it is (a code not complete, a match past
+/// stream of this format that [`fn@write`] gives back as it is (a code not complete, a match past
 /// the data or the window, bytes after the stream, lengths not as the writer gives them).
 pub fn read(src: &[u8], n: usize) -> Option<(Vec<u8>, Parse)> {
     if n == 0 {

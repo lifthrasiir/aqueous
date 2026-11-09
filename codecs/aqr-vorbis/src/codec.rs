@@ -395,7 +395,7 @@ struct Parsed {
 /// Where a packet's value count is none.
 const NOT_SHORT: u32 = u32::MAX;
 
-/// The lengths of the vectors of a [`Parsed`] of a header of `counts` and keys of `tables`
+/// The lengths of the vectors of a `Parsed` of a header of `counts` and keys of `tables`
 /// default tables of `symbols` symbols in all, in the order they are made.
 pub fn parsed_sizes(counts: &Counts, tables: usize, symbols: usize) -> [usize; 7] {
     let n = tables + counts.own;

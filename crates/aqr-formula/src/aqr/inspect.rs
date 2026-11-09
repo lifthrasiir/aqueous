@@ -440,7 +440,7 @@ fn kind_of(ty: u64) -> &'static str {
 
 impl Inspection<'_> {
     /// Of segment `segment`, the formulas making `contents` in full, a line of each node
-    /// ([`super::listing`]'s graph), indented from `indent`.
+    /// (`super::listing`'s graph), indented from `indent`.
     pub fn formulas(&self, segment: usize, contents: &[Content], indent: usize) -> Decoded<Vec<String>> {
         let p = &self.parsed[segment];
         let names = &self.names[segment];

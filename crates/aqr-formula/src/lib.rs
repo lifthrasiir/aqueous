@@ -95,7 +95,7 @@ pub enum Planner {
     Tasks(fn(&Usage<'_>) -> Option<Plan>),
 }
 
-/// What an application gives its module, for its memory plan ([`Module::plan_in_pages`]).
+/// What an application gives its module, for its memory plan ([`Module::plan_for`]).
 #[derive(Clone, Copy)]
 pub struct Usage<'a> {
     pub params: &'a [u8],
@@ -1456,7 +1456,7 @@ impl Formula {
     /// [`Formula::merge_classes`], into streams of `limit` bytes at most: a stream that would
     /// take one past it starts another of its class and kind (one longer is left as it is).
     /// Where a class and kind has several streams longer than half of it, `k` of them (at most
-    /// [`GROUP_MOST`]), they are cut into pieces of a `k`th of it (of [`PIECE_MIN`] at least),
+    /// `GROUP_MOST`), they are cut into pieces of a `k`th of it (of [`PIECE_MIN`] at least),
     /// and each piece put with those of the others most like it, if any, up to `k` pieces of
     /// different streams (versions of a program's code, say): the pieces of a stream not so
     /// put are one stream, and a stream none of whose pieces is put so is left whole.

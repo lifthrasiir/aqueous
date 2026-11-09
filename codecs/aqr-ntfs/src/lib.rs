@@ -85,7 +85,7 @@ fn volume(d: &dyn Image) -> Option<Volume> {
     Some(Volume { cluster, record: record as usize, mft: le64(b, 48) })
 }
 
-/// Whether `d` starts like an NTFS volume ([`volume`]).
+/// Whether `d` starts like an NTFS volume (`volume`).
 pub fn starts(d: &dyn Image) -> bool {
     volume(d).is_some()
 }

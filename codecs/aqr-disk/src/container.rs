@@ -353,7 +353,7 @@ fn qcow2(d: &[u8]) -> Option<Map<'_>> {
     Map::of(Kind::Qcow2, d, size, cluster, count, entry)
 }
 
-/// The chunks of a qcow2 image of any compressed cluster (`crate::chunked`), as [`qcow2`] reads it
+/// The chunks of a qcow2 image of any compressed cluster (`crate::chunked`), as `qcow2` reads it
 /// otherwise: its clusters by its L2 tables, those allocated raw, compressed ones raw DEFLATE
 /// streams of zlib's (compression type 0; qcow2.txt's descriptor: the offset and the sectors from
 /// it, which may hold the next one's start: qemu packs them by bytes), the others zeros (an L2 table

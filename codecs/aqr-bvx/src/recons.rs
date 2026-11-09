@@ -222,7 +222,7 @@ struct Tables {
     pairs: Vec<(usize, usize, usize)>,
 }
 
-/// Bytes of [`Tables`] (the pairs of 12 bytes on WebAssembly).
+/// Bytes of `Tables` (the pairs of 12 bytes on WebAssembly).
 pub const TABLES_HEAP: [u64; 4] = [(1 << HEAD_BITS) * 4, (RING * 4) as u64, TABLE_BYTES, 12 * (DEPTH as u64 + 1)];
 
 impl Tables {

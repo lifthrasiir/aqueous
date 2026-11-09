@@ -122,7 +122,7 @@ fn part(params_len: u64, res_len: u64, lens: [u64; SLOTS], size: u64) -> Result<
 /// Bytes of the structures the module holds, on WebAssembly (32-bit pointers; checked there by
 /// assertions): what its memory plan ([`crate::plan`]) is made of.
 pub mod wasm {
-    /// A frame of the queue of [`crate::part`] (header, side information, the payload's place and
+    /// A frame of the queue of `crate::part` (header, side information, the payload's place and
     /// length, and the junk before it; checked there), and the models of the main pass and of
     /// the side information (boxed).
     pub const REC: u64 = crate::part::REC;

@@ -1,4 +1,4 @@
-//! A stream of ARM64 code ([`super::CODE`], as [`super::remap`] writes it) against the same
+//! A stream of ARM64 code (`super::CODE`, as [`super::remap`] writes it) against the same
 //! stream of another version (bsdiff's idea, after Colin Percival's "Naive differences of
 //! executable code"): copies of the reference's words at some offset, each word coded as its
 //! difference from a prediction, and bytes of the stream's own between the copies.

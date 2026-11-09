@@ -273,7 +273,7 @@ impl Joined {
 
 /// The module as a part module (its entry point, of `aqr_api::entry!`): what [`decode`] gives,
 /// its inputs taken and its output put in order through windows ([`WINDOW`]) in pieces, the
-/// joined stream held [`SPAN`] bytes at a time: nothing depends on the lengths. A block of the
+/// joined stream held `SPAN` bytes at a time: nothing depends on the lengths. A block of the
 /// output (a CAB file's `CFDATA`) whose DEFLATE blocks span more of the stream than that is
 /// refused.
 pub fn decode_part(params_len: u64, in0_len: u64, in1_len: u64, in2_len: u64, in3_len: u64, size: u64) {

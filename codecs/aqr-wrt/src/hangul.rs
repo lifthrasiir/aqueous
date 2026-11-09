@@ -110,6 +110,8 @@ fn pieces(d: &[u8]) -> Vec<&[u8]> {
 }
 
 /// `d` in segments of about `size` bytes ([`SEGMENT`]), cut as pieces are.
+///
+/// [`SEGMENT`]: crate::words::SEGMENT
 pub fn segments(d: &[u8], size: usize) -> Vec<&[u8]> {
     split(d, size, apart, 0)
 }
@@ -380,14 +382,14 @@ struct Parsed {
     entries: Vec<(usize, usize)>,
 }
 
-/// Bytes of an entry of [`Parsed`] on WebAssembly (32-bit pointers), checked there by an
+/// Bytes of an entry of `Parsed` on WebAssembly (32-bit pointers), checked there by an
 /// assertion.
 pub const ENTRY: u64 = 8;
 
 #[cfg(target_family = "wasm")]
 const _: () = assert!(size_of::<(usize, usize)>() as u64 == ENTRY);
 
-/// The count of entries of the dictionary `bytes`, as [`Parsed`] holds them: what the module's
+/// The count of entries of the dictionary `bytes`, as `Parsed` holds them: what the module's
 /// memory plan follows.
 pub fn entries_of(bytes: &[u8]) -> Result<usize> {
     Ok(Parsed::of(bytes)?.entries.len())

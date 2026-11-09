@@ -208,7 +208,7 @@ struct Ctx {
     tree_val: Vec<[Bit; 32]>,
 }
 
-/// The vectors of [`Ctx`] in the order they are made: how many elements, of how many adaptive
+/// The vectors of `Ctx` in the order they are made: how many elements, of how many adaptive
 /// bits each (a gamma's table has 32).
 pub const CTX_VECS: [(usize, usize); 6] =
     [(8 * 17 * 3 * 2 * 2, 1), (8 * 8, 32), (8 * 8, 1), (8 * 8, 32), (16 * 2 * 2, 1), (16 * 2, 32)];

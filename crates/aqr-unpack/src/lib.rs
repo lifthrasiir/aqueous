@@ -207,7 +207,7 @@ impl<'d> Opened<'d> {
     }
 
     /// What is told of how its names of no declared encoding were taken, where it was guessed
-    /// ([`build::Undeclared::told`]).
+    /// (`build::Undeclared::told`).
     pub fn names_told(&self) -> Option<String> {
         match &self.inner {
             Inner::Zip(l) => l.undeclared.told("ZIP"),
