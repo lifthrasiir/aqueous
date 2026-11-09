@@ -34,4 +34,5 @@
   필요해지면 더한다.
 
 - 아카이브 안 항목의 삭제·이름 바꾸기: overlay archive와 함께(`docs/append-design.md`).
-- 셸 자동 완성(zsh, bash, fish, PowerShell): 만들지 정하지 않았다.
+- 셸 자동 완성(`--setup-autocomplete`): fish와 PowerShell의 스크립트는 그 셸에서 돌려 보지 않았다(이 Mac에 없다).
+  zsh는 zpty로, bash는 `_aqr`를 직접 불러 확인했다.

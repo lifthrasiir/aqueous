@@ -43,6 +43,8 @@
 .Op Ar options
 .Ar archive
 .Op Ar path ...
+.Nm
+.Fl -setup-autocomplete Ns Op = Ns Ar shell
 .Sh DESCRIPTION
 .Nm
 makes Aqueous archives: files and directories with their metadata, the compressed data
@@ -380,6 +382,29 @@ decoder supports), an archive needing more fails.
 Show a summary of the options.
 .It Fl V , Fl -version
 Show the version.
+.It Fl -setup-autocomplete Ns Op = Ns Ar shell
+Given alone: set up the completion of
+.Nm Ns 's
+and
+.Nm unaqr Ns 's
+options and their values for
+.Ar shell :
+.Cm zsh , bash , fish
+or
+.Cm powershell ;
+by default that of
+.Ev SHELL ,
+PowerShell on Windows.
+The script is written into
+.Pa $XDG_DATA_HOME/aqr
+(else
+.Pa ~/.local/share/aqr ;
+.Pa %LOCALAPPDATA%\eAqueous
+on Windows) and a line reading it added to
+.Pa ~/.zshrc ,
+.Pa ~/.bashrc
+or PowerShell's profile where it is not there yet; fish's go into
+.Pa ~/.config/fish/completions .
 .El
 .Pp
 A

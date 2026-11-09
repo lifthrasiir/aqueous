@@ -230,6 +230,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 mod append;
+mod complete;
 mod exit;
 mod extract;
 mod fold;
@@ -382,6 +383,11 @@ General:
                         (default 512M, which every decoder supports); independent of -M
   -h, --help            show this help
   -V, --version         show the version
+      --setup-autocomplete[=SHELL]
+                        alone: set up the completion of aqr's options for SHELL (zsh,
+                        bash, fish, powershell; by default $SHELL's, PowerShell on
+                        Windows): its script written, a line reading it added to the
+                        shell's startup file
 
 Exit status: 0 done; 1 failed otherwise; 2 the arguments wrong; 3 an archive invalid
 (damaged, files lost to it); 4 not decrypted (no passphrase opens it); 5 needing more than
@@ -556,6 +562,25 @@ fn parse() -> Result<Args, String> {
     let stats_alone = argv.len() > 0
         && std::env::args_os().skip(1).all(|a| a == "--stats" || a.to_string_lossy().starts_with("--stats="));
     let unaqr = me.file_stem().is_some_and(|s| s.to_string_lossy().starts_with("unaqr"));
+    // (a command alone: [`complete`])
+    let all: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if let Some(first) = all.first().map(|f| f.to_string_lossy().into_owned())
+        && (first == "--setup-autocomplete" || first.starts_with("--setup-autocomplete="))
+    {
+        let shell = match (first.split_once('='), &all[1..]) {
+            (Some((_, s)), []) => Some(s.to_owned()),
+            (None, []) => None,
+            (None, [s]) => Some(s.to_string_lossy().into_owned()),
+            _ => return Err("--setup-autocomplete is a command alone (no other argument)".into()),
+        };
+        std::process::exit(match complete::setup(shell.as_deref()) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("aqr: {e}");
+                1
+            }
+        });
+    }
     let mut a = Args {
         decompress: unaqr,
         test: false,
@@ -698,6 +723,7 @@ fn parse() -> Result<Args, String> {
             }
             "--ipc" => a.ipc = true,
             "--json" => a.json = true,
+            "--setup-autocomplete" => return Err("--setup-autocomplete is a command alone (no other argument)".into()),
             "-P" | "--passphrase" => a.passphrase = true,
             "--passphrase-from" => {
                 a.pass_from = Some(pass::Source::parse(&value("--passphrase-from")?)?);
@@ -3757,11 +3783,9 @@ fn summary_d(input: &Path, out: Option<&Path>, files: usize, total: u64, start: 
 mod tests {
     use super::*;
 
-    /// Every option `--help` tells of is in the manual page (`aqr.1`), as mdoc's `Fl`.
-    #[test]
-    fn man_page_has_every_option() {
-        let man = include_str!("../aqr.1");
-        let mut missing = Vec::new();
+    /// The options `--help` tells of, as given (`-x`, `--long`).
+    pub(crate) fn help_options() -> Vec<String> {
+        let mut out = Vec::new();
         for line in HELP.lines() {
             // (the lines of options: indented by 2 to 6, the option first, its words to two spaces)
             let indent = line.len() - line.trim_start().len();
@@ -3774,11 +3798,18 @@ mod tests {
                 if name.len() < 2 || !name.starts_with('-') || name == "..." {
                     continue;
                 }
-                if !man.contains(&format!("Fl {}", &name[1..])) {
-                    missing.push(name.to_owned());
-                }
+                out.push(name.to_owned());
             }
         }
+        out
+    }
+
+    /// Every option `--help` tells of is in the manual page (`aqr.1`), as mdoc's `Fl`.
+    #[test]
+    fn man_page_has_every_option() {
+        let man = include_str!("../aqr.1");
+        let missing: Vec<String> =
+            help_options().into_iter().filter(|o| !man.contains(&format!("Fl {}", &o[1..]))).collect();
         assert!(missing.is_empty(), "not in aqr.1: {missing:?}");
     }
 
