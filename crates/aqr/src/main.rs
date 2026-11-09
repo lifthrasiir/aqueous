@@ -99,7 +99,10 @@
 //!   as the work begins (twice on a terminal); decompressing, asked for then rather than as an
 //!   archive needs it. An encrypted archive (of either kind) is opened by the passphrases that
 //!   opened those before it, else asks for one where there is a terminal or a frontend
-//!   ([`pass`]). Without a terminal, `-P` takes a line of standard input. An empty passphrase
+//!   ([`pass`]). Without a terminal, `-P` takes a line of standard input. `--passphrase-from`
+//!   (implying `-P`) takes it from a line of standard input (`stdin`), of a file descriptor
+//!   (`fd:N`) or of a file (any other path), or an environment variable's value (`env:NAME`),
+//!   nothing asked for (decompressing, the archives it does not open fail). An empty passphrase
 //!   is a passphrase too.
 //! - `-E`, `--normalize`, `--bad-names`: decompressing, how the archives' names are written
 //!   ([`names`], `docs/names-design.md`): names of no declared encoding decoded from the set
@@ -307,6 +310,10 @@ Compression:
   -P, --passphrase      encrypt the archives with a passphrase asked for (decompressing:
                         ask for it at once; an encrypted archive asks anyway where there
                         is a terminal); without a terminal, a line of standard input
+      --passphrase-from SOURCE
+                        -P, its passphrase a line of standard input (stdin), of a file
+                        descriptor (fd:N) or of a file (a path; ./env:x for env:x), or
+                        an environment variable's value (env:NAME); nothing asked
   -l, --level LEVEL, -0 ... -9
                         0 (uncompressed), 1 (zstd alone) to 9; low, mid (default), high
                         are 2, 5 and 8; zstdN is zstd level N with recompression as mid
@@ -419,6 +426,8 @@ struct Args {
     /// `-P`: compressing, the archives encrypted with a passphrase asked for; decompressing,
     /// the passphrase asked for before the archives need it ([`pass`]).
     passphrase: bool,
+    /// `--passphrase-from`: where `-P`'s passphrase is taken (implying it).
+    pass_from: Option<pass::Source>,
     /// `--each`: decompressing or listing, every input an archive.
     each: bool,
     /// Decompressing (or listing) some paths of the archive: each path (names as the tree has them), and
@@ -474,7 +483,7 @@ fn main() -> ExitCode {
         eprintln!("aqr: {e}");
         return ExitCode::FAILURE;
     }
-    if let Err(e) = pass::init(args.passphrase, !args.decompress && !args.list && !args.info) {
+    if let Err(e) = pass::init(args.passphrase, !args.decompress && !args.list && !args.info, args.pass_from.as_ref()) {
         eprintln!("aqr: {e}");
         ipc::tell(serde_json::json!({"event": "error", "message": e}));
         return ExitCode::FAILURE;
@@ -547,6 +556,7 @@ fn parse() -> Result<Args, String> {
         format: Pack::Aqr,
         level: None,
         passphrase: false,
+        pass_from: None,
         each: false,
         select: None,
         names: names::Opts::default(),
@@ -655,6 +665,10 @@ fn parse() -> Result<Args, String> {
             }
             "--ipc" => a.ipc = true,
             "-P" | "--passphrase" => a.passphrase = true,
+            "--passphrase-from" => {
+                a.pass_from = Some(pass::Source::parse(&value("--passphrase-from")?)?);
+                a.passphrase = true;
+            }
             "--each" => a.each = true,
             "--rename" => renames.push((a.inputs.len(), value("--rename")?.into())),
             "-E" | "--encoding" => a.names.encoding = aqr_unpack::Choice::parse(&text(value("-E")?))?,
@@ -896,9 +910,9 @@ fn stdio_args(a: &mut Args) -> Result<(), String> {
     if a.stdin && a.rm {
         return Err("--rm with - (standard input)".into());
     }
-    if a.stdin && a.passphrase {
+    if a.stdin && a.passphrase && a.pass_from.as_ref().is_none_or(|f| *f == pass::Source::Stdin) {
         // (a line of standard input, or the terminal: neither to be taken where it is the input)
-        return Err("-P with - (standard input): the passphrase is read from it".into());
+        return Err("-P with - (standard input): the passphrase is read from it (--passphrase-from)".into());
     }
     if a.stdin && !a.decompress && a.renames.iter().any(Option::is_some) {
         return Err("--rename of - (standard input): an archive of a single file has no names".into());

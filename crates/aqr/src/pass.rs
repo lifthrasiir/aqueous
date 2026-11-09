@@ -1,7 +1,8 @@
 //! Passphrases: the one of `-P`, asked for as the work begins (twice, compressing), and those
 //! asked for as an archive needs one, decompressing: on the terminal, its echo off, or of the
 //! frontend ([`crate::ipc`], the question `passphrase`). Without a terminal, `-P` takes a line
-//! of standard input. Any passphrase is taken, an empty one too (as PDF's), and those that
+//! of standard input; `--passphrase-from` takes it from where it tells instead ([`Source`]).
+//! Any passphrase is taken, an empty one too (as PDF's), and those that
 //! open an archive are tried first on the archives after it.
 
 use std::io::IsTerminal;
@@ -12,9 +13,13 @@ use serde_json::json;
 
 static KEYS: std::sync::OnceLock<Keys> = std::sync::OnceLock::new();
 
-/// The passphrases of this run made ([`Keys::new`]); once, after the frontend's hello.
-pub fn init(given: bool, compress: bool) -> Result<(), String> {
-    let k = Keys::new(given, compress)?;
+/// The passphrases of this run made ([`Keys::new`]); once, after the frontend's hello. `from`:
+/// that of `-P` taken from there rather than asked for.
+pub fn init(given: bool, compress: bool, from: Option<&Source>) -> Result<(), String> {
+    let k = match from {
+        Some(f) => Keys::of(f.read()?),
+        None => Keys::new(given, compress)?,
+    };
     KEYS.set(k).map_err(|_| "passphrases asked for twice".to_string())
 }
 
@@ -57,7 +62,84 @@ fn asker() -> Asker {
     }
 }
 
+/// Where `--passphrase-from` takes the passphrase: a line of standard input (`stdin`), of a
+/// file descriptor inherited (`fd:N`), of a file (any other path); or an environment
+/// variable's value whole (`env:NAME`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Source {
+    Stdin,
+    Fd(i32),
+    Env(std::ffi::OsString),
+    File(std::path::PathBuf),
+}
+
+impl Source {
+    pub fn parse(v: &std::ffi::OsStr) -> Result<Source, String> {
+        let b = v.as_encoded_bytes();
+        Ok(if b == b"stdin" {
+            Source::Stdin
+        } else if let Some(n) = b.strip_prefix(b"fd:") {
+            let n = std::str::from_utf8(n).ok().and_then(|n| n.parse().ok()).filter(|&n: &i32| n >= 0);
+            Source::Fd(n.ok_or("--passphrase-from fd:N takes a file descriptor's number")?)
+        } else if let Some(n) = b.strip_prefix(b"env:") {
+            // SAFETY: split after ASCII, of an `OsStr`'s bytes
+            Source::Env(unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(n) }.to_owned())
+        } else {
+            Source::File(v.into())
+        })
+    }
+
+    /// The passphrase it gives: a line, its end (`\n`, `\r\n`) left out; or the variable's value.
+    pub fn read(&self) -> Result<Vec<u8>, String> {
+        let line = |r: &mut dyn std::io::Read, what: &str| -> Result<Vec<u8>, String> {
+            // (a byte at a time: nothing read past the line, of a pipe kept open)
+            let mut out = Vec::new();
+            let mut b = [0u8];
+            loop {
+                match r.read(&mut b) {
+                    Ok(0) if out.is_empty() => return Err(format!("{what}: no passphrase (ended)")),
+                    Ok(0) => break,
+                    Ok(_) if b[0] == b'\n' => break,
+                    Ok(_) => out.push(b[0]),
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(format!("{what}: {e}")),
+                }
+            }
+            if out.last() == Some(&b'\r') {
+                out.pop();
+            }
+            Ok(out)
+        };
+        match self {
+            Source::Stdin => line(&mut std::io::stdin().lock(), "standard input"),
+            #[cfg(unix)]
+            Source::Fd(n) => {
+                use std::os::fd::FromRawFd;
+                // SAFETY: the descriptor read, not closed (it is not this process's to close)
+                let mut f = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(*n) });
+                line(&mut *f, &format!("fd:{n}"))
+            }
+            #[cfg(not(unix))]
+            Source::Fd(_) => Err("--passphrase-from fd:N: not on this system".into()),
+            Source::Env(n) => match std::env::var_os(n) {
+                Some(v) => Ok(v.into_encoded_bytes()),
+                None => Err(format!("--passphrase-from env:{}: not set", n.display())),
+            },
+            Source::File(p) => {
+                let mut f = std::fs::File::open(p).map_err(|e| format!("{}: {e}", p.display()))?;
+                let mut r = std::io::BufReader::new(&mut f);
+                line(&mut r, &p.display().to_string())
+            }
+        }
+    }
+}
+
 impl Keys {
+    /// The passphrases of a run of `-P`'s given (`--passphrase-from`): none asked for.
+    fn of(p: Vec<u8>) -> Keys {
+        Keys { known: Mutex::new(vec![p]), asks: false, given: true }
+    }
+
     /// The passphrases of a run, `-P` given or not: asked for now where given (compressing,
     /// twice on a terminal and for the frontend to confirm).
     pub fn new(given: bool, compress: bool) -> Result<Keys, String> {
