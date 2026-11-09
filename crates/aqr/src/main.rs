@@ -5,7 +5,7 @@
 //! INPUT [--rename TO]...
 //!
 //! aqr -d [OPTIONS] ARCHIVE [PATH [--rename TO]]...; aqr -d --each [OPTIONS] ARCHIVE...; aqr -t [-q | -v] ARCHIVE [PATH]...;
-//! aqr -t --each [-q | -v] ARCHIVE...
+//! aqr -t --each [-q | -v] ARCHIVE...; aqr --delete [-q] ARCHIVE PATH...
 //!
 //! - `-c` (the default; `aqr`): each input into `INPUT.aqr`, a file as an archive of a single
 //!   file, a directory as an archive of what it holds; with `-o`, all the inputs into one
@@ -101,6 +101,10 @@
 //! - `-I` (`--info`): all that an archive records, for debugging ([`info`]): of the archive
 //!   itself (its blocks and segments; of a single file, its formula too), or with paths, each
 //!   path's entry in every segment (those before an update too), its metadata and formula in full.
+//! - `--delete ARCHIVE PATH...`: the paths of the archive given (a directory with what is under
+//!   it) taken out of it in place, by a segment of tombstones appended and committed as `-a`
+//!   commits ([`edit`]); their bytes stay in the file. A path not in it is an error, before
+//!   anything is written.
 //! - `-P`: compressing, the archives encrypted with a passphrase ([`aqr::envelope`]), asked for
 //!   as the work begins (twice on a terminal); decompressing, asked for then rather than as an
 //!   archive needs it. An encrypted archive (of either kind) is opened by the passphrases that
@@ -231,6 +235,7 @@ use std::time::Instant;
 
 mod append;
 mod complete;
+mod edit;
 mod exit;
 mod extract;
 mod fold;
@@ -262,6 +267,7 @@ usage: aqr [OPTIONS] INPUT [--rename TO]...
        aqr -t [-q | -v] ARCHIVE [PATH]...
        aqr -t --each [-q | -v] ARCHIVE...
        aqr -I [-v] ARCHIVE [PATH]...
+       aqr --delete [-q] ARCHIVE PATH...
        unaqr [OPTIONS] ARCHIVE [PATH [--rename TO]]...
 
 Modes:
@@ -278,6 +284,8 @@ Modes:
   -I, --info            all that an archive records (its blocks and segments), or of
                         its PATHs in each segment (their formulas in full); -v: the
                         unknown metadata uncut
+      --delete          take the PATHs of an archive (and what is under them) out of
+                        it, appending to it what says so
 
 Compressing (aqr -o ARCHIVE INPUT [--rename TO]...):
   INPUT                 a file or directory; several of them archived by their paths,
@@ -425,6 +433,8 @@ struct Args {
     append: bool,
     /// `-s` (with `append`): what the archive holds that the inputs do not taken away too.
     sync: bool,
+    /// Editing the archive (the first input) in place ([`edit`]).
+    edit: Option<edit::Edit>,
     /// `-L`: compressing, the links found (and given) followed, archived as what they lead to.
     dereference: bool,
     /// What is not commonly kept of the metadata kept too ([`meta`]).
@@ -528,6 +538,7 @@ fn main() -> ExitCode {
     }
     aqr_common::pool::init(args.opt.threads);
     let r = aqr_common::pool::run(|| match () {
+        _ if args.edit.is_some() => edit::edit(&args),
         _ if args.info => info::info(&args),
         _ if args.list => list::list_all(&args),
         _ if args.decompress => decompress_all(&args),
@@ -595,6 +606,7 @@ fn parse() -> Result<Args, String> {
         atomic: false,
         append: false,
         sync: false,
+        edit: None,
         dereference: false,
         preserve: false,
         quiet: false,
@@ -659,6 +671,7 @@ fn parse() -> Result<Args, String> {
             "-K" | "--test" => (a.decompress, a.test, a.list, a.info) = (true, true, false, false),
             "-t" | "--list" => (a.list, a.info) = (true, false),
             "-I" | "--info" => (a.info, a.list) = (true, false),
+            "--delete" => a.edit = Some(edit::Edit::Delete),
             "--wasm" => a.wasm = true,
             "--no-sandbox" => a.sandbox = false,
             "-o" | "--output" => a.output = Some(value("-o")?.into()),
@@ -801,6 +814,10 @@ fn parse() -> Result<Args, String> {
         Some(b) => aqr_formula::set_application_limit(b),
         None => {}
     }
+    if let Some(e) = a.edit {
+        edit_args(&mut a, e, renames, last_dir.is_some())?;
+        return Ok(a);
+    }
     if a.json && !a.list {
         return Err("--json is for -t".into());
     }
@@ -907,6 +924,46 @@ fn parse() -> Result<Args, String> {
     stdio_args(&mut a)?;
     a.dir = dir;
     Ok(a)
+}
+
+/// Of [`parse`], editing an archive by `e` ([`edit`]): the archive and its paths, checked
+/// against the other options given (`renames` as [`selection`] takes them; `dir`: `-C` given).
+fn edit_args(a: &mut Args, e: edit::Edit, renames: Vec<(usize, PathBuf)>, dir: bool) -> Result<(), String> {
+    let o = e.option();
+    let modes = [
+        (a.decompress && !a.test, "-d"),
+        (a.test, "-K"),
+        (a.list, "-t"),
+        (a.info, "-I"),
+        (a.append, a.verb()),
+        (a.passphrase || a.pass_from.is_some(), "-P (an encrypted archive is not edited)"),
+        (a.opt.mirrors, "-A"),
+        (a.output.is_some(), "-o"),
+        (dir, "-C"),
+        (a.rm, "--rm"),
+        (a.each, "--each"),
+        (a.dereference, "-L"),
+        (a.auto_dir, "--auto-dir"),
+        (a.json, "--json"),
+        (!a.exclude.names.is_empty() || !a.exclude.paths.is_empty(), "-x"),
+    ];
+    if let Some((_, what)) = modes.iter().find(|m| m.0) {
+        return Err(format!("{o} with {what}"));
+    }
+    if a.inputs.iter().any(|i| stdio::is(i)) {
+        return Err(format!("{o}: an archive in place, not - (standard input)"));
+    }
+    if a.inputs.len() < 2 {
+        return Err(format!("{o} takes an archive and its paths"));
+    }
+    if let Some((_, to)) = renames.first() {
+        return Err(format!("{o}: --rename {} (paths are taken out)", to.display()));
+    }
+    a.select = Some(selection(a.inputs.split_off(1), renames)?);
+    if let Some(l) = &a.level {
+        a.opt.level = l.parse()?;
+    }
+    Ok(())
 }
 
 /// An argument as [`Lexer`] reads it: an input, or an option (`-x` or `--long`) with the value

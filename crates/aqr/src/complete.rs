@@ -80,6 +80,7 @@ pub const OPTIONS: &[Opt] = &[
     opt(Some('t'), Some("list"), Value::None, "list the entries of an archive"),
     opt(Some('K'), Some("test"), Value::None, "decode and check an archive, writing nothing"),
     opt(Some('I'), Some("info"), Value::None, "all that an archive records"),
+    opt(None, Some("delete"), Value::None, "take the paths out of an archive"),
     many(None, Some("rename"), Value::File, "archive the input before (or extract the path before) at TO"),
     many(Some('x'), Some("exclude"), Value::Text, "leave out the entries of NAME, or of a path"),
     many(None, Some("files-from"), Value::File, "the inputs listed in FILE"),
@@ -377,7 +378,7 @@ fn add_line(rc: &Path, script: &Path, line: &str) -> Result<bool, String> {
     }
     use std::io::Write;
     let mut f = std::fs::OpenOptions::new().create(true).append(true).open(rc).map_err(err)?;
-    write!(f, "{sep}{line}\n").map_err(err)?;
+    writeln!(f, "{sep}{line}").map_err(err)?;
     Ok(true)
 }
 

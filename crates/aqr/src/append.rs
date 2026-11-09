@@ -105,6 +105,16 @@ impl Opened {
     pub fn against(self, g: &mut Gathered, sync: bool) -> Option<Prior> {
         diff(g, &self.old, &self.sizes, sync).then_some(self.prior)
     }
+
+    /// The archive's tree.
+    pub fn tree(&self) -> &Tree {
+        &self.old
+    }
+
+    /// The archive, to be appended to as it is.
+    pub fn into_prior(self) -> Prior {
+        self.prior
+    }
 }
 
 /// The archive at `at` of file `c` (of `file`) where bytes follow it: an append not committed,

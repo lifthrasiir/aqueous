@@ -39,6 +39,11 @@
 .Op Fl v
 .Ar archive
 .Op Ar path ...
+.Nm
+.Fl -delete
+.Op Fl q
+.Ar archive
+.Ar path ...
 .Nm unaqr
 .Op Ar options
 .Ar archive
@@ -108,6 +113,17 @@ profile where it has mirror blocks (or with
 Tell all that an archive records, for debugging: its blocks and segments, or of each
 .Ar path
 its entry in every segment with its formula in full.
+.It Fl -delete
+Take the
+.Ar path Ns s
+given after the archive (a directory with what is under it) out of it, in place: a
+segment saying so is appended and committed, as
+.Fl a
+appends, so that the file holds the archive as it was or as edited whatever happens
+meanwhile.
+The bytes of what was taken out stay in the file.
+A path not in the archive is an error, before anything is written; an encrypted
+archive is not edited.
 .Fl v
 gives the unknown metadata uncut.
 .El

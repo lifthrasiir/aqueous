@@ -33,6 +33,5 @@
 - `--json`은 `-t`만 받는다. `-I`(디버깅용)와 압축·풀기의 요약(지금은 `--ipc`의 메시지와 `--stats=FILE.json`)은
   필요해지면 더한다.
 
-- 아카이브 안 항목의 삭제·이름 바꾸기: overlay archive와 함께(`docs/append-design.md`).
 - 셸 자동 완성(`--setup-autocomplete`): fish와 PowerShell의 스크립트는 그 셸에서 돌려 보지 않았다(이 Mac에 없다).
   zsh는 zpty로, bash는 `_aqr`를 직접 불러 확인했다.
