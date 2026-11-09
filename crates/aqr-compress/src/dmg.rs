@@ -2,11 +2,11 @@
 //! in turn (a disk image of its own: its files taken apart), cut into the parts of its chunks
 //! once (a Split of all of it, so that it is one content): zlib's chunks rebuilt from their parts
 //! by applications of aqr-flate's (of 32 MiB of data each; their headers and checksums kept),
-//! bzip2's each by aqr-bz2's, raw ones those parts as they are, zeros dropped (each part the
+//! bzip2's each by aqr-bz2's, LZFSE's each by aqr-bvx's, raw ones those parts as they are, zeros dropped (each part the
 //! source of a Patch of nothing), and so the parts of chunks not rebuilt, kept as they are. The
 //! rest of the file (the property list, the trailer, what is between the chunks) is kept as it
 //! is. A UDIF image of raw chunks only is a container of aqr-disk's, not this; one of chunks of
-//! another compression (LZFSE, LZMA, ADC) is not taken yet.
+//! another compression (LZMA, ADC) is not taken yet.
 
 use aqr_disk::dmg::{self, How};
 use aqr_flate::formula::Derived;
@@ -32,8 +32,8 @@ pub(crate) const KEPT: &str = "dmg";
 /// Whether `d` is a UDIF image of compressed chunks this takes (zlib's; raw ones and zeros too).
 pub(crate) fn starts(d: &[u8]) -> bool {
     dmg::parse(d).is_some_and(|u| {
-        u.chunks.iter().any(|c| matches!(c.how, How::Zlib | How::Bzip2))
-            && u.chunks.iter().all(|c| matches!(c.how, How::Zlib | How::Bzip2 | How::Raw | How::Zeros))
+        u.chunks.iter().any(|c| matches!(c.how, How::Zlib | How::Bzip2 | How::Lzfse))
+            && u.chunks.iter().all(|c| matches!(c.how, How::Zlib | How::Bzip2 | How::Lzfse | How::Raw | How::Zeros))
     })
 }
 
@@ -58,7 +58,7 @@ pub(crate) fn dmg(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
     // chunks); none probed, as they are parts of one disk (the first of them, of the partition
     // table's sectors, is no probe of the rest)
     for c in &u.chunks {
-        if !matches!(c.how, How::Zlib | How::Bzip2 | How::Zeros)
+        if !matches!(c.how, How::Zlib | How::Bzip2 | How::Lzfse | How::Zeros)
             && !(c.how == How::Raw && c.file.len() as u64 == c.disk.end - c.disk.start)
         {
             return None;
@@ -127,6 +127,19 @@ pub(crate) fn dmg(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
                     }
                     let s = aqr_bz2::stream::decode(m, true, n).ok()?;
                     (s.data.len() == n && s.len == m.len()).then(|| (Some(s.data.into()), Made::Kept))
+                }
+                How::Lzfse => {
+                    // (split, and joined again to check it: some 40 MB/s of data a thread each)
+                    let st = aqr_bvx::recons::split(m, n).ok().filter(|sp| sp.used == m.len() && sp.data.len() == n);
+                    if let Some(sp) = st {
+                        let mut out = Vec::with_capacity(m.len());
+                        if aqr_bvx::recons::join_onto(&sp.data, &sp.record, &sp.counts, &mut out).is_ok() && out == m {
+                            let made = Made::Lzfse { params: sp.counts.params(), record: sp.record };
+                            return Some((Some(sp.data.into()), made));
+                        }
+                    }
+                    let st = aqr_bvx::bvx::decode(m, n).ok()?;
+                    (st.data.len() == n && st.used == m.len()).then(|| (Some(st.data.into()), Made::Kept))
                 }
                 How::Raw | How::Zeros => Some((None, Made::Kept)),
                 _ => None,
@@ -220,6 +233,24 @@ pub(crate) fn dmg(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
             streams[k] = Some(Node::Apply(Box::new(a)));
         }
     }
+    // (LZFSE's likewise, their records one stream, sliced)
+    let mut records = Vec::new();
+    let mut lzfse = Vec::new();
+    for &k in &file_order {
+        if let Made::Lzfse { params, record } = &made[k] {
+            lzfse.push((k, params.clone(), records.len() as u64, record.len() as u64));
+            records.extend_from_slice(record);
+        }
+    }
+    if !lzfse.is_empty() {
+        let at = f.streams.len();
+        f.push_as("bvx/record", Kind::Compressed, records);
+        for (k, params, start, n) in lzfse {
+            let part = parts[k].take().expect("its part");
+            let inputs = vec![part, Node::slice(at, start, n)];
+            streams[k] = Some(Node::apply(aqr_bvx::formula::MODULE, params, inputs, u.chunks[k].file.len() as u64));
+        }
+    }
     // the file: what is kept, then each chunk in turn
     let mut kept = Vec::new();
     let mut root = Vec::new();
@@ -261,12 +292,13 @@ pub(crate) fn dmg(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
     (f.root.len() == d.len() as u64).then_some(f)
 }
 
-/// What a chunk is made of in the formula: zlib's or bzip2's rebuilt (where its DEFLATE stream is
-/// in the chunk and its record; the bzip2 stream's parameters), or its bytes kept as they are
-/// (raw ones, zeros, and those not rebuilt).
+/// What a chunk is made of in the formula: zlib's, bzip2's or LZFSE's rebuilt (where its DEFLATE
+/// stream is in the chunk and its record; the bzip2 stream's parameters; aqr-bvx's params and
+/// record), or its bytes kept as they are (raw ones, zeros, and those not rebuilt).
 #[derive(Clone)]
 enum Made {
     Zlib { raw: std::ops::Range<usize>, record: Vec<u8> },
     Bzip2(aqr_bz2::module::StreamParams),
+    Lzfse { params: Vec<u8>, record: Vec<u8> },
     Kept,
 }

@@ -33,8 +33,8 @@ codecs/aqr-disk/scripts/gen-dmg.sh          # tests/data/dmg-*: a disk of HFS+ a
   block tables and headers are the rest. A fixed VHD and a flat VMDK extent are a plain disk.
   A UDIF image (`.dmg`, `dmg`: the `koly` trailer, the property list's `mish` block tables, from
   the format's public descriptions) of raw chunks and zeros only (UDRO, UDRW) is a container as
-  well; one of compressed chunks is parsed for aqr-compress, whose formula rebuilds its zlib and
-  bzip2 chunks from the disk.
+  well; one of compressed chunks is parsed for aqr-compress, whose formula rebuilds its zlib,
+  bzip2 and LZFSE chunks from the disk.
   Not read: differencing disks and those of a parent or backing file, encrypted ones, compressed
   grains and clusters (streamOptimized VMDK; qcow2's compressed clusters read as zeros: stage 8),
   VHDX's log, VHD's and VHDX's sector bitmaps (an allocated block is taken whole).

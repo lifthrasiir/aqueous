@@ -40,9 +40,10 @@ assert_eq!(out, stream[..sp.used]);
   takes a stream only where its data fits in what is left of the budget that DEFLATE streams
   inflate within (`Options::expansion`: 32 times the file and 64 MiB).
 - `compression_tool`, `.lzfse` files, and LZFSE in other data found by the scan.
+- DMG (ULFO): each chunk an LZFSE stream, taken by aqr-compress's `dmg` at every level (split
+  and joined again to check it, some 37 MB/s of data a thread; records 0.8% of the streams).
 - Not taken yet: APFS and HFS+ transparent compression (decmpfs: in a resource fork or an
-  extended attribute, raw LZVN or LZFSE chunks behind a table), DMG (ULFO, chunks of LZFSE
-  behind a block table), Apple Archive (`.aar`; its LZFSE blocks are found by the scan where
+  extended attribute, raw LZVN or LZFSE chunks behind a table), Apple Archive (`.aar`; its LZFSE blocks are found by the scan where
   they are whole streams), and raw LZVN streams (the kernel's).
 
 ## Results
