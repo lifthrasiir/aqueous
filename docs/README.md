@@ -8,5 +8,6 @@ Most of them are currently written in Korean, sorry.
 - `append-design.md`, `recovery-design.md`, `special-files-design.md`, `names-design.md`, `zip-extras-design.md`: appending, recovery, special files, names on extraction, ZIP extra fields.
 - `eval-design.md`, `bench-scenarios.md`: evaluation and benchmark scenarios.
 - `macos-app-todo.md`: what is left for macOS application bundles.
+- `disk-image-design.md`: the plan for disk images (file systems, partition tables, virtual disks).
 - `other-projects.md`: survey of other projects.
 - `rar3-decoding.md`, `rar5-decoding.md`: notes on the RAR formats for the clean-room aqr-rar.
