@@ -96,7 +96,8 @@
 //! - `-t` (`--list`): the entries of each archive listed on standard output, and what each file
 //!   takes of the archive and how it is made ([`list`]); `-q` the paths alone, `-v` all that is
 //!   told. `-t ARCHIVE PATH...`: the entries at those paths alone, with what is under them, as
-//!   tar's `-t` has them; `--each` lists several archives whole.
+//!   tar's `-t` has them; `--each` lists several archives whole. `--json`: a line of JSON for
+//!   each archive instead, its entries with all their metadata ([`list`]).
 //! - `-I` (`--info`): all that an archive records, for debugging ([`info`]): of the archive
 //!   itself (its blocks and segments; of a single file, its formula too), or with paths, each
 //!   path's entry in every segment (those before an update too), its metadata and formula in full.
@@ -265,7 +266,7 @@ Modes:
                         without them
   -t, --list            list the entries of an archive, or those of its PATHs (-q: the
                         paths alone; -v: the blocks each file takes, its formula and
-                        all its metadata)
+                        all its metadata; --json: as a line of JSON each archive)
   -K, --test            decode and check an archive, writing nothing
   -I, --info            all that an archive records (its blocks and segments), or of
                         its PATHs in each segment (their formulas in full); -v: the
@@ -430,6 +431,8 @@ struct Args {
     stats: Option<&'static stats::Stats>,
     /// Driven by a frontend ([`ipc`]).
     ipc: bool,
+    /// Listing as JSON (`--json`).
+    json: bool,
     /// Compressing, into archives of this format (`--format`, or `-o`'s name).
     format: Pack,
     /// `-l` as given (read as the format's level: [`Args::format`]'s, or Aqueous's).
@@ -566,6 +569,7 @@ fn parse() -> Result<Args, String> {
         renames: Vec::new(),
         stats: None,
         ipc: false,
+        json: false,
         format: Pack::Aqr,
         level: None,
         passphrase: false,
@@ -681,6 +685,7 @@ fn parse() -> Result<Args, String> {
                 application_bound = Some(bound_of(&v)?);
             }
             "--ipc" => a.ipc = true,
+            "--json" => a.json = true,
             "-P" | "--passphrase" => a.passphrase = true,
             "--passphrase-from" => {
                 a.pass_from = Some(pass::Source::parse(&value("--passphrase-from")?)?);
@@ -757,6 +762,9 @@ fn parse() -> Result<Args, String> {
         }
         Some(b) => aqr_formula::set_application_limit(b),
         None => {}
+    }
+    if a.json && !a.list {
+        return Err("--json is for -t".into());
     }
     if a.info {
         if a.rm || a.each || a.dereference || a.output.is_some() || !renames.is_empty() || last_dir.is_some() {

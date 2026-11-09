@@ -30,5 +30,8 @@
 
 ## 그 밖
 
+- `--json`은 `-t`만 받는다. `-I`(디버깅용)와 압축·풀기의 요약(지금은 `--ipc`의 메시지와 `--stats=FILE.json`)은
+  필요해지면 더한다.
+
 - 아카이브 안 항목의 삭제·이름 바꾸기: overlay archive와 함께(`docs/append-design.md`).
 - 셸 자동 완성(zsh, bash, fish, PowerShell): 만들지 정하지 않았다.

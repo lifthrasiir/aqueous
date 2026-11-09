@@ -25,6 +25,9 @@
 //!   `chflags` names them), the flags `@+=`, its modification time, and the formula summarized
 //!   ([`aqr::Listed::formula`]); and the total of the archive's data blocks and the rest.
 //!
+//! `--json`: each archive's listing as a line of JSON instead ([`json`]): its entries with all
+//! their metadata (what `-v` tells too, but `-q`), and the counts and totals.
+//!
 //! A time is told as it is recorded ([`aqr::Zone`]): `Z` of no time zone told, its offset where
 //! one is, none of a local time in an unknown time zone; the digits of a quantization interval
 //! over a second `?` (`??:??:??` of a date).
@@ -47,6 +50,8 @@ struct Row {
     is_dir: bool,
     /// A link's target, and whether it is a junction.
     link: Option<(Vec<u8>, bool)>,
+    /// What it is (none: the file of an archive of a single file).
+    node: Option<EntryNode>,
 }
 
 pub fn list_all(a: &Args) -> Result<(), String> {
@@ -58,7 +63,16 @@ pub fn list_all(a: &Args) -> Result<(), String> {
             return Err(format!("{}: only Aqueous archives are listed", input.display()));
         }
         let text = list(a, input)?;
-        if several && !a.quiet {
+        // (named by its path as given)
+        let text = match a.json {
+            true => {
+                let mut v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+                v["archive"] = crate::stdio::shown(input).to_string().into();
+                v.to_string() + "\n"
+            }
+            false => text,
+        };
+        if several && !a.quiet && !a.json {
             if i > 0 {
                 writeln!(out).map_err(|e| e.to_string())?;
             }
@@ -163,6 +177,7 @@ fn listed(
                 extra: Extra::default(),
                 is_dir: false,
                 link: None,
+                node: None,
             });
         }
         Some(t) => {
@@ -206,6 +221,7 @@ fn listed(
                     extra: e.extra.clone(),
                     is_dir: e.node == EntryNode::Dir,
                     link,
+                    node: Some(e.node.clone()),
                 });
                 paths.push(path);
             }
@@ -218,6 +234,9 @@ fn listed(
         let p = String::from_utf8_lossy(&r.path).into_owned();
         if r.is_dir { p + "/" } else { p }
     };
+    if a.json {
+        return json(a, archive, &rows, len, err);
+    }
     let mut s = String::new();
     if a.quiet {
         for r in &rows {
@@ -357,6 +376,142 @@ fn listed(
     s.push('\n');
     line(&mut s, table.last().unwrap());
     Ok(s)
+}
+
+/// The listing of `archive` (of `len` bytes, where known) as a line of JSON, of its `rows`:
+/// `{"archive" (set by [`list_all`]), "entries": [...], "files", "directories", "links", "others", "size"}`, and the
+/// archive's `"data"` and `"overhead"` bytes where they are known. Each entry has its `"path"`
+/// (`"path_hex"` too where it is not UTF-8; null of an archive of a single file), its `"type"` (`file`, `dir`, `link`, `fifo`, `chr`,
+/// `blk`, `special`) and what is known of it: of a file, `"size"` and `"nodes"` (with all of
+/// it read, `"data"`, `"overhead"`, `"share"`, `"segment"` and `"formula"` too); of a link,
+/// `"target"` and `"junction"`; of a device, `"major"` and `"minor"`; and its metadata (times
+/// in RFC 3339, without an offset where it is a local time of an unknown time zone).
+fn json(
+    a: &Args,
+    archive: &aqr::Archive,
+    rows: &[Row],
+    len: Option<u64>,
+    err: &dyn Fn(&dyn std::fmt::Display) -> String,
+) -> Result<String, String> {
+    use serde_json::{Map, Value, json};
+    let text = |b: &[u8]| Value::from(String::from_utf8_lossy(b).into_owned());
+    let mut entries = Vec::with_capacity(rows.len());
+    let (mut files, mut dirs, mut links, mut others, mut total) = (0, 0, 0, 0, 0u64);
+    for r in rows {
+        let mut e = Map::new();
+        // (none of the file of an archive of a single file)
+        e.insert("path".into(), if r.node.is_some() { text(&r.path) } else { Value::Null });
+        if r.node.is_some() && std::str::from_utf8(&r.path).is_err() {
+            e.insert("path_hex".into(), r.path.iter().map(|b| format!("{b:02x}")).collect::<String>().into());
+        }
+        let kind = match &r.node {
+            None | Some(EntryNode::File(_)) => "file",
+            Some(EntryNode::Dir) => "dir",
+            Some(EntryNode::Link(_)) => "link",
+            Some(EntryNode::Fifo) => "fifo",
+            Some(EntryNode::Device { block: true, .. }) => "blk",
+            Some(EntryNode::Device { block: false, .. }) => "chr",
+            Some(EntryNode::Special(_)) => "special",
+        };
+        match kind {
+            "file" => files += 1,
+            "dir" => dirs += 1,
+            "link" => links += 1,
+            _ => others += 1,
+        }
+        e.insert("type".into(), kind.into());
+        if let Some(l) = &r.listed {
+            total += l.size;
+            e.insert("size".into(), l.size.into());
+            e.insert("nodes".into(), l.nodes.into());
+            if a.verbose || a.select.is_none() {
+                e.insert("data".into(), l.data.into());
+                e.insert("overhead".into(), l.overhead.into());
+                e.insert("share".into(), l.share.into());
+                e.insert("segment".into(), (l.segment + 1).into());
+                e.insert("formula".into(), l.formula.clone().into());
+            }
+        }
+        if let Some((to, junction)) = &r.link {
+            e.insert("target".into(), text(to));
+            e.insert("junction".into(), (*junction).into());
+        }
+        match r.node {
+            Some(EntryNode::Device { major, minor, .. }) => {
+                e.insert("major".into(), major.into());
+                e.insert("minor".into(), minor.into());
+            }
+            Some(EntryNode::Special(k)) => _ = e.insert("kind".into(), k.into()),
+            _ => {}
+        }
+        let x = &r.extra;
+        for (name, t) in
+            [("mtime", x.mtime), ("ctime", x.ctime), ("crtime", x.crtime), ("atime", x.atime), ("arctime", x.arctime)]
+        {
+            if let Some(t) = t {
+                e.insert(name.into(), rfc3339(t).into());
+            }
+        }
+        let mut num = |name: &str, v: Option<u64>| _ = v.map(|v| e.insert(name.into(), v.into()));
+        num("mode", x.mode.map(u64::from));
+        num("uid", x.uid);
+        num("gid", x.gid);
+        num("win_attrs", x.win_attrs.map(u64::from));
+        num("mac_flags", x.mac_flags.map(u64::from));
+        if let Some(u) = &x.uname {
+            e.insert("user".into(), text(u));
+        }
+        if let Some(g) = &x.gname {
+            e.insert("group".into(), text(g));
+        }
+        if let Some(g) = x.link_group {
+            e.insert("link_group".into(), i64::try_from(g).map_or_else(|_| g.to_string().into(), Value::from));
+        }
+        if !x.xattrs.is_empty() {
+            e.insert("xattrs".into(), x.xattrs.iter().map(|(n, _)| text(n)).collect());
+        }
+        if !x.forks.is_empty() {
+            e.insert("forks".into(), x.forks.iter().map(|(n, _)| text(name_bytes(n).0)).collect());
+        }
+        entries.push(Value::Object(e));
+    }
+    let mut o = json!({
+        "entries": entries,
+        "files": files,
+        "directories": dirs,
+        "links": links,
+        "others": others,
+    });
+    if !a.quiet {
+        o["size"] = total.into();
+    }
+    if a.select.is_none()
+        && let Some(len) = len
+    {
+        let data = archive.data_bytes().map_err(|e| err(&e))?;
+        o["data"] = data.into();
+        o["overhead"] = (len - data.min(len)).into();
+    }
+    Ok(o.to_string() + "\n")
+}
+
+/// A time as RFC 3339 has it: of its offset (`Z` of none told), none of a local time in an
+/// unknown time zone; fractions of a second where it has them.
+fn rfc3339(t: Time) -> String {
+    let (y, mo, d, h, mi, sec) = t.civil();
+    let frac = match t.nanos {
+        0 => String::new(),
+        n => format!(".{n:09}").trim_end_matches('0').to_owned(),
+    };
+    let zone = match t.zone {
+        Zone::Utc => "Z".into(),
+        Zone::Offset(o) => {
+            let m = (o as i32).abs() * 15;
+            format!("{}{:02}:{:02}", if o < 0 { '-' } else { '+' }, m / 60, m % 60)
+        }
+        Zone::Local => String::new(),
+    };
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{sec:02}{frac}{zone}")
 }
 
 /// A size as `-v` shows it (in bytes), or as `-t` alone does.
