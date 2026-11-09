@@ -1,4 +1,5 @@
-//! Archives edited in place: paths taken out (`--delete`).
+//! Archives edited in place: paths taken out (`--delete`), the archive written again of what it
+//! holds (`--compact`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -133,5 +134,80 @@ fn delete_refused() {
     ok(&d, &["-q", "--passphrase-from", "pass", "-o", "e.aqr", "src"]);
     let o = aqr(&d, &["--delete", "e.aqr", "t0.txt"]);
     assert!(stderr(&o).contains("encrypted"), "{}", stderr(&o));
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// An archive appended to, synchronized and taken from, written again: what it holds the same,
+/// the file smaller than it was and about as one made of it anew; a stub before it kept; a link
+/// to it left a link. Written again once more, the same bytes.
+#[test]
+fn compacted() {
+    let d = scratch("compacted");
+    let want = source(&d);
+    ok(&d, &["-q", "-o", "a.aqr", "src"]);
+    // (a file changed, one gone, one taken out: three segments)
+    fs::write(d.join("src/t2.txt"), text(99, 9000)).unwrap();
+    fs::remove_file(d.join("src/sub/t4.txt")).unwrap();
+    ok(&d, &["-q", "-s", "a.aqr", "src"]);
+    ok(&d, &["-q", "--delete", "a.aqr", "sub/deep/t5.txt"]);
+    let held = extracted(&d, "a.aqr");
+    let mut now = files(&d.join("src"));
+    now.retain(|(p, _)| p != "sub/deep/t5.txt");
+    assert_eq!(held, now);
+    assert_ne!(held, want);
+    let a = fs::read(d.join("a.aqr")).unwrap();
+    fs::write(d.join("lead.aqr"), [b"#!stub\n".as_slice(), &a].concat()).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("lead.aqr", d.join("link.aqr")).unwrap();
+    let len = |n: &str| fs::metadata(d.join(n)).unwrap().len();
+    ok(&d, &["-q", "--compact", "a.aqr"]);
+    ok(&d, &["-K", "a.aqr"]);
+    assert_eq!(extracted(&d, "a.aqr"), held);
+    assert!(len("a.aqr") < a.len() as u64, "{} -> {}", a.len(), len("a.aqr"));
+    let compacted = fs::read(d.join("a.aqr")).unwrap();
+    ok(&d, &["-q", "--compact", "a.aqr"]);
+    assert_eq!(fs::read(d.join("a.aqr")).unwrap(), compacted);
+    let link = if cfg!(unix) { "link.aqr" } else { "lead.aqr" };
+    ok(&d, &["-q", "--compact", link]);
+    assert!(fs::symlink_metadata(d.join(link)).unwrap().file_type().is_symlink() == cfg!(unix));
+    assert_eq!(fs::read(d.join("lead.aqr")).unwrap(), [b"#!stub\n".as_slice(), &compacted].concat());
+    // taken out and written again at once: no tombstone, nothing of it left
+    ok(&d, &["-q", "--delete", "--compact", "a.aqr", "sub"]);
+    let mut left = held.clone();
+    left.retain(|(p, _)| !p.starts_with("sub/"));
+    assert_eq!(extracted(&d, "a.aqr"), left);
+    let o = ok(&d, &["-I", "a.aqr"]);
+    let info = String::from_utf8_lossy(&o.stdout);
+    assert!(info.contains("segments: 1") || info.contains("segments: 2"), "{info}");
+    assert!(!info.contains("tombstone"), "{info}");
+    assert!(d.read_dir().unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".part")));
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// Written again, an archive of nothing left, an encrypted one, one of mirror blocks and one of
+/// a single file are refused, each left as it is; so is --compact given paths.
+#[test]
+fn compact_refused() {
+    let d = scratch("compact-refused");
+    source(&d);
+    ok(&d, &["-q", "-o", "a.aqr", "src"]);
+    fs::write(d.join("pass"), "secret\n").unwrap();
+    ok(&d, &["-q", "--passphrase-from", "pass", "-o", "e.aqr", "src"]);
+    ok(&d, &["-q", "-A", "-o", "m.aqr", "src"]);
+    ok(&d, &["-q", "-o", "one.aqr", "src/t0.txt"]);
+    for (args, told) in [
+        (&["--delete", "--compact", "a.aqr", "t0.txt", "t3.txt", "t6.txt", "sub"][..], "nothing left"),
+        (&["--compact", "e.aqr"], "encrypted"),
+        (&["--compact", "m.aqr"], "mirror"),
+        (&["--compact", "one.aqr"], "single file"),
+        (&["--compact", "a.aqr", "t0.txt"], "an archive alone"),
+    ] {
+        let name = args.iter().find(|a| a.ends_with(".aqr")).unwrap();
+        let before = fs::read(d.join(name)).unwrap();
+        let o = aqr(&d, args);
+        assert!(!o.status.success() && stderr(&o).contains(told), "{args:?}: {}", stderr(&o));
+        assert_eq!(fs::read(d.join(name)).unwrap(), before, "{args:?}");
+    }
+    assert!(d.read_dir().unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".part")));
     fs::remove_dir_all(&d).unwrap();
 }

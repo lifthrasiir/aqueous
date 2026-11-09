@@ -41,9 +41,14 @@
 .Op Ar path ...
 .Nm
 .Fl -delete
+.Op Fl -compact
 .Op Fl q
 .Ar archive
 .Ar path ...
+.Nm
+.Fl -compact
+.Op Fl q | v
+.Ar archive
 .Nm unaqr
 .Op Ar options
 .Ar archive
@@ -121,9 +126,29 @@ segment saying so is appended and committed, as
 .Fl a
 appends, so that the file holds the archive as it was or as edited whatever happens
 meanwhile.
-The bytes of what was taken out stay in the file.
+The bytes of what was taken out stay in the file (but with
+.Fl -compact ) .
 A path not in the archive is an error, before anything is written; an encrypted
 archive is not edited.
+.It Fl -compact
+Write an archive again of what it holds, segment by segment, copying the blocks it still
+needs as they are: what
+.Fl a ,
+.Fl s
+and
+.Fl -delete
+replaced or took out leaves the file.
+It is written beside the archive, checked, and put in its place by a rename, so that the
+file holds the archive as it was or as written again whatever happens meanwhile; bytes
+before the archive (a stub) are kept.
+With
+.Fl -delete ,
+the paths are taken out as it is written.
+Archives of mirror blocks
+.Pq Fl A
+are not written again yet.
+.Fl v
+tells the blocks left out.
 .Fl v
 gives the unknown metadata uncut.
 .El

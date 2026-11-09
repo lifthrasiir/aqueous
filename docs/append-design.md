@@ -227,8 +227,9 @@ overlay 아카이브의 footer(`OVERLAY_FOOTER_TYPE`)도 똑같이 죽인다.
   그 결과는 같은 입력으로 `-c`를 돌린 트리와 같다(quick check가 보는 한에서). 입력 밖의 최상위 이름도
   지워지고, 디렉터리 하나를 주면 `-c`처럼 그 내용이 최상위가 된다. 입력 디렉터리 아래만 지우는 방식
   (처음 구현했던 `-a --delete`)은 sync라는 이름에서 기대하는 바와 달라서 없앴다.
-- **`-s`도 파일을 키운다.** 지워진 것은 tombstone으로 표시될 뿐이고 그 바이트는 남는다. 공간을 되찾는
-  것(`--vacuum`, `-s --vacuum` 또는 verb)은 나중의 일이며 이번 작업에 들지 않는다.
+- **`-s`도 파일을 키운다.** 지워진 것은 tombstone으로 표시될 뿐이고 그 바이트는 남는다. 공간은
+  `aqr --compact`가 되찾는다(segment 구조를 유지한 채 남은 블록만 복사해 다시 쓰고 rename한다;
+  `crates/aqr-formula/src/aqr/rewrite.rs`). segment를 합치는 것(`--merge-segments` 같은 것)은 필요해지면 따로.
 - **재개는 별도 기능이 아니다.** 멈춘 `-c`는 같은 입력으로 `aqr -a out.aqr …`를 돌리면 남은 파일이 "없는
   것"이라 들어간다. 결과는 중단 없이 만든 `-c`보다 조금 크다. 모듈이 segment마다 실리고, PNG set 같은
   묶음이 segment 경계에서 끊기기 때문이다.

@@ -38,6 +38,7 @@ pub mod inspect;
 mod listing;
 mod locate;
 pub mod mirror;
+mod rewrite;
 mod segment;
 pub mod sink;
 mod spool;
@@ -46,6 +47,7 @@ mod tree;
 pub use listing::{Applied, Listed};
 pub use locate::{block_at, footer_of, locate, trim};
 pub use mirror::Mirroring;
+pub use rewrite::{Rewritten, rewrite};
 pub use segment::{Batch, ContentAt, Layout, Leaf, Placed, Segment, SegmentWriter, crossing, kill};
 pub use tree::{
     Entry, EntryNode, Extra, MAC_FLAGS_ALLOWED, Member, Status, Time, Tree, WIN_ATTRS_ALLOWED, Xattr, Zone,

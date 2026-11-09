@@ -5,7 +5,8 @@
 //! INPUT [--rename TO]...
 //!
 //! aqr -d [OPTIONS] ARCHIVE [PATH [--rename TO]]...; aqr -d --each [OPTIONS] ARCHIVE...; aqr -t [-q | -v] ARCHIVE [PATH]...;
-//! aqr -t --each [-q | -v] ARCHIVE...; aqr --delete [-q] ARCHIVE PATH...
+//! aqr -t --each [-q | -v] ARCHIVE...; aqr --delete [--compact] [-q] ARCHIVE PATH...;
+//! aqr --compact [-q | -v] ARCHIVE
 //!
 //! - `-c` (the default; `aqr`): each input into `INPUT.aqr`, a file as an archive of a single
 //!   file, a directory as an archive of what it holds; with `-o`, all the inputs into one
@@ -105,6 +106,11 @@
 //!   it) taken out of it in place, by a segment of tombstones appended and committed as `-a`
 //!   commits ([`edit`]); their bytes stay in the file. A path not in it is an error, before
 //!   anything is written.
+//! - `--compact ARCHIVE`: the archive written again of what it holds, segment by segment, the
+//!   blocks it still needs copied as they are ([`aqr::rewrite`]): what appends replaced or took
+//!   away, and an append not committed, out of the file. Written beside it and checked, then
+//!   put in its place by a rename. With `--delete`, of the tree without its paths (no
+//!   tombstones). Not of an archive of mirror blocks (`-A`) for now.
 //! - `-P`: compressing, the archives encrypted with a passphrase ([`aqr::envelope`]), asked for
 //!   as the work begins (twice on a terminal); decompressing, asked for then rather than as an
 //!   archive needs it. An encrypted archive (of either kind) is opened by the passphrases that
@@ -267,7 +273,8 @@ usage: aqr [OPTIONS] INPUT [--rename TO]...
        aqr -t [-q | -v] ARCHIVE [PATH]...
        aqr -t --each [-q | -v] ARCHIVE...
        aqr -I [-v] ARCHIVE [PATH]...
-       aqr --delete [-q] ARCHIVE PATH...
+       aqr --delete [--compact] [-q] ARCHIVE PATH...
+       aqr --compact [-q | -v] ARCHIVE
        unaqr [OPTIONS] ARCHIVE [PATH [--rename TO]]...
 
 Modes:
@@ -286,6 +293,8 @@ Modes:
                         unknown metadata uncut
       --delete          take the PATHs of an archive (and what is under them) out of
                         it, appending to it what says so
+      --compact         write an archive again of what it holds (with --delete, of what
+                        is left), what was taken out or replaced out of the file
 
 Compressing (aqr -o ARCHIVE INPUT [--rename TO]...):
   INPUT                 a file or directory; several of them archived by their paths,
@@ -433,8 +442,10 @@ struct Args {
     append: bool,
     /// `-s` (with `append`): what the archive holds that the inputs do not taken away too.
     sync: bool,
-    /// Editing the archive (the first input) in place ([`edit`]).
+    /// Editing the archive (the first input) in place ([`edit`]), and writing it again of what
+    /// it holds (`--compact`).
     edit: Option<edit::Edit>,
+    compact: bool,
     /// `-L`: compressing, the links found (and given) followed, archived as what they lead to.
     dereference: bool,
     /// What is not commonly kept of the metadata kept too ([`meta`]).
@@ -538,7 +549,7 @@ fn main() -> ExitCode {
     }
     aqr_common::pool::init(args.opt.threads);
     let r = aqr_common::pool::run(|| match () {
-        _ if args.edit.is_some() => edit::edit(&args),
+        _ if args.edit.is_some() || args.compact => edit::edit(&args),
         _ if args.info => info::info(&args),
         _ if args.list => list::list_all(&args),
         _ if args.decompress => decompress_all(&args),
@@ -607,6 +618,7 @@ fn parse() -> Result<Args, String> {
         append: false,
         sync: false,
         edit: None,
+        compact: false,
         dereference: false,
         preserve: false,
         quiet: false,
@@ -672,6 +684,7 @@ fn parse() -> Result<Args, String> {
             "-t" | "--list" => (a.list, a.info) = (true, false),
             "-I" | "--info" => (a.info, a.list) = (true, false),
             "--delete" => a.edit = Some(edit::Edit::Delete),
+            "--compact" => a.compact = true,
             "--wasm" => a.wasm = true,
             "--no-sandbox" => a.sandbox = false,
             "-o" | "--output" => a.output = Some(value("-o")?.into()),
@@ -814,8 +827,8 @@ fn parse() -> Result<Args, String> {
         Some(b) => aqr_formula::set_application_limit(b),
         None => {}
     }
-    if let Some(e) = a.edit {
-        edit_args(&mut a, e, renames, last_dir.is_some())?;
+    if a.edit.is_some() || a.compact {
+        edit_args(&mut a, renames, last_dir.is_some())?;
         return Ok(a);
     }
     if a.json && !a.list {
@@ -926,10 +939,10 @@ fn parse() -> Result<Args, String> {
     Ok(a)
 }
 
-/// Of [`parse`], editing an archive by `e` ([`edit`]): the archive and its paths, checked
-/// against the other options given (`renames` as [`selection`] takes them; `dir`: `-C` given).
-fn edit_args(a: &mut Args, e: edit::Edit, renames: Vec<(usize, PathBuf)>, dir: bool) -> Result<(), String> {
-    let o = e.option();
+/// Of [`parse`], editing an archive ([`edit`]): the archive and its paths, checked against the
+/// other options given (`renames` as [`selection`] takes them; `dir`: `-C` given).
+fn edit_args(a: &mut Args, renames: Vec<(usize, PathBuf)>, dir: bool) -> Result<(), String> {
+    let o = a.edit.map_or("--compact", edit::Edit::option);
     let modes = [
         (a.decompress && !a.test, "-d"),
         (a.test, "-K"),
@@ -953,13 +966,15 @@ fn edit_args(a: &mut Args, e: edit::Edit, renames: Vec<(usize, PathBuf)>, dir: b
     if a.inputs.iter().any(|i| stdio::is(i)) {
         return Err(format!("{o}: an archive in place, not - (standard input)"));
     }
-    if a.inputs.len() < 2 {
-        return Err(format!("{o} takes an archive and its paths"));
-    }
     if let Some((_, to)) = renames.first() {
         return Err(format!("{o}: --rename {} (paths are taken out)", to.display()));
     }
-    a.select = Some(selection(a.inputs.split_off(1), renames)?);
+    match a.edit {
+        None if a.inputs.len() != 1 => return Err("--compact alone takes an archive alone".into()),
+        None => {}
+        Some(_) if a.inputs.len() < 2 => return Err(format!("{o} takes an archive and its paths")),
+        Some(_) => a.select = Some(selection(a.inputs.split_off(1), renames)?),
+    }
     if let Some(l) = &a.level {
         a.opt.level = l.parse()?;
     }

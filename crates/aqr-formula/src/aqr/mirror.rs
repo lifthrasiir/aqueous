@@ -58,7 +58,7 @@ pub fn mirrorable(ty: u64) -> bool {
 }
 
 /// Whether blocks of type `ty` are mirror blocks.
-fn is_mirror(ty: u64) -> bool {
+pub(super) fn is_mirror(ty: u64) -> bool {
     (MIRROR + 0x10..=MIRROR + 0x78).contains(&ty)
 }
 

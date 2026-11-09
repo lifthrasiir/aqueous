@@ -106,9 +106,18 @@ impl Opened {
         diff(g, &self.old, &self.sizes, sync).then_some(self.prior)
     }
 
-    /// The archive's tree.
+    /// The archive's tree, and the bytes of each of its contents.
     pub fn tree(&self) -> &Tree {
         &self.old
+    }
+
+    pub fn sizes(&self) -> &[u64] {
+        &self.sizes
+    }
+
+    /// The archive as it is in its file.
+    pub fn prior(&self) -> &Prior {
+        &self.prior
     }
 
     /// The archive, to be appended to as it is.
@@ -154,7 +163,7 @@ fn tail(file: &fs::File, c: &[u8], at: Range<usize>, path: &Path) -> Result<(Ran
 }
 
 /// The path of each entry of `t`, by its names.
-fn paths(t: &Tree) -> Vec<Vec<Vec<u8>>> {
+pub fn paths(t: &Tree) -> Vec<Vec<Vec<u8>>> {
     let mut out: Vec<Vec<Vec<u8>>> = Vec::with_capacity(t.entries.len());
     for e in &t.entries {
         let mut p = e.parent.map_or_else(Vec::new, |q| out[q].clone());

@@ -126,6 +126,17 @@ pub struct Batch {
     leaf_dictionary: Vec<(usize, usize)>,
 }
 
+/// A block copied into a segment ([`SegmentWriter::copied`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Copied {
+    Module,
+    Resource,
+    Dictionary,
+    /// A leaf block, and the dictionary it takes (by its index in the segment).
+    Leaf(Option<usize>),
+    NonLeaf,
+}
+
 /// Where a content of an archive is: the leaf block (where it starts in the archive), its output
 /// and its size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -328,6 +339,20 @@ impl SegmentWriter {
     /// Takes `n` bytes written after the blocks so far that are of no segment (mirror and
     /// spacer blocks, [`super::Mirroring::mirror_before`]) as written.
     pub fn skip(&mut self, n: usize) {
+        self.at += n;
+    }
+
+    /// Takes a block of `n` bytes written after the blocks so far, as it was in another archive
+    /// ([`super::rewrite`]), as one of the segment's: what it is for the metadata block. A copied
+    /// segment takes no batch: its modules and resources are not known.
+    pub(super) fn copied(&mut self, what: Copied, n: usize) {
+        match what {
+            Copied::Module => self.module_at.push(self.at),
+            Copied::Resource => self.resource_at.push(self.at),
+            Copied::Dictionary => self.dictionary_at.push(self.at),
+            Copied::Leaf(Some(d)) => _ = self.leaf_dictionary.insert(self.at, d),
+            Copied::Leaf(None) | Copied::NonLeaf => {}
+        }
         self.at += n;
     }
 
