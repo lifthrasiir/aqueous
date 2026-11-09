@@ -1561,6 +1561,11 @@ fn stream_at(at: At, v: Val) -> Decoded<Ch> {
     Ok(h)
 }
 
+/// Bytes of the blocks [`Fresh`] keeps decoded (but [`AHEAD_BLOCKS`] and one, whatever their
+/// size): an image's applications on threads take their inputs of several blocks each, of many
+/// small ones (thousands, of the classes of its files), which a few were decoded again for each.
+const FRESH_BYTES: usize = 512 << 20;
+
 /// Bytes of output at most of the values [`Hashing::ahead`] makes at once.
 const AHEAD_HASHED_BYTES: u64 = 128 << 20;
 
@@ -1603,8 +1608,10 @@ impl Blocks for Fresh<'_> {
             // (asked for again: decoded again, to fail there too)
             Err(_) => _ = cache.remove(k),
         }
-        // (the oldest decoded let go of, those being decoded kept)
-        while cache.iter().filter(|e| e.1.is_some()).count() > AHEAD_BLOCKS + 1 {
+        // (the oldest decoded let go of, those being decoded kept: past [`FRESH_BYTES`] and
+        // [`AHEAD_BLOCKS`] and one)
+        let bytes = |c: &Kept| c.iter().filter_map(|e| e.1.as_ref()).map(|d| d.len()).sum::<usize>();
+        while cache.iter().filter(|e| e.1.is_some()).count() > AHEAD_BLOCKS + 1 && bytes(&cache) > FRESH_BYTES {
             let k = cache.iter().position(|e| e.1.is_some()).expect("one decoded");
             cache.remove(k);
         }
