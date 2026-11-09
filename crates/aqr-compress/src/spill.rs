@@ -13,7 +13,7 @@
 //! taken again by those after it, so that the spill takes about the space of the regions held,
 //! not of all made); one larger than half a segment has a segment of its own, the rest of it
 //! free once it is written. (A stream of a length not known takes regions growing as it does:
-//! `aqr_formula::store::Writer`.) A segment starts with [`MAGIC`], so that
+//! `aqr_formula::store::Writer`.) A segment starts with `MAGIC`, so that
 //! one left behind is not taken for a file of another kind. The bytes of a region dropped are
 //! given back to the system ([`aqr_common::pages::discard`]: a hole punched in the file).
 

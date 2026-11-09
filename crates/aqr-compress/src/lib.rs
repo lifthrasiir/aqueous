@@ -9,11 +9,11 @@
 //! - gzip and zlib: the container sliced around aqr-flate on the DEFLATE stream (data and
 //!   record). Below level 4, DEFLATE streams (theirs and ZIP archives') are not rebuilt but
 //!   kept as they are, each a slice of its own, and the files archived along with them that
-//!   hold their data are made of them by aqr-flate's `flate-inflate` ([`inflated`]).
+//!   hold their data are made of them by aqr-flate's `flate-inflate` (`inflated`).
 //! - mozlz4 files and LZ4 frames: the container sliced around aqr-lz4 on the data.
 //! - `.lzma` files: the header sliced around aqr-lzma on the data and record of the stream.
 //! - `.xz` files: the container sliced around aqr-lzma on the data and records of the LZMA2
-//!   streams of its blocks. (These and 7z archives from level 4: [`format_on`].)
+//!   streams of its blocks. (These and 7z archives from level 4: `format_on`.)
 //! - lzop files: the headers sliced around aqr-lzo on the data and records of the streams.
 //! - Streams of Apple's LZFSE and LZVN blocks (`bvx2`, `bvxn`; asset catalogs hold them):
 //!   aqr-bvx on the data and record of the stream (from level 9).
@@ -248,7 +248,7 @@ pub struct Options {
     /// limit and the sum of its task limits; spec, "Module execution"): a recompression whose
     /// formula has a larger one is not used, its data kept as it would be without it
     /// ([`memory::fallbacks`] tells). None, the default: 256 MiB ([`memory::DEFAULT_BOUND`]),
-    /// or more for a module with an exception ([`memory`]); decoders support up to 512 MiB.
+    /// or more for a module with an exception (`memory`); decoders support up to 512 MiB.
     pub application_bound: Option<u64>,
 }
 
