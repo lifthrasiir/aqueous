@@ -9,7 +9,8 @@
 //! - Times: the modification time as MS-DOS's (local time), and the modification, access and
 //!   creation times in the extended timestamp (0x5455, seconds) and NTFS (0x000a, 100 ns)
 //!   fields. The Unix mode, where it is known, in the external attributes (made by Unix);
-//!   Windows' attributes (read-only, hidden, system, archive) in their low byte.
+//!   Windows' attributes (read-only, hidden, system, archive) in their low byte. The owner's
+//!   ids, where both are known, in Info-ZIP's Unix field (0x7875).
 //! - Zip64 where a size, an offset or the number of entries needs it.
 //! - With a passphrase, files (not directories nor links) are encrypted by WinZip's AES-256,
 //!   AE-2 (no CRC-32 told: the authentication code checks the data), each with a salt of its
@@ -249,6 +250,27 @@ fn times(x: &Extra, central: bool) -> Vec<u8> {
     f
 }
 
+/// Info-ZIP's Unix field (0x7875) of `x`'s owner, where both its ids are known: version 1, each
+/// id of 4 bytes (8 where larger), the same in local and central headers, as Info-ZIP's `zip`
+/// writes it.
+fn owner(f: &mut Vec<u8>, x: &Extra) {
+    let (Some(uid), Some(gid)) = (x.uid, x.gid) else { return };
+    let mut d = vec![1];
+    for id in [uid, gid] {
+        match u32::try_from(id) {
+            Ok(id) => {
+                d.push(4);
+                d.extend(id.to_le_bytes());
+            }
+            Err(_) => {
+                d.push(8);
+                d.extend(id.to_le_bytes());
+            }
+        }
+    }
+    field(f, 0x7875, &d);
+}
+
 /// WinZip's AES field (0x9901): AE-2, AES-256, the method under it.
 fn aes_field(f: &mut Vec<u8>, method: Option<u16>) {
     if let Some(m) = method {
@@ -285,6 +307,7 @@ fn local(it: &Item, x: &Extra, b: &Body) -> Vec<u8> {
         field(&mut extra, 0x0001, &[b.size.to_le_bytes(), clen.to_le_bytes()].concat());
     }
     extra.extend(times(x, false));
+    owner(&mut extra, x);
     aes_field(&mut extra, b.aes);
     let mut h = Vec::with_capacity(30 + it.path.len() + extra.len());
     h.extend(LOCAL.to_le_bytes());
@@ -316,6 +339,7 @@ fn central(it: &Item, x: &Extra, w: &Written1) -> Vec<u8> {
     }
     let zip64 = !z.is_empty() || size >= 0xffff_ffff || clen >= 0xffff_ffff;
     extra.extend(times(x, true));
+    owner(&mut extra, x);
     aes_field(&mut extra, w.aes);
     let (host, attrs) = attributes(it, x);
     let mut h = Vec::with_capacity(46 + it.path.len() + extra.len());

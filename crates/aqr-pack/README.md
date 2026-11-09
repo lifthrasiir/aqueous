@@ -34,11 +34,13 @@ used as a black box.
 ## What is kept
 
 - ZIP: UTF-8 names, directory entries, symbolic links as Info-ZIP's `S_IFLNK` entries, MS-DOS,
-  extended timestamp and NTFS times, Unix modes and Windows attributes, Zip64 where needed.
+  extended timestamp and NTFS times, Unix modes and Windows attributes, the owner's ids
+  (Info-ZIP's 0x7875), Zip64 where needed.
 - 7z: UTF-16 names, empty streams and files, modification, access and creation times, Windows
   attributes with 7-Zip's Unix extension (the mode), symbolic links as 7-Zip on Unix writes them.
 - ALZ and EGG: names, directories, the modification time (MS-DOS's; EGG's FILETIME) and
-  Windows attributes. Not tested against ALZip or Bandizip (only aqr-unpack).
+  Windows attributes; in EGG, where the mode is known, POSIX file information (the mode, the
+  owner's ids). Not tested against ALZip or Bandizip (only aqr-unpack).
 - tar: files, directories, symbolic and hard links (of a link group), FIFOs, devices; mode,
   owner (ids and names), the modification time (to the nanosecond in pax), extended attributes
   (`SCHILY.xattr.`).
@@ -65,6 +67,5 @@ Left:
   does, was measured not to help: 107.4 -> 115.7 MB on one thread; 114.1 -> 111.7 MB but 6.3
   -> 11.9 s on 10.
 - A single large file deflated in parallel in ZIP, ALZ and EGG (pigz's way).
-- Info-ZIP's owner field (0x7875); EGG's POSIX information.
 - Encryption of ALZ and EGG (aqr-unpack does not decrypt them, to check against).
 - RAR is not written: a proprietary format, whose compressor RARLAB keeps to itself.

@@ -193,3 +193,26 @@ fn aes() {
     let said = String::from_utf8_lossy(&r.stdout);
     assert!(r.status.success() && said.contains("Everything is Ok"), "{said}{}", String::from_utf8_lossy(&r.stderr));
 }
+
+/// The owner's ids in Info-ZIP's Unix field (0x7875), in the local and central headers both as
+/// Info-ZIP's `zip` writes it (version 1, ids of 4 bytes; 8 where larger); none where unknown.
+#[test]
+fn owner() {
+    let files = Files(vec![b"x".to_vec()]);
+    let x = |uid, gid| Extra { mode: Some(0o644), uid, gid, ..Extra::default() };
+    let tree = Tree {
+        root: Extra::default(),
+        entries: vec![
+            entry(None, "a", EntryNode::File(0), x(Some(501), Some(20))),
+            entry(None, "b", EntryNode::File(0), x(Some(1 << 40), Some(7))),
+            entry(None, "c", EntryNode::File(0), x(None, None)),
+        ],
+    };
+    let mut out = Vec::new();
+    write(&tree, &files, &Options::default(), &mut out, &|_| {}).unwrap();
+    let field = [&b"ux\x0b\x00\x01\x04"[..], &501u32.to_le_bytes(), b"\x04", &20u32.to_le_bytes()].concat();
+    assert_eq!(out.windows(field.len()).filter(|w| *w == field).count(), 2);
+    let done = Opened::open(Format::Zip, &out).unwrap().unpack(1, &Kept::default()).unwrap();
+    let ids: Vec<_> = done.tree.entries.iter().map(|e| (e.extra.uid, e.extra.gid)).collect();
+    assert_eq!(ids, [(Some(501), Some(20)), (Some(1 << 40), Some(7)), (None, None)]);
+}

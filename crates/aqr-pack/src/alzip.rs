@@ -14,7 +14,8 @@
 //!   with a UTF-8 filename and Windows file information (the modification time as a FILETIME,
 //!   attributes of EGG's own bits: read-only, hidden, system, 0x80 a directory) for each entry,
 //!   and a block for each file (one more for each GiB of a larger one, as a block's sizes are
-//!   32 bits), then the final end marker. No POSIX file information (modes, owners are lost).
+//!   32 bits), then the final end marker. POSIX file information where the mode is known: the
+//!   mode, the owner's ids (0 where unknown) and the modification time in seconds.
 //! - Left out, told: symbolic links (neither format is known to store their targets), FIFOs and
 //!   devices, extended attributes and forks. No encryption.
 
@@ -25,7 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use aqr_common::{crc32, pool};
 use aqr_flate::zlib;
 
-use crate::{Bytes, Contents, Format, Item, Keeps, Kind, Options, Progress, Tell, Tree, Written, batches, items};
+use crate::{Bytes, Contents, Format, Item, Keeps, Kind, Options, Progress, Tell, Time, Tree, Written, batches, items};
 use aqr_foreign::time;
 
 /// The attributes of Windows kept by ALZ (read-only, hidden, system, archive), and its
@@ -35,6 +36,9 @@ const ALZ_DIR: u8 = 0x10;
 /// The same in EGG: its own bits (read-only, hidden, system), and a directory's.
 const EGG_KEPT: u32 = 0x07;
 const EGG_DIR: u8 = 0x80;
+/// The kinds of a POSIX mode (EGG's POSIX file information).
+const S_IFDIR: u32 = 0o040000;
+const S_IFREG: u32 = 0o100000;
 
 /// ALZ's methods.
 const ALZ_STORED: u8 = 0;
@@ -281,6 +285,19 @@ pub fn write_egg(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tel
             h.extend(9u16.to_le_bytes());
             h.extend(x.mtime.map_or(0, time::to_filetime).to_le_bytes());
             h.push((x.win_attrs.unwrap_or(0) & EGG_KEPT) as u8 | if dir { EGG_DIR } else { 0 });
+            // POSIX file information, where the mode is known: the mode with its kind, the
+            // owner's ids (0 where unknown or wider than 32 bits) and the time in seconds
+            if let Some(mode) = x.mode {
+                let id = |v: Option<u64>| v.and_then(|v| u32::try_from(v).ok()).unwrap_or(0);
+                let secs = x.mtime.filter(Time::is_instant).map_or(0, |t| t.secs.max(0) as u64);
+                h.extend(0x1EE9_22E5u32.to_le_bytes());
+                h.push(0);
+                h.extend(20u16.to_le_bytes());
+                h.extend((mode & 0o7777 | if dir { S_IFDIR } else { S_IFREG }).to_le_bytes());
+                h.extend(id(x.uid).to_le_bytes());
+                h.extend(id(x.gid).to_le_bytes());
+                h.extend(secs.to_le_bytes());
+            }
             h.extend(END);
             put(w, &h)?;
             for b in &p {

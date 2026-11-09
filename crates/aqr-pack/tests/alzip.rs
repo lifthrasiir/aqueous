@@ -202,6 +202,41 @@ fn egg_times() {
     assert_eq!(done.tree.entries[1].extra.mtime, None);
 }
 
+/// EGG's POSIX file information: the mode (and the kind), the owner's ids (0 where unknown) and
+/// the time in seconds, where the mode is known; none else (an owner alone is not kept).
+#[test]
+fn egg_posix() {
+    let t0 = Time::new(1_700_000_001, 123_456_700);
+    let x = |mode, uid, gid| Extra { mtime: Some(t0), mode, uid, gid, ..Extra::default() };
+    let tree = Tree {
+        root: Extra::default(),
+        entries: vec![
+            entry(None, "d", EntryNode::Dir, x(Some(0o750), Some(501), Some(20))),
+            entry(Some(0), "a", EntryNode::File(0), x(Some(0o4755), None, None)),
+            entry(None, "b", EntryNode::File(0), x(None, Some(0), Some(0))),
+            entry(None, "c", EntryNode::File(0), x(None, None, None)),
+        ],
+    };
+    let files = Files(vec![b"x".to_vec()]);
+    let mut out = Vec::new();
+    write_egg(&tree, &files, &Options::default(), &mut out, &|_| {}).unwrap();
+    let posix = 0x1EE9_22E5u32.to_le_bytes();
+    assert_eq!(out.windows(4).filter(|w| *w == posix).count(), 2);
+    let done = Opened::open(Format::Egg, &out).unwrap().unpack(1, &Kept::default()).unwrap();
+    let got: Vec<_> =
+        done.tree.entries.iter().map(|e| (e.extra.mode, e.extra.uid, e.extra.gid, e.extra.mtime)).collect();
+    assert_eq!(
+        got,
+        [
+            (Some(0o750), Some(501), Some(20), Some(t0)),
+            (Some(0o4755), Some(0), Some(0), Some(t0)),
+            (None, None, None, Some(t0)),
+            (None, None, None, Some(t0)),
+        ]
+    );
+    assert!(matches!(done.tree.entries[0].node, EntryNode::Dir));
+}
+
 #[test]
 fn passphrase_refused() {
     let s = sample(1_700_000_000);
