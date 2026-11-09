@@ -31,6 +31,7 @@ fn aqr(home: &Path, args: &[&str]) -> (bool, String) {
 }
 
 /// Whether program `p` runs here.
+#[cfg(unix)]
 fn found(p: &str) -> bool {
     Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success())
 }

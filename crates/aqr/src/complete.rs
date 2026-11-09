@@ -267,12 +267,12 @@ pub fn powershell() -> String {
             opts.push(format!("    @({}, {})", q(n), q(o.help)));
             match o.value {
                 Value::Of(f) => values.push(format!(
-                    "    {} = @({})",
+                    "  $values[{}] = @({})",
                     q(n),
                     f().iter().map(|v| q(v)).collect::<Vec<_>>().join(", ")
                 )),
-                Value::Dir => values.push(format!("    {} = 'dir'", q(n))),
-                Value::File | Value::Text => values.push(format!("    {} = $null", q(n))),
+                Value::Dir => values.push(format!("  $values[{}] = 'dir'", q(n))),
+                Value::File | Value::Text => values.push(format!("  $values[{}] = $null", q(n))),
                 Value::None | Value::OptionalFile => {}
             }
         }
@@ -285,7 +285,7 @@ pub fn powershell() -> String {
          Register-ArgumentCompleter -Native -CommandName aqr, unaqr -ScriptBlock {{\n\
          \x20 param($wordToComplete, $commandAst, $cursorPosition)\n\
          \x20 $opts = @(\n{}\n  )\n\
-         \x20 $values = @{{\n{}\n  }}\n\
+         \x20 $values = [hashtable]::new([StringComparer]::Ordinal)\n{}\n\
          \x20 $word = \"$wordToComplete\"\n\
          \x20 $before = @($commandAst.CommandElements | Where-Object {{ $_.Extent.EndOffset -lt $cursorPosition }})\n\
          \x20 $prev = if ($before.Count -gt 1) {{ $before[-1].ToString() }} else {{ '' }}\n\
@@ -470,5 +470,44 @@ mod tests {
         let names = names();
         let missing: Vec<String> = crate::tests::help_options().into_iter().filter(|o| !names.contains(o)).collect();
         assert!(missing.is_empty(), "not completed: {missing:?}");
+    }
+
+    /// PowerShell loads the script (its hash tables ignore case, as `-b` and `-B` differ) and
+    /// completes long options and values. (Windows PowerShell never calls a native completer
+    /// for a word of one dash and a letter, so short options cannot be tested.)
+    #[test]
+    fn powershell_completes() {
+        let Some(exe) = ["pwsh", "powershell"].into_iter().find(|e| {
+            std::process::Command::new(e)
+                .args(["-NoProfile", "-Command", "1"])
+                .output()
+                .is_ok_and(|o| o.status.success())
+        }) else {
+            return;
+        };
+        let path = std::env::temp_dir().join(format!("aqr-complete-ps-{}.ps1", std::process::id()));
+        std::fs::write(&path, powershell()).unwrap();
+        let probe =
+            |line: &str| format!("(TabExpansion2 '{line}' {}).CompletionMatches.CompletionText -join ' '", line.len());
+        let cmd = format!(
+            ". '{}'; {}; {}; {}; {}",
+            path.display(),
+            probe("aqr --for"),
+            probe("aqr --format tar.x"),
+            probe("aqr --normalize="),
+            probe("aqr --b"),
+        );
+        let o =
+            std::process::Command::new(exe).args(["-NoProfile", "-NonInteractive", "-Command", &cmd]).output().unwrap();
+        _ = std::fs::remove_file(&path);
+        let (out, err) = (String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+        assert!(err.trim().is_empty(), "{err}");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines[..3],
+            ["--format --force", "tar.xz", "--normalize=auto --normalize=nfc --normalize=nfd --normalize=keep"],
+            "{out}"
+        );
+        assert!(lines[3] == "--batch --block-size --bad-names", "{out}");
     }
 }
