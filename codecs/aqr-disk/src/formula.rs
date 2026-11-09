@@ -7,6 +7,7 @@ use std::borrow::Cow;
 use aqr_formula::store::Writer;
 use aqr_formula::{Bytes, Formula, Kind, Node};
 
+use crate::compressed::STREAM_DATA;
 use crate::{File, FileSystem, Piece};
 
 /// The class of the stream of the rest of the image, stream 1.
@@ -153,21 +154,39 @@ pub fn build(input: &[u8], files: &[File], pieces: &[Piece], opt: &Options) -> F
         let all = match unpacked[i].take() {
             Some(u) => {
                 let Some(crate::Compressed::Wof { len, .. }) = files[i].compressed else { unreachable!("compressed") };
-                // an application of each stream of chunks (its data at most 32 MiB, as the
-                // module holds it whole), the chunk table kept before the first
+                // applications of streams of chunks, each of 32 MiB of data at most (as the module
+                // holds it whole), the chunk table kept before the first stream
                 let mut kept = Some((f.push(KEPT, u.table.clone()), u.table.len() as u64));
                 let (mut at, mut apps) = (0, Vec::new());
-                for p in u.streams {
-                    let (kept, n) = kept.take().unwrap_or_else(|| (Node::concat(Vec::new()), 0));
-                    let data = Node::slice(stream_of[i], at, p.data as u64);
-                    at += p.data as u64;
-                    let stream = aqr_lzx::formula::Stream { kept, data, record: p.record };
-                    apps.push(aqr_lzx::formula::apply(
-                        &mut f,
-                        vec![stream],
-                        Node::concat(Vec::new()),
-                        n + p.bytes as u64,
-                    ));
+                let mut streams = u.streams.into_iter().peekable();
+                while streams.peek().is_some() {
+                    let (mut group, mut data_len, mut bytes) = (Vec::new(), 0, 0);
+                    while let Some(p) = streams.next_if(|p| group.is_empty() || data_len + p.data <= STREAM_DATA) {
+                        let (kept, n) = kept.take().unwrap_or_else(|| (Node::concat(Vec::new()), 0));
+                        let data = Node::slice(stream_of[i], at, p.data as u64);
+                        at += p.data as u64;
+                        (data_len, bytes) = (data_len + p.data, bytes + n + p.bytes as u64);
+                        group.push((kept, data, p.record));
+                    }
+                    let tail = Node::concat(Vec::new());
+                    apps.push(match u.lzx {
+                        true => {
+                            let group = group.into_iter().map(|(kept, data, record)| aqr_lzx::formula::Stream {
+                                kept,
+                                data,
+                                record,
+                            });
+                            aqr_lzx::formula::apply(&mut f, group.collect(), tail, bytes)
+                        }
+                        false => {
+                            let group = group.into_iter().map(|(kept, data, record)| aqr_xpress::formula::Stream {
+                                kept,
+                                data,
+                                record,
+                            });
+                            aqr_xpress::formula::apply(&mut f, group.collect(), tail, bytes)
+                        }
+                    });
                 }
                 debug_assert_eq!(at, len);
                 Node::concat(apps)

@@ -1,22 +1,27 @@
 //! Files a file system stores compressed ([`crate::Compressed`]), taken apart into their data and
 //! what rebuilds the compressed bytes from it: of WOF's LZX, aqr-lzx's record (its module
-//! `lzx-recons` rebuilds the chunks, the chunk table kept as it is). WOF's XPRESS is not taken yet:
-//! such a file is its compressed bytes, as any other.
+//! `lzx-recons` rebuilds the chunks), of WOF's XPRESS, aqr-xpress's (`xpress-recons`); the chunk
+//! table kept as it is.
 
 use std::ops::Range;
 
 use crate::Compressed;
 
-/// Chunks of a stream of aqr-lzx at most (32 MiB of data, as aqr-wim's): a file of more is
-/// several, so that the memory of a split is bounded however large the file.
-pub const STREAM_CHUNKS: usize = 1024;
+/// Bytes of data of a stream of chunks at most, of LZX (as aqr-wim's) and of XPRESS: a file of more
+/// is several, so that the memory of a split, and of an application (the modules hold their data
+/// whole), is bounded however large the file. (XPRESS's split takes about 6 bytes a byte of data:
+/// streams of 32 MiB on 10 threads took the heap past 2 GB; its chunks are compressed apart, so
+/// shorter streams cost little.)
+pub const STREAM_DATA: usize = 32 << 20;
+pub const XPRESS_STREAM_DATA: usize = 8 << 20;
 
 /// A file taken apart: its data, its streams of chunks, and its chunk table (the bytes before
-/// the chunks, as they are).
+/// the chunks, as they are); whether of LZX (else XPRESS).
 pub struct Unpacked {
     pub data: Vec<u8>,
     pub streams: Vec<Part>,
     pub table: Vec<u8>,
+    pub lzx: bool,
 }
 
 /// A stream of chunks of a file taken apart: its bytes of data, of chunks, and its record.
@@ -67,19 +72,22 @@ pub fn wof_chunks(s: &[u8], len: u64, chunk: usize) -> Option<Chunks> {
 /// taken, or a stream that does not read).
 pub fn unpack(s: &[u8], how: Compressed) -> Option<Unpacked> {
     let Compressed::Wof { algorithm, len } = how;
-    // (LZX only, as yet)
-    if algorithm != 1 {
-        return None;
-    }
-    let (table, chunks) = wof_chunks(s, len, Compressed::wof_chunk(algorithm)?)?;
+    let chunk = Compressed::wof_chunk(algorithm)?;
+    let lzx = algorithm == 1;
+    let (table, chunks) = wof_chunks(s, len, chunk)?;
     let chunks: Vec<(&[u8], usize)> = chunks.iter().map(|(r, n)| (&s[r.clone()], *n)).collect();
     let mut data = vec![0; aqr_lzx::recons::data_len(&chunks)];
     let (mut streams, mut at) = (Vec::new(), 0);
-    for c in chunks.chunks(STREAM_CHUNKS) {
+    let most = if lzx { STREAM_DATA } else { XPRESS_STREAM_DATA };
+    for c in chunks.chunks(most / chunk) {
         let n = aqr_lzx::recons::data_len(c);
-        let record = aqr_lzx::recons::split_into(c, &mut data[at..at + n]).ok()?;
+        let out = &mut data[at..at + n];
+        let record = match lzx {
+            true => aqr_lzx::recons::split_into(c, out).ok()?,
+            false => aqr_xpress::recons::split_into(c, out).ok()?,
+        };
         streams.push(Part { data: n, bytes: c.iter().map(|c| c.0.len()).sum(), record });
         at += n;
     }
-    Some(Unpacked { data, streams, table: s[table].to_vec() })
+    Some(Unpacked { data, streams, table: s[table].to_vec(), lzx })
 }

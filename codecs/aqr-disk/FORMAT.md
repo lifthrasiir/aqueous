@@ -30,11 +30,13 @@ made so.
 
 ## Files stored compressed
 
-A file of WOF's LZX (`Compressed::Wof`, algorithm 1) is its data, a content stream as any file's,
-of its kind by its name. Its compressed bytes (the chunk table, then the chunks) are the outputs
-of applications of aqr-lzx's module `lzx-recons` (aqr-lzx's FORMAT.md), one of each 1024 chunks:
-the first keeping the chunk table before its chunks (a stream of class `disk/kept`), its data a
-slice of the file's stream, its record and index streams of aqr-lzx's. Split as any file's bytes
+A file of WOF's (`Compressed::Wof`) is its data, a content stream as any file's, of its kind by
+its name. Its compressed bytes (the chunk table, then the chunks) are the outputs of applications
+of aqr-lzx's module `lzx-recons` (LZX) or aqr-xpress's `xpress-recons` (XPRESS4K, 8K, 16K; their
+FORMAT.md), each of 32 MiB of data at most, of streams of chunks one after another (of XPRESS, of 8
+MiB at most each): the first keeping the chunk table before its chunks (a stream of class
+`disk/kept`), its data a slice of the file's stream, its record and index streams of the
+module's. Split as any file's bytes
 into its pieces where it is in several.
 
 ## Pieces *(encoder)*

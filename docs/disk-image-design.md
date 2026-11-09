@@ -241,7 +241,9 @@ Windows가 만든 동적 VHD·VHDX는 피어 세션에 맡겼다.
 5단계(2026-11-09, 진행 중): aqr-ntfs가 WOF 재분석 지점을 읽어 파일을 압축된 것으로 알리고, aqr-disk가 LZX
 파일을 데이터(내용물)와 aqr-lzx의 `lzx-recons` 적용으로 나눈다(1024 청크씩, 32 MiB 이하). Windows 피어가
 만든 2 GB VHD(System32 1500 MiB, `compact /exe:lzx`, 빈 공간은 0으로 채움)에서 531.2 → 393.3 MB(-26%).
-XPRESS는 MS-XCA로 새로 쓰는 중(aqr-xpress, 파스의 기록), LZNT1은 그 다음이다.
+XPRESS는 MS-XCA로 새로 쓴 aqr-xpress(파스의 기록: Windows의 WOF 4K 청크에서 텍스트 2.98%, 코드 길이는 블록의
+빈도로 만든 길이 제한 Huffman 그대로)가 맡는다: 같은 VHD를 `compact /exe:xpress4k`로 만든 것에서 696.2 →
+379.8 MB(-45%). LZNT1은 그 다음이다.
 - 처음 VHD는 compact 전의 원본이 빈 공간에 남아 있어(1.4 GB) 원시 압축에 유리했다(844.6 → 706.5 MB).
 - `lzx-recons` 적용 하나가 파일 전체면 힙이 예산을 넘고(3.59 GB) 크기도 줄지 않았다(846 MB). aqr-wim처럼 32 MiB씩
   나누니 둘 다 풀렸다.

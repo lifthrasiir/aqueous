@@ -139,13 +139,15 @@ fn windows_volume() {
     let stream: Vec<u8> = wof.extents.iter().flat_map(|r| d[r.clone()].to_vec()).collect();
     let (_, chunks) = aqr_disk::compressed::wof_chunks(&stream, 256 << 10, 4096).unwrap();
     assert_eq!(chunks.len(), 64);
-    let f = formula::encode_with(&d, &opt).unwrap();
-    assert!(f.eval(&none).unwrap() == d);
+    // (the bytes the script wrote; the volume's formula has xpress-recons, which aqr-compress's
+    // tests run)
+    let u = aqr_disk::compressed::unpack(&stream, wof.compressed.unwrap()).unwrap();
+    assert!(u.data == (0..256u32 << 10).map(|i| ((i * 5 + (i >> 7)) % 239) as u8).collect::<Vec<u8>>());
 }
 
 /// Files Windows compressed by WOF (`scripts/gen-wof.ps1`'s small volume): of LZX and of XPRESS of
-/// 4 KiB chunks, each the file's name, its extents of WofCompressedData; the LZX one taken apart
-/// into the data that plain.txt holds as it is.
+/// 4 KiB chunks, each the file's name, its extents of WofCompressedData; both taken apart into
+/// the data that plain.txt holds as it is.
 #[test]
 fn wof_files() {
     let d = fixture("wof-small.vhd");
@@ -160,7 +162,9 @@ fn wof_files() {
         let f = files.iter().find(|f| f.name == name).unwrap();
         assert_eq!(f.compressed, Some(aqr_disk::Compressed::Wof { algorithm, len: 256 << 10 }));
     }
-    let how = aqr_disk::Compressed::Wof { algorithm: 1, len: 256 << 10 };
-    let u = aqr_disk::compressed::unpack(&data(b"lzx/text.txt"), how).unwrap();
-    assert!(u.data == plain && u.streams.len() == 1);
+    for (name, algorithm) in [(&b"lzx/text.txt"[..], 1), (b"xpress4k/text.txt", 0)] {
+        let how = aqr_disk::Compressed::Wof { algorithm, len: 256 << 10 };
+        let u = aqr_disk::compressed::unpack(&data(name), how).unwrap();
+        assert!(u.data == plain && u.streams.len() == 1 && u.lzx == (algorithm == 1));
+    }
 }

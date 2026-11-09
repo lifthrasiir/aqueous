@@ -44,9 +44,11 @@ powershell -File codecs/aqr-disk/scripts/gen-containers.ps1   # tests/data/win*:
   file systems, the first starting where it does is taken (`FORMAT.md`, "Pieces").
 - **Files stored compressed** (`compressed`): a file a file system reports compressed (aqr-ntfs's
   of WOF) is its data, a content, and its compressed bytes are rebuilt from it: WOF's chunk table
-  kept, its LZX chunks by aqr-lzx's module `lzx-recons` (an application of each 1024 chunks, 32 MiB
-  of data at most, as the module holds its data whole). WOF's XPRESS is not taken yet (aqr-xpress
-  to come): such a file is its compressed bytes, of kind compressed whatever its name.
+  kept, its LZX chunks by aqr-lzx's module `lzx-recons`, its XPRESS chunks (XPRESS4K, 8K, 16K) by
+  aqr-xpress's `xpress-recons`: applications of 32 MiB of data at most (the modules hold their data
+  whole), of streams split of 8 MiB at most of XPRESS (its split takes about 6 bytes a byte). A file
+  stored compressed and not taken apart is its compressed bytes, of kind compressed whatever its
+  name.
 - **Files in pieces**: a file whose extents are not contiguous is one content all the same, its
   pieces split from it; a piece overlapping one before it is left in the rest, and the file's
   contents are those taken.
@@ -73,6 +75,12 @@ Measured 2026-11-09 on an M4 through `cargo aqr`, against the build before conta
 | the disk itself (2,147,483,648 bytes) | | 461,942,344 B, 49.8 s, 5.00 GB resident |
 
 A container archives as its disk does.
+
+Files of WOF's XPRESS4K, the same (`compact /exe:xpress4k`, 854,628,226 bytes of XPRESS): 696,150,574
+-> 379,813,648 B, 244 -> 1,930 G instructions (9.2 -> 43.2 s), heap peak 1.27 -> 1.48 GB, given back.
+(Streams of 32 MiB took the heap to 2.31 GB, of the budget's 2.00; applications of one stream of 8
+MiB each, 399,662,316 B: of more applications, fewer of the files' own formulas fit the bound of
+the description.)
 
 Files of WOF's LZX, on an M4 (2026-11-09): a 2 GB fixed VHD a Windows peer session made, 1,500 MiB
 of System32 compacted by `compact /exe:lzx` (10,607 files, 1,562,928,797 bytes of data in

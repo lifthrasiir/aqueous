@@ -3894,15 +3894,17 @@ mod tests {
         assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
     }
 
-    /// An NTFS volume's file Windows compressed by WOF's LZX (aqr-ntfs's fixture): its data a
-    /// content, its chunks rebuilt by aqr-lzx's module, the volume given back.
+    /// An NTFS volume's files Windows compressed by WOF's LZX and XPRESS (aqr-ntfs's fixture):
+    /// their data contents, their chunks rebuilt by aqr-lzx's and aqr-xpress's modules, the
+    /// volume given back.
     #[test]
-    fn wof_lzx_taken_apart() {
+    fn wof_taken_apart() {
         let z = std::fs::read(format!("{}/../../codecs/aqr-ntfs/tests/data/wof-small.vhd.zst", env!("CARGO_MANIFEST_DIR")))
             .unwrap();
         let d = zstd::stream::decode_all(&z[..]).unwrap();
         let (c, f) = compress_formula(&d, &Options { threads: 2, shared_modules: true, ..Options::default() });
         assert!(f.applies().iter().any(|a| a.module == aqr_decompress::LZX));
+        assert!(f.applies().iter().any(|a| a.module == aqr_decompress::XPRESS));
         assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
     }
 

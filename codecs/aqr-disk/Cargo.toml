@@ -9,6 +9,7 @@ publish = false
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula" }
 aqr-lzx = { path = "../aqr-lzx" }
+aqr-xpress = { path = "../aqr-xpress" }
 
 [dev-dependencies]
 # (file systems to read the containers' disks with)
