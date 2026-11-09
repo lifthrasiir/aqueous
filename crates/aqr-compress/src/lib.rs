@@ -1557,7 +1557,8 @@ fn scan(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, cx: &Cx) -> 
 fn scan_with(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, slack: usize, cx: &Cx) -> Option<Made> {
     let found = find(d, first, opt, depth, slack, cx)?;
     // each file with the data before it, and the data after the last and the whole
-    let around = description_bound(&Node::slice(0, u64::MAX, d.len() as u64));
+    // (a slice of all of it anywhere: at the last byte of a block, over the most blocks)
+    let around = description_bound(&Node::slice(0, aqr_formula::aqr::BLOCK as u64 - 1, d.len() as u64));
     let sizes: Vec<_> = found.iter().map(|(_, n, child)| (*n, bound_of(child).saturating_add(around))).collect();
     let keep = fit(around + 11, &sizes, opt.description);
 

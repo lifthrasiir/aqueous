@@ -1171,8 +1171,11 @@ impl Emit<'_> {
         varint::put(out, a.params.len() as u64);
         out.extend_from_slice(&a.params);
         varint::put(out, a.memory_limit);
-        let classes = self.classes.get(at).copied().unwrap_or(0).max(a.task_limits.len());
-        debug_assert!(classes <= TASK_CLASSES, "{classes} classes of tasks, past the description bound's");
+        let own = self.classes.get(at).copied().unwrap_or(0);
+        // (the bound counts the limits given and those of a module's classes up to its own; more
+        // limits than the module's classes are a formula the decoder turns down)
+        debug_assert!(own <= TASK_CLASSES, "{own} classes of tasks, past the description bound's");
+        let classes = own.max(a.task_limits.len());
         varint::put(out, classes as u64);
         let limits = a.task_limits.iter().copied().chain(std::iter::repeat(crate::NO_LIMIT));
         limits.take(classes).for_each(|n| varint::put(out, n));

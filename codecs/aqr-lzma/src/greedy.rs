@@ -64,7 +64,7 @@ pub fn lzma2(data: &[u8], dict: usize) -> Vec<u8> {
     for (i, pk) in packets.iter().enumerate() {
         len += pk.len as usize;
         let next = packets.get(i + 1).map_or(usize::MAX, |p| p.len as usize);
-        if len + next > 32 << 10 || i + 1 == packets.len() {
+        if len.saturating_add(next) > 32 << 10 || i + 1 == packets.len() {
             let control = if chunks.is_empty() { 0xe0 } else { 0x80 };
             chunks.push(Chunk { control, len, props: (control == 0xe0).then_some(props) });
             len = 0;
