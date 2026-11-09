@@ -43,7 +43,8 @@ powershell -File codecs/aqr-disk/scripts/gen-containers.ps1   # tests/data/win*:
   reads it. A partition's files are found along with all of the image's: of extents of several
   file systems, the first starting where it does is taken (`FORMAT.md`, "Pieces").
 - **Files stored compressed** (`compressed`): a file a file system reports compressed (aqr-ntfs's
-  of WOF) is its data, a content, and its compressed bytes are rebuilt from it: WOF's chunk table
+  of WOF and of LZNT1) is its data, a content, and its compressed bytes are rebuilt from it:
+  LZNT1's units (stored, holes, compressed) by aqr-lznt1's `lznt1-recons`; WOF's chunk table
   kept, its LZX chunks by aqr-lzx's module `lzx-recons`, its XPRESS chunks (XPRESS4K, 8K, 16K) by
   aqr-xpress's `xpress-recons`: applications of 32 MiB of data at most (the modules hold their data
   whole), of streams split of 8 MiB at most of XPRESS (its split takes about 6 bytes a byte). A file
@@ -75,6 +76,9 @@ Measured 2026-11-09 on an M4 through `cargo aqr`, against the build before conta
 | the disk itself (2,147,483,648 bytes) | | 461,942,344 B, 49.8 s, 5.00 GB resident |
 
 A container archives as its disk does.
+
+Of all three (aqr-ntfs's peer volume: the same three files by XPRESS4K, 8K, 16K, LZX and LZNT1),
+1,106,436 -> 664,744 B: their data deduplicated once made.
 
 Files of WOF's XPRESS4K, the same (`compact /exe:xpress4k`, 854,628,226 bytes of XPRESS): 696,150,574
 -> 379,813,648 B, 244 -> 1,930 G instructions (9.2 -> 43.2 s), heap peak 1.27 -> 1.48 GB, given back.

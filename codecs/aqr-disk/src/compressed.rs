@@ -16,12 +16,20 @@ pub const STREAM_DATA: usize = 32 << 20;
 pub const XPRESS_STREAM_DATA: usize = 8 << 20;
 
 /// A file taken apart: its data, its streams of chunks, and its chunk table (the bytes before
-/// the chunks, as they are); whether of LZX (else XPRESS).
+/// the chunks, as they are; none of LZNT1's); the recompressor of its chunks.
 pub struct Unpacked {
     pub data: Vec<u8>,
     pub streams: Vec<Part>,
     pub table: Vec<u8>,
-    pub lzx: bool,
+    pub by: By,
+}
+
+/// The recompressor of a file's chunks (or units).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum By {
+    Lzx,
+    Xpress,
+    Lznt1,
 }
 
 /// A stream of chunks of a file taken apart: its bytes of data, of chunks, and its record.
@@ -68,26 +76,48 @@ pub fn wof_chunks(s: &[u8], len: u64, chunk: usize) -> Option<Chunks> {
     Some((0..table, chunks))
 }
 
+/// The units of LZNT1 stream `s` (the clusters allocated of its units, `allocated` bytes of
+/// each) of `len` bytes of data in units of `unit`: each its bytes (none of a hole) and its data's
+/// length. None where the units' bytes are not all of `s`.
+fn lznt1_units<'s>(s: &'s [u8], len: u64, unit: u32, allocated: &[u32]) -> Option<Vec<(&'s [u8], usize)>> {
+    let (len, unit) = (usize::try_from(len).ok()?, unit as usize);
+    let mut out = Vec::with_capacity(allocated.len());
+    let mut at = 0;
+    for (k, &a) in allocated.iter().enumerate() {
+        let n = unit.min(len.checked_sub(k * unit)?);
+        out.push((s.get(at..at + a as usize)?, n));
+        at += a as usize;
+    }
+    (at == s.len()).then_some(out)
+}
+
 /// File stream `s` stored as `how`, taken apart: None where it is not taken (an algorithm not
 /// taken, or a stream that does not read).
-pub fn unpack(s: &[u8], how: Compressed) -> Option<Unpacked> {
-    let Compressed::Wof { algorithm, len } = how;
-    let chunk = Compressed::wof_chunk(algorithm)?;
-    let lzx = algorithm == 1;
-    let (table, chunks) = wof_chunks(s, len, chunk)?;
-    let chunks: Vec<(&[u8], usize)> = chunks.iter().map(|(r, n)| (&s[r.clone()], *n)).collect();
+pub fn unpack(s: &[u8], how: &Compressed) -> Option<Unpacked> {
+    let (table, chunks, chunk, by) = match *how {
+        Compressed::Wof { algorithm, len } => {
+            let chunk = Compressed::wof_chunk(algorithm)?;
+            let (table, chunks) = wof_chunks(s, len, chunk)?;
+            let chunks: Vec<(&[u8], usize)> = chunks.iter().map(|(r, n)| (&s[r.clone()], *n)).collect();
+            (table, chunks, chunk, if algorithm == 1 { By::Lzx } else { By::Xpress })
+        }
+        Compressed::Lznt1 { len, unit, ref allocated } => {
+            (0..0, lznt1_units(s, len, unit, allocated)?, unit as usize, By::Lznt1)
+        }
+    };
     let mut data = vec![0; aqr_lzx::recons::data_len(&chunks)];
     let (mut streams, mut at) = (Vec::new(), 0);
-    let most = if lzx { STREAM_DATA } else { XPRESS_STREAM_DATA };
-    for c in chunks.chunks(most / chunk) {
+    let most = if by == By::Lzx { STREAM_DATA } else { XPRESS_STREAM_DATA };
+    for c in chunks.chunks((most / chunk).max(1)) {
         let n = aqr_lzx::recons::data_len(c);
         let out = &mut data[at..at + n];
-        let record = match lzx {
-            true => aqr_lzx::recons::split_into(c, out).ok()?,
-            false => aqr_xpress::recons::split_into(c, out).ok()?,
+        let record = match by {
+            By::Lzx => aqr_lzx::recons::split_into(c, out).ok()?,
+            By::Xpress => aqr_xpress::recons::split_into(c, out).ok()?,
+            By::Lznt1 => aqr_lznt1::recons::split_into(c, out).ok()?,
         };
         streams.push(Part { data: n, bytes: c.iter().map(|c| c.0.len()).sum(), record });
         at += n;
     }
-    Some(Unpacked { data, streams, table: s[table].to_vec(), lzx })
+    Some(Unpacked { data, streams, table: s[table].to_vec(), by })
 }

@@ -375,6 +375,7 @@ dependencies = [
  "aqr-common",
  "aqr-ext",
  "aqr-formula",
+ "aqr-lznt1",
  "aqr-lzx",
  "aqr-ntfs",
  "aqr-xpress",
@@ -800,6 +801,7 @@ dependencies = [
 name = "aqr-ntfs"
 version = "0.1.0"
 dependencies = [
+ "aqr-decompress",
  "aqr-disk",
  "aqr-formula",
  "zstd",

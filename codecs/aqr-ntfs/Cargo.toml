@@ -9,6 +9,7 @@ publish = false
 aqr-disk = { path = "../aqr-disk" }
 
 [dev-dependencies]
+aqr-decompress = { path = "../../crates/aqr-decompress" }
 aqr-formula = { path = "../../crates/aqr-formula" }
 zstd = "0.13"
 

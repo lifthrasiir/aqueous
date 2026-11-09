@@ -34,7 +34,7 @@ pub struct File {
 }
 
 /// How a file's contents are stored compressed by its file system.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Compressed {
     /// By Windows' WOF (an NTFS file's `WofCompressedData`): a table of where its chunks start
     /// (but the first; 4 bytes each, 8 where `len` is over 4 GiB), then the chunks, each of the
@@ -42,9 +42,25 @@ pub enum Compressed {
     /// smaller), by `algorithm`: 0 XPRESS (Huffman) of 4 KiB chunks, 1 LZX of 32 KiB, 2 and 3
     /// XPRESS of 8 and 16 KiB. `len` bytes of data in all.
     Wof { algorithm: u32, len: u64 },
+    /// By NTFS's LZNT1 (a compressed attribute): in units of `unit` bytes of data (the last
+    /// fewer), each of `allocated` bytes of the extents in order: as many as `unit` stored as it is,
+    /// 0 a hole of zeros, else compressed (the chunks of LZNT1, then what is left of the last
+    /// cluster). `len` bytes of data in all.
+    Lznt1 { len: u64, unit: u32, allocated: Vec<u32> },
 }
 
 impl Compressed {
+    /// Bytes of data.
+    pub fn len(&self) -> u64 {
+        match *self {
+            Compressed::Wof { len, .. } | Compressed::Lznt1 { len, .. } => len,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Bytes of data of a WOF chunk of `algorithm`.
     pub fn wof_chunk(algorithm: u32) -> Option<usize> {
         match algorithm {

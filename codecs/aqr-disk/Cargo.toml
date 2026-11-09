@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula" }
+aqr-lznt1 = { path = "../aqr-lznt1" }
 aqr-lzx = { path = "../aqr-lzx" }
 aqr-xpress = { path = "../aqr-xpress" }
 

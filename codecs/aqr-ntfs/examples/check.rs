@@ -1,7 +1,8 @@
 //! What aqr-ntfs finds in volumes (through aqr-disk, of all of an image and its partitions): their
 //! files and the bytes left as the rest, whether the formula gives each image back, and how long
 //! each step takes (`-v` lists the files; `-x DIR` writes each WOF file's compressed bytes to
-//! DIR, as `<algorithm>-<n>-<length of the data>.wof`).
+//! DIR, as `<algorithm>-<n>-<length of the data>.wof`, and each LZNT1 one's as
+//! `lznt1-<n>-<length>-<unit>.bin` with the bytes allocated of each unit in `.alloc`).
 //!
 //! ```sh
 //! cargo run --release -p aqr-ntfs --example aqr-ntfs-check -- [-v] [-x DIR] IMAGE...
@@ -27,10 +28,21 @@ fn main() {
         let read = t.elapsed().as_secs_f64();
         if let Some(dir) = &out {
             for (n, f) in files.iter().enumerate() {
-                let Some(aqr_disk::Compressed::Wof { algorithm, len }) = f.compressed else { continue };
                 let bytes: Vec<u8> = f.extents.iter().flat_map(|r| d[r.clone()].to_vec()).collect();
-                std::fs::write(format!("{dir}/{algorithm}-{n}-{len}.wof"), bytes).unwrap();
-                println!("  wof {algorithm} {len} {}", String::from_utf8_lossy(&f.name));
+                match &f.compressed {
+                    Some(aqr_disk::Compressed::Wof { algorithm, len }) => {
+                        std::fs::write(format!("{dir}/{algorithm}-{n}-{len}.wof"), bytes).unwrap();
+                        println!("  wof {algorithm} {len} {}", String::from_utf8_lossy(&f.name));
+                    }
+                    Some(aqr_disk::Compressed::Lznt1 { len, unit, allocated }) => {
+                        let at = format!("{dir}/lznt1-{n}-{len}-{unit}");
+                        std::fs::write(format!("{at}.bin"), bytes).unwrap();
+                        let lines: Vec<String> = allocated.iter().map(u32::to_string).collect();
+                        std::fs::write(format!("{at}.alloc"), lines.join("\n") + "\n").unwrap();
+                        println!("  lznt1 {len} {} units {}", allocated.len(), String::from_utf8_lossy(&f.name));
+                    }
+                    None => {}
+                }
             }
         }
         let t = Instant::now();

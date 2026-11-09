@@ -7,8 +7,9 @@ fn fixture(name: &str) -> Vec<u8> {
     zstd::stream::decode_all(&z[..]).unwrap()
 }
 
-fn none(_: &aqr_formula::Apply, _: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
-    unreachable!("no module")
+/// The modules of the formulas (NTFS's compressed files: lznt1-recons), run natively.
+fn modules() -> aqr_decompress::Native {
+    aqr_decompress::Native::default()
 }
 
 fn encode(d: &[u8]) -> Option<Formula> {
@@ -55,13 +56,13 @@ fn files_found() {
         let Some(g) = got.iter().find(|g| g.0 == want) else { panic!("{want} not found") };
         assert!(g.1 == data, "{want}");
     }
-    // resident, compressed, system files and directories: not files with contents
-    for name in ["docs/한글.txt", "docs/deeper/a rather long file name.json", "packed/text.txt", "$MFT", "bin"] {
+    // resident, system files and directories: not files with contents
+    for name in ["docs/한글.txt", "docs/deeper/a rather long file name.json", "$MFT", "bin"] {
         assert!(!got.iter().any(|g| g.0 == name), "{name}");
     }
     assert!(got.iter().find(|g| g.0 == "frag.bin").unwrap().2 > 8);
     let f = encode(&d).unwrap();
-    assert!(f.eval(&none).unwrap() == d);
+    assert!(f.eval(&modules()).unwrap() == d);
     assert!(!f.shared.is_empty());
 }
 
@@ -92,7 +93,7 @@ fn damaged() {
     for cut in [d.len() / 2, mft + 1024 * 40, mft + 3000, 4096, 600, 100] {
         let d = &d[..cut];
         if let Some(f) = encode(d) {
-            assert!(f.eval(&none).unwrap() == d, "cut at {cut}");
+            assert!(f.eval(&modules()).unwrap() == d, "cut at {cut}");
         }
     }
     for _ in 0..500 {
@@ -102,7 +103,7 @@ fn damaged() {
             e[at] = next() as u8;
         }
         if let Some(f) = encode(&e) {
-            assert!(f.eval(&none).unwrap() == e, "changed");
+            assert!(f.eval(&modules()).unwrap() == e, "changed");
         }
     }
 }
@@ -129,8 +130,8 @@ fn windows_volume() {
     assert!(got("photo.jpg").unwrap().0 == jpeg);
     let (f, pieces) = got("frag.bin").unwrap();
     assert!(f == frag && pieces > 300, "{pieces}");
-    // resident and compressed: in the rest
-    for name in ["ads.txt", "ads.txt:extra", "packed/text.txt", "wof.exe:WofCompressedData"] {
+    // resident: in the rest; WOF's stream not a file of its own
+    for name in ["ads.txt", "ads.txt:extra", "wof.exe:WofCompressedData"] {
         assert!(got(name).is_none(), "{name}");
     }
     // WOF's: the file, its extents of WofCompressedData, of XPRESS of 4 KiB chunks
@@ -141,7 +142,7 @@ fn windows_volume() {
     assert_eq!(chunks.len(), 64);
     // (the bytes the script wrote; the volume's formula has xpress-recons, which aqr-compress's
     // tests run)
-    let u = aqr_disk::compressed::unpack(&stream, wof.compressed.unwrap()).unwrap();
+    let u = aqr_disk::compressed::unpack(&stream, wof.compressed.as_ref().unwrap()).unwrap();
     assert!(u.data == (0..256u32 << 10).map(|i| ((i * 5 + (i >> 7)) % 239) as u8).collect::<Vec<u8>>());
 }
 
@@ -164,7 +165,26 @@ fn wof_files() {
     }
     for (name, algorithm) in [(&b"lzx/text.txt"[..], 1), (b"xpress4k/text.txt", 0)] {
         let how = aqr_disk::Compressed::Wof { algorithm, len: 256 << 10 };
-        let u = aqr_disk::compressed::unpack(&data(name), how).unwrap();
-        assert!(u.data == plain && u.streams.len() == 1 && u.lzx == (algorithm == 1));
+        let u = aqr_disk::compressed::unpack(&data(name), &how).unwrap();
+        assert!(u.data == plain && u.streams.len() == 1 && (u.by == aqr_disk::compressed::By::Lzx) == (algorithm == 1));
+    }
+}
+
+/// Files NTFS compressed (LZNT1): of Windows' volume and of ntfs-3g's, the file, its units, taken
+/// apart into the text written.
+#[test]
+fn lznt1_files() {
+    for (name, text) in [
+        ("windows.vhd", &b"The quick brown fox jumps over the lazy dog.\r\n"[..]),
+        ("ntfs.img", b"compressed text, line after line\n"),
+    ] {
+        let d = fixture(name);
+        let files = aqr_disk::files(&d, &[aqr_ntfs::FS]);
+        let f = files.iter().find(|f| f.name == b"packed/text.txt").unwrap();
+        let Some(how @ aqr_disk::Compressed::Lznt1 { len, unit, .. }) = &f.compressed else { panic!("{name}: {f:?}") };
+        assert_eq!((*len, *unit), ((text.len() * 3000) as u64, 65536), "{name}");
+        let stream: Vec<u8> = f.extents.iter().flat_map(|r| d[r.clone()].to_vec()).collect();
+        let u = aqr_disk::compressed::unpack(&stream, how);
+        assert!(u.is_some_and(|u| u.data == text.repeat(3000)), "{name}");
     }
 }

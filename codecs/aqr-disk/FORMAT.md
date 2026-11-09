@@ -30,6 +30,9 @@ made so.
 
 ## Files stored compressed
 
+A file of LZNT1's (`Compressed::Lznt1`) is as a WOF file of no chunk table: its units (holes of
+zeros in the data, no bytes) rebuilt by aqr-lznt1's `lznt1-recons`.
+
 A file of WOF's (`Compressed::Wof`) is its data, a content stream as any file's, of its kind by
 its name. Its compressed bytes (the chunk table, then the chunks) are the outputs of applications
 of aqr-lzx's module `lzx-recons` (LZX) or aqr-xpress's `xpress-recons` (XPRESS4K, 8K, 16K; their

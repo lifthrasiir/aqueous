@@ -130,7 +130,7 @@ struct Attr<'a> {
 
 enum Body<'a> {
     Resident(&'a [u8]),
-    Runs { vcn: u64, runs: Vec<Run>, data: u64, initialized: u64 },
+    Runs { vcn: u64, runs: Vec<Run>, data: u64, initialized: u64, unit: u16 },
 }
 
 /// The attributes of record `r` (its fixups applied), as far as they read.
@@ -157,6 +157,7 @@ fn attrs(r: &[u8]) -> Vec<Attr<'_>> {
                 runs: runs(m),
                 data: le64(a, 48),
                 initialized: le64(a, 56),
+                unit: le16(a, 34),
             }),
             _ => None,
         };
@@ -197,6 +198,8 @@ struct Stream {
     pieces: Vec<(u64, Vec<Run>)>,
     sizes: Option<(u64, u64)>,
     packed: bool,
+    /// Of a compressed one (not encrypted), its compression unit's clusters (as a power of two).
+    lznt1: Option<u16>,
 }
 
 /// What the records of a file tell: its name and parent, whether a directory, its streams by name.
@@ -292,7 +295,7 @@ pub fn files(d: &dyn Image) -> Vec<File> {
                     e.wof = Some(le32(p, 20));
                 }
                 (0x80, Body::Resident(v)) if a.name.is_empty() => e.resident = Some(v.len() as u64),
-                (0x80, Body::Runs { vcn, runs, data, initialized }) => {
+                (0x80, Body::Runs { vcn, runs, data, initialized, unit }) => {
                     if base == 0 && a.name.is_empty() && vcn > 0 {
                         // (the MFT's own runs, of an extension record of it)
                         map.extend(vcn, &runs, v.cluster);
@@ -301,6 +304,7 @@ pub fn files(d: &dyn Image) -> Vec<File> {
                     s.packed |= a.flags & 0x4001 != 0;
                     if vcn == 0 {
                         s.sizes = Some((data, initialized));
+                        s.lznt1 = (a.flags & 0x4001 == 1 && (1..=8).contains(&unit)).then_some(unit);
                     }
                     s.pieces.push((vcn, runs));
                 }
@@ -348,6 +352,61 @@ pub fn files(d: &dyn Image) -> Vec<File> {
             continue;
         }
         let Some(p) = path(n, &entries, &mut paths, 0) else { continue };
+        // (the runs of stream `s` in order of their VCNs, up to where one is missing)
+        let ordered = |s: &Stream| -> Vec<Run> {
+            let mut pieces: Vec<&(u64, Vec<Run>)> = s.pieces.iter().collect();
+            pieces.sort_by_key(|p| p.0);
+            let mut all: Vec<Run> = Vec::new();
+            let mut vcn = 0u64;
+            for (start, runs) in pieces {
+                if *start != vcn {
+                    break;
+                }
+                for &r in runs {
+                    vcn = vcn.saturating_add(r.0);
+                    all.push(r);
+                }
+            }
+            all
+        };
+        // (a compressed stream: its units' clusters allocated, in order, and the bytes of each)
+        let units = |s: &Stream| -> Option<(Vec<Range<usize>>, aqr_disk::Compressed)> {
+            let ((len, _), unit) = (s.sizes?, s.lznt1?);
+            let cu = 1u64 << unit;
+            // (units at most: of 64 KiB, a terabyte)
+            let count = len.div_ceil(cu.checked_mul(v.cluster)?);
+            if count > 1 << 24 {
+                return None;
+            }
+            let mut allocated = vec![0u32; count as usize];
+            let mut out: Vec<Range<usize>> = Vec::new();
+            let mut vcn = 0u64;
+            for (n, lcn) in ordered(s) {
+                // (each unit the run overlaps, its clusters of it)
+                let (mut k, end) = (0u64, n.min((count * cu).saturating_sub(vcn)));
+                while k < end {
+                    let u = (vcn + k) / cu;
+                    let m = ((u + 1) * cu - (vcn + k)).min(end - k);
+                    if let Some(at) = lcn.and_then(|l| l.checked_add(k)?.checked_mul(v.cluster))
+                        && let Ok(at) = usize::try_from(at)
+                    {
+                        let bytes = (m * v.cluster) as usize;
+                        allocated[u as usize] += bytes as u32;
+                        match out.last_mut() {
+                            Some(r) if r.end == at => r.end = at + bytes,
+                            _ => out.push(at..at + bytes),
+                        }
+                    }
+                    k += m;
+                }
+                vcn = vcn.saturating_add(n);
+                if vcn >= count * cu {
+                    break;
+                }
+            }
+            let unit = u32::try_from(cu * v.cluster).ok()?;
+            Some((out, aqr_disk::Compressed::Lznt1 { len, unit, allocated }))
+        };
         // (the extents of stream `s`, up to its initialized size)
         let taken = |s: &Stream| -> Option<Vec<Range<usize>>> {
             let (data, initialized) = s.sizes.filter(|_| !s.packed)?;
@@ -386,13 +445,20 @@ pub fn files(d: &dyn Image) -> Vec<File> {
         let mut names: Vec<&Vec<u16>> = e.streams.keys().collect();
         names.sort();
         for name in names {
-            let Some(extents) = taken(&e.streams[name]) else { continue };
+            let s = &e.streams[name];
+            let (extents, compressed) = match units(s) {
+                Some((extents, how)) => (extents, Some(how)),
+                None => match taken(s) {
+                    Some(extents) => (extents, None),
+                    None => continue,
+                },
+            };
             let mut full = p.clone();
             if !name.is_empty() {
                 full.push(b':');
                 full.extend(utf16(name));
             }
-            out.push(File { name: full, extents, rank: 0, compressed: None });
+            out.push(File { name: full, extents, rank: 0, compressed });
         }
     }
     out

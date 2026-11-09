@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use aqr_formula::store::Writer;
 use aqr_formula::{Bytes, Formula, Kind, Node};
 
-use crate::compressed::STREAM_DATA;
+use crate::compressed::{By, STREAM_DATA};
 use crate::{File, FileSystem, Piece};
 
 /// The class of the stream of the rest of the image, stream 1.
@@ -71,7 +71,7 @@ pub fn build(input: &[u8], files: &[File], pieces: &[Piece], opt: &Options) -> F
     let made = aqr_common::pool::par_map(packed.len(), opt.threads.max(1), |k| {
         let i = packed[k];
         let s: Vec<u8> = of[i].iter().flat_map(|&j| input[pieces[j].span.clone()].iter().copied()).collect();
-        let mut u = crate::compressed::unpack(&s, files[i].compressed.expect("compressed"))?;
+        let mut u = crate::compressed::unpack(&s, files[i].compressed.as_ref().expect("compressed"))?;
         // (the data to the store as it is made, where one is set: of thousands of files, not
         // all held at once)
         let mut data: Bytes = std::mem::take(&mut u.data).into();
@@ -153,7 +153,7 @@ pub fn build(input: &[u8], files: &[File], pieces: &[Piece], opt: &Options) -> F
         let sizes: Vec<u64> = js.iter().map(|&j| pieces[j].span.len() as u64).collect();
         let all = match unpacked[i].take() {
             Some(u) => {
-                let Some(crate::Compressed::Wof { len, .. }) = files[i].compressed else { unreachable!("compressed") };
+                let len = files[i].compressed.as_ref().expect("compressed").len();
                 // applications of streams of chunks, each of 32 MiB of data at most (as the module
                 // holds it whole), the chunk table kept before the first stream
                 let mut kept = Some((f.push(KEPT, u.table.clone()), u.table.len() as u64));
@@ -169,8 +169,8 @@ pub fn build(input: &[u8], files: &[File], pieces: &[Piece], opt: &Options) -> F
                         group.push((kept, data, p.record));
                     }
                     let tail = Node::concat(Vec::new());
-                    apps.push(match u.lzx {
-                        true => {
+                    apps.push(match u.by {
+                        By::Lzx => {
                             let group = group.into_iter().map(|(kept, data, record)| aqr_lzx::formula::Stream {
                                 kept,
                                 data,
@@ -178,13 +178,21 @@ pub fn build(input: &[u8], files: &[File], pieces: &[Piece], opt: &Options) -> F
                             });
                             aqr_lzx::formula::apply(&mut f, group.collect(), tail, bytes)
                         }
-                        false => {
+                        By::Xpress => {
                             let group = group.into_iter().map(|(kept, data, record)| aqr_xpress::formula::Stream {
                                 kept,
                                 data,
                                 record,
                             });
                             aqr_xpress::formula::apply(&mut f, group.collect(), tail, bytes)
+                        }
+                        By::Lznt1 => {
+                            let group = group.into_iter().map(|(kept, data, record)| aqr_lznt1::formula::Stream {
+                                kept,
+                                data,
+                                record,
+                            });
+                            aqr_lznt1::formula::apply(&mut f, group.collect(), tail, bytes)
                         }
                     });
                 }

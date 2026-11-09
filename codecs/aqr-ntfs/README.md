@@ -34,8 +34,10 @@ the format (no implementation's code read). mkntfs and ntfs-3g make a fixture, a
   `WofCompressedData`'s, compressed by the algorithm the reparse point tells, of the unnamed
   stream's size (aqr-disk takes the data apart: its README).
 
-Left in the rest: resident data (in its record), compressed and encrypted streams (their clusters
-as they are: LZNT1 is stage 5 of `docs/disk-image-design.md`), the system files (records 0 to 15,
+- Compressed streams (LZNT1): the clusters of each compression unit (stored, compressed, or a
+  hole), so that aqr-disk takes the data apart.
+
+Left in the rest: resident data (in its record), encrypted streams, the system files (records 0 to 15,
 and those below `$Extend`), directories and their indexes, free clusters (which may hold the data
 of deleted files). The MFT's records themselves are not taken apart yet.
 
