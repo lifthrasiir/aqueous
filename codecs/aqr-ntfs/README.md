@@ -30,6 +30,10 @@ the format (no implementation's code read). mkntfs and ntfs-3g make a fixture, a
 - Paths by the parents of `$FILE_NAME` up to the root (at most 256 deep). A stream's contents are
   its clusters up to its initialized size, holes of a sparse stream left out.
 
+- WOF's files (a reparse point of WOF's file provider): the file itself, its contents
+  `WofCompressedData`'s, compressed by the algorithm the reparse point tells, of the unnamed
+  stream's size (aqr-disk takes the data apart: its README).
+
 Left in the rest: resident data (in its record), compressed and encrypted streams (their clusters
 as they are: LZNT1 is stage 5 of `docs/disk-image-design.md`), the system files (records 0 to 15,
 and those below `$Extend`), directories and their indexes, free clusters (which may hold the data

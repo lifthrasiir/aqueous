@@ -2749,7 +2749,7 @@ fn recompressor(format: Format) -> Recompressor {
         Format::Hdf5 => Cx(|d, _, opt, depth, cx| hdf5::file(d, opt, depth, cx)),
         Format::Bvx => Cx(|d, _, opt, _, cx| bvx(d, opt, cx)),
         Format::Ar | Format::Tar | Format::Cpio => Cx(|d, _, _, _, _| bundle::bundle(d)),
-        Format::Disk => Cx(|d, _, _, _, _| bundle::disk(d)),
+        Format::Disk => Cx(|d, _, opt, _, _| bundle::disk(d, opt.threads)),
         Format::Asar => Cx(|d, _, _, _, _| bundle::asar(d)),
     }
 }
@@ -3052,13 +3052,13 @@ mod tests {
         let plain = compress(&d, &Options::default());
         let shared = aqr_formula::Bytes::shared(Arc::new(d));
         let _known = aqr_formula::store::known(&shared);
-        let f = bundle::disk(&shared).unwrap();
+        let f = bundle::disk(&shared, 1).unwrap();
         let large: Vec<_> = f.streams.iter().filter(|s| s.content && s.data.len() >= aqr_formula::store::MIN).collect();
         assert!(!large.is_empty() && large.iter().all(|s| s.data.is_shared()));
         assert!(compress(&shared, &Options::default()) == plain);
         // a file all of its stream takes its bytes, cut out of them as it is made (let go of
         // then): the JPEG file's stream empty, its formula of no gaps left
-        let mut f = bundle::disk(&shared).unwrap();
+        let mut f = bundle::disk(&shared, 1).unwrap();
         let opt = Options { shared_modules: true, ..Options::default() };
         let cx = Cx::new(&shared, &opt);
         let (children, _) = nested(&mut f, &shared, &opt, 0, &cx).unwrap();
@@ -3834,10 +3834,10 @@ mod tests {
         for (i, (name, data)) in named.iter().enumerate() {
             let span = d.len()..d.len() + data.len();
             d.extend_from_slice(data);
-            files.push(aqr_disk::File { name: name.to_vec(), extents: vec![span.clone()], rank: 0 });
+            files.push(aqr_disk::File { name: name.to_vec(), extents: vec![span.clone()], rank: 0, compressed: None });
             pieces.push(aqr_disk::Piece { span, file: Some((i, 0)) });
         }
-        let opt = aqr_disk::formula::Options { file_systems: bundle::FILE_SYSTEMS, kind: kind_by_name };
+        let opt = aqr_disk::formula::Options { file_systems: bundle::FILE_SYSTEMS, kind: kind_by_name, ..Default::default() };
         let mut f = aqr_disk::formula::build(&d, &files, &pieces, &opt);
         let opt = Options { threads: 2, shared_modules: true, ..Options::default() };
         let cx = Cx::new(&d, &opt);
@@ -3894,6 +3894,18 @@ mod tests {
         assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
     }
 
+    /// An NTFS volume's file Windows compressed by WOF's LZX (aqr-ntfs's fixture): its data a
+    /// content, its chunks rebuilt by aqr-lzx's module, the volume given back.
+    #[test]
+    fn wof_lzx_taken_apart() {
+        let z = std::fs::read(format!("{}/../../codecs/aqr-ntfs/tests/data/wof-small.vhd.zst", env!("CARGO_MANIFEST_DIR")))
+            .unwrap();
+        let d = zstd::stream::decode_all(&z[..]).unwrap();
+        let (c, f) = compress_formula(&d, &Options { threads: 2, shared_modules: true, ..Options::default() });
+        assert!(f.applies().iter().any(|a| a.module == aqr_decompress::LZX));
+        assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
+    }
+
     /// A virtual disk in a container (aqr-disk's VHDX fixture, of a GPT of ext volumes): its files
     /// taken where the container holds them, its JPEG files recompressed by aqr-jpeg, the
     /// container given back.
@@ -3923,11 +3935,11 @@ mod tests {
         let d = [&jpeg[a..b], &text, &jpeg[b..], &jpeg[..a]].concat();
         let (t, e, s) = (b - a, b - a + text.len(), b - a + text.len() + n - b);
         let files = [
-            aqr_disk::File { name: b"j.jpg".to_vec(), extents: vec![s..s + a, 0..b - a, e..e + n - b], rank: 0 },
-            aqr_disk::File { name: b"t.txt".to_vec(), extents: vec![t..e], rank: 0 },
+            aqr_disk::File { name: b"j.jpg".to_vec(), extents: vec![s..s + a, 0..b - a, e..e + n - b], rank: 0, compressed: None },
+            aqr_disk::File { name: b"t.txt".to_vec(), extents: vec![t..e], rank: 0, compressed: None },
         ];
         let pieces = aqr_disk::pieces(&d, &files);
-        let opt = aqr_disk::formula::Options { file_systems: bundle::FILE_SYSTEMS, kind: kind_by_name };
+        let opt = aqr_disk::formula::Options { file_systems: bundle::FILE_SYSTEMS, kind: kind_by_name, ..Default::default() };
         let mut f = aqr_disk::formula::build(&d, &files, &pieces, &opt);
         assert_eq!(f.shared.len(), 1);
         let opt = Options { threads: 2, shared_modules: true, ..Options::default() };

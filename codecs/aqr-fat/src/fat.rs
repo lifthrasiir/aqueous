@@ -259,7 +259,7 @@ pub fn files(d: &dyn Image) -> Vec<File> {
             let size = le32(e, 28) as u64;
             let most = size.div_ceil(v.cluster as u64) as usize;
             let chain = if size == 0 { Vec::new() } else { v.chain(&fat, cluster, most) };
-            out.push(File { name: full, extents: extents(&chain, v.heap, v.cluster, size), rank: 0 });
+            out.push(File { name: full, extents: extents(&chain, v.heap, v.cluster, size), rank: 0, compressed: None });
         }
     }
     out

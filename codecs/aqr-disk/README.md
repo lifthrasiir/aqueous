@@ -42,6 +42,11 @@ powershell -File codecs/aqr-disk/scripts/gen-containers.ps1   # tests/data/win*:
   a hybrid ISO image's own are), cut at the image's end; the first file system that starts one
   reads it. A partition's files are found along with all of the image's: of extents of several
   file systems, the first starting where it does is taken (`FORMAT.md`, "Pieces").
+- **Files stored compressed** (`compressed`): a file a file system reports compressed (aqr-ntfs's
+  of WOF) is its data, a content, and its compressed bytes are rebuilt from it: WOF's chunk table
+  kept, its LZX chunks by aqr-lzx's module `lzx-recons` (an application of each 1024 chunks, 32 MiB
+  of data at most, as the module holds its data whole). WOF's XPRESS is not taken yet (aqr-xpress
+  to come): such a file is its compressed bytes, of kind compressed whatever its name.
 - **Files in pieces**: a file whose extents are not contiguous is one content all the same, its
   pieces split from it; a piece overlapping one before it is left in the rest, and the file's
   contents are those taken.
@@ -67,7 +72,16 @@ Measured 2026-11-09 on an M4 through `cargo aqr`, against the build before conta
 | qcow2 (1,791,295,488 bytes) | 515,665,820 B, 42.0 s, 9.40 GB resident | 467,413,878 B, 43.1 s, 4.14 GB resident |
 | the disk itself (2,147,483,648 bytes) | | 461,942,344 B, 49.8 s, 5.00 GB resident |
 
-A container archives as its disk does. (Most of the time is the verify of one leaf:
+A container archives as its disk does.
+
+Files of WOF's LZX, on an M4 (2026-11-09): a 2 GB fixed VHD a Windows peer session made, 1,500 MiB
+of System32 compacted by `compact /exe:lzx` (10,607 files, 1,562,928,797 bytes of data in
+630,974,409 of LZX), its free space then written with zeros: against the build before (the WOF
+streams as they are) 531,167,800 -> 393,309,474 B, 195 -> 2,136 G instructions (7.2 -> 102.9 s;
+57 s in another run of as many instructions), heap peak 0.97 -> 1.72 GB, given back. With the free
+space still holding the files as they were before compact: 844,576,448 -> 706,525,686 B. Much of
+the time is the verify running `lzx-recons` on one thread (one leaf: `docs/disk-image-design.md`,
+stage 3). (Most of the time is the verify of one leaf:
 `docs/disk-image-design.md`, stage 3.)
 
 ## Tests

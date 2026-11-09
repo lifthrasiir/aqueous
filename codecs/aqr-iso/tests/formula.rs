@@ -3,7 +3,7 @@ use aqr_formula::{Formula, Kind, Node};
 
 /// The formula of image `d` (aqr-disk's, of aqr-iso's file system), its files of kinds by `kind`.
 fn encode_with(d: &[u8], kind: fn(&[u8]) -> Kind) -> Option<Formula> {
-    formula::encode_with(d, &Options { file_systems: &[aqr_iso::FS], kind })
+    formula::encode_with(d, &Options { file_systems: &[aqr_iso::FS], kind, ..Default::default() })
 }
 
 fn encode(d: &[u8]) -> Option<Formula> {

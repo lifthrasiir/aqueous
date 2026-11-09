@@ -205,6 +205,10 @@ struct Entry {
     name: Option<(u8, Vec<u16>, u64)>,
     directory: bool,
     streams: HashMap<Vec<u16>, Stream>,
+    /// The algorithm of WOF's file provider, of a reparse point of WOF's.
+    wof: Option<u32>,
+    /// The size of the unnamed stream where it is resident.
+    resident: Option<u64>,
 }
 
 /// The extents of `runs` (in order) up to `len` bytes of clusters of `cluster` bytes, holes left
@@ -282,6 +286,12 @@ pub fn files(d: &dyn Image) -> Vec<File> {
                         e.name = Some((space, units(name), le64(f, 0) & 0xffff_ffff_ffff));
                     }
                 }
+                // (WOF's reparse point: its tag, WOF_EXTERNAL_INFO of the file provider, then
+                // FILE_PROVIDER_EXTERNAL_INFO_V1, its algorithm)
+                (0xc0, Body::Resident(p)) if p.len() >= 24 && le32(p, 0) == 0x8000_0017 && le32(p, 12) == 2 => {
+                    e.wof = Some(le32(p, 20));
+                }
+                (0x80, Body::Resident(v)) if a.name.is_empty() => e.resident = Some(v.len() as u64),
                 (0x80, Body::Runs { vcn, runs, data, initialized }) => {
                     if base == 0 && a.name.is_empty() && vcn > 0 {
                         // (the MFT's own runs, of an extension record of it)
@@ -338,11 +348,9 @@ pub fn files(d: &dyn Image) -> Vec<File> {
             continue;
         }
         let Some(p) = path(n, &entries, &mut paths, 0) else { continue };
-        let mut names: Vec<&Vec<u16>> = e.streams.keys().collect();
-        names.sort();
-        for name in names {
-            let s = &e.streams[name];
-            let Some((data, initialized)) = s.sizes.filter(|_| !s.packed) else { continue };
+        // (the extents of stream `s`, up to its initialized size)
+        let taken = |s: &Stream| -> Option<Vec<Range<usize>>> {
+            let (data, initialized) = s.sizes.filter(|_| !s.packed)?;
             let mut pieces: Vec<&(u64, Vec<Run>)> = s.pieces.iter().collect();
             pieces.sort_by_key(|p| p.0);
             // (the runs in order of their VCNs, up to where one is missing)
@@ -357,12 +365,34 @@ pub fn files(d: &dyn Image) -> Vec<File> {
                     all.push(r);
                 }
             }
+            Some(extents(&all, v.cluster, initialized.min(data)))
+        };
+        // a file of WOF's: its contents the stream WofCompressedData holds compressed, of the
+        // unnamed stream's size
+        let wof: Vec<u16> = "WofCompressedData".encode_utf16().collect();
+        let len = e.streams.get(&[][..]).and_then(|s| s.sizes).map(|s| s.0).or(e.resident);
+        if let (Some(algorithm), Some(s), Some(len)) = (e.wof, e.streams.get(&wof), len)
+            && aqr_disk::Compressed::wof_chunk(algorithm).is_some()
+            && let Some(extents) = taken(s)
+        {
+            out.push(File {
+                name: p,
+                extents,
+                rank: 0,
+                compressed: Some(aqr_disk::Compressed::Wof { algorithm, len }),
+            });
+            continue;
+        }
+        let mut names: Vec<&Vec<u16>> = e.streams.keys().collect();
+        names.sort();
+        for name in names {
+            let Some(extents) = taken(&e.streams[name]) else { continue };
             let mut full = p.clone();
             if !name.is_empty() {
                 full.push(b':');
                 full.extend(utf16(name));
             }
-            out.push(File { name: full, extents: extents(&all, v.cluster, initialized.min(data)), rank: 0 });
+            out.push(File { name: full, extents, rank: 0, compressed: None });
         }
     }
     out

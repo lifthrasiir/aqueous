@@ -103,7 +103,7 @@ pub fn files(d: &dyn Image) -> Vec<File> {
             if chars & 2 != 0 {
                 dirs.push((icb, name));
             } else if let Some(e) = entry(d, &vol, icb).filter(|e| e.inline.is_none()) {
-                out.push(File { name, extents: e.extents, rank: 0 });
+                out.push(File { name, extents: e.extents, rank: 0, compressed: None });
             }
         }
     }

@@ -325,7 +325,7 @@ pub fn files(d: &dyn Image) -> Vec<File> {
                     }
                     let len = size(i);
                     let runs = v.runs(d, i, len.div_ceil(v.block));
-                    out.push(File { name: full, extents: v.ranges(&runs, len), rank: 0 });
+                    out.push(File { name: full, extents: v.ranges(&runs, len), rank: 0, compressed: None });
                 }
             }
         }

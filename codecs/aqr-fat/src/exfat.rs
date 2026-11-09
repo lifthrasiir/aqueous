@@ -162,7 +162,7 @@ impl Walk<'_> {
                 }
             } else {
                 let extents = self.v.stream(self.d, self.fat, first, contiguous, valid.min(length));
-                self.out.push(File { name: full, extents, rank: 0 });
+                self.out.push(File { name: full, extents, rank: 0, compressed: None });
             }
         }
     }

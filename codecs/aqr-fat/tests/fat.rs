@@ -12,7 +12,7 @@ fn none(_: &aqr_formula::Apply, _: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
 }
 
 fn encode(d: &[u8]) -> Option<Formula> {
-    formula::encode_with(d, &Options { file_systems: &[aqr_fat::FAT], kind: |_| Kind::Unknown })
+    formula::encode_with(d, &Options { file_systems: &[aqr_fat::FAT], kind: |_| Kind::Unknown, ..Default::default() })
 }
 
 /// The files the fixtures hold that `scripts/gen-fixtures.sh` wrote, by name, with their

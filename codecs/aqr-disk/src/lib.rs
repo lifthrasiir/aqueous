@@ -9,6 +9,7 @@
 //! the virtual disk of its [`container`]) and on each partition of its partition table
 //! ([`partition`]), and [`pieces`] lays the extents out over the image.
 
+pub mod compressed;
 pub mod container;
 pub mod formula;
 pub mod image;
@@ -27,6 +28,33 @@ pub struct File {
     /// Of the files giving the same extent, the one of the lowest rank names it (a file system's
     /// own order of its trees: aqr-iso's UDF, Joliet, then ISO 9660).
     pub rank: u8,
+    /// How its contents are stored, where compressed: its extents are then of the compressed
+    /// bytes, and its contents are what they decompress to.
+    pub compressed: Option<Compressed>,
+}
+
+/// How a file's contents are stored compressed by its file system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compressed {
+    /// By Windows' WOF (an NTFS file's `WofCompressedData`): a table of where its chunks start
+    /// (but the first; 4 bytes each, 8 where `len` is over 4 GiB), then the chunks, each of the
+    /// chunk's bytes of data but the last, compressed on its own (stored where that is no
+    /// smaller), by `algorithm`: 0 XPRESS (Huffman) of 4 KiB chunks, 1 LZX of 32 KiB, 2 and 3
+    /// XPRESS of 8 and 16 KiB. `len` bytes of data in all.
+    Wof { algorithm: u32, len: u64 },
+}
+
+impl Compressed {
+    /// Bytes of data of a WOF chunk of `algorithm`.
+    pub fn wof_chunk(algorithm: u32) -> Option<usize> {
+        match algorithm {
+            0 => Some(4 << 10),
+            1 => Some(32 << 10),
+            2 => Some(8 << 10),
+            3 => Some(16 << 10),
+            _ => None,
+        }
+    }
 }
 
 /// A reader of a file system.

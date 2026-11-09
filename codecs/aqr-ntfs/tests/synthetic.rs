@@ -164,7 +164,11 @@ fn extension_records() {
             ("init.bin".into(), vec![c(52)..c(52) + 5000]),
         ]
     );
-    let opt = aqr_disk::formula::Options { file_systems: &[aqr_ntfs::FS], kind: |_| aqr_formula::Kind::Unknown };
+    let opt = aqr_disk::formula::Options {
+        file_systems: &[aqr_ntfs::FS],
+        kind: |_| aqr_formula::Kind::Unknown,
+        ..Default::default()
+    };
     let f = aqr_disk::formula::encode_with(&d, &opt).unwrap();
     let none = |_: &aqr_formula::Apply, _: &[&[u8]]| -> aqr_formula::Result<Vec<u8>> { unreachable!("no module") };
     assert!(f.eval(&none).unwrap() == d);

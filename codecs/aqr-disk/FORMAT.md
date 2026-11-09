@@ -28,6 +28,15 @@ the order of their indices, the class where its first stream is: the archive hol
 each class, of its files in the order of their first pieces in the image, as if the streams were
 made so.
 
+## Files stored compressed
+
+A file of WOF's LZX (`Compressed::Wof`, algorithm 1) is its data, a content stream as any file's,
+of its kind by its name. Its compressed bytes (the chunk table, then the chunks) are the outputs
+of applications of aqr-lzx's module `lzx-recons` (aqr-lzx's FORMAT.md), one of each 1024 chunks:
+the first keeping the chunk table before its chunks (a stream of class `disk/kept`), its data a
+slice of the file's stream, its record and index streams of aqr-lzx's. Split as any file's bytes
+into its pieces where it is in several.
+
 ## Pieces *(encoder)*
 
 `aqr_disk::files` reads the volumes of the disk (the image, or the virtual disk of its container:

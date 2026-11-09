@@ -12,7 +12,7 @@ fn none(_: &aqr_formula::Apply, _: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
 }
 
 fn encode(d: &[u8]) -> Option<Formula> {
-    formula::encode_with(d, &Options { file_systems: &[aqr_ext::FS], kind: |_| Kind::Unknown })
+    formula::encode_with(d, &Options { file_systems: &[aqr_ext::FS], kind: |_| Kind::Unknown, ..Default::default() })
 }
 
 /// The files of `d` read, by name, with their contents and their extents.

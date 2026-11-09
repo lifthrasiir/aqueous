@@ -6,7 +6,9 @@ description = "Disk images taken apart into the contents of their files and the 
 publish = false
 
 [dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula" }
+aqr-lzx = { path = "../aqr-lzx" }
 
 [dev-dependencies]
 # (file systems to read the containers' disks with)

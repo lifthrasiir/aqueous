@@ -5,7 +5,7 @@
 use std::borrow::Cow;
 
 use aqr_formula::store::Writer;
-use aqr_formula::{Formula, Kind, Node};
+use aqr_formula::{Bytes, Formula, Kind, Node};
 
 use crate::{File, FileSystem, Piece};
 
@@ -20,13 +20,18 @@ pub struct Options {
     /// stream of their own (those of [`Kind::Unknown`] the stream `raw`, the others after it,
     /// `disk/{kind}`, or `disk/{name}` for a format). By default all are unknown.
     pub kind: fn(&[u8]) -> Kind,
+    /// Threads the files stored compressed are taken apart on.
+    pub threads: usize,
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options { file_systems: &[], kind: |_| Kind::Unknown }
+        Options { file_systems: &[], kind: |_| Kind::Unknown, threads: 1 }
     }
 }
+
+/// The class of the streams of the bytes kept of files stored compressed (WOF's chunk tables).
+pub const KEPT: &str = "disk/kept";
 
 /// The formula of image `input` with `opt`, or None where none of its file systems is read or
 /// no file of them has contents.
@@ -52,24 +57,51 @@ pub fn build(input: &[u8], files: &[File], pieces: &[Piece], opt: &Options) -> F
     const REST_AT: usize = 1;
     // each file's pieces, in its order
     let mut of: Vec<Vec<usize>> = vec![Vec::new(); files.len()];
-    // the kinds in the order they come, `raw` first, and the files of each
-    let mut kinds: Vec<(Kind, Vec<usize>)> = vec![(Kind::Unknown, Vec::new())];
     let mut rest_len = 0;
     for (j, p) in pieces.iter().enumerate() {
-        let Some((i, _)) = p.file else {
-            rest_len += p.span.len();
-            continue;
-        };
-        if of[i].is_empty() {
-            let kind = (opt.kind)(&files[i].name);
-            match kinds.iter_mut().find(|k| k.0 == kind) {
-                Some(k) => k.1.push(i),
-                None => kinds.push((kind, vec![i])),
-            }
+        match p.file {
+            Some((i, _)) => of[i].push(j),
+            None => rest_len += p.span.len(),
         }
-        of[i].push(j);
     }
     of.iter_mut().for_each(|js| js.sort_by_key(|&j| pieces[j].file.map(|f| f.1)));
+    // the files stored compressed taken apart (their contents their data), on up to `threads`
+    let packed: Vec<usize> = (0..files.len()).filter(|&i| files[i].compressed.is_some() && !of[i].is_empty()).collect();
+    let made = aqr_common::pool::par_map(packed.len(), opt.threads.max(1), |k| {
+        let i = packed[k];
+        let s: Vec<u8> = of[i].iter().flat_map(|&j| input[pieces[j].span.clone()].iter().copied()).collect();
+        let mut u = crate::compressed::unpack(&s, files[i].compressed.expect("compressed"))?;
+        // (the data to the store as it is made, where one is set: of thousands of files, not
+        // all held at once)
+        let mut data: Bytes = std::mem::take(&mut u.data).into();
+        aqr_formula::store::spill(&mut data);
+        Some((data, u))
+    });
+    let mut unpacked: Vec<Option<crate::compressed::Unpacked>> = (0..files.len()).map(|_| None).collect();
+    let mut datas: Vec<Option<Bytes>> = vec![None; files.len()];
+    for (i, u) in packed.into_iter().zip(made) {
+        if let Some((d, u)) = u {
+            (datas[i], unpacked[i]) = (Some(d), Some(u));
+        }
+    }
+    // the kinds in the order of the files' first pieces, `raw` first, and the files of each (a
+    // file stored compressed and not taken apart of compressed data, whatever its name)
+    let mut kinds: Vec<(Kind, Vec<usize>)> = vec![(Kind::Unknown, Vec::new())];
+    let mut seen = vec![false; files.len()];
+    for p in pieces {
+        let Some((i, _)) = p.file else { continue };
+        if std::mem::replace(&mut seen[i], true) {
+            continue;
+        }
+        let kind = match files[i].compressed.is_some() && datas[i].is_none() {
+            true => Kind::Compressed,
+            false => (opt.kind)(&files[i].name),
+        };
+        match kinds.iter_mut().find(|k| k.0 == kind) {
+            Some(k) => k.1.push(i),
+            None => kinds.push((kind, vec![i])),
+        }
+    }
     let class = |kind: Kind| -> Cow<'static, str> {
         match kind {
             Kind::Unknown => "raw".into(),
@@ -77,7 +109,10 @@ pub fn build(input: &[u8], files: &[File], pieces: &[Piece], opt: &Options) -> F
             kind => format!("disk/{kind}").into(),
         }
     };
-    let contents = |i: usize| {
+    let mut contents = |i: usize| {
+        if let Some(d) = datas[i].take() {
+            return d;
+        }
         let spans = || of[i].iter().map(|&j| &input[pieces[j].span.clone()]);
         if let [j] = of[i][..]
             && let Some(b) = aqr_formula::store::find(&input[pieces[j].span.clone()])
@@ -109,12 +144,40 @@ pub fn build(input: &[u8], files: &[File], pieces: &[Piece], opt: &Options) -> F
             stream_of[i] = f.streams.len() - 1;
         }
     }
-    // the outputs of each file of several pieces, by piece
+    // the outputs of each file of several pieces, by piece; of each file of one, the node of it
+    // (where stored compressed: an application rebuilding its bytes from its data)
     let mut split: Vec<Vec<Option<Node>>> = vec![Vec::new(); files.len()];
-    for (i, js) in of.iter().enumerate().filter(|(_, js)| js.len() > 1) {
+    let mut whole: Vec<Option<Node>> = vec![None; files.len()];
+    for (i, js) in of.iter().enumerate().filter(|(_, js)| !js.is_empty()) {
         let sizes: Vec<u64> = js.iter().map(|&j| pieces[j].span.len() as u64).collect();
-        let all = Node::slice(stream_of[i], 0, sizes.iter().sum());
-        split[i] = f.split_node(all, sizes).into_iter().map(Some).collect();
+        let all = match unpacked[i].take() {
+            Some(u) => {
+                let Some(crate::Compressed::Wof { len, .. }) = files[i].compressed else { unreachable!("compressed") };
+                // an application of each stream of chunks (its data at most 32 MiB, as the
+                // module holds it whole), the chunk table kept before the first
+                let mut kept = Some((f.push(KEPT, u.table.clone()), u.table.len() as u64));
+                let (mut at, mut apps) = (0, Vec::new());
+                for p in u.streams {
+                    let (kept, n) = kept.take().unwrap_or_else(|| (Node::concat(Vec::new()), 0));
+                    let data = Node::slice(stream_of[i], at, p.data as u64);
+                    at += p.data as u64;
+                    let stream = aqr_lzx::formula::Stream { kept, data, record: p.record };
+                    apps.push(aqr_lzx::formula::apply(
+                        &mut f,
+                        vec![stream],
+                        Node::concat(Vec::new()),
+                        n + p.bytes as u64,
+                    ));
+                }
+                debug_assert_eq!(at, len);
+                Node::concat(apps)
+            }
+            None => Node::slice(stream_of[i], 0, sizes.iter().sum()),
+        };
+        match js.len() {
+            1 => whole[i] = Some(all),
+            _ => split[i] = f.split_node(all, sizes).into_iter().map(Some).collect(),
+        }
     }
     let mut at = 0;
     let mut parts = Vec::with_capacity(pieces.len());
@@ -126,7 +189,7 @@ pub fn build(input: &[u8], files: &[File], pieces: &[Piece], opt: &Options) -> F
                 at += n;
                 Node::slice(REST_AT, (at - n) as u64, n as u64)
             }
-            Some((i, _)) if of[i].len() == 1 => Node::slice(stream_of[i], 0, p.span.len() as u64),
+            Some((i, _)) if of[i].len() == 1 => whole[i].take().expect("its node"),
             Some((i, k)) => split[i][k].take().expect("each piece once"),
         });
     }

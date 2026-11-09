@@ -12,7 +12,7 @@ fn none(_: &Apply, _: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
 fn encode(d: &[u8]) -> Option<Formula> {
     aqr_disk::formula::encode_with(
         d,
-        &aqr_disk::formula::Options { file_systems: &[aqr_fat::EXFAT], kind: |_| Kind::Unknown },
+        &aqr_disk::formula::Options { file_systems: &[aqr_fat::EXFAT], kind: |_| Kind::Unknown, ..Default::default() },
     )
 }
 

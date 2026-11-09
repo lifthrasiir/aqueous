@@ -67,9 +67,9 @@ fn walk(d: &dyn aqr_disk::Image, root: &[u8], block: usize, ucs2: bool, out: &mu
                 Some(f) if f.name == name => f,
                 Some(f) => {
                     out.push(f);
-                    File { name, extents: Vec::new(), rank: 1 + !ucs2 as u8 }
+                    File { name, extents: Vec::new(), rank: 1 + !ucs2 as u8, compressed: None }
                 }
-                None => File { name, extents: Vec::new(), rank: 1 + !ucs2 as u8 },
+                None => File { name, extents: Vec::new(), rank: 1 + !ucs2 as u8, compressed: None },
             };
             f.extents.push(at..at.saturating_add(size));
             match flags & 0x80 != 0 {

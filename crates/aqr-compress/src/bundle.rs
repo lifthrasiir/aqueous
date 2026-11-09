@@ -20,8 +20,8 @@ pub(crate) fn asar(d: &[u8]) -> Option<Formula> {
 pub(crate) const FILE_SYSTEMS: &[aqr_disk::FileSystem] =
     &[aqr_iso::FS, aqr_fat::FAT, aqr_fat::EXFAT, aqr_ntfs::FS, aqr_ext::FS];
 
-pub(crate) fn disk(d: &[u8]) -> Option<Formula> {
-    aqr_disk::formula::encode_with(d, &aqr_disk::formula::Options { file_systems: FILE_SYSTEMS, kind: kind_by_name })
+pub(crate) fn disk(d: &[u8], threads: usize) -> Option<Formula> {
+    aqr_disk::formula::encode_with(d, &aqr_disk::formula::Options { file_systems: FILE_SYSTEMS, kind: kind_by_name, threads })
 }
 
 /// Whether formula `f` is one of an archive that only bundles files.
