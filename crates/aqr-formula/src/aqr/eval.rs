@@ -1393,10 +1393,48 @@ impl Hashing<'_, '_, '_> {
                 }
                 out
             }
+            Op::Split(x, sizes, _) => {
+                // (all its outputs at once, by one pass over its input: pulled one by one, each
+                // would hold the pieces before it, of a file in pieces all over an image)
+                let pieces = self.split(x, sizes)?;
+                let h = pieces[v.out];
+                self.vals[v.node] = pieces.into_iter().map(|c| Some(vec![c])).collect();
+                return Ok(h);
+            }
             _ => self.stream(v)?,
         };
         self.vals[v.node][v.out] = Some(vec![h]);
         Ok(h)
+    }
+
+    /// The hashes of value `x` cut into pieces of `sizes`, evaluated, as it is pulled.
+    fn split(&self, x: Val, sizes: &[u64]) -> Decoded<Vec<Ch>> {
+        let mut s = self.at.ev.source(x);
+        let mut out = Vec::with_capacity(sizes.len());
+        let (mut h, mut left) = (Ch::EMPTY, sizes.first().copied().unwrap_or(0));
+        let next = |h: &mut Ch, left: &mut u64, out: &mut Vec<Ch>| {
+            while *left == 0 && out.len() < sizes.len() {
+                out.push(std::mem::replace(h, Ch::EMPTY));
+                *left = sizes.get(out.len()).copied().unwrap_or(0);
+            }
+        };
+        next(&mut h, &mut left, &mut out);
+        while let Some(c) = s.next(self.at)? {
+            let mut c: &[u8] = &c;
+            while !c.is_empty() {
+                if out.len() == sizes.len() {
+                    return invalid("a split of a value longer than declared");
+                }
+                let n = c.len().min(left as usize);
+                h = h.then(&c[..n]);
+                (left, c) = (left - n as u64, &c[n..]);
+                next(&mut h, &mut left, &mut out);
+            }
+        }
+        match out.len() == sizes.len() {
+            true => Ok(out),
+            false => invalid("a split of a value shorter than declared"),
+        }
     }
 
     /// The hash of value `v`, evaluated, as it is pulled.
