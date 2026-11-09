@@ -4344,6 +4344,59 @@ mod tests {
         assert_eq!(decode(&c, Default::default()), (Ok(d.clone()), 0));
     }
 
+    /// A Split of a value made of another Split's outputs (a disk of fragmented files, cut into a
+    /// DMG's chunks), its outputs taken by an application, is verified by its hashes: each value
+    /// evaluated there is pulled of its own states of nodes of several outputs, not of those that
+    /// another value already pulled.
+    #[test]
+    fn hashed_splits_of_splits() {
+        let text = unruled(200_000);
+        let mut z = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(6));
+        std::io::Write::write_all(&mut z, &text).unwrap();
+        let deflated = z.finish().unwrap();
+        let tail = b"what follows the stream".to_vec();
+        let d = [deflated.clone(), tail.clone()].concat();
+        let opt = Options::default();
+        let (profile, zlib) = opt.flate();
+        let fopt =
+            aqr_flate::Options { threads: 1, zlib, store: true, ..aqr_flate::Options::for_profile(profile).unwrap() };
+        let parsed = aqr_flate::Parsed::head(&deflated, &fopt).unwrap();
+        assert_eq!(parsed.len(), deflated.len());
+        let (data, record, _) = parsed.deconstruct_bytes(&fopt, &Default::default()).unwrap();
+        assert!(data == text);
+        // the text in two pieces, the second first, and the tail: cut by a Split into the text
+        // and the tail, the text inflated again
+        // (the pieces across two blocks, as a file's content of several streams is)
+        let (half, m) = (text.len() / 2, text.len() / 2 + 777);
+        let rotated = [&text[half..], &text[..half]].concat();
+        let mut f = Formula::default();
+        f.push("raw", rotated[..m].to_vec());
+        f.push("dmg", [&rotated[m..], &tail[..]].concat());
+        let (n, m) = (text.len() as u64, m as u64);
+        let pieces = Node::concat([Node::slice(0, 0, m), Node::slice(1, 0, n - m)]);
+        let inner = f.split_node(pieces, vec![n - half as u64, half as u64]);
+        let joined = Node::concat([inner[1].clone(), inner[0].clone(), Node::slice(1, n - m, tail.len() as u64)]);
+        let outer = f.split_node(joined, vec![n, tail.len() as u64]);
+        let records = f.push("flate/record", record.clone());
+        let index = f.push("flate/index", aqr_flate::module::index(&[(data.len(), record.len(), deflated.len())]));
+        let a = aqr_flate::formula::apply(
+            profile,
+            outer[0].clone(),
+            records,
+            index,
+            deflated.len() as u64,
+            aqr_flate::formula::Derived::None,
+        )
+        .unwrap();
+        f.root = Node::concat([Node::Apply(Box::new(a)), outer[1].clone()]);
+        assert!(f.eval(&Native::default()).unwrap() == d);
+        let c = Cx::new(&d, &opt).enc.encode(&f, Some(aqr::checksum(&d))).unwrap();
+        assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
+        for threads in [1, 4] {
+            assert_eq!(hashed(&c, &d, &Default::default(), &Options { threads, ..opt.clone() }), Some(true));
+        }
+    }
+
     /// An input that a recompressor would take more heap for than a recompression may is not
     /// recompressed so; one taken in parts is, whatever its size.
     #[test]

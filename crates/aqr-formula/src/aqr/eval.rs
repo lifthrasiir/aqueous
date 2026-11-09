@@ -282,7 +282,7 @@ struct Eval<'e, 'a> {
     apply_part: &'e (dyn Fn(Ap<'e, 'a>, &mut [&mut dyn PartIn], &mut [&mut dyn PartOut]) -> Decoded<()> + Sync),
     blocks: &'e dyn Blocks,
     fans: Vec<Mutex<Fan<'a>>>,
-    threads: &'e Threads,
+    threads: Threads,
 }
 
 /// Where values are pulled: of an evaluation, and (on the thread writing the outputs out) what
@@ -660,7 +660,6 @@ pub(super) fn run<'a>(
         super::within_limit(a, p.modules[a.module])?;
         loaded(a)?.apply_part(a.params, &resources(a), ins, outs, &a.output_sizes, a.memory_limit, &a.task_limits)
     };
-    let running = Threads::default();
     let ev = Eval {
         g: &g,
         apply: &apply,
@@ -668,7 +667,7 @@ pub(super) fn run<'a>(
         apply_part: &apply_part,
         blocks: contents,
         fans: (0..g.fans).map(|_| Mutex::new(Fan::Idle)).collect(),
-        threads: &running,
+        threads: Threads::default(),
     };
     // (the threads of part modules let go of and joined before what they borrow goes)
     let _joined = Joined(&ev);
@@ -1275,17 +1274,16 @@ pub(super) fn hashed(
         loaded(a)?.apply_part(a.params, &resources(a), ins, outs, &a.output_sizes, a.memory_limit, &a.task_limits)
     };
     let fresh = Fresh { raw, dictionaries, cache: Mutex::default(), decoded: Condvar::new() };
-    let running = Threads::default();
     let ev = Eval {
         g: &g,
         apply: &apply,
         part: &part,
         apply_part: &apply_part,
         blocks: &fresh,
-        fans: (0..g.fans).map(|_| Mutex::new(Fan::Idle)).collect(),
-        threads: &running,
+        // (none: each value evaluated is of an evaluation of its own, [`apart`])
+        fans: Vec::new(),
+        threads: Threads::default(),
     };
-    let _joined = Joined(&ev);
     let names: Vec<Option<String>> = p.modules.iter().map(|&m| identify(&env.modules[m])).collect();
     let key = |a: &Apply, ins: &[Ch]| -> Option<u128> {
         let name = names[a.module].as_deref()?;
@@ -1420,6 +1418,13 @@ impl Hashing<'_, '_, '_> {
                 self.vals[v.node] = pieces.into_iter().map(|c| Some(vec![c])).collect();
                 return Ok(h);
             }
+            Op::Apply(_, _, Some(_)) => {
+                // (all its outputs at once, by one run: pulled one by one, each would run it)
+                let outs = self.fanned(v.node)?;
+                let h = outs[v.out];
+                self.vals[v.node] = outs.into_iter().map(|c| Some(vec![c])).collect();
+                return Ok(h);
+            }
             _ => match self.made.remove(&v) {
                 Some(made) => made?,
                 None => self.stream(v)?,
@@ -1517,11 +1522,36 @@ impl Hashing<'_, '_, '_> {
     fn stream(&self, v: Val) -> Decoded<Ch> {
         stream_at(self.at, v)
     }
+
+    /// The hashes of the outputs of application `node` of several, evaluated, as they are pulled
+    /// in turn (the module run once).
+    fn fanned(&self, node: usize) -> Decoded<Vec<Ch>> {
+        fanned_at(self.at, node)
+    }
+}
+
+/// `f` run on an evaluation of its own, as `at`'s but of states of nodes of several outputs not
+/// pulled yet, and of threads of its own (joined as it ends): the hashes of values evaluated in
+/// turn, or at once on threads, each pulls what it is made of anew, where those of `at` would give
+/// what another value pulled of them already (a Split of a value of another Split's outputs, of a
+/// disk of fragmented files cut into a DMG's chunks, pulled the second again).
+fn apart<T>(at: At, f: impl FnOnce(At) -> T) -> T {
+    let ev = Eval {
+        g: at.ev.g,
+        apply: at.ev.apply,
+        part: at.ev.part,
+        apply_part: at.ev.apply_part,
+        blocks: at.ev.blocks,
+        fans: (0..at.ev.g.fans).map(|_| Mutex::new(Fan::Idle)).collect(),
+        threads: Threads::default(),
+    };
+    let _joined = Joined(&ev);
+    f(At { ev: &ev, ahead: at.ahead })
 }
 
 /// [`Hashing::split`] of `at`.
 fn split_at(at: At, x: Val, sizes: &[u64]) -> Decoded<Vec<Ch>> {
-    {
+    apart(at, |at| {
         let mut s = at.ev.source(x);
         let mut out = Vec::with_capacity(sizes.len());
         let (mut h, mut left) = (Ch::EMPTY, sizes.first().copied().unwrap_or(0));
@@ -1548,11 +1578,21 @@ fn split_at(at: At, x: Val, sizes: &[u64]) -> Decoded<Vec<Ch>> {
             true => Ok(out),
             false => invalid("a split of a value shorter than declared"),
         }
-    }
+    })
 }
 
 /// [`Hashing::stream`] of `at`.
 fn stream_at(at: At, v: Val) -> Decoded<Ch> {
+    apart(at, |at| hash_of(at, v))
+}
+
+/// [`Hashing::fanned`] of `at`.
+fn fanned_at(at: At, node: usize) -> Decoded<Vec<Ch>> {
+    apart(at, |at| (0..at.ev.g.out_count(node)).map(|out| hash_of(at, Val { node, out })).collect())
+}
+
+/// The hash of value `v`, pulled of the states of `at`.
+fn hash_of(at: At, v: Val) -> Decoded<Ch> {
     let mut s = at.ev.source(v);
     let mut h = Ch::EMPTY;
     while let Some(c) = s.next(at)? {
@@ -1775,7 +1815,6 @@ fn with_formula<M: crate::Modules + Sync, R>(
     let apply_part = |_: Ap<'_, '_>, _: &mut [&mut dyn PartIn], _: &mut [&mut dyn PartOut]| -> Decoded<()> {
         unreachable!("no part modules in a formula's evaluation")
     };
-    let running = Threads::default();
     let ev = Eval {
         g: &g,
         apply: &apply,
@@ -1783,7 +1822,7 @@ fn with_formula<M: crate::Modules + Sync, R>(
         apply_part: &apply_part,
         blocks: &NoBlocks,
         fans: (0..g.fans).map(|_| Mutex::new(Fan::Idle)).collect(),
-        threads: &running,
+        threads: Threads::default(),
     };
     let _joined = Joined(&ev);
     go(&ev)
