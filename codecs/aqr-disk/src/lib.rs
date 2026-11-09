@@ -9,6 +9,7 @@
 //! the virtual disk of its [`container`]) and on each partition of its partition table
 //! ([`partition`]), and [`pieces`] lays the extents out over the image.
 
+pub mod chunked;
 pub mod compressed;
 pub mod container;
 pub mod dmg;

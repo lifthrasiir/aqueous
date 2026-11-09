@@ -34,9 +34,11 @@ codecs/aqr-disk/scripts/gen-dmg.sh          # tests/data/dmg-*: a disk of HFS+ a
   A UDIF image (`.dmg`, `dmg`: the `koly` trailer, the property list's `mish` block tables, from
   the format's public descriptions) of raw chunks and zeros only (UDRO, UDRW) is a container as
   well; one of compressed chunks is parsed for aqr-compress, whose formula rebuilds its zlib,
-  bzip2 and LZFSE chunks from the disk.
+  bzip2 and LZFSE chunks from the disk. So is a qcow2 image of compressed clusters (raw DEFLATE,
+  `container::qcow2_chunks`): its chunks for aqr-compress (`chunked`), its compressed clusters
+  read as zeros as a container.
   Not read: differencing disks and those of a parent or backing file, encrypted ones, compressed
-  grains and clusters (streamOptimized VMDK; qcow2's compressed clusters read as zeros: stage 8),
+  grains (streamOptimized VMDK: stage 8), qcow2's zstd clusters,
   VHDX's log, VHD's and VHDX's sector bitmaps (an allocated block is taken whole).
 - **Partition tables**: GPT (of 512- or 4096-byte sectors; the primary header, its checksums not
   checked), else MBR (its four entries, and the logical partitions of the extended ones' chains
@@ -59,7 +61,7 @@ codecs/aqr-disk/scripts/gen-dmg.sh          # tests/data/dmg-*: a disk of HFS+ a
   pieces split from it; a piece overlapping one before it is left in the rest, and the file's
   contents are those taken.
 
-Not read yet: compressed containers (stage 8; DMGs of other compressions than zlib), holes of sparse files and of zeros as nodes of their own (they are
+Not read yet: streamOptimized VMDK and E01 (stage 8), holes of sparse files and of zeros as nodes of their own (they are
 in the rest, to zstd), file systems' metadata taken apart (`docs/disk-image-design.md`).
 
 ## How it does

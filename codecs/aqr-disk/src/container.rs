@@ -353,6 +353,87 @@ fn qcow2(d: &[u8]) -> Option<Map<'_>> {
     Map::of(Kind::Qcow2, d, size, cluster, count, entry)
 }
 
+/// The chunks of a qcow2 image of any compressed cluster (`crate::chunked`), as [`qcow2`] reads it
+/// otherwise: its clusters by its L2 tables, those allocated raw, compressed ones raw DEFLATE
+/// streams of zlib's (compression type 0; qcow2.txt's descriptor: the offset and the sectors from
+/// it, which may hold the next one's start: qemu packs them by bytes), the others zeros (an L2 table
+/// not allocated, its clusters at once). Runs of raw clusters one after another in the disk and
+/// the file, and of zeros, are a chunk each. None where no cluster is compressed.
+pub fn qcow2_chunks(d: &[u8]) -> Option<crate::chunked::Chunked> {
+    use crate::chunked::{Chunk, How};
+    let h = d.get(..104)?;
+    if &h[..4] != b"QFI\xfb" || !matches!(be32(h, 4), 2 | 3) {
+        return None;
+    }
+    let (backing, bits, size, crypt, l1_size, l1) =
+        (be64(h, 8), be32(h, 20), be64(h, 24), be32(h, 32), be32(h, 36) as u64, be64(h, 40));
+    let incompatible = if be32(h, 4) == 3 { be64(h, 72) } else { 0 };
+    if backing != 0 || crypt != 0 || incompatible & !0b11 != 0 || !(9..=21).contains(&bits) {
+        return None;
+    }
+    let (cluster, x) = (1u64 << bits, 62 - (bits - 8));
+    let per_l2 = cluster / 8;
+    let count = size.div_ceil(cluster);
+    if l1_size.checked_mul(per_l2)? < count {
+        return None;
+    }
+    let mask = 0x00ff_ffff_ffff_fe00u64;
+    let l1 = usize::try_from(l1).ok()?;
+    let mut chunks: Vec<Chunk> = Vec::new();
+    let mut push = |c: Chunk| match chunks.last_mut() {
+        Some(l)
+            if l.how == c.how
+                && l.disk.end == c.disk.start
+                && matches!(c.how, How::Zeros | How::Raw)
+                && (c.how == How::Zeros || l.file.end == c.file.start) =>
+        {
+            l.disk.end = c.disk.end;
+            l.file.end = c.file.end;
+        }
+        _ => chunks.push(c),
+    };
+    let mut compressed = false;
+    for t in 0..count.div_ceil(per_l2) {
+        let p = l1.checked_add(usize::try_from(8 * t).ok()?)?;
+        let l2 = be64(d.get(p..p + 8)?, 0) & mask;
+        let first = t * per_l2;
+        let n = per_l2.min(count - first);
+        if l2 == 0 {
+            let disk = first * cluster..((first + n) * cluster).min(size);
+            push(Chunk { disk, file: 0..0, how: How::Zeros });
+            continue;
+        }
+        for k in 0..n {
+            let p = usize::try_from(l2.checked_add(8 * k)?).ok()?;
+            let e = be64(d.get(p..p + 8)?, 0);
+            let disk = (first + k) * cluster..((first + k + 1) * cluster).min(size);
+            let len = (disk.end - disk.start) as usize;
+            let c = if e & 1 << 62 != 0 {
+                compressed = true;
+                let at = e & ((1 << x) - 1);
+                let sectors = ((e >> x) & ((1 << (62 - x)) - 1)) + 1;
+                let end = (at & !511).checked_add(sectors * 512)?;
+                let file = usize::try_from(at).ok()?..usize::try_from(end).ok()?.min(d.len());
+                if file.start >= file.end {
+                    return None;
+                }
+                Chunk { disk, file, how: How::Deflate }
+            } else if e & mask != 0 && e & 1 == 0 {
+                let at = usize::try_from(e & mask).ok()?;
+                let file = at..at.checked_add(len)?;
+                if file.end > d.len() {
+                    return None;
+                }
+                Chunk { disk, file, how: How::Raw }
+            } else {
+                Chunk { disk, file: 0..0, how: How::Zeros }
+            };
+            push(c);
+        }
+    }
+    compressed.then_some(crate::chunked::Chunked { len: size, chunks })
+}
+
 /// A VDI image of VirtualBox (header version 1.1, dynamic or fixed): its block map (indices of
 /// blocks in the data; free and zero blocks read as zeros).
 fn vdi(d: &[u8]) -> Option<Map<'_>> {

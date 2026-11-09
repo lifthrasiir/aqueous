@@ -213,3 +213,52 @@ fn udif_images_damaged() {
         }
     }
 }
+
+/// A qcow2 image of compressed clusters (`scripts/gen-containers.sh`, `qemu-img convert -c`): its
+/// chunks cover the disk one after another, its raw DEFLATE ones inflating to their parts of it;
+/// the same image cut short or with bytes changed (its header, its tables) gives none, or chunks
+/// within the file and the disk; an image of no compressed cluster gives none.
+#[test]
+fn qcow2_compressed_chunks() {
+    let (disk, d) = (fixture("disk.img"), fixture("disk-c.qcow2"));
+    let u = aqr_disk::container::qcow2_chunks(&d).unwrap();
+    assert_eq!(u.len, disk.len() as u64);
+    let mut chunks = u.chunks.clone();
+    chunks.sort_by_key(|c| c.disk.start);
+    let (mut at, mut deflated) = (0, 0);
+    for c in &chunks {
+        assert_eq!(c.disk.start, at);
+        at = c.disk.end;
+        let want = &disk[c.disk.start as usize..c.disk.end as usize];
+        match c.how {
+            aqr_disk::dmg::How::Zeros => assert!(want.iter().all(|&b| b == 0)),
+            aqr_disk::dmg::How::Raw => assert!(&d[c.file.clone()] == want),
+            aqr_disk::dmg::How::Deflate => {
+                let mut out = Vec::new();
+                std::io::Read::read_to_end(&mut flate2::read::DeflateDecoder::new(&d[c.file.clone()]), &mut out)
+                    .unwrap();
+                assert!(out == want);
+                deflated += 1;
+            }
+            how => panic!("{how:?}"),
+        }
+    }
+    assert_eq!(at, u.len);
+    assert!(deflated > 100, "{deflated}");
+    assert!(aqr_disk::container::qcow2_chunks(&fixture("disk.qcow2")).is_none());
+    for n in [0, 103, 104, 4096, d.len() / 2, d.len() - 1] {
+        let e = &d[..n];
+        if let Some(u) = aqr_disk::container::qcow2_chunks(e) {
+            assert!(u.chunks.iter().all(|c| c.file.end <= e.len()), "cut at {n}");
+        }
+    }
+    for p in (0..104).chain((0x30000..0x30400).step_by(3)) {
+        for v in [0x00, 0xff, d[p] ^ 0x40] {
+            let mut e = d.clone();
+            e[p] = v;
+            if let Some(u) = aqr_disk::container::qcow2_chunks(&e) {
+                assert!(u.chunks.iter().all(|c| c.file.end <= e.len()), "byte {p} = {v:#x}");
+            }
+        }
+    }
+}

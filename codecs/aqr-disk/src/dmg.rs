@@ -14,26 +14,7 @@ fn be64(b: &[u8], p: usize) -> u64 {
     u64::from_be_bytes(b[p..p + 8].try_into().unwrap())
 }
 
-/// How a chunk is stored.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum How {
-    /// Zeros (or sectors ignored: zeros as well), of no bytes.
-    Zeros,
-    Raw,
-    Zlib,
-    Bzip2,
-    Lzfse,
-    Lzma,
-    Adc,
-}
-
-/// A chunk: the bytes of the disk it gives, where its bytes are in the file, and how.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Chunk {
-    pub disk: Range<u64>,
-    pub file: Range<usize>,
-    pub how: How,
-}
+pub use crate::chunked::{Chunk, How};
 
 /// A UDIF image: its disk's bytes, its chunks (in the order of the tables), where its property
 /// list is, and its trailer.
