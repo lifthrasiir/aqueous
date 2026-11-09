@@ -273,3 +273,43 @@ fn dump_writer_styles() {
     }
     std::fs::write(std::env::var("OUT").unwrap(), s).unwrap();
 }
+
+/// The verification's check of a decoded block (`block::Check`): the numbers the encoder told,
+/// at their places, are not printed again, and the block is the same; without them (every
+/// number printed), the same; a decoder giving other numbers or indices than the block's is
+/// caught, told or not.
+#[test]
+fn check_of_decoded_blocks() {
+    use aqr_obj::block::{Check, Decoder, Encoder, NSTREAMS, S_FSYM, S_VAL};
+    let mut src = String::new();
+    for i in 0..300 {
+        let x = (i as f64 * 0.37).sin();
+        let z = if i % 7 == 0 { 0.0 } else { x * 3.0 };
+        src += &format!("v {} {} {}\n", c_fmt(c"%.17g", x), c_fmt(c"%f", -x), c_fmt(c"%g", z));
+        src += &format!("vn 0 {} 1\n", c_fmt(c"%.9g", x));
+        if i > 2 {
+            src += &format!("f {} {}//{} -1\n", i - 2, i - 1, i);
+        }
+    }
+    src += "# end\n";
+    let src = src.as_bytes();
+    let mut enc = Encoder::default();
+    let mut streams: [Vec<u8>; NSTREAMS] = std::array::from_fn(|_| Vec::new());
+    enc.encode(src, &mut streams);
+    assert!(enc.told().len() > 1000);
+    let checked = |streams: &[Vec<u8>; NSTREAMS], told| {
+        let mut c = Check::new(src, told);
+        Decoder::default().decode(streams, &mut c) && c.same()
+    };
+    assert!(checked(&streams, enc.told()));
+    assert!(checked(&streams, &[]));
+    // (a value, and a face's index, changed: decoded otherwise)
+    for k in [S_VAL, S_FSYM] {
+        let k = (k..k + 3).find(|&k| streams[k].len() > 8).unwrap();
+        let mut bad = streams.clone();
+        let n = bad[k].len();
+        bad[k][n / 2] ^= 1;
+        assert!(!checked(&bad, enc.told()), "stream {k}");
+        assert!(!checked(&bad, &[]), "stream {k}");
+    }
+}

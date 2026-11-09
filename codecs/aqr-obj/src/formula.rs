@@ -119,7 +119,6 @@ fn encode_blocks(input: &[u8], opt: &Options) -> Option<Formula> {
     let mut enc = block::Encoder::default();
     let mut dec = block::Decoder::default();
     let mut streams = codec::new_streams();
-    let mut check = Vec::new();
     let mut blocks = Vec::new();
     let mut p = 0;
     while p < input.len() {
@@ -129,8 +128,8 @@ fn encode_blocks(input: &[u8], opt: &Options) -> Option<Formula> {
         enc.encode(b, &mut streams);
         let mut ok = opt.force_whole >> (blocks.len() % 64) & 1 == 0;
         if ok && opt.verify {
-            check.clear();
-            ok = dec.decode(&streams, &mut check) && check == b;
+            let mut check = block::Check::new(b, enc.told());
+            ok = dec.decode(&streams, &mut check) && check.same();
         }
         if ok {
             blocks.push(Blk::Coded(b.len(), Box::new(std::mem::replace(&mut streams, codec::new_streams()))));

@@ -25,7 +25,9 @@ have too. Without the default feature `encode`, the crate is the module's code a
 (`module`), which aqr-modules builds into the Wasm module `obj-recons`.
 
 Any input is accepted: lines that do not parse are kept as text, and a block that fails
-verification is stored whole.
+verification is stored whole. The verification decodes each block against the text it was
+coded from (`block::Check`); a number the encoder checked prints back to its token (and told,
+`Encoder::told`) is compared by its value, scale and format rather than printed again.
 
 ## Results
 
@@ -199,8 +201,8 @@ cargo test --release
 
 ## Next steps
 
-- Compression speed of `%.17g` files: the mode check and the verification both print
-  each number from exact digits; one of them could compare values instead.
+- Compression speed of `%.17g` files: the mode check prints each number from exact digits
+  (twice where the 15-digit guess misses, most `%.17g` numbers).
 - Connectivity: faces in random order (decimated scans) cost about the logarithm of the
   vertex count per index; coding a vertex against the faces around its neighbours needs
   more state than the bounded tables keep.

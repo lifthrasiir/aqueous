@@ -257,14 +257,16 @@ fn parse_corner(t: &[u8]) -> Option<((i64, i64, i64), u8)> {
 /// Parses a `v`, `vt`, `vn`, `vp`, `f` or `l` line in `styles`: its template into `key`,
 /// its numbers into `vals` (zeros not in a fixed format at scale 0: `Encoder::code_line`
 /// gives them the previous one's) or its corners onto `corners`. The kind and the count
-/// of numbers or corners; None if the line does not parse back to itself. Needs no state:
-/// it runs on other threads too.
+/// of numbers or corners; None if the line does not parse back to itself. The numbers' tokens
+/// go in `toks` (their start in the line and length), each a token that the number prints back
+/// to. Needs no state: it runs on other threads too.
 #[inline]
 fn parse_line(
     l: &[u8],
     styles: &Styles,
     key: &mut Vec<u8>,
     vals: &mut [(i64, i32, u8); MAX_NUMS],
+    toks: &mut [(u32, u32); MAX_NUMS],
     corners: &mut Vec<(i64, i64, i64)>,
     tmp: &mut Vec<u8>,
 ) -> Option<(u8, usize)> {
@@ -292,6 +294,7 @@ fn parse_line(
             let t = &l[i..te];
             let (v, sc, mode, f) = style.encode(t, 0, tmp)?;
             vals[n] = (v, sc, mode);
+            toks[n] = (i as u32, t.len() as u32);
             n += 1;
             key.extend_from_slice(&[mode, f, (i - ws) as u8]);
             key.extend_from_slice(&l[ws..i]);
@@ -355,12 +358,13 @@ pub fn parse_block(styles: &Styles, src: &[u8]) -> ParsedBlock {
     let mut key = Vec::new();
     let mut tmp = Vec::new();
     let mut vals = [(0i64, 0i32, 0u8); MAX_NUMS];
+    let mut toks = [(0u32, 0u32); MAX_NUMS];
     let mut p = 0;
     while p < src.len() {
         let e = memchr::memchr(b'\n', &src[p..]).map_or(src.len(), |i| p + i + 1);
         let mut r = ParsedLine { start: p as u32, end: e as u32, kind: RAW, n: 0, key_len: 0, key: 0, item: 0 };
         let c0 = b.corners.len();
-        match parse_line(&src[p..e], styles, &mut key, &mut vals, &mut b.corners, &mut tmp) {
+        match parse_line(&src[p..e], styles, &mut key, &mut vals, &mut toks, &mut b.corners, &mut tmp) {
             Some((kind, n)) => {
                 r.kind = kind;
                 r.n = n as u16;
@@ -400,6 +404,20 @@ pub struct Encoder {
     last_vp: [usize; 3],
     /// Corners of the current face line.
     fbuf: Vec<(i64, i64, i64)>,
+    /// The numbers of the block [`Encoder::encode`] coded, for [`Check`].
+    told: Vec<Told>,
+}
+
+/// A number [`Encoder::encode`] coded, as the decoder gives it (value, scale, mode, flags), and
+/// the place in the block of the token it prints back to (start, length).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Told {
+    at: u32,
+    len: u32,
+    v: i64,
+    s: i32,
+    mode: u8,
+    f: u8,
 }
 
 impl Default for Encoder {
@@ -417,6 +435,7 @@ impl Default for Encoder {
             corners: Corners::new(),
             last_vp: [0; 3],
             fbuf: vec![],
+            told: vec![],
         }
     }
 }
@@ -463,13 +482,20 @@ impl Encoder {
         self.begin(s);
         let mut p = 0;
         let mut vals = [(0i64, 0i32, 0u8); MAX_NUMS];
+        let mut toks = [(0u32, 0u32); MAX_NUMS];
         let (mut key, mut corners) = (std::mem::take(&mut self.key), std::mem::take(&mut self.fbuf));
         while p < src.len() {
             let e = memchr::memchr(b'\n', &src[p..]).map_or(src.len(), |i| p + i + 1);
             let l = &src[p..e];
             corners.clear();
-            let ok = match parse_line(l, &self.styles, &mut key, &mut vals, &mut corners, &mut self.tmp) {
-                Some((kind, n)) => self.code_line(kind, n, &key, &mut vals, &mut corners, s),
+            let ok = match parse_line(l, &self.styles, &mut key, &mut vals, &mut toks, &mut corners, &mut self.tmp) {
+                Some((kind, n)) => {
+                    let ok = self.code_line(kind, n, &key, &mut vals, &mut corners, s);
+                    if ok && kind < K_F {
+                        self.tell(p, n, &key, &vals, &toks);
+                    }
+                    ok
+                }
                 None => false,
             };
             if !ok {
@@ -514,7 +540,32 @@ impl Encoder {
         self.styles
     }
 
+    /// The numbers [`Encoder::encode`] coded in the last block, in the order of their tokens.
+    pub fn told(&self) -> &[Told] {
+        &self.told
+    }
+
+    /// Tells the `n` numbers `vals` of a line at `p` of template `key` (as coded: zeros at the
+    /// previous scale), their tokens at `toks`.
+    fn tell(
+        &mut self,
+        p: usize,
+        n: usize,
+        key: &[u8],
+        vals: &[(i64, i32, u8); MAX_NUMS],
+        toks: &[(u32, u32); MAX_NUMS],
+    ) {
+        let mut i = 2;
+        for j in 0..n {
+            let (mode, f) = (key[i], key[i + 1]);
+            i += 3 + key[i + 2] as usize;
+            let (at, len) = toks[j];
+            self.told.push(Told { at: p as u32 + at, len, v: vals[j].0, s: vals[j].1, mode, f });
+        }
+    }
+
     fn begin(&mut self, s: &mut [Vec<u8>; NSTREAMS]) {
+        self.told.clear();
         for v in s.iter_mut() {
             v.clear();
         }
@@ -898,6 +949,82 @@ impl Deferred {
                 }
             }
         }
+    }
+}
+
+/// A decoded block checked against the block it was coded from, as it is decoded: a number the
+/// encoder told ([`Encoder::told`]) at the same place and of the same value, scale, mode and
+/// flags is its token there, which the encoder checked prints back to it; it is not printed
+/// again. Any other number (a zero at a scale of its predecessor, one not told) is printed and
+/// compared.
+pub struct Check<'a> {
+    src: &'a [u8],
+    told: &'a [Told],
+    /// Where the decoded text is in `src`, and the next number in `told`.
+    pos: usize,
+    next: usize,
+    same: bool,
+    tmp: Vec<u8>,
+}
+
+impl<'a> Check<'a> {
+    pub fn new(src: &'a [u8], told: &'a [Told]) -> Self {
+        Check { src, told, pos: 0, next: 0, same: true, tmp: Vec::new() }
+    }
+
+    /// Whether the text decoded is all of `src`.
+    pub fn same(&self) -> bool {
+        self.same && self.pos == self.src.len()
+    }
+
+    #[inline]
+    fn text(&mut self, b: &[u8]) {
+        self.same &= self.src[self.pos.min(self.src.len())..].starts_with(b);
+        self.pos += b.len();
+    }
+
+    #[inline]
+    fn printed(&mut self) {
+        let t = std::mem::take(&mut self.tmp);
+        self.text(&t);
+        self.tmp = t;
+    }
+}
+
+impl Sink for Check<'_> {
+    #[inline]
+    fn bytes(&mut self, b: &[u8]) {
+        self.text(b);
+    }
+
+    #[inline]
+    fn byte(&mut self, c: u8) {
+        self.text(&[c]);
+    }
+
+    #[inline]
+    fn number(&mut self, v: i64, s: i32, mode: u8, f: u8) {
+        let t = self.told.get(self.next);
+        self.next += 1;
+        // (a zero not fixed: told at the scale of its predecessor, not that of its token)
+        if let Some(t) = t
+            && t.at as usize == self.pos
+            && (v != 0 || mode == M_FIX)
+            && (t.v, t.s, t.mode, t.f) == (v, s, mode, f)
+        {
+            self.pos += t.len as usize;
+            return;
+        }
+        self.tmp.clear();
+        aqr_num::put(&mut self.tmp, v, s, mode, f);
+        self.printed();
+    }
+
+    #[inline]
+    fn index(&mut self, a: i64, neg: bool, count: i64) {
+        self.tmp.clear();
+        put_index(&mut self.tmp, a, neg, count);
+        self.printed();
     }
 }
 
