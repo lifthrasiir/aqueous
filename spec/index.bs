@@ -2722,6 +2722,16 @@ Opcode 15<sub>16</sub> denotes a **Patch instruction**. Its operands consist of 
   as `zstd --patch-from` does.
 </div>
 
+<div class=note>
+  With an empty |source|, a Patch instruction decompresses the blocks of a Zstandard frame without a dictionary,
+  which start from the same state.
+  A compressor can then keep a Zstandard file as it is
+  and take the files its content holds (the whole, or the members of a tar archive) from a Split instruction of that output,
+  rather than storing them again.
+  A piece of the Split that no file takes is dropped as the |source| of another Patch instruction
+  whose |patch| is an empty raw block, the final one (<code>01 00 00</code>), of an empty output.
+</div>
+
 <h4 id=insn-checksum>
 Checksum instruction</h4>
 

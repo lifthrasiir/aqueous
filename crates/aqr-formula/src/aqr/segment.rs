@@ -821,7 +821,10 @@ impl Encoder {
         for &i in &u.shared {
             e.shared(i, &f.shared[i]);
         }
-        leaf.outputs.iter().for_each(|n| e.node(n));
+        for (k, n) in leaf.outputs.iter().enumerate() {
+            e.node(n);
+            e.sink(k);
+        }
         debug_assert!(e.stack.iter().all(Option::is_none) && e.stack.len() == leaf.outputs.len());
         // each output checked where it is brought to the top, and put back
         let k = leaf.outputs.len();

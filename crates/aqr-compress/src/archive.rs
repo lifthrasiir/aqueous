@@ -1306,7 +1306,7 @@ const TOGETHER_MAX: u64 = 2 << 30;
 /// and the file of its data (inflated whole where its header tells a large one), an ar, tar or cpio
 /// archive or ISO 9660 or UDF image and the contents of its members (read whole, one at a time,
 /// for their CRC-32; those of at least [`MEMBER_MIN`] bytes), a git pack and its indexes (by name and the pack's
-/// trailer, of any size), a `.lzma` or `.xz` file and those of what its streams hold
+/// trailer, of any size), a `.lzma`, `.xz` or Zstandard file and those of what its streams hold
 /// (decoded whole, [`stream_sums`]), an NSIS installer and those of the files its data stores
 /// (read whole, the tarballs decoded, [`crate::nsis::sums`]), FSB5 banks and those of their samples (read whole, by the samples'
 /// CRC-32; banks sharing samples so), and contents that start alike (their first 64 KiB, or
@@ -1361,6 +1361,10 @@ fn together<S: Source + ?Sized>(
         }
         if format == Some(detect::Format::Xz) && size <= TOGETHER_MAX {
             held.extend(stream_sums(aqr_lzma::formula::data_xz(&src.read(c)?)));
+        }
+        // (a Zstandard file's frames, which the files they hold are taken from: `crate::zst`)
+        if opt.recompresses() && aqr_zstd::starts(&head) && size <= TOGETHER_MAX {
+            held.extend(stream_sums(crate::zst::content(&src.read(c)?, crate::zst::bound(opt))));
         }
         // (an NSIS installer's stored files: tarballs of the files installed, mostly)
         if format == Some(detect::Format::Pe) && size <= TOGETHER_MAX {
@@ -1554,7 +1558,7 @@ fn lay_alike<S: Source + ?Sized>(
     Ok(())
 }
 
-/// What the data of a `.lzma` or `.xz` file holds (None where it does not decode), as
+/// What the data of a `.lzma`, `.xz` or Zstandard file holds (None where it does not decode), as
 /// [`together`] takes it: the CRC-32 and size of the members of an ar, tar or cpio archive
 /// ([`member_sums`]), or else of all of it.
 pub(crate) fn stream_sums(data: Option<Vec<u8>>) -> Vec<(u32, u64)> {
@@ -1568,17 +1572,23 @@ pub(crate) fn stream_sums(data: Option<Vec<u8>>) -> Vec<(u32, u64)> {
 /// The CRC-32 and size of the files' contents in ar, tar, cpio or asar archive or ISO 9660 or
 /// UDF image `d`, those of at least [`MEMBER_MIN`] bytes.
 fn member_sums(d: &[u8], threads: usize) -> Vec<(u32, u64)> {
+    let bodies: Vec<&[u8]> =
+        member_spans(d).into_iter().filter(|s| s.len() as u64 >= MEMBER_MIN).map(|s| &d[s]).collect();
+    aqr_common::pool::par_map(bodies.len(), threads, |i| (aqr_common::crc32::hash(bodies[i]), bodies[i].len() as u64))
+}
+
+/// Where the files' contents are in ar, tar, cpio or asar archive or ISO 9660 or UDF image `d`
+/// (none where it is none of them).
+pub(crate) fn member_spans(d: &[u8]) -> Vec<std::ops::Range<usize>> {
     use aqr_bundle::{formula, layout::Role};
-    let spans: Vec<std::ops::Range<usize>> = if aqr_iso::starts(d) {
+    if aqr_iso::starts(d) {
         aqr_iso::pieces(d, &aqr_iso::files(d)).into_iter().filter(|p| p.file.is_some()).map(|p| p.span).collect()
     } else if aqr_asar::starts(d) {
         aqr_asar::formula::files(d).into_iter().map(|f| f.1).collect()
     } else {
         let recs = formula::detect(d).and_then(|f| formula::records(f, d)).unwrap_or_default();
         recs.iter().filter_map(|r| r.body()).filter(|b| b.role == Role::File).map(|b| b.span.clone()).collect()
-    };
-    let bodies: Vec<&[u8]> = spans.into_iter().filter(|s| s.len() as u64 >= MEMBER_MIN).map(|s| &d[s]).collect();
-    aqr_common::pool::par_map(bodies.len(), threads, |i| (aqr_common::crc32::hash(bodies[i]), bodies[i].len() as u64))
+    }
 }
 
 /// What files are ordered by, to put those alike next to each other: the extension, then the
@@ -1692,6 +1702,8 @@ fn analyze(i: usize, files: &[File], data: Vec<Bytes>, raw: &HashSet<usize>, opt
         });
     }
     f.root = Node::Concat(slices);
+    // (the files that the frames of a Zstandard file hold, taken from them)
+    crate::zst::share(&mut f, &files.iter().map(|f| (f.len, f.hash)).collect::<Vec<_>>(), crate::zst::bound(opt));
 
     // nested a format deeper, so that the files are as deep as a file alone is
     let nopt = Options { depth: opt.depth.saturating_add(1), ..opt.clone() };
@@ -1779,8 +1791,40 @@ fn laid(mut f: Formula, files: &[File], enc: aqr::Encoder, memo: verify::Memo, o
     let mut leaves: Vec<Leaf> = Vec::new();
     let mut at = vec![(0, 0); files.len()];
     let mut set_leaf: HashMap<usize, usize> = HashMap::new();
+    // (the files taking pieces of a patch's output, [`crate::zst`]: those taking pieces of the
+    // same ones a leaf, as each output is taken in the leaf it is made in; its outputs in the
+    // order of the pieces, so that they are made one after another)
+    let pieces = |n: &Node| {
+        let mut out = Vec::new();
+        n.visit(&mut |n| match *n {
+            Node::Output { shared, index, .. } if f.shared[shared].apply().is_none() => out.push((shared, index)),
+            _ => {}
+        });
+        out
+    };
+    let mut group: Vec<usize> = (0..f.shared.len()).collect();
+    fn find(g: &mut [usize], mut i: usize) -> usize {
+        while g[i] != i {
+            (g[i], i) = (g[g[i]], g[i]);
+        }
+        i
+    }
+    let taken: Vec<Vec<(usize, usize)>> = nodes.iter().map(pieces).collect();
+    for t in &taken {
+        for w in t.windows(2) {
+            let (a, b) = (find(&mut group, w[0].0), find(&mut group, w[1].0));
+            group[a.max(b)] = a.min(b);
+        }
+    }
+    // (of each group: the files, each with the first piece it takes)
+    type Takers = Vec<((usize, usize), usize, Node)>;
+    let mut patched: HashMap<usize, Takers> = HashMap::new();
     for (k, node) in nodes.into_iter().enumerate() {
         let sum = Some(files[k].sum);
+        if let Some(&first) = taken[k].iter().min() {
+            patched.entry(find(&mut group, first.0)).or_default().push((first, k, node));
+            continue;
+        }
         match node {
             Node::Output { shared, index, .. } => {
                 let n = f.shared[shared].sizes.len();
@@ -1796,6 +1840,19 @@ fn laid(mut f: Formula, files: &[File], enc: aqr::Encoder, memo: verify::Memo, o
                 at[k] = (leaves.len() - 1, 0);
             }
         }
+    }
+    let mut patched: Vec<_> = patched.into_values().collect();
+    patched.iter_mut().for_each(|g| g.sort_unstable_by_key(|&(first, ..)| first));
+    patched.sort_unstable_by_key(|g| g[0].0);
+    for g in patched {
+        let l = leaves.len();
+        let mut leaf = Leaf { outputs: Vec::new(), sums: Vec::new() };
+        for (index, (_, k, node)) in g.into_iter().enumerate() {
+            leaf.outputs.push(node);
+            leaf.sums.push(Some(files[k].sum));
+            at[k] = (l, index);
+        }
+        leaves.push(leaf);
     }
 
     // the streams of a class together, within a block each; but those that do not compress,

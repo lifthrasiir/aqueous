@@ -42,7 +42,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   - `aqr-modules` — Wasm modules built from the recompressors' code (`src/bin`, `wasm/`,
     `src/known.rs`).
 - `codecs/` — the recompressor crates `aqr-*` (flate, png, jpeg, mp3, flac, pdf, zip, sqlite,
-  git, lz4, lzma, lzo, bvx, bz2, alz, egg, azo, lha, rar, snappy, gif, prores, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle,
+  git, lz4, lzma, lzo, bvx, bz2, alz, egg, azo, lha, rar, snappy, zstd, gif, prores, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle,
   asar, vorbis, ogg, mkv, …), each with a `README.md` and a `FORMAT.md` describing what it stores; a crate with a
   `FORMAT.md` belongs here. `aqr-flate` underlies everything that uses DEFLATE. The workspace
   takes both directories by glob, so a new crate needs no entry in the root `Cargo.toml`.
@@ -227,6 +227,10 @@ optimization picked by hash.
 - aqr-snappy and aqr-lz4 reimplement the encoders: Chrome's LevelDB Snappy is the
   multiplicative-hash build (Homebrew's arm64 builds use the CRC hash and do not match);
   Firefox's mozlz4 is liblz4's `LZ4_compress_default`.
+- aqr-zstd: Zstandard frames are not rebuilt (it would gain little); a `.zst` file is kept as it
+  is and the files of its batch that its content holds (the whole, a tar archive's members) are
+  taken from its frames, decompressed by Patch instructions of an empty source and split
+  (`Formula::split_patch`, `crates/aqr-compress/src/zst.rs`). No module. Left (its README's Status).
 - aqr-git is the pack recompressor `git-pack-recons`, at aqr-flate's profile as aqr-compress
   picks it; a pack with its `.idx`/`.rev` is a set (`git-pack-index-recons`, only the ids
   stored). Left: deriving the ids (resolving every delta), `multi-pack-index` from the indexes,

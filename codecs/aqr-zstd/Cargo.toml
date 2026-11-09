@@ -1,0 +1,15 @@
+[package]
+name = "aqr-zstd"
+version = "0.1.0"
+edition = "2024"
+description = "Zstandard frames decompressed by the archive's Patch instructions, so that what they hold is shared with other files"
+publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the structure of frames alone.
+encode = ["dep:aqr-formula"]
+
+[dependencies]
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+zstd = "0.13"

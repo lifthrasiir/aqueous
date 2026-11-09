@@ -258,6 +258,7 @@ dependencies = [
  "aqr-wrt",
  "aqr-xsv",
  "aqr-zip",
+ "aqr-zstd",
  "flate2",
  "libc",
  "memmap2",
@@ -1026,6 +1027,14 @@ dependencies = [
  "aqr-formula",
  "flate2",
  "memchr",
+ "zstd",
+]
+
+[[package]]
+name = "aqr-zstd"
+version = "0.1.0"
+dependencies = [
+ "aqr-formula",
  "zstd",
 ]
 

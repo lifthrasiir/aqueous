@@ -716,6 +716,41 @@ fn lzma_held_once() {
     }
 }
 
+/// Files, a `.tar.zst` of them, a file of two frames (a skippable frame between them) of
+/// another, and a `.zst` of the same as the tar archive: the files taken from the frames
+/// (decompressed by Patch instructions), which are kept as they are, so that the files cost
+/// next to nothing; the tar archive taken from the frames of its own. In a batch together
+/// however small the batches.
+#[test]
+fn zstd_held_once() {
+    let mut members: Vec<(String, Vec<u8>)> = (0..3).map(|k| (format!("m/f{k}.txt"), words(1_000_000, k))).collect();
+    // (raw blocks)
+    members.push(("m/noise.bin".into(), noise(300_000, 1)));
+    let refs: Vec<(&str, &[u8])> = members.iter().map(|(n, d)| (&n[..], &d[..])).collect();
+    let tarred = tar(&refs);
+    let tzst = zstd::bulk::compress(&tarred, 3).unwrap();
+    let g = words(400_000, 9);
+    let mut gzst = zstd::bulk::compress(&g[..150_000], 1).unwrap();
+    gzst.extend_from_slice(&[0x5e, 0x2a, 0x4d, 0x18, 4, 0, 0, 0, 1, 2, 3, 4]);
+    gzst.extend(zstd::bulk::compress(&g[150_000..], 5).unwrap());
+    let opt = Options { block: 1 << 20, ..Options::default() };
+    let zsts = [("p/m.tar.zst", tzst.clone()), ("p/m2.tar.zst", zstd::bulk::compress(&tarred, 1).unwrap())];
+    let zsts = [&zsts[..], &[("q/g.txt.zst", gzst.clone())]].concat();
+    let (only, r) = archived(&zsts, &opt);
+    let only = only.len() - r.overhead;
+    let files: Vec<(&str, Vec<u8>)> = members.iter().map(|(n, d)| (&n[..], d.clone())).collect();
+    let all = [&files[..], &[("q/g.txt", g.clone()), ("p/m.tar", tarred.clone())], &zsts[..]].concat();
+    for opt in [opt.clone(), Options { batch: 1 << 20, ..opt.clone() }] {
+        let (c, r) = archived(&all, &opt);
+        let c = c.len() - r.overhead;
+        assert!(c < only + only / 50, "{c} of {only} of the frames alone");
+    }
+    // (frames of more content than an application's bound: the tar archives' not taken)
+    let (c, r) = archived(&all, &Options { application_bound: Some(1 << 20), ..opt });
+    let c = c.len() - r.overhead;
+    assert!(c > only + only / 2, "{c} of {only} of the frames alone");
+}
+
 /// Files, a `.tar.xz` of them and an `.xz` of one: the LZMA2 streams rebuilt from data taken
 /// from the files, so that the files are stored once, in a batch together however small the
 /// batches.

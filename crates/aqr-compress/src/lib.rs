@@ -18,6 +18,9 @@
 //! - Streams of Apple's LZFSE and LZVN blocks (`bvx2`, `bvxn`; asset catalogs hold them):
 //!   aqr-bvx on the data and record of the stream (from level 9).
 //! - bzip2 streams, one after another: aqr-bz2 on their data, what follows sliced.
+//! - Zstandard files: kept as they are (not rebuilt); the files of the same batch that are
+//!   their content, or a member of the tar archive it is, taken from their frames, which the
+//!   archive's Patch instructions decompress (`zst`, aqr-zstd).
 //! - LevelDB tables: aqr-snappy on the contents of their blocks.
 //! - ZIP archives: aqr-zip, rebuilding the archive from the contents of its entries (the
 //!   DEFLATE streams by aqr-flate) with its headers derived.
@@ -140,6 +143,7 @@ mod sets;
 pub mod spill;
 mod verify;
 mod zip;
+mod zst;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};

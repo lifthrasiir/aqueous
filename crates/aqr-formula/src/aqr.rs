@@ -1094,6 +1094,22 @@ impl Emit<'_> {
         }
     }
 
+    /// Puts the item at the top, the `k`-th output of a formula block of several, in its place
+    /// `k`, below the outputs of applications not taken yet (where they are, the lowest of them
+    /// brought up in its stead): so that taking one of them passes only the items of the output
+    /// being made, not the outputs made before it (a formula block of a thousand files taking
+    /// pieces of a Split, say, the Swaps would otherwise grow as their square).
+    fn sink(&mut self, k: usize) {
+        let top = self.stack.len() - 1;
+        debug_assert!(self.stack[..k].iter().all(Option::is_none) && self.stack[top].is_none());
+        if top > k {
+            debug_assert!(self.stack[k].is_some(), "the outputs not taken yet right above those made");
+            self.out.push(SWAP);
+            varint::put(self.out, (top - k) as u64);
+            self.stack.swap(k, top);
+        }
+    }
+
     /// Puts together the items of a concatenation at the top of the stack, of `levels` (each
     /// the number of times [`FOLD`] items were put together into it), [`FOLD`] of the same
     /// level at a time from the top.
