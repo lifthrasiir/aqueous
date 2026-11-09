@@ -15,6 +15,11 @@
 //!   with `..` by its last name alone, as 7-Zip does (tar, zip and RAR would keep an absolute
 //!   path whole, but the frontends give absolute paths); `--rename TO` after an input has it at
 //!   `TO` (`/` between names) instead. Two inputs of the same path are an error.
+//! - `-x NAME` (`--exclude`): compressing, the entries of `NAME` left out wherever they are
+//!   found (an input given too), or of a path in the archive where it has a `/` (but at its
+//!   end), with what is under them ([`Exclude`]); as given, no wildcards. `--files-from FILE`
+//!   takes the inputs (decompressing, the paths of the archive) listed in `FILE` (`-`: standard
+//!   input) where it is given, a line each, or ended by NUL each after `--null`.
 //! - `-L` (`--dereference`), as bsdtar's: compressing, the links given and found followed, each
 //!   archived (at its own name) as what it leads to, read there; a link leading nowhere, or to a
 //!   directory it is in, kept as a link and told. Without it a link is archived as a link, one
@@ -271,6 +276,12 @@ Compressing (aqr -o ARCHIVE INPUT [--rename TO]...):
                         a relative one as given, an absolute one or one with .. by
                         its last name
       --rename TO       after an INPUT: that one archived at TO (names between /)
+  -x, --exclude NAME    leave out the entries of NAME wherever they are, or of a path
+                        in the archive where it has a / (with what is under them); as
+                        given, no wildcards
+      --files-from FILE the inputs (or decompressing, PATHs) listed in FILE (- standard
+                        input), a line each
+      --null            the lists of --files-from after it ended by NUL each, not lines
   -L, --dereference     follow links (given or found), archiving what they lead to;
                         those leading nowhere or to a directory they are in kept
       --format FORMAT   aqr (the default), zip, 7z, alz, egg, tar, tar.gz, tar.bz2,
@@ -426,6 +437,8 @@ struct Args {
     /// `-P`: compressing, the archives encrypted with a passphrase asked for; decompressing,
     /// the passphrase asked for before the archives need it ([`pass`]).
     passphrase: bool,
+    /// Compressing, what is left out of the inputs (`-x`).
+    exclude: Exclude,
     /// `--passphrase-from`: where `-P`'s passphrase is taken (implying it).
     pass_from: Option<pass::Source>,
     /// `--each`: decompressing or listing, every input an archive.
@@ -557,6 +570,7 @@ fn parse() -> Result<Args, String> {
         level: None,
         passphrase: false,
         pass_from: None,
+        exclude: Exclude::default(),
         each: false,
         select: None,
         names: names::Opts::default(),
@@ -568,6 +582,9 @@ fn parse() -> Result<Args, String> {
     let mut renames: Vec<(usize, PathBuf)> = Vec::new();
     let (mut stats, mut stats_to) = (false, Vec::new());
     let mut format = None;
+    let mut null = false;
+    // (`--files-from -`: standard input taken by a list)
+    let (mut list_stdin, mut listed) = (false, false);
     let mut memory = None;
     let mut application_bound = None;
     // (`-C`: the directory so far, by input the one it was given in, and the last given)
@@ -670,6 +687,20 @@ fn parse() -> Result<Args, String> {
                 a.passphrase = true;
             }
             "--each" => a.each = true,
+            "-x" | "--exclude" => a.exclude.add(&value("-x")?)?,
+            "--null" => null = true,
+            "--files-from" => {
+                let from = value("--files-from")?;
+                list_stdin |= stdio::is(Path::new(&from));
+                listed = true;
+                for p in files_from(&from, null)? {
+                    if stdio::is(&p) {
+                        return Err(format!("--files-from {}: - (standard input) among the paths", from.display()));
+                    }
+                    a.inputs.push(p);
+                    dirs.push(dir.clone());
+                }
+            }
             "--rename" => renames.push((a.inputs.len(), value("--rename")?.into())),
             "-E" | "--encoding" => a.names.encoding = aqr_unpack::Choice::parse(&text(value("-E")?))?,
             "--normalize" => a.names.normalize = names::Opts::normalize(&text(value("--normalize")?))?,
@@ -694,7 +725,7 @@ fn parse() -> Result<Args, String> {
         });
     }
     // (none given, of standard input where it is not a terminal: as zstd and gzip have it)
-    if a.inputs.is_empty() && !a.list && !a.info && !a.ipc && !std::io::stdin().is_terminal() {
+    if a.inputs.is_empty() && !listed && !a.list && !a.info && !a.ipc && !std::io::stdin().is_terminal() {
         a.inputs.push("-".into());
         dirs.push(dir.clone());
     }
@@ -743,6 +774,9 @@ fn parse() -> Result<Args, String> {
         if !a.each && a.inputs.len() > 1 {
             a.select = Some(selection(a.inputs.split_off(1), Vec::new())?);
         }
+    }
+    if (!a.exclude.names.is_empty() || !a.exclude.paths.is_empty()) && (a.decompress || a.list || a.info) {
+        return Err("-x is for compressing".into());
     }
     if a.dereference && (a.decompress || a.list) {
         return Err("-L is for compressing".into());
@@ -821,6 +855,9 @@ fn parse() -> Result<Args, String> {
     if a.decompress && a.output.is_some() && a.inputs.len() > 1 && !a.auto_dir {
         return Err("-o with several archives to decompress".into());
     }
+    if list_stdin && (a.inputs.iter().any(|i| stdio::is(i)) || a.pass_from == Some(pass::Source::Stdin)) {
+        return Err("--files-from - with standard input taken otherwise too".into());
+    }
     stdio_args(&mut a)?;
     a.dir = dir;
     Ok(a)
@@ -835,7 +872,7 @@ enum Tok {
 
 /// The short options that take a value: in a bundle (`-cfo OUT`), the rest of the argument is
 /// theirs (`-oOUT`), or else the next argument.
-const SHORT_VALUES: &[u8] = b"oCTMlBbSE";
+const SHORT_VALUES: &[u8] = b"oCTMlBbSEx";
 
 /// Reads the arguments as options and inputs, getopt's way: short options bundled (`-cf`), a
 /// value joined to its option (`-T8`, `--memory=2G`), `--` ending the options, `-` an input
@@ -934,6 +971,23 @@ fn stdio_args(a: &mut Args) -> Result<(), String> {
         a.atomic = true;
     }
     Ok(())
+}
+
+/// The paths listed in file `from` (`-`: standard input) for `--files-from`: a line each, its
+/// end (`\n`, `\r\n`) left out; or, where `null`, ended by NUL each. Empty ones left out.
+fn files_from(from: &OsStr, null: bool) -> Result<Vec<PathBuf>, String> {
+    let err = |e: std::io::Error| format!("--files-from {}: {e}", from.display());
+    let mut b = Vec::new();
+    match stdio::is(Path::new(from)) {
+        true => std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut b).map_err(err)?,
+        false => std::io::Read::read_to_end(&mut fs::File::open(from).map_err(err)?, &mut b).map_err(err)?,
+    };
+    let end = if null { 0 } else { b'\n' };
+    Ok(b.split(|&c| c == end)
+        .map(|l| if null { l } else { l.strip_suffix(b"\r").unwrap_or(l) })
+        .filter(|l| !l.is_empty())
+        .map(|l| PathBuf::from(os_from(l)))
+        .collect())
 }
 
 /// An option's value as text (any of it not Unicode replaced), where it is not a path.
@@ -1416,6 +1470,9 @@ fn compress_into(
         ([input], [None]) => Some((input, meta(input)?)).filter(|(_, m)| m.is_file()),
         _ => None,
     };
+    if single.is_some() && a.exclude.excludes(&archive_names(&given[0], None)?) {
+        return Err(format!("nothing to archive in {} (-x)", inputs[0].display()));
+    }
     if let Some((input, m)) = single {
         let mut atimes = Atimes(a.preserve.then(Vec::new));
         atimes.note(input, &m);
@@ -1496,7 +1553,7 @@ fn compress_into(
     // (as long as it takes: a bar of no end known, and how many files)
     let listing = view::Listing::new(bars());
     let gathered = ticking(a, &listing, || -> Result<(), String> {
-        gather(inputs, given, renames, &mut g, &listing, a.opt.threads, a.dereference)?;
+        gather(inputs, given, renames, &mut g, &listing, a.opt.threads, a.dereference, &a.exclude)?;
         listing.finish();
         Ok(())
     });
@@ -1639,7 +1696,7 @@ fn pack_into(
     g.gone = a.rm.then(Vec::new);
     let listing = view::Listing::new(bars());
     let gathered = ticking(a, &listing, || -> Result<(), String> {
-        gather(inputs, given, &renames, &mut g, &listing, a.opt.threads, a.dereference)?;
+        gather(inputs, given, &renames, &mut g, &listing, a.opt.threads, a.dereference, &a.exclude)?;
         listing.finish();
         Ok(())
     });
@@ -1880,6 +1937,7 @@ fn gather(
     l: &view::Listing,
     threads: usize,
     dereference: bool,
+    x: &Exclude,
 ) -> Result<(), String> {
     let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
     let privileged = g.reader.privileged;
@@ -1901,8 +1959,8 @@ fn gather(
         // as a link at its name)
         ([(dir, t)], [None]) if t.is_dir() => {
             let s = meta::stat(dir, privileged).map_err(|e| err(dir, e))?;
-            let (x, forks) = g.reader.extra(dir, &s, &mut |w| g.warnings.push(w));
-            g.tree.root = x;
+            let (extra, forks) = g.reader.extra(dir, &s, &mut |w| g.warnings.push(w));
+            g.tree.root = extra;
             g.atimes.note(dir, &s.m);
             if let Some(gone) = &mut g.gone {
                 gone.push(Gone::of(dir, &s.m));
@@ -1912,13 +1970,16 @@ fn gather(
                 g.contents.push((f.path.clone(), os_bytes(f.path.as_os_str()), f.size));
                 l.bytes(f.size);
             }
-            walk(dir, None, &mut found, l, privileged, &mut follow)?;
+            walk(dir, None, &mut found, l, privileged, &mut follow, x)?;
         }
         _ => {
             // (by their names in the archive, the directories found among the inputs or on the way)
             let mut dirs: std::collections::HashMap<Vec<OsString>, usize> = Default::default();
             for (((input, t), given), to) in read.iter().zip(given).zip(renames) {
                 let names = archive_names(given, to.as_deref())?;
+                if x.excludes(&names) {
+                    continue;
+                }
                 let mut parent = None;
                 for k in 1..names.len() {
                     let at = dirs.entry(names[..k].to_vec()).or_insert_with(|| {
@@ -1952,7 +2013,7 @@ fn gather(
                 }
                 if t.is_dir() {
                     dirs.entry(names).or_insert(at);
-                    walk(input, Some(at), &mut found, l, privileged, &mut follow)?;
+                    walk(input, Some(at), &mut found, l, privileged, &mut follow, x)?;
                 }
             }
             taken_twice(&found)?;
@@ -2034,6 +2095,7 @@ fn walk(
     l: &view::Listing,
     privileged: bool,
     follow: &mut Follow,
+    x: &Exclude,
 ) -> Result<(), String> {
     // (not on Windows, where reading takes longer and listing a directory leaves its access
     // time, NTFS's, mostly as it was: there they are read with the rest, on threads)
@@ -2053,7 +2115,23 @@ fn walk(
     if follow.on {
         follow.chain.push(fs::canonicalize(dir).map_err(err)?);
     }
+    // (the path in the archive of what it holds, where paths are excluded)
+    let mut at: Vec<OsString> = Vec::new();
+    if !x.paths.is_empty() {
+        let mut p = parent;
+        while let Some(i) = p {
+            at.push(found[i].name.clone());
+            p = found[i].parent;
+        }
+        at.reverse();
+    }
     for (name, t) in names {
+        at.push(name.clone());
+        let out = x.excludes(&at);
+        at.pop();
+        if out {
+            continue;
+        }
         let mut path = dir.join(&name);
         let mut t = t;
         if follow.on && t.is_symlink() {
@@ -2069,11 +2147,41 @@ fn walk(
         if t.is_dir() {
             let at = found.len() - 1;
             let path = found[at].path.clone();
-            walk(&path, Some(at), found, l, privileged, follow)?;
+            walk(&path, Some(at), found, l, privileged, follow, x)?;
         }
     }
     follow.chain.pop();
     Ok(())
+}
+
+/// What `-x` (`--exclude`) leaves out of the inputs, with what is under it: the entries of a
+/// name (a pattern with no `/` but at its end), wherever they are, and of a path in the archive
+/// (`/` between names; `.` and a `/` at its start or end left out). Given as they are: no
+/// wildcards yet.
+#[derive(Default, Clone)]
+struct Exclude {
+    names: std::collections::HashSet<OsString>,
+    paths: Vec<Vec<OsString>>,
+}
+
+impl Exclude {
+    fn add(&mut self, p: &OsStr) -> Result<(), String> {
+        let b = os_bytes(p);
+        let b = b.strip_suffix(b"/").unwrap_or(&b);
+        let names: Vec<OsString> =
+            b.split(|&c| c == b'/').filter(|n| !n.is_empty() && *n != b".").map(os_from).collect();
+        match names.len() {
+            0 => return Err(format!("-x {}: no name", p.display())),
+            1 if !b.contains(&b'/') => _ = self.names.insert(names.into_iter().next().unwrap()),
+            _ => self.paths.push(names),
+        }
+        Ok(())
+    }
+
+    /// Whether the entry at path `names` in the archive is left out (what holds it not).
+    fn excludes(&self, names: &[OsString]) -> bool {
+        names.last().is_some_and(|n| self.names.contains(n)) || self.paths.iter().any(|p| p == names)
+    }
 }
 
 /// Links followed (`-L`), where `on`: each archived as what it leads to, read by the path
