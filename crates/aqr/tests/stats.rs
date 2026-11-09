@@ -43,12 +43,13 @@ fn bare_stats_alone() {
     fs::remove_dir_all(&d).unwrap();
 }
 
-/// With any other option, it is a run of aqr wanting its inputs as ever.
+/// With any other option, it is a run of aqr wanting its inputs as ever (listing: compressing,
+/// standard input would be its input).
 #[test]
 fn stats_with_another_option() {
     let d = scratch("other");
     let out =
-        Command::new(env!("CARGO_BIN_EXE_aqr")).args(["-q", "--stats=page.html"]).current_dir(&d).output().unwrap();
+        Command::new(env!("CARGO_BIN_EXE_aqr")).args(["-t", "--stats=page.html"]).current_dir(&d).output().unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("no input"));
     assert!(fs::read_dir(&d).unwrap().next().is_none());

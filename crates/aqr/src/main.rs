@@ -43,6 +43,15 @@
 //!   Only what they need is decoded ([`aqr::Archive::contents_of`], [`aqr_unpack::Select`]). A
 //!   path not in the archive is an error, before anything is extracted where its listing tells
 //!   (but in a tar archive, after); so is one under another.
+//! - `-` (an input) is standard input, `-o -` standard output ([`stdio`]). Compressing, `-` is
+//!   the only input, read whole before the work begins, an archive of a single file; written
+//!   to standard output where no `-o` is given (never to a terminal, but with `-f`). An archive
+//!   of several files is written to standard output as it is made (never committed: stopped,
+//!   what was written is cut short); an archive of a single file, encrypted or of another
+//!   format, made whole first. Decompressing, `-` is an Aqueous archive (read whole first, for
+//!   now), extracted to standard output where no `-o` is given; standard output takes the file
+//!   of an archive of a single file, or the one file of the paths given (`-d ARCHIVE PATH -o
+//!   -`). No input given, and standard input not a terminal, it is the input (but listing).
 //! - `-C DIR` (`--directory`), as tar has it: compressing, the inputs after it found in `DIR`
 //!   (each `-C` from the one before) and archived as if this were run there, `INPUT.aqr`
 //!   beside them; decompressing (given anywhere), what is extracted goes into `DIR` in place of
@@ -216,6 +225,7 @@ mod meta;
 mod names;
 mod pass;
 mod stats;
+mod stdio;
 mod stop;
 mod view;
 
@@ -272,7 +282,11 @@ Decompressing some paths (aqr -d ARCHIVE PATH [--rename TO]...):
       --each            every input an archive, each extracted (or listed) whole
 
 Output:
-  -o, --output OUTPUT   write to OUTPUT; compressing, all the inputs into one archive
+  -o, --output OUTPUT   write to OUTPUT; compressing, all the inputs into one archive;
+                        -o - is standard output (compressing, the archive; decompressing,
+                        the file of a single file's archive or of the one PATH given), and
+                        an INPUT - standard input (alone; its output standard output
+                        unless -o), the input where none is given
   -C, --directory DIR   compressing, the inputs after it found in DIR, archived as if
                         run there; decompressing, extract into DIR (-o in it too);
                         the archives' own paths are taken from where aqr is run
@@ -414,6 +428,12 @@ struct Args {
     names: names::Opts,
     /// Decompressing, which links are made (`--links`).
     links: extract::Links,
+    /// The input is standard input (`-`, alone).
+    stdin: bool,
+    /// The output is standard output (`-o -`; or by default, of standard input): compressing,
+    /// the archive; decompressing, the file of an archive of a single file, or the one of its
+    /// paths given.
+    stdout: bool,
 }
 
 /// The format of the archives made: Aqueous, or another of [`aqr_pack`] at its level.
@@ -531,6 +551,8 @@ fn parse() -> Result<Args, String> {
         select: None,
         names: names::Opts::default(),
         links: extract::Links::Inside,
+        stdin: false,
+        stdout: false,
     };
     // (by the number of inputs before it, `--rename`'s place and value)
     let mut renames: Vec<(usize, PathBuf)> = Vec::new();
@@ -657,6 +679,11 @@ fn parse() -> Result<Args, String> {
             }
         });
     }
+    // (none given, of standard input where it is not a terminal: as zstd and gzip have it)
+    if a.inputs.is_empty() && !a.list && !a.info && !a.ipc && !std::io::stdin().is_terminal() {
+        a.inputs.push("-".into());
+        dirs.push(dir.clone());
+    }
     if a.inputs.is_empty() {
         return Err("no input".into());
     }
@@ -753,7 +780,7 @@ fn parse() -> Result<Args, String> {
             return Err(format!("-C {} not before an input", dir.display()));
         }
         a.given = std::mem::take(&mut a.inputs);
-        a.inputs = a.given.iter().zip(&dirs).map(|(i, d)| d.join(i)).collect();
+        a.inputs = a.given.iter().zip(&dirs).map(|(i, d)| if stdio::is(i) { i.clone() } else { d.join(i) }).collect();
         a.renames = vec![None; a.inputs.len()];
         for (n, to) in renames {
             let Some(k) = n.checked_sub(1) else {
@@ -780,6 +807,7 @@ fn parse() -> Result<Args, String> {
     if a.decompress && a.output.is_some() && a.inputs.len() > 1 && !a.auto_dir {
         return Err("-o with several archives to decompress".into());
     }
+    stdio_args(&mut a)?;
     a.dir = dir;
     Ok(a)
 }
@@ -852,6 +880,46 @@ impl Lexer {
     fn value(&mut self) -> Option<OsString> {
         self.argv.next()
     }
+}
+
+/// Of the arguments parsed, standard input and output (`-`): where they are taken, and what
+/// they are not taken with.
+fn stdio_args(a: &mut Args) -> Result<(), String> {
+    a.stdin = a.inputs.iter().any(|i| stdio::is(i));
+    let to = a.output.as_deref().is_some_and(stdio::is);
+    if a.stdin && a.inputs.len() > 1 {
+        return Err(match a.decompress {
+            true => "- (standard input): an archive alone, of no paths given".into(),
+            false => "- (standard input): the only input".into(),
+        });
+    }
+    if a.stdin && a.rm {
+        return Err("--rm with - (standard input)".into());
+    }
+    if a.stdin && a.passphrase {
+        // (a line of standard input, or the terminal: neither to be taken where it is the input)
+        return Err("-P with - (standard input): the passphrase is read from it".into());
+    }
+    if a.stdin && !a.decompress && a.renames.iter().any(Option::is_some) {
+        return Err("--rename of - (standard input): an archive of a single file has no names".into());
+    }
+    a.stdout = !a.test && (to || (a.stdin && a.output.is_none()));
+    if !a.stdout {
+        return Ok(());
+    }
+    for (bad, what) in [(a.append, a.verb()), (a.auto_dir, "--auto-dir"), (a.each, "--each"), (a.ipc, "--ipc")] {
+        if bad {
+            return Err(format!("{what} with -o - (standard output)"));
+        }
+    }
+    if !a.decompress {
+        if std::io::stdout().is_terminal() && !a.force {
+            return Err("not writing an archive to a terminal (-f to)".into());
+        }
+        // (written as it is made, never written over: nothing to commit)
+        a.atomic = true;
+    }
+    Ok(())
 }
 
 /// An option's value as text (any of it not Unicode replaced), where it is not a path.
@@ -1030,6 +1098,11 @@ fn with_ext(path: &Path, ext: &str) -> PathBuf {
 }
 
 fn compress_all(a: &Args) -> Result<(), String> {
+    if a.stdin || a.stdout {
+        let r = compress_stdio(a);
+        stdio::remove();
+        return r;
+    }
     if a.append {
         let (out, skip) = match &a.output {
             Some(o) => (o.clone(), 0),
@@ -1046,9 +1119,6 @@ fn compress_all(a: &Args) -> Result<(), String> {
             // (where some of an input is kept, the next ones still archived and removed)
             let mut kept = Ok(());
             for ((input, given), to) in a.inputs.iter().zip(&a.given).zip(&a.renames) {
-                if given.as_os_str() == "-" {
-                    return Err("standard input is not taken yet".into());
-                }
                 let out = with_ext(input, &a.format.ext());
                 use std::slice::from_ref as one;
                 let gone = compress_into(a, one(input), one(given), one(to), &out)?;
@@ -1057,6 +1127,25 @@ fn compress_all(a: &Args) -> Result<(), String> {
             kept
         }
     }
+}
+
+/// Compresses standard input (read whole first), or into standard output ([`stdio`]): an
+/// archive of several files written there as it is made, others made whole and copied there.
+fn compress_stdio(a: &Args) -> Result<(), String> {
+    let (inputs, given) = match a.stdin {
+        true => (vec![stdio::spool_in()?], vec![PathBuf::from("-")]),
+        false => (a.inputs.clone(), a.given.clone()),
+    };
+    let out = match (a.stdout, &a.output) {
+        (true, _) => stdio::temp(&format!("stdout{}", a.format.ext()))?,
+        (false, Some(o)) => o.clone(),
+        (false, None) => unreachable!("standard input to standard output by default"),
+    };
+    let gone = compress_into(a, &inputs, &given, &a.renames, &out)?;
+    if a.stdout && !stdio::streamed() {
+        stdio::copy_out(&out)?;
+    }
+    remove(&gone)
 }
 
 /// A path to be removed with `--rm` (an input archived, or an archive extracted), as it was
@@ -1349,7 +1438,7 @@ fn compress_into(
             let format = detect(&d).map_or("-", |f| f.name());
             eprintln!(
                 "{}: {}, {}, {} -> {} ({})",
-                input.display(),
+                stdio::shown(input),
                 format,
                 if modules.is_empty() { "kept as it is".into() } else { modules.join(" ") },
                 size(d.len() as f64),
@@ -1436,6 +1525,19 @@ fn compress_into(
     let stopping = (!a.atomic).then(|| aqr_compress::Stop { requested: stop::graceful(), ended: &ended });
     let r = match prior {
         Some(p) => appended(a, out, p, &view, &g, opt, stopping.as_ref())?,
+        // (written out as it is made: not to be written over, nor read back)
+        None if a.stdout && sealing.is_none() => {
+            let err = |e: std::io::Error| format!("standard output: {e}");
+            let mut w = std::io::BufWriter::with_capacity(8 << 20, std::io::stdout().lock());
+            let r = viewed(a, &view, |tell| {
+                let mut o = aqr_compress::Plain(&mut w);
+                aqr_compress::compress_tree_into(&g.tree, &g, opt, &mut o, None, None, tell)
+            })
+            .map_err(err)?;
+            w.flush().map_err(err)?;
+            stdio::set_streamed();
+            r
+        }
         None => write_placing(out, force, |file, part| match &sealing {
             None => {
                 let w = std::io::BufWriter::with_capacity(8 << 20, &*file);
@@ -1689,7 +1791,7 @@ fn summary(out: &Path, files: usize, total: usize, len: usize, start: Instant) {
     let t = start.elapsed().as_secs_f64();
     eprintln!(
         "{}: {files} file{}, {} -> {} ({}) in {}, {:.1} MB/s",
-        out.display(),
+        stdio::shown(out),
         if files == 1 { "" } else { "s" },
         size(total as f64),
         size(len as f64),
@@ -2361,7 +2463,18 @@ fn create(path: &Path, force: bool) -> Result<fs::File, String> {
 }
 
 fn decompress_all(a: &Args) -> Result<(), String> {
-    for input in &a.inputs {
+    let r = decompress_each(a);
+    stdio::remove();
+    r
+}
+
+fn decompress_each(a: &Args) -> Result<(), String> {
+    // (standard input read whole first, for now)
+    let spooled = match a.stdin {
+        true => vec![stdio::spool_in()?],
+        false => Vec::new(),
+    };
+    for input in if a.stdin { &spooled } else { &a.inputs } {
         // an archive of another format by its name (`.zip`, `.tar.gz`, ...), else an Aqueous one
         let name = input.file_name().map(os_bytes).unwrap_or_default();
         let foreign = aqr_unpack::by_name(&name);
@@ -2377,6 +2490,10 @@ fn decompress_all(a: &Args) -> Result<(), String> {
         };
         let output = a.output.as_ref().map(|o| a.dir.join(o));
         let to = match (named, &output, a.auto_dir) {
+            _ if a.stdout && foreign.is_some() => {
+                return Err(format!("{}: -o - (standard output) of Aqueous archives alone", input.display()));
+            }
+            _ if a.stdout => To { named: PathBuf::from("-"), base: a.dir.clone() },
             (Some(n), Some(o), true) => To { named: o.join(n.file_name().unwrap()), base: o.clone() },
             (Some(n), None, true) => To { base: n.parent().unwrap_or(Path::new("")).to_owned(), named: n },
             (_, Some(o), false) => To { named: o.clone(), base: o.clone() },
@@ -2497,7 +2614,7 @@ impl aqr_unpack::Sink for Unpacking<'_, '_> {
 /// is ([`extract::Extractor`]); an error at the end where entries were left out. Whether it
 /// was (not skipped, as a frontend answers).
 fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Format) -> Result<bool, String> {
-    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
+    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", stdio::shown(input));
     let file = fs::File::open(input).map_err(|e| err(&e))?;
     // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
     let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
@@ -2536,6 +2653,7 @@ fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Forma
         Some(p) => shown(p),
         None => (!a.test).then_some(&*to.named),
     };
+    let told = told.map(|t| if a.stdout { Path::new("-") } else { t });
     begin(if a.test { "test" } else { "decompress" }, &[input.to_owned()], told);
     let start = Instant::now();
     let rec = stats::record(
@@ -2697,7 +2815,7 @@ fn tell_incomplete(status: Option<aqr::Status>, input: &Path) {
             (Some(n), None) => format!(": {n} file{} not archived", if n == 1 { "" } else { "s" }),
             _ => String::new(),
         };
-        eprintln!("{}: incomplete, its writing stopped{left} (aqr -a adds them)", input.display());
+        eprintln!("{}: incomplete, its writing stopped{left} (aqr -a adds them)", stdio::shown(input));
     }
 }
 
@@ -2798,7 +2916,7 @@ fn by_index<'c, 'n>(
 /// Decodes (or tests) `input`, an Aqueous archive, to `to`: whether it was (not skipped, as a
 /// frontend answers).
 fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
-    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
+    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", stdio::shown(input));
     let file = fs::File::open(input).map_err(|e| err(&e))?;
     // (mapped, so that what is read of it is the system's to drop)
     // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
@@ -2850,7 +2968,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     if maybe_cut {
         eprintln!(
             "{}: its last segment is not the one meant to be the last: segments after it may be lost",
-            input.display()
+            stdio::shown(input)
         );
     }
     // (some paths: by content, whether it is decoded)
@@ -2865,6 +2983,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     let ask = |p: &Path| output(a, p);
     let (place, force) = match (a.test, archive.tree().is_some()) {
         (true, _) => (None, false),
+        _ if a.stdout => (None, false),
         (false, true) => match to.place(a, false, &ask)? {
             Some((p, f)) => (Some(p), f),
             None => return Ok(false),
@@ -2878,12 +2997,13 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
         Some(p) => shown(p),
         None => (!a.test).then_some(&*to.named),
     };
+    let told = told.map(|t| if a.stdout { Path::new("-") } else { t });
     begin(if a.test { "test" } else { "decompress" }, &[input.to_owned()], told);
     let start = Instant::now();
     let rec = stats::record(
         a.stats,
         if a.test { "test" } else { "decompress" },
-        input.display().to_string(),
+        stdio::shown(input).to_string(),
         told.map_or(String::new(), |o| o.display().to_string()),
         a.opt.threads,
     );
@@ -2921,6 +3041,57 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
             })
             .map_err(|e| err(&e))?;
             (1, n, None)
+        }
+        None if a.stdout => {
+            let mut w = std::io::BufWriter::with_capacity(1 << 20, std::io::stdout());
+            let mut failed = None;
+            let r = ticking(a, &*view, || {
+                archive.write_file(a.opt.threads, &mut |d: &[u8]| {
+                    seen.saw(0, d, 0);
+                    w.write_all(d).map_err(|e| {
+                        let m = e.to_string();
+                        failed = Some(e);
+                        Failure::Resource(m)
+                    })
+                })
+            });
+            let n = match (r, failed) {
+                (_, Some(e)) => return Err(format!("standard output: {e}")),
+                (r, None) => r.map_err(|e| err(&e))?,
+            };
+            w.flush().map_err(|e| format!("standard output: {e}"))?;
+            (1, n, Some(PathBuf::from("-")))
+        }
+        Some(t) if a.stdout => {
+            // the one file of the paths given
+            let picked = a.select.as_ref().map(|s| s.picked(t));
+            let picked = picked.ok_or_else(|| err(&"an archive of several files: -o - (standard output) of a PATH"))?;
+            let files: Vec<usize> = (t.entries.iter().zip(&picked))
+                .filter_map(|(e, &p)| match e.node {
+                    EntryNode::File(c) if p => Some(c),
+                    _ => None,
+                })
+                .collect();
+            let [c] = files[..] else {
+                return Err(err(&format!("{} files given: -o - (standard output) of one", files.len())));
+            };
+            let mut only = vec![false; archive.contents_len()];
+            only[c] = true;
+            let given = std::sync::Mutex::new(vec![false; archive.contents_len()]);
+            let w = std::sync::Mutex::new(std::io::BufWriter::with_capacity(1 << 20, std::io::stdout()));
+            let total = std::sync::atomic::AtomicU64::new(0);
+            let r = ticking(a, &*view, || {
+                archive.contents_of(a.opt.threads, Some(&only), |c, d| {
+                    seen.saw(c, &d, d.len() as u64);
+                    w.lock().unwrap().write_all(&d).map_err(|e| Failure::Resource(format!("standard output: {e}")))?;
+                    given.lock().unwrap()[c] = true;
+                    total.fetch_add(d.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                    Ok(())
+                })
+            });
+            w.into_inner().unwrap().flush().map_err(|e| format!("standard output: {e}"))?;
+            lost = not_given(r, &given.into_inner().unwrap(), Some(&only)).map_err(|e| err(&e))?;
+            (1, total.into_inner(), Some(PathBuf::from("-")))
         }
         None => {
             let n = write_whole(&to.named, force, |w| {
@@ -3068,7 +3239,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
             salvage_unnamed(a, r.damaged(plain), cut, &r.erased, runner, into.as_deref()).map_err(|e| err(&e))?;
         if n > 0 {
             let s = if n == 1 { "" } else { "s" };
-            let (what, bytes) = (input.display(), size(bytes as f64));
+            let (what, bytes) = (stdio::shown(input), size(bytes as f64));
             match &into {
                 Some(d) => eprintln!(
                     "{what}: {n} file{s} of no name ({bytes}) salvaged from the segment cut short, into {}",
@@ -3095,7 +3266,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
         // (each told, by the path of its first file, however quiet)
         let paths = content_paths(&archive, &to.named);
         for (c, f) in &lost {
-            eprintln!("{}: {}: lost ({f})", input.display(), paths[*c]);
+            eprintln!("{}: {}: lost ({f})", stdio::shown(input), paths[*c]);
         }
         let n = lost.len();
         return Err(err(&format!("{n} file{} lost", if n == 1 { "" } else { "s" })));
@@ -3117,7 +3288,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
         }
         s.add(stats::Run {
             mode: if a.test { "test" } else { "decompress" },
-            input: input.display().to_string(),
+            input: stdio::shown(input).to_string(),
             output: out.map_or(String::new(), |o| o.display().to_string()),
             seconds: start.elapsed().as_secs_f64(),
             threads: a.opt.threads,
@@ -3393,7 +3564,7 @@ impl aqr::Runner for Decoder {
 /// What was told of the names of archive `input` ([`names`]), on standard error (but with `-q`).
 fn tell_names(a: &Args, input: &Path, told: impl IntoIterator<Item = String>) {
     if !a.quiet {
-        told.into_iter().for_each(|t| eprintln!("{}: {t}", input.display()));
+        told.into_iter().for_each(|t| eprintln!("{}: {t}", stdio::shown(input)));
     }
 }
 
@@ -3402,11 +3573,11 @@ fn summary_d(input: &Path, out: Option<&Path>, files: usize, total: u64, start: 
     let to = match out {
         None => " (tested)".into(),
         Some(o) if o.as_os_str().is_empty() => " -> .".into(),
-        Some(o) => format!(" -> {}", o.display()),
+        Some(o) => format!(" -> {}", stdio::shown(o)),
     };
     eprintln!(
         "{}{to}: {files} file{}, {} in {}, {:.1} MB/s",
-        input.display(),
+        stdio::shown(input),
         if files == 1 { "" } else { "s" },
         size(total as f64),
         aqr_l10n::duration(t, 2),

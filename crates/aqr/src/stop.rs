@@ -20,8 +20,8 @@
 //! is removed, an archive appended to cut back to where it ended before ([`undo_by`]).
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
 
 /// Held as an output is made and set to be removed ([`create`]), and by [`now`] as the process
 /// stops (never released then): so that it never stops between the two, the output left.
@@ -96,23 +96,26 @@ pub fn undo_by(undo: Undo) -> Guard {
 
 pub struct Guard(());
 
-/// What [`on_end`] set, and whether it has been done (held while it is done).
-static ON_END: OnceLock<fn()> = OnceLock::new();
+/// What [`on_end`] set (and whether anything is: [`HAS_END`]), and whether it has been done
+/// (held while it is done).
+static ON_END: Mutex<Vec<fn()>> = Mutex::new(Vec::new());
+static HAS_END: AtomicBool = AtomicBool::new(false);
 static ENDED: Mutex<bool> = Mutex::new(false);
 
 /// Has `f` done as the process stops however it does (but returning from `main` or a panic):
-/// [`now`], [`exit`] or a signal. Set once.
+/// [`now`], [`exit`] or a signal; after what was set before.
 pub fn on_end(f: fn()) {
-    _ = ON_END.set(f);
+    ON_END.lock().unwrap_or_else(|e| e.into_inner()).push(f);
+    HAS_END.store(true, Ordering::SeqCst);
     imp::install();
 }
 
 /// Does what [`on_end`] set, where not done already (waiting for it where it is being done).
 fn end() {
-    let Some(f) = ON_END.get() else { return };
+    let fs = ON_END.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let mut ended = ENDED.lock().unwrap_or_else(|e| e.into_inner());
     if !std::mem::replace(&mut *ended, true) {
-        f();
+        fs.iter().for_each(|f| f());
     }
 }
 
@@ -166,7 +169,7 @@ mod imp {
     use std::sync::Once;
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
 
-    use super::{GATE, GRACEFUL, ON_END, REQUESTED, STOPPING};
+    use super::{GATE, GRACEFUL, HAS_END, REQUESTED, STOPPING};
 
     /// The path to remove, as the handler takes it: never freed, as the handler may be reading
     /// it while it is replaced (a path for each output, a few bytes).
@@ -174,7 +177,8 @@ mod imp {
 
     const SIGNALS: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
 
-    /// The pipe the handler tells a signal stopping the process by (where [`ON_END`] is set): a
+    /// The pipe the handler tells a signal stopping the process by (where [`super::on_end`] set
+    /// anything): a
     /// thread of its own does that, then stops the process by it. -1 where none.
     static ENDER: AtomicI32 = AtomicI32::new(-1);
     /// Whether a signal stopping the process was told to it (any other stops it at once).
@@ -192,7 +196,7 @@ mod imp {
     pub fn install() {
         static INSTALL: Once = Once::new();
         static ENDER_MADE: Once = Once::new();
-        if ON_END.get().is_some() {
+        if HAS_END.load(Ordering::SeqCst) {
             ENDER_MADE.call_once(make_ender);
         }
         INSTALL.call_once(|| {
