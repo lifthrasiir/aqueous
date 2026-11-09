@@ -3880,6 +3880,19 @@ mod tests {
         assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
     }
 
+    /// An APFS container's files (aqr-apfs's fixture, of a GPT): its JPEG file recompressed by
+    /// aqr-jpeg, the image given back.
+    #[test]
+    fn apfs_containers_taken_apart() {
+        let z = std::fs::read(format!("{}/../../codecs/aqr-apfs/tests/data/apfs.img.zst", env!("CARGO_MANIFEST_DIR")))
+            .unwrap();
+        let d = zstd::stream::decode_all(&z[..]).unwrap();
+        assert_eq!(detect(&d), Some(Format::Disk));
+        let (c, f) = compress_formula(&d, &Options { threads: 2, shared_modules: true, ..Options::default() });
+        assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
+        assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
+    }
+
     /// An ext4 volume's files (aqr-ext's fixture): its JPEG file recompressed by aqr-jpeg, its
     /// files in pieces split, the archive giving it back.
     #[test]

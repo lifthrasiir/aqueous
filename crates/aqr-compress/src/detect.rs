@@ -126,7 +126,8 @@ pub enum Format {
     Cpio,
     /// Disk image (aqr-disk): a volume of a file system read (ISO 9660 or UDF, aqr-iso's, known
     /// by the descriptor at sector 16; FAT or exFAT, aqr-fat's, and NTFS, aqr-ntfs's, by the boot
-    /// sector; ext2/3/4, aqr-ext's, by the superblock), all of it or a partition of its MBR, GPT or
+    /// sector; ext2/3/4, aqr-ext's, by the superblock; APFS, aqr-apfs's, by the container's
+    /// superblock), all of it or a partition of its MBR, GPT or
     /// APM, of the disk or of the virtual disk of a VHD, VHDX, VMDK, qcow2 or VDI container: at the
     /// start of data only.
     Disk,

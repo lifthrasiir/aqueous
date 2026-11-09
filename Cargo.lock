@@ -100,6 +100,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-apfs"
+version = "0.1.0"
+dependencies = [
+ "aqr-disk",
+ "aqr-formula",
+ "zstd",
+]
+
+[[package]]
 name = "aqr-api"
 version = "0.1.0"
 dependencies = [
@@ -207,6 +216,7 @@ version = "0.1.0"
 dependencies = [
  "aqr-7z",
  "aqr-alz",
+ "aqr-apfs",
  "aqr-arsc",
  "aqr-asar",
  "aqr-bundle",

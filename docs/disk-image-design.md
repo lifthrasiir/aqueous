@@ -256,6 +256,12 @@ XPRESS는 MS-XCA로 새로 쓴 aqr-xpress(파스의 기록: Windows의 WOF 4K �
 - `lzx-recons` 적용 하나가 파일 전체면 힙이 예산을 넘고(3.59 GB) 크기도 줄지 않았다(846 MB). aqr-wim처럼 32 MiB씩
   나누니 둘 다 풀렸다.
 
+6단계(2026-11-09): `codecs/aqr-apfs`(Apple File System Reference로 쓴 읽는 쪽: 최신 체크포인트, 컨테이너와 볼륨의
+객체 맵, 파일 시스템 B-트리의 디렉터리·inode·extent 레코드, 볼륨 여럿). decmpfs 파일(UF_COMPRESSED)과 암호화·봉인된
+볼륨, 스냅숏, xattr는 `rest`다. fixture는 hdiutil(볼륨 둘은 컨테이너 1 GiB 이상: 512 MiB마다 하나). `ditto
+--hfsCompression`은 다른 볼륨에서 복사할 때만 압축한다. 1.5 GB 이미지(Rust 툴체인 lib, /usr/share)에서 346.3 →
+325.3 MB.
+
 각 단계는 파서, README(무엇을 읽는가, 결과, 시험), 손상·잘린 이미지 시험(aqr-iso의 것처럼), 그리고
 `--stats`를 켠 `cargo aqr` 측정(크기, 시간, 힙과 resident 최대)으로 끝난다. 0단계 뒤의 비교 기준은
 같은 이미지를 탐지 없이 압축한 결과다.

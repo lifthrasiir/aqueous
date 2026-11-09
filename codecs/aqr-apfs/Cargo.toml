@@ -1,0 +1,20 @@
+[package]
+name = "aqr-apfs"
+version = "0.1.0"
+edition = "2024"
+description = "APFS containers read into their files, a file system of aqr-disk"
+publish = false
+
+[dependencies]
+aqr-disk = { path = "../aqr-disk" }
+
+[dev-dependencies]
+aqr-formula = { path = "../../crates/aqr-formula" }
+zstd = "0.13"
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-apfs-check"
+path = "examples/check.rs"

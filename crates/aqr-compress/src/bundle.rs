@@ -16,9 +16,9 @@ pub(crate) fn asar(d: &[u8]) -> Option<Formula> {
     aqr_asar::formula::encode_with(d, &aqr_asar::formula::Options { kind: kind_by_name, ..Default::default() })
 }
 
-/// The file systems of disk images read: ISO 9660 and UDF, FAT, exFAT, NTFS, ext2/3/4.
+/// The file systems of disk images read: ISO 9660 and UDF, FAT, exFAT, NTFS, ext2/3/4, APFS.
 pub(crate) const FILE_SYSTEMS: &[aqr_disk::FileSystem] =
-    &[aqr_iso::FS, aqr_fat::FAT, aqr_fat::EXFAT, aqr_ntfs::FS, aqr_ext::FS];
+    &[aqr_iso::FS, aqr_fat::FAT, aqr_fat::EXFAT, aqr_ntfs::FS, aqr_ext::FS, aqr_apfs::FS];
 
 pub(crate) fn disk(d: &[u8], threads: usize) -> Option<Formula> {
     aqr_disk::formula::encode_with(d, &aqr_disk::formula::Options { file_systems: FILE_SYSTEMS, kind: kind_by_name, threads })
