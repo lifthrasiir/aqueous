@@ -3883,9 +3883,9 @@ mod tests {
         assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
     }
 
-    /// UDIF images (aqr-disk's fixtures, of an HFS+ volume): of zlib's chunks, its own formula (the
-    /// disk a content, taken apart in turn: its JPEG file by aqr-jpeg; the chunks by zlib's
-    /// emulation), of raw ones a container of the disk; both given back.
+    /// UDIF images (aqr-disk's fixtures, of an HFS+ volume): of zlib's or bzip2's chunks, its own
+    /// formula (the disk a content, taken apart in turn: its JPEG file by aqr-jpeg; zlib's chunks
+    /// by zlib's emulation), of raw ones a container of the disk; all given back.
     #[test]
     fn dmg_taken_apart() {
         let fixture = |name: &str| {
@@ -3903,6 +3903,12 @@ mod tests {
         assert!(records * 50 < zlib, "records {records} of {zlib} B");
         let (c, f) = compress_formula(&d, &opt);
         assert!(f.applies().iter().any(|a| a.module == aqr_flate::formula::MODULE));
+        assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
+        assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
+        let d = fixture("dmg-udbz.dmg");
+        assert_eq!(detect(&d), Some(Format::Dmg));
+        let (c, f) = compress_formula(&d, &opt);
+        assert!(f.applies().iter().any(|a| a.module == aqr_bz2::formula::MODULE));
         assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
         assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
         let d = fixture("dmg-udro.dmg");
