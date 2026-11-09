@@ -283,7 +283,13 @@ struct Eval<'e, 'a> {
     blocks: &'e dyn Blocks,
     fans: Vec<Mutex<Fan<'a>>>,
     threads: Threads,
+    /// Of an evaluation of a value of its own ([`apart`]): the slices of each block left to be
+    /// pulled, and the block while any is (of `blocks`, which may let go of it before).
+    kept: Option<Mutex<Counted>>,
 }
+
+/// Of each block, the slices left to be pulled and its data while any is ([`Eval::kept`]).
+type Counted = HashMap<usize, (usize, Option<Arc<Vec<u8>>>)>;
 
 /// Where values are pulled: of an evaluation, and (on the thread writing the outputs out) what
 /// to tell of each block as it is first sliced, to decode those after it ahead.
@@ -314,6 +320,33 @@ enum Fan<'a> {
 }
 
 impl<'a> Eval<'_, 'a> {
+    /// The data of block `o`: of [`Eval::kept`] where it is there, else of the blocks (kept then
+    /// while slices of it are left to be pulled).
+    fn block(&self, o: usize) -> Decoded<Arc<Vec<u8>>> {
+        let Some(kept) = &self.kept else { return self.blocks.block(o) };
+        if let Some((_, Some(d))) = kept.lock().unwrap().get(&o) {
+            return Ok(d.clone());
+        }
+        let d = self.blocks.block(o)?;
+        Ok(match kept.lock().unwrap().get_mut(&o) {
+            Some((left, held)) if *left > 0 => held.get_or_insert(d).clone(),
+            _ => d,
+        })
+    }
+
+    /// One slice of block `o` pulled ([`Blocks::release`]).
+    fn release(&self, o: usize) {
+        self.blocks.release(o);
+        if let Some(kept) = &self.kept
+            && let Some(e) = kept.lock().unwrap().get_mut(&o)
+        {
+            e.0 = e.0.saturating_sub(1);
+            if e.0 == 0 {
+                e.1 = None;
+            }
+        }
+    }
+
     /// Whether value `v` is made whole by an application, ahead where it is a part of an
     /// output written out ([`run`]): not a part module's ([`Eval::made_streamed`]).
     fn made_whole(&self, v: Val) -> bool {
@@ -378,8 +411,8 @@ impl<'a> Source<'a> for SliceSource {
         if let Some(tell) = at.ahead {
             tell(self.block);
         }
-        let d = at.ev.blocks.block(self.block)?;
-        at.ev.blocks.release(self.block);
+        let d = at.ev.block(self.block)?;
+        at.ev.release(self.block);
         let r = usize::try_from(self.start)
             .ok()
             .zip(usize::try_from(self.len).ok())
@@ -668,6 +701,7 @@ pub(super) fn run<'a>(
         blocks: contents,
         fans: (0..g.fans).map(|_| Mutex::new(Fan::Idle)).collect(),
         threads: Threads::default(),
+        kept: None,
     };
     // (the threads of part modules let go of and joined before what they borrow goes)
     let _joined = Joined(&ev);
@@ -1283,6 +1317,7 @@ pub(super) fn hashed(
         // (none: each value evaluated is of an evaluation of its own, [`apart`])
         fans: Vec::new(),
         threads: Threads::default(),
+        kept: None,
     };
     let names: Vec<Option<String>> = p.modules.iter().map(|&m| identify(&env.modules[m])).collect();
     let key = |a: &Apply, ins: &[Ch]| -> Option<u128> {
@@ -1362,6 +1397,28 @@ impl Graph<'_, '_> {
             Op::Split(_, sizes, _) => sizes.len(),
             _ => 1,
         }
+    }
+
+    /// The slices of each block that values `from` pull, evaluated (at most: a Split's input is
+    /// pulled only as far as its outputs pulled reach), each node of several outputs pulling its
+    /// inputs once.
+    fn slices_of(&self, from: &[Val]) -> HashMap<usize, usize> {
+        let mut out = HashMap::new();
+        let mut fans = HashSet::new();
+        let mut todo: Vec<usize> = from.iter().map(|v| v.node).collect();
+        while let Some(n) = todo.pop() {
+            match self.ops[n] {
+                Op::Slice { block, .. } => *out.entry(block).or_insert(0) += 1,
+                Op::Literal(_) | Op::Absent => {}
+                Op::Concat(ref items) | Op::Pack(ref items) => todo.extend(items.iter().map(|v| v.node)),
+                Op::Apply(_, ref inputs, None) => todo.extend(inputs.iter().map(|v| v.node)),
+                Op::Apply(_, ref inputs, Some(_)) if fans.insert(n) => todo.extend(inputs.iter().map(|v| v.node)),
+                Op::Split(x, ..) if fans.insert(n) => todo.push(x.node),
+                Op::Apply(..) | Op::Split(..) => {}
+                Op::Patch(x, y, _) => todo.extend([x.node, y.node]),
+            }
+        }
+        out
     }
 }
 
@@ -1535,7 +1592,12 @@ impl Hashing<'_, '_, '_> {
 /// turn, or at once on threads, each pulls what it is made of anew, where those of `at` would give
 /// what another value pulled of them already (a Split of a value of another Split's outputs, of a
 /// disk of fragmented files cut into a DMG's chunks, pulled the second again).
-fn apart<T>(at: At, f: impl FnOnce(At) -> T) -> T {
+///
+/// The blocks are kept for it while slices of them are left to be pulled of `from` (the values it
+/// pulls): of a block cache of its own, the evaluation of a disk's Split decoded the blocks of
+/// its files' classes again and again, in the order of the disk (50 GB of a DMG of 1.3 GB), and
+/// the pieces held of them (a Split's outputs pulled out of turn) kept the copies.
+fn apart<T>(at: At, from: &[Val], f: impl FnOnce(At) -> T) -> T {
     let ev = Eval {
         g: at.ev.g,
         apply: at.ev.apply,
@@ -1544,6 +1606,7 @@ fn apart<T>(at: At, f: impl FnOnce(At) -> T) -> T {
         blocks: at.ev.blocks,
         fans: (0..at.ev.g.fans).map(|_| Mutex::new(Fan::Idle)).collect(),
         threads: Threads::default(),
+        kept: Some(Mutex::new(at.ev.g.slices_of(from).into_iter().map(|(b, n)| (b, (n, None))).collect())),
     };
     let _joined = Joined(&ev);
     f(At { ev: &ev, ahead: at.ahead })
@@ -1551,7 +1614,7 @@ fn apart<T>(at: At, f: impl FnOnce(At) -> T) -> T {
 
 /// [`Hashing::split`] of `at`.
 fn split_at(at: At, x: Val, sizes: &[u64]) -> Decoded<Vec<Ch>> {
-    apart(at, |at| {
+    apart(at, &[x], |at| {
         let mut s = at.ev.source(x);
         let mut out = Vec::with_capacity(sizes.len());
         let (mut h, mut left) = (Ch::EMPTY, sizes.first().copied().unwrap_or(0));
@@ -1583,12 +1646,13 @@ fn split_at(at: At, x: Val, sizes: &[u64]) -> Decoded<Vec<Ch>> {
 
 /// [`Hashing::stream`] of `at`.
 fn stream_at(at: At, v: Val) -> Decoded<Ch> {
-    apart(at, |at| hash_of(at, v))
+    apart(at, &[v], |at| hash_of(at, v))
 }
 
 /// [`Hashing::fanned`] of `at`.
 fn fanned_at(at: At, node: usize) -> Decoded<Vec<Ch>> {
-    apart(at, |at| (0..at.ev.g.out_count(node)).map(|out| hash_of(at, Val { node, out })).collect())
+    let outs: Vec<Val> = (0..at.ev.g.out_count(node)).map(|out| Val { node, out }).collect();
+    apart(at, &outs, |at| outs.iter().map(|&v| hash_of(at, v)).collect())
 }
 
 /// The hash of value `v`, pulled of the states of `at`.
@@ -1823,6 +1887,7 @@ fn with_formula<M: crate::Modules + Sync, R>(
         blocks: &NoBlocks,
         fans: (0..g.fans).map(|_| Mutex::new(Fan::Idle)).collect(),
         threads: Threads::default(),
+        kept: None,
     };
     let _joined = Joined(&ev);
     go(&ev)
