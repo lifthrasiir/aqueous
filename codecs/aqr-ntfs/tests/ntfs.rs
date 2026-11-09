@@ -1,0 +1,108 @@
+use aqr_disk::formula::{self, Options};
+use aqr_formula::{Formula, Kind};
+
+/// Fixture `name` of tests/data (`scripts/gen-fixtures.sh`), decompressed.
+fn fixture(name: &str) -> Vec<u8> {
+    let z = std::fs::read(format!("{}/tests/data/{name}.zst", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    zstd::stream::decode_all(&z[..]).unwrap()
+}
+
+fn none(_: &aqr_formula::Apply, _: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
+    unreachable!("no module")
+}
+
+fn encode(d: &[u8]) -> Option<Formula> {
+    formula::encode_with(d, &Options { file_systems: &[aqr_ntfs::FS], kind: |_| Kind::Unknown })
+}
+
+/// The files of `d` read, by name, with their contents and their extents.
+fn read(d: &[u8]) -> Vec<(String, Vec<u8>, usize)> {
+    let mut out: Vec<_> = aqr_ntfs::files(d)
+        .into_iter()
+        .map(|f| {
+            let data = f.extents.iter().flat_map(|r| d[r.clone()].to_vec()).collect();
+            (String::from_utf8(f.name).unwrap(), data, f.extents.len())
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// The non-resident files `scripts/gen-fixtures.sh` wrote, by name, with their contents as read
+/// (of a sparse file, its clusters of data: the hole left out).
+fn expected() -> Vec<(String, Vec<u8>)> {
+    let jpeg = std::fs::read(format!("{}/../aqr-jpeg/tests/data/gradient.jpg", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    let mut out = vec![
+        ("readme.txt".to_string(), b"Aqueous NTFS fixture\r\n".repeat(40)),
+        // (a hard link of bin/data.bin: one file, of one of its names)
+        ("link.bin".into(), (0..10000u32).map(|i| ((i * 7 + (i >> 8)) % 251) as u8).collect()),
+        ("ads.txt".into(), b"the main stream\n".repeat(100)),
+        ("ads.txt:extra".into(), b"an alternate data stream\n".repeat(200)),
+        ("sparse.bin".into(), [vec![0x11; 4096], vec![0x22; 4096]].concat()),
+        ("photo.jpg".into(), jpeg),
+        ("frag.bin".into(), (0..4096u32 * 250 + 100).map(|i| ((i * 13 + (i >> 9)) % 253) as u8).collect()),
+    ];
+    out.extend((0..600).step_by(2).map(|i| (format!("gap.{i:03}"), vec![(i % 251) as u8; 4096])));
+    out
+}
+
+#[test]
+fn files_found() {
+    let d = fixture("ntfs.img");
+    assert!(aqr_ntfs::starts(&d));
+    let got = read(&d);
+    for (want, data) in expected() {
+        let Some(g) = got.iter().find(|g| g.0 == want) else { panic!("{want} not found") };
+        assert!(g.1 == data, "{want}");
+    }
+    // resident, compressed, system files and directories: not files with contents
+    for name in ["docs/한글.txt", "docs/deeper/a rather long file name.json", "packed/text.txt", "$MFT", "bin"] {
+        assert!(!got.iter().any(|g| g.0 == name), "{name}");
+    }
+    assert!(got.iter().find(|g| g.0 == "frag.bin").unwrap().2 > 8);
+    let f = encode(&d).unwrap();
+    assert!(f.eval(&none).unwrap() == d);
+    assert!(!f.shared.is_empty());
+}
+
+#[test]
+fn not_ntfs() {
+    assert!(!aqr_ntfs::starts(&[0; 4096]));
+    let noise: Vec<u8> = (0..65536u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+    assert!(!aqr_ntfs::starts(&noise));
+    let z = std::fs::read(format!("{}/../aqr-fat/tests/data/fat32.img.zst", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    assert!(!aqr_ntfs::starts(&zstd::stream::decode_all(&z[..]).unwrap()));
+}
+
+/// Volumes cut short or with bytes changed: no panic, and a formula, where there is one, gives the
+/// volume back.
+#[test]
+fn damaged() {
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let d = fixture("ntfs.img");
+    // (the boot sector and the MFT's records)
+    let mft = 4 * 4096;
+    let meta: Vec<usize> = (0..512).chain(mft..mft + 1024 * 64).filter(|&i| d[i] != 0).collect();
+    for cut in [d.len() / 2, mft + 1024 * 40, mft + 3000, 4096, 600, 100] {
+        let d = &d[..cut];
+        if let Some(f) = encode(d) {
+            assert!(f.eval(&none).unwrap() == d, "cut at {cut}");
+        }
+    }
+    for _ in 0..500 {
+        let mut e = d.clone();
+        for _ in 0..1 + next() % 4 {
+            let at = meta[(next() % meta.len() as u64) as usize];
+            e[at] = next() as u8;
+        }
+        if let Some(f) = encode(&e) {
+            assert!(f.eval(&none).unwrap() == e, "changed");
+        }
+    }
+}

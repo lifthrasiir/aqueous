@@ -242,6 +242,7 @@ dependencies = [
  "aqr-mkv",
  "aqr-mp3",
  "aqr-mszip",
+ "aqr-ntfs",
  "aqr-obj",
  "aqr-ogg",
  "aqr-pdb",
@@ -764,6 +765,15 @@ dependencies = [
  "aqr-flate",
  "aqr-formula",
  "aqr-lzx",
+]
+
+[[package]]
+name = "aqr-ntfs"
+version = "0.1.0"
+dependencies = [
+ "aqr-disk",
+ "aqr-formula",
+ "zstd",
 ]
 
 [[package]]
