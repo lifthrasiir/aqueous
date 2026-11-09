@@ -306,3 +306,36 @@ fn solid_compacted() {
     assert!(after * 10 < fresh * 11, "{before} -> {after}, anew {fresh}");
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// Written again, the archive keeps what the file system holds of it besides its bytes (on
+/// Windows, replaced by ReplaceFileW): the creation time, the attributes and its named streams.
+#[cfg(windows)]
+#[test]
+fn compact_keeps_file_attributes() {
+    use std::os::windows::fs::{FileTimesExt, MetadataExt};
+    let d = scratch("attributes");
+    source(&d);
+    ok(&d, &["-q", "-o", "a.aqr", "src"]);
+    ok(&d, &["-q", "--delete", "a.aqr", "sub/deep/t5.txt"]);
+    let path = d.join("a.aqr");
+    let created = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    let f = fs::OpenOptions::new().write(true).open(&path).unwrap();
+    f.set_times(fs::FileTimes::new().set_created(created)).unwrap();
+    drop(f);
+    // (hidden and archive: the attributes a new file would not have)
+    let hidden = 0x2;
+    let before = fs::metadata(&path).unwrap().file_attributes();
+    let set = std::process::Command::new("attrib").arg("+H").arg(&path).status().unwrap();
+    assert!(set.success());
+    // (a named stream: the file system's tunnelling gives back the creation time of a file
+    // replaced within 15 seconds, but not this)
+    let stream = d.join("a.aqr:note");
+    fs::write(&stream, b"kept").unwrap();
+    ok(&d, &["-q", "--compact", "a.aqr"]);
+    assert_eq!(fs::read(&stream).unwrap(), b"kept");
+    let m = fs::metadata(&path).unwrap();
+    assert_eq!(m.created().unwrap(), created);
+    assert_eq!(m.file_attributes() & hidden, hidden, "before {before:#x}");
+    assert!(d.read_dir().unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".part")));
+    fs::remove_dir_all(&d).unwrap();
+}

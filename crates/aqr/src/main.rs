@@ -2683,6 +2683,39 @@ fn write_placing<T>(
     r
 }
 
+/// Puts `from` in place of the file `to`, which keeps its identity (its attributes, creation
+/// time, ACL and named streams) as it takes `from`'s bytes: `ReplaceFileW` on Windows, a rename
+/// elsewhere (which keeps nothing of `to` but its name, on Windows too).
+pub(crate) fn replace(from: &Path, to: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            REPLACEFILE_IGNORE_ACL_ERRORS, REPLACEFILE_IGNORE_MERGE_ERRORS, ReplaceFileW,
+        };
+        let wide = |p: &Path| p.as_os_str().encode_wide().chain([0]).collect::<Vec<u16>>();
+        let (f, t) = (wide(from), wide(to));
+        // SAFETY: both are NUL-terminated paths; the other pointers are null (no backup)
+        let ok = unsafe {
+            ReplaceFileW(
+                t.as_ptr(),
+                f.as_ptr(),
+                std::ptr::null(),
+                REPLACEFILE_IGNORE_MERGE_ERRORS | REPLACEFILE_IGNORE_ACL_ERRORS,
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        if ok != 0 {
+            return Ok(());
+        }
+        // (a file system without it, such as FAT: what a rename does)
+        place(from, to, true)
+    }
+    #[cfg(not(windows))]
+    place(from, to, true)
+}
+
 /// Moves `from` to `to`, over a file there only where `force`.
 fn place(from: &Path, to: &Path, force: bool) -> Result<(), String> {
     let err = |e: std::io::Error| format!("{}: {e}", to.display());

@@ -155,7 +155,7 @@ fn compact(a: &Args, path: &Path, o: &append::Opened, t: &Tree) -> Result<(u64, 
     drop(file);
     match r {
         Ok(r) => {
-            crate::place(&part, path, true)?;
+            crate::replace(&part, path)?;
             Ok(r)
         }
         Err(e) => {
