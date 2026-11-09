@@ -1,0 +1,20 @@
+[package]
+name = "aqr-fat"
+version = "0.1.0"
+edition = "2024"
+description = "FAT12, FAT16, FAT32 and exFAT volumes read into their files, file systems of aqr-disk"
+publish = false
+
+[dependencies]
+aqr-disk = { path = "../aqr-disk" }
+
+[dev-dependencies]
+aqr-formula = { path = "../../crates/aqr-formula" }
+zstd = "0.13"
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-fat-check"
+path = "examples/check.rs"

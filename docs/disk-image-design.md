@@ -197,6 +197,15 @@ aqr-iso를 그 위로 옮김, aqr-compress의 `Format::Disk`. ISO 이미지의 �
 (aqr-disk README). 남은 것: 작은 파일의 묶음(파일 수가 많은 실제 볼륨이 생기는 1단계에서 재고 정한다),
 `SEEK_HOLE`, 조각난 파일을 실제 파일 시스템으로 끝까지(아카이브까지) 시험하는 것(1단계의 FAT fixture).
 
+1단계(2026-11-09): `codecs/aqr-fat`(FAT12/16/32, exFAT). 조각난 파일은 FAT fixture에서 아카이브까지
+시험했다(aqr-compress의 `fat_files_in_pieces`; macOS의 exFAT는 빈틈에 쓰지 않아 조각나지 않았다).
+/usr/share의 FAT32 볼륨(734 MB, 파일 20992개)에서 26.21 → 23.34 MB, 6.0 → 7.0 s(aqr-fat README).
+- 볼륨을 읽고 공식을 만드는 데 53 ms이므로 **작은 파일의 묶음은 하지 않는다**: 파일마다 스트림을 두는
+  비용이 보이지 않았다. 백만 파일 볼륨에서 다시 본다.
+- 재 보니 aqr-compress가 내용물을 찾는 데 파일 수의 제곱이 들었다(`contents_apart`를 슬라이스마다
+  물었다). 고쳤다(ISO 이미지도 12.7 → 10.3 s).
+- macOS의 msdosfs는 1 KiB 클러스터의 4 MiB FAT12에 파일을 잘못 썼다(fixture는 8 MiB로 만든다).
+
 각 단계는 파서, README(무엇을 읽는가, 결과, 시험), 손상·잘린 이미지 시험(aqr-iso의 것처럼), 그리고
 `--stats`를 켠 `cargo aqr` 측정(크기, 시간, 힙과 resident 최대)으로 끝난다. 0단계 뒤의 비교 기준은
 같은 이미지를 탐지 없이 압축한 결과다.

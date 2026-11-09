@@ -406,7 +406,7 @@ files (pages, logs) copied by a backup tool. What they share:
 | UEFI firmware volumes | PC firmware | EFI/Tiano compression (LZ77 with Huffman) or LZMA | Tiano's reference encoder (EDK II) reproduced | |
 | Intel HEX, Motorola S-record | microcontroller firmware | hex text with per-line checksums | the bytes, with addresses and checksums derived | |
 | VMDK, VHD, VHDX, qcow2, VDI | virtual machines, their backups and OVAs | sparse images behind block tables; qcow2's compressed clusters and streamOptimized VMDK's grains (OVA) in deflate | the deflate clusters; the block tables derived; the guest's file system as below | aqr-flate, aqr-iso's approach |
-| File system images (ext4, NTFS, FAT, APFS, HFS+), E01 | disk dumps, firmware, forensics (E01: chunks of 32 KiB in zlib) | none (NTFS's LZNT1 and WOF's XPRESS for compressed files) | as aqr-iso: the image as its files' contents and the rest, the free blocks found zero or kept; E01's zlib chunks | aqr-iso, aqr-flate |
+| File system images (ext4, NTFS, FAT, APFS, HFS+), E01 | disk dumps, firmware, forensics (E01: chunks of 32 KiB in zlib) | none (NTFS's LZNT1 and WOF's XPRESS for compressed files) | as aqr-iso: the image as its files' contents and the rest, the free blocks found zero or kept; E01's zlib chunks | aqr-disk; FAT and exFAT read by aqr-fat (2026-11-09: a FAT32 volume of /usr/share 26.21 → 23.34 MB, aqr-fat README); aqr-flate |
 
 ### Executables and bytecode
 

@@ -221,6 +221,7 @@ dependencies = [
  "aqr-egg",
  "aqr-exe",
  "aqr-fasta",
+ "aqr-fat",
  "aqr-fits",
  "aqr-flac",
  "aqr-flate",
@@ -412,6 +413,15 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "memchr",
+ "zstd",
+]
+
+[[package]]
+name = "aqr-fat"
+version = "0.1.0"
+dependencies = [
+ "aqr-disk",
+ "aqr-formula",
  "zstd",
 ]
 

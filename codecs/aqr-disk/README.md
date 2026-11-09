@@ -2,7 +2,8 @@
 
 Disk images taken apart into the contents of their files and the rest ([FORMAT.md](FORMAT.md)):
 the part the readers of file systems share. A file system is read by a crate of its own (aqr-iso
-for ISO 9660 and UDF; FAT, NTFS, ext4, APFS and HFS+ to come, `docs/disk-image-design.md`), a
+for ISO 9660 and UDF, aqr-fat for FAT and exFAT; NTFS, ext4, APFS and HFS+ to come,
+`docs/disk-image-design.md`), a
 `FileSystem` that gives the files of a volume and their extents; aqr-disk finds the volumes
 (all of the image, and the partitions of its table), lays the files' extents out over the image
 and makes the formula. The image is the concatenation of the two, so there is no module: what it

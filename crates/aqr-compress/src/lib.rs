@@ -3848,6 +3848,24 @@ mod tests {
         assert_eq!(of("disk/jpeg"), [0]);
     }
 
+    /// A FAT volume's JPEG file in pieces (aqr-fat's fixture) is recompressed by aqr-jpeg as one
+    /// content, through the archive; the archive the same whatever the threads.
+    #[test]
+    fn fat_files_in_pieces() {
+        let z = std::fs::read(format!("{}/../../codecs/aqr-fat/tests/data/fat32.img.zst", env!("CARGO_MANIFEST_DIR")))
+            .unwrap();
+        let d = zstd::stream::decode_all(&z[..]).unwrap();
+        assert_eq!(detect(&d), Some(Format::Disk));
+        let files = aqr_disk::files(&d, bundle::FILE_SYSTEMS);
+        assert!(files.iter().find(|f| f.name == b"photo.jpg").unwrap().extents.len() > 1);
+        let archived = |threads| compress_formula(&d, &Options { threads, shared_modules: true, ..Options::default() });
+        let (c, f) = archived(2);
+        assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
+        assert!(!f.shared.is_empty());
+        assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
+        assert!(archived(1).0 == c);
+    }
+
     /// A file of an image in pieces, split from its stream ([`aqr_formula::Of::Node`]), is one
     /// content: a JPEG file in three pieces out of order, about a text file, recompressed by
     /// aqr-jpeg, and the image rebuilt.
