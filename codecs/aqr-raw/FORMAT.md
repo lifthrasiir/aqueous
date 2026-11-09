@@ -713,8 +713,10 @@ the height and the maximum value follow as decimal numbers (at most 9 digits), e
 whitespace and comments (`#` to the end of the line), then exactly one whitespace byte
 before the samples. For `P7`, the header is lines up to and including `ENDHDR` (within
 4096 bytes), of which `WIDTH`, `HEIGHT`, `DEPTH` (1..4: the channels) and `MAXVAL` are
-read. The maximum value must be below 256 (8-bit samples) and the width and height at
-least 1. The rows are not padded. Only the first image of a file is taken: any others are
+read. The maximum value must be below 65536 and the width and height at least 1: below 256,
+the samples are `raster-recons`' (8-bit); else `raster-recons-16`'s, big-endian (two bytes a
+sample, as PNM writes them), unless every sample is a multiple of 257 (8-bit samples written as
+16 bits: not taken). The rows are not padded. Only the first image of a file is taken: any others are
 in the trailer.
 
 ### 9.5 TIFF
@@ -723,11 +725,12 @@ in the trailer.
 that IFD (the first image; any others are in the header or the trailer), the tags are read
 as SHORT or LONG values: ImageWidth (256) and ImageLength (257), both required, at least 1;
 SamplesPerPixel (277), 1..4, 1 where absent; BitsPerSample (258), one value of 8 for each
-sample (where absent, one sample of 1 bit: not taken); Compression (259) and
+sample, or of 16 for each (where absent, one sample of 1 bit: not taken); Compression (259) and
 PlanarConfiguration (284), 1 or absent. The strips (StripOffsets 273 and StripByteCounts
 279, as many of each) must follow one another in the file, each where the one before ends,
-and hold `width × height × channels` bytes in all. The samples are `raster-recons`', without
-padding, from the first strip.
+and hold `width × height × channels` samples in all. The samples are `raster-recons`' (8-bit)
+or `raster-recons-16`'s (16-bit, of the file's byte order; not taken where every sample is a
+multiple of 257), without padding, from the first strip.
 
 ### 9.6 DICOM
 

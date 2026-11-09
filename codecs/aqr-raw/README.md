@@ -13,7 +13,8 @@ ways round:
   from the coded streams, and nothing else. A file is the concatenation of its container's
   bytes before the samples, the application, and its bytes after them, so the container's own
   bytes are kept as they are and never derived. [`container`](src/container.rs) takes the
-  trivial containers apart (WAV, AIFF, BMP, PNM, uncompressed TIFF, DICOM), and finds 16-bit
+  trivial containers apart (WAV, AIFF, BMP, PNM, uncompressed TIFF, DICOM; PNM, TIFF and DICOM
+  of 8- or 16-bit samples), and finds 16-bit
   samples after a header that tells their size in data of no format (`container::sized`). A
   recompressor that finds samples in a format of its own applies the modules the same way
   (`formula::apply`).
@@ -54,6 +55,17 @@ files, valid and not) round-trip; 97 of them are not coded (fewer than 8 bits pe
 (as archives of aqr before: 0.497 and 0.273, mostly aqr-infer-recs' transpose). Six of the
 eight uncompressed TIFF files of the Waterloo set (7.26 MB) come to 2.93 MB from 3.94 MB; the
 two synthetic ones (`frymire`, `serrano`) code larger and are kept as they were.
+
+16-bit PNM and TIFF files (2026-11-10, M4, `cargo aqr -c`, one file an archive, against the
+build before, which took no 16-bit PNM or TIFF): four 576 × 576 photographs of codec-corpus'
+`gb82` scaled by 1.5 by ImageMagick in 16 bits (PPM, 4.48 MB each) 17.92 MB -> 13.54 MB (0.756;
+kept as they were before; zstd -3 0.990); with Gaussian noise (`-attenuate 0.3 +noise
+Gaussian`, PPM and TIFF) 35.83 -> 30.21 MB (0.843). The six DSS images of aqr-fits' corpus as
+PGM and TIFF (891 × 893, once hcompressed; 19.03 MB), which aqr-infer-recs' transpose
+(`recs-fields`) took before, 8.60 -> 8.27 MB, though one of them grows (0.95 -> 1.07 MB; aqr-fits
+takes the FITS files themselves to about 0.27, by their pyramid). 8-bit samples written as 16
+bits (every sample a multiple of 257) are not taken: they came to 0.676 of their files, against
+0.565 by the transpose.
 
 IMA ADPCM WAV files (2026-10-31, M4, `aqr -c`, one file an archive): 2 minutes of a live
 recording (`aqr-flac-corpus/ia`, 44.1 kHz stereo) written by ffmpeg (`adpcm_ima_wav`, blocks of
@@ -168,8 +180,7 @@ PCM is cut into it here.
 
 ## Open issues and limitations
 
-- **Not covered**: 16-bit PNM, PAM and TIFF (16-bit rasters are taken in DICOM and after a header telling
-  their size, `raster-recons-16`), fewer than 8 bits per pixel, RLE BMP, ASCII
+- **Not covered**: fewer than 8 bits per pixel, RLE BMP, ASCII
   PNM, TGA (no reliable signature), float audio, more than 8 channels, compressed AIFC, CAF,
   W64, RF64, ADPCM other than IMA's (Microsoft's 0x02 and others), Apple's IMA4 (AIFC and CAF
   `ima4`, packets of another layout).

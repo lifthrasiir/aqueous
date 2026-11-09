@@ -4,8 +4,8 @@
 //!
 //! Audio: WAV (PCM, also WAVE_FORMAT_EXTENSIBLE; and Microsoft's IMA ADPCM, whose blocks
 //! aqr-ima codes) and AIFF / AIFC (uncompressed, `sowt`).
-//! Images: BMP (8, 24 and 32 bits per pixel, uncompressed), PNM (PGM, PPM, PAM; 8-bit), TIFF
-//! (uncompressed, 8-bit, its first image) and DICOM (8- and 16-bit, little-endian, its frames
+//! Images: BMP (8, 24 and 32 bits per pixel, uncompressed), PNM (PGM, PPM, PAM; 8- and 16-bit),
+//! TIFF (uncompressed, 8- and 16-bit, its first image) and DICOM (8- and 16-bit, little-endian, its frames
 //! one under another); and, by [`sized`], 16-bit samples after a header that tells their size.
 
 use crate::audio::pcm;
@@ -219,8 +219,9 @@ fn bmp(d: &[u8]) -> Option<Found> {
     raster_found("bmp", d, raster::Format { width: w, height: h, channels, stride }, off)
 }
 
-/// A binary PNM file of 8-bit samples: PGM (`P5`), PPM (`P6`) or PAM (`P7`, of 1 to 4
-/// channels). Only the first image of a file is taken.
+/// A binary PNM file: PGM (`P5`), PPM (`P6`) or PAM (`P7`, of 1 to 4 channels), of 8-bit
+/// samples, or of 16-bit ones (big-endian) where its maxval is over 255. Only the first image of
+/// a file is taken.
 fn pnm(d: &[u8]) -> Option<Found> {
     let kind = match d.get(0..2)? {
         b"P5" => 1,
@@ -243,16 +244,20 @@ fn pnm(d: &[u8]) -> Option<Found> {
         p += 1;
         (v[0], v[1], kind, v[2])
     };
-    if !(1..256).contains(&maxval) || w == 0 || h == 0 {
+    if !(1..65536).contains(&maxval) || w == 0 || h == 0 {
         return None;
+    }
+    if maxval > 255 {
+        let stride = w.checked_mul(2 * channels)?;
+        return wide_found("pnm", d, raster16::Format { width: w, height: h, channels, stride, big_endian: true }, p);
     }
     let stride = w.checked_mul(channels)?;
     raster_found("pnm", d, raster::Format { width: w, height: h, channels, stride }, p)
 }
 
-/// A TIFF file whose first image is uncompressed, of 8-bit samples, 1 to 4 to a pixel,
-/// interleaved, in strips one after another in the file. The rest of the file (other images
-/// too) is kept as it is.
+/// A TIFF file whose first image is uncompressed, of 8-bit samples, or 16-bit ones (of the
+/// file's byte order), 1 to 4 to a pixel, interleaved, in strips one after another in the file.
+/// The rest of the file (other images too) is kept as it is.
 fn tiff(d: &[u8]) -> Option<Found> {
     let t = Tiff::new(d)?;
     let ifd = t.u32(4)?;
@@ -270,16 +275,24 @@ fn tiff(d: &[u8]) -> Option<Found> {
         return None;
     }
     let bits = values(258).unwrap_or_else(|| vec![1]);
-    if bits.len() != channels || bits.iter().any(|&b| b != 8) {
-        return None;
-    }
+    let wide = match bits[..] {
+        [b, ..] if bits.len() == channels && bits.iter().all(|&x| x == b) && (b == 8 || b == 16) => b == 16,
+        _ => return None,
+    };
     let (offsets, counts) = (values(273)?, values(279)?);
     if offsets.len() != counts.len() || offsets.windows(2).zip(&counts).any(|(o, &c)| o[0] + c != o[1]) {
         return None;
     }
+    let all = counts.iter().sum::<usize>();
+    if wide {
+        let stride = w.checked_mul(2 * channels)?;
+        let f = raster16::Format { width: w, height: h, channels, stride, big_endian: t.big };
+        (all == f.len()?).then_some(())?;
+        return wide_found("tiff", d, f, *offsets.first()?);
+    }
     let stride = w.checked_mul(channels)?;
     let f = raster::Format { width: w, height: h, channels, stride };
-    (counts.iter().sum::<usize>() == f.len()?).then_some(())?;
+    (all == f.len()?).then_some(())?;
     raster_found("tiff", d, f, *offsets.first()?)
 }
 
@@ -392,6 +405,17 @@ impl<'a> Tiff<'a> {
         let at = if size * e.count > 4 { self.u32(e.at)? } else { e.at };
         (0..e.count).map(|i| if size == 2 { self.u16(at + 2 * i) } else { self.u32(at + 4 * i) }).collect()
     }
+}
+
+/// 16-bit raster samples at `start` of a PNM or TIFF file, as [`raster16_found`], but for
+/// samples all multiples of 257: 8-bit ones written as 16 bits (ImageMagick's `-depth 16`, say),
+/// whose low bytes repeat the high ones, which `raster-recons-16` does not see and the planes of
+/// bytes apart (aqr-infer-recs) take better.
+fn wide_found(name: &'static str, d: &[u8], f: raster16::Format, start: usize) -> Option<Found> {
+    let found = raster16_found(name, d, f, start)?;
+    let samples = d[found.start..found.start + found.len].chunks_exact(f.stride);
+    let widened = samples.flat_map(|r| r[..f.row_bytes()].as_chunks::<2>().0).all(|s| s[0] == s[1]);
+    (!widened).then_some(found)
 }
 
 /// 16-bit raster samples at `start`, if the file holds all of them.

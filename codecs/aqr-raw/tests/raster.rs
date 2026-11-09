@@ -147,19 +147,21 @@ fn bmp(w: usize, h: usize, bpp: usize, top_down: bool) -> Vec<u8> {
     d
 }
 
-fn pnm(w: usize, h: usize, ch: usize) -> Vec<u8> {
+/// A binary PNM file of samples up to `max`: of 8 bits up to 255, else of 16 (big-endian).
+fn pnm(w: usize, h: usize, ch: usize, max: usize) -> Vec<u8> {
     let mut d = match ch {
-        1 => format!("P5\n# a comment\n{w} {h}\n255\n").into_bytes(),
-        3 => format!("P6 {w}\t{h} 255 ").into_bytes(),
-        _ => format!("P7\nWIDTH {w}\nHEIGHT {h}\nDEPTH {ch}\nMAXVAL 255\nTUPLTYPE X\nENDHDR\n").into_bytes(),
+        1 => format!("P5\n# a comment\n{w} {h}\n{max}\n").into_bytes(),
+        3 => format!("P6 {w}\t{h} {max} ").into_bytes(),
+        _ => format!("P7\nWIDTH {w}\nHEIGHT {h}\nDEPTH {ch}\nMAXVAL {max}\nTUPLTYPE X\nENDHDR\n").into_bytes(),
     };
-    d.extend_from_slice(&picture(w, h, ch));
+    d.extend_from_slice(&if max < 256 { picture(w, h, ch) } else { picture16(w, h, ch, true) });
     d
 }
 
-/// An uncompressed TIFF file: its IFD first (tags of SHORT values, BitsPerSample's and the
-/// strips' at the end of the IFD), then the pixels in two strips.
-fn tiff(w: usize, h: usize, ch: usize, big: bool) -> Vec<u8> {
+/// An uncompressed TIFF file of samples of `bits` (8 or 16) bits: its IFD first (tags of SHORT
+/// values, BitsPerSample's and the strips' at the end of the IFD), then the pixels in two
+/// strips.
+fn tiff(w: usize, h: usize, ch: usize, big: bool, bits: usize) -> Vec<u8> {
     let (u16b, u32b) = if big {
         (u16::to_be_bytes as fn(u16) -> [u8; 2], u32::to_be_bytes as fn(u32) -> [u8; 4])
     } else {
@@ -168,7 +170,7 @@ fn tiff(w: usize, h: usize, ch: usize, big: bool) -> Vec<u8> {
     let n = 9;
     let extra = 8 + 2 + 12 * n + 4;
     let px_at = extra + 2 * ch + 8 + 8;
-    let half = h / 2 * w * ch;
+    let half = h / 2 * w * ch * bits / 8;
     let mut d = if big { b"MM\0*".to_vec() } else { b"II*\0".to_vec() };
     d.extend_from_slice(&u32b(8));
     d.extend_from_slice(&u16b(n as u16));
@@ -183,12 +185,12 @@ fn tiff(w: usize, h: usize, ch: usize, big: bool) -> Vec<u8> {
     let long = |v: usize| u32b(v as u32).to_vec();
     tag(&mut d, 256, 3, 1, short(w));
     tag(&mut d, 257, 4, 1, long(h));
-    let bits = match ch {
-        1 => short(8),
-        2 => [u16b(8), u16b(8)].concat(),
+    let per = match ch {
+        1 => short(bits),
+        2 => [u16b(bits as u16), u16b(bits as u16)].concat(),
         _ => long(extra),
     };
-    tag(&mut d, 258, 3, ch as u32, bits);
+    tag(&mut d, 258, 3, ch as u32, per);
     tag(&mut d, 259, 3, 1, short(1));
     tag(&mut d, 262, 3, 1, short(if ch < 3 { 1 } else { 2 }));
     tag(&mut d, 273, 4, 2, long(extra + 2 * ch));
@@ -197,14 +199,14 @@ fn tiff(w: usize, h: usize, ch: usize, big: bool) -> Vec<u8> {
     tag(&mut d, 284, 3, 1, short(1));
     d.extend_from_slice(&u32b(0));
     for _ in 0..ch {
-        d.extend_from_slice(&u16b(8));
+        d.extend_from_slice(&u16b(bits as u16));
     }
     d.extend_from_slice(&u32b(px_at as u32));
     d.extend_from_slice(&u32b((px_at + half) as u32));
     d.extend_from_slice(&u32b(half as u32));
-    d.extend_from_slice(&u32b((h * w * ch - half) as u32));
+    d.extend_from_slice(&u32b((h * w * ch * bits / 8 - half) as u32));
     assert_eq!(d.len(), px_at);
-    d.extend_from_slice(&picture(w, h, ch));
+    d.extend_from_slice(&if bits == 8 { picture(w, h, ch) } else { picture16(w, h, ch, big) });
     d
 }
 
@@ -216,9 +218,9 @@ fn images() -> Vec<(String, Vec<u8>)> {
         }
         v.push((format!("bmp {w}x{h} 24, top-down"), bmp(w, h, 24, true)));
         for ch in [1, 2, 3, 4] {
-            v.push((format!("pnm {w}x{h} {ch}"), pnm(w, h, ch)));
-            v.push((format!("tiff {w}x{h} {ch}"), tiff(w, h, ch, false)));
-            v.push((format!("tiff {w}x{h} {ch}, big-endian"), tiff(w, h, ch, true)));
+            v.push((format!("pnm {w}x{h} {ch}"), pnm(w, h, ch, 255)));
+            v.push((format!("tiff {w}x{h} {ch}"), tiff(w, h, ch, false, 8)));
+            v.push((format!("tiff {w}x{h} {ch}, big-endian"), tiff(w, h, ch, true, 8)));
         }
     }
     v
@@ -238,6 +240,52 @@ fn files() {
             assert!(coded < d.len() / 2, "{name}: {coded} of {}", d.len());
         }
     }
+}
+
+/// 16-bit PNM (a maxval over 255: big-endian samples) and TIFF files (of the file's byte order).
+fn images16() -> Vec<(String, Vec<u8>)> {
+    let mut v = vec![];
+    for (w, h) in [(1, 1), (7, 5), (101, 64), (640, 480)] {
+        for ch in [1, 2, 3, 4] {
+            for max in [256, 4095, 65535] {
+                v.push((format!("pnm {w}x{h} {ch}, maxval {max}"), pnm(w, h, ch, max)));
+            }
+            v.push((format!("tiff {w}x{h} {ch}, 16 bits"), tiff(w, h, ch, false, 16)));
+            v.push((format!("tiff {w}x{h} {ch}, 16 bits, big-endian"), tiff(w, h, ch, true, 16)));
+        }
+    }
+    v
+}
+
+#[test]
+fn files16() {
+    for (name, d) in images16() {
+        let c = container::detect(&d).expect(&name);
+        let Layout::Raster16(fmt) = c.layout else { panic!("{name}: {:?}", c.layout) };
+        assert_eq!(fmt.big_endian, !name.starts_with("tiff") || name.ends_with("big-endian"), "{name}");
+        assert_eq!(c.start + c.len, d.len(), "{name}");
+        let f = check(&name, &d).expect(&name);
+        let [a] = f.applies()[..] else { panic!("{name}") };
+        assert_eq!(a.module, raster16::MODULE, "{name}");
+        if d.len() > 100_000 {
+            let coded: usize = f.streams.iter().map(|s| s.data.len()).sum();
+            assert!(coded < d.len() / 2, "{name}: {coded} of {}", d.len());
+        }
+        // The samples are not all there: not coded.
+        assert!(formula::encode(&d[..d.len() - 1], 1).is_none(), "{name}");
+    }
+    // 8-bit samples written as 16 bits (multiples of 257): not taken
+    let mut d = b"P6 64 48 65535\n".to_vec();
+    d.extend(picture(64, 48, 3).iter().flat_map(|&s| [s, s]));
+    assert!(container::detect(&d).is_none());
+    let mut d = pnm(64, 48, 3, 65535);
+    let n = d.len();
+    for s in d[n - 64 * 48 * 6..].as_chunks_mut::<2>().0 {
+        s[1] = s[0];
+    }
+    assert!(container::detect(&d).is_none());
+    d[n - 1] ^= 1;
+    assert!(container::detect(&d).is_some());
 }
 
 #[test]
@@ -314,7 +362,8 @@ fn sized_samples() {
 fn not_coded() {
     for d in [
         &b"BM"[..],
-        b"P5\n1 1\n65535\n\0\0",
+        b"P5\n1 1\n65536\n\0\0\0",
+        b"P5\n1 1\n65535\n\0",
         b"P6 0 0 255 ",
         b"P7\nWIDTH 1\nHEIGHT 1\nDEPTH 5\nMAXVAL 255\nENDHDR\n12345",
     ] {
