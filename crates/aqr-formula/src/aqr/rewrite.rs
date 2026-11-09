@@ -5,10 +5,15 @@
 //! blocks of the tree's contents, and the non-leaf blocks those refer to. Spacer blocks, the size
 //! hint block and the blocks of no meaning known are left out.
 //!
-//! A formula block refers to non-leaf blocks by their ordinals among those after it (spec,
-//! "Formula data"): where blocks between it and those it refers to are left out, its ordinals
-//! are made again and its formula data compressed again (without a dictionary); its
-//! instructions are kept as they are.
+//! A non-leaf block that a file taken away sliced too is made again of the bytes still sliced
+//! (the ranges of the Slice instructions of the formula blocks kept, merged), compressed again
+//! without a dictionary: what was solid with the files taken away leaves the file too.
+//!
+//! A formula block refers to non-leaf blocks by their ordinals among those after it, and slices
+//! them by offsets (spec, "Formula data"): where blocks between it and those it refers to are
+//! left out, its ordinals are made again, and where those it slices are made again, the starts
+//! of its slices; its formula data is then compressed again (without a dictionary). Its
+//! instructions are otherwise kept as they are, its applications too.
 //!
 //! Each segment's metadata block is made again: the entries whose contents are of it, at their
 //! paths in the tree, with the directories on the way (of no extra, which keeps theirs); the
@@ -36,10 +41,15 @@ pub struct Rewritten {
     pub len: u64,
     /// The segments, of the archive written and of the one before.
     pub segments: (usize, usize),
-    /// The leaf and non-leaf blocks left out, and the formula blocks made again.
+    /// The leaf and non-leaf blocks left out, the non-leaf blocks made again of the bytes still
+    /// sliced, and the formula blocks made again.
     pub leaves_left: usize,
     pub non_leaf_left: usize,
+    pub non_leaf_packed: usize,
     pub formulas_made: usize,
+    /// The leaf blocks made again (formula blocks), by their indices among those written: to be
+    /// evaluated to check them.
+    pub made: Vec<usize>,
 }
 
 /// What a block of the archive is, as it is written again.
@@ -148,19 +158,38 @@ pub fn rewrite(c: &[u8], t: &Tree, level: Level, threads: usize, out: &mut dyn W
     out.write_all(w.head()).map_err(io)?;
     let mut written = w.len() as u64;
     let mut leaf_at = vec![usize::MAX; blocks.leaves.len()];
+    let mut leaves_written = 0;
     for n in 0..kept.len().max(1) {
         if let Some(&s) = kept.get(n) {
             let seg = &blocks.segments[s];
             let leaves = seg.first.leaves..seg.end.leaves;
-            // the non-leaf blocks still referred to, and the ordinals of each formula block's
+            // the non-leaf blocks still referred to, the bytes of each still sliced, and the
+            // ordinals of each formula block's
             let whole = live[leaves.clone()].iter().all(|&l| l);
-            let mut keep = vec![whole; seg.end.non_leaf - seg.first.non_leaf];
+            let nl = seg.first.non_leaf;
+            let mut keep = vec![whole; seg.end.non_leaf - nl];
             let mut programs: HashMap<usize, Referred> = HashMap::new();
+            let mut packed: HashMap<usize, Packed> = HashMap::new();
             if !whole {
-                for l in leaves.clone().filter(|&l| live[l]) {
+                let mut dead = vec![false; keep.len()];
+                let mut sliced: Vec<Vec<(u64, u64)>> = vec![Vec::new(); keep.len()];
+                for l in leaves.clone() {
                     if let Some(p) = referred(&blocks, l).map_err(fail)? {
-                        p.ordinals.iter().for_each(|&o| keep[o - seg.first.non_leaf] = true);
-                        programs.insert(l, p);
+                        for &o in &p.ordinals {
+                            *if live[l] { &mut keep[o - nl] } else { &mut dead[o - nl] } = true;
+                        }
+                        if live[l] {
+                            p.slices
+                                .iter()
+                                .for_each(|x| sliced[p.ordinals[x.block] - nl].push((x.start, x.start + x.len)));
+                            programs.insert(l, p);
+                        }
+                    }
+                }
+                // (those a file taken away sliced too: of the bytes still sliced alone)
+                for i in (0..keep.len()).filter(|&i| keep[i] && dead[i]) {
+                    if let Some(p) = pack(&blocks, nl + i, &mut sliced[i], &enc)? {
+                        packed.insert(nl + i, p);
                     }
                 }
             }
@@ -170,7 +199,7 @@ pub fn rewrite(c: &[u8], t: &Tree, level: Level, threads: usize, out: &mut dyn W
             for &k in &keep {
                 rank.push(rank.last().unwrap() + k as usize);
             }
-            let rank_of = |o: usize| rank[o - seg.first.non_leaf];
+            let rank_of = |o: usize| rank[o - nl];
             for &(at, size, kind) in &segments[s] {
                 let bytes = &c[at..at + size];
                 let (what, made) = match kind {
@@ -183,14 +212,16 @@ pub fn rewrite(c: &[u8], t: &Tree, level: Level, threads: usize, out: &mut dyn W
                         let dictionary = blocks.leaf_dictionary[l].map(|d| d - seg.first.dictionaries);
                         let again = match (programs.get(&l), &blocks.leaves[l]) {
                             (Some(p), &LeafBlock::Formula { outputs, non_leaf, .. }) => {
-                                again(p, outputs, rank_of(non_leaf), &rank_of, &enc)?
+                                again(p, outputs, rank_of(non_leaf), &rank_of, &packed, &enc)?
                             }
                             _ => None,
                         };
                         leaf_at[l] = w.len();
+                        leaves_written += 1;
                         match again {
                             Some(b) => {
                                 r.formulas_made += 1;
+                                r.made.push(leaves_written - 1);
                                 (Copied::Leaf(None), Some(b))
                             }
                             None => (Copied::Leaf(dictionary), None),
@@ -200,7 +231,13 @@ pub fn rewrite(c: &[u8], t: &Tree, level: Level, threads: usize, out: &mut dyn W
                         r.non_leaf_left += 1;
                         continue;
                     }
-                    Kind::NonLeaf(_) => (Copied::NonLeaf, None),
+                    Kind::NonLeaf(o) => match packed.remove(&o) {
+                        Some(p) => {
+                            r.non_leaf_packed += 1;
+                            (Copied::NonLeaf, Some(p.block))
+                        }
+                        None => (Copied::NonLeaf, None),
+                    },
                     Kind::Dropped => continue,
                 };
                 let bytes = made.as_deref().unwrap_or(bytes);
@@ -249,12 +286,41 @@ fn unknown_metadata(c: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// A formula block's references to non-leaf blocks ([`referred`]): their ordinals among all, its
-/// formula data decoded and where the list of them ends in it.
+/// A formula block's references to non-leaf blocks ([`referred`]): their ordinals among all,
+/// its formula data decoded, where the list of them ends in it, and its Slice instructions.
 struct Referred {
     ordinals: Vec<usize>,
     data: Vec<u8>,
     prefix: usize,
+    slices: Vec<SliceAt>,
+}
+
+/// A Slice instruction: of the referenced item `block` (by its index in the formula's list), and
+/// where its start operand is in the formula data.
+struct SliceAt {
+    block: usize,
+    start: u64,
+    len: u64,
+    at: std::ops::Range<usize>,
+}
+
+/// A non-leaf block made again of the bytes still sliced ([`pack`]): its bytes, and where each
+/// range kept (start, end) starts in it.
+struct Packed {
+    block: Vec<u8>,
+    ranges: Vec<(u64, u64, u64)>,
+}
+
+impl Packed {
+    /// Where a slice of `len` bytes at `start` of the block before is in this one.
+    fn start(&self, start: u64, len: u64) -> u64 {
+        let i = self.ranges.partition_point(|r| r.1 < start + len.max(1)).min(self.ranges.len().saturating_sub(1));
+        match self.ranges.get(i) {
+            Some(&(s, e, at)) if s <= start && start + len <= e => at + (start - s),
+            // (an empty slice where no range is)
+            _ => 0,
+        }
+    }
 }
 
 /// What formula block `l` refers to of the non-leaf blocks; none of a leaf data block.
@@ -271,17 +337,94 @@ fn referred(blocks: &super::Blocks, l: usize) -> super::Decoded<Option<Referred>
         next = o + 1;
     }
     let prefix = r.at;
-    Ok(Some(Referred { ordinals, data: d, prefix }))
+    let slices = slices(&d, prefix, ordinals.len())?;
+    Ok(Some(Referred { ordinals, data: d, prefix, slices }))
+}
+
+/// The Slice instructions of formula data `d`, its resources' and modules' lists from `at` on,
+/// of `blocks` referenced items: the instructions' operands read (spec, "Formula data"), not
+/// checked further than they have to be to be read.
+fn slices(d: &[u8], at: usize, blocks: usize) -> super::Decoded<Vec<SliceAt>> {
+    use super::{
+        APPLY, APPLY_OLD, CHECKSUM, CONCAT, LITERAL, MODULE_BYTES, NOP, PACK, PATCH, RESOURCE_BYTES, SLICE, SPLIT, SWAP,
+    };
+    let mut r = Reader { d, at };
+    r.nums()?;
+    r.nums()?;
+    let mut out = Vec::new();
+    while r.at < d.len() {
+        let op = d[r.at];
+        r.at += 1;
+        match op {
+            NOP => {}
+            LITERAL => _ = r.bytes()?,
+            MODULE_BYTES | RESOURCE_BYTES => _ = (r.num()?, r.num()?),
+            SWAP | CONCAT | PACK | PATCH => _ = r.num()?,
+            SLICE => {
+                let block = r.index(blocks)?;
+                let s = r.at;
+                let start = r.num()?;
+                let at = s..r.at;
+                out.push(SliceAt { block, start, len: r.num()?, at });
+            }
+            APPLY | APPLY_OLD => {
+                r.num()?;
+                r.nums()?;
+                r.bytes()?;
+                r.num()?;
+                if op == APPLY {
+                    r.nums()?;
+                }
+                r.num()?;
+                r.nums()?;
+            }
+            SPLIT => _ = r.nums()?,
+            CHECKSUM if r.at + 8 <= d.len() => r.at += 8,
+            _ => return Err(Failure::Invalid(format!("formula data not read at opcode {op:#04x}"))),
+        }
+    }
+    Ok(out)
+}
+
+/// Non-leaf block `o` made again of its bytes in `sliced` (the ranges sliced of it, sorted and
+/// merged here), compressed at the level of `enc` without a dictionary: none where they are all
+/// of it.
+fn pack(blocks: &super::Blocks, o: usize, sliced: &mut Vec<(u64, u64)>, enc: &Encoder) -> Result<Option<Packed>> {
+    let (data, zstd, dict) = blocks.non_leaf[o];
+    let d =
+        decoded_with(data, zstd, true, dict.map(|i| &blocks.dictionaries[i])).map_err(|f| Error::new(f.to_string()))?;
+    sliced.retain(|r| r.0 < r.1);
+    sliced.sort_unstable();
+    let mut merged: Vec<(u64, u64)> = Vec::new();
+    for &(s, e) in sliced.iter() {
+        match merged.last_mut() {
+            Some(m) if s <= m.1 => m.1 = m.1.max(e),
+            _ => merged.push((s, e)),
+        }
+    }
+    if merged == [(0, d.len() as u64)] {
+        return Ok(None);
+    }
+    let mut kept = Vec::new();
+    let mut ranges = Vec::with_capacity(merged.len());
+    for (s, e) in merged {
+        ranges.push((s, e, kept.len() as u64));
+        kept.extend_from_slice(&d[s as usize..e as usize]);
+    }
+    let mut block = Vec::new();
+    enc.content_block(&mut block, false, &[&kept], super::How::Usual, None)?;
+    Ok(Some(Packed { block, ranges }))
 }
 
 /// Formula block of `outputs` outputs referring as `p` does, made again where the non-leaf
-/// blocks kept before it are `first` and before each, `rank`: none where its ordinals are the
-/// same.
+/// blocks kept before it are `first` and before each, `rank`, and where those it slices were
+/// `packed`: none where it refers to them the same.
 fn again(
     p: &Referred,
     outputs: u64,
     first: usize,
     rank: &dyn Fn(usize) -> usize,
+    packed: &HashMap<usize, Packed>,
     enc: &Encoder,
 ) -> Result<Option<Vec<u8>>> {
     let d = &p.data;
@@ -292,15 +435,24 @@ fn again(
         deltas.push((n - next) as u64);
         next = n + 1;
     }
-    // (none left out between it and those it refers to: as it is)
+    // (none left out between it and those it refers to, nor of them: as it is)
     let before = Reader { d, at: 0 }.nums().map_err(|f| Error::new(f.to_string()))?;
-    if before == deltas {
+    let moved: Vec<(&SliceAt, u64)> = (p.slices.iter())
+        .filter_map(|x| packed.get(&p.ordinals[x.block]).map(|k| (x, k.start(x.start, x.len))))
+        .collect();
+    if before == deltas && moved.is_empty() {
         return Ok(None);
     }
     let mut data = Vec::with_capacity(d.len());
     varint::put(&mut data, deltas.len() as u64);
     deltas.iter().for_each(|&x| varint::put(&mut data, x));
-    data.extend_from_slice(&d[p.prefix..]);
+    let mut from = p.prefix;
+    for (x, start) in moved {
+        data.extend_from_slice(&d[from..x.at.start]);
+        varint::put(&mut data, start);
+        from = x.at.end;
+    }
+    data.extend_from_slice(&d[from..]);
     let mut out = Vec::new();
     formula_block(&mut out, outputs, &always_compressed(&mut enc.cctx(), &[&data], enc.base_level(), enc.threads)?);
     Ok(Some(out))
@@ -410,7 +562,7 @@ mod tests {
         let t = open(&c, &natives()).unwrap().tree().unwrap().clone();
         let (out, r) = written(&c, &t);
         assert_eq!(out, c);
-        assert_eq!((r.leaves_left, r.non_leaf_left, r.formulas_made), (0, 0, 0));
+        assert_eq!((r.leaves_left, r.non_leaf_left, r.non_leaf_packed, r.formulas_made), (0, 0, 0, 0));
     }
 
     /// The first leaf taken away: the stream it alone slices left out, the formula block after
@@ -425,7 +577,8 @@ mod tests {
         let y = t.entries.iter().position(|e| e.name == b"y").unwrap();
         (t.entries[y].parent, t.entries[y].name) = (None, b"w".to_vec());
         let (out, r) = written(&c, &t);
-        assert_eq!((r.leaves_left, r.non_leaf_left, r.formulas_made), (1, 1, 1));
+        assert_eq!((r.leaves_left, r.non_leaf_left, r.non_leaf_packed, r.formulas_made), (1, 1, 1, 1));
+        assert_eq!(r.made, [0]);
         assert!(out.len() < c.len());
         let Ok(Value::Tree(got, files)) = decode_value(&out, &natives()) else { panic!() };
         let by_name = |n: &[u8]| {
@@ -436,6 +589,24 @@ mod tests {
         assert_eq!(by_name(b"w"), (None, want[1].clone(), Some(0o601)));
         assert_eq!(by_name(b"z"), (Some(b"d".to_vec()), want[2].clone(), Some(0o602)));
         assert_eq!(got.entries.len(), 3);
+    }
+
+    /// The second leaf taken away: the stream solid with the first made again of the bytes the
+    /// first slices alone, about a thirtieth of it; the first leaf's slices made again into it.
+    #[test]
+    fn solid_packed() {
+        let (c, want) = grouped();
+        let mut t = open(&c, &natives()).unwrap().tree().unwrap().clone();
+        let y = t.entries.iter().position(|e| e.name == b"y").unwrap();
+        t.entries.remove(y);
+        let (out, r) = written(&c, &t);
+        assert_eq!((r.leaves_left, r.non_leaf_left, r.non_leaf_packed, r.formulas_made), (1, 0, 1, 1));
+        // (the second stream, of 30,000 bytes, down to the 1,000 the first leaf slices of it)
+        assert!(c.len() - out.len() > 5000, "{} -> {}", c.len(), out.len());
+        let Ok(Value::Tree(got, files)) = decode_value(&out, &natives()) else { panic!() };
+        let names: Vec<&[u8]> = got.entries.iter().map(|e| &e.name[..]).collect();
+        assert_eq!(names, [&b"d"[..], b"x", b"z"]);
+        assert_eq!(files, [want[0].clone(), want[2].clone()]);
     }
 
     /// Nothing left, and contents not of the archive, are errors.

@@ -107,8 +107,9 @@
 //!   commits ([`edit`]); their bytes stay in the file. A path not in it is an error, before
 //!   anything is written.
 //! - `--compact ARCHIVE`: the archive written again of what it holds, segment by segment, the
-//!   blocks it still needs copied as they are ([`aqr::rewrite`]): what appends replaced or took
-//!   away, and an append not committed, out of the file. Written beside it and checked, then
+//!   blocks it still needs copied as they are, those solid with what is gone made again of what
+//!   is left ([`aqr::rewrite`]): what appends replaced or took away, and an append not
+//!   committed, out of the file. Written beside it and checked, then
 //!   put in its place by a rename. With `--delete`, of the tree without its paths (no
 //!   tombstones). Not of an archive of mirror blocks (`-A`) for now.
 //! - `--move ARCHIVE PATH --rename TO...`: each path moved to its `TO` (in the order given, the

@@ -11,7 +11,8 @@
 //!   there already, under the path moved, or under what is not a directory, is an error.
 //! - `--compact ARCHIVE` (alone, or with `--delete`, the paths then taken out of the tree): the
 //!   archive written again of what its tree holds ([`aqr::rewrite`]), every block it still needs
-//!   copied as it is, segment by segment; what an append not committed, tombstones and entries
+//!   copied as it is (a non-leaf block solid with what is gone made again of what is left, the
+//!   files made again evaluated to check them), segment by segment; what an append not committed, tombstones and entries
 //!   replaced left in the file taken out of it. It is written beside the archive
 //!   (`ARCHIVE.PID.part`), opened again and its tree checked against the one meant, then put in
 //!   its place by a rename: the archive as it was or as edited, whatever happens meanwhile.
@@ -111,8 +112,8 @@ pub fn edit(a: &Args) -> Result<(), String> {
     told(what);
     if a.verbose {
         told(format!(
-            "{} leaf and {} non-leaf blocks left out, {} formula blocks made again",
-            r.leaves_left, r.non_leaf_left, r.formulas_made
+            "{} leaf and {} non-leaf blocks left out, {} non-leaf and {} formula blocks made again",
+            r.leaves_left, r.non_leaf_left, r.non_leaf_packed, r.formulas_made
         ));
     }
     crate::end(Some(path), 0, before, r.len, start);
@@ -146,7 +147,7 @@ fn compact(a: &Args, path: &Path, o: &append::Opened, t: &Tree) -> Result<(u64, 
         crate::sync_file(&file).map_err(|e| perr(&e))?;
         let lead = lead.len();
         drop(map);
-        checked(&part, lead, t, o.sizes()).map_err(|e| perr(&e))?;
+        checked(a, &part, lead, t, o.sizes(), &r.made).map_err(|e| perr(&e))?;
         let perms = p.file.metadata().map_err(io)?.permissions();
         fs::set_permissions(&part, perms).map_err(|e| perr(&e))?;
         Ok((p.at.end - p.at.start, r))
@@ -165,12 +166,25 @@ fn compact(a: &Args, path: &Path, o: &append::Opened, t: &Tree) -> Result<(u64, 
 }
 
 /// Whether archive `part` (after `lead` bytes) holds tree `t` (its contents of `sizes`), as it
-/// is opened: its paths, their kinds and metadata, and the bytes of each content.
-fn checked(part: &PathBuf, lead: usize, t: &Tree, sizes: &[u64]) -> Result<(), String> {
+/// is opened: its paths, their kinds and metadata, and the bytes of each content; and whether
+/// the leaves `made` again evaluate, their checksums verified.
+fn checked(a: &Args, part: &PathBuf, lead: usize, t: &Tree, sizes: &[u64], made: &[usize]) -> Result<(), String> {
     let file = fs::File::open(part).map_err(|e| e.to_string())?;
     // SAFETY: a file of this process, not written to any more
     let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| e.to_string())?;
-    let archive = aqr::open(&c[lead..], &aqr::NoModules).map_err(|e| e.to_string())?;
+    let decoder = crate::Decoder {
+        native: aqr_decompress::Native { threads: a.opt.threads },
+        wasm: a.wasm,
+        sandbox: a.sandbox.then(std::sync::OnceLock::new),
+    };
+    let archive = aqr::open(&c[lead..], &decoder).map_err(|e| e.to_string())?;
+    if !made.is_empty() {
+        let mut only = vec![false; archive.leaves_len()];
+        made.iter().for_each(|&l| only[l] = true);
+        archive
+            .each_leaf_only(a.opt.threads, &only, |_, r| r.map(drop))
+            .map_err(|e| format!("a file made again does not decode (left as it was): {e}"))?;
+    }
     let new = archive.tree().ok_or("no tree")?;
     let size = |k: usize| archive.content_size(k).unwrap_or(u64::MAX);
     if shape(new, &size) != shape(t, &|k| sizes.get(k).copied().unwrap_or(u64::MAX)) {

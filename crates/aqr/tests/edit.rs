@@ -282,3 +282,27 @@ fn move_refused() {
     }
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// Files solid with others taken out and the archive written again: their bytes leave the
+/// blocks they shared, the archive about as small as one made anew of what is left.
+#[test]
+fn solid_compacted() {
+    let d = scratch("solid");
+    let want = source(&d);
+    ok(&d, &["-q", "-o", "a.aqr", "src"]);
+    let gone = ["t0.txt", "t3.txt", "t6.txt", "sub/t1.txt", "sub/deep/t2.txt"];
+    let before = fs::metadata(d.join("a.aqr")).unwrap().len();
+    let mut args = vec!["-q", "--delete", "--compact", "a.aqr"];
+    args.extend(gone);
+    ok(&d, &args);
+    let left = without(&want, &gone);
+    assert_eq!(extracted(&d, "a.aqr"), left);
+    for g in gone {
+        fs::remove_file(d.join("src").join(g)).unwrap();
+    }
+    ok(&d, &["-q", "-o", "fresh.aqr", "src"]);
+    let (after, fresh) =
+        (fs::metadata(d.join("a.aqr")).unwrap().len(), fs::metadata(d.join("fresh.aqr")).unwrap().len());
+    assert!(after * 10 < fresh * 11, "{before} -> {after}, anew {fresh}");
+    fs::remove_dir_all(&d).unwrap();
+}
