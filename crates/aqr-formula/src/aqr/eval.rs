@@ -1475,6 +1475,11 @@ impl<'f> Graph<'f, 'f> {
                     g.push(Op::Split(p, &s.sizes, fan), 0);
                     (0..n).map(|out| Val { node, out }).collect()
                 }
+                (_, crate::Of::Node(_)) => {
+                    let (node, fan) = (g.ops.len(), g.fan());
+                    g.push(Op::Split(inputs[0], &s.sizes, fan), 0);
+                    (0..n).map(|out| Val { node, out }).collect()
+                }
                 (true, crate::Of::Apply(a)) => {
                     let a = g.push(Op::Apply(Ap::Shared(s), inputs, None), a.len);
                     let (node, fan) = (g.ops.len(), g.fan());

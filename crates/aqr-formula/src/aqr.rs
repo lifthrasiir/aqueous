@@ -4796,6 +4796,28 @@ mod tests {
         assert!(f.check_outputs().is_err());
     }
 
+    /// A node's bytes split ([`crate::Of::Node`]): a stream's, then an application's, the pieces
+    /// taken in another order between other bytes, as a file's are in an image. The archive
+    /// gives what the formula does.
+    #[test]
+    fn node_outputs() {
+        let data: Vec<u8> = (0..300_000u32).map(|i| (i / 7 % 251) as u8).collect();
+        let mut f = Formula::default();
+        let file = f.push_as("file", Kind::Unknown, data.clone());
+        f.push("rest", b"0123456789".to_vec());
+        let [o0, o1, o2] = <[Node; 3]>::try_from(f.split_node(file, vec![10, 200_000, 99_990])).unwrap();
+        let rev = Node::apply(REV, vec![1, 2, 3], vec![Node::slice(1, 0, 10)], 10);
+        let [r0, r1] = <[Node; 2]>::try_from(f.split_node(rev, vec![4, 6])).unwrap();
+        f.root = Node::concat([o2, Node::slice(1, 0, 3), r1, o0, r0, o1]);
+        let want = [&data[200_010..], b"012", b"543210", &data[..10], b"9876", &data[10..200_010]].concat();
+        let rev = |_: &crate::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect());
+        assert!(f.eval(&rev).unwrap() == want);
+        let c = encode(&f, None, Level::Zstd(3)).unwrap();
+        assert!(decode(&c, &natives()).unwrap() == want);
+        f.shared[0].split = false;
+        assert!(f.check_outputs().is_err());
+    }
+
     /// Streams merged by class without moving their bytes ([`crate::Formula::merged`]) archive
     /// as those merged ([`crate::Formula::merge_classes`]), byte for byte, the merged stream
     /// over several blocks too; and the encoder keeps none of the blocks it wrote.

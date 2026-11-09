@@ -770,6 +770,9 @@ pub enum Of {
     /// bytes, the outputs' sizes added up: e.g. a Zstandard frame's blocks decompressed (an
     /// empty source), what they hold taken by several files.
     Patch { inputs: [Node; 2], len: u64 },
+    /// A node's bytes, cut into the outputs (a Split instruction of it): e.g. a file's contents,
+    /// one content, of which an image holds pieces here and there.
+    Node(Node),
 }
 
 impl Shared {
@@ -778,6 +781,7 @@ impl Shared {
         match &self.of {
             Of::Apply(a) => &a.inputs,
             Of::Patch { inputs, .. } => inputs,
+            Of::Node(n) => std::slice::from_ref(n),
         }
     }
 
@@ -785,6 +789,7 @@ impl Shared {
         match &mut self.of {
             Of::Apply(a) => &mut a.inputs,
             Of::Patch { inputs, .. } => inputs,
+            Of::Node(n) => std::slice::from_mut(n),
         }
     }
 
@@ -792,14 +797,14 @@ impl Shared {
     pub fn apply(&self) -> Option<&Apply> {
         match &self.of {
             Of::Apply(a) => Some(a),
-            Of::Patch { .. } => None,
+            Of::Patch { .. } | Of::Node(_) => None,
         }
     }
 
     pub fn apply_mut(&mut self) -> Option<&mut Apply> {
         match &mut self.of {
             Of::Apply(a) => Some(a),
-            Of::Patch { .. } => None,
+            Of::Patch { .. } | Of::Node(_) => None,
         }
     }
 
@@ -808,12 +813,21 @@ impl Shared {
         match &self.of {
             Of::Apply(a) => a.len,
             Of::Patch { len, .. } => *len,
+            Of::Node(n) => n.len(),
         }
     }
 
     /// The outputs of a Patch instruction ([`Of::Patch`]) on `inputs`, the source and the patch
-    /// evaluated; None of an application.
+    /// evaluated, or of a node split ([`Of::Node`]) on its bytes; None of an application.
     pub fn patched(&self, inputs: &[&[u8]]) -> Option<Result<Vec<Vec<u8>>>> {
+        if let Of::Node(_) = self.of {
+            let &[all] = inputs else { return Some(Err(Error::new("split: one input wanted"))) };
+            if all.len() as u64 != self.sizes.iter().sum::<u64>() {
+                return Some(Err(Error::new("split: outputs of other sizes than declared")));
+            }
+            let mut rest = all;
+            return Some(Ok(self.sizes.iter().map(|&n| rest.split_off(..n as usize).unwrap().to_vec()).collect()));
+        }
         let Of::Patch { len, .. } = self.of else { return None };
         let &[source, patch] = inputs else { return Some(Err(Error::new("patch: two inputs wanted"))) };
         Some(patch::apply(source, patch, len).and_then(|all| {
@@ -830,6 +844,7 @@ impl Shared {
         match &self.of {
             Of::Apply(a) => a.module.to_string(),
             Of::Patch { .. } => "patch".into(),
+            Of::Node(_) => "split".into(),
         }
     }
 }
@@ -1134,6 +1149,16 @@ impl Formula {
         let outputs = sizes.iter().enumerate().map(|(index, &len)| Node::Output { shared, index, len }).collect();
         let len = sizes.iter().sum();
         self.shared.push(Shared { of: Of::Patch { inputs: [source, patch], len }, sizes, split: true });
+        outputs
+    }
+
+    /// Adds `node` cut into outputs of `sizes` bytes ([`Of::Node`]), their sum its length,
+    /// returning them to be placed in the formula, each once.
+    pub fn split_node(&mut self, node: Node, sizes: Vec<u64>) -> Vec<Node> {
+        debug_assert_eq!(sizes.iter().sum::<u64>(), node.len());
+        let shared = self.shared.len();
+        let outputs = sizes.iter().enumerate().map(|(index, &len)| Node::Output { shared, index, len }).collect();
+        self.shared.push(Shared { of: Of::Node(node), sizes, split: true });
         outputs
     }
 
@@ -1920,7 +1945,7 @@ pub trait Modules {
     /// from the output of [`Modules::apply`] ([`Shared::split`]), or that output if `s` has one.
     fn apply_shared(&self, s: &Shared, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
         let all = match &s.of {
-            Of::Patch { .. } => return s.patched(inputs).expect("a patch"),
+            Of::Patch { .. } | Of::Node(_) => return s.patched(inputs).expect("a patch or a split"),
             Of::Apply(a) if s.split => self.apply(a, inputs)?,
             Of::Apply(a) if s.sizes.len() == 1 => return Ok(vec![self.apply(a, inputs)?]),
             Of::Apply(a) => return Err(Error::new(format!("{}: {} outputs", a.module, s.sizes.len()))),
