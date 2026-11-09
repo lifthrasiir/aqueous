@@ -1,0 +1,457 @@
+.\" The manual page of aqr, in mdoc(7). Every option of `aqr --help` is here: a test of
+.\" crates/aqr (`man_page_has_every_option`) checks it.
+.Dd November 9, 2026
+.Dt AQR 1
+.Os
+.Sh NAME
+.Nm aqr ,
+.Nm unaqr
+.Nd archive files with lossless recompression
+.Sh SYNOPSIS
+.Nm
+.Op Ar options
+.Ar input
+.Op Fl -rename Ar to
+.Ar ...
+.Nm
+.Fl d
+.Op Ar options
+.Ar archive
+.Op Ar path Op Fl -rename Ar to
+.Ar ...
+.Nm
+.Fl d
+.Fl -each
+.Op Ar options
+.Ar archive ...
+.Nm
+.Fl t
+.Op Fl q | v
+.Op Fl -json
+.Ar archive
+.Op Ar path ...
+.Nm
+.Fl K
+.Op Ar options
+.Ar archive ...
+.Nm
+.Fl I
+.Op Fl v
+.Ar archive
+.Op Ar path ...
+.Nm unaqr
+.Op Ar options
+.Ar archive
+.Op Ar path ...
+.Sh DESCRIPTION
+.Nm
+makes Aqueous archives: files and directories with their metadata, the compressed data
+in them (DEFLATE streams, JPEG, MP3, FLAC, PDF, ZIP, LZMA, executables and more)
+recompressed losslessly, so that each file comes back byte for byte.
+An archive carries the WebAssembly modules that decode it; known ones run natively,
+others in a sandbox.
+.Pp
+By default, each
+.Ar input
+is compressed into
+.Ar input Ns .aqr :
+a file as an archive of a single file, a directory as an archive of what it holds.
+With
+.Fl o ,
+all the inputs go into one archive, several of them by their paths: a relative one as
+given, an absolute one or one with
+.Pa ..
+by its last name.
+Run as
+.Nm unaqr ,
+it decompresses by default.
+.Pp
+.Nm
+also reads ZIP, 7z, RAR, ALZ, EGG and tar archives (alone or under gzip, bzip2, xz,
+LZMA or Zstandard) and those compressors' single files, extracting them as
+.Xr tar 1 ,
+.Xr unzip 1
+and 7-Zip do; and writes ZIP, 7z, ALZ, EGG and tar archives
+.Pq Fl -format .
+.Ss Modes
+.Bl -tag -width Ds
+.It Fl c , Fl -compress
+Compress (the default as
+.Nm ) .
+.It Fl d , Fl -decompress
+Extract each archive into its name without
+.Pa .aqr ,
+or
+.Fl o .
+An archive of another format is extracted as it is into the current directory (or
+.Fl o ) ,
+a compressor's single file into its name without its extension.
+Given
+.Ar path Ns s
+after the archive, those alone are extracted (a directory with what is under it), where
+the whole archive would have them; only what they need is decoded.
+.It Fl t , Fl -list
+List the entries of each archive, or those at its
+.Ar path Ns s ,
+with their sizes, modification times, flags and how each file is made.
+.Fl q
+lists the paths alone,
+.Fl v
+the blocks each file takes, its formula and all its metadata.
+.It Fl K , Fl -test
+Decode and check each archive, writing nothing; tell how far it conforms to the archival
+profile where it has mirror blocks (or with
+.Fl v ) .
+.It Fl I , Fl -info
+Tell all that an archive records, for debugging: its blocks and segments, or of each
+.Ar path
+its entry in every segment with its formula in full.
+.Fl v
+gives the unknown metadata uncut.
+.El
+.Ss Inputs
+.Bl -tag -width Ds
+.It Fl -rename Ar to
+After an input, archive it at
+.Ar to
+.Pq names between Ql / ;
+after a
+.Ar path
+of an archive, extract it there.
+.It Fl x Ar name , Fl -exclude Ar name
+Leave out the entries named
+.Ar name
+wherever they are found, or, where
+.Ar name
+has a
+.Ql /
+but at its end, the entry at that path in the archive; with what is under them.
+Matched as given: there are no wildcards yet.
+May be given more than once.
+.It Fl -files-from Ar file
+Take the inputs (decompressing, the
+.Ar path Ns s
+of the archive) listed in
+.Ar file
+.Po
+.Ql -
+for standard input
+.Pc ,
+a line each, where the option is given.
+.It Fl -null
+The lists of
+.Fl -files-from
+after it have each path ended by NUL, not by a line's end.
+.It Fl L , Fl -dereference
+Follow links, given or found, archiving what they lead to; a link leading nowhere or to a
+directory it is in is kept as a link.
+.It Fl C Ar dir , Fl -directory Ar dir
+Compressing, find the inputs after it in
+.Ar dir
+and archive them as if run there; decompressing, extract into
+.Ar dir .
+The archives' own paths are taken from where
+.Nm
+is run.
+.It Fl -each
+Take every input as an archive, each extracted (or listed) whole.
+.It Fl
+As an input, standard input: compressing, the only input, read whole and archived as a
+single file; decompressing, an Aqueous archive (read whole first).
+Its output is standard output unless
+.Fl o
+is given.
+Where no input is given and standard input is not a terminal, it is the input (but with
+.Fl t
+and
+.Fl I ) .
+.El
+.Ss Output
+.Bl -tag -width Ds
+.It Fl o Ar output , Fl -output Ar output
+Write to
+.Ar output ;
+compressing, all the inputs into one archive.
+.Fl o Fl
+is standard output: compressing, the archive (never to a terminal, but with
+.Fl f ) ,
+an archive of several files written as it is made; decompressing, the file of an archive
+of a single file, or the one file of the
+.Ar path Ns s
+given.
+.It Fl -auto-dir
+Decompressing, extract a single entry at the top of an archive beside it, else into a
+directory of the archive's name without its extension beside it;
+.Fl o
+is where it goes instead of beside it.
+.It Fl f , Fl -force
+Overwrite outputs.
+.It Fl -rm
+Remove the inputs once archived (and checked), or an archive once extracted whole;
+what changed meanwhile is kept and told.
+.It Fl p , Fl -preserve
+Keep and apply the metadata not commonly kept too: access, status change and backup
+times; extracting, ownership, flags only the superuser can change, set-user-ID and
+set-group-ID bits, FIFOs and devices.
+.It Fl q , Fl -quiet
+Log nothing but errors.
+.It Fl v , Fl -verbose
+Log each file archived: what it was taken for, the modules its formula applies and the
+bytes of the archive that are its.
+.It Fl -stats Ns Op = Ns Ar file
+Tell, after each archive, what stands out of where the time went;
+.Ar file Ns .json
+or
+.Ar file Ns .html
+writes all that was sampled.
+May be given more than once.
+.It Fl -json
+With
+.Fl t ,
+write a line of JSON for each archive: its entries with all their metadata, and the
+counts and totals.
+.It Fl -ipc
+Be driven by a graphical frontend through standard input and output.
+.El
+.Ss Compression
+.Bl -tag -width Ds
+.It Fl P , Fl -passphrase
+Encrypt the archives with a passphrase asked for on the terminal (twice).
+Decompressing, ask for it at once; an encrypted archive asks for one anyway where there is
+a terminal.
+Without a terminal, a line of standard input is taken.
+.It Fl -passphrase-from Ar source
+As
+.Fl P ,
+the passphrase taken from
+.Ar source
+and nothing asked for:
+.Cm stdin ,
+a line of standard input;
+.Cm fd: Ns Ar n ,
+a line of file descriptor
+.Ar n ;
+.Cm env: Ns Ar name ,
+the value of environment variable
+.Ar name ;
+any other path, the first line of that file
+.Po
+.Pa ./env:x
+for a file named so
+.Pc .
+.It Fl l Ar level , Fl -level Ar level , Fl 0 No ... Fl 9
+The level of compression:
+.Cm 0
+stores the data uncompressed,
+.Cm 1
+compresses it with zstd alone,
+.Cm 2
+to
+.Cm 9
+recompress it the more;
+.Cm low ,
+.Cm mid
+(the default) and
+.Cm high
+are 2, 5 and 8.
+.Cm zstd Ns Ar n
+is zstd level
+.Ar n
+with the recompression of
+.Cm mid .
+With
+.Fl -format ,
+the format's level.
+.It Fl -format Ar format
+Write archives of another format:
+.Cm zip , 7z , alz , egg , tar , tar.gz , tar.bz2 , tar.xz , tar.lzma , tar.zst ,
+or
+.Cm gz , bz2 , xz , lzma , zst
+of a single file;
+.Cm aqr
+is the default.
+Also chosen by the extension of
+.Fl o Ns 's
+name.
+.It Fl -depth Ar n
+Recompress formats nested at most
+.Ar n
+deep (default 3).
+.It Fl B Ar size , Fl -batch Ar size
+Make about
+.Ar size
+of files at once (default 512M), which bounds the memory compression takes.
+.It Fl b Ar size , Fl -block-size Ar size
+The most bytes of a block that files share (default 16M): smaller for faster random
+access.
+.It Fl S Ar size , Fl -segment-size Ar size
+Close a segment of the archive after about
+.Ar size
+of it (default 256M;
+.Cm 0 ,
+one segment), so that an archive cut short or damaged loses no more than a segment's
+names.
+.It Fl D , Fl -dictionaries
+Compress blocks alike with dictionaries trained for them where it pays.
+.It Fl A , Fl -archival
+Make an archive for long-term preservation: the blocks whose damage would lose more than a
+file mirrored, to be restored from as it is read.
+.It Fl -no-check
+Do not decode the archive made to check it.
+.It Fl -atomic
+Make the archive whole or not at all.
+By default an archive of several files is committed as it is written, so that a stopped
+run (Ctrl-C) leaves an archive of what was written.
+.It Fl a , Fl -append
+Append the inputs to an archive (the first input, or
+.Fl o ) :
+what is not in it, or changed by size and modification time.
+.It Fl s , Fl -sync
+As
+.Fl a ,
+and take away what the archive holds that the inputs do not.
+.El
+.Ss Decompression
+.Bl -tag -width Ds
+.It Fl E Ar enc , Fl -encoding Ar enc
+How names of no declared encoding are taken:
+.Cm auto
+(the default: as bytes where this system takes them, else decoded from a set guessed),
+.Cm raw
+(as bytes),
+.Cm system ,
+or sets such as
+.Cm shift_jis , euc-kr , gbk , big5 , cp437
+(several: guessed among them).
+.It Fl -normalize Ar form
+.Cm auto
+(the default: composed, but on macOS),
+.Cm nfc ,
+.Cm nfd
+or
+.Cm keep .
+.It Fl -bad-names Ar what
+Names this system cannot write as they are:
+.Cm auto
+(the default),
+.Cm keep
+(as bytes, where the system takes them),
+.Cm replace
+.Po
+.Ql %XX ,
+U+FFFD,
+.Ql _
+.Pc
+or
+.Cm fail .
+.It Fl -links Ar what
+Which links are made:
+.Cm inside
+(the default: those whose targets stay in the directory extracted into; the others told),
+or
+.Cm all .
+.It Fl -wasm
+Run every module as WebAssembly, the known ones too.
+.It Fl -no-sandbox
+Run the WebAssembly modules in this process, not in worker processes locked down by the
+system; where the system cannot lock workers down, they run only so.
+.El
+.Ss General
+.Bl -tag -width Ds
+.It Fl T Ar n , Fl -threads Ar n
+Threads to use (default 0: as many as the machine has).
+.It Fl M Ar mem , Fl -memory Ar mem
+About the most heap to take at once: a
+.Ar size ,
+.Ar n Ns %
+of the system's memory,
+.Cm avail
+(most of what is available as it starts), or
+.Cm 0
+(no limit); by default 2 GB, or half the system's if less.
+It also bounds the memory of the modules run as WebAssembly.
+.It Fl -application-bound Ar size
+The most memory an application of a module may need.
+Compressing (default 256M, or
+.Cm unlimited ) ,
+recompressions needing more are not used; decompressing (default 512M, which every
+decoder supports), an archive needing more fails.
+.It Fl h , Fl -help
+Show a summary of the options.
+.It Fl V , Fl -version
+Show the version.
+.El
+.Pp
+A
+.Ar size
+is a number of bytes, or of KiB, MiB or GiB with
+.Ql K ,
+.Ql M
+or
+.Ql G .
+Short options may be bundled
+.Pq Fl cf , Fl T8 , Fl oOUT ;
+a long option's value may follow it after
+.Ql =
+.Pq Fl -memory=2G .
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev TMPDIR
+Where standard input is read into
+.Pq Fl ,
+and an archive for standard output is made where it is not written as it is made
+.Pq Fl o Fl .
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 3n -compact
+.It 0
+Done.
+.It 1
+Failed otherwise: reading or writing files, an archive of another format, ...
+.It 2
+The arguments are wrong.
+.It 3
+An archive is invalid: damaged or cut short, files lost to it (repaired or not).
+.It 4
+An archive is not decrypted: no passphrase given opens it.
+.It 5
+An archive needs more than this decoder supports or is allowed
+.Pq Fl M , Fl -application-bound .
+.It 6
+An archive has a critical extension not known.
+.It 7
+Done but for what was told left out: entries not extracted, inputs not removed
+.Pq Fl -rm .
+.It 130
+Stopped (Ctrl-C, a signal, the frontend).
+.El
+.Pp
+Where several apply, the most severe (in the order 7, 3, 4, 5, 6) is the exit status.
+.Sh EXAMPLES
+Archive a directory into
+.Pa photos.aqr ,
+and extract it again:
+.Dl $ aqr photos
+.Dl $ aqr -d photos.aqr
+.Pp
+Archive two inputs into one archive at the highest level, leaving out
+.Pa .git
+directories:
+.Dl $ aqr -9 -x .git -o work.aqr src docs
+.Pp
+Extract one file of an archive to standard output:
+.Dl $ aqr -d -o - work.aqr src/main.rs | less
+.Pp
+Archive on another machine and extract here:
+.Dl $ ssh host 'aqr -o - project' | aqr -d - -o project
+.Pp
+Encrypt with a passphrase of a file, then list the archive as JSON:
+.Dl $ aqr --passphrase-from=key.txt -o secret.aqr secret
+.Dl $ aqr -t --json --passphrase-from=key.txt secret.aqr | jq .
+.Sh SEE ALSO
+.Xr 7z 1 ,
+.Xr tar 1 ,
+.Xr unzip 1 ,
+.Xr zstd 1
+.Pp
+The Aqueous format specification.

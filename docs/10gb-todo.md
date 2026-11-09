@@ -41,15 +41,15 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html, 10gb.zpa
 
 ## 측정
 
-2026-11-08, Apple M4(10코어), 커밋 `f6f22f7a`. 명령어는 아래와 같고(`-L`은 레벨, 배치는 기본값,
+2026-11-08, Apple M4(10코어), 커밋 `f6f22f7a`. 명령어는 아래와 같고(`-N`은 레벨 `-0`~`-9`; `-L`은 `--dereference`이다, 배치는 기본값,
 검증 포함), 둘 다 `--stats --stats=FILE.json`을 켜고 `/usr/bin/time -l`로 쟀다(JSON은
-`crates/aqr/cache/10gb/{c,k}L-f6f22f7a-r{1,2}.json`). 각 레벨을 두 번 재어 빠른 쪽을 적었고
+`crates/aqr/cache/10gb/{c,k}N-f6f22f7a-r{1,2}.json`). 각 레벨을 두 번 재어 빠른 쪽을 적었고
 괄호는 다른 한 번이다. 시간은 aqr 자신이 찍는 초이다. 측정 전에 `uptime`과 `ps`로 다른 부하가
 없음을 확인했다(1코어를 넘는 것은 없었고 `claude` 자신 외에는 1% 안팎).
 
 ```
-cargo aqr -c -f -L -o ~/tmp/bench10/L.aqr ~/tmp/10gb --stats --stats=...
-cargo aqr -K ~/tmp/bench10/L.aqr --stats --stats=...
+cargo aqr -c -f -N -o ~/tmp/bench10/N.aqr ~/tmp/10gb --stats --stats=...
+cargo aqr -K ~/tmp/bench10/N.aqr --stats --stats=...
 ```
 
 | 레벨 | 크기 | 압축 | 명령어 | footprint | resident | heap 최대 | `-K` | 명령어 | footprint | resident | heap 최대 |

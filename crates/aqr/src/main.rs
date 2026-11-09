@@ -3757,6 +3757,31 @@ fn summary_d(input: &Path, out: Option<&Path>, files: usize, total: u64, start: 
 mod tests {
     use super::*;
 
+    /// Every option `--help` tells of is in the manual page (`aqr.1`), as mdoc's `Fl`.
+    #[test]
+    fn man_page_has_every_option() {
+        let man = include_str!("../aqr.1");
+        let mut missing = Vec::new();
+        for line in HELP.lines() {
+            // (the lines of options: indented by 2 to 6, the option first, its words to two spaces)
+            let indent = line.len() - line.trim_start().len();
+            if !(2..=6).contains(&indent) || !line.trim_start().starts_with('-') {
+                continue;
+            }
+            let column = line.trim_start().split("  ").next().unwrap();
+            for word in column.split([' ', ',']) {
+                let name = word.split('[').next().unwrap();
+                if name.len() < 2 || !name.starts_with('-') || name == "..." {
+                    continue;
+                }
+                if !man.contains(&format!("Fl {}", &name[1..])) {
+                    missing.push(name.to_owned());
+                }
+            }
+        }
+        assert!(missing.is_empty(), "not in aqr.1: {missing:?}");
+    }
+
     /// `-M`: by default 2 GB but at most half the system's; `avail` most of what is available,
     /// but not too little; a share of the system's; a size; none.
     #[test]
