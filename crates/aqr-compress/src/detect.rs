@@ -2,6 +2,7 @@
 //! the name of its file ([`kind_by_name`]).
 
 use std::fmt;
+use std::sync::LazyLock;
 
 use aqr_formula::Kind;
 
@@ -48,254 +49,223 @@ pub fn detect(d: &[u8]) -> Option<Format> {
     detect_at(d, true)
 }
 
-/// [`detect`], of data at its start (`start`) or in the middle of other data.
+/// [`detect`], of data at its start (`start`) or in the middle of other data: the format of
+/// the first row of [`ROWS`] that tells it (of those looked for there).
 fn detect_at(d: &[u8], start: bool) -> Option<Format> {
-    let at = |p: usize, m: &[u8]| d.get(p..p + m.len()) == Some(m);
-    if at(0, b"\x89PNG\r\n\x1a\n") {
-        Some(Format::Png)
-    } else if aqr_gif::formula::starts(d) {
-        Some(Format::Gif)
-    } else if start && crate::aqueous::starts(d) {
-        Some(Format::Aqr)
-    } else if start && aqr_disk::starts(d, crate::bundle::FILE_SYSTEMS) {
+    ROWS.iter().find(|r| (start || r.anywhere.is_some()) && r.test.holds(d)).map(|r| r.format)
+}
+
+/// How a row of [`ROWS`] tells a file of its format.
+enum Test {
+    /// These bytes at these offsets, all of them.
+    Magic(&'static [(usize, &'static [u8])]),
+    /// A function of the data.
+    Fn(fn(&[u8]) -> bool),
+}
+
+impl Test {
+    fn holds(&self, d: &[u8]) -> bool {
+        match self {
+            Test::Magic(parts) => parts.iter().all(|&(p, m)| d.get(p..p + m.len()) == Some(m)),
+            Test::Fn(f) => f(d),
+        }
+    }
+}
+
+/// The first two bytes of the files a row of [`ROWS`] looked for in other data tells: every
+/// file it tells starts with one of them ([`starts`] looks at no other row there).
+enum Pairs {
+    /// Those of its [`Test::Magic`], whose first bytes are at the start.
+    Magic,
+    Of(&'static [&'static [u8; 2]]),
+    Fn(fn(u8, u8) -> bool),
+}
+
+/// A way of telling a file of a format by its bytes.
+struct Row {
+    format: Format,
+    test: Test,
+    /// Where it is looked for in other data too, the first bytes of the files it tells; else at
+    /// the start of data only.
+    anywhere: Option<Pairs>,
+}
+
+const fn magic(format: Format, parts: &'static [(usize, &'static [u8])]) -> Row {
+    Row { format, test: Test::Magic(parts), anywhere: Some(Pairs::Magic) }
+}
+
+const fn anywhere(format: Format, pairs: Pairs, f: fn(&[u8]) -> bool) -> Row {
+    Row { format, test: Test::Fn(f), anywhere: Some(pairs) }
+}
+
+const fn start(format: Format, f: fn(&[u8]) -> bool) -> Row {
+    Row { format, test: Test::Fn(f), anywhere: None }
+}
+
+/// The ways of telling files by their bytes, in the order they are tried: the first that tells
+/// the data gives its format.
+#[rustfmt::skip]
+static ROWS: &[Row] = {
+    use Format::*;
+    use Pairs::Of;
+    &[
+        magic(Png, &[(0, b"\x89PNG\r\n\x1a\n")]),
+        anywhere(Gif, Of(&[b"GI"]), aqr_gif::formula::starts),
+        start(Aqr, crate::aqueous::starts),
         // (before the others: a hybrid image starts with a boot sector, or anything)
-        Some(Format::Disk)
-    } else if start && aqr_disk::chunked::container(d).is_some() {
+        start(Disk, |d| aqr_disk::starts(d, crate::bundle::FILE_SYSTEMS)),
         // (a compressed container, whose file systems are in its compressed chunks: `chunked`)
-        Some(Format::Disk)
-    } else if start && crate::chunked::starts(d) {
-        Some(Format::Dmg)
-    } else if start && aqr_wim::wim::starts(d) {
-        Some(Format::Wim)
-    } else if start && aqr_asar::starts(d) {
-        Some(Format::Asar)
-    } else if start && aqr_mszip::formula::starts_chm(d) {
-        Some(Format::Chm)
-    } else if sqlite_header(d) {
-        Some(Format::Sqlite)
-    } else if at(0, b"%PDF-") {
-        Some(Format::Pdf)
-    } else if at(0, b"8BPS") {
-        Some(Format::Psd)
-    } else if at(0, b"CSFCHUNK") {
-        Some(Format::Clip)
-    } else if aqr_fsb::fsb5::starts(d) {
-        Some(Format::Fsb5)
-    } else if aqr_ogg::formula::starts(d) {
-        Some(Format::Ogg)
-    } else if at(0, b"fLaC") {
-        Some(Format::Flac)
-    } else if at(0, b"RIFF") && at(8, b"WAVE") || at(0, b"FORM") && (at(8, b"AIFF") || at(8, b"AIFC")) {
-        Some(Format::Raw)
-    } else if let Some(p) = id3_len(d) {
+        start(Disk, |d| aqr_disk::chunked::container(d).is_some()),
+        start(Dmg, crate::chunked::starts),
+        start(Wim, aqr_wim::wim::starts),
+        start(Asar, aqr_asar::starts),
+        start(Chm, aqr_mszip::formula::starts_chm),
+        // (a whole file, not in other data)
+        start(Sqlite, sqlite_header),
+        magic(Pdf, &[(0, b"%PDF-")]),
+        magic(Psd, &[(0, b"8BPS")]),
+        magic(Clip, &[(0, b"CSFCHUNK")]),
+        start(Fsb5, aqr_fsb::fsb5::starts),
+        anywhere(Ogg, Of(&[b"Og"]), aqr_ogg::formula::starts),
+        magic(Flac, &[(0, b"fLaC")]),
+        magic(Raw, &[(0, b"RIFF"), (8, b"WAVE")]),
+        magic(Raw, &[(0, b"FORM"), (8, b"AIFF")]),
+        magic(Raw, &[(0, b"FORM"), (8, b"AIFC")]),
         // ID3v2 is found before either; what follows the tag tells them apart.
-        Some(if at(p, b"fLaC") { Format::Flac } else { Format::Mp3 })
-    } else if at(0, &[0xff, 0xd8, 0xff]) {
-        Some(Format::Jpeg)
-    } else if mp3_header(d) {
-        Some(Format::Mp3)
-    } else if aqr_tex::dds::starts(d) {
-        Some(Format::Dds)
-    } else if pe(d) {
-        Some(Format::Pe)
-    } else if aqr_exe::format::macho::starts(d) {
-        Some(Format::MachO)
-    } else if aqr_exe::format::elf::starts(d) {
-        Some(Format::Elf)
-    } else if aqr_lz4::formula::starts(d) {
-        Some(Format::Lz4)
-    } else if aqr_lzo::formula::starts(d) {
-        Some(Format::Lzo)
-    } else if aqr_bvx::formula::starts(d) {
-        Some(Format::Bvx)
-    } else if aqr_bz2::formula::starts(d) {
-        Some(Format::Bzip2)
-    } else if aqr_lzma::formula::starts_xz(d) {
-        Some(Format::Xz)
-    } else if at(0, b"PK\x03\x04") {
-        Some(Format::Zip)
-    } else if aqr_7z::formula::starts(d) {
-        Some(Format::SevenZip)
-    } else if aqr_mszip::formula::starts(d) {
-        Some(Format::Cab)
-    } else if aqr_alz::formula::starts(d) {
-        Some(Format::Alz)
-    } else if aqr_egg::formula::starts(d) {
-        Some(Format::Egg)
-    } else if aqr_rar::formula::starts(d) {
-        Some(Format::Rar)
-    } else if start && aqr_git::pack::starts(d) {
-        Some(Format::GitPack)
-    } else if at(0, &[0x1f, 0x8b, 8]) {
-        Some(Format::Gzip)
-    } else if zlib_header(d, start) {
-        Some(Format::Zlib)
-    } else if aqr_snappy::leveldb::is_table(d) {
-        Some(Format::LevelDb)
-    } else if start
-        && ([&b"BM"[..], b"P5", b"P6", b"P7", b"II*\0", b"MM\0*", &[8, 0]].iter().any(|m| at(0, m)) || at(128, b"DICM"))
-        && aqr_raw::container::detect(d).is_some()
-    {
+        anywhere(Flac, Of(&[b"ID"]), |d| id3_len(d).is_some_and(|p| d.get(p..p + 4) == Some(b"fLaC"))),
+        anywhere(Mp3, Of(&[b"ID"]), |d| id3_len(d).is_some()),
+        magic(Jpeg, &[(0, &[0xff, 0xd8, 0xff])]),
+        anywhere(Mp3, Pairs::Fn(|a, b| a == 0xff && b & 0xe0 == 0xe0), mp3_header),
+        anywhere(Dds, Of(&[b"DD"]), aqr_tex::dds::starts),
+        anywhere(Pe, Of(&[b"MZ"]), pe),
+        // little-endian (32- or 64-bit), and universal
+        anywhere(MachO, Of(&[&[0xce, 0xfa], &[0xcf, 0xfa], &[0xca, 0xfe]]), aqr_exe::format::macho::starts),
+        anywhere(Elf, Of(&[&[0x7f, b'E']]), aqr_exe::format::elf::starts),
+        anywhere(Lz4, Of(&[b"mo", &[0x04, 0x22]]), aqr_lz4::formula::starts),
+        anywhere(Lzo, Of(&[&[0x89, b'L']]), aqr_lzo::formula::starts),
+        anywhere(Bvx, Of(&[b"bv"]), aqr_bvx::formula::starts),
+        anywhere(Bzip2, Of(&[b"BZ"]), aqr_bz2::formula::starts),
+        anywhere(Xz, Of(&[&[0xfd, b'7']]), aqr_lzma::formula::starts_xz),
+        magic(Zip, &[(0, b"PK\x03\x04")]),
+        anywhere(SevenZip, Of(&[b"7z"]), aqr_7z::formula::starts),
+        anywhere(Cab, Of(&[b"MS"]), aqr_mszip::formula::starts),
+        anywhere(Alz, Of(&[b"AL"]), aqr_alz::formula::starts),
+        anywhere(Egg, Of(&[b"EG"]), aqr_egg::formula::starts),
+        anywhere(Rar, Of(&[b"Ra"]), aqr_rar::formula::starts),
+        start(GitPack, aqr_git::pack::starts),
+        magic(Gzip, &[(0, &[0x1f, 0x8b, 8])]),
+        // (a fixed block first only at the start: see `zlib_header`)
+        anywhere(Zlib, Pairs::Fn(zlib_pair), |d| zlib_header(d, false)),
+        start(Zlib, |d| zlib_header(d, true)),
+        // (known by its footer: its end would be that of the data)
+        start(LevelDb, aqr_snappy::leveldb::is_table),
         // Two bytes (or DICOM's group 8) are too weak a signature to look for in other data.
-        Some(Format::Raw)
-    } else if aqr_wasm::formula::starts(d) {
-        Some(Format::Wasm)
-    } else if aqr_gnu_gettext::formula::starts(d) {
-        Some(Format::GnuGettext)
-    } else if aqr_fits::formula::starts(d) {
-        Some(Format::Fits)
-    } else if aqr_hdf5::formula::starts(d) || start && aqr_hdf5::formula::after_user_block(d) {
-        Some(Format::Hdf5)
-    } else if start && aqr_dex::formula::starts(d) {
-        Some(Format::Dex)
-    } else if aqr_pdb::formula::starts(d) {
-        Some(Format::Pdb)
-    } else if start && aqr_arsc::formula::starts(d) {
-        Some(Format::Arsc)
-    } else if start && aqr_fasta::formula::starts(d) {
-        Some(Format::Fasta)
-    } else if start && aqr_obj::formula::starts(d) {
-        Some(Format::Obj)
-    } else if aqr_bundle::ar::starts(d) {
-        Some(Format::Ar)
-    } else if (start || d.starts_with(b"07070")) && aqr_bundle::cpio::starts(d) {
-        Some(Format::Cpio)
-    } else if start && aqr_bundle::tar::starts(d) {
-        Some(Format::Tar)
-    } else if start && aqr_lzma::formula::starts(d) {
-        Some(Format::Lzma)
-    } else if start && aqr_ppmd::starts(d) {
+        start(Raw, |d| {
+            let at = |p: usize, m: &[u8]| d.get(p..p + m.len()) == Some(m);
+            ([&b"BM"[..], b"P5", b"P6", b"P7", b"II*\0", b"MM\0*", &[8, 0]].iter().any(|m| at(0, m)) || at(128, b"DICM"))
+                && aqr_raw::container::detect(d).is_some()
+        }),
+        anywhere(Wasm, Of(&[&[0, b'a']]), aqr_wasm::formula::starts),
+        start(GnuGettext, aqr_gnu_gettext::formula::starts),
+        anywhere(Fits, Of(&[b"SI"]), aqr_fits::formula::starts),
+        anywhere(Hdf5, Of(&[&[0x89, b'H']]), aqr_hdf5::formula::starts),
+        start(Hdf5, aqr_hdf5::formula::after_user_block),
+        start(Dex, aqr_dex::formula::starts),
+        start(Pdb, aqr_pdb::formula::starts),
+        start(Arsc, aqr_arsc::formula::starts),
+        start(Fasta, aqr_fasta::formula::starts),
+        start(Obj, aqr_obj::formula::starts),
+        anywhere(Ar, Of(&[b"!<"]), aqr_bundle::ar::starts),
+        // (of the binary forms, only at the start)
+        anywhere(Cpio, Of(&[b"07"]), |d| d.starts_with(b"07070") && aqr_bundle::cpio::starts(d)),
+        start(Cpio, aqr_bundle::cpio::starts),
+        start(Tar, aqr_bundle::tar::starts),
+        start(Lzma, aqr_lzma::formula::starts),
         // (four bytes are too weak a signature to look for in other data)
-        Some(Format::Ppmd)
-    } else if start && aqr_mkv::starts(d) {
-        Some(Format::Mkv)
-    } else if start && aqr_prores::formula::starts(d) {
-        Some(Format::ProRes)
-    } else if start && aqr_lha::formula::starts(d) {
+        start(Ppmd, aqr_ppmd::starts),
+        start(Mkv, aqr_mkv::starts),
+        start(ProRes, aqr_prores::formula::starts),
         // (a header starts with its size and checksum: too weak to look for in other data)
-        Some(Format::Lha)
-    } else if start && aqr_jsonl::formula::starts(d) {
+        start(Lha, aqr_lha::formula::starts),
         // (before tables: JSON lines may cut into the same number of fields)
-        Some(Format::Jsonl)
-    } else if start && aqr_xsv::formula::starts(d) {
-        Some(Format::Xsv)
-    } else if start && aqr_wrt::formula::starts(d) {
-        Some(Format::Text)
-    } else {
-        None
-    }
-}
-
-/// Whether a file of a format [`starts`] finds may start with bytes `a`, `b`.
-const fn pair(a: u8, b: u8) -> bool {
-    match a {
-        0x89 => b == b'P' || b == b'L' || b == b'H',
-        b'%' => b == b'P',
-        b'f' => b == b'L',
-        b'R' => b == b'I' || b == b'a',
-        b'F' => b == b'O' || b == b'S',
-        b'I' => b == b'D',
-        b'D' => b == b'D',
-        0xff => b == 0xd8 || b & 0xe0 == 0xe0,
-        b'M' => b == b'Z' || b == b'S',
-        // Mach-O, little-endian (32- or 64-bit), and universal
-        0xce | 0xcf => b == 0xfa,
-        0xca => b == 0xfe,
-        0x7f => b == b'E',
-        0x1f => b == 0x8b,
-        b'm' => b == b'o',
-        0x04 => b == 0x22,
-        b'P' => b == b'K',
-        b'C' => b == b'S',
-        b'!' => b == b'<',
-        b'0' => b == b'7',
-        b'S' => b == b'I',
-        0xfd => b == b'7',
-        b'7' => b == b'z',
-        0x00 => b == b'a',
-        b'b' => b == b'v',
-        b'G' => b == b'I',
-        b'O' => b == b'g',
-        b'B' => b == b'Z',
-        b'A' => b == b'L',
-        b'E' => b == b'G',
-        // zlib's CMF and FLG: DEFLATE with a window of at most 32K, no preset dictionary
-        _ => {
-            a & 15 == 8 && a >> 4 <= 7 && b & 0x20 == 0 && (a as u16 * 256 + b as u16).is_multiple_of(31)
-                || a == b'8' && b == b'B'
-        }
-    }
-}
-
-/// [`pair`] for every two bytes, a bit each.
-const PAIRS: [u64; 1024] = {
-    let mut t = [0u64; 1024];
-    let mut i = 0;
-    while i < 65536 {
-        if pair((i >> 8) as u8, i as u8) {
-            t[i >> 6] |= 1 << (i & 63);
-        }
-        i += 1;
-    }
-    t
+        start(Jsonl, aqr_jsonl::formula::starts),
+        start(Xsv, aqr_xsv::formula::starts),
+        start(Text, aqr_wrt::formula::starts),
+    ]
 };
 
-fn pairs(a: u8, b: u8) -> bool {
-    let i = (a as usize) << 8 | b as usize;
-    PAIRS[i >> 6] >> (i & 63) & 1 != 0
+/// zlib's CMF and FLG: DEFLATE with a window of at most 32K, no preset dictionary.
+fn zlib_pair(cmf: u8, flg: u8) -> bool {
+    cmf & 15 == 8 && cmf >> 4 <= 7 && flg & 0x20 == 0 && (cmf as u16 * 256 + flg as u16).is_multiple_of(31)
 }
+
+/// What [`starts`] looks at, made of the rows of [`ROWS`] looked for in other data: the first
+/// two bytes of their files, a bit each, and the rows by the first byte.
+struct Starts {
+    pairs: [u64; 1024],
+    rows: [u128; 256],
+}
+
+impl Starts {
+    fn pair(&self, a: u8, b: u8) -> bool {
+        let i = (a as usize) << 8 | b as usize;
+        self.pairs[i >> 6] >> (i & 63) & 1 != 0
+    }
+}
+
+static STARTS: LazyLock<Starts> = LazyLock::new(|| {
+    assert!(ROWS.len() <= 128, "rows of a u128");
+    let mut t = Starts { pairs: [0; 1024], rows: [0; 256] };
+    let mut put = |r: usize, a: u8, b: u8| {
+        let i = (a as usize) << 8 | b as usize;
+        t.pairs[i >> 6] |= 1 << (i & 63);
+        t.rows[a as usize] |= 1 << r;
+    };
+    for (r, row) in ROWS.iter().enumerate() {
+        match (&row.anywhere, &row.test) {
+            (None, _) => {}
+            (Some(Pairs::Magic), Test::Magic([(0, m), ..])) if m.len() >= 2 => put(r, m[0], m[1]),
+            (Some(Pairs::Magic), _) => panic!("row {r} ({}): no first bytes of its magic", row.format),
+            (Some(Pairs::Of(pairs)), _) => pairs.iter().for_each(|&&[a, b]| put(r, a, b)),
+            (Some(Pairs::Fn(f)), _) => {
+                for i in 0..=u16::MAX {
+                    let [a, b] = i.to_be_bytes();
+                    if f(a, b) {
+                        put(r, a, b);
+                    }
+                }
+            }
+        }
+    }
+    t
+});
 
 /// Where in `d` from `p` on a file of a format [`starts`] finds may start (by its first two
 /// bytes), or its end.
 pub(crate) fn next_start(d: &[u8], p: usize) -> usize {
-    d.get(p..).and_then(|r| r.windows(2).position(|w| pairs(w[0], w[1]))).map_or(d.len(), |q| p + q)
+    let t = &*STARTS;
+    d.get(p..).and_then(|r| r.windows(2).position(|w| t.pair(w[0], w[1]))).map_or(d.len(), |q| p + q)
 }
 
-/// [`detect`] for a file found anywhere in data. Two first bytes no signature starts with are
-/// turned down at once, and so are a LevelDB table, whose end would be that of the data, and a
-/// SQLite database, which is a whole file and is not in other data. A zlib stream starting with
-/// a fixed block is not taken either ([`zlib_header`]).
+/// [`detect`] for a file found anywhere in data: by the rows of [`ROWS`] looked for there,
+/// only those whose files may start with the first byte (two first bytes no file starts with
+/// turned down at once). A zlib stream starting with a fixed block is not taken
+/// ([`zlib_header`]).
 pub(crate) fn starts(d: &[u8]) -> Option<Format> {
-    // what every format starting with those bytes starts with: most pairs start none, and some
-    // that are common in code (0x48 0x89, x86-64's `mov`) only a zlib header
-    if !pairs(*d.first()?, *d.get(1)?) {
+    let t = &*STARTS;
+    let (a, b) = (*d.first()?, *d.get(1)?);
+    if !t.pair(a, b) {
         return None;
     }
-    let likely = match d[0] {
-        0x89 => d.starts_with(b"\x89PNG") || d.starts_with(&aqr_lzo::lzop::MAGIC) || aqr_hdf5::formula::starts(d),
-        b'%' => d.starts_with(b"%PDF-"),
-        b'8' => d.starts_with(b"8BPS") || zlib_header(d, false),
-        b'f' => d.starts_with(b"fLaC"),
-        b'R' => d.starts_with(b"RIFF") || aqr_rar::formula::starts(d),
-        b'F' => d.starts_with(b"FORM"),
-        b'I' => d.starts_with(b"ID3"),
-        b'D' => aqr_tex::dds::starts(d),
-        0xff => true,
-        b'M' => d.starts_with(b"MZ") || aqr_mszip::formula::starts(d),
-        0xce | 0xcf => d.starts_with(&[d[0], 0xfa, 0xed, 0xfe]),
-        0xca => d.starts_with(&[0xca, 0xfe, 0xba]),
-        0x7f => aqr_exe::format::elf::starts(d),
-        0x1f => d.starts_with(&[0x1f, 0x8b]),
-        b'm' | 0x04 => aqr_lz4::formula::starts(d),
-        b'P' => d.starts_with(b"PK\x03\x04"),
-        b'C' => d.starts_with(b"CSFCHUNK"),
-        b'!' => d.starts_with(aqr_bundle::ar::MAGIC),
-        b'0' => d.starts_with(b"07070"),
-        b'S' => aqr_fits::formula::starts(d),
-        0xfd => aqr_lzma::formula::starts_xz(d),
-        b'7' => aqr_7z::formula::starts(d),
-        0x00 => aqr_wasm::formula::starts(d),
-        b'b' => aqr_bvx::formula::starts(d),
-        b'G' => aqr_gif::formula::starts(d),
-        b'O' => aqr_ogg::formula::starts(d),
-        b'B' => aqr_bz2::formula::starts(d),
-        b'A' => aqr_alz::formula::starts(d),
-        b'E' => aqr_egg::formula::starts(d),
-        // zlib's CMF: DEFLATE with a window of at most 32K
-        b if b & 15 == 8 && b >> 4 <= 7 => zlib_header(d, false),
-        _ => false,
-    };
-    if likely { detect_at(d, false).filter(|&f| !matches!(f, Format::LevelDb | Format::Sqlite)) } else { None }
+    let mut rows = t.rows[a as usize];
+    while rows != 0 {
+        let row = &ROWS[rows.trailing_zeros() as usize];
+        if row.test.holds(d) {
+            return Some(row.format);
+        }
+        rows &= rows - 1;
+    }
+    None
 }
 
 /// A SQLite database header: the magic string, a page size, and the fields that must have one
@@ -338,7 +308,7 @@ pub(crate) fn pe(d: &[u8]) -> bool {
 /// the `start` of data.
 pub(crate) fn zlib_header(d: &[u8], start: bool) -> bool {
     let Some(&[cmf, flg]) = d.first_chunk() else { return false };
-    if !(cmf & 15 == 8 && cmf >> 4 <= 7 && flg & 0x20 == 0 && (cmf as u16 * 256 + flg as u16).is_multiple_of(31)) {
+    if !zlib_pair(cmf, flg) {
         return false;
     }
     // Two bytes pass by chance in one of about 250 places, and more often in code (`48 89`,
@@ -353,7 +323,7 @@ mod tests {
     /// The first two bytes of anything `starts` takes are a pair; noise has few.
     #[test]
     fn pairs_of_starts() {
-        let n = (0..65536).filter(|&i| pairs((i >> 8) as u8, i as u8)).count();
+        let n = (0..65536).filter(|&i| STARTS.pair((i >> 8) as u8, i as u8)).count();
         assert!(n < 400, "{n}");
         for (d, _) in [
             (&b"\x89PNG"[..], 0),
@@ -386,7 +356,7 @@ mod tests {
             (b"BZh9", 0),
             (b"OggS", 0),
         ] {
-            assert!(pairs(d[0], d[1]), "{d:x?}");
+            assert!(STARTS.pair(d[0], d[1]), "{d:x?}");
         }
     }
 
@@ -418,11 +388,7 @@ mod tests {
         }
         for p in 0..data.len() {
             let d = &data[p..];
-            assert_eq!(
-                starts(d),
-                detect_at(d, false).filter(|&f| !matches!(f, Format::LevelDb | Format::Sqlite)),
-                "at {p}"
-            );
+            assert_eq!(starts(d), detect_at(d, false), "at {p}");
         }
     }
 

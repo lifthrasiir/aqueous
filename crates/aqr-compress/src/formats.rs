@@ -1,7 +1,7 @@
 //! What [`detect`](crate::detect) recognises, each format in one place: its name, the names of
 //! files of it, its recompressor, where a file of it ends, the heap it takes, the time it takes
 //! and the level it is taken from ([`Spec`]). How a format is recognised by its bytes is
-//! [`detect`](crate::detect)'s.
+//! [`detect`](crate::detect)'s table of rows.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -292,7 +292,8 @@ formats! {
     }
     /// Clip Studio Paint file (aqr-clip), known by its header.
     Clip = "clip" { recompressor: Pure(aqr_clip::formula::encode), heap: 12.0, exts: &["clip"], extent: extent::clip }
-    /// FMOD FSB5 sound bank (aqr-fsb), known by its header and samples' headers.
+    /// FMOD FSB5 sound bank (aqr-fsb), known by its header and samples' headers: at the start of
+    /// data only.
     Fsb5 = "fsb5" {
         recompressor: Pure(aqr_fsb::formula::encode),
         heap: 7.0,
@@ -438,7 +439,7 @@ formats! {
         exts: &["dex"],
         extent: aqr_dex::formula::extent,
     }
-    /// PDB file of the MSF 7.00 container (aqr-pdb), known by its magic.
+    /// PDB file of the MSF 7.00 container (aqr-pdb), known by its magic: at the start of data only.
     Pdb = "pdb" {
         recompressor: Pure(aqr_pdb::formula::encode),
         heap: 7.0,
@@ -460,7 +461,8 @@ formats! {
         exts: &["wasm"],
         extent: aqr_wasm::formula::extent,
     }
-    /// GNU gettext message catalog, `.mo` (aqr-gnu-gettext), known by its magic and header.
+    /// GNU gettext message catalog, `.mo` (aqr-gnu-gettext), known by its magic and header: at the
+    /// start of data only.
     GnuGettext = "gnu-gettext" {
         recompressor: Pure(aqr_gnu_gettext::formula::encode),
         // coded whole (enwik9: 1.5)
