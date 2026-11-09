@@ -212,6 +212,11 @@ pub const BZ2_ALZ: Module = aqr_bz2::formula::MODULE_ALZ;
 /// the streams'.
 pub const LZX: Module = aqr_lzx::formula::MODULE;
 
+/// aqr-xpress reconstruction of streams of XPRESS Huffman chunks (WOF's, WIM's, or a buffer's),
+/// one after another, from their data and records. Inputs: the data, the records, the bytes kept
+/// and the index cutting them into the streams'.
+pub const XPRESS: Module = aqr_xpress::formula::MODULE;
+
 /// A CAB file's MSZIP and stored folders rebuilt from the joined DEFLATE streams of the MSZIP
 /// folders (each its blocks' streams as one) and the stored folders' data. Inputs: the joined
 /// streams, the stored data, the bytes kept (the data blocks' headers) and the index.
@@ -600,6 +605,7 @@ const NATIVE: &[Entry] = &[
     threaded(BZ2, |p, _, i, n, t| aqr_bz2::formula::decode(p, i, n, t).map_err(err)),
     threaded(BZ2_ALZ, |p, _, i, n, t| aqr_bz2::formula::decode_alz(p, i, n, t).map_err(err)),
     bare(LZX, |p, _, i, n, t| aqr_lzx::formula::decode(p, i, n, t).map_err(err)),
+    bare(XPRESS, |p, _, i, n, t| aqr_xpress::formula::decode(p, i, n, t).map_err(err)),
     part(
         MSZIP,
         false,

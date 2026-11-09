@@ -478,6 +478,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/wrt-recons.block"),
     },
     Known {
+        name: "xpress-recons",
+        version: 1,
+        sha512_256: hex("442cbe7e721c9e2dec22638ef8f119f5ba99906c897ea2bd69e864cd66497138"),
+        block: include_bytes!("../wasm/xpress-recons.block"),
+    },
+    Known {
         name: "xsv-recons",
         version: 1,
         sha512_256: hex("7c00e13cec4251b470acfc9843655c60cc396d7c0803571b96b02589bd29eeba"),

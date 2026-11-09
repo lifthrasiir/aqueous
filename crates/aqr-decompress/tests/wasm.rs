@@ -1482,6 +1482,85 @@ fn lzx_same_as_wasm() {
     }
 }
 
+/// The streams of aqr-xpress's fixtures (`.chunks` files: for each chunk its data's length and
+/// its bytes): WOF's chunks of 4 KiB in one stream and in two, and a buffer of blocks of 64 KiB.
+fn xpress_chunks(path: &str) -> Vec<(Vec<u8>, usize)> {
+    let d = fixture(path);
+    let (mut chunks, mut at) = (Vec::new(), 0);
+    while at < d.len() {
+        let n = u32::from_le_bytes(d[at..at + 4].try_into().unwrap()) as usize;
+        let len = u32::from_le_bytes(d[at + 4..at + 8].try_into().unwrap()) as usize;
+        chunks.push((d[at + 8..at + 8 + len].to_vec(), n));
+        at += 8 + len;
+    }
+    chunks
+}
+
+/// The formulas of `streams` of aqr-xpress, with bytes kept before each and after the last, and
+/// the bytes the application gives.
+fn xpress_formula(streams: &[Vec<(Vec<u8>, usize)>]) -> (Formula, Vec<u8>) {
+    let streams: Vec<Vec<(&[u8], usize)>> =
+        streams.iter().map(|s| s.iter().map(|c| (&c.0[..], c.1)).collect()).collect();
+    let mut f = Formula::default();
+    f.push("raw", Vec::new());
+    f.push("kept", b"<before><between><after>".to_vec());
+    let mut parts = Vec::new();
+    let mut want = Vec::new();
+    for (i, (s, sp)) in streams.iter().zip(aqr_xpress::formula::split(&streams, 1)).enumerate() {
+        let sp = sp.unwrap();
+        let at = f.streams[0].data.len() as u64;
+        f.streams[0].data.extend_from_slice(&sp.data);
+        let kept = if i == 0 { Node::slice(1, 0, 8) } else { Node::slice(1, 8, 9) };
+        want.extend_from_slice(if i == 0 { b"<before>" } else { b"<between>" });
+        s.iter().for_each(|c| want.extend_from_slice(c.0));
+        parts.push(aqr_xpress::formula::Stream {
+            kept,
+            data: Node::slice(0, at, sp.data.len() as u64),
+            record: sp.record,
+        });
+    }
+    want.extend_from_slice(b"<after>");
+    f.root = aqr_xpress::formula::apply(&mut f, parts, Node::slice(1, 17, 7), want.len() as u64);
+    (f, want)
+}
+
+/// XPRESS Huffman chunks (aqr-xpress's fixtures, of Windows) natively and as WebAssembly alike,
+/// in one stream and in two, and a buffer of two blocks with long matches, and their records
+/// damaged in turn failing alike (or giving the same).
+#[test]
+fn xpress_same_as_wasm() {
+    let enc = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
+    let chunks = xpress_chunks("codecs/aqr-xpress/tests/data/wof4k.chunks");
+    let gen_buffer = xpress_chunks("codecs/aqr-xpress/tests/data/gen.chunks");
+    for streams in [
+        vec![chunks.clone()],
+        vec![chunks[..2].to_vec(), chunks[2..].to_vec()],
+        vec![gen_buffer.clone(), chunks[..1].to_vec()],
+    ] {
+        let (f, want) = xpress_formula(&streams);
+        let c = enc.encode(&f, None).unwrap();
+        assert!(aqr::decode(&c, &Native::default()).unwrap() == want);
+        assert!(decode_wasm(&c).unwrap() == want);
+        let r = f.streams.iter().position(|s| s.class == "xpress/record").unwrap();
+        for k in 0..8 {
+            let mut bad = f.clone();
+            let s = &mut bad.streams[r].data;
+            let at = s.len() * k / 8;
+            if k == 7 {
+                s[at..].fill(0xff);
+            } else if at < s.len() {
+                s[at] ^= 1 << k;
+            }
+            let c = enc.encode(&bad, None).unwrap();
+            let (n, w) = (aqr::decode(&c, &Native::default()), decode_wasm(&c));
+            assert_eq!(n.is_ok(), w.is_ok(), "{k}: {n:?} {w:?}");
+            if let (Ok(n), Ok(w)) = (n, w) {
+                assert!(n == w, "{k}");
+            }
+        }
+    }
+}
+
 /// A CAB stream of LZX (aqr-lzx's fixture: a window of 64 KiB, e8) natively and as WebAssembly
 /// alike, and its record damaged in turn failing alike (or giving the same).
 #[test]
@@ -3780,6 +3859,25 @@ fn lzx_plans_hold() {
     let a = aqr_lzx::formula::apply_as(&mut f, v, vec![stream], Node::Concat(Vec::new()), src.len() as u64);
     f.root = Node::Apply(Box::new(a));
     plan_holds("lzx cab", f, &src);
+}
+
+/// xpress-recons lays its memory out as a stack, its limit its plan: of WOF's chunks (aqr-xpress's
+/// fixture) in one stream and in two with bytes kept between and after, and of a buffer of two
+/// blocks.
+#[test]
+fn xpress_plans_hold() {
+    let chunks = xpress_chunks("codecs/aqr-xpress/tests/data/wof4k.chunks");
+    let gen_buffer = xpress_chunks("codecs/aqr-xpress/tests/data/gen.chunks");
+    for (what, streams) in [
+        ("one", vec![chunks.clone()]),
+        ("two", vec![chunks[..2].to_vec(), chunks[2..].to_vec()]),
+        ("a chunk", vec![chunks[..1].to_vec()]),
+        ("a buffer", vec![gen_buffer.clone()]),
+        ("both", vec![gen_buffer.clone(), chunks[..3].to_vec()]),
+    ] {
+        let (f, want) = xpress_formula(&streams);
+        plan_holds(&format!("xpress {what}"), f, &want);
+    }
 }
 
 mod pdf_gen {
