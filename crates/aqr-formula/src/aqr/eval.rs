@@ -17,6 +17,7 @@
 //! bound of the bytes held ahead); the blocks are decoded ahead of their first slice as they are.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Condvar;
 
 use super::spool::Spool;
 use super::*;
@@ -1273,7 +1274,7 @@ pub(super) fn hashed(
         super::within_limit(a, p.modules[a.module])?;
         loaded(a)?.apply_part(a.params, &resources(a), ins, outs, &a.output_sizes, a.memory_limit, &a.task_limits)
     };
-    let fresh = Fresh { raw, dictionaries, cache: Mutex::default() };
+    let fresh = Fresh { raw, dictionaries, cache: Mutex::default(), decoded: Condvar::new() };
     let running = Threads::default();
     let ev = Eval {
         g: &g,
@@ -1291,7 +1292,14 @@ pub(super) fn hashed(
         let res: Vec<Ch> = a.resources.iter().map(|&i| Ch::of(&env.resources[p.resources[i]])).collect();
         Some(record_key(name, a.params, &res, ins, &a.output_sizes))
     };
-    let mut h = Hashing { at: At { ev: &ev, ahead: None }, vals: Vec::with_capacity(g.ops.len()), records, key: &key };
+    let mut h = Hashing {
+        at: At { ev: &ev, ahead: None },
+        vals: Vec::with_capacity(g.ops.len()),
+        records,
+        key: &key,
+        made: HashMap::new(),
+        pieces: HashMap::new(),
+    };
     for (n, op) in g.ops.iter().enumerate() {
         let outs = match *op {
             Op::Apply(_, _, Some(_)) | Op::Split(..) => g.out_count(n),
@@ -1338,6 +1346,7 @@ pub(super) fn hashed(
         };
         h.vals.push(made);
     }
+    h.ahead(threads);
     let roots = g.roots.iter().map(|&r| Ok((h.need(r)?, g.sums.get(&r).cloned().unwrap_or_default())));
     roots.collect::<Decoded<Vec<_>>>().map(Some)
 }
@@ -1365,6 +1374,10 @@ struct Hashing<'r, 'e, 'a> {
     vals: Vec<Vec<Option<Vec<Ch>>>>,
     records: &'r dyn Records,
     key: &'r dyn Fn(&Apply, &[Ch]) -> Option<u128>,
+    /// The hashes of values made beforehand, on threads ([`Hashing::ahead`]): of a value, and of
+    /// a Split's outputs (by its node).
+    made: HashMap<Val, Decoded<Ch>>,
+    pieces: HashMap<usize, Decoded<Vec<Ch>>>,
 }
 
 impl Hashing<'_, '_, '_> {
@@ -1387,7 +1400,10 @@ impl Hashing<'_, '_, '_> {
             }
             Op::Apply(Ap::Block(a), ref inputs, None) => {
                 let ins = inputs.iter().map(|&i| self.need(i)).collect::<Decoded<Vec<Ch>>>()?;
-                let out = self.stream(v)?;
+                let out = match self.made.remove(&v) {
+                    Some(made) => made?,
+                    None => self.stream(v)?,
+                };
                 if let Some(k) = (self.key)(a, &ins) {
                     self.records.learn(k, &[out]);
                 }
@@ -1396,20 +1412,117 @@ impl Hashing<'_, '_, '_> {
             Op::Split(x, sizes, _) => {
                 // (all its outputs at once, by one pass over its input: pulled one by one, each
                 // would hold the pieces before it, of a file in pieces all over an image)
-                let pieces = self.split(x, sizes)?;
+                let pieces = match self.pieces.remove(&v.node) {
+                    Some(made) => made?,
+                    None => self.split(x, sizes)?,
+                };
                 let h = pieces[v.out];
                 self.vals[v.node] = pieces.into_iter().map(|c| Some(vec![c])).collect();
                 return Ok(h);
             }
-            _ => self.stream(v)?,
+            _ => match self.made.remove(&v) {
+                Some(made) => made?,
+                None => self.stream(v)?,
+            },
         };
         self.vals[v.node][v.out] = Some(vec![h]);
         Ok(h)
     }
 
+    /// The values the outputs need evaluated ([`Hashing::need`]: those whose hashes are not
+    /// told), evaluated at once beforehand on up to `threads` threads, their hashes kept for
+    /// `need` to take: an image's applications, thousands in a leaf of its own, took the verify's
+    /// time one after another. (Not the outputs of an application of several: those are pulled
+    /// of its state, in turn.)
+    fn ahead(&mut self, threads: usize) {
+        if threads < 2 {
+            return;
+        }
+        let g = self.at.ev.g;
+        let mut heavy = Vec::new();
+        let mut seen = HashSet::new();
+        let mut todo: Vec<Val> = g.roots.iter().rev().copied().collect();
+        while let Some(v) = todo.pop() {
+            if self.vals[v.node][v.out].is_some() || !seen.insert(v) {
+                continue;
+            }
+            match g.ops[v.node] {
+                Op::Concat(ref items) | Op::Pack(ref items) => todo.extend(items.iter().rev()),
+                Op::Apply(Ap::Block(_), ref inputs, None) => {
+                    todo.extend(inputs.iter().rev());
+                    heavy.push(v);
+                }
+                Op::Split(..) if seen.insert(Val { node: v.node, out: usize::MAX }) => heavy.push(v),
+                Op::Split(..) | Op::Apply(_, _, Some(_)) => {}
+                _ => heavy.push(v),
+            }
+        }
+        if heavy.len() < 2 {
+            return;
+        }
+        // (by the first block each slices, so that those made at once share the blocks they decode)
+        let first = |v: Val| -> usize {
+            let mut todo = vec![v];
+            let mut seen = HashSet::new();
+            while let Some(v) = todo.pop() {
+                if !seen.insert(v.node) {
+                    continue;
+                }
+                match g.ops[v.node] {
+                    Op::Slice { block, .. } => return block,
+                    Op::Concat(ref items) | Op::Pack(ref items) => todo.extend(items.iter().rev()),
+                    Op::Apply(_, ref inputs, _) => todo.extend(inputs.iter().rev()),
+                    Op::Split(x, ..) => todo.push(x),
+                    Op::Patch(x, y, _) => todo.extend([y, x]),
+                    _ => {}
+                }
+            }
+            usize::MAX
+        };
+        heavy.sort_by_cached_key(|&v| first(v));
+        // (in batches of [`AHEAD_HASHED_BYTES`] of output at most, as each holds its output and
+        // its inputs while it is made)
+        let at = self.at;
+        let mut rest = &heavy[..];
+        while !rest.is_empty() {
+            let (mut n, mut bytes) = (0, 0);
+            while n < rest.len() && (n == 0 || bytes + g.len(rest[n]) <= AHEAD_HASHED_BYTES) {
+                bytes += g.len(rest[n]);
+                n += 1;
+            }
+            let (batch, after) = rest.split_at(n);
+            rest = after;
+            let made = aqr_common::pool::par_map(batch.len(), threads, |k| {
+                let v = batch[k];
+                match g.ops[v.node] {
+                    Op::Split(x, sizes, _) => Err(split_at(at, x, sizes)),
+                    _ => Ok(stream_at(at, v)),
+                }
+            });
+            for (&v, m) in batch.iter().zip(made) {
+                match m {
+                    Ok(h) => _ = self.made.insert(v, h),
+                    Err(p) => _ = self.pieces.insert(v.node, p),
+                }
+            }
+        }
+    }
+
     /// The hashes of value `x` cut into pieces of `sizes`, evaluated, as it is pulled.
     fn split(&self, x: Val, sizes: &[u64]) -> Decoded<Vec<Ch>> {
-        let mut s = self.at.ev.source(x);
+        split_at(self.at, x, sizes)
+    }
+
+    /// The hash of value `v`, evaluated, as it is pulled.
+    fn stream(&self, v: Val) -> Decoded<Ch> {
+        stream_at(self.at, v)
+    }
+}
+
+/// [`Hashing::split`] of `at`.
+fn split_at(at: At, x: Val, sizes: &[u64]) -> Decoded<Vec<Ch>> {
+    {
+        let mut s = at.ev.source(x);
         let mut out = Vec::with_capacity(sizes.len());
         let (mut h, mut left) = (Ch::EMPTY, sizes.first().copied().unwrap_or(0));
         let next = |h: &mut Ch, left: &mut u64, out: &mut Vec<Ch>| {
@@ -1419,7 +1532,7 @@ impl Hashing<'_, '_, '_> {
             }
         };
         next(&mut h, &mut left, &mut out);
-        while let Some(c) = s.next(self.at)? {
+        while let Some(c) = s.next(at)? {
             let mut c: &[u8] = &c;
             while !c.is_empty() {
                 if out.len() == sizes.len() {
@@ -1436,39 +1549,68 @@ impl Hashing<'_, '_, '_> {
             false => invalid("a split of a value shorter than declared"),
         }
     }
-
-    /// The hash of value `v`, evaluated, as it is pulled.
-    fn stream(&self, v: Val) -> Decoded<Ch> {
-        let mut s = self.at.ev.source(v);
-        let mut h = Ch::EMPTY;
-        while let Some(c) = s.next(self.at)? {
-            h = h.then(&c);
-        }
-        Ok(h)
-    }
 }
+
+/// [`Hashing::stream`] of `at`.
+fn stream_at(at: At, v: Val) -> Decoded<Ch> {
+    let mut s = at.ev.source(v);
+    let mut h = Ch::EMPTY;
+    while let Some(c) = s.next(at)? {
+        h = h.then(&c);
+    }
+    Ok(h)
+}
+
+/// Bytes of output at most of the values [`Hashing::ahead`] makes at once.
+const AHEAD_HASHED_BYTES: u64 = 128 << 20;
 
 /// The non-leaf blocks of an archive decoded as they are asked for, again where they were let go
 /// of: `raw` (data as stored, whether of Zstandard, and of a dictionary), the last few kept.
 struct Fresh<'c> {
     raw: &'c [(&'c [u8], bool, Option<usize>)],
     dictionaries: &'c [dict::Dictionary],
-    cache: Mutex<VecDeque<(usize, Arc<Vec<u8>>)>>,
+    /// The blocks kept, the last used last, each None while it is decoded (those asking for it
+    /// then waiting for it, rather than decoding it as well: of values made on threads,
+    /// [`Hashing::ahead`]).
+    cache: Mutex<Kept>,
+    decoded: Condvar,
 }
+
+/// The blocks [`Fresh`] keeps: each its index and its data (None while it is decoded).
+type Kept = VecDeque<(usize, Option<Arc<Vec<u8>>>)>;
 
 impl Blocks for Fresh<'_> {
     fn block(&self, o: usize) -> Decoded<Arc<Vec<u8>>> {
-        if let Some((_, d)) = self.cache.lock().unwrap().iter().find(|(b, _)| *b == o) {
-            return Ok(d.clone());
-        }
-        let (d, zstd, dict) = self.raw[o];
-        let d = Arc::new(decoded_with(d, zstd, true, dict.map(|d| &self.dictionaries[d]))?);
         let mut cache = self.cache.lock().unwrap();
-        if cache.len() > AHEAD_BLOCKS {
-            cache.pop_front();
+        while let Some(k) = cache.iter().position(|(b, _)| *b == o) {
+            match cache[k].1.clone() {
+                Some(d) => {
+                    let hit = cache.remove(k).expect("there");
+                    cache.push_back(hit);
+                    return Ok(d);
+                }
+                None => cache = self.decoded.wait(cache).unwrap(),
+            }
         }
-        cache.push_back((o, d.clone()));
-        Ok(d)
+        cache.push_back((o, None));
+        drop(cache);
+        let (d, zstd, dict) = self.raw[o];
+        let d = decoded_with(d, zstd, true, dict.map(|d| &self.dictionaries[d])).map(Arc::new);
+        let mut cache = self.cache.lock().unwrap();
+        let k = cache.iter().position(|(b, _)| *b == o).expect("being decoded");
+        match &d {
+            Ok(d) => cache[k].1 = Some(d.clone()),
+            // (asked for again: decoded again, to fail there too)
+            Err(_) => _ = cache.remove(k),
+        }
+        // (the oldest decoded let go of, those being decoded kept)
+        while cache.iter().filter(|e| e.1.is_some()).count() > AHEAD_BLOCKS + 1 {
+            let k = cache.iter().position(|e| e.1.is_some()).expect("one decoded");
+            cache.remove(k);
+        }
+        drop(cache);
+        self.decoded.notify_all();
+        d
     }
 
     fn release(&self, _: usize) {}
