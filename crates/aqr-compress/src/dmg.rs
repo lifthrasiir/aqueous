@@ -289,7 +289,14 @@ pub(crate) fn dmg(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
     keep(&mut kept, &mut root, &d[at..]);
     f.streams[0].data = kept.into();
     f.root = Node::concat(root);
-    (f.root.len() == d.len() as u64).then_some(f)
+    if f.root.len() != d.len() as u64 {
+        return None;
+    }
+    // (the disk's Split recorded, its bytes at hand: not so once the disk is a formula)
+    if let Some(pre) = &cx.pre {
+        pre.learn_splits(&f, opt.threads);
+    }
+    Some(f)
 }
 
 /// What a chunk is made of in the formula: zlib's, bzip2's or LZFSE's rebuilt (where its DEFLATE

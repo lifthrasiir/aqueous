@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::memory::{self, Limits};
 use aqr_decompress::Native;
-use aqr_formula::chash::{Ch, Records, record_key};
-use aqr_formula::{Apply, Formula, Modules, Node, Result, Shared};
+use aqr_formula::chash::{Ch, Records, record_key, split_key};
+use aqr_formula::{Apply, Formula, Modules, Node, Of, Result, Shared};
 use xxhash_rust::xxh3::Xxh3;
 
 /// What an application is ([`record_key`]).
@@ -261,6 +261,33 @@ impl Prevalidator {
         match worker.is_empty() {
             true => eval(),
             false => self.running.lock().unwrap().push(worker.spawn(eval)),
+        }
+    }
+
+    /// Records the Splits of formula `f` whose bytes are at hand (of a slice of a stream made, as a
+    /// disk image's content is before it is recompressed in turn): the hashes of their pieces by
+    /// the hash of what they split ([`split_key`]), on up to `threads` threads. The verify then
+    /// cuts them by their hashes where the hashes of what they split, as it is evaluated after,
+    /// do not fall where the pieces do: a DMG's disk, cut into its chunks, ran its files'
+    /// modules again in the verify for their bytes (3.6 GB of heap).
+    pub fn learn_splits(&self, f: &Formula, threads: usize) {
+        for s in &f.shared {
+            let Of::Node(Node::Slice { stream, start, len }) = s.of else { continue };
+            let data = &f.streams[stream].data;
+            if data.is_lazy() || data.sunk_in().is_some() || start.saturating_add(len) > data.len() as u64 {
+                continue;
+            }
+            let mut at = vec![start as usize];
+            for &n in &s.sizes {
+                at.push(at.last().unwrap() + n as usize);
+            }
+            let pieces = aqr_common::pool::par_map(s.sizes.len(), threads.max(1), |k| Ch::of(&data[at[k]..at[k + 1]]));
+            let whole = pieces.iter().fold(Ch::EMPTY, |w, &c| w.cat(c));
+            let key = split_key(whole, &s.sizes);
+            if len >= LARGE_OUTPUT {
+                LARGE.lock().unwrap().insert(key, pieces.clone());
+            }
+            self.memo.lock().unwrap().0.insert(key, Record { outputs: pieces, file: None });
         }
     }
 

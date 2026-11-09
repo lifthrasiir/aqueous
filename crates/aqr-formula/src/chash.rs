@@ -72,6 +72,12 @@ pub fn record_key(module: &str, params: &[u8], resources: &[Ch], inputs: &[Ch], 
     h.digest128()
 }
 
+/// What a Split of a value of hash `input` into pieces of `sizes` is, as [`Records`] tell it (a
+/// [`record_key`] of no module): the hashes of its pieces, recorded where its bytes were at hand.
+pub fn split_key(input: Ch, sizes: &[u64]) -> u128 {
+    record_key("", &[], &[], &[input], sizes)
+}
+
 /// An output's content hash, and the checksums a formula block takes of it.
 pub type Hashed = (Ch, Vec<u64>);
 

@@ -1325,6 +1325,11 @@ pub(super) fn hashed(
         let res: Vec<Ch> = a.resources.iter().map(|&i| Ch::of(&env.resources[p.resources[i]])).collect();
         Some(record_key(name, a.params, &res, ins, &a.output_sizes))
     };
+    let told = |p: &[Ch], sizes: &[u64]| -> Option<Vec<Vec<Ch>>> {
+        let pieces = records.outputs(crate::chash::split_key(joined(p), sizes))?;
+        (pieces.len() == sizes.len() && pieces.iter().zip(sizes).all(|(c, &n)| c.len() == n))
+            .then(|| pieces.into_iter().map(|c| vec![c]).collect())
+    };
     let mut h = Hashing {
         at: At { ev: &ev, ahead: None },
         vals: Vec::with_capacity(g.ops.len()),
@@ -1342,6 +1347,9 @@ pub(super) fn hashed(
         let made: Vec<Option<Vec<Ch>>> = match *op {
             Op::Literal(l) => vec![Some(vec![Ch::of(l)])],
             Op::Slice { .. } => vec![Some(vec![sliced[&n]])],
+            // (a Patch of no bytes, whatever its source: a part of a value dropped, its bytes told by
+            // the value's other parts)
+            Op::Patch(_, _, 0) => vec![Some(Vec::new())],
             Op::Absent | Op::Patch(..) => vec![None],
             Op::Concat(ref items) => {
                 vec![items.iter().map(|&v| get(&h.vals, v)).collect::<Option<Vec<_>>>().map(|p| p.concat())]
@@ -1352,7 +1360,8 @@ pub(super) fn hashed(
                 let items = items.iter().map(|&v| get(&h.vals, v)).collect::<Option<Vec<_>>>();
                 vec![items.map(|p| [vec![Ch::of(&head)], p.concat()].concat())]
             }
-            Op::Split(x, sizes, _) => match get(&h.vals, x).and_then(|p| cut(&p, sizes)) {
+            // (cut where its pieces are, else as the records tell of a Split of its hash)
+            Op::Split(x, sizes, _) => match get(&h.vals, x).and_then(|p| cut(&p, sizes).or_else(|| told(&p, sizes))) {
                 Some(pieces) => pieces.into_iter().map(Some).collect(),
                 None => vec![None; outs],
             },
@@ -1471,6 +1480,7 @@ impl Hashing<'_, '_, '_> {
                     Some(made) => made?,
                     None => self.split(x, sizes)?,
                 };
+                self.records.learn(crate::chash::split_key(joined(&pieces), sizes), &pieces);
                 let h = pieces[v.out];
                 self.vals[v.node] = pieces.into_iter().map(|c| Some(vec![c])).collect();
                 return Ok(h);

@@ -2750,7 +2750,14 @@ fn recompressor(format: Format) -> Recompressor {
         Format::Hdf5 => Cx(|d, _, opt, depth, cx| hdf5::file(d, opt, depth, cx)),
         Format::Bvx => Cx(|d, _, opt, _, cx| bvx(d, opt, cx)),
         Format::Ar | Format::Tar | Format::Cpio => Cx(|d, _, _, _, _| bundle::bundle(d)),
-        Format::Disk => Cx(|d, _, opt, _, _| bundle::disk(d, opt.threads)),
+        Format::Disk => Cx(|d, _, opt, _, cx| {
+            // (the Splits of files in pieces recorded, their contents at hand: see `dmg`)
+            let f = bundle::disk(d, opt.threads)?;
+            if let Some(pre) = &cx.pre {
+                pre.learn_splits(&f, opt.threads);
+            }
+            Some(f)
+        }),
         Format::Dmg => Cx(|d, _, opt, _, cx| dmg::dmg(d, opt, cx)),
         Format::Asar => Cx(|d, _, _, _, _| bundle::asar(d)),
     }
@@ -3921,6 +3928,28 @@ mod tests {
         let (c, f) = compress_formula(&d, &opt);
         assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
         assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
+    }
+
+    /// A DMG's archive is verified by its hashes without running a module: its disk's Split into
+    /// the chunks, of pieces that the chunks do not cut where they are cut, is told by what the
+    /// formula recorded of it as it was made (the disk's bytes at hand then), and the disk's
+    /// applications (its JPEG file's) by the prevalidation.
+    #[test]
+    fn dmg_verified_by_hashes() {
+        let p = format!("{}/../../codecs/aqr-disk/tests/data/dmg-udzo.dmg.zst", env!("CARGO_MANIFEST_DIR"));
+        let d = zstd::stream::decode_all(&std::fs::read(p).unwrap()[..]).unwrap();
+        let opt = Options { threads: 2, smaller: false, ..Options::default() };
+        let mut cx = Cx::new(&d, &opt);
+        cx.pre = Some(Arc::new(verify::Prevalidator::spawn(2, &[&d])));
+        let f = recompress_at(&d, &opt, 0, Kind::Unknown, &cx);
+        let memo = verify::Prevalidator::finish_shared(cx.pre.take().unwrap());
+        assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
+        let c = cx.enc.encode(&f, Some(aqr::checksum(&d))).unwrap();
+        let a = aqr::open(&c, &aqr::NoModules).unwrap();
+        let roots = a.hashed(&memo, &aqr_decompress::identify, 2).map_err(|e| e.to_string());
+        let roots = roots.unwrap().expect("told");
+        let whole = roots.iter().fold(aqr_formula::chash::Ch::EMPTY, |w, (h, _)| w.cat(*h));
+        assert!(whole == aqr_formula::chash::Ch::of(&d));
     }
 
     /// A UDIF image of zlib's chunks whose block tables are changed (chunks of other runs of the
