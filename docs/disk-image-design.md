@@ -291,7 +291,7 @@ XPRESS는 MS-XCA로 새로 쓴 aqr-xpress(파스의 기록: Windows의 WOF 4K �
   ULFO 3.57 → 0.67 GB, 25.1 → 22.7 s.
 - 남은 것: 작은 DMG는 모듈 바이트(flate-set 72 KB)가 커서 원시로 남는다.
 
-8단계(2026-11-09, 진행 중): 7단계의 틀을 `aqr_disk::chunked`(청크: 디스크의 범위, 파일의 범위, 저장 방식)와
+8단계(2026-11-09): 7단계의 틀을 `aqr_disk::chunked`(청크: 디스크의 범위, 파일의 범위, 저장 방식)와
 aqr-compress의 `chunked`로 일반화했다. 압축 컨테이너는 청크 목록만 내면 된다.
 - qcow2 압축 클러스터(`container::qcow2_chunks`): qemu-img는 클러스터마다 zlib 레벨 6, 창 4 KiB의 raw
   DEFLATE를 바이트 단위로 이어 붙인다(선언된 섹터 범위는 다음 것과 겹친다). 이어지는 원시 클러스터와 0은 청크
@@ -301,7 +301,8 @@ aqr-compress의 `chunked`로 일반화했다. 압축 컨테이너는 청크 목�
 - streamOptimized VMDK(`container::vmdk_stream_chunks`): 첫 데이터 섹터부터 marker를 차례로 읽는다(grain은
   LBA와 zlib 스트림, 메타데이터 marker는 섹터 수만큼 건너뛰고 EOS에서 끝). qemu-img의 grain은 zlib 레벨 6과
   바이트까지 같다. 같은 디스크(350.2 MB): 345.3 MB(스캔이 zlib 스트림을 하나씩 찾음), 72 s → 231.5 MB, 22.4 s,
-  힙 1.11 GB, 풀기 8.3 s. VMware·VirtualBox가 내보낸 OVA는 시험하지 못했다(인코더가 다를 수 있다: 표본이
+  힙 1.11 GB, 풀기 8.3 s. OVA(ustar에 OVF와 그 VMDK)는 tar의 멤버로 그대로 잡힌다: 232.4 MB, 24.2 s,
+  힙 1.45 GB, 풀기 8.1 s. VMware·VirtualBox가 내보낸 OVA는 시험하지 못했다(인코더가 다를 수 있다: 표본이
   맞지 않으면 기본 프로파일).
 - E01(`aqr_disk::ewf`, libyal의 문서만 읽음): 섹션을 차례로 읽고(서술자의 Adler-32 확인), `volume`·`data`
   섹션의 청크 크기, `sectors` 섹션 뒤 `table`의 오프셋(기준 오프셋에서 31비트, 최상위 비트가 압축)으로
@@ -312,7 +313,8 @@ aqr-compress의 `chunked`로 일반화했다. 압축 컨테이너는 청크 목�
   힙 0.94 GB, 풀기 4.6 s. 청크가 작아 aqr-flate 레코드가 청크마다 십여 바이트(대부분 0 청크)다.
   EnCase·FTK Imager가 만든 이미지는 시험하지 못했다. 읽지 않는 것: EWF2(`.Ex01`), EnCase 6.7.1의
   2 GiB 넘는 32비트 오프셋.
-- 남은 것: qcow2의 zstd 클러스터(compression type 1).
+- qcow2의 zstd 클러스터(compression type 1)는 읽지 않는다: Zstandard 프레임은 다시 만들지 않으므로
+  (aqr-zstd) 얻을 것이 디스크 안 파일의 중복 제거뿐이다. 그런 이미지는 스캔된다.
 
 각 단계는 파서, README(무엇을 읽는가, 결과, 시험), 손상·잘린 이미지 시험(aqr-iso의 것처럼), 그리고
 `--stats`를 켠 `cargo aqr` 측정(크기, 시간, 힙과 resident 최대)으로 끝난다. 0단계 뒤의 비교 기준은
