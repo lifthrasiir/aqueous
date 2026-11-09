@@ -97,7 +97,9 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   (`Corr::SPECIALIZED = false`).
 - On big streams prefer structural wins (sharing, probe-guided selection) to slower coding;
   slow modes such as aqr-flate's profile 10 belong to a separate high level, never to big
-  streams by default.
+  streams by default. The exception: where an encoder is predicted exactly (zlib's emulation
+  missing no token of a sample, its parameters then hinted) and profile 10 is faster for it,
+  profile 10 is used at the default level too (compressed DMGs: `crates/aqr-compress/src/dmg.rs`).
 - Don't look at GPL code: for LZO, only public specifications (the kernel's
   `Documentation/staging/lzo.rst`, libarchive's BSD lzop reader) are read, and liblzo2 and
   lzop are used only as black-box oracles for fixtures. Never read LZO, miniLZO or the kernel's
