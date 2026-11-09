@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::Ordering::Relaxed;
 
 use aqr_flate::formula::Derived;
 use aqr_flate::{Hints, Parsed, zlib};
@@ -45,6 +46,9 @@ pub struct Options {
     pub profile: u16,
     /// With an adaptive profile, whether to try zlib emulation ([`aqr_flate::Options::zlib`]).
     pub zlib: bool,
+    /// Whether the adaptive profile may be tried where `profile` is lower: it is used for all
+    /// where zlib's emulation predicts every token of the samples ([`Encoded::adaptive`]).
+    pub trial: bool,
     /// The most bytes of data that the entries may inflate to, all together, by the sizes
     /// their headers tell: the entries past it are kept as they are.
     pub limit: u64,
@@ -67,6 +71,7 @@ impl Default for Options {
             threads: 1,
             profile: aqr_flate::DEFAULT_PROFILE,
             zlib: true,
+            trial: true,
             limit: u64::MAX,
             probe: None,
             held: None,
@@ -104,6 +109,8 @@ pub struct Encoded {
     pub formula: Formula,
     /// Bytes of data inflated (what counts against [`Options::limit`]).
     pub inflated: u64,
+    /// Whether the adaptive profile was used in place of [`Options::profile`].
+    pub adaptive: bool,
 }
 
 /// The formula rebuilding the pack `input`, inflating at most [`limit`] bytes.
@@ -122,8 +129,9 @@ fn kind(t: u8) -> Kind {
     }
 }
 
-/// An entry's stream made: its data and record, and the zlib settings emulation found.
-type Made = Option<(Vec<u8>, Vec<u8>, Option<zlib::Params>)>;
+/// An entry's stream made: its data and record, the zlib settings emulation found, and whether it
+/// predicted every token.
+type Made = Option<(Vec<u8>, Vec<u8>, Option<zlib::Params>, bool)>;
 
 /// The formula rebuilding the pack `input`, or None where it is not one (or no entry is
 /// rebuilt). The entries whose data their headers tell fit in [`Options::limit`], that
@@ -154,9 +162,21 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         max_data: usize::try_from(opt.limit).unwrap_or(usize::MAX),
         ..aqr_flate::Options::for_profile(opt.profile).ok()?
     };
-    let fopts =
-        [aqr_flate::Options { threads: 1, ..base.clone() }, aqr_flate::Options { threads: opt.threads, ..base }];
-    let fopt = |threads: usize| &fopts[(threads > 1) as usize];
+    let sets = |base: aqr_flate::Options| {
+        [aqr_flate::Options { threads: 1, ..base.clone() }, aqr_flate::Options { threads: opt.threads, ..base }]
+    };
+    // (the adaptive profile too, where the samples may show that zlib is predicted exactly: it is
+    // then the profile of all, as aqr-compress's DMGs)
+    let adaptive = (opt.trial && opt.zlib && opt.profile < aqr_flate::ADAPTIVE)
+        .then(|| aqr_flate::Options::for_profile(aqr_flate::ADAPTIVE).ok())
+        .flatten()
+        .map(|a| sets(aqr_flate::Options { zlib: base.zlib, max_data: base.max_data, ..a }));
+    let fopts = sets(base);
+    let exact = std::sync::atomic::AtomicBool::new(false);
+    let fopt = |threads: usize| match (&adaptive, exact.load(Relaxed)) {
+        (Some(a), true) => &a[(threads > 1) as usize],
+        _ => &fopts[(threads > 1) as usize],
+    };
     let size = |&(i, _): &(usize, u64)| entries[i].deflate.len();
     // its stream parsed, if its data is as its header and Adler-32 tell
     let parse = |j: usize, threads: usize| {
@@ -171,13 +191,37 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         let hints = Hints { params, ..Hints::zlib_header(e.zlib(input)) };
         let (data, record, report) = p.deconstruct(fopt(threads), &hints).ok()?;
         // (tiny records are much alike, so that they compress well together)
-        (record.len() < e.deflate.len() + 16).then_some((data, record, report.zlib))
+        (record.len() < e.deflate.len() + 16).then_some((data, record, report.zlib, report.misses == 0))
     };
     // The large streams, where there is a probe, one at a time, as it tells: and only where it
     // may pay (the probe's encoder is of one thread).
     let probed = |j: usize| opt.probe.is_some() && size(&jobs[j]) >= PROBE_MIN;
-    // (made apart from the others: a few)
+    // git writes every object with the same zlib settings: those of a few of the largest
+    // streams are tried first on the others (taken where they predict every token).
+    let mut order: Vec<usize> = (0..jobs.len()).filter(|&j| !probed(j)).collect();
+    order.sort_by_key(|&j| (std::cmp::Reverse(size(&jobs[j])), j));
+    order.truncate(SAMPLES);
+    let run = |js: &[usize], params: Option<zlib::Params>| {
+        par_jobs(js, |&j| size(&jobs[j]), opt.threads, |&j, threads| make(j, parse(j, threads)?, threads, params))
+    };
     let mut early: HashMap<usize, Made> = HashMap::new();
+    // The samples at the adaptive profile first, where the profile is lower: if its zlib emulation
+    // predicts every token of at least half of them, all are made at it, its parameters hinted (no
+    // search: which makes the profile slow), as the zlib streams of compressed DMGs are; else they
+    // are made again at the profile asked for. (The profile is set before any stream is made.)
+    let mut sampled = None;
+    if adaptive.is_some() && !order.is_empty() {
+        exact.store(true, Relaxed);
+        let made = run(&order, None);
+        let hit = made.iter().flatten().filter(|m| m.2.is_some() && m.3).count();
+        if hit > 0 && 2 * hit >= made.iter().flatten().count() {
+            sampled = Some(made);
+        } else {
+            exact.store(false, Relaxed);
+        }
+    }
+    let profile = if exact.load(Relaxed) { aqr_flate::ADAPTIVE } else { opt.profile };
+    // (made apart from the others: a few)
     if let Some(probe) = &opt.probe {
         let enc = Encoder::with_threads(probe.level, opt.threads);
         for j in (0..jobs.len()).filter(|&j| probed(j)) {
@@ -191,16 +235,8 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
             }
         }
     }
-    // git writes every object with the same zlib settings: those of a few of the largest
-    // streams are tried first on the others (taken where they predict every token).
-    let mut order: Vec<usize> = (0..jobs.len()).filter(|&j| !probed(j)).collect();
-    order.sort_by_key(|&j| (std::cmp::Reverse(size(&jobs[j])), j));
-    order.truncate(SAMPLES);
-    let run = |js: &[usize], params: Option<zlib::Params>| {
-        par_jobs(js, |&j| size(&jobs[j]), opt.threads, |&j, threads| make(j, parse(j, threads)?, threads, params))
-    };
     let mut seen: Vec<(zlib::Params, usize)> = Vec::new();
-    for (&j, m) in order.iter().zip(run(&order, None)) {
+    for (&j, m) in order.iter().zip(sampled.unwrap_or_else(|| run(&order, None))) {
         if let Some(p) = m.as_ref().and_then(|m| m.2) {
             match seen.iter_mut().find(|s| s.0 == p) {
                 Some(s) => s.1 += 1,
@@ -243,7 +279,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
             };
             match m {
                 None => w.kept(&input[e.header.start..e.end()]),
-                Some((d, r, _)) => {
+                Some((d, r, ..)) => {
                     w.rebuilt(e.t, d.len() as u64, &input[e.header.clone()], &input[e.base.clone()], e.zlib(input));
                     Derived::Zlib.put(&d, e.deflate.len(), &mut derived);
                     streams += e.deflate.len();
@@ -279,11 +315,11 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         i => f.push("flate/index", i),
     };
     let data = f.push_by_kind(0, data, &kinds, "git-pack", OWN_MIN);
-    let a = aqr_flate::formula::apply(opt.profile, data, records, index, flate_len as u64, Derived::Zlib).ok()?;
+    let a = aqr_flate::formula::apply(profile, data, records, index, flate_len as u64, Derived::Zlib).ok()?;
     // (the streams and what is derived of them apart, so that both are taken in order)
     let [streams, table]: [Node; 2] = f.split(a, vec![streams_len as u64, derived.len() as u64]).try_into().ok()?;
     f.root = Node::apply(MODULE, Vec::new(), vec![streams, table, layout, kept], input.len() as u64);
-    Some(Encoded { formula: f, inflated })
+    Some(Encoded { formula: f, inflated, adaptive: profile != opt.profile })
 }
 
 /// The ids of the entries of pack `pack` in order, where its index `idx` and reverse index

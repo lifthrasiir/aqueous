@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering::Relaxed;
 
 use aqr_flate::formula::Item;
 use aqr_flate::{Hints, Parsed, zlib};
@@ -36,6 +38,9 @@ pub struct Options {
     pub profile: u16,
     /// With an adaptive profile, whether to try zlib emulation ([`aqr_flate::Options::zlib`]).
     pub zlib: bool,
+    /// Whether the adaptive profile may be tried where `profile` is lower: it is used for all
+    /// where zlib's emulation predicts every token of the samples ([`Encoded::adaptive`]).
+    pub trial: bool,
     /// Whether datasets of floats are coded by the float model ([`FLOAT`]).
     pub floats: bool,
     /// The most bytes of data that the chunks may inflate to, all together, by the sizes of
@@ -45,7 +50,7 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Options {
-        Options { threads: 1, profile: aqr_flate::DEFAULT_PROFILE, zlib: true, floats: true, limit: u64::MAX }
+        Options { threads: 1, profile: aqr_flate::DEFAULT_PROFILE, zlib: true, trial: true, floats: true, limit: u64::MAX }
     }
 }
 
@@ -65,6 +70,8 @@ pub struct Encoded {
     pub formula: Formula,
     /// Bytes of data inflated (what counts against [`Options::limit`]).
     pub inflated: u64,
+    /// Whether the adaptive profile was used in place of [`Options::profile`].
+    pub adaptive: bool,
     /// Chunks rebuilt.
     pub chunks: usize,
 }
@@ -144,8 +151,9 @@ fn jobs(input: &[u8], file: &File, mut limit: u64) -> Vec<Job> {
     out
 }
 
-/// A chunk's stream made: its data and record, and the zlib settings emulation found.
-type Made = Option<(Vec<u8>, Vec<u8>, Option<zlib::Params>)>;
+/// A chunk's stream made: its data and record, the zlib settings emulation found, and whether it
+/// predicted every token.
+type Made = Option<(Vec<u8>, Vec<u8>, Option<zlib::Params>, bool)>;
 
 /// The formula rebuilding the HDF5 file `input`, or None where it is not one (or no chunk is
 /// rebuilt). The deflated chunks whose data inflates to what their dataset tells (where its
@@ -162,9 +170,21 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         max_data: usize::try_from(opt.limit).unwrap_or(usize::MAX),
         ..aqr_flate::Options::for_profile(opt.profile).ok()?
     };
-    let fopts =
-        [aqr_flate::Options { threads: 1, ..base.clone() }, aqr_flate::Options { threads: opt.threads, ..base }];
-    let fopt = |threads: usize| &fopts[(threads > 1) as usize];
+    let sets = |base: aqr_flate::Options| {
+        [aqr_flate::Options { threads: 1, ..base.clone() }, aqr_flate::Options { threads: opt.threads, ..base }]
+    };
+    // (the adaptive profile too, where the samples may show that zlib is predicted exactly: it is
+    // then the profile of all, as aqr-compress's DMGs)
+    let adaptive = (opt.trial && opt.zlib && opt.profile < aqr_flate::ADAPTIVE)
+        .then(|| aqr_flate::Options::for_profile(aqr_flate::ADAPTIVE).ok())
+        .flatten()
+        .map(|a| sets(aqr_flate::Options { zlib: base.zlib, max_data: base.max_data, ..a }));
+    let fopts = sets(base);
+    let exact = AtomicBool::new(false);
+    let fopt = |threads: usize| match (&adaptive, exact.load(Relaxed)) {
+        (Some(a), true) => &a[(threads > 1) as usize],
+        _ => &fopts[(threads > 1) as usize],
+    };
     let parse = |j: &Job, threads: usize| {
         let p = Parsed::new(&input[j.deflate.clone()], fopt(threads)).ok()?;
         let sum = u32::from_be_bytes(*input.get(j.deflate.end..)?.first_chunk()?);
@@ -175,7 +195,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         let p = parse(j, threads)?;
         let hints = Hints { params, ..Hints::zlib_header(j.header) };
         let (data, record, report) = p.deconstruct(fopt(threads), &hints).ok()?;
-        (record.len() < j.deflate.len()).then_some((data, record, report.zlib))
+        (record.len() < j.deflate.len()).then_some((data, record, report.zlib, report.misses == 0))
     };
     let size = |j: &usize| jobs[*j].deflate.len();
     let run = |js: &[usize], params: Option<zlib::Params>| {
@@ -187,8 +207,23 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     order.sort_by_key(|&j| (std::cmp::Reverse(size(&j)), j));
     order.truncate(SAMPLES);
     let mut made: HashMap<usize, Made> = HashMap::new();
+    // The samples at the adaptive profile first, where the profile is lower: if its zlib emulation
+    // predicts every token of at least half of them, all are made at it, its parameters hinted (no
+    // search: which makes the profile slow), as the zlib streams of compressed DMGs are; else they
+    // are made again at the profile asked for.
+    let mut sampled = None;
+    if adaptive.is_some() && !order.is_empty() {
+        exact.store(true, Relaxed);
+        let done = run(&order, None);
+        let hit = done.iter().flatten().filter(|m| m.2.is_some() && m.3).count();
+        if hit > 0 && 2 * hit >= done.iter().flatten().count() {
+            sampled = Some(done);
+        } else {
+            exact.store(false, Relaxed);
+        }
+    }
     let mut seen: Vec<(zlib::Params, usize)> = Vec::new();
-    for (&j, m) in order.iter().zip(run(&order, None)) {
+    for (&j, m) in order.iter().zip(sampled.unwrap_or_else(|| run(&order, None))) {
         if let Some(p) = m.as_ref().and_then(|m| m.2) {
             match seen.iter_mut().find(|s| s.0 == p) {
                 Some(s) => s.1 += 1,
@@ -221,7 +256,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     let mut at = 0;
     let mut inflated = 0;
     for (j, job) in jobs.iter().enumerate() {
-        let Some((d, r, _)) = made.remove(&j).flatten() else { continue };
+        let Some((d, r, ..)) = made.remove(&j).flatten() else { continue };
         let Ok(profile) = aqr_flate::record_profile(&r) else { continue };
         let kept = &input[at..job.deflate.start];
         parts.push(Some(Node::slice(META, meta.len() as u64, kept.len() as u64)));
@@ -257,7 +292,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     let parts: Vec<Node> =
         parts.into_iter().filter_map(|p| p.or_else(|| streams.next())).filter(|n| !n.is_empty()).collect();
     f.root = Node::concat(parts);
-    Some(Encoded { formula: f, inflated, chunks })
+    Some(Encoded { formula: f, inflated, adaptive: exact.load(Relaxed), chunks })
 }
 
 /// The data of the chunks that the float model codes, by job, as nodes of `f`: of each dataset

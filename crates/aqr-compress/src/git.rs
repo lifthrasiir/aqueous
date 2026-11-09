@@ -18,7 +18,7 @@ use crate::{Cx, Made, Options};
 
 pub(crate) fn pack(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
     let (profile, zlib) = opt.flate();
-    let gopt = aqr_git::formula::Options {
+    let mut gopt = aqr_git::formula::Options {
         threads: opt.threads,
         profile,
         zlib,
@@ -30,7 +30,13 @@ pub(crate) fn pack(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formu
         }),
         ..Default::default()
     };
-    let e = aqr_git::formula::encode_with(d, &gopt)?;
+    let mut e = aqr_git::formula::encode_with(d, &gopt)?;
+    // (the adaptive profile, tried where zlib is predicted exactly, needs more memory than the
+    // application may take for some data: then the profile asked for)
+    if e.adaptive && crate::memory::exceeding(&e.formula, &crate::Native { threads: 1 }, opt.application_bound).is_some() {
+        gopt.trial = false;
+        e = aqr_git::formula::encode_with(d, &gopt)?;
+    }
     cx.inflate(e.inflated);
     Some(e.formula)
 }
