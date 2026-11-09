@@ -33,7 +33,9 @@ pub(crate) fn pack(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formu
     let mut e = aqr_git::formula::encode_with(d, &gopt)?;
     // (the adaptive profile, tried where zlib is predicted exactly, needs more memory than the
     // application may take for some data: then the profile asked for)
-    if e.adaptive && crate::memory::exceeding(&e.formula, &crate::Native { threads: 1 }, opt.application_bound).is_some() {
+    if e.adaptive
+        && crate::memory::exceeding(&e.formula, &crate::Native { threads: 1 }, opt.application_bound).is_some()
+    {
         gopt.trial = false;
         e = aqr_git::formula::encode_with(d, &gopt)?;
     }
