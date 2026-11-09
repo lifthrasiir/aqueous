@@ -303,7 +303,16 @@ aqr-compress의 `chunked`로 일반화했다. 압축 컨테이너는 청크 목�
   바이트까지 같다. 같은 디스크(350.2 MB): 345.3 MB(스캔이 zlib 스트림을 하나씩 찾음), 72 s → 231.5 MB, 22.4 s,
   힙 1.11 GB, 풀기 8.3 s. VMware·VirtualBox가 내보낸 OVA는 시험하지 못했다(인코더가 다를 수 있다: 표본이
   맞지 않으면 기본 프로파일).
-- 남은 것: E01, qcow2의 zstd 클러스터(compression type 1).
+- E01(`aqr_disk::ewf`, libyal의 문서만 읽음): 섹션을 차례로 읽고(서술자의 Adler-32 확인), `volume`·`data`
+  섹션의 청크 크기, `sectors` 섹션 뒤 `table`의 오프셋(기준 오프셋에서 31비트, 최상위 비트가 압축)으로
+  청크를 낸다. 압축 청크는 zlib 스트림, 아닌 것은 데이터와 Adler-32. 세그먼트 파일(`.E02` …)은 각각
+  따로: 그 디스크는 제 청크를 이은 것(디스크의 일부)이고, 마지막 청크는 `done`이 있는 세그먼트에서만
+  짧다. ewfacquire(20140814)의 fast는 zlib 레벨 1과 바이트까지 같다(best는 9로 보인다). 같은 디스크의
+  `ewfacquire -c deflate:fast`(383.5 MB, 청크 32 KiB 40,611개): 379.6 MB, 78.7 s → 231.7 MB, 30.5 s,
+  힙 0.94 GB, 풀기 4.6 s. 청크가 작아 aqr-flate 레코드가 청크마다 십여 바이트(대부분 0 청크)다.
+  EnCase·FTK Imager가 만든 이미지는 시험하지 못했다. 읽지 않는 것: EWF2(`.Ex01`), EnCase 6.7.1의
+  2 GiB 넘는 32비트 오프셋.
+- 남은 것: qcow2의 zstd 클러스터(compression type 1).
 
 각 단계는 파서, README(무엇을 읽는가, 결과, 시험), 손상·잘린 이미지 시험(aqr-iso의 것처럼), 그리고
 `--stats`를 켠 `cargo aqr` 측정(크기, 시간, 힙과 resident 최대)으로 끝난다. 0단계 뒤의 비교 기준은

@@ -128,8 +128,9 @@ pub enum Format {
     /// by the descriptor at sector 16; FAT or exFAT, aqr-fat's, and NTFS, aqr-ntfs's, by the boot
     /// sector; ext2/3/4, aqr-ext's, by the superblock; APFS, aqr-apfs's, by the container's
     /// superblock), all of it or a partition of its MBR, GPT or
-    /// APM, of the disk or of the virtual disk of a VHD, VHDX, VMDK, qcow2 or VDI container: at the
-    /// start of data only.
+    /// APM, of the disk or of the virtual disk of a VHD, VHDX, VMDK, qcow2 or VDI container; or a
+    /// container of compressed chunks (qcow2's compressed clusters, a streamOptimized VMDK, an
+    /// EWF-E01 segment file: aqr-compress's `chunked`): at the start of data only.
     Disk,
     /// UDIF image (`.dmg`) of zlib's chunks (aqr-disk's `dmg`, aqr-compress's own formula: the
     /// disk a content), known by its trailer: all of the data only. (One of raw chunks is a

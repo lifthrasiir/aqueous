@@ -3941,7 +3941,7 @@ mod tests {
     /// without running a module.
     #[test]
     fn compressed_containers_taken_apart() {
-        for name in ["disk-c.qcow2", "disk-s.vmdk"] {
+        for name in ["disk-c.qcow2", "disk-s.vmdk", "disk.E01"] {
             let p = format!("{}/../../codecs/aqr-disk/tests/data/{name}.zst", env!("CARGO_MANIFEST_DIR"));
             let d = zstd::stream::decode_all(&std::fs::read(p).unwrap()[..]).unwrap();
             assert_eq!(detect(&d), Some(Format::Disk), "{name}");
@@ -3953,7 +3953,9 @@ mod tests {
                 .filter(|c| matches!(c.how, aqr_disk::chunked::How::Deflate | aqr_disk::chunked::How::Zlib))
                 .map(|c| c.file.len())
                 .sum();
-            assert!(records * 50 < compressed, "{name}: records {records} of {compressed} B");
+            // (an EWF image's chunks are of 32 KiB, most of zeros: each a record of some bytes)
+            let most = if name.ends_with(".E01") { 15 } else { 50 };
+            assert!(records * most < compressed, "{name}: records {records} of {compressed} B");
             let (c, f) = compress_formula(&d, &opt);
             assert!(f.applies().iter().any(|a| a.module == aqr_flate::formula::MODULE), "{name}");
             assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG), "{name}");
@@ -3968,6 +3970,22 @@ mod tests {
             let roots = roots.map_err(|e| e.to_string()).unwrap().expect("told");
             let whole = roots.iter().fold(aqr_formula::chash::Ch::EMPTY, |w, (h, _)| w.cat(*h));
             assert!(whole == aqr_formula::chash::Ch::of(&d), "{name}");
+        }
+    }
+
+    /// An EWF image's segment files, each taken by itself (the second of raw chunks only): each
+    /// a disk image, its chunks rebuilt.
+    #[test]
+    fn ewf_segments_taken_apart() {
+        for name in ["disk-s.E01", "disk-s.E02", "disk-s.E03"] {
+            let p = format!("{}/../../codecs/aqr-disk/tests/data/{name}.zst", env!("CARGO_MANIFEST_DIR"));
+            let d = zstd::stream::decode_all(&std::fs::read(p).unwrap()[..]).unwrap();
+            assert_eq!(detect(&d), Some(Format::Disk), "{name}");
+            let opt = Options { threads: 2, shared_modules: true, ..Options::default() };
+            assert!(chunked::container(&d, &opt, &Cx::new(&d, &opt)).is_some(), "{name}");
+            let (c, _) = compress_formula(&d, &opt);
+            assert!(c.len() * 4 < d.len(), "{name}: {} of {} B", c.len(), d.len());
+            assert!(aqr_decompress::decompress(&c, 1).unwrap() == d, "{name}");
         }
     }
 

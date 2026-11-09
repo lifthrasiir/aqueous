@@ -36,8 +36,9 @@ codecs/aqr-disk/scripts/gen-dmg.sh          # tests/data/dmg-*: a disk of HFS+ a
   well; one of compressed chunks is parsed for aqr-compress, whose formula rebuilds its zlib,
   bzip2 and LZFSE chunks from the disk. So is a qcow2 image of compressed clusters (raw DEFLATE,
   `container::qcow2_chunks`): its chunks for aqr-compress (`chunked`), its compressed clusters
-  read as zeros as a container; and a streamOptimized VMDK extent (`container::vmdk_stream_chunks`:
-  its markers, its grains zlib streams).
+  read as zeros as a container; a streamOptimized VMDK extent (`container::vmdk_stream_chunks`:
+  its markers, its grains zlib streams); and an EnCase image's segment file (EWF-E01, `ewf`, from
+  libyal's description: its sections, the tables' chunks, zlib streams or raw), each by itself.
   Not read: differencing disks and those of a parent or backing file, encrypted ones, qcow2's
   zstd clusters,
   VHDX's log, VHD's and VHDX's sector bitmaps (an allocated block is taken whole).
@@ -62,7 +63,7 @@ codecs/aqr-disk/scripts/gen-dmg.sh          # tests/data/dmg-*: a disk of HFS+ a
   pieces split from it; a piece overlapping one before it is left in the rest, and the file's
   contents are those taken.
 
-Not read yet: E01 (stage 8), holes of sparse files and of zeros as nodes of their own (they are
+Not read yet: EWF2 (`.Ex01`), holes of sparse files and of zeros as nodes of their own (they are
 in the rest, to zstd), file systems' metadata taken apart (`docs/disk-image-design.md`).
 
 ## How it does
@@ -115,7 +116,8 @@ stage 3). (Most of the time is the verify of one leaf:
 its files of ext4 and ext2 where the container holds them, the container rebuilt; compressed
 clusters; containers cut short and changed bytes); Windows' own (`scripts/gen-containers.ps1`,
 elevated: diskpart's dynamic VHDX and VHD, Hyper-V's New-VHD's VHDX), their NTFS files; the
-chunks of qemu-img's compressed qcow2 and streamOptimized VMDK (cut short and changed bytes); hdiutil's
+chunks of qemu-img's compressed qcow2 and streamOptimized VMDK and of ewfacquire's E01 (one
+file, and segment files; cut short and changed bytes); hdiutil's
 UDIF images of each kind (chunks covering the disk, UDRO's a container; cut short and changed
 bytes); the partition tables of hdiutil (GPT, MBR, APM), logical partitions and
 their loops, data that is no table, how extents are laid out, files in pieces (evaluated and

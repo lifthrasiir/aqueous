@@ -1,14 +1,14 @@
 //! Disk images whose disk is in chunks, some compressed (aqr-disk's `chunked`): UDIF images
-//! (`.dmg`) of compressed chunks, qcow2 images of compressed clusters, streamOptimized VMDK extents. The disk is a content,
+//! (`.dmg`) of compressed chunks, qcow2 images of compressed clusters, streamOptimized VMDK
+//! extents, EWF-E01 segment files (each by itself, of raw chunks only too). The disk is a content,
 //! recompressed in turn (a disk image of its own: its files taken apart), cut into the parts of
 //! its chunks once (a Split of all of it, so that it is one content): zlib's and raw DEFLATE
 //! chunks rebuilt from their parts by applications of aqr-flate's (of 32 MiB of data each; zlib's
 //! headers and checksums, qcow2's padding kept), bzip2's each by aqr-bz2's, LZFSE's each by
 //! aqr-bvx's, raw ones those parts as they are, zeros dropped (each part the source of a Patch of
 //! nothing), and so the parts of chunks not rebuilt, kept as they are. The rest of the file (a
-//! DMG's property list and trailer, qcow2's header and tables, VMDK's markers, what is between
-//! the chunks) is
-//! kept as it is. A UDIF or qcow2 image of raw chunks only is a container of aqr-disk's, not this;
+//! DMG's property list and trailer, qcow2's header and tables, VMDK's markers, EWF's sections and
+//! raw chunks' checksums, what is between the chunks) is kept as it is. A UDIF or qcow2 image of raw chunks only is a container of aqr-disk's, not this;
 //! one of chunks of another compression (LZMA, ADC, qcow2's zstd) is not taken yet.
 
 use aqr_disk::chunked::{Chunked, How};
@@ -45,10 +45,15 @@ pub(crate) fn dmg(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
 }
 
 /// The formula of compressed container `d` ([`chunked`]: a qcow2 image of compressed clusters, a
-/// streamOptimized VMDK extent), None where it is not one.
+/// streamOptimized VMDK extent, an EWF-E01 segment file), None where it is not one.
 pub(crate) fn container(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
     let u = aqr_disk::chunked::container(d)?;
-    chunked(d, &u, if d.starts_with(b"KDMV") { "vmdk" } else { "qcow2" }, opt, cx)
+    let kept = match d.get(..4) {
+        Some(b"KDMV") => "vmdk",
+        Some(b"EVF\x09") => "e01",
+        _ => "qcow2",
+    };
+    chunked(d, &u, kept, opt, cx)
 }
 
 /// The formula of image `d` of chunks `u`, its bytes kept of class `kept`.
@@ -96,7 +101,7 @@ fn chunked(d: &[u8], u: &Chunked, kept: &'static str, opt: &Options, cx: &Cx) ->
     let mut params = None;
     let sample = (by_disk.iter().take(SAMPLED).map(|&k| &u.chunks[k]))
         .filter(|c| matches!(c.how, How::Zlib | How::Deflate) && c.file.len() > 2)
-        .max_by_key(|c| c.disk.end - c.disk.start);
+        .max_by_key(|c| (c.disk.end - c.disk.start, c.file.len()));
     if let Some(c) = sample.filter(|_| zlib) {
         let profile = profile.max(aqr_flate::ADAPTIVE);
         let sopt = aqr_flate::Options {

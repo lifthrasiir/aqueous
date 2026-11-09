@@ -221,11 +221,28 @@ fn udif_images_damaged() {
 /// or chunks within the file and the disk; an uncompressed one gives none.
 #[test]
 fn compressed_container_chunks() {
-    let disk = fixture("disk.img");
-    for (name, at) in [("disk-c.qcow2", 0x30000), ("disk-s.vmdk", 0x10000)] {
+    let whole = fixture("disk.img");
+    // (each a part of the disk: an EWF segment file's, from where the one before ends; where to
+    // change bytes; the compressed chunks at least)
+    let mut from = 0;
+    for (name, at, least) in [
+        ("disk-c.qcow2", 0x30000, 100),
+        ("disk-s.vmdk", 0x10000, 100),
+        ("disk.E01", 0x81ec0, 2000),
+        ("disk-s.E01", 0x6e0, 200),
+        ("disk-s.E02", 0x400, 0),
+        ("disk-s.E03", 0x400, 100),
+    ] {
         let d = fixture(name);
         let u = aqr_disk::chunked::container(&d).unwrap_or_else(|| panic!("{name}"));
-        assert_eq!(u.len, disk.len() as u64, "{name}");
+        if !name.starts_with("disk-s.E0") || name.ends_with('1') {
+            from = 0;
+        }
+        let disk = &whole[from..];
+        from += u.len as usize;
+        if !name.starts_with("disk-s.E0") || name.ends_with('3') {
+            assert_eq!(u.len, disk.len() as u64, "{name}");
+        }
         let mut chunks = u.chunks.clone();
         chunks.sort_by_key(|c| c.disk.start);
         let (mut end, mut compressed) = (0, 0);
@@ -253,7 +270,7 @@ fn compressed_container_chunks() {
             }
         }
         assert_eq!(end, u.len, "{name}");
-        assert!(compressed > 100, "{name}: {compressed}");
+        assert!(compressed >= least, "{name}: {compressed}");
         let within = |e: &[u8], what: &str| {
             if let Some(u) = aqr_disk::chunked::container(e) {
                 assert!(u.chunks.iter().all(|c| c.file.end <= e.len() && c.disk.end <= u.len), "{name}, {what}");
@@ -272,4 +289,5 @@ fn compressed_container_chunks() {
     }
     assert!(aqr_disk::chunked::container(&fixture("disk.qcow2")).is_none());
     assert!(aqr_disk::chunked::container(&fixture("disk.vmdk")).is_none());
+    assert!(aqr_disk::chunked::container(&whole).is_none());
 }

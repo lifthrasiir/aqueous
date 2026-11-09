@@ -4,7 +4,9 @@
 # aqr-linux: docs/disk-image-design.md), zstd -19:
 #   disk.vhd (dynamic VHD), disk.vhdx (dynamic VHDX), disk.vmdk (monolithicSparse), disk.qcow2
 #   (version 3), disk-v2.qcow2 (version 2), disk-c.qcow2 (compressed clusters), disk.vdi,
-#   disk-s.vmdk (streamOptimized; made later, of the disk.img committed, by qemu-img 8.2.2).
+#   disk-s.vmdk (streamOptimized; made later, of the disk.img committed, by qemu-img 8.2.2);
+#   EnCase images by ewfacquire (ewf-tools 20140814, made later as well): disk.E01 (deflate:fast),
+#   disk-s.E01 to .E03 (deflate:empty-block, segment files of 4 MiB).
 # The files: readme.txt, photo.jpg (aqr-jpeg's gradient.jpg), data.bin (1 MiB of a pattern) in
 # both volumes, and in the ext4 one big.bin (8 MiB of another), so that files cross the
 # containers' blocks.
@@ -50,12 +52,16 @@ qemu-img convert -O qcow2 -o compat=0.10 disk.img disk-v2.qcow2
 qemu-img convert -c -O qcow2 disk.img disk-c.qcow2
 qemu-img convert -O vdi disk.img disk.vdi
 qemu-img convert -O vmdk -o subformat=streamOptimized disk.img disk-s.vmdk
-for f in disk.img disk.vhd disk.vhdx disk.vmdk disk.qcow2 disk-v2.qcow2 disk-c.qcow2 disk.vdi; do
+ewfacquire -u -q -c deflate:fast -t disk disk.img >/dev/null
+ewfacquire -u -q -c deflate:empty-block -S 4194304 -t disk-s disk.img >/dev/null
+for f in disk.img disk.vhd disk.vhdx disk.vmdk disk.qcow2 disk-v2.qcow2 disk-c.qcow2 disk.vdi disk-s.vmdk \
+    disk.E01 disk-s.E01 disk-s.E02 disk-s.E03; do
     zstd -q -19 -f "$f" -o "/tmp/aqr-disk-$f.zst"
     chmod a+r "/tmp/aqr-disk-$f.zst"
 done
 VM
-for f in disk.img disk.vhd disk.vhdx disk.vmdk disk.qcow2 disk-v2.qcow2 disk-c.qcow2 disk.vdi; do
+for f in disk.img disk.vhd disk.vhdx disk.vmdk disk.qcow2 disk-v2.qcow2 disk-c.qcow2 disk.vdi disk-s.vmdk \
+    disk.E01 disk-s.E01 disk-s.E02 disk-s.E03; do
     limactl copy "$vm:/tmp/aqr-disk-$f.zst" "$crate/tests/data/$f.zst"
     limactl shell "$vm" -- sudo rm -f "/tmp/aqr-disk-$f.zst"
 done
