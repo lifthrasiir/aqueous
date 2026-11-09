@@ -1,7 +1,7 @@
 //! Compresses files and directories into Aqueous archives, and decompresses them, as zstd does.
 //!
 //! usage: aqr [-c | -d | -K | -t] [-o OUTPUT] [-L] [-f] [--rm] [-p] [-q | -v] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N]
-//! [--batch MIB | -B SIZE] [-b SIZE] [-S SIZE] [-D] [-A] [--no-check] [-P] [--wasm] [--no-sandbox] [--stats[=FILE]] [-h]
+//! [-B SIZE] [-b SIZE] [-S SIZE] [-D] [-A] [--no-check] [-P] [--wasm] [--no-sandbox] [--stats[=FILE]] [-h]
 //! INPUT [--rename TO]...
 //!
 //! aqr -d [OPTIONS] ARCHIVE [PATH [--rename TO]]...; aqr -d --each [OPTIONS] ARCHIVE...; aqr -t [-q | -v] ARCHIVE [PATH]...;
@@ -147,10 +147,9 @@
 //!   with mirror blocks (`-A`) is not committed as it is written, but ended as it is all the same
 //!   where it is stopped once (but by being killed). An archive of a single file is always made
 //!   whole or not at all.
-//! - `--batch` is about the most MiB of files made at once (512 by default), which bounds the
-//!   memory taken by compression (but for a file larger).
-//! - `-B` is `--batch` as a size (512M; `K`, `M` and `G` are KiB, MiB and GiB, a number alone
-//!   bytes). `-b` is the most bytes of a block that files share (16M by default), which a file
+//! - `-B` (`--batch`) is about the most bytes of files made at once (512M by default; `K`, `M`
+//!   and `G` are KiB, MiB and GiB, a number alone bytes), which bounds the memory taken by
+//!   compression (but for a file larger). `-b` is the most bytes of a block that files share (16M by default), which a file
 //!   read alone may have to decompress: smaller for faster random access. `-S` is about the
 //!   least bytes of a segment of an archive of several files (256M by default; 0, one segment):
 //!   each closed by its metadata block after the batch that makes it so long, so that an archive
@@ -273,7 +272,7 @@ Decompressing some paths (aqr -d ARCHIVE PATH [--rename TO]...):
       --each            every input an archive, each extracted (or listed) whole
 
 Output:
-  -o OUTPUT             write to OUTPUT; compressing, all the inputs into one archive
+  -o, --output OUTPUT   write to OUTPUT; compressing, all the inputs into one archive
   -C, --directory DIR   compressing, the inputs after it found in DIR, archived as if
                         run there; decompressing, extract into DIR (-o in it too);
                         the archives' own paths are taken from where aqr is run
@@ -294,15 +293,16 @@ Compression:
   -P, --passphrase      encrypt the archives with a passphrase asked for (decompressing:
                         ask for it at once; an encrypted archive asks anyway where there
                         is a terminal); without a terminal, a line of standard input
-  -l LEVEL, -0 ... -9   0 (uncompressed), 1 (zstd alone) to 9; low, mid (default), high
+  -l, --level LEVEL, -0 ... -9
+                        0 (uncompressed), 1 (zstd alone) to 9; low, mid (default), high
                         are 2, 5 and 8; zstdN is zstd level N with recompression as mid
       --depth N         recompress formats nested at most N deep (default 3)
-      --batch MIB       make about MIB MiB of files at once (default 512)
-  -B SIZE               --batch as a size (512M)
-  -b SIZE               the most bytes of a block that files share (default 16M)
-  -S SIZE               close a segment of the archive after about SIZE bytes of it
+  -B, --batch SIZE      make about SIZE of files at once (default 512M)
+  -b, --block-size SIZE the most bytes of a block that files share (default 16M)
+  -S, --segment-size SIZE
+                        close a segment of the archive after about SIZE bytes of it
                         (default 256M; 0, one segment)
-  -D                    compress blocks alike with dictionaries trained for them
+  -D, --dictionaries    compress blocks alike with dictionaries trained for them
   -A, --archival        for long-term preservation: mirror the blocks whose damage
                         would lose more than a file, to be restored from as it is read
       --no-check        do not decode the archive made to check it
@@ -331,7 +331,7 @@ Decompression:
                         where the system cannot lock workers down, they run only so
 
 General:
-  -T THREADS            threads to use (default 0: as many as the machine has)
+  -T, --threads N       threads to use (default 0: as many as the machine has)
   -M, --memory MEM      about the most heap to take at once: a SIZE, N% of the
                         system's memory, avail (most of what is available now), or 0
                         (no limit); by default 2 GB, or half the system's if less
@@ -344,7 +344,8 @@ General:
   -h, --help            show this help
   -V, --version         show the version
 
-SIZE is a number of bytes, or of KiB, MiB or GiB with K, M or G.
+SIZE is a number of bytes, or of KiB, MiB or GiB with K, M or G. Short options may be
+bundled (-cf, -T8, -oOUT); a long option's value may follow it after = (--memory=2G).
 ";
 
 /// The argument (the only one) that this program is run with as a worker of the sandbox.
@@ -534,23 +535,27 @@ fn parse() -> Result<Args, String> {
     // (by the number of inputs before it, `--rename`'s place and value)
     let mut renames: Vec<(usize, PathBuf)> = Vec::new();
     let (mut stats, mut stats_to) = (false, Vec::new());
-    let mut only_inputs = false;
     let mut format = None;
     let mut memory = None;
     let mut application_bound = None;
     // (`-C`: the directory so far, by input the one it was given in, and the last given)
     let (mut dir, mut dirs, mut last_dir) = (PathBuf::new(), Vec::new(), None);
-    while let Some(arg) = argv.next() {
-        let s = arg.to_string_lossy();
-        if only_inputs || !s.starts_with('-') || s == "-" {
-            a.inputs.push(arg.into());
-            dirs.push(dir.clone());
-            continue;
-        }
+    let mut lex = Lexer { argv, short: Default::default(), only_inputs: false };
+    while let Some(tok) = lex.next() {
+        let (s, mut inline) = match tok {
+            Tok::Input(i) => {
+                a.inputs.push(i.into());
+                dirs.push(dir.clone());
+                continue;
+            }
+            Tok::Opt(s, inline) => (s, inline),
+        };
         // (as given: a path need not be Unicode; [`text`] for the others)
-        let mut value = |name: &str| argv.next().ok_or(format!("{name} takes a value"));
+        let mut value = |name: &str| match inline.take() {
+            Some(v) => Ok(v),
+            None => lex.value().ok_or(format!("{name} takes a value")),
+        };
         match &*s {
-            "--" => only_inputs = true,
             "-h" | "--help" => {
                 print!("{HELP}");
                 std::process::exit(0);
@@ -566,7 +571,7 @@ fn parse() -> Result<Args, String> {
             "-I" | "--info" => (a.info, a.list) = (true, false),
             "--wasm" => a.wasm = true,
             "--no-sandbox" => a.sandbox = false,
-            "-o" => a.output = Some(value("-o")?.into()),
+            "-o" | "--output" => a.output = Some(value("-o")?.into()),
             "-C" | "--directory" => {
                 let to = dir.join(value("-C")?);
                 if let Err(e) = fs::read_dir(&to) {
@@ -584,9 +589,9 @@ fn parse() -> Result<Args, String> {
             "-p" | "--preserve" => a.preserve = true,
             "-q" | "--quiet" => a.quiet = true,
             "-v" | "--verbose" => a.verbose = true,
-            "-T" => a.opt.threads = text(value("-T")?).parse().map_err(|_| "-T takes a number")?,
+            "-T" | "--threads" => a.opt.threads = text(value("-T")?).parse().map_err(|_| "-T takes a number")?,
             "-M" | "--memory" => memory = Some(text(value("-M")?)),
-            "-l" => a.level = Some(text(value("-l")?)),
+            "-l" | "--level" => a.level = Some(text(value("-l")?)),
             "--format" => {
                 format = Some(match &*text(value("--format")?) {
                     "aqr" => None,
@@ -600,23 +605,31 @@ fn parse() -> Result<Args, String> {
                 })
             }
             "--depth" => a.opt.depth = text(value("--depth")?).parse().map_err(|_| "--depth takes a number")?,
-            "--batch" => {
-                let mib: usize = text(value("--batch")?).parse().map_err(|_| "--batch takes a number of MiB")?;
-                a.opt.batch = mib.max(1) << 20;
+            "-B" | "--batch" => {
+                a.opt.batch = size_of(&text(value("-B")?)).ok_or("-B takes a size (64M, 1G, ...)")?.max(1)
             }
-            "-B" => a.opt.batch = size_of(&text(value("-B")?)).ok_or("-B takes a size (64M, 1G, ...)")?.max(1),
-            "-b" => a.opt.block = size_of(&text(value("-b")?)).ok_or("-b takes a size (64K, 1M, ...)")?.max(1),
-            "-S" => a.opt.segment = size_of(&text(value("-S")?)).ok_or("-S takes a size (64M, 1G, ...)")?,
-            "-D" => a.opt.dictionaries = true,
+            "-b" | "--block-size" => {
+                a.opt.block = size_of(&text(value("-b")?)).ok_or("-b takes a size (64K, 1M, ...)")?.max(1)
+            }
+            "-S" | "--segment-size" => {
+                a.opt.segment = size_of(&text(value("-S")?)).ok_or("-S takes a size (64M, 1G, ...)")?
+            }
+            "-D" | "--dictionaries" => a.opt.dictionaries = true,
             "-A" | "--archival" => a.opt.mirrors = true,
             "--no-check" => a.opt.verify = false,
-            "--stats" => stats = true,
+            "--stats" => match inline.take() {
+                None => stats = true,
+                Some(to) => {
+                    let to = PathBuf::from(to);
+                    if !stats::takes(&to) {
+                        return Err("--stats= takes a file named .json or .html".into());
+                    }
+                    stats_to.push(to);
+                }
+            },
             "--application-bound" => {
                 let v = text(value("--application-bound")?);
                 application_bound = Some(bound_of(&v)?);
-            }
-            s if s.starts_with("--application-bound=") => {
-                application_bound = Some(bound_of(&s["--application-bound=".len()..])?)
             }
             "--ipc" => a.ipc = true,
             "-P" | "--passphrase" => a.passphrase = true,
@@ -626,22 +639,12 @@ fn parse() -> Result<Args, String> {
             "--normalize" => a.names.normalize = names::Opts::normalize(&text(value("--normalize")?))?,
             "--bad-names" => a.names.bad = names::Opts::bad(&text(value("--bad-names")?))?,
             "--links" => a.links = extract::Links::parse(&text(value("--links")?))?,
-            s if s.starts_with("--stats=") => {
-                let to = &arg.as_encoded_bytes()["--stats=".len()..];
-                // SAFETY: split after ASCII, of an `OsStr`'s bytes
-                let to = PathBuf::from(unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(to) });
-                if !stats::takes(&to) {
-                    return Err("--stats= takes a file named .json or .html".into());
-                }
-                stats_to.push(to);
-            }
-            // -T8 and the like
-            s if s.starts_with("-T") => a.opt.threads = s[2..].parse().map_err(|_| "-T takes a number")?,
-            s if s.starts_with("-M") => memory = Some(s[2..].to_string()),
-            s if s.starts_with("-l") => a.level = Some(s[2..].to_string()),
             // -0 to -9, and whatever level of more digits there may be (one level, not several)
-            s if s[1..].bytes().all(|b| b.is_ascii_digit()) => a.level = Some(s[1..].to_string()),
+            s if s.len() > 1 && s[1..].bytes().all(|b| b.is_ascii_digit()) => a.level = Some(s[1..].to_string()),
             s => return Err(format!("unknown option {s}")),
+        }
+        if inline.is_some() {
+            return Err(format!("{s} takes no value"));
         }
     }
     if stats_alone {
@@ -779,6 +782,76 @@ fn parse() -> Result<Args, String> {
     }
     a.dir = dir;
     Ok(a)
+}
+
+/// An argument as [`Lexer`] reads it: an input, or an option (`-x` or `--long`) with the value
+/// given in the same argument (`-xVALUE`, `--long=VALUE`).
+enum Tok {
+    Input(OsString),
+    Opt(String, Option<OsString>),
+}
+
+/// The short options that take a value: in a bundle (`-cfo OUT`), the rest of the argument is
+/// theirs (`-oOUT`), or else the next argument.
+const SHORT_VALUES: &[u8] = b"oCTMlBbSE";
+
+/// Reads the arguments as options and inputs, getopt's way: short options bundled (`-cf`), a
+/// value joined to its option (`-T8`, `--memory=2G`), `--` ending the options, `-` an input
+/// (standard input or output). The digits of a level (`-10`) are one option.
+struct Lexer {
+    argv: std::env::ArgsOs,
+    /// The options left of the bundle being read.
+    short: std::collections::VecDeque<Tok>,
+    only_inputs: bool,
+}
+
+impl Lexer {
+    fn next(&mut self) -> Option<Tok> {
+        if let Some(t) = self.short.pop_front() {
+            return Some(t);
+        }
+        let arg = self.argv.next()?;
+        let b = arg.as_encoded_bytes();
+        if self.only_inputs || b.len() < 2 || b[0] != b'-' {
+            return Some(Tok::Input(arg));
+        }
+        if b == b"--" {
+            self.only_inputs = true;
+            return self.next();
+        }
+        // SAFETY: split after ASCII, of an `OsStr`'s bytes
+        let os = |b: &[u8]| unsafe { OsStr::from_encoded_bytes_unchecked(b) }.to_owned();
+        if let Some(long) = b.strip_prefix(b"--") {
+            return Some(match long.iter().position(|&c| c == b'=') {
+                Some(i) => Tok::Opt(format!("--{}", String::from_utf8_lossy(&long[..i])), Some(os(&long[i + 1..]))),
+                None => Tok::Opt(format!("--{}", String::from_utf8_lossy(long)), None),
+            });
+        }
+        let mut i = 1;
+        while i < b.len() {
+            let c = b[i];
+            if c.is_ascii_digit() {
+                let n = b[i..].iter().take_while(|c| c.is_ascii_digit()).count();
+                self.short.push_back(Tok::Opt(format!("-{}", String::from_utf8_lossy(&b[i..i + n])), None));
+                i += n;
+                continue;
+            }
+            let name = format!("-{}", if c.is_ascii() { char::from(c).to_string() } else { "?".into() });
+            if SHORT_VALUES.contains(&c) {
+                let rest = (i + 1 < b.len()).then(|| os(&b[i + 1..]));
+                self.short.push_back(Tok::Opt(name, rest));
+                break;
+            }
+            self.short.push_back(Tok::Opt(name, None));
+            i += 1;
+        }
+        self.short.pop_front()
+    }
+
+    /// The next argument as it is, an option's value.
+    fn value(&mut self) -> Option<OsString> {
+        self.argv.next()
+    }
 }
 
 /// An option's value as text (any of it not Unicode replaced), where it is not a path.

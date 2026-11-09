@@ -72,3 +72,38 @@ fn values_not_unicode() {
     aqr(&["-d".as_ref(), "-o".as_ref(), out.as_os_str(), archive.as_os_str()]);
     assert_eq!(names(&out), [renamed]);
 }
+
+/// aqr run in `d` on `args`, its exit status and standard error.
+fn run_in(d: &std::path::Path, args: &[&str]) -> (bool, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_aqr")).current_dir(d).args(args).output().unwrap();
+    (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+#[test]
+fn bundled_and_joined() {
+    let d = scratch("bundled");
+    fs::write(d.join("in.txt"), "some text\n".repeat(50)).unwrap();
+    // (short options bundled, the last one's value the next argument or joined)
+    for args in [
+        &["-qcfo", "a.aqr", "in.txt"][..],
+        &["-qcfT2", "-oa.aqr", "-2", "in.txt"],
+        &["-q", "--output=a.aqr", "--level=low", "--batch=1M", "--block-size=64K", "--threads=1", "-f", "in.txt"],
+        &["-qf", "-B1M", "-l3", "-o", "a.aqr", "--", "in.txt"],
+    ] {
+        let (ok, err) = run_in(&d, args);
+        assert!(ok, "aqr {args:?}: {err}");
+        let (ok, err) = run_in(&d, &["-qdfo", "out.txt", "a.aqr"]);
+        assert!(ok, "aqr -d of {args:?}: {err}");
+        assert_eq!(fs::read(d.join("out.txt")).unwrap(), fs::read(d.join("in.txt")).unwrap());
+    }
+    for (args, told) in [
+        (&["--force=1", "in.txt"][..], "--force takes no value"),
+        (&["-qz", "in.txt"], "unknown option -z"),
+        (&["--frobnicate", "in.txt"], "unknown option --frobnicate"),
+        (&["-qo"], "-o takes a value"),
+    ] {
+        let (ok, err) = run_in(&d, args);
+        assert!(!ok && err.contains(told), "aqr {args:?}: {err}");
+    }
+    fs::remove_dir_all(&d).unwrap();
+}
