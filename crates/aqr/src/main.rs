@@ -42,6 +42,8 @@
 //!   Its metadata is taken as an Aqueous archive's ([`extract`]); what it holds that is not
 //!   extracted (encrypted entries, methods not known, paths reaching out) is told, and the run
 //!   fails once the rest is extracted. A file there already is written over only with `-f`.
+//!   Files are written sparse ([`sparse`]): runs of zeros of 256 KiB or more (of whole 64 KiB
+//!   at offsets of a multiple of it) are left as holes where the file system has them.
 //! - `-d ARCHIVE PATH...` (and `-K`): the paths of the archive given alone (`/` between names;
 //!   a directory with what is under it), where the whole archive would have them, with the
 //!   directories on the way (made plainly, without their metadata); `--rename TO` after a path
@@ -257,6 +259,7 @@ mod list;
 mod meta;
 mod names;
 mod pass;
+mod sparse;
 mod stats;
 mod stdio;
 mod stop;
@@ -1700,7 +1703,7 @@ fn compress_into(
     // (as long as it takes: a bar of no end known, and how many files)
     let listing = view::Listing::new(bars());
     let gathered = ticking(a, &listing, || -> Result<(), String> {
-        gather(inputs, given, renames, &mut g, &listing, a.opt.threads, a.dereference, &a.exclude)?;
+        gather(inputs, given, renames, &mut g, &listing, a)?;
         listing.finish();
         Ok(())
     });
@@ -1843,7 +1846,7 @@ fn pack_into(
     g.gone = a.rm.then(Vec::new);
     let listing = view::Listing::new(bars());
     let gathered = ticking(a, &listing, || -> Result<(), String> {
-        gather(inputs, given, &renames, &mut g, &listing, a.opt.threads, a.dereference, &a.exclude)?;
+        gather(inputs, given, &renames, &mut g, &listing, a)?;
         listing.finish();
         Ok(())
     });
@@ -2072,20 +2075,19 @@ fn archive_names(input: &Path, to: Option<&Path>) -> Result<Vec<OsString>, Strin
 /// Gathers `inputs` (a directory alone and not renamed: its entries at the root; else each at
 /// the path [`archive_names`] gives it, as `given`, with `renames`) into `g`: walked first (what the
 /// directories hold, a call for each), then what is read of each by its path ([`meta::stat`], a
-/// handle or so each, the most of the time) read on `threads`, then made the entries in the
+/// handle or so each, the most of the time) read on `a`'s threads, then made the entries in the
 /// order they were found. The files of an inode archived already are of its content (and
-/// forks), read once. Where `dereference` (`-L`), the links given and found are followed
-/// ([`Follow`]).
+/// forks), read once. Where `a` dereferences (`-L`), the links given and found are followed
+/// ([`Follow`]); what `a` excludes (`-x`) is left out.
 fn gather(
     inputs: &[PathBuf],
     given: &[PathBuf],
     renames: &[Option<PathBuf>],
     g: &mut Gathered,
     l: &view::Listing,
-    threads: usize,
-    dereference: bool,
-    x: &Exclude,
+    a: &Args,
 ) -> Result<(), String> {
+    let (threads, dereference, x) = (a.opt.threads, a.dereference, &a.exclude);
     let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
     let privileged = g.reader.privileged;
     let mut found = Vec::new();
@@ -3409,13 +3411,15 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
             (1, total.into_inner(), Some(PathBuf::from("-")))
         }
         None => {
-            let n = write_whole(&to.named, force, |w| {
+            let n = write_whole(&to.named, force, |f| {
+                // (runs of zeros left as holes)
+                let mut w = sparse::Sparse::new(f);
                 let mut failed = None;
                 let r = ticking(a, &*view, || {
                     archive.write_file(a.opt.threads, &mut |d: &[u8]| {
                         seen.saw(0, d, 0);
                         let _s = aqr_common::trace::span("write");
-                        w.write_all(d).map_err(|e| {
+                        w.write(d).map_err(|e| {
                             let m = e.to_string();
                             failed = Some(e);
                             Failure::Resource(m)
@@ -3424,7 +3428,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
                 });
                 match (r, failed) {
                     (_, Some(e)) => Err(e),
-                    (Ok(n), None) => Ok(n),
+                    (Ok(n), None) => w.finish().map(|()| n),
                     // (the part written so far removed)
                     (Err(e), None) => Err(std::io::Error::other(e.to_string())),
                 }

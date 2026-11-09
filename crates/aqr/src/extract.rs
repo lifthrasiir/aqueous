@@ -33,7 +33,6 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Mutex, RwLock};
@@ -735,16 +734,16 @@ impl<'a> Extractor<'a> {
             match &s.soon[i] {
                 Some(x) => {
                     self.clear(s.top.as_deref(), p)?;
-                    let mut f = create(p, self.force.load(Relaxed))?;
-                    f.write_all(&d).map_err(|e| err(p, e))?;
+                    let f = create(p, self.force.load(Relaxed))?;
+                    crate::sparse::write_all(&f, &d).map_err(|e| err(p, e))?;
                     self.ap.apply_file(&f, p, x)?;
                     drop(f);
                     s.applied[i].store(true, Relaxed);
                 }
                 // (the file made empty already)
                 None => {
-                    let mut f = fs::OpenOptions::new().write(true).open(p).map_err(|e| err(p, e))?;
-                    f.write_all(&d).map_err(|e| err(p, e))?;
+                    let f = fs::OpenOptions::new().write(true).open(p).map_err(|e| err(p, e))?;
+                    crate::sparse::write_all(&f, &d).map_err(|e| err(p, e))?;
                 }
             }
         }
