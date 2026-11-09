@@ -352,7 +352,8 @@ fn header(t: &Tree, items: &[Item], has: &[bool], notes: &mut Vec<String>, main:
     property(&mut h, id::NAME, &names);
     let extra = |i: &Item| &t.entries[i.entry].extra;
     let times = |f: fn(&Extra) -> Option<crate::Time>| -> Vec<Option<u64>> {
-        items.iter().map(|i| f(extra(i)).map(time::to_filetime)).collect()
+        // (a local time of an unknown time zone as local time here)
+        items.iter().map(|i| f(extra(i)).and_then(time::instant).map(time::to_filetime)).collect()
     };
     defined(&mut h, id::CTIME, &times(|x| x.crtime), 8);
     defined(&mut h, id::ATIME, &times(|x| x.atime), 8);

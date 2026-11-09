@@ -12,7 +12,8 @@
 //!   Windows' (read-only, hidden, system, archive; 0x10 a directory). No comment section.
 //! - EGG: the header with a random id, no prefix records (not solid, not split), a file header
 //!   with a UTF-8 filename and Windows file information (the modification time as a FILETIME,
-//!   attributes of EGG's own bits: read-only, hidden, system, 0x80 a directory) for each entry,
+//!   attributes of EGG's own bits: read-only, hidden, system, 0x80 a directory; a local time of
+//!   an unknown time zone as local time here, as ALZ's MS-DOS times are) for each entry,
 //!   and a block for each file (one more for each GiB of a larger one, as a block's sizes are
 //!   32 bits), then the final end marker. POSIX file information where the mode is known: the
 //!   mode, the owner's ids (0 where unknown) and the modification time in seconds.
@@ -26,7 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use aqr_common::{crc32, pool};
 use aqr_flate::zlib;
 
-use crate::{Bytes, Contents, Format, Item, Keeps, Kind, Options, Progress, Tell, Time, Tree, Written, batches, items};
+use crate::{Bytes, Contents, Format, Item, Keeps, Kind, Options, Progress, Tell, Tree, Written, batches, items};
 use aqr_foreign::time;
 
 /// The attributes of Windows kept by ALZ (read-only, hidden, system, archive), and its
@@ -283,13 +284,15 @@ pub fn write_egg(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tel
             h.extend(0x2C86_950Bu32.to_le_bytes());
             h.push(0);
             h.extend(9u16.to_le_bytes());
-            h.extend(x.mtime.map_or(0, time::to_filetime).to_le_bytes());
+            // (a local time of an unknown time zone as local time here, as ALZ's MS-DOS times)
+            let mtime = x.mtime.and_then(time::instant);
+            h.extend(mtime.map_or(0, time::to_filetime).to_le_bytes());
             h.push((x.win_attrs.unwrap_or(0) & EGG_KEPT) as u8 | if dir { EGG_DIR } else { 0 });
             // POSIX file information, where the mode is known: the mode with its kind, the
             // owner's ids (0 where unknown or wider than 32 bits) and the time in seconds
             if let Some(mode) = x.mode {
                 let id = |v: Option<u64>| v.and_then(|v| u32::try_from(v).ok()).unwrap_or(0);
-                let secs = x.mtime.filter(Time::is_instant).map_or(0, |t| t.secs.max(0) as u64);
+                let secs = mtime.map_or(0, |t| t.secs.max(0) as u64);
                 h.extend(0x1EE9_22E5u32.to_le_bytes());
                 h.push(0);
                 h.extend(20u16.to_le_bytes());

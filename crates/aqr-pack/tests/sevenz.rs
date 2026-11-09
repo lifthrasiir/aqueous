@@ -328,3 +328,21 @@ fn timing() {
         by_7zz("timing", &out, None);
     }
 }
+
+/// A local time of an unknown time zone (`Zone::Local`) as local time here, as MS-DOS times are
+/// read and written: read back, the same local date and time, to 100 ns.
+#[test]
+fn local_times() {
+    use aqr_formula::aqr::Zone;
+    let local = Time { secs: 1_700_000_001, nanos: 250_000_000, zone: Zone::Local, unit: 1 };
+    let here = aqr_foreign::time::instant(local).unwrap();
+    let x = Extra { mtime: Some(local), atime: Some(local), crtime: Some(local), ..Extra::default() };
+    let tree = Tree { root: Extra::default(), entries: vec![entry(None, "a", EntryNode::File(0), x)] };
+    let files = Files(vec![b"x".to_vec()]);
+    let (out, _, _) = archive(&tree, &files, &Options::default());
+    let done = Opened::open(Format::SevenZip, &out).unwrap().unpack(1, &Kept::default()).unwrap();
+    let x = &done.tree.entries[0].extra;
+    for t in [x.mtime, x.atime, x.crtime] {
+        assert_eq!(t.map(|t| (t.secs, t.nanos)), Some((here.secs, here.nanos)));
+    }
+}

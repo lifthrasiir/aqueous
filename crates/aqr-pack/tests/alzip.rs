@@ -237,6 +237,29 @@ fn egg_posix() {
     assert!(matches!(done.tree.entries[0].node, EntryNode::Dir));
 }
 
+/// A local time of an unknown time zone (`Zone::Local`) goes into EGG's FILETIME and POSIX time
+/// as local time here, as MS-DOS times are read and written: read back, the same local date and
+/// time (not the civil time taken for UTC).
+#[test]
+fn egg_local_times() {
+    use aqr_formula::aqr::Zone;
+    let local = Time { secs: 1_700_000_000, nanos: 500_000_000, zone: Zone::Local, unit: 1 };
+    let x = Extra { mtime: Some(local), mode: Some(0o644), ..Extra::default() };
+    let tree = Tree { root: Extra::default(), entries: vec![entry(None, "a", EntryNode::File(0), x)] };
+    let files = Files(vec![b"x".to_vec()]);
+    let mut out = Vec::new();
+    write_egg(&tree, &files, &Options::default(), &mut out, &|_| {}).unwrap();
+    let done = Opened::open(Format::Egg, &out).unwrap().unpack(1, &Kept::default()).unwrap();
+    let got = done.tree.entries[0].extra.mtime.unwrap();
+    assert!(got.is_instant());
+    assert_eq!(aqr_foreign::time::to_dos(got), aqr_foreign::time::to_dos(local));
+    assert_eq!(got.nanos, local.nanos);
+    // (the POSIX time, in seconds, the same instant)
+    let posix = 0x1EE9_22E5u32.to_le_bytes();
+    let at = out.windows(4).position(|w| w == posix).unwrap() + 4 + 3 + 12;
+    assert_eq!(i64::from_le_bytes(out[at..at + 8].try_into().unwrap()), got.secs);
+}
+
 #[test]
 fn passphrase_refused() {
     let s = sample(1_700_000_000);

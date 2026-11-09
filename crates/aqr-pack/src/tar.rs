@@ -208,7 +208,8 @@ fn header(it: &Item, x: &Extra, hard: Option<&[u8]>, size: u64, notes: &mut Vec<
         _ => 0o644,
     }) & 0o7777;
     let (uid, gid) = (x.uid.unwrap_or(0), x.gid.unwrap_or(0));
-    let mtime = x.mtime.unwrap_or(Time::new(0, 0));
+    // (a local time of an unknown time zone as local time here)
+    let mtime = x.mtime.and_then(aqr_foreign::time::instant).unwrap_or(Time::new(0, 0));
     let (uname, gname) = (x.uname.as_deref().unwrap_or(b""), x.gname.as_deref().unwrap_or(b""));
 
     let mut pax = Vec::new();

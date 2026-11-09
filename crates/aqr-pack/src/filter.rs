@@ -168,7 +168,9 @@ impl Encoder for Gzip<'_> {
 /// as gzip writes them (2 at level 9, 4 at level 1), of Unix.
 fn gzip_header(level: u8, named: Option<&Named>) -> Vec<u8> {
     let name = named.and_then(|n| n.name.as_ref()).filter(|n| !n.contains(&0));
-    let mtime = named.and_then(|n| n.mtime).and_then(|t| u32::try_from(t.secs).ok()).unwrap_or(0);
+    // (a local time of an unknown time zone as local time here)
+    let mtime = named.and_then(|n| n.mtime).and_then(aqr_foreign::time::instant);
+    let mtime = mtime.and_then(|t| u32::try_from(t.secs).ok()).unwrap_or(0);
     let xfl = match level {
         9 => 2,
         1 => 4,

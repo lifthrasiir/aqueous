@@ -216,3 +216,21 @@ fn owner() {
     let ids: Vec<_> = done.tree.entries.iter().map(|e| (e.extra.uid, e.extra.gid)).collect();
     assert_eq!(ids, [(Some(501), Some(20)), (Some(1 << 40), Some(7)), (None, None)]);
 }
+
+/// A local time of an unknown time zone (`Zone::Local`) goes into the extended timestamp and
+/// NTFS's field as local time here (it was left to MS-DOS's time alone, of 2 seconds): read
+/// back, the same local date and time, to 100 ns.
+#[test]
+fn local_times() {
+    use aqr_formula::aqr::Zone;
+    let local = Time { secs: 1_700_000_001, nanos: 250_000_000, zone: Zone::Local, unit: 1 };
+    let here = aqr_foreign::time::instant(local).unwrap();
+    let x = Extra { mtime: Some(local), ..Extra::default() };
+    let tree = Tree { root: Extra::default(), entries: vec![entry(None, "a", EntryNode::File(0), x)] };
+    let files = Files(vec![b"x".to_vec()]);
+    let mut out = Vec::new();
+    write(&tree, &files, &Options::default(), &mut out, &|_| {}).unwrap();
+    let done = Opened::open(Format::Zip, &out).unwrap().unpack(1, &Kept::default()).unwrap();
+    let t = done.tree.entries[0].extra.mtime;
+    assert_eq!(t.map(|t| (t.secs, t.nanos)), Some((here.secs, here.nanos)));
+}

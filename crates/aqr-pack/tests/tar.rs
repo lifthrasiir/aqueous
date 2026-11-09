@@ -137,3 +137,26 @@ fn tar_lists(archive: &[u8]) {
     assert!(listed.lines().any(|l| l.ends_with(".txt") && l.len() > 130), "{listed}");
     assert_eq!(listed.lines().count(), 10, "{listed}");
 }
+
+/// A local time of an unknown time zone (`Zone::Local`) as local time here, as MS-DOS times are
+/// read and written: a tar archive's mtime and a gzip header's, the same local date and time.
+#[test]
+fn local_times() {
+    use aqr_formula::aqr::Zone;
+    let local = Time { secs: 1_700_000_001, nanos: 250_000_000, zone: Zone::Local, unit: 1 };
+    let here = aqr_foreign::time::instant(local).unwrap();
+    let tree = Tree {
+        root: Extra::default(),
+        entries: vec![entry(None, b"a", EntryNode::File(0), Extra { mtime: Some(local), ..Extra::default() })],
+    };
+    let files = Files(vec![b"x".to_vec()]);
+    let mut out = Cursor::new(Vec::new());
+    aqr_pack::write(Format::Tar(None), &tree, &files, &Options::default(), &mut out, &|_| {}).unwrap();
+    let out = out.into_inner();
+    let done = Opened::open(aqr_unpack::Format::Tar(None), &out).unwrap().unpack(1, &Kept::default()).unwrap();
+    assert_eq!(done.tree.entries[0].extra.mtime.map(|t| (t.secs, t.nanos)), Some((here.secs, here.nanos)));
+    let mut out = Cursor::new(Vec::new());
+    aqr_pack::write(Format::Single(Filter::Gzip), &tree, &files, &Options::default(), &mut out, &|_| {}).unwrap();
+    let out = out.into_inner();
+    assert_eq!(u32::from_le_bytes(out[4..8].try_into().unwrap()) as i64, here.secs);
+}

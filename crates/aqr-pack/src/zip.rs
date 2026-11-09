@@ -227,9 +227,10 @@ fn attributes(it: &Item, x: &Extra) -> (u16, u32) {
 /// The fields of times of `x` (as in local headers, or `central` ones): the extended
 /// timestamp and NTFS's.
 fn times(x: &Extra, central: bool) -> Vec<u8> {
-    let x = &*x.instants();
+    // (a local time of an unknown time zone as local time here, as MS-DOS's)
+    let [mtime, atime, crtime] = [x.mtime, x.atime, x.crtime].map(|t| t.and_then(time::instant));
     let mut f = Vec::new();
-    let unix = [x.mtime, x.atime, x.crtime].map(|t| t.filter(|t| i32::try_from(t.secs).is_ok()));
+    let unix = [mtime, atime, crtime].map(|t| t.filter(|t| i32::try_from(t.secs).is_ok()));
     let flags = unix.iter().enumerate().filter(|(_, t)| t.is_some()).fold(0u8, |a, (i, _)| a | 1 << i);
     if flags != 0 {
         // (the central header's has the modification time alone)
@@ -238,11 +239,11 @@ fn times(x: &Extra, central: bool) -> Vec<u8> {
         kept.iter().flatten().for_each(|t| d.extend((t.secs as i32).to_le_bytes()));
         field(&mut f, 0x5455, &d);
     }
-    if x.mtime.is_some() || x.atime.is_some() || x.crtime.is_some() {
+    if mtime.is_some() || atime.is_some() || crtime.is_some() {
         let mut d = vec![0; 4];
         d.extend(1u16.to_le_bytes());
         d.extend(24u16.to_le_bytes());
-        for t in [x.mtime, x.atime, x.crtime] {
+        for t in [mtime, atime, crtime] {
             d.extend(t.map_or(0, time::to_filetime).to_le_bytes());
         }
         field(&mut f, 0x000a, &d);

@@ -31,6 +31,18 @@ pub fn from_dos(date: u16, time: u16) -> Option<Time> {
     from_local((y, mo, d, h, mi, s))
 }
 
+/// `t` as a point in time: itself where it is one, else a local time of an unknown time zone taken
+/// as local time here (as [`from_dos`] and [`to_dos`] take MS-DOS's), its fraction kept. `None`
+/// where the local time cannot be one here.
+pub fn instant(t: Time) -> Option<Time> {
+    if t.is_instant() {
+        return Some(t);
+    }
+    let (y, mo, d, h, mi, s) = t.civil();
+    let at = from_local((i32::try_from(y).ok()?, mo, d, h, mi, s))?;
+    Some(Time { nanos: t.nanos, ..at })
+}
+
 /// `t` as an MS-DOS date and time (2-second steps, rounded down) in local time here (a local
 /// time of an unknown time zone as it is), kept within what they can have (1980 to 2107).
 pub fn to_dos(t: Time) -> (u16, u16) {
