@@ -4,6 +4,11 @@
 //!   and committed (spec, "Appending to an archive"), one at the top of each path, with the
 //!   directories on the way (without their metadata, which keeps theirs). What was taken out is
 //!   only marked so: the file grows by the segment.
+//! - `--move ARCHIVE PATH --rename TO...`: each path given (a directory with what is under it)
+//!   moved to `TO`, in the order given, the directories on the way to it made (of no extra),
+//!   and the archive written again as `--compact` writes it: a segment cannot refer to the
+//!   contents of another (spec, "Content blocks") but by an import, which is not read yet. `TO`
+//!   there already, under the path moved, or under what is not a directory, is an error.
 //! - `--compact ARCHIVE` (alone, or with `--delete`, the paths then taken out of the tree): the
 //!   archive written again of what its tree holds ([`aqr::rewrite`]), every block it still needs
 //!   copied as it is, segment by segment; what an append not committed, tombstones and entries
@@ -31,12 +36,16 @@ use crate::{Args, append, exit, stop};
 pub enum Edit {
     /// `--delete`: the paths given taken out.
     Delete,
+    /// `--move`: the paths given moved (to where their `--rename` tells), the archive written
+    /// again.
+    Move,
 }
 
 impl Edit {
     pub fn option(self) -> &'static str {
         match self {
             Edit::Delete => "--delete",
+            Edit::Move => "--move",
         }
     }
 }
@@ -45,7 +54,12 @@ impl Edit {
 pub fn edit(a: &Args) -> Result<(), String> {
     let path = a.inputs.first().ok_or("no archive given")?;
     let start = Instant::now();
-    crate::begin(if a.compact { "compact" } else { "delete" }, std::slice::from_ref(path), Some(path));
+    let mode = match a.edit {
+        Some(Edit::Move) => "move",
+        _ if a.compact => "compact",
+        _ => "delete",
+    };
+    crate::begin(mode, std::slice::from_ref(path), Some(path));
     let opened = append::open(path, a.quiet)?;
     let gone = match &a.select {
         Some(sel) => {
@@ -62,15 +76,30 @@ pub fn edit(a: &Args) -> Result<(), String> {
             eprintln!("{}: {what}", path.display());
         }
     };
-    let paths = |n: usize| format!("{n} path{} deleted", if n == 1 { "" } else { "s" });
-    if !a.compact {
+    let s = |n: usize| if n == 1 { "" } else { "s" };
+    let paths = |n: usize| match a.edit {
+        Some(Edit::Move) => format!("{n} path{} moved", s(n)),
+        _ => format!("{n} path{} deleted", s(n)),
+    };
+    if a.edit == Some(Edit::Delete) && !a.compact {
         let t = tombstones(opened.tree(), &gone);
         let added = commit(a, path, opened.into_prior(), &t)?;
         told(format!("{} (+{added} bytes; --compact takes them out of the file)", paths(gone.len())));
         crate::end(Some(path), 0, 0, added, start);
         return Ok(());
     }
-    let t = without(opened.tree(), &gone);
+    let t = match a.edit {
+        Some(Edit::Move) => {
+            let sel = a.select.as_ref().expect("the paths of the archive");
+            let mut t = opened.tree().clone();
+            for (k, &e) in gone.iter().enumerate() {
+                let to = crate::path_names(sel.paths[k].1.as_deref().expect("--rename TO"))?;
+                moved(&mut t, e, &to).map_err(|e| format!("{}: {}: {e}", path.display(), sel.shown(k)))?;
+            }
+            ordered(&t)
+        }
+        _ => without(opened.tree(), &gone),
+    };
     let (before, r) = compact(a, path, &opened, &t)?;
     let mut what = format!("{} -> {} bytes", before, r.len);
     if r.segments.0 != r.segments.1 {
@@ -164,6 +193,68 @@ fn shape(t: &Tree, size: &dyn Fn(usize) -> u64) -> Vec<(Vec<Vec<u8>>, EntryNode,
         })
         .collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// Tree `t` with entry `e` (and what is under it) moved to path `to`, the directories on the way
+/// made (of no extra, after the others) where they are not there. The entries keep their
+/// indices, so that several are moved one after another; an entry may then come before its
+/// parent, until the tree is [`ordered`].
+fn moved(t: &mut Tree, e: usize, to: &[Vec<u8>]) -> Result<(), String> {
+    let (name, dirs) = to.split_last().expect("a path of names");
+    let mut parent = None;
+    for (i, d) in dirs.iter().enumerate() {
+        let there = t.entries.iter().position(|x| x.parent == parent && x.name == *d);
+        parent = Some(match there {
+            Some(k) if k == e => return Err("moved under itself".into()),
+            Some(k) if matches!(t.entries[k].node, EntryNode::Dir) => k,
+            Some(_) => return Err(format!("{} not a directory", shown(&dirs[..=i]))),
+            None => {
+                t.entries.push(Entry { parent, name: d.clone(), node: EntryNode::Dir, extra: Extra::default() });
+                t.entries.len() - 1
+            }
+        });
+    }
+    // (not under itself)
+    let mut up = parent;
+    while let Some(p) = up {
+        if p == e {
+            return Err("moved under itself".into());
+        }
+        up = t.entries[p].parent;
+    }
+    if t.entries.iter().enumerate().any(|(k, x)| k != e && x.parent == parent && x.name == *name) {
+        return Err(format!("{} there already", shown(to)));
+    }
+    (t.entries[e].parent, t.entries[e].name) = (parent, name.clone());
+    Ok(())
+}
+
+/// Names `p` of a path, for people.
+fn shown(p: &[Vec<u8>]) -> String {
+    let names: Vec<&[u8]> = p.iter().map(|n| aqr::name_bytes(n).0).collect();
+    String::from_utf8_lossy(&names.join(&b'/')).into_owned()
+}
+
+/// Tree `t` of its entries in an order each after its parent (each directory's as they were).
+fn ordered(t: &Tree) -> Tree {
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); t.entries.len()];
+    let mut top = Vec::new();
+    for (k, e) in t.entries.iter().enumerate() {
+        match e.parent {
+            Some(p) => children[p].push(k),
+            None => top.push(k),
+        }
+    }
+    let mut index = vec![usize::MAX; t.entries.len()];
+    let mut out = Tree { root: t.root.clone(), entries: Vec::with_capacity(t.entries.len()) };
+    let mut stack: Vec<usize> = top.into_iter().rev().collect();
+    while let Some(k) = stack.pop() {
+        let e = &t.entries[k];
+        index[k] = out.entries.len();
+        out.entries.push(Entry { parent: e.parent.map(|p| index[p]), ..e.clone() });
+        stack.extend(children[k].iter().rev());
+    }
     out
 }
 

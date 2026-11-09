@@ -46,6 +46,13 @@
 .Ar archive
 .Ar path ...
 .Nm
+.Fl -move
+.Op Fl q | v
+.Ar archive
+.Ar path
+.Fl -rename Ar to
+.Ar ...
+.Nm
 .Fl -compact
 .Op Fl q | v
 .Ar archive
@@ -130,6 +137,21 @@ The bytes of what was taken out stay in the file (but with
 .Fl -compact ) .
 A path not in the archive is an error, before anything is written; an encrypted
 archive is not edited.
+.It Fl -move
+Move each
+.Ar path
+of the archive given after it (a directory with what is under it) to the
+.Ar to
+of the
+.Fl -rename
+after it, in the order given, making the directories on the way; the archive is then
+written again as
+.Fl -compact
+writes it, in place.
+A
+.Ar to
+there already, under the path moved or under what is not a directory is an error, before
+anything is written.
 .It Fl -compact
 Write an archive again of what it holds, segment by segment, copying the blocks it still
 needs as they are: what
@@ -160,7 +182,9 @@ After an input, archive it at
 .Pq names between Ql / ;
 after a
 .Ar path
-of an archive, extract it there.
+of an archive, extract it there (with
+.Fl -move ,
+move it there).
 .It Fl x Ar name , Fl -exclude Ar name
 Leave out the entries named
 .Ar name

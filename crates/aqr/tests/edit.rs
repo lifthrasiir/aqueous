@@ -1,5 +1,5 @@
-//! Archives edited in place: paths taken out (`--delete`), the archive written again of what it
-//! holds (`--compact`).
+//! Archives edited in place: paths taken out (`--delete`) and moved (`--move`), the archive
+//! written again of what it holds (`--compact`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -209,5 +209,76 @@ fn compact_refused() {
         assert_eq!(fs::read(d.join(name)).unwrap(), before, "{args:?}");
     }
     assert!(d.read_dir().unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".part")));
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// `want` with the files at or under each path `from` moved to `to`, in order.
+fn renamed(want: &[(String, Vec<u8>)], moves: &[(&str, &str)]) -> Vec<(String, Vec<u8>)> {
+    let mut out = want.to_vec();
+    for (from, to) in moves {
+        for (p, _) in &mut out {
+            if p == from {
+                *p = to.to_string();
+            } else if let Some(rest) = p.strip_prefix(&format!("{from}/")) {
+                *p = format!("{to}/{rest}");
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Paths moved, a file and a directory, into a directory not there yet and out of a directory
+/// into the top; the metadata kept (a file's mode), the archive written again.
+#[test]
+fn moved() {
+    let d = scratch("moved");
+    let want = source(&d);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(d.join("src/sub/t1.txt"), fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    ok(&d, &["-q", "-o", "a.aqr", "src"]);
+    ok(&d, &["-q", "--delete", "a.aqr", "t3.txt"]);
+    let moves = [("sub/deep", "new/place/deep"), ("sub/t1.txt", "t1-moved.txt"), ("t0.txt", "sub/t0.txt")];
+    let mut args = vec!["-q", "--move", "a.aqr"];
+    for (from, to) in &moves {
+        args.extend([*from, "--rename", *to]);
+    }
+    ok(&d, &args);
+    ok(&d, &["-K", "a.aqr"]);
+    assert_eq!(extracted(&d, "a.aqr"), renamed(&without(&want, &["t3.txt"]), &moves));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        ok(&d, &["-q", "-d", "-o", "x", "a.aqr"]);
+        assert_eq!(fs::metadata(d.join("x/t1-moved.txt")).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    let o = ok(&d, &["-I", "a.aqr"]);
+    assert!(!String::from_utf8_lossy(&o.stdout).contains("tombstone"));
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// A move to a path there already, under what is not a directory or under itself, from a path
+/// not there, or without --rename, is an error, the archive left as it is.
+#[test]
+fn move_refused() {
+    let d = scratch("move-refused");
+    source(&d);
+    ok(&d, &["-q", "-o", "a.aqr", "src"]);
+    let a = fs::read(d.join("a.aqr")).unwrap();
+    for (args, told) in [
+        (&["--move", "a.aqr", "t0.txt", "--rename", "t3.txt"][..], "there already"),
+        (&["--move", "a.aqr", "t0.txt", "--rename", "t3.txt/x"], "not a directory"),
+        (&["--move", "a.aqr", "sub", "--rename", "sub/deep/sub"], "under itself"),
+        (&["--move", "a.aqr", "nope", "--rename", "x"], "no nope in it"),
+        (&["--move", "a.aqr", "t0.txt"], "without --rename"),
+        (&["--delete", "a.aqr", "t0.txt", "--rename", "x"], "--rename"),
+    ] {
+        let o = aqr(&d, args);
+        assert!(!o.status.success() && stderr(&o).contains(told), "{args:?}: {}", stderr(&o));
+        assert_eq!(fs::read(d.join("a.aqr")).unwrap(), a, "{args:?}");
+    }
     fs::remove_dir_all(&d).unwrap();
 }

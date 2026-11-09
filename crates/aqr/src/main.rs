@@ -6,7 +6,7 @@
 //!
 //! aqr -d [OPTIONS] ARCHIVE [PATH [--rename TO]]...; aqr -d --each [OPTIONS] ARCHIVE...; aqr -t [-q | -v] ARCHIVE [PATH]...;
 //! aqr -t --each [-q | -v] ARCHIVE...; aqr --delete [--compact] [-q] ARCHIVE PATH...;
-//! aqr --compact [-q | -v] ARCHIVE
+//! aqr --move [-q | -v] ARCHIVE PATH --rename TO...; aqr --compact [-q | -v] ARCHIVE
 //!
 //! - `-c` (the default; `aqr`): each input into `INPUT.aqr`, a file as an archive of a single
 //!   file, a directory as an archive of what it holds; with `-o`, all the inputs into one
@@ -111,6 +111,11 @@
 //!   away, and an append not committed, out of the file. Written beside it and checked, then
 //!   put in its place by a rename. With `--delete`, of the tree without its paths (no
 //!   tombstones). Not of an archive of mirror blocks (`-A`) for now.
+//! - `--move ARCHIVE PATH --rename TO...`: each path moved to its `TO` (in the order given, the
+//!   directories on the way made, without their metadata), the archive written again as
+//!   `--compact` writes it, as a segment cannot take the contents of another but by an import
+//!   (not read yet). `TO` there already, under the path or under what is not a directory, is
+//!   an error, before anything is written.
 //! - `-P`: compressing, the archives encrypted with a passphrase ([`aqr::envelope`]), asked for
 //!   as the work begins (twice on a terminal); decompressing, asked for then rather than as an
 //!   archive needs it. An encrypted archive (of either kind) is opened by the passphrases that
@@ -274,6 +279,7 @@ usage: aqr [OPTIONS] INPUT [--rename TO]...
        aqr -t --each [-q | -v] ARCHIVE...
        aqr -I [-v] ARCHIVE [PATH]...
        aqr --delete [--compact] [-q] ARCHIVE PATH...
+       aqr --move [-q | -v] ARCHIVE PATH --rename TO...
        aqr --compact [-q | -v] ARCHIVE
        unaqr [OPTIONS] ARCHIVE [PATH [--rename TO]]...
 
@@ -293,6 +299,8 @@ Modes:
                         unknown metadata uncut
       --delete          take the PATHs of an archive (and what is under them) out of
                         it, appending to it what says so
+      --move            move each PATH of an archive to the TO of its --rename (in order,
+                        the directories on the way made), writing it again as --compact
       --compact         write an archive again of what it holds (with --delete, of what
                         is left), what was taken out or replaced out of the file
 
@@ -317,7 +325,7 @@ Compressing (aqr -o ARCHIVE INPUT [--rename TO]...):
 Decompressing some paths (aqr -d ARCHIVE PATH [--rename TO]...):
   PATH                  a path in the archive (a directory with what is under it),
                         extracted where the whole archive would have it
-      --rename TO       after a PATH: that one extracted at TO instead
+      --rename TO       after a PATH: that one extracted at TO instead (--move: moved)
       --each            every input an archive, each extracted (or listed) whole
 
 Output:
@@ -684,6 +692,7 @@ fn parse() -> Result<Args, String> {
             "-t" | "--list" => (a.list, a.info) = (true, false),
             "-I" | "--info" => (a.info, a.list) = (true, false),
             "--delete" => a.edit = Some(edit::Edit::Delete),
+            "--move" => a.edit = Some(edit::Edit::Move),
             "--compact" => a.compact = true,
             "--wasm" => a.wasm = true,
             "--no-sandbox" => a.sandbox = false,
@@ -966,7 +975,9 @@ fn edit_args(a: &mut Args, renames: Vec<(usize, PathBuf)>, dir: bool) -> Result<
     if a.inputs.iter().any(|i| stdio::is(i)) {
         return Err(format!("{o}: an archive in place, not - (standard input)"));
     }
-    if let Some((_, to)) = renames.first() {
+    if a.edit != Some(edit::Edit::Move)
+        && let Some((_, to)) = renames.first()
+    {
         return Err(format!("{o}: --rename {} (paths are taken out)", to.display()));
     }
     match a.edit {
@@ -974,6 +985,12 @@ fn edit_args(a: &mut Args, renames: Vec<(usize, PathBuf)>, dir: bool) -> Result<
         None => {}
         Some(_) if a.inputs.len() < 2 => return Err(format!("{o} takes an archive and its paths")),
         Some(_) => a.select = Some(selection(a.inputs.split_off(1), renames)?),
+    }
+    if a.edit == Some(edit::Edit::Move)
+        && let Some(sel) = &a.select
+        && let Some(k) = sel.paths.iter().position(|p| p.1.is_none())
+    {
+        return Err(format!("--move: {} without --rename TO after it", sel.shown(k)));
     }
     if let Some(l) = &a.level {
         a.opt.level = l.parse()?;
@@ -1113,19 +1130,24 @@ fn text(v: std::ffi::OsString) -> String {
     v.to_string_lossy().into_owned()
 }
 
+/// Path `p` of an archive as given: its names, encoded as the tree's (`.` left out).
+fn path_names(p: &Path) -> Result<Vec<Vec<u8>>, String> {
+    // (on Windows, `\` is `/` too)
+    let bytes = os_bytes(p.as_os_str());
+    let names: Vec<Vec<u8>> =
+        bytes.split(|&b| b == b'/').filter(|n| !n.is_empty() && *n != b".").map(name_from).collect();
+    if names.is_empty() || names.iter().any(|n| n == b"..") {
+        return Err(format!("{}: not a path in an archive", p.display()));
+    }
+    Ok(names)
+}
+
 /// The paths of an archive given, `paths`, with `renames` (each by the number of inputs before
 /// it, the archive's too): each path's names (encoded as the tree's), and where it goes.
 fn selection(paths: Vec<PathBuf>, renames: Vec<(usize, PathBuf)>) -> Result<extract::Selection, String> {
     let mut out: Vec<(Vec<Vec<u8>>, Option<PathBuf>)> = Vec::new();
     for p in &paths {
-        // (on Windows, `\` is `/` too)
-        let bytes = os_bytes(p.as_os_str());
-        let names: Vec<Vec<u8>> =
-            bytes.split(|&b| b == b'/').filter(|n| !n.is_empty() && *n != b".").map(name_from).collect();
-        if names.is_empty() || names.iter().any(|n| n == b"..") {
-            return Err(format!("{}: not a path in an archive", p.display()));
-        }
-        out.push((names, None));
+        out.push((path_names(p)?, None));
     }
     for (n, to) in renames {
         let Some(k) = n.checked_sub(2) else {
