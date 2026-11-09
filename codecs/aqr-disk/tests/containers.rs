@@ -112,3 +112,36 @@ fn plain_is_none() {
     assert!(container::open(&[0; 4096]).is_none());
     assert!(Plain(&[1, 2, 3]).get(1..3).is_some_and(|b| *b == [2, 3]));
 }
+
+/// Containers that Windows made (`scripts/gen-containers.ps1`, by a peer session): diskpart's
+/// dynamic VHDX (a GPT, blocks of 32 MiB) and VHD (an MBR), Hyper-V's New-VHD's VHDX; of each, the
+/// NTFS volume's files, the container rebuilt.
+#[test]
+fn windows_containers() {
+    let jpeg = std::fs::read(format!("{}/../aqr-jpeg/tests/data/gradient.jpg", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    let mut want = vec![
+        (b"big.bin".to_vec(), (0..8u32 << 20).map(|i| ((i * 11 + (i >> 12)) % 241) as u8).collect::<Vec<u8>>()),
+        (b"data.bin".to_vec(), (0..1u32 << 20).map(|i| ((i * 7 + (i >> 8)) % 251) as u8).collect()),
+        (b"photo.jpg".to_vec(), jpeg),
+        (b"readme.txt".to_vec(), b"Aqueous container fixture\r\n".repeat(40)),
+    ];
+    want.sort();
+    const NTFS: [aqr_disk::FileSystem; 1] = [aqr_ntfs::FS];
+    let fs = &NTFS;
+    for (name, kind) in [("win.vhdx", Kind::Vhdx), ("win.vhd", Kind::Vhd), ("win-hv.vhdx", Kind::Vhdx)] {
+        let d = fixture(name);
+        assert_eq!(container::open(&d).map(|m| m.kind), Some(kind), "{name}");
+        let mut got: Vec<_> = aqr_disk::files(&d, fs)
+            .into_iter()
+            .map(|f| (f.name, f.extents.iter().flat_map(|r| d[r.clone()].to_vec()).collect::<Vec<u8>>()))
+            .collect();
+        got.sort();
+        assert!(
+            got == want,
+            "{name}: {:?}",
+            got.iter().map(|g| (String::from_utf8_lossy(&g.0).into_owned(), g.1.len())).collect::<Vec<_>>()
+        );
+        let f = formula::encode_with(&d, &Options { file_systems: fs, ..Default::default() }).unwrap();
+        assert!(f.eval(&none).unwrap() == d, "{name}: rebuilt");
+    }
+}

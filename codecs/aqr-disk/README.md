@@ -19,6 +19,7 @@ let f = aqr_disk::formula::encode_with(&image, &opt).unwrap();
 ```sh
 codecs/aqr-disk/scripts/gen-fixtures.sh     # tests/data: partition tables of hdiutil (macOS)
 codecs/aqr-disk/scripts/gen-containers.sh   # tests/data: a disk and its containers by qemu-img (Lima VM)
+powershell -File codecs/aqr-disk/scripts/gen-containers.ps1   # tests/data/win*: Windows' (elevated)
 ```
 
 ## What it reads
@@ -73,7 +74,8 @@ A container archives as its disk does. (Most of the time is the verify of one le
 
 `cargo rt -p aqr-disk`: a disk of qemu-img in each container (the virtual disk as the disk is,
 its files of ext4 and ext2 where the container holds them, the container rebuilt; compressed
-clusters; containers cut short and changed bytes), the partition tables of hdiutil (GPT, MBR, APM), logical partitions and
+clusters; containers cut short and changed bytes); Windows' own (`scripts/gen-containers.ps1`,
+elevated: diskpart's dynamic VHDX and VHD, Hyper-V's New-VHD's VHDX), their NTFS files; the partition tables of hdiutil (GPT, MBR, APM), logical partitions and
 their loops, data that is no table, how extents are laid out, files in pieces (evaluated and
 archived), a toy file system in each table and in all of an image, images cut short and changed
 bytes. aqr-iso's tests read its fixtures on a partition, and aqr-compress's a JPEG file in pieces
