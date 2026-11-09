@@ -1,14 +1,17 @@
-//! UDIF images (`.dmg`) of compressed chunks (aqr-disk's `dmg`): the disk a content, recompressed
-//! in turn (a disk image of its own: its files taken apart), cut into the parts of its chunks
-//! once (a Split of all of it, so that it is one content): zlib's chunks rebuilt from their parts
-//! by applications of aqr-flate's (of 32 MiB of data each; their headers and checksums kept),
-//! bzip2's each by aqr-bz2's, LZFSE's each by aqr-bvx's, raw ones those parts as they are, zeros dropped (each part the
-//! source of a Patch of nothing), and so the parts of chunks not rebuilt, kept as they are. The
-//! rest of the file (the property list, the trailer, what is between the chunks) is kept as it
-//! is. A UDIF image of raw chunks only is a container of aqr-disk's, not this; one of chunks of
-//! another compression (LZMA, ADC) is not taken yet.
+//! Disk images whose disk is in chunks, some compressed (aqr-disk's `chunked`): UDIF images
+//! (`.dmg`) of compressed chunks, qcow2 images of compressed clusters. The disk is a content,
+//! recompressed in turn (a disk image of its own: its files taken apart), cut into the parts of
+//! its chunks once (a Split of all of it, so that it is one content): zlib's and raw DEFLATE
+//! chunks rebuilt from their parts by applications of aqr-flate's (of 32 MiB of data each; zlib's
+//! headers and checksums, qcow2's padding kept), bzip2's each by aqr-bz2's, LZFSE's each by
+//! aqr-bvx's, raw ones those parts as they are, zeros dropped (each part the source of a Patch of
+//! nothing), and so the parts of chunks not rebuilt, kept as they are. The rest of the file (a
+//! DMG's property list and trailer, qcow2's header and tables, what is between the chunks) is
+//! kept as it is. A UDIF or qcow2 image of raw chunks only is a container of aqr-disk's, not this;
+//! one of chunks of another compression (LZMA, ADC, qcow2's zstd) is not taken yet.
 
-use aqr_disk::dmg::{self, How};
+use aqr_disk::chunked::{Chunked, How};
+use aqr_disk::dmg;
 use aqr_flate::formula::Derived;
 use aqr_formula::store::Writer;
 use aqr_formula::{Formula, Kind, Node};
@@ -26,9 +29,6 @@ const SAMPLED: usize = 64;
 /// `compressed::STREAM_DATA` (but one chunk of more).
 const GROUP_DATA: usize = 32 << 20;
 
-/// The class of the bytes kept of an image.
-pub(crate) const KEPT: &str = "dmg";
-
 /// Whether `d` is a UDIF image of compressed chunks this takes (zlib's; raw ones and zeros too).
 pub(crate) fn starts(d: &[u8]) -> bool {
     dmg::parse(d).is_some_and(|u| {
@@ -37,8 +37,20 @@ pub(crate) fn starts(d: &[u8]) -> bool {
     })
 }
 
+/// The formula of UDIF image `d` ([`chunked`]).
 pub(crate) fn dmg(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
     let u = dmg::parse(d)?;
+    chunked(d, &Chunked { len: u.len, chunks: u.chunks }, "dmg", opt, cx)
+}
+
+/// The formula of qcow2 image `d` of compressed clusters ([`chunked`]), None where it is not one.
+pub(crate) fn qcow2(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
+    let u = aqr_disk::container::qcow2_chunks(d)?;
+    chunked(d, &u, "qcow2", opt, cx)
+}
+
+/// The formula of image `d` of chunks `u`, its bytes kept of class `kept`.
+fn chunked(d: &[u8], u: &Chunked, kept: &'static str, opt: &Options, cx: &Cx) -> Option<Formula> {
     // the chunks by where they are in the disk, covering it one after another
     let mut by_disk: Vec<usize> = (0..u.chunks.len()).collect();
     by_disk.sort_by_key(|&k| u.chunks[k].disk.start);
@@ -58,7 +70,7 @@ pub(crate) fn dmg(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
     // chunks); none probed, as they are parts of one disk (the first of them, of the partition
     // table's sectors, is no probe of the rest)
     for c in &u.chunks {
-        if !matches!(c.how, How::Zlib | How::Bzip2 | How::Lzfse | How::Zeros)
+        if !matches!(c.how, How::Zlib | How::Deflate | How::Bzip2 | How::Lzfse | How::Zeros)
             && !(c.how == How::Raw && c.file.len() as u64 == c.disk.end - c.disk.start)
         {
             return None;
@@ -69,14 +81,19 @@ pub(crate) fn dmg(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
         return None;
     }
     let (mut profile, zlib) = opt.flate();
-    // hdiutil writes every chunk with zlib's level 1, whose misses the default profile codes in
-    // about a tenth of the stream, and zlib's emulation (of the adaptive profiles) in none: where
+    // hdiutil writes every chunk with zlib's level 1 (qemu's clusters zlib's level 6, of a window of
+    // 4 KiB), whose misses the default profile codes in about a tenth of the stream, and zlib's
+    // emulation (of the adaptive profiles) in none: where
     // it predicts every token of a chunk, the chunks are rebuilt by it, its parameters hinted (none
     // searched for, which is what makes those profiles slow), else as aqr-flate's profile is
-    let header = |m: &[u8]| aqr_flate::Hints::zlib_header([m[0], m[1]]);
+    // (a zlib stream's header and where its DEFLATE starts)
+    let header = |how: How, m: &[u8]| match how {
+        How::Zlib => (aqr_flate::Hints::zlib_header([m[0], m[1]]), 2),
+        _ => (aqr_flate::Hints::default(), 0),
+    };
     let mut params = None;
     let sample = (by_disk.iter().take(SAMPLED).map(|&k| &u.chunks[k]))
-        .filter(|c| c.how == How::Zlib && c.file.len() > 2)
+        .filter(|c| matches!(c.how, How::Zlib | How::Deflate) && c.file.len() > 2)
         .max_by_key(|c| c.disk.end - c.disk.start);
     if let Some(c) = sample.filter(|_| zlib) {
         let profile = profile.max(aqr_flate::ADAPTIVE);
@@ -86,7 +103,8 @@ pub(crate) fn dmg(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
             ..aqr_flate::Options::for_profile(profile).ok()?
         };
         let m = &d[c.file.clone()];
-        let report = aqr_flate::Parsed::head(&m[2..], &sopt).and_then(|p| p.deconstruct(&sopt, &header(m)));
+        let (hints, at) = header(c.how, m);
+        let report = aqr_flate::Parsed::head(&m[at..], &sopt).and_then(|p| p.deconstruct(&sopt, &hints));
         if let Ok((_, _, r)) = report
             && r.misses == 0
             && r.zlib.is_some()
@@ -116,7 +134,24 @@ pub(crate) fn dmg(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
                         return None;
                     }
                     let (data, record, _) =
-                        parsed.deconstruct_bytes(&opts, &aqr_flate::Hints { params, ..header(m) }).ok()?;
+                        parsed.deconstruct_bytes(&opts, &aqr_flate::Hints { params, ..header(How::Zlib, m).0 }).ok()?;
+                    let rebuilt = record.len() < raw.len();
+                    Some((Some(data), if rebuilt { Made::Zlib { raw, record } } else { Made::Kept }))
+                }
+                How::Deflate => {
+                    // (qemu's last cluster, past the disk's end, is compressed whole: of more data
+                    // than its part, kept as it is)
+                    let opts = aqr_flate::Options { max_data: n.max(1 << 16).saturating_mul(2), ..fopt.clone() };
+                    let parsed = aqr_flate::Parsed::head(m, &opts).ok()?;
+                    let raw = 0..parsed.len();
+                    if parsed.data().len() > n {
+                        return Some((Some(parsed.data()[..n].to_vec().into()), Made::Kept));
+                    }
+                    if parsed.data().len() != n {
+                        return None;
+                    }
+                    let (data, record, _) =
+                        parsed.deconstruct_bytes(&opts, &aqr_flate::Hints { params, ..Default::default() }).ok()?;
                     let rebuilt = record.len() < raw.len();
                     Some((Some(data), if rebuilt { Made::Zlib { raw, record } } else { Made::Kept }))
                 }
@@ -157,7 +192,7 @@ pub(crate) fn dmg(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
         }
     }
     let mut f = Formula::default();
-    f.push(KEPT, Vec::new());
+    f.push(kept, Vec::new());
     let drop = f.push("dmg/drop", vec![1, 0, 0]);
     // (a disk image, by its kind: recompressed as one from its start, not scanned)
     let whole = f.push_content("raw", Kind::Format(crate::detect::Format::Disk.name()), disk.into_bytes());
@@ -270,7 +305,9 @@ pub(crate) fn dmg(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
         // where the chunk's bytes are in the file, as they are rebuilt
         let rebuilt = match (&c.how, &made[k]) {
             (How::Zeros, _) | (_, Made::Kept) if c.how != How::Raw => None,
-            (How::Zlib, Made::Zlib { raw, .. }) => Some(c.file.start + raw.start..c.file.start + raw.end),
+            (How::Zlib | How::Deflate, Made::Zlib { raw, .. }) => {
+                Some(c.file.start + raw.start..c.file.start + raw.end)
+            }
             _ => Some(c.file.clone()),
         };
         match rebuilt {

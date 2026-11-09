@@ -291,6 +291,15 @@ XPRESS는 MS-XCA로 새로 쓴 aqr-xpress(파스의 기록: Windows의 WOF 4K �
   ULFO 3.57 → 0.67 GB, 25.1 → 22.7 s.
 - 남은 것: 작은 DMG는 모듈 바이트(flate-set 72 KB)가 커서 원시로 남는다.
 
+8단계(2026-11-09, 진행 중): 7단계의 틀을 `aqr_disk::chunked`(청크: 디스크의 범위, 파일의 범위, 저장 방식)와
+aqr-compress의 `chunked`로 일반화했다. 압축 컨테이너는 청크 목록만 내면 된다.
+- qcow2 압축 클러스터(`container::qcow2_chunks`): qemu-img는 클러스터마다 zlib 레벨 6, 창 4 KiB의 raw
+  DEFLATE를 바이트 단위로 이어 붙인다(선언된 섹터 범위는 다음 것과 겹친다). 이어지는 원시 클러스터와 0은 청크
+  하나로 합친다. 디스크 끝을 넘는 마지막 클러스터는 통째로 압축되어 있어 그대로 둔다. 압축 클러스터가 있으면
+  컨테이너의 `Map`으로는 파일 시스템이 보이지 않으므로 탐지에 따로 넣었다. 1.33 GB HFS+ 디스크의
+  `qemu-img convert -c`(375.5 MB): 371.3 MB(원시) → 231.2 MB, 2.5 → 21.6 s, 힙 1.05 GB, 풀기 7.6 s.
+- 남은 것: streamOptimized VMDK·OVA, E01, qcow2의 zstd 클러스터(compression type 1).
+
 각 단계는 파서, README(무엇을 읽는가, 결과, 시험), 손상·잘린 이미지 시험(aqr-iso의 것처럼), 그리고
 `--stats`를 켠 `cargo aqr` 측정(크기, 시간, 힙과 resident 최대)으로 끝난다. 0단계 뒤의 비교 기준은
 같은 이미지를 탐지 없이 압축한 결과다.
