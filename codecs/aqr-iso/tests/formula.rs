@@ -1,5 +1,14 @@
+use aqr_disk::formula::{self, Options, REST};
 use aqr_formula::{Formula, Kind, Node};
-use aqr_iso::formula::{self, Options};
+
+/// The formula of image `d` (aqr-disk's, of aqr-iso's file system), its files of kinds by `kind`.
+fn encode_with(d: &[u8], kind: fn(&[u8]) -> Kind) -> Option<Formula> {
+    formula::encode_with(d, &Options { file_systems: &[aqr_iso::FS], kind })
+}
+
+fn encode(d: &[u8]) -> Option<Formula> {
+    encode_with(d, |_| Kind::Unknown)
+}
 
 /// Fixture `name` of tests/data (`scripts/gen-fixtures.ps1`), decompressed.
 fn fixture(name: &str) -> Vec<u8> {
@@ -32,10 +41,10 @@ fn expected() -> Vec<(&'static str, Vec<u8>)> {
 
 /// The files of `d` taken, by name, with their contents.
 fn taken(d: &[u8]) -> Vec<(String, Vec<u8>)> {
-    let files = aqr_iso::files(d);
-    let mut out: Vec<_> = aqr_iso::pieces(d, &files)
+    let files = aqr_disk::files(d, &[aqr_iso::FS]);
+    let mut out: Vec<_> = aqr_disk::pieces(d, &files)
         .into_iter()
-        .filter_map(|p| Some((String::from_utf8(files[p.file?].name.clone()).unwrap(), d[p.span].to_vec())))
+        .filter_map(|p| Some((String::from_utf8(files[p.file?.0].name.clone()).unwrap(), d[p.span].to_vec())))
         .collect();
     out.sort();
     out
@@ -51,7 +60,7 @@ fn files_of_each_tree() {
         for ((gn, gd), (wn, wd)) in got.iter().zip(&want) {
             assert_eq!((gn.as_str(), gd), (*wn, wd), "{name}");
         }
-        let f = formula::encode(&d, 1).expect(name);
+        let f = encode(&d).expect(name);
         assert!(eval(&f) == d, "{name} not rebuilt");
     }
 }
@@ -70,7 +79,7 @@ fn trees_found() {
     names.sort();
     assert_eq!(names[..2], ["BIN/COPY.BIN", "BIN/DATA.BIN"]);
     assert!(names.contains(&"README.TXT".to_string()));
-    assert!(eval(&formula::encode(&d, 1).unwrap()) == d);
+    assert!(eval(&encode(&d).unwrap()) == d);
 }
 
 #[test]
@@ -80,7 +89,7 @@ fn contents_by_kind() {
         true => Kind::Text,
         false => Kind::Unknown,
     };
-    let f = formula::encode_with(&d, &Options { kind }).unwrap();
+    let f = encode_with(&d, kind).unwrap();
     assert!(eval(&f) == d);
     // (a stream of each file, those of a class merged in the order of their first)
     let mut classes: Vec<(&str, bool, usize)> = Vec::new();
@@ -91,10 +100,7 @@ fn contents_by_kind() {
         }
     }
     let text = 840 + "물 aqueous".len();
-    assert_eq!(
-        classes,
-        [("raw", true, 20026), (formula::REST, false, d.len() - 20026 - text), ("iso/text", true, text)]
-    );
+    assert_eq!(classes, [("raw", true, 20026), (REST, false, d.len() - 20026 - text), ("disk/text", true, text)]);
     // a file a slice of its own, the whole of its stream
     let Node::Concat(parts) = &f.root else { unreachable!() };
     let files: Vec<_> = parts.iter().filter(|n| !matches!(n, Node::Slice { stream: 1, .. })).collect();
@@ -110,11 +116,11 @@ fn contents_by_kind() {
 #[test]
 fn no_raw_contents() {
     let d = fixture("udf201.iso");
-    let f = formula::encode_with(&d, &Options { kind: |_| Kind::Text }).unwrap();
+    let f = encode_with(&d, |_| Kind::Text).unwrap();
     assert!(eval(&f) == d);
     assert!(f.streams[0].class == "raw" && f.streams[0].data.is_empty());
-    assert_eq!(f.streams[1].class, formula::REST);
-    assert!(f.streams[2..].iter().all(|s| s.class == "iso/text"));
+    assert_eq!(f.streams[1].class, REST);
+    assert!(f.streams[2..].iter().all(|s| s.class == "disk/text"));
 }
 
 /// UDF 2.50 keeps its files in a metadata partition, which is not read: no file is found.
@@ -122,13 +128,13 @@ fn no_raw_contents() {
 fn metadata_partition_not_read() {
     let d = fixture("udf250.iso");
     assert!(aqr_iso::starts(&d));
-    assert!(formula::encode(&d, 1).is_none());
+    assert!(encode(&d).is_none());
 }
 
 #[test]
 fn not_an_image() {
-    assert!(formula::encode(&[0; 40000], 1).is_none());
-    assert!(formula::encode(b"CD001", 1).is_none());
+    assert!(encode(&[0; 40000]).is_none());
+    assert!(encode(b"CD001").is_none());
 }
 
 /// Images cut short or with bytes changed: no panic, and a formula, where there is one, gives
@@ -148,7 +154,7 @@ fn damaged() {
         let meta: Vec<usize> = (0..d.len()).filter(|&i| d[i] != 0).take(20000).collect();
         for cut in [d.len() / 2, d.len() * 9 / 10, 16 * 2048 + 100, 257 * 2048 + 17] {
             let d = &d[..cut.min(d.len())];
-            if let Some(f) = formula::encode(d, 1) {
+            if let Some(f) = encode(d) {
                 assert!(eval(&f) == d, "{name} cut at {cut}");
             }
         }
@@ -158,35 +164,21 @@ fn damaged() {
                 let at = meta[(next() % meta.len() as u64) as usize];
                 e[at] = next() as u8;
             }
-            if let Some(f) = formula::encode(&e, 1) {
+            if let Some(f) = encode(&e) {
                 assert!(eval(&f) == e, "{name} changed");
             }
         }
     }
 }
 
+/// An image on a partition (of a GPT, aqr-disk's fixture of hdiutil's): its files found there.
 #[test]
-// (one range is an extent of one range, not a range of indices)
-#[allow(clippy::single_range_in_vec_init)]
-fn pieces_overlapping_and_contiguous() {
-    use aqr_iso::File;
-    let d = vec![0u8; 100];
-    let file = |name: &str, extents: &[std::ops::Range<usize>], rank| File {
-        name: name.into(),
-        extents: extents.to_vec(),
-        rank,
-    };
-    let files = [
-        // two contiguous extents: one piece
-        file("a", &[10..20, 20..30], 2),
-        // the same extent, of a lower rank: it names it
-        file("b", &[10..30], 0),
-        // overlapping the one before: left out
-        file("c", &[25..40], 0),
-        // past the end: cut
-        file("d", &[90..120], 0),
-        file("e", &[50..50], 0),
-    ];
-    let p: Vec<_> = aqr_iso::pieces(&d, &files).into_iter().map(|p| (p.span, p.file)).collect();
-    assert_eq!(p, [(0..10, None), (10..30, Some(1)), (30..90, None), (90..100, Some(3))]);
+fn on_a_partition() {
+    let z = std::fs::read(format!("{}/../aqr-disk/tests/data/gpt.img.zst", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    let mut d = zstd::stream::decode_all(&z[..]).unwrap();
+    let iso = fixture("udf201.iso");
+    let at = 0x800 * 512;
+    d[at..at + iso.len()].copy_from_slice(&iso);
+    assert!(taken(&d) == taken(&iso) && taken(&d).len() == expected().len());
+    assert!(eval(&encode(&d).unwrap()) == d);
 }

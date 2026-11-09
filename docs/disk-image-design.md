@@ -32,8 +32,11 @@ aqr-iso의 공식은 그대로 쓸 수 없는 곳이 두 군데다.
 
 1. **조각난 파일.** aqr-iso는 조각(piece)마다 스트림을 하나씩 만든다. CD에서는 파일이 거의 연속이라
    문제가 없지만 FAT·NTFS·ext4에서는 한 파일이 수십 조각이고, 조각마다 따로 재압축되면 PNG나 PE는
-   형식으로 알아볼 수조차 없다. 파일마다 스트림 하나를 두고 루트의 조각은 그 스트림의 `Slice { start,
-   len }`으로 가리켜야 한다.
+   형식으로 알아볼 수조차 없다. 파일마다 스트림 하나를 둔다. 다만 aqr-compress는 루트의 슬라이스
+   하나하나를 내용물로 보므로, 루트가 그 스트림을 `Slice { start, len }` 여럿으로 가리키면 조각마다
+   다시 따로 재압축된다. 그래서 조각이 둘 이상인 파일은 스트림 전체를 Split 명령으로 조각들로 자르고
+   (`aqr_formula::Of::Node`, 명세의 Split은 아무 값이나 받는다), 루트는 그 출력들을 제자리에 둔다.
+   내용물은 Split의 입력 하나이고, 재압축된 공식이 그 자리에 들어간다(0단계에서 구현).
 2. **파일 수.** 시스템 볼륨에는 파일이 수십만에서 백만이다. 파일마다 스트림을 두면 공식이 무거워진다.
    어차피 클래스별로 병합되므로(`Formula::merged`), 작은 파일(예: 64 KiB 미만)은 처음부터 그 클래스의
    스트림 하나에 이어 붙이고 큰 파일만 따로 둔다. 문턱은 재서 정한다.
@@ -188,6 +191,11 @@ WOF와 decmpfs는 시스템 볼륨에서 큰 몫이라 각 파일 시스템의 �
 | 7 | HFS+, DMG(UDIF): UDRW·UDRO는 4단계처럼, UDZO·ULFO·UDBZ는 청크 재구성 뒤 안쪽 디스크 | `hdiutil` | macOS 배포물. 압축 DMG는 두 단계 공식의 첫 사례 |
 | 8 | 압축 컨테이너: qcow2 압축 클러스터, streamOptimized VMDK·OVA, E01 | `qemu-img -c`, OVA 내보내기 | 7단계의 틀 재사용 |
 | 9 | decmpfs, 그 밖: XFS, btrfs, squashfs, EROFS, F2FS, Android sparse, 원시 CD 섹터(`other-projects.md` §7) | Lima VM | 수요를 보고 |
+
+0단계(2026-11-09): `codecs/aqr-disk`(파티션 표, 파일마다 스트림, 조각난 파일의 Split, `disk/rest`),
+aqr-iso를 그 위로 옮김, aqr-compress의 `Format::Disk`. ISO 이미지의 아카이브는 바이트 단위로 같다
+(aqr-disk README). 남은 것: 작은 파일의 묶음(파일 수가 많은 실제 볼륨이 생기는 1단계에서 재고 정한다),
+`SEEK_HOLE`, 조각난 파일을 실제 파일 시스템으로 끝까지(아카이브까지) 시험하는 것(1단계의 FAT fixture).
 
 각 단계는 파서, README(무엇을 읽는가, 결과, 시험), 손상·잘린 이미지 시험(aqr-iso의 것처럼), 그리고
 `--stats`를 켠 `cargo aqr` 측정(크기, 시간, 힙과 resident 최대)으로 끝난다. 0단계 뒤의 비교 기준은

@@ -1,4 +1,4 @@
-//! What aqr-iso finds in images: their files and the bytes left as the rest, whether the
+//! What aqr-iso finds in images (through aqr-disk, of all of an image and its partitions): their files and the bytes left as the rest, whether the
 //! formula gives each image back, and how fast it is made (`-v` lists the files, `-z` adds zstd
 //! -3 of the rest).
 //!
@@ -7,8 +7,6 @@
 //! ```
 
 use std::time::Instant;
-
-use aqr_formula::Node;
 
 fn main() {
     let (mut paths, mut verbose, mut zstd) = (Vec::new(), false, false);
@@ -22,8 +20,8 @@ fn main() {
     for p in &paths {
         let d = std::fs::read(p).unwrap();
         let start = Instant::now();
-        let files = aqr_iso::files(&d);
-        let pieces = aqr_iso::pieces(&d, &files);
+        let files = aqr_disk::files(&d, &[aqr_iso::FS]);
+        let pieces = aqr_disk::pieces(&d, &files);
         let secs = start.elapsed().as_secs_f64();
         let by_rank = |r: u8| files.iter().filter(|f| f.rank == r).count();
         let taken: Vec<_> = pieces.iter().filter(|p| p.file.is_some()).collect();
@@ -39,17 +37,13 @@ fn main() {
         );
         if verbose {
             for t in &taken {
-                let f = &files[t.file.unwrap()];
+                let f = &files[t.file.unwrap().0];
                 println!("  {:>12} {:>12}  {}", t.span.start, t.span.len(), String::from_utf8_lossy(&f.name));
             }
         }
-        let f = aqr_iso::formula::build(&d, &files, &pieces, &Default::default());
-        let Node::Concat(parts) = &f.root else { panic!("no concatenation") };
-        let mut out = Vec::with_capacity(d.len());
-        for n in parts {
-            let &Node::Slice { stream, start, len } = n else { panic!("not a slice") };
-            out.extend_from_slice(&f.streams[stream].data[start as usize..][..len as usize]);
-        }
+        let f = aqr_disk::formula::build(&d, &files, &pieces, &Default::default());
+        let none = |_: &aqr_formula::Apply, _: &[&[u8]]| -> aqr_formula::Result<Vec<u8>> { unreachable!("no module") };
+        let out = f.eval(&none).unwrap();
         let rebuilt = out == d;
         drop(out);
         println!("  rebuilt: {rebuilt}");

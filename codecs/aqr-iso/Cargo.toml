@@ -2,13 +2,14 @@
 name = "aqr-iso"
 version = "0.1.0"
 edition = "2024"
-description = "ISO 9660 and UDF images taken apart into the contents of their files and the rest, without a module"
+description = "ISO 9660 and UDF images read into their files, a file system of aqr-disk"
 publish = false
 
 [dependencies]
-aqr-formula = { path = "../../crates/aqr-formula" }
+aqr-disk = { path = "../aqr-disk" }
 
 [dev-dependencies]
+aqr-formula = { path = "../../crates/aqr-formula" }
 zstd = "0.13"
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so

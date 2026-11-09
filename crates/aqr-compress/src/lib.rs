@@ -2253,6 +2253,11 @@ fn place_all(f: &mut Formula, children: Vec<Option<Made>>, sets: Vec<sets::Set>,
             place(&mut n, f, &slices, opt, &mut children);
             let Node::Apply(a) = n else { unreachable!("an application") };
             f.shared[i].apply_mut().expect("an application").inputs = a.inputs;
+        } else if let aqr_formula::Of::Node(n) = &mut f.shared[i].of {
+            // (a node split: what is placed in it is cut into the same outputs)
+            let mut n = std::mem::replace(n, Node::Concat(Vec::new()));
+            place(&mut n, f, &slices, opt, &mut children);
+            f.shared[i].of = aqr_formula::Of::Node(n);
         }
         order.extend(embedded..f.shared.len());
         order.push(i);
@@ -2276,6 +2281,7 @@ fn shared_nodes(f: &Formula) -> Vec<Node> {
         Of::Patch { inputs: [source, patch], len } => {
             Node::Patch(Box::new(Patch { source: source.clone(), patch: patch.clone(), len: *len }))
         }
+        Of::Node(n) => n.clone(),
     };
     f.shared.iter().map(node).collect()
 }
@@ -2727,7 +2733,7 @@ fn recompressor(format: Format) -> Recompressor {
         Format::Hdf5 => Cx(|d, _, opt, depth, cx| hdf5::file(d, opt, depth, cx)),
         Format::Bvx => Cx(|d, _, opt, _, cx| bvx(d, opt, cx)),
         Format::Ar | Format::Tar | Format::Cpio => Cx(|d, _, _, _, _| bundle::bundle(d)),
-        Format::Iso => Cx(|d, _, _, _, _| bundle::iso(d)),
+        Format::Disk => Cx(|d, _, _, _, _| bundle::disk(d)),
         Format::Asar => Cx(|d, _, _, _, _| bundle::asar(d)),
     }
 }
@@ -2745,7 +2751,7 @@ fn heap_per_byte(format: Format) -> f64 {
     match format {
         // in parts (segments, chunks, the data of each application made as it is needed), or
         // slices of the input and entries made apart
-        Jsonl | ProRes | Wim | Iso | Ar | Tar | Cpio | Asar | Aqr | Ppmd => 0.0,
+        Jsonl | ProRes | Wim | Disk | Ar | Tar | Cpio | Asar | Aqr | Ppmd => 0.0,
         // blocks of 64 MiB, or slices with an index of frames
         Obj | Mkv => 3.0,
         // FASTA: segments of 256 MiB, the encoder holding a whole segment (heap peaks of
@@ -2996,26 +3002,26 @@ mod tests {
         let z = fixture("codecs/aqr-iso/tests/data/udf201.iso.zst");
         let mut d = zstd::stream::decode_all(&z[..]).unwrap();
         let jpeg = fixture("codecs/aqr-jpeg/tests/data/gradient.jpg");
-        let files = aqr_iso::files(&d);
+        let files = aqr_disk::files(&d, bundle::FILE_SYSTEMS);
         let at = files.iter().find(|f| f.name == b"bin/data.bin").unwrap().extents[0].start;
         d[at..at + jpeg.len()].copy_from_slice(&jpeg);
-        assert_eq!(detect(&d), Some(Format::Iso));
+        assert_eq!(detect(&d), Some(Format::Disk));
         // (the modules the archive's anyway)
         let f = recompress(&d, &Options { shared_modules: true, ..Options::default() });
-        assert!(f.streams.iter().any(|s| s.class == aqr_iso::formula::REST));
+        assert!(f.streams.iter().any(|s| s.class == aqr_disk::formula::REST));
         assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
         assert!(f.eval(&Native::default()).unwrap() == d);
         // the files of an image known to the store (mapped) shared, not copied: the same archive
         let plain = compress(&d, &Options::default());
         let shared = aqr_formula::Bytes::shared(Arc::new(d));
         let _known = aqr_formula::store::known(&shared);
-        let f = bundle::iso(&shared).unwrap();
+        let f = bundle::disk(&shared).unwrap();
         let large: Vec<_> = f.streams.iter().filter(|s| s.content && s.data.len() >= aqr_formula::store::MIN).collect();
         assert!(!large.is_empty() && large.iter().all(|s| s.data.is_shared()));
         assert!(compress(&shared, &Options::default()) == plain);
         // a file all of its stream takes its bytes, cut out of them as it is made (let go of
         // then): the JPEG file's stream empty, its formula of no gaps left
-        let mut f = bundle::iso(&shared).unwrap();
+        let mut f = bundle::disk(&shared).unwrap();
         let opt = Options { shared_modules: true, ..Options::default() };
         let cx = Cx::new(&shared, &opt);
         let (children, _) = nested(&mut f, &shared, &opt, 0, &cx).unwrap();
@@ -3190,7 +3196,7 @@ mod tests {
         let fixture = |p: &str| std::fs::read(format!("{}/../../{p}", env!("CARGO_MANIFEST_DIR"))).unwrap();
         let mut d = zstd::stream::decode_all(&fixture("codecs/aqr-iso/tests/data/udf201.iso.zst")[..]).unwrap();
         let jpeg = fixture("codecs/aqr-jpeg/tests/data/gradient.jpg");
-        let files = aqr_iso::files(&d);
+        let files = aqr_disk::files(&d, bundle::FILE_SYSTEMS);
         let at = files.iter().find(|f| f.name == b"bin/data.bin").unwrap().extents[0].start;
         d[at..at + jpeg.len()].copy_from_slice(&jpeg);
         let archived = |threads| compress_formula(&d, &Options { threads, shared_modules: true, ..Options::default() });
@@ -3209,7 +3215,7 @@ mod tests {
         let fixture = |p: &str| std::fs::read(format!("{}/../../{p}", env!("CARGO_MANIFEST_DIR"))).unwrap();
         let mut iso = zstd::stream::decode_all(&fixture("codecs/aqr-iso/tests/data/udf201.iso.zst")[..]).unwrap();
         let jpeg = fixture("codecs/aqr-jpeg/tests/data/gradient.jpg");
-        let files = aqr_iso::files(&iso);
+        let files = aqr_disk::files(&iso, bundle::FILE_SYSTEMS);
         let at = files.iter().find(|f| f.name == b"bin/data.bin").unwrap().extents[0].start;
         iso[at..at + jpeg.len()].copy_from_slice(&jpeg);
         let mut z = flate2::GzBuilder::new().filename("udf.iso").write(Vec::new(), flate2::Compression::new(6));
@@ -3230,7 +3236,7 @@ mod tests {
         let fixture = |p: &str| std::fs::read(format!("{}/../../{p}", env!("CARGO_MANIFEST_DIR"))).unwrap();
         let mut iso = zstd::stream::decode_all(&fixture("codecs/aqr-iso/tests/data/udf201.iso.zst")[..]).unwrap();
         let jpeg = fixture("codecs/aqr-jpeg/tests/data/gradient.jpg");
-        let files = aqr_iso::files(&iso);
+        let files = aqr_disk::files(&iso, bundle::FILE_SYSTEMS);
         let at = files.iter().find(|f| f.name == b"bin/data.bin").unwrap().extents[0].start;
         iso[at..at + jpeg.len()].copy_from_slice(&jpeg);
         let text = b"some text, ".repeat(1000);
@@ -3252,10 +3258,10 @@ mod tests {
         let fixture = |p: &str| std::fs::read(format!("{}/../../{p}", env!("CARGO_MANIFEST_DIR"))).unwrap();
         let mut d = zstd::stream::decode_all(&fixture("codecs/aqr-iso/tests/data/udf201.iso.zst")[..]).unwrap();
         let jpeg = fixture("codecs/aqr-jpeg/tests/data/gradient.jpg");
-        let files = aqr_iso::files(&d);
-        let first = aqr_iso::pieces(&d, &files)
+        let files = aqr_disk::files(&d, bundle::FILE_SYSTEMS);
+        let first = aqr_disk::pieces(&d, &files)
             .into_iter()
-            .find(|p| p.file.is_some_and(|i| kind_by_name(&files[i].name) == Kind::Unknown))
+            .find(|p| p.file.is_some_and(|(i, _)| kind_by_name(&files[i].name) == Kind::Unknown))
             .unwrap();
         assert!(first.span.len() >= jpeg.len());
         d[first.span.start..][..jpeg.len()].copy_from_slice(&jpeg);
@@ -3791,17 +3797,50 @@ mod tests {
         for (i, (name, data)) in named.iter().enumerate() {
             let span = d.len()..d.len() + data.len();
             d.extend_from_slice(data);
-            files.push(aqr_iso::File { name: name.to_vec(), extents: vec![span.clone()], rank: 0 });
-            pieces.push(aqr_iso::Piece { span, file: Some(i) });
+            files.push(aqr_disk::File { name: name.to_vec(), extents: vec![span.clone()], rank: 0 });
+            pieces.push(aqr_disk::Piece { span, file: Some((i, 0)) });
         }
-        let mut f = aqr_iso::formula::build(&d, &files, &pieces, &aqr_iso::formula::Options { kind: kind_by_name });
+        let opt = aqr_disk::formula::Options { file_systems: bundle::FILE_SYSTEMS, kind: kind_by_name };
+        let mut f = aqr_disk::formula::build(&d, &files, &pieces, &opt);
         let opt = Options { threads: 2, shared_modules: true, ..Options::default() };
         let cx = Cx::new(&d, &opt);
         let (_, plan) = nested(&mut f, &d, &opt, 0, &cx).unwrap();
         assert!(!plan.is_empty());
         let of = |class: &str| f.streams.iter().filter(|s| s.class == class).map(|s| s.data.len()).collect::<Vec<_>>();
-        assert!(of("iso/png").len() == 3 && of("iso/png").iter().all(|&n| n > 0));
-        assert_eq!(of("iso/jpeg"), [0]);
+        assert!(of("disk/png").len() == 3 && of("disk/png").iter().all(|&n| n > 0));
+        assert_eq!(of("disk/jpeg"), [0]);
+    }
+
+    /// A file of an image in pieces, split from its stream ([`aqr_formula::Of::Node`]), is one
+    /// content: a JPEG file in three pieces out of order, about a text file, recompressed by
+    /// aqr-jpeg, and the image rebuilt.
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn files_in_pieces_taken() {
+        let jpeg =
+            std::fs::read(format!("{}/../../codecs/aqr-jpeg/tests/data/gradient.jpg", env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+        let text = b"some text between the pieces, ".repeat(50);
+        let (n, a, b) = (jpeg.len(), jpeg.len() / 3, jpeg.len() * 2 / 3);
+        // its middle, the text, its end, its start
+        let d = [&jpeg[a..b], &text, &jpeg[b..], &jpeg[..a]].concat();
+        let (t, e, s) = (b - a, b - a + text.len(), b - a + text.len() + n - b);
+        let files = [
+            aqr_disk::File { name: b"j.jpg".to_vec(), extents: vec![s..s + a, 0..b - a, e..e + n - b], rank: 0 },
+            aqr_disk::File { name: b"t.txt".to_vec(), extents: vec![t..e], rank: 0 },
+        ];
+        let pieces = aqr_disk::pieces(&d, &files);
+        let opt = aqr_disk::formula::Options { file_systems: bundle::FILE_SYSTEMS, kind: kind_by_name };
+        let mut f = aqr_disk::formula::build(&d, &files, &pieces, &opt);
+        assert_eq!(f.shared.len(), 1);
+        let opt = Options { threads: 2, shared_modules: true, ..Options::default() };
+        let cx = Cx::new(&d, &opt);
+        let (children, plan) = nested(&mut f, &d, &opt, 0, &cx).unwrap();
+        assert!(plan.is_empty());
+        place_all(&mut f, children.into_iter().map(|c| c.1).collect(), Vec::new(), &opt);
+        let jpegs = |n: &Node| matches!(n, Node::Apply(a) if a.module == aqr_decompress::JPEG);
+        assert!(f.shared.iter().any(|s| matches!(&s.of, aqr_formula::Of::Node(n) if jpegs(n))));
+        assert!(f.eval(&Native::default()).unwrap() == d);
     }
 
     /// The DEFLATE stream of a gzip file is deconstructed where its data may archive smaller
@@ -4189,7 +4228,7 @@ mod tests {
         assert!(fits_within(Format::Png, 40 << 20, limit));
         assert!(!fits_within(Format::Png, 50 << 20, limit));
         assert!(fits_within(Format::Text, 400 << 20, limit) && !fits_within(Format::Text, 500 << 20, limit));
-        assert!(fits_within(Format::Iso, usize::MAX >> 8, limit));
+        assert!(fits_within(Format::Disk, usize::MAX >> 8, limit));
         assert!(fits_within(Format::Jsonl, usize::MAX >> 8, limit));
     }
 

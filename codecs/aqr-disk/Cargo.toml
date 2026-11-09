@@ -1,0 +1,12 @@
+[package]
+name = "aqr-disk"
+version = "0.1.0"
+edition = "2024"
+description = "Disk images taken apart into the contents of their files and the rest: partition tables, the formula the file systems' readers share, without a module"
+publish = false
+
+[dependencies]
+aqr-formula = { path = "../../crates/aqr-formula" }
+
+[dev-dependencies]
+zstd = "0.13"

@@ -1,10 +1,12 @@
 # aqr-iso
 
-ISO 9660 and UDF images (CD, DVD and BD images; the UDF bridge discs of Windows) taken apart
-into the contents of their files and the rest (`FORMAT.md`). The image is the concatenation of
-the two, so there is no module: what it is for is that each file's contents become a content of
-the archive, recompressed by their formats (a PE file by aqr-exe, a ZIP archive by aqr-zip) and
-stored once where the same files are archived along with it.
+ISO 9660 and UDF images (CD, DVD and BD images; the UDF bridge discs of Windows) read into their
+files: a file system of aqr-disk (`FS`), which takes the image apart into the contents of the
+files and the rest ([../aqr-disk/FORMAT.md](../aqr-disk/FORMAT.md)), all of an image or a
+partition of it. The image is the concatenation of the two, so there is no module: what it is for
+is that each file's contents become a content of the archive, recompressed by their formats (a
+PE file by aqr-exe, a ZIP archive by aqr-zip) and stored once where the same files are archived
+along with it.
 
 ```sh
 cargo run --release -p aqr-iso --example aqr-iso-check -- [-v] [-z] IMAGE...   # files found, rebuilt, zstd -3 of the rest
@@ -21,10 +23,10 @@ powershell -File codecs/aqr-iso/scripts/gen-fixtures.ps1                      # 
   UCS-2 names), files of several extents as one.
 
 Where several trees give the same extent, UDF's name is taken, then Joliet's, then ISO 9660's
-(8.3 names, versions dropped); the names give the contents their kinds (aqr-compress's
-`kind_by_name`). An extent overlapping one before it is left in the rest, and so is everything
-the trees do not point at. Each directory is read once, so loops do not hang it, and what is
-past the end of an image cut short is not read.
+(8.3 names, versions dropped: the files' ranks); the names give the contents their kinds
+(aqr-compress's `kind_by_name`). aqr-disk leaves an extent overlapping one before it in the rest,
+and so everything the trees do not point at. Each directory is read once, so loops do not hang
+it, and what is past the end of an image cut short is not read.
 
 Not read: virtual, sparable and metadata partitions (UDF 1.50 on; a UDF 2.50 image, as Blu-ray
 discs are, gives no file), ISO 9660's extended attribute records and interleaved files, raw
@@ -49,9 +51,11 @@ files of their own, which aqr-wim takes apart (written after this measurement).
 aqr-compress takes an image as an archive that only bundles files (as aqr-bundle's): its
 formula is not compared against the image raw, and its files are made in parallel.
 Each file is a stream of its own, sharing the image's bytes where it is mapped (`aqr`'s input)
-rather than a copy of them; the streams of a kind are merged as the archive is written.
+rather than a copy of them; the streams of a kind are merged as the archive is written. (Measured
+when aqr-iso made the formula itself; aqr-disk's is the same for an image, byte for byte.)
 
 ## Tests
 
 `cargo rt -p aqr-iso`: the fixtures of IMAPI2 (ISO 9660 alone, with Joliet, with Joliet and UDF
-1.02, UDF 2.01 and 2.50), images cut short and changed bytes, how extents are laid out.
+1.02, UDF 2.01 and 2.50), images cut short and changed bytes. How extents are laid out is
+aqr-disk's to test.

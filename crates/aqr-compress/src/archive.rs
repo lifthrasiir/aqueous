@@ -45,7 +45,7 @@ use aqr_formula::probe::{self, Held};
 use aqr_formula::{Bytes, Formula, Kind, Module, Node};
 
 use crate::progress::{Event, Files, Note, Notes, Tracker};
-use crate::{Cx, Once, Options, detect, kind_by_name, nested, place_all, sets, verify};
+use crate::{Cx, Once, Options, bundle, detect, kind_by_name, nested, place_all, sets, verify};
 
 /// Streams shorter than this are put together with those of their class and kind without
 /// telling whether they compress.
@@ -1569,20 +1569,24 @@ pub(crate) fn stream_sums(data: Option<Vec<u8>>) -> Vec<(u32, u64)> {
     }
 }
 
-/// The CRC-32 and size of the files' contents in ar, tar, cpio or asar archive or ISO 9660 or
-/// UDF image `d`, those of at least [`MEMBER_MIN`] bytes.
+/// The CRC-32 and size of the files' contents in ar, tar, cpio or asar archive or disk image `d`,
+/// those of at least [`MEMBER_MIN`] bytes.
 fn member_sums(d: &[u8], threads: usize) -> Vec<(u32, u64)> {
     let bodies: Vec<&[u8]> =
         member_spans(d).into_iter().filter(|s| s.len() as u64 >= MEMBER_MIN).map(|s| &d[s]).collect();
     aqr_common::pool::par_map(bodies.len(), threads, |i| (aqr_common::crc32::hash(bodies[i]), bodies[i].len() as u64))
 }
 
-/// Where the files' contents are in ar, tar, cpio or asar archive or ISO 9660 or UDF image `d`
-/// (none where it is none of them).
+/// Where the files' contents are in ar, tar, cpio or asar archive or disk image `d` (none where
+/// it is none of them): of an image, those of one piece.
 pub(crate) fn member_spans(d: &[u8]) -> Vec<std::ops::Range<usize>> {
     use aqr_bundle::{formula, layout::Role};
-    if aqr_iso::starts(d) {
-        aqr_iso::pieces(d, &aqr_iso::files(d)).into_iter().filter(|p| p.file.is_some()).map(|p| p.span).collect()
+    if aqr_disk::starts(d, bundle::FILE_SYSTEMS) {
+        let files = aqr_disk::files(d, bundle::FILE_SYSTEMS);
+        let pieces = aqr_disk::pieces(d, &files);
+        let mut of = vec![0usize; files.len()];
+        pieces.iter().filter_map(|p| p.file).for_each(|(i, _)| of[i] += 1);
+        pieces.into_iter().filter(|p| p.file.is_some_and(|(i, _)| of[i] == 1)).map(|p| p.span).collect()
     } else if aqr_asar::starts(d) {
         aqr_asar::formula::files(d).into_iter().map(|f| f.1).collect()
     } else {

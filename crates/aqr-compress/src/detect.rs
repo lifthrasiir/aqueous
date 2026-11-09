@@ -124,9 +124,10 @@ pub enum Format {
     Tar,
     /// cpio archive (aqr-bundle); of the binary forms, not looked for in other data.
     Cpio,
-    /// ISO 9660 or UDF image (aqr-iso), known by the descriptor at sector 16: at the start of
-    /// data only.
-    Iso,
+    /// Disk image (aqr-disk): a volume of a file system read (ISO 9660 or UDF, aqr-iso's, known
+    /// by the descriptor at sector 16), all of it or a partition of its MBR, GPT or APM: at the
+    /// start of data only.
+    Disk,
     /// WIM file of LZX or of no compression (aqr-wim, and aqr-lzx on its chunks), known by its
     /// header: at the start of data only.
     Wim,
@@ -200,7 +201,7 @@ impl Format {
         Format::Ar,
         Format::Tar,
         Format::Cpio,
-        Format::Iso,
+        Format::Disk,
         Format::Wim,
         Format::Asar,
         Format::Xsv,
@@ -262,7 +263,7 @@ impl Format {
             Format::Ar => "ar",
             Format::Tar => "tar",
             Format::Cpio => "cpio",
-            Format::Iso => "iso",
+            Format::Disk => "disk",
             Format::Wim => "wim",
             Format::Asar => "asar",
             Format::Xsv => "xsv",
@@ -274,9 +275,9 @@ impl Format {
     }
 
     /// Whether it only bundles files: an archive of aqr-bundle's or aqr-asar's, or an image of
-    /// aqr-iso's.
+    /// aqr-disk's.
     pub fn is_bundle(self) -> bool {
-        matches!(self, Format::Ar | Format::Tar | Format::Cpio | Format::Iso | Format::Asar)
+        matches!(self, Format::Ar | Format::Tar | Format::Cpio | Format::Disk | Format::Asar)
     }
 
     /// The format of [`Format::name`] `name`, as [`Kind::Format`] names it.
@@ -324,7 +325,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"h5" | b"hdf5" | b"he5" | b"h5ad" | b"nwb" => format(Format::Hdf5),
         b"ldb" => format(Format::LevelDb),
         b"tar" => format(Format::Tar),
-        b"iso" => format(Format::Iso),
+        b"iso" | b"img" => format(Format::Disk),
         b"wim" => format(Format::Wim),
         b"asar" => format(Format::Asar),
         b"jsonlz4" | b"mozlz4" | b"baklz4" => format(Format::Lz4),
@@ -378,9 +379,9 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Gif)
     } else if start && crate::aqueous::starts(d) {
         Some(Format::Aqr)
-    } else if start && aqr_iso::starts(d) {
+    } else if start && aqr_disk::starts(d, crate::bundle::FILE_SYSTEMS) {
         // (before the others: a hybrid image starts with a boot sector, or anything)
-        Some(Format::Iso)
+        Some(Format::Disk)
     } else if start && aqr_wim::wim::starts(d) {
         Some(Format::Wim)
     } else if start && aqr_asar::starts(d) {

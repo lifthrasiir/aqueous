@@ -216,6 +216,7 @@ dependencies = [
  "aqr-common",
  "aqr-decompress",
  "aqr-dex",
+ "aqr-disk",
  "aqr-dwarf",
  "aqr-egg",
  "aqr-exe",
@@ -359,6 +360,14 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "sha1",
+ "zstd",
+]
+
+[[package]]
+name = "aqr-disk"
+version = "0.1.0"
+dependencies = [
+ "aqr-formula",
  "zstd",
 ]
 
@@ -555,6 +564,7 @@ dependencies = [
 name = "aqr-iso"
 version = "0.1.0"
 dependencies = [
+ "aqr-disk",
  "aqr-formula",
  "zstd",
 ]
