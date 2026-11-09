@@ -77,6 +77,11 @@ Measured 2026-11-09 on an M4 through `cargo aqr`, against the build before conta
 
 A container archives as its disk does.
 
+Files of NTFS's LZNT1, the same (`compact /c`, 957,014,359 bytes on the volume): 672,774,728 ->
+364,216,362 B, 140 -> 3,226 G instructions (7.9 -> 73.8 s), heap peak 1.14 -> 1.63 GB, given back.
+Most of the time is the verify decoding blocks again for the values whose hashes are not told
+(`docs/disk-image-design.md`, stage 5).
+
 Of all three (aqr-ntfs's peer volume: the same three files by XPRESS4K, 8K, 16K, LZX and LZNT1),
 1,106,436 -> 664,744 B: their data deduplicated once made.
 
