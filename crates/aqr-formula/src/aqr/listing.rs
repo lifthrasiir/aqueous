@@ -7,7 +7,7 @@
 //! of the one instruction), the content of output `o` is what the item `o` from the bottom at
 //! the end is made of, apart from the other outputs of the leaf.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write;
 use std::sync::OnceLock;
 
@@ -72,6 +72,9 @@ impl Applied {
 const SUMMARY: usize = 48;
 /// The most groups of alike children shown of a node.
 const BREADTH: usize = 4;
+/// The most characters kept of a node rendered for a summary (past them `...`), as one far
+/// longer than [`SUMMARY`] is shown of no node.
+const RENDERED: usize = 4 * SUMMARY;
 
 /// The most bytes of a literal or parameters kept to be shown ([`Graph::dump`]).
 const SHOWN: usize = 32;
@@ -250,43 +253,58 @@ impl Graph<'_> {
         out
     }
 
-    /// Node `n` summarized down to `depth` levels below it (`*` past them).
-    fn render(&self, n: usize, depth: usize) -> String {
+    /// Node `n` summarized down to `depth` levels below it (`*` past them), each node rendered once
+    /// at each depth (`memo`: nodes are taken by several, an image's Split by thousands), and at
+    /// most [`RENDERED`] characters of each kept.
+    fn render(&self, n: usize, depth: usize, memo: &mut HashMap<(usize, usize), String>) -> String {
+        if let Some(s) = memo.get(&(n, depth)) {
+            return s.clone();
+        }
         let label = self.label(n);
         let kids = &self.nodes[n].kids;
-        if kids.is_empty() {
-            return label;
-        }
-        if depth == 0 {
-            return format!("{label}(*)");
-        }
-        let mut groups: Vec<(String, usize)> = Vec::new();
-        for &k in kids {
-            let s = self.render(k, depth - 1);
-            match groups.last_mut() {
-                Some((last, count)) if *last == s => *count += 1,
-                _ => groups.push((s, 1)),
+        let s = if kids.is_empty() {
+            label
+        } else if depth == 0 {
+            format!("{label}(*)")
+        } else {
+            let mut groups: Vec<(String, usize)> = Vec::new();
+            for &k in kids {
+                let s = self.render(k, depth - 1, memo);
+                match groups.last_mut() {
+                    Some((last, count)) if *last == s => *count += 1,
+                    _ => groups.push((s, 1)),
+                }
             }
-        }
-        let mut parts: Vec<String> =
-            groups.iter().take(BREADTH).map(|(s, c)| if *c > 1 { format!("{s} x{c}") } else { s.clone() }).collect();
-        if groups.len() > BREADTH {
-            parts.push("...".into());
-        }
-        format!("{label}({})", parts.join(", "))
+            let mut parts: Vec<String> = (groups.iter().take(BREADTH))
+                .map(|(s, c)| if *c > 1 { format!("{s} x{c}") } else { s.clone() })
+                .collect();
+            if groups.len() > BREADTH {
+                parts.push("...".into());
+            }
+            format!("{label}({})", parts.join(", "))
+        };
+        let s = match s.char_indices().nth(RENDERED) {
+            Some((at, _)) => format!("{}...", &s[..at]),
+            None => s,
+        };
+        memo.insert((n, depth), s.clone());
+        s
     }
 
-    /// Node `n` summarized as deep as fits in [`SUMMARY`] characters past its label.
+    /// Node `n` summarized as deep as fits in [`SUMMARY`] characters past its label (one level
+    /// deeper at a time, until it does not or nothing is left out).
     fn summary(&self, n: usize) -> String {
         let label = self.label(n).chars().count();
-        let mut depth = 64;
-        loop {
-            let s = self.render(n, depth);
-            if depth == 0 || s.chars().count() <= label + SUMMARY {
-                return s;
+        let mut memo = HashMap::new();
+        let mut best = self.render(n, 0, &mut memo);
+        for depth in 1..=64 {
+            let s = self.render(n, depth, &mut memo);
+            if s.chars().count() > label + SUMMARY || s == best {
+                break;
             }
-            depth = depth.min(s.len()) - 1;
+            best = s;
         }
+        best
     }
 }
 
@@ -579,6 +597,25 @@ fn apportion<T: Copy + Ord>(contents: &[(u64, &BTreeSet<T>)], bytes: &dyn Fn(T) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A summary of a graph whose nodes take one another's many times over (each a concatenation of
+    /// both outputs of a Split of the one before: 2^40 paths) is made in moments: each node
+    /// rendered once at each depth, as deep as fits.
+    #[test]
+    fn summary_of_shared_nodes() {
+        let name = |_: usize| String::from("m");
+        let mut g = Graph { nodes: Vec::new(), insns: 0, name: &name, first_insn: Vec::new() };
+        let mut n = g.add(Shape::Slice(0, 0), Vec::new(), 0, 2);
+        for i in 0..40 {
+            let a = g.add(Shape::Split { out: 0, outs: 2 }, vec![n], 2 * i + 1, 1);
+            let b = g.add(Shape::Split { out: 1, outs: 2 }, vec![n], 2 * i + 1, 1);
+            n = g.add(Shape::Concat, vec![a, b], 2 * i + 2, 2);
+        }
+        let t = std::time::Instant::now();
+        let s = g.summary(n);
+        assert!(t.elapsed().as_secs_f64() < 1.0, "{:?}", t.elapsed());
+        assert!(s.starts_with("cat(split#1(cat(") && s.chars().count() <= 3 + SUMMARY, "{s}");
+    }
 
     #[test]
     fn shared_blocks_apportioned() {
