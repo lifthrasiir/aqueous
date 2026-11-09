@@ -1597,16 +1597,15 @@ subsequent directories are numbered from 1 to [=meta/num_directories=],
 individual files are numbered from ([=meta/num_directories=] + 1) to ([=meta/num_directories=] + [=meta/num_files=]),
 and [=special entries=] are numbered from ([=meta/num_directories=] + [=meta/num_files=] + 1)
 to ([=meta/num_directories=] + [=meta/num_files=] + [=meta/num_specials=]).
-There MUST be at least one entry other than the root directory,
+There MUST be at least one entry other than the root directory in the first metadata block of an archive,
 i.e. [=meta/num_directories=] + [=meta/num_files=] + [=meta/num_specials=] ≥ 1.
+A later metadata block MAY have none, e.g. to add only the `journal` ([[#journal]]) of a state to the archive;
+its segment then has no [=content blocks=], and [=meta/entry_parents=], [=meta/entry_offsets=] and [=meta/entries=] are empty.
 [=meta/entry_parents=][|k| - 2] is the parent of the entry |k| for each |k| ≥ 2,
 and MUST be a directory less than |k|,
 i.e. in [0, min(|k| - 1, [=meta/num_directories=])], so that directories can't form a cycle.
 The root directory (entry 0) has no parent and the parent of the entry 1 is always the root directory,
 so they are omitted.
-
-Issue: Whether a segment without any entry other than the root directory should be allowed,
-e.g. to update only the archive-wide optional metadata or the [=entry extra=] of the root directory.
 
 File parameters (<dfn>file_param</dfn>) occur for each file (but not for directories or special entries), and consist of the following:
 
@@ -1813,7 +1812,7 @@ and an optional [=base=] |base|, which is an [=archive value=]:
         1. Let |segment root| be the result of [=interpret a segment|interpreting=] |segment|.
         2. [=Merge directory nodes|Merge=] |segment root| into |root|.
         3. For each key |k| and value |v| in the top-level map of the segment's [[#optional-metadata|optional metadata]]
-            other than `entry-extras` and `segment-status` ([[#segment-status]]), set |extra|[|k|] to |v|.
+            other than `entry-extras`, `segment-status` ([[#segment-status]]) and `journal` ([[#journal]]), set |extra|[|k|] to |v|.
     10. Return an [=archive value=] with |root| as [=archive value/root=] and |extra| as [=archive value/extra=].
 </ol>
 
@@ -4910,6 +4909,7 @@ aqr-opt-metadata = {
   aqr-archive-comment
   ? &(entry-extras: -2) => [* aqr-entry-extra / null]  ; Indexed by entry numbers, starting from the root directory
   aqr-segment-status
+  aqr-journal
 
     * $$aqr-opt-metadata-member  ; For future extensions
 }
@@ -5262,6 +5262,39 @@ SHOULD report that segments after it may have been lost, and SHOULD NOT report t
   and only the last segment tells about the archive:
   a writing that continues one left incomplete ends with `true` without undoing anything of the segments before.
 </div>
+
+<h3 id=journal><code>journal</code>: Points to return to</h3>
+
+`journal` of `aqr-opt-metadata` names the states of the archive that its writer meant to be returned to,
+e.g. the states after each run of a backup:
+
+<pre class=cddl>
+aqr-journal = (
+  ? &(journal: -4) => {* aqr-journal-time => aqr-text}
+)
+
+aqr-journal-time = uint  ; Milliseconds since 1970-01-01T00:00:00Z, leap seconds not counted
+</pre>
+
+Each key is the time of a <dfn>journal point</dfn> and its value is the label of the point, which may be empty.
+The state of a journal point in the `journal` of a segment is the result of [=interpret an archive|interpreting=] the archive
+cut after that segment, i.e. with the segments after it removed.
+Several points of a segment therefore name the same state,
+as when a writing found nothing to change and added a segment of no entries to name the state again.
+Journal points need not be unique in their labels.
+
+The `journal` doesn't affect the result of [=interpret an archive|interpreting an archive=] ([[#interpretation]]),
+and it is not a part of the [=archive value/extra=] of the result.
+A decompressor MAY be asked for the state of a point, and then interprets only the segments up to the point's.
+Which point is meant by a time or a label, if the user gives one, is up to the decompressor:
+it SHOULD take the latest point whose time is not after the given time,
+and the last of the points of the label.
+Where the same time occurs in several segments, or the times don't increase with the order of segments,
+the order of the segments tells which point is the later, and a decompressor SHOULD warn of the latter.
+
+Conforming compressors SHOULD put `journal` only in the metadata block of a segment with `segment-status` `true`
+([[#segment-status]]), as the state after a commit of an incomplete writing is not one to return to.
+They SHOULD NOT put one unless the user asked for it, as the time is information about the user.
 
 <h3 id=link-groups><code>link-group</code>: Hard links</h3>
 

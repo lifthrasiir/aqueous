@@ -364,3 +364,33 @@ aqr-incomplete = {
 5. 해제 정리.
 6. 추가 작업: internal import. 별도 설계: 암호화한 증분 백업.
 7. 10gb에서 commit의 비용과 멈출 때의 지연을 잰다(Mac. 이 클라우드 머신에는 데이터가 없다).
+
+## 저널링: `-j`와 `--at`
+
+덧붙이기로 쌓인 segment에서 "돌아갈 상태"를 사용자가 이름 붙이는 기능이다. 포맷은 spec의 `journal`
+(절 "`journal`")이 정한다. 여기서는 UI와 구현의 결정만 적는다.
+
+- **지점은 명시적이다.** commit은 주기적 commit과 멈출 때의 commit도 만들고 segment는 `-S`로도 나뉘므로,
+  이들을 복원 지점으로 삼지 않는다. `aqr -c|-a|-s -j LABEL …`만 그 실행의 마지막 commit
+  (`segment-status: true`)에 `journal: {now_ms => LABEL}`을 쓴다. 라벨은 필수이고 빈 문자열(`-j ''`)도 된다.
+  중단된 실행은 지점을 만들지 않는다.
+- **변화가 없어도 지점을 남긴다.** `-a`/`-s`가 쓸 것이 없으면 엔트리 없는 segment 하나에 `journal`만 담아
+  덧붙인다. 마지막 segment를 고쳐 쓸 수 없는 것은 append-only와 크래시 안전성 때문이다(옛 footer를 죽이는 commit만
+  원자적이다). 비용은 metadata block 하나다. spec은 첫 segment가 아니면 엔트리 0개를 허용한다.
+- **`--compact`.** 지점이 없는 아카이브는 지금과 같다. 지점이 있으면 이력(지워진 것, 덮어쓴 것)을 버리므로
+  `--keep-since SPEC`(그 지점 이후만 남기고 앞은 한 segment로 접는다)이나 `--drop-history`를 요구한다.
+  같은 상태를 가리키는 빈 segment의 사슬은 지점을 모두 보존한 채 한 segment로 합칠 수 있다(맵인 까닭).
+- **라벨의 placeholder.** `{today}`는 지역 날짜 `YYYY-MM-DD`, `{now}`는 지역 시각 `YYYY-MM-DD HH:MM:SS`다.
+  `{{`와 `}}`는 괄호 자체이고, 모르는 이름은 오류다. 시각 키(UTC ms)와는 별개로 라벨 문자열만 바꾼다.
+- **`--at SPEC`**(`-t`, `-I`, `-d`, 이후 `--diff`)은 지점 중에서만 고른다.
+  - `#N`: N번째 지점(1부터, segment 순서). `#-N`은 끝에서 N번째이다.
+  - `@LABEL`: 그 라벨의 마지막 지점.
+  - 날짜: `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, `YYYY-MM-DDTHH[:MM[:SS]]`. 모자란 자리는 그 기간의 끝까지로
+    읽고(`2026-11-01` = 그 날의 23:59:59.999), 시간대는 지역이며 `Z`나 `+09:00`을 붙이면 따른다.
+    `time ≤ 그 끝`인 마지막 지점을 쓴다.
+  - 해당 지점이 없으면 오류이고, 가장 이른 지점을 알린다. 지점이 하나도 없으면 "no journal points".
+- **`-L, --history`**는 지점 목록(번호, 시각, 라벨, 그 지점에서의 엔트리 수와 크기)을 보인다.
+- 시각은 벽시계(UTC)만 쓰고, 시험에서는 `AQR_TEST_NOW=ms`로 고정한다.
+
+작업 순서: (1) spec, (2) aqr-formula의 읽기(지점, 지점까지의 접두 트리)와 쓰기(`journal`, 빈 segment),
+(3) aqr의 `-j`, `-L`, `--at`, (4) `--compact`의 이력 규칙, (5) `--diff`, `--ipc`, 프런트엔드.
