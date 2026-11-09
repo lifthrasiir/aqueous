@@ -3,7 +3,8 @@
 # a loop mount), as it is (disk.img) and as qemu-img converts it (all black boxes, in the Lima VM
 # aqr-linux: docs/disk-image-design.md), zstd -19:
 #   disk.vhd (dynamic VHD), disk.vhdx (dynamic VHDX), disk.vmdk (monolithicSparse), disk.qcow2
-#   (version 3), disk-v2.qcow2 (version 2), disk-c.qcow2 (compressed clusters), disk.vdi.
+#   (version 3), disk-v2.qcow2 (version 2), disk-c.qcow2 (compressed clusters), disk.vdi,
+#   disk-s.vmdk (streamOptimized; made later, of the disk.img committed, by qemu-img 8.2.2).
 # The files: readme.txt, photo.jpg (aqr-jpeg's gradient.jpg), data.bin (1 MiB of a pattern) in
 # both volumes, and in the ext4 one big.bin (8 MiB of another), so that files cross the
 # containers' blocks.
@@ -48,6 +49,7 @@ qemu-img convert -O qcow2 -o compat=1.1 disk.img disk.qcow2
 qemu-img convert -O qcow2 -o compat=0.10 disk.img disk-v2.qcow2
 qemu-img convert -c -O qcow2 disk.img disk-c.qcow2
 qemu-img convert -O vdi disk.img disk.vdi
+qemu-img convert -O vmdk -o subformat=streamOptimized disk.img disk-s.vmdk
 for f in disk.img disk.vhd disk.vhdx disk.vmdk disk.qcow2 disk-v2.qcow2 disk-c.qcow2 disk.vdi; do
     zstd -q -19 -f "$f" -o "/tmp/aqr-disk-$f.zst"
     chmod a+r "/tmp/aqr-disk-$f.zst"

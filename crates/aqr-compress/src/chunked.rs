@@ -1,12 +1,13 @@
 //! Disk images whose disk is in chunks, some compressed (aqr-disk's `chunked`): UDIF images
-//! (`.dmg`) of compressed chunks, qcow2 images of compressed clusters. The disk is a content,
+//! (`.dmg`) of compressed chunks, qcow2 images of compressed clusters, streamOptimized VMDK extents. The disk is a content,
 //! recompressed in turn (a disk image of its own: its files taken apart), cut into the parts of
 //! its chunks once (a Split of all of it, so that it is one content): zlib's and raw DEFLATE
 //! chunks rebuilt from their parts by applications of aqr-flate's (of 32 MiB of data each; zlib's
 //! headers and checksums, qcow2's padding kept), bzip2's each by aqr-bz2's, LZFSE's each by
 //! aqr-bvx's, raw ones those parts as they are, zeros dropped (each part the source of a Patch of
 //! nothing), and so the parts of chunks not rebuilt, kept as they are. The rest of the file (a
-//! DMG's property list and trailer, qcow2's header and tables, what is between the chunks) is
+//! DMG's property list and trailer, qcow2's header and tables, VMDK's markers, what is between
+//! the chunks) is
 //! kept as it is. A UDIF or qcow2 image of raw chunks only is a container of aqr-disk's, not this;
 //! one of chunks of another compression (LZMA, ADC, qcow2's zstd) is not taken yet.
 
@@ -43,10 +44,11 @@ pub(crate) fn dmg(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
     chunked(d, &Chunked { len: u.len, chunks: u.chunks }, "dmg", opt, cx)
 }
 
-/// The formula of qcow2 image `d` of compressed clusters ([`chunked`]), None where it is not one.
-pub(crate) fn qcow2(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
-    let u = aqr_disk::container::qcow2_chunks(d)?;
-    chunked(d, &u, "qcow2", opt, cx)
+/// The formula of compressed container `d` ([`chunked`]: a qcow2 image of compressed clusters, a
+/// streamOptimized VMDK extent), None where it is not one.
+pub(crate) fn container(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
+    let u = aqr_disk::chunked::container(d)?;
+    chunked(d, &u, if d.starts_with(b"KDMV") { "vmdk" } else { "qcow2" }, opt, cx)
 }
 
 /// The formula of image `d` of chunks `u`, its bytes kept of class `kept`.

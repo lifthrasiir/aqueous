@@ -2751,8 +2751,8 @@ fn recompressor(format: Format) -> Recompressor {
         Format::Bvx => Cx(|d, _, opt, _, cx| bvx(d, opt, cx)),
         Format::Ar | Format::Tar | Format::Cpio => Cx(|d, _, _, _, _| bundle::bundle(d)),
         Format::Disk => Cx(|d, _, opt, _, cx| {
-            // (a qcow2 image of compressed clusters by its chunks, its disk a content: as a DMG)
-            if let Some(f) = chunked::qcow2(d, opt, cx) {
+            // (a compressed container by its chunks, its disk a content: as a DMG)
+            if let Some(f) = chunked::container(d, opt, cx) {
                 return Some(f);
             }
             // (the Splits of files in pieces recorded, their contents at hand: see `chunked`)
@@ -3934,35 +3934,41 @@ mod tests {
         assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
     }
 
-    /// A qcow2 image of compressed clusters (aqr-disk's fixture, of qemu-img: zlib's level 6 of a
-    /// window of 4 KiB): its own formula, as a DMG's (the clusters by zlib's emulation, its files
-    /// taken apart: its JPEG file by aqr-jpeg), given back, and verified by its hashes without
-    /// running a module.
+    /// Compressed containers (aqr-disk's fixtures, of qemu-img: a qcow2 image of compressed clusters,
+    /// raw DEFLATE of zlib's level 6 of a window of 4 KiB; a streamOptimized VMDK extent, zlib's
+    /// level 6): their own formula, as a DMG's (the compressed chunks by zlib's emulation, the
+    /// files taken apart: its JPEG file by aqr-jpeg), given back, and verified by their hashes
+    /// without running a module.
     #[test]
-    fn qcow2_compressed_taken_apart() {
-        let p = format!("{}/../../codecs/aqr-disk/tests/data/disk-c.qcow2.zst", env!("CARGO_MANIFEST_DIR"));
-        let d = zstd::stream::decode_all(&std::fs::read(p).unwrap()[..]).unwrap();
-        let opt = Options { threads: 2, shared_modules: true, ..Options::default() };
-        let f = chunked::qcow2(&d, &opt, &Cx::new(&d, &opt)).unwrap();
-        let records: usize = f.streams.iter().filter(|s| s.class == "flate/record").map(|s| s.data.len()).sum();
-        let chunks = aqr_disk::container::qcow2_chunks(&d).unwrap().chunks;
-        let deflate: usize =
-            chunks.iter().filter(|c| c.how == aqr_disk::chunked::How::Deflate).map(|c| c.file.len()).sum();
-        assert!(records * 50 < deflate, "records {records} of {deflate} B");
-        let (c, f) = compress_formula(&d, &opt);
-        assert!(f.applies().iter().any(|a| a.module == aqr_flate::formula::MODULE));
-        assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
-        assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
-        let opt = Options { smaller: false, ..opt };
-        let mut cx = Cx::new(&d, &opt);
-        cx.pre = Some(Arc::new(verify::Prevalidator::spawn(2, &[&d])));
-        let f = recompress_at(&d, &opt, 0, Kind::Unknown, &cx);
-        let memo = verify::Prevalidator::finish_shared(cx.pre.take().unwrap());
-        let c = cx.enc.encode(&f, Some(aqr::checksum(&d))).unwrap();
-        let roots = aqr::open(&c, &aqr::NoModules).unwrap().hashed(&memo, &aqr_decompress::identify, 2);
-        let roots = roots.map_err(|e| e.to_string()).unwrap().expect("told");
-        let whole = roots.iter().fold(aqr_formula::chash::Ch::EMPTY, |w, (h, _)| w.cat(*h));
-        assert!(whole == aqr_formula::chash::Ch::of(&d));
+    fn compressed_containers_taken_apart() {
+        for name in ["disk-c.qcow2", "disk-s.vmdk"] {
+            let p = format!("{}/../../codecs/aqr-disk/tests/data/{name}.zst", env!("CARGO_MANIFEST_DIR"));
+            let d = zstd::stream::decode_all(&std::fs::read(p).unwrap()[..]).unwrap();
+            assert_eq!(detect(&d), Some(Format::Disk), "{name}");
+            let opt = Options { threads: 2, shared_modules: true, ..Options::default() };
+            let f = chunked::container(&d, &opt, &Cx::new(&d, &opt)).unwrap();
+            let records: usize = f.streams.iter().filter(|s| s.class == "flate/record").map(|s| s.data.len()).sum();
+            let chunks = aqr_disk::chunked::container(&d).unwrap().chunks;
+            let compressed: usize = (chunks.iter())
+                .filter(|c| matches!(c.how, aqr_disk::chunked::How::Deflate | aqr_disk::chunked::How::Zlib))
+                .map(|c| c.file.len())
+                .sum();
+            assert!(records * 50 < compressed, "{name}: records {records} of {compressed} B");
+            let (c, f) = compress_formula(&d, &opt);
+            assert!(f.applies().iter().any(|a| a.module == aqr_flate::formula::MODULE), "{name}");
+            assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG), "{name}");
+            assert!(aqr_decompress::decompress(&c, 1).unwrap() == d, "{name}");
+            let opt = Options { smaller: false, ..opt };
+            let mut cx = Cx::new(&d, &opt);
+            cx.pre = Some(Arc::new(verify::Prevalidator::spawn(2, &[&d])));
+            let f = recompress_at(&d, &opt, 0, Kind::Unknown, &cx);
+            let memo = verify::Prevalidator::finish_shared(cx.pre.take().unwrap());
+            let c = cx.enc.encode(&f, Some(aqr::checksum(&d))).unwrap();
+            let roots = aqr::open(&c, &aqr::NoModules).unwrap().hashed(&memo, &aqr_decompress::identify, 2);
+            let roots = roots.map_err(|e| e.to_string()).unwrap().expect("told");
+            let whole = roots.iter().fold(aqr_formula::chash::Ch::EMPTY, |w, (h, _)| w.cat(*h));
+            assert!(whole == aqr_formula::chash::Ch::of(&d), "{name}");
+        }
     }
 
     /// A DMG's archive is verified by its hashes without running a module: its disk's Split into

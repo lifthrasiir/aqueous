@@ -434,6 +434,62 @@ pub fn qcow2_chunks(d: &[u8]) -> Option<crate::chunked::Chunked> {
     compressed.then_some(crate::chunked::Chunked { len: size, chunks })
 }
 
+/// The chunks of a streamOptimized VMDK extent (VMware's Virtual Disk Format 1.1: compressed grains
+/// with markers, deflate), by its markers from its first data sector on: each grain a zlib stream
+/// (its marker's LBA, in sectors, and bytes), each marker on a sector of its own; a metadata marker
+/// (a grain table, the directory, the footer) skipped by its sectors, the end-of-stream one ending
+/// it. What no grain gives is zeros. None where grains overlap or none is read.
+pub fn vmdk_stream_chunks(d: &[u8]) -> Option<crate::chunked::Chunked> {
+    use crate::chunked::{Chunk, How};
+    let h = d.get(..512)?;
+    if &h[..4] != b"KDMV" || !(1..=3).contains(&le32(h, 4)) {
+        return None;
+    }
+    let (flags, capacity, grain, over) = (le32(h, 8), le64(h, 12), le64(h, 20), le64(h, 64));
+    if flags & 0x3_0000 != 0x3_0000 || le16(h, 77) != 1 || grain == 0 || !grain.is_power_of_two() {
+        return None;
+    }
+    let (len, grain) = (capacity.checked_mul(512)?, grain.checked_mul(512)?);
+    let mut grains = Vec::new();
+    let mut p = usize::try_from(over.checked_mul(512)?).ok()?;
+    while let Some(m) = d.get(p..p + 16) {
+        let (lba, size) = (le64(m, 0), le32(m, 8) as usize);
+        if size > 0 {
+            let start = lba.checked_mul(512)?;
+            let file = p + 12..(p + 12).checked_add(size)?;
+            if start >= len || file.end > d.len() {
+                return None;
+            }
+            p = file.end.div_ceil(512).checked_mul(512)?;
+            grains.push(Chunk { disk: start..start.saturating_add(grain).min(len), file, how: How::Zlib });
+        } else if le32(m, 12) == 0 {
+            break;
+        } else {
+            p = p.checked_add(usize::try_from(lba.checked_add(1)?.checked_mul(512)?).ok()?)?;
+        }
+    }
+    if grains.is_empty() {
+        return None;
+    }
+    grains.sort_by_key(|c| c.disk.start);
+    let mut chunks = Vec::with_capacity(grains.len() + 1);
+    let mut at = 0;
+    for c in grains {
+        if c.disk.start < at {
+            return None;
+        }
+        if c.disk.start > at {
+            chunks.push(Chunk { disk: at..c.disk.start, file: 0..0, how: How::Zeros });
+        }
+        at = c.disk.end;
+        chunks.push(c);
+    }
+    if at < len {
+        chunks.push(Chunk { disk: at..len, file: 0..0, how: How::Zeros });
+    }
+    Some(crate::chunked::Chunked { len, chunks })
+}
+
 /// A VDI image of VirtualBox (header version 1.1, dynamic or fixed): its block map (indices of
 /// blocks in the data; free and zero blocks read as zeros).
 fn vdi(d: &[u8]) -> Option<Map<'_>> {

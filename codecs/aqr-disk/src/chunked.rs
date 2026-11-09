@@ -1,7 +1,8 @@
 //! Disk images whose disk is stored in chunks, some of them compressed: each chunk a run of the
 //! disk, where its bytes are in the image's file and how they are stored (`Chunked`). Of UDIF
-//! images (`crate::dmg`) and qcow2 images of compressed clusters (`crate::container::qcow2_chunks`);
-//! aqr-compress rebuilds the compressed chunks from the disk.
+//! images (`crate::dmg`), qcow2 images of compressed clusters (`crate::container::qcow2_chunks`)
+//! and streamOptimized VMDK extents (`crate::container::vmdk_stream_chunks`); aqr-compress
+//! rebuilds the compressed chunks from the disk.
 
 use std::ops::Range;
 
@@ -37,7 +38,13 @@ pub struct Chunked {
     pub chunks: Vec<Chunk>,
 }
 
-/// The chunks of image `d`, where it is a UDIF image or a qcow2 image of any compressed cluster.
+/// The chunks of image `d`, where it is a UDIF image or a compressed container ([`container`]).
 pub fn of(d: &[u8]) -> Option<Chunked> {
-    crate::dmg::parse(d).map(|u| Chunked { len: u.len, chunks: u.chunks }).or_else(|| crate::container::qcow2_chunks(d))
+    crate::dmg::parse(d).map(|u| Chunked { len: u.len, chunks: u.chunks }).or_else(|| container(d))
+}
+
+/// The chunks of container `d`, where it is a qcow2 image of any compressed cluster or a
+/// streamOptimized VMDK extent.
+pub fn container(d: &[u8]) -> Option<Chunked> {
+    crate::container::qcow2_chunks(d).or_else(|| crate::container::vmdk_stream_chunks(d))
 }

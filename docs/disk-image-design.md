@@ -298,7 +298,12 @@ aqr-compress의 `chunked`로 일반화했다. 압축 컨테이너는 청크 목�
   하나로 합친다. 디스크 끝을 넘는 마지막 클러스터는 통째로 압축되어 있어 그대로 둔다. 압축 클러스터가 있으면
   컨테이너의 `Map`으로는 파일 시스템이 보이지 않으므로 탐지에 따로 넣었다. 1.33 GB HFS+ 디스크의
   `qemu-img convert -c`(375.5 MB): 371.3 MB(원시) → 231.2 MB, 2.5 → 21.6 s, 힙 1.05 GB, 풀기 7.6 s.
-- 남은 것: streamOptimized VMDK·OVA, E01, qcow2의 zstd 클러스터(compression type 1).
+- streamOptimized VMDK(`container::vmdk_stream_chunks`): 첫 데이터 섹터부터 marker를 차례로 읽는다(grain은
+  LBA와 zlib 스트림, 메타데이터 marker는 섹터 수만큼 건너뛰고 EOS에서 끝). qemu-img의 grain은 zlib 레벨 6과
+  바이트까지 같다. 같은 디스크(350.2 MB): 345.3 MB(스캔이 zlib 스트림을 하나씩 찾음), 72 s → 231.5 MB, 22.4 s,
+  힙 1.11 GB, 풀기 8.3 s. VMware·VirtualBox가 내보낸 OVA는 시험하지 못했다(인코더가 다를 수 있다: 표본이
+  맞지 않으면 기본 프로파일).
+- 남은 것: E01, qcow2의 zstd 클러스터(compression type 1).
 
 각 단계는 파서, README(무엇을 읽는가, 결과, 시험), 손상·잘린 이미지 시험(aqr-iso의 것처럼), 그리고
 `--stats`를 켠 `cargo aqr` 측정(크기, 시간, 힙과 resident 최대)으로 끝난다. 0단계 뒤의 비교 기준은

@@ -214,51 +214,62 @@ fn udif_images_damaged() {
     }
 }
 
-/// A qcow2 image of compressed clusters (`scripts/gen-containers.sh`, `qemu-img convert -c`): its
-/// chunks cover the disk one after another, its raw DEFLATE ones inflating to their parts of it;
-/// the same image cut short or with bytes changed (its header, its tables) gives none, or chunks
-/// within the file and the disk; an image of no compressed cluster gives none.
+/// Compressed containers (`scripts/gen-containers.sh`): a qcow2 image of compressed clusters
+/// (`qemu-img convert -c`) and a streamOptimized VMDK extent. Their chunks cover the disk one after
+/// another, the compressed ones (qcow2's raw DEFLATE, VMDK's zlib) inflating to their parts of it;
+/// the same images cut short or with bytes changed (their headers, tables and markers) give none,
+/// or chunks within the file and the disk; an uncompressed one gives none.
 #[test]
-fn qcow2_compressed_chunks() {
-    let (disk, d) = (fixture("disk.img"), fixture("disk-c.qcow2"));
-    let u = aqr_disk::container::qcow2_chunks(&d).unwrap();
-    assert_eq!(u.len, disk.len() as u64);
-    let mut chunks = u.chunks.clone();
-    chunks.sort_by_key(|c| c.disk.start);
-    let (mut at, mut deflated) = (0, 0);
-    for c in &chunks {
-        assert_eq!(c.disk.start, at);
-        at = c.disk.end;
-        let want = &disk[c.disk.start as usize..c.disk.end as usize];
-        match c.how {
-            aqr_disk::dmg::How::Zeros => assert!(want.iter().all(|&b| b == 0)),
-            aqr_disk::dmg::How::Raw => assert!(&d[c.file.clone()] == want),
-            aqr_disk::dmg::How::Deflate => {
-                let mut out = Vec::new();
-                std::io::Read::read_to_end(&mut flate2::read::DeflateDecoder::new(&d[c.file.clone()]), &mut out)
-                    .unwrap();
-                assert!(out == want);
-                deflated += 1;
+fn compressed_container_chunks() {
+    let disk = fixture("disk.img");
+    for (name, at) in [("disk-c.qcow2", 0x30000), ("disk-s.vmdk", 0x10000)] {
+        let d = fixture(name);
+        let u = aqr_disk::chunked::container(&d).unwrap_or_else(|| panic!("{name}"));
+        assert_eq!(u.len, disk.len() as u64, "{name}");
+        let mut chunks = u.chunks.clone();
+        chunks.sort_by_key(|c| c.disk.start);
+        let (mut end, mut compressed) = (0, 0);
+        for c in &chunks {
+            assert_eq!(c.disk.start, end, "{name}");
+            end = c.disk.end;
+            let want = &disk[c.disk.start as usize..c.disk.end as usize];
+            let mut out = Vec::new();
+            match c.how {
+                aqr_disk::chunked::How::Zeros => assert!(want.iter().all(|&b| b == 0), "{name}"),
+                aqr_disk::chunked::How::Raw => assert!(&d[c.file.clone()] == want, "{name}"),
+                aqr_disk::chunked::How::Deflate => {
+                    std::io::Read::read_to_end(&mut flate2::read::DeflateDecoder::new(&d[c.file.clone()]), &mut out)
+                        .unwrap();
+                }
+                aqr_disk::chunked::How::Zlib => {
+                    std::io::Read::read_to_end(&mut flate2::read::ZlibDecoder::new(&d[c.file.clone()]), &mut out)
+                        .unwrap();
+                }
+                how => panic!("{name}: {how:?}"),
             }
-            how => panic!("{how:?}"),
-        }
-    }
-    assert_eq!(at, u.len);
-    assert!(deflated > 100, "{deflated}");
-    assert!(aqr_disk::container::qcow2_chunks(&fixture("disk.qcow2")).is_none());
-    for n in [0, 103, 104, 4096, d.len() / 2, d.len() - 1] {
-        let e = &d[..n];
-        if let Some(u) = aqr_disk::container::qcow2_chunks(e) {
-            assert!(u.chunks.iter().all(|c| c.file.end <= e.len()), "cut at {n}");
-        }
-    }
-    for p in (0..104).chain((0x30000..0x30400).step_by(3)) {
-        for v in [0x00, 0xff, d[p] ^ 0x40] {
-            let mut e = d.clone();
-            e[p] = v;
-            if let Some(u) = aqr_disk::container::qcow2_chunks(&e) {
-                assert!(u.chunks.iter().all(|c| c.file.end <= e.len()), "byte {p} = {v:#x}");
+            if !out.is_empty() {
+                assert!(out == want, "{name}");
+                compressed += 1;
             }
         }
+        assert_eq!(end, u.len, "{name}");
+        assert!(compressed > 100, "{name}: {compressed}");
+        let within = |e: &[u8], what: &str| {
+            if let Some(u) = aqr_disk::chunked::container(e) {
+                assert!(u.chunks.iter().all(|c| c.file.end <= e.len() && c.disk.end <= u.len), "{name}, {what}");
+            }
+        };
+        for n in [0, 103, 104, 512, 4096, d.len() / 2, d.len() - 1] {
+            within(&d[..n], &format!("cut at {n}"));
+        }
+        for p in (0..512).chain((at..at + 0x400).step_by(3)) {
+            for v in [0x00, 0xff, d[p] ^ 0x40] {
+                let mut e = d.clone();
+                e[p] = v;
+                within(&e, &format!("byte {p} = {v:#x}"));
+            }
+        }
     }
+    assert!(aqr_disk::chunked::container(&fixture("disk.qcow2")).is_none());
+    assert!(aqr_disk::chunked::container(&fixture("disk.vmdk")).is_none());
 }

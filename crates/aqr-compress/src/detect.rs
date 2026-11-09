@@ -392,8 +392,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
     } else if start && aqr_disk::starts(d, crate::bundle::FILE_SYSTEMS) {
         // (before the others: a hybrid image starts with a boot sector, or anything)
         Some(Format::Disk)
-    } else if start && aqr_disk::container::qcow2_chunks(d).is_some() {
-        // (a qcow2 image of compressed clusters, whose file systems are in them: `chunked`)
+    } else if start && aqr_disk::chunked::container(d).is_some() {
+        // (a compressed container, whose file systems are in its compressed chunks: `chunked`)
         Some(Format::Disk)
     } else if start && crate::chunked::starts(d) {
         Some(Format::Dmg)
