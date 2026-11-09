@@ -5,16 +5,21 @@
 //! entry point (see aqr-formula); `FORMAT.md` tells what the formula holds.
 //!
 //! The file systems are read by crates of their own (aqr-iso, …), each a [`FileSystem`] that
-//! gives the files of a volume and their extents; [`files`] runs them on the image and on each
-//! partition of its partition table ([`partition`]), and [`pieces`] lays the extents out.
+//! gives the files of a volume and their extents; [`files`] runs them on the disk (the image, or
+//! the virtual disk of its [`container`]) and on each partition of its partition table
+//! ([`partition`]), and [`pieces`] lays the extents out over the image.
 
+pub mod container;
 pub mod formula;
+pub mod image;
 pub mod partition;
 
 use std::ops::Range;
 
+pub use image::{Image, Plain, Sub};
+
 /// A file of a file system: its path (of `/` separators, as UTF-8) and its contents, byte ranges
-/// of the image in order (of the volume, as a [`FileSystem`] gives them).
+/// in order (of the volume, as a [`FileSystem`] gives them; of the image, as [`files`] does).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct File {
     pub name: Vec<u8>,
@@ -29,16 +34,17 @@ pub struct File {
 pub struct FileSystem {
     pub name: &'static str,
     /// Whether a volume starts like one (its superblock's magic bytes, as cheap as that).
-    pub starts: fn(&[u8]) -> bool,
+    pub starts: fn(&dyn Image) -> bool,
     /// The files of a volume it starts ([`FileSystem::starts`]), their extents of it: as many as
-    /// can be read, whatever the bytes.
-    pub files: fn(&[u8]) -> Vec<File>,
+    /// can be read, whatever the bytes, reading only what it needs (of a container, each read
+    /// puts its bytes together).
+    pub files: fn(&dyn Image) -> Vec<File>,
 }
 
-/// The parts of image `d` a file system may be on: all of it, then each partition of its
+/// The parts of disk `d` a file system may be on: all of it, then each partition of its
 /// partition table (but one starting where it does, as an ISO 9660 image's own partitions do),
 /// cut at its end.
-pub fn volumes(d: &[u8]) -> Vec<Range<usize>> {
+pub fn volumes(d: &dyn Image) -> Vec<Range<usize>> {
     #[allow(clippy::single_range_in_vec_init)]
     let mut out = vec![0..d.len()];
     let within = |s: Range<usize>| (s.start > 0 && s.start < d.len()).then(|| s.start..s.end.min(d.len()));
@@ -46,26 +52,46 @@ pub fn volumes(d: &[u8]) -> Vec<Range<usize>> {
     out
 }
 
-/// Whether image `d` has a volume one of `file_systems` starts ([`volumes`]).
-pub fn starts(d: &[u8], file_systems: &[FileSystem]) -> bool {
+/// Whether disk `d` has a volume one of `file_systems` starts ([`volumes`]).
+fn starts_on(d: &dyn Image, file_systems: &[FileSystem]) -> bool {
     // (all of it first, the partitions only where it is none)
-    let on = |v: &Range<usize>| file_systems.iter().any(|fs| (fs.starts)(&d[v.clone()]));
+    let on = |v: &Range<usize>| file_systems.iter().any(|fs| (fs.starts)(&Sub { of: d, span: v.clone() }));
     on(&(0..d.len())) || volumes(d)[1..].iter().any(on)
 }
 
-/// The files of every volume of image `d` ([`volumes`]): of each, those of the first of
-/// `file_systems` that starts it, their extents of the image.
-pub fn files(d: &[u8], file_systems: &[FileSystem]) -> Vec<File> {
+/// Whether image `d` (a disk, or a container of one: [`container`]) has a volume one of
+/// `file_systems` starts.
+pub fn starts(d: &[u8], file_systems: &[FileSystem]) -> bool {
+    match container::open(d) {
+        Some(m) => starts_on(&m, file_systems),
+        None => starts_on(&Plain(d), file_systems),
+    }
+}
+
+/// The files of every volume of disk `d` ([`volumes`]): of each, those of the first of
+/// `file_systems` that starts it, their extents of the disk.
+fn files_on(d: &dyn Image, file_systems: &[FileSystem]) -> Vec<File> {
     let mut out = Vec::new();
     for v in volumes(d) {
-        let vd = &d[v.clone()];
-        let Some(fs) = file_systems.iter().find(|fs| (fs.starts)(vd)) else { continue };
-        let mut files = (fs.files)(vd);
+        let vd = Sub { of: d, span: v.clone() };
+        let Some(fs) = file_systems.iter().find(|fs| (fs.starts)(&vd)) else { continue };
+        let mut files = (fs.files)(&vd);
         for f in &mut files {
             // (an extent past the volume's end is left to [`pieces`] to cut at the image's)
             f.extents.iter_mut().for_each(|r| *r = r.start.saturating_add(v.start)..r.end.saturating_add(v.start));
         }
         out.extend(files);
+    }
+    out
+}
+
+/// The files of image `d` ([`files_on`] of its disk), their extents of the image: of a
+/// container, where the disk's are in it, those of blocks it does not hold (zeros) left out.
+pub fn files(d: &[u8], file_systems: &[FileSystem]) -> Vec<File> {
+    let Some(m) = container::open(d) else { return files_on(&Plain(d), file_systems) };
+    let mut out = files_on(&m, file_systems);
+    for f in &mut out {
+        f.extents = f.extents.iter().flat_map(|r| m.translate(r.start.min(m.len())..r.end.min(m.len()))).collect();
     }
     out
 }

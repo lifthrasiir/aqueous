@@ -9,4 +9,6 @@ publish = false
 aqr-formula = { path = "../../crates/aqr-formula" }
 
 [dev-dependencies]
+# (a file system to read the containers' disks with)
+aqr-ext = { path = "../aqr-ext" }
 zstd = "0.13"

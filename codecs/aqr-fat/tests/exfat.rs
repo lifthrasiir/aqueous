@@ -41,8 +41,8 @@ fn contents(d: &[u8], f: &aqr_fat::File) -> Vec<u8> {
 #[test]
 fn files_found() {
     let d = fixture("exfat");
-    assert!(aqr_fat::exfat::starts(&d));
-    let files = aqr_fat::exfat::files(&d);
+    assert!(aqr_fat::exfat::starts(&aqr_disk::Plain(&d)));
+    let files = aqr_fat::exfat::files(&aqr_disk::Plain(&d));
     for (name, data) in expected() {
         let f = files.iter().find(|f| f.name == name.as_bytes()).unwrap_or_else(|| panic!("{name} not found"));
         assert!(contents(&d, f) == data, "{name}");
@@ -95,7 +95,7 @@ fn damaged() {
 
 #[test]
 fn starts_only_exfat() {
-    assert!(!aqr_fat::exfat::starts(&[0; 4096]));
+    assert!(!aqr_fat::exfat::starts(&aqr_disk::Plain(&[0; 4096])));
     let mut seed = 1u64;
     let noise: Vec<u8> = (0..4096)
         .map(|_| {
@@ -105,8 +105,8 @@ fn starts_only_exfat() {
             seed as u8
         })
         .collect();
-    assert!(!aqr_fat::exfat::starts(&noise));
+    assert!(!aqr_fat::exfat::starts(&aqr_disk::Plain(&noise)));
     for n in ["fat12", "fat16", "fat32"] {
-        assert!(!aqr_fat::exfat::starts(&fixture(n)), "{n}");
+        assert!(!aqr_fat::exfat::starts(&aqr_disk::Plain(&fixture(n))), "{n}");
     }
 }

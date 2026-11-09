@@ -150,8 +150,10 @@ fn volume() -> Vec<u8> {
 #[test]
 fn extension_records() {
     let d = volume();
-    let mut files: Vec<_> =
-        aqr_ntfs::files(&d).into_iter().map(|f| (String::from_utf8(f.name).unwrap(), f.extents)).collect();
+    let mut files: Vec<_> = aqr_ntfs::files(&aqr_disk::Plain(&d))
+        .into_iter()
+        .map(|f| (String::from_utf8(f.name).unwrap(), f.extents))
+        .collect();
     files.sort_by(|a, b| a.0.cmp(&b.0));
     let c = |n: usize| n * CLUSTER;
     assert_eq!(
@@ -175,7 +177,7 @@ fn fixups_checked() {
     // (the end of record 19's first 512 bytes)
     let at = 2 * CLUSTER + 19 * RECORD + 510;
     d[at] ^= 1;
-    let files = aqr_ntfs::files(&d);
+    let files = aqr_ntfs::files(&aqr_disk::Plain(&d));
     assert!(files.iter().all(|f| f.name != b"a.txt:s"));
     assert_eq!(files.len(), 2);
 }

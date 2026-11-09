@@ -7,7 +7,7 @@ use crate::{File, SECTOR, le16, le32};
 
 /// The files of every volume descriptor's tree in image `d`, Joliet's first (whose names are
 /// the longer). None where sector 16 is not a volume descriptor.
-pub fn files(d: &[u8]) -> Vec<File> {
+pub fn files(d: &dyn aqr_disk::Image) -> Vec<File> {
     let (mut joliet, mut primary) = (Vec::new(), Vec::new());
     // (a disc has a handful of descriptors; past this many, it is no list of them)
     for s in 16..16 + 64 {
@@ -17,7 +17,7 @@ pub fn files(d: &[u8]) -> Vec<File> {
         }
         // UCS-2 of levels 1 to 3
         let ucs2 = v[0] == 2 && v[88..90] == *b"%/" && matches!(v[90], b'@' | b'C' | b'E');
-        let block = le16(v, 128) as usize;
+        let block = le16(&v, 128) as usize;
         if !matches!(v[0], 1 | 2) || !block.is_power_of_two() || !(512..=SECTOR).contains(&block) {
             continue;
         }
@@ -29,14 +29,15 @@ pub fn files(d: &[u8]) -> Vec<File> {
 }
 
 /// The files below the directory of record `root`.
-fn walk(d: &[u8], root: &[u8], block: usize, ucs2: bool, out: &mut Vec<File>) {
+fn walk(d: &dyn aqr_disk::Image, root: &[u8], block: usize, ucs2: bool, out: &mut Vec<File>) {
     let mut seen = std::collections::HashSet::new();
     let mut dirs = vec![(le32(root, 2) as usize, le32(root, 10) as usize, Vec::new())];
     while let Some((lba, size, path)) = dirs.pop() {
         if !seen.insert(lba) {
             continue;
         }
-        let Some(data) = d.get(lba * block..).map(|r| &r[..size.min(r.len())]) else { continue };
+        let at = lba * block;
+        let data = d.cut(at..at.saturating_add(size));
         // the file whose next record continues it
         let mut open: Option<File> = None;
         let mut p = 0;

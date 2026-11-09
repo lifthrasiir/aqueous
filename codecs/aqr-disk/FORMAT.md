@@ -30,9 +30,11 @@ made so.
 
 ## Pieces *(encoder)*
 
-`aqr_disk::files` reads the volumes of the image (all of it, then each partition of its table
-but one at its start) with the file systems given, the first that starts a volume taking it,
-into files and their extents in bytes of the image. `aqr_disk::pieces` lays them out: extents
+`aqr_disk::files` reads the volumes of the disk (the image, or the virtual disk of its container:
+README) (all of it, then each partition of its table but one at its start) with the file systems
+given, the first that starts a volume taking it,
+into files and their extents in bytes of the image (of a container, where it holds the blocks of
+the disk's extents; blocks it does not hold are no part of any file). `aqr_disk::pieces` lays them out: extents
 within the image, sorted by where they start (the longest first, then of the lowest rank), each
 taken where it starts at or after the end of the one taken before, and the bytes between them
 the rest. A file's pieces are those of its extents taken, in the order of its extents. An image

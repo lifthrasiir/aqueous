@@ -13,10 +13,11 @@
 //! Left in the rest: inline data (in the inode), encrypted files, symbolic links, directories,
 //! extended attributes, the journal, and what does not read.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ops::Range;
 
-pub use aqr_disk::File;
+pub use aqr_disk::{File, Image};
 
 /// ext2, ext3 and ext4 as a file system of aqr-disk.
 pub const FS: aqr_disk::FileSystem = aqr_disk::FileSystem { name: "ext", starts, files };
@@ -52,8 +53,9 @@ struct Volume {
 
 /// The superblock of `d` (at byte 1024), where it is one: the magic, sizes the format allows; and
 /// the group descriptors' inode tables.
-fn volume(d: &[u8]) -> Option<Volume> {
+fn volume(d: &dyn Image) -> Option<Volume> {
     let s = d.get(1024..2048)?;
+    let s = &s[..];
     if le16(s, 56) != 0xef53 {
         return None;
     }
@@ -108,6 +110,7 @@ fn volume(d: &[u8]) -> Option<Volume> {
         };
         let p = at.checked_mul(block)?.checked_add((g % per_block) * desc as u64)?;
         let Some(e) = usize::try_from(p).ok().and_then(|p| d.get(p..p + desc)) else { break };
+        let e = &e[..];
         let hi = if wide && desc >= 64 { (le32(e, 0x28) as u64) << 32 } else { 0 };
         tables.push(le32(e, 8) as u64 | hi);
     }
@@ -117,18 +120,18 @@ fn volume(d: &[u8]) -> Option<Volume> {
 
 /// Where the inode table of each group of ext volume `d` starts (a block), as its descriptors
 /// tell: for tools and tests.
-pub fn inode_tables(d: &[u8]) -> Vec<u64> {
+pub fn inode_tables(d: &dyn Image) -> Vec<u64> {
     volume(d).map(|v| v.tables).unwrap_or_default()
 }
 
 /// Whether `d` is an ext2, ext3 or ext4 volume ([`volume`]).
-pub fn starts(d: &[u8]) -> bool {
+pub fn starts(d: &dyn Image) -> bool {
     volume(d).is_some()
 }
 
 impl Volume {
     /// The bytes of block `n` of `d`, where it is in both.
-    fn block<'a>(&self, d: &'a [u8], n: u64) -> Option<&'a [u8]> {
+    fn block<'a>(&self, d: &'a dyn Image, n: u64) -> Option<Cow<'a, [u8]>> {
         if n >= self.blocks {
             return None;
         }
@@ -137,7 +140,7 @@ impl Volume {
     }
 
     /// Inode `n` of `d`.
-    fn inode<'a>(&self, d: &'a [u8], n: u32) -> Option<&'a [u8]> {
+    fn inode<'a>(&self, d: &'a dyn Image, n: u32) -> Option<Cow<'a, [u8]>> {
         if n == 0 || n > self.inodes {
             return None;
         }
@@ -151,7 +154,7 @@ impl Volume {
     /// The blocks of inode `i`'s data, in order of the file: runs of a logical block, a physical
     /// block and a count (unwritten extents and holes not among them), those of logical blocks
     /// before `most`.
-    fn runs(&self, d: &[u8], i: &[u8], most: u64) -> Vec<(u64, u64, u64)> {
+    fn runs(&self, d: &dyn Image, i: &[u8], most: u64) -> Vec<(u64, u64, u64)> {
         let mut out = Vec::new();
         let flags = le32(i, 32);
         if flags & 0x80000 != 0 {
@@ -164,7 +167,7 @@ impl Volume {
     }
 
     /// The extents of the node of an extent tree `n` (its header and entries), of depth `depth`.
-    fn extents(&self, d: &[u8], n: &[u8], most: u64, depth: usize, out: &mut Vec<(u64, u64, u64)>) {
+    fn extents(&self, d: &dyn Image, n: &[u8], most: u64, depth: usize, out: &mut Vec<(u64, u64, u64)>) {
         if n.len() < 12 || le16(n, 0) != 0xf30a || depth > TREE {
             return;
         }
@@ -189,7 +192,7 @@ impl Volume {
                 let child = (le16(e, 8) as u64) << 32 | le32(e, 4) as u64;
                 self.budget.set(self.budget.get() - 1);
                 if let Some(b) = self.block(d, child) {
-                    self.extents(d, b, most, depth + 1, out);
+                    self.extents(d, &b, most, depth + 1, out);
                 }
             }
         }
@@ -197,7 +200,7 @@ impl Volume {
 
     /// The blocks of block map `i` (12 direct, then an indirect, a double and a triple indirect
     /// block), 0 a hole.
-    fn mapped(&self, d: &[u8], i: &[u8], most: u64, out: &mut Vec<(u64, u64, u64)>) {
+    fn mapped(&self, d: &dyn Image, i: &[u8], most: u64, out: &mut Vec<(u64, u64, u64)>) {
         let per = self.block / 4;
         let mut push = |logical: u64, physical: u64| match out.last_mut() {
             Some(r) if r.0 + r.2 == logical && r.1 + r.2 == physical => r.2 += 1,
@@ -210,7 +213,7 @@ impl Volume {
             }
         }
         // (an indirect block of `level` levels from logical block `base`)
-        fn walk(v: &Volume, d: &[u8], b: u64, level: u32, base: u64, most: u64, push: &mut dyn FnMut(u64, u64)) {
+        fn walk(v: &Volume, d: &dyn Image, b: u64, level: u32, base: u64, most: u64, push: &mut dyn FnMut(u64, u64)) {
             let per = v.block / 4;
             let Some(blk) = v.block(d, b) else { return };
             let span = per.pow(level - 1);
@@ -219,7 +222,7 @@ impl Volume {
                 if logical >= most || v.budget.get() == 0 {
                     return;
                 }
-                let p = le32(blk, 4 * k as usize) as u64;
+                let p = le32(&blk, 4 * k as usize) as u64;
                 if p == 0 {
                     continue;
                 }
@@ -268,7 +271,7 @@ fn size(i: &[u8]) -> u64 {
 }
 
 /// The files of ext volume `d`.
-pub fn files(d: &[u8]) -> Vec<File> {
+pub fn files(d: &dyn Image) -> Vec<File> {
     let Some(v) = volume(d) else { return Vec::new() };
     let mut out = Vec::new();
     let mut seen = HashSet::from([ROOT]);
@@ -278,6 +281,7 @@ pub fn files(d: &[u8]) -> Vec<File> {
     let mut bytes = d.len() as u64;
     while let Some((path, n, depth)) = todo.pop() {
         let Some(dir) = v.inode(d, n) else { continue };
+        let dir = &dir[..];
         if le32(dir, 32) & 0x1000_0800 != 0 {
             // (inline or encrypted: in the rest)
             continue;
@@ -286,7 +290,7 @@ pub fn files(d: &[u8]) -> Vec<File> {
         bytes -= len;
         let runs = v.runs(d, dir, len.div_ceil(v.block));
         for r in v.ranges(&runs, len) {
-            let Some(blk) = d.get(r.start.min(d.len())..r.end.min(d.len())) else { continue };
+            let blk = d.cut(r);
             // the entries of each block: the inode, the record's length, the name's
             for b in blk.chunks(v.block as usize) {
                 let mut at = 0;
@@ -303,6 +307,7 @@ pub fn files(d: &[u8]) -> Vec<File> {
                         continue;
                     }
                     let Some(i) = v.inode(d, ino) else { continue };
+                    let i = &i[..];
                     let mode = le16(i, 0) & 0xf000;
                     let full = match path.is_empty() {
                         true => name.to_vec(),

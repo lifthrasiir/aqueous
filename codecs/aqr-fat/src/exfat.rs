@@ -8,6 +8,8 @@
 //! does not stop the reading.
 
 use crate::{File, le16, le32, le64, utf16};
+use aqr_disk::Image;
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ops::Range;
 
@@ -34,8 +36,9 @@ struct Volume {
 }
 
 /// The main boot sector read, if it is one.
-fn volume(d: &[u8]) -> Option<Volume> {
-    if d.len() < 120 || &d[3..11] != b"EXFAT   " || d[11..64].iter().any(|&b| b != 0) {
+fn volume(d: &dyn Image) -> Option<Volume> {
+    let d = &*d.get(0..120)?;
+    if &d[3..11] != b"EXFAT   " || d[11..64].iter().any(|&b| b != 0) {
         return None;
     }
     let (sector, per) = (d[108] as u32, d[109] as u32);
@@ -63,7 +66,7 @@ fn volume(d: &[u8]) -> Option<Volume> {
 }
 
 /// Whether the main boot sector of an exFAT volume is at the start.
-pub fn starts(d: &[u8]) -> bool {
+pub fn starts(d: &dyn Image) -> bool {
     volume(d).is_some()
 }
 
@@ -74,7 +77,7 @@ impl Volume {
 
     /// The byte ranges of `len` bytes from cluster `first`: contiguous with `contiguous`, else its
     /// chain in the first FAT (cut where it leaves the clusters or loops).
-    fn stream(&self, d: &[u8], first: u32, contiguous: bool, len: u64) -> Vec<Range<usize>> {
+    fn stream(&self, d: &dyn Image, fat: &[u8], first: u32, contiguous: bool, len: u64) -> Vec<Range<usize>> {
         if !self.valid(first) || len == 0 {
             return Vec::new();
         }
@@ -92,8 +95,7 @@ impl Volume {
         let most = need.min(self.entries).min(self.steps.get());
         while clusters.len() < most && self.valid(c) {
             clusters.push(c);
-            let Some(p) = (c as usize).checked_mul(4).and_then(|o| o.checked_add(self.fat)) else { break };
-            let Some(e) = d.get(p..p + 4) else { break };
+            let Some(e) = (c as usize).checked_mul(4).and_then(|p| fat.get(p..p.checked_add(4)?)) else { break };
             c = u32::from_le_bytes(e.try_into().unwrap());
         }
         self.steps.set(self.steps.get() - clusters.len());
@@ -102,7 +104,9 @@ impl Volume {
 }
 
 struct Walk<'a> {
-    d: &'a [u8],
+    d: &'a dyn Image,
+    /// The bytes of the first FAT (as many as there are).
+    fat: &'a [u8],
     v: &'a Volume,
     /// The first clusters of the directories read.
     seen: HashSet<u32>,
@@ -115,10 +119,9 @@ impl Walk<'_> {
     fn dir(&mut self, path: &[u8], extents: &[Range<usize>], depth: usize) {
         let mut bytes = Vec::new();
         for r in extents {
-            let (s, e) = (r.start.min(self.d.len()), r.end.min(self.d.len()));
-            let n = (e - s).min(self.budget);
-            bytes.extend_from_slice(&self.d[s..s + n]);
-            self.budget -= n;
+            let part = self.d.cut(r.start..r.end.min(r.start.saturating_add(self.budget)));
+            bytes.extend_from_slice(&part);
+            self.budget -= part.len();
         }
         let mut i = 0;
         while let Some(e) = bytes.get(i * 32..i * 32 + 32) {
@@ -154,11 +157,11 @@ impl Walk<'_> {
             if attributes & 0x10 != 0 {
                 // each directory once, and not too deep
                 if depth < DEPTH && self.v.valid(first) && self.seen.insert(first) {
-                    let extents = self.v.stream(self.d, first, contiguous, length);
+                    let extents = self.v.stream(self.d, self.fat, first, contiguous, length);
                     self.dir(&full, &extents, depth + 1);
                 }
             } else {
-                let extents = self.v.stream(self.d, first, contiguous, valid.min(length));
+                let extents = self.v.stream(self.d, self.fat, first, contiguous, valid.min(length));
                 self.out.push(File { name: full, extents, rank: 0 });
             }
         }
@@ -166,11 +169,13 @@ impl Walk<'_> {
 }
 
 /// The files of the directory tree, empty ones too.
-pub fn files(d: &[u8]) -> Vec<File> {
+pub fn files(d: &dyn Image) -> Vec<File> {
     let Some(v) = volume(d) else { return Vec::new() };
-    let mut w = Walk { d, v: &v, seen: HashSet::new(), budget: d.len(), out: Vec::new() };
+    // (the first FAT, once: of a container every read puts its bytes together)
+    let fat: Cow<[u8]> = d.cut(v.fat..v.fat.saturating_add(v.entries.saturating_mul(4)));
+    let mut w = Walk { d, fat: &fat, v: &v, seen: HashSet::new(), budget: d.len(), out: Vec::new() };
     w.seen.insert(v.root);
-    let root = v.stream(d, v.root, false, u64::MAX);
+    let root = v.stream(d, &fat, v.root, false, u64::MAX);
     w.dir(&[], &root, 0);
     w.out
 }

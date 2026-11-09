@@ -68,7 +68,7 @@ fn files_of_each_tree() {
 #[test]
 fn trees_found() {
     let d = fixture("iso-joliet-udf102.iso");
-    let files = aqr_iso::files(&d);
+    let files = aqr_iso::files(&aqr_disk::Plain(&d));
     // the empty file too, in each of the three trees
     for rank in 0..3 {
         assert_eq!(files.iter().filter(|f| f.rank == rank).count(), 6, "rank {rank}");
@@ -127,7 +127,7 @@ fn no_raw_contents() {
 #[test]
 fn metadata_partition_not_read() {
     let d = fixture("udf250.iso");
-    assert!(aqr_iso::starts(&d));
+    assert!(aqr_iso::starts(&aqr_disk::Plain(&d)));
     assert!(encode(&d).is_none());
 }
 

@@ -27,12 +27,12 @@ fn le32(b: &[u8], p: usize) -> u32 {
 
 /// Whether `d` starts like an image: a volume structure descriptor at sector 16 (`CD001` of
 /// ISO 9660, `BEA01` of UDF's recognition sequence).
-pub fn starts(d: &[u8]) -> bool {
-    d.get(16 * SECTOR + 1..16 * SECTOR + 6).is_some_and(|m| m == b"CD001" || m == b"BEA01")
+pub fn starts(d: &dyn aqr_disk::Image) -> bool {
+    d.get(16 * SECTOR + 1..16 * SECTOR + 6).is_some_and(|m| *m == *b"CD001" || *m == *b"BEA01")
 }
 
 /// The files of every directory tree of image `d`, UDF's first.
-pub fn files(d: &[u8]) -> Vec<File> {
+pub fn files(d: &dyn aqr_disk::Image) -> Vec<File> {
     let mut out = udf::files(d);
     out.extend(iso9660::files(d));
     out

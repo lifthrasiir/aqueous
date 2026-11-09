@@ -4,6 +4,8 @@
 
 use std::ops::Range;
 
+use crate::image::Image;
+
 /// A partition: where it is in the image (perhaps past its end, of an image cut short).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Partition {
@@ -46,7 +48,7 @@ fn span(start: u64, n: u64, unit: u64) -> Option<Range<usize>> {
 
 /// The partitions of image `d`, in the order of its table: of its GPT where it has one, else of
 /// its MBR, else of its APM. None where it has none of them.
-pub fn partitions(d: &[u8]) -> Vec<Partition> {
+pub fn partitions(d: &dyn Image) -> Vec<Partition> {
     let (gpt, mbr) = (gpt(d), mbr(d));
     let (spans, scheme) = match () {
         _ if !gpt.is_empty() => (gpt, Scheme::Gpt),
@@ -59,7 +61,7 @@ pub fn partitions(d: &[u8]) -> Vec<Partition> {
 /// An MBR's partitions (of 512-byte sectors): its primary ones, and the logical ones of its
 /// extended ones, but GPT's protective one. None where any of its four entries is not one (a
 /// boot sector of a volume, or other data).
-pub fn mbr(d: &[u8]) -> Vec<Range<usize>> {
+pub fn mbr(d: &dyn Image) -> Vec<Range<usize>> {
     const SECTOR: u64 = 512;
     let table = |s: &[u8]| -> Option<[(u8, u64, u64); 4]> {
         if s.get(510..512)? != [0x55, 0xaa] {
@@ -76,7 +78,7 @@ pub fn mbr(d: &[u8]) -> Vec<Range<usize>> {
         Some(out)
     };
     let extended = |t: u8| matches!(t, 0x05 | 0x0f | 0x85);
-    let Some(primary) = table(d) else { return Vec::new() };
+    let Some(primary) = d.get(0..512).and_then(|s| table(&s)) else { return Vec::new() };
     let mut out = Vec::new();
     for (t, start, n) in primary {
         if t == 0 || t == 0xee || n == 0 || start == 0 {
@@ -91,7 +93,7 @@ pub fn mbr(d: &[u8]) -> Vec<Range<usize>> {
         let mut ebr = start;
         for _ in 0..MOST {
             let Some(s) = span(ebr, 1, SECTOR).and_then(|r| d.get(r)) else { break };
-            let Some([(t0, s0, n0), (t1, s1, n1), ..]) = table(s) else { break };
+            let Some([(t0, s0, n0), (t1, s1, n1), ..]) = table(&s) else { break };
             if t0 != 0 && n0 > 0 && s0 > 0 {
                 out.extend(ebr.checked_add(s0).and_then(|s| span(s, n0, SECTOR)));
             }
@@ -110,21 +112,21 @@ pub fn mbr(d: &[u8]) -> Vec<Range<usize>> {
 /// A GPT's partitions, of sectors of 512 bytes, or else of 4096: its primary header's (its
 /// checksums not checked: a file system is known by its own bytes anyway), the entries of a
 /// type in use.
-pub fn gpt(d: &[u8]) -> Vec<Range<usize>> {
+pub fn gpt(d: &dyn Image) -> Vec<Range<usize>> {
     for sector in [512u64, 4096] {
         let Some(h) = d.get(sector as usize..sector as usize + 92) else { break };
-        if &h[..8] != b"EFI PART" || le32(h, 12) < 92 {
+        if &h[..8] != b"EFI PART" || le32(&h, 12) < 92 {
             continue;
         }
-        let (entries, count, size) = (le64(h, 72), le32(h, 80) as usize, le32(h, 84) as usize);
+        let (entries, count, size) = (le64(&h, 72), le32(&h, 80) as usize, le32(&h, 84) as usize);
         if !(128..=4096).contains(&size) || size % 8 != 0 {
             continue;
         }
         let Some(at) = entries.checked_mul(sector).and_then(|a| usize::try_from(a).ok()) else { continue };
         let mut out = Vec::new();
         for i in 0..count.min(MOST) {
-            let Some(e) = d.get(at + i * size..).and_then(|e| e.get(..128)) else { break };
-            let (first, last) = (le64(e, 32), le64(e, 40));
+            let Some(e) = d.get(at + i * size..at + i * size + 128) else { break };
+            let (first, last) = (le64(&e, 32), le64(&e, 40));
             if e[..16] == [0; 16] || last < first {
                 continue;
             }
@@ -137,22 +139,22 @@ pub fn gpt(d: &[u8]) -> Vec<Range<usize>> {
 
 /// An Apple partition map's partitions, but the map itself and free space: of blocks of the
 /// size its driver descriptor (block 0) tells, where it has one, else of 512 bytes.
-pub fn apm(d: &[u8]) -> Vec<Range<usize>> {
-    let block = match d.get(..4) {
-        Some(b) if &b[..2] == b"ER" && matches!(be16(b, 2), 512 | 1024 | 2048 | 4096) => be16(b, 2) as usize,
+pub fn apm(d: &dyn Image) -> Vec<Range<usize>> {
+    let block = match d.get(0..4) {
+        Some(b) if &b[..2] == b"ER" && matches!(be16(&b, 2), 512 | 1024 | 2048 | 4096) => be16(&b, 2) as usize,
         _ => 512,
     };
-    let entry = |i: usize| d.get(i * block..).and_then(|e| e.get(..80)).filter(|e| &e[..2] == b"PM");
+    let entry = |i: usize| d.get(i * block..i * block + 80).filter(|e| &e[..2] == b"PM");
     let Some(first) = entry(1) else { return Vec::new() };
     let mut out = Vec::new();
-    for i in 1..=(be32(first, 4) as usize).min(MOST) {
+    for i in 1..=(be32(&first, 4) as usize).min(MOST) {
         let Some(e) = entry(i) else { break };
         let kind = &e[48..80];
         let kind = &kind[..kind.iter().position(|&b| b == 0).unwrap_or(32)];
         if kind.eq_ignore_ascii_case(b"Apple_partition_map") || kind.eq_ignore_ascii_case(b"Apple_Free") {
             continue;
         }
-        out.extend(span(be32(e, 8) as u64, be32(e, 12) as u64, block as u64));
+        out.extend(span(be32(&e, 8) as u64, be32(&e, 12) as u64, block as u64));
     }
     out
 }

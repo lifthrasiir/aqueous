@@ -127,7 +127,8 @@ pub enum Format {
     /// Disk image (aqr-disk): a volume of a file system read (ISO 9660 or UDF, aqr-iso's, known
     /// by the descriptor at sector 16; FAT or exFAT, aqr-fat's, and NTFS, aqr-ntfs's, by the boot
     /// sector; ext2/3/4, aqr-ext's, by the superblock), all of it or a partition of its MBR, GPT or
-    /// APM: at the start of data only.
+    /// APM, of the disk or of the virtual disk of a VHD, VHDX, VMDK, qcow2 or VDI container: at the
+    /// start of data only.
     Disk,
     /// WIM file of LZX or of no compression (aqr-wim, and aqr-lzx on its chunks), known by its
     /// header: at the start of data only.
@@ -326,7 +327,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"h5" | b"hdf5" | b"he5" | b"h5ad" | b"nwb" => format(Format::Hdf5),
         b"ldb" => format(Format::LevelDb),
         b"tar" => format(Format::Tar),
-        b"iso" | b"img" => format(Format::Disk),
+        b"iso" | b"img" | b"vhd" | b"vhdx" | b"vmdk" | b"qcow2" | b"vdi" => format(Format::Disk),
         b"wim" => format(Format::Wim),
         b"asar" => format(Format::Asar),
         b"jsonlz4" | b"mozlz4" | b"baklz4" => format(Format::Lz4),

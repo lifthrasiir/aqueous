@@ -34,7 +34,7 @@ fn expected(cluster: usize) -> Vec<(String, Vec<u8>)> {
 
 /// The files of `d` read, by name, with their contents and their extents.
 fn read(d: &[u8]) -> Vec<(String, Vec<u8>, usize)> {
-    let mut out: Vec<_> = aqr_fat::fat::files(d)
+    let mut out: Vec<_> = aqr_fat::fat::files(&aqr_disk::Plain(d))
         .into_iter()
         .map(|f| {
             let data = f.extents.iter().flat_map(|r| d[r.clone()].to_vec()).collect();
@@ -53,7 +53,7 @@ fn files_of_each_width() {
         let d = fixture(name);
         // (the bytes of a cluster, as the script read them)
         let cluster = u16::from_le_bytes([d[11], d[12]]) as usize * d[13] as usize;
-        assert!(aqr_fat::fat::starts(&d), "{name}");
+        assert!(aqr_fat::fat::starts(&aqr_disk::Plain(&d)), "{name}");
         let got = read(&d);
         for (want, data) in expected(cluster) {
             let Some(g) = got.iter().find(|g| g.0 == want) else { panic!("{name}: {want} not found in {got:?}") };
@@ -70,14 +70,14 @@ fn files_of_each_width() {
 
 #[test]
 fn not_fat() {
-    assert!(!aqr_fat::fat::starts(&[0; 4096]));
+    assert!(!aqr_fat::fat::starts(&aqr_disk::Plain(&[0; 4096])));
     let noise: Vec<u8> = (0..65536u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
-    assert!(!aqr_fat::fat::starts(&noise));
-    assert!(!aqr_fat::fat::starts(&fixture("exfat.img")));
+    assert!(!aqr_fat::fat::starts(&aqr_disk::Plain(&noise)));
+    assert!(!aqr_fat::fat::starts(&aqr_disk::Plain(&fixture("exfat.img"))));
     // (an MBR's sector, of a FAT volume in a partition)
     let z = std::fs::read(format!("{}/../aqr-disk/tests/data/mbr.img.zst", env!("CARGO_MANIFEST_DIR"))).unwrap();
     let mbr = zstd::stream::decode_all(&z[..]).unwrap();
-    assert!(!aqr_fat::fat::starts(&mbr) && aqr_fat::fat::starts(&mbr[512..]));
+    assert!(!aqr_fat::fat::starts(&aqr_disk::Plain(&mbr)) && aqr_fat::fat::starts(&aqr_disk::Plain(&mbr[512..])));
 }
 
 /// Volumes cut short or with bytes changed: no panic, and a formula, where there is one, gives the
@@ -133,7 +133,7 @@ fn chains_met() {
     for e in d[root..root + entries * 32].as_chunks_mut::<32>().0 {
         e.copy_from_slice(b"BIG     BIN\x20\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x02\0\xff\xff\xff\xff");
     }
-    let files = aqr_fat::fat::files(&d);
+    let files = aqr_fat::fat::files(&aqr_disk::Plain(&d));
     assert_eq!(files.len(), entries);
     let bytes: usize = files.iter().flat_map(|f| &f.extents).map(|r| r.len()).sum();
     assert!(bytes > count * cluster && bytes <= (2 * count + 1024) * cluster, "{bytes}");

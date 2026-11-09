@@ -370,6 +370,7 @@ dependencies = [
 name = "aqr-disk"
 version = "0.1.0"
 dependencies = [
+ "aqr-ext",
  "aqr-formula",
  "zstd",
 ]

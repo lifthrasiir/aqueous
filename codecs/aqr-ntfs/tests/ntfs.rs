@@ -17,7 +17,7 @@ fn encode(d: &[u8]) -> Option<Formula> {
 
 /// The files of `d` read, by name, with their contents and their extents.
 fn read(d: &[u8]) -> Vec<(String, Vec<u8>, usize)> {
-    let mut out: Vec<_> = aqr_ntfs::files(d)
+    let mut out: Vec<_> = aqr_ntfs::files(&aqr_disk::Plain(d))
         .into_iter()
         .map(|f| {
             let data = f.extents.iter().flat_map(|r| d[r.clone()].to_vec()).collect();
@@ -49,7 +49,7 @@ fn expected() -> Vec<(String, Vec<u8>)> {
 #[test]
 fn files_found() {
     let d = fixture("ntfs.img");
-    assert!(aqr_ntfs::starts(&d));
+    assert!(aqr_ntfs::starts(&aqr_disk::Plain(&d)));
     let got = read(&d);
     for (want, data) in expected() {
         let Some(g) = got.iter().find(|g| g.0 == want) else { panic!("{want} not found") };
@@ -67,11 +67,11 @@ fn files_found() {
 
 #[test]
 fn not_ntfs() {
-    assert!(!aqr_ntfs::starts(&[0; 4096]));
+    assert!(!aqr_ntfs::starts(&aqr_disk::Plain(&[0; 4096])));
     let noise: Vec<u8> = (0..65536u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
-    assert!(!aqr_ntfs::starts(&noise));
+    assert!(!aqr_ntfs::starts(&aqr_disk::Plain(&noise)));
     let z = std::fs::read(format!("{}/../aqr-fat/tests/data/fat32.img.zst", env!("CARGO_MANIFEST_DIR"))).unwrap();
-    assert!(!aqr_ntfs::starts(&zstd::stream::decode_all(&z[..]).unwrap()));
+    assert!(!aqr_ntfs::starts(&aqr_disk::Plain(&zstd::stream::decode_all(&z[..]).unwrap())));
 }
 
 /// Volumes cut short or with bytes changed: no panic, and a formula, where there is one, gives the

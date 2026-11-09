@@ -17,7 +17,7 @@ fn encode(d: &[u8]) -> Option<Formula> {
 
 /// The files of `d` read, by name, with their contents and their extents.
 fn read(d: &[u8]) -> Vec<(String, Vec<u8>, usize)> {
-    let mut out: Vec<_> = aqr_ext::files(d)
+    let mut out: Vec<_> = aqr_ext::files(&aqr_disk::Plain(d))
         .into_iter()
         .map(|f| {
             let data = f.extents.iter().flat_map(|r| d[r.clone()].to_vec()).collect();
@@ -70,7 +70,7 @@ const FIXTURES: [(&str, usize); 3] = [("ext4.img", 4096), ("ext2.img", 1024), ("
 fn files_found() {
     for (name, block) in FIXTURES {
         let d = fixture(name);
-        assert!(aqr_ext::starts(&d), "{name}");
+        assert!(aqr_ext::starts(&aqr_disk::Plain(&d)), "{name}");
         let got = read(&d);
         for (want, data) in expected(name, block) {
             let Some(g) = got.iter().find(|g| g.0 == want) else { panic!("{name}: {want} not found") };
@@ -95,12 +95,12 @@ fn files_found() {
 
 #[test]
 fn not_ext() {
-    assert!(!aqr_ext::starts(&[0; 4096]));
+    assert!(!aqr_ext::starts(&aqr_disk::Plain(&[0; 4096])));
     let noise: Vec<u8> = (0..65536u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
-    assert!(!aqr_ext::starts(&noise));
+    assert!(!aqr_ext::starts(&aqr_disk::Plain(&noise)));
     for other in ["aqr-fat/tests/data/fat32.img.zst", "aqr-ntfs/tests/data/ntfs.img.zst"] {
         let z = std::fs::read(format!("{}/../{other}", env!("CARGO_MANIFEST_DIR"))).unwrap();
-        assert!(!aqr_ext::starts(&zstd::stream::decode_all(&z[..]).unwrap()), "{other}");
+        assert!(!aqr_ext::starts(&aqr_disk::Plain(&zstd::stream::decode_all(&z[..]).unwrap())), "{other}");
     }
 }
 
@@ -143,7 +143,7 @@ fn damaged() {
 /// [`files_found`].
 #[test]
 fn meta_groups() {
-    let tables = aqr_ext::inode_tables(&fixture("ext4m.img"));
+    let tables = aqr_ext::inode_tables(&aqr_disk::Plain(&fixture("ext4m.img")));
     assert_eq!(tables.len(), 20);
     assert_eq!(tables[15..], [185, 131082, 131092, 131102, 131112]);
 }

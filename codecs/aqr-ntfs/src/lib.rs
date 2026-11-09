@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 pub use aqr_disk::File;
+use aqr_disk::Image;
 
 /// NTFS as a file system of aqr-disk.
 pub const FS: aqr_disk::FileSystem = aqr_disk::FileSystem { name: "ntfs", starts, files };
@@ -57,8 +58,9 @@ struct Volume {
 
 /// The boot sector `d` starts with, where it is NTFS's: its OEM name, the signature, and sizes of
 /// the values it allows.
-fn volume(d: &[u8]) -> Option<Volume> {
-    let b = d.get(..512)?;
+fn volume(d: &dyn Image) -> Option<Volume> {
+    let b = d.get(0..512)?;
+    let b = &b[..];
     if &b[3..11] != b"NTFS    " || b[510..512] != [0x55, 0xaa] {
         return None;
     }
@@ -84,7 +86,7 @@ fn volume(d: &[u8]) -> Option<Volume> {
 }
 
 /// Whether `d` starts like an NTFS volume ([`volume`]).
-pub fn starts(d: &[u8]) -> bool {
+pub fn starts(d: &dyn Image) -> bool {
     volume(d).is_some()
 }
 
@@ -229,10 +231,10 @@ fn extents(runs: &[Run], cluster: u64, len: u64) -> Vec<Range<usize>> {
 }
 
 /// The files of NTFS volume `d`.
-pub fn files(d: &[u8]) -> Vec<File> {
+pub fn files(d: &dyn Image) -> Vec<File> {
     let Some(v) = volume(d) else { return Vec::new() };
     // the MFT's runs, as known: its first record's, then those its extension records add
-    let first = |d: &[u8], at: u64| -> Option<Vec<u8>> {
+    let first = |d: &dyn Image, at: u64| -> Option<Vec<u8>> {
         let s = usize::try_from(at.checked_mul(v.cluster)?).ok()?;
         fixed(d.get(s..s.checked_add(v.record)?)?.to_vec())
     };
@@ -404,7 +406,7 @@ impl MftMap {
     }
 
     /// The bytes of record `i` of `len` bytes, where they are within the runs and `d`.
-    fn record(&self, d: &[u8], i: usize, len: usize) -> Option<Vec<u8>> {
+    fn record(&self, d: &dyn Image, i: usize, len: usize) -> Option<Vec<u8>> {
         let (mut at, mut left) = ((i as u64).checked_mul(len as u64)?, len as u64);
         let mut out = Vec::with_capacity(len);
         let mut start = 0u64;
@@ -416,7 +418,7 @@ impl MftMap {
                 let from = lcn?.checked_add(at - start)?;
                 let take = left.min(start + n - at);
                 let (a, b) = (usize::try_from(from).ok()?, usize::try_from(from.checked_add(take)?).ok()?);
-                out.extend_from_slice(d.get(a..b)?);
+                out.extend_from_slice(&d.get(a..b)?);
                 (at, left) = (at + take, left - take);
             }
             start = start.saturating_add(n);

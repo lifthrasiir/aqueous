@@ -6,17 +6,25 @@
 //! sparable or metadata partition (UDF 1.50 on, rare on pressed discs) is not read, and the
 //! files in it are not found.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ops::Range;
 
+use aqr_disk::Image;
+
 use crate::{File, SECTOR, le16, le32};
 
-/// A descriptor of tag `id` at byte `at` of `d`, by its tag's checksum: the descriptor's bytes
-/// from there on.
-fn tag(d: &[u8], at: usize, id: u16) -> Option<&[u8]> {
-    let t = d.get(at..)?.get(..16)?;
+/// Whether `t` starts with the tag of a descriptor `id`, by its checksum.
+fn is_tag(t: &[u8], id: u16) -> bool {
+    let Some(t) = t.get(..16) else { return false };
     let sum = t.iter().enumerate().filter(|&(i, _)| i != 4).fold(0u8, |s, (_, &b)| s.wrapping_add(b));
-    (le16(t, 0) == id && sum == t[4]).then(|| &d[at..])
+    le16(t, 0) == id && sum == t[4]
+}
+
+/// A descriptor of tag `id` at byte `at` of `d`, by its tag's checksum: its bytes from there on,
+/// up to `max` of them (fewer at the image's end).
+fn tag(d: &dyn Image, at: usize, id: u16, max: usize) -> Option<Cow<'_, [u8]>> {
+    is_tag(&d.get(at..at.checked_add(16)?)?, id).then(|| d.cut(at..at.saturating_add(max.max(16))))
 }
 
 /// Where the logical blocks of each partition reference number start, if read.
@@ -33,25 +41,26 @@ impl Volume {
 }
 
 /// The files of the UDF file system of image `d`, if it has one.
-pub fn files(d: &[u8]) -> Vec<File> {
+pub fn files(d: &dyn Image) -> Vec<File> {
     let last = (d.len() / SECTOR).saturating_sub(1);
-    let Some(anchor) = [256, last].into_iter().find_map(|s| tag(d, s * SECTOR, 2).filter(|a| a.len() >= 24)) else {
+    let Some(anchor) = [256, last].into_iter().find_map(|s| tag(d, s * SECTOR, 2, 24).filter(|a| a.len() >= 24)) else {
         return Vec::new();
     };
-    let (len, loc) = (le32(anchor, 16) as usize, le32(anchor, 20) as usize);
+    let (len, loc) = (le32(&anchor, 16) as usize, le32(&anchor, 20) as usize);
     let (mut numbers, mut lvd) = (Vec::new(), None);
     // the main sequence: its partitions by number, and its logical volume
     for s in loc..loc + (len / SECTOR).min(64) {
         let at = s * SECTOR;
-        let Some(&id) = d.get(at..at + 2).map(|t| &t[0]) else { break };
-        match (id, tag(d, at, id as u16)) {
-            (5, Some(p)) if p.len() >= 196 => numbers.push((le16(p, 22), le32(p, 188) as usize)),
+        let Some(id) = d.get(at..at + 2).map(|t| t[0]) else { break };
+        match (id, tag(d, at, id as u16, 440 + 64 * 255)) {
+            (5, Some(p)) if p.len() >= 196 => numbers.push((le16(&p, 22), le32(&p, 188) as usize)),
             (6, Some(l)) if lvd.is_none() && l.len() >= 440 => lvd = Some(l),
             (8, Some(_)) => break,
             _ => {}
         }
     }
     let Some(lvd) = lvd.filter(|l| le32(l, 212) as usize == SECTOR) else { return Vec::new() };
+    let lvd = &lvd[..];
     // the partition maps, of type 1 only
     let (maps, mut parts, mut p) = (le32(lvd, 268) as usize, Vec::new(), 440);
     for _ in 0..maps.min(64) {
@@ -64,7 +73,7 @@ pub fn files(d: &[u8]) -> Vec<File> {
     }
     let vol = Volume { parts };
     let fsd = long_ad(&lvd[248..264]);
-    let Some(fsd) = vol.at(fsd.part, fsd.lbn).and_then(|at| tag(d, at, 256)).filter(|f| f.len() >= 416) else {
+    let Some(fsd) = vol.at(fsd.part, fsd.lbn).and_then(|at| tag(d, at, 256, 416)).filter(|f| f.len() >= 416) else {
         return Vec::new();
     };
     let root = long_ad(&fsd[400..416]);
@@ -77,11 +86,11 @@ pub fn files(d: &[u8]) -> Vec<File> {
         }
         let Some(dir) = entry(d, &vol, icb) else { continue };
         let data: Vec<u8> = match dir.inline {
-            Some(r) => d[r].to_vec(),
-            None => dir.extents.into_iter().flat_map(|r| &d[r]).copied().collect(),
+            Some(r) => d.get(r).map(Cow::into_owned).unwrap_or_default(),
+            None => dir.extents.into_iter().flat_map(|r| d.cut(r).into_owned()).collect(),
         };
         let mut p = 0;
-        while let Some(fid) = data.get(p..).and_then(|r| tag(r, 0, 257)).filter(|f| f.len() >= 38) {
+        while let Some(fid) = data.get(p..).filter(|r| is_tag(r, 257)).filter(|f| f.len() >= 38) {
             let (chars, l_fi, l_iu) = (fid[18], fid[19] as usize, le16(fid, 36) as usize);
             let Some(id) = fid.get(38 + l_iu..38 + l_iu + l_fi) else { break };
             p += (38 + l_iu + l_fi).div_ceil(4) * 4;
@@ -120,13 +129,13 @@ struct Entry {
 }
 
 /// The (extended) file entry of ICB `icb`, if it is one whose allocation descriptors are read.
-fn entry(d: &[u8], vol: &Volume, icb: Long) -> Option<Entry> {
+fn entry(d: &dyn Image, vol: &Volume, icb: Long) -> Option<Entry> {
     let at = vol.at(icb.part, icb.lbn)?;
-    let (fe, ad_at) = match tag(d, at, 261) {
+    let (fe, ad_at) = match tag(d, at, 261, SECTOR) {
         Some(fe) => (fe, 176),
-        None => (tag(d, at, 266)?, 216),
+        None => (tag(d, at, 266, SECTOR)?, 216),
     };
-    let fe = fe.get(..SECTOR.min(fe.len()))?;
+    let fe = &fe[..];
     let flags = le16(fe, 16 + 18);
     let info = u64::from_le_bytes(fe.get(56..64)?.try_into().unwrap());
     let (l_ea, l_ad) = (le32(fe, ad_at - 8) as usize, le32(fe, ad_at - 4) as usize);
@@ -135,8 +144,8 @@ fn entry(d: &[u8], vol: &Volume, icb: Long) -> Option<Entry> {
     fe.get(ads..ads_end)?;
     let mut left = usize::try_from(info).ok()?;
     let (size, mut list) = match flags & 7 {
-        0 => (8, &fe[ads..ads_end]),
-        1 => (16, &fe[ads..ads_end]),
+        0 => (8, fe[ads..ads_end].to_vec()),
+        1 => (16, fe[ads..ads_end].to_vec()),
         3 => return (l_ad >= left).then(|| Entry { extents: Vec::new(), inline: Some(at + ads..at + ads + left) }),
         _ => return None,
     };
@@ -144,8 +153,11 @@ fn entry(d: &[u8], vol: &Volume, icb: Long) -> Option<Entry> {
     // (chained lists bounded, as a loop of them would be endless)
     let mut chained = 0;
     while left > 0 {
-        let Some(ad) = list.get(..size) else { break };
-        list = &list[size..];
+        let Some(head) = list.get(..size) else { break };
+        let mut buf = [0u8; 16];
+        buf[..size].copy_from_slice(head);
+        let ad = &buf[..size];
+        list.drain(..size);
         let (len, kind) = ((le32(ad, 0) & 0x3fff_ffff) as usize, le32(ad, 0) >> 30);
         if len == 0 {
             break;
@@ -155,8 +167,9 @@ fn entry(d: &[u8], vol: &Volume, icb: Long) -> Option<Entry> {
         match kind {
             3 => {
                 chained += 1;
-                let aed = start.filter(|_| chained <= 1024).and_then(|s| tag(d, s, 258))?;
-                list = aed.get(24..24 + le32(aed, 20) as usize)?;
+                // (an allocation extent descriptor is within a block)
+                let aed = start.filter(|_| chained <= 1024).and_then(|s| tag(d, s, 258, SECTOR))?;
+                list = aed.get(24..24 + le32(&aed, 20) as usize)?.to_vec();
             }
             0 => {
                 let n = len.min(left);

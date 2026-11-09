@@ -3,7 +3,10 @@
 //! FAT32's cluster), their entries' long names (VFAT) or else short ones. A file's contents are its
 //! cluster chain up to its size.
 
+use std::borrow::Cow;
 use std::ops::Range;
+
+use aqr_disk::Image;
 
 use crate::{File, extents, le16, le32, utf16};
 
@@ -42,8 +45,8 @@ struct Volume {
 
 /// The BPB of boot sector `d`, where it is one: a jump, the signature, sizes of the values the
 /// specification allows, and a width that fits the count of clusters (FAT32's by its own fields).
-fn volume(d: &[u8]) -> Option<Volume> {
-    let b = d.get(..512)?;
+fn volume(d: &dyn Image) -> Option<Volume> {
+    let b = &*d.get(0..512)?;
     if !matches!(b[0], 0xeb | 0xe9) || b[510..512] != [0x55, 0xaa] {
         return None;
     }
@@ -89,20 +92,20 @@ fn volume(d: &[u8]) -> Option<Volume> {
 }
 
 /// Whether `d` starts like a FAT volume ([`volume`]).
-pub fn starts(d: &[u8]) -> bool {
+pub fn starts(d: &dyn Image) -> bool {
     volume(d).is_some()
 }
 
 impl Volume {
-    /// The FAT's entry of cluster `n` of volume `d`, where it is within both.
-    fn next(&self, d: &[u8], n: u32) -> Option<u32> {
+    /// The entry of cluster `n` in `fat` (the bytes of the first FAT, as many as there are), where it is within.
+    fn next(&self, fat: &[u8], n: u32) -> Option<u32> {
         let n = n as usize;
         let (at, len) = match self.width {
             Width::Fat12 => (n + n / 2, 2),
             Width::Fat16 => (n * 2, 2),
             Width::Fat32 => (n * 4, 4),
         };
-        let e = d.get(self.fat.start + at..)?.get(..len).filter(|_| at + len <= self.fat.len())?;
+        let e = fat.get(at..at + len)?;
         Some(match self.width {
             Width::Fat12 if n % 2 == 1 => (le16(e, 0) >> 4) as u32,
             Width::Fat12 => (le16(e, 0) & 0xfff) as u32,
@@ -113,7 +116,7 @@ impl Volume {
 
     /// The chain of clusters from `first`, at most `most` of them: up to its end, a bad cluster or
     /// a number of no cluster; a loop ends with the count of the clusters.
-    fn chain(&self, d: &[u8], first: u32, most: usize) -> Vec<u32> {
+    fn chain(&self, fat: &[u8], first: u32, most: usize) -> Vec<u32> {
         let end = match self.width {
             Width::Fat12 => 0xff7,
             Width::Fat16 => 0xfff7,
@@ -125,7 +128,7 @@ impl Volume {
         let mut c = first;
         while (2..=self.count + 1).contains(&c) && out.len() < most {
             out.push(c);
-            match self.next(d, c) {
+            match self.next(fat, c) {
                 Some(n) if n < end => c = n,
                 _ => break,
             }
@@ -136,18 +139,17 @@ impl Volume {
 
     /// The bytes of the directory of first cluster `first` (or the root's region), as many as
     /// there are of it.
-    fn directory(&self, d: &[u8], first: Option<u32>) -> Vec<u8> {
+    fn directory(&self, d: &dyn Image, fat: &[u8], first: Option<u32>) -> Vec<u8> {
         let first = match (first, &self.root) {
             (Some(c), _) | (None, &Err(c)) => c,
-            (None, Ok(r)) => return d.get(r.start.min(d.len())..r.end.min(d.len())).unwrap_or_default().to_vec(),
+            (None, Ok(r)) => return d.cut(r.clone()).into_owned(),
         };
         let mut out = Vec::new();
-        for r in extents(&self.chain(d, first, DIRECTORY / self.cluster), self.heap, self.cluster, DIRECTORY as u64) {
+        for r in extents(&self.chain(fat, first, DIRECTORY / self.cluster), self.heap, self.cluster, DIRECTORY as u64) {
             let (steps, bytes) = self.budget.get();
-            let r = r.start.min(d.len())..r.end.min(d.len());
-            let r = r.start..r.end.min(r.start + bytes);
-            self.budget.set((steps, bytes - r.len()));
-            out.extend_from_slice(&d[r]);
+            let bytes_of = d.cut(r.start..r.end.min(r.start.saturating_add(bytes)));
+            self.budget.set((steps, bytes - bytes_of.len()));
+            out.extend_from_slice(&bytes_of);
         }
         out
     }
@@ -182,8 +184,10 @@ struct Long {
 }
 
 /// The files of FAT volume `d`.
-pub fn files(d: &[u8]) -> Vec<File> {
+pub fn files(d: &dyn Image) -> Vec<File> {
     let Some(v) = volume(d) else { return Vec::new() };
+    // (the first FAT, once: of a container every read puts its bytes together)
+    let fat: Cow<[u8]> = d.cut(v.fat.clone());
     let mut out = Vec::new();
     // (the directories to read: their path and first cluster, None of the root region)
     let mut todo: Vec<(Vec<u8>, Option<u32>, usize)> = vec![(Vec::new(), None, 0)];
@@ -192,7 +196,7 @@ pub fn files(d: &[u8]) -> Vec<File> {
         seen.insert(c);
     }
     while let Some((path, first, depth)) = todo.pop() {
-        let dir = v.directory(d, first);
+        let dir = v.directory(d, &fat, first);
         let mut long: Option<Long> = None;
         for e in dir.as_chunks::<32>().0 {
             let e = &e[..];
@@ -254,7 +258,7 @@ pub fn files(d: &[u8]) -> Vec<File> {
             }
             let size = le32(e, 28) as u64;
             let most = size.div_ceil(v.cluster as u64) as usize;
-            let chain = if size == 0 { Vec::new() } else { v.chain(d, cluster, most) };
+            let chain = if size == 0 { Vec::new() } else { v.chain(&fat, cluster, most) };
             out.push(File { name: full, extents: extents(&chain, v.heap, v.cluster, size), rank: 0 });
         }
     }

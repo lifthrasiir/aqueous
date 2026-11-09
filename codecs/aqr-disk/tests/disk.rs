@@ -5,7 +5,7 @@ use std::ops::Range;
 
 use aqr_disk::formula::{self, Options, REST};
 use aqr_disk::partition::{self, Partition, Scheme};
-use aqr_disk::{File, FileSystem, Piece};
+use aqr_disk::{File, FileSystem, Image, Piece, Plain};
 use aqr_formula::aqr::Level;
 use aqr_formula::{Formula, Kind, Node};
 
@@ -18,12 +18,13 @@ fn fixture(name: &str) -> Vec<u8> {
 /// A file system of the tests: `TOYFS`, the number of files, then of each the number of its
 /// extents and each extent (start and length, of the volume), all u32 LE; the files named
 /// `f{i}.bin`, or `f{i}.txt` where `i` is odd.
-const TOY: FileSystem = FileSystem { name: "toy", starts: |d| d.starts_with(b"TOYFS"), files: toy_files };
+const TOY: FileSystem =
+    FileSystem { name: "toy", starts: |d| d.get(0..5).is_some_and(|m| *m == *b"TOYFS"), files: toy_files };
 
-fn toy_files(d: &[u8]) -> Vec<File> {
+fn toy_files(d: &dyn Image) -> Vec<File> {
     let mut at = 5;
     let mut u32_at = || {
-        let v = d.get(at..at + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
+        let v = d.get(at..at + 4).map(|b| u32::from_le_bytes(b[..].try_into().unwrap()) as usize);
         at += 4;
         v
     };
@@ -84,7 +85,7 @@ fn rebuilds(f: &Formula, d: &[u8]) {
 
 #[test]
 fn partitions_of_hdiutil() {
-    let of = |name: &str| partition::partitions(&fixture(name));
+    let of = |name: &str| partition::partitions(&Plain(&fixture(name)));
     let p = |span: Range<usize>, scheme| Partition { span, scheme };
     assert_eq!(of("gpt.img"), [p(0x800 * 512..0x3800 * 512, Scheme::Gpt)]);
     assert_eq!(of("mbr.img"), [p(512..0x1000 * 512, Scheme::Mbr)]);
@@ -112,7 +113,7 @@ fn logical_partitions() {
     mbr_at(&mut d, 0, &[(0x83, 1, 50), (0x0f, 100, 300)]);
     mbr_at(&mut d, 100, &[(0x07, 2, 40), (0x05, 60, 100)]);
     mbr_at(&mut d, 160, &[(0x07, 1, 20)]);
-    let spans = |d: &[u8]| partition::mbr(d);
+    let spans = |d: &[u8]| partition::mbr(&Plain(d));
     assert_eq!(spans(&d), [512..51 * 512, 102 * 512..142 * 512, 161 * 512..181 * 512]);
     // a chain back to itself ends
     mbr_at(&mut d, 160, &[(0x07, 1, 20), (0x05, 0, 1)]);
@@ -127,14 +128,14 @@ fn logical_partitions() {
 
 #[test]
 fn not_tables() {
-    assert!(partition::partitions(&[]).is_empty());
-    assert!(partition::partitions(&[0; 8192]).is_empty());
+    assert!(partition::partitions(&Plain(&[])).is_empty());
+    assert!(partition::partitions(&Plain(&[0; 8192])).is_empty());
     let noise: Vec<u8> = (0..65536u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
-    assert!(partition::partitions(&noise).is_empty());
+    assert!(partition::partitions(&Plain(&noise)).is_empty());
     // a volume's boot sector: code where the entries would be
     let mut boot = fixture("mbr.img")[512..][..4096].to_vec();
     boot[446..510].copy_from_slice(&noise[..64]);
-    assert!(partition::mbr(&boot).is_empty());
+    assert!(partition::mbr(&Plain(&boot)).is_empty());
 }
 
 #[test]
@@ -179,7 +180,7 @@ fn files_in_pieces() {
     let f = formula::encode_with(&d, &options()).unwrap();
     rebuilds(&f, &d);
     let content = |f: &File| f.extents.iter().flat_map(|r| d[r.clone()].to_vec()).collect::<Vec<_>>();
-    let files = toy_files(&d);
+    let files = toy_files(&Plain(&d));
     // raw (file 0), the rest, file 1 (text), file 2 (raw), as their first pieces come
     let classes: Vec<_> = f.streams.iter().map(|s| (&s.class[..], s.content)).collect();
     assert_eq!(classes, [("raw", true), (REST, false), ("raw", true), ("disk/text", true)]);
@@ -259,7 +260,7 @@ fn damaged() {
 #[test]
 fn pieces_of_a_file_left_out() {
     let d = toy(4096, &[&[100..200, 300..400, 500..600], &[350..450]]);
-    let files = toy_files(&d);
+    let files = toy_files(&Plain(&d));
     let pieces = aqr_disk::pieces(&d, &files);
     let taken: Vec<&Piece> = pieces.iter().filter(|p| p.file.is_some_and(|f| f.0 == 0)).collect();
     assert_eq!(taken.iter().map(|p| p.span.clone()).collect::<Vec<_>>(), [100..200, 300..400, 500..600]);
