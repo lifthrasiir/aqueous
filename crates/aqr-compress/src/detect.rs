@@ -131,6 +131,10 @@ pub enum Format {
     /// APM, of the disk or of the virtual disk of a VHD, VHDX, VMDK, qcow2 or VDI container: at the
     /// start of data only.
     Disk,
+    /// UDIF image (`.dmg`) of zlib's chunks (aqr-disk's `dmg`, aqr-compress's own formula: the
+    /// disk a content), known by its trailer: all of the data only. (One of raw chunks is a
+    /// container of [`Format::Disk`].)
+    Dmg,
     /// WIM file of LZX or of no compression (aqr-wim, and aqr-lzx on its chunks), known by its
     /// header: at the start of data only.
     Wim,
@@ -153,7 +157,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 58] = [
+    pub const ALL: [Format; 59] = [
         Format::Pe,
         Format::MachO,
         Format::Elf,
@@ -205,6 +209,7 @@ impl Format {
         Format::Tar,
         Format::Cpio,
         Format::Disk,
+        Format::Dmg,
         Format::Wim,
         Format::Asar,
         Format::Xsv,
@@ -267,6 +272,7 @@ impl Format {
             Format::Tar => "tar",
             Format::Cpio => "cpio",
             Format::Disk => "disk",
+            Format::Dmg => "dmg",
             Format::Wim => "wim",
             Format::Asar => "asar",
             Format::Xsv => "xsv",
@@ -329,6 +335,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"ldb" => format(Format::LevelDb),
         b"tar" => format(Format::Tar),
         b"iso" | b"img" | b"vhd" | b"vhdx" | b"vmdk" | b"qcow2" | b"vdi" => format(Format::Disk),
+        b"dmg" => format(Format::Dmg),
         b"wim" => format(Format::Wim),
         b"asar" => format(Format::Asar),
         b"jsonlz4" | b"mozlz4" | b"baklz4" => format(Format::Lz4),
@@ -385,6 +392,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
     } else if start && aqr_disk::starts(d, crate::bundle::FILE_SYSTEMS) {
         // (before the others: a hybrid image starts with a boot sector, or anything)
         Some(Format::Disk)
+    } else if start && crate::dmg::starts(d) {
+        Some(Format::Dmg)
     } else if start && aqr_wim::wim::starts(d) {
         Some(Format::Wim)
     } else if start && aqr_asar::starts(d) {

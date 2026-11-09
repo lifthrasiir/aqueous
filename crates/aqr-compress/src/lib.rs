@@ -126,6 +126,7 @@ mod aqueous;
 mod archive;
 mod bundle;
 mod detect;
+mod dmg;
 mod dwarf;
 mod exe;
 mod extent;
@@ -2750,6 +2751,7 @@ fn recompressor(format: Format) -> Recompressor {
         Format::Bvx => Cx(|d, _, opt, _, cx| bvx(d, opt, cx)),
         Format::Ar | Format::Tar | Format::Cpio => Cx(|d, _, _, _, _| bundle::bundle(d)),
         Format::Disk => Cx(|d, _, opt, _, _| bundle::disk(d, opt.threads)),
+        Format::Dmg => Cx(|d, _, opt, _, cx| dmg::dmg(d, opt, cx)),
         Format::Asar => Cx(|d, _, _, _, _| bundle::asar(d)),
     }
 }
@@ -2767,7 +2769,7 @@ fn heap_per_byte(format: Format) -> f64 {
     match format {
         // in parts (segments, chunks, the data of each application made as it is needed), or
         // slices of the input and entries made apart
-        Jsonl | ProRes | Wim | Disk | Ar | Tar | Cpio | Asar | Aqr | Ppmd => 0.0,
+        Jsonl | ProRes | Wim | Disk | Dmg | Ar | Tar | Cpio | Asar | Aqr | Ppmd => 0.0,
         // blocks of 64 MiB, or slices with an index of frames
         Obj | Mkv => 3.0,
         // FASTA: segments of 256 MiB, the encoder holding a whole segment (heap peaks of
@@ -3837,7 +3839,8 @@ mod tests {
             files.push(aqr_disk::File { name: name.to_vec(), extents: vec![span.clone()], rank: 0, compressed: None });
             pieces.push(aqr_disk::Piece { span, file: Some((i, 0)) });
         }
-        let opt = aqr_disk::formula::Options { file_systems: bundle::FILE_SYSTEMS, kind: kind_by_name, ..Default::default() };
+        let opt =
+            aqr_disk::formula::Options { file_systems: bundle::FILE_SYSTEMS, kind: kind_by_name, ..Default::default() };
         let mut f = aqr_disk::formula::build(&d, &files, &pieces, &opt);
         let opt = Options { threads: 2, shared_modules: true, ..Options::default() };
         let cx = Cx::new(&d, &opt);
@@ -3880,6 +3883,61 @@ mod tests {
         assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
     }
 
+    /// UDIF images (aqr-disk's fixtures, of an HFS+ volume): of zlib's chunks, its own formula (the
+    /// disk a content, taken apart in turn: its JPEG file by aqr-jpeg; the chunks by zlib's
+    /// emulation), of raw ones a container of the disk; both given back.
+    #[test]
+    fn dmg_taken_apart() {
+        let fixture = |name: &str| {
+            let p = format!("{}/../../codecs/aqr-disk/tests/data/{name}.zst", env!("CARGO_MANIFEST_DIR"));
+            zstd::stream::decode_all(&std::fs::read(p).unwrap()[..]).unwrap()
+        };
+        let opt = Options { threads: 2, shared_modules: true, ..Options::default() };
+        let d = fixture("dmg-udzo.dmg");
+        assert_eq!(detect(&d), Some(Format::Dmg));
+        // (hdiutil's zlib emulated: its records next to nothing)
+        let f = dmg::dmg(&d, &opt, &Cx::new(&d, &opt)).unwrap();
+        let records: usize = f.streams.iter().filter(|s| s.class == "flate/record").map(|s| s.data.len()).sum();
+        let chunks = aqr_disk::dmg::parse(&d).unwrap().chunks;
+        let zlib: usize = chunks.iter().filter(|c| c.how == aqr_disk::dmg::How::Zlib).map(|c| c.file.len()).sum();
+        assert!(records * 50 < zlib, "records {records} of {zlib} B");
+        let (c, f) = compress_formula(&d, &opt);
+        assert!(f.applies().iter().any(|a| a.module == aqr_flate::formula::MODULE));
+        assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
+        assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
+        let d = fixture("dmg-udro.dmg");
+        assert_eq!(detect(&d), Some(Format::Disk));
+        let (c, f) = compress_formula(&d, &opt);
+        assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
+        assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
+    }
+
+    /// A UDIF image of zlib's chunks whose block tables are changed (chunks of other runs of the
+    /// disk or the file, overlapping, of another kind): no formula, or one giving it back.
+    #[test]
+    fn dmg_damaged() {
+        let p = format!("{}/../../codecs/aqr-disk/tests/data/dmg-udzo.dmg.zst", env!("CARGO_MANIFEST_DIR"));
+        let d = zstd::stream::decode_all(&std::fs::read(p).unwrap()[..]).unwrap();
+        let u = aqr_disk::dmg::parse(&d).unwrap();
+        let opt = Options { threads: 2, ..Options::default() };
+        let mut tried = 0;
+        for p in u.xml.clone().step_by(5) {
+            for v in [b'A', b'/', d[p] ^ 0x01] {
+                let mut e = d.clone();
+                e[p] = v;
+                // (where the chunks read are others)
+                if aqr_disk::dmg::parse(&e).is_none_or(|t| t.chunks == u.chunks) {
+                    continue;
+                }
+                tried += 1;
+                if let Some(f) = dmg::dmg(&e, &opt, &Cx::new(&e, &opt)) {
+                    assert!(f.eval(&Native::default()).unwrap() == e, "byte {p} = {v:#x}");
+                }
+            }
+        }
+        assert!(tried > 10, "{tried}");
+    }
+
     /// An APFS container's files (aqr-apfs's fixture, of a GPT): its JPEG file recompressed by
     /// aqr-jpeg, the image given back.
     #[test]
@@ -3912,8 +3970,9 @@ mod tests {
     /// volume given back.
     #[test]
     fn wof_taken_apart() {
-        let z = std::fs::read(format!("{}/../../codecs/aqr-ntfs/tests/data/wof-small.vhd.zst", env!("CARGO_MANIFEST_DIR")))
-            .unwrap();
+        let z =
+            std::fs::read(format!("{}/../../codecs/aqr-ntfs/tests/data/wof-small.vhd.zst", env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
         let d = zstd::stream::decode_all(&z[..]).unwrap();
         let (c, f) = compress_formula(&d, &Options { threads: 2, shared_modules: true, ..Options::default() });
         assert!(f.applies().iter().any(|a| a.module == aqr_decompress::LZX));
@@ -3950,11 +4009,17 @@ mod tests {
         let d = [&jpeg[a..b], &text, &jpeg[b..], &jpeg[..a]].concat();
         let (t, e, s) = (b - a, b - a + text.len(), b - a + text.len() + n - b);
         let files = [
-            aqr_disk::File { name: b"j.jpg".to_vec(), extents: vec![s..s + a, 0..b - a, e..e + n - b], rank: 0, compressed: None },
+            aqr_disk::File {
+                name: b"j.jpg".to_vec(),
+                extents: vec![s..s + a, 0..b - a, e..e + n - b],
+                rank: 0,
+                compressed: None,
+            },
             aqr_disk::File { name: b"t.txt".to_vec(), extents: vec![t..e], rank: 0, compressed: None },
         ];
         let pieces = aqr_disk::pieces(&d, &files);
-        let opt = aqr_disk::formula::Options { file_systems: bundle::FILE_SYSTEMS, kind: kind_by_name, ..Default::default() };
+        let opt =
+            aqr_disk::formula::Options { file_systems: bundle::FILE_SYSTEMS, kind: kind_by_name, ..Default::default() };
         let mut f = aqr_disk::formula::build(&d, &files, &pieces, &opt);
         assert_eq!(f.shared.len(), 1);
         let opt = Options { threads: 2, shared_modules: true, ..Options::default() };
