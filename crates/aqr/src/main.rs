@@ -212,6 +212,11 @@
 //! files are. Decompressing (and testing), there is a bar too, of the blocks decompressed and
 //! the files evaluated ([`view::Decoding`]).
 //!
+//! A run that fails exits by what failed ([`exit`]): 1 but where the archive itself tells
+//! (invalid 3, not decrypted 4, more than allowed 5, an extension not known 6, as the spec's
+//! failures are), 7 where it is done but for what it told it left out, 2 of the arguments, 130
+//! stopped.
+//!
 //! `--ipc` has this program driven by another (a graphical frontend) through standard input
 //! and output ([`ipc`]): what it shows as it goes told there, and the frontend asked what the
 //! options leave open.
@@ -225,6 +230,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 mod append;
+mod exit;
 mod extract;
 mod fold;
 mod info;
@@ -377,6 +383,11 @@ General:
   -h, --help            show this help
   -V, --version         show the version
 
+Exit status: 0 done; 1 failed otherwise; 2 the arguments wrong; 3 an archive invalid
+(damaged, files lost to it); 4 not decrypted (no passphrase opens it); 5 needing more than
+supported or allowed (-M, --application-bound); 6 an unknown critical extension; 7 done but
+for what was told left out (not extracted, not removed); 130 stopped.
+
 SIZE is a number of bytes, or of KiB, MiB or GiB with K, M or G. Short options may be
 bundled (-cf, -T8, -oOUT); a long option's value may follow it after = (--memory=2G).
 ";
@@ -502,7 +513,8 @@ fn main() -> ExitCode {
     if let Err(e) = pass::init(args.passphrase, !args.decompress && !args.list && !args.info, args.pass_from.as_ref()) {
         eprintln!("aqr: {e}");
         ipc::tell(serde_json::json!({"event": "error", "message": e}));
-        return ExitCode::FAILURE;
+        // (none given: none to open an archive with)
+        return ExitCode::from(exit::Code::Decryption as u8);
     }
     // (before the pool is made, for its workers to be sampled)
     if args.stats.is_some() {
@@ -525,7 +537,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("aqr: {e}");
             ipc::tell(serde_json::json!({"event": "error", "message": e}));
-            ExitCode::FAILURE
+            ExitCode::from(exit::code())
         }
     }
 }
@@ -1285,8 +1297,14 @@ fn remove(gone: &[Gone]) -> Result<(), String> {
     }
     match kept.len() {
         0 => Ok(()),
-        1 => Err(format!("--rm: {} not removed", kept[0].display())),
-        n => Err(format!("--rm: {n} paths not removed (told above)")),
+        1 => {
+            exit::note(exit::Code::Incomplete);
+            Err(format!("--rm: {} not removed", kept[0].display()))
+        }
+        n => {
+            exit::note(exit::Code::Incomplete);
+            Err(format!("--rm: {n} paths not removed (told above)"))
+        }
     }
 }
 
@@ -2335,12 +2353,12 @@ fn appended(
         if a.verbose {
             eprintln!("{}: its footer across a sector of the file: written over", out.display());
         }
-        file.set_len(p.at.start + p.footer.start as u64).map_err(|e| err(&e))?;
+        file.set_len(p.at.start + p.footer.start as u64).map_err(|e| err(&exit::seen(e)))?;
     }
     let end = p.at.end;
     let _undo = stop::undo_by(stop::Undo::Truncate(out.to_owned(), end));
     let mut f = file;
-    std::io::Seek::seek(&mut f, std::io::SeekFrom::End(0)).map_err(|e| err(&e))?;
+    std::io::Seek::seek(&mut f, std::io::SeekFrom::End(0)).map_err(|e| err(&exit::seen(e)))?;
     let from =
         aqr_compress::Appending { footer: p.footer, metadata: p.metadata, link_groups: p.link_groups, kill: p.kill };
     let placed = std::sync::atomic::AtomicBool::new(true);
@@ -2349,7 +2367,7 @@ fn appended(
     // (failing, what was written after the last commit is left, cut off by the next append)
     let mut r =
         viewed(a, view, |tell| aqr_compress::compress_tree_into(&g.tree, g, opt, &mut o, Some(&from), stopping, tell))
-            .map_err(|e| err(&e))?;
+            .map_err(|e| err(&exit::seen(e)))?;
     let old = (end - p.at.start) as usize;
     (r.len, r.overhead) = (r.len.saturating_sub(old), r.overhead.saturating_sub(old));
     Ok(r)
@@ -2745,25 +2763,28 @@ impl aqr_unpack::Sink for Unpacking<'_, '_> {
 /// was (not skipped, as a frontend answers).
 fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Format) -> Result<bool, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", stdio::shown(input));
-    let file = fs::File::open(input).map_err(|e| err(&e))?;
+    let file = fs::File::open(input).map_err(|e| err(&exit::seen(e)))?;
     // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
-    let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
-    let mut opened = aqr_unpack::Opened::open_with(format, &c, &a.names.encoding).map_err(|e| err(&e))?;
+    let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&exit::seen(e)))?;
+    let mut opened = aqr_unpack::Opened::open_with(format, &c, &a.names.encoding).map_err(|e| err(&exit::seen(e)))?;
     tell_names(a, input, opened.names_told());
     if a.select.is_some() && !opened.is_tree() {
         return Err(err(&"a single file, not an archive of paths"));
     }
     // (its entries encrypted without a passphrase taken are left out, told)
     if opened.encrypted()
-        && pass::keys().open(input, |p| opened.unlock(p).map(|ok| ok.then_some(())).map_err(|e| err(&e)))?.is_none()
+        && pass::keys()
+            .open(input, |p| opened.unlock(p).map(|ok| ok.then_some(())).map_err(|e| err(&exit::seen(e))))?
+            .is_none()
         && opened.sealed()
     {
+        exit::note(exit::Code::Decryption);
         return Err(err(&pass::keys().none_opens()));
     }
     // (some paths: checked where the listing is known, else once the archive is read)
     if let Some(s) = &a.select {
         if let Some(t) = opened.tree() {
-            s.check(t, &|k| opened.left_out(&s.unpacking(Some(k)))).map_err(|e| err(&e))?;
+            s.check(t, &|k| opened.left_out(&s.unpacking(Some(k)))).map_err(|e| err(&exit::seen(e)))?;
         }
         opened.select(s.unpacking(None));
     }
@@ -2811,7 +2832,7 @@ fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Forma
                     &step,
                 )
             })
-            .map_err(|e| err(&e))?
+            .map_err(|e| err(&exit::seen(e)))?
         } else {
             write_whole(&to.named, force, |w| {
                 ticking(a, &view, || {
@@ -2842,13 +2863,13 @@ fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Forma
                 Unpacking { x: x.as_ref(), input, quiet: a.quiet, view: shown, seen: &seen, sizes: Default::default() };
             let done = match opened.unpack(threads, &sink) {
                 Err(_) if x.as_ref().is_some_and(|x| x.skipped()) => return Ok(None),
-                r => r.map_err(|e| err(&e))?,
+                r => r.map_err(|e| err(&exit::seen(e)))?,
             };
             // (of a tar archive; where entries were left out, told, and the error at the end)
             if let Some(s) = &a.select
                 && done.skipped == 0
             {
-                s.check(&done.tree, &|_| Vec::new()).map_err(|e| err(&e))?;
+                s.check(&done.tree, &|_| Vec::new()).map_err(|e| err(&exit::seen(e)))?;
             }
             let picked = a.select.as_ref().map(|s| s.picked(&done.tree));
             let sizes = sink.sizes.into_inner().unwrap();
@@ -2906,6 +2927,7 @@ fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Forma
     }
     if skipped > 0 {
         let what = if skipped == 1 { "entry" } else { "entries" };
+        exit::note(exit::Code::Incomplete);
         return Err(format!("{}: {skipped} {what} not extracted (told above)", input.display()));
     }
     Ok(true)
@@ -3047,10 +3069,10 @@ fn by_index<'c, 'n>(
 /// frontend answers).
 fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", stdio::shown(input));
-    let file = fs::File::open(input).map_err(|e| err(&e))?;
+    let file = fs::File::open(input).map_err(|e| err(&exit::seen(e)))?;
     // (mapped, so that what is read of it is the system's to drop)
     // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
-    let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
+    let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&exit::seen(e)))?;
     // an encrypted one decrypted as it is read, into memory (not backed by a file, so that
     // nothing decrypted is written out but the output)
     let decrypting = match aqr::envelope::is_encrypted(&c) || aqr::envelope::is_damaged_encrypted(&c) {
@@ -3084,7 +3106,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
         Some(archive) => archive,
         None => Repair::of(&repair, input, plain, decrypting.as_ref(), a.opt.threads)?
             .open(plain, runner)
-            .map_err(|e| err(&e))?,
+            .map_err(|e| err(&exit::seen(e)))?,
     };
     let cut_off = repair.get().and_then(|r| r.cut_off());
     let footer_made = repair.get().is_some_and(|r| r.restored.as_ref().is_some_and(|r| r.footer));
@@ -3106,7 +3128,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
         (None, _) => None,
         (Some(_), None) => return Err(err(&"an archive of a single file, not of paths")),
         (Some(s), Some(t)) => {
-            s.check(t, &|_| Vec::new()).map_err(|e| err(&e))?;
+            s.check(t, &|_| Vec::new()).map_err(|e| err(&exit::seen(e)))?;
             Some(s.contents(t, archive.contents_len()))
         }
     };
@@ -3169,7 +3191,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
                     Ok(())
                 })
             })
-            .map_err(|e| err(&e))?;
+            .map_err(|e| err(&exit::seen(e)))?;
             (1, n, None)
         }
         None if a.stdout => {
@@ -3187,7 +3209,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
             });
             let n = match (r, failed) {
                 (_, Some(e)) => return Err(format!("standard output: {e}")),
-                (r, None) => r.map_err(|e| err(&e))?,
+                (r, None) => r.map_err(|e| err(&exit::seen(e)))?,
             };
             w.flush().map_err(|e| format!("standard output: {e}"))?;
             (1, n, Some(PathBuf::from("-")))
@@ -3210,17 +3232,26 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
             let given = std::sync::Mutex::new(vec![false; archive.contents_len()]);
             let w = std::sync::Mutex::new(std::io::BufWriter::with_capacity(1 << 20, std::io::stdout()));
             let total = std::sync::atomic::AtomicU64::new(0);
+            // (failing to write it: an error of its own, not the file lost)
+            let failed = std::sync::Mutex::new(None);
             let r = ticking(a, &*view, || {
                 archive.contents_of(a.opt.threads, Some(&only), |c, d| {
                     seen.saw(c, &d, d.len() as u64);
-                    w.lock().unwrap().write_all(&d).map_err(|e| Failure::Resource(format!("standard output: {e}")))?;
+                    w.lock().unwrap().write_all(&d).map_err(|e| {
+                        let m = format!("standard output: {e}");
+                        failed.lock().unwrap().get_or_insert(m.clone());
+                        Failure::Resource(m)
+                    })?;
                     given.lock().unwrap()[c] = true;
                     total.fetch_add(d.len() as u64, std::sync::atomic::Ordering::Relaxed);
                     Ok(())
                 })
             });
+            if let Some(m) = failed.into_inner().unwrap() {
+                return Err(m);
+            }
             w.into_inner().unwrap().flush().map_err(|e| format!("standard output: {e}"))?;
-            lost = not_given(r, &given.into_inner().unwrap(), Some(&only)).map_err(|e| err(&e))?;
+            lost = not_given(r, &given.into_inner().unwrap(), Some(&only)).map_err(|e| err(&exit::seen(e)))?;
             (1, total.into_inner(), Some(PathBuf::from("-")))
         }
         None => {
@@ -3267,7 +3298,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
                     Ok(())
                 })
             });
-            lost = not_given(r, &given.into_inner().unwrap(), wanted.as_deref()).map_err(|e| err(&e))?;
+            lost = not_given(r, &given.into_inner().unwrap(), wanted.as_deref()).map_err(|e| err(&exit::seen(e)))?;
             (n.into_inner(), total.into_inner(), None)
         }
         Some(t) => {
@@ -3341,7 +3372,8 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
                     ipc::tell(serde_json::json!({"event": "stopped", "kept": {"files": n, "bytes": bytes}}));
                     stop::exit(130);
                 }
-                let lost = not_given(r, &given.into_inner().unwrap(), wanted.as_deref()).map_err(|e| e.to_string())?;
+                let lost = not_given(r, &given.into_inner().unwrap(), wanted.as_deref())
+                    .map_err(|e| exit::seen(e).to_string())?;
                 lost.iter().try_for_each(|&(c, _)| x.lose(c))?;
                 tell_names(a, input, x.names_told());
                 Ok(x.finish(t)?.map(|r| (r, lost)))
@@ -3365,8 +3397,8 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
             (Some(o), Some(t)) if a.select.is_none() && !a.test => Some(unnamed_dir(o, t)),
             _ => None,
         };
-        let (n, bytes) =
-            salvage_unnamed(a, r.damaged(plain), cut, &r.erased, runner, into.as_deref()).map_err(|e| err(&e))?;
+        let (n, bytes) = salvage_unnamed(a, r.damaged(plain), cut, &r.erased, runner, into.as_deref())
+            .map_err(|e| err(&exit::seen(e)))?;
         if n > 0 {
             let s = if n == 1 { "" } else { "s" };
             let (what, bytes) = (stdio::shown(input), size(bytes as f64));
@@ -3388,7 +3420,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
             && (a.verbose || !r.mirrors.mirrors.is_empty() || r.mirrors.broken > 0)
         {
             tell_archival(input, &archive, &r.mirrors, r.read(plain), decrypting.is_some().then_some(&c[..]))
-                .map_err(|e| err(&e))?;
+                .map_err(|e| err(&exit::seen(e)))?;
         }
     }
     end(out, files, c.len() as u64, total, start);
@@ -3396,6 +3428,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
         // (each told, by the path of its first file, however quiet)
         let paths = content_paths(&archive, &to.named);
         for (c, f) in &lost {
+            exit::note(exit::Code::of(f));
             eprintln!("{}: {}: lost ({f})", stdio::shown(input), paths[*c]);
         }
         let n = lost.len();
@@ -3404,9 +3437,11 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     // (salvaged, its files given back, but the blocks of a segment cut short lost with it, of
     // files of no name known)
     if let Some(n) = cut_off {
+        exit::note(exit::Code::Invalid);
         return Err(err(&format!("a segment cut short lost ({n} bytes), its files not known")));
     }
     if maybe_cut {
+        exit::note(exit::Code::Invalid);
         return Err(err(&"cut short after a segment, maybe: segments after it not known"));
     }
     if let (Some(s), Some(rec)) = (&a.stats, rec) {
@@ -3564,7 +3599,7 @@ fn decrypt(c: &[u8], input: &Path, threads: usize) -> Result<(memmap2::Mmap, Vec
 /// mirrored header, told.
 fn unlock<'c>(c: &'c [u8], input: &Path) -> Result<aqr::envelope::Decrypting<'c>, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
-    let (e, opened) = aqr::envelope::open_damaged(c).map_err(|e| err(&e))?;
+    let (e, opened) = aqr::envelope::open_damaged(c).map_err(|e| err(&exit::seen(e)))?;
     if let Some(k) = opened.header_from {
         eprintln!("{}: its encrypted header damaged, taken from mirrored header {k}", input.display());
     }
@@ -3578,7 +3613,10 @@ fn unlock<'c>(c: &'c [u8], input: &Path) -> Result<aqr::envelope::Decrypting<'c>
     })?;
     match unlocked {
         Some(u) => Ok(u.decrypting()),
-        None => Err(err(&pass::keys().none_opens())),
+        None => {
+            exit::note(exit::Code::Decryption);
+            Err(err(&pass::keys().none_opens()))
+        }
     }
 }
 
@@ -3591,14 +3629,14 @@ fn decrypt_whole(
 ) -> Result<(memmap2::Mmap, Vec<std::ops::Range<usize>>), String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
     let u = d.unlocked();
-    let mut d = memmap2::MmapMut::map_anon(u.len()).map_err(|e| err(&e))?;
+    let mut d = memmap2::MmapMut::map_anon(u.len()).map_err(|e| err(&exit::seen(e)))?;
     let failed = u.decrypt_lossy(&mut d, threads);
     if !failed.is_empty() {
         let s = if failed.len() == 1 { "" } else { "s" };
         eprintln!("{}: {} encrypted chunk{s} not authenticating, not trusted", input.display(), failed.len());
     }
     let erased = failed.iter().map(|&m| u.chunk_range(m)).collect();
-    Ok((d.make_read_only().map_err(|e| err(&e))?, erased))
+    Ok((d.make_read_only().map_err(|e| err(&exit::seen(e)))?, erased))
 }
 
 /// By content of `archive` (decoded into `out`), the path of its first file in the archive (of

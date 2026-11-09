@@ -86,9 +86,9 @@ pub fn list_all(a: &Args) -> Result<(), String> {
 /// The listing of archive `input`.
 fn list(a: &Args, input: &Path) -> Result<String, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
-    let file = fs::File::open(input).map_err(|e| err(&e))?;
+    let file = fs::File::open(input).map_err(|e| err(&crate::exit::seen(e)))?;
     // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
-    let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
+    let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&crate::exit::seen(e)))?;
     // the paths alone, or those of paths given but of their blocks: of its metadata blocks alone
     // (of paths given, those back from the last as far as they tell them) and the blocks of
     // those files, an encrypted archive decrypted as it is read
@@ -103,8 +103,8 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
             None => aqr::Payload::Plain(crate::located(&c, input, a.quiet)),
         };
         let paths: Option<Vec<Vec<Vec<u8>>>> = a.select.as_ref().map(|s| s.paths.iter().map(|p| p.0.clone()).collect());
-        let archive =
-            crate::by_index(payload, &aqr::NoModules, a.opt.threads, paths.as_deref()).map_err(|e| err(&e))?;
+        let archive = crate::by_index(payload, &aqr::NoModules, a.opt.threads, paths.as_deref())
+            .map_err(|e| err(&crate::exit::seen(e)))?;
         if a.quiet {
             return listed(a, &archive, Vec::new(), &err, None);
         }
@@ -113,9 +113,9 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
         let (Some(sel), Some(t)) = (&a.select, archive.tree()) else {
             return Err(err(&"an archive of a single file, not of paths"));
         };
-        sel.check(t, &|_| Vec::new()).map_err(|e| err(&e))?;
+        sel.check(t, &|_| Vec::new()).map_err(|e| err(&crate::exit::seen(e)))?;
         let only = sel.contents(t, archive.contents_len());
-        let sized = archive.sized(&only).map_err(|e| err(&e))?;
+        let sized = archive.sized(&only).map_err(|e| err(&crate::exit::seen(e)))?;
         let listing = sized
             .into_iter()
             .map(|s| {
@@ -146,12 +146,12 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
         Some(d) => aqr::open_payload(d, &aqr::NoModules),
         None => aqr::open(crate::located(&c, input, a.quiet), &aqr::NoModules),
     }
-    .map_err(|e| err(&e))?;
+    .map_err(|e| err(&crate::exit::seen(e)))?;
     if !a.quiet {
         crate::tell_incomplete(archive.status(), input);
     }
     let name = |wasm: &[u8]| aqr_decompress::identify(wasm).map(|n| n.split('@').next().unwrap_or(&n).to_owned());
-    let listing = archive.listing(&name).map_err(|e| err(&e))?.into_iter().map(Some).collect();
+    let listing = archive.listing(&name).map_err(|e| err(&crate::exit::seen(e)))?.into_iter().map(Some).collect();
     listed(a, &archive, listing, &err, Some(c.len() as u64))
 }
 
@@ -183,7 +183,7 @@ fn listed(
         Some(t) => {
             let picked = match &a.select {
                 Some(sel) => {
-                    sel.check(t, &|_| Vec::new()).map_err(|e| err(&e))?;
+                    sel.check(t, &|_| Vec::new()).map_err(|e| err(&crate::exit::seen(e)))?;
                     Some(sel.picked(t))
                 }
                 None => None,
@@ -304,7 +304,7 @@ fn listed(
         let (data, overhead, whole) = match a.select {
             Some(_) => ("-".into(), "-".into(), rows.iter().filter_map(|r| r.listed.as_ref()).map(|l| l.share).sum()),
             None => {
-                let (data, len) = (archive.data_bytes().map_err(|e| err(&e))?, len.unwrap_or(0));
+                let (data, len) = (archive.data_bytes().map_err(|e| err(&crate::exit::seen(e)))?, len.unwrap_or(0));
                 (data.to_string(), (len - data.min(len)).to_string(), len)
             }
         };
@@ -488,7 +488,7 @@ fn json(
     if a.select.is_none()
         && let Some(len) = len
     {
-        let data = archive.data_bytes().map_err(|e| err(&e))?;
+        let data = archive.data_bytes().map_err(|e| err(&crate::exit::seen(e)))?;
         o["data"] = data.into();
         o["overhead"] = (len - data.min(len)).into();
     }

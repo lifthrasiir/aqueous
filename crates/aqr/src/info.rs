@@ -47,9 +47,9 @@ fn info_of(a: &Args, input: &Path) -> Result<String, String> {
     if aqr_unpack::by_name(&name).is_some() {
         return Err(err(&"only Aqueous archives are told of"));
     }
-    let file = fs::File::open(input).map_err(|e| err(&e))?;
+    let file = fs::File::open(input).map_err(|e| err(&crate::exit::seen(e)))?;
     // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
-    let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
+    let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&crate::exit::seen(e)))?;
     let mut s = String::new();
     let paths = &a.inputs[1..];
     if paths.is_empty() {
@@ -60,7 +60,7 @@ fn info_of(a: &Args, input: &Path) -> Result<String, String> {
     let decrypted = match encrypted {
         true => {
             if paths.is_empty() {
-                let (e, opened) = aqr::envelope::open_damaged(&c).map_err(|e| err(&e))?;
+                let (e, opened) = aqr::envelope::open_damaged(&c).map_err(|e| err(&crate::exit::seen(e)))?;
                 let (salt, nonce) = e.salt_and_nonce();
                 let mirrored = c.starts_with(&aqr::envelope::ENCRYPTED_MIRRORED_HEADER_MAGIC);
                 let _ = writeln!(
@@ -99,12 +99,13 @@ fn info_of(a: &Args, input: &Path) -> Result<String, String> {
         }
     };
     let cut = if a.verbose { None } else { Some(64) };
-    let i = inspect::inspect(payload, encrypted, &aqr_decompress::identify, cut).map_err(|e| err(&e))?;
+    let i =
+        inspect::inspect(payload, encrypted, &aqr_decompress::identify, cut).map_err(|e| err(&crate::exit::seen(e)))?;
     if paths.is_empty() {
         if encrypted {
             let _ = writeln!(s, "  payload: {} B", payload.len());
         }
-        archive(&mut s, &i, a.verbose).map_err(|e| err(&e))?;
+        archive(&mut s, &i, a.verbose).map_err(|e| err(&crate::exit::seen(e)))?;
     } else {
         if i.segments[0].metadata.is_none() {
             return Err(err(&"an archive of a single file, not of paths"));
@@ -114,7 +115,7 @@ fn info_of(a: &Args, input: &Path) -> Result<String, String> {
             if k > 0 {
                 s.push('\n');
             }
-            path(&mut s, &i, &states, p).map_err(|e| err(&e))?;
+            path(&mut s, &i, &states, p).map_err(|e| err(&crate::exit::seen(e)))?;
         }
     }
     Ok(s)
