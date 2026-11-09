@@ -542,7 +542,7 @@ fn bcj2_plans_hold() {
 /// whose outputs the root takes: a module that takes no tasks.
 fn plan_holds_shared(what: &str, mut f: Formula, want: &[u8]) {
     let pages = |n: u64| n.div_ceil(65536) * 65536;
-    let a = f.shared[0].apply.clone();
+    let a = f.shared[0].apply().unwrap().clone();
     let sizes = f.shared[0].sizes.clone();
     let inputs: Vec<Vec<u8>> = (a.inputs.iter())
         .map(|n| match *n {
@@ -569,7 +569,7 @@ fn plan_holds_shared(what: &str, mut f: Formula, want: &[u8]) {
     assert!(plan.instance <= 4 << 20, "{what}: instance {}", plan.instance);
     let imported = std::iter::once(a.params.len() as u64).chain(sizes.iter().copied()).chain(lens.iter().copied());
     let limit = imported.map(pages).sum::<u64>() + plan.instance;
-    f.shared[0].apply.memory_limit = limit;
+    f.shared[0].apply_mut().unwrap().memory_limit = limit;
     let c = Encoder::new(Level::Zstd(3)).with_modules(wasm_of).encode(&f, None).unwrap();
     let recording = RECORDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     aqr_decompress::record_applications(true);
@@ -1174,7 +1174,7 @@ fn png_set_plans_hold() {
         let d = files.concat();
         // (the files' application whole: its output the files one after another)
         let mut g = f.clone();
-        let mut a = g.shared[0].apply.clone();
+        let mut a = g.shared[0].apply().unwrap().clone();
         a.len = d.len() as u64;
         g.shared.clear();
         g.root = Node::Apply(Box::new(a));
@@ -3350,7 +3350,7 @@ fn module_applications_hold(what: &str, f: &Formula, name: &str, run: &RunApply)
             found.push((**a).clone());
         }
     });
-    found.extend(f.shared.iter().map(|s| s.apply.clone()));
+    found.extend(f.shared.iter().filter_map(|s| s.apply().cloned()));
     let mut count = 0;
     for a in found.into_iter().filter(|a| a.module.name == name) {
         // (the inputs as they come: each by itself, or where they hold outputs of other

@@ -91,16 +91,18 @@ impl Modules for Recording {
     }
 
     fn apply_shared(&self, s: &Shared, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
+        // (a patch: no module, nothing to record)
+        let Some(a) = s.apply() else { return self.native.apply_shared(s, inputs) };
         // (one output split into pieces, as the archive has it: or several outputs)
         let sizes = match s.split {
             true => vec![s.sizes.iter().sum()],
             false => s.sizes.clone(),
         };
         // (the memories of its outputs: one of a split output)
-        self.limit(&s.apply, &sizes, inputs);
+        self.limit(a, &sizes, inputs);
         let outs = self.native.apply_shared(s, inputs)?;
         let r = Record { outputs: outs.iter().map(|o| Ch::of(o)).collect(), file: None };
-        self.seen.lock().unwrap().push((key(&s.apply, inputs, &sizes), r));
+        self.seen.lock().unwrap().push((key(a, inputs, &sizes), r));
         Ok(outs)
     }
 }

@@ -751,14 +751,87 @@ pub struct Patch {
 /// formula: in its root, or in the inputs of a later one).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shared {
-    /// The application, its `len` the outputs' sizes added up.
-    pub apply: Apply,
+    /// What makes the outputs: an application, or a Patch instruction (always split).
+    pub of: Of,
     /// Bytes of each output.
     pub sizes: Vec<u64>,
     /// Whether the module outputs the concatenation of the outputs, which a Split instruction
     /// separates ([`Formula::split`]), for a number of outputs that varies between applications;
     /// otherwise each is an output of the module ([`Formula::share`]).
     pub split: bool,
+}
+
+/// What makes the outputs of a [`Shared`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Of {
+    /// An application, its `len` the outputs' sizes added up.
+    Apply(Apply),
+    /// A Patch instruction ([`Patch`]) of its `inputs`, the source then the patch, of `len`
+    /// bytes, the outputs' sizes added up: e.g. a Zstandard frame's blocks decompressed (an
+    /// empty source), what they hold taken by several files.
+    Patch { inputs: [Node; 2], len: u64 },
+}
+
+impl Shared {
+    /// The nodes it takes: the inputs of the application, or the source and the patch.
+    pub fn inputs(&self) -> &[Node] {
+        match &self.of {
+            Of::Apply(a) => &a.inputs,
+            Of::Patch { inputs, .. } => inputs,
+        }
+    }
+
+    pub fn inputs_mut(&mut self) -> &mut [Node] {
+        match &mut self.of {
+            Of::Apply(a) => &mut a.inputs,
+            Of::Patch { inputs, .. } => inputs,
+        }
+    }
+
+    /// The application, where it is one.
+    pub fn apply(&self) -> Option<&Apply> {
+        match &self.of {
+            Of::Apply(a) => Some(a),
+            Of::Patch { .. } => None,
+        }
+    }
+
+    pub fn apply_mut(&mut self) -> Option<&mut Apply> {
+        match &mut self.of {
+            Of::Apply(a) => Some(a),
+            Of::Patch { .. } => None,
+        }
+    }
+
+    /// Bytes of the outputs together.
+    pub fn bytes(&self) -> u64 {
+        match &self.of {
+            Of::Apply(a) => a.len,
+            Of::Patch { len, .. } => *len,
+        }
+    }
+
+    /// The outputs of a Patch instruction ([`Of::Patch`]) on `inputs`, the source and the patch
+    /// evaluated; None of an application.
+    pub fn patched(&self, inputs: &[&[u8]]) -> Option<Result<Vec<Vec<u8>>>> {
+        let Of::Patch { len, .. } = self.of else { return None };
+        let &[source, patch] = inputs else { return Some(Err(Error::new("patch: two inputs wanted"))) };
+        Some(patch::apply(source, patch, len).and_then(|all| {
+            if all.len() as u64 != len || self.sizes.iter().sum::<u64>() != len {
+                return Err(Error::new("patch: outputs of other sizes than declared"));
+            }
+            let mut rest = &all[..];
+            Ok(self.sizes.iter().map(|&n| rest.split_off(..n as usize).unwrap().to_vec()).collect())
+        }))
+    }
+
+    /// What it is, for messages: the module, or `patch`.
+    pub fn name(&self) -> String {
+        match &self.of {
+            Of::Apply(a) => a.module.to_string(),
+            Of::Patch { .. } => "patch".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1050,7 +1123,17 @@ impl Formula {
         a.len = sizes.iter().sum();
         let shared = self.shared.len();
         let outputs = sizes.iter().enumerate().map(|(index, &len)| Node::Output { shared, index, len }).collect();
-        self.shared.push(Shared { apply: a, sizes, split });
+        self.shared.push(Shared { of: Of::Apply(a), sizes, split });
+        outputs
+    }
+
+    /// Adds the Patch instruction of `patch` against `source` ([`Of::Patch`]), its output split
+    /// into outputs of `sizes` bytes, returning them to be placed in the formula, each once.
+    pub fn split_patch(&mut self, source: Node, patch: Node, sizes: Vec<u64>) -> Vec<Node> {
+        let shared = self.shared.len();
+        let outputs = sizes.iter().enumerate().map(|(index, &len)| Node::Output { shared, index, len }).collect();
+        let len = sizes.iter().sum();
+        self.shared.push(Shared { of: Of::Patch { inputs: [source, patch], len }, sizes, split: true });
         outputs
     }
 
@@ -1062,7 +1145,7 @@ impl Formula {
         root.shift(streams, shared);
         self.streams.extend(child.streams);
         for mut s in child.shared {
-            s.apply.inputs.iter_mut().for_each(|n| n.shift(streams, shared));
+            s.inputs_mut().iter_mut().for_each(|n| n.shift(streams, shared));
             self.shared.push(s);
         }
         root
@@ -1084,28 +1167,28 @@ impl Formula {
                 *shared = to[*shared];
             }
         };
-        self.shared.iter_mut().flat_map(|s| &mut s.apply.inputs).for_each(|n| n.visit_mut(&mut remap));
+        self.shared.iter_mut().flat_map(|s| s.inputs_mut()).for_each(|n| n.visit_mut(&mut remap));
         self.root.visit_mut(&mut remap);
     }
 
     /// Calls `f` on every node of the inputs of the applications of several outputs, in order,
     /// then of the root, parents first.
     pub fn visit<'a>(&'a self, f: &mut impl FnMut(&'a Node)) {
-        self.shared.iter().flat_map(|s| &s.apply.inputs).for_each(|n| n.visit(f));
+        self.shared.iter().flat_map(|s| s.inputs()).for_each(|n| n.visit(f));
         self.root.visit(f);
     }
 
     /// Replaces every slice of the inputs of the applications of several outputs and of the
     /// root with what `f` makes of it, of `(stream, start, len)`; what it makes is not visited.
     pub fn map_slices(&mut self, f: &mut impl FnMut(usize, u64, u64) -> Node) {
-        self.shared.iter_mut().flat_map(|s| &mut s.apply.inputs).for_each(|n| n.map_slices(f));
+        self.shared.iter_mut().flat_map(|s| s.inputs_mut()).for_each(|n| n.map_slices(f));
         self.root.map_slices(f);
     }
 
     /// Calls `f` on every slice of the inputs of the applications of several outputs and of the
     /// root, as `(stream, start, len)`, which it may change.
     pub fn slices_mut(&mut self, f: &mut impl FnMut(&mut usize, &mut u64, &mut u64)) {
-        self.shared.iter_mut().flat_map(|s| &mut s.apply.inputs).for_each(|n| n.slices_mut(f));
+        self.shared.iter_mut().flat_map(|s| s.inputs_mut()).for_each(|n| n.slices_mut(f));
         self.root.slices_mut(f);
     }
 
@@ -1274,7 +1357,7 @@ impl Formula {
                 *n = Node::concat(ps.iter().map(|&(s, a, l)| Node::slice(s, a, l)));
             }
         };
-        self.shared.iter_mut().flat_map(|s| &mut s.apply.inputs).for_each(|n| n.visit_mut(&mut cut));
+        self.shared.iter_mut().flat_map(|s| s.inputs_mut()).for_each(|n| n.visit_mut(&mut cut));
         self.root.visit_mut(&mut cut);
         self.flatten_parts();
         self.compact();
@@ -1283,7 +1366,7 @@ impl Formula {
     /// [`Node::flatten`] of the inputs of the applications of several outputs and of the root's
     /// parts, or of the root where it is not a concatenation: the root's parts stay its parts.
     fn flatten_parts(&mut self) {
-        self.shared.iter_mut().flat_map(|s| &mut s.apply.inputs).for_each(Node::flatten);
+        self.shared.iter_mut().flat_map(|s| s.inputs_mut()).for_each(Node::flatten);
         match &mut self.root {
             Node::Concat(ns) => ns.iter_mut().for_each(Node::flatten),
             n => n.flatten(),
@@ -1391,7 +1474,7 @@ impl Formula {
                 }
             })
         };
-        self.shared.iter().flat_map(|s| &s.apply.inputs).for_each(&mut visit);
+        self.shared.iter().flat_map(|s| s.inputs()).for_each(&mut visit);
         visit(&self.root);
         let alike = |i: usize| {
             let s = &self.streams[i];
@@ -1524,7 +1607,7 @@ impl Formula {
             }
             if out.len() == 1 { out.pop().unwrap() } else { Node::concat(out) }
         };
-        self.shared.iter_mut().flat_map(|s| &mut s.apply.inputs).for_each(|n| n.map_slices(&mut map));
+        self.shared.iter_mut().flat_map(|s| s.inputs_mut()).for_each(|n| n.map_slices(&mut map));
         self.root.map_slices(&mut map);
     }
 
@@ -1581,7 +1664,7 @@ impl Formula {
             module(a.module);
             a.resources.iter().for_each(&mut resource);
         }
-        for n in self.shared.iter().flat_map(|s| &s.apply.inputs).chain([&self.root]) {
+        for n in self.shared.iter().flat_map(|s| s.inputs()).chain([&self.root]) {
             n.visit(&mut |n| match n {
                 &Node::ModuleBytes(m, _) => module(m),
                 Node::ResourceBytes(r) => resource(r),
@@ -1599,14 +1682,14 @@ impl Formula {
                 out.push(&**a);
             }
         });
-        for i in self.shared.iter().flat_map(|s| &s.apply.inputs) {
+        for i in self.shared.iter().flat_map(|s| s.inputs()) {
             i.visit(&mut |n| {
                 if let Node::Apply(a) = n {
                     out.push(&**a);
                 }
             });
         }
-        out.extend(self.shared.iter().map(|s| &s.apply));
+        out.extend(self.shared.iter().filter_map(Shared::apply));
         out
     }
 
@@ -1640,14 +1723,14 @@ impl Formula {
             r
         };
         for (i, s) in self.shared.iter().enumerate() {
-            if s.sizes.is_empty() || s.apply.len != s.sizes.iter().sum::<u64>() {
+            if s.sizes.is_empty() || s.bytes() != s.sizes.iter().sum::<u64>() || (s.apply().is_none() && !s.split) {
                 return Err(Error::new(format!("application #{i} of several outputs of bad sizes")));
             }
-            s.apply.inputs.iter().try_for_each(|n| check(n, i))?;
+            s.inputs().iter().try_for_each(|n| check(n, i))?;
         }
         check(&self.root, self.shared.len())?;
         let mut stored = Ok(());
-        for n in self.shared.iter().flat_map(|s| &s.apply.inputs).chain([&self.root]) {
+        for n in self.shared.iter().flat_map(|s| s.inputs()).chain([&self.root]) {
             n.visit(&mut |n| {
                 if let Node::ResourceBytes(r) = n
                     && r.stored_data().is_none()
@@ -1746,8 +1829,8 @@ impl Formula {
         let limits = {
             let mut applies = Vec::new();
             for s in &self.shared {
-                applies.push(&s.apply);
-                s.apply.inputs.iter().for_each(|n| visit(n, &mut applies));
+                applies.extend(s.apply());
+                s.inputs().iter().for_each(|n| visit(n, &mut applies));
             }
             visit(&self.root, &mut applies);
             let limits = aqr::eval::limits_of(self, m, &applies, limit)?;
@@ -1757,9 +1840,11 @@ impl Formula {
         };
         let mut limits = limits.into_iter();
         for s in &mut self.shared {
-            let l = limits.next().expect("a limit for each application");
-            (s.apply.memory_limit, s.apply.task_limits) = (l.instance, l.tasks);
-            s.apply.inputs.iter_mut().for_each(|n| visit_mut(n, &mut limits));
+            if let Some(a) = s.apply_mut() {
+                let l = limits.next().expect("a limit for each application");
+                (a.memory_limit, a.task_limits) = (l.instance, l.tasks);
+            }
+            s.inputs_mut().iter_mut().for_each(|n| visit_mut(n, &mut limits));
         }
         visit_mut(&mut self.root, &mut limits);
         Ok(())
@@ -1814,10 +1899,13 @@ impl fmt::Display for Formula {
             writeln!(f)
         }
         for (i, s) in self.shared.iter().enumerate() {
-            write!(f, "shared #{i} {}{}", s.apply.module, if s.split { " split" } else { "" })?;
+            write!(f, "shared #{i} {}{}", s.name(), if s.split { " split" } else { "" })?;
             s.sizes.iter().try_for_each(|n| write!(f, " {n}"))?;
-            attrs(&s.apply, f)?;
-            s.apply.inputs.iter().try_for_each(|n| node(self, n, 1, f))?;
+            match s.apply() {
+                Some(a) => attrs(a, f)?,
+                None => writeln!(f)?,
+            }
+            s.inputs().iter().try_for_each(|n| node(self, n, 1, f))?;
         }
         node(self, &self.root, 0, f)
     }
@@ -1828,26 +1916,20 @@ pub trait Modules {
     /// The output of `a` on `inputs`, the evaluated `a.inputs` (with `a.resources`).
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>>;
 
-    /// The outputs of `s` on `inputs`, the evaluated `s.apply.inputs`: by default those split
+    /// The outputs of `s` on `inputs`, the evaluated [`Shared::inputs`]: by default those split
     /// from the output of [`Modules::apply`] ([`Shared::split`]), or that output if `s` has one.
     fn apply_shared(&self, s: &Shared, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
-        match s.sizes[..] {
-            _ if s.split => {
-                let all = self.apply(&s.apply, inputs)?;
-                if all.len() as u64 != s.apply.len {
-                    return Err(Error::new(format!(
-                        "{} made {} bytes, not {}",
-                        s.apply.module,
-                        all.len(),
-                        s.apply.len
-                    )));
-                }
-                let mut rest = &all[..];
-                Ok(s.sizes.iter().map(|&n| rest.split_off(..n as usize).unwrap().to_vec()).collect())
-            }
-            [_] => Ok(vec![self.apply(&s.apply, inputs)?]),
-            _ => Err(Error::new(format!("{}: {} outputs", s.apply.module, s.sizes.len()))),
+        let all = match &s.of {
+            Of::Patch { .. } => return s.patched(inputs).expect("a patch"),
+            Of::Apply(a) if s.split => self.apply(a, inputs)?,
+            Of::Apply(a) if s.sizes.len() == 1 => return Ok(vec![self.apply(a, inputs)?]),
+            Of::Apply(a) => return Err(Error::new(format!("{}: {} outputs", a.module, s.sizes.len()))),
+        };
+        if all.len() as u64 != s.bytes() {
+            return Err(Error::new(format!("{} made {} bytes, not {}", s.name(), all.len(), s.bytes())));
         }
+        let mut rest = &all[..];
+        Ok(s.sizes.iter().map(|&n| rest.split_off(..n as usize).unwrap().to_vec()).collect())
     }
 }
 
@@ -2061,7 +2143,7 @@ mod tests {
         }
 
         fn apply_shared(&self, s: &Shared, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
-            assert_eq!(s.apply.module, CUT);
+            assert_eq!(s.apply().unwrap().module, CUT);
             let (all, mut at) = (inputs.concat(), 0);
             let mut next = |n: u64| {
                 at += n as usize;
@@ -2367,7 +2449,7 @@ mod tests {
         }
         f.root = Node::concat([o0, o1]);
         assert_eq!(f.eval(&RevCut).unwrap(), b"abcdefgh");
-        f.shared[0].apply.inputs = vec![Node::Output { shared: 0, index: 0, len: 3 }];
+        f.shared[0].apply_mut().unwrap().inputs = vec![Node::Output { shared: 0, index: 0, len: 3 }];
         assert!(f.check_outputs().is_err());
         // a module of one output only, by default
         let mut g = Formula::raw("a", b"ab".to_vec());

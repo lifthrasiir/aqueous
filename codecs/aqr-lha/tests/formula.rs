@@ -24,7 +24,7 @@ fn rebuilt(f: &Formula) -> u64 {
         assert_eq!(a.module, formula::MODULE);
         n += a.len;
     };
-    f.shared.iter().for_each(|s| count(&s.apply));
+    f.shared.iter().for_each(|s| count(s.apply().unwrap()));
     f.root.visit(&mut |n| {
         if let Node::Apply(a) = n {
             count(a);

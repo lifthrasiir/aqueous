@@ -2241,11 +2241,14 @@ fn place_all(f: &mut Formula, children: Vec<Option<Made>>, sets: Vec<sets::Set>,
     let mut order: Vec<usize> = (own..f.shared.len()).collect();
     for i in 0..own {
         let embedded = f.shared.len();
-        let inputs = std::mem::take(&mut f.shared[i].apply.inputs);
-        let mut n = Node::apply(f.shared[i].apply.module, Vec::new(), inputs, 0);
-        place(&mut n, f, &slices, opt, &mut children);
-        let Node::Apply(a) = n else { unreachable!("an application") };
-        f.shared[i].apply.inputs = a.inputs;
+        // (a patch's source and patch, of contents kept as they are: nothing placed in them)
+        if let Some(module) = f.shared[i].apply().map(|a| a.module) {
+            let inputs = std::mem::take(&mut f.shared[i].apply_mut().expect("an application").inputs);
+            let mut n = Node::apply(module, Vec::new(), inputs, 0);
+            place(&mut n, f, &slices, opt, &mut children);
+            let Node::Apply(a) = n else { unreachable!("an application") };
+            f.shared[i].apply_mut().expect("an application").inputs = a.inputs;
+        }
         order.extend(embedded..f.shared.len());
         order.push(i);
     }
@@ -2262,7 +2265,14 @@ fn place_all(f: &mut Formula, children: Vec<Option<Made>>, sets: Vec<sets::Set>,
 /// The applications of several outputs of `f`, as nodes: what is below them comes before the
 /// root, wherever contents are looked for.
 fn shared_nodes(f: &Formula) -> Vec<Node> {
-    f.shared.iter().map(|s| Node::Apply(Box::new(s.apply.clone()))).collect()
+    use aqr_formula::{Of, Patch};
+    let node = |s: &aqr_formula::Shared| match &s.of {
+        Of::Apply(a) => Node::Apply(Box::new(a.clone())),
+        Of::Patch { inputs: [source, patch], len } => {
+            Node::Patch(Box::new(Patch { source: source.clone(), patch: patch.clone(), len: *len }))
+        }
+    };
+    f.shared.iter().map(node).collect()
 }
 
 /// [`description_bound`] of all of `f`: its root, and its applications of several outputs with

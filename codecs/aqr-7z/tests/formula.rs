@@ -18,8 +18,8 @@ impl aqr_formula::Modules for Modules {
     }
 
     fn apply_shared(&self, s: &aqr_formula::Shared, inputs: &[&[u8]]) -> aqr_formula::Result<Vec<Vec<u8>>> {
-        let all = self.apply(&s.apply, inputs)?;
-        assert_eq!(all.len() as u64, s.apply.len);
+        let all = self.apply(s.apply().unwrap(), inputs)?;
+        assert_eq!(all.len() as u64, s.bytes());
         let mut rest = &all[..];
         Ok(s.sizes.iter().map(|&n| rest.split_off(..n as usize).unwrap().to_vec()).collect())
     }

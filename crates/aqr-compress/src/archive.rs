@@ -1980,9 +1980,11 @@ fn report(
         leaf.outputs.iter().for_each(|n| visit(n, &mut sliced[l], &mut modules[l], &mut shared));
         for s in (0..f.shared.len()).rev() {
             if shared[s] {
-                f.shared[s].apply.inputs.iter().for_each(|n| visit(n, &mut sliced[l], &mut modules[l], &mut shared));
-                if !modules[l].contains(&f.shared[s].apply.module) {
-                    modules[l].push(f.shared[s].apply.module);
+                f.shared[s].inputs().iter().for_each(|n| visit(n, &mut sliced[l], &mut modules[l], &mut shared));
+                if let Some(a) = f.shared[s].apply()
+                    && !modules[l].contains(&a.module)
+                {
+                    modules[l].push(a.module);
                 }
             }
         }

@@ -727,7 +727,7 @@ impl Encoder {
     /// archive holds them as they are either way, typically shared with the archive around them.
     fn module_bytes_len(&self, f: &Formula) -> Result<usize> {
         let mut modules: Vec<Module> = Vec::new();
-        for n in f.shared.iter().flat_map(|s| &s.apply.inputs).chain([&f.root]) {
+        for n in f.shared.iter().flat_map(|s| s.inputs()).chain([&f.root]) {
             n.visit(&mut |n| {
                 if let &Node::ModuleBytes(m, _) = n
                     && !modules.contains(&m)
@@ -891,13 +891,13 @@ impl Encoder {
             self.content_block(out, true, &leaf, self.how(&f.streams[stream]), None)?;
         } else {
             // the non-leaf blocks sliced, of each stream in order, by their ordinals
-            let mut nodes: Vec<&Node> = f.shared.iter().flat_map(|s| &s.apply.inputs).collect();
+            let mut nodes: Vec<&Node> = f.shared.iter().flat_map(|s| s.inputs()).collect();
             nodes.push(&f.root);
             let used = sliced(f.streams.len(), |s| len_of(s).unwrap_or(0), nodes);
             let (ordinals, next) = listed(&used, 0..f.streams.len());
             let (modules, resources) = f.blocks();
             let mut checked = Ok(());
-            for n in f.shared.iter().flat_map(|s| &s.apply.inputs).chain([&f.root]) {
+            for n in f.shared.iter().flat_map(|s| s.inputs()).chain([&f.root]) {
                 n.visit(&mut |n| {
                     if let Node::ModuleBytes(m, d) = n
                         && checked.is_ok()
@@ -1120,16 +1120,24 @@ impl Emit<'_> {
     /// The Apply instruction of `a` (its inputs pushed), of outputs of `sizes`.
     /// The instructions pushing the outputs of `s`, the `i`-th application of several outputs.
     fn shared(&mut self, i: usize, s: &crate::Shared) {
-        s.apply.inputs.iter().for_each(|n| self.node(n));
-        if s.split {
-            self.apply(&s.apply, &[s.apply.len]);
+        s.inputs().iter().for_each(|n| self.node(n));
+        if let crate::Of::Patch { len, .. } = s.of {
+            self.out.push(PATCH);
+            varint::put(self.out, len);
+            self.stack.truncate(self.stack.len() - 2);
+            self.stack.push(None);
+        }
+        if let Some(a) = s.apply().filter(|_| !s.split) {
+            self.apply(a, &s.sizes);
+        } else {
+            if let Some(a) = s.apply() {
+                self.apply(a, &[a.len]);
+            }
             self.out.push(SPLIT);
             varint::put(self.out, s.sizes.len() as u64);
             s.sizes.iter().for_each(|&n| varint::put(self.out, n));
             self.stack.pop();
             self.stack.extend(s.sizes.iter().map(|_| None));
-        } else {
-            self.apply(&s.apply, &s.sizes);
         }
         let k = self.stack.len() - s.sizes.len();
         (0..s.sizes.len()).for_each(|j| self.stack[k + j] = Some((i, j)));
@@ -2548,7 +2556,10 @@ impl<M: crate::Modules + Sync> Runner for Natives<'_, M> {
                 };
                 match sizes {
                     [_] => self.m.apply(&a, inputs).map(|out| vec![out]),
-                    _ => self.m.apply_shared(&crate::Shared { apply: a, sizes: sizes.to_vec(), split: false }, inputs),
+                    _ => self.m.apply_shared(
+                        &crate::Shared { of: crate::Of::Apply(a), sizes: sizes.to_vec(), split: false },
+                        inputs,
+                    ),
                 }
                 .map_err(|e| Failure::Invalid(e.0))
             }
@@ -4655,7 +4666,7 @@ mod tests {
         }
 
         fn apply_shared(&self, s: &crate::Shared, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
-            if s.apply.module != CUT {
+            if s.apply().is_none_or(|a| a.module != CUT) {
                 return Err(Error::new("not cut"));
             }
             let (all, mut at) = (inputs.concat(), 0);
@@ -4734,6 +4745,34 @@ mod tests {
         let mut twice = f.clone();
         twice.root = Node::concat([twice.root.clone(), Node::Output { shared: 0, index: 0, len: 3 }]);
         assert!(encode(&twice, None, Level::Zstd(3)).is_err());
+    }
+
+    /// A patch's output split ([`crate::Of::Patch`]): Zstandard blocks decompressed (of an empty
+    /// source), their pieces taken in another order, one dropped (the source of a patch of an
+    /// empty raw block). The archive gives what the formula does.
+    #[test]
+    fn patch_outputs() {
+        let data: Vec<u8> = (0..300_000u32).map(|i| (i / 7 % 251) as u8).collect();
+        let mut f = Formula::default();
+        let blocks = f.push_as("zstd", Kind::Compressed, crate::patch::make(b"", &data, 3).unwrap());
+        let drop = f.push("drop", vec![1, 0, 0]);
+        let empty = Node::concat([]);
+        let [o0, o1, o2] = <[Node; 3]>::try_from(f.split_patch(empty, blocks, vec![10, 200_000, 99_990])).unwrap();
+        let drop = Node::Patch(Box::new(crate::Patch { source: o1, patch: drop, len: 0 }));
+        f.root = Node::concat([o2, drop, Node::slice(0, 0, 4), o0]);
+        let want = [&data[200_010..], &f.streams[0].data[..4], &data[..10]].concat();
+        let none = |_: &crate::Apply, _: &[&[u8]]| -> crate::Result<Vec<u8>> { unreachable!("no module") };
+        assert!(f.eval(&none).unwrap() == want);
+        let c = encode(&f, None, Level::Zstd(3)).unwrap();
+        assert!(decode(&c, &natives()).unwrap() == want);
+        // an output not taken; a patch's output not split
+        f.root = Node::concat([
+            Node::Output { shared: 0, index: 2, len: 99_990 },
+            Node::Output { shared: 0, index: 0, len: 10 },
+        ]);
+        assert!(f.check_outputs().is_err());
+        f.shared[0].split = false;
+        assert!(f.check_outputs().is_err());
     }
 
     /// Streams merged by class without moving their bytes ([`crate::Formula::merged`]) archive
@@ -4855,7 +4894,7 @@ mod tests {
     /// over a boundary and of all of it come back, and the archive has a block for each.
     /// The blocks `f` slices listed, of its streams in order.
     fn ordinals_of(f: &Formula) -> Vec<Vec<Option<u64>>> {
-        let mut nodes: Vec<&Node> = f.shared.iter().flat_map(|s| &s.apply.inputs).collect();
+        let mut nodes: Vec<&Node> = f.shared.iter().flat_map(|s| s.inputs()).collect();
         nodes.push(&f.root);
         listed(&sliced(f.streams.len(), |s| f.streams[s].data.len(), nodes), 0..f.streams.len()).0
     }

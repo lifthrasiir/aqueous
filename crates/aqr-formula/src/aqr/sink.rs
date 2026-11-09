@@ -249,7 +249,7 @@ impl Sink {
                 *n = Node::concat(parts.collect::<Vec<_>>());
             }
         };
-        f.shared.iter_mut().flat_map(|s| &mut s.apply.inputs).for_each(|n| n.visit_mut(&mut cut));
+        f.shared.iter_mut().flat_map(|s| s.inputs_mut()).for_each(|n| n.visit_mut(&mut cut));
         f.root.visit_mut(&mut cut);
         // (each sunk stream as long as the sink's is now)
         for s in &mut streams {
@@ -264,7 +264,7 @@ impl Sink {
                 *n = Node::Concat(Vec::new());
             }
         };
-        f.shared.iter_mut().flat_map(|s| &mut s.apply.inputs).for_each(|n| n.visit_mut(&mut empty));
+        f.shared.iter_mut().flat_map(|s| s.inputs_mut()).for_each(|n| n.visit_mut(&mut empty));
         f.root.visit_mut(&mut empty);
         f.compact();
         Ok(())

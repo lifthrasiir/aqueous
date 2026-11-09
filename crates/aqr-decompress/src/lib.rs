@@ -1337,13 +1337,14 @@ impl Modules for Native {
 
     /// A module of several outputs gives them one after another natively (its whole `decode`).
     fn apply_shared(&self, s: &aqr_formula::Shared, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
-        let all = self.apply(&s.apply, inputs)?;
-        if all.len() as u64 != s.apply.len {
-            return Err(Error::new(format!("{} made {} bytes, not {}", s.apply.module, all.len(), s.apply.len)));
+        let Some(a) = s.apply() else { return s.patched(inputs).expect("a patch") };
+        let all = self.apply(a, inputs)?;
+        if all.len() as u64 != a.len {
+            return Err(Error::new(format!("{} made {} bytes, not {}", a.module, all.len(), a.len)));
         }
         match (s.split, &s.sizes[..]) {
             (false, &[_]) => Ok(vec![all]),
-            (_, sizes) => split_outputs(s.apply.module, all, sizes).map_err(Error::new),
+            (_, sizes) => split_outputs(a.module, all, sizes).map_err(Error::new),
         }
     }
 }

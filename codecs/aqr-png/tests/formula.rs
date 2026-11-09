@@ -369,15 +369,14 @@ fn set_inputs_fail_cleanly() {
     let files = [picture(200, 150, 6, 9, None), picture(200, 150, 6, 9, Some((10, 20, 60, 40)))];
     let refs: Vec<&[u8]> = files.iter().map(|f| &f[..]).collect();
     let f = formula::encode_set(&refs, &[None, Some(0)], &[], 1).unwrap();
-    let s = &f.shared[0];
+    let s = f.shared[0].apply().unwrap();
     let inputs: Vec<Vec<u8>> = s
-        .apply
         .inputs
         .iter()
         .map(|n| Formula { streams: f.streams.clone(), root: n.clone(), shared: vec![] }.eval(&Set(1)).unwrap())
         .collect();
     let ins: Vec<&[u8]> = inputs.iter().map(|i| &i[..]).collect();
-    let (params, len) = (&s.apply.params[..], s.apply.len);
+    let (params, len) = (&s.params[..], s.len);
     assert!(formula::decode_set(params, &ins, len, 1).unwrap() == files.concat());
     assert!(formula::decode_set(params, &ins, len - 1, 1).is_err());
     assert!(formula::decode_set(params, &ins[..2], len, 1).is_err());

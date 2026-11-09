@@ -53,7 +53,7 @@ impl<'p> Ap<'p, '_> {
         match *self {
             Ap::Block(a) => &a.output_sizes,
             Ap::One(a) => std::slice::from_ref(&a.len),
-            Ap::Shared(s) if s.split => std::slice::from_ref(&s.apply.len),
+            Ap::Shared(s) if s.split => std::slice::from_ref(s.apply().map_or(&0, |a| &a.len)),
             Ap::Shared(s) => &s.sizes,
         }
     }
@@ -1466,16 +1466,22 @@ impl<'f> Graph<'f, 'f> {
         let mut g = Graph { ops: Vec::new(), lens: Vec::new(), fans: 0, sums: HashMap::new(), roots: Vec::new() };
         let mut outputs: Vec<Vec<Val>> = Vec::with_capacity(f.shared.len());
         for s in &f.shared {
-            let inputs = s.apply.inputs.iter().map(|n| g.node(f, n, &outputs)).collect::<crate::Result<Vec<_>>>()?;
+            let inputs = s.inputs().iter().map(|n| g.node(f, n, &outputs)).collect::<crate::Result<Vec<_>>>()?;
             let n = s.sizes.len();
-            let vals = match s.split {
-                true => {
-                    let a = g.push(Op::Apply(Ap::Shared(s), inputs, None), s.apply.len);
+            let vals = match (s.split, &s.of) {
+                (_, crate::Of::Patch { len, .. }) => {
+                    let p = g.push(Op::Patch(inputs[0], inputs[1], *len), *len);
+                    let (node, fan) = (g.ops.len(), g.fan());
+                    g.push(Op::Split(p, &s.sizes, fan), 0);
+                    (0..n).map(|out| Val { node, out }).collect()
+                }
+                (true, crate::Of::Apply(a)) => {
+                    let a = g.push(Op::Apply(Ap::Shared(s), inputs, None), a.len);
                     let (node, fan) = (g.ops.len(), g.fan());
                     g.push(Op::Split(a, &s.sizes, fan), 0);
                     (0..n).map(|out| Val { node, out }).collect()
                 }
-                false => {
+                (false, crate::Of::Apply(_)) => {
                     let (node, fan) = (g.ops.len(), g.fan());
                     g.push(Op::Apply(Ap::Shared(s), inputs, Some(fan)), 0);
                     (0..n).map(|out| Val { node, out }).collect()
@@ -1637,7 +1643,9 @@ pub(crate) fn limits_of<M: crate::Modules + Sync>(
         for (n, op) in g.ops.iter().enumerate() {
             match *op {
                 Op::Apply(Ap::One(a), ..) => _ = node_of.insert(a as *const crate::Apply as usize, n),
-                Op::Apply(Ap::Shared(s), ..) => _ = node_of.insert(&s.apply as *const crate::Apply as usize, n),
+                Op::Apply(Ap::Shared(s), ..) => {
+                    _ = node_of.insert(s.apply().map_or(0, |a| a as *const crate::Apply as usize), n)
+                }
                 _ => {}
             }
         }

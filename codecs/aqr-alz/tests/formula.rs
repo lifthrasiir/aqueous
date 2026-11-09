@@ -26,7 +26,7 @@ fn rebuilt(f: &Formula) -> (u64, u64) {
         m if m == aqr_bz2::formula::MODULE_ALZ => bz2 += a.len,
         _ => panic!("{:?}", a.module),
     };
-    f.shared.iter().for_each(|s| count(&s.apply));
+    f.shared.iter().for_each(|s| count(s.apply().unwrap()));
     f.root.visit(&mut |n| {
         if let Node::Apply(a) = n {
             count(a);

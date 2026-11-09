@@ -295,7 +295,7 @@ fn index_corrupt_inputs_fail_cleanly() {
     let (p, idx, rev) = pack_with_index(&d);
     let rev = rev.unwrap();
     let f = roundtrip_index(&p, &idx, Some(&rev));
-    let a = &f.shared[1].apply;
+    let a = f.shared[1].apply().unwrap();
     let inputs = inputs_of(&f, a);
     let len = a.len;
     let run = |params: &[u8], ins: &[Vec<u8>]| {

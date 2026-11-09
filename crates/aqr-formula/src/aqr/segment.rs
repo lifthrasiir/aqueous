@@ -788,7 +788,7 @@ impl Encoder {
         // listed used), by their ordinals' deltas, and its own index of each
         let mut sliced: Vec<(u64, usize)> = u.streams.iter().map(|&st| (ordinals[st].unwrap(), st)).collect();
         sliced.sort_unstable();
-        let mut nodes: Vec<&Node> = u.shared.iter().flat_map(|&i| &f.shared[i].apply.inputs).collect();
+        let mut nodes: Vec<&Node> = u.shared.iter().flat_map(|&i| f.shared[i].inputs()).collect();
         nodes.extend(&leaf.outputs);
         let used = super::sliced(f.streams.len(), |st| f.streams[st].data.len(), nodes);
         let (local, all) = super::listed(&used, sliced.iter().map(|&(_, st)| st));
@@ -872,7 +872,7 @@ fn uses(f: &Formula, leaf: &Leaf) -> Uses {
     leaf.outputs.iter().for_each(|n| mark(n, &mut shared));
     for i in (0..f.shared.len()).rev() {
         if shared[i] {
-            f.shared[i].apply.inputs.iter().for_each(|n| mark(n, &mut shared));
+            f.shared[i].inputs().iter().for_each(|n| mark(n, &mut shared));
         }
     }
     let shared: Vec<usize> = (0..f.shared.len()).filter(|&i| shared[i]).collect();
@@ -910,9 +910,8 @@ fn uses(f: &Formula, leaf: &Leaf) -> Uses {
     }
     // (the applications of several outputs first, as they are emitted)
     for &i in &shared {
-        let a = &f.shared[i].apply;
-        a.inputs.iter().for_each(|n| visit(&mut u, n));
-        note(&mut u, a);
+        f.shared[i].inputs().iter().for_each(|n| visit(&mut u, n));
+        f.shared[i].apply().into_iter().for_each(|a| note(&mut u, a));
     }
     leaf.outputs.iter().for_each(|n| visit(&mut u, n));
     u.shared = shared;
