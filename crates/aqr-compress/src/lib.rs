@@ -3880,6 +3880,20 @@ mod tests {
         assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
     }
 
+    /// An ext4 volume's files (aqr-ext's fixture): its JPEG file recompressed by aqr-jpeg, its
+    /// files in pieces split, the archive giving it back.
+    #[test]
+    fn ext_volumes_taken_apart() {
+        let z = std::fs::read(format!("{}/../../codecs/aqr-ext/tests/data/ext4.img.zst", env!("CARGO_MANIFEST_DIR")))
+            .unwrap();
+        let d = zstd::stream::decode_all(&z[..]).unwrap();
+        assert_eq!(detect(&d), Some(Format::Disk));
+        let (c, f) = compress_formula(&d, &Options { threads: 2, shared_modules: true, ..Options::default() });
+        assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
+        assert!(!f.shared.is_empty());
+        assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
+    }
+
     /// A file of an image in pieces, split from its stream ([`aqr_formula::Of::Node`]), is one
     /// content: a JPEG file in three pieces out of order, about a text file, recompressed by
     /// aqr-jpeg, and the image rebuilt.

@@ -33,6 +33,7 @@ aqr-fits = { path = "../../codecs/aqr-fits" }
 aqr-git = { path = "../../codecs/aqr-git" }
 aqr-hdf5 = { path = "../../codecs/aqr-hdf5" }
 aqr-disk = { path = "../../codecs/aqr-disk" }
+aqr-ext = { path = "../../codecs/aqr-ext" }
 aqr-fat = { path = "../../codecs/aqr-fat" }
 aqr-ntfs = { path = "../../codecs/aqr-ntfs" }
 aqr-iso = { path = "../../codecs/aqr-iso" }

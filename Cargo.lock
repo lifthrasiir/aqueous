@@ -220,6 +220,7 @@ dependencies = [
  "aqr-dwarf",
  "aqr-egg",
  "aqr-exe",
+ "aqr-ext",
  "aqr-fasta",
  "aqr-fat",
  "aqr-fits",
@@ -403,6 +404,15 @@ dependencies = [
  "bytemuck",
  "sha1",
  "sha2",
+ "zstd",
+]
+
+[[package]]
+name = "aqr-ext"
+version = "0.1.0"
+dependencies = [
+ "aqr-disk",
+ "aqr-formula",
  "zstd",
 ]
 

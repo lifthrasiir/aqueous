@@ -126,7 +126,8 @@ pub enum Format {
     Cpio,
     /// Disk image (aqr-disk): a volume of a file system read (ISO 9660 or UDF, aqr-iso's, known
     /// by the descriptor at sector 16; FAT or exFAT, aqr-fat's, and NTFS, aqr-ntfs's, by the boot
-    /// sector), all of it or a partition of its MBR, GPT or APM: at the start of data only.
+    /// sector; ext2/3/4, aqr-ext's, by the superblock), all of it or a partition of its MBR, GPT or
+    /// APM: at the start of data only.
     Disk,
     /// WIM file of LZX or of no compression (aqr-wim, and aqr-lzx on its chunks), known by its
     /// header: at the start of data only.
