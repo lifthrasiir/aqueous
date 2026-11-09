@@ -54,13 +54,14 @@
 //!   JPEG's embedded files, Clip Studio Paint's database) applied to theirs (see aqr-decompress
 //!   for the modules).
 //!
-//! In whatever formula a recompressor gives, the data that its applications take as it is
-//! ([`Options::contents`], by default that of a DEFLATE stream, of gzip, zlib or PDF, and
-//! that of an LZ4, LZMA or LZMA2 stream, of the blocks of a LevelDB table, of the entries of a ZIP archive,
-//! of the members of an ar, tar or cpio archive or of the files of an asar archive)
-//! is recompressed in turn, up to [`Options::depth`] formats deep, and its formula put in place
-//! of the data. So are the slices of a stream that a recompressor gives as data as it is
-//! ([`Stream::content`]: the rest of an executable, around its code), wherever they are.
+//! In whatever formula a recompressor gives, the data as it is ([`Stream::content`]) is
+//! recompressed in turn, up to [`Options::depth`] formats deep, and its formula put in place
+//! of the data: the slices of the streams that a recompressor gives as such (the rest of an
+//! executable, around its code; the files of an image), and of those that its applications
+//! take as such ([`Module::contents`]: the data of a DEFLATE stream, of gzip, zlib or PDF, of
+//! an LZ4, LZMA or LZMA2 stream, of the blocks of a LevelDB table, of the entries of a ZIP
+//! archive, of the members of an ar, tar or cpio archive, of the files of an asar archive;
+//! [`Formula::mark_contents`]), wherever they are.
 //!
 //! Data is taken as one file by the format it starts like ([`Nest::Exact`]), or scanned for
 //! files starting anywhere in it ([`Nest::Scan`], the default): each is cut to its end
@@ -182,9 +183,6 @@ pub struct Options {
     /// (R8). [`recompress`] does not verify: whoever takes its formula does. Nor is anything
     /// verified below level 2, where nothing is recompressed ([`Options::level`]).
     pub verify: bool,
-    /// The inputs whose data is recompressed in turn, by module and position; by default
-    /// [`Content::defaults`].
-    pub contents: Vec<Content>,
     /// How the file itself is recompressed.
     pub file: Nest,
     /// The most bytes of description a formula may take ([`aqr::description_bound`]): where
@@ -320,7 +318,6 @@ impl Default for Options {
             threads: 1,
             depth: 3,
             verify: true,
-            contents: Content::defaults(),
             file: Nest::Scan,
             description: usize::MAX,
             level: Level::MID,
@@ -338,29 +335,6 @@ impl Default for Options {
             spill: None,
             application_bound: None,
         }
-    }
-}
-
-/// An input of a module's applications that is data as it is, a file or what a file holds,
-/// rather than a representation of the module's own. A formula may recompress it in turn (see
-/// [`Options::contents`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Content {
-    pub module: Module,
-    pub input: usize,
-    pub nest: Nest,
-}
-
-impl Content {
-    /// The contents of the modules of aqr-decompress, as each declares them
-    /// ([`Module::contents`]), scanned.
-    pub fn defaults() -> Vec<Content> {
-        let inputs = |&module: &Module| module.contents.iter().map(move |&input| (module, input));
-        aqr_decompress::MODULES
-            .iter()
-            .flat_map(inputs)
-            .map(|(module, input)| Content { module, input, nest: Nest::Scan })
-            .collect()
     }
 }
 
@@ -1222,6 +1196,7 @@ fn recompress_sealed(
         },
     }?;
     let mut f = f;
+    f.mark_contents();
     // (an application over the bound: this recompression is not used, as if the recompressor did
     // not take the data; a formula of data not made yet is not looked at)
     if !f.streams.iter().any(|s| s.data.is_lazy())
@@ -1338,7 +1313,7 @@ fn segment_words(f: &Formula, opt: &Options, cx: &Cx) -> Option<Arc<aqr_wrt::for
     let texts: Vec<&[u8]> = match apart {
         true => {
             let mut texts = Vec::new();
-            member_texts(&f.root, f, opt, &mut texts);
+            member_texts(&f.root, f, &mut texts);
             texts
         }
         false => f
@@ -1357,21 +1332,15 @@ fn segment_words(f: &Formula, opt: &Options, cx: &Cx) -> Option<Arc<aqr_wrt::for
 }
 
 /// The contents below node `n` of `f` that are text ([`segment_words`]), made already.
-fn member_texts<'a>(n: &Node, f: &'a Formula, opt: &Options, out: &mut Vec<&'a [u8]>) {
+fn member_texts<'a>(n: &Node, f: &'a Formula, out: &mut Vec<&'a [u8]>) {
     match n {
-        Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| member_texts(n, f, opt, out)),
-        Node::Apply(a) => {
-            for (i, input) in a.inputs.iter().enumerate() {
-                match content(opt, a.module, i) {
-                    Some(_) => slices_of(input, f, &mut |d| {
-                        if is_text(detect(d)) && aqr_wrt::formula::starts(d) && !aqr_obj::formula::starts(d) {
-                            out.push(d);
-                        }
-                    }),
-                    None => member_texts(input, f, opt, out),
-                }
+        Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| member_texts(n, f, out)),
+        &Node::Slice { stream, .. } if is_content(f, stream) => slices_of(n, f, &mut |d| {
+            if is_text(detect(d)) && aqr_wrt::formula::starts(d) && !aqr_obj::formula::starts(d) {
+                out.push(d);
             }
-        }
+        }),
+        Node::Apply(a) => a.inputs.iter().for_each(|n| member_texts(n, f, out)),
         _ => {}
     }
 }
@@ -1789,12 +1758,13 @@ fn fit(base: usize, parts: &[(usize, usize)], limit: usize) -> Vec<bool> {
     keep
 }
 
-/// The contents of the applications in `f` ([`Options::contents`]), a formula of data `depth`
+/// The contents of `f` ([`contents`]), a formula of data `depth`
 /// formats deep, each its slice and its formula to put in place of the slice ([`place_all`])
 /// where it has any application (as many as fit in [`Options::description`]), and the plan of
 /// the sets of them (whose members with a parent have no formula); `None` where none has any
 /// and there is no set.
 fn nested(f: &mut Formula, of: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<(Contents, sets::Plan)> {
+    f.mark_contents();
     if depth + 1 >= opt.depth {
         return None;
     }
@@ -2260,8 +2230,8 @@ fn bound_of(f: &Formula) -> usize {
 }
 
 /// The contents below node `n` of `f`, in order: each slice, and its formula where it has any
-/// application. A content is an input of an application ([`Options::contents`]) or a slice of a
-/// stream that is [`Stream::content`], scanned. `apart` is [`bundle::contents_apart`] of `f`.
+/// application: a slice of a stream that is [`Stream::content`] ([`Formula::mark_contents`]),
+/// scanned. `apart` is [`bundle::contents_apart`] of `f`.
 fn contents(
     n: &Node,
     f: &Formula,
@@ -2278,14 +2248,7 @@ fn contents(
         // (patches are made of recompressed data, not looked into)
         Node::Slice { .. } | Node::Output { .. } | Node::Patch(_) | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
         Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| contents(n, f, apart, opt, depth, cx, out)),
-        Node::Apply(a) => {
-            for (i, input) in a.inputs.iter().enumerate() {
-                match content(opt, a.module, i) {
-                    Some(content) => content_slices(input, content.nest, f, apart, opt, depth, cx, out),
-                    None => contents(input, f, apart, opt, depth, cx, out),
-                }
-            }
-        }
+        Node::Apply(a) => a.inputs.iter().for_each(|n| contents(n, f, apart, opt, depth, cx, out)),
     }
 }
 
@@ -2355,15 +2318,7 @@ fn place(
         &mut Node::Slice { stream, .. } if is_content(f, stream) => place_slices(n, f, slices, opt, children),
         Node::Slice { .. } | Node::Output { .. } | Node::Patch(_) | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
         Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| place(n, f, slices, opt, children)),
-        Node::Apply(a) => {
-            let module = a.module;
-            for (i, input) in a.inputs.iter_mut().enumerate() {
-                match content(opt, module, i) {
-                    Some(_) => place_slices(input, f, slices, opt, children),
-                    None => place(input, f, slices, opt, children),
-                }
-            }
-        }
+        Node::Apply(a) => a.inputs.iter_mut().for_each(|n| place(n, f, slices, opt, children)),
     }
 }
 
@@ -2402,11 +2357,6 @@ fn place_slices(
 /// Whether `stream` of `f` is [`Stream::content`].
 fn is_content(f: &Formula, stream: usize) -> bool {
     f.streams.get(stream).is_some_and(|s| s.content)
-}
-
-/// The content that input `i` of `m` is, if any.
-fn content(opt: &Options, m: Module, i: usize) -> Option<&Content> {
-    opt.contents.iter().find(|c| c.module == m && c.input == i)
 }
 
 /// What the recompressor of a [`pure`] format is given besides the data: the options (of the
@@ -2683,7 +2633,7 @@ fn fits_within(format: Format, len: usize, limit: u64) -> bool {
 fn prepare(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> (Vec<(usize, usize, Format)>, sets::Plan) {
     let mut jobs = Vec::new();
     for n in shared_nodes(f).iter().chain([&f.root]) {
-        pure_contents(n, None, f, opt, &mut jobs);
+        pure_contents(n, f, opt, &mut jobs);
     }
     if jobs.len() < 2 {
         return Default::default();
@@ -2718,19 +2668,12 @@ fn prepare(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> (Vec<(usize, usiz
     (keys, plan)
 }
 
-/// The files of [`pure`] formats below node `n` of `f` that [`contents`] (with `nest` `None`)
-/// or [`content_slices`] (with it) would take as such (those of a kind of the format, or that a
-/// scan finds at the start), each with its data as it is given its recompressor (to its
-/// [`extent`]), and its slice where that is all of the content.
-fn pure_contents<'a>(
-    n: &Node,
-    nest: Option<Nest>,
-    f: &'a Formula,
-    opt: &Options,
-    out: &mut Vec<(Format, &'a [u8], Option<sets::At>)>,
-) {
+/// The files of [`pure`] formats below node `n` of `f` that [`contents`] would take as such
+/// (those of a kind of the format, or that a scan finds at the start), each with its data as it
+/// is given its recompressor (to its [`extent`]), and its slice where that is all of the content.
+fn pure_contents<'a>(n: &Node, f: &'a Formula, opt: &Options, out: &mut Vec<(Format, &'a [u8], Option<sets::At>)>) {
     let mut found = Vec::new();
-    pure_candidates(n, nest, f, opt, &mut found);
+    pure_candidates(n, f, &mut found);
     // (the scans at once: of an image's thousands of files, they took a second alone)
     let found = aqr_common::pool::par_map(found.len(), opt.threads, |i| {
         let (nest, d, at) = found[i];
@@ -2749,30 +2692,17 @@ fn pure_contents<'a>(
 
 /// The slices [`pure_contents`] looks at below node `n` of `f`, each with how it is taken (its
 /// stream's kind's nest) and its data.
-fn pure_candidates<'a>(
-    n: &Node,
-    nest: Option<Nest>,
-    f: &'a Formula,
-    opt: &Options,
-    out: &mut Vec<(Nest, &'a [u8], sets::At)>,
-) {
-    match (n, nest) {
-        (&Node::Slice { stream, .. }, None) if is_content(f, stream) => {
-            pure_candidates(n, Some(Nest::Scan), f, opt, out)
-        }
-        (&Node::Slice { stream, start, len }, Some(nest)) => {
+fn pure_candidates<'a>(n: &Node, f: &'a Formula, out: &mut Vec<(Nest, &'a [u8], sets::At)>) {
+    match n {
+        &Node::Slice { stream, start, len } if is_content(f, stream) => {
             let Some(s) = f.streams.get(stream).filter(|s| !s.data.is_lazy()) else { return };
             let Some(d) = s.data.get(start as usize..).and_then(|d| d.get(..len as usize)) else { return };
-            if let Some(nest) = nest.of(s.kind) {
+            if let Some(nest) = Nest::Scan.of(s.kind) {
                 out.push((nest, d, (stream, start, len)));
             }
         }
-        (Node::Concat(ns) | Node::Pack(ns), _) => ns.iter().for_each(|n| pure_candidates(n, nest, f, opt, out)),
-        (Node::Apply(a), _) => {
-            for (i, input) in a.inputs.iter().enumerate() {
-                pure_candidates(input, content(opt, a.module, i).map(|c| c.nest), f, opt, out);
-            }
-        }
+        Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| pure_candidates(n, f, out)),
+        Node::Apply(a) => a.inputs.iter().for_each(|n| pure_candidates(n, f, out)),
         _ => {}
     }
 }
@@ -3201,7 +3131,7 @@ mod tests {
         for (level, n) in [(Level::STORED, 0), (Level::Of(1), 0), (Level::LOW, 1), (Level::MID, 1)] {
             let opt = Options { level, ..Options::default() };
             let mut jobs = Vec::new();
-            pure_contents(&f.root, None, &f, &opt, &mut jobs);
+            pure_contents(&f.root, &f, &opt, &mut jobs);
             assert_eq!(jobs.len(), n, "{level:?}");
             assert_eq!(format_on(Format::Jpeg, &opt), n > 0, "{level:?}");
         }
@@ -4509,6 +4439,7 @@ mod tests {
         let whole = f.push("raw", data.clone());
         let record = f.push("flate/record", vec![0]);
         f.root = Node::apply(FLATE, vec![], vec![whole.clone(), record], n as u64);
+        f.mark_contents();
         // the stream sliced again
         let mut copied = f.clone();
         copied.root = Node::concat([f.root.clone(), whole]);

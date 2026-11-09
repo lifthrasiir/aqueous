@@ -2,7 +2,7 @@ use std::io::Write;
 use std::sync::{PoisonError, RwLock};
 
 use aqr_common::rng::noise;
-use aqr_compress::{Content, Formula, Nest, Node, Options, compress, recompress};
+use aqr_compress::{Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
     ARM64, ASAR, BUNDLE, BVX, BZ2, CLIP, DWARF_APPLE, DWARF_INFO, FLAC, FLATE, GIF, HDF5_FLOAT, JPEG, JSONL, LEVELDB,
     LZ4, LZO, MACHO_SYMTAB, MP3, Native, PCM, PDF, PNG, PNG_SET, PRORES, RASTER, RECS_ENTRIES, RECS_FIELDS, SQLITE,
@@ -196,10 +196,6 @@ fn gzip_nested() {
     d.extend_from_slice(b"trailing");
     let f = roundtrip(&d, &all());
     assert_eq!(modules(&f), [FLATE.name]);
-
-    // Only the contents named are recompressed.
-    let none = Options { contents: vec![], ..all() };
-    assert_eq!(modules(&roundtrip(&gzip(&flac), &none)), [FLATE.name]);
 
     let d = gzip(&zlib(&text(100_000), 9));
     assert_eq!(modules(&roundtrip(&d, &all())), [FLATE.name; 2]);
@@ -1011,9 +1007,6 @@ fn scan_embedded() {
     // In the data of a DEFLATE stream.
     let f = roundtrip(&gzip(&[&text(5000)[..], &flac, &text(5000)].concat()), &all());
     assert_eq!(modules(&f), [FLATE.name, flac_name], "{f}");
-    let exact = Options { contents: vec![Content { module: FLATE, input: 0, nest: Nest::Exact }], ..all() };
-    let f = roundtrip(&gzip(&[&text(5000)[..], &flac, &text(5000)].concat()), &exact);
-    assert_eq!(modules(&f), [FLATE.name], "{f}");
 }
 
 /// A file found at the start is cut to its end too, and what follows is scanned.

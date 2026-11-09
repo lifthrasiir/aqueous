@@ -323,7 +323,8 @@ pub struct Stream {
     pub kind: Kind,
     /// Whether the bytes are data as they are, a file or what a file holds, rather than a
     /// representation of the recompressor's own: whoever takes the formula may recompress its
-    /// slices in turn wherever they are (aqr-compress, as it does an application's content).
+    /// slices in turn wherever they are (aqr-compress). A recompressor gives it, or an
+    /// application's module, of the streams it takes as such ([`Formula::mark_contents`]).
     pub content: bool,
     /// Whether the stream is kept apart, never put with others ([`Formula::merge_classes`]):
     /// one that other formulas slice in pieces, each of which is to decode alone (the archive
@@ -1206,6 +1207,41 @@ impl Formula {
         self.root.visit_mut(&mut remap);
     }
 
+    /// Makes [`Stream::content`] every stream sliced in an input of an application that its
+    /// module tells is data as it is ([`Module::contents`]), not in an application within it.
+    pub fn mark_contents(&mut self) {
+        fn walk(n: &Node, content: bool, out: &mut [bool]) {
+            match n {
+                &Node::Slice { stream, .. } => {
+                    if let Some(o) = out.get_mut(stream) {
+                        *o |= content;
+                    }
+                }
+                Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| walk(n, content, out)),
+                Node::Apply(a) => apply(a, out),
+                Node::Patch(p) => [&p.source, &p.patch].into_iter().for_each(|n| walk(n, false, out)),
+                Node::Output { .. } | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
+            }
+        }
+        fn apply(a: &Apply, out: &mut [bool]) {
+            for (i, n) in a.inputs.iter().enumerate() {
+                walk(n, a.module.contents.contains(&i), out);
+            }
+        }
+        let mut marks = vec![false; self.streams.len()];
+        for s in &self.shared {
+            match &s.of {
+                Of::Apply(a) => apply(a, &mut marks),
+                Of::Patch { inputs, .. } => inputs.iter().for_each(|n| walk(n, false, &mut marks)),
+                Of::Node(n) => walk(n, false, &mut marks),
+            }
+        }
+        walk(&self.root, false, &mut marks);
+        for (s, &inside) in self.streams.iter_mut().zip(&marks) {
+            s.content |= inside;
+        }
+    }
+
     /// Calls `f` on every node of the inputs of the applications of several outputs, in order,
     /// then of the root, parents first.
     pub fn visit<'a>(&'a self, f: &mut impl FnMut(&'a Node)) {
@@ -2084,6 +2120,22 @@ mod tests {
         assert!(f.to_string().ends_with("slice #1 [0, +3) b (format=zlib)\n"), "{f}");
         f.streams[1].content = true;
         assert!(f.to_string().ends_with("slice #1 [0, +3) b (format=zlib, content)\n"), "{f}");
+    }
+
+    /// The streams sliced in an input its module tells is data as it is are contents, those of
+    /// its other inputs not, nor those of an application within it but by its own module.
+    #[test]
+    fn contents_marked() {
+        const DATA: Module = Module::new("data", 1).with_contents(&[0]);
+        let mut f = Formula::default();
+        let [a, b, c, d] = ["a", "b", "c", "d"].map(|s| f.push(s, s.as_bytes().to_vec()));
+        let inner = Node::apply(REV, vec![], vec![c], 1);
+        f.root = Node::concat([Node::apply(DATA, vec![], vec![Node::concat([a, inner]), b], 2), d]);
+        f.mark_contents();
+        assert_eq!(f.streams.iter().map(|s| s.content).collect::<Vec<_>>(), [true, false, false, false]);
+        f.root = Node::apply(DATA, vec![], vec![Node::apply(DATA, vec![], vec![Node::slice(2, 0, 1)], 1)], 1);
+        f.mark_contents();
+        assert!(f.streams[2].content);
     }
 
     #[test]
