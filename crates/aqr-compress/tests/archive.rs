@@ -828,6 +828,82 @@ fn sevenz_held_once() {
     }
 }
 
+fn deflated(d: &[u8]) -> Vec<u8> {
+    let mut z = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(6));
+    z.write_all(d).unwrap();
+    z.finish().unwrap()
+}
+
+/// An ALZ archive of `files`, deflated, as ALZip lays them out (sizes of 4 bytes).
+fn alz(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut a = b"ALZ\x01\x0a\0\0\0".to_vec();
+    for &(name, d) in files {
+        let body = deflated(d);
+        a.extend_from_slice(b"BLZ\x01");
+        a.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        a.extend_from_slice(&[0x20, 0, 0, 0x21, 0x5a, 0x40, 0]);
+        a.extend_from_slice(&[aqr_alz::alz::DEFLATE, 0]);
+        a.extend_from_slice(&aqr_common::crc32::hash(d).to_le_bytes());
+        a.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        a.extend_from_slice(&(d.len() as u32).to_le_bytes());
+        a.extend_from_slice(name.as_bytes());
+        a.extend_from_slice(&body);
+    }
+    a.extend_from_slice(b"CLZ\x01\0\0\0\0\0\0\0\0CLZ\x02");
+    a
+}
+
+/// An EGG archive of `files`, each a deflated block, as ALZip lays them out.
+fn egg(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let put = |a: &mut Vec<u8>, s: u32| a.extend_from_slice(&s.to_le_bytes());
+    let mut a = b"EGGA\0\x01\x01\x02\x03\x04\0\0\0\0".to_vec();
+    put(&mut a, 0x08E2_8222);
+    for (i, &(name, d)) in files.iter().enumerate() {
+        let body = deflated(d);
+        put(&mut a, 0x0A85_90E3);
+        put(&mut a, i as u32);
+        a.extend_from_slice(&(d.len() as u64).to_le_bytes());
+        put(&mut a, 0x0A85_91AC);
+        a.push(0);
+        a.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        a.extend_from_slice(name.as_bytes());
+        put(&mut a, 0x08E2_8222);
+        put(&mut a, 0x02B5_0C13);
+        a.extend_from_slice(&[aqr_egg::egg::DEFLATE, 0]);
+        put(&mut a, d.len() as u32);
+        put(&mut a, body.len() as u32);
+        put(&mut a, aqr_common::crc32::hash(d));
+        put(&mut a, 0x08E2_8222);
+        a.extend_from_slice(&body);
+    }
+    put(&mut a, 0x08E2_8222);
+    a
+}
+
+/// Files and an ALZ and an EGG archive of them: the archives' deflated bodies rebuilt from the
+/// files' contents, stored once, in a batch together however small the batches (the entries'
+/// CRC-32 and sizes tell what the archives hold).
+#[test]
+fn alz_egg_held_once() {
+    let members: Vec<(String, Vec<u8>)> = (0..3).map(|k| (format!("m/f{k}.txt"), words(1_000_000, k))).collect();
+    let refs: Vec<(&str, &[u8])> = members.iter().map(|(n, d)| (&n[..], &d[..])).collect();
+    let opt = Options { block: 1 << 20, ..Options::default() };
+    let files: Vec<(&str, Vec<u8>)> = members.iter().map(|(n, d)| (&n[..], d.clone())).collect();
+    let (alone, r) = archived(&files, &opt);
+    let alone = alone.len() - r.overhead;
+    for (name, a) in [("p/m.alz", alz(&refs)), ("p/m.egg", egg(&refs))] {
+        assert!(a.len() > 256 << 10);
+        let all = [&files[..], &[(name, a)]].concat();
+        for opt in [opt.clone(), Options { batch: 1 << 20, ..opt.clone() }] {
+            let (c, r) = archived(&all, &opt);
+            assert!(r.files[3].modules.iter().any(|m| m.name == "flate-set"), "{name}: {:?}", r.files[3]);
+            // (and the streams' records: flate2's zlib-rs does not write zlib's own streams)
+            let c = c.len() - r.overhead;
+            assert!(c < alone * 5 / 4, "{name}, batch {}: {c} of {alone} alone", opt.batch);
+        }
+    }
+}
+
 /// A file and the git loose object of it (a zlib stream of `blob <size>\0` and the file): the
 /// object's data is the file after its header, stored once, in a batch together however small
 /// the batches.

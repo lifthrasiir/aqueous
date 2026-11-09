@@ -156,3 +156,26 @@ fn extent_in_data() {
     let f = formula::encode(&x, 1).unwrap();
     assert!(eval(&f) == x);
 }
+
+/// The CRC-32 and sizes read record by record are those of the files `parse` reads, of the
+/// files of one block, not encrypted; none of a solid archive.
+#[test]
+fn entry_sums_as_parsed() {
+    for (name, d) in fixtures() {
+        let sums = egg::entry_sums(&mut |r| d.get(r.start as usize..r.end as usize).map(<[u8]>::to_vec));
+        let a = egg::parse(&d).unwrap();
+        let parsed: Vec<(u32, u64)> = match a.solid {
+            true => Vec::new(),
+            false => a
+                .entries
+                .iter()
+                .filter_map(|e| match &e.blocks[..] {
+                    [b] if !e.encrypted && b.size as u64 == e.size => Some((b.crc, e.size)),
+                    _ => None,
+                })
+                .collect(),
+        };
+        assert_eq!(sums, parsed, "{name}");
+        assert!(a.solid || !sums.is_empty() || a.entries.iter().all(|e| e.encrypted || e.blocks.len() != 1), "{name}");
+    }
+}

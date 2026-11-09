@@ -1344,6 +1344,9 @@ fn together<S: Source + ?Sized>(
             Some(detect::Format::SevenZip) => aqr_7z::formula::entry_sums(&mut |r| {
                 src.read_range(c, r.clone()).ok().filter(|d| d.len() as u64 == r.end - r.start)
             }),
+            // (their headers, one after another from the start)
+            Some(detect::Format::Alz) => aqr_alz::alz::entry_sums(&mut windowed(src, c)),
+            Some(detect::Format::Egg) => aqr_egg::egg::entry_sums(&mut windowed(src, c)),
             Some(detect::Format::Gzip) => {
                 let t = src.read_range(c, size - 8..size)?;
                 let word = |p: usize| u32::from_le_bytes(t[p..p + 4].try_into().expect("4 bytes"));
@@ -1556,6 +1559,22 @@ fn lay_alike<S: Source + ?Sized>(
     }
     order.sort_by_key(|c| key[c]);
     Ok(())
+}
+
+/// The ranges of content `c`, read through a window of 64 KiB at least (each
+/// [`Source::read_range`] may open the file again): for headers read one after another.
+fn windowed<S: Source + ?Sized>(src: &S, c: usize) -> impl FnMut(Range<u64>) -> Option<Vec<u8>> {
+    const WINDOW: u64 = 64 << 10;
+    let mut held: (u64, Vec<u8>) = (0, Vec::new());
+    move |r: Range<u64>| {
+        let (at, w) = &held;
+        if r.start < *at || r.end > at + w.len() as u64 {
+            let end = r.end.max(r.start.saturating_add(WINDOW));
+            held = (r.start, src.read_range(c, r.start..end).ok()?);
+        }
+        let (at, w) = &held;
+        w.get((r.start - at) as usize..(r.end - at) as usize).map(<[u8]>::to_vec)
+    }
 }
 
 /// What the data of a `.lzma`, `.xz` or Zstandard file holds (None where it does not decode), as

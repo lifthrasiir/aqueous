@@ -36,10 +36,11 @@ a record of about 0.01% of the streams, the default profile 1-10% (it has no zli
 ## Status
 
 Not taken, kept as they are: encrypted entries (ZIP 2.0's traditional encryption); bodies
-running past the data (the next volumes of a split archive are not joined). Left: the volumes of
-a split archive as one; the entries' CRC-32 and sizes for aqr-compress's probe of what the files
-archived along hold (`entry_sums`, as for ZIP and 7z); bzip2 of several blocks checked against
-ALZip itself (only one-block streams were at hand, reproduced exactly).
+running past the data (the next volumes of a split archive are not joined). The entries' CRC-32 and sizes
+(`alz::entry_sums`, the local headers read one after another) tell aqr-compress's probe what the
+files archived along hold, as for ZIP and 7z. Left: the volumes of a split archive as one; bzip2
+of several blocks checked against ALZip itself (only one-block streams were at hand, reproduced
+exactly).
 
 ## Results
 

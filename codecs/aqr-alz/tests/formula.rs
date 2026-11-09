@@ -116,3 +116,20 @@ fn extent_in_data() {
     let f = formula::encode(&x, 1).unwrap();
     assert!(eval(&f) == x);
 }
+
+/// The CRC-32 and sizes read header by header are those of the files `parse` reads, of the
+/// files not encrypted.
+#[test]
+fn entry_sums_as_parsed() {
+    for (name, d) in fixtures() {
+        let sums = alz::entry_sums(&mut |r| d.get(r.start as usize..r.end as usize).map(<[u8]>::to_vec));
+        let a = alz::parse(&d).unwrap();
+        let parsed: Vec<(u32, u64)> =
+            a.entries.iter().filter(|e| e.method.is_some() && !e.encrypted).map(|e| (e.crc, e.size)).collect();
+        assert_eq!(sums, parsed, "{name}");
+        // (the files' CRC-32 where they are stored)
+        for e in a.entries.iter().filter(|e| e.method == Some(alz::STORED) && !e.encrypted) {
+            assert_eq!(aqr_common::crc32::hash(&d[e.body.clone()]), e.crc, "{name}");
+        }
+    }
+}

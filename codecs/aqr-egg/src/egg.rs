@@ -261,6 +261,77 @@ pub fn parse(d: &[u8]) -> Option<Egg> {
     Some(egg)
 }
 
+/// The CRC-32 and size of the files' contents in the archive whose bytes `read` gives by their
+/// span (the records alone, one after another from the start, the blocks' data skipped): of the
+/// files of one block of all of their data, not encrypted, up to the first record that is not a
+/// file's. None of a solid archive's (its blocks hold several files).
+pub fn entry_sums(read: &mut dyn FnMut(Range<u64>) -> Option<Vec<u8>>) -> Vec<(u32, u64)> {
+    let mut read_le =
+        |at: u64, n: usize| read(at..at + n as u64).filter(|d| d.len() == n).map(|d| le(&d, 0, n).unwrap());
+    let mut sums = Vec::new();
+    if read_le(0, 4) != Some(u32::from_le_bytes(MAGIC) as u64) {
+        return sums;
+    }
+    // the flags of the record of an extra field at `p`, and where it ends
+    fn extra_end(read_le: &mut dyn FnMut(u64, usize) -> Option<u64>, p: u64) -> Option<(u8, u64)> {
+        let flags = read_le(p + 4, 1)? as u8;
+        let w = if flags & 1 != 0 { 4 } else { 2 };
+        Some((flags, (p + 5 + w as u64).checked_add(read_le(p + 5, w)?)?))
+    }
+    let mut p = HEADER as u64;
+    loop {
+        match read_le(p, 4).map(|s| s as u32) {
+            Some(END) => break p += 4,
+            Some(SOLID) | None => return sums,
+            Some(SPLIT | SKIP | GLOBAL_ENCRYPT) => match extra_end(&mut read_le, p) {
+                Some((_, e)) => p = e,
+                None => return sums,
+            },
+            Some(_) => return sums,
+        }
+    }
+    'files: while read_le(p, 4) == Some(FILE as u64) {
+        let Some(size) = read_le(p + 8, 8) else { break };
+        let (mut at, mut encrypted) = (p + 16, false);
+        loop {
+            match read_le(at, 4).map(|s| s as u32) {
+                Some(END) => break at += 4,
+                None | Some(BLOCK | FILE) => break 'files,
+                Some(s) => {
+                    let Some((flags, mut end)) = extra_end(&mut read_le, at) else { break 'files };
+                    // (a filename's locale, which its size does not count)
+                    if s == FILENAME && flags & 8 != 0 {
+                        end += LOCALE as u64;
+                    }
+                    encrypted |= s == ENCRYPT;
+                    at = end;
+                }
+            }
+        }
+        let mut blocks = Vec::new();
+        while read_le(at, 4) == Some(BLOCK as u64) {
+            let h = at + 4;
+            let (Some(bsize), Some(csize), Some(crc)) = (read_le(h + 2, 4), read_le(h + 6, 4), read_le(h + 10, 4))
+            else {
+                break 'files;
+            };
+            blocks.push((crc as u32, bsize));
+            at = h + 18 + csize;
+            // (a block running past the data: of a volume of a split archive, or cut short)
+            if read_le(at - 1, 1).is_none() {
+                break 'files;
+            }
+        }
+        if let ([(crc, n)], false) = (&blocks[..], encrypted)
+            && *n == size
+        {
+            sums.push((*crc, size));
+        }
+        p = at;
+    }
+    sums
+}
+
 /// A file to [`fn@write`]: its name, its block's method, its compressed data and its size.
 pub type Written<'a> = (&'a str, u8, &'a [u8], u32);
 

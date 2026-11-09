@@ -74,40 +74,95 @@ fn le(d: &[u8], at: usize, n: usize) -> Option<u64> {
 /// The local entry at `p` (its signature checked): Err(true) where it runs past `d`, Err(false)
 /// where it is not one (sizes of another width).
 fn local(d: &[u8], p: usize) -> Result<Entry, bool> {
+    let h = head(d, p)?;
     let f = p + 4;
-    let desc = *d.get(f + 7).ok_or(true)?;
+    let name = h.at..h.at + h.nlen;
+    let encrypted = h.desc & 1 != 0;
+    let start = name.end;
+    let end = usize::try_from(h.csize)
+        .ok()
+        .and_then(|n| n.checked_add(start + if encrypted { CRYPT_HEADER } else { 0 }))
+        .filter(|&e| e <= d.len())
+        .ok_or(true)?;
+    let (attrs, time) = (d[f + 2], le(d, f + 3, 4).ok_or(true)? as u32);
+    Ok(Entry { pos: p, name, attrs, time, method: h.method, encrypted, crc: h.crc, size: h.size, body: start..end })
+}
+
+/// What a local header at `p` tells (its signature checked), before its name.
+struct Head {
+    desc: u8,
+    nlen: usize,
+    method: Option<u8>,
+    crc: u32,
+    csize: u64,
+    size: u64,
+    /// Where its name starts.
+    at: usize,
+}
+
+/// Bytes of a local header before its name, of a descriptor byte `desc`: None where it is not
+/// one (sizes of another width).
+fn head_len(desc: u8) -> Option<usize> {
     let width = match desc >> 4 {
         0 => 0,
         1 => 1,
         2 => 2,
         4 => 4,
         8 => 8,
-        _ => return Err(false),
+        _ => return None,
     };
-    local_sized(d, p, desc, width).ok_or(true)
+    Some(4 + FIXED + if width > 0 { 6 + 2 * width } else { 0 })
 }
 
-fn local_sized(d: &[u8], p: usize, desc: u8, width: usize) -> Option<Entry> {
+/// The local header at `p` (its signature checked): Err(true) where it runs past `d`, Err(false)
+/// where it is not one.
+fn head(d: &[u8], p: usize) -> Result<Head, bool> {
     let f = p + 4;
-    let nlen = le(d, f, 2)? as usize;
-    let mut at = f + FIXED;
+    let desc = *d.get(f + 7).ok_or(true)?;
+    let len = head_len(desc).ok_or(false)?;
+    let width = (len - 4 - FIXED).saturating_sub(6) / 2;
+    let field = |at, n| le(d, at, n).ok_or(true);
+    let nlen = field(f, 2)? as usize;
+    let at = f + FIXED;
     let (mut method, mut crc, mut csize, mut size) = (None, 0, 0, 0);
     if width > 0 {
-        method = Some(*d.get(at)?);
-        crc = le(d, at + 2, 4)? as u32;
-        csize = le(d, at + 6, width)?;
-        size = le(d, at + 6 + width, width)?;
-        at += 6 + 2 * width;
+        method = Some(*d.get(at).ok_or(true)?);
+        crc = field(at + 2, 4)? as u32;
+        csize = field(at + 6, width)?;
+        size = field(at + 6 + width, width)?;
     }
-    let name = at..at + nlen;
-    let encrypted = desc & 1 != 0;
-    let start = name.end;
-    let end = usize::try_from(csize).ok()?.checked_add(start + if encrypted { CRYPT_HEADER } else { 0 })?;
-    if end > d.len() {
-        return None;
+    Ok(Head { desc, nlen, method, crc, csize, size, at: p + len })
+}
+
+/// The CRC-32 and size of the files' contents in the archive whose bytes `read` gives by their
+/// span (the local headers alone, one after another from the start): of the files not
+/// encrypted, up to the first record that is not a local entry.
+pub fn entry_sums(read: &mut dyn FnMut(Range<u64>) -> Option<Vec<u8>>) -> Vec<(u32, u64)> {
+    let mut sums = Vec::new();
+    if !read(0..HEADER as u64 + 4).is_some_and(|d| starts(&d)) {
+        return sums;
     }
-    let (attrs, time) = (*d.get(f + 2)?, le(d, f + 3, 4)? as u32);
-    Some(Entry { pos: p, name, attrs, time, method, encrypted, crc, size, body: start..end })
+    let mut p = HEADER as u64;
+    // (a desc of no sizes: a header of the fixed part alone)
+    while let Some(fixed) = read(p..p + 4 + FIXED as u64).filter(|d| d.len() == 4 + FIXED && d[..4] == LOCAL) {
+        let Some(len) = head_len(fixed[4 + 7]) else { break };
+        let Some(Ok(h)) = read(p..p + len as u64).map(|d| head(&d, 0)) else { break };
+        let encrypted = h.desc & 1 != 0;
+        if h.method.is_some() && !encrypted {
+            sums.push((h.crc, h.size));
+        }
+        let body = h.csize.saturating_add(if encrypted { CRYPT_HEADER as u64 } else { 0 });
+        let end = p.saturating_add((h.at + h.nlen) as u64).saturating_add(body);
+        // (a body running past the data: of a volume of a split archive, or cut short)
+        if read(end - 1..end).is_none_or(|b| b.len() != 1) {
+            if h.method.is_some() && !encrypted {
+                sums.pop();
+            }
+            break;
+        }
+        p = end;
+    }
+    sums
 }
 
 /// The comment section at `p` (its signature checked): its entries (a file's index, 4 bytes, the
