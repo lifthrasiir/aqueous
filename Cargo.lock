@@ -242,6 +242,7 @@ dependencies = [
  "aqr-git",
  "aqr-gnu-gettext",
  "aqr-hdf5",
+ "aqr-hfs",
  "aqr-infer-recs",
  "aqr-iso",
  "aqr-jpeg",
@@ -567,6 +568,15 @@ dependencies = [
  "aqr-api",
  "aqr-common",
  "aqr-flate",
+ "aqr-formula",
+ "zstd",
+]
+
+[[package]]
+name = "aqr-hfs"
+version = "0.1.0"
+dependencies = [
+ "aqr-disk",
  "aqr-formula",
  "zstd",
 ]

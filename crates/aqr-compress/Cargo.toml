@@ -36,6 +36,7 @@ aqr-apfs = { path = "../../codecs/aqr-apfs" }
 aqr-disk = { path = "../../codecs/aqr-disk" }
 aqr-ext = { path = "../../codecs/aqr-ext" }
 aqr-fat = { path = "../../codecs/aqr-fat" }
+aqr-hfs = { path = "../../codecs/aqr-hfs" }
 aqr-ntfs = { path = "../../codecs/aqr-ntfs" }
 aqr-iso = { path = "../../codecs/aqr-iso" }
 aqr-wim = { path = "../../codecs/aqr-wim" }
