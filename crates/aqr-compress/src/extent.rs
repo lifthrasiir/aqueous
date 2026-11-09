@@ -2,12 +2,12 @@
 //! given to its recompressor.
 
 use crate::detect::{Format, id3_len, mp3_header};
-use crate::flate::{gzip_deflate, zlib_deflate};
+use crate::flate::gzip_deflate;
 use aqr_flac::flac;
 
 /// Bytes of the gzip members one after another at the start of `d` (a stream written in parts:
 /// gzip's, pigz's `--independent`, aqr-pack's), recompressed as one ([`crate::flate::gzip`]).
-fn gzip_members(d: &[u8]) -> Option<usize> {
+pub(crate) fn gzip_members(d: &[u8]) -> Option<usize> {
     let mut end = gzip_deflate(d)?.end + 8;
     while d.get(end..end + 3) == Some(&[0x1f, 0x8b, 8])
         && let Some(r) = gzip_deflate(&d[end..])
@@ -24,68 +24,12 @@ fn gzip_members(d: &[u8]) -> Option<usize> {
 /// The end need not be exact: what is cut off stays in the data around the file, and what is
 /// left in is the recompressor's to code or store.
 pub fn extent(f: Format, d: &[u8]) -> Option<usize> {
-    let end = match f {
-        Format::Pe => pe(d),
-        Format::MachO => aqr_exe::format::macho::extent(d).map(|e| clamp(d, e)),
-        Format::Elf => aqr_exe::format::elf::extent(d).map(|e| clamp(d, e)),
-        Format::Gzip => gzip_members(d),
-        Format::Zlib => zlib_deflate(d).map(|r| r.end + 4),
-        Format::Lz4 => aqr_lz4::formula::extent(d),
-        Format::Lzma => Some(d.len()),
-        Format::Xz => aqr_lzma::formula::extent_xz(d),
-        Format::Lzo => aqr_lzo::formula::extent(d),
-        Format::Bvx => aqr_bvx::formula::extent(d),
-        Format::Bzip2 => aqr_bz2::formula::extent(d),
-        Format::Png => png(d),
-        Format::Gif => aqr_gif::formula::extent(d),
-        Format::Jpeg => jpeg(d),
-        Format::Mp3 => mp3(d),
-        Format::Flac => Some(flac_frames(d)),
-        Format::Raw => raw(d),
-        Format::Psd => psd(d),
-        Format::Clip => clip(d),
-        Format::Dds => aqr_tex::dds::detect(d).map(|f| f.start + f.data.len() as usize),
-        Format::Pdf => Some(pdf(d)),
-        Format::Sqlite => sqlite(d),
-        Format::LevelDb => Some(d.len()),
-        Format::Zip => aqr_zip::zip::extent(d),
-        Format::SevenZip => aqr_7z::formula::extent(d),
-        Format::Cab => aqr_mszip::formula::extent(d),
-        Format::Alz => aqr_alz::formula::extent(d),
-        Format::Egg => aqr_egg::formula::extent(d),
-        Format::Lha => aqr_lha::formula::extent(d),
-        Format::Rar => aqr_rar::formula::extent(d),
-        Format::GitPack => aqr_git::pack::extent(d),
-        Format::GnuGettext => aqr_gnu_gettext::formula::extent(d),
-        Format::Wasm => aqr_wasm::formula::extent(d),
-        Format::Dex => aqr_dex::formula::extent(d),
-        Format::Pdb => aqr_pdb::formula::extent(d),
-        Format::Arsc => aqr_arsc::formula::extent(d),
-        Format::Fsb5 => aqr_fsb::fsb5::extent(d),
-        Format::Ogg => aqr_ogg::formula::extent(d),
-        Format::ProRes => aqr_prores::formula::extent(d),
-        Format::Fasta
-        | Format::Ppmd
-        | Format::Mkv
-        | Format::Obj
-        | Format::Xsv
-        | Format::Jsonl
-        | Format::Text
-        | Format::Sized
-        | Format::Records => Some(d.len()),
-        Format::Fits => aqr_fits::formula::extent(d),
-        Format::Hdf5 => aqr_hdf5::formula::extent(d),
-        Format::Ar => bundle(aqr_bundle::formula::Format::Ar, d),
-        Format::Tar => bundle(aqr_bundle::formula::Format::Tar, d),
-        Format::Cpio => bundle(aqr_bundle::formula::Format::Cpio, d),
-        Format::Disk | Format::Dmg | Format::Wim | Format::Asar | Format::Chm | Format::Aqr => Some(d.len()),
-    }?;
-    Some(end.min(d.len()))
+    Some((f.spec().extent)(d)?.min(d.len()))
 }
 
 /// An archive of aqr-bundle: up to its last member, and the zeros after it; or, where it has
 /// none, all of it (an archive of nothing, which is not taken).
-fn bundle(f: aqr_bundle::formula::Format, d: &[u8]) -> Option<usize> {
+pub(crate) fn bundle(f: aqr_bundle::formula::Format, d: &[u8]) -> Option<usize> {
     Some(aqr_bundle::formula::extent(f, d).unwrap_or(d.len()))
 }
 
@@ -110,14 +54,14 @@ fn u64be(d: &[u8], p: usize) -> Option<u64> {
 }
 
 /// `p`, or the end of `d` where `p` is past it (or does not fit).
-fn clamp(d: &[u8], p: u64) -> usize {
+pub(crate) fn clamp(d: &[u8], p: u64) -> usize {
     usize::try_from(p).map_or(d.len(), |p| p.min(d.len()))
 }
 
 /// The headers and the sections' data, with the certificate table where it is after them: the
 /// overlay is left out, but for an NSIS installer's data ([`crate::nsis`]), which its stub
 /// reads.
-fn pe(d: &[u8]) -> Option<usize> {
+pub(crate) fn pe(d: &[u8]) -> Option<usize> {
     let (mut end, dirs) = pe_sections(d)?;
     if let Some(len) = d.get(clamp(d, end)..).and_then(crate::nsis::data_len) {
         end += len as u64;
@@ -161,7 +105,7 @@ pub(crate) fn pe_overlay(d: &[u8]) -> Option<u64> {
 }
 
 /// The chunks up to `IEND`.
-fn png(d: &[u8]) -> Option<usize> {
+pub(crate) fn png(d: &[u8]) -> Option<usize> {
     let mut p = 8u64;
     while let Some(len) = u32be(d, p as usize) {
         let ty = d.get(p as usize + 4..p as usize + 8)?;
@@ -178,7 +122,7 @@ fn png(d: &[u8]) -> Option<usize> {
 
 /// The segments and entropy-coded data up to EOI. Broken structure ends the file where it
 /// starts, if a scan was found before it.
-fn jpeg(d: &[u8]) -> Option<usize> {
+pub(crate) fn jpeg(d: &[u8]) -> Option<usize> {
     let (mut p, mut scan) = (2, false);
     while p + 1 < d.len() {
         if d[p] != 0xff {
@@ -239,7 +183,7 @@ fn mp3_free(d: &[u8]) -> Option<usize> {
 
 /// Frames of the same version, layer and rate one after another, after an ID3v2 tag if any,
 /// and an ID3v1 tag after them. Without a tag, a single frame is no sign of a file.
-fn mp3(d: &[u8]) -> Option<usize> {
+pub(crate) fn mp3(d: &[u8]) -> Option<usize> {
     let tagged = id3_len(d);
     let mut p = tagged.unwrap_or(0);
     let first = d.get(p..).filter(|f| mp3_header(f))?;
@@ -263,7 +207,7 @@ fn mp3(d: &[u8]) -> Option<usize> {
 
 /// RIFF and FORM by their sizes; BMP and PNM (only taken at the start of a file) by their
 /// samples' end.
-fn raw(d: &[u8]) -> Option<usize> {
+pub(crate) fn raw(d: &[u8]) -> Option<usize> {
     let size = match d.first_chunk::<4>()? {
         b"RIFF" => u32le(d, 4)?,
         b"FORM" => u32be(d, 4)?,
@@ -285,7 +229,7 @@ const FLAC_JUNK: usize = 4096;
 /// end, damaged, is followed by the next within the largest frame size. The last frame ends at
 /// its first end, and an ID3v1 tag may follow it; one without an end is left out. Without the
 /// metadata, to the end of `d`.
-fn flac_frames(d: &[u8]) -> usize {
+pub(crate) fn flac_frames(d: &[u8]) -> usize {
     let Some((info, start)) = flac::parse_metadata(d) else { return d.len() };
     let Some(&sync) = d.get(start + 1) else { return start };
     // The stream info is the first block; its maximum frame size is 0 where unknown.
@@ -372,12 +316,12 @@ fn id3v1(d: &[u8]) -> usize {
 /// The header, the three sections given by their lengths, and the image data where it is raw
 /// or RLE.
 /// A Clip Studio Paint file: the size its header gives.
-fn clip(d: &[u8]) -> Option<usize> {
+pub(crate) fn clip(d: &[u8]) -> Option<usize> {
     let n = u64be(d, 8)?;
     (n >= 24).then(|| clamp(d, n))
 }
 
-fn psd(d: &[u8]) -> Option<usize> {
+pub(crate) fn psd(d: &[u8]) -> Option<usize> {
     let psb = match u16be(d, 4)? {
         1 => false,
         2 => true,
@@ -413,7 +357,7 @@ fn psd(d: &[u8]) -> Option<usize> {
 
 /// To the last `%%EOF` of the file: one followed by an object or a cross-reference section
 /// (an incremental update, or the first page of a linearized file) is not the last.
-fn pdf(d: &[u8]) -> usize {
+pub(crate) fn pdf(d: &[u8]) -> usize {
     let mut end = None;
     let mut p = 0;
     while let Some(i) = d[p..].windows(5).position(|w| w == b"%%EOF") {
@@ -443,7 +387,7 @@ fn object(d: &[u8]) -> bool {
 }
 
 /// The pages the header counts, where the count is valid; else to the end of `d`.
-fn sqlite(d: &[u8]) -> Option<usize> {
+pub(crate) fn sqlite(d: &[u8]) -> Option<usize> {
     let size = match u16be(d, 16)? {
         1 => 65536,
         s if s.is_power_of_two() && (512..=32768).contains(&s) => s,

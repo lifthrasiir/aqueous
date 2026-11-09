@@ -131,6 +131,7 @@ mod dwarf;
 mod exe;
 mod extent;
 mod flate;
+mod formats;
 mod git;
 mod hdf5;
 mod inflated;
@@ -1071,7 +1072,7 @@ fn records(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Made> {
 
 /// Whether data detected as `format` is text: taken as a table, else as text ([`made`]).
 fn is_text(format: Option<Format>) -> bool {
-    matches!(format, Some(Format::Text | Format::Xsv | Format::Jsonl))
+    format.is_some_and(|f| f.spec().text)
 }
 
 /// `d`, text, as JSON lines if aqr-jsonl takes it, else as a table if aqr-xsv does (and the
@@ -1166,8 +1167,11 @@ fn wim(d: &[u8], threads: usize) -> Option<Formula> {
 /// files they hold: -33%).
 /// (CHM files are not known by their names: one known so and turned down would not be scanned.)
 fn lzx_on(opt: &Options) -> bool {
-    opt.level.scale() >= 9
+    opt.level.scale() >= LZX_LEVEL
 }
+
+/// The level LZX streams are taken from ([`lzx_on`]).
+const LZX_LEVEL: u8 = 9;
 
 /// Whether RAR's streams with PPMd blocks are taken apart (and PPMd rebuilt): from level 9 only,
 /// as rebuilding PPMd is slow and its data seldom archives smaller apart (high-order PPMd is
@@ -1183,15 +1187,7 @@ fn ppmd_on(opt: &Options) -> bool {
 /// ([`bvx`]) and CHM files ([`lzx_on`]) from level 9. Parts of a format taken (CAB's LZX
 /// folders, RAR's PPMd blocks) are its recompressor's to turn down: [`lzx_on`], [`ppmd_on`].
 pub(crate) fn format_on(format: Format, opt: &Options) -> bool {
-    if !opt.recompresses() {
-        return false;
-    }
-    match format {
-        Format::Lzma | Format::Xz | Format::SevenZip | Format::Gif => opt.level.scale() >= 4,
-        Format::Bvx => opt.level.scale() >= 9,
-        Format::Chm => lzx_on(opt),
-        _ => true,
-    }
+    opt.recompresses() && opt.level.scale() >= format.spec().level
 }
 
 /// `d` as a file of `format`, with its contents nested, if its recompressor takes it (and the
@@ -1791,13 +1787,7 @@ fn within(d: &[u8], parts: &[Region], opt: &Options, depth: u32, cx: &Cx) -> Vec
 
 /// What the parts of `d`, a file of `format`, are, where its recompressor tells.
 fn regions(format: Format, d: &[u8]) -> Option<Vec<Region>> {
-    catch_unwind(AssertUnwindSafe(|| match format {
-        Format::Psd => aqr_psd::formula::regions(d),
-        Format::Mkv => aqr_mkv::formula::regions(d),
-        _ => None,
-    }))
-    .ok()
-    .flatten()
+    catch_unwind(AssertUnwindSafe(|| format.spec().regions.and_then(|r| r(d)))).ok().flatten()
 }
 
 /// Which of `parts` (bytes of data and of description each) to keep, so that `base` and the
@@ -2137,19 +2127,9 @@ fn applications_of_lazy(f: &Formula) -> HashMap<usize, (Node, usize)> {
 
 /// About the thread time making data `d` takes, of its bytes and how long its format takes for
 /// a byte: thread-milliseconds by MB of the files of each format of 10gb (`--stats`, an M4;
-/// rounded), 50 for the others.
+/// rounded), 50 for the others ([`formats::Spec::cost`]).
 fn cost(d: &[u8]) -> u64 {
-    let per_mb = match detect::detect(d) {
-        Some(Format::SevenZip) => 1750,
-        Some(Format::Gif) => 1590,
-        Some(Format::Lzma) => 1370,
-        Some(Format::Xz) => 750,
-        Some(Format::Gzip) => 370,
-        Some(Format::Zip) => 230,
-        Some(Format::Pe | Format::Elf) => 160,
-        Some(Format::Ar) => 120,
-        _ => 50,
-    };
+    let per_mb = detect::detect(d).map_or(formats::Spec::DEFAULT.cost, |f| f.spec().cost);
     d.len() as u64 * per_mb
 }
 
@@ -2451,7 +2431,7 @@ fn content(opt: &Options, m: Module, i: usize) -> Option<&Content> {
 
 /// What the recompressor of a [`pure`] format is given besides the data: the options (of the
 /// level and the threads), how many formats deep the data is, and what the context lends.
-struct Pure<'a> {
+pub(crate) struct Pure<'a> {
     opt: &'a Options,
     depth: u32,
     /// The dictionary text is coded with, if any ([`Cx::words`]).
@@ -2670,7 +2650,7 @@ fn is_pure(format: Format) -> bool {
 
 /// How the recompressor of a format is run.
 #[derive(Clone, Copy)]
-enum Recompressor {
+pub(crate) enum Recompressor {
     /// A [`pure`] one, its `encode`: the formula of the data, on so many threads.
     Pure(fn(&[u8], usize) -> Option<Formula>),
     /// A [`pure`] one taking more of what [`Pure`] gives than the threads.
@@ -2681,147 +2661,27 @@ enum Recompressor {
     Cx(fn(&[u8], Kind, &Options, u32, &Cx) -> Option<Formula>),
 }
 
-/// The recompressor of `format`.
-fn recompressor(format: Format) -> Recompressor {
-    use Recompressor::{Cx, Pure, PureWith};
-    match format {
-        Format::Lz4 => Pure(aqr_lz4::formula::encode),
-        Format::Lzma => Pure(aqr_lzma::formula::encode),
-        Format::Xz => Pure(aqr_lzma::formula::encode_xz),
-        Format::Lzo => Pure(aqr_lzo::formula::encode),
-        Format::Png => Pure(aqr_png::formula::encode),
-        Format::Gif => Pure(aqr_gif::formula::encode),
-        Format::Jpeg => Pure(aqr_jpeg::formula::encode),
-        Format::Mp3 => Pure(aqr_mp3::formula::encode),
-        Format::Flac => Pure(aqr_flac::formula::encode),
-        Format::Raw => Pure(aqr_raw::formula::encode),
-        Format::Psd => Pure(aqr_psd::formula::encode),
-        Format::Clip => Pure(aqr_clip::formula::encode),
-        Format::Dds => Pure(aqr_tex::formula::encode),
-        Format::Sqlite => Pure(aqr_sqlite::formula::encode),
-        Format::LevelDb => Pure(aqr_snappy::formula::encode),
-        Format::Fasta => Pure(aqr_fasta::formula::encode),
-        Format::Dex => Pure(aqr_dex::formula::encode),
-        Format::Pdb => Pure(aqr_pdb::formula::encode),
-        Format::Arsc => Pure(aqr_arsc::formula::encode),
-        Format::GnuGettext => Pure(aqr_gnu_gettext::formula::encode),
-        Format::Wasm => Pure(aqr_wasm::formula::encode),
-        Format::Fsb5 => Pure(aqr_fsb::formula::encode),
-        Format::Ogg => Pure(aqr_ogg::formula::encode),
-        Format::Fits => Pure(aqr_fits::formula::encode),
-        Format::Obj => Pure(aqr_obj::formula::encode),
-        Format::Xsv => Pure(aqr_xsv::formula::encode),
-        Format::Jsonl => Pure(aqr_jsonl::formula::encode),
-        Format::Sized => Pure(aqr_raw::formula::encode_sized),
-        Format::Records => Pure(aqr_infer_recs::formula::encode),
-        Format::Wim => Pure(wim),
-        Format::Ppmd => Pure(aqr_ppmd::formula::encode),
-        Format::Mkv => Pure(aqr_mkv::formula::encode),
-        Format::ProRes => Pure(aqr_prores::formula::encode),
-        // (text with the dictionary given, if any; PDF as [`pdf_options`] tells; bzip2 streams
-        // where they may pay, see [`bz2`])
-        Format::Text => PureWith(|d, p| match p.words {
-            Some(w) => aqr_wrt::formula::encode_with(d, w, p.opt.threads),
-            None => aqr_wrt::formula::encode(d, p.opt.threads),
-        }),
-        Format::Pdf => PureWith(|d, p| aqr_pdf::formula::encode_with(d, &pdf_options(p.opt, p.opt.threads))),
-        Format::Bzip2 => PureWith(|d, p| bz2(d, p.opt, p.depth, p.opt.threads, p.held)),
-        Format::Pe => Cx(|d, _, _, _, _| exe::pe(d)),
-        Format::MachO => Cx(|d, _, _, _, cx| {
-            let r = cx.remaps.as_deref();
-            exe::macho(d, r.map_or(&[], |r| r.of(d)), r.map_or(&[], |r| r.deltas(d)), r.and_then(|r| r.data(d)))
-        }),
-        Format::Elf => Cx(|d, _, _, _, cx| {
-            let r = cx.remaps.as_deref();
-            exe::elf(d, r.map_or(&[], |r| r.of(d)), r.map_or(&[], |r| r.deltas(d)))
-        }),
-        Format::Gzip => Cx(flate::gzip),
-        Format::Zlib => Cx(flate::zlib),
-        Format::Zip => Cx(|d, _, opt, depth, cx| zip::zip(d, opt, depth, cx)),
-        Format::SevenZip => Cx(|d, _, opt, _, _| sevenz(d, opt)),
-        Format::Cab => Cx(|d, _, opt, _, cx| cab(d, opt, cx)),
-        Format::Chm => Cx(|d, _, opt, _, cx| chm(d, opt, cx)),
-        Format::Alz => Cx(|d, _, opt, depth, cx| alz(d, opt, depth, cx)),
-        Format::Egg => Cx(|d, _, opt, depth, cx| egg(d, opt, depth, cx)),
-        Format::Lha => Cx(|d, _, opt, _, cx| lha(d, opt, cx)),
-        Format::Rar => Cx(|d, _, opt, _, cx| rar(d, opt, cx)),
-        Format::Aqr => Cx(|d, _, _, _, _| aqueous::archive(d)),
-        Format::GitPack => Cx(|d, _, opt, depth, cx| git::pack(d, opt, depth, cx)),
-        Format::Hdf5 => Cx(|d, _, opt, depth, cx| hdf5::file(d, opt, depth, cx)),
-        Format::Bvx => Cx(|d, _, opt, _, cx| bvx(d, opt, cx)),
-        Format::Ar | Format::Tar | Format::Cpio => Cx(|d, _, _, _, _| bundle::bundle(d)),
-        Format::Disk => Cx(|d, _, opt, _, cx| {
-            // (a compressed container by its chunks, its disk a content: as a DMG)
-            if let Some(f) = chunked::container(d, opt, cx) {
-                return Some(f);
-            }
-            // (the Splits of files in pieces recorded, their contents at hand: see `chunked`)
-            let f = bundle::disk(d, opt.threads)?;
-            if let Some(pre) = &cx.pre {
-                pre.learn_splits(&f, opt.threads);
-            }
-            Some(f)
-        }),
-        Format::Dmg => Cx(|d, _, opt, _, cx| chunked::dmg(d, opt, cx)),
-        Format::Asar => Cx(|d, _, _, _, _| bundle::asar(d)),
+/// The formula of a disk image: of a compressed container by its chunks, its disk a content (as a
+/// DMG); else of its file systems, the Splits of files in pieces recorded, their contents at
+/// hand (see `chunked`).
+fn disk(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
+    if let Some(f) = chunked::container(d, opt, cx) {
+        return Some(f);
     }
+    let f = bundle::disk(d, opt.threads)?;
+    if let Some(pre) = &cx.pre {
+        pre.learn_splits(&f, opt.threads);
+    }
+    Some(f)
 }
 
-/// Bytes of heap the recompressor of `format` takes at most for each byte of its input, as far
-/// as it holds what it makes of all of it (an estimate, rounded up: of its data decoded, its
-/// streams, its models), or none where it holds a bounded part of it at a time (chunks,
-/// segments, entries made apart, slices of the input). An input whose estimate is more than a
-/// recompression may take ([`fits`]) is not recompressed so: data a recompressor cannot take
-/// in parts is kept as it is rather than letting it take all the memory there is.
-fn heap_per_byte(format: Format) -> f64 {
-    use Format::*;
-    // (of the peaks measured in docs/file-formats.md, "memory / input", rounded up; those not
-    // measured as the code holds them)
-    match format {
-        // in parts (segments, chunks, the data of each application made as it is needed), or
-        // slices of the input and entries made apart
-        Jsonl | ProRes | Wim | Disk | Dmg | Ar | Tar | Cpio | Asar | Aqr | Ppmd => 0.0,
-        // blocks of 64 MiB, or slices with an index of frames
-        Obj | Mkv => 3.0,
-        // FASTA: segments of 256 MiB, the encoder holding a whole segment (heap peaks of
-        // `aqr -c --stats` with verification, hg19: chr21 49 MB -> 160 MB = 3.3 per byte, as a
-        // small input takes its tables whole; chr1 254 MB -> 308 MB = 1.2; chr1+chr20 319 MB ->
-        // 482 MB = 1.5, two segments), 2.0 for the largest ratio of the inputs that count
-        Fasta => 2.0,
-        // text: the counts of the dictionary and the coded texts of the segments of 32 MiB being
-        // made, which are spilled (heap peaks of `aqr -c --stats` with verification: enwik8 109
-        // MB = 1.09 per byte of the input, enwik9 601 MB = 0.60), enwik8's rounded up
-        Text => 1.2,
-        // coded whole (enwik9: 1.5)
-        GnuGettext => 2.0,
-        // tables: segments of 64 MiB parsed one at a time, the streams (0.6 per byte) whole (heap
-        // peaks of `aqr -c --stats` on a synthetic CSV of nine columns: 67 MB 579 MB, 209 MB 671
-        // MB = 3.2 per byte, 628 MB 1.08 GB = 1.7; the tables of the segments are what
-        // there is for a small input, 0.6 GB), 2.0 for the largest ratio of the inputs that count
-        Xsv => 2.0,
-        Records | Sized => 5.0,
-        Pdf | Psd | Mp3 | Ogg | Fsb5 | Dex | Pdb | Arsc | Wasm => 7.0,
-        Sqlite | Pe | MachO | Elf | Jpeg | Lz4 | Lzo | LevelDb | Bzip2 | Hdf5 | Cab | Chm | Alz | Egg | Lha | Rar => {
-            9.0
-        }
-        // the data written out as it is decoded, and rebuilt in verification a batch at a time:
-        // what is left is the tokens an adaptive profile keeps (6 bytes each; enwik8.gz at -8:
-        // 7.6 per byte, 7.0 once the zlib detection and the chain rule stopped copying them)
-        Gzip | Zlib => 8.0,
-        Raw | Flac | Png | Gif | Clip | Dds | GitPack | Lzma | Xz | SevenZip => 12.0,
-        // the bodies' data written out as it is decoded; in verification, zip-recons with the
-        // bodies and the archive whole (enwik9.zip: 1.0); the tokens an adaptive profile keeps
-        // (6 bytes each, 189 M for enwik9.zip, reserved at once as one for each byte of the
-        // stream) at -7 to -9 (enwik9.zip, 322.6 MB: 5.05 GB = 15.7 per byte, 1.96 GB = 6.1 once
-        // the detection and the chain rule stopped copying them), rounded up
-        Zip => 7.0,
-        // the data decoded and its tokens kept (6 bytes each)
-        Bvx | Fits => 36.0,
-    }
+/// The recompressor of `format` ([`formats::Spec::recompressor`]).
+fn recompressor(format: Format) -> Recompressor {
+    format.spec().recompressor
 }
 
 /// Whether recompressing `len` bytes as `format` takes no more heap by its estimate
-/// ([`heap_per_byte`]) than one recompression may ([`aqr_common::budget::attempt_limit`]: what
+/// ([`formats::Spec::heap`]) than one recompression may ([`aqr_common::budget::attempt_limit`]: what
 /// `aqr -M` asks for, else the budget of the process or half the system's memory where more),
 /// which it is then held to as it runs ([`attempted`]). The estimate turns down up front what
 /// would give up after much of the work. (With `AQR_TEST_NO_ESTIMATE` set and not empty,
@@ -2833,7 +2693,7 @@ fn fits(format: Format, len: usize) -> bool {
 }
 
 fn fits_within(format: Format, len: usize, limit: u64) -> bool {
-    heap_per_byte(format) * len as f64 <= limit as f64
+    format.spec().heap * len as f64 <= limit as f64
 }
 
 /// Makes the formulas of the files of [`pure`] formats among the contents of `f` beforehand,

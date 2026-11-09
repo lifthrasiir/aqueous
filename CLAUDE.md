@@ -154,10 +154,10 @@ optimization picked by hash.
   aqr-compress declares them (`crates/aqr-compress/src/memory.rs`) in the Apply instruction
   (always opcode 16, one task limit for each class of the module). An application over
   `--application-bound` (256 MiB compressing, 512 MiB decompressing) is not used / fails; a
-  recompression runs under a heap allowance (`aqr_common::allowance`), `heap_per_byte` in
-  aqr-compress turning inputs away up front. A module allocates on the stack in the order its
-  plan follows; changing what it allocates means changing its plan, which the `*_plans_hold`
-  tests in aqr-decompress's `tests/wasm.rs` check to the page, instance and each class
+  recompression runs under a heap allowance (`aqr_common::allowance`), each format's `heap` in
+  aqr-compress (`src/formats.rs`) turning inputs away up front. A module allocates on the stack
+  in the order its plan follows; changing what it allocates means changing its plan, which the
+  `*_plans_hold` tests in aqr-decompress's `tests/wasm.rs` check to the page, instance and each class
   (`plans_hold_on_samples` in `tests/samples.rs`, ignored, does on `scripts/module-memory.sh`'s
   samples). Tasks spawn only classes above their own.
 - Released modules: the earlier Apply (opcode 11, reserved) is accepted only for the modules of

@@ -590,7 +590,7 @@ peak footprint 4.39 → 2.23 GB, resident 최대 10.57 → 8.07 GB, 스필 최�
 | 8 | png | 10.3× | 12 | A(줄 창) | |
 | – | jpeg(progressive), pdf, pdb, dex, arsc, wasm, gettext, psd, fits, hdf5, gif, tex, clip, mp3, ogg | | 7–36 | C 또는 나중 | 상한만; 커지는 일이 드물거나 전역 구조(xref, 객체 그래프) |
 
-("지금"은 `crates/aqr-compress/src/lib.rs`의 `heap_per_byte`이다. 모듈의 part 판은 해제의 메모리를 입력과 무관하게 했지만, 인코더의 힙은 형식마다 이만큼 남아 있다.)
+("지금"은 `crates/aqr-compress/src/formats.rs`의 형식별 `heap`이다(예전 `heap_per_byte`). 모듈의 part 판은 해제의 메모리를 입력과 무관하게 했지만, 인코더의 힙은 형식마다 이만큼 남아 있다.)
 
 이미 나뉘어 있는 것: jsonl(64 MiB), prores(64 MiB), obj(64 MiB), wim(적용마다), fasta(8 Mi 염기), git(64 MiB
 inflate 창). iso, wim, bundle, asar, mkv, ppmd, 7z는 모듈이 없어 해제 쪽에 옮길 것이 없다.
