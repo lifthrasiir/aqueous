@@ -13,6 +13,9 @@
 //!   worker cannot resize; `Child::share(&arena)` it given to the worker, of a token for
 //!   `view(token, len)` in the worker, which maps it (a `Mapping`).
 //!
+//! - `cpu_time()`: the CPU time all the threads of the worker have used (user and system), for
+//!   the decoder's `--stats`. Reading one's own clock needs nothing the lockdown denies.
+//!
 //! Systems without these have the worker refuse to start (`unsupported`), as a worker that is
 //! not locked down would protect from nothing. (`SUPPORTED` of the sandbox lists the others.)
 
@@ -22,7 +25,7 @@ use std::io;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{Arena, Child, Mapping, arena, lockdown, spawn, view};
+pub use windows::{Arena, Child, Mapping, arena, cpu_time, lockdown, spawn, view};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -36,11 +39,13 @@ pub use macos::{Arena, Child, Mapping, arena, lockdown, spawn, view};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod unix;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use unix::cpu_time;
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 mod unsupported;
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-pub use unsupported::{Arena, Child, Mapping, arena, lockdown, spawn, view};
+pub use unsupported::{Arena, Child, Mapping, arena, cpu_time, lockdown, spawn, view};
 
 /// The standard input and output of the worker, for the messages.
 pub fn channel() -> io::Result<(File, File)> {

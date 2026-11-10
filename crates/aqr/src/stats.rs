@@ -35,7 +35,8 @@
 //! - `trace`: `interval` (seconds between samples, as it ended), `workers`, `labels` (by id:
 //!   name and whether of waiting), `stacks` (by id: label ids, the outermost first; 0 is none,
 //!   idle), `threads` (name and whether a worker of the pool; the others are the threads of part
-//!   modules and of their tasks, whose work is attributed as the pool's is), and the samples by columns:
+//!   modules and of their tasks, whose work is attributed as the pool's is, and the "sandbox worker"s,
+//!   made up from the CPU time a sandbox worker told for each application), and the samples by columns:
 //!   `at` (seconds), `heap` and `rss` (bytes), `mapped` (bytes of the resident set of files
 //!   mapped: the inputs, the spill; 0 where unknown), `held` (bytes taken of the budget), `reserved`
 //!   (workers reserved or running), `samples`

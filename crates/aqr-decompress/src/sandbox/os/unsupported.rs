@@ -56,3 +56,7 @@ pub fn view(_: u64, _: usize) -> io::Result<Mapping> {
 pub fn lockdown() -> io::Result<()> {
     Err(unsupported())
 }
+
+pub fn cpu_time() -> u64 {
+    0
+}

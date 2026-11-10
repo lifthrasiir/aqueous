@@ -340,7 +340,13 @@ impl Worker {
             put_u64(w, c as u64)?;
         }
         w.flush()?;
-        let r = get_result(&mut self.from)?;
+        // (the thread waits for the worker; the worker's work is told as it ends)
+        let r = {
+            let _w = aqr_common::trace::wait("sandbox worker");
+            get_result(&mut self.from)?
+        };
+        let (cpu, wall) = get_usage(&mut self.from)?;
+        aqr_common::trace::remote(wall, cpu);
         let outs = match (&placed, r) {
             (_, Err(f)) => Err(f),
             (None, Ok(())) => self.outputs(sizes).map(Ok)?,

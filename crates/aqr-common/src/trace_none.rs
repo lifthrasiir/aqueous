@@ -24,6 +24,9 @@ pub fn span(_: &'static str) -> Span {
 }
 
 #[inline]
+pub fn remote(_: std::time::Duration, _: std::time::Duration) {}
+
+#[inline]
 pub fn wait(_: &'static str) -> Span {
     Span
 }

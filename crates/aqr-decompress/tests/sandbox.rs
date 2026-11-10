@@ -59,3 +59,49 @@ fn refuses_unsandboxed() {
     assert!(out.is_empty());
     assert_eq!(c.wait().unwrap().code(), Some(1));
 }
+
+/// A module spinning for a while (`n` rounds of a loop).
+fn spinning(n: u64) -> Vec<u8> {
+    wat::parse_str(format!(
+        r#"(module (import "aqr" "aqr_memory" (memory 0))
+            (func (export "aqr_apply_whole") (param i64 i64) (local $i i64)
+              (loop $l
+                (local.set $i (i64.add (local.get $i) (i64.const 1)))
+                (br_if $l (i64.lt_u (local.get $i) (i64.const {n}))))))"#
+    ))
+    .unwrap()
+}
+
+/// `--stats` sees what a worker does: its CPU time is thread-seconds outside the pool, at work
+/// for the item and under the spans of the thread that applied the module.
+#[test]
+fn work_is_traced() {
+    use aqr_common::trace;
+    trace::enable();
+    let rec = trace::record().unwrap();
+    let s = Sandbox::new(WORKER, [""; 0]);
+    let l = s.load(&spinning(1 << 31)).unwrap();
+    let start = std::time::Instant::now();
+    {
+        let _item = trace::item(Some(0));
+        let _span = trace::span("test");
+        l.apply(&[], &[], &[], &[1], 1 << 20, &[]).unwrap();
+    }
+    let wall = start.elapsed().as_secs_f64();
+    let t = rec.finish();
+    let mut busy = 0.0;
+    for (i, smp) in t.samples.iter().enumerate() {
+        let dt = t.samples.get(i + 1).map_or(0.0, |n| n.at - smp.at);
+        for (k, &(stack, item)) in smp.threads.iter().enumerate() {
+            let work = t.stacks.get(stack as usize).is_some_and(|st| {
+                st.last().is_some_and(|&l| !t.labels[l as usize].1)
+                    && st.iter().any(|&l| t.labels[l as usize].0 == "test")
+            });
+            if !t.threads[k].1 && item == 0 && work && t.threads[k].0 != "work_is_traced" {
+                busy += dt;
+            }
+        }
+    }
+    assert!(wall > 0.1, "the module spun for {wall} s");
+    assert!(busy >= 0.5 * wall, "{busy} thread-seconds outside the pool of a run of {wall} s");
+}

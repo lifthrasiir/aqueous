@@ -206,3 +206,14 @@ mod tests {
         assert!(shown.starts_with("aqr: titled -c "), "{shown:?}");
     }
 }
+
+/// The CPU time all the threads of this process have used, in nanoseconds. `clock_gettime` is
+/// among the calls the Linux filter allows (as the clock of `Instant`); no file is opened.
+pub fn cpu_time() -> u64 {
+    let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: of a timespec to write
+    if unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut t) } < 0 {
+        return 0;
+    }
+    (t.tv_sec as u64).saturating_mul(1_000_000_000).saturating_add(t.tv_nsec as u64)
+}

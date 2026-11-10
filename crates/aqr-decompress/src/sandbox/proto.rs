@@ -139,3 +139,16 @@ pub fn get_result(r: &mut impl Read) -> io::Result<Result<(), Failure>> {
         _ => return Err(violation(format!("an answer of tag {tag}"))),
     }))
 }
+
+/// What a worker used for an application, after the head of its answer: the CPU time of all its
+/// threads and the wall time, in nanoseconds (for `--stats`).
+pub fn put_usage(w: &mut impl Write, cpu: u64, wall: u64) -> io::Result<()> {
+    put_u64(w, cpu)?;
+    put_u64(w, wall)
+}
+
+/// What [`put_usage`] put, as durations: `(cpu, wall)`.
+pub fn get_usage(r: &mut impl Read) -> io::Result<(std::time::Duration, std::time::Duration)> {
+    let cpu = std::time::Duration::from_nanos(get_u64(r)?);
+    Ok((cpu, std::time::Duration::from_nanos(get_u64(r)?)))
+}

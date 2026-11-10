@@ -83,21 +83,31 @@ fn requests(r: &mut impl Read, w: &mut impl Write) -> io::Result<()> {
                     crate::wasm::Bounds { memory_limit: limit, task_limits: &task_limits, concurrency: &concurrency };
                 let Some(l) = loaded.get(&hash) else {
                     put_result(w, &Err(Failure::Resource("a module not loaded in the worker".into())))?;
+                    put_usage(w, 0, 0)?;
                     w.flush()?;
                     continue;
                 };
+                // (what the application takes: the process's CPU time and the wall time)
+                let (cpu0, wall0) = (os::cpu_time(), std::time::Instant::now());
+                let used = || (os::cpu_time().saturating_sub(cpu0), wall0.elapsed().as_nanos() as u64);
                 match inputs {
                     Inputs::Inline(inputs) => {
                         let inputs: Vec<&[u8]> = inputs.iter().map(|i| &i[..]).collect();
-                        match aqr_common::pool::run(|| l.apply_with(&params, &resources, &inputs, &sizes, bounds)) {
+                        let res = aqr_common::pool::run(|| l.apply_with(&params, &resources, &inputs, &sizes, bounds));
+                        let (cpu, wall) = used();
+                        match res {
                             Ok(outs) => {
                                 put_result(w, &Ok(()))?;
+                                put_usage(w, cpu, wall)?;
                                 put_u64(w, outs.len() as u64)?;
                                 for o in &outs {
                                     put_bytes(w, o)?;
                                 }
                             }
-                            Err(f) => put_result(w, &Err(f))?,
+                            Err(f) => {
+                                put_result(w, &Err(f))?;
+                                put_usage(w, cpu, wall)?;
+                            }
                         }
                     }
                     Inputs::Arena(lens) => {
@@ -118,7 +128,9 @@ fn requests(r: &mut impl Read, w: &mut impl Write) -> io::Result<()> {
                             o.iter().map(at).map(|(p, n)| unsafe { std::slice::from_raw_parts_mut(p, n) }).collect();
                         let res =
                             aqr_common::pool::run(|| l.apply_into(&params, &resources, &inputs, &mut outs, bounds));
+                        let (cpu, wall) = used();
                         put_result(w, &res)?;
+                        put_usage(w, cpu, wall)?;
                         if a.len() as u64 > KEEP {
                             arena = None;
                         }

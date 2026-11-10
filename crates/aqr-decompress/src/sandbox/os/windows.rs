@@ -29,7 +29,7 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, DuplicateHandle, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+    CloseHandle, DuplicateHandle, FILETIME, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
     WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::{
@@ -54,7 +54,7 @@ use windows_sys::Win32::System::SystemServices::{JOB_OBJECT_UILIMIT_ALL, JOB_OBJ
 use windows_sys::Win32::System::Threading::{
     CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, DETACHED_PROCESS,
     DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcessToken,
+    GetProcessTimes, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcessToken,
     PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
     PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW,
     SetThreadToken, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
@@ -535,6 +535,21 @@ pub fn view(token: u64, len: usize) -> io::Result<Mapping> {
     // SAFETY: of the handle the decoder gave this process
     unsafe { CloseHandle(h) };
     m
+}
+
+/// The CPU time all the threads of this process have used (kernel and user), in nanoseconds.
+/// `GetProcessTimes` of the process's own pseudo-handle, which needs no access the lockdown takes.
+pub fn cpu_time() -> u64 {
+    // SAFETY: of FILETIMEs to write
+    unsafe {
+        let (mut created, mut exited, mut kernel, mut user): (FILETIME, FILETIME, FILETIME, FILETIME) = zeroed();
+        if GetProcessTimes(GetCurrentProcess(), &mut created, &mut exited, &mut kernel, &mut user) == 0 {
+            return 0;
+        }
+        let ticks = |t: FILETIME| (t.dwHighDateTime as u64) << 32 | t.dwLowDateTime as u64;
+        // (units of 100 ns)
+        ticks(kernel).saturating_add(ticks(user)).saturating_mul(100)
+    }
 }
 
 /// The impersonation [`spawn`] began given up, leaving the worker to its locked-down token.

@@ -296,6 +296,91 @@ impl Drop for Adopted {
     }
 }
 
+// Work done in other processes (the sandbox's workers).
+
+/// Work a worker process did, as the worker told it: when it ended, how long it took, the CPU
+/// time it used, and the spans and item of the thread that had it done.
+#[derive(Clone)]
+struct Remote {
+    end: Instant,
+    wall: f64,
+    cpu: f64,
+    frames: Vec<u32>,
+    item: u32,
+}
+
+static REMOTE: Mutex<Vec<Remote>> = Mutex::new(Vec::new());
+
+/// Tells that the calling thread had a process of its own do work, which ended now: `wall` is
+/// how long it took, `cpu` the CPU time all of the process's threads used meanwhile. The sampler
+/// cannot see inside the process; the trace shows `cpu / wall` threads at work through that
+/// time, outside the pool, under the calling thread's spans and for its item.
+pub fn remote(wall: Duration, cpu: Duration) {
+    if !on() || wall.is_zero() {
+        return;
+    }
+    let (frames, item) = match context() {
+        Some(c) => (c.frames, c.item),
+        None => (Vec::new(), NO_ITEM),
+    };
+    let mut frames = frames;
+    frames.push(label("sandbox worker", false));
+    REMOTE.lock().unwrap().push(Remote {
+        end: Instant::now(),
+        wall: wall.as_secs_f64(),
+        cpu: cpu.as_secs_f64(),
+        frames,
+        item,
+    });
+}
+
+/// Adds to `t` (a recording that started at `start`) the threads of work told by [`remote`]: at
+/// each sample within the time of a piece of work, as many busy threads as its CPU time over
+/// its wall time makes (the fraction spread over the samples).
+fn add_remote(t: &mut Trace, start: Instant) {
+    let mut work: Vec<(f64, f64, f64, u32, u32)> = REMOTE
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|r| {
+            let end = r.end.checked_duration_since(start)?.as_secs_f64();
+            // (the stack of the work, looked up or made)
+            let stack = match t.stacks.iter().position(|s| *s == r.frames) {
+                Some(i) => i,
+                None => {
+                    t.stacks.push(r.frames.clone());
+                    t.stacks.len() - 1
+                }
+            };
+            Some((end - r.wall, end, r.cpu / r.wall, stack as u32, r.item))
+        })
+        .collect();
+    if work.is_empty() {
+        return;
+    }
+    work.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let columns = t.threads.len();
+    let mut most = 0;
+    for (m, s) in t.samples.iter_mut().enumerate() {
+        // (a low-discrepancy sequence: the fractions add up over the samples)
+        let phase = (m as f64 * 0.618_033_988_749_895).fract();
+        let mut extra = Vec::new();
+        for &(from, to, threads, stack, item) in &work {
+            if s.at >= from && s.at < to {
+                let n = (threads + phase).floor() as usize;
+                extra.extend(std::iter::repeat_n((stack, item), n));
+            }
+        }
+        if !extra.is_empty() {
+            s.threads.resize(columns, (0, NO_ITEM));
+            most = most.max(extra.len());
+            s.threads.extend(extra);
+        }
+    }
+    t.threads.extend((0..most).map(|i| (format!("sandbox worker {}", i + 1), false)));
+    t.labels = LABELS.read().unwrap().names.clone();
+}
+
 // The heap, as the allocator tells of it.
 
 static HEAP: AtomicI64 = AtomicI64::new(0);
@@ -620,6 +705,7 @@ impl Watch {
             t.labels = LABELS.read().unwrap().names.clone();
             t.workers = crate::pool::usage().1;
         }
+        add_remote(&mut t, self.0.start);
         t
     }
 }
