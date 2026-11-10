@@ -301,6 +301,9 @@ pub const PDB_MSF: Module = aqr_pdb::formula::MODULE;
 /// The symbol substreams of a PDB file's modules from aqr-pdb's streams of their records' fields.
 /// No params or resources.
 pub const PDB_SYMBOLS: Module = aqr_pdb::formula::SYMBOLS;
+/// The TPI and IPI streams of a PDB file with their hash streams (six outputs) from aqr-pdb's
+/// streams of their records' fields. A part module. No resources.
+pub const PDB_TYPES: Module = aqr_pdb::formula::TYPES;
 /// An Android resource table from aqr-arsc's streams (string pools, entries, chunks). No params
 /// or resources.
 pub const ARSC: Module = aqr_arsc::formula::MODULE;
@@ -782,6 +785,43 @@ const NATIVE: &[Entry] = &[
     bare(DWARF_INFO, |p, _, i, n, _| aqr_dwarf::formula::decode_info(p, i, n).map_err(err)),
     bare(PDB_MSF, |p, _, i, n, _| aqr_pdb::formula::decode(p, i, n).map_err(err)),
     bare(PDB_SYMBOLS, |p, _, i, n, _| aqr_pdb::formula::decode_symbols(p, i, n).map_err(err)),
+    part(
+        PDB_TYPES,
+        false,
+        aqr_api::emu::Entry {
+            kind: aqr_api::emu::Kind::Part,
+            windows: &[
+                aqr_api::Window::Input(0, aqr_pdb::module::TYPES_WINDOW),
+                aqr_api::Window::Input(1, aqr_pdb::module::TYPES_WINDOW),
+                aqr_api::Window::Input(2, aqr_pdb::module::TYPES_WINDOW),
+                aqr_api::Window::Input(3, aqr_pdb::module::TYPES_WINDOW),
+                aqr_api::Window::Input(4, aqr_pdb::module::TYPES_WINDOW),
+                aqr_api::Window::Input(5, aqr_pdb::module::TYPES_WINDOW),
+                aqr_api::Window::Input(6, aqr_pdb::module::TYPES_WINDOW),
+                aqr_api::Window::Input(7, aqr_pdb::module::TYPES_WINDOW),
+                aqr_api::Window::Input(8, aqr_pdb::module::TYPES_WINDOW),
+                aqr_api::Window::Input(9, aqr_pdb::module::TYPES_WINDOW),
+                aqr_api::Window::Input(10, aqr_pdb::module::TYPES_WINDOW),
+                aqr_api::Window::Input(11, aqr_pdb::module::TYPES_WINDOW),
+                aqr_api::Window::Input(12, aqr_pdb::module::TYPES_WINDOW),
+                aqr_api::Window::Output(0, aqr_pdb::module::TYPES_WINDOW),
+                aqr_api::Window::Output(1, aqr_pdb::module::TYPES_WINDOW),
+                aqr_api::Window::Output(2, aqr_pdb::module::TYPES_WINDOW),
+                aqr_api::Window::Output(3, aqr_pdb::module::TYPES_WINDOW),
+                aqr_api::Window::Output(4, aqr_pdb::module::TYPES_WINDOW),
+                aqr_api::Window::Output(5, aqr_pdb::module::TYPES_WINDOW),
+            ],
+            arity: 20,
+            call: |a| {
+                aqr_pdb::module::types_part(
+                    a[0],
+                    [a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13]],
+                    [a[14], a[15], a[16], a[17], a[18], a[19]],
+                )
+            },
+        },
+        |p, _, i, n, _| aqr_pdb::formula::decode_types(p, i, n).map_err(err),
+    ),
     bare(ARSC, |p, _, i, n, _| aqr_arsc::formula::decode(p, i, n).map_err(err)),
     bare(WASM, |p, _, i, n, _| aqr_wasm::formula::decode(p, i, n).map_err(err)),
     bare(GNU_GETTEXT, |p, _, i, n, _| aqr_gnu_gettext::formula::decode(p, i, n).map_err(err)),

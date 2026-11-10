@@ -496,3 +496,8 @@ required-features = ["wasm"]
 name = "pdb-symbols"
 path = "src/bin/pdb-symbols.rs"
 required-features = ["wasm"]
+
+[[bin]]
+name = "pdb-types"
+path = "src/bin/pdb-types.rs"
+required-features = ["wasm"]

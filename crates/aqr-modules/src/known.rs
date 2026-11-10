@@ -388,6 +388,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/pdb-symbols.block"),
     },
     Known {
+        name: "pdb-types",
+        version: 1,
+        sha512_256: hex("d33037eaac57e632e3d52732ed8df28537a8604990d826128555de02065a3b28"),
+        block: include_bytes!("../wasm/pdb-types.block"),
+    },
+    Known {
         name: "pdf-recons",
         version: 3,
         sha512_256: hex("e97fdeb1c252d57c85d2f67bfe591df6b6c6e6f37823a7378652b122793c58ee"),

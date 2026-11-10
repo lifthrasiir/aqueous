@@ -5399,6 +5399,131 @@ fn pdb_symbols_plan_holds() {
     }
 }
 
+/// pdb-types is a part module with six outputs and takes the same plan whatever the lengths: a
+/// TPI stream of pointers, argument lists, procedures and field lists with their hash stream
+/// derived (and not), of a few records and of many, and an IPI stream after it.
+#[test]
+fn pdb_types_plan_holds() {
+    fn rec(kind: u16, body: &[u8]) -> Vec<u8> {
+        let mut r = kind.to_le_bytes().to_vec();
+        r.extend_from_slice(body);
+        while (r.len() + 2) % 4 != 0 {
+            let left = 4 - (r.len() + 2) % 4;
+            r.push(0xf0 | left as u8);
+        }
+        let mut out = (r.len() as u16).to_le_bytes().to_vec();
+        out.extend(r);
+        out
+    }
+    // the raw CRC-32 of the record, which is the hash of the kinds made here
+    fn crc(d: &[u8]) -> u32 {
+        let mut c = 0u32;
+        for &b in d {
+            c ^= b as u32;
+            for _ in 0..8 {
+                c = (c >> 1) ^ (0xedb8_8320 & (c & 1).wrapping_neg());
+            }
+        }
+        c
+    }
+    fn stream(records: &[Vec<u8>], hash_stream: u16) -> (Vec<u8>, Vec<u8>) {
+        let (mut hv, mut idx) = (Vec::new(), Vec::new());
+        let (mut off, mut next) = (0usize, 0usize);
+        for (k, r) in records.iter().enumerate() {
+            hv.extend_from_slice(&(crc(r) % 262143).to_le_bytes());
+            if off >= next {
+                idx.extend_from_slice(&(0x1000 + k as u32).to_le_bytes());
+                idx.extend_from_slice(&(off as u32).to_le_bytes());
+                next = (off / 8192 + 1) * 8192;
+            }
+            off += r.len();
+        }
+        let body: Vec<u8> = records.concat();
+        let mut h = Vec::new();
+        let f = [
+            20040203u32,
+            56,
+            0x1000,
+            0x1000 + records.len() as u32,
+            body.len() as u32,
+            hash_stream as u32 | 0xffff << 16,
+            4,
+            262143,
+            0,
+            hv.len() as u32,
+            hv.len() as u32,
+            idx.len() as u32,
+            (hv.len() + idx.len()) as u32,
+            0,
+        ];
+        f.iter().for_each(|v| h.extend_from_slice(&v.to_le_bytes()));
+        (h.into_iter().chain(body).collect(), hv.into_iter().chain(idx).collect())
+    }
+    for n in [3usize, 300, 60_000] {
+        let t = |v: u32| v.to_le_bytes().to_vec();
+        let mut tpi = vec![rec(0x1201, &t(0))];
+        for k in 0..n {
+            let me = 0x1001 + k as u32;
+            tpi.push(match k % 4 {
+                0 => rec(0x1002, &[t(me - 1), t(0x1000c)].concat()),
+                1 => rec(0x1201, &[t(2), t(0x74), t(me - 1)].concat()),
+                2 => rec(0x1008, &[t(3), vec![0, 0, 1, 0], t(me - 1)].concat()),
+                _ => {
+                    let mut body = vec![0x0d, 0x15, 3, 0];
+                    body.extend([t(0x74), vec![0, 0]].concat());
+                    body.extend(format!("member_{k}\0").as_bytes());
+                    while (body.len() + 6) % 4 != 0 {
+                        let left = 4 - (body.len() + 6) % 4;
+                        body.push(0xf0 | left as u8);
+                    }
+                    rec(0x1203, &body)
+                }
+            });
+        }
+        let (tpi_stream, tpi_hash) = stream(&tpi, 5);
+        let ipi: Vec<Vec<u8>> = (0..n / 2 + 1)
+            .map(|k| rec(0x1605, &[t(0), format!("C:\\src\\file{k}.cpp\0").into_bytes()].concat()))
+            .collect();
+        let (ipi_stream, ipi_hash) = stream(&ipi, 6);
+        let streams: Vec<Option<Vec<u8>>> = vec![
+            Some(vec![0; 60]),
+            Some(b"pdb info".to_vec()),
+            Some(tpi_stream.clone()),
+            Some(vec![1; 8]),
+            Some(ipi_stream.clone()),
+            Some(tpi_hash.clone()),
+            Some(ipi_hash.clone()),
+        ];
+        // (the streams one after another, each where it is)
+        let mut all = Vec::new();
+        let mut spans = Vec::new();
+        for s in streams.iter().flatten() {
+            spans.push(Some(all.len()..all.len() + s.len()));
+            all.extend_from_slice(s);
+        }
+        let e = aqr_pdb::types::encode(&all, &spans).expect("taken");
+        assert_eq!(e.places.len(), 4, "{n}");
+        let mut f = Formula::default();
+        let nodes = (aqr_pdb::types::STREAM_NAMES.iter().zip(&e.streams))
+            .map(|(name, d)| f.push(format!("pdb-types/{name}"), d.clone()))
+            .collect();
+        let a = aqr_formula::Apply {
+            module: aqr_decompress::PDB_TYPES,
+            resources: vec![],
+            params: e.params.clone(),
+            inputs: nodes,
+            len: 0,
+            memory_limit: aqr_formula::NO_LIMIT,
+            task_limits: vec![],
+        };
+        let outs = f.share(a, e.sizes.to_vec());
+        f.root = Node::concat(outs);
+        let want: Vec<u8> = [tpi_stream, tpi_hash, ipi_stream, ipi_hash].concat();
+        // (the outputs are the TPI stream, the hash values and the index, the IPI stream's)
+        plan_holds_shared(&format!("types {n}"), f, &want);
+    }
+}
+
 /// A module's stream: symbols of `n` blocks (S_BLOCK32, each holding a local) nested `depth`
 /// deep in turn, then C13 lines of inlinee lines of `entries` entries of `ids` inlinees; with the
 /// bytes of its symbols and of its C13 lines.
