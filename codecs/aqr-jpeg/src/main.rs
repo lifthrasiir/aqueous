@@ -282,6 +282,38 @@ fn main() {
                 }
             }
         }
+        "ljbench" => {
+            use aqr_jpeg::lformula;
+            let module = |a: &Apply, inputs: &[&[u8]]| {
+                lformula::decode(&a.params, inputs, a.len, 0).map_err(|e| aqr_formula::Error::new(e.0))
+            };
+            for path in &args {
+                let d = std::fs::read(path).unwrap();
+                let name = std::path::Path::new(path).file_name().unwrap().to_string_lossy().into_owned();
+                let t = Instant::now();
+                let Some(f) = lformula::encode(&d, 0) else {
+                    println!("{name}: not coded");
+                    continue;
+                };
+                let te = t.elapsed().as_secs_f64();
+                let c = aqr::encode(&f, Some(aqr::checksum(&d)), Level::MID).expect("archive encoding failed");
+                let t = Instant::now();
+                let back = aqr::decode(&c, &aqr::natives(&[lformula::MODULE], &module)).map_err(|e| e.to_string());
+                let td = t.elapsed().as_secs_f64();
+                let ok = back.as_ref().is_ok_and(|b| *b == d);
+                println!(
+                    "{name}: {} -> {} B = {:.4}; formula {:.1} MB/s, archive decode {:.1} MB/s, exact {ok}",
+                    d.len(),
+                    c.len(),
+                    c.len() as f64 / d.len() as f64,
+                    d.len() as f64 / te / 1e6,
+                    d.len() as f64 / td / 1e6
+                );
+                if !ok {
+                    println!("  {:?}", back.err());
+                }
+            }
+        }
         "ljinfo" => {
             for path in &args {
                 let d = std::fs::read(path).unwrap();

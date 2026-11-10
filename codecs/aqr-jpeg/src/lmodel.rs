@@ -33,7 +33,9 @@ const QMAX: usize = 12;
 /// The Golomb parameter is the bit length of the mean error around, less this.
 const KSHIFT: usize = 0;
 
-struct Models {
+/// The adaptive bits of a model: what frames coded one after the other share, as the tiles of
+/// a DNG, for each to learn from the ones before it.
+pub struct Model {
     /// the quotient in unary, by context and position
     quo: Vec<Bit>,
     /// the quotients beyond `QMAX`, as a gamma code
@@ -43,14 +45,29 @@ struct Models {
     low: Vec<Bit>,
 }
 
-impl Models {
-    fn new(comps: usize) -> Models {
-        Models {
+impl Model {
+    /// A model for frames of `comps` components.
+    pub fn new(comps: usize) -> Model {
+        Model {
             quo: vec![Bit::default(); comps * ENERGY * EQ * QMAX],
             esc: vec![Bit::default(); 20],
             low: vec![Bit::default(); comps * 18 * 3 * 4],
         }
     }
+
+    /// Bytes of the model's three tables of bits (the blocks of `new`'s vectors, before they are
+    /// rounded up).
+    pub fn bytes(comps: usize) -> [u64; 3] {
+        let bit = size_of::<Bit>() as u64;
+        let n = comps as u64;
+        [n * (ENERGY * EQ * QMAX) as u64 * bit, 20 * bit, n * 18 * 3 * 4 * bit]
+    }
+}
+
+/// Bytes of the working memory of [`code_frame`] for a frame of `h`: the rows of errors of each
+/// component (one block of them), the most it takes beyond the model and the frame's samples.
+pub fn frame_bytes(h: &Header) -> Vec<u64> {
+    (0..h.comps.len()).map(|i| ((h.comps[i].v + 2) * (h.plane(i).0 + 2) * size_of::<[u16; LANES]>()) as u64).collect()
 }
 
 /// Lanes of the errors at a position: those of the predictors, then the blend's, padded.
@@ -104,7 +121,7 @@ fn energy(e: u32) -> usize {
 /// of the remainder modelled, the rest raw in one step. Returns what was coded.
 fn residual<C: Coder>(
     c: &mut C,
-    m: &mut Models,
+    m: &mut Model,
     comp: usize,
     ctx: usize,
     eq: usize,
@@ -140,12 +157,11 @@ fn residual<C: Coder>(
     Ok((x >> 1) as i32 ^ -((x & 1) as i32))
 }
 
-/// Walks the samples of `planes` in the stream's order, coding each by `c`. Decoding, `planes`
+/// Walks the samples of the frame of `h` in the stream's order, coding each by `c`, with `m`. Decoding, `planes`
 /// are zeros that get filled.
-fn walk<C: Coder>(c: &mut C, h: &Header, planes: &mut [Vec<u16>]) -> Result<(), Error> {
+pub fn code_frame<C: Coder>(c: &mut C, m: &mut Model, h: &Header, planes: &mut [&mut [u16]]) -> Result<(), Error> {
     let (mx, my) = h.mcus();
     let default = 1i32 << (h.precision - h.point - 1);
-    let mut m = Models::new(h.comps.len());
     let mut st: Vec<Comp> = h
         .comps
         .iter()
@@ -228,7 +244,7 @@ fn walk<C: Coder>(c: &mut C, h: &Header, planes: &mut [Vec<u16>]) -> Result<(), 
                         let actual = p[at] as i32;
                         let eq = before.map_or(0, |q| bitlen(st[q].err[ry + x][FIN] as u32).min(EQ - 1));
                         let k = (bitlen(e[FIN] >> 2).saturating_sub(KSHIFT)).min(16) as u32;
-                        let rr = residual(c, &mut m, ci, ctx, eq, k, actual - pred)?;
+                        let rr = residual(c, m, ci, ctx, eq, k, actual - pred)?;
                         let value = (pred + rr) as u16;
                         planes[ci][at] = value;
                         let cell = &mut st[ci].err[ry + x];
@@ -244,19 +260,19 @@ fn walk<C: Coder>(c: &mut C, h: &Header, planes: &mut [Vec<u16>]) -> Result<(), 
     Ok(())
 }
 
-/// The samples of `s` coded under `h`.
+/// The samples of `s` coded under `h`, by a model of its own.
 pub fn encode(h: &Header, s: &Samples) -> Vec<u8> {
     let mut planes = s.planes.clone();
     let mut e = ArithEncoder::new(Vec::new());
-    walk(&mut e, h, &mut planes).expect("encoding does not fail");
+    code_frame(&mut e, &mut Model::new(h.comps.len()), h, &mut views(&mut planes)).expect("encoding does not fail");
     e.finish()
 }
 
-/// The samples that `data` codes under `h`.
+/// The samples that `data` codes under `h`, by a model of its own.
 pub fn decode(h: &Header, data: &[u8]) -> Result<Samples, Error> {
-    let mut planes: Vec<Vec<u16>> = (0..h.comps.len()).map(|i| h.plane(i)).map(|(w, hh)| vec![0u16; w * hh]).collect();
+    let mut planes: Vec<Vec<u16>> = (0..h.comps.len()).map(|i| vec![0u16; h.samples_of(i)]).collect();
     let mut d = ArithDecoder::new(data);
-    walk(&mut d, h, &mut planes)?;
+    code_frame(&mut d, &mut Model::new(h.comps.len()), h, &mut views(&mut planes))?;
     if d.overrun() {
         return err("data cut off");
     }
@@ -266,11 +282,15 @@ pub fn decode(h: &Header, data: &[u8]) -> Result<Samples, Error> {
 /// `s` walked and coded by `c` (any coder, as a null one measuring the model alone).
 pub fn encode_with<C: Coder>(c: &mut C, h: &Header, s: &Samples) {
     let mut planes = s.planes.clone();
-    walk(c, h, &mut planes).expect("encoding does not fail");
+    code_frame(c, &mut Model::new(h.comps.len()), h, &mut views(&mut planes)).expect("encoding does not fail");
+}
+
+fn views(planes: &mut [Vec<u16>]) -> Vec<&mut [u16]> {
+    planes.iter_mut().map(|p| &mut p[..]).collect()
 }
 
 /// The rows of MCUs `r0..r1` of `h` as a frame of their own, for a band to be coded alone.
-fn band_header(h: &Header, r0: usize, r1: usize) -> Header {
+pub fn band_header(h: &Header, r0: usize, r1: usize) -> Header {
     let vmax = h.comps.iter().map(|c| c.v).max().unwrap_or(1);
     let mut b = h.clone();
     b.height = (r1 * vmax).min(h.height) - r0 * vmax;
@@ -278,46 +298,74 @@ fn band_header(h: &Header, r0: usize, r1: usize) -> Header {
 }
 
 /// The MCU rows of each of `bands` bands of a frame of `rows` of them.
-fn band_rows(rows: usize, bands: usize) -> Vec<(usize, usize)> {
+pub fn band_rows(rows: usize, bands: usize) -> Vec<(usize, usize)> {
     let per = rows.div_ceil(bands.clamp(1, rows.max(1)));
     (0..rows).step_by(per.max(1)).map(|r| (r, (r + per).min(rows))).collect()
+}
+
+/// The planes of a frame of `h` cut in bands of the MCU rows `rows` ([`band_rows`]): for each
+/// band the part of each plane.
+pub fn split_bands<'a>(h: &Header, planes: &'a mut [&mut [u16]], rows: &[(usize, usize)]) -> Vec<Vec<&'a mut [u16]>> {
+    let mut out: Vec<Vec<&'a mut [u16]>> = rows.iter().map(|_| Vec::new()).collect();
+    for (i, p) in planes.iter_mut().enumerate() {
+        let (w, v) = (h.plane(i).0, h.comps[i].v);
+        let mut rest: &mut [u16] = std::mem::take(p);
+        for (band, &(r0, r1)) in out.iter_mut().zip(rows) {
+            let (part, tail) = rest.split_at_mut(((r1 - r0) * v * w).min(rest.len()));
+            band.push(part);
+            rest = tail;
+        }
+    }
+    out
 }
 
 /// `s` coded in `bands` bands of rows (at most; fewer where there are not that many rows),
 /// each with a model and a stream of its own, so that they can be coded and decoded at once.
 pub fn encode_bands(h: &Header, s: &Samples, bands: usize) -> Vec<Vec<u8>> {
+    let mut planes = s.planes.clone();
+    encode_bands_of(h, &mut views(&mut planes), bands)
+}
+
+/// [`encode_bands`] of `planes` (which the coding leaves as they are).
+pub fn encode_bands_of(h: &Header, planes: &mut [&mut [u16]], bands: usize) -> Vec<Vec<u8>> {
     use crate::par::prelude::*;
     let rows = band_rows(h.mcus().1, bands);
-    rows.into_par_iter()
-        .map(|(r0, r1)| {
-            let b = band_header(h, r0, r1);
-            let planes = (0..h.comps.len())
-                .map(|i| {
-                    let (w, v) = (h.plane(i).0, h.comps[i].v);
-                    s.planes[i][r0 * v * w..r1 * v * w].to_vec()
-                })
-                .collect();
-            encode(&b, &Samples { planes })
+    split_bands(h, planes, &rows)
+        .into_par_iter()
+        .zip(rows.into_par_iter())
+        .map(|(mut part, (r0, r1))| {
+            let mut e = ArithEncoder::new(Vec::new());
+            code_frame(&mut e, &mut Model::new(h.comps.len()), &band_header(h, r0, r1), &mut part)
+                .expect("encoding does not fail");
+            e.finish()
         })
         .collect()
 }
 
 /// The samples that the bands `streams` code under `h` (as many as [`encode_bands`] made).
 pub fn decode_bands(h: &Header, streams: &[&[u8]]) -> Result<Samples, Error> {
+    let mut planes: Vec<Vec<u16>> = (0..h.comps.len()).map(|i| vec![0u16; h.samples_of(i)]).collect();
+    decode_bands_into(h, streams, &mut views(&mut planes))?;
+    Ok(Samples { planes })
+}
+
+/// [`decode_bands`] into `planes` (zeros).
+pub fn decode_bands_into(h: &Header, streams: &[&[u8]], planes: &mut [&mut [u16]]) -> Result<(), Error> {
     use crate::par::prelude::*;
     let rows = band_rows(h.mcus().1, streams.len());
     if rows.len() != streams.len() {
         return err("bands do not fit the frame");
     }
-    let parts: Vec<Result<Samples, Error>> =
-        rows.into_par_iter().zip(streams.par_iter()).map(|((r0, r1), d)| decode(&band_header(h, r0, r1), d)).collect();
-    let mut planes: Vec<Vec<u16>> = (0..h.comps.len()).map(|i| Vec::with_capacity(h.samples_of(i))).collect();
-    for p in parts {
-        for (all, part) in planes.iter_mut().zip(p?.planes) {
-            all.extend_from_slice(&part);
-        }
-    }
-    Ok(Samples { planes })
+    let done: Vec<Result<(), Error>> = split_bands(h, planes, &rows)
+        .into_par_iter()
+        .zip(rows.into_par_iter().zip(streams.par_iter()))
+        .map(|(mut part, ((r0, r1), data))| {
+            let mut d = ArithDecoder::new(data);
+            code_frame(&mut d, &mut Model::new(h.comps.len()), &band_header(h, r0, r1), &mut part)?;
+            if d.overrun() { err("data cut off") } else { Ok(()) }
+        })
+        .collect();
+    done.into_iter().collect()
 }
 
 #[cfg(test)]

@@ -495,13 +495,13 @@ impl Encoder {
     }
 }
 
-struct Out {
-    out: Vec<u8>,
+struct Out<'a> {
+    out: &'a mut Vec<u8>,
     acc: u64,
     n: u32,
 }
 
-impl Out {
+impl Out<'_> {
     #[inline]
     fn put(&mut self, v: u32, k: u32) {
         self.acc = (self.acc << k) | v as u64;
@@ -529,12 +529,20 @@ impl Out {
 /// The entropy-coded data of `s` under `h`, as [`decode`] reads it. Err where a difference
 /// has no code in the tables.
 pub fn encode(h: &Header, s: &Samples) -> Result<Vec<u8>, Error> {
+    let planes: Vec<&[u16]> = s.planes.iter().map(|p| &p[..]).collect();
+    let mut out = Vec::new();
+    encode_into(h, &planes, &mut out)?;
+    Ok(out)
+}
+
+/// [`encode`] of the `planes` of a frame, appended to `out`.
+pub fn encode_into(h: &Header, planes: &[&[u16]], out: &mut Vec<u8>) -> Result<(), Error> {
     let (mx, my) = h.mcus();
     let rows_per = if h.restart == 0 { my } else { h.restart / mx };
     let encoders: Vec<Option<Encoder>> =
         h.tables.iter().map(|t| t.as_ref().map(|t| Encoder::new(t, h.last_code))).collect();
     let default = 1i32 << (h.precision - h.point - 1);
-    let mut o = Out { out: Vec::new(), acc: 0, n: 0 };
+    let mut o = Out { out, acc: 0, n: 0 };
     for (k, row0) in (0..my).step_by(rows_per).enumerate() {
         if k > 0 {
             o.out.extend_from_slice(&[0xFF, 0xD0 + ((k - 1) & 7) as u8]);
@@ -545,7 +553,7 @@ pub fn encode(h: &Header, s: &Samples) -> Result<Vec<u8>, Error> {
                     let comp = h.comps[ci];
                     let w = mx * comp.h;
                     let e = encoders[td].as_ref().unwrap();
-                    let p = &s.planes[ci];
+                    let p = planes[ci];
                     for v in 0..comp.v {
                         let y = r * comp.v + v;
                         let first = y == row0 * comp.v;
@@ -571,7 +579,7 @@ pub fn encode(h: &Header, s: &Samples) -> Result<Vec<u8>, Error> {
         }
         o.pad();
     }
-    Ok(o.out)
+    Ok(())
 }
 
 /// The lossless JPEGs in `d`: the headers of each, found by their SOI (a JPEG inside the data
