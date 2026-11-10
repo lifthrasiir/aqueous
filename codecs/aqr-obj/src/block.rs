@@ -259,7 +259,7 @@ fn parse_corner(t: &[u8]) -> Option<((i64, i64, i64), u8)> {
 /// gives them the previous one's) or its corners onto `corners`. The kind and the count
 /// of numbers or corners; None if the line does not parse back to itself. The numbers' tokens
 /// go in `toks` (their start in the line and length), each a token that the number prints back
-/// to. Needs no state: it runs on other threads too.
+/// to. Needs no state.
 #[inline]
 fn parse_line(
     l: &[u8],
@@ -327,64 +327,6 @@ fn parse_line(
     }
     key[1] = n as u8;
     Some((kind, n))
-}
-
-/// A line of a block parsed on another thread: its text range, kind (RAW if it is kept as
-/// text), count of numbers or corners, template key and items in the block's arrays.
-pub struct ParsedLine {
-    start: u32,
-    end: u32,
-    kind: u8,
-    n: u16,
-    key_len: u16,
-    key: u32,
-    item: u32,
-}
-
-const RAW: u8 = 255;
-
-/// A block parsed on another thread (`parse_block`), for `Encoder::encode_parsed`.
-#[derive(Default)]
-pub struct ParsedBlock {
-    lines: Vec<ParsedLine>,
-    keys: Vec<u8>,
-    vals: Vec<(i64, i32, u8)>,
-    corners: Vec<(i64, i64, i64)>,
-}
-
-/// Parses the lines of a block (at most `MAX_BLOCK`, well under 4 GB) in `styles`.
-pub fn parse_block(styles: &Styles, src: &[u8]) -> ParsedBlock {
-    let mut b = ParsedBlock::default();
-    let mut key = Vec::new();
-    let mut tmp = Vec::new();
-    let mut vals = [(0i64, 0i32, 0u8); MAX_NUMS];
-    let mut toks = [(0u32, 0u32); MAX_NUMS];
-    let mut p = 0;
-    while p < src.len() {
-        let e = memchr::memchr(b'\n', &src[p..]).map_or(src.len(), |i| p + i + 1);
-        let mut r = ParsedLine { start: p as u32, end: e as u32, kind: RAW, n: 0, key_len: 0, key: 0, item: 0 };
-        let c0 = b.corners.len();
-        match parse_line(&src[p..e], styles, &mut key, &mut vals, &mut toks, &mut b.corners, &mut tmp) {
-            Some((kind, n)) => {
-                r.kind = kind;
-                r.n = n as u16;
-                r.key = b.keys.len() as u32;
-                r.key_len = key.len() as u16;
-                b.keys.extend_from_slice(&key);
-                if kind < K_F {
-                    r.item = b.vals.len() as u32;
-                    b.vals.extend_from_slice(&vals[..n]);
-                } else {
-                    r.item = c0 as u32;
-                }
-            }
-            // Corners of a line that failed half way.
-            None => b.corners.truncate(c0),
-        }
-        b.lines.push(r);
-        p = e;
-    }
-    b
 }
 
 pub struct Encoder {
@@ -504,40 +446,6 @@ impl Encoder {
             p = e;
         }
         (self.key, self.fbuf) = (key, corners);
-    }
-
-    /// Codes a block parsed on another thread (`parse_block`, with `styles`, which become
-    /// the encoder's).
-    pub fn encode_parsed(&mut self, styles: &Styles, src: &[u8], b: &ParsedBlock, s: &mut [Vec<u8>; NSTREAMS]) {
-        self.styles = *styles;
-        self.begin(s);
-        let mut corners = std::mem::take(&mut self.fbuf);
-        let mut vals = [(0i64, 0i32, 0u8); MAX_NUMS];
-        for r in &b.lines {
-            let l = &src[r.start as usize..r.end as usize];
-            let key = &b.keys[r.key as usize..r.key as usize + r.key_len as usize];
-            let ok = match r.kind {
-                RAW => false,
-                k if k < K_F => {
-                    vals[..r.n as usize].copy_from_slice(&b.vals[r.item as usize..r.item as usize + r.n as usize]);
-                    self.code_line(k, r.n as usize, key, &mut vals, &mut corners, s)
-                }
-                k => {
-                    corners.clear();
-                    corners.extend_from_slice(&b.corners[r.item as usize..r.item as usize + r.n as usize]);
-                    self.code_line(k, r.n as usize, key, &mut vals, &mut corners, s)
-                }
-            };
-            if !ok {
-                raw_line(l, s);
-            }
-        }
-        self.fbuf = corners;
-    }
-
-    /// The styles of the last block (those the next block's start from).
-    pub fn styles(&self) -> Styles {
-        self.styles
     }
 
     /// The numbers [`Encoder::encode`] coded in the last block, in the order of their tokens.

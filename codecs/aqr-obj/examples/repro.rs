@@ -11,6 +11,7 @@ fn main() {
         block: a[1].parse().unwrap(),
         force_whole: u64::from_str_radix(&a[2], 16).unwrap(),
         threads: 1,
+        ..Options::default()
     };
     let Some(f) = formula::encode_with(&src, &opt) else { return println!("not coded") };
     let eval = |a: &Apply, inputs: &[&[u8]]| {

@@ -37,7 +37,7 @@ fn cpu() -> f64 {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: aqr-obj bench [-n ITERS] [-B BLOCK] [-x] [-t THREADS] [-c|-d] [-v] FILE...\n       aqr-obj stats FILE... | aqr-obj fuzz [-n N] [-s SEED] FILE..."
+        "usage: aqr-obj bench [-n ITERS] [-B BLOCK] [-P PORTION] [-x] [-t THREADS] [-c|-d] [-v] FILE...\n       aqr-obj stats FILE... | aqr-obj fuzz [-n N] [-s SEED] FILE..."
     );
     std::process::exit(2);
 }
@@ -49,6 +49,7 @@ fn opt_arg<'a>(a: &str, it: &mut impl Iterator<Item = &'a String>, opt: &mut Opt
         "-B" => opt.block = num(),
         "-x" => opt.verify = false,
         "-t" => opt.threads = num().max(1),
+        "-P" => opt.portion = num().max(1),
         _ => return false,
     }
     true
@@ -319,6 +320,8 @@ fn fuzz(args: &[String]) {
                 block: [1 << 10, 64 << 10, 4 << 20][i % 3],
                 force_whole: if i % 2 == 1 { r.next() } else { 0 },
                 threads: 1,
+                // (portions of 64 KiB in one run of three)
+                portion: if i % 3 == 1 { 64 << 10 } else { usize::MAX },
             };
             runs += 1;
             let res = std::panic::catch_unwind(|| {

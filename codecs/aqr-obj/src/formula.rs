@@ -4,6 +4,7 @@
 
 use crate::ans;
 use crate::block::{self, NSTREAMS};
+pub use crate::codec::PORTION;
 use crate::codec::{self, AC_STREAMS, MAX_BLOCK, Options, Streams};
 use crate::varint::put_uv;
 use aqr_formula::{Formula, Module, Node};
@@ -106,15 +107,126 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     encode_with(input, &Options { threads, ..Options::default() })
 }
 
-/// `encode` with `opt`.
+/// `encode` with `opt`. A file of more than `opt.portion` bytes is cut into portions
+/// ([`portions`]), each coded apart, from no state, on the threads: an application of the
+/// module each, of slices of the same streams (their parts one after another, so that the
+/// archive compresses each kind of stream as one), and a Concat of them.
 pub fn encode_with(input: &[u8], opt: &Options) -> Option<Formula> {
     if input.is_empty() {
         return None;
     }
-    catch_unwind(AssertUnwindSafe(|| encode_blocks(input, opt))).ok().flatten()
+    catch_unwind(AssertUnwindSafe(|| encode_portions(input, opt))).ok().flatten()
 }
 
-fn encode_blocks(input: &[u8], opt: &Options) -> Option<Formula> {
+/// Where the portions of `input` end, each of `portion` bytes at most, about: at a line start,
+/// the last one in its last quarter where the statement changes (its keyword: a run of `v` lines
+/// to `vt`, vertices to faces, a group's `g` or `usemtl`), where the state the portion ends
+/// with would serve the next little, else the last line start before `portion` bytes. A line
+/// longer than a portion is one by itself.
+pub fn portions(input: &[u8], portion: usize) -> Vec<usize> {
+    let portion = portion.max(1);
+    let keyword = |p: usize| {
+        let l = &input[p..];
+        &l[..l.iter().position(|&c| matches!(c, b' ' | b'\t' | b'\r' | b'\n')).unwrap_or(l.len())]
+    };
+    let mut ends = Vec::new();
+    let mut from = 0;
+    while from < input.len() {
+        let target = from.saturating_add(portion);
+        if target >= input.len() {
+            ends.push(input.len());
+            break;
+        }
+        // the line starts before `target`, from the last one back to the quarter's start
+        let end = match memchr::memrchr(b'\n', &input[from..target]) {
+            None => memchr::memchr(b'\n', &input[target..]).map_or(input.len(), |i| target + i + 1),
+            Some(i) => {
+                let (last, low) = (from + i + 1, from + portion - portion / 4);
+                let mut e = last;
+                loop {
+                    if e <= low {
+                        break last;
+                    }
+                    let Some(j) = memchr::memrchr(b'\n', &input[from..e - 1]) else { break last };
+                    let q = from + j + 1;
+                    if keyword(e) != keyword(q) {
+                        break e;
+                    }
+                    e = q;
+                }
+            }
+        };
+        ends.push(end);
+        from = end;
+    }
+    ends
+}
+
+/// A portion coded: its length, and the index, the blocks stored whole and the streams.
+struct Portion {
+    len: u64,
+    parts: Vec<Vec<u8>>,
+}
+
+fn encode_portions(input: &[u8], opt: &Options) -> Option<Formula> {
+    let ends = portions(input, opt.portion);
+    let starts: Vec<usize> = std::iter::once(0).chain(ends.iter().copied()).collect();
+    let one = |k: usize, threads: usize| encode_blocks(&input[starts[k]..ends[k]], &Options { threads, ..*opt });
+    let segs: Vec<Option<Portion>> = match ends.len() {
+        1 => vec![one(0, opt.threads)],
+        n => aqr_common::pool::par_map(n, opt.threads, |k| one(k, 1)),
+    };
+    if segs.iter().all(Option::is_none) {
+        return None;
+    }
+    // (a portion of no block coded: its blocks stored whole, of an index alone)
+    let segs: Vec<Portion> = (segs.into_iter().zip(starts.windows(2)))
+        .map(|(s, r)| s.unwrap_or_else(|| stored(&input[r[0]..r[1]], opt)))
+        .collect();
+    let mut f = Formula::default();
+    let names = ["index", "whole"].into_iter().chain(block::STREAM_NAMES.iter().copied());
+    let lens: Vec<Vec<u64>> = segs.iter().map(|s| s.parts.iter().map(|p| p.len() as u64).collect()).collect();
+    let mut data: Vec<Vec<u8>> = vec![Vec::new(); 2 + NSTREAMS];
+    for s in segs.iter() {
+        for (d, p) in data.iter_mut().zip(&s.parts) {
+            d.extend_from_slice(p);
+        }
+    }
+    let whole: Vec<Node> = names.zip(data).map(|(name, d)| f.push(format!("obj/{name}"), d)).collect();
+    if let [s] = &segs[..] {
+        f.root = Node::apply(MODULE, Vec::new(), whole, s.len);
+        return Some(f);
+    }
+    let base = f.streams.len() - (2 + NSTREAMS);
+    let mut at = vec![0u64; 2 + NSTREAMS];
+    let nodes: Vec<Node> = (segs.iter().zip(&lens))
+        .map(|(s, lens)| {
+            let inputs: Vec<Node> = (0..2 + NSTREAMS).map(|j| Node::slice(base + j, at[j], lens[j])).collect();
+            at.iter_mut().zip(lens).for_each(|(a, n)| *a += n);
+            Node::apply(MODULE, Vec::new(), inputs, s.len)
+        })
+        .collect();
+    f.root = Node::concat(nodes);
+    Some(f)
+}
+
+/// A portion of its blocks stored whole (of `opt.block` bytes).
+fn stored(d: &[u8], opt: &Options) -> Portion {
+    let bsize = opt.block.clamp(1 << 10, MAX_BLOCK);
+    let mut index = Vec::new();
+    let mut p = 0;
+    while p < d.len() {
+        let e = codec::block_end(d, p, bsize);
+        put_uv(&mut index, ((e - p) as u64) << 1);
+        p = e;
+    }
+    let mut parts = vec![index, d.to_vec()];
+    parts.resize(2 + NSTREAMS, Vec::new());
+    Portion { len: d.len() as u64, parts }
+}
+
+/// The portion `input` coded: None where no block of it could be.
+fn encode_blocks(input: &[u8], opt: &Options) -> Option<Portion> {
     let bsize = opt.block.clamp(1 << 10, MAX_BLOCK);
     let mut enc = block::Encoder::default();
     let mut dec = block::Decoder::default();
@@ -196,11 +308,7 @@ fn encode_blocks(input: &[u8], opt: &Options) -> Option<Formula> {
             }
         }
     }
-    let mut f = Formula::default();
-    let mut inputs = vec![f.push("obj/index", index), f.push("obj/whole", whole)];
-    for (name, d) in block::STREAM_NAMES.iter().zip(slots) {
-        inputs.push(f.push(format!("obj/{name}"), d));
-    }
-    f.root = Node::apply(MODULE, Vec::new(), inputs, input.len() as u64);
-    Some(f)
+    let mut parts = vec![index, whole];
+    parts.extend(slots);
+    Some(Portion { len: input.len() as u64, parts })
 }

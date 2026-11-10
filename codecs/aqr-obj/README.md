@@ -50,16 +50,58 @@ Memory, with one process per file, is 24 MB + 3.1× the file (a linear fit).
 then `aqr_formula::aqr::encode`) and the speed of making and decoding it. The other
 compressors' sizes per file are cached by `scripts/baseline.sh`.
 
-### Threads
+### Threads and portions
+
+A file of more than 64 MiB (`formula::PORTION`, `Options::portion`, `-P` of `aqr-obj bench`)
+is cut into portions, each coded apart from no state: an application of the module each, of
+slices of the same streams (the portions' parts one after another, so that the archive
+compresses each kind of stream as one), and a Concat of them. The module holds its file and
+its streams whole, so that an application takes some 2.4 times its bytes; a whole 221 MB file
+needed 498 MiB, over the application bound, and was kept as it was. A portion ends at a line
+start, at the last change of statement in its last quarter (a run of `v` lines to `vt`,
+vertices to faces, a group's `g`), where the state it ends with would serve the next little;
+cut in a run of faces instead, the faces after lose their corners' candidates. Face indices
+need no state across portions: a relative one is coded against the vertices of its portion,
+as the decoder counts them.
 
 `-t N` (`Options::threads`, the threads of `formula::decode`): the output is the same
-whatever the number of threads, and one thread runs the code unchanged. Coded blocks carry
-state over, so the line coding and decoding stay on one thread, in order; around them, a
-pool parses the lines of the blocks ahead (number modes, render checks), verifies, and
-codes the streams; decoding, it unpacks the streams of the blocks ahead and prints the
-numbers of decoded blocks (the decoder emits values, `block::Deferred`). The line coding
-(predictors, corner caches) and the line decoding are the limit. Going further needs
-independent segments (state reset every so many blocks); not done.
+whatever the number of threads, and one thread runs the code unchanged. The portions are
+coded side by side on the threads; within a portion, coded blocks carry state over, so the
+line coding and its verification stay on one thread, in order, and only the streams' rANS
+coding is spread. Decoding unpacks the streams of the blocks ahead on other threads and
+prints the numbers of decoded blocks (the decoder emits values, `block::Deferred`). The
+line coding (predictors, corner caches) and the line decoding are the limit.
+
+A synthetic file of 12 objects (221.8 MB: each its `v`, `vt` and `vn` lines, then `g`,
+`usemtl` and its faces; on an M4, `aqr-obj bench -t 10 -c`, 2026-11-10):
+
+| portions of | at changes of statement | at the last line start | compress | decompress |
+|---|---|---|---|---|
+| (one, before) | 4,881,245 B | | 174 MB/s | 727 MB/s |
+| 64 MiB | 4,919,175 B | 4,901,179 B | 484 MB/s | 692 MB/s |
+| 16 MiB | 4,806,035 B | 4,880,813 B | 664 MB/s | 570 MB/s |
+| 4 MiB | 4,761,061 B | 4,869,545 B | 729 MB/s | 353 MB/s |
+| 1 MiB | 4,569,253 B | 5,190,961 B | 768 MB/s | 350 MB/s |
+
+Through `aqr -c` it went from 20.99 MB (the formula over the bound) in 2.51 s to 4.95 MB in
+0.66 s. Decoding slows with many portions, as aqr-formula evaluates a Concat's parts in turn.
+
+The files of 100 MB or more of McGuire's archive, `aqr -c` one archive a file before and
+after portions (2026-11-10, Ryzen 7 9700X, 16 threads; before, all but `erato` were over the
+bound, needing 292 MiB to 2,560 MiB, and kept as they were):
+
+| file | MB | before | after | heap / resident peak |
+|---|---|---|---|---|
+| San_Miguel-san-miguel | 1,143.0 | 214.10 MB, 18.86 s | 73.37 MB (6.4%), 3.67 s | 880 MB / 1.79 GB |
+| powerplant | 817.9 | 102.01 MB, 11.75 s | 20.02 MB (2.4%), 2.51 s | 523 MB / 1.35 GB |
+| San_Miguel-san-miguel-low-poly | 628.0 | 130.76 MB, 13.26 s | 49.19 MB (7.8%), 2.16 s | 590 MB / 1.14 GB |
+| rungholt-rungholt | 275.7 | 31.80 MB, 4.63 s | 8.27 MB (3.0%), 1.46 s | 405 MB / 674 MB |
+| hairball | 236.1 | 43.16 MB, 3.87 s | 14.89 MB (6.3%), 1.18 s | 317 MB / 527 MB |
+| salle_de_bain | 123.9 | 19.69 MB, 2.67 s | 6.34 MB (5.1%), 0.92 s | 217 MB / 293 MB |
+| erato | 107.6 | 10.15 MB, 1.46 s | 10.15 MB, 0.67 s | 175 MB / 259 MB |
+
+Each extracted byte for byte (1.6 s the largest). Against the whole file's formula
+(`aqr-obj bench`), the portions cost 0.7% (San_Miguel) and 0.4% (rungholt).
 
 ### Memory
 

@@ -32,7 +32,7 @@ fn rt(src: &[u8]) {
     // Threads: the same formula, whole blocks or not, and the same file back.
     for (threads, force_whole) in [(2, 0), (3, 0x5A5A_1234_8421_0F0F), (5, u64::MAX), (4, 1)] {
         for verify in [false, true] {
-            let opt = Options { block: 1 << 10, verify, force_whole, threads };
+            let opt = Options { block: 1 << 10, verify, force_whole, threads, ..Default::default() };
             let seq = Options { threads: 1, ..opt };
             let f = formula::encode_with(src, &opt);
             assert_eq!(f, formula::encode_with(src, &seq), "threads {threads}");
@@ -43,6 +43,12 @@ fn rt(src: &[u8]) {
     }
     if let Some(f) = formula::encode(src, 1) {
         assert_eq!(eval(&f, 1).unwrap(), src);
+    }
+    // Portions: each coded apart, the same file back, whatever the threads.
+    for portion in [1 << 12, 1 << 16] {
+        let opt = Options { block: 1 << 10, portion, ..Default::default() };
+        let f = rt_with(src, &opt);
+        assert_eq!(f, formula::encode_with(src, &Options { threads: 3, ..opt }), "portion {portion}");
     }
 }
 
@@ -312,4 +318,49 @@ fn check_of_decoded_blocks() {
         assert!(!checked(&bad, enc.told()), "stream {k}");
         assert!(!checked(&bad, &[]), "stream {k}");
     }
+}
+
+/// Portions end at line starts, at most a portion long but for a line longer: at the last change
+/// of statement in their last quarter where there is one there, else at the last line start.
+#[test]
+fn portion_ends() {
+    let mut src = String::new();
+    for o in 0..20 {
+        for i in 0..200 {
+            src += &format!("v {i}.5 {o}.25 1.0\n");
+        }
+        src += &format!("g part{o}\n");
+        for i in 1..150 {
+            src += &format!("f {i} {} {}\n", i + 1, i + 2);
+        }
+    }
+    let src = src.as_bytes();
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(src.iter().enumerate().filter(|(_, c)| **c == b'\n').map(|(i, _)| i + 1))
+        .filter(|&p| p < src.len())
+        .collect();
+    let kw = |p: usize| src[p..].split(|&c| c == b' ').next().unwrap();
+    for portion in [100, 1000, 4096, 10_000, 30_000] {
+        let ends = formula::portions(src, portion);
+        let mut from = 0;
+        for &e in &ends {
+            if from + portion < src.len() {
+                let within: Vec<usize> = starts.iter().copied().filter(|&p| p > from && p <= from + portion).collect();
+                let low = from + portion - portion / 4;
+                let change = within.windows(2).rev().take_while(|w| w[1] > low).find(|w| kw(w[0]) != kw(w[1]));
+                let want = match change {
+                    Some(w) => w[1],
+                    None => *within.last().unwrap(),
+                };
+                assert_eq!(e, want, "portion {portion} from {from}");
+            }
+            from = e;
+        }
+        assert_eq!(from, src.len());
+        rt_with(src, &Options { portion, ..Default::default() }).unwrap();
+    }
+    // a line longer than a portion: one by itself
+    let long = format!("v 1 2 3\n# {}\nv 4 5 6\n", "x".repeat(5000));
+    let ends = formula::portions(long.as_bytes(), 1000);
+    assert_eq!(ends, [8, 5011, long.len()]);
 }

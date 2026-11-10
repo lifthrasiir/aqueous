@@ -52,13 +52,21 @@ pub struct Options {
     pub force_whole: u64,
     /// Threads (1: all on the calling thread).
     pub threads: usize,
+    /// Input bytes per portion at most, about (an application of the module each, coded apart:
+    /// `formula::PORTION`), a line longer aside.
+    pub portion: usize,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { block: 4 << 20, verify: true, force_whole: 0, threads: 1 }
+        Options { block: 4 << 20, verify: true, force_whole: 0, threads: 1, portion: PORTION }
     }
 }
+
+/// The input bytes of a portion at most, about ([`Options::portion`]): the module holds its
+/// file and its streams whole, so that a portion's application takes some 2.4 times its bytes;
+/// a file of more is cut into portions, an application each (`formula::encode_with`).
+pub const PORTION: usize = 64 << 20;
 
 /// The end of the block starting at `p`: at most `bsize` bytes, at a line end if there is
 /// one.
