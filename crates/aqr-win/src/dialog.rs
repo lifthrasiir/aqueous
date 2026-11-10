@@ -108,7 +108,7 @@ impl Config {
 }
 
 /// Gives the dialog `hwnd` this program's icon (aqr-win.rc), on its title bar and the taskbar.
-fn set_icon(hwnd: HWND) {
+pub fn set_icon(hwnd: HWND) {
     for (size, which) in [(LIM_SMALL, ICON_SMALL), (LIM_LARGE, ICON_BIG)] {
         let mut icon: HICON = std::ptr::null_mut();
         // SAFETY: this program's module, resource 1 by its number, the icon written to a local

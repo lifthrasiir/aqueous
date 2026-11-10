@@ -37,6 +37,8 @@ mod gather;
 #[cfg(windows)]
 mod install;
 #[cfg(windows)]
+mod options;
+#[cfg(windows)]
 mod passphrase;
 #[cfg(windows)]
 mod register;
@@ -112,6 +114,7 @@ fn main() -> std::process::ExitCode {
                 Err(e) => fail(win::not_uninstalled(), &e),
             };
         }
+        "options-preview" => return options::preview(),
         "compress" => Verb::Compress,
         "compress-passphrase" => {
             encrypt = true;
