@@ -338,38 +338,74 @@ struct Chan {
 #[cfg(feature = "alloc")]
 static GANGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// The channels of the process, and their changes.
+/// A channel as the threads share it: its state, and the threads waiting for a change of it,
+/// each side on a condition variable of its own (under the state's lock, so that a change is
+/// never missed). Only the events of the channel wake its waiters.
 #[cfg(feature = "alloc")]
-static CHANS: std::sync::Mutex<Vec<Chan>> = std::sync::Mutex::new(Vec::new());
-#[cfg(feature = "alloc")]
-static CHANGED: std::sync::Condvar = std::sync::Condvar::new();
+struct Shared {
+    state: std::sync::Mutex<Chan>,
+    /// Signalled as a message is queued or the channel closed: the receiver waits here.
+    readable: std::sync::Condvar,
+    /// Signalled as a message is taken: the sender waits here.
+    writable: std::sync::Condvar,
+}
 
-/// The channel `c`, with `f` (which may wait for a change of the channels and return `None`
-/// to wait again).
+/// What a thread does to a channel: the condition variable it waits on, and the one it wakes.
 #[cfg(feature = "alloc")]
-fn with_chan<R>(c: u32, mut f: impl FnMut(&mut Chan) -> Result<Option<R>, String>) -> R {
-    let mut chans = CHANS.lock().unwrap_or_else(|e| e.into_inner());
+#[derive(Clone, Copy, PartialEq)]
+enum Op {
+    Send,
+    Recv,
+    Close,
+}
+
+/// The channels of the process (read for each use, written as one is made).
+#[cfg(feature = "alloc")]
+static CHANS: std::sync::RwLock<Vec<std::sync::Arc<Shared>>> = std::sync::RwLock::new(Vec::new());
+
+#[cfg(feature = "alloc")]
+std::thread_local! {
+    /// The channels this thread sent to or closed, which it closes as it ends.
+    static SENT: RefCell<Vec<std::sync::Arc<Shared>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The channel `c`, with `f` (which may wait for a change of the channel and return `None` to wait
+/// again) as `op`.
+#[cfg(feature = "alloc")]
+fn with_chan<R>(c: u32, op: Op, mut f: impl FnMut(&mut Chan) -> Result<Option<R>, String>) -> R {
+    let shared = CHANS.read().unwrap_or_else(|e| e.into_inner()).get(c as usize).cloned();
+    let Some(shared) = shared else { trap(format!("channel {c} not made")) };
+    let mut ch = shared.state.lock().unwrap_or_else(|e| e.into_inner());
     loop {
-        let r = match chans.get_mut(c as usize) {
-            Some(ch) => f(ch),
-            None => Err(format!("channel {c} not made")),
-        };
-        match r {
+        match f(&mut ch) {
             Ok(Some(r)) => {
-                CHANGED.notify_all();
+                let me = std::thread::current().id();
+                let sent = op != Op::Recv && ch.sender == Some(me) && GANG.get().is_some();
+                drop(ch);
+                match op {
+                    Op::Recv => shared.writable.notify_one(),
+                    Op::Send | Op::Close => shared.readable.notify_one(),
+                }
+                if sent {
+                    SENT.with_borrow_mut(|s| {
+                        if !s.last().is_some_and(|l| std::sync::Arc::ptr_eq(l, &shared)) {
+                            s.push(shared.clone())
+                        }
+                    });
+                }
                 return r;
             }
             Ok(None) => {
-                let (g, t) =
-                    CHANGED.wait_timeout(chans, std::time::Duration::from_secs(30)).unwrap_or_else(|e| e.into_inner());
+                let cv = if op == Op::Recv { &shared.readable } else { &shared.writable };
+                let (g, t) = cv.wait_timeout(ch, std::time::Duration::from_secs(30)).unwrap_or_else(|e| e.into_inner());
                 if t.timed_out() {
                     drop(g);
                     trap(format!("channel {c} waited for 30 s: a deadlock?"));
                 }
-                chans = g;
+                ch = g;
             }
             Err(msg) => {
-                drop(chans);
+                drop(ch);
                 trap(msg)
             }
         }
@@ -560,8 +596,10 @@ pub(crate) mod sys {
         let id = super::GANGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if gang {
             let me = std::thread::current().id();
-            let mut chans = super::CHANS.lock().unwrap_or_else(|e| e.into_inner());
-            pending.iter().for_each(|&c| chans[c as usize].owner = Some((id, me)));
+            let chans = super::CHANS.read().unwrap_or_else(|e| e.into_inner());
+            for &c in &pending {
+                chans[c as usize].state.lock().unwrap_or_else(|e| e.into_inner()).owner = Some((id, me));
+            }
         } else if !pending.is_empty() {
             super::trap("a spawn of tasks that are no gang, with channels made and not given".into());
         }
@@ -577,10 +615,10 @@ pub(crate) mod sys {
                     struct End;
                     impl Drop for End {
                         fn drop(&mut self) {
-                            let me = std::thread::current().id();
-                            let mut chans = super::CHANS.lock().unwrap_or_else(|e| e.into_inner());
-                            chans.iter_mut().filter(|c| c.sender == Some(me)).for_each(|c| c.closed = true);
-                            super::CHANGED.notify_all();
+                            for c in super::SENT.with_borrow_mut(std::mem::take) {
+                                c.state.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+                                c.readable.notify_one();
+                            }
                         }
                     }
                     let _end = End;
@@ -596,15 +634,19 @@ pub(crate) mod sys {
 
     #[cfg(feature = "alloc")]
     pub fn chan(cap: u32) -> u32 {
-        let mut chans = super::CHANS.lock().unwrap_or_else(|e| e.into_inner());
-        chans.push(super::Chan {
-            cap: cap as usize,
-            msgs: Default::default(),
-            closed: false,
-            sender: None,
-            receiver: None,
-            owner: None,
-        });
+        let mut chans = super::CHANS.write().unwrap_or_else(|e| e.into_inner());
+        chans.push(std::sync::Arc::new(super::Shared {
+            state: std::sync::Mutex::new(super::Chan {
+                cap: cap as usize,
+                msgs: Default::default(),
+                closed: false,
+                sender: None,
+                receiver: None,
+                owner: None,
+            }),
+            readable: Default::default(),
+            writable: Default::default(),
+        }));
         let c = (chans.len() - 1) as u32;
         super::PENDING.with_borrow_mut(|p| p.push(c));
         c
@@ -613,7 +655,7 @@ pub(crate) mod sys {
     #[cfg(feature = "alloc")]
     pub fn send(c: u32, msg: &[u8]) {
         let mut msg = Some(msg.to_vec());
-        super::with_chan(c, |ch| {
+        super::with_chan(c, super::Op::Send, |ch| {
             super::end_of(ch, true)?;
             if ch.closed {
                 return Err(format!("aqr_send({c}) after closing"));
@@ -628,7 +670,7 @@ pub(crate) mod sys {
 
     #[cfg(feature = "alloc")]
     pub fn recv(c: u32, dst: &mut [u8]) -> i32 {
-        let msg = super::with_chan(c, |ch| {
+        let msg = super::with_chan(c, super::Op::Recv, |ch| {
             super::end_of(ch, false)?;
             Ok(match ch.msgs.front() {
                 None if ch.closed => Some(Err(-1)),
@@ -648,7 +690,7 @@ pub(crate) mod sys {
 
     #[cfg(feature = "alloc")]
     pub fn close(c: u32) {
-        super::with_chan(c, |ch| {
+        super::with_chan(c, super::Op::Close, |ch| {
             super::end_of(ch, true)?;
             ch.closed = true;
             Ok(Some(()))
