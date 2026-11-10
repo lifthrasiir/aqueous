@@ -12,7 +12,7 @@ cd "${0:A:h}/.."
 # The revisions that were released, oldest first:
 # - 9e9476c2 is v0.0.20261028, the first public release (posted on encode.su), which has no tag;
 #   its modules were in aqr-modules/ at the root.
-revs=(9e9476c2 v0.0.20261031 v0.0.20261101 v0.0.20261105)
+revs=(9e9476c2 v0.0.20261031 v0.0.20261101 v0.0.20261105 v0.0.20261110)
 
 out=crates/aqr-formula/src/released.rs
 now=$(mktemp)
