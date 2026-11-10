@@ -162,7 +162,12 @@ keep those from the one
 picks
 .Pq as Fl -at
 on, with the states between them, and write what is before as one state: the segments before
-the point as the state at it, the others as they are.
+the point as the state at it, the others as they are, but for runs of segments that only name
+the state again
+.Pq Fl j No of a run that changed nothing, Fl -tag ,
+which are one segment with all their points.
+.Fl -keep-since Cm #1
+keeps every point and merges them.
 .It Fl -drop-history
 With
 .Fl -compact :

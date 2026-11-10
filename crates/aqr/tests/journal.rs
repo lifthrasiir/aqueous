@@ -377,3 +377,45 @@ fn naming_a_state() {
 fn states_of(dir: &Path, archive: &str) -> Vec<String> {
     listed(dir, &["-t", "-q", archive])
 }
+
+/// Runs of segments that only name a state again (a `-j` run where nothing changed, `--tag`) are
+/// written as one segment with all their points, by `--compact --keep-since`.
+#[test]
+fn empty_segments_are_merged() {
+    let d = scratch("merge");
+    let src = d.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("a.txt"), words(1, 3_000)).unwrap();
+    ok(&d, Some(&day(0)), &["-q", "-j", "p1", "-o", "a.aqr", "src"]);
+    // three runs that change nothing, and a tag
+    for (n, label) in ["u1", "u2", "u3"].into_iter().enumerate() {
+        ok(&d, Some(&day(1 + n as u64)), &["-q", "-a", "-j", label, "a.aqr", "src"]);
+    }
+    ok(&d, Some(&day(4)), &["-q", "--tag", "t4", "a.aqr"]);
+    fs::write(src.join("b.txt"), words(2, 1_000)).unwrap();
+    ok(&d, Some(&day(5)), &["-q", "-a", "-j", "p6", "a.aqr", "src"]);
+    ok(&d, Some(&day(6)), &["-q", "-a", "-j", "u7", "a.aqr", "src"]);
+    let before = states(&d, "a.aqr", 7);
+    assert_eq!(before[0], before[4]);
+    assert_eq!(before[5], before[6]);
+    assert_eq!(before[5].len(), 2);
+    let size = fs::metadata(d.join("a.aqr")).unwrap().len();
+
+    // every point kept (from the first): the seven segments are two
+    let o = ok(&d, None, &["--compact", "--keep-since", "#1", "a.aqr"]);
+    assert!(stderr(&o).contains("7 -> 2 segments"), "{}", stderr(&o));
+    let h = stdout(&ok(&d, None, &["--history", "a.aqr"]));
+    let labels: Vec<&str> = h.lines().map(|l| l.rsplit("  ").next().unwrap()).collect();
+    assert_eq!(labels, ["p1", "u1", "u2", "u3", "t4", "p6", "u7"], "{h}");
+    assert_eq!(states(&d, "a.aqr", 7), before);
+    ok(&d, None, &["-q", "-K", "a.aqr"]);
+    assert!(fs::metadata(d.join("a.aqr")).unwrap().len() < size);
+    // the times are the ones named, and the dates find them
+    assert_eq!(listed(&d, &["-t", "-q", "--at", "2026-11-04", "a.aqr"]), ["a.txt"]);
+    assert_eq!(listed(&d, &["-t", "-q", "--at", "@u7", "a.aqr"]), ["a.txt", "b.txt"]);
+    // appended to after that: as before
+    ok(&d, Some(&day(7)), &["-q", "--tag", "t8", "a.aqr"]);
+    let h = stdout(&ok(&d, None, &["--history", "a.aqr"]));
+    assert_eq!(h.lines().count(), 8, "{h}");
+    ok(&d, None, &["-q", "-K", "a.aqr"]);
+}

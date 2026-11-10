@@ -27,7 +27,7 @@ use std::io::Write;
 use aqr_common::varint;
 
 use super::segment::Copied;
-use super::tree::{Entry, EntryNode, Extra, SegmentInfo, Status, Tree};
+use super::tree::{Entry, EntryNode, Extra, Journal, SegmentInfo, Status, Tree};
 use super::{
     ContentAt, Encoder, Failure, HEADER_MAGIC, LeafBlock, Level, Reader, SegmentWriter, always_compressed, critical,
     decoded_with, footer_of, formula_block, frame, inspect, opened, opened_with,
@@ -200,9 +200,33 @@ pub fn rewrite_as(
     let homes = all.iter().map(|cs| home(cs)).collect::<Result<Vec<usize>>>()?;
 
     let enc = Encoder::with_threads(level, threads);
-    // (the segments written: those of the state, then those after it as they are)
-    let after = blocks.segments.len() - base_n;
-    let (base, total) = (kept.len().max(1), kept.len().max(1) + after);
+    // (the segments written: those of the state, then those after it as they are, but for those
+    // of no entries, which name a state again: their points go to the segment before)
+    let (mut base_status, mut base_journal) = match keeping {
+        Some((_, since)) => {
+            let first = &infos[base_n - 1];
+            (first.status, first.journal.iter().filter(|p| p.0 >= since).cloned().collect::<Journal>())
+        }
+        None => (Status::None, Journal::new()),
+    };
+    let mut outs: Vec<Out> = Vec::new();
+    for (s, told) in infos.iter().enumerate().skip(base_n) {
+        let (status, journal) = match outs.last_mut() {
+            Some(o) => (&mut o.status, &mut o.journal),
+            None => (&mut base_status, &mut base_journal),
+        };
+        let merged =
+            names_again(&blocks.segments[s], told) && told.journal.iter().all(|p| journal.iter().all(|q| q.0 != p.0));
+        match merged {
+            true => {
+                journal.extend(told.journal.iter().cloned());
+                journal.sort_by_key(|p| p.0);
+                *status = Status::Complete;
+            }
+            false => outs.push(Out { s, status: told.status, journal: told.journal.clone() }),
+        }
+    }
+    let (base, total) = (kept.len().max(1), kept.len().max(1) + outs.len());
     let mut r = Rewritten { segments: (total, blocks.segments.len()), ..Rewritten::default() };
     let mut w = SegmentWriter::new();
     let io = |e: std::io::Error| Error::new(e.to_string());
@@ -211,7 +235,7 @@ pub fn rewrite_as(
     let mut leaf_at = vec![usize::MAX; blocks.leaves.len()];
     let mut leaves_written = 0;
     for n in 0..total {
-        let s = if n < base { kept.get(n).copied() } else { Some(base_n + n - base) };
+        let s = if n < base { kept.get(n).copied() } else { Some(outs[n - base].s) };
         if let Some(s) = s {
             let seg = &blocks.segments[s];
             let leaves = seg.first.leaves..seg.end.leaves;
@@ -304,7 +328,7 @@ pub fn rewrite_as(
                 let (l, output, size) = refs[k];
                 ContentAt { leaf: leaf_at[l], output, size }
             }),
-            false => told_tree(&infos[base_n + n - base], &leaf_at)?,
+            false => told_tree(&infos[outs[n - base].s], &leaf_at)?,
         };
         if n < base && st.entries.is_empty() {
             return Err(Error::new("a segment of no entries (of the root's forks alone)"));
@@ -313,15 +337,9 @@ pub fn rewrite_as(
         // of; as they were, after it)
         let (status, journal) = match keeping {
             None => (if n + 1 == total { Status::Complete } else { Status::None }, Vec::new()),
-            Some((_, since)) if n + 1 == base => {
-                let first = &infos[base_n - 1];
-                (first.status, first.journal.iter().filter(|p| p.0 >= since).cloned().collect())
-            }
+            Some(_) if n + 1 == base => (base_status, std::mem::take(&mut base_journal)),
             Some(_) if n < base => (Status::None, Vec::new()),
-            Some(_) => {
-                let told = &infos[base_n + n - base];
-                (told.status, told.journal.clone())
-            }
+            Some(_) => (outs[n - base].status, std::mem::take(&mut outs[n - base].journal)),
         };
         w.set_journal(journal)?;
         let end = match n + 1 == total {
@@ -356,6 +374,29 @@ fn unknown_metadata(c: &[u8], journal: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// A segment written after the state, as it was told: where it is among the segments read, how
+/// the writing it ends did, and its points (those of the segments of no entries after it among
+/// them: [`names_again`]).
+struct Out {
+    s: usize,
+    status: Status,
+    journal: Journal,
+}
+
+/// Whether segment `seg` (told as `told`) only names the state again: no blocks, no entries nor
+/// tombstones, no extra of the root, and the end of a writing that completed (`-j` where nothing
+/// changed, `--tag`). Its points can be those of the segment before it.
+fn names_again(seg: &super::Segmented, told: &SegmentInfo) -> bool {
+    let t = &told.tree;
+    seg.first == seg.end
+        && t.tree.entries.is_empty()
+        && t.tombstones.is_empty()
+        && t.refs.is_empty()
+        && t.tree.root == Extra::default()
+        && !t.given.iter().any(|&g| g)
+        && told.status == Status::Complete
 }
 
 /// The tree of a segment as it was told (`told`), its contents at their leaves in the archive

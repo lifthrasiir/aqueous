@@ -386,7 +386,11 @@ aqr-incomplete = {
     tombstone, `segment-status`, `journal`은 그대로). `--delete`/`--move`와는 함께 쓰지 않는다. 사이 상태의
     트리가 바뀌기 때문이다. 끝난 뒤 마지막 상태가 처음과 같은지는 기존 검사(`checked`)가 본다.
   - 한계: 뒤 segment의 엔트리 extra가 "있지만 비어 있는 맵"(`{}`)이면(spec, "Merging segments"의 교체 표기)
-    다시 쓸 수 없어 거절한다. 빈 segment의 사슬을 한 segment로 합치는 일은 아직 하지 않는다.
+    다시 쓸 수 없어 거절한다. 
+  - 같은 상태를 다시 이름 붙이는 segment(블록도 엔트리도 tombstone도 없고 끝난 실행의 끝인 것: 변화 없는 `-j`
+    실행, `--tag`)의 사슬은 `--keep-since`가 앞 segment 하나에 지점을 맵째 합쳐 쓴다(같은 시각이 겹치면 합치지
+    않는다). 지점도 상태도 그대로이고 segment와 metadata block만 줄어든다. 지점을 하나도 버리지 않고 합치려면
+    `--keep-since #1`을 쓴다(첫 지점 앞의 이름 없는 상태만 접힌다).
 - **라벨의 placeholder.** `{today}`는 지역 날짜 `YYYY-MM-DD`, `{now}`는 지역 시각 `YYYY-MM-DD HH:MM:SS`다.
   `{{`와 `}}`는 괄호 자체이고, 모르는 이름은 오류다. 시각 키(UTC ms)와는 별개로 라벨 문자열만 바꾼다.
 - **`--at SPEC`**(`-t`, `-I`, `-d`, 이후 `--diff`)은 지점 중에서만 고른다.
