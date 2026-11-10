@@ -44,15 +44,19 @@ fn main() -> std::process::ExitCode {
         ui::message(ui::Icon::Error, l::failed(), l::no_local_app_data());
         return ExitCode::FAILURE;
     };
-    if !quiet {
-        if !ui::confirm(&l::ask(env!("AQR_VERSION")), &l::what(dir.display())) {
-            return ExitCode::SUCCESS;
-        }
+    if !quiet && !ui::confirm(&l::ask(env!("AQR_VERSION")), &l::what(dir.display())) {
+        return ExitCode::SUCCESS;
     }
     match install(&dir) {
         Ok(()) => {
             if !quiet {
-                let done = l::done(shell::compress(), shell::extract(), shell::test());
+                let done = l::done(
+                    shell::compress(),
+                    shell::extract(),
+                    shell::test(),
+                    shell::name_version(),
+                    shell::extract_version(),
+                );
                 ui::message(ui::Icon::Information, l::installed(), &done);
             }
             ExitCode::SUCCESS

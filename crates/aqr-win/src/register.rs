@@ -106,7 +106,15 @@ fn more() -> Vec<(String, Msg, String)> {
 pub fn told() -> String {
     let menu: Vec<String> = more().into_iter().map(|(_, text, _)| win::quoted(text.text())).collect();
     let formats: Vec<String> = FORMATS.iter().map(|(ext, ..)| format!(".{ext}")).collect();
-    win::told(shell::compress(), menu.join(", "), shell::extract(), shell::test(), formats.join(" "))
+    win::told(
+        shell::compress(),
+        menu.join(", "),
+        shell::extract(),
+        shell::test(),
+        shell::name_version(),
+        shell::extract_version(),
+        formats.join(" "),
+    )
 }
 
 pub fn register() -> Result<(), String> {
@@ -456,6 +464,8 @@ mod tests {
         let t = told();
         assert!(t.contains("\"Compress with passphrase…\", \"Compress into .zip\", \"Compress into .7z\""), "{t}");
         assert!(t.contains("(.zip .7z .rar") && t.contains(".zst)"), "{t}");
+        // (the verbs of the versions of an archive, on .aqr files alone)
+        assert!(t.contains("\"Name this version…\"") && t.contains("\"Extract a previous version…\""), "{t}");
     }
 
     /// `FORMATS`' icons are the resources of aqr-win.rc by those numbers, and are there.
