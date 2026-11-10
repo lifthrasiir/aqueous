@@ -1392,6 +1392,38 @@ fn prores_same_as_wasm() {
     }
 }
 
+/// A file of synthetic ProRes frames of some size (720x480: past the module's windows in all, and
+/// their pieces past its reads), with bytes between them and one frame kept as it is.
+fn prores_big(frames: usize) -> Vec<u8> {
+    let mut d = b"\0\0\0\x08wide".to_vec();
+    for i in 0..frames {
+        let (chroma, interlace) = if i % 4 == 3 { (3, 1) } else { (2, 0) };
+        let mut f = aqr_prores::synth::synthetic(720, 480, chroma, interlace, i as u64);
+        if i == 5 {
+            f[40] ^= 0x55;
+        }
+        d.extend_from_slice(&f);
+        d.extend(std::iter::repeat_n(i as u8, 100 * (i % 3)));
+    }
+    d
+}
+
+/// Frames of some size, in various numbers of stripes, natively and as WebAssembly alike (the
+/// stripes as tasks), the chunk's pieces going past the windows and the reads.
+#[test]
+fn prores_big_frames_same_as_wasm() {
+    let enc = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
+    let d = prores_big(12);
+    for k in [Some(1), Some(3), Some(16), None] {
+        let f = aqr_prores::formula::encode_with(&d, 2, aqr_prores::formula::CHUNK, k).unwrap();
+        let c = enc.encode(&f, None).unwrap();
+        assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{k:?}");
+        assert!(aqr::decode(&c, &Wasm).unwrap() == d, "{k:?}");
+        let queued = |u: &aqr_formula::Usage| aqr_prores::module::plan(u.params, u.initial()).unwrap().1;
+        assert!(applications_hold(&format!("prores big {k:?}"), &f, &d, queued) > 0);
+    }
+}
+
 /// GIF files natively and as WebAssembly alike, and their records damaged in turn failing alike
 /// (or giving the same).
 #[test]
@@ -5123,9 +5155,10 @@ fn bcn_plans_hold() {
     }
 }
 
-/// prores-recons lays its memory out as a stack, its limit its plan of the instance and as many
-/// tasks at once as their slots allow: of 4:2:2, 4:4:4 with alpha, interlaced frames, and of a
-/// chunk of 17 stripes (more than the slots); each application of a file on its own.
+/// prores-recons lays its memory out as a stack, its limit its plan of the instance and its gang of
+/// tasks (a task for each stripe, and the messages of their channels): of 4:2:2, 4:4:4 with
+/// alpha, interlaced frames, and of chunks of a few stripes and of 16; each application of a file
+/// on its own.
 #[test]
 fn prores_plans_hold() {
     for t in ["ks-422", "ks-4444-alpha", "ks-interlaced", "aw-422hq x80", "aw-422hq x600"] {
@@ -5148,13 +5181,49 @@ fn prores_plans_hold() {
             if let Node::Apply(_) = n {
                 let mut g = f.clone();
                 g.root = n;
-                plan_holds(&format!("prores {t} {applied}"), g, &d[at..at + len]);
+                let queued = |u: &aqr_formula::Usage| aqr_prores::module::plan(u.params, u.initial()).unwrap().1;
+                plan_holds_queued(&format!("prores {t} {applied}"), g, &d[at..at + len], queued);
                 applied += 1;
             }
             at += len;
         }
         assert!(applied > 0, "{t}");
     }
+}
+
+/// prores-recons (a part module) takes the same plan whatever the lengths of its inputs and its
+/// output, and a file of the same frames repeated to hundreds of megabytes takes the plan of
+/// the file once: the plan follows the frames' limits (the params), not the chunk.
+#[test]
+fn prores_plan_is_independent_of_length() {
+    let one = fixture("codecs/aqr-prores/tests/data/aw-422hq.mov");
+    let plan_of = |d: &[u8]| {
+        // (four stripes whatever the size)
+        let f = aqr_prores::formula::encode_with(d, 8, aqr_prores::formula::CHUNK, Some(4)).unwrap();
+        let mut apps = Vec::new();
+        applications(&f.root, "prores-recons", &mut apps);
+        let Node::Apply(a) = &apps[0] else { unreachable!() };
+        let none: Vec<&[u8]> = Vec::new();
+        let at = |lens: &[u64], out: u64| {
+            let usage = aqr_formula::Usage {
+                params: &a.params,
+                resources: &[],
+                inputs: lens,
+                outputs: &[out],
+                contents: &none,
+                initial_pages: aqr_decompress::initial_pages_of(a.module).unwrap(),
+            };
+            let p = a.module.plan_for(&usage).unwrap();
+            (p.instance, p.tasks)
+        };
+        // (inputs of any length, and none of their contents read)
+        let (small, big) = (at(&[100; 3], 100), at(&[1 << 28; 3], 1 << 28));
+        assert_eq!(small, big);
+        small
+    };
+    let short = plan_of(&one);
+    let long = plan_of(&one.repeat(2500));
+    assert_eq!(short, long, "a file of the same frames repeated");
 }
 
 /// sqlite-recons lays its memory out as a stack, its limit its plan of the instance and as many

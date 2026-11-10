@@ -6458,8 +6458,8 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/png-set.wasm" title="crates/aqr-modules/wasm/png-set.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-png/FORMAT.md" title="codecs/aqr-png/FORMAT.md">R</a>
     <tr>
-      <td><code>279229095546d77c4cc437ffdc7699525ab5f66dc71649fde918421ac0b020f7</code>
-      <td>prores-recons@2
+      <td><code>94cba8e70905376fa565c840c7e0c2d52d34f32ba96d967765d7a29887b9bb2c</code>
+      <td>prores-recons@3
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/prores-recons.wasm" title="crates/aqr-modules/wasm/prores-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-prores/FORMAT.md" title="codecs/aqr-prores/FORMAT.md">R</a>
     <tr>

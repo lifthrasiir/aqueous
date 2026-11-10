@@ -9,9 +9,11 @@ publish = false
 default = ["encode"]
 # The formulas (`formula`); without it, the code of the module alone (`module`).
 encode = ["dep:aqr-formula"]
+# Synthetic frames (`synth`), for the tests of other crates.
+synth = []
 
 [dependencies]
-aqr-api = { path = "../../crates/aqr-api", default-features = false }
+aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 memchr = "2"

@@ -26,35 +26,60 @@ its two encoders.
 - Bytes after the pictures within the frame's size: zero stuffing in Apple's frames
   (64–128 bytes), kept.
 
-## The formula (`src/formula.rs`, `src/codec.rs`)
+## The formula (`src/formula.rs`, `src/codec.rs`, `src/module.rs`)
 
 The frames are cut into chunks of about 64 MiB (a chunk ends also where more than 4 MiB lie
 between frames). A chunk's span, from its first frame to its last, is an application of
-`prores-recons`, whose inputs are the coded chunk and the bytes between its frames (audio,
-the container's headers); the bytes outside the spans and between frames are one stream,
-`prores/rest`, in the file's order.
+`prores-recons`, whose inputs are the side stream (`prores/side`), the stripes' pieces
+(`prores/coded`) and the bytes between its frames (audio, the container's headers); the bytes
+outside the spans and between frames are one stream, `prores/rest`, in the file's order.
 
-A coded chunk is streams of adaptive binary arithmetic coding (aqr-common's `arith`) and raw
-bits. The first tells the frames: the gaps' lengths, the frames kept as they are (those that do
-not parse), the headers as differences from the previous ones, the slices' headers, tails and
-alpha. Each of the others codes a stripe of rows of every picture, with a model of its own and
-the same stripe of the frame before as context. So the stripes decode at once (tasks in
-WebAssembly, 16 slots), each writing its slices' bytes; the frames are put together from them.
+The coded chunk is pieces, a few for each frame, of adaptive binary arithmetic coding
+(aqr-common's `arith`) and raw bits. The side stream has the frame's piece: the gaps' lengths,
+the frames kept as they are (those that do not parse), the headers as differences from the
+previous ones, the slices' headers, tails and alpha. The stripes' stream has, for each frame,
+a piece for each stripe: the stripe of rows of every picture, with a model of its own and the
+same stripe of the frame before as context. Every piece restarts the arithmetic coder (the
+model's state carries on), which costs about four bytes a piece: on 120 frames of 1080p in 16
+stripes, 106,220,346 bytes against 106,219,711 of the streams before, and 122,123,352 against
+122,129,519 on 24 frames of UHD 4:4:4.
 
-A chunk has a stripe for each 4 MiB of its frames, rounded up (at most 64), whatever the
-threads. Splitting rows costs little spatial context (SD at 32 stripes, a slice row each, lost
-0.1%); what costs is each stripe's model learning anew, which shows where little is coded: of
-150 frames of each file in one chunk, by 1, 8, 16 and 32 stripes, Apple's animated film
-0.7347, 0.7414, 0.7457, 0.7516, while camera footage gained a little (ARRI 2K 0.5517, 0.5498,
-0.5493, 0.5491) and decoding on 16 threads went 13, 71, 100, 108 MB/s. Stripes by size keep
-their cost a small part of any chunk, and a large file's 64 MiB chunks decode on 16 threads.
+The module is a part module (`prores-recons` 3, as flac-recons): its instance reads the three
+inputs in order through windows and writes the output through its window, and a gang of tasks,
+one for each stripe, lives for the whole chunk, holding its stripe's model and planes of the
+frame before. For each modelled frame the instance sends each task its message (the side piece
+and the stripe's piece), the task decodes the headers of its slices from the side piece itself
+and writes them (the slices' bytes, with their lengths), and the instance puts the frame
+together from what the tasks send back and writes it with the gap before it. Three frames are
+in flight (`module::DEPTH`: a channel holds as many messages, so no end waits for another),
+(depths from 2 to 6 decoded alike on ten cores). A frame kept as it is waits for those before it and
+goes through. Natively the same code runs through the emulation of aqr-api, the tasks on
+threads (`Run::Part` of aqr-decompress): the memory that grows with the length is only the
+application's result.
 
-The parameters give what decoding holds (blocks of a frame and of a stripe, bytes of a frame,
-of the headers and of what each stripe writes, and the counts of the records and bytes the
-first stream makes), exactly as the encoder found it; the decoder holds to them. The module
-lays its memory out as a stack (`aqr_api::stack`), so its limit is its plan (`codec::plan`):
-the instance's memory and as many stripes' tasks at once as its 16 slots allow, each a copy of
-the instance with its own on top.
+A chunk has a stripe for each 4 MiB of its frames, rounded up (at most 16), and no more than a
+stripe for each 16 KiB of a frame (a frame of 4 KB, in the fixtures, takes one: the messages
+cost more than the work otherwise; on 300 MB of those, 16 stripes took 3.8 MB/s to decode
+and one 18). Splitting rows costs little spatial context (SD at 32 stripes, a slice row each,
+lost 0.1%); what costs is each stripe's model learning anew, which shows where little is
+coded: of 150 frames of each file in one chunk, by 1, 8, 16 and 32 stripes, Apple's animated
+film 0.7347, 0.7414, 0.7457, 0.7516, while camera footage gained a little (ARRI 2K 0.5517,
+0.5498, 0.5493, 0.5491) and decoding on 16 threads went 13, 71, 100, 108 MB/s. Stripes by size
+keep their cost a small part of any chunk, and a large file's 64 MiB chunks decode on 16
+threads. On noisy ffmpeg footage, 1080p 4:2:2 HQ and UHD 4:4:4 (120 and 24 frames, 115 MB and 138 MB, one chunk), by 1, 2, 4, 8
+and 16 stripes the streams came to 106.23, 106.17, 106.15, 106.11 and 106.14 MB (UHD 121.91,
+121.94, 121.94, 121.96, 122.01) and decoded at 12, 24, 45, 72 and 82 MB/s (UHD 13, 25, 48, 75,
+88) on 10 cores.
+
+The parameters give what decoding holds: the most of any frame, stripe or piece (blocks and
+bytes of a frame, of the headers, slices of a stripe, bytes of a piece and of what a stripe
+writes), exactly as the encoder found it; the decoder holds to them. The module lays its memory
+out as a stack (`aqr_api::stack`), so its limit is its plan (`module::plan`): the instance's
+memory (the windows' reads, a few frames' headers, a message, a frame and a result for each
+stripe) and the gang's (a task for each stripe: the model, the planes of two frames of the
+stripe, the slices' records, a message and a result; with the messages the channels hold).
+None of it follows the chunk's or the file's length (`prores_plan_is_independent_of_length`,
+`prores_plans_hold`).
 
 ## The model (`src/model.rs`)
 
@@ -87,8 +112,8 @@ Tools (`cargo run -r -p aqr-prores --example ...`):
 
 - `aqr-prores-check [--zstd] FILE_OR_DIR...`: finds the frames and checks that each is written
   again bit for bit (with `--zstd`, zstd -3 of the frames and of their parse).
-- `aqr-prores-bench [-c CHUNK_MB] [-n FRAMES] [-t THREADS] FILE_OR_DIR...`: codes the frames
-  in chunks and decodes them.
+- `aqr-prores-bench [-c CHUNK_MB] [-n FRAMES] [-k STRIPES] FILE_OR_DIR...`: codes the frames
+  in chunks and decodes them (through the module, the stripes on threads).
 - `aqr-prores-model [-n FRAMES] FILE_OR_DIR...`: the context estimator above.
 
 The local corpus is `F:\Data\aqr-prores-corpus` (see its README: Apple, ARRI, FFmpeg's
@@ -124,6 +149,28 @@ formula's modules. Measured 2026-11-10 on the same machine, `cargo aqr -c --stat
 before and after: 4,503,182,837 bytes both, the archives identical byte for byte; 148.6 s and
 146.8 s wall (the weighing of the largest file, one thread at the end, is within the noise).
 
+The module as a part module (version 3) against version 2, measured 2026-11-10 on an M4 (10
+cores), `cargo aqr -c` and `-K` (the files are ffmpeg's: `hd` 120 frames of noisy 1080p 4:2:2
+HQ, 115 MB; `uhd` 24 frames of noisy UHD 4:4:4, 138 MB; `rep` the fixture `aw-422hq.mov` 2,500
+times, 298 MB of 4 KB frames, which the stripe rule gives one stripe), with the application bound
+raised (`--application-bound 512M`, `1G` for `rep`) so that version 2 is used at all:
+
+| | hd 2 → 3 | uhd 2 → 3 | rep 2 → 3 |
+|---|---|---|---|
+| archive, bytes | 106,234,567 → 106,214,021 | 122,143,709 → 122,123,577 | 24,872,647 → 11,948,327 |
+| application's memory (`-I -v`, the largest) | 404 MB → 70 MB | 410 MB → 220 MB | 582 MB → 6.9 MB |
+| compressing, wall | 10.5 s → 6.1 s | 10.7 s → 6.6 s | 6.3 s → 6.9 s |
+| compressing, peak resident | 748 → 764 MB | 1036 → 1018 MB | 1057 → 1019 MB |
+| `-K`, wall (native; threads busy) | 5.9 s (1.7) → 1.6 s (8.7) | 5.7 s (1.9) → 1.8 s (8.9) | 3.4 s (2.5) → 3.9 s (2.5) |
+| `-K`, peak resident | 412 → 352 MB | 479 → 648 MB | 617 → 437 MB |
+| `-K --wasm`, wall | 1.85 s → 1.83 s | 2.1 s → 2.1 s | 2.2 s → 4.1 s |
+| `-K --wasm`, peak resident | 555 → 334 MB | 579 → 320 MB | 930 → 474 MB |
+
+(The archive of `rep` is smaller because pieces of repeated frames repeat bytes, which the
+archive's deduplication finds; it is no measure of coding. Version 2's `rep` used 16 stripes of
+4 KB frames; at 16 version 3 decodes it at a fifth of the speed of one stripe, hence the rule.)
+The module is 44,009 bytes (14,610 of its block) against 40,306 (13,292).
+
 Left:
 
 - Speed, decoding first (it is more than half of compressing too): writing the slices is about
@@ -131,10 +178,27 @@ Left:
   (1.8); the arithmetic coder itself is about 15% of the encoding time, the rest the decisions'
   contexts and branches. Fewer decisions (zero runs coded together, sizes binarised around
   their expected value) are the way to go faster.
-- A chunk of 64 MiB needs up to 389 MiB of the application's memory (the plan), over the
-  compressing bound of 256 MiB: under the defaults, the files of the corpus over 64 MiB (14 of
-  30, 6.29 GB) are kept as they are (`prores-recons: 14 recompressions not used for the
-  bound`); `--application-bound 512M` (the decompressing bound) takes them.
+- Memory: the plan follows the frames, not the chunk (a chunk of 64 MiB took up to 389 MiB of
+  the application's memory, over the compressing bound of 256 MiB, which kept the files of the
+  corpus over 64 MiB, 14 of 30, as they were). Measured on noisy ffmpeg footage, a file of 120
+  frames of 1080p 4:2:2 HQ (115 MB) needs 70 MB (one instance of 5.8 MB, a gang of 16 tasks and
+  their messages of 64 MB), against 404 MB; 24 frames of UHD 4:4:4 (138 MB) 220 MB (the planes of
+  two frames), against 410 MB. Native decoding of a chunk holds the same, and the chunk's span
+  as its result. 8K 4:4:4 frames would pass the bound (a stripe's planes are 258 bytes a block
+  of its picture, in two frames).
+- The chunk's size (`aqr-prores-bench -c`, 120 frames of 1080p repeated nine times, 1.04 GB,
+  10 cores; the chunk is the unit of the encoder's work, so coding takes one thread a chunk):
+
+  | chunk | streams | encoding and decoding, wall | decoding one chunk |
+  |---|---|---|---|
+  | 64 MiB | 955,914,677 | 24.8 s | |
+  | 256 MiB | 954,581,967 (−0.14%) | 32.8 s | |
+  | 1 GiB (the file) | 954,124,586 (−0.19%) | 78.7 s | 78 MB/s |
+
+  The default stays at 64 MiB. A bigger chunk gains little on noise (the model learns in the first
+  frames, and there is more to learn in the corpus's footage: to be measured there) and loses the
+  chunks' parallelism in encoding, which is a third of compressing, and its memory (the encoder
+  holds the chunk's frames); decoding does not need it any more.
 - Alpha: its run-length coding parsed and modelled (0.3 MB of the corpus).
 - Apple's own encoders as a sample: AVFoundation (`avconvert`, `prores_videotoolbox`) and iPhone
   recordings; the corpus has one Apple-encoded film.

@@ -4,10 +4,12 @@ aqr-prores codes the ProRes frames of a file (QuickTime or MXF) in **chunks**: a
 of the file from a frame's start to a later frame's end, and its frames are coded with a context
 model of their quantized coefficients, the frame before as context, while the bytes between them
 (audio, the container's headers) go apart as they are. The coefficients are coded in stripes
-of rows, each a stream of its own, so that they decode at once. From the coded chunk and
-those bytes the module `prores-recons` rebuilds the span bit for bit. This document describes
-ProRes frames as aqr-prores reads and writes them (§2), the module (§3), the chunk and its
-streams (§4), a frame's headers (§5), the planes of coefficients (§6) and their model (§7).
+of rows, each with a model of its own, so that they decode at once. Everything is coded frame
+by frame, in pieces, so that decoding holds a few frames and nothing of the chunk's length.
+From the coded chunk and those bytes the module `prores-recons` rebuilds the span bit for bit.
+This document describes ProRes frames as aqr-prores reads and writes them (§2), the module
+(§3), the chunk and its pieces (§4), a frame's headers (§5), the planes of coefficients (§6) and
+their model (§7).
 
 The document is normative and complete: an implementation of the module can be written from it
 alone. Sections marked *informative* describe the reference encoder's choices; a decoder needs
@@ -35,7 +37,7 @@ Contents:
 - `S[a..b)` are the bytes of `S` from `a` to `b − 1`.
 - A coefficient is a signed 16-bit integer; values written to one wrap to 16 bits (two's
   complement).
-- Bits of the ProRes bitstream and of the chunk's raw bits (§4) are MSB first: bit `i` is bit
+- Bits of the ProRes bitstream and of the pieces' raw bits (§4) are MSB first: bit `i` is bit
   `7 − i mod 8` of byte `⌊i / 8⌋`, and a value of `n` bits is written highest bit first.
 
 ## 2. ProRes frames
@@ -131,43 +133,45 @@ padding.
 
 ## 3. The module
 
-- **Module**: name `prores-recons`, version 2.
-- **Params**: `11 + k` varints (unsigned LEB128, shortest form), what decoding holds (§4.4):
+- **Module**: name `prores-recons`, version 3; a part module (its inputs are read in order, and
+  its output written in order, through windows of 16 pages each).
+- **Params**: 12 varints (unsigned LEB128, shortest form), what decoding holds at most, of one
+  frame, one stripe or one piece, never of the chunk (§4.4):
 
   ```text
-  blocks         most blocks of a frame (all its pictures' components), at most 2^24
-  frame          most bytes of a frame, at most 2^32 − 1
-  side           most of what the first stream tells, as §4.4 counts it
-  stripe_blocks  most blocks of a stripe of a picture (§6), at most blocks
-  k              the number of stripes, 1 to 64
-  result[k]      bytes each stripe writes (§4.3)
-  items          the frames stream 0 tells (kept or modelled)
-  frames         of them, the modelled frames
-  pictures       the modelled frames' pictures
-  slices         the pictures' slices
-  widths         the pictures' slices along a row, added up
-  bytes          the bytes stream 0 gives: of the frames kept, of the frame headers and picture
-                 headers it codes (those not the same as before), of the slices' headers and
-                 alpha, of the trailers not of zeros
+  blocks         blocks of a frame (all its pictures' components), at most 2^24
+  frame          bytes of a frame, at most 2^32 − 1
+  stripe_blocks  blocks of a stripe of a picture (§6), at most blocks
+  k              the number of stripes, 1 to 16
+  fields         pictures of a frame, 1 or 2
+  head           bytes of a frame's headers: the frame header, the picture headers and a
+                 trailer not of zeros (§5), at most frame
+  widths         slices along a row of each picture of a frame (§2.1), added up, at most 16384
+  stripe_slices  slices of a stripe of a frame (all its pictures), at most blocks
+  stripe_bytes   bytes of the headers and alpha of the slices of a stripe of a frame, at most
+                 frame
+  side_piece     bytes of a piece of the side stream (§4.2), at most 2^32 − 1
+  piece          bytes of a piece of a stripe (§4.3), at most 2^32 − 1
+  result         bytes a stripe writes for a frame (§4.3), at most 2^32 − 1
   ```
 
-  Decoding stream 0 must give exactly these counts; else it fails.
+  Decoding must stay within them; else it fails.
 
 - **Resources**: none.
-- **Inputs**: exactly two, the chunk `C` (§4; class `prores/coded`) and the bytes between its
-  frames `G` (class `prores/rest`, of which it is a slice).
+- **Inputs**: exactly three: the side stream `S` (§4.2; class `prores/side`), the stripes'
+  pieces `C` (§4.3; class `prores/coded`) and the bytes between the chunk's frames `G` (class
+  `prores/rest`, of which it is a slice). Each is read in order and wholly.
 - **Output**: the span of §4, which must be of the `len` the application declares.
-- **Tasks**: the stripes (§4.3) may be decoded as tasks, at most 16 at once (the module's task
-  slots); the output does not depend on it.
+- **Tasks**: one gang class (a gang's tasks start together and wait for each other through
+  channels). The stripes (§4.3) may be decoded as tasks, `k` at most: the output does not depend
+  on it. A decoder needs to hold, whatever the length of the chunk, only the pieces and results
+  of the frames it has in flight (a few), the models and planes of the stripes, and a frame.
 
 ## 4. The chunk
 
-`C` is `1 + k` **streams**: first, for each stream in order, `le32 A` and `le32 R`, its bytes of
-arithmetic code and of raw bits; then the streams one after another, each its `A` bytes of
-arithmetic code and its `R` bytes of raw bits. Nothing follows. Stream 0 tells the frames
-(§4.2, §5); stream `1 + s` the coefficients of stripe `s` of every picture (§4.3).
+The coded chunk is the three inputs `S`, `C` and `G`. `S` and `C` are sequences of **pieces**.
 
-### 4.1 Coding
+### 4.1 Coding and pieces
 
 The arithmetic code is binary and carry-less (32 bits), as aqr-lzo's (its `FORMAT.md` §5.1):
 
@@ -184,65 +188,81 @@ end: the encoder writes (x1 >> 24) + 1
 Each **adaptive bit** has `p1` (initially 32768) and a count `c` (initially 0). After coding a
 bit `b`: `p1 += floor((t − p1) × RATE[c] / 65536)` with `t = 65535` for a 1 and 0 for a 0,
 `RATE[i] = floor(131072 / (2i + 3))`, then `p1` is clamped to 32 … 65504 and `c`, if below 30,
-grows by 1. Each stream has adaptive bits of its own, fresh at its start and kept from frame to
-frame.
+grows by 1.
 
-A value of `n` **raw** bits is read from the stream's raw bits, highest bit first. Below,
-`raw(n)` is such a value and `bytes(n)` is `n` bytes of `raw(8)` each.
+A **piece** is `varint a`, `varint r`, then `a` bytes of arithmetic code and `r` bytes of raw
+bits. The coder of a piece starts anew (`x1`, `x2`, the decoder's `x`), and the piece's raw bits
+start at its first raw byte. The adaptive bits do not: they belong to the side stream (§5) or to a
+stripe (§7), and are kept from piece to piece, fresh at the chunk's start.
 
-A stream fails where its arithmetic code is read more than 4 bytes past its end, or its raw bits
-past theirs.
+A value of `n` **raw** bits is read from the piece's raw bits, highest bit first. Below, `raw(n)`
+is such a value and `bytes(n)` is `n` bytes of `raw(8)` each.
 
-### 4.2 Stream 0
+A piece fails where its arithmetic code is read more than 4 bytes past its end, or its raw bits
+past theirs, or where `a + r` is over the limit of §3 or the piece is past the end of its input.
 
-1. `N = raw(32)`, the number of frames.
-2. For each frame: `g = raw(32)`, the bytes of `G` before it; then the adaptive bit `modelled`:
-   if 1, a frame's headers (§5); if 0, `n = raw(32)` and `bytes(n)`, a frame kept as it is (or
-   any bytes), at most `frame` of them.
-3. `g = raw(32)`, the bytes of `G` after the last frame.
+### 4.2 The side stream
+
+`S` is a sequence of **items**, one for each frame of the span in order, then an end. Each item
+starts with a byte telling its kind and `varint g`, the bytes of `G` before it:
+
+```text
+0x01  g  varint n  bytes     a frame kept as it is (or any bytes): n bytes, at most `frame`
+0x02  g  piece               a frame modelled: its headers (§5) are coded in the piece
+0x00  g                      the end: the bytes of G after the last frame
+```
+
+Nothing follows the end, and no other kind is valid. A frame kept as it is breaks the chain of
+frames that give each other context (§4.3).
 
 ### 4.3 Stripes
 
 A picture of `rows` slice rows has `k` **stripes**: stripe `s` is its slice rows
 `⌊rows·s / k⌋` up to (not with) `⌊rows·(s + 1) / k⌋`, and so may be empty.
 
-Stream `1 + s`, for each modelled frame in order and each of its pictures `j`, codes the planes
-(§6) of stripe `s` of the picture, Y, Cb and Cr, each by §7, with the same plane of stripe `s`
-of picture `j` of the frame before as context where there is one of the same size in blocks.
-The frame before is the modelled frame just before; there is none after a frame kept as it is
-(nor at the chunk's start).
+`C` holds, for each modelled frame in order, `k` pieces: stripe `s`'s is the `s`-th. Piece `s`
+codes, for each of the frame's pictures `j`, the planes (§6) of stripe `s` of the picture, Y, Cb
+and Cr, each by §7, with the same plane of stripe `s` of picture `j` of the frame before as
+context where there is one of the same size in blocks. The frame before is the modelled frame
+just before; there is none after a frame kept as it is (nor at the chunk's start). A stripe
+with no slice rows in any picture of the frame codes nothing: its piece is empty (`a = r = 0`),
+and is not read. The stripe's adaptive bits and the planes of the frame before are the stripe's
+state, kept from frame to frame.
 
-Stripe `s` **writes**, for each modelled frame and picture, the `le32` byte lengths of its slices
-(in the stripe's rows, in order) and then the slices (§2.4: header, components, alpha; their
-coefficients from the planes, the rest from §5). What it writes must be `result[s]` bytes.
+Stripe `s` **writes**, for each modelled frame, for each picture, the `le32` byte lengths of its
+slices (in the stripe's rows, in order) and then the slices (§2.4: header, components, alpha;
+their coefficients from the planes, the rest from §5). What it writes for a frame must be at most
+`result` bytes.
 
 ### 4.4 The output
 
-The output `O` is, for each frame of stream 0: the next `g` bytes of `G`; then a frame kept as
-it is, or the frame written (§2.4) from its headers (§5) and, for each picture, the slices that
-the stripes write, stripe by stripe (each slice's length, which must fit in 16 bits, into the
-picture's table); each frame at most `frame` bytes. Then the last `g` bytes of
-`G`. All of `G` is used and all that the stripes write, and `O` is `len` bytes; else decoding
-fails.
+The output `O` is, for each item of `S`: the next `g` bytes of `G`; then a frame kept as it is,
+or the frame written (§2.4) from its headers (§5) and, for each picture, the slices that the
+stripes write, stripe by stripe (each slice's length, which must fit in 16 bits, into the
+picture's table; every byte that the stripes wrote is used); each frame at most `frame` bytes.
+At the end, the `g` bytes of `G` after the last frame. All of `S`, `C` and `G` is used, and `O`
+is `len` bytes; else decoding fails.
 
-What stream 0 tells is counted, and must stay within `side`: 64 for each frame, with a frame kept
-as it is its bytes, and for a modelled one its frame header's and trailer's bytes, 64 for each
-picture, and for each slice 256 and its header's and alpha's bytes. A frame's pictures' blocks
-must stay within `blocks` (as each picture's slice count is read) and each of their stripes'
-blocks within `stripe_blocks`.
+What the side stream tells of a frame is held within: a frame's pictures' blocks within `blocks`
+(as each picture's slice count is read) and each of their stripes' blocks within `stripe_blocks`,
+its pictures within `fields`, its slices along a row within `widths`, the bytes of its headers
+and trailer within `head`, the slices of each stripe within `stripe_slices` and their headers'
+and alpha's bytes within `stripe_bytes`.
 
 ## 5. A frame's headers
 
-The adaptive bits of stream 0's frames: `same_header`, `same_pic`, `same_byte0`, `same_q`,
+The adaptive bits of the side stream's pieces: `same_header`, `same_pic`, `same_byte0`, `same_q`,
 `tail` and `trailer_zero`, one each. Kept from frame to frame: the last frame header `FH` and,
 for picture `j` (0 or 1), the last picture header `PH[j]` (its `size` zeroed), all initially
 empty.
 
 1. `same_header`: if 0, `n = raw(16)` and `FH = bytes(n)`. `FH` is the frame header (§2.1);
    `H = n` must be its first `be16`, and its width, height and chroma format must be valid.
+   Each frame's headers are the bytes of one piece of the side stream (§4.2): the frame header,
+   the picture headers and the trailer (when not zeros) come to `head` bytes at most.
 2. For each picture `j`:
    1. `same_pic`: if 0, `n = raw(8)` and `PH[j] = bytes(n)`. It is the picture's header, `size`
-      aside; its `hs` must be `n` (at least 8), its `lw` at most 3, its `n` slices a whole
+      aside; its `hs` must be `n` (8 to 31), its `lw` at most 3, its `n` slices a whole
       number of rows (at most 4096 rows; `mbw` at most 8192).
    2. For each slice (with `b0 = q = 0` at the picture's start): `same_byte0`: if 0,
       `b0 = raw(8)`; `same_q`: if 0, `q = raw(8)`. Its header is `b0`, `q`, the sizes (from the
@@ -266,6 +286,9 @@ slice whose left edge is macroblock `x0` in the stripe's slice row `R` (from 0) 
 Planes are coded in raster order of their blocks, each block's coefficients in scan order.
 
 ## 7. The model
+
+Each stripe has the adaptive bits of this section (the arrays below) of its own, fresh at the
+chunk's start and kept from frame to frame.
 
 Component class `cc` is 0 for Y and 1 for Cb and Cr. The plane of the frame before is `Q` where
 there is one (§4.3), and then `hp = 1`; else `hp = 0`. For block `i` at column `x`, row `y`, `L` is
@@ -353,14 +376,19 @@ the frame header, pictures that fit the frame, slices that fit the pictures, com
 codewords end within them with zero padding, coefficients within 16 bits; a frame found is
 skipped whole) and cuts them into chunks of about 64 MiB of frames, a chunk ending also where
 more than 4 MiB lie between two frames. A chunk has a stripe for each 4 MiB of its frames,
-rounded up (at most 64): as each stripe's model learns anew, their cost stays a small part
+rounded up (at most 16): as each stripe's model learns anew, their cost stays a small part
 whatever the size, and a large file's chunks decode on 16 threads. Each chunk is coded on a
-thread of its own, its stripes side by side. A frame that parses is modelled: it is written again bit for bit, as its
-codewords, signs and positions have one coding each, its padding is zero and recorded, and its
-sizes are derived. Any other is kept as it is. The parameters are what the chunk takes, exactly.
+thread of its own, its stripes side by side, and a frame at a time: the side piece of the frame,
+then the stripes' pieces (the coder of each restarts at the frame, costing about four bytes a
+piece: the end of the arithmetic code, a byte of the raw bits' padding and the two lengths; a
+stripe with no rows writes an empty piece). A frame that parses is modelled: it is written again
+bit for bit, as its codewords, signs and positions have one coding each, its padding is zero and
+recorded, and its sizes are derived. Any other is kept as it is. The parameters are the
+maxima the chunk takes, exactly.
 
 The formula's root is the file: the bytes outside the chunks' spans (slices of the stream
-`prores/rest`) and an application of `prores-recons` for each span, whose inputs are its coded
-chunk (a slice of `prores/coded`, of kind compressed) and the bytes between its frames (the
-slice of `prores/rest` they are in, in order). It is made where the chunks come to less than
-the frames' bytes; aqr-compress weighs it against the file.
+`prores/rest`) and an application of `prores-recons` for each span, whose inputs are its side
+stream (a slice of `prores/side`), its stripes' pieces (a slice of `prores/coded`; both of kind
+compressed) and the bytes between its frames (the slice of `prores/rest` they are in, in
+order). It is made where the chunks come to less than the frames' bytes; aqr-compress weighs it
+against the file.

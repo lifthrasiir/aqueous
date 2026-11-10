@@ -15,6 +15,8 @@ pub mod frame;
 pub mod model;
 pub mod module;
 pub mod plane;
+#[cfg(any(test, feature = "synth"))]
+pub mod synth;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error(pub &'static str);

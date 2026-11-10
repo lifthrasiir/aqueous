@@ -126,13 +126,13 @@ optimization picked by hash.
 - Whole modules take their inputs at once; part modules (`entry! … windows(…)`, spec "Module
   execution") stream them through windows of fixed pages, so their memory does not grow with
   the data. Big streams' modules are part modules (lzma, bz2, lz4, snappy, git, exe, png, flac,
-  pcm, mp3, fasta, bundle, bcj, mszip, flate-set, flate-inflate); natively lzma, bz2, png,
+  pcm, mp3, fasta, bundle, bcj, mszip, flate-set, flate-inflate, prores); natively lzma, bz2, png,
   mp3, flac and pcm still decode whole on threads (`Run::Threaded`), not held to the plan.
 - No variable arity: use Split and separate modules (png-against, leveldb-recons, …).
 - Model data (aqr-flate's) is a resource, not embedded in the module.
 - Threads in Wasm: fork-join tasks (`aqr_spawn(class, count, records, arg, n)`, the only spawn;
   `aqr_join`/`aqr_take`; `aqr_common::pool::par_map_apart` with `wire::Wire`) and channels
-  (flac/pcm pipelines); the spec's "Module execution" has the rules, `docs/xform-design.md` §5.5
+  (flac/pcm pipelines, prores's stripes); the spec's "Module execution" has the rules, `docs/xform-design.md` §5.5
   the design. aqr-api's `task::spawn` is class 0 with one region record for all of the working
   memory; `spawn_class(class, ..)` and `spawn_gang(class, ..)` name the class. The spawn record
   must stay in a never-inlined frame (`spawn_record`), or the task's stack clobbers the caller's
@@ -224,8 +224,13 @@ optimization picked by hash.
   WinRARs' tables, RAR5's parse (most of its record), speed.
 - aqr-prores (Apple ProRes in QuickTime or MXF): the frames found by their `icpf` (no container
   parsed), parsed to coefficients and written again (every coefficient set has one coding); a
-  context model with the previous frame as context, in chunks of 64 MiB whose stripes of rows
-  (one for each 4 MiB of frames) decode as tasks. Written from RDD 36's description; no decoder's code read. Left (its
+  context model with the previous frame as context, in chunks of 64 MiB. It is a part module
+  (`prores-recons` 3): the coded chunk is pieces for each frame (side info; one for each
+  stripe of rows, a stripe for each 4 MiB of frames, at most 16, and for 16 KiB of a frame), a
+  gang of one task for each stripe lives through the chunk, the instance sending each its
+  pieces and taking the slices to write the frame, so its plan follows the frames, not the
+  chunk. Natively the same code runs through the emulation of aqr-api (`Run::Part(entry, None)`).
+  Written from RDD 36's description; no decoder's code read. Left (its
   README's Status): decoding speed (decisions per byte), alpha's run-lengths, Apple-encoded
   samples (AVFoundation, iPhone).
 - aqr-snappy and aqr-lz4 reimplement the encoders: Chrome's LevelDB Snappy is the

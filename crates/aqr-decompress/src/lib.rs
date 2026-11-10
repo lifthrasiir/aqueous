@@ -394,6 +394,12 @@ const fn part(module: Module, resources: bool, entry: aqr_api::emu::Entry, decod
     Entry { module, resources, decode: Run::Part(entry, Some(decode)) }
 }
 
+/// [`Entry`] of a part module run natively as it is in Wasm, through the emulation of `aqr_api`
+/// (`entry`: its tasks on threads, its inputs and output through windows), taking no resources.
+const fn by_emulation(module: Module, entry: aqr_api::emu::Entry) -> Entry {
+    Entry { module, resources: false, decode: Run::Part(entry, None) }
+}
+
 /// [`Entry`] of a module that is a part module in Wasm but natively is applied whole, on threads
 /// (its `decode`), as streaming gives one thread: the memory of a native run is not held to the
 /// module's plan.
@@ -743,7 +749,7 @@ const NATIVE: &[Entry] = &[
     bare(PNG_AGAINST, |p, _, i, n, t| aqr_png::formula::decode_against(p, i, n, t).map_err(err)),
     bare(PNG_SET, |p, _, i, n, t| aqr_png::formula::decode_set(p, i, n, t).map_err(err)),
     bare(GIF, |p, _, i, n, t| aqr_gif::formula::decode(p, i, n, t).map_err(err)),
-    bare(PRORES, |p, _, i, n, t| aqr_prores::formula::decode(p, i, n, t).map_err(err)),
+    by_emulation(PRORES, aqr_prores::module::ENTRY),
     bare(JPEG, |p, _, i, n, t| aqr_jpeg::formula::decode(p, i, n, t).map_err(err)),
     threaded(JPEG_LOSSLESS, |p, _, i, n, t| aqr_jpeg::lformula::decode(p, i, n, t).map_err(err)),
     threaded_takes(MP3, |p, r, i, n, t| aqr_mp3::formula::decode(p, r, i, n, t).map_err(err)),
@@ -1361,10 +1367,33 @@ impl Native {
             Run::Whole(decode) | Run::Part(_, Some(decode)) | Run::Threaded(decode) => {
                 decode(params, resources, inputs, len, self.threads.max(1))
             }
-            Run::Part(entry, None) => match aqr_api::emu::apply(&entry, inputs, resources, params, &[len]) {
-                Ok(mut out) => Ok(out.pop().expect("an output")),
-                Err(f) => Err(emulated(f)),
-            },
+            Run::Part(entry, None) => {
+                // (the inputs pulled from the slices as the module asks, not copied whole)
+                struct Slice<'a>(&'a [u8], u64);
+                impl aqr_api::emu::Feed for Slice<'_> {
+                    fn len(&self) -> u64 {
+                        self.0.len() as u64
+                    }
+                    fn pull(&mut self, hi: u64, put: &mut dyn FnMut(&[u8])) -> std::result::Result<(), String> {
+                        put(&self.0[self.1 as usize..hi as usize]);
+                        self.1 = hi;
+                        Ok(())
+                    }
+                }
+                struct Out(Vec<u8>);
+                impl aqr_api::emu::Drain for Out {
+                    fn push(&mut self, d: &[u8]) -> std::result::Result<(), String> {
+                        self.0.extend_from_slice(d);
+                        Ok(())
+                    }
+                }
+                let mut feeds: Vec<Slice> = inputs.iter().map(|i| Slice(i, 0)).collect();
+                let mut feeds: Vec<&mut dyn aqr_api::emu::Feed> = feeds.iter_mut().map(|f| f as _).collect();
+                let mut out = Out(Vec::with_capacity(usize::try_from(len).map_err(|_| "too long")?));
+                aqr_api::emu::apply_streaming(&entry, &mut feeds, resources, params, &mut [&mut out], &[len])
+                    .map_err(emulated)?;
+                Ok(out.0)
+            }
         }
     }
 }

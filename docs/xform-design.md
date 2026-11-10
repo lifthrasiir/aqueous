@@ -445,10 +445,10 @@ Kahn 네트워크이므로, 슬롯이 넉넉할 때 끝나는 것은 낮췄을 �
 `-M`을 줄 때만 한도에 맞춰 낮춘다(`choose_concurrency`; 기본 예산 2 GB는 속도 조절일 뿐이라 그것으로 실패시키면 지금 풀리는
 아카이브가 깨진다). 네이티브 경로는 슬롯을 쓰지 않는다. flac/pcm의 gang은 파이프라인 하나씩 돌리므로 슬롯이 1이다.
 
-**지금의 모듈.** Wasm에서 채널을 쓰는 것은 flac/pcm 파이프라인(aqr-raw `audio::par::apart`)뿐이다(mp3, psd의
+**지금의 모듈.** Wasm에서 채널을 쓰는 것은 flac/pcm 파이프라인(aqr-raw `audio::par::apart`)과 prores(프레임마다 줄무늬 태스크에 보내고 받는다)뿐이다(mp3, psd의
 파이프라인은 네이티브에만 있다). 채널을 모두 만든 뒤 한 번에 spawn한 형제(3 + 작업 task 수)와 부모 사이에서만 쓰므로
 gang 하나가 되고, 코드의 변경 없이 그 클래스를 gang으로 선언하면 된다.
-task를 채널 없이 쓰는 것(flate-set, prores, fasta, jpeg 등)은 gang이 아닌 클래스이고, 디코더가 task 하나 단위로 낮출 수
+task를 채널 없이 쓰는 것(flate-set, fasta, jpeg 등)은 gang이 아닌 클래스이고, 디코더가 task 하나 단위로 낮출 수
 있다.
 
 > **근거: post-init 스냅샷을 버렸던 이유와 다시 꺼낸 이유.** 예전 안은 task가 post-init 스냅샷에서 시작하고 명시된 입력
