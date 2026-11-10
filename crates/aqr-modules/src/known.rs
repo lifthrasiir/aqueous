@@ -270,7 +270,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "jpeg-lossless-recons",
         version: 1,
-        sha512_256: hex("d56d7f10b4de89b1a77804fd1bf10250244d25a00b149aa8f1105978a5189273"),
+        sha512_256: hex("8fcac6c281e6b55428c421554f0420702120b88af22a06a178b8b5260469012b"),
         block: include_bytes!("../wasm/jpeg-lossless-recons.block"),
     },
     Known {

@@ -9,6 +9,7 @@ pub mod lformula;
 pub mod lmodel;
 pub mod lmodule;
 pub mod lossless;
+pub mod lpart;
 pub mod model;
 pub mod module;
 mod par;

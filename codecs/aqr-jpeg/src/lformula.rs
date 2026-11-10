@@ -8,7 +8,7 @@ use aqr_common::varint;
 use aqr_formula::{Formula, Kind, Module, Node};
 
 use crate::lmodel::{self, Model};
-use crate::lmodule::{self, MAX_SAMPLES};
+use crate::lmodule::{HEADER_MAX, MAX_SAMPLES};
 use crate::lossless::{self, Header, Samples};
 use crate::par::prelude::*;
 
@@ -16,10 +16,9 @@ pub use crate::lmodule::decode;
 
 pub const MODULE: Module = Module::new("jpeg-lossless-recons", 1).with_plan(memory);
 
-/// The memory of the module: its plan ([`crate::lmodule::plan`]).
+/// The memory of the module: its plan ([`crate::lpart::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let inputs: [&[u8]; 4] = u.all_contents()?;
-    lmodule::plan(u.initial(), &inputs, u.output())
+    crate::lpart::plan(u.initial(), u.content(0)?, u.content(1)?, u.content(2)?)
 }
 
 /// Whether `d` is a TIFF file (CR2, DNG and the like) holding a lossless JPEG.
@@ -33,7 +32,7 @@ const GROUP: usize = 1 << 22;
 /// [`BAND`] samples, at most [`BANDS`].
 const BAND_MIN: usize = 1 << 21;
 const BAND: usize = 1 << 20;
-const BANDS: usize = 16;
+const BANDS: usize = 1 << 12;
 
 /// A stream that is coded: its place in the file, its headers and its samples.
 struct Coded {
@@ -53,7 +52,7 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
 /// The stream of `h` at `soi`, if its data is reproduced exactly from its samples.
 fn check(input: &[u8], soi: usize, mut header: Header) -> Option<Coded> {
     let data = &input[header.start..header.end];
-    if header.samples() > MAX_SAMPLES {
+    if header.samples() > MAX_SAMPLES || header.start + 2 - soi > HEADER_MAX {
         return None;
     }
     let samples = lossless::decode(&header, data).ok()?;
@@ -135,22 +134,22 @@ fn encode_at(input: &[u8]) -> Option<Formula> {
     // the file without the entropy-coded data, and what the module needs to put it back
     let mut cut = Vec::with_capacity(input.len());
     let mut info = Vec::new();
-    varint::put(&mut info, coded.len() as u64);
-    let (mut prev, mut removed) = (0, 0);
-    for c in &coded {
-        cut.extend_from_slice(&input[prev..c.header.start]);
-        prev = c.header.end;
-        varint::put(&mut info, (c.soi - removed) as u64);
-        removed += c.header.end - c.header.start;
-        varint::put(&mut info, (c.header.end - c.header.start) as u64);
-        varint::put(&mut info, c.header.last_code as u64);
-    }
-    cut.extend_from_slice(&input[prev..]);
     varint::put(&mut info, jobs.len() as u64);
+    let (mut prev, mut removed, mut next) = (0, 0, 0);
     for &(_, count, bands) in &jobs {
         varint::put(&mut info, count as u64);
         varint::put(&mut info, bands as u64);
+        for c in &coded[next..next + count] {
+            cut.extend_from_slice(&input[prev..c.header.start]);
+            prev = c.header.end;
+            varint::put(&mut info, (c.soi - removed) as u64);
+            removed += c.header.end - c.header.start;
+            varint::put(&mut info, (c.header.end - c.header.start) as u64);
+            varint::put(&mut info, c.header.last_code as u64);
+        }
+        next += count;
     }
+    cut.extend_from_slice(&input[prev..]);
     let (mut lens, mut model) = (Vec::new(), Vec::new());
     for chunk in chunks.iter().flatten() {
         varint::put(&mut lens, chunk.len() as u64);
@@ -174,7 +173,10 @@ mod tests {
     /// The file back from the formula's four streams, as the module makes it.
     fn back(f: &Formula, len: usize) -> Vec<u8> {
         let inputs: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
-        decode(&[], &inputs, len as u64, 0).unwrap()
+        // (whole, on threads, and as the part module streams it: the same file)
+        let whole = decode(&[], &inputs, len as u64, 0).unwrap();
+        assert_eq!(crate::lpart::decode(&[], &inputs, len as u64).unwrap(), whole);
+        whole
     }
 
     /// Streams of several shapes among other data: tiles that share a model, and one cut in bands.
@@ -192,7 +194,7 @@ mod tests {
         let f = encode(&file, 0).expect("coded");
         assert_eq!(back(&f, file.len()), file);
         // (the streams are all in the cut, as jobs: a group of the first two, then the others)
-        let lay = lmodule::Layout::parse(&f.streams[0].data, &f.streams[1].data).unwrap();
+        let lay = crate::lmodule::Layout::parse(&f.streams[0].data, &f.streams[1].data).unwrap();
         assert_eq!(lay.streams.len(), 5);
         assert_eq!(lay.jobs.iter().map(|j| (j.count, j.bands)).collect::<Vec<_>>(), [(3, 1), (1, 2), (1, 1)]);
     }

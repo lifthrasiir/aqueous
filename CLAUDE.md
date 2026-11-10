@@ -243,12 +243,16 @@ optimization picked by hash.
   `jpeg-lossless-recons`, apart from `jpeg-recons`: the streams are found by their SOI in a
   TIFF file (`lformula::starts`), their Huffman data taken out and the samples coded by
   `lmodel` (a blend of predictors, a Golomb code by adaptive bits; integers only). A big stream
-  is cut in bands of rows, each its own chunk, to run at once (0.05% for 16); the small ones
-  (a DNG's tiles) share one model. Its memory plan is the blocks `lmodule::run` makes, to the
-  page (`lossless_jpeg_plan_holds*`): a header holds its lists in place (`Small`) because the
-  module's allocator takes only 64 blocks freed out of order. Samples (CC0): raw.pixls.us, in
-  `F:\Data\aqr-corpus\aqr-jpeg-lossless`. Left: the speed of one thread, mixing of models,
-  other containers, the module's tasks in Wasm (its jobs run one at a time there).
+  is cut in bands of rows, each its own chunk (about 1M samples), to run at once; the small ones
+  (a DNG's tiles) share one model. It is a part module (`lpart`): the file is put as it comes,
+  the rows of a frame decoded and their Huffman data written a row of MCUs at a time
+  (`lmodel::Frame`, `lossless::Emitter`), so its plan (`lpart::plan`, to the page,
+  `lossless_jpeg_plan_holds*`) follows the width of the frames and the size of a chunk, not the
+  file (2-4 MiB for a 62 MB CR2). A header holds its lists in place (`Small`): the module's
+  allocator takes only 64 blocks freed out of order. Natively it is applied whole on threads
+  (`lmodule::decode`). Samples (CC0): raw.pixls.us, in `F:\Data\aqr-corpus\aqr-jpeg-lossless`.
+  Left: the speed of one thread, mixing of models, other containers, the bands as tasks in Wasm
+  (they run one after the other there).
 
 ## Working copy and commits
 

@@ -7,7 +7,6 @@
 //! coded one after the other with one model and one arithmetic stream (small tiles learn from
 //! one another), or one stream cut in bands of rows, each its own chunk.
 
-use aqr_api::stack::{block, whole};
 use aqr_common::arith::ArithDecoder;
 
 use crate::jpeg::{Error, err};
@@ -18,6 +17,22 @@ use crate::par::prelude::*;
 
 /// Most samples of a stream that are taken (a corrupt header would ask for gigabytes).
 pub const MAX_SAMPLES: usize = 1 << 30;
+
+/// Most bytes of the headers of a stream, from its SOI to the EOI after its SOS: the part module
+/// holds them while it parses them.
+pub const HEADER_MAX: usize = 1 << 16;
+
+/// The record of a stream in the info: where its SOI is in a cut of `cut_len` bytes, the bytes of
+/// its entropy-coded data, and its flags (0 or 1).
+pub fn stream_record(info: &[u8], at: &mut usize, cut_len: u64) -> Result<(usize, usize, u64), Error> {
+    let soi = small(get_varint(info, at)?, cut_len as usize)?;
+    let len = small(get_varint(info, at)?, usize::MAX >> 1)?;
+    let flags = get_varint(info, at)?;
+    if flags > 1 {
+        return bad("flags");
+    }
+    Ok((soi, len, flags))
+}
 
 /// A lossless JPEG of the file: where its headers start in the `cut`, how many bytes of
 /// entropy-coded data go after them, and the headers.
@@ -52,41 +67,34 @@ impl Layout {
     /// The streams and jobs that `info` tells of, with the headers parsed from the `cut`.
     pub fn parse(cut: &[u8], info: &[u8]) -> Result<Layout, Error> {
         let mut at = 0;
-        // (each stream and job takes a byte of the info at least)
-        let n = small(get_varint(info, &mut at)?, info.len())?;
-        let mut streams: Vec<Stream> = Vec::with_capacity(n);
-        for _ in 0..n {
-            let soi = small(get_varint(info, &mut at)?, cut.len())?;
-            let len = small(get_varint(info, &mut at)?, usize::MAX >> 1)?;
-            let flags = get_varint(info, &mut at)?;
-            if flags > 1 {
-                return bad("flags");
-            }
-            let mut header = lossless::parse(cut, soi)?;
-            // the entropy-coded data is not in the cut: the EOI follows the scan's header
-            if header.end != header.start || header.samples() > MAX_SAMPLES {
-                return bad("stream");
-            }
-            if streams.last().is_some_and(|p| soi < p.header.end) {
-                return bad("order of the streams");
-            }
-            header.last_code = flags == 1;
-            streams.push(Stream { len, header });
-        }
+        // (each job, and each stream, takes a few bytes of the info)
         let njobs = small(get_varint(info, &mut at)?, info.len())?;
+        let mut streams: Vec<Stream> = Vec::new();
         let mut jobs: Vec<Job> = Vec::with_capacity(njobs);
-        let (mut first, mut chunk) = (0usize, 0usize);
+        let mut chunk = 0usize;
         for _ in 0..njobs {
-            let count = small(get_varint(info, &mut at)?, n)?;
+            let count = small(get_varint(info, &mut at)?, info.len())?;
             let bands = small(get_varint(info, &mut at)?, 1 << 16)?;
-            if count == 0 || bands == 0 || (bands > 1 && count > 1) || first + count > n {
+            if count == 0 || bands == 0 || (bands > 1 && count > 1) {
                 return bad("job");
             }
-            jobs.push(Job { first, count, bands, chunk });
-            first += count;
+            jobs.push(Job { first: streams.len(), count, bands, chunk });
             chunk += bands;
+            for _ in 0..count {
+                let (soi, len, flags) = stream_record(info, &mut at, cut.len() as u64)?;
+                let mut header = lossless::parse(cut, soi)?;
+                // the entropy-coded data is not in the cut: the EOI follows the scan's header
+                if header.end != header.start || header.samples() > MAX_SAMPLES || header.start + 2 - soi > HEADER_MAX {
+                    return bad("stream");
+                }
+                if streams.last().is_some_and(|p| soi < p.header.end) {
+                    return bad("order of the streams");
+                }
+                header.last_code = flags == 1;
+                streams.push(Stream { len, header });
+            }
         }
-        if first != n || at != info.len() {
+        if at != info.len() {
             return bad("jobs");
         }
         Ok(Layout { streams, jobs })
@@ -116,73 +124,6 @@ pub fn split_chunks<'a>(lens: &[u8], model: &'a [u8], n: usize) -> Result<Vec<&'
         return bad("chunk lengths");
     }
     Ok(out)
-}
-
-/// Bytes of a `Stream` on WebAssembly (32-bit pointers): its length, and its `Header` of eight
-/// numbers of 4 bytes, a flag, the four Huffman tables, and the lists of components (4 and four
-/// of 12) and of the scan (4 and four of 8), the whole rounded up to 4.
-const STREAM_BYTES: u64 =
-    (4 + 8 * 4 + 1 + 4 * size_of::<Option<crate::jpeg::HuffSpec>>() as u64 + (4 + 4 * 12) + (4 + 4 * 8))
-        .next_multiple_of(4);
-
-/// Bytes the working memory of the module takes at most, beyond its initial memory
-/// (`initial` bytes), for the four `inputs` and a file of `len` bytes (`None` where they are not
-/// so): the inputs `aqr_api::whole` copies, and the blocks that `run` makes in the order it
-/// does, on WebAssembly, where nothing runs at once and a job's blocks are given back before the
-/// next one's: the file, the layout and the lists of jobs and chunks, and the most a job takes
-/// at a moment. (Sizes of the elements of lists are those of 32-bit pointers.)
-pub fn plan(initial: u64, inputs: &[&[u8]], len: u64) -> Option<u64> {
-    let &[cut, info, lens, model] = inputs else { return None };
-    let lay = Layout::parse(cut, info).ok()?;
-    split_chunks(lens, model, lay.chunks()).ok()?;
-    let lens64: Vec<u64> = inputs.iter().map(|i| i.len() as u64).collect();
-    let n = |k: usize| k as u64;
-    let mut top = initial + whole(0, &[], &lens64);
-    // the layout: the streams (headers in place), the jobs, the chunks
-    top += block(n(lay.streams.len()) * STREAM_BYTES);
-    top += block(16 * n(lay.jobs.len())) + block(8 * n(lay.chunks()));
-    // the file, and the results of a batch of one job
-    top += block(len) + block(16);
-    let peak = lay.jobs.iter().map(|j| job_bytes(&lay, j)).max().unwrap_or(0);
-    Some(top + peak)
-}
-
-/// The most that a job takes at a moment: of the blocks of `run_job`, those of what it calls
-/// and of the frame it is decoding or re-emitting.
-fn job_bytes(lay: &Layout, job: &Job) -> u64 {
-    let streams = &lay.streams[job.first..job.first + job.count];
-    let n = |k: usize| k as u64;
-    let nc = streams[0].header.comps.len();
-    let model: u64 = Model::bytes(nc).iter().map(|&b| block(b)).sum();
-    let buf = block(n(lay.data(job)));
-    // `planes` (a list of lists, and the lists), `full` or the views of them, and an encoder's
-    // table for each of four Huffman tables
-    let frame = |h: &Header| -> (u64, u64, u64) {
-        let nc = h.comps.len();
-        let planes = block(12 * n(nc)) + (0..nc).map(|i| block(2 * n(h.samples_of(i)))).sum::<u64>();
-        let walk = block(20 * n(nc)) + lmodel::frame_bytes(h).iter().map(|&b| block(b)).sum::<u64>() + block(8 * n(nc));
-        let encode = block(8 * n(nc)) + block(4 * 52);
-        (planes + block(8 * n(nc)), walk, encode)
-    };
-    if job.bands > 1 {
-        let h = &streams[0].header;
-        let (planes, walk, encode) = frame(h);
-        let nb = n(job.bands);
-        // the rows of the bands, the bands' lists of parts (one block for each), the results
-        let bands = block(8 * nb) + block(12 * nb) + nb * block(32) + block(12 * nb);
-        // (a band has a model of its own)
-        buf + planes + (bands + model + walk).max(encode)
-    } else {
-        let most = streams
-            .iter()
-            .map(|s| {
-                let (planes, walk, encode) = frame(&s.header);
-                planes + walk.max(encode)
-            })
-            .max()
-            .unwrap_or(0);
-        buf + model + most
-    }
 }
 
 /// The module: the file of `len` bytes from the four `inputs` (`cut`, `info`, `lens`, `model`),

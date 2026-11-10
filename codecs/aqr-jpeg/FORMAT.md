@@ -679,21 +679,26 @@ data removed, exactly.
 ## L2. The info
 
 ```text
-varint  n            streams
-per stream:
-  varint  soi        offset in the cut of its SOI (FF D8)
-  varint  len        bytes of its entropy-coded data
-  varint  flags      0 or 1: bit 0 says a symbol listed twice in a table has its later code (L3)
 varint  m            jobs
 per job:
-  varint  count      streams in the job (at least 1), the ones after the last job's
+  varint  count      streams in the job (at least 1)
   varint  bands      bands (at least 1; more than 1 only where count is 1)
+  per stream of the job:
+    varint  soi      offset in the cut of its SOI (FF D8)
+    varint  len      bytes of its entropy-coded data
+    varint  flags    0 or 1: bit 0 says a symbol listed twice in a table has its later code (L3)
 ```
 
-The jobs cover the streams in order, exactly. Trailing bytes are an error, and so is a number
+The streams are those of the jobs, in order. Trailing bytes are an error, and so is a number
 larger than the info or the cut could hold. A job takes `bands` chunks, in order, from the first
 chunk not taken: a job of one stream cut in bands takes a chunk for each band, a group of
 streams takes one. `lens` has a varint for each chunk, and `model` is exactly them.
+
+The module is a part module: it reads `cut`, `info`, `lens` and `model` once, in order, and
+writes the file once, in order, through windows. The file is the cut up to a stream's `soi`, the
+stream's headers (L3), the data of the stream, as its rows of MCUs come, and so on; the rest of
+the cut at the end. It holds no more than a chunk of the model, the rows of a frame, and the
+headers of a stream.
 
 ## L3. The headers
 
@@ -812,12 +817,14 @@ of equal top bytes as above.
 
 ## L7. The encoder
 
-Free choices: which streams are coded (those whose data a re-emission reproduces exactly; the
-others stay in the cut), the grouping into jobs, and `flags` (whichever reproduces the data).
-`aqr_jpeg::lformula` cuts a stream of 2^21 samples or more into `floor(samples / 2^20)` bands,
-16 at most (fewer where there are not so many rows), and groups the others up to 2^22
-samples if they have the same number of components.
+Free choices: which streams are coded (those whose data a re-emission reproduces exactly, whose
+headers are 64 KiB at most from the SOI to the EOI after the SOS; the others stay in the cut),
+the grouping into jobs, and `flags` (whichever reproduces the data). `aqr_jpeg::lformula` cuts a
+stream of 2^21 samples or more into `floor(samples / 2^20)` bands (fewer where there are not so
+many rows), so that a chunk stays about a mebibyte, and groups the others up to 2^22 samples if
+they have the same number of components.
 
-The module's memory plan (`aqr_jpeg::lmodule::plan`) is the blocks `run` makes: the file, the
-layout (the streams' headers are held in place, not as lists of their own: a module's allocator
-holds only a few blocks freed out of order), and the most a job takes at a moment.
+The module's memory plan (`aqr_jpeg::lpart::plan`) is the blocks `decode_part` makes: the pieces
+of its readers, the headers' buffer, and the most a job takes at a moment (its chunk and model,
+and the rows and errors of its widest frame, its emitter and a row's data). It follows the width
+of the frames and the size of the chunks, and the length of the file not at all.

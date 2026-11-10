@@ -80,7 +80,7 @@ as a file that is not coded.
 | `src/variant.rs` | Test generator: re-encodes the same coefficients in valid but non-canonical ways |
 | `src/lossless.rs` | Lossless JPEG (SOF3, raw photographs): parsing, decoding to samples and exact re-emission of the Huffman data |
 | `src/lmodel.rs` | The model of those samples: a blend of predictors, a Golomb code by adaptive bits, bands of rows |
-| `src/lmodule.rs`, `src/lformula.rs` | The module `jpeg-lossless-recons` (spec: the second part of [FORMAT.md](FORMAT.md)) and its formula |
+| `src/lmodule.rs`, `src/lpart.rs`, `src/lformula.rs` | The module `jpeg-lossless-recons` (spec: the second part of [FORMAT.md](FORMAT.md)): whole on threads natively, a part module in Wasm; and its formula |
 | `tests/regress.rs` | Regression inputs |
 | `tests/memory.rs` | Peak heap use of a large sequential file (counting allocator) |
 
@@ -300,4 +300,4 @@ for the same size to 0.05%. The tiles of a DNG are grouped to share one model (l
 lost). Left: the speed of one thread (about a third each for the predictors, the adaptive bits
 and the arithmetic coder), mixing of models, bias cancellation, hierarchical and arithmetic SOF
 kinds, other containers' lossless JPEGs not found by their SOI (a stream cut in the middle),
-and the Wasm module's tasks (it runs its jobs one at a time there).
+and the bands as tasks in Wasm (the part module runs them one after the other there).
