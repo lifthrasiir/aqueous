@@ -397,6 +397,11 @@ Decompression:
                         #N (from 1), #-N (from the last), @LABEL (the last of it), or
                         a date, to its end: 2026, 2026-11, 2026-11-01, 2026-11-01T09:30
       --history         list the journal points of the archives
+      --diff            list what differs between two states of the archives, a line
+                        each: + added, ~ changed (size or metadata), - removed. By
+                        default the last point against the archive now; with --at, that
+                        point against the one before it; --from SPEC picks the earlier
+                        state (--at's choices) for either
   -E, --encoding ENC    names of no declared encoding: auto (the default: as bytes where
                         this system takes them, else decoded from a set guessed), raw
                         (as bytes), system, or sets (shift_jis, euc-kr, gbk, big5,
@@ -472,6 +477,9 @@ struct Args {
     at: Option<journal::At>,
     /// `--history`: the journal points of the archives listed.
     history: bool,
+    /// `--diff`: what differs between two states of the archives (`--from` and `--at` pick them).
+    diff: bool,
+    from: Option<journal::At>,
     /// `--keep-since SPEC`: `--compact` keeping the journal points from the one `SPEC` picks on
     /// (with the states between); `--drop-history`: dropping them all, with those states.
     keep_since: Option<journal::At>,
@@ -590,6 +598,7 @@ fn main() -> ExitCode {
         _ if args.edit.is_some() || args.compact => edit::edit(&args),
         _ if args.info => info::info(&args),
         _ if args.history => journal::history_all(&args),
+        _ if args.diff => journal::diff_all(&args),
         _ if args.list => list::list_all(&args),
         _ if args.decompress => decompress_all(&args),
         _ => compress_all(&args),
@@ -657,6 +666,8 @@ fn parse() -> Result<Args, String> {
         journal: None,
         at: None,
         history: false,
+        diff: false,
+        from: None,
         keep_since: None,
         drop_history: false,
         append: false,
@@ -747,6 +758,8 @@ fn parse() -> Result<Args, String> {
             "-j" | "--journal" => a.journal = Some(text(value("-j")?)),
             "--at" => a.at = Some(journal::at_of(&text(value("--at")?))?),
             "--history" => a.history = true,
+            "--diff" => a.diff = true,
+            "--from" => a.from = Some(journal::at_of(&text(value("--from")?))?),
             "--keep-since" => a.keep_since = Some(journal::at_of(&text(value("--keep-since")?))?),
             "--drop-history" => a.drop_history = true,
             "-a" | "--append" => (a.append, a.sync) = (true, false),
@@ -884,14 +897,24 @@ fn parse() -> Result<Args, String> {
     if a.keep_since.is_some() || a.drop_history {
         return Err("--keep-since and --drop-history are for --compact".into());
     }
-    if a.history {
-        if a.decompress || a.list || a.info || a.journal.is_some() || a.at.is_some() || a.output.is_some() {
+    if a.history || a.diff {
+        let what = if a.diff { "--diff" } else { "--history" };
+        if a.history && a.diff {
+            return Err("--history with --diff".into());
+        }
+        if a.decompress || a.list || a.info || a.journal.is_some() || a.output.is_some() {
+            return Err(format!("{what} takes archives alone"));
+        }
+        if a.history && (a.at.is_some() || a.from.is_some()) {
             return Err("--history takes archives alone".into());
         }
         return Ok(a);
     }
+    if a.from.is_some() {
+        return Err("--from is for --diff".into());
+    }
     if a.at.is_some() && !(a.list || a.decompress) {
-        return Err("--at is for -t, -d and -K".into());
+        return Err("--at is for -t, -d, -K and --diff".into());
     }
     if let Some(label) = &a.journal {
         if a.decompress || a.list || a.info {

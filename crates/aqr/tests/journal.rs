@@ -246,3 +246,59 @@ fn compacting_keeps_the_points_asked_for() {
         assert!(!aqr_at(&d, None, args).status.success(), "{args:?} succeeded");
     }
 }
+
+#[test]
+fn diff_between_states() {
+    let d = scratch("diff");
+    let src = d.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("a.txt"), words(1, 3_000)).unwrap();
+    ok(&d, Some(&day(0)), &["-q", "-j", "p1", "-o", "a.aqr", "src"]);
+    fs::write(src.join("a.txt"), words(2, 3_500)).unwrap();
+    fs::write(src.join("b.txt"), words(3, 1_000)).unwrap();
+    ok(&d, Some(&day(1)), &["-q", "-a", "-j", "p2", "a.aqr", "src"]);
+    fs::remove_file(src.join("b.txt")).unwrap();
+    ok(&d, Some(&day(2)), &["-q", "-s", "-j", "p3", "a.aqr", "src"]);
+    ok(&d, Some(&day(3)), &["-q", "-a", "-j", "p4", "a.aqr", "src"]);
+    fs::create_dir_all(src.join("sub")).unwrap();
+    fs::write(src.join("sub/c.txt"), words(4, 2_000)).unwrap();
+    ok(&d, Some(&day(4)), &["-q", "-a", "-j", "p5", "a.aqr", "src"]);
+
+    let diff = |args: &[&str]| -> Vec<String> {
+        let mut all = vec!["--diff", "-q"];
+        all.extend_from_slice(args);
+        all.push("a.aqr");
+        stdout(&ok(&d, None, &all)).lines().map(str::to_owned).collect()
+    };
+    // the last point against the archive now: nothing yet
+    assert_eq!(diff(&[]), Vec::<String>::new());
+    fs::write(src.join("d.txt"), words(5, 500)).unwrap();
+    ok(&d, None, &["-q", "-a", "a.aqr", "src"]);
+    assert_eq!(diff(&[]), ["+ d.txt"]);
+    // a point against the one before it
+    assert_eq!(diff(&["--at", "#1"]), ["+ a.txt"]);
+    assert_eq!(diff(&["--at", "#2"]), ["~ a.txt", "+ b.txt"]);
+    assert_eq!(diff(&["--at", "#3"]), ["- b.txt"]);
+    assert_eq!(diff(&["--at", "#4"]), Vec::<String>::new());
+    assert_eq!(diff(&["--at", "@p5"]), ["+ sub/", "+ sub/c.txt"]);
+    // any two
+    assert_eq!(diff(&["--from", "#1", "--at", "#5"]), ["~ a.txt", "+ sub/", "+ sub/c.txt"]);
+    assert_eq!(diff(&["--from", "@p2", "--at", "2026-11-03"]), ["- b.txt"]);
+    assert_eq!(diff(&["--from", "#5"]), ["+ d.txt"]);
+    assert_eq!(diff(&["--from", "#2", "--at", "#1"]), ["~ a.txt", "- b.txt"]);
+    // the summary, and the refusals
+    let o = ok(&d, None, &["--diff", "--at", "#2", "a.aqr"]);
+    assert!(stderr(&o).contains("1 added, 1 changed, 0 removed (#1 \"p1\" -> #2 \"p2\")"), "{}", stderr(&o));
+    for args in [
+        ["--diff", "--at", "#9", "a.aqr"].as_slice(),
+        &["--from", "#1", "-t", "a.aqr"],
+        &["--diff", "--history", "a.aqr"],
+        &["--diff", "-t", "a.aqr"],
+    ] {
+        assert!(!aqr_at(&d, None, args).status.success(), "{args:?} succeeded");
+    }
+    ok(&d, Some(&day(5)), &["-q", "-j", "only", "-o", "j.aqr", "src"]);
+    assert_eq!(stdout(&ok(&d, None, &["--diff", "-q", "--at", "#1", "j.aqr"])).lines().count(), 4);
+    let o = aqr_at(&d, None, &["--diff", "plain.aqr"]);
+    assert!(!o.status.success());
+}

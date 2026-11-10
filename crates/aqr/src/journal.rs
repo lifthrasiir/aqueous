@@ -247,6 +247,107 @@ pub fn history_all(a: &crate::Args) -> Result<(), String> {
     out.flush().map_err(|e| e.to_string())
 }
 
+/// An entry of a state as `--diff` tells states apart: its path, and what it is (a file by its
+/// size) with its metadata but for what is numbered by the archive (forks, link groups).
+type Seen = (Vec<Vec<u8>>, aqr::EntryNode, aqr::Extra);
+
+/// The entries of `archive` (a directory by its path alone), by path.
+fn seen(archive: &aqr::Archive) -> std::collections::BTreeMap<Vec<Vec<u8>>, Seen> {
+    let Some(t) = archive.tree() else { return Default::default() };
+    let mut out = std::collections::BTreeMap::new();
+    for (e, path) in t.entries.iter().zip(crate::append::paths(t)) {
+        let (node, extra) = match e.node {
+            aqr::EntryNode::Dir => (aqr::EntryNode::Dir, aqr::Extra::default()),
+            // (a file by its size: the number of its content is the archive's)
+            aqr::EntryNode::File(c) => {
+                let size = archive.content_size(c).unwrap_or(u64::MAX) as usize;
+                (aqr::EntryNode::File(size), aqr::Extra { forks: Vec::new(), link_group: None, ..e.extra.clone() })
+            }
+            ref other => (other.clone(), aqr::Extra { forks: Vec::new(), link_group: None, ..e.extra.clone() }),
+        };
+        out.insert(path.clone(), (path, node, extra));
+    }
+    out
+}
+
+/// `--diff`: what differs between two states of each archive of `a`, a line each: `+` added,
+/// `~` changed (by size and metadata), `-` removed; a directory with a `/` after it, and not told
+/// for its metadata. The states are the points `--from` and `--at` pick; `--at` alone against the
+/// point before it (none: nothing), neither the last point against the archive as it is.
+pub fn diff_all(a: &crate::Args) -> Result<(), String> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    for (k, input) in a.inputs.iter().enumerate() {
+        let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
+        let file = std::fs::File::open(input).map_err(|e| err(&crate::exit::seen(e)))?;
+        // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
+        let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&crate::exit::seen(e)))?;
+        let bytes = crate::located(&c, input, a.quiet);
+        if aqr::envelope::is_encrypted(bytes) {
+            return Err(err(&"an encrypted archive has no journal (it is not appended to)"));
+        }
+        let whole = aqr::open(bytes, &aqr::NoModules).map_err(|e| err(&e))?;
+        let points = whole.journal();
+        let find = |at: &At| pick(points, at).map_err(|e| err(&e));
+        let index = |p: &JournalPoint| points.iter().position(|q| q.metadata == p.metadata && q.time == p.time);
+        let named = |p: &JournalPoint| format!("#{} {:?}", index(p).map_or(0, |i| i + 1), p.label);
+        // the later state, and the earlier (none: nothing)
+        let (later, to) = match &a.at {
+            Some(at) => {
+                let p = find(at)?;
+                (Some(p), named(p))
+            }
+            None => (None, "the archive now".to_string()),
+        };
+        let earlier = match (&a.from, later) {
+            (Some(at), _) => Some(find(at)?),
+            (None, Some(p)) => index(p).and_then(|i| i.checked_sub(1)).map(|i| &points[i]),
+            (None, None) => Some(points.last().ok_or_else(|| err(&"no journal points (-j makes them)"))?),
+        };
+        let from = earlier.map_or("nothing".to_string(), named);
+        let state = |p: Option<&JournalPoint>| -> Result<_, String> {
+            match p {
+                Some(p) => aqr::open_upto(bytes, &aqr::NoModules, p.metadata).map(|x| seen(&x)).map_err(|e| err(&e)),
+                None => Ok(Default::default()),
+            }
+        };
+        let (before, after) = (state(earlier)?, if later.is_some() { state(later)? } else { seen(&whole) });
+        if a.inputs.len() > 1 {
+            if k > 0 {
+                writeln!(out).map_err(|e| e.to_string())?;
+            }
+            writeln!(out, "{}:", input.display()).map_err(|e| e.to_string())?;
+        }
+        let shown = |path: &[Vec<u8>], dir: bool| {
+            let names: Vec<String> =
+                path.iter().map(|n| String::from_utf8_lossy(aqr::name_bytes(n).0).into_owned()).collect();
+            names.join("/") + if dir { "/" } else { "" }
+        };
+        let is_dir = |e: &Seen| e.1 == aqr::EntryNode::Dir;
+        let (mut added, mut changed, mut removed) = (0, 0, 0);
+        for (path, now) in &after {
+            let (mark, dir) = match before.get(path) {
+                None => ('+', is_dir(now)),
+                Some(was) if was.1 != now.1 || was.2 != now.2 => ('~', is_dir(now)),
+                Some(_) => continue,
+            };
+            match mark {
+                '+' => added += 1,
+                _ => changed += 1,
+            }
+            writeln!(out, "{mark} {}", shown(path, dir)).map_err(|e| e.to_string())?;
+        }
+        for (path, was) in before.iter().filter(|(p, _)| !after.contains_key(*p)) {
+            removed += 1;
+            writeln!(out, "- {}", shown(path, is_dir(was))).map_err(|e| e.to_string())?;
+        }
+        if !a.quiet {
+            eprintln!("{}: {added} added, {changed} changed, {removed} removed ({from} -> {to})", input.display());
+        }
+    }
+    out.flush().map_err(|e| e.to_string())
+}
+
 /// The points of archive `bytes` (of `input`) listed, one on a line: its number, time and label.
 pub fn history(input: &Path, bytes: &[u8]) -> Result<String, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());

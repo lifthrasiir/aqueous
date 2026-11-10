@@ -119,6 +119,8 @@ pub const OPTIONS: &[Opt] = &[
     opt(Some('j'), Some("journal"), Value::Text, "name the state left as a point to return to"),
     opt(None, Some("at"), Value::Text, "the archive as it was at a journal point"),
     opt(None, Some("history"), Value::None, "list the journal points of an archive"),
+    opt(None, Some("diff"), Value::None, "list what differs between two states of an archive"),
+    opt(None, Some("from"), Value::Text, "with --diff: the earlier state"),
     opt(Some('E'), Some("encoding"), Value::Of(encodings), "names of no declared encoding"),
     opt(None, Some("normalize"), Value::Of(|| of(&["auto", "nfc", "nfd", "keep"])), "how Unicode names are normalized"),
     opt(

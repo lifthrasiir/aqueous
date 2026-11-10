@@ -437,6 +437,23 @@ or an offset
 the last point at or before the end of the period it names (2026-11-01 is up to the end of that day).
 .It Fl -history
 List the journal points of the archives: their numbers, times and labels.
+.It Fl -diff
+List what differs between two states of the archives, a line each:
+.Ql +
+added,
+.Ql ~
+changed (by size and metadata),
+.Ql -
+removed; a directory has a
+.Ql /
+after it.
+By default the last journal point against the archive as it is now; with
+.Fl -at ,
+that point against the one before it (none: nothing);
+.Fl -from Ar spec
+picks the earlier state, as
+.Fl -at
+picks a point, for either.
 .It Fl E Ar enc , Fl -encoding Ar enc
 How names of no declared encoding are taken:
 .Cm auto
