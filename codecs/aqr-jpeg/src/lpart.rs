@@ -13,7 +13,7 @@ use aqr_common::arith::ArithDecoder;
 use crate::jpeg::{Error, err};
 use crate::lmodel::{self, Frame, Model};
 use crate::lmodule::{self, GAP_MAX, HEADER_MAX};
-use crate::lossless::{self, Emitter, Header, Rows};
+use crate::lossless::{self, Emitter, Header, Raw, Rows};
 
 /// Pages of the windows of the module as a part module ([`decode_part`]): of each input and of
 /// the output.
@@ -472,31 +472,60 @@ pub const THREADS: usize = 8;
 /// decoded while the rows of the first are put.
 pub const ROUND: usize = 16;
 
-/// Bytes of the rows of the band `r0..r1` of a frame of `h`, as [`band_task`] gives them: for each
-/// MCU row, each component's rows of it, 16 bits to a sample.
-fn band_bytes(h: &Header, (r0, r1): (usize, usize)) -> usize {
-    (0..h.comps.len()).map(|ci| 2 * (r1 - r0) * h.comps[ci].v * h.plane(ci).0).sum()
+/// Bytes of the samples of an MCU row of a frame of `h`: for each component its rows of the MCU row,
+/// 16 bits to a sample, little-endian.
+fn mcu_row_bytes(h: &Header) -> usize {
+    (0..h.comps.len()).map(|ci| 2 * h.comps[ci].v * h.plane(ci).0).sum()
 }
 
-/// The band `rows` of the frame of `h` decoded from its `chunk`, its rows given as bytes (the
-/// task of a band). Err where the chunk is cut off.
-fn band_task(h: &Header, rows: (usize, usize), chunk: &[u8]) -> Result<Vec<u8>, Error> {
+/// Bytes [`band_task`] gives for a band of `rows` MCU rows whose rows after the first take `bits`
+/// bits: the samples of its first MCU row, those bits, and the samples of its last MCU row (if it is
+/// another).
+fn band_bytes(h: &Header, rows: usize, bits: u64) -> usize {
+    let row = mcu_row_bytes(h);
+    row + bits.div_ceil(8) as usize + if rows > 1 { row } else { 0 }
+}
+
+/// Appends the samples of the MCU row `r` of `frame` to `out`, as [`mcu_row_bytes`] counts.
+fn push_row(out: &mut Vec<u8>, h: &Header, frame: &Frame, r: usize) {
+    for ci in 0..h.comps.len() {
+        let v = h.comps[ci].v;
+        for y in r * v..(r + 1) * v {
+            for s in frame.row(ci, y) {
+                out.extend_from_slice(&s.to_le_bytes());
+            }
+        }
+    }
+}
+
+/// The band `rows` of the frame of `h` decoded from its `chunk` (the task of a band), which gives
+/// the samples of its first MCU row, the Huffman codes of the rows after the first as raw bits
+/// (`bits` of them: the frame has no restart intervals, so they do not depend on what comes before
+/// the band), and the samples of its last MCU row. Err where the chunk is cut off or the bits are
+/// not so many.
+fn band_task(h: &Header, rows: (usize, usize), chunk: &[u8], bits: u64) -> Result<Vec<u8>, Error> {
     let (r0, r1) = rows;
+    let mut out = Vec::with_capacity(band_bytes(h, r1 - r0, bits));
     let mut d = ArithDecoder::new(chunk);
     let mut model = Model::new(h.comps.len());
     let bh = lmodel::band_header(h, r0, r1);
     let mut frame = Frame::new(&bh);
-    let mut out = Vec::with_capacity(band_bytes(h, rows));
-    for r in 0..r1 - r0 {
-        frame.code_row(&mut d, &mut model, r)?;
-        for ci in 0..h.comps.len() {
-            let v = h.comps[ci].v;
-            for y in r * v..(r + 1) * v {
-                for s in frame.row(ci, y) {
-                    out.extend_from_slice(&s.to_le_bytes());
-                }
-            }
+    let emitter = Emitter::new(&bh);
+    frame.code_row(&mut d, &mut model, 0)?;
+    push_row(&mut out, h, &frame, 0);
+    if r1 - r0 > 1 {
+        let mut raw = Raw::new(&mut out);
+        for r in 1..r1 - r0 {
+            frame.code_row(&mut d, &mut model, r)?;
+            emitter.bits(&frame, r, &mut raw)?;
         }
+        raw.finish();
+        if raw.bits != bits {
+            return bad("bits of a band");
+        }
+        push_row(&mut out, h, &frame, r1 - r0 - 1);
+    } else if bits != 0 {
+        return bad("bits of a band");
     }
     if d.overrun() {
         return err("data cut off");
@@ -505,26 +534,36 @@ fn band_task(h: &Header, rows: (usize, usize), chunk: &[u8]) -> Result<Vec<u8>, 
 }
 
 /// A job of one stream in `bands` bands, a chunk and a model for each: [`ROUND`] bands at a
-/// time are read (their chunks), decoded as tasks, and their rows put in order, whose data is
-/// written as they come.
+/// time are read (their chunks), decoded as tasks, and put in order: the codes of a band's first
+/// MCU row from its samples (and the row above, the last of the band before), then its other codes
+/// as the task made them, shifted to follow, and the samples of its last row held.
 fn banded(st: &mut State, sink: &mut Sink, bands: usize) -> Result<(), Error> {
     let (h, len) = st.next_stream(sink)?;
+    if h.restart != 0 {
+        return bad("bands of a frame with restart intervals");
+    }
     let rows = lmodel::band_rows(h.mcus().1, bands);
     if rows.len() != bands {
         return bad("bands");
     }
+    let mut bits: Vec<u64> = Vec::with_capacity(bands);
+    for _ in 0..bands {
+        bits.push(num(&mut st.info)?);
+    }
     let mut held = Held::new(&h);
     let mut emitter = Emitter::new(&h);
-    let mut row = Vec::with_capacity(Emitter::row_room(&h));
+    let room = Emitter::row_room(&h);
+    let mut row = Vec::with_capacity(room);
     let mut emitted = 0;
     let mut first = 0;
+    let my = h.mcus().1;
     while first < bands {
         let n = (bands - first).min(ROUND);
         let mut chunks: Vec<Vec<u8>> = Vec::with_capacity(ROUND);
         for _ in 0..n {
             chunks.push(st.chunk()?);
         }
-        let task = |i: usize| band_task(&h, rows[first + i], &chunks[i]).unwrap_or_default();
+        let task = |i: usize| band_task(&h, rows[first + i], &chunks[i], bits[first + i]).unwrap_or_default();
         // (in WebAssembly as tasks even alone, as the plan has them)
         aqr_common::pool::par_each_apart(
             n,
@@ -534,22 +573,34 @@ fn banded(st: &mut State, sink: &mut Sink, bands: usize) -> Result<(), Error> {
             || (),
             |i, bytes| {
                 let (r0, r1) = rows[first + i];
-                if bytes.is_empty() || bytes.len() != band_bytes(&h, (r0, r1)) {
+                let nbits = bits[first + i];
+                if bytes.is_empty() || bytes.len() != band_bytes(&h, r1 - r0, nbits) {
                     return bad("band");
                 }
-                let mut at = 0;
-                for r in 0..r1 - r0 {
+                let rb = mcu_row_bytes(&h);
+                // (the samples of an MCU row of the bytes, held at the row `r`)
+                let hold = |held: &mut Held, from: &[u8], r: usize| {
+                    let mut at = 0;
                     for ci in 0..h.comps.len() {
                         let (v, w) = (h.comps[ci].v, h.plane(ci).0);
                         for y in r * v..(r + 1) * v {
-                            held.set_bytes(ci, r0 * v + y, &bytes[at..at + 2 * w]);
+                            held.set_bytes(ci, y, &from[at..at + 2 * w]);
                             at += 2 * w;
                         }
                     }
-                    row.clear();
-                    emitter.mcu_row(&held, r0 + r, &mut row)?;
-                    emitted += row.len();
-                    sink.put(&row)?;
+                };
+                hold(&mut held, &bytes[..rb], r0);
+                row.clear();
+                emitter.mcu_row(&held, r0, &mut row)?;
+                emitted += row.len();
+                sink.put(&row)?;
+                if r1 - r0 > 1 {
+                    let data = &bytes[rb..bytes.len() - rb];
+                    emitter.append(data, nbits, r1 == my, &mut row, (room - 4) / 2, |p| {
+                        emitted += p.len();
+                        sink.put(p)
+                    })?;
+                    hold(&mut held, &bytes[bytes.len() - rb..], r1 - 1);
                 }
                 Ok(())
             },
@@ -584,6 +635,8 @@ pub fn plan(initial: u64, cut: &[u8], info: &[u8], lens: &[u8]) -> Option<(u64, 
         bands: u64,
         streams: Vec<(usize, usize, Header)>,
         chunks: Vec<usize>,
+        /// the bits of a band's rows after the first
+        bits: Vec<u64>,
     }
     let mut jobs = Vec::new();
     for _ in 0..njobs {
@@ -609,7 +662,16 @@ pub fn plan(initial: u64, cut: &[u8], info: &[u8], lens: &[u8]) -> Option<(u64, 
         if streams.windows(2).any(|w| w[1].0 < w[0].2.start + 2) {
             return None;
         }
-        jobs.push(Job { bands, streams, chunks });
+        let mut bits = Vec::new();
+        if bands > 1 {
+            if streams[0].2.restart != 0 {
+                return None;
+            }
+            for _ in 0..bands {
+                bits.push(get_varint(info, &mut at).ok()?);
+            }
+        }
+        jobs.push(Job { bands, streams, chunks, bits });
     }
     // a frame, its emitter and the room for a row of its data
     let frame = |h: &Header| Frame::bytes(h) + Emitter::bytes() + block(n(Emitter::row_room(h)));
@@ -690,21 +752,23 @@ pub fn plan(initial: u64, cut: &[u8], info: &[u8], lens: &[u8]) -> Option<(u64, 
             + (0..h0.comps.len()).map(|i| block(2 * n((h0.comps[i].v + 1) * h0.plane(i).0))).sum::<u64>();
         let rows = lmodel::band_rows(h0.mcus().1, bands as usize);
         let top = sim.top;
-        sim.take(block(8 * bands) + held + Emitter::bytes() + block(n(Emitter::row_room(h0))));
+        sim.take(block(8 * bands) + block(8 * bands) + held + Emitter::bytes() + block(n(Emitter::row_room(h0))));
         for (round, chunk) in rows.chunks(ROUND).zip(chunks.chunks(ROUND)) {
             let t = sim.top;
             // the list of chunks, and the chunks, which the tasks have a copy of
             sim.take(block(12 * n(ROUND)));
             chunk.iter().for_each(|&c| sim.take(n(c)));
             // a task: its model, its frame and the rows it gives, over that copy
-            let own = |r: &(usize, usize)| model + Frame::bytes(&lmodel_band(h0, *r)) + block(n(band_bytes(h0, *r)));
+            let first = rows.iter().position(|r| r == &round[0])?;
+            let size = |i: usize| block(n(band_bytes(h0, round[i].1 - round[i].0, job.bits[first + i])));
+            let own = |i: usize| model + Frame::bytes(&lmodel_band(h0, round[i])) + Emitter::bytes() + size(i);
             if round.len() >= 2 {
-                let tasks = round.iter().map(|r| sim.task(own(r))).collect();
+                let tasks = (0..round.len()).map(|i| sim.task(own(i))).collect();
                 sim.spawned(0, tasks);
                 // (what the parent holds of the tasks, and a result it has joined)
-                sim.peak(block(n(round.len())) + round.iter().map(|&r| block(n(band_bytes(h0, r)))).max()?);
+                sim.peak(block(n(round.len())) + (0..round.len()).map(size).max()?);
             } else {
-                sim.peak(own(&round[0]));
+                sim.peak(own(0));
             }
             sim.top = t;
         }

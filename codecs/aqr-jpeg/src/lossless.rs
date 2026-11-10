@@ -532,7 +532,12 @@ struct Out<'a> {
     n: u32,
 }
 
-impl Out<'_> {
+/// Where the bits of the codes go.
+trait Sink {
+    fn put(&mut self, v: u32, k: u32);
+}
+
+impl Sink for Out<'_> {
     #[inline]
     fn put(&mut self, v: u32, k: u32) {
         self.acc = (self.acc << k) | v as u64;
@@ -546,7 +551,9 @@ impl Out<'_> {
             self.n -= 8;
         }
     }
+}
 
+impl Out<'_> {
     /// Ends the byte with 1 bits.
     fn pad(&mut self) {
         if self.n > 0 {
@@ -554,6 +561,53 @@ impl Out<'_> {
             self.put((1 << k) - 1, k);
         }
         self.acc = 0;
+    }
+}
+
+/// The bits counted.
+struct Count(u64);
+
+impl Sink for Count {
+    #[inline]
+    fn put(&mut self, _: u32, k: u32) {
+        self.0 += k as u64;
+    }
+}
+
+/// The bits as they come, packed from the high end of each byte, not stuffed: the last byte is
+/// padded with 0 bits ([`Raw::finish`]).
+pub struct Raw<'a> {
+    out: &'a mut Vec<u8>,
+    acc: u64,
+    n: u32,
+    /// bits put
+    pub bits: u64,
+}
+
+impl<'a> Raw<'a> {
+    pub fn new(out: &'a mut Vec<u8>) -> Raw<'a> {
+        Raw { out, acc: 0, n: 0, bits: 0 }
+    }
+
+    /// Puts the bits left in a last byte.
+    pub fn finish(&mut self) {
+        if self.n > 0 {
+            self.out.push((self.acc << (8 - self.n)) as u8);
+            self.n = 0;
+        }
+    }
+}
+
+impl Sink for Raw<'_> {
+    #[inline]
+    fn put(&mut self, v: u32, k: u32) {
+        self.acc = (self.acc << k) | v as u64;
+        self.n += k;
+        self.bits += k as u64;
+        while self.n >= 8 {
+            self.out.push((self.acc >> (self.n - 8)) as u8);
+            self.n -= 8;
+        }
     }
 }
 
@@ -620,14 +674,26 @@ impl<'h> Emitter<'h> {
     /// Appends to `out` the data of the row `r` of MCUs (in order), the rows of the planes by
     /// `rows`: those of the MCU row and the one above.
     pub fn mcu_row(&mut self, rows: &impl Rows, r: usize, out: &mut Vec<u8>) -> Result<(), Error> {
-        let h = self.h;
-        let (mx, my) = h.mcus();
-        let default = 1i32 << (h.precision - h.point - 1);
-        let row0 = r / self.rows_per * self.rows_per;
+        let my = self.h.mcus().1;
         if r.is_multiple_of(self.rows_per) && r > 0 {
             out.extend_from_slice(&[0xFF, 0xD0 + ((r / self.rows_per - 1) & 7) as u8]);
         }
         let mut o = Out { out, acc: self.acc, n: self.n };
+        self.row_bits(rows, r, &mut o)?;
+        if (r + 1).is_multiple_of(self.rows_per) || r + 1 == my {
+            o.pad();
+        }
+        (self.acc, self.n) = (o.acc, o.n);
+        Ok(())
+    }
+
+    /// Puts the bits of the codes of the row `r` of MCUs to `o`, whatever precedes them
+    /// (`rows` as [`Emitter::mcu_row`]'s).
+    fn row_bits(&self, rows: &impl Rows, r: usize, o: &mut impl Sink) -> Result<(), Error> {
+        let h = self.h;
+        let mx = h.mcus().0;
+        let default = 1i32 << (h.precision - h.point - 1);
+        let row0 = r / self.rows_per * self.rows_per;
         for c in 0..mx {
             for &(ci, td) in h.scan.iter() {
                 let comp = h.comps[ci];
@@ -655,12 +721,62 @@ impl<'h> Emitter<'h> {
                 }
             }
         }
-        if (r + 1).is_multiple_of(self.rows_per) || r + 1 == my {
+        Ok(())
+    }
+
+    /// The codes of the row `r` of MCUs as raw bits ([`Raw`]), for a frame without restart
+    /// intervals, a row that is not its first.
+    pub fn bits(&self, rows: &impl Rows, r: usize, raw: &mut Raw) -> Result<(), Error> {
+        self.row_bits(rows, r, raw)
+    }
+
+    /// Appends to `out` the `bits` bits of `data` (packed from the high end, [`Raw`]) after what
+    /// the rows put, `chunk` bytes of them at a time to `put`; `last` ends the byte with 1 bits
+    /// (the end of the frame).
+    pub fn append(
+        &mut self,
+        data: &[u8],
+        bits: u64,
+        last: bool,
+        out: &mut Vec<u8>,
+        chunk: usize,
+        mut put: impl FnMut(&[u8]) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let mut o = Out { out, acc: self.acc, n: self.n };
+        let (whole, tail) = ((bits / 8) as usize, (bits % 8) as u32);
+        if data.len() != whole + (tail > 0) as usize {
+            return err("bits do not fit their bytes");
+        }
+        for piece in data[..whole].chunks(chunk.max(1)) {
+            o.out.clear();
+            for &b in piece {
+                o.put(b as u32, 8);
+            }
+            put(o.out)?;
+        }
+        o.out.clear();
+        if tail > 0 {
+            o.put((data[whole] >> (8 - tail)) as u32, tail);
+        }
+        if last {
             o.pad();
         }
+        put(o.out)?;
         (self.acc, self.n) = (o.acc, o.n);
         Ok(())
     }
+}
+
+/// The bits of the rows `r0 + 1..r1` of MCUs of the frame of `h` in `planes` (a frame without
+/// restart intervals), as the data of the rows after the first of a band.
+pub fn band_bits(h: &Header, planes: &[&[u16]], r0: usize, r1: usize) -> Result<u64, Error> {
+    let full = Full(planes, h);
+    let emitter = Emitter::new(h);
+    let mut count = Count(0);
+    for r in r0 + 1..r1 {
+        emitter.row_bits(&full, r, &mut count)?;
+    }
+    Ok(count.0)
 }
 
 /// [`encode`] of the `planes` of a frame, appended to `out`.

@@ -53,7 +53,11 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
 /// The stream of `h` at `soi`, if its data is reproduced exactly from its samples.
 fn check(input: &[u8], soi: usize, mut header: Header) -> Option<Coded> {
     let data = &input[header.start..header.end];
-    if header.samples() > MAX_SAMPLES || header.start + 2 - soi > HEADER_MAX {
+    // (a frame with restart intervals is not cut in bands: one that is too big for a group is left)
+    if header.samples() > MAX_SAMPLES
+        || header.start + 2 - soi > HEADER_MAX
+        || (header.restart != 0 && header.samples() > GROUP)
+    {
         return None;
     }
     let samples = lossless::decode(&header, data).ok()?;
@@ -81,7 +85,7 @@ fn jobs(coded: &[Coded]) -> Vec<(usize, usize, usize)> {
     };
     for (i, c) in coded.iter().enumerate() {
         let n = c.header.samples();
-        if n >= BAND_MIN {
+        if n >= BAND_MIN && c.header.restart == 0 {
             let rows = c.header.mcus().1;
             let bands = lmodel::band_rows(rows, (n / BAND).clamp(1, BANDS)).len();
             jobs.push((i, 1, bands));
@@ -111,12 +115,20 @@ fn jobs(coded: &[Coded]) -> Vec<(usize, usize, usize)> {
     jobs
 }
 
-/// The chunks of a job: one for streams coded together, one for each band.
-fn code_job(coded: &mut [Coded], bands: usize) -> Vec<Vec<u8>> {
+/// The chunks of a job: one for streams coded together, one for each band, and for the bands the
+/// bits of their rows after the first.
+fn code_job(coded: &mut [Coded], bands: usize) -> (Vec<Vec<u8>>, Vec<u64>) {
     if bands > 1 {
         let c = &mut coded[0];
         let mut full: Vec<&mut [u16]> = c.samples.planes.iter_mut().map(|p| &mut p[..]).collect();
-        return lmodel::encode_bands_of(&c.header, &mut full, bands);
+        let chunks = lmodel::encode_bands_of(&c.header, &mut full, bands);
+        let planes: Vec<&[u16]> = c.samples.planes.iter().map(|p| &p[..]).collect();
+        let rows = lmodel::band_rows(c.header.mcus().1, bands);
+        let bits = rows
+            .par_iter()
+            .map(|&(r0, r1)| lossless::band_bits(&c.header, &planes, r0, r1).expect("the data is reproduced"))
+            .collect();
+        return (chunks, bits);
     }
     let mut model = Model::new(coded[0].header.comps.len());
     let mut e = ArithEncoder::new(Vec::new());
@@ -124,7 +136,7 @@ fn code_job(coded: &mut [Coded], bands: usize) -> Vec<Vec<u8>> {
         let mut full: Vec<&mut [u16]> = c.samples.planes.iter_mut().map(|p| &mut p[..]).collect();
         lmodel::code_frame(&mut e, &mut model, &c.header, &mut full).expect("encoding does not fail");
     }
-    vec![e.finish()]
+    (vec![e.finish()], Vec::new())
 }
 
 fn encode_at(input: &[u8]) -> Option<Formula> {
@@ -145,14 +157,15 @@ fn encode_at(input: &[u8]) -> Option<Formula> {
         parts.push(job);
         rest = tail;
     }
-    let chunks: Vec<Vec<Vec<u8>>> =
+    let coded_jobs: Vec<(Vec<Vec<u8>>, Vec<u64>)> =
         parts.into_par_iter().zip(jobs.par_iter()).map(|(job, &(_, _, bands))| code_job(job, bands)).collect();
+    let (chunks, bits): (Vec<_>, Vec<_>) = coded_jobs.into_iter().unzip();
     // the file without the entropy-coded data, and what the module needs to put it back
     let mut cut = Vec::with_capacity(input.len());
     let mut info = Vec::new();
     varint::put(&mut info, jobs.len() as u64);
     let (mut prev, mut removed, mut next) = (0, 0, 0);
-    for &(_, count, bands) in &jobs {
+    for (&(_, count, bands), bits) in jobs.iter().zip(&bits) {
         varint::put(&mut info, count as u64);
         varint::put(&mut info, bands as u64);
         for c in &coded[next..next + count] {
@@ -162,6 +175,9 @@ fn encode_at(input: &[u8]) -> Option<Formula> {
             removed += c.header.end - c.header.start;
             varint::put(&mut info, (c.header.end - c.header.start) as u64);
             varint::put(&mut info, c.header.last_code as u64);
+        }
+        for &b in bits {
+            varint::put(&mut info, b);
         }
         next += count;
     }
@@ -231,6 +247,21 @@ mod tests {
         // (a gap of 9000 bytes keeps the third and the fourth apart)
         assert!(lay.jobs.iter().all(|j| j.bands == 1));
         assert!(lay.jobs.len() >= 4, "{:?}", lay.jobs.iter().map(|j| j.count).collect::<Vec<_>>());
+    }
+
+    /// A frame with restart intervals is big enough to be cut in bands and is not: it is a group;
+    /// without them it is cut, and its bands' bits put after the codes of their first rows.
+    #[test]
+    fn bands_and_restarts() {
+        let mut file = b"II*  restarts ".to_vec();
+        file.extend_from_slice(&synthetic(12, 2400, 1000, &[(1, 1)], 4, 0, 2400, 1));
+        file.extend_from_slice(b" and ");
+        file.extend_from_slice(&synthetic(12, 1200, 2100, &[(2, 1), (1, 1)], 5, 0, 0, 2));
+        file.extend_from_slice(&synthetic(8, 1200, 2100, &[(1, 1), (1, 1), (1, 1)], 7, 1, 0, 3));
+        let f = encode(&file, 0).expect("coded");
+        assert_eq!(back(&f, file.len()), file);
+        let lay = crate::lmodule::Layout::parse(&f.streams[0].data, &f.streams[1].data).unwrap();
+        assert_eq!(lay.jobs.iter().map(|j| j.bands > 1).collect::<Vec<_>>(), [false, true, true]);
     }
 
     #[test]

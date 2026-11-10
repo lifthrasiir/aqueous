@@ -246,7 +246,8 @@ optimization picked by hash.
   is cut in bands of rows, each its own chunk (about 1M samples), to run at once; the small ones
   (a DNG's tiles) share one model. It is a part module (`lpart`): the file is put as it comes,
   the rows of a frame decoded and their Huffman data written a row of MCUs at a time
-  (`lmodel::Frame`, `lossless::Emitter`), so its plan (`lpart::plan`, to the page,
+  (`lmodel::Frame`, `lossless::Emitter`; a band's tasks make the raw bits of its codes, the
+  parent shifts them in: no restart intervals in a banded frame), so its plan (`lpart::plan`, to the page,
   `lossless_jpeg_plan_holds*`) follows the width of the frames and the size of a chunk, not the
   file (2-4 MiB for a 62 MB CR2). A header holds its lists in place (`Small`): the module's
   allocator takes only 64 blocks freed out of order. Natively it is applied whole on threads

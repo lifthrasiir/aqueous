@@ -687,6 +687,8 @@ per job:
     varint  soi      offset in the cut of its SOI (FF D8)
     varint  len      bytes of its entropy-coded data
     varint  flags    0 or 1: bit 0 says a symbol listed twice in a table has its later code (L3)
+  where bands > 1, for each band:
+    varint  bits     bits of the Huffman codes of its MCU rows after the first
 ```
 
 The streams are those of the jobs, in order. Trailing bytes are an error, and so is a number
@@ -701,9 +703,15 @@ the cut at the end. It holds no more than a chunk of the model, the rows of a fr
 headers of a stream (and, where bands are tasks, the chunks of the ones being decoded).
 
 The bands of a stream may be decoded as tasks (one class, 8 slots): a round of up to 16 bands has
-their chunks read, each band is a task that gives its rows as bytes (for each MCU row, each
-component's rows of it, 16 bits to a sample, little-endian), and the rows are put in order, their
-data written as they come. The output is the same however many run at once.
+their chunks read, and each band is a task that gives the samples of its first MCU row (for each
+component its rows of it, 16 bits to a sample, little-endian), the Huffman codes of its other MCU
+rows as raw bits (`bits` of them, packed from the high end of each byte, not stuffed, the last
+byte padded with 0 bits), and the samples of its last MCU row (if that is another row). The frame
+has no restart intervals (a stream with them is not cut in bands), so those codes do not depend on
+what comes before the band. The bands are put in order: the codes of a band's first MCU row,
+made from its samples and the last row of the band before, then its raw bits shifted to follow
+them (stuffed on the way), and at the end of the frame the byte ended with 1 bits. A task whose
+bits are not the `bits` of the info is an error. The output is the same however many run at once.
 
 The groups may be decoded as tasks as well, a round of them at a time (the same class). A round
 holds a *script* of at most 2^19 bytes (plus the gap room), and takes up to 16 jobs of groups, in

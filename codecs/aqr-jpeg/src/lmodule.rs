@@ -123,6 +123,15 @@ impl Layout {
                 header.last_code = flags == 1;
                 streams.push(Stream { len, header });
             }
+            if bands > 1 {
+                // (the bits of the rows of each band after its first: the part module checks them)
+                if streams.last().is_some_and(|s| s.header.restart != 0) {
+                    return bad("bands of a frame with restart intervals");
+                }
+                for _ in 0..bands {
+                    get_varint(info, &mut at)?;
+                }
+            }
         }
         if at != info.len() {
             return bad("jobs");
