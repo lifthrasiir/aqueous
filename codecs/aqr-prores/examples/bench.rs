@@ -71,7 +71,7 @@ fn main() {
                     None => codec::encode(s, &ranges),
                 };
                 let te = t.elapsed().as_secs_f64();
-                // The fastest of `reps` decodings (the first is checked).
+                // The fastest of `reps` decodings (the first is checked; none with 0).
                 let (mut td, mut back) = (f64::MAX, None);
                 for _ in 0..reps {
                     let t = Instant::now();
@@ -83,7 +83,7 @@ fn main() {
                     td = td.min(t.elapsed().as_secs_f64());
                     back.get_or_insert(b);
                 }
-                let back = back.unwrap();
+                let back = back.unwrap_or_else(|| Ok(s.to_vec()));
                 let ok = back.is_ok_and(|b| b == s);
                 (ch.iter().map(|&a| size(a)).sum(), e.coded.len() + e.side.len(), te, td, ok)
             })

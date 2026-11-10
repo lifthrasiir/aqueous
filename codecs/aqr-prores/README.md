@@ -195,13 +195,51 @@ counts those threads too). `archive-org` (2 files, 10.41 GB)
 at the default bound: 7,691,455,732 bytes (73.9%) in 235.6 s, the 5.82 GB file in 99.3 s on 9.1
 threads.
 
+Speed of the model, measured 2026-11-10 on an M4 (10 cores) with a local set made with ffmpeg
+(10 files, 1.2 GB: `prores_ks` and `prores_aw`, 422 proxy to 4444 with alpha, 1080p and UHD,
+test patterns, fractals and noise; synthetic, no camera footage), against the commit before
+(`1866ff4f`'s model). Decisions per input byte of the first 20 frames, 313 MB: 7.67 -> 7.50
+(zero flags 1.66, the size's 3.05, mantissa 1.35, signs 0.85, counts 0.46 -> 0.29, DC 0.30); the
+estimated ratio 0.7902 -> 0.7900 and the bench's, whole files, 0.7785 -> 0.7782, no source worse
+(one thread, one stripe, `aqr-prores-bench -k 1 -n 20 -r 3`, decoding MB/s of the module's code
+-> after): mandel_aw_hq (HQ noise) 13.3 -> 17.5, life_aw_lt (LT) 14.5 -> 20.1, pan_ks_hq (sparse)
+12.7 -> 16.5, testsrc_ks_hq 18.1 -> 28.4; cycles of the run (an encoding and 3 decodings) -19% to -30%. The whole set at the bench's
+default (chunks of 32 MiB, the stripes on threads): decoding 22.0 -> 29.8 MB/s of a chunk's wall
+time; encoding unchanged (15.6), the same model code but the parse of ProRes bits (a fifth of
+it) and the arithmetic coder's own work not touched. `cargo aqr -c`/`-K` of mandel_aw_hq (121
+MB) and testsrc_uhd_hq (84 MB): compressing 5.7 -> 5.4 s and 4.3 -> 3.8 s, `-K` natively 1.43 ->
+1.27 s and 1.10 -> 0.87 s (threads' CPU time 12.3 -> 9.9 and 7.0 -> 4.7 s), `-K --wasm` 1.65 ->
+1.62 s and 1.17 -> 1.13 s (CPU 14.0 -> 13.0 and 7.5 -> 6.4 s). The module is 45,159 bytes
+(15,222 of its block) against 44,009 (14,610).
+
+What the time was: decoding is bound by the latency chain of each decision (the adaptive bit's
+load, the multiplication of the range, the comparison, whose result is a branch) and its
+mispredictions, not by cache (a model cut to 16k contexts ran as fast) or by instructions
+(unchecked indexing took 8% of them for 2% of the cycles). So what helped was fewer branches on
+hard-to-predict bits (mantissa and sign bits by selects), the slices written from the nonzero
+positions (their writing was a quarter of decoding, now 13%) and a cheaper bit update. Tried
+and dropped, on the set above (decisions or ratio, one thread):
+
+- Zero flags in spans of positions with nothing around them coded as one decision per span:
+  decisions -3% (proxy) to -8% (pan), ratio +0.65% and +0.2%; the spans are short.
+- Raw second mantissa bit where the previous frame gives no hint (or always): decisions -5% (-7%),
+  ratio +0.15% (+0.22%, +1.5% on the static pan), and only 1-3% of the time (those bits are
+  branchless already).
+- All zero flags of a block first, then the sizes, signs and mantissas, the flags coded with no
+  branch on a result (their context the neighbours' flags, not magnitudes: ratio the same, 0.7900):
+  decoding 6-13% slower (the chain of 25 cycles a flag against 22 with branches), encoding the same.
+- One window for a coefficient's run, level and sign in the ProRes parse, by selects: 2-3% of
+  encoding for more code.
+
 Left:
 
 - Speed, decoding first (it is more than half of compressing too): writing the slices is about
   a quarter of decoding; about 8–9 binary decisions per input byte, mostly zero flags (3.8 a byte) and sizes
   (1.8); the arithmetic coder itself is about 15% of the encoding time, the rest the decisions'
-  contexts and branches. Fewer decisions (zero runs coded together, sizes binarised around
-  their expected value) are the way to go faster.
+  contexts and branches (those figures are from the corpus; the local set has more sizes and
+  fewer zero flags). Sizes binarised around their expected value would save decisions on dense
+  footage (not tried: it widens the size table); the corpus is to say whether the changes of the
+  commits after `1866ff4f` keep the ratio, and where the time goes there.
 - Memory: 8K 4:4:4 frames would pass the compressing bound of 256 MiB (a stripe's planes are
   258 bytes a block of its picture, in two frames; UHD 4:4:4 takes 220 MB). Native decoding runs
   all the gang's tasks at once, so it holds the plan (UHD 4:4:4: 648 MB resident, against 479
