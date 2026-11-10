@@ -45,6 +45,29 @@ impl ArithEncoder {
         }
     }
 
+    /// The `n` (1 to 16) bits of `v` at probability 1/2 each, as one step: the range cut in
+    /// `2^n` slices of an equal size (the last takes what is left over). Not the bits of
+    /// [`ArithEncoder::encode`] one by one: a stream of its own. Where the range is too narrow
+    /// for slices, the bits go one by one, as the decoder sees the same range.
+    #[inline]
+    pub fn encode_run(&mut self, n: u32, v: u32) {
+        let sub = (self.x2 - self.x1) >> n;
+        if sub == 0 {
+            for i in (0..n).rev() {
+                self.encode(v >> i & 1 != 0, 1 << 15);
+            }
+            return;
+        }
+        let lo = self.x1 + v * sub;
+        self.x2 = if v == (1 << n) - 1 { self.x2 } else { lo + sub - 1 };
+        self.x1 = lo;
+        while (self.x1 ^ self.x2) & 0xff00_0000 == 0 {
+            self.out.push((self.x2 >> 24) as u8);
+            self.x1 <<= 8;
+            self.x2 = self.x2 << 8 | 0xff;
+        }
+    }
+
     /// Any value in (x1, x2] decodes, and the decoder reads zeros past the end.
     pub fn finish(mut self) -> Vec<u8> {
         self.out.push((self.x1 >> 24) as u8 + 1);
@@ -108,6 +131,25 @@ impl<'a> ArithDecoder<'a> {
         bit
     }
 
+    /// The `n` (1 to 16) bits that [`ArithEncoder::encode_run`] wrote.
+    #[inline]
+    pub fn decode_run(&mut self, n: u32) -> u32 {
+        let sub = (self.x2 - self.x1) >> n;
+        if sub == 0 {
+            return (0..n).fold(0, |v, _| v << 1 | self.decode(1 << 15) as u32);
+        }
+        let v = ((self.x - self.x1) / sub).min((1 << n) - 1);
+        let lo = self.x1 + v * sub;
+        self.x2 = if v == (1 << n) - 1 { self.x2 } else { lo + sub - 1 };
+        self.x1 = lo;
+        while (self.x1 ^ self.x2) & 0xff00_0000 == 0 {
+            self.x1 <<= 8;
+            self.x2 = self.x2 << 8 | 0xff;
+            self.x = self.x << 8 | self.byte() as u32;
+        }
+        v
+    }
+
     pub fn overrun(&self) -> bool {
         self.pos > self.input.len() + 4
     }
@@ -164,6 +206,11 @@ pub trait Coder {
     fn raw(&mut self, v: bool) -> bool;
     /// Whether the decoder has read past its input.
     fn failed(&self) -> bool;
+    /// `n` (1 to 16) raw bits of `v`, the high one first, as a step of the coder where it has
+    /// one ([`ArithEncoder::encode_run`]); otherwise one by one.
+    fn raw_run(&mut self, n: u32, v: u32) -> u32 {
+        (0..n).rev().fold(0, |x, i| x << 1 | self.raw(v >> i & 1 != 0) as u32)
+    }
     /// The kind of what the bits after are, for the statistics ([`Costed`]).
     fn set_cat(&mut self, _: usize) {}
 
@@ -237,6 +284,11 @@ impl Coder for ArithEncoder {
         self.encode(v, 1 << 15);
         v
     }
+    #[inline]
+    fn raw_run(&mut self, n: u32, v: u32) -> u32 {
+        self.encode_run(n, v);
+        v
+    }
     fn failed(&self) -> bool {
         false
     }
@@ -252,6 +304,10 @@ impl Coder for ArithDecoder<'_> {
     #[inline]
     fn raw(&mut self, _: bool) -> bool {
         self.decode(1 << 15)
+    }
+    #[inline]
+    fn raw_run(&mut self, n: u32, _: u32) -> u32 {
+        self.decode_run(n)
     }
     fn failed(&self) -> bool {
         self.overrun()
@@ -335,5 +391,44 @@ mod coder_tests {
         assert_eq!(d.raws(12, 0), 0xabc);
         assert_eq!(d.tree(&mut tree, 4, 0), 9);
         assert!(!d.failed());
+    }
+}
+
+#[cfg(test)]
+mod run_tests {
+    use super::*;
+
+    /// Runs of raw bits among adaptive bits, written and read back alike (the narrow ranges
+    /// that a run falls back from included: many adaptive bits of a skewed probability).
+    #[test]
+    fn runs_roundtrip() {
+        let mut x = 7u32;
+        let mut next = move || {
+            x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+            x >> 8
+        };
+        let script: Vec<(u32, u32)> = (0..20000).map(|_| (next() % 17, next())).collect();
+        let mut e = ArithEncoder::new(Vec::new());
+        let mut b = Bit::default();
+        for &(n, v) in &script {
+            let v = if n == 0 { 0 } else { v & ((1u32 << n) - 1) };
+            if n == 0 {
+                e.bit(&mut b, v & 1 != 0);
+            } else {
+                assert_eq!(e.raw_run(n, v), v);
+            }
+        }
+        let data = e.finish();
+        let mut d = ArithDecoder::new(&data);
+        let mut b = Bit::default();
+        for &(n, v) in &script {
+            let v = if n == 0 { 0 } else { v & ((1u32 << n) - 1) };
+            if n == 0 {
+                assert_eq!(d.bit(&mut b, false), v & 1 != 0);
+            } else {
+                assert_eq!(d.raw_run(n, 0), v);
+            }
+        }
+        assert!(!d.overrun());
     }
 }
