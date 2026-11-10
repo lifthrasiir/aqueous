@@ -63,6 +63,14 @@ small).
 | NOAA OISST (1) | 0.976 | 0.976 | 0.965 |
 | cmz: H-H1_GWOSC_4KHZ_R1-1126259447-32.hdf5 | 1040814 | 880760 | 880672 |
 
+The trial of the adaptive profile (every chunk made with zlib's parameters hinted, once the
+samples predict exactly) is given up as soon as the samples are made if the stream of one of
+them alone is over the application bound (`aqr-compress`, 256 MiB when compressing): `made/gzip1.h5`
+(24.3 MB, chunks too large for it, 447 MB of the set) took 2.93 s, now 2.29 s (Ryzen 7 9700X, two
+runs each, 2.93 and 2.95, 2.29 and 2.28). The other 61 files take the same time (sum of the least
+of two runs 26.19 s, 25.51 s with that file) and make archives of the same sizes; `made/gzip4-shuffle.h5`
+is not over the bound (its 3.1 s are the trial and the weighing against zstd, 21.86 MB kept).
+
 For reference, `xz -9e` makes 1018200 bytes of the cmz file. Of its archive, 86 KB are the
 modules (`flate-set`'s block was 78.7 KB, `hdf5-recons-float`'s 7.2 KB; now 71.7 and 4.5 KB), which archives of
 several files share: four GWOSC files of 32 s make 3.20 MB together. Files without deflated
@@ -81,9 +89,10 @@ Left:
 
 - The archive of a single small file pays for `flate-set` (71.7 KB) to rebuild zlib's streams;
   a module of zlib's deflate alone would be a fraction of it.
-- A file whose adaptive formula is over the application bound pays for the trial for nothing
-  (about 1.5 s for `made/gzip1.h5` and `made/gzip4-shuffle.h5`): a cheaper test of the bound
-  before making all of its streams.
+- The application bound is tested on the formula of each sample's stream alone (`encode_checked`),
+  which is a lower bound of the whole: a set over the bound by a stream of the samples is found
+  before the other chunks are made. A set over it by other streams (or by the float model, or
+  by the sum of the sizes of many) is still found by the whole trial.
 - Integer data: images (GOES's 12-bit radiances, OISST) by a 2D predictor (aqr-fits' pixel
   model), shuffle undone; floats of few values (AnnData's counts) by their ranks. The float
   model predicts along the chunk as one line: images of floats would want the row above.

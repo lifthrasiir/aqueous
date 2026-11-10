@@ -74,6 +74,9 @@ pub struct Encoded {
     pub adaptive: bool,
     /// Chunks rebuilt.
     pub chunks: usize,
+    /// Whether the adaptive profile was given up for `fits` ([`encode_checked`]): `formula` is
+    /// then one of a sample, not of the file.
+    pub over: bool,
 }
 
 /// Whether `d` starts like an HDF5 file (its superblock).
@@ -160,6 +163,15 @@ type Made = Option<(Vec<u8>, Vec<u8>, Option<zlib::Params>, bool)>;
 /// filters tell it), whose Adler-32 is right and that aqr-flate takes are rebuilt from their
 /// data; the rest is kept as it is.
 pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
+    encode_checked(input, opt, &|_| true)
+}
+
+/// [`encode_with`], with the adaptive profile given up (`over`) once the samples are made at it
+/// where the formula of one of them alone does not satisfy `fits` (aqr-compress's test of the
+/// application bound): the formula of all the chunks holds that sample's stream too, as an
+/// application of its set that takes no less memory than it does apart, so it does not fit
+/// either, and the rest of the chunks need not be made to tell.
+pub fn encode_checked(input: &[u8], opt: &Options, fits: &dyn Fn(&Formula) -> bool) -> Option<Encoded> {
     let file = hdf5::parse(input)?;
     let jobs = jobs(input, &file, opt.limit);
     if jobs.is_empty() {
@@ -232,6 +244,25 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         }
         made.insert(j, m);
     }
+    if exact.load(Relaxed) {
+        for j in &order {
+            let Some((d, r, ..)) = made[j].as_ref() else { continue };
+            let Ok(profile) = aqr_flate::record_profile(r) else { continue };
+            let mut f = Formula::default();
+            let (data, record) = (f.push("hdf5/data", d.clone()), f.push("flate/record", r.clone()));
+            let item = aqr_flate::formula::Item {
+                profile,
+                data: (data, d.len()),
+                record: (record, r.len()),
+                len: jobs[*j].deflate.len() as u64,
+            };
+            let Ok(mut nodes) = aqr_flate::formula::streams(&mut f, vec![item]) else { continue };
+            f.root = nodes.pop()?;
+            if !fits(&f) {
+                return Some(Encoded { formula: f, inflated: 0, adaptive: true, chunks: 0, over: true });
+            }
+        }
+    }
     let params = seen.iter().max_by_key(|s| s.1).map(|s| s.0);
     let rest: Vec<usize> = (0..jobs.len()).filter(|j| !made.contains_key(j)).collect();
     made.extend(rest.iter().copied().zip(run(&rest, params)));
@@ -292,7 +323,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     let parts: Vec<Node> =
         parts.into_iter().filter_map(|p| p.or_else(|| streams.next())).filter(|n| !n.is_empty()).collect();
     f.root = Node::concat(parts);
-    Some(Encoded { formula: f, inflated, adaptive: exact.load(Relaxed), chunks })
+    Some(Encoded { formula: f, inflated, adaptive: exact.load(Relaxed), chunks, over: false })
 }
 
 /// The data of the chunks that the float model codes, by job, as nodes of `f`: of each dataset

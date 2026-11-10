@@ -49,6 +49,26 @@ fn fixtures() {
     assert!(formula::starts(&data("sb0.h5")) && !formula::starts(&data("userblock.h5")));
 }
 
+/// Where the adaptive profile is tried, a test of the formula of one sample's stream alone that
+/// fails ends the trial before the other chunks are made (`over`); one that passes, or no test,
+/// gives the formula of all.
+#[test]
+fn checked() {
+    let d = data("sb0.h5");
+    let opt = Options::default();
+    let all = formula::encode_with(&d, &opt).unwrap();
+    assert!(all.adaptive && !all.over && all.chunks > 1);
+    let seen = std::cell::RefCell::new(Vec::new());
+    let kept = formula::encode_checked(&d, &opt, &|f| (seen.borrow_mut().push(f.applies().len()), true).1).unwrap();
+    assert!(!kept.over && kept.chunks == all.chunks && kept.formula.root == all.formula.root);
+    assert!(!seen.borrow().is_empty() && seen.borrow().iter().all(|&n| n == 1));
+    let over = formula::encode_checked(&d, &opt, &|_| false).unwrap();
+    assert!(over.over && over.adaptive && over.chunks == 0);
+    // (a profile asked for that is not tried against: nothing to give up)
+    let plain = Options { trial: false, ..Options::default() };
+    assert!(!formula::encode_checked(&d, &plain, &|_| false).unwrap().over);
+}
+
 /// Within the limit of data, the chunks up to it are rebuilt and the rest kept.
 #[test]
 fn limit() {

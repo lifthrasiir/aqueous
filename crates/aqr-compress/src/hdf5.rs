@@ -17,12 +17,13 @@ pub(crate) fn file(d: &[u8], opt: &Options, _depth: u32, cx: &Cx) -> Option<Form
         limit: cx.inflate_left(),
         trial: true,
     };
-    let mut e = aqr_hdf5::formula::encode_with(d, &hopt)?;
+    let bound = opt.application_bound;
+    let fits = |f: &Formula| crate::memory::exceeding(f, &crate::Native { threads: 1 }, bound).is_none();
+    let mut e = aqr_hdf5::formula::encode_checked(d, &hopt, &fits)?;
     // (the adaptive profile, tried where zlib is predicted exactly, needs more memory than the
-    // application may take for some data: then the profile asked for)
-    if e.adaptive
-        && crate::memory::exceeding(&e.formula, &crate::Native { threads: 1 }, opt.application_bound).is_some()
-    {
+    // application may take for some data, which a sample's stream alone shows before the other
+    // chunks are made: then the profile asked for)
+    if e.over || e.adaptive && !fits(&e.formula) {
         hopt.trial = false;
         e = aqr_hdf5::formula::encode_with(d, &hopt)?;
     }
