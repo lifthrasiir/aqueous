@@ -42,13 +42,14 @@ It spawns no tasks.
 
 ## Status
 
-The x86 filter (bit 0 of a stream's flags) is not known: neither the spec's filter nor the
-LZMA SDK's BCJ gives the CRC-32 of ALZip's archives (alzgg's PE files, filtered before ALZip
-decides to store a block). The streams are rebuilt all the same, their data being what the
-blocks decode to, the filter's input; the files are then not the files themselves. ALZip picks
-AZO by itself for `.sys` and `.com` files only (alzgg's notes), so it is rare.
+The x86 filter (bit 0 of a stream's flags) is E8/E9 with a converted address, the five bytes
+skipped whether converted or not (FORMAT.md §2.6; found from the CRC-32 of the four `.sys`
+streams of alzgg's archives, `docs/azo-x86-filter-search.md`). The module still rebuilds the
+streams from the data the blocks decode to, the filter's input, so the files are not the files
+themselves; ALZip picks AZO by itself for `.sys` and `.com` files only (alzgg's notes), so it is
+rare.
 
-Left: the x86 filter (with an oracle of ALZip); ALZip's choice between a match and a literal,
+Left: the module giving the filtered data's inverse (the files themselves); ALZip's choice between a match and a literal,
 most of the record; speed (5–6 MB/s of data a thread to split and to join, the chains walked
 twice where a match may start; a stream's blocks go on up to `threads` threads natively, one
 after another in Wasm).

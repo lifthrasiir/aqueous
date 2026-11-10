@@ -21,3 +21,11 @@ aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 [[example]]
 name = "aqr-azo-check"
 path = "examples/check.rs"
+
+[[example]]
+name = "aqr-azo-x86-search"
+path = "examples/x86_search.rs"
+
+[[example]]
+name = "aqr-azo-x86-dump"
+path = "examples/x86_dump.rs"

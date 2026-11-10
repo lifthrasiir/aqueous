@@ -635,11 +635,14 @@ fn filter_with(d: &mut [u8], absolute: bool) {
     }
     let mut i = 0;
     while i < d.len() - 4 {
-        if (d[i] == 0xE8 || d[i] == 0xE9) && (d[i + 4] == 0 || d[i + 4] == 0xFF) {
-            let a = u32::from_le_bytes(d[i + 1..i + 5].try_into().unwrap());
-            let a = if absolute { a.wrapping_add(i as u32) } else { a.wrapping_sub(i as u32) };
-            let a = if a >> 24 & 1 != 0 { a | 0xFF00_0000 } else { a & 0x00FF_FFFF };
-            d[i + 1..i + 5].copy_from_slice(&a.to_le_bytes());
+        if d[i] == 0xE8 || d[i] == 0xE9 {
+            // (the five bytes are skipped whether the address is converted or not)
+            if d[i + 4] == 0 || d[i + 4] == 0xFF {
+                let a = u32::from_le_bytes(d[i + 1..i + 5].try_into().unwrap());
+                let a = if absolute { a.wrapping_add(i as u32) } else { a.wrapping_sub(i as u32) };
+                let a = if a >> 24 & 1 != 0 { a | 0xFF00_0000 } else { a & 0x00FF_FFFF };
+                d[i + 1..i + 5].copy_from_slice(&a.to_le_bytes());
+            }
             i += 5;
         } else {
             i += 1;

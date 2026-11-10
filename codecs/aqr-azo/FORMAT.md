@@ -143,10 +143,28 @@ at the end of the code.
 
 ### 2.6 The x86 filter *(informative)*
 
-With bit 0 of the flags, the data of each block is filtered after decoding (the spec's A.12).
-The spec's filter does not give the CRC-32 of ALZip's archives, nor does the LZMA SDK's BCJ
-filter: the filter is not known here. The module does not filter: its data is what the blocks
-decode to, the filter's input (§6).
+With bit 0 of the flags, the data of each block is filtered, each block by itself, before it is
+coded (the spec's A.12 describes it only in part). The encoder, over a block's data `D` of
+length `N` (nothing is done for `N < 5`), from `i = 0` while `i < N − 4`:
+
+- if `D[i]` is `E8` or `E9` (not `0F 8x`): let `a` be the little-endian 32-bit integer at
+  `D[i+1..i+5)`. If `D[i+4]` is `00` or `FF`, then `a ← a + i` (*wrapping*, `i` counted from the
+  block's start, not the stream's), and its bit 24 is extended: `a ← a | 0xFF000000` if bit 24 of
+  `a` is set, else `a & 0x00FFFFFF`; `a` is written back. Either way (converted or not), `i ← i + 5`;
+- otherwise `i ← i + 1`.
+
+The decoder is the same with `a ← a − i`. That the five bytes are skipped even when the address
+is not converted is what the spec's text does not say. `azo::filter` and `azo::unfilter` are this.
+
+Known from the corpus: the decoder's direction as above (E8/E9 only, `00`/`FF`, subtracting the
+position of the opcode in its block, bit 24, five bytes always). Not known, and taken from the
+spec's description or by reasoning: the bounds (`N < 5`, `i < N − 4`: no stream at hand has a
+candidate in a block's last four bytes) and the encoder's direction being this one's inverse.
+
+Found from the CRC-32 of the files alone, with no code of ALZip read: `docs/azo-x86-filter-search.md`
+tells how and with what evidence. The four x86 streams of the test archives (`.sys` files) are
+all right with it, three of them by blocks of stored or coded data. The module does not filter:
+its data is what the blocks decode to, the filter's input (§6).
 
 ## 3. The match finder
 

@@ -205,3 +205,29 @@ fn refusals() {
     let sp = recons::split(&e, usize::MAX, 2).unwrap();
     assert!(sp.data.is_empty() && recons::join(&[], &sp.record, 2).unwrap() == e);
 }
+
+/// The x86 filter (found by the CRC-32 of ALZip's archives alone, FORMAT.md §2.6): E8 and E9
+/// whose address ends in 00 or FF are made relative to their own position, the address
+/// extended from bit 24; and the five bytes of an E8 or E9 are skipped whether it was converted
+/// or not, so an E8 in the window of one that was not is left alone.
+#[test]
+fn x86_filter_skips_a_window_whether_converted_or_not() {
+    // converted: at 3, the address 0x00000010 + 3; at 12 (E9), 0xFFFFFF00 + 12 (bit 24 set)
+    let mut d = vec![0x90, 0x90, 0x90, 0xE8, 0x13, 0, 0, 0, 0x90, 0x90, 0x90, 0x90];
+    d.extend_from_slice(&[0xE9, 0x0C, 0xFF, 0xFF, 0xFF, 0x90]);
+    let mut want = d.clone();
+    want[4..8].copy_from_slice(&0x10u32.to_le_bytes());
+    want[13..17].copy_from_slice(&0xFFFF_FF00u32.to_le_bytes());
+    let mut got = d.clone();
+    azo::unfilter(&mut got);
+    assert_eq!(got, want);
+    azo::filter(&mut got);
+    assert_eq!(got, d);
+
+    // not converted (its address ends in E8): the E8 four bytes on, with a convertible address,
+    // is inside its window and stays as it is
+    let d = [0xE8, 0x12, 0x34, 0xD8, 0xE8, 0x31, 0xB5, 0x15, 0xFF, 0x78, 0x00, 0x00];
+    let mut got = d;
+    azo::unfilter(&mut got);
+    assert_eq!(got, d);
+}
