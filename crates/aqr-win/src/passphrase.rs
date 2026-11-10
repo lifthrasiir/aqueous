@@ -23,9 +23,9 @@ const FIRST: i32 = 101;
 const SECOND: i32 = 102;
 
 /// The window classes of controls, as atoms of a template.
-const BUTTON: u16 = 0x0080;
-const EDIT: u16 = 0x0081;
-const STATIC: u16 = 0x0082;
+pub const BUTTON: u16 = 0x0080;
+pub const EDIT: u16 = 0x0081;
+pub const STATIC: u16 = 0x0082;
 
 /// What the dialog procedure works on (a dialog is modal, on one thread).
 struct State {
@@ -40,9 +40,31 @@ thread_local! {
 
 /// A template being made: words, each item at a double word.
 #[derive(Default)]
-struct Template(Vec<u16>);
+pub struct Template(Vec<u16>);
 
 impl Template {
+    /// The dialog itself: `items` controls to come, in a box of `[w, h]` dialog units, titled
+    /// "Aqueous", in Segoe UI: no menu, the default class.
+    pub fn dialog(&mut self, items: u16, [w, h]: [i16; 2]) {
+        self.dword((WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE) | (DS_MODALFRAME | DS_SETFONT | DS_CENTER) as u32);
+        self.dword(0);
+        self.word(items);
+        for v in [0i16, 0, w, h] {
+            self.word(v as u16);
+        }
+        self.word(0);
+        self.word(0);
+        self.string("Aqueous");
+        self.word(9);
+        self.string("Segoe UI");
+    }
+
+    /// The template at a double word, as `DialogBoxIndirectParamW` takes it.
+    pub fn aligned(mut self) -> Vec<u32> {
+        self.0.resize(self.0.len().next_multiple_of(2), 0);
+        self.0.chunks(2).map(|c| c[0] as u32 | (c[1] as u32) << 16).collect()
+    }
+
     fn word(&mut self, w: u16) {
         self.0.push(w);
     }
@@ -57,7 +79,7 @@ impl Template {
     }
 
     /// An item: style, place (x, y, width, height in dialog units), id, class, text.
-    fn item(&mut self, style: u32, [x, y, w, h]: [i16; 4], id: i32, class: u16, text: &str) {
+    pub fn item(&mut self, style: u32, [x, y, w, h]: [i16; 4], id: i32, class: u16, text: &str) {
         if !self.0.len().is_multiple_of(2) {
             self.0.push(0);
         }
@@ -92,18 +114,7 @@ pub fn ask(parent: HWND, file: Option<&str>, compress: bool, again: bool, confir
     let fields = if confirm { 2 } else { 1 };
     let buttons_y = 46 + 18 * fields;
     let mut t = Template::default();
-    // (the dialog: no menu, the default class, a title, the font)
-    t.dword((WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE) | (DS_MODALFRAME | DS_SETFONT | DS_CENTER) as u32);
-    t.dword(0);
-    t.word(3 + 2 * fields as u16);
-    for v in [0i16, 0, 230, buttons_y as i16 + 21] {
-        t.word(v as u16);
-    }
-    t.word(0);
-    t.word(0);
-    t.string("Aqueous");
-    t.word(9);
-    t.string("Segoe UI");
+    t.dialog(3 + 2 * fields as u16, [230, buttons_y as i16 + 21]);
     t.item(0, [7, 7, 216, 30], MESSAGE, STATIC, &message);
     let label = |t: &mut Template, y: i16, id: i32, text: &str| {
         t.item(0, [7, y + 2, 66, 10], -1, STATIC, text);
@@ -117,9 +128,7 @@ pub fn ask(parent: HWND, file: Option<&str>, compress: bool, again: bool, confir
     let by = buttons_y as i16;
     t.item(WS_TABSTOP | BS_DEFPUSHBUTTON as u32, [117, by, 50, 14], IDOK, BUTTON, common::ok());
     t.item(WS_TABSTOP | BS_PUSHBUTTON as u32, [173, by, 50, 14], IDCANCEL, BUTTON, common::cancel());
-    // (the template at a double word)
-    t.0.resize(t.0.len().next_multiple_of(2), 0);
-    let aligned: Vec<u32> = t.0.chunks(2).map(|c| c[0] as u32 | (c[1] as u32) << 16).collect();
+    let aligned = t.aligned();
 
     STATE.with(|s| *s.borrow_mut() = Some(State { confirm, answer: None }));
     // SAFETY: a template made above (aligned, and complete), a procedure of the signature, no
@@ -131,7 +140,7 @@ pub fn ask(parent: HWND, file: Option<&str>, compress: bool, again: bool, confir
 }
 
 /// The text of control `id` of `hwnd`.
-fn text(hwnd: HWND, id: i32) -> String {
+pub fn text(hwnd: HWND, id: i32) -> String {
     // SAFETY: a control of the dialog, and room for its text and the NUL
     unsafe {
         let len = GetWindowTextLengthW(GetDlgItem(hwnd, id)).max(0) as usize;

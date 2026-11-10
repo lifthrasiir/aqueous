@@ -9,7 +9,8 @@
 //!   the submenu's verbs, in the order of their keys' names; `CommandFlags` of
 //!   `ECF_SEPARATORBEFORE` puts the separator.
 //! - `.aqr` of the class `Aqueous.Archive`, whose verbs are `extract` (the default: a double
-//!   click) and `test`, and whose icon (`DefaultIcon`) is resource 2: this program's drop with
+//!   click) and `test`, and `name-version` and `extract-version` ([`crate::version`]: one file
+//!   at a time, `MultiSelectModel` `Single`), and whose icon (`DefaultIcon`) is resource 2: this program's drop with
 //!   a label, "AQR" (`scripts/icons.py`).
 //! - The other formats `aqr` extracts ([`FORMATS`]), each of a class of its own
 //!   (`Aqueous.zip`, ...) with the same verbs and its own icon (the drop in gray, labeled).
@@ -154,6 +155,12 @@ pub fn register() -> Result<(), String> {
         |ext: &str, class: &str| self::set(&format!(r"{CAPABILITIES}\FileAssociations"), Some(ext), Value::Sz(class));
     set(".aqr", None, CLASS)?;
     class(CLASS, types::AQR, 2)?;
+    // (the versions of an archive: one archive at a time, `.aqr` files alone)
+    for (v, text) in [("extract-version", shell::EXTRACT_VERSION), ("name-version", shell::NAME_VERSION)] {
+        let key = format!(r"{CLASS}\shell\{v}");
+        verb(&key, text, v)?;
+        set(&key, Some("MultiSelectModel"), "Single")?;
+    }
     capability(".aqr", CLASS)?;
     for (ext, icon, name) in FORMATS {
         let (ext, progid) = (format!(".{ext}"), format!("Aqueous.{ext}"));

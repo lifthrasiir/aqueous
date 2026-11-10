@@ -2,17 +2,30 @@
 //! the window shows ([`crate::dialog::progress`]), and what came of it shown at the end.
 
 use std::os::windows::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use aqr_ipc::{Job, Verb, failure, intact, tested};
+use aqr_ipc::{Job, Point, Verb, failure, intact, tested};
 
 use crate::dialog::{self, Icon};
 
 /// Runs `aqr` on `paths` (`-P` where `encrypt`; compressing, into archives of `format`, `aqr`
 /// or another that `aqr --format` takes), and shows how far it is.
 pub fn run(verb: Verb, paths: Vec<PathBuf>, encrypt: bool, format: &str) -> ExitCode {
-    let (mut cmd, count) = aqr_ipc::command(&aqr_ipc::aqr(), verb, paths, encrypt, format);
+    let (cmd, count) = aqr_ipc::command(&aqr_ipc::aqr(), verb, paths, encrypt, format);
+    drive(verb, cmd, count)
+}
+
+/// Runs `aqr` extracting `archive` as it was at `point`, into a folder beside it named after the
+/// version ([`aqr_ipc::version_folder`]), and shows how far it is.
+pub fn run_at(archive: &Path, point: &Point) -> ExitCode {
+    let into = aqr_ipc::version_folder(archive, point);
+    let (cmd, count) = aqr_ipc::command_at(&aqr_ipc::aqr(), archive, point, &into);
+    drive(Verb::Extract, cmd, count)
+}
+
+/// Runs `cmd` (of `count` archives), the window of how far it is shown and what came of it.
+fn drive(verb: Verb, mut cmd: std::process::Command, count: usize) -> ExitCode {
     /// `CREATE_NO_WINDOW`: no console for it.
     const NO_WINDOW: u32 = 0x0800_0000;
     cmd.creation_flags(NO_WINDOW);

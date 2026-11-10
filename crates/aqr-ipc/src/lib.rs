@@ -153,6 +153,129 @@ pub fn command(
     (cmd, count)
 }
 
+/// A journal point of an archive (`aqr --history --json`): a version of it that was named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Point {
+    /// Its number (from 1), which `--at #N` takes.
+    pub number: u64,
+    /// When it was named, in local time as `aqr` shows it (`2026-11-01 12:00:00`).
+    pub shown: String,
+    pub label: String,
+}
+
+impl Point {
+    /// The point as a list shows it: `#3  2026-11-01 12:00:00  label`.
+    pub fn row(&self) -> String {
+        format!("#{}  {}  {}", self.number, self.shown, self.label)
+    }
+}
+
+/// The points of `archive`, as the `aqr` at that path tells them (none: it has none).
+pub fn points(aqr: &Path, archive: &Path) -> Result<Vec<Point>, String> {
+    let out = Command::new(aqr)
+        .args(["--history", "--json", "--"])
+        .arg(archive)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| aqr_l10n::common::not_run(aqr.to_string_lossy(), e))?;
+    if !out.status.success() {
+        return Err(last_line(&out.stderr));
+    }
+    parse_points(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The points of the line of JSON `aqr --history --json` writes.
+fn parse_points(line: &str) -> Result<Vec<Point>, String> {
+    let v: Value = serde_json::from_str(line.trim()).map_err(|e| e.to_string())?;
+    let list = v["points"].as_array().ok_or("no points told")?;
+    Ok(list
+        .iter()
+        .filter_map(|p| {
+            Some(Point {
+                number: p["number"].as_u64()?,
+                shown: p["shown"].as_str()?.to_owned(),
+                label: p["label"].as_str()?.to_owned(),
+            })
+        })
+        .collect())
+}
+
+/// Names the state `archive` is in `label` (`aqr --tag`, `{today}` and `{now}` filled in by it):
+/// what `aqr` told, or why it could not.
+pub fn tag(aqr: &Path, archive: &Path, label: &str) -> Result<String, String> {
+    let out = Command::new(aqr)
+        .arg("--tag")
+        .arg(label)
+        .arg("--")
+        .arg(archive)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| aqr_l10n::common::not_run(aqr.to_string_lossy(), e))?;
+    match out.status.success() {
+        true => Ok(last_line(&out.stderr)),
+        false => Err(last_line(&out.stderr)),
+    }
+}
+
+/// The last line of `aqr`'s standard error, without its `aqr: `.
+fn last_line(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let line = text
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("");
+    line.strip_prefix("aqr: ").unwrap_or(line).to_owned()
+}
+
+/// A name for the folder that version `point` of `archive` is extracted into, beside the archive:
+/// its name without the extension, the label in parentheses (the number where it has none); what
+/// a file name cannot hold is `_`.
+pub fn version_folder(archive: &Path, point: &Point) -> PathBuf {
+    let stem = archive
+        .file_stem()
+        .map_or_else(|| "Archive".into(), |s| s.to_string_lossy().into_owned());
+    let label: String = point
+        .label
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_control() || r#"<>:"/\|?*"#.contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let label = label.trim_end_matches(['.', ' ']);
+    let label = match label.is_empty() {
+        true => format!("#{}", point.number),
+        false => label.to_owned(),
+    };
+    archive.with_file_name(format!("{stem} ({label})"))
+}
+
+/// The command extracting `archive` as it was at `point` into `into` (`aqr --ipc -d --at`), its
+/// standard streams piped: one archive, as [`command`] has it.
+pub fn command_at(aqr: &Path, archive: &Path, point: &Point, into: &Path) -> (Command, usize) {
+    let mut cmd = Command::new(aqr);
+    cmd.arg("--ipc")
+        .arg("-d")
+        .arg("--at")
+        .arg(format!("#{}", point.number))
+        .arg("-o")
+        .arg(into)
+        .arg("--")
+        .arg(archive);
+    if let Some(dir) = archive.parent().filter(|d| d.is_dir()) {
+        cmd.current_dir(dir);
+    }
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    (cmd, 1)
+}
+
 /// The lines of `aqr`'s standard error kept, the last.
 const LOG: usize = 200;
 
@@ -427,6 +550,57 @@ mod tests {
         assert_eq!(s.questions.len(), 1);
         assert_eq!(s.skipped, [PathBuf::from("d/xy.aqr")]);
         assert_eq!(s.error.as_deref(), Some("no"));
+    }
+
+    #[test]
+    fn versions() {
+        let line = r#"{"archive":"a.aqr","points":[{"number":1,"time":1,"shown":"2026-11-01 12:00:00","label":"first"},{"number":2,"time":2,"shown":"2026-11-02 12:00:00","label":""},{"bad":1}]}"#;
+        let points = parse_points(line).unwrap();
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0].row(), "#1  2026-11-01 12:00:00  first");
+        assert!(
+            parse_points(r#"{"archive":"a.aqr","points":[]}"#)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(parse_points("nothing").is_err() && parse_points("{}").is_err());
+        let a = Path::new("d/backup.aqr");
+        assert_eq!(version_folder(a, &points[0]), Path::new("d/backup (first)"));
+        assert_eq!(version_folder(a, &points[1]), Path::new("d/backup (#2)"));
+        let odd = Point {
+            number: 3,
+            shown: String::new(),
+            label: " a/b:c? 2026. ".into(),
+        };
+        assert_eq!(version_folder(a, &odd), Path::new("d/backup (a_b_c_ 2026)"));
+        let (cmd, count) = command_at(Path::new("aqr"), a, &points[0], Path::new("d/out"));
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "--ipc",
+                "-d",
+                "--at",
+                "#1",
+                "-o",
+                "d/out",
+                "--",
+                "d/backup.aqr"
+            ]
+        );
+        assert_eq!(count, 1);
+        assert_eq!(
+            last_line(
+                b"x
+aqr: not there
+
+"
+            ),
+            "not there"
+        );
     }
 
     #[test]

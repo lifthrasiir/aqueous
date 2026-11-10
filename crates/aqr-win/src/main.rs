@@ -2,7 +2,7 @@
 //! is, the work done by `aqr --ipc` (`crates/aqr/src/ipc.rs`) in a process of its own.
 //!
 //! usage: aqr-win --register | --unregister | compress[-passphrase|-zip|-7z] PATH... |
-//!        extract ARCHIVE... | test ARCHIVE...
+//!        extract ARCHIVE... | test ARCHIVE... | name-version ARCHIVE | extract-version ARCHIVE
 //!
 //! - `--register` adds the verbs for the user (`register`): "Compress with Aqueous" on files
 //!   and folders, and the menu "Aqueous" beside it with the rest ("Compress with passphrase…",
@@ -16,6 +16,10 @@
 //!   `register::OTHER_FORMATS`). `extract`: each archive beside it, a single entry at its top
 //!   as it is, else into its name without `.aqr` (`aqr --each --auto-dir`). `test`: each archive
 //!   checked, and what it holds told.
+//! - `name-version` and `extract-version`, on one `.aqr` file chosen (`version`): "Name this
+//!   version…" names the state the archive is in (`aqr --tag`), and "Extract a previous
+//!   version…" extracts one of the versions named (the points of its journal: `aqr -j`, `--tag`)
+//!   as it was, into a folder beside the archive named after it.
 //! - Explorer runs a process for each of the paths chosen: those of a verb in a folder are
 //!   gathered into the first of them (`gather`).
 //! - `aqr.exe` is the one beside this program, else the one on `PATH` (`AQR` names another).
@@ -38,6 +42,8 @@ mod passphrase;
 mod register;
 #[cfg(windows)]
 mod run;
+#[cfg(windows)]
+mod version;
 
 #[cfg(not(windows))]
 fn main() {
@@ -119,9 +125,17 @@ fn main() -> std::process::ExitCode {
         }
         "extract" => Verb::Extract,
         "test" => Verb::Test,
+        // (one archive: a verb that takes a single selection)
+        "name-version" | "extract-version" => {
+            let Ok([archive]) = <[PathBuf; 1]>::try_from(paths) else { return fail(win::nothing(), win::no_path()) };
+            return match name {
+                "name-version" => version::name(archive),
+                _ => version::extract(archive),
+            };
+        }
         _ => {
             let usage = "aqr-win --register | --unregister | compress[-passphrase|-zip|-7z] PATH... | \
-                         extract ARCHIVE... | test ARCHIVE...";
+                         extract ARCHIVE... | test ARCHIVE... | name-version ARCHIVE | extract-version ARCHIVE";
             return fail(win::not_verb(), usage);
         }
     };
