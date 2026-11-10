@@ -1,8 +1,8 @@
 //! A tree written as ALZip's archives, ALZ and EGG (the specs of OctopusET, CC0): each file
 //! deflated as zlib 1.3.1 does it (aqr-flate's emulation, so that the archive recompresses
 //! whole), or stored where that is no smaller; the files of a batch deflated on the pool's
-//! threads, then written in order. Neither is tested against ALZip or Bandizip (only against
-//! our own reader).
+//! threads (a large one in chunks, `par`), then written in order. Neither is tested against
+//! ALZip or Bandizip (only against our own reader).
 //!
 //! - ALZ: the header (version 10), a local header and body for each entry, then the central
 //!   directory's 16 bytes and the end record. Sizes are of the narrowest width (1, 2, 4 or 8
@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use aqr_common::{crc32, pool};
 use aqr_flate::zlib;
 
+use crate::par;
 use crate::{Bytes, Contents, Format, Item, Keeps, Kind, Options, Progress, Tell, Tree, Written, batches, items};
 use aqr_foreign::time;
 
@@ -75,26 +76,27 @@ struct Piece {
 }
 
 /// The piece of `r` of file data `d`: deflated at `level`, stored where that is not smaller.
-fn piece(d: &Bytes, r: Range<usize>, level: u8) -> Piece {
+fn piece(d: &Bytes, r: Range<usize>, level: u8, threads: usize) -> Piece {
     let s = &d[r.clone()];
-    let (crc, size) = (crc32::hash(s), s.len() as u64);
+    let size = s.len() as u64;
     if level > 0 && !s.is_empty() {
         let p = zlib::Params { level: level.min(9), ..zlib::Params::default() };
-        if let Some(v) = zlib::compress(s, p).filter(|v| v.len() < s.len()) {
+        if let Some((v, crc)) = par::deflate_crc(s, p, threads).filter(|(v, _)| v.len() < s.len()) {
             return Piece { crc, deflated: true, size, data: Data::Deflated(v) };
         }
     }
+    let crc = crc32::hash(s);
     Piece { crc, deflated: false, size, data: Data::Stored(d.clone(), r) }
 }
 
 /// The pieces of a file: one for ALZ, one for each `limit` bytes for EGG (none for an empty
 /// file there).
-fn pieces(d: Bytes, level: u8, limit: usize, empty_one: bool) -> Vec<Piece> {
+fn pieces(d: Bytes, level: u8, limit: usize, empty_one: bool, threads: usize) -> Vec<Piece> {
     if d.is_empty() {
-        return if empty_one { vec![piece(&d, 0..0, level)] } else { Vec::new() };
+        return if empty_one { vec![piece(&d, 0..0, level, threads)] } else { Vec::new() };
     }
     let n = d.len();
-    (0..n).step_by(limit).map(|s| piece(&d, s..(s + limit).min(n), level)).collect()
+    (0..n).step_by(limit).map(|s| piece(&d, s..(s + limit).min(n), level, threads)).collect()
 }
 
 /// The entries of `t` to write as format `name`; the CLI refuses a passphrase, but if one is
@@ -128,7 +130,7 @@ fn bodies(
         &Kind::File(k) => {
             tell(Progress::Started(k));
             let d = c.read(k)?;
-            let p = pieces(d, cut.level, cut.limit, cut.empty_one);
+            let p = pieces(d, cut.level, cut.limit, cut.empty_one, o.threads);
             tell(Progress::Ended(k));
             let n = done.fetch_add(c.size(k), Ordering::Relaxed) + c.size(k);
             tell(Progress::Done { done: n, total });

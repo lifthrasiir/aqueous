@@ -1,6 +1,7 @@
 //! A tree written as a ZIP archive (APPNOTE 6.3): each file deflated as zlib 1.3.1 does it
 //! (aqr-flate's emulation, so that the archive recompresses whole), or stored where that is no
-//! smaller; the files of a batch deflated on the pool's threads, then written in order.
+//! smaller; the files of a batch deflated on the pool's threads (a large one in chunks, `par`),
+//! then written in order.
 //!
 //! - Names are UTF-8, flagged so (bit 11) where they are not ASCII; a name of other bytes is
 //!   written as it is, unflagged.
@@ -23,6 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use aqr_common::{crc32, pool};
 use aqr_flate::zlib;
 
+use crate::par;
 use crate::{
     Bytes, Contents, Extra, Format, Item, Keeps, Kind, Options, Progress, Tell, Tree, Written, batches, items,
 };
@@ -127,7 +129,7 @@ pub fn write(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tell: &
                 &Kind::File(k) => {
                     tell(Progress::Started(k));
                     let d = c.read(k)?;
-                    let mut b = deflate(d, level);
+                    let mut b = deflate(d, level, o.threads);
                     if let Some(p) = &o.passphrase {
                         let salt = crate::random()?;
                         let data = Data::Of(crypt::winzip_aes_encrypt(p, &salt, b.data.bytes()));
@@ -189,14 +191,15 @@ pub fn write(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tell: &
 }
 
 /// The body of file data `d`: deflated at `level`, stored where that is not smaller.
-fn deflate(d: Bytes, level: u8) -> Body {
-    let (crc, size) = (crc32::hash(&d), d.len() as u64);
+fn deflate(d: Bytes, level: u8, threads: usize) -> Body {
+    let size = d.len() as u64;
     if level > 0 && !d.is_empty() {
         let p = zlib::Params { level: level.min(9), ..zlib::Params::default() };
-        if let Some(v) = zlib::compress(&d, p).filter(|v| v.len() < d.len()) {
+        if let Some((v, crc)) = par::deflate_crc(&d, p, threads).filter(|(v, _)| v.len() < d.len()) {
             return Body { crc, method: DEFLATED, size, data: Data::Deflated(v), aes: None };
         }
     }
+    let crc = crc32::hash(&d);
     Body { crc, method: STORED, size, data: Data::Read(d), aes: None }
 }
 

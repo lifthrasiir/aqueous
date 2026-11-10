@@ -1263,6 +1263,48 @@ pub fn compress_onto(data: &[u8], p: Params, out: Vec<u8>) -> Option<Vec<u8>> {
     }
 }
 
+/// `data[dict..]` compressed with parameters `p` as one part of a stream cut in pieces (pigz's
+/// way): `data[..dict]` (at most the window's size, the 32 KiB before the part) is its preset
+/// dictionary, which its matches may reach; it ends on a byte boundary, as zlib's `Z_SYNC_FLUSH`
+/// (an empty stored block after the last, which is not final) unless `last`, where its last
+/// block is final. Concatenated, such parts are one raw DEFLATE stream. The tokens are those of
+/// the emulator run on the whole `data`, started at `dict` (not what zlib does after
+/// `deflateSetDictionary`, whose window is not that of a stream). `None` for invalid parameters
+/// or `dict` out of range.
+pub fn compress_part(data: &[u8], dict: usize, p: Params, last: bool) -> Option<Vec<u8>> {
+    if !p.valid() || dict >= data.len() && !last || dict > data.len() {
+        return None;
+    }
+    let mut e = Emulator::new(data, p);
+    if !e.skip_to(dict) {
+        return None;
+    }
+    let part = &data[dict..];
+    let limit = p.block_tokens();
+    let mut w = crate::write::Writer::append_to(Vec::with_capacity(part.len() / 4 + 64));
+    let mut start = dict;
+    loop {
+        let mut tokens = Vec::with_capacity(limit.min(data.len() - start + 1));
+        let end_of_data = e.run(&mut tokens, limit);
+        let (lf, df) = freqs(&tokens);
+        let end = start + tokens.iter().map(|t| t.span()).sum::<usize>();
+        let b = flush_block(&e, start, end, tokens, &lf, &df, end_of_data && last);
+        let toks = match &b.body {
+            Body::Fixed { tokens } | Body::Dynamic { tokens, .. } => &tokens[..],
+            Body::Stored { .. } => &[],
+        };
+        w.block(&b, toks, part).ok()?;
+        start = end;
+        if end_of_data {
+            if !last {
+                let sync = Block { last: false, body: Body::Stored { pad: 0, len: 0 } };
+                w.block(&sync, &[], part).ok()?;
+            }
+            return w.finish(0, &[]).ok();
+        }
+    }
+}
+
 /// An emulation that has followed a stream's first tokens (in [`crate::detect`]): what it
 /// mispredicted on the way, and the emulator after them, to carry on from.
 pub struct Followed<'a> {

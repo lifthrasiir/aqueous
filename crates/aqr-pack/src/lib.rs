@@ -16,6 +16,7 @@ pub use aqr_formula::aqr::{Entry, EntryNode, Extra, Time, Tree};
 
 pub mod alzip;
 pub mod filter;
+mod par;
 pub mod sevenz;
 pub mod tar;
 pub mod zip;

@@ -18,7 +18,7 @@ Zstandard jobs). Only `.lzma` (a single LZMA stream, no parts) is one thread's.
 
 | format | `-l` (default) | how | `-P` |
 |---|---|---|---|
-| ZIP | zlib's 0–9 (6) | each file as zlib 1.3.1 deflates it (aqr-flate's emulator), stored where no smaller | WinZip's AES-256 (AE-2) |
+| ZIP | zlib's 0–9 (6) | each file as zlib 1.3.1 deflates it (aqr-flate's emulator; a file of 4 MiB on in chunks, below), stored where no smaller | WinZip's AES-256 (AE-2) |
 | 7z | XZ Utils' presets 0–9 (6) | one solid folder of LZMA2 (liblzma's raw encoder) in parts of `total / threads` (1 MiB to 4 dictionaries), each from a dictionary reset; Copy at 0 | AES-256, the header too |
 | ALZ, EGG | zlib's 0–9 (6) | as ZIP's; ALZ's names in CP949 where they all can be, EGG's in UTF-8 | — |
 | tar | — | pax, kept to ustar where that holds an entry | — |
@@ -30,6 +30,17 @@ Zstandard jobs). Only `.lzma` (a single LZMA stream, no parts) is one thread's.
 
 liblzma is XZ Utils' (0BSD), built from its source by the `liblzma` crate (not the system's),
 used as a black box.
+
+A file of 4 MiB or more is deflated in chunks of 512 KiB on the pool (pigz's way), in ZIP, ALZ
+and EGG (an EGG block of up to 1 GiB), where there are two threads or more: each chunk has the
+32 KiB before it as its preset dictionary (aqr-flate's `zlib::compress_part`: the emulator
+started at the chunk, so the chunk is not zlib's own output) and ends on a byte boundary with an
+empty stored block (`Z_SYNC_FLUSH`), the last one final, so that the chunks in order are one
+DEFLATE stream; the CRC-32s of the chunks are made with them and combined. Smaller files, and
+any with `-T 1`, are deflated whole, byte for byte as before. Encryption takes the stream
+afterwards, as for any other. The cost is 16 bytes or so a chunk and the matches cut at the
+chunk's start; 128 KiB to 2 MiB chunks gave the same speed within 10% (the dictionary's 32 KiB
+is run again for each), 512 KiB the size close to the whole's.
 
 ## What is kept
 
@@ -57,6 +68,18 @@ On an M4 (10 cores), 7z at level 6 of `third_party` (230.2 MB): 6.2 s and 113.7 
 48.3 s and 107.0 MB on one; `7zz a -mx6 -mmt10`: 10.7 s, 88.7 MB. ALZ and EGG of 48 files of 1
 MiB (50.3 MB): 0.22 s on 10 threads, 1.44 s on one.
 
+One file, 300,000,000 bytes (the head of enwik9) alone as ZIP at level 6, on an M4 (10 cores):
+
+| | time | size | peak RSS | instructions |
+|---|---|---|---|---|
+| before, 10 threads | 7.13 s | 108,820,960 | 395 MiB | 119.4 G |
+| after, 10 threads | 1.66 s | 108,832,255 (+0.010%) | 513 MiB | 125.4 G (+5%) |
+| before, `-T 1` | 7.14 s | 108,820,960 | 395 MiB | 119.4 G |
+| after, `-T 1` | 7.27 s | 108,820,960 (identical) | 395 MiB | 119.5 G |
+
+`unzip -t` and `7zz t` accept it (`tests/large.rs`). `aqr -c` of that ZIP still takes its
+stream apart whole: 86,586,961 bytes before, 86,592,487 of the chunked one, in the same time.
+
 ## Status
 
 Left:
@@ -66,6 +89,5 @@ Left:
   it puts executables under BCJ or ARM64 filters. Ordering the folder by extension, as 7-Zip
   does, was measured not to help: 107.4 -> 115.7 MB on one thread; 114.1 -> 111.7 MB but 6.3
   -> 11.9 s on 10.
-- A single large file deflated in parallel in ZIP, ALZ and EGG (pigz's way).
 - Encryption of ALZ and EGG (aqr-unpack does not decrypt them, to check against).
 - RAR is not written: a proprietary format, whose compressor RARLAB keeps to itself.
