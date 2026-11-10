@@ -22,6 +22,21 @@ pub const MAX_SAMPLES: usize = 1 << 30;
 /// holds them while it parses them.
 pub const HEADER_MAX: usize = 1 << 16;
 
+/// Most bytes between a group's streams (the part module holds them while the group's tiles are
+/// decoded as tasks), and, at the head of a group, for it to run with others.
+pub const GAP_MAX: usize = 1 << 12;
+
+/// Most bytes of a group of streams that the part module holds for its tasks: its gaps, the
+/// headers, and a record of each ([`script_bytes`]).
+pub const SCRIPT_JOB: usize = 1 << 17;
+
+/// Bytes the part module holds of a stream of a group: the lengths of its gap, its headers and
+/// its data, the flag, and the gap and the headers.
+pub fn script_bytes(gap: usize, header: usize, len: usize) -> usize {
+    use aqr_common::varint::len as vl;
+    vl(gap as u64) + vl(header as u64) + vl(len as u64) + 1 + gap + header
+}
+
 /// The record of a stream in the info: where its SOI is in a cut of `cut_len` bytes, the bytes of
 /// its entropy-coded data, and its flags (0 or 1).
 pub fn stream_record(info: &[u8], at: &mut usize, cut_len: u64) -> Result<(usize, usize, u64), Error> {
@@ -80,15 +95,30 @@ impl Layout {
             }
             jobs.push(Job { first: streams.len(), count, bands, chunk });
             chunk += bands;
-            for _ in 0..count {
+            let group = bands == 1;
+            let mut script = 0;
+            for k in 0..count {
                 let (soi, len, flags) = stream_record(info, &mut at, cut.len() as u64)?;
                 let mut header = lossless::parse(cut, soi)?;
                 // the entropy-coded data is not in the cut: the EOI follows the scan's header
                 if header.end != header.start || header.samples() > MAX_SAMPLES || header.start + 2 - soi > HEADER_MAX {
                     return bad("stream");
                 }
-                if streams.last().is_some_and(|p| soi < p.header.end) {
+                // (the cut goes on after the EOI)
+                let prev = streams.last().map(|p| p.header.start + 2);
+                if prev.is_some_and(|p| soi < p) {
                     return bad("order of the streams");
+                }
+                if group {
+                    // (what the part module holds of a group while its tasks decode it)
+                    let gap = if k == 0 { 0 } else { soi - prev.unwrap_or(0) };
+                    if gap > GAP_MAX {
+                        return bad("gap in a group");
+                    }
+                    script += script_bytes(gap, header.start + 2 - soi, len);
+                    if script > SCRIPT_JOB {
+                        return bad("group");
+                    }
                 }
                 header.last_code = flags == 1;
                 streams.push(Stream { len, header });

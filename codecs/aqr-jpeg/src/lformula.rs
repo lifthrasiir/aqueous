@@ -8,7 +8,7 @@ use aqr_common::varint;
 use aqr_formula::{Formula, Kind, Module, Node};
 
 use crate::lmodel::{self, Model};
-use crate::lmodule::{HEADER_MAX, MAX_SAMPLES};
+use crate::lmodule::{GAP_MAX, HEADER_MAX, MAX_SAMPLES, SCRIPT_JOB, script_bytes};
 use crate::lossless::{self, Header, Samples};
 use crate::par::prelude::*;
 
@@ -73,6 +73,12 @@ fn jobs(coded: &[Coded]) -> Vec<(usize, usize, usize)> {
     let mut jobs: Vec<(usize, usize, usize)> = Vec::new();
     // samples of the job being grown, if it is a group
     let mut open = 0;
+    // what the job being grown takes of the script of the part module, and its room (the gap
+    // before its first stream may be held as well)
+    let mut script = 0;
+    let bytes = |c: &Coded, gap: usize| {
+        script_bytes(gap, c.header.start + 2 - c.soi, c.header.end - c.header.start)
+    };
     for (i, c) in coded.iter().enumerate() {
         let n = c.header.samples();
         if n >= BAND_MIN {
@@ -82,14 +88,23 @@ fn jobs(coded: &[Coded]) -> Vec<(usize, usize, usize)> {
             open = 0;
             continue;
         }
+        let gap = if i > 0 { c.soi - coded[i - 1].header.end } else { 0 };
         match jobs.last_mut() {
-            Some(j) if open > 0 && open + n <= GROUP && coded[j.0].header.comps.len() == c.header.comps.len() => {
+            Some(j)
+                if open > 0
+                    && open + n <= GROUP
+                    && coded[j.0].header.comps.len() == c.header.comps.len()
+                    && gap <= GAP_MAX
+                    && script + bytes(c, gap) <= SCRIPT_JOB =>
+            {
                 j.1 += 1;
                 open += n;
+                script += bytes(c, gap);
             }
             _ => {
                 jobs.push((i, 1, 1));
                 open = n;
+                script = bytes(c, GAP_MAX);
             }
         }
     }
@@ -198,6 +213,24 @@ mod tests {
         let lay = crate::lmodule::Layout::parse(&f.streams[0].data, &f.streams[1].data).unwrap();
         assert_eq!(lay.streams.len(), 5);
         assert_eq!(lay.jobs.iter().map(|j| (j.count, j.bands)).collect::<Vec<_>>(), [(3, 1), (1, 2), (1, 1)]);
+    }
+
+    /// Several groups, which the part module decodes as tasks a round at a time: with gaps, one
+    /// of them too wide to share a round or a group with the stream before it.
+    #[test]
+    fn groups_in_rounds() {
+        let mut file = b"MM\0* groups ".to_vec();
+        for k in 0..7u32 {
+            file.extend_from_slice(&synthetic(12, 1500, 1000, &[(1, 1)], 1 + (k % 7) as u8, 0, 0, k));
+            file.extend(std::iter::repeat_n(b'.', [0, 5, 9000, 0, 100, 0, 3][k as usize]));
+        }
+        let f = encode(&file, 0).expect("coded");
+        assert_eq!(back(&f, file.len()), file);
+        let lay = crate::lmodule::Layout::parse(&f.streams[0].data, &f.streams[1].data).unwrap();
+        assert_eq!(lay.streams.len(), 7);
+        // (a gap of 9000 bytes keeps the third and the fourth apart)
+        assert!(lay.jobs.iter().all(|j| j.bands == 1));
+        assert!(lay.jobs.len() >= 4, "{:?}", lay.jobs.iter().map(|j| j.count).collect::<Vec<_>>());
     }
 
     #[test]

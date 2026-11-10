@@ -5536,6 +5536,13 @@ fn lossless_jpeg_plan_holds() {
     let mut big = b"MM\0* one ".to_vec();
     big.extend_from_slice(&lossless_stream(1300, 900, 2, 7));
     plan_holds("bands", aqr_jpeg::lformula::encode(&big, 1).unwrap(), &big);
+    // groups of the size that fill a job, in a round of tasks, one after a gap too wide for it
+    let mut rounds = b"II*\0 rounds ".to_vec();
+    for k in 0..9u32 {
+        rounds.extend_from_slice(&lossless_stream(1500 + k as u16, 1000, 1, k));
+        rounds.extend(std::iter::repeat_n(b'.', [0, 7, 0, 9000, 0, 0, 40, 0, 1][k as usize]));
+    }
+    plan_holds("rounds", aqr_jpeg::lformula::encode(&rounds, 1).unwrap(), &rounds);
     let mut mixed = b"II*\0 mixed ".to_vec();
     mixed.extend_from_slice(&lossless_stream(30, 20, 1, 1));
     mixed.extend_from_slice(&lossless_stream(1200, 900, 3, 2));

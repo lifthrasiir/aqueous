@@ -12,7 +12,7 @@ use aqr_common::arith::ArithDecoder;
 
 use crate::jpeg::{Error, err};
 use crate::lmodel::{self, Frame, Model};
-use crate::lmodule::{self, HEADER_MAX};
+use crate::lmodule::{self, GAP_MAX, HEADER_MAX};
 use crate::lossless::{self, Emitter, Header, Rows};
 
 /// Pages of the windows of the module as a part module ([`decode_part`]): of each input and of
@@ -85,6 +85,9 @@ struct State<'a> {
     cut_len: u64,
     /// the headers of the stream being read, from its SOI to the EOI after the scan's header
     hb: Vec<u8>,
+    /// a stream's record, and a job's, read before they were taken
+    ahead: Option<(u64, u64, u64)>,
+    job_ahead: Option<(u64, u64)>,
 }
 
 fn num(r: &mut Reader) -> Result<u64, Error> {
@@ -151,16 +154,45 @@ impl State<'_> {
     /// The next stream of the job: the cut up to its headers put, and the headers (put but the
     /// EOI after them, which is left in `hb`), and the bytes of its data.
     fn next_stream(&mut self, sink: &mut Sink) -> Result<(Header, usize), Error> {
-        let soi = num(&mut self.info)?;
-        let len = num(&mut self.info)?;
-        let flags = num(&mut self.info)?;
-        if soi > self.cut_len || flags > 1 {
+        let (soi, len, flags) = self.record()?;
+        if soi > self.cut_len {
             return bad("stream");
         }
         self.copy_to(soi, sink)?;
         let h = self.read_header(flags == 1)?;
         sink.put(&self.hb[..h.start])?;
         Ok((h, usize::try_from(len).map_err(|_| Error("bad length".into()))?))
+    }
+
+    /// The next stream's record in the info: its SOI, the bytes of its data, its flags.
+    fn record(&mut self) -> Result<(u64, u64, u64), Error> {
+        if let Some(r) = self.ahead.take() {
+            return Ok(r);
+        }
+        let (soi, len, flags) = (num(&mut self.info)?, num(&mut self.info)?, num(&mut self.info)?);
+        if flags > 1 {
+            return bad("stream");
+        }
+        Ok((soi, len, flags))
+    }
+
+    /// [`State::record`], left to be taken.
+    fn peek(&mut self) -> Result<(u64, u64, u64), Error> {
+        let r = self.record()?;
+        self.ahead = Some(r);
+        Ok(r)
+    }
+
+    /// The next job: its streams and bands.
+    fn job(&mut self) -> Result<(u64, u64), Error> {
+        if let Some(j) = self.job_ahead.take() {
+            return Ok(j);
+        }
+        let (count, bands) = (num(&mut self.info)?, num(&mut self.info)?);
+        if count == 0 || bands == 0 || (bands > 1 && count > 1) || bands > 1 << 16 {
+            return bad("job");
+        }
+        Ok((count, bands))
     }
 
     /// The next chunk of the model.
@@ -219,64 +251,219 @@ pub fn run(inputs: [&mut dyn Pull; 4], lens: [u64; 4], out: &mut dyn Put, size: 
         model_left: lens[3],
         cut_len: lens[0],
         hb: Vec::with_capacity(HEADER_MAX),
+        ahead: None,
+        job_ahead: None,
     };
     let mut sink = Sink { out, total: 0, size };
     let njobs = num(&mut st.info)?;
-    for _ in 0..njobs {
-        let count = num(&mut st.info)?;
-        let bands = num(&mut st.info)?;
-        if count == 0 || bands == 0 || (bands > 1 && count > 1) || bands > 1 << 16 {
-            return bad("job");
-        }
+    let mut done = 0;
+    while done < njobs {
+        let (count, bands) = st.job()?;
         if bands == 1 {
-            group(&mut st, &mut sink, count)?;
+            done += groups(&mut st, &mut sink, count, njobs - done)?;
         } else {
             banded(&mut st, &mut sink, bands as usize)?;
+            done += 1;
         }
     }
     // the rest of the cut
     let cut_len = st.cut_len;
     st.copy_to(cut_len, &mut sink)?;
-    if sink.total != size || !st.info.done() || !st.lens.done() || st.model_left != 0 {
+    if sink.total != size
+        || st.ahead.is_some()
+        || st.job_ahead.is_some()
+        || !st.info.done()
+        || !st.lens.done()
+        || st.model_left != 0
+    {
         return bad("end of the streams");
     }
     Ok(())
 }
 
-/// A job of `count` streams, one chunk and one model for them.
-fn group(st: &mut State, sink: &mut Sink, count: u64) -> Result<(), Error> {
-    let (mut h, mut len) = st.next_stream(sink)?;
-    let comps = h.comps.len();
-    let chunk = st.chunk()?;
-    let mut d = ArithDecoder::new(&chunk);
-    let mut model = Model::new(comps);
-    for i in 0..count {
-        if i > 0 {
-            (h, len) = st.next_stream(sink)?;
-            if h.comps.len() != comps {
-                return bad("job of streams of different components");
-            }
+/// What a task of a group has: where its streams are in the script, how many, and the bytes of
+/// their data.
+type Place = [usize; 3];
+
+/// The record of a stream in a script (see [`groups`]): the gap before its headers, the headers,
+/// the bytes of its data, and the flag.
+struct Rec<'a> {
+    gap: &'a [u8],
+    header: &'a [u8],
+    len: usize,
+    last_code: bool,
+}
+
+fn rec<'a>(script: &'a [u8], at: &mut usize) -> Result<Rec<'a>, Error> {
+    use crate::model::get_varint;
+    let mut n = || -> Result<usize, Error> { usize::try_from(get_varint(script, at)?).map_err(|_| Error("bad number".into())) };
+    let (gap, header, len) = (n()?, n()?, n()?);
+    let flag = *script.get(*at).ok_or(Error("bad script".into()))?;
+    *at += 1;
+    let end = at.checked_add(gap).and_then(|e| e.checked_add(header)).filter(|&e| e <= script.len());
+    let end = end.ok_or(Error("bad script".into()))?;
+    let r = Rec { gap: &script[*at..*at + gap], header: &script[*at + gap..end], len, last_code: flag == 1 };
+    *at = end;
+    Ok(r)
+}
+
+/// The entropy-coded data of the streams of a group, one after the other (the task of a job).
+fn group_task(script: &[u8], place: Place, chunk: &[u8]) -> Result<Vec<u8>, Error> {
+    let [mut at, count, total] = place;
+    let mut out = Vec::with_capacity(total);
+    let mut d = ArithDecoder::new(chunk);
+    let mut model: Option<(usize, Model)> = None;
+    for _ in 0..count {
+        let r = rec(script, &mut at)?;
+        let mut h = lossless::parse(r.header, 0)?;
+        if h.end != h.start || h.start + 2 != r.header.len() || h.samples() > lmodule::MAX_SAMPLES {
+            return bad("stream");
+        }
+        h.last_code = r.last_code;
+        let comps = h.comps.len();
+        let (c, model) = model.get_or_insert_with(|| (comps, Model::new(comps)));
+        if *c != comps {
+            return bad("job of streams of different components");
         }
         let mut frame = Frame::new(&h);
         let mut emitter = Emitter::new(&h);
         let mut row = Vec::with_capacity(Emitter::row_room(&h));
-        let mut emitted = 0;
-        for r in 0..h.mcus().1 {
-            frame.code_row(&mut d, &mut model, r)?;
+        let start = out.len();
+        for y in 0..h.mcus().1 {
+            frame.code_row(&mut d, model, y)?;
             row.clear();
-            emitter.mcu_row(&frame, r, &mut row)?;
-            emitted += row.len();
-            sink.put(&row)?;
+            emitter.mcu_row(&frame, y, &mut row)?;
+            if out.len() + row.len() > total {
+                return bad("length of the entropy-coded data");
+            }
+            out.extend_from_slice(&row);
         }
-        if emitted != len {
+        if out.len() - start != r.len {
             return bad("length of the entropy-coded data");
         }
-        sink.put(&st.hb[h.start..])?;
     }
     if d.overrun() {
         return err("data cut off");
     }
-    Ok(())
+    Ok(out)
+}
+
+/// Most bytes of the script ([`groups`]): the jobs of a round, whose room is [`SCRIPT_JOB`] each
+/// when they are read, and the temporary gap.
+pub const SCRIPT_MAX: usize = 4 * lmodule::SCRIPT_JOB;
+const SCRIPT_CAP: usize = SCRIPT_MAX + 2 * lmodule::GAP_MAX;
+
+/// The jobs of streams coded together, `left` jobs being left, the first of `count` streams (jobs
+/// of one chunk and one model each), as many as follow it that are groups. A round of them
+/// at a time is read into a script: for each stream a record ([`rec`]) with its gap in the
+/// cut and its headers, and its chunk; they are decoded as tasks, each its streams one after the
+/// other, and put in order, each stream's gap, headers and data. A round ends before a job that
+/// is [`ROUND`] jobs on, or comes after a gap of more than [`GAP_MAX`] (the first stream of
+/// a round has its gap put at once), or whose script would not fit. Returns the jobs it took.
+fn groups(st: &mut State, sink: &mut Sink, count: u64, mut left: u64) -> Result<u64, Error> {
+    use crate::lmodule::{SCRIPT_JOB, script_bytes};
+    let all = left;
+    let mut script: Vec<u8> = Vec::with_capacity(SCRIPT_CAP);
+    let mut places: Vec<Place> = Vec::with_capacity(ROUND);
+    let mut next = Some(count);
+    while next.is_some() {
+        script.clear();
+        places.clear();
+        let mut chunks: Vec<Vec<u8>> = Vec::with_capacity(ROUND);
+        while let Some(count) = next {
+            let (soi, _, _) = st.peek()?;
+            let gap = soi.checked_sub(st.cut.taken()).ok_or(Error("bad order of the streams".into()))?;
+            let first = places.is_empty();
+            if !first && (gap > GAP_MAX as u64 || places.len() == ROUND || script.len() + SCRIPT_JOB > SCRIPT_MAX) {
+                break;
+            }
+            let job_at = script.len();
+            let mut data = 0usize;
+            for k in 0..count {
+                let (soi, len, flags) = st.record()?;
+                let gap = soi.checked_sub(st.cut.taken()).ok_or(Error("bad order of the streams".into()))?;
+                if soi > st.cut_len || (k > 0 && gap > GAP_MAX as u64) {
+                    return bad("stream");
+                }
+                let len = usize::try_from(len).map_err(|_| Error("bad length".into()))?;
+                // (the first stream of the round has its gap put now)
+                let gap = if first && k == 0 {
+                    st.copy_to(soi, sink)?;
+                    0
+                } else {
+                    gap as usize
+                };
+                let at = script.len();
+                st.cut.each(gap as u64, |p| {
+                    script.extend_from_slice(p);
+                    Some(())
+                }).ok_or(Error("bad cut".into()))?;
+                st.read_header(flags == 1)?;
+                let hlen = st.hb.len();
+                if script.len() - job_at + script_bytes(gap, hlen, len) - gap > SCRIPT_JOB {
+                    return bad("group");
+                }
+                // (the lengths before the gap)
+                let mut meta = [0u8; 32];
+                let mut m = 0;
+                for v in [gap, hlen, len] {
+                    let mut v = v as u64;
+                    while v >= 0x80 {
+                        meta[m] = v as u8 | 0x80;
+                        m += 1;
+                        v >>= 7;
+                    }
+                    meta[m] = v as u8;
+                    m += 1;
+                }
+                meta[m] = flags as u8;
+                m += 1;
+                script.resize(script.len() + m, 0);
+                script.copy_within(at..at + gap, at + m);
+                script[at..at + m].copy_from_slice(&meta[..m]);
+                script.extend_from_slice(&st.hb);
+                data = data.checked_add(len).ok_or(Error("bad length".into()))?;
+            }
+            places.push([job_at, count as usize, data]);
+            chunks.push(st.chunk()?);
+            left -= 1;
+            next = None;
+            if left > 0 {
+                let (c, bands) = st.job()?;
+                if bands == 1 {
+                    next = Some(c);
+                } else {
+                    st.job_ahead = Some((c, bands));
+                }
+            }
+        }
+        let task = |i: usize| group_task(&script, places[i], &chunks[i]).unwrap_or_default();
+        aqr_common::pool::par_each_apart(
+            places.len(),
+            THREADS,
+            2,
+            task,
+            || (),
+            |i, bytes| {
+                let [mut at, count, total] = places[i];
+                if bytes.len() != total {
+                    return bad("group");
+                }
+                let mut off = 0;
+                for _ in 0..count {
+                    let r = rec(&script, &mut at)?;
+                    let split = r.header.len() - 2;
+                    sink.put(r.gap)?;
+                    sink.put(&r.header[..split])?;
+                    sink.put(&bytes[off..off + r.len])?;
+                    sink.put(&r.header[split..])?;
+                    off += r.len;
+                }
+                Ok(())
+            },
+        )?;
+    }
+    Ok(all - left)
 }
 
 /// Bands decoded at once, as tasks, and the task slots of the module.
@@ -392,34 +579,109 @@ pub fn plan(initial: u64, cut: &[u8], info: &[u8], lens: &[u8]) -> Option<(u64, 
     }
     let (mut at, mut la) = (0, 0);
     let njobs = get_varint(info, &mut at).ok()?;
+    // the jobs: their streams (where each starts, the bytes of its data, its headers) and chunks
+    struct Job {
+        bands: u64,
+        streams: Vec<(usize, usize, Header)>,
+        chunks: Vec<usize>,
+    }
+    let mut jobs = Vec::new();
     for _ in 0..njobs {
         let count = get_varint(info, &mut at).ok()?;
         let bands = get_varint(info, &mut at).ok()?;
         if count == 0 || bands == 0 || (bands > 1 && count > 1) || bands > 1 << 16 {
             return None;
         }
-        let mut headers = Vec::new();
+        let mut streams = Vec::new();
         for _ in 0..count {
-            let (soi, _, flags) = lmodule::stream_record(info, &mut at, cut.len() as u64).ok()?;
+            let (soi, len, flags) = lmodule::stream_record(info, &mut at, cut.len() as u64).ok()?;
             let mut h = lossless::parse(cut, soi).ok()?;
             if h.end != h.start || h.start + 2 - soi > HEADER_MAX || h.samples() > lmodule::MAX_SAMPLES {
                 return None;
             }
             h.last_code = flags == 1;
-            headers.push(h);
+            streams.push((soi, len, h));
         }
         let mut chunks = Vec::new();
         for _ in 0..bands {
             chunks.push(usize::try_from(get_varint(lens, &mut la).ok()?).ok()?);
         }
-        let h0 = &headers[0];
-        let model: u64 = Model::bytes(h0.comps.len()).iter().map(|&b| block(b)).sum();
-        // a frame, its emitter and the room for a row of its data
-        let frame = |h: &Header| Frame::bytes(h) + Emitter::bytes() + block(n(Emitter::row_room(h)));
-        if bands == 1 {
-            sim.peak(block(n(chunks[0])) + model + headers.iter().map(frame).max()?);
+        if streams.windows(2).any(|w| w[1].0 < w[0].2.start + 2) {
+            return None;
+        }
+        jobs.push(Job { bands, streams, chunks });
+    }
+    // a frame, its emitter and the room for a row of its data
+    let frame = |h: &Header| Frame::bytes(h) + Emitter::bytes() + block(n(Emitter::row_room(h)));
+    let model_of = |h: &Header| -> u64 { Model::bytes(h.comps.len()).iter().map(|&b| block(b)).sum() };
+    // (where the cut has been read to)
+    let mut taken = 0usize;
+    let mut j = 0;
+    while j < jobs.len() {
+        let job = &jobs[j];
+        let (soi, _, h0) = &job.streams[0];
+        if job.bands == 1 {
+            // groups, a round of them at a time: the script, the places, then for each round the
+            // list of chunks and the chunks
+            let top = sim.top;
+            sim.take(n(SCRIPT_CAP));
+            sim.take(12 * n(ROUND));
+            while j < jobs.len() && jobs[j].bands == 1 {
+                let t = sim.top;
+                sim.take(12 * n(ROUND));
+                let (mut script, mut round) = (0usize, Vec::new());
+                while j < jobs.len() && jobs[j].bands == 1 {
+                    let job = &jobs[j];
+                    let gap = job.streams[0].0.checked_sub(taken)?;
+                    if !round.is_empty()
+                        && (gap > GAP_MAX || round.len() == ROUND || script + lmodule::SCRIPT_JOB > SCRIPT_MAX)
+                    {
+                        break;
+                    }
+                    let job_at = script;
+                    for (k, (soi, len, h)) in job.streams.iter().enumerate() {
+                        let gap = soi.checked_sub(taken)?;
+                        if k > 0 && gap > GAP_MAX {
+                            return None;
+                        }
+                        let gap = if round.is_empty() && k == 0 { 0 } else { gap };
+                        let hlen = h.start + 2 - soi;
+                        let bytes = lmodule::script_bytes(gap, hlen, *len);
+                        if script - job_at + bytes - gap > lmodule::SCRIPT_JOB {
+                            return None;
+                        }
+                        script += bytes;
+                        taken = h.start + 2;
+                    }
+                    sim.take(n(job.chunks[0]));
+                    round.push(j);
+                    j += 1;
+                }
+                // a task: its output, its model, and the frame of the largest stream
+                let own = |&j: &usize| -> Option<(u64, u64)> {
+                    let job = &jobs[j];
+                    let out: usize = job.streams.iter().map(|s| s.1).sum();
+                    let most = job.streams.iter().map(|s| frame(&s.2)).max()?;
+                    Some((block(n(out)) + model_of(&job.streams[0].2) + most, block(n(out))))
+                };
+                let owns: Vec<(u64, u64)> = round.iter().map(own).collect::<Option<_>>()?;
+                if round.len() >= 2 {
+                    sim.spawned(0, owns.iter().map(|o| sim.task(o.0)).collect());
+                    sim.peak(block(n(round.len())) + owns.iter().map(|o| o.1).max()?);
+                } else {
+                    sim.peak(owns[0].0);
+                }
+                sim.top = t;
+            }
+            sim.top = top;
             continue;
         }
+        j += 1;
+        taken = h0.start + 2;
+        let _ = soi;
+        let chunks = &job.chunks;
+        let bands = job.bands;
+        let model = model_of(h0);
         // the rows of the bands, and the rows held for the data
         let nc = n(h0.comps.len());
         let held = block(4 * nc)

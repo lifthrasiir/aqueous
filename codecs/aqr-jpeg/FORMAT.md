@@ -705,6 +705,21 @@ their chunks read, each band is a task that gives its rows as bytes (for each MC
 component's rows of it, 16 bits to a sample, little-endian), and the rows are put in order, their
 data written as they come. The output is the same however many run at once.
 
+The groups may be decoded as tasks as well, a round of them at a time (the same class). A round
+holds a *script* of at most 2^19 bytes (plus the gap room), and takes up to 16 jobs of groups, in
+order. For each stream of a group the script has: varint lengths of the gap (the bytes of the cut
+before the stream's SOI, since the end of the stream before it, which are copied to the script;
+those before the first stream of the round are written at once, and are not in the script),
+of the headers (SOI to the EOI after the SOS) and of the data, the flag byte, the gap and the
+headers. A job is not put in the round that already has a job where the gap before its first
+stream is more than 2^12 bytes, the round has 16 jobs, or the script has less than 2^17 bytes of
+room; it is the first of the next. In a group, no gap after its first stream is more than 2^12
+bytes, and a stream's record, gap and headers, summed over the group (without the first gap), are
+at most 2^17 bytes; the files are otherwise refused. Each job is a task that parses the headers
+of its records and gives the data of its streams, one after the other; the parent puts, for each
+stream, the gap, the headers up to the EOI, the data and the EOI, in order. The output is the same
+however many run at once. `aqr_jpeg::lformula` ends a group at a gap or a sum over these.
+
 ## L3. The headers
 
 A stream's headers are parsed from the cut at `soi`: markers up to its SOS, among them DHT (DC
