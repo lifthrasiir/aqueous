@@ -47,7 +47,7 @@ mod tree;
 pub use listing::{Applied, Listed};
 pub use locate::{block_at, footer_of, locate, trim};
 pub use mirror::Mirroring;
-pub use rewrite::{Rewritten, rewrite};
+pub use rewrite::{History, Rewritten, rewrite, rewrite_as};
 pub use segment::{Batch, ContentAt, Layout, Leaf, Placed, Segment, SegmentWriter, crossing, kill};
 pub use tree::{
     Entry, EntryNode, Extra, MAC_FLAGS_ALLOWED, Member, Status, Time, Tree, WIN_ATTRS_ALLOWED, Xattr, Zone,
@@ -2947,6 +2947,18 @@ fn opened(
     salvaging: bool,
     upto: Option<usize>,
 ) -> Decoded<(Blocks<'_>, Option<(Tree, Vec<ContentRef>)>, Option<Status>, Vec<JournalPoint>)> {
+    opened_with(c, sealed, salvaging, upto, None)
+}
+
+/// [`opened`], each segment read told too, in `segments` where it is given.
+#[allow(clippy::type_complexity)]
+fn opened_with<'c>(
+    c: &'c [u8],
+    sealed: bool,
+    salvaging: bool,
+    upto: Option<usize>,
+    mut segments: Option<&mut Vec<tree::SegmentInfo>>,
+) -> Decoded<(Blocks<'c>, Option<(Tree, Vec<ContentRef>)>, Option<Status>, Vec<JournalPoint>)> {
     let (fields_start, archive_end, size_hint, metadata) = footer_fields(Payload::Plain(c))?;
     // (salvaging an encrypted archive's payload, its blocks lost are spacer blocks, its size
     // hint block among them maybe)
@@ -3009,7 +3021,11 @@ fn opened(
             }
             Ok(Some((leaf, Some(outputs[leaf]))))
         };
+        let (told, points) = (m.status, segments.is_some().then(|| m.journal.clone()));
         trees.push(tree_of(m, at, prev, &mut leaf_at, outputs.len(), salvaging.then_some(&mut lost))?);
+        if let (Some(all), Some(journal)) = (segments.as_deref_mut(), points) {
+            all.push(tree::SegmentInfo { tree: trees.last().expect("just pushed").clone(), status: told, journal });
+        }
         prev = at;
         if upto == Some(at) {
             ended = true;

@@ -113,7 +113,9 @@
 //!   is left ([`aqr::rewrite`]): what appends replaced or took away, and an append not
 //!   committed, out of the file. Written beside it and checked, then
 //!   put in its place by a rename. With `--delete`, of the tree without its paths (no
-//!   tombstones). Not of an archive of mirror blocks (`-A`) for now.
+//!   tombstones). Not of an archive of mirror blocks (`-A`) for now. Of an archive with journal
+//!   points, `--keep-since SPEC` keeps those from the one it picks on (the segments before it
+//!   written as one state, the others as they are), `--drop-history` none ([`aqr::History`]).
 //! - `--move ARCHIVE PATH --rename TO...`: each path moved to its `TO` (in the order given, the
 //!   directories on the way made, without their metadata), the archive written again as
 //!   `--compact` writes it, as a segment cannot take the contents of another but by an import
@@ -285,7 +287,7 @@ usage: aqr [OPTIONS] INPUT [--rename TO]...
        aqr -I [-v] ARCHIVE [PATH]...
        aqr --delete [--compact] [-q] ARCHIVE PATH...
        aqr --move [-q | -v] ARCHIVE PATH --rename TO...
-       aqr --compact [-q | -v] ARCHIVE
+       aqr --compact [-q | -v] [--keep-since SPEC | --drop-history] ARCHIVE
        unaqr [OPTIONS] ARCHIVE [PATH [--rename TO]]...
 
 Modes:
@@ -308,6 +310,10 @@ Modes:
                         the directories on the way made), writing it again as --compact
       --compact         write an archive again of what it holds (with --delete, of what
                         is left), what was taken out or replaced out of the file
+      --keep-since SPEC with --compact, of an archive with journal points (-j): keep
+                        those from the one SPEC picks (as --at) on, with their states;
+                        what was before is written as one state
+      --drop-history    with --compact: keep no point, and none of the states between
 
 Compressing (aqr -o ARCHIVE INPUT [--rename TO]...):
   INPUT                 a file or directory; several of them archived by their paths,
@@ -466,6 +472,10 @@ struct Args {
     at: Option<journal::At>,
     /// `--history`: the journal points of the archives listed.
     history: bool,
+    /// `--keep-since SPEC`: `--compact` keeping the journal points from the one `SPEC` picks on
+    /// (with the states between); `--drop-history`: dropping them all, with those states.
+    keep_since: Option<journal::At>,
+    drop_history: bool,
     /// `-a`: compressing, the inputs appended to an archive ([`append`]), the first input or `-o`.
     append: bool,
     /// `-s` (with `append`): what the archive holds that the inputs do not taken away too.
@@ -647,6 +657,8 @@ fn parse() -> Result<Args, String> {
         journal: None,
         at: None,
         history: false,
+        keep_since: None,
+        drop_history: false,
         append: false,
         sync: false,
         edit: None,
@@ -735,6 +747,8 @@ fn parse() -> Result<Args, String> {
             "-j" | "--journal" => a.journal = Some(text(value("-j")?)),
             "--at" => a.at = Some(journal::at_of(&text(value("--at")?))?),
             "--history" => a.history = true,
+            "--keep-since" => a.keep_since = Some(journal::at_of(&text(value("--keep-since")?))?),
+            "--drop-history" => a.drop_history = true,
             "-a" | "--append" => (a.append, a.sync) = (true, false),
             "-s" | "--sync" => (a.append, a.sync) = (true, true),
             "-L" | "--dereference" => a.dereference = true,
@@ -866,6 +880,9 @@ fn parse() -> Result<Args, String> {
     if a.edit.is_some() || a.compact {
         edit_args(&mut a, renames, last_dir.is_some())?;
         return Ok(a);
+    }
+    if a.keep_since.is_some() || a.drop_history {
+        return Err("--keep-since and --drop-history are for --compact".into());
     }
     if a.history {
         if a.decompress || a.list || a.info || a.journal.is_some() || a.at.is_some() || a.output.is_some() {
@@ -1014,6 +1031,15 @@ fn edit_args(a: &mut Args, renames: Vec<(usize, PathBuf)>, dir: bool) -> Result<
     ];
     if let Some((_, what)) = modes.iter().find(|m| m.0) {
         return Err(format!("{o} with {what}"));
+    }
+    if a.keep_since.is_some() && a.drop_history {
+        return Err("--keep-since with --drop-history".into());
+    }
+    if a.keep_since.is_some() && a.edit.is_some() {
+        return Err("--keep-since is for --compact alone (the paths edited are not in the states between)".into());
+    }
+    if (a.keep_since.is_some() || a.drop_history) && a.edit == Some(edit::Edit::Delete) && !a.compact {
+        return Err("--drop-history is for --compact (--delete alone only adds)".into());
     }
     if a.inputs.iter().any(|i| stdio::is(i)) {
         return Err(format!("{o}: an archive in place, not - (standard input)"));

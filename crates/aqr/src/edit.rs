@@ -141,7 +141,8 @@ fn compact(a: &Args, path: &Path, o: &append::Opened, t: &Tree) -> Result<(u64, 
         let (lead, c) = (&map[..p.at.start as usize], &map[p.at.start as usize..p.at.end as usize]);
         let mut w = std::io::BufWriter::with_capacity(8 << 20, &file);
         w.write_all(lead).map_err(|e| perr(&e))?;
-        let r = aqr::rewrite(c, t, a.opt.level, a.opt.threads, &mut w).map_err(|e| err(&e))?;
+        let history = history_of(a, c).map_err(|e| err(&e))?;
+        let r = aqr::rewrite_as(c, t, a.opt.level, a.opt.threads, &mut w, history).map_err(|e| err(&e))?;
         w.flush().map_err(|e| perr(&e))?;
         drop(w);
         crate::sync_file(&file).map_err(|e| perr(&e))?;
@@ -162,6 +163,26 @@ fn compact(a: &Args, path: &Path, o: &append::Opened, t: &Tree) -> Result<(u64, 
             _ = fs::remove_file(&part);
             Err(e)
         }
+    }
+}
+
+/// What becomes of the journal points of archive `c` written again: as `--keep-since` and
+/// `--drop-history` tell; an error where it has some and neither is given.
+fn history_of(a: &Args, c: &[u8]) -> Result<aqr::History, String> {
+    let archive = aqr::open(c, &aqr::NoModules).map_err(|e| e.to_string())?;
+    let points = archive.journal();
+    match (&a.keep_since, a.drop_history) {
+        (Some(at), _) => {
+            let p = crate::journal::pick(points, at).map_err(|e| format!("--keep-since: {e}"))?;
+            Ok(aqr::History::Keep { from: p.metadata, since: p.time })
+        }
+        (None, true) => Ok(aqr::History::Drop),
+        (None, false) if points.is_empty() => Ok(aqr::History::Refuse),
+        (None, false) => Err(format!(
+            "it has {} journal point{}: --keep-since SPEC keeps those from one on, --drop-history drops them all",
+            points.len(),
+            if points.len() == 1 { "" } else { "s" }
+        )),
     }
 }
 

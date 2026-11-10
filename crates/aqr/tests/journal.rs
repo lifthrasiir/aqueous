@@ -116,7 +116,9 @@ fn asking_what_is_not_there() {
         assert!(!o.status.success() && stderr(&o).contains("no journal points"), "{args:?}: {}", stderr(&o));
     }
     ok(&d, Some(&day(5)), &["-q", "-j", "only", "-o", "j.aqr", "src"]);
-    for (at, what) in [("#2", "it has 1"), ("@other", "no point labeled"), ("2026-10", "the earliest is"), ("#0", "--at")] {
+    for (at, what) in
+        [("#2", "it has 1"), ("@other", "no point labeled"), ("2026-10", "the earliest is"), ("#0", "--at")]
+    {
         let o = aqr_at(&d, None, &["-t", "-q", "--at", at, "j.aqr"]);
         assert!(!o.status.success() && stderr(&o).contains(what), "{at}: {}", stderr(&o));
     }
@@ -140,4 +142,107 @@ fn asking_what_is_not_there() {
     // writing it again would lose the points
     let o = aqr_at(&d, None, &["--compact", "j.aqr"]);
     assert!(!o.status.success() && stderr(&o).contains("journal"), "{}", stderr(&o));
+}
+
+/// Some text of `n` bytes that does not compress to nothing.
+fn words(seed: u64, n: usize) -> Vec<u8> {
+    let mut x = seed;
+    let mut t = Vec::new();
+    while t.len() < n {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        t.extend_from_slice(format!("{:x} ", x >> 20).as_bytes());
+    }
+    t.truncate(n);
+    t
+}
+
+/// What `--at` shows of each point of `archive`: the paths and the bytes of each file.
+fn states(dir: &Path, archive: &str, points: usize) -> Vec<Vec<(String, Vec<u8>)>> {
+    (1..=points)
+        .map(|k| {
+            // (a name of its own each time: the states are read of one archive more than once)
+            let out = (0..).map(|n| format!("state{k}-{n}-{archive}")).find(|o| !dir.join(o).exists()).unwrap();
+            ok(dir, None, &["-q", "-d", "--at", &format!("#{k}"), "-o", &out, archive]);
+            let mut v: Vec<(String, Vec<u8>)> = fs::read_dir(dir.join(&out))
+                .unwrap()
+                .map(|e| {
+                    let e = e.unwrap();
+                    (e.file_name().to_string_lossy().into_owned(), fs::read(e.path()).unwrap())
+                })
+                .collect();
+            v.sort();
+            v
+        })
+        .collect()
+}
+
+#[test]
+fn compacting_keeps_the_points_asked_for() {
+    let d = scratch("compact");
+    let src = d.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("a.txt"), words(1, 20_000)).unwrap();
+    ok(&d, Some(&day(0)), &["-q", "-j", "p1", "-o", "a.aqr", "src"]);
+    // a.txt replaced, b.txt added
+    fs::write(src.join("a.txt"), words(2, 21_000)).unwrap();
+    fs::write(src.join("b.txt"), words(3, 5_000)).unwrap();
+    ok(&d, Some(&day(1)), &["-q", "-a", "-j", "p2", "a.aqr", "src"]);
+    // b.txt taken away
+    fs::remove_file(src.join("b.txt")).unwrap();
+    ok(&d, Some(&day(2)), &["-q", "-s", "-j", "p3", "a.aqr", "src"]);
+    // nothing changed, named again
+    ok(&d, Some(&day(3)), &["-q", "-a", "-j", "p4", "a.aqr", "src"]);
+    // c.txt added
+    fs::write(src.join("c.txt"), words(4, 6_000)).unwrap();
+    ok(&d, Some(&day(4)), &["-q", "-a", "-j", "p5", "a.aqr", "src"]);
+    let before = states(&d, "a.aqr", 5);
+    assert_eq!(before[0].len(), 1);
+    assert_eq!(before[1].len(), 2);
+    assert_eq!(before[2].len(), 1);
+    assert_eq!(before[2], before[3]);
+    assert_eq!(before[4].len(), 2);
+    let size = fs::metadata(d.join("a.aqr")).unwrap().len();
+
+    // neither said: refused, and left as it was
+    let o = aqr_at(&d, None, &["--compact", "a.aqr"]);
+    assert!(!o.status.success() && stderr(&o).contains("--keep-since"), "{}", stderr(&o));
+    assert_eq!(fs::metadata(d.join("a.aqr")).unwrap().len(), size);
+
+    // from the second point on: the first state gone, the others as they were
+    fs::copy(d.join("a.aqr"), d.join("k.aqr")).unwrap();
+    ok(&d, None, &["-q", "--compact", "--keep-since", "@p2", "k.aqr"]);
+    let h = stdout(&ok(&d, None, &["--history", "k.aqr"]));
+    let labels: Vec<&str> = h.lines().map(|l| l.rsplit("  ").next().unwrap()).collect();
+    assert_eq!(labels, ["p2", "p3", "p4", "p5"], "{h}");
+    assert_eq!(states(&d, "k.aqr", 4), before[1..]);
+    ok(&d, None, &["-q", "-K", "k.aqr"]);
+    for k in 1..=4 {
+        ok(&d, None, &["-q", "-K", "--at", &format!("#{k}"), "k.aqr"]);
+    }
+    let kept = fs::metadata(d.join("k.aqr")).unwrap().len();
+    assert!(kept < size, "{kept} < {size}: the first a.txt is gone");
+    // again, by a date: the third point on
+    ok(&d, None, &["-q", "--compact", "--keep-since", "2026-11-03", "k.aqr"]);
+    let h = stdout(&ok(&d, None, &["--history", "k.aqr"]));
+    assert_eq!(h.lines().count(), 3, "{h}");
+    assert_eq!(states(&d, "k.aqr", 3)[0], before[2]);
+
+    // none: the last state alone
+    fs::copy(d.join("a.aqr"), d.join("n.aqr")).unwrap();
+    ok(&d, None, &["-q", "--compact", "--drop-history", "n.aqr"]);
+    let o = aqr_at(&d, None, &["--history", "n.aqr"]);
+    assert!(!o.status.success() && stderr(&o).contains("no journal points"));
+    assert_eq!(listed(&d, &["-t", "-q", "n.aqr"]), ["a.txt", "c.txt"]);
+    ok(&d, None, &["-q", "-K", "n.aqr"]);
+    assert!(fs::metadata(d.join("n.aqr")).unwrap().len() < kept);
+
+    // not where they have no meaning
+    for args in [
+        ["--keep-since", "#1", "-t", "a.aqr"].as_slice(),
+        &["--drop-history", "-t", "a.aqr"],
+        &["--compact", "--keep-since", "#1", "--drop-history", "a.aqr"],
+        &["--compact", "--keep-since", "#9", "a.aqr"],
+    ] {
+        assert!(!aqr_at(&d, None, args).status.success(), "{args:?} succeeded");
+    }
 }

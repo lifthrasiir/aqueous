@@ -27,10 +27,10 @@ use std::io::Write;
 use aqr_common::varint;
 
 use super::segment::Copied;
-use super::tree::{Entry, EntryNode, Extra, Status, Tree};
+use super::tree::{Entry, EntryNode, Extra, SegmentInfo, Status, Tree};
 use super::{
     ContentAt, Encoder, Failure, HEADER_MAGIC, LeafBlock, Level, Reader, SegmentWriter, always_compressed, critical,
-    decoded_with, footer_of, formula_block, frame, inspect, opened,
+    decoded_with, footer_of, formula_block, frame, inspect, opened, opened_with,
 };
 use crate::{Error, Result};
 
@@ -52,6 +52,19 @@ pub struct Rewritten {
     pub made: Vec<usize>,
 }
 
+/// What becomes of the journal points of an archive written again ([`rewrite_as`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum History {
+    /// Fails where the archive has any: they would be lost.
+    Refuse,
+    /// Every point dropped, and with them the states between: the archive is of its tree alone.
+    Drop,
+    /// The points from the time `since` on kept, with their states: the segments up to the one
+    /// whose metadata block is at `from` (the first point's) written again as one state, those
+    /// after it as they are.
+    Keep { from: usize, since: u64 },
+}
+
 /// What a block of the archive is, as it is written again.
 #[derive(Debug, Clone, Copy)]
 enum Kind {
@@ -69,13 +82,44 @@ enum Kind {
 /// Fails on an archive of mirror blocks, or of metadata this crate does not read, and on a tree
 /// of no entries.
 pub fn rewrite(c: &[u8], t: &Tree, level: Level, threads: usize, out: &mut dyn Write) -> Result<Rewritten> {
+    rewrite_as(c, t, level, threads, out, History::Refuse)
+}
+
+/// [`rewrite`], `history` telling what becomes of the journal points. With [`History::Keep`], `t`
+/// is not used: the archive is of its own tree, the segments after the first point kept written
+/// as they are (their entries, tombstones, `segment-status` and `journal`, their blocks all
+/// copied), so that the states at the points still read as they did.
+pub fn rewrite_as(
+    c: &[u8],
+    t: &Tree,
+    level: Level,
+    threads: usize,
+    out: &mut dyn Write,
+    history: History,
+) -> Result<Rewritten> {
     let fail = |f: Failure| Error::new(f.to_string());
     if !c.starts_with(&HEADER_MAGIC) {
         return Err(Error::new("not a standalone archive"));
     }
-    unknown_metadata(c)?;
-    let (blocks, tree, ..) = opened(c, false, false, None).map_err(fail)?;
-    let (_, refs) = tree.ok_or_else(|| Error::new("an archive of a single file, not of paths"))?;
+    unknown_metadata(c, history != History::Refuse)?;
+    let keeping = match history {
+        History::Keep { from, since } => Some((from, since)),
+        _ => None,
+    };
+    let (blocks, tree, ..) = opened(c, false, false, keeping.map(|k| k.0)).map_err(fail)?;
+    let (own, refs) = tree.ok_or_else(|| Error::new("an archive of a single file, not of paths"))?;
+    // (the segments before the first point kept, as one state; and each segment as it is told)
+    let mut infos: Vec<SegmentInfo> = Vec::new();
+    let base_n = match keeping {
+        Some((from, _)) => {
+            opened_with(c, false, false, None, Some(&mut infos)).map_err(fail)?;
+            let at = |s: &super::Segmented| s.metadata.as_ref().map(|m| m.0);
+            let k = blocks.segments.iter().position(|s| at(s) == Some(from));
+            k.ok_or_else(|| Error::new("no metadata block where the first point is"))? + 1
+        }
+        None => blocks.segments.len(),
+    };
+    let t = if keeping.is_some() { &own } else { t };
     if t.entries.is_empty() {
         return Err(Error::new("nothing left in it"));
     }
@@ -131,8 +175,12 @@ pub fn rewrite(c: &[u8], t: &Tree, level: Level, threads: usize, out: &mut dyn W
         let r = refs.get(k).ok_or_else(|| Error::new(format!("no content #{k} in the archive")))?;
         live[r.0] = true;
     }
+    // (the segments after the first point kept are copied whole)
+    for seg in &blocks.segments[base_n..] {
+        live[seg.first.leaves..seg.end.leaves].fill(true);
+    }
     let segment_of = |leaf: usize| blocks.segments.iter().position(|s| (s.first.leaves..s.end.leaves).contains(&leaf));
-    let kept: Vec<usize> = (0..blocks.segments.len())
+    let kept: Vec<usize> = (0..base_n)
         .filter(|&s| {
             let seg = &blocks.segments[s];
             live[seg.first.leaves..seg.end.leaves].iter().any(|&l| l)
@@ -152,15 +200,19 @@ pub fn rewrite(c: &[u8], t: &Tree, level: Level, threads: usize, out: &mut dyn W
     let homes = all.iter().map(|cs| home(cs)).collect::<Result<Vec<usize>>>()?;
 
     let enc = Encoder::with_threads(level, threads);
-    let mut r = Rewritten { segments: (kept.len().max(1), blocks.segments.len()), ..Rewritten::default() };
+    // (the segments written: those of the state, then those after it as they are)
+    let after = blocks.segments.len() - base_n;
+    let (base, total) = (kept.len().max(1), kept.len().max(1) + after);
+    let mut r = Rewritten { segments: (total, blocks.segments.len()), ..Rewritten::default() };
     let mut w = SegmentWriter::new();
     let io = |e: std::io::Error| Error::new(e.to_string());
     out.write_all(w.head()).map_err(io)?;
     let mut written = w.len() as u64;
     let mut leaf_at = vec![usize::MAX; blocks.leaves.len()];
     let mut leaves_written = 0;
-    for n in 0..kept.len().max(1) {
-        if let Some(&s) = kept.get(n) {
+    for n in 0..total {
+        let s = if n < base { kept.get(n).copied() } else { Some(base_n + n - base) };
+        if let Some(s) = s {
             let seg = &blocks.segments[s];
             let leaves = seg.first.leaves..seg.end.leaves;
             // the non-leaf blocks still referred to, the bytes of each still sliced, and the
@@ -247,16 +299,34 @@ pub fn rewrite(c: &[u8], t: &Tree, level: Level, threads: usize, out: &mut dyn W
             }
         }
         // the entries of the segment
-        let (st, contents) = segment_tree(t, &homes, n, &|k| {
-            let (l, output, size) = refs[k];
-            ContentAt { leaf: leaf_at[l], output, size }
-        });
-        if st.entries.is_empty() {
+        let (st, contents) = match n < base {
+            true => segment_tree(t, &homes, n, &|k| {
+                let (l, output, size) = refs[k];
+                ContentAt { leaf: leaf_at[l], output, size }
+            }),
+            false => told_tree(&infos[base_n + n - base], &leaf_at)?,
+        };
+        if n < base && st.entries.is_empty() {
             return Err(Error::new("a segment of no entries (of the root's forks alone)"));
         }
-        let end = match n == last {
-            false => w.close_as(&enc, &st, &contents, Status::None)?,
-            true => w.finish_as(&enc, &st, &contents, Status::Complete)?.0,
+        // (the writing's end and the points: of the segment ended at, for the one the state is
+        // of; as they were, after it)
+        let (status, journal) = match keeping {
+            None => (if n + 1 == total { Status::Complete } else { Status::None }, Vec::new()),
+            Some((_, since)) if n + 1 == base => {
+                let first = &infos[base_n - 1];
+                (first.status, first.journal.iter().filter(|p| p.0 >= since).cloned().collect())
+            }
+            Some(_) if n < base => (Status::None, Vec::new()),
+            Some(_) => {
+                let told = &infos[base_n + n - base];
+                (told.status, told.journal.clone())
+            }
+        };
+        w.set_journal(journal)?;
+        let end = match n + 1 == total {
+            false => w.close_as(&enc, &st, &contents, status)?,
+            true => w.finish_as(&enc, &st, &contents, status)?.0,
         };
         out.write_all(&end).map_err(io)?;
         written += end.len() as u64;
@@ -267,16 +337,15 @@ pub fn rewrite(c: &[u8], t: &Tree, level: Level, threads: usize, out: &mut dyn W
 
 /// Fails where archive `c` has metadata that [`Extra`] does not hold (a comment, ZIP's extra
 /// fields, members of no meaning known), which writing it again would lose.
-fn unknown_metadata(c: &[u8]) -> Result<()> {
+fn unknown_metadata(c: &[u8], journal: bool) -> Result<()> {
     let i = inspect::inspect(c, false, &|_| None, None).map_err(|f| Error::new(f.to_string()))?;
     let known = |name: Option<&str>| name.is_some_and(|n| !matches!(n, "comment" | "zip-extras"));
     for s in &i.segments {
-        if s.archive_extra.iter().any(|m| m.key.and_then(super::archive_key_name) == Some("journal")) {
+        let named = |m: &super::tree::Member| m.key.and_then(super::archive_key_name);
+        if !journal && s.archive_extra.iter().any(|m| named(m) == Some("journal")) {
             return Err(Error::new("the journal's points would be lost in writing it again"));
         }
-        if let Some(m) =
-            s.archive_extra.iter().find(|m| m.key.and_then(super::archive_key_name) != Some("segment-status"))
-        {
+        if let Some(m) = s.archive_extra.iter().find(|m| !matches!(named(m), Some("segment-status" | "journal"))) {
             return Err(Error::new(format!("archive-wide metadata not kept in writing it again: {}", m.key_text)));
         }
         for e in &s.entries {
@@ -287,6 +356,29 @@ fn unknown_metadata(c: &[u8]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The tree of a segment as it was told (`told`), its contents at their leaves in the archive
+/// written (`leaf_at`, by the leaf's index in the one read): the tombstones among its entries,
+/// after the others. Fails where an entry extra is told as a map of no member, which the entry
+/// would lose (null) in it.
+fn told_tree(told: &SegmentInfo, leaf_at: &[usize]) -> Result<(Tree, Vec<ContentAt>)> {
+    let st = &told.tree;
+    let empty = |k: usize| st.given.get(k) == Some(&true) && st.tree.entries[k - 1].extra == Extra::default();
+    if (1..=st.tree.entries.len()).any(empty) || (st.given.first() == Some(&true) && st.tree.root == Extra::default()) {
+        return Err(Error::new("an entry extra of no member (an empty map) is not kept in writing it again"));
+    }
+    let mut tree = st.tree.clone();
+    for (parent, name) in &st.tombstones {
+        tree.entries.push(Entry {
+            parent: *parent,
+            name: name.clone(),
+            node: EntryNode::Special(0),
+            extra: Extra::default(),
+        });
+    }
+    let contents = (st.refs.iter()).map(|&(l, output, size)| ContentAt { leaf: leaf_at[l], output, size }).collect();
+    Ok((tree, contents))
 }
 
 /// A formula block's references to non-leaf blocks ([`referred`]): their ordinals among all,

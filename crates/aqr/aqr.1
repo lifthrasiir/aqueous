@@ -152,6 +152,22 @@ A
 .Ar to
 there already, under the path moved or under what is not a directory is an error, before
 anything is written.
+.It Fl -keep-since Ar spec
+With
+.Fl -compact
+of an archive with journal points
+.Pq Fl j :
+keep those from the one
+.Ar spec
+picks
+.Pq as Fl -at
+on, with the states between them, and write what is before as one state: the segments before
+the point as the state at it, the others as they are.
+.It Fl -drop-history
+With
+.Fl -compact :
+keep no journal point, and none of the states between.
+An archive with points is not written again without one of the two.
 .It Fl -compact
 Write an archive again of what it holds, segment by segment, copying the blocks it still
 needs as they are (those shared with what is gone made again of what is left): what

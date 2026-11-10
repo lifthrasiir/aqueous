@@ -83,6 +83,8 @@ pub const OPTIONS: &[Opt] = &[
     opt(None, Some("delete"), Value::None, "take the paths out of an archive"),
     opt(None, Some("move"), Value::None, "move the paths of an archive (each to its --rename)"),
     opt(None, Some("compact"), Value::None, "write an archive again of what it holds"),
+    opt(None, Some("keep-since"), Value::Text, "with --compact: keep the journal points from SPEC on"),
+    opt(None, Some("drop-history"), Value::None, "with --compact: keep no journal point"),
     many(None, Some("rename"), Value::File, "archive the input before (extract or move the path before) at TO"),
     many(Some('x'), Some("exclude"), Value::Text, "leave out the entries of NAME, or of a path"),
     many(None, Some("files-from"), Value::File, "the inputs listed in FILE"),

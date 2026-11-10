@@ -378,8 +378,15 @@ aqr-incomplete = {
   덧붙인다. 마지막 segment를 고쳐 쓸 수 없는 것은 append-only와 크래시 안전성 때문이다(옛 footer를 죽이는 commit만
   원자적이다). 비용은 metadata block 하나다. spec은 첫 segment가 아니면 엔트리 0개를 허용한다.
 - **`--compact`.** 지점이 없는 아카이브는 지금과 같다. 지점이 있으면 이력(지워진 것, 덮어쓴 것)을 버리므로
-  `--keep-since SPEC`(그 지점 이후만 남기고 앞은 한 segment로 접는다)이나 `--drop-history`를 요구한다.
-  같은 상태를 가리키는 빈 segment의 사슬은 지점을 모두 보존한 채 한 segment로 합칠 수 있다(맵인 까닭).
+  `--keep-since SPEC`이나 `--drop-history`를 요구하고, 둘 다 없으면 지점 수를 알리며 거절한다.
+  - `--drop-history`: 지금의 `--compact`(마지막 상태만)에 지점을 모두 버린다. `--delete`/`--move`와도 쓴다.
+  - `--keep-since SPEC`(`--at`과 같은 선택자): 고른 지점 P부터의 지점과 그 상태를 남긴다. P의 segment까지는
+    P의 트리 하나로 접어 지금과 같은 방식으로 다시 쓰고(P의 segment에서 P 이후의 지점은 맵째 옮긴다),
+    그 뒤의 segment는 블록을 모두 그대로 복사하고 metadata block만 새 위치에 맞춰 다시 쓴다(엔트리,
+    tombstone, `segment-status`, `journal`은 그대로). `--delete`/`--move`와는 함께 쓰지 않는다. 사이 상태의
+    트리가 바뀌기 때문이다. 끝난 뒤 마지막 상태가 처음과 같은지는 기존 검사(`checked`)가 본다.
+  - 한계: 뒤 segment의 엔트리 extra가 "있지만 비어 있는 맵"(`{}`)이면(spec, "Merging segments"의 교체 표기)
+    다시 쓸 수 없어 거절한다. 빈 segment의 사슬을 한 segment로 합치는 일은 아직 하지 않는다.
 - **라벨의 placeholder.** `{today}`는 지역 날짜 `YYYY-MM-DD`, `{now}`는 지역 시각 `YYYY-MM-DD HH:MM:SS`다.
   `{{`와 `}}`는 괄호 자체이고, 모르는 이름은 오류다. 시각 키(UTC ms)와는 별개로 라벨 문자열만 바꾼다.
 - **`--at SPEC`**(`-t`, `-I`, `-d`, 이후 `--diff`)은 지점 중에서만 고른다.
@@ -394,8 +401,7 @@ aqr-incomplete = {
 - 시각은 벽시계(UTC)만 쓰고, 시험에서는 `AQR_TEST_NOW=ms`로 고정한다.
 
 구현한 것(`-j`, `--at`로 `-t`/`-d`/`-K`, `--history`): 중단된 실행은 지점을 만들지 않고, `-s`/`-a`가 바꿀 것이
-없어도 빈 segment로 지점을 남긴다. `--at`은 `-I`에는 아직 없다. `--compact`는 지점이 든 아카이브를 거절한다
-(`--keep-since`와 `--drop-history`가 생길 때까지). 한 줄 요약의 `-j`는 단일 파일 아카이브, `--format`의 다른
+없어도 빈 segment로 지점을 남긴다. `--at`은 `-I`에는 아직 없다. `--compact`는 `--keep-since`나 `--drop-history`를 요구한다. 한 줄 요약의 `-j`는 단일 파일 아카이브, `--format`의 다른
 형식, 암호화 아카이브(덧붙일 수 없다)와 함께 쓸 수 없다.
 
 작업 순서: (1) spec, (2) aqr-formula의 읽기(지점, 지점까지의 접두 트리)와 쓰기(`journal`, 빈 segment),

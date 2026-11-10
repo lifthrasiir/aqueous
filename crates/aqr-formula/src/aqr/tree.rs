@@ -324,8 +324,18 @@ fn check_extra(x: &Extra, contents: usize) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// A segment as its metadata block tells it, for the archive to be written again segment by
+/// segment: its tree, `segment-status` and `journal`.
+#[derive(Clone)]
+pub(crate) struct SegmentInfo {
+    pub tree: SegmentTree,
+    pub status: Status,
+    pub journal: Journal,
+}
+
 /// The tree of a segment as its metadata block tells it (spec, "Interpreting a segment"), before
 /// it is merged into those of the segments before it ([`merge`]).
+#[derive(Clone)]
 pub(crate) struct SegmentTree {
     /// The entries (but tombstones), their contents numbered among those of the segment.
     pub tree: Tree,
