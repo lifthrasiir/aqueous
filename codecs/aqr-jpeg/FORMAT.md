@@ -778,6 +778,20 @@ prediction = floor((sum_j weight(E_j) * clamp(p_j, 0, 65535) + floor(W / 2)) / W
              W = sum_j weight(E_j), over the predictors in use, in 64 bits
 ```
 
+The blend, `p0`, is then corrected by its mean error where the neighbours had this shape (as
+LOCO-I does). With `q(x) = 4 - min(4, bitlen(|x|) / 2)` for `x < 0` and `4 + min(4, bitlen(|x|) / 2)`
+otherwise, the shape is `((comp * 9 + q(d - b)) * 9 + q(b - c)) * 9 + q(c - a)`, and each shape
+has a sum, a count and a correction, all 0 at first. With `room = 1 + (E >> 3)`,
+
+```text
+prediction = clamp(p0 + clamp(correction, -room, room), 0, 65535)
+```
+
+and once the sample `s` is known, for the shape's state: `sum += s - p0 - correction`; `count += 1`;
+if `count = 64`, `sum >>= 1` (arithmetic) and `count >>= 1`; then if `sum <= -count`,
+`correction -= 1` and `sum = max(sum + count, 1 - count)`, else if `sum > 0`, `correction += 1` and
+`sum = min(sum - count, 0)`.
+
 A sample `s` is coded as `r = s - prediction`; decoding gives `s = (prediction + r) mod 2^16`.
 Any `s` of 16 bits can be coded. The contexts:
 
@@ -797,9 +811,9 @@ t   = v >> k
   the second; the others (`k - 2` of them, if more than 0) raw, as one run (`raw_run`, L6).
 - `r = (x >> 1) xor -(x & 1)` of `x = t << k | the remainder`.
 
-A model is three tables of adaptive bits, all starting as new bits: the quotient's, of
+A model is three tables of adaptive bits, all starting as new bits, and the shapes' states: the quotient's, of
 `comps * 32 * 8 * 12`; the escape's, of 20; the remainder's, of `comps * 18 * 3 * 4` (`comps` the
-number of components of the job's frames; `comp` the component's index in its frame).
+number of components of the job's frames; `comp` the component's index in its frame); the shapes' states are `comps * 729`.
 
 ## L6. The arithmetic coder
 

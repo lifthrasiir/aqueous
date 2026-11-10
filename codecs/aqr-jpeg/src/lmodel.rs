@@ -32,6 +32,8 @@ const EQ: usize = 8;
 const QMAX: usize = 12;
 /// The Golomb parameter is the bit length of the mean error around, less this.
 const KSHIFT: usize = 0;
+/// A correction of the blend by its mean error is at most 1 and the errors around over this power of 2.
+const BIAS_ROOM: u32 = 3;
 
 /// The adaptive bits of a model: what frames coded one after the other share, as the tiles of
 /// a DNG, for each to learn from the ones before it.
@@ -43,6 +45,8 @@ pub struct Model {
     /// the two bits of the remainder next to the quotient, by the remainder's length, the
     /// quotient (0, 1 or more) and the bit before
     low: Vec<Bit>,
+    /// the mean error of the blend by the shape of the neighbours: its sum and its count
+    bias: Vec<[i32; 3]>,
 }
 
 impl Model {
@@ -52,15 +56,16 @@ impl Model {
             quo: vec![Bit::default(); comps * ENERGY * EQ * QMAX],
             esc: vec![Bit::default(); 20],
             low: vec![Bit::default(); comps * 18 * 3 * 4],
+            bias: vec![[0; 3]; comps * 729],
         }
     }
 
-    /// Bytes of the model's three tables of bits (the blocks of `new`'s vectors, before they are
+    /// Bytes of the model's tables (the blocks of `new`'s vectors, before they are
     /// rounded up).
-    pub fn bytes(comps: usize) -> [u64; 3] {
+    pub fn bytes(comps: usize) -> [u64; 4] {
         let bit = size_of::<Bit>() as u64;
         let n = comps as u64;
-        [n * (ENERGY * EQ * QMAX) as u64 * bit, 20 * bit, n * 18 * 3 * 4 * bit]
+        [n * (ENERGY * EQ * QMAX) as u64 * bit, 20 * bit, n * 18 * 3 * 4 * bit, n * 729 * 12]
     }
 }
 
@@ -287,13 +292,38 @@ impl<'h> Frame<'h> {
                             num += wt * cands[j].clamp(0, 65535) as u64;
                             den += wt;
                         }
-                        let pred = ((num + den / 2) / den) as i32;
+                        let pred0 = ((num + den / 2) / den) as i32;
+                        // (the mean error of the blend where the neighbours had this shape, within what the errors around allow)
+                        let q = |x: i32| -> usize {
+                            let l = (bitlen(x.unsigned_abs()) / 2).min(4);
+                            if x < 0 { 4 - l } else { 4 + l }
+                        };
+                        let bctx = ((ci * 9 + q(d - b)) * 9 + q(b - cc)) * 9 + q(cc - a);
+                        let room = 1 + (e[FIN] >> BIAS_ROOM) as i32;
+                        let corr = m.bias[bctx][2].clamp(-room, room);
+                        let pred = (pred0 + corr).clamp(0, 65535);
                         let ctx = energy(e[FIN]);
                         let actual = p[rc + x] as i32;
                         let eq = before.map_or(0, |q| bitlen(st[q].err[ry + x][FIN] as u32).min(EQ - 1));
                         let k = (bitlen(e[FIN] >> 2).saturating_sub(KSHIFT)).min(16) as u32;
                         let rr = residual(c, m, ci, ctx, eq, k, actual - pred)?;
                         let value = (pred + rr) as u16;
+                        // (as LOCO-I keeps its bias: the error after the correction summed, the
+                        // correction stepped by one where the sum passes the count)
+                        let [bs, bn, bc] = &mut m.bias[bctx];
+                        *bs += value as i32 - pred0 - *bc;
+                        *bn += 1;
+                        if *bn == 64 {
+                            *bs >>= 1;
+                            *bn >>= 1;
+                        }
+                        if *bs <= -*bn {
+                            *bc -= 1;
+                            *bs = (*bs + *bn).max(1 - *bn);
+                        } else if *bs > 0 {
+                            *bc += 1;
+                            *bs = (*bs - *bn).min(0);
+                        }
                         ring[ci][rc + x] = value;
                         let cell = &mut st[ci].err[ry + x];
                         for j in 0..n {
