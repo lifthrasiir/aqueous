@@ -62,7 +62,7 @@ A block is rebuilt where its file is not encrypted, it is not empty, and:
   the rest is one LZMA stream of as much data as the uncompressed size (in the archives seen with
   no end marker; one with an end marker is taken too), which `lzma-recons` gives back; or
 - its method is 3 (AZO, spec Appendix A): the block is an AZO stream, which aqr-azo splits into
-  its data (as its blocks decode, before any x86 filter) and record, of as much data as the
+  its data (as its blocks decode, with any x86 filter undone) and record, of as much data as the
   uncompressed size.
 
 The DEFLATE, bzip2, LZMA and AZO blocks decode within a budget

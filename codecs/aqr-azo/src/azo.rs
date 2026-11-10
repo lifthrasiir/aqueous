@@ -519,7 +519,7 @@ impl Model {
     }
 }
 
-/// A block decoded: its data (before the x86 filter) and tokens.
+/// A block decoded: its data (the filter's output, before it is undone) and tokens.
 pub struct Block {
     pub data: Vec<u8>,
     pub tokens: Vec<Token>,

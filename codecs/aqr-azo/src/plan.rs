@@ -33,12 +33,19 @@ pub fn decode(initial: u64, params: &[u8], inputs: &[u64], len: u64, files: [&[u
     m.take(wasm::STREAM * streams.len() as u64);
     m.take(len);
     for (data, record) in streams {
-        let (blocks, sizes) = block_sizes(data, record).ok()?;
+        let (x86, blocks, sizes) = block_sizes(data, record).ok()?;
         // (the stream's blocks, held while they are written)
         let top = m.top;
         m.take(wasm::BLOCK * blocks as u64);
         for n in sizes {
+            // (a coded block's filtered copy is held while it is coded; a stored block is
+            // filtered where it is written)
+            let held = m.top;
+            if x86 {
+                m.take(block(n as u64));
+            }
             m.peak(coded(n as u64));
+            m.top = held;
         }
         m.top = top;
     }

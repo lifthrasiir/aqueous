@@ -77,7 +77,7 @@ enum Made {
     Bzip2(StreamParams, Vec<u8>),
     /// The stream's data and record (the stream follows the block's header of LZMA).
     Lzma(Vec<u8>, Vec<u8>),
-    /// The AZO stream's data (before its x86 filter) and record.
+    /// The AZO stream's data (its x86 filter undone) and record.
     Azo(Vec<u8>, Vec<u8>),
 }
 

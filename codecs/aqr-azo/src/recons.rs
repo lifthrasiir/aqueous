@@ -424,7 +424,8 @@ const _: () = {
 /// The size of the blocks of streams ALZip writes, but for their last, and the largest taken.
 pub const BLOCK: usize = 1 << 19;
 
-/// A stream split: its data (before the x86 filter, as its blocks decode) and record.
+/// A stream split: its data (the blocks' data with the x86 filter undone: the file itself) and
+/// record.
 pub struct Split {
     pub data: Vec<u8>,
     pub record: Vec<u8>,
@@ -448,38 +449,65 @@ pub fn split(input: &[u8], limit: usize, threads: usize) -> Result<Split> {
             return Err(Error("blocks of other sizes"));
         }
     }
-    // each coded block's data and record
+    // each block's data (the filter undone) and, where it is coded, its record
     let made = aqr_common::pool::par_map(st.blocks.len(), threads, |i| {
         let b = &st.blocks[i];
         let code = &input[b.code.clone()];
         if b.stored() {
-            return Ok(None);
+            return Ok((st.x86.then(|| unfiltered(code)).transpose()?, None));
         }
         let blk = azo::decode_block(code, b.size, &mut azo::Model::default())?;
         if azo::encode_block(&blk.data, &blk.tokens, &mut azo::Model::default())? != code {
             return Err(Error("a block encoded otherwise"));
         }
+        // (the tokens are of the filter's output, the data kept is the file)
         let r = record_block(&blk.data, &blk.tokens)?;
-        Ok(Some((blk.data, r)))
+        let d = if st.x86 { unfiltered(&blk.data)? } else { blk.data };
+        Ok((Some(d), Some(r)))
     });
     let mut record = vec![st.x86 as u8];
     varint::put(&mut record, size as u64);
     let mut data = Vec::with_capacity(total);
     for (b, m) in st.blocks.iter().zip(made) {
+        // (a stored block's data is its code, but where the filter is undone)
         match m? {
-            None => {
+            (d, None) => {
                 record.push(1);
-                data.extend_from_slice(&input[b.code.clone()]);
+                data.extend_from_slice(d.as_deref().unwrap_or(&input[b.code.clone()]));
             }
-            Some((d, r)) => {
+            (d, Some(r)) => {
                 record.push(0);
                 varint::put(&mut record, r.len() as u64);
                 record.extend_from_slice(&r);
-                data.extend_from_slice(&d);
+                data.extend_from_slice(&d.ok_or_else(corrupt)?);
             }
         }
     }
     Ok(Split { data, record, used: st.end })
+}
+
+/// A block with its x86 filter undone, if the filter gives the block back from it (it does for
+/// what the encoder's filter made; any other block is not taken).
+fn unfiltered(block: &[u8]) -> Result<Vec<u8>> {
+    let mut d = block.to_vec();
+    azo::unfilter(&mut d);
+    let mut again = d.clone();
+    azo::filter(&mut again);
+    if again != block {
+        return Err(Error("a block the x86 filter does not give back"));
+    }
+    Ok(d)
+}
+
+/// The block that has the data `piece` (with the x86 filter undone, where `x86`) once filtered:
+/// a copy only where there is a filter.
+fn filtered(x86: bool, piece: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    if !x86 {
+        return piece.into();
+    }
+    let mut d = piece.to_vec();
+    azo::filter(&mut d);
+    d.into()
 }
 
 /// The code of a coded block of data `piece` and record `r`, written onto the end of `out`:
@@ -535,11 +563,11 @@ fn blocks<'a>(data: &'a [u8], record: &'a [u8]) -> Result<(u8, Vec<Piece<'a>>)> 
     Ok((x86, blocks))
 }
 
-/// The coded blocks' sizes of a stream's data and record, and the blocks in all: what the
-/// module's memory plan follows ([`crate::plan`]).
-pub fn block_sizes(data: &[u8], record: &[u8]) -> Result<(usize, Vec<usize>)> {
-    let (_, blocks) = blocks(data, record)?;
-    Ok((blocks.len(), blocks.iter().filter(|b| b.1.is_some()).map(|b| b.0.len()).collect()))
+/// Whether a stream has the x86 filter, the blocks in all and the coded blocks' sizes of a
+/// stream's data and record: what the module's memory plan follows ([`crate::plan`]).
+pub fn block_sizes(data: &[u8], record: &[u8]) -> Result<(bool, usize, Vec<usize>)> {
+    let (x86, blocks) = blocks(data, record)?;
+    Ok((x86 != 0, blocks.len(), blocks.iter().filter(|b| b.1.is_some()).map(|b| b.0.len()).collect()))
 }
 
 /// The stream that `record` and `data` rebuild, written onto `out`; its blocks on up to `threads`
@@ -559,34 +587,34 @@ pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>, threads: usize) 
             match r {
                 None => {
                     out.extend_from_slice(&header(piece.len(), piece.len()));
+                    // (filtered where it lies)
+                    let at = out.len();
                     out.extend_from_slice(piece);
+                    if x86 != 0 {
+                        azo::filter(&mut out[at..]);
+                    }
                 }
                 Some(r) => {
                     // (the code written after the room for its header, which is then filled)
+                    let f = filtered(x86 != 0, piece);
                     let at = out.len();
                     out.extend_from_slice(&[0; azo::BLOCK_HEADER]);
-                    *out = code_onto(piece, r, std::mem::take(out))?;
+                    *out = code_onto(&f, r, std::mem::take(out))?;
                     let c = out.len() - at - azo::BLOCK_HEADER;
                     out[at..at + azo::BLOCK_HEADER].copy_from_slice(&header(piece.len(), c));
                 }
             }
         }
     } else {
-        let codes = aqr_common::pool::par_map(blocks.len(), threads, |i| match blocks[i] {
-            (_, None) => Ok(None),
-            (piece, Some(r)) => code_onto(piece, r, Vec::new()).map(Some),
+        // (each block's body: the code of a coded one, the filtered data of a stored one)
+        let bodies = aqr_common::pool::par_map(blocks.len(), threads, |i| match blocks[i] {
+            (piece, None) => Ok(filtered(x86 != 0, piece).into_owned()),
+            (piece, Some(r)) => code_onto(&filtered(x86 != 0, piece), r, Vec::new()),
         });
-        for (&(piece, _), c) in blocks.iter().zip(codes) {
-            match c? {
-                None => {
-                    out.extend_from_slice(&header(piece.len(), piece.len()));
-                    out.extend_from_slice(piece);
-                }
-                Some(c) => {
-                    out.extend_from_slice(&header(piece.len(), c.len()));
-                    out.extend_from_slice(&c);
-                }
-            }
+        for (&(piece, _), c) in blocks.iter().zip(bodies) {
+            let c = c?;
+            out.extend_from_slice(&header(piece.len(), c.len()));
+            out.extend_from_slice(&c);
         }
     }
     out.extend_from_slice(&header(0, 0));

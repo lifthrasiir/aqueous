@@ -8,7 +8,7 @@
 //! CRC-32s checked (ALZ's of the file, EGG's of each block).
 //!
 //! Encrypted files, symbolic links (whose targets neither format is known to store), methods not
-//! known (and AZO's x86 filter), and what is past the archive's records where they do not end as
+//! known, and what is past the archive's records where they do not end as
 //! they should (a volume of a split archive, an archive cut short) are left out and told.
 
 use std::ops::Range;
@@ -214,13 +214,6 @@ impl<'d> Listing<'d> {
                 Kind::Left { why: "encrypted".into(), size: held() }
             } else if let Some(m) = e.blocks.iter().map(|b| b.method).find(|&m| m > egg::LZMA) {
                 Kind::Left { why: format!("of method {m}, not known"), size: held() }
-            } else if e
-                .blocks
-                .iter()
-                .any(|b| b.method == egg::AZO && aqr_azo::azo::parse(&d[b.body.clone()]).is_ok_and(|s| s.x86))
-            {
-                // (aqr-azo's x86 filter is not ALZip's: its data would not be the file's)
-                Kind::Left { why: "of AZO's x86 filter, not known here".into(), size: held() }
             } else {
                 match size {
                     None => Kind::Left { why: "too large".into(), size: 0 },

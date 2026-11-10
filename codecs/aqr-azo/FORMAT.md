@@ -163,8 +163,7 @@ candidate in a block's last four bytes) and the encoder's direction being this o
 
 Found from the CRC-32 of the files alone, with no code of ALZip read: `docs/azo-x86-filter-search.md`
 tells how and with what evidence. The four x86 streams of the test archives (`.sys` files) are
-all right with it, three of them by blocks of stored or coded data. The module does not filter:
-its data is what the blocks decode to, the filter's input (§6).
+all right with it. The module undoes it, and applies it again to rebuild (§6).
 
 ## 3. The match finder
 
@@ -279,7 +278,7 @@ the streams' lengths (a Split instruction of the formula), and adds what lies ar
 
 | slot | content |
 |---|---|
-| 0 | the data of every stream (as its blocks decode, before any x86 filter), one after another |
+| 0 | the data of every stream (as its blocks decode, with any x86 filter undone: the files), one after another |
 | 1 | the records of every stream (§5), one after another |
 | 2 | the index: for each stream, the length of its data and the length of its record (varints); or empty, for a single stream of all the data and the whole record |
 

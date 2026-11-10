@@ -4507,11 +4507,16 @@ fn azo_plans_hold() {
         d[at + 18..at + 18 + len].to_vec()
     };
     let (numbers, short) = (stream("azonumbers"), stream("azoshort_txt"));
-    let cases: [(&str, Vec<&[u8]>); 4] = [
+    // (the same streams with the x86 flag: their blocks are then the filter's output, and the
+    // module holds each coded block's filtered copy)
+    let (xnumbers, xshort) = ([&numbers[..1], &[1], &numbers[2..]].concat(), [&short[..1], &[1], &short[2..]].concat());
+    let cases: [(&str, Vec<&[u8]>); 6] = [
         ("numbers", vec![&numbers]),
         ("short", vec![&short]),
         ("both", vec![&short, &numbers]),
         ("three", vec![&short, &numbers, &short]),
+        ("x86", vec![&xnumbers, &xshort]),
+        ("mixed", vec![&short, &xnumbers, &numbers]),
     ];
     for (what, streams) in cases {
         let (mut data, mut records, mut lens, mut all) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());

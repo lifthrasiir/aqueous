@@ -41,8 +41,7 @@ spec calls reserved are ZIP's header of LZMA.
 
 Not taken, kept as they are: encrypted files (ZIP 2.0's traditional encryption, AES, LEA);
 blocks running past the data, and continuation volumes (the volumes of a split archive are not
-joined). The data of an AZO block with the x86 filter is the filter's input, not the file (the
-filter is not known: aqr-azo's README). The files' CRC-32 and sizes (`egg::entry_sums`, the records
+joined). The data of an AZO block with the x86 filter is the file's (aqr-azo's README). The files' CRC-32 and sizes (`egg::entry_sums`, the records
 read one after another, the blocks' data skipped; of files of one block, none of a solid
 archive's) tell aqr-compress's probe what the files archived along hold, as for ZIP and 7z.
 Left: the volumes of a split archive as one; a solid archive's files for that probe.

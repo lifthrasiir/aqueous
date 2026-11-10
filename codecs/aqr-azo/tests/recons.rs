@@ -163,6 +163,8 @@ fn random_parses() {
             Err(e) => panic!("{round}: {e}"),
         };
         assert_eq!((sp.used, sp.data.len()), (s.len(), total));
+        // (with the x86 filter the data is the file itself: what the stream decodes to)
+        assert!(sp.data == azo::decode(&s, usize::MAX).unwrap().data, "{round}: data");
         assert!(recons::join(&sp.data, &sp.record, 2).unwrap() == s, "{round}");
         // a record cut or damaged: fails, or gives another stream of the data
         for k in 0..8 {

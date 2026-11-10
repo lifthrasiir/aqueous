@@ -18,7 +18,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "azo-recons",
         version: 1,
-        sha512_256: hex("2e005fcb47d6ad394a1eee637543eeff71b15c2f0b82257cdf1919bb6d181e6d"),
+        sha512_256: hex("6d0945d550a86fdf62dc44885b7378f7e88e75f68e003869b02bb36f842ab026"),
         block: include_bytes!("../wasm/azo-recons.block"),
     },
     Known {

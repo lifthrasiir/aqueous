@@ -11,7 +11,7 @@ cargo run --release -p aqr-azo --example aqr-azo-check -- [-v] FILE_OR_DIR...   
 
 ```rust
 use aqr_azo::recons;
-let sp = recons::split(&stream, usize::MAX, threads)?;  // data (before the x86 filter) and record
+let sp = recons::split(&stream, usize::MAX, threads)?;  // data (x86 filter undone) and record
 assert!(recons::join(&sp.data, &sp.record, threads)? == stream);
 ```
 
@@ -44,12 +44,12 @@ It spawns no tasks.
 
 The x86 filter (bit 0 of a stream's flags) is E8/E9 with a converted address, the five bytes
 skipped whether converted or not (FORMAT.md §2.6; found from the CRC-32 of the four `.sys`
-streams of alzgg's archives, `docs/azo-x86-filter-search.md`). The module still rebuilds the
-streams from the data the blocks decode to, the filter's input, so the files are not the files
-themselves; ALZip picks AZO by itself for `.sys` and `.com` files only (alzgg's notes), so it is
+streams of alzgg's archives, `docs/azo-x86-filter-search.md`). The data of a stream is
+the file itself: `split` undoes the filter and `join` applies it again (a block that the filter
+does not give back is not taken); ALZip picks AZO by itself for `.sys` and `.com` files only (alzgg's notes), so it is
 rare.
 
-Left: the module giving the filtered data's inverse (the files themselves); ALZip's choice between a match and a literal,
+Left: ALZip's choice between a match and a literal,
 most of the record; speed (5–6 MB/s of data a thread to split and to join, the chains walked
 twice where a match may start; a stream's blocks go on up to `threads` threads natively, one
 after another in Wasm).
