@@ -3480,6 +3480,9 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
             }
         }
         archive.set_items(items);
+    } else if rec.is_some() {
+        // (a single file: all of the leaves are its)
+        archive.set_items(vec![Some(0); archive.leaves_len()]);
     }
     // (the contents lost, each with why)
     let mut lost: Vec<(usize, Failure)> = Vec::new();

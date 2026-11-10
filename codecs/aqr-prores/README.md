@@ -183,9 +183,12 @@ threads), `cargo aqr -c --stats` of the same 30 files (6.49 GB) at `1866ff4f`:
 | `-K` of the archive (native / `--wasm`) | | 58.8 s (110 MB/s) / 80.9 s (80 MB/s) |
 | heap peak, resident peak (compressing) | | 3.04 GB, 5.16 GB |
 
-No file drops prores-recons for the bound. Testing leaves the pool idle for long stretches (one
-of 16 workers busy for 22-49 s natively, 30-69 s in Wasm): two ARRI files (A006, A007) take 1.0
-thread on average as they are tested, though a chunk has a gang of up to 16 (not looked into). `archive-org` (2 files, 10.41 GB)
+No file drops prores-recons for the bound. The pool looks idle for long stretches when testing
+(one of 16 workers busy for 22-49 s natively, 30-69 s in Wasm), and two ARRI files (A006, A007)
+seemed to take 1.0 thread on average as they were tested. That was `--stats` counting the pool's
+threads alone: the part module and its gang run on threads outside it. A006 tested alone natively
+took 11.2 s at about 13.4 threads by process CPU time, A007 16.1 s at about 13.6 (`--stats` now
+counts those threads too). `archive-org` (2 files, 10.41 GB)
 at the default bound: 7,691,455,732 bytes (73.9%) in 235.6 s, the 5.82 GB file in 99.3 s on 9.1
 threads.
 
@@ -213,8 +216,6 @@ Left:
   frames, and there is more to learn in the corpus's footage: to be measured there) and loses the
   chunks' parallelism in encoding, which is a third of compressing, and its memory (the encoder
   holds the chunk's frames); decoding does not need it any more.
-- Why A006 and A007 of the corpus decode on one thread (above): the stripes their chunks have,
-  or the chunks' order in the archive.
 - Alpha: its run-length coding parsed and modelled (0.3 MB of the corpus).
 - Apple's own encoders as a sample: AVFoundation (`avconvert`, `prores_videotoolbox`) and iPhone
   recordings; the corpus has one Apple-encoded film.

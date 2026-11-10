@@ -159,9 +159,12 @@ function own(t, i) {
 function render() {
   const v = VIEW, r = v.r, t = v.t;
   const workers = v.shown.filter((k) => t.threads[k][1]).length || 1;
-  let busy = 0, heapPeak = 0, heapAt = 0, rssPeak = 0, ownPeak = 0;
+  let busy = 0, apart = 0, heapPeak = 0, heapAt = 0, rssPeak = 0, ownPeak = 0;
   for (let i = 0; i < v.n; i++) {
-    for (const k of v.shown) { const s = v.stack[i * v.T + k]; if (t.threads[k][1] && s > 0 && v.waits[s] < 0) busy += v.dt[i]; }
+    for (const k of v.shown) {
+      const s = v.stack[i * v.T + k];
+      if (s > 0 && v.waits[s] < 0) { if (t.threads[k][1]) busy += v.dt[i]; else apart += v.dt[i]; }
+    }
     if (t.heap[i] > heapPeak) { heapPeak = t.heap[i]; heapAt = t.at[i]; }
     rssPeak = Math.max(rssPeak, t.rss[i]);
     ownPeak = Math.max(ownPeak, own(t, i));
@@ -170,7 +173,9 @@ function render() {
   const archived = r.mode === "compress";
   const tiles = [
     ["mode", r.partial ? `${r.mode} (${DATA.state === "live" ? "going on" : "not done"})` : r.mode], ["time", secs(r.seconds)], ["workers", t.workers + (r.threads !== t.workers ? ` (-T ${r.threads})` : "")],
-    ["busy", pc(busy, total)], ["read", size(r.read)], ["written", size(r.written)],
+    ["busy", pc(busy, total)],
+    ...(apart >= 0.5 ? [["outside the pool", `${apart.toFixed(1)} thread-s (${(apart / r.seconds).toFixed(1)} on average)`]] : []),
+    ["read", size(r.read)], ["written", size(r.written)],
     archived ? ["ratio", pc(r.written, r.read)] : ["speed", (r.written / 1e6 / r.seconds).toFixed(1) + " MB/s"],
     ["heap peak", size(heapPeak) + ` @ ${heapAt.toFixed(1)} s`], ["resident peak", rssPeak ? size(rssPeak) : "-"],
     ...(ownPeak < rssPeak ? [["resident peak, not mapped", size(ownPeak)]] : []),
@@ -376,8 +381,9 @@ function hover(e) {
     const row = Math.floor(y / (LANE + GAP));
     const k = v.shown[row];
     if (k === undefined) {
-      let busy = 0; for (const k of v.shown) { const s = v.stack[i * v.T + k]; if (t.threads[k][1] && s > 0 && v.waits[s] < 0) busy++; }
-      html += ` · ${busy} busy, ${t.reserved[i]} reserved of ${t.workers}`;
+      let busy = 0, apart = 0;
+      for (const k of v.shown) { const s = v.stack[i * v.T + k]; if (s > 0 && v.waits[s] < 0) { if (t.threads[k][1]) busy++; else apart++; } }
+      html += ` · ${busy} busy, ${t.reserved[i]} reserved of ${t.workers}` + (apart ? `, ${apart} busy outside the pool` : "");
     } else {
       const s = v.stack[i * v.T + k], it = v.item[i * v.T + k];
       html += ` · ${esc(t.threads[k][0])}<br>`;

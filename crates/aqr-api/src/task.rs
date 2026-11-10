@@ -180,7 +180,10 @@ impl Tasks<'_> {
         }
         // (a trap resumed here)
         #[cfg(not(target_family = "wasm"))]
-        self.threads[i].take().expect("a task").join().unwrap_or_else(|p| std::panic::resume_unwind(p))
+        {
+            let _w = crate::emu::waiting("tasks");
+            self.threads[i].take().expect("a task").join().unwrap_or_else(|p| std::panic::resume_unwind(p))
+        }
     }
 }
 
@@ -196,10 +199,13 @@ impl Drop for Tasks<'_> {
                 }
                 // (a trap resumed here, unless already unwinding)
                 #[cfg(not(target_family = "wasm"))]
-                if let Err(p) = self.threads[i].take().expect("a task").join()
-                    && !std::thread::panicking()
                 {
-                    std::panic::resume_unwind(p)
+                    let _w = crate::emu::waiting("tasks");
+                    if let Err(p) = self.threads[i].take().expect("a task").join()
+                        && !std::thread::panicking()
+                    {
+                        std::panic::resume_unwind(p)
+                    }
                 }
             }
         }

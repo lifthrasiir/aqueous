@@ -1033,6 +1033,7 @@ impl Queue {
     fn push(&self, d: &[u8]) -> Decoded<()> {
         let mut q = self.lock();
         while !q.gone && !q.pieces.is_empty() && q.pieces.len() + d.len() as u64 > self.cap as u64 {
+            let _w = aqr_common::trace::wait("output pulled");
             q = self.changed.wait(q).unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         if q.gone {
@@ -1078,6 +1079,7 @@ impl Queue {
             if q.gone {
                 return resource("an evaluation given up");
             }
+            let _w = aqr_common::trace::wait("part module");
             q = self.changed.wait(q).unwrap_or_else(std::sync::PoisonError::into_inner);
         }
     }
@@ -1208,6 +1210,12 @@ impl Threads {
     unsafe fn spawn<'f>(&self, f: Box<dyn FnOnce() + Send + 'f>) {
         // SAFETY: joined before what it borrows goes, as the caller ensures
         let f: Box<dyn FnOnce() + Send + 'static> = unsafe { std::mem::transmute(f) };
+        // (the spawner's item and spans: the module's work is its)
+        let cx = aqr_common::trace::context();
+        let f = move || {
+            let _traced = aqr_common::trace::adopt(cx);
+            f()
+        };
         let t = std::thread::Builder::new().name("aqr-part".into()).spawn(f).expect("a thread");
         self.running.lock().unwrap().push(t);
     }

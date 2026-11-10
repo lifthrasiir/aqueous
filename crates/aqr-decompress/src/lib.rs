@@ -1204,6 +1204,24 @@ fn emulated(f: aqr_api::emu::Failure) -> String {
     }
 }
 
+/// Tells the emulation how to trace its threads: the tasks of a gang work for the item and under
+/// the spans of the thread that spawned them, and what they wait for is told.
+fn traced() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        aqr_api::emu::set_tracing(aqr_api::emu::Tracing {
+            inherit: || {
+                let cx = aqr_common::trace::context();
+                Box::new(move || Box::new(aqr_common::trace::adopt(cx)))
+            },
+            wait: |what| match aqr_common::trace::on() {
+                true => Box::new(aqr_common::trace::wait(what)),
+                false => Box::new(()),
+            },
+        })
+    });
+}
+
 /// Applies part module `entry` natively ([`aqr_api::emu::apply_streaming`]), its inputs pulled
 /// and its outputs pushed as it goes: a failure to pull or push is the application's.
 fn streamed(
@@ -1243,6 +1261,7 @@ fn streamed(
     let mut drains: Vec<Drain> = outputs.iter_mut().map(|o| Drain(&mut **o, &failed)).collect();
     let mut feeds: Vec<&mut dyn aqr_api::emu::Feed> = feeds.iter_mut().map(|f| f as _).collect();
     let mut drains: Vec<&mut dyn aqr_api::emu::Drain> = drains.iter_mut().map(|d| d as _).collect();
+    traced();
     let r = aqr_api::emu::apply_streaming(entry, &mut feeds, resources, params, &mut drains, sizes);
     match (failed.into_inner(), r) {
         (Some(f), _) => Err(f),
@@ -1390,6 +1409,7 @@ impl Native {
                 let mut feeds: Vec<Slice> = inputs.iter().map(|i| Slice(i, 0)).collect();
                 let mut feeds: Vec<&mut dyn aqr_api::emu::Feed> = feeds.iter_mut().map(|f| f as _).collect();
                 let mut out = Out(Vec::with_capacity(usize::try_from(len).map_err(|_| "too long")?));
+                traced();
                 aqr_api::emu::apply_streaming(&entry, &mut feeds, resources, params, &mut [&mut out], &[len])
                     .map_err(emulated)?;
                 Ok(out.0)

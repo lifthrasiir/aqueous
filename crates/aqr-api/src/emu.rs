@@ -10,9 +10,40 @@
 //! resumed where it is joined. Channels (`crate::chan`) are queues between them, whose ends
 //! are threads; there is no telling a deadlock, but for a trap after 30 s of waiting.
 
+use std::any::Any;
 use std::cell::RefCell;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
+
+/// What a host that traces its threads (`aqr_common::trace`, which this crate cannot use: it is
+/// a dependency of that one on Wasm) gives [`set_tracing`].
+pub struct Tracing {
+    /// Called on a thread spawning tasks: what the new thread takes of it (the item and spans
+    /// of its work, say), a function the new thread calls first, which returns what it keeps
+    /// until it ends.
+    pub inherit: fn() -> Box<dyn FnOnce() -> Box<dyn Any> + Send>,
+    /// Called as the calling thread starts waiting for another (joining a task, a channel); what
+    /// is returned is dropped as the wait ends.
+    pub wait: fn(&'static str) -> Box<dyn Any>,
+}
+
+static TRACING: OnceLock<Tracing> = OnceLock::new();
+
+/// Tells how threads are traced (the first call only).
+pub fn set_tracing(t: Tracing) {
+    _ = TRACING.set(t);
+}
+
+/// What the calling thread gives the thread it spawns ([`Tracing::inherit`]).
+#[cfg(feature = "alloc")]
+fn inherit() -> Option<Box<dyn FnOnce() -> Box<dyn Any> + Send>> {
+    TRACING.get().map(|t| (t.inherit)())
+}
+
+/// The calling thread waiting for `what`, until the result is dropped.
+pub(crate) fn waiting(what: &'static str) -> Option<Box<dyn Any>> {
+    TRACING.get().map(|t| (t.wait)(what))
+}
 
 /// Whole or part module, after the exported entry point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -396,6 +427,7 @@ fn with_chan<R>(c: u32, op: Op, mut f: impl FnMut(&mut Chan) -> Result<Option<R>
                 return r;
             }
             Ok(None) => {
+                let _w = waiting(if op == Op::Recv { "recv" } else { "send" });
                 let cv = if op == Op::Recv { &shared.readable } else { &shared.writable };
                 let (g, t) = cv.wait_timeout(ch, std::time::Duration::from_secs(30)).unwrap_or_else(|e| e.into_inner());
                 if t.timed_out() {
@@ -604,11 +636,15 @@ pub(crate) mod sys {
             super::trap("a spawn of tasks that are no gang, with channels made and not given".into());
         }
         let gang = gang.then_some(id);
+        // (the spawner's item and spans: what the tasks do is its work)
+        let mut inherit: Vec<_> = (0..n).map(|_| super::inherit()).collect();
         (0..n)
             .map(|i| {
                 let rec = Send(rec.clone());
+                let inherit = inherit[i].take();
                 Some(std::thread::spawn(move || {
                     let rec = rec;
+                    let _traced = inherit.map(|f| f());
                     super::HOST.with_borrow_mut(|h| *h = kind.map(super::task_host));
                     super::GANG.set(gang);
                     // (the channels it sent to closed as it ends, however it does)

@@ -3,7 +3,7 @@
 //! threads sampled as it ran ([`aqr_common::trace`]).
 //!
 //! - `--stats`: on standard error, a line of the whole, and what stands out: the stretches the
-//!   pool was barely used in and what ran then, the files that took long by themselves, the
+//!   few threads (of the pool or not) were busy in and what ran then, the files that took long by themselves, the
 //!   workers waiting much for something, and the kinds of files slow for their bytes or
 //!   compressed hardly at all.
 //! - `--stats=FILE.json`: that too, and everything sampled, as JSON (every archive of the run
@@ -34,7 +34,8 @@
 //!   its), `same_as` (the content it is the same as) and `modules`;
 //! - `trace`: `interval` (seconds between samples, as it ended), `workers`, `labels` (by id:
 //!   name and whether of waiting), `stacks` (by id: label ids, the outermost first; 0 is none,
-//!   idle), `threads` (name and whether a worker of the pool), and the samples by columns:
+//!   idle), `threads` (name and whether a worker of the pool; the others are the threads of part
+//!   modules and of their tasks, whose work is attributed as the pool's is), and the samples by columns:
 //!   `at` (seconds), `heap` and `rss` (bytes), `mapped` (bytes of the resident set of files
 //!   mapped: the inputs, the spill; 0 where unknown), `held` (bytes taken of the budget), `reserved`
 //!   (workers reserved or running), `samples`
@@ -425,6 +426,8 @@ fn outliers(run: &Run) -> String {
         n => n,
     };
     let (mut busy_time, mut wait_time, mut total) = (0.0, HashMap::<u32, f64>::new(), 0.0);
+    // the thread-seconds of the threads outside the pool (those of part modules and their tasks)
+    let mut apart_time = 0.0;
     // the peak of the heap, and when
     let (mut peak, mut peak_at, mut rss) = (0i64, None, 0u64);
     // of the resident set: what of it was of files mapped then, and the most of the rest
@@ -435,6 +438,9 @@ fn outliers(run: &Run) -> String {
         total += v.dt[i] * w as f64;
         for (k, &(stack, _)) in s.threads.iter().enumerate() {
             if !workers[k] {
+                if v.state(stack) == State::Busy {
+                    apart_time += v.dt[i];
+                }
                 continue;
             }
             match v.state(stack) {
@@ -470,9 +476,16 @@ fn outliers(run: &Run) -> String {
     });
     _ = writeln!(
         out,
-        "stats: {:.2} s, {w} workers {} busy; heap peak {}{}{} at {:.1} s{}{}",
+        "stats: {:.2} s, {w} workers {} busy{}; heap peak {}{}{} at {:.1} s{}{}",
         run.seconds,
         percent(busy_time, total),
+        match apart_time >= 0.5 {
+            true => format!(
+                "; {apart_time:.1} thread-seconds on threads outside the pool ({:.1} on average)",
+                apart_time / run.seconds.max(1e-9)
+            ),
+            false => String::new(),
+        },
         size(peak.max(0) as f64),
         match aqr_common::budget::global().limit() {
             u64::MAX => String::new(),
@@ -503,15 +516,14 @@ fn outliers(run: &Run) -> String {
         _ = writeln!(out, "  {line}");
     };
 
-    // the pool barely used: a stretch of a quarter of the workers busy at most (one of a few)
+    // few threads busy, of the pool or not (the tasks of part modules run outside it): a stretch
+    // of a quarter of the pool's places' worth of threads busy at most (one of a few)
     if w >= 2 {
         let narrow = (w / 4).max(1);
         let long = (0.05 * run.seconds).max(0.5);
         let mut stretches: Vec<(usize, usize)> = Vec::new();
         let mut from = None;
-        let busy = |s: &trace::Sample| {
-            s.threads.iter().enumerate().filter(|&(k, &(st, _))| workers[k] && v.state(st) == State::Busy).count()
-        };
+        let busy = |s: &trace::Sample| s.threads.iter().filter(|&&(st, _)| v.state(st) == State::Busy).count();
         for (i, s) in t.samples.iter().enumerate() {
             match (busy(s) <= narrow, from) {
                 (true, None) => from = Some(i),
@@ -534,10 +546,10 @@ fn outliers(run: &Run) -> String {
             let mut busy_sum = 0.0;
             for i in r.0..r.1 {
                 let s = &t.samples[i];
-                for (k, &(st, item)) in s.threads.iter().enumerate() {
+                for &(st, item) in &s.threads {
                     if v.state(st) == State::Busy {
                         *what.entry((v.path(st), item)).or_default() += v.dt[i];
-                        busy_sum += if workers[k] { v.dt[i] } else { 0.0 };
+                        busy_sum += v.dt[i];
                     }
                 }
             }
@@ -547,13 +559,13 @@ fn outliers(run: &Run) -> String {
                     let of = if item == NO_ITEM { String::new() } else { format!(" of {}", v.item(item)) };
                     format!("mostly {path}{of}")
                 }
-                None => "nothing on the pool".into(),
+                None => "nothing".into(),
             };
             let end = t.samples.get(r.1).map_or(t.seconds, |s| s.at);
             say(
                 &mut out,
                 format!(
-                    "{:.1}–{:.1} s ({secs:.1} s): {:.1} of {w} workers busy, {ran}",
+                    "{:.1}–{:.1} s ({secs:.1} s): {:.1} threads busy (the pool has {w} workers), {ran}",
                     t.samples[r.0].at,
                     end,
                     busy_sum / secs.max(1e-9)
