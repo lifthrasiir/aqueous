@@ -271,6 +271,9 @@ fn unknown_metadata(c: &[u8]) -> Result<()> {
     let i = inspect::inspect(c, false, &|_| None, None).map_err(|f| Error::new(f.to_string()))?;
     let known = |name: Option<&str>| name.is_some_and(|n| !matches!(n, "comment" | "zip-extras"));
     for s in &i.segments {
+        if s.archive_extra.iter().any(|m| m.key.and_then(super::archive_key_name) == Some("journal")) {
+            return Err(Error::new("the journal's points would be lost in writing it again"));
+        }
         if let Some(m) =
             s.archive_extra.iter().find(|m| m.key.and_then(super::archive_key_name) != Some("segment-status"))
         {

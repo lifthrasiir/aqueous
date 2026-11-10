@@ -101,9 +101,11 @@ pub fn open(path: &Path, quiet: bool) -> Result<Opened, String> {
 
 impl Opened {
     /// Of `g` (gathered of the inputs; `sync`: synchronizing): `g` left as what is to be appended
-    /// ([module](self)), and the archive. None where nothing is to be (the archive left as it is).
-    pub fn against(self, g: &mut Gathered, sync: bool) -> Option<Prior> {
-        diff(g, &self.old, &self.sizes, sync).then_some(self.prior)
+    /// ([module](self)), the archive, and whether anything is to be (else the archive is left as
+    /// it is).
+    pub fn against(self, g: &mut Gathered, sync: bool) -> (Prior, bool) {
+        let any = diff(g, &self.old, &self.sizes, sync);
+        (self.prior, any)
     }
 
     /// The archive's tree, and the bytes of each of its contents.

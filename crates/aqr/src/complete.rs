@@ -114,6 +114,9 @@ pub const OPTIONS: &[Opt] = &[
     opt(None, Some("atomic"), Value::None, "make the archive whole or not at all"),
     opt(Some('a'), Some("append"), Value::None, "append the inputs to an archive"),
     opt(Some('s'), Some("sync"), Value::None, "append, and take away what the inputs do not have"),
+    opt(Some('j'), Some("journal"), Value::Text, "name the state left as a point to return to"),
+    opt(None, Some("at"), Value::Text, "the archive as it was at a journal point"),
+    opt(None, Some("history"), Value::None, "list the journal points of an archive"),
     opt(Some('E'), Some("encoding"), Value::Of(encodings), "names of no declared encoding"),
     opt(None, Some("normalize"), Value::Of(|| of(&["auto", "nfc", "nfd", "keep"])), "how Unicode names are normalized"),
     opt(

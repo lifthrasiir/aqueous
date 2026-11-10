@@ -103,7 +103,11 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
             None => aqr::Payload::Plain(crate::located(&c, input, a.quiet)),
         };
         let paths: Option<Vec<Vec<Vec<u8>>>> = a.select.as_ref().map(|s| s.paths.iter().map(|p| p.0.clone()).collect());
-        let archive = crate::by_index(payload, &aqr::NoModules, a.opt.threads, paths.as_deref())
+        let upto = match &a.at {
+            Some(at) => Some(crate::journal::upto(input, crate::located(&c, input, a.quiet), at, a.quiet)?),
+            None => None,
+        };
+        let archive = crate::by_index(payload, &aqr::NoModules, a.opt.threads, paths.as_deref(), upto)
             .map_err(|e| err(&crate::exit::seen(e)))?;
         if a.quiet {
             return listed(a, &archive, Vec::new(), &err, None);
@@ -144,7 +148,13 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
     // (no module is run)
     let archive = match &decrypted {
         Some(d) => aqr::open_payload(d, &aqr::NoModules),
-        None => aqr::open(crate::located(&c, input, a.quiet), &aqr::NoModules),
+        None => {
+            let bytes = crate::located(&c, input, a.quiet);
+            match &a.at {
+                Some(at) => aqr::open_upto(bytes, &aqr::NoModules, crate::journal::upto(input, bytes, at, a.quiet)?),
+                None => aqr::open(bytes, &aqr::NoModules),
+            }
+        }
     }
     .map_err(|e| err(&crate::exit::seen(e)))?;
     if !a.quiet {

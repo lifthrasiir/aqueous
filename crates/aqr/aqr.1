@@ -377,9 +377,50 @@ what is not in it, or changed by size and modification time.
 As
 .Fl a ,
 and take away what the archive holds that the inputs do not.
+.It Fl j , Fl -journal Ar label
+With
+.Fl c ,
+.Fl a
+or
+.Fl s :
+name the state the archive is left in, with the time, as a journal point to return to
+.Pq Fl -at ,
+also where the run changed nothing (a segment of no entries then carries the point).
+.Ql {today}
+in the label is the local date,
+.Ql {now}
+the local date and time;
+.Ql {{
+and
+.Ql }}
+are braces.
+A run stopped before it ended names nothing.
 .El
 .Ss Decompression
 .Bl -tag -width Ds
+.It Fl -at Ar spec
+With
+.Fl t ,
+.Fl d
+or
+.Fl K :
+the archive as it was at a journal point.
+.Ar spec
+is
+.Cm # Ns Ar N
+(the Nth point from 1;
+.Cm #- Ns Ar N
+from the last),
+.Cm @ Ns Ar label
+(the last point of the label), or a date,
+.Ar YYYY Ns Op - Ns Ar MM Ns Op - Ns Ar DD Ns Op T Ns Ar HH Ns Op : Ns Ar MM Ns Op : Ns Ar SS ,
+in local time or followed by
+.Cm Z
+or an offset
+.Cm +HH:MM :
+the last point at or before the end of the period it names (2026-11-01 is up to the end of that day).
+.It Fl -history
+List the journal points of the archives: their numbers, times and labels.
 .It Fl E Ar enc , Fl -encoding Ar enc
 How names of no declared encoding are taken:
 .Cm auto

@@ -321,9 +321,26 @@ fn tombstones(t: &Tree, gone: &[usize]) -> Tree {
     Tree { root: Extra::default(), entries }
 }
 
+/// Appends a segment of no entries naming the archive's state again by `point` (a time and a
+/// label, `-j`) to archive `path` as `p` found it, and commits it: the bytes the file grew by.
+pub fn journal(a: &Args, path: &Path, p: append::Prior, point: &(u64, String)) -> Result<u64, String> {
+    commit_with(a, path, p, &Tree::default(), Some(point))
+}
+
 /// Appends a segment of tree `t` (of no contents) to archive `path` as `p` found it, and commits
 /// it: the bytes the file grew by.
 fn commit(a: &Args, path: &Path, p: append::Prior, t: &Tree) -> Result<u64, String> {
+    commit_with(a, path, p, t, None)
+}
+
+/// [`commit`], the segment naming a state by `point` where it is given.
+fn commit_with(
+    a: &Args,
+    path: &Path,
+    p: append::Prior,
+    t: &Tree,
+    point: Option<&(u64, String)>,
+) -> Result<u64, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let io = |e: std::io::Error| err(&exit::seen(e));
     let file = &p.file;
@@ -339,6 +356,9 @@ fn commit(a: &Args, path: &Path, p: append::Prior, t: &Tree) -> Result<u64, Stri
     // (stopped before the commit is whole, the bytes written are cut off by the next append, or
     // the commit completed by it: nothing to undo)
     let mut out = w.pad().to_vec();
+    if let Some(point) = point {
+        w.set_journal(vec![point.clone()]).map_err(|e| err(&e))?;
+    }
     out.extend(w.close_as(&enc, t, &[], aqr::Status::Complete).map_err(|e| err(&e))?);
     let (footer, before) = w.footer(p.at.start);
     out.extend(footer);

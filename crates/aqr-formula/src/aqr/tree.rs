@@ -1722,6 +1722,7 @@ pub fn archive_key_name(k: i128) -> Option<&'static str> {
         -1 => Some("archive-comment"),
         ENTRY_EXTRAS => Some("entry-extras"),
         SEGMENT_STATUS => Some("segment-status"),
+        JOURNAL => Some("journal"),
         _ => None,
     }
 }

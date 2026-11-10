@@ -255,6 +255,7 @@ mod extract;
 mod fold;
 mod info;
 mod ipc;
+mod journal;
 mod list;
 mod meta;
 mod names;
@@ -381,8 +382,15 @@ Compression:
                         is not in it, or changed (by size and modification time)
   -s, --sync            as -a, and take away what the archive holds that the inputs do
                         not: it then holds what -c of them would (the file still grows)
+  -j, --journal LABEL   with -c, -a or -s: name the state the archive is left in as a
+                        point to return to (--at), also where nothing is changed;
+                        {today} and {now} in LABEL are the date and the date and time
 
 Decompression:
+      --at SPEC         with -t, -d or -K: the archive as it was at a journal point:
+                        #N (from 1), #-N (from the last), @LABEL (the last of it), or
+                        a date, to its end: 2026, 2026-11, 2026-11-01, 2026-11-01T09:30
+      --history         list the journal points of the archives
   -E, --encoding ENC    names of no declared encoding: auto (the default: as bytes where
                         this system takes them, else decoded from a set guessed), raw
                         (as bytes), system, or sets (shift_jis, euc-kr, gbk, big5,
@@ -450,6 +458,14 @@ struct Args {
     /// `--atomic`: compressing, an archive made whole or not at all, rather than committed as it
     /// is written ([`stop`]).
     atomic: bool,
+    /// `-j LABEL`: compressing, the state the archive is left in named as a journal point
+    /// ([`journal`]), the label as given (`opt.journal` has it with its placeholders filled in).
+    journal: Option<String>,
+    /// `--at SPEC`: listing, testing or decompressing, the archive as it was at a journal point
+    /// ([`journal`]).
+    at: Option<journal::At>,
+    /// `--history`: the journal points of the archives listed.
+    history: bool,
     /// `-a`: compressing, the inputs appended to an archive ([`append`]), the first input or `-o`.
     append: bool,
     /// `-s` (with `append`): what the archive holds that the inputs do not taken away too.
@@ -563,6 +579,7 @@ fn main() -> ExitCode {
     let r = aqr_common::pool::run(|| match () {
         _ if args.edit.is_some() || args.compact => edit::edit(&args),
         _ if args.info => info::info(&args),
+        _ if args.history => journal::history_all(&args),
         _ if args.list => list::list_all(&args),
         _ if args.decompress => decompress_all(&args),
         _ => compress_all(&args),
@@ -627,6 +644,9 @@ fn parse() -> Result<Args, String> {
         force: false,
         rm: false,
         atomic: false,
+        journal: None,
+        at: None,
+        history: false,
         append: false,
         sync: false,
         edit: None,
@@ -712,6 +732,9 @@ fn parse() -> Result<Args, String> {
             "-f" | "--force" => a.force = true,
             "--rm" => a.rm = true,
             "--atomic" => a.atomic = true,
+            "-j" | "--journal" => a.journal = Some(text(value("-j")?)),
+            "--at" => a.at = Some(journal::at_of(&text(value("--at")?))?),
+            "--history" => a.history = true,
             "-a" | "--append" => (a.append, a.sync) = (true, false),
             "-s" | "--sync" => (a.append, a.sync) = (true, true),
             "-L" | "--dereference" => a.dereference = true,
@@ -844,6 +867,21 @@ fn parse() -> Result<Args, String> {
         edit_args(&mut a, renames, last_dir.is_some())?;
         return Ok(a);
     }
+    if a.history {
+        if a.decompress || a.list || a.info || a.journal.is_some() || a.at.is_some() || a.output.is_some() {
+            return Err("--history takes archives alone".into());
+        }
+        return Ok(a);
+    }
+    if a.at.is_some() && !(a.list || a.decompress) {
+        return Err("--at is for -t, -d and -K".into());
+    }
+    if let Some(label) = &a.journal {
+        if a.decompress || a.list || a.info {
+            return Err("-j is for compressing".into());
+        }
+        a.opt.journal = Some(journal::point(label, journal::now_ms()?)?);
+    }
     if a.json && !a.list {
         return Err("--json is for -t".into());
     }
@@ -964,6 +1002,7 @@ fn edit_args(a: &mut Args, renames: Vec<(usize, PathBuf)>, dir: bool) -> Result<
         (a.append, a.verb()),
         (a.passphrase || a.pass_from.is_some(), "-P (an encrypted archive is not edited)"),
         (a.opt.mirrors, "-A"),
+        (a.journal.is_some(), "-j"),
         (a.output.is_some(), "-o"),
         (dir, "-C"),
         (a.rm, "--rm"),
@@ -1564,6 +1603,9 @@ fn compress_into(
         if a.append {
             return Err(format!("{}: Aqueous archives alone are appended to", a.verb()));
         }
+        if a.journal.is_some() {
+            return Err("-j: Aqueous archives alone have a journal".into());
+        }
         return pack_into(a, f, level, inputs, given, renames, out);
     }
     if a.append && (a.passphrase || a.opt.mirrors) {
@@ -1620,6 +1662,9 @@ fn compress_into(
         ([input], [None]) => Some((input, meta(input)?)).filter(|(_, m)| m.is_file()),
         _ => None,
     };
+    if single.is_some() && a.journal.is_some() {
+        return Err("-j: not with an archive of a single file (it has no segments to name)".into());
+    }
     if single.is_some() && a.exclude.excludes(&archive_names(&given[0], None)?) {
         return Err(format!("nothing to archive in {} (-x)", inputs[0].display()));
     }
@@ -1723,12 +1768,25 @@ fn compress_into(
     // appending: what the archive holds already left out
     let prior = match opened {
         Some(o) => match o.against(&mut g, a.sync) {
-            Some(p) => Some(p),
-            None => {
+            (p, true) => Some(p),
+            (p, false) => {
+                // (a point named all the same, by a segment of no entries)
+                let grew = match &opt.journal {
+                    Some(point) => Some(edit::journal(a, out, p, point)?),
+                    None => None,
+                };
                 if !a.quiet {
-                    eprintln!("{}: nothing to append, all there already", out.display());
+                    match (&opt.journal, grew) {
+                        (Some((_, label)), Some(n)) => {
+                            eprintln!(
+                                "{}: nothing to append, all there already; journal point {label:?} added (+{n} bytes)",
+                                out.display()
+                            )
+                        }
+                        _ => eprintln!("{}: nothing to append, all there already", out.display()),
+                    }
                 }
-                end(Some(out), 0, 0, 0, start);
+                end(Some(out), 0, 0, grew.unwrap_or(0), start);
                 return Ok(g.gone.take().unwrap_or_default());
             }
         },
@@ -3197,12 +3255,18 @@ impl Repair {
 
     /// The archive opened, of its bytes repaired: salvaged where bytes were lost (their files
     /// lost, the others given back as they check).
-    fn open<'r, 'n>(&'r self, plain: &'r [u8], runner: &'n dyn aqr::Runner) -> Result<aqr::Archive<'r, 'n>, Failure> {
+    fn open<'r, 'n>(
+        &'r self,
+        plain: &'r [u8],
+        runner: &'n dyn aqr::Runner,
+        upto: Option<usize>,
+    ) -> Result<aqr::Archive<'r, 'n>, Failure> {
         let read = self.read(plain);
-        match (self.restored.as_ref().is_some_and(|r| !r.lost.is_empty()), self.decrypted.is_some()) {
-            (true, sealed) => aqr::open_salvaging(read, runner, sealed),
-            (false, true) => aqr::open_payload(read, runner),
-            (false, false) => aqr::open(read, runner),
+        match (self.restored.as_ref().is_some_and(|r| !r.lost.is_empty()), self.decrypted.is_some(), upto) {
+            (true, sealed, _) => aqr::open_salvaging(read, runner, sealed),
+            (false, true, _) => aqr::open_payload(read, runner),
+            (false, false, Some(m)) => aqr::open_upto(read, runner, m),
+            (false, false, None) => aqr::open(read, runner),
         }
     }
 }
@@ -3214,10 +3278,13 @@ fn by_index<'c, 'n>(
     runner: &'n dyn aqr::Runner,
     threads: usize,
     paths: Option<&[Vec<Vec<u8>>]>,
+    upto: Option<usize>,
 ) -> Result<aqr::Archive<'c, 'n>, Failure> {
-    match paths {
-        Some(paths) => aqr::open_indexed_at(p, runner, threads, paths),
-        None => aqr::open_indexed(p, runner, threads),
+    match (upto, paths) {
+        // (the archive ended at the point: all of what is before it read)
+        (Some(m), _) => aqr::open_indexed_upto(p, runner, threads, m),
+        (None, Some(paths)) => aqr::open_indexed_at(p, runner, threads, paths),
+        (None, None) => aqr::open_indexed(p, runner, threads),
     }
 }
 
@@ -3250,8 +3317,13 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     };
     // (of paths selected, its metadata blocks read back from the last as far as they tell them)
     let paths: Option<Vec<Vec<Vec<u8>>>> = a.select.as_ref().map(|s| s.paths.iter().map(|p| p.0.clone()).collect());
+    // (the archive as it was at a journal point: ended after the segment of the point)
+    let upto = match &a.at {
+        Some(at) => Some(journal::upto(input, if decrypting.is_some() { &c } else { plain }, at, a.quiet)?),
+        None => None,
+    };
     let indexed = match !a.test && payload.of_tree() {
-        true => by_index(payload, runner, a.opt.threads, paths.as_deref()).ok(),
+        true => by_index(payload, runner, a.opt.threads, paths.as_deref(), upto).ok(),
         false => None,
     };
     let fast = indexed.is_some();
@@ -3261,7 +3333,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     let mut archive = match indexed {
         Some(archive) => archive,
         None => Repair::of(&repair, input, plain, decrypting.as_ref(), a.opt.threads)?
-            .open(plain, runner)
+            .open(plain, runner, upto)
             .map_err(|e| err(&exit::seen(e)))?,
     };
     let cut_off = repair.get().and_then(|r| r.cut_off());
@@ -3503,9 +3575,10 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
                     // (by its index too, so that its contents are numbered as they were, the files
                     // of blocks lost failing alone; of the whole tree, else salvaged)
                     let read = repaired.read(plain);
-                    let whole = match by_index(aqr::Payload::Plain(read), runner, a.opt.threads, paths.as_deref()) {
+                    let whole = match by_index(aqr::Payload::Plain(read), runner, a.opt.threads, paths.as_deref(), upto)
+                    {
                         Ok(whole) => Some(whole),
-                        Err(_) if paths.is_none() => repaired.open(plain, runner).ok(),
+                        Err(_) if paths.is_none() => repaired.open(plain, runner, upto).ok(),
                         Err(_) => None,
                     };
                     if let Some(mut whole) = whole.filter(|w| w.contents_len() == again.len()) {

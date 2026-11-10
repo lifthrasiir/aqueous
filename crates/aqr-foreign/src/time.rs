@@ -18,7 +18,21 @@ pub fn to_filetime(t: Time) -> u64 {
 }
 
 /// The parts of a civil time: year, month, day, hour, minute, second.
-type Civil = (i32, u32, u32, u32, u32, u32);
+/// A date and time of day: year, month, day, hour, minute and second.
+pub type Civil = (i32, u32, u32, u32, u32, u32);
+
+/// `secs` since the epoch as the date and time of day in local time here; `None` where the system
+/// does not tell.
+pub fn local_civil(secs: i64) -> Option<Civil> {
+    to_local(secs)
+}
+
+/// The seconds since the epoch of a date and time of day in local time here (a time skipped or
+/// repeated by a change of the clock as the system takes it); `None` where the system does not
+/// tell.
+pub fn local_secs(civil: Civil) -> Option<i64> {
+    from_local(civil).map(|t| t.secs)
+}
 
 /// An MS-DOS date and time (2-second steps), as local time here: `None` where it is not a
 /// date (a month or day of 0).

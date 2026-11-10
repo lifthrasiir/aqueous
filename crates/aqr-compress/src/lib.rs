@@ -248,6 +248,10 @@ pub struct Options {
     /// ([`memory::fallbacks`] tells). None, the default: 256 MiB ([`memory::DEFAULT_BOUND`]),
     /// or more for a module with an exception (`memory`); decoders support up to 512 MiB.
     pub application_bound: Option<u64>,
+    /// Of an archive of several files: the journal point (spec, "`journal`") the last segment of
+    /// the writing names: a time in milliseconds since the epoch (UTC) and a label. None by
+    /// default; not told of a writing stopped.
+    pub journal: Option<(u64, String)>,
 }
 
 /// The bytes of a segment of an archive of several files by default ([`Options::segment`]).
@@ -334,6 +338,7 @@ impl Default for Options {
             segment: SEGMENT,
             spill: None,
             application_bound: None,
+            journal: None,
         }
     }
 }
