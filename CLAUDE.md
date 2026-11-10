@@ -13,7 +13,8 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
 - `docs/` — design documents, mostly in Korean: `10gb-todo.md` (what is left for the 10 GB
   benchmark), `file-formats.md` (measurements by format), `*-design.md`.
 - `crates/` — the core crates
-  - `aqr` — the CLI (`aqr -c/-d/-K/-t/-I`); `--ipc` drives it from a frontend (`src/ipc.rs`).
+  - `aqr` — the CLI (`aqr -c/-d/-K/-t/-I`); `--ipc` drives it from a frontend (`src/ipc.rs`); `--session` serves a
+    compression dialog's questions before it begins (`src/session.rs`).
   - `aqr-ipc` — the frontends' side of `--ipc`: `aqr` run on the paths, what it tells taken.
   - `aqr-win` — Explorer's verbs and a progress window over `aqr --ipc` (Windows).
   - `aqr-win-install` — the installer carrying `target/dist/{aqr,aqr-win}.exe`, packed by its

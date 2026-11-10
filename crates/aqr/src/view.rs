@@ -350,6 +350,8 @@ pub struct Listing {
     read: AtomicU64,
     bytes: AtomicU64,
     state: Mutex<Listed>,
+    /// Whether the listing is to stop ([`Listing::cancel`]).
+    cancelled: std::sync::atomic::AtomicBool,
 }
 
 struct Listed {
@@ -367,7 +369,23 @@ impl Listing {
     pub fn new(bar: bool) -> Listing {
         let state = Mutex::new(Listed { since: Instant::now(), dir: None, walked: false, drawn: 0, done: false });
         let n = || AtomicU64::new(0);
-        Listing { bar, files: n(), read: n(), bytes: n(), state }
+        Listing { bar, files: n(), read: n(), bytes: n(), state, cancelled: Default::default() }
+    }
+
+    /// The listing is to stop: what is listing gives up as it sees it.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    pub fn cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+
+    /// How far it is: the files found, the bytes of those read, and whether all the
+    /// directories are walked (the bytes still growing after).
+    pub fn counts(&self) -> (u64, u64, bool) {
+        let walked = self.state.lock().unwrap().walked;
+        (self.files.load(Ordering::Relaxed), self.bytes.load(Ordering::Relaxed), walked)
     }
 
     /// A file found.

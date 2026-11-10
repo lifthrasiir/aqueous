@@ -310,3 +310,62 @@ fn extracting_a_point() {
     assert_eq!(events(&seen), ["begin", "end"]);
     assert!(out.join("a.txt").exists() && !out.join("b.txt").exists());
 }
+
+/// `aqr --session`: asked how many files the inputs are while the options are chosen (the same
+/// request again told by its new id, another one replacing it, a missing input an error), then
+/// begun with the arguments of the compression.
+#[test]
+fn session() {
+    let d = scratch("session");
+    let src = d.join("src");
+    fs::create_dir_all(src.join("skip")).unwrap();
+    fs::write(src.join("a.txt"), "a".repeat(100)).unwrap();
+    fs::write(src.join("b.txt"), "b".repeat(200)).unwrap();
+    fs::write(src.join("skip").join("c.txt"), "c".repeat(400)).unwrap();
+    let mut c = Command::new(env!("CARGO_BIN_EXE_aqr"))
+        .arg("--session")
+        .current_dir(&d)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    send(&mut c, json!({"hello": 1, "answers": []}));
+    let out: ChildStdout = c.stdout.take().unwrap();
+    let mut lines = BufReader::new(out).lines().map(|l| serde_json::from_str::<Value>(&l.unwrap()).unwrap());
+    let hello = lines.next().unwrap();
+    assert_eq!(hello["controls"], json!(["cancel", "finish", "inventory", "begin"]));
+    // (the events of an id up to the one that is done)
+    let mut done = |id: u64| loop {
+        let v = lines.next().unwrap();
+        assert_eq!(v["event"], "inventory");
+        assert_eq!(v["id"], id);
+        if v["done"] == true {
+            return v;
+        }
+    };
+
+    send(&mut c, json!({"control": "inventory", "id": 1, "args": ["-c", "--", "src"]}));
+    let v = done(1);
+    assert_eq!((v["files"].as_u64(), v["bytes"].as_u64(), &v["walked"]), (Some(3), Some(700), &json!(true)));
+    // the same gathering: told again, by the new id
+    send(&mut c, json!({"control": "inventory", "id": 2, "args": ["-c", "-l", "3", "--", "src"]}));
+    let v = done(2);
+    assert_eq!(v["files"], 3);
+    // another: what is excluded is not counted
+    send(&mut c, json!({"control": "inventory", "id": 3, "args": ["-c", "-x", "skip", "--", "src"]}));
+    let v = done(3);
+    assert_eq!((v["files"].as_u64(), v["bytes"].as_u64()), (Some(2), Some(300)));
+    // a missing input
+    send(&mut c, json!({"control": "inventory", "id": 4, "args": ["-c", "--", "nothing"]}));
+    let v = done(4);
+    assert!(v["error"].is_string(), "{v}");
+
+    // begun: the archive of what the inventory gathered last but one (other arguments: gathered again)
+    send(&mut c, json!({"control": "begin", "args": ["-c", "-x", "skip", "-o", "a.aqr", "--", "src"]}));
+    let seen: Vec<Value> = lines.filter(|v| v["event"] != "progress").collect();
+    assert_eq!(events(&seen), ["begin", "end"]);
+    assert_eq!(seen[1]["files"], 2);
+    assert!(c.wait().unwrap().success());
+    assert!(d.join("a.aqr").exists());
+}

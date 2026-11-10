@@ -239,7 +239,9 @@
 //!
 //! `--ipc` has this program driven by another (a graphical frontend) through standard input
 //! and output ([`ipc`]): what it shows as it goes told there, and the frontend asked what the
-//! options leave open.
+//! options leave open. `--session` is that started before the work is known, as a compression
+//! dialog does: asked how many files the inputs are while the options are chosen, then begun
+//! ([`session`]).
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -257,6 +259,7 @@ mod extract;
 mod fold;
 mod info;
 mod ipc;
+mod session;
 mod journal;
 mod list;
 mod meta;
@@ -361,6 +364,7 @@ Output:
       --stats[=FILE]    tell what stands out after each archive; FILE.json or FILE.html
                         writes all that was sampled (may be given more than once)
       --ipc             be driven by a frontend through standard input and output
+      --session         as --ipc, told what to do later (a compression dialog's)
 
 Compression:
   -P, --passphrase      encrypt the archives with a passphrase asked for (decompressing:
@@ -522,6 +526,8 @@ struct Args {
     stats: Option<&'static stats::Stats>,
     /// Driven by a frontend ([`ipc`]).
     ipc: bool,
+    /// Started for a frontend that tells what to do later ([`session`]).
+    session: bool,
     /// Listing as JSON (`--json`).
     json: bool,
     /// Compressing, into archives of this format (`--format`, or `-o`'s name).
@@ -585,11 +591,23 @@ fn main() -> ExitCode {
         }
     };
     if args.ipc
-        && let Err(e) = ipc::start()
+        && let Err(e) = ipc::start(args.session)
     {
         eprintln!("aqr: {e}");
         return ExitCode::FAILURE;
     }
+    // (a session: its requests served until it begins, and then as if run with what it began with)
+    let args = match args.session {
+        true => match session::serve(args) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("aqr: {e}");
+                ipc::tell(serde_json::json!({"event": "error", "message": e}));
+                return ExitCode::FAILURE;
+            }
+        },
+        false => args,
+    };
     if let Err(e) = pass::init(args.passphrase, !args.decompress && !args.list && !args.info, args.pass_from.as_ref()) {
         eprintln!("aqr: {e}");
         ipc::tell(serde_json::json!({"event": "error", "message": e}));
@@ -634,14 +652,19 @@ impl Args {
 }
 
 fn parse() -> Result<Args, String> {
-    let mut argv = std::env::args_os();
+    parse_from(std::env::args_os().collect())
+}
+
+/// The arguments `argv` (the program's name first) as [`Args`].
+fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
+    let mut argv = all.clone().into_iter();
     let me = argv.next().map(PathBuf::from).unwrap_or_default();
     // (`--stats` alone, no input nor any other option: [`stats::alone`])
     let stats_alone = argv.len() > 0
-        && std::env::args_os().skip(1).all(|a| a == "--stats" || a.to_string_lossy().starts_with("--stats="));
+        && all.iter().skip(1).all(|a| a == "--stats" || a.to_string_lossy().starts_with("--stats="));
     let unaqr = me.file_stem().is_some_and(|s| s.to_string_lossy().starts_with("unaqr"));
     // (a command alone: [`complete`])
-    let all: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let all: Vec<OsString> = all.iter().skip(1).cloned().collect();
     if let Some(first) = all.first().map(|f| f.to_string_lossy().into_owned())
         && (first == "--setup-autocomplete" || first.starts_with("--setup-autocomplete="))
     {
@@ -694,6 +717,7 @@ fn parse() -> Result<Args, String> {
         renames: Vec::new(),
         stats: None,
         ipc: false,
+        session: false,
         json: false,
         format: Pack::Aqr,
         level: None,
@@ -821,6 +845,7 @@ fn parse() -> Result<Args, String> {
                 application_bound = Some(bound_of(&v)?);
             }
             "--ipc" => a.ipc = true,
+            "--session" => (a.session, a.ipc) = (true, true),
             "--json" => a.json = true,
             "--setup-autocomplete" => return Err("--setup-autocomplete is a command alone (no other argument)".into()),
             "-P" | "--passphrase" => a.passphrase = true,
@@ -871,7 +896,7 @@ fn parse() -> Result<Args, String> {
         a.inputs.push("-".into());
         dirs.push(dir.clone());
     }
-    if a.inputs.is_empty() {
+    if a.inputs.is_empty() && !a.session {
         return Err("no input".into());
     }
     if stats || !stats_to.is_empty() {
@@ -899,6 +924,12 @@ fn parse() -> Result<Args, String> {
         }
         Some(b) => aqr_formula::set_application_limit(b),
         None => {}
+    }
+    if a.session {
+        if !a.inputs.is_empty() {
+            return Err("--session takes no inputs (they come with its begin)".into());
+        }
+        return Ok(a);
     }
     if a.edit.is_some() || a.compact {
         edit_args(&mut a, renames, last_dir.is_some())?;
@@ -1129,7 +1160,7 @@ const SHORT_VALUES: &[u8] = b"oCTMlBbSEx";
 /// value joined to its option (`-T8`, `--memory=2G`), `--` ending the options, `-` an input
 /// (standard input or output). The digits of a level (`-10`) are one option.
 struct Lexer {
-    argv: std::env::ArgsOs,
+    argv: std::vec::IntoIter<OsString>,
     /// The options left of the bundle being read.
     short: std::collections::VecDeque<Tok>,
     only_inputs: bool,
@@ -1818,15 +1849,20 @@ fn compress_into(
     let mut g = Gathered::new(mapper, a.preserve);
     g.gone = a.rm.then(Vec::new);
     let gathering = aqr_common::trace::span("gather");
-    // (as long as it takes: a bar of no end known, and how many files)
-    let listing = view::Listing::new(bars());
-    let gathered = ticking(a, &listing, || -> Result<(), String> {
-        gather(inputs, given, renames, &mut g, &listing, a)?;
+    // (what a session's inventory gathered of the same, if any)
+    if let Some(cached) = session::cached(a, inputs, given, renames) {
+        g = cached;
+    } else {
+        // (as long as it takes: a bar of no end known, and how many files)
+        let listing = view::Listing::new(bars());
+        let gathered = ticking(a, &listing, || -> Result<(), String> {
+            gather(inputs, given, renames, &mut g, &listing, a)?;
+            listing.finish();
+            Ok(())
+        });
         listing.finish();
-        Ok(())
-    });
-    listing.finish();
-    gathered?;
+        gathered?;
+    }
     if g.tree.entries.is_empty() {
         return Err(format!("nothing to archive in {}", inputs[0].display()));
     }
@@ -1975,14 +2011,18 @@ fn pack_into(
     let mapper = Mapper::new().map_err(|e| format!("files not to be mapped: {e}"))?;
     let mut g = Gathered::new(mapper, a.preserve);
     g.gone = a.rm.then(Vec::new);
-    let listing = view::Listing::new(bars());
-    let gathered = ticking(a, &listing, || -> Result<(), String> {
-        gather(inputs, given, &renames, &mut g, &listing, a)?;
+    if let Some(cached) = session::cached(a, inputs, given, &renames) {
+        g = cached;
+    } else {
+        let listing = view::Listing::new(bars());
+        let gathered = ticking(a, &listing, || -> Result<(), String> {
+            gather(inputs, given, &renames, &mut g, &listing, a)?;
+            listing.finish();
+            Ok(())
+        });
         listing.finish();
-        Ok(())
-    });
-    listing.finish();
-    gathered?;
+        gathered?;
+    }
     if g.tree.entries.is_empty() {
         return Err(format!("nothing to archive in {}", inputs[0].display()));
     }
@@ -2314,6 +2354,9 @@ fn gather(
         }
         Some(s)
     });
+    if l.cancelled() {
+        return Err(session::CANCELLED.into());
+    }
     // (by the entries found, the entry made of each)
     let mut made: Vec<Option<usize>> = Vec::with_capacity(found.len());
     for ((f, s), e) in found.iter().zip(stats).zip(early) {
@@ -2377,6 +2420,9 @@ fn walk(
     follow: &mut Follow,
     x: &Exclude,
 ) -> Result<(), String> {
+    if l.cancelled() {
+        return Err(session::CANCELLED.into());
+    }
     // (not on Windows, where reading takes longer and listing a directory leaves its access
     // time, NTFS's, mostly as it was: there they are read with the rest, on threads)
     if cfg!(unix)
@@ -2438,7 +2484,7 @@ fn walk(
 /// name (a pattern with no `/` but at its end), wherever they are, and of a path in the archive
 /// (`/` between names; `.` and a `/` at its start or end left out). Given as they are: no
 /// wildcards yet.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, PartialEq)]
 struct Exclude {
     names: std::collections::HashSet<OsString>,
     paths: Vec<Vec<OsString>>,

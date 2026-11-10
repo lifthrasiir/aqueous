@@ -27,6 +27,11 @@ pub mod ask {
 /// The control that stops the work, undoing what was done to its output.
 pub const CANCEL: &str = "cancel";
 
+/// The controls of a session (`aqr --session`, `crates/aqr/src/session.rs`): asking how many
+/// files and bytes inputs are (answered by `inventory` events), and beginning the work.
+pub const INVENTORY: &str = "inventory";
+pub const BEGIN: &str = "begin";
+
 /// The control that stops the work keeping what was done: an archive being written ended as
 /// it is, of the files written (and the work cancelled where it cannot be: `aqr` tells the
 /// controls it takes in its hello).
@@ -151,6 +156,21 @@ pub fn command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     (cmd, count)
+}
+
+/// The command running `aqr --session` (the program at that path), its standard streams piped,
+/// in `dir` where there is one: told what to do later ([`Job::request_inventory`],
+/// [`Job::begin`]), as a compression dialog does.
+pub fn session_command(aqr: &Path, dir: Option<&Path>) -> Command {
+    let mut cmd = Command::new(aqr);
+    cmd.arg("--session");
+    if let Some(dir) = dir.filter(|d| d.is_dir()) {
+        cmd.current_dir(dir);
+    }
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd
 }
 
 /// A journal point of an archive (`aqr --history --json`): a version of it that was named.
@@ -279,9 +299,40 @@ pub fn command_at(aqr: &Path, archive: &Path, point: &Point, into: &Path) -> (Co
 /// The lines of `aqr`'s standard error kept, the last.
 const LOG: usize = 200;
 
+/// What a session's inventory has found of its inputs so far (`inventory` events): the last
+/// told. Nothing is known for a while after a request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inventory {
+    /// The request it answers.
+    pub id: u64,
+    /// The files found, and the bytes of those read so far: all of them once `done` (the
+    /// bytes not known until `walked`, the directories all walked).
+    pub files: u64,
+    pub bytes: u64,
+    pub walked: bool,
+    pub done: bool,
+    /// Why it could not.
+    pub error: Option<String>,
+}
+
+impl Inventory {
+    fn of(v: &Value) -> Option<Inventory> {
+        Some(Inventory {
+            id: v["id"].as_u64()?,
+            files: v["files"].as_u64().unwrap_or(0),
+            bytes: v["bytes"].as_u64().unwrap_or(0),
+            walked: v["walked"].as_bool().unwrap_or(false),
+            done: v["done"].as_bool().unwrap_or(false),
+            error: v["error"].as_str().map(String::from),
+        })
+    }
+}
+
 /// What `aqr` told so far.
 #[derive(Default)]
 pub struct State {
+    /// A session's last inventory event ([`Job::request_inventory`]).
+    pub inventory: Option<Inventory>,
     /// The archives begun, and of the last: its inputs, its output (none testing, and with
     /// `--auto-dir` until decided), and when it began.
     pub begun: usize,
@@ -348,6 +399,7 @@ impl State {
             // (with --auto-dir, what is extracted once decided)
             Some("output") => self.output = path(&v["output"]),
             Some("progress") => self.progress = Some(v),
+            Some("inventory") => self.inventory = Inventory::of(&v),
             Some("end") => {
                 let name = self.name();
                 self.ended.push((name, v));
@@ -388,6 +440,20 @@ impl Job {
         if let Some(i) = self.input.lock().unwrap().as_mut() {
             _ = writeln!(i, "{v}").and_then(|_| i.flush());
         }
+    }
+
+    /// Asks a session's `aqr` how many files the inputs of `args` (what it would be run with to
+    /// compress: only `-x`, `-L`, `-p`, `--rm` and the inputs count) are, as `id`: it answers by
+    /// `inventory` events of that id ([`State::inventory`]), now and then until it is known, and
+    /// takes a later request as replacing this one.
+    pub fn request_inventory(&self, id: u64, args: &[String]) {
+        self.send(&json!({"control": INVENTORY, "id": id, "args": args}));
+    }
+
+    /// Has a session's `aqr` begin to compress as `args` say, using what its inventory found
+    /// of the same inputs.
+    pub fn begin(&self, args: &[String]) {
+        self.send(&json!({"control": BEGIN, "args": args}));
     }
 
     /// Answers question `q` with `value`.
@@ -531,6 +597,13 @@ mod tests {
         assert_eq!(s.name(), "xy.aqr");
         assert_eq!(s.input(), Some(Path::new("x")));
         assert!(s.progress.is_none());
+        s.take(r#"{"event":"inventory","id":4,"files":12,"bytes":300,"walked":false,"done":false}"#);
+        assert_eq!(
+            s.inventory,
+            Some(Inventory { id: 4, files: 12, bytes: 300, walked: false, done: false, error: None })
+        );
+        s.take(r#"{"event":"inventory","id":4,"error":"no way","done":true}"#);
+        assert_eq!(s.inventory.as_ref().unwrap().error.as_deref(), Some("no way"));
         assert_eq!(s.ended.len(), 1);
         assert_eq!(s.ended[0].0, "a.aqr");
         assert_eq!(

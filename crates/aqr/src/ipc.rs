@@ -53,6 +53,9 @@
 //! answer where nobody is asked (an error, as without `--ipc`): a frontend that does not take
 //! a kind of question still works. The questions are numbered, as several may be open at once.
 //!
+//! With `--session` the frontend is also served requests that come before the work does
+//! (`inventory`, then `begin`: [`crate::session`]).
+//!
 //! The frontend may send `{"control":"cancel"}` at any time, or `{"control":"finish"}`: an
 //! archive being written then ended as it is, of the files written (committed: [`crate::stop`]);
 //! anything else cancelled as `cancel` does. Closing this program's standard
@@ -64,7 +67,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, mpsc};
 
-use aqr_ipc::{CANCEL, FINISH, VERSION};
+use aqr_ipc::{BEGIN, CANCEL, FINISH, INVENTORY, VERSION};
 use serde_json::{Value, json};
 
 /// The exit code where the frontend stopped the work (as shells tell a process stopped by
@@ -77,6 +80,10 @@ pub struct Ipc {
     next: AtomicU64,
     /// By question asked, where its answer goes.
     waiting: Mutex<HashMap<u64, mpsc::Sender<Value>>>,
+    /// In a session ([`crate::session`]): where the requests it serves go, and the end of it
+    /// that serves them, taken once.
+    requests: Option<mpsc::Sender<Value>>,
+    inbox: Mutex<Option<mpsc::Receiver<Value>>>,
 }
 
 static IPC: OnceLock<Ipc> = OnceLock::new();
@@ -100,7 +107,7 @@ fn send(v: &Value) {
 }
 
 /// Takes the frontend's hello and answers it, then reads what it sends on a thread of its own.
-pub fn start() -> Result<(), String> {
+pub fn start(session: bool) -> Result<(), String> {
     let mut line = String::new();
     std::io::stdin().read_line(&mut line).map_err(|e| format!("--ipc: {e}"))?;
     let hello: Value = serde_json::from_str(&line).map_err(|_| "--ipc: no hello from the frontend")?;
@@ -110,13 +117,32 @@ pub fn start() -> Result<(), String> {
         None => return Err("--ipc: no hello from the frontend".into()),
     }
     let answers = hello["answers"].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from);
-    let ipc = Ipc { answers: answers.collect(), next: AtomicU64::new(1), waiting: Mutex::default() };
+    let (requests, inbox) = match session {
+        true => {
+            let (to, from) = mpsc::channel();
+            (Some(to), Some(from))
+        }
+        false => (None, None),
+    };
+    let ipc = Ipc {
+        answers: answers.collect(),
+        next: AtomicU64::new(1),
+        waiting: Mutex::default(),
+        requests,
+        inbox: Mutex::new(inbox),
+    };
     if IPC.set(ipc).is_err() {
         return Err("--ipc: started twice".into());
     }
-    send(&json!({"hello": VERSION, "controls": [CANCEL, FINISH]}));
+    let controls: &[&str] = if session { &[CANCEL, FINISH, INVENTORY, BEGIN] } else { &[CANCEL, FINISH] };
+    send(&json!({"hello": VERSION, "controls": controls}));
     std::thread::Builder::new().name("ipc".into()).spawn(read).map_err(|e| format!("--ipc: {e}"))?;
     Ok(())
+}
+
+/// The requests of a session, to be served by one thread: once.
+pub fn requests() -> Option<mpsc::Receiver<Value>> {
+    IPC.get()?.inbox.lock().unwrap().take()
 }
 
 /// Reads what the frontend sends, until it cancels or is gone.
@@ -129,6 +155,10 @@ fn read() {
             if let Some(to) = ipc.waiting.lock().unwrap().remove(&id) {
                 _ = to.send(v["value"].clone());
             }
+        } else if let Some(to) = &ipc.requests
+            && (v["control"] == INVENTORY || v["control"] == BEGIN)
+        {
+            _ = to.send(v);
         } else if v["control"] == CANCEL {
             break;
         } else if v["control"] == FINISH {
