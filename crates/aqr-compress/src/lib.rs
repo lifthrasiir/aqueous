@@ -1443,10 +1443,16 @@ fn files_len(d: &[u8]) -> usize {
 /// 24 s of a boot.wim of 169 MB. So is a scan's formula whose files are all of the data, each
 /// of them compared already (or text, not compared: [`made`]). So is a PPMd file's, its header
 /// cut off ([`takes_place`]), which costs no more apart: a file whose data starts another's
-/// is stored once only where both are cut alike.
+/// is stored once only where both are cut alike. So is a ProRes file's of [`PRORES_UNCOMPARED`]
+/// bytes or more: its frames are coded to a fraction of their bytes, which zstd of the file never
+/// nears, and the comparison costs 3.7 s on one thread at the end for 1.3 GB. A small one is
+/// compared still: what zstd makes of nearly blank frames may beat the formula's modules.
 fn smaller(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], opt: &Options, cx: &Cx) -> bool {
     smaller_as(f, gaps, d, bundle::Kinds::of(f), opt, cx)
 }
+
+/// The size of a ProRes file from which on [`smaller`] takes its formula without comparing it.
+const PRORES_UNCOMPARED: usize = 16 << 20;
 
 /// [`smaller`] of formula `f` of what `of` tells, as its recompressor made it: once its
 /// contents are in place, its own streams may be gone (a WIM file's data, all of it cut into
@@ -1462,8 +1468,15 @@ fn smaller_as(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], of: bundle::
     let against = f.streams.iter().any(|s| s.class == exe::REFERENCE);
     // (a file keeping DEFLATE streams that files archived along with it are made of)
     let inflated = cx.bodies.as_ref().is_some_and(|b| b.holds_streams(d));
-    let smaller =
-        !opt.smaller || bundled || covered || against || inflated || of.files_apart || aqr_ppmd::formula::is(f) || {
+    let smaller = !opt.smaller
+        || bundled
+        || covered
+        || against
+        || inflated
+        || of.files_apart
+        || aqr_ppmd::formula::is(f)
+        || (d.len() >= PRORES_UNCOMPARED && aqr_prores::formula::is(f))
+        || {
             #[cfg(test)]
             tests::COMPARED.with(|c| c.borrow_mut().push(d.len()));
             let pieces: Option<Vec<&[u8]>> = gaps.map(|gaps| gaps.iter().map(|g| &d[g.clone()]).collect());

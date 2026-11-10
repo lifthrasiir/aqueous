@@ -20,6 +20,9 @@ pub const CHUNK: usize = 64 << 20;
 
 /// Stripes decoding at once in WebAssembly: the module's task slots (aqr-modules' `prores-recons`).
 pub use crate::module::SLOTS;
+/// The class of the stream holding the frames' coefficients, which tells a ProRes formula.
+const CODED: &str = "prores/coded";
+
 /// Bytes between frames past which a chunk ends (they stay out of the applications).
 const GAP: usize = 4 << 20;
 /// How far into a file its first frame is looked for.
@@ -116,7 +119,7 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     let tail = (rest.len(), input.len() - at);
     rest.extend_from_slice(&input[at..]);
     let mut f = Formula::default();
-    let Node::Slice { stream: cs, .. } = f.push_as("prores/coded", Kind::Compressed, all) else { unreachable!() };
+    let Node::Slice { stream: cs, .. } = f.push_as(CODED, Kind::Compressed, all) else { unreachable!() };
     let Node::Slice { stream: rs, .. } = f.push("prores/rest", rest) else { unreachable!() };
     let slice = |s: usize, (start, n): (usize, usize)| Node::slice(s, start as u64, n as u64);
     let mut root = Vec::with_capacity(2 * parts.len() + 1);
@@ -128,4 +131,9 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     root.push(slice(rs, tail));
     f.root = Node::concat(root);
     Some(f)
+}
+
+/// Whether formula `f` is one of [`encode`]'s, or holds one (a scan's of a file, say).
+pub fn is(f: &Formula) -> bool {
+    f.streams.iter().any(|s| s.class == CODED)
 }

@@ -116,6 +116,14 @@ ARRI 2K 422 HQ 0.54–0.55, ARRI 4444 0.67–0.83, Apple's animated film 0.63, t
 0.82, ffmpeg's encodes 0.35–0.73 of their frames. A chunk codes at about 15 MB/s on a thread
 and decodes at about 13 (about 100 MB/s with 16 stripes at once).
 
+aqr-compress does not weigh a ProRes formula against zstd of the file when the file is 16 MiB
+or more (`PRORES_UNCOMPARED`). A smaller one still is: with it skipped, FATE's 8 files (1.2 MB,
+nearly blank frames) archived to 377.6 KB in place of 319.5 KB, zstd taking them under the
+formula's modules. Measured 2026-11-10 on the same machine, `cargo aqr -c --stats
+--application-bound 512M` of `fate`, `ffmpeg`, `arri-alexa` and `arri-amira` (30 files, 6.49 GB),
+before and after: 4,503,182,837 bytes both, the archives identical byte for byte; 148.6 s and
+146.8 s wall (the weighing of the largest file, one thread at the end, is within the noise).
+
 Left:
 
 - Speed, decoding first (it is more than half of compressing too): writing the slices is about
@@ -123,8 +131,10 @@ Left:
   (1.8); the arithmetic coder itself is about 15% of the encoding time, the rest the decisions'
   contexts and branches. Fewer decisions (zero runs coded together, sizes binarised around
   their expected value) are the way to go faster.
-- aqr-compress's weighing of the formula against zstd of the file runs on one thread at the
-  end (3.7 s for 1.3 GB) and could be skipped for ProRes, as for PPMd.
+- A chunk of 64 MiB needs up to 389 MiB of the application's memory (the plan), over the
+  compressing bound of 256 MiB: under the defaults, the files of the corpus over 64 MiB (14 of
+  30, 6.29 GB) are kept as they are (`prores-recons: 14 recompressions not used for the
+  bound`); `--application-bound 512M` (the decompressing bound) takes them.
 - Alpha: its run-length coding parsed and modelled (0.3 MB of the corpus).
 - Apple's own encoders as a sample: AVFoundation (`avconvert`, `prores_videotoolbox`) and iPhone
   recordings; the corpus has one Apple-encoded film.
