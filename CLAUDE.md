@@ -251,8 +251,8 @@ optimization picked by hash.
   file (2-4 MiB for a 62 MB CR2). A header holds its lists in place (`Small`): the module's
   allocator takes only 64 blocks freed out of order. Natively it is applied whole on threads
   (`lmodule::decode`). Samples (CC0): raw.pixls.us, in `F:\Data\aqr-corpus\aqr-jpeg-lossless`.
-  Left: the speed of one thread, mixing of models, other containers, the bands as tasks in Wasm
-  (they run one after the other there).
+  Left: the speed of one thread, mixing of models, other containers, and the groups of tiles as
+  tasks in Wasm (a big stream's bands are tasks, 8 at a time; the groups run one after the other).
 
 ## Working copy and commits
 

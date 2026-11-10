@@ -6338,7 +6338,7 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/ima-recons.wasm" title="crates/aqr-modules/wasm/ima-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-ima/FORMAT.md" title="codecs/aqr-ima/FORMAT.md">R</a>
     <tr>
-      <td><code>8fcac6c281e6b55428c421554f0420702120b88af22a06a178b8b5260469012b</code>
+      <td><code>7b13d09bb3299177f5099dde7e599b304405f4fa39e0b3a7288ef544e2cd6262</code>
       <td>jpeg-lossless-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/jpeg-lossless-recons.wasm" title="crates/aqr-modules/wasm/jpeg-lossless-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-jpeg/FORMAT.md" title="codecs/aqr-jpeg/FORMAT.md">R</a>

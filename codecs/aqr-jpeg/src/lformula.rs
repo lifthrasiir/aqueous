@@ -14,11 +14,12 @@ use crate::par::prelude::*;
 
 pub use crate::lmodule::decode;
 
-pub const MODULE: Module = Module::new("jpeg-lossless-recons", 1).with_plan(memory);
+pub const MODULE: Module = Module::new("jpeg-lossless-recons", 1).with_task_plan(memory);
 
 /// The memory of the module: its plan ([`crate::lpart::plan`]).
-fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    crate::lpart::plan(u.initial(), u.content(0)?, u.content(1)?, u.content(2)?)
+fn memory(u: &aqr_formula::Usage<'_>) -> Option<aqr_formula::Plan> {
+    let (instance, task) = crate::lpart::plan(u.initial(), u.content(0)?, u.content(1)?, u.content(2)?)?;
+    Some(aqr_formula::Plan::one(instance, task))
 }
 
 /// Whether `d` is a TIFF file (CR2, DNG and the like) holding a lossless JPEG.

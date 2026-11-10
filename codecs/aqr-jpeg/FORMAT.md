@@ -698,7 +698,12 @@ The module is a part module: it reads `cut`, `info`, `lens` and `model` once, in
 writes the file once, in order, through windows. The file is the cut up to a stream's `soi`, the
 stream's headers (L3), the data of the stream, as its rows of MCUs come, and so on; the rest of
 the cut at the end. It holds no more than a chunk of the model, the rows of a frame, and the
-headers of a stream.
+headers of a stream (and, where bands are tasks, the chunks of the ones being decoded).
+
+The bands of a stream may be decoded as tasks (one class, 8 slots): a round of up to 8 bands has
+their chunks read, each band is a task that gives its rows as bytes (for each MCU row, each
+component's rows of it, 16 bits to a sample, little-endian), and the rows are put in order, their
+data written as they come. The output is the same however many run at once.
 
 ## L3. The headers
 

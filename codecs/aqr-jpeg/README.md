@@ -300,4 +300,5 @@ for the same size to 0.05%. The tiles of a DNG are grouped to share one model (l
 lost). Left: the speed of one thread (about a third each for the predictors, the adaptive bits
 and the arithmetic coder), mixing of models, bias cancellation, hierarchical and arithmetic SOF
 kinds, other containers' lossless JPEGs not found by their SOI (a stream cut in the middle),
-and the bands as tasks in Wasm (the part module runs them one after the other there).
+and the groups of tiles as tasks in Wasm (the bands of a big stream are tasks, 8 at a time:
+2.4 times the speed of one thread there).

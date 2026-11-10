@@ -303,13 +303,14 @@ fn main() {
                 let td = t.elapsed().as_secs_f64();
                 let ok = back.as_ref().is_ok_and(|b| *b == d);
                 println!(
-                    "{name}: {} -> {} B = {:.4}; formula {:.1} MB/s, archive decode {:.1} MB/s, memory plan {:.1} MiB, exact {ok}",
+                    "{name}: {} -> {} B = {:.4}; formula {:.1} MB/s, archive decode {:.1} MB/s, memory plan {:.1} MiB + {:.1} per task, exact {ok}",
                     d.len(),
                     c.len(),
                     c.len() as f64 / d.len() as f64,
                     d.len() as f64 / te / 1e6,
                     d.len() as f64 / td / 1e6,
-                    plan.unwrap_or(0) as f64 / 1048576.0
+                    plan.unwrap_or((0, 0)).0 as f64 / 1048576.0,
+                    plan.unwrap_or((0, 0)).1 as f64 / 1048576.0
                 );
                 if !ok {
                     println!("  {:?}", back.err());

@@ -191,9 +191,13 @@ impl Held {
         Held { ring: (0..w.len()).map(|i| vec![0; (v[i] + 1) * w[i]]).collect(), v, w }
     }
 
-    fn set(&mut self, ci: usize, y: usize, row: &[u16]) {
+    /// A row of 16-bit samples as bytes, little-endian, the row `y` of component `ci`.
+    fn set_bytes(&mut self, ci: usize, y: usize, bytes: &[u8]) {
         let at = (y % (self.v[ci] + 1)) * self.w[ci];
-        self.ring[ci][at..at + self.w[ci]].copy_from_slice(row);
+        let (pairs, _) = bytes.as_chunks::<2>();
+        for (s, b) in self.ring[ci][at..at + self.w[ci]].iter_mut().zip(pairs) {
+            *s = u16::from_le_bytes(*b);
+        }
     }
 }
 
@@ -275,7 +279,44 @@ fn group(st: &mut State, sink: &mut Sink, count: u64) -> Result<(), Error> {
     Ok(())
 }
 
-/// A job of one stream in `bands` bands, a chunk and a model for each.
+/// Bands decoded at once, as tasks, and the task slots of the module.
+pub const THREADS: usize = 8;
+
+/// Bytes of the rows of the band `r0..r1` of a frame of `h`, as [`band_task`] gives them: for each
+/// MCU row, each component's rows of it, 16 bits to a sample.
+fn band_bytes(h: &Header, (r0, r1): (usize, usize)) -> usize {
+    (0..h.comps.len()).map(|ci| 2 * (r1 - r0) * h.comps[ci].v * h.plane(ci).0).sum()
+}
+
+/// The band `rows` of the frame of `h` decoded from its `chunk`, its rows given as bytes (the
+/// task of a band). Err where the chunk is cut off.
+fn band_task(h: &Header, rows: (usize, usize), chunk: &[u8]) -> Result<Vec<u8>, Error> {
+    let (r0, r1) = rows;
+    let mut d = ArithDecoder::new(chunk);
+    let mut model = Model::new(h.comps.len());
+    let bh = lmodel::band_header(h, r0, r1);
+    let mut frame = Frame::new(&bh);
+    let mut out = Vec::with_capacity(band_bytes(h, rows));
+    for r in 0..r1 - r0 {
+        frame.code_row(&mut d, &mut model, r)?;
+        for ci in 0..h.comps.len() {
+            let v = h.comps[ci].v;
+            for y in r * v..(r + 1) * v {
+                for s in frame.row(ci, y) {
+                    out.extend_from_slice(&s.to_le_bytes());
+                }
+            }
+        }
+    }
+    if d.overrun() {
+        return err("data cut off");
+    }
+    Ok(out)
+}
+
+/// A job of one stream in `bands` bands, a chunk and a model for each: [`THREADS`] bands at a
+/// time are read (their chunks), decoded as tasks, and their rows put in order, whose data is
+/// written as they come.
 fn banded(st: &mut State, sink: &mut Sink, bands: usize) -> Result<(), Error> {
     let (h, len) = st.next_stream(sink)?;
     let rows = lmodel::band_rows(h.mcus().1, bands);
@@ -286,28 +327,44 @@ fn banded(st: &mut State, sink: &mut Sink, bands: usize) -> Result<(), Error> {
     let mut emitter = Emitter::new(&h);
     let mut row = Vec::with_capacity(Emitter::row_room(&h));
     let mut emitted = 0;
-    for &(r0, r1) in &rows {
-        let chunk = st.chunk()?;
-        let mut d = ArithDecoder::new(&chunk);
-        let mut model = Model::new(h.comps.len());
-        let bh = lmodel::band_header(&h, r0, r1);
-        let mut frame = Frame::new(&bh);
-        for r in 0..r1 - r0 {
-            frame.code_row(&mut d, &mut model, r)?;
-            for ci in 0..h.comps.len() {
-                let v = h.comps[ci].v;
-                for y in r * v..(r + 1) * v {
-                    held.set(ci, r0 * v + y, frame.row(ci, y));
+    let mut first = 0;
+    while first < bands {
+        let n = (bands - first).min(THREADS);
+        let mut chunks: Vec<Vec<u8>> = Vec::with_capacity(THREADS);
+        for _ in 0..n {
+            chunks.push(st.chunk()?);
+        }
+        let task = |i: usize| band_task(&h, rows[first + i], &chunks[i]).unwrap_or_default();
+        // (in WebAssembly as tasks even alone, as the plan has them)
+        aqr_common::pool::par_each_apart(
+            n,
+            THREADS,
+            2,
+            task,
+            || (),
+            |i, bytes| {
+                let (r0, r1) = rows[first + i];
+                if bytes.is_empty() || bytes.len() != band_bytes(&h, (r0, r1)) {
+                    return bad("band");
                 }
-            }
-            row.clear();
-            emitter.mcu_row(&held, r0 + r, &mut row)?;
-            emitted += row.len();
-            sink.put(&row)?;
-        }
-        if d.overrun() {
-            return err("data cut off");
-        }
+                let mut at = 0;
+                for r in 0..r1 - r0 {
+                    for ci in 0..h.comps.len() {
+                        let (v, w) = (h.comps[ci].v, h.plane(ci).0);
+                        for y in r * v..(r + 1) * v {
+                            held.set_bytes(ci, r0 * v + y, &bytes[at..at + 2 * w]);
+                            at += 2 * w;
+                        }
+                    }
+                    row.clear();
+                    emitter.mcu_row(&held, r0 + r, &mut row)?;
+                    emitted += row.len();
+                    sink.put(&row)?;
+                }
+                Ok(())
+            },
+        )?;
+        first += n;
     }
     if emitted != len {
         return bad("length of the entropy-coded data");
@@ -317,11 +374,12 @@ fn banded(st: &mut State, sink: &mut Sink, bands: usize) -> Result<(), Error> {
 }
 
 /// The memory plan of the module as a part module ([`aqr_api::stack`]): what [`decode_part`]
-/// takes beyond its initial memory (`initial` bytes) at most, for the `cut`, `info` and `lens`
-/// given (`None` where they are not so): the pieces of the readers and the headers, and the most
-/// a job takes at a moment (its chunk and model, and the largest frame's rows). Nothing of it
-/// follows the lengths of the file, but the width of its frames and the size of its chunks.
-pub fn plan(initial: u64, cut: &[u8], info: &[u8], lens: &[u8]) -> Option<u64> {
+/// takes beyond its initial memory (`initial` bytes) at most, and what a task of its class
+/// takes, for the `cut`, `info` and `lens` given (`None` where they are not so): the pieces of the
+/// readers and the headers, and the most a job takes at a moment (its chunks and model, and the
+/// largest frame's rows). Nothing of it follows the lengths of the file, but the width of its
+/// frames and the size of its chunks.
+pub fn plan(initial: u64, cut: &[u8], info: &[u8], lens: &[u8]) -> Option<(u64, u64)> {
     use crate::model::get_varint;
     use aqr_api::stack::{Sim, block};
     let n = |k: usize| k as u64;
@@ -355,25 +413,43 @@ pub fn plan(initial: u64, cut: &[u8], info: &[u8], lens: &[u8]) -> Option<u64> {
         let model: u64 = Model::bytes(h0.comps.len()).iter().map(|&b| block(b)).sum();
         // a frame, its emitter and the room for a row of its data
         let frame = |h: &Header| Frame::bytes(h) + Emitter::bytes() + block(n(Emitter::row_room(h)));
-        let job = if bands == 1 {
-            block(n(chunks[0])) + model + headers.iter().map(frame).max()?
-        } else {
-            // the rows of the bands, the rows held for the data, and a band's chunk, model and frame
-            let nc = n(h0.comps.len());
-            let held = block(4 * nc)
-                + block(4 * nc)
-                + block(12 * nc)
-                + (0..h0.comps.len()).map(|i| block(2 * n((h0.comps[i].v + 1) * h0.plane(i).0))).sum::<u64>();
-            let most = chunks.iter().map(|&c| block(n(c))).max()?;
-            block(8 * bands)
-                + held
-                + Emitter::bytes()
-                + block(n(Emitter::row_room(h0)))
-                + most
-                + model
-                + Frame::bytes(h0)
-        };
-        sim.peak(job);
+        if bands == 1 {
+            sim.peak(block(n(chunks[0])) + model + headers.iter().map(frame).max()?);
+            continue;
+        }
+        // the rows of the bands, and the rows held for the data
+        let nc = n(h0.comps.len());
+        let held = block(4 * nc)
+            + block(4 * nc)
+            + block(12 * nc)
+            + (0..h0.comps.len()).map(|i| block(2 * n((h0.comps[i].v + 1) * h0.plane(i).0))).sum::<u64>();
+        let rows = lmodel::band_rows(h0.mcus().1, bands as usize);
+        let top = sim.top;
+        sim.take(block(8 * bands) + held + Emitter::bytes() + block(n(Emitter::row_room(h0))));
+        for (round, chunk) in rows.chunks(THREADS).zip(chunks.chunks(THREADS)) {
+            let t = sim.top;
+            // the list of chunks, and the chunks, which the tasks have a copy of
+            sim.take(block(12 * n(THREADS)));
+            chunk.iter().for_each(|&c| sim.take(n(c)));
+            // a task: its model, its frame and the rows it gives, over that copy
+            let own = |r: &(usize, usize)| model + Frame::bytes(&lmodel_band(h0, *r)) + block(n(band_bytes(h0, *r)));
+            if round.len() >= 2 {
+                let tasks = round.iter().map(|r| sim.task(own(r))).collect();
+                sim.spawned(0, tasks);
+                // (what the parent holds of the tasks, and a result it has joined)
+                sim.peak(block(n(round.len())) + round.iter().map(|&r| block(n(band_bytes(h0, r)))).max()?);
+            } else {
+                sim.peak(own(&round[0]));
+            }
+            sim.top = t;
+        }
+        sim.top = top;
     }
-    Some(sim.plan())
+    let (instance, tasks) = sim.plans(1);
+    Some((instance, tasks[0]))
+}
+
+/// The header of the band `r` of the frame of `h`.
+fn lmodel_band(h: &Header, r: (usize, usize)) -> Header {
+    lmodel::band_header(h, r.0, r.1)
 }
