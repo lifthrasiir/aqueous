@@ -6348,12 +6348,12 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/ima-recons.wasm" title="crates/aqr-modules/wasm/ima-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-ima/FORMAT.md" title="codecs/aqr-ima/FORMAT.md">R</a>
     <tr>
-      <td><code>1de7bcc688e365e536dfc91b8aac6cbd1acca85f163787782edd5db74f352a75</code>
+      <td><code>54bb1b016825362472d6ba50032bc859f474683bf10d1d6881bc74dc7d9be6c7</code>
       <td>jpeg-lossless-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/jpeg-lossless-recons.wasm" title="crates/aqr-modules/wasm/jpeg-lossless-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-jpeg/FORMAT.md" title="codecs/aqr-jpeg/FORMAT.md">R</a>
     <tr>
-      <td><code>be987dae925fec95436f68aab1ec198360c7b5eb368c49580b699826bcba9d6d</code>
+      <td><code>f59680ac14025657b329842fdc49e477130fcd28acfe95148d578b3f830220dd</code>
       <td>jpeg-recons@3
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/jpeg-recons.wasm" title="crates/aqr-modules/wasm/jpeg-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-jpeg/FORMAT.md" title="codecs/aqr-jpeg/FORMAT.md">R</a>
@@ -6518,7 +6518,7 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/vorbis-recons.wasm" title="crates/aqr-modules/wasm/vorbis-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-vorbis/FORMAT.md" title="codecs/aqr-vorbis/FORMAT.md">R</a>
     <tr>
-      <td><code>9b2f1021885d459895a06fc5a669bff3c961ce9b75122cd40e46ed5c994dccdf</code>
+      <td><code>7ca6b6cdddb3bce10ad90a975a7c92aef3fef7025976f24abb5686edf0805da9</code>
       <td>wasm-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/wasm-recons.wasm" title="crates/aqr-modules/wasm/wasm-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-wasm/FORMAT.md" title="codecs/aqr-wasm/FORMAT.md">R</a>
