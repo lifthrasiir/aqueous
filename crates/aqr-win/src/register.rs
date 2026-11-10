@@ -4,7 +4,8 @@
 //! - `*\shell\Aqueous.compress` and `Directory\shell\Aqueous.compress`: `aqr-win compress`,
 //!   with this program's icon; and beside it `Aqueous.more`, the menu "Aqueous" of the other
 //!   verbs ([`more`]: "Compress with passphrase…", `aqr -P`; then, after a separator, "Compress
-//!   into .zip", ".7z" and the other formats `aqr` makes, [`OTHER_FORMATS`]). The menu is made
+//!   into .zip", ".7z" and the other formats `aqr` makes, [`OTHER_FORMATS`]; and, after another,
+//!   "Compress with options…", `aqr-win compress-options`: the dialog of the options). The menu is made
 //!   by the registry alone: `SubCommands` (empty) on the key has its own `shell` key taken as
 //!   the submenu's verbs, in the order of their keys' names; `CommandFlags` of
 //!   `ECF_SEPARATORBEFORE` puts the separator.
@@ -98,6 +99,8 @@ fn more() -> Vec<(String, Msg, String)> {
     for (i, (f, text)) in OTHER_FORMATS.iter().enumerate() {
         v.push((format!("{}-{f}", i + 2), *text, format!("compress-{f}")));
     }
+    // (last, after a separator of its own: the other ways than those above)
+    v.push(("9-options".into(), shell::COMPRESS_OPTIONS, "compress-options".into()));
     v
 }
 
@@ -145,7 +148,8 @@ pub fn register() -> Result<(), String> {
         for (i, (name, text, v)) in more().into_iter().enumerate() {
             let key = format!(r"{menu}\shell\{name}");
             verb(&key, text, &v)?;
-            if i == 1 {
+            // (a separator before the formats, and before the dialog of the options)
+            if i == 1 || i == OTHER_FORMATS.len() + 1 {
                 self::set(&classes(&key), Some("CommandFlags"), Value::Dword(SEPARATOR_BEFORE))?;
             }
         }
@@ -462,7 +466,10 @@ mod tests {
     #[test]
     fn told_as_registered() {
         let t = told();
-        assert!(t.contains("\"Compress with passphrase…\", \"Compress into .zip\", \"Compress into .7z\""), "{t}");
+        assert!(
+            t.contains("\"Compress with passphrase…\", \"Compress into .zip\", \"Compress into .7z\", \"Compress with options…\""),
+            "{t}"
+        );
         assert!(t.contains("(.zip .7z .rar") && t.contains(".zst)"), "{t}");
         // (the verbs of the versions of an archive, on .aqr files alone)
         assert!(t.contains("\"Name this version…\"") && t.contains("\"Extract a previous version…\""), "{t}");

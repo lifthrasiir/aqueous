@@ -64,6 +64,7 @@ zst = "Zstandard file"
 # Windows' string table: no placeholders.
 [shell]
 compress = "Compress with Aqueous"
+compress_options = "Compress with options…"
 compress_passphrase = "Compress with passphrase…"
 compress_zip = "Compress into .zip"
 compress_7z = "Compress into .7z"
@@ -221,6 +222,9 @@ summary = { one = "→ {output} · {n} file · {size}", other = "→ {output} ·
 preset = "Preset"
 format = "Format"
 level = "Level"
+summary_counting = { one = "→ {output} · {n} file so far…", other = "→ {output} · {n} files so far…" }
+summary_none = "→ {output}"
+summary_error = "→ {output} · {error}"
 advanced = "Advanced options"
 # {n}: how many settings differ from the defaults.
 advanced_n = "Advanced options ({n})"

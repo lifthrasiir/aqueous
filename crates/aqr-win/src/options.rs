@@ -9,6 +9,8 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 
@@ -30,7 +32,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CB_SETCURSEL, CBN_SELCHANGE, CBS_DROPDOWNLIST, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
     DestroyWindow, DispatchMessageW, ES_AUTOHSCROLL, ES_MULTILINE, ES_READONLY,
     GetDlgCtrlID, GetMessageW, GetScrollInfo, GetWindowTextLengthW, GetWindowTextW, IDC_ARROW,
-    GA_ROOT, GetAncestor, GetClientRect, GetWindowRect, IsWindowVisible, WindowFromPoint, WM_KEYDOWN, IDCANCEL, IDOK, IsChild, IsDialogMessageW, LB_ADDSTRING, LB_GETCURSEL, LB_RESETCONTENT,
+    GA_ROOT, SetTimer, WM_TIMER, GetAncestor, GetClientRect, GetWindowRect, IsWindowVisible, WindowFromPoint, WM_KEYDOWN, IDCANCEL, IDOK, IsChild, IsDialogMessageW, LB_ADDSTRING, LB_GETCURSEL, LB_RESETCONTENT,
     LBS_NOTIFY, LoadCursorW, MB_ICONINFORMATION, MB_OK, MSG, MessageBoxW, PostQuitMessage, RegisterClassExW,
     SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBTRACK, SB_VERT, SCROLLINFO, SIF_ALL, SIF_PAGE, SIF_POS,
     SIF_RANGE, SPI_GETICONTITLELOGFONT, SW_ERASE, SW_HIDE,
@@ -41,6 +43,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_VISIBLE, WS_VSCROLL,
 };
 
+use aqr_ipc::Job;
 use aqr_l10n::options as t;
 
 use crate::dialog::wide;
@@ -199,25 +202,31 @@ impl Opts {
         ]
     }
 
-    /// The command line of the settings.
-    fn cli(&self) -> String {
-        let mut a: Vec<String> = vec!["aqr".into(), "-c".into()];
+    /// The arguments of `aqr` for the settings, compressing `inputs` into `output`.
+    fn args(&self, output: &str, inputs: &[String]) -> Vec<String> {
+        fn two(a: &mut Vec<String>, flag: &str, value: impl Into<String>) {
+            a.push(flag.into());
+            a.push(value.into());
+        }
+        let mut a: Vec<String> = vec!["-c".into()];
         let aqr = self.aqr();
         if !aqr {
-            a.push(format!("--format {}", self.format));
+            two(&mut a, "--format", self.format);
         }
         if let Some((_, _, def)) = levels(self.format) {
             if aqr && self.zstd_scale {
-                a.push(format!("-l zstd{}", self.zl));
+                two(&mut a, "-l", format!("zstd{}", self.zl));
             } else if self.level != def {
-                a.push(format!("-l {}", self.level));
+                two(&mut a, "-l", self.level.to_string());
             }
         }
         let d = Opts::new();
         if aqr && self.depth != d.depth {
-            a.push(format!("--depth {}", self.depth));
+            two(&mut a, "--depth", self.depth.to_string());
         }
-        a.extend(self.exclude.iter().map(|x| format!("-x {x}")));
+        for x in &self.exclude {
+            two(&mut a, "-x", x.as_str());
+        }
         for (on, flag) in [(self.deref, "-L"), (self.preserve, "-p")] {
             if on {
                 a.push(flag.into());
@@ -225,13 +234,13 @@ impl Opts {
         }
         if aqr {
             if self.batch != d.batch {
-                a.push(format!("-B {}", BATCH[self.batch as usize]));
+                two(&mut a, "-B", BATCH[self.batch as usize]);
             }
             if self.block != d.block {
-                a.push(format!("-b {}", BLOCK[self.block as usize]));
+                two(&mut a, "-b", BLOCK[self.block as usize]);
             }
             if self.segment != d.segment {
-                a.push(format!("-S {}", if self.segment == 0 { "0" } else { SEGMENT[self.segment as usize] }));
+                two(&mut a, "-S", if self.segment == 0 { "0" } else { SEGMENT[self.segment as usize] });
             }
             for (on, flag) in [(self.dict, "-D"), (self.archival, "-A"), (!self.check, "--no-check"), (self.atomic, "--atomic")]
             {
@@ -247,36 +256,64 @@ impl Opts {
             a.push(f.into());
         }
         if !self.journal.is_empty() && self.mode != 1 {
-            a.push(format!("-j '{}'", self.journal));
+            two(&mut a, "-j", self.journal.as_str());
         }
         if self.rm {
             a.push("--rm".into());
         }
         if self.threads != 0 {
-            a.push(format!("-T {}", THREADS[self.threads as usize]));
+            two(&mut a, "-T", THREADS[self.threads as usize].to_string());
         }
         if self.mem != 0 {
             let m = MEM[self.mem as usize];
-            a.push(format!(
-                "-M {}",
+            two(
+                &mut a,
+                "-M",
                 match m {
                     "none" => "0".into(),
                     "avail" => "avail".into(),
                     m if m.starts_with("0.") => format!("{}%", (m.parse::<f64>().unwrap() * 100.0).round()),
                     m => format!("{m}G"),
-                }
-            ));
+                },
+            );
         }
         if self.appb != d.appb {
-            a.push(format!("--application-bound {}", if self.appb == 4 { "unlimited" } else { APPB[self.appb as usize] }));
+            two(&mut a, "--application-bound", if self.appb == 4 { "unlimited" } else { APPB[self.appb as usize] });
         }
-        a.push(format!("-o {}", self.output()));
-        a.push("Photos-2026 project-notes".into());
-        a.join(" ")
+        two(&mut a, "-o", output);
+        a.push("--".into());
+        a.extend(inputs.iter().cloned());
+        a
     }
 
-    fn output(&self) -> String {
-        format!("Photos-2026.{}", self.format)
+    /// The arguments that bear on what is gathered of `inputs` (`aqr --session`'s inventory
+    /// asks by them), which `args` has the same of.
+    fn gather_args(&self, inputs: &[String]) -> Vec<String> {
+        let mut a: Vec<String> = vec!["-c".into()];
+        for x in &self.exclude {
+            a.extend(["-x".into(), x.clone()]);
+        }
+        for (on, flag) in [(self.deref, "-L"), (self.preserve, "-p"), (self.rm, "--rm")] {
+            if on {
+                a.push(flag.into());
+            }
+        }
+        a.push("--".into());
+        a.extend(inputs.iter().cloned());
+        a
+    }
+
+    /// The command line of the settings, as a shell has it.
+    fn cli(&self, output: &str, inputs: &[String]) -> String {
+        let quote = |s: &String| {
+            if s.is_empty() || s.contains([' ', '"', '*', '?', '<', '>', '|', '&']) {
+                format!("\"{}\"", s.replace('"', "\\\""))
+            } else {
+                s.clone()
+            }
+        };
+        let args = self.args(output, inputs);
+        format!("aqr {}", args.iter().map(quote).collect::<Vec<_>>().join(" "))
     }
 }
 
@@ -377,6 +414,48 @@ struct App {
     content_h: i32,
     open: bool,
     cpus: usize,
+    /// With a session of `aqr`: what the dialog tells it ([`run`]); none in the preview.
+    job: Option<Arc<Job>>,
+    /// The inputs, as `aqr` is given them and as they are shown, and the name (without its
+    /// extension) and folder of the archive made.
+    inputs: Vec<String>,
+    names: Vec<String>,
+    stem: String,
+    out_dir: PathBuf,
+    /// The arguments to begin with, once Compress is pressed.
+    go: Option<Vec<String>>,
+    /// The inventory asked last: its id, and the arguments it was asked by.
+    req: u64,
+    req_args: Vec<String>,
+}
+
+impl App {
+    /// The name of the archive made.
+    fn out_name(&self) -> String {
+        format!("{}.{}", self.stem, self.o.format)
+    }
+
+    /// What the line under the names of the inputs tells: where they go and, as `aqr` finds
+    /// it out, how many files they are and how big (nothing, then the files found so far).
+    fn summary(&self) -> String {
+        let name = self.out_name();
+        let Some(job) = &self.job else {
+            return t::summary(14208, name, aqr_l10n::size(38.4e9));
+        };
+        let found = job.state.lock().unwrap().inventory.clone().filter(|i| i.id == self.req);
+        match found {
+            None => t::summary_none(name),
+            Some(i) if i.error.is_some() => t::summary_error(name, i.error.unwrap_or_default()),
+            Some(i) if i.done => t::summary(i.files, name, aqr_l10n::size(i.bytes as f64)),
+            Some(i) => t::summary_counting(i.files, name),
+        }
+    }
+}
+
+/// The timer: what `aqr` has found of the inputs since is shown.
+fn poll(a: &mut App) {
+    let text = a.summary();
+    set_text(a.ctl[&(SUMMARY + 1000)], &text);
 }
 
 thread_local! {
@@ -533,6 +612,25 @@ impl Rows<'_> {
 // ---------- building ----------
 
 pub fn preview() -> std::process::ExitCode {
+    open(None, Vec::new());
+    std::process::ExitCode::SUCCESS
+}
+
+/// The name (without its extension) of the archive of `paths`, and its folder: as `aqr_ipc::command`
+/// has them (one path: its name, beside it; several: the name of their folder, in it).
+fn target(paths: &[PathBuf]) -> (String, PathBuf) {
+    let dir = paths[0].parent().map(PathBuf::from).unwrap_or_default();
+    let stem = match paths {
+        [one] => aqr_ipc::file_name(one),
+        _ => dir.file_name().map_or_else(|| "Archive".into(), |n| n.to_string_lossy().into_owned()),
+    };
+    (stem, dir)
+}
+
+/// Shows the dialog on `paths` (a preview on examples where there are none), with the session
+/// of `aqr` that finds out what they are as `job` where there is one: the arguments to
+/// compress with, once the user is done; none where the dialog is cancelled.
+pub fn open(job: Option<Arc<Job>>, paths: Vec<PathBuf>) -> Option<Vec<String>> {
     // SAFETY: plain Win32 calls on this thread; every pointer passed lives through its call
     unsafe {
         InitCommonControlsEx(&INITCOMMONCONTROLSEX {
@@ -606,6 +704,7 @@ pub fn preview() -> std::process::ExitCode {
         SendMessageW(tips, TTM_SETMAXTIPWIDTH, 0, cx.s(320) as isize);
         SendMessageW(tips, TTM_SETDELAYTIME, TTDT_AUTOPOP as usize, 30000);
 
+        let (stem, out_dir) = if paths.is_empty() { ("Photos-2026".to_string(), PathBuf::new()) } else { target(&paths) };
         let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
         let mut a = App {
             main,
@@ -620,6 +719,14 @@ pub fn preview() -> std::process::ExitCode {
             content_h: 0,
             open: false,
             cpus,
+            job,
+            inputs: if paths.is_empty() { vec!["Photos-2026".into(), "project-notes".into()] } else { paths.iter().map(|p| p.display().to_string()).collect() },
+            names: if paths.is_empty() { vec!["Photos-2026".into(), "project-notes".into()] } else { paths.iter().map(|p| aqr_ipc::file_name(p)).collect() },
+            stem,
+            out_dir,
+            go: None,
+            req: 0,
+            req_args: Vec::new(),
         };
         build_main(&mut a);
         build_pane(&mut a);
@@ -631,6 +738,7 @@ pub fn preview() -> std::process::ExitCode {
         set_scroll(pane, content, pane_h);
         refresh(&mut a);
         APP.with(|s| *s.borrow_mut() = Some(a));
+        SetTimer(main, 1, 250, None);
         ShowWindow(main, SW_SHOWNORMAL);
 
         let mut msg: MSG = std::mem::zeroed();
@@ -651,7 +759,7 @@ pub fn preview() -> std::process::ExitCode {
             }
         }
     }
-    std::process::ExitCode::SUCCESS
+    APP.with(|s| s.borrow_mut().take()).and_then(|a| a.go)
 }
 
 type WNDPROC = unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
@@ -681,7 +789,7 @@ fn center(h: HWND) {
 fn build_main(a: &mut App) {
     let (cx, m) = (&a.cx, a.main);
     let mut reg = Vec::new();
-    reg.push((SUMMARY, make(cx, m, "STATIC", "Photos-2026, project-notes", SS_LEFT as u32, [16, 14, 318, 18], -1, true)));
+    reg.push((SUMMARY, make(cx, m, "STATIC", "", (SS_LEFT | SS_ENDELLIPSIS) as u32, [16, 14, 318, 18], -1, true)));
     reg.push((SUMMARY + 1000, make(cx, m, "STATIC", "", SS_LEFT as u32, [16, 34, 318, 34], SUMMARY + 1000, false)));
     for (i, (id, label)) in [(PRESET, t::preset()), (FORMAT, t::format()), (LEVEL, t::level())].into_iter().enumerate() {
         let y = 84 + 34 * i as i32;
@@ -827,6 +935,15 @@ fn set_check(h: HWND, on: bool) {
 
 fn refresh(a: &mut App) {
     let o = a.o.clone();
+    // (what bears on the inventory changed: asked again, the answer to the last no more wanted)
+    let gather = o.gather_args(&a.inputs);
+    if let Some(job) = &a.job
+        && gather != a.req_args
+    {
+        a.req += 1;
+        job.request_inventory(a.req, &gather);
+        a.req_args = gather;
+    }
     let aqr = o.aqr();
     let c = |id: i32| a.ctl[&id];
     let sel = |id: i32, i: usize| {
@@ -905,7 +1022,8 @@ fn refresh(a: &mut App) {
         EnableWindow(c(ZL + VALUE), (aqr && o.zstd_scale) as i32);
         ShowWindow(c(WARN), if aqr && !o.check && o.rm { SW_SHOW } else { SW_HIDE });
         // texts
-        set_text(c(SUMMARY + 1000), &t::summary(14208, o.output(), aqr_l10n::size(38.4e9)));
+        set_text(c(SUMMARY), &a.names.join(", "));
+        set_text(c(SUMMARY + 1000), &a.summary());
         let n = o.changes();
         for (i, h) in a.headers.iter().take(SECTIONS).enumerate() {
             set_text(*h, &if n[i] > 0 { t::section_n(section(i), n[i]) } else { section(i).into() });
@@ -914,7 +1032,7 @@ fn refresh(a: &mut App) {
         let name = if total > 0 { t::advanced_n(total) } else { t::advanced().into() };
         let label = format!("{name}   {}", if a.open { "<<" } else { ">>" });
         set_text(c(TOGGLE), &label);
-        set_text(c(CLI), &o.cli());
+        set_text(c(CLI), &o.cli(&a.out_name(), &a.names));
     }
 }
 
@@ -994,8 +1112,14 @@ fn changed(a: &mut App, id: i32, code: u32) {
                 let (w, h) = frame(a, a.open);
                 SetWindowPos(a.main, null_mut(), 0, 0, w, h, 0x0002 | 0x0004 | 0x0010);
             }
+            IDOK if a.job.is_some() => {
+                let out = a.out_dir.join(a.out_name());
+                a.go = Some(a.o.args(&out.to_string_lossy(), &a.inputs));
+                DestroyWindow(a.main);
+                return;
+            }
             IDOK => {
-                let cli = a.o.cli();
+                let cli = a.o.cli(&a.out_name(), &a.names);
                 MessageBoxW(a.main, wide(&cli).as_ptr(), wide(t::preview_title()).as_ptr(), MB_OK | MB_ICONINFORMATION);
             }
             IDCANCEL => {
@@ -1059,6 +1183,10 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             0
         }
         WM_CTLCOLORSTATIC => face_brush(wp),
+        WM_TIMER => {
+            with_app(poll);
+            0
+        }
         WM_CLOSE => {
             // SAFETY: this window
             unsafe { DestroyWindow(hwnd) };

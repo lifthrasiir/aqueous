@@ -1,7 +1,7 @@
 //! Aqueous in Explorer: verbs on files, folders and archives, and a window of how far the work
 //! is, the work done by `aqr --ipc` (`crates/aqr/src/ipc.rs`) in a process of its own.
 //!
-//! usage: aqr-win --register | --unregister | compress[-passphrase|-zip|-7z] PATH... |
+//! usage: aqr-win --register | --unregister | compress[-options|-passphrase|-zip|-7z] PATH... |
 //!        extract ARCHIVE... | test ARCHIVE... | name-version ARCHIVE | extract-version ARCHIVE
 //!
 //! - `--register` adds the verbs for the user (`register`): "Compress with Aqueous" on files
@@ -11,6 +11,9 @@
 //!   `aqr` extracts. `--unregister` takes them away.
 //! - `--install` and `--uninstall [--quiet]`, of the program that aqr-win-install installed
 //!   (`install`): the former run by the installer, the latter by Settings' Apps.
+//! - `compress-options`: the dialog of the options first (`options`), `aqr --session` beside it
+//!   finding out how many files and how big the paths are; Compress then has that `aqr` make the
+//!   archive, as `compress` does. `options-preview` shows the dialog alone, on examples.
 //! - `compress`: the paths into an archive, a single one into `PATH.aqr`, several into one
 //!   named after their folder (`compress-zip`: `.zip`, `compress-7z`: `.7z`,
 //!   `register::OTHER_FORMATS`). `extract`: each archive beside it, a single entry at its top
@@ -69,7 +72,7 @@ fn main() -> std::process::ExitCode {
         dialog::message(dialog::Icon::Error, main, e, None);
         ExitCode::FAILURE
     };
-    let (mut encrypt, mut format) = (false, "aqr");
+    let (mut encrypt, mut format, mut options) = (false, "aqr", false);
     let name = verb;
     let verb = match verb {
         "--register" => {
@@ -115,6 +118,10 @@ fn main() -> std::process::ExitCode {
             };
         }
         "options-preview" => return options::preview(),
+        "compress-options" => {
+            options = true;
+            Verb::Compress
+        }
         "compress" => Verb::Compress,
         "compress-passphrase" => {
             encrypt = true;
@@ -137,7 +144,7 @@ fn main() -> std::process::ExitCode {
             };
         }
         _ => {
-            let usage = "aqr-win --register | --unregister | compress[-passphrase|-zip|-7z] PATH... | \
+            let usage = "aqr-win --register | --unregister | compress[-options|-passphrase|-zip|-7z] PATH... | \
                          extract ARCHIVE... | test ARCHIVE... | name-version ARCHIVE | extract-version ARCHIVE";
             return fail(win::not_verb(), usage);
         }
@@ -151,5 +158,8 @@ fn main() -> std::process::ExitCode {
         Err(paths) if paths.is_empty() => return fail(win::nothing(), win::no_path()),
         Err(paths) => paths,
     };
-    run::run(verb, paths, encrypt, format)
+    match options {
+        true => run::run_options(paths),
+        false => run::run(verb, paths, encrypt, format),
+    }
 }

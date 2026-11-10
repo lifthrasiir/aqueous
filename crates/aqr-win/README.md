@@ -1,7 +1,7 @@
 # aqr-win
 
 Aqueous in Windows Explorer: "Compress with Aqueous" on files and folders, and beside it the
-menu "Aqueous" of the rest ("Compress with passphrase…", encrypted, `aqr -P`; a separator;
+menu "Aqueous" of the rest ("Compress with options…", the dialog of the options, `aqr --session`; "Compress with passphrase…", encrypted, `aqr -P`; a separator;
 "Compress into .zip" and ".7z", `aqr --format zip`, `7z`), "Extract here" (also the
 double-click) and "Test" on `.aqr` files and the other archives `aqr` extracts, and a window of
 how far the work is. The work is done by `aqr --ipc` in a process of its own (the protocol:
