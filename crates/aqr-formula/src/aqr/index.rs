@@ -15,6 +15,7 @@ use std::sync::OnceLock;
 
 use aqr_common::varint;
 
+use super::JournalPoint;
 use super::tree::{self, Read, Status, Tree};
 use super::{
     BlockSizes, Blocks, ContentRef, Counts, Decoded, Failure, HEADER_MAGIC, LeafBlock, Payload, Resource, SIZE_HINT,
@@ -50,10 +51,13 @@ pub(super) struct Index<'c> {
     leaf_dictionary: Vec<Option<u64>>,
     /// The blocks read whole, once all of them are wanted ([`Index::parsed`]).
     parsed: OnceLock<Decoded<Blocks<'c>>>,
+    /// Where the metadata block of the last segment is, where the archive ends before its own.
+    upto: Option<usize>,
 }
 
-/// What [`open`] makes of an archive: its index, its tree and contents, and its status.
-pub(super) type Indexed<'c> = (Index<'c>, Option<(Tree, Vec<ContentRef>)>, Option<Status>);
+/// What [`open`] makes of an archive: its index, its tree and contents, its status and its
+/// journal points.
+pub(super) type Indexed<'c> = (Index<'c>, Option<(Tree, Vec<ContentRef>)>, Option<Status>, Vec<JournalPoint>);
 
 /// The block of `p` at `at`, ending by `end`, by the generic structure: its type, its data and
 /// where it ends (after its padding).
@@ -141,6 +145,7 @@ pub(super) fn open<'c>(
     threads: usize,
     footer: (usize, usize, u64, u64),
     paths: Option<&[Vec<Vec<u8>>]>,
+    upto: Option<usize>,
 ) -> Decoded<Indexed<'c>> {
     let (fields_start, archive_end, size_hint, metadata) = footer;
     if p.sealed() {
@@ -164,6 +169,13 @@ pub(super) fn open<'c>(
         .and_then(|b| fields_start.checked_sub(b))
         .filter(|&at| at >= HEADER_MAGIC.len())
         .ok_or_else(|| Failure::Invalid("no metadata block where the footer points".into()))?;
+    // (the archive ended before its own end: from the metadata block of its last segment)
+    if let Some(u) = upto {
+        if u < HEADER_MAGIC.len() || u > at {
+            return invalid("no metadata block where the archive is to end");
+        }
+        at = u;
+    }
     loop {
         let (ty, data, next) = frame(p, at, archive_end)?;
         if !(0x10..=0x17).contains(&ty) {
@@ -249,8 +261,17 @@ pub(super) fn open<'c>(
     // (the metadata block before the first read, or the end of the header magic less 1)
     let mut prev = metas[0].0 - metas[0].2.prev as usize;
     let mut status = None;
-    for (at, _, m) in metas {
+    let mut journal = Vec::new();
+    for (k, (at, _, m)) in metas.into_iter().enumerate() {
+        if k == 0 && whole && m.entries.is_empty() {
+            return invalid("the first segment of no entries");
+        }
         status = Some(m.status);
+        journal.extend(m.journal.iter().map(|(time, label)| JournalPoint {
+            metadata: at,
+            time: *time,
+            label: label.clone(),
+        }));
         let mut leaf_of = |b: usize, dictionary: Option<u64>| -> Decoded<Option<(usize, Option<u64>)>> {
             let Ok(l) = leaf_at.binary_search(&b) else { return Ok(None) };
             if let Some(d) = dictionary {
@@ -269,8 +290,9 @@ pub(super) fn open<'c>(
         1 => trees.pop().map(|t| (t.tree, t.refs)),
         _ => Some(tree::merge(trees)),
     };
-    let index = Index { p, threads, whole, segments, leaf_at, leaf_segment, leaf_dictionary, parsed: OnceLock::new() };
-    Ok((index, tree, status))
+    let index =
+        Index { p, threads, whole, segments, leaf_at, leaf_segment, leaf_dictionary, parsed: OnceLock::new(), upto };
+    Ok((index, tree, status, journal))
 }
 
 /// The module, resource and dictionary blocks read as the leaves taken need them, by index
@@ -307,7 +329,7 @@ impl<'c> Index<'c> {
             if !self.whole {
                 return invalid("the archive read for some of its paths alone, not whole");
             }
-            let (blocks, tree, _) = opened(self.p.whole(self.threads)?, self.p.sealed(), false)?;
+            let (blocks, tree, ..) = opened(self.p.whole(self.threads)?, self.p.sealed(), false, self.upto)?;
             let leaves_at = blocks.leaf_at == self.leaf_at;
             if !leaves_at || tree.map(|t| t.1).as_ref() != refs {
                 return invalid("leaf blocks not those the metadata blocks tell");

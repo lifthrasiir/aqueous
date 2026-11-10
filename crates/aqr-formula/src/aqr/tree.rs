@@ -261,11 +261,9 @@ pub(crate) fn numbers(t: &Tree) -> Vec<usize> {
 }
 
 /// Checks that `t` is a tree the spec allows: each entry after its parent, which is a
-/// directory, of a valid name not taken in it already; and at least one entry.
+/// directory, of a valid name not taken in it already. (That the first segment has an entry is
+/// the writer's to check, and the reader's.)
 pub(crate) fn check(t: &Tree, contents: usize) -> Result<(), String> {
-    if t.entries.is_empty() {
-        return Err("no entries".into());
-    }
     let mut names = std::collections::HashSet::new();
     for (i, e) in t.entries.iter().enumerate() {
         if let Some(p) = e.parent
@@ -575,6 +573,10 @@ pub(crate) struct FileParam {
     pub dictionary: Option<usize>,
 }
 
+/// The journal points of a segment (spec, "`journal`"): each a time (milliseconds since the
+/// epoch, UTC) and a label, in the order of their times.
+pub type Journal = Vec<(u64, String)>;
+
 /// What a segment's metadata block tells of the writing it ends (spec, "`segment-status`").
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Status {
@@ -597,6 +599,7 @@ pub(crate) fn metadata(
     at: usize,
     prev: usize,
     status: Status,
+    journal: &[(u64, String)],
     modules: &[usize],
     resources: &[usize],
     dictionaries: &[usize],
@@ -647,7 +650,7 @@ pub(crate) fn metadata(
         let p = contents[c];
         [(at - p.leaf) as u64, p.output, p.size]
     };
-    let opt = optional(t, &order, &fork_at, status);
+    let opt = optional(t, &order, &fork_at, status, journal);
 
     let mut m = Vec::new();
     varint::put(&mut m, prev);
@@ -658,10 +661,10 @@ pub(crate) fn metadata(
     for &b in modules.iter().chain(resources).chain(dictionaries) {
         put_u(&mut m, prev, (at - b) as u64);
     }
-    for &i in &order[1..] {
+    for &i in order.iter().skip(1) {
         put_u(&mut m, dirs as u64, t.entries[i].parent.map_or(0, |p| number[p]) as u64);
     }
-    for &i in &order[dirs..dirs + nfiles] {
+    for &i in order.iter().skip(dirs).take(nfiles) {
         let p = param(i);
         let offset = (at - p.leaf) as u64;
         // (1-based, zero for none: zero-sized where the segment has no dictionary)
@@ -699,15 +702,21 @@ fn put_u(out: &mut Vec<u8>, n: u64, v: u64) {
 /// The optional metadata of `t`, its entries in `order`, its forks' contents where `fork_at`
 /// tells (`aqr-fork`: offset, output and size): `entry-extras` where any entry has an extra, and
 /// `segment-status` where `status` is not [`Status::None`]; else nothing (an empty map).
-fn optional(t: &Tree, order: &[usize], fork_at: &dyn Fn(usize) -> [u64; 3], status: Status) -> Vec<u8> {
+fn optional(
+    t: &Tree,
+    order: &[usize],
+    fork_at: &dyn Fn(usize) -> [u64; 3],
+    status: Status,
+    journal: &[(u64, String)],
+) -> Vec<u8> {
     let extras: Vec<&Extra> = std::iter::once(&t.root).chain(order.iter().map(|&i| &t.entries[i].extra)).collect();
     let last = extras.iter().rposition(|e| !e.is_empty());
     let told = status != Status::None;
-    if last.is_none() && !told {
+    if last.is_none() && !told && journal.is_empty() {
         return Vec::new();
     }
     let mut c = Vec::new();
-    head(&mut c, 5, last.is_some() as u64 + told as u64);
+    head(&mut c, 5, last.is_some() as u64 + told as u64 + !journal.is_empty() as u64);
     if let Some(last) = last {
         int(&mut c, ENTRY_EXTRAS);
         head(&mut c, 4, last as u64 + 1);
@@ -734,6 +743,15 @@ fn optional(t: &Tree, order: &[usize], fork_at: &dyn Fn(usize) -> [u64; 3], stat
                     head(&mut c, 0, v);
                 }
             }
+        }
+    }
+    if !journal.is_empty() {
+        int(&mut c, JOURNAL);
+        head(&mut c, 5, journal.len() as u64);
+        for (time, label) in journal {
+            head(&mut c, 0, *time);
+            head(&mut c, 3, label.len() as u64);
+            c.extend_from_slice(label.as_bytes());
         }
     }
     c
@@ -853,6 +871,7 @@ fn text(out: &mut Vec<u8>, b: &[u8]) {
 
 const ENTRY_EXTRAS: i128 = -2;
 const SEGMENT_STATUS: i128 = -3;
+const JOURNAL: i128 = -4;
 const INCOMPLETE_FILES: i128 = 0;
 const INCOMPLETE_BYTES: i128 = 1;
 const CRTIME: i128 = -1;
@@ -1308,7 +1327,7 @@ fn extras(d: &[u8], n: usize) -> Decoded<(Vec<Extra>, Vec<Vec<(Vec<u8>, ForkRef)
 
 /// The extras of [`extras`] and their forks, whether each has an entry extra (a map, not null
 /// nor left out), and the segment's `segment-status`.
-type Extras = (Vec<Extra>, Vec<Vec<(Vec<u8>, ForkRef)>>, Vec<bool>, Status);
+type Extras = (Vec<Extra>, Vec<Vec<(Vec<u8>, ForkRef)>>, Vec<bool>, Status, Journal);
 
 /// [`extras`], and whether each has an entry extra (a map, not null nor left out), and the
 /// segment's `segment-status`. Of the entries `wanted` tells (by number from the root, where it
@@ -1320,8 +1339,9 @@ fn extras_given(d: &[u8], n: usize, wanted: Option<&[bool]>) -> Decoded<Extras> 
     let mut forks = vec![Vec::new(); n + 1];
     let mut given = vec![false; n + 1];
     let mut status = Status::None;
+    let mut journal = Journal::new();
     if d.is_empty() {
-        return Ok((out, forks, given, status));
+        return Ok((out, forks, given, status, journal));
     }
     // Walked rather than read whole: the entry-extras an entry at a time, each a member at a
     // time (read whole, those of an archive of many entries took most of opening it).
@@ -1341,9 +1361,14 @@ fn extras_given(d: &[u8], n: usize, wanted: Option<&[bool]>) -> Decoded<Extras> 
         }
         let entry_extras = k == Cbor::Int(ENTRY_EXTRAS);
         let told = k == Cbor::Int(SEGMENT_STATUS);
+        let points = k == Cbor::Int(JOURNAL);
         add_key(&mut keys, k)?;
         if told {
             status = status_of(item(d, &mut at, 1)?)?;
+            continue;
+        }
+        if points {
+            journal = journal_of(item(d, &mut at, 1)?)?;
             continue;
         }
         if !entry_extras {
@@ -1396,7 +1421,23 @@ fn extras_given(d: &[u8], n: usize, wanted: Option<&[bool]>) -> Decoded<Extras> 
     if at != d.len() {
         return invalid("bytes after the optional metadata");
     }
-    Ok((out, forks, given, status))
+    Ok((out, forks, given, status, journal))
+}
+
+/// The `journal` of value `v`: times to labels, in the order of the times.
+fn journal_of(v: Cbor) -> Decoded<Journal> {
+    let Cbor::Map(m) = v else { return invalid("journal not a map") };
+    let mut out = Journal::new();
+    for (k, v) in m.pairs() {
+        let Cbor::Int(t) = k else { return invalid("a journal time not an integer") };
+        let t = u64::try_from(t).map_err(|_| super::Failure::Invalid("a journal time out of range".into()))?;
+        out.push((t, String::from_utf8_lossy(&aqr_text(v)?).into_owned()));
+    }
+    out.sort_by_key(|p| p.0);
+    if out.windows(2).any(|w| w[0].0 == w[1].0) {
+        return invalid("duplicate keys in journal");
+    }
+    Ok(out)
 }
 
 /// The `segment-status` of value `v`: `true`, or an `aqr-incomplete` (other keys let be).
@@ -1822,6 +1863,8 @@ pub(crate) struct Metadata {
     /// Its `segment-status`: a hint of repair and of what the writing left out, not of the
     /// archive's value.
     pub status: Status,
+    /// Its `journal`.
+    pub journal: Journal,
     /// Where the optional metadata is in the block's data.
     pub opt: std::ops::Range<usize>,
 }
@@ -1871,9 +1914,6 @@ pub(crate) fn read_with(d: &[u8], wanted: &mut dyn FnMut(&Entries) -> Option<Vec
     }
     let [modules, resources, dictionaries, dirs, files, specials, entries_size, opt_size] = counts;
     let n = dirs + files + specials;
-    if n == 0 {
-        return invalid("a metadata block of no entries");
-    }
     let get_u = |at: &mut usize, bound: u64| -> Decoded<u64> {
         let w = width(bound);
         let b = d.get(*at..*at + w).ok_or_else(|| super::Failure::Invalid("truncated metadata".into()))?;
@@ -1968,7 +2008,7 @@ pub(crate) fn read_with(d: &[u8], wanted: &mut dyn FnMut(&Entries) -> Option<Vec
         return invalid("bytes after the entries");
     }
     let wanted = wanted(&out);
-    let (extras, forks, given, status) = extras_given(opt, n, wanted.as_deref())?;
+    let (extras, forks, given, status, journal) = extras_given(opt, n, wanted.as_deref())?;
     Ok(Metadata {
         prev,
         modules: module_offsets,
@@ -1979,6 +2019,7 @@ pub(crate) fn read_with(d: &[u8], wanted: &mut dyn FnMut(&Entries) -> Option<Vec
         forks,
         given,
         status,
+        journal,
         opt: d.len() - opt_size..d.len(),
     })
 }
@@ -2087,7 +2128,7 @@ mod tests {
             t.entries.push(Entry { parent: None, name: vec![b'a' + i as u8], node, extra });
         }
         let order: Vec<usize> = (0..3).collect();
-        let c = optional(&t, &order, &|c| [c as u64 * 2, 0, 9], Status::None);
+        let c = optional(&t, &order, &|c| [c as u64 * 2, 0, 9], Status::None, &[]);
         let (got, forks) = extras(&c, 3).unwrap();
         assert_eq!(got[1..3], [t.entries[0].extra.clone(), t.entries[1].extra.clone()]);
         // (a time beyond 64 bits of nanoseconds of seconds)
@@ -2097,26 +2138,38 @@ mod tests {
         // (times of nanoseconds as they are)
         assert!(c.windows(2).any(|w| w == [0xd8, 126]));
         let none = Tree { entries: t.entries[..1].to_vec(), ..Tree::default() };
-        assert_eq!(optional(&none, &[0], &|_| unreachable!(), Status::None), b"");
+        assert_eq!(optional(&none, &[0], &|_| unreachable!(), Status::None, &[]), b"");
         // segment-status, alone and after entry-extras: true, or a map of what was left out
-        assert_eq!(optional(&none, &[0], &|_| unreachable!(), Status::Complete), [0xa1, 0x22, 0xf5]);
+        assert_eq!(optional(&none, &[0], &|_| unreachable!(), Status::Complete, &[]), [0xa1, 0x22, 0xf5]);
         assert_eq!(extras_given(&[0xa1, 0x22, 0xf5], 1, None).unwrap().3, Status::Complete);
-        let both = optional(&t, &order, &|c| [c as u64 * 2, 0, 9], Status::Complete);
-        let (again, _, _, status) = extras_given(&both, 3, None).unwrap();
+        let both = optional(&t, &order, &|c| [c as u64 * 2, 0, 9], Status::Complete, &[]);
+        let (again, _, _, status, _) = extras_given(&both, 3, None).unwrap();
         assert!(status == Status::Complete && again == extras(&c, 3).unwrap().0);
         assert_eq!(extras_given(&c, 3, None).unwrap().3, Status::None);
         assert!(extras_given(&[0xa1, 0x22, 0xf4], 1, None).is_err());
         let left = Status::Incomplete { files: Some(3), bytes: Some(300) };
-        let m = optional(&none, &[0], &|_| unreachable!(), left);
+        let m = optional(&none, &[0], &|_| unreachable!(), left, &[]);
         assert_eq!(m, [0xa1, 0x22, 0xa2, 0x00, 0x03, 0x01, 0x19, 0x01, 0x2c]);
         assert_eq!(extras_given(&m, 1, None).unwrap().3, left);
         let bare = Status::Incomplete { files: None, bytes: None };
-        assert_eq!(optional(&none, &[0], &|_| unreachable!(), bare), [0xa1, 0x22, 0xa0]);
+        assert_eq!(optional(&none, &[0], &|_| unreachable!(), bare, &[]), [0xa1, 0x22, 0xa0]);
         assert_eq!(extras_given(&[0xa1, 0x22, 0xa0], 1, None).unwrap().3, bare);
         // (other keys let be; a count of another kind, or the same key twice, not)
         let other = Status::Incomplete { files: Some(1), bytes: None };
         assert_eq!(extras_given(&[0xa1, 0x22, 0xa2, 0x00, 0x01, 0x05, 0xf6], 1, None).unwrap().3, other);
         assert!(extras_given(&[0xa1, 0x22, 0xa1, 0x00, 0x20], 1, None).is_err());
+        // journal: times to labels, written in the order of the times
+        let points = vec![(1_700_000_000_000, "daily".to_string()), (5, String::new())];
+        let j = optional(&none, &[0], &|_| unreachable!(), Status::Complete, &points);
+        assert_eq!(&j[..5], [0xa2, 0x22, 0xf5, 0x23, 0xa2]);
+        let got = extras_given(&j, 1, None).unwrap();
+        assert_eq!(
+            (got.3, &got.4[..]),
+            (Status::Complete, &[(5, String::new()), (1_700_000_000_000, "daily".to_string())][..])
+        );
+        assert!(extras_given(&[0xa1, 0x23, 0xa2, 0x05, 0x60, 0x05, 0x60], 1, None).is_err());
+        assert!(extras_given(&[0xa1, 0x23, 0xa1, 0x20, 0x60], 1, None).is_err());
+        assert!(extras_given(&[0xa1, 0x23, 0x80], 1, None).is_err());
         assert!(extras_given(&[0xa1, 0x22, 0xa2, 0x00, 0x01, 0x00, 0x02], 1, None).is_err());
         // other keys, tags and indefinite lengths read
         let other = [0xbf, 0x21, 0x9f, 0xa1, 0x22, 0xd8, 0x79, 0x0a, 0xf6, 0xff, 0x01, 0x5f, 0x41, 0x00, 0xff, 0xff];
@@ -2227,7 +2280,7 @@ mod tests {
             let extra = Extra { gname: Some(vec![b'g', i % 2].into()), ..x.clone() };
             t.entries.push(Entry { parent: None, name: vec![b'a' + i], node: EntryNode::Dir, extra });
         }
-        let c = optional(&t, &[0, 1, 2], &|_| unreachable!(), Status::None);
+        let c = optional(&t, &[0, 1, 2], &|_| unreachable!(), Status::None, &[]);
         let (got, _) = extras(&c, 3).unwrap();
         assert_eq!(got[1..], t.entries.iter().map(|e| e.extra.clone()).collect::<Vec<_>>()[..]);
         let same = |f: &dyn Fn(&Extra) -> &Arc<[u8]>| got[1..].windows(2).all(|w| Arc::ptr_eq(f(&w[0]), f(&w[1])));

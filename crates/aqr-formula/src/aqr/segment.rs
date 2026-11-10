@@ -108,6 +108,8 @@ pub struct SegmentWriter {
     /// odd, is counted in `at` but not yet written where `pad`.
     live: Option<std::ops::Range<usize>>,
     pad: bool,
+    /// The journal points the next metadata block tells ([`SegmentWriter::set_journal`]).
+    journal: Vec<(u64, String)>,
 }
 
 /// The blocks of a batch of leaves, to write after those before ([`SegmentWriter::commit`]).
@@ -198,6 +200,7 @@ impl SegmentWriter {
             prefix: Vec::new(),
             live: None,
             pad: false,
+            journal: Vec::new(),
         }
     }
 
@@ -221,6 +224,28 @@ impl SegmentWriter {
         let mut w = SegmentWriter::new();
         (w.at, w.segment_at, w.prev) = (footer, footer, metadata);
         w
+    }
+
+    /// Has the metadata block of the segment being written tell `points` as its `journal` (spec,
+    /// "`journal`"): times in milliseconds since the epoch (UTC) and labels, of times not repeated.
+    /// Taken by [`SegmentWriter::close_as`]; [`SegmentWriter::end`] and [`SegmentWriter::finish_as`]
+    /// tell them without taking.
+    pub fn set_journal(&mut self, mut points: Vec<(u64, String)>) -> Result<()> {
+        points.sort_by_key(|p| p.0);
+        if points.windows(2).any(|w| w[0].0 == w[1].0) {
+            return Err(Error::new("a time repeated in the journal"));
+        }
+        self.journal = points;
+        Ok(())
+    }
+
+    /// Whether the segment being written is the archive's first, which has to have an entry
+    /// (spec, "Metadata block"): a tree the spec allows.
+    fn check(&self, t: &Tree, contents: usize) -> Result<()> {
+        if self.prev == HEADER_MAGIC.len() - 1 && t.entries.is_empty() {
+            return Err(Error::new("the first segment of no entries"));
+        }
+        tree::check(t, contents).map_err(Error::new)
     }
 
     /// The footer of the archive so far, to write after the metadata block of the segment just
@@ -250,7 +275,7 @@ impl SegmentWriter {
         status: Status,
         base: u64,
     ) -> Result<(Vec<u8>, Option<std::ops::Range<usize>>)> {
-        tree::check(t, contents.len()).map_err(Error::new)?;
+        self.check(t, contents.len())?;
         if contents.iter().any(|c| c.leaf < self.segment_at) {
             return Err(Error::new("a content of a leaf of another segment"));
         }
@@ -368,11 +393,12 @@ impl SegmentWriter {
 
     /// [`SegmentWriter::close`], the metadata block telling `status` (`segment-status`).
     pub fn close_as(&mut self, enc: &Encoder, t: &Tree, contents: &[ContentAt], status: Status) -> Result<Vec<u8>> {
-        tree::check(t, contents.len()).map_err(Error::new)?;
+        self.check(t, contents.len())?;
         if contents.iter().any(|c| c.leaf < self.segment_at) {
             return Err(Error::new("a content of a leaf of another segment"));
         }
         let out = self.metadata_block(enc, t, contents, usize::MAX, 0, status)?;
+        self.journal.clear();
         self.prev = self.at;
         self.at += out.len();
         self.segment_at = self.at;
@@ -679,7 +705,7 @@ impl SegmentWriter {
         contents: &[ContentAt],
         status: Status,
     ) -> Result<(Vec<u8>, usize)> {
-        tree::check(t, contents.len()).map_err(Error::new)?;
+        self.check(t, contents.len())?;
         let mut out = self.metadata_block(enc, t, contents, usize::MAX, 0, status)?;
         let metadata = out.len();
         let end = self.at + out.len();
@@ -708,7 +734,7 @@ impl SegmentWriter {
         chunked: bool,
         status: Status,
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        tree::check(t, contents.len()).map_err(Error::new)?;
+        self.check(t, contents.len())?;
         let mut room = 0;
         for tries in 0..8 {
             let meta = self.metadata_block(enc, t, contents, front, room, status)?;
@@ -760,8 +786,17 @@ impl SegmentWriter {
         let all = |v: &[usize]| v.iter().map(|&a| moved(a)).collect::<Vec<_>>();
         let (modules, resources, dictionaries) =
             (all(&self.module_at), all(&self.resource_at), all(&self.dictionary_at));
-        let meta =
-            tree::metadata(t, self.at + shift, moved(self.prev), status, &modules, &resources, &dictionaries, &params);
+        let meta = tree::metadata(
+            t,
+            self.at + shift,
+            moved(self.prev),
+            status,
+            &self.journal,
+            &modules,
+            &resources,
+            &dictionaries,
+            &params,
+        );
         let mut out = Vec::new();
         match enc.base_level() {
             STORED => {
@@ -779,6 +814,9 @@ impl Encoder {
     /// Fails on slices out of their streams, on outputs not taken once each (by one leaf), and
     /// on a tree the spec does not allow.
     pub fn encode_segment(&self, s: &Segment) -> Result<(Vec<u8>, Layout)> {
+        if s.tree.entries.is_empty() {
+            return Err(Error::new("the first segment of no entries"));
+        }
         tree::check(s.tree, s.contents.len()).map_err(Error::new)?;
         for &(leaf, output) in s.contents {
             if s.leaves.get(leaf).is_none_or(|l| output >= l.outputs.len()) {
@@ -953,7 +991,10 @@ fn uses(f: &Formula, leaf: &Leaf) -> Uses {
 #[cfg(test)]
 mod tests {
     use super::super::tests::{CUT, REV, natives};
-    use super::super::{BLOCK, Level, Value, checksum, decode, decode_value, invalid, leb, locate, open, open_indexed};
+    use super::super::{
+        Archive, BLOCK, Level, Payload, Value, checksum, decode, decode_value, invalid, leb, locate, open,
+        open_indexed, open_indexed_upto, open_upto,
+    };
     use super::*;
     use crate::{Apply, Kind};
     use tree::{Entry, EntryNode, Extra, Time};
@@ -1450,6 +1491,74 @@ mod tests {
         assert_eq!(locate(&third), Some(0..second.len()));
         let third = killed(&third, old);
         assert_eq!(files(&third), [file("a"), file("b"), file("c")]);
+    }
+
+    /// Journal points name states: a segment of no entries names the state again, and an archive
+    /// opens as it is after any of them.
+    #[test]
+    fn journal_points() {
+        let names = ["a", "b"];
+        let mut f = Formula::default();
+        let lits: Vec<Node> = names.iter().map(|n| f.push(*n, n.repeat(5).into_bytes())).collect();
+        let enc = Encoder::new(Level::Zstd(3));
+        let mut w = SegmentWriter::new();
+        let mut out = SegmentWriter::header().to_vec();
+        let mut olds = Vec::new();
+        // (file `k` or nothing, the points)
+        let runs: [(Option<usize>, Vec<(u64, &str)>); 3] = [
+            (Some(0), vec![(1000, "first")]),
+            (Some(1), vec![(2000, "second"), (2500, "")]),
+            (None, vec![(3000, "again")]),
+        ];
+        for (file, points) in runs {
+            out.extend_from_slice(w.pad());
+            let (t, contents) = match file {
+                Some(k) => {
+                    let b = w.batch(&enc, &f, &[Leaf { outputs: vec![lits[k].clone()], sums: vec![None] }]).unwrap();
+                    w.commit(&b);
+                    out.extend_from_slice(&b.bytes);
+                    let t = Tree { root: Extra::default(), entries: vec![entry(None, names[k], EntryNode::File(0))] };
+                    (t, vec![ContentAt { leaf: b.leaf_at[0], output: 0, size: 5 }])
+                }
+                None => (Tree::default(), Vec::new()),
+            };
+            w.set_journal(points.iter().map(|&(t, l)| (t, l.to_string())).collect()).unwrap();
+            out.extend_from_slice(&w.close_as(&enc, &t, &contents, Status::Complete).unwrap());
+            let (end, old) = w.footer(0);
+            out.extend_from_slice(&end);
+            olds.extend(old);
+        }
+        for old in olds.into_iter().rev() {
+            out = killed(&out, old);
+        }
+        let want = [(1000, "first"), (2000, "second"), (2500, ""), (3000, "again")];
+        let names_of = |a: &Archive| -> Vec<Vec<u8>> {
+            let mut n: Vec<_> = a.tree().unwrap().entries.iter().map(|e| e.name.clone()).collect();
+            n.sort();
+            n
+        };
+        let nat = natives();
+        let whole = open(&out, &nat).unwrap();
+        let got: Vec<_> = whole.journal().iter().map(|p| (p.time, p.label.as_str())).collect();
+        assert_eq!(got, want);
+        assert_eq!(names_of(&whole), [b"a".to_vec(), b"b".to_vec()]);
+        // the state after the points: the empty segment adds nothing
+        let at: Vec<usize> = whole.journal().iter().map(|p| p.metadata).collect();
+        assert!(at[0] < at[1] && at[1] == at[2] && at[2] < at[3]);
+        let up = |m| open_upto(&out, &nat, m).unwrap();
+        assert_eq!(names_of(&up(at[0])), [b"a".to_vec()]);
+        assert_eq!(names_of(&up(at[1])), [b"a".to_vec(), b"b".to_vec()]);
+        assert_eq!(up(at[0]).journal().len(), 1);
+        assert_eq!(up(at[3]).journal().len(), 4);
+        assert!(open_upto(&out, &nat, at[0] + 1).is_err());
+        let indexed = |m| open_indexed_upto(Payload::Plain(&out), &nat, 1, m).unwrap();
+        assert_eq!(names_of(&indexed(at[0])), [b"a".to_vec()]);
+        assert_eq!(indexed(at[3]).journal().len(), 4);
+        assert_eq!(open_indexed(Payload::Plain(&out), &nat, 1).unwrap().journal().len(), 4);
+        // an archive's first segment has an entry; a time is not repeated
+        let mut first = SegmentWriter::new();
+        assert!(first.close_as(&enc, &Tree::default(), &[], Status::Complete).is_err());
+        assert!(first.set_journal(vec![(1, "a".into()), (1, "b".into())]).is_err());
     }
 
     #[test]

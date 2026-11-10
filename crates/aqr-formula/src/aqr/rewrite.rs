@@ -74,7 +74,7 @@ pub fn rewrite(c: &[u8], t: &Tree, level: Level, threads: usize, out: &mut dyn W
         return Err(Error::new("not a standalone archive"));
     }
     unknown_metadata(c)?;
-    let (blocks, tree, _) = opened(c, false, false).map_err(fail)?;
+    let (blocks, tree, ..) = opened(c, false, false, None).map_err(fail)?;
     let (_, refs) = tree.ok_or_else(|| Error::new("an archive of a single file, not of paths"))?;
     if t.entries.is_empty() {
         return Err(Error::new("nothing left in it"));

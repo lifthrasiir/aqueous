@@ -2696,6 +2696,8 @@ pub struct Archive<'c, 'n> {
     tree: Option<(Tree, Vec<ContentRef>)>,
     /// What the last segment tells of the writing it ends ([`Archive::status`]).
     status: Option<Status>,
+    /// The journal points of its segments, in the order of the segments ([`Archive::journal`]).
+    journal: Vec<JournalPoint>,
     /// The budget the leaves evaluated take of by their weights ([`Archive::set_budget`]).
     budget: Option<&'n Budget>,
     /// Told how far the evaluation is ([`Archive::on_progress`]).
@@ -2704,6 +2706,18 @@ pub struct Archive<'c, 'n> {
     items: Vec<Option<usize>>,
     /// Whether the pages of the blocks are let go of as they are read ([`Archive::let_go_read`]).
     let_go: bool,
+}
+
+/// A journal point of an archive (spec, "`journal`"): the state after a segment, named by a time
+/// and a label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalPoint {
+    /// Where the segment's metadata block is, from the archive's header magic: what
+    /// [`open_upto`] and [`open_indexed_upto`] take to open the archive as it is at the point.
+    pub metadata: usize,
+    /// Milliseconds since the epoch (UTC).
+    pub time: u64,
+    pub label: String,
 }
 
 /// An archive's blocks: all of them read ([`open`]), or as its metadata blocks tell where they
@@ -2722,6 +2736,16 @@ pub fn open<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner) -> Decoded<Archive<'c, 
     open_as(c, runner, false)
 }
 
+/// [`open`] of the archive as it is after the segment whose metadata block is at `metadata`
+/// ([`JournalPoint::metadata`]): the segments after it left out, as if the archive ended there
+/// (spec, "`journal`").
+pub fn open_upto<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, metadata: usize) -> Decoded<Archive<'c, 'n>> {
+    if envelope::is_encrypted(c) {
+        return Err(Failure::Decryption("an encrypted archive, and no passphrase".into()));
+    }
+    open_with(c, runner, false, false, Some(metadata))
+}
+
 /// The decrypted payload `c` of an encrypted archive opened, as [`open`] does, but for the
 /// constraints of a payload: a size hint block, and no spacer blocks.
 pub fn open_payload<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner) -> Decoded<Archive<'c, 'n>> {
@@ -2737,7 +2761,7 @@ pub fn open_salvaging<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, sealed: bool)
     if envelope::is_encrypted(c) {
         return Err(Failure::Decryption("an encrypted archive, and no passphrase".into()));
     }
-    open_with(c, runner, sealed, true)
+    open_with(c, runner, sealed, true, None)
 }
 
 /// The bytes of an archive (from its header magic to the end of its footer) as they are read: a
@@ -2798,7 +2822,18 @@ impl<'c> Payload<'c> {
 /// told of (decrypted on up to `threads` threads), and an archive without a metadata block at
 /// once.
 pub fn open_indexed<'c, 'n>(p: Payload<'c>, runner: &'n dyn Runner, threads: usize) -> Decoded<Archive<'c, 'n>> {
-    open_indexed_with(p, runner, threads, None)
+    open_indexed_with(p, runner, threads, None, None)
+}
+
+/// [`open_indexed`] of the archive as it is after the segment whose metadata block is at
+/// `metadata` ([`JournalPoint::metadata`]), as [`open_upto`] opens it.
+pub fn open_indexed_upto<'c, 'n>(
+    p: Payload<'c>,
+    runner: &'n dyn Runner,
+    threads: usize,
+    metadata: usize,
+) -> Decoded<Archive<'c, 'n>> {
+    open_indexed_with(p, runner, threads, None, Some(metadata))
 }
 
 /// [`open_indexed`], of the entries at `paths` (each its names in turn, as the tree's) alone:
@@ -2812,7 +2847,7 @@ pub fn open_indexed_at<'c, 'n>(
     threads: usize,
     paths: &[Vec<Vec<u8>>],
 ) -> Decoded<Archive<'c, 'n>> {
-    open_indexed_with(p, runner, threads, Some(paths))
+    open_indexed_with(p, runner, threads, Some(paths), None)
 }
 
 fn open_indexed_with<'c, 'n>(
@@ -2820,28 +2855,58 @@ fn open_indexed_with<'c, 'n>(
     runner: &'n dyn Runner,
     threads: usize,
     paths: Option<&[Vec<Vec<u8>>]>,
+    upto: Option<usize>,
 ) -> Decoded<Archive<'c, 'n>> {
     let footer = footer_fields(p)?;
     if footer.3 == 0 {
         return open_as(p.whole(threads)?, runner, p.sealed());
     }
-    let (index, tree, status) = index::open(p, threads, footer, paths)?;
+    let (index, tree, status, journal) = index::open(p, threads, footer, paths, upto)?;
     let loaded = (0..index.modules_len()).map(|_| OnceLock::new()).collect();
     let kept = Archived::Indexed(Box::new(index));
-    Ok(Archive { kept, runner, loaded, tree, status, budget: None, tell: None, items: Vec::new(), let_go: false })
+    Ok(Archive {
+        kept,
+        runner,
+        loaded,
+        tree,
+        status,
+        journal,
+        budget: None,
+        tell: None,
+        items: Vec::new(),
+        let_go: false,
+    })
 }
 
 /// [`open`] of an archive, the payload of an encrypted one where `sealed`.
 fn open_as<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, sealed: bool) -> Decoded<Archive<'c, 'n>> {
-    open_with(c, runner, sealed, false)
+    open_with(c, runner, sealed, false, None)
 }
 
-/// [`open_as`], salvaging where `salvaging` ([`open_salvaging`]).
-fn open_with<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, sealed: bool, salvaging: bool) -> Decoded<Archive<'c, 'n>> {
-    let (blocks, tree, status) = opened(c, sealed, salvaging)?;
+/// [`open_as`], salvaging where `salvaging` ([`open_salvaging`]), the archive ended after the
+/// segment whose metadata block is at `upto` where it is given ([`open_upto`]).
+fn open_with<'c, 'n>(
+    c: &'c [u8],
+    runner: &'n dyn Runner,
+    sealed: bool,
+    salvaging: bool,
+    upto: Option<usize>,
+) -> Decoded<Archive<'c, 'n>> {
+    let (blocks, tree, status, journal) = opened(c, sealed, salvaging, upto)?;
     let loaded = blocks.modules.iter().map(|_| OnceLock::new()).collect();
     let kept = Archived::Parsed(Box::new(blocks));
-    Ok(Archive { kept, runner, loaded, tree, status, budget: None, tell: None, items: Vec::new(), let_go: false })
+    Ok(Archive {
+        kept,
+        runner,
+        loaded,
+        tree,
+        status,
+        journal,
+        budget: None,
+        tell: None,
+        items: Vec::new(),
+        let_go: false,
+    })
 }
 
 /// Of archive `p`, as its footer tells: where the footer's fields start, where the archive's
@@ -2873,13 +2938,15 @@ fn footer_fields(p: Payload) -> Decoded<(usize, usize, u64, u64)> {
 }
 
 /// The blocks of archive `c` (the payload of an encrypted one where `sealed`, salvaged where
-/// `salvaging`), its tree and its status: what [`open_with`] opens.
+/// `salvaging`), its tree, its status and its journal points: what [`open_with`] opens, ended
+/// after the segment whose metadata block is at `upto` where it is given.
 #[allow(clippy::type_complexity)]
 fn opened(
     c: &[u8],
     sealed: bool,
     salvaging: bool,
-) -> Decoded<(Blocks<'_>, Option<(Tree, Vec<ContentRef>)>, Option<Status>)> {
+    upto: Option<usize>,
+) -> Decoded<(Blocks<'_>, Option<(Tree, Vec<ContentRef>)>, Option<Status>, Vec<JournalPoint>)> {
     let (fields_start, archive_end, size_hint, metadata) = footer_fields(Payload::Plain(c))?;
     // (salvaging an encrypted archive's payload, its blocks lost are spacer blocks, its size
     // hint block among them maybe)
@@ -2904,10 +2971,20 @@ fn opened(
     // (where the metadata block before each is: the end of the header magic, less 1, before the first)
     let mut prev = HEADER_MAGIC.len() - 1;
     let mut status = None;
+    let mut journal = Vec::new();
+    let mut ended = upto.is_none();
     for (k, (at, d)) in metas.into_iter().enumerate() {
         let m = tree::read(&d)?;
         drop(d);
+        if k == 0 && m.entries.is_empty() {
+            return invalid("the first segment of no entries");
+        }
         status = Some(m.status);
+        journal.extend(m.journal.iter().map(|(time, label)| JournalPoint {
+            metadata: at,
+            time: *time,
+            label: label.clone(),
+        }));
         let seg = &blocks.segments[k];
         let (first, end) = (seg.first, seg.end);
         // (salvaging, those there those the first offsets tell: the others lost with what follows)
@@ -2934,6 +3011,13 @@ fn opened(
         };
         trees.push(tree_of(m, at, prev, &mut leaf_at, outputs.len(), salvaging.then_some(&mut lost))?);
         prev = at;
+        if upto == Some(at) {
+            ended = true;
+            break;
+        }
+    }
+    if !ended {
+        return invalid("no metadata block where the archive is to end");
     }
     let tree = match trees.len() {
         0 => None,
@@ -2947,10 +3031,17 @@ fn opened(
         blocks.leaf_dictionary.push(None);
         blocks.sizes.leaves.push(0);
     }
-    Ok((blocks, tree, status))
+    Ok((blocks, tree, status, journal))
 }
 
 impl<'c, 'n> Archive<'c, 'n> {
+    /// The journal points of the archive's segments (spec, "`journal`"), in the order of the
+    /// segments and, in a segment, of the times. Of an archive opened for some paths alone, only
+    /// those of the segments read.
+    pub fn journal(&self) -> &[JournalPoint] {
+        &self.journal
+    }
+
     /// The archive's blocks, all of them read (where they are not yet, now, as [`open`] reads
     /// them).
     fn parsed(&self) -> Decoded<&Blocks<'c>> {
