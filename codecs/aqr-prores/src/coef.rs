@@ -7,6 +7,8 @@
 //! Coefficients are kept by block, in scan order: `c[b * 64 + i]` is block `b`'s `i`th in
 //! scan order (`c[b * 64]` its DC, as coded: without the 4096 offset).
 
+use std::hint::select_unpredictable;
+
 use aqr_common::msb::BitReader;
 
 use crate::{Error, Result};
@@ -70,8 +72,7 @@ impl Out<'_> {
     #[inline(always)]
     fn put(&mut self, v: u64, len: u32) {
         if len > 32 {
-            self.put(v >> 32, len - 32);
-            self.put(v & 0xffff_ffff, 32);
+            self.put_long(v, len);
             return;
         }
         self.acc = (self.acc << len) | v;
@@ -80,6 +81,13 @@ impl Out<'_> {
             self.n -= 32;
             self.out.extend_from_slice(&((self.acc >> self.n) as u32).to_be_bytes());
         }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn put_long(&mut self, v: u64, len: u32) {
+        self.put(v >> 32, len - 32);
+        self.put(v & 0xffff_ffff, 32);
     }
 
     /// Pads with zero bits to a byte.
@@ -151,6 +159,31 @@ pub fn decode(d: &[u8], start: usize, end: usize, blocks: usize, c: &mut [i16]) 
     Ok(Tail { zero_bytes: (end / 8 - used) as u32, empty: false })
 }
 
+/// The positions of block `b`'s coefficients that are nonzero, as bits (bit 0, the DC, is not
+/// looked at).
+#[inline(always)]
+fn nonzeros(b: &[i16]) -> u64 {
+    let mut m = 0u64;
+    for (i, &v) in b.iter().enumerate().skip(1) {
+        m |= ((v != 0) as u64) << i;
+    }
+    m
+}
+
+/// The codeword of `v` as [`codeword`] has it, with selects in place of the branch between the
+/// Rice code and the exp-Golomb one (which values near the switch make hard to predict).
+#[inline(always)]
+fn codeword_u(cb: u8, v: u32) -> (u64, u32) {
+    let s = (cb & 3) as u32;
+    let rk = (cb >> 5) as u32;
+    let ek = ((cb >> 2) & 7) as u32;
+    let rice = ((1u64 << rk) | (v & ((1 << rk) - 1)) as u64, (v >> rk) + 1 + rk);
+    let y = (v.wrapping_sub((s + 1) << rk)) as u64 + (1 << ek);
+    let n = 64 - y.leading_zeros();
+    let golomb = (y, (2 * n + s).wrapping_sub(ek));
+    select_unpredictable(v < (s + 1) << rk, rice, golomb)
+}
+
 /// Appends `c` coded as [`decode`] reads it, then `tail`'s padding, to `out`.
 pub fn encode(out: &mut Vec<u8>, c: &[i16], tail: Tail) {
     if tail.empty {
@@ -159,38 +192,48 @@ pub fn encode(out: &mut Vec<u8>, c: &[i16], tail: Tail) {
     }
     let mut w = Out { out, acc: 0, n: 0 };
     let blocks = c.len() / 64;
+    assert!(blocks <= 64);
     let mut prev = c[0] as i32;
     let (v, n) = codeword(FIRST_DC_CB, ((prev << 1) ^ (prev >> 31)) as u32);
     w.put(v, n);
     let (mut code, mut sign) = (5u32, 0i32);
-    for b in 1..blocks {
-        let v = c[b * 64] as i32;
-        let d = v - prev;
-        prev = v;
-        let cb = DC_CB[code.min(6) as usize];
-        code = if d == 0 {
-            0
-        } else {
-            let m = d.unsigned_abs();
-            if (d < 0) != (sign != 0) { 2 * m - 1 } else { 2 * m }
-        };
-        sign = if code == 0 { 0 } else { sign ^ -((code & 1) as i32) };
-        let (v, n) = codeword(cb, code);
-        w.put(v, n);
+    // The blocks with a nonzero coefficient at each scan position.
+    let mut rows = [0u64; 64];
+    for (b, k) in c.as_chunks::<64>().0.iter().enumerate() {
+        if b > 0 {
+            let v = k[0] as i32;
+            let d = v - prev;
+            prev = v;
+            let cb = DC_CB[code.min(6) as usize];
+            code = if d == 0 {
+                0
+            } else {
+                let m = d.unsigned_abs();
+                if (d < 0) != (sign != 0) { 2 * m - 1 } else { 2 * m }
+            };
+            sign = if code == 0 { 0 } else { sign ^ -((code & 1) as i32) };
+            let (v, n) = codeword_u(cb, code);
+            w.put(v, n);
+        }
+        let mut m = nonzeros(k);
+        while m != 0 {
+            rows[m.trailing_zeros() as usize] |= 1 << b;
+            m &= m - 1;
+        }
     }
     let (mut run, mut level) = (4u32, 2u32);
     let mut last = blocks - 1;
-    for i in 1..64 {
-        for b in 0..blocks {
+    for (i, &row) in rows.iter().enumerate().skip(1) {
+        let mut m = row;
+        while m != 0 {
+            let b = m.trailing_zeros() as usize;
+            m &= m - 1;
             let v = c[b * 64 + i];
-            if v == 0 {
-                continue;
-            }
             let pos = i * blocks + b;
-            let (rv, rn) = codeword(RUN_CB[run.min(15) as usize], (pos - last - 1) as u32);
+            let (rv, rn) = codeword_u(RUN_CB[run.min(15) as usize], (pos - last - 1) as u32);
             run = (pos - last - 1) as u32;
             last = pos;
-            let (lv, ln) = codeword(LEV_CB[level.min(9) as usize], v.unsigned_abs() as u32 - 1);
+            let (lv, ln) = codeword_u(LEV_CB[level.min(9) as usize], v.unsigned_abs() as u32 - 1);
             level = v.unsigned_abs() as u32;
             let (lv, ln) = ((lv << 1) | (v < 0) as u64, ln + 1);
             if rn + ln <= 32 {
@@ -254,6 +297,32 @@ mod tests {
             let mut back = vec![0i16; blocks * 64];
             assert_eq!(decode(&d, 0, bytes.len() * 8, blocks, &mut back).unwrap(), tail);
             assert_eq!(back, c);
+        }
+    }
+
+    /// All zeros, the largest values, one coefficient anywhere, and sparse rows far apart.
+    #[test]
+    fn extreme_coefficients_round_trip() {
+        for blocks in [1usize, 2, 8, 32] {
+            let mut sets: Vec<Vec<i16>> = vec![vec![0; blocks * 64]];
+            sets.push((0..blocks * 64).map(|j| if (j / 64 + j % 64) % 2 == 0 { 32767 } else { -32767 }).collect());
+            sets.push((0..blocks * 64).map(|j| if j % 64 == 0 { [32767, -32768][j / 64 % 2] } else { 0 }).collect());
+            for at in [1, 2, 63, 64 * blocks - 1, 64 * blocks / 2 + 5] {
+                let mut c = vec![0; blocks * 64];
+                c[at] = -7;
+                sets.push(c);
+            }
+            for c in sets {
+                for zero_bytes in [0, 3] {
+                    let tail = Tail { zero_bytes, empty: false };
+                    let mut bytes = Vec::new();
+                    encode(&mut bytes, &c, tail);
+                    let d = padded(&bytes);
+                    let mut back = vec![0i16; blocks * 64];
+                    assert_eq!(decode(&d, 0, bytes.len() * 8, blocks, &mut back).unwrap(), tail);
+                    assert_eq!(back, c);
+                }
+            }
         }
     }
 }
