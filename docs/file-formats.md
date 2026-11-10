@@ -238,7 +238,7 @@ bytes. Gains are estimates unless a tool is cited.
 
 | format | used in | how it compresses | what is left | reuse |
 |---|---|---|---|---|
-| Canon CR2, DNG | photographers' originals (terabytes each) | lossless JPEG (ITU T.81 SOF3): prediction, then Huffman | 2D context modelling: 15–30%. Rawzor claimed 20–40% around 2008 | aqr-jpeg's Huffman decoder; the JPEG previews |
+| Canon CR2, DNG | photographers' originals (terabytes each) | lossless JPEG (ITU T.81 SOF3): prediction, then Huffman | done by aqr-jpeg (`jpeg-lossless-recons`, 2026-11): the whole file against its archive 0.83–0.97 for CR2 (5D IV 0.826, 5D III 0.864), 0.86–0.95 for DNG; the model's gain over the Huffman data alone is 5–15%, noise-bound. Rawzor claimed 20–40% around 2008. Left: other vendors' containers, mixing of models, speed of one thread (19 MB/s; 155 MB/s on 16 with bands) | aqr-jpeg's lossless model; the JPEG previews |
 | Nikon NEF | the same | Huffman-coded differences (also uncompressed and lossy variants) | the same | the same |
 | Sony ARW2 | the same | 128-bit blocks of min, max and 7-bit deltas: no entropy coding | the largest gain of the group | |
 | Panasonic RW2, Olympus ORF, Pentax PEF, Hasselblad 3FR, Phase One IIQ | the same | fixed-width packing or simple Huffman or differential schemes per vendor | as CR2 | |

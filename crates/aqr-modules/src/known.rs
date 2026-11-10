@@ -268,6 +268,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/ima-recons.block"),
     },
     Known {
+        name: "jpeg-lossless-recons",
+        version: 1,
+        sha512_256: hex("d56d7f10b4de89b1a77804fd1bf10250244d25a00b149aa8f1105978a5189273"),
+        block: include_bytes!("../wasm/jpeg-lossless-recons.block"),
+    },
+    Known {
         name: "jpeg-recons",
         version: 3,
         sha512_256: hex("be987dae925fec95436f68aab1ec198360c7b5eb368c49580b699826bcba9d6d"),

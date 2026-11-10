@@ -1500,6 +1500,25 @@ fn wasm() {
     assert_eq!(aqr_compress::kind_by_name(b"x/a.wasm"), aqr_formula::Kind::Format("wasm"));
 }
 
+/// A raw photograph (a TIFF holding lossless JPEGs) goes to jpeg-lossless-recons, and its
+/// container's other JPEG (a preview of a kind this does not take) stays another's; a TIFF
+/// without one is no business of it. The names CR2 and DNG tell the format.
+#[test]
+fn lossless_jpeg() {
+    use aqr_jpeg::lossless::synthetic;
+    let mut cr2 = b"II*\0\x08\0\0\0CR\x02\0 container ".to_vec();
+    cr2.extend_from_slice(&synthetic(14, 200, 120, &[(1, 1), (1, 1)], 1, 0, 0, 1));
+    cr2.extend_from_slice(&text(5_000));
+    let f = roundtrip(&cr2, &all());
+    assert!(modules(&f).contains(&"jpeg-lossless-recons"), "{f}");
+    assert_eq!(aqr_compress::kind_by_name(b"x/IMG_1.cr2"), aqr_formula::Kind::Format("jpeg-lossless"));
+    assert_eq!(aqr_compress::kind_by_name(b"x/a.dng"), aqr_formula::Kind::Format("jpeg-lossless"));
+    // (the same file in other data is a TIFF no longer at the start)
+    let tiff = [&b"II*\0\x08\0\0\0"[..], &text(30_000)].concat();
+    let f = roundtrip(&tiff, &all());
+    assert!(!modules(&f).contains(&"jpeg-lossless-recons"), "{f}");
+}
+
 /// A FITS file of a 16-bit image and a binary table, `n` × `n` pixels and rows.
 fn fits_file(n: usize) -> Vec<u8> {
     let header = |cards: &[String]| {

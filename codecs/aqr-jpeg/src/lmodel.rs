@@ -371,7 +371,7 @@ pub fn decode_bands_into(h: &Header, streams: &[&[u8]], planes: &mut [&mut [u16]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lossless::{self, tests::jpeg};
+    use crate::lossless::{self, synthetic};
 
     fn roundtrip(d: &[u8]) {
         let h = lossless::parse(d, 0).unwrap();
@@ -382,19 +382,19 @@ mod tests {
 
     #[test]
     fn shapes() {
-        roundtrip(&jpeg(14, 37, 19, &[(1, 1), (1, 1)], 1, 0, 0, 1));
-        roundtrip(&jpeg(16, 20, 11, &[(1, 1)], 6, 0, 0, 2));
-        roundtrip(&jpeg(12, 33, 17, &[(2, 1), (1, 1), (1, 1)], 4, 0, 0, 3));
+        roundtrip(&synthetic(14, 37, 19, &[(1, 1), (1, 1)], 1, 0, 0, 1));
+        roundtrip(&synthetic(16, 20, 11, &[(1, 1)], 6, 0, 0, 2));
+        roundtrip(&synthetic(12, 33, 17, &[(2, 1), (1, 1), (1, 1)], 4, 0, 0, 3));
         // (a component of several rows to the MCU: the north-east sample is not always there)
-        roundtrip(&jpeg(12, 33, 17, &[(2, 2), (1, 1), (1, 1)], 1, 2, 0, 4));
-        roundtrip(&jpeg(10, 16, 9, &[(1, 1), (1, 1), (1, 1), (1, 1)], 7, 0, 16, 5));
-        roundtrip(&jpeg(2, 9, 5, &[(1, 1)], 1, 0, 0, 6));
+        roundtrip(&synthetic(12, 33, 17, &[(2, 2), (1, 1), (1, 1)], 1, 2, 0, 4));
+        roundtrip(&synthetic(10, 16, 9, &[(1, 1), (1, 1), (1, 1), (1, 1)], 7, 0, 16, 5));
+        roundtrip(&synthetic(2, 9, 5, &[(1, 1)], 1, 0, 0, 6));
     }
 
     /// Samples of any 16-bit value, as a stream with a wild encoder may have them.
     #[test]
     fn extreme_values() {
-        let d = jpeg(16, 12, 7, &[(1, 1), (1, 1)], 1, 0, 0, 7);
+        let d = synthetic(16, 12, 7, &[(1, 1), (1, 1)], 1, 0, 0, 7);
         let h = lossless::parse(&d, 0).unwrap();
         let mut x = 12345u32;
         let planes = (0..2)
@@ -425,7 +425,7 @@ mod tests {
         for (comps, w, hgt) in
             [(&[(1, 1), (1, 1)][..], 37, 19), (&[(2, 2), (1, 1), (1, 1)][..], 33, 17), (&[(1, 1)][..], 8, 3)]
         {
-            let d = jpeg(14, w, hgt, comps, 1, 0, 0, 9);
+            let d = synthetic(14, w, hgt, comps, 1, 0, 0, 9);
             let h = lossless::parse(&d, 0).unwrap();
             let s = lossless::decode(&h, &d[h.start..h.end]).unwrap();
             for n in [1, 2, 3, 7, 100] {
@@ -437,7 +437,7 @@ mod tests {
     }
     #[test]
     fn cut_off_data_is_an_error_or_garbage_not_a_panic() {
-        let d = jpeg(14, 40, 30, &[(1, 1), (1, 1)], 1, 0, 0, 8);
+        let d = synthetic(14, 40, 30, &[(1, 1), (1, 1)], 1, 0, 0, 8);
         let h = lossless::parse(&d, 0).unwrap();
         let s = lossless::decode(&h, &d[h.start..h.end]).unwrap();
         let coded = encode(&h, &s);

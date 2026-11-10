@@ -1,6 +1,9 @@
-# aqr-jpeg: the `jpeg-recons` module
+# aqr-jpeg: the `jpeg-recons` and `jpeg-lossless-recons` modules
 
-This document specifies module `jpeg-recons` version 3 of aqr-formula (`aqr_jpeg::formula`)
+This document has two parts: module `jpeg-recons` (DCT JPEG, sections 1–10), and module
+`jpeg-lossless-recons` (the lossless JPEGs of raw photographs, sections L1–L7, at the end).
+
+This part specifies module `jpeg-recons` version 3 of aqr-formula (`aqr_jpeg::formula`)
 completely enough to reimplement both directions. The module rebuilds one JPEG file, the
 *original*, bit-exactly from its params and nine input slots. (Version 1 had slot 1 as the
 plain concatenation of the embedded JPEGs, with their lengths in the head; version 2 had only
@@ -649,3 +652,172 @@ Everything here is the encoder's choice. A decoder relies only on sections 1–9
 35 42 49 56 57 50 43 36 29 22 15 23 30 37 44 51
 58 59 52 45 38 31 39 46 53 60 61 54 47 55 62 63
 ```
+
+# Module `jpeg-lossless-recons`
+
+This part specifies module `jpeg-lossless-recons` version 1 (`aqr_jpeg::lformula`, `lmodule`,
+`lmodel`, `lossless`) completely enough to reimplement the decoder. It rebuilds a file, the
+*original*, that holds lossless JPEGs (SOF3, ITU T.81 annex H) as the pixels of a raw
+photograph: CR2, DNG and the like. The Huffman-coded differences of those are taken out of the
+file and come back from a model of the samples; the rest of the file, the container with its
+headers and previews, is the first input as it is. Conventions are those of section 1.
+
+## L1. Inputs
+
+No params (any is an error). Four inputs:
+
+| # | name  | contents |
+|---|-------|----------|
+| 0 | cut   | the original with the entropy-coded data of each coded stream removed |
+| 1 | info  | the streams and the jobs (L2) |
+| 2 | lens  | a varint for each chunk: its length |
+| 3 | model | the chunks, one after the other |
+
+The output length is given by the formula and is the length of `cut` plus the lengths of all the
+data removed, exactly.
+
+## L2. The info
+
+```text
+varint  n            streams
+per stream:
+  varint  soi        offset in the cut of its SOI (FF D8)
+  varint  len        bytes of its entropy-coded data
+  varint  flags      0 or 1: bit 0 says a symbol listed twice in a table has its later code (L3)
+varint  m            jobs
+per job:
+  varint  count      streams in the job (at least 1), the ones after the last job's
+  varint  bands      bands (at least 1; more than 1 only where count is 1)
+```
+
+The jobs cover the streams in order, exactly. Trailing bytes are an error, and so is a number
+larger than the info or the cut could hold. A job takes `bands` chunks, in order, from the first
+chunk not taken: a job of one stream cut in bands takes a chunk for each band, a group of
+streams takes one. `lens` has a varint for each chunk, and `model` is exactly them.
+
+## L3. The headers
+
+A stream's headers are parsed from the cut at `soi`: markers up to its SOS, among them DHT (DC
+tables only, Tc = 0, four at most, symbols 0 to 16, a prefix code), one SOF3, DRI; APPn, COM and
+the other markers are skipped. The frame has 2 to 16 bits of precision, 1 to 4 components of
+sampling factors 1 to 4, a height and a width of 1 or more (no DNL); the scan has all the
+components, in any order, predictor 1 to 7, Se 0, Ah 0, a point transform less than the
+precision; a restart interval is of whole rows of MCUs. The EOI (FF D9) follows the SOS header
+at once in the cut, and the entropy-coded data of `len` bytes goes between. Streams are in
+order, none inside another, and have at most 2^30 samples.
+
+With the width `X`, height `Y` and the largest factors `H`, `V`, a frame has `ceil(X / H)` by
+`ceil(Y / V)` MCUs; a component of factors `h`, `v` has a plane of `mcux * h` by `mcuy * v`
+samples, padding included.
+
+The entropy-coded data of a stream is the differences of its samples from the standard's
+predictions (the first line of each restart interval from the left, the very first sample from
+`2^(precision - point - 1)`), each as the code of its category and the category's bits; a
+byte-aligned interval ends with 1 bits and is followed by RSTn (n = 0, 1, … modulo 8) between
+intervals; a 0xFF byte is followed by a 0. A symbol listed twice in a table has the code of its
+first listing, or of its last where `flags` is 1. The encoder checks that this gives exactly the
+original.
+
+## L4. Jobs
+
+Decoding a job gives the samples of its frames and, from them, the entropy-coded data of each
+of its streams (L3), which goes into the output at the stream's place: the output is the cut up
+to the stream's headers, the data, the cut up to the next stream's, and so on to its end.
+
+- A job of `count` streams (bands = 1) has one chunk, one model (L5) and one arithmetic decoder
+  (L6) for all of them: the frames are coded one after the other, the model keeping what it
+  learnt. The streams have the same number of components.
+- A job of one stream in `bands` bands has a chunk for each. The frame's MCU rows are cut in runs
+  of `per = ceil(rows / bands)` rows, the last the rest; the number of runs, `ceil(rows / per)`,
+  must be `bands`. Each run is decoded as a frame of its own, of `min(end * V, Y) - start * V`
+  lines (`start` and `end` its rows), with a fresh model and its chunk's decoder; its first row
+  is a first row, with no row above.
+
+## L5. The model
+
+Samples are coded in the order of the stream: MCU by MCU, the components in the scan's order,
+the samples of a component in an MCU by rows and then by columns. For the sample at (`x`, `y`) of
+a plane of width `w`:
+
+- `a`, `b`, `c` are the samples to the west, north and north-west. `a` is `b` at x = 0 (and the
+  very first sample's `a` is `2^(precision - point - 1)`); `b` is `a` at y = 0; `c` is `b` unless
+  both x and y are over 0.
+- `d` is the sample to the north-east where it is there (y > 0, x + 1 < w, and, in the second and
+  later row of the MCU of a component of several rows, only within the MCU's own columns), and
+  `b` otherwise.
+- `q`, `qa` and `qb` are the sample of the component before it in the scan at the same place and
+  its `a` and `b`, if that component has a plane of the same size; otherwise there is none.
+
+The predictors `p_j` (`>>` shifts arithmetically):
+
+```text
+0: a    1: b    2: a + ((b - c) >> 1)    3: b + ((a - c) >> 1)    4: a + d - b
+5: a + q - qa    6: b + q - qb          (5 and 6 only where q is there)
+```
+
+Every sample coded gives each predictor in use an *error* `|s - clamp(p_j, 0, 65535)|` and the
+blend one, `|s - prediction|`, all held in 16 bits (saturated). The errors *around* a sample are
+those of the samples to the west, north-west, north and north-east of it in its own component
+(zero outside the plane, or the band; the north-east where `d` is there, else the north's
+again), added: `E_j` for predictor `j`, `E` for the blend.
+
+```text
+weight(e) = floor(2^40 / (e*e + 8))                  for e < 4096
+          = max(1, weight(e >> k) >> (2k)),  k = bitlen(e) - 12   otherwise
+prediction = floor((sum_j weight(E_j) * clamp(p_j, 0, 65535) + floor(W / 2)) / W),
+             W = sum_j weight(E_j), over the predictors in use, in 64 bits
+```
+
+A sample `s` is coded as `r = s - prediction`; decoding gives `s = (prediction + r) mod 2^16`.
+Any `s` of 16 bits can be coded. The contexts:
+
+```text
+k   = min(16, bitlen(E >> 2))                                    Golomb parameter
+ctx = E for E < 2; else min(31, 2 * bitlen(E) - 2 + (bit below E's top bit))
+eq  = min(7, bitlen(the blend's error at q's place))             (0 without q)
+v   = (r << 1) xor (r >> 31)                                      32 bits
+t   = v >> k
+```
+
+- The quotient `t` is coded in unary by adaptive bits: the bit `[t_i < t]` for i = 0, 1, … up to
+  12, the bit at index `((comp * 32 + ctx) * 8 + eq) * 12 + i`. If all 12 are 1, `t - 12`
+  follows as a gamma code (L6) by the 20 adaptive bits of the escape table.
+- The remainder, the low `k` bits of `v`: the top `min(k, 2)` of them by adaptive bits, at index
+  `((comp * 18 + k) * 3 + min(t, 2)) * 4 + p`, `p` = 0 for the first and `1 + the first bit` for
+  the second; the others (`k - 2` of them, if more than 0) raw, as one run (`raw_run`, L6).
+- `r = (x >> 1) xor -(x & 1)` of `x = t << k | the remainder`.
+
+A model is three tables of adaptive bits, all starting as new bits: the quotient's, of
+`comps * 32 * 8 * 12`; the escape's, of 20; the remainder's, of `comps * 18 * 3 * 4` (`comps` the
+number of components of the job's frames; `comp` the component's index in its frame).
+
+## L6. The arithmetic coder
+
+The carry-less binary coder of aqr-common (`ArithDecoder`): 32-bit `x1` and `x2`, initially 0
+and 2^32 - 1, and `x`, the first four bytes of the chunk, zeros past its end; an input read more
+than four bytes past its end is an error. For a bit of probability `p1` / 65536 of being 1,
+`xmid = x1 + ((x2 - x1) * p1 >> 16)`; the bit is 1 if `x <= xmid`, and then `x2 = xmid`, else
+`x1 = xmid + 1`; while the top bytes of `x1` and `x2` are the same, a byte is shifted out of them
+(`x1 <<= 8`, `x2 = x2 << 8 | 0xFF`) and one is read into `x`.
+
+An adaptive bit (aqr-common's `Bit`) has a probability `p` of a 1, 32768 at first, and a count
+`n` of its uses, 0 at first. After a bit, `p` becomes `clamp(p + (((65535 * bit - p) * R[n]) >>
+16), 32, 65504)` (an arithmetic shift) with `R[n] = floor(131072 / (2 * n + 3))`, and `n` grows
+to 30 at most. The gamma code is aqr-common's `gamma32`.
+
+`raw_run(n, v)` of 1 to 16 bits: with `sub = (x2 - x1) >> n`, if `sub` is 0 the `n` bits come
+one at a time at probability 1/2; otherwise `v = min((x - x1) / sub, 2^n - 1)`,
+`x1 += v * sub`, `x2 = x1 + sub - 1` unless `v = 2^n - 1` (then it stays), and the shifting out
+of equal top bytes as above.
+
+## L7. The encoder
+
+Free choices: which streams are coded (those whose data a re-emission reproduces exactly; the
+others stay in the cut), the grouping into jobs, and `flags` (whichever reproduces the data).
+`aqr_jpeg::lformula` cuts a stream of 2^21 samples or more into `floor(samples / 2^20)` bands,
+16 at most (fewer where there are not so many rows), and groups the others up to 2^22
+samples if they have the same number of components.
+
+The module's memory plan (`aqr_jpeg::lmodule::plan`) is the blocks `run` makes: the file, the
+layout (the streams' headers are held in place, not as lists of their own: a module's allocator
+holds only a few blocks freed out of order), and the most a job takes at a moment.

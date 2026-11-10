@@ -159,6 +159,8 @@ static ROWS: &[Row] = {
         start(Zlib, |d| zlib_header(d, true)),
         // (known by its footer: its end would be that of the data)
         start(LevelDb, aqr_snappy::leveldb::is_table),
+        // (before raw: that takes TIFF files of uncompressed samples, and no CR2 or DNG of lossless ones)
+        start(JpegLossless, aqr_jpeg::lformula::starts),
         // Two bytes (or DICOM's group 8) are too weak a signature to look for in other data.
         start(Raw, |d| {
             let at = |p: usize, m: &[u8]| d.get(p..p + m.len()) == Some(m);

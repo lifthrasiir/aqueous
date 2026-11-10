@@ -5516,3 +5516,46 @@ fn lzma_finder_fits_the_bound() {
     set_bound(u64::MAX);
     assert_eq!([a, b, c], [21, 21, 20], "{p21} {p20}");
 }
+
+/// A lossless JPEG (SOF3) of `comps` components, 14 bits, predictor 1, of a gradient with noise
+/// from `seed`.
+fn lossless_stream(w: u16, h: u16, comps: u8, seed: u32) -> Vec<u8> {
+    aqr_jpeg::lossless::synthetic(14, w, h, &vec![(1, 1); comps as usize], 1, 0, 0, seed)
+}
+
+/// jpeg-lossless-recons lays its memory out as a stack: its limit its plan, to the page: a file of
+/// tiles that share a model, then one cut in bands, then a mixture.
+#[test]
+fn lossless_jpeg_plan_holds() {
+    let mut tiles = b"II*\0 tiles ".to_vec();
+    for k in 0..9 {
+        tiles.extend_from_slice(&lossless_stream(60 + k, 40, 2, k as u32));
+        tiles.extend_from_slice(b" next ");
+    }
+    plan_holds("tiles", aqr_jpeg::lformula::encode(&tiles, 1).unwrap(), &tiles);
+    let mut big = b"MM\0* one ".to_vec();
+    big.extend_from_slice(&lossless_stream(1300, 900, 2, 7));
+    plan_holds("bands", aqr_jpeg::lformula::encode(&big, 1).unwrap(), &big);
+    let mut mixed = b"II*\0 mixed ".to_vec();
+    mixed.extend_from_slice(&lossless_stream(30, 20, 1, 1));
+    mixed.extend_from_slice(&lossless_stream(1200, 900, 3, 2));
+    mixed.extend_from_slice(&lossless_stream(70, 50, 4, 3));
+    mixed.extend_from_slice(b" the end");
+    plan_holds("mixed", aqr_jpeg::lformula::encode(&mixed, 1).unwrap(), &mixed);
+}
+
+/// The same over many shapes: numbers of streams and of components, in groups and in bands.
+#[test]
+fn lossless_jpeg_plan_holds_widely() {
+    for comps in 1..=4u8 {
+        for (tiles, w, h) in [(1, 33, 17), (5, 100, 64), (40, 70, 30), (2, 1500, 800)] {
+            let mut file = b"II*\0 shapes ".to_vec();
+            for k in 0..tiles {
+                file.extend_from_slice(&lossless_stream(w + k as u16 % 3, h, comps, k as u32 * 7 + comps as u32));
+                file.extend_from_slice(b"..");
+            }
+            let Some(f) = aqr_jpeg::lformula::encode(&file, 1) else { continue };
+            plan_holds(&format!("{tiles} of {w}x{h} with {comps}"), f, &file);
+        }
+    }
+}

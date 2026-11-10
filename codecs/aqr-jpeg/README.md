@@ -78,6 +78,9 @@ as a file that is not coded.
 | `src/codec.rs` | The codec behind the formula module: blob and scan info, embedded JPEGs, model and scan re-emission glue |
 | `src/formula.rs` | The formula module `jpeg-recons` (spec: [FORMAT.md](FORMAT.md)): `encode`, `decode`, recursive coding of embedded JPEGs |
 | `src/variant.rs` | Test generator: re-encodes the same coefficients in valid but non-canonical ways |
+| `src/lossless.rs` | Lossless JPEG (SOF3, raw photographs): parsing, decoding to samples and exact re-emission of the Huffman data |
+| `src/lmodel.rs` | The model of those samples: a blend of predictors, a Golomb code by adaptive bits, bands of rows |
+| `src/lmodule.rs`, `src/lformula.rs` | The module `jpeg-lossless-recons` (spec: the second part of [FORMAT.md](FORMAT.md)) and its formula |
 | `tests/regress.rs` | Regression inputs |
 | `tests/memory.rs` | Peak heap use of a large sequential file (counting allocator) |
 
@@ -279,3 +282,22 @@ The format is specified in [FORMAT.md](FORMAT.md).
   been investigated yet.
 - **Sample photos**: `samples/` holds personal photos (with GPS / Exif) and is excluded from
   version control via `.gitignore`.
+
+## Lossless JPEG (raw photographs)
+
+CR2, DNG and the like hold their pixels as lossless JPEGs (SOF3): differences from a predictor,
+Huffman-coded. `aqr-jpeg ljinfo FILE...` finds the streams in any container by their SOI and
+checks that each is reproduced exactly (`LJ_MODEL=1` also the model, `LJ_BANDS=n` the model in `n`
+bands); `aqr-jpeg ljbench FILE...` takes a file through the formula, an archive and back. The
+samples are coded by `lmodel` in place of the Huffman data (the file's container is kept as it
+is, its previews recompressed in turn), as the module `jpeg-lossless-recons`.
+
+Measured on 13 files of raw.pixls.us (CC0; `F:\Data\aqr-corpus\aqr-jpeg-lossless`, 272 MB), a
+file against its archive: 5D III CR2 0.864, 5D IV 0.826, 1D X II 0.886, 1Ds III 0.953, 5D II
+0.958 (sRAW 0.93), Blackmagic DNG 0.948, a small DNG 0.858, Adobe DNG Converter's tiled 0.949.
+One thread decodes at about 19 MB/s, and a stream in bands scales with the cores: 155 MB/s on 16
+for the same size to 0.05%. The tiles of a DNG are grouped to share one model (less learning is
+lost). Left: the speed of one thread (about a third each for the predictors, the adaptive bits
+and the arithmetic coder), mixing of models, bias cancellation, hierarchical and arithmetic SOF
+kinds, other containers' lossless JPEGs not found by their SOI (a stream cut in the middle),
+and the Wasm module's tasks (it runs its jobs one at a time there).

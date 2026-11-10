@@ -21,6 +21,30 @@ pub struct Comp {
     pub v: usize,
 }
 
+/// Up to four values held in place, so that a header takes no blocks of its own: a list of
+/// them is one block of headers, which a module's allocator gives back at once.
+#[derive(Clone, Copy)]
+pub struct Small<T: Copy> {
+    n: u8,
+    a: [T; 4],
+}
+
+impl<T: Copy> Small<T> {
+    /// The values `v` (1 to 4 of them: a frame of more is refused before this).
+    pub fn of(v: &[T]) -> Small<T> {
+        let mut a = [v[0]; 4];
+        a[..v.len()].copy_from_slice(v);
+        Small { n: v.len() as u8, a }
+    }
+}
+
+impl<T: Copy> std::ops::Deref for Small<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        &self.a[..self.n as usize]
+    }
+}
+
 /// The headers of a lossless JPEG and where its entropy-coded data lies.
 #[derive(Clone)]
 pub struct Header {
@@ -28,9 +52,9 @@ pub struct Header {
     pub precision: u32,
     pub height: usize,
     pub width: usize,
-    pub comps: Vec<Comp>,
+    pub comps: Small<Comp>,
     /// the components of the scan in its order: (index in `comps`, Huffman table 0..4)
-    pub scan: Vec<(usize, usize)>,
+    pub scan: Small<(usize, usize)>,
     /// 1..=7
     pub predictor: u32,
     /// the point transform, 0..precision
@@ -203,8 +227,8 @@ pub fn parse(d: &[u8], at: usize) -> Result<Header, Error> {
                     precision,
                     height,
                     width,
-                    comps,
-                    scan,
+                    comps: Small::of(&comps),
+                    scan: Small::of(&scan),
                     predictor,
                     point: al,
                     restart,
@@ -429,7 +453,7 @@ pub fn decode(h: &Header, data: &[u8]) -> Result<Samples, Error> {
         let mut b = Bits::new(iv);
         for r in row0..row1 {
             for c in 0..mx {
-                for &(ci, td) in &h.scan {
+                for &(ci, td) in h.scan.iter() {
                     let comp = h.comps[ci];
                     let w = mx * comp.h;
                     let t = decoders[td].as_ref().unwrap();
@@ -549,7 +573,7 @@ pub fn encode_into(h: &Header, planes: &[&[u16]], out: &mut Vec<u8>) -> Result<(
         }
         for r in row0..(row0 + rows_per).min(my) {
             for c in 0..mx {
-                for &(ci, td) in &h.scan {
+                for &(ci, td) in h.scan.iter() {
                     let comp = h.comps[ci];
                     let w = mx * comp.h;
                     let e = encoders[td].as_ref().unwrap();
@@ -582,6 +606,18 @@ pub fn encode_into(h: &Header, planes: &[&[u16]], out: &mut Vec<u8>) -> Result<(
     Ok(())
 }
 
+/// Whether `d` holds a lossless JPEG ([`find`] stopping at the first).
+pub fn any(d: &[u8]) -> bool {
+    let mut i = 0;
+    while let Some(o) = memchr::memmem::find(&d[i..], &[0xFF, 0xD8, 0xFF]) {
+        if parse(d, i + o).is_ok() {
+            return true;
+        }
+        i += o + 2;
+    }
+    false
+}
+
 /// The lossless JPEGs in `d`: the headers of each, found by their SOI (a JPEG inside the data
 /// of another is not looked for).
 pub fn find(d: &[u8]) -> Vec<(usize, Header)> {
@@ -600,77 +636,80 @@ pub fn find(d: &[u8]) -> Vec<(usize, Header)> {
     out
 }
 
+/// A DC table with the categories 0..=16 as 5-bit codes (the all-ones code is left out).
+fn table() -> Vec<u8> {
+    let mut t = vec![0x00];
+    let mut counts = [0u8; 16];
+    counts[4] = 17;
+    t.extend_from_slice(&counts);
+    t.extend(0..=16u8);
+    t
+}
+
+fn seg(out: &mut Vec<u8>, m: u8, body: &[u8]) {
+    out.extend_from_slice(&[0xFF, m]);
+    out.extend_from_slice(&(body.len() as u16 + 2).to_be_bytes());
+    out.extend_from_slice(body);
+}
+
+/// A lossless JPEG for tests, here and in other crates: the headers with a table of 17 codes of 5
+/// bits, of `comps` (h, v) components of `precision` bits and `w` by `h` samples (a gradient with noise
+/// from `seed`), predictor `pred`, point transform `pt` and restart interval `restart` MCUs (0: none).
+#[allow(clippy::too_many_arguments)]
+pub fn synthetic(
+    precision: u8,
+    w: u16,
+    h: u16,
+    comps: &[(u8, u8)],
+    pred: u8,
+    pt: u8,
+    restart: u16,
+    seed: u32,
+) -> Vec<u8> {
+    let mut d = vec![0xFF, 0xD8];
+    seg(&mut d, 0xC4, &table());
+    let mut sof = vec![precision];
+    sof.extend_from_slice(&h.to_be_bytes());
+    sof.extend_from_slice(&w.to_be_bytes());
+    sof.push(comps.len() as u8);
+    for (i, &(hh, vv)) in comps.iter().enumerate() {
+        sof.extend_from_slice(&[i as u8 + 1, hh << 4 | vv, 0]);
+    }
+    seg(&mut d, 0xC3, &sof);
+    if restart > 0 {
+        seg(&mut d, 0xDD, &restart.to_be_bytes());
+    }
+    let mut sos = vec![comps.len() as u8];
+    for i in 0..comps.len() {
+        sos.extend_from_slice(&[i as u8 + 1, 0]);
+    }
+    sos.extend_from_slice(&[pred, 0, pt]);
+    seg(&mut d, 0xDA, &sos);
+    let start = d.len();
+    d.extend_from_slice(&[0xFF, 0xD9]);
+    // the samples: a gradient with noise, coded by the encoder itself
+    let hd = parse(&d, 0).unwrap();
+    let mut x = seed;
+    let planes = (0..comps.len())
+        .map(|i| {
+            let (pw, ph) = hd.plane(i);
+            (0..pw * ph)
+                .map(|k| {
+                    x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+                    let mask = (1u32 << (precision - pt)) - 1;
+                    (((k % pw) as u32 * 7 + (k / pw) as u32 * 3 + (x >> 24) % 9) & mask) as u16
+                })
+                .collect()
+        })
+        .collect();
+    let data = encode(&hd, &Samples { planes }).unwrap();
+    d.splice(start..start, data);
+    d
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-
-    /// A DC table with the categories 0..=16 as 5-bit codes (the all-ones code is left out).
-    fn table() -> Vec<u8> {
-        let mut t = vec![0x00];
-        let mut counts = [0u8; 16];
-        counts[4] = 17;
-        t.extend_from_slice(&counts);
-        t.extend(0..=16u8);
-        t
-    }
-
-    fn seg(out: &mut Vec<u8>, m: u8, body: &[u8]) {
-        out.extend_from_slice(&[0xFF, m]);
-        out.extend_from_slice(&(body.len() as u16 + 2).to_be_bytes());
-        out.extend_from_slice(body);
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn jpeg(
-        precision: u8,
-        w: u16,
-        h: u16,
-        comps: &[(u8, u8)],
-        pred: u8,
-        pt: u8,
-        restart: u16,
-        seed: u32,
-    ) -> Vec<u8> {
-        let mut d = vec![0xFF, 0xD8];
-        seg(&mut d, 0xC4, &table());
-        let mut sof = vec![precision];
-        sof.extend_from_slice(&h.to_be_bytes());
-        sof.extend_from_slice(&w.to_be_bytes());
-        sof.push(comps.len() as u8);
-        for (i, &(hh, vv)) in comps.iter().enumerate() {
-            sof.extend_from_slice(&[i as u8 + 1, hh << 4 | vv, 0]);
-        }
-        seg(&mut d, 0xC3, &sof);
-        if restart > 0 {
-            seg(&mut d, 0xDD, &restart.to_be_bytes());
-        }
-        let mut sos = vec![comps.len() as u8];
-        for i in 0..comps.len() {
-            sos.extend_from_slice(&[i as u8 + 1, 0]);
-        }
-        sos.extend_from_slice(&[pred, 0, pt]);
-        seg(&mut d, 0xDA, &sos);
-        let start = d.len();
-        d.extend_from_slice(&[0xFF, 0xD9]);
-        // the samples: a gradient with noise, coded by the encoder itself
-        let hd = parse(&d, 0).unwrap();
-        let mut x = seed;
-        let planes = (0..comps.len())
-            .map(|i| {
-                let (pw, ph) = hd.plane(i);
-                (0..pw * ph)
-                    .map(|k| {
-                        x = x.wrapping_mul(1664525).wrapping_add(1013904223);
-                        let mask = (1u32 << (precision - pt)) - 1;
-                        (((k % pw) as u32 * 7 + (k / pw) as u32 * 3 + (x >> 24) % 9) & mask) as u16
-                    })
-                    .collect()
-            })
-            .collect();
-        let data = encode(&hd, &Samples { planes }).unwrap();
-        d.splice(start..start, data);
-        d
-    }
 
     fn roundtrip(d: &[u8]) {
         let h = parse(d, 0).unwrap();
@@ -681,12 +720,12 @@ pub(crate) mod tests {
     #[test]
     fn predictors_and_shapes() {
         for pred in 1..=7 {
-            roundtrip(&jpeg(14, 37, 19, &[(1, 1), (1, 1)], pred, 0, 0, pred as u32));
+            roundtrip(&synthetic(14, 37, 19, &[(1, 1), (1, 1)], pred, 0, 0, pred as u32));
         }
-        roundtrip(&jpeg(16, 20, 11, &[(1, 1)], 1, 0, 0, 1));
-        roundtrip(&jpeg(12, 33, 17, &[(2, 1), (1, 1), (1, 1)], 4, 0, 0, 2));
-        roundtrip(&jpeg(12, 33, 17, &[(2, 2), (1, 1), (1, 1)], 6, 2, 0, 3));
-        roundtrip(&jpeg(10, 16, 9, &[(1, 1), (1, 1), (1, 1), (1, 1)], 7, 0, 0, 4));
+        roundtrip(&synthetic(16, 20, 11, &[(1, 1)], 1, 0, 0, 1));
+        roundtrip(&synthetic(12, 33, 17, &[(2, 1), (1, 1), (1, 1)], 4, 0, 0, 2));
+        roundtrip(&synthetic(12, 33, 17, &[(2, 2), (1, 1), (1, 1)], 6, 2, 0, 3));
+        roundtrip(&synthetic(10, 16, 9, &[(1, 1), (1, 1), (1, 1), (1, 1)], 7, 0, 0, 4));
     }
 
     /// A table listing the symbol 0 twice (5 and 7 bits), as in an Adobe DNG: its encoder writes
@@ -723,13 +762,13 @@ pub(crate) mod tests {
 
     #[test]
     fn restarts() {
-        roundtrip(&jpeg(14, 16, 12, &[(1, 1), (1, 1)], 1, 0, 32, 5));
-        roundtrip(&jpeg(14, 16, 12, &[(1, 1), (1, 1)], 6, 0, 16, 6));
+        roundtrip(&synthetic(14, 16, 12, &[(1, 1), (1, 1)], 1, 0, 32, 5));
+        roundtrip(&synthetic(14, 16, 12, &[(1, 1), (1, 1)], 6, 0, 16, 6));
     }
 
     #[test]
     fn found_in_other_data() {
-        let j = jpeg(14, 16, 12, &[(1, 1), (1, 1)], 1, 0, 0, 7);
+        let j = synthetic(14, 16, 12, &[(1, 1), (1, 1)], 1, 0, 0, 7);
         let mut d = b"II*\0 some container ".to_vec();
         d.extend_from_slice(&j);
         d.extend_from_slice(b"and more");
@@ -740,7 +779,7 @@ pub(crate) mod tests {
 
     #[test]
     fn damaged_data_is_refused() {
-        let d = jpeg(14, 16, 12, &[(1, 1), (1, 1)], 1, 0, 0, 8);
+        let d = synthetic(14, 16, 12, &[(1, 1), (1, 1)], 1, 0, 0, 8);
         let h = parse(&d, 0).unwrap();
         let mut cut = d[h.start..h.end - 3].to_vec();
         assert!(decode(&h, &cut).is_err());

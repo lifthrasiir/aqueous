@@ -239,6 +239,16 @@ optimization picked by hash.
   picks it; a pack with its `.idx`/`.rev` is a set (`git-pack-index-recons`, only the ids
   stored). Left: deriving the ids (resolving every delta), `multi-pack-index` from the indexes,
   the archive's 16 MiB solid-block bound, pack blobs in `together`.
+- aqr-jpeg's lossless JPEG (SOF3: the pixels of CR2, DNG and the like) is the module
+  `jpeg-lossless-recons`, apart from `jpeg-recons`: the streams are found by their SOI in a
+  TIFF file (`lformula::starts`), their Huffman data taken out and the samples coded by
+  `lmodel` (a blend of predictors, a Golomb code by adaptive bits; integers only). A big stream
+  is cut in bands of rows, each its own chunk, to run at once (0.05% for 16); the small ones
+  (a DNG's tiles) share one model. Its memory plan is the blocks `lmodule::run` makes, to the
+  page (`lossless_jpeg_plan_holds*`): a header holds its lists in place (`Small`) because the
+  module's allocator takes only 64 blocks freed out of order. Samples (CC0): raw.pixls.us, in
+  `F:\Data\aqr-corpus\aqr-jpeg-lossless`. Left: the speed of one thread, mixing of models,
+  other containers, the module's tasks in Wasm (its jobs run one at a time there).
 
 ## Working copy and commits
 

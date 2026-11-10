@@ -22,6 +22,11 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     lmodule::plan(u.initial(), &inputs, u.output())
 }
 
+/// Whether `d` is a TIFF file (CR2, DNG and the like) holding a lossless JPEG.
+pub fn starts(d: &[u8]) -> bool {
+    (d.starts_with(b"II*\0") || d.starts_with(b"MM\0*")) && lossless::any(d)
+}
+
 /// A stream no longer than this many samples is coded with the ones next to it, with one model.
 const GROUP: usize = 1 << 22;
 /// A stream of at least this many samples is cut in bands, as many as it has times
@@ -164,7 +169,7 @@ fn encode_at(input: &[u8]) -> Option<Formula> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lossless::tests::jpeg;
+    use crate::lossless::synthetic;
 
     /// The file back from the formula's four streams, as the module makes it.
     fn back(f: &Formula, len: usize) -> Vec<u8> {
@@ -177,12 +182,12 @@ mod tests {
     fn roundtrip_in_a_container() {
         let mut file = b"II*\0\x08\0\0\0 a container ".to_vec();
         for (k, (w, h)) in [(40, 30), (40, 30), (50, 20)].into_iter().enumerate() {
-            file.extend_from_slice(&jpeg(14, w, h, &[(1, 1), (1, 1)], 1 + k as u8, 0, 0, k as u32));
+            file.extend_from_slice(&synthetic(14, w, h, &[(1, 1), (1, 1)], 1 + k as u8, 0, 0, k as u32));
             file.extend_from_slice(b" between ");
         }
         // one big enough to be cut in bands, among the others' components
-        file.extend_from_slice(&jpeg(12, 2400, 1000, &[(1, 1)], 6, 0, 0, 9));
-        file.extend_from_slice(&jpeg(12, 40, 30, &[(2, 1), (1, 1), (1, 1)], 4, 0, 0, 10));
+        file.extend_from_slice(&synthetic(12, 2400, 1000, &[(1, 1)], 6, 0, 0, 9));
+        file.extend_from_slice(&synthetic(12, 40, 30, &[(2, 1), (1, 1), (1, 1)], 4, 0, 0, 10));
         file.extend_from_slice(b" and the end");
         let f = encode(&file, 0).expect("coded");
         assert_eq!(back(&f, file.len()), file);
@@ -200,7 +205,7 @@ mod tests {
 
     #[test]
     fn damaged_inputs_are_errors() {
-        let file = jpeg(14, 60, 40, &[(1, 1), (1, 1)], 1, 0, 0, 3);
+        let file = synthetic(14, 60, 40, &[(1, 1), (1, 1)], 1, 0, 0, 3);
         let f = encode(&file, 0).expect("coded");
         let ins: Vec<Vec<u8>> = f.streams.iter().map(|s| s.data.to_vec()).collect();
         let run = |ins: &[Vec<u8>], len: usize| {

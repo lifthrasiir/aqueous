@@ -448,6 +448,11 @@ path = "src/bin/jpeg-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]
+name = "jpeg-lossless-recons"
+path = "src/bin/jpeg-lossless-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
 name = "psd-recons"
 path = "src/bin/psd-recons.rs"
 required-features = ["wasm"]

@@ -267,6 +267,15 @@ formats! {
         exts: &["jpg", "jpeg", "jpe", "jfif"],
         extent: extent::jpeg,
     }
+    /// Lossless JPEGs (SOF3) in a TIFF file (aqr-jpeg): a raw photograph in CR2 or DNG, known by
+    /// its header and by a stream within it.
+    JpegLossless = "jpeg-lossless" {
+        recompressor: Pure(aqr_jpeg::lformula::encode),
+        // (the samples of every stream held, as 16 bits, and the file without them)
+        heap: 4.0,
+        exts: &["cr2", "dng"],
+        cost: 70,
+    }
     Mp3 = "mp3" { recompressor: Pure(aqr_mp3::formula::encode), heap: 7.0, exts: &["mp3"], extent: extent::mp3 }
     Flac = "flac" {
         recompressor: Pure(aqr_flac::formula::encode),

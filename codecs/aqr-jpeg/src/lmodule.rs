@@ -118,38 +118,71 @@ pub fn split_chunks<'a>(lens: &[u8], model: &'a [u8], n: usize) -> Result<Vec<&'
     Ok(out)
 }
 
+/// Bytes of a `Stream` on WebAssembly (32-bit pointers): its length, and its `Header` of eight
+/// numbers of 4 bytes, a flag, the four Huffman tables, and the lists of components (4 and four
+/// of 12) and of the scan (4 and four of 8), the whole rounded up to 4.
+const STREAM_BYTES: u64 =
+    (4 + 8 * 4 + 1 + 4 * size_of::<Option<crate::jpeg::HuffSpec>>() as u64 + (4 + 4 * 12) + (4 + 4 * 8))
+        .next_multiple_of(4);
+
 /// Bytes the working memory of the module takes at most, beyond its initial memory
 /// (`initial` bytes), for the four `inputs` and a file of `len` bytes (`None` where they are not
-/// so): the inputs `aqr_api::whole` copies, the file, the layout, and the most a job takes
-/// (every block it makes, whatever the order of their freeing, so that no hole can take more).
+/// so): the inputs `aqr_api::whole` copies, and the blocks that `run` makes in the order it
+/// does, on WebAssembly, where nothing runs at once and a job's blocks are given back before the
+/// next one's: the file, the layout and the lists of jobs and chunks, and the most a job takes
+/// at a moment. (Sizes of the elements of lists are those of 32-bit pointers.)
 pub fn plan(initial: u64, inputs: &[&[u8]], len: u64) -> Option<u64> {
     let &[cut, info, lens, model] = inputs else { return None };
     let lay = Layout::parse(cut, info).ok()?;
     split_chunks(lens, model, lay.chunks()).ok()?;
     let lens64: Vec<u64> = inputs.iter().map(|i| i.len() as u64).collect();
     let n = |k: usize| k as u64;
-    let mut top = initial + whole(0, &[], &lens64) + block(len);
-    // the headers (up to 1.5 KB each, with their components) and the lists of jobs and chunks
-    top += block(n(lay.streams.len()) * 2048) + block(n(lay.jobs.len()) * 64) + block(n(lay.chunks()) * 16);
+    let mut top = initial + whole(0, &[], &lens64);
+    // the layout: the streams (headers in place), the jobs, the chunks
+    top += block(n(lay.streams.len()) * STREAM_BYTES);
+    top += block(16 * n(lay.jobs.len())) + block(8 * n(lay.chunks()));
+    // the file, and the results of a batch of one job
+    top += block(len) + block(16);
     let peak = lay.jobs.iter().map(|j| job_bytes(&lay, j)).max().unwrap_or(0);
-    // (what is small: the lists of a job's bands, tables of an encoder, the batches' results)
-    Some(top + peak + (256 << 10))
+    Some(top + peak)
 }
 
-/// Bytes of the blocks a job makes.
+/// The most that a job takes at a moment: of the blocks of `run_job`, those of what it calls
+/// and of the frame it is decoding or re-emitting.
 fn job_bytes(lay: &Layout, job: &Job) -> u64 {
     let streams = &lay.streams[job.first..job.first + job.count];
-    let comps = streams[0].header.comps.len();
-    let model: u64 = Model::bytes(comps).iter().map(|&b| block(b)).sum();
-    // a frame's planes, and the rows of errors of the walk over it
-    let frame = |h: &Header| -> u64 {
-        let planes: u64 = (0..h.comps.len()).map(|i| block(2 * h.samples_of(i) as u64)).sum();
-        planes + lmodel::frame_bytes(h).iter().map(|&b| block(b)).sum::<u64>()
+    let n = |k: usize| k as u64;
+    let nc = streams[0].header.comps.len();
+    let model: u64 = Model::bytes(nc).iter().map(|&b| block(b)).sum();
+    let buf = block(n(lay.data(job)));
+    // `planes` (a list of lists, and the lists), `full` or the views of them, and an encoder's
+    // table for each of four Huffman tables
+    let frame = |h: &Header| -> (u64, u64, u64) {
+        let nc = h.comps.len();
+        let planes = block(12 * n(nc)) + (0..nc).map(|i| block(2 * n(h.samples_of(i)))).sum::<u64>();
+        let walk = block(20 * n(nc)) + lmodel::frame_bytes(h).iter().map(|&b| block(b)).sum::<u64>() + block(8 * n(nc));
+        let encode = block(8 * n(nc)) + block(4 * 52);
+        (planes + block(8 * n(nc)), walk, encode)
     };
-    let most = streams.iter().map(|s| frame(&s.header)).max().unwrap_or(0);
-    // (a band's model and rows are given back before the next one's; its rows are as wide as
-    // the frame, and at most as many)
-    block(lay.data(job) as u64) + model + most
+    if job.bands > 1 {
+        let h = &streams[0].header;
+        let (planes, walk, encode) = frame(h);
+        let nb = n(job.bands);
+        // the rows of the bands, the bands' lists of parts (one block for each), the results
+        let bands = block(8 * nb) + block(12 * nb) + nb * block(32) + block(12 * nb);
+        // (a band has a model of its own)
+        buf + planes + (bands + model + walk).max(encode)
+    } else {
+        let most = streams
+            .iter()
+            .map(|s| {
+                let (planes, walk, encode) = frame(&s.header);
+                planes + walk.max(encode)
+            })
+            .max()
+            .unwrap_or(0);
+        buf + model + most
+    }
 }
 
 /// The module: the file of `len` bytes from the four `inputs` (`cut`, `info`, `lens`, `model`),

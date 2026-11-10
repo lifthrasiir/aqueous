@@ -269,6 +269,9 @@ pub const GIF: Module = aqr_gif::formula::MODULE;
 /// between them.
 pub const PRORES: Module = aqr_prores::formula::MODULE;
 pub const JPEG: Module = aqr_jpeg::formula::MODULE;
+/// Lossless JPEGs (SOF3) of a raw photograph in CR2, DNG and the like, from the file without their
+/// entropy-coded data and the samples coded by a model. No params or resources.
+pub const JPEG_LOSSLESS: Module = aqr_jpeg::lformula::MODULE;
 pub const MP3: Module = aqr_mp3::formula::MODULE;
 pub const FLAC: Module = aqr_flac::formula::MODULE;
 pub const PSD: Module = aqr_psd::formula::MODULE;
@@ -718,6 +721,7 @@ const NATIVE: &[Entry] = &[
     bare(GIF, |p, _, i, n, t| aqr_gif::formula::decode(p, i, n, t).map_err(err)),
     bare(PRORES, |p, _, i, n, t| aqr_prores::formula::decode(p, i, n, t).map_err(err)),
     bare(JPEG, |p, _, i, n, t| aqr_jpeg::formula::decode(p, i, n, t).map_err(err)),
+    bare(JPEG_LOSSLESS, |p, _, i, n, t| aqr_jpeg::lformula::decode(p, i, n, t).map_err(err)),
     threaded_takes(MP3, |p, r, i, n, t| aqr_mp3::formula::decode(p, r, i, n, t).map_err(err)),
     threaded_takes(FLAC, |p, r, i, n, t| aqr_flac::formula::decode(p, r, i, n, t).map_err(err)),
     bare(PSD, |p, _, i, n, t| aqr_psd::formula::decode(p, i, n, t).map_err(err)),
