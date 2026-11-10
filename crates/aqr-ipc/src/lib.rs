@@ -473,21 +473,11 @@ pub fn file_name(path: &Path) -> String {
     )
 }
 
-/// Bytes of a size, for people (as `aqr` tells them).
-pub fn size(n: f64) -> String {
-    match n {
-        n if n < 1e3 => format!("{n:.0} B"),
-        n if n < 1e6 => format!("{:.1} KB", n / 1e3),
-        n if n < 1e9 => format!("{:.2} MB", n / 1e6),
-        n => format!("{:.2} GB", n / 1e9),
-    }
-}
-
 /// What an `end` event `e` of a test of archive `name` tells (the name too, where `named`).
 pub fn tested(name: &str, e: &Value, named: bool) -> String {
     let files = e["files"].as_u64().unwrap_or(0);
-    let bytes = size(e["written"].as_u64().unwrap_or(0) as f64);
-    let archive = size(e["read"].as_u64().unwrap_or(0) as f64);
+    let bytes = aqr_l10n::size(e["written"].as_u64().unwrap_or(0) as f64);
+    let archive = aqr_l10n::size(e["read"].as_u64().unwrap_or(0) as f64);
     let time = aqr_l10n::duration(e["seconds"].as_f64().unwrap_or(0.0), 1);
     let text = aqr_l10n::common::tested(files, bytes, archive, time);
     if named {

@@ -166,6 +166,52 @@ impl Msg {
     }
 }
 
+/// A count (of files, of archives) in the language chosen: `1234`. Every number the frontends
+/// show goes through this, [`decimal`], [`percent`] and [`size`] (the plurals' `{n}` too), so
+/// that the language's own forms (CLDR's grouping and decimal marks) are written in one place;
+/// they are the same in every language for now.
+pub fn integer(n: u64) -> String {
+    integer_in(LANG.load(Ordering::Relaxed), n)
+}
+
+/// A number of `decimals` decimals in the language chosen: `2.35`.
+pub fn decimal(x: f64, decimals: usize) -> String {
+    decimal_in(LANG.load(Ordering::Relaxed), x, decimals)
+}
+
+/// A share (0 to 1) as a whole percentage in the language chosen: `42%`.
+pub fn percent(share: f64) -> String {
+    percent_in(LANG.load(Ordering::Relaxed), share)
+}
+
+/// Bytes of a size in the language chosen, of decimal units as `aqr` tells them: `999 B`,
+/// `1.5 KB`, `2.35 MB`, `1.20 GB`.
+pub fn size(bytes: f64) -> String {
+    size_in(LANG.load(Ordering::Relaxed), bytes)
+}
+
+fn integer_in(_lang: usize, n: u64) -> String {
+    n.to_string()
+}
+
+fn decimal_in(_lang: usize, x: f64, decimals: usize) -> String {
+    format!("{x:.decimals$}")
+}
+
+fn percent_in(lang: usize, share: f64) -> String {
+    decimal_in(lang, 100.0 * share, 0) + "%"
+}
+
+fn size_in(lang: usize, n: f64) -> String {
+    let (x, decimals, unit) = match n {
+        n if n < 1e3 => (n, 0, "B"),
+        n if n < 1e6 => (n / 1e3, 1, "KB"),
+        n if n < 1e9 => (n / 1e6, 2, "MB"),
+        n => (n / 1e9, 2, "GB"),
+    };
+    format!("{} {unit}", decimal_in(lang, x, decimals))
+}
+
 /// A time of `seconds` in the language chosen, of the parts of [`units`]: under a minute as
 /// seconds of `decimals` decimals (`2.35 s`, `2.35초`), else of whole hours, minutes and seconds,
 /// those of zero left out (`1 h 2 min 3 s`, `1 min`; `1시간 2분 3초`). ICU is not linked, so its
@@ -176,16 +222,16 @@ pub fn duration(seconds: f64, decimals: usize) -> String {
 
 /// [`duration`] in language `lang` (an index of [`LANGS`]).
 fn duration_in(lang: usize, seconds: f64, decimals: usize) -> String {
-    let part = |m: Msg, n: &dyn Display| fill(m.form(lang, None), &[("n", n)]);
+    let part = |m: Msg, n: &str| fill(m.form(lang, None), &[("n", &n)]);
     let t = if seconds.is_finite() { seconds.max(0.0) } else { 0.0 };
-    let short = format!("{t:.decimals$}");
     // (what rounds to a minute is one)
-    if short.parse::<f64>().is_ok_and(|s| s < 60.0) {
-        return part(units::SECONDS, &short);
+    if format!("{t:.decimals$}").parse::<f64>().is_ok_and(|s| s < 60.0) {
+        return part(units::SECONDS, &decimal_in(lang, t, decimals));
     }
     let t = t.round() as u64;
     let parts = [(t / 3600, units::HOURS), (t / 60 % 60, units::MINUTES), (t % 60, units::SECONDS)];
-    let parts: Vec<String> = parts.iter().filter(|(n, _)| *n > 0).map(|(n, m)| part(*m, n)).collect();
+    let parts: Vec<String> =
+        parts.iter().filter(|(n, _)| *n > 0).map(|&(n, m)| part(m, &integer_in(lang, n))).collect();
     parts.join(" ")
 }
 
@@ -260,6 +306,19 @@ mod tests {
         // (the language chosen is English in the tests)
         assert_eq!(common::intact("a.aqr"), "a.aqr is intact");
         assert_eq!(common::all_intact(2), "The 2 archives are intact");
+    }
+
+    #[test]
+    fn numbers() {
+        // (the language chosen is English in the tests)
+        assert_eq!(integer(1234), "1234");
+        assert_eq!(decimal(2.345, 1), "2.3");
+        assert_eq!(percent(0.426), "43%");
+        assert_eq!(size(999.0), "999 B");
+        assert_eq!(size(1500.0), "1.5 KB");
+        assert_eq!(size(2_345_678.0), "2.35 MB");
+        assert_eq!(size(1.2e9), "1.20 GB");
+        assert_eq!(size_in(ko(), 1500.0), "1.5 KB");
     }
 
     #[test]

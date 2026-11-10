@@ -9,6 +9,7 @@ English.
 aqr_l10n::init(&aqr_l10n::system_languages());   // aqr-mac: NSBundle's preferred localizations
 aqr_l10n::common::intact("a.aqr")                 // "a.aqr is intact", "a.aqr에 이상이 없습니다"
 aqr_l10n::types::ZIP.resource()                   // its id in Windows' string table
+aqr_l10n::size(1.5e6)                             // "1.50 MB"; integer, decimal, percent too
 ```
 
 ```sh
@@ -42,6 +43,13 @@ tested = { one = "{n} file, {bytes}, …", other = "{n} files, {bytes}, …" }
   languages (`GetUserPreferredUILanguages`, the list Windows' resources are loaded by); in the
   macOS app, `NSBundle`'s preferred localizations of the catalogs' (the app's own language in
   System Settings, else the system's).
+
+## Numbers
+
+Every number the frontends show is written by `integer` (counts, and a plural's `{n}`, which
+the generated functions fill through it), `decimal`, `percent`, `size` (bytes, in the decimal
+units `aqr` tells them in) or `duration`, so that the language's own forms are made in one
+place. For now they are the same in every language: no grouping, `.` as the decimal mark.
 
 ## What the systems read themselves
 
@@ -82,5 +90,5 @@ tables.
 ## Status
 
 Left: VERSIONINFO's description (English only); numbers and sizes in the language's own forms
-(`aqr_ipc::size` writes `1.5 MB` everywhere); `aqr`'s messages; Settings' Apps' name and
+(the functions of "Numbers" write `1.5 MB` everywhere); `aqr`'s messages; Settings' Apps' name and
 installer's title stay "Aqueous".

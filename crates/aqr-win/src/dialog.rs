@@ -39,8 +39,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 use windows_sys::core::{BOOL, HRESULT, PCWSTR};
 
-use aqr_ipc::{Job, Verb, done, file_name, size};
-use aqr_l10n::{common, win};
+use aqr_ipc::{Job, Verb, done, file_name};
+use aqr_l10n::{common, integer, percent, size, win};
 
 /// `s` as a string of NULs.
 pub fn wide(s: impl AsRef<OsStr>) -> Vec<u16> {
@@ -344,7 +344,7 @@ impl Window<'_> {
         let s = self.job.state.lock().unwrap();
         let mut main = self.job.verb.doing(&s.name());
         if self.job.count > 1 && s.begun > 0 {
-            main = win::of_archives(main, s.begun, self.job.count);
+            main = win::of_archives(main, integer(s.begun as u64), integer(self.job.count as u64));
         }
         if self.stopping.get().is_some() {
             main = win::stopping().into();
@@ -359,11 +359,11 @@ impl Window<'_> {
                     if p["listed"].is_array() {
                         let (files, bytes) = pair("listed");
                         match p["read"].as_u64() {
-                            Some(read) => win::listing_read(read, files, size(bytes)),
-                            None => win::listing(files),
+                            Some(read) => win::listing_read(integer(read), integer(files as u64), size(bytes)),
+                            None => win::listing(integer(files as u64)),
                         }
                     } else if analysis.0 == 0.0 && probe.0 < probe.1 {
-                        win::looking(probe.0, probe.1)
+                        win::looking(integer(probe.0 as u64), integer(probe.1 as u64))
                     } else if analysis.0 < analysis.1 {
                         win::recompressing(bytes(analysis))
                     } else {
@@ -381,7 +381,7 @@ impl Window<'_> {
                 if let (Some(done), Some(len)) = (file["done"].as_f64(), file["len"].as_f64())
                     && len > 0.0
                 {
-                    line += &format!(", {:.0}%", (100.0 * done / len).min(99.0));
+                    line += &format!(", {}", percent((done / len).min(0.99)));
                 }
                 if let Some(t) = file["seconds"].as_f64().filter(|&t| t >= 2.0) {
                     line += &format!(", {}", time(t));

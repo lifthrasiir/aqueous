@@ -292,7 +292,7 @@ fn rust(out: &mut String, tags: &[&str], messages: &[Message]) {
             let mut args: Vec<String> = others.iter().map(|p| format!("({p:?}, &{p})")).collect();
             if m.plural {
                 params.insert(0, "n: u64".into());
-                args.insert(0, "(\"n\", &n)".into());
+                args.insert(0, "(\"n\", &super::integer(n))".into());
             }
             let n = if m.plural { "Some(n)" } else { "None" };
             writeln!(
