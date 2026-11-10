@@ -171,6 +171,24 @@ archive's deduplication finds; it is no measure of coding. Version 2's `rep` use
 4 KB frames; at 16 version 3 decodes it at a fifth of the speed of one stripe, hence the rule.)
 The module is 44,009 bytes (14,610 of its block) against 40,306 (13,292).
 
+The plan follows the frames, not the chunk: a chunk of 64 MiB took up to 389 MiB of the
+application's memory as version 2, over the compressing bound of 256 MiB, so the corpus's files
+over 64 MiB (14 of 30) were kept as they were. Measured 2026-11-10 on the Ryzen 7 9700X (16
+threads), `cargo aqr -c --stats` of the same 30 files (6.49 GB) at `1866ff4f`:
+
+| | version 2 | version 3 |
+|---|---|---|
+| default bound (256 MiB) | 6.14 GB (94.6%) | 4,505,195,603 bytes (69.4%), 137.2 s |
+| `--application-bound 512M` | 4,503,182,837 bytes, 146.8 s | the same as at the default, byte for byte; 137.7 s |
+| `-K` of the archive (native / `--wasm`) | | 58.8 s (110 MB/s) / 80.9 s (80 MB/s) |
+| heap peak, resident peak (compressing) | | 3.04 GB, 5.16 GB |
+
+No file drops prores-recons for the bound. Testing leaves the pool idle for long stretches (one
+of 16 workers busy for 22-49 s natively, 30-69 s in Wasm): two ARRI files (A006, A007) take 1.0
+thread on average as they are tested, though a chunk has a gang of up to 16 (not looked into). `archive-org` (2 files, 10.41 GB)
+at the default bound: 7,691,455,732 bytes (73.9%) in 235.6 s, the 5.82 GB file in 99.3 s on 9.1
+threads.
+
 Left:
 
 - Speed, decoding first (it is more than half of compressing too): writing the slices is about
@@ -178,14 +196,10 @@ Left:
   (1.8); the arithmetic coder itself is about 15% of the encoding time, the rest the decisions'
   contexts and branches. Fewer decisions (zero runs coded together, sizes binarised around
   their expected value) are the way to go faster.
-- Memory: the plan follows the frames, not the chunk (a chunk of 64 MiB took up to 389 MiB of
-  the application's memory, over the compressing bound of 256 MiB, which kept the files of the
-  corpus over 64 MiB, 14 of 30, as they were). Measured on noisy ffmpeg footage, a file of 120
-  frames of 1080p 4:2:2 HQ (115 MB) needs 70 MB (one instance of 5.8 MB, a gang of 16 tasks and
-  their messages of 64 MB), against 404 MB; 24 frames of UHD 4:4:4 (138 MB) 220 MB (the planes of
-  two frames), against 410 MB. Native decoding of a chunk holds the same, and the chunk's span
-  as its result. 8K 4:4:4 frames would pass the bound (a stripe's planes are 258 bytes a block
-  of its picture, in two frames).
+- Memory: 8K 4:4:4 frames would pass the compressing bound of 256 MiB (a stripe's planes are
+  258 bytes a block of its picture, in two frames; UHD 4:4:4 takes 220 MB). Native decoding runs
+  all the gang's tasks at once, so it holds the plan (UHD 4:4:4: 648 MB resident, against 479
+  for version 2), and the chunk's span as its result.
 - The chunk's size (`aqr-prores-bench -c`, 120 frames of 1080p repeated nine times, 1.04 GB,
   10 cores; the chunk is the unit of the encoder's work, so coding takes one thread a chunk):
 
@@ -199,6 +213,8 @@ Left:
   frames, and there is more to learn in the corpus's footage: to be measured there) and loses the
   chunks' parallelism in encoding, which is a third of compressing, and its memory (the encoder
   holds the chunk's frames); decoding does not need it any more.
+- Why A006 and A007 of the corpus decode on one thread (above): the stripes their chunks have,
+  or the chunks' order in the archive.
 - Alpha: its run-length coding parsed and modelled (0.3 MB of the corpus).
 - Apple's own encoders as a sample: AVFoundation (`avconvert`, `prores_videotoolbox`) and iPhone
   recordings; the corpus has one Apple-encoded film.
