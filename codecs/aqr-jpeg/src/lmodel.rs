@@ -76,7 +76,7 @@ pub fn frame_bytes(h: &Header) -> Vec<u64> {
 }
 
 /// Lanes of the errors at a position: those of the predictors, then the blend's, padded.
-const LANES: usize = 16;
+const LANES: usize = 8;
 const FIN: usize = K;
 
 /// The state of a component: rows of the errors at each position, `w + 2` of them to a row (a
@@ -149,10 +149,12 @@ fn residual<C: Coder>(
     let base = ((comp * 18 + k as usize) * 3 + q.min(2) as usize) * 4;
     let high = k.min(2);
     let mut low = 0u32;
-    for s in 0..high {
-        let want = v >> (k - 1 - s) & 1 != 0;
-        let at = base + if s == 0 { 0 } else { 1 + (low & 1) as usize };
-        low = low << 1 | c.bit(&mut m.low[at], want) as u32;
+    if high > 0 {
+        low = c.bit(&mut m.low[base], v >> (k - 1) & 1 != 0) as u32;
+        if high > 1 {
+            let at = base + 1 + low as usize;
+            low = low << 1 | c.bit(&mut m.low[at], v >> (k - 2) & 1 != 0) as u32;
+        }
     }
     if k > high {
         let rest = k - high;
@@ -255,7 +257,7 @@ impl<'h> Frame<'h> {
                         let cc = if x > 0 && y > 0 { p[rq + x - 1] as i32 } else { b };
                         // (the north-east sample is there where its MCU is: above this MCU row, or
                         // to the left of this one)
-                        let ne = y > 0 && x + 1 < w && (v == 0 || (x + 1) / comp.h <= col);
+                        let ne = y > 0 && x + 1 < w && (v == 0 || hh + 1 < comp.h);
                         let d = if ne { p[rq + x + 1] as i32 } else { b };
                         cands[0] = a;
                         cands[1] = b;
@@ -288,15 +290,17 @@ impl<'h> Frame<'h> {
                         }
                         let (mut num, mut den) = (0u64, 0u64);
                         for j in 0..n {
+                            cands[j] = cands[j].clamp(0, 65535);
                             let wt = weight(e[j]);
-                            num += wt * cands[j].clamp(0, 65535) as u64;
+                            num += wt * cands[j] as u64;
                             den += wt;
                         }
                         let pred0 = ((num + den / 2) / den) as i32;
                         // (the mean error of the blend where the neighbours had this shape, within what the errors around allow)
                         let q = |x: i32| -> usize {
-                            let l = (bitlen(x.unsigned_abs()) / 2).min(4);
-                            if x < 0 { 4 - l } else { 4 + l }
+                            let l = (bitlen(x.unsigned_abs()) / 2).min(4) as i32;
+                            let s = x >> 31;
+                            (4 + ((l ^ s) - s)) as usize
                         };
                         let bctx = ((ci * 9 + q(d - b)) * 9 + q(b - cc)) * 9 + q(cc - a);
                         let room = 1 + (e[FIN] >> BIAS_ROOM) as i32;
@@ -313,21 +317,18 @@ impl<'h> Frame<'h> {
                         let [bs, bn, bc] = &mut m.bias[bctx];
                         *bs += value as i32 - pred0 - *bc;
                         *bn += 1;
-                        if *bn == 64 {
-                            *bs >>= 1;
-                            *bn >>= 1;
-                        }
-                        if *bs <= -*bn {
-                            *bc -= 1;
-                            *bs = (*bs + *bn).max(1 - *bn);
-                        } else if *bs > 0 {
-                            *bc += 1;
-                            *bs = (*bs - *bn).min(0);
-                        }
+                        // (without branches: the data decides them, and they would miss)
+                        let halve = (*bn == 64) as u32;
+                        *bs >>= halve;
+                        *bn >>= halve;
+                        let (down, up) = (*bs <= -*bn, *bs > 0);
+                        *bc += up as i32 - down as i32;
+                        let (lowered, raised) = ((*bs + *bn).max(1 - *bn), (*bs - *bn).min(0));
+                        *bs = if down { lowered } else if up { raised } else { *bs };
                         ring[ci][rc + x] = value;
                         let cell = &mut st[ci].err[ry + x];
                         for j in 0..n {
-                            cell[j] = (value as i32 - cands[j].clamp(0, 65535)).unsigned_abs() as u16;
+                            cell[j] = (value as i32 - cands[j]).unsigned_abs() as u16;
                         }
                         cell[FIN] = rr.unsigned_abs().min(65535) as u16;
                     }
