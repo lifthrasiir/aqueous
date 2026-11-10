@@ -19,7 +19,7 @@ cargo run -p aqr-l10n -- rc          # Windows' string table, as aqr-win embeds 
 
 ## The catalogs
 
-TOML, a section of messages for each part (`common`, `units`, `types`, `shell`, `win`, `install`, `mac`,
+TOML, a section of messages for each part (`common`, `units`, `types`, `shell`, `win`, `options`, `install`, `mac`,
 `services`), a key for each message:
 
 ```toml
