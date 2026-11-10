@@ -90,7 +90,7 @@ fn archives_rebuilt() {
 #[test]
 fn filters_rebuilt() {
     let fixtures: Vec<_> = fixtures().into_iter().filter(|f| f.0.starts_with("filter-")).collect();
-    assert_eq!(fixtures.len(), 6);
+    assert_eq!(fixtures.len(), 8);
     for (name, d) in fixtures {
         let f = formula::encode(&d, 2).unwrap_or_else(|| panic!("{name}"));
         assert!(eval(&f).unwrap() == d, "{name}");

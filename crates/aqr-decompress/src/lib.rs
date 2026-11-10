@@ -158,8 +158,8 @@ pub const LZMA2: Module = aqr_lzma::formula::LZMA2;
 
 /// The filters of xz and 7z (aqr-bcj): a branch converter's encoding of the data (x86, PowerPC,
 /// IA-64, ARM, ARM Thumb, SPARC, ARM64, RISC-V; parameters: the start address, le32 or none),
-/// Delta's (parameters: the distance less one), and BCJ2's main, call and jump streams (inputs:
-/// the data, and the range coder's stream). No resources.
+/// Delta's (parameters: the distance less one), BCJ2's main, call and jump streams (inputs:
+/// the data, and the range coder's stream), and 7z's Swap2 and Swap4. No resources.
 pub const BCJ_X86: Module = aqr_bcj::formula::X86;
 pub const BCJ_POWERPC: Module = aqr_bcj::formula::POWERPC;
 pub const BCJ_IA64: Module = aqr_bcj::formula::IA64;
@@ -170,6 +170,8 @@ pub const BCJ_ARM64: Module = aqr_bcj::formula::ARM64;
 pub const BCJ_RISCV: Module = aqr_bcj::formula::RISCV;
 pub const BCJ_DELTA: Module = aqr_bcj::formula::DELTA;
 pub const BCJ2: Module = aqr_bcj::formula::BCJ2;
+pub const BCJ_SWAP2: Module = aqr_bcj::formula::SWAP2;
+pub const BCJ_SWAP4: Module = aqr_bcj::formula::SWAP4;
 
 /// aqr-lzo reconstruction of LZO1X streams, one after another, from their data and records.
 /// Inputs: the data, the records and the index cutting them into the streams'.
@@ -433,6 +435,26 @@ macro_rules! bra {
     };
 }
 
+/// [`Entry`] of 7z's Swap2 or Swap4 (aqr-bcj), a part module of windows of a page.
+macro_rules! swap {
+    ($module:ident, $width:literal) => {
+        part(
+            $module,
+            false,
+            aqr_api::emu::Entry {
+                kind: aqr_api::emu::Kind::Part,
+                windows: &[
+                    aqr_api::Window::Input(0, aqr_bcj::module::SWAP_WINDOW),
+                    aqr_api::Window::Output(0, aqr_bcj::module::SWAP_WINDOW),
+                ],
+                arity: 3,
+                call: |a| aqr_bcj::module::swap_part($width, a[0], a[1], a[2]),
+            },
+            |p, _, i, n, _| bcj($module, p, i, n),
+        )
+    };
+}
+
 /// Every module of this crate, as it runs natively.
 const NATIVE: &[Entry] = &[
     part(
@@ -604,6 +626,8 @@ const NATIVE: &[Entry] = &[
         },
         |p, _, i, n, _| bcj(BCJ2, p, i, n),
     ),
+    swap!(BCJ_SWAP2, 2),
+    swap!(BCJ_SWAP4, 4),
     bare(LZO, |p, _, i, n, t| aqr_lzo::formula::decode(p, i, n, t).map_err(err)),
     bare(AZO, |p, _, i, n, t| aqr_azo::formula::decode(p, i, n, t).map_err(err)),
     bare(LHA, |p, _, i, n, t| aqr_lha::formula::decode(p, i, n, t).map_err(err)),

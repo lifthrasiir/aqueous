@@ -2,8 +2,8 @@
 
 7z archives rebuilt bit for bit: the packed streams of each folder from the contents of the
 files it holds, its coders of LZMA or LZMA2 by aqr-lzma's modules (`lzma-recons`,
-`lzma2-recons`) and the filters over them (the branch converters, Delta, BCJ2) by aqr-bcj's, and
-an encoded header of LZMA likewise; the rest of the archive (the signature header, folders of
+`lzma2-recons`) and the filters over them (the branch converters, Delta, BCJ2, Swap2 and Swap4)
+by aqr-bcj's, and an encoded header of LZMA likewise; the rest of the archive (the signature header, folders of
 other coders, the header) is kept as it is. There is no module of its own: `FORMAT.md` tells
 what the formula is.
 
@@ -63,7 +63,7 @@ Done: the container (headers encoded or plain), folders of LZMA, LZMA2 or Copy, 
 (`format_on`), kept as they are below.
 Left:
 
-- PPMd, BZip2, Deflate folders; Swap2/Swap4; encrypted archives are kept as they are.
+- PPMd, BZip2, Deflate folders; encrypted archives are kept as they are.
 - A folder of LZMA over 64 MiB of data is coded in parts rebuilt side by side, and the match
   finder's reach is cut to fit the encoder's bound on an application (256 MiB by default: 8 MiB
   for the 64 MiB dictionary, so the records grow); see aqr-lzma's README for the figures.

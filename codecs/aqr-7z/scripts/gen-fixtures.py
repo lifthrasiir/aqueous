@@ -2,7 +2,7 @@
 """Writes tests/data/*.7z: deterministic files archived by 7-Zip (7zz) in LZMA2 and LZMA,
 solid and not, with the header encoded and plain, stored, in LZMA2 blocks of 64 KiB (dictionary
 resets). 7-Zip puts the PE file (made up) in a folder of BCJ and LZMA or LZMA2. Of that file and
-a text, archives of each other filter (`-mf`): BCJ2, ARM64, ARMT, SPARC, RISC-V and Delta.
+a text, archives of each other filter (`-mf`): BCJ2, ARM64, ARMT, SPARC, RISC-V, Delta, Swap2 and Swap4.
 
     python3 -I scripts/gen-fixtures.py   # needs 7zz on the PATH
 """
@@ -63,6 +63,8 @@ FILTERS = {
     'sparc': ['-mf=SPARC'],
     'riscv': ['-mf=RISCV'],
     'delta': ['-mf=Delta:4'],
+    'swap2': ['-mf=Swap2'],
+    'swap4': ['-mf=Swap4'],
 }
 
 def main():

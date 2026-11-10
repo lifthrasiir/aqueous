@@ -58,8 +58,16 @@ fn modules() {
     delta::encode(&mut want, 4);
     assert_eq!(module::delta(&[3], &[&d], d.len() as u64).unwrap(), want);
     assert!(module::delta(&[], &[&d], d.len() as u64).is_err());
+    // Swap2 and Swap4, a last unit cut short kept
+    assert_eq!(module::swap(2, &[], &[b"abcde"], 5).unwrap(), b"badce");
+    assert_eq!(module::swap(4, &[], &[b"abcdefg"], 7).unwrap(), b"dcbaefg");
+    assert!(module::swap(4, &[0], &[b"abcd"], 4).is_err());
+    assert_eq!(Filter::from_7z(&[2, 3, 4], &[]), Some(Filter::Swap(4)));
+    assert_eq!(Filter::from_7z(&[2, 3, 3], &[]), None);
     // by the formula's filters, and their modules
-    for f in [Filter::Bra(Arch::X86, 0), Filter::Bra(Arch::RiscV, 2), Filter::Delta(3)] {
+    for f in
+        [Filter::Bra(Arch::X86, 0), Filter::Bra(Arch::RiscV, 2), Filter::Delta(3), Filter::Swap(2), Filter::Swap(4)]
+    {
         let mut e = d.clone();
         f.encode(&mut e);
         assert_eq!(formula::unfilter(&[f], &e).as_deref(), Some(&d[..]));

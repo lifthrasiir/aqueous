@@ -5,7 +5,7 @@
 use aqr_formula::{Module, Node};
 
 use crate::bra::{self, Arch};
-use crate::{Result, delta, module};
+use crate::{Result, delta, module, swap};
 
 pub const X86: Module = Module::new("bcj-x86", 2).with_plan(memory_part).with_contents(&[0]);
 pub const POWERPC: Module = Module::new("bcj-powerpc", 2).with_plan(memory_part).with_contents(&[0]);
@@ -15,17 +15,19 @@ pub const ARM_THUMB: Module = Module::new("bcj-armthumb", 2).with_plan(memory_pa
 pub const SPARC: Module = Module::new("bcj-sparc", 2).with_plan(memory_part).with_contents(&[0]);
 pub const ARM64: Module = Module::new("bcj-arm64", 2).with_plan(memory_part).with_contents(&[0]);
 pub const RISCV: Module = Module::new("bcj-riscv", 2).with_plan(memory_part).with_contents(&[0]);
-/// The memory of the part modules ([`module::bra_part`], [`module::delta_part`], [`module::bcj2_part`]): their initial
-/// memory alone (they allocate nothing).
+/// The memory of the part modules ([`module::bra_part`], [`module::delta_part`], [`module::bcj2_part`],
+/// [`module::swap_part`]): their initial memory alone (they allocate nothing).
 fn memory_part(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.initial())
 }
 
 pub const DELTA: Module = Module::new("bcj-delta", 1).with_plan(memory_part).with_contents(&[0]);
 pub const BCJ2: Module = Module::new("bcj2", 2).with_plan(memory_part).with_contents(&[0]);
+pub const SWAP2: Module = Module::new("bcj-swap2", 1).with_plan(memory_part).with_contents(&[0]);
+pub const SWAP4: Module = Module::new("bcj-swap4", 1).with_plan(memory_part).with_contents(&[0]);
 
 /// Every module of this crate.
-pub const MODULES: [Module; 10] = [X86, POWERPC, IA64, ARM, ARM_THUMB, SPARC, ARM64, RISCV, DELTA, BCJ2];
+pub const MODULES: [Module; 12] = [X86, POWERPC, IA64, ARM, ARM_THUMB, SPARC, ARM64, RISCV, DELTA, BCJ2, SWAP2, SWAP4];
 
 /// The module of a branch converter.
 pub fn module_of(arch: Arch) -> Module {
@@ -50,6 +52,8 @@ pub fn decode(m: Module, params: &[u8], inputs: &[&[u8]], len: u64) -> Option<Re
         Some(module::delta(params, inputs, len))
     } else if m == BCJ2 {
         Some(module::bcj2(params, inputs, len))
+    } else if m == SWAP2 || m == SWAP4 {
+        Some(module::swap(if m == SWAP2 { 2 } else { 4 }, params, inputs, len))
     } else {
         None
     }
@@ -62,6 +66,8 @@ pub enum Filter {
     Bra(Arch, u32),
     /// Delta of a distance (1 to 256).
     Delta(usize),
+    /// 7z's Swap2 or Swap4: the bytes of each unit of this width (2 or 4) reversed.
+    Swap(usize),
 }
 
 impl Filter {
@@ -93,6 +99,7 @@ impl Filter {
                 let &[k] = props else { return None };
                 return Some(Filter::Delta(k as usize + 1));
             }
+            &[2, 3, w @ (2 | 4)] => return props.is_empty().then_some(Filter::Swap(w as usize)),
             [3, 3, 1, 3] => Arch::X86,
             [3, 3, 2, 5] => Arch::PowerPc,
             [3, 3, 4, 1] => Arch::Ia64,
@@ -119,6 +126,7 @@ impl Filter {
         match self {
             Filter::Bra(arch, pc) => bra::convert(arch, d, pc, true),
             Filter::Delta(n) => delta::encode(d, n),
+            Filter::Swap(w) => swap::convert(d, w),
         }
     }
 
@@ -126,6 +134,7 @@ impl Filter {
         match self {
             Filter::Bra(arch, pc) => bra::convert(arch, d, pc, false),
             Filter::Delta(n) => delta::decode(d, n),
+            Filter::Swap(w) => swap::convert(d, w),
         }
     }
 
@@ -137,6 +146,7 @@ impl Filter {
                 Node::apply(module_of(arch), params, vec![data], len)
             }
             Filter::Delta(n) => Node::apply(DELTA, vec![(n - 1) as u8], vec![data], len),
+            Filter::Swap(w) => Node::apply(if w == 2 { SWAP2 } else { SWAP4 }, Vec::new(), vec![data], len),
         }
     }
 }

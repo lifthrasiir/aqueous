@@ -398,6 +398,16 @@ path = "src/bin/bcj2.rs"
 required-features = ["wasm"]
 
 [[bin]]
+name = "bcj-swap2"
+path = "src/bin/bcj-swap2.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "bcj-swap4"
+path = "src/bin/bcj-swap4.rs"
+required-features = ["wasm"]
+
+[[bin]]
 name = "bcn-recons"
 path = "src/bin/bcn-recons.rs"
 required-features = ["wasm"]

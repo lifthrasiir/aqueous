@@ -1,13 +1,13 @@
 # aqr-bcj modules
 
 aqr-bcj's modules apply the encoders of the filters of xz and 7z: the branch converters
-(BCJ), Delta and 7z's BCJ2. A container whose stream went through a filter before its
+(BCJ), Delta, and 7z's BCJ2, Swap2 and Swap4. A container whose stream went through a filter before its
 compressor (an `.xz` block of `x86` then LZMA2, a 7z folder of BCJ2 and LZMA) keeps the data
 before the filter, and the module gives back what the compressor was given. The document is
 normative: an implementation of the modules can be written from it.
 
 External reference: the LZMA SDK (Igor Pavlov, public domain): `Bra.c`, `Bra86.c`,
-`BraIA64.c`, `Delta.c` and `Bcj2.c`, of which the filters below are what one call of the encoder
+`BraIA64.c`, `Delta.c`, `Bcj2.c` and `SwapBytes.c`, of which the filters below are what one call of the encoder
 on the whole data does; xz's filters (`xz-file-format.txt`) are the same.
 
 ## Conventions
@@ -124,6 +124,14 @@ while i < N:
 ```
 
 What follows the last bit in `R` is not read (the container keeps `R` as it is).
+
+## Swap2 and Swap4
+
+Modules `bcj-swap2` and `bcj-swap4`, each version 1. **Parameters**: none. **Inputs**: one, the
+data. **Output**: the data with the bytes of each unit of 2 (`bcj-swap2`) or 4 (`bcj-swap4`)
+bytes from its start reversed; a last unit shorter than that stays as it is. Each is its own
+inverse. Part modules, of windows of a page for the input and the output: the units are
+converted a piece at a time, whatever the length of the data.
 
 **Resources**: none, for every module. A module fails on other parameters or inputs, or an
 output length other than its input's (BCJ2: `N`).

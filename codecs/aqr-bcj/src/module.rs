@@ -3,7 +3,7 @@
 //! input, as the encoder of an archive did before compressing it.
 
 use crate::bra::{self, Arch};
-use crate::{Error, Result, bcj2, corrupt, delta};
+use crate::{Error, Result, bcj2, corrupt, delta, swap};
 
 /// The start address that a branch converter's parameters tell (none: 0; else le32), aligned as
 /// its architecture wants.
@@ -315,4 +315,44 @@ fn bcj2_stream(params_len: u64, data_len: u64, rc_len: u64, sizes: [u64; 3]) -> 
     main.finish()?;
     call.finish()?;
     jump.finish()
+}
+
+/// The module `bcj-swap2` or `bcj-swap4` (`width` 2 or 4): 7z's Swap2 or Swap4 of the input.
+pub fn swap(width: usize, params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
+    if !params.is_empty() {
+        return Err(Error("bad parameters"));
+    }
+    let mut d = one(inputs, len)?.to_vec();
+    swap::convert(&mut d, width);
+    Ok(d)
+}
+
+/// The pages of the windows of `bcj-swap2`'s and `bcj-swap4`'s input and output (as part
+/// modules, [`swap_part`]).
+pub const SWAP_WINDOW: u32 = 1;
+
+/// The module `bcj-swap2` or `bcj-swap4` (`width` 2 or 4) as a part module (its entry point, of
+/// `aqr_api::entry!`): its input converted a piece at a time through windows of [`SWAP_WINDOW`]
+/// pages. The pieces are of whole units but the last (the windows and the buffer are of whole
+/// units), so each is converted on its own.
+#[inline(always)]
+pub fn swap_part(width: usize, params_len: u64, in0_len: u64, size: u64) {
+    use aqr_api::{Input, Memory, Output};
+    if params_len != 0 || size != in0_len {
+        aqr_api::finish(Err(Error("bad parameters, or output of another length")));
+    }
+    let (w_in, w_out) = (Input::<0>::size(), Output::<0>::size());
+    let mut buf = [0; 4096];
+    let mut pos = 0;
+    while pos < size {
+        let n = (size - pos).min(buf.len() as u64).min(w_in - pos % w_in).min(w_out - pos % w_out);
+        let piece = &mut buf[..n as usize];
+        Input::<0>::request(pos + n);
+        Input::<0>::read(pos % w_in, piece);
+        Input::<0>::release(pos + n);
+        swap::convert(piece, width);
+        Output::<0>::write(pos % w_out, piece);
+        Output::<0>::commit(pos + n);
+        pos += n;
+    }
 }

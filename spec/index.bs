@@ -6173,6 +6173,16 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bcj-sparc.wasm" title="crates/aqr-modules/wasm/bcj-sparc.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bcj/FORMAT.md" title="codecs/aqr-bcj/FORMAT.md">R</a>
     <tr>
+      <td><code>3ec61c304a66d5b5fdbc1e8b23e9d3fbf910a56998122d1fa4a33d6ec54c4834</code>
+      <td>bcj-swap2@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bcj-swap2.wasm" title="crates/aqr-modules/wasm/bcj-swap2.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bcj/FORMAT.md" title="codecs/aqr-bcj/FORMAT.md">R</a>
+    <tr>
+      <td><code>bf14dcbafbf73c4fbecc0d6768a8428705d58939d28fca71e6ce3f356a1cccf6</code>
+      <td>bcj-swap4@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bcj-swap4.wasm" title="crates/aqr-modules/wasm/bcj-swap4.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bcj/FORMAT.md" title="codecs/aqr-bcj/FORMAT.md">R</a>
+    <tr>
       <td><code>bc5de18653206afc1c83a8179acbb9b04463cf4e62b23269b5d6fcd56f4557a7</code>
       <td>bcj-x86@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bcj-x86.wasm" title="crates/aqr-modules/wasm/bcj-x86.wasm">D</a>

@@ -1,7 +1,7 @@
 # aqr-bcj
 
 The filters of xz and 7z as modules applying their encoders: the branch converters (BCJ: x86,
-PowerPC, IA-64, ARM, ARM Thumb, SPARC, ARM64, RISC-V), Delta, and 7z's BCJ2. A stream that went
+PowerPC, IA-64, ARM, ARM Thumb, SPARC, ARM64, RISC-V), Delta, and 7z's BCJ2, Swap2 and Swap4. A stream that went
 through a filter before LZMA or LZMA2 is rebuilt from the data before the filter, the files'
 own bytes, so that they are stored once where the same files are archived along with it
 (aqr-lzma's `.xz` blocks, aqr-7z's folders). `FORMAT.md` specifies the modules.
@@ -35,8 +35,9 @@ commit before as the baseline).
   2.17 -> 2.27 GB. Each folder is one LZMA or LZMA2 stream (250 and 124 MB of data), split and
   rebuilt on one thread (before aqr-lzma's parts); the times look like the two are rebuilt one
   after the other (not looked into).
-- The modules are 2.4 to 3.2 KB (`bcj2` 4.4 KB, `bcj-delta` 1.9 KB), of module blocks of 1.1 to 2.1 KB;
-  they are part modules whose memory does not depend on the length of the data.
+- The modules are 2.4 to 3.2 KB (`bcj2` 4.4 KB, `bcj-delta`, `bcj-swap2` and `bcj-swap4` 1.9 KB),
+  of module blocks of 1.1 to 2.1 KB; they are part modules whose memory does not depend on the
+  length of the data.
 
 ## Tests
 
@@ -52,5 +53,5 @@ too) test them as black boxes.
 ## Status
 
 Done: the modules, natively and in Wasm, and their use by aqr-lzma (`.xz` blocks of filters
-before LZMA2) and aqr-7z (folders of filters over LZMA, LZMA2 or Copy, and BCJ2 over them).
-Left: 7z's Swap2/Swap4 filters and chains of BCJ2 under other filters, both rare.
+before LZMA2) and aqr-7z (folders of filters over LZMA, LZMA2 or Copy, Swap2 and Swap4 among
+them, and BCJ2 over them). Left: chains of BCJ2 under other filters, rare.

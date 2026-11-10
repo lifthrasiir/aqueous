@@ -2044,22 +2044,22 @@ fn zip_again_checked() {
     assert!(w.is_err(), "decoded as WebAssembly");
 }
 
-/// The filters of aqr-bcj (the branch converters, Delta, BCJ2) lay their memory out as a stack,
-/// their limits their plans, exactly: of the filtered streams of `.xz` and 7z fixtures.
+/// The filters of aqr-bcj (the branch converters, Delta, BCJ2, Swap2 and Swap4) lay their memory
+/// out as a stack, their limits their plans, exactly: of the filtered streams of `.xz` and 7z
+/// fixtures.
 #[test]
 fn bcj_plans_hold() {
     use aqr_decompress::*;
-    let filters =
-        [BCJ_X86, BCJ_POWERPC, BCJ_IA64, BCJ_ARM, BCJ_ARM_THUMB, BCJ_SPARC, BCJ_ARM64, BCJ_RISCV, BCJ_DELTA, BCJ2];
-    let modules: Vec<[u8; 32]> = filters.iter().map(|&m| built(m).expect("built").sha512_256).collect();
+    let filters = MODULES.iter().filter(|m| m.name.starts_with("bcj"));
+    let modules: Vec<[u8; 32]> = filters.map(|&m| built(m).expect("built").sha512_256).collect();
     let mut seen = 0;
     for t in ["x86", "powerpc", "ia64", "arm", "armthumb", "sparc", "arm64", "riscv", "delta", "chain"] {
         seen += within_plans(t, &fixture(&format!("codecs/aqr-lzma/tests/data/filter-{t}.xz")), &modules, true);
     }
-    for t in ["bcj2", "arm64", "delta"] {
+    for t in ["bcj2", "arm64", "delta", "swap2", "swap4"] {
         seen += within_plans(t, &fixture(&format!("codecs/aqr-7z/tests/data/filter-{t}.7z")), &modules, true);
     }
-    assert!(seen >= 13, "{seen} applications of the filters");
+    assert!(seen >= 15, "{seen} applications of the filters");
 }
 
 /// lzo-recons lays its memory out as a stack, its limit its plan, exactly: of the fixtures (lzop

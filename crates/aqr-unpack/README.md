@@ -16,7 +16,7 @@ another entry at the top comes later, what was made is moved into the directory
 | Names | Read | Decoded |
 |---|---|---|
 | `.zip` `.jar` `.apk` `.xpi` `.cbz` `.whl` | the central directory | stored, DEFLATE, bzip2, LZMA, Zstandard, xz; by entry |
-| `.7z` `.cb7` | the header (an encoded one decoded first) | folders of LZMA, LZMA2, DEFLATE, bzip2, stored, BCJ/ARM/…/Delta, BCJ2; by folder, an LZMA2 stream by its segments, files written as their bytes are decoded |
+| `.7z` `.cb7` | the header (an encoded one decoded first) | folders of LZMA, LZMA2, DEFLATE, bzip2, stored, BCJ/ARM/…/Delta, BCJ2, Swap2/Swap4; by folder, an LZMA2 stream by its segments, files written as their bytes are decoded |
 | `.rar` `.cbr` | the headers (aqr-rar's readers; RAR5, RAR 1.5–4.x) | stored, RAR5's LZ with its filters, RAR 2.9's LZ and PPMd with the standard filters (aqr-rar's decoders); by solid group (or file), its files given as each is decoded |
 | `.alz` | the records (aqr-alz's reader) | stored, DEFLATE, ALZip's bzip2; by file |
 | `.egg` | the records (aqr-egg's reader) | stored, DEFLATE, bzip2, LZMA, AZO; by file (its blocks), a solid archive's block whole, cut into its files |

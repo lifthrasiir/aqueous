@@ -70,6 +70,18 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/bcj-sparc.block"),
     },
     Known {
+        name: "bcj-swap2",
+        version: 1,
+        sha512_256: hex("3ec61c304a66d5b5fdbc1e8b23e9d3fbf910a56998122d1fa4a33d6ec54c4834"),
+        block: include_bytes!("../wasm/bcj-swap2.block"),
+    },
+    Known {
+        name: "bcj-swap4",
+        version: 1,
+        sha512_256: hex("bf14dcbafbf73c4fbecc0d6768a8428705d58939d28fca71e6ce3f356a1cccf6"),
+        block: include_bytes!("../wasm/bcj-swap4.block"),
+    },
+    Known {
         name: "bcj-x86",
         version: 2,
         sha512_256: hex("bc5de18653206afc1c83a8179acbb9b04463cf4e62b23269b5d6fcd56f4557a7"),
@@ -270,13 +282,13 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "jpeg-lossless-recons",
         version: 1,
-        sha512_256: hex("1de7bcc688e365e536dfc91b8aac6cbd1acca85f163787782edd5db74f352a75"),
+        sha512_256: hex("54bb1b016825362472d6ba50032bc859f474683bf10d1d6881bc74dc7d9be6c7"),
         block: include_bytes!("../wasm/jpeg-lossless-recons.block"),
     },
     Known {
         name: "jpeg-recons",
         version: 3,
-        sha512_256: hex("be987dae925fec95436f68aab1ec198360c7b5eb368c49580b699826bcba9d6d"),
+        sha512_256: hex("f59680ac14025657b329842fdc49e477130fcd28acfe95148d578b3f830220dd"),
         block: include_bytes!("../wasm/jpeg-recons.block"),
     },
     Known {
@@ -474,7 +486,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "wasm-recons",
         version: 1,
-        sha512_256: hex("9b2f1021885d459895a06fc5a669bff3c961ce9b75122cd40e46ed5c994dccdf"),
+        sha512_256: hex("7ca6b6cdddb3bce10ad90a975a7c92aef3fef7025976f24abb5686edf0805da9"),
         block: include_bytes!("../wasm/wasm-recons.block"),
     },
     Known {
