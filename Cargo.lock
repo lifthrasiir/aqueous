@@ -887,6 +887,7 @@ dependencies = [
 name = "aqr-pdf"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "aqr-api",
  "aqr-common",
  "aqr-flate",
@@ -898,6 +899,7 @@ dependencies = [
  "flate2",
  "memchr",
  "rayon",
+ "sha2",
  "simd-adler32",
  "xxhash-rust",
  "zstd",

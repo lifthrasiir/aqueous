@@ -6,7 +6,8 @@
 
 use aqr_api::stack::{Sim, block, whole};
 
-use crate::module::scan_table;
+use crate::crypt::Crypt;
+use crate::module::{iv_len, scan_table_with};
 use crate::rans::BitR;
 use crate::tok::{self, DIST_ALPHA, LIT_ALPHA, Pixels};
 
@@ -16,12 +17,10 @@ use crate::module::wasm;
 /// bytes), parameters `params`, inputs of `inputs` bytes, an output of `len`, and the inputs
 /// themselves.
 pub fn decode(initial: u64, params: &[u8], inputs: &[u64], len: u64, files: [&[u8]; 11]) -> Option<u64> {
-    if !params.is_empty() {
-        return None;
-    }
+    let crypt = Crypt::from_params(params).ok()?;
     let [table, _skel, _raw, deflate, png, jpeg, layout, tb, st, raw, headers] = files;
     let mut m = Sim::new(initial);
-    m.take(whole(0, &[], inputs));
+    m.take(whole(params.len() as u64, &[], inputs));
     // (`DecoderState::new`: the contexts, a table's room, the decoding tables, the frequencies and
     // where each table starts, which go once the decoding tables are built)
     if [layout, tb, st, raw, headers].iter().any(|p| !p.is_empty()) {
@@ -48,7 +47,7 @@ pub fn decode(initial: u64, params: &[u8], inputs: &[u64], len: u64, files: [&[u
     }
     let size = usize::try_from(len).ok()?;
     let mut streams = vec![];
-    let items = scan_table(table, size, |plain, px| streams.push((plain, px)))?;
+    let items = scan_table_with(table, size, iv_len(&crypt), |plain, px| streams.push((plain, px)))?;
     m.take(len);
     m.take(wasm::PLACED * items as u64);
     // (the streams one at a time: the layout's blocks and alts, the window, the writer and the

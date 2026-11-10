@@ -410,3 +410,51 @@ fn corrupted_slots() {
         }
     }
 }
+
+/// The cipher in the parameters and the encrypted items in the table: without the cipher, or
+/// with another, the module fails or gives other bytes, and corrupted ones never make it panic.
+#[test]
+fn corrupted_encryption() {
+    for f in [
+        &include_bytes!("data/enc-aesv2.pdf")[..],
+        &include_bytes!("data/enc-rc4-128.pdf")[..],
+        &include_bytes!("data/enc-aesv3-r6.pdf")[..],
+    ] {
+        let o = Options { speed: f64::INFINITY, ..Options::default() };
+        let fm = formula::encode_with(f, &o).unwrap();
+        let Node::Apply(root) = &fm.root else { panic!() };
+        let inputs: Vec<Vec<u8>> = root
+            .inputs
+            .iter()
+            .map(|n| {
+                let mut outputs = false;
+                n.visit(&mut |n| outputs |= matches!(n, Node::Output { .. }));
+                let shared = if outputs { fm.shared.clone() } else { vec![] };
+                eval(&Formula { streams: fm.streams.clone(), root: n.clone(), shared }, 1).unwrap()
+            })
+            .collect();
+        let run = |params: &[u8], ins: &[Vec<u8>]| {
+            let r: Vec<&[u8]> = ins.iter().map(|v| &v[..]).collect();
+            formula::decode(params, &r, root.len, 1)
+        };
+        let params = &root.params[..];
+        assert!(params.len() >= 6);
+        assert_eq!(run(params, &inputs).unwrap(), f);
+        assert!(run(&[], &inputs).is_err(), "encrypted items without a cipher");
+        assert!(run(&params[..1], &inputs).is_err(), "a cipher without a key");
+        assert_ne!(run(&params[..params.len() - 1], &inputs).ok().as_deref(), Some(f), "a key a byte short");
+        assert!(run(&params[..4], &inputs).is_err(), "a key of 3 bytes");
+        assert!(run(&[params, &[0]].concat(), &inputs).is_err(), "a key a byte long");
+        assert!(run(&[&[9u8][..], &params[1..]].concat(), &inputs).is_err(), "an unknown method");
+        let mut other = params.to_vec();
+        *other.last_mut().unwrap() ^= 1;
+        assert_ne!(run(&other, &inputs).ok().as_deref(), Some(f), "another key");
+        for at in (0..inputs[0].len()).step_by(1 + inputs[0].len() / 80) {
+            for bit in [0x01u8, 0x80] {
+                let mut flip = inputs.clone();
+                flip[0][at] ^= bit;
+                let _ = run(params, &flip);
+            }
+        }
+    }
+}

@@ -19,6 +19,8 @@ pub struct Stream<'a> {
     pub data: Range<usize>,
     /// Whether `data` comes from a direct `/Length`.
     pub length_ok: bool,
+    /// The object number and generation of its `N G obj` header.
+    pub id: Option<(u32, u16)>,
 }
 
 /// How far back the object header may be from `stream`.
@@ -38,7 +40,7 @@ pub fn streams(buf: &[u8]) -> Vec<Stream<'_>> {
         if h >= 3 && &buf[h - 3..h] == b"end" {
             continue;
         }
-        let Some(dict) = dict_before(buf, floor, h) else {
+        let Some((dict, id)) = dict_before(buf, floor, h) else {
             continue;
         };
         // The end of line after the keyword: CRLF or LF (CR alone is not allowed, but
@@ -72,7 +74,7 @@ pub fn streams(buf: &[u8]) -> Vec<Stream<'_>> {
                 (d, false)
             }
         };
-        out.push(Stream { dict, data: start..end, length_ok });
+        out.push(Stream { dict, data: start..end, length_ok, id });
         pos = end;
         floor = end;
     }
@@ -80,8 +82,8 @@ pub fn streams(buf: &[u8]) -> Vec<Stream<'_>> {
 }
 
 /// The dictionary of an object `N G obj << ... >>` that ends (but for white space) at
-/// `kw`, starting at or after `floor`.
-fn dict_before(buf: &[u8], floor: usize, kw: usize) -> Option<Obj<'_>> {
+/// `kw`, starting at or after `floor`, and the object's number and generation.
+fn dict_before(buf: &[u8], floor: usize, kw: usize) -> Option<(Obj<'_>, Option<(u32, u16)>)> {
     let lo = floor.max(kw.saturating_sub(MAX_DICT));
     let mut e = kw;
     while e > lo && is_white(buf[e - 1]) {
@@ -99,11 +101,29 @@ fn dict_before(buf: &[u8], floor: usize, kw: usize) -> Option<Obj<'_>> {
         if let Some(d @ Obj::Dict(_)) = p.object() {
             p.skip_ws();
             if p.pos == kw {
-                return Some(d);
+                return Some((d, object_id(buf, o)));
             }
         }
     }
     None
+}
+
+/// The `N G` before the `obj` keyword at `at`.
+fn object_id(buf: &[u8], at: usize) -> Option<(u32, u16)> {
+    let back = |end: usize| {
+        let mut e = end;
+        while e > 0 && is_white(buf[e - 1]) {
+            e -= 1;
+        }
+        let mut s = e;
+        while s > 0 && buf[s - 1].is_ascii_digit() {
+            s -= 1;
+        }
+        (s < e).then(|| (s, crate::lex::parse_int(&buf[s..e])))
+    };
+    let (gs, gen_) = back(at)?;
+    let (_, num) = back(gs)?;
+    Some((u32::try_from(num?).ok()?, u16::try_from(gen_?).ok()?))
 }
 
 #[cfg(test)]
@@ -118,6 +138,7 @@ mod tests {
         let s = streams(f);
         assert_eq!(s.len(), 2);
         assert_eq!(&f[s[0].data.clone()], b"hello");
+        assert_eq!((s[0].id, s[1].id), (Some((1, 0)), Some((2, 0))));
         assert!(s[0].length_ok);
         assert_eq!(&f[s[1].data.clone()], b"ab ");
         assert!(!s[1].length_ok);

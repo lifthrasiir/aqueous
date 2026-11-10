@@ -9,11 +9,12 @@ publish = false
 default = ["encode"]
 # The formulas (`formula`, `encode`); without it, the code of the module alone (`module`).
 encode = [
-    "dep:aqr-formula", "dep:zstd", "dep:rayon", "aqr-common/rayon", "aqr-flate/encode", "aqr-jpeg/encode",
-    "aqr-png/encode", "aqr-raw/encode",
+    "dep:aqr-formula", "dep:aes", "dep:sha2", "dep:zstd", "dep:rayon", "aqr-common/rayon", "aqr-flate/encode",
+    "aqr-jpeg/encode", "aqr-png/encode", "aqr-raw/encode",
 ]
 
 [dependencies]
+aes = { version = "0.8", optional = true }
 aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
@@ -22,12 +23,14 @@ aqr-jpeg = { path = "../aqr-jpeg", default-features = false }
 aqr-png = { path = "../aqr-png", default-features = false }
 aqr-raw = { path = "../aqr-raw", default-features = false }
 memchr = "2"
+sha2 = { version = "0.10", optional = true }
 zstd = { version = "0.13", optional = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 simd-adler32 = "0.3"
 rayon = { version = "1.12", optional = true }
 
 [dev-dependencies]
+aes = "0.8"
 flate-zoo.workspace = true
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 

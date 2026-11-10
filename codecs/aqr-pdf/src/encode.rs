@@ -12,12 +12,13 @@
 //! formula is the same whatever the number of threads.
 
 use crate::flate;
-use crate::formula::{DUP, FULL, JPEG, NMODES, PNG, RAW, TOK};
+use crate::formula::{DUP, ENC, FULL, JPEG, NMODES, PNG, RAW, TOK};
 use crate::image::{self, Geometry};
 use crate::kind::{self, CLASSES, Class, Filter};
 use crate::lex::Obj;
 use crate::objects::Objects;
 use crate::scan;
+use crate::standard::{self, Standard};
 use crate::tok;
 use crate::varint;
 use aqr_flate::inflate::{self, Layout};
@@ -89,6 +90,9 @@ struct Item {
     plan: Plan,
     /// What a FlateDecode stream's data is once inflated ([`kind::inflated_kind`]).
     kind: Kind,
+    /// The object an encrypted stream belongs to, where the item is its decrypted bytes
+    /// ([`Standard::open`]); `start` and `len` are the stream's as in the file.
+    enc: Option<(u32, u16)>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -196,6 +200,18 @@ fn encrypted(file: &[u8]) -> bool {
     })
 }
 
+/// Whether the stream with dictionary `d`, object `id` and `data` is encrypted by the file's
+/// cipher so that it can be decrypted and encrypted back (ISO 32000-1 §7.6.2): not a
+/// cross-reference stream, not the metadata of a file that leaves it plain, no crypt filter of
+/// its own, and AES padding that is canonical.
+fn encrypted_stream(sd: &Standard, d: &Obj, id: (u32, u16), data: &[u8]) -> bool {
+    let ty = d.get(b"Type").and_then(Obj::as_name);
+    ty != Some(b"XRef")
+        && (sd.metadata || ty != Some(b"Metadata"))
+        && !d.get(b"Filter").map(Obj::names).is_some_and(|n| n.contains(&&b"Crypt"[..]))
+        && sd.plausible(id.0, id.1, data)
+}
+
 /// The inflated size of a FlateDecode stream, from its dictionary or a prior.
 fn plain_estimate(d: &Obj, c: Class, data: &[u8]) -> f64 {
     let len = data.len();
@@ -235,21 +251,25 @@ fn plain_estimate(d: &Obj, c: Class, data: &[u8]) -> f64 {
 }
 
 /// Cuts the file into items and picks their modes; returns them and the length of the skeleton.
-fn plan(file: &[u8], opts: &Options, st: &mut Stats) -> (Vec<Item>, usize) {
+fn plan(file: &[u8], opts: &Options, st: &mut Stats) -> (Vec<Item>, usize, Option<Standard>) {
     let t0 = std::time::Instant::now();
     let streams = scan::streams(file);
     let mut items: Vec<Item> = vec![];
     let mut seen: std::collections::HashMap<u64, Vec<usize>> = Default::default();
     let mut covered = 0usize;
-    // Encrypted files' streams look random: nothing to code but repeats.
+    // Encrypted streams look random: nothing to code but repeats, unless the file's cipher is
+    // known (the empty user password) and they are decrypted.
     let encrypted = encrypted(file);
     let mut objs = Objects::new(file);
+    let standard = if encrypted { standard::detect(file, &mut objs) } else { None };
     for s in &streams {
         let data = &file[s.data.clone()];
         if data.len() < MIN_ITEM {
             continue;
         }
         let f = kind::filter(&s.dict);
+        let sealed =
+            standard.as_ref().zip(s.id).filter(|(sd, id)| encrypted_stream(sd, &s.dict, *id, data)).map(|x| x.1);
         let keep = match f {
             Filter::None => true,
             Filter::Other => s
@@ -259,9 +279,16 @@ fn plan(file: &[u8], opts: &Options, st: &mut Stats) -> (Vec<Item>, usize) {
                 .is_some_and(|n| matches!(n[0], b"ASCIIHexDecode" | b"AHx" | b"ASCII85Decode" | b"A85")),
             _ => false,
         };
-        if keep {
+        if keep && sealed.is_none() {
             continue;
         }
+        // Encrypted: the plain data is what is classified and coded.
+        let opened = match (sealed, &standard) {
+            (Some((n, g)), Some(sd)) if matches!(f, Filter::Flate | Filter::Dct) => sd.open(n, g, data),
+            _ => None,
+        };
+        let pdata = opened.as_deref().unwrap_or(data);
+        let sealed = sealed.filter(|_| opened.is_some() || keep);
         let h = xxhash_rust::xxh3::xxh3_64(data);
         let same =
             seen.get(&h).and_then(|v| v.iter().copied().find(|&i| file[items[i].start..][..items[i].len] == *data));
@@ -272,24 +299,25 @@ fn plan(file: &[u8], opts: &Options, st: &mut Stats) -> (Vec<Item>, usize) {
         };
         let plan = match (same, f) {
             (Some(i), _) => Plan::Dup(i),
-            _ if encrypted => Plan::Raw,
-            (None, Filter::Flate) => {
+            _ if encrypted && sealed.is_none() => Plan::Raw,
+            (None, Filter::Flate) if opened.is_some() || !encrypted => {
                 let c = kind::class(&s.dict);
                 let g = (c == Class::Image).then(|| image::geometry(&s.dict, &mut objs)).flatten();
                 let plain = match g {
                     Some(g) => ((g.row() + (g.predictor >= 10) as usize) * g.height as usize) as f64,
-                    None => plain_estimate(&s.dict, c, data),
+                    None => plain_estimate(&s.dict, c, pdata),
                 };
                 Plan::Flate(c, plain, RAW, g)
             }
-            (None, Filter::Dct) => {
-                let (prog, blocks) = image::jpeg_frame(data).unwrap_or((false, 0));
+            (None, Filter::Dct) if opened.is_some() || !encrypted => {
+                let (prog, blocks) = image::jpeg_frame(pdata).unwrap_or((false, 0));
                 Plan::Jpeg(prog, blocks, false)
             }
             _ => Plan::Raw,
         };
         covered += data.len();
-        items.push(Item { start: s.data.start, len: data.len(), plan, kind });
+        let enc = sealed.filter(|_| !matches!(plan, Plan::Dup(_)));
+        items.push(Item { start: s.data.start, len: data.len(), plan, kind, enc });
     }
     let skel_len = file.len() - covered;
     let budget =
@@ -297,7 +325,7 @@ fn plan(file: &[u8], opts: &Options, st: &mut Stats) -> (Vec<Item>, usize) {
     let fixed = file.len() as f64 * cost::SCAN + skel_len as f64 * cost::ZSTD_C;
     st.predicted = fixed + choose(&mut items, budget - fixed, opts);
     st.times[0] += t0.elapsed().as_secs_f64();
-    (items, skel_len)
+    (items, skel_len, standard)
 }
 
 /// Codes the items: each on its own (on the pool, with more than one thread), then into
@@ -308,6 +336,7 @@ fn code_items(
     opts: &Options,
     st: &mut Stats,
     pool: &Option<rayon::ThreadPool>,
+    sd: Option<&Standard>,
     b: &mut Sections,
 ) -> Option<()> {
     let fr_opts =
@@ -315,8 +344,8 @@ fn code_items(
     match pool {
         None => {
             for (i, it) in items.iter().enumerate() {
-                let d = code_item(file, it, &fr_opts);
-                b.add(file, i, it, d, st);
+                let d = code_item(file, it, &fr_opts, sd);
+                b.add(file, i, it, d, sd, st);
             }
         }
         Some(pool) => {
@@ -335,10 +364,10 @@ fn code_items(
                 pool,
                 items.len(),
                 est,
-                |i| code_item(file, &items[i], &fr_opts),
+                |i| code_item(file, &items[i], &fr_opts, sd),
                 |i, d| {
-                    let d = d.unwrap_or_else(|| code_item(file, &items[i], &fr_opts));
-                    b.add(file, i, &items[i], d, st);
+                    let d = d.unwrap_or_else(|| code_item(file, &items[i], &fr_opts, sd));
+                    b.add(file, i, &items[i], d, sd, st);
                     Ok::<(), ()>(())
                 },
             )
@@ -355,10 +384,10 @@ fn code_items(
 /// the pools measured by their zstd at `opts.level` (the pools hold inflated data, so they are
 /// larger than the file).
 pub fn try_formula(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Formula> {
-    let (items, skel_len) = plan(file, opts, st);
+    let (items, skel_len, sd) = plan(file, opts, st);
     let pool = pool(opts.threads);
     let mut b = Sections::new(skel_len, items.len());
-    code_items(file, &items, opts, st, &pool, &mut b)?;
+    code_items(file, &items, opts, st, &pool, sd.as_ref(), &mut b)?;
     let Sections { table, mut skel, raw, meta, tokens, pools, at, fm, .. } = b;
     skel.extend_from_slice(&file[at..]);
     let (toks, _) = tokens.finish();
@@ -387,7 +416,8 @@ pub fn try_formula(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Formul
     for (part, (name, kind)) in toks.into_iter().zip(TOK_CLASSES) {
         inputs.push(f.push_as(name, kind, part));
     }
-    f.root = Node::apply(crate::formula::MODULE, Vec::new(), inputs, file.len() as u64);
+    let params = sd.map_or(vec![], |sd| sd.crypt.to_params());
+    f.root = Node::apply(crate::formula::MODULE, params, inputs, file.len() as u64);
     (streams_len(&f) - saved < file.len()).then_some(f)
 }
 
@@ -550,13 +580,24 @@ fn streams_len(f: &Formula) -> usize {
 struct Done {
     coded: Coded,
     times: [f64; 4],
+    /// Whether the item is the decrypted bytes of its stream.
+    enc: bool,
+    /// The bytes of a decrypted stream after what its item rebuilds (a line break its length
+    /// counts, say).
+    tail: Vec<u8>,
 }
 
+/// Most bytes after an encrypted stream's rebuilt data that are kept with the item.
+const MAX_TAIL: usize = 64;
+
 /// The images are coded as formulas of their own (aqr-png, aqr-jpeg).
-fn code_item(file: &[u8], it: &Item, fr_opts: &aqr_flate::Options) -> Done {
-    let data = &file[it.start..it.start + it.len];
+fn code_item(file: &[u8], it: &Item, fr_opts: &aqr_flate::Options, sd: Option<&Standard>) -> Done {
+    let stream = &file[it.start..it.start + it.len];
+    let opened = it.enc.zip(sd).and_then(|((n, g), sd)| sd.open(n, g, stream));
+    let enc = opened.is_some();
+    let data = opened.as_deref().unwrap_or(stream);
     let mut times = [0f64; 4];
-    let coded = match it.plan {
+    let mut coded = match it.plan {
         Plan::Dup(j) => Coded::Dup(j),
         Plan::Flate(c, _, m @ (TOK | FULL), g) => {
             let px = if m == TOK { g.as_ref().and_then(pixels) } else { None };
@@ -625,7 +666,22 @@ fn code_item(file: &[u8], it: &Item, fr_opts: &aqr_flate::Options) -> Done {
         }
         _ => Coded::Raw(false),
     };
-    Done { coded, times }
+    // (an encrypted stream is rebuilt whole, or its decrypted bytes are kept as they are)
+    let mut tail = vec![];
+    if enc {
+        let covered = match &coded {
+            Coded::Tok(.., len) | Coded::Full(.., len) => *len,
+            _ => data.len(),
+        };
+        if covered != data.len() {
+            if matches!(coded, Coded::Tok(..) | Coded::Full(..)) && data.len() - covered <= MAX_TAIL {
+                tail = data[covered..].to_vec();
+            } else {
+                coded = Coded::Raw(false);
+            }
+        }
+    }
+    Done { coded, times, enc, tail }
 }
 
 /// The sections as the items go in, in order.
@@ -715,17 +771,22 @@ impl Sections {
     }
 
     /// Adds item `i`, coded as `d`.
-    fn add(&mut self, file: &[u8], i: usize, it: &Item, d: Done, st: &mut Stats) {
+    fn add(&mut self, file: &[u8], i: usize, it: &Item, d: Done, sd: Option<&Standard>, st: &mut Stats) {
         let data = &file[it.start..it.start + it.len];
         varint::put(&mut self.table, (it.start - self.at) as u64);
+        let mark = self.table.len();
         self.skel.extend_from_slice(&file[self.at..it.start]);
         for (a, b) in st.times.iter_mut().zip(&d.times) {
             *a += b;
         }
+        // (an encrypted item: its decrypted bytes)
+        let sealed = it.enc.filter(|_| d.enc).zip(sd);
         let raw = |s: &mut Self| {
+            let opened = sealed.and_then(|((n, g), sd)| sd.open(n, g, data));
+            let bytes = opened.as_deref().unwrap_or(data);
             s.table.push(RAW);
-            varint::put(&mut s.table, it.len as u64);
-            s.raw.extend_from_slice(data);
+            varint::put(&mut s.table, bytes.len() as u64);
+            s.raw.extend_from_slice(bytes);
             (RAW, it.len, it.len)
         };
         let (mode, len, out_len) = match d.coded {
@@ -774,6 +835,18 @@ impl Sections {
                 raw(self)
             }
         };
+        // (an encrypted item covers the stream whatever its decrypted bytes were)
+        let len = if sealed.is_some() { it.len } else { len };
+        if let Some(((num, gen_), sd)) = sealed {
+            let mut prefix = vec![ENC];
+            varint::put(&mut prefix, num as u64);
+            varint::put(&mut prefix, gen_ as u64);
+            prefix.extend_from_slice(&data[..sd.crypt.iv_len()]);
+            let tail = if mode == RAW { &[] } else { &d.tail[..] };
+            varint::put(&mut prefix, tail.len() as u64);
+            prefix.extend_from_slice(tail);
+            self.table.splice(mark..mark, prefix);
+        }
         let e = &mut st.modes[mode as usize];
         e.0 += 1;
         e.1 += len;

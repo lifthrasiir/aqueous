@@ -227,6 +227,66 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// The bytes of a string object as it is in the file (`Obj::Str`): escapes resolved,
+/// hexadecimal digits paired (an odd one completed with 0). An end of line in a literal string
+/// stays as it is, though the specification has it read as LF: writers of encrypted files put
+/// the binary strings of their `/Encrypt` dictionaries in unescaped, and ciphers know the bytes.
+pub fn string_value(s: &[u8]) -> Vec<u8> {
+    let mut out = vec![];
+    if s.first() == Some(&b'<') {
+        let mut hi = None;
+        for d in s.iter().filter_map(|&c| (c as char).to_digit(16)) {
+            match hi.take() {
+                None => hi = Some(d as u8),
+                Some(h) => out.push(h << 4 | d as u8),
+            }
+        }
+        out.extend(hi.map(|h| h << 4));
+        return out;
+    }
+    let s = s.strip_prefix(b"(").and_then(|s| s.strip_suffix(b")")).unwrap_or(s);
+    let mut i = 0;
+    while i < s.len() {
+        let c = s[i];
+        i += 1;
+        match c {
+            b'\\' => {
+                let Some(&e) = s.get(i) else { break };
+                i += 1;
+                match e {
+                    b'n' => out.push(b'\n'),
+                    b'r' => out.push(b'\r'),
+                    b't' => out.push(b'\t'),
+                    b'b' => out.push(8),
+                    b'f' => out.push(12),
+                    b'0'..=b'7' => {
+                        let mut v = (e - b'0') as u32;
+                        for _ in 0..2 {
+                            match s.get(i) {
+                                Some(&d @ b'0'..=b'7') => {
+                                    v = v * 8 + (d - b'0') as u32;
+                                    i += 1;
+                                }
+                                _ => break,
+                            }
+                        }
+                        out.push(v as u8);
+                    }
+                    b'\r' => {
+                        if s.get(i) == Some(&b'\n') {
+                            i += 1;
+                        }
+                    }
+                    b'\n' => {}
+                    e => out.push(e),
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 pub fn parse_int(t: &[u8]) -> Option<i64> {
     let (neg, d) = match t.first()? {
         b'-' => (true, &t[1..]),
@@ -263,5 +323,11 @@ mod tests {
         assert_eq!(o.get(b"B"), Some(&Obj::Str(b"<ab 12>")));
         assert_eq!(o.get(b"C"), Some(&Obj::Real(b"-1.5")));
         assert_eq!(o.get(b"D").unwrap().get(b"E"), Some(&Obj::Null));
+    }
+
+    #[test]
+    fn strings() {
+        assert_eq!(string_value(b"(a\\(b\\)\\n\\101\\7\\\r\nc\r\nd(e))"), b"a(b)\nA\x07c\r\nd(e)");
+        assert_eq!(string_value(b"<4 1 4>"), b"A\x40");
     }
 }

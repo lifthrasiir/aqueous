@@ -4098,6 +4098,25 @@ fn pdf_plans_hold() {
     }
 }
 
+/// The same of encrypted files (RC4, AESV2 and AESV3: the cipher is in the parameters and the
+/// IVs in the table), from aqr-pdf's fixtures.
+#[test]
+fn pdf_encrypted_plans_hold() {
+    let run = |a: &aqr_formula::Apply, i: &[&[u8]]| aqr_pdf::formula::apply(a, i, 1).unwrap();
+    let files: [(&str, &[u8]); 3] = [
+        ("rc4", include_bytes!("../../../codecs/aqr-pdf/tests/data/enc-rc4-128.pdf")),
+        ("aesv2", include_bytes!("../../../codecs/aqr-pdf/tests/data/enc-aesv2.pdf")),
+        ("aesv3", include_bytes!("../../../codecs/aqr-pdf/tests/data/enc-aesv3-r6.pdf")),
+    ];
+    for (what, d) in files {
+        let f = aqr_pdf::formula::encode_with(d, &Default::default()).unwrap_or_else(|| panic!("{what}: no formula"));
+        let a = f.applies().into_iter().find(|a| a.module.name == "pdf-recons").unwrap();
+        assert!(!a.params.is_empty(), "{what}");
+        let found = module_applications_hold(&format!("pdf {what}"), &f, "pdf-recons", &run);
+        assert!(found > 0, "{what}");
+    }
+}
+
 /// Data of `n` bytes of 20 letters and repeats of them, from `seed`.
 fn lzma_data(n: usize, seed: u64) -> Vec<u8> {
     let mut x = seed;

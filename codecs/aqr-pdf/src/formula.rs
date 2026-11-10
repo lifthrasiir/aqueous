@@ -11,7 +11,7 @@
 use crate::encode::{self, Options, Stats};
 use aqr_formula::{Apply, Formula, Module};
 
-pub use crate::module::{DUP, FULL, JPEG, MODES, NMODES, PNG, RAW, TOK, decode};
+pub use crate::module::{DUP, ENC, FULL, JPEG, MODES, NMODES, PNG, RAW, TOK, decode};
 
 pub const MODULE: Module = Module::new("pdf-recons", 3).with_plan(plan);
 

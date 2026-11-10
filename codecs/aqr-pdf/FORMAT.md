@@ -15,6 +15,10 @@ an earlier item, or is rebuilt by one of these coders:
 - **png**: a FlateDecode image with PNG predictors, as a PNG file coded by aqr-png;
 - **jpeg**: a DCTDecode image, coded by aqr-jpeg.
 
+An item of an encrypted file (the Standard security handler with the empty user password) may
+be *sealed*: its bytes are the stream's plain bytes, encrypted again by the module
+([Encrypted items](#34-encrypted-items)).
+
 The nested formats are specified by their own documents, which this one refers to rather than
 repeats:
 
@@ -62,7 +66,16 @@ modules as input slots, and the formula gives them as applications of those modu
 DEFLATE streams of `FULL` items (aqr-flate), the PNG files of `PNG` items (aqr-png) and the
 JPEG files of `JPEG` items (aqr-jpeg). A decoder of this module does not need any of the three.
 
-**Parameters**: none (empty). A module application with parameters is invalid.
+**Parameters**: empty, or the cipher of an encrypted file (3.4): a byte for the method, then
+the file encryption key.
+
+| byte | method | key |
+|---|---|---|
+| 1 | RC4 | 5 to 16 bytes |
+| 2 | AES-128 in CBC mode (AESV2) | 16 bytes |
+| 3 | AES-256 in CBC mode (AESV3) | 32 bytes |
+
+Any other parameters are invalid.
 
 **Inputs**: exactly eleven, in this order. Any other count is invalid.
 
@@ -105,7 +118,7 @@ They are not streams: the formula gives each as a `pack` of one node per item. F
 
 **Memory** *(informative)*: the module lays its memory out as a stack (`aqr_api::stack`), and
 the plan of its memory is exact (`aqr-pdf`'s `plan::decode`), from the table, the token tables
-and the layouts, which the plan reads as the decoder does: besides the inputs, the token
+and the layouts, which the plan reads as the decoder does: besides the parameters and the inputs, the token
 coder's contexts and decoding tables (made once, at the sizes the tables part gives), the three
 packed slots unpacked (8 bytes an item), the output and where each item went in it (8 bytes an
 item); and the most any one token stream takes: its blocks (with their headers) and listed
@@ -132,6 +145,7 @@ u8      mode
 | 3 | `JPEG` | (none) |
 | 4 | `TOK` | u8 `flags`, [2 bytes `zlib`], u8 `class`, varint `plain`, [varint `bpp`, varint `stride`] |
 | 5 | `PNG` | (none) |
+| 6 | `ENC` | varint `object`, varint `generation`, [16 bytes `iv`], varint `tail`, `tail` bytes, then the fields of another item (its mode byte first) |
 
 Other modes are invalid. Field constraints:
 
@@ -145,6 +159,11 @@ Other modes are invalid. Field constraints:
   module does not see the inflated data, so the Adler-32 is stored, as written after the DEFLATE
   data.
 - `class` from 0 to 5: content, font, image, object stream, cross-reference stream, other data.
+- `ENC` is a prefix of an item, not a mode of its own: the item that follows (its mode byte
+  and fields) is any but `DUP` and `ENC`, and has no `gap` of its own. `object` is at most
+  2^32 − 1 and `generation` at most 65535. `iv` is there for the AES methods and absent for RC4;
+  a table with an `ENC` item is invalid if the parameters are empty. `tail` is at most the
+  original's length.
 - Pixels: `1 ≤ bpp ≤ 64`, `bpp ≤ stride ≤ 2^34`, and `stride` a multiple of `bpp`.
 
 ### 3.2 Item bytes
@@ -168,7 +187,7 @@ before it left off.
 ### 3.3 Decompression
 
 1. For each item of the table: append the next `gap` bytes of the skeleton, then the item's
-   bytes. The output must never exceed the original's length.
+   bytes (3.4 for an `ENC` item). The output must never exceed the original's length.
 2. Append the rest of the skeleton.
 3. Check that slot 2 was used up exactly and every item of slots 3 to 5 taken, that the token symbol stream ended as section
    6.5 requires (if there is a token decoder, below), and that the output is the original's
@@ -183,6 +202,23 @@ Every `gap` and `n` must also fit in what is left of its slot, an item of slots 
 left for every item taking one, and an item whose fields run past the end of the table is
 invalid. The layout, tables, raw bits and headers streams need not
 be used up: what follows the last item's bits is not read.
+
+### 3.4 Encrypted items
+
+An `ENC` item has the *plain bytes* of the item it prefixes: what that item gives by 3.2.
+The `tail` bytes follow them, and the *body* is the two together. The item's bytes in the
+original are:
+
+- RC4: the body, encrypted;
+- AES: `iv`, then the body padded (PKCS#5: 1 to 16 bytes, each the number of them, so that the
+  length is a multiple of 16) and encrypted in CBC mode with `iv` as the first block's IV.
+
+The key is derived from the cipher of the parameters, `object` and `generation`
+(ISO 32000-1 algorithm 1): for AES-256, the file key itself; for the others, the first
+min(n + 5, 16) bytes of the MD5 of the file key (`n` bytes), the three low bytes of `object`
+and the two bytes of `generation` (both little endian), and for AES-128 the four bytes `sAlT`.
+Then RC4 or AES (FIPS 197) with that key. A decoder needs no decryption: the original is what
+the cipher gives back.
 
 ## 4. Token coding: overview
 
@@ -433,7 +469,7 @@ the reference for the heuristics named here.
   first filter is ASCIIHex or ASCII85. Its first filter decides how it may be coded: FlateDecode
   (`/FlateDecode`, `/Fl`) as `TOK`, `FULL` or `PNG`, DCTDecode alone as `JPEG`, anything else
   `RAW`. A stream equal to an earlier item's data is a `DUP` of it. If the file has an
-  `/Encrypt` entry, every item that is not a `DUP` is `RAW`.
+  `/Encrypt` entry that is not understood (7.5), every item that is not a `DUP` is `RAW`.
 - The class (`kind.rs`), by the first rule that applies: `/Type /XRef` → cross-reference
   stream; `/Type /ObjStm` → object stream; `/Subtype /Image` → image; `/Type /Metadata` or
   `/EmbeddedFile` → other data; `/Subtype` Type1C, CIDFontType0C or OpenType, or a `/Length1`
@@ -490,3 +526,41 @@ the reference for the heuristics named here.
   the pools hold inflated data, which the archive compresses.
 - With verification on, a formula that does not evaluate to the original is made again
   without the `TOK`, `FULL` and `PNG` modes.
+- The application's parameters are the cipher of an encrypted file (7.5), else empty.
+
+### 7.5 Encrypted files
+
+The encoder understands the Standard security handler (`standard.rs`) with the empty user
+password, from the `/Encrypt` dictionary (a direct or indirect one: every `/Encrypt` of the
+file is tried, the last first) and the first element of an `/ID` (every `/ID` of the file in
+turn, and the empty string). It takes:
+
+- `/V` 1 and 2 (RC4 of `/Length` bits, 40 by default), revisions 2 and 3;
+- `/V` 4 with `/StmF` naming a crypt filter of `/CFM` `/V2` (RC4) or `/AESV2` (AES-128),
+  revision 4, `/EncryptMetadata` (default true) respected in the key;
+- `/V` 5 with a crypt filter of `/CFM` `/AESV3` (AES-256), revisions 5 and 6 (ISO 32000-2
+  algorithm 2.B, the empty password's hash of the validation and key salts).
+
+The file key (algorithm 2, or 2.A for AES-256) must pass the check of the `/U` entry
+(algorithms 4 to 6 and 2.A): the first 16 bytes for revisions 3 and 4, 32 for revision 2, the
+hash for revisions 5 and 6. A file that does not (a user password), another handler, public-key
+security, `/StmF` `/Identity` and every other case is not understood. Strings of the
+literal type are read as they are in the file, an end of line included (the binary entries of
+the dictionary are written unescaped).
+
+For each stream of an understood file, the encoder reads the object number and generation of
+its `N G obj`; the stream is sealed if it is not a cross-reference stream, not the metadata of a
+file with `/EncryptMetadata false`, has no `/Crypt` filter, is at least 64 bytes, and, for AES,
+its data is whole blocks after an IV and ends in canonical padding. The plain bytes (the
+decryption; RC4 has nothing to check) are then what is classified and coded as in 7.1 to 7.3,
+with these differences:
+
+- streams without a filter (or ASCIIHex or ASCII85) are items too, `RAW` ones;
+- the item has to give the plain bytes whole: what a FlateDecode item does not cover, up to 64
+  bytes (a line break the length counts), is the `tail`; more than that, or a PNG or JPEG
+  item that does not cover it, makes the item `RAW`;
+- the other first filters stay in the skeleton, encrypted;
+- equal streams are `DUP`s only when their encrypted bytes are equal (they never are, but for
+  an object that is written twice): `ENC` items are never `DUP`s.
+
+The cipher is the parameters of the application, and nothing else of the encryption is kept.

@@ -262,6 +262,39 @@ fn encrypted() {
     assert_eq!(st.modes[formula::TOK as usize].0 + st.modes[formula::FULL as usize].0, 0);
 }
 
+/// Files encrypted with the empty user password (`scripts/make-encrypted.py`, which poppler opens
+/// as well): their streams are decrypted, coded and encrypted again.
+#[test]
+fn encrypted_streams() {
+    use aqr_pdf::formula::{FULL, TOK};
+    let files: [(&str, &[u8]); 7] = [
+        ("RC4 40 bits", include_bytes!("data/enc-rc4-40.pdf")),
+        ("RC4 128 bits", include_bytes!("data/enc-rc4-128.pdf")),
+        ("V2 crypt filter", include_bytes!("data/enc-v4-rc4.pdf")),
+        ("AESV2", include_bytes!("data/enc-aesv2.pdf")),
+        ("AESV2, plain metadata", include_bytes!("data/enc-aesv2-plain-metadata.pdf")),
+        ("AESV3, revision 5", include_bytes!("data/enc-aesv3-r5.pdf")),
+        ("AESV3, revision 6", include_bytes!("data/enc-aesv3-r6.pdf")),
+    ];
+    for (what, f) in files {
+        check(what, f);
+        let st = coded(f);
+        // (the three FlateDecode streams)
+        assert_eq!(st.modes[TOK as usize].0 + st.modes[FULL as usize].0, 3, "{what}: {:?}", st.modes);
+        let o = Options { speed: f64::INFINITY, ..Options::default() };
+        let fm = formula::encode_with(f, &o).unwrap();
+        let sizes: usize = fm.streams.iter().map(|s| zstd::bulk::compress(&s.data, 9).unwrap().len()).sum();
+        assert!(sizes < f.len() * 3 / 4, "{what}: {sizes} bytes of streams for {} of file", f.len());
+        // A wrong password hash (the /U entry): the file is not understood.
+        let mut bad = f.to_vec();
+        let at = bad.windows(3).rposition(|w| w == b"/U ").unwrap() + 4;
+        bad[at] = if bad[at] == b'0' { b'1' } else { b'0' };
+        check(what, &bad);
+        let st = coded(&bad);
+        assert_eq!(st.modes[TOK as usize].0 + st.modes[FULL as usize].0, 0, "{what} with another /U");
+    }
+}
+
 /// A PDF 2.0 file (with junk before the header, as allowed): a UTF-8 text string, an image,
 /// an object stream and a cross-reference stream in place of the xref table; with `encrypt`,
 /// an AES-256 (revision 6) `/Encrypt` dictionary.

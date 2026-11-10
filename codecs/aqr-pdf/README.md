@@ -43,6 +43,28 @@ included) over the input size.
 | arxiv | 6 | 22.2 | 0.753 | 0.843 | 48.3 MB/s | 147.9 MB/s |
 | all | 144 | 402 | **0.855** | 0.896 | **46 MB/s** | **198 MB/s** |
 
+Encrypted files, measured on 2026-11-10 (Apple M4, `aqr -c` at the default level, then `aqr -K`;
+times include `cargo aqr`'s 0.14 s start). 19 of the first 1,000 files of CC have an `/Encrypt`
+entry: RC4 40 bits (revision 2: 2 files), RC4 128 bits (revision 3: 7), the `/V2` crypt filter
+(revision 4: 4), AESV2 (revision 4: 5, one of them with a user password, whose `/U` does not
+match the empty one: kept raw) and AESV3 (revision 6: 1, `cc/0000120.pdf`). 18
+are understood. The ratio of their streams alone is 0.55-0.95 (`aqr-pdf bench`); in an archive
+the modules' bytes (about 50 KB) decide, so only the files with images that gain much pay (the
+modules of JPEG were rebuilt for this measurement: they were stale in the tree):
+
+| file | bytes | kept raw (before) | archive (after) | compress | test | RSS compress / test |
+|---|---|---|---|---|---|---|
+| cc/0000849 | 62,090,949 | 62,090,983 | 32,128,869 | 0.33 -> 1.67 s | 0.19 -> 0.82 s | 390 -> 500 / 122 -> 167 MB |
+| cc/0000311 | 1,725,114 | 1,725,148 | 1,441,220 | 0.16 -> 0.28 s | 0.14 -> 0.24 s | 23 -> 60 / 7 -> 17 MB |
+| cc/0000693 | 1,244,289 | 1,244,322 | 1,061,974 | 0.16 -> 0.26 s | 0.14 -> 0.23 s | 19 -> 41 / 6 -> 13 MB |
+| cc/0000397 | 559,033 | 501,146 | 411,230 | 0.17 -> 0.25 s | 0.14 -> 0.22 s | 34 -> 38 / 5 -> 11 MB |
+| cc/0000325 | 356,672 | 356,706 | 313,472 | 0.16 -> 0.24 s | 0.14 -> 0.23 s | 13 -> 19 / 5 -> 12 MB |
+
+The other 14 are unchanged in size (the formula is smaller than the file but not than the file
+and the modules); 19 files: 70,250,369 -> 39,580,951 bytes. The rest of CC (981 files) is
+not affected: all 1,000 as one archive are 1,240,289,829 bytes before and after (13 s, 2.8 GB
+peak both; the modules of JPEG as they are in the tree).
+
 18 files are kept as they are. Memory, re-measured on 2026-10-24 at `da98d11` with one
 process per file, is 41 MB + 5.7× the file (a linear fit). Nine files take over twice that,
 up to 331 MB for 3.4 MB (`cc/0000192.pdf`), 202 MB for 1.8 MB (`cc/0000360.pdf`) and 295 MB
@@ -103,8 +125,31 @@ The file is cut into the skeleton and *items*:
 | jpeg | DCTDecode | aqr-jpeg |
 
 Uncompressed and ASCII-encoded streams stay in the skeleton, as does anything after a
-DEFLATE stream's data. Files with an `/Encrypt` entry keep their streams raw (they look
-random).
+DEFLATE stream's data. A file with an `/Encrypt` entry that is not understood keeps its
+streams raw (they look random).
+
+### Encrypted files (`standard.rs`, `crypt.rs`)
+
+The Standard security handler with the empty user password is read (the `/Encrypt`
+dictionary and the first `/ID`; the file key is checked against `/U`, so a wrong key is never
+used): RC4 of 40 to 128 bits (`/V` 1, 2 and the `/V2` crypt filter of `/V` 4; revisions 2–4),
+AES-128 (`/AESV2`, revision 4) and AES-256 (`/AESV3`, revisions 5 and 6). Each stream is
+decrypted with its object's key, coded as an unencrypted one would be, and encrypted again by
+the module: the item is prefixed (`ENC`) with the object number and generation, the stored IV
+(AES) and the few bytes after the DEFLATE data that the length counts. A stream is sealed
+only if the plain bytes encrypt back to it exactly (AES: whole blocks after the IV, canonical
+PKCS#5 padding); cross-reference streams, the metadata of a file with `/EncryptMetadata
+false`, streams with their own `/Crypt` filter and streams shorter than 64 bytes stay as they
+are, as do strings (they are in the skeleton and cost the same as before).
+
+The formula keeps only the file key, as the module's parameters (a byte for the method and
+5 to 32 bytes of key). The module derives each object's key with MD5 (algorithm 1 of ISO
+32000-1) and encrypts with RC4 or AES (encryption only: `crypt.rs`, about 200 lines, no
+decryption tables); the decoder needs no SHA-2, no AES decryption and no password logic.
+Keeping the per-object keys instead would drop MD5 (1.5 KB of the module) and cost 16 bytes
+of incompressible key for each stream (8 bytes for the object number and generation, against
+about 3 bytes now); the file key is smaller as soon as a file has a handful of streams. The
+module grew from 80,782 to 86,598 bytes (block 25,234 to 27,721).
 
 ### Token mode (`tok.rs`, `rans.rs`)
 
@@ -165,8 +210,9 @@ items, and the tokens are one rANS stream.
 - JPEG: DCT data is 35% of CC, and only about half of it fits the budget. aqr-jpeg takes
   about 15 ns/B plus 250 µs (compressing) / 125 µs (decompressing) per image on PDF
   images, mostly per-file table building; default tables for small images would help.
-- Encrypted files (a few percent of CC): with the empty user password their streams can be
-  decrypted, recoded and encrypted again exactly (RC4 and AES-CBC with the stored IV).
+- Encrypted files with a non-empty user password (the `/U` check fails: 1 of 19 encrypted
+  files in CC), crypt filters named per stream, and equal plain streams (`DUP` of encrypted
+  streams: their ciphertexts differ).
 - `[/ASCII85Decode /FlateDecode]` and `[/FlateDecode /DCTDecode]` chains (2.8 and 28 MB in
   CC) are kept raw or in the skeleton.
 - Token decoding is 11-15 ns/B; its order-1 contexts form a serial chain of table lookups.
@@ -202,6 +248,12 @@ cargo test --release
   with the nested modules, under every set of options and with 1 to 8 threads; the
   module's input slots corrupted.
 - `tests/memory.rs`: peak heap of a file whose streams inflate 36×, with 1 and 4 threads.
+- `tests/data/enc-*.pdf` (`scripts/make-encrypted.py`, which writes the files by ISO 32000's
+  algorithms with pycryptodomex; poppler's `pdftotext` opens all of them): RC4 40 and 128
+  bits, the `/V2` crypt filter, AESV2 (also with plain metadata), AESV3 revisions 5 and 6
+  (with salts for which the two readings of "the round number" of algorithm 2.B differ). Each
+  goes through the formula, and with a wrong `/U` it is not understood. `src/crypt.rs` has
+  the RFC 1321, RFC 6229 and FIPS 197 vectors, and AES against the `aes` crate.
 - `tests/roundtrip.rs`: FlateDecode streams from every encoder of flate-zoo, through every
   mode; zlib wrapper variants (bare DEFLATE, wrong Adler-32, junk after the data,
   truncated and damaged streams); syntax (indirect and wrong lengths, CR line ends,
@@ -223,7 +275,8 @@ cargo test --release
 | `FORMAT.md` | The format, in full |
 | `src/formula.rs` | The module: its decoder, and the encoder's entry points |
 | `src/encode.rs` | The cost model and planner, and the formula's encoder |
-| `src/scan.rs`, `src/lex.rs` | Finding streams, PDF objects |
+| `src/scan.rs`, `src/lex.rs` | Finding streams (and their object numbers), PDF objects |
+| `src/standard.rs`, `src/crypt.rs` | The Standard security handler (encoder); MD5, RC4, AES encryption (module) |
 | `src/kind.rs`, `src/objects.rs` | Stream classes and filters, indirect objects |
 | `src/flate.rs`, `src/image.rs` | zlib wrapper; image geometry and the PNG wrapper |
 | `src/tok.rs`, `src/rans.rs` | Token mode; static rANS (`aqr_common::rans32` with 12-bit probabilities) |

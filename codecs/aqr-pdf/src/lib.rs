@@ -1,5 +1,6 @@
 //! Lossless PDF recompression: a PDF file is stored smaller, and restored bit for bit.
 
+pub mod crypt;
 #[cfg(feature = "encode")]
 pub mod encode;
 pub mod flate;
@@ -14,6 +15,8 @@ pub mod objects;
 pub mod plan;
 pub mod rans;
 pub mod scan;
+#[cfg(feature = "encode")]
+pub mod standard;
 pub mod tok;
 pub mod varint;
 
