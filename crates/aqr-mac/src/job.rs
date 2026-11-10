@@ -2,12 +2,12 @@
 //! [`aqr_ipc::Job`] by threads reading it, which the app looks at on its timer ([`crate::app`]);
 //! stopped, and killed where it does not stop.
 
-use std::path::PathBuf;
-use std::process::{Child, ExitStatus};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitStatus};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub use aqr_ipc::{Verb, failure, file_name, intact, tested};
+pub use aqr_ipc::{Point, Verb, failure, file_name, intact, tested};
 
 /// The time given `aqr` to stop before it is killed.
 const STOP: Duration = Duration::from_secs(10);
@@ -25,7 +25,20 @@ pub struct Job {
 impl Job {
     /// Runs `aqr` on `paths` (`-P` where `encrypt`), read on threads of their own.
     pub fn start(verb: Verb, paths: Vec<PathBuf>, encrypt: bool) -> Result<Arc<Job>, String> {
-        let (mut cmd, count) = aqr_ipc::command(&aqr_ipc::aqr(), verb, paths, encrypt, "aqr");
+        let (cmd, count) = aqr_ipc::command(&aqr_ipc::aqr(), verb, paths, encrypt, "aqr");
+        Self::run(verb, cmd, count)
+    }
+
+    /// Runs `aqr` to extract version `point` of `archive` as it was, into a folder beside it
+    /// ([`aqr_ipc::version_folder`]).
+    pub fn start_at(archive: &Path, point: &Point) -> Result<Arc<Job>, String> {
+        let into = aqr_ipc::version_folder(archive, point);
+        let (cmd, count) = aqr_ipc::command_at(&aqr_ipc::aqr(), archive, point, &into);
+        Self::run(Verb::Extract, cmd, count)
+    }
+
+    /// Runs `cmd` (`aqr --ipc` of `count` archives), read on threads of their own.
+    fn run(verb: Verb, mut cmd: Command, count: usize) -> Result<Arc<Job>, String> {
         let mut child = cmd.spawn().map_err(|e| aqr_l10n::common::not_run(cmd.get_program().display(), e))?;
         let (out, err) = (child.stdout.take().expect("piped"), child.stderr.take().expect("piped"));
         let job = Arc::new(Job {

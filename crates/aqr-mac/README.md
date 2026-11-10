@@ -31,6 +31,13 @@ Aqueous is distributed as `Aqueous.zip`, holding `Aqueous.app` (`aqr-mac` and `a
 - The services are `NSServices` in `Info.plist`, under Quick Actions or Services of a
   Control-click in Finder. Finder sends all the paths chosen at once, so nothing gathers them
   as aqr-win does. Several paths compressed make one archive named after their folder.
+- The versions of an `.aqr` archive (its journal's points: `docs/append-design.md`,
+  "Journaling"), one archive at a time (several chosen are refused), as aqr-win's verbs:
+  "Name this version with Aqueous…" asks for a name (`{today}` at first) and runs
+  `aqr --tag`; "Extract a previous version with Aqueous…" lists them
+  (`aqr --history --json`, a table in the alert, the last selected, a double-click is OK)
+  and extracts the one chosen as it was (`aqr -d --at #N`) into `NAME (LABEL)` beside the
+  archive, a job like the others (progress, the overwrite question).
 - The app is an agent (`LSUIElement`): no Dock icon, no menu, no window. It quits once its
   jobs are done.
 - Progress is an `NSProgress` published for the file at work: the archive being written

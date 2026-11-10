@@ -7,6 +7,8 @@
 mod app;
 #[cfg(target_os = "macos")]
 mod job;
+#[cfg(target_os = "macos")]
+mod version;
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -45,7 +47,7 @@ mod tests {
                 strings.push(w[1].strip_prefix("<string>").and_then(|s| s.strip_suffix("</string>")).unwrap());
             }
         }
-        assert_eq!(strings.len(), 15 + 15 + 4);
+        assert_eq!(strings.len(), 15 + 15 + 6);
         let en: String = aqr_l10n::LPROJ.iter().filter(|(d, _, _)| *d == "en.lproj").map(|(_, _, s)| *s).collect();
         for s in strings {
             let s = s.replace("&amp;", "&");

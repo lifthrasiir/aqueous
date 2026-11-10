@@ -4,7 +4,9 @@
 //! - Finder's services (`NSServices` in `Info.plist`, under Quick Actions or Services of a
 //!   Control-click) send the paths chosen, all at once, on a pasteboard: "Compress with Aqueous"
 //!   on files and folders ("Compress with Aqueous (Passphrase)…" encrypts: `aqr -P`), "Extract
-//!   with Aqueous" and "Test with Aqueous" on `.aqr` files and the other archives `aqr` extracts.
+//!   with Aqueous" and "Test with Aqueous" on `.aqr` files and the other archives `aqr` extracts,
+//!   and on `.aqr` files "Name this version with Aqueous…" and "Extract a previous version with
+//!   Aqueous…" for their versions ([`crate::version`]).
 //!   Those opened (a double-click; [`EXTRACTED`]) are extracted: beside them, a single entry at
 //!   the top as it is, else into their names without the extension (`aqr --each --auto-dir`).
 //!   Other formats than `.aqr` are document types of the rank `Alternate` (`Info.plist`): opened
@@ -45,6 +47,7 @@ use serde_json::Value;
 use aqr_l10n::{common, mac, services};
 
 use crate::job::{Job, Verb, failure, file_name, intact, tested};
+use crate::version;
 
 /// How often the jobs are looked at, in seconds.
 const TICK: f64 = 0.25;
@@ -152,6 +155,25 @@ define_class!(
         fn test_files(&self, pb: &NSPasteboard, _: Option<&NSString>, _: *mut *mut NSString) {
             self.start(Verb::Test, paths(pb));
         }
+
+        #[unsafe(method(nameVersion:userData:error:))]
+        fn name_version(&self, pb: &NSPasteboard, _: Option<&NSString>, _: *mut *mut NSString) {
+            let mtm = self.mtm();
+            self.ivars().worked.set(true);
+            if let Some(archive) = version::one(mtm, paths(pb), services::name_version()) {
+                version::name(mtm, &archive);
+            }
+        }
+
+        #[unsafe(method(extractVersion:userData:error:))]
+        fn extract_version(&self, pb: &NSPasteboard, _: Option<&NSString>, _: *mut *mut NSString) {
+            let mtm = self.mtm();
+            self.ivars().worked.set(true);
+            let Some(archive) = version::one(mtm, paths(pb), services::extract_version()) else { return };
+            if let Some(point) = version::choose(mtm, &archive) {
+                self.begin(Verb::Extract, Job::start_at(&archive, &point));
+            }
+        }
     }
 );
 
@@ -181,11 +203,15 @@ impl Delegate {
 
     /// Begins a job, its archives encrypted (`aqr -P`) where `encrypt`.
     fn start_with(&self, verb: Verb, paths: Vec<PathBuf>, encrypt: bool) {
-        if paths.is_empty() {
-            return;
+        if !paths.is_empty() {
+            self.begin(verb, Job::start(verb, paths, encrypt));
         }
+    }
+
+    /// Keeps `job` begun, or tells why it did not begin.
+    fn begin(&self, verb: Verb, job: Result<Arc<Job>, String>) {
         self.ivars().worked.set(true);
-        match Job::start(verb, paths, encrypt) {
+        match job {
             Ok(job) => self.ivars().jobs.borrow_mut().push(Running { job, progress: None, always: Vec::new() }),
             Err(e) => alert(self.mtm(), NSAlertStyle::Critical, &verb.failed(""), &e, None),
         }
@@ -409,13 +435,13 @@ fn passphrase(mtm: MainThreadMarker, q: &Value) -> Option<String> {
     }
 }
 
-fn activate(mtm: MainThreadMarker) {
+pub fn activate(mtm: MainThreadMarker) {
     #[allow(deprecated)]
     NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
 }
 
 /// Shows an alert, `more` in a box of text below.
-fn alert(mtm: MainThreadMarker, style: NSAlertStyle, main: &str, info: &str, more: Option<&str>) {
+pub fn alert(mtm: MainThreadMarker, style: NSAlertStyle, main: &str, info: &str, more: Option<&str>) {
     let a = NSAlert::new(mtm);
     a.setAlertStyle(style);
     a.setMessageText(&NSString::from_str(main));
@@ -474,8 +500,14 @@ fn welcome(mtm: MainThreadMarker) {
     let linked = aqr.as_ref().is_some_and(|a| std::fs::canonicalize(COMMAND).ok() == std::fs::canonicalize(a).ok());
     let a = NSAlert::new(mtm);
     a.setMessageText(&NSString::from_str(mac::ready()));
-    let mut info =
-        mac::ready_info(services::compress(), services::compress_passphrase(), services::extract(), services::test());
+    let mut info = mac::ready_info(
+        services::compress(),
+        services::compress_passphrase(),
+        services::extract(),
+        services::test(),
+        services::name_version(),
+        services::extract_version(),
+    );
     if aqr.is_some() && !linked {
         info += "\n\n";
         info += &match there() {

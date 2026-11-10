@@ -174,7 +174,7 @@ not_registered = "Aqueous is not registered"
 launch_services = "Launch Services did not register {path} (error {status})."
 ready = "Aqueous is ready"
 # The services' names, as `services` has them.
-ready_info = "In Finder, Control-click files or folders for \"{compress}\" (or \"{compress_passphrase}\" to encrypt), and archives for \"{extract}\" and \"{test}\" (under Quick Actions or Services). Opening an .aqr file extracts it beside it; other archives too where Aqueous opens them (Get Info, Open with).\n\nWhere the services are not there, turn them on in System Settings: Keyboard, Keyboard Shortcuts, Services, Files and Folders."
+ready_info = "In Finder, Control-click files or folders for \"{compress}\" (or \"{compress_passphrase}\" to encrypt), and archives for \"{extract}\" and \"{test}\" (under Quick Actions or Services); .aqr files also have \"{name_version}\" and \"{extract_version}\" for their versions. Opening an .aqr file extracts it beside it; other archives too where Aqueous opens them (Get Info, Open with).\n\nWhere the services are not there, turn them on in System Settings: Keyboard, Keyboard Shortcuts, Services, Files and Folders."
 command_offer = "The aqr command can be put at {command} (as an administrator)."
 # What is at the command's place (`link`, `link_gone`, `folder`, `file`).
 command_other = "{command} is {what}, not this app's aqr."
@@ -188,6 +188,20 @@ command_not_installed = "The aqr command is not installed"
 command_replace = "It is {what}. Replace it with a link to {aqr}?"
 command_installed = "The aqr command is installed"
 command_runs = "{command} runs {aqr}."
+# The versions of an archive (the points of its journal: aqr --tag, --history, --at).
+name_version = "Name this version of {name}"
+name_version_info = "{{today}} stands for the date, {{now}} for the date and time."
+version_name = "Name"
+version_named = "The version of {name} is named"
+could_not_name = "Could not name the version of {name}"
+choose_version = "Extract which version of {name}?"
+choose_version_info = "It is extracted into a folder beside the archive, named after the version."
+could_not_list = "Could not list the versions of {name}"
+no_versions = "{name} has no named versions"
+no_versions_info = "A version is named when an archive is updated with aqr -j, or by \"{name_version}\" in Finder."
+# A service of one archive given several files.
+one_archive = "Choose one archive"
+one_archive_info = "\"{service}\" takes a single .aqr file."
 
 # Finder's services (Info.plist's NSServices, by ServicesMenu.strings).
 [services]
@@ -195,3 +209,5 @@ compress = "Compress with Aqueous"
 compress_passphrase = "Compress with Aqueous (Passphrase)…"
 extract = "Extract with Aqueous"
 test = "Test with Aqueous"
+name_version = "Name this version with Aqueous…"
+extract_version = "Extract a previous version with Aqueous…"
