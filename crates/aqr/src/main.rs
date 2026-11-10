@@ -397,11 +397,13 @@ Decompression:
                         #N (from 1), #-N (from the last), @LABEL (the last of it), or
                         a date, to its end: 2026, 2026-11, 2026-11-01, 2026-11-01T09:30
       --history         list the journal points of the archives
-      --diff            list what differs between two states of the archives, a line
+      --diff            list what differs between two states of an archive, a line
                         each: + added, ~ changed (size or metadata), - removed. By
                         default the last point against the archive now; with --at, that
                         point against the one before it; --from SPEC picks the earlier
-                        state (--at's choices) for either
+                        state (--at's choices) for either. With PATHs after the
+                        archive (taken as -a takes its inputs), the archive (as --at
+                        picks it) against them: + only in them, - only in the archive
   -E, --encoding ENC    names of no declared encoding: auto (the default: as bytes where
                         this system takes them, else decoded from a set guessed), raw
                         (as bytes), system, or sets (shift_jis, euc-kr, gbk, big5,
@@ -902,18 +904,21 @@ fn parse() -> Result<Args, String> {
         if a.history && a.diff {
             return Err("--history with --diff".into());
         }
-        if a.decompress || a.list || a.info || a.journal.is_some() || a.output.is_some() {
-            return Err(format!("{what} takes archives alone"));
+        if a.decompress || a.list || a.info || a.journal.is_some() || a.output.is_some() || a.rm {
+            return Err(format!("{what} takes an archive{} alone", if a.diff { " and paths" } else { "s" }));
         }
         if a.history && (a.at.is_some() || a.from.is_some()) {
             return Err("--history takes archives alone".into());
         }
-        return Ok(a);
+        // (--diff with paths: they are taken as the inputs of -a are, below)
+        if a.history {
+            return Ok(a);
+        }
     }
-    if a.from.is_some() {
+    if a.from.is_some() && !a.diff {
         return Err("--from is for --diff".into());
     }
-    if a.at.is_some() && !(a.list || a.decompress) {
+    if a.at.is_some() && !(a.list || a.decompress || a.diff) {
         return Err("--at is for -t, -d, -K and --diff".into());
     }
     if let Some(label) = &a.journal {

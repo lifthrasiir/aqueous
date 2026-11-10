@@ -299,6 +299,28 @@ fn diff_between_states() {
     }
     ok(&d, Some(&day(5)), &["-q", "-j", "only", "-o", "j.aqr", "src"]);
     assert_eq!(stdout(&ok(&d, None, &["--diff", "-q", "--at", "#1", "j.aqr"])).lines().count(), 4);
+    // the archive against paths, as -a takes them: nothing differs yet
+    let against = |args: &[&str]| -> Vec<String> {
+        let mut all = vec!["--diff", "-q"];
+        all.extend_from_slice(args);
+        stdout(&ok(&d, None, &all)).lines().map(str::to_owned).collect()
+    };
+    assert_eq!(against(&["a.aqr", "src"]), Vec::<String>::new());
+    fs::write(src.join("a.txt"), words(9, 3_700)).unwrap();
+    fs::write(src.join("e.txt"), words(8, 300)).unwrap();
+    fs::remove_file(src.join("sub/c.txt")).unwrap();
+    assert_eq!(against(&["a.aqr", "src"]), ["~ a.txt", "+ e.txt", "- sub/c.txt"]);
+    // a point of it against them
+    assert_eq!(against(&["--at", "#1", "a.aqr", "src"]), ["~ a.txt", "+ d.txt", "+ e.txt", "+ sub/"]);
+    let o = ok(&d, None, &["--diff", "a.aqr", "src"]);
+    assert!(stderr(&o).contains("only in src"), "{}", stderr(&o));
+    for args in [
+        ["--diff", "--from", "#1", "a.aqr", "src"].as_slice(),
+        &["--diff", "a.aqr", "nowhere"],
+        &["--diff", "--rm", "a.aqr", "src"],
+    ] {
+        assert!(!aqr_at(&d, None, args).status.success(), "{args:?} succeeded");
+    }
     let o = aqr_at(&d, None, &["--diff", "plain.aqr"]);
     assert!(!o.status.success());
 }

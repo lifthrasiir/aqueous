@@ -454,6 +454,17 @@ that point against the one before it (none: nothing);
 picks the earlier state, as
 .Fl -at
 picks a point, for either.
+With paths after the archive (taken as
+.Fl a
+takes its inputs; a quick check by size and modification time), the archive as
+.Fl -at
+picks it against them:
+.Ql +
+what only they have,
+.Ql -
+what only the archive has,
+.Ql ~
+what differs.
 .It Fl E Ar enc , Fl -encoding Ar enc
 How names of no declared encoding are taken:
 .Cm auto
