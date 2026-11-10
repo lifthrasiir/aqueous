@@ -157,53 +157,101 @@ fn residual<C: Coder>(
     Ok((x >> 1) as i32 ^ -((x & 1) as i32))
 }
 
-/// Walks the samples of the frame of `h` in the stream's order, coding each by `c`, with `m`. Decoding, `planes`
-/// are zeros that get filled.
-pub fn code_frame<C: Coder>(c: &mut C, m: &mut Model, h: &Header, planes: &mut [&mut [u16]]) -> Result<(), Error> {
-    let (mx, my) = h.mcus();
-    let default = 1i32 << (h.precision - h.point - 1);
-    let mut st: Vec<Comp> = h
-        .comps
-        .iter()
-        .enumerate()
-        .map(|(i, comp)| {
-            let w = h.plane(i).0;
-            let rows = comp.v + 2;
-            Comp { w, rows, err: vec![[0; LANES]; rows * (w + 2)] }
-        })
-        .collect();
-    // the component before each one of the scan, if it has its shape
-    let before_of: Vec<Option<usize>> = (0..h.scan.len())
-        .map(|pos| pos.checked_sub(1).map(|p| h.scan[p].0).filter(|&p| h.plane(p) == h.plane(h.scan[pos].0)))
-        .collect();
-    let mut cands = [0i32; K];
-    for r in 0..my {
+/// A frame being coded a row of MCUs at a time: the last rows of its planes (those of the MCU
+/// row, and the row above them), and the errors around. A module holding only these takes memory
+/// by the width of the frame, whatever its height.
+pub struct Frame<'h> {
+    h: &'h Header,
+    st: Vec<Comp>,
+    /// for each component, `v + 1` rows of its plane, the row `y` at `y % (v + 1)`
+    ring: Vec<Vec<u16>>,
+    /// the component before each one of the scan, if it has its shape
+    before_of: Vec<Option<usize>>,
+}
+
+impl<'h> Frame<'h> {
+    pub fn new(h: &'h Header) -> Frame<'h> {
+        let st = h
+            .comps
+            .iter()
+            .enumerate()
+            .map(|(i, comp)| {
+                let w = h.plane(i).0;
+                let rows = comp.v + 2;
+                Comp { w, rows, err: vec![[0; LANES]; rows * (w + 2)] }
+            })
+            .collect();
+        let ring = h.comps.iter().enumerate().map(|(i, c)| vec![0u16; (c.v + 1) * h.plane(i).0]).collect();
+        let before_of = (0..h.scan.len())
+            .map(|pos| pos.checked_sub(1).map(|p| h.scan[p].0).filter(|&p| h.plane(p) == h.plane(h.scan[pos].0)))
+            .collect();
+        Frame { h, st, ring, before_of }
+    }
+
+    /// Bytes of the blocks of a frame of `h` (the rows of errors and of samples, the lists), each
+    /// rounded up as the stack does, on 32-bit pointers.
+    pub fn bytes(h: &Header) -> u64 {
+        use aqr_api::stack::block;
+        let nc = h.comps.len() as u64;
+        let mut n = block(20 * nc) + block(12 * nc) + block(8 * h.scan.len() as u64);
+        for (i, c) in h.comps.iter().enumerate() {
+            n += block(((c.v + 2) * (h.plane(i).0 + 2) * size_of::<[u16; LANES]>()) as u64);
+            n += block(2 * ((c.v + 1) * h.plane(i).0) as u64);
+        }
+        n
+    }
+
+    /// The row `y` of component `ci`: one of the last `v + 1` coded or put (`row_mut`).
+    pub fn row(&self, ci: usize, y: usize) -> &[u16] {
+        let w = self.st[ci].w;
+        let at = (y % (self.h.comps[ci].v + 1)) * w;
+        &self.ring[ci][at..at + w]
+    }
+
+    /// The place of the row `y` of component `ci`: an encoder puts the samples to be coded here
+    /// before [`Frame::code_row`].
+    pub fn row_mut(&mut self, ci: usize, y: usize) -> &mut [u16] {
+        let w = self.st[ci].w;
+        let at = (y % (self.h.comps[ci].v + 1)) * w;
+        &mut self.ring[ci][at..at + w]
+    }
+
+    /// Codes the row `r` of MCUs by `c` with `m`: the samples are in the rows of the MCU row
+    /// (an encoder), or come to be (a decoder).
+    pub fn code_row<C: Coder>(&mut self, c: &mut C, m: &mut Model, r: usize) -> Result<(), Error> {
+        let h = self.h;
+        let mx = h.mcus().0;
+        let default = 1i32 << (h.precision - h.point - 1);
+        let (st, ring, before_of) = (&mut self.st, &mut self.ring, &self.before_of);
+        let mut cands = [0i32; K];
         for col in 0..mx {
             for (pos, &(ci, _)) in h.scan.iter().enumerate() {
                 let comp = h.comps[ci];
                 let w = st[ci].w;
                 let (rows, stride) = (st[ci].rows, w + 2);
                 let before = before_of[pos];
+                let held = comp.v + 1;
                 for v in 0..comp.v {
                     let y = r * comp.v + v;
                     let (ry, rp) = ((y % rows) * stride + 1, ((y + rows - 1) % rows) * stride + 1);
+                    // the rows of the samples, this and the one above
+                    let (rc, rq) = ((y % held) * w, ((y + held - 1) % held) * w);
                     for hh in 0..comp.h {
                         let x = col * comp.h + hh;
-                        let at = y * w + x;
-                        let p = &planes[ci];
+                        let p = &ring[ci];
                         let a = if x > 0 {
-                            p[at - 1] as i32
+                            p[rc + x - 1] as i32
                         } else if y > 0 {
-                            p[at - w] as i32
+                            p[rq + x] as i32
                         } else {
                             default
                         };
-                        let b = if y > 0 { p[at - w] as i32 } else { a };
-                        let cc = if x > 0 && y > 0 { p[at - w - 1] as i32 } else { b };
+                        let b = if y > 0 { p[rq + x] as i32 } else { a };
+                        let cc = if x > 0 && y > 0 { p[rq + x - 1] as i32 } else { b };
                         // (the north-east sample is there where its MCU is: above this MCU row, or
                         // to the left of this one)
                         let ne = y > 0 && x + 1 < w && (v == 0 || (x + 1) / comp.h <= col);
-                        let d = if ne { p[at - w + 1] as i32 } else { b };
+                        let d = if ne { p[rq + x + 1] as i32 } else { b };
                         cands[0] = a;
                         cands[1] = b;
                         cands[2] = a + ((b - cc) >> 1);
@@ -211,16 +259,16 @@ pub fn code_frame<C: Coder>(c: &mut C, m: &mut Model, h: &Header, planes: &mut [
                         cands[4] = a + d - b;
                         let mut n = SAME;
                         if let Some(q) = before {
-                            let pq = &planes[q];
-                            let qv = pq[at] as i32;
+                            let pq = &ring[q];
+                            let qv = pq[rc + x] as i32;
                             let qa = if x > 0 {
-                                pq[at - 1] as i32
+                                pq[rc + x - 1] as i32
                             } else if y > 0 {
-                                pq[at - w] as i32
+                                pq[rq + x] as i32
                             } else {
                                 qv
                             };
-                            let qb = if y > 0 { pq[at - w] as i32 } else { qa };
+                            let qb = if y > 0 { pq[rq + x] as i32 } else { qa };
                             cands[5] = a + qv - qa;
                             cands[6] = b + qv - qb;
                             n = K;
@@ -241,12 +289,12 @@ pub fn code_frame<C: Coder>(c: &mut C, m: &mut Model, h: &Header, planes: &mut [
                         }
                         let pred = ((num + den / 2) / den) as i32;
                         let ctx = energy(e[FIN]);
-                        let actual = p[at] as i32;
+                        let actual = p[rc + x] as i32;
                         let eq = before.map_or(0, |q| bitlen(st[q].err[ry + x][FIN] as u32).min(EQ - 1));
                         let k = (bitlen(e[FIN] >> 2).saturating_sub(KSHIFT)).min(16) as u32;
                         let rr = residual(c, m, ci, ctx, eq, k, actual - pred)?;
                         let value = (pred + rr) as u16;
-                        planes[ci][at] = value;
+                        ring[ci][rc + x] = value;
                         let cell = &mut st[ci].err[ry + x];
                         for j in 0..n {
                             cell[j] = (value as i32 - cands[j].clamp(0, 65535)).unsigned_abs() as u16;
@@ -254,6 +302,34 @@ pub fn code_frame<C: Coder>(c: &mut C, m: &mut Model, h: &Header, planes: &mut [
                         cell[FIN] = rr.unsigned_abs().min(65535) as u16;
                     }
                 }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl crate::lossless::Rows for Frame<'_> {
+    fn row(&self, ci: usize, y: usize) -> &[u16] {
+        Frame::row(self, ci, y)
+    }
+}
+
+/// Walks the samples of the frame of `h` in the stream's order, coding each by `c`, with `m`.
+/// Decoding, `planes` are zeros that get filled.
+pub fn code_frame<C: Coder>(c: &mut C, m: &mut Model, h: &Header, planes: &mut [&mut [u16]]) -> Result<(), Error> {
+    let mut f = Frame::new(h);
+    for r in 0..h.mcus().1 {
+        for ci in 0..h.comps.len() {
+            let (w, v) = (h.plane(ci).0, h.comps[ci].v);
+            for y in r * v..(r + 1) * v {
+                f.row_mut(ci, y).copy_from_slice(&planes[ci][y * w..(y + 1) * w]);
+            }
+        }
+        f.code_row(c, m, r)?;
+        for ci in 0..h.comps.len() {
+            let (w, v) = (h.plane(ci).0, h.comps[ci].v);
+            for y in r * v..(r + 1) * v {
+                planes[ci][y * w..(y + 1) * w].copy_from_slice(f.row(ci, y));
             }
         }
     }

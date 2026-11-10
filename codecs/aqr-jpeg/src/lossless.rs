@@ -384,15 +384,22 @@ fn extend(v: u32, s: u32) -> i32 {
 /// of an interval) or later.
 #[inline]
 fn predict(p: &[u16], w: usize, x: usize, y: usize, first_row: bool, predictor: u32, default: i32) -> i32 {
-    let at = y * w + x;
+    let prev = if y > 0 { &p[(y - 1) * w..y * w] } else { &[][..] };
+    predict_row(&p[y * w..(y + 1) * w], prev, x, first_row, predictor, default)
+}
+
+/// [`predict`] of the sample `x` of a line `cur`, the line above it `prev` (not looked at in the
+/// first line of an interval).
+#[inline]
+fn predict_row(cur: &[u16], prev: &[u16], x: usize, first_row: bool, predictor: u32, default: i32) -> i32 {
     if first_row {
         // the first line of an interval: the sample to the left, the default at its start
-        return if x == 0 { default } else { p[at - 1] as i32 };
+        return if x == 0 { default } else { cur[x - 1] as i32 };
     }
     if x == 0 {
-        return p[at - w] as i32;
+        return prev[0] as i32;
     }
-    let (a, b, c) = (p[at - 1] as i32, p[at - w] as i32, p[at - w - 1] as i32);
+    let (a, b, c) = (cur[x - 1] as i32, prev[x] as i32, prev[x - 1] as i32);
     match predictor {
         1 => a,
         2 => b,
@@ -559,49 +566,109 @@ pub fn encode(h: &Header, s: &Samples) -> Result<Vec<u8>, Error> {
     Ok(out)
 }
 
-/// [`encode`] of the `planes` of a frame, appended to `out`.
-pub fn encode_into(h: &Header, planes: &[&[u16]], out: &mut Vec<u8>) -> Result<(), Error> {
-    let (mx, my) = h.mcus();
-    let rows_per = if h.restart == 0 { my } else { h.restart / mx };
-    let encoders: Vec<Option<Encoder>> =
-        h.tables.iter().map(|t| t.as_ref().map(|t| Encoder::new(t, h.last_code))).collect();
-    let default = 1i32 << (h.precision - h.point - 1);
-    let mut o = Out { out, acc: 0, n: 0 };
-    for (k, row0) in (0..my).step_by(rows_per).enumerate() {
-        if k > 0 {
-            o.out.extend_from_slice(&[0xFF, 0xD0 + ((k - 1) & 7) as u8]);
+/// The rows of the planes of a frame, by the component and the line.
+pub trait Rows {
+    fn row(&self, ci: usize, y: usize) -> &[u16];
+}
+
+/// The whole planes of a frame as [`Rows`].
+struct Full<'a>(&'a [&'a [u16]], &'a Header);
+
+impl Rows for Full<'_> {
+    fn row(&self, ci: usize, y: usize) -> &[u16] {
+        let w = self.1.plane(ci).0;
+        &self.0[ci][y * w..(y + 1) * w]
+    }
+}
+
+/// The entropy-coded data of a frame made a row of MCUs at a time ([`Emitter::mcu_row`]), so that
+/// what is held is the rows the prediction looks at, and the bits not yet a byte.
+pub struct Emitter<'h> {
+    h: &'h Header,
+    encoders: Vec<Option<Encoder>>,
+    /// bits not yet put in bytes
+    acc: u64,
+    n: u32,
+    /// rows of MCUs to an interval
+    rows_per: usize,
+}
+
+impl<'h> Emitter<'h> {
+    pub fn new(h: &'h Header) -> Emitter<'h> {
+        let (mx, my) = h.mcus();
+        Emitter {
+            h,
+            encoders: h.tables.iter().map(|t| t.as_ref().map(|t| Encoder::new(t, h.last_code))).collect(),
+            acc: 0,
+            n: 0,
+            rows_per: if h.restart == 0 { my } else { h.restart / mx },
         }
-        for r in row0..(row0 + rows_per).min(my) {
-            for c in 0..mx {
-                for &(ci, td) in h.scan.iter() {
-                    let comp = h.comps[ci];
-                    let w = mx * comp.h;
-                    let e = encoders[td].as_ref().unwrap();
-                    let p = planes[ci];
-                    for v in 0..comp.v {
-                        let y = r * comp.v + v;
-                        let first = y == row0 * comp.v;
-                        for hh in 0..comp.h {
-                            let x = c * comp.h + hh;
-                            let pred = predict(p, w, x, y, first, h.predictor, default);
-                            // the difference in -32768..32768
-                            let d = ((p[y * w + x] as i32 - pred + 32768) & 0xFFFF) - 32768;
-                            let a = d.unsigned_abs();
-                            let cat = 32 - a.leading_zeros();
-                            if e.len[cat as usize] == 0 {
-                                return err("difference without a code");
-                            }
-                            o.put(e.code[cat as usize] as u32, e.len[cat as usize] as u32);
-                            if cat > 0 && cat < 16 {
-                                let bits = if d > 0 { d } else { d + (1 << cat) - 1 };
-                                o.put(bits as u32, cat);
-                            }
+    }
+
+    /// Bytes of the blocks an emitter makes (its tables), rounded up as the stack does.
+    pub fn bytes() -> u64 {
+        aqr_api::stack::block(4 * size_of::<Option<Encoder>>() as u64)
+    }
+
+    /// Bytes the data of a row of MCUs takes at most: each sample a code of 16 bits and the 16 bits
+    /// after it, stuffed, and a restart marker and the bits left.
+    pub fn row_room(h: &Header) -> usize {
+        let samples: usize = (0..h.comps.len()).map(|i| h.plane(i).0 * h.comps[i].v).sum();
+        samples * 8 + 16
+    }
+
+    /// Appends to `out` the data of the row `r` of MCUs (in order), the rows of the planes by
+    /// `rows`: those of the MCU row and the one above.
+    pub fn mcu_row(&mut self, rows: &impl Rows, r: usize, out: &mut Vec<u8>) -> Result<(), Error> {
+        let h = self.h;
+        let (mx, my) = h.mcus();
+        let default = 1i32 << (h.precision - h.point - 1);
+        let row0 = r / self.rows_per * self.rows_per;
+        if r.is_multiple_of(self.rows_per) && r > 0 {
+            out.extend_from_slice(&[0xFF, 0xD0 + ((r / self.rows_per - 1) & 7) as u8]);
+        }
+        let mut o = Out { out, acc: self.acc, n: self.n };
+        for c in 0..mx {
+            for &(ci, td) in h.scan.iter() {
+                let comp = h.comps[ci];
+                let e = self.encoders[td].as_ref().unwrap();
+                for v in 0..comp.v {
+                    let y = r * comp.v + v;
+                    let first = y == row0 * comp.v;
+                    let cur = rows.row(ci, y);
+                    let prev = if first { &[][..] } else { rows.row(ci, y - 1) };
+                    for hh in 0..comp.h {
+                        let x = c * comp.h + hh;
+                        let pred = predict_row(cur, prev, x, first, h.predictor, default);
+                        // the difference in -32768..32768
+                        let d = ((cur[x] as i32 - pred + 32768) & 0xFFFF) - 32768;
+                        let cat = 32 - d.unsigned_abs().leading_zeros();
+                        if e.len[cat as usize] == 0 {
+                            return err("difference without a code");
+                        }
+                        o.put(e.code[cat as usize] as u32, e.len[cat as usize] as u32);
+                        if cat > 0 && cat < 16 {
+                            let bits = if d > 0 { d } else { d + (1 << cat) - 1 };
+                            o.put(bits as u32, cat);
                         }
                     }
                 }
             }
         }
-        o.pad();
+        if (r + 1).is_multiple_of(self.rows_per) || r + 1 == my {
+            o.pad();
+        }
+        (self.acc, self.n) = (o.acc, o.n);
+        Ok(())
+    }
+}
+
+/// [`encode`] of the `planes` of a frame, appended to `out`.
+pub fn encode_into(h: &Header, planes: &[&[u16]], out: &mut Vec<u8>) -> Result<(), Error> {
+    let full = Full(planes, h);
+    let mut emitter = Emitter::new(h);
+    for r in 0..h.mcus().1 {
+        emitter.mcu_row(&full, r, out)?;
     }
     Ok(())
 }
