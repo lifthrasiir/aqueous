@@ -149,9 +149,13 @@ impl Msg {
     }
 
     /// Its id in Windows' string table ([`RC`]; only those of the sections `types` and `shell`
-    /// are there).
+    /// are there), the one that `messages/ids.toml` gives it: it does not change as messages are
+    /// added. Panics for a message that is not in the table.
     pub fn resource(self) -> u16 {
-        RESOURCE_BASE + self.0
+        match RESOURCE_IDS[self.0 as usize] {
+            0 => panic!("not a message of Windows' string table"),
+            id => id,
+        }
     }
 
     /// The text in the language chosen, of `n`'s category where it is a plural, its placeholders
@@ -285,7 +289,17 @@ mod tests {
         assert!(RC.contains(&format!("    {id}, L\"Compress with Aqueous\"\n")));
         assert!(RC.contains(&format!("    {id}, L\"Aqueous\\xb85c \\xc555\\xcd95\"\n")), "{RC}");
         assert!(RC.contains(&format!("    {}, L\"ZIP archive\"\n", types::ZIP.resource())));
-        assert!(!RC.contains(&format!("    {}, ", common::OK.resource())));
+        // (the ids of ids.toml: kept for good, each in its section's range)
+        assert_eq!((shell::COMPRESS.resource(), shell::EXTRACT_VERSION.resource()), (1200, 1207));
+        assert_eq!((types::AQR.resource(), types::ZST.resource()), (1100, 1114));
+        assert_eq!(
+            RC.matches(
+                "
+    1"
+            )
+            .count(),
+            24 * LANGS.len()
+        );
     }
 
     #[test]

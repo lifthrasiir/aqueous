@@ -37,9 +37,10 @@ use std::os::windows::ffi::OsStrExt;
 
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_SUCCESS, WIN32_ERROR};
 use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, KEY_WRITE, REG_DWORD, REG_EXPAND_SZ, REG_OPTION_NON_VOLATILE, REG_SZ,
-    REG_VALUE_TYPE, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW,
-    RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW, RegSetValueExW,
+    HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_DWORD, REG_EXPAND_SZ, REG_OPTION_NON_VOLATILE,
+    REG_SZ, REG_VALUE_TYPE, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW,
+    RegDeleteKeyValueW, RegDeleteTreeW, RegDeleteValueW, RegEnumKeyExW, RegEnumValueW, RegGetValueW, RegOpenKeyExW,
+    RegSetValueExW,
 };
 use windows_sys::Win32::UI::Shell::{SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify};
 
@@ -179,6 +180,7 @@ pub fn register() -> Result<(), String> {
         self::set(CAPABILITIES, Some(name), Value::Sz(value))?;
     }
     self::set(APPLICATIONS, Some(APPLICATION), Value::Sz(CAPABILITIES))?;
+    forget_cached(&exe.to_string_lossy());
     notify();
     Ok(())
 }
@@ -202,8 +204,110 @@ pub fn unregister() -> Result<(), String> {
     }
     delete_value(APPLICATIONS, APPLICATION)?;
     delete(r"Software\Aqueous")?;
+    if let Ok(exe) = std::env::current_exe() {
+        forget_cached(&exe.to_string_lossy());
+    }
     notify();
     Ok(())
+}
+
+/// Where Windows keeps what it read of indirect strings (`@file,-ID`): a key for each language
+/// (`679F23C34`), a value for each string, named by it. It stays as it is when Explorer is
+/// restarted, so a string whose id has moved shows the one that was there ([`aqr_l10n`]'s ids do not
+/// move any more, but what an older build left is still there).
+const MUI_CACHE: &str = r"Software\Classes\Local Settings\MuiCache";
+
+/// Forgets what Windows cached of the strings of `exe` (the values `@EXE,-ID`, the path compared
+/// without regard to case) for it to read them again: how many values. Best effort: what cannot be
+/// opened or deleted is left.
+pub fn forget_cached(exe: &str) -> usize {
+    let prefix = format!("@{},-", exe.to_lowercase());
+    let mut forgotten = 0;
+    let mut h: HKEY = std::ptr::null_mut();
+    let p = wide(MUI_CACHE);
+    // SAFETY: a key of NULs, and a handle written to a local
+    if unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, p.as_ptr(), 0, KEY_READ | KEY_WRITE, &mut h) } != ERROR_SUCCESS {
+        return 0;
+    }
+    forgotten += forget_in(h, &prefix, 0);
+    // SAFETY: the key opened above
+    unsafe { RegCloseKey(h) };
+    forgotten
+}
+
+/// [`forget_cached`] in `key` and the keys under it (as deep as the cache goes, a few).
+fn forget_in(key: HKEY, prefix: &str, depth: u32) -> usize {
+    let mut forgotten = 0;
+    // the names of the values to delete (not deleted as they are listed: the list would shift)
+    let mut names: Vec<Vec<u16>> = Vec::new();
+    let mut i = 0;
+    loop {
+        // (a value's name is at most 16,383 characters)
+        let mut name = vec![0u16; 16384];
+        let mut len = name.len() as u32;
+        // SAFETY: an open key, room for the name and its length; no data asked for
+        let e = unsafe {
+            RegEnumValueW(
+                key,
+                i,
+                name.as_mut_ptr(),
+                &mut len,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if e != ERROR_SUCCESS {
+            break;
+        }
+        i += 1;
+        name.truncate(len as usize);
+        if String::from_utf16_lossy(&name).to_lowercase().starts_with(prefix) {
+            name.push(0);
+            names.push(name);
+        }
+    }
+    for name in &names {
+        // SAFETY: an open key and a name of NULs
+        if unsafe { RegDeleteValueW(key, name.as_ptr()) } == ERROR_SUCCESS {
+            forgotten += 1;
+        }
+    }
+    if depth < 4 {
+        let mut i = 0;
+        loop {
+            let mut sub = vec![0u16; 256];
+            let mut len = sub.len() as u32;
+            // SAFETY: an open key, room for the name of a subkey and its length
+            let e = unsafe {
+                RegEnumKeyExW(
+                    key,
+                    i,
+                    sub.as_mut_ptr(),
+                    &mut len,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
+            if e != ERROR_SUCCESS {
+                break;
+            }
+            i += 1;
+            sub.truncate(len as usize);
+            sub.push(0);
+            let mut h: HKEY = std::ptr::null_mut();
+            // SAFETY: an open key, a name of NULs, and a handle written to a local
+            if unsafe { RegOpenKeyExW(key, sub.as_ptr(), 0, KEY_READ | KEY_WRITE, &mut h) } == ERROR_SUCCESS {
+                forgotten += forget_in(h, prefix, depth + 1);
+                // SAFETY: the key opened above
+                unsafe { RegCloseKey(h) };
+            }
+        }
+    }
+    forgotten
 }
 
 /// Whether extension `ext` (`.zip`) opens with a program already: a class in
@@ -365,6 +469,29 @@ mod tests {
             assert!(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("icons/{ext}.ico")).is_file());
         }
         assert_eq!(rc.lines().filter(|l| l.contains(" ICON ")).count(), 2 + FORMATS.len());
+    }
+
+    /// What Windows cached of a program's strings is forgotten for that program alone, whatever
+    /// the case of its path, in the keys under the cache's too.
+    #[test]
+    fn forgets_the_cache_of_one_program() {
+        use super::{MUI_CACHE, Value, delete, forget_cached, get, set};
+        let key = format!(r"{MUI_CACHE}\aqr-win-test-{}\inner", std::process::id());
+        let top = format!(r"{MUI_CACHE}\aqr-win-test-{}", std::process::id());
+        let ours = r"C:\Test Dir\aqr-win-test.exe";
+        set(&top, Some(&format!("@{ours},-1200")), Value::Sz("one")).unwrap();
+        set(&key, Some(&format!("@{},-1201", ours.to_uppercase())), Value::Sz("two")).unwrap();
+        set(&key, Some(&format!("@{ours}2,-1200")), Value::Sz("another program, a longer path")).unwrap();
+        set(&key, Some(r"@C:\Other\other.exe,-1200"), Value::Sz("another program")).unwrap();
+        set(&key, Some("FriendlyAppName"), Value::Sz("not a string of a file")).unwrap();
+        assert_eq!(forget_cached(ours), 2);
+        assert_eq!(get(&top, Some(&format!("@{ours},-1200"))), None);
+        assert_eq!(get(&key, Some(&format!("@{},-1201", ours.to_uppercase()))), None);
+        assert!(get(&key, Some(&format!("@{ours}2,-1200"))).is_some());
+        assert!(get(&key, Some(r"@C:\Other\other.exe,-1200")).is_some());
+        assert!(get(&key, Some("FriendlyAppName")).is_some());
+        assert_eq!(forget_cached(ours), 0);
+        delete(&top).unwrap();
     }
 
     /// Each format of `OTHER_FORMATS` has its own verb's text.

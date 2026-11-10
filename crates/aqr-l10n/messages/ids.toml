@@ -1,0 +1,38 @@
+# The ids of the messages in Windows' string table (aqr-win's registry has them as indirect
+# strings, `@aqr-win.exe,-ID`, and Windows keeps what it read of them: they must never change
+# for a message that has been released). Only the sections of build.rs's RC_RANGES have any, each
+# in its own range.
+#
+# - A new message takes the next id of its range, the one after the highest ever used (see the
+#   retired ones below: never an id that a message had).
+# - A message taken away keeps its id here as a comment, retired: `# retired: 1115 (zst2)`.
+# - The build fails for a message of those sections with no id, an id out of its range or used
+#   twice, and an id that is no message's.
+
+[types]            # 1100-1199
+aqr = 1100
+zip = 1101
+seven_z = 1102
+rar = 1103
+alz = 1104
+egg = 1105
+tar = 1106
+tgz = 1107
+tbz2 = 1108
+txz = 1109
+gz = 1110
+bz2 = 1111
+xz = 1112
+lzma = 1113
+zst = 1114
+
+[shell]            # 1200-1299
+compress = 1200
+compress_passphrase = 1201
+compress_zip = 1202
+compress_7z = 1203
+extract = 1204
+test = 1205
+name_version = 1206
+extract_version = 1207
+description = 1208

@@ -57,6 +57,13 @@ tables.
   loads in the user's language of the moment: changing it needs no registering again. The script
   is ASCII, the rest escaped (`L"\xb85c"`), as rc.exe, windres and llvm-rc all read that alike
   (llvm-rc's preprocessing loses `#pragma code_page`). These messages take no placeholders.
+  The id of each is the one `messages/ids.toml` gives it (`types` 1100-1199, `shell` 1200-1299), and
+  never changes for a released message: Windows keeps what it read of an id (`HKCU\Software\Classes\
+  Local Settings\MuiCache`, which survives Explorer's restart), so a moved id shows another
+  message's text until that is cleared. A new message takes the next id of its range; one taken away
+  leaves its id retired in a comment there. The build fails for a message with no id, an id out of
+  its range or used twice, and an id that is no message's. aqr-win's `--register` clears what Windows
+  has cached of its own strings.
 - macOS: `LANG.lproj/InfoPlist.strings` (the types' names: `UTTypeDescription` and
   `CFBundleTypeName` are looked up by their English text) and `ServicesMenu.strings` (the
   services' `NSMenuItem`), written into the bundle's `Resources` by `bundle.sh`. A test of aqr-mac

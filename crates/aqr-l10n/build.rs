@@ -11,11 +11,12 @@ use std::path::Path;
 const PLURALS: [&str; 6] = ["zero", "one", "two", "few", "many", "other"];
 
 /// The sections in Windows' string table (`RC`), read by Explorer itself (indirect strings in the
-/// registry): no placeholders.
+/// registry): no placeholders. Each has the ids of `messages/ids.toml` in its own range, which a
+/// message keeps for good (Windows keeps what it read of them).
 const RC_SECTIONS: [&str; 2] = ["types", "shell"];
 
-/// The first resource id of the string table; a message's is this and its index.
-const RESOURCE_BASE: u16 = 1000;
+/// The range of resource ids of each of [`RC_SECTIONS`].
+const RC_RANGES: [(&str, std::ops::RangeInclusive<u16>); 2] = [("types", 1100..=1199), ("shell", 1200..=1299)];
 
 /// Windows' language (`LANGUAGE` of a resource script: primary and sub language) of each
 /// language of the catalogs.
@@ -40,15 +41,18 @@ struct Message {
     plural: bool,
     /// The placeholders of the English text, in order.
     params: Vec<String>,
+    /// Its id in Windows' string table (`messages/ids.toml`), of the messages of [`RC_SECTIONS`].
+    id: Option<u16>,
 }
 
 fn main() {
     let dir = Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("messages");
     println!("cargo:rerun-if-changed={}", dir.display());
+    println!("cargo:rerun-if-changed={}", dir.join("ids.toml").display());
     let mut langs: Vec<(String, toml::Table)> = Vec::new();
     for e in std::fs::read_dir(&dir).unwrap() {
         let path = e.unwrap().path();
-        if path.extension().is_none_or(|x| x != "toml") {
+        if path.extension().is_none_or(|x| x != "toml") || path.file_stem().is_some_and(|s| s == "ids") {
             continue;
         }
         println!("cargo:rerun-if-changed={}", path.display());
@@ -62,7 +66,8 @@ fn main() {
     if langs.first().is_none_or(|(t, _)| t != "en") {
         fail("messages/en.toml is not there");
     }
-    let messages = read(&langs);
+    let mut messages = read(&langs);
+    ids(&dir, &mut messages);
     let tags: Vec<&str> = langs.iter().map(|(t, _)| t.as_str()).collect();
     let mut out = String::new();
     rust(&mut out, &tags, &messages);
@@ -108,7 +113,9 @@ fn read(langs: &[(String, toml::Table)]) -> Vec<Message> {
             if RC_SECTIONS.contains(&section.as_str()) && (plural || !params.is_empty()) {
                 fail(&format!("{at}: a message of Windows' string table takes no placeholders"));
             }
-            messages.push(Message { section: section.clone(), key: key.clone(), forms: vec![english], plural, params });
+            let m =
+                Message { section: section.clone(), key: key.clone(), forms: vec![english], plural, params, id: None };
+            messages.push(m);
         }
     }
     for (tag, table) in &langs[1..] {
@@ -140,6 +147,38 @@ fn read(langs: &[(String, toml::Table)]) -> Vec<Message> {
         }
     }
     messages
+}
+
+/// Gives the messages of [`RC_SECTIONS`] their ids of `messages/ids.toml`. Fails on one with none
+/// or out of its range, an id used twice, and an id of no message of those sections.
+fn ids(dir: &Path, messages: &mut [Message]) {
+    let path = dir.join("ids.toml");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| fail(&format!("{}: {e}", path.display())));
+    let table = text.parse::<toml::Table>().unwrap_or_else(|e| fail(&format!("{}: {e}", path.display())));
+    let mut used: std::collections::BTreeMap<u16, String> = std::collections::BTreeMap::new();
+    for (section, t) in &table {
+        let Some((_, range)) = RC_RANGES.iter().find(|(s, _)| s == section) else {
+            fail(&format!("ids.toml: {section} is not a section of Windows' string table ({RC_SECTIONS:?})"))
+        };
+        let toml::Value::Table(t) = t else { fail(&format!("ids.toml: {section} is not a section")) };
+        for (key, v) in t {
+            let at = format!("ids.toml: {section}.{key}");
+            let id = v.as_integer().and_then(|n| u16::try_from(n).ok());
+            let Some(id) = id.filter(|id| range.contains(id)) else {
+                fail(&format!("{at} is not an id in {}-{}", range.start(), range.end()))
+            };
+            if let Some(other) = used.insert(id, format!("{section}.{key}")) {
+                fail(&format!("{at}: {id} is {other}'s too"));
+            }
+            let Some(m) = messages.iter_mut().find(|m| m.section == *section && m.key == *key) else {
+                fail(&format!("{at} is not a message of en.toml (retire its id in a comment instead)"))
+            };
+            m.id = Some(id);
+        }
+    }
+    if let Some(m) = messages.iter().find(|m| RC_SECTIONS.contains(&m.section.as_str()) && m.id.is_none()) {
+        fail(&format!("{}.{} has no id in ids.toml (the next of its range)", m.section, m.key));
+    }
 }
 
 /// The forms of a message: a string (the category "other"), or a table of categories.
@@ -205,8 +244,13 @@ fn rust(out: &mut String, tags: &[&str], messages: &[Message]) {
     writeln!(out, "// Written by aqr-l10n's build.rs from messages/*.toml.\n").unwrap();
     writeln!(out, "/// The languages of the catalogs, English first.").unwrap();
     writeln!(out, "pub const LANGS: [&str; {}] = {tags:?};", tags.len()).unwrap();
-    writeln!(out, "/// The first resource id of Windows' string table.").unwrap();
-    writeln!(out, "pub const RESOURCE_BASE: u16 = {RESOURCE_BASE};").unwrap();
+    writeln!(out, "/// The id of each message in Windows' string table (0: it is not in it).").unwrap();
+    writeln!(
+        out,
+        "static RESOURCE_IDS: [u16; {n}] = {:?};",
+        messages.iter().map(|m| m.id.unwrap_or(0)).collect::<Vec<_>>()
+    )
+    .unwrap();
     writeln!(out, "/// The forms of each message of each language (none: not translated).").unwrap();
     writeln!(out, "static TEXTS: [[&[(Plural, &str)]; {n}]; {}] = [", tags.len()).unwrap();
     for lang in 0..tags.len() {
@@ -274,7 +318,7 @@ fn capitalize(s: &str) -> String {
 fn rc(tags: &[&str], messages: &[Message]) -> String {
     let mut out = String::from(
         "// Written by aqr-l10n's build.rs from messages/*.toml: what Explorer reads itself (indirect\n\
-         // strings, \"@aqr-win.exe,-ID\"), each message at RESOURCE_BASE and its index. All ASCII: what\n\
+         // strings, \"@aqr-win.exe,-ID\"), each message at its id of messages/ids.toml. All ASCII: what\n\
          // is not is escaped (UTF-16), as rc.exe, windres and llvm-rc all read it so.\n",
     );
     for (lang, tag) in tags.iter().enumerate() {
@@ -282,9 +326,11 @@ fn rc(tags: &[&str], messages: &[Message]) -> String {
             fail(&format!("{tag}: no Windows language in build.rs's RC_LANGUAGES"))
         };
         writeln!(out, "\nLANGUAGE {id}\nSTRINGTABLE\nBEGIN").unwrap();
-        for (i, m) in messages.iter().enumerate().filter(|(_, m)| RC_SECTIONS.contains(&m.section.as_str())) {
+        let mut in_table: Vec<&Message> = messages.iter().filter(|m| m.id.is_some()).collect();
+        in_table.sort_by_key(|m| m.id);
+        for m in in_table {
             let text = m.forms[lang].first().or(m.forms[0].first()).map(|(_, t)| unescape(t)).unwrap();
-            writeln!(out, "    {}, L\"{}\"", RESOURCE_BASE as usize + i, rc_string(&text)).unwrap();
+            writeln!(out, "    {}, L\"{}\"", m.id.unwrap(), rc_string(&text)).unwrap();
         }
         writeln!(out, "END").unwrap();
     }
