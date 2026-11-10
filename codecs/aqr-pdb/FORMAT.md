@@ -4,7 +4,8 @@ This document specifies the modules of aqr-formula entry formulas that rebuild P
 MSF container of Microsoft's debugging information) from streams:
 [`pdb-msf`](#2-the-pdb-msf-module), the container from its streams' data, its layout and the
 rest of its blocks, and [`pdb-symbols`](#3-the-pdb-symbols-module), the CodeView symbol records
-of the modules' streams from their fields. The document is meant to be complete: an
+of the modules' streams from their fields, and [`pdb-types`](#4-the-pdb-types-module), the TPI
+and IPI streams (the type records) with their hash streams. The document is meant to be complete: an
 implementation of the modules can be written from it alone. Sections marked *(encoder)*
 describe the choices this implementation makes when it builds formulas; the modules do not
 depend on them.
@@ -14,6 +15,7 @@ Contents:
 1. [Conventions](#1-conventions)
 2. [The `pdb-msf` module](#2-the-pdb-msf-module)
 3. [The `pdb-symbols` module](#3-the-pdb-symbols-module)
+4. [The `pdb-types` module](#4-the-pdb-types-module)
 
 ## 1. Conventions
 
@@ -224,3 +226,167 @@ site's annotations are kept where they hold an operation not of 1 to 13, an inte
 fewest bytes, or bytes but zeros after an operation 0. Parents and ends are derived where they
 are those of the scopes as they nest. The encoder decodes what it made and takes the symbols
 only where they come back.
+
+## 4. The `pdb-types` module
+
+The TPI stream (stream 2) holds the type records, the IPI stream (stream 4) the id records
+(functions, strings, build information, links of a type to its line); both are a header of 56
+bytes and records, each a `u16` length (of what follows it), a `u16` kind and its fields. A
+stream's header names a hash stream (a stream of the file): the hash value of each record (`u32`,
+modulo the header's number of buckets), then an index (pairs of `u32`: a record's index and its
+offset in the records, for some of them) and the adjusters (empty). The module makes the two
+streams and their hash streams from the fields of the records; the hash stream is made in two
+outputs, which the formula puts one after the other.
+
+- **Module**: name `pdb-types`, version 1. A **part module** (spec, "Module execution").
+- **Params**: a byte for the TPI stream and one for the IPI stream, `mode | rule << 2`, then six
+  varints, the sizes of the outputs.
+- **Resources**: none.
+- **Inputs**: exactly 13, each one stream of the names below, read in order (windows of one
+  page).
+- **Outputs**: exactly 6, of the sizes in the params: the TPI stream, its hash values, its index
+  (and adjusters, none), then the IPI stream's three.
+
+`mode` is 0 (the stream is absent: its three sizes are 0), 1 (**records**: the stream, its size
+at least 56; the other two sizes are 0) or 2 (**full**: also the hash values, a multiple of 4
+bytes, and the index, a multiple of 8). The records of the TPI stream are decoded first, then
+those of the IPI stream, from the same inputs. The bits of `rule`: bit 0 the rule of the index
+(§4.4), bit 1 that the header names the offset of the adjusters as the index's, not as its end
+(lld); in mode 1 no rule is set.
+
+| # | input | holds |
+|---|---|---|
+| 0 | `kind` | a byte for each record: its kind's index in the list below, or 255 (kept) |
+| 1 | `sub` | for a field list or a method list, a byte for each member and 0 at the end |
+| 2 | `ti` | indices coded as the distance back, of records but field lists and member functions |
+| 3 | `fti` | indices of the other stream's space (§4.2) |
+| 4 | `num` | counts, and numeric leaves (§4.3) |
+| 5 | `attr` | small fields, of records but field lists, as varints |
+| 6 | `name` | names, each with its NUL |
+| 7 | `raw` | bytes as they are |
+| 8 | `hdr` | the header (§4.4) |
+| 9 | `tif` | indices of field lists, as the distance back |
+| 10 | `tim` | indices of member functions (kind `0x1009`) as the distance back, but the class by `Prev` |
+| 11 | `attrf` | small fields of field lists |
+| 12 | `tia` | indices coded as `Abs` |
+
+The kinds with layouts, in the order of their indices: `0x000a`, `0x1001`, `0x1002`, `0x1008`,
+`0x1009`, `0x1201`, `0x1203`, `0x1205`, `0x1206`, `0x1503`, `0x1504`, `0x1505`, `0x1506`,
+`0x1507`, `0x1601` to `0x1607`. The members of a field list, with the codes 1 and up in `sub`:
+`0x1400`, `0x1401`, `0x1402`, `0x1404`, `0x1409`, `0x1502`, `0x150d`, `0x150e`, `0x150f`,
+`0x1510`, `0x1511`, `0x1512`. In a method list the byte of a member is 255.
+
+### 4.1 Layouts
+
+A record is made of its kind (a `u16`) and its fields, the **padding** and nothing else. The
+padding is the bytes that make the record's length (with the `u16` before it) a multiple of 4,
+`0xf3 0xf2 0xf1` for 3, `0xf2 0xf1` for 2, `0xf1` for 1, none for 0; a member of a field list is
+padded in the same way, counting from the start of the record. Fields (`ti` an index of the type
+records, `id` of the id records; both coded by §4.2; `u8`, `u16`, `u32` to `attr` or `attrf`
+as a varint; `count` a `u16` or `u32` to `num`; `numeric` §4.3; `name` to `name`, with its NUL;
+`tail` below):
+
+| kind | fields |
+|---|---|
+| `0x000a` | `u16` n, ⌈n / 2⌉ bytes of `raw` (no padding but the usual) |
+| `0x1001` | ti, u16 |
+| `0x1002` | ti, u32 attr; if bits 5 to 7 of attr are 2 or 3: ti, u16 |
+| `0x1008` | ti, u8, u8, u16, ti |
+| `0x1009` | ti, ti (`Prev`), ti, u8, u8, u16, ti (`Abs`), u32 |
+| `0x1201` | count (u32) n, n × ti |
+| `0x1203` | members until the end |
+| `0x1205` | ti, u8, u8 |
+| `0x1206` | members until the end: u16 attr, u16, ti, and a u32 if bits 2 to 4 of attr are 4 or 6 |
+| `0x1503` | ti, ti, numeric, name |
+| `0x1504`, `0x1505` | count (u16), u16 prop, ti, ti, ti, numeric, name, and a name if prop & 0x200 |
+| `0x1506` | count (u16), u16 prop, ti, numeric, name, and a name if prop & 0x200 |
+| `0x1507` | count (u16), u16 prop, ti, ti, name, and a name if prop & 0x200 |
+| `0x1601` | id, ti, name, tail |
+| `0x1602` | ti, ti, name, tail |
+| `0x1603` | count (u16) n, n × id |
+| `0x1604` | count (u32) n, n × id |
+| `0x1605` | id, name |
+| `0x1606` | ti, id, u32 |
+| `0x1607` | ti, id, u32, u16 (no padding) |
+
+| member | fields |
+|---|---|
+| `0x1400` | u16, ti, numeric |
+| `0x1401`, `0x1402` | u16, ti, ti, numeric, numeric |
+| `0x1404`, `0x1409` | u16, ti |
+| `0x1502` | u16, numeric, name |
+| `0x150d` | u16, ti, numeric, name |
+| `0x150e` | u16, ti (`Abs`), name |
+| `0x150f` | count (u16), ti, name |
+| `0x1510`, `0x1512` | u16, ti, name |
+| `0x1511` | u16 attr, ti, a u32 if bits 2 to 4 of attr are 4 or 6, name |
+
+**tail**: a byte of the attributes' stream, 0 or 1; if 1, 8 bytes of `raw` (what some compilers
+write after the name: a hash).
+
+A record **kept** has the code 255 in `kind`; `raw` holds a varint kind, a varint `n` (2 to
+65535) and `n − 2` bytes, the record's after its kind. Any record of a kind with no layout is
+kept, as is one that the layout does not give exactly (§4.5).
+
+### 4.2 Indices
+
+A record has an index, `begin` (the header's first index) plus its position. An index of the
+stream's own space (types in the TPI stream, ids in the IPI stream) is, by how it is coded:
+
+- `Back`: the varint `v`. Even: the record's index less 1 less `v / 2`, which must be `begin` or
+  more. Odd, `u = v >> 1`: `u` if below `begin` (a simple type), else the record's index plus
+  `u − begin` (a record after it).
+- `Abs`: the varint, as it is.
+- `Prev`: the previous index coded so (0 at the start of each stream) moved by the varint
+  unzigzagged.
+
+An index of the other space (types in the IPI stream) is the previous one in `fti` (0 at the
+start of each stream) moved by the varint unzigzagged. All results must fit a `u32`.
+
+### 4.3 Numeric leaves
+
+A leaf is a `u16`, a value if below 0x8000, else a code (`0x8000` to `0x8010`) and the bytes
+that follow. The varint of `num` is `z`. Unless it is 2⁶⁴ − 1, the value is `unzigzag(z)`, in the
+shortest of: inline (0 to 0x7fff); `0x8002` (to 0xffff); `0x8004` (to 0xffffffff); `0x800a`
+(above); for negative numbers `0x8000` (to −128), `0x8001` (to −32768), `0x8003`
+(to −2³¹), `0x8009`. For 2⁶⁴ − 1: a varint `n` and `n` bytes of `raw`, the leaf as it is.
+
+### 4.4 Header, hashes and index
+
+In mode 1 the header is 56 bytes of `hdr`, of which `begin` is the `u32` at 8. In mode 2, the
+varints of `hdr`: the version, `begin`, the hash stream's index (a `u16`), the auxiliary index
+(`u16`), the size of a key, the number of buckets (not 0), and the number of exceptions `e`;
+then `e` pairs, a varint (the position of a record less the last exception's, from 0) and the
+hash value of the record. The header is the `u32`s: the version, 56, `begin`, `begin` plus the
+records (the size of the hash values over 4), the bytes of the records, the hash stream's index
+and the auxiliary's as a `u32` (`hash | aux << 16`), the key, the buckets, 0, the size of the
+hash values, the same, the size of the index, the offset of the adjusters (the size of the hash
+values plus that of the index, or without it with bit 1 of `rule`), 0.
+
+The hash value of a record, modulo the buckets (the record's bytes include its length):
+
+- kinds `0x1606` and `0x1607`: the string hash of the 4 bytes after the kind;
+- kinds `0x1504` to `0x1507` that are not forward declarations (bit 7 of prop clear) and whose
+  name, after the last colon, is not `<unnamed-tag>` or `__unnamed`: the string hash of the
+  unique name if bit 8 of prop (scoped) is set and there is one, else of the name;
+- others: the CRC-32 (reflected, polynomial 0xedb88320, the register 0 at the start and the
+  result) of the record.
+
+The string hash: `r` the XOR of the `u32`s of the string, the `u16` of the remainder if
+its bit 1 is set and its last byte if bit 0 is; `r |= 0x20202020`, `r ^= r >> 11`, `r ^ (r >> 16)`.
+A record whose hash is another is an exception, which `hdr` names.
+
+The index has an entry (the record's index and its offset from the first record, two `u32`s) for
+the first record, and with rule 0 for each record at an offset of the next multiple of 8192
+or more after the previous entry's offset (the entry's, rounded down to a multiple of 8192, plus
+8192), with rule 1 for each record that ends in a later 8192 bytes than it starts in.
+
+### 4.5 Encoding *(encoder)*
+
+A stream is taken where it has a header of the version 20040203 and 56 bytes, a `begin` other
+than 0 and records to its end. Mode 2 is used where its hash stream is another stream of the
+file, of the size the header says, with an index by one of the rules and a header as above. The
+encoder decodes what it made and compares it with the streams. A record is kept where its
+fields do not end at its length, its padding is not the usual, a leaf has a code not in the table,
+or its kind has no layout. A numeric leaf is escaped where it is not in the shortest form, not
+whole or past ±2⁶². Formulas take the streams where the records are 64 KiB or more.

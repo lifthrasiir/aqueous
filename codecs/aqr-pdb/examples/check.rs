@@ -26,6 +26,13 @@ fn main() {
         }
         return;
     }
+    if std::env::args().nth(1).as_deref() == Some("--types") {
+        // the TPI and IPI streams coded: `--types FILE... [--dump DIR]`
+        let a: Vec<String> = std::env::args().skip(2).collect();
+        let dump = a.iter().position(|x| x == "--dump").map(|k| a[k + 1].clone());
+        a.iter().filter(|x| x.ends_with(".pdb")).for_each(|p| types(p, dump.as_deref()));
+        return;
+    }
     if std::env::args().nth(1).as_deref() == Some("--formula") {
         std::env::args().skip(2).for_each(|p| time_formula(&p));
         return;
@@ -90,4 +97,44 @@ fn time_formula(p: &str) {
     let t = std::time::Instant::now();
     let f = aqr_pdb::formula::encode(&d, 1);
     println!("formula::encode {p}: {:?} in {:.2?}", f.map(|f| f.streams.len()), t.elapsed());
+}
+
+/// The TPI and IPI streams of a file through `pdb-types`: what each input is, and zstd -3 of it.
+fn types(p: &str, dump: Option<&str>) {
+    let d = std::fs::read(p).unwrap();
+    let Some(([streams, _, _], spans)) = aqr_pdb::msf::encode_streams(&d) else { return };
+    let name = std::path::Path::new(p).file_stem().unwrap().to_string_lossy().to_string();
+    let t = std::time::Instant::now();
+    let Some(e) = aqr_pdb::types::encode(&streams, &spans) else {
+        println!("{name}: types not taken");
+        return;
+    };
+    let enc = t.elapsed();
+    let whole: usize = e.places.iter().map(|p| p.bytes.len()).sum();
+    let inputs: Vec<&[u8]> = e.streams.iter().map(|v| &v[..]).collect();
+    let t = std::time::Instant::now();
+    let back = aqr_pdb::module::types(&e.params, &inputs, e.sizes.iter().sum()).unwrap();
+    let dec = t.elapsed();
+    let zo: usize = e.places.iter().map(|p| z(&streams[p.bytes.clone()])).sum();
+    let zs: Vec<usize> = e.streams.iter().map(|s| z(s)).collect();
+    println!(
+        "{name}: {whole} B in {} streams, zstd -3 {zo} -> {} ({} B); encode {enc:.2?}, decode {dec:.2?}, {} B out",
+        e.places.len(),
+        zs.iter().sum::<usize>(),
+        e.streams.iter().map(|s| s.len()).sum::<usize>(),
+        back.len()
+    );
+    for (index, own) in [(2, aqr_pdb::types::Space::Type), (4, aqr_pdb::types::Space::Id)] {
+        let Some(r) = spans.get(index).cloned().flatten() else { continue };
+        for (kind, n, bytes, kept, by) in aqr_pdb::types::by_kind(&streams[r], own) {
+            println!("  {index} {kind:04x}: {n} records {bytes} B, kept {kept}; streams {by:?}");
+        }
+    }
+    println!("  sizes {:?}, kept records {}", e.sizes, e.streams[0].iter().filter(|&&c| c == 255).count());
+    for ((n, s), z) in aqr_pdb::types::STREAM_NAMES.iter().zip(&e.streams).zip(&zs) {
+        println!("    {n:6} {:>10} {:>10}", s.len(), z);
+        if let Some(dir) = dump {
+            std::fs::write(format!("{dir}/{name}.{n}"), s).unwrap();
+        }
+    }
 }

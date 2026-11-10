@@ -10,6 +10,7 @@ pub mod formula;
 pub mod module;
 pub mod msf;
 pub mod symbols;
+pub mod types;
 
 /// Streams packed into an input: the varints of the lengths of all but the last, then the
 /// streams one after another, the last taking what is left.

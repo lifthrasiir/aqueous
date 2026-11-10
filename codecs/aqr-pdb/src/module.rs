@@ -63,3 +63,124 @@ pub fn symbols(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     }
     Ok(out)
 }
+
+/// `pdb-types`: the TPI and IPI streams with their hash streams, the outputs of
+/// [`crate::types::Config`] one after another, from `params` and `inputs` (the streams of
+/// [`crate::types::STREAM_NAMES`]), `len` bytes in all.
+pub fn types(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
+    use crate::types::{self, Config, NUM_INPUTS, NUM_OUTPUTS};
+    use aqr_api::stream::Slice;
+    let config = Config::get(params)?;
+    if inputs.len() != NUM_INPUTS || config.sizes.iter().sum::<u64>() != len {
+        return Err(corrupt());
+    }
+    let mut ins: Vec<Slice> = inputs.iter().map(|i| Slice(i)).collect();
+    let mut outs: Vec<Vec<u8>> = config.sizes.iter().map(|&s| Vec::with_capacity(s.min(1 << 30) as usize)).collect();
+    {
+        let mut i = ins.iter_mut();
+        let mut o = outs.iter_mut();
+        let ins: [&mut dyn aqr_api::stream::Pull; NUM_INPUTS] =
+            std::array::from_fn(|_| i.next().unwrap() as &mut dyn aqr_api::stream::Pull);
+        let outs: [&mut dyn aqr_api::stream::Put; NUM_OUTPUTS] =
+            std::array::from_fn(|_| o.next().unwrap() as &mut dyn aqr_api::stream::Put);
+        types::run(&config, ins, outs)?;
+    }
+    Ok(outs.concat())
+}
+
+/// The pages of the windows of `pdb-types`'s inputs and outputs (as a part module,
+/// [`types_part`]).
+pub const TYPES_WINDOW: u32 = 1;
+
+/// The `K`-th output of a part module put in order through its window, `size` bytes in all.
+struct Sink<const K: u32> {
+    at: u64,
+    size: u64,
+}
+
+impl<const K: u32> aqr_api::stream::Put for Sink<K>
+where
+    aqr_api::Output<K>: aqr_api::Memory + aqr_api::Writable,
+{
+    fn put(&mut self, mut d: &[u8]) -> Option<()> {
+        use aqr_api::{Memory, Output};
+        if d.len() as u64 > self.size - self.at {
+            return None;
+        }
+        let w = Output::<K>::size();
+        while !d.is_empty() {
+            let k = (d.len() as u64).min(w - self.at % w) as usize;
+            Output::<K>::write(self.at % w, &d[..k]);
+            self.at += k as u64;
+            Output::<K>::commit(self.at);
+            d = &d[k..];
+        }
+        Some(())
+    }
+}
+
+/// The module `pdb-types` as a part module (its entry point, of `aqr_api::entry!`): what
+/// [`types`] gives, its inputs taken and its outputs put in order through windows of
+/// [`TYPES_WINDOW`] pages, in pieces: nothing is held, whatever the lengths.
+pub fn types_part(params_len: u64, lens: [u64; crate::types::NUM_INPUTS], sizes: [u64; crate::types::NUM_OUTPUTS]) {
+    aqr_api::finish(types_stream(params_len, lens, sizes));
+}
+
+fn types_stream(
+    params_len: u64,
+    lens: [u64; crate::types::NUM_INPUTS],
+    sizes: [u64; crate::types::NUM_OUTPUTS],
+) -> Result<()> {
+    use crate::types::{self, Config};
+    use aqr_api::{Memory, Params, stream::In};
+    // (two bytes and six varints at most)
+    let mut params = [0; 2 + 6 * 10];
+    let params = params.get_mut(..params_len as usize).ok_or_else(corrupt)?;
+    Params::read(0, params);
+    let config = Config::get(params)?;
+    if config.sizes != sizes {
+        return Err(corrupt());
+    }
+    let mut ins = (
+        In::<0>::new(lens[0]),
+        In::<1>::new(lens[1]),
+        In::<2>::new(lens[2]),
+        In::<3>::new(lens[3]),
+        In::<4>::new(lens[4]),
+        In::<5>::new(lens[5]),
+        In::<6>::new(lens[6]),
+        In::<7>::new(lens[7]),
+        In::<8>::new(lens[8]),
+        In::<9>::new(lens[9]),
+        In::<10>::new(lens[10]),
+        In::<11>::new(lens[11]),
+        In::<12>::new(lens[12]),
+    );
+    let mut outs = (
+        Sink::<0> { at: 0, size: sizes[0] },
+        Sink::<1> { at: 0, size: sizes[1] },
+        Sink::<2> { at: 0, size: sizes[2] },
+        Sink::<3> { at: 0, size: sizes[3] },
+        Sink::<4> { at: 0, size: sizes[4] },
+        Sink::<5> { at: 0, size: sizes[5] },
+    );
+    types::run(
+        &config,
+        [
+            &mut ins.0,
+            &mut ins.1,
+            &mut ins.2,
+            &mut ins.3,
+            &mut ins.4,
+            &mut ins.5,
+            &mut ins.6,
+            &mut ins.7,
+            &mut ins.8,
+            &mut ins.9,
+            &mut ins.10,
+            &mut ins.11,
+            &mut ins.12,
+        ],
+        [&mut outs.0, &mut outs.1, &mut outs.2, &mut outs.3, &mut outs.4, &mut outs.5],
+    )
+}

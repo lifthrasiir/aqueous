@@ -19,6 +19,16 @@ PDB files (the MSF 7.00 container of Microsoft's debugging information, as `link
   (the same in 99.9% of uniform.pdb's 384 K entries); the rest (checksums, global references)
   as it is, scanned as content.
 
+- the type records (`pdb-types`, a part module of six outputs): the TPI and IPI streams and the
+  hash streams their headers name. Each record's fields by its kind's layout to streams of their
+  own (kinds, members of field lists, type indices, attributes, counts and numeric leaves, names,
+  bytes kept); type indices as the distance back from the record's own (or as they are, or from
+  the last of their field, where that is better), numeric leaves in the shortest form, padding
+  and lengths derived; the header, the hash of each record (CRC-32 of the record, the string hash
+  of a defined type's name or unique name, of the index of a link to a line) and the offsets of
+  the index (both rules seen, Microsoft's and lld's) derived, the hashes that differ named. A
+  record not as the layouts say is kept as it is. FORMAT.md §4.
+
 aqr-compress takes PDB files whose modules' symbols are 512 KiB or more: below that, the
 modules' blocks (12 KB) cost more than they save. The other streams are scanned as content
 (record inference finds the section contributions, hashes and the like): the modules' streams
@@ -77,8 +87,14 @@ Peak RSS compressing `uniform.pdb` 331 -> 453 MB, testing 136 MB. The modules' W
 
 Left:
 
-- The type records (TPI and IPI: `combase.pdb`'s 38.4 MB of types are 3.5 of its 14.1 MB under
-  zstd -3), the global symbols' records (and their publics' and globals' hashes, which follow
+- The type records: record kinds with no layout (`LF_VFTABLE`, labels, 16-bit kinds, the old
+  forms) are kept whole; the 8 bytes some compilers write after the name of a function id
+  (310 KB in `combase.pdb`, a hash) are kept; the names (1.1 MB of `combase.pdb`'s 4.5 MB of
+  types) are text as they are, a type's name and decorated name twice and again for its forward
+  declaration (no dictionary of earlier names: it would be memory growing with the data); the
+  type indices (0.9 MB) are only transformed; adjusters of the hash stream (none seen) make a
+  stream's hashes kept.
+- The global symbols' records (and their publics' and globals' hashes, which follow
   from them), the file checksums of C13 lines, the DBI stream's section contributions; FPO
   and OMAP.
 - Windows' public PDBs: xz -9 still beats the archive by 13 to 20% on them.
