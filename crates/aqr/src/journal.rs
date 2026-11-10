@@ -226,6 +226,23 @@ pub fn upto(input: &Path, bytes: &[u8], at: &At, quiet: bool) -> Result<usize, S
     Ok(picked.metadata)
 }
 
+/// `--tag LABEL ARCHIVE`: the state the archive is in named as a journal point, by a segment of no
+/// entries appended (the file is not otherwise changed).
+pub fn tag_all(a: &crate::Args) -> Result<(), String> {
+    let label = a.tag.as_deref().ok_or("--tag takes a label")?;
+    let [path] = &a.inputs[..] else { return Err("--tag takes a label and one archive".into()) };
+    let point = point(label, now_ms()?)?;
+    let start = std::time::Instant::now();
+    crate::begin("tag", std::slice::from_ref(path), Some(path));
+    let opened = crate::append::open(path, a.quiet)?;
+    let grew = crate::edit::journal(a, path, opened.into_prior(), &point)?;
+    if !a.quiet {
+        eprintln!("{}: journal point {:?} added (+{grew} bytes)", path.display(), point.1);
+    }
+    crate::end(Some(path), 0, 0, grew, start);
+    Ok(())
+}
+
 /// `--history`: the points of each archive of `a` listed.
 pub fn history_all(a: &crate::Args) -> Result<(), String> {
     use std::io::Write;
@@ -471,7 +488,7 @@ pub fn history(input: &Path, bytes: &[u8], json: bool) -> Result<String, String>
     if json {
         // (a line: the archive and its points, none maybe)
         let points: Vec<serde_json::Value> = (archive.journal().iter().enumerate())
-            .map(|(k, p)| serde_json::json!({"number": k + 1, "time": p.time, "label": p.label}))
+            .map(|(k, p)| serde_json::json!({"number": k + 1, "time": p.time, "shown": show(p.time), "label": p.label}))
             .collect();
         let v = serde_json::json!({"archive": crate::stdio::shown(input).to_string(), "points": points});
         return Ok(format!("{v}\n"));

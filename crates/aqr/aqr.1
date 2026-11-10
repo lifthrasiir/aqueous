@@ -445,6 +445,10 @@ in local time or followed by
 or an offset
 .Cm +HH:MM :
 the last point at or before the end of the period it names (2026-11-01 is up to the end of that day).
+.It Fl -tag Ar label
+Name the state the archive is in as a journal point, as
+.Fl j
+does, appending a segment of no entries; nothing else is changed.
 .It Fl -history
 List the journal points of the archives: their numbers, times and labels.
 .It Fl -diff

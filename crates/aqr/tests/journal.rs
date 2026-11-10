@@ -342,3 +342,38 @@ fn diff_between_states() {
     let o = aqr_at(&d, None, &["--diff", "plain.aqr"]);
     assert!(!o.status.success());
 }
+
+/// `--tag` names the state an archive is in, one made without `-j` too, and changes nothing else.
+#[test]
+fn naming_a_state() {
+    let d = scratch("tag");
+    let src = d.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("a.txt"), words(1, 2_000)).unwrap();
+    ok(&d, None, &["-q", "-o", "a.aqr", "src"]);
+    let before = states_of(&d, "a.aqr");
+    ok(&d, Some(&day(0)), &["-q", "--tag", "release {today}", "a.aqr"]);
+    fs::write(src.join("b.txt"), words(2, 1_000)).unwrap();
+    ok(&d, None, &["-q", "-a", "a.aqr", "src"]);
+    let o = ok(&d, Some(&day(1)), &["--tag", "later", "a.aqr"]);
+    assert!(stderr(&o).contains("journal point \"later\" added"), "{}", stderr(&o));
+    let h = stdout(&ok(&d, None, &["--history", "a.aqr"]));
+    assert!(h.lines().count() == 2 && h.contains("release 2026-11-01"), "{h}");
+    assert_eq!(listed(&d, &["-t", "-q", "--at", "@release 2026-11-01", "a.aqr"]), ["a.txt"]);
+    assert_eq!(listed(&d, &["-t", "-q", "--at", "#2", "a.aqr"]), ["a.txt", "b.txt"]);
+    assert_eq!(before, vec!["a.txt".to_string()]);
+    ok(&d, None, &["-q", "-K", "a.aqr"]);
+    for args in [
+        ["--tag", "x"].as_slice(),
+        &["--tag", "x", "a.aqr", "src"],
+        &["--tag", "x", "-t", "a.aqr"],
+        &["--tag", "x", "nowhere.aqr"],
+        &["--tag", "{what}", "a.aqr"],
+    ] {
+        assert!(!aqr_at(&d, None, args).status.success(), "{args:?} succeeded");
+    }
+}
+
+fn states_of(dir: &Path, archive: &str) -> Vec<String> {
+    listed(dir, &["-t", "-q", archive])
+}

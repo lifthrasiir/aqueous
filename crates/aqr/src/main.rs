@@ -394,6 +394,8 @@ Compression:
                         {today} and {now} in LABEL are the date and the date and time
 
 Decompression:
+      --tag LABEL       name the state of an archive as a journal point (as -j does,
+                        with nothing else changed)
       --at SPEC         with -t, -d or -K: the archive as it was at a journal point:
                         #N (from 1), #-N (from the last), @LABEL (the last of it), or
                         a date, to its end: 2026, 2026-11, 2026-11-01, 2026-11-01T09:30
@@ -480,6 +482,8 @@ struct Args {
     at: Option<journal::At>,
     /// `--history`: the journal points of the archives listed.
     history: bool,
+    /// `--tag LABEL`: the archive's state named as a journal point, nothing else changed.
+    tag: Option<String>,
     /// `--diff`: what differs between two states of the archives (`--from` and `--at` pick them).
     diff: bool,
     from: Option<journal::At>,
@@ -600,6 +604,7 @@ fn main() -> ExitCode {
     let r = aqr_common::pool::run(|| match () {
         _ if args.edit.is_some() || args.compact => edit::edit(&args),
         _ if args.info => info::info(&args),
+        _ if args.tag.is_some() => journal::tag_all(&args),
         _ if args.history => journal::history_all(&args),
         _ if args.diff => journal::diff_all(&args),
         _ if args.list => list::list_all(&args),
@@ -670,6 +675,7 @@ fn parse() -> Result<Args, String> {
         at: None,
         history: false,
         diff: false,
+        tag: None,
         from: None,
         keep_since: None,
         drop_history: false,
@@ -762,6 +768,7 @@ fn parse() -> Result<Args, String> {
             "--at" => a.at = Some(journal::at_of(&text(value("--at")?))?),
             "--history" => a.history = true,
             "--diff" => a.diff = true,
+            "--tag" => a.tag = Some(text(value("--tag")?)),
             "--from" => a.from = Some(journal::at_of(&text(value("--from")?))?),
             "--keep-since" => a.keep_since = Some(journal::at_of(&text(value("--keep-since")?))?),
             "--drop-history" => a.drop_history = true,
@@ -899,6 +906,17 @@ fn parse() -> Result<Args, String> {
     }
     if a.keep_since.is_some() || a.drop_history {
         return Err("--keep-since and --drop-history are for --compact".into());
+    }
+    if a.tag.is_some() {
+        if a.decompress || a.list || a.info || a.journal.is_some() || a.output.is_some() || a.rm || a.history || a.diff
+        {
+            return Err("--tag takes a label and an archive alone".into());
+        }
+        if a.inputs.len() != 1 {
+            return Err("--tag takes one archive".into());
+        }
+        a.opt.journal = None;
+        return Ok(a);
     }
     if a.history || a.diff {
         let what = if a.diff { "--diff" } else { "--history" };
