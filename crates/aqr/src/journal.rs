@@ -235,8 +235,8 @@ pub fn history_all(a: &crate::Args) -> Result<(), String> {
         let file = std::fs::File::open(input).map_err(|e| err(&crate::exit::seen(e)))?;
         // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
         let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&crate::exit::seen(e)))?;
-        let text = history(input, crate::located(&c, input, a.quiet))?;
-        if a.inputs.len() > 1 {
+        let text = history(input, crate::located(&c, input, a.quiet), a.json)?;
+        if a.inputs.len() > 1 && !a.json {
             if k > 0 {
                 writeln!(out).map_err(|e| e.to_string())?;
             }
@@ -297,30 +297,60 @@ fn keyed(
 
 /// Writes how `after` differs from `before` (a line each: `+` added, `~` changed, `-` removed),
 /// and tells how many of each.
-fn report(out: &mut dyn std::io::Write, before: &Seens, after: &Seens) -> Result<(usize, usize, usize), String> {
+fn changes(before: &Seens, after: &Seens) -> Vec<(char, String)> {
     let shown = |path: &[Vec<u8>], dir: bool| {
         let names: Vec<String> =
             path.iter().map(|n| String::from_utf8_lossy(aqr::name_bytes(n).0).into_owned()).collect();
         names.join("/") + if dir { "/" } else { "" }
     };
     let is_dir = |e: &Seen| e.1 == aqr::EntryNode::Dir;
-    let io = |e: std::io::Error| e.to_string();
-    let (mut added, mut changed, mut removed) = (0, 0, 0);
+    let mut out = Vec::new();
     for (path, now) in after {
         let mark = match before.get(path) {
             None => '+',
             Some(was) if was.1 != now.1 || was.2 != now.2 => '~',
             Some(_) => continue,
         };
-        match mark {
-            '+' => added += 1,
-            _ => changed += 1,
-        }
-        writeln!(out, "{mark} {}", shown(path, is_dir(now))).map_err(io)?;
+        out.push((mark, shown(path, is_dir(now))));
     }
     for (path, was) in before.iter().filter(|(p, _)| !after.contains_key(*p)) {
-        removed += 1;
-        writeln!(out, "- {}", shown(path, is_dir(was))).map_err(io)?;
+        out.push(('-', shown(path, is_dir(was))));
+    }
+    out
+}
+
+/// Writes `changes` (with `--json`, as an object a line: the archive, the states told apart, the
+/// changes `{"change": "added" | "changed" | "removed", "path", "dir"}` and their numbers), and
+/// returns how many were added, changed and removed.
+fn emit(
+    out: &mut dyn std::io::Write,
+    a: &crate::Args,
+    (archive, from, to): (&Path, &str, &str),
+    changes: &[(char, String)],
+) -> Result<(usize, usize, usize), String> {
+    let io = |e: std::io::Error| e.to_string();
+    let n = |m: char| changes.iter().filter(|c| c.0 == m).count();
+    let (added, changed, removed) = (n('+'), n('~'), n('-'));
+    if a.json {
+        let list: Vec<serde_json::Value> = (changes.iter())
+            .map(|(m, p)| {
+                let change = match m {
+                    '+' => "added",
+                    '~' => "changed",
+                    _ => "removed",
+                };
+                serde_json::json!({"change": change, "path": p.trim_end_matches('/'), "dir": p.ends_with('/')})
+            })
+            .collect();
+        let v = serde_json::json!({
+            "archive": crate::stdio::shown(archive).to_string(), "from": from, "to": to, "changes": list,
+            "added": added, "changed": changed, "removed": removed,
+        });
+        writeln!(out, "{v}").map_err(io)?;
+    } else {
+        for (m, p) in changes {
+            writeln!(out, "{m} {p}").map_err(io)?;
+        }
     }
     Ok((added, changed, removed))
 }
@@ -374,7 +404,7 @@ pub fn diff_all(a: &crate::Args) -> Result<(), String> {
     };
     let from = earlier.map_or("nothing".to_string(), named);
     let (before, after) = (state(earlier)?, if later.is_some() { state(later)? } else { seen(&whole) });
-    let (added, changed, removed) = report(&mut out, &before, &after)?;
+    let (added, changed, removed) = emit(&mut out, a, (input, &from, &to), &changes(&before, &after))?;
     if !a.quiet {
         eprintln!("{}: {added} added, {changed} changed, {removed} removed ({from} -> {to})", input.display());
     }
@@ -420,25 +450,32 @@ fn compare(a: &crate::Args, whole: &aqr::Archive, bytes: &[u8], out: &mut dyn st
         aqr::EntryNode::File(c) => aqr::EntryNode::File(g.contents[c].2 as usize),
         ref other => other.clone(),
     });
-    let (added, changed, removed) = report(out, &state, &here)?;
+    let to = a.inputs[1..].iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(" ");
+    let (added, changed, removed) = emit(out, a, (input, &of, &to), &changes(&state, &here))?;
     if !a.quiet {
-        let to: Vec<String> = a.inputs[1..].iter().map(|p| p.display().to_string()).collect();
         eprintln!(
             "{}: {added} only in {to}, {changed} changed, {removed} only in the archive ({of} -> {to})",
-            input.display(),
-            to = to.join(" ")
+            input.display()
         );
     }
     out.flush().map_err(|e| e.to_string())
 }
 
 /// The points of archive `bytes` (of `input`) listed, one on a line: its number, time and label.
-pub fn history(input: &Path, bytes: &[u8]) -> Result<String, String> {
+pub fn history(input: &Path, bytes: &[u8], json: bool) -> Result<String, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
     if aqr::envelope::is_encrypted(bytes) {
         return Err(err(&"an encrypted archive has no journal (it is not appended to)"));
     }
     let archive = aqr::open(bytes, &aqr::NoModules).map_err(|e| err(&e))?;
+    if json {
+        // (a line: the archive and its points, none maybe)
+        let points: Vec<serde_json::Value> = (archive.journal().iter().enumerate())
+            .map(|(k, p)| serde_json::json!({"number": k + 1, "time": p.time, "label": p.label}))
+            .collect();
+        let v = serde_json::json!({"archive": crate::stdio::shown(input).to_string(), "points": points});
+        return Ok(format!("{v}\n"));
+    }
     let mut out = String::new();
     for (k, p) in archive.journal().iter().enumerate() {
         out += &format!("#{}  {}  {}\n", k + 1, show(p.time), p.label);

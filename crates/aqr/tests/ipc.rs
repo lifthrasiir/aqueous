@@ -278,3 +278,35 @@ fn frontend_job() {
     assert_eq!(s.ended[0].1["files"], 2);
     assert_eq!(s.ended[0].1["written"], 3100);
 }
+
+/// A frontend extracts an archive as it was at a journal point (`--at`), having listed the
+/// points as JSON (`--history --json`).
+#[test]
+fn extracting_a_point() {
+    let d = scratch("point");
+    let src = d.join("src");
+    fs::create_dir_all(&src).unwrap();
+    let aqr = |args: &[&str]| {
+        let o = Command::new(env!("CARGO_BIN_EXE_aqr")).current_dir(&d).args(args).output().unwrap();
+        assert!(o.status.success(), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
+        String::from_utf8(o.stdout).unwrap()
+    };
+    fs::write(src.join("a.txt"), "first ".repeat(500)).unwrap();
+    aqr(&["-q", "-j", "one", "-o", "a.aqr", "src"]);
+    fs::write(src.join("b.txt"), "second ".repeat(500)).unwrap();
+    aqr(&["-q", "-a", "-j", "two", "a.aqr", "src"]);
+
+    let list: Value = serde_json::from_str(aqr(&["--history", "--json", "a.aqr"]).trim()).unwrap();
+    let points = list["points"].as_array().unwrap();
+    assert_eq!(points.iter().map(|p| p["label"].as_str().unwrap()).collect::<Vec<_>>(), ["one", "two"]);
+    // the first point, by the number the listing gave
+    let at = format!("#{}", points[0]["number"]);
+    let (archive, out) = (d.join("a.aqr"), d.join("out"));
+    let args: Vec<&std::ffi::OsStr> =
+        vec!["-d".as_ref(), "--at".as_ref(), at.as_ref(), "-o".as_ref(), out.as_os_str(), archive.as_os_str()];
+    let (mut c, lines) = start(&args, &[]);
+    let seen = run(&mut c, lines, true);
+    assert!(c.wait().unwrap().success());
+    assert_eq!(events(&seen), ["begin", "end"]);
+    assert!(out.join("a.txt").exists() && !out.join("b.txt").exists());
+}

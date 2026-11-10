@@ -299,7 +299,8 @@ Modes:
                         without them
   -t, --list            list the entries of an archive, or those of its PATHs (-q: the
                         paths alone; -v: the blocks each file takes, its formula and
-                        all its metadata; --json: as a line of JSON each archive)
+                        all its metadata; --json: as a line of JSON each archive;
+                        --history and --diff take --json too)
   -K, --test            decode and check an archive, writing nothing
   -I, --info            all that an archive records (its blocks and segments), or of
                         its PATHs in each segment (their formulas in full); -v: the
@@ -927,8 +928,8 @@ fn parse() -> Result<Args, String> {
         }
         a.opt.journal = Some(journal::point(label, journal::now_ms()?)?);
     }
-    if a.json && !a.list {
-        return Err("--json is for -t".into());
+    if a.json && !(a.list || a.diff) {
+        return Err("--json is for -t, --history and --diff".into());
     }
     if a.info {
         if a.rm || a.each || a.dereference || a.output.is_some() || !renames.is_empty() || last_dir.is_some() {

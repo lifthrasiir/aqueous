@@ -293,6 +293,16 @@ With
 .Fl t ,
 write a line of JSON for each archive: its entries with all their metadata, and the
 counts and totals.
+.Pp
+With
+.Fl -history ,
+a line each archive: its points
+.Pq number, time in milliseconds since the epoch, and label ;
+with
+.Fl -diff ,
+a line each comparison: the states, the changes
+.Pq added, changed, removed
+and their numbers.
 .It Fl -ipc
 Be driven by a graphical frontend through standard input and output.
 .El

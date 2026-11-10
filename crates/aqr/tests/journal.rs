@@ -68,6 +68,14 @@ fn points_and_states() {
     fs::write(src.join("c.txt"), "gamma ".repeat(500)).unwrap();
     ok(&d, Some(&day(3)), &["-q", "-a", "a.aqr", "src"]);
 
+    // as JSON: the points, none maybe
+    let j: serde_json::Value =
+        serde_json::from_str(stdout(&ok(&d, None, &["--history", "--json", "a.aqr"])).trim()).unwrap();
+    assert_eq!(j["points"].as_array().unwrap().len(), 3);
+    assert_eq!(j["points"][0]["number"], 1);
+    assert_eq!(j["points"][0]["time"], day(0).parse::<u64>().unwrap());
+    assert_eq!(j["points"][0]["label"], "first 2026-11-01");
+    assert_eq!(j["points"][2]["label"], "unchanged");
     let h = stdout(&ok(&d, None, &["--history", "a.aqr"]));
     let rows: Vec<&str> = h.lines().collect();
     assert_eq!(rows.len(), 3, "{h}");
@@ -299,6 +307,16 @@ fn diff_between_states() {
     }
     ok(&d, Some(&day(5)), &["-q", "-j", "only", "-o", "j.aqr", "src"]);
     assert_eq!(stdout(&ok(&d, None, &["--diff", "-q", "--at", "#1", "j.aqr"])).lines().count(), 4);
+    // as JSON, for a frontend
+    let j: serde_json::Value =
+        serde_json::from_str(stdout(&ok(&d, None, &["--diff", "--json", "--at", "#2", "a.aqr"])).trim()).unwrap();
+    assert_eq!(j["archive"], "a.aqr");
+    assert_eq!((j["added"].as_u64(), j["changed"].as_u64(), j["removed"].as_u64()), (Some(1), Some(1), Some(0)));
+    assert_eq!(j["changes"][0], serde_json::json!({"change": "changed", "path": "a.txt", "dir": false}));
+    assert_eq!(j["changes"][1]["change"], "added");
+    let j: serde_json::Value =
+        serde_json::from_str(stdout(&ok(&d, None, &["--diff", "--json", "--at", "@p5", "a.aqr"])).trim()).unwrap();
+    assert_eq!(j["changes"][0], serde_json::json!({"change": "added", "path": "sub", "dir": true}));
     // the archive against paths, as -a takes them: nothing differs yet
     let against = |args: &[&str]| -> Vec<String> {
         let mut all = vec!["--diff", "-q"];
