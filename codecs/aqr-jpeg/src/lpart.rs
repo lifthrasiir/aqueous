@@ -281,6 +281,9 @@ fn group(st: &mut State, sink: &mut Sink, count: u64) -> Result<(), Error> {
 
 /// Bands decoded at once, as tasks, and the task slots of the module.
 pub const THREADS: usize = 8;
+/// Bands read and spawned together, a round: more than run at once, so that the next bands are
+/// decoded while the rows of the first are put.
+pub const ROUND: usize = 16;
 
 /// Bytes of the rows of the band `r0..r1` of a frame of `h`, as [`band_task`] gives them: for each
 /// MCU row, each component's rows of it, 16 bits to a sample.
@@ -314,7 +317,7 @@ fn band_task(h: &Header, rows: (usize, usize), chunk: &[u8]) -> Result<Vec<u8>, 
     Ok(out)
 }
 
-/// A job of one stream in `bands` bands, a chunk and a model for each: [`THREADS`] bands at a
+/// A job of one stream in `bands` bands, a chunk and a model for each: [`ROUND`] bands at a
 /// time are read (their chunks), decoded as tasks, and their rows put in order, whose data is
 /// written as they come.
 fn banded(st: &mut State, sink: &mut Sink, bands: usize) -> Result<(), Error> {
@@ -329,8 +332,8 @@ fn banded(st: &mut State, sink: &mut Sink, bands: usize) -> Result<(), Error> {
     let mut emitted = 0;
     let mut first = 0;
     while first < bands {
-        let n = (bands - first).min(THREADS);
-        let mut chunks: Vec<Vec<u8>> = Vec::with_capacity(THREADS);
+        let n = (bands - first).min(ROUND);
+        let mut chunks: Vec<Vec<u8>> = Vec::with_capacity(ROUND);
         for _ in 0..n {
             chunks.push(st.chunk()?);
         }
@@ -426,10 +429,10 @@ pub fn plan(initial: u64, cut: &[u8], info: &[u8], lens: &[u8]) -> Option<(u64, 
         let rows = lmodel::band_rows(h0.mcus().1, bands as usize);
         let top = sim.top;
         sim.take(block(8 * bands) + held + Emitter::bytes() + block(n(Emitter::row_room(h0))));
-        for (round, chunk) in rows.chunks(THREADS).zip(chunks.chunks(THREADS)) {
+        for (round, chunk) in rows.chunks(ROUND).zip(chunks.chunks(ROUND)) {
             let t = sim.top;
             // the list of chunks, and the chunks, which the tasks have a copy of
-            sim.take(block(12 * n(THREADS)));
+            sim.take(block(12 * n(ROUND)));
             chunk.iter().for_each(|&c| sim.take(n(c)));
             // a task: its model, its frame and the rows it gives, over that copy
             let own = |r: &(usize, usize)| model + Frame::bytes(&lmodel_band(h0, *r)) + block(n(band_bytes(h0, *r)));
