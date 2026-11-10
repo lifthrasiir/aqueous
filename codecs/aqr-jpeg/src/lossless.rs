@@ -59,6 +59,12 @@ impl Header {
         (mx * self.comps[i].h, my * self.comps[i].v)
     }
 
+    /// Samples of plane `i`.
+    pub fn samples_of(&self, i: usize) -> usize {
+        let (w, h) = self.plane(i);
+        w * h
+    }
+
     /// Samples of all planes.
     pub fn samples(&self) -> usize {
         (0..self.comps.len()).map(|i| self.plane(i)).map(|(w, h)| w * h).sum()
