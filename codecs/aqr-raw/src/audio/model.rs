@@ -297,6 +297,179 @@ mod simd {
     }
 }
 
+/// [`neon`] in SSE2 (always there on x86-64), or SSSE3 where the processor has it (`S3`):
+/// `pmaddwd`'s dot products wrap as NEON's multiply-accumulates do; SSSE3's `psignw` makes
+/// the weight steps and `palignr` shifts the history.
+#[cfg(target_arch = "x86_64")]
+mod x86 {
+    use super::*;
+    use std::arch::x86_64::*;
+
+    /// An [`Lms`] in registers.
+    pub struct Regs {
+        w: [__m128i; 4],
+        h: [__m128i; 4],
+        u0: [__m128i; 4],
+        u1: [__m128i; 4],
+        /// The newest input and the last history vector without it.
+        last: i32,
+        hm: __m128i,
+        sh: u32,
+    }
+
+    /// `b:a` shifted right by a lane (NEON's `vextq_s16(a, b, 1)`).
+    #[inline(always)]
+    fn next<const S3: bool>(a: __m128i, b: __m128i) -> __m128i {
+        // SAFETY: SSE2 is always there; SSSE3's where `S3` is set (see `run`).
+        unsafe {
+            if S3 { _mm_alignr_epi8::<2>(b, a) } else { _mm_or_si128(_mm_srli_si128::<2>(a), _mm_slli_si128::<14>(b)) }
+        }
+    }
+
+    impl Regs {
+        #[inline(always)]
+        pub fn load(st: &Lms) -> Regs {
+            const _: () = assert!(DELAY == 2 && TAPS == 32);
+            // SAFETY: SSE2 is always there; the loads stay within the arrays.
+            unsafe {
+                let ld = |p: *const i16| core::array::from_fn(|k| _mm_loadu_si128(p.add(8 * k) as *const __m128i));
+                let h: [__m128i; 4] = ld(st.h.as_ptr());
+                Regs {
+                    w: ld(st.w.as_ptr()),
+                    u0: ld(st.u[0].as_ptr()),
+                    u1: ld(st.u[1].as_ptr()),
+                    last: _mm_extract_epi16::<7>(h[3]) as i16 as i32,
+                    hm: _mm_insert_epi16::<7>(h[3], 0),
+                    h,
+                    sh: st.in_shift,
+                }
+            }
+        }
+
+        #[inline(always)]
+        pub fn store(&self, st: &mut Lms) {
+            // SAFETY: the stores stay within the arrays.
+            unsafe {
+                let stv = |p: *mut i16, v: &[__m128i; 4]| {
+                    for (k, v) in v.iter().enumerate() {
+                        _mm_storeu_si128(p.add(8 * k) as *mut __m128i, *v);
+                    }
+                };
+                stv(st.w.as_mut_ptr(), &self.w);
+                stv(st.h.as_mut_ptr(), &self.h);
+                stv(st.u[0].as_mut_ptr(), &self.u0);
+                stv(st.u[1].as_mut_ptr(), &self.u1);
+            }
+        }
+
+        #[inline(always)]
+        pub fn step<const DEC: bool, const S3: bool>(&mut self, v: &mut i32) {
+            // SAFETY: as in `next`.
+            unsafe {
+                let (w, h) = (&mut self.w, &mut self.h);
+                let a = _mm_add_epi32(
+                    _mm_add_epi32(_mm_madd_epi16(w[0], h[0]), _mm_madd_epi16(w[1], h[1])),
+                    _mm_add_epi32(_mm_madd_epi16(w[2], h[2]), _mm_madd_epi16(w[3], self.hm)),
+                );
+                let a = _mm_add_epi32(a, _mm_shuffle_epi32::<0b01_00_11_10>(a));
+                let a = _mm_add_epi32(a, _mm_shuffle_epi32::<0b10_11_00_01>(a));
+                let older = _mm_cvtsi128_si32(a);
+                let acc = older.wrapping_add(_mm_extract_epi16::<7>(w[3]) as i16 as i32 * self.last);
+                let p = (acc >> W_SHIFT) << self.sh;
+                let (x, e) = if DEC { ((*v).wrapping_add(p), *v) } else { (*v, (*v).wrapping_sub(p)) };
+                *v = if DEC { x } else { e };
+                // Apply the oldest pending step; queue this sample's.
+                let sg = _mm_set1_epi16(((e > 0) as i16 - (e < 0) as i16) * MU);
+                let (one, mone) = (_mm_set1_epi16(1), _mm_set1_epi16(-1));
+                for k in 0..4 {
+                    w[k] = _mm_add_epi16(w[k], self.u0[k]);
+                    self.u0[k] = self.u1[k];
+                    self.u1[k] = if S3 {
+                        _mm_sign_epi16(sg, h[k])
+                    } else {
+                        _mm_mullo_epi16(_mm_min_epi16(_mm_max_epi16(h[k], mone), one), sg)
+                    };
+                }
+                let xn = (x >> self.sh).clamp(-32768, 32767) as i16;
+                self.hm = next::<S3>(h[3], _mm_setzero_si128());
+                *h = [
+                    next::<S3>(h[0], h[1]),
+                    next::<S3>(h[1], h[2]),
+                    next::<S3>(h[2], h[3]),
+                    next::<S3>(h[3], _mm_set1_epi16(xn)),
+                ];
+                self.last = xn as i32;
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub(super) fn run_in<const DEC: bool, const S3: bool>(st: &mut Lms, buf: &mut [i32]) {
+        let mut r = Regs::load(st);
+        for v in buf.iter_mut() {
+            r.step::<DEC, S3>(v);
+        }
+        r.store(st);
+    }
+
+    #[inline(always)]
+    fn run2_in<const DEC: bool, const S3: bool>(sa: &mut Lms, a: &mut [i32], sb: &mut Lms, b: &mut [i32]) {
+        let n = a.len().min(b.len());
+        let mut ra = Regs::load(sa);
+        let mut rb = Regs::load(sb);
+        for (x, y) in a[..n].iter_mut().zip(b[..n].iter_mut()) {
+            ra.step::<DEC, S3>(x);
+            rb.step::<DEC, S3>(y);
+        }
+        for x in &mut a[n..] {
+            ra.step::<DEC, S3>(x);
+        }
+        for y in &mut b[n..] {
+            rb.step::<DEC, S3>(y);
+        }
+        ra.store(sa);
+        rb.store(sb);
+    }
+
+    #[target_feature(enable = "ssse3")]
+    fn run_ssse3<const DEC: bool>(st: &mut Lms, buf: &mut [i32]) {
+        run_in::<DEC, true>(st, buf)
+    }
+
+    #[target_feature(enable = "ssse3")]
+    fn run2_ssse3<const DEC: bool>(sa: &mut Lms, a: &mut [i32], sb: &mut Lms, b: &mut [i32]) {
+        run2_in::<DEC, true>(sa, a, sb, b)
+    }
+
+    pub fn run<const DEC: bool>(st: &mut Lms, buf: &mut [i32]) {
+        if std::is_x86_feature_detected!("ssse3") {
+            // SAFETY: the processor has SSSE3.
+            unsafe { run_ssse3::<DEC>(st, buf) }
+        } else {
+            run_in::<DEC, false>(st, buf)
+        }
+    }
+
+    pub fn run2<const DEC: bool>(sa: &mut Lms, a: &mut [i32], sb: &mut Lms, b: &mut [i32]) {
+        if std::is_x86_feature_detected!("ssse3") {
+            // SAFETY: as in `run`.
+            unsafe { run2_ssse3::<DEC>(sa, a, sb, b) }
+        } else {
+            run2_in::<DEC, false>(sa, a, sb, b)
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn lms_run<const DEC: bool, const PIPE: bool>(st: &mut Lms, buf: &mut [i32]) {
+    x86::run::<DEC>(st, buf)
+}
+
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn lms_run2_in<const DEC: bool, const PIPE: bool>(sa: &mut Lms, a: &mut [i32], sb: &mut Lms, b: &mut [i32]) {
+    x86::run2::<DEC>(sa, a, sb, b)
+}
+
 #[cfg(target_family = "wasm")]
 fn lms_run<const DEC: bool, const PIPE: bool>(st: &mut Lms, buf: &mut [i32]) {
     // (SIMD128 is of the profile of the modules: an engine without it does not run them)
@@ -344,14 +517,20 @@ pub(crate) fn lms_run2_in<const DEC: bool, const PIPE: bool>(sa: &mut Lms, a: &m
     rb.store(sb);
 }
 
-#[cfg(not(any(target_arch = "aarch64", target_family = "wasm")))]
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64", target_family = "wasm")))]
 pub(crate) fn lms_run2_in<const DEC: bool, const PIPE: bool>(sa: &mut Lms, a: &mut [i32], sb: &mut Lms, b: &mut [i32]) {
     lms_run::<DEC, PIPE>(sa, a);
     lms_run::<DEC, PIPE>(sb, b);
 }
 
-#[cfg(not(any(target_arch = "aarch64", target_family = "wasm")))]
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64", target_family = "wasm")))]
 fn lms_run<const DEC: bool, const PIPE: bool>(st: &mut Lms, buf: &mut [i32]) {
+    lms_run_scalar::<DEC>(st, buf)
+}
+
+/// The LMS stage of [`neon`] and the others, one lane at a time.
+#[cfg(any(test, not(any(target_arch = "aarch64", target_arch = "x86_64", target_family = "wasm"))))]
+fn lms_run_scalar<const DEC: bool>(st: &mut Lms, buf: &mut [i32]) {
     let sh = st.in_shift;
     for v in buf.iter_mut() {
         let mut acc = 0i32;
@@ -372,6 +551,80 @@ fn lms_run<const DEC: bool, const PIPE: bool>(st: &mut Lms, buf: &mut [i32]) {
         }
         st.h.copy_within(1.., 0);
         st.h[TAPS - 1] = (x >> sh).clamp(-32768, 32767) as i16;
+    }
+}
+
+/// The LMS stage of this target (and SSE2's alone on x86-64) is the scalar one, one channel
+/// and two at once, encoding and decoding, through residuals of every size and changes of
+/// the input shift.
+#[cfg(test)]
+#[test]
+fn lms_vector_is_scalar() {
+    type Run = fn(&mut Lms, &mut [i32]);
+    type Run2 = fn(&mut Lms, &mut [i32], &mut Lms, &mut [i32]);
+    let runs: &[[Run; 2]] = &[
+        [lms_run::<false, false>, lms_run::<true, false>],
+        #[cfg(target_arch = "x86_64")]
+        [x86::run_in::<false, false>, x86::run_in::<true, false>],
+    ];
+    let runs2: [Run2; 2] = [lms_run2::<false>, lms_run2::<true>];
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut sig = Vec::new();
+    let mut phase = 0f64;
+    for i in 0..20000 {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        phase += 0.01 + (i / 4000) as f64 * 0.05;
+        let amp = [300.0, 30000.0, 3e6, 2e8, 1e9][i / 4000];
+        let noise = (seed % 2001) as i32 - 1000;
+        sig.push(((phase.sin() * amp) as i32).wrapping_add(noise * (i / 4000 + 1) as i32));
+    }
+    // Each run over chunks, the shift set from the errors' scale after each.
+    let chunked = |run: &mut dyn FnMut(&mut Lms, &mut [i32]), dec: bool, data: &[i32]| -> (Vec<i32>, Lms) {
+        let (mut st, mut sc) = (Lms::default(), Scale::default());
+        let mut out = data.to_vec();
+        for c in out.chunks_mut(1111) {
+            let errs = if dec { c.to_vec() } else { Vec::new() };
+            run(&mut st, c);
+            for &e in if dec { &errs[..] } else { &c[..] } {
+                sc.next(zigzag(e));
+            }
+            st.set_scale(&sc);
+        }
+        (out, st)
+    };
+    let state = |st: &Lms| (st.w, st.h, st.u, st.in_shift);
+    let (errs, st) = chunked(&mut lms_run_scalar::<false>, false, &sig);
+    let (back, _) = chunked(&mut lms_run_scalar::<true>, true, &errs);
+    assert_eq!(back, sig);
+    for &[enc, dec] in runs {
+        let (e, s) = chunked(&mut |st, c| enc(st, c), false, &sig);
+        assert!(e == errs && state(&s) == state(&st), "encoding");
+        assert!(chunked(&mut |st, c| dec(st, c), true, &errs).0 == sig, "decoding");
+    }
+    // Two channels: the signal and its reverse, of other lengths.
+    let rev: Vec<i32> = sig.iter().rev().copied().collect();
+    for (k, run2) in runs2.into_iter().enumerate() {
+        let (a_in, b_in) = if k == 0 {
+            (sig.clone(), rev.clone())
+        } else {
+            (errs.clone(), chunked(&mut lms_run_scalar::<false>, false, &rev).0)
+        };
+        let (mut sa, mut sb, mut ta, mut tb) = (Lms::default(), Lms::default(), Lms::default(), Lms::default());
+        let (mut a, mut b) = (a_in.clone(), b_in.clone());
+        let (mut wa, mut wb) = (a_in, b_in);
+        for (ca, cb) in [(0..5000, 0..7000), (5000..20000, 7000..20000)] {
+            run2(&mut sa, &mut a[ca.clone()], &mut sb, &mut b[cb.clone()]);
+            if k == 0 {
+                lms_run_scalar::<false>(&mut ta, &mut wa[ca]);
+                lms_run_scalar::<false>(&mut tb, &mut wb[cb]);
+            } else {
+                lms_run_scalar::<true>(&mut ta, &mut wa[ca]);
+                lms_run_scalar::<true>(&mut tb, &mut wb[cb]);
+            }
+        }
+        assert!(a == wa && b == wb && state(&sa) == state(&ta) && state(&sb) == state(&tb), "two channels, {k}");
     }
 }
 

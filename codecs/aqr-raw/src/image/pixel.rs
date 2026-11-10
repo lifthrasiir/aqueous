@@ -177,3 +177,112 @@ pub mod neon {
         }
     }
 }
+
+/// [`neon`] in SSE2 (always there on x86-64), 16 samples at a time.
+#[cfg(target_arch = "x86_64")]
+pub mod sse2 {
+    use std::arch::x86_64::*;
+
+    /// The bit lengths of `v` capped at `ACT - 1` (the [`super::bucket`] of 16-bit lanes
+    /// below 2^15): how many of 1, 2, 4, ..., 2^(ACT - 2) it reaches.
+    #[inline(always)]
+    pub fn bucket16(v: __m128i) -> __m128i {
+        const _: () = assert!(super::ACT == 12);
+        // SAFETY: SSE2 is always available on x86-64.
+        unsafe {
+            let mut n = _mm_setzero_si128();
+            for k in 0..super::ACT - 1 {
+                // (each comparison is -1 where it holds)
+                n = _mm_sub_epi16(n, _mm_cmpgt_epi16(v, _mm_set1_epi16((1 << k) - 1)));
+            }
+            n
+        }
+    }
+
+    /// MED of 8 lanes (widened).
+    #[inline(always)]
+    pub fn med16(a: __m128i, b: __m128i, c: __m128i) -> __m128i {
+        // SAFETY: as in `bucket16`.
+        unsafe {
+            _mm_min_epi16(
+                _mm_max_epi16(_mm_sub_epi16(_mm_add_epi16(a, b), c), _mm_min_epi16(a, b)),
+                _mm_max_epi16(a, b),
+            )
+        }
+    }
+
+    #[inline(always)]
+    pub fn lo(v: __m128i) -> __m128i {
+        // SAFETY: as in `bucket16`.
+        unsafe { _mm_unpacklo_epi8(v, _mm_setzero_si128()) }
+    }
+
+    #[inline(always)]
+    pub fn hi(v: __m128i) -> __m128i {
+        // SAFETY: as in `bucket16`.
+        unsafe { _mm_unpackhi_epi8(v, _mm_setzero_si128()) }
+    }
+
+    /// [`super::neon::pred`].
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn pred(
+        a: __m128i,
+        b: __m128i,
+        c: __m128i,
+        v1: __m128i,
+        a1: __m128i,
+        b1: __m128i,
+        c1: __m128i,
+        dec: __m128i,
+    ) -> __m128i {
+        // SAFETY: as in `bucket16`.
+        unsafe {
+            let m_lo = med16(lo(a), lo(b), lo(c));
+            let m_hi = med16(hi(a), hi(b), hi(c));
+            let n_lo = _mm_sub_epi16(_mm_add_epi16(m_lo, lo(v1)), med16(lo(a1), lo(b1), lo(c1)));
+            let n_hi = _mm_sub_epi16(_mm_add_epi16(m_hi, hi(v1)), med16(hi(a1), hi(b1), hi(c1)));
+            let m = _mm_packus_epi16(m_lo, m_hi);
+            let n = _mm_packus_epi16(n_lo, n_hi);
+            _mm_or_si128(_mm_and_si128(dec, n), _mm_andnot_si128(dec, m))
+        }
+    }
+
+    /// The prediction of 16 samples by MED alone.
+    #[inline(always)]
+    pub fn pred_med(a: __m128i, b: __m128i, c: __m128i) -> __m128i {
+        // SAFETY: as in `bucket16`.
+        unsafe { _mm_packus_epi16(med16(lo(a), lo(b), lo(c)), med16(hi(a), hi(b), hi(c))) }
+    }
+
+    /// The zigzag symbols of 16 residuals.
+    #[inline(always)]
+    pub fn zigzag16(e: __m128i) -> __m128i {
+        // SAFETY: as in `bucket16`.
+        unsafe { _mm_xor_si128(_mm_add_epi8(e, e), _mm_cmpgt_epi8(_mm_setzero_si128(), e)) }
+    }
+
+    /// The activities `|a - c| + |b - c|` of 16 samples, as low and high halves.
+    #[inline(always)]
+    pub fn act16(a: __m128i, b: __m128i, c: __m128i) -> (__m128i, __m128i) {
+        // SAFETY: as in `bucket16`.
+        unsafe {
+            let ac = _mm_or_si128(_mm_subs_epu8(a, c), _mm_subs_epu8(c, a));
+            let bc = _mm_or_si128(_mm_subs_epu8(b, c), _mm_subs_epu8(c, b));
+            (_mm_add_epi16(lo(ac), lo(bc)), _mm_add_epi16(hi(ac), hi(bc)))
+        }
+    }
+
+    /// The magnitudes of two sets of 16 residuals added, as low and high halves.
+    #[inline(always)]
+    pub fn mag_sum16(x: __m128i, y: __m128i) -> (__m128i, __m128i) {
+        // SAFETY: as in `bucket16`.
+        unsafe {
+            // (|x| of a signed byte, as an unsigned one: the smaller of x and -x)
+            let z = _mm_setzero_si128();
+            let x = _mm_min_epu8(x, _mm_sub_epi8(z, x));
+            let y = _mm_min_epu8(y, _mm_sub_epi8(z, y));
+            (_mm_add_epi16(lo(x), lo(y)), _mm_add_epi16(hi(x), hi(y)))
+        }
+    }
+}

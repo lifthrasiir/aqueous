@@ -1786,7 +1786,7 @@ fn row_syms_scalar<const BPP: usize>(
     }
 }
 
-/// [`row_syms_scalar`] for a whole row, 16 bytes at a time with NEON where available.
+/// [`row_syms_scalar`] for a whole row, 16 bytes at a time with NEON or SSE2 where available.
 #[allow(clippy::too_many_arguments)]
 fn row_syms<const BPP: usize>(
     raw: &[u8],
@@ -1800,18 +1800,34 @@ fn row_syms<const BPP: usize>(
     d: usize,
 ) {
     #[cfg(target_arch = "aarch64")]
-    {
-        let done = neon::row_syms::<BPP>(raw, buf, q, at, w, rs, rs2, out, d);
-        row_syms_scalar::<BPP>(raw, buf, q, at, done, w, rs, rs2, out, d);
+    let done = neon::row_syms::<BPP>(raw, buf, q, at, w, rs, rs2, out, d);
+    #[cfg(target_arch = "x86_64")]
+    let done = sse2::row_syms::<BPP>(raw, buf, q, at, w, rs, rs2, out, d);
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    let done = 0;
+    row_syms_scalar::<BPP>(raw, buf, q, at, done, w, rs, rs2, out, d);
+}
+
+/// Per phase of the channel pattern of 16 bytes from `x % BPP`: the lanes to decorrelate
+/// (channels 1 and 2 of three or more) and the table offsets (`min(ch, 3) * ACT`).
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+fn row_phases<const BPP: usize>() -> ([[u8; 16]; 4], [[u8; 16]; 4]) {
+    let mut dec = [[0u8; 16]; 4];
+    let mut toff = [[0u8; 16]; 4];
+    for ph in 0..BPP.min(4) {
+        for i in 0..16 {
+            let ch = (ph + i) % BPP;
+            dec[ph][i] = if pixel::decorrelated::<BPP>(ch) { 0xff } else { 0 };
+            toff[ph][i] = (ch.min(3) * ACT) as u8;
+        }
     }
-    #[cfg(not(target_arch = "aarch64"))]
-    row_syms_scalar::<BPP>(raw, buf, q, at, 0, w, rs, rs2, out, d);
+    (dec, toff)
 }
 
 #[cfg(target_arch = "aarch64")]
 mod neon {
-    use super::{ACT, RowSymsMut};
-    use aqr_raw::image::pixel::{self, neon::*};
+    use super::RowSymsMut;
+    use aqr_raw::image::pixel::neon::*;
     use std::arch::aarch64::*;
 
     /// Returns how many bytes it did (whole 16-byte chunks).
@@ -1835,17 +1851,7 @@ mod neon {
         // before (the raw margin) or the data's padding: within the buffers.
         assert!(q > rs2 + BPP && q + w <= raw.len() && at >= rs && at + w <= buf.len());
         assert!(d + w <= out.s.len() && d + w <= out.t.len() && d + w <= out.act.len());
-        // Per phase of the channel pattern: the lanes to decorrelate (channels 1 and 2 of
-        // three or more) and the table offsets (`min(ch, 3) * ACT`).
-        let mut dec = [[0u8; 16]; 4];
-        let mut toff = [[0u8; 16]; 4];
-        for ph in 0..BPP.min(4) {
-            for i in 0..16 {
-                let ch = (ph + i) % BPP;
-                dec[ph][i] = if pixel::decorrelated::<BPP>(ch) { 0xff } else { 0 };
-                toff[ph][i] = (ch.min(3) * ACT) as u8;
-            }
-        }
+        let (dec, toff) = super::row_phases::<BPP>();
         unsafe {
             let r = raw.as_ptr();
             let f = buf.as_ptr();
@@ -1876,6 +1882,69 @@ mod neon {
                 vst1q_u8(out.t.as_mut_ptr().add(d + x), t);
                 let ab = vcombine_u8(vmovn_u16(bucket16(act_lo)), vmovn_u16(bucket16(act_hi)));
                 vst1q_u8(out.act.as_mut_ptr().add(d + x), ab);
+            }
+        }
+        chunks * 16
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+mod sse2 {
+    use super::RowSymsMut;
+    use aqr_raw::image::pixel::sse2::*;
+    use std::arch::x86_64::*;
+
+    /// [`super::neon::row_syms`] in SSE2: how many bytes it did (whole 16-byte chunks).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn row_syms<const BPP: usize>(
+        raw: &[u8],
+        buf: &[u8],
+        q: usize,
+        at: usize,
+        w: usize,
+        rs: usize,
+        rs2: usize,
+        out: &mut RowSymsMut,
+        d: usize,
+    ) -> usize {
+        let chunks = w / 16;
+        if chunks == 0 {
+            return 0;
+        }
+        // (the reads as in NEON's)
+        assert!(q > rs2 + BPP && q + w <= raw.len() && at >= rs && at + w <= buf.len());
+        assert!(d + w <= out.s.len() && d + w <= out.t.len() && d + w <= out.act.len());
+        let (dec, toff) = super::row_phases::<BPP>();
+        // SAFETY: SSE2 is always available on x86-64; the reads and writes are checked above.
+        unsafe {
+            let r = raw.as_ptr();
+            let f = buf.as_ptr();
+            let ld = |p: *const u8| _mm_loadu_si128(p as *const __m128i);
+            let st = |p: *mut u8, v: __m128i| _mm_storeu_si128(p as *mut __m128i, v);
+            for k in 0..chunks {
+                let x = k * 16;
+                let ph = x % BPP;
+                let v = ld(r.add(q + x));
+                let a = ld(r.add(q + x - BPP));
+                let b = ld(r.add(q + x - rs2));
+                let c = ld(r.add(q + x - rs2 - BPP));
+                let p = if BPP >= 3 {
+                    let v1 = ld(r.add(q + x - 1));
+                    let a1 = ld(r.add(q + x - 1 - BPP));
+                    let b1 = ld(r.add(q + x - 1 - rs2));
+                    let c1 = ld(r.add(q + x - 1 - rs2 - BPP));
+                    pred(a, b, c, v1, a1, b1, c1, ld(dec[ph].as_ptr()))
+                } else {
+                    pred_med(a, b, c)
+                };
+                st(out.s.as_mut_ptr().add(d + x), zigzag16(_mm_sub_epi8(v, p)));
+                let (act_lo, act_hi) = act16(a, b, c);
+                let (ff_lo, ff_hi) = mag_sum16(ld(f.add(at + x - BPP)), ld(f.add(at + x - rs)));
+                let t_lo = bucket16(_mm_add_epi16(act_lo, ff_lo));
+                let t_hi = bucket16(_mm_add_epi16(act_hi, ff_hi));
+                let t = _mm_add_epi8(_mm_packus_epi16(t_lo, t_hi), ld(toff[ph].as_ptr()));
+                st(out.t.as_mut_ptr().add(d + x), t);
+                st(out.act.as_mut_ptr().add(d + x), _mm_packus_epi16(bucket16(act_lo), bucket16(act_hi)));
             }
         }
         chunks * 16
@@ -2396,6 +2465,50 @@ fn prepare<const BPP: usize, const IMAGE: bool>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The row symbols 16 bytes at a time (NEON, SSE2) are the scalar ones, for every pixel
+    /// size, on random rows of extreme and mixed values.
+    #[test]
+    fn row_syms_vector_is_scalar() {
+        fn run<const BPP: usize>(seed: u64) {
+            let mut x = seed;
+            let mut next = move || {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x
+            };
+            for w in [15, 16, 17, 47, 64, 100, 257] {
+                let (rs, rs2) = (w + 1, w + BPP);
+                let (q, at) = (2 * rs2 + BPP + 1, 2 * rs + BPP + 1);
+                let mut fill = |n: usize, k: u64| -> Vec<u8> {
+                    (0..n)
+                        .map(|_| match (next() >> 60) % k {
+                            0 => 0,
+                            1 => 255,
+                            2 => 128,
+                            _ => next() as u8,
+                        })
+                        .collect()
+                };
+                let (raw, buf) = (fill(q + w + 16, 5), fill(at + w + 16, 5));
+                let n = w + 8;
+                let (mut s1, mut t1, mut a1) = (vec![0u8; n], vec![0u8; n], vec![0u8; n]);
+                let (mut s2, mut t2, mut a2) = (vec![0u8; n], vec![0u8; n], vec![0u8; n]);
+                let mut o1 = RowSymsMut { s: &mut s1, t: &mut t1, act: &mut a1 };
+                row_syms::<BPP>(&raw, &buf, q, at, w, rs, rs2, &mut o1, 3);
+                let mut o2 = RowSymsMut { s: &mut s2, t: &mut t2, act: &mut a2 };
+                row_syms_scalar::<BPP>(&raw, &buf, q, at, 0, w, rs, rs2, &mut o2, 3);
+                assert_eq!((s1, t1, a1), (s2, t2, a2), "BPP {BPP}, width {w}");
+            }
+        }
+        for seed in 1..50 {
+            run::<1>(seed);
+            run::<2>(seed);
+            run::<3>(seed);
+            run::<4>(seed);
+        }
+    }
 
     /// Unfiltering in pieces (as matches do) and whole gives what the reference does, for
     /// every filter and pixel size.
