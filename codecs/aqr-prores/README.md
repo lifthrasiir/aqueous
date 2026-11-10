@@ -203,14 +203,32 @@ test patterns, fractals and noise; synthetic, no camera footage), against the co
 estimated ratio 0.7902 -> 0.7900 and the bench's, whole files, 0.7785 -> 0.7782, no source worse
 (one thread, one stripe, `aqr-prores-bench -k 1 -n 20 -r 3`, decoding MB/s of the module's code
 -> after): mandel_aw_hq (HQ noise) 13.3 -> 17.5, life_aw_lt (LT) 14.5 -> 20.1, pan_ks_hq (sparse)
-12.7 -> 16.5, testsrc_ks_hq 18.1 -> 28.4; cycles of the run (an encoding and 3 decodings) -19% to -30%. The whole set at the bench's
-default (chunks of 32 MiB, the stripes on threads): decoding 22.0 -> 29.8 MB/s of a chunk's wall
+12.7 -> 16.5, testsrc_ks_hq 18.1 -> 28.4; cycles of the run (an encoding and 3 decodings) -19%
+to -30%. The whole set at the bench's default (chunks of 32 MiB, the stripes on threads): decoding 22.0 -> 29.8 MB/s of a chunk's wall
 time; encoding unchanged (15.6), the same model code but the parse of ProRes bits (a fifth of
 it) and the arithmetic coder's own work not touched. `cargo aqr -c`/`-K` of mandel_aw_hq (121
 MB) and testsrc_uhd_hq (84 MB): compressing 5.7 -> 5.4 s and 4.3 -> 3.8 s, `-K` natively 1.43 ->
 1.27 s and 1.10 -> 0.87 s (threads' CPU time 12.3 -> 9.9 and 7.0 -> 4.7 s), `-K --wasm` 1.65 ->
 1.62 s and 1.17 -> 1.13 s (CPU 14.0 -> 13.0 and 7.5 -> 6.4 s). The module is 45,159 bytes
 (15,222 of its block) against 44,009 (14,610).
+
+On the corpus (the 30 files, 6.49 GB, the Ryzen 7 9700X, the default bound), `1866ff4f` ->
+`a1ac4866` (the model above and the stripe rule of one stripe per 1 KiB of a frame):
+
+| | `1866ff4f` | `a1ac4866` |
+|---|---|---|
+| archived | 4,505,195,603 bytes (69.4%) | 4,503,971,815 (69.4%) |
+| compressing, wall | 137.2 s | 124.9 s (1,146 s of CPU) |
+| `-K` natively, wall | 58.8 s | 50.1 s (584 s of CPU) |
+| `-K --wasm`, wall | 80.9 s | 71.3 s |
+| A006 alone, `-K` natively | 11.2 s, 158.5 s of CPU | 9.3 s, 127.6 s of CPU |
+
+Each file archived alone: 4,502,451,627 -> 4,501,238,839 bytes (-0.03%), none moved by 0.5%
+(the most: two of FATE's, +0.38% and +0.36%, a few hundred bytes; ARRI's and ffmpeg's -0.02 to
+-0.06%). Decisions per input byte of the first 8 frames: A006 (ARRI 3.2K 4:4:4) 7.58, zero
+flags 2.95, the size's 2.27, mantissa 0.74, signs 0.78, counts 0.55, DC 0.31; an ffmpeg 4:4:4
+file 7.46 (zero flags 2.87, sizes 2.33); FATE's 422 HQ sample 5.18. The zero flags take about
+a third of the coded bytes.
 
 What the time was: decoding is bound by the latency chain of each decision (the adaptive bit's
 load, the multiplication of the range, the comparison, whose result is a branch) and its
@@ -233,13 +251,11 @@ and dropped, on the set above (decisions or ratio, one thread):
 
 Left:
 
-- Speed, decoding first (it is more than half of compressing too): writing the slices is about
-  a quarter of decoding; about 8–9 binary decisions per input byte, mostly zero flags (3.8 a byte) and sizes
-  (1.8); the arithmetic coder itself is about 15% of the encoding time, the rest the decisions'
-  contexts and branches (those figures are from the corpus; the local set has more sizes and
-  fewer zero flags). Sizes binarised around their expected value would save decisions on dense
-  footage (not tried: it widens the size table); the corpus is to say whether the changes of the
-  commits after `1866ff4f` keep the ratio, and where the time goes there.
+- Speed, decoding first (it is more than half of compressing too): about 7.5 binary decisions
+  per input byte on the corpus, zero flags 2.9 and sizes 2.3 of them; the arithmetic coder
+  itself is about 15% of the encoding time, the rest the decisions' contexts and branches.
+  Sizes binarised around their expected value would save decisions on dense footage (not tried:
+  it widens the size table); the parse of ProRes bits is a fifth of encoding.
 - Memory: 8K 4:4:4 frames would pass the compressing bound of 256 MiB (a stripe's planes are
   258 bytes a block of its picture, in two frames; UHD 4:4:4 takes 220 MB). Native decoding runs
   all the gang's tasks at once, so it holds the plan (UHD 4:4:4: 648 MB resident, against 479
