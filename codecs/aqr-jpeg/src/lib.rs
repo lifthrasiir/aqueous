@@ -4,6 +4,7 @@ pub mod codec;
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod jpeg;
+pub mod lossless;
 pub mod model;
 pub mod module;
 mod par;

@@ -1,0 +1,728 @@
+//! Lossless JPEG (SOF3, ITU T.81 annex H): parsing, decoding to samples and bit-exact
+//! re-emission of the entropy-coded data from them.
+//!
+//! What is supported is what cameras write (Canon's CR2, Adobe DNG, Nikon, ...): one scan of
+//! all the components, interleaved; predictors 1 to 7; any point transform; restart intervals
+//! of whole rows of MCUs. The samples of a component are kept in a plane of the size of its
+//! MCUs (`mcux * h` by `mcuy * v`), padding included, as the encoder coded them.
+//!
+//! The entropy-coded data is reproduced exactly where an encoder has no choices left beyond the
+//! samples: the Huffman code of each difference, padding of 1 bits at the end of an interval,
+//! stuffed bytes. [`encode`] gives the bytes the decoder read for it (the caller compares).
+
+use crate::jpeg::Error;
+use crate::jpeg::{HuffSpec, err, scan_end};
+
+/// A component of the frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Comp {
+    pub id: u8,
+    pub h: usize,
+    pub v: usize,
+}
+
+/// The headers of a lossless JPEG and where its entropy-coded data lies.
+#[derive(Clone)]
+pub struct Header {
+    /// bits of a sample (2..=16)
+    pub precision: u32,
+    pub height: usize,
+    pub width: usize,
+    pub comps: Vec<Comp>,
+    /// the components of the scan in its order: (index in `comps`, Huffman table 0..4)
+    pub scan: Vec<(usize, usize)>,
+    /// 1..=7
+    pub predictor: u32,
+    /// the point transform, 0..precision
+    pub point: u32,
+    /// restart interval in MCUs (0: none)
+    pub restart: usize,
+    /// Which code an encoder writes for a symbol that the table lists twice: the last one, not the first.
+    pub last_code: bool,
+    pub tables: [Option<HuffSpec>; 4],
+    /// the entropy-coded data `start..end` of the buffer parsed (RST markers inside)
+    pub start: usize,
+    pub end: usize,
+}
+
+impl Header {
+    /// MCUs across and down.
+    pub fn mcus(&self) -> (usize, usize) {
+        let hmax = self.comps.iter().map(|c| c.h).max().unwrap_or(1);
+        let vmax = self.comps.iter().map(|c| c.v).max().unwrap_or(1);
+        (self.width.div_ceil(hmax), self.height.div_ceil(vmax))
+    }
+
+    /// Width and height of the plane of component `i`.
+    pub fn plane(&self, i: usize) -> (usize, usize) {
+        let (mx, my) = self.mcus();
+        (mx * self.comps[i].h, my * self.comps[i].v)
+    }
+
+    /// Samples of all planes.
+    pub fn samples(&self) -> usize {
+        (0..self.comps.len()).map(|i| self.plane(i)).map(|(w, h)| w * h).sum()
+    }
+}
+
+fn be16(d: &[u8], i: usize) -> Result<usize, Error> {
+    match d.get(i..i + 2) {
+        Some(b) => Ok(((b[0] as usize) << 8) | b[1] as usize),
+        None => err("truncated"),
+    }
+}
+
+/// Whether a Huffman table of `counts` is a prefix code (and not overfull).
+fn prefix_code(counts: &[u8; 16]) -> bool {
+    let mut code = 0u32;
+    for (l, &n) in counts.iter().enumerate() {
+        code += n as u32;
+        if code > 1 << (l + 1) {
+            return false;
+        }
+        code <<= 1;
+    }
+    true
+}
+
+/// Parses the headers of the lossless JPEG with its SOI at `at`. Err where it is not one (or
+/// not of the kind supported here).
+pub fn parse(d: &[u8], at: usize) -> Result<Header, Error> {
+    if d.get(at..at + 2) != Some(&[0xFF, 0xD8]) {
+        return err("no SOI");
+    }
+    let mut p = at + 2;
+    let mut frame: Option<(u32, usize, usize, Vec<Comp>)> = None;
+    let mut tables: [Option<HuffSpec>; 4] = [None; 4];
+    let mut restart = 0;
+    loop {
+        if d.get(p) != Some(&0xFF) {
+            return err("marker expected");
+        }
+        while d.get(p + 1) == Some(&0xFF) {
+            p += 1;
+        }
+        let m = *d.get(p + 1).ok_or(Error("truncated".into()))?;
+        p += 2;
+        match m {
+            0x01 => continue,
+            0xD8 | 0xD0..=0xD7 | 0xD9 | 0x00 => return err("unexpected marker"),
+            _ => {}
+        }
+        let len = be16(d, p)?;
+        let seg = d.get(p + 2..p + len.max(2)).ok_or(Error("truncated".into()))?;
+        p += len;
+        match m {
+            0xC4 => {
+                let mut s = seg;
+                while !s.is_empty() {
+                    let (tc_th, rest) = s.split_first().unwrap();
+                    let (tc, th) = (tc_th >> 4, (tc_th & 15) as usize);
+                    if tc != 0 || th >= 4 {
+                        return err("not a DC table");
+                    }
+                    let counts: [u8; 16] = rest.get(..16).ok_or(Error("truncated".into()))?.try_into().unwrap();
+                    let n: usize = counts.iter().map(|&c| c as usize).sum();
+                    let vals = rest.get(16..16 + n).ok_or(Error("truncated".into()))?;
+                    if !prefix_code(&counts) || vals.iter().any(|&v| v > 16) {
+                        return err("bad table");
+                    }
+                    tables[th] = Some(HuffSpec { counts, vals: crate::jpeg::Vals::of(vals).unwrap() });
+                    s = &rest[16 + n..];
+                }
+            }
+            0xC3 => {
+                if frame.is_some() {
+                    return err("second frame");
+                }
+                if seg.len() < 6 {
+                    return err("truncated SOF");
+                }
+                let (precision, height, width, nf) = (seg[0] as u32, be16(seg, 1)?, be16(seg, 3)?, seg[5] as usize);
+                if !(2..=16).contains(&precision) || height == 0 || width == 0 || !(1..=4).contains(&nf) {
+                    return err("unsupported frame");
+                }
+                if seg.len() != 6 + 3 * nf {
+                    return err("bad SOF length");
+                }
+                let mut comps = Vec::with_capacity(nf);
+                for c in seg[6..].chunks(3) {
+                    let (h, v) = ((c[1] >> 4) as usize, (c[1] & 15) as usize);
+                    if !(1..=4).contains(&h) || !(1..=4).contains(&v) {
+                        return err("bad sampling factors");
+                    }
+                    if comps.iter().any(|x: &Comp| x.id == c[0]) {
+                        return err("repeated component");
+                    }
+                    comps.push(Comp { id: c[0], h, v });
+                }
+                frame = Some((precision, height, width, comps));
+            }
+            0xC0..=0xCF if !matches!(m, 0xC4 | 0xC8 | 0xCC) => return err("not lossless"),
+            0xDD => {
+                if seg.len() != 2 {
+                    return err("bad DRI");
+                }
+                restart = be16(seg, 0)?;
+            }
+            0xDA => {
+                let Some((precision, height, width, comps)) = frame else { return err("SOS before SOF") };
+                let ns = *seg.first().ok_or(Error("truncated".into()))? as usize;
+                if ns != comps.len() || seg.len() != 1 + 2 * ns + 3 {
+                    return err("scan is not of all the components");
+                }
+                let mut scan = Vec::with_capacity(ns);
+                for c in seg[1..1 + 2 * ns].chunks(2) {
+                    let ci = comps.iter().position(|x| x.id == c[0]).ok_or(Error("unknown component".into()))?;
+                    if scan.iter().any(|&(i, _)| i == ci) {
+                        return err("repeated component in scan");
+                    }
+                    let td = (c[1] >> 4) as usize;
+                    if td >= 4 || tables[td].is_none() {
+                        return err("missing table");
+                    }
+                    scan.push((ci, td));
+                }
+                let t = &seg[1 + 2 * ns..];
+                let (predictor, se, ah, al) = (t[0] as u32, t[1], t[2] >> 4, (t[2] & 15) as u32);
+                if !(1..=7).contains(&predictor) || se != 0 || ah != 0 || al >= precision {
+                    return err("unsupported scan parameters");
+                }
+                let start = p;
+                let end = scan_end(d, start);
+                if d.get(end..end + 2) != Some(&[0xFF, 0xD9]) {
+                    return err("no EOI after the scan");
+                }
+                let h = Header {
+                    precision,
+                    height,
+                    width,
+                    comps,
+                    scan,
+                    predictor,
+                    point: al,
+                    restart,
+                    last_code: false,
+                    tables,
+                    start,
+                    end,
+                };
+                let (mx, _) = h.mcus();
+                if restart != 0 && restart % mx != 0 {
+                    return err("restart intervals are not of whole rows");
+                }
+                return Ok(h);
+            }
+            // APPn, COM and the like
+            _ => {}
+        }
+    }
+}
+
+/// The samples of a frame: a plane for each component, `plane(i)` samples across.
+pub struct Samples {
+    pub planes: Vec<Vec<u16>>,
+}
+
+/// A decoding table: the codes of up to 16 bits, as a lookup of the next `FAST` bits and the
+/// canonical decoding for longer codes.
+struct Decoder {
+    fast: Vec<u16>,
+    /// `maxcode[l]`: the largest code of length l + 1 (or -1), `valptr[l]` the index of its first symbol minus
+    /// its first code
+    maxcode: [i32; 17],
+    valptr: [i32; 17],
+    vals: Vec<u8>,
+}
+
+const FAST: u32 = 10;
+
+impl Decoder {
+    fn new(t: &HuffSpec) -> Decoder {
+        let mut fast = vec![0u16; 1 << FAST];
+        let mut maxcode = [-1i32; 17];
+        let mut valptr = [0i32; 17];
+        let (mut code, mut k) = (0u32, 0usize);
+        for l in 1..=16usize {
+            let n = t.counts[l - 1] as usize;
+            valptr[l] = k as i32 - code as i32;
+            for i in 0..n {
+                if l as u32 <= FAST {
+                    let first = (code + i as u32) << (FAST - l as u32);
+                    for e in &mut fast[first as usize..first as usize + (1 << (FAST - l as u32))] {
+                        *e = ((l as u16) << 8) | t.vals[k + i] as u16;
+                    }
+                }
+            }
+            code += n as u32;
+            k += n;
+            maxcode[l] = if n > 0 { code as i32 - 1 } else { -1 };
+            code <<= 1;
+        }
+        Decoder { fast, maxcode, valptr, vals: t.vals.to_vec() }
+    }
+}
+
+/// An MSB-first bit reader of a destuffed interval; reads past its end give zeros (and are
+/// noticed by `over`).
+struct Bits<'a> {
+    d: &'a [u8],
+    pos: usize,
+    acc: u64,
+    n: u32,
+}
+
+impl<'a> Bits<'a> {
+    fn new(d: &'a [u8]) -> Self {
+        Bits { d, pos: 0, acc: 0, n: 0 }
+    }
+
+    #[inline]
+    fn fill(&mut self) {
+        while self.n <= 56 {
+            let b = self.d.get(self.pos).copied().unwrap_or(0);
+            self.pos += 1;
+            self.acc |= (b as u64) << (56 - self.n);
+            self.n += 8;
+        }
+    }
+
+    #[inline]
+    fn peek(&self, k: u32) -> u32 {
+        (self.acc >> (64 - k)) as u32
+    }
+
+    #[inline]
+    fn skip(&mut self, k: u32) {
+        self.acc <<= k;
+        self.n -= k;
+    }
+
+    /// Bits consumed so far.
+    fn used(&self) -> usize {
+        self.pos * 8 - self.n as usize
+    }
+
+    #[inline]
+    fn symbol(&mut self, t: &Decoder) -> Result<u32, Error> {
+        self.fill();
+        let e = t.fast[self.peek(FAST) as usize];
+        if e != 0 {
+            self.skip((e >> 8) as u32);
+            return Ok((e & 255) as u32);
+        }
+        // (a code of length 0 is no entry: lengths are 1 or more)
+        for l in (FAST + 1)..=16 {
+            let c = self.peek(l) as i32;
+            if c <= t.maxcode[l as usize] {
+                self.skip(l);
+                let i = (c + t.valptr[l as usize]) as usize;
+                return t.vals.get(i).map(|&v| v as u32).ok_or(Error("bad code".into()));
+            }
+        }
+        err("bad code")
+    }
+
+    /// The `k` (<= 16) bits as a number.
+    #[inline]
+    fn bits(&mut self, k: u32) -> u32 {
+        if k == 0 {
+            return 0;
+        }
+        self.fill();
+        let v = self.peek(k);
+        self.skip(k);
+        v
+    }
+}
+
+/// The difference of the category `s` and its `s` bits `v`.
+#[inline]
+fn extend(v: u32, s: u32) -> i32 {
+    if s == 0 {
+        0
+    } else if s == 16 {
+        32768
+    } else if v < 1 << (s - 1) {
+        v as i32 - (1 << s) + 1
+    } else {
+        v as i32
+    }
+}
+
+/// The prediction of the sample at (`x`, `y`) of a plane of width `w`, its rows `first` (the first
+/// of an interval) or later.
+#[inline]
+fn predict(p: &[u16], w: usize, x: usize, y: usize, first_row: bool, predictor: u32, default: i32) -> i32 {
+    let at = y * w + x;
+    if first_row {
+        // the first line of an interval: the sample to the left, the default at its start
+        return if x == 0 { default } else { p[at - 1] as i32 };
+    }
+    if x == 0 {
+        return p[at - w] as i32;
+    }
+    let (a, b, c) = (p[at - 1] as i32, p[at - w] as i32, p[at - w - 1] as i32);
+    match predictor {
+        1 => a,
+        2 => b,
+        3 => c,
+        4 => a + b - c,
+        5 => a + ((b - c) >> 1),
+        6 => b + ((a - c) >> 1),
+        _ => (a + b) >> 1,
+    }
+}
+
+/// The destuffed intervals of the data `d[start..end]`: (bytes, whether a marker closed it).
+/// Err where the RST markers are not in order, or a 0xFF is followed by what cannot be.
+fn intervals(d: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
+    let mut out = vec![Vec::with_capacity(d.len())];
+    let mut i = 0;
+    let mut rst = 0u8;
+    while i < d.len() {
+        match memchr::memchr(0xFF, &d[i..]) {
+            None => {
+                out.last_mut().unwrap().extend_from_slice(&d[i..]);
+                break;
+            }
+            Some(o) => {
+                out.last_mut().unwrap().extend_from_slice(&d[i..i + o]);
+                match d.get(i + o + 1) {
+                    Some(0) => {
+                        out.last_mut().unwrap().push(0xFF);
+                    }
+                    Some(&m) if m == 0xD0 + rst => {
+                        rst = (rst + 1) & 7;
+                        out.push(Vec::new());
+                    }
+                    _ => return err("unexpected marker in the data"),
+                }
+                i += o + 2;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Decodes the entropy-coded data of `h` (the bytes of the file from `h.start` to `h.end`).
+/// Err where the data is not what [`encode`] gives from the samples (the padding, the order
+/// of restart markers) or is cut off.
+pub fn decode(h: &Header, data: &[u8]) -> Result<Samples, Error> {
+    let (mx, my) = h.mcus();
+    let ivs = intervals(data)?;
+    let rows_per = if h.restart == 0 { my } else { h.restart / mx };
+    if ivs.len() != my.div_ceil(rows_per) {
+        return err("the restart intervals do not fit the frame");
+    }
+    let decoders: Vec<Option<Decoder>> = h.tables.iter().map(|t| t.as_ref().map(Decoder::new)).collect();
+    let mut planes: Vec<Vec<u16>> = (0..h.comps.len()).map(|i| h.plane(i)).map(|(w, hh)| vec![0u16; w * hh]).collect();
+    let default = 1i32 << (h.precision - h.point - 1);
+    for (k, iv) in ivs.iter().enumerate() {
+        let (row0, row1) = (k * rows_per, ((k + 1) * rows_per).min(my));
+        let mut b = Bits::new(iv);
+        for r in row0..row1 {
+            for c in 0..mx {
+                for &(ci, td) in &h.scan {
+                    let comp = h.comps[ci];
+                    let w = mx * comp.h;
+                    let t = decoders[td].as_ref().unwrap();
+                    for v in 0..comp.v {
+                        let y = r * comp.v + v;
+                        let first = y == row0 * comp.v;
+                        for hh in 0..comp.h {
+                            let x = c * comp.h + hh;
+                            let s = b.symbol(t)?;
+                            let bits = if s == 16 { 0 } else { b.bits(s) };
+                            let diff = extend(bits, s);
+                            let pred = predict(&planes[ci], w, x, y, first, h.predictor, default);
+                            planes[ci][y * w + x] = (pred + diff) as u16;
+                        }
+                    }
+                }
+            }
+        }
+        // the padding: 1 bits to the end of the byte, and no more bytes
+        let used = b.used();
+        if used > iv.len() * 8 {
+            return err("data cut off");
+        }
+        let end = used.div_ceil(8);
+        if end != iv.len() {
+            return err("bytes after the interval's data");
+        }
+        let pad = end * 8 - used;
+        if pad > 0 {
+            let last = iv[end - 1];
+            if last & ((1 << pad) - 1) != (1 << pad) - 1 {
+                return err("padding is not of 1 bits");
+            }
+        }
+    }
+    Ok(Samples { planes })
+}
+
+/// An encoding table: the code and its length of each category.
+struct Encoder {
+    code: [u16; 17],
+    len: [u8; 17],
+}
+
+impl Encoder {
+    fn new(t: &HuffSpec, last: bool) -> Encoder {
+        let mut e = Encoder { code: [0; 17], len: [0; 17] };
+        let (mut code, mut k) = (0u32, 0usize);
+        for l in 1..=16u8 {
+            for _ in 0..t.counts[l as usize - 1] {
+                let s = t.vals[k] as usize;
+                // (a symbol listed twice: the first code or the last)
+                if last || e.len[s] == 0 {
+                    e.code[s] = code as u16;
+                    e.len[s] = l;
+                }
+                code += 1;
+                k += 1;
+            }
+            code <<= 1;
+        }
+        e
+    }
+}
+
+struct Out {
+    out: Vec<u8>,
+    acc: u64,
+    n: u32,
+}
+
+impl Out {
+    #[inline]
+    fn put(&mut self, v: u32, k: u32) {
+        self.acc = (self.acc << k) | v as u64;
+        self.n += k;
+        while self.n >= 8 {
+            let b = (self.acc >> (self.n - 8)) as u8;
+            self.out.push(b);
+            if b == 0xFF {
+                self.out.push(0);
+            }
+            self.n -= 8;
+        }
+    }
+
+    /// Ends the byte with 1 bits.
+    fn pad(&mut self) {
+        if self.n > 0 {
+            let k = 8 - self.n;
+            self.put((1 << k) - 1, k);
+        }
+        self.acc = 0;
+    }
+}
+
+/// The entropy-coded data of `s` under `h`, as [`decode`] reads it. Err where a difference
+/// has no code in the tables.
+pub fn encode(h: &Header, s: &Samples) -> Result<Vec<u8>, Error> {
+    let (mx, my) = h.mcus();
+    let rows_per = if h.restart == 0 { my } else { h.restart / mx };
+    let encoders: Vec<Option<Encoder>> =
+        h.tables.iter().map(|t| t.as_ref().map(|t| Encoder::new(t, h.last_code))).collect();
+    let default = 1i32 << (h.precision - h.point - 1);
+    let mut o = Out { out: Vec::new(), acc: 0, n: 0 };
+    for (k, row0) in (0..my).step_by(rows_per).enumerate() {
+        if k > 0 {
+            o.out.extend_from_slice(&[0xFF, 0xD0 + ((k - 1) & 7) as u8]);
+        }
+        for r in row0..(row0 + rows_per).min(my) {
+            for c in 0..mx {
+                for &(ci, td) in &h.scan {
+                    let comp = h.comps[ci];
+                    let w = mx * comp.h;
+                    let e = encoders[td].as_ref().unwrap();
+                    let p = &s.planes[ci];
+                    for v in 0..comp.v {
+                        let y = r * comp.v + v;
+                        let first = y == row0 * comp.v;
+                        for hh in 0..comp.h {
+                            let x = c * comp.h + hh;
+                            let pred = predict(p, w, x, y, first, h.predictor, default);
+                            // the difference in -32768..32768
+                            let d = ((p[y * w + x] as i32 - pred + 32768) & 0xFFFF) - 32768;
+                            let a = d.unsigned_abs();
+                            let cat = 32 - a.leading_zeros();
+                            if e.len[cat as usize] == 0 {
+                                return err("difference without a code");
+                            }
+                            o.put(e.code[cat as usize] as u32, e.len[cat as usize] as u32);
+                            if cat > 0 && cat < 16 {
+                                let bits = if d > 0 { d } else { d + (1 << cat) - 1 };
+                                o.put(bits as u32, cat);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        o.pad();
+    }
+    Ok(o.out)
+}
+
+/// The lossless JPEGs in `d`: the headers of each, found by their SOI (a JPEG inside the data
+/// of another is not looked for).
+pub fn find(d: &[u8]) -> Vec<(usize, Header)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(o) = memchr::memmem::find(&d[i..], &[0xFF, 0xD8, 0xFF]) {
+        let at = i + o;
+        match parse(d, at) {
+            Ok(h) => {
+                i = h.end;
+                out.push((at, h));
+            }
+            Err(_) => i = at + 2,
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A DC table with the categories 0..=16 as 5-bit codes (the all-ones code is left out).
+    fn table() -> Vec<u8> {
+        let mut t = vec![0x00];
+        let mut counts = [0u8; 16];
+        counts[4] = 17;
+        t.extend_from_slice(&counts);
+        t.extend(0..=16u8);
+        t
+    }
+
+    fn seg(out: &mut Vec<u8>, m: u8, body: &[u8]) {
+        out.extend_from_slice(&[0xFF, m]);
+        out.extend_from_slice(&(body.len() as u16 + 2).to_be_bytes());
+        out.extend_from_slice(body);
+    }
+
+    fn jpeg(precision: u8, w: u16, h: u16, comps: &[(u8, u8)], pred: u8, pt: u8, restart: u16, seed: u32) -> Vec<u8> {
+        let mut d = vec![0xFF, 0xD8];
+        seg(&mut d, 0xC4, &table());
+        let mut sof = vec![precision];
+        sof.extend_from_slice(&h.to_be_bytes());
+        sof.extend_from_slice(&w.to_be_bytes());
+        sof.push(comps.len() as u8);
+        for (i, &(hh, vv)) in comps.iter().enumerate() {
+            sof.extend_from_slice(&[i as u8 + 1, hh << 4 | vv, 0]);
+        }
+        seg(&mut d, 0xC3, &sof);
+        if restart > 0 {
+            seg(&mut d, 0xDD, &restart.to_be_bytes());
+        }
+        let mut sos = vec![comps.len() as u8];
+        for i in 0..comps.len() {
+            sos.extend_from_slice(&[i as u8 + 1, 0]);
+        }
+        sos.extend_from_slice(&[pred, 0, pt]);
+        seg(&mut d, 0xDA, &sos);
+        let start = d.len();
+        d.extend_from_slice(&[0xFF, 0xD9]);
+        // the samples: a gradient with noise, coded by the encoder itself
+        let hd = parse(&d, 0).unwrap();
+        let mut x = seed;
+        let planes = (0..comps.len())
+            .map(|i| {
+                let (pw, ph) = hd.plane(i);
+                (0..pw * ph)
+                    .map(|k| {
+                        x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+                        let mask = (1u32 << (precision - pt)) - 1;
+                        (((k % pw) as u32 * 7 + (k / pw) as u32 * 3 + (x >> 24) % 9) & mask) as u16
+                    })
+                    .collect()
+            })
+            .collect();
+        let data = encode(&hd, &Samples { planes }).unwrap();
+        d.splice(start..start, data);
+        d
+    }
+
+    fn roundtrip(d: &[u8]) {
+        let h = parse(d, 0).unwrap();
+        let s = decode(&h, &d[h.start..h.end]).unwrap();
+        assert_eq!(encode(&h, &s).unwrap(), &d[h.start..h.end]);
+    }
+
+    #[test]
+    fn predictors_and_shapes() {
+        for pred in 1..=7 {
+            roundtrip(&jpeg(14, 37, 19, &[(1, 1), (1, 1)], pred, 0, 0, pred as u32));
+        }
+        roundtrip(&jpeg(16, 20, 11, &[(1, 1)], 1, 0, 0, 1));
+        roundtrip(&jpeg(12, 33, 17, &[(2, 1), (1, 1), (1, 1)], 4, 0, 0, 2));
+        roundtrip(&jpeg(12, 33, 17, &[(2, 2), (1, 1), (1, 1)], 6, 2, 0, 3));
+        roundtrip(&jpeg(10, 16, 9, &[(1, 1), (1, 1), (1, 1), (1, 1)], 7, 0, 0, 4));
+    }
+
+    /// A table listing the symbol 0 twice (5 and 7 bits), as in an Adobe DNG: its encoder writes
+    /// the later code for every 0.
+    #[test]
+    fn symbols_listed_twice() {
+        let mut d = vec![0xFF, 0xD8];
+        let mut t = vec![0x00];
+        let mut counts = [0u8; 16];
+        counts[4] = 16;
+        counts[6] = 1;
+        t.extend_from_slice(&counts);
+        t.extend((0..16u8).chain([0]));
+        seg(&mut d, 0xC4, &t);
+        seg(&mut d, 0xC3, &[8, 0, 4, 0, 6, 1, 1, 0x11, 0]);
+        seg(&mut d, 0xDA, &[1, 1, 0, 1, 0, 0]);
+        d.extend_from_slice(&[0xFF, 0xD9]);
+        let mut h = parse(&d, 0).unwrap();
+        let planes = vec![(0..24u16).map(|k| (k / 3) % 4).collect::<Vec<_>>()];
+        let s = Samples { planes };
+        // a constant row has zero differences: the first code and the last differ
+        let first = encode(&h, &s).unwrap();
+        h.last_code = true;
+        let last = encode(&h, &s).unwrap();
+        assert_ne!(first, last);
+        for data in [first, last] {
+            let mut g = h.clone();
+            let back = decode(&g, &data).unwrap();
+            assert_eq!(back.planes, s.planes);
+            g.last_code = data == encode(&h, &s).unwrap();
+            assert_eq!(encode(&g, &back).unwrap(), data);
+        }
+    }
+
+    #[test]
+    fn restarts() {
+        roundtrip(&jpeg(14, 16, 12, &[(1, 1), (1, 1)], 1, 0, 32, 5));
+        roundtrip(&jpeg(14, 16, 12, &[(1, 1), (1, 1)], 6, 0, 16, 6));
+    }
+
+    #[test]
+    fn found_in_other_data() {
+        let j = jpeg(14, 16, 12, &[(1, 1), (1, 1)], 1, 0, 0, 7);
+        let mut d = b"II*\0 some container ".to_vec();
+        d.extend_from_slice(&j);
+        d.extend_from_slice(b"and more");
+        let f = find(&d);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].0, 20);
+    }
+
+    #[test]
+    fn damaged_data_is_refused() {
+        let d = jpeg(14, 16, 12, &[(1, 1), (1, 1)], 1, 0, 0, 8);
+        let h = parse(&d, 0).unwrap();
+        let mut cut = d[h.start..h.end - 3].to_vec();
+        assert!(decode(&h, &cut).is_err());
+        // a 0 among the padding bits (the last byte of the data has some, or none)
+        cut = d[h.start..h.end].to_vec();
+        cut.push(0);
+        assert!(decode(&h, &cut).is_err());
+    }
+}

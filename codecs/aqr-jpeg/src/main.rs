@@ -282,6 +282,85 @@ fn main() {
                 }
             }
         }
+        "ljinfo" => {
+            for path in &args {
+                let d = std::fs::read(path).unwrap();
+                println!("{path}:");
+                let found = aqr_jpeg::lossless::find(&d);
+                let (mut ok, mut bytes) = (0, 0);
+                let (mut td, mut te) = (0f64, 0f64);
+                for (at, h) in &found {
+                    let mut h = h.clone();
+                    let data = &d[h.start..h.end];
+                    let h = &mut h;
+                    // (symbols listed twice by a table: the code an encoder writes)
+                    if let Ok(s) = aqr_jpeg::lossless::decode(h, data)
+                        && aqr_jpeg::lossless::encode(h, &s).is_ok_and(|b| b != data)
+                    {
+                        h.last_code = true;
+                    }
+                    let h = &*h;
+                    if std::env::var_os("LJ_TABLES").is_some() {
+                        for (i, t) in h.tables.iter().enumerate() {
+                            if let Some(t) = t {
+                                println!("  table {i}: counts {:?} vals {:?}", t.counts, &t.vals[..]);
+                            }
+                        }
+                    }
+                    let t = Instant::now();
+                    let s = aqr_jpeg::lossless::decode(h, data);
+                    td += t.elapsed().as_secs_f64();
+                    let line = |what: &str| {
+                        println!(
+                            "  @{at}: {}x{} P{} comps {:?} pred {} pt {} ri {} data {}B: {what}",
+                            h.width,
+                            h.height,
+                            h.precision,
+                            h.comps.iter().map(|c| (c.h, c.v)).collect::<Vec<_>>(),
+                            h.predictor,
+                            h.point,
+                            h.restart,
+                            data.len()
+                        )
+                    };
+                    match s {
+                        Err(e) if found.len() <= 8 => line(&format!("decode error: {e}")),
+                        Err(_) => {}
+                        Ok(s) => {
+                            let t = Instant::now();
+                            let back = aqr_jpeg::lossless::encode(h, &s);
+                            te += t.elapsed().as_secs_f64();
+                            match back {
+                                Ok(b) if b == data => {
+                                    ok += 1;
+                                    bytes += data.len();
+                                    if found.len() <= 8 {
+                                        line("exact");
+                                    }
+                                }
+                                Ok(b) => {
+                                    let at = b.iter().zip(data).position(|(x, y)| x != y);
+                                    line(&format!(
+                                        "DIFFERENT: {} B against {}, first difference at {at:?}",
+                                        b.len(),
+                                        data.len()
+                                    ));
+                                }
+                                Err(e) => line(&format!("encode error: {e}")),
+                            }
+                        }
+                    }
+                }
+                println!(
+                    "  {} streams, {} exact ({} B); decode {:.1} MB/s, encode {:.1} MB/s",
+                    found.len(),
+                    ok,
+                    bytes,
+                    bytes as f64 / td / 1e6,
+                    bytes as f64 / te / 1e6
+                );
+            }
+        }
         "pscan" => {
             for path in &args {
                 let d = std::fs::read(path).unwrap();
