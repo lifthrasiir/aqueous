@@ -186,9 +186,9 @@ end: the encoder writes (x1 >> 24) + 1
 ```
 
 Each **adaptive bit** has `p1` (initially 32768) and a count `c` (initially 0). After coding a
-bit `b`: `p1 += floor((t − p1) × RATE[c] / 65536)` with `t = 65535` for a 1 and 0 for a 0,
-`RATE[i] = floor(131072 / (2i + 3))`, then `p1` is clamped to 32 … 65504 and `c`, if below 30,
-grows by 1.
+bit `b`: `p1 += floor((t − p1) × RATE[c] / 65536)` with `t = 65504` for a 1 and 32 for a 0,
+`RATE[i] = floor(131072 / (2i + 3))`, and `c`, if below 30, grows by 1. (`p1` thus stays within
+32 … 65504.)
 
 A **piece** is `varint a`, `varint r`, then `a` bytes of arithmetic code and `r` bytes of raw
 bits. The coder of a piece starts anew (`x1`, `x2`, the decoder's `x`), and the piece's raw bits
@@ -339,8 +339,10 @@ negative) and its magnitude `2^(rs−1) | raw(rs − 1)`. The DC is `P` plus the
 
 `avg` is `⌈(nz(L) + nz(A)) / 2⌉` where both exist, the one that exists, or 0. `t` is
 `1 + ⌊NZB[the nonzero AC coefficients of Q's block] / 2⌋` where there is `Q`, else 0. With
-`base = ((16cc + NZB[avg])·9 + t)·64`, six bits are decoded from `node = 1`: each the adaptive
-bit `nz[base + node]`, then `node = 2·node + bit`; the count is `nz = node − 64`.
+`base = ((16cc + NZB[avg])·9 + t)·64`, the adaptive bit `nz[base]` is 0 for a count of 0, which
+is then `nz`. Else six bits are decoded from `node = 1`: each the adaptive bit `nz[base + node]`,
+then `node = 2·node + bit`; the count is `nz = min(node − 63, 63)` (the encoder's is at most
+63).
 
 ### 7.3 The AC coefficients
 

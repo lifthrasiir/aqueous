@@ -3,7 +3,7 @@
 //! thread, the chunks in parallel). Frames are checked byte for byte.
 //!
 //! ```sh
-//! cargo run --release -p aqr-prores --example aqr-prores-bench -- [-c CHUNK_MB] [-n MAX_FRAMES] [-k STRIPES] FILE_OR_DIR...
+//! cargo run --release -p aqr-prores --example aqr-prores-bench -- [-c CHUNK_MB] [-n MAX_FRAMES] [-k STRIPES] [-r DECODINGS] FILE_OR_DIR...
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -25,11 +25,13 @@ fn walk(p: &Path, out: &mut Vec<PathBuf>) {
 fn main() {
     let mut paths = Vec::new();
     let (mut chunk_mb, mut max_frames, mut stripes) = (32usize, usize::MAX, None);
+    let mut reps = 1;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "-c" => chunk_mb = args.next().unwrap().parse().unwrap(),
             "-k" => stripes = Some(args.next().unwrap().parse().unwrap()),
+            "-r" => reps = args.next().unwrap().parse().unwrap(),
             "-n" => max_frames = args.next().unwrap().parse().unwrap(),
             _ => walk(Path::new(&a), &mut paths),
         }
@@ -69,13 +71,19 @@ fn main() {
                     None => codec::encode(s, &ranges),
                 };
                 let te = t.elapsed().as_secs_f64();
-                let t = Instant::now();
-                let back = aqr_prores::module::decode(
-                    &aqr_prores::module::params(&e.limits),
-                    &[&e.side, &e.coded, &e.gaps],
-                    s.len() as u64,
-                );
-                let td = t.elapsed().as_secs_f64();
+                // The fastest of `reps` decodings (the first is checked).
+                let (mut td, mut back) = (f64::MAX, None);
+                for _ in 0..reps {
+                    let t = Instant::now();
+                    let b = aqr_prores::module::decode(
+                        &aqr_prores::module::params(&e.limits),
+                        &[&e.side, &e.coded, &e.gaps],
+                        s.len() as u64,
+                    );
+                    td = td.min(t.elapsed().as_secs_f64());
+                    back.get_or_insert(b);
+                }
+                let back = back.unwrap();
                 let ok = back.is_ok_and(|b| b == s);
                 (ch.iter().map(|&a| size(a)).sum(), e.coded.len() + e.side.len(), te, td, ok)
             })

@@ -37,3 +37,7 @@ path = "examples/model.rs"
 [[example]]
 name = "aqr-prores-bench"
 path = "examples/bench.rs"
+
+[[example]]
+name = "aqr-prores-decisions"
+path = "examples/decisions.rs"

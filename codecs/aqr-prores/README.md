@@ -112,9 +112,12 @@ Tools (`cargo run -r -p aqr-prores --example ...`):
 
 - `aqr-prores-check [--zstd] FILE_OR_DIR...`: finds the frames and checks that each is written
   again bit for bit (with `--zstd`, zstd -3 of the frames and of their parse).
-- `aqr-prores-bench [-c CHUNK_MB] [-n FRAMES] [-k STRIPES] FILE_OR_DIR...`: codes the frames
+- `aqr-prores-bench [-c CHUNK_MB] [-n FRAMES] [-k STRIPES] [-r DECODINGS] FILE_OR_DIR...`: codes the frames
   in chunks and decodes them (through the module, the stripes on threads).
 - `aqr-prores-model [-n FRAMES] FILE_OR_DIR...`: the context estimator above.
+- `aqr-prores-decisions [-n FRAMES] FILE_OR_DIR...`: the model's binary decisions by kind (zero
+  flags, the size's first, second and later decisions, mantissa bits, signs, counts, DC) with
+  the bytes each would cost, over the first frames.
 
 The local corpus is `F:\Data\aqr-prores-corpus` (see its README: Apple, ARRI, FFmpeg's
 `prores_ks` and `prores_aw`, 2K to UHD, MOV and MXF, interlaced, alpha; 16.4 GB). Every frame

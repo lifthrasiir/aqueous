@@ -13,13 +13,13 @@
 
 use std::ops::Range;
 
-use aqr_common::arith::{ArithDecoder, ArithEncoder, Bit};
+use aqr_common::arith::{ArithDecoder, ArithEncoder};
 use aqr_common::msb::{BitReader, BitWriter, PAD};
 use aqr_common::varint;
 
 use crate::coef::Tail;
 use crate::frame::{self, Frame, Header};
-use crate::model::{Coder, Model};
+use crate::model::{Coder, Model, Prob};
 use crate::plane::{self, Plane};
 use crate::{Error, Result};
 
@@ -60,8 +60,15 @@ impl Coder for Enc {
     const DECODE: bool = false;
 
     #[inline(always)]
-    fn bit(&mut self, p: &mut Bit, b: bool) -> bool {
+    fn bit(&mut self, p: &mut Prob, b: bool) -> bool {
         self.a.encode(b, p.p1());
+        p.update(b);
+        b
+    }
+
+    #[inline(always)]
+    fn bit_u(&mut self, p: &mut Prob, b: bool) -> bool {
+        self.a.encode_unpredictable(b, p.p1());
         p.update(b);
         b
     }
@@ -95,8 +102,15 @@ impl Coder for Dec<'_> {
     const DECODE: bool = true;
 
     #[inline(always)]
-    fn bit(&mut self, p: &mut Bit, _: bool) -> bool {
+    fn bit(&mut self, p: &mut Prob, _: bool) -> bool {
         let b = self.a.decode(p.p1());
+        p.update(b);
+        b
+    }
+
+    #[inline(always)]
+    fn bit_u(&mut self, p: &mut Prob, _: bool) -> bool {
+        let b = self.a.decode_unpredictable(p.p1());
         p.update(b);
         b
     }
@@ -134,12 +148,12 @@ pub(crate) fn take_piece<'a>(d: &'a [u8], at: &mut usize, end: usize) -> Result<
 /// The adaptive bits of the headers.
 #[derive(Default)]
 struct Side {
-    same_header: Bit,
-    same_pic: Bit,
-    same_byte0: Bit,
-    same_q: Bit,
-    tail: Bit,
-    trailer_zero: Bit,
+    same_header: Prob,
+    same_pic: Prob,
+    same_byte0: Prob,
+    same_q: Prob,
+    tail: Prob,
+    trailer_zero: Prob,
 }
 
 /// Bytes of a picture header at most (its size, `hs`, is five bits).
@@ -945,6 +959,67 @@ mod tests {
         }
         span.extend_from_slice(b"tail");
         for k in [1, 3, 8] {
+            stripes_round_trip(&span, &ranges, &frames, k);
+        }
+    }
+
+    /// Frames of extreme coefficients: components of zeros, of the largest values, of one
+    /// coefficient, and empty ones; with alpha.
+    #[test]
+    fn extreme_frames_round_trip() {
+        let mut frames = Vec::new();
+        for (w, h, chroma, il, alpha) in [(64, 32, 3, 0, 1u8), (64, 48, 2, 0, 0), (80, 32, 3, 1, 2)] {
+            let mut f = Frame::parse(&synthetic(w, h, chroma, il, 7)).unwrap();
+            f.header.raw[17] = alpha;
+            f.header = Header::new(f.header.raw.clone()).unwrap();
+            let mut n = 0u32;
+            for pic in &mut f.pictures {
+                for (i, s) in pic.slices.iter_mut().enumerate() {
+                    s.header = vec![8 << 3, 1 + (i % 4) as u8, 0, 0, 0, 0, 0, 0];
+                    s.alpha = (0..if alpha != 0 { i * 3 } else { 0 }).map(|j| (j * 37 + i) as u8).collect();
+                    for (k, (c, tail)) in s.comps.iter_mut().enumerate() {
+                        n += 1;
+                        let blocks = c.len() / 64;
+                        c.fill(0);
+                        *tail = Tail { zero_bytes: 0, empty: false };
+                        match (n as usize + k) % 6 {
+                            0 => {}
+                            1 => {
+                                for (j, v) in c.iter_mut().enumerate() {
+                                    let neg = (j / 64 + j % 64) % 2 == 1;
+                                    *v = if neg { -32767 } else { 32767 };
+                                }
+                                for b in 0..blocks {
+                                    c[b * 64] = if b % 2 == 0 { 32767 } else { -32768 };
+                                }
+                            }
+                            2 => c[(blocks - 1) * 64 + 63] = -1,
+                            3 => *tail = Tail { zero_bytes: 2, empty: true },
+                            4 => c.iter_mut().enumerate().for_each(|(j, v)| *v = (j % 64 != 0) as i16),
+                            _ => {
+                                for b in 0..blocks {
+                                    c[b * 64 + (b * 7) % 63 + 1] = 32767 - b as i16;
+                                    c[b * 64 + 1] = -(b as i16);
+                                }
+                            }
+                        }
+                        if tail.empty {
+                            tail.zero_bytes = 0;
+                        }
+                    }
+                }
+            }
+            let bytes = f.write();
+            assert_eq!(Frame::parse(&bytes).unwrap().write(), bytes);
+            frames.push(bytes);
+        }
+        let (mut span, mut ranges) = (Vec::new(), Vec::new());
+        for f in &frames {
+            span.extend_from_slice(b"gap");
+            ranges.push(span.len()..span.len() + f.len());
+            span.extend_from_slice(f);
+        }
+        for k in [1, 2, 4] {
             stripes_round_trip(&span, &ranges, &frames, k);
         }
     }
