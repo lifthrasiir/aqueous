@@ -587,7 +587,7 @@ pub fn find(d: &[u8]) -> Vec<(usize, Header)> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A DC table with the categories 0..=16 as 5-bit codes (the all-ones code is left out).
@@ -606,7 +606,17 @@ mod tests {
         out.extend_from_slice(body);
     }
 
-    fn jpeg(precision: u8, w: u16, h: u16, comps: &[(u8, u8)], pred: u8, pt: u8, restart: u16, seed: u32) -> Vec<u8> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn jpeg(
+        precision: u8,
+        w: u16,
+        h: u16,
+        comps: &[(u8, u8)],
+        pred: u8,
+        pt: u8,
+        restart: u16,
+        seed: u32,
+    ) -> Vec<u8> {
         let mut d = vec![0xFF, 0xD8];
         seg(&mut d, 0xC4, &table());
         let mut sof = vec![precision];

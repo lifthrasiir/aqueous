@@ -289,6 +289,7 @@ fn main() {
                 let found = aqr_jpeg::lossless::find(&d);
                 let (mut ok, mut bytes) = (0, 0);
                 let (mut td, mut te) = (0f64, 0f64);
+                let (mut mbytes, mut mn, mut mt, mut mtd) = (0usize, 0usize, 0f64, 0f64);
                 for (at, h) in &found {
                     let mut h = h.clone();
                     let data = &d[h.start..h.end];
@@ -327,6 +328,22 @@ fn main() {
                         Err(e) if found.len() <= 8 => line(&format!("decode error: {e}")),
                         Err(_) => {}
                         Ok(s) => {
+                            if std::env::var_os("LJ_MODEL").is_some() {
+                                let t = Instant::now();
+                                let m = aqr_jpeg::lmodel::encode(h, &s);
+                                let tm = t.elapsed().as_secs_f64();
+                                let t = Instant::now();
+                                let back = aqr_jpeg::lmodel::decode(h, &m);
+                                let tmd = t.elapsed().as_secs_f64();
+                                let same = back.is_ok_and(|b| b.planes == s.planes);
+                                mbytes += m.len();
+                                mn += data.len();
+                                mt += tm;
+                                mtd += tmd;
+                                if !same {
+                                    println!("  @{at}: MODEL ROUNDTRIP FAILS");
+                                }
+                            }
                             let t = Instant::now();
                             let back = aqr_jpeg::lossless::encode(h, &s);
                             te += t.elapsed().as_secs_f64();
@@ -350,6 +367,14 @@ fn main() {
                             }
                         }
                     }
+                }
+                if mn > 0 {
+                    println!(
+                        "  model: {mbytes} B of {mn} B = {:.4}; encode {:.1} MB/s, decode {:.1} MB/s",
+                        mbytes as f64 / mn as f64,
+                        mn as f64 / mt / 1e6,
+                        mn as f64 / mtd / 1e6
+                    );
                 }
                 println!(
                     "  {} streams, {} exact ({} B); decode {:.1} MB/s, encode {:.1} MB/s",
