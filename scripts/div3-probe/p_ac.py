@@ -34,7 +34,8 @@ def decP(pkts):
     for p in pkts: seq += [I_PKT, p]
     res = DEC.frames(seq)
     return [res[2 * i + 1] for i in range(len(pkts))]
-def make_mk(rl): return lambda bits_: tob(hdr_p(rl=rl) + PREFIX + bits_ + '0' * 40)
+QMK = 5
+def make_mk(rl): return lambda bits_: tob(hdr_p(q=QMK, rl=rl) + PREFIX + bits_ + '0' * 40)
 THRESH_P = 0.85
 def flip_leaf_p(mk, p, terms, per=8, thresh=None):
     thresh = THRESH_P if thresh is None else thresh

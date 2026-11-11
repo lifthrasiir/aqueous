@@ -20,22 +20,22 @@ def _zigzag():
 IDX = _zigzag()
 _known = {tuple(map(int, k[1:-1].split(','))): v for k, v in J('scan_idx_block3.json').items()}
 assert all(IDX[k] == v for k, v in _known.items())
-ESC = {'L0': '0010110', 'L1': '001001010', 'L2': '0000011', 'C0': '000001101', 'C1': '101101001', 'C2': '00000110'}
+ESC = {'L0': '0010110', 'L1': '001001010', 'L2': '0000011', 'C0': '000001101', 'C1': '101101001', 'C2': '0000011'}
 
 class Tab:
-    def __init__(self, labeled, esc):
+    def __init__(self, labeled, esc, base=1):
         self.codes = {}; self.esc = esc
         self.maxl = {}; self.maxr = {}
         for p, v in labeled.items():
-            pos = tuple(v['pos']); run = IDX.get(pos, IDX.get((pos[1], pos[0])))
+            pos = tuple(v['pos']); run = 0 if pos == (0, 0) else IDX.get(pos, IDX.get((pos[1], pos[0])))
             if run is None: run = 64
-            run -= 1
+            run -= base
             self.codes[p] = (run, v['level'], v['last'])
             self.maxl[(v['last'], run)] = max(self.maxl.get((v['last'], run), 0), v['level'])
             self.maxr[(v['last'], v['level'])] = max(self.maxr.get((v['last'], v['level']), -1), run)
         self.maxlen = max(len(p) for p in self.codes)
 L = [Tab(J('ac_labeled_rl%d.json' % i), ESC['L%d' % i]) for i in range(3)]
-C = [Tab(J('ac_labeled_c%d.json' % i), ESC['C%d' % i]) for i in range(3)]
+C = [Tab(J('ac_labeled_c%d.json' % i), ESC['C%d' % i], 1 if i < 2 else 0) for i in range(3)]
 
 class Bits:
     def __init__(self, data): self.d = data; self.p = 0; self.n = len(data) * 8
@@ -74,7 +74,7 @@ TRACE = None
 ESC2_ADD = 0
 class Esc3:
     ll = 0
-def read_block_ac(b, tab, q, st):
+def read_block_ac(b, tab, q, st, maxi=63):
     i = 0
     while True:
         s = b.peek_str(tab.maxlen); et = 0
@@ -98,7 +98,7 @@ def read_block_ac(b, tab, q, st):
             run, lvl, last = vlc(b, tab.codes, tab.maxlen); sign = b.get(1)
         if TRACE is not None: TRACE.append((run, lvl, last, sign, et))
         i += run + 1
-        if i > 63: raise ValueError('run past block')
+        if i > maxi: raise ValueError('run past block')
         if last: return
 
 def d012(b):
@@ -193,5 +193,5 @@ def parse_p(data, w=640, h=352, predvar=0, trace=None, no_skip_flag=False, extra
             else:
                 read_mv(b, MVT[mvt])
                 for i in range(6):
-                    if cb[i]: read_block_ac(b, C[rl], q, st)
+                    if cb[i]: read_block_ac(b, C[rl], q, st, 64)
     return b.n - b.p
