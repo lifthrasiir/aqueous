@@ -1,11 +1,12 @@
 //! The code of the module `div3-recons` (see `formula`, and `FORMAT.md`), which needs no aqr-formula,
 //! so that aqr-modules builds it into its Wasm module.
-use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
 use aqr_api::stream::{In, Pull, Put, Slice, Written};
+use aqr_walk::reader::Reader;
 
-use crate::{Codec, Decoder, Error, Result, Source, corrupt};
+use crate::{Codec, Decoder, Error, Result, corrupt};
 
 /// Pages of the windows of `div3-recons` as a part module: of each input and of the output.
 pub const WINDOW: u32 = 4;
@@ -30,71 +31,25 @@ pub fn plan(initial: u64) -> u64 {
     m.plan()
 }
 
-/// Bytes read from an input through a buffer.
-struct Reader<'a> {
-    src: &'a mut dyn Pull,
-    buf: Vec<u8>,
-    pos: usize,
-    len: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(src: &'a mut dyn Pull) -> Self {
-        Reader { src, buf: vec![0; BUF], pos: 0, len: 0 }
+/// The table at the start of the coded frames: the number of chunks, then for each the frames it holds and the bytes it
+/// is coded in. Each chunk is coded on its own, with a model new to it.
+pub fn table(r: &mut Reader) -> Result<Vec<(u64, u64)>> {
+    let mut one = || r.varint().ok().flatten().ok_or_else(corrupt);
+    let n = one()?;
+    if n > 1 << 24 {
+        return Err(corrupt());
     }
-    fn fill(&mut self) -> bool {
-        if self.pos == self.len {
-            self.len = self.src.pull(&mut self.buf);
-            self.pos = 0;
-        }
-        self.len != 0
+    let mut out = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        let a = one()?;
+        let b = one()?;
+        out.push((a, b));
     }
-    fn next(&mut self) -> Option<u8> {
-        if !self.fill() {
-            return None;
-        }
-        self.pos += 1;
-        Some(self.buf[self.pos - 1])
-    }
-    /// A LEB128 number, or None at the end of the input.
-    fn varint(&mut self) -> Result<Option<u64>> {
-        let (mut v, mut shift) = (0u64, 0);
-        loop {
-            let Some(b) = self.next() else {
-                return if shift == 0 { Ok(None) } else { Err(corrupt()) };
-            };
-            if shift > 56 {
-                return Err(corrupt());
-            }
-            v |= ((b & 0x7f) as u64) << shift;
-            if b & 0x80 == 0 {
-                return Ok(Some(v));
-            }
-            shift += 7;
-        }
-    }
-    /// `n` bytes put to `out`.
-    fn copy(&mut self, mut n: u64, out: &mut dyn Put) -> Result<()> {
-        while n > 0 {
-            if !self.fill() {
-                return Err(Error("input of another length"));
-            }
-            let k = (self.len - self.pos).min(n.min(usize::MAX as u64) as usize);
-            out.put(&self.buf[self.pos..self.pos + k]).ok_or(Error("output of another length"))?;
-            self.pos += k;
-            n -= k as u64;
-        }
-        Ok(())
-    }
-}
-
-impl Source for Reader<'_> {
-    fn byte(&mut self) -> u8 {
-        self.next().unwrap_or(0)
-    }
+    Ok(out)
 }
 
 /// The file of `size` bytes from the coded frames, the skeleton and the layout (see `FORMAT.md`), put to `out`.
+/// The chunks are decoded one after the other here; `formula::decode` does it at once natively.
 pub fn run(
     coded: &mut dyn Pull,
     skeleton: &mut dyn Pull,
@@ -108,31 +63,50 @@ pub fn run(
     // (in the order of the plan)
     let mut codec = Codec::new(width, height);
     let mut frame: Vec<u8> = Vec::with_capacity(FRAME_MAX + 8);
-    let mut dec = Decoder::new(Reader::new(coded));
-    let mut skel = Reader::new(skeleton);
-    let mut lay = Reader::new(layout);
-    let mut aud = Reader::new(audio);
+    let cod = RefCell::new(Reader::new(coded, BUF));
+    let mut skel = Reader::new(skeleton, BUF);
+    let mut lay = Reader::new(layout, BUF);
+    let mut aud = Reader::new(audio, BUF);
+    let chunks = table(&mut cod.borrow_mut())?;
+    let mut chunks = chunks.into_iter();
+    let mut dec: Option<Decoder<&RefCell<Reader>>> = None;
+    let mut left = 0u64;
     let mut written = 0u64;
-    while let Some(gap) = lay.varint()? {
-        let tag = lay.varint()?.ok_or_else(corrupt)?;
+    while let Some(gap) = lay.varint().map_err(|_| corrupt())? {
+        let tag = lay.varint().map_err(|_| corrupt())?.ok_or_else(corrupt)?;
         let n = tag >> 1;
         if written + gap + n > size {
             return Err(corrupt());
         }
-        skel.copy(gap, out)?;
+        if !skel.copy(gap, out) {
+            return Err(Error("input of another length"));
+        }
         if tag & 1 == 0 {
             if n as usize > FRAME_MAX {
                 return Err(corrupt());
             }
-            frame = codec.decode(&mut dec, n as usize, frame).map_err(|_| corrupt())?;
+            if left == 0 {
+                if dec.is_some() {
+                    cod.borrow_mut().skip_rest();
+                }
+                let (frames, bytes) = chunks.next().ok_or_else(corrupt)?;
+                cod.borrow_mut().limit(bytes);
+                codec.reset();
+                dec = Some(Decoder::new(&cod));
+                left = frames;
+            }
+            left -= 1;
+            frame = codec.decode(dec.as_mut().ok_or_else(corrupt)?, n as usize, frame).map_err(|_| corrupt())?;
             out.put(&frame).ok_or(Error("output of another length"))?;
-        } else {
-            aud.copy(n, out)?;
+        } else if !aud.copy(n, out) {
+            return Err(Error("input of another length"));
         }
         written += gap + n;
     }
-    skel.copy(size - written, out)?;
-    if skel.next().is_some() || aud.next().is_some() {
+    if !skel.copy(size - written, out) {
+        return Err(Error("input of another length"));
+    }
+    if left != 0 || chunks.next().is_some() || skel.next().is_some() || aud.next().is_some() {
         return Err(Error("input of another length"));
     }
     Ok(())
@@ -143,8 +117,8 @@ fn dims(params: &[u8]) -> Result<(usize, usize)> {
     Ok((u16::from_le_bytes([a, b]) as usize, u16::from_le_bytes([c, d]) as usize))
 }
 
-/// The module `div3-recons` on whole inputs, natively.
-pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Result<Vec<u8>> {
+/// The module `div3-recons` on whole inputs, the chunks one after the other.
+pub fn decode_serial(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     let &[coded, skeleton, layout, audio] = inputs else { return Err(corrupt()) };
     let (w, h) = dims(params)?;
     let mut out = Vec::with_capacity(len.min(1 << 32) as usize);

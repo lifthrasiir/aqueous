@@ -1,6 +1,7 @@
-//! A byte stream of AC-3: syncframes (coded) and the bytes between them (kept as they are). The records are, in order of
-//! the stream: a bit (adaptive), 1 for a syncframe, which follows as `ac3::encode` codes it; 0 for a run of other bytes,
-//! its length (32 bits) and the bytes (flat).
+//! A byte stream of AC-3: syncframes (coded) and the bytes between them (kept as they are), in chunks that are coded each on
+//! its own (a fresh model), so that they can be coded and decoded at once. The records of a chunk are, in order: a bit
+//! (adaptive), 1 for a syncframe, which follows as `ac3::encode` codes it; 0 for a run of other bytes, its length (32 bits)
+//! and the bytes (flat).
 use alloc::vec::Vec;
 
 use aqr_walk::Error;
@@ -15,6 +16,8 @@ pub const MODEL_BITS: u32 = 21;
 pub const FRAME_MAX: usize = 3840;
 /// Bytes of a run of other bytes decoded at once.
 pub const RUN_PIECE: usize = 4096;
+/// The bytes of a chunk, about: it ends with the record that passes them.
+pub const CHUNK: usize = 16 << 20;
 
 const KIND: u32 = 0xFFFF_0001;
 
@@ -30,21 +33,18 @@ fn flat32<C: Coder>(rc: &mut C, v: u32) -> u32 {
     r
 }
 
-/// Codes `data`: its syncframes (whose checksums are right and that parse) by the model, the rest as it is.
-pub fn encode<C: Coder>(rc: &mut C, data: &[u8]) {
-    let mut m = Model::new(MODEL_BITS);
-    let mut ctx = Ctx::default();
-    let (mut pos, mut raw, mut prev) = (0usize, 0usize, 0u32);
-    let flush = |rc: &mut C, m: &mut Model, from: usize, to: usize, prev: &mut u32| {
-        kind_bit(rc, m, *prev, 0);
-        *prev = 0;
-        flat32(rc, (to - from) as u32);
-        for &b in &data[from..to] {
-            for k in (0..8).rev() {
-                rc.flat((b >> k & 1) as u32);
-            }
-        }
-    };
+/// A record of a stream: its bytes `start..end`, and whether it is a syncframe (else a run of other bytes).
+#[derive(Clone, Copy, Debug)]
+pub struct Record {
+    pub start: usize,
+    pub end: usize,
+    pub frame: bool,
+}
+
+/// The records of `data`: the syncframes whose checksums are right and that parse, and the runs between them.
+pub fn records(data: &[u8]) -> Vec<Record> {
+    let mut out = Vec::new();
+    let (mut pos, mut raw) = (0usize, 0usize);
     while pos < data.len() {
         if let Some(n) = ac3::frame_len(&data[pos..])
             && pos + n <= data.len()
@@ -52,11 +52,9 @@ pub fn encode<C: Coder>(rc: &mut C, data: &[u8]) {
             && ac3::check(&data[pos..pos + n])
         {
             if raw < pos {
-                flush(rc, &mut m, raw, pos, &mut prev);
+                out.push(Record { start: raw, end: pos, frame: false });
             }
-            kind_bit(rc, &mut m, prev, 1);
-            prev = 1;
-            ac3::encode(rc, &mut m, &mut ctx, &data[pos..pos + n]).expect("a checked frame");
+            out.push(Record { start: pos, end: pos + n, frame: true });
             pos += n;
             raw = pos;
         } else {
@@ -64,11 +62,52 @@ pub fn encode<C: Coder>(rc: &mut C, data: &[u8]) {
         }
     }
     if raw < data.len() {
-        flush(rc, &mut m, raw, data.len(), &mut prev);
+        out.push(Record { start: raw, end: data.len(), frame: false });
+    }
+    out
+}
+
+/// The chunks: ranges of records of about [`CHUNK`] bytes.
+pub fn chunks(recs: &[Record]) -> Vec<core::ops::Range<usize>> {
+    let (mut out, mut from, mut bytes) = (Vec::new(), 0usize, 0usize);
+    for (i, r) in recs.iter().enumerate() {
+        bytes += r.end - r.start;
+        if bytes >= CHUNK {
+            out.push(from..i + 1);
+            from = i + 1;
+            bytes = 0;
+        }
+    }
+    if from < recs.len() {
+        out.push(from..recs.len());
+    }
+    out
+}
+
+/// Codes the records `recs` of `data` as one chunk.
+pub fn encode_chunk<C: Coder>(rc: &mut C, data: &[u8], recs: &[Record]) {
+    let mut m = Model::new(MODEL_BITS);
+    let mut ctx = Ctx::default();
+    let mut prev = 0u32;
+    for r in recs {
+        if r.frame {
+            kind_bit(rc, &mut m, prev, 1);
+            prev = 1;
+            ac3::encode(rc, &mut m, &mut ctx, &data[r.start..r.end]).expect("a checked frame");
+        } else {
+            kind_bit(rc, &mut m, prev, 0);
+            prev = 0;
+            flat32(rc, (r.end - r.start) as u32);
+            for &b in &data[r.start..r.end] {
+                for k in (0..8).rev() {
+                    rc.flat((b >> k & 1) as u32);
+                }
+            }
+        }
     }
 }
 
-/// The decoding state of a stream: its records one after the other.
+/// The decoding state of a chunk: its records one after the other.
 pub struct Decoder {
     m: Model,
     ctx: Ctx,
@@ -87,7 +126,7 @@ impl Decoder {
         Self::default()
     }
 
-    /// The next bytes of the stream into `out` (cleared first): a syncframe, or a piece of a run of other bytes.
+    /// The next bytes of the chunk into `out` (cleared first): a syncframe, or a piece of a run of other bytes.
     /// `out` should have the capacity of [`FRAME_MAX`] and [`RUN_PIECE`] bytes at least.
     pub fn next<C: Coder>(&mut self, rc: &mut C, out: Vec<u8>) -> Result<Vec<u8>, Error> {
         if self.run == 0 {

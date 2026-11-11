@@ -20,13 +20,20 @@ impl<'a> BitReader<'a> {
         self.total() - self.pos
     }
     /// The next 32 bits, left-aligned, zero past the end.
+    #[inline]
     pub fn peek32(&self) -> u32 {
-        let mut v = 0u64;
         let byte = self.pos >> 3;
-        for k in 0..5 {
-            v = v << 8 | *self.data.get(byte + k).unwrap_or(&0) as u64;
-        }
-        (v >> (8 - (self.pos & 7)) & 0xFFFF_FFFF) as u32
+        let w = match self.data.get(byte..byte + 8) {
+            Some(s) => u64::from_be_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]),
+            None => {
+                let mut v = 0u64;
+                for k in 0..8 {
+                    v = v << 8 | *self.data.get(byte + k).unwrap_or(&0) as u64;
+                }
+                v
+            }
+        };
+        ((w << (self.pos & 7)) >> 32) as u32
     }
     /// `n` bits (at most 32), or `None` if the data ends first.
     pub fn get(&mut self, n: u32) -> Option<u32> {

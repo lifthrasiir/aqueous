@@ -19,7 +19,7 @@ pub enum FrameKind {
 
 /// A table of AC symbols: the VLC, what each symbol means, and the escape-coded extensions.
 struct AcTab {
-    vlc: &'static Vlc,
+    vlc: Vlc,
     info: &'static [(u8, u8, u8)],
     /// By last, then run: the highest level of the table.
     maxl: [[u8; 65]; 2],
@@ -28,7 +28,7 @@ struct AcTab {
 }
 
 impl AcTab {
-    fn new(vlc: &'static Vlc, info: &'static [(u8, u8, u8)]) -> AcTab {
+    fn new(codes: &'static [(u32, u8, u16)], info: &'static [(u8, u8, u8)]) -> AcTab {
         let mut maxl = [[0u8; 65]; 2];
         let mut maxr = [[-1i16; 128]; 2];
         for &(run, level, last) in info {
@@ -38,7 +38,7 @@ impl AcTab {
                 maxr[k][l] = maxr[k][l].max(run as i16);
             }
         }
-        AcTab { vlc, info, maxl, maxr }
+        AcTab { vlc: Vlc::new(codes), info, maxl, maxr }
     }
 }
 
@@ -46,6 +46,10 @@ impl AcTab {
 struct Syntax {
     w: usize,
     h: usize,
+    dc: [Vlc; 4],
+    cbp_i: Vlc,
+    mb_p: Vlc,
+    mv: [Vlc; 2],
     intra: [AcTab; 3],
     inter: [AcTab; 3],
 }
@@ -74,7 +78,7 @@ fn d012<I: Io>(io: &mut I) -> R<u32> {
     Ok(1 + io.raw(1)?)
 }
 
-fn read_dc<I: Io>(io: &mut I, tab: &'static Vlc, ctx: u32) -> R<()> {
+fn read_dc<I: Io>(io: &mut I, tab: &Vlc, ctx: u32) -> R<()> {
     let s = io.vlc(tab, E_DC | ctx)?;
     let level = if s == ESC { io.raw(8)? } else { s as u32 };
     if level != 0 {
@@ -90,11 +94,11 @@ fn ac_block<I: Io>(io: &mut I, t: &AcTab, kind: u32, maxi: u32) -> R<()> {
     let mut prev = 0u32;
     loop {
         let ctx = E_AC | kind | i.min(15) << 2 | prev.min(2) << 6;
-        let s = io.vlc(t.vlc, ctx)?;
+        let s = io.vlc(&t.vlc, ctx)?;
         let (run, level, last);
         if s == ESC {
             if io.flag(E_ESC | kind)? == 1 {
-                let s2 = io.vlc(t.vlc, ctx | 1 << 8)?;
+                let s2 = io.vlc(&t.vlc, ctx | 1 << 8)?;
                 if s2 == ESC {
                     return Err(FrameError::Parse);
                 }
@@ -103,7 +107,7 @@ fn ac_block<I: Io>(io: &mut I, t: &AcTab, kind: u32, maxi: u32) -> R<()> {
                 level = l as u32 + t.maxl[la as usize][r as usize] as u32;
                 last = la;
             } else if io.flag(E_ESC | 4 | kind)? == 1 {
-                let s2 = io.vlc(t.vlc, ctx | 2 << 8)?;
+                let s2 = io.vlc(&t.vlc, ctx | 2 << 8)?;
                 if s2 == ESC {
                     return Err(FrameError::Parse);
                 }
@@ -156,10 +160,14 @@ struct Geom {
 
 impl Syntax {
     fn new(width: usize, height: usize) -> Syntax {
-        let a = |v: &'static Vlc, i: &'static [(u8, u8, u8)]| AcTab::new(v, i);
+        let a = |v: &'static [(u32, u8, u16)], i: &'static [(u8, u8, u8)]| AcTab::new(v, i);
         Syntax {
             w: width,
             h: height,
+            dc: [Vlc::new(&DC_LUMA0), Vlc::new(&DC_LUMA1), Vlc::new(&DC_CHROMA0), Vlc::new(&DC_CHROMA1)],
+            cbp_i: Vlc::new(&CBP_I),
+            mb_p: Vlc::new(&MB_P),
+            mv: [Vlc::new(&MV0_VLC), Vlc::new(&MV1_VLC)],
             intra: [
                 a(&AC_INTRA0_VLC, &AC_INTRA0_INFO),
                 a(&AC_INTRA1_VLC, &AC_INTRA1_INFO),
@@ -205,7 +213,7 @@ impl Syntax {
         let mut flags = vec![0u8; stride * (g.mbh * 2 + 2)];
         for my in 0..g.mbh {
             for mx in 0..g.mbw {
-                let sym = io.vlc(&CBP_I, E_CBPI)? as u32;
+                let sym = io.vlc(&self.cbp_i, E_CBPI)? as u32;
                 let mut cb = [0u8; 6];
                 for i in 0..6 {
                     let mut bit = (sym >> (5 - i) & 1) as u8;
@@ -222,11 +230,11 @@ impl Syntax {
                 }
                 io.flag(E_AP)?;
                 for i in 0..6 {
-                    let dct: &'static Vlc = match (i < 4, dc) {
-                        (true, 0) => &DC_LUMA0,
-                        (true, _) => &DC_LUMA1,
-                        (false, 0) => &DC_CHROMA0,
-                        (false, _) => &DC_CHROMA1,
+                    let dct: &Vlc = match (i < 4, dc) {
+                        (true, 0) => &self.dc[0],
+                        (true, _) => &self.dc[1],
+                        (false, 0) => &self.dc[2],
+                        (false, _) => &self.dc[3],
                     };
                     read_dc(io, dct, (i < 4) as u32)?;
                     if cb[i] != 0 {
@@ -244,7 +252,7 @@ impl Syntax {
         let rl = d012(io)? as usize;
         let dc = io.raw(1)? as usize;
         let mvt = io.raw(1)? as usize;
-        let mvtab: &'static Vlc = if mvt == 0 { &MV0_VLC } else { &MV1_VLC };
+        let mvtab: &Vlc = &self.mv[mvt];
         let mvvec: &'static [(i8, i8)] = if mvt == 0 { &MV0_VEC } else { &MV1_VEC };
         // Per macroblock: 0 skipped, 1 inter, 2 intra; and whether its vector is zero.
         let mut kind = vec![0u8; g.mbw * g.mbh];
@@ -258,18 +266,18 @@ impl Syntax {
                 if use_skip != 0 && io.flag(E_SKIP | nctx)? == 1 {
                     continue;
                 }
-                let sym = io.vlc(&MB_P, E_MBT | nctx)? as u32;
+                let sym = io.vlc(&self.mb_p, E_MBT | nctx)? as u32;
                 let intra = sym & 64 != 0;
                 let cb = |i: usize| sym >> (5 - i) & 1 != 0;
                 if intra {
                     kind[at] = 2;
                     io.flag(E_AP)?;
                     for i in 0..6 {
-                        let dct: &'static Vlc = match (i < 4, dc) {
-                            (true, 0) => &DC_LUMA0,
-                            (true, _) => &DC_LUMA1,
-                            (false, 0) => &DC_CHROMA0,
-                            (false, _) => &DC_CHROMA1,
+                        let dct: &Vlc = match (i < 4, dc) {
+                            (true, 0) => &self.dc[0],
+                            (true, _) => &self.dc[1],
+                            (false, 0) => &self.dc[2],
+                            (false, _) => &self.dc[3],
                         };
                         read_dc(io, dct, (i < 4) as u32)?;
                         if cb(i) {
@@ -303,6 +311,11 @@ impl Syntax {
 impl Codec {
     pub fn new(width: usize, height: usize) -> Codec {
         Codec { model: Model::new(22), syn: Syntax::new(width, height) }
+    }
+
+    /// Forgets what the model has learned (the start of a chunk), in place.
+    pub fn reset(&mut self) {
+        self.model.reset();
     }
 
     /// Whether the frame can be coded: it must parse and leave only a short tail.

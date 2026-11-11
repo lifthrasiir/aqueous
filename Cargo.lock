@@ -94,6 +94,7 @@ name = "aqr-ac3"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-common",
  "aqr-formula",
  "aqr-walk",
 ]
@@ -1062,6 +1063,9 @@ dependencies = [
 [[package]]
 name = "aqr-walk"
 version = "0.1.0"
+dependencies = [
+ "aqr-api",
+]
 
 [[package]]
 name = "aqr-wasm"

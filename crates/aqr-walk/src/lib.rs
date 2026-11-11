@@ -10,6 +10,7 @@ pub mod bits;
 pub mod io;
 pub mod model;
 pub mod rc;
+pub mod reader;
 
 /// The data is not what the syntax walks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

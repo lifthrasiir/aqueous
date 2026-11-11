@@ -1,20 +1,57 @@
 //! The two directions of the syntax walk. `Enc` reads elements from the original bits and codes them;
 //! `Dec` decodes them and writes the bits; `Check` only reads (a dry run to see that a frame parses).
-use crate::bits::{BitReader, BitWriter};
+//!
+//! A symbol of a VLC is coded as the bits of its code, each under the probability of its node of the code's tree and the
+//! context: the nodes of four bits share a line of the model's table, so that a code takes a miss of the cache for every
+//! four of its bits.
 use crate::Error;
+use crate::bits::{BitReader, BitWriter};
 use crate::model::Model;
 use crate::rc::Coder;
+use alloc::vec::Vec;
 
-pub type Vlc = [(u32, u8, u16)];
 /// The symbol of an escape code.
 pub const ESC: u16 = 0xFFFF;
+
+/// A VLC: its codes, `(code left-aligned to 32 bits, length, symbol)`, and the tree of them to walk bit by bit.
+pub struct Vlc {
+    codes: &'static [(u32, u8, u16)],
+    /// By node and bit: the next node (positive), or the symbol (`!symbol`, negative), or 0 for none.
+    trie: Vec<[i32; 2]>,
+}
+
+impl Vlc {
+    pub fn new(codes: &'static [(u32, u8, u16)]) -> Vlc {
+        let mut trie: Vec<[i32; 2]> = alloc::vec![[0, 0]];
+        for &(code, len, sym) in codes {
+            let mut node = 0usize;
+            for k in 0..len as u32 {
+                let bit = (code >> (31 - k) & 1) as usize;
+                if k + 1 == len as u32 {
+                    trie[node][bit] = !(sym as i32);
+                } else {
+                    if trie[node][bit] <= 0 {
+                        trie.push([0, 0]);
+                        trie[node][bit] = trie.len() as i32 - 1;
+                    }
+                    node = trie[node][bit] as usize;
+                }
+            }
+        }
+        Vlc { codes, trie }
+    }
+
+    pub fn codes(&self) -> &'static [(u32, u8, u16)] {
+        self.codes
+    }
+}
 
 pub trait Io {
     fn total_bits(&self) -> usize;
     /// Bits consumed (compressing) or produced (decompressing) so far.
     fn done(&self) -> usize;
     /// A symbol of the VLC `tab`; `ctx` selects the statistics.
-    fn vlc(&mut self, tab: &'static Vlc, ctx: u32) -> Result<u16, Error>;
+    fn vlc(&mut self, tab: &Vlc, ctx: u32) -> Result<u16, Error>;
     /// `n` (at most 32) bits as they are, coded flat.
     fn raw(&mut self, n: u32) -> Result<u32, Error>;
     /// One bit, adaptive under `ctx`.
@@ -27,23 +64,21 @@ pub trait Io {
     fn derived(&mut self, n: u32) -> Result<(), Error>;
 }
 
+/// Walks the tree of `tab` over the bits of `peek` (left-aligned): the symbol and the length of its code.
 #[inline]
-fn find(tab: &Vlc, peek: u32) -> Option<(u32, u8, u16)> {
-    let i = tab.partition_point(|e| e.0 <= peek);
-    if i == 0 {
-        return None;
+fn walk(tab: &Vlc, peek: u32) -> Option<(u16, u32)> {
+    let mut node = 0usize;
+    for k in 0..32u32 {
+        let next = tab.trie[node][(peek >> (31 - k) & 1) as usize];
+        if next < 0 {
+            return Some((!next as u16, k + 1));
+        }
+        if next == 0 {
+            return None;
+        }
+        node = next as usize;
     }
-    let e = tab[i - 1];
-    if e.1 == 0 || (peek ^ e.0) >> (32 - e.1 as u32) != 0 { None } else { Some(e) }
-}
-
-#[inline]
-fn exact(tab: &Vlc, la: u32, len: u8) -> Option<u16> {
-    let i = tab.partition_point(|e| e.0 < la);
-    match tab.get(i) {
-        Some(e) if e.0 == la && e.1 == len => Some(e.2),
-        _ => None,
-    }
+    None
 }
 
 pub struct Enc<'a, 'm, C: Coder> {
@@ -59,18 +94,24 @@ impl<C: Coder> Io for Enc<'_, '_, C> {
     fn done(&self) -> usize {
         self.r.pos()
     }
-    fn vlc(&mut self, tab: &'static Vlc, ctx: u32) -> Result<u16, Error> {
-        let e = find(tab, self.r.peek32()).ok_or(Error::Parse)?;
-        if self.r.left() < e.1 as usize {
+    fn vlc(&mut self, tab: &Vlc, ctx: u32) -> Result<u16, Error> {
+        let peek = self.r.peek32();
+        let (sym, len) = walk(tab, peek).ok_or(Error::Parse)?;
+        if self.r.left() < len as usize {
             return Err(Error::Parse);
         }
-        for k in 0..e.1 as u32 {
-            let node = 1u32 << k | if k == 0 { 0 } else { e.0 >> (32 - k) };
-            let bit = e.0 >> (31 - k) & 1;
-            self.rc.bit(self.m.slot(ctx, node), bit);
+        let (mut base, mut gn) = (0usize, 1u32);
+        for k in 0..len {
+            if k & 3 == 0 {
+                base = self.m.line(ctx, k >> 2, if k == 0 { 0 } else { peek >> (32 - k) });
+                gn = 1;
+            }
+            let bit = peek >> (31 - k) & 1;
+            self.rc.bit(self.m.at(base, gn), bit);
+            gn = gn << 1 | bit;
         }
-        self.r.skip(e.1 as usize);
-        Ok(e.2)
+        self.r.skip(len as usize);
+        Ok(sym)
     }
     fn raw(&mut self, n: u32) -> Result<u32, Error> {
         let v = self.r.get(n).ok_or(Error::Parse)?;
@@ -81,15 +122,22 @@ impl<C: Coder> Io for Enc<'_, '_, C> {
     }
     fn flag(&mut self, ctx: u32) -> Result<u32, Error> {
         let v = self.r.get(1).ok_or(Error::Parse)?;
-        self.rc.bit(self.m.slot(ctx, 0x8000_0000), v);
+        let base = self.m.line(ctx, 0, 0);
+        self.rc.bit(self.m.at(base, 1), v);
         Ok(v)
     }
     fn field(&mut self, n: u32, ctx: u32) -> Result<u32, Error> {
         let v = self.r.get(n).ok_or(Error::Parse)?;
         let k = n.min(8);
+        let (mut base, mut gn) = (0usize, 1u32);
         for i in 0..k {
-            let node = 1u32 << i | v >> (n - i);
-            self.rc.bit(self.m.slot(ctx, node), v >> (n - 1 - i) & 1);
+            if i & 3 == 0 {
+                base = self.m.line(ctx, i >> 2, if i == 0 { 0 } else { v >> (n - i) });
+                gn = 1;
+            }
+            let bit = v >> (n - 1 - i) & 1;
+            self.rc.bit(self.m.at(base, gn), bit);
+            gn = gn << 1 | bit;
         }
         for i in (0..n - k).rev() {
             self.rc.flat(v >> i & 1);
@@ -118,17 +166,26 @@ impl<C: Coder> Io for Dec<'_, C> {
     fn done(&self) -> usize {
         self.w.bits()
     }
-    fn vlc(&mut self, tab: &'static Vlc, ctx: u32) -> Result<u16, Error> {
-        let mut prefix = 0u32;
+    fn vlc(&mut self, tab: &Vlc, ctx: u32) -> Result<u16, Error> {
+        let (mut node, mut prefix) = (0usize, 0u32);
+        let (mut base, mut gn) = (0usize, 1u32);
         for k in 0..32u32 {
-            let node = 1u32 << k | prefix;
-            let bit = self.rc.bit(self.m.slot(ctx, node), 0);
-            prefix = prefix << 1 | bit;
-            let la = prefix << (31 - k);
-            if let Some(s) = exact(tab, la, k as u8 + 1) {
-                self.w.put(prefix, k + 1);
-                return Ok(s);
+            if k & 3 == 0 {
+                base = self.m.line(ctx, k >> 2, prefix);
+                gn = 1;
             }
+            let bit = self.rc.bit(self.m.at(base, gn), 0);
+            gn = gn << 1 | bit;
+            prefix = prefix << 1 | bit;
+            let next = tab.trie[node][bit as usize];
+            if next < 0 {
+                self.w.put(prefix, k + 1);
+                return Ok(!next as u16);
+            }
+            if next == 0 {
+                return Err(Error::Parse);
+            }
+            node = next as usize;
         }
         Err(Error::Parse)
     }
@@ -141,16 +198,23 @@ impl<C: Coder> Io for Dec<'_, C> {
         Ok(v)
     }
     fn flag(&mut self, ctx: u32) -> Result<u32, Error> {
-        let v = self.rc.bit(self.m.slot(ctx, 0x8000_0000), 0);
+        let base = self.m.line(ctx, 0, 0);
+        let v = self.rc.bit(self.m.at(base, 1), 0);
         self.w.put(v, 1);
         Ok(v)
     }
     fn field(&mut self, n: u32, ctx: u32) -> Result<u32, Error> {
         let k = n.min(8);
         let mut v = 0u32;
+        let (mut base, mut gn) = (0usize, 1u32);
         for i in 0..k {
-            let node = 1u32 << i | v;
-            v = v << 1 | self.rc.bit(self.m.slot(ctx, node), 0);
+            if i & 3 == 0 {
+                base = self.m.line(ctx, i >> 2, v);
+                gn = 1;
+            }
+            let bit = self.rc.bit(self.m.at(base, gn), 0);
+            gn = gn << 1 | bit;
+            v = v << 1 | bit;
         }
         for _ in 0..n - k {
             v = v << 1 | self.rc.flat(0);
@@ -179,13 +243,13 @@ impl Io for Check<'_> {
     fn done(&self) -> usize {
         self.r.pos()
     }
-    fn vlc(&mut self, tab: &'static Vlc, _ctx: u32) -> Result<u16, Error> {
-        let e = find(tab, self.r.peek32()).ok_or(Error::Parse)?;
-        if self.r.left() < e.1 as usize {
+    fn vlc(&mut self, tab: &Vlc, _ctx: u32) -> Result<u16, Error> {
+        let (sym, len) = walk(tab, self.r.peek32()).ok_or(Error::Parse)?;
+        if self.r.left() < len as usize {
             return Err(Error::Parse);
         }
-        self.r.skip(e.1 as usize);
-        Ok(e.2)
+        self.r.skip(len as usize);
+        Ok(sym)
     }
     fn raw(&mut self, n: u32) -> Result<u32, Error> {
         self.r.get(n).ok_or(Error::Parse)

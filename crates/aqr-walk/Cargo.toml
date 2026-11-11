@@ -6,3 +6,4 @@ description = "A syntax walked once for both directions: elements read from the 
 publish = false
 
 [dependencies]
+aqr-api = { path = "../aqr-api", default-features = false, features = ["alloc"] }

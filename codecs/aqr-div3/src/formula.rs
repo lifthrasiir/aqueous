@@ -9,9 +9,12 @@ use aqr_common::varint;
 use aqr_formula::{Formula, Module, Node};
 
 use crate::module::FRAME_MAX;
-use crate::{Codec, Encoder};
+use crate::{Codec, Decoder, Encoder, Error, Result, SliceSource, corrupt};
 
-pub use crate::module::decode;
+/// The bytes of frames a chunk of the coded frames holds, about: each chunk has a model of its own, so that they are coded
+/// and decoded at once.
+pub const CHUNK: usize = 16 << 20;
+
 
 /// The classes of the streams.
 pub const CODED: &str = "div3/frames";
@@ -135,17 +138,17 @@ pub fn video(d: &[u8]) -> Option<Video> {
 }
 
 /// The formula of AVI file `input` with DivX 3 video, or None where it has none, or its frames do not come to less
-/// than 97% by the model. The same whatever `threads` is (none is used).
-pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
-    encode_with(input, 0.97)
+/// than 97% by the model. The chunks of frames are coded on `threads` at once.
+pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
+    encode_with(input, 0.97, threads)
 }
 
 /// [`encode`] taking the frames whatever they come to (for tests of the module).
-pub fn encode_unchecked(input: &[u8], _threads: usize) -> Option<Formula> {
-    encode_with(input, f64::INFINITY)
+pub fn encode_unchecked(input: &[u8], threads: usize) -> Option<Formula> {
+    encode_with(input, f64::INFINITY, threads)
 }
 
-fn encode_with(input: &[u8], worst: f64) -> Option<Formula> {
+fn encode_with(input: &[u8], worst: f64, threads: usize) -> Option<Formula> {
     let v = video(input)?;
     if v.frames.len() < 4 || v.frames.iter().any(|f| f.len() > FRAME_MAX) {
         return None;
@@ -154,16 +157,22 @@ fn encode_with(input: &[u8], worst: f64) -> Option<Formula> {
     let mut items: Vec<(Range<usize>, u64)> =
         v.frames.iter().map(|r| (r.clone(), 0)).chain(v.audio.iter().map(|r| (r.clone(), 1))).collect();
     items.sort_by_key(|(r, _)| r.start);
-    let mut codec = Codec::new(v.width as usize, v.height as usize);
-    let mut enc = Encoder::new();
     let (mut skeleton, mut layout, mut audio) = (Vec::with_capacity(input.len() / 8), Vec::new(), Vec::new());
     let (mut p, mut frames_len) = (0, 0usize);
+    // the frames, cut in chunks of about CHUNK bytes: (frames' ranges)
+    let mut chunks: Vec<Vec<Range<usize>>> = vec![Vec::new()];
+    let mut chunk_bytes = 0usize;
     for (r, kind) in &items {
         varint::put(&mut layout, (r.start - p) as u64);
         varint::put(&mut layout, (r.len() as u64) << 1 | kind);
         skeleton.extend_from_slice(&input[p..r.start]);
         if *kind == 0 {
-            codec.encode(&mut enc, &input[r.clone()]);
+            if chunk_bytes >= CHUNK {
+                chunks.push(Vec::new());
+                chunk_bytes = 0;
+            }
+            chunks.last_mut().unwrap().push(r.clone());
+            chunk_bytes += r.len();
             frames_len += r.len();
         } else {
             audio.extend_from_slice(&input[r.clone()]);
@@ -171,14 +180,30 @@ fn encode_with(input: &[u8], worst: f64) -> Option<Formula> {
         p = r.end;
     }
     skeleton.extend_from_slice(&input[p..]);
-    let coded = enc.finish();
+    let parts = aqr_common::pool::par_map(chunks.len(), threads, |i| {
+        let mut codec = Codec::new(v.width as usize, v.height as usize);
+        let mut enc = Encoder::new();
+        for r in &chunks[i] {
+            codec.encode(&mut enc, &input[r.clone()]);
+        }
+        enc.finish()
+    });
+    let mut coded = Vec::new();
+    varint::put(&mut coded, chunks.len() as u64);
+    for (c, part) in chunks.iter().zip(&parts) {
+        varint::put(&mut coded, c.len() as u64);
+        varint::put(&mut coded, part.len() as u64);
+    }
+    for part in &parts {
+        coded.extend_from_slice(part);
+    }
     if coded.len() as f64 > worst * frames_len as f64 {
         return None;
     }
     let mut f = Formula::default();
     let (c, s, l) = (f.push(CODED, coded), f.push(SKELETON, skeleton), f.push(LAYOUT, layout));
     // the audio: from the AC-3 module where the AC-3 stream comes to under 97% by it, else as it is
-    let audio_node = match v.ac3.then(|| aqr_ac3::formula::encode(&audio)).flatten() {
+    let audio_node = match v.ac3.then(|| aqr_ac3::formula::encode_with(&audio, threads)).flatten() {
         Some(coded) => {
             let n = audio.len() as u64;
             let input = f.push(aqr_ac3::formula::CODED, coded);
@@ -191,4 +216,92 @@ fn encode_with(input: &[u8], worst: f64) -> Option<Formula> {
     params.extend_from_slice(&v.height.to_le_bytes());
     f.root = Node::apply(MODULE, params, vec![c, s, l, audio_node], input.len() as u64);
     Some(f)
+}
+
+fn dims(params: &[u8]) -> Result<(usize, usize)> {
+    let &[a, b, c, d] = params else { return Err(corrupt()) };
+    Ok((u16::from_le_bytes([a, b]) as usize, u16::from_le_bytes([c, d]) as usize))
+}
+
+fn read_varint(data: &[u8], pos: &mut usize) -> Result<u64> {
+    varint::get(data, pos).map_err(|_| corrupt())
+}
+
+/// The module `div3-recons` on whole inputs, natively: the chunks of frames decoded at once on `threads`, then the file
+/// put together from the skeleton, the frames and the audio.
+pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
+    let &[coded, skeleton, layout, audio] = inputs else { return Err(corrupt()) };
+    let (w, h) = dims(params)?;
+    // the layout: (gap, length, is audio)
+    let mut items = Vec::new();
+    let mut pos = 0;
+    while pos < layout.len() {
+        let gap = read_varint(layout, &mut pos)?;
+        let tag = read_varint(layout, &mut pos)?;
+        items.push((gap as usize, (tag >> 1) as usize, tag & 1 == 1));
+    }
+    // the table of chunks
+    let mut pos = 0;
+    let n = read_varint(coded, &mut pos)?;
+    if n > 1 << 24 {
+        return Err(corrupt());
+    }
+    let mut table = Vec::new();
+    for _ in 0..n {
+        let frames = read_varint(coded, &mut pos)? as usize;
+        let bytes = read_varint(coded, &mut pos)? as usize;
+        table.push((frames, bytes));
+    }
+    // the frames' lengths of each chunk, and where its coded bytes are
+    let mut lens = items.iter().filter(|i| !i.2).map(|i| i.1);
+    let mut chunks = Vec::new();
+    let mut at = pos;
+    for &(frames, bytes) in &table {
+        let l: Vec<usize> = lens.by_ref().take(frames).collect();
+        if l.len() != frames || l.iter().any(|&n| n > FRAME_MAX) {
+            return Err(corrupt());
+        }
+        let end = at.checked_add(bytes).filter(|&e| e <= coded.len()).ok_or_else(corrupt)?;
+        chunks.push((at..end, l));
+        at = end;
+    }
+    if lens.next().is_some() || at != coded.len() {
+        return Err(corrupt());
+    }
+    let decoded = aqr_common::pool::par_map(chunks.len(), threads, |i| -> Result<Vec<u8>> {
+        let (range, l) = &chunks[i];
+        let mut codec = Codec::new(w, h);
+        let mut rc = Decoder::new(SliceSource::new(&coded[range.clone()]));
+        let mut out = Vec::with_capacity(l.iter().sum());
+        let mut frame = Vec::with_capacity(FRAME_MAX + 8);
+        for &n in l {
+            frame = codec.decode(&mut rc, n, frame).map_err(|_| corrupt())?;
+            out.extend_from_slice(&frame);
+        }
+        Ok(out)
+    });
+    let decoded = decoded.into_iter().collect::<Result<Vec<_>>>()?;
+    let mut out = Vec::with_capacity(len.min(1 << 32) as usize);
+    let (mut sk, mut au) = (0usize, 0usize);
+    let (mut chunk, mut cpos) = (0usize, 0usize);
+    for &(gap, n, is_audio) in &items {
+        out.extend_from_slice(skeleton.get(sk..sk + gap).ok_or_else(corrupt)?);
+        sk += gap;
+        if is_audio {
+            out.extend_from_slice(audio.get(au..au + n).ok_or_else(corrupt)?);
+            au += n;
+        } else {
+            while decoded.get(chunk).is_some_and(|d| cpos == d.len()) {
+                chunk += 1;
+                cpos = 0;
+            }
+            out.extend_from_slice(decoded.get(chunk).and_then(|d| d.get(cpos..cpos + n)).ok_or_else(corrupt)?);
+            cpos += n;
+        }
+    }
+    out.extend_from_slice(&skeleton[sk..]);
+    if out.len() as u64 != len || au != audio.len() {
+        return Err(Error("output of another length"));
+    }
+    Ok(out)
 }

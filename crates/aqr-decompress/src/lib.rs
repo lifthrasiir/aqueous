@@ -689,7 +689,7 @@ const NATIVE: &[Entry] = &[
             arity: 6,
             call: |a| aqr_div3::module::decode_part(a[0], a[1], a[2], a[3], a[4], a[5]),
         },
-        |p, _, i, n, t| aqr_div3::module::decode(p, i, n, t).map_err(err),
+        |p, _, i, n, t| aqr_div3::formula::decode(p, i, n, t).map_err(err),
     ),
     part(
         AC3,
@@ -703,7 +703,7 @@ const NATIVE: &[Entry] = &[
             arity: 3,
             call: |a| aqr_ac3::module::decode_part(a[0], a[1], a[2]),
         },
-        |p, _, i, n, t| aqr_ac3::module::decode(p, i, n, t).map_err(err),
+        |p, _, i, n, t| aqr_ac3::formula::decode(p, i, n, t).map_err(err),
     ),
     part(
         SNAPPY,

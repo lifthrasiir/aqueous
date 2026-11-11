@@ -1,6 +1,5 @@
 //! Codes the audio of an AVI (the `01wb` chunks as one byte stream) and rebuilds it by the module's code, natively:
 //! `aqr-ac3-check FILE.avi [CHUNKS]`.
-use aqr_walk::rc::Encoder;
 use std::time::Instant;
 
 fn chunks(data: &[u8], limit: usize) -> Vec<u8> {
@@ -33,12 +32,12 @@ fn main() {
     let limit: usize = args.get(2).map_or(usize::MAX, |s| s.parse().unwrap());
     let stream = chunks(&data, limit);
     let t = Instant::now();
-    let mut enc = Encoder::new();
-    aqr_ac3::stream::encode(&mut enc, &stream);
-    let coded = enc.finish();
+    let coded = aqr_ac3::formula::encode_with(&stream, 4).expect("compressible");
     let te = t.elapsed();
     let t = Instant::now();
-    let back = aqr_ac3::module::decode(&[], &[&coded], stream.len() as u64, 1).unwrap();
+    let back = aqr_ac3::formula::decode(&[], &[&coded], stream.len() as u64, 4).unwrap();
+    let serial = aqr_ac3::module::decode_serial(&[], &[&coded], stream.len() as u64, 1).unwrap();
+    assert!(serial == stream, "serial decode differs");
     let td = t.elapsed();
     println!(
         "{} -> {} bytes ({:.2}%), {}; encode {:.1}s decode {:.1}s",

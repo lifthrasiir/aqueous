@@ -61,12 +61,20 @@ fn roundtrip_real_frames() {
     let none = |a: &aqr_formula::Apply, i: &[&[u8]]| -> aqr_formula::Result<Vec<u8>> {
         match a.module.name {
             "div3-recons" => formula::decode(&a.params, i, a.len, 1).map_err(|e| aqr_formula::Error(e.to_string())),
-            "ac3-recons" => aqr_ac3::module::decode(&a.params, i, a.len, 1).map_err(|e| aqr_formula::Error(e.to_string())),
+            "ac3-recons" => aqr_ac3::formula::decode(&a.params, i, a.len, 2).map_err(|e| aqr_formula::Error(e.to_string())),
             m => panic!("{m}"),
         }
     };
     let back = f.eval(&none).unwrap();
     assert!(back == file);
+    let serial = |a: &aqr_formula::Apply, i: &[&[u8]]| -> aqr_formula::Result<Vec<u8>> {
+        match a.module.name {
+            "div3-recons" => aqr_div3::module::decode_serial(&a.params, i, a.len).map_err(|e| aqr_formula::Error(e.to_string())),
+            "ac3-recons" => aqr_ac3::module::decode_serial(&a.params, i, a.len, 1).map_err(|e| aqr_formula::Error(e.to_string())),
+            m => panic!("{m}"),
+        }
+    };
+    assert!(f.eval(&serial).unwrap() == file, "serial decoding differs");
     let total: usize = frames.iter().map(|f| f.len()).sum();
     let audio: usize = sound.iter().map(|s| s.len()).sum::<usize>();
     let names: Vec<String> = f.streams.iter().map(|s| s.class.to_string()).collect();
