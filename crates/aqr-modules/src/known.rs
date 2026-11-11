@@ -126,13 +126,13 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "clip-recons",
         version: 3,
-        sha512_256: hex("1b289a9412dd2c229c6bc4ad749e08f964b0dbd538b6bdb215d9397b585f6534"),
+        sha512_256: hex("05046fa393900bd0b9eb5a469bfa52a3f77207bba4712a1929b752ebdd1699bb"),
         block: include_bytes!("../wasm/clip-recons.block"),
     },
     Known {
         name: "dex-recons",
         version: 2,
-        sha512_256: hex("5e14bcbbd00d3c3356dc74f825bb85cd6819583ca2b16e606f4342cffc6d541f"),
+        sha512_256: hex("6cd93f2bdf7cbc7111bde86ffd87e1131d6c772594c2f843a5ad7a3b251a559d"),
         block: include_bytes!("../wasm/dex-recons.block"),
     },
     Known {
@@ -240,7 +240,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "flate-set",
         version: 4,
-        sha512_256: hex("3bd0e9a1a30f9f76205dcbeffb370586ff7a3d16eddf80fb30c955918d1618b0"),
+        sha512_256: hex("5443c6d2a6b4e255081756cfe3494c3b2abc15cb2095240635b422c646e6821a"),
         block: include_bytes!("../wasm/flate-set.block"),
     },
     Known {
@@ -396,7 +396,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "pdf-recons",
         version: 3,
-        sha512_256: hex("e97fdeb1c252d57c85d2f67bfe591df6b6c6e6f37823a7378652b122793c58ee"),
+        sha512_256: hex("1a02be597fafbe84bb028247a924ecb00721590e2d31af668439bfecdfe51529"),
         block: include_bytes!("../wasm/pdf-recons.block"),
     },
     Known {

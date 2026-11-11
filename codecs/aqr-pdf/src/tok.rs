@@ -284,7 +284,7 @@ pub struct Window {
     off: usize,
     o: usize,
     keep: usize,
-    adler: simd_adler32::Adler32,
+    adler: aqr_common::adler32::Hasher,
 }
 
 impl Window {
@@ -297,7 +297,7 @@ impl Window {
             off: 0,
             o: 0,
             keep,
-            adler: simd_adler32::Adler32::new(),
+            adler: aqr_common::adler32::Hasher::new(),
         }
     }
 
@@ -321,7 +321,7 @@ impl Window {
         let slide = self.o >= far;
         if slide {
             let cut = self.o - self.keep;
-            self.adler.write(&self.data[..cut]);
+            self.adler.update(&self.data[..cut]);
             self.data.copy_within(cut..self.o, 0);
             self.off += cut;
             self.o = self.keep;
@@ -344,9 +344,9 @@ impl Window {
 
     /// The Adler-32 of the data; the window is let go.
     pub fn finish(&mut self) -> u32 {
-        self.adler.write(&self.data[..self.o]);
+        self.adler.update(&self.data[..self.o]);
         self.data = vec![];
-        self.adler.finish()
+        self.adler.finalize()
     }
 }
 

@@ -900,7 +900,6 @@ dependencies = [
  "memchr",
  "rayon",
  "sha2",
- "simd-adler32",
  "xxhash-rust",
  "zstd",
 ]
