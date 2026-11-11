@@ -208,7 +208,8 @@ fn environment() -> Result<String> {
     text += &String::from_utf8_lossy(&out.stdout);
     let mut vars: Vec<(String, String)> = std::env::vars()
         .filter(|(k, _)| {
-            matches!(&k[..], "RUSTFLAGS" | "CARGO_ENCODED_RUSTFLAGS" | "RUSTC" | "RUSTC_WRAPPER")
+            // (and aqr's build script's: what `--format sfx` embeds)
+            matches!(&k[..], "RUSTFLAGS" | "CARGO_ENCODED_RUSTFLAGS" | "RUSTC" | "RUSTC_WRAPPER" | "AQR_SFX_PACK")
                 || ["CARGO_PROFILE_", "CARGO_BUILD_", "CARGO_TARGET_"].iter().any(|p| k.starts_with(p))
                     && !k.ends_with("TARGET_DIR")
         })

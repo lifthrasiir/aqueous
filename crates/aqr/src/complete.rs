@@ -53,7 +53,7 @@ const fn many(short: Option<char>, long: Option<&'static str>, value: Value, hel
 }
 
 fn formats() -> Vec<String> {
-    std::iter::once("aqr").chain(aqr_pack::Format::names()).map(String::from).collect()
+    std::iter::once("aqr").chain(aqr_pack::Format::names()).chain(["sfx"]).map(String::from).collect()
 }
 
 fn levels() -> Vec<String> {

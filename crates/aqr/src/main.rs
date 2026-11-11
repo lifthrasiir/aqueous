@@ -34,6 +34,11 @@
 //!   Zstandard's 1-22). What the format does not keep (FIFOs, devices, extended attributes,
 //!   forks) is told; `-P` encrypts ZIP (WinZip's AES-256) and 7z archives (AES-256, the header
 //!   too).
+//! - `--format sfx` (Windows x86-64): a self-extracting program, `INPUT.exe` without `-o` ([`sfx`]):
+//!   the Aqueous archive (a single file in it by its name) after a stub that writes its files out
+//!   when run, with the native blobs of the modules the archive names by their hashes merged into
+//!   it (and the interpreter blob, for any other module). Not with `-a`, `-A`, `-P`, `-j` or
+//!   standard input or output.
 //! - `-d` (the default as `unaqr`): an archive into its name without `.aqr`, or `-o`. An
 //!   archive of another format, by its name (ZIP, 7z, RAR, ALZ, EGG, tar alone or under gzip, bzip2,
 //!   xz, LZMA or Zstandard, and those compressors' single files: [`aqr_unpack::by_name`]), is extracted
@@ -265,6 +270,7 @@ mod list;
 mod meta;
 mod names;
 mod pass;
+mod sfx;
 mod sparse;
 mod stats;
 mod stdio;
@@ -335,7 +341,8 @@ Compressing (aqr -o ARCHIVE INPUT [--rename TO]...):
       --format FORMAT   aqr (the default), zip, 7z, alz, egg, tar, tar.gz, tar.bz2,
                         tar.xz, tar.lzma, tar.zst, or gz, bz2, xz, lzma, zst of a
                         single file (also by -o's name); -l is the format's level
-                        (zlib's 0-9; xz, lzma, 7z: 0-9; bz2: 1-9; zst: 1-22)
+                        (zlib's 0-9; xz, lzma, 7z: 0-9; bz2: 1-9; zst: 1-22); sfx, a
+                        self-extracting program (Windows)
 
 Decompressing some paths (aqr -d ARCHIVE PATH [--rename TO]...):
   PATH                  a path in the archive (a directory with what is under it),
@@ -563,6 +570,8 @@ struct Args {
 enum Pack {
     Aqr,
     Other(aqr_pack::Format, Option<u8>),
+    /// A self-extracting program ([`sfx`]).
+    Sfx,
 }
 
 impl Pack {
@@ -571,6 +580,7 @@ impl Pack {
         match self {
             Pack::Aqr => ".aqr".into(),
             Pack::Other(f, _) => f.ext(),
+            Pack::Sfx => ".exe".into(),
         }
     }
 }
@@ -735,6 +745,7 @@ fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
     let mut renames: Vec<(usize, PathBuf)> = Vec::new();
     let (mut stats, mut stats_to) = (false, Vec::new());
     let mut format = None;
+    let mut sfx = false;
     let mut null = false;
     // (`--files-from -`: standard input taken by a list)
     let (mut list_stdin, mut listed) = (false, false);
@@ -806,13 +817,18 @@ fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
             "-M" | "--memory" => memory = Some(text(value("-M")?)),
             "-l" | "--level" => a.level = Some(text(value("-l")?)),
             "--format" => {
+                sfx = false;
                 format = Some(match &*text(value("--format")?) {
                     "aqr" => None,
+                    "sfx" => {
+                        sfx = true;
+                        None
+                    }
                     f => match aqr_pack::Format::by_format_name(f) {
                         Some(f) => Some(f),
                         None => {
                             let names = aqr_pack::Format::names().collect::<Vec<_>>().join(", ");
-                            return Err(format!("not a format to compress into (aqr, {names}): {f}"));
+                            return Err(format!("not a format to compress into (aqr, {names}, sfx): {f}"));
                         }
                     },
                 })
@@ -1045,6 +1061,19 @@ fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
     {
         a.opt.level = l.parse()?;
     }
+    if sfx && !a.decompress {
+        let not = |what: &str| Err(format!("--format sfx: not with {what}"));
+        match () {
+            _ if a.append => return not("-a"),
+            _ if a.opt.mirrors => return not("-A"),
+            _ if a.passphrase => return not("-P (the program does not ask for one)"),
+            _ if a.journal.is_some() => return not("-j"),
+            _ => {}
+        }
+        a.format = Pack::Sfx;
+        // (the modules the program carries named by their hashes alone)
+        a.opt.modules = sfx::wasm_of;
+    }
     if !a.decompress {
         if last_dir == Some(a.inputs.len()) {
             return Err(format!("-C {} not before an input", dir.display()));
@@ -1081,6 +1110,9 @@ fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         return Err("--files-from - with standard input taken otherwise too".into());
     }
     stdio_args(&mut a)?;
+    if a.format == Pack::Sfx && (a.stdin || a.stdout) {
+        return Err("--format sfx: not with standard input or output".into());
+    }
     a.dir = dir;
     Ok(a)
 }
@@ -1703,15 +1735,73 @@ fn compress_into(
     renames: &[Option<PathBuf>],
     out: &Path,
 ) -> Result<Vec<Gone>, String> {
-    if let Pack::Other(f, level) = a.format {
-        if a.append {
-            return Err(format!("{}: Aqueous archives alone are appended to", a.verb()));
+    match a.format {
+        Pack::Aqr => compress_aqr(a, inputs, given, renames, out),
+        Pack::Other(f, level) => {
+            if a.append {
+                return Err(format!("{}: Aqueous archives alone are appended to", a.verb()));
+            }
+            if a.journal.is_some() {
+                return Err("-j: Aqueous archives alone have a journal".into());
+            }
+            pack_into(a, f, level, inputs, given, renames, out)
         }
-        if a.journal.is_some() {
-            return Err("-j: Aqueous archives alone have a journal".into());
-        }
-        return pack_into(a, f, level, inputs, given, renames, out);
+        Pack::Sfx => sfx_into(a, inputs, given, renames, out),
     }
+}
+
+/// Compresses `inputs` into self-extracting program `out` ([`sfx`]): the Aqueous archive made
+/// beside it first (a single file in it by its name), then the program of it.
+fn sfx_into(
+    a: &Args,
+    inputs: &[PathBuf],
+    given: &[PathBuf],
+    renames: &[Option<PathBuf>],
+    out: &Path,
+) -> Result<Vec<Gone>, String> {
+    sfx::pack()?;
+    let Some(_) = output(a, out)? else { return Ok(Vec::new()) };
+    let renames = match (inputs, renames) {
+        ([input], [None]) if !input.is_dir() => vec![input.file_name().map(PathBuf::from)],
+        _ => renames.to_vec(),
+    };
+    let mut tmp = out.as_os_str().to_owned();
+    tmp.push(format!(".{}.aqr", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    let made = compress_aqr(a, inputs, given, &renames, &tmp).and_then(|gone| {
+        let archive = fs::read(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        let made = sfx::make(&archive)?;
+        fs::write(out, &made.exe).map_err(|e| format!("{}: {e}", out.display()))?;
+        Ok((gone, made, archive.len()))
+    });
+    let _ = fs::remove_file(&tmp);
+    let (gone, made, archived) = made?;
+    if !a.quiet {
+        eprintln!(
+            "{}: self-extracting, {} module{} native{}: {} ({} of the archive){}",
+            out.display(),
+            made.natives,
+            if made.natives == 1 { "" } else { "s" },
+            if made.interp { " and the interpreter" } else { "" },
+            size(made.exe.len() as f64),
+            size(archived as f64),
+            match a.verbose {
+                true => format!(", pack {}", sfx::PACK_ID.get(..12).unwrap_or("-")),
+                false => String::new(),
+            }
+        );
+    }
+    Ok(gone)
+}
+
+/// Compresses `inputs` into Aqueous archive `out` ([`compress_into`]).
+fn compress_aqr(
+    a: &Args,
+    inputs: &[PathBuf],
+    given: &[PathBuf],
+    renames: &[Option<PathBuf>],
+    out: &Path,
+) -> Result<Vec<Gone>, String> {
     if a.append && (a.passphrase || a.opt.mirrors) {
         return Err(format!(
             "{}: not with {}",

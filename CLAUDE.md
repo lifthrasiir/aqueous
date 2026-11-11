@@ -14,7 +14,13 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   benchmark), `file-formats.md` (measurements by format), `*-design.md`.
 - `crates/` — the core crates
   - `aqr` — the CLI (`aqr -c/-d/-K/-t/-I`); `--ipc` drives it from a frontend (`src/ipc.rs`); `--session` serves a
-    compression dialog's questions before it begins (`src/session.rs`).
+    compression dialog's questions before it begins (`src/session.rs`). `--format sfx` (`src/sfx.rs`,
+    Windows x86-64) makes a self-extracting program: the archive with shorthand module blocks for
+    the modules that have native blobs, after aqr-sfx-shim with those blobs (and the interpreter
+    blob, if any module is in full) merged in. What it merges is `target/aqr-sfx/` (or
+    `AQR_SFX_PACK`), which `crates/aqr-sfx/pack.sh` gathers and `build.rs` packs into the binary
+    (zstd, ~6 MB); rerun pack.sh after rebuilding modules, as each blob is used only for the hash
+    it was packed for.
   - `aqr-ipc` — the frontends' side of `--ipc`: `aqr` run on the paths, what it tells taken.
   - `aqr-win` — Explorer's verbs and a progress window over `aqr --ipc` (Windows).
   - `aqr-win-install` — the installer carrying `target/dist/{aqr,aqr-win}.exe`, packed by its
@@ -45,22 +51,26 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     (`src/pemerge.rs`) has `blob`, which digests a module library into a blob (just the bytes and
     facts a merge needs: image from the first section, no PE headers/`.reloc`/header gap, dead
     directories zeroed), and `merge`, which merges blobs (or libraries) into a stub executable as
-    sections with no loader — code copied and rebased, imports merged into the stub's table, a
-    dispatch table added (`demo/{stub,modadd,modxor}`, `pemerge-test.sh`), toward SFX archives.
+    one section with no loader — code copied and rebased, imports merged into the stub's table, a
+    dispatch table added (`demo/{stub,modadd,modxor}`, `pemerge-test.sh`); a library too
+    (`merge_bytes`, for `aqr --format sfx`).
   - `aqr-wasmrt` — runs the Wasm modules of aqr natively by Wasmtime (`wasm::load`), in the
     process or in a sandbox worker (`sandbox::Sandbox`), with no native codecs linked. Shared by
     aqr-decompress (for modules it does not know natively) and the self-extracting interpreter
     blob. `Sandboxed` (native where known, else a worker) stays in aqr-decompress, which has the
     native modules.
-  - `aqr-sfx` — the self-extracting apply logic (a library): `Interp` finds the interpreter blob
-    (`aqr-interp`) merged into the program through the dispatch table's anchor and wraps it as a
-    `Runner` (the vtable from the merge); `extract` writes a decoded archive's files out. Shared by
-    the stub and the tool that builds SFX archives.
+  - `aqr-sfx` — the self-extracting apply logic (a library): `Sfx` finds the blobs merged into the
+    program through the dispatch table's anchor — native module blobs named `HASH/SLOTS`
+    (`native_name`: the module's hash and task slots), the interpreter blob `aqr-interp` — and is
+    the `Runner`: a shorthand block's hash gives a stand-in Wasm module (no code, the task slots
+    and the hash in custom sections), which `load` takes to the native blob (applied whole); any
+    other module goes to the interpreter. `extract` writes a decoded archive's files out. Shared
+    by the stub and aqr. `pack.sh` gathers what aqr embeds (the stub, the blobs).
   - `aqr-sfx-shim` — the self-extracting stub (lean: aqr-formula + aqr-sfx, no codecs or Wasmtime,
-    ~1.3 MB): the small executable `aqr-ld merge` fills with the interpreter blob
-    (`--apply aqr_interp_vtable --info - interp=…`) and an archive is appended to (`cat`). It finds
-    the archive by its header magic (scanning from the end, no trailer), decodes it running every
-    module through the merged blob, and writes the files out.
+    ~1.3 MB): the small executable that `aqr --format sfx` (or `aqr-ld merge`) fills with blobs
+    and an archive is appended to. It finds the archive by its header magic (scanning from the
+    end, no trailer), decodes it running the modules through the merged blobs, and writes the
+    files out.
   - `aqr-interp` — the interpreter blob: a module library (`aqr_interp_{load,apply,is_part,drop}`)
     that runs any Wasm module handed to it by Wasmtime (`aqr-wasmrt`), no codecs linked (~12 MB).
     Built for the no-TLS target (`NOTLS`) it is mergeable into a stub: the fallback for modules the

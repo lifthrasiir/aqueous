@@ -67,7 +67,10 @@ dependencies = [
  "aqr-formula",
  "aqr-ipc",
  "aqr-l10n",
+ "aqr-ld",
+ "aqr-modules",
  "aqr-pack",
+ "aqr-sfx",
  "aqr-unpack",
  "aqr-version",
  "embed-resource",
@@ -77,6 +80,7 @@ dependencies = [
  "serde_json",
  "unicode-normalization",
  "windows-sys",
+ "zstd",
 ]
 
 [[package]]

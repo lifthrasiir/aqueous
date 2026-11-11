@@ -371,6 +371,15 @@ is the default.
 Also chosen by the extension of
 .Fl o Ns 's
 name.
+.Cm sfx
+(Windows) writes a self-extracting program,
+.Ar input Ns Pa .exe
+without
+.Fl o :
+run, it writes the files out under the directory given (the current directory by default).
+Not with
+.Fl a , A , P , j
+or standard input or output.
 .It Fl -depth Ar n
 Recompress formats nested at most
 .Ar n
