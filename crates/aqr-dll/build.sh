@@ -45,8 +45,11 @@ else
     post=
     built=target/$profile
 fi
-python=.venv/Scripts/python.exe
-[ -x "$python" ] || python=.venv/bin/python
+# (PYTHON, else the venv's Python, else one on PATH, as in CI: layout.py needs nothing else)
+python=${PYTHON:-.venv/Scripts/python.exe}
+[ -n "${PYTHON:-}" ] || [ -x "$python" ] || python=.venv/bin/python
+[ -n "${PYTHON:-}" ] || [ -x "$python" ] || python=$(command -v python3 || command -v python) ||
+    { echo "build.sh: no Python (set PYTHON)" >&2; exit 1; }
 "$python" -I crates/aqr-dll/layout.py > /dev/null
 mkdir -p target/aqr-dll
 # (the shared libraries linked whole first: what the modules import from them is what is found)

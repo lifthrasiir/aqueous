@@ -61,7 +61,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # What aqr's build.rs packs into aqr.exe (target/aqr-sfx/, crates/aqr-sfx/pack.sh): the
+      # interpreter blob, which runs the modules as WebAssembly (aqr links no Wasmtime on Windows
+      # x86-64), and the stub and the modules' blobs of `--format sfx`. Built by nightly with
+      # build-std (the no-TLS target of crates/aqr-dll), and Python for crates/aqr-dll/layout.py.
+      - run: rustup toolchain install nightly --profile minimal --component rust-src
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - run: PYTHON=python crates/aqr-sfx/pack.sh
       - run: cargo build --profile dist -p aqr -p aqr-win
+      # aqr.exe runs modules as WebAssembly (by the interpreter blob it carries) and makes a
+      # self-extracting program that gives the files back: a build without the pack fails here.
+      - run: |
+          mkdir smoke
+          cp codecs/aqr-jpeg/tests/data/gradient.jpg README.md smoke/
+          target/dist/aqr.exe -c -q -o smoke.aqr smoke
+          target/dist/aqr.exe -d -q --wasm -o smoke-wasm smoke.aqr
+          diff -r smoke smoke-wasm
+          target/dist/aqr.exe -c -q --format sfx -o smoke.exe smoke
+          ./smoke.exe smoke-out
+          diff -r smoke smoke-out
       # build.rs packs target/dist/{aqr,aqr-win}.exe, built above.
       - run: cargo build --profile dist -p aqr-win-install
       - run: |

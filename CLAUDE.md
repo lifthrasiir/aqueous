@@ -20,7 +20,8 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     blob, if any module is in full) merged in. What it merges is `target/aqr-sfx/` (or
     `AQR_SFX_PACK`), which `crates/aqr-sfx/pack.sh` gathers and `build.rs` packs into the binary
     (zstd, ~6 MB); rerun pack.sh after rebuilding modules, as each blob is used only for the hash
-    it was packed for.
+    it was packed for. The release workflow runs pack.sh before building aqr.exe (without the
+    pack, aqr.exe runs no module as WebAssembly), then a smoke test of `--wasm` and of an SFX.
   - `aqr-ipc` — the frontends' side of `--ipc`: `aqr` run on the paths, what it tells taken.
   - `aqr-win` — Explorer's verbs and a progress window over `aqr --ipc` (Windows).
   - `aqr-win-install` — the installer carrying `target/dist/{aqr,aqr-win}.exe`, packed by its
@@ -67,7 +68,8 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     aqr-decompress (for modules it does not know natively) and the self-extracting interpreter
     blob. `Sandboxed` (native where known, else a worker) stays in aqr-decompress, which has the
     native modules. Wasmtime is linked only with the feature `wasmtime` (`wasm/engine.rs`; always
-    but on Windows x86-64, aqr-decompress enabling it there, and in the tests' dev-dependencies);
+    but on Windows x86-64 — the win7 target links it too, the blob being of Windows 10's —
+    aqr-decompress enabling it there, and in the tests' dev-dependencies);
     else `wasm/interp.rs` runs the modules by the interpreter blob the program gives
     (`wasm::set_interpreter`, aqr: its pack's), placed at run time (`aqr_blob::load`), a worker
     served by the blob's own (`worker_main`). aqr.exe on Windows links no Wasmtime (41.9 ->
