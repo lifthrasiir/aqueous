@@ -13,15 +13,37 @@ use aqr_formula::Resource;
 use aqr_formula::aqr::{self, Failure, Loaded, PartIn, PartOut, Runner};
 use sha2::{Digest, Sha512_256};
 
-#[cfg(feature = "wasm")]
-mod cow;
-#[cfg(feature = "wasm")]
-mod exec;
-#[cfg(feature = "sandbox")]
-pub mod sandbox;
-#[cfg(feature = "wasm")]
-mod wasm;
 use aqr_formula::{Apply, Error, Module, Modules, Result};
+#[cfg(feature = "wasm")]
+use aqr_wasmrt::wasm;
+
+/// The sandbox of [`aqr_wasmrt`], with [`Sandboxed`](sandbox::Sandboxed) which runs the modules
+/// this crate knows natively and the rest in a worker.
+#[cfg(feature = "sandbox")]
+pub mod sandbox {
+    pub use aqr_wasmrt::sandbox::*;
+
+    use aqr_formula::aqr::{self, Loaded, Runner};
+
+    use crate::Native;
+
+    /// The modules of this crate natively where an archive has the Wasm module that aqr-modules
+    /// built, as [`Native`] runs them, and any other module in a worker of `sandbox`.
+    #[derive(Clone, Copy)]
+    pub struct Sandboxed<'a> {
+        pub native: Native,
+        pub sandbox: &'a Sandbox,
+    }
+
+    impl Runner for Sandboxed<'_> {
+        fn load(&self, wasm: &[u8]) -> aqr::Decoded<Box<dyn Loaded + '_>> {
+            match crate::known(wasm) {
+                Some(_) => self.native.load(wasm),
+                None => self.sandbox.load(wasm),
+            }
+        }
+    }
+}
 #[cfg(feature = "wasm")]
 #[doc(hidden)]
 pub use wasm::load_released;

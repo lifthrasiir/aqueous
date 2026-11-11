@@ -352,16 +352,13 @@ dependencies = [
  "aqr-vorbis",
  "aqr-walk",
  "aqr-wasm",
+ "aqr-wasmrt",
  "aqr-wrt",
  "aqr-xpress",
  "aqr-xsv",
  "aqr-zip",
- "libc",
  "sha2",
- "wasmparser 0.258.3",
- "wasmtime",
  "wat",
- "windows-sys",
 ]
 
 [[package]]
@@ -1196,6 +1193,20 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "zstd",
+]
+
+[[package]]
+name = "aqr-wasmrt"
+version = "0.1.0"
+dependencies = [
+ "aqr-api",
+ "aqr-common",
+ "aqr-formula",
+ "libc",
+ "sha2",
+ "wasmparser 0.258.3",
+ "wasmtime",
+ "windows-sys",
 ]
 
 [[package]]

@@ -8,18 +8,17 @@ publish = false
 [features]
 default = ["wasm", "sandbox"]
 # Modules that are not known run as WebAssembly, by Wasmtime.
-wasm = ["dep:wasmtime", "dep:wasmparser", "dep:windows-sys"]
+wasm = ["aqr-wasmrt/wasm"]
 # ... or so in worker processes locked down by the system (`sandbox`).
-sandbox = ["wasm"]
+sandbox = ["wasm", "aqr-wasmrt/sandbox"]
 
 [dependencies]
 aqr-api = { path = "../aqr-api" }
 aqr-common = { path = "../aqr-common" }
 aqr-formula = { path = "../aqr-formula" }
 aqr-modules = { path = "../aqr-modules" }
+aqr-wasmrt = { path = "../aqr-wasmrt", default-features = false }
 sha2 = "0.10"
-wasmparser = { version = "0.258", optional = true }
-wasmtime = { version = "49", optional = true, default-features = false, features = ["cranelift", "runtime", "std", "parallel-compilation", "async"] }
 aqr-asar = { path = "../../codecs/aqr-asar" }
 aqr-bundle = { path = "../../codecs/aqr-bundle" }
 aqr-exe = { path = "../../codecs/aqr-exe", default-features = false, features = ["decode"] }
@@ -72,23 +71,6 @@ aqr-zip = { path = "../../codecs/aqr-zip" }
 aqr-sqlite = { path = "../../codecs/aqr-sqlite" }
 aqr-tex = { path = "../../codecs/aqr-tex" }
 aqr-wrt = { path = "../../codecs/aqr-wrt" }
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", optional = true, features = [
-    "Wdk_System_SystemServices",
-    "Win32_Foundation",
-    "Win32_Security",
-    "Win32_System_JobObjects",
-    "Win32_System_LibraryLoader",
-    "Win32_System_Memory",
-    "Win32_System_SystemInformation",
-    "Win32_System_SystemServices",
-    "Win32_System_Threading",
-    "Win32_System_WindowsProgramming",
-] }
 
 [dev-dependencies]
 aqr-7z = { path = "../../codecs/aqr-7z" }

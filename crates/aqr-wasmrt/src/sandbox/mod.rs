@@ -29,7 +29,6 @@ use aqr_formula::Resource;
 use aqr_formula::aqr::{self, Failure, Loaded, Runner};
 use sha2::{Digest, Sha512_256};
 
-use crate::Native;
 use proto::*;
 
 /// The bytes a worker takes beyond the memory limit of an application, as the system limits
@@ -190,23 +189,6 @@ impl Loaded for Remote<'_> {
             let b = crate::wasm::Bounds { memory_limit, task_limits, concurrency: &concurrency };
             w.apply(self.hash, params, resources, inputs, sizes, b)
         })
-    }
-}
-
-/// The modules of this crate natively where an archive has the Wasm module that aqr-modules
-/// built, as [`Native`] runs them, and any other module in a worker of `sandbox`.
-#[derive(Clone, Copy)]
-pub struct Sandboxed<'a> {
-    pub native: Native,
-    pub sandbox: &'a Sandbox,
-}
-
-impl Runner for Sandboxed<'_> {
-    fn load(&self, wasm: &[u8]) -> aqr::Decoded<Box<dyn Loaded + '_>> {
-        match crate::known(wasm) {
-            Some(_) => self.native.load(wasm),
-            None => self.sandbox.load(wasm),
-        }
     }
 }
 
