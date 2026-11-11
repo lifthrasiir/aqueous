@@ -10,9 +10,11 @@
 //! - `aqr_interp_apply`: an application of the handle's module, its outputs written into the
 //!   caller's buffers (whole modules; a part module is run whole here too).
 
+use core::ffi::c_void;
+
 use aqr_api::dll::{Slice, SliceMut};
 use aqr_formula::Resource;
-use aqr_formula::aqr::Loaded;
+use aqr_formula::aqr::{Decoded, Failure, Loaded, PartIn, PartOut};
 
 /// A module loaded, behind the handle (`Box<dyn Loaded>` is a fat pointer, so it is boxed again
 /// to pass one thin pointer).
@@ -125,6 +127,135 @@ pub unsafe extern "C" fn aqr_interp_apply(
             }
             0
         }
+        Err(e) => {
+            fail(&format!("{e:?}"), error, error_len);
+            1
+        }
+    }
+}
+
+// ---- part modules: streamed, so a big stream's memory stays bounded
+
+/// A callback that takes bytes the interpreter pulls or commits.
+type BytesFn = unsafe extern "C" fn(*mut c_void, *const u8, usize);
+
+/// An input of a part application, pulled as the module requests it (so it is not held whole).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PartInC {
+    pub ctx: *mut c_void,
+    pub len: u64,
+    /// Pull the input up to offset `hi` into the module, in pieces given to `put` with `put_ctx`.
+    pub pull: unsafe extern "C" fn(ctx: *mut c_void, hi: u64, put_ctx: *mut c_void, put: BytesFn) -> u32,
+}
+
+/// An output of a part application, taking bytes as the module commits them.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PartOutC {
+    pub ctx: *mut c_void,
+    pub push: unsafe extern "C" fn(ctx: *mut c_void, ptr: *const u8, len: usize) -> u32,
+}
+
+struct FfiIn(PartInC);
+
+// SAFETY: the callbacks are driven from the instance thread (where the module requests and
+// commits), not the module's task threads; the caller keeps `ctx` valid across the application.
+unsafe impl Send for FfiIn {}
+unsafe impl Send for FfiOut {}
+
+impl PartIn for FfiIn {
+    fn len(&self) -> u64 {
+        self.0.len
+    }
+
+    fn pull(&mut self, hi: u64, put: &mut dyn FnMut(&[u8])) -> Decoded<()> {
+        // the module's `put` closure, reached through a C callback by a pointer to it
+        unsafe extern "C" fn trampoline(ctx: *mut c_void, ptr: *const u8, len: usize) {
+            let put = unsafe { &mut *(ctx as *mut &mut dyn FnMut(&[u8])) };
+            put(unsafe { std::slice::from_raw_parts(ptr, len) });
+        }
+        let mut put: &mut dyn FnMut(&[u8]) = put;
+        let put_ctx = (&mut put) as *mut &mut dyn FnMut(&[u8]) as *mut c_void;
+        match unsafe { (self.0.pull)(self.0.ctx, hi, put_ctx, trampoline) } {
+            0 => Ok(()),
+            _ => Err(Failure::Invalid("interp: an input could not be pulled".into())),
+        }
+    }
+}
+
+struct FfiOut(PartOutC);
+
+impl PartOut for FfiOut {
+    fn push(&mut self, d: &[u8]) -> Decoded<()> {
+        match unsafe { (self.0.push)(self.0.ctx, d.as_ptr(), d.len()) } {
+            0 => Ok(()),
+            _ => Err(Failure::Invalid("interp: an output could not be committed".into())),
+        }
+    }
+}
+
+/// Applies the handle's module as a part module: its inputs pulled as it requests them and its
+/// outputs pushed as it commits them (of `sizes` bytes), so a big stream stays within the memory
+/// limit. 0 on success, else 1 with a message in `error`.
+///
+/// # Safety
+/// As the pointers are described; the outputs and `error` apart from everything else.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn aqr_interp_apply_part(
+    handle: *mut c_void,
+    params: Slice,
+    resources: *const Slice,
+    n_resources: usize,
+    inputs: *const PartInC,
+    n_inputs: usize,
+    outputs: *const PartOutC,
+    n_outputs: usize,
+    sizes: *const u64,
+    n_sizes: usize,
+    memory_limit: u64,
+    task_limits: *const u64,
+    n_task_limits: usize,
+    error: SliceMut,
+    error_len: *mut usize,
+) -> u32 {
+    let loaded: &dyn Loaded = unsafe { &**(handle as *const Box<dyn Loaded>) };
+    let resources: Vec<Resource> = match n_resources {
+        0 => Vec::new(),
+        n => unsafe { std::slice::from_raw_parts(resources, n) }
+            .iter()
+            .map(|s| Resource::new(unsafe { s.get() }.to_vec()))
+            .collect(),
+    };
+    let mut ins: Vec<FfiIn> = match n_inputs {
+        0 => Vec::new(),
+        n => unsafe { std::slice::from_raw_parts(inputs, n) }.iter().map(|&c| FfiIn(c)).collect(),
+    };
+    let mut outs: Vec<FfiOut> = match n_outputs {
+        0 => Vec::new(),
+        n => unsafe { std::slice::from_raw_parts(outputs, n) }.iter().map(|&c| FfiOut(c)).collect(),
+    };
+    let sizes = match n_sizes {
+        0 => &[][..],
+        n => unsafe { std::slice::from_raw_parts(sizes, n) },
+    };
+    let task_limits = match n_task_limits {
+        0 => &[][..],
+        n => unsafe { std::slice::from_raw_parts(task_limits, n) },
+    };
+    let mut in_refs: Vec<&mut dyn PartIn> = ins.iter_mut().map(|x| x as &mut dyn PartIn).collect();
+    let mut out_refs: Vec<&mut dyn PartOut> = outs.iter_mut().map(|x| x as &mut dyn PartOut).collect();
+    match loaded.apply_part(
+        unsafe { params.get() },
+        &resources,
+        &mut in_refs,
+        &mut out_refs,
+        sizes,
+        memory_limit,
+        task_limits,
+    ) {
+        Ok(()) => 0,
         Err(e) => {
             fail(&format!("{e:?}"), error, error_len);
             1

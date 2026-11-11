@@ -32,6 +32,7 @@ fn main() {
         Some("record") => record(&args[1..]),
         Some("run") => run(&args[1..]),
         Some("apply") => apply(&args[1..]),
+        Some("interp") if args.len() >= 2 => interp(&args[1..]),
         _ => Err("usage: aqr-dll-shim record DIR [--only NAME]... ARCHIVE...\n       \
                   aqr-dll-shim run [--module NAME|PATH] CASE...\n       \
                   aqr-dll-shim apply NAME|PATH [--params FILE] [--resource FILE]... [--input FILE]... \
@@ -412,6 +413,8 @@ struct Case {
     resources: Vec<Vec<u8>>,
     inputs: Vec<Vec<u8>>,
     outputs: Vec<Vec<u8>>,
+    memory_limit: u64,
+    task_limits: Vec<u64>,
     native: Option<f64>,
 }
 
@@ -428,6 +431,10 @@ impl Case {
             resources: many("resource", count("resources")?)?,
             inputs: many("input", count("inputs")?)?,
             outputs: many("output", count("outputs")?)?,
+            memory_limit: field("memory_limit").and_then(|v| v.parse().ok()).unwrap_or(u64::MAX),
+            task_limits: field("task_limits")
+                .map(|v| v.trim_matches(['[', ']']).split(',').filter_map(|s| s.trim().parse().ok()).collect())
+                .unwrap_or_default(),
             native: field("native").and_then(|v| v.parse().ok()),
         })
     }
@@ -520,4 +527,242 @@ fn apply(args: &[String]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ---- interp: run cases through the interpreter blob (aqr-interp), whole and streamed
+
+type Ptr = *mut core::ffi::c_void;
+type PutFn = unsafe extern "C" fn(Ptr, *const u8, usize);
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PartInC {
+    ctx: Ptr,
+    len: u64,
+    pull: unsafe extern "C" fn(Ptr, u64, Ptr, PutFn) -> u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PartOutC {
+    ctx: Ptr,
+    push: unsafe extern "C" fn(Ptr, *const u8, usize) -> u32,
+}
+
+#[allow(clippy::type_complexity)]
+struct Interp {
+    load: unsafe extern "C" fn(Slice, SliceMut, *mut usize) -> Ptr,
+    is_part: unsafe extern "C" fn(Ptr) -> u32,
+    apply: unsafe extern "C" fn(
+        Ptr,
+        Slice,
+        *const Slice,
+        usize,
+        *const Slice,
+        usize,
+        u64,
+        *const u64,
+        usize,
+        *const SliceMut,
+        usize,
+        SliceMut,
+        *mut usize,
+    ) -> u32,
+    apply_part: unsafe extern "C" fn(
+        Ptr,
+        Slice,
+        *const Slice,
+        usize,
+        *const PartInC,
+        usize,
+        *const PartOutC,
+        usize,
+        *const u64,
+        usize,
+        u64,
+        *const u64,
+        usize,
+        SliceMut,
+        *mut usize,
+    ) -> u32,
+    drop: unsafe extern "C" fn(Ptr),
+}
+
+/// An input kept whole for the test, pulled in pieces from a cursor.
+struct In {
+    data: Vec<u8>,
+    cursor: std::cell::Cell<u64>,
+}
+
+unsafe extern "C" fn pull(ctx: Ptr, hi: u64, put_ctx: Ptr, put: PutFn) -> u32 {
+    let input = unsafe { &*(ctx as *const In) };
+    let (lo, hi) = (input.cursor.get() as usize, hi as usize);
+    if hi > input.data.len() {
+        return 1;
+    }
+    unsafe { put(put_ctx, input.data[lo..hi].as_ptr(), hi - lo) };
+    input.cursor.set(hi as u64);
+    0
+}
+
+unsafe extern "C" fn push(ctx: Ptr, ptr: *const u8, len: usize) -> u32 {
+    let out = unsafe { &*(ctx as *const std::cell::RefCell<Vec<u8>>) };
+    out.borrow_mut().extend_from_slice(unsafe { std::slice::from_raw_parts(ptr, len) });
+    0
+}
+
+fn interp(args: &[String]) -> Result<()> {
+    let (dll, cases) = (&args[0], &args[1..]);
+    let it = interp_sys::open(Path::new(dll)).map_err(|e| format!("{dll}: {e}"))?;
+    let (mut total, mut bad) = (0.0, 0);
+    for dir in cases {
+        let case = Case::read(Path::new(dir))?;
+        let known = aqr_modules::KNOWN
+            .iter()
+            .find(|k| k.name == case.module)
+            .ok_or_else(|| format!("{}: not a module of aqr-modules", case.module))?;
+        let wasm = known.read_wasm().map_err(|e| format!("{}: {e}", case.module))?;
+        let mut err = [0u8; 1024];
+        let mut el = 0;
+        let handle = unsafe { (it.load)(Slice::of(&wasm), SliceMut::of(&mut err), &mut el) };
+        if handle.is_null() {
+            return Err(format!("{}: load: {}", case.module, String::from_utf8_lossy(&err[..el])));
+        }
+        let res: Vec<Slice> = case.resources.iter().map(|r| Slice::of(r)).collect();
+        let sizes: Vec<u64> = case.outputs.iter().map(|o| o.len() as u64).collect();
+        let t = Instant::now();
+        let got: Result<Vec<Vec<u8>>> = if unsafe { (it.is_part)(handle) } != 0 {
+            // streamed: inputs pulled as requested, outputs collected as committed
+            let ins: Vec<In> = case.inputs.iter().map(|d| In { data: d.clone(), cursor: 0.into() }).collect();
+            let in_c: Vec<PartInC> =
+                ins.iter().map(|i| PartInC { ctx: i as *const In as Ptr, len: i.data.len() as u64, pull }).collect();
+            let outs: Vec<std::cell::RefCell<Vec<u8>>> =
+                (0..case.outputs.len()).map(|_| std::cell::RefCell::new(Vec::new())).collect();
+            let out_c: Vec<PartOutC> = outs.iter().map(|o| PartOutC { ctx: o as *const _ as Ptr, push }).collect();
+            let r = unsafe {
+                (it.apply_part)(
+                    handle,
+                    Slice::of(&case.params),
+                    res.as_ptr(),
+                    res.len(),
+                    in_c.as_ptr(),
+                    in_c.len(),
+                    out_c.as_ptr(),
+                    out_c.len(),
+                    sizes.as_ptr(),
+                    sizes.len(),
+                    case.memory_limit,
+                    case.task_limits.as_ptr(),
+                    case.task_limits.len(),
+                    SliceMut::of(&mut err),
+                    &mut el,
+                )
+            };
+            match r {
+                0 => Ok(outs.into_iter().map(|o| o.into_inner()).collect()),
+                _ => Err(String::from_utf8_lossy(&err[..el]).into_owned()),
+            }
+        } else {
+            let ins: Vec<Slice> = case.inputs.iter().map(|i| Slice::of(i)).collect();
+            let mut bufs: Vec<Vec<u8>> = sizes.iter().map(|&s| vec![0u8; s as usize]).collect();
+            let os: Vec<SliceMut> = bufs.iter_mut().map(|o| SliceMut::of(o)).collect();
+            let r = unsafe {
+                (it.apply)(
+                    handle,
+                    Slice::of(&case.params),
+                    res.as_ptr(),
+                    res.len(),
+                    ins.as_ptr(),
+                    ins.len(),
+                    case.memory_limit,
+                    case.task_limits.as_ptr(),
+                    case.task_limits.len(),
+                    os.as_ptr(),
+                    os.len(),
+                    SliceMut::of(&mut err),
+                    &mut el,
+                )
+            };
+            match r {
+                0 => Ok(bufs),
+                _ => Err(String::from_utf8_lossy(&err[..el]).into_owned()),
+            }
+        };
+        let secs = t.elapsed().as_secs_f64();
+        unsafe { (it.drop)(handle) };
+        total += secs;
+        let verdict = match &got {
+            Ok(o) if *o == case.outputs => "same".to_owned(),
+            Ok(_) => "DIFFERENT".to_owned(),
+            Err(e) => format!("FAILED: {e}"),
+        };
+        bad += (verdict != "same") as usize;
+        let n: usize = case.inputs.iter().map(Vec::len).sum();
+        println!("{dir}: {}, {n} bytes in, interp {secs:.3} s: {verdict}", case.module);
+    }
+    if cases.len() > 1 {
+        println!("{} cases: interp {total:.3} s, {bad} not the same", cases.len());
+    }
+    match bad {
+        0 => Ok(()),
+        n => Err(format!("{n} cases not the same")),
+    }
+}
+
+#[cfg(windows)]
+mod interp_sys {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+
+    use super::Interp;
+
+    type Sym = unsafe extern "system" fn() -> isize;
+
+    #[allow(clippy::missing_transmute_annotations)]
+    pub fn open(path: &std::path::Path) -> Result<Interp, String> {
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+        let h = unsafe { LoadLibraryW(wide.as_ptr()) };
+        if h.is_null() {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        let sym =
+            |n: &std::ffi::CStr| unsafe { GetProcAddress(h, n.as_ptr().cast()) }.ok_or_else(|| format!("no {n:?}"));
+        Ok(Interp {
+            load: unsafe { std::mem::transmute::<Sym, _>(sym(c"aqr_interp_load")?) },
+            is_part: unsafe { std::mem::transmute::<Sym, _>(sym(c"aqr_interp_is_part")?) },
+            apply: unsafe { std::mem::transmute::<Sym, _>(sym(c"aqr_interp_apply")?) },
+            apply_part: unsafe { std::mem::transmute::<Sym, _>(sym(c"aqr_interp_apply_part")?) },
+            drop: unsafe { std::mem::transmute::<Sym, _>(sym(c"aqr_interp_drop")?) },
+        })
+    }
+}
+
+#[cfg(unix)]
+mod interp_sys {
+    use std::os::unix::ffi::OsStrExt;
+
+    use super::Interp;
+
+    type Sym = *mut libc::c_void;
+
+    #[allow(clippy::missing_transmute_annotations)]
+    pub fn open(path: &std::path::Path) -> Result<Interp, String> {
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
+        let h = unsafe { libc::dlopen(c.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+        if h.is_null() {
+            return Err(unsafe { std::ffi::CStr::from_ptr(libc::dlerror()) }.to_string_lossy().into_owned());
+        }
+        let sym = |n: &std::ffi::CStr| match unsafe { libc::dlsym(h, n.as_ptr()) } {
+            p if p.is_null() => Err(format!("no {n:?}")),
+            p => Ok(p),
+        };
+        Ok(Interp {
+            load: unsafe { std::mem::transmute::<Sym, _>(sym(c"aqr_interp_load")?) },
+            is_part: unsafe { std::mem::transmute::<Sym, _>(sym(c"aqr_interp_is_part")?) },
+            apply: unsafe { std::mem::transmute::<Sym, _>(sym(c"aqr_interp_apply")?) },
+            apply_part: unsafe { std::mem::transmute::<Sym, _>(sym(c"aqr_interp_apply_part")?) },
+            drop: unsafe { std::mem::transmute::<Sym, _>(sym(c"aqr_interp_drop")?) },
+        })
+    }
 }
