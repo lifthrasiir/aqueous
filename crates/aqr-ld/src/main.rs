@@ -11,6 +11,7 @@
 //!
 //! With `AQR_LD_NAMES` set, the name section is kept, to see what is left in a module.
 
+mod msvc;
 mod rewrite;
 mod trim;
 
@@ -28,10 +29,17 @@ fn main() -> ExitCode {
         pemerge::main(&args[1..])
     } else if args.first().is_some_and(|a| a == "blob") {
         pemerge::blob_main(&args[1..])
+    } else if args.first().is_some_and(|a| a == "blobs") {
+        pemerge::blobs_main(&args[1..])
+    } else if args.first().is_some_and(|a| a == "exports") {
+        msvc::exports_main(&args[1..])
+    } else if msvc::is_link(&args) {
+        msvc::link(&args)
     } else if let [input, output] = &args[..] {
         process(input.into(), output.into(), true)
     } else {
         Err("usage: aqr-ld <in.wasm> <out.wasm>, aqr-ld blob --out M.blob MODULE.dll, \
+             aqr-ld blobs --out DIR LIBRARY.dll ..., \
              aqr-ld merge --stub S --out O NAME=MODULE ..., \
              or as the linker of wasm32-unknown-unknown"
             .into())
