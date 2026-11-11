@@ -1,7 +1,8 @@
-//! The interpreter blob (`aqr-interp`) merged into this stub: found through the dispatch table
-//! `aqr-ld merge` wrote into the anchor, and wrapped as a [`Runner`] so the decoder runs each
-//! module through it. Everything here is for the merged image (Windows x86-64); elsewhere no
-//! interpreter is merged and [`Interp::find`] gives nothing.
+//! The self-extracting apply logic, shared by the stub (`aqr-sfx-shim`) and the tool that builds
+//! self-extracting archives: [`Interp`] finds the interpreter blob (`aqr-interp`) merged into the
+//! program through the dispatch table `aqr-ld merge` wrote into the anchor, and wraps it as a
+//! [`Runner`] so the decoder runs each module through it; [`extract`] writes a decoded archive's
+//! files out. The merged blob is Windows x86-64 only; elsewhere [`Interp::find`] gives nothing.
 
 use core::ffi::c_void;
 
@@ -291,4 +292,59 @@ impl Interp {
     pub fn find() -> Option<Interp> {
         None
     }
+}
+
+// ---- writing the decoded files out
+
+use std::path::Path;
+
+use aqr_formula::aqr::{EntryNode, Value};
+
+/// Writes the files of `value` under `dest`, returning how many were written.
+pub fn extract(value: Value, dest: &Path) -> Result<usize, String> {
+    match value {
+        Value::File(data) => {
+            std::fs::create_dir_all(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+            write(&dest.join("aqr-sfx-output"), &data)?;
+            Ok(1)
+        }
+        Value::Tree(tree, contents) => {
+            let mut paths: Vec<std::path::PathBuf> = Vec::with_capacity(tree.entries.len());
+            let mut files = 0;
+            for e in &tree.entries {
+                // the entries come each after its parent, so the parent's path is known
+                let base = match e.parent {
+                    Some(p) => paths[p].clone(),
+                    None => dest.to_path_buf(),
+                };
+                let path = base.join(sanitized(&e.name));
+                match &e.node {
+                    EntryNode::Dir => std::fs::create_dir_all(&path).map_err(|x| format!("{}: {x}", path.display()))?,
+                    EntryNode::File(c) => {
+                        let data = contents.get(*c).ok_or_else(|| format!("{}: no content", path.display()))?;
+                        write(&path, data)?;
+                        files += 1;
+                    }
+                    // links and special entries are left out of this first stub
+                    _ => {}
+                }
+                paths.push(path);
+            }
+            Ok(files)
+        }
+    }
+}
+
+/// Writes `data` to `path`, making its parent directory.
+fn write(path: &Path, data: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    std::fs::write(path, data).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// An entry name (WTF-8) as a path component, lossily, with any separators of its own dropped so
+/// that it cannot escape its directory.
+fn sanitized(name: &[u8]) -> String {
+    String::from_utf8_lossy(name).replace(['/', '\\'], "_").replace("..", "_")
 }

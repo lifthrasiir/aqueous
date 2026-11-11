@@ -2,12 +2,8 @@
 name = "aqr-sfx"
 version = "0.1.0"
 edition = "2024"
-description = "The self-extracting stub: decodes an Aqueous archive appended to it and writes its files out, running its modules through the interpreter blob merged into it (no native codecs linked)"
+description = "The self-extracting apply logic: runs an archive's modules through the interpreter (and native) blobs merged into a stub, and writes its files out. The stub is aqr-sfx-shim"
 publish = false
-
-[[bin]]
-name = "aqr-sfx"
-path = "src/main.rs"
 
 [dependencies]
 aqr-api = { path = "../aqr-api", default-features = false }

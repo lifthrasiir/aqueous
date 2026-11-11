@@ -1125,6 +1125,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-sfx-shim"
+version = "0.1.0"
+dependencies = [
+ "aqr-formula",
+ "aqr-sfx",
+]
+
+[[package]]
 name = "aqr-snappy"
 version = "0.1.0"
 dependencies = [
