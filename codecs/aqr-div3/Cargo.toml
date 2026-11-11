@@ -1,0 +1,12 @@
+[package]
+name = "aqr-div3"
+version = "0.1.0"
+edition = "2024"
+description = "DivX 3 (MS-MPEG4 v3) video frames re-coded by a context model, rebuilt bit for bit"
+publish = false
+
+[dependencies]
+
+[[example]]
+name = "aqr-div3-check"
+path = "examples/check.rs"
