@@ -47,6 +47,9 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     directories zeroed), and `merge`, which merges blobs (or libraries) into a stub executable as
     sections with no loader — code copied and rebased, imports merged into the stub's table, a
     dispatch table added (`demo/{stub,modadd,modxor}`, `pemerge-test.sh`), toward SFX archives.
+  - `aqr-sfx` — the self-extracting stub: an archive appended to it (with a trailer: its length
+    and the magic `AQRSFX01`) is decoded and its files written out when it runs. For now it links
+    the native decoder (`aqr-decompress`); a leaner stub carrying only the merged modules is next.
   - `aqr-dll` — a module's binary built as a native library (`AQR_DLL_MODULE`; `build.sh` builds
     them into `target/aqr-dll/`) exporting `aqr_api::dll`, toward self-extracting archives;
     `aqr-dll-shim` records applications from archives and runs the libraries on them (its own, or

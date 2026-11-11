@@ -1,0 +1,14 @@
+[package]
+name = "aqr-sfx"
+version = "0.1.0"
+edition = "2024"
+description = "The self-extracting stub: decodes an Aqueous archive appended to it and writes its files out"
+publish = false
+
+[[bin]]
+name = "aqr-sfx"
+path = "src/main.rs"
+
+[dependencies]
+aqr-decompress = { path = "../aqr-decompress" }
+aqr-formula = { path = "../aqr-formula" }
