@@ -654,7 +654,7 @@ const NATIVE: &[Entry] = &[
     bare(BVX, |p, _, i, n, t| aqr_bvx::formula::decode(p, i, n, t).map_err(err)),
     threaded(BZ2, |p, _, i, n, t| aqr_bz2::formula::decode(p, i, n, t).map_err(err)),
     threaded(BZ2_ALZ, |p, _, i, n, t| aqr_bz2::formula::decode_alz(p, i, n, t).map_err(err)),
-    bare(LZX, |p, _, i, n, t| aqr_lzx::formula::decode(p, i, n, t).map_err(err)),
+    threaded(LZX, |p, _, i, n, t| aqr_lzx::formula::decode(p, i, n, t).map_err(err)),
     bare(XPRESS, |p, _, i, n, t| aqr_xpress::formula::decode(p, i, n, t).map_err(err)),
     bare(LZNT1, |p, _, i, n, t| aqr_lznt1::formula::decode(p, i, n, t).map_err(err)),
     part(

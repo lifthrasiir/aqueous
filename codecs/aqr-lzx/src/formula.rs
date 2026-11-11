@@ -10,13 +10,13 @@ use crate::{lzx, recons};
 
 pub use crate::module::{Part, decode, index};
 
-pub const MODULE: aqr_formula::Module = aqr_formula::Module::new("lzx-recons", 2).with_plan(plan).with_contents(&[0]);
+pub const MODULE: aqr_formula::Module = aqr_formula::Module::new("lzx-recons", 3).with_plan(plan).with_contents(&[0]);
 
 /// The memory of the module: its plan ([`crate::plan::decode`]).
 fn plan(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     // (the records and the index: the data is not asked for, as it may be sunk)
     let files = [u.content(1)?, u.content(3)?];
-    crate::plan::decode(u.initial(), u.params, u.inputs, u.output(), files)
+    crate::plan::decode(u.initial(), u.params, u.inputs, files)
 }
 
 /// The streams split on up to `threads` threads, each a stream of chunks (their bytes and

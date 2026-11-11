@@ -13,6 +13,7 @@ encode = ["dep:aqr-formula"]
 [dependencies]
 aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
 aqr-common = { path = "../../crates/aqr-common" }
+aqr-lzma = { path = "../aqr-lzma", default-features = false }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 
 [dev-dependencies]

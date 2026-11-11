@@ -57,13 +57,18 @@ cargo rt -p aqr-lzx
 
 Chunks and CAB streams of a small encoder of the tests (greedy matches, blocks of random types
 and sizes, pretree runs taken or not, e8 at random): read and written back, split and rebuilt;
-damaged records. `tests/data` holds its fixtures (`write_fixture` and the others, ignored),
-which aqr-decompress runs as WebAssembly.
+damaged records; streams of many windows, whose data slides along the window as the blocks go
+(`cab_streams_slide`: the stream pulled a few bytes at a time too). `tests/data` holds its
+fixtures (`write_fixture` and the others, ignored), which aqr-decompress runs as WebAssembly,
+and whose plans of memory it checks to the page (`slide.cab-lzx` of many windows).
 
 ## Status
 
 The module `lzx-recons` (natively and as a Wasm module of aqr-modules), WIM files (aqr-wim),
-WOF's LZX files in disk images (aqr-disk) and CAB and CHM files (aqr-mszip) are done.
+WOF's LZX files in disk images (aqr-disk) and CAB and CHM files (aqr-mszip) are done. The module
+is a part module (version 3): a CAB stream's data is read frame by frame and only the window and
+the block being coded are held, so its memory does not grow with the stream (a 568 MB CAB of an
+MSI, 3 GB of data, took 8.9 GiB as a whole module).
 
 Not yet: speed (a large CAB folder is one stream on one thread, which keeps LZX CABs to level
 9); LZX DELTA (MS-PATCH's reference data); LZMS and XPRESS (ESD files, WIMs of other

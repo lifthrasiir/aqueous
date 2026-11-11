@@ -129,7 +129,7 @@ optimization picked by hash.
 - Whole modules take their inputs at once; part modules (`entry! … windows(…)`, spec "Module
   execution") stream them through windows of fixed pages, so their memory does not grow with
   the data. Big streams' modules are part modules (lzma, bz2, lz4, snappy, git, exe, png, flac,
-  pcm, mp3, fasta, bundle, bcj, mszip, flate-set, flate-inflate, prores, div3, ac3); natively lzma, bz2, png,
+  pcm, mp3, fasta, bundle, bcj, mszip, lzx, flate-set, flate-inflate, prores, div3, ac3); natively lzma, lzx, bz2, png,
   mp3, flac and pcm still decode whole on threads (`Run::Threaded`), not held to the plan.
 - No variable arity: use Split and separate modules (png-against, leveldb-recons, …).
 - Model data (aqr-flate's) is a resource, not embedded in the module.

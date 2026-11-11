@@ -322,6 +322,11 @@ fn write_fixture() {
 /// A CAB stream of `n` bytes of data of a window of `2^bits` bytes: the file's data, (with e8
 /// at random) its stream, its blocks at random sizes over the frames.
 fn cab_stream(rng: &mut Rng, n: usize, bits: u8) -> (Vec<u8>, Vec<u8>) {
+    cab_stream_of(rng, n, bits, None)
+}
+
+/// [`cab_stream`], its blocks of `block` bytes (some of them uncompressed) where given.
+fn cab_stream_of(rng: &mut Rng, n: usize, bits: u8, block: Option<usize>) -> (Vec<u8>, Vec<u8>) {
     let v = Variant::cab(bits).unwrap();
     let file = data(rng, n);
     let e8 = (rng.below(2) == 0).then(|| [12_000_000, 1 << 20, 3_000][rng.below(3) as usize]);
@@ -331,12 +336,20 @@ fn cab_stream(rng: &mut Rng, n: usize, bits: u8) -> (Vec<u8>, Vec<u8>) {
     }
     let mut sizes = Vec::new();
     let mut left = d.len() as isize;
-    while left > 0 && rng.below(4) != 0 {
-        let s = 1 + rng.below(left as u64 * 2 / 3 + 1) as isize;
-        sizes.push(if rng.below(5) == 0 { -s } else { s });
-        left -= s;
+    if let Some(block) = block {
+        while left > 0 {
+            let s = (block as isize).min(left);
+            sizes.push(if rng.below(6) == 0 { -s } else { s });
+            left -= s;
+        }
+    } else {
+        while left > 0 && rng.below(4) != 0 {
+            let s = 1 + rng.below(left as u64 * 2 / 3 + 1) as isize;
+            sizes.push(if rng.below(5) == 0 { -s } else { s });
+            left -= s;
+        }
+        sizes.push(left.max(1));
     }
-    sizes.push(left.max(1));
     (file, encode_as(&d, &sizes, rng, v, e8))
 }
 
@@ -367,6 +380,50 @@ fn cab_streams() {
         // (the record of another variant gives nothing, or something else: no panic)
         let mut out = Vec::new();
         let _ = recons::join_stream_onto(&sp.data, &sp.record, Variant::cab(bits.max(16) - 1).unwrap(), &mut out);
+    }
+}
+
+/// CAB streams of many windows: the data slides along the window as the blocks go, the stream
+/// pulled a few bytes at a time rebuilt as when it is at hand.
+#[test]
+fn cab_streams_slide() {
+    use aqr_api::stream::Pull;
+    /// A pull giving at most `k` bytes at a time.
+    struct Few<'a>(&'a [u8], usize);
+    impl Pull for Few<'_> {
+        fn pull(&mut self, buf: &mut [u8]) -> usize {
+            let n = self.0.len().min(buf.len()).min(self.1);
+            buf[..n].copy_from_slice(&self.0[..n]);
+            self.0 = &self.0[n..];
+            n
+        }
+    }
+    let mut rng = Rng::new(9);
+    for (k, bits) in [15, 15, 16, 17].into_iter().enumerate() {
+        let v = Variant::cab(bits).unwrap();
+        let n = (12 << bits) + 1 + rng.below(3 << bits) as usize;
+        let (file, src) = cab_stream_of(&mut rng, n, bits, Some(lzx::FRAME * (1 + k)));
+        let sp = recons::split_stream(&src, n, v).expect("split");
+        assert_eq!(sp.data, file);
+        let mut out = Vec::new();
+        recons::join_stream_onto(&sp.data, &sp.record, v, &mut out).unwrap();
+        assert_eq!(out, src, "bits {bits}");
+        // (pulled in odd pieces, the record too)
+        let mut out = Vec::new();
+        let spare = recons::Spare::new(v.window(), 0);
+        let mut rec_src = Few(&sp.record, 1 + 3 * k);
+        let mut rec = aqr_api::stream::Reader::new(&mut rec_src, 7);
+        let (_, done) = recons::join_stream(
+            spare,
+            v,
+            &mut Few(&sp.data, 1000 + k),
+            sp.data.len(),
+            &mut rec,
+            sp.record.len() as u64,
+            &mut out,
+        );
+        done.unwrap();
+        assert_eq!(out, src, "bits {bits}, pulled in pieces");
     }
 }
 
@@ -416,6 +473,28 @@ fn write_cab_fixture() {
         at = e;
     }
     std::fs::write(format!("{}/tests/data/greedy.cab-lzx", env!("CARGO_MANIFEST_DIR")), out).unwrap();
+}
+
+/// Writes `tests/data/slide.cab-lzx`, a CAB stream of this test of many windows (a window of 32 KiB,
+/// blocks of one to three frames, some uncompressed) for other crates' tests of the module's
+/// memory, in the form of `greedy.cab-lzx`.
+#[test]
+#[ignore]
+fn write_slide_fixture() {
+    let mut rng = Rng::new(12);
+    let v = Variant::cab(15).unwrap();
+    let n = 8 * lzx::FRAME + 1234;
+    let (_, src) = cab_stream_of(&mut rng, n, 15, Some(lzx::FRAME * 2));
+    let ends = lzx::frame_ends(&src, n, v).unwrap();
+    let mut out = vec![15];
+    out.extend_from_slice(&(n as u32).to_le_bytes());
+    let mut at = 0;
+    for e in ends.into_iter().chain([src.len()]) {
+        out.extend_from_slice(&((e - at) as u32).to_le_bytes());
+        out.extend_from_slice(&src[at..e]);
+        at = e;
+    }
+    std::fs::write(format!("{}/tests/data/slide.cab-lzx", env!("CARGO_MANIFEST_DIR")), out).unwrap();
 }
 
 /// Writes `tests/data/greedy.chm-lzx`, CHM's LZX of this test for other crates' tests: a reset

@@ -353,8 +353,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "lzx-recons",
-        version: 2,
-        sha512_256: hex("91d709f504d504b4042c669b0dda2638506bedb857b2f1e50504923623c53ed8"),
+        version: 3,
+        sha512_256: hex("5f4ca9b2bb25ff46eade5b40998404ac3ad4d4a9fe3f993d64b8255885064f7a"),
         block: include_bytes!("../wasm/lzx-recons.block"),
     },
     Known {

@@ -1,7 +1,10 @@
 //! The code of the module `lzx-recons` (see `formula`, and `FORMAT.md`), which needs no
 //! aqr-formula, so that aqr-modules builds it into its Wasm module.
 
+use aqr_api::Memory;
+use aqr_api::stream::{In, Pull, Put, Reader, Slice, Written};
 use aqr_common::varint;
+use aqr_lzma::stream::PIECE;
 
 use crate::lzx::{self, Variant};
 use crate::{Error, Result, corrupt, recons};
@@ -92,13 +95,6 @@ pub fn variant(params: &[u8]) -> Result<Variant> {
     }
 }
 
-/// The bytes of data a chunk of the streams of `v` comes to at most, of those of `lens` bytes of
-/// data: a CAB stream is one, WIM's chunks are of [`recons::CHUNK`].
-pub fn spare_data(v: Variant, lens: impl Iterator<Item = usize>) -> usize {
-    let most = lens.max().unwrap_or(0);
-    if v.cab { most } else { most.min(recons::CHUNK) }
-}
-
 /// The module: of the inputs (data, records, bytes kept, index), each stream of LZX chunks (or,
 /// with `params` the window's bits, each CAB stream) that its data and record rebuild after the
 /// bytes kept before it, then the bytes kept after the last, `len` bytes in all (see
@@ -115,7 +111,7 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
     let mut out = Vec::with_capacity(len);
     if threads <= 1 || streams.len() <= 1 || cfg!(target_family = "wasm") {
         // (the streams one after another on the match finder and chunk made once, for the largest)
-        let mut spare = recons::Spare::new(v.window(), spare_data(v, streams.iter().map(|s| s.1.len())));
+        let mut spare = recons::Spare::new(v.window(), 0);
         for &(kept, data, record) in &streams {
             out.extend_from_slice(kept);
             let (s, done) = recons::join_in(spare, v, data, record, &mut out);
@@ -140,4 +136,101 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
         return Err(Error("output of another length"));
     }
     Ok(out)
+}
+
+/// Pages of the windows of the module as a part module ([`decode_part`]): of each input and of
+/// the output.
+pub const WINDOW: u32 = 16;
+
+/// Bytes of the pieces in which the index is read.
+pub const INDEX_PIECE: usize = 256;
+
+/// The next `left` bytes of a stream, no more.
+struct Limit<'a> {
+    src: &'a mut dyn Pull,
+    left: usize,
+}
+
+impl Pull for Limit<'_> {
+    fn pull(&mut self, buf: &mut [u8]) -> usize {
+        let k = self.left.min(buf.len());
+        let n = if k == 0 { 0 } else { self.src.pull(&mut buf[..k]) };
+        self.left -= n;
+        n
+    }
+}
+
+/// The module as a part module on the inputs `data`, `rec` (records), `kept` and `index` of
+/// `lens` bytes: [`decode`] with its inputs taken and its output put in order through windows,
+/// in pieces. It holds the window and the block being coded of a CAB stream, never the stream.
+fn run(v: Variant, [data, rec, kept, index]: [&mut dyn Pull; 4], lens: [u64; 4], out: &mut dyn Put) -> Result<()> {
+    let [mut data_left, mut rec_left, mut kept_left, _] = lens;
+    let mut index = Reader::new(index, INDEX_PIECE);
+    let mut rec = Reader::new(rec, PIECE);
+    let mut kept = Reader::new(kept, PIECE);
+    let mut spare = recons::Spare::new(v.window(), 0);
+    let mut put = |d: &[u8]| out.put(d).ok_or(Error("output of another length"));
+    while !index.done() {
+        let mut take = |left: &mut u64| -> Result<u64> {
+            let n = index.num().map_err(|_| corrupt())?;
+            *left = left.checked_sub(n).ok_or_else(corrupt)?;
+            Ok(n)
+        };
+        let (k, n, r) = (take(&mut kept_left)?, take(&mut data_left)?, take(&mut rec_left)?);
+        kept.each(k, |b| put(b).ok()).ok_or_else(corrupt)?;
+        let n = usize::try_from(n).map_err(|_| corrupt())?;
+        let mut sink = Sink(&mut put);
+        let (s, done) =
+            recons::join_stream(spare, v, &mut Limit { src: &mut *data, left: n }, n, &mut rec, r, &mut sink);
+        spare = s;
+        done?;
+    }
+    kept.each(kept_left, |b| put(b).ok()).ok_or_else(corrupt)?;
+    match data_left == 0 && rec_left == 0 && rec.done() && kept.done() {
+        true => Ok(()),
+        false => Err(corrupt()),
+    }
+}
+
+/// A closure as a [`Put`].
+struct Sink<'a, F: FnMut(&[u8]) -> Result<()>>(&'a mut F);
+
+impl<F: FnMut(&[u8]) -> Result<()>> Put for Sink<'_, F> {
+    fn put(&mut self, d: &[u8]) -> Option<()> {
+        (self.0)(d).ok()
+    }
+}
+
+/// The module `lzx-recons` as a part module (its entry point, of `aqr_api::entry!`): the inputs
+/// are data, records, bytes kept and the index, of `lens` bytes, the output `size` bytes.
+pub fn decode_part(params_len: u64, lens: [u64; 4], size: u64) {
+    aqr_api::finish(part(params_len, lens, size));
+}
+
+fn part(params_len: u64, lens: [u64; 4], size: u64) -> Result<()> {
+    let mut params = [0u8; 1];
+    let Some(buf) = params.get_mut(..params_len as usize) else { return Err(corrupt()) };
+    aqr_api::Params::read(0, buf);
+    let v = variant(buf)?;
+    let (mut i0, mut i1, mut i2, mut i3) =
+        (In::<0>::new(lens[0]), In::<1>::new(lens[1]), In::<2>::new(lens[2]), In::<3>::new(lens[3]));
+    let mut out = Written::new(size);
+    run(v, [&mut i0, &mut i1, &mut i2, &mut i3], lens, &mut out)?;
+    match out.total() == size {
+        true => Ok(()),
+        false => Err(Error("output of another length")),
+    }
+}
+
+/// [`decode_part`] on whole inputs, natively: what a part module gives, one stream after another.
+pub fn decode_streamed(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
+    let &[data, records, kept, index] = inputs else { return Err(Error("four inputs wanted")) };
+    let v = variant(params)?;
+    let lens = [data.len() as u64, records.len() as u64, kept.len() as u64, index.len() as u64];
+    let mut out = Vec::new();
+    run(v, [&mut Slice(data), &mut Slice(records), &mut Slice(kept), &mut Slice(index)], lens, &mut out)?;
+    match out.len() as u64 == len {
+        true => Ok(out),
+        false => Err(Error("output of another length")),
+    }
 }

@@ -672,6 +672,9 @@ pub fn write_onto_as(data: &[u8], parse: &Parse, v: Variant, w: &mut BitW) -> Op
     wr.finish(w, parse.tail_bits, &parse.trailing)
 }
 
+/// Bytes written at which a block's writer lets its output be taken ([`BlockWriter::block_with`]).
+pub const FLUSH: usize = 1 << 14;
+
 /// The writer of a chunk or stream of `v` block by block: what the blocks before leave
 /// for the ones after them (the code lengths, the repeat offsets, where the data is).
 pub struct BlockWriter {
@@ -716,6 +719,29 @@ impl BlockWriter {
     /// padding of the frames its tokens end (the first of the slice given, and so on): how many
     /// of them it used.
     pub fn block(&mut self, w: &mut BitW, b: &Block, toks: &[Tok], pads: &[u16], data: &[u8]) -> Option<usize> {
+        self.block_with(w, b, toks, pads, data, &mut |_| Some(()))
+    }
+
+    /// Moves the stream's start `shift` bytes on (a multiple of [`FRAME`], at most the bytes
+    /// before the next block): `data` of the blocks after it starts there.
+    pub fn slide(&mut self, shift: usize) {
+        self.at -= shift;
+        self.n -= shift;
+        self.frame_end -= shift;
+    }
+
+    /// [`BlockWriter::block`], `flush` called with the writer whenever [`FLUSH`] bytes or more
+    /// are written, so that they may be taken out of `w.out`. `data` is the stream from the
+    /// start [`BlockWriter::slide`] left.
+    pub fn block_with(
+        &mut self,
+        w: &mut BitW,
+        b: &Block,
+        toks: &[Tok],
+        pads: &[u16],
+        data: &[u8],
+        flush: &mut dyn FnMut(&mut BitW) -> Option<()>,
+    ) -> Option<usize> {
         let (v, n) = (self.v, self.n);
         let (mut at, mut f) = (self.at, 0);
         if !v.cab && !pads.is_empty() {
@@ -743,6 +769,7 @@ impl BlockWriter {
                 write_tree(w, &b.trees[0])?;
                 write_tree(w, &b.trees[1])?;
                 write_tree(w, &b.trees[2])?;
+                flush(w)?;
                 self.lens.apply(b)?;
                 let lens = &self.lens;
                 let (main, len_tree) = (Huff::new(&lens.main, false)?, Huff::new(&lens.len, false)?);
@@ -799,6 +826,9 @@ impl BlockWriter {
                         f += 1;
                         self.frame_end = (self.frame_end + FRAME).min(n);
                     }
+                    if w.out.len() >= FLUSH {
+                        flush(w)?;
+                    }
                 }
                 (at == end).then_some(())?;
             }
@@ -808,7 +838,10 @@ impl BlockWriter {
                 w.bits(pad, b.align_bits as u32);
                 b.reps.iter().for_each(|r| w.out.extend_from_slice(&r.to_le_bytes()));
                 self.reps = b.reps;
-                w.out.extend_from_slice(data.get(at..end)?);
+                for piece in data.get(at..end)?.chunks(FLUSH) {
+                    w.out.extend_from_slice(piece);
+                    flush(w)?;
+                }
                 (end - at == b.size || end == n).then_some(())?;
                 if b.size % 2 == 1 {
                     w.out.extend(b.pad_byte);
@@ -868,6 +901,14 @@ pub fn e8_decode_frames(d: &mut [u8], size: u32) {
 pub fn e8_encode_frames(d: &mut [u8], size: u32) {
     for f in frames(d.len()) {
         e8_encode_at(&mut d[f.clone()], f.start, size as i32);
+    }
+}
+
+/// e8 translation of size `size` of the frame `d` of a CAB stream, which starts at `start` of it
+/// (a multiple of [`FRAME`]): [`e8_encode_frames`] for one frame.
+pub fn e8_encode_frame(d: &mut [u8], start: usize, size: u32) {
+    if start < 1 << 30 && d.len() > 10 {
+        e8_encode_at(d, start, size as i32);
     }
 }
 

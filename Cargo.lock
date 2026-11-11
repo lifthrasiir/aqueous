@@ -748,6 +748,7 @@ dependencies = [
  "aqr-api",
  "aqr-common",
  "aqr-formula",
+ "aqr-lzma",
  "memmap2",
  "sha1",
 ]

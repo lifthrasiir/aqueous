@@ -4062,6 +4062,35 @@ fn lzx_plans_hold() {
     let a = aqr_lzx::formula::apply_as(&mut f, v, vec![stream], Node::Concat(Vec::new()), src.len() as u64);
     f.root = Node::Apply(Box::new(a));
     plan_holds("lzx cab", f, &src);
+    // CAB streams of many windows (a window of 32 KiB: the data slides along as the blocks go,
+    // by a window at a time), alone and twice with bytes kept around them
+    let s = fixture("codecs/aqr-lzx/tests/data/slide.cab-lzx");
+    let v = aqr_lzx::lzx::Variant::cab(s[0]).unwrap();
+    let n = u32::from_le_bytes(s[1..5].try_into().unwrap()) as usize;
+    let (mut src, mut at) = (Vec::new(), 5);
+    while at < s.len() {
+        let len = u32::from_le_bytes(s[at..at + 4].try_into().unwrap()) as usize;
+        src.extend_from_slice(&s[at + 4..at + 4 + len]);
+        at += 4 + len;
+    }
+    let sp = aqr_lzx::recons::split_stream(&src, n, v).unwrap();
+    for copies in [1usize, 2] {
+        let mut f = Formula::default();
+        f.push("raw", sp.data.repeat(copies));
+        f.push("kept", b"<before><between><after>".to_vec());
+        let (mut streams, mut want) = (Vec::new(), Vec::new());
+        for i in 0..copies {
+            let kept = if i == 0 { Node::slice(1, 0, 8) } else { Node::slice(1, 8, 9) };
+            want.extend_from_slice(if i == 0 { b"<before>" } else { b"<between>" });
+            want.extend_from_slice(&src);
+            let data = Node::slice(0, (i * n) as u64, n as u64);
+            streams.push(aqr_lzx::formula::Stream { kept, data, record: sp.record.clone() });
+        }
+        want.extend_from_slice(b"<after>");
+        let a = aqr_lzx::formula::apply_as(&mut f, v, streams, Node::slice(1, 17, 7), want.len() as u64);
+        f.root = Node::Apply(Box::new(a));
+        plan_holds(&format!("lzx slide x{copies}"), f, &want);
+    }
 }
 
 /// xpress-recons lays its memory out as a stack, its limit its plan: of WOF's chunks (aqr-xpress's
