@@ -10,6 +10,7 @@ def resume(rl, prefix, maxd, q=5):
         nxt = []
         for p in level:
             r = flip_leaf(mk, 3, p)
+            if r is None and len(p) >= 14: pass
             if r is not None: leaves[p] = r
             elif len(p) < maxd:
                 pk = [mk(p + rnd(20, random.Random(k))) for k in range(8)]

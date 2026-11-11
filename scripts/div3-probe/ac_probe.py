@@ -14,7 +14,37 @@ def single(D, minamp=6):
     if np.abs(D - fit).max() > 1.05: return None
     return (int(i[0]), int(i[1])), float(a)
 
-def flip_leaf(mk, blk, p, K=24, rng=None):
+THRESH = 0.85
+LASTRATE = [0.0]
+TERMS = ['01110', '0011110', '0011100', '00100000']   # rl=2 last=1 codes + sign 0
+def flip_leaf(mk, blk, p, K=40, rng=None):
+    return flip_leaf_t(mk, blk, p)
+def flip_leaf_t(mk, blk, p, per=4):
+    """As flip_leaf, but the bits after the flipped one are a known terminating symbol, so the block ends cleanly."""
+    rng = random.Random(hash(p) & 0xffffffff)
+    rests = [t + rnd(8, rng) for t in TERMS for _ in range(per)]
+    K = len(rests)
+    res = DEC.frames([mk(p + s + r) for r in rests for s in '01'])
+    got = []
+    for k in range(K):
+        (o0, b0), (o1, b1) = res[2 * k], res[2 * k + 1]
+        if b0 or b1 or o0 is None or o1 is None: continue
+        D = np.array(blocks_yuv(o0)[blk], float) - np.array(blocks_yuv(o1)[blk], float)
+        s = single(D)
+        if s is not None:
+            F0 = fdct(blocks_yuv(o0)[blk]); F1 = fdct(blocks_yuv(o1)[blk]); u, v = s[0]
+            if abs(F0[u, v] + F1[u, v]) > 2.0 + 0.1 * abs(s[1]): continue
+            got.append((s[0], round(abs(s[1]) / 2)))
+    LASTRATE[0] = 0.0
+    if not got: return None
+    from collections import Counter
+    pos = Counter(g[0] for g in got).most_common(1)[0][0]
+    amps = sorted(g[1] for g in got if g[0] == pos); med = amps[len(amps) // 2]
+    good = [x for x in amps if abs(x - med) <= max(3, 0.12 * med)]
+    LASTRATE[0] = len(good) / K
+    if len(good) < THRESH * K: return None
+    return pos, float(np.mean(good))
+def flip_leaf_old(mk, blk, p, K=40, rng=None):
     """p is a complete code iff, for most random rests, the outputs for p+'0'+rest and p+'1'+rest differ by one basis pattern
     (the same one every time)."""
     rng = rng or random.Random(hash(p) & 0xffffffff)
@@ -31,10 +61,12 @@ def flip_leaf(mk, blk, p, K=24, rng=None):
             F0 = fdct(blocks_yuv(o0)[blk]); F1 = fdct(blocks_yuv(o1)[blk]); u, v = s[0]
             if abs(F0[u, v] + F1[u, v]) > 2.0 + 0.1 * abs(s[1]): continue
             got.append((s[0], round(abs(s[1]) / 2)))
-    if len(got) < 0.3 * K: return None
+    LASTRATE[0] = 0.0
+    if len(got) < THRESH * K: return None
     from collections import Counter
     (pos, amp), n = Counter((g[0], g[1] // 3) for g in got).most_common(1)[0]
-    if n < 0.3 * K: return None
+    LASTRATE[0] = n / K
+    if n < THRESH * K: return None
     amps = [g[1] for g in got if g[0] == pos and g[1] // 3 == amp]
     return pos, float(np.mean(amps))
 
@@ -56,6 +88,9 @@ def walk_ac(mk, blk, maxd=17):
 
 if __name__ == '__main__':
     rl = int(sys.argv[1]); q = 5
+    import json as _j
+    _old = _j.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ac_labeled_rl%d.json' % rl)))
+    TERMS[:] = [c + '0' for _, c in sorted((len(c), c) for c, v in _old.items() if v['last'] == 1)[:4]]
     # block 3 only coded (cbp code 00110, found by the CBP probe), dc table 0 (zero code '1')
     mk = lambda bits: tob(hdr_i(q=q, rl=rl) + '00110' + '0' + '1' * 4 + bits + '1' * 60)
     leaves, unres = walk_ac(mk, 3)

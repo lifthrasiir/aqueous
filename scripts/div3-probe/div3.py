@@ -3,7 +3,7 @@ import json, os
 HERE = os.path.dirname(os.path.abspath(__file__))
 def J(n): return json.load(open(os.path.join(HERE, n)))
 DC = J('dc_raw.json')
-CBP_FLAGS = {v: int(k) for k, v in J('cbp_i_codes.json').items()}
+CBP_FLAGS = {v: int(k) for k, v in J('cbp_i_codes2.json').items()}
 def predf(a, bb, c, var): return (a if bb == c else c) if var == 0 else (c if a == bb else a)
 def to_symbol(F, var):
     # the first MB has no neighbours (flags 0): the symbol bits are the flags xor their prediction
@@ -11,7 +11,15 @@ def to_symbol(F, var):
     s0 = f[0]; s1 = f[1] ^ predf(f[0], 0, 0, var); s2 = f[2] ^ predf(0, 0, f[0], var); s3 = f[3] ^ predf(f[2], f[0], f[1], var)
     return (s0 << 5) | (s1 << 4) | (s2 << 3) | (s3 << 2) | (f[4] << 1) | f[5]
 CBP = {}
-IDX = {tuple(map(int, k[1:-1].split(','))): v for k, v in J('scan_idx_block3.json').items()}
+def _zigzag():
+    order = []
+    for d in range(1, 15):
+        pts = [(u, d - u) for u in range(max(0, d - 7), min(7, d) + 1)]
+        order += pts if d % 2 else pts[::-1]
+    return {p: i + 1 for i, p in enumerate(order)}
+IDX = _zigzag()
+_known = {tuple(map(int, k[1:-1].split(','))): v for k, v in J('scan_idx_block3.json').items()}
+assert all(IDX[k] == v for k, v in _known.items())
 ESC = {'L0': '0010110', 'L1': '001001010', 'L2': '0000011', 'C0': '000001101', 'C1': '101101001', 'C2': '00000110'}
 
 class Tab:
@@ -62,21 +70,26 @@ def read_dc(b, name):
     return lvl
 def s_all(b, l): return b.peek_str(l)
 
+TRACE = None
+ESC2_ADD = 1
 class Esc3:
     ll = 0
 def read_block_ac(b, tab, q, st):
     i = 0
     while True:
-        s = b.peek_str(tab.maxlen)
+        s = b.peek_str(tab.maxlen); et = 0
         if s.startswith(tab.esc):
             b.p += len(tab.esc)
-            if b.get(1):          # esc 1: level + max_level
+            if b.get(1):
+                et = 1          # esc 1: level + max_level
                 run, lvl, last = vlc(b, tab.codes, tab.maxlen); lvl += tab.maxl[(last, run)]
                 sign = b.get(1)
             elif b.get(1):        # esc 2: run + max_run + 1
-                run, lvl, last = vlc(b, tab.codes, tab.maxlen); run += tab.maxr[(last, lvl)] + 1
+                et = 2
+                run, lvl, last = vlc(b, tab.codes, tab.maxlen); run += tab.maxr[(last, lvl)] + ESC2_ADD
                 sign = b.get(1)
             else:
+                et = 3
                 last = b.get(1); run = b.get(6)
                 if st.ll == 0:
                     if q < 8:
@@ -89,6 +102,7 @@ def read_block_ac(b, tab, q, st):
                 sign = b.get(1); lvl = b.get(st.ll)
         else:
             run, lvl, last = vlc(b, tab.codes, tab.maxlen); sign = b.get(1)
+        if TRACE is not None: TRACE.append((run, lvl, last, sign, et))
         i += run + 1
         if i > 63: raise ValueError('run past block')
         if last: return
