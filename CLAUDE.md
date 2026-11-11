@@ -67,8 +67,9 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     program through the dispatch table's anchor — native module blobs named `HASH/SLOTS`
     (`native_name`: the module's hash and task slots), the interpreter blob `aqr-interp` — and is
     the `Runner`: a shorthand block's hash gives a stand-in Wasm module (no code, the task slots
-    and the hash in custom sections), which `load` takes to the native blob (applied whole); any
-    other module goes to the interpreter. The shared libraries the native blobs link against are
+    and the hash in custom sections), which `load` takes to the native blob (a part module
+    streamed through `aqr_dll_apply_part`, as `Info::apply_part` gives it); any other module
+    goes to the interpreter. The shared libraries the native blobs link against are
     entries `lib:NAME` (their exception tables registered, nothing else). `extract` writes a
     decoded archive's files out. Shared by the stub and aqr. `pack.sh` gathers what aqr embeds
     (the stub, the blobs of the modules and of the shared libraries).

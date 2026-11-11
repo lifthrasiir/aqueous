@@ -8,16 +8,59 @@
 //! - `aqr_dll_apply`, an [`ApplyFn`]: an application, its outputs written into the caller's
 //!   buffers, each of the size declared; 0 if it succeeded, else 1 with a message of the failure
 //!   in `error` (as much of it as fits, `*error_len` bytes).
+//! - `aqr_dll_apply_part`, an [`ApplyPartFn`]: an application of a part module streamed, its
+//!   inputs pulled through the caller's callbacks ([`PartIn`]) as the module requests them and
+//!   its outputs pushed ([`PartOut`]) as it commits them, so that a big stream is never held
+//!   whole; returning as `aqr_dll_apply` does.
 //!
-//! The library holds a copy of the module's code and of everything it uses, the standard library
-//! among them (its own allocator, its own threads for the tasks).
+//! The library holds a copy of the module's code and of everything it uses (or links against the
+//! shared libraries that do, crates/aqr-dll/layout.py): the standard library among them, its own
+//! allocator, its own threads for the tasks.
 
+use core::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use crate::emu::{self, Entry, Kind};
+use crate::emu::{self, Drain, Entry, Feed, Kind};
 
-/// The version of the interface, which [`Info::version`] tells.
-pub const VERSION: u32 = 1;
+/// The version of the interface, which [`Info::version`] tells: 2 has `aqr_dll_apply_part`.
+pub const VERSION: u32 = 2;
+
+/// Bytes given to a callback ([`PartIn::pull`]'s `put`).
+pub type BytesFn = unsafe extern "C" fn(ctx: *mut c_void, ptr: *const u8, len: usize);
+
+/// An input of a part application, as the module pulls it (the interpreter blob's too).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PartIn {
+    pub ctx: *mut c_void,
+    pub len: u64,
+    /// Pulls the input up to offset `hi`, in pieces given to `put` with `put_ctx`; 0 if it did.
+    pub pull: unsafe extern "C" fn(ctx: *mut c_void, hi: u64, put_ctx: *mut c_void, put: BytesFn) -> u32,
+}
+
+/// An output of a part application, taking the bytes as the module commits them.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PartOut {
+    pub ctx: *mut c_void,
+    /// Takes `len` bytes at `ptr`; 0 if it did.
+    pub push: unsafe extern "C" fn(ctx: *mut c_void, ptr: *const u8, len: usize) -> u32,
+}
+
+/// `aqr_dll_apply_part`: the parameters, the resources, the inputs and outputs streamed, the
+/// sizes of the outputs (`n_outputs` of them), and where the message of a failure goes.
+pub type ApplyPartFn = unsafe extern "C" fn(
+    params: Slice,
+    resources: *const Slice,
+    n_resources: usize,
+    inputs: *const PartIn,
+    n_inputs: usize,
+    outputs: *const PartOut,
+    n_outputs: usize,
+    sizes: *const u64,
+    error: SliceMut,
+    error_len: *mut usize,
+) -> u32;
 
 /// Bytes the caller gives.
 #[repr(C)]
@@ -78,6 +121,9 @@ pub struct Info {
     pub arity: u32,
     /// The name of the module's binary in crates/aqr-modules (`lz4-recons`), UTF-8, static.
     pub name: Slice,
+    /// Its `aqr_dll_apply_part`, for a part module (an address within the library as it is
+    /// loaded, or merged: what a merged library is reached by, with no table of exports).
+    pub apply_part: Option<ApplyPartFn>,
 }
 
 /// `aqr_dll_info`.
@@ -97,13 +143,16 @@ pub type ApplyFn = unsafe extern "C" fn(
     error_len: *mut usize,
 ) -> u32;
 
-/// The [`Info`] of the module of binary `name` and entry point `entry`.
-pub fn info(name: &'static str, entry: &Entry) -> Info {
+/// The [`Info`] of the module of binary `name` and entry point `entry`, whose library's
+/// `aqr_dll_apply_part` is `apply_part`.
+pub fn info(name: &'static str, entry: &Entry, apply_part: ApplyPartFn) -> Info {
+    let part = entry.kind == Kind::Part;
     Info {
         version: VERSION,
-        part: (entry.kind == Kind::Part) as u32,
+        part: part as u32,
         arity: entry.arity as u32,
         name: Slice::of(name.as_bytes()),
+        apply_part: part.then_some(apply_part),
     }
 }
 
@@ -144,12 +193,14 @@ pub unsafe fn apply(
             }
             return 0;
         }
-        Ok(Err(f)) => match f.log {
-            Some(log) => format!("{}: {}", f.what, String::from_utf8_lossy(&log)),
-            None => f.what,
-        },
+        Ok(Err(f)) => message(f),
         Err(_) => "panicked".to_owned(),
     };
+    unsafe { fail(&msg, error, error_len) }
+}
+
+/// Writes `msg` (as much as fits) into `error`, its length into `*error_len`: 1, a failure.
+unsafe fn fail(msg: &str, error: SliceMut, error_len: *mut usize) -> u32 {
     let error = unsafe { error.get() };
     let n = msg.len().min(error.len());
     error[..n].copy_from_slice(&msg.as_bytes()[..n]);
@@ -157,4 +208,106 @@ pub unsafe fn apply(
         unsafe { *error_len = n };
     }
     1
+}
+
+/// The message of failure `f` of the emulation.
+fn message(f: emu::Failure) -> String {
+    match f.log {
+        Some(log) => format!("{}: {}", f.what, String::from_utf8_lossy(&log)),
+        None => f.what,
+    }
+}
+
+/// A [`PartIn`] as the emulation pulls it.
+struct In(PartIn);
+
+impl Feed for In {
+    fn len(&self) -> u64 {
+        self.0.len
+    }
+
+    fn pull(&mut self, hi: u64, put: &mut dyn FnMut(&[u8])) -> Result<(), String> {
+        unsafe extern "C" fn give(ctx: *mut c_void, ptr: *const u8, len: usize) {
+            let put = unsafe { &mut *(ctx as *mut &mut dyn FnMut(&[u8])) };
+            put(match len {
+                0 => &[],
+                n => unsafe { std::slice::from_raw_parts(ptr, n) },
+            });
+        }
+        let mut put = put;
+        let ctx = &mut put as *mut &mut dyn FnMut(&[u8]) as *mut c_void;
+        // SAFETY: the caller's callback, with its context, `put` alive across the call
+        match unsafe { (self.0.pull)(self.0.ctx, hi, ctx, give) } {
+            0 => Ok(()),
+            _ => Err("an input not pulled".into()),
+        }
+    }
+}
+
+/// A [`PartOut`] as the emulation pushes to it.
+struct Out(PartOut);
+
+impl Drain for Out {
+    fn push(&mut self, d: &[u8]) -> Result<(), String> {
+        // SAFETY: the caller's callback, with its context
+        match unsafe { (self.0.push)(self.0.ctx, d.as_ptr(), d.len()) } {
+            0 => Ok(()),
+            _ => Err("an output not taken".into()),
+        }
+    }
+}
+
+/// The body of `aqr_dll_apply_part` ([`ApplyPartFn`]) of `entry`, a part module's: streamed
+/// through [`emu::apply_streaming`], on the calling thread.
+///
+/// # Safety
+/// As [`ApplyPartFn`] is called: each pointer to as many items as given, the callbacks valid
+/// with their contexts across the call.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn apply_part(
+    entry: &Entry,
+    params: Slice,
+    resources: *const Slice,
+    n_resources: usize,
+    inputs: *const PartIn,
+    n_inputs: usize,
+    outputs: *const PartOut,
+    n_outputs: usize,
+    sizes: *const u64,
+    error: SliceMut,
+    error_len: *mut usize,
+) -> u32 {
+    let items = |p: *const u8, n: usize| -> bool { n == 0 || !p.is_null() };
+    if !items(resources.cast(), n_resources) || !items(inputs.cast(), n_inputs) || !items(outputs.cast(), n_outputs) {
+        return unsafe { fail("null items", error, error_len) };
+    }
+    let slice = |p: *const Slice, n: usize| match n {
+        0 => Vec::new(),
+        n => unsafe { std::slice::from_raw_parts(p, n) }.iter().map(|s| unsafe { s.get() }).collect::<Vec<_>>(),
+    };
+    let resources = slice(resources, n_resources);
+    let mut ins: Vec<In> = match n_inputs {
+        0 => Vec::new(),
+        n => unsafe { std::slice::from_raw_parts(inputs, n) }.iter().map(|&p| In(p)).collect(),
+    };
+    let mut outs: Vec<Out> = match n_outputs {
+        0 => Vec::new(),
+        n => unsafe { std::slice::from_raw_parts(outputs, n) }.iter().map(|&p| Out(p)).collect(),
+    };
+    let sizes: &[u64] = match n_outputs {
+        0 => &[],
+        n => unsafe { std::slice::from_raw_parts(sizes, n) },
+    };
+    let params = unsafe { params.get() };
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let mut ins: Vec<&mut dyn Feed> = ins.iter_mut().map(|i| i as &mut dyn Feed).collect();
+        let mut outs: Vec<&mut dyn Drain> = outs.iter_mut().map(|o| o as &mut dyn Drain).collect();
+        emu::apply_streaming(entry, &mut ins, &resources, params, &mut outs, sizes)
+    }));
+    let msg = match r {
+        Ok(Ok(())) => return 0,
+        Ok(Err(f)) => message(f),
+        Err(_) => "panicked".to_owned(),
+    };
+    unsafe { fail(&msg, error, error_len) }
 }

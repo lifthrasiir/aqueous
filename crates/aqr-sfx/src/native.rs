@@ -7,9 +7,9 @@
 //! [`Runner::registered`]: aqr_formula::aqr::Runner::registered
 //! [`Runner::load`]: aqr_formula::aqr::Runner::load
 
-use aqr_api::dll::{ApplyFn, Slice, SliceMut};
+use aqr_api::dll::{ApplyFn, ApplyPartFn, Slice, SliceMut};
 use aqr_formula::Resource;
-use aqr_formula::aqr::{Decoded, Loaded};
+use aqr_formula::aqr::{Decoded, Failure, Loaded, PartIn, PartOut};
 
 /// The name in the dispatch table of the native blob of the module of SHA-512/256 `hash` and
 /// task slots `slots` (the bytes of its custom section `aqr_task_slots`): both in hex,
@@ -104,12 +104,17 @@ pub(crate) struct Native {
     pub hash: [u8; 32],
     pub slots: Vec<u8>,
     pub apply: ApplyFn,
+    /// Its `aqr_dll_apply_part`, for a part module ([`aqr_api::dll::Info::apply_part`]).
+    pub apply_part: Option<ApplyPartFn>,
 }
 
-/// A module of a native blob: applied whole (a part module too, its inputs gathered first), the
-/// limits of its memory not enforced (it is the module's own code, run natively).
+/// A module of a native blob: a part module streamed, its inputs pulled and its outputs pushed
+/// as the module requests and commits them (so a big stream is never held whole), a whole one
+/// applied on the buffers; the limits of its memory not enforced (it is the module's own code,
+/// run natively).
 pub(crate) struct NativeLoaded {
     pub apply: ApplyFn,
+    pub apply_part: Option<ApplyPartFn>,
 }
 
 impl Loaded for NativeLoaded {
@@ -144,6 +149,49 @@ impl Loaded for NativeLoaded {
         };
         match r {
             0 => Ok(outs),
+            _ => Err(crate::message(&error, len)),
+        }
+    }
+
+    fn is_part(&self) -> bool {
+        self.apply_part.is_some()
+    }
+
+    fn apply_part(
+        &self,
+        params: &[u8],
+        resources: &[Resource],
+        inputs: &mut [&mut dyn PartIn],
+        outputs: &mut [&mut dyn PartOut],
+        sizes: &[u64],
+        _memory_limit: u64,
+        _task_limits: &[u64],
+    ) -> Decoded<()> {
+        let apply_part = self.apply_part.ok_or_else(|| Failure::Invalid("not a part module".into()))?;
+        if sizes.len() != outputs.len() {
+            return Err(Failure::Invalid("outputs of other sizes than declared".into()));
+        }
+        let res: Vec<Slice> = resources.iter().map(|r| Slice::of(r)).collect();
+        let (in_c, out_c) = crate::part_c(inputs, outputs);
+        let mut error = [0u8; 1024];
+        let mut len = 0;
+        // SAFETY: the inputs and outputs live across the call, their callbacks driven from here
+        let r = unsafe {
+            apply_part(
+                Slice::of(params),
+                res.as_ptr(),
+                res.len(),
+                in_c.as_ptr(),
+                in_c.len(),
+                out_c.as_ptr(),
+                out_c.len(),
+                sizes.as_ptr(),
+                SliceMut::of(&mut error),
+                &mut len,
+            )
+        };
+        match r {
+            0 => Ok(()),
             _ => Err(crate::message(&error, len)),
         }
     }

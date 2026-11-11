@@ -136,26 +136,9 @@ pub unsafe extern "C" fn aqr_interp_apply(
 
 // ---- part modules: streamed, so a big stream's memory stays bounded
 
-/// A callback that takes bytes the interpreter pulls or commits.
-type BytesFn = unsafe extern "C" fn(*mut c_void, *const u8, usize);
-
-/// An input of a part application, pulled as the module requests it (so it is not held whole).
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct PartInC {
-    pub ctx: *mut c_void,
-    pub len: u64,
-    /// Pull the input up to offset `hi` into the module, in pieces given to `put` with `put_ctx`.
-    pub pull: unsafe extern "C" fn(ctx: *mut c_void, hi: u64, put_ctx: *mut c_void, put: BytesFn) -> u32,
-}
-
-/// An output of a part application, taking bytes as the module commits them.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct PartOutC {
-    pub ctx: *mut c_void,
-    pub push: unsafe extern "C" fn(ctx: *mut c_void, ptr: *const u8, len: usize) -> u32,
-}
+// (an input of a part application, pulled as the module requests it so it is not held whole, and
+// an output, taking bytes as the module commits them: aqr-api's, as the native blobs have them)
+pub use aqr_api::dll::{PartIn as PartInC, PartOut as PartOutC};
 
 struct FfiIn(PartInC);
 

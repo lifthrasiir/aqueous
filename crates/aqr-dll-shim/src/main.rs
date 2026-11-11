@@ -223,6 +223,45 @@ impl Lib {
             _ => Err(format!("{}: {}", self.name(), String::from_utf8_lossy(&error[..error_len]))),
         }
     }
+
+    /// [`Lib::apply`] of a part module streamed (`aqr_dll_apply_part`): its inputs pulled from
+    /// cursors, its outputs pushed to buffers; `None` for a whole module.
+    fn apply_part(
+        &self,
+        params: &[u8],
+        resources: &[&[u8]],
+        inputs: &[&[u8]],
+        sizes: &[u64],
+    ) -> Option<Result<Vec<Vec<u8>>>> {
+        let apply_part = self.info.apply_part?;
+        let res: Vec<Slice> = resources.iter().map(|r| Slice::of(r)).collect();
+        let ins: Vec<In> = inputs.iter().map(|i| In { data: i.to_vec(), cursor: Default::default() }).collect();
+        let outs: Vec<std::cell::RefCell<Vec<u8>>> = sizes.iter().map(|_| Default::default()).collect();
+        let in_c: Vec<PartInC> =
+            ins.iter().map(|i| PartInC { ctx: i as *const In as Ptr, len: i.data.len() as u64, pull }).collect();
+        let out_c: Vec<PartOutC> = outs.iter().map(|o| PartOutC { ctx: o as *const _ as Ptr, push }).collect();
+        let mut error = [0u8; 1024];
+        let mut error_len = 0;
+        // SAFETY: the inputs and outputs live across the call, their callbacks driven from here
+        let r = unsafe {
+            apply_part(
+                Slice::of(params),
+                res.as_ptr(),
+                res.len(),
+                in_c.as_ptr(),
+                in_c.len(),
+                out_c.as_ptr(),
+                out_c.len(),
+                sizes.as_ptr(),
+                SliceMut::of(&mut error),
+                &mut error_len,
+            )
+        };
+        Some(match r {
+            0 => Ok(outs.into_iter().map(std::cell::RefCell::into_inner).collect()),
+            _ => Err(format!("{}: {}", self.name(), String::from_utf8_lossy(&error[..error_len]))),
+        })
+    }
 }
 
 #[cfg(windows)]
@@ -491,15 +530,32 @@ fn run(args: &[String]) -> Result<()> {
         let t = Instant::now();
         let got = lib.apply(&case.params, &res, &ins, &sizes);
         let secs = t.elapsed().as_secs_f64();
-        let verdict = match &got {
+        let judge = |got: &Result<Vec<Vec<u8>>>| match got {
             Ok(o) if *o == case.outputs => "same".to_owned(),
             Ok(_) => "DIFFERENT".to_owned(),
             Err(e) => format!("FAILED: {e}"),
         };
+        let mut verdict = judge(&got);
+        // a part module streamed too (`aqr_dll_apply_part`): the same, or what is wrong with it
+        let t = Instant::now();
+        let streamed = lib.apply_part(&case.params, &res, &ins, &sizes);
+        let streamed_secs = t.elapsed().as_secs_f64();
+        if let Some(s) = &streamed
+            && verdict == "same"
+        {
+            verdict = match judge(s) {
+                v if v == "same" => v,
+                v => format!("streamed {v}"),
+            };
+        }
+        let streamed = match streamed {
+            Some(_) => format!(", streamed {streamed_secs:.3} s"),
+            None => String::new(),
+        };
         bad += (verdict != "same") as usize;
         let total: usize = case.inputs.iter().map(Vec::len).sum();
         let native = case.native.map_or(String::new(), |n| format!(", native {n:.3} s"));
-        println!("{}: {name}, {total} bytes in, library {secs:.3} s{native}: {verdict}", dir.display());
+        println!("{}: {name}, {total} bytes in, library {secs:.3} s{native}{streamed}: {verdict}", dir.display());
         total_dll += secs;
         total_native += case.native.unwrap_or(0.0);
     }
@@ -557,20 +613,9 @@ fn apply(args: &[String]) -> Result<()> {
 type Ptr = *mut core::ffi::c_void;
 type PutFn = unsafe extern "C" fn(Ptr, *const u8, usize);
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct PartInC {
-    ctx: Ptr,
-    len: u64,
-    pull: unsafe extern "C" fn(Ptr, u64, Ptr, PutFn) -> u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct PartOutC {
-    ctx: Ptr,
-    push: unsafe extern "C" fn(Ptr, *const u8, usize) -> u32,
-}
+// (the callbacks of a part application, as aqr-api gives them: the interpreter's and the
+// libraries')
+use aqr_api::dll::{PartIn as PartInC, PartOut as PartOutC};
 
 #[allow(clippy::type_complexity)]
 struct Interp {

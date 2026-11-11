@@ -16,23 +16,9 @@ use aqr_formula::aqr::{Decoded, Failure, Loaded, PartIn, PartOut, Runner};
 pub use native::native_name;
 use native::{Native, NativeLoaded};
 
-/// An input of a part application, as the interpreter pulls it.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct PartInC {
-    ctx: *mut c_void,
-    len: u64,
-    pull:
-        unsafe extern "C" fn(*mut c_void, u64, *mut c_void, unsafe extern "C" fn(*mut c_void, *const u8, usize)) -> u32,
-}
-
-/// An output of a part application, as the interpreter commits it.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct PartOutC {
-    ctx: *mut c_void,
-    push: unsafe extern "C" fn(*mut c_void, *const u8, usize) -> u32,
-}
+// (an input of a part application as the blob pulls it, an output as it commits it: the same
+// for the interpreter blob and the native ones)
+use aqr_api::dll::{PartIn as PartInC, PartOut as PartOutC};
 
 /// The interpreter blob's entry points ([`aqr_interp::Vtable`]).
 #[repr(C)]
@@ -105,7 +91,7 @@ impl Runner for Sfx {
         if let Some(hash) = native::stand_in_hash(wasm) {
             let n = self.natives.iter().find(|n| n.hash == hash);
             let n = n.ok_or_else(|| Failure::Resource("a native module blob not merged".into()))?;
-            return Ok(Box::new(NativeLoaded { apply: n.apply }));
+            return Ok(Box::new(NativeLoaded { apply: n.apply, apply_part: n.apply_part }));
         }
         let vtable = self.interp.ok_or_else(|| {
             Failure::Resource("a module with no native blob merged, and no interpreter blob either".into())
@@ -205,12 +191,7 @@ impl Loaded for Loaded_ {
         task_limits: &[u64],
     ) -> Decoded<()> {
         let res: Vec<Slice> = resources.iter().map(|r| Slice::of(r)).collect();
-        let in_c: Vec<PartInC> = inputs
-            .iter_mut()
-            .map(|pi| PartInC { len: pi.len(), ctx: pi as *mut &mut dyn PartIn as *mut c_void, pull })
-            .collect();
-        let out_c: Vec<PartOutC> =
-            outputs.iter_mut().map(|po| PartOutC { ctx: po as *mut &mut dyn PartOut as *mut c_void, push }).collect();
+        let (in_c, out_c) = part_c(inputs, outputs);
         let mut error = [0u8; 1024];
         let mut len = 0;
         // SAFETY: the inputs and outputs live across the call, their callbacks driven from here
@@ -240,7 +221,23 @@ impl Loaded for Loaded_ {
     }
 }
 
-/// The interpreter pulls input `ctx` (a `&mut dyn PartIn`) up to `hi`, its bytes given to `put`.
+/// The decoder's inputs and outputs of a part application as a blob's C callbacks drive them
+/// ([`pull`], [`push`]): each callback's context is the item's place in `inputs` or `outputs`,
+/// which must stay where it is across the application.
+pub(crate) fn part_c(
+    inputs: &mut [&mut dyn PartIn],
+    outputs: &mut [&mut dyn PartOut],
+) -> (Vec<PartInC>, Vec<PartOutC>) {
+    let ins = inputs
+        .iter_mut()
+        .map(|pi| PartInC { len: pi.len(), ctx: pi as *mut &mut dyn PartIn as *mut c_void, pull })
+        .collect();
+    let outs =
+        outputs.iter_mut().map(|po| PartOutC { ctx: po as *mut &mut dyn PartOut as *mut c_void, push }).collect();
+    (ins, outs)
+}
+
+/// A blob pulls input `ctx` (a `&mut dyn PartIn`) up to `hi`, its bytes given to `put`.
 unsafe extern "C" fn pull(
     ctx: *mut c_void,
     hi: u64,
@@ -255,7 +252,7 @@ unsafe extern "C" fn pull(
     }
 }
 
-/// The interpreter commits `len` bytes of output `ctx` (a `&mut dyn PartOut`).
+/// A blob commits `len` bytes of output `ctx` (a `&mut dyn PartOut`).
 unsafe extern "C" fn push(ctx: *mut c_void, ptr: *const u8, len: usize) -> u32 {
     let po = unsafe { &mut *(ctx as *mut &mut dyn PartOut) };
     match po.push(unsafe { std::slice::from_raw_parts(ptr, len) }) {
@@ -310,8 +307,8 @@ impl Sfx {
         // name_off: 6 u32), then the names (each its length, u32, and its bytes)
         for k in 0..u32_at(table, 0).unwrap_or(0) as usize {
             let field = |i: usize| u32_at(table, 4 + k * 24 + i * 4).unwrap_or(0);
-            let (apply_rva, pdata_rva, pdata_count, mod_base, name_at) =
-                (field(0), field(2), field(3), field(4), field(5) as usize);
+            let (apply_rva, info_rva, pdata_rva, pdata_count, mod_base, name_at) =
+                (field(0), field(1), field(2), field(3), field(4), field(5) as usize);
             let Some(n) = u32_at(table, name_at) else { continue };
             let Some(name) = table.get(name_at + 4..name_at + 4 + n as usize) else { continue };
             if pdata_count > 0 {
@@ -328,10 +325,17 @@ impl Sfx {
                 // SAFETY: the merge wrote the RVA of aqr_interp_vtable, which returns the static vtable
                 let vtable_fn: extern "C" fn() -> *const Vtable = unsafe { std::mem::transmute(at) };
                 sfx.interp = Some(unsafe { &*vtable_fn() });
-            } else if let Some((hash, slots)) = native::parse_native_name(name) {
-                // SAFETY: the merge wrote the RVA of the blob's aqr_dll_apply
+            } else if let Some((hash, slots)) = native::parse_native_name(name)
+                && info_rva != 0
+            {
+                // SAFETY: the merge wrote the RVAs of the blob's aqr_dll_apply and aqr_dll_info
                 let apply: aqr_api::dll::ApplyFn = unsafe { std::mem::transmute(at) };
-                sfx.natives.push(Native { hash, slots, apply });
+                let info: aqr_api::dll::InfoFn = unsafe { std::mem::transmute(base + info_rva as usize) };
+                // (a blob of another version of the interface left out: its info is not this)
+                let info = unsafe { info() };
+                if info.version == aqr_api::dll::VERSION {
+                    sfx.natives.push(Native { hash, slots, apply, apply_part: info.apply_part });
+                }
             }
         }
         sfx
