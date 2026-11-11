@@ -68,7 +68,11 @@ The module `lzx-recons` (natively and as a Wasm module of aqr-modules), WIM file
 WOF's LZX files in disk images (aqr-disk) and CAB and CHM files (aqr-mszip) are done. The module
 is a part module (version 3): a CAB stream's data is read frame by frame and only the window and
 the block being coded are held, so its memory does not grow with the stream (a 568 MB CAB of an
-MSI, 3 GB of data, took 8.9 GiB as a whole module).
+MSI, 3 GB of data, took 8.9 GiB as a whole module). Splitting is streamed alike
+(`recons::split_stream_to`): the stream is read twice, a block at a time (the record starts with
+the capacities, the most of any block), the data put onto a sink as it is decoded, so that neither
+the data nor the parse of a stream is held but the window and the blocks being coded (the
+tokens of a 3 GB stream took 8 bytes each).
 
 Not yet: speed (a large CAB folder is one stream on one thread, which keeps LZX CABs to level
 9); LZX DELTA (MS-PATCH's reference data); LZMS and XPRESS (ESD files, WIMs of other

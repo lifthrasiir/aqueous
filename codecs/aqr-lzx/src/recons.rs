@@ -560,6 +560,62 @@ pub enum Data<'a> {
     /// A CAB stream's, `n` bytes pulled in frames as the blocks need them: only the window and
     /// the block being coded are held.
     Pulled(&'a mut dyn Pull, usize),
+    /// A CAB stream's data as the stream codes it (e8 translated), `n` bytes pulled as `Pulled`
+    /// are, and the file's (the translation undone) put onto the sink as it is read.
+    Raw(&'a mut dyn Pull, usize, &'a mut dyn Put),
+}
+
+/// A block of a parse to be coded: the block, its tokens and the frames' padding it ends.
+pub struct WantBlock {
+    pub block: Block,
+    pub toks: Vec<Tok>,
+    pub pads: Vec<u16>,
+}
+
+/// The parse a walker codes, a block at a time.
+pub trait Want {
+    /// (CAB's) The e8 translation's size.
+    fn e8(&self) -> Option<u32>;
+    /// The next block, or None after the last.
+    fn next(&mut self) -> Result<Option<WantBlock>>;
+    /// After the last block: the bits padding the last word, and the bytes after it.
+    fn tail(&mut self) -> Result<(u16, Vec<u8>)>;
+}
+
+/// What a walker does with a chunk or stream: decodes it, codes a chunk stored, or codes a parse.
+pub enum Wanted<'a> {
+    Decode,
+    Stored,
+    Parse(&'a mut dyn Want),
+}
+
+/// A chunk's [`Parse`] as a [`Want`] (no frames: WIM's).
+struct ParseWant<'a> {
+    parse: &'a Parse,
+    nb: usize,
+    t: usize,
+}
+
+impl Want for ParseWant<'_> {
+    fn e8(&self) -> Option<u32> {
+        self.parse.e8
+    }
+
+    fn next(&mut self) -> Result<Option<WantBlock>> {
+        let Some(b) = self.parse.blocks.get(self.nb) else { return Ok(None) };
+        let toks = self.parse.toks.get(self.t..self.t + b.toks).ok_or_else(corrupt)?.to_vec();
+        self.nb += 1;
+        self.t += b.toks;
+        Ok(Some(WantBlock { block: b.clone(), toks, pads: Vec::new() }))
+    }
+
+    fn tail(&mut self) -> Result<(u16, Vec<u8>)> {
+        let p = self.parse;
+        if self.t != p.toks.len() || !p.frame_pad.is_empty() {
+            return Err(Error("a parse the record does not give back"));
+        }
+        Ok((p.tail_bits, p.trailing.clone()))
+    }
 }
 
 /// Where a decoded chunk or stream goes.
@@ -589,6 +645,9 @@ const LOOK: usize = 8;
 /// bytes as frames hold, e8 translated as they are read.
 struct Feed<'a> {
     src: Option<&'a mut dyn Pull>,
+    /// Where the file's data goes where the data pulled is the stream's (translated already).
+    tap: Option<&'a mut dyn Put>,
+    frame: Vec<u8>,
     base: usize,
     total: usize,
     e8: Option<u32>,
@@ -652,8 +711,24 @@ impl Feed<'_> {
                     k => got += k,
                 }
             }
-            if let Some(size) = self.e8 {
-                lzx::e8_encode_frame(&mut d[from..], at, size);
+            match self.tap.as_deref_mut() {
+                Some(tap) => {
+                    let mut put = |b: &[u8]| tap.put(b).ok_or(Error("output of another length"));
+                    match self.e8 {
+                        Some(size) => {
+                            self.frame.clear();
+                            self.frame.extend_from_slice(&d[from..]);
+                            lzx::e8_decode_frame(&mut self.frame, at, size);
+                            put(&self.frame)?;
+                        }
+                        None => put(&d[from..])?,
+                    }
+                }
+                None => {
+                    if let Some(size) = self.e8 {
+                        lzx::e8_encode_frame(&mut d[from..], at, size);
+                    }
+                }
             }
         }
         Ok(())
@@ -700,22 +775,17 @@ impl Walker {
 impl Walker {
     /// One chunk (or CAB stream) of data `raw` (as the file holds it): its parse coded or
     /// decoded, the chunk written onto `out` a block at a time when decoding.
-    fn chunk(
-        &mut self,
-        side: &mut impl Side,
-        data: Data<'_>,
-        want: Option<&Option<Parse>>,
-        out: Option<Out<'_>>,
-    ) -> Result<()> {
+    fn chunk(&mut self, side: &mut impl Side, data: Data<'_>, want: Wanted<'_>, out: Option<Out<'_>>) -> Result<()> {
         let cab = self.v.cab;
         let mut out = out;
-        let (raw, mut src, total) = match data {
-            Data::Whole(raw) => (raw, None, raw.len()),
-            Data::Pulled(src, n) if cab && want.is_none() => (&[][..], Some(src), n),
-            Data::Pulled(..) => return Err(Error("a pulled stream of chunks, or coded")),
+        let (raw, mut src, mut tap, total) = match data {
+            Data::Whole(raw) => (raw, None, None, raw.len()),
+            Data::Pulled(src, n) if cab => (&[][..], Some(src), None, n),
+            Data::Raw(src, n, tap) if cab => (&[][..], Some(src), Some(tap), n),
+            _ => return Err(Error("a pulled stream of chunks")),
         };
         if !cab {
-            let stored = side.bit(&mut self.ctx.stored, matches!(want, Some(None)), Cat::Rest);
+            let stored = side.bit(&mut self.ctx.stored, matches!(want, Wanted::Stored), Cat::Rest);
             if stored {
                 if let Some(out) = out.as_mut() {
                     out.put(raw)?;
@@ -723,12 +793,16 @@ impl Walker {
                 return Ok(());
             }
         }
-        let want = want.map(|w| w.as_ref().ok_or(Error("a stream stored"))).transpose()?;
+        let mut want = match want {
+            Wanted::Parse(w) => Some(w),
+            Wanted::Decode => None,
+            Wanted::Stored => return Err(Error("a stream stored")),
+        };
         let same = Error("a parse the record does not give back");
         // the header (CAB's): the e8 translation's size
         let mut e8 = None;
         if cab {
-            let we = want.and_then(|w| w.e8);
+            let we = want.as_ref().and_then(|w| w.e8());
             if side.bit(&mut self.ctx.zero[5], we.is_some(), Cat::Rest) {
                 let v = we.unwrap_or(0);
                 e8 = Some(side.raw(16, v >> 16, Cat::Rest) << 16 | side.raw(16, v & 0xffff, Cat::Rest));
@@ -739,6 +813,8 @@ impl Walker {
         let mut feed = Feed {
             cap: held(self.v, self.caps.block, total) as usize,
             src: src.take(),
+            tap: tap.take(),
+            frame: Vec::new(),
             base: 0,
             total,
             e8,
@@ -780,10 +856,14 @@ impl Walker {
             self.wr.head(w, e8).ok_or_else(corrupt)?;
         }
         let (mut at, mut prev_kind, mut last_size) = (0, 0, lzx::FRAME);
-        // (how far the parse given is gone through: tokens, frames' padding, blocks)
-        let (mut t, mut fp, mut nb) = (0, 0, 0);
+        // (the code lengths the parse given ends the blocks with)
+        let mut wlens = lzx::Lens::new(self.v);
         while at < feed.n() {
-            let wb = want.map(|w| w.blocks.get(nb).ok_or_else(corrupt)).transpose()?;
+            let cur = match want.as_mut() {
+                Some(w) => Some(w.next()?.ok_or_else(corrupt)?),
+                None => None,
+            };
+            let wb = cur.as_ref().map(|c| &c.block);
             let mut b = Block::default();
             // the type
             let k = wb.map_or(0, |b| b.kind as usize - 1);
@@ -874,7 +954,8 @@ impl Walker {
                 }
             } else {
                 // the tokens
-                let wt = want.map(|w| (&w.toks[..], &w.frame_pad[..]));
+                let wt = cur.as_ref().map(|c| (&c.toks[..], &c.pads[..]));
+                let (mut t, mut fp) = (0, 0);
                 self.tokens(side, &d, feed.n(), at, end, &mut reps, wt, &mut t, &mut fp)?;
                 b.toks = self.toks.len();
                 // the trees, against the code of the block's frequencies
@@ -916,8 +997,11 @@ impl Walker {
                 huffman(&fm[..main], 16, &mut pm[..main]);
                 huffman(&fl, 16, &mut pl);
                 // (the lengths the block ends with, of the parse given)
-                let (wm, wl) = match want {
-                    Some(w) => want_lens(w, nb, self.v),
+                let (wm, wl) = match wb {
+                    Some(wb) => {
+                        wlens.apply(wb).ok_or_else(corrupt)?;
+                        (wlens.main.clone(), wlens.len)
+                    }
                     None => (Vec::new(), [0; LEN]),
                 };
                 let mut target_m = vec![0u8; main];
@@ -944,44 +1028,39 @@ impl Walker {
                     return Err(corrupt());
                 }
             }
-            if let Some(pw) = want {
-                let (n, p) = (self.toks.len(), self.pads.len());
-                let block = *wb.expect("a block given") == b;
-                if !block
-                    || pw.toks.get(t - n..t) != Some(&self.toks[..])
-                    || pw.frame_pad.get(fp - p..fp) != Some(&self.pads[..])
-                {
+            if let Some(c) = &cur {
+                // (the pads of an uncompressed block: none, as the walker finds)
+                if c.block != b || c.toks != self.toks || c.pads != self.pads {
                     return Err(same);
                 }
             }
-            nb += 1;
         }
         self.lens = lens;
         // the last word's padding, and bytes after it
-        let wt = want.map_or(0, |w| w.tail_bits as u32);
+        let (wtail, wtrailing) = match want.as_mut() {
+            Some(w) => w.tail()?,
+            None => (0, Vec::new()),
+        };
+        let wt = wtail as u32;
         let tail_bits =
             if side.bit(&mut self.ctx.zero[4], wt != 0, Cat::Rest) { side.raw(16, wt, Cat::Rest) as u16 } else { 0 };
         if let Some(w) = w.as_mut() {
             self.wr.tail(w, tail_bits).ok_or_else(corrupt)?;
         }
-        let wn = want.map_or(0, |w| w.trailing.len() as u32);
+        let wn = wtrailing.len() as u32;
         let n = side.gamma(&mut self.ctx.gamma, wn, Cat::Rest)? as usize;
         if n > CHUNK {
             return Err(corrupt());
         }
         for i in 0..n {
-            let v = want.map_or(0, |w| w.trailing[i] as u32);
+            let v = wtrailing.get(i).map_or(0, |&b| b as u32);
             let byte = side.raw(8, v, Cat::Rest) as u8;
             if let Some(w) = w.as_mut() {
                 w.out.push(byte);
             }
         }
-        if let Some(pw) = want
-            && (pw.e8 != e8
-                || nb != pw.blocks.len()
-                || t != pw.toks.len()
-                || fp != pw.frame_pad.len()
-                || pw.tail_bits != tail_bits)
+        if let Some(w) = want.as_mut()
+            && (w.e8() != e8 || w.next()?.is_some() || wtail != tail_bits)
         {
             return Err(same);
         }
@@ -1299,18 +1378,6 @@ fn self_len(side: &mut impl Side, c: &mut Ctx, kind: usize, pred: usize, want: u
     Ok(len)
 }
 
-/// The code lengths block `b` of `parse` (of `v`) ends with: the main tree's and the length
-/// tree's.
-fn want_lens(parse: &Parse, b: usize, v: Variant) -> (Vec<u8>, [u8; LEN]) {
-    let mut l = lzx::Lens::new(v);
-    for blk in &parse.blocks[..=b] {
-        if blk.kind != UNCOMPRESSED {
-            l.apply(blk).expect("trees read");
-        }
-    }
-    (l.main, l.len)
-}
-
 /// The data and record of a stream of chunks, each its bytes and its data's length (a chunk of
 /// as many bytes as its data is stored).
 pub struct Split {
@@ -1355,7 +1422,13 @@ fn walk(enc: &mut impl Side, data: &[u8], parses: &[Option<Parse>]) -> Result<()
     let mut w = Walker::parked(lzx::WIM, None);
     let done = (|| {
         for (raw, p) in data.chunks(CHUNK).zip(parses) {
-            w.chunk(enc, Data::Whole(raw), Some(p), None)?;
+            match p {
+                Some(parse) => {
+                    let mut want = ParseWant { parse, nb: 0, t: 0 };
+                    w.chunk(enc, Data::Whole(raw), Wanted::Parse(&mut want), None)?
+                }
+                None => w.chunk(enc, Data::Whole(raw), Wanted::Stored, None)?,
+            }
         }
         Ok(())
     })();
@@ -1505,7 +1578,7 @@ pub fn join_stream(
     let mut w = Walker::new(spare, v, Some(caps));
     let done = (|| {
         if v.cab {
-            w.chunk(&mut dec, Data::Pulled(data, n), None, Some(Out::Put(sink)))?;
+            w.chunk(&mut dec, Data::Pulled(data, n), Wanted::Decode, Some(Out::Put(sink)))?;
         } else {
             let mut raw = Vec::with_capacity(CHUNK.min(n));
             let mut left = n;
@@ -1519,7 +1592,7 @@ pub fn join_stream(
                     }
                 }
                 left -= raw.len();
-                w.chunk(&mut dec, Data::Whole(&raw), None, Some(Out::Put(&mut *sink)))?;
+                w.chunk(&mut dec, Data::Whole(&raw), Wanted::Decode, Some(Out::Put(&mut *sink)))?;
             }
         }
         dec.finish().ok_or_else(corrupt)
@@ -1530,17 +1603,144 @@ pub fn join_stream(
 /// The data and record of stream `src` of `v` (CAB's) of `n` bytes of data. None where it does
 /// not read whole.
 pub fn split_stream(src: &[u8], n: usize, v: Variant) -> Result<Split> {
-    let (mut data, parse) = lzx::read_as(src, n, v).ok_or(Error("a stream not read"))?;
-    if let Some(size) = parse.e8 {
-        lzx::e8_decode_frames(&mut data, size);
-    }
+    let mut data = Vec::with_capacity(n);
+    let (record, cost) = split_stream_to(src, n, v, &mut data)?;
+    Ok(Split { data, record, cost })
+}
+
+/// [`split_stream`] with the data put in order onto `sink` (the file's, the e8 translation undone)
+/// and the record and its cost given: the stream is read twice (the record starts with its
+/// capacities, the most of any block), a block at a time, and never held, its data nor its parse,
+/// but the window and the blocks being coded.
+pub fn split_stream_to(src: &[u8], n: usize, v: Variant, sink: &mut dyn Put) -> Result<(Vec<u8>, [f64; CATS])> {
+    let caps = stream_caps(src, n, v)?;
+    let rd = lzx::StreamReader::new(src, n, v).ok_or(Error("a stream not read"))?;
+    let shared = Shared(std::cell::RefCell::new(Encoding {
+        rd,
+        queue: Default::default(),
+        cursor: 0,
+        failed: false,
+        slack: 2 * v.window(),
+    }));
     let mut enc = Enc::with(ArithEncoder::new(Vec::new()));
-    code_caps(&mut enc, caps_of(&parse, data.len(), v))?;
-    let mut w = Walker::parked(v, None);
-    let done = w.chunk(&mut enc, Data::Whole(&data), Some(&Some(parse)), None);
+    code_caps(&mut enc, caps)?;
+    let mut w = Walker::parked(v, Some(caps));
+    let done = w.chunk(&mut enc, Data::Raw(&mut DataOf(&shared), n, sink), Wanted::Parse(&mut WantOf(&shared)), None);
     w.park();
-    done?;
-    Ok(Split { data, record: enc.c.finish(), cost: enc.cost })
+    match done {
+        Err(_) if shared.0.borrow().failed => Err(Error("a stream not read")),
+        done => done.map(|()| (enc.c.finish(), enc.cost)),
+    }
+}
+
+/// The capacities of the stream `src` of `v` of `n` bytes of data: the most of any block, read a
+/// block at a time ([`caps_of`] for a parse held whole).
+fn stream_caps(src: &[u8], n: usize, v: Variant) -> Result<Caps> {
+    let not_read = Error("a stream not read");
+    let mut rd = lzx::StreamReader::new(src, n, v).ok_or(not_read.clone())?;
+    let (mut toks, mut pads) = (Vec::new(), Vec::new());
+    let mut caps = Caps::default();
+    while !rd.done() {
+        let at = rd.decoded();
+        let b = rd.block(&mut toks, &mut pads).ok_or(not_read.clone())?;
+        caps.block = caps.block.max(rd.decoded() - at);
+        if b.kind != UNCOMPRESSED {
+            caps.toks = caps.toks.max(b.toks);
+            caps.pads = caps.pads.max(pads.len());
+        }
+        rd.drop_before(rd.decoded());
+    }
+    rd.finish().ok_or(not_read)?;
+    Ok(caps)
+}
+
+/// A stream read for coding: its blocks queued as they are read, and the data it decodes to
+/// (as the stream codes it, e8 translated), pulled in order.
+struct Encoding<'a> {
+    rd: lzx::StreamReader<'a>,
+    queue: std::collections::VecDeque<WantBlock>,
+    /// The next byte of the data to give.
+    cursor: usize,
+    failed: bool,
+    /// Bytes behind the cursor that are dropped when there are this many (twice the window).
+    slack: usize,
+}
+
+impl Encoding<'_> {
+    /// Reads one more block into the queue; whether there was one.
+    fn more(&mut self) -> bool {
+        if self.rd.done() {
+            return false;
+        }
+        // (what is before the cursor is not asked for again; the reach of the matches is kept)
+        let (base, held) = (self.rd.window().0, self.rd.window().1.len());
+        if self.cursor - base >= self.slack && (self.cursor - base) * 2 >= held {
+            self.rd.drop_before(self.cursor);
+        }
+        let (mut toks, mut pads) = (Vec::new(), Vec::new());
+        match self.rd.block(&mut toks, &mut pads) {
+            Some(block) => {
+                self.queue.push_back(WantBlock { block, toks, pads });
+                true
+            }
+            None => {
+                self.failed = true;
+                false
+            }
+        }
+    }
+}
+
+/// What the data pulled and the blocks wanted share: the reader.
+struct Shared<'a>(std::cell::RefCell<Encoding<'a>>);
+
+/// The data of a [`Shared`] stream, pulled.
+struct DataOf<'s, 'a>(&'s Shared<'a>);
+
+impl Pull for DataOf<'_, '_> {
+    fn pull(&mut self, buf: &mut [u8]) -> usize {
+        let mut e = self.0.0.borrow_mut();
+        while e.cursor >= e.rd.decoded() {
+            if !e.more() {
+                return 0;
+            }
+        }
+        let k = buf.len().min(e.rd.decoded() - e.cursor);
+        let (base, window) = e.rd.window();
+        buf[..k].copy_from_slice(&window[e.cursor - base..][..k]);
+        e.cursor += k;
+        k
+    }
+}
+
+/// The blocks of a [`Shared`] stream, wanted.
+struct WantOf<'s, 'a>(&'s Shared<'a>);
+
+impl Want for WantOf<'_, '_> {
+    fn e8(&self) -> Option<u32> {
+        self.0.0.borrow().rd.e8
+    }
+
+    fn next(&mut self) -> Result<Option<WantBlock>> {
+        let mut e = self.0.0.borrow_mut();
+        loop {
+            if let Some(b) = e.queue.pop_front() {
+                return Ok(Some(b));
+            }
+            if !e.more() {
+                return if e.failed { Err(Error("a stream not read")) } else { Ok(None) };
+            }
+        }
+    }
+
+    fn tail(&mut self) -> Result<(u16, Vec<u8>)> {
+        let mut e = self.0.0.borrow_mut();
+        while e.more() {}
+        match e.failed {
+            true => Err(Error("a stream not read")),
+            false => e.rd.finish().ok_or(Error("a stream not read")),
+        }
+    }
 }
 
 /// The stream of `v` that `data` and `record` rebuild, onto `out`.

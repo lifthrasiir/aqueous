@@ -507,19 +507,102 @@ pub fn frame_ends(src: &[u8], n: usize, v: Variant) -> Option<Vec<usize>> {
 }
 
 fn read_impl(src: &[u8], n: usize, v: Variant, ends: &mut Vec<usize>) -> Option<(Vec<u8>, Parse)> {
-    let mut r = BitR::new(src, 0);
-    let mut data = Vec::with_capacity(n);
-    let mut parse = Parse::default();
-    let mut lens = Lens::new(v);
-    let mut reps = REPS;
-    let mut end_bits = 0;
-    // (the end of the frame, where the stream is aligned in a block of tokens)
-    let mut frame_end = if v.cab { FRAME.min(n) } else { usize::MAX };
-    if v.cab && r.bits(1) == 1 {
-        let hi = r.bits(16);
-        parse.e8 = Some(hi << 16 | r.bits(16));
+    let mut rd = StreamReader::new(src, n, v)?;
+    rd.ends = Some(Vec::new());
+    let mut parse = Parse { e8: rd.e8, ..Parse::default() };
+    let (mut toks, mut pads) = (Vec::new(), Vec::new());
+    while !rd.done() {
+        let b = rd.block(&mut toks, &mut pads)?;
+        parse.toks.extend_from_slice(&toks);
+        parse.frame_pad.extend_from_slice(&pads);
+        parse.blocks.push(b);
     }
-    while data.len() < n {
+    let (tail_bits, trailing) = rd.finish()?;
+    (parse.tail_bits, parse.trailing) = (tail_bits, trailing);
+    *ends = rd.ends.take().unwrap_or_default();
+    Some((rd.data, parse))
+}
+
+/// A stream (or chunk) read block by block: each block's [`Block`], tokens and frames' padding as
+/// [`read_as`] gives them, and the data it decodes to (as translated by e8) in a window that the
+/// caller slides on ([`StreamReader::drop_before`]), so that a long stream is never held whole.
+pub struct StreamReader<'a> {
+    src: &'a [u8],
+    n: usize,
+    v: Variant,
+    r: BitR<'a>,
+    lens: Lens,
+    reps: [u32; 3],
+    end_bits: usize,
+    /// Where the frame ends, where the stream is aligned in a block of tokens.
+    frame_end: usize,
+    /// The data from `base` of the stream on.
+    data: Vec<u8>,
+    base: usize,
+    /// (CAB's) The e8 translation's size.
+    pub e8: Option<u32>,
+    /// Where each frame but the last ends in the stream, if wanted.
+    pub ends: Option<Vec<usize>>,
+}
+
+impl<'a> StreamReader<'a> {
+    /// Starts reading stream `src` of `v` of `n` bytes of data; None where its header does not read.
+    pub fn new(src: &'a [u8], n: usize, v: Variant) -> Option<StreamReader<'a>> {
+        let mut r = BitR::new(src, 0);
+        let mut e8 = None;
+        if v.cab && r.bits(1) == 1 {
+            let hi = r.bits(16);
+            e8 = Some(hi << 16 | r.bits(16));
+        }
+        Some(StreamReader {
+            src,
+            n,
+            v,
+            r,
+            lens: Lens::new(v),
+            reps: REPS,
+            end_bits: 0,
+            frame_end: if v.cab { FRAME.min(n) } else { usize::MAX },
+            data: Vec::with_capacity(if v.cab { 0 } else { n }),
+            base: 0,
+            e8,
+            ends: None,
+        })
+    }
+
+    /// Whether all of the data is decoded.
+    pub fn done(&self) -> bool {
+        self.decoded() >= self.n
+    }
+
+    /// Bytes of the data decoded so far.
+    pub fn decoded(&self) -> usize {
+        self.base + self.data.len()
+    }
+
+    /// The data held, and where in the stream it starts.
+    pub fn window(&self) -> (usize, &[u8]) {
+        (self.base, &self.data)
+    }
+
+    /// Drops the data before `at` of the stream (but the reach of the matches to come, which is
+    /// kept before what is decoded).
+    pub fn drop_before(&mut self, at: usize) {
+        let at = at.min(self.decoded().saturating_sub(self.v.max_off()));
+        if at > self.base {
+            self.data.drain(..at - self.base);
+            self.base = at;
+        }
+    }
+
+    /// Reads the next block: its tokens and the frames' padding it ends are put in `toks` and
+    /// `pads` (emptied first), its data appended to the window. None where it does not read.
+    pub fn block(&mut self, toks: &mut Vec<Tok>, pads: &mut Vec<u16>) -> Option<Block> {
+        toks.clear();
+        pads.clear();
+        let (v, n, src) = (self.v, self.n, self.src);
+        let mut r = std::mem::replace(&mut self.r, BitR::new(src, 0));
+        let at = self.decoded();
         let mut b = Block { kind: r.bits(3) as u8, ..Block::default() };
         if v.cab {
             let hi = r.bits(16) as usize;
@@ -532,23 +615,22 @@ fn read_impl(src: &[u8], n: usize, v: Variant, ends: &mut Vec<usize>) -> Option<
             return None;
         }
         // (the last block may say more than is left: the stream ends with its data)
-        let end = (data.len() + b.size).min(n);
+        let end = (at + b.size).min(n);
         match b.kind {
             VERBATIM | ALIGNED_BLOCK => {
                 if b.kind == ALIGNED_BLOCK {
                     b.aligned.iter_mut().for_each(|a| *a = r.bits(3) as u8);
                 }
                 let aligned = Huff::new(&b.aligned, b.kind == ALIGNED_BLOCK)?;
-                b.trees[0] = read_tree(&mut r, &mut lens.main[..256])?;
-                b.trees[1] = read_tree(&mut r, &mut lens.main[256..])?;
-                b.trees[2] = read_tree(&mut r, &mut lens.len)?;
-                let (main, len_tree) = (Huff::new(&lens.main, true)?, Huff::new(&lens.len, true)?);
-                let first = parse.toks.len();
-                while data.len() < end {
+                b.trees[0] = read_tree(&mut r, &mut self.lens.main[..256])?;
+                b.trees[1] = read_tree(&mut r, &mut self.lens.main[256..])?;
+                b.trees[2] = read_tree(&mut r, &mut self.lens.len)?;
+                let (main, len_tree) = (Huff::new(&self.lens.main, true)?, Huff::new(&self.lens.len, true)?);
+                while self.decoded() < end {
                     let s = main.decode(&mut r)?;
                     if s < 256 {
-                        data.push(s as u8);
-                        parse.toks.push(Tok::Lit);
+                        self.data.push(s as u8);
+                        toks.push(Tok::Lit);
                     } else {
                         let (header, slot) = ((s - 256) & 7, (s - 256) >> 3);
                         let mut len = header + MIN_MATCH;
@@ -557,8 +639,8 @@ fn read_impl(src: &[u8], n: usize, v: Variant, ends: &mut Vec<usize>) -> Option<
                         }
                         let (off, rep) = match slot {
                             0..3 => {
-                                reps.swap(0, slot);
-                                (reps[0], Some(slot as u8))
+                                self.reps.swap(0, slot);
+                                (self.reps[0], Some(slot as u8))
                             }
                             _ => {
                                 let e = EXTRA[slot] as u32;
@@ -567,31 +649,35 @@ fn read_impl(src: &[u8], n: usize, v: Variant, ends: &mut Vec<usize>) -> Option<
                                 } else {
                                     BASE[slot] + r.bits(e)
                                 };
-                                reps = [f - 2, reps[0], reps[1]];
+                                self.reps = [f - 2, self.reps[0], self.reps[1]];
                                 (f - 2, None)
                             }
                         };
-                        let at = data.len();
+                        let at = self.decoded();
                         if off == 0 || off as usize > at.min(v.max_off()) || at + len > end {
                             return None;
                         }
-                        for i in at..at + len {
-                            data.push(data[i - off as usize]);
+                        // (the window holds the reach of the matches: the caller keeps it)
+                        let from = self.data.len().checked_sub(off as usize)?;
+                        for i in from..from + len {
+                            self.data.push(self.data[i]);
                         }
-                        parse.toks.push(Tok::Match { len: len as u16, off, rep });
+                        toks.push(Tok::Match { len: len as u16, off, rep });
                     }
-                    if data.len() >= frame_end && frame_end < n {
+                    if self.decoded() >= self.frame_end && self.frame_end < n {
                         let k = (16 - r.pos() % 16) % 16;
-                        parse.frame_pad.push(r.bits(k as u32) as u16);
-                        ends.push(r.pos() / 8);
-                        frame_end = (frame_end + FRAME).min(n);
+                        pads.push(r.bits(k as u32) as u16);
+                        if let Some(ends) = self.ends.as_mut() {
+                            ends.push(r.pos() / 8);
+                        }
+                        self.frame_end = (self.frame_end + FRAME).min(n);
                     }
                 }
-                b.toks = parse.toks.len() - first;
+                b.toks = toks.len();
                 if r.past() {
                     return None;
                 }
-                end_bits = r.pos();
+                self.end_bits = r.pos();
             }
             UNCOMPRESSED => {
                 let pad = match r.pos() % 16 {
@@ -608,36 +694,42 @@ fn read_impl(src: &[u8], n: usize, v: Variant, ends: &mut Vec<usize>) -> Option<
                 if v.cab && b.reps.iter().any(|&r| r == 0 || r as usize > v.max_off()) {
                     return None;
                 }
-                reps = b.reps;
-                let k = end - data.len();
-                let (from, at) = (q, data.len());
-                data.extend_from_slice(src.get(q..q + k)?);
+                self.reps = b.reps;
+                let k = end - at;
+                let from = q;
+                self.data.extend_from_slice(src.get(q..q + k)?);
                 q += k;
                 if b.size % 2 == 1 {
                     b.pad_byte = src.get(q).copied();
                     q += b.pad_byte.is_some() as usize;
                 }
                 r = BitR::new(src, q);
-                end_bits = q * 8;
-                while frame_end <= data.len() && frame_end < n {
-                    ends.push(from + frame_end - at);
-                    frame_end = (frame_end + FRAME).min(n);
+                self.end_bits = q * 8;
+                while self.frame_end <= self.decoded() && self.frame_end < n {
+                    if let Some(ends) = self.ends.as_mut() {
+                        ends.push(from + self.frame_end - at);
+                    }
+                    self.frame_end = (self.frame_end + FRAME).min(n);
                 }
             }
             _ => return None,
         }
-        parse.blocks.push(b);
+        self.r = r;
+        Some(b)
     }
-    // the bits padding the last word, and bytes after it
-    let k = end_bits % 16;
-    if k != 0 {
-        let mut r = BitR::new(src, end_bits / 16 * 2);
-        r.bits(k as u32);
-        parse.tail_bits = r.bits(16 - k as u32) as u16;
+
+    /// After the last block: the bits padding the last word, and the bytes after it.
+    pub fn finish(&self) -> Option<(u16, Vec<u8>)> {
+        let mut tail_bits = 0;
+        let k = self.end_bits % 16;
+        if k != 0 {
+            let mut r = BitR::new(self.src, self.end_bits / 16 * 2);
+            r.bits(k as u32);
+            tail_bits = r.bits(16 - k as u32) as u16;
+        }
+        let used = (self.end_bits.div_ceil(16) * 2).min(self.src.len());
+        Some((tail_bits, self.src.get(used..)?.to_vec()))
     }
-    let used = (end_bits.div_ceil(16) * 2).min(src.len());
-    parse.trailing = src.get(used..)?.to_vec();
-    Some((data, parse))
 }
 
 /// Writes chunk `parse` of data `data` (as translated by e8). None where the parse does not
@@ -909,6 +1001,14 @@ pub fn e8_encode_frames(d: &mut [u8], size: u32) {
 pub fn e8_encode_frame(d: &mut [u8], start: usize, size: u32) {
     if start < 1 << 30 && d.len() > 10 {
         e8_encode_at(d, start, size as i32);
+    }
+}
+
+/// Undoes the e8 translation of size `size` of the frame `d` of a CAB stream, which starts at
+/// `start` of it (a multiple of [`FRAME`]): [`e8_decode_frames`] for one frame.
+pub fn e8_decode_frame(d: &mut [u8], start: usize, size: u32) {
+    if start < 1 << 30 && d.len() > 10 {
+        e8_decode_at(d, start, size as i32);
     }
 }
 
