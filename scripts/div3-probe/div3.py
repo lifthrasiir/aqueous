@@ -148,3 +148,50 @@ if __name__ == '__main__':
             except Exception as e: print(k, len(d), 'predvar', pv, 'ERR', repr(e)[:80])
         n += 1
         if n >= 4: break
+
+# ---- P frames (work in progress) ----
+MVT = [J('p_mv_table0.json'), J('p_mv_table1.json')]
+MBI = {v: int(k) for k, v in J('p_mb_codes_v5.json').items()}     # inter code -> flags of the first MB
+MBI['01'] = 0
+
+def read_mv(b, tab):
+    s = b.peek_str(24)
+    if s.startswith(tab['esc']):
+        b.p += len(tab['esc']); mx = b.get(6); my = b.get(6); return (mx, my, 'esc')
+    for l in range(1, 22):
+        if s[:l] in tab['codes']: b.p += l; return tab['codes'][s[:l]]
+    raise ValueError('bad mv')
+
+MBA = {v: int(k) for k, v in J('p_intra_codes.json').items()}
+
+def parse_p(data, w=640, h=352, predvar=0, trace=None, no_skip_flag=False, extra=0):
+    CBP.clear(); CBP.update(MBI)
+    CBPA = dict(MBA)
+    b = Bits(data)
+    if b.get(2) != 1: raise ValueError('not P')
+    q = b.get(5); use_skip = b.get(1); rl = d012(b); dc = b.get(1); mvt = b.get(1)
+    mbw, mbh = w // 16, h // 16
+    flags = [[0] * (mbw * 2 + 2) for _ in range(mbh * 2 + 2)]
+    st = Esc3()
+    for my in range(mbh):
+        for mx in range(mbw):
+            if use_skip and b.get(1): continue
+            s = b.peek_str(24); intra = False
+            for l in range(1, 24):
+                if s[:l] in CBP: V = CBP[s[:l]]; b.p += l; break
+                if s[:l] in CBPA: V = CBPA[s[:l]]; b.p += l; intra = True; break
+            else: raise ValueError('bad mb code %s at %d,%d' % (s[:14], mx, my))
+            cb = []
+            for i in range(6):
+                bit = (V >> (5 - i)) & 1
+                cb.append(bit)
+            if intra:
+                b.get(1)                                    # ac_pred
+                for i in range(6):
+                    read_dc(b, ('luma%d' if i < 4 else 'chroma%d') % dc)
+                    if cb[i]: read_block_ac(b, L[rl] if i < 4 else C[rl], q, st)
+            else:
+                read_mv(b, MVT[mvt])
+                for i in range(6):
+                    if cb[i]: read_block_ac(b, C[rl], q, st)
+    return b.n - b.p

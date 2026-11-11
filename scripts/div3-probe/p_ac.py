@@ -35,7 +35,9 @@ def decP(pkts):
     res = DEC.frames(seq)
     return [res[2 * i + 1] for i in range(len(pkts))]
 def make_mk(rl): return lambda bits_: tob(hdr_p(rl=rl) + PREFIX + bits_ + '0' * 40)
-def flip_leaf_p(mk, p, terms, per=8, thresh=0.85):
+THRESH_P = 0.85
+def flip_leaf_p(mk, p, terms, per=8, thresh=None):
+    thresh = THRESH_P if thresh is None else thresh
     rng = random.Random(hash(p) & 0xffffffff)
     rests = [t + rnd(8, rng) for t in terms for _ in range(per)]
     K = len(rests)
@@ -48,7 +50,7 @@ def flip_leaf_p(mk, p, terms, per=8, thresh=0.85):
         if any(bo0[k] != bo1[k] for k in (0, 1, 2, 4, 5)): continue
         D = np.array(bo0[3], float) - np.array(bo1[3], float)
         s = single(D)
-        if s is not None and s[0] != (0, 0):
+        if s is not None:
             F0 = fdct(np.array(bo0[3]) - PRED); F1 = fdct(np.array(bo1[3]) - PRED); u, v = s[0]
             if abs(F0[u, v] + F1[u, v]) > 2.0 + 0.1 * abs(s[1]): continue
             got.append((s[0], round(abs(s[1]) / 2)))
@@ -75,7 +77,7 @@ def walk_p(mk, terms, maxd=17):
     return leaves, unres
 if __name__ == '__main__':
     rl = int(sys.argv[1])
-    terms = ['0011111', '0011110']
+    terms = ['01111', '01110']
     print('terms', terms)
     leaves, unres = walk_p(make_mk(rl), terms)
     print('inter rl', rl, len(leaves), 'kraft', kraft(leaves), 'unres', len(unres), flush=True)
