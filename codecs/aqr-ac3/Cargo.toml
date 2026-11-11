@@ -5,7 +5,14 @@ edition = "2024"
 description = "AC-3 (Dolby Digital) syncframes re-coded by a context model, rebuilt bit for bit"
 publish = false
 
+[features]
+default = ["encode"]
+# The formula (`formula`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula"]
+
 [dependencies]
+aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 aqr-walk = { path = "../../crates/aqr-walk" }
 
 [[example]]

@@ -351,6 +351,9 @@ fn fld<I: Io>(io: &mut I, last: &mut Ctx, id: usize, n: u32, blk0: bool) -> R<u3
     Ok(v)
 }
 
+/// Bytes of the state of a block while a frame is walked.
+pub const BLK_BYTES: usize = core::mem::size_of::<Blk>();
+
 #[derive(Clone)]
 struct Blk {
     cplinu: bool,
