@@ -2,11 +2,11 @@
 //! information, the exponents and the mantissas are coded under small contexts; the checksums are derived, not coded.
 //! The bit allocation (7.2) is run on the exponents to know how many bits each mantissa has.
 use crate::ac3_tables::*;
-use crate::bits::{BitReader, BitWriter};
-use crate::frame::FrameError;
-use crate::io::{Check, Dec, Enc, Io};
-use crate::model::Model;
-use crate::rc::Coder;
+use aqr_walk::Error as FrameError;
+use aqr_walk::bits::{BitReader, BitWriter};
+use aqr_walk::io::{Check, Dec, Enc, Io};
+use aqr_walk::model::Model;
+use aqr_walk::rc::Coder;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 

@@ -9,13 +9,7 @@ extern crate alloc;
 #[cfg(feature = "encode")]
 extern crate std;
 
-mod ac3;
-mod ac3_tables;
-mod bits;
 mod frame;
-mod io;
-mod model;
-mod rc;
 pub mod tables;
 
 #[cfg(feature = "encode")]
@@ -24,12 +18,7 @@ pub mod module;
 
 pub use frame::{Codec, FrameError, FrameKind};
 
-/// AC-3 syncframes (see `ac3`).
-pub mod audio {
-    pub use crate::ac3::{Ctx, check, decode, encode, frame_len};
-    pub use crate::model::Model;
-}
-pub use rc::{Coder, Decoder, Encoder, SliceSource, Source};
+pub use aqr_walk::rc::{Coder, Decoder, Encoder, SliceSource, Source};
 
 /// The error of the module and the formula.
 #[derive(Debug, Clone, PartialEq, Eq)]

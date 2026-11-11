@@ -1,17 +1,13 @@
 //! The syntax of I and P frames, walked once for both directions (see `io`).
-use crate::bits::{BitReader, BitWriter};
-use crate::io::{Check, Dec, ESC, Enc, Io, Vlc};
-use crate::model::Model;
-use crate::rc::Coder;
+use aqr_walk::bits::{BitReader, BitWriter};
+use aqr_walk::io::{Check, Dec, ESC, Enc, Io, Vlc};
+use aqr_walk::model::Model;
+use aqr_walk::rc::Coder;
 use crate::tables::*;
 use alloc::vec;
 use alloc::vec::Vec;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrameError {
-    /// The data is not a frame this module can walk.
-    Parse,
-}
+pub use aqr_walk::Error as FrameError;
 
 type R<T> = Result<T, FrameError>;
 

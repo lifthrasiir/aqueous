@@ -13,12 +13,9 @@ encode = ["dep:aqr-formula"]
 [dependencies]
 aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
 aqr-common = { path = "../../crates/aqr-common" }
+aqr-walk = { path = "../../crates/aqr-walk" }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 
 [[example]]
 name = "aqr-div3-check"
 path = "examples/check.rs"
-
-[[example]]
-name = "aqr-ac3-check"
-path = "examples/ac3check.rs"

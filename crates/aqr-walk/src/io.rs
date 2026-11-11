@@ -1,7 +1,7 @@
 //! The two directions of the syntax walk. `Enc` reads elements from the original bits and codes them;
 //! `Dec` decodes them and writes the bits; `Check` only reads (a dry run to see that a frame parses).
 use crate::bits::{BitReader, BitWriter};
-use crate::frame::FrameError as Error;
+use crate::Error;
 use crate::model::Model;
 use crate::rc::Coder;
 

@@ -1,0 +1,13 @@
+[package]
+name = "aqr-ac3"
+version = "0.1.0"
+edition = "2024"
+description = "AC-3 (Dolby Digital) syncframes re-coded by a context model, rebuilt bit for bit"
+publish = false
+
+[dependencies]
+aqr-walk = { path = "../../crates/aqr-walk" }
+
+[[example]]
+name = "aqr-ac3-check"
+path = "examples/check.rs"

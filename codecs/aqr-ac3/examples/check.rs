@@ -1,6 +1,6 @@
 //! Codes the AC-3 syncframes in the `01wb` chunks of an AVI and decodes them again: `aqr-ac3-check FILE.avi [CHUNKS]`.
-use aqr_div3::audio::{self, Ctx, Model};
-use aqr_div3::{Decoder, Encoder, SliceSource};
+use aqr_ac3::{Ctx, Model};
+use aqr_walk::rc::{Decoder, Encoder, SliceSource};
 use std::time::Instant;
 
 fn chunks(data: &[u8], limit: usize) -> Vec<u8> {
@@ -36,7 +36,7 @@ fn main() {
     let mut frames = Vec::new();
     let mut p = 0;
     while p + 5 <= stream.len() {
-        match audio::frame_len(&stream[p..]) {
+        match aqr_ac3::frame_len(&stream[p..]) {
             Some(n) if p + n <= stream.len() => {
                 frames.push(&stream[p..p + n]);
                 p += n;
@@ -53,8 +53,8 @@ fn main() {
     let mut ok_frames = Vec::new();
     for f in &frames {
         total += f.len();
-        if audio::check(f) {
-            audio::encode(&mut enc, &mut model, &mut ctx, f).unwrap();
+        if aqr_ac3::check(f) {
+            aqr_ac3::encode(&mut enc, &mut model, &mut ctx, f).unwrap();
             ok_frames.push(*f);
         } else {
             bad += 1;
@@ -68,7 +68,7 @@ fn main() {
     let mut dec = Decoder::new(SliceSource::new(&out));
     let mut diff = 0;
     for f in &ok_frames {
-        let g = audio::decode(&mut dec, &mut model, &mut ctx, Vec::new()).unwrap();
+        let g = aqr_ac3::decode(&mut dec, &mut model, &mut ctx, Vec::new()).unwrap();
         if g != *f {
             diff += 1;
             if diff < 3 {

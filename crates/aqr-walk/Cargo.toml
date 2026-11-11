@@ -1,0 +1,8 @@
+[package]
+name = "aqr-walk"
+version = "0.1.0"
+edition = "2024"
+description = "A syntax walked once for both directions: elements read from the original bits and coded by a context model, or decoded and written back"
+publish = false
+
+[dependencies]
