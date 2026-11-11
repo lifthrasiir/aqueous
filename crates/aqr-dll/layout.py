@@ -181,7 +181,8 @@ def main():
                 rel = os.path.relpath(path, d).replace(os.sep, '/')
                 lines.append(f'{p} = {{ path = "{rel}", default-features = false }}')
             else:
-                lines.append(f'{p} = {{ version = "={version}", default-features = false }}')
+                # (build metadata, `+...`, is not for requirements)
+                lines.append(f'{p} = {{ version = "={version.split("+")[0]}", default-features = false }}')
         write(os.path.join(d, 'Cargo.toml'), '\n'.join(lines) + '\n')
         src = ['//! Made by layout.py: ' + ', '.join(sorted(ps)) + '.', '']
         src += [f'extern crate aqr_dll_{ident(b)};' for b in sorted(below)]
