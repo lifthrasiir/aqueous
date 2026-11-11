@@ -1,0 +1,16 @@
+[package]
+name = "aqr-ole"
+version = "0.1.0"
+edition = "2024"
+description = "OLE compound files (Windows Installer packages, Office 97-2003 and HWP documents) read into their streams, a file system of aqr-disk"
+publish = false
+
+[dependencies]
+aqr-disk = { path = "../aqr-disk" }
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-ole-ls"
+path = "examples/ls.rs"

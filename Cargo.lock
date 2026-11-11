@@ -269,6 +269,7 @@ dependencies = [
  "aqr-ntfs",
  "aqr-obj",
  "aqr-ogg",
+ "aqr-ole",
  "aqr-pdb",
  "aqr-pdf",
  "aqr-png",
@@ -891,6 +892,13 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "aqr-vorbis",
+]
+
+[[package]]
+name = "aqr-ole"
+version = "0.1.0"
+dependencies = [
+ "aqr-disk",
 ]
 
 [[package]]
