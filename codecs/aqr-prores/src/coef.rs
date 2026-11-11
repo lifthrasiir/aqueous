@@ -160,14 +160,54 @@ pub fn decode(d: &[u8], start: usize, end: usize, blocks: usize, c: &mut [i16]) 
 }
 
 /// The positions of block `b`'s coefficients that are nonzero, as bits (bit 0, the DC, is not
-/// looked at).
+/// looked at): 16 at a time where the target has SIMD (SIMD128, SSE2), compared, narrowed to
+/// bytes and their sign bits taken.
 #[inline(always)]
-fn nonzeros(b: &[i16]) -> u64 {
+#[cfg(not(any(target_family = "wasm", target_arch = "x86_64")))]
+fn nonzeros(b: &[i16; 64]) -> u64 {
     let mut m = 0u64;
     for (i, &v) in b.iter().enumerate().skip(1) {
         m |= ((v != 0) as u64) << i;
     }
     m
+}
+
+#[inline]
+#[cfg(target_family = "wasm")]
+#[target_feature(enable = "simd128")]
+fn nonzeros(b: &[i16; 64]) -> u64 {
+    use core::arch::wasm32::*;
+    let mut m = 0u64;
+    for k in 0..4 {
+        // SAFETY: the loads are within the block.
+        let (x, y) = unsafe {
+            let p = b.as_ptr().add(16 * k) as *const v128;
+            (v128_load(p), v128_load(p.add(1)))
+        };
+        let z = i16x8_splat(0);
+        let n = i8x16_narrow_i16x8(i16x8_ne(x, z), i16x8_ne(y, z));
+        m |= (i8x16_bitmask(n) as u64) << (16 * k);
+    }
+    m & !1
+}
+
+#[inline(always)]
+#[cfg(target_arch = "x86_64")]
+fn nonzeros(b: &[i16; 64]) -> u64 {
+    use std::arch::x86_64::*;
+    let mut m = 0u64;
+    // SAFETY: SSE2 is always there on x86-64; the loads are within the block.
+    unsafe {
+        let z = _mm_setzero_si128();
+        for k in 0..4 {
+            let p = b.as_ptr().add(16 * k) as *const __m128i;
+            let (x, y) = (_mm_loadu_si128(p), _mm_loadu_si128(p.add(1)));
+            // (the lanes equal to zero, -1, packed to bytes; their sign bits are the zeros)
+            let e = _mm_packs_epi16(_mm_cmpeq_epi16(x, z), _mm_cmpeq_epi16(y, z));
+            m |= ((!_mm_movemask_epi8(e) & 0xffff) as u64) << (16 * k);
+        }
+    }
+    m & !1
 }
 
 /// The codeword of `v` as [`codeword`] has it, with selects in place of the branch between the
@@ -185,6 +225,7 @@ fn codeword_u(cb: u8, v: u32) -> (u64, u32) {
 }
 
 /// Appends `c` coded as [`decode`] reads it, then `tail`'s padding, to `out`.
+#[cfg_attr(target_family = "wasm", target_feature(enable = "simd128"))]
 pub fn encode(out: &mut Vec<u8>, c: &[i16], tail: Tail) {
     if tail.empty {
         debug_assert!(c.iter().all(|&v| v == 0));
@@ -252,6 +293,31 @@ pub fn encode(out: &mut Vec<u8>, c: &[i16], tail: Tail) {
 mod tests {
     use super::*;
     use aqr_common::msb::padded;
+
+    /// The nonzero positions of this target are those of each coefficient alone.
+    #[test]
+    fn nonzeros_of_each() {
+        let mut rng = 99u64;
+        for t in 0..2000 {
+            let mut b = [0i16; 64];
+            for v in &mut b {
+                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let r = (rng >> 33) as u32;
+                *v = if r.is_multiple_of(t % 7 + 2) {
+                    [1, -1, 32767, -32768, 256, -256][r as usize / 13 % 6]
+                } else {
+                    0
+                };
+            }
+            let want = (1..64).fold(0u64, |m, i| m | ((b[i] != 0) as u64) << i);
+            #[cfg(target_family = "wasm")]
+            // SAFETY: (tests are not built for Wasm)
+            let got = unsafe { nonzeros(&b) };
+            #[cfg(not(target_family = "wasm"))]
+            let got = nonzeros(&b);
+            assert_eq!(got, want);
+        }
+    }
 
     #[test]
     fn codewords_round_trip() {

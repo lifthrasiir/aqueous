@@ -420,7 +420,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "prores-recons",
         version: 3,
-        sha512_256: hex("5360686d45c5cd5ba693dc89600f97ee96af073a40049ee3124e3482ffdbfd7c"),
+        sha512_256: hex("8be212e3ae7c493cb56ad581518dab01ba09e074b1765277e423f0fe7f6e0783"),
         block: include_bytes!("../wasm/prores-recons.block"),
     },
     Known {
