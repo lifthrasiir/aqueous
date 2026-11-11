@@ -109,6 +109,7 @@ impl<const C: usize> Plane<C> {
     /// the next smaller mipmap, bilinearly: each pixel (x, y) of the surface is between four of
     /// this one, (x/2, y/2) and the one beside it towards (x, y) across and down (the sides
     /// repeated), weighted 9, 3, 3 and 1. In `px`, with `work`.
+    #[cfg_attr(target_family = "wasm", target_feature(enable = "simd128"))]
     pub fn upsampled(&self, bw: usize, rows: std::ops::Range<usize>, px: Vec<[u8; C]>, work: &mut Work) -> Plane<C> {
         let (w, y0, h) = (bw * 4, rows.start * 4, rows.len() * 4);
         let near = |v: usize, n: usize| {
