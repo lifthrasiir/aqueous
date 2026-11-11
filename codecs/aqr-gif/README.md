@@ -106,6 +106,12 @@ context of whether P, WW and NN are W's and of the run of such pixels, and of W 
 mixed), not the 10 contexts: records −0.67% (22.92 -> 22.77 MB; the fixtures' −0.26%), 76 ->
 54 s.
 
+The mixers then went to 12 lanes (the 10 inputs and two of zeros) in SIMD of their own
+(SIMD128 in the module, which is not built for SIMD else; NEON; SSE4.1 where there is), the
+records the same: on an M4, `aqr -K` of 15 GIF files (8.7 MB) as Wasm 94.9 -> 69.3 G
+instructions (1.65 -> 1.41 s), natively 51.8 -> 46.9 G; the module 35.1 -> 33.9 KB. On a Ryzen 7
+9700X, natively on one thread, 4.86 -> 4.49 s (the scalar loops instead of SSE4.1: 4.98 s).
+
 Left out: a single mixer (+0.6%, −14%), and the W bit gated by how often pixels were W's (larger
 at every threshold: the tree's tables learn from both cases).
 

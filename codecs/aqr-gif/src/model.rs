@@ -148,9 +148,10 @@ fn stretch_table() -> Vec<i16> {
     t
 }
 
-/// Contexts mixed, and their lanes (padded, so that the mixers' loops are of whole vectors).
+/// Contexts mixed, and their lanes (padded, so that the mixers' loops are of whole vectors: the
+/// lanes past the inputs stay zero, as their weights do).
 pub const INPUTS: usize = 10;
-const LANES: usize = 16;
+const LANES: usize = 12;
 /// Slots of a table at most (of the contexts of many values), and at least: a table is about 4
 /// slots for a pixel.
 const MAX_BITS: u32 = 21;
@@ -194,6 +195,145 @@ const SLOT0: u16 = 2048 << 4;
 /// No neighbour there.
 const NONE: u32 = 256;
 
+/// The mixers' arithmetic on the lanes: the dot products of the inputs `st` and two weight sets
+/// (each product shifted right by 10 before the sum, which does not wrap), and a weight set
+/// moved by the error `e`. In SIMD where the target always has it (NEON, SIMD128 of the profile
+/// of the modules), in scalar else; SSE4.1 for x86-64 where the processor has it.
+mod mix {
+    use super::{LANES, W_MAX};
+
+    const _: () = assert!(LANES.is_multiple_of(4));
+
+    #[cfg(not(any(target_arch = "aarch64", target_family = "wasm")))]
+    #[inline(always)]
+    pub fn dot2(st: &[i32; LANES], w1: &[i32; LANES], w2: &[i32; LANES]) -> (i32, i32) {
+        let (mut d1, mut d2) = (0i32, 0i32);
+        for j in 0..LANES {
+            d1 += (st[j] * w1[j]) >> 10;
+            d2 += (st[j] * w2[j]) >> 10;
+        }
+        (d1, d2)
+    }
+
+    #[cfg(not(any(target_arch = "aarch64", target_family = "wasm")))]
+    #[inline(always)]
+    pub fn train(wt: &mut [i32; LANES], st: &[i32; LANES], e: i32) {
+        for j in 0..LANES {
+            wt[j] = (wt[j] + ((st[j] * e) >> 14)).clamp(-W_MAX, W_MAX);
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[inline(always)]
+    pub fn dot2(st: &[i32; LANES], w1: &[i32; LANES], w2: &[i32; LANES]) -> (i32, i32) {
+        use std::arch::aarch64::*;
+        // SAFETY: NEON is always there on AArch64; the loads are of whole arrays.
+        unsafe {
+            let (mut a1, mut a2) = (vdupq_n_s32(0), vdupq_n_s32(0));
+            for k in (0..LANES).step_by(4) {
+                let s = vld1q_s32(st.as_ptr().add(k));
+                a1 = vaddq_s32(a1, vshrq_n_s32::<10>(vmulq_s32(s, vld1q_s32(w1.as_ptr().add(k)))));
+                a2 = vaddq_s32(a2, vshrq_n_s32::<10>(vmulq_s32(s, vld1q_s32(w2.as_ptr().add(k)))));
+            }
+            (vaddvq_s32(a1), vaddvq_s32(a2))
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[inline(always)]
+    pub fn train(wt: &mut [i32; LANES], st: &[i32; LANES], e: i32) {
+        use std::arch::aarch64::*;
+        // SAFETY: as in `dot2`.
+        unsafe {
+            let (lo, hi, e) = (vdupq_n_s32(-W_MAX), vdupq_n_s32(W_MAX), vdupq_n_s32(e));
+            for k in (0..LANES).step_by(4) {
+                let p = wt.as_mut_ptr().add(k);
+                let d = vshrq_n_s32::<14>(vmulq_s32(vld1q_s32(st.as_ptr().add(k)), e));
+                vst1q_s32(p, vminq_s32(vmaxq_s32(vaddq_s32(vld1q_s32(p), d), lo), hi));
+            }
+        }
+    }
+
+    #[cfg(target_family = "wasm")]
+    #[inline]
+    #[target_feature(enable = "simd128")]
+    pub fn dot2(st: &[i32; LANES], w1: &[i32; LANES], w2: &[i32; LANES]) -> (i32, i32) {
+        use core::arch::wasm32::*;
+        let (mut a1, mut a2) = (i32x4_splat(0), i32x4_splat(0));
+        for k in (0..LANES).step_by(4) {
+            // SAFETY: the loads are of whole arrays.
+            let (s, x1, x2) = unsafe {
+                let ld = |p: *const i32| v128_load(p.add(k) as *const v128);
+                (ld(st.as_ptr()), ld(w1.as_ptr()), ld(w2.as_ptr()))
+            };
+            a1 = i32x4_add(a1, i32x4_shr(i32x4_mul(s, x1), 10));
+            a2 = i32x4_add(a2, i32x4_shr(i32x4_mul(s, x2), 10));
+        }
+        let sum = |a: v128| {
+            let a = i32x4_add(a, i32x4_shuffle::<2, 3, 0, 1>(a, a));
+            i32x4_extract_lane::<0>(i32x4_add(a, i32x4_shuffle::<1, 0, 3, 2>(a, a)))
+        };
+        (sum(a1), sum(a2))
+    }
+
+    #[cfg(target_family = "wasm")]
+    #[inline]
+    #[target_feature(enable = "simd128")]
+    pub fn train(wt: &mut [i32; LANES], st: &[i32; LANES], e: i32) {
+        use core::arch::wasm32::*;
+        let (lo, hi, e) = (i32x4_splat(-W_MAX), i32x4_splat(W_MAX), i32x4_splat(e));
+        for k in (0..LANES).step_by(4) {
+            // SAFETY: the loads and stores are of whole arrays.
+            unsafe {
+                let p = wt.as_mut_ptr().add(k) as *mut v128;
+                let d = i32x4_shr(i32x4_mul(v128_load(st.as_ptr().add(k) as *const v128), e), 14);
+                v128_store(p, i32x4_min(i32x4_max(i32x4_add(v128_load(p), d), lo), hi));
+            }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub mod sse41 {
+        use super::{LANES, W_MAX};
+        use std::arch::x86_64::*;
+
+        #[inline]
+        #[target_feature(enable = "sse4.1")]
+        pub fn dot2(st: &[i32; LANES], w1: &[i32; LANES], w2: &[i32; LANES]) -> (i32, i32) {
+            let (mut a1, mut a2) = (_mm_setzero_si128(), _mm_setzero_si128());
+            for k in (0..LANES).step_by(4) {
+                // SAFETY: the loads are of whole arrays.
+                let (s, x1, x2) = unsafe {
+                    let ld = |p: *const i32| _mm_loadu_si128(p.add(k) as *const __m128i);
+                    (ld(st.as_ptr()), ld(w1.as_ptr()), ld(w2.as_ptr()))
+                };
+                a1 = _mm_add_epi32(a1, _mm_srai_epi32::<10>(_mm_mullo_epi32(s, x1)));
+                a2 = _mm_add_epi32(a2, _mm_srai_epi32::<10>(_mm_mullo_epi32(s, x2)));
+            }
+            let sum = |a: __m128i| {
+                let a = _mm_add_epi32(a, _mm_shuffle_epi32::<0b01_00_11_10>(a));
+                _mm_cvtsi128_si32(_mm_add_epi32(a, _mm_shuffle_epi32::<0b10_11_00_01>(a)))
+            };
+            (sum(a1), sum(a2))
+        }
+
+        #[inline]
+        #[target_feature(enable = "sse4.1")]
+        pub fn train(wt: &mut [i32; LANES], st: &[i32; LANES], e: i32) {
+            let (lo, hi, e) = (_mm_set1_epi32(-W_MAX), _mm_set1_epi32(W_MAX), _mm_set1_epi32(e));
+            for k in (0..LANES).step_by(4) {
+                // SAFETY: the loads and stores are of whole arrays.
+                unsafe {
+                    let p = wt.as_mut_ptr().add(k) as *mut __m128i;
+                    let s = _mm_loadu_si128(st.as_ptr().add(k) as *const __m128i);
+                    let d = _mm_srai_epi32::<14>(_mm_mullo_epi32(s, e));
+                    _mm_storeu_si128(p, _mm_min_epi32(_mm_max_epi32(_mm_add_epi32(_mm_loadu_si128(p), d), lo), hi));
+                }
+            }
+        }
+    }
+}
+
 pub struct Model {
     /// stretch(p) of the probabilities as the slots hold them (exclusive-or [`SLOT0`]).
     stretch_slot: Vec<i16>,
@@ -212,6 +352,9 @@ pub struct Model {
     /// The last image's indices on the screen, [`NONE`] where it did not cover.
     canvas: Vec<u16>,
     screen: (usize, usize),
+    /// Whether the processor has SSE4.1, for the mixers.
+    #[cfg(target_arch = "x86_64")]
+    sse41: bool,
 }
 
 /// Where an image is, for the model.
@@ -280,6 +423,8 @@ impl Model {
             flat_weights: vec![[W0 * 5, W0 * 5, 0, 0]; FLAT_CTX],
             canvas: vec![NONE as u16; screen.0 * screen.1],
             screen,
+            #[cfg(target_arch = "x86_64")]
+            sse41: std::is_x86_feature_detected!("sse4.1"),
         }
     }
 
@@ -300,18 +445,43 @@ impl Model {
     /// Codes a bit (`want`, the encoder's) of the slots `idx` and the mixers' weight sets `set1`
     /// and `set2`, and gives it.
     #[inline(never)]
+    #[cfg_attr(target_family = "wasm", target_feature(enable = "simd128"))]
     fn bit(&mut self, c: &mut impl Coder, idx: &[usize; INPUTS], set1: usize, set2: usize, want: bool) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        if self.sse41 {
+            // SAFETY: the processor has SSE4.1.
+            return unsafe { self.bit_sse41(c, idx, set1, set2, want) };
+        }
+        self.bit_in::<false>(c, idx, set1, set2, want)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "sse4.1")]
+    fn bit_sse41(&mut self, c: &mut impl Coder, idx: &[usize; INPUTS], set1: usize, set2: usize, want: bool) -> bool {
+        self.bit_in::<true>(c, idx, set1, set2, want)
+    }
+
+    /// [`Model::bit`], the mixers in SSE4.1 where `S41` is set (x86-64's; else of [`mix`]).
+    #[inline(always)]
+    fn bit_in<const S41: bool>(
+        &mut self,
+        c: &mut impl Coder,
+        idx: &[usize; INPUTS],
+        set1: usize,
+        set2: usize,
+        want: bool,
+    ) -> bool {
         let mut st = [0i32; LANES];
         for j in 0..INPUTS {
             // SAFETY: a slot is within its table's bucket (of 16 slots).
             st[j] = self.stretch_slot[(unsafe { *self.slots.get_unchecked(idx[j]) } >> 4) as usize] as i32;
         }
         let (w1, w2) = (&self.weights[set1], &self.weights[set2]);
-        let (mut dot1, mut dot2) = (0i32, 0i32);
-        for j in 0..LANES {
-            dot1 += (st[j] * w1[j]) >> 10;
-            dot2 += (st[j] * w2[j]) >> 10;
-        }
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: SSE4.1 is there where `S41` is set (see `bit`).
+        let (dot1, dot2) = if S41 { unsafe { mix::sse41::dot2(&st, w1, w2) } } else { mix::dot2(&st, w1, w2) };
+        #[cfg(not(target_arch = "x86_64"))]
+        let (dot1, dot2) = mix::dot2(&st, w1, w2);
         let (dot1, dot2) = ((dot1 >> 6).clamp(-4095, 4095), (dot2 >> 6).clamp(-4095, 4095));
         let (p1, p2) = (squash(dot1), squash(dot2));
         let pr = squash((dot1 + dot2) / 2).clamp(1, 4095);
@@ -321,9 +491,13 @@ impl Model {
         let (e1, e2) = ((((v as i32) << 12) - p1) * RATE_MIX, (((v as i32) << 12) - p2) * RATE_MIX);
         for (set, e) in [(set1, e1), (set2, e2)] {
             let wt = &mut self.weights[set];
-            for j in 0..LANES {
-                wt[j] = (wt[j] + ((st[j] * e) >> 14)).clamp(-W_MAX, W_MAX);
+            #[cfg(target_arch = "x86_64")]
+            if S41 {
+                // SAFETY: as above.
+                unsafe { mix::sse41::train(wt, &st, e) };
+                continue;
             }
+            mix::train(wt, &st, e);
         }
         // the slots
         for &s in idx {

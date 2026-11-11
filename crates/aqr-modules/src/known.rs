@@ -246,7 +246,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "gif-recons",
         version: 2,
-        sha512_256: hex("d7a586c0989d23e300fd341bf833c472a9f7cee35b474225067002d149c7b1c3"),
+        sha512_256: hex("8f53a39d83da2c850989320f0f64709ceaec9d8d4046c03258cf776a9b496288"),
         block: include_bytes!("../wasm/gif-recons.block"),
     },
     Known {
