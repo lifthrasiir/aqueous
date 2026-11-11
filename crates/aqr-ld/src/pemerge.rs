@@ -191,6 +191,71 @@ impl Pe {
         }
         Err(format!("no export {name}"))
     }
+
+    /// The RVA of the exported function `name`, or 0 for `-`.
+    fn export_opt(&self, name: &str) -> Result<u32> {
+        match name {
+            "-" => Ok(0),
+            _ => self.export(name),
+        }
+    }
+
+    /// The stub's import descriptors (20 bytes each), without the zero terminator.
+    fn descriptors(&self) -> Result<Vec<u8>> {
+        let (rva, _) = self.dir(1);
+        if rva == 0 {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        let mut d = self.off(rva)?;
+        while self.buf[d..d + 20].iter().any(|&b| b != 0) {
+            out.extend_from_slice(&self.buf[d..d + 20]);
+            d += 20;
+        }
+        Ok(out)
+    }
+}
+
+/// Fixes the import thunk RVAs in a module's image `img` (placed at RVA `r`) by adding `r`, and
+/// returns its import descriptors adjusted the same way (without a terminator): the loader binds
+/// them in the merged image as though they were the stub's own.
+fn fix_imports(img: &mut [u8], dir1_rva: u32, r: u32) -> Result<Vec<u8>> {
+    if dir1_rva == 0 {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    let mut d = dir1_rva as usize;
+    while img[d..d + 20].iter().any(|&b| b != 0) {
+        let (oft, name, ft) = (u32(img, d), u32(img, d + 12), u32(img, d + 16));
+        // each distinct thunk array: a by-name entry (high bit clear) is an RVA, so add r
+        let mut arrays = vec![oft, ft];
+        arrays.retain(|&a| a != 0);
+        arrays.dedup();
+        for arr in arrays {
+            let mut t = arr as usize;
+            loop {
+                let e = u64(img, t);
+                if e == 0 {
+                    break;
+                }
+                if e & 0x8000_0000_0000_0000 == 0 {
+                    img[t..t + 8].copy_from_slice(&(e + r as u64).to_le_bytes());
+                }
+                t += 8;
+            }
+        }
+        let mut nd = img[d..d + 20].to_vec();
+        if oft != 0 {
+            put_u32(&mut nd, 0, oft + r);
+        }
+        put_u32(&mut nd, 12, name + r);
+        if ft != 0 {
+            put_u32(&mut nd, 16, ft + r);
+        }
+        out.extend_from_slice(&nd);
+        d += 20;
+    }
+    Ok(out)
 }
 
 /// A new section to append to the stub.
@@ -202,8 +267,27 @@ struct New {
     data: Vec<u8>,
 }
 
-/// Merges `modules` (name, path) into the stub at `stub` and writes the result to `out`.
-pub fn merge(stub: &Path, out: &Path, modules: &[(String, std::path::PathBuf)]) -> Result<()> {
+/// A module merged, as the dispatch table records it.
+struct Entry {
+    name: String,
+    apply_rva: u32,
+    info_rva: u32,
+    /// The merged RVA of the module's exception table, its count, and the module's base RVA (`r`,
+    /// what the stub passes `RtlAddFunctionTable` so its entries' RVAs resolve).
+    pdata_rva: u32,
+    pdata_count: u32,
+    mod_base: u32,
+}
+
+/// Merges `modules` (name, path) into the stub at `stub` and writes the result to `out`. Each
+/// module exports its application entry as `apply_name` and, unless `-`, its info as `info_name`.
+pub fn merge(
+    stub: &Path,
+    out: &Path,
+    modules: &[(String, std::path::PathBuf)],
+    apply_name: &str,
+    info_name: &str,
+) -> Result<()> {
     let mut pe = Pe::parse(std::fs::read(stub).map_err(|e| format!("{}: {e}", stub.display()))?)?;
     let salign = pe.section_align();
     let falign = pe.file_align();
@@ -213,14 +297,12 @@ pub fn merge(stub: &Path, out: &Path, modules: &[(String, std::path::PathBuf)]) 
     let mut next_va = align(pe.size_of_image(), salign);
     let mut news: Vec<New> = Vec::new();
     let mut new_relocs: Vec<u32> = Vec::new();
-    // the dispatch entries: (name, apply_rva in the merged image)
-    let mut entries: Vec<(String, u32)> = Vec::new();
+    let mut entries: Vec<Entry> = Vec::new();
+    // the stub's import descriptors, then each module's (its thunks and names in its own image)
+    let mut descriptors = pe.descriptors()?;
 
     for (name, path) in modules {
         let m = Pe::parse(std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?)?;
-        if m.dir(9).0 != 0 {
-            return Err(format!("{name}: the module uses thread-local storage"));
-        }
         let r = next_va;
         let mut img = m.image();
         // rebase: an absolute address in the module (module_base + x) becomes stub_base + r + x
@@ -231,7 +313,19 @@ pub fn merge(stub: &Path, out: &Path, modules: &[(String, std::path::PathBuf)]) 
             img[o..o + 8].copy_from_slice(&v.to_le_bytes());
             new_relocs.push(r + loc);
         }
-        entries.push((name.clone(), r + m.export("aqr_mod_apply")?));
+        descriptors.extend_from_slice(&fix_imports(&mut img, m.dir(1).0, r)?);
+        let (pdata_rva, pdata_size) = m.dir(3);
+        entries.push(Entry {
+            name: name.clone(),
+            apply_rva: r + m.export(apply_name)?,
+            info_rva: match m.export_opt(info_name)? {
+                0 => 0,
+                e => r + e,
+            },
+            pdata_rva: if pdata_rva == 0 { 0 } else { r + pdata_rva },
+            pdata_count: pdata_size / 12,
+            mod_base: r,
+        });
         let vsize = img.len() as u32;
         let mut sname = [0u8; 8];
         let tag = format!(".aqrm{:02}", news.len());
@@ -240,16 +334,24 @@ pub fn merge(stub: &Path, out: &Path, modules: &[(String, std::path::PathBuf)]) 
         next_va = align(r + vsize, salign);
     }
 
-    // the dispatch table: count, then (apply_rva, name_off, name_len) each, then the names
+    // the import directory: the descriptors gathered, zero-terminated
+    descriptors.extend_from_slice(&[0u8; 20]);
+    let imp_va = next_va;
+    let imp_len = descriptors.len() as u32;
+    news.push(New { name: *b".aqri\0\0\0", va: imp_va, vsize: imp_len, flags: DATA_FLAGS, data: descriptors });
+    next_va = align(imp_va + imp_len, salign);
+
+    // the dispatch table: count, then an entry each (6 u32), then the names
     let mut disp = Vec::new();
     disp.extend_from_slice(&(entries.len() as u32).to_le_bytes());
-    let names_at = 4 + entries.len() * 12;
+    let names_at = 4 + entries.len() * 24;
     let mut names = Vec::new();
-    for (name, apply) in &entries {
-        disp.extend_from_slice(&apply.to_le_bytes());
-        disp.extend_from_slice(&((names_at + names.len()) as u32).to_le_bytes());
-        disp.extend_from_slice(&(name.len() as u32).to_le_bytes());
-        names.extend_from_slice(name.as_bytes());
+    for e in &entries {
+        for v in [e.apply_rva, e.info_rva, e.pdata_rva, e.pdata_count, e.mod_base, (names_at + names.len()) as u32] {
+            disp.extend_from_slice(&v.to_le_bytes());
+        }
+        names.extend_from_slice(&(e.name.len() as u32).to_le_bytes());
+        names.extend_from_slice(e.name.as_bytes());
     }
     disp.extend_from_slice(&names);
     let disp_va = next_va;
@@ -310,9 +412,14 @@ pub fn merge(stub: &Path, out: &Path, modules: &[(String, std::path::PathBuf)]) 
         pe.buf.resize(pad, 0);
     }
 
-    // the header fields: section count, image size, the relocation directory
+    // the header fields: section count, image size, the import and relocation directories
     put_u16(&mut pe.buf, pe.pe + 6, (old_n + news.len()) as u32);
     put_u32(&mut pe.buf, pe.opt + 56, align(next_va, salign));
+    put_u32(&mut pe.buf, pe.opt + 112 + 8, imp_va); // directory 1 (import)
+    put_u32(&mut pe.buf, pe.opt + 112 + 8 + 4, imp_len);
+    // the bound-import directory (11) would pin the stub's imports to stale addresses; drop it
+    put_u32(&mut pe.buf, pe.opt + 112 + 11 * 8, 0);
+    put_u32(&mut pe.buf, pe.opt + 112 + 11 * 8 + 4, 0);
     put_u32(&mut pe.buf, pe.opt + 112 + 5 * 8, reloc_va);
     put_u32(&mut pe.buf, pe.opt + 112 + 5 * 8 + 4, reloc_len);
 
@@ -329,16 +436,24 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-/// `aqr-ld merge --stub S --out O NAME=MODULE.dll ...`.
+/// `aqr-ld merge --stub S --out O [--apply NAME] [--info NAME] NAME=MODULE.dll ...`. The exports
+/// default to `aqr_dll_apply` and `aqr_dll_info`; `--info -` is for a module with no info export.
 pub fn main(args: &[std::ffi::OsString]) -> Result<()> {
     let mut stub = None;
     let mut out = None;
+    let mut apply_name = "aqr_dll_apply".to_owned();
+    let mut info_name = "aqr_dll_info".to_owned();
     let mut modules = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
+        let next = |it: &mut std::slice::Iter<std::ffi::OsString>, what: &str| {
+            it.next().and_then(|s| s.to_str().map(str::to_owned)).ok_or(format!("{what}: no value"))
+        };
         match a.to_str() {
             Some("--stub") => stub = Some(it.next().ok_or("--stub: no path")?.into()),
             Some("--out") => out = Some(it.next().ok_or("--out: no path")?.into()),
+            Some("--apply") => apply_name = next(&mut it, "--apply")?,
+            Some("--info") => info_name = next(&mut it, "--info")?,
             _ => {
                 let a = a.to_str().ok_or("a module argument is not UTF-8")?;
                 let (name, path) = a.split_once('=').ok_or(format!("{a}: not NAME=MODULE.dll"))?;
@@ -348,5 +463,5 @@ pub fn main(args: &[std::ffi::OsString]) -> Result<()> {
     }
     let stub: std::path::PathBuf = stub.ok_or("merge: no --stub")?;
     let out: std::path::PathBuf = out.ok_or("merge: no --out")?;
-    merge(&stub, &out, &modules)
+    merge(&stub, &out, &modules, &apply_name, &info_name)
 }

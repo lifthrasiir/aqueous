@@ -66,11 +66,13 @@ fn modules() -> Vec<Module> {
     let count = u32_at(table, 0) as usize;
     (0..count)
         .map(|i| {
-            let e = 4 + i * 12;
+            // entry: apply_rva, info_rva, pdata_rva, pdata_count, mod_base, name_off (6 u32)
+            let e = 4 + i * 24;
             let apply_rva = u32_at(table, e);
-            let (off, nlen) = (u32_at(table, e + 4) as usize, u32_at(table, e + 8) as usize);
+            let off = u32_at(table, e + 20) as usize;
+            let nlen = u32_at(table, off) as usize;
             Module {
-                name: String::from_utf8_lossy(&table[off..off + nlen]).into_owned(),
+                name: String::from_utf8_lossy(&table[off + 4..off + 4 + nlen]).into_owned(),
                 // SAFETY: the merge wrote the RVA of the module's aqr_mod_apply
                 apply: unsafe { std::mem::transmute::<*const u8, ApplyFn>(base().add(apply_rva as usize)) },
             }

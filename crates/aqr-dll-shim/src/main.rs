@@ -52,7 +52,99 @@ struct Lib {
     apply: ApplyFn,
 }
 
+/// What `aqr-ld merge` fills: the place of the dispatch table of the modules merged into this
+/// executable (its magic, then the table's RVA and length). Empty until something is merged in.
+#[repr(C)]
+struct Anchor {
+    magic: [u8; 16],
+    dispatch_rva: u32,
+    dispatch_len: u32,
+}
+
+#[used]
+#[unsafe(no_mangle)]
+static AQR_PEMERGE_ANCHOR: Anchor =
+    Anchor { magic: *b"\x89AQRPEMERGEv1\x00\x00\x00", dispatch_rva: 0, dispatch_len: 0 };
+
+#[cfg(windows)]
+unsafe extern "C" {
+    /// The image base, a symbol the MSVC linker defines.
+    static __ImageBase: u8;
+}
+
+#[cfg(windows)]
+unsafe extern "system" {
+    fn RtlAddFunctionTable(table: *const u8, count: u32, base: u64) -> i32;
+}
+
 impl Lib {
+    /// The library of module `name` merged into this executable (`aqr-ld merge`), if any: its
+    /// `aqr_dll_apply` and `aqr_dll_info` called by the RVAs in the dispatch table, with its
+    /// exception table registered so unwinding through it works.
+    #[cfg(windows)]
+    fn embedded(name: &str) -> Option<Result<Lib>> {
+        let base = &raw const __ImageBase as usize;
+        let read = |rva: u32, n: usize| unsafe { std::slice::from_raw_parts((base + rva as usize) as *const u8, n) };
+        let u32_at = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        let (rva, len) = unsafe {
+            (
+                std::ptr::read_volatile(&AQR_PEMERGE_ANCHOR.dispatch_rva),
+                std::ptr::read_volatile(&AQR_PEMERGE_ANCHOR.dispatch_len),
+            )
+        };
+        if rva == 0 || len < 4 {
+            return None;
+        }
+        let table = read(rva, len as usize);
+        for i in 0..u32_at(table, 0) as usize {
+            // entry: apply_rva, info_rva, pdata_rva, pdata_count, mod_base, name_off (6 u32)
+            let e = 4 + i * 24;
+            let off = u32_at(table, e + 20) as usize;
+            let nlen = u32_at(table, off) as usize;
+            if &table[off + 4..off + 4 + nlen] != name.as_bytes() {
+                continue;
+            }
+            let (apply_rva, info_rva) = (u32_at(table, e), u32_at(table, e + 4));
+            let (pdata_rva, pdata_count, mod_base) =
+                (u32_at(table, e + 8), u32_at(table, e + 12), u32_at(table, e + 16));
+            if info_rva == 0 {
+                return Some(Err(format!("{name}: no info in the merged module")));
+            }
+            // the unwinder finds the module's functions from here (its RVAs over the module base)
+            if pdata_count > 0 {
+                unsafe {
+                    RtlAddFunctionTable(
+                        (base + pdata_rva as usize) as *const u8,
+                        pdata_count,
+                        (base + mod_base as usize) as u64,
+                    )
+                };
+            }
+            // SAFETY: the merge wrote the RVAs of the module's aqr_dll_info and aqr_dll_apply
+            let info = unsafe { std::mem::transmute::<usize, InfoFn>(base + info_rva as usize)() };
+            let apply = unsafe { std::mem::transmute::<usize, ApplyFn>(base + apply_rva as usize) };
+            if info.version != VERSION {
+                return Some(Err(format!("{name}: merged interface {}, not {VERSION}", info.version)));
+            }
+            return Some(Ok(Lib { info, apply }));
+        }
+        None
+    }
+
+    #[cfg(not(windows))]
+    fn embedded(_name: &str) -> Option<Result<Lib>> {
+        None
+    }
+
+    /// The library of module `name`: the one merged into this executable, else the one in
+    /// `aqr-dll/`, or at path `name`.
+    fn find(name: &str) -> Result<Lib> {
+        match Lib::embedded(name) {
+            Some(r) => r,
+            None => Lib::open(name),
+        }
+    }
+
     /// The library of module `name` (in `aqr-dll/`), or at path `name`.
     fn open(name: &str) -> Result<Lib> {
         let path = match name.contains(['/', '\\']) || name.ends_with(std::env::consts::DLL_SUFFIX) {
@@ -358,7 +450,9 @@ fn run(args: &[String]) -> Result<()> {
         let case = Case::read(dir)?;
         let name = module.clone().unwrap_or_else(|| case.module.clone());
         if !libs.contains_key(&name) {
-            libs.insert(name.clone(), Lib::open(&name)?);
+            // a path given is opened; a bare name prefers the module merged into this executable
+            let lib = if module.is_some() { Lib::open(&name)? } else { Lib::find(&name)? };
+            libs.insert(name.clone(), lib);
         }
         let lib = &libs[&name];
         let res: Vec<&[u8]> = case.resources.iter().map(Vec::as_slice).collect();

@@ -35,17 +35,17 @@ PY
 "$dir/stub.exe" run add "$dir/in" "$dir/x" && fail "the bare stub ran a module" || true
 
 # each subset carries exactly its modules
-"$ld" merge --stub "$dir/stub.exe" --out "$dir/add.exe" add="$dir/modadd.dll"
+"$ld" merge --stub "$dir/stub.exe" --out "$dir/add.exe" --apply aqr_mod_apply --info - add="$dir/modadd.dll"
 [ "$("$dir/add.exe" list)" = "add" ] || fail "{add} lists wrong"
 "$dir/add.exe" run add "$dir/in" "$dir/o"; check "$dir/o" "b+7"
 "$dir/add.exe" run xor "$dir/in" "$dir/x" && fail "{add} ran xor" || true
 
-"$ld" merge --stub "$dir/stub.exe" --out "$dir/xor.exe" xor="$dir/modxor.dll"
+"$ld" merge --stub "$dir/stub.exe" --out "$dir/xor.exe" --apply aqr_mod_apply --info - xor="$dir/modxor.dll"
 [ "$("$dir/xor.exe" list)" = "xor" ] || fail "{xor} lists wrong"
 "$dir/xor.exe" run xor "$dir/in" "$dir/o"; check "$dir/o" "b^0x5a"
 "$dir/xor.exe" run add "$dir/in" "$dir/x" && fail "{xor} ran add" || true
 
-"$ld" merge --stub "$dir/stub.exe" --out "$dir/both.exe" add="$dir/modadd.dll" xor="$dir/modxor.dll"
+"$ld" merge --stub "$dir/stub.exe" --out "$dir/both.exe" --apply aqr_mod_apply --info - add="$dir/modadd.dll" xor="$dir/modxor.dll"
 [ "$(printf '%s\n' $("$dir/both.exe" list) | sort | tr '\n' ' ')" = "add xor " ] || fail "{add,xor} lists wrong"
 "$dir/both.exe" run add "$dir/in" "$dir/oa"; check "$dir/oa" "b+7"
 "$dir/both.exe" run xor "$dir/in" "$dir/ox"; check "$dir/ox" "b^0x5a"

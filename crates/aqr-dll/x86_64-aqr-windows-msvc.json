@@ -1,0 +1,60 @@
+{
+  "abi-return-struct-as-int": true,
+  "arch": "x86_64",
+  "archive-format": "coff",
+  "binary-format": "coff",
+  "cpu": "x86-64",
+  "crt-objects-fallback": "false",
+  "crt-static-allows-dylibs": true,
+  "crt-static-respected": true,
+  "data-layout": "e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
+  "debuginfo-kind": "pdb",
+  "dll-prefix": "",
+  "dll-suffix": ".dll",
+  "dll-tls-export": false,
+  "dynamic-linking": true,
+  "emit-debug-gdb-scripts": false,
+  "env": "msvc",
+  "exe-suffix": ".exe",
+  "features": "+cmpxchg16b,+sse3,+lahfsahf",
+  "has-thread-local": false,
+  "is-like-msvc": true,
+  "is-like-windows": true,
+  "linker-flavor": "msvc",
+  "linker-is-gnu": false,
+  "lld-flavor": "link",
+  "llvm-target": "x86_64-pc-windows-msvc",
+  "max-atomic-width": 128,
+  "no-default-libraries": false,
+  "os": "windows",
+  "plt-by-default": false,
+  "pre-link-args": {
+    "msvc": [
+      "/NOLOGO"
+    ],
+    "msvc-lld": [
+      "/NOLOGO"
+    ]
+  },
+  "requires-uwtable": true,
+  "split-debuginfo": "packed",
+  "staticlib-prefix": "",
+  "staticlib-suffix": ".lib",
+  "supported-sanitizers": [
+    "address"
+  ],
+  "supported-split-debuginfo": [
+    "packed"
+  ],
+  "target-family": [
+    "windows"
+  ],
+  "target-pointer-width": 64,
+  "vendor": "pc",
+  "metadata": {
+    "description": "x86_64-pc-windows-msvc without native thread-locals (aqr-dll)",
+    "std": true,
+    "tier": 3,
+    "host_tools": false
+  }
+}

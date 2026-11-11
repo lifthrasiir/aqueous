@@ -43,10 +43,14 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   - `aqr-bincache` — `cargo aqr`: the release `aqr` built and kept by a hash of its sources.
   - `aqr-api`, `aqr-ld` — the Rust interface of modules and the Wasm linker wrapper; aqr-ld also
     has `merge` (`src/pemerge.rs`), which merges native module libraries into a stub executable as
-    sections with no loader (`demo/{stub,modadd,modxor}`, `pemerge-test.sh`), toward SFX archives.
+    sections with no loader — their code copied and rebased, imports merged into the stub's table,
+    a dispatch table added (`demo/{stub,modadd,modxor}`, `pemerge-test.sh`), toward SFX archives.
   - `aqr-dll` — a module's binary built as a native library (`AQR_DLL_MODULE`; `build.sh` builds
     them into `target/aqr-dll/`) exporting `aqr_api::dll`, toward self-extracting archives;
-    `aqr-dll-shim` records applications from archives and runs the libraries on them.
+    `aqr-dll-shim` records applications from archives and runs the libraries on them (its own, or
+    the ones merged into it). `NOTLS=1 build.sh` builds for `x86_64-aqr-windows-msvc.json` (native
+    thread-locals off, so std uses TlsAlloc, not a TLS directory), which `aqr-ld merge` can take;
+    `merge-test.sh ARCHIVE...` is the end-to-end test (needs nightly and build-std).
   - `aqr-modules` — Wasm modules built from the recompressors' code (`src/bin`, `wasm/`,
     `src/known.rs`).
 - `codecs/` — the recompressor crates `aqr-*` (flate, png, jpeg, mp3, flac, pdf, zip, sqlite,
