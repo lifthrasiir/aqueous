@@ -1,23 +1,21 @@
-//! The self-extracting stub: an Aqueous archive is appended to this executable with a trailer,
-//! and running it decodes the archive and writes its files out.
+//! The self-extracting stub: an Aqueous archive is appended to this executable, and running it
+//! decodes the archive and writes its files out. The modules are run through the interpreter blob
+//! (`aqr-interp`) merged into this stub by `aqr-ld merge`, so the stub itself links no codecs and
+//! no Wasmtime; the interpreter blob holds Wasmtime and runs each module, sandboxed, found through
+//! the dispatch table the merge wrote into the anchor.
 //!
-//! The trailer is the last 16 bytes: the archive's length (`u64` little-endian) and the magic
-//! [`MAGIC`]; the archive is the bytes before it. `aqr-sfx` with no archive appended prints how
-//! it is made.
+//! The archive is found by its own header magic: the stub scans itself from the end for the last
+//! place a valid archive begins, so nothing is appended but the archive (which runs to the end of
+//! the file). An archive made with a size hint narrows the search.
 //!
 //! `aqr-sfx [DIR]` writes the files under `DIR` (the working directory by default).
-//!
-//! The modules are run by [`aqr_decompress::Native`]; an archive that names them by their
-//! registered hashes (shorthand module blocks) carries only the hashes, this stub the modules.
-//! (A leaner stub carrying only the modules it needs, merged in as native code, is the next step.)
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use aqr_formula::aqr::{EntryNode, Value};
+use aqr_formula::aqr::{self, EntryNode, HEADER_MAGIC, Value};
 
-/// The last 8 bytes of a stub with an archive appended.
-const MAGIC: &[u8; 8] = b"AQRSFX01";
+mod interp;
 
 fn main() -> ExitCode {
     match run() {
@@ -32,27 +30,22 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("cannot find the program: {e}"))?;
     let bytes = std::fs::read(&exe).map_err(|e| format!("{}: {e}", exe.display()))?;
-    let archive = archive_of(&bytes).ok_or(
-        "no archive is appended to this stub. Make a self-extracting archive by appending an \
-         Aqueous archive, its length (8 bytes, little-endian) and the magic \"AQRSFX01\".",
-    )?;
+    let runner = interp::Interp::find().ok_or("no interpreter blob is merged into this stub")?;
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+
+    // the appended archive runs to the end of the file; find where it begins by its header magic,
+    // scanning from the end and taking the last place a valid archive opens
+    let archive = (0..=bytes.len().saturating_sub(HEADER_MAGIC.len()))
+        .rev()
+        .filter(|&x| bytes[x..].starts_with(&HEADER_MAGIC))
+        .find_map(|x| aqr::open(&bytes[x..], &runner).ok())
+        .ok_or("no Aqueous archive is appended to this stub")?;
 
     let dest: PathBuf = std::env::args_os().nth(1).map_or_else(|| PathBuf::from("."), PathBuf::from);
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-    let value = aqr_decompress::decompress_value(archive, threads).map_err(|e| format!("{e:?}"))?;
+    let value = archive.value(threads).map_err(|e| format!("{e:?}"))?;
     let n = extract(value, &dest)?;
     eprintln!("aqr-sfx: {n} file{} written under {}", if n == 1 { "" } else { "s" }, dest.display());
     Ok(())
-}
-
-/// The archive appended to `bytes` (before its trailer), if any.
-fn archive_of(bytes: &[u8]) -> Option<&[u8]> {
-    let n = bytes.len();
-    if n < 16 || &bytes[n - 8..] != MAGIC {
-        return None;
-    }
-    let len = u64::from_le_bytes(bytes[n - 16..n - 8].try_into().ok()?) as usize;
-    bytes.get(n - 16 - len..n - 16)
 }
 
 /// Writes the files of `value` under `dest`, returning how many were written.
@@ -60,8 +53,7 @@ fn extract(value: Value, dest: &Path) -> Result<usize, String> {
     match value {
         Value::File(data) => {
             std::fs::create_dir_all(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
-            let path = dest.join("aqr-sfx-output");
-            write(&path, &data)?;
+            write(&dest.join("aqr-sfx-output"), &data)?;
             Ok(1)
         }
         Value::Tree(tree, contents) => {

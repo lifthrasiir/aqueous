@@ -52,9 +52,12 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     aqr-decompress (for modules it does not know natively) and the self-extracting interpreter
     blob. `Sandboxed` (native where known, else a worker) stays in aqr-decompress, which has the
     native modules.
-  - `aqr-sfx` — the self-extracting stub: an archive appended to it (with a trailer: its length
-    and the magic `AQRSFX01`) is decoded and its files written out when it runs. For now it links
-    the native decoder (`aqr-decompress`); a leaner stub carrying only the merged modules is next.
+  - `aqr-sfx` — the self-extracting stub (lean: aqr-formula only, no codecs or Wasmtime, ~1.3 MB):
+    an archive appended to it is decoded and its files written out when it runs. It finds the
+    archive by its header magic (scanning from the end, no trailer) and runs every module through
+    the interpreter blob (`aqr-interp`) merged into it (`src/interp.rs`: the vtable from the
+    dispatch, wrapped as a `Runner`). `aqr-ld merge --apply aqr_interp_vtable --info - interp=…`
+    merges the blob; then the archive is appended (`cat`).
   - `aqr-interp` — the interpreter blob: a module library (`aqr_interp_{load,apply,is_part,drop}`)
     that runs any Wasm module handed to it by Wasmtime (`aqr-wasmrt`), no codecs linked (~12 MB).
     Built for the no-TLS target (`NOTLS`) it is mergeable into a stub: the fallback for modules the

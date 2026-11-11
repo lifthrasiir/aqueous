@@ -262,3 +262,61 @@ pub unsafe extern "C" fn aqr_interp_apply_part(
         }
     }
 }
+
+// ---- the vtable: one export the merge records, holding every entry point
+
+/// The interpreter blob's entry points, so a stub that merges the blob in finds them all through
+/// one export ([`aqr_interp_vtable`]) rather than by name.
+#[repr(C)]
+pub struct Vtable {
+    pub load: unsafe extern "C" fn(Slice, SliceMut, *mut usize) -> *mut c_void,
+    pub is_part: unsafe extern "C" fn(*mut c_void) -> u32,
+    pub apply: unsafe extern "C" fn(
+        *mut c_void,
+        Slice,
+        *const Slice,
+        usize,
+        *const Slice,
+        usize,
+        u64,
+        *const u64,
+        usize,
+        *const SliceMut,
+        usize,
+        SliceMut,
+        *mut usize,
+    ) -> u32,
+    pub apply_part: unsafe extern "C" fn(
+        *mut c_void,
+        Slice,
+        *const Slice,
+        usize,
+        *const PartInC,
+        usize,
+        *const PartOutC,
+        usize,
+        *const u64,
+        usize,
+        u64,
+        *const u64,
+        usize,
+        SliceMut,
+        *mut usize,
+    ) -> u32,
+    pub drop: unsafe extern "C" fn(*mut c_void),
+}
+
+static VTABLE: Vtable = Vtable {
+    load: aqr_interp_load,
+    is_part: aqr_interp_is_part,
+    apply: aqr_interp_apply,
+    apply_part: aqr_interp_apply_part,
+    drop: aqr_interp_drop,
+};
+
+/// The blob's [`Vtable`], its only export the stub needs: its entry points, by a pointer the
+/// merge relocates.
+#[unsafe(no_mangle)]
+pub extern "C" fn aqr_interp_vtable() -> *const Vtable {
+    &VTABLE
+}

@@ -1119,8 +1119,9 @@ dependencies = [
 name = "aqr-sfx"
 version = "0.1.0"
 dependencies = [
- "aqr-decompress",
+ "aqr-api",
  "aqr-formula",
+ "windows-sys",
 ]
 
 [[package]]
