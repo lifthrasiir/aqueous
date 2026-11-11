@@ -15,12 +15,13 @@ dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
 
 "$shim" record "$dir/cases" "$@"
-# the modules the cases use, built for the no-TLS target and named for the merge
+# the modules the cases use, built for the no-TLS target and digested into blobs for the merge
 mods=$(cat "$dir"/cases/*/info | sed -n 's/^module //p' | sort -u)
 NOTLS=1 crates/aqr-dll/build.sh $mods
 args=""
 for m in $mods; do
-    args="$args $m=target/aqr-dll/$m.dll"
+    "$ld" blob --out "target/aqr-dll/$m.blob" "target/aqr-dll/$m.dll"
+    args="$args $m=target/aqr-dll/$m.blob"
 done
 # shellcheck disable=SC2086
 "$ld" merge --stub "$shim" --out "$dir/merged.exe" $args

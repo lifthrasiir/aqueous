@@ -25,10 +25,13 @@ fn main() -> ExitCode {
         link(&args)
     } else if args.first().is_some_and(|a| a == "merge") {
         pemerge::main(&args[1..])
+    } else if args.first().is_some_and(|a| a == "blob") {
+        pemerge::blob_main(&args[1..])
     } else if let [input, output] = &args[..] {
         process(input.into(), output.into(), true)
     } else {
-        Err("usage: aqr-ld <in.wasm> <out.wasm>, aqr-ld merge --stub S --out O NAME=MODULE.dll ..., \
+        Err("usage: aqr-ld <in.wasm> <out.wasm>, aqr-ld blob --out M.blob MODULE.dll, \
+             aqr-ld merge --stub S --out O NAME=MODULE ..., \
              or as the linker of wasm32-unknown-unknown"
             .into())
     };

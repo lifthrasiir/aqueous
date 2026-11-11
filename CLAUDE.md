@@ -42,9 +42,11 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     the hashed model of aqr-div3 and aqr-ac3 (their coding is specified in its README).
   - `aqr-bincache` — `cargo aqr`: the release `aqr` built and kept by a hash of its sources.
   - `aqr-api`, `aqr-ld` — the Rust interface of modules and the Wasm linker wrapper; aqr-ld also
-    has `merge` (`src/pemerge.rs`), which merges native module libraries into a stub executable as
-    sections with no loader — their code copied and rebased, imports merged into the stub's table,
-    a dispatch table added (`demo/{stub,modadd,modxor}`, `pemerge-test.sh`), toward SFX archives.
+    (`src/pemerge.rs`) has `blob`, which digests a module library into a blob (just the bytes and
+    facts a merge needs: image from the first section, no PE headers/`.reloc`/header gap, dead
+    directories zeroed), and `merge`, which merges blobs (or libraries) into a stub executable as
+    sections with no loader — code copied and rebased, imports merged into the stub's table, a
+    dispatch table added (`demo/{stub,modadd,modxor}`, `pemerge-test.sh`), toward SFX archives.
   - `aqr-dll` — a module's binary built as a native library (`AQR_DLL_MODULE`; `build.sh` builds
     them into `target/aqr-dll/`) exporting `aqr_api::dll`, toward self-extracting archives;
     `aqr-dll-shim` records applications from archives and runs the libraries on them (its own, or

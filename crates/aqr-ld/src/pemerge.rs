@@ -128,18 +128,6 @@ impl Pe {
         Err(format!("RVA {rva:#x} in no section"))
     }
 
-    /// The module's memory image: a buffer of `size_of_image` bytes, each section at its RVA.
-    fn image(&self) -> Vec<u8> {
-        let mut img = vec![0u8; self.size_of_image() as usize];
-        for s in &self.sections {
-            let n = s.raw_size.min(s.vsize.max(s.raw_size)) as usize;
-            let (src, dst) = (s.raw_ptr as usize, s.va as usize);
-            let n = n.min(self.buf.len().saturating_sub(src));
-            img[dst..dst + n].copy_from_slice(&self.buf[src..src + n]);
-        }
-        img
-    }
-
     /// The RVAs of every `DIR64` base relocation (type 10); an error on any other type.
     fn relocs(&self) -> Result<Vec<u32>> {
         let (rva, size) = self.dir(5);
@@ -216,46 +204,152 @@ impl Pe {
     }
 }
 
-/// Fixes the import thunk RVAs in a module's image `img` (placed at RVA `r`) by adding `r`, and
-/// returns its import descriptors adjusted the same way (without a terminator): the loader binds
-/// them in the merged image as though they were the stub's own.
-fn fix_imports(img: &mut [u8], dir1_rva: u32, r: u32) -> Result<Vec<u8>> {
+/// Fixes the import thunk RVAs in a module's image `img` (its bytes from RVA `first`, placed so
+/// that RVA `x` lands at `c + x`) by adding `c`, and returns its import descriptors adjusted the
+/// same way (without a terminator): the loader binds them in the merged image as the stub's own.
+fn fix_imports(img: &mut [u8], first: u32, dir1_rva: u32, c: u32) -> Result<Vec<u8>> {
     if dir1_rva == 0 {
         return Ok(Vec::new());
     }
+    let idx = |rva: u32| (rva - first) as usize;
     let mut out = Vec::new();
-    let mut d = dir1_rva as usize;
-    while img[d..d + 20].iter().any(|&b| b != 0) {
-        let (oft, name, ft) = (u32(img, d), u32(img, d + 12), u32(img, d + 16));
-        // each distinct thunk array: a by-name entry (high bit clear) is an RVA, so add r
+    let mut d = dir1_rva;
+    while img[idx(d)..idx(d) + 20].iter().any(|&b| b != 0) {
+        let o = idx(d);
+        let (oft, name, ft) = (u32(img, o), u32(img, o + 12), u32(img, o + 16));
+        // each distinct thunk array: a by-name entry (high bit clear) is an RVA, so add c
         let mut arrays = vec![oft, ft];
         arrays.retain(|&a| a != 0);
         arrays.dedup();
         for arr in arrays {
-            let mut t = arr as usize;
+            let mut t = idx(arr);
             loop {
                 let e = u64(img, t);
                 if e == 0 {
                     break;
                 }
                 if e & 0x8000_0000_0000_0000 == 0 {
-                    img[t..t + 8].copy_from_slice(&(e + r as u64).to_le_bytes());
+                    img[t..t + 8].copy_from_slice(&(e + c as u64).to_le_bytes());
                 }
                 t += 8;
             }
         }
-        let mut nd = img[d..d + 20].to_vec();
+        let mut nd = img[o..o + 20].to_vec();
         if oft != 0 {
-            put_u32(&mut nd, 0, oft + r);
+            put_u32(&mut nd, 0, oft + c);
         }
-        put_u32(&mut nd, 12, name + r);
+        put_u32(&mut nd, 12, name + c);
         if ft != 0 {
-            put_u32(&mut nd, 16, ft + r);
+            put_u32(&mut nd, 16, ft + c);
         }
         out.extend_from_slice(&nd);
         d += 20;
     }
     Ok(out)
+}
+
+/// A module digested from a library into just what the merge needs: its image laid out from the
+/// first section (no PE headers, no `.reloc` section, no header gap), its base relocations as a
+/// list, and the RVAs the merge resolves. RVAs are the module's own (over its image base); the
+/// image holds the bytes of `[first, last)`, indexed by `rva - first`.
+struct Blob {
+    apply_rva: u32,
+    info_rva: u32,
+    pdata_rva: u32,
+    pdata_count: u32,
+    import_dir_rva: u32,
+    first: u32,
+    image_base: u64,
+    relocs: Vec<u32>,
+    image: Vec<u8>,
+}
+
+const BLOB_MAGIC: &[u8; 4] = b"AQRB";
+
+impl Blob {
+    /// Digests a parsed library, resolving `apply_name` and (unless `-`) `info_name`.
+    fn of(pe: &Pe, apply_name: &str, info_name: &str) -> Result<Blob> {
+        // the image's span: the sections but `.reloc` (read into the relocation list instead)
+        let reloc_va = pe.dir(5).0;
+        let kept: Vec<&Section> = pe.sections.iter().filter(|s| s.va != reloc_va).collect();
+        let first = kept.iter().map(|s| s.va).min().ok_or("no sections")?;
+        let last = kept.iter().map(|s| s.va + s.vsize.max(s.raw_size)).max().unwrap();
+        let mut image = vec![0u8; (last - first) as usize];
+        for s in &kept {
+            let n = (s.raw_size as usize).min(pe.buf.len().saturating_sub(s.raw_ptr as usize));
+            let at = (s.va - first) as usize;
+            image[at..at + n].copy_from_slice(&pe.buf[s.raw_ptr as usize..s.raw_ptr as usize + n]);
+        }
+        // the dead directories' data, zeroed (the loader reads only the stub's)
+        let zero = |image: &mut [u8], (rva, size): (u32, u32)| {
+            if rva >= first && rva + size <= last {
+                image[(rva - first) as usize..(rva + size - first) as usize].fill(0);
+            }
+        };
+        for dir in [0, 6, 9, 10] {
+            // export, debug, thread storage, load config
+            zero(&mut image, pe.dir(dir));
+        }
+        Ok(Blob {
+            apply_rva: pe.export(apply_name)?,
+            info_rva: pe.export_opt(info_name)?,
+            pdata_rva: pe.dir(3).0,
+            pdata_count: pe.dir(3).1 / 12,
+            import_dir_rva: pe.dir(1).0,
+            first,
+            image_base: pe.image_base(),
+            relocs: pe.relocs()?,
+            image,
+        })
+    }
+
+    /// The blob serialized (`aqr-ld blob`). The header, then the relocations, then the image.
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(BLOB_MAGIC);
+        for v in [self.apply_rva, self.info_rva, self.pdata_rva, self.pdata_count, self.import_dir_rva, self.first] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        b.extend_from_slice(&self.image_base.to_le_bytes());
+        b.extend_from_slice(&(self.relocs.len() as u32).to_le_bytes());
+        for &r in &self.relocs {
+            b.extend_from_slice(&r.to_le_bytes());
+        }
+        b.extend_from_slice(&(self.image.len() as u32).to_le_bytes());
+        b.extend_from_slice(&self.image);
+        b
+    }
+
+    /// A blob parsed from bytes.
+    fn from_bytes(b: &[u8]) -> Result<Blob> {
+        if b.len() < 40 || &b[0..4] != BLOB_MAGIC {
+            return Err("not a module blob".into());
+        }
+        let n_relocs = u32(b, 36) as usize;
+        let relocs = (0..n_relocs).map(|i| u32(b, 40 + i * 4)).collect();
+        let at = 40 + n_relocs * 4;
+        let image_len = u32(b, at) as usize;
+        Ok(Blob {
+            apply_rva: u32(b, 4),
+            info_rva: u32(b, 8),
+            pdata_rva: u32(b, 12),
+            pdata_count: u32(b, 16),
+            import_dir_rva: u32(b, 20),
+            first: u32(b, 24),
+            image_base: u64(b, 28),
+            relocs,
+            image: b[at + 4..at + 4 + image_len].to_vec(),
+        })
+    }
+
+    /// A blob from a library or a blob file (by its first bytes).
+    fn read(path: &Path, apply_name: &str, info_name: &str) -> Result<Blob> {
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        match bytes.first_chunk::<4>() {
+            Some(BLOB_MAGIC) => Blob::from_bytes(&bytes),
+            _ => Blob::of(&Pe::parse(bytes)?, apply_name, info_name),
+        }
+    }
 }
 
 /// A new section to append to the stub.
@@ -302,36 +396,34 @@ pub fn merge(
     let mut descriptors = pe.descriptors()?;
 
     for (name, path) in modules {
-        let m = Pe::parse(std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?)?;
-        let r = next_va;
-        let mut img = m.image();
-        // rebase: an absolute address in the module (module_base + x) becomes stub_base + r + x
-        let delta = base.wrapping_add(r as u64).wrapping_sub(m.image_base());
-        for &loc in &m.relocs()? {
-            let o = loc as usize;
+        let b = Blob::read(path, apply_name, info_name)?;
+        // the image (bytes from RVA `first`) lands at `va`, so RVA `x` is at `c + x`
+        let va = next_va;
+        let c = va.wrapping_sub(b.first);
+        let mut img = b.image;
+        // rebase: an absolute address in the module (module_base + x) becomes stub_base + c + x
+        let delta = base.wrapping_add(c as u64).wrapping_sub(b.image_base);
+        for &loc in &b.relocs {
+            let o = (loc - b.first) as usize;
             let v = u64::from_le_bytes(img[o..o + 8].try_into().unwrap()).wrapping_add(delta);
             img[o..o + 8].copy_from_slice(&v.to_le_bytes());
-            new_relocs.push(r + loc);
+            new_relocs.push(c.wrapping_add(loc));
         }
-        descriptors.extend_from_slice(&fix_imports(&mut img, m.dir(1).0, r)?);
-        let (pdata_rva, pdata_size) = m.dir(3);
+        descriptors.extend_from_slice(&fix_imports(&mut img, b.first, b.import_dir_rva, c)?);
         entries.push(Entry {
             name: name.clone(),
-            apply_rva: r + m.export(apply_name)?,
-            info_rva: match m.export_opt(info_name)? {
-                0 => 0,
-                e => r + e,
-            },
-            pdata_rva: if pdata_rva == 0 { 0 } else { r + pdata_rva },
-            pdata_count: pdata_size / 12,
-            mod_base: r,
+            apply_rva: c.wrapping_add(b.apply_rva),
+            info_rva: if b.info_rva == 0 { 0 } else { c.wrapping_add(b.info_rva) },
+            pdata_rva: if b.pdata_rva == 0 { 0 } else { c.wrapping_add(b.pdata_rva) },
+            pdata_count: b.pdata_count,
+            mod_base: c,
         });
         let vsize = img.len() as u32;
         let mut sname = [0u8; 8];
         let tag = format!(".aqrm{:02}", news.len());
         sname[..tag.len().min(8)].copy_from_slice(&tag.as_bytes()[..tag.len().min(8)]);
-        news.push(New { name: sname, va: r, vsize, flags: SEC_FLAGS, data: img });
-        next_va = align(r + vsize, salign);
+        news.push(New { name: sname, va, vsize, flags: SEC_FLAGS, data: img });
+        next_va = align(va + vsize, salign);
     }
 
     // the import directory: the descriptors gathered, zero-terminated
@@ -464,4 +556,31 @@ pub fn main(args: &[std::ffi::OsString]) -> Result<()> {
     let stub: std::path::PathBuf = stub.ok_or("merge: no --stub")?;
     let out: std::path::PathBuf = out.ok_or("merge: no --out")?;
     merge(&stub, &out, &modules, &apply_name, &info_name)
+}
+
+/// `aqr-ld blob --out M.blob [--apply NAME] [--info NAME] MODULE.dll`: digests a module library
+/// into a blob (just the bytes and the facts the merge needs, no PE format).
+pub fn blob_main(args: &[std::ffi::OsString]) -> Result<()> {
+    let mut out = None;
+    let mut apply_name = "aqr_dll_apply".to_owned();
+    let mut info_name = "aqr_dll_info".to_owned();
+    let mut dll = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let val = |it: &mut std::slice::Iter<std::ffi::OsString>, w: &str| {
+            it.next().and_then(|s| s.to_str().map(str::to_owned)).ok_or(format!("{w}: no value"))
+        };
+        match a.to_str() {
+            Some("--out") => out = Some(it.next().ok_or("--out: no path")?.into()),
+            Some("--apply") => apply_name = val(&mut it, "--apply")?,
+            Some("--info") => info_name = val(&mut it, "--info")?,
+            _ => dll = Some(std::path::PathBuf::from(a)),
+        }
+    }
+    let out: std::path::PathBuf = out.ok_or("blob: no --out")?;
+    let dll = dll.ok_or("blob: no module library")?;
+    let pe = Pe::parse(std::fs::read(&dll).map_err(|e| format!("{}: {e}", dll.display()))?)?;
+    let blob = Blob::of(&pe, &apply_name, &info_name)?;
+    std::fs::write(&out, blob.to_bytes()).map_err(|e| format!("{}: {e}", out.display()))?;
+    Ok(())
 }
