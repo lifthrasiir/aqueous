@@ -65,6 +65,9 @@ pub(crate) fn pe(d: &[u8]) -> Option<usize> {
     let (mut end, dirs) = pe_sections(d)?;
     if let Some(len) = d.get(clamp(d, end)..).and_then(crate::nsis::data_len) {
         end += len as u64;
+    } else if let Some(total) = aqr_inno::end(d) {
+        // (an Inno Setup installer's data, up to where a certificate may follow)
+        end = end.max(total as u64);
     }
     // The certificate table (directory 4), the only one given by file offset.
     if u32le(d, dirs - 4)? > 4 {
@@ -669,6 +672,14 @@ mod tests {
             crate::nsis::in_pe(&nsis).map(|b| b.into_iter().map(|r| &nsis[r]).collect()),
             Some(vec![&b"files"[..]])
         );
+        // An Inno Setup installer's data: the loader's offset table among the headers' padding,
+        // the data, the setup header and the setup program, up to the total
+        let mut inno = d[..0x380].to_vec();
+        inno[opt + 96 + 32..opt + 96 + 40].fill(0);
+        let table = aqr_inno::Table { total: 0x3c0, exe: 0x3b0, header: 0x3a0, data: 0x380 }.to_bytes();
+        inno[0x1c0..0x1c0 + table.len()].copy_from_slice(&table);
+        inno.resize(0x3c0, 1);
+        ends(Format::Pe, &inno);
     }
 
     #[test]

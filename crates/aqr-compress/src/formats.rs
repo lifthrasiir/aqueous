@@ -136,7 +136,7 @@ macro_rules! formats {
 
 formats! {
     /// PE image of x86, x86-64 or ARM64 (aqr-exe on its executable sections).
-    Pe = "pe" { recompressor: Cx(|d, _, _, _, _| crate::exe::pe(d)), heap: 9.0, extent: extent::pe, cost: 160 }
+    Pe = "pe" { recompressor: Cx(|d, _, opt, _, _| crate::exe::pe(d, opt)), heap: 9.0, extent: extent::pe, cost: 160 }
     /// Mach-O file, thin or universal (aqr-exe on the executable sections of its x86, x86-64
     /// and ARM64 images).
     MachO = "macho" {

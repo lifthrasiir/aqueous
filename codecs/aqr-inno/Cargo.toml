@@ -1,0 +1,17 @@
+[package]
+name = "aqr-inno"
+version = "0.1.0"
+edition = "2024"
+description = "Inno Setup installers: the LZMA streams of their file data found and split by aqr-lzma, without a module of their own"
+publish = false
+
+[dependencies]
+aqr-lzma = { path = "../aqr-lzma" }
+crc32fast = "1.5"
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-inno-check"
+path = "examples/check.rs"

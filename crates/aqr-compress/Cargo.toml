@@ -40,6 +40,7 @@ aqr-hfs = { path = "../../codecs/aqr-hfs" }
 aqr-ntfs = { path = "../../codecs/aqr-ntfs" }
 aqr-iso = { path = "../../codecs/aqr-iso" }
 aqr-wim = { path = "../../codecs/aqr-wim" }
+aqr-inno = { path = "../../codecs/aqr-inno" }
 aqr-flac = { path = "../../codecs/aqr-flac" }
 aqr-jpeg = { path = "../../codecs/aqr-jpeg" }
 aqr-lz4 = { path = "../../codecs/aqr-lz4" }

@@ -1238,7 +1238,9 @@ fn recompress_sealed(
     // (an ar, tar or cpio archive only bundles files: they are as deep as it is; and so are
     // those an NSIS installer stores)
     let deeper;
-    let opt = match format.is_bundle() || format == Format::Pe && nsis::in_pe(d).is_some_and(|b| !b.is_empty()) {
+    let opt = match format.is_bundle()
+        || format == Format::Pe && (nsis::in_pe(d).is_some_and(|b| !b.is_empty()) || aqr_inno::end(d).is_some())
+    {
         true => {
             deeper = Options { depth: opt.depth.saturating_add(1), ..opt.clone() };
             &deeper

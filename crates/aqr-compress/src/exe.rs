@@ -7,7 +7,8 @@
 //! e.g. for the images among the resources. Of a PE image, its tables of known layouts outside
 //! the code are taken too: the base relocations by `exe-recons/pe-reloc`, the tables of exports,
 //! imports and runtime functions by `recs-fields`, their numbers as deltas; of an NSIS
-//! installer, the files its data stores, each a content of its format ([`crate::nsis`]). Of a 64-bit Mach-O
+//! installer, the files its data stores, each a content of its format ([`crate::nsis`]); of an Inno
+//! Setup installer, the LZMA streams of its file data rebuilt from their data ([`aqr_inno`]). Of a 64-bit Mach-O
 //! image, the symbol table and its string table by `exe-recons/macho-symtab`; of its `__DWARF`
 //! segment, its DWARF by aqr-dwarf's modules ([`crate::dwarf`]). ELF images, of their code and
 //! their DWARF.
@@ -60,6 +61,9 @@ enum Arch {
     /// A file of this format, stored in an NSIS installer's data ([`crate::nsis`]): a content
     /// of its own.
     Stored(&'static str),
+    /// The `k`-th LZMA stream of an Inno Setup installer's file data ([`aqr_inno`]): rebuilt from
+    /// its data, a content of its own.
+    Inno(usize),
     /// A Mach-O image's code signature, left out (for `exe-recons/macho-codesign` to put back).
     Signature,
     /// A section of data of a Mach-O image coded against its tree's root's, or the root's
@@ -74,7 +78,7 @@ const MIN_TABLE: usize = 64;
 /// module would cost more.
 const MIN_SYMBOLS: usize = 16 << 10;
 
-pub(crate) fn pe(d: &[u8]) -> Option<Formula> {
+pub(crate) fn pe(d: &[u8], opt: &crate::Options) -> Option<Formula> {
     let code = locate_code(&mut Cursor::new(d)).ok()?;
     let arch = match code.machine {
         0x14c | 0x8664 => Some(Arch::X86(code.is64, 0)),
@@ -111,7 +115,13 @@ pub(crate) fn pe(d: &[u8]) -> Option<Formula> {
             sections.push((0, b.start, b.len(), Arch::Stored(format.name())));
         }
     }
-    filtered(d, "pe", sections, &[], &[], None, &[])
+    // the LZMA streams of an Inno Setup installer's data (slow for their bytes: from level 4)
+    let inno = match opt.level.scale() >= 4 && opt.recompresses() {
+        true => aqr_inno::split(d, opt.threads),
+        false => Vec::new(),
+    };
+    sections.extend(inno.iter().enumerate().map(|(k, p)| (0, p.range.start, p.range.len(), Arch::Inno(k))));
+    filtered(d, "pe", sections, &[], &[], None, &[], inno)
 }
 
 /// An image's code: `(virtual address, offset, size)` of each section, within its file.
@@ -162,7 +172,7 @@ pub(crate) fn elf(d: &[u8], remaps: &[Option<Arc<Remap>>], deltas: &[Option<Delt
             Some(crate::dwarf::Debug { section, image: 0, off: s.off, size: s.size })
         })
         .collect();
-    filtered(d, "elf", sections.collect(), remaps, deltas, None, &debug)
+    filtered(d, "elf", sections.collect(), remaps, deltas, None, &debug, Vec::new())
 }
 
 /// The formula of Mach-O file `d`, its images remapped as `remaps` tells (by image).
@@ -202,7 +212,7 @@ pub(crate) fn macho(
         .map(|s| (0, s.1, s.2, Arch::Data))
         .collect();
     let all = sections.chain(symbols).chain(left).chain(pointers).collect();
-    let mut f = filtered(d, "macho", all, remaps, deltas, data, &debug)?;
+    let mut f = filtered(d, "macho", all, remaps, deltas, data, &debug, Vec::new())?;
     if let Some(s) = signed {
         // (unless a signature overlapped what went before, and was kept in the rest)
         let without: usize = s.ranges.iter().map(|r| r.len()).sum();
@@ -573,6 +583,7 @@ fn filtered(
     deltas: &[Option<Delta>],
     data: Option<&HashMap<usize, Delta>>,
     debug: &[crate::dwarf::Debug],
+    mut inno: Vec<aqr_inno::Piece>,
 ) -> Option<Formula> {
     // In file order, a CIL section before those within it; sections overlapping an earlier
     // one are left in the rest.
@@ -605,6 +616,12 @@ fn filtered(
         let apply = match arch {
             Arch::Output(k) => outputs[k].take().expect("an output placed twice"),
             Arch::Stored(format) => f.push_content("nsis", Kind::Format(format), section.to_vec()),
+            Arch::Inno(k) => {
+                let p = std::mem::take(&mut inno[k]);
+                let data = f.push_content("inno", Kind::Unknown, p.data);
+                let inputs = vec![data, f.push("lzma/record", p.record), f.push("lzma/index", Vec::new())];
+                Node::apply(aqr_lzma::formula::MODULE, Vec::new(), inputs, size as u64)
+            }
             Arch::Data => match data.and_then(|data| data.get(&off)) {
                 Some(d) => against(&mut f, section, d, DATA, "macho-delta"),
                 None => f.push(DATA, section.to_vec()),
@@ -711,7 +728,13 @@ fn code_apply(
                 (0..fields).map(|i| Field { off: i * width, width, big: false, how: How::Delta }).collect();
             aqr_infer_recs::formula::apply_fields(f, "pe/table", section, k, &fl)
         }
-        Arch::Cil(_) | Arch::Symbols { .. } | Arch::Output(_) | Arch::Stored(_) | Arch::Signature | Arch::Data => {
+        Arch::Cil(_)
+        | Arch::Symbols { .. }
+        | Arch::Output(_)
+        | Arch::Stored(_)
+        | Arch::Inno(_)
+        | Arch::Signature
+        | Arch::Data => {
             return None;
         }
     })

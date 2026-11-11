@@ -255,6 +255,7 @@ dependencies = [
  "aqr-hdf5",
  "aqr-hfs",
  "aqr-infer-recs",
+ "aqr-inno",
  "aqr-iso",
  "aqr-jpeg",
  "aqr-jsonl",
@@ -625,6 +626,14 @@ dependencies = [
  "aqr-formula",
  "xxhash-rust",
  "zstd",
+]
+
+[[package]]
+name = "aqr-inno"
+version = "0.1.0"
+dependencies = [
+ "aqr-lzma",
+ "crc32fast",
 ]
 
 [[package]]
