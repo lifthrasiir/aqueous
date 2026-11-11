@@ -270,7 +270,12 @@ pub fn inspect<'c>(
         // (by their names alone in the formulas, their versions apart)
         let mods = module_names(&p, &|w| name(w).map(|n| n.split('@').next().unwrap_or(&n).to_owned()));
         seg.modules = (p.modules.iter().enumerate())
-            .map(|(i, w)| Aux { at: p.module_at[i], size: sizes.modules[i], decoded: Some(w.len()), name: name(w) })
+            .map(|(i, w)| Aux {
+                at: p.module_at[i],
+                size: sizes.modules[i],
+                decoded: w.bytes().map(<[u8]>::len),
+                name: w.bytes().and_then(|b| name(b)),
+            })
             .collect();
         seg.resources = (p.resources.iter().enumerate())
             .map(|(i, r)| Aux { at: p.resource_at[i], size: sizes.resources[i], decoded: Some(r.len()), name: None })
@@ -474,7 +479,8 @@ impl Inspection<'_> {
         let mut out: Vec<Application> = Vec::new();
         for a in g.applications() {
             let name = names[a.module].clone();
-            let full = a.full(&super::class_slots(&self.parsed[segment].modules[a.module]));
+            let full =
+                a.full(&self.parsed[segment].modules[a.module].bytes().map(super::class_slots).unwrap_or_default());
             let is_part = part(&name);
             let minimal = a.minimal();
             // (the applications are in the order they were made, inputs first)

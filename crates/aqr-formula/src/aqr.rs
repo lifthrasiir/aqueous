@@ -26,8 +26,9 @@
 //! An archive of several files is of one or more segments (`segment`): [`Encoder::encode_segment`]
 //! lays out the formulas of the files over streams they may share, with the metadata block of
 //! their [`Tree`], and [`SegmentWriter`] writes them a batch at a time, closing a segment where
-//! it is told to. [`decode_value`] decodes any archive (without registered dictionaries or
-//! imports) to its files, the trees of its segments merged. The blocks alike of a batch of its
+//! it is told to. [`decode_value`] decodes any archive (shorthand module blocks resolved through
+//! the runner's registry; registered dictionaries and imports apart) to its files, the trees of
+//! its segments merged. The blocks alike of a batch of its
 //! leaves may take a dictionary trained for them (`dict`).
 
 mod dict;
@@ -409,6 +410,10 @@ pub enum Wasm {
     Bytes(Cow<'static, [u8]>),
     /// The data of its module block made beforehand ([`module_block_data`]), written as it is.
     Block(Cow<'static, [u8]>),
+    /// Its SHA-512/256, written as a shorthand module block (32 bytes, no module bytes): the
+    /// decompressor reconstructs the module from its own registry (spec, "Registered dictionaries
+    /// and modules"). The module must be registered, or the archive cannot be decoded.
+    Registered([u8; 32]),
 }
 
 /// The zstd level of the module blocks made beforehand: modules are made once and archived
@@ -613,7 +618,8 @@ impl Encoder {
         let class = |m: &Module| match (self.wasm)(*m) {
             Some(Wasm::Bytes(b)) => task_classes(&b),
             Some(Wasm::Block(d)) => module_of_block_data(&d).map_or(0, |w| task_classes(&w)),
-            None => 0,
+            // a registered module's classes are not known here without its bytes
+            Some(Wasm::Registered(_)) | None => 0,
         };
         modules.iter().map(class).collect()
     }
@@ -635,6 +641,16 @@ impl Encoder {
         }
     }
 
+    /// Appends module block `m` to `out`: a shorthand block where its Wasm is
+    /// [`Wasm::Registered`], else a full module block of its bytes.
+    fn write_module(&self, out: &mut impl Out, m: Module, level: i32) -> Result<()> {
+        match (self.wasm)(m) {
+            Some(Wasm::Registered(hash)) => shorthand_block(out, MODULE, &hash),
+            _ => block(out, MODULE, &self.module_block(m, level)?),
+        }
+        Ok(())
+    }
+
     fn module_block(&self, m: Module, level: i32) -> Result<ModuleBlock> {
         if let Some(b) = self.module_blocks.borrow().get(&(m, level)) {
             return Ok(b.clone());
@@ -643,6 +659,8 @@ impl Encoder {
         let b = ModuleBlock::new(match wasm {
             Wasm::Block(b) => b.into_owned(),
             Wasm::Bytes(w) => always_compressed(&mut self.cctx(), &[&w], level, self.threads)?,
+            // a shorthand block is written by `write_module`, not through here
+            Wasm::Registered(_) => return Err(Error::new(format!("{m} is registered, with no module block"))),
         });
         self.module_blocks.borrow_mut().insert((m, level), b.clone());
         Ok(b)
@@ -672,7 +690,7 @@ impl Encoder {
         let mut n = Count(0);
         let (modules, _) = f.blocks();
         for m in modules {
-            block(&mut n, MODULE, &self.module_block(m, self.base_level())?);
+            self.write_module(&mut n, m, self.base_level())?;
         }
         Ok(n.0)
     }
@@ -760,7 +778,7 @@ impl Encoder {
         }
         let mut n = Count(0);
         for m in modules {
-            block(&mut n, MODULE, &self.module_block(m, self.base_level())?);
+            self.write_module(&mut n, m, self.base_level())?;
         }
         Ok(n.0)
     }
@@ -969,7 +987,7 @@ impl Encoder {
                 self.precompress_blocks(blocks, true)?;
             }
             for &m in &modules {
-                block(out, MODULE, &self.module_block(m, level)?);
+                self.write_module(out, m, level)?;
             }
             for r in resources {
                 self.resource_block(out, r)?;
@@ -1447,6 +1465,21 @@ fn block_of(out: &mut impl Out, ty: u64, parts: &[&[u8]]) {
 /// Appends a dictionary block of `data` (with entropy tables), compressed.
 fn dictionary_block(out: &mut impl Out, data: &[u8]) {
     block(out, DICTIONARY, data);
+}
+
+/// Appends a shorthand block (`DICTIONARY` or `MODULE`) of a 32-byte registered `hash`: the type
+/// with a 1-byte size, which [`block_of`] never makes for these (spec, "Registered dictionaries
+/// and modules").
+fn shorthand_block(out: &mut impl Out, ty: u64, hash: &[u8; 32]) {
+    let start = out.len();
+    let mut head = Vec::with_capacity(2);
+    varint::put(&mut head, ty); // a 1-byte size follows (size class 0)
+    head.push(hash.len() as u8);
+    out.put(&head);
+    out.put(hash);
+    if (out.len() - start) % 2 == 1 {
+        out.put(&[0]);
+    }
 }
 
 /// Appends a dictionary block standing in for another, where an archive is to have as many
@@ -2473,6 +2506,14 @@ pub trait Runner: Sync {
     /// Wasm module `wasm` made ready to apply, once for each module block applied; a failure if
     /// it is not a module, or cannot be run here.
     fn load(&self, wasm: &[u8]) -> Decoded<Box<dyn Loaded + '_>>;
+
+    /// The Wasm module a shorthand module block's registered `hash` stands for (spec, "Registered
+    /// dictionaries and modules"), from the runner's own registry; a failure if it is not known.
+    /// A runner with a registry overrides this; the default knows none.
+    fn registered(&self, hash: &[u8; 32]) -> Decoded<Vec<u8>> {
+        let _ = hash;
+        resource("this runner knows no registered modules")
+    }
 }
 
 /// A module made ready to apply ([`Runner::load`]).
@@ -3281,7 +3322,7 @@ impl<'c, 'n> Archive<'c, 'n> {
     /// How far the archive conforms to the archival profile (spec, "Archival profile"), as its
     /// blocks tell: its leaf data blocks without a checksum, and its formula blocks with an output
     /// no Checksum instruction covers (every formula block read). An archive opened is standalone
-    /// and has no shorthand blocks (which are not supported yet).
+    /// (a dictionary shorthand block, which is not supported yet, is not opened at all).
     pub fn archival(&self) -> Decoded<Archival> {
         let blocks = self.parsed()?;
         let mut a = Archival::default();
@@ -3388,7 +3429,7 @@ impl<'c, 'n> Archive<'c, 'n> {
             }
         }
         // by leaf, its weight, the bytes of its outputs and of its work on a thread
-        let slots: Vec<u64> = blocks.modules.iter().map(|w| task_slots(w)).collect();
+        let slots: Vec<u64> = blocks.modules.iter().map(|m| m.wasm(self.runner).map_or(0, task_slots)).collect();
         let (mut weights, mut lens, mut serial) = (Vec::new(), Vec::new(), Vec::new());
         for (leaf, p) in blocks.leaves.iter().zip(&programs) {
             let (w, l, t) = match (leaf, p) {
@@ -3680,6 +3721,35 @@ fn leb(d: &[u8], at: &mut usize) -> Decoded<u64> {
 /// to them within a segment (a formula block to module, resource and non-leaf blocks, a block
 /// to its dictionary, a metadata block to its blocks) is taken within that segment's
 /// ([`Segmented`]).
+/// A module block's module: its Wasm bytes, or a shorthand block's registered hash, whose module
+/// the runner reconstructs from its registry on first use (spec, "Registered dictionaries and
+/// modules"). A shorthand block carries no module bytes, so none are decompressed or hashed.
+enum ModuleSrc {
+    Wasm(Vec<u8>),
+    Registered([u8; 32], OnceLock<Decoded<Vec<u8>>>),
+}
+
+impl ModuleSrc {
+    /// The Wasm module's bytes where they are at hand (not a shorthand block, which carries none
+    /// before it is resolved): for inspection, which has no runner.
+    fn bytes(&self) -> Option<&[u8]> {
+        match self {
+            ModuleSrc::Wasm(w) => Some(w),
+            ModuleSrc::Registered(..) => None,
+        }
+    }
+
+    /// The Wasm module, resolving a registered hash through `runner` once and keeping it.
+    fn wasm(&self, runner: &dyn Runner) -> Decoded<&[u8]> {
+        match self {
+            ModuleSrc::Wasm(w) => Ok(w),
+            ModuleSrc::Registered(h, cell) => {
+                cell.get_or_init(|| runner.registered(h)).as_ref().map(Vec::as_slice).map_err(Failure::clone)
+            }
+        }
+    }
+}
+
 struct Blocks<'c> {
     leaves: Vec<LeafBlock<'c>>,
     /// Where the leaf, module and resource blocks start, in the archive.
@@ -3704,7 +3774,7 @@ struct Blocks<'c> {
     non_leaf: Vec<(&'c [u8], bool, Option<usize>)>,
     /// Where each non-leaf block starts, in the archive.
     non_leaf_at: Vec<usize>,
-    modules: Vec<Vec<u8>>,
+    modules: Vec<ModuleSrc>,
     resources: Vec<Resource>,
     /// The data of each module and resource block as stored, for ModuleBytes and ResourceBytes
     /// instructions.
@@ -3865,12 +3935,19 @@ fn parse(d: &[u8], base: usize, size_hint: u64, metadata: bool, sealed: bool) ->
                 b.sizes.dictionaries.push(size);
                 b.dictionaries.push(dict::Dictionary::read(decoded(data, true, true)?, ty & 0x04 != 0)?);
             }
-            // a shorthand block: the hash of a registered module
-            0x60 => return resource("registered modules are not supported yet"),
+            // a shorthand block: the hash of a registered module (resolved on first use)
+            0x60 => {
+                let hash: [u8; 32] =
+                    data.try_into().map_err(|_| Failure::Invalid("a module shorthand block not 32 bytes".into()))?;
+                b.module_at.push(at);
+                b.sizes.modules.push(size);
+                b.modules.push(ModuleSrc::Registered(hash, OnceLock::new()));
+                b.module_data.push(data);
+            }
             0x61..=0x63 => {
                 b.module_at.push(at);
                 b.sizes.modules.push(size);
-                b.modules.push(module_of_decoded(decoded(data, true, true)?)?);
+                b.modules.push(ModuleSrc::Wasm(module_of_decoded(decoded(data, true, true)?)?));
                 b.module_data.push(data);
             }
             0x64..=0x67 => {
@@ -4109,7 +4186,7 @@ fn unzstd_with(dctx: &mut zstd_safe::DCtx, window: u8, blocks: &[u8], size: u64)
 struct Env<'a, 'n> {
     /// The ordinal of the first non-leaf block after the formula block.
     first: usize,
-    modules: &'a [Vec<u8>],
+    modules: &'a [ModuleSrc],
     /// The data of the module and resource blocks as stored.
     module_data: &'a [&'a [u8]],
     resource_data: &'a [&'a [u8]],
@@ -4438,11 +4515,14 @@ fn read<'a>(d: &'a [u8], outputs: u64, env: &Env<'a, '_>, non_leaf: usize, used:
         let insn = match op {
             NOP => Insn::Nop,
             LITERAL => Insn::Literal(r.bytes()?),
-            // the data of a block as stored, pushed as a literal is (of a module block in full:
-            // shorthand blocks, which it may not take, are not supported yet)
+            // the data of a block as stored, pushed as a literal is; the block must be a module
+            // block in full, not a shorthand block (spec, "`module_bytes`")
             MODULE_BYTES => {
                 let module = r.index(modules.len())?;
                 m_used[module] = true;
+                if matches!(env.modules[modules[module]], ModuleSrc::Registered(..)) {
+                    return invalid("a ModuleBytes instruction of a shorthand module block");
+                }
                 stored_bytes(env.module_data[modules[module]], r.num()?)?
             }
             RESOURCE_BYTES => {
@@ -4727,12 +4807,13 @@ fn within_limit(a: &Apply, module: usize) -> Decoded<()> {
 
 /// The outputs of application `a` of module block `module`.
 fn apply(env: &Env, module: usize, a: &Apply, inputs: &[&[u8]], resources: &[Resource]) -> Decoded<Vec<Vec<u8>>> {
-    let loaded = env.loaded[module].get_or_init(|| env.runner.load(&env.modules[module]));
+    let wasm = env.modules[module].wasm(env.runner)?;
+    let loaded = env.loaded[module].get_or_init(|| env.runner.load(wasm));
     let loaded = loaded.as_ref().map_err(Failure::clone)?;
-    let classes = task_classes(&env.modules[module]);
+    let classes = task_classes(wasm);
     if a.old {
         // (the memory limit was an estimate of all of the application's memories: not enforced)
-        if !released(&env.modules[module]) {
+        if !released(wasm) {
             return invalid(format!("module block {module}: the reserved Apply instruction of a module not released"));
         }
         let outputs = loaded.apply(a.params, resources, inputs, &a.output_sizes, crate::NO_LIMIT, &[])?;
@@ -4829,6 +4910,46 @@ mod tests {
 
     pub(super) fn natives() -> Natives<'static, impl crate::Modules + Sync> {
         super::natives(&[REV, CUT], &RevCut)
+    }
+
+    /// A module written as a shorthand block (its registered hash alone, no module bytes): the
+    /// decompressor reconstructs it from the hash through the runner, skipping the decompression
+    /// and hashing of a full module block, and decodes the archive the same. Without a registry
+    /// that knows the hash, the archive cannot be decoded.
+    #[test]
+    fn shorthand_module() {
+        use sha2::Digest;
+        let mut f = Formula::default();
+        let d: Vec<u8> = (0..2000u32).map(|i| (i * 11 % 251) as u8).collect();
+        let a = f.push("a", d.clone());
+        f.root = Node::apply(REV, vec![1, 2, 3], vec![a], d.len() as u64);
+        let want: Vec<u8> = d.iter().rev().copied().collect();
+        let wasm = stand_in(REV);
+        let hash: [u8; 32] = sha2::Sha512_256::digest(&wasm).into();
+        // the archive names REV by its registered hash (a shorthand module block, type 0x60)
+        fn reg(m: Module) -> Option<Wasm> {
+            use sha2::Digest;
+            (m == REV).then(|| Wasm::Registered(sha2::Sha512_256::digest(stand_in(REV)).into()))
+        }
+        let c = Encoder::new(Level::Zstd(1)).with_modules(reg).encode(&f, Some(checksum(&want))).unwrap();
+
+        // a runner that reconstructs REV's module from the hash, then runs it (as natives does)
+        struct Short<R> {
+            inner: R,
+            hash: [u8; 32],
+            wasm: Vec<u8>,
+        }
+        impl<R: Runner> Runner for Short<R> {
+            fn load(&self, w: &[u8]) -> Decoded<Box<dyn Loaded + '_>> {
+                self.inner.load(w)
+            }
+            fn registered(&self, h: &[u8; 32]) -> Decoded<Vec<u8>> {
+                if *h == self.hash { Ok(self.wasm.clone()) } else { resource("unknown registered module") }
+            }
+        }
+        assert!(decode(&c, &Short { inner: natives(), hash, wasm }).unwrap() == want);
+        // the default runner knows no registered modules, so the shorthand cannot be resolved
+        assert!(matches!(decode(&c, &natives()), Err(Failure::Resource(_))));
     }
 
     /// Patches in archives: of a slice, and of an output of an application of several outputs
@@ -6365,7 +6486,8 @@ mod tests {
             assert_eq!(out[0] as u64, ty + 1);
         }
         let shorthand = |ty: u8| archive(|out| out.extend([&[ty, 32][..], &[7; 32]].concat()));
-        assert_eq!(decode(&shorthand(0x60), &natives()), resource("registered modules are not supported yet"));
+        // a module shorthand block is parsed (resolved only when applied, which this one is not)
+        assert_eq!(decode(&shorthand(0x60), &natives()), Ok(Vec::new()));
         assert_eq!(decode(&shorthand(0x50), &natives()), resource("registered dictionaries are not supported yet"));
     }
 

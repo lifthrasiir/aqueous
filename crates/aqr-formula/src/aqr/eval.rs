@@ -681,7 +681,8 @@ pub(super) fn run<'a>(
     };
     let loaded = |a: &Apply<'a>| {
         let m = p.modules[a.module];
-        env.loaded[m].get_or_init(|| env.runner.load(&env.modules[m])).as_ref().map_err(Failure::clone)
+        let w = env.modules[m].wasm(env.runner)?;
+        env.loaded[m].get_or_init(|| env.runner.load(w)).as_ref().map_err(Failure::clone)
     };
     let apply = |a: Ap<'_, 'a>, inputs: &[&[u8]]| {
         let a = block(a);
@@ -1303,7 +1304,8 @@ pub(super) fn hashed(
         |a: &Apply| -> Vec<Resource> { a.resources.iter().map(|&i| env.resources[p.resources[i]].clone()).collect() };
     let loaded = |a: &Apply| {
         let m = p.modules[a.module];
-        env.loaded[m].get_or_init(|| env.runner.load(&env.modules[m])).as_ref().map_err(Failure::clone)
+        let w = env.modules[m].wasm(env.runner)?;
+        env.loaded[m].get_or_init(|| env.runner.load(w)).as_ref().map_err(Failure::clone)
     };
     let apply = |a: Ap<'_, '_>, inputs: &[&[u8]]| {
         let a = block(a);
@@ -1327,7 +1329,8 @@ pub(super) fn hashed(
         threads: Threads::default(),
         kept: None,
     };
-    let names: Vec<Option<String>> = p.modules.iter().map(|&m| identify(&env.modules[m])).collect();
+    let names: Vec<Option<String>> =
+        p.modules.iter().map(|&m| env.modules[m].wasm(env.runner).ok().and_then(|w| identify(w))).collect();
     let key = |a: &Apply, ins: &[Ch]| -> Option<u128> {
         let name = names[a.module].as_deref()?;
         let res: Vec<Ch> = a.resources.iter().map(|&i| Ch::of(&env.resources[p.resources[i]])).collect();

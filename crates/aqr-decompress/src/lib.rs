@@ -943,6 +943,21 @@ pub fn built(m: Module) -> Option<&'static aqr_modules::Known> {
     aqr_modules::KNOWN.iter().find(|k| k.name == m.name && k.version == m.version)
 }
 
+/// The Wasm module a shorthand module block's registered `hash` stands for, reconstructed from
+/// the module blocks this crate carries (`aqr_modules::KNOWN`): the archive names it by its hash
+/// alone, with no module bytes of its own. A known hash runs natively all the same.
+fn registered_module(hash: &[u8; 32]) -> aqr::Decoded<Vec<u8>> {
+    let k = aqr_modules::KNOWN
+        .iter()
+        .find(|k| &k.sha512_256 == hash)
+        .ok_or_else(|| Failure::Resource(format!("registered module {} not known", hex(hash))))?;
+    aqr::module_of_block_data(k.block).ok_or_else(|| Failure::Invalid("a registered module block is invalid".into()))
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
 /// What a module's imports say of its memories, read once: the pages of its working memory as
 /// it is instantiated, and the windows of its inputs and outputs (whether each is an output's,
 /// its index and its pages).
@@ -1050,6 +1065,10 @@ impl Runner for Wasm {
     fn load(&self, wasm: &[u8]) -> aqr::Decoded<Box<dyn Loaded + '_>> {
         wasm::load(wasm, Sha512_256::digest(wasm).into())
     }
+
+    fn registered(&self, hash: &[u8; 32]) -> aqr::Decoded<Vec<u8>> {
+        registered_module(hash)
+    }
 }
 
 /// [`Wasm`] with its own bound on the memories of an application (`.0` bytes: the instance's
@@ -1063,6 +1082,10 @@ pub struct WasmBounded(pub u64);
 impl Runner for WasmBounded {
     fn load(&self, wasm: &[u8]) -> aqr::Decoded<Box<dyn Loaded + '_>> {
         wasm::load_bounded(wasm, Sha512_256::digest(wasm).into(), self.0)
+    }
+
+    fn registered(&self, hash: &[u8; 32]) -> aqr::Decoded<Vec<u8>> {
+        registered_module(hash)
     }
 }
 
@@ -1462,6 +1485,10 @@ impl Runner for Native {
         return Wasm.load(wasm);
         #[cfg(not(feature = "wasm"))]
         Err(Failure::Resource("a module not known, which runs only as WebAssembly (the feature wasm)".into()))
+    }
+
+    fn registered(&self, hash: &[u8; 32]) -> aqr::Decoded<Vec<u8>> {
+        registered_module(hash)
     }
 }
 

@@ -18,9 +18,9 @@ use aqr_common::varint;
 use super::JournalPoint;
 use super::tree::{self, Read, Status, Tree};
 use super::{
-    BlockSizes, Blocks, ContentRef, Counts, Decoded, Failure, HEADER_MAGIC, LeafBlock, Payload, Resource, SIZE_HINT,
-    Segmented, critical, decoded, decoded_with, defined, dict, invalid, leb, module_of_decoded, opened, resource,
-    tree_of,
+    BlockSizes, Blocks, ContentRef, Counts, Decoded, Failure, HEADER_MAGIC, LeafBlock, ModuleSrc, Payload, Resource,
+    SIZE_HINT, Segmented, critical, decoded, decoded_with, defined, dict, invalid, leb, module_of_decoded, opened,
+    resource, tree_of,
 };
 
 /// A segment's blocks as its metadata block tells where they are.
@@ -299,7 +299,7 @@ pub(super) fn open<'c>(
 /// among all: each as it decodes, or its failure.
 #[derive(Default)]
 struct Auxiliary<'c> {
-    modules: HashMap<usize, Stored<'c, Vec<u8>>>,
+    modules: HashMap<usize, Stored<'c, ModuleSrc>>,
     resources: HashMap<usize, Stored<'c, Resource>>,
     dictionaries: HashMap<usize, Decoded<dict::Dictionary>>,
 }
@@ -367,8 +367,13 @@ impl<'c> Index<'c> {
         let r = aux.modules.entry(m).or_insert_with(|| {
             let at = seg.module_at[m - seg.first.modules];
             match frame(self.p, at, seg.end)? {
-                (0x60, ..) => resource("registered modules are not supported yet"),
-                (0x61..=0x63, data, _) => Ok((module_of_decoded(decoded(data, true, true)?)?, data)),
+                (0x60, data, _) => {
+                    let hash: [u8; 32] = data
+                        .try_into()
+                        .map_err(|_| Failure::Invalid("a module shorthand block not 32 bytes".into()))?;
+                    Ok((ModuleSrc::Registered(hash, std::sync::OnceLock::new()), data))
+                }
+                (0x61..=0x63, data, _) => Ok((ModuleSrc::Wasm(module_of_decoded(decoded(data, true, true)?)?), data)),
                 _ => invalid("module, resource or dictionary offsets not those of the blocks"),
             }
         });
@@ -591,7 +596,7 @@ impl<'c> Index<'c> {
         for m in 0..last.modules {
             let (w, d) = match aux.modules.remove(&m) {
                 Some(Ok((w, d))) => (w, d),
-                _ => (Vec::new(), &[][..]),
+                _ => (ModuleSrc::Wasm(Vec::new()), &[][..]),
             };
             modules.push(w);
             module_data.push(d);

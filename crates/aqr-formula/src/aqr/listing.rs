@@ -455,7 +455,12 @@ fn instructions(g: &Graph, n: usize, seen: &mut BTreeSet<usize>) -> usize {
 /// The names of the module blocks of `blocks`, as `name` names their Wasm modules (`moduleN`
 /// where it does not).
 pub(super) fn module_names(blocks: &Blocks, name: &dyn Fn(&[u8]) -> Option<String>) -> Vec<String> {
-    blocks.modules.iter().enumerate().map(|(i, w)| name(w).unwrap_or_else(|| format!("module{}", i + 1))).collect()
+    blocks
+        .modules
+        .iter()
+        .enumerate()
+        .map(|(i, w)| w.bytes().and_then(|b| name(b)).unwrap_or_else(|| format!("module{}", i + 1)))
+        .collect()
 }
 
 /// The graph of the formulas of the leaf blocks of `blocks`, the modules named by `name`; and by
