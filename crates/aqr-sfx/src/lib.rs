@@ -8,57 +8,10 @@
 
 mod native;
 
-use core::ffi::c_void;
-
-use aqr_api::dll::{Slice, SliceMut};
-use aqr_formula::Resource;
-use aqr_formula::aqr::{Decoded, Failure, Loaded, PartIn, PartOut, Runner};
+use aqr_blob::interp::{Interpreter, Vtable};
+use aqr_formula::aqr::{Decoded, Failure, Loaded, Runner};
 pub use native::native_name;
 use native::{Fns, Native, NativeLoaded};
-
-// (an input of a part application as the blob pulls it, an output as it commits it: the same
-// for the interpreter blob and the native ones)
-use aqr_api::dll::{PartIn as PartInC, PartOut as PartOutC};
-
-/// The interpreter blob's entry points ([`aqr_interp::Vtable`]).
-#[repr(C)]
-pub struct Vtable {
-    load: unsafe extern "C" fn(Slice, SliceMut, *mut usize) -> *mut c_void,
-    is_part: unsafe extern "C" fn(*mut c_void) -> u32,
-    apply: unsafe extern "C" fn(
-        *mut c_void,
-        Slice,
-        *const Slice,
-        usize,
-        *const Slice,
-        usize,
-        u64,
-        *const u64,
-        usize,
-        *const SliceMut,
-        usize,
-        SliceMut,
-        *mut usize,
-    ) -> u32,
-    apply_part: unsafe extern "C" fn(
-        *mut c_void,
-        Slice,
-        *const Slice,
-        usize,
-        *const PartInC,
-        usize,
-        *const PartOutC,
-        usize,
-        *const u64,
-        usize,
-        u64,
-        *const u64,
-        usize,
-        SliceMut,
-        *mut usize,
-    ) -> u32,
-    drop: unsafe extern "C" fn(*mut c_void),
-}
 
 /// The name of the interpreter blob in the dispatch table.
 pub const INTERP: &str = "aqr-interp";
@@ -71,7 +24,7 @@ pub const LIB: &str = "lib:";
 /// The runner of a self-extracting program: the modules with native blobs merged into it run
 /// natively, any other through the interpreter blob, where it is merged.
 pub struct Sfx {
-    interp: Option<&'static Vtable>,
+    interp: Option<Interpreter>,
     natives: Vec<Native>,
     /// The threads the native blobs decode whole inputs on.
     threads: usize,
@@ -95,17 +48,10 @@ impl Runner for Sfx {
             let n = n.ok_or_else(|| Failure::Resource("a native module blob not merged".into()))?;
             return Ok(Box::new(NativeLoaded { native: n.fns, threads: self.threads }));
         }
-        let vtable = self.interp.ok_or_else(|| {
+        let interp = self.interp.as_ref().ok_or_else(|| {
             Failure::Resource("a module with no native blob merged, and no interpreter blob either".into())
         })?;
-        let mut error = [0u8; 1024];
-        let mut len = 0;
-        // SAFETY: the interpreter's load takes the module's bytes and a place for a message
-        let handle = unsafe { (vtable.load)(Slice::of(wasm), SliceMut::of(&mut error), &mut len) };
-        if handle.is_null() {
-            return Err(Failure::Invalid(String::from_utf8_lossy(&error[..len]).into_owned()));
-        }
-        Ok(Box::new(Loaded_ { vtable, handle }))
+        interp.load(wasm)
     }
 
     fn registered(&self, hash: &[u8; 32]) -> Decoded<Vec<u8>> {
@@ -113,153 +59,6 @@ impl Runner for Sfx {
             Some(n) => Ok(native::stand_in(hash, &n.slots)),
             None => Err(Failure::Resource("a registered module with no native blob merged".into())),
         }
-    }
-}
-
-/// A module loaded in the interpreter blob, behind its handle.
-struct Loaded_ {
-    vtable: &'static Vtable,
-    handle: *mut c_void,
-}
-
-// SAFETY: the handle's module is run through the interpreter, whose applications are thread-safe.
-unsafe impl Send for Loaded_ {}
-unsafe impl Sync for Loaded_ {}
-
-impl Drop for Loaded_ {
-    fn drop(&mut self) {
-        // SAFETY: the handle is live and used no more
-        unsafe { (self.vtable.drop)(self.handle) };
-    }
-}
-
-fn message(error: &[u8], len: usize) -> Failure {
-    Failure::Invalid(String::from_utf8_lossy(&error[..len]).into_owned())
-}
-
-impl Loaded for Loaded_ {
-    fn is_part(&self) -> bool {
-        // SAFETY: a live handle
-        unsafe { (self.vtable.is_part)(self.handle) != 0 }
-    }
-
-    fn apply(
-        &self,
-        params: &[u8],
-        resources: &[Resource],
-        inputs: &[&[u8]],
-        sizes: &[u64],
-        memory_limit: u64,
-        task_limits: &[u64],
-    ) -> Decoded<Vec<Vec<u8>>> {
-        let res: Vec<Slice> = resources.iter().map(|r| Slice::of(r)).collect();
-        let ins: Vec<Slice> = inputs.iter().map(|i| Slice::of(i)).collect();
-        let mut outs: Vec<Vec<u8>> = sizes.iter().map(|&s| vec![0u8; s as usize]).collect();
-        let os: Vec<SliceMut> = outs.iter_mut().map(|o| SliceMut::of(o)).collect();
-        let mut error = [0u8; 1024];
-        let mut len = 0;
-        // SAFETY: each pointer is to as many items as its count, the outputs apart
-        let r = unsafe {
-            (self.vtable.apply)(
-                self.handle,
-                Slice::of(params),
-                res.as_ptr(),
-                res.len(),
-                ins.as_ptr(),
-                ins.len(),
-                memory_limit,
-                task_limits.as_ptr(),
-                task_limits.len(),
-                os.as_ptr(),
-                os.len(),
-                SliceMut::of(&mut error),
-                &mut len,
-            )
-        };
-        match r {
-            0 => Ok(outs),
-            _ => Err(message(&error, len)),
-        }
-    }
-
-    fn apply_part(
-        &self,
-        params: &[u8],
-        resources: &[Resource],
-        inputs: &mut [&mut dyn PartIn],
-        outputs: &mut [&mut dyn PartOut],
-        sizes: &[u64],
-        memory_limit: u64,
-        task_limits: &[u64],
-    ) -> Decoded<()> {
-        let res: Vec<Slice> = resources.iter().map(|r| Slice::of(r)).collect();
-        let (in_c, out_c) = part_c(inputs, outputs);
-        let mut error = [0u8; 1024];
-        let mut len = 0;
-        // SAFETY: the inputs and outputs live across the call, their callbacks driven from here
-        let r = unsafe {
-            (self.vtable.apply_part)(
-                self.handle,
-                Slice::of(params),
-                res.as_ptr(),
-                res.len(),
-                in_c.as_ptr(),
-                in_c.len(),
-                out_c.as_ptr(),
-                out_c.len(),
-                sizes.as_ptr(),
-                sizes.len(),
-                memory_limit,
-                task_limits.as_ptr(),
-                task_limits.len(),
-                SliceMut::of(&mut error),
-                &mut len,
-            )
-        };
-        match r {
-            0 => Ok(()),
-            _ => Err(message(&error, len)),
-        }
-    }
-}
-
-/// The decoder's inputs and outputs of a part application as a blob's C callbacks drive them
-/// ([`pull`], [`push`]): each callback's context is the item's place in `inputs` or `outputs`,
-/// which must stay where it is across the application.
-pub(crate) fn part_c(
-    inputs: &mut [&mut dyn PartIn],
-    outputs: &mut [&mut dyn PartOut],
-) -> (Vec<PartInC>, Vec<PartOutC>) {
-    let ins = inputs
-        .iter_mut()
-        .map(|pi| PartInC { len: pi.len(), ctx: pi as *mut &mut dyn PartIn as *mut c_void, pull })
-        .collect();
-    let outs =
-        outputs.iter_mut().map(|po| PartOutC { ctx: po as *mut &mut dyn PartOut as *mut c_void, push }).collect();
-    (ins, outs)
-}
-
-/// A blob pulls input `ctx` (a `&mut dyn PartIn`) up to `hi`, its bytes given to `put`.
-unsafe extern "C" fn pull(
-    ctx: *mut c_void,
-    hi: u64,
-    put_ctx: *mut c_void,
-    put: unsafe extern "C" fn(*mut c_void, *const u8, usize),
-) -> u32 {
-    let pi = unsafe { &mut *(ctx as *mut &mut dyn PartIn) };
-    let mut give = |bytes: &[u8]| unsafe { put(put_ctx, bytes.as_ptr(), bytes.len()) };
-    match pi.pull(hi, &mut give) {
-        Ok(()) => 0,
-        Err(_) => 1,
-    }
-}
-
-/// A blob commits `len` bytes of output `ctx` (a `&mut dyn PartOut`).
-unsafe extern "C" fn push(ctx: *mut c_void, ptr: *const u8, len: usize) -> u32 {
-    let po = unsafe { &mut *(ctx as *mut &mut dyn PartOut) };
-    match po.push(unsafe { std::slice::from_raw_parts(ptr, len) }) {
-        Ok(()) => 0,
-        Err(_) => 1,
     }
 }
 
@@ -330,7 +129,7 @@ impl Sfx {
             if name == INTERP.as_bytes() {
                 // SAFETY: the merge wrote the RVA of aqr_interp_vtable, which returns the static vtable
                 let vtable_fn: extern "C" fn() -> *const Vtable = unsafe { std::mem::transmute(at) };
-                sfx.interp = Some(unsafe { &*vtable_fn() });
+                sfx.interp = Some(unsafe { Interpreter::new(vtable_fn()) });
             } else if let Some((hash, slots)) = native::parse_native_name(name)
                 && info_rva != 0
             {

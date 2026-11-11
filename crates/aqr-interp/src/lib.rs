@@ -20,12 +20,18 @@ use aqr_formula::aqr::{Decoded, Failure, Loaded, PartIn, PartOut};
 /// to pass one thin pointer).
 type Handle = Box<Box<dyn Loaded>>;
 
+/// Writes failure `f` into `error` as it crosses the C ABI (its kind's byte and its message,
+/// `aqr_blob::interp::failure_bytes`), as much as fits.
+fn fail_with(f: &Failure, error: SliceMut, error_len: *mut usize) {
+    fail_bytes(&aqr_blob::interp::failure_bytes(f), error, error_len)
+}
+
 /// Writes `msg` into `error` (as much as fits) and `*error_len`.
-fn fail(msg: &str, error: SliceMut, error_len: *mut usize) {
+fn fail_bytes(msg: &[u8], error: SliceMut, error_len: *mut usize) {
     // SAFETY: the caller gives `error` as a buffer and `error_len` a place for the length
     let buf = unsafe { error.get() };
     let n = msg.len().min(buf.len());
-    buf[..n].copy_from_slice(&msg.as_bytes()[..n]);
+    buf[..n].copy_from_slice(&msg[..n]);
     if !error_len.is_null() {
         unsafe { *error_len = n };
     }
@@ -51,7 +57,7 @@ pub unsafe extern "C" fn aqr_interp_load(
             Box::into_raw(handle).cast()
         }
         Err(e) => {
-            fail(&format!("{e:?}"), error, error_len);
+            fail_with(&e, error, error_len);
             core::ptr::null_mut()
         }
     }
@@ -128,7 +134,7 @@ pub unsafe extern "C" fn aqr_interp_apply(
             0
         }
         Err(e) => {
-            fail(&format!("{e:?}"), error, error_len);
+            fail_with(&e, error, error_len);
             1
         }
     }
@@ -240,7 +246,7 @@ pub unsafe extern "C" fn aqr_interp_apply_part(
     ) {
         Ok(()) => 0,
         Err(e) => {
-            fail(&format!("{e:?}"), error, error_len);
+            fail_with(&e, error, error_len);
             1
         }
     }
@@ -248,46 +254,10 @@ pub unsafe extern "C" fn aqr_interp_apply_part(
 
 // ---- the vtable: one export the merge records, holding every entry point
 
-/// The interpreter blob's entry points, so a stub that merges the blob in finds them all through
-/// one export ([`aqr_interp_vtable`]) rather than by name.
-#[repr(C)]
-pub struct Vtable {
-    pub load: unsafe extern "C" fn(Slice, SliceMut, *mut usize) -> *mut c_void,
-    pub is_part: unsafe extern "C" fn(*mut c_void) -> u32,
-    pub apply: unsafe extern "C" fn(
-        *mut c_void,
-        Slice,
-        *const Slice,
-        usize,
-        *const Slice,
-        usize,
-        u64,
-        *const u64,
-        usize,
-        *const SliceMut,
-        usize,
-        SliceMut,
-        *mut usize,
-    ) -> u32,
-    pub apply_part: unsafe extern "C" fn(
-        *mut c_void,
-        Slice,
-        *const Slice,
-        usize,
-        *const PartInC,
-        usize,
-        *const PartOutC,
-        usize,
-        *const u64,
-        usize,
-        u64,
-        *const u64,
-        usize,
-        SliceMut,
-        *mut usize,
-    ) -> u32,
-    pub drop: unsafe extern "C" fn(*mut c_void),
-}
+/// The interpreter blob's entry points, so a stub that merges the blob in (or a program that
+/// places it, `aqr_blob::load`) finds them all through one export ([`aqr_interp_vtable`]) rather
+/// than by name: aqr-blob's, which its hosts read.
+pub use aqr_blob::interp::Vtable;
 
 static VTABLE: Vtable = Vtable {
     load: aqr_interp_load,
@@ -295,7 +265,62 @@ static VTABLE: Vtable = Vtable {
     apply: aqr_interp_apply,
     apply_part: aqr_interp_apply_part,
     drop: aqr_interp_drop,
+    load_with: aqr_interp_load_with,
+    set_application_bound: aqr_interp_set_application_bound,
+    warm_up: aqr_interp_warm_up,
+    worker_main: aqr_interp_worker_main,
 };
+
+/// [`aqr_interp_load`] as `aqr_wasmrt::wasm` loads: of the module's SHA-512/256 `hash` (32 bytes;
+/// null: computed), with the bound of its applications' memories `bound` of its own (`u64::MAX`:
+/// none), or as a module of a release (`released` 1, for tests of the earlier rules).
+///
+/// # Safety
+/// `wasm` points to its bytes, `hash` to 32 bytes or is null; `error`/`error_len` take a
+/// failure's message.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aqr_interp_load_with(
+    wasm: Slice,
+    hash: *const u8,
+    bound: u64,
+    released: u32,
+    error: SliceMut,
+    error_len: *mut usize,
+) -> *mut c_void {
+    use sha2::{Digest, Sha512_256};
+    let bytes = unsafe { wasm.get() };
+    let hash: [u8; 32] = match hash.is_null() {
+        true => Sha512_256::digest(bytes).into(),
+        false => unsafe { std::ptr::read_unaligned(hash.cast::<[u8; 32]>()) },
+    };
+    let loaded = match (released, bound) {
+        (0, u64::MAX) => aqr_wasmrt::wasm::load(bytes, hash),
+        (0, b) => aqr_wasmrt::wasm::load_bounded(bytes, hash, b),
+        _ => aqr_wasmrt::wasm::load_released(bytes),
+    };
+    match loaded {
+        Ok(loaded) => {
+            let handle: Handle = Box::new(loaded);
+            Box::into_raw(handle).cast()
+        }
+        Err(e) => {
+            fail_with(&e, error, error_len);
+            core::ptr::null_mut()
+        }
+    }
+}
+
+extern "C" fn aqr_interp_set_application_bound(bytes: u64) {
+    aqr_wasmrt::wasm::set_application_bound(bytes);
+}
+
+extern "C" fn aqr_interp_warm_up() {
+    aqr_wasmrt::wasm::warm_up();
+}
+
+extern "C" fn aqr_interp_worker_main() -> ! {
+    aqr_wasmrt::sandbox::worker_main()
+}
 
 /// The blob's [`Vtable`], its only export the stub needs: its entry points, by a pointer the
 /// merge relocates.

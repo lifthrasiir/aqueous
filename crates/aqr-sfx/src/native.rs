@@ -172,7 +172,7 @@ impl NativeLoaded {
         };
         match r {
             0 => Ok(out),
-            _ => Err(crate::message(&error, len)),
+            _ => Err(aqr_blob::interp::failure_of(&error[..len])),
         }
     }
 
@@ -226,7 +226,7 @@ impl Loaded for NativeLoaded {
         };
         match r {
             0 => Ok(outs),
-            _ => Err(crate::message(&error, len)),
+            _ => Err(aqr_blob::interp::failure_of(&error[..len])),
         }
     }
 
@@ -265,7 +265,8 @@ impl Loaded for NativeLoaded {
         }
         let apply_part = self.native.apply_part.ok_or_else(|| Failure::Invalid("not a part module".into()))?;
         let res: Vec<Slice> = resources.iter().map(|r| Slice::of(r)).collect();
-        let (in_c, out_c) = crate::part_c(inputs, outputs);
+        let mut failed = None;
+        let (in_c, out_c, _ctx) = aqr_blob::interp::part_c(inputs, outputs, &mut failed);
         let mut error = [0u8; 1024];
         let mut len = 0;
         // SAFETY: the inputs and outputs live across the call, their callbacks driven from here
@@ -283,9 +284,11 @@ impl Loaded for NativeLoaded {
                 &mut len,
             )
         };
-        match r {
-            0 => Ok(()),
-            _ => Err(crate::message(&error, len)),
+        match (r, failed) {
+            (0, _) => Ok(()),
+            // (an input's or an output's own failure, rather than the module's of it)
+            (_, Some(f)) => Err(f),
+            _ => Err(aqr_blob::interp::failure_of(&error[..len])),
         }
     }
 }

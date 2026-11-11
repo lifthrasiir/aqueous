@@ -1,0 +1,14 @@
+[package]
+name = "aqr-blob"
+version = "0.1.0"
+edition = "2024"
+description = "Blobs (native libraries digested by aqr-ld): their format, and placing a set of them in memory at run time (Windows x86-64)"
+publish = false
+
+[dependencies]
+aqr-api = { path = "../aqr-api", default-features = false, features = ["alloc"], optional = true }
+aqr-formula = { path = "../aqr-formula", optional = true }
+
+[features]
+# The interpreter blob's client (`interp`): what runs modules through it.
+runner = ["dep:aqr-api", "dep:aqr-formula"]

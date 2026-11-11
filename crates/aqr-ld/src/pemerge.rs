@@ -18,6 +18,8 @@
 
 use std::path::Path;
 
+use aqr_blob::{Bind, Blob};
+
 const MAGIC: &[u8; 16] = b"\x89AQRPEMERGEv1\x00\x00\x00";
 
 /// The characteristics of a merged section: code and data, readable, writable and executable
@@ -251,16 +253,6 @@ struct Exports {
     by_ordinal: std::collections::HashMap<u32, u32>,
 }
 
-/// An import bound to another blob of the merge: the RVA of the slot of the import address table
-/// (in the importing blob), the library imported from (its name, lowercase) and the RVA of the
-/// export there. The merge writes the export's address into the slot.
-#[derive(Debug, Clone)]
-struct Bind {
-    slot: u32,
-    lib: String,
-    rva: u32,
-}
-
 /// Binds the imports of a module's image `img` (its bytes from RVA `first`) from the libraries of
 /// `set` (by their names): each slot of their import address tables to its export, the import
 /// descriptors of those libraries taken out of the import directory (the others moved up). The
@@ -354,185 +346,60 @@ fn fix_imports(img: &mut [u8], first: u32, dir1_rva: u32, c: u32) -> Result<Vec<
     Ok(out)
 }
 
-/// A module digested from a library into just what the merge needs: its image laid out from the
-/// first section (no PE headers, no `.reloc` section, no header gap), its base relocations as a
-/// list, the RVAs the merge resolves, and its imports from the other libraries of the set it was
-/// digested with ([`Bind`]s, by their names). RVAs are the module's own (over its image base); the
-/// image holds the bytes of `[first, last)`, indexed by `rva - first`. A shared library (no entry
-/// of a module) has `apply_rva` 0.
-struct Blob {
-    apply_rva: u32,
-    info_rva: u32,
-    pdata_rva: u32,
-    pdata_count: u32,
-    import_dir_rva: u32,
-    first: u32,
-    image_base: u64,
-    /// Its own name as a library (lowercase), what the others' imports name; empty where it
-    /// exports nothing.
-    name: String,
-    binds: Vec<Bind>,
-    relocs: Vec<u32>,
-    image: Vec<u8>,
+/// Digests a parsed library into a blob, resolving `apply_name` (unless `optional` and not there: a
+/// shared library) and (unless `-`, or `optional`) `info_name`, and binding its imports from
+/// the libraries of `set`.
+fn blob_of(pe: &Pe, apply_name: &str, info_name: &str, optional: bool, set: &[&Exports]) -> Result<Blob> {
+    // the image's span: the sections but `.reloc` (read into the relocation list instead)
+    let reloc_va = pe.dir(5).0;
+    let kept: Vec<&Section> = pe.sections.iter().filter(|s| s.va != reloc_va).collect();
+    let first = kept.iter().map(|s| s.va).min().ok_or("no sections")?;
+    let last = kept.iter().map(|s| s.va + s.vsize.max(s.raw_size)).max().unwrap();
+    let mut image = vec![0u8; (last - first) as usize];
+    for s in &kept {
+        let n = (s.raw_size as usize).min(pe.buf.len().saturating_sub(s.raw_ptr as usize));
+        let at = (s.va - first) as usize;
+        image[at..at + n].copy_from_slice(&pe.buf[s.raw_ptr as usize..s.raw_ptr as usize + n]);
+    }
+    let binds = bind_set(&mut image, first, pe.dir(1).0, set)?;
+    // the dead directories' data, zeroed (the loader reads only the stub's)
+    let zero = |image: &mut [u8], (rva, size): (u32, u32)| {
+        if rva >= first && rva + size <= last {
+            image[(rva - first) as usize..(rva + size - first) as usize].fill(0);
+        }
+    };
+    let name = pe.exports()?.map(|e| e.name).unwrap_or_default();
+    for dir in [0, 6, 9, 10] {
+        // export, debug, thread storage, load config
+        zero(&mut image, pe.dir(dir));
+    }
+    let entry = |n: &str| match optional {
+        true => Ok(pe.export_opt(n).unwrap_or(0)),
+        false => pe.export_opt(n),
+    };
+    Ok(Blob {
+        apply_rva: match optional {
+            true => pe.export(apply_name).unwrap_or(0),
+            false => pe.export(apply_name)?,
+        },
+        info_rva: entry(info_name)?,
+        pdata_rva: pe.dir(3).0,
+        pdata_count: pe.dir(3).1 / 12,
+        import_dir_rva: pe.dir(1).0,
+        first,
+        image_base: pe.image_base(),
+        name,
+        binds,
+        relocs: pe.relocs()?,
+        image,
+    })
 }
 
-const BLOB_MAGIC: &[u8; 4] = b"AQB2";
-
-impl Blob {
-    /// Digests a parsed library, resolving `apply_name` (unless `optional` and not there: a
-    /// shared library) and (unless `-`, or `optional`) `info_name`, and binding its imports from
-    /// the libraries of `set`.
-    fn of(pe: &Pe, apply_name: &str, info_name: &str, optional: bool, set: &[&Exports]) -> Result<Blob> {
-        // the image's span: the sections but `.reloc` (read into the relocation list instead)
-        let reloc_va = pe.dir(5).0;
-        let kept: Vec<&Section> = pe.sections.iter().filter(|s| s.va != reloc_va).collect();
-        let first = kept.iter().map(|s| s.va).min().ok_or("no sections")?;
-        let last = kept.iter().map(|s| s.va + s.vsize.max(s.raw_size)).max().unwrap();
-        let mut image = vec![0u8; (last - first) as usize];
-        for s in &kept {
-            let n = (s.raw_size as usize).min(pe.buf.len().saturating_sub(s.raw_ptr as usize));
-            let at = (s.va - first) as usize;
-            image[at..at + n].copy_from_slice(&pe.buf[s.raw_ptr as usize..s.raw_ptr as usize + n]);
-        }
-        let binds = bind_set(&mut image, first, pe.dir(1).0, set)?;
-        // the dead directories' data, zeroed (the loader reads only the stub's)
-        let zero = |image: &mut [u8], (rva, size): (u32, u32)| {
-            if rva >= first && rva + size <= last {
-                image[(rva - first) as usize..(rva + size - first) as usize].fill(0);
-            }
-        };
-        let name = pe.exports()?.map(|e| e.name).unwrap_or_default();
-        for dir in [0, 6, 9, 10] {
-            // export, debug, thread storage, load config
-            zero(&mut image, pe.dir(dir));
-        }
-        let entry = |n: &str| match optional {
-            true => Ok(pe.export_opt(n).unwrap_or(0)),
-            false => pe.export_opt(n),
-        };
-        Ok(Blob {
-            apply_rva: match optional {
-                true => pe.export(apply_name).unwrap_or(0),
-                false => pe.export(apply_name)?,
-            },
-            info_rva: entry(info_name)?,
-            pdata_rva: pe.dir(3).0,
-            pdata_count: pe.dir(3).1 / 12,
-            import_dir_rva: pe.dir(1).0,
-            first,
-            image_base: pe.image_base(),
-            name,
-            binds,
-            relocs: pe.relocs()?,
-            image,
-        })
-    }
-
-    /// The libraries it binds imports from, each once.
-    fn libs(&self) -> Vec<String> {
-        let mut libs: Vec<String> = Vec::new();
-        for b in &self.binds {
-            if !libs.contains(&b.lib) {
-                libs.push(b.lib.clone());
-            }
-        }
-        libs
-    }
-
-    /// The blob serialized (`aqr-ld blob`). The header, its name, the libraries it binds imports
-    /// from, the binds (slot, library by index, RVA), the relocations, then the image.
-    fn to_bytes(&self) -> Vec<u8> {
-        let mut b = Vec::new();
-        let put = |b: &mut Vec<u8>, v: u32| b.extend_from_slice(&v.to_le_bytes());
-        let put_str = |b: &mut Vec<u8>, s: &str| {
-            put(b, s.len() as u32);
-            b.extend_from_slice(s.as_bytes());
-        };
-        b.extend_from_slice(BLOB_MAGIC);
-        for v in [self.apply_rva, self.info_rva, self.pdata_rva, self.pdata_count, self.import_dir_rva, self.first] {
-            put(&mut b, v);
-        }
-        b.extend_from_slice(&self.image_base.to_le_bytes());
-        put_str(&mut b, &self.name);
-        let libs = self.libs();
-        put(&mut b, libs.len() as u32);
-        for l in &libs {
-            put_str(&mut b, l);
-        }
-        put(&mut b, self.binds.len() as u32);
-        for bind in &self.binds {
-            put(&mut b, bind.slot);
-            put(&mut b, libs.iter().position(|l| *l == bind.lib).unwrap() as u32);
-            put(&mut b, bind.rva);
-        }
-        put(&mut b, self.relocs.len() as u32);
-        for &r in &self.relocs {
-            put(&mut b, r);
-        }
-        put(&mut b, self.image.len() as u32);
-        b.extend_from_slice(&self.image);
-        b
-    }
-
-    /// A blob parsed from bytes.
-    fn from_bytes(b: &[u8]) -> Result<Blob> {
-        if b.len() < 36 || &b[0..4] != BLOB_MAGIC {
-            return Err("not a module blob (of this version)".into());
-        }
-        let mut r = Reader { b, at: 36 };
-        let name = r.string()?;
-        let libs = (0..r.word()?).map(|_| r.string()).collect::<Result<Vec<_>>>()?;
-        let mut binds = Vec::new();
-        for _ in 0..r.word()? {
-            let (slot, lib, rva) = (r.word()?, r.word()? as usize, r.word()?);
-            let lib = libs.get(lib).ok_or("a bind of no library")?.clone();
-            binds.push(Bind { slot, lib, rva });
-        }
-        let relocs = (0..r.word()?).map(|_| r.word()).collect::<Result<Vec<_>>>()?;
-        let n = r.word()? as usize;
-        let image = r.take(n)?.to_vec();
-        Ok(Blob {
-            apply_rva: u32(b, 4),
-            info_rva: u32(b, 8),
-            pdata_rva: u32(b, 12),
-            pdata_count: u32(b, 16),
-            import_dir_rva: u32(b, 20),
-            first: u32(b, 24),
-            image_base: u64(b, 28),
-            name,
-            binds,
-            relocs,
-            image,
-        })
-    }
-
-    /// A blob from the bytes of a library or a blob file (by its first bytes).
-    fn parse(bytes: Vec<u8>, apply_name: &str, info_name: &str) -> Result<Blob> {
-        match bytes.first_chunk::<4>() {
-            Some(BLOB_MAGIC) => Blob::from_bytes(&bytes),
-            _ => Blob::of(&Pe::parse(bytes)?, apply_name, info_name, false, &[]),
-        }
-    }
-}
-
-/// The bytes of a blob read in order.
-struct Reader<'a> {
-    b: &'a [u8],
-    at: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        let s = self.b.get(self.at..self.at + n).ok_or("a module blob cut short")?;
-        self.at += n;
-        Ok(s)
-    }
-    fn word(&mut self) -> Result<u32> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
-    }
-    fn string(&mut self) -> Result<String> {
-        let n = self.word()? as usize;
-        Ok(String::from_utf8_lossy(self.take(n)?).into_owned())
+/// A blob from the bytes of a library or a blob file (by its first bytes).
+fn parse_blob(bytes: Vec<u8>, apply_name: &str, info_name: &str) -> Result<Blob> {
+    match bytes.first_chunk::<4>() {
+        Some(aqr_blob::MAGIC) => Blob::from_bytes(&bytes),
+        _ => blob_of(&Pe::parse(bytes)?, apply_name, info_name, false, &[]),
     }
 }
 
@@ -598,7 +465,7 @@ pub fn merge_bytes(stub: Vec<u8>, modules: &[(String, Vec<u8>)], apply_name: &st
     // `c + x`), for the imports bound between them
     let mut blobs = Vec::new();
     for (name, bytes) in modules {
-        let b = Blob::parse(bytes.clone(), apply_name, info_name)?;
+        let b = parse_blob(bytes.clone(), apply_name, info_name)?;
         let va = next_va;
         next_va = align(va + b.image.len() as u32, salign);
         blobs.push((name, va, va.wrapping_sub(b.first), b));
@@ -793,7 +660,7 @@ pub fn blob_main(args: &[std::ffi::OsString]) -> Result<()> {
     let out: std::path::PathBuf = out.ok_or("blob: no --out")?;
     let dll = dll.ok_or("blob: no module library")?;
     let pe = Pe::parse(std::fs::read(&dll).map_err(|e| format!("{}: {e}", dll.display()))?)?;
-    let blob = Blob::of(&pe, &apply_name, &info_name, false, &[])?;
+    let blob = blob_of(&pe, &apply_name, &info_name, false, &[])?;
     std::fs::write(&out, blob.to_bytes()).map_err(|e| format!("{}: {e}", out.display()))?;
     Ok(())
 }
@@ -823,7 +690,7 @@ pub fn blobs_main(args: &[std::ffi::OsString]) -> Result<()> {
     std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
     for (dll, pe) in dlls.iter().zip(&pes) {
         let blob =
-            Blob::of(pe, "aqr_dll_apply", "aqr_dll_info", true, &set).map_err(|e| format!("{}: {e}", dll.display()))?;
+            blob_of(pe, "aqr_dll_apply", "aqr_dll_info", true, &set).map_err(|e| format!("{}: {e}", dll.display()))?;
         let to = out.join(dll.file_stem().ok_or("a library of no name")?).with_extension("blob");
         std::fs::write(&to, blob.to_bytes()).map_err(|e| format!("{}: {e}", to.display()))?;
     }

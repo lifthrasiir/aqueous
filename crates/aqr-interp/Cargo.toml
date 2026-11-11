@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 aqr-api = { path = "../aqr-api" }
+aqr-blob = { path = "../aqr-blob", features = ["runner"] }
 aqr-formula = { path = "../aqr-formula" }
 aqr-wasmrt = { path = "../aqr-wasmrt" }
 sha2 = "0.10"
