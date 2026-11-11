@@ -708,6 +708,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-interp"
+version = "0.1.0"
+dependencies = [
+ "aqr-api",
+ "aqr-formula",
+ "aqr-wasmrt",
+ "sha2",
+]
+
+[[package]]
 name = "aqr-ipc"
 version = "0.1.0"
 dependencies = [

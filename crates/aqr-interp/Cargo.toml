@@ -1,0 +1,15 @@
+[package]
+name = "aqr-interp"
+version = "0.1.0"
+edition = "2024"
+description = "The interpreter blob: runs a Wasm module given to it (Wasmtime, aqr-wasmrt), merged into a self-extracting stub for the modules it has no native code for"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aqr-api = { path = "../aqr-api" }
+aqr-formula = { path = "../aqr-formula" }
+aqr-wasmrt = { path = "../aqr-wasmrt" }
+sha2 = "0.10"
