@@ -1423,7 +1423,7 @@ impl RowSink<'_> {
         if self.count_bytes > 0
             && !exception
             && let Some((at, n)) = self.prev_at
-            && self.prev == row
+            && aqr_common::bytes::same(self.prev, row)
         {
             if self.data_at + n > self.end {
                 return Err(corrupt());

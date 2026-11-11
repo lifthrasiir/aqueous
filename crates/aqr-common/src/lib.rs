@@ -25,6 +25,7 @@
 //! - [`out`]: output made in order, into a vector or compared with what it should be.
 //! - [`streams`]: streams of data and records one after another, and their index.
 //! - [`lz`]: what the LZ parsers share (the length of a match).
+//! - [`bytes`]: byte slices compared (in SIMD in WebAssembly too).
 //! - [`wasm`]: WebAssembly modules split into streams and joined back (aqr-wasm, module blocks).
 
 pub mod adler32;
@@ -35,6 +36,7 @@ pub mod allowance;
 pub mod allowance;
 pub mod arith;
 pub mod budget;
+pub mod bytes;
 #[cfg(not(target_family = "wasm"))]
 pub mod cpu;
 pub mod crc32;
