@@ -11,13 +11,14 @@
 //!
 //! With `AQR_LD_NAMES` set, the name section is kept, to see what is left in a module.
 
-mod pemerge;
 mod rewrite;
 mod trim;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
+
+use aqr_ld::pemerge;
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();

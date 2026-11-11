@@ -1,16 +1,18 @@
 //! Merges native module libraries into a stub executable as new sections, so that the stub
-//! carries the modules it needs with no loader and no separate files: a first, minimal step
-//! toward self-extracting archives (`aqr-ld merge --stub S --out O NAME=MODULE.dll ...`).
+//! carries the modules it needs with no loader and no separate files: the self-extracting
+//! archives of `aqr --format sfx` ([`merge_bytes`]), and `aqr-ld merge --stub S --out O
+//! NAME=MODULE ...`.
 //!
-//! Each module is a position-independent library whose code uses neither thread-local storage
-//! (one per image, its offsets baked into instructions) nor imports (its IAT would be unbound):
-//! the whole of its image is copied into the stub at a chosen RVA with its layout kept, so that
-//! every RIP-relative reference stays valid, and its base relocations (`DIR64` only) are applied
-//! for the new address and emitted into the stub's relocations so that ASLR still works. A
-//! dispatch table naming each module and the RVA of its `aqr_mod_apply` is added too, and its
-//! place written into the stub's anchor (its magic). This is validated on trivial modules by
-//! `crates/aqr-ld/pemerge-test.sh`; the real codec modules (aqr-dll) use the standard library,
-//! so they are not mergeable this way yet (they need to be made free of it first).
+//! Each module is a position-independent library whose code uses no thread-local storage of its
+//! own image (its offsets baked into instructions; aqr-dll's no-TLS target has std's use
+//! TlsAlloc): the whole of its image is copied into the stub at a chosen RVA with its layout
+//! kept, so that every RIP-relative reference stays valid, its base relocations (`DIR64` only)
+//! are applied for the new address and emitted into the stub's relocations so that ASLR still
+//! works, and its imports are merged into the stub's import table. The modules' images are in
+//! one section, each at an RVA of its own (the stub's headers have room for few more section
+//! headers). A dispatch table naming each module and the RVA of its entry is added too, and its
+//! place written into the stub's anchor (its magic). Validated by `crates/aqr-ld/pemerge-test.sh`
+//! on trivial modules, `crates/aqr-dll/merge-test.sh` on the codec modules.
 //!
 //! x86-64 only. The structures are the PE/COFF ones (Microsoft's "PE Format").
 
@@ -342,9 +344,8 @@ impl Blob {
         })
     }
 
-    /// A blob from a library or a blob file (by its first bytes).
-    fn read(path: &Path, apply_name: &str, info_name: &str) -> Result<Blob> {
-        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    /// A blob from the bytes of a library or a blob file (by its first bytes).
+    fn parse(bytes: Vec<u8>, apply_name: &str, info_name: &str) -> Result<Blob> {
         match bytes.first_chunk::<4>() {
             Some(BLOB_MAGIC) => Blob::from_bytes(&bytes),
             _ => Blob::of(&Pe::parse(bytes)?, apply_name, info_name),
@@ -382,7 +383,18 @@ pub fn merge(
     apply_name: &str,
     info_name: &str,
 ) -> Result<()> {
-    let mut pe = Pe::parse(std::fs::read(stub).map_err(|e| format!("{}: {e}", stub.display()))?)?;
+    let read = |p: &Path| std::fs::read(p).map_err(|e| format!("{}: {e}", p.display()));
+    let modules = modules.iter().map(|(n, p)| Ok((n.clone(), read(p)?))).collect::<Result<Vec<_>>>()?;
+    let merged = merge_bytes(read(stub)?, &modules, apply_name, info_name)?;
+    std::fs::write(out, merged).map_err(|e| format!("{}: {e}", out.display()))
+}
+
+/// Merges `modules` (each a name, and the bytes of a library or a blob) into stub executable
+/// `stub`, giving the merged executable; the names go in the dispatch table as they are. Each
+/// module exports its application entry as `apply_name` and, unless `-`, its info as `info_name`
+/// (a blob has them resolved already).
+pub fn merge_bytes(stub: Vec<u8>, modules: &[(String, Vec<u8>)], apply_name: &str, info_name: &str) -> Result<Vec<u8>> {
+    let mut pe = Pe::parse(stub)?;
     let salign = pe.section_align();
     let falign = pe.file_align();
     let base = pe.image_base();
@@ -394,9 +406,13 @@ pub fn merge(
     let mut entries: Vec<Entry> = Vec::new();
     // the stub's import descriptors, then each module's (its thunks and names in its own image)
     let mut descriptors = pe.descriptors()?;
+    // the modules' images, each at an RVA of its own, section-aligned, in one section (the stub's
+    // headers have room for few more section headers)
+    let modules_va = next_va;
+    let mut images: Vec<u8> = Vec::new();
 
-    for (name, path) in modules {
-        let b = Blob::read(path, apply_name, info_name)?;
+    for (name, bytes) in modules {
+        let b = Blob::parse(bytes.clone(), apply_name, info_name)?;
         // the image (bytes from RVA `first`) lands at `va`, so RVA `x` is at `c + x`
         let va = next_va;
         let c = va.wrapping_sub(b.first);
@@ -418,12 +434,13 @@ pub fn merge(
             pdata_count: b.pdata_count,
             mod_base: c,
         });
-        let vsize = img.len() as u32;
-        let mut sname = [0u8; 8];
-        let tag = format!(".aqrm{:02}", news.len());
-        sname[..tag.len().min(8)].copy_from_slice(&tag.as_bytes()[..tag.len().min(8)]);
-        news.push(New { name: sname, va, vsize, flags: SEC_FLAGS, data: img });
-        next_va = align(va + vsize, salign);
+        images.resize((va - modules_va) as usize, 0);
+        images.extend_from_slice(&img);
+        next_va = align(va + img.len() as u32, salign);
+    }
+    if !images.is_empty() {
+        let vsize = images.len() as u32;
+        news.push(New { name: *b".aqrm\0\0\0", va: modules_va, vsize, flags: SEC_FLAGS, data: images });
     }
 
     // the import directory: the descriptors gathered, zero-terminated
@@ -520,8 +537,7 @@ pub fn merge(
     put_u32(&mut pe.buf, anchor + 16, disp_va);
     put_u32(&mut pe.buf, anchor + 16 + 4, disp_len);
 
-    std::fs::write(out, &pe.buf).map_err(|e| format!("{}: {e}", out.display()))?;
-    Ok(())
+    Ok(pe.buf)
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
