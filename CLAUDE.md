@@ -42,6 +42,9 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     the hashed model of aqr-div3 and aqr-ac3 (their coding is specified in its README).
   - `aqr-bincache` — `cargo aqr`: the release `aqr` built and kept by a hash of its sources.
   - `aqr-api`, `aqr-ld` — the Rust interface of modules and the Wasm linker wrapper.
+  - `aqr-dll` — a module's binary built as a native library (`AQR_DLL_MODULE`; `build.sh` builds
+    them into `target/aqr-dll/`) exporting `aqr_api::dll`, toward self-extracting archives;
+    `aqr-dll-shim` records applications from archives and runs the libraries on them.
   - `aqr-modules` — Wasm modules built from the recompressors' code (`src/bin`, `wasm/`,
     `src/known.rs`).
 - `codecs/` — the recompressor crates `aqr-*` (flate, png, jpeg, mp3, flac, pdf, zip, sqlite,

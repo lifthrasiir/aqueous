@@ -110,6 +110,47 @@ impl Sim {
 
 #[cfg(target_family = "wasm")]
 pub use imp::Stack;
+#[cfg(not(target_family = "wasm"))]
+pub use native::Stack;
+
+/// Natively (a module's binary built as a library, crates/aqr-dll) the system's allocator: the
+/// plan is of the Wasm module, and natively nothing holds a module to it.
+#[cfg(not(target_family = "wasm"))]
+mod native {
+    use std::alloc::{GlobalAlloc, Layout, System};
+
+    pub struct Stack(System);
+
+    impl Stack {
+        pub const fn new() -> Stack {
+            Stack(System)
+        }
+    }
+
+    impl Default for Stack {
+        fn default() -> Stack {
+            Stack::new()
+        }
+    }
+
+    unsafe impl GlobalAlloc for Stack {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            unsafe { self.0.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            unsafe { self.0.alloc_zeroed(layout) }
+        }
+
+        unsafe fn dealloc(&self, p: *mut u8, layout: Layout) {
+            unsafe { self.0.dealloc(p, layout) }
+        }
+
+        unsafe fn realloc(&self, p: *mut u8, layout: Layout, new: usize) -> *mut u8 {
+            unsafe { self.0.realloc(p, layout, new) }
+        }
+    }
+}
 
 #[cfg(target_family = "wasm")]
 mod imp {

@@ -1,0 +1,19 @@
+[package]
+name = "aqr-dll-shim"
+version = "0.1.0"
+edition = "2024"
+description = "Applies the modules built as native libraries (aqr-dll) to applications given or recorded from archives"
+publish = false
+
+[dependencies]
+aqr-api = { path = "../aqr-api", default-features = false }
+aqr-decompress = { path = "../aqr-decompress" }
+aqr-formula = { path = "../aqr-formula" }
+aqr-modules = { path = "../aqr-modules" }
+sha2 = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }

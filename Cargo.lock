@@ -423,6 +423,78 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-dll"
+version = "0.1.0"
+dependencies = [
+ "aqr-ac3",
+ "aqr-api",
+ "aqr-arsc",
+ "aqr-asar",
+ "aqr-azo",
+ "aqr-bcj",
+ "aqr-bundle",
+ "aqr-bvx",
+ "aqr-bz2",
+ "aqr-clip",
+ "aqr-dex",
+ "aqr-div3",
+ "aqr-dwarf",
+ "aqr-exe",
+ "aqr-fasta",
+ "aqr-fits",
+ "aqr-flac",
+ "aqr-flate",
+ "aqr-gif",
+ "aqr-git",
+ "aqr-gnu-gettext",
+ "aqr-hdf5",
+ "aqr-ima",
+ "aqr-infer-recs",
+ "aqr-jpeg",
+ "aqr-jsonl",
+ "aqr-lha",
+ "aqr-lz4",
+ "aqr-lzma",
+ "aqr-lznt1",
+ "aqr-lzo",
+ "aqr-lzx",
+ "aqr-modules",
+ "aqr-mp3",
+ "aqr-mszip",
+ "aqr-obj",
+ "aqr-ogg",
+ "aqr-pdb",
+ "aqr-pdf",
+ "aqr-png",
+ "aqr-prores",
+ "aqr-psd",
+ "aqr-rar",
+ "aqr-raw",
+ "aqr-snappy",
+ "aqr-sqlite",
+ "aqr-tex",
+ "aqr-vorbis",
+ "aqr-wasm",
+ "aqr-wrt",
+ "aqr-xpress",
+ "aqr-xsv",
+ "aqr-zip",
+]
+
+[[package]]
+name = "aqr-dll-shim"
+version = "0.1.0"
+dependencies = [
+ "aqr-api",
+ "aqr-decompress",
+ "aqr-formula",
+ "aqr-modules",
+ "libc",
+ "sha2",
+ "windows-sys",
+]
+
+[[package]]
 name = "aqr-dwarf"
 version = "0.1.0"
 dependencies = [
