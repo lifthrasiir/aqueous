@@ -67,9 +67,17 @@ rest is the archive's (a 5.3 GB Q4_K_M, `--stats`): the coded streams compressed
 probe level to see whether they save (about 19 thread-seconds), then writing the batch and
 verifying it, about 4.5 s of 13.6 on one thread.
 
-A shard of 49.9 GB (Qwen3.8-Flash UD-Q4_K_XL, 2 of 4) did not finish: `aqr` grew to 80 GB of
-memory (the spill's regions mapped, 155 of 256 MiB, and the input) and was stopped. The archive
-holds a large file's batch whole (docs/streaming-encoder-design.md, steps 6 and 7).
+A file of 1 GiB or more archived alone to a file is written directly
+(`docs/streaming-encoder-design.md`, "출력에 바로 쓰기"): each segment's formula is sealed into the
+archive's sink as it is made, its blocks written to the archive as they fill, and the formula
+block put into a room left before them (its bound, `formula::formula_bound`), the rest a
+spacer. A shard of 49.9 GB (Qwen3.8-Flash UD-Q4_K_XL, 2 of 4), which before grew to 80 GB of
+memory (the spill's regions mapped, 155 of 256 MiB, and the input) and was stopped, now
+archives to 47.72 GB (0.9572) in 188 s, resident peak 1.22 GB, spill peak 18.7 KB: 72 s to
+write the archive, then 116 s verifying it on 1.8 threads. `aqr -K` gives it back at 1055 MB/s.
+The 5.3 GB Q4_K_M: 18.65 -> 13.1–13.5 s, resident peak 15.89 -> 1.26 GB, spill peak 5.66 GB ->
+15.8 MB, the archive 5,131,102,954 -> 5,131,401,818 B (the room's spacer, and the blocks in the
+order they filled).
 
 ## Status
 
@@ -78,7 +86,9 @@ Left:
 - Q2_K, Q3_K, IQ1–IQ3 and the trellis types (EXL3's) are kept as they are.
 - The heap peak of the encoder reaches the budget on files of Q4_K and Q6_K (2.0–2.16 GB): the
   symbols of every segment in flight (17 of 16 MiB) and their words.
-- Files of tens of GB within the archive: see "How it does".
+- Files of tens of GB in an archive of several files: a file is one leaf there, its batch held
+  whole (docs/streaming-encoder-design.md, step 7); written directly only alone, to a file
+  (not to standard output, encrypted, or mirrored).
 - Within the archive, the streams coded are compressed at zstd's probe level all the same,
   whole, to see whether they would save (`How::Light`), which costs as many thread-seconds as
   the coding; and the archive's writing and verification of a large file are mostly on one

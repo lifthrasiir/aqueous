@@ -457,7 +457,7 @@ formats! {
     }
     /// GGUF model file (aqr-gguf), known by its header: at the start of data only.
     Gguf = "gguf" {
-        recompressor: Pure(aqr_gguf::formula::encode),
+        recompressor: PureWith(crate::gguf),
         // segments of 16 MiB, as many at once as threads, each holding its symbols and streams
         // (about 4 bytes a byte); the long runs not coded are slices of the input
         heap: 0.0,

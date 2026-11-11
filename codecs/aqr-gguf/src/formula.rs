@@ -384,7 +384,7 @@ fn quant(
         for (k, p) in parts.iter().enumerate() {
             let len = b * p.groups() * LANES;
             let mut h = [[0u32; 16]; 4];
-            for g in syms[at..at + len].chunks_exact(4) {
+            for g in syms[at..at + len].as_chunks::<4>().0 {
                 for j in 0..4 {
                     h[j][g[j] as usize] += 1;
                 }
@@ -412,6 +412,43 @@ fn quant(
     Some(Run::Quant { q, blocks: n as u64, tables: ts })
 }
 
+/// Bytes that the formula data of the archive of [`encode`]'s formula of `input` comes to at
+/// most, not compressed (spec "Formula data"), its streams of a sink ([`encode_sealing`]: those of
+/// SYMS and RAW of each segment a stream of their own): by the pieces of the file, each span of a
+/// segment's parameters at most as long as a run of floats with two tables, its application and
+/// slices of each input over two blocks, a run kept as it is a slice of each block it is over,
+/// and a byte listing each block. None where [`encode`] takes no formula of it.
+pub fn formula_bound(input: &[u8]) -> Option<usize> {
+    let g = gguf::parse(input)?;
+    if g.tensors.is_empty() {
+        return None;
+    }
+    // (a varint of 64 bits, a Slice instruction, a Concat folding items)
+    const NUM: usize = 10;
+    const SLICE: usize = 1 + 3 * NUM;
+    const ITEM: usize = 2 * (1 + NUM);
+    // (a run of floats: tag, shift, count, map of 127 at most, two tables of 16 varints of 15 bits)
+    const SPAN: usize = 1 + 1 + NUM + 1 + 127 + 2 * 16 * 3;
+    // (an application: opcode, module, length of the parameters, the output's length, the memory
+    // limit and a task limit; its inputs)
+    const APPLY: usize = 1 + 4 * NUM + 2 * NUM + 2 * SLICE + (2 * SLICE + 1 + NUM);
+    let block = aqr_formula::aqr::BLOCK;
+    let over = |len: usize| len / block + 2;
+    let mut n = 1024 + over(g.data) * SLICE + ITEM + over(input.len()) * 4;
+    for p in pieces(input.len(), &g, SEGMENT) {
+        n += ITEM
+            + match p {
+                Piece::Long(a, b) => over(b - a) * SLICE + 1 + NUM,
+                Piece::Segment(spans) => APPLY + spans.len() * SPAN + 2,
+            };
+    }
+    Some(n)
+}
+
+/// A segment coded ([`encode_sealing`]): its formula and what was made of it, None where none of
+/// it was coded; and its bytes.
+type Made<T> = (Option<(Formula, T)>, std::ops::Range<usize>);
+
 /// The formula of GGUF file `input`, or None where it is not one this crate takes. The segments
 /// are coded `threads` at a time; the formula is the same whatever `threads` is.
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
@@ -421,6 +458,23 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
 /// [`encode`] in segments of about `segment` bytes (the tests' of segments, at lengths shorter
 /// than [`SEGMENT`]).
 pub fn encode_in(input: &[u8], threads: usize, segment_bytes: usize) -> Option<Formula> {
+    let made = |part: &mut Formula, _: &[u8]| aqr_formula::store::spill_streams(part);
+    encode_sealing(input, threads, segment_bytes, &made, &mut |_, _, ()| {})
+}
+
+/// [`encode_in`], each segment coded made a formula of its own (its application and streams),
+/// given to `made` on the worker that coded it, with the bytes it stands for, then to `seal` with
+/// what `made` made of it, in order, before it is taken into the file's ([`Formula::embed`]): to
+/// be sealed into the archive's sink, say, its streams then of the sink's (or to have its streams
+/// spilled, as [`encode_in`] has them). The input of each piece is let go of once it is done
+/// ([`aqr_formula::store::let_go`]).
+pub fn encode_sealing<T: Send>(
+    input: &[u8],
+    threads: usize,
+    segment_bytes: usize,
+    made: &(dyn Fn(&mut Formula, &[u8]) -> T + Sync),
+    seal: &mut dyn FnMut(&mut Formula, &[u8], T),
+) -> Option<Formula> {
     let g = gguf::parse(input)?;
     if g.tensors.is_empty() {
         return None;
@@ -431,14 +485,26 @@ pub fn encode_in(input: &[u8], threads: usize, segment_bytes: usize) -> Option<F
     // (each segment's streams pushed as they come, moved to the store at once: a stream of a
     // class made of all of them, of a length not told, would be copied as its region grew)
     let mut any = false;
-    // (a segment's coded form, or None where none of it was coded, and its bytes)
+    // (a segment's formula and what `made` made of it, or None where none of it was coded, and
+    // its bytes)
     let code = |spans: &[Span]| {
         let c = segment(input, spans);
         let (a, b) = (spans[0].range().start, spans.last().unwrap().range().end);
+        let part = c.coded.then(|| {
+            let mut part = Formula::default();
+            let inputs = vec![
+                part.push_as(SYMS, Kind::Compressed, c.syms),
+                part.push_as(RAW, Kind::Compressed, c.raw),
+                part.push_as(SIDE, Kind::Unknown, c.side),
+            ];
+            part.root = Node::apply(MODULE, c.params, inputs, (b - a) as u64);
+            let t = made(&mut part, &input[a..b]);
+            (part, t)
+        });
         aqr_common::progress::done(&input[a..b]);
-        (c.coded.then_some(c), a..b)
+        (part, a..b)
     };
-    let mut put = |piece: &Piece, c: Option<(Option<Coded>, std::ops::Range<usize>)>| {
+    let mut put = |piece: &Piece, c: Option<Made<T>>| {
         let (c, r) = match (piece, c) {
             (Piece::Long(a, b), _) => {
                 aqr_common::progress::done(&input[*a..*b]);
@@ -448,26 +514,19 @@ pub fn encode_in(input: &[u8], threads: usize, segment_bytes: usize) -> Option<F
             (Piece::Segment(_), None) => unreachable!("coded first"),
         };
         match c {
-            Some(c) => {
+            Some((mut part, t)) => {
                 any = true;
-                let mut push = |class: &'static str, kind: Kind, v: Vec<u8>| {
-                    let mut b: aqr_formula::Bytes = v.into();
-                    aqr_formula::store::spill(&mut b);
-                    f.push_as(class, kind, b)
-                };
-                let inputs = vec![
-                    push(SYMS, Kind::Compressed, c.syms),
-                    push(RAW, Kind::Compressed, c.raw),
-                    push(SIDE, Kind::Unknown, c.side),
-                ];
-                nodes.push(Node::apply(MODULE, c.params, inputs, r.len() as u64));
+                seal(&mut part, &input[r.clone()], t);
+                nodes.push(f.embed(part));
             }
             None => {
-                let d = &input[r];
+                let d = &input[r.clone()];
                 let bytes = aqr_formula::store::find(d).unwrap_or_else(|| d.to_vec().into());
                 nodes.push(f.push(DATA, bytes));
             }
         }
+        // (read again only where it is archived as it is, or compared)
+        aqr_formula::store::let_go(&input[r]);
     };
     // (the segments coded on the workers in order, as many at once as there are, each written
     // once those before it are: no wait for the slowest of a batch)

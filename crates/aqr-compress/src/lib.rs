@@ -680,6 +680,58 @@ pub trait Sink: Write {
     fn mapped(&self) -> bool {
         false
     }
+
+    /// Where nothing is written yet and bytes can be written at offsets from its start (a file):
+    /// how, for blocks to be written as they are made and the formula block before them after
+    /// ([`direct`]). The sink is then written to only through it, until [`Sink::placed`].
+    fn place(&mut self) -> Option<Arc<Placing>> {
+        None
+    }
+
+    /// Has the sink go on after the `len` bytes written through [`Sink::place`].
+    fn placed(&mut self, len: u64) -> io::Result<()> {
+        let _ = len;
+        Ok(())
+    }
+}
+
+/// A file written at offsets ([`Sink::place`]).
+pub struct Placing(std::fs::File);
+
+impl Placing {
+    fn read_at(&self, at: u64, d: &mut [u8]) -> io::Result<()> {
+        #[cfg(unix)]
+        return std::os::unix::fs::FileExt::read_exact_at(&self.0, d, at);
+        #[cfg(windows)]
+        {
+            let (mut at, mut d) = (at, d);
+            while !d.is_empty() {
+                match std::os::windows::fs::FileExt::seek_read(&self.0, d, at)? {
+                    0 => return Err(io::ErrorKind::UnexpectedEof.into()),
+                    n => (at, d) = (at + n as u64, &mut d[n..]),
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+impl aqr::sink::Place for Placing {
+    fn write_at(&self, at: u64, d: &[u8]) -> io::Result<()> {
+        #[cfg(unix)]
+        return std::os::unix::fs::FileExt::write_all_at(&self.0, d, at);
+        #[cfg(windows)]
+        {
+            let (mut at, mut d) = (at, d);
+            while !d.is_empty() {
+                match std::os::windows::fs::FileExt::seek_write(&self.0, d, at)? {
+                    0 => return Err(io::ErrorKind::WriteZero.into()),
+                    n => (at, d) = (at + n as u64, &d[n..]),
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 impl Sink for Vec<u8> {
@@ -708,6 +760,16 @@ impl Sink for std::fs::File {
 
     fn mapped(&self) -> bool {
         true
+    }
+
+    fn place(&mut self) -> Option<Arc<Placing>> {
+        let empty = self.stream_position().ok()? == 0 && self.metadata().ok()?.len() == 0;
+        empty.then(|| self.try_clone().ok().map(|f| Arc::new(Placing(f)))).flatten()
+    }
+
+    fn placed(&mut self, len: u64) -> io::Result<()> {
+        // (the position shared with the clone written at offsets, on Windows)
+        self.seek(io::SeekFrom::Start(len)).map(|_| ())
     }
 }
 
@@ -771,8 +833,17 @@ fn compress_with(
     let watch = notes.as_ref().map(|notes| progress::Files::of(notes, [(0, d)]));
     let mut cx = Cx::new(d, opt);
     cx.pre = opt.verify.then(|| Arc::new(verify::Prevalidator::spawn(opt.threads, &[d])));
-    // (the contents of an image or the like sealed into a sink as they are made)
-    let order = Arc::new(seal::Order::new(aqr::sink::Sink::new(&cx.enc, archive::SLICE_MIN)));
+    // (the contents of an image or the like sealed into a sink as they are made; of a large file,
+    // the sink's blocks written to `out` as they are, after room for the formula block)
+    let direct = direct_room(d, kind, opt, &cx.enc).and_then(|room| Some((out.place()?, room)));
+    let sink = match &direct {
+        Some((place, room)) => {
+            let at = (aqr::HEADER_MAGIC.len() as u64) + room;
+            aqr::sink::Sink::direct(&cx.enc, archive::SLICE_MIN, place.clone(), at, opt.threads.max(2))
+        }
+        None => aqr::sink::Sink::new(&cx.enc, archive::SLICE_MIN),
+    };
+    let order = Arc::new(seal::Order::new(sink));
     *cx.sealing.get_mut() = Some(seal::Sealing { order: order.clone(), slot: seal::ROOT });
     let _item = aqr_common::trace::item(Some(0));
     let analyzing = aqr_common::trace::span("analyze");
@@ -789,9 +860,58 @@ fn compress_with(
     // (the root's slot taken, or never used)
     drop(cx.sealing.take());
     let sink = Arc::into_inner(order).expect("the order held only here").into_sink();
-    let r = finish(f, d, opt, &cx, memo, Some(sink), kept, notes.as_ref(), out)?;
+    let r = finish(f, d, opt, &cx, memo, Some((sink, direct)), kept, notes.as_ref(), out)?;
     note(Note::Written(0));
     Ok(r)
+}
+
+/// Where an archive is written directly ([`direct_room`]): through what, and the room before the
+/// blocks.
+type Direct = (Arc<Placing>, u64);
+
+/// Bytes of a GGUF file from which on it is archived directly ([`direct_room`]).
+const DIRECT: usize = 1 << 30;
+
+/// [`DIRECT`], or what the tests set.
+fn direct_min() -> usize {
+    #[cfg(test)]
+    if let Some(n) = tests::DIRECT_MIN.get() {
+        return n;
+    }
+    DIRECT
+}
+
+/// Where file `d` of `kind` (of [`direct_min`] bytes or more) is archived alone by the formula
+/// of a recompressor telling how large its formula comes to at most (aqr-gguf's), each part of
+/// it sealed as it is made: the room for its module and formula blocks to leave before the
+/// blocks of the sink, which are then written to the archive as they are made rather than held
+/// (`docs/streaming-encoder-design.md`, "출력에 바로 쓰기"); what the formula leaves of the room is
+/// a spacer block after it. Not where the archive is mirrored (the mirror blocks' places are
+/// not planned with the room).
+fn direct_room(d: &[u8], kind: Kind, opt: &Options, enc: &aqr::Encoder) -> Option<u64> {
+    let gguf = (kind == Kind::Unknown || kind == Kind::Format(Format::Gguf.name()))
+        && detect(d) == Some(Format::Gguf)
+        && format_on(Format::Gguf, opt);
+    if d.len() < direct_min() || opt.mirrors || !opt.recompresses() || !gguf {
+        return None;
+    }
+    let bound = aqr_gguf::formula::formula_bound(d)?;
+    // (the data compressed at most: Zstandard's raw blocks, its frame and the block's header)
+    let formula = bound + bound / 128 + 64;
+    let modules = enc.module_len(aqr_gguf::formula::MODULE).ok()?;
+    let room = formula + modules + 2;
+    #[cfg(test)]
+    if let Some(n) = tests::DIRECT_ROOM.get() {
+        return Some(n);
+    }
+    Some((room + room % 2) as u64)
+}
+
+/// The sealing that the parts of a formula take as they are made, where its sink writes its
+/// blocks as they are ([`direct_room`]): the formula of the file itself, made as `sealing` is
+/// given (taken by [`recompress_sealed`]).
+fn sealing_parts(sealing: &Option<seal::Sealing>) -> Option<Arc<seal::Order>> {
+    sealing.as_ref().filter(|s| s.slot == seal::ROOT && s.order.sink().is_direct()).map(|s| s.order.clone())
 }
 
 /// Bytes of aqr-lzma's match finders' chains at once while compressing: two of a 64 MiB
@@ -820,8 +940,11 @@ pub(crate) fn spilling(opt: &Options) -> Option<aqr_formula::store::Guard> {
 /// in `memo` taken from there), and where it is not `d` (a module's bug), the archive of `d` raw
 /// written instead. The formula is returned where `kept` (of no bytes of the streams sunk);
 /// what is no longer needed (the formula, the streams compressed) is dropped before the
-/// decoding. The streams of `sink`, where `f`'s sunk streams are, are written after its own.
-/// The `notes` are told of it encoded and verified. Fails where `out` does.
+/// decoding. The streams of `sink`, where `f`'s sunk streams are, are written after its own;
+/// where it writes its blocks to `out` as they are made (through the place given, after the
+/// room given: [`direct_room`]), `f` is sealed into it too, and its module and formula blocks put
+/// into the room ([`written_direct`]). The `notes` are told of it encoded and verified. Fails
+/// where `out` does.
 #[allow(clippy::too_many_arguments)]
 fn finish(
     mut f: Formula,
@@ -829,11 +952,12 @@ fn finish(
     opt: &Options,
     cx: &Cx,
     memo: verify::Memo,
-    sink: Option<aqr::sink::Sink>,
+    sink: Option<(aqr::sink::Sink, Option<Direct>)>,
     kept: bool,
     notes: Option<&progress::Notes>,
     out: &mut dyn Sink,
 ) -> io::Result<(usize, Option<Formula>)> {
+    let (sink, direct) = sink.map_or((None, None), |(s, d)| (Some(s), d));
     use progress::Note;
     let mut mirroring = None;
     let out: &mut dyn Sink = match opt.mirrors {
@@ -847,25 +971,22 @@ fn finish(
     // (of a file mapped, let go of as it is read: of all of it, again)
     let sum = Some(aqr::checksum_through(d));
     let encoding = aqr_common::trace::span("encode");
-    let sunk = sink.map(aqr::sink::Sink::close).transpose().map_err(io::Error::other)?.unwrap_or_default();
-    let (mut merged, groups) = f.merged();
-    merged.streams.extend(sunk.iter().enumerate().map(|(k, s)| Stream {
-        class: s.class.clone(),
-        kind: s.kind,
-        content: false,
-        apart: false,
-        data: Bytes::sunk(k, s.len as usize),
-    }));
-    let pieces: Vec<Vec<&[u8]>> = groups
-        .iter()
-        .map(|g| g.iter().map(|&(i, a, b)| &f.streams[i].data[a as usize..b as usize]).collect())
-        .collect();
-    let n = written(out, |w| cx.enc.encode_sunk_to(&merged, &pieces, &sunk, sum, w))?;
+    let n = match (sink, direct) {
+        (Some(sink), Some((place, room))) => written_direct(&mut f, sink, &place, room, sum, &cx.enc, out)?,
+        (sink, _) => {
+            let sunk = sink.map(aqr::sink::Sink::close).transpose().map_err(io::Error::other)?.unwrap_or_default();
+            let (mut merged, groups) = f.merged();
+            merged.streams.extend(sunk_streams(&sunk));
+            let pieces: Vec<Vec<&[u8]>> = groups
+                .iter()
+                .map(|g| g.iter().map(|&(i, a, b)| &f.streams[i].data[a as usize..b as usize]).collect())
+                .collect();
+            written(out, |w| cx.enc.encode_sunk_to(&merged, &pieces, &sunk, sum, w))?
+        }
+    };
     // (the input read through: a file mapped, its pages read again as verifying comes to them)
     aqr_formula::store::let_go(d);
-    drop(sunk);
     drop(encoding);
-    drop(pieces);
     notes.inspect(|n| n.send(Note::Encoded(0, 1, 1)));
     cx.enc.clear();
     let f = kept.then_some(f);
@@ -903,7 +1024,7 @@ fn finish(
         decodes
     };
     // by the hashes recorded, without running a module; else decoded
-    let verified = |c: &[u8]| match hashed(c, d, &memo, opt) {
+    let verified = |c: &[u8]| match hashed(c, d, &memo, opt, mapped) {
         Some(same) => same,
         None => decodes(c),
     };
@@ -922,30 +1043,124 @@ fn finish(
     Ok((r.0 + mirroring.map_or(0, |m| m.added() as usize), r.1))
 }
 
+/// The streams of formula of a sink's streams `sunk`, after those of the formula's own: as
+/// [`Formula::merged`] has them.
+fn sunk_streams(sunk: &[aqr::sink::Sunk]) -> impl Iterator<Item = Stream> + '_ {
+    sunk.iter().enumerate().map(|(k, s)| Stream {
+        class: s.class.clone(),
+        kind: s.kind,
+        content: false,
+        apart: false,
+        data: Bytes::sunk(k, s.len as usize),
+    })
+}
+
+/// The archive of formula `f` whose blocks `sink` writes to `out` as they are made (through
+/// `place`, from the room of `room` bytes after the header on, [`direct_room`]), of the bytes
+/// written: `f` sealed into it, the room then its module and formula blocks and a spacer block
+/// of the rest of it, and the footer after the blocks. Where they take more than the room (which
+/// they are not to), the blocks are moved after them. A formula error (a block of the sink no
+/// slice takes, as where a recompression gave up having sealed some of it) is given as such,
+/// for the archive of the file as it is to be written instead.
+fn written_direct(
+    f: &mut Formula,
+    sink: aqr::sink::Sink,
+    place: &Placing,
+    room: u64,
+    sum: Option<u64>,
+    enc: &aqr::Encoder,
+    out: &mut dyn Sink,
+) -> io::Result<aqr_formula::Result<usize>> {
+    use aqr::sink::Place;
+    let start = aqr::HEADER_MAGIC.len() as u64;
+    #[cfg(test)]
+    tests::DIRECTED.with(|n| n.set(n.get() + 1));
+    let sealed = sink.seal(f);
+    let (sunk, end) = sink.close_direct().map_err(io::Error::other)?;
+    let head = sealed.and_then(|()| {
+        let (mut merged, groups) = f.merged();
+        if !groups.is_empty() {
+            return Err(aqr_formula::Error::new("a stream of the formula not sealed"));
+        }
+        merged.streams.extend(sunk_streams(&sunk));
+        enc.direct_head(&merged, &sunk, sum)
+    });
+    let head = match head {
+        Ok(h) => h,
+        Err(e) => return Ok(Err(e)),
+    };
+    // (a spacer of 2 bytes at least after the formula block: the room only shrinks)
+    let need = head.len() as u64 + 2;
+    let (blocks_at, end) = match need <= room {
+        true => (start + room, end),
+        false => {
+            let by = need - room;
+            moved_back(place, start + room, end, by)?;
+            (start + need, end + by)
+        }
+    };
+    let spacer = blocks_at - start - head.len() as u64;
+    place.write_at(0, &aqr::HEADER_MAGIC)?;
+    place.write_at(start, &head)?;
+    place.write_at(start + head.len() as u64, &aqr::kill(spacer as usize))?;
+    let footer = aqr::footer_bytes((end - start) as usize);
+    place.write_at(end, &footer)?;
+    let n = end + footer.len() as u64;
+    out.placed(n)?;
+    Ok(Ok(n as usize))
+}
+
+/// Moves bytes `from..end` written through `place` back by `by` bytes, from the end on.
+fn moved_back(place: &Placing, from: u64, end: u64, by: u64) -> io::Result<()> {
+    use aqr::sink::Place;
+    let mut buf = vec![0u8; 8 << 20];
+    let mut at = end;
+    while at > from {
+        let n = (at - from).min(buf.len() as u64);
+        at -= n;
+        place.read_at(at, &mut buf[..n as usize])?;
+        place.write_at(at + by, &buf[..n as usize])?;
+    }
+    Ok(())
+}
+
 /// Whether archive `c` of file `d` gives it back by its content hashes, worked out without
 /// running a module by what `memo` recorded (`aqr::Archive::hashed`): its outputs' hashes those
 /// of the parts of `d` they are, which their checksums are of. None where any application is not
 /// recorded.
-fn hashed(c: &[u8], d: &[u8], memo: &std::cell::RefCell<verify::Memo>, opt: &Options) -> Option<bool> {
+fn hashed(c: &[u8], d: &[u8], memo: &std::cell::RefCell<verify::Memo>, opt: &Options, mapped: bool) -> Option<bool> {
     use aqr_formula::chash::Ch;
     let _s = aqr_common::trace::span("verify");
     let native = Native { threads: opt.threads };
     let runner = aqr_decompress::natives(&native);
-    let Ok(a) = aqr::open(c, &runner) else { return Some(false) };
+    let Ok(mut a) = aqr::open(c, &runner) else { return Some(false) };
+    if mapped {
+        // SAFETY: the archive's file mapped read only ([`Sink::mapped`])
+        unsafe { a.let_go_read() };
+    }
     let roots = match a.hashed(&*memo.borrow(), &aqr_decompress::identify, opt.threads) {
         Ok(Some(roots)) => roots,
         Ok(None) => return None,
         Err(_) => return Some(false),
     };
-    let (mut at, mut whole) = (0usize, Ch::EMPTY);
+    // (the hash of `d` made of those of its pieces, each read once for both, [`LET_GO`] at a
+    // time, its pages then let go of: not all of a file mapped resident by the end)
+    let (mut at, mut whole, mut of_d) = (0usize, Ch::EMPTY, Ch::EMPTY);
     for (h, sums) in roots {
         let Some(part) = d.get(at..at.saturating_add(h.len() as usize)) else { return Some(false) };
-        if sums.iter().any(|&s| s != aqr::checksum(part)) {
+        let mut sum = xxhash_rust::xxh64::Xxh64::new(0);
+        for piece in part.chunks(LET_GO) {
+            sum.update(piece);
+            of_d = of_d.cat(Ch::of(piece));
+            aqr_formula::store::let_go(piece);
+        }
+        // (the checksums of the archive's, [`aqr::checksum`])
+        if sums.iter().any(|&s| s != sum.digest()) {
             return Some(false);
         }
         (at, whole) = (at + part.len(), whole.cat(h));
     }
-    let same = at == d.len() && whole == Ch::of(d);
+    let same = at == d.len() && whole == of_d;
     aqr_formula::store::let_go(d);
     Some(same)
 }
@@ -1202,9 +1417,17 @@ fn recompress_sealed(
                     .ok()
                     .flatten()
             }
-            _ => pure(format, d, &Pure { opt, depth, words, once: &cx.once, held }).flatten(),
+            _ => {
+                // (of the file itself, archived directly: its parts sealed as they are made, each
+                // evaluated beforehand on its own)
+                let order = sealing_parts(sealing);
+                let (seal, pre) = (order.as_deref(), cx.pre.as_deref());
+                pure(format, d, &Pure { opt, depth, words, once: &cx.once, held, seal, pre }).flatten()
+            }
         },
     }?;
+    // (parts sealed already, evaluated beforehand as they were)
+    let sealed = f.streams.iter().any(|s| s.data.sunk_in().is_some());
     let mut f = f;
     f.mark_contents();
     // (an application over the bound: this recompression is not used, as if the recompressor did
@@ -1229,7 +1452,7 @@ fn recompress_sealed(
     // (a formula of data not made yet, aqr-wim's: its applications evaluated with their contents
     // as they are made, [`make_later`], else once its data is made, below)
     let lazy = f.streams.iter().any(|s| s.data.is_lazy());
-    if let Some(pre) = cx.pre.as_ref().filter(|_| !lazy) {
+    if let Some(pre) = cx.pre.as_ref().filter(|_| !lazy && !sealed) {
         match prepared && format == Format::Png {
             true => pre
                 .job(shared.clone(), d)
@@ -1380,7 +1603,7 @@ fn told_as_second_half(f: &Formula, d: &[u8]) -> Vec<aqr_common::progress::Watch
     let own: Vec<&[u8]> = f
         .streams
         .iter()
-        .filter(|s| !s.data.is_lazy())
+        .filter(|s| !s.data.is_lazy() && s.data.sunk_in().is_none())
         .map(|s| &s.data[..])
         .filter(|s| !s.is_empty() && !within(s))
         .collect();
@@ -2399,6 +2622,44 @@ pub(crate) struct Pure<'a> {
     once: &'a Once,
     /// What the files archived along hold ([`Cx::held`]).
     held: Option<&'a Held>,
+    /// Where the formula is of the file itself archived directly ([`direct_room`]): the order
+    /// whose sink the formula's parts are sealed into as they are made, as the recompressor may
+    /// have them ([`gguf`], [`Pure::made`]).
+    seal: Option<&'a seal::Order>,
+    /// Where those parts are evaluated beforehand ([`Cx::pre`]).
+    pre: Option<&'a verify::Prevalidator>,
+}
+
+impl Pure<'_> {
+    /// What part `part` of the formula, of bytes `of`, makes ready to be sealed into the sink of
+    /// [`Pure::seal`], on any thread: its memory declared, evaluated beforehand, and its blocks
+    /// of its own encoded ([`aqr::sink::Sink::ready`]).
+    fn made(&self, part: &mut Formula, of: &[u8]) -> aqr::sink::Ready {
+        let order = self.seal.expect("sealing");
+        let _a = aqr_common::allowance::enter(aqr_common::allowance::Context::NONE);
+        memory::declare(part, &Native { threads: 1 }, &memory::Limits::default());
+        if let Some(pre) = self.pre {
+            part.streams.iter_mut().for_each(|s| s.data.share());
+            pre.submit(Arc::new(part.clone()), of);
+        }
+        order.sink().ready(part).expect("encoded")
+    }
+}
+
+/// aqr-gguf's formula of `d`, each segment coded sealed as it is made where `p` tells, else its
+/// streams spilled.
+fn gguf(d: &[u8], p: &Pure) -> Option<Formula> {
+    let segment = aqr_gguf::formula::SEGMENT;
+    #[cfg(test)]
+    let segment = tests::GGUF_SEGMENT.get().unwrap_or(segment);
+    match p.seal {
+        Some(order) => {
+            let made = |part: &mut Formula, of: &[u8]| p.made(part, of);
+            let mut seal = |part: &mut Formula, _: &[u8], ready| order.sink().seal_ready(part, ready).expect("sealed");
+            aqr_gguf::formula::encode_sealing(d, p.opt.threads, segment, &made, &mut seal)
+        }
+        None => aqr_gguf::formula::encode_in(d, p.opt.threads, segment),
+    }
 }
 
 /// The formula that the recompressor of `format` makes of `d` (its `formula` module, see its
@@ -2688,7 +2949,8 @@ fn prepare(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> (Vec<(usize, usiz
     // (each may take all of `opt.threads`: the pool gives it the workers free, and those given
     // back as the others finish)
     let words = cx.words.borrow().clone();
-    let p = Pure { opt, depth, words: words.as_deref(), once: &cx.once, held: cx.held.as_deref() };
+    let p =
+        Pure { opt, depth, words: words.as_deref(), once: &cx.once, held: cx.held.as_deref(), seal: None, pre: None };
     let files = cx.files.as_deref();
     let made = sets::par_map(jobs.len(), workers, |i| {
         files.inspect(|f| f.tell(jobs[i].1.as_ptr(), false));
@@ -2774,6 +3036,14 @@ mod tests {
         pub(crate) static PURE: Cell<usize> = const { Cell::new(0) };
         /// The lengths of the data compared with their formulas by [`smaller`].
         pub(crate) static COMPARED: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+        /// [`direct_min`] of the tests, where set.
+        pub(crate) static DIRECT_MIN: Cell<Option<usize>> = const { Cell::new(None) };
+        /// The room [`direct_room`] leaves, where set.
+        pub(crate) static DIRECT_ROOM: Cell<Option<u64>> = const { Cell::new(None) };
+        /// The archives written directly ([`written_direct`]).
+        pub(crate) static DIRECTED: Cell<usize> = const { Cell::new(0) };
+        /// The bytes of a segment of aqr-gguf ([`gguf`]), where set.
+        pub(crate) static GGUF_SEGMENT: Cell<Option<usize>> = const { Cell::new(None) };
     }
 
     /// The lengths of the texts given to aqr-wrt, on any thread.
@@ -4273,6 +4543,50 @@ mod tests {
         c
     }
 
+    /// A GGUF file archived to a file directly ([`direct_room`]): its blocks written as they are
+    /// made, its formula into the room before them, the archive the same whatever the threads
+    /// and giving the file back; where the formula takes more than the room, the blocks moved
+    /// after it. Archived to memory, or below the size, it is archived as before.
+    #[test]
+    fn gguf_direct() {
+        let d = aqr_gguf::synth::file(3, 8);
+        let path = std::env::temp_dir().join(format!("aqr-compress-direct-{}.aqr", std::process::id()));
+        let archived = |threads: usize, min: usize, room: Option<u64>| {
+            DIRECT_MIN.set(Some(min));
+            DIRECT_ROOM.set(room);
+            GGUF_SEGMENT.set(Some(64 << 10));
+            let opt = Options { threads, ..Options::default() };
+            let mut file =
+                std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path).unwrap();
+            let before = DIRECTED.get();
+            let (n, _) = compress_with(&d, Kind::Unknown, &opt, false, None, &mut file).unwrap();
+            drop(file);
+            let c = std::fs::read(&path).unwrap();
+            assert_eq!(n, c.len());
+            (c, DIRECTED.get() - before)
+        };
+        let (one, directed) = archived(1, 0, None);
+        assert_eq!(directed, 1);
+        assert!(aqr_decompress::decompress(&one, 1).unwrap() == d);
+        let (four, _) = archived(4, 0, None);
+        assert!(four == one, "the same whatever the threads");
+        // (the room too small: the blocks moved after the formula)
+        let (moved, _) = archived(2, 0, Some(2));
+        assert!(moved.len() < one.len() && aqr_decompress::decompress(&moved, 1).unwrap() == d);
+        let (held, directed) = archived(2, usize::MAX, None);
+        assert_eq!(directed, 0);
+        assert!(held != one && aqr_decompress::decompress(&held, 1).unwrap() == d);
+        // (of the formula, not the file as it is: the room's spacer, or 2 bytes of it, more)
+        assert!(one.len() < d.len() * 9 / 10 && moved.len() < held.len() + 64, "{} {}", one.len(), held.len());
+        // (in memory: archived as before)
+        DIRECT_MIN.set(Some(0));
+        let opt = Options { threads: 2, ..Options::default() };
+        let (mut c, before) = (Vec::new(), DIRECTED.get());
+        compress_with(&d, Kind::Unknown, &opt, false, None, &mut c).unwrap();
+        assert!(DIRECTED.get() == before && c == held);
+        _ = std::fs::remove_file(&path);
+    }
+
     /// An archive written to a file that does not give the file back is written again over it:
     /// the archive of the file raw, shorter than it, the file cut to its length.
     #[test]
@@ -4316,12 +4630,12 @@ mod tests {
         assert!(!f.applies().is_empty());
         let c = cx.enc.encode(&f, Some(aqr::checksum(&d))).unwrap();
         let memo = std::cell::RefCell::new(memo);
-        assert_eq!(hashed(&c, &d, &memo, &opt), Some(true));
+        assert_eq!(hashed(&c, &d, &memo, &opt, false), Some(true));
         let mut other = d.clone();
         other[1000] ^= 1;
-        assert_eq!(hashed(&c, &other, &memo, &opt), Some(false));
+        assert_eq!(hashed(&c, &other, &memo, &opt, false), Some(false));
         // (without the records: evaluated where they do not tell)
-        assert_eq!(hashed(&c, &d, &Default::default(), &opt), Some(true));
+        assert_eq!(hashed(&c, &d, &Default::default(), &opt, false), Some(true));
         let memo = memo.into_inner();
         let decode = |c: &[u8], memo: verify::Memo| {
             let files = |_: usize, range: Range<usize>| d.get(range).map(<[u8]>::to_vec);
@@ -4392,7 +4706,7 @@ mod tests {
         let c = Cx::new(&d, &opt).enc.encode(&f, Some(aqr::checksum(&d))).unwrap();
         assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
         for threads in [1, 4] {
-            assert_eq!(hashed(&c, &d, &Default::default(), &Options { threads, ..opt.clone() }), Some(true));
+            assert_eq!(hashed(&c, &d, &Default::default(), &Options { threads, ..opt.clone() }, false), Some(true));
         }
     }
 
@@ -4425,7 +4739,7 @@ mod tests {
         assert!(!f.applies().is_empty());
         let c = cx.enc.encode(&f, Some(aqr::checksum(&d))).unwrap();
         // (the memo of the batch it was evaluated in gone)
-        assert_eq!(hashed(&c, &d, &Default::default(), &opt), Some(true));
+        assert_eq!(hashed(&c, &d, &Default::default(), &opt, false), Some(true));
     }
 
     /// A module run whose output is a whole file is run once: the same application again takes

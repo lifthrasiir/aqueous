@@ -937,44 +937,7 @@ impl Encoder {
             nodes.push(&f.root);
             let used = sliced(f.streams.len(), |s| len_of(s).unwrap_or(0), nodes);
             let (ordinals, next) = listed(&used, 0..f.streams.len());
-            let (modules, resources) = f.blocks();
-            let mut checked = Ok(());
-            for n in f.shared.iter().flat_map(|s| s.inputs()).chain([&f.root]) {
-                n.visit(&mut |n| {
-                    if let Node::ModuleBytes(m, d) = n
-                        && checked.is_ok()
-                    {
-                        checked = self.check_module_bytes(*m, d, level);
-                    }
-                });
-            }
-            checked?;
-
-            let mut data = Vec::new();
-            varint::put(&mut data, next);
-            (0..next).for_each(|_| varint::put(&mut data, 0));
-            for n in [resources.len(), modules.len()] {
-                varint::put(&mut data, n as u64);
-                (0..n).for_each(|i| varint::put(&mut data, i as u64));
-            }
-            let classes = self.classes_of(&modules);
-            let mut e = Emit {
-                ordinals: &ordinals,
-                modules: &modules,
-                classes: &classes,
-                resources: &resources,
-                out: &mut data,
-                stack: vec![],
-            };
-            for (i, s) in f.shared.iter().enumerate() {
-                e.shared(i, s);
-            }
-            e.node(&f.root);
-            debug_assert_eq!(e.stack, [None]);
-            if let Some(c) = checksum {
-                data.push(CHECKSUM);
-                data.extend_from_slice(&c.to_le_bytes());
-            }
+            let (data, modules, resources) = self.formula_data(f, &ordinals, next, checksum)?;
 
             // (the blocks compressed at once beforehand, kept or not: where kept, as a formula is
             // compared with its data, those compressed already are skipped)
@@ -1012,6 +975,126 @@ impl Encoder {
         footer(out, out.len() - blocks);
         Ok(())
     }
+
+    /// The formula data of `f` (not compressed), its slices of the blocks listed at `ordinals`
+    /// ([`listed`]: the first `next` blocks after the formula block, all of them taken), with
+    /// the modules and resources it lists, in order.
+    fn formula_data<'f>(
+        &self,
+        f: &'f Formula,
+        ordinals: &[Vec<Option<u64>>],
+        next: u64,
+        checksum: Option<u64>,
+    ) -> Result<(Vec<u8>, Vec<Module>, Vec<&'f Resource>)> {
+        let (modules, resources) = f.blocks();
+        let mut checked = Ok(());
+        for n in f.shared.iter().flat_map(|s| s.inputs()).chain([&f.root]) {
+            n.visit(&mut |n| {
+                if let Node::ModuleBytes(m, d) = n
+                    && checked.is_ok()
+                {
+                    checked = self.check_module_bytes(*m, d, self.base_level());
+                }
+            });
+        }
+        checked?;
+
+        let mut data = Vec::new();
+        varint::put(&mut data, next);
+        (0..next).for_each(|_| varint::put(&mut data, 0));
+        for n in [resources.len(), modules.len()] {
+            varint::put(&mut data, n as u64);
+            (0..n).for_each(|i| varint::put(&mut data, i as u64));
+        }
+        let classes = self.classes_of(&modules);
+        let mut e = Emit {
+            ordinals,
+            modules: &modules,
+            classes: &classes,
+            resources: &resources,
+            out: &mut data,
+            stack: vec![],
+        };
+        for (i, s) in f.shared.iter().enumerate() {
+            e.shared(i, s);
+        }
+        e.node(&f.root);
+        debug_assert_eq!(e.stack, [None]);
+        if let Some(c) = checksum {
+            data.push(CHECKSUM);
+            data.extend_from_slice(&c.to_le_bytes());
+        }
+        Ok((data, modules, resources))
+    }
+
+    /// The blocks that go before those a direct sink wrote ([`sink::Sink::direct`]) in the
+    /// archive of `f`, all of whose streams are of the sink, stream `k` of `f` the sink's `k`
+    /// (`sunk`, of [`sink::Sink::close_direct`]): its module and resource blocks, then its formula
+    /// block. The blocks of the sink follow it, then the footer ([`footer_bytes`]). Fails where a
+    /// stream of `f` is not the sink's, or a block written is taken by no slice (the spec has
+    /// every non-leaf block taken).
+    pub fn direct_head(&self, f: &Formula, sunk: &[sink::Sunk], checksum: Option<u64>) -> Result<Vec<u8>> {
+        f.check_outputs()?;
+        if f.streams.len() != sunk.len()
+            || f.streams
+                .iter()
+                .enumerate()
+                .any(|(k, s)| s.data.sunk_in() != Some(k) || s.data.len() as u64 != sunk[k].len)
+        {
+            return Err(Error::new("a stream not of the sink"));
+        }
+        let mut nodes: Vec<&Node> = f.shared.iter().flat_map(|s| s.inputs()).collect();
+        nodes.push(&f.root);
+        let mut slices = Ok(());
+        f.visit(&mut |n| {
+            if let &Node::Slice { stream, start, len } = n
+                && sunk.get(stream).is_none_or(|s| start.checked_add(len).is_none_or(|e| e > s.len))
+            {
+                slices = Err(Error::new(format!("slice [{start}, +{len}) out of stream #{stream}")));
+            }
+        });
+        slices?;
+        let used = sliced(f.streams.len(), |s| sunk[s].len as usize, nodes);
+        let mut ordinals: Vec<Vec<Option<u64>>> = Vec::with_capacity(sunk.len());
+        let mut next = 0;
+        for (s, u) in sunk.iter().zip(&used) {
+            if s.ordinals.len() != u.len() && !(u.is_empty() && s.ordinals.is_empty()) || !u.iter().all(|&u| u) {
+                return Err(Error::new("a block of the sink taken by no slice"));
+            }
+            next += s.ordinals.len() as u64;
+            ordinals.push(s.ordinals.iter().map(|&o| Some(o)).collect());
+        }
+        let mut all: Vec<u64> = ordinals.iter().flatten().flatten().copied().collect();
+        all.sort_unstable();
+        if all.iter().enumerate().any(|(i, &o)| o != i as u64) {
+            return Err(Error::new("the sink's blocks not all of the formula's"));
+        }
+        let (data, modules, resources) = self.formula_data(f, &ordinals, next, checksum)?;
+        let mut out = Vec::new();
+        let level = self.base_level();
+        for &m in &modules {
+            self.write_module(&mut out, m, level)?;
+        }
+        for r in resources {
+            self.resource_block(&mut out, r)?;
+        }
+        formula_block(&mut out, 1, &always_compressed(&mut self.cctx(), &[&data], level, self.threads)?);
+        Ok(out)
+    }
+
+    /// Bytes of the module block of `m` in an archive, as [`Encoder::direct_head`] writes it.
+    pub fn module_len(&self, m: Module) -> Result<usize> {
+        let mut n = Count(0);
+        self.write_module(&mut n, m, self.base_level())?;
+        Ok(n.0)
+    }
+}
+
+/// The end of an archive without a metadata block whose blocks take `blocks` bytes.
+pub fn footer_bytes(blocks: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    footer(&mut out, blocks);
+    out
 }
 
 /// [`Encoder::how`] of a stream of `class` and `kind` at `level`.
@@ -5171,6 +5254,86 @@ mod tests {
         let mut out = Vec::new();
         enc.encode_sunk_to(&merged, &pieces, &sunk, Some(checksum(&want)), &mut out).unwrap().unwrap();
         assert!(decode(&out, &natives()).unwrap() == want);
+    }
+
+    /// Bytes written at offsets, in memory.
+    #[derive(Default)]
+    struct Placed(Mutex<Vec<u8>>);
+
+    impl sink::Place for Placed {
+        fn write_at(&self, at: u64, d: &[u8]) -> io::Result<()> {
+            let mut v = self.0.lock().unwrap();
+            let end = at as usize + d.len();
+            if v.len() < end {
+                v.resize(end, 0);
+            }
+            v[at as usize..end].copy_from_slice(d);
+            Ok(())
+        }
+    }
+
+    /// A direct sink writes its blocks as they fill, in the order they were filled, a stream of
+    /// a formula's own (of [`Kind::Compressed`], or kept apart) as soon as the formula is sealed:
+    /// by the end it holds the blocks of the streams it shares, not full, at most. With the
+    /// module and formula blocks in the room left before them and a spacer of the rest, the
+    /// archive gives the formulas' output back, the same whatever the threads.
+    #[test]
+    fn sealed_direct() {
+        let noise = |n: usize, seed: u32| aqr_common::rng::Rng::new(seed as u64 + 1).bytes(n);
+        let parts: Vec<Formula> = (0..5)
+            .map(|i| {
+                let mut f = Formula::default();
+                let a = f.push_as("syms", Kind::Compressed, noise(BLOCK / 2 + i * 1000, i as u32));
+                let b = f.push("side", b"of a part, some text. ".repeat(10_000 + i * 100));
+                let c = f.push("apart", noise(3000 + i, 7 * i as u32));
+                f.streams[2].apart = true;
+                f.root = Node::concat([b, a, c]);
+                f
+            })
+            .collect();
+        let id = |_: &crate::Apply, i: &[&[u8]]| Ok(i.concat());
+        let want: Vec<u8> = parts.iter().flat_map(|f| f.eval(&id).unwrap()).chain(*b"top").collect();
+        let room = 8192u64;
+        let archive = |threads: usize| {
+            let enc = Encoder::with_threads(Level::Zstd(1), threads);
+            let place = Arc::new(Placed::default());
+            let at = HEADER_MAGIC.len() as u64 + room;
+            let sink = sink::Sink::direct(&enc, 1024, place.clone(), at, 2);
+            let mut top = Formula::default();
+            let mut nodes = Vec::new();
+            for mut f in parts.clone() {
+                sink.seal(&mut f).unwrap();
+                assert!(f.streams.iter().all(|s| s.data.sunk_in().is_some()));
+                nodes.push(top.embed(f));
+            }
+            // (each part's own streams written, but the 2 that may wait to be compressed)
+            let before = (place.0.lock().unwrap().len() as u64).saturating_sub(at);
+            assert!(before >= 3 * BLOCK as u64 / 2, "{before} bytes written before the end");
+            nodes.push(top.push("own", b"top".to_vec()));
+            top.root = Node::concat(nodes);
+            sink.seal(&mut top).unwrap();
+            let (sunk, end) = sink.close_direct().unwrap();
+            let (mut merged, groups) = top.merged();
+            assert!(groups.is_empty());
+            merged.streams.extend(sunk.iter().enumerate().map(|(k, s)| crate::Stream {
+                class: s.class.clone(),
+                kind: s.kind,
+                content: false,
+                apart: false,
+                data: crate::Bytes::sunk(k, s.len as usize),
+            }));
+            let head = enc.direct_head(&merged, &sunk, Some(checksum(&want))).unwrap();
+            assert!(head.len() as u64 + 2 <= room);
+            use sink::Place;
+            place.write_at(0, &HEADER_MAGIC).unwrap();
+            place.write_at(HEADER_MAGIC.len() as u64, &head).unwrap();
+            place.write_at((HEADER_MAGIC.len() + head.len()) as u64, &kill(room as usize - head.len())).unwrap();
+            place.write_at(end, &footer_bytes((end - HEADER_MAGIC.len() as u64) as usize)).unwrap();
+            Arc::into_inner(place).unwrap().0.into_inner().unwrap()
+        };
+        let one = archive(1);
+        assert!(decode(&one, &natives()).unwrap() == want);
+        assert!(archive(4) == one);
     }
 
     /// Streams written to a sink, a piece at a time (over a block's end), archive as those held

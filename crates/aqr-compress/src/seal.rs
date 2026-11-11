@@ -83,6 +83,12 @@ impl Order {
         }
     }
 
+    /// The sink, to seal into it outside the slots' order: only what is of the root's turn
+    /// (the parts of the formula of the file itself, where it has no contents made apart).
+    pub fn sink(&self) -> &Sink {
+        &self.sink
+    }
+
     /// The sink, once every job has run.
     pub fn into_sink(self) -> Sink {
         debug_assert!(!self.state.into_inner().unwrap().running);
