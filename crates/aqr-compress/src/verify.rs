@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::memory::{self, Limits};
 use aqr_decompress::Native;
+use aqr_formula::aqr::{PartIn, PartOut};
 use aqr_formula::chash::{Ch, Records, record_key, split_key};
 use aqr_formula::{Apply, Formula, Modules, Node, Of, Result, Shared};
 use xxhash_rust::xxh3::Xxh3;
@@ -27,9 +28,13 @@ type Key = u128;
 
 /// The key of application `a` of outputs of `sizes` on `inputs`.
 fn key(a: &Apply, inputs: &[&[u8]], sizes: &[u64]) -> Key {
+    key_of(a, &inputs.iter().map(|i| Ch::of(i)).collect::<Vec<_>>(), sizes)
+}
+
+/// [`key`] of inputs given by their hashes.
+fn key_of(a: &Apply, inputs: &[Ch], sizes: &[u64]) -> Key {
     let resources: Vec<Ch> = a.resources.iter().map(|r| Ch::of(r)).collect();
-    let inputs: Vec<Ch> = inputs.iter().map(|i| Ch::of(i)).collect();
-    record_key(&a.module.to_string(), &a.params, &resources, &inputs, sizes)
+    record_key(&a.module.to_string(), &a.params, &resources, inputs, sizes)
 }
 
 /// What an application gave: the hashes of the pieces of its output (each output, or each piece
@@ -90,6 +95,37 @@ impl Modules for Recording {
         Ok(out)
     }
 
+    fn is_part(&self, a: &Apply) -> bool {
+        self.native.is_part(a)
+    }
+
+    fn apply_part(&self, a: &Apply, inputs: &mut [&mut dyn PartIn], output: &mut dyn PartOut) -> Result<()> {
+        // (the inputs and the output hashed as they go by, none held but the short inputs, which
+        // the plan of the memory may read: the hashes are the same as of the bytes whole)
+        let mut tees: Vec<InTee> = inputs
+            .iter_mut()
+            .map(|i| InTee { held: (i.len() <= HOLD).then(Vec::new), inner: &mut **i, ch: Ch::EMPTY, done: 0 })
+            .collect();
+        let mut out = OutTee { inner: output, ch: Ch::EMPTY };
+        {
+            let mut ins: Vec<&mut dyn PartIn> = tees.iter_mut().map(|t| t as &mut dyn PartIn).collect();
+            self.native.apply_part(a, &mut ins, &mut out)?;
+        }
+        // (what the module did not read is hashed too)
+        for t in &mut tees {
+            t.finish().map_err(|f| aqr_formula::Error::new(format!("{}: {f:?}", a.module)))?;
+        }
+        let file = self.known.iter().find(|(at, _)| std::ptr::addr_eq(a, *at as *const Apply)).map(|(_, f)| f.clone());
+        let hashes: Vec<Ch> = tees.iter().map(|t| t.ch).collect();
+        let r = Record { outputs: vec![out.ch], file };
+        self.seen.lock().unwrap().push((key_of(a, &hashes, &[a.len]), r));
+        let lens: Vec<u64> = tees.iter().map(|t| t.inner.len()).collect();
+        let held = Held(tees.into_iter().map(|t| t.held).collect());
+        let l = memory::limit(a, &lens, &[a.len], &held);
+        self.limits.lock().unwrap().put(memory::shape(a, &lens), l);
+        Ok(())
+    }
+
     fn apply_shared(&self, s: &Shared, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
         // (a patch: no module, nothing to record)
         let Some(a) = s.apply() else { return self.native.apply_shared(s, inputs) };
@@ -104,6 +140,75 @@ impl Modules for Recording {
         let r = Record { outputs: outs.iter().map(|o| Ch::of(o)).collect(), file: None };
         self.seen.lock().unwrap().push((key(a, inputs, &sizes), r));
         Ok(outs)
+    }
+}
+
+/// Bytes of an input of an application applied as a part module at most for it to be held, for
+/// the plan of the memory to read it (the records and the index of a module, say): the data of
+/// such an application is far longer.
+const HOLD: u64 = 256 << 20;
+
+/// An input of a part module hashed as it is pulled, and held if it is short ([`HOLD`]).
+struct InTee<'a> {
+    inner: &'a mut dyn PartIn,
+    ch: Ch,
+    held: Option<Vec<u8>>,
+    /// The bytes pulled so far.
+    done: u64,
+}
+
+impl InTee<'_> {
+    fn take(&mut self, hi: u64, put: &mut dyn FnMut(&[u8])) -> aqr_formula::aqr::Decoded<()> {
+        let (ch, held) = (&mut self.ch, &mut self.held);
+        self.inner.pull(hi, &mut |b| {
+            *ch = ch.then(b);
+            if let Some(h) = held {
+                h.extend_from_slice(b);
+            }
+            put(b);
+        })?;
+        self.done = hi;
+        Ok(())
+    }
+
+    /// Hashes what was not pulled.
+    fn finish(&mut self) -> aqr_formula::aqr::Decoded<()> {
+        match self.done < self.inner.len() {
+            true => self.take(self.inner.len(), &mut |_| {}),
+            false => Ok(()),
+        }
+    }
+}
+
+impl PartIn for InTee<'_> {
+    fn len(&self) -> u64 {
+        self.inner.len()
+    }
+
+    fn pull(&mut self, hi: u64, put: &mut dyn FnMut(&[u8])) -> aqr_formula::aqr::Decoded<()> {
+        self.take(hi, put)
+    }
+}
+
+/// The output of a part module hashed as it is pushed.
+struct OutTee<'a> {
+    inner: &'a mut dyn PartOut,
+    ch: Ch,
+}
+
+impl PartOut for OutTee<'_> {
+    fn push(&mut self, d: &[u8]) -> aqr_formula::aqr::Decoded<()> {
+        self.ch = self.ch.then(d);
+        self.inner.push(d)
+    }
+}
+
+/// The inputs of an application that were held, for its plan ([`HOLD`]).
+struct Held(Vec<Option<Vec<u8>>>);
+
+impl aqr_formula::Contents for Held {
+    fn input(&self, k: usize) -> Option<&[u8]> {
+        self.0.get(k)?.as_deref()
     }
 }
 

@@ -138,6 +138,18 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
     Ok(out)
 }
 
+/// Bytes of data from which an application is better streamed than gathered whole: a stream that
+/// long can not be spread over threads, and holding it (and its output) takes more memory than
+/// the time of the threads is worth.
+pub const STREAMED_MIN: u64 = 256 << 20;
+
+/// Whether an application of inputs of `lens` bytes (data, records, bytes kept, index) is of
+/// such streams: of few (at most some, as the index tells), their data long ([`STREAMED_MIN`]).
+/// An application of many streams (a WIM's) is spread over threads whole.
+pub fn streamed(lens: &[u64]) -> bool {
+    matches!(lens, &[data, _, _, index] if data >= STREAMED_MIN && index <= 64)
+}
+
 /// Pages of the windows of the module as a part module ([`decode_part`]): of each input and of
 /// the output.
 pub const WINDOW: u32 = 16;

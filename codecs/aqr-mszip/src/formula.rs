@@ -107,6 +107,9 @@ impl Made {
     }
 }
 
+/// Bytes of data from which an LZX folder is rebuilt by an application of its own.
+const ALONE: u64 = 64 << 20;
+
 /// The LZX folders of a window: the window's bits, their streams, and for each where its node
 /// goes among the raw blocks' and its bytes.
 type LzxGroup = (u8, Vec<aqr_lzx::formula::Stream>, Vec<(usize, u64)>);
@@ -253,14 +256,20 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     }
     for (bits, streams, at) in lzx {
         let v = aqr_lzx::lzx::Variant::cab(bits)?;
-        let sizes: Vec<u64> = at.iter().map(|a| a.1).collect();
-        let a = aqr_lzx::formula::apply_as(&mut f, v, streams, Node::Concat(Vec::new()), sizes.iter().sum());
-        let nodes = match sizes.len() {
-            1 => vec![Node::Apply(Box::new(a))],
-            _ => f.split(a, sizes),
-        };
-        for ((k, _), n) in at.into_iter().zip(nodes) {
-            raws[k] = Some(n);
+        // (a stream of long data in an application of its own, which is streamed and applied at
+        // once with the others; the rest together)
+        let (long, short): (Vec<_>, Vec<_>) = streams.into_iter().zip(at).partition(|(s, _)| s.data.len() >= ALONE);
+        for group in long.into_iter().map(|s| vec![s]).chain((!short.is_empty()).then_some(short)) {
+            let (streams, at): (Vec<_>, Vec<_>) = group.into_iter().unzip();
+            let sizes: Vec<u64> = at.iter().map(|a| a.1).collect();
+            let a = aqr_lzx::formula::apply_as(&mut f, v, streams, Node::Concat(Vec::new()), sizes.iter().sum());
+            let nodes = match sizes.len() {
+                1 => vec![Node::Apply(Box::new(a))],
+                _ => f.split(a, sizes),
+            };
+            for ((k, _), n) in at.into_iter().zip(nodes) {
+                raws[k] = Some(n);
+            }
         }
     }
     let joined = match lens.is_empty() {

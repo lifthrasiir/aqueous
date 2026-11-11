@@ -1987,6 +1987,22 @@ pub trait Modules {
     /// The output of `a` on `inputs`, the evaluated `a.inputs` (with `a.resources`).
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>>;
 
+    /// Whether `a`, an application of a single output, is applied by [`Modules::apply_part`]:
+    /// its inputs pulled as it asks for them and its output pushed as it makes it, none of them
+    /// held whole (the evaluation of a formula gathers the inputs of [`Modules::apply`] and holds
+    /// its output). By default none is.
+    fn is_part(&self, a: &Apply) -> bool {
+        let _ = a;
+        false
+    }
+
+    /// The output of `a` ([`Modules::is_part`]) pushed to `output`, its inputs (the evaluated
+    /// `a.inputs`, with `a.resources`) pulled from `inputs`.
+    fn apply_part(&self, a: &Apply, inputs: &mut [&mut dyn aqr::PartIn], output: &mut dyn aqr::PartOut) -> Result<()> {
+        let _ = (inputs, output);
+        Err(Error::new(format!("{} is no part module here", a.module)))
+    }
+
     /// The outputs of `s` on `inputs`, the evaluated [`Shared::inputs`]: by default those split
     /// from the output of [`Modules::apply`] ([`Shared::split`]), or that output if `s` has one.
     fn apply_shared(&self, s: &Shared, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>> {

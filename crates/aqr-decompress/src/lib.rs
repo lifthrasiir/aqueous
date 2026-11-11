@@ -388,6 +388,12 @@ enum Run {
     /// A part module in Wasm that natively is applied whole, by its threaded `decode` (which
     /// spreads streams and parts over threads; the output is the same as the streamed one's).
     Threaded(Decode),
+    /// [`Run::Threaded`], and where `streamed` says of the lengths of an application's inputs and
+    /// output that holding them whole is not worth the threads (a stream too long to gather), an
+    /// application of a formula's evaluation ([`Modules::is_part`]) goes through the emulation of
+    /// `entry`, its inputs pulled and its output pushed, none held. The archive's decoders apply
+    /// it as threaded.
+    Streamed(aqr_api::emu::Entry, Decode, fn(&[u64], u64) -> bool),
 }
 
 /// [`Entry`] of a module taking resources.
@@ -654,7 +660,26 @@ const NATIVE: &[Entry] = &[
     bare(BVX, |p, _, i, n, t| aqr_bvx::formula::decode(p, i, n, t).map_err(err)),
     threaded(BZ2, |p, _, i, n, t| aqr_bz2::formula::decode(p, i, n, t).map_err(err)),
     threaded(BZ2_ALZ, |p, _, i, n, t| aqr_bz2::formula::decode_alz(p, i, n, t).map_err(err)),
-    threaded(LZX, |p, _, i, n, t| aqr_lzx::formula::decode(p, i, n, t).map_err(err)),
+    Entry {
+        module: LZX,
+        resources: false,
+        decode: Run::Streamed(
+            aqr_api::emu::Entry {
+                kind: aqr_api::emu::Kind::Part,
+                windows: &[
+                    aqr_api::Window::Input(0, aqr_lzx::module::WINDOW),
+                    aqr_api::Window::Input(1, aqr_lzx::module::WINDOW),
+                    aqr_api::Window::Input(2, aqr_lzx::module::WINDOW),
+                    aqr_api::Window::Input(3, 1),
+                    aqr_api::Window::Output(0, aqr_lzx::module::WINDOW),
+                ],
+                arity: 6,
+                call: |a| aqr_lzx::module::decode_part(a[0], [a[1], a[2], a[3], a[4]], a[5]),
+            },
+            |p, _, i, n, t| aqr_lzx::formula::decode(p, i, n, t).map_err(err),
+            |lens, _| aqr_lzx::module::streamed(lens),
+        ),
+    },
     bare(XPRESS, |p, _, i, n, t| aqr_xpress::formula::decode(p, i, n, t).map_err(err)),
     bare(LZNT1, |p, _, i, n, t| aqr_lznt1::formula::decode(p, i, n, t).map_err(err)),
     part(
@@ -998,7 +1023,9 @@ pub fn identify(wasm: &[u8]) -> Option<String> {
 /// Whether the module named `name` (without its version) is a part module (in Wasm, applied as its
 /// inputs stream; natively some are applied whole, on threads).
 pub fn is_part(name: &str) -> bool {
-    NATIVE.iter().any(|e| e.module.name == name && matches!(e.decode, Run::Part(..) | Run::Threaded(..)))
+    NATIVE
+        .iter()
+        .any(|e| e.module.name == name && matches!(e.decode, Run::Part(..) | Run::Threaded(..) | Run::Streamed(..)))
 }
 
 /// The Wasm module of `m` that aqr-modules built, for [`aqr::Encoder::with_modules`].
@@ -1270,7 +1297,7 @@ impl<'a> NativeLoaded<'a> {
     fn part(&self) -> Option<aqr_api::emu::Entry> {
         NATIVE.iter().find(|e| e.module == self.module).and_then(|e| match e.decode {
             Run::Part(entry, _) => Some(entry),
-            Run::Whole(_) | Run::Threaded(..) => None,
+            Run::Whole(_) | Run::Threaded(..) | Run::Streamed(..) => None,
         })
     }
 }
@@ -1463,7 +1490,7 @@ impl Native {
             return Err("resources given".into());
         }
         match e.decode {
-            Run::Whole(decode) | Run::Part(_, Some(decode)) | Run::Threaded(decode) => {
+            Run::Whole(decode) | Run::Part(_, Some(decode)) | Run::Threaded(decode) | Run::Streamed(_, decode, _) => {
                 decode(params, resources, inputs, len, self.threads.max(1))
             }
             Run::Part(entry, None) => {
@@ -1502,6 +1529,29 @@ impl Modules for Native {
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
         let resources: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
         self.run(a.module, &a.params, &resources, inputs, a.len)
+    }
+
+    fn is_part(&self, a: &Apply) -> bool {
+        match NATIVE.iter().find(|e| e.module == a.module).map(|e| e.decode) {
+            Some(Run::Streamed(_, _, streamed)) => {
+                let lens: Vec<u64> = a.inputs.iter().map(aqr_formula::Node::len).collect();
+                a.resources.is_empty() && streamed(&lens, a.len)
+            }
+            _ => false,
+        }
+    }
+
+    fn apply_part(&self, a: &Apply, inputs: &mut [&mut dyn PartIn], output: &mut dyn PartOut) -> Result<()> {
+        let Some(Run::Streamed(entry, ..)) = NATIVE.iter().find(|e| e.module == a.module).map(|e| e.decode) else {
+            return Err(Error::new(format!("{}: not a module applied streamed", a.module)));
+        };
+        let _s = aqr_common::trace::span(a.module.name);
+        let lens: Vec<u64> = inputs.iter().map(|i| i.len()).collect();
+        metered(a.module, &a.params, &lens, &[a.len], || {
+            let mut outputs: [&mut dyn PartOut; 1] = [output];
+            streamed(&entry, &a.params, &[], inputs, &mut outputs, &[a.len])
+                .map_err(|f| Error::new(format!("{}: {f:?}", a.module)))
+        })
     }
 
     /// A module of several outputs gives them one after another natively (its whole `decode`).

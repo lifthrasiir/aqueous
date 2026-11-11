@@ -1893,9 +1893,14 @@ fn with_formula<M: crate::Modules + Sync, R>(
             }
         })
     };
-    let part_module = |_: Ap<'_, '_>| false;
-    let apply_part = |_: Ap<'_, '_>, _: &mut [&mut dyn PartIn], _: &mut [&mut dyn PartOut]| -> Decoded<()> {
-        unreachable!("no part modules in a formula's evaluation")
+    // (an application of a single output that `m` applies as a part module: its inputs pulled and
+    // its output queued, on a thread of its own, none of them gathered)
+    let part_module = |a: Ap<'_, '_>| matches!(a, Ap::One(a) if m.is_part(a));
+    let apply_part = |a: Ap<'_, '_>, ins: &mut [&mut dyn PartIn], outs: &mut [&mut dyn PartOut]| -> Decoded<()> {
+        match (a, outs) {
+            (Ap::One(a), [out]) => m.apply_part(a, ins, &mut **out).map_err(failed),
+            _ => unreachable!("an application of a single output of a formula"),
+        }
     };
     let ev = Eval {
         g: &g,
