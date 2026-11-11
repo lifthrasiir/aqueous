@@ -7,6 +7,7 @@ pub mod clip;
 pub mod dynamic;
 #[cfg(feature = "encode")]
 pub mod formula;
+mod lanes;
 pub mod module;
 #[cfg(feature = "encode")]
 pub mod plan;

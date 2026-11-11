@@ -296,14 +296,14 @@ impl Model {
                 // the stretch of the row above equal to the left pixel, which must reach
                 // RUN_LOOK pixels on (or the end of the row); the first row has none
                 let above = if y > 0 {
-                    px[i - SIDE..i - SIDE + left].iter().take_while(|&&p| p == w).count()
+                    crate::lanes::run(&px[i - SIDE..i - SIDE + left], w)
                 } else if x > 1 && px[i - 2] == w {
                     left
                 } else {
                     0
                 };
                 if above >= RUN_LOOK.min(left) && above > 0 {
-                    let len = if C::DECODES { 0 } else { px[i..i + left].iter().take_while(|&&p| p == w).count() };
+                    let len = if C::DECODES { 0 } else { crate::lanes::run(&px[i..i + left], w) };
                     let t = (y > 0) as usize * 4 + (above == left) as usize * 2 + self.last_full as usize;
                     let full = c.bit(&mut self.full[t], len == above);
                     let len = if full { above } else { gamma(c, &mut self.length[t], len).min(left) };
@@ -364,7 +364,7 @@ impl Model {
                     run = 0;
                     // A pixel in the list is coded by its place there, or with Escape::Med as
                     // a new one where that is cheaper; the list keeps each pixel once.
-                    let at = if C::DECODES { None } else { self.list.iter().position(|&p| p == want) };
+                    let at = if C::DECODES { None } else { crate::lanes::find(&self.list, want) };
                     let listed = at.is_some_and(|j| {
                         self.escape == Escape::Left || {
                             let (mut by_place, mut by_samples) = (Cost::default(), Cost::default());
@@ -382,7 +382,7 @@ impl Model {
                         self.list.remove(j)
                     } else {
                         let v = self.fresh(c, l, want, [w, n, nw, ne]);
-                        if let Some(j) = self.list.iter().position(|&p| p == v) {
+                        if let Some(j) = crate::lanes::find(&self.list, v) {
                             self.list.remove(j);
                         }
                         v
