@@ -275,17 +275,25 @@ impl<'a> Bst<'a> {
             }
             p = child[pu];
             let q = at(p);
+            // (the bytes after the first compared a word at a time, inline: the walk waits on
+            // each comparison, most of which end in the first word; up to the first byte that
+            // differs, which orders the keys, or the end of the data, which orders `r`'s first)
+            let max = (FULL - 1).min(n - r - 1);
             let mut i = 1;
-            while i < FULL {
-                if r + i >= n {
-                    cmp = -1;
+            while i + 8 <= max + 1 {
+                let w = u64::from_le_bytes(d[q + i..q + i + 8].try_into().unwrap())
+                    ^ u64::from_le_bytes(d[r + i..r + i + 8].try_into().unwrap());
+                if w != 0 {
+                    i += (w.trailing_zeros() / 8) as usize;
                     break;
                 }
-                cmp = d[r + i] as i32 - d[q + i] as i32;
-                if cmp != 0 {
-                    break;
-                }
+                i += 8;
+            }
+            while i <= max && d[q + i] == d[r + i] {
                 i += 1;
+            }
+            if i < FULL {
+                cmp = if r + i >= n { -1 } else { d[r + i] as i32 - d[q + i] as i32 };
             }
             if i > best {
                 best = i;
