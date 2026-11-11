@@ -46,8 +46,10 @@ fn sfx_pack() {
     let id = from.join("pack.id");
     assert!(id.exists(), "{}: no pack.id (crates/aqr-sfx/pack.sh writes it)", from.display());
     println!("cargo:rustc-env=AQR_SFX_ID={}", std::path::absolute(&id).unwrap().display());
-    let mut names = vec!["aqr-sfx-shim.exe".to_owned(), "aqr-interp.blob".to_owned(), "modules.txt".to_owned()];
+    let libs = std::fs::read_to_string(from.join("libs.txt")).unwrap_or_default();
+    let mut names = ["aqr-sfx-shim.exe", "aqr-interp.blob", "modules.txt", "libs.txt"].map(String::from).to_vec();
     names.extend(list.lines().filter_map(|l| Some(format!("modules/{}.blob", l.split_whitespace().next()?))));
+    names.extend(libs.lines().filter(|l| !l.is_empty()).map(|l| format!("libs/{l}")));
     // the files, each its name and its bytes (u32 lengths before them)
     let mut raw = Vec::new();
     for name in &names {

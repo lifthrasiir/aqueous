@@ -50,10 +50,14 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   - `aqr-api`, `aqr-ld` — the Rust interface of modules and the Wasm linker wrapper; aqr-ld also
     (`src/pemerge.rs`) has `blob`, which digests a module library into a blob (just the bytes and
     facts a merge needs: image from the first section, no PE headers/`.reloc`/header gap, dead
-    directories zeroed), and `merge`, which merges blobs (or libraries) into a stub executable as
-    one section with no loader — code copied and rebased, imports merged into the stub's table, a
-    dispatch table added (`demo/{stub,modadd,modxor}`, `pemerge-test.sh`); a library too
-    (`merge_bytes`, for `aqr --format sfx`).
+    directories zeroed); `blobs`, which digests a set (modules and the shared libraries they link
+    against) with the imports between them bound by name to export RVAs; and `merge`, which merges
+    blobs (or libraries) into a stub executable as one section with no loader — code copied and
+    rebased, bound imports written as addresses (relocated), the others merged into the stub's
+    table, a dispatch table added (`demo/{stub,modadd,modxor}`, `pemerge-test.sh`); a library too
+    (`merge_bytes`, for `aqr --format sfx`). `src/msvc.rs`: the MSVC linker of aqr-dll's no-TLS
+    target, cutting a shared library's exports to a list (`AQR_LD_EXPORTS`, made by `exports`) so
+    that `/OPT:REF` drops the rest, its import library still of every export.
   - `aqr-wasmrt` — runs the Wasm modules of aqr natively by Wasmtime (`wasm::load`), in the
     process or in a sandbox worker (`sandbox::Sandbox`), with no native codecs linked. Shared by
     aqr-decompress (for modules it does not know natively) and the self-extracting interpreter
@@ -64,8 +68,10 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     (`native_name`: the module's hash and task slots), the interpreter blob `aqr-interp` — and is
     the `Runner`: a shorthand block's hash gives a stand-in Wasm module (no code, the task slots
     and the hash in custom sections), which `load` takes to the native blob (applied whole); any
-    other module goes to the interpreter. `extract` writes a decoded archive's files out. Shared
-    by the stub and aqr. `pack.sh` gathers what aqr embeds (the stub, the blobs).
+    other module goes to the interpreter. The shared libraries the native blobs link against are
+    entries `lib:NAME` (their exception tables registered, nothing else). `extract` writes a
+    decoded archive's files out. Shared by the stub and aqr. `pack.sh` gathers what aqr embeds
+    (the stub, the blobs of the modules and of the shared libraries).
   - `aqr-sfx-shim` — the self-extracting stub (lean: aqr-formula + aqr-sfx, no codecs or Wasmtime,
     ~1.3 MB): the small executable that `aqr --format sfx` (or `aqr-ld merge`) fills with blobs
     and an archive is appended to. It finds the archive by its header magic (scanning from the
@@ -76,7 +82,12 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     Built for the no-TLS target (`NOTLS`) it is mergeable into a stub: the fallback for modules the
     stub has no native blob for.
   - `aqr-dll` — a module's binary built as a native library (`AQR_DLL_MODULE`; `build.sh` builds
-    them into `target/aqr-dll/`) exporting `aqr_api::dll`, toward self-extracting archives;
+    them into `target/aqr-dll/`) exporting `aqr_api::dll`, toward self-extracting archives. The
+    crates that several modules use are Rust dylibs it links against (`layout.py`, run by
+    build.sh, writes `shared/NAME/`, `shared.rs` and its Cargo.toml's block: one dylib for each
+    set of modules using the same crates, the runtime `aqr-dll-rt`, std and aqr-api, used by all);
+    building every module, build.sh links them again until each exports only what the others
+    import (aqr-ld's `exports`): all modules and libraries 8 MB as blobs, not 25 MB;
     `aqr-dll-shim` records applications from archives and runs the libraries on them (its own, or
     the ones merged into it). `NOTLS=1 build.sh` builds for `x86_64-aqr-windows-msvc.json` (native
     thread-locals off, so std uses TlsAlloc, not a TLS directory), which `aqr-ld merge` can take;

@@ -77,6 +77,11 @@ pub struct Vtable {
 /// The name of the interpreter blob in the dispatch table.
 pub const INTERP: &str = "aqr-interp";
 
+/// What the name of a shared library that native blobs link against (crates/aqr-dll/layout.py)
+/// starts with in the dispatch table: its code is reached through the blobs' imports alone (the
+/// merge binds them), its exception table registered as theirs are.
+pub const LIB: &str = "lib:";
+
 /// The runner of a self-extracting program: the modules with native blobs merged into it run
 /// natively, any other through the interpreter blob, where it is merged.
 pub struct Sfx {

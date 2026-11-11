@@ -1778,10 +1778,12 @@ fn sfx_into(
     let (gone, made, archived) = made?;
     if !a.quiet {
         eprintln!(
-            "{}: self-extracting, {} module{} native{}: {} ({} of the archive){}",
+            "{}: self-extracting, {} module{} native ({} shared librar{}){}: {} ({} of the archive){}",
             out.display(),
             made.natives,
             if made.natives == 1 { "" } else { "s" },
+            made.libs,
+            if made.libs == 1 { "y" } else { "ies" },
             if made.interp { " and the interpreter" } else { "" },
             size(made.exe.len() as f64),
             size(archived as f64),

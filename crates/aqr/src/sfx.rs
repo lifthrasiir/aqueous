@@ -5,8 +5,9 @@
 //! The stub and blobs are those `crates/aqr-sfx/pack.sh` gathered when this program was built
 //! (build.rs: `sfx.pack`). The archive names a module with a native blob there by a shorthand
 //! module block, its hash alone ([`wasm_of`]), and the stub carries the blob (named by the hash
-//! and the module's task slots, [`aqr_sfx::native_name`]); any other module is written in full,
-//! and the interpreter blob is merged to run it.
+//! and the module's task slots, [`aqr_sfx::native_name`]) and the shared libraries that blob links
+//! against (crates/aqr-dll/layout.py: the runtime among them; the imports between them bound by
+//! the merge); any other module is written in full, and the interpreter blob is merged to run it.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -29,6 +30,9 @@ pub struct Pack {
     /// The native blob of each module by its hash, with the bytes of its task slots (the custom
     /// section `aqr_task_slots` of its Wasm module).
     natives: HashMap<[u8; 32], (Vec<u8>, Vec<u8>)>,
+    /// The shared libraries the native blobs link against, by their names as libraries (what
+    /// the blobs' imports name), each with the libraries it links against itself.
+    libs: HashMap<String, (Vec<u8>, Vec<String>)>,
 }
 
 /// The pack, unpacked once; an error where this program carries none.
@@ -60,6 +64,12 @@ fn unpack() -> Result<Pack, String> {
     }
     let mut file = |n: &str| files.remove(n).ok_or(format!("the self-extracting pack has no {n}"));
     let (stub, interp, list) = (file("aqr-sfx-shim.exe")?, file("aqr-interp.blob")?, file("modules.txt")?);
+    let mut libs = HashMap::new();
+    for l in String::from_utf8_lossy(&file("libs.txt")?).lines().filter(|l| !l.is_empty()) {
+        let blob = file(&format!("libs/{l}"))?;
+        let (name, _, below) = aqr_ld::pemerge::blob_facts(&blob).map_err(|e| format!("{l}: {e}"))?;
+        libs.insert(name, (blob, below));
+    }
     // each module's blob, for the module of the hash it was packed for if this program has it
     // still (else it was packed from other code: left out)
     let mut natives = HashMap::new();
@@ -71,7 +81,7 @@ fn unpack() -> Result<Pack, String> {
         let slots = aqr::custom_section(&wasm, "aqr_task_slots").unwrap_or_default().to_vec();
         natives.insert(k.sha512_256, (blob, slots));
     }
-    Ok(Pack { stub, interp, natives })
+    Ok(Pack { stub, interp, natives, libs })
 }
 
 fn hex(b: &[u8]) -> String {
@@ -91,8 +101,10 @@ pub fn wasm_of(m: Module) -> Option<Wasm> {
 /// What a self-extracting program carries of `archive`'s modules.
 pub struct Made {
     pub exe: Vec<u8>,
-    /// The native blobs merged, and whether the interpreter blob is.
+    /// The native blobs merged, the shared libraries they link against, and whether the
+    /// interpreter blob is.
     pub natives: usize,
+    pub libs: usize,
     pub interp: bool,
 }
 
@@ -117,14 +129,29 @@ pub fn make(archive: &[u8]) -> Result<Made, String> {
         }
     }
     let mut blobs = Vec::new();
+    // (the shared libraries they link against, and those that these do, each once)
+    let mut needed: Vec<String> = Vec::new();
     for h in &hashes {
         let (blob, slots) = pack.natives.get(h).ok_or_else(|| format!("no native blob of module {}", hex(h)))?;
+        needed.extend(aqr_ld::pemerge::blob_facts(blob)?.2);
         blobs.push((aqr_sfx::native_name(h, slots), blob.clone()));
+    }
+    let mut libs: Vec<String> = Vec::new();
+    while let Some(l) = needed.pop() {
+        if !libs.contains(&l) {
+            let (_, below) = pack.libs.get(&l).ok_or_else(|| format!("no shared library {l}"))?;
+            needed.extend(below.iter().cloned());
+            libs.push(l);
+        }
+    }
+    libs.sort();
+    for l in &libs {
+        blobs.push((format!("{}{l}", aqr_sfx::LIB), pack.libs[l].0.clone()));
     }
     if full {
         blobs.push((aqr_sfx::INTERP.to_owned(), pack.interp.clone()));
     }
     let mut exe = aqr_ld::pemerge::merge_bytes(pack.stub.clone(), &blobs, "aqr_dll_apply", "aqr_dll_info")?;
     exe.extend_from_slice(archive);
-    Ok(Made { exe, natives: hashes.len(), interp: full })
+    Ok(Made { exe, natives: hashes.len(), libs: libs.len(), interp: full })
 }
