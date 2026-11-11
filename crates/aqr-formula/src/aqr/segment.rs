@@ -1505,7 +1505,8 @@ mod tests {
         let mut out = SegmentWriter::header().to_vec();
         let mut olds = Vec::new();
         // (file `k` or nothing, the points)
-        let runs: [(Option<usize>, Vec<(u64, &str)>); 3] = [
+        type Run<'a> = (Option<usize>, Vec<(u64, &'a str)>);
+        let runs: [Run; 3] = [
             (Some(0), vec![(1000, "first")]),
             (Some(1), vec![(2000, "second"), (2500, "")]),
             (None, vec![(3000, "again")]),

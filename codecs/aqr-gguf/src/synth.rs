@@ -107,16 +107,14 @@ pub fn file(seed: u64, scale: usize) -> Vec<u8> {
     ts.push(float(&mut r, 1, n * 2, 0));
     // (F16 of BF16's precision: the low 3 bits of every mantissa zero; and in part)
     let mut f = float(&mut r, 1, n * 2 + 31, 0);
-    for (k, c) in f.data.chunks_exact_mut(2).enumerate() {
-        let v = u16::from_le_bytes([c[0], c[1]]);
-        let v = if k % 97 == 0 { v } else { v & !7 };
-        c.copy_from_slice(&v.to_le_bytes());
+    for (k, c) in f.data.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+        let v = u16::from_le_bytes(*c);
+        *c = if k % 97 == 0 { v } else { v & !7 }.to_le_bytes();
     }
     ts.push(f);
     let mut f = float(&mut r, 1, n, 0);
-    for c in f.data.chunks_exact_mut(2) {
-        let v = u16::from_le_bytes([c[0], c[1]]) & !7;
-        c.copy_from_slice(&v.to_le_bytes());
+    for c in f.data.as_chunks_mut::<2>().0 {
+        *c = (u16::from_le_bytes(*c) & !7).to_le_bytes();
     }
     ts.push(f);
     // (too small to code)

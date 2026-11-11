@@ -3118,7 +3118,7 @@ fn div3_plan_holds() {
 fn ac3_plan_holds() {
     let mut f = Formula::default();
     // (a run of other bytes only: the stream of no frame at all, a run longer than a piece)
-    let data: Vec<u8> = (0..10_000u32).map(|i| (i * 31 >> 2) as u8).collect();
+    let data: Vec<u8> = (0..10_000u32).map(|i| ((i * 31) >> 2) as u8).collect();
     let coded = aqr_ac3::formula::encode(&data);
     assert!(coded.is_none(), "bytes that are no AC-3 do not come to less");
     let coded = aqr_ac3::formula::encode_always(&data, 1);
@@ -5540,7 +5540,7 @@ fn pdb_types_plan_holds() {
     fn rec(kind: u16, body: &[u8]) -> Vec<u8> {
         let mut r = kind.to_le_bytes().to_vec();
         r.extend_from_slice(body);
-        while (r.len() + 2) % 4 != 0 {
+        while !(r.len() + 2).is_multiple_of(4) {
             let left = 4 - (r.len() + 2) % 4;
             r.push(0xf0 | left as u8);
         }

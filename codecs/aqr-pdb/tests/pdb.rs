@@ -306,7 +306,7 @@ fn formula_symbols() {
 
 fn pad_to(r: &mut Vec<u8>, align: bool) {
     // (the length counts from the kind; the compilers pad the record with its length to 4)
-    while align && (r.len() + 2) % 4 != 0 {
+    while align && !(r.len() + 2).is_multiple_of(4) {
         let left = 4 - (r.len() + 2) % 4;
         r.push(0xf0 | left as u8);
     }
@@ -351,7 +351,7 @@ fn member(kind: u16, body: &[u8], at: usize) -> Vec<u8> {
     let mut m = kind.to_le_bytes().to_vec();
     m.extend_from_slice(body);
     // (the padding counts the record's length and kind before it)
-    while (at + 4 + m.len()) % 4 != 0 {
+    while !(at + 4 + m.len()).is_multiple_of(4) {
         let left = 4 - (at + 4 + m.len()) % 4;
         m.push(0xf0 | left as u8);
     }
@@ -395,16 +395,17 @@ fn field_list(me: u32) -> Vec<u8> {
 fn type_records(fill: usize) -> Vec<Vec<u8>> {
     let t = |v: u32| v.to_le_bytes().to_vec();
     let base = 0x1000u32;
-    let mut r: Vec<Vec<u8>> = Vec::new();
-    r.push(trec(0x1201, &t(0), true));
-    r.push(trec(0x1201, &[t(2), t(0x74), t(base)].concat(), true));
-    r.push(trec(0x1008, &[t(3), vec![0, 0], le16(2), t(base + 1)].concat(), false));
-    r.push(trec(0x1001, &[t(0x74), le16(1)].concat(), true));
-    r.push(trec(0x1002, &[t(base + 3), t(0x1000c)].concat(), true));
-    // a pointer to a member function: its class and form
-    r.push(trec(0x1002, &[t(base + 2), t(0x1000c | 3 << 5), t(base + 3), le16(2)].concat(), true));
-    r.push(trec(0x000a, &[le16(3), vec![0x11, 0x01]].concat(), true));
-    r.push(trec(0x1205, &[t(0x74), vec![3, 1]].concat(), true));
+    let mut r: Vec<Vec<u8>> = vec![
+        trec(0x1201, &t(0), true),
+        trec(0x1201, &[t(2), t(0x74), t(base)].concat(), true),
+        trec(0x1008, &[t(3), vec![0, 0], le16(2), t(base + 1)].concat(), false),
+        trec(0x1001, &[t(0x74), le16(1)].concat(), true),
+        trec(0x1002, &[t(base + 3), t(0x1000c)].concat(), true),
+        // a pointer to a member function: its class and form
+        trec(0x1002, &[t(base + 2), t(0x1000c | 3 << 5), t(base + 3), le16(2)].concat(), true),
+        trec(0x000a, &[le16(3), vec![0x11, 0x01]].concat(), true),
+        trec(0x1205, &[t(0x74), vec![3, 1]].concat(), true),
+    ];
     r.push(field_list(base + r.len() as u32));
     r.push(trec(0x1206, &[le16(0x0b), le16(0), t(base + 2), le16(0x13), le16(0), t(base + 2), t(4)].concat(), false));
     let me = base + r.len() as u32;
@@ -451,18 +452,19 @@ fn type_records(fill: usize) -> Vec<Vec<u8>> {
 /// The records of an IPI stream.
 fn id_records(fill: usize) -> Vec<Vec<u8>> {
     let t = |v: u32| v.to_le_bytes().to_vec();
-    let mut r: Vec<Vec<u8>> = Vec::new();
-    r.push(trec(0x1605, &[t(0), cstr("")].concat(), true));
-    r.push(trec(0x1605, &[t(0), cstr("C:\\src\\a.cpp")].concat(), true));
-    r.push(trec(0x1604, &[t(2), t(0x1000), t(0x1001)].concat(), true));
-    r.push(trec(0x1605, &[t(0x1002), cstr("-c -Zi")].concat(), true));
-    r.push(trec(0x1603, &[le16(2), t(0x1001), t(0x1003)].concat(), true));
-    // functions: with the 8 bytes some compilers write after the name, and without
-    r.push(trec(0x1601, &[t(0), t(0x1002), cstr("f"), vec![1, 2, 3, 4, 5, 6, 7, 8]].concat(), true));
-    r.push(trec(0x1601, &[t(0x1000), t(0x1003), cstr("g")].concat(), true));
-    r.push(trec(0x1602, &[t(0x1004), t(0x1005), cstr("m"), vec![9; 8]].concat(), true));
-    r.push(trec(0x1606, &[t(0x1010), t(0x1001), t(77)].concat(), true));
-    r.push(trec(0x1607, &[t(0x1011), t(0x1001), t(78), le16(3)].concat(), false));
+    let mut r: Vec<Vec<u8>> = vec![
+        trec(0x1605, &[t(0), cstr("")].concat(), true),
+        trec(0x1605, &[t(0), cstr("C:\\src\\a.cpp")].concat(), true),
+        trec(0x1604, &[t(2), t(0x1000), t(0x1001)].concat(), true),
+        trec(0x1605, &[t(0x1002), cstr("-c -Zi")].concat(), true),
+        trec(0x1603, &[le16(2), t(0x1001), t(0x1003)].concat(), true),
+        // functions: with the 8 bytes some compilers write after the name, and without
+        trec(0x1601, &[t(0), t(0x1002), cstr("f"), vec![1, 2, 3, 4, 5, 6, 7, 8]].concat(), true),
+        trec(0x1601, &[t(0x1000), t(0x1003), cstr("g")].concat(), true),
+        trec(0x1602, &[t(0x1004), t(0x1005), cstr("m"), vec![9; 8]].concat(), true),
+        trec(0x1606, &[t(0x1010), t(0x1001), t(77)].concat(), true),
+        trec(0x1607, &[t(0x1011), t(0x1001), t(78), le16(3)].concat(), false),
+    ];
     for k in 0..fill {
         r.push(trec(
             0x1601,

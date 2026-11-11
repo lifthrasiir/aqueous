@@ -21,7 +21,7 @@ pub struct Tracing {
     /// Called on a thread spawning tasks: what the new thread takes of it (the item and spans
     /// of its work, say), a function the new thread calls first, which returns what it keeps
     /// until it ends.
-    pub inherit: fn() -> Box<dyn FnOnce() -> Box<dyn Any> + Send>,
+    pub inherit: fn() -> Inherited,
     /// Called as the calling thread starts waiting for another (joining a task, a channel); what
     /// is returned is dropped as the wait ends.
     pub wait: fn(&'static str) -> Box<dyn Any>,
@@ -34,9 +34,13 @@ pub fn set_tracing(t: Tracing) {
     _ = TRACING.set(t);
 }
 
+/// What a thread spawned takes of the one spawning it ([`Tracing::inherit`]): called first, it
+/// returns what the thread keeps until it ends.
+pub type Inherited = Box<dyn FnOnce() -> Box<dyn Any> + Send>;
+
 /// What the calling thread gives the thread it spawns ([`Tracing::inherit`]).
 #[cfg(feature = "alloc")]
-fn inherit() -> Option<Box<dyn FnOnce() -> Box<dyn Any> + Send>> {
+fn inherit() -> Option<Inherited> {
     TRACING.get().map(|t| (t.inherit)())
 }
 

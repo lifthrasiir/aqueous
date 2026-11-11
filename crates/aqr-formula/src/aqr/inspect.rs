@@ -274,7 +274,7 @@ pub fn inspect<'c>(
                 at: p.module_at[i],
                 size: sizes.modules[i],
                 decoded: w.bytes().map(<[u8]>::len),
-                name: w.bytes().and_then(|b| name(b)),
+                name: w.bytes().and_then(name),
             })
             .collect();
         seg.resources = (p.resources.iter().enumerate())

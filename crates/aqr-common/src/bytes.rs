@@ -49,7 +49,7 @@ mod tests {
     fn same_bytes() {
         let a: Vec<u8> = (0..301u32).map(|i| (i * 7) as u8).collect();
         for n in [0, 1, 15, 16, 17, 63, 64, 65, 130, 300] {
-            assert!(super::same(&a[..n], &a[..n].to_vec()));
+            assert!(super::same(&a[..n], &a[..n]));
             for k in 0..n {
                 let mut b = a[..n].to_vec();
                 b[k] ^= 0x40;

@@ -2685,8 +2685,11 @@ pub struct Natives<'a, M> {
     modules: Vec<Module>,
     m: &'a M,
     identify: fn(&[u8]) -> Option<String>,
-    registered: Option<fn(&[u8; 32]) -> Decoded<Vec<u8>>>,
+    registered: Option<Registered>,
 }
+
+/// The Wasm module of a shorthand module block's registered hash ([`Natives::registered_by`]).
+type Registered = fn(&[u8; 32]) -> Decoded<Vec<u8>>;
 
 impl<M> Natives<'_, M> {
     /// The modules known by `identify`, which gives the name of the module of a Wasm module

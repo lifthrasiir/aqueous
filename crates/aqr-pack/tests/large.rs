@@ -43,7 +43,7 @@ fn data(n: usize) -> Vec<u8> {
     let mut v = Vec::with_capacity(n + 64);
     let mut i = 0u32;
     while v.len() < n {
-        if i % 7 == 0 {
+        if i.is_multiple_of(7) {
             v.extend((0..300u32).map(|k| (k.wrapping_add(i).wrapping_mul(2_654_435_761) >> 11) as u8));
         } else {
             v.extend(format!("line {} of the large file, again {}\n", i % 1000, i / 1000).into_bytes());

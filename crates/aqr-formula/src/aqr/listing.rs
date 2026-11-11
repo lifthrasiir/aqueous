@@ -459,7 +459,7 @@ pub(super) fn module_names(blocks: &Blocks, name: &dyn Fn(&[u8]) -> Option<Strin
         .modules
         .iter()
         .enumerate()
-        .map(|(i, w)| w.bytes().and_then(|b| name(b)).unwrap_or_else(|| format!("module{}", i + 1)))
+        .map(|(i, w)| w.bytes().and_then(name).unwrap_or_else(|| format!("module{}", i + 1)))
         .collect()
 }
 

@@ -9,38 +9,39 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
 use std::ffi::c_void;
+use std::path::PathBuf;
 use std::ptr::{null, null_mut};
+use std::sync::Arc;
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    COLOR_3DFACE, MapWindowPoints, CreateFontIndirectW, CreateSolidBrush, GetSysColor, GetSysColorBrush, HDC, LOGFONTW, SetBkColor,
+    COLOR_3DFACE, CreateFontIndirectW, CreateSolidBrush, GetSysColor, GetSysColorBrush, HDC, LOGFONTW, MapWindowPoints,
+    SetBkColor,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{
-    ICC_BAR_CLASSES, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, BST_CHECKED, BST_UNCHECKED, SetScrollInfo, TBM_SETPAGESIZE,
-    TBM_SETPOS, TBM_SETRANGE, TBM_SETTICFREQ, TBS_AUTOTICKS, TBS_HORZ, TTDT_AUTOPOP, TTF_IDISHWND, TTF_SUBCLASS,
-    TTM_ADDTOOLW, TTM_SETDELAYTIME, TTM_SETMAXTIPWIDTH, TTS_ALWAYSTIP, TTTOOLINFOW,
+    BST_CHECKED, BST_UNCHECKED, ICC_BAR_CLASSES, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
+    SetScrollInfo, TBM_SETPAGESIZE, TBM_SETPOS, TBM_SETRANGE, TBM_SETTICFREQ, TBS_AUTOTICKS, TBS_HORZ, TTDT_AUTOPOP,
+    TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTM_SETDELAYTIME, TTM_SETMAXTIPWIDTH, TTS_ALWAYSTIP, TTTOOLINFOW,
 };
 use windows_sys::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow, SystemParametersInfoForDpi};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, GetKeyState, IsWindowEnabled, SetFocus, VK_SHIFT, VK_TAB};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    EnableWindow, GetFocus, GetKeyState, IsWindowEnabled, SetFocus, VK_SHIFT, VK_TAB,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON,
-    BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT,
-    CB_SETCURSEL, CBN_SELCHANGE, CBS_DROPDOWNLIST, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-    DestroyWindow, DispatchMessageW, ES_AUTOHSCROLL, ES_MULTILINE, ES_READONLY,
-    GetDlgCtrlID, GetMessageW, GetScrollInfo, GetWindowTextLengthW, GetWindowTextW, IDC_ARROW,
-    GA_ROOT, SetTimer, WM_TIMER, GetAncestor, GetClientRect, GetWindowRect, IsWindowVisible, WindowFromPoint, WM_KEYDOWN, IDCANCEL, IDOK, IsChild, IsDialogMessageW, LB_ADDSTRING, LB_GETCURSEL, LB_RESETCONTENT,
+    BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CB_ADDSTRING,
+    CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL, CBN_SELCHANGE, CBS_DROPDOWNLIST, CW_USEDEFAULT, CreateWindowExW,
+    DefWindowProcW, DestroyWindow, DispatchMessageW, ES_AUTOHSCROLL, ES_MULTILINE, ES_READONLY, GA_ROOT, GetAncestor,
+    GetClientRect, GetDlgCtrlID, GetMessageW, GetScrollInfo, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+    IDC_ARROW, IDCANCEL, IDOK, IsChild, IsDialogMessageW, IsWindowVisible, LB_ADDSTRING, LB_GETCURSEL, LB_RESETCONTENT,
     LBS_NOTIFY, LoadCursorW, MB_ICONINFORMATION, MB_OK, MSG, MessageBoxW, PostQuitMessage, RegisterClassExW,
     SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBTRACK, SB_VERT, SCROLLINFO, SIF_ALL, SIF_PAGE, SIF_POS,
-    SIF_RANGE, SPI_GETICONTITLELOGFONT, SW_ERASE, SW_HIDE,
-    SW_INVALIDATE, SW_SCROLLCHILDREN, SW_SHOW, SW_SHOWNORMAL, ScrollWindowEx, SendMessageW,
-    SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC, WM_DESTROY,
-    WM_HSCROLL, WM_MOUSEWHEEL, WM_SETFONT, WM_VSCROLL, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD,
-    WS_CLIPCHILDREN, WS_EX_TOPMOST, WS_GROUP, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_TABSTOP,
-    WS_VISIBLE, WS_VSCROLL,
+    SIF_RANGE, SPI_GETICONTITLELOGFONT, SW_ERASE, SW_HIDE, SW_INVALIDATE, SW_SCROLLCHILDREN, SW_SHOW, SW_SHOWNORMAL,
+    ScrollWindowEx, SendMessageW, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WM_CLOSE,
+    WM_COMMAND, WM_CTLCOLORSTATIC, WM_DESTROY, WM_HSCROLL, WM_KEYDOWN, WM_MOUSEWHEEL, WM_SETFONT, WM_TIMER, WM_VSCROLL,
+    WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_TOPMOST, WS_GROUP, WS_MINIMIZEBOX,
+    WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL, WindowFromPoint,
 };
 
 use aqr_ipc::Job;
@@ -179,9 +180,9 @@ impl Opts {
 
     /// Whether the settings a preset names are those of `p`.
     fn same(&self, p: &Opts) -> bool {
-        (self.format, self.level, self.check, self.dict, self.batch, self.block, self.depth) ==
-            (p.format, p.level, p.check, p.dict, p.batch, p.block, p.depth) &&
-            (self.archival, self.atomic, self.zstd_scale) == (p.archival, p.atomic, p.zstd_scale)
+        (self.format, self.level, self.check, self.dict, self.batch, self.block, self.depth)
+            == (p.format, p.level, p.check, p.dict, p.batch, p.block, p.depth)
+            && (self.archival, self.atomic, self.zstd_scale) == (p.archival, p.atomic, p.zstd_scale)
     }
 
     fn aqr(&self) -> bool {
@@ -195,7 +196,11 @@ impl Opts {
         [
             n(a && self.zstd_scale) + n(a && self.depth != d.depth),
             n(!self.exclude.is_empty()) + n(self.deref) + n(self.preserve),
-            if a { n(self.batch != d.batch) + n(self.block != d.block) + n(self.segment != d.segment) + n(self.dict) } else { 0 },
+            if a {
+                n(self.batch != d.batch) + n(self.block != d.block) + n(self.segment != d.segment) + n(self.dict)
+            } else {
+                0
+            },
             n(self.encrypt) + n(a && self.archival) + n(a && !self.check) + n(a && self.atomic),
             n(self.mode != 0) + n(!self.journal.is_empty()) + n(self.rm),
             n(self.threads != 0) + n(self.mem != 0) + n(self.appb != d.appb),
@@ -242,7 +247,8 @@ impl Opts {
             if self.segment != d.segment {
                 two(&mut a, "-S", if self.segment == 0 { "0" } else { SEGMENT[self.segment as usize] });
             }
-            for (on, flag) in [(self.dict, "-D"), (self.archival, "-A"), (!self.check, "--no-check"), (self.atomic, "--atomic")]
+            for (on, flag) in
+                [(self.dict, "-D"), (self.archival, "-A"), (!self.check, "--no-check"), (self.atomic, "--atomic")]
             {
                 if on {
                     a.push(flag.into());
@@ -480,6 +486,7 @@ fn set_text(h: HWND, s: &str) {
 }
 
 /// A child window of `parent` at `r` (x, y, width, height in 96-dpi units).
+#[allow(clippy::too_many_arguments)]
 fn make(cx: &Cx, parent: HWND, class: &str, text: &str, style: u32, r: [i32; 4], id: i32, bold: bool) -> HWND {
     // SAFETY: strings of NULs, a parent of this thread; the font outlives the windows
     unsafe {
@@ -546,15 +553,15 @@ impl Rows<'_> {
 
     fn header(&mut self, title: &str) {
         self.y += 10;
-        let h = make(&self.a.cx, self.pane(), "STATIC", title, SS_LEFT as u32, [LX, self.y, 400, 18], -1, true);
+        let h = make(&self.a.cx, self.pane(), "STATIC", title, SS_LEFT, [LX, self.y, 400, 18], -1, true);
         self.a.headers.push(h);
-        make(&self.a.cx, self.pane(), "STATIC", "", SS_ETCHEDHORZ as u32, [LX, self.y + 21, 530, 2], -1, false);
+        make(&self.a.cx, self.pane(), "STATIC", "", SS_ETCHEDHORZ, [LX, self.y + 21, 530, 2], -1, false);
         self.y += 30;
     }
 
     fn label(&mut self, text: &str, expert: bool, aqr: bool, tip_text: &str) {
         let text = if expert { t::expert(text) } else { text.into() };
-        let style = (SS_LEFT | SS_NOTIFY | SS_ENDELLIPSIS) as u32;
+        let style = SS_LEFT | SS_NOTIFY | SS_ENDELLIPSIS;
         let h = make(&self.a.cx, self.pane(), "STATIC", &text, style, [LX, self.y + 5, LW, 18], -1, false);
         if aqr {
             self.a.aqr_only.push(h);
@@ -571,7 +578,7 @@ impl Rows<'_> {
 
     fn slider(&mut self, id: i32, text: &str, max: i32, expert: bool, aqr: bool, tip_text: &str) {
         self.label(text, expert, aqr, tip_text);
-        let style = WS_TABSTOP | (TBS_HORZ | TBS_AUTOTICKS) as u32;
+        let style = WS_TABSTOP | (TBS_HORZ | TBS_AUTOTICKS);
         let h = make(&self.a.cx, self.pane(), "msctls_trackbar32", "", style, [CX, self.y, CW, 28], id, false);
         // SAFETY: a trackbar made above
         unsafe {
@@ -580,7 +587,8 @@ impl Rows<'_> {
             SendMessageW(h, TBM_SETPAGESIZE, 0, 1);
         }
         self.reg(id, h, aqr, tip_text);
-        let v = make(&self.a.cx, self.pane(), "STATIC", "", SS_LEFT as u32, [CX + CW + 6, self.y + 5, 98, 18], id + VALUE, false);
+        let v =
+            make(&self.a.cx, self.pane(), "STATIC", "", SS_LEFT, [CX + CW + 6, self.y + 5, 98, 18], id + VALUE, false);
         self.a.ctl.insert(id + VALUE, v);
         if aqr {
             self.a.aqr_only.push(v);
@@ -638,7 +646,7 @@ pub fn open(job: Option<Arc<Job>>, paths: Vec<PathBuf>) -> Option<Vec<String>> {
             dwICC: ICC_BAR_CLASSES | ICC_STANDARD_CLASSES,
         });
         let inst = GetModuleHandleW(null());
-        for (name, proc) in [("AqrOptions", main_proc as WNDPROC), ("AqrOptionsPane", pane_proc)] {
+        for (name, proc) in [("AqrOptions", main_proc as WndProc), ("AqrOptionsPane", pane_proc)] {
             let mut wc: WNDCLASSEXW = std::mem::zeroed();
             wc.cbSize = size_of::<WNDCLASSEXW>() as u32;
             wc.lpfnWndProc = Some(proc);
@@ -667,7 +675,13 @@ pub fn open(job: Option<Arc<Job>>, paths: Vec<PathBuf>) -> Option<Vec<String>> {
         );
         let dpi = GetDpiForWindow(main).max(96) as i32;
         let mut lf: LOGFONTW = std::mem::zeroed();
-        SystemParametersInfoForDpi(SPI_GETICONTITLELOGFONT, size_of::<LOGFONTW>() as u32, (&mut lf as *mut LOGFONTW).cast(), 0, dpi as u32);
+        SystemParametersInfoForDpi(
+            SPI_GETICONTITLELOGFONT,
+            size_of::<LOGFONTW>() as u32,
+            (&mut lf as *mut LOGFONTW).cast(),
+            0,
+            dpi as u32,
+        );
         let font = CreateFontIndirectW(&lf);
         lf.lfWeight = 700;
         let bold = CreateFontIndirectW(&lf);
@@ -691,7 +705,7 @@ pub fn open(job: Option<Arc<Job>>, paths: Vec<PathBuf>) -> Option<Vec<String>> {
             WS_EX_TOPMOST,
             wide("tooltips_class32").as_ptr(),
             null(),
-            WS_POPUP | TTS_ALWAYSTIP as u32,
+            WS_POPUP | TTS_ALWAYSTIP,
             0,
             0,
             0,
@@ -704,7 +718,8 @@ pub fn open(job: Option<Arc<Job>>, paths: Vec<PathBuf>) -> Option<Vec<String>> {
         SendMessageW(tips, TTM_SETMAXTIPWIDTH, 0, cx.s(320) as isize);
         SendMessageW(tips, TTM_SETDELAYTIME, TTDT_AUTOPOP as usize, 30000);
 
-        let (stem, out_dir) = if paths.is_empty() { ("Photos-2026".to_string(), PathBuf::new()) } else { target(&paths) };
+        let (stem, out_dir) =
+            if paths.is_empty() { ("Photos-2026".to_string(), PathBuf::new()) } else { target(&paths) };
         let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
         let mut a = App {
             main,
@@ -720,8 +735,16 @@ pub fn open(job: Option<Arc<Job>>, paths: Vec<PathBuf>) -> Option<Vec<String>> {
             open: false,
             cpus,
             job,
-            inputs: if paths.is_empty() { vec!["Photos-2026".into(), "project-notes".into()] } else { paths.iter().map(|p| p.display().to_string()).collect() },
-            names: if paths.is_empty() { vec!["Photos-2026".into(), "project-notes".into()] } else { paths.iter().map(|p| aqr_ipc::file_name(p)).collect() },
+            inputs: if paths.is_empty() {
+                vec!["Photos-2026".into(), "project-notes".into()]
+            } else {
+                paths.iter().map(|p| p.display().to_string()).collect()
+            },
+            names: if paths.is_empty() {
+                vec!["Photos-2026".into(), "project-notes".into()]
+            } else {
+                paths.iter().map(|p| aqr_ipc::file_name(p)).collect()
+            },
             stem,
             out_dir,
             go: None,
@@ -762,7 +785,7 @@ pub fn open(job: Option<Arc<Job>>, paths: Vec<PathBuf>) -> Option<Vec<String>> {
     APP.with(|s| s.borrow_mut().take()).and_then(|a| a.go)
 }
 
-type WNDPROC = unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
+type WndProc = unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
 
 /// The outer size of the window, with the pane open or not.
 fn frame(a: &App, open: bool) -> (i32, i32) {
@@ -770,7 +793,13 @@ fn frame(a: &App, open: bool) -> (i32, i32) {
     let mut r = RECT { left: 0, top: 0, right: w, bottom: a.cx.s(H) };
     // SAFETY: a rectangle of ours, the style the window was made with
     unsafe {
-        AdjustWindowRectExForDpi(&mut r, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, 0, 0, a.cx.dpi as u32);
+        AdjustWindowRectExForDpi(
+            &mut r,
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+            0,
+            0,
+            a.cx.dpi as u32,
+        );
     }
     (r.right - r.left, r.bottom - r.top)
 }
@@ -781,7 +810,10 @@ fn center(h: HWND) {
     unsafe {
         let mut r: RECT = std::mem::zeroed();
         GetWindowRect(h, &mut r);
-        let (x, y) = ((GetSystemMetrics(SM_CXSCREEN) - (r.right - r.left)) / 2, (GetSystemMetrics(SM_CYSCREEN) - (r.bottom - r.top)) / 3);
+        let (x, y) = (
+            (GetSystemMetrics(SM_CXSCREEN) - (r.right - r.left)) / 2,
+            (GetSystemMetrics(SM_CYSCREEN) - (r.bottom - r.top)) / 3,
+        );
         SetWindowPos(h, null_mut(), x, y, 0, 0, 0x0001 | 0x0004 | 0x0010); // NOSIZE | NOZORDER | NOACTIVATE
     }
 }
@@ -789,18 +821,49 @@ fn center(h: HWND) {
 fn build_main(a: &mut App) {
     let (cx, m) = (&a.cx, a.main);
     let mut reg = Vec::new();
-    reg.push((SUMMARY, make(cx, m, "STATIC", "", (SS_LEFT | SS_ENDELLIPSIS) as u32, [16, 14, 318, 18], -1, true)));
-    reg.push((SUMMARY + 1000, make(cx, m, "STATIC", "", SS_LEFT as u32, [16, 34, 318, 34], SUMMARY + 1000, false)));
-    for (i, (id, label)) in [(PRESET, t::preset()), (FORMAT, t::format()), (LEVEL, t::level())].into_iter().enumerate() {
+    reg.push((SUMMARY, make(cx, m, "STATIC", "", SS_LEFT | SS_ENDELLIPSIS, [16, 14, 318, 18], -1, true)));
+    reg.push((SUMMARY + 1000, make(cx, m, "STATIC", "", SS_LEFT, [16, 34, 318, 34], SUMMARY + 1000, false)));
+    for (i, (id, label)) in [(PRESET, t::preset()), (FORMAT, t::format()), (LEVEL, t::level())].into_iter().enumerate()
+    {
         let y = 84 + 34 * i as i32;
-        make(cx, m, "STATIC", label, SS_LEFT as u32, [16, y + 4, 64, 18], -1, false);
-        reg.push((id, make(cx, m, "COMBOBOX", "", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, [84, y, 250, 260], id, false)));
+        make(cx, m, "STATIC", label, SS_LEFT, [16, y + 4, 64, 18], -1, false);
+        reg.push((
+            id,
+            make(
+                cx,
+                m,
+                "COMBOBOX",
+                "",
+                WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32,
+                [84, y, 250, 260],
+                id,
+                false,
+            ),
+        ));
     }
     reg.push((TOGGLE, make(cx, m, "BUTTON", "", WS_TABSTOP | BS_PUSHBUTTON as u32, [16, 478, 318, 28], TOGGLE, false)));
-    make(cx, m, "STATIC", "", SS_ETCHEDHORZ as u32, [0, 520, MAIN_W, 2], -1, false);
-    reg.push((RESET, make(cx, m, "BUTTON", t::reset(), WS_TABSTOP | BS_PUSHBUTTON as u32, [16, 534, 70, 26], RESET, false)));
-    reg.push((IDOK, make(cx, m, "BUTTON", t::compress(), WS_TABSTOP | BS_DEFPUSHBUTTON as u32, [176, 534, 82, 26], IDOK, false)));
-    reg.push((IDCANCEL, make(cx, m, "BUTTON", aqr_l10n::common::cancel(), WS_TABSTOP | BS_PUSHBUTTON as u32, [264, 534, 70, 26], IDCANCEL, false)));
+    make(cx, m, "STATIC", "", SS_ETCHEDHORZ, [0, 520, MAIN_W, 2], -1, false);
+    reg.push((
+        RESET,
+        make(cx, m, "BUTTON", t::reset(), WS_TABSTOP | BS_PUSHBUTTON as u32, [16, 534, 70, 26], RESET, false),
+    ));
+    reg.push((
+        IDOK,
+        make(cx, m, "BUTTON", t::compress(), WS_TABSTOP | BS_DEFPUSHBUTTON as u32, [176, 534, 82, 26], IDOK, false),
+    ));
+    reg.push((
+        IDCANCEL,
+        make(
+            cx,
+            m,
+            "BUTTON",
+            aqr_l10n::common::cancel(),
+            WS_TABSTOP | BS_PUSHBUTTON as u32,
+            [264, 534, 70, 26],
+            IDCANCEL,
+            false,
+        ),
+    ));
     for (id, h) in reg {
         a.ctl.insert(id, h);
     }
@@ -829,8 +892,26 @@ fn build_pane(a: &mut App) {
     r.label(t::level_scale(), true, true, t::tip_level_scale());
     let tipt = t::tip_level_scale();
     let (a1, a2) = (
-        make(&r.a.cx, r.pane(), "BUTTON", t::scale_aqueous(), WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON as u32, [CX, r.y + 1, 90, 22], SCALE_AQR, false),
-        make(&r.a.cx, r.pane(), "BUTTON", t::scale_zstd(), WS_TABSTOP | BS_AUTORADIOBUTTON as u32, [CX + 96, r.y + 1, 90, 22], SCALE_ZSTD, false),
+        make(
+            &r.a.cx,
+            r.pane(),
+            "BUTTON",
+            t::scale_aqueous(),
+            WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON as u32,
+            [CX, r.y + 1, 90, 22],
+            SCALE_AQR,
+            false,
+        ),
+        make(
+            &r.a.cx,
+            r.pane(),
+            "BUTTON",
+            t::scale_zstd(),
+            WS_TABSTOP | BS_AUTORADIOBUTTON as u32,
+            [CX + 96, r.y + 1, 90, 22],
+            SCALE_ZSTD,
+            false,
+        ),
     );
     r.reg(SCALE_AQR, a1, true, tipt);
     r.reg(SCALE_ZSTD, a2, true, tipt);
@@ -841,14 +922,50 @@ fn build_pane(a: &mut App) {
     let tx = t::tip_skip_names();
     r.label(t::skip_names(), false, false, tx);
     r.y += 24;
-    let list = make(&r.a.cx, r.pane(), "LISTBOX", "", WS_TABSTOP | WS_BORDER | WS_VSCROLL | LBS_NOTIFY as u32, [LX, r.y, 530, 70], EXLIST, false);
+    let list = make(
+        &r.a.cx,
+        r.pane(),
+        "LISTBOX",
+        "",
+        WS_TABSTOP | WS_BORDER | WS_VSCROLL | LBS_NOTIFY as u32,
+        [LX, r.y, 530, 70],
+        EXLIST,
+        false,
+    );
     r.reg(EXLIST, list, false, tx);
     r.y += 76;
-    let ed = make(&r.a.cx, r.pane(), "EDIT", "", WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL as u32, [LX, r.y, 330, 22], EXEDIT, false);
+    let ed = make(
+        &r.a.cx,
+        r.pane(),
+        "EDIT",
+        "",
+        WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL as u32,
+        [LX, r.y, 330, 22],
+        EXEDIT,
+        false,
+    );
     r.reg(EXEDIT, ed, false, t::tip_skip_edit());
-    let add = make(&r.a.cx, r.pane(), "BUTTON", t::add(), WS_TABSTOP | BS_PUSHBUTTON as u32, [LX + 336, r.y - 1, 90, 24], EXADD, false);
+    let add = make(
+        &r.a.cx,
+        r.pane(),
+        "BUTTON",
+        t::add(),
+        WS_TABSTOP | BS_PUSHBUTTON as u32,
+        [LX + 336, r.y - 1, 90, 24],
+        EXADD,
+        false,
+    );
     r.reg(EXADD, add, false, "");
-    let del = make(&r.a.cx, r.pane(), "BUTTON", t::remove(), WS_TABSTOP | BS_PUSHBUTTON as u32, [LX + 432, r.y - 1, 98, 24], EXDEL, false);
+    let del = make(
+        &r.a.cx,
+        r.pane(),
+        "BUTTON",
+        t::remove(),
+        WS_TABSTOP | BS_PUSHBUTTON as u32,
+        [LX + 432, r.y - 1, 98, 24],
+        EXDEL,
+        false,
+    );
     r.reg(EXDEL, del, false, "");
     r.y += 32;
     r.check(DEREF, t::follow_links(), false, t::tip_follow_links());
@@ -871,12 +988,13 @@ fn build_pane(a: &mut App) {
     r.combo(MODE, t::if_exists(), &modes, false, false, t::tip_if_exists());
     r.edit(JOURNAL, t::version_name(), t::tip_version_name());
     r.check(RM, t::delete_originals(), false, t::tip_delete_originals());
-    let warn = make(&r.a.cx, r.pane(), "STATIC", t::verify_warning(), SS_LEFT as u32, [LX + 20, r.y, 510, 18], WARN, false);
+    let warn = make(&r.a.cx, r.pane(), "STATIC", t::verify_warning(), SS_LEFT, [LX + 20, r.y, 510, 18], WARN, false);
     r.a.ctl.insert(WARN, warn);
     r.y += 24;
 
     r.header(t::section_resources());
-    let threads: Vec<String> = THREADS.iter().map(|&n| if n == 0 { t::threads_all(cpus) } else { n.to_string() }).collect();
+    let threads: Vec<String> =
+        THREADS.iter().map(|&n| if n == 0 { t::threads_all(cpus) } else { n.to_string() }).collect();
     r.combo(THREAD, t::threads(), &threads, false, false, t::tip_threads());
     let mems: Vec<String> = mem_labels().iter().map(|m| m.to_string()).collect();
     r.combo(MEMORY, t::memory(), &mems, false, false, t::tip_memory());
@@ -1279,7 +1397,16 @@ fn scroll_to(pane: HWND, f: impl FnOnce(&SCROLLINFO, i32) -> i32) {
         let max = (si.nMax + 1 - si.nPage as i32).max(0);
         let pos = f(&si, max).clamp(0, max);
         if pos != si.nPos {
-            ScrollWindowEx(pane, 0, si.nPos - pos, null(), null(), null_mut(), null_mut(), SW_SCROLLCHILDREN | SW_INVALIDATE | SW_ERASE);
+            ScrollWindowEx(
+                pane,
+                0,
+                si.nPos - pos,
+                null(),
+                null(),
+                null_mut(),
+                null_mut(),
+                SW_SCROLLCHILDREN | SW_INVALIDATE | SW_ERASE,
+            );
             si.fMask = SIF_POS;
             si.nPos = pos;
             SetScrollInfo(pane, SB_VERT, &si, 1);
@@ -1324,7 +1451,8 @@ fn tab(a: &mut App, back: bool) -> bool {
         order.extend(a.pane_tab.iter().copied());
         order.extend([c(IDOK), c(IDCANCEL), c(RESET)]);
         // (of a group of radio buttons the checked one takes the Tab, the arrows the rest)
-        let off = |h: HWND| [SCALE_AQR, SCALE_ZSTD].iter().any(|&id| c(id) == h && SendMessageW(h, BM_GETCHECK, 0, 0) == 0);
+        let off =
+            |h: HWND| [SCALE_AQR, SCALE_ZSTD].iter().any(|&id| c(id) == h && SendMessageW(h, BM_GETCHECK, 0, 0) == 0);
         order.retain(|&h| IsWindowVisible(h) != 0 && IsWindowEnabled(h) != 0 && !off(h));
         if order.is_empty() {
             return false;

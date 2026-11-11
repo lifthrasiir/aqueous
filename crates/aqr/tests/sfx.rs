@@ -27,7 +27,7 @@ fn prose(n: usize) -> Vec<u8> {
     while t.len() < n {
         x = x.wrapping_mul(1103515245).wrapping_add(12345);
         t.extend_from_slice(words[(x >> 16) as usize % words.len()].as_bytes());
-        t.push(if x % 13 == 0 { b'\n' } else { b' ' });
+        t.push(if x.is_multiple_of(13) { b'\n' } else { b' ' });
     }
     t
 }

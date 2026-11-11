@@ -575,6 +575,7 @@ pub(crate) fn resolve(f: &mut Formula) {
 /// The images' code is remapped as `remaps` tells.
 /// The sections within a CIL section are filtered within what the CIL filter keeps as it is
 /// (where whole within a range of it).
+#[allow(clippy::too_many_arguments)]
 fn filtered(
     d: &[u8],
     class: &'static str,

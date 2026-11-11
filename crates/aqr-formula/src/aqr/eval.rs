@@ -1330,7 +1330,7 @@ pub(super) fn hashed(
         kept: None,
     };
     let names: Vec<Option<String>> =
-        p.modules.iter().map(|&m| env.modules[m].wasm(env.runner).ok().and_then(|w| identify(w))).collect();
+        p.modules.iter().map(|&m| env.modules[m].wasm(env.runner).ok().and_then(identify)).collect();
     let key = |a: &Apply, ins: &[Ch]| -> Option<u128> {
         let name = names[a.module].as_deref()?;
         let res: Vec<Ch> = a.resources.iter().map(|&i| Ch::of(&env.resources[p.resources[i]])).collect();

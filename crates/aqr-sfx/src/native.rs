@@ -26,7 +26,7 @@ fn hex(b: &[u8]) -> String {
 pub(crate) fn parse_native_name(name: &[u8]) -> Option<([u8; 32], Vec<u8>)> {
     let (hash, slots) = std::str::from_utf8(name).ok()?.split_once('/')?;
     let unhex = |h: &str| -> Option<Vec<u8>> {
-        if h.len() % 2 != 0 {
+        if !h.len().is_multiple_of(2) {
             return None;
         }
         (0..h.len()).step_by(2).map(|i| u8::from_str_radix(h.get(i..i + 2)?, 16).ok()).collect()

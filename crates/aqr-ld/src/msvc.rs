@@ -32,7 +32,7 @@ fn expanded(args: &[std::ffi::OsString]) -> Result<Vec<String>> {
         let b = std::fs::read(file).map_err(|e| format!("{file}: {e}"))?;
         let text = match b.strip_prefix(&[0xff, 0xfe]) {
             Some(w) => String::from_utf16_lossy(
-                &w.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>(),
+                &w.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>(),
             ),
             None => String::from_utf8_lossy(&b).into_owned(),
         };
