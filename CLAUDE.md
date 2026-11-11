@@ -109,7 +109,9 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     `aqr-dll-shim` records applications from archives and runs the libraries on them (its own, or
     the ones merged into it). `NOTLS=1 build.sh` builds for `x86_64-aqr-windows-msvc.json` (native
     thread-locals off, so std uses TlsAlloc, not a TLS directory), which `aqr-ld merge` can take;
-    `merge-test.sh ARCHIVE...` is the end-to-end test (needs nightly and build-std).
+    `merge-test.sh ARCHIVE...` is the end-to-end test (needs nightly and build-std). The nightly of
+    these builds (and of the release's win7 job) is pinned by the root file `nightly-toolchain`
+    (`AQR_NIGHTLY` overrides it), as the custom target's JSON is unstable.
   - `aqr-modules` — Wasm modules built from the recompressors' code (`src/bin`, `wasm/`,
     `src/known.rs`).
 - `codecs/` — the recompressor crates `aqr-*` (flate, png, jpeg, mp3, flac, pdf, zip, sqlite,

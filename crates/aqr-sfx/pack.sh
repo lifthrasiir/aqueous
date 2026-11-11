@@ -13,8 +13,9 @@
 #   was built from;
 # - pack.id, a digest of the files.
 #
-# The modules named are packed (all by default). It needs a nightly toolchain and build-std (as
-# NOTLS does). Rerun it after crates/aqr-modules/build.sh, then rebuild aqr (`cargo aqr`).
+# The modules named are packed (all by default). It needs the nightly toolchain of the file
+# nightly-toolchain (AQR_NIGHTLY to use another) and build-std (as NOTLS does). Rerun it after
+# crates/aqr-modules/build.sh, then rebuild aqr (`cargo aqr`).
 set -eu
 cd "$(dirname "$0")/../.."
 case $(uname -s) in
@@ -32,7 +33,8 @@ target=crates/aqr-dll/x86_64-aqr-windows-msvc.json
 # (linked by aqr-ld as build.sh links, so that the standard library built for the target is not
 # built again for a linker of its own)
 CARGO_TARGET_X86_64_AQR_WINDOWS_MSVC_LINKER=$(cygpath -w "$PWD/$ld") \
-    cargo +nightly build -q --release -p aqr-interp --target $target -Z json-target-spec -Z build-std
+    cargo "+${AQR_NIGHTLY:-$(cat nightly-toolchain)}" build -q --release -p aqr-interp --target $target \
+        -Z json-target-spec -Z build-std
 
 rm -rf "$out"
 mkdir -p "$out/modules" "$out/libs"

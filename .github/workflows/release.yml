@@ -7,7 +7,8 @@ name: release
 #
 # Dependencies are cached (rust-cache), saved only by runs on main: a tag's run can restore
 # the caches of main but not of another tag's. The scheduled runs, twice a week on main, keep
-# them there (and catch a build broken, say by nightly, before a tag does).
+# them there (and catch a build broken, say by a toolchain, before a tag does). The nightly of the
+# jobs that need one (build-std) is pinned by the file nightly-toolchain.
 #
 # Before tagging: add the tag to the revisions of scripts/released-modules.sh and run it, so that
 # the modules of the release stay valid for the reserved Apply instruction after they are rebuilt
@@ -19,7 +20,7 @@ name: release
 #
 # Assets, STEM being the tag without `v0.0.` (v0.0.20261031 -> 20261031):
 #   aqr-STEM.exe                  Windows 10 on, x86_64 (packed by UPX)
-#   aqr-STEM-win7.exe             Windows 7 and 8 (cargo +nightly win7; packed by UPX)
+#   aqr-STEM-win7.exe             Windows 7 and 8 (cargo +NIGHTLY win7; packed by UPX)
 #   aqr-STEM-win-install.exe      the installer, aqr.exe and aqr-win.exe (crates/aqr-win-install)
 #   aqr-STEM-mac.zip              Aqueous.app, universal (crates/aqr-mac/bundle.sh --universal)
 #   aqr-STEM-linux-x86_64.tar.xz  aqr (glibc of Ubuntu 22.04 on)
@@ -63,9 +64,12 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # What aqr's build.rs packs into aqr.exe (target/aqr-sfx/, crates/aqr-sfx/pack.sh): the
       # interpreter blob, which runs the modules as WebAssembly (aqr links no Wasmtime on Windows
-      # x86-64), and the stub and the modules' blobs of `--format sfx`. Built by nightly with
+      # x86-64), and the stub and the modules' blobs of `--format sfx`. Built by the nightly with
       # build-std (the no-TLS target of crates/aqr-dll), and Python for crates/aqr-dll/layout.py.
-      - run: rustup toolchain install nightly --profile minimal --component rust-src
+      # (the nightly of nightly-toolchain, pinned: AQR_NIGHTLY for the scripts)
+      - run: |
+          echo "AQR_NIGHTLY=$(cat nightly-toolchain)" >> "$GITHUB_ENV"
+          rustup toolchain install "$(cat nightly-toolchain)" --profile minimal --component rust-src
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
@@ -114,11 +118,14 @@ jobs:
           [ "$GITHUB_REF_TYPE" = tag ] || s=$(git rev-parse --short HEAD)
           echo "stem=${s#v}" >> "$GITHUB_OUTPUT"
           if [ "$GITHUB_REF_TYPE" = tag ]; then echo "AQR_VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"; fi
-      - run: rustup toolchain install nightly --profile minimal --component rust-src
+      # (the nightly of nightly-toolchain, pinned: AQR_NIGHTLY for the scripts)
+      - run: |
+          echo "AQR_NIGHTLY=$(cat nightly-toolchain)" >> "$GITHUB_ENV"
+          rustup toolchain install "$(cat nightly-toolchain)" --profile minimal --component rust-src
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo +nightly win7 -p aqr
+      - run: cargo "+$AQR_NIGHTLY" win7 -p aqr
       - run: |
           mkdir out
           cp target/x86_64-win7-windows-msvc/dist/aqr.exe "out/aqr-${{ steps.stem.outputs.stem }}-win7.exe"

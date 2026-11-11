@@ -5,8 +5,9 @@ rt = "test --profile release-test"
 # arguments; `cargo aqr +` lists the kept binaries, `cargo aqr +<id> …` runs one
 # (crates/aqr-bincache).
 aqr = "run -q -p aqr-bincache --"
-# For Windows 7 and 8 (`cargo +nightly win7 -p aqr`): std built for the target (tier 3) of the
-# systems before Windows 10, the C runtime linked statically (no redistributable to install).
+# For Windows 7 and 8 (`cargo +NIGHTLY win7 -p aqr`, NIGHTLY the toolchain of nightly-toolchain):
+# std built for the target (tier 3) of the systems before Windows 10, the C runtime linked
+# statically (no redistributable to install).
 win7 = "build --profile dist --target x86_64-win7-windows-msvc -Zbuild-std"
 
 [target.x86_64-win7-windows-msvc]

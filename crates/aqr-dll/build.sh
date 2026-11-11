@@ -13,7 +13,8 @@
 # x86_64-aqr-windows-msvc.json, which has native thread-locals off so the standard library's
 # thread-locals use TlsAlloc rather than a TLS directory (one per image, not relocatable). Such a
 # library is mergeable into a stub by `aqr-ld merge` (its code uses no TLS directory, only
-# imports). It needs a nightly toolchain and build-std, so it is slower. aqr-ld links them
+# imports). It needs the nightly toolchain of nightly-toolchain (AQR_NIGHTLY to use another) and
+# build-std, so it is slower. aqr-ld links them
 # (src/msvc.rs): building every module, the shared libraries are linked again exporting only
 # what the others import from them and what rustc has every link reference (`aqr-ld exports`,
 # target/aqr-dll/exports/ and needed/), the rest of their
@@ -32,7 +33,8 @@ exports=target/aqr-dll/exports
 needed=target/aqr-dll/needed
 if [ "${NOTLS:-}" = 1 ]; then
     target=crates/aqr-dll/x86_64-aqr-windows-msvc.json
-    pre="+nightly"
+    # (the nightly of nightly-toolchain, or AQR_NIGHTLY's)
+    pre="+${AQR_NIGHTLY:-$(cat nightly-toolchain)}"
     post="--target $target -Z json-target-spec -Z build-std"
     built=target/x86_64-aqr-windows-msvc/$profile
     cargo build -q --release -p aqr-ld
