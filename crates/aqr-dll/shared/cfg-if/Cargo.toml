@@ -1,0 +1,13 @@
+[package]
+name = "aqr-dll-cfg-if"
+version = "0.1.0"
+edition = "2024"
+description = "Made by layout.py: the crates that the same 76 modules use, as a dylib that their native libraries link against"
+publish = false
+
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+aqr-dll-rt = { path = "../rt" }
+cfg-if = { version = "=1.0.5", default-features = false }

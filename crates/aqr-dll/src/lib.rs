@@ -1,10 +1,15 @@
 //! A module of aqr-modules (`AQR_DLL_MODULE`, the name of its binary) built as a native library,
 //! exporting the interface of `aqr_api::dll`: `build.sh` builds one for each module into
 //! `target/aqr-dll/`. The binary's source is taken as it is (`build.rs`), its entry point
-//! `apply` applied under aqr-api's emulation.
+//! `apply` applied under aqr-api's emulation. The crates that other modules use too are in the
+//! shared libraries it links against (layout.py: the dylibs of shared/, the runtime among them).
 
 #[cfg(aqr_dll_module)]
 include!(concat!(env!("OUT_DIR"), "/module.rs"));
+
+// (the shared libraries, layout.py's: what of them the module uses is taken from them)
+#[cfg(aqr_dll_module)]
+include!("../shared.rs");
 
 #[cfg(aqr_dll_module)]
 #[unsafe(no_mangle)]

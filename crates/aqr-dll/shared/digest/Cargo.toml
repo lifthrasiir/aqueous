@@ -1,0 +1,18 @@
+[package]
+name = "aqr-dll-digest"
+version = "0.1.0"
+edition = "2024"
+description = "Made by layout.py: the crates that the same 13 modules use, as a dylib that their native libraries link against"
+publish = false
+
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+aqr-dll-rt = { path = "../rt" }
+block-buffer = { version = "=0.10.4", default-features = false }
+cpufeatures = { version = "=0.2.17", default-features = false }
+crypto-common = { version = "=0.1.7", default-features = false }
+digest = { version = "=0.10.7", default-features = false }
+generic-array = { version = "=0.14.7", default-features = false }
+typenum = { version = "=1.20.1", default-features = false }

@@ -1,0 +1,18 @@
+[package]
+name = "aqr-dll-git"
+version = "0.1.0"
+edition = "2024"
+description = "Made by layout.py: the crates that the same 2 modules use, as a dylib that their native libraries link against"
+publish = false
+
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+aqr-dll-cfg-if = { path = "../cfg-if" }
+aqr-dll-common = { path = "../common" }
+aqr-dll-digest = { path = "../digest" }
+aqr-dll-flate = { path = "../flate" }
+aqr-dll-rt = { path = "../rt" }
+aqr-dll-sha1 = { path = "../sha1" }
+aqr-git = { path = "../../../../codecs/aqr-git", default-features = false }

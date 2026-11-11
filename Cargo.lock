@@ -439,6 +439,33 @@ dependencies = [
  "aqr-clip",
  "aqr-dex",
  "aqr-div3",
+ "aqr-dll-bcj",
+ "aqr-dll-bz2",
+ "aqr-dll-cfg-if",
+ "aqr-dll-common",
+ "aqr-dll-digest",
+ "aqr-dll-dwarf",
+ "aqr-dll-exe",
+ "aqr-dll-fits",
+ "aqr-dll-flate",
+ "aqr-dll-git",
+ "aqr-dll-infer-recs",
+ "aqr-dll-jpeg",
+ "aqr-dll-lzma",
+ "aqr-dll-lzx",
+ "aqr-dll-memchr",
+ "aqr-dll-num",
+ "aqr-dll-pdb",
+ "aqr-dll-png",
+ "aqr-dll-rar",
+ "aqr-dll-raw",
+ "aqr-dll-rt",
+ "aqr-dll-sha1",
+ "aqr-dll-sha2",
+ "aqr-dll-snappy",
+ "aqr-dll-walk",
+ "aqr-dll-wrt",
+ "aqr-dll-xxhash-rust",
  "aqr-dwarf",
  "aqr-exe",
  "aqr-fasta",
@@ -483,6 +510,246 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-dll-bcj"
+version = "0.1.0"
+dependencies = [
+ "aqr-bcj",
+ "aqr-dll-rt",
+]
+
+[[package]]
+name = "aqr-dll-bz2"
+version = "0.1.0"
+dependencies = [
+ "aqr-bz2",
+ "aqr-dll-cfg-if",
+ "aqr-dll-common",
+ "aqr-dll-rt",
+]
+
+[[package]]
+name = "aqr-dll-cfg-if"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-rt",
+ "cfg-if",
+]
+
+[[package]]
+name = "aqr-dll-common"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-dll-cfg-if",
+ "aqr-dll-rt",
+ "crc32fast",
+ "crossbeam-deque",
+ "crossbeam-epoch",
+ "crossbeam-utils",
+ "either",
+ "rayon",
+ "rayon-core",
+ "simd-adler32",
+]
+
+[[package]]
+name = "aqr-dll-digest"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-rt",
+ "block-buffer",
+ "cpufeatures",
+ "crypto-common",
+ "digest",
+ "generic-array",
+ "typenum",
+]
+
+[[package]]
+name = "aqr-dll-dwarf"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-cfg-if",
+ "aqr-dll-common",
+ "aqr-dll-rt",
+ "aqr-dwarf",
+]
+
+[[package]]
+name = "aqr-dll-exe"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-cfg-if",
+ "aqr-dll-digest",
+ "aqr-dll-rt",
+ "aqr-dll-sha1",
+ "aqr-dll-sha2",
+ "aqr-exe",
+ "bytemuck",
+]
+
+[[package]]
+name = "aqr-dll-fits"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-cfg-if",
+ "aqr-dll-common",
+ "aqr-dll-rt",
+ "aqr-fits",
+]
+
+[[package]]
+name = "aqr-dll-flate"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-cfg-if",
+ "aqr-dll-common",
+ "aqr-dll-rt",
+ "aqr-flate",
+]
+
+[[package]]
+name = "aqr-dll-git"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-cfg-if",
+ "aqr-dll-common",
+ "aqr-dll-digest",
+ "aqr-dll-flate",
+ "aqr-dll-rt",
+ "aqr-dll-sha1",
+ "aqr-git",
+]
+
+[[package]]
+name = "aqr-dll-infer-recs"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-cfg-if",
+ "aqr-dll-common",
+ "aqr-dll-rt",
+ "aqr-infer-recs",
+]
+
+[[package]]
+name = "aqr-dll-jpeg"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-cfg-if",
+ "aqr-dll-common",
+ "aqr-dll-memchr",
+ "aqr-dll-rt",
+ "aqr-jpeg",
+]
+
+[[package]]
+name = "aqr-dll-lzma"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-cfg-if",
+ "aqr-dll-common",
+ "aqr-dll-rt",
+ "aqr-lzma",
+]
+
+[[package]]
+name = "aqr-dll-lzx"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-cfg-if",
+ "aqr-dll-common",
+ "aqr-dll-lzma",
+ "aqr-dll-rt",
+ "aqr-lzx",
+]
+
+[[package]]
+name = "aqr-dll-memchr"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-rt",
+ "memchr",
+]
+
+[[package]]
+name = "aqr-dll-num"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-rt",
+ "aqr-num",
+ "zmij",
+]
+
+[[package]]
+name = "aqr-dll-pdb"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-cfg-if",
+ "aqr-dll-common",
+ "aqr-dll-rt",
+ "aqr-pdb",
+]
+
+[[package]]
+name = "aqr-dll-png"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-cfg-if",
+ "aqr-dll-common",
+ "aqr-dll-flate",
+ "aqr-dll-raw",
+ "aqr-dll-rt",
+ "aqr-png",
+]
+
+[[package]]
+name = "aqr-dll-rar"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-cfg-if",
+ "aqr-dll-common",
+ "aqr-dll-rt",
+ "aqr-rar",
+]
+
+[[package]]
+name = "aqr-dll-raw"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-cfg-if",
+ "aqr-dll-common",
+ "aqr-dll-rt",
+ "aqr-raw",
+]
+
+[[package]]
+name = "aqr-dll-rt"
+version = "0.1.0"
+dependencies = [
+ "aqr-api",
+]
+
+[[package]]
+name = "aqr-dll-sha1"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-cfg-if",
+ "aqr-dll-digest",
+ "aqr-dll-rt",
+ "sha1",
+]
+
+[[package]]
+name = "aqr-dll-sha2"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-cfg-if",
+ "aqr-dll-digest",
+ "aqr-dll-rt",
+ "sha2",
+]
+
+[[package]]
 name = "aqr-dll-shim"
 version = "0.1.0"
 dependencies = [
@@ -493,6 +760,45 @@ dependencies = [
  "libc",
  "sha2",
  "windows-sys",
+]
+
+[[package]]
+name = "aqr-dll-snappy"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-cfg-if",
+ "aqr-dll-common",
+ "aqr-dll-rt",
+ "aqr-snappy",
+]
+
+[[package]]
+name = "aqr-dll-walk"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-rt",
+ "aqr-walk",
+]
+
+[[package]]
+name = "aqr-dll-wrt"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-cfg-if",
+ "aqr-dll-common",
+ "aqr-dll-rt",
+ "aqr-wrt",
+ "zstd",
+ "zstd-safe",
+ "zstd-sys",
+]
+
+[[package]]
+name = "aqr-dll-xxhash-rust"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-rt",
+ "xxhash-rust",
 ]
 
 [[package]]

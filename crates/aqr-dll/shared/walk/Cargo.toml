@@ -1,0 +1,13 @@
+[package]
+name = "aqr-dll-walk"
+version = "0.1.0"
+edition = "2024"
+description = "Made by layout.py: the crates that the same 2 modules use, as a dylib that their native libraries link against"
+publish = false
+
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+aqr-dll-rt = { path = "../rt" }
+aqr-walk = { path = "../../../aqr-walk", default-features = false }

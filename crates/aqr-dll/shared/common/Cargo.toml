@@ -1,0 +1,22 @@
+[package]
+name = "aqr-dll-common"
+version = "0.1.0"
+edition = "2024"
+description = "Made by layout.py: the crates that the same 67 modules use, as a dylib that their native libraries link against"
+publish = false
+
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+aqr-dll-cfg-if = { path = "../cfg-if" }
+aqr-dll-rt = { path = "../rt" }
+aqr-common = { path = "../../../aqr-common", default-features = false }
+crc32fast = { version = "=1.5.2", default-features = false }
+crossbeam-deque = { version = "=0.8.8", default-features = false }
+crossbeam-epoch = { version = "=0.9.21", default-features = false }
+crossbeam-utils = { version = "=0.8.23", default-features = false }
+either = { version = "=1.19.0", default-features = false }
+rayon = { version = "=1.12.0", default-features = false }
+rayon-core = { version = "=1.13.0", default-features = false }
+simd-adler32 = { version = "=0.3.10", default-features = false }

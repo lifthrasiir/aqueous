@@ -97,6 +97,27 @@ impl Lib {
             return None;
         }
         let table = read(rva, len as usize);
+        // the shared libraries the modules link against (`lib:NAME`, their imports bound by the
+        // merge): their exception tables registered once, as the modules' are
+        static LIBS: std::sync::Once = std::sync::Once::new();
+        LIBS.call_once(|| {
+            for i in 0..u32_at(table, 0) as usize {
+                let e = 4 + i * 24;
+                let off = u32_at(table, e + 20) as usize;
+                let nlen = u32_at(table, off) as usize;
+                let (pdata_rva, pdata_count, mod_base) =
+                    (u32_at(table, e + 8), u32_at(table, e + 12), u32_at(table, e + 16));
+                if table[off + 4..off + 4 + nlen].starts_with(b"lib:") && pdata_count > 0 {
+                    unsafe {
+                        RtlAddFunctionTable(
+                            (base + pdata_rva as usize) as *const u8,
+                            pdata_count,
+                            (base + mod_base as usize) as u64,
+                        )
+                    };
+                }
+            }
+        });
         for i in 0..u32_at(table, 0) as usize {
             // entry: apply_rva, info_rva, pdata_rva, pdata_count, mod_base, name_off (6 u32)
             let e = 4 + i * 24;
@@ -208,13 +229,15 @@ impl Lib {
 mod sys {
     use super::{ApplyFn, InfoFn};
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LOAD_WITH_ALTERED_SEARCH_PATH, LoadLibraryExW};
 
     type Sym = unsafe extern "system" fn() -> isize;
 
     pub fn open(path: &std::path::Path) -> Result<(InfoFn, ApplyFn), String> {
+        // (the shared libraries it links against looked for beside it, as build.sh puts them)
+        let path = std::path::absolute(path).map_err(|e| e.to_string())?;
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
-        let h = unsafe { LoadLibraryW(wide.as_ptr()) };
+        let h = unsafe { LoadLibraryExW(wide.as_ptr(), std::ptr::null_mut(), LOAD_WITH_ALTERED_SEARCH_PATH) };
         if h.is_null() {
             return Err(std::io::Error::last_os_error().to_string());
         }

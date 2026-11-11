@@ -10,6 +10,35 @@ crate-type = ["cdylib"]
 
 # The crates that the binaries of aqr-modules use, natively (the decoding code only).
 [dependencies]
+# (begin: layout.py)
+aqr-dll-bcj = { path = "shared/bcj" }
+aqr-dll-bz2 = { path = "shared/bz2" }
+aqr-dll-cfg-if = { path = "shared/cfg-if" }
+aqr-dll-common = { path = "shared/common" }
+aqr-dll-digest = { path = "shared/digest" }
+aqr-dll-dwarf = { path = "shared/dwarf" }
+aqr-dll-exe = { path = "shared/exe" }
+aqr-dll-fits = { path = "shared/fits" }
+aqr-dll-flate = { path = "shared/flate" }
+aqr-dll-git = { path = "shared/git" }
+aqr-dll-infer-recs = { path = "shared/infer-recs" }
+aqr-dll-jpeg = { path = "shared/jpeg" }
+aqr-dll-lzma = { path = "shared/lzma" }
+aqr-dll-lzx = { path = "shared/lzx" }
+aqr-dll-memchr = { path = "shared/memchr" }
+aqr-dll-num = { path = "shared/num" }
+aqr-dll-pdb = { path = "shared/pdb" }
+aqr-dll-png = { path = "shared/png" }
+aqr-dll-rar = { path = "shared/rar" }
+aqr-dll-raw = { path = "shared/raw" }
+aqr-dll-rt = { path = "shared/rt" }
+aqr-dll-sha1 = { path = "shared/sha1" }
+aqr-dll-sha2 = { path = "shared/sha2" }
+aqr-dll-snappy = { path = "shared/snappy" }
+aqr-dll-walk = { path = "shared/walk" }
+aqr-dll-wrt = { path = "shared/wrt" }
+aqr-dll-xxhash-rust = { path = "shared/xxhash-rust" }
+# (end: layout.py)
 aqr-api = { path = "../aqr-api", default-features = false, features = ["alloc"] }
 aqr-modules = { path = "../aqr-modules" }
 aqr-asar = { path = "../../codecs/aqr-asar", default-features = false }

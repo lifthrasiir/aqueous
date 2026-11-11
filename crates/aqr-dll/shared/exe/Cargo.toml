@@ -1,0 +1,18 @@
+[package]
+name = "aqr-dll-exe"
+version = "0.1.0"
+edition = "2024"
+description = "Made by layout.py: the crates that the same 9 modules use, as a dylib that their native libraries link against"
+publish = false
+
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+aqr-dll-cfg-if = { path = "../cfg-if" }
+aqr-dll-digest = { path = "../digest" }
+aqr-dll-rt = { path = "../rt" }
+aqr-dll-sha1 = { path = "../sha1" }
+aqr-dll-sha2 = { path = "../sha2" }
+aqr-exe = { path = "../../../../codecs/aqr-exe", default-features = false }
+bytemuck = { version = "=1.25.2", default-features = false }
