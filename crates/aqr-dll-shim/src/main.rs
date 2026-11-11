@@ -224,6 +224,46 @@ impl Lib {
         }
     }
 
+    /// [`Lib::apply`] by the module's native decoding (`aqr_dll_decode`, on `threads`); `None`
+    /// where it has none, or the application is of several outputs.
+    fn decode(
+        &self,
+        params: &[u8],
+        resources: &[&[u8]],
+        inputs: &[&[u8]],
+        sizes: &[u64],
+        threads: usize,
+    ) -> Option<Result<Vec<Vec<u8>>>> {
+        let (Some(decode), [size]) = (self.info.decode, sizes) else { return None };
+        // (a module that takes no resources natively is given none)
+        let res: Vec<Slice> = match self.info.resources {
+            0 => Vec::new(),
+            _ => resources.iter().map(|r| Slice::of(r)).collect(),
+        };
+        let ins: Vec<Slice> = inputs.iter().map(|i| Slice::of(i)).collect();
+        let mut out = vec![0u8; *size as usize];
+        let mut error = [0u8; 1024];
+        let mut error_len = 0;
+        // SAFETY: each pointer is to as many items as its count, the output apart
+        let r = unsafe {
+            decode(
+                Slice::of(params),
+                res.as_ptr(),
+                res.len(),
+                ins.as_ptr(),
+                ins.len(),
+                SliceMut::of(&mut out),
+                threads,
+                SliceMut::of(&mut error),
+                &mut error_len,
+            )
+        };
+        Some(match r {
+            0 => Ok(vec![out]),
+            _ => Err(format!("{}: {}", self.name(), String::from_utf8_lossy(&error[..error_len]))),
+        })
+    }
+
     /// [`Lib::apply`] of a part module streamed (`aqr_dll_apply_part`): its inputs pulled from
     /// cursors, its outputs pushed to buffers; `None` for a whole module.
     fn apply_part(
@@ -551,6 +591,23 @@ fn run(args: &[String]) -> Result<()> {
         let streamed = match streamed {
             Some(_) => format!(", streamed {streamed_secs:.3} s"),
             None => String::new(),
+        };
+        // by its native decoding too (`aqr_dll_decode`): the same
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let t = Instant::now();
+        let decoded = lib.decode(&case.params, &res, &ins, &sizes, threads);
+        let decoded_secs = t.elapsed().as_secs_f64();
+        if let Some(d) = &decoded
+            && verdict == "same"
+        {
+            verdict = match judge(d) {
+                v if v == "same" => v,
+                v => format!("decoded {v}"),
+            };
+        }
+        let streamed = match decoded {
+            Some(_) => format!("{streamed}, decoded {decoded_secs:.3} s"),
+            None => streamed,
         };
         bad += (verdict != "same") as usize;
         let total: usize = case.inputs.iter().map(Vec::len).sum();

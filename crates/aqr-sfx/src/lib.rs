@@ -14,7 +14,7 @@ use aqr_api::dll::{Slice, SliceMut};
 use aqr_formula::Resource;
 use aqr_formula::aqr::{Decoded, Failure, Loaded, PartIn, PartOut, Runner};
 pub use native::native_name;
-use native::{Native, NativeLoaded};
+use native::{Fns, Native, NativeLoaded};
 
 // (an input of a part application as the blob pulls it, an output as it commits it: the same
 // for the interpreter blob and the native ones)
@@ -73,6 +73,8 @@ pub const LIB: &str = "lib:";
 pub struct Sfx {
     interp: Option<&'static Vtable>,
     natives: Vec<Native>,
+    /// The threads the native blobs decode whole inputs on.
+    threads: usize,
 }
 
 // SAFETY: the vtable is in the image, static; the interpreter's own state is thread-safe, and so
@@ -91,7 +93,7 @@ impl Runner for Sfx {
         if let Some(hash) = native::stand_in_hash(wasm) {
             let n = self.natives.iter().find(|n| n.hash == hash);
             let n = n.ok_or_else(|| Failure::Resource("a native module blob not merged".into()))?;
-            return Ok(Box::new(NativeLoaded { apply: n.apply, apply_part: n.apply_part }));
+            return Ok(Box::new(NativeLoaded { native: n.fns, threads: self.threads }));
         }
         let vtable = self.interp.ok_or_else(|| {
             Failure::Resource("a module with no native blob merged, and no interpreter blob either".into())
@@ -290,7 +292,11 @@ impl Sfx {
         unsafe extern "system" {
             fn RtlAddFunctionTable(table: *const u8, count: u32, base: u64) -> i32;
         }
-        let mut sfx = Sfx { interp: None, natives: Vec::new() };
+        let mut sfx = Sfx {
+            interp: None,
+            natives: Vec::new(),
+            threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
+        };
         let base = &raw const __ImageBase as usize;
         let u32_at = |b: &[u8], o: usize| b.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
         let (rva, len) = unsafe {
@@ -334,7 +340,15 @@ impl Sfx {
                 // (a blob of another version of the interface left out: its info is not this)
                 let info = unsafe { info() };
                 if info.version == aqr_api::dll::VERSION {
-                    sfx.natives.push(Native { hash, slots, apply, apply_part: info.apply_part });
+                    let fns = Fns {
+                        apply,
+                        apply_part: info.apply_part,
+                        run: info.run,
+                        resources: info.resources != 0,
+                        decode: info.decode,
+                        streamed: info.streamed,
+                    };
+                    sfx.natives.push(Native { hash, slots, fns });
                 }
             }
         }
@@ -346,7 +360,7 @@ impl Sfx {
 impl Sfx {
     /// None: the merged blobs are Windows x86-64 only.
     pub fn find() -> Sfx {
-        Sfx { interp: None, natives: Vec::new() }
+        Sfx { interp: None, natives: Vec::new(), threads: std::thread::available_parallelism().map_or(1, |n| n.get()) }
     }
 }
 

@@ -22,8 +22,9 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::emu::{self, Drain, Entry, Feed, Kind};
 
-/// The version of the interface, which [`Info::version`] tells: 2 has `aqr_dll_apply_part`.
-pub const VERSION: u32 = 2;
+/// The version of the interface, which [`Info::version`] tells: 2 has `aqr_dll_apply_part`, 3
+/// how the module runs natively (`Info::run`, `aqr_dll_decode`).
+pub const VERSION: u32 = 3;
 
 /// Bytes given to a callback ([`PartIn::pull`]'s `put`).
 pub type BytesFn = unsafe extern "C" fn(ctx: *mut c_void, ptr: *const u8, len: usize);
@@ -124,6 +125,99 @@ pub struct Info {
     /// Its `aqr_dll_apply_part`, for a part module (an address within the library as it is
     /// loaded, or merged: what a merged library is reached by, with no table of exports).
     pub apply_part: Option<ApplyPartFn>,
+    /// How it runs natively (aqr-native's `Run`): [`RUN_WHOLE`], [`RUN_PART`], [`RUN_THREADED`]
+    /// or [`RUN_STREAMED`].
+    pub run: u32,
+    /// 1 where natively it takes resources (those that do not are given none).
+    pub resources: u32,
+    /// Its native decoding of whole inputs (`aqr_dll_decode`), where it has one: what a host
+    /// applies it whole by (on threads), rather than by the emulation of its entry point.
+    pub decode: Option<DecodeFn>,
+    /// For [`RUN_STREAMED`]: whether an application of inputs and an output of these lengths is
+    /// to be streamed rather than applied whole.
+    pub streamed: Option<StreamedFn>,
+}
+
+/// [`Info::run`]: applied whole, by its native decoding.
+pub const RUN_WHOLE: u32 = 0;
+/// [`Info::run`]: a part module, streamed, or applied whole by its native decoding where it has
+/// one (else by the emulation), as its host judges.
+pub const RUN_PART: u32 = 1;
+/// [`Info::run`]: a part module in Wasm applied whole natively, by its native decoding on threads.
+pub const RUN_THREADED: u32 = 2;
+/// [`Info::run`]: as [`RUN_THREADED`], but streamed where [`Info::streamed`] says so.
+pub const RUN_STREAMED: u32 = 3;
+
+/// A module's native decoding of whole inputs (aqr-native's `Decode`): the parameters, the
+/// resources, the inputs, the output's length and the threads it may use; the output.
+pub type NativeDecode = fn(&[u8], &[&[u8]], &[&[u8]], u64, usize) -> Result<Vec<u8>, String>;
+
+/// `aqr_dll_decode`: the parameters, the resources, the inputs, the output (of the length
+/// declared, written), the threads it may use, and where the message of a failure goes; 0 if it
+/// succeeded.
+pub type DecodeFn = unsafe extern "C" fn(
+    params: Slice,
+    resources: *const Slice,
+    n_resources: usize,
+    inputs: *const Slice,
+    n_inputs: usize,
+    output: SliceMut,
+    threads: usize,
+    error: SliceMut,
+    error_len: *mut usize,
+) -> u32;
+
+/// `aqr_dll_streamed`: 1 where an application of inputs of `lens` and an output of `len` bytes
+/// is to be streamed.
+pub type StreamedFn = unsafe extern "C" fn(lens: *const u64, n_lens: usize, len: u64) -> u32;
+
+/// The body of `aqr_dll_decode` ([`DecodeFn`]) of native decoding `decode`.
+///
+/// # Safety
+/// As [`DecodeFn`] is called.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn decode(
+    decode: NativeDecode,
+    params: Slice,
+    resources: *const Slice,
+    n_resources: usize,
+    inputs: *const Slice,
+    n_inputs: usize,
+    output: SliceMut,
+    threads: usize,
+    error: SliceMut,
+    error_len: *mut usize,
+) -> u32 {
+    let list = |p: *const Slice, n: usize| match n {
+        0 => Vec::new(),
+        n => unsafe { std::slice::from_raw_parts(p, n) }.iter().map(|s| unsafe { s.get() }).collect::<Vec<_>>(),
+    };
+    let (params, resources, inputs) = (unsafe { params.get() }, list(resources, n_resources), list(inputs, n_inputs));
+    let out = unsafe { output.get() };
+    let len = out.len() as u64;
+    let r = catch_unwind(AssertUnwindSafe(|| decode(params, &resources, &inputs, len, threads.max(1))));
+    let msg = match r {
+        Ok(Ok(got)) if got.len() == out.len() => {
+            out.copy_from_slice(&got);
+            return 0;
+        }
+        Ok(Ok(got)) => format!("an output of {} bytes, not {len}", got.len()),
+        Ok(Err(e)) => e,
+        Err(_) => "panicked".to_owned(),
+    };
+    unsafe { fail(&msg, error, error_len) }
+}
+
+/// The body of `aqr_dll_streamed` ([`StreamedFn`]) of `streamed`.
+///
+/// # Safety
+/// As [`StreamedFn`] is called.
+pub unsafe fn streamed(streamed: fn(&[u64], u64) -> bool, lens: *const u64, n_lens: usize, len: u64) -> u32 {
+    let lens = match n_lens {
+        0 => &[][..],
+        n => unsafe { std::slice::from_raw_parts(lens, n) },
+    };
+    catch_unwind(|| streamed(lens, len)).unwrap_or(false) as u32
 }
 
 /// `aqr_dll_info`.
@@ -153,6 +247,11 @@ pub fn info(name: &'static str, entry: &Entry, apply_part: ApplyPartFn) -> Info 
         arity: entry.arity as u32,
         name: Slice::of(name.as_bytes()),
         apply_part: part.then_some(apply_part),
+        // (how it runs natively: the library's to say, by aqr-native)
+        run: if part { RUN_PART } else { RUN_WHOLE },
+        resources: 1,
+        decode: None,
+        streamed: None,
     }
 }
 

@@ -7,7 +7,7 @@
 //! [`Runner::registered`]: aqr_formula::aqr::Runner::registered
 //! [`Runner::load`]: aqr_formula::aqr::Runner::load
 
-use aqr_api::dll::{ApplyFn, ApplyPartFn, Slice, SliceMut};
+use aqr_api::dll::{ApplyFn, ApplyPartFn, DecodeFn, Slice, SliceMut, StreamedFn};
 use aqr_formula::Resource;
 use aqr_formula::aqr::{Decoded, Failure, Loaded, PartIn, PartOut};
 
@@ -99,22 +99,96 @@ pub(crate) fn stand_in_hash(wasm: &[u8]) -> Option<[u8; 32]> {
     None
 }
 
-/// A native module blob merged.
+/// A native module blob merged: its module's hash and task slots, and its functions.
 pub(crate) struct Native {
     pub hash: [u8; 32],
     pub slots: Vec<u8>,
-    pub apply: ApplyFn,
-    /// Its `aqr_dll_apply_part`, for a part module ([`aqr_api::dll::Info::apply_part`]).
-    pub apply_part: Option<ApplyPartFn>,
+    pub fns: Fns,
 }
 
-/// A module of a native blob: a part module streamed, its inputs pulled and its outputs pushed
-/// as the module requests and commits them (so a big stream is never held whole), a whole one
-/// applied on the buffers; the limits of its memory not enforced (it is the module's own code,
+/// What a native module blob's `aqr_dll_info` tells of it ([`aqr_api::dll::Info`]).
+#[derive(Clone, Copy)]
+pub(crate) struct Fns {
+    pub apply: ApplyFn,
+    /// Its `aqr_dll_apply_part`, for a part module.
+    pub apply_part: Option<ApplyPartFn>,
+    /// How it runs natively (`Info::run`), whether it takes resources natively, its native
+    /// decoding of whole inputs and, for `RUN_STREAMED`, when an application is streamed.
+    pub run: u32,
+    pub resources: bool,
+    pub decode: Option<DecodeFn>,
+    pub streamed: Option<StreamedFn>,
+}
+
+/// The most bytes of inputs and outputs of a part module's application gathered to be applied
+/// whole by its native decoding (on threads) rather than streamed: the stub has no plans of the
+/// modules' memory to judge by, as aqr-decompress has.
+const GATHERED: u64 = 256 << 20;
+
+/// A module of a native blob, run as aqr-decompress runs it natively: by its native decoding of
+/// whole inputs (on `threads`) where it has one; a part module streamed where its inputs and
+/// outputs are long (more than [`GATHERED`], or as `Info::streamed` says), its inputs pulled and
+/// its outputs pushed as the module requests and commits them; by the emulation of its entry
+/// point otherwise. The limits of its memory are not enforced (it is the module's own code,
 /// run natively).
 pub(crate) struct NativeLoaded {
-    pub apply: ApplyFn,
-    pub apply_part: Option<ApplyPartFn>,
+    pub native: Fns,
+    pub threads: usize,
+}
+
+impl NativeLoaded {
+    /// Its native decoding of `inputs` into one output of `size` bytes.
+    fn decode(
+        &self,
+        decode: DecodeFn,
+        params: &[u8],
+        resources: &[Resource],
+        inputs: &[&[u8]],
+        size: u64,
+    ) -> Decoded<Vec<u8>> {
+        // (a module that takes no resources natively is given none)
+        let res: Vec<Slice> = match self.native.resources {
+            true => resources.iter().map(|r| Slice::of(r)).collect(),
+            false => Vec::new(),
+        };
+        let ins: Vec<Slice> = inputs.iter().map(|i| Slice::of(i)).collect();
+        let size = usize::try_from(size).map_err(|_| Failure::Resource("an output too long".into()))?;
+        let mut out = vec![0u8; size];
+        let mut error = [0u8; 1024];
+        let mut len = 0;
+        // SAFETY: each pointer is to as many items as its count, the output apart
+        let r = unsafe {
+            decode(
+                Slice::of(params),
+                res.as_ptr(),
+                res.len(),
+                ins.as_ptr(),
+                ins.len(),
+                SliceMut::of(&mut out),
+                self.threads,
+                SliceMut::of(&mut error),
+                &mut len,
+            )
+        };
+        match r {
+            0 => Ok(out),
+            _ => Err(crate::message(&error, len)),
+        }
+    }
+
+    /// Whether an application of `inputs` and outputs of `sizes` is streamed rather than its
+    /// inputs gathered and natively decoded.
+    fn streams(&self, inputs: &[&mut dyn PartIn], sizes: &[u64]) -> bool {
+        let lens: Vec<u64> = inputs.iter().map(|i| i.len()).collect();
+        if self.native.decode.is_none() || sizes.len() != 1 {
+            return true;
+        }
+        match (self.native.run, self.native.streamed) {
+            // SAFETY: the lengths, as many as given
+            (aqr_api::dll::RUN_STREAMED, Some(f)) => unsafe { f(lens.as_ptr(), lens.len(), sizes[0]) != 0 },
+            _ => lens.iter().chain(sizes).fold(0u64, |a, &n| a.saturating_add(n)) > GATHERED,
+        }
+    }
 }
 
 impl Loaded for NativeLoaded {
@@ -127,6 +201,9 @@ impl Loaded for NativeLoaded {
         _memory_limit: u64,
         _task_limits: &[u64],
     ) -> Decoded<Vec<Vec<u8>>> {
+        if let (Some(decode), [size]) = (self.native.decode, sizes) {
+            return Ok(vec![self.decode(decode, params, resources, inputs, *size)?]);
+        }
         let res: Vec<Slice> = resources.iter().map(|r| Slice::of(r)).collect();
         let ins: Vec<Slice> = inputs.iter().map(|i| Slice::of(i)).collect();
         let mut outs: Vec<Vec<u8>> = sizes.iter().map(|&s| vec![0u8; s as usize]).collect();
@@ -135,7 +212,7 @@ impl Loaded for NativeLoaded {
         let mut len = 0;
         // SAFETY: each pointer is to as many items as its count, the outputs apart
         let r = unsafe {
-            (self.apply)(
+            (self.native.apply)(
                 Slice::of(params),
                 res.as_ptr(),
                 res.len(),
@@ -154,7 +231,9 @@ impl Loaded for NativeLoaded {
     }
 
     fn is_part(&self) -> bool {
-        self.apply_part.is_some()
+        // (a threaded one, and a whole one, are applied whole, as aqr-decompress has them)
+        self.native.apply_part.is_some()
+            && matches!(self.native.run, aqr_api::dll::RUN_PART | aqr_api::dll::RUN_STREAMED)
     }
 
     fn apply_part(
@@ -167,10 +246,24 @@ impl Loaded for NativeLoaded {
         _memory_limit: u64,
         _task_limits: &[u64],
     ) -> Decoded<()> {
-        let apply_part = self.apply_part.ok_or_else(|| Failure::Invalid("not a part module".into()))?;
         if sizes.len() != outputs.len() {
             return Err(Failure::Invalid("outputs of other sizes than declared".into()));
         }
+        if !self.streams(inputs, sizes) {
+            // the inputs gathered, decoded natively, the output pushed
+            let mut gathered = Vec::with_capacity(inputs.len());
+            for i in inputs.iter_mut() {
+                let len = i.len();
+                let mut d = Vec::with_capacity(len as usize);
+                i.pull(len, &mut |b: &[u8]| d.extend_from_slice(b))?;
+                gathered.push(d);
+            }
+            let ins: Vec<&[u8]> = gathered.iter().map(Vec::as_slice).collect();
+            let decode = self.native.decode.expect("streamed without one");
+            let out = self.decode(decode, params, resources, &ins, sizes[0])?;
+            return outputs[0].push(&out);
+        }
+        let apply_part = self.native.apply_part.ok_or_else(|| Failure::Invalid("not a part module".into()))?;
         let res: Vec<Slice> = resources.iter().map(|r| Slice::of(r)).collect();
         let (in_c, out_c) = crate::part_c(inputs, outputs);
         let mut error = [0u8; 1024];

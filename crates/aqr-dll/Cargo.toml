@@ -41,6 +41,7 @@ aqr-dll-xxhash-rust = { path = "shared/xxhash-rust" }
 # (end: layout.py)
 aqr-api = { path = "../aqr-api", default-features = false, features = ["alloc"] }
 aqr-modules = { path = "../aqr-modules" }
+aqr-native = { path = "../aqr-native" }
 aqr-asar = { path = "../../codecs/aqr-asar", default-features = false }
 aqr-bundle = { path = "../../codecs/aqr-bundle", default-features = false }
 aqr-bvx = { path = "../../codecs/aqr-bvx", default-features = false }

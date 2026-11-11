@@ -490,6 +490,7 @@ dependencies = [
  "aqr-modules",
  "aqr-mp3",
  "aqr-mszip",
+ "aqr-native",
  "aqr-obj",
  "aqr-ogg",
  "aqr-pdb",

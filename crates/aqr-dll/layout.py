@@ -16,7 +16,8 @@ the crates each names):
   group is then taken from it, whether or not the module was seen to use it);
 - the dependencies of aqr-dll on them, in Cargo.toml between its markers.
 
-aqr-modules is in none (its runtime part, the module blocks, is not for the libraries).
+aqr-modules is in none (its runtime part, the module blocks, is not for the libraries), nor
+aqr-native (its table names every module's code; each module takes its one entry).
 """
 
 import collections
@@ -32,7 +33,7 @@ ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 BINS = os.path.join(ROOT, 'crates', 'aqr-modules', 'src', 'bin')
 SHARED = os.path.join(HERE, 'shared')
 BEGIN, END = '# (begin: layout.py)', '# (end: layout.py)'
-LEFT_OUT = {'aqr-modules', 'aqr-dll'}
+LEFT_OUT = {'aqr-modules', 'aqr-dll', 'aqr-native'}
 
 
 def tree():
