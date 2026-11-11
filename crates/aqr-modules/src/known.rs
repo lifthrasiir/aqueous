@@ -136,6 +136,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/dex-recons.block"),
     },
     Known {
+        name: "div3-recons",
+        version: 1,
+        sha512_256: hex("5dab104cbb1dfe0ccb5ee1bd83bfc94d6e313264a3b5e42ca62cad67aead1bde"),
+        block: include_bytes!("../wasm/div3-recons.block"),
+    },
+    Known {
         name: "dwarf-apple",
         version: 1,
         sha512_256: hex("4ec450c2be5c856d2ae02cbdd7cb84f7936dbdb1cbfd9871d05198aad82d0921"),

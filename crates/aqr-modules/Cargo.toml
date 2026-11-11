@@ -47,6 +47,7 @@ aqr-lzx = { path = "../../codecs/aqr-lzx", default-features = false }
 aqr-xpress = { path = "../../codecs/aqr-xpress", default-features = false }
 aqr-lznt1 = { path = "../../codecs/aqr-lznt1", default-features = false }
 aqr-mp3 = { path = "../../codecs/aqr-mp3", default-features = false }
+aqr-div3 = { path = "../../codecs/aqr-div3", default-features = false }
 aqr-mszip = { path = "../../codecs/aqr-mszip", default-features = false }
 aqr-obj = { path = "../../codecs/aqr-obj", default-features = false }
 aqr-pdf = { path = "../../codecs/aqr-pdf", default-features = false }
@@ -500,4 +501,9 @@ required-features = ["wasm"]
 [[bin]]
 name = "pdb-types"
 path = "src/bin/pdb-types.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "div3-recons"
+path = "src/bin/div3-recons.rs"
 required-features = ["wasm"]

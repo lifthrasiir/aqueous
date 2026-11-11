@@ -297,6 +297,7 @@ dependencies = [
  "aqr-clip",
  "aqr-common",
  "aqr-dex",
+ "aqr-div3",
  "aqr-dwarf",
  "aqr-exe",
  "aqr-fasta",
@@ -392,6 +393,15 @@ dependencies = [
  "aqr-xpress",
  "flate2",
  "zstd",
+]
+
+[[package]]
+name = "aqr-div3"
+version = "0.1.0"
+dependencies = [
+ "aqr-api",
+ "aqr-common",
+ "aqr-formula",
 ]
 
 [[package]]
@@ -752,6 +762,7 @@ dependencies = [
  "aqr-bz2",
  "aqr-clip",
  "aqr-dex",
+ "aqr-div3",
  "aqr-dwarf",
  "aqr-exe",
  "aqr-fasta",
