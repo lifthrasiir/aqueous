@@ -2,6 +2,7 @@
 import sys, os, json; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ac_probe import *
 HERE = os.path.dirname(os.path.abspath(__file__))
+KCUT = 2.0
 ESC = {'rl0': '0010110', 'rl1': '001001010', 'rl2': '0000011', 'c0': '000001101', 'c1': '101101001', 'c2': '00000110'}
 def build(name):
     d = json.load(open(os.path.join(HERE, 'ac_raw_%s.json' % name)))
@@ -24,7 +25,7 @@ def build(name):
         key = (tuple(v['pos']), v['level'], v['last'])
         if key in seen: continue
         seen[key] = p; clean[p] = v; k += 2.0 ** -len(p)
-        if k >= 0.9985: break
+        if k >= KCUT: break
     json.dump(clean, open(os.path.join(HERE, 'ac_labeled_%s.json' % name), 'w'))
     print(name, len(out), '->', len(clean), 'kraft', round(k, 5), 'maxlen', max(len(p) for p in clean))
 if __name__ == '__main__':

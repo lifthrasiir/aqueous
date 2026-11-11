@@ -71,7 +71,7 @@ def read_dc(b, name):
 def s_all(b, l): return b.peek_str(l)
 
 TRACE = None
-ESC2_ADD = 1
+ESC2_ADD = 0
 class Esc3:
     ll = 0
 def read_block_ac(b, tab, q, st):
@@ -91,15 +91,9 @@ def read_block_ac(b, tab, q, st):
             else:
                 et = 3
                 last = b.get(1); run = b.get(6)
-                if st.ll == 0:
-                    if q < 8:
-                        ll = b.get(3)
-                        if ll == 0: ll = 8 + b.get(1)
-                    else:
-                        ll = 2
-                        while ll < 8 and not b.get(1): ll += 1
-                    st.ll = ll
-                sign = b.get(1); lvl = b.get(st.ll)
+                lvl = b.get(8)
+                if lvl >= 128: lvl -= 256
+                sign = 1 if lvl < 0 else 0; lvl = abs(lvl)
         else:
             run, lvl, last = vlc(b, tab.codes, tab.maxlen); sign = b.get(1)
         if TRACE is not None: TRACE.append((run, lvl, last, sign, et))

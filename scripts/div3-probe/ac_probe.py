@@ -11,10 +11,11 @@ def single(D, minamp=6):
     D = np.array(D, float).reshape(8, 8); F = fdct(D); i = np.unravel_index(np.abs(F).argmax(), F.shape); a = F[i]
     if abs(a) < minamp: return None
     fit = a * np.outer(_C[i[0]], _C[i[1]])
-    if np.abs(D - fit).max() > 1.05: return None
+    if np.abs(D - fit).max() > RESID: return None
     return (int(i[0]), int(i[1])), float(a)
 
 THRESH = 0.85
+RESID = 2.0
 LASTRATE = [0.0]
 TERMS = ['01110', '0011110', '0011100', '00100000']   # rl=2 last=1 codes + sign 0
 def flip_leaf(mk, blk, p, K=40, rng=None):
@@ -90,7 +91,7 @@ if __name__ == '__main__':
     rl = int(sys.argv[1]); q = 5
     import json as _j
     _old = _j.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ac_labeled_rl%d.json' % rl)))
-    TERMS[:] = [c + '0' for _, c in sorted((len(c), c) for c, v in _old.items() if v['last'] == 1)[:4]]
+    TERMS[:] = [c + '0' for _, c in sorted((v['level'], c) for c, v in _old.items() if v['last'] == 1 and v['pos'] == [0, 1])[:4]]
     # block 3 only coded (cbp code 00110, found by the CBP probe), dc table 0 (zero code '1')
     mk = lambda bits: tob(hdr_i(q=q, rl=rl) + '00110' + '0' + '1' * 4 + bits + '1' * 60)
     leaves, unres = walk_ac(mk, 3)
