@@ -217,6 +217,14 @@ formats! {
         exts: &["webm", "mkv", "mka", "mk3d", "mks"],
         regions: Some(aqr_mkv::formula::regions),
     }
+    /// AVI file with DivX 3 video (aqr-div3: the frames under a context model, module `div3-recons`), known by its
+    /// header list: not looked for in other data.
+    Div3 = "div3" {
+        recompressor: Pure(aqr_div3::formula::encode),
+        // the file, its skeleton and the model's output
+        heap: 2.5,
+        exts: &["avi"],
+    }
     /// QuickTime or MXF file of ProRes frames (aqr-prores, the frames' coefficients under a
     /// model), known by its container's start and a frame near it: not looked for in other data.
     ProRes = "prores" {

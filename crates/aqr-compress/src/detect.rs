@@ -186,6 +186,7 @@ static ROWS: &[Row] = {
         // (four bytes are too weak a signature to look for in other data)
         start(Ppmd, aqr_ppmd::starts),
         start(Mkv, aqr_mkv::starts),
+        start(Div3, aqr_div3::formula::starts),
         start(ProRes, aqr_prores::formula::starts),
         // (a header starts with its size and checksum: too weak to look for in other data)
         start(Lha, aqr_lha::formula::starts),

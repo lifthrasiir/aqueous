@@ -227,6 +227,7 @@ dependencies = [
  "aqr-decompress",
  "aqr-dex",
  "aqr-disk",
+ "aqr-div3",
  "aqr-dwarf",
  "aqr-egg",
  "aqr-exe",

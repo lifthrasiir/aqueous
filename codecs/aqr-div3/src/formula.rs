@@ -37,8 +37,20 @@ fn u32le(d: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(d.get(at..at + 4)?.try_into().ok()?))
 }
 
+/// Whether `d` starts as an AVI file with a DivX 3 video stream (its header list only is looked at).
+pub fn starts(d: &[u8]) -> bool {
+    video_stream(&d[..d.len().min(1 << 16)]).is_some()
+}
+
 /// The DivX 3 video of AVI file `d`, if it has one.
 pub fn video(d: &[u8]) -> Option<Video> {
+    let (stream, width, height) = video_stream(d)?;
+    let tag = [b'0' + (stream / 10) as u8, b'0' + (stream % 10) as u8, b'd', b'c'];
+    movi_frames(d, tag, width, height)
+}
+
+/// The index of the first DivX 3 video stream of an AVI file's header list, and its width and height.
+fn video_stream(d: &[u8]) -> Option<(usize, u16, u16)> {
     if d.len() < 12 || &d[..4] != b"RIFF" || &d[8..12] != b"AVI " {
         return None;
     }
@@ -80,8 +92,10 @@ pub fn video(d: &[u8]) -> Option<Video> {
         }
         pos += 8 + sz + (sz & 1);
     }
-    let stream = stream?;
-    let tag = [b'0' + (stream / 10) as u8, b'0' + (stream % 10) as u8, b'd', b'c'];
+    Some((stream?, width, height))
+}
+
+fn movi_frames(d: &[u8], tag: [u8; 4], width: u16, height: u16) -> Option<Video> {
     let mut pos = d.windows(4).position(|w| w == b"movi")? + 4;
     let mut frames = Vec::new();
     while pos + 8 <= d.len() {
