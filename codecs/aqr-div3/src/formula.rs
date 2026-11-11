@@ -1,6 +1,7 @@
 //! aqr-div3 as a module of entry formulas (see aqr-formula): an AVI file whose video is DivX 3, rebuilt from its
-//! frames coded by the model, the rest of its bytes (the skeleton) and the frames' places (the layout).
-//! `FORMAT.md` specifies them.
+//! frames coded by the model, the rest of its bytes (the skeleton), the audio's bytes (as they are, or from aqr-ac3's
+//! module for AC-3) and the places of the frames and audio chunks (the layout). `FORMAT.md` specifies them.
+use std::ops::Range;
 use std::vec;
 use std::vec::Vec;
 
@@ -16,50 +17,48 @@ pub use crate::module::decode;
 pub const CODED: &str = "div3/frames";
 pub const SKELETON: &str = "div3/skeleton";
 pub const LAYOUT: &str = "div3/layout";
+pub const AUDIO: &str = "div3/audio";
 
-/// The module `div3-recons`: params the width and height as two 16-bit numbers; inputs the coded frames, the skeleton
-/// and the layout.
-pub const MODULE: Module = Module::new("div3-recons", 1).with_plan(memory);
+/// The module `div3-recons`: params the width and height as two 16-bit numbers; inputs the coded frames, the skeleton,
+/// the layout and the audio.
+pub const MODULE: Module = Module::new("div3-recons", 2).with_plan(memory);
 
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let &[_, _, _] = u.inputs else { return None };
+    let &[_, _, _, _] = u.inputs else { return None };
     Some(crate::module::plan(u.initial()))
 }
 
-/// The video of an AVI file: its size, and where its frames are.
+/// The video of an AVI file: its size, where its frames are, and where its audio chunks are.
 pub struct Video {
     pub width: u16,
     pub height: u16,
-    pub frames: Vec<core::ops::Range<usize>>,
+    pub frames: Vec<Range<usize>>,
+    pub audio: Vec<Range<usize>>,
+    /// Whether the audio stream is AC-3 (format tag 0x2000).
+    pub ac3: bool,
 }
 
 fn u32le(d: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(d.get(at..at + 4)?.try_into().ok()?))
 }
 
-/// Whether `d` starts as an AVI file with a DivX 3 video stream (its header list only is looked at).
-pub fn starts(d: &[u8]) -> bool {
-    video_stream(&d[..d.len().min(1 << 16)]).is_some()
+/// The streams of an AVI file's header list: the index of the first DivX 3 video stream with its width and height, and
+/// the index of the first audio stream with whether it is AC-3.
+struct Streams {
+    video: Option<(usize, u16, u16)>,
+    audio: Option<(usize, bool)>,
 }
 
-/// The DivX 3 video of AVI file `d`, if it has one.
-pub fn video(d: &[u8]) -> Option<Video> {
-    let (stream, width, height) = video_stream(d)?;
-    let tag = [b'0' + (stream / 10) as u8, b'0' + (stream % 10) as u8, b'd', b'c'];
-    movi_frames(d, tag, width, height)
-}
-
-/// The index of the first DivX 3 video stream of an AVI file's header list, and its width and height.
-fn video_stream(d: &[u8]) -> Option<(usize, u16, u16)> {
+fn streams(d: &[u8]) -> Option<Streams> {
     if d.len() < 12 || &d[..4] != b"RIFF" || &d[8..12] != b"AVI " {
         return None;
     }
-    // the streams in the header list, in order: the first video stream of DivX 3 or its aliases
-    let mut stream = None;
-    let (mut index, mut width, mut height) = (0usize, 0u16, 0u16);
+    let mut out = Streams { video: None, audio: None };
+    let mut index = 0usize;
     let mut pos = d.windows(4).position(|w| w == b"hdrl")? + 4;
     let end = pos + u32le(d, pos - 8)? as usize;
-    let mut cur: Option<(bool, bool)> = None; // (is video, is DivX 3)
+    // (is video, is DivX 3, is audio) of the stream being read
+    let mut cur: Option<(bool, bool, bool)> = None;
     while pos + 8 <= end.min(d.len()) {
         let (id, sz) = (&d[pos..pos + 4], u32le(d, pos + 4)? as usize);
         match id {
@@ -68,36 +67,53 @@ fn video_stream(d: &[u8]) -> Option<(usize, u16, u16)> {
                     if cur.is_some() {
                         index += 1;
                     }
-                    cur = Some((false, false));
+                    cur = Some((false, false, false));
                 }
                 pos += 12;
                 continue;
             }
             b"strh" => {
-                let video = d.get(pos + 8..pos + 12)? == b"vids";
+                let kind = d.get(pos + 8..pos + 12)?;
                 let h = d.get(pos + 12..pos + 16)?.to_ascii_lowercase();
-                cur = Some((video, video && matches!(&h[..], b"div3" | b"mp43" | b"div4" | b"div5" | b"div6")));
+                let video = kind == b"vids";
+                cur = Some((video, video && matches!(&h[..], b"div3" | b"mp43" | b"div4" | b"div5" | b"div6"), kind == b"auds"));
             }
-            b"strf" => {
-                if cur == Some((true, true)) && stream.is_none() {
+            b"strf" => match cur {
+                Some((true, true, _)) if out.video.is_none() => {
                     let w = u32le(d, pos + 12)? as i32;
                     let h = u32le(d, pos + 16)? as i32;
                     if w <= 0 || h == 0 || w > 4096 || h.abs() > 4096 {
                         return None;
                     }
-                    (stream, width, height) = (Some(index), w as u16, h.unsigned_abs() as u16);
+                    out.video = Some((index, w as u16, h.unsigned_abs() as u16));
                 }
-            }
+                Some((_, _, true)) if out.audio.is_none() => {
+                    let tag = u16::from_le_bytes(d.get(pos + 8..pos + 10)?.try_into().ok()?);
+                    out.audio = Some((index, tag == 0x2000));
+                }
+                _ => {}
+            },
             _ => {}
         }
         pos += 8 + sz + (sz & 1);
     }
-    Some((stream?, width, height))
+    Some(out)
 }
 
-fn movi_frames(d: &[u8], tag: [u8; 4], width: u16, height: u16) -> Option<Video> {
+/// Whether `d` starts as an AVI file with a DivX 3 video stream (its header list only is looked at).
+pub fn starts(d: &[u8]) -> bool {
+    streams(&d[..d.len().min(1 << 16)]).is_some_and(|s| s.video.is_some())
+}
+
+/// The DivX 3 video of AVI file `d`, if it has one.
+pub fn video(d: &[u8]) -> Option<Video> {
+    let s = streams(d)?;
+    let (vi, width, height) = s.video?;
+    let tag = |i: usize, kind: &[u8; 2]| [b'0' + (i / 10) as u8, b'0' + (i % 10) as u8, kind[0], kind[1]];
+    let vtag = tag(vi, b"dc");
+    let atag = s.audio.map(|(i, _)| tag(i, b"wb"));
     let mut pos = d.windows(4).position(|w| w == b"movi")? + 4;
-    let mut frames = Vec::new();
+    let (mut frames, mut audio) = (Vec::new(), Vec::new());
     while pos + 8 <= d.len() {
         let (id, sz) = (&d[pos..pos + 4], u32le(d, pos + 4)? as usize);
         if id == b"LIST" {
@@ -108,12 +124,14 @@ fn movi_frames(d: &[u8], tag: [u8; 4], width: u16, height: u16) -> Option<Video>
         if !known || pos + 8 + sz > d.len() {
             break;
         }
-        if id == tag {
+        if id == vtag {
             frames.push(pos + 8..pos + 8 + sz);
+        } else if Some(id) == atag.as_ref().map(|t| &t[..]) {
+            audio.push(pos + 8..pos + 8 + sz);
         }
         pos += 8 + sz + (sz & 1);
     }
-    Some(Video { width, height, frames })
+    Some(Video { width, height, frames, audio, ac3: s.audio.is_some_and(|(_, a)| a) })
 }
 
 /// The formula of AVI file `input` with DivX 3 video, or None where it has none, or its frames do not come to less
@@ -132,17 +150,25 @@ fn encode_with(input: &[u8], worst: f64) -> Option<Formula> {
     if v.frames.len() < 4 || v.frames.iter().any(|f| f.len() > FRAME_MAX) {
         return None;
     }
+    // the chunks in the order of the file: the video's frames (tag bit 0) and the audio's (tag bit 1)
+    let mut items: Vec<(Range<usize>, u64)> =
+        v.frames.iter().map(|r| (r.clone(), 0)).chain(v.audio.iter().map(|r| (r.clone(), 1))).collect();
+    items.sort_by_key(|(r, _)| r.start);
     let mut codec = Codec::new(v.width as usize, v.height as usize);
     let mut enc = Encoder::new();
-    let (mut skeleton, mut layout) = (Vec::with_capacity(input.len() / 2), Vec::new());
+    let (mut skeleton, mut layout, mut audio) = (Vec::with_capacity(input.len() / 8), Vec::new(), Vec::new());
     let (mut p, mut frames_len) = (0, 0usize);
-    for f in &v.frames {
-        varint::put(&mut layout, (f.start - p) as u64);
-        varint::put(&mut layout, f.len() as u64);
-        skeleton.extend_from_slice(&input[p..f.start]);
-        codec.encode(&mut enc, &input[f.clone()]);
-        frames_len += f.len();
-        p = f.end;
+    for (r, kind) in &items {
+        varint::put(&mut layout, (r.start - p) as u64);
+        varint::put(&mut layout, (r.len() as u64) << 1 | kind);
+        skeleton.extend_from_slice(&input[p..r.start]);
+        if *kind == 0 {
+            codec.encode(&mut enc, &input[r.clone()]);
+            frames_len += r.len();
+        } else {
+            audio.extend_from_slice(&input[r.clone()]);
+        }
+        p = r.end;
     }
     skeleton.extend_from_slice(&input[p..]);
     let coded = enc.finish();
@@ -150,10 +176,19 @@ fn encode_with(input: &[u8], worst: f64) -> Option<Formula> {
         return None;
     }
     let mut f = Formula::default();
-    let inputs = vec![f.push(CODED, coded), f.push(SKELETON, skeleton), f.push(LAYOUT, layout)];
+    let (c, s, l) = (f.push(CODED, coded), f.push(SKELETON, skeleton), f.push(LAYOUT, layout));
+    // the audio: from the AC-3 module where the AC-3 stream comes to under 97% by it, else as it is
+    let audio_node = match v.ac3.then(|| aqr_ac3::formula::encode(&audio)).flatten() {
+        Some(coded) => {
+            let n = audio.len() as u64;
+            let input = f.push(aqr_ac3::formula::CODED, coded);
+            Node::apply(aqr_ac3::formula::MODULE, vec![], vec![input], n)
+        }
+        None => f.push(AUDIO, audio),
+    };
     let mut params = Vec::new();
     params.extend_from_slice(&v.width.to_le_bytes());
     params.extend_from_slice(&v.height.to_le_bytes());
-    f.root = Node::apply(MODULE, params, inputs, input.len() as u64);
+    f.root = Node::apply(MODULE, params, vec![c, s, l, audio_node], input.len() as u64);
     Some(f)
 }

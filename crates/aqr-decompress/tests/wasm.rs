@@ -3110,6 +3110,36 @@ fn div3_plan_holds() {
     }
 }
 
+/// ac3-recons lays its memory out as a stack, its limit its plan (constant: the model, a record's buffer, the input's
+/// buffer, a block's state): AC-3 syncframes made from noise by the encoder's own rules are not available, so the stream
+/// is frames of a real file where AQR_DIV3_AVI names one, and bytes between frames otherwise: rebuilt as WebAssembly
+/// within the limit of its plan alone, the working memory that of the plan to the page.
+#[test]
+fn ac3_plan_holds() {
+    let mut f = Formula::default();
+    // (a run of other bytes only: the stream of no frame at all, a run longer than a piece)
+    let data: Vec<u8> = (0..10_000u32).map(|i| (i * 31 >> 2) as u8).collect();
+    let coded = aqr_ac3::formula::encode(&data);
+    assert!(coded.is_none(), "bytes that are no AC-3 do not come to less");
+    let mut enc = aqr_walk::rc::Encoder::new();
+    aqr_ac3::stream::encode(&mut enc, &data);
+    let coded = enc.finish();
+    let input = f.push(aqr_ac3::formula::CODED, coded);
+    f.root = Node::apply(aqr_ac3::formula::MODULE, vec![], vec![input], data.len() as u64);
+    plan_holds("ac3 runs", f, &data);
+    if let Ok(path) = std::env::var("AQR_DIV3_AVI") {
+        let src = std::fs::read(path).unwrap();
+        let v = aqr_div3::formula::video(&src).unwrap();
+        let audio: Vec<u8> = v.audio.iter().take(120).flat_map(|r| src[r.clone()].iter().copied()).collect();
+        let mut f = Formula::default();
+        let mut enc = aqr_walk::rc::Encoder::new();
+        aqr_ac3::stream::encode(&mut enc, &audio);
+        let input = f.push(aqr_ac3::formula::CODED, enc.finish());
+        f.root = Node::apply(aqr_ac3::formula::MODULE, vec![], vec![input], audio.len() as u64);
+        plan_holds("ac3 frames", f, &audio);
+    }
+}
+
 /// wasm-recons, gnu-gettext-recons and ima-recons lay their memory out as stacks, their limits
 /// their plans: of modules aqr-modules built; of `.mo` files with and without a hash table; of
 /// IMA ADPCM blocks of noise (any header) of one channel and of six.

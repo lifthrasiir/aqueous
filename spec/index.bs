@@ -6118,6 +6118,11 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
   </thead>
   <tbody>
     <tr>
+      <td><code>507e41a3f672bfa57e221b89ac63596cc9b9226c858daf89bf190e7a3934d2b8</code>
+      <td>ac3-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/ac3-recons.wasm" title="crates/aqr-modules/wasm/ac3-recons.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-ac3/FORMAT.md" title="codecs/aqr-ac3/FORMAT.md">R</a>
+    <tr>
       <td><code>7e5b64d4517145d2de500a59fe797705df2e5f94ecbf38146031d895ece32caa</code>
       <td>arsc-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/arsc-recons.wasm" title="crates/aqr-modules/wasm/arsc-recons.wasm">D</a>
@@ -6228,8 +6233,8 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/dex-recons.wasm" title="crates/aqr-modules/wasm/dex-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-dex/FORMAT.md" title="codecs/aqr-dex/FORMAT.md">R</a>
     <tr>
-      <td><code>5dab104cbb1dfe0ccb5ee1bd83bfc94d6e313264a3b5e42ca62cad67aead1bde</code>
-      <td>div3-recons@1
+      <td><code>1939fc2a4481ad8fe4e6f7c16e0d0f9ec8701cceef7c82ebd5b965cc3914a91d</code>
+      <td>div3-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/div3-recons.wasm" title="crates/aqr-modules/wasm/div3-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-div3/FORMAT.md" title="codecs/aqr-div3/FORMAT.md">R</a>
     <tr>

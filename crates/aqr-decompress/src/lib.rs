@@ -229,10 +229,14 @@ pub const LZNT1: Module = aqr_lznt1::formula::MODULE;
 /// streams, the stored data, the bytes kept (the data blocks' headers) and the index.
 pub const MSZIP: Module = aqr_mszip::formula::MODULE;
 
-/// The frames of an AVI file's DivX 3 video decoded from the model's range coder, put between the bytes of
-/// the skeleton as the layout tells. A part module. Parameters: the width and height (16 bits each); inputs: the
-/// coded frames, the skeleton and the layout.
+/// An AVI file with DivX 3 video: the frames decoded from the model's range coder, put between the bytes of the
+/// skeleton, and the audio's chunks taken from the audio stream, as the layout tells. A part module. Parameters: the
+/// width and height (16 bits each); inputs: the coded frames, the skeleton, the layout and the audio stream.
 pub const DIV3: Module = aqr_div3::formula::MODULE;
+
+/// A stream of AC-3 (syncframes and what lies between them) from its coded form. A part module. No parameters; input:
+/// the coded stream.
+pub const AC3: Module = aqr_ac3::formula::MODULE;
 
 /// Snappy's compressor on data, for a Snappy stream. Parameters: the compressor's hash; inputs:
 /// the data.
@@ -679,12 +683,27 @@ const NATIVE: &[Entry] = &[
                 aqr_api::Window::Input(0, aqr_div3::module::WINDOW),
                 aqr_api::Window::Input(1, aqr_div3::module::WINDOW),
                 aqr_api::Window::Input(2, aqr_div3::module::WINDOW),
+                aqr_api::Window::Input(3, aqr_div3::module::WINDOW),
                 aqr_api::Window::Output(0, aqr_div3::module::WINDOW),
             ],
-            arity: 5,
-            call: |a| aqr_div3::module::decode_part(a[0], a[1], a[2], a[3], a[4]),
+            arity: 6,
+            call: |a| aqr_div3::module::decode_part(a[0], a[1], a[2], a[3], a[4], a[5]),
         },
         |p, _, i, n, t| aqr_div3::module::decode(p, i, n, t).map_err(err),
+    ),
+    part(
+        AC3,
+        false,
+        aqr_api::emu::Entry {
+            kind: aqr_api::emu::Kind::Part,
+            windows: &[
+                aqr_api::Window::Input(0, aqr_ac3::module::WINDOW),
+                aqr_api::Window::Output(0, aqr_ac3::module::WINDOW),
+            ],
+            arity: 3,
+            call: |a| aqr_ac3::module::decode_part(a[0], a[1], a[2]),
+        },
+        |p, _, i, n, t| aqr_ac3::module::decode(p, i, n, t).map_err(err),
     ),
     part(
         SNAPPY,

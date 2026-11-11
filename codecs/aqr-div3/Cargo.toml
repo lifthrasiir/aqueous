@@ -8,12 +8,13 @@ publish = false
 [features]
 default = ["encode"]
 # The formula (`formula`); without it, the code of the module alone (`module`).
-encode = ["dep:aqr-formula"]
+encode = ["dep:aqr-formula", "dep:aqr-ac3", "aqr-ac3/encode"]
 
 [dependencies]
 aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-walk = { path = "../../crates/aqr-walk" }
+aqr-ac3 = { path = "../aqr-ac3", default-features = false, optional = true }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 
 [[example]]

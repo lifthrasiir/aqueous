@@ -4,6 +4,12 @@ use crate::{Known, hex};
 
 pub const KNOWN: &[Known] = &[
     Known {
+        name: "ac3-recons",
+        version: 1,
+        sha512_256: hex("507e41a3f672bfa57e221b89ac63596cc9b9226c858daf89bf190e7a3934d2b8"),
+        block: include_bytes!("../wasm/ac3-recons.block"),
+    },
+    Known {
         name: "arsc-recons",
         version: 1,
         sha512_256: hex("7e5b64d4517145d2de500a59fe797705df2e5f94ecbf38146031d895ece32caa"),
@@ -137,8 +143,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "div3-recons",
-        version: 1,
-        sha512_256: hex("5dab104cbb1dfe0ccb5ee1bd83bfc94d6e313264a3b5e42ca62cad67aead1bde"),
+        version: 2,
+        sha512_256: hex("1939fc2a4481ad8fe4e6f7c16e0d0f9ec8701cceef7c82ebd5b965cc3914a91d"),
         block: include_bytes!("../wasm/div3-recons.block"),
     },
     Known {

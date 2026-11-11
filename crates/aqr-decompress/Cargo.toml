@@ -64,6 +64,8 @@ aqr-xsv = { path = "../../codecs/aqr-xsv" }
 aqr-jsonl = { path = "../../codecs/aqr-jsonl" }
 aqr-raw = { path = "../../codecs/aqr-raw" }
 aqr-infer-recs = { path = "../../codecs/aqr-infer-recs" }
+aqr-ac3 = { path = "../../codecs/aqr-ac3" }
+aqr-walk = { path = "../aqr-walk" }
 aqr-div3 = { path = "../../codecs/aqr-div3" }
 aqr-snappy = { path = "../../codecs/aqr-snappy" }
 aqr-zip = { path = "../../codecs/aqr-zip" }

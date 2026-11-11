@@ -20,7 +20,7 @@ fn list(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
     v
 }
 
-fn avi(w: u32, h: u32, frames: &[&[u8]], sound: &[u8]) -> Vec<u8> {
+fn avi(w: u32, h: u32, frames: &[&[u8]], sound: &[&[u8]]) -> Vec<u8> {
     let mut strh = b"vidsdiv3".to_vec();
     strh.extend_from_slice(&[0; 48]);
     let mut strf = Vec::new();
@@ -32,10 +32,10 @@ fn avi(w: u32, h: u32, frames: &[&[u8]], sound: &[u8]) -> Vec<u8> {
     strh2.extend_from_slice(&[0; 48]);
     let mut hdrl = chunk(b"avih", &[0; 56]);
     hdrl.extend(list(b"strl", &[chunk(b"strh", &strh), chunk(b"strf", &strf)].concat()));
-    hdrl.extend(list(b"strl", &[chunk(b"strh", &strh2), chunk(b"strf", &[0; 18])].concat()));
+    hdrl.extend(list(b"strl", &[chunk(b"strh", &strh2), chunk(b"strf", &[0x00, 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])].concat()));
     let mut movi = Vec::new();
-    for f in frames {
-        movi.extend(chunk(b"01wb", sound));
+    for (i, f) in frames.iter().enumerate() {
+        movi.extend(chunk(b"01wb", sound[i % sound.len()]));
         movi.extend(chunk(b"00dc", f));
     }
     let mut body = b"AVI ".to_vec();
@@ -54,16 +54,30 @@ fn roundtrip_real_frames() {
     let src = std::fs::read(path).unwrap();
     let v = formula::video(&src).expect("a DivX 3 AVI");
     let frames: Vec<&[u8]> = v.frames.iter().take(300).map(|r| &src[r.clone()]).collect();
-    let sound: Vec<u8> = (0..2001u32).map(|i| (i * 7) as u8).collect();
+    // the audio of the source: its chunks cut across the AC-3 frames, with the zeros before the first one
+    let sound: Vec<&[u8]> = v.audio.iter().take(300).map(|r| &src[r.clone()]).collect();
     let file = avi(v.width as u32, v.height as u32, &frames, &sound);
     let f = formula::encode(&file, 1).expect("a formula");
     let none = |a: &aqr_formula::Apply, i: &[&[u8]]| -> aqr_formula::Result<Vec<u8>> {
-        assert_eq!(a.module.name, "div3-recons");
-        formula::decode(&a.params, i, a.len, 1).map_err(|e| aqr_formula::Error(e.to_string()))
+        match a.module.name {
+            "div3-recons" => formula::decode(&a.params, i, a.len, 1).map_err(|e| aqr_formula::Error(e.to_string())),
+            "ac3-recons" => aqr_ac3::module::decode(&a.params, i, a.len, 1).map_err(|e| aqr_formula::Error(e.to_string())),
+            m => panic!("{m}"),
+        }
     };
     let back = f.eval(&none).unwrap();
     assert!(back == file);
-    let coded = f.streams[0].data.len();
     let total: usize = frames.iter().map(|f| f.len()).sum();
-    println!("{} frames: {} -> {} bytes ({:.1}%)", frames.len(), total, coded, 100.0 * coded as f64 / total as f64);
+    let audio: usize = sound.iter().map(|s| s.len()).sum::<usize>();
+    let names: Vec<String> = f.streams.iter().map(|s| s.class.to_string()).collect();
+    let size = |c: &str| f.streams.iter().find(|s| &*s.class == c).map_or(0, |s| s.data.len());
+    println!("{names:?}");
+    println!(
+        "{} frames: {} -> {} bytes; audio {} -> {} bytes",
+        frames.len(),
+        total,
+        size("div3/frames"),
+        audio,
+        size("ac3/frames") + size("div3/audio")
+    );
 }

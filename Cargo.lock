@@ -93,6 +93,8 @@ dependencies = [
 name = "aqr-ac3"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
+ "aqr-formula",
  "aqr-walk",
 ]
 
@@ -294,6 +296,7 @@ name = "aqr-decompress"
 version = "0.1.0"
 dependencies = [
  "aqr-7z",
+ "aqr-ac3",
  "aqr-api",
  "aqr-arsc",
  "aqr-asar",
@@ -343,6 +346,7 @@ dependencies = [
  "aqr-sqlite",
  "aqr-tex",
  "aqr-vorbis",
+ "aqr-walk",
  "aqr-wasm",
  "aqr-wrt",
  "aqr-xpress",
@@ -407,6 +411,7 @@ dependencies = [
 name = "aqr-div3"
 version = "0.1.0"
 dependencies = [
+ "aqr-ac3",
  "aqr-api",
  "aqr-common",
  "aqr-formula",
@@ -761,6 +766,7 @@ dependencies = [
 name = "aqr-modules"
 version = "0.1.0"
 dependencies = [
+ "aqr-ac3",
  "aqr-api",
  "aqr-arsc",
  "aqr-asar",
