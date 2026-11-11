@@ -1074,7 +1074,7 @@ pub fn wasm_of(m: Module) -> Option<aqr::Wasm> {
 
 /// The modules of this crate run by `m` where an archive has those of aqr-modules ([`known`]).
 pub fn natives<M: Modules + Sync>(m: &M) -> aqr::Natives<'_, M> {
-    aqr::natives(&MODULES, m).identified_by(identify)
+    aqr::natives(&MODULES, m).identified_by(identify).registered_by(registered_module)
 }
 
 /// Runs every module as WebAssembly, as the spec defines it, whether known or not.

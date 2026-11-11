@@ -481,7 +481,7 @@ fn compress_tree_noting<S: Source + ?Sized>(
         wr.w.set_journal(vec![point.clone()]).map_err(bad_tree)?;
     }
     if wr.commit.is_some() {
-        let enc = aqr::Encoder::with_threads(opt.level, opt.threads).with_modules(aqr_decompress::wasm_of);
+        let enc = aqr::Encoder::with_threads(opt.level, opt.threads).with_modules(opt.modules);
         let meta = wr.w.close_as(&enc, tree, &contents, aqr::Status::Complete).map_err(bad_tree)?;
         wr.commit(&mut out, &meta)?;
         let len = wr.w.len() - wr.w.pad().len();
@@ -494,7 +494,7 @@ fn compress_tree_noting<S: Source + ?Sized>(
     }
     let Writer { w, mut r, held, held_len, inserted, .. } = wr;
     // (an encoder of the metadata block only)
-    let enc = aqr::Encoder::with_threads(opt.level, opt.threads).with_modules(aqr_decompress::wasm_of);
+    let enc = aqr::Encoder::with_threads(opt.level, opt.threads).with_modules(opt.modules);
     let bad = |e: aqr_formula::Error| io::Error::new(io::ErrorKind::InvalidInput, e.0);
     // with mirror blocks, the metadata block's before the batches held back, where it can be
     // far enough from it; else after it, as the others are ([`aqr::Mirroring`])
@@ -1055,7 +1055,7 @@ impl Writer {
             self.inserted += n;
         }
         let (t, contents) = self.segment_tree(cx.tree);
-        let enc = aqr::Encoder::with_threads(cx.opt.level, cx.opt.threads).with_modules(aqr_decompress::wasm_of);
+        let enc = aqr::Encoder::with_threads(cx.opt.level, cx.opt.threads).with_modules(cx.opt.modules);
         let commits = self.commit.is_some() && !self.once;
         let status = if commits { self.left(cx) } else { aqr::Status::None };
         let meta = self.w.close_as(&enc, &t, &contents, status).map_err(bad_tree)?;
@@ -1143,7 +1143,7 @@ impl Writer {
             return Ok(r);
         }
         // (on a thread of no worker: the workers busy with the batch let go)
-        let enc = aqr::Encoder::with_threads(cx.opt.level, 1).with_modules(aqr_decompress::wasm_of);
+        let enc = aqr::Encoder::with_threads(cx.opt.level, 1).with_modules(cx.opt.modules);
         if let Some(base) = self.commit {
             let (end, before) = self.w.end(&enc, &t, &contents, status, base).map_err(bad_tree)?;
             if self.w.pad_due() {

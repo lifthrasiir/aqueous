@@ -23,7 +23,7 @@ use aqr_common::varint;
 use super::dict::Candidate;
 use super::tree::{self, FileParam, Status, Tree};
 use super::{
-    CHECKSUM, Emit, Encoder, FOOTER_MAGIC, HEADER_MAGIC, How, MODULE, STORED, SWAP, always_compressed, block, block_of,
+    CHECKSUM, Emit, Encoder, FOOTER_MAGIC, HEADER_MAGIC, How, STORED, SWAP, always_compressed, block, block_of,
     block_ranges, checksum_of, dictionary_block, dictionary_stand_in, footer, footer_with, formula_block, key_how,
 };
 use crate::{Error, Formula, Module, Node, Resource, Result};
@@ -548,7 +548,7 @@ impl SegmentWriter {
                 for &m in &uses[i].modules {
                     if !modules.contains(&m) {
                         let at = out.len();
-                        block(out, MODULE, &enc.module_block(m, level)?);
+                        enc.write_module(out, m, level)?;
                         b.layout.push((Placed::Module, out.len() - at));
                         b.added.push(at..out.len());
                         modules.push(m);

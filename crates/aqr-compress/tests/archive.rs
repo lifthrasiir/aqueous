@@ -195,6 +195,32 @@ fn files_given_back() {
     );
 }
 
+/// The modules named by their hashes alone (shorthand module blocks, as a self-extracting
+/// archive has them, `aqr --format sfx`): every file verified (the hashes resolved) and given
+/// back as by default, by the same modules, and the archive has no module block in full.
+#[test]
+fn registered_modules() {
+    use aqr_formula::aqr::{self, Wasm};
+    fn registered(m: aqr_formula::Module) -> Option<Wasm> {
+        let k = aqr_decompress::built(m)?;
+        let classes = aqr::task_classes(&aqr::module_of_block_data(k.block)?);
+        Some(Wasm::Registered { hash: k.sha512_256, classes })
+    }
+    let files = sample();
+    let (c, r) = archived(&files, &Options { modules: registered, ..Options::default() });
+    let (d, by_default) = archived(&files, &Options::default());
+    let modules = |r: &aqr_compress::Report| r.files.iter().map(|f| f.modules.clone()).collect::<Vec<_>>();
+    assert_eq!(modules(&r), modules(&by_default));
+    let types = |c: &[u8]| {
+        let i = aqr::inspect::inspect(c, false, &|_| None, None).unwrap();
+        i.blocks.iter().map(|b| b.ty).filter(|t| (0x60..=0x63).contains(t)).collect::<Vec<_>>()
+    };
+    let (shorthand, full) = (types(&c), types(&d));
+    assert!(!shorthand.is_empty() && shorthand.iter().all(|&t| t == 0x60), "{shorthand:x?}");
+    assert_eq!(shorthand.len(), full.len());
+    assert!(c.len() < d.len());
+}
+
 /// Sets and solid blocks within their bounds; a file alone in its set is coded alone.
 #[test]
 fn bounded() {

@@ -207,6 +207,10 @@ pub struct Options {
     /// Size formulas without their module blocks ([`aqr::Encoder::share_modules`]), as an
     /// archive of several files does ([`compress_tree`]), whose modules are written once.
     pub shared_modules: bool,
+    /// How each module is written into the archive ([`aqr::Encoder::with_modules`]): by default
+    /// its Wasm module, as aqr-modules built it ([`aqr_decompress::wasm_of`]); a self-extracting
+    /// archive names those its program carries by their hashes alone ([`aqr::Wasm::Registered`]).
+    pub modules: aqr::WasmOf,
     /// Of an archive of several files ([`compress_tree`]): the most bytes of a non-leaf block
     /// that files share (one stream longer is a block of its own), which a file read alone
     /// may have to decompress.
@@ -329,6 +333,7 @@ impl Default for Options {
             expansion: 32,
             shared_resources: false,
             shared_modules: false,
+            modules: aqr_decompress::wasm_of,
             block: 16 << 20,
             dictionaries: false,
             size_hint: false,
@@ -481,7 +486,7 @@ pub(crate) fn verifying(opt: &Options) -> Options {
 /// The encoder of formulas made with `opt`.
 pub(crate) fn encoder(opt: &Options) -> Encoder {
     let mut enc = Encoder::with_threads(opt.level, opt.threads)
-        .with_modules(aqr_decompress::wasm_of)
+        .with_modules(opt.modules)
         .with_dictionaries(opt.dictionaries)
         .with_size_hint(opt.size_hint);
     if opt.shared_resources {

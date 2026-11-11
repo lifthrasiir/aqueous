@@ -413,7 +413,9 @@ pub enum Wasm {
     /// Its SHA-512/256, written as a shorthand module block (32 bytes, no module bytes): the
     /// decompressor reconstructs the module from its own registry (spec, "Registered dictionaries
     /// and modules"). The module must be registered, or the archive cannot be decoded.
-    Registered([u8; 32]),
+    /// `classes` is how many classes of tasks the module has ([`task_classes`] of its bytes, which
+    /// the encoder does not have): an Apply declares a task limit for each.
+    Registered { hash: [u8; 32], classes: usize },
 }
 
 /// The zstd level of the module blocks made beforehand: modules are made once and archived
@@ -618,8 +620,8 @@ impl Encoder {
         let class = |m: &Module| match (self.wasm)(*m) {
             Some(Wasm::Bytes(b)) => task_classes(&b),
             Some(Wasm::Block(d)) => module_of_block_data(&d).map_or(0, |w| task_classes(&w)),
-            // a registered module's classes are not known here without its bytes
-            Some(Wasm::Registered(_)) | None => 0,
+            Some(Wasm::Registered { classes, .. }) => classes,
+            None => 0,
         };
         modules.iter().map(class).collect()
     }
@@ -645,7 +647,7 @@ impl Encoder {
     /// [`Wasm::Registered`], else a full module block of its bytes.
     fn write_module(&self, out: &mut impl Out, m: Module, level: i32) -> Result<()> {
         match (self.wasm)(m) {
-            Some(Wasm::Registered(hash)) => shorthand_block(out, MODULE, &hash),
+            Some(Wasm::Registered { hash, .. }) => shorthand_block(out, MODULE, &hash),
             _ => block(out, MODULE, &self.module_block(m, level)?),
         }
         Ok(())
@@ -660,7 +662,7 @@ impl Encoder {
             Wasm::Block(b) => b.into_owned(),
             Wasm::Bytes(w) => always_compressed(&mut self.cctx(), &[&w], level, self.threads)?,
             // a shorthand block is written by `write_module`, not through here
-            Wasm::Registered(_) => return Err(Error::new(format!("{m} is registered, with no module block"))),
+            Wasm::Registered { .. } => return Err(Error::new(format!("{m} is registered, with no module block"))),
         });
         self.module_blocks.borrow_mut().insert((m, level), b.clone());
         Ok(b)
@@ -1338,7 +1340,7 @@ pub fn task_classes(w: &[u8]) -> usize {
 }
 
 /// The content of the first custom section `name` of Wasm module `w`, if any.
-fn custom_section<'w>(w: &'w [u8], name: &str) -> Option<&'w [u8]> {
+pub fn custom_section<'w>(w: &'w [u8], name: &str) -> Option<&'w [u8]> {
     let mut at = WASM_HEADER.len();
     if w.get(..at)? != WASM_HEADER {
         return None;
@@ -2588,17 +2590,19 @@ impl Runner for NoModules {
 
 /// `modules` run by `m` ([`Natives`]), known by their [`stand_in`]s.
 pub fn natives<'a, M: crate::Modules + Sync>(modules: &[Module], m: &'a M) -> Natives<'a, M> {
-    Natives { modules: modules.to_vec(), m, identify: |w| stand_in_name(w).map(str::to_owned) }
+    Natives { modules: modules.to_vec(), m, identify: |w| stand_in_name(w).map(str::to_owned), registered: None }
 }
 
 /// Modules run by [`crate::Modules`], as archives apply them: [`crate::Modules::apply`] for one
 /// output, else [`crate::Modules::apply_shared`]. The [`crate::Apply`] that `m` is given has no
 /// inputs of its own (they are the evaluated ones). A module block is that of one of them where
 /// its Wasm module is identified as it, by its [`stand_in`] unless [`Natives::identified_by`].
+/// A shorthand module block's module is reconstructed by [`Natives::registered_by`], if given.
 pub struct Natives<'a, M> {
     modules: Vec<Module>,
     m: &'a M,
     identify: fn(&[u8]) -> Option<String>,
+    registered: Option<fn(&[u8; 32]) -> Decoded<Vec<u8>>>,
 }
 
 impl<M> Natives<'_, M> {
@@ -2606,6 +2610,13 @@ impl<M> Natives<'_, M> {
     /// (`name@version`).
     pub fn identified_by(mut self, identify: fn(&[u8]) -> Option<String>) -> Self {
         self.identify = identify;
+        self
+    }
+
+    /// The registered modules ([`Runner::registered`]) that `registered` reconstructs from their
+    /// hashes.
+    pub fn registered_by(mut self, registered: fn(&[u8; 32]) -> Decoded<Vec<u8>>) -> Self {
+        self.registered = Some(registered);
         self
     }
 }
@@ -2651,6 +2662,13 @@ impl<M: crate::Modules + Sync> Runner for Natives<'_, M> {
         let module = self.modules.iter().copied().find(|m| m.to_string() == name);
         let module = module.ok_or_else(|| Failure::Resource(format!("no native implementation of {name}")))?;
         Ok(Box::new(Native { module, m: self.m }))
+    }
+
+    fn registered(&self, hash: &[u8; 32]) -> Decoded<Vec<u8>> {
+        match self.registered {
+            Some(r) => r(hash),
+            None => resource("this runner knows no registered modules"),
+        }
     }
 }
 
@@ -4924,12 +4942,22 @@ mod tests {
         let a = f.push("a", d.clone());
         f.root = Node::apply(REV, vec![1, 2, 3], vec![a], d.len() as u64);
         let want: Vec<u8> = d.iter().rev().copied().collect();
-        let wasm = stand_in(REV);
+        // REV's module with a class of tasks, which its Apply declares a task limit for
+        fn wasm_of_rev() -> Vec<u8> {
+            let mut w = stand_in(REV);
+            w.extend_from_slice(&[0, 16, 14]);
+            w.extend_from_slice(b"aqr_task_slots");
+            w.push(4);
+            w
+        }
+        let wasm = wasm_of_rev();
+        assert_eq!(task_classes(&wasm), 1);
         let hash: [u8; 32] = sha2::Sha512_256::digest(&wasm).into();
         // the archive names REV by its registered hash (a shorthand module block, type 0x60)
         fn reg(m: Module) -> Option<Wasm> {
             use sha2::Digest;
-            (m == REV).then(|| Wasm::Registered(sha2::Sha512_256::digest(stand_in(REV)).into()))
+            let hash = sha2::Sha512_256::digest(wasm_of_rev()).into();
+            (m == REV).then_some(Wasm::Registered { hash, classes: 1 })
         }
         let c = Encoder::new(Level::Zstd(1)).with_modules(reg).encode(&f, Some(checksum(&want))).unwrap();
 
