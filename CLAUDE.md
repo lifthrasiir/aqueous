@@ -38,13 +38,15 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     `aqr-num` — numbers printed as text.
   - `aqr-version` — the binaries' version for their build scripts: the tag's (`AQR_VERSION`, set
     by the release workflow) or `git describe`'s, as `env!("AQR_VERSION")` and Windows' `VERSIONINFO`.
+  - `aqr-walk` — one syntax walked for coding, decoding and a dry parse (`Io`), the range coder and
+    the hashed model of aqr-div3 and aqr-ac3 (their coding is specified in its README).
   - `aqr-bincache` — `cargo aqr`: the release `aqr` built and kept by a hash of its sources.
   - `aqr-api`, `aqr-ld` — the Rust interface of modules and the Wasm linker wrapper.
   - `aqr-modules` — Wasm modules built from the recompressors' code (`src/bin`, `wasm/`,
     `src/known.rs`).
 - `codecs/` — the recompressor crates `aqr-*` (flate, png, jpeg, mp3, flac, pdf, zip, sqlite,
   git, lz4, lzma, lzo, bvx, bz2, alz, egg, azo, lha, rar, snappy, zstd, gif, prores, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle,
-  asar, vorbis, ogg, mkv, lzx, xpress, lznt1, …), each with a `README.md` and a `FORMAT.md` describing what it stores; a
+  asar, vorbis, ogg, mkv, lzx, xpress, lznt1, div3, ac3, …), each with a `README.md` and a `FORMAT.md` describing what it stores; a
   crate with a `FORMAT.md` belongs here. Disk images are aqr-disk's (partition tables, containers,
   the formula; `docs/disk-image-design.md`), their file systems read by aqr-iso, aqr-fat, aqr-ntfs,
   aqr-ext, aqr-apfs and aqr-hfs (no FORMAT.md: aqr-disk's tells). `aqr-flate` underlies everything that uses DEFLATE. The workspace
@@ -127,7 +129,7 @@ optimization picked by hash.
 - Whole modules take their inputs at once; part modules (`entry! … windows(…)`, spec "Module
   execution") stream them through windows of fixed pages, so their memory does not grow with
   the data. Big streams' modules are part modules (lzma, bz2, lz4, snappy, git, exe, png, flac,
-  pcm, mp3, fasta, bundle, bcj, mszip, flate-set, flate-inflate, prores); natively lzma, bz2, png,
+  pcm, mp3, fasta, bundle, bcj, mszip, flate-set, flate-inflate, prores, div3, ac3); natively lzma, bz2, png,
   mp3, flac and pcm still decode whole on threads (`Run::Threaded`), not held to the plan.
 - No variable arity: use Split and separate modules (png-against, leveldb-recons, …).
 - Model data (aqr-flate's) is a resource, not embedded in the module.

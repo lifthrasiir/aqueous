@@ -3121,9 +3121,7 @@ fn ac3_plan_holds() {
     let data: Vec<u8> = (0..10_000u32).map(|i| (i * 31 >> 2) as u8).collect();
     let coded = aqr_ac3::formula::encode(&data);
     assert!(coded.is_none(), "bytes that are no AC-3 do not come to less");
-    let mut enc = aqr_walk::rc::Encoder::new();
-    aqr_ac3::stream::encode(&mut enc, &data);
-    let coded = enc.finish();
+    let coded = aqr_ac3::formula::encode_always(&data, 1);
     let input = f.push(aqr_ac3::formula::CODED, coded);
     f.root = Node::apply(aqr_ac3::formula::MODULE, vec![], vec![input], data.len() as u64);
     plan_holds("ac3 runs", f, &data);
@@ -3132,9 +3130,7 @@ fn ac3_plan_holds() {
         let v = aqr_div3::formula::video(&src).unwrap();
         let audio: Vec<u8> = v.audio.iter().take(120).flat_map(|r| src[r.clone()].iter().copied()).collect();
         let mut f = Formula::default();
-        let mut enc = aqr_walk::rc::Encoder::new();
-        aqr_ac3::stream::encode(&mut enc, &audio);
-        let input = f.push(aqr_ac3::formula::CODED, enc.finish());
+        let input = f.push(aqr_ac3::formula::CODED, aqr_ac3::formula::encode_always(&audio, 1));
         f.root = Node::apply(aqr_ac3::formula::MODULE, vec![], vec![input], audio.len() as u64);
         plan_holds("ac3 frames", f, &audio);
     }
