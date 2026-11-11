@@ -6,9 +6,12 @@
 //!   the relocations kept and the symbols not stripped (it strips them itself), for the rewrite
 //!   to take out what only panics need; any other output is linked again as asked.
 //! - `aqr-ld <in.wasm> <out.wasm>` rewrites `in.wasm` into `out.wasm`.
+//! - `aqr-ld merge --stub S --out O NAME=MODULE.dll ...` merges native module libraries into a
+//!   stub executable as sections, with no loader ([`pemerge`]), toward self-extracting archives.
 //!
 //! With `AQR_LD_NAMES` set, the name section is kept, to see what is left in a module.
 
+mod pemerge;
 mod rewrite;
 mod trim;
 
@@ -20,10 +23,14 @@ fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let result = if args.first().is_some_and(|a| a == "-flavor") {
         link(&args)
+    } else if args.first().is_some_and(|a| a == "merge") {
+        pemerge::main(&args[1..])
     } else if let [input, output] = &args[..] {
         process(input.into(), output.into(), true)
     } else {
-        Err("usage: aqr-ld <in.wasm> <out.wasm>, or as the linker of wasm32-unknown-unknown".into())
+        Err("usage: aqr-ld <in.wasm> <out.wasm>, aqr-ld merge --stub S --out O NAME=MODULE.dll ..., \
+             or as the linker of wasm32-unknown-unknown"
+            .into())
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

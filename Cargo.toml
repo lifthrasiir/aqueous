@@ -5,6 +5,9 @@ members = [
     "crates/aqr-api/demo/concat",
     "crates/aqr-api/demo/xor",
     "crates/aqr-api/demo/split",
+    "crates/aqr-ld/demo/stub",
+    "crates/aqr-ld/demo/modadd",
+    "crates/aqr-ld/demo/modxor",
     "codecs/*",
 ]
 # The benches are standalone, with the checkouts of third_party/ (some of them workspaces of their

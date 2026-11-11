@@ -1033,6 +1033,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-pemerge-modadd"
+version = "0.1.0"
+
+[[package]]
+name = "aqr-pemerge-modxor"
+version = "0.1.0"
+
+[[package]]
+name = "aqr-pemerge-stub"
+version = "0.1.0"
+
+[[package]]
 name = "aqr-png"
 version = "0.1.0"
 dependencies = [

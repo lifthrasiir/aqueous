@@ -41,7 +41,9 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   - `aqr-walk` — one syntax walked for coding, decoding and a dry parse (`Io`), the range coder and
     the hashed model of aqr-div3 and aqr-ac3 (their coding is specified in its README).
   - `aqr-bincache` — `cargo aqr`: the release `aqr` built and kept by a hash of its sources.
-  - `aqr-api`, `aqr-ld` — the Rust interface of modules and the Wasm linker wrapper.
+  - `aqr-api`, `aqr-ld` — the Rust interface of modules and the Wasm linker wrapper; aqr-ld also
+    has `merge` (`src/pemerge.rs`), which merges native module libraries into a stub executable as
+    sections with no loader (`demo/{stub,modadd,modxor}`, `pemerge-test.sh`), toward SFX archives.
   - `aqr-dll` — a module's binary built as a native library (`AQR_DLL_MODULE`; `build.sh` builds
     them into `target/aqr-dll/`) exporting `aqr_api::dll`, toward self-extracting archives;
     `aqr-dll-shim` records applications from archives and runs the libraries on them.

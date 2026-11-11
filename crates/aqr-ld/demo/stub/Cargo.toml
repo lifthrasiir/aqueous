@@ -1,0 +1,9 @@
+[package]
+name = "aqr-pemerge-stub"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "aqr-pemerge-stub"
+path = "src/main.rs"
