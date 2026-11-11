@@ -38,8 +38,10 @@ fn sfx_pack() {
     // dep-info: what tells `cargo aqr` (aqr-bincache) one pack from another)
     let none = out_dir.join("sfx.id");
     let list = std::fs::read_to_string(from.join("modules.txt"));
-    let (Ok(list), "windows", "x86_64") = (list, &*target("CARGO_CFG_TARGET_OS"), &*target("CARGO_CFG_TARGET_ARCH"))
-    else {
+    // (not for the target of Windows 7 and 8: the stub and the blobs are of Windows 10's)
+    let win7 = target("CARGO_CFG_TARGET_VENDOR") == "win7";
+    let os_arch = (&*target("CARGO_CFG_TARGET_OS"), &*target("CARGO_CFG_TARGET_ARCH"));
+    let (Ok(list), ("windows", "x86_64"), false) = (list, os_arch, win7) else {
         std::fs::write(&none, b"").unwrap();
         println!("cargo:rustc-env=AQR_SFX_ID={}", none.display());
         std::fs::write(&out, b"").unwrap();

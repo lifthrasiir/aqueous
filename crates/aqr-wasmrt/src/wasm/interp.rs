@@ -33,7 +33,7 @@ fn interpreter() -> Decoded<&'static Interpreter> {
     i.as_ref().map_err(|e| Failure::Resource(format!("modules not run as WebAssembly: {e}")))
 }
 
-#[cfg(all(windows, target_arch = "x86_64"))]
+#[cfg(all(windows, target_arch = "x86_64", not(target_vendor = "win7")))]
 fn place(bytes: &[u8]) -> Result<Interpreter, String> {
     let image = aqr_blob::load(&[bytes])?;
     let b = &image.blobs[0];
@@ -47,9 +47,9 @@ fn place(bytes: &[u8]) -> Result<Interpreter, String> {
     Ok(i)
 }
 
-#[cfg(not(all(windows, target_arch = "x86_64")))]
+#[cfg(not(all(windows, target_arch = "x86_64", not(target_vendor = "win7"))))]
 fn place(_: &[u8]) -> Result<Interpreter, String> {
-    Err("the interpreter blob runs on Windows x86-64 alone".into())
+    Err("the interpreter blob runs on Windows 10 on, x86-64, alone".into())
 }
 
 /// `wasm`, of SHA-512/256 `hash`, checked against the profile and compiled (once a process).
@@ -67,6 +67,12 @@ pub fn load_bounded(wasm: &[u8], hash: [u8; 32], bound: u64) -> Decoded<Box<dyn 
 #[doc(hidden)]
 pub fn load_released(wasm: &[u8]) -> Decoded<Box<dyn Loaded>> {
     interpreter()?.load_with(wasm, None, None, true)
+}
+
+/// Whether the program has the interpreter given (it placed here): the failure, where it has not.
+#[cfg(feature = "sandbox")]
+pub(crate) fn interpreter_given() -> Decoded<()> {
+    interpreter().map(|_| ())
 }
 
 /// The bound of the applications' memories set: the blob's too, where it is placed.
@@ -88,6 +94,11 @@ pub fn warm_up() {
 pub(crate) fn worker_main() -> ! {
     match interpreter() {
         Ok(i) => i.worker_main(),
-        Err(_) => std::process::exit(1),
+        // (said where the decoder's standard error goes: what the decoder tells of the worker is
+        // only that it did not start)
+        Err(e) => {
+            eprintln!("aqr: a sandbox worker: {e:?}");
+            std::process::exit(1)
+        }
     }
 }

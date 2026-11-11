@@ -120,7 +120,15 @@ impl Sandbox {
         let idle = self.idle.lock().unwrap().pop();
         let mut w = match idle {
             Some(w) => w,
-            None => Worker::start(self).map_err(|e| Failure::Resource(format!("a sandbox worker not started: {e}")))?,
+            None => Worker::start(self).map_err(|e| {
+                // (with no Wasmtime linked, a worker runs by the interpreter blob: where the
+                // program has none to give, that is what is said)
+                #[cfg(not(feature = "wasmtime"))]
+                if let Err(f) = crate::wasm::interpreter_given() {
+                    return f;
+                }
+                Failure::Resource(format!("a sandbox worker not started: {e}"))
+            })?,
         };
         match f(&mut w) {
             Ok(r) => {

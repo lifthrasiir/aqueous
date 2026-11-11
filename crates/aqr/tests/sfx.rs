@@ -38,7 +38,7 @@ fn made(dir: &Path, inputs: &[&str], out: &str) -> bool {
     args.extend_from_slice(inputs);
     let o = aqr_in(dir, &args);
     let err = String::from_utf8_lossy(&o.stderr);
-    if !o.status.success() && err.contains("carries no self-extracting stub") {
+    if !o.status.success() && err.contains("carries no blobs") {
         eprintln!("skipped: {err}");
         return false;
     }

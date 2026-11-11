@@ -23,7 +23,7 @@ pub use engine::{load, load_bounded, load_released};
 #[cfg(not(feature = "wasmtime"))]
 mod interp;
 #[cfg(all(not(feature = "wasmtime"), feature = "sandbox"))]
-pub(crate) use interp::worker_main;
+pub(crate) use interp::{interpreter_given, worker_main};
 #[cfg(not(feature = "wasmtime"))]
 pub use interp::{load, load_bounded, load_released, set_interpreter, warm_up};
 

@@ -45,8 +45,9 @@ pub fn interpreter() -> Result<Vec<u8>, String> {
 /// The frames of [`PACKED`]: the interpreter blob's, and the other files'.
 fn frames() -> Result<(&'static [u8], &'static [u8]), String> {
     if PACKED.is_empty() {
-        return Err("this aqr carries no self-extracting stub (built without target/aqr-sfx/, which \
-                    crates/aqr-sfx/pack.sh gathers on Windows x86-64)"
+        return Err("this aqr carries no blobs (the interpreter's and the self-extracting stub's: \
+                    built without target/aqr-sfx/, which crates/aqr-sfx/pack.sh gathers on Windows \
+                    x86-64)"
             .into());
     }
     let n = PACKED.first_chunk::<8>().map(|n| u64::from_le_bytes(*n) as usize);
