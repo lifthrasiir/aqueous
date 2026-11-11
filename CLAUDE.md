@@ -33,6 +33,10 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     (`src/aqr.rs`: the archive encoder and decoder).
   - `aqr-compress` — picks a recompressor by magic bytes, makes the formula, stores the archive.
   - `aqr-decompress` — runs the formulas' modules natively and extracts archives.
+  - `aqr-native` — how each module runs natively (`NATIVE`, by module name: its native decoding
+    of whole inputs, threaded where it is, or its part entry point, and when to stream), from the
+    codec crates' decoding code alone (no `encode`); aqr-decompress pairs its `Module`s with it,
+    aqr-dll builds each module's library with its entry.
   - `aqr-unpack` — archives of other formats (ZIP, 7z, tar and its compressors) read into a
     tree for `aqr -d`, which extracts them as Aqueous archives (`crates/aqr/src/extract.rs`).
   - `aqr-pack` — the tree `aqr -c` gathers written as an archive of another format (ZIP, 7z,

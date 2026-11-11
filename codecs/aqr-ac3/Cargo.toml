@@ -16,6 +16,10 @@ aqr-common = { path = "../../crates/aqr-common", optional = true }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 aqr-walk = { path = "../../crates/aqr-walk" }
 
+# (natively, the threads of `native`)
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
+
 [[example]]
 name = "aqr-ac3-check"
 path = "examples/check.rs"

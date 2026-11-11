@@ -17,6 +17,7 @@ aqr-api = { path = "../aqr-api" }
 aqr-common = { path = "../aqr-common" }
 aqr-formula = { path = "../aqr-formula" }
 aqr-modules = { path = "../aqr-modules" }
+aqr-native = { path = "../aqr-native" }
 aqr-wasmrt = { path = "../aqr-wasmrt", default-features = false }
 sha2 = "0.10"
 aqr-asar = { path = "../../codecs/aqr-asar" }

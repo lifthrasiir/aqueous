@@ -389,12 +389,13 @@ pub const RECS_FIELDS: Module = aqr_infer_recs::formula::FIELDS;
 pub const RECS_ENTRIES: Module = aqr_infer_recs::formula::ENTRIES;
 pub const RECS_FLOATS: Module = aqr_infer_recs::formula::FLOATS;
 
-/// A module's `decode`: params, resources, inputs, output length and threads.
-pub type Decode = fn(&[u8], &[&[u8]], &[&[u8]], u64, usize) -> std::result::Result<Vec<u8>, String>;
+pub use aqr_native::Decode;
+use aqr_native::Run;
 
-/// A module of this crate as it runs natively: its `decode`, or the entry point of its code as a
-/// part module (applied streamed, [`Loaded::apply_part`], and whole by `aqr_api`'s emulation);
-/// and whether it takes resources (those that do not are given none).
+/// A module of this crate as it runs natively: aqr-native's entry of its name (its native
+/// decoding, or the entry point of its code as a part module, applied streamed,
+/// [`Loaded::apply_part`], and whole by `aqr_api`'s emulation), and whether it takes resources
+/// (those that do not are given none).
 #[derive(Clone, Copy)]
 struct Entry {
     module: Module,
@@ -402,534 +403,105 @@ struct Entry {
     decode: Run,
 }
 
-#[derive(Clone, Copy)]
-enum Run {
-    Whole(Decode),
-    /// And its `decode` applied whole, where it has one (else the emulation's).
-    Part(aqr_api::emu::Entry, Option<Decode>),
-    /// A part module in Wasm that natively is applied whole, by its threaded `decode` (which
-    /// spreads streams and parts over threads; the output is the same as the streamed one's).
-    Threaded(Decode),
-    /// [`Run::Threaded`], and where `streamed` says of the lengths of an application's inputs and
-    /// output that holding them whole is not worth the threads (a stream too long to gather), an
-    /// application of a formula's evaluation ([`Modules::is_part`]) goes through the emulation of
-    /// `entry`, its inputs pulled and its output pushed, none held. The archive's decoders apply
-    /// it as threaded.
-    Streamed(aqr_api::emu::Entry, Decode, fn(&[u64], u64) -> bool),
+/// The [`Entry`] of `module`: aqr-native's of its name (a module with none does not build).
+const fn entry(module: Module) -> Entry {
+    match aqr_native::find(module.name) {
+        Some(n) => Entry { module, resources: n.resources, decode: n.run },
+        None => panic!("a module with no entry in aqr-native"),
+    }
 }
 
-/// [`Entry`] of a module taking resources.
-const fn takes(module: Module, decode: Decode) -> Entry {
-    Entry { module, resources: true, decode: Run::Whole(decode) }
-}
-
-/// [`Entry`] of a module taking none.
-const fn bare(module: Module, decode: Decode) -> Entry {
-    Entry { module, resources: false, decode: Run::Whole(decode) }
-}
-
-/// [`Entry`] of a part module, of the entry point `entry` (`aqr_api::entry!`'s) and `decode`
-/// applied whole, taking resources where `resources`.
-const fn part(module: Module, resources: bool, entry: aqr_api::emu::Entry, decode: Decode) -> Entry {
-    Entry { module, resources, decode: Run::Part(entry, Some(decode)) }
-}
-
-/// [`Entry`] of a part module run natively as it is in Wasm, through the emulation of `aqr_api`
-/// (`entry`: its tasks on threads, its inputs and output through windows), taking no resources.
-const fn by_emulation(module: Module, entry: aqr_api::emu::Entry) -> Entry {
-    Entry { module, resources: false, decode: Run::Part(entry, None) }
-}
-
-/// [`Entry`] of a module that is a part module in Wasm but natively is applied whole, on threads
-/// (its `decode`), as streaming gives one thread: the memory of a native run is not held to the
-/// module's plan.
-const fn threaded(module: Module, decode: Decode) -> Entry {
-    Entry { module, resources: false, decode: Run::Threaded(decode) }
-}
-
-/// [`threaded`] of a module taking resources.
-const fn threaded_takes(module: Module, decode: Decode) -> Entry {
-    Entry { module, resources: true, decode: Run::Threaded(decode) }
-}
-
-fn err(e: impl std::fmt::Display) -> String {
-    e.to_string()
-}
-
-/// A filter of aqr-bcj's.
-fn bcj(m: Module, p: &[u8], i: &[&[u8]], n: u64) -> std::result::Result<Vec<u8>, String> {
-    aqr_bcj::formula::decode(m, p, i, n).ok_or("not of aqr-bcj")?.map_err(err)
-}
-
-/// [`Entry`] of a branch converter of aqr-bcj, a part module of windows of a page.
-macro_rules! bra {
-    ($module:ident, $arch:ident) => {
-        part(
-            $module,
-            false,
-            aqr_api::emu::Entry {
-                kind: aqr_api::emu::Kind::Part,
-                windows: &[
-                    aqr_api::Window::Input(0, aqr_bcj::module::BRA_WINDOW),
-                    aqr_api::Window::Output(0, aqr_bcj::module::BRA_WINDOW),
-                ],
-                arity: 3,
-                call: |a| aqr_bcj::module::bra_part(aqr_bcj::bra::Arch::$arch, a[0], a[1], a[2]),
-            },
-            |p, _, i, n, _| bcj($module, p, i, n),
-        )
-    };
-}
-
-/// [`Entry`] of 7z's Swap2 or Swap4 (aqr-bcj), a part module of windows of a page.
-macro_rules! swap {
-    ($module:ident, $width:literal) => {
-        part(
-            $module,
-            false,
-            aqr_api::emu::Entry {
-                kind: aqr_api::emu::Kind::Part,
-                windows: &[
-                    aqr_api::Window::Input(0, aqr_bcj::module::SWAP_WINDOW),
-                    aqr_api::Window::Output(0, aqr_bcj::module::SWAP_WINDOW),
-                ],
-                arity: 3,
-                call: |a| aqr_bcj::module::swap_part($width, a[0], a[1], a[2]),
-            },
-            |p, _, i, n, _| bcj($module, p, i, n),
-        )
-    };
-}
-
-/// Every module of this crate, as it runs natively.
+/// Every module of this crate, as it runs natively (aqr-native's entry of its name).
 const NATIVE: &[Entry] = &[
-    part(
-        X86,
-        true,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(1, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(2, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(3, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(4, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(5, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(6, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(7, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(8, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(9, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(10, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(11, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(12, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Output(0, aqr_exe::module::X86_WINDOW),
-            ],
-            arity: 16,
-            call: |a| {
-                aqr_exe::module::x86_part(
-                    a[0],
-                    a[1],
-                    [a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14]],
-                    a[15],
-                )
-            },
-        },
-        |p, r, i, n, _| aqr_exe::module::x86(p, r, i, n).map_err(err),
-    ),
-    takes(X86_REMAP, |p, r, i, n, _| aqr_exe::module::x86_remap(p, r, i, n).map_err(err)),
-    part(
-        ARM64,
-        false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_exe::module::ARM64_WINDOW),
-                aqr_api::Window::Input(1, aqr_exe::module::ARM64_WINDOW),
-                aqr_api::Window::Input(2, aqr_exe::module::ARM64_WINDOW),
-                aqr_api::Window::Input(3, aqr_exe::module::ARM64_WINDOW),
-                aqr_api::Window::Input(4, aqr_exe::module::ARM64_WINDOW),
-                aqr_api::Window::Input(5, aqr_exe::module::ARM64_WINDOW),
-                aqr_api::Window::Input(6, aqr_exe::module::ARM64_WINDOW),
-                aqr_api::Window::Input(7, aqr_exe::module::ARM64_WINDOW),
-                aqr_api::Window::Input(8, aqr_exe::module::ARM64_WINDOW),
-                aqr_api::Window::Input(9, aqr_exe::module::ARM64_WINDOW),
-                aqr_api::Window::Input(10, aqr_exe::module::ARM64_WINDOW),
-                aqr_api::Window::Output(0, aqr_exe::module::ARM64_WINDOW),
-            ],
-            arity: 13,
-            call: |a| {
-                aqr_exe::module::arm64_part(
-                    a[0],
-                    [a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11]],
-                    a[12],
-                )
-            },
-        },
-        |p, _, i, n, _| aqr_exe::module::arm64(p, i, n).map_err(err),
-    ),
-    bare(ARM64_REMAP, |p, _, i, n, _| aqr_exe::module::arm64_remap(p, i, n).map_err(err)),
-    bare(ARM64_DELTA, |p, _, i, n, _| aqr_exe::module::arm64_delta(p, i, n).map_err(err)),
-    part(
-        MACHO_CODESIGN,
-        false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_exe::module::MACHO_CODESIGN_WINDOW),
-                aqr_api::Window::Input(1, aqr_exe::module::MACHO_CODESIGN_WINDOW),
-                aqr_api::Window::Output(0, aqr_exe::module::MACHO_CODESIGN_WINDOW),
-            ],
-            arity: 4,
-            call: |a| aqr_exe::module::macho_codesign_part(a[0], [a[1], a[2]], a[3]),
-        },
-        |p, _, i, n, _| aqr_exe::module::macho_codesign(p, i, n).map_err(err),
-    ),
-    bare(CIL, |p, _, i, n, _| aqr_exe::module::cil(p, i, n).map_err(err)),
-    bare(PE_RELOC, |p, _, i, n, _| aqr_exe::module::reloc(p, i, n).map_err(err)),
-    bare(MACHO_SYMTAB, |p, _, i, n, _| aqr_exe::module::macho_symtab(p, i, n).map_err(err)),
-    part(
-        FLATE,
-        true,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_flate::module::SET_WINDOW),
-                aqr_api::Window::Input(1, aqr_flate::module::SET_RECORDS_WINDOW),
-                aqr_api::Window::Input(2, aqr_flate::module::SET_RECORDS_WINDOW),
-                aqr_api::Window::Output(0, aqr_flate::module::SET_WINDOW),
-            ],
-            arity: 7,
-            call: |a| aqr_flate::module::decode_part(a[0], a[1], a[2], a[3], a[4], a[5], a[6]),
-        },
-        |p, r, i, n, t| aqr_flate::formula::decode(p, r, i, n, t).map_err(err),
-    ),
-    part(
-        INFLATE,
-        false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_flate::module::INFLATE_WINDOW),
-                aqr_api::Window::Output(0, aqr_flate::module::INFLATE_WINDOW),
-            ],
-            arity: 3,
-            call: |a| aqr_flate::module::inflate_part(a[0], a[1], a[2]),
-        },
-        |p, _, i, n, _| aqr_flate::module::inflate(p, i, n).map_err(err),
-    ),
-    part(
-        LZ4,
-        false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_lz4::part::WINDOW),
-                aqr_api::Window::Output(0, aqr_lz4::part::WINDOW),
-            ],
-            arity: 3,
-            call: |a| aqr_lz4::part::decode_part(a[0], a[1], a[2]),
-        },
-        |p, _, i, n, t| aqr_lz4::formula::decode(p, i, n, t).map_err(err),
-    ),
-    threaded(LZMA, |p, _, i, n, t| aqr_lzma::formula::decode(p, i, n, t).map_err(err)),
-    threaded(LZMA2, |p, _, i, n, t| aqr_lzma::formula::decode2(p, i, n, t).map_err(err)),
-    bra!(BCJ_X86, X86),
-    bra!(BCJ_POWERPC, PowerPc),
-    bra!(BCJ_IA64, Ia64),
-    bra!(BCJ_ARM, Arm),
-    bra!(BCJ_ARM_THUMB, ArmThumb),
-    bra!(BCJ_SPARC, Sparc),
-    bra!(BCJ_ARM64, Arm64),
-    bra!(BCJ_RISCV, RiscV),
-    part(
-        BCJ_DELTA,
-        false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_bcj::module::DELTA_WINDOW),
-                aqr_api::Window::Output(0, aqr_bcj::module::DELTA_WINDOW),
-            ],
-            arity: 3,
-            call: |a| aqr_bcj::module::delta_part(a[0], a[1], a[2]),
-        },
-        |p, _, i, n, _| bcj(BCJ_DELTA, p, i, n),
-    ),
-    part(
-        BCJ2,
-        false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_bcj::module::BCJ2_WINDOW),
-                aqr_api::Window::Input(1, aqr_bcj::module::BCJ2_WINDOW),
-                aqr_api::Window::Output(0, aqr_bcj::module::BCJ2_WINDOW),
-                aqr_api::Window::Output(1, aqr_bcj::module::BCJ2_WINDOW),
-                aqr_api::Window::Output(2, aqr_bcj::module::BCJ2_WINDOW),
-            ],
-            arity: 6,
-            call: |a| aqr_bcj::module::bcj2_part(a[0], a[1], a[2], a[3], a[4], a[5]),
-        },
-        |p, _, i, n, _| bcj(BCJ2, p, i, n),
-    ),
-    swap!(BCJ_SWAP2, 2),
-    swap!(BCJ_SWAP4, 4),
-    bare(LZO, |p, _, i, n, t| aqr_lzo::formula::decode(p, i, n, t).map_err(err)),
-    bare(AZO, |p, _, i, n, t| aqr_azo::formula::decode(p, i, n, t).map_err(err)),
-    bare(LHA, |p, _, i, n, t| aqr_lha::formula::decode(p, i, n, t).map_err(err)),
-    bare(RAR5, |p, _, i, n, t| aqr_rar::formula::decode5(p, i, n, t).map_err(err)),
-    bare(RAR3, |p, _, i, n, t| aqr_rar::formula::decode3(p, i, n, t).map_err(err)),
-    bare(BVX, |p, _, i, n, t| aqr_bvx::formula::decode(p, i, n, t).map_err(err)),
-    threaded(BZ2, |p, _, i, n, t| aqr_bz2::formula::decode(p, i, n, t).map_err(err)),
-    threaded(BZ2_ALZ, |p, _, i, n, t| aqr_bz2::formula::decode_alz(p, i, n, t).map_err(err)),
-    Entry {
-        module: LZX,
-        resources: false,
-        decode: Run::Streamed(
-            aqr_api::emu::Entry {
-                kind: aqr_api::emu::Kind::Part,
-                windows: &[
-                    aqr_api::Window::Input(0, aqr_lzx::module::WINDOW),
-                    aqr_api::Window::Input(1, aqr_lzx::module::WINDOW),
-                    aqr_api::Window::Input(2, aqr_lzx::module::WINDOW),
-                    aqr_api::Window::Input(3, 1),
-                    aqr_api::Window::Output(0, aqr_lzx::module::WINDOW),
-                ],
-                arity: 6,
-                call: |a| aqr_lzx::module::decode_part(a[0], [a[1], a[2], a[3], a[4]], a[5]),
-            },
-            |p, _, i, n, t| aqr_lzx::formula::decode(p, i, n, t).map_err(err),
-            |lens, _| aqr_lzx::module::streamed(lens),
-        ),
-    },
-    bare(XPRESS, |p, _, i, n, t| aqr_xpress::formula::decode(p, i, n, t).map_err(err)),
-    bare(LZNT1, |p, _, i, n, t| aqr_lznt1::formula::decode(p, i, n, t).map_err(err)),
-    part(
-        MSZIP,
-        false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_mszip::module::WINDOW),
-                aqr_api::Window::Input(1, aqr_mszip::module::WINDOW),
-                aqr_api::Window::Input(2, aqr_mszip::module::WINDOW),
-                aqr_api::Window::Input(3, aqr_mszip::module::WINDOW),
-                aqr_api::Window::Output(0, aqr_mszip::module::WINDOW),
-            ],
-            arity: 6,
-            call: |a| aqr_mszip::module::decode_part(a[0], a[1], a[2], a[3], a[4], a[5]),
-        },
-        |p, _, i, n, _| aqr_mszip::module::decode(p, i, n).map_err(err),
-    ),
-    part(
-        DIV3,
-        false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_div3::module::WINDOW),
-                aqr_api::Window::Input(1, aqr_div3::module::WINDOW),
-                aqr_api::Window::Input(2, aqr_div3::module::WINDOW),
-                aqr_api::Window::Input(3, aqr_div3::module::WINDOW),
-                aqr_api::Window::Output(0, aqr_div3::module::WINDOW),
-            ],
-            arity: 6,
-            call: |a| aqr_div3::module::decode_part(a[0], a[1], a[2], a[3], a[4], a[5]),
-        },
-        |p, _, i, n, t| aqr_div3::formula::decode(p, i, n, t).map_err(err),
-    ),
-    part(
-        AC3,
-        false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_ac3::module::WINDOW),
-                aqr_api::Window::Output(0, aqr_ac3::module::WINDOW),
-            ],
-            arity: 3,
-            call: |a| aqr_ac3::module::decode_part(a[0], a[1], a[2]),
-        },
-        |p, _, i, n, t| aqr_ac3::formula::decode(p, i, n, t).map_err(err),
-    ),
-    part(
-        SNAPPY,
-        false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_snappy::module::WINDOW),
-                aqr_api::Window::Output(0, aqr_snappy::module::WINDOW),
-            ],
-            arity: 3,
-            call: |a| aqr_snappy::module::decode_part(a[0], a[1], a[2]),
-        },
-        |p, _, i, n, t| aqr_snappy::formula::decode(p, i, n, t).map_err(err),
-    ),
-    bare(LEVELDB, |p, _, i, n, t| aqr_snappy::formula::decode_table(p, i, n, t).map_err(err)),
-    part(
-        ZIP,
-        false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_zip::module::WINDOW),
-                aqr_api::Window::Input(1, aqr_zip::module::WINDOW),
-                aqr_api::Window::Input(2, aqr_zip::module::WINDOW),
-                aqr_api::Window::Input(3, aqr_zip::module::WINDOW),
-                aqr_api::Window::Output(0, aqr_zip::module::WINDOW),
-            ],
-            arity: 6,
-            call: |a| aqr_zip::module::decode_part(a[0], a[1], a[2], a[3], a[4], a[5]),
-        },
-        |p, _, i, n, t| aqr_zip::formula::decode(p, i, n, t).map_err(err),
-    ),
-    part(
-        BUNDLE,
-        false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_bundle::module::WINDOW),
-                aqr_api::Window::Input(1, aqr_bundle::module::WINDOW),
-                aqr_api::Window::Output(0, aqr_bundle::module::WINDOW),
-            ],
-            arity: 4,
-            call: |a| aqr_bundle::module::decode_part(a[0], a[1], a[2], a[3]),
-        },
-        |p, _, i, n, t| aqr_bundle::formula::decode(p, i, n, t).map_err(err),
-    ),
-    bare(ASAR, |p, _, i, n, t| aqr_asar::formula::decode(p, i, n, t).map_err(err)),
-    part(
-        GIT_PACK,
-        false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_git::module::WINDOW),
-                aqr_api::Window::Input(1, aqr_git::module::SMALL_WINDOW),
-                aqr_api::Window::Input(2, aqr_git::module::SMALL_WINDOW),
-                aqr_api::Window::Input(3, aqr_git::module::WINDOW),
-                aqr_api::Window::Output(0, aqr_git::module::WINDOW),
-            ],
-            arity: 6,
-            call: |a| aqr_git::module::decode_part(a[0], a[1], a[2], a[3], a[4], a[5]),
-        },
-        |p, _, i, n, t| aqr_git::formula::decode(p, i, n, t).map_err(err),
-    ),
-    part(
-        GIT_PACK_INDEX,
-        false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_git::module::WINDOW),
-                aqr_api::Window::Input(1, aqr_git::module::SMALL_WINDOW),
-                aqr_api::Window::Input(2, aqr_git::module::SMALL_WINDOW),
-                aqr_api::Window::Input(3, aqr_git::module::WINDOW),
-                aqr_api::Window::Input(4, aqr_git::module::SMALL_WINDOW),
-                aqr_api::Window::Output(0, aqr_git::module::WINDOW),
-            ],
-            arity: 7,
-            call: |a| aqr_git::module::decode_index_part(a[0], a[1], a[2], a[3], a[4], a[5], a[6]),
-        },
-        |p, _, i, n, t| aqr_git::formula::decode_index(p, i, n, t).map_err(err),
-    ),
-    threaded(PNG, |p, _, i, n, t| aqr_png::formula::decode(p, i, n, t).map_err(err)),
-    bare(PNG_AGAINST, |p, _, i, n, t| aqr_png::formula::decode_against(p, i, n, t).map_err(err)),
-    bare(PNG_SET, |p, _, i, n, t| aqr_png::formula::decode_set(p, i, n, t).map_err(err)),
-    bare(GIF, |p, _, i, n, t| aqr_gif::formula::decode(p, i, n, t).map_err(err)),
-    by_emulation(PRORES, aqr_prores::module::ENTRY),
-    bare(JPEG, |p, _, i, n, t| aqr_jpeg::formula::decode(p, i, n, t).map_err(err)),
-    threaded(JPEG_LOSSLESS, |p, _, i, n, t| aqr_jpeg::lformula::decode(p, i, n, t).map_err(err)),
-    threaded_takes(MP3, |p, r, i, n, t| aqr_mp3::formula::decode(p, r, i, n, t).map_err(err)),
-    threaded_takes(FLAC, |p, r, i, n, t| aqr_flac::formula::decode(p, r, i, n, t).map_err(err)),
-    bare(PSD, |p, _, i, n, t| aqr_psd::formula::decode(p, i, n, t).map_err(err)),
-    bare(CLIP, |p, _, i, n, t| aqr_clip::formula::decode(p, i, n, t).map_err(err)),
-    bare(BCN, |p, _, i, n, t| aqr_tex::formula::decode(p, i, n, t).map_err(err)),
-    bare(PDF, |p, _, i, n, t| aqr_pdf::formula::decode(p, i, n, t).map_err(err)),
-    bare(SQLITE, |p, _, i, n, t| aqr_sqlite::formula::decode(p, i, n, t).map_err(err)),
-    part(
-        FASTA,
-        false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_fasta::module::WINDOW),
-                aqr_api::Window::Input(1, aqr_fasta::module::WINDOW),
-                aqr_api::Window::Input(2, aqr_fasta::module::WINDOW),
-                aqr_api::Window::Input(3, aqr_fasta::module::WINDOW),
-                aqr_api::Window::Input(4, aqr_fasta::module::WINDOW),
-                aqr_api::Window::Output(0, aqr_fasta::module::WINDOW),
-            ],
-            arity: 7,
-            call: |a| aqr_fasta::module::decode_part(a[0], [a[1], a[2], a[3], a[4], a[5]], a[6]),
-        },
-        |p, _, i, n, t| aqr_fasta::formula::decode(p, i, n, t).map_err(err),
-    ),
-    bare(DEX, |p, _, i, n, _| aqr_dex::formula::decode(p, i, n).map_err(err)),
-    bare(DWARF_APPLE, |p, _, i, n, _| aqr_dwarf::formula::decode_apple(p, i, n).map_err(err)),
-    bare(DWARF_INFO, |p, _, i, n, _| aqr_dwarf::formula::decode_info(p, i, n).map_err(err)),
-    bare(PDB_MSF, |p, _, i, n, _| aqr_pdb::formula::decode(p, i, n).map_err(err)),
-    bare(PDB_SYMBOLS, |p, _, i, n, _| aqr_pdb::formula::decode_symbols(p, i, n).map_err(err)),
-    part(
-        PDB_TYPES,
-        false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(1, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(2, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(3, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(4, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(5, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(6, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(7, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(8, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(9, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(10, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(11, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(12, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Output(0, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Output(1, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Output(2, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Output(3, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Output(4, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Output(5, aqr_pdb::module::TYPES_WINDOW),
-            ],
-            arity: 20,
-            call: |a| {
-                aqr_pdb::module::types_part(
-                    a[0],
-                    [a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13]],
-                    [a[14], a[15], a[16], a[17], a[18], a[19]],
-                )
-            },
-        },
-        |p, _, i, n, _| aqr_pdb::formula::decode_types(p, i, n).map_err(err),
-    ),
-    bare(ARSC, |p, _, i, n, _| aqr_arsc::formula::decode(p, i, n).map_err(err)),
-    bare(WASM, |p, _, i, n, _| aqr_wasm::formula::decode(p, i, n).map_err(err)),
-    bare(GNU_GETTEXT, |p, _, i, n, _| aqr_gnu_gettext::formula::decode(p, i, n).map_err(err)),
-    bare(FITS_IMAGE, |p, _, i, n, _| aqr_fits::formula::decode_image(p, i, n).map_err(err)),
-    bare(FITS_RICE, |p, _, i, n, _| aqr_fits::formula::decode_rice(p, i, n).map_err(err)),
-    bare(FITS_TABLE, |p, _, i, n, _| aqr_fits::formula::decode_table(p, i, n).map_err(err)),
-    bare(OBJ, |p, _, i, n, t| aqr_obj::formula::decode(p, i, n, t).map_err(err)),
-    bare(VORBIS, |p, _, i, n, _| aqr_vorbis::formula::decode(p, i, n).map_err(err)),
-    bare(OGG, |p, _, i, n, _| aqr_ogg::formula::decode(p, i, n).map_err(err)),
-    bare(IMA, |p, _, i, n, _| aqr_ima::formula::decode(p, i, n).map_err(err)),
-    bare(HDF5_FLOAT, |p, _, i, n, _| aqr_hdf5::module::float(p, i, n).map_err(err)),
-    bare(XSV, |p, _, i, n, t| aqr_xsv::formula::decode(p, i, n, t).map_err(err)),
-    bare(JSONL, |p, _, i, n, t| aqr_jsonl::formula::decode(p, i, n, t).map_err(err)),
-    takes(WRT, |p, r, i, n, t| aqr_wrt::formula::decode(p, r, i, n, t).map_err(err)),
-    takes(WRT_HANGUL, |p, r, i, n, t| aqr_wrt::formula::decode_hangul(p, r, i, n, t).map_err(err)),
-    threaded_takes(PCM, |p, r, i, n, t| aqr_raw::formula::pcm::decode(p, r, i, n, t).map_err(err)),
-    bare(RASTER, |p, _, i, n, t| aqr_raw::formula::raster::decode(p, i, n, t).map_err(err)),
-    bare(RASTER_16, |p, _, i, n, _| aqr_raw::formula::raster16::decode(p, i, n).map_err(err)),
-    bare(RECS_FIELDS, |p, _, i, n, _| aqr_infer_recs::formula::decode_fields(p, i, n).map_err(err)),
-    bare(RECS_ENTRIES, |p, _, i, n, _| aqr_infer_recs::formula::decode_entries(p, i, n).map_err(err)),
-    bare(RECS_FLOATS, |p, _, i, n, _| aqr_infer_recs::formula::decode_floats(p, i, n).map_err(err)),
+    entry(X86),
+    entry(X86_REMAP),
+    entry(ARM64),
+    entry(ARM64_REMAP),
+    entry(ARM64_DELTA),
+    entry(MACHO_CODESIGN),
+    entry(CIL),
+    entry(PE_RELOC),
+    entry(MACHO_SYMTAB),
+    entry(FLATE),
+    entry(INFLATE),
+    entry(LZ4),
+    entry(LZMA),
+    entry(LZMA2),
+    entry(BCJ_X86),
+    entry(BCJ_POWERPC),
+    entry(BCJ_IA64),
+    entry(BCJ_ARM),
+    entry(BCJ_ARM_THUMB),
+    entry(BCJ_SPARC),
+    entry(BCJ_ARM64),
+    entry(BCJ_RISCV),
+    entry(BCJ_DELTA),
+    entry(BCJ2),
+    entry(BCJ_SWAP2),
+    entry(BCJ_SWAP4),
+    entry(LZO),
+    entry(AZO),
+    entry(LHA),
+    entry(RAR5),
+    entry(RAR3),
+    entry(BVX),
+    entry(BZ2),
+    entry(BZ2_ALZ),
+    entry(LZX),
+    entry(XPRESS),
+    entry(LZNT1),
+    entry(MSZIP),
+    entry(DIV3),
+    entry(AC3),
+    entry(SNAPPY),
+    entry(LEVELDB),
+    entry(ZIP),
+    entry(BUNDLE),
+    entry(ASAR),
+    entry(GIT_PACK),
+    entry(GIT_PACK_INDEX),
+    entry(PNG),
+    entry(PNG_AGAINST),
+    entry(PNG_SET),
+    entry(GIF),
+    entry(PRORES),
+    entry(JPEG),
+    entry(JPEG_LOSSLESS),
+    entry(MP3),
+    entry(FLAC),
+    entry(PSD),
+    entry(CLIP),
+    entry(BCN),
+    entry(PDF),
+    entry(SQLITE),
+    entry(FASTA),
+    entry(DEX),
+    entry(DWARF_APPLE),
+    entry(DWARF_INFO),
+    entry(PDB_MSF),
+    entry(PDB_SYMBOLS),
+    entry(PDB_TYPES),
+    entry(ARSC),
+    entry(WASM),
+    entry(GNU_GETTEXT),
+    entry(FITS_IMAGE),
+    entry(FITS_RICE),
+    entry(FITS_TABLE),
+    entry(OBJ),
+    entry(VORBIS),
+    entry(OGG),
+    entry(IMA),
+    entry(HDF5_FLOAT),
+    entry(XSV),
+    entry(JSONL),
+    entry(WRT),
+    entry(WRT_HANGUL),
+    entry(PCM),
+    entry(RASTER),
+    entry(RASTER_16),
+    entry(RECS_FIELDS),
+    entry(RECS_ENTRIES),
+    entry(RECS_FLOATS),
 ];
 
 /// Every module of this crate.
@@ -1644,6 +1216,21 @@ mod tests {
     use aqr_api::{Input, Memory, Output};
 
     use super::*;
+
+    /// aqr-native has an entry for every module of this crate (or it would not build) and none
+    /// for others, each once: of each module of aqr-modules, as each is built of its crate's
+    /// current code.
+    #[test]
+    fn native_entries_are_the_modules() {
+        let mut names: Vec<&str> = aqr_native::NATIVE.iter().map(|n| n.name).collect();
+        names.sort_unstable();
+        let mut modules: Vec<&str> = MODULES.iter().map(|m| m.name).collect();
+        modules.sort_unstable();
+        assert_eq!(names, modules);
+        let mut built: Vec<&str> = aqr_modules::KNOWN.iter().map(|k| k.name).collect();
+        built.sort_unstable();
+        assert_eq!(names, built);
+    }
 
     aqr_api::entry! {
         // its input copied to its output through windows of a page, in pieces of 4 KiB

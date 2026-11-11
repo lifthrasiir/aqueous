@@ -15,6 +15,9 @@ pub mod tables;
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod module;
+/// The module natively on whole inputs (not in the module: what aqr-decompress and aqr-dll run).
+#[cfg(not(target_family = "wasm"))]
+pub mod native;
 
 pub use frame::{Codec, FrameError, FrameKind};
 
