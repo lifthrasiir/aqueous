@@ -49,6 +49,10 @@ pub mod sandbox {
 pub use wasm::load_released;
 #[cfg(feature = "wasm")]
 pub use wasm::set_application_bound;
+/// Where the interpreter blob comes from, where Wasmtime is not linked (Windows x86-64): before
+/// any module is run as WebAssembly, and before `sandbox::worker_main`.
+#[cfg(feature = "wasm")]
+pub use wasm::set_interpreter;
 #[cfg(feature = "wasm")]
 pub use wasm::{Applied, initial_pages, record_applications};
 

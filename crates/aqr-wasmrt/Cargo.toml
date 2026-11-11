@@ -6,14 +6,18 @@ description = "Runs the Wasm modules of aqr natively (Wasmtime), in the process 
 publish = false
 
 [features]
-default = ["wasm", "sandbox"]
-# Modules run as WebAssembly, by Wasmtime.
-wasm = ["dep:wasmtime", "dep:wasmparser", "dep:windows-sys"]
+default = ["wasm", "sandbox", "wasmtime"]
+# Modules run as WebAssembly: by Wasmtime (`wasmtime`), else by the interpreter blob the program
+# gives (Windows x86-64).
+wasm = ["dep:wasmparser", "dep:windows-sys", "dep:aqr-blob"]
 # ... or so in worker processes locked down by the system (`sandbox`).
 sandbox = ["wasm"]
+# Wasmtime linked (needed but on Windows x86-64: a crate enables it there).
+wasmtime = ["wasm", "dep:wasmtime"]
 
 [dependencies]
 aqr-api = { path = "../aqr-api" }
+aqr-blob = { path = "../aqr-blob", features = ["runner"], optional = true }
 aqr-common = { path = "../aqr-common" }
 aqr-formula = { path = "../aqr-formula" }
 sha2 = "0.10"

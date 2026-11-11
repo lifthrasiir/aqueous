@@ -66,7 +66,16 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     process or in a sandbox worker (`sandbox::Sandbox`), with no native codecs linked. Shared by
     aqr-decompress (for modules it does not know natively) and the self-extracting interpreter
     blob. `Sandboxed` (native where known, else a worker) stays in aqr-decompress, which has the
-    native modules.
+    native modules. Wasmtime is linked only with the feature `wasmtime` (`wasm/engine.rs`; always
+    but on Windows x86-64, aqr-decompress enabling it there, and in the tests' dev-dependencies);
+    else `wasm/interp.rs` runs the modules by the interpreter blob the program gives
+    (`wasm::set_interpreter`, aqr: its pack's), placed at run time (`aqr_blob::load`), a worker
+    served by the blob's own (`worker_main`). aqr.exe on Windows links no Wasmtime (41.9 ->
+    30.4 MB). What reads a module's bytes alone, and the bound, is `wasm.rs`'s, for both.
+  - `aqr-blob` — blobs: their format (aqr-ld makes them), `load` placing a set in memory at run
+    time (Windows x86-64: relocated, imports between them and from system libraries bound,
+    exception tables registered), and (feature `runner`) the interpreter blob's client: its
+    `Vtable`, `Interpreter` (a `Runner`), failures crossing the C ABI with their kinds.
   - `aqr-sfx` — the self-extracting apply logic (a library): `Sfx` finds the blobs merged into the
     program through the dispatch table's anchor — native module blobs named `HASH/SLOTS`
     (`native_name`: the module's hash and task slots), the interpreter blob `aqr-interp` — and is
@@ -82,8 +91,10 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     and an archive is appended to. It finds the archive by its header magic (scanning from the
     end, no trailer), decodes it running the modules through the merged blobs, and writes the
     files out.
-  - `aqr-interp` — the interpreter blob: a module library (`aqr_interp_{load,apply,is_part,drop}`)
-    that runs any Wasm module handed to it by Wasmtime (`aqr-wasmrt`), no codecs linked (~12 MB).
+  - `aqr-interp` — the interpreter blob: a module library (`aqr_interp_vtable`, aqr-blob's
+    `Vtable`: load, apply, apply_part, and for aqr the loads of aqr-wasmrt, the bound and the
+    sandbox's worker) that runs any Wasm module handed to it by Wasmtime (`aqr-wasmrt`), no codecs
+    linked (~12 MB).
     Built for the no-TLS target (`NOTLS`) it is mergeable into a stub: the fallback for modules the
     stub has no native blob for.
   - `aqr-dll` — a module's binary built as a native library (`AQR_DLL_MODULE`; `build.sh` builds

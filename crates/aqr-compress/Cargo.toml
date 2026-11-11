@@ -78,6 +78,8 @@ zstd = "0.13"
 libc = "0.2"
 
 [dev-dependencies]
+# (the tests run modules by Wasmtime, linked)
+aqr-wasmrt = { path = "../aqr-wasmrt", default-features = false, features = ["wasmtime"] }
 zstd = "0.13"
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 

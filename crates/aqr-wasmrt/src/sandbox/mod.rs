@@ -14,8 +14,12 @@
 //! for gives, failures included, or else a resource failure where a worker could not be
 //! started or ended unexpectedly.
 
+// (with no Wasmtime linked, the worker's side of them is the interpreter blob's, not this one's)
+#[cfg_attr(not(feature = "wasmtime"), allow(dead_code, unused_imports))]
 mod os;
+#[cfg_attr(not(feature = "wasmtime"), allow(dead_code, unused_imports))]
 mod proto;
+#[cfg(feature = "wasmtime")]
 mod worker;
 
 use std::collections::HashSet;
@@ -49,12 +53,16 @@ pub const SUPPORTED: bool = cfg!(any(windows, target_os = "linux", target_os = "
 /// Serves the decoder that started this process as its worker, then exits: the whole of the
 /// worker program, or the part of the host's that its arguments for workers lead to.
 pub fn worker_main() -> ! {
+    // (with no Wasmtime linked, the interpreter blob's worker serves: its engine's)
+    #[cfg(not(feature = "wasmtime"))]
+    crate::wasm::worker_main();
     // what Linux's `top` shows by default (`comm`, of 15 bytes), as `argv[0]` is not
     #[cfg(target_os = "linux")]
     // SAFETY: of the name, terminated
     unsafe {
         libc::prctl(libc::PR_SET_NAME, c"aqr-sandbox".as_ptr())
     };
+    #[cfg(feature = "wasmtime")]
     std::process::exit(match worker::serve() {
         Ok(()) => 0,
         Err(_) => 1,

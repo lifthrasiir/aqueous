@@ -23,16 +23,35 @@ static PACKED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sfx.pack"));
 /// of its dep-info, and the packed file in `OUT_DIR` changes only once the build script runs.
 pub const PACK_ID: &str = include_str!(env!("AQR_SFX_ID"));
 
-/// The stub and the blobs of [`PACKED`].
+/// The stub and the blobs of [`PACKED`] but the interpreter blob ([`interpreter`]).
 pub struct Pack {
     stub: Vec<u8>,
-    interp: Vec<u8>,
     /// The native blob of each module by its hash, with the bytes of its task slots (the custom
     /// section `aqr_task_slots` of its Wasm module).
     natives: HashMap<[u8; 32], (Vec<u8>, Vec<u8>)>,
     /// The shared libraries the native blobs link against, by their names as libraries (what
     /// the blobs' imports name), each with the libraries it links against itself.
     libs: HashMap<String, (Vec<u8>, Vec<String>)>,
+}
+
+/// The interpreter blob of the pack: what runs the modules as WebAssembly where this program
+/// links no Wasmtime (`aqr_decompress::set_interpreter`), unpacked alone (its frame of its own,
+/// the first, its length before it).
+pub fn interpreter() -> Result<Vec<u8>, String> {
+    let (frame, _) = frames()?;
+    zstd::decode_all(frame).map_err(|e| format!("the interpreter blob: {e}"))
+}
+
+/// The frames of [`PACKED`]: the interpreter blob's, and the other files'.
+fn frames() -> Result<(&'static [u8], &'static [u8]), String> {
+    if PACKED.is_empty() {
+        return Err("this aqr carries no self-extracting stub (built without target/aqr-sfx/, which \
+                    crates/aqr-sfx/pack.sh gathers on Windows x86-64)"
+            .into());
+    }
+    let n = PACKED.first_chunk::<8>().map(|n| u64::from_le_bytes(*n) as usize);
+    let n = n.filter(|&n| n <= PACKED.len() - 8).ok_or("the self-extracting pack is cut short")?;
+    Ok((&PACKED[8..8 + n], &PACKED[8 + n..]))
 }
 
 /// The pack, unpacked once; an error where this program carries none.
@@ -42,12 +61,8 @@ pub fn pack() -> Result<&'static Pack, String> {
 }
 
 fn unpack() -> Result<Pack, String> {
-    if PACKED.is_empty() {
-        return Err("this aqr carries no self-extracting stub (built without target/aqr-sfx/, which \
-                    crates/aqr-sfx/pack.sh gathers on Windows x86-64)"
-            .into());
-    }
-    let raw = zstd::decode_all(PACKED).map_err(|e| format!("the self-extracting pack: {e}"))?;
+    let (_, rest) = frames()?;
+    let raw = zstd::decode_all(rest).map_err(|e| format!("the self-extracting pack: {e}"))?;
     let mut files = HashMap::new();
     let mut at = 0;
     let take = |at: &mut usize| -> Option<&[u8]> {
@@ -63,7 +78,7 @@ fn unpack() -> Result<Pack, String> {
         files.insert(String::from_utf8_lossy(name).into_owned(), data.to_vec());
     }
     let mut file = |n: &str| files.remove(n).ok_or(format!("the self-extracting pack has no {n}"));
-    let (stub, interp, list) = (file("aqr-sfx-shim.exe")?, file("aqr-interp.blob")?, file("modules.txt")?);
+    let (stub, list) = (file("aqr-sfx-shim.exe")?, file("modules.txt")?);
     let mut libs = HashMap::new();
     for l in String::from_utf8_lossy(&file("libs.txt")?).lines().filter(|l| !l.is_empty()) {
         let blob = file(&format!("libs/{l}"))?;
@@ -81,7 +96,7 @@ fn unpack() -> Result<Pack, String> {
         let slots = aqr::custom_section(&wasm, "aqr_task_slots").unwrap_or_default().to_vec();
         natives.insert(k.sha512_256, (blob, slots));
     }
-    Ok(Pack { stub, interp, natives, libs })
+    Ok(Pack { stub, natives, libs })
 }
 
 fn hex(b: &[u8]) -> String {
@@ -149,7 +164,7 @@ pub fn make(archive: &[u8]) -> Result<Made, String> {
         blobs.push((format!("{}{l}", aqr_sfx::LIB), pack.libs[l].0.clone()));
     }
     if full {
-        blobs.push((aqr_sfx::INTERP.to_owned(), pack.interp.clone()));
+        blobs.push((aqr_sfx::INTERP.to_owned(), interpreter()?));
     }
     let mut exe = aqr_ld::pemerge::merge_bytes(pack.stub.clone(), &blobs, "aqr_dll_apply", "aqr_dll_info")?;
     exe.extend_from_slice(archive);

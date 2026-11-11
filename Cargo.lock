@@ -172,6 +172,14 @@ name = "aqr-bincache"
 version = "0.1.0"
 
 [[package]]
+name = "aqr-blob"
+version = "0.1.0"
+dependencies = [
+ "aqr-api",
+ "aqr-formula",
+]
+
+[[package]]
 name = "aqr-bundle"
 version = "0.1.0"
 dependencies = [
@@ -287,6 +295,7 @@ dependencies = [
  "aqr-sqlite",
  "aqr-tex",
  "aqr-wasm",
+ "aqr-wasmrt",
  "aqr-wim",
  "aqr-wrt",
  "aqr-xsv",
@@ -1024,6 +1033,7 @@ name = "aqr-interp"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-blob",
  "aqr-formula",
  "aqr-wasmrt",
  "sha2",
@@ -1090,6 +1100,7 @@ dependencies = [
 name = "aqr-ld"
 version = "0.1.0"
 dependencies = [
+ "aqr-blob",
  "walrus",
  "wasmparser 0.245.1",
 ]
@@ -1490,6 +1501,7 @@ name = "aqr-sfx"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-blob",
  "aqr-formula",
  "windows-sys",
 ]
@@ -1589,6 +1601,7 @@ name = "aqr-wasmrt"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-blob",
  "aqr-common",
  "aqr-formula",
  "libc",

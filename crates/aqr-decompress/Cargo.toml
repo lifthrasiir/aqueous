@@ -11,6 +11,9 @@ default = ["wasm", "sandbox"]
 wasm = ["aqr-wasmrt/wasm"]
 # ... or so in worker processes locked down by the system (`sandbox`).
 sandbox = ["wasm", "aqr-wasmrt/sandbox"]
+# Wasmtime linked, rather than the modules run by the interpreter blob that the program gives
+# (`set_interpreter`); always but on Windows x86-64, where the blob runs.
+wasmtime = ["wasm", "aqr-wasmrt/wasmtime"]
 
 [dependencies]
 aqr-api = { path = "../aqr-api" }
@@ -73,7 +76,13 @@ aqr-sqlite = { path = "../../codecs/aqr-sqlite" }
 aqr-tex = { path = "../../codecs/aqr-tex" }
 aqr-wrt = { path = "../../codecs/aqr-wrt" }
 
+# (Wasmtime, where the interpreter blob does not run)
+[target.'cfg(not(all(windows, target_arch = "x86_64")))'.dependencies]
+aqr-wasmrt = { path = "../aqr-wasmrt", default-features = false, features = ["wasmtime"] }
+
 [dev-dependencies]
+# (the tests run modules by Wasmtime, linked)
+aqr-wasmrt = { path = "../aqr-wasmrt", default-features = false, features = ["wasmtime", "sandbox"] }
 aqr-7z = { path = "../../codecs/aqr-7z" }
 aqr-exe = { path = "../../codecs/aqr-exe" }
 aqr-prores = { path = "../../codecs/aqr-prores", features = ["synth"] }
