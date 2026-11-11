@@ -18,3 +18,24 @@ for V in range(64):
     res[V]=[p for p,vs in found.items() if V in vs and st.startswith(p)]
 print(sum(1 for c in res.values() if c),'of 64 have candidates; unique:',sum(1 for c in res.values() if len(c)==1))
 print({V:c for V,c in res.items() if len(c)!=1})
+
+# resolve: longest candidate per V among probe matches; the rest from free code space
+known = {V: max(c, key=len) for V, c in res.items() if c}
+bad = [V for V, c in known.items() if any(o != c and (o.startswith(c) or c.startswith(o)) for W, o in known.items() if W != V)]
+print('conflicts', bad)
+strings = {}
+for V in range(64):
+    s = bits_of(enc_frames([frame_for(V)], q=5)[0]); h = header(s); strings[V] = s[h['mb']:]
+for V in bad: known.pop(V)
+free = {}
+for V in range(64):
+    if V in known: continue
+    st = strings[V]
+    for l in range(1, 13):
+        c = st[:l]
+        if not any(o.startswith(c) or c.startswith(o) for o in known.values()):
+            free[V] = c; break
+print(len(known), len(free), 'kraft known', sum(2.0 ** -len(c) for c in known.values()), 'free', sum(2.0 ** -len(c) for c in free.values()))
+allc = {**known, **free}
+print('prefix-free', not any(a != b and (allc[a].startswith(allc[b])) for a in allc for b in allc), 'kraft', sum(2.0 ** -len(c) for c in allc.values()))
+json.dump(allc, open('scripts/div3-probe/cbp_i_codes.json', 'w'))
