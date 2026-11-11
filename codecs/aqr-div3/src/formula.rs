@@ -105,6 +105,15 @@ pub fn video(d: &[u8]) -> Option<Video> {
 /// The formula of AVI file `input` with DivX 3 video, or None where it has none, or its frames do not come to less
 /// than 97% by the model. The same whatever `threads` is (none is used).
 pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
+    encode_with(input, 0.97)
+}
+
+/// [`encode`] taking the frames whatever they come to (for tests of the module).
+pub fn encode_unchecked(input: &[u8], _threads: usize) -> Option<Formula> {
+    encode_with(input, f64::INFINITY)
+}
+
+fn encode_with(input: &[u8], worst: f64) -> Option<Formula> {
     let v = video(input)?;
     if v.frames.len() < 4 || v.frames.iter().any(|f| f.len() > FRAME_MAX) {
         return None;
@@ -123,7 +132,7 @@ pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
     }
     skeleton.extend_from_slice(&input[p..]);
     let coded = enc.finish();
-    if coded.len() as f64 > 0.97 * frames_len as f64 {
+    if coded.len() as f64 > worst * frames_len as f64 {
         return None;
     }
     let mut f = Formula::default();

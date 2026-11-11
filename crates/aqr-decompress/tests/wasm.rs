@@ -3044,6 +3044,72 @@ fn snappy_plan_holds() {
     assert!(seen >= 10, "{seen} streams");
 }
 
+/// div3-recons lays its memory out as a stack, its limit its plan (constant: the model, a frame at most, three
+/// buffers): an AVI of synthetic DivX 3 frames (the syntax is walked on whatever the bits give, and the frames that do
+/// not parse are kept as they are), rebuilt as WebAssembly within the limit of the plan alone, the working memory that
+/// of the plan to the page, for a short file and a longer one.
+#[test]
+fn div3_plan_holds() {
+    fn chunk(id: &[u8; 4], d: &[u8]) -> Vec<u8> {
+        let mut v = id.to_vec();
+        v.extend_from_slice(&(d.len() as u32).to_le_bytes());
+        v.extend_from_slice(d);
+        if d.len() & 1 == 1 {
+            v.push(0);
+        }
+        v
+    }
+    fn list(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut v = b"LIST".to_vec();
+        v.extend_from_slice(&(body.len() as u32 + 4).to_le_bytes());
+        v.extend_from_slice(kind);
+        v.extend_from_slice(body);
+        v
+    }
+    let avi = |frames: &[Vec<u8>]| {
+        let mut strh = b"vidsdiv3".to_vec();
+        strh.extend_from_slice(&[0; 48]);
+        let mut strf = Vec::new();
+        for v in [40u32, 64, 48, 0x0018_0001, u32::from_le_bytes(*b"DIV3")] {
+            strf.extend_from_slice(&v.to_le_bytes());
+        }
+        strf.extend_from_slice(&[0; 20]);
+        let mut hdrl = chunk(b"avih", &[0; 56]);
+        hdrl.extend(list(b"strl", &[chunk(b"strh", &strh), chunk(b"strf", &strf)].concat()));
+        let mut movi = Vec::new();
+        for f in frames {
+            movi.extend(chunk(b"00dc", f));
+        }
+        let mut body = b"AVI ".to_vec();
+        body.extend(list(b"hdrl", &hdrl));
+        body.extend(list(b"movi", &movi));
+        let mut v = b"RIFF".to_vec();
+        v.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        v.extend(body);
+        v
+    };
+    // (skipped frames: all-skip P frames of a 64x48 picture, which parse; noise that does not)
+    let p_skip = |q: u8| {
+        let mut bits = vec![0u8, 1];
+        bits.extend((0..5).rev().map(|i| q >> i & 1));
+        bits.extend([1, 0, 0, 0, 1]); // use_skip, rl 0, dc 0, mv 1
+        bits.extend([1; 12]); // twelve skipped macroblocks
+        let mut out = vec![0u8; bits.len().div_ceil(8)];
+        for (i, b) in bits.iter().enumerate() {
+            out[i / 8] |= b << (7 - i % 8);
+        }
+        out
+    };
+    for n in [8usize, 400] {
+        let frames: Vec<Vec<u8>> = (0..n)
+            .map(|i| if i % 5 == 4 { aqr_common::rng::noise(97 + i) } else { p_skip(2 + (i % 3) as u8) })
+            .collect();
+        let file = avi(&frames);
+        let f = aqr_div3::formula::encode_unchecked(&file, 1).expect("a formula");
+        plan_holds(&format!("div3 {n}"), f, &file);
+    }
+}
+
 /// wasm-recons, gnu-gettext-recons and ima-recons lay their memory out as stacks, their limits
 /// their plans: of modules aqr-modules built; of `.mo` files with and without a hash table; of
 /// IMA ADPCM blocks of noise (any header) of one channel and of six.
