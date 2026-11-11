@@ -154,7 +154,12 @@ struct Host {
 }
 
 thread_local! {
-    static HOST: RefCell<Option<Host>> = const { RefCell::new(None) };
+    /// The host of the application this thread runs (null: none). A pointer, not a borrow: an
+    /// application may pull its inputs from (or push its outputs to) another application run on
+    /// the same thread within the call (a decoder's chain of part applications), which installs
+    /// its own host for the while and puts this one back ([`run`]); and nothing of one host is
+    /// reached through another's calls.
+    static HOST: std::cell::Cell<*mut Host> = const { std::cell::Cell::new(std::ptr::null_mut()) };
     /// The channels this thread made that no spawn has given to a gang yet, and the gang it is a
     /// task of.
     static PENDING: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
@@ -294,11 +299,10 @@ fn run(
         task: 0,
         empty: Vec::new(),
     };
-    HOST.with_borrow_mut(|h| {
-        assert!(h.is_none(), "nested emu::apply");
-        *h = Some(host);
-    });
-    PENDING.with_borrow_mut(Vec::clear);
+    // (an application of the same thread's put back as this one ends: see HOST)
+    let mut host = Box::new(host);
+    let outer = HOST.replace(&mut *host);
+    let pending_outer = PENDING.with_borrow_mut(std::mem::take);
 
     let mut args = vec![params.len() as u64];
     args.extend(resources.iter().map(|r| r.len() as u64));
@@ -319,16 +323,17 @@ fn run(
             }
         })
     };
-    let mut host = HOST.with_borrow_mut(|h| h.take()).unwrap();
+    HOST.set(outer);
+    let pending = PENDING.with_borrow_mut(|p| std::mem::replace(p, pending_outer));
     let result = result.and_then(|()| {
         // (no spawn gave the channels made last to a gang)
-        match PENDING.with_borrow_mut(std::mem::take).is_empty() {
+        match pending.is_empty() {
             true => Ok(()),
             false => Err(failure("channels made were not given to a gang".into())),
         }
     });
     result.map_err(|f| Failure { log: host.last_log.take(), ..f })?;
-    Ok(host)
+    Ok(*host)
 }
 
 fn trap(msg: String) -> ! {
@@ -468,8 +473,15 @@ fn end_of(ch: &mut Chan, send: bool) -> Result<(), String> {
     }
 }
 
+/// The host of the application this thread runs, if any.
+fn current<'a>() -> Option<&'a mut Host> {
+    // SAFETY: the host installed lives until it is taken off again (`run`, a task's thread), and
+    // is reached only from this thread, by the application's own calls
+    unsafe { HOST.get().as_mut() }
+}
+
 fn with<R>(f: impl FnOnce(&mut Host) -> Result<R, String>) -> R {
-    let r = HOST.with_borrow_mut(|h| f(h.as_mut().expect("aqr_api used outside emu::apply")));
+    let r = f(current().expect("aqr_api used outside emu::apply"));
     r.unwrap_or_else(|msg| trap(msg))
 }
 
@@ -623,7 +635,7 @@ pub(crate) mod sys {
         struct Send(crate::task::Record);
         // SAFETY: the closure `rec` refers to is `Sync`, and outlives the threads
         unsafe impl std::marker::Send for Send {}
-        let kind = super::HOST.with_borrow(|h| h.as_ref().map(|h| h.kind));
+        let kind = super::current().map(|h| h.kind);
         // (the channels made so far are given to this gang, or there are none to give)
         let pending = super::PENDING.with_borrow_mut(std::mem::take);
         let id = super::GANGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -646,7 +658,16 @@ pub(crate) mod sys {
                 Some(std::thread::spawn(move || {
                     let rec = rec;
                     let _traced = inherit.map(|f| f());
-                    super::HOST.with_borrow_mut(|h| *h = kind.map(super::task_host));
+                    // (the task's host, this thread's while it runs)
+                    let mut host = kind.map(|k| Box::new(super::task_host(k)));
+                    super::HOST.set(host.as_deref_mut().map_or(std::ptr::null_mut(), |h| h as *mut _));
+                    struct Unset;
+                    impl Drop for Unset {
+                        fn drop(&mut self) {
+                            super::HOST.set(std::ptr::null_mut());
+                        }
+                    }
+                    let _unset = Unset;
                     super::GANG.set(gang);
                     // (the channels it sent to closed as it ends, however it does)
                     struct End;
@@ -737,11 +758,9 @@ pub(crate) mod sys {
     /// Also outside [`apply`](super::apply), where the code of a module runs as a library.
     pub fn log(msg: &[u8]) {
         eprintln!("aqr_log: {}", String::from_utf8_lossy(msg));
-        super::HOST.with_borrow_mut(|h| {
-            if let Some(h) = h {
-                h.last_log = Some(msg.to_vec());
-            }
-        })
+        if let Some(h) = super::current() {
+            h.last_log = Some(msg.to_vec());
+        }
     }
 
     pub fn trap() -> ! {
