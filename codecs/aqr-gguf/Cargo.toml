@@ -1,0 +1,27 @@
+[package]
+name = "aqr-gguf"
+version = "0.1.0"
+edition = "2024"
+description = "GGUF model files rebuilt bit for bit: the floats' exponents and the quantised blocks' nibbles coded by a SIMD rANS of 16 symbols, the rest as it is"
+publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula"]
+
+[dependencies]
+aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-gguf-bench"
+path = "examples/bench.rs"
+
+[dev-dependencies]
+aqr-formula = { path = "../../crates/aqr-formula" }
+memmap2 = "0.9"

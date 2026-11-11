@@ -176,6 +176,7 @@ static ROWS: &[Row] = {
         start(Pdb, aqr_pdb::formula::starts),
         start(Arsc, aqr_arsc::formula::starts),
         start(Fasta, aqr_fasta::formula::starts),
+        start(Gguf, aqr_gguf::formula::starts),
         start(Obj, aqr_obj::formula::starts),
         anywhere(Ar, Of(&[b"!<"]), aqr_bundle::ar::starts),
         // (of the binary forms, only at the start)

@@ -1,0 +1,95 @@
+# aqr-gguf
+
+GGUF model files (llama.cpp's) rebuilt bit for bit (`FORMAT.md`): the header as it is, and the
+tensor data in segments of 16 MiB, each an application of the part module `gguf-recons`, in
+which
+
+- the floats' (BF16, F16, F32) exponents are symbols, a table for each tensor's part of a
+  segment (the 15 or 16 commonest exponents, the rest escapes), and their signs and mantissas
+  go as they are, without the low bits that are zero in all of them (F16 of BF16's precision:
+  3 bits; the few floats that are not, subnormals, are escapes whole);
+- the quantised blocks' quants are symbols: the nibbles of Q4_0, Q4_1, Q4_K, IQ4_NL, IQ4_XS
+  and MXFP4, Q6_K's low nibbles and its 2-bit high parts, Q8_0's high nibbles and the high 4
+  bits of Q5_0's, Q5_1's and Q5_K's quants (their low nibbles and lowest bits as they are); the
+  blocks' scales go to the side, for the archive to compress;
+- everything else (other types, padding, runs too short or that would not come to less) goes as
+  it is, and runs of 1 MiB or more of it are left out of the applications.
+
+Weights are close to noise: what is left to take is the order-0 entropy of the exponents
+(BF16's 8 bits come to about 2.6) and of the quants (a Q4_K nibble 3.86 bits, Q8_0's high
+nibble 3.6–3.7, Q6_K's 6 bits 5.86 as nibble and crumb). Contexts were measured and give
+little: the exponent before (2.594 -> 2.592 bits), the low nibble of Q8_0 given its high one
+(3.92 of 4). So the model is order-0 by table, and the work is in the speed.
+
+## The coder
+
+A static rANS of 32 interleaved 32-bit states, 16-bit words, probabilities of 15 bits, over
+an alphabet of 16 symbols, in groups of 32 symbols of one table (FORMAT.md §3). As all the
+states of a group have the same table, a symbol is found by comparing the slot with the 15
+cumulative frequencies, and its frequency and start are looked up by a permutation (AVX2) or a
+byte shuffle (SIMD128): no gather. The renormalisation reads the words of the states that need
+one by a table of the mask of those states. Natively the AVX2 kernels are taken where the
+processor has them (else one state at a time); the Wasm module runs SIMD128.
+
+On a Ryzen 7 9700X, one thread, 64M symbols of a table of 3.67 bits (`timing::speed`):
+
+| | Msym/s |
+|---|---|
+| encode, scalar (u32 division) | 374 |
+| encode, scalar, branchless renormalisation, Lemire's division | 726 |
+| encode, AVX2 (division by doubles, exact below 2^32) | 1555 |
+| decode, AVX2 | 1900 |
+
+## How it does
+
+Measured 2026-11-12 on a Ryzen 7 9700X (16 threads, 125 GB), through `aqr -c` and `aqr -d` (the
+default level, verification included), each file an archive of its own, the files read in place
+from another disk; "before" is `aqr` before aqr-gguf (zstd on the file as it is). Every file came
+back the same. (Q5_0, Q5_1 and Q5_K were coded after: Qwen3.5-4B Q4_K_M's 519 MB of Q5_K come to
+2.3% less, by `aqr-gguf-bench`.)
+
+| file | size | archive / input | before | compress | before | decompress | heap peak |
+|---|---|---|---|---|---|---|---|
+| gemma-4-26B mmproj BF16 | 1.19 GB | 0.6395 | 0.7614 | 428 MB/s | 150 MB/s | 1075 MB/s | 0.80 GB |
+| Qwen3.8-Flash mmproj F16 | 0.90 GB | 0.6606 | 0.7643 | 407 MB/s | 124 MB/s | 925 MB/s | 0.78 GB |
+| Qwen3.8-27B mmproj Q8_0 | 0.63 GB | 0.8078 | 0.8572 | 297 MB/s | 102 MB/s | 692 MB/s | 0.74 GB |
+| translategemma-4b Q4_K_M | 2.49 GB | 0.9626 | 0.9830 | 350 MB/s | 135 MB/s | 1179 MB/s | 1.56 GB |
+| gemma-4-E4B Q6_K | 6.22 GB | 0.9669 | 0.9955 | 330 MB/s | 134 MB/s | 1215 MB/s | 1.31 GB |
+| gemma-4-E4B Q8_0 | 8.03 GB | 0.9412 | 0.9556 | 372 MB/s | 94 MB/s | 1314 MB/s | 0.79 GB |
+| gemma-4-26B QAT Q4_0 | 14.44 GB | 0.8921 | 0.9283 | 321 MB/s | 140 MB/s | 1237 MB/s | 1.48 GB |
+| Qwen3.5-9B BF16 | 17.92 GB | 0.6608 | 0.7788 | 392 MB/s | 160 MB/s | 1879 MB/s | 0.73 GB |
+| Qwen3.8-27B Q4_K_M | 16.81 GB | 0.9624 | 0.9824 | 362 MB/s | 139 MB/s | 1454 MB/s | 2.00 GB |
+| Qwen3.8-Flash UD-Q4_K_XL, 4 of 4 | 12.09 GB | 0.9656 | 0.9783 | 355 MB/s | 129 MB/s | 1315 MB/s | 2.16 GB |
+
+The coding itself (`aqr-gguf-bench`, 16 threads, the file cached) runs at 1.6–3.8 GB/s and
+decodes at 5–6 GB/s (one thread: 330–670 MB/s coding, 550–1080 decoding). Through `aqr`, the
+rest is the archive's (a 5.3 GB Q4_K_M, `--stats`): the coded streams compressed whole at zstd's
+probe level to see whether they save (about 19 thread-seconds), then writing the batch and
+verifying it, about 4.5 s of 13.6 on one thread.
+
+A shard of 49.9 GB (Qwen3.8-Flash UD-Q4_K_XL, 2 of 4) did not finish: `aqr` grew to 80 GB of
+memory (the spill's regions mapped, 155 of 256 MiB, and the input) and was stopped. The archive
+holds a large file's batch whole (docs/streaming-encoder-design.md, steps 6 and 7).
+
+## Status
+
+Left:
+
+- Q2_K, Q3_K, IQ1–IQ3 and the trellis types (EXL3's) are kept as they are.
+- The heap peak of the encoder reaches the budget on files of Q4_K and Q6_K (2.0–2.16 GB): the
+  symbols of every segment in flight (17 of 16 MiB) and their words.
+- Files of tens of GB within the archive: see "How it does".
+- Within the archive, the streams coded are compressed at zstd's probe level all the same,
+  whole, to see whether they would save (`How::Light`), which costs as many thread-seconds as
+  the coding; and the archive's writing and verification of a large file are mostly on one
+  thread (see "How it does").
+- Native SIMD on AArch64 (NEON): the decoder and encoder run one state at a time there.
+
+## Tests
+
+`cargo rt -p aqr-gguf` (made-up files of every type coded, `synth`); `aqr-gguf-bench FILE
+[BYTES]` (the formula's streams, the speed of encoding and of decoding natively, the file
+rebuilt and compared; `THREADS` for the threads); `cargo test -r -p aqr-gguf --lib timing --
+--ignored --nocapture` (the coder's speed). aqr-decompress's `gguf_plans_hold` runs the Wasm
+module on them within its plan. Samples (models of LM Studio's and Hugging Face's) are read in
+place, not copied.

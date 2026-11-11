@@ -10,7 +10,8 @@ with stronger models, and rebuilds the original files bit for bit on extraction.
   `codecs/` with a `FORMAT.md` describing what it stores. To name some: images (PNG, JPEG, GIF,
   PSD, Clip Studio Paint, BMP and PNM, BCn textures in DDS), audio and video (MP3, FLAC, Ogg
   Vorbis, WAV and AIFF, FMOD sound banks, ProRes, Matroska and WebM), documents and data (PDF,
-  SQLite, HDF5, FITS, CSV and JSON Lines, plain text, FASTA, Wavefront OBJ, gettext catalogs),
+  SQLite, HDF5, FITS, CSV and JSON Lines, plain text, FASTA, Wavefront OBJ, gettext catalogs,
+  GGUF models),
   archives and images of discs (ZIP, 7z, RAR, tar, ar and cpio, ISO 9660 and UDF, CAB and CHM,
   LHA, ALZ and EGG, Electron's asar, git packs), the compressors found in and around them
   (deflate in gzip and zlib, LZMA and xz, bzip2, LZ4, Snappy, LZO, LZFSE, LZX, PPMd), and

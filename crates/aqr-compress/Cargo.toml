@@ -24,6 +24,7 @@ aqr-dex = { path = "../../codecs/aqr-dex" }
 aqr-dwarf = { path = "../../codecs/aqr-dwarf" }
 aqr-pdb = { path = "../../codecs/aqr-pdb" }
 aqr-fasta = { path = "../../codecs/aqr-fasta" }
+aqr-gguf = { path = "../../codecs/aqr-gguf" }
 aqr-wasm = { path = "../../codecs/aqr-wasm" }
 aqr-fsb = { path = "../../codecs/aqr-fsb" }
 aqr-ogg = { path = "../../codecs/aqr-ogg" }

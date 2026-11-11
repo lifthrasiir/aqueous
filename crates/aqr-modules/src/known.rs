@@ -256,6 +256,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/flate-set.block"),
     },
     Known {
+        name: "gguf-recons",
+        version: 1,
+        sha512_256: hex("4059cace682f979fc1645166e676770b6b1d388d49fe0e8121ca338e5fc5d931"),
+        block: include_bytes!("../wasm/gguf-recons.block"),
+    },
+    Known {
         name: "gif-recons",
         version: 2,
         sha512_256: hex("8f53a39d83da2c850989320f0f64709ceaec9d8d4046c03258cf776a9b496288"),

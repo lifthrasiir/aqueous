@@ -23,6 +23,7 @@ aqr-dex = { path = "../../codecs/aqr-dex", default-features = false }
 aqr-dwarf = { path = "../../codecs/aqr-dwarf", default-features = false }
 aqr-pdb = { path = "../../codecs/aqr-pdb", default-features = false }
 aqr-fasta = { path = "../../codecs/aqr-fasta", default-features = false }
+aqr-gguf = { path = "../../codecs/aqr-gguf", default-features = false }
 aqr-gif = { path = "../../codecs/aqr-gif", default-features = false }
 aqr-prores = { path = "../../codecs/aqr-prores", default-features = false }
 aqr-gnu-gettext = { path = "../../codecs/aqr-gnu-gettext", default-features = false }
@@ -257,6 +258,11 @@ required-features = ["wasm"]
 [[bin]]
 name = "fasta-recons"
 path = "src/bin/fasta-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "gguf-recons"
+path = "src/bin/gguf-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]

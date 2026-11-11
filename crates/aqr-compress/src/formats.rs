@@ -455,6 +455,15 @@ formats! {
         heap: 2.0,
         exts: &["fa", "fasta", "fna", "ffn", "fas"],
     }
+    /// GGUF model file (aqr-gguf), known by its header: at the start of data only.
+    Gguf = "gguf" {
+        recompressor: Pure(aqr_gguf::formula::encode),
+        // segments of 16 MiB, as many at once as threads, each holding its symbols and streams
+        // (about 4 bytes a byte); the long runs not coded are slices of the input
+        heap: 0.0,
+        exts: &["gguf"],
+        cost: 4,
+    }
     /// Android DEX file (aqr-dex), known by its header: at the start of data only.
     Dex = "dex" {
         recompressor: Pure(aqr_dex::formula::encode),

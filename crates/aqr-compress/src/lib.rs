@@ -1453,7 +1453,10 @@ fn files_len(d: &[u8]) -> usize {
 /// is stored once only where both are cut alike. So is a ProRes file's of [`PRORES_UNCOMPARED`]
 /// bytes or more: its frames are coded to a fraction of their bytes, which zstd of the file never
 /// nears, and the comparison costs 3.7 s on one thread at the end for 1.3 GB. A small one is
-/// compared still: what zstd makes of nearly blank frames may beat the formula's modules.
+/// compared still: what zstd makes of nearly blank frames may beat the formula's modules. So is a
+/// GGUF file's: its encoder codes a run only where that comes to less than its bytes (which zstd
+/// hardly compresses: weights), and comparing compresses gigabytes twice on one thread (3.6 of
+/// 6.3 s for a model of 1.2 GB).
 fn smaller(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], opt: &Options, cx: &Cx) -> bool {
     smaller_as(f, gaps, d, bundle::Kinds::of(f), opt, cx)
 }
@@ -1483,6 +1486,7 @@ fn smaller_as(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], of: bundle::
         || of.files_apart
         || aqr_ppmd::formula::is(f)
         || (d.len() >= PRORES_UNCOMPARED && aqr_prores::formula::is(f))
+        || aqr_gguf::formula::is(f)
         || {
             #[cfg(test)]
             tests::COMPARED.with(|c| c.borrow_mut().push(d.len()));

@@ -4761,6 +4761,18 @@ fn fasta_plans_hold() {
     }
 }
 
+/// gguf-recons is a part module whose plan follows its params alone, to the page: of made-up GGUF
+/// files of every type it codes, in segments of an application each (runs of floats and blocks
+/// cut at chunks, the Wasm SIMD decoder's groups whole and partial).
+#[test]
+fn gguf_plans_hold() {
+    for (seed, scale) in [(1, 1), (3, 8)] {
+        let d = aqr_gguf::synth::file(seed, scale);
+        let f = aqr_gguf::formula::encode_in(&d, 2, 1 << 16).unwrap();
+        assert!(applications_hold(&format!("gguf {seed}"), &f, &d, |_| 0) > 1, "{seed}");
+    }
+}
+
 /// bundle-recons is a part module whose plan is the same whatever the lengths: the fixtures of
 /// every kind of archive, and a tar of bodies past its windows (pieces and several windows,
 /// padding, a gap at the end).
