@@ -2500,6 +2500,17 @@ fn alz(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
     Some(e.formula)
 }
 
+/// aqr-isc's formula of an InstallShield cabinet, the contents of its files a content of the
+/// application, recompressed in turn. Its chunks decode within what is left of the budget
+/// ([`Options::expansion`]).
+fn isc(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
+    let (profile, zlib) = opt.flate();
+    let o = aqr_isc::formula::Options { threads: opt.threads, profile, zlib, limit: cx.inflate_left() };
+    let e = aqr_isc::formula::encode_with(d, &o)?;
+    cx.inflate(e.inflated);
+    Some(e.formula)
+}
+
 /// aqr-egg's formula of an EGG archive, the contents of its files a content of the
 /// applications (or of the formula, those stored), recompressed in turn, each by its kind by its
 /// name ([`kind_by_name`]). Its DEFLATE, bzip2 and LZMA blocks decode within what is left of the
@@ -3194,6 +3205,30 @@ mod tests {
         );
         let r = recompress_as(Format::Alz, &d, &opt, 0, &cx);
         eprintln!("as: {}", r.is_some());
+    }
+
+    #[test]
+    fn installshield_cabinet_taken_apart() {
+        // a data volume of chunks of zlib's DEFLATE, two files of text
+        let text: Vec<u8> =
+            (0..120_000u32).flat_map(|i| format!("setup {} file{} ", i % 977, i % 31).into_bytes()).collect();
+        let mut d = b"ISc(\xb0\x04\x00\x02\0\0\0\0".to_vec();
+        d.extend(0x200u32.to_le_bytes());
+        d.extend([0; 4]);
+        d.extend(0x200u32.to_le_bytes());
+        d.resize(0x200, 0);
+        for c in text[..100_000].chunks(32768).chain(text[100_000..].chunks(32768)) {
+            let z = aqr_flate::zlib::compress(c, aqr_flate::zlib::Params::default()).unwrap();
+            d.extend((z.len() as u16).to_le_bytes());
+            d.extend(z);
+        }
+        assert_eq!(detect(&d), Some(Format::Isc));
+        let opt = Options { shared_modules: true, level: Level::Of(9), ..Options::default() };
+        let f = recompress(&d, &opt);
+        assert!(f.applies().iter().any(|a| a.module == aqr_decompress::FLATE));
+        assert!(f.eval(&Native::default()).unwrap() == d);
+        // (known at the start of data only: not found in other data)
+        assert_ne!(detect([&b"some data before "[..], &d].concat().as_slice()), Some(Format::Isc));
     }
 
     #[test]

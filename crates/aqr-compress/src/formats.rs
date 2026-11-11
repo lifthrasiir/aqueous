@@ -398,6 +398,12 @@ formats! {
         exts: &["alz"],
         extent: aqr_alz::formula::extent,
     }
+    /// InstallShield cabinet of data (`data1.cab`, aqr-isc, and aqr-flate on its DEFLATE chunks),
+    /// known by its header: at the start of data only.
+    Isc = "isc" {
+        recompressor: Cx(|d, _, opt, _, cx| crate::isc(d, opt, cx)),
+        heap: 9.0,
+    }
     /// EGG archive (aqr-egg, and aqr-flate on its DEFLATE blocks, aqr-bz2 on its bzip2 blocks,
     /// aqr-lzma on its LZMA blocks), known by its header and the record after it.
     Egg = "egg" {

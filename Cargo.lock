@@ -256,6 +256,7 @@ dependencies = [
  "aqr-hfs",
  "aqr-infer-recs",
  "aqr-inno",
+ "aqr-isc",
  "aqr-iso",
  "aqr-jpeg",
  "aqr-jsonl",
@@ -643,6 +644,16 @@ version = "0.1.0"
 dependencies = [
  "aqr-l10n",
  "serde_json",
+]
+
+[[package]]
+name = "aqr-isc"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-decompress",
+ "aqr-flate",
+ "aqr-formula",
 ]
 
 [[package]]

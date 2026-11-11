@@ -1,0 +1,21 @@
+[package]
+name = "aqr-isc"
+version = "0.1.0"
+edition = "2024"
+description = "InstallShield cabinets (ISc( data1.cab) taken apart into their files' contents, the DEFLATE chunks rebuilt by aqr-flate, without a module of their own"
+publish = false
+
+[dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula" }
+aqr-flate = { path = "../aqr-flate" }
+
+[dev-dependencies]
+aqr-decompress = { path = "../../crates/aqr-decompress" }
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-isc-check"
+path = "examples/check.rs"

@@ -190,6 +190,7 @@ static ROWS: &[Row] = {
         start(ProRes, aqr_prores::formula::starts),
         // (a header starts with its size and checksum: too weak to look for in other data)
         start(Lha, aqr_lha::formula::starts),
+        start(Isc, aqr_isc::formula::starts),
         // (before tables: JSON lines may cut into the same number of fields)
         start(Jsonl, aqr_jsonl::formula::starts),
         start(Xsv, aqr_xsv::formula::starts),
