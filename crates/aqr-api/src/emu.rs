@@ -41,6 +41,7 @@ fn inherit() -> Option<Box<dyn FnOnce() -> Box<dyn Any> + Send>> {
 }
 
 /// The calling thread waiting for `what`, until the result is dropped.
+#[cfg(feature = "alloc")]
 pub(crate) fn waiting(what: &'static str) -> Option<Box<dyn Any>> {
     TRACING.get().map(|t| (t.wait)(what))
 }

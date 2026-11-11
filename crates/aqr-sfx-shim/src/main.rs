@@ -1,7 +1,8 @@
 //! The self-extracting stub: an Aqueous archive is appended to this executable, and running it
-//! decodes the archive and writes its files out. The modules run through the interpreter blob
-//! (`aqr-interp`) merged into this stub by `aqr-ld merge`, so the stub links no codecs and no
-//! Wasmtime; the apply logic is in [`aqr_sfx`].
+//! decodes the archive and writes its files out. The modules run through the blobs merged into
+//! this stub (`aqr --format sfx`, or `aqr-ld merge`): the native blobs of the modules that the
+//! archive names by their hashes, and the interpreter blob (`aqr-interp`) for any other, so the
+//! stub links no codecs and no Wasmtime; the apply logic is in [`aqr_sfx`].
 //!
 //! The archive is found by its own header magic: the stub scans itself from the end for the last
 //! place a valid archive begins, so nothing is appended but the archive (which runs to the end of
@@ -13,7 +14,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use aqr_formula::aqr::{self, HEADER_MAGIC};
-use aqr_sfx::{Interp, extract};
+use aqr_sfx::{Sfx, extract};
 
 fn main() -> ExitCode {
     match run() {
@@ -28,7 +29,7 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("cannot find the program: {e}"))?;
     let bytes = std::fs::read(&exe).map_err(|e| format!("{}: {e}", exe.display()))?;
-    let runner = Interp::find().ok_or("no interpreter blob is merged into this stub")?;
+    let runner = Sfx::find();
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
 
     // the appended archive runs to the end of the file; find where it begins by its header magic,

@@ -2,7 +2,7 @@
 name = "aqr-sfx"
 version = "0.1.0"
 edition = "2024"
-description = "The self-extracting apply logic: runs an archive's modules through the interpreter (and native) blobs merged into a stub, and writes its files out. The stub is aqr-sfx-shim"
+description = "The self-extracting apply logic: runs an archive's modules through the native and interpreter blobs merged into a stub, and writes its files out. The stub is aqr-sfx-shim"
 publish = false
 
 [dependencies]

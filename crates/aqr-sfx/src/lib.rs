@@ -1,14 +1,20 @@
 //! The self-extracting apply logic, shared by the stub (`aqr-sfx-shim`) and the tool that builds
-//! self-extracting archives: [`Interp`] finds the interpreter blob (`aqr-interp`) merged into the
-//! program through the dispatch table `aqr-ld merge` wrote into the anchor, and wraps it as a
-//! [`Runner`] so the decoder runs each module through it; [`extract`] writes a decoded archive's
-//! files out. The merged blob is Windows x86-64 only; elsewhere [`Interp::find`] gives nothing.
+//! self-extracting archives (`aqr --format sfx`): [`Sfx`] finds the blobs merged into the program
+//! through the dispatch table `aqr-ld merge` wrote into the anchor -- the native module blobs
+//! (aqr-dll), each named by its module's hash ([`native_name`]), and the interpreter blob
+//! (`aqr-interp`, [`INTERP`]) for any other module -- and is the [`Runner`] the decoder runs each
+//! module through; [`extract`] writes a decoded archive's files out. The merged blobs are Windows
+//! x86-64 only; elsewhere [`Sfx::find`] finds none.
+
+mod native;
 
 use core::ffi::c_void;
 
 use aqr_api::dll::{Slice, SliceMut};
 use aqr_formula::Resource;
 use aqr_formula::aqr::{Decoded, Failure, Loaded, PartIn, PartOut, Runner};
+pub use native::native_name;
+use native::{Native, NativeLoaded};
 
 /// An input of a part application, as the interpreter pulls it.
 #[repr(C)]
@@ -68,24 +74,52 @@ pub struct Vtable {
     drop: unsafe extern "C" fn(*mut c_void),
 }
 
-/// A runner that sends every module to the merged interpreter blob.
-pub struct Interp {
-    vtable: &'static Vtable,
+/// The name of the interpreter blob in the dispatch table.
+pub const INTERP: &str = "aqr-interp";
+
+/// The runner of a self-extracting program: the modules with native blobs merged into it run
+/// natively, any other through the interpreter blob, where it is merged.
+pub struct Sfx {
+    interp: Option<&'static Vtable>,
+    natives: Vec<Native>,
 }
 
-// SAFETY: the vtable is in the image, static; the interpreter's own state is thread-safe.
-unsafe impl Sync for Interp {}
+// SAFETY: the vtable is in the image, static; the interpreter's own state is thread-safe, and so
+// is each native blob's (its applications share nothing).
+unsafe impl Sync for Sfx {}
 
-impl Runner for Interp {
+impl Sfx {
+    /// How many native module blobs are merged, and whether the interpreter blob is.
+    pub fn merged(&self) -> (usize, bool) {
+        (self.natives.len(), self.interp.is_some())
+    }
+}
+
+impl Runner for Sfx {
     fn load(&self, wasm: &[u8]) -> Decoded<Box<dyn Loaded + '_>> {
+        if let Some(hash) = native::stand_in_hash(wasm) {
+            let n = self.natives.iter().find(|n| n.hash == hash);
+            let n = n.ok_or_else(|| Failure::Resource("a native module blob not merged".into()))?;
+            return Ok(Box::new(NativeLoaded { apply: n.apply }));
+        }
+        let vtable = self.interp.ok_or_else(|| {
+            Failure::Resource("a module with no native blob merged, and no interpreter blob either".into())
+        })?;
         let mut error = [0u8; 1024];
         let mut len = 0;
         // SAFETY: the interpreter's load takes the module's bytes and a place for a message
-        let handle = unsafe { (self.vtable.load)(Slice::of(wasm), SliceMut::of(&mut error), &mut len) };
+        let handle = unsafe { (vtable.load)(Slice::of(wasm), SliceMut::of(&mut error), &mut len) };
         if handle.is_null() {
             return Err(Failure::Invalid(String::from_utf8_lossy(&error[..len]).into_owned()));
         }
-        Ok(Box::new(Loaded_ { vtable: self.vtable, handle }))
+        Ok(Box::new(Loaded_ { vtable, handle }))
+    }
+
+    fn registered(&self, hash: &[u8; 32]) -> Decoded<Vec<u8>> {
+        match self.natives.iter().find(|n| n.hash == *hash) {
+            Some(n) => Ok(native::stand_in(hash, &n.slots)),
+            None => Err(Failure::Resource("a registered module with no native blob merged".into())),
+        }
     }
 }
 
@@ -225,7 +259,7 @@ unsafe extern "C" fn push(ctx: *mut c_void, ptr: *const u8, len: usize) -> u32 {
     }
 }
 
-// ---- finding the merged interpreter blob
+// ---- finding the merged blobs
 
 /// What `aqr-ld merge` fills: the dispatch table's place in the image (its magic, then RVA and
 /// length).
@@ -242,18 +276,21 @@ static AQR_PEMERGE_ANCHOR: Anchor =
     Anchor { magic: *b"\x89AQRPEMERGEv1\x00\x00\x00", dispatch_rva: 0, dispatch_len: 0 };
 
 #[cfg(windows)]
-impl Interp {
-    /// The interpreter blob merged into this stub, if any: the dispatch table names it, giving
-    /// the RVA of its `aqr_interp_vtable` and its exception table (registered here).
-    pub fn find() -> Option<Interp> {
+impl Sfx {
+    /// The blobs merged into this program, as the dispatch table names them: the interpreter
+    /// blob ([`INTERP`], the RVA of its `aqr_interp_vtable`) and the native module blobs
+    /// ([`native_name`], the RVA of each `aqr_dll_apply`), each one's exception table registered
+    /// here (for the unwinder: traps, panics).
+    pub fn find() -> Sfx {
         unsafe extern "C" {
             static __ImageBase: u8;
         }
         unsafe extern "system" {
             fn RtlAddFunctionTable(table: *const u8, count: u32, base: u64) -> i32;
         }
+        let mut sfx = Sfx { interp: None, natives: Vec::new() };
         let base = &raw const __ImageBase as usize;
-        let u32_at = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        let u32_at = |b: &[u8], o: usize| b.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
         let (rva, len) = unsafe {
             (
                 std::ptr::read_volatile(&AQR_PEMERGE_ANCHOR.dispatch_rva),
@@ -261,36 +298,46 @@ impl Interp {
             )
         };
         if rva == 0 || len < 4 {
-            return None;
+            return sfx;
         }
         let table = unsafe { std::slice::from_raw_parts((base + rva as usize) as *const u8, len as usize) };
-        // the first (only) merged module is the interpreter blob; its entry: apply_rva (the
-        // vtable function), info_rva, pdata_rva, pdata_count, mod_base, name_off (6 u32)
-        if u32_at(table, 0) == 0 {
-            return None;
+        // the count, then an entry each (apply_rva, info_rva, pdata_rva, pdata_count, mod_base,
+        // name_off: 6 u32), then the names (each its length, u32, and its bytes)
+        for k in 0..u32_at(table, 0).unwrap_or(0) as usize {
+            let field = |i: usize| u32_at(table, 4 + k * 24 + i * 4).unwrap_or(0);
+            let (apply_rva, pdata_rva, pdata_count, mod_base, name_at) =
+                (field(0), field(2), field(3), field(4), field(5) as usize);
+            let Some(n) = u32_at(table, name_at) else { continue };
+            let Some(name) = table.get(name_at + 4..name_at + 4 + n as usize) else { continue };
+            if pdata_count > 0 {
+                unsafe {
+                    RtlAddFunctionTable(
+                        (base + pdata_rva as usize) as *const u8,
+                        pdata_count,
+                        (base + mod_base as usize) as u64,
+                    )
+                };
+            }
+            let at = base + apply_rva as usize;
+            if name == INTERP.as_bytes() {
+                // SAFETY: the merge wrote the RVA of aqr_interp_vtable, which returns the static vtable
+                let vtable_fn: extern "C" fn() -> *const Vtable = unsafe { std::mem::transmute(at) };
+                sfx.interp = Some(unsafe { &*vtable_fn() });
+            } else if let Some((hash, slots)) = native::parse_native_name(name) {
+                // SAFETY: the merge wrote the RVA of the blob's aqr_dll_apply
+                let apply: aqr_api::dll::ApplyFn = unsafe { std::mem::transmute(at) };
+                sfx.natives.push(Native { hash, slots, apply });
+            }
         }
-        let (apply_rva, pdata_rva, pdata_count, mod_base) =
-            (u32_at(table, 4), u32_at(table, 12), u32_at(table, 16), u32_at(table, 20));
-        if pdata_count > 0 {
-            // the unwinder finds the interpreter's functions from here (traps, panics)
-            unsafe {
-                RtlAddFunctionTable(
-                    (base + pdata_rva as usize) as *const u8,
-                    pdata_count,
-                    (base + mod_base as usize) as u64,
-                )
-            };
-        }
-        // SAFETY: the merge wrote the RVA of aqr_interp_vtable, which returns the static vtable
-        let vtable_fn: extern "C" fn() -> *const Vtable = unsafe { std::mem::transmute(base + apply_rva as usize) };
-        Some(Interp { vtable: unsafe { &*vtable_fn() } })
+        sfx
     }
 }
 
 #[cfg(not(windows))]
-impl Interp {
-    pub fn find() -> Option<Interp> {
-        None
+impl Sfx {
+    /// None: the merged blobs are Windows x86-64 only.
+    pub fn find() -> Sfx {
+        Sfx { interp: None, natives: Vec::new() }
     }
 }
 
