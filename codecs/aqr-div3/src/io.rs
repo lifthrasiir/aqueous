@@ -19,6 +19,12 @@ pub trait Io {
     fn raw(&mut self, n: u32) -> Result<u32, Error>;
     /// One bit, adaptive under `ctx`.
     fn flag(&mut self, ctx: u32) -> Result<u32, Error>;
+    /// `n` (at most 16) bits, the top eight coded adaptively under `ctx` as a binary tree, the others flat.
+    fn field(&mut self, n: u32, ctx: u32) -> Result<u32, Error>;
+    /// `n` (at most 32) bits that must be `v`: not coded.
+    fn expect(&mut self, v: u32, n: u32) -> Result<(), Error>;
+    /// `n` bits that follow from the others (a checksum): not coded; written as zeros when decompressing, to be patched.
+    fn derived(&mut self, n: u32) -> Result<(), Error>;
 }
 
 #[inline]
@@ -78,6 +84,24 @@ impl<C: Coder> Io for Enc<'_, '_, C> {
         self.rc.bit(self.m.slot(ctx, 0x8000_0000), v);
         Ok(v)
     }
+    fn field(&mut self, n: u32, ctx: u32) -> Result<u32, Error> {
+        let v = self.r.get(n).ok_or(Error::Parse)?;
+        let k = n.min(8);
+        for i in 0..k {
+            let node = 1u32 << i | v >> (n - i);
+            self.rc.bit(self.m.slot(ctx, node), v >> (n - 1 - i) & 1);
+        }
+        for i in (0..n - k).rev() {
+            self.rc.flat(v >> i & 1);
+        }
+        Ok(v)
+    }
+    fn expect(&mut self, v: u32, n: u32) -> Result<(), Error> {
+        if self.r.get(n).ok_or(Error::Parse)? == v { Ok(()) } else { Err(Error::Parse) }
+    }
+    fn derived(&mut self, n: u32) -> Result<(), Error> {
+        self.r.get(n).map(|_| ()).ok_or(Error::Parse)
+    }
 }
 
 pub struct Dec<'m, C: Coder> {
@@ -121,6 +145,27 @@ impl<C: Coder> Io for Dec<'_, C> {
         self.w.put(v, 1);
         Ok(v)
     }
+    fn field(&mut self, n: u32, ctx: u32) -> Result<u32, Error> {
+        let k = n.min(8);
+        let mut v = 0u32;
+        for i in 0..k {
+            let node = 1u32 << i | v;
+            v = v << 1 | self.rc.bit(self.m.slot(ctx, node), 0);
+        }
+        for _ in 0..n - k {
+            v = v << 1 | self.rc.flat(0);
+        }
+        self.w.put(v, n);
+        Ok(v)
+    }
+    fn expect(&mut self, v: u32, n: u32) -> Result<(), Error> {
+        self.w.put(v, n);
+        Ok(())
+    }
+    fn derived(&mut self, n: u32) -> Result<(), Error> {
+        self.w.put(0, n);
+        Ok(())
+    }
 }
 
 pub struct Check<'a> {
@@ -147,5 +192,14 @@ impl Io for Check<'_> {
     }
     fn flag(&mut self, _ctx: u32) -> Result<u32, Error> {
         self.r.get(1).ok_or(Error::Parse)
+    }
+    fn field(&mut self, n: u32, _ctx: u32) -> Result<u32, Error> {
+        self.r.get(n).ok_or(Error::Parse)
+    }
+    fn expect(&mut self, v: u32, n: u32) -> Result<(), Error> {
+        if self.r.get(n).ok_or(Error::Parse)? == v { Ok(()) } else { Err(Error::Parse) }
+    }
+    fn derived(&mut self, n: u32) -> Result<(), Error> {
+        self.r.get(n).map(|_| ()).ok_or(Error::Parse)
     }
 }
