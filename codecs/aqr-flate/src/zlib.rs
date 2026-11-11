@@ -293,6 +293,7 @@ impl<'a> Window<'a> {
     }
 
     /// Slides the window by `w`.
+    #[cfg_attr(target_family = "wasm", target_feature(enable = "simd128"))]
     fn slide(&mut self) {
         let w = self.w;
         self.buf.copy_within(w..self.cursor + self.ahead, 0);
@@ -342,12 +343,29 @@ impl<'a> Window<'a> {
         let cs: &[u8; 274] = self.buf[c..c + 274].try_into().unwrap();
         let mut n = 3;
         while n < 258 {
-            let a = u128::from_le_bytes(xs[n..n + 16].try_into().unwrap());
-            let b = u128::from_le_bytes(cs[n..n + 16].try_into().unwrap());
-            let d = a ^ b;
-            if d != 0 {
-                n += (d.trailing_zeros() / 8) as usize;
+            // (in Wasm a vector's bytes compared, where u128 would be two halves; the callers
+            // enable SIMD128 there)
+            #[cfg(target_family = "wasm")]
+            // SAFETY: SIMD128 is of the profile of the modules; the loads are within the views.
+            let eq = unsafe {
+                use core::arch::wasm32::*;
+                let ld = |s: &[u8; 274]| v128_load(s.as_ptr().add(n) as *const v128);
+                i8x16_bitmask(i8x16_eq(ld(xs), ld(cs)))
+            };
+            #[cfg(target_family = "wasm")]
+            if eq != 0xffff {
+                n += (!eq).trailing_zeros() as usize;
                 break;
+            }
+            #[cfg(not(target_family = "wasm"))]
+            {
+                let a = u128::from_le_bytes(xs[n..n + 16].try_into().unwrap());
+                let b = u128::from_le_bytes(cs[n..n + 16].try_into().unwrap());
+                let d = a ^ b;
+                if d != 0 {
+                    n += (d.trailing_zeros() / 8) as usize;
+                    break;
+                }
             }
             n += 16;
         }
@@ -389,6 +407,7 @@ impl<'a> Window<'a> {
 
     /// Searches the chain from `h` for the cursor on behalf of all `jobs` at once, each as
     /// its own search with its own best length and budget would.
+    #[cfg_attr(target_family = "wasm", target_feature(enable = "simd128"))]
     fn walk(&self, h: usize, jobs: &mut [Job]) {
         if let [job] = jobs {
             if job.active {
@@ -1025,6 +1044,7 @@ impl<'a> Emulator<'a> {
     ///
     /// [`predict`]: Emulator::predict
     /// [`commit`]: Emulator::commit
+    #[cfg_attr(target_family = "wasm", target_feature(enable = "simd128"))]
     pub fn run(&mut self, out: &mut Vec<Token>, limit: usize) -> bool {
         if self.e.kind != Kind::Greedy || self.e.lanes[0].pending.is_some() {
             while out.len() < limit {
@@ -1297,7 +1317,10 @@ pub fn compress_part(data: &[u8], dict: usize, p: Params, last: bool) -> Option<
         start = end;
         if end_of_data {
             if !last {
-                let sync = Block { last: false, body: Body::Stored { pad: 0, len: 0 } };
+                let sync = Block {
+                    last: false,
+                    body: Body::Stored { pad: 0, len: 0 },
+                };
                 w.block(&sync, &[], part).ok()?;
             }
             return w.finish(0, &[]).ok();
