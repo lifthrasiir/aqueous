@@ -1,11 +1,11 @@
 //! The syntax of I and P frames, walked once for both directions (see `io`).
+use crate::tables::*;
+use alloc::vec;
+use alloc::vec::Vec;
 use aqr_walk::bits::{BitReader, BitWriter};
 use aqr_walk::io::{Check, Dec, ESC, Enc, Io, Vlc};
 use aqr_walk::model::Model;
 use aqr_walk::rc::Coder;
-use crate::tables::*;
-use alloc::vec;
-use alloc::vec::Vec;
 
 pub use aqr_walk::Error as FrameError;
 
@@ -203,6 +203,8 @@ impl Syntax {
         Ok(k)
     }
 
+    // (the blocks of a macroblock by index, as the syntax has them)
+    #[allow(clippy::needless_range_loop)]
     fn walk_i<I: Io>(&self, io: &mut I, g: &Geom) -> R<()> {
         io.raw(5)?; // q
         io.raw(5)?; // slice code
@@ -238,7 +240,11 @@ impl Syntax {
                     };
                     read_dc(io, dct, (i < 4) as u32)?;
                     if cb[i] != 0 {
-                        if i < 4 { ac_block(io, &self.intra[rl], 2, 63)? } else { ac_block(io, &self.inter[rlc], 3, 63)? }
+                        if i < 4 {
+                            ac_block(io, &self.intra[rl], 2, 63)?
+                        } else {
+                            ac_block(io, &self.inter[rlc], 3, 63)?
+                        }
                     }
                 }
             }
@@ -281,7 +287,11 @@ impl Syntax {
                         };
                         read_dc(io, dct, (i < 4) as u32)?;
                         if cb(i) {
-                            if i < 4 { ac_block(io, &self.intra[rl], 2, 63)? } else { ac_block(io, &self.inter[rl], 3, 63)? }
+                            if i < 4 {
+                                ac_block(io, &self.intra[rl], 2, 63)?
+                            } else {
+                                ac_block(io, &self.inter[rl], 3, 63)?
+                            }
                         }
                     }
                 } else {

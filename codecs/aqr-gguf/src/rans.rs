@@ -130,7 +130,7 @@ impl Encoder {
 
     /// Groups of 32 symbols each, all of `table`: `syms.len()` a multiple of 32.
     pub fn groups(&mut self, table: u32, syms: &[u8]) {
-        debug_assert!(syms.len() % LANES == 0);
+        debug_assert!(syms.len().is_multiple_of(LANES));
         self.syms.extend_from_slice(syms);
         self.groups.extend(std::iter::repeat_n((table, LANES as u8), syms.len() / LANES));
     }
@@ -236,8 +236,8 @@ impl Encoder {
         }
         let at = out.len();
         out.resize(at + 2 * words.len(), 0);
-        for (o, w) in out[at..].chunks_exact_mut(2).zip(&words) {
-            o.copy_from_slice(&w.to_le_bytes());
+        for (o, w) in out[at..].as_chunks_mut::<2>().0.iter_mut().zip(&words) {
+            *o = w.to_le_bytes();
         }
         out
     }
@@ -296,8 +296,11 @@ impl Decoder {
     /// Decodes `out.len() / 32` full groups of table `t` into `out`, reading words from
     /// `words` at `*pos` (which must have [`GROUP_BYTES`] bytes for each group past it).
     #[inline]
+    // (groups as slices: of arrays, the scalar kernel is unrolled for them, gguf-recons 787
+    // bytes larger)
+    #[allow(clippy::chunks_exact_to_as_chunks)]
     pub fn groups(&mut self, t: &Table, words: &[u8], pos: &mut usize, out: &mut [u8]) {
-        debug_assert!(out.len() % LANES == 0);
+        debug_assert!(out.len().is_multiple_of(LANES));
         assert!(words.len() >= *pos + out.len() * 2);
         match self.kernel {
             Kernel::Scalar => {
@@ -449,6 +452,8 @@ mod avx2 {
         }
     }
 
+    // (the 4 vectors of the states by index, as the lanes they hold)
+    #[allow(clippy::needless_range_loop)]
     #[target_feature(enable = "avx2")]
     pub(super) unsafe fn groups(x: &mut [u32; LANES], t: &Table, words: &[u8], pos: &mut usize, out: &mut [u8]) {
         unsafe {
@@ -466,7 +471,7 @@ mod avx2 {
                 std::array::from_fn(|k| _mm256_loadu_si256(x.as_ptr().add(8 * k) as *const __m256i));
             let mut p = *pos;
             let w = words.as_ptr();
-            for g in out.chunks_exact_mut(LANES) {
+            for g in out.as_chunks_mut::<LANES>().0 {
                 let mut syms = [_mm256_setzero_si256(); 4];
                 for k in 0..4 {
                     let v = st[k];
@@ -630,7 +635,7 @@ mod tests {
         let tables: Vec<Table> = counts.iter().map(Table::of_counts).collect();
         let pick = |t: usize, r: &mut dyn FnMut() -> u64| loop {
             let s = (r() % 16) as usize;
-            if tables[t].freq[s] > 0 && (r() % 4 == 0 || counts[t][s] > 10) {
+            if tables[t].freq[s] > 0 && (r().is_multiple_of(4) || counts[t][s] > 10) {
                 return s as u8;
             }
         };

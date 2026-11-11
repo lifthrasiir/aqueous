@@ -50,6 +50,7 @@ pub fn table(r: &mut Reader) -> Result<Vec<(u64, u64)>> {
 
 /// The file of `size` bytes from the coded frames, the skeleton and the layout (see `FORMAT.md`), put to `out`.
 /// The chunks are decoded one after the other here; `formula::decode` does it at once natively.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     coded: &mut dyn Pull,
     skeleton: &mut dyn Pull,
@@ -144,7 +145,16 @@ fn part(params_len: u64, in0_len: u64, in1_len: u64, in2_len: u64, in3_len: u64,
     aqr_api::Params::read(0, &mut p);
     let (w, h) = dims(&p)?;
     let mut out = Written::new(size);
-    run(&mut In::<0>::new(in0_len), &mut In::<1>::new(in1_len), &mut In::<2>::new(in2_len), &mut In::<3>::new(in3_len), &mut out, w, h, size)?;
+    run(
+        &mut In::<0>::new(in0_len),
+        &mut In::<1>::new(in1_len),
+        &mut In::<2>::new(in2_len),
+        &mut In::<3>::new(in3_len),
+        &mut out,
+        w,
+        h,
+        size,
+    )?;
     match out.total() == size {
         true => Ok(()),
         false => Err(Error("output of another length")),

@@ -408,7 +408,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "pdb-types",
         version: 1,
-        sha512_256: hex("d33037eaac57e632e3d52732ed8df28537a8604990d826128555de02065a3b28"),
+        sha512_256: hex("33bfc52d05afcbe85d7bf7b7b8c56a17cec6a5442240964ddf905cbeae3ff499"),
         block: include_bytes!("../wasm/pdb-types.block"),
     },
     Known {

@@ -263,6 +263,8 @@ fn float(
         // (the escapes over what was put for them: whole, or their exponents)
         if esc > 0 {
             let mut j = 0;
+            // (a counter of its own: of `enumerate`, gguf-recons is 5 bytes larger)
+            #[allow(clippy::explicit_counter_loop)]
             for i in (0..e).filter(|&i| a[i] >= m) {
                 if r.whole {
                     dst[fb * i..fb * (i + 1)].copy_from_slice(&sc.side[fb * j..fb * (j + 1)]);

@@ -417,9 +417,12 @@ fn cstr(d: &[u8], at: usize) -> Option<&[u8]> {
     Some(&s[..s.iter().position(|&b| b == 0)?])
 }
 
+/// The properties, name and unique name of a record ([`tag_names`]).
+type TagNames<'a> = (u16, &'a [u8], Option<&'a [u8]>);
+
 /// The names of a record of a class, a structure, a union or an enum `rec` (with its length):
 /// its properties, name and unique name.
-fn tag_names(rec: &[u8]) -> Option<(u16, &[u8], Option<&[u8]>)> {
+fn tag_names(rec: &[u8]) -> Option<TagNames<'_>> {
     let kind = u16::from_le_bytes(*rec.get(2..)?.first_chunk()?);
     let prop = u16::from_le_bytes(*rec.get(6..)?.first_chunk()?);
     let mut at = match kind {
@@ -467,11 +470,10 @@ fn anonymous(name: &[u8]) -> bool {
 /// The hash of a string by the old hash of the PDB format.
 fn hash_string(s: &[u8]) -> u32 {
     let mut r = 0u32;
-    let mut words = s.chunks_exact(4);
-    for w in &mut words {
-        r ^= u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+    let (words, mut rest) = s.as_chunks::<4>();
+    for w in words {
+        r ^= u32::from_le_bytes(*w);
     }
-    let mut rest = words.remainder();
     if rest.len() & 2 != 0 {
         r ^= u16::from_le_bytes([rest[0], rest[1]]) as u32;
         rest = &rest[2..];
@@ -878,10 +880,10 @@ fn encode_records(st: &mut Streams, own: Space, d: &[u8], hash: Option<(&[u8], u
         encode_record(st, own, begin + k as u32, begin, &mut fprev, &d[r.clone()]);
     }
     // the hash stream, if it follows from the records (else nothing changes)
-    if let Some((h, index)) = hash {
-        if let Some(coded) = encode_hash(st, d, &recs, h, index, kept) {
-            return Some(coded);
-        }
+    if let Some((h, index)) = hash
+        && let Some(coded) = encode_hash(st, d, &recs, h, index, kept)
+    {
+        return Some(coded);
     }
     Some((RECORDS, 0, [d.len() as u64, 0, 0]))
 }
@@ -1013,8 +1015,7 @@ pub fn encode(streams: &[u8], spans: &[Option<std::ops::Range<usize>>]) -> Optio
             let hash = u16le(d, 20)
                 .filter(|&h| hashes && h != u16::MAX)
                 .and_then(|h| Some((spans.get(h as usize)?.clone()?, h)))
-                .filter(|(hr, _)| !hr.is_empty() && hr != &r && !taken.contains(hr))
-                .map(|(hr, h)| (hr, h));
+                .filter(|(hr, _)| !hr.is_empty() && hr != &r && !taken.contains(hr));
             let hash_bytes = hash.as_ref().map(|(hr, h)| (&streams[hr.clone()], *h));
             let Some((mode, rule, sizes)) = encode_stream(&mut st, own, d, hash_bytes) else { continue };
             config.modes[k] = (mode, rule);

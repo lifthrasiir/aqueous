@@ -272,6 +272,8 @@ pub struct FloatRun {
 }
 
 /// A run of an application.
+// (a run of floats inline: the runs are read one at a time)
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Run {
     /// Bytes as they are, to the side.
@@ -422,7 +424,7 @@ pub fn split_quant(q: Quant, d: &[u8], syms: &mut [u8], raw: &mut [u8], side: &m
                 let s = &mut syms[s_at..s_at + blocks * n * 2];
                 for b in 0..blocks {
                     let src = &d[b * bs + at..][..n];
-                    for (c, g) in src.chunks_exact(16).zip(s[b * n * 2..][..n * 2].chunks_exact_mut(32)) {
+                    for (c, g) in src.as_chunks::<16>().0.iter().zip(s[b * n * 2..][..n * 2].as_chunks_mut::<32>().0) {
                         for i in 0..16 {
                             g[i] = c[i] & 15;
                             g[16 + i] = c[i] >> 4;
@@ -435,7 +437,7 @@ pub fn split_quant(q: Quant, d: &[u8], syms: &mut [u8], raw: &mut [u8], side: &m
                 let s = &mut syms[s_at..s_at + blocks * n * 4];
                 for b in 0..blocks {
                     let src = &d[b * bs + at..][..n];
-                    for (c, g) in src.chunks_exact(8).zip(s[b * n * 4..][..n * 4].chunks_exact_mut(32)) {
+                    for (c, g) in src.as_chunks::<8>().0.iter().zip(s[b * n * 4..][..n * 4].as_chunks_mut::<32>().0) {
                         for i in 0..8 {
                             g[i] = c[i] & 3;
                             g[8 + i] = c[i] >> 2 & 3;
@@ -450,7 +452,7 @@ pub fn split_quant(q: Quant, d: &[u8], syms: &mut [u8], raw: &mut [u8], side: &m
                 let s = &mut syms[s_at..s_at + blocks * n];
                 for b in 0..blocks {
                     let src = &d[b * bs + at..][..n];
-                    for (c, g) in src.chunks_exact(32).zip(s[b * n..][..n].chunks_exact_mut(32)) {
+                    for (c, g) in src.as_chunks::<32>().0.iter().zip(s[b * n..][..n].as_chunks_mut::<32>().0) {
                         let r = &mut raw[raw_at..][..16];
                         raw_at += 16;
                         for i in 0..32 {
@@ -524,7 +526,8 @@ pub fn join_quant(q: Quant, blocks: usize, syms: &[u8], raw: &[u8], side: &[u8],
                 let s = &syms[s_at..s_at + blocks * n * 2];
                 for b in 0..blocks {
                     let o = &mut out[b * bs + at..][..n];
-                    for (c, g) in o.chunks_exact_mut(16).zip(s[b * n * 2..][..n * 2].chunks_exact(32)) {
+                    for (c, g) in o.as_chunks_mut::<16>().0.iter_mut().zip(s[b * n * 2..][..n * 2].as_chunks::<32>().0)
+                    {
                         for i in 0..16 {
                             c[i] = g[i] | g[16 + i] << 4;
                         }
@@ -536,7 +539,7 @@ pub fn join_quant(q: Quant, blocks: usize, syms: &[u8], raw: &[u8], side: &[u8],
                 let s = &syms[s_at..s_at + blocks * n * 4];
                 for b in 0..blocks {
                     let o = &mut out[b * bs + at..][..n];
-                    for (c, g) in o.chunks_exact_mut(8).zip(s[b * n * 4..][..n * 4].chunks_exact(32)) {
+                    for (c, g) in o.as_chunks_mut::<8>().0.iter_mut().zip(s[b * n * 4..][..n * 4].as_chunks::<32>().0) {
                         for i in 0..8 {
                             c[i] = g[i] | g[8 + i] << 2 | g[16 + i] << 4 | g[24 + i] << 6;
                         }
@@ -548,7 +551,7 @@ pub fn join_quant(q: Quant, blocks: usize, syms: &[u8], raw: &[u8], side: &[u8],
                 let s = &syms[s_at..s_at + blocks * n];
                 for b in 0..blocks {
                     let o = &mut out[b * bs + at..][..n];
-                    for (c, g) in o.chunks_exact_mut(32).zip(s[b * n..][..n].chunks_exact(32)) {
+                    for (c, g) in o.as_chunks_mut::<32>().0.iter_mut().zip(s[b * n..][..n].as_chunks::<32>().0) {
                         let r = &raw[raw_at..][..16];
                         raw_at += 16;
                         for i in 0..16 {

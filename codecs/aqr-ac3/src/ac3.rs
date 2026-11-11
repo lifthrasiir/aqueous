@@ -2,13 +2,13 @@
 //! information, the exponents and the mantissas are coded under small contexts; the checksums are derived, not coded.
 //! The bit allocation (7.2) is run on the exponents to know how many bits each mantissa has.
 use crate::ac3_tables::*;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use aqr_walk::Error as FrameError;
 use aqr_walk::bits::{BitReader, BitWriter};
 use aqr_walk::io::{Check, Dec, Enc, Io};
 use aqr_walk::model::Model;
 use aqr_walk::rc::Coder;
-use alloc::boxed::Box;
-use alloc::vec::Vec;
 
 type R<T> = Result<T, FrameError>;
 
@@ -433,6 +433,8 @@ impl Blk {
 
 /// Walks a syncframe: returns its length in bytes. The reader (or writer) holds exactly the frame, except when
 /// decompressing, where the length comes from the header just coded.
+// (the channels and bins by index, as the syntax of A/52's Section 5.4 has them)
+#[allow(clippy::needless_range_loop)]
 pub fn walk<I: Io>(io: &mut I, last: &mut Ctx) -> R<usize> {
     io.expect(0x0B77, 16)?;
     io.derived(16)?;
@@ -553,7 +555,13 @@ pub fn walk<I: Io>(io: &mut I, last: &mut Ctx) -> R<usize> {
         }
         if acmod == 2 && fld(io, last, 70, 1, b0)? != 0 {
             let cb = st.cplbegf;
-            let n = if cb > 2 || !st.cplinu { 4 } else if cb > 0 { 3 } else { 2 };
+            let n = if cb > 2 || !st.cplinu {
+                4
+            } else if cb > 0 {
+                3
+            } else {
+                2
+            };
             for _ in 0..n {
                 fld(io, last, 71, 1, b0)?;
             }
@@ -579,7 +587,8 @@ pub fn walk<I: Io>(io: &mut I, last: &mut Ctx) -> R<usize> {
         }
         let mut endmant = [0usize; 5];
         for ch in 0..nf {
-            endmant[ch] = if st.cplinu && st.chincpl[ch] { cplstrtmant } else { 37 + 3 * (st.chbwcod[ch] as usize + 12) };
+            endmant[ch] =
+                if st.cplinu && st.chincpl[ch] { cplstrtmant } else { 37 + 3 * (st.chbwcod[ch] as usize + 12) };
         }
         if st.cplinu && st.cplexpstr != 0 {
             let g = [0, 1, 2, 4][st.cplexpstr as usize];
@@ -644,7 +653,11 @@ pub fn walk<I: Io>(io: &mut I, last: &mut Ctx) -> R<usize> {
                 let n = fld(io, last, 120, 3, b0)? as usize;
                 st.ncpldelta = n + 1;
                 for s in 0..=n {
-                    st.cpldelta[s] = (fld(io, last, 121, 5, b0)? as u8, fld(io, last, 122, 4, b0)? as u8, fld(io, last, 123, 3, b0)? as u8);
+                    st.cpldelta[s] = (
+                        fld(io, last, 121, 5, b0)? as u8,
+                        fld(io, last, 122, 4, b0)? as u8,
+                        fld(io, last, 123, 3, b0)? as u8,
+                    );
                 }
             }
             for ch in 0..nf {
@@ -652,7 +665,11 @@ pub fn walk<I: Io>(io: &mut I, last: &mut Ctx) -> R<usize> {
                     let n = fld(io, last, 124, 3, b0)? as usize;
                     st.ndelta[ch] = n + 1;
                     for s in 0..=n {
-                        st.delta[ch][s] = (fld(io, last, 125, 5, b0)? as u8, fld(io, last, 126, 4, b0)? as u8, fld(io, last, 127, 3, b0)? as u8);
+                        st.delta[ch][s] = (
+                            fld(io, last, 125, 5, b0)? as u8,
+                            fld(io, last, 126, 4, b0)? as u8,
+                            fld(io, last, 127, 3, b0)? as u8,
+                        );
                     }
                 }
             }
@@ -672,7 +689,10 @@ pub fn walk<I: Io>(io: &mut I, last: &mut Ctx) -> R<usize> {
             floor: FLOORTAB[st.floorcod as usize],
             fscod: alloc_fscod,
         };
-        let allzero = st.csnroffst == 0 && st.cplfsnroffst == 0 && st.lfefsnroffst == 0 && st.fsnroffst[..nf].iter().all(|&x| x == 0);
+        let allzero = st.csnroffst == 0
+            && st.cplfsnroffst == 0
+            && st.lfefsnroffst == 0
+            && st.fsnroffst[..nf].iter().all(|&x| x == 0);
         let mut baps = [[0u8; 256]; 5];
         let mut cplbap = [0u8; 256];
         let mut lfebap = [0u8; 256];
@@ -680,12 +700,34 @@ pub fn walk<I: Io>(io: &mut I, last: &mut Ctx) -> R<usize> {
             for ch in 0..nf {
                 let snr = (((st.csnroffst as i32 - 15) << 4) + st.fsnroffst[ch] as i32) << 2;
                 let dl: &[(u8, u8, u8)] = if st.deltbae[ch] <= 1 { &st.delta[ch][..st.ndelta[ch]] } else { &[] };
-                bit_alloc(&al, &st.exps[ch], 0, endmant[ch], FASTGAIN[st.fgaincod[ch] as usize], snr, 0, 0, dl, &mut baps[ch]);
+                bit_alloc(
+                    &al,
+                    &st.exps[ch],
+                    0,
+                    endmant[ch],
+                    FASTGAIN[st.fgaincod[ch] as usize],
+                    snr,
+                    0,
+                    0,
+                    dl,
+                    &mut baps[ch],
+                );
             }
             if st.cplinu {
                 let snr = (((st.csnroffst as i32 - 15) << 4) + st.cplfsnroffst as i32) << 2;
                 let dl: &[(u8, u8, u8)] = if st.cpldeltbae <= 1 { &st.cpldelta[..st.ncpldelta] } else { &[] };
-                bit_alloc(&al, &st.cplexp, cplstrtmant, cplendmant, FASTGAIN[st.cplfgaincod as usize], snr, ((st.cplfleak << 8) + 768) as i32, ((st.cplsleak << 8) + 768) as i32, dl, &mut cplbap);
+                bit_alloc(
+                    &al,
+                    &st.cplexp,
+                    cplstrtmant,
+                    cplendmant,
+                    FASTGAIN[st.cplfgaincod as usize],
+                    snr,
+                    ((st.cplfleak << 8) + 768) as i32,
+                    ((st.cplsleak << 8) + 768) as i32,
+                    dl,
+                    &mut cplbap,
+                );
             }
             if lfeon {
                 let snr = (((st.csnroffst as i32 - 15) << 4) + st.lfefsnroffst as i32) << 2;
@@ -747,7 +789,7 @@ pub fn walk<I: Io>(io: &mut I, last: &mut Ctx) -> R<usize> {
 
 /// Whether the syncframe at the start of `d` can be coded (`d` is exactly the frame).
 pub fn check(d: &[u8]) -> bool {
-    if d.len() < 8 || d.len() % 2 != 0 || !crcs_ok(d) {
+    if d.len() < 8 || !d.len().is_multiple_of(2) || !crcs_ok(d) {
         return false;
     }
     let mut c = Check { r: BitReader::new(d) };

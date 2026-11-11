@@ -148,15 +148,14 @@ impl<S: Source> Decoder<S> {
     }
     fn decode(&mut self, p0: u32) -> u32 {
         let bound = (self.range >> 12) * p0;
-        let b;
-        if self.code < bound {
+        let b = if self.code < bound {
             self.range = bound;
-            b = 0;
+            0
         } else {
             self.code -= bound;
             self.range -= bound;
-            b = 1;
-        }
+            1
+        };
         while self.range < TOP {
             self.range <<= 8;
             self.code = self.code << 8 | self.src.byte() as u32;

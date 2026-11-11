@@ -27,6 +27,8 @@ impl<'a> Reader<'a> {
     }
 
     /// The next byte, or None at the end of the input or the limit.
+    // (not an iterator: the limit and the refills are its own)
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<u8> {
         if self.left == 0 || !self.fill() {
             return None;
@@ -37,6 +39,8 @@ impl<'a> Reader<'a> {
     }
 
     /// A LEB128 number, or None at the end (before its first byte); `Err` if it is cut or too long.
+    // (whoever reads it tells the failure as its own)
+    #[allow(clippy::result_unit_err)]
     pub fn varint(&mut self) -> Result<Option<u64>, ()> {
         let (mut v, mut shift) = (0u64, 0);
         loop {
