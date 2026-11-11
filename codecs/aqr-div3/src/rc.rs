@@ -107,25 +107,44 @@ impl Coder for Encoder {
     }
 }
 
-pub struct Decoder<'a> {
+/// Where a decoder takes its bytes from; past the end it gets zeros.
+pub trait Source {
+    fn byte(&mut self) -> u8;
+}
+
+pub struct SliceSource<'a> {
     data: &'a [u8],
     pos: usize,
+}
+
+impl<'a> SliceSource<'a> {
+    pub fn new(data: &'a [u8]) -> Self {
+        SliceSource { data, pos: 0 }
+    }
+}
+
+impl Source for SliceSource<'_> {
+    fn byte(&mut self) -> u8 {
+        let b = *self.data.get(self.pos).unwrap_or(&0);
+        self.pos += 1;
+        b
+    }
+}
+
+pub struct Decoder<S: Source> {
+    src: S,
     range: u32,
     code: u32,
 }
 
-impl<'a> Decoder<'a> {
-    pub fn new(data: &'a [u8]) -> Self {
-        let mut d = Decoder { data, pos: 1, range: 0xFFFF_FFFF, code: 0 };
+impl<S: Source> Decoder<S> {
+    pub fn new(mut src: S) -> Self {
+        src.byte(); // (the first byte the encoder writes is always 0)
+        let mut code = 0u32;
         for _ in 0..4 {
-            d.code = d.code << 8 | d.next() as u32;
+            code = code << 8 | src.byte() as u32;
         }
-        d
-    }
-    fn next(&mut self) -> u8 {
-        let b = *self.data.get(self.pos).unwrap_or(&0);
-        self.pos += 1;
-        b
+        Decoder { src, range: 0xFFFF_FFFF, code }
     }
     fn decode(&mut self, p0: u32) -> u32 {
         let bound = (self.range >> 12) * p0;
@@ -140,13 +159,13 @@ impl<'a> Decoder<'a> {
         }
         while self.range < TOP {
             self.range <<= 8;
-            self.code = self.code << 8 | self.next() as u32;
+            self.code = self.code << 8 | self.src.byte() as u32;
         }
         b
     }
 }
 
-impl Coder for Decoder<'_> {
+impl<S: Source> Coder for Decoder<S> {
     #[inline]
     fn bit(&mut self, p: &mut Prob, _b: u32) -> u32 {
         let b = self.decode(4096 - p.p12());

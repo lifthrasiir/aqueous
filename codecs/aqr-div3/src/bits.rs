@@ -53,8 +53,10 @@ pub struct BitWriter {
 }
 
 impl BitWriter {
-    pub fn new() -> Self {
-        Self::default()
+    /// Writes into `out` (cleared), which should have the capacity already.
+    pub fn with_vec(mut out: Vec<u8>) -> Self {
+        out.clear();
+        BitWriter { out, acc: 0, n: 0 }
     }
     pub fn put(&mut self, v: u32, n: u32) {
         if n == 0 {

@@ -53,10 +53,10 @@ fn main() {
 
     let t = Instant::now();
     let mut codec = Codec::new(640, 352);
-    let mut dec = aqr_div3::Decoder::new(&out);
+    let mut dec = aqr_div3::Decoder::new(aqr_div3::SliceSource::new(&out));
     let mut bad = 0;
     for (i, f) in fr.iter().enumerate() {
-        match codec.decode(&mut dec, f.len()) {
+        match codec.decode(&mut dec, f.len(), Vec::new()) {
             Ok(v) if v == *f => {}
             _ => {
                 bad += 1;

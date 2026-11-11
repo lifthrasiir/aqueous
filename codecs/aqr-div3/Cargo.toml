@@ -2,10 +2,18 @@
 name = "aqr-div3"
 version = "0.1.0"
 edition = "2024"
-description = "DivX 3 (MS-MPEG4 v3) video frames re-coded by a context model, rebuilt bit for bit"
+description = "DivX 3 (MS-MPEG4 v3) video frames of AVI files re-coded by a context model, rebuilt bit for bit"
 publish = false
 
+[features]
+default = ["encode"]
+# The formula (`formula`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula"]
+
 [dependencies]
+aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 
 [[example]]
 name = "aqr-div3-check"

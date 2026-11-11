@@ -2,18 +2,18 @@
 use crate::bits::{BitReader, BitWriter};
 use crate::io::{Check, Dec, ESC, Enc, Io, Vlc};
 use crate::model::Model;
-use crate::rc::{Coder, Decoder, Encoder};
+use crate::rc::Coder;
 use crate::tables::*;
 use alloc::vec;
 use alloc::vec::Vec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Error {
+pub enum FrameError {
     /// The data is not a frame this module can walk.
     Parse,
 }
 
-type R<T> = Result<T, Error>;
+type R<T> = Result<T, FrameError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameKind {
@@ -100,7 +100,7 @@ fn ac_block<I: Io>(io: &mut I, t: &AcTab, kind: u32, maxi: u32) -> R<()> {
             if io.flag(E_ESC | kind)? == 1 {
                 let s2 = io.vlc(t.vlc, ctx | 1 << 8)?;
                 if s2 == ESC {
-                    return Err(Error::Parse);
+                    return Err(FrameError::Parse);
                 }
                 let (r, l, la) = t.info[s2 as usize];
                 run = r as u32;
@@ -109,12 +109,12 @@ fn ac_block<I: Io>(io: &mut I, t: &AcTab, kind: u32, maxi: u32) -> R<()> {
             } else if io.flag(E_ESC | 4 | kind)? == 1 {
                 let s2 = io.vlc(t.vlc, ctx | 2 << 8)?;
                 if s2 == ESC {
-                    return Err(Error::Parse);
+                    return Err(FrameError::Parse);
                 }
                 let (r, l, la) = t.info[s2 as usize];
                 let m = t.maxr[la as usize][(l as usize).min(127)];
                 if m < 0 {
-                    return Err(Error::Parse);
+                    return Err(FrameError::Parse);
                 }
                 run = r as u32 + m as u32;
                 level = l as u32;
@@ -126,7 +126,7 @@ fn ac_block<I: Io>(io: &mut I, t: &AcTab, kind: u32, maxi: u32) -> R<()> {
                 level = if v >= 128 { 256 - v } else { v };
                 i += run + 1;
                 if i > maxi {
-                    return Err(Error::Parse);
+                    return Err(FrameError::Parse);
                 }
                 prev = level;
                 if last != 0 {
@@ -144,7 +144,7 @@ fn ac_block<I: Io>(io: &mut I, t: &AcTab, kind: u32, maxi: u32) -> R<()> {
         }
         i += run + 1;
         if i > maxi {
-            return Err(Error::Parse);
+            return Err(FrameError::Parse);
         }
         prev = level;
         if last != 0 {
@@ -175,7 +175,7 @@ impl Syntax {
 
     /// Walks a frame: returns its kind. The two header bits tell which syntax follows.
     fn walk<I: Io>(&self, io: &mut I) -> R<FrameKind> {
-        let g = Geom { mbw: self.w / 16, mbh: self.h / 16 };
+        let g = Geom { mbw: self.w.div_ceil(16), mbh: self.h.div_ceil(16) };
         let kind = io.raw(2)?;
         let k = match kind {
             0 => {
@@ -186,12 +186,12 @@ impl Syntax {
                 self.walk_p(io, &g)?;
                 FrameKind::P
             }
-            _ => return Err(Error::Parse),
+            _ => return Err(FrameError::Parse),
         };
         // What is left: the extension header and padding, coded bit by bit.
-        let left = io.total_bits().checked_sub(io.done()).ok_or(Error::Parse)?;
+        let left = io.total_bits().checked_sub(io.done()).ok_or(FrameError::Parse)?;
         if left > if k == FrameKind::I { 40 } else { 16 } {
-            return Err(Error::Parse);
+            return Err(FrameError::Parse);
         }
         for j in 0..left {
             io.flag(E_TAIL | j.min(63) as u32)?;
@@ -331,11 +331,12 @@ impl Codec {
         self.syn.walk(&mut e).ok()
     }
 
-    /// Decodes a frame of `len` bytes.
-    pub fn decode<C: Coder>(&mut self, rc: &mut C, len: usize) -> R<Vec<u8>> {
+    /// Decodes a frame of `len` bytes into `out` (its capacity is used: reserve `len` + 8 bytes to take no more).
+    pub fn decode<C: Coder>(&mut self, rc: &mut C, len: usize, out: Vec<u8>) -> R<Vec<u8>> {
         let ok = rc.bit(self.model.slot(E_OK, 0), 0);
         if ok == 0 {
-            let mut out = Vec::with_capacity(len);
+            let mut out = out;
+            out.clear();
             for _ in 0..len {
                 let mut v = 0u8;
                 for _ in 0..8 {
@@ -345,11 +346,11 @@ impl Codec {
             }
             return Ok(out);
         }
-        let mut d = Dec { w: BitWriter::new(), total: len * 8, rc, m: &mut self.model };
+        let mut d = Dec { w: BitWriter::with_vec(out), total: len * 8, rc, m: &mut self.model };
         self.syn.walk(&mut d)?;
         let bits = d.w.bits();
         if bits != len * 8 {
-            return Err(Error::Parse);
+            return Err(FrameError::Parse);
         }
         Ok(d.w.finish())
     }
