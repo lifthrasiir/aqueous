@@ -6816,6 +6816,31 @@ mod tests {
         assert_eq!(decode(&c, &natives()).unwrap(), b"zyyxzxyz");
     }
 
+    /// A non-leaf block that formula blocks share is there for each of them as their outputs
+    /// are hashed too ([`Archive::hashed`]), where one cuts its slice by a Split: the slice cut
+    /// is let go of as its pieces, not once more as itself.
+    #[test]
+    fn shared_blocks_hashed_past_a_split() {
+        struct Untold;
+        impl crate::chash::Records for Untold {
+            fn outputs(&self, _: u128) -> Option<Vec<crate::chash::Ch>> {
+                None
+            }
+        }
+        let first = [1, 0, 0, 0, SLICE, 0, 0, 3, SPLIT, 2, 1, 2, CONCAT, 2];
+        let second = [1, 0, 0, 0, SLICE, 0, 0, 3];
+        let c = archive(|out| {
+            for d in [&first[..], &second, &second] {
+                formula_block(out, 1, &always_compressed(&mut CCtx::create(), &[d], 3, 1).unwrap());
+            }
+            content_block(out, false, &[b"xyz"], None);
+        });
+        assert_eq!(decode(&c, &NoModules).unwrap(), b"xyzxyzxyz");
+        let hashed = open(&c, &NoModules).unwrap().hashed(&Untold, &|_| None, 1).unwrap();
+        let hashes: Vec<_> = hashed.expect("hashes of slices alone").into_iter().map(|h| h.0).collect();
+        assert_eq!(hashes, [crate::chash::Ch::of(b"xyz"); 3]);
+    }
+
     /// The evaluation tells how far it is: nothing at first, then each block decoded and each
     /// leaf evaluated, up to all the data blocks' bytes and all the outputs'.
     #[test]

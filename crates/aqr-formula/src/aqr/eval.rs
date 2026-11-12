@@ -144,6 +144,10 @@ impl<'p, 'a> Graph<'p, 'a> {
                                 0 => blocks.release(block),
                                 n => blocks.add(block, n - 1),
                             }
+                            // (the slice cut is no value any more, the stack's only one of it
+                            // popped: a node of no bytes, for what goes by every node, as
+                            // `hashed` does, not to pull the block and let go of it once more)
+                            (g.ops[x.node], g.lens[x.node]) = (Op::Literal(&[]), 0);
                             let mut at = start;
                             for &len in sizes {
                                 stack.push(g.push(Op::Slice { block, start: at, len }, len));
