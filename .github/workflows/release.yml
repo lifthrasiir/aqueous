@@ -25,6 +25,11 @@ name: release
 #   aqr-STEM-mac.zip              Aqueous.app, universal (crates/aqr-mac/bundle.sh --universal)
 #   aqr-STEM-linux-x86_64.tar.xz  aqr (glibc of Ubuntu 22.04 on)
 #   aqr-STEM-linux-aarch64.tar.xz
+#
+# The debug information of each binary is not in the assets but in the run's artifacts named
+# debug-* (kept as the repository's retention allows): Windows' PDBs, the dSYMs of the Mac's,
+# Linux's aqr.debug (split off by objcopy, the binary pointing to it by .gnu_debuglink). To
+# debug a release, take them from the run of its tag (aqr.exe unpacked by `upx -d` first).
 
 on:
   push:
@@ -101,8 +106,16 @@ jobs:
           ./upx.exe -9 -q "out/aqr-${{ steps.stem.outputs.stem }}.exe"
       - uses: actions/upload-artifact@v4
         with:
-          name: windows
+          name: bin-windows
           path: out/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debug-windows
+          path: |
+            target/dist/aqr.pdb
+            target/dist/aqr_win.pdb
+            target/dist/aqr_win_install.pdb
           if-no-files-found: error
 
   win7:
@@ -137,8 +150,13 @@ jobs:
           ./upx.exe -9 -q out/*.exe
       - uses: actions/upload-artifact@v4
         with:
-          name: win7
+          name: bin-win7
           path: out/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debug-win7
+          path: target/x86_64-win7-windows-msvc/dist/aqr.pdb
           if-no-files-found: error
 
   mac:
@@ -155,14 +173,29 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # (split-debuginfo "packed": dsymutil run before profile.dist's strip, leaving a dSYM for
+      # each binary of each architecture, a symlink into deps/; by default, "unpacked", the
+      # DWARF stays in the objects and the strip takes the binary's map of them)
       - run: crates/aqr-mac/bundle.sh --universal
+        env:
+          CARGO_PROFILE_DIST_SPLIT_DEBUGINFO: packed
       - run: |
           mkdir out
           cp target/dist/Aqueous.zip "out/aqr-${{ steps.stem.outputs.stem }}-mac.zip"
+      - run: |
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+              mkdir -p "debug/$t"
+              cp -RL "target/$t/dist/aqr.dSYM" "target/$t/dist/aqr-mac.dSYM" "debug/$t/"
+          done
       - uses: actions/upload-artifact@v4
         with:
-          name: mac
+          name: bin-mac
           path: out/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debug-mac
+          path: debug/
           if-no-files-found: error
 
   linux:
@@ -187,14 +220,28 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           key: ${{ matrix.arch }}
+      # Built with its debug information (profile.dist strips it), which is split off into
+      # aqr.debug for the artifact debug-linux-*: the binary as strip = "debuginfo" leaves it, with
+      # a .gnu_debuglink to aqr.debug.
       - run: cargo build --profile dist -p aqr --bin aqr
+        env:
+          CARGO_PROFILE_DIST_STRIP: none
+      - run: |
+          cd target/dist
+          objcopy --only-keep-debug --compress-debug-sections aqr aqr.debug
+          objcopy --strip-debug --add-gnu-debuglink=aqr.debug aqr
       - run: |
           mkdir out
           tar -C target/dist -cJf "out/aqr-${{ steps.stem.outputs.stem }}-linux-${{ matrix.arch }}.tar.xz" aqr
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-${{ matrix.arch }}
+          name: bin-linux-${{ matrix.arch }}
           path: out/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debug-linux-${{ matrix.arch }}
+          path: target/dist/aqr.debug
           if-no-files-found: error
 
   release:
@@ -204,9 +251,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      # (the binaries alone: the debug-* artifacts stay with the run)
       - uses: actions/download-artifact@v4
         with:
           path: out
+          pattern: bin-*
           merge-multiple: true
       - env:
           GH_TOKEN: ${{ github.token }}
