@@ -168,6 +168,7 @@ What aqr-compress tries on data in which no file of a known format is found.
 | what | crate | sample | ratio | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
 | records of fixed size, entries with a length field, floats of whole multiples | aqr-infer-recs | 11 files, 114.6 MB: ELF and Mach-O binaries, a font, a pcap, git's index and pack index, `ld.so.cache` (README) | 0.974 of zstd -3 (one thread) | | 65 (one thread) | | 527 MB peak RSS | tables of fixed-size records, entries with a length field and floats of whole multiples, their fields transposed (`recs-fields`, `recs-entries`, `recs-floats`); tried by aqr-compress on data in which no file is found, where a 2–50 ms estimate tells 5% at least. The SAO star catalogue 0.432 of zstd -3 |
+| directories of unknown archive formats (game paks) | aqr-infer-pak | The Crew: 12 files, 122.98 MB (three regions and three patches, `.fat` indexes of `.dat` files of LZO1X members) | 82.21 MB archived, 88.41 MB without (-7.0%) | | 8 (all of `aqr -c`, 2.8 s without) | | 460 MB heap peak (277 without) | the files of no format detected whose names tell no kind and that start alike (3 at least) are a group with their families (a stem in a directory); the directories inferred in the biggest family, verified in the others by its template; a data file's LZO1X members rebuilt by aqr-lzo (`lzo-recons`), its stored ones apart, each member's data a content. zstd members (No Man's Sky) are left as they are |
 
 ### In progress or planned
 

@@ -165,3 +165,54 @@ fn seeds() {
     }
     assert!(missed.is_empty(), "{missed:?}");
 }
+
+/// `data` as an LZO1X stream of one run of literals.
+fn lzo_literals(data: &[u8]) -> Vec<u8> {
+    let mut out = vec![0];
+    let mut n = data.len() - 18;
+    while n > 255 {
+        out.push(0);
+        n -= 255;
+    }
+    out.push(n as u8);
+    out.extend_from_slice(data);
+    out.extend_from_slice(&[0x11, 0, 0]);
+    out
+}
+
+/// An index and its data file of `n` LZO1X members.
+fn family(rng: &mut Rng, n: usize) -> (Vec<u8>, Vec<u8>) {
+    let (mut data, mut index) = (Vec::new(), b"IDXv\x01\x00\x00\x00".to_vec());
+    index.extend((n as u64).to_le_bytes());
+    for _ in 0..n {
+        let len = 200 + rng.below(3000) as usize;
+        let text: Vec<u8> = (0..len).map(|_| b"lorem ipsum dolor sit amet "[rng.below(27) as usize]).collect();
+        let stream = lzo_literals(&text);
+        index.extend(rng.next().to_le_bytes());
+        index.extend((data.len() as u32).to_le_bytes());
+        index.extend((stream.len() as u32).to_le_bytes());
+        data.extend(stream);
+    }
+    (index, data)
+}
+
+/// An index and its data file: the directory in the index, of the data file, its members
+/// LZO1X; its template holds for families of 5 members and of 1.
+#[test]
+fn index_and_data() {
+    use aqr_infer_pak::template;
+    let mut rng = Rng(11);
+    let (index, data) = family(&mut rng, 300);
+    let files = [File { name: "a.idx".into(), data: &index }, File { name: "a.dat".into(), data: &data }];
+    let (dirs, _) = infer(&files, &Options::default());
+    let what: Vec<_> = dirs.iter().map(|d| (d.owner.clone(), d.target.clone(), d.members.len(), d.codec)).collect();
+    assert_eq!(dirs.len(), 1, "{what:?}");
+    assert_eq!((dirs[0].target.as_str(), dirs[0].members.len()), ("a.dat", 300));
+    let t = template::learn(&files, 0, &dirs).unwrap();
+    for n in [5, 1] {
+        let (index, data) = family(&mut rng, n);
+        let files = [File { name: "b.idx".into(), data: &index }, File { name: "b.dat".into(), data: &data }];
+        let dirs = template::verify(&t, &files, 0).unwrap_or_else(|| panic!("{n} members: does not hold"));
+        assert_eq!(dirs[0].members.len(), n);
+    }
+}

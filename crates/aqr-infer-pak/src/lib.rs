@@ -215,6 +215,12 @@ pub fn infer(files: &[File], opt: &Options) -> (Vec<Directory>, Times) {
                 j += 1;
                 continue;
             }
+            // nor the directory a decoded target is made of: its offsets are of the target before
+            // it was decoded (members that decode to about their size tile both)
+            if tg.parent.is_some_and(|p| dirs[p].owner_file == owner && overlap(&dirs[p].cand.table)) {
+                j += 1;
+                continue;
+            }
             if profiles.len() <= j {
                 profiles.resize_with(j + 1, || None);
             }

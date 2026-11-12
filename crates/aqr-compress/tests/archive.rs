@@ -1730,3 +1730,65 @@ fn plain_levels() {
         assert!(check.walked && check.mirrored(&m, false), "{level:?}: {check:?}");
     }
 }
+
+/// `data` as an LZO1X stream of one run of literals: `0`, the run's length past 18 (as LZO
+/// extends lengths), the bytes, and the end.
+fn lzo_literals(data: &[u8]) -> Vec<u8> {
+    let mut out = vec![0];
+    let mut n = data.len() - 18;
+    while n > 255 {
+        out.push(0);
+        n -= 255;
+    }
+    out.push(n as u8);
+    out.extend_from_slice(data);
+    out.extend_from_slice(&[0x11, 0, 0]);
+    out
+}
+
+/// Data files of an archive format nothing knows, each with its index (a magic, the count,
+/// records of a hash, an offset and a size): their members taken apart where the indexes
+/// start alike (aqr-infer-pak, `aqr_compress`'s `pak`), LZO1X streams rebuilt by aqr-lzo, a
+/// data file of a single member too (by the template of the biggest).
+#[test]
+fn paks() {
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for (k, n) in [300usize, 57, 5, 1].into_iter().enumerate() {
+        let (mut data, mut index) = (Vec::new(), b"IDXv\x01\x00\x00\x00".to_vec());
+        index.extend((n as u64).to_le_bytes());
+        for _ in 0..n {
+            // (the small families' members big: a data file of a few KB is better kept as it is
+            // than rebuilt by a module)
+            let len = match n {
+                1 => 200_000,
+                2..10 => 20_000,
+                _ => 200,
+            } + (next() % 3000) as usize;
+            let text: Vec<u8> = (0..len).map(|_| b"lorem ipsum dolor sit amet "[(next() % 27) as usize]).collect();
+            let stream = lzo_literals(&text);
+            index.extend(next().to_le_bytes());
+            index.extend((data.len() as u32).to_le_bytes());
+            index.extend((stream.len() as u32).to_le_bytes());
+            data.extend(stream);
+        }
+        files.push((format!("game/part{k}.pakidx"), index));
+        files.push((format!("game/part{k}.pakdat"), data));
+    }
+    let files: Vec<(&str, Vec<u8>)> = files.iter().map(|(n, d)| (n.as_str(), d.clone())).collect();
+    let (_, r) = archived(&files, &Options::default());
+    let (tree, _) = tree_of(&files);
+    for (e, (name, _)) in tree.entries.iter().filter(|e| matches!(e.node, EntryNode::File(_))).zip(&files) {
+        let EntryNode::File(c) = e.node else { unreachable!() };
+        if name.ends_with(".pakdat") {
+            let m: Vec<String> = r.files[c].modules.iter().map(|m| m.name.to_string()).collect();
+            assert!(m.iter().any(|m| m == "lzo-recons"), "{name}: {m:?}");
+        }
+    }
+}

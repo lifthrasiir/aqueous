@@ -140,6 +140,7 @@ pub mod mapped;
 mod memory;
 pub use memory::{DEFAULT_BOUND, Fallback, bound_text, fallbacks};
 mod nsis;
+mod pak;
 mod progress;
 mod seal;
 mod sets;
@@ -409,6 +410,9 @@ pub(crate) struct Cx {
     /// The files of an archive (the contents of a formula 0 formats deep), to tell as they are
     /// made. Not shared with the contexts of the files.
     files: Option<Arc<progress::Files>>,
+    /// The data files of unknown archive formats to take apart, by where their data is
+    /// ([`pak::plan`]). Shared with the contexts of the files.
+    paks: Option<Arc<pak::Placed>>,
 }
 
 /// Text coded once, for the files of an archive that other files of it hold as the contents of
@@ -524,6 +528,7 @@ impl Cx {
             coded_held: Default::default(),
             once: Default::default(),
             files: None,
+            paks: None,
         }
     }
 
@@ -1232,7 +1237,10 @@ fn made_alone(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option
             }
             None => None,
         },
-        // else its samples after a header telling their size, or its tables of records, if any
+        // a data file of an unknown archive format whose directory was found (its members
+        // taken apart before a scan takes one of them for the file); else its samples after a
+        // header telling their size, or its tables of records, if any
+        Nest::Scan if pak::has(d, cx) => recompress_as(Format::Pak, d, opt, depth, cx).map(Made::from),
         Nest::Scan => scan(d, None, opt, depth, cx)
             .filter(|m| smaller(&m.f, m.gaps.as_deref(), d, opt, cx))
             .or_else(|| recompress_as(Format::Sized, d, opt, depth, cx).map(Made::from))
@@ -2349,6 +2357,7 @@ struct Apart {
     coded_held: Arc<HashSet<(usize, u64)>>,
     once: Arc<Once>,
     shares_modules: bool,
+    paks: Option<Arc<pak::Placed>>,
 }
 
 impl Cx {
@@ -2362,6 +2371,7 @@ impl Cx {
             coded_held: Arc::new(self.coded_held.borrow().clone()),
             once: self.once.clone(),
             shares_modules: self.enc.shares_modules(),
+            paks: self.paks.clone(),
         }
     }
 }
@@ -2380,6 +2390,7 @@ impl Apart {
         own.share_words(self.words.clone());
         own.coded_held = RefCell::new((*self.coded_held).clone());
         own.once = self.once.clone();
+        own.paks = self.paks.clone();
         own
     }
 }

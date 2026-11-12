@@ -643,4 +643,8 @@ formats! {
     /// Tables of records and chains of entries (aqr-infer-recs) in data in which a scan finds no
     /// file: of no magic bytes, never detected.
     Records = "records" { recompressor: Pure(aqr_infer_recs::formula::encode), heap: 5.0 }
+    /// A data file of an unknown archive format whose directory aqr-infer-pak found among the
+    /// files archived along ([`crate::pak`]): its members apart, LZO1X streams rebuilt by
+    /// aqr-lzo. Never detected: planned for the files beforehand.
+    Pak = "pak" { recompressor: Cx(crate::pak::encode), heap: 3.0 }
 }
