@@ -3,7 +3,9 @@ name: homebrew
 # A release published (by hand, after release.yml made its draft and uploaded the assets: a
 # draft's assets cannot be downloaded) has lifthrasiir/homebrew-aqueous point its formula and
 # cask at it: its update workflow, run by repository_dispatch. The secret HOMEBREW_TAP_TOKEN is a
-# fine-grained token for that repository alone, with Contents: read and write.
+# fine-grained token for that repository alone, with Contents: read and write, a secret of the
+# environment homebrew (its deployments limited to the tags v*), so that no other ref's workflow
+# can read it.
 
 on:
   release:
@@ -15,6 +17,7 @@ jobs:
   dispatch:
     if: '!github.event.release.prerelease'
     runs-on: ubuntu-latest
+    environment: homebrew
     steps:
       - env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

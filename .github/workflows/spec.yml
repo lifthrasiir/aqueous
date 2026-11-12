@@ -10,10 +10,8 @@ on:
       - '.github/workflows/spec.yml'
   workflow_dispatch:
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+# (the build reads only; the deployment alone may write the pages)
+permissions: {}
 
 concurrency:
   group: pages
@@ -22,26 +20,34 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5.6.0
         with:
           python-version: '3.12'
-      - run: pip install bikeshed
+      # (Bikeshed and every dependency of it pinned with their hashes: spec/requirements.in)
+      - run: pip install --require-hashes --no-deps -r spec/requirements.txt
       # Figures are committed as SVGs, so pikchr isn't needed here.
       - run: mkdir -p _site/spec && bikeshed spec spec/index.bs _site/spec/index.html
       # The site's root page (site/), with the icon it uses.
       - run: cp -R site/. _site/ && cp droplet.svg _site/
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v3.0.1
         with:
           path: _site
 
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write # the pages deployed
+      id-token: write # (deploy-pages: the OIDC token proves the deployment)
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v4.0.5

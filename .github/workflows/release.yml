@@ -5,10 +5,19 @@ name: release
 # replaced if the workflow is run again. Run by hand (workflow_dispatch) or on schedule, it only
 # builds them as the run's artifacts.
 #
-# Dependencies are cached (rust-cache), saved only by runs on main: a tag's run can restore
-# the caches of main but not of another tag's. The scheduled runs, twice a week on main, keep
-# them there (and catch a build broken, say by a toolchain, before a tag does). The nightly of the
-# jobs that need one (build-std) is pinned by the file nightly-toolchain.
+# Dependencies are cached (rust-cache), saved only by runs on main, for the runs not of a tag: a
+# tag's run builds from nothing, so that no cache (written by any run on main) goes into a
+# release. The scheduled runs, twice a week on main, keep them there (and catch a build broken,
+# say by a toolchain, before a tag does). The nightly of the jobs that need one (build-std) is
+# pinned by the file nightly-toolchain.
+#
+# Against a compromised dependency (supply chain): the actions, the transitive ones too, are
+# pinned by commit in .github/workflows/actions.lock (`gh actions-lock`; Dependabot keeps it up
+# to date, and a workflow using an action not in it does not start); every job's token reads
+# only, but the release's; the checkouts keep no credentials; the crates are Cargo.lock's (a job
+# fails if the build changed it), the downloads checked by SHA-256. The release carries
+# SHA256SUMS and an attestation of build provenance for its assets, which the Homebrew tap
+# verifies before taking a release.
 #
 # Before tagging: add the tag to the revisions of scripts/released-modules.sh and run it, so that
 # the modules of the release stay valid for the reserved Apply instruction after they are rebuilt
@@ -25,6 +34,7 @@ name: release
 #   aqr-STEM-mac.zip              Aqueous.app, universal (crates/aqr-mac/bundle.sh --universal)
 #   aqr-STEM-linux-x86_64.tar.xz  aqr (glibc of Ubuntu 22.04 on)
 #   aqr-STEM-linux-aarch64.tar.xz
+#   SHA256SUMS                    the SHA-256s of the above (their provenance attested)
 #
 # The debug information of each binary is not in the assets but in the run's artifacts named
 # debug-* (kept as the repository's retention allows): Windows' PDBs, the dSYMs of the Mac's,
@@ -55,16 +65,19 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - id: stem
-        run: |
+      - uses: actions/checkout@v4.4.0
+        with:
+          persist-credentials: false
+      - run: |
           s=${GITHUB_REF_NAME#v0.0.}
           [ "$GITHUB_REF_TYPE" = tag ] || s=$(git rev-parse --short HEAD)
-          echo "stem=${s#v}" >> "$GITHUB_OUTPUT"
+          echo "STEM=${s#v}" >> "$GITHUB_ENV"
           if [ "$GITHUB_REF_TYPE" = tag ]; then echo "AQR_VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"; fi
       # (the toolchain of rust-toolchain.toml)
       - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
+        # (a tag's run takes no cache)
+        if: github.ref_type != 'tag' # zizmor: ignore[cache-poisoning]
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # What aqr's build.rs packs into aqr.exe (target/aqr-sfx/, crates/aqr-sfx/pack.sh): the
@@ -75,7 +88,7 @@ jobs:
       - run: |
           echo "AQR_NIGHTLY=$(cat nightly-toolchain)" >> "$GITHUB_ENV"
           rustup toolchain install "$(cat nightly-toolchain)" --profile minimal --component rust-src
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5.6.0
         with:
           python-version: '3.x'
       - run: PYTHON=python crates/aqr-sfx/pack.sh
@@ -95,21 +108,23 @@ jobs:
       - run: cargo build --profile dist -p aqr-win-install
       - run: |
           mkdir out
-          cp target/dist/aqr.exe "out/aqr-${{ steps.stem.outputs.stem }}.exe"
-          cp target/dist/aqr-win-install.exe "out/aqr-${{ steps.stem.outputs.stem }}-win-install.exe"
+          cp target/dist/aqr.exe "out/aqr-$STEM.exe"
+          cp target/dist/aqr-win-install.exe "out/aqr-$STEM-win-install.exe"
       # Last, aqr.exe alone packed by UPX (the installer carries it unpacked, which its own
       # payload compresses better; the installer itself is not packed).
       - run: |
           curl -sSfLo upx.zip "https://github.com/upx/upx/releases/download/v$UPX_VERSION/upx-$UPX_VERSION-win64.zip"
           echo "$UPX_SHA256 *upx.zip" | sha256sum -c -
           unzip -jq upx.zip "upx-$UPX_VERSION-win64/upx.exe"
-          ./upx.exe -9 -q "out/aqr-${{ steps.stem.outputs.stem }}.exe"
-      - uses: actions/upload-artifact@v4
+          ./upx.exe -9 -q "out/aqr-$STEM.exe"
+      # (built by Cargo.lock as committed: cargo would have rewritten it otherwise)
+      - run: git diff --exit-code -- Cargo.lock
+      - uses: actions/upload-artifact@v4.6.2
         with:
           name: bin-windows
           path: out/*
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4.6.2
         with:
           name: debug-windows
           path: |
@@ -124,36 +139,41 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - id: stem
-        run: |
+      - uses: actions/checkout@v4.4.0
+        with:
+          persist-credentials: false
+      - run: |
           s=${GITHUB_REF_NAME#v0.0.}
           [ "$GITHUB_REF_TYPE" = tag ] || s=$(git rev-parse --short HEAD)
-          echo "stem=${s#v}" >> "$GITHUB_OUTPUT"
+          echo "STEM=${s#v}" >> "$GITHUB_ENV"
           if [ "$GITHUB_REF_TYPE" = tag ]; then echo "AQR_VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"; fi
       # (the nightly of nightly-toolchain, pinned: AQR_NIGHTLY for the scripts)
       - run: |
           echo "AQR_NIGHTLY=$(cat nightly-toolchain)" >> "$GITHUB_ENV"
           rustup toolchain install "$(cat nightly-toolchain)" --profile minimal --component rust-src
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
+        # (a tag's run takes no cache)
+        if: github.ref_type != 'tag' # zizmor: ignore[cache-poisoning]
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo "+$AQR_NIGHTLY" win7 -p aqr
       - run: |
           mkdir out
-          cp target/x86_64-win7-windows-msvc/dist/aqr.exe "out/aqr-${{ steps.stem.outputs.stem }}-win7.exe"
+          cp target/x86_64-win7-windows-msvc/dist/aqr.exe "out/aqr-$STEM-win7.exe"
       # (packed by UPX as in the job windows)
       - run: |
           curl -sSfLo upx.zip "https://github.com/upx/upx/releases/download/v$UPX_VERSION/upx-$UPX_VERSION-win64.zip"
           echo "$UPX_SHA256 *upx.zip" | sha256sum -c -
           unzip -jq upx.zip "upx-$UPX_VERSION-win64/upx.exe"
           ./upx.exe -9 -q out/*.exe
-      - uses: actions/upload-artifact@v4
+      # (built by Cargo.lock as committed: cargo would have rewritten it otherwise)
+      - run: git diff --exit-code -- Cargo.lock
+      - uses: actions/upload-artifact@v4.6.2
         with:
           name: bin-win7
           path: out/*
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4.6.2
         with:
           name: debug-win7
           path: target/x86_64-win7-windows-msvc/dist/aqr.pdb
@@ -162,15 +182,18 @@ jobs:
   mac:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - id: stem
-        run: |
+      - uses: actions/checkout@v4.4.0
+        with:
+          persist-credentials: false
+      - run: |
           s=${GITHUB_REF_NAME#v0.0.}
           [ "$GITHUB_REF_TYPE" = tag ] || s=$(git rev-parse --short HEAD)
-          echo "stem=${s#v}" >> "$GITHUB_OUTPUT"
+          echo "STEM=${s#v}" >> "$GITHUB_ENV"
           if [ "$GITHUB_REF_TYPE" = tag ]; then echo "AQR_VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"; fi
       - run: rustup toolchain install && rustup target add aarch64-apple-darwin x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
+        # (a tag's run takes no cache)
+        if: github.ref_type != 'tag' # zizmor: ignore[cache-poisoning]
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # (split-debuginfo "packed": dsymutil run before profile.dist's strip, leaving a dSYM for
@@ -181,18 +204,20 @@ jobs:
           CARGO_PROFILE_DIST_SPLIT_DEBUGINFO: packed
       - run: |
           mkdir out
-          cp target/dist/Aqueous.zip "out/aqr-${{ steps.stem.outputs.stem }}-mac.zip"
+          cp target/dist/Aqueous.zip "out/aqr-$STEM-mac.zip"
       - run: |
           for t in aarch64-apple-darwin x86_64-apple-darwin; do
               mkdir -p "debug/$t"
               cp -RL "target/$t/dist/aqr.dSYM" "target/$t/dist/aqr-mac.dSYM" "debug/$t/"
           done
-      - uses: actions/upload-artifact@v4
+      # (built by Cargo.lock as committed: cargo would have rewritten it otherwise)
+      - run: git diff --exit-code -- Cargo.lock
+      - uses: actions/upload-artifact@v4.6.2
         with:
           name: bin-mac
           path: out/*
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4.6.2
         with:
           name: debug-mac
           path: debug/
@@ -208,15 +233,18 @@ jobs:
             runner: ubuntu-22.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - id: stem
-        run: |
+      - uses: actions/checkout@v4.4.0
+        with:
+          persist-credentials: false
+      - run: |
           s=${GITHUB_REF_NAME#v0.0.}
           [ "$GITHUB_REF_TYPE" = tag ] || s=$(git rev-parse --short HEAD)
-          echo "stem=${s#v}" >> "$GITHUB_OUTPUT"
+          echo "STEM=${s#v}" >> "$GITHUB_ENV"
           if [ "$GITHUB_REF_TYPE" = tag ]; then echo "AQR_VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"; fi
       - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
+        # (a tag's run takes no cache)
+        if: github.ref_type != 'tag' # zizmor: ignore[cache-poisoning]
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           key: ${{ matrix.arch }}
@@ -230,15 +258,19 @@ jobs:
           cd target/dist
           objcopy --only-keep-debug --compress-debug-sections aqr aqr.debug
           objcopy --strip-debug --add-gnu-debuglink=aqr.debug aqr
-      - run: |
+      - env:
+          ARCH: ${{ matrix.arch }}
+        run: |
           mkdir out
-          tar -C target/dist -cJf "out/aqr-${{ steps.stem.outputs.stem }}-linux-${{ matrix.arch }}.tar.xz" aqr
-      - uses: actions/upload-artifact@v4
+          tar -C target/dist -cJf "out/aqr-$STEM-linux-$ARCH.tar.xz" aqr
+      # (built by Cargo.lock as committed: cargo would have rewritten it otherwise)
+      - run: git diff --exit-code -- Cargo.lock
+      - uses: actions/upload-artifact@v4.6.2
         with:
           name: bin-linux-${{ matrix.arch }}
           path: out/*
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4.6.2
         with:
           name: debug-linux-${{ matrix.arch }}
           path: target/dist/aqr.debug
@@ -249,14 +281,22 @@ jobs:
     needs: [windows, win7, mac, linux]
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write # the release made and its assets uploaded
+      id-token: write # the attestation signed (Sigstore, by the OIDC token)
+      attestations: write # the attestation stored
     steps:
       # (the binaries alone: the debug-* artifacts stay with the run)
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4.3.0
         with:
           path: out
           pattern: bin-*
           merge-multiple: true
+      # The SHA-256s of the assets, and their build provenance (Sigstore, by GitHub's attestations:
+      # `gh attestation verify FILE -R lifthrasiir/aqueous`), tying each to this workflow and the tag.
+      - run: (cd out && sha256sum -- *) > SHA256SUMS && mv SHA256SUMS out/ && cat out/SHA256SUMS
+      - uses: actions/attest-build-provenance@v4.2.2
+        with:
+          subject-checksums: out/SHA256SUMS
       - env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}

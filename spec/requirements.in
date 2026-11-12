@@ -1,0 +1,4 @@
+# Bikeshed for the workflow spec (.github/workflows/spec.yml), installed with --require-hashes.
+# After changing this file, regenerate requirements.txt (every dependency pinned, with its hashes):
+#   uv pip compile -q --generate-hashes --universal --python-version 3.12 spec/requirements.in -o spec/requirements.txt
+bikeshed==7.2.1

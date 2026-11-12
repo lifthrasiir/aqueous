@@ -1,0 +1,25 @@
+# The actions of the workflows, pinned by commit in .github/workflows/actions.lock, kept up to
+# date (Dependabot regenerates the lockfile's entries). A version waits a week before it is
+# proposed (cooldown), time for a compromised release to be found and pulled. Cargo's
+# dependencies are not here: updating them changes the modules' bytes
+# (crates/aqr-modules/build.sh), so it is done by hand.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ['*']
+  - package-ecosystem: pip
+    directory: /spec
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      bikeshed:
+        patterns: ['*']

@@ -1,0 +1,27 @@
+name: zizmor
+
+# The workflows audited by zizmor (github.com/zizmorcore/zizmor): injections from expressions,
+# credentials left behind, permissions too wide, actions not pinned, caches poisoned, ...
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/**']
+  pull_request:
+    paths: ['.github/**']
+
+permissions: {}
+
+jobs:
+  zizmor:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4.4.0
+        with:
+          persist-credentials: false
+      # (findings in the log, not uploaded to code scanning)
+      - uses: zizmorcore/zizmor-action@v0.8.1
+        with:
+          advanced-security: false
