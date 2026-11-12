@@ -4763,15 +4763,19 @@ fn fasta_plans_hold() {
 
 /// tensors-recons is a part module whose plan follows its params alone, to the page: of made-up GGUF
 /// files of every type it codes, in segments of an application each (runs of floats and blocks
-/// cut at chunks, the Wasm SIMD decoder's groups whole and partial), and of files of `torch.save`
-/// and safetensors.
+/// cut at chunks, the Wasm SIMD decoder's groups whole and partial), of files of `torch.save`
+/// and safetensors (floats of every type, integers), and of weights converted from lower
+/// precisions (runs of grids, cut within tiles).
 #[test]
 fn tensors_plans_hold() {
     use aqr_tensors::synth;
-    for (name, seed, scale) in [("gguf", 1, 1), ("gguf", 3, 8), ("pth", 1, 3), ("safetensors", 2, 3)] {
+    for (name, seed, scale) in
+        [("gguf", 1, 1), ("gguf", 3, 8), ("pth", 1, 3), ("safetensors", 2, 3), ("converted", 4, 0)]
+    {
         let d = match name {
             "gguf" => synth::file(seed, scale),
             "pth" => synth::pth(seed, scale),
+            "converted" => synth::converted(seed),
             _ => synth::safetensors(seed, scale),
         };
         let f = aqr_tensors::formula::encode_in(&d, 2, 1 << 16).unwrap();

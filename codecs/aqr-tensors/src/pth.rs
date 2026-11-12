@@ -269,12 +269,24 @@ fn storages(p: &[u8]) -> Option<Vec<Storage<'_>>> {
     }
 }
 
-/// The float of a storage type of torch's, by its name.
-fn float_of(ty: &[u8]) -> Option<Float> {
+/// What a storage of a type of torch's (by its name) of `n` elements is, and the bytes of an
+/// element.
+fn data_of(ty: &[u8], n: u64) -> Option<(Data, u64)> {
+    let float = |f: Float, k: u64| Some((Data::Float(f, n.checked_mul(k)?), k * f.bytes() as u64));
+    let lanes = |w: u8| Some((Data::Lanes(w, n), w as u64));
     match ty {
-        b"FloatStorage" => Some(Float::F32),
-        b"HalfStorage" => Some(Float::F16),
-        b"BFloat16Storage" => Some(Float::Bf16),
+        b"FloatStorage" => float(Float::F32, 1),
+        b"HalfStorage" => float(Float::F16, 1),
+        b"BFloat16Storage" => float(Float::Bf16, 1),
+        b"DoubleStorage" => float(Float::F64, 1),
+        b"ComplexFloatStorage" => float(Float::F32, 2),
+        b"ComplexDoubleStorage" => float(Float::F64, 2),
+        b"Float8_e4m3fnStorage" | b"Float8_e4m3fnuzStorage" => float(Float::E4m3, 1),
+        b"Float8_e5m2Storage" | b"Float8_e5m2fnuzStorage" => float(Float::E5m2, 1),
+        b"LongStorage" | b"UInt64Storage" => lanes(8),
+        b"IntStorage" | b"UInt32Storage" => lanes(4),
+        b"ShortStorage" | b"UInt16Storage" => lanes(2),
+        b"CharStorage" | b"ByteStorage" | b"BoolStorage" => lanes(1),
         _ => None,
     }
 }
@@ -300,11 +312,11 @@ pub fn parse(d: &[u8]) -> Option<Tensors> {
     let mut seen = std::collections::HashSet::new();
     let mut coded = Vec::new();
     for (key, ty, n) in storages(&d[pkl.start..pkl.start + pkl.len])? {
-        let (Some(f), Some(e)) = (float_of(ty), by_name.get(key)) else { continue };
-        if n.checked_mul(f.bytes() as u64) != Some(e.len as u64) || !seen.insert(key) {
+        let (Some((what, elem)), Some(e)) = (data_of(ty, n), by_name.get(key)) else { continue };
+        if n.checked_mul(elem) != Some(e.len as u64) || !seen.insert(key) {
             continue;
         }
-        coded.push((e.start as u64, Data::Float(f, n)));
+        coded.push((e.start as u64, what, 0));
     }
     let data = coded.iter().map(|c| c.0 as usize).min()?;
     Some(tensors::apart(Container::Pth, d, data, coded))

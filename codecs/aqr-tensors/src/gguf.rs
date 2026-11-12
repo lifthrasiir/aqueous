@@ -78,14 +78,19 @@ pub fn starts(d: &[u8]) -> bool {
     d.len() >= 24 && &d[..4] == b"GGUF" && matches!(u32::from_le_bytes(d[4..8].try_into().unwrap()), 2 | 3)
 }
 
-/// The float of ggml's type number `t`.
-fn float_of(t: u32) -> Option<Float> {
-    match t {
-        0 => Some(Float::F32),
-        1 => Some(Float::F16),
-        30 => Some(Float::Bf16),
-        _ => None,
-    }
+/// What a tensor of ggml's type number `t` of `n` elements is, where it is not of blocks.
+fn data_of(t: u32, n: u64) -> Option<Data> {
+    Some(match t {
+        0 => Data::Float(Float::F32, n),
+        1 => Data::Float(Float::F16, n),
+        30 => Data::Float(Float::Bf16, n),
+        28 => Data::Float(Float::F64, n),
+        24 => Data::Lanes(1, n),
+        25 => Data::Lanes(2, n),
+        26 => Data::Lanes(4, n),
+        27 => Data::Lanes(8, n),
+        _ => return None,
+    })
 }
 
 /// The layout of GGUF file `d`, None where it is not one (or its header does not hold).
@@ -116,31 +121,36 @@ pub fn parse(d: &[u8]) -> Option<Tensors> {
         if dims > 8 {
             return None;
         }
-        let mut n = 1u64;
-        for _ in 0..dims {
-            n = n.checked_mul(c.u64()?)?;
+        // (the first dimension the row's)
+        let (mut n, mut row) = (1u64, 0);
+        for k in 0..dims {
+            let ne = c.u64()?;
+            if k == 0 {
+                row = ne;
+            }
+            n = n.checked_mul(ne)?;
         }
         let t = c.u32()?;
         let off = c.u64()?;
-        info.push((off, t, n));
+        info.push((off, t, n, row));
     }
     let data = c.at.div_ceil(align as usize).checked_mul(align as usize)?;
     if data > d.len() {
         return None;
     }
     let mut coded = Vec::new();
-    for (off, t, n) in info {
-        let what = if let Some(f) = float_of(t) {
-            Data::Float(f, n)
+    for (off, t, n, row) in info {
+        let (what, row) = if let Some(what) = data_of(t, n) {
+            (what, row)
         } else if let Some(q) = Quant::of_ggml(t) {
             if n % q.weights() as u64 != 0 {
                 continue;
             }
-            Data::Quant(q, n / q.weights() as u64)
+            (Data::Quant(q, n / q.weights() as u64), 0)
         } else {
             continue;
         };
-        coded.push(((data as u64).checked_add(off)?, what));
+        coded.push(((data as u64).checked_add(off)?, what, row));
     }
     Some(tensors::apart(Container::Gguf, d, data, coded))
 }

@@ -1547,6 +1547,7 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "memmap2",
+ "zstd",
 ]
 
 [[package]]

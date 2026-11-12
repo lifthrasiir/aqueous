@@ -74,6 +74,30 @@ fn main() {
     for (k, v) in &sizes {
         println!("  {k}: {:.2} MB", *v as f64 / 1e6);
     }
+    // (the side bytes as the archive would have them: compressed, here by zstd at level 3, each
+    // application's apart)
+    let side: usize = (f.streams.iter())
+        .filter(|s| s.class == "tensors/side")
+        .map(|s| zstd::bulk::compress(&s.data, 3).unwrap().len().min(s.data.len()))
+        .sum();
+    let side_raw = sizes.get("tensors/side").copied().unwrap_or(0) as usize;
+    let coded_z = coded - side_raw as u64 + side as u64;
+    // (and the whole file so: its header and the bytes not coded at zstd's level 3 too)
+    let plain: usize = (f.streams.iter())
+        .filter(|s| s.class.ends_with("/header") || s.class == "tensors/data")
+        .map(|s| zstd::bulk::compress(&s.data, 3).unwrap().len().min(s.data.len()))
+        .sum();
+    println!(
+        "  file: {:.1} MB ({:.4})",
+        (coded_z + plain as u64) as f64 / 1e6,
+        (coded_z + plain as u64) as f64 / d.len() as f64
+    );
+    println!(
+        "  side zstd -3: {:.2} MB; coded with it {:.1} MB ({:.4})",
+        side as f64 / 1e6,
+        coded_z as f64 / 1e6,
+        coded_z as f64 / coded_out.max(1) as f64
+    );
     println!(
         "  encode {:.0} MB/s, decode {:.0} MB/s ({threads} threads), one thread {:.0} MB/s",
         mb / enc,

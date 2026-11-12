@@ -120,12 +120,27 @@ impl<'a> Json<'a> {
     }
 }
 
-/// The float of a safetensors dtype.
-fn float_of(dtype: &[u8]) -> Option<Float> {
+/// What a tensor of a safetensors dtype of `len` bytes is: floats, or elements of lanes; and the
+/// bytes of one of its elements (0 where they are packed: FP4's, FP6's).
+fn data_of(dtype: &[u8], len: u64) -> Option<(Data, u64)> {
+    let float =
+        |f: Float, k: u64| len.is_multiple_of(f.bytes() as u64).then(|| (Data::Float(f, len / f.bytes() as u64), k));
+    let lanes = |w: u8, k: u64| len.is_multiple_of(w as u64).then(|| (Data::Lanes(w, len / w as u64), k));
     match dtype {
-        b"F32" => Some(Float::F32),
-        b"F16" => Some(Float::F16),
-        b"BF16" => Some(Float::Bf16),
+        b"F64" => float(Float::F64, 8),
+        b"F32" => float(Float::F32, 4),
+        b"F16" => float(Float::F16, 2),
+        b"BF16" => float(Float::Bf16, 2),
+        // (complex: two floats each)
+        b"C64" => float(Float::F32, 8),
+        b"C128" => float(Float::F64, 16),
+        b"F8_E4M3" | b"F8_E4M3FNUZ" => float(Float::E4m3, 1),
+        b"F8_E5M2" | b"F8_E5M2FNUZ" => float(Float::E5m2, 1),
+        b"I64" | b"U64" => lanes(8, 8),
+        b"I32" | b"U32" => lanes(4, 4),
+        b"I16" | b"U16" => lanes(2, 2),
+        b"I8" | b"U8" | b"BOOL" | b"F8_E8M0" => lanes(1, 1),
+        b"F4" | b"F6_E2M3" | b"F6_E3M2" => lanes(1, 0),
         _ => None,
     }
 }
@@ -143,9 +158,21 @@ pub fn parse(d: &[u8]) -> Option<Tensors> {
         if key == b"__metadata__" {
             return j.skip(2);
         }
-        let (mut dtype, mut offsets) = (None, None);
+        let (mut dtype, mut offsets, mut last) = (None, None, 0u64);
         j.object(|j, k| match k {
             b"dtype" => j.string().map(|s| dtype = Some(s)),
+            b"shape" => {
+                j.eat(b'[')?;
+                if j.eat(b']').is_some() {
+                    return Some(());
+                }
+                loop {
+                    last = j.uint()?;
+                    if j.eat(b',').is_none() {
+                        break j.eat(b']');
+                    }
+                }
+            }
             b"data_offsets" => {
                 j.eat(b'[')?;
                 let a = j.uint()?;
@@ -157,11 +184,16 @@ pub fn parse(d: &[u8]) -> Option<Tensors> {
             _ => j.skip(2),
         })?;
         let (dtype, (a, b)) = (dtype?, offsets?);
-        if let Some(f) = float_of(dtype)
-            && let Some(len) = b.checked_sub(a)
-            && len % f.bytes() as u64 == 0
+        if let Some(len) = b.checked_sub(a)
+            && let Some((what, elem)) = data_of(dtype, len)
         {
-            coded.push(((data as u64).checked_add(a)?, Data::Float(f, len / f.bytes() as u64)));
+            // (a row in elements of the data: of complex numbers, two floats each)
+            let row = match what {
+                Data::Float(f, _) if elem > 0 => last * elem / f.bytes() as u64,
+                Data::Lanes(..) if elem > 0 => last,
+                _ => 0,
+            };
+            coded.push(((data as u64).checked_add(a)?, what, row));
         }
         Some(())
     })?;

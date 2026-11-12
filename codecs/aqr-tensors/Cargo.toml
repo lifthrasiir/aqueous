@@ -2,7 +2,7 @@
 name = "aqr-tensors"
 version = "0.1.0"
 edition = "2024"
-description = "Files of tensors (GGUF, torch.save, safetensors) rebuilt bit for bit: the floats' exponents and the quantised blocks' nibbles coded by a SIMD rANS of 16 symbols, the rest as it is"
+description = "Files of tensors (GGUF, torch.save, safetensors) rebuilt bit for bit: the floats' exponents, the quantised blocks' nibbles and the indices of grids (weights of lower precisions converted) coded by a SIMD rANS of 16 symbols, the rest as it is"
 publish = false
 
 [features]
@@ -25,3 +25,4 @@ path = "examples/bench.rs"
 [dev-dependencies]
 aqr-formula = { path = "../../crates/aqr-formula" }
 memmap2 = "0.9"
+zstd = "0.13"

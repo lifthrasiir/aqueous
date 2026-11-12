@@ -4,7 +4,9 @@
 
 use aqr_formula::{Formula, Node};
 use aqr_tensors::formula::{self, MODULE};
+use aqr_tensors::layout::{Float, GRID_TAG, LANES_TAG, Run};
 use aqr_tensors::module::decode;
+use aqr_tensors::tensors::Data;
 
 /// The inputs of application `a` of `f`.
 fn inputs<'a>(f: &'a Formula, a: &aqr_formula::Apply) -> Vec<&'a [u8]> {
@@ -48,22 +50,11 @@ fn rebuilt() {
         assert_eq!(eval(&f), d, "{seed}");
         assert!(formula::is(&f));
         // (every type coded: each quantised type's tag, and floats', in the params)
-        let tags: std::collections::BTreeSet<u8> = apps(&f)
-            .iter()
-            .flat_map(|a| {
-                let mut at = 0;
-                let mut t = Vec::new();
-                while at < a.params.len() {
-                    t.push(a.params[at]);
-                    aqr_tensors::layout::Run::read(&a.params, &mut at).unwrap();
-                }
-                t
-            })
-            .collect();
+        let tags = tags(&f);
         for q in aqr_tensors::layout::Quant::ALL {
             assert!(tags.contains(&q.tag()), "{seed}: {q:?} not coded: {tags:?}");
         }
-        for fl in aqr_tensors::layout::Float::ALL {
+        for fl in [Float::Bf16, Float::F16, Float::F32] {
             assert!(tags.contains(&fl.tag()), "{seed}: {fl:?} not coded");
         }
         let coded: usize = f.streams.iter().filter(|s| s.class != formula::HEADER).map(|s| s.data.len()).sum();
@@ -139,20 +130,28 @@ fn not_taken() {
     }
 }
 
-/// The tags of the runs of the applications of `f`.
-fn tags(f: &Formula) -> std::collections::BTreeSet<u8> {
+/// The runs of the applications of `f`.
+fn runs(f: &Formula) -> Vec<Run> {
     apps(f)
         .iter()
         .flat_map(|a| {
-            let mut at = 0;
+            let (mut at, mut k) = (0, 0);
             let mut t = Vec::new();
             while at < a.params.len() {
-                t.push(a.params[at]);
-                aqr_tensors::layout::Run::read(&a.params, &mut at).unwrap();
+                let r = Run::read(&a.params, &mut at, k).unwrap();
+                if let Run::Grid(g) = &r {
+                    k = g.k;
+                }
+                t.push(r);
             }
             t
         })
         .collect()
+}
+
+/// The tags of the runs of the applications of `f`.
+fn tags(f: &Formula) -> std::collections::BTreeSet<u8> {
+    runs(f).iter().map(|r| r.tag()).collect()
 }
 
 /// Made-up files of `torch.save` and safetensors: rebuilt, their floats of each type coded (each
@@ -168,16 +167,22 @@ fn pth_and_safetensors() {
             let d = make(seed, scale);
             assert_eq!(tensors::starts(&d), Some(container));
             let t = tensors::parse(&d).unwrap();
-            // (of the six tensors, the integers not, and the view of another's storage not again)
-            let want = if container == Container::Pth { 4 } else { 5 };
+            // (of the nine tensors, the view of another's storage not again)
+            let want = if container == Container::Pth { 8 } else { 9 };
             assert_eq!(t.tensors.len(), want, "{container:?} {seed}");
             let f = formula::encode_in(&d, 3, 1 << 16).unwrap();
             assert_eq!(eval(&f), d, "{container:?} {seed}");
             assert!(f.streams.iter().any(|s| s.class == container.header()));
             let tags = tags(&f);
-            for fl in aqr_tensors::layout::Float::ALL {
+            for fl in Float::ALL {
                 assert!(tags.contains(&fl.tag()), "{container:?} {seed}: {fl:?} not coded");
             }
+            assert!(tags.contains(&LANES_TAG), "{container:?} {seed}: integers not coded");
+            // (the FP8's mantissas, of a top skewed by the exponent, coded)
+            assert!(
+                runs(&f).iter().any(|r| matches!(r, Run::Float(r) if r.f == Float::E4m3 && r.t > 0)),
+                "{container:?} {seed}: FP8's mantissas"
+            );
             assert!(formula::encode(&d, 1).unwrap() == formula::encode(&d, 4).unwrap());
         }
     }
@@ -214,4 +219,62 @@ fn pth_and_safetensors_not_taken() {
     let cut = &d[..d.len() - 1000];
     let f = formula::encode(cut, 2).unwrap();
     assert_eq!(eval(&f), cut);
+}
+
+/// Weights converted from lower precisions (NVFP4, MXFP4 down the columns, FP8 of tiles, NF4, GPTQ
+/// of zero points, INT8 of rows): each a grid's run, coded to a fraction of the floats', and
+/// rebuilt; whole and in segments that cut tiles.
+#[test]
+fn conversions() {
+    let d = aqr_tensors::synth::converted(7);
+    let t = aqr_tensors::tensors::parse(&d).unwrap();
+    assert_eq!(t.tensors.len(), 10);
+    for segment in [1 << 16, 100_000, 1 << 24] {
+        let f = formula::encode_in(&d, 3, segment).unwrap();
+        assert_eq!(eval(&f), d, "{segment}");
+        let rs = runs(&f);
+        let grids: Vec<_> = rs.iter().filter_map(|r| if let Run::Grid(g) = r { Some(g) } else { None }).collect();
+        // (each of the six's: its shape of tiles; indices of two symbols)
+        let shapes: std::collections::BTreeSet<(u64, u64, u64)> = grids.iter().map(|g| (g.row, g.br, g.bc)).collect();
+        assert!(shapes.len() >= 5, "{segment}: {shapes:?}");
+        assert!(grids.iter().any(|g| g.k > 16), "{segment}");
+        assert!(rs.iter().any(|r| r.tag() == LANES_TAG));
+        let coded: usize = f.streams.iter().filter(|s| s.class != "safetensors/header").map(|s| s.data.len()).sum();
+        assert!(coded < d.len() * 6 / 10, "{segment}: {coded} of {}", d.len());
+        assert!(formula::encode_in(&d, 1, segment).unwrap() == f, "{segment}: threads");
+    }
+    let _ = GRID_TAG;
+}
+
+/// Each of the conversions as a run of the grid and tiles it was made of (a zero point's
+/// among them), alone and from within a row: rebuilt.
+#[test]
+fn grid_runs() {
+    use aqr_tensors::grid::{self, Cfg};
+    let d = aqr_tensors::synth::converted(8);
+    let t = aqr_tensors::tensors::parse(&d).unwrap();
+    let made =
+        [("e2m1", 1, 16), ("e2m1", 32, 1), ("e4m3", 128, 128), ("nf4", 1, 64), ("uint4", 1, 128), ("int8", 1, 512)];
+    for (i, &(name, br, bc)) in made.iter().enumerate() {
+        let tensor = &t.tensors[i];
+        let Data::Float(f, n) = tensor.data else { panic!() };
+        let bytes = &d[tensor.start..tensor.start + tensor.data.len() as usize];
+        let cfg = Cfg { grid: grid::grids().iter().position(|g| g.name == name).unwrap(), row: tensor.row, br, bc };
+        for (from, count) in [(0, n), (100, 5000), (n - 3000, 3000)] {
+            let (mut enc, mut tables, mut side) = (aqr_tensors::rans::Encoder::new(), Vec::new(), Vec::new());
+            let run = grid::encode(cfg, f, bytes, from, count, false, f64::INFINITY, &mut enc, &mut tables, &mut side)
+                .unwrap_or_else(|| panic!("{name}: not fitted"));
+            assert_eq!(run.zero, name == "uint4");
+            let mut params = Vec::new();
+            Run::Grid(run).write(&mut params);
+            let syms = enc.finish(&tables);
+            let fb = f.bytes();
+            let want = &bytes[from as usize * fb..(from + count) as usize * fb];
+            assert_eq!(decode(&params, &[&syms, &[], &side], want.len() as u64, 1).unwrap(), want, "{name} {from}");
+            // (its escapes few: the side bytes about its scales')
+            if count == n {
+                assert!(side.len() < want.len() / 4, "{name}: {} side bytes of {}", side.len(), want.len());
+            }
+        }
+    }
 }

@@ -12,6 +12,8 @@ pub enum Data {
     Float(Float, u64),
     /// `n` blocks.
     Quant(Quant, u64),
+    /// `n` elements of so many bytes (integers, packed FP4, and the like: FORMAT.md §4.4).
+    Lanes(u8, u64),
 }
 
 impl Data {
@@ -19,6 +21,22 @@ impl Data {
         match self {
             Data::Float(f, n) => n * f.bytes() as u64,
             Data::Quant(q, n) => n * q.block() as u64,
+            Data::Lanes(w, n) => n * w as u64,
+        }
+    }
+
+    /// Its count: of floats, blocks or elements.
+    pub fn count(self) -> u64 {
+        let (Data::Float(_, n) | Data::Quant(_, n) | Data::Lanes(_, n)) = self;
+        n
+    }
+
+    /// The same of `n`.
+    pub fn with_count(self, n: u64) -> Data {
+        match self {
+            Data::Float(f, _) => Data::Float(f, n),
+            Data::Quant(q, _) => Data::Quant(q, n),
+            Data::Lanes(w, _) => Data::Lanes(w, n),
         }
     }
 
@@ -49,6 +67,15 @@ impl Container {
     }
 }
 
+/// A tensor coded: where it is, what it is, and the elements of its rows (its last dimension;
+/// 0 where it is not known).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tensor {
+    pub start: usize,
+    pub data: Data,
+    pub row: u64,
+}
+
 /// A file's layout: its container, where its tensor data starts (the bytes before it its
 /// header), and the tensors of types this crate codes, in the order of their places, apart,
 /// from there on within the file.
@@ -56,7 +83,7 @@ impl Container {
 pub struct Tensors {
     pub container: Container,
     pub data: usize,
-    pub tensors: Vec<(usize, Data)>,
+    pub tensors: Vec<Tensor>,
 }
 
 /// The container `d` starts like, if any (its layout may not hold still: [`parse`]).
@@ -82,16 +109,16 @@ pub fn parse(d: &[u8]) -> Option<Tensors> {
     }
 }
 
-/// The layout of the tensors `coded` (their places in the file and what they are) from `data` on:
-/// those past the file's end, empty or overlapping the one before them (by their places) left out.
-pub(crate) fn apart(container: Container, d: &[u8], data: usize, mut coded: Vec<(u64, Data)>) -> Tensors {
+/// The layout of the tensors `coded` (their places in the file, what they are and their rows'
+/// elements) from `data` on: those past the file's end, empty or overlapping the one before them
+/// (by their places) left out.
+pub(crate) fn apart(container: Container, d: &[u8], data: usize, mut coded: Vec<(u64, Data, u64)>) -> Tensors {
     coded.sort_by_key(|t| t.0);
     let mut end = data as u64;
     let mut tensors = Vec::with_capacity(coded.len());
-    for (start, what) in coded {
+    for (start, what, row) in coded {
         // (as many floats or blocks as there are bytes at most: their length does not overflow)
-        let (Data::Float(_, n) | Data::Quant(_, n)) = what;
-        if n > d.len() as u64 {
+        if what.count() > d.len() as u64 {
             continue;
         }
         let Some(e) = start.checked_add(what.len()) else { continue };
@@ -99,7 +126,9 @@ pub(crate) fn apart(container: Container, d: &[u8], data: usize, mut coded: Vec<
             continue;
         }
         end = e;
-        tensors.push((start as usize, what));
+        // (a row that does not divide the tensor's elements is not told)
+        let row = if row > 0 && what.count() % row == 0 { row } else { 0 };
+        tensors.push(Tensor { start: start as usize, data: what, row });
     }
     Tensors { container, data, tensors }
 }

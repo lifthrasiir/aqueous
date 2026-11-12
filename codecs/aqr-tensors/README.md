@@ -6,10 +6,19 @@ files of `torch.save` (its ZIP format: `.pth`, `.pt`, `.ckpt`) and safetensors. 
 16 MiB, each an application of the part module `tensors-recons` (until 2026-11-12 the crate was
 aqr-gguf and the module `gguf-recons`), in which
 
-- the floats' (BF16, F16, F32) exponents are symbols, a table for each tensor's part of a
-  segment (the 15 or 16 commonest exponents, the rest escapes), and their signs and mantissas
-  go as they are, without the low bits that are zero in all of them (F16 of BF16's precision:
-  3 bits; the few floats that are not, subnormals, are escapes whole);
+- the floats' (BF16, F16, F32, F64, FP8 E4M3 and E5M2) exponents are symbols, a table for each
+  tensor's part of a segment (the 15 or 16 commonest exponents, the rest escapes), and their
+  signs and mantissas go as they are, without the low bits that are zero in all of them (F16 of
+  BF16's precision: 3 bits; the few floats that are not, subnormals, are escapes whole), but
+  the top 4 bits or fewer (with the sign) are symbols by the exponent's class where a sample of
+  the tensor says they would come to 1.5% less (of FP8, of a lower precision converted);
+- floats that are a grid's values scaled by tiles (weights converted from a lower precision:
+  NVFP4, MXFP4, FP8 of blocks, NF4, GPTQ's and AWQ's INT4, INT8 of rows, to BF16, F16 or F32) are
+  found by a sample of the tensor and coded as the grid's indices (symbols) and the tiles'
+  scales (to the side), each scale the F32 of the fewest bits that gives all its tile's
+  elements exactly (`src/grid.rs`; below, "Conversions");
+- integers, bytes (packed FP4, E8M0 scales) and the like go as lanes, each byte of an element a
+  lane as it is or its two nibbles symbols;
 - the quantised blocks' quants are symbols: the nibbles of Q4_0, Q4_1, Q4_K, IQ4_NL, IQ4_XS
   and MXFP4, Q6_K's low nibbles and its 2-bit high parts, Q8_0's high nibbles and the high 4
   bits of Q5_0's, Q5_1's and Q5_K's quants (their low nibbles and lowest bits as they are),
@@ -25,7 +34,11 @@ Weights are close to noise: what is left to take is the order-0 entropy of the e
 (BF16's 8 bits come to about 2.6) and of the quants (a Q4_K nibble 3.86 bits, Q8_0's high
 nibble 3.6–3.7, Q6_K's 6 bits 5.86 as nibble and crumb). Contexts were measured and give
 little: the exponent before (2.594 -> 2.592 bits), the low nibble of Q8_0 given its high one
-(3.92 of 4). So the model is order-0 by table, and the work is in the speed.
+(3.92 of 4), the top 4 bits of BF16's mantissa given the exponent (3.93 of 4; F32's alike).
+So the model is order-0 by table, and the work is in the speed. Weights of a lower precision
+converted are not noise but a grid's values: of NVFP4's to BF16 the mantissa has 13 or 14
+values (3.7 bits of 7) and a block of 16 has 7 distinct magnitudes; as a grid, 4.2 bits a
+weight.
 
 ## The coder
 
@@ -111,6 +124,38 @@ Its F32 come to their exponents' entropy (8 bits to about 2.6) and the 24 bits o
 mantissa as they are (no mantissa's low bits are zero throughout): `aqr-tensors-bench`, 213 MB of
 symbols and 1923 MB raw of 2564.5 MB, coding at 4.1 GB/s, decoding at 5.2 GB/s (16 threads).
 
+## Conversions
+
+Measured 2026-11-12 on a Ryzen 7 9700X (16 threads), through `aqr -c` (the default level,
+verification included) and `aqr -K`, each file an archive of its own; "before" is `aqr` before
+the grids, lanes and the other floats (the bytes not coded zstd'd by the archive). Samples are
+in `F:\Data\aqr-corpus\tensors` (from Hugging Face; `fetch.sh` there): real conversions are
+rare there, so `dequant/` has checkpoints of NVFP4 (compressed-tensors' and ModelOpt's), FP8 of
+128 × 128 tiles, NF4 and GPTQ dequantised as the conversion scripts do (`scale * value` in F32,
+then to BF16 or F16); gpt-oss-20b's BF16 (unsloth's, its MXFP4 experts dequantised, blocks
+down the columns) is a real one (its first 2.5 GiB, cut).
+
+| file | size | archive / input | before | compress | before | decompress | before |
+|---|---|---|---|---|---|---|---|
+| Qwen3-0.6B NVFP4 (c-t) to BF16 | 1.50 GB | 0.4340 | 0.5298 | 355 MB/s | 568 MB/s | 2951 MB/s | 3200 MB/s |
+| Qwen2.5-0.5B GPTQ to F16 | 1.17 GB | 0.4176 | 0.6846 | 355 MB/s | 412 MB/s | 2886 MB/s | 1629 MB/s |
+| gpt-oss-20b BF16 (MXFP4), 2.5 GiB | 2.68 GB | 0.2627 | 0.2828 | 237 MB/s | 179 MB/s | 2384 MB/s | 1986 MB/s |
+| Qwen3-0.6B BF16 | 1.50 GB | 0.6633 | 0.6633 | 582 MB/s | 582 MB/s | 3360 MB/s | 3289 MB/s |
+| Qwen3-0.6B FP8 (E4M3 weights) | 1.06 GB | 0.7328 | 0.7322 | 430 MB/s | 372 MB/s | 2451 MB/s | 2680 MB/s |
+
+By `aqr-tensors-bench` (the side bytes and the bytes not coded at zstd's level 3), whole files:
+NVFP4 (ModelOpt) to BF16 0.6580 -> 0.3773, NF4 to BF16 0.6552 -> 0.3623, FP8 of tiles to BF16
+0.6635 -> 0.5163 (an FP8's 6.6 bits of entropy); the checkpoints themselves (FP8, NVFP4, NF4,
+MXFP4, GPTQ's and AWQ's I32) as lanes and FP8 come to what zstd made of them, within 0.1–0.3%.
+Of natural weights (BF16, F32) nothing changed: the sample finds no grid and the mantissa's
+top bits not worth it.
+
+The grids' runs code at 0.8–0.9 GB/s (16 threads; their tiles fitted, each a few passes over
+its elements) against 3.5 GB/s of floats, and decode at about 1 GB/s a thread as floats do (the
+values by AVX2 where a tile's span is 32 or more, or of F16: GPTQ's to F16 1.2 GB/s, 0.6 one at
+a time). Through `aqr`, the NVFP4 file's compressing is held by the archive's verification on
+one thread (1.9 of 4.3 s) and the grids' coding (33 thread-seconds, 17 before).
+
 ## Status
 
 Left:
@@ -130,21 +175,37 @@ Left:
   whole, to see whether they would save (`How::Light`), which costs as many thread-seconds as
   the coding; and the archive's writing and verification of a large file are mostly on one
   thread (see "How it does").
-- Native SIMD on AArch64 (NEON): the decoder and encoder run one state at a time there.
+- Native SIMD on AArch64 (NEON): the decoder and encoder run one state at a time there; a
+  grid's values one at a time there and in Wasm (SIMD128 has no conversion to F16; BF16's and
+  F32's would take a lookup of 16 values by byte shuffles).
+- Grids: their coding (0.8–0.9 GB/s on 16 threads) is under the 500 MB/s through `aqr` where
+  verification is added; a tile is fitted by a few passes over it (gathered, its indices at a
+  first scale, the range of scales, the check), of which the indices and the check could be 8 at
+  a time. Not fitted: zero points that are not integers (HQQ's), and conversions computed in
+  F16 or BF16 step by step (`(q − z)` rounded, then times the scale rounded: the two roundings
+  are not the grid's one); those are escaped tiles, or floats. The rows of a `.pth`'s tensors
+  are not read (its pickle's sizes), so its grids are of rows of the whole tensor alone. The
+  scales go to the side as F32s, 2 bits a weight of NVFP4's before the archive compresses them
+  (to about 0.3); their own grid (FP8 times a global scale) is not looked for.
+- The checkpoints of lower precisions themselves (FP8, packed FP4 and their scales) come to
+  about what zstd makes of them: their values are near their entropy order 0, and nothing is
+  shared between a tensor and its scales'.
 - `torch.save`: the legacy format (before PyTorch 1.6: pickles one after another, then the
-  storages) and the pickles of protocols 0 and 1 are not taken; storages of other types (F64,
-  integers, FP8) go as they are. F32's mantissas are kept whole: their top bits are not quite
-  uniform within an exponent, which a model of them could take (not measured).
-- safetensors: F64, FP8 (`F8_E4M3`, `F8_E5M2`) and integers go as they are. No real file was
-  measured (the made-up ones of `synth` alone).
+  storages) and the pickles of protocols 0 and 1 are not taken; storages of quantised types
+  (`QInt8Storage` and the like) go as they are.
+- safetensors: F6's and F4's bytes are lanes of a byte (FP6's 4 values in 3 bytes not taken
+  apart).
 - Other containers of raw tensors (ONNX, NumPy's `.npy`/`.npz`, Keras' HDF5) are not taken.
 
 ## Tests
 
 `cargo rt -p aqr-tensors` (made-up GGUF files of every type coded, files of `torch.save` and
-safetensors, `synth`); `aqr-tensors-bench FILE [BYTES]` (the formula's streams, the speed of
-encoding and of decoding natively, the file rebuilt and compared; `THREADS` for the threads);
+safetensors of every float and integers, weights converted from six lower precisions coded as
+grids, whole and cut, and each as a run of the grid it was made of, `synth`);
+`aqr-tensors-bench FILE [BYTES]` (the formula's streams, the speed of encoding and of decoding
+natively, the file rebuilt and compared, the size of the whole file with the side bytes and the
+bytes not coded at zstd's level 3; `THREADS` for the threads);
 `cargo test -r -p aqr-tensors --lib timing -- --ignored --nocapture` (the coder's speed).
 aqr-decompress's `tensors_plans_hold` runs the Wasm module on them within its plan. Samples
-(models of LM Studio's and Hugging Face's, Segment Anything's `.pth`) are read in place, not
-copied.
+(models of LM Studio's and Hugging Face's, Segment Anything's `.pth`, `F:\Data\aqr-corpus\tensors`)
+are read in place, not copied.

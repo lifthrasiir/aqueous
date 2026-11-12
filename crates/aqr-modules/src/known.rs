@@ -497,8 +497,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "tensors-recons",
-        version: 1,
-        sha512_256: hex("f98d5c82951b1587331b8ea0e09753b9bd7822f8631ab60c8684e9494a7a3a5d"),
+        version: 2,
+        sha512_256: hex("c575b2d721d1c2dd39fe1ba3ed2448a87a89a0e6f183e46e1c7327310427d691"),
         block: include_bytes!("../wasm/tensors-recons.block"),
     },
     Known {

@@ -322,12 +322,18 @@ optimization picked by hash.
   each an application of the part module `tensors-recons`: floats' exponents and quantised
   blocks' nibbles (and Q6_K's crumbs, the high bits of Q8_0 and Q5_*) as symbols of a static
   order-0 rANS of 16 symbols, 32 states (SIMD: AVX2 natively, SIMD128 in Wasm, no gather), the
-  rest as it is. A `.pth` is read by its central directory and the persistent ids of its pickle
+  rest as it is. Weights converted from a lower precision (NVFP4, MXFP4, FP8, NF4, GPTQ, INT8 to
+  BF16/F16/F32) are found by a sample of the tensor and coded as a grid's indices times scales of
+  tiles fitted exactly (`src/grid.rs`); the mantissa's top bits are symbols only where the sample
+  says they pay; integers and packed bytes as lanes. Every dtype of the containers is taken. A
+  `.pth` is read by its central directory and the persistent ids of its pickle
   (a small machine of the opcodes, nothing else of the pickle). Speed is the point (the files
   are tens of GB): aim at 500 MB/s through `aqr`. What bounds it now is the archive's: the coded
   streams probed by zstd whole (`How::Light`), and the writing and verification of a large file
   on one thread. Samples are in `F:\Software\bai-models`, `F:\Software\lmstudio-models` and
-  `F:\Data\sam_vit_h_4b8939.pth` (F32), used in place (never copied). Left (its README's Status).
+  `F:\Data\sam_vit_h_4b8939.pth` (F32), used in place (never copied); safetensors from Hugging
+  Face (and checkpoints dequantised from them) in `F:\Data\aqr-corpus\tensors`. Left (its
+  README's Status).
 - aqr-jpeg's lossless JPEG (SOF3: the pixels of CR2, DNG and the like) is the module
   `jpeg-lossless-recons`, apart from `jpeg-recons`: the streams are found by their SOI in a
   TIFF file (`lformula::starts`), their Huffman data taken out and the samples coded by

@@ -6,28 +6,37 @@ use aqr_common::varint;
 use crate::rans::{LANES, Table};
 use crate::{Result, corrupt};
 
-/// A float of the tensors: its bytes, bits of its exponent and of its mantissa.
+/// A float of the tensors: its bytes, bits of its exponent and of its mantissa (and a sign).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Float {
     Bf16,
     F16,
     F32,
+    F64,
+    /// FP8 E4M3 (`float8_e4m3fn`: no infinities, its NaN all ones).
+    E4m3,
+    /// FP8 E5M2.
+    E5m2,
 }
 
 impl Float {
-    pub const ALL: [Float; 3] = [Float::Bf16, Float::F16, Float::F32];
+    pub const ALL: [Float; 6] = [Float::Bf16, Float::F16, Float::F32, Float::F64, Float::E4m3, Float::E5m2];
 
     pub const fn bytes(self) -> usize {
         match self {
             Float::Bf16 | Float::F16 => 2,
             Float::F32 => 4,
+            Float::F64 => 8,
+            Float::E4m3 | Float::E5m2 => 1,
         }
     }
 
     pub const fn exp_bits(self) -> u32 {
         match self {
             Float::Bf16 | Float::F32 => 8,
-            Float::F16 => 5,
+            Float::F16 | Float::E5m2 => 5,
+            Float::F64 => 11,
+            Float::E4m3 => 4,
         }
     }
 
@@ -36,51 +45,117 @@ impl Float {
             Float::Bf16 => 7,
             Float::F16 => 10,
             Float::F32 => 23,
+            Float::F64 => 52,
+            Float::E4m3 => 3,
+            Float::E5m2 => 2,
         }
     }
 
-    /// Its tag in the parameters.
+    /// Bytes of an escape's exponent in the side bytes.
+    pub const fn exp_bytes(self) -> usize {
+        (self.exp_bits() as usize).div_ceil(8)
+    }
+
+    /// Its tag in the parameters (of a run of floats; of a grid's output, FORMAT.md §4.5).
     pub const fn tag(self) -> u8 {
         self as u8 + 1
     }
+
+    /// The float of tag `t`.
+    pub fn of_tag(t: u8) -> Option<Float> {
+        Float::ALL.iter().copied().find(|f| f.tag() == t)
+    }
+
+    /// The exponent of `v`.
+    #[inline(always)]
+    pub fn exp(self, v: u64) -> u32 {
+        (v >> self.man_bits()) as u32 & ((1 << self.exp_bits()) - 1)
+    }
 }
 
-/// The shape of the bits a float keeps beyond its exponent, its mantissa's `shift` low bits
-/// dropped: `k` bytes as they are, and the `b` bits above them a symbol.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Kept {
-    pub shift: u32,
-    pub k: usize,
-    pub b: u32,
+/// The bits a float keeps beyond its exponent: its sign, then its mantissa without the low
+/// `shift` bits (which are zero), `1 + M − shift` bits in all.
+#[inline(always)]
+pub fn kept_bits(f: Float, shift: u32, v: u64) -> u64 {
+    let m = f.man_bits();
+    let sign = v >> (f.exp_bits() + m) & 1;
+    sign << (m - shift) | (v & ((1 << m) - 1)) >> shift
 }
 
-impl Kept {
-    /// Of `f`, its mantissa's `shift` low bits dropped (at most its bits); None where the bits
-    /// above the bytes are more than 4.
-    pub fn of(f: Float, shift: u32) -> Option<Kept> {
-        if shift > f.man_bits() {
-            return None;
+/// The float of exponent `e` and the bits kept `kept` ([`kept_bits`]).
+#[inline(always)]
+pub fn kept_float(f: Float, shift: u32, e: u64, kept: u64) -> u64 {
+    let m = f.man_bits();
+    let ms = m - shift;
+    (kept >> ms) << (f.exp_bits() + m) | e << m | (kept & ((1 << ms) - 1)) << shift
+}
+
+/// `bits` bits of `v` put at bit `at` of `out` (little-endian bits; `out` zero there, with 8
+/// bytes past them).
+#[inline(always)]
+pub fn put_bits(out: &mut [u8], at: usize, bits: u32, v: u64) {
+    let (i, o) = (at / 8, at % 8);
+    let mut w = u64::from_le_bytes(out[i..i + 8].try_into().unwrap());
+    w |= v << o;
+    out[i..i + 8].copy_from_slice(&w.to_le_bytes());
+    if o as u32 + bits > 64 {
+        out[i + 8] |= (v >> (64 - o)) as u8;
+    }
+}
+
+/// `bits` bits (at most 56) at bit `at` of `d` (with 8 bytes past them).
+#[inline(always)]
+pub fn get_bits(d: &[u8], at: usize, bits: u32) -> u64 {
+    let w = u64::from_le_bytes(d[at / 8..at / 8 + 8].try_into().unwrap());
+    (w >> (at % 8)) & ((1u64 << bits) - 1)
+}
+
+/// The float of type `f` (BF16, F16 or F32) nearest `x`, ties to even (F16's subnormals made,
+/// beyond its range infinity); a NaN is the quiet NaN of `f`, positive. The value a grid's
+/// element is (FORMAT.md §4.5).
+#[inline(always)]
+pub fn round_f32(f: Float, x: f32) -> u64 {
+    let u = x.to_bits();
+    if x.is_nan() {
+        return match f {
+            Float::Bf16 => 0x7fc0,
+            Float::F16 => 0x7e00,
+            _ => 0x7fc0_0000,
+        };
+    }
+    match f {
+        Float::Bf16 => ((u + 0x7fff + (u >> 16 & 1)) >> 16) as u64,
+        Float::F16 => f32_to_f16(u) as u64,
+        _ => u as u64,
+    }
+}
+
+/// F16 of the bits of an F32 (not a NaN), round to nearest even.
+#[inline(always)]
+fn f32_to_f16(u: u32) -> u16 {
+    let sign = (u >> 16 & 0x8000) as u16;
+    let a = u & 0x7fff_ffff;
+    // (2^16 and above, or infinity: infinity; 65520 rounds up to it)
+    if a >= 0x477f_f000 {
+        return sign | 0x7c00;
+    }
+    // (below 2^-14: a subnormal, the mantissa with its leading one shifted, to nearest even)
+    if a < 0x3880_0000 {
+        let e = (a >> 23) as i32;
+        // (below half the least subnormal: zero)
+        if e < 102 {
+            return sign;
         }
-        let r = 1 + f.man_bits() - shift;
-        let (k, b) = ((r / 8) as usize, r % 8);
-        (b <= 4).then_some(Kept { shift, k, b })
+        let m = a & 0x7f_ffff | 0x80_0000;
+        let s = (126 - e) as u32;
+        let (q, r, half) = (m >> s, m & ((1 << s) - 1), 1 << (s - 1));
+        let q = q + (r > half || r == half && q & 1 == 1) as u32;
+        return sign | q as u16;
     }
-
-    /// The bits kept of `f`: its sign, then its mantissa without the low `shift` bits.
-    #[inline(always)]
-    pub fn bits(self, f: Float, v: u32) -> u32 {
-        let m = f.man_bits();
-        let sign = v >> (f.exp_bits() + m);
-        sign << (m - self.shift) | (v & ((1 << m) - 1)) >> self.shift
-    }
-
-    /// The float of exponent `e` and the bits kept `kept` ([`Kept::bits`]).
-    #[inline(always)]
-    pub fn float(self, f: Float, e: u32, kept: u32) -> u32 {
-        let m = f.man_bits();
-        let ms = m - self.shift;
-        (kept >> ms) << (f.exp_bits() + m) | e << m | (kept & ((1 << ms) - 1)) << self.shift
-    }
+    let v = a - (112 << 23);
+    let (q, r) = (v >> 13, v & 0x1fff);
+    let q = q + (r > 0x1000 || r == 0x1000 && q & 1 == 1) as u32;
+    sign | q as u16
 }
 
 /// A piece of a block of quantised weights.
@@ -328,36 +403,135 @@ impl Quant {
 
 /// Weights of a chunk of quantised blocks.
 pub const CHUNK_WEIGHTS: usize = 8192;
-/// Floats of a chunk.
+/// Floats of a chunk (of a run of floats, or of a grid).
 pub const FLOAT_CHUNK: usize = 2048;
+/// Bytes of the elements of a chunk of a run of lanes.
+pub const LANES_CHUNK: usize = 8192;
 
-/// Bytes of symbols a chunk decodes to at most: a chunk of Q6_K's (32 × (8 + 8) groups).
+/// Bytes of symbols a chunk decodes to at most: a chunk of Q6_K's (32 × (8 + 8) groups), or of
+/// lanes all of nibbles.
 pub const MAX_CHUNK_SYMS: usize = 16 << 10;
-/// Side bytes of a chunk at most: a chunk of floats' escapes (whole floats), or of blocks' side
-/// parts.
-pub const MAX_CHUNK_SIDE: usize = 4 * FLOAT_CHUNK;
-/// Raw bytes of a chunk at most: 3 for each float of a chunk.
-pub const MAX_CHUNK_RAW: usize = 3 * FLOAT_CHUNK;
+/// Side bytes of a chunk at most: a chunk of floats' escapes (whole floats of F64), or of blocks'
+/// side parts. (A grid reads its side bytes as it goes.)
+pub const MAX_CHUNK_SIDE: usize = 8 * FLOAT_CHUNK;
+/// Raw bytes of a chunk at most, with 8 past them for the bits read 8 bytes at a time: a chunk of
+/// F64's 53 bits each, or of lanes all raw.
+pub const MAX_CHUNK_RAW: usize = 16 << 10;
+/// Columns of tiles of a grid at most (FORMAT.md §4.5).
+pub const MAX_TILES: u64 = 1 << 14;
+/// Values of a grid at most.
+pub const MAX_GRID: usize = 256;
 
-/// The tables of the symbols of a float: of the exponent and of the bits above the bytes.
+/// A run of floats (FORMAT.md §4.2): the exponents' symbols by `map`, then the top `t` bits of the
+/// bits kept of each (its sign and mantissa, without the `shift` low bits of its mantissa) a
+/// symbol of the table of its exponent symbol's class, the rest raw.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FloatRun {
     pub f: Float,
-    pub kept: Kept,
+    pub shift: u32,
     pub n: u64,
     /// The exponents of the symbols below `m`; the symbols from `m` on are escapes.
-    pub map: [u8; 16],
+    pub map: [u16; 16],
     pub m: u8,
-    /// Whether an escape is a whole float in the side bytes (else its exponent, a byte).
+    /// Whether an escape is a whole float in the side bytes (else its exponent).
     pub whole: bool,
     pub exp: Table,
-    pub top: Option<Table>,
+    /// Bits of the top of the bits kept that are a symbol (0 to 4).
+    pub t: u32,
+    /// The class of each exponent symbol: of its table in `man`.
+    pub class: [u8; 16],
+    /// The tables of the top bits, one for each class (none where `t` is 0).
+    pub man: Vec<Table>,
 }
+
+impl FloatRun {
+    /// Bits kept of each float.
+    pub fn kept(&self) -> u32 {
+        1 + self.f.man_bits() - self.shift
+    }
+
+    /// Raw bits of each float.
+    pub fn raw_bits(&self) -> u32 {
+        self.kept() - self.t
+    }
+}
+
+/// A run of elements of `w` bytes (FORMAT.md §4.4), each of their bytes (a lane) as it is, or its
+/// two nibbles symbols.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LanesRun {
+    pub w: usize,
+    pub n: u64,
+    /// The lanes of nibbles: bit `j` lane `j`.
+    pub nib: u8,
+    /// Of each lane of nibbles in turn, the tables of its low and of its high nibbles.
+    pub tables: Vec<Table>,
+}
+
+impl LanesRun {
+    /// Elements of a chunk.
+    pub fn chunk(&self) -> usize {
+        LANES_CHUNK / self.w
+    }
+}
+
+/// The values of a grid: its own, or the grid of the run of a grid before it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GridValues {
+    Own(Vec<f32>),
+    Same,
+}
+
+/// A run of a grid (FORMAT.md §4.5): elements of type `f` (BF16, F16, F32), in rows of `row`,
+/// each the value of its index in the grid times the scale of its tile (`br` rows by `bc`
+/// columns), less the tile's zero point first where `zero`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GridRun {
+    pub f: Float,
+    pub n: u64,
+    /// The element of the tensor the run starts at: its place in the rows and tiles.
+    pub start: u64,
+    pub row: u64,
+    pub br: u64,
+    pub bc: u64,
+    pub zero: bool,
+    pub grid: GridValues,
+    /// The values of the grid (of the grid itself, or the one before).
+    pub k: usize,
+    /// Where `k` is at most 16, the table of the indices; else of their high nibbles, then of
+    /// their low nibbles, one for each class.
+    pub tables: Vec<Table>,
+    /// Of the high nibbles, the class of each (of its table of the low nibbles).
+    pub class: [u8; 16],
+}
+
+impl GridRun {
+    /// Symbols of each element: 1 or 2.
+    pub fn syms(&self) -> usize {
+        if self.k <= 16 { 1 } else { 2 }
+    }
+
+    /// Tile columns of a row.
+    pub fn tiles(&self) -> u64 {
+        self.row.div_ceil(self.bc)
+    }
+}
+
+/// The value of a grid's element: of grid value `g`, scale `s` and zero point `z` (where
+/// `zero`), of type `f` (FORMAT.md §4.5).
+#[inline(always)]
+pub fn grid_value(f: Float, g: f32, s: f32, z: f32, zero: bool) -> u64 {
+    round_f32(f, if zero { (g - z) * s } else { g * s })
+}
+
+/// A scale of these bits is that of a tile escaped: its elements are in the side bytes as they
+/// are.
+pub const ESCAPED: u32 = 0xffff_ffff;
 
 /// A run of an application.
 // (a run of floats inline: the runs are read one at a time)
 #[allow(clippy::large_enum_variant)]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Run {
     /// Bytes as they are, to the side.
     Raw(u64),
@@ -368,7 +542,13 @@ pub enum Run {
         blocks: u64,
         tables: Vec<Table>,
     },
+    Lanes(LanesRun),
+    Grid(GridRun),
 }
+
+/// The tag of a run of lanes, and of a grid.
+pub const LANES_TAG: u8 = 8;
+pub const GRID_TAG: u8 = 9;
 
 fn num(p: &[u8], at: &mut usize) -> Result<u64> {
     varint::get(p, at).map_err(|_| corrupt())
@@ -380,10 +560,14 @@ fn byte(p: &[u8], at: &mut usize) -> Result<u8> {
     Ok(b)
 }
 
-fn table(p: &[u8], at: &mut usize) -> Result<Table> {
+/// A table of symbols below `alphabet`.
+fn table(p: &[u8], at: &mut usize, alphabet: usize) -> Result<Table> {
     let mut f = [0u32; 16];
     for v in f.iter_mut() {
         *v = u32::try_from(num(p, at)?).map_err(|_| corrupt())?;
+    }
+    if f[alphabet..].iter().any(|&f| f > 0) {
+        return Err(corrupt());
     }
     Table::new(f)
 }
@@ -394,6 +578,33 @@ fn put_table(out: &mut Vec<u8>, t: &Table) {
     }
 }
 
+/// Classes of 16 symbols: their count (1 to 4), then where more than 1, 8 bytes of a nibble each
+/// (symbol `2i`'s the low nibble of byte `i`).
+fn classes(p: &[u8], at: &mut usize) -> Result<(usize, [u8; 16])> {
+    let c = byte(p, at)? as usize;
+    if !(1..=4).contains(&c) {
+        return Err(corrupt());
+    }
+    let mut class = [0u8; 16];
+    if c > 1 {
+        for i in 0..8 {
+            let b = byte(p, at)?;
+            (class[2 * i], class[2 * i + 1]) = (b & 15, b >> 4);
+        }
+        if class.iter().any(|&k| k as usize >= c) {
+            return Err(corrupt());
+        }
+    }
+    Ok((c, class))
+}
+
+fn put_classes(out: &mut Vec<u8>, c: usize, class: &[u8; 16]) {
+    out.push(c as u8);
+    if c > 1 {
+        out.extend((0..8).map(|i| class[2 * i] | class[2 * i + 1] << 4));
+    }
+}
+
 impl Run {
     /// Bytes of its output.
     pub fn len(&self) -> u64 {
@@ -401,6 +612,8 @@ impl Run {
             Run::Raw(n) => *n,
             Run::Float(r) => r.n * r.f.bytes() as u64,
             Run::Quant { q, blocks, .. } => blocks * q.block() as u64,
+            Run::Lanes(r) => r.n * r.w as u64,
+            Run::Grid(r) => r.n * r.f.bytes() as u64,
         }
     }
 
@@ -408,73 +621,162 @@ impl Run {
         self.len() == 0
     }
 
-    /// The next run of parameters `p` from `*at`.
-    pub fn read(p: &[u8], at: &mut usize) -> Result<Run> {
+    /// The tag of the run.
+    pub fn tag(&self) -> u8 {
+        match self {
+            Run::Raw(_) => 0,
+            Run::Float(r) => r.f.tag(),
+            Run::Quant { q, .. } => q.tag(),
+            Run::Lanes(_) => LANES_TAG,
+            Run::Grid(_) => GRID_TAG,
+        }
+    }
+
+    /// The next run of parameters `p` from `*at`; `k` the values of the last grid before it (0
+    /// for none), a grid's of [`GridValues::Same`].
+    pub fn read(p: &[u8], at: &mut usize, k: usize) -> Result<Run> {
         let tag = byte(p, at)?;
         if tag == 0 {
             return Ok(Run::Raw(num(p, at)?));
         }
-        if let Some(&f) = Float::ALL.iter().find(|f| f.tag() == tag) {
+        if let Some(f) = Float::of_tag(tag) {
             let shift = byte(p, at)? as u32;
-            let kept = Kept::of(f, shift).ok_or_else(corrupt)?;
+            if shift > f.man_bits() {
+                return Err(corrupt());
+            }
             let n = num(p, at)?;
             let mb = byte(p, at)?;
             let (m, whole) = (mb & 0x7f, mb & 0x80 != 0);
             if !(1..=16).contains(&m) {
                 return Err(corrupt());
             }
-            let mut map = [0u8; 16];
+            let mut map = [0u16; 16];
             for v in map.iter_mut().take(m as usize) {
-                *v = byte(p, at)?;
-                if *v as u32 >= 1 << f.exp_bits() {
+                let e = num(p, at)?;
+                if e >= 1 << f.exp_bits() {
                     return Err(corrupt());
                 }
+                *v = e as u16;
             }
-            let exp = table(p, at)?;
-            let top = if kept.b > 0 { Some(table(p, at)?) } else { None };
-            if let Some(t) = &top
-                && t.freq[1 << kept.b..].iter().any(|&f| f > 0)
-            {
+            let exp = table(p, at, 16)?;
+            let t = byte(p, at)? as u32;
+            if t > 4 || t > 1 + f.man_bits() - shift {
                 return Err(corrupt());
             }
-            return Ok(Run::Float(FloatRun { f, kept, n, map, m, whole, exp, top }));
+            let (mut class, mut man) = ([0u8; 16], Vec::new());
+            if t > 0 {
+                let c;
+                (c, class) = classes(p, at)?;
+                man = (0..c).map(|_| table(p, at, 1 << t)).collect::<Result<_>>()?;
+            }
+            return Ok(Run::Float(FloatRun { f, shift, n, map, m, whole, exp, t, class, man }));
         }
         if let Some(&q) = Quant::ALL.iter().find(|q| q.tag() == tag) {
             let blocks = num(p, at)?;
-            let tables = q.coded().map(|_| table(p, at)).collect::<Result<Vec<_>>>()?;
-            for (part, t) in q.coded().zip(&tables) {
-                if t.freq[part.alphabet()..].iter().any(|&f| f > 0) {
+            let tables = q.coded().map(|part| table(p, at, part.alphabet())).collect::<Result<Vec<_>>>()?;
+            return Ok(Run::Quant { q, blocks, tables });
+        }
+        if tag == LANES_TAG {
+            let w = byte(p, at)? as usize;
+            if !matches!(w, 1 | 2 | 4 | 8) {
+                return Err(corrupt());
+            }
+            let n = num(p, at)?;
+            let nib = byte(p, at)?;
+            if w < 8 && nib >> w != 0 {
+                return Err(corrupt());
+            }
+            let tables = (0..2 * nib.count_ones()).map(|_| table(p, at, 16)).collect::<Result<_>>()?;
+            return Ok(Run::Lanes(LanesRun { w, n, nib, tables }));
+        }
+        if tag == GRID_TAG {
+            let f = Float::of_tag(byte(p, at)?).filter(|f| matches!(f, Float::Bf16 | Float::F16 | Float::F32));
+            let f = f.ok_or_else(corrupt)?;
+            let (n, start, row, br, bc) = (num(p, at)?, num(p, at)?, num(p, at)?, num(p, at)?, num(p, at)?);
+            if row == 0 || br == 0 || bc == 0 || bc > row || row.div_ceil(bc) > MAX_TILES {
+                return Err(corrupt());
+            }
+            let mode = byte(p, at)?;
+            if mode > 1 {
+                return Err(corrupt());
+            }
+            let len = num(p, at)?;
+            let (grid, k) = if len == 0 {
+                (GridValues::Same, k)
+            } else {
+                if len > MAX_GRID as u64 {
                     return Err(corrupt());
                 }
+                let len = len as usize;
+                let b = p.get(*at..*at + 4 * len).ok_or_else(corrupt)?;
+                *at += 4 * len;
+                (GridValues::Own(b.chunks(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect()), len)
+            };
+            if k == 0 {
+                return Err(corrupt());
             }
-            return Ok(Run::Quant { q, blocks, tables });
+            let (tables, class) = if k <= 16 {
+                (vec![table(p, at, k)?], [0; 16])
+            } else {
+                let hi = table(p, at, k.div_ceil(16))?;
+                let (c, class) = classes(p, at)?;
+                let mut tables = vec![hi];
+                for _ in 0..c {
+                    tables.push(table(p, at, 16)?);
+                }
+                (tables, class)
+            };
+            return Ok(Run::Grid(GridRun { f, n, start, row, br, bc, zero: mode == 1, grid, k, tables, class }));
         }
         Err(corrupt())
     }
 
     /// Appends its parameters to `out`.
     pub fn write(&self, out: &mut Vec<u8>) {
+        out.push(self.tag());
         match self {
-            Run::Raw(n) => {
-                out.push(0);
-                varint::put(out, *n);
-            }
+            Run::Raw(n) => varint::put(out, *n),
             Run::Float(r) => {
-                out.push(r.f.tag());
-                out.push(r.kept.shift as u8);
+                out.push(r.shift as u8);
                 varint::put(out, r.n);
                 out.push(r.m | (r.whole as u8) << 7);
-                out.extend_from_slice(&r.map[..r.m as usize]);
+                for &e in &r.map[..r.m as usize] {
+                    varint::put(out, e as u64);
+                }
                 put_table(out, &r.exp);
-                if let Some(t) = &r.top {
-                    put_table(out, t);
+                out.push(r.t as u8);
+                if r.t > 0 {
+                    put_classes(out, r.man.len(), &r.class);
+                    r.man.iter().for_each(|t| put_table(out, t));
                 }
             }
-            Run::Quant { q, blocks, tables } => {
-                out.push(q.tag());
+            Run::Quant { blocks, tables, .. } => {
                 varint::put(out, *blocks);
-                for t in tables {
-                    put_table(out, t);
+                tables.iter().for_each(|t| put_table(out, t));
+            }
+            Run::Lanes(r) => {
+                out.push(r.w as u8);
+                varint::put(out, r.n);
+                out.push(r.nib);
+                r.tables.iter().for_each(|t| put_table(out, t));
+            }
+            Run::Grid(r) => {
+                out.push(r.f.tag());
+                for v in [r.n, r.start, r.row, r.br, r.bc] {
+                    varint::put(out, v);
+                }
+                out.push(r.zero as u8);
+                match &r.grid {
+                    GridValues::Same => out.push(0),
+                    GridValues::Own(g) => {
+                        varint::put(out, g.len() as u64);
+                        g.iter().for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
+                    }
+                }
+                put_table(out, &r.tables[0]);
+                if r.k > 16 {
+                    put_classes(out, r.tables.len() - 1, &r.class);
+                    r.tables[1..].iter().for_each(|t| put_table(out, t));
                 }
             }
         }
@@ -902,22 +1204,122 @@ mod tests {
     }
 
     #[test]
-    fn kept_bits() {
+    fn kept_bits_back() {
         for f in Float::ALL {
             for shift in 0..=f.man_bits() {
-                let Some(k) = Kept::of(f, shift) else { continue };
                 let w = 8 * f.bytes() as u32;
-                for v in [0u32, 1, 0x1234_5678, 0xFFFF_FFFF, 0x8000_0001, 0x7F80_0000] {
-                    let v = if w == 32 { v } else { v & 0xFFFF };
+                for v in [0u64, 1, 0x1234_5678_9abc_def0, u64::MAX, 0x8000_0000_0000_0001, 0x7F80_0000] {
+                    let v = if w == 64 { v } else { v & ((1 << w) - 1) };
                     let v = v & !((1 << shift) - 1);
-                    let e = v >> f.man_bits() & ((1 << f.exp_bits()) - 1);
-                    let bits = k.bits(f, v);
-                    assert!(bits < 1 << (8 * k.k as u32 + k.b));
-                    assert_eq!(k.float(f, e, bits), v, "{f:?} {shift} {v:x}");
+                    let e = f.exp(v) as u64;
+                    let bits = kept_bits(f, shift, v);
+                    assert!(bits < 1 << (1 + f.man_bits() - shift));
+                    assert_eq!(kept_float(f, shift, e, bits), v, "{f:?} {shift} {v:x}");
                 }
             }
         }
-        // (every shift has one at most a few bits lower that fits)
-        assert!(Float::ALL.iter().all(|&f| Kept::of(f, 0).is_some()));
+    }
+
+    #[test]
+    fn bits() {
+        let mut d = vec![0u8; 256];
+        let vals: Vec<(u32, u64)> = (1..=53).map(|b| (b, (0x1f_ffff_ffff_ffff ^ b as u64) & ((1 << b) - 1))).collect();
+        let mut at = 0;
+        for &(b, v) in &vals {
+            put_bits(&mut d, at, b, v);
+            at += b as usize;
+        }
+        let mut at = 0;
+        for &(b, v) in &vals {
+            assert_eq!(get_bits(&d, at, b), v, "{b}");
+            at += b as usize;
+        }
+    }
+
+    /// Rounding to F16 and BF16 at the edges (the values numpy gives).
+    #[test]
+    fn rounding() {
+        let cases = [
+            (1.0f32, 0x3c00u64, 0x3f80u64),
+            (65504.0, 0x7bff, 0x4780),
+            (65519.0, 0x7bff, 0x4780),
+            (65520.0, 0x7c00, 0x4780),
+            (5.960_464_5e-8, 0x0001, 0x3380),
+            (2.980_232_2e-8, 0x0000, 0x3300),
+            (2.980_233e-8, 0x0001, 0x3300),
+            (-6.097_555e-5, 0x83ff, 0xb880),
+            (1.000_976_6, 0x3c01, 0x3f80),
+            (1.000_488_3, 0x3c00, 0x3f80),
+            (1.001_464_8, 0x3c02, 0x3f80),
+            (1.003_906_3, 0x3c04, 0x3f80),
+            (1.011_718_8, 0x3c0c, 0x3f82),
+            (3.0e38, 0x7c00, 0x7f62),
+        ];
+        for (x, h, b) in cases {
+            assert_eq!(round_f32(Float::F16, x), h, "{x}");
+            assert_eq!(round_f32(Float::Bf16, x), b, "{x}");
+        }
+        assert_eq!(round_f32(Float::Bf16, f32::NAN), 0x7fc0);
+        assert_eq!(round_f32(Float::F32, -f32::NAN), 0x7fc0_0000);
+    }
+
+    #[test]
+    fn runs_back() {
+        let t = Table::of_counts(&[3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let t4 = Table::of_counts(&[3, 1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let runs = [
+            Run::Raw(77),
+            Run::Float(FloatRun {
+                f: Float::F64,
+                shift: 3,
+                n: 100_000,
+                map: [1023, 1022, 1021, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                m: 3,
+                whole: true,
+                exp: t,
+                t: 2,
+                class: [0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                man: vec![t4, t4],
+            }),
+            Run::Lanes(LanesRun { w: 4, n: 9, nib: 0b1001, tables: vec![t; 4] }),
+            Run::Grid(GridRun {
+                f: Float::Bf16,
+                n: 4096,
+                start: 0,
+                row: 1024,
+                br: 1,
+                bc: 16,
+                zero: false,
+                grid: GridValues::Own(vec![0.0, 0.5, 1.0, -1.0]),
+                k: 4,
+                tables: vec![t4],
+                class: [0; 16],
+            }),
+            Run::Grid(GridRun {
+                f: Float::F16,
+                n: 4096,
+                start: 100,
+                row: 64,
+                br: 32,
+                bc: 1,
+                zero: true,
+                grid: GridValues::Same,
+                k: 4,
+                tables: vec![t4],
+                class: [0; 16],
+            }),
+        ];
+        let mut p = Vec::new();
+        runs.iter().for_each(|r| r.write(&mut p));
+        let mut at = 0;
+        let mut k = 0;
+        for r in &runs {
+            let got = Run::read(&p, &mut at, k).unwrap();
+            if let Run::Grid(g) = &got {
+                k = g.k;
+            }
+            assert_eq!(&got, r);
+        }
+        assert_eq!(at, p.len());
     }
 }

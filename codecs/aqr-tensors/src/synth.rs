@@ -198,8 +198,130 @@ pub fn file(seed: u64, scale: usize) -> Vec<u8> {
     h
 }
 
+/// An FP8 of a bell: its exponent about it, its mantissa smaller the larger the exponent (so that
+/// its top bits given the exponent come to less), of `e` bits of exponent (4 or 5).
+fn fp8(r: &mut Rng, e: u32) -> u8 {
+    let m = 7 - e;
+    let ex = ((bell(r) * 3.0).abs() as u32 + (1 << (e - 1)) - 4).min((1 << e) - 2);
+    let man = (r.below(1 << m) as u32).min(r.below(1 << m) as u32 + (ex & 1) * 2).min((1 << m) - 1);
+    ((r.below(2) as u32) << 7 | ex << m | man) as u8
+}
+
+/// Weights of a lower precision converted, as conversions write them (FORMAT.md §4.5): each a
+/// tensor of a grid's values scaled by tiles (rows of `row`), its type, and its bytes.
+fn conversions(r: &mut Rng) -> Vec<(&'static str, u64, Vec<u8>)> {
+    use crate::layout::{Float, round_f32};
+    let gs = crate::grid::grids();
+    let g = |name: &str| gs.iter().find(|g| g.name == name).unwrap();
+    let nearest = |g: &crate::grid::Grid, x: f32| {
+        (0..g.values.len()).min_by(|&a, &b| (g.values[a] - x).abs().total_cmp(&(g.values[b] - x).abs())).unwrap()
+    };
+    let bf16 = |v: &[u64]| -> Vec<u8> { v.iter().flat_map(|&b| (b as u16).to_le_bytes()).collect() };
+    // (each tile of rows r0.. and columns c0.., of its weights `w`: its elements by `quant`)
+    let tiled = |w: &[f32], rows: usize, row: usize, br: usize, bc: usize, quant: &dyn Fn(&[f32]) -> Vec<u64>| {
+        let mut out = vec![0u64; rows * row];
+        for r0 in (0..rows).step_by(br) {
+            for c0 in (0..row).step_by(bc) {
+                let idx: Vec<usize> = (r0..r0 + br).flat_map(|r| (c0..c0 + bc).map(move |c| r * row + c)).collect();
+                let vals: Vec<f32> = idx.iter().map(|&i| w[i]).collect();
+                for (&i, v) in idx.iter().zip(quant(&vals)) {
+                    out[i] = v;
+                }
+            }
+        }
+        out
+    };
+    let amax = |v: &[f32]| v.iter().fold(0f32, |a, x| a.max(x.abs()));
+    let mut out = Vec::new();
+    // NVFP4 (compressed-tensors): blocks of 16 along the rows, a scale of FP8 over a global one
+    let (e2m1, e4m3) = (g("e2m1"), g("e4m3"));
+    let global = 0.012_345_67f32;
+    let w = weights(r, 64 * 1024, 0.05, 0);
+    let v = tiled(&w, 64, 1024, 1, 16, &|t| {
+        let s = e4m3.values[nearest(e4m3, amax(t) / 6.0 / global)] * global;
+        t.iter().map(|&x| round_f32(Float::Bf16, e2m1.values[nearest(e2m1, x / s)] * s)).collect()
+    });
+    out.push(("BF16", 1024, bf16(&v)));
+    // MXFP4 (gpt-oss's, transposed): blocks of 32 down the columns, a scale of a power of 2
+    let w = weights(r, 256 * 512, 0.05, 0);
+    let v = tiled(&w, 256, 512, 32, 1, &|t| {
+        let s = 2f32.powi((amax(t) / 6.0).log2().ceil() as i32);
+        t.iter().map(|&x| round_f32(Float::Bf16, e2m1.values[nearest(e2m1, x / s)] * s)).collect()
+    });
+    out.push(("BF16", 512, bf16(&v)));
+    // FP8 of tiles of 128 by 128 (DeepSeek's), a scale of F32
+    let w = weights(r, 256 * 384, 0.05, 0);
+    let v = tiled(&w, 256, 384, 128, 128, &|t| {
+        let s = amax(t) / 448.0;
+        t.iter().map(|&x| round_f32(Float::Bf16, e4m3.values[nearest(e4m3, x / s)] * s)).collect()
+    });
+    out.push(("BF16", 384, bf16(&v)));
+    // NF4 (bitsandbytes'): blocks of 64, a scale of F32 (the block's largest)
+    let nf4 = g("nf4");
+    let w = weights(r, 65536, 0.05, 0);
+    let v = tiled(&w, 1, 65536, 1, 64, &|t| {
+        let s = amax(t);
+        t.iter().map(|&x| round_f32(Float::Bf16, nf4.values[nearest(nf4, x / s)] * s)).collect()
+    });
+    out.push(("BF16", 65536, bf16(&v)));
+    // GPTQ to F16: groups of 128 along the rows, a scale of F16 and a zero point of 4 bits
+    let w = weights(r, 64 * 1024, 0.05, 0);
+    let v = tiled(&w, 64, 1024, 1, 128, &|t| {
+        let (lo, hi) = t.iter().fold((f32::MAX, f32::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+        let s = f32::from_bits(((hi - lo) / 15.0).to_bits() & !0x1fff);
+        let z = (-lo / s).round().clamp(0.0, 15.0);
+        t.iter().map(|&x| round_f32(Float::F16, ((x / s + z).round().clamp(0.0, 15.0) - z + 0.0) * s)).collect()
+    });
+    out.push(("F16", 1024, bf16(&v)));
+    // INT8 of rows (a scale for each), to BF16
+    let w = weights(r, 128 * 512, 0.05, 0);
+    let v = tiled(&w, 128, 512, 1, 512, &|t| {
+        let s = amax(t) / 127.0;
+        t.iter().map(|&x| round_f32(Float::Bf16, ((x / s).round() + 0.0) * s)).collect()
+    });
+    out.push(("BF16", 512, bf16(&v)));
+    out
+}
+
+/// A safetensors file of weights converted from lower precisions ([`conversions`]), and of
+/// integers and packed FP4 (lanes), of seed `seed`.
+pub fn converted(seed: u64) -> Vec<u8> {
+    let mut r = Rng::new(seed);
+    let mut ts: Vec<(&str, u64, Vec<u8>)> = conversions(&mut r);
+    let nib = |r: &mut Rng| ((bell(r) * 7.5 + 8.0) as i32).clamp(0, 15) as u8;
+    ts.push(("U8", 512, (0..64 * 512).map(|_| nib(&mut r) | nib(&mut r) << 4).collect()));
+    ts.push((
+        "I32",
+        64,
+        (0..64 * 256)
+            .flat_map(|_| (0..8).fold(0u32, |a, k| a | (nib(&mut r) as u32) << (4 * k)).to_le_bytes())
+            .collect(),
+    ));
+    ts.push(("I8", 1024, (0..32768).map(|_| (bell(&mut r) * 100.0) as i8 as u8).collect()));
+    ts.push(("BOOL", 1, (0..10000).map(|_| (r.below(10) == 0) as u8).collect()));
+    let mut h = String::from("{");
+    let mut at = 0;
+    for (i, (ty, row, d)) in ts.iter().enumerate() {
+        let (n, end) = (d.len() / width(ty), at + d.len());
+        let sep = if i == 0 { "" } else { "," };
+        h += &format!(
+            r#"{sep}"t.{i}":{{"dtype":"{ty}","shape":[{},{row}],"data_offsets":[{at},{end}]}}"#,
+            n as u64 / row
+        );
+        at = end;
+    }
+    h.push('}');
+    while h.len() % 8 != 0 {
+        h.push(' ');
+    }
+    let mut out = (h.len() as u64).to_le_bytes().to_vec();
+    out.extend_from_slice(h.as_bytes());
+    ts.iter().for_each(|(_, _, d)| out.extend_from_slice(d));
+    out
+}
+
 /// The floats of a made-up model, as safetensors names their types, and their bytes: of each
-/// type, a tensor; a small one; integers (not coded); and a tensor of BF16 again.
+/// type, a tensor; a small one; integers; and a tensor of BF16 again.
 fn floats(seed: u64, scale: usize) -> Vec<(&'static str, Vec<u8>)> {
     let mut r = Rng::new(seed);
     let n = 4096 * scale;
@@ -212,15 +334,19 @@ fn floats(seed: u64, scale: usize) -> Vec<(&'static str, Vec<u8>)> {
         ("F16", w(&mut r, n + 1).iter().flat_map(|&v| f32_to_f16(v).to_le_bytes()).collect()),
         ("F32", f32s(w(&mut r, 50))),
         ("I64", (0..n as u64 / 4).flat_map(|i| (i * 7 % 1000).to_le_bytes()).collect()),
+        ("F64", w(&mut r, n).iter().flat_map(|&v| (v as f64 * 1.000_000_1).to_le_bytes()).collect()),
+        ("F8_E4M3", (0..2 * n).map(|_| fp8(&mut r, 4)).collect()),
+        ("F8_E5M2", (0..2 * n).map(|_| fp8(&mut r, 5)).collect()),
         ("BF16", bf16s(w(&mut r, n))),
     ]
 }
 
-/// Bytes of an element of a type of safetensors' (of [`floats`]).
+/// Bytes of an element of a type of safetensors' (of [`floats`] and [`converted`]).
 fn width(ty: &str) -> usize {
     match ty {
-        "F16" | "BF16" => 2,
-        "F32" => 4,
+        "F16" | "BF16" | "I16" => 2,
+        "F32" | "I32" => 4,
+        "F8_E4M3" | "F8_E5M2" | "U8" | "I8" | "BOOL" => 1,
         _ => 8,
     }
 }
@@ -269,6 +395,9 @@ fn pickle(ts: &[(&str, Vec<u8>)]) -> Vec<u8> {
         "F32" => "FloatStorage",
         "F16" => "HalfStorage",
         "BF16" => "BFloat16Storage",
+        "F64" => "DoubleStorage",
+        "F8_E4M3" => "Float8_e4m3fnStorage",
+        "F8_E5M2" => "Float8_e5m2Storage",
         _ => "LongStorage",
     };
     for (i, (ty, d)) in ts.iter().enumerate() {

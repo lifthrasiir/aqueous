@@ -5,8 +5,11 @@
 
 use aqr_api::stream::{In, Pull, Put, Reader, Slice, Written};
 
-use crate::layout::{self, FLOAT_CHUNK, Float, FloatRun, MAX_CHUNK_RAW, MAX_CHUNK_SIDE, MAX_CHUNK_SYMS, Run};
-use crate::rans::{Decoder, HEAD, Kernel, LANES};
+use crate::layout::{
+    self, ESCAPED, FLOAT_CHUNK, FloatRun, GridRun, GridValues, LanesRun, MAX_CHUNK_RAW, MAX_CHUNK_SIDE, MAX_CHUNK_SYMS,
+    MAX_GRID, MAX_TILES, Run,
+};
+use crate::rans::{Decoder, HEAD, Kernel, LANES, Table};
 use crate::{Error, Result, corrupt};
 
 /// Pages of the windows of the module as a part module: of each input and of the output.
@@ -31,7 +34,20 @@ pub const MAX_PARAMS: u64 = 1 << 20;
 pub fn plan(initial: u64, params: u64) -> u64 {
     let mut m = aqr_api::stack::Sim::new(initial);
     m.take(params);
-    for n in [WORDS, PIECE, PIECE, PIECE, MAX_CHUNK_SYMS, MAX_CHUNK_RAW, MAX_CHUNK_SIDE] {
+    let tiles = 4 * MAX_TILES as usize;
+    for n in [
+        WORDS,
+        PIECE,
+        PIECE,
+        PIECE,
+        MAX_CHUNK_SYMS,
+        MAX_CHUNK_RAW,
+        MAX_CHUNK_SIDE,
+        tiles,
+        tiles,
+        2 * tiles,
+        4 * MAX_GRID,
+    ] {
         m.take(n as u64);
     }
     m.plan()
@@ -111,11 +127,53 @@ impl Out<'_> {
     }
 }
 
-/// The working buffers of a chunk.
+/// The working buffers of a chunk, and of a grid: the scales and zero points of a row of tiles,
+/// and its values.
 struct Scratch {
     syms: Vec<u8>,
     raw: Vec<u8>,
     side: Vec<u8>,
+    scales: Vec<u32>,
+    zeros: Vec<f32>,
+    seen: Vec<u64>,
+    grid: Vec<f32>,
+}
+
+/// The symbols of `n` of table `t` into `out` (groups of 32, the last perhaps fewer).
+#[inline]
+fn symbols(dec: &mut Decoder, t: &Table, words: &mut Words, out: &mut [u8]) {
+    let n = out.len();
+    let full = n / LANES * LANES;
+    dec.groups(t, &words.buf, &mut words.pos, &mut out[..full]);
+    if n > full {
+        dec.partial(t, &words.buf, &mut words.pos, &mut out[full..]);
+    }
+}
+
+/// Of the symbols `a` (each of 16), the symbols of their classes' tables, each class's in turn
+/// into `out` (FORMAT.md §4.2): the start of each class's in it.
+fn by_class(
+    dec: &mut Decoder,
+    tables: &[Table],
+    class: &[u8; 16],
+    a: &[u8],
+    words: &mut Words,
+    out: &mut [u8],
+) -> [usize; 4] {
+    let mut count = [0usize; 4];
+    if tables.len() == 1 {
+        count[0] = a.len();
+    } else {
+        a.iter().for_each(|&s| count[class[s as usize] as usize] += 1);
+    }
+    let mut start = [0usize; 4];
+    let mut o = 0;
+    for (k, t) in tables.iter().enumerate() {
+        start[k] = o;
+        symbols(dec, t, words, &mut out[o..o + count[k]]);
+        o += count[k];
+    }
+    start
 }
 
 /// The module on its streams (the coded symbols of `syms_len` bytes, the raw and the side
@@ -134,7 +192,15 @@ fn run(
     let mut raw = Reader::new(raw, PIECE);
     let mut side = Reader::new(side, PIECE);
     let mut out = Out { sink: out, buf: Vec::with_capacity(PIECE) };
-    let mut sc = Scratch { syms: vec![0; MAX_CHUNK_SYMS], raw: vec![0; MAX_CHUNK_RAW], side: vec![0; MAX_CHUNK_SIDE] };
+    let mut sc = Scratch {
+        syms: vec![0; MAX_CHUNK_SYMS],
+        raw: vec![0; MAX_CHUNK_RAW],
+        side: vec![0; MAX_CHUNK_SIDE],
+        scales: vec![0; MAX_TILES as usize],
+        zeros: vec![0.0; MAX_TILES as usize],
+        seen: vec![0; MAX_TILES as usize],
+        grid: Vec::with_capacity(MAX_GRID),
+    };
     let mut dec = None;
     if syms_len > 0 {
         words.fill();
@@ -147,24 +213,25 @@ fn run(
     let mut at = 0;
     let mut total = 0u64;
     while at < params.len() {
-        let r = Run::read(params, &mut at)?;
+        let r = Run::read(params, &mut at, sc.grid.len())?;
         total = total.checked_add(r.len()).filter(|&t| t <= size).ok_or_else(corrupt)?;
+        if let Run::Raw(n) = r {
+            let mut put = Ok(());
+            let all = side.each(n, |p| {
+                put = out.chunk(p.len()).map(|o| o.copy_from_slice(p));
+                put.is_ok().then_some(())
+            });
+            put?;
+            all.ok_or_else(corrupt)?;
+            continue;
+        }
+        let dec = dec.as_mut().ok_or_else(corrupt)?;
         match r {
-            Run::Raw(n) => {
-                let mut put = Ok(());
-                let all = side.each(n, |p| {
-                    put = out.chunk(p.len()).map(|o| o.copy_from_slice(p));
-                    put.is_ok().then_some(())
-                });
-                put?;
-                all.ok_or_else(corrupt)?;
-            }
-            Run::Float(f) => {
-                let dec = dec.as_mut().ok_or_else(corrupt)?;
-                float(&f, dec, &mut words, &mut raw, &mut side, &mut out, &mut sc)?;
-            }
+            Run::Raw(_) => unreachable!(),
+            Run::Float(f) => float(&f, dec, &mut words, &mut raw, &mut side, &mut out, &mut sc)?,
+            Run::Lanes(l) => lanes(&l, dec, &mut words, &mut raw, &mut out, &mut sc)?,
+            Run::Grid(g) => grid(g, dec, &mut words, &mut side, &mut out, &mut sc)?,
             Run::Quant { q, blocks, tables } => {
-                let dec = dec.as_mut().ok_or_else(corrupt)?;
                 let mut left = blocks;
                 while left > 0 {
                     let b = left.min(q.chunk() as u64) as usize;
@@ -173,11 +240,7 @@ fn run(
                     let mut o = 0;
                     for (part, t) in q.coded().zip(&tables) {
                         let n = b * part.syms();
-                        let full = n / LANES * LANES;
-                        dec.groups(t, &words.buf, &mut words.pos, &mut sc.syms[o..o + full]);
-                        if n > full {
-                            dec.partial(t, &words.buf, &mut words.pos, &mut sc.syms[o + full..o + n]);
-                        }
+                        symbols(dec, t, &mut words, &mut sc.syms[o..o + n]);
                         o += n;
                     }
                     let (nr, ns) = (layout::quant_raw(q, b), layout::quant_side(q, b));
@@ -197,7 +260,7 @@ fn run(
     Ok(())
 }
 
-/// A run of floats.
+/// A run of floats (FORMAT.md §4.2).
 fn float(
     r: &FloatRun,
     dec: &mut Decoder,
@@ -207,60 +270,56 @@ fn float(
     out: &mut Out,
     sc: &mut Scratch,
 ) -> Result<()> {
-    let (f, kept) = (r.f, r.kept);
+    let f = r.f;
     let fb = f.bytes();
+    let (t, rb, shift) = (r.t, r.raw_bits(), r.shift);
+    let eb = if r.whole { fb } else { f.exp_bytes() };
     let mut left = r.n;
     while left > 0 {
         let e = left.min(FLOAT_CHUNK as u64) as usize;
         left -= e as u64;
         words.fill();
-        let full = e / LANES * LANES;
         let (a, b) = sc.syms.split_at_mut(FLOAT_CHUNK);
-        dec.groups(&r.exp, &words.buf, &mut words.pos, &mut a[..full]);
-        if e > full {
-            dec.partial(&r.exp, &words.buf, &mut words.pos, &mut a[full..e]);
+        let a = &mut a[..e];
+        symbols(dec, &r.exp, words, a);
+        let mut start = [0; 4];
+        if t > 0 {
+            start = by_class(dec, &r.man, &r.class, a, words, b);
         }
-        if let Some(t) = &r.top {
-            dec.groups(t, &words.buf, &mut words.pos, &mut b[..full]);
-            if e > full {
-                dec.partial(t, &words.buf, &mut words.pos, &mut b[full..e]);
-            }
-        }
-        let nr = e * kept.k;
+        let nr = (e * rb as usize).div_ceil(8);
         raw.exact(&mut sc.raw[..nr]).ok_or_else(corrupt)?;
+        sc.raw[nr..nr + 8].fill(0);
         let m = r.m;
-        let esc = a[..e].iter().filter(|&&s| s >= m).count();
-        let eb = if r.whole { fb } else { 1 };
+        let esc = a.iter().filter(|&&s| s >= m).count();
         side.exact(&mut sc.side[..esc * eb]).ok_or_else(corrupt)?;
-        if !r.whole && sc.side[..esc].iter().any(|&x| x as u32 >= 1 << f.exp_bits()) {
-            return Err(corrupt());
-        }
         let dst = out.chunk(e * fb)?;
-        let (a, b, rw) = (&a[..e], &b[..e], &sc.raw[..nr]);
-        let map = &r.map;
-        match (f, kept.k, kept.b) {
+        let (a, rw, map) = (&*a, &sc.raw[..nr + 8], &r.map);
+        match (fb, t, rb) {
             // (the usual: BF16, or F16 of BF16's precision)
-            (Float::Bf16 | Float::F16, 1, 0) => {
-                let ms = f.man_bits() - kept.shift;
+            (2, 0, 8) => {
+                let ms = f.man_bits() - shift;
                 for i in 0..e {
                     let k = rw[i] as u32;
-                    let v = (k >> ms) << 15
-                        | (map[a[i] as usize] as u32) << f.man_bits()
-                        | (k & ((1 << ms) - 1)) << kept.shift;
+                    let v =
+                        (k >> ms) << 15 | (map[a[i] as usize] as u32) << f.man_bits() | (k & ((1 << ms) - 1)) << shift;
                     dst[2 * i..2 * i + 2].copy_from_slice(&(v as u16).to_le_bytes());
                 }
             }
-            _ => {
+            // (F32 of every bit)
+            (4, 0, 24) => {
                 for i in 0..e {
-                    let mut k = 0u32;
-                    for (t, &x) in rw[i * kept.k..(i + 1) * kept.k].iter().enumerate() {
-                        k |= (x as u32) << (8 * t);
-                    }
-                    if kept.b > 0 {
-                        k |= (b[i] as u32) << (8 * kept.k);
-                    }
-                    let v = kept.float(f, map[a[i] as usize] as u32, k);
-                    dst[fb * i..fb * (i + 1)].copy_from_slice(&v.to_le_bytes()[..fb]);
+                    let k = u32::from_le_bytes([rw[3 * i], rw[3 * i + 1], rw[3 * i + 2], 0]);
+                    let v = (k >> 23) << 31 | (map[a[i] as usize] as u32) << 23 | k & 0x7f_ffff;
+                    dst[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes());
+                }
+            }
+            _ => {
+                let fl = Floats { f, shift, rb, t, a, b, start, class: &r.class, map, rw };
+                match fb {
+                    1 => fl.put::<1>(dst),
+                    2 => fl.put::<2>(dst),
+                    4 => fl.put::<4>(dst),
+                    _ => fl.put::<8>(dst),
                 }
             }
         }
@@ -270,16 +329,196 @@ fn float(
             // (a counter of its own: of `enumerate`, tensors-recons is 5 bytes larger)
             #[allow(clippy::explicit_counter_loop)]
             for i in (0..e).filter(|&i| a[i] >= m) {
+                let d = &mut dst[fb * i..fb * (i + 1)];
                 if r.whole {
-                    dst[fb * i..fb * (i + 1)].copy_from_slice(&sc.side[fb * j..fb * (j + 1)]);
+                    d.copy_from_slice(&sc.side[fb * j..fb * (j + 1)]);
                 } else {
-                    let mut v = [0u8; 4];
-                    v[..fb].copy_from_slice(&dst[fb * i..fb * (i + 1)]);
-                    let x = u32::from_le_bytes(v) & !(((1 << f.exp_bits()) - 1) << f.man_bits())
-                        | (sc.side[j] as u32) << f.man_bits();
-                    dst[fb * i..fb * (i + 1)].copy_from_slice(&x.to_le_bytes()[..fb]);
+                    let mut x = [0u8; 8];
+                    x[..eb].copy_from_slice(&sc.side[eb * j..eb * (j + 1)]);
+                    let x = u64::from_le_bytes(x);
+                    if x >= 1 << f.exp_bits() {
+                        return Err(corrupt());
+                    }
+                    let mut v = [0u8; 8];
+                    v[..fb].copy_from_slice(d);
+                    let v = u64::from_le_bytes(v) & !(((1 << f.exp_bits()) - 1) << f.man_bits()) | x << f.man_bits();
+                    d.copy_from_slice(&v.to_le_bytes()[..fb]);
                 }
                 j += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A chunk of a run of floats decoded but put together: its exponents' symbols `a`, the top bits
+/// `b` of each class from `start`, the raw bits `rw`.
+struct Floats<'a> {
+    f: crate::layout::Float,
+    shift: u32,
+    rb: u32,
+    t: u32,
+    a: &'a [u8],
+    b: &'a [u8],
+    start: [usize; 4],
+    class: &'a [u8; 16],
+    map: &'a [u16; 16],
+    rw: &'a [u8],
+}
+
+impl Floats<'_> {
+    /// The floats of `FB` bytes into `dst` (specialised: the loops over every float are most of
+    /// the decoder's time).
+    #[inline(never)]
+    fn put<const FB: usize>(&self, dst: &mut [u8]) {
+        let (f, shift, rb, rw, a, map) = (self.f, self.shift, self.rb, self.rw, self.a, self.map);
+        let mut set = |i: usize, s: usize, k: u64| {
+            let v = layout::kept_float(f, shift, map[s] as u64, k);
+            dst[FB * i..FB * i + FB].copy_from_slice(&v.to_le_bytes()[..FB]);
+        };
+        if self.t == 0 && rb % 8 == 0 {
+            let k = rb as usize / 8;
+            for i in 0..a.len() {
+                let mut b = [0u8; 8];
+                b[..k].copy_from_slice(&rw[i * k..i * k + k]);
+                set(i, a[i] as usize, u64::from_le_bytes(b));
+            }
+        } else if self.t == 0 {
+            for (i, &s) in a.iter().enumerate() {
+                set(i, s as usize, layout::get_bits(rw, i * rb as usize, rb));
+            }
+        } else {
+            let mut cur = self.start;
+            for (i, &s) in a.iter().enumerate() {
+                let s = s as usize;
+                let c = self.class[s] as usize;
+                let top = self.b[cur[c]] as u64;
+                cur[c] += 1;
+                set(i, s, top << rb | layout::get_bits(rw, i * rb as usize, rb));
+            }
+        }
+    }
+}
+
+/// A run of lanes (FORMAT.md §4.4).
+fn lanes(
+    r: &LanesRun,
+    dec: &mut Decoder,
+    words: &mut Words,
+    raw: &mut Reader,
+    out: &mut Out,
+    sc: &mut Scratch,
+) -> Result<()> {
+    let w = r.w;
+    let nibs = r.nib.count_ones() as usize;
+    let rl = w - nibs;
+    let mut left = r.n;
+    while left > 0 {
+        let e = left.min(r.chunk() as u64) as usize;
+        left -= e as u64;
+        words.fill();
+        for (k, t) in r.tables.iter().enumerate() {
+            symbols(dec, t, words, &mut sc.syms[k * e..(k + 1) * e]);
+        }
+        raw.exact(&mut sc.raw[..e * rl]).ok_or_else(corrupt)?;
+        let dst = out.chunk(e * w)?;
+        let (mut k, mut j) = (0, 0);
+        for lane in 0..w {
+            if r.nib >> lane & 1 == 1 {
+                let (lo, hi) = (&sc.syms[2 * k * e..][..e], &sc.syms[(2 * k + 1) * e..][..e]);
+                for i in 0..e {
+                    dst[w * i + lane] = lo[i] | hi[i] << 4;
+                }
+                k += 1;
+            } else {
+                for i in 0..e {
+                    dst[w * i + lane] = sc.raw[rl * i + j];
+                }
+                j += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A run of a grid (FORMAT.md §4.5).
+fn grid(
+    r: GridRun,
+    dec: &mut Decoder,
+    words: &mut Words,
+    side: &mut Reader,
+    out: &mut Out,
+    sc: &mut Scratch,
+) -> Result<()> {
+    if let GridValues::Own(g) = &r.grid {
+        sc.grid.clear();
+        sc.grid.extend_from_slice(g);
+    }
+    let (f, k) = (r.f, r.k);
+    let fb = f.bytes();
+    // (where the element is: its row, its column, its tile's column and its column in the tile,
+    // and its tiles' row; of each column of tiles, the row of tiles of its scale)
+    let (mut row, mut col) = (r.start / r.row, r.start % r.row);
+    let (mut tc, mut cin, mut band) = ((col / r.bc) as usize, col % r.bc, row / r.br);
+    sc.seen[..r.tiles() as usize].fill(u64::MAX);
+    let mut left = r.n;
+    let mut b4 = [0u8; 4];
+    while left > 0 {
+        let e = left.min(FLOAT_CHUNK as u64) as usize;
+        left -= e as u64;
+        words.fill();
+        let (a, b) = sc.syms.split_at_mut(FLOAT_CHUNK);
+        let a = &mut a[..e];
+        symbols(dec, &r.tables[0], words, a);
+        let mut cur = [0; 4];
+        if k > 16 {
+            cur = by_class(dec, &r.tables[1..], &r.class, a, words, b);
+        }
+        // (the indices, each below the grid's values)
+        let q = &mut sc.side[..e];
+        if k > 16 {
+            for i in 0..e {
+                let h = a[i] as usize;
+                let c = r.class[h] as usize;
+                q[i] = (h << 4) as u8 | b[cur[c]];
+                cur[c] += 1;
+            }
+            if q.iter().fold(0u8, |m, &v| m.max(v)) as usize >= k {
+                return Err(corrupt());
+            }
+        } else {
+            q.copy_from_slice(a);
+        }
+        let dst = out.chunk(e * fb)?;
+        // (in spans of the elements of a tile)
+        let mut i = 0;
+        while i < e {
+            if sc.seen[tc] != band {
+                sc.seen[tc] = band;
+                side.exact(&mut b4).ok_or_else(corrupt)?;
+                sc.scales[tc] = u32::from_le_bytes(b4);
+                if r.zero && sc.scales[tc] != ESCAPED {
+                    side.exact(&mut b4).ok_or_else(corrupt)?;
+                    sc.zeros[tc] = f32::from_le_bytes(b4);
+                }
+            }
+            let span = ((e - i) as u64).min(r.bc - cin).min(r.row - col) as usize;
+            let d = &mut dst[fb * i..fb * (i + span)];
+            let s = sc.scales[tc];
+            if s == ESCAPED {
+                side.exact(d).ok_or_else(corrupt)?;
+            } else {
+                let (g, qs, s, z) = (&sc.grid[..k], &q[i..i + span], f32::from_bits(s), sc.zeros[tc]);
+                crate::gridval::values(f, g, qs, s, z, r.zero, d);
+            }
+            i += span;
+            col += span as u64;
+            cin += span as u64;
+            if col == r.row {
+                (row, col, tc, cin) = (row + 1, 0, 0, 0);
+                band = row / r.br;
+            } else if cin == r.bc {
+                (tc, cin) = (tc + 1, 0);
             }
         }
     }
