@@ -46,9 +46,11 @@ A static rANS of 32 interleaved 32-bit states, 16-bit words, probabilities of 15
 an alphabet of 16 symbols, in groups of 32 symbols of one table (FORMAT.md §3). As all the
 states of a group have the same table, a symbol is found by comparing the slot with the 15
 cumulative frequencies, and its frequency and start are looked up by a permutation (AVX2) or a
-byte shuffle (SIMD128): no gather. The renormalisation reads the words of the states that need
-one by a table of the mask of those states. Natively the AVX2 kernels are taken where the
-processor has them (else one state at a time); the Wasm module runs SIMD128.
+byte shuffle (NEON, SIMD128): no gather. The renormalisation reads the words of the states that
+need one by a table of the mask of those states. Natively the AVX2 kernels are taken where the
+processor has them, the NEON ones on AArch64 (else one state at a time); the Wasm module runs
+SIMD128. NEON compares the slots as 16 bits, 8 at a time, and divides by the 64-bit magic
+numbers of the scalar encoder (`umull`, `umlal`), not by doubles.
 
 On a Ryzen 7 9700X, one thread, 64M symbols of a table of 3.67 bits (`timing::speed`):
 
@@ -58,6 +60,15 @@ On a Ryzen 7 9700X, one thread, 64M symbols of a table of 3.67 bits (`timing::sp
 | encode, scalar, branchless renormalisation, Lemire's division | 726 |
 | encode, AVX2 (division by doubles, exact below 2^32) | 1555 |
 | decode, AVX2 | 1900 |
+
+On an Apple M4, the same:
+
+| | Msym/s |
+|---|---|
+| encode, scalar | 1044 |
+| encode, NEON | 1386 |
+| decode, scalar | 216 |
+| decode, NEON | 1210 |
 
 ## How it does
 
@@ -153,7 +164,9 @@ top bits not worth it.
 The grids' runs code at 0.8–0.9 GB/s (16 threads; their tiles fitted, each a few passes over
 its elements) against 3.5 GB/s of floats, and decode at about 1 GB/s a thread as floats do (the
 values by AVX2 where a tile's span is 32 or more, or of F16: GPTQ's to F16 1.2 GB/s, 0.6 one at
-a time). Through `aqr`, the NVFP4 file's compressing is held by the archive's verification on
+a time; by NEON for F16, BF16 of spans of 16 or more, and F32 of spans of 64 or more of a grid
+of 16 values at most: on an M4, `gridval::timing::speed`'s spans of 16 of BF16 1.63 -> 2.15 G
+elements/s, of F16 0.67 -> 2.33, spans of 128 of F32 2.98 -> 4.57). Through `aqr`, the NVFP4 file's compressing is held by the archive's verification on
 one thread (1.9 of 4.3 s) and the grids' coding (33 thread-seconds, 17 before).
 
 ## Status
@@ -175,9 +188,8 @@ Left:
   whole, to see whether they would save (`How::Light`), which costs as many thread-seconds as
   the coding; and the archive's writing and verification of a large file are mostly on one
   thread (see "How it does").
-- Native SIMD on AArch64 (NEON): the decoder and encoder run one state at a time there; a
-  grid's values one at a time there and in Wasm (SIMD128 has no conversion to F16; BF16's and
-  F32's would take a lookup of 16 values by byte shuffles).
+- A grid's values one at a time in Wasm (SIMD128 has no conversion to F16; BF16's and F32's
+  would take a lookup of 16 values by byte shuffles, as NEON's does).
 - Grids: their coding (0.8–0.9 GB/s on 16 threads) is under the 500 MB/s through `aqr` where
   verification is added; a tile is fitted by a few passes over it (gathered, its indices at a
   first scale, the range of scales, the check), of which the indices and the check could be 8 at

@@ -3,7 +3,7 @@
 //! one to a state, all of a group with one table. As every state of a group has the same table,
 //! a symbol is found by comparing the slot with the table's 15 cumulative frequencies, which
 //! SIMD does on all the states at once with no gather: AVX2 natively (where the processor has
-//! it), SIMD128 in Wasm, else one state at a time. All of them read the same words in the same
+//! it), NEON on AArch64, SIMD128 in Wasm, else one state at a time. All of them read the same words in the same
 //! order, so their results are the same.
 
 use crate::{Result, corrupt};
@@ -198,6 +198,9 @@ impl Encoder {
                 })
             })
             .collect();
+        #[cfg(target_arch = "aarch64")]
+        let neon: Vec<neon::Enc> =
+            if kernel == Kernel::Neon { enc.iter().map(neon::Enc::new).collect() } else { Vec::new() };
         let mut x = [L; LANES];
         // (the words, last first: one at most for each symbol, written whether or not it is
         // put out, which a renormalisation of about one symbol in four would mispredict; with
@@ -218,6 +221,11 @@ impl Encoder {
                 #[cfg(target_arch = "x86_64")]
                 Kernel::Avx2 if n == LANES => unsafe {
                     avx2::encode(&mut x, &tables[t as usize], syms, &mut words, &mut w)
+                },
+                // SAFETY: `words` has room for a group's words past `w` and 4 more
+                #[cfg(target_arch = "aarch64")]
+                Kernel::Neon if n == LANES => unsafe {
+                    neon::encode(&mut x, &neon[t as usize], syms, &mut words, &mut w)
                 },
                 _ => {
                     let e = &enc[t as usize];
@@ -257,6 +265,8 @@ pub enum Kernel {
     Scalar,
     #[cfg(target_arch = "x86_64")]
     Avx2,
+    #[cfg(target_arch = "aarch64")]
+    Neon,
     #[cfg(target_family = "wasm")]
     Simd128,
 }
@@ -268,6 +278,8 @@ impl Kernel {
         if std::is_x86_feature_detected!("avx2") {
             return Kernel::Avx2;
         }
+        #[cfg(target_arch = "aarch64")]
+        return Kernel::Neon;
         #[cfg(target_family = "wasm")]
         return Kernel::Simd128;
         #[allow(unreachable_code)]
@@ -319,6 +331,9 @@ impl Decoder {
             // SAFETY: AVX2 was found ([`Kernel::best`]); the words were asserted above.
             #[cfg(target_arch = "x86_64")]
             Kernel::Avx2 => unsafe { avx2::groups(&mut self.x, t, words, pos, out) },
+            // SAFETY: the words were asserted above (AArch64 has NEON always).
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Neon => unsafe { neon::groups(&mut self.x, t, words, pos, out) },
             // SAFETY: the words were asserted above.
             #[cfg(target_family = "wasm")]
             Kernel::Simd128 => unsafe { simd128::groups(&mut self.x, t, words, pos, out) },
@@ -533,6 +548,237 @@ mod avx2 {
     }
 }
 
+#[cfg(target_arch = "aarch64")]
+mod neon {
+    use super::{L, LANES, PROB, PROB_BITS, Table};
+    use std::arch::aarch64::*;
+
+    /// Of each mask of 4 lanes, the bytes of the words (of 4, the 8 bytes from the position)
+    /// each lane takes: the lanes below it that take one (indices past 15 give 0).
+    static TAKE: [[u8; 16]; 16] = {
+        let mut t = [[0u8; 16]; 16];
+        let mut m = 0;
+        while m < 16 {
+            let mut n = 0;
+            let mut i = 0;
+            while i < 4 {
+                let mut b = 0;
+                while b < 4 {
+                    t[m][4 * i + b] = if b < 2 { (2 * n + b) as u8 } else { 0xff };
+                    b += 1;
+                }
+                if m >> i & 1 == 1 {
+                    n += 1;
+                }
+                i += 1;
+            }
+            m += 1;
+        }
+        t
+    };
+
+    /// Of each mask of 4 lanes, the low two bytes of the lanes set, from the highest down (then
+    /// zeros).
+    static PUT: [[u8; 16]; 16] = {
+        let mut t = [[0xffu8; 16]; 16];
+        let mut m = 0;
+        while m < 16 {
+            let mut n = 0;
+            let mut i = 4;
+            while i > 0 {
+                i -= 1;
+                if m >> i & 1 == 1 {
+                    t[m][2 * n] = 4 * i as u8;
+                    t[m][2 * n + 1] = 4 * i as u8 + 1;
+                    n += 1;
+                }
+            }
+            m += 1;
+        }
+        t
+    };
+
+    /// The bits of the lanes set of a mask.
+    #[inline(always)]
+    unsafe fn bits(m: uint32x4_t) -> usize {
+        unsafe {
+            const B: [u32; 4] = [1, 2, 4, 8];
+            vaddvq_u32(vandq_u32(m, vld1q_u32(B.as_ptr()))) as usize
+        }
+    }
+
+    /// Of a table's 16 values of 16 bits, their low and high bytes.
+    #[inline(always)]
+    unsafe fn bytes(a: &[u32]) -> (uint8x16_t, uint8x16_t) {
+        let lo: [u8; 16] = std::array::from_fn(|s| a[s] as u8);
+        let hi: [u8; 16] = std::array::from_fn(|s| (a[s] >> 8) as u8);
+        unsafe { (vld1q_u8(lo.as_ptr()), vld1q_u8(hi.as_ptr())) }
+    }
+
+    /// The 16-bit values of the symbols `s` (bytes, 0 to 15) of the table of bytes `lo`, `hi`:
+    /// of the lower 8 and the upper 8 of `s`.
+    #[inline(always)]
+    unsafe fn look(lo: uint8x16_t, hi: uint8x16_t, s: uint8x16_t) -> (uint16x8_t, uint16x8_t) {
+        unsafe {
+            let (l, h) = (vqtbl1q_u8(lo, s), vqtbl1q_u8(hi, s));
+            (vreinterpretq_u16_u8(vzip1q_u8(l, h)), vreinterpretq_u16_u8(vzip2q_u8(l, h)))
+        }
+    }
+
+    /// A table as the encoder takes it: by symbol, the bytes of the frequencies (low, high), of
+    /// the starts and of the 32-bit halves of the dividers' magic numbers ([`super::EncSym`]).
+    pub(super) struct Enc {
+        freq: [uint8x16_t; 2],
+        cum: [uint8x16_t; 2],
+        lo: [uint8x16_t; 4],
+        hi: [uint8x16_t; 4],
+    }
+
+    impl Enc {
+        pub(super) fn new(e: &[super::EncSym; 16]) -> Enc {
+            let b = |f: &dyn Fn(&super::EncSym) -> u64, k: u32| {
+                let a: [u8; 16] = std::array::from_fn(|s| (f(&e[s]) >> (8 * k)) as u8);
+                // SAFETY: AArch64 has NEON always.
+                unsafe { vld1q_u8(a.as_ptr()) }
+            };
+            Enc {
+                freq: std::array::from_fn(|k| b(&|e| e.freq as u64, k as u32)),
+                cum: std::array::from_fn(|k| b(&|e| e.cum as u64, k as u32)),
+                lo: std::array::from_fn(|k| b(&|e| e.magic, k as u32)),
+                hi: std::array::from_fn(|k| b(&|e| e.magic, 4 + k as u32)),
+            }
+        }
+    }
+
+    /// The 32-bit values of the symbols `s` (bytes, 0 to 15) of the table of bytes `t`, of 16
+    /// lanes, 4 to a vector.
+    #[inline(always)]
+    unsafe fn look32(t: &[uint8x16_t; 4], s: uint8x16_t) -> [uint32x4_t; 4] {
+        unsafe {
+            let (l, h) = look(t[0], t[1], s);
+            let (l2, h2) = look(t[2], t[3], s);
+            let z = |a: uint16x8_t, b: uint16x8_t| (vzip1q_u16(a, b), vzip2q_u16(a, b));
+            let (a, b) = z(l, l2);
+            let (c, d) = z(h, h2);
+            [a, b, c, d].map(|v| vreinterpretq_u32_u16(v))
+        }
+    }
+
+    /// The encoder of a full group (FORMAT.md §3), lanes from the last: as the scalar one, its
+    /// words put out after `w` in `words` (which has room for 4 more past a group's).
+    #[allow(clippy::needless_range_loop)]
+    pub(super) unsafe fn encode(x: &mut [u32; LANES], t: &Enc, syms: &[u8], words: &mut [u16], w: &mut usize) {
+        unsafe {
+            // (the frequencies, starts and magic numbers of the lanes, 4 to a vector)
+            let mut fq = [vdupq_n_u32(0); 8];
+            let mut cm = [vdupq_n_u32(0); 8];
+            let mut ml = [vdupq_n_u32(0); 8];
+            let mut mh = [vdupq_n_u32(0); 8];
+            for h in 0..2 {
+                let s = vld1q_u8(syms.as_ptr().add(16 * h));
+                let (fa, fb) = look(t.freq[0], t.freq[1], s);
+                let (ca, cb) = look(t.cum[0], t.cum[1], s);
+                for (j, (f, c)) in [(fa, ca), (fb, cb)].into_iter().enumerate() {
+                    fq[4 * h + 2 * j] = vmovl_u16(vget_low_u16(f));
+                    fq[4 * h + 2 * j + 1] = vmovl_high_u16(f);
+                    cm[4 * h + 2 * j] = vmovl_u16(vget_low_u16(c));
+                    cm[4 * h + 2 * j + 1] = vmovl_high_u16(c);
+                }
+                ml[4 * h..4 * h + 4].copy_from_slice(&look32(&t.lo, s));
+                mh[4 * h..4 * h + 4].copy_from_slice(&look32(&t.hi, s));
+            }
+            let zero = vdupq_n_u32(0);
+            let mut o = *w;
+            for k in (0..8).rev() {
+                let (f, c) = (fq[k], cm[k]);
+                let mut v = vld1q_u32(x.as_ptr().add(4 * k));
+                // (a word out where v >= f << 17, that is v >> 17 >= f)
+                let put = vcgeq_u32(vshrq_n_u32::<17>(v), f);
+                let m = bits(put);
+                let out = vqtbl1q_u8(vreinterpretq_u8_u32(v), vld1q_u8(PUT[m].as_ptr()));
+                vst1_u8(words.as_mut_ptr().add(o) as *mut u8, vget_low_u8(out));
+                o += m.count_ones() as usize;
+                v = vbslq_u32(put, vshrq_n_u32::<16>(v), v);
+                // (v / f: (magic * v) >> 64, of the magic's halves; a magic of 0, of a frequency
+                // of 1, leaves v)
+                let (lo, hi) = (ml[k], mh[k]);
+                let a = vshrq_n_u64::<32>(vmull_u32(vget_low_u32(v), vget_low_u32(lo)));
+                let b = vshrq_n_u64::<32>(vmull_high_u32(v, lo));
+                let a = vmlal_u32(a, vget_low_u32(v), vget_low_u32(hi));
+                let b = vmlal_high_u32(b, v, hi);
+                let q = vshrn_high_n_u64::<32>(vshrn_n_u64::<32>(a), b);
+                let q = vbslq_u32(vceqq_u32(hi, zero), v, q);
+                let r = vmlsq_u32(v, q, f);
+                let nx = vaddq_u32(vaddq_u32(vshlq_n_u32::<{ PROB_BITS as i32 }>(q), r), c);
+                vst1q_u32(x.as_mut_ptr().add(4 * k), nx);
+            }
+            *w = o;
+        }
+    }
+
+    // (the 8 vectors of the states by index, as the lanes they hold)
+    #[allow(clippy::needless_range_loop)]
+    pub(super) unsafe fn groups(x: &mut [u32; LANES], t: &Table, words: &[u8], pos: &mut usize, out: &mut [u8]) {
+        unsafe {
+            // (the slots and the cumulative frequencies, below 2^15 and to 2^15, compared as 16
+            // bits)
+            let c: [uint16x8_t; 15] = std::array::from_fn(|k| vdupq_n_u16(t.cum[k + 1] as u16));
+            let (f0, f1) = bytes(&t.freq);
+            let (s0, s1) = bytes(&t.cum[..16]);
+            let mask = vdupq_n_u16(PROB as u16 - 1);
+            let below = vdupq_n_u32(L);
+            let mut st: [uint32x4_t; 8] = std::array::from_fn(|k| vld1q_u32(x.as_ptr().add(4 * k)));
+            let mut p = *pos;
+            let w = words.as_ptr();
+            for g in out.as_chunks_mut::<LANES>().0 {
+                for h in 0..2 {
+                    // (the slots of 16 lanes, and their symbols)
+                    let sl: [uint16x8_t; 2] = std::array::from_fn(|j| {
+                        let (a, b) =
+                            (vreinterpretq_u16_u32(st[4 * h + 2 * j]), vreinterpretq_u16_u32(st[4 * h + 2 * j + 1]));
+                        vandq_u16(vuzp1q_u16(a, b), mask)
+                    });
+                    let sy: [uint16x8_t; 2] = std::array::from_fn(|j| {
+                        let mut s = vdupq_n_u16(0);
+                        for ck in &c {
+                            // (all ones where slot >= cum)
+                            s = vsubq_u16(s, vcgeq_u16(sl[j], *ck));
+                        }
+                        s
+                    });
+                    let s8 = vuzp1q_u8(vreinterpretq_u8_u16(sy[0]), vreinterpretq_u8_u16(sy[1]));
+                    vst1q_u8(g.as_mut_ptr().add(16 * h), s8);
+                    let (fa, fb) = look(f0, f1, s8);
+                    let (sa, sb) = look(s0, s1, s8);
+                    // (the slots less the starts, and the frequencies, of 8 lanes each)
+                    let d = [vsubq_u16(sl[0], sa), vsubq_u16(sl[1], sb)];
+                    let fr = [fa, fb];
+                    for k in 0..4 {
+                        let (j, high) = (k / 2, k % 2 == 1);
+                        let (f, dd) = if high {
+                            (vmovl_high_u16(fr[j]), vmovl_high_u16(d[j]))
+                        } else {
+                            (vmovl_u16(vget_low_u16(fr[j])), vmovl_u16(vget_low_u16(d[j])))
+                        };
+                        let i = 4 * h + k;
+                        let v = vmlaq_u32(dd, f, vshrq_n_u32::<{ PROB_BITS as i32 }>(st[i]));
+                        let need = vcltq_u32(v, below);
+                        let m = bits(need);
+                        let ws = vcombine_u8(vld1_u8(w.add(p)), vdup_n_u8(0));
+                        let ws = vreinterpretq_u32_u8(vqtbl1q_u8(ws, vld1q_u8(TAKE[m].as_ptr())));
+                        st[i] = vbslq_u32(need, vorrq_u32(vshlq_n_u32::<16>(v), ws), v);
+                        p += 2 * m.count_ones() as usize;
+                    }
+                }
+            }
+            for k in 0..8 {
+                vst1q_u32(x.as_mut_ptr().add(4 * k), st[k]);
+            }
+            *pos = p;
+        }
+    }
+}
+
 #[cfg(target_family = "wasm")]
 mod simd128 {
     use super::{L, LANES, PROB, PROB_BITS, Table};
@@ -722,31 +968,36 @@ mod timing {
                 k as u8
             })
             .collect();
-        let at = std::time::Instant::now();
-        let mut e = Encoder::new();
-        e.groups(0, &syms);
-        let gathered = at.elapsed();
-        let data = e.finish(&[t]);
-        let enc = at.elapsed();
-        let mut words = data[HEAD..].to_vec();
-        words.resize(words.len() + 2 * 8192, 0);
-        let mut out = vec![0u8; syms.len()];
-        let at = std::time::Instant::now();
-        let mut d = Decoder::new(&data, Kernel::best()).unwrap();
-        let mut pos = 0;
-        for c in out.chunks_mut(8192) {
-            d.groups(&t, &words, &mut pos, c);
-        }
-        let dec = at.elapsed();
-        assert_eq!(out, syms);
         let m = syms.len() as f64 / 1e6;
-        println!(
-            "{} bytes/sym; gather {:.0} Msym/s, encode {:.0} Msym/s, decode {:.0} Msym/s ({:?})",
-            data.len() as f64 / syms.len() as f64,
-            m / gathered.as_secs_f64(),
-            m / (enc - gathered).as_secs_f64(),
-            m / dec.as_secs_f64(),
-            Kernel::best()
-        );
+        let mut kernels = vec![Kernel::Scalar];
+        if Kernel::best() != Kernel::Scalar {
+            kernels.push(Kernel::best());
+        }
+        for k in kernels {
+            let at = std::time::Instant::now();
+            let mut e = Encoder::new();
+            e.groups(0, &syms);
+            let gathered = at.elapsed();
+            let data = e.finish_with(&[t], k);
+            let enc = at.elapsed();
+            let mut words = data[HEAD..].to_vec();
+            words.resize(words.len() + 2 * 8192, 0);
+            let mut out = vec![0u8; syms.len()];
+            let at = std::time::Instant::now();
+            let mut d = Decoder::new(&data, k).unwrap();
+            let mut pos = 0;
+            for c in out.chunks_mut(8192) {
+                d.groups(&t, &words, &mut pos, c);
+            }
+            let dec = at.elapsed();
+            assert_eq!(out, syms);
+            println!(
+                "{k:?}: {} bytes/sym; gather {:.0} Msym/s, encode {:.0} Msym/s, decode {:.0} Msym/s",
+                data.len() as f64 / syms.len() as f64,
+                m / gathered.as_secs_f64(),
+                m / (enc - gathered).as_secs_f64(),
+                m / dec.as_secs_f64(),
+            );
+        }
     }
 }
