@@ -23,10 +23,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4.4.0
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5.6.0
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: '3.12'
       # (Bikeshed and every dependency of it pinned with their hashes: spec/requirements.in)
@@ -35,7 +35,7 @@ jobs:
       - run: mkdir -p _site/spec && bikeshed spec spec/index.bs _site/spec/index.html
       # The site's root page (site/), with the icon it uses.
       - run: cp -R site/. _site/ && cp droplet.svg _site/
-      - uses: actions/upload-pages-artifact@v3.0.1
+      - uses: actions/upload-pages-artifact@v5.0.0
         with:
           path: _site
 
@@ -50,4 +50,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4.0.5
+        uses: actions/deploy-pages@v5.0.1
