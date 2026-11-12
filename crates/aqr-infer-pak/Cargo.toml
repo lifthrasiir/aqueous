@@ -20,3 +20,7 @@ memmap2 = "0.9"
 [[example]]
 name = "aqr-infer-pak-probe"
 path = "examples/probe.rs"
+
+[[example]]
+name = "aqr-infer-pak-batch"
+path = "examples/batch.rs"

@@ -21,6 +21,10 @@ tile the target.
   member decoded whole or not at all.
 - [`target`](src/target.rs): targets decoded in place, which the tables are tested on in turn
   (a pak of zstd chunks whose directory points into the chunks decoded).
+- [`template`](src/template.rs): the layout of the directories inferred in one family (where
+  each table starts, the header field counting its rows, stride, fields, files, base, codec),
+  verified in another of the same format: no search and no evidence of its own, so that a
+  directory of a single row is found where its template holds.
 
 ## Status
 
@@ -28,14 +32,23 @@ Not used by aqr yet (docs/pak-inference-design.md, section 8). On the test set (
 No Man's Sky, four files of other formats), `scripts/check.py` against the counts the headers
 give: 15 of 15 directories found, none found wrongly. The samples and their counts are in an
 expectations file of the user's (the script's docstring has its format), not in the repository.
-Directories of fewer than 8 rows are not looked for (a layout learned from a bigger file of the
-family would be: section 7).
+The inference does not look for directories of fewer than 8 rows; templates find them.
+
+`aqr-infer-pak-batch` runs a batch as aqr would trigger it: files that start with the same 8
+bytes (3 at least, not text or zeros) are a group, each with its family; the biggest family is
+inferred, the others verify its template (or are inferred, and learned from, where it does not
+hold), those left with nothing retried by the templates learned later. The Crew's `data_win32`
+(174 files, 87 families): all 87, 85 by templates in 0.1 s in all, 2 inferred in 2.4 s. No Man's
+Sky's `PCBANKS` (98 files): 95 of 97 paks, 93 by templates in 4.5 s (mostly the first touch of
+the mapped files), 4 inferred in 6.0 s; the two paks stored uncompressed are missed (their
+entries' table is labelled the wrong stride).
 
 ## Usage
 
 ```sh
 cargo build -r -p aqr-infer-pak --examples
 target/release/examples/aqr-infer-pak-probe FILE...   # AQR_PAK_VERBOSE=1: each table's tests and times
+target/release/examples/aqr-infer-pak-batch PATH...   # groups by magic, templates (directories: a level deep)
 .venv/Scripts/python -I crates/aqr-infer-pak/scripts/check.py EXPECT  # samples against what is known of them
 AQR_PAK_VERBOSE=1 target/release/examples/aqr-infer-pak-probe FILE 2>&1 | python crates/aqr-infer-pak/scripts/costs.py
 ```

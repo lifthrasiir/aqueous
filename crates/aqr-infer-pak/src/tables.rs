@@ -110,10 +110,14 @@ fn autocorrelation(z: &[u8]) -> Vec<f64> {
 /// their divisors and multiples (a table of a divisor's stride may sit next to a bigger one).
 fn strides(w: &[u8]) -> Vec<usize> {
     let mut cand = Vec::new();
-    // tiles of 16 KiB over the first 256 KiB (a table among data whose bytes repeat at any
-    // stride stands out only in a tile of its own size), then the first 16 KiB of each 64 KiB
-    let head = w.len().min(1 << 18);
-    let tiles = w[..head].chunks(1 << 14).chain(w[head..].chunks(1 << 16).map(|z| &z[..z.len().min(1 << 14)]));
+    // tiles of 4 KiB over the first 64 KiB and of 16 KiB to 256 KiB (a table among data whose
+    // bytes repeat at any stride stands out only in a tile near its own size: 480 bytes of a
+    // table in 16 KiB of text did not), then the first 16 KiB of each 64 KiB
+    let (h1, h2) = (w.len().min(1 << 16), w.len().min(1 << 18));
+    let tiles = w[..h1]
+        .chunks(1 << 12)
+        .chain(w[h1..h2].chunks(1 << 14))
+        .chain(w[h2..].chunks(1 << 16).map(|z| &z[..z.len().min(1 << 14)]));
     for z in tiles {
         if z.len() < 16 * KMIN {
             continue;
@@ -281,7 +285,6 @@ pub fn find(b: &[u8], lo: usize, hi: usize) -> Vec<Table> {
     }
     let t_regions = t0.elapsed();
     let mut t_label = std::time::Duration::ZERO;
-    const WN: usize = 2048;
     let mut tables = Vec::new();
     let mut counts = Vec::new();
     for (s, e) in regions {
@@ -294,12 +297,18 @@ pub fn find(b: &[u8], lo: usize, hi: usize) -> Vec<Table> {
         // the strides dense in the region (most of a file's strides are another region's)
         let peak = |i: usize| dens[i][s..e].iter().copied().fold(0f32, f32::max);
         let best = (0..cand.len()).map(peak).fold(0f32, f32::max);
-        let cand: Vec<usize> = (0..cand.len()).filter(|&i| peak(i) >= 0.8 * best).map(|i| cand[i]).collect();
-        let wins: Vec<usize> = (rs..re).step_by(WN).collect();
+        let mut dense: Vec<(f32, usize)> =
+            (0..cand.len()).map(|i| (peak(i), cand[i])).filter(|&(p, _)| p >= 0.8 * best).collect();
+        dense.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap()); // the densest first
+        let cand: Vec<usize> = dense.into_iter().map(|x| x.1).collect();
+        // (windows of 2 KiB: KT's labels on so few rows are unsure, a 32-byte table of 12.7 KB
+        // labelled 56; windows sized to the region lost a table of CREATURES' instead)
+        let wn = 2048;
+        let wins: Vec<usize> = (rs..re).step_by(wn).collect();
         let lab: Vec<Option<usize>> = wins
             .iter()
             .map(|&a| {
-                let z = &w[a..(a + WN).min(re)];
+                let z = &w[a..(a + wn).min(re)];
                 cand.iter()
                     .filter(|&&k| z.len() >= MINROWS * k)
                     .map(|&k| (colcost(z, k, &mut counts), k))
@@ -316,17 +325,23 @@ pub fn find(b: &[u8], lo: usize, hi: usize) -> Vec<Table> {
                 j += 1;
             }
             if let Some(k) = k {
-                let (a, z) = (wins[i], (wins[j - 1] + WN).min(re));
+                let (a, z) = (wins[i], (wins[j - 1] + wn).min(re));
                 // the run at its stride and at the strides related to it, the models fitted on
                 // the run and on its first and last windows (a run may be two tables met)
-                let related = [k / 4, k / 2, 2 * k, 4 * k]
+                // (related: by the label, and the other strides dense in the region, as KT on a
+                // window may label a 32-byte table 56: both miss what the other finds)
+                let mut related: Vec<usize> = [k / 4, k / 2, 2 * k, 4 * k]
                     .into_iter()
-                    .filter(move |&x| (KMIN..=KMAX).contains(&x) && (x % k == 0 || k % x == 0));
+                    .filter(|&x| (KMIN..=KMAX).contains(&x) && (x % k == 0 || k % x == 0))
+                    .chain(cand.iter().copied().filter(|&x| x != k).take(4))
+                    .collect();
+                related.sort_unstable();
+                related.dedup();
                 for kk in std::iter::once(k).chain(related) {
                     let mut seeds = vec![(a, z)];
-                    if z - a > 2 * WN {
-                        seeds.push((a, a + WN));
-                        seeds.push((z - WN, z));
+                    if z - a > 2 * wn {
+                        seeds.push((a, a + wn));
+                        seeds.push((z - wn, z));
                     }
                     for (ta, tz) in seeds {
                         if let Some((st, en, sc)) = refine(w, a, z, kk, &bg, ta, tz)
@@ -352,11 +367,14 @@ pub fn find(b: &[u8], lo: usize, hi: usize) -> Vec<Table> {
             tables.len()
         );
     }
-    // fragments of one table (same stride and phase, meeting): one table
+    // fragments of one table (same stride and phase, meeting): one table, and the fragments
+    // too (a table may meet data of its stride: 300 records of 16 bytes and the members after
+    // them, padded to 16, are one run at 16)
     tables.sort_by_key(|t| (t.k, t.start % t.k, t.start));
     let mut out: Vec<Table> = Vec::new();
+    let mut merged: Option<(Table, usize)> = None;
     for t in tables {
-        if let Some(p) = out.last_mut()
+        if let Some((p, count)) = merged.as_mut()
             && p.k == t.k
             && (t.start - p.start).is_multiple_of(t.k)
             && t.start <= p.end + t.k
@@ -364,9 +382,22 @@ pub fn find(b: &[u8], lo: usize, hi: usize) -> Vec<Table> {
             p.end = p.end.max(t.end);
             p.score += t.score;
             p.primary |= t.primary;
+            *count += 1;
+            out.push(t);
             continue;
         }
+        if let Some((p, count)) = merged.take()
+            && count > 1
+        {
+            out.push(p);
+        }
+        merged = Some((t, 1));
         out.push(t);
+    }
+    if let Some((p, count)) = merged
+        && count > 1
+    {
+        out.push(p);
     }
     out
 }
@@ -392,7 +423,7 @@ pub fn rank_near(tables: Vec<Table>, len: usize, keep: usize, per: usize, near_o
         if far && near_only {
             break; // sorted: the rest are far too
         }
-        let key = (t.start >> 12, t.end >> 12);
+        let key = (t.start >> 8, t.end >> 8); // (finer than 4 KiB: a table and its run into data of its stride end apart)
         let c = per_region.entry(key).or_insert(0);
         if *c >= per || out.iter().any(|u| u.same(&t)) {
             continue;

@@ -7,12 +7,14 @@
 //! - [`fields`]: the candidate fields of a table, from its bit profile;
 //! - [`tiling`]: the tests (offsets and sizes, or sizes laid end to end) and their evidence;
 //! - [`codec`]: the members' codecs;
-//! - [`target`]: files and targets decoded in place, which the tables are tested on in turn.
+//! - [`target`]: files and targets decoded in place, which the tables are tested on in turn;
+//! - [`template`]: the layout found in one family, verified in another of the same format.
 
 pub mod codec;
 pub mod fields;
 pub mod tables;
 pub mod target;
+pub mod template;
 pub mod tiling;
 
 use std::time::{Duration, Instant};
@@ -31,8 +33,15 @@ pub struct File<'a> {
 pub struct Directory {
     pub target: String,
     pub target_len: u64,
-    /// The file holding the table.
+    /// The file the target is or comes from, by index in the family; and the directory whose
+    /// members, decoded in place, the target is (where it is no file).
+    pub target_file: usize,
+    pub parent: Option<usize>,
+    /// The file holding the table, by name and index in the family.
     pub owner: String,
+    pub owner_file: usize,
+    /// The codec the members are of (the most frequent in a sample; some may be stored).
+    pub codec: Option<codec::Codec>,
     pub cand: Cand,
     pub members: Vec<Member>,
     pub ev: f64,
@@ -78,7 +87,7 @@ const SAMPLE: usize = 24;
 
 /// The values of a row's 16-, 32- and 64-bit fields (a decoded size must be among them for
 /// an LZ4 block).
-fn hints(b: &[u8], t: &Table, row: i64) -> Vec<u64> {
+pub(crate) fn hints(b: &[u8], t: &Table, row: i64) -> Vec<u64> {
     let p = t.start as i64 + row * t.k as i64;
     let mut v = Vec::with_capacity(6 * t.k);
     for i in 0..t.k as i64 {
@@ -94,14 +103,14 @@ fn hints(b: &[u8], t: &Table, row: i64) -> Vec<u64> {
     v
 }
 
-fn filled(ms: &[Member]) -> u64 {
+pub(crate) fn filled(ms: &[Member]) -> u64 {
     let mut v: Vec<(u64, u64)> = ms.iter().map(|m| (m.offset, m.size)).collect();
     v.sort_unstable();
     v.dedup_by_key(|x| x.0);
     v.iter().map(|x| x.1).sum()
 }
 
-fn kind_of(x: &[u8]) -> String {
+pub(crate) fn kind_of(x: &[u8]) -> String {
     let h = &x[..x.len().min(4)];
     if h.len() == 4 && h.iter().all(|&c| (32..127).contains(&c)) {
         String::from_utf8_lossy(h).into_owned()
@@ -110,7 +119,7 @@ fn kind_of(x: &[u8]) -> String {
     }
 }
 
-fn tally<T: Eq + Clone>(v: &[T]) -> Vec<(T, usize)> {
+pub(crate) fn tally<T: Eq + Clone>(v: &[T]) -> Vec<(T, usize)> {
     let mut out: Vec<(T, usize)> = Vec::new();
     for x in v {
         match out.iter_mut().find(|(y, _)| y == x) {
@@ -120,6 +129,55 @@ fn tally<T: Eq + Clone>(v: &[T]) -> Vec<(T, usize)> {
     }
     out.sort_by_key(|x| std::cmp::Reverse(x.1));
     out
+}
+
+/// The target of `members` (of a table of `b`) in file `file` (`src`), decoded in place: the
+/// bytes before the first member and between members kept unless they are zeros (padding).
+/// Where the members' codec is known, a member is of it or stored (a pak stores the chunks zstd
+/// does not make smaller: probing each for every codec took seconds of a texture pak's).
+pub fn decode_in_place<'a>(
+    name: String,
+    file: usize,
+    src: &'a [u8],
+    members: &[Member],
+    b: &[u8],
+    table: &Table,
+    known: Option<codec::Codec>,
+) -> Target<'a> {
+    let mut ms = members.to_vec();
+    ms.sort_by_key(|m| m.offset);
+    ms.dedup_by_key(|m| m.offset);
+    let mut parts = Vec::new();
+    let mut at = 0usize;
+    for m in &ms {
+        let (o, s) = (m.offset as usize, m.size as usize);
+        if o < at || o + s > src.len() {
+            continue;
+        }
+        if o > at && src[at..o].iter().any(|&x| x != 0) {
+            parts.push(Part { len: (o - at) as u64, at, src_len: o - at, codec: None });
+        }
+        let blob = &src[o..o + s];
+        let (len, k) = match (known, blob) {
+            // (by its header alone: the directory knows the member's bounds)
+            (Some(codec::Codec::Zstd), _) => match codec::zstd_header_size(blob) {
+                Some(n) => (n, Some(codec::Codec::Zstd)),
+                None => (s as u64, None),
+            },
+            (_, _) if let Some(n) = codec::decoded_size(blob) => (n, Some(codec::Codec::Zstd)),
+            (Some(c), _) => match codec::decode(c, blob) {
+                Some(d) => (d.len() as u64, Some(c)),
+                None => (s as u64, None),
+            },
+            (None, _) => match codec::probe(blob, &hints(b, table, m.row)) {
+                Some((k, d)) => (d.len() as u64, Some(k)),
+                None => (s as u64, None),
+            },
+        };
+        parts.push(Part { len, at: o, src_len: s, codec: k });
+        at = o + s;
+    }
+    Target::decoded(name, file, src, parts)
 }
 
 struct Tested {
@@ -286,40 +344,23 @@ pub fn infer(files: &[File], opt: &Options) -> (Vec<Directory>, Times) {
             {
                 // the target decoded in place: a target in turn
                 let td = Instant::now();
-                let src = files[tg.file].data;
-                let mut ms = best.members.clone();
-                ms.sort_by_key(|m| m.offset);
-                ms.dedup_by_key(|m| m.offset);
-                let mut parts = Vec::new();
-                let mut at = 0usize;
-                for m in &ms {
-                    let (o, s) = (m.offset as usize, m.size as usize);
-                    if o < at {
-                        continue;
-                    }
-                    if o > at && src[at..o].iter().any(|&x| x != 0) {
-                        parts.push(Part { len: (o - at) as u64, at, src_len: o - at, codec: None });
-                    }
-                    let blob = &src[o..o + s];
-                    let (len, k) = match codec::decoded_size(blob) {
-                        Some(n) => (n, Some(codec::Codec::Zstd)),
-                        None => match codec::probe(blob, &hints(b, &best.cand.table, m.row)) {
-                            Some((k, d)) => (d.len() as u64, Some(k)),
-                            None => (s as u64, None),
-                        },
-                    };
-                    parts.push(Part { len, at: o, src_len: s, codec: k });
-                    at = o + s;
-                }
-                let v = Target::decoded(name, tg.file, src, parts);
+                let known = tally(&best.codecs).into_iter().find_map(|(c, _)| c);
+                let v = decode_in_place(name, tg.file, files[tg.file].data, &best.members, b, &best.cand.table, known)
+                    .with_parent(dirs.len());
                 decoded = Some(v.len);
                 new_targets.push(v);
                 times.decode += td.elapsed();
             }
+            // the codec among the members (some may be stored: chunks zstd did not make smaller)
+            let majority = tally(&best.codecs).into_iter().find_map(|(c, _)| c);
             dirs.push(Directory {
                 target: tg.name.clone(),
                 target_len: l,
+                target_file: tg.file,
+                parent: tg.parent,
                 owner: files[owner].name.clone(),
+                owner_file: owner,
+                codec: majority,
                 cand: best.cand,
                 ev: best.ev,
                 cover,

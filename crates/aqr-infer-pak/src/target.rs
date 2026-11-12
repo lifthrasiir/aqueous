@@ -31,13 +31,15 @@ pub struct Target<'a> {
     pub len: u64,
     /// The file it is or comes from (by index in the family).
     pub file: usize,
+    /// The directory whose members, decoded in place, it is (by index among those found).
+    pub parent: Option<usize>,
     pub kind: Kind<'a>,
     data: &'a [u8],
 }
 
 impl<'a> Target<'a> {
     pub fn file(name: &str, index: usize, data: &'a [u8]) -> Target<'a> {
-        Target { name: name.to_string(), len: data.len() as u64, file: index, kind: Kind::File, data }
+        Target { name: name.to_string(), len: data.len() as u64, file: index, parent: None, kind: Kind::File, data }
     }
 
     pub fn decoded(name: String, file: usize, src: &'a [u8], parts: Vec<Part>) -> Target<'a> {
@@ -52,9 +54,14 @@ impl<'a> Target<'a> {
             name,
             len: s,
             file,
+            parent: None,
             kind: Kind::Decoded { file, parts, starts, cache: RefCell::new(HashMap::new()), src },
             data: &[],
         }
+    }
+
+    pub fn with_parent(self, parent: usize) -> Target<'a> {
+        Target { parent: Some(parent), ..self }
     }
 
     pub fn is_file(&self) -> bool {

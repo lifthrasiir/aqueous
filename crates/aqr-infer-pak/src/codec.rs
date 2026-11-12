@@ -16,6 +16,10 @@ pub enum Codec {
 }
 
 impl Codec {
+    pub fn from_name(name: &str) -> Option<Codec> {
+        [Codec::Zstd, Codec::Zlib, Codec::Deflate, Codec::Lzo1x, Codec::Lz4Block].into_iter().find(|c| c.name() == name)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Codec::Zstd => "zstd",
@@ -118,6 +122,16 @@ pub fn decoded_size(src: &[u8]) -> Option<u64> {
         }
     }
     None
+}
+
+/// The decoded size a zstd member's frame header tells, its bounds known (only the header is
+/// read: a pak's chunks are each touched once, of a file mapped and maybe not yet read).
+pub fn zstd_header_size(src: &[u8]) -> Option<u64> {
+    if src.len() >= 4 && src[..4] == [0x28, 0xb5, 0x2f, 0xfd] {
+        zstd::zstd_safe::get_frame_content_size(&src[..src.len().min(18)]).ok().flatten()
+    } else {
+        None
+    }
 }
 
 /// Decodes a member known to be of `codec`.

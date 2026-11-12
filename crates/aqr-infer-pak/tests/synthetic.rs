@@ -101,3 +101,67 @@ fn random_bytes() {
     let (dirs, _) = infer(&files, &Options::default());
     assert!(dirs.is_empty());
 }
+
+/// A pak of `n` members in the format of `offsets_and_sizes`, its count in the header.
+fn pak(rng: &mut Rng, n: usize) -> Vec<u8> {
+    let head = 16 + 16 * n;
+    let (mut data, mut table) = (Vec::new(), Vec::new());
+    for _ in 0..n {
+        let size = 100 + rng.below(4000) as usize;
+        let off = head + data.len();
+        data.extend(member(rng, size));
+        while data.len() % 16 != 0 {
+            data.push(0);
+        }
+        table.extend(rng.next().to_le_bytes());
+        table.extend((off as u32).to_le_bytes());
+        table.extend((size as u32).to_le_bytes());
+    }
+    let mut pak = b"PAKFILE\0".to_vec();
+    pak.extend((n as u64).to_le_bytes());
+    pak.extend(table);
+    pak.extend(data);
+    pak
+}
+
+/// A layout learned from one pak holds in others of the format, a pak of one member too (no
+/// evidence of its own); and not in one of another.
+#[test]
+fn template() {
+    use aqr_infer_pak::template;
+    let mut rng = Rng(7);
+    let big = pak(&mut rng, 300);
+    let files = [File { name: "a.pak".into(), data: &big }];
+    let (dirs, _) = infer(&files, &Options::default());
+    let t = template::learn(&files, 0, &dirs).expect("no template");
+    for n in [57, 1] {
+        let small = pak(&mut rng, n);
+        let files = [File { name: "b.pak".into(), data: &small }];
+        let dirs = template::verify(&t, &files, 0).unwrap_or_else(|| panic!("{n} members: does not hold"));
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0].members.len(), n);
+    }
+    // the same magic, other bytes after it
+    let mut other = b"PAKFILE\0".to_vec();
+    other.extend(rng.bytes(64 << 10));
+    let files = [File { name: "c.pak".into(), data: &other }];
+    assert!(template::verify(&t, &files, 0).is_none());
+}
+
+/// The format of `offsets_and_sizes` over seeds: the members' bytes, sizes and the hashes
+/// change the table's and the data's statistics (seed 7 had the table merged with its data).
+#[test]
+fn seeds() {
+    let mut missed = Vec::new();
+    for seed in 1..=16u64 {
+        let mut rng = Rng(seed * 0x9e37_79b9_7f4a_7c15);
+        let n = 20 + rng.below(400) as usize;
+        let p = pak(&mut rng, n);
+        let files = [File { name: "s.pak".into(), data: &p }];
+        let (dirs, _) = infer(&files, &Options::default());
+        if !(dirs.len() == 1 && dirs[0].members.len() == n) {
+            missed.push((seed, n, dirs.iter().map(|d| d.members.len()).collect::<Vec<_>>()));
+        }
+    }
+    assert!(missed.is_empty(), "{missed:?}");
+}

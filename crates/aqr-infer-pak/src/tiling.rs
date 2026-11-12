@@ -38,19 +38,26 @@ pub struct Member {
     pub row: i64,
 }
 
-fn even(n: usize, m: usize) -> Vec<i64> {
+pub(crate) fn even(n: usize, m: usize) -> Vec<i64> {
     if n <= m { (0..n as i64).collect() } else { (0..m).map(|i| (i * (n - 1) / (m - 1)) as i64).collect() }
 }
 
 /// A size fits a member's room where it fills it up to the slack. A size of 0 fits only an
 /// empty room (a member shared with the next): else any small room takes it, and a field of
 /// zeros "fits" a table's rows of its neighbour.
-fn fits(room: u64, s: u64) -> bool {
+pub(crate) fn fits(room: u64, s: u64) -> bool {
     room >= s && room - s < SLACK && (s > 0 || room == 0)
 }
 
 fn fit_of(rooms: &[u64], sizes: &[u64]) -> f64 {
     rooms.iter().zip(sizes).filter(|(r, s)| fits(**r, **s)).count() as f64 / rooms.len().max(1) as f64
+}
+
+/// The slack the members show: the greatest gap of a member fitting its room, rounded up to a
+/// power of two.
+fn rooms_slack(rooms: &[u64], sizes: &[u64]) -> u64 {
+    let gmax = rooms.iter().zip(sizes).filter(|(r, s)| fits(**r, **s)).map(|(r, s)| r - s).max().unwrap_or(0);
+    (gmax + 1).next_power_of_two()
 }
 
 /// Bits against chance: each member fitting its room to within the slack G seen (a size in
@@ -82,7 +89,7 @@ fn binomial_bits(n: usize, fit: f64, ctrl: f64) -> f64 {
 }
 
 /// Each row's room: up to the next distinct offset (None for the last and those out of range).
-fn rooms(offs: &[u64], l: u64) -> Vec<Option<u64>> {
+pub(crate) fn rooms(offs: &[u64], l: u64) -> Vec<Option<u64>> {
     let mut u: Vec<u64> = offs.iter().copied().filter(|&o| o < l).collect();
     u.sort_unstable();
     u.dedup();
@@ -335,10 +342,17 @@ pub fn explicit(b: &[u8], t: &Table, prof: &Profile, l: u64, sizes: &[Field]) ->
             })
             .collect();
         let fit = fit_of(&mroom, &used);
+        // the control (sizes paired with the wrong members) within the slack the members show,
+        // not SLACK: with members of a few KB, a wrong size is within 4 KiB of most rooms
+        let g = rooms_slack(&mroom, &used);
+        let fit_g = |s: &[u64]| {
+            mroom.iter().zip(s).filter(|(r, x)| fits(**r, **x) && **r - **x < g).count() as f64
+                / mroom.len().max(1) as f64
+        };
         let mut ctrl_s = used.clone();
         ctrl_s.rotate_right(1);
-        let ctrl = fit_of(&mroom, &ctrl_s);
-        let ev = room_bits(&mroom, &used).min(binomial_bits(mroom.len(), fit, ctrl));
+        let ctrl = fit_g(&ctrl_s);
+        let ev = room_bits(&mroom, &used).min(binomial_bits(mroom.len(), fit_g(&used), ctrl));
         if fit >= 0.8 && ev >= EVIDENCE {
             out.push(Cand { layout: Layout::Explicit { off, size, alt, fit, ctrl }, table: tt, ev });
         }
