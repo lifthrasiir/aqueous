@@ -32,9 +32,11 @@ Before this crate no cabinet inside a package was found at all: the FAT's sector
 apart. As with `.cab` files alone, the gain is small for one package (aqr-compress's `lzx_on`:
 -1.1% over 441 CAB files) and pays with the files archived along (other versions of a product).
 
-An LZX cabinet whose data is over some tens of MB is not used: `lzx-recons` is a whole module, and its
-plan (469 MiB for a 66 MB cabinet) is over the compressing bound of 256 MiB; a 568 MB cabinet took
-11.7 GB for 3.5 minutes before it was turned down. A part module for LZX is what is left of it.
+An LZX cabinet whose data was over some tens of MB was not used while `lzx-recons` was a whole
+module (469 MiB planned for a 66 MB cabinet, over the compressing bound of 256 MiB). Since
+`lzx-recons` 3, a part module, a 568 MB cabinet in a 569 MB package comes to 552.33 MB (97.0%,
+decoded in 2 min 4 s; aqr-lzx's commit 090c6c36); compressing still holds a folder's data and
+parse whole (11.7 GB heap peak).
 
 ## Status
 
@@ -46,4 +48,4 @@ Left:
 - Storages' CLSIDs, timestamps and the mini stream are kept as they are (in the rest).
 - HWP 5's streams are raw DEFLATE (no zlib header): not found as such; `\x05HwpSummaryInformation` and
   the rest are small. Office documents' streams are not recompressed, only separated.
-- `lzx-recons` as a part module (above).
+- LZX's encoder streamed, for the memory of large cabinets (above).

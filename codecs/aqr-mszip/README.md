@@ -111,5 +111,5 @@ Done: CAB files of MSZIP, LZX and stored folders; CHM files' LZX sections. Left:
 - The data blocks' checksums and sizes kept as they are (4 bytes of checksum a block, which a
   module could derive), and folders going on in another cabinet.
 - A rule for Microsoft's MSZIP encoder in aqr-flate's catalog.
-- CAB files in other data: self-extractors are found by the scan, MSI files (CAB in an OLE
-  compound file, in sectors) are not.
+- CAB files in other data: self-extractors are found by the scan; MSI files' cabinets (in an OLE
+  compound file, in sectors) are put together by aqr-ole through aqr-disk.
