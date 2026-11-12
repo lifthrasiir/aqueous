@@ -869,7 +869,7 @@ fn compress_with(
 /// blocks.
 type Direct = (Arc<Placing>, u64);
 
-/// Bytes of a GGUF file from which on it is archived directly ([`direct_room`]).
+/// Bytes of a file of tensors (aqr-tensors') from which on it is archived directly ([`direct_room`]).
 const DIRECT: usize = 1 << 30;
 
 /// [`DIRECT`], or what the tests set.
@@ -882,23 +882,24 @@ fn direct_min() -> usize {
 }
 
 /// Where file `d` of `kind` (of [`direct_min`] bytes or more) is archived alone by the formula
-/// of a recompressor telling how large its formula comes to at most (aqr-gguf's), each part of
+/// of a recompressor telling how large its formula comes to at most (aqr-tensors'), each part of
 /// it sealed as it is made: the room for its module and formula blocks to leave before the
 /// blocks of the sink, which are then written to the archive as they are made rather than held
 /// (`docs/streaming-encoder-design.md`, "출력에 바로 쓰기"); what the formula leaves of the room is
 /// a spacer block after it. Not where the archive is mirrored (the mirror blocks' places are
 /// not planned with the room).
 fn direct_room(d: &[u8], kind: Kind, opt: &Options, enc: &aqr::Encoder) -> Option<u64> {
-    let gguf = (kind == Kind::Unknown || kind == Kind::Format(Format::Gguf.name()))
-        && detect(d) == Some(Format::Gguf)
-        && format_on(Format::Gguf, opt);
-    if d.len() < direct_min() || opt.mirrors || !opt.recompresses() || !gguf {
+    let tensors = [Format::Gguf, Format::Pth, Format::Safetensors];
+    let taken = detect(d)
+        .filter(|f| tensors.contains(f))
+        .is_some_and(|f| (kind == Kind::Unknown || kind == Kind::Format(f.name())) && format_on(f, opt));
+    if d.len() < direct_min() || opt.mirrors || !opt.recompresses() || !taken {
         return None;
     }
-    let bound = aqr_gguf::formula::formula_bound(d)?;
+    let bound = aqr_tensors::formula::formula_bound(d)?;
     // (the data compressed at most: Zstandard's raw blocks, its frame and the block's header)
     let formula = bound + bound / 128 + 64;
-    let modules = enc.module_len(aqr_gguf::formula::MODULE).ok()?;
+    let modules = enc.module_len(aqr_tensors::formula::MODULE).ok()?;
     let room = formula + modules + 2;
     #[cfg(test)]
     if let Some(n) = tests::DIRECT_ROOM.get() {
@@ -1677,8 +1678,8 @@ fn files_len(d: &[u8]) -> usize {
 /// bytes or more: its frames are coded to a fraction of their bytes, which zstd of the file never
 /// nears, and the comparison costs 3.7 s on one thread at the end for 1.3 GB. A small one is
 /// compared still: what zstd makes of nearly blank frames may beat the formula's modules. So is a
-/// GGUF file's: its encoder codes a run only where that comes to less than its bytes (which zstd
-/// hardly compresses: weights), and comparing compresses gigabytes twice on one thread (3.6 of
+/// file of tensors' (aqr-tensors'): its encoder codes a run only where that comes to less than its
+/// bytes (which zstd hardly compresses: weights), and comparing compresses gigabytes twice on one thread (3.6 of
 /// 6.3 s for a model of 1.2 GB).
 fn smaller(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], opt: &Options, cx: &Cx) -> bool {
     smaller_as(f, gaps, d, bundle::Kinds::of(f), opt, cx)
@@ -1709,7 +1710,7 @@ fn smaller_as(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], of: bundle::
         || of.files_apart
         || aqr_ppmd::formula::is(f)
         || (d.len() >= PRORES_UNCOMPARED && aqr_prores::formula::is(f))
-        || aqr_gguf::formula::is(f)
+        || aqr_tensors::formula::is(f)
         || {
             #[cfg(test)]
             tests::COMPARED.with(|c| c.borrow_mut().push(d.len()));
@@ -2624,7 +2625,7 @@ pub(crate) struct Pure<'a> {
     held: Option<&'a Held>,
     /// Where the formula is of the file itself archived directly ([`direct_room`]): the order
     /// whose sink the formula's parts are sealed into as they are made, as the recompressor may
-    /// have them ([`gguf`], [`Pure::made`]).
+    /// have them ([`tensors`], [`Pure::made`]).
     seal: Option<&'a seal::Order>,
     /// Where those parts are evaluated beforehand ([`Cx::pre`]).
     pre: Option<&'a verify::Prevalidator>,
@@ -2646,19 +2647,19 @@ impl Pure<'_> {
     }
 }
 
-/// aqr-gguf's formula of `d`, each segment coded sealed as it is made where `p` tells, else its
+/// aqr-tensors' formula of `d`, each segment coded sealed as it is made where `p` tells, else its
 /// streams spilled.
-fn gguf(d: &[u8], p: &Pure) -> Option<Formula> {
-    let segment = aqr_gguf::formula::SEGMENT;
+fn tensors(d: &[u8], p: &Pure) -> Option<Formula> {
+    let segment = aqr_tensors::formula::SEGMENT;
     #[cfg(test)]
-    let segment = tests::GGUF_SEGMENT.get().unwrap_or(segment);
+    let segment = tests::TENSORS_SEGMENT.get().unwrap_or(segment);
     match p.seal {
         Some(order) => {
             let made = |part: &mut Formula, of: &[u8]| p.made(part, of);
             let mut seal = |part: &mut Formula, _: &[u8], ready| order.sink().seal_ready(part, ready).expect("sealed");
-            aqr_gguf::formula::encode_sealing(d, p.opt.threads, segment, &made, &mut seal)
+            aqr_tensors::formula::encode_sealing(d, p.opt.threads, segment, &made, &mut seal)
         }
-        None => aqr_gguf::formula::encode_in(d, p.opt.threads, segment),
+        None => aqr_tensors::formula::encode_in(d, p.opt.threads, segment),
     }
 }
 
@@ -3042,8 +3043,8 @@ mod tests {
         pub(crate) static DIRECT_ROOM: Cell<Option<u64>> = const { Cell::new(None) };
         /// The archives written directly ([`written_direct`]).
         pub(crate) static DIRECTED: Cell<usize> = const { Cell::new(0) };
-        /// The bytes of a segment of aqr-gguf ([`gguf`]), where set.
-        pub(crate) static GGUF_SEGMENT: Cell<Option<usize>> = const { Cell::new(None) };
+        /// The bytes of a segment of aqr-tensors ([`tensors`]), where set.
+        pub(crate) static TENSORS_SEGMENT: Cell<Option<usize>> = const { Cell::new(None) };
     }
 
     /// The lengths of the texts given to aqr-wrt, on any thread.
@@ -4549,12 +4550,12 @@ mod tests {
     /// after it. Archived to memory, or below the size, it is archived as before.
     #[test]
     fn gguf_direct() {
-        let d = aqr_gguf::synth::file(3, 8);
+        let d = aqr_tensors::synth::file(3, 8);
         let path = std::env::temp_dir().join(format!("aqr-compress-direct-{}.aqr", std::process::id()));
         let archived = |threads: usize, min: usize, room: Option<u64>| {
             DIRECT_MIN.set(Some(min));
             DIRECT_ROOM.set(room);
-            GGUF_SEGMENT.set(Some(64 << 10));
+            TENSORS_SEGMENT.set(Some(64 << 10));
             let opt = Options { threads, ..Options::default() };
             let mut file =
                 std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path).unwrap();

@@ -6328,11 +6328,6 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/flate-set.wasm" title="crates/aqr-modules/wasm/flate-set.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-flate/FORMAT.md" title="codecs/aqr-flate/FORMAT.md">R</a>
     <tr>
-      <td><code>f0a95cf5a72b5eaf8f5f51246369c827e2661b6bfe016cc066178e4a9bf75880</code>
-      <td>gguf-recons@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/gguf-recons.wasm" title="crates/aqr-modules/wasm/gguf-recons.wasm">D</a>
-        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-gguf/FORMAT.md" title="codecs/aqr-gguf/FORMAT.md">R</a>
-    <tr>
       <td><code>8f53a39d83da2c850989320f0f64709ceaec9d8d4046c03258cf776a9b496288</code>
       <td>gif-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/gif-recons.wasm" title="crates/aqr-modules/wasm/gif-recons.wasm">D</a>
@@ -6532,6 +6527,11 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td>sqlite-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/sqlite-recons.wasm" title="crates/aqr-modules/wasm/sqlite-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-sqlite/FORMAT.md" title="codecs/aqr-sqlite/FORMAT.md">R</a>
+    <tr>
+      <td><code>f98d5c82951b1587331b8ea0e09753b9bd7822f8631ab60c8684e9494a7a3a5d</code>
+      <td>tensors-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/tensors-recons.wasm" title="crates/aqr-modules/wasm/tensors-recons.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-tensors/FORMAT.md" title="codecs/aqr-tensors/FORMAT.md">R</a>
     <tr>
       <td><code>43a6195dacde429fd1c040eb6f6158aa7df420e6ec278c87dddf6e5be114016b</code>
       <td>vorbis-recons@2

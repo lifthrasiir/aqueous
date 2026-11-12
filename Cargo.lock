@@ -261,7 +261,6 @@ dependencies = [
  "aqr-flate",
  "aqr-formula",
  "aqr-fsb",
- "aqr-gguf",
  "aqr-gif",
  "aqr-git",
  "aqr-gnu-gettext",
@@ -294,6 +293,7 @@ dependencies = [
  "aqr-raw",
  "aqr-snappy",
  "aqr-sqlite",
+ "aqr-tensors",
  "aqr-tex",
  "aqr-wasm",
  "aqr-wasmrt",
@@ -334,7 +334,6 @@ dependencies = [
  "aqr-flac",
  "aqr-flate",
  "aqr-formula",
- "aqr-gguf",
  "aqr-gif",
  "aqr-git",
  "aqr-gnu-gettext",
@@ -364,6 +363,7 @@ dependencies = [
  "aqr-raw",
  "aqr-snappy",
  "aqr-sqlite",
+ "aqr-tensors",
  "aqr-tex",
  "aqr-vorbis",
  "aqr-walk",
@@ -484,7 +484,6 @@ dependencies = [
  "aqr-fits",
  "aqr-flac",
  "aqr-flate",
- "aqr-gguf",
  "aqr-gif",
  "aqr-git",
  "aqr-gnu-gettext",
@@ -514,6 +513,7 @@ dependencies = [
  "aqr-raw",
  "aqr-snappy",
  "aqr-sqlite",
+ "aqr-tensors",
  "aqr-tex",
  "aqr-vorbis",
  "aqr-wasm",
@@ -954,16 +954,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aqr-gguf"
-version = "0.1.0"
-dependencies = [
- "aqr-api",
- "aqr-common",
- "aqr-formula",
- "memmap2",
-]
-
-[[package]]
 name = "aqr-gif"
 version = "0.1.0"
 dependencies = [
@@ -1222,7 +1212,6 @@ dependencies = [
  "aqr-fits",
  "aqr-flac",
  "aqr-flate",
- "aqr-gguf",
  "aqr-gif",
  "aqr-git",
  "aqr-gnu-gettext",
@@ -1250,6 +1239,7 @@ dependencies = [
  "aqr-raw",
  "aqr-snappy",
  "aqr-sqlite",
+ "aqr-tensors",
  "aqr-tex",
  "aqr-vorbis",
  "aqr-wasm",
@@ -1305,7 +1295,6 @@ dependencies = [
  "aqr-fits",
  "aqr-flac",
  "aqr-flate",
- "aqr-gguf",
  "aqr-gif",
  "aqr-git",
  "aqr-gnu-gettext",
@@ -1333,6 +1322,7 @@ dependencies = [
  "aqr-raw",
  "aqr-snappy",
  "aqr-sqlite",
+ "aqr-tensors",
  "aqr-tex",
  "aqr-vorbis",
  "aqr-wasm",
@@ -1547,6 +1537,16 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "xxhash-rust",
+]
+
+[[package]]
+name = "aqr-tensors"
+version = "0.1.0"
+dependencies = [
+ "aqr-api",
+ "aqr-common",
+ "aqr-formula",
+ "memmap2",
 ]
 
 [[package]]

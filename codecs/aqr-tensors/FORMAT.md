@@ -1,13 +1,15 @@
-# aqr-gguf format
+# aqr-tensors format
 
-This document specifies the module `gguf-recons` of aqr-formula entry formulas, which rebuilds
-a segment of a GGUF file's tensor data, and how the encoder takes a GGUF file apart around it.
-It is meant to be complete: an implementation of the module can be written from it alone.
+This document specifies the module `tensors-recons` of aqr-formula entry formulas, which rebuilds
+a segment of the tensor data of a file of tensors, and how the encoder takes such a file apart
+around it: GGUF, PyTorch's of `torch.save` and safetensors. It is meant to be complete: an implementation of the module can be written from it alone.
 Sections marked *(encoder)* describe the choices this implementation makes when it builds
 formulas; the module does not depend on them.
 
 GGUF itself is llama.cpp's (ggml's `docs/gguf.md`), versions 2 and 3; the layouts of the
-quantised blocks are ggml's (`ggml-common.h`), named here by their ggml types.
+quantised blocks are ggml's (`ggml-common.h`), named here by their ggml types. The files of
+`torch.save` are those of its ZIP format (PyTorch 1.6 on; `torch/serialization.py`), safetensors
+Hugging Face's (`safetensors`' README).
 
 Contents:
 
@@ -15,7 +17,7 @@ Contents:
 2. [The formula](#2-the-formula-encoder) *(encoder)*
 3. [The symbols' coder](#3-the-symbols-coder)
 4. [Runs](#4-runs)
-5. [`gguf-recons`](#5-gguf-recons)
+5. [`tensors-recons`](#5-tensors-recons)
 
 ## 1. Conventions
 
@@ -27,21 +29,40 @@ Contents:
 
 ## 2. The formula *(encoder)*
 
-A GGUF file is taken where it starts with `GGUF` and a version of 2 or 3, its header (the
-metadata, of which only `general.alignment` is read, and the tensors' infos) holds within the
-file, and at least one tensor is of a type coded: F32, F16, BF16 (§4.2), or one of the
-quantised types of §4.3 of a whole number of blocks. A tensor is coded where all of it is
-within the file and it does not overlap the one before it (by their offsets).
+A file is taken where its container's structure holds as below, and at least one tensor is of a
+type coded. A tensor is coded where all of it is within the file and it does not overlap the one
+before it (by their places); the bytes before the first one coded are the file's *header*.
 
-The formula is the concatenation of the header up to the tensor data (the header padded to the
-alignment; a slice of the stream `gguf/header`), then the tensor data to the end of the file:
+- **GGUF**: a file starting with `GGUF` and a version of 2 or 3, its header (the metadata, of
+  which only `general.alignment` is read, and the tensors' infos) within the file. Its tensors
+  of F32, F16, BF16 (§4.2), or of one of the quantised types of §4.3 of a whole number of
+  blocks, are coded; the header is up to the tensor data (padded to the alignment), a slice of
+  the stream `gguf/header`.
+- **`torch.save`**: a ZIP archive whose first entry, stored, is named `data.pkl` or ends with
+  `/data.pkl` (its prefix `P`), its central directory (ZIP64's too) within the file. Of the
+  pickle `P/data.pkl`, only the persistent ids are read: tuples `('storage', torch.T, KEY,
+  LOCATION, NUMEL)`, a storage's data the entry `P/data/KEY`. The pickle is run by a machine of
+  the opcodes of protocols 2 to 5 that keeps strings, integers, globals and tuples (and the memo,
+  of which the ids' parts are got again); an opcode of protocol 0 or 1 (text), or one that does
+  not hold, and the file is not taken. Storages of `FloatStorage`, `HalfStorage` and
+  `BFloat16Storage` (F32, F16, BF16) whose entry is stored and of NUMEL elements' bytes are
+  coded, each once. Where an entry `P/byteorder` is there and is not `little`, the file is not
+  taken. The header (the pickle and the entries' headers before the first storage coded) is a
+  slice of `pth/header`.
+- **safetensors**: a file of a u64 `N` (little-endian, from 2 to 10^8), then `N` bytes of a JSON
+  object (its first byte `{`, its last not a space `}`) within the file, then the data. A
+  member of the object (other than `__metadata__`) of a `dtype` of `F32`, `F16` or `BF16` and
+  `data_offsets` `[a, b]` of a whole number of floats is coded, from byte `8 + N + a`. The
+  header (`8 + N` bytes) is a slice of `safetensors/header`.
+
+The formula is the concatenation of the header, then the tensor data to the end of the file:
 
 - the bytes not coded between the tensors coded, where 1 MiB or more, as they are (each a
-  stream `gguf/data`, the input's bytes shared);
-- the rest in *segments* of about 16 MiB, each an application of `gguf-recons` whose runs
+  stream `tensors/data`, the input's bytes shared);
+- the rest in *segments* of about 16 MiB, each an application of `tensors-recons` whose runs
   (§4) are the tensors' parts and the bytes between them in turn: a tensor is cut between
-  segments at its chunks (§4.2, §4.3). The streams of each application are `gguf/syms` and
-  `gguf/raw` (compressed already) and `gguf/side`.
+  segments at its chunks (§4.2, §4.3). The streams of each application are `tensors/syms` and
+  `tensors/raw` (compressed already) and `tensors/side`.
 
 A tensor's part of fewer than 4096 bytes is a run of bytes as they are (§4.1), and so is one
 whose coded form is estimated (by the tables' costs) at 98.5% of its bytes or more: noise, or
@@ -212,9 +233,9 @@ the chunk, the blocks in order, in groups of 32 (the last perhaps fewer; a block
 in turn, its raw bytes of every block, the blocks in order; and for each side part in turn, its
 bytes of every block, the blocks in order.
 
-## 5. `gguf-recons`
+## 5. `tensors-recons`
 
-- **Module**: name `gguf-recons`, version 1. A part module: its inputs are read and its output
+- **Module**: name `tensors-recons`, version 1. A part module: its inputs are read and its output
   written in order, through windows of 16 pages each.
 - **Params**: the runs (§4), at most 2^20 bytes.
 - **Resources**: none.

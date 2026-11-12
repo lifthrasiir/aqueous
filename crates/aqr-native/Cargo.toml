@@ -21,7 +21,7 @@ aqr-div3 = { path = "../../codecs/aqr-div3", default-features = false }
 aqr-dwarf = { path = "../../codecs/aqr-dwarf", default-features = false }
 aqr-exe = { path = "../../codecs/aqr-exe", default-features = false, features = ["decode"] }
 aqr-fasta = { path = "../../codecs/aqr-fasta", default-features = false }
-aqr-gguf = { path = "../../codecs/aqr-gguf", default-features = false }
+aqr-tensors = { path = "../../codecs/aqr-tensors", default-features = false }
 aqr-fits = { path = "../../codecs/aqr-fits", default-features = false }
 aqr-flac = { path = "../../codecs/aqr-flac", default-features = false }
 aqr-flate = { path = "../../codecs/aqr-flate", default-features = false }

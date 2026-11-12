@@ -2,36 +2,7 @@
 //! but for the alignment, and the tensors' types and places in the data.
 
 use crate::layout::{Float, Quant};
-
-/// What a tensor's bytes are, where they are coded.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Data {
-    /// `n` floats.
-    Float(Float, u64),
-    /// `n` blocks.
-    Quant(Quant, u64),
-}
-
-impl Data {
-    pub fn len(self) -> u64 {
-        match self {
-            Data::Float(f, n) => n * f.bytes() as u64,
-            Data::Quant(q, n) => n * q.block() as u64,
-        }
-    }
-
-    pub fn is_empty(self) -> bool {
-        self.len() == 0
-    }
-}
-
-/// A file's layout: where its tensor data starts, and the tensors of types this crate codes, in
-/// the order of their places, apart, within the file.
-#[derive(Debug)]
-pub struct Gguf {
-    pub data: usize,
-    pub tensors: Vec<(usize, Data)>,
-}
+use crate::tensors::{self, Container, Data, Tensors};
 
 struct Cur<'a> {
     d: &'a [u8],
@@ -118,7 +89,7 @@ fn float_of(t: u32) -> Option<Float> {
 }
 
 /// The layout of GGUF file `d`, None where it is not one (or its header does not hold).
-pub fn parse(d: &[u8]) -> Option<Gguf> {
+pub fn parse(d: &[u8]) -> Option<Tensors> {
     if !starts(d) {
         return None;
     }
@@ -157,7 +128,7 @@ pub fn parse(d: &[u8]) -> Option<Gguf> {
     if data > d.len() {
         return None;
     }
-    let mut coded: Vec<(usize, Data)> = Vec::new();
+    let mut coded = Vec::new();
     for (off, t, n) in info {
         let what = if let Some(f) = float_of(t) {
             Data::Float(f, n)
@@ -169,22 +140,7 @@ pub fn parse(d: &[u8]) -> Option<Gguf> {
         } else {
             continue;
         };
-        let start = (data as u64).checked_add(off)?;
-        let end = start.checked_add(what.len())?;
-        if what.is_empty() || end > d.len() as u64 {
-            continue;
-        }
-        coded.push((start as usize, what));
+        coded.push(((data as u64).checked_add(off)?, what));
     }
-    coded.sort_by_key(|t| t.0);
-    // (those overlapping the one before left out)
-    let mut end = data;
-    coded.retain(|&(start, what)| {
-        let keep = start >= end;
-        if keep {
-            end = start + what.len() as usize;
-        }
-        keep
-    });
-    Some(Gguf { data, tensors: coded })
+    Some(tensors::apart(Container::Gguf, d, data, coded))
 }

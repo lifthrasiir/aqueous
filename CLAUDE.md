@@ -116,7 +116,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     `src/known.rs`).
 - `codecs/` — the recompressor crates `aqr-*` (flate, png, jpeg, mp3, flac, pdf, zip, sqlite,
   git, lz4, lzma, lzo, bvx, bz2, alz, egg, azo, lha, rar, snappy, zstd, gif, prores, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle,
-  asar, inno, ole, isc, vorbis, ogg, mkv, lzx, xpress, lznt1, div3, ac3, gguf, …), each with a `README.md` and a `FORMAT.md` describing what it stores; a
+  asar, inno, ole, isc, vorbis, ogg, mkv, lzx, xpress, lznt1, div3, ac3, tensors, …), each with a `README.md` and a `FORMAT.md` describing what it stores; a
   crate with a `FORMAT.md` belongs here. Disk images are aqr-disk's (partition tables, containers,
   the formula; `docs/disk-image-design.md`), their file systems read by aqr-iso, aqr-fat, aqr-ntfs,
   aqr-ext, aqr-apfs and aqr-hfs (no FORMAT.md: aqr-disk's tells). `aqr-flate` underlies everything that uses DEFLATE. The workspace
@@ -317,14 +317,17 @@ optimization picked by hash.
   picks it; a pack with its `.idx`/`.rev` is a set (`git-pack-index-recons`, only the ids
   stored). Left: deriving the ids (resolving every delta), `multi-pack-index` from the indexes,
   the archive's 16 MiB solid-block bound, pack blobs in `together`.
-- aqr-gguf (GGUF model files): the tensor data in segments of 16 MiB, each an application of the
-  part module `gguf-recons`: floats' exponents and quantised blocks' nibbles (and Q6_K's crumbs,
-  the high bits of Q8_0 and Q5_*) as symbols of a static order-0 rANS of 16 symbols, 32 states
-  (SIMD: AVX2 natively, SIMD128 in Wasm, no gather), the rest as it is. Speed is the point (the
-  files are tens of GB): aim at 500 MB/s through `aqr`. What bounds it now is the archive's:
-  the coded streams probed by zstd whole (`How::Light`), and the writing and verification of a
-  large file on one thread. Samples are in `F:\Software\bai-models` and
-  `F:\Software\lmstudio-models`, used in place (never copied). Left (its README's Status).
+- aqr-tensors (files of tensors: GGUF, `torch.save`'s ZIP format, safetensors; the formats `gguf`,
+  `pth`, `safetensors` of aqr-compress, one recompressor): the tensor data in segments of 16 MiB,
+  each an application of the part module `tensors-recons`: floats' exponents and quantised
+  blocks' nibbles (and Q6_K's crumbs, the high bits of Q8_0 and Q5_*) as symbols of a static
+  order-0 rANS of 16 symbols, 32 states (SIMD: AVX2 natively, SIMD128 in Wasm, no gather), the
+  rest as it is. A `.pth` is read by its central directory and the persistent ids of its pickle
+  (a small machine of the opcodes, nothing else of the pickle). Speed is the point (the files
+  are tens of GB): aim at 500 MB/s through `aqr`. What bounds it now is the archive's: the coded
+  streams probed by zstd whole (`How::Light`), and the writing and verification of a large file
+  on one thread. Samples are in `F:\Software\bai-models`, `F:\Software\lmstudio-models` and
+  `F:\Data\sam_vit_h_4b8939.pth` (F32), used in place (never copied). Left (its README's Status).
 - aqr-jpeg's lossless JPEG (SOF3: the pixels of CR2, DNG and the like) is the module
   `jpeg-lossless-recons`, apart from `jpeg-recons`: the streams are found by their SOI in a
   TIFF file (`lformula::starts`), their Huffman data taken out and the samples coded by

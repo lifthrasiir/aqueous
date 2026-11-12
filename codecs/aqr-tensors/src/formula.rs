@@ -1,28 +1,28 @@
-//! aqr-gguf as a module of entry formulas (see aqr-formula): a GGUF file's header as it is, its
-//! tensor data in segments, each an application of `gguf-recons` (FORMAT.md §2), and the long
-//! runs of bytes this crate does not code as they are.
+//! aqr-tensors as a module of entry formulas (see aqr-formula): a file of tensors' header as it is
+//! (GGUF's, `torch.save`'s, safetensors'), its tensor data in segments, each an application of
+//! `tensors-recons` (FORMAT.md §2), and the long runs of bytes this crate does not code as they are.
 
 use aqr_formula::{Formula, Kind, Module, Node};
 
-use crate::gguf::{self, Data};
 use crate::layout::{self, FLOAT_CHUNK, Float, FloatRun, Kept, Part, Quant, Run};
 use crate::rans::{self, Encoder, LANES, Table};
+use crate::tensors::{self, Data, Tensors};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("gguf-recons", 1).with_plan(plan);
+pub const MODULE: Module = Module::new("tensors-recons", 1).with_plan(plan);
 
 /// The memory of the module: its plan ([`crate::module::plan`]).
 fn plan(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(crate::module::plan(u.initial(), u.params.len() as u64))
 }
 
-/// The classes of the streams.
+/// The classes of the streams: of a GGUF file's header (the others' [`tensors::Container::header`]).
 pub const HEADER: &str = "gguf/header";
-pub const SYMS: &str = "gguf/syms";
-pub const RAW: &str = "gguf/raw";
-pub const SIDE: &str = "gguf/side";
-pub const DATA: &str = "gguf/data";
+pub const SYMS: &str = "tensors/syms";
+pub const RAW: &str = "tensors/raw";
+pub const SIDE: &str = "tensors/side";
+pub const DATA: &str = "tensors/data";
 
 /// Bytes of a segment, about: of the output of an application. The decoder makes the
 /// applications of a file at once, 8 of them ahead and 256 MiB at most, so 16 MiB keeps 8 at
@@ -34,7 +34,10 @@ pub const LONG_RAW: usize = 1 << 20;
 /// A tensor (or a part of one in a segment) of fewer bytes is not coded.
 pub const MIN_CODED: usize = 4096;
 
-pub use gguf::starts;
+/// Whether `d` starts as a file of tensors this crate takes: GGUF, `torch.save`'s or safetensors.
+pub fn starts(d: &[u8]) -> bool {
+    tensors::starts(d).is_some()
+}
 
 /// A span of the file in a segment: bytes as they are, or of a tensor coded.
 #[derive(Clone, Copy, Debug)]
@@ -60,7 +63,7 @@ enum Piece {
 
 /// The pieces of the file after the header: the tensors coded cut into segments of about
 /// `segment` bytes (at chunks), with the bytes between them.
-fn pieces(len: usize, g: &gguf::Gguf, segment: usize) -> Vec<Piece> {
+fn pieces(len: usize, g: &Tensors, segment: usize) -> Vec<Piece> {
     let mut out = Vec::new();
     let mut seg: Vec<Span> = Vec::new();
     let mut seg_len = 0usize;
@@ -423,7 +426,7 @@ fn quant(
 /// slices of each input over two blocks, a run kept as it is a slice of each block it is over,
 /// and a byte listing each block. None where [`encode`] takes no formula of it.
 pub fn formula_bound(input: &[u8]) -> Option<usize> {
-    let g = gguf::parse(input)?;
+    let g = tensors::parse(input)?;
     if g.tensors.is_empty() {
         return None;
     }
@@ -453,7 +456,7 @@ pub fn formula_bound(input: &[u8]) -> Option<usize> {
 /// it was coded; and its bytes.
 type Made<T> = (Option<(Formula, T)>, std::ops::Range<usize>);
 
-/// The formula of GGUF file `input`, or None where it is not one this crate takes. The segments
+/// The formula of file of tensors `input` (GGUF, `torch.save`'s, safetensors), or None where it is not one this crate takes. The segments
 /// are coded `threads` at a time; the formula is the same whatever `threads` is.
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     encode_in(input, threads, SEGMENT)
@@ -479,13 +482,13 @@ pub fn encode_sealing<T: Send>(
     made: &(dyn Fn(&mut Formula, &[u8]) -> T + Sync),
     seal: &mut dyn FnMut(&mut Formula, &[u8], T),
 ) -> Option<Formula> {
-    let g = gguf::parse(input)?;
+    let g = tensors::parse(input)?;
     if g.tensors.is_empty() {
         return None;
     }
     let pieces = pieces(input.len(), &g, segment_bytes.max(1 << 16));
     let mut f = Formula::default();
-    let mut nodes = vec![f.push(HEADER, input[..g.data].to_vec())];
+    let mut nodes = vec![f.push(g.container.header(), input[..g.data].to_vec())];
     // (each segment's streams pushed as they come, moved to the store at once: a stream of a
     // class made of all of them, of a length not told, would be copied as its region grew)
     let mut any = false;

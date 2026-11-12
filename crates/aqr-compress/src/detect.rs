@@ -146,6 +146,8 @@ static ROWS: &[Row] = {
         anywhere(Bvx, Of(&[b"bv"]), aqr_bvx::formula::starts),
         anywhere(Bzip2, Of(&[b"BZ"]), aqr_bz2::formula::starts),
         anywhere(Xz, Of(&[&[0xfd, b'7']]), aqr_lzma::formula::starts_xz),
+        // (a ZIP archive of `torch.save`'s, of its pickle first)
+        start(Pth, aqr_tensors::pth::starts),
         magic(Zip, &[(0, b"PK\x03\x04")]),
         anywhere(SevenZip, Of(&[b"7z"]), aqr_7z::formula::starts),
         anywhere(Cab, Of(&[b"MS"]), aqr_mszip::formula::starts),
@@ -176,7 +178,8 @@ static ROWS: &[Row] = {
         start(Pdb, aqr_pdb::formula::starts),
         start(Arsc, aqr_arsc::formula::starts),
         start(Fasta, aqr_fasta::formula::starts),
-        start(Gguf, aqr_gguf::formula::starts),
+        start(Gguf, aqr_tensors::gguf::starts),
+        start(Safetensors, aqr_tensors::safetensors::starts),
         start(Obj, aqr_obj::formula::starts),
         anywhere(Ar, Of(&[b"!<"]), aqr_bundle::ar::starts),
         // (of the binary forms, only at the start)
@@ -416,6 +419,8 @@ mod tests {
             (b"var/log/access.log", Kind::Text),
             (b"scan.BMP", Kind::Format("raw")),
             (b"take.wav", Kind::Format("raw")),
+            (b"sam_vit_h.pth", Kind::Format("pth")),
+            (b"model-00001-of-00002.safetensors", Kind::Format("safetensors")),
             (b"sky.tga", Kind::Pixels),
             (b"fonts/a.otf", Kind::Font),
             (b"fonts/a.woff", Kind::Unknown),
@@ -517,6 +522,16 @@ mod tests {
         for &(d, f) in cases {
             assert_eq!(detect(d), f, "{d:x?}");
         }
+        // files of tensors: of `torch.save` (a ZIP archive, its pickle first), safetensors
+        let pth = aqr_tensors::synth::pth(1, 1);
+        assert_eq!(detect(&pth), Some(Format::Pth));
+        let mut zip = pth.clone();
+        zip[30 + b"archive/data.".len()..][..3].copy_from_slice(b"txt");
+        assert_eq!(detect(&zip), Some(Format::Zip));
+        assert_eq!(detect(&aqr_tensors::synth::safetensors(1, 1)), Some(Format::Safetensors));
+        assert_eq!(detect(b"\x02\0\0\0\0\0\0\0{}"), Some(Format::Safetensors));
+        assert_eq!(detect(b"\x02\0\0\0\0\0\0\0[]"), None);
+        assert_eq!(detect(b"\x03\0\0\0\0\0\0\0{}"), None);
         // a stream of dynamic blocks
         let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(9));
         std::io::Write::write_all(

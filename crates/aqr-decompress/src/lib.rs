@@ -321,10 +321,10 @@ pub const BCN: Module = aqr_tex::formula::MODULE;
 pub const PDF: Module = aqr_pdf::formula::MODULE;
 pub const SQLITE: Module = aqr_sqlite::formula::MODULE;
 pub const FASTA: Module = aqr_fasta::formula::MODULE;
-/// A GGUF file's segment of tensor data from its floats' exponents and its blocks' nibbles coded
-/// (rANS), and the bytes as they are: a part module. Parameters: the runs and their tables; inputs:
+/// A segment of the tensor data of a file of tensors (GGUF, `torch.save`'s, safetensors) from its
+/// floats' exponents and its blocks' nibbles coded (rANS), and the bytes as they are: a part module. Parameters: the runs and their tables; inputs:
 /// the coded symbols, the raw bytes and the side bytes.
-pub const GGUF: Module = aqr_gguf::formula::MODULE;
+pub const TENSORS: Module = aqr_tensors::formula::MODULE;
 /// An Android DEX file from aqr-dex's streams (strings, tables, classes' data and sections). No
 /// params or resources.
 pub const DEX: Module = aqr_dex::formula::MODULE;
@@ -483,7 +483,7 @@ const NATIVE: &[Entry] = &[
     entry(PDF),
     entry(SQLITE),
     entry(FASTA),
-    entry(GGUF),
+    entry(TENSORS),
     entry(DEX),
     entry(DWARF_APPLE),
     entry(DWARF_INFO),

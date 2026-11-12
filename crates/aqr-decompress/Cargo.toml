@@ -33,7 +33,7 @@ aqr-dex = { path = "../../codecs/aqr-dex" }
 aqr-dwarf = { path = "../../codecs/aqr-dwarf" }
 aqr-pdb = { path = "../../codecs/aqr-pdb" }
 aqr-fasta = { path = "../../codecs/aqr-fasta" }
-aqr-gguf = { path = "../../codecs/aqr-gguf" }
+aqr-tensors = { path = "../../codecs/aqr-tensors" }
 aqr-wasm = { path = "../../codecs/aqr-wasm" }
 aqr-gnu-gettext = { path = "../../codecs/aqr-gnu-gettext" }
 aqr-vorbis = { path = "../../codecs/aqr-vorbis" }

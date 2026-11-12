@@ -1,7 +1,9 @@
-//! Made-up GGUF files for the tests (here and aqr-decompress's): tensors of every type this crate
-//! codes, of weights alike to a model's (a bell of values), with the corners its formulas take:
-//! floats of exponents past 16 (escapes), F16 of BF16's precision and F16 of another in part,
-//! tensors too small to code, a type not coded, a long run of it, padding.
+//! Made-up files of tensors for the tests (here and aqr-decompress's). GGUF files ([`file`]):
+//! tensors of every type this crate codes, of weights alike to a model's (a bell of values), with
+//! the corners its formulas take: floats of exponents past 16 (escapes), F16 of BF16's precision
+//! and F16 of another in part, tensors too small to code, a type not coded, a long run of it,
+//! padding. Files of `torch.save` ([`pth`]) and safetensors ([`safetensors`]): floats of each
+//! type, integers not coded, a tensor sharing another's storage.
 
 use aqr_common::rng::Rng;
 
@@ -194,4 +196,147 @@ pub fn file(seed: u64, scale: usize) -> Vec<u8> {
         h.extend_from_slice(&t.data);
     }
     h
+}
+
+/// The floats of a made-up model, as safetensors names their types, and their bytes: of each
+/// type, a tensor; a small one; integers (not coded); and a tensor of BF16 again.
+fn floats(seed: u64, scale: usize) -> Vec<(&'static str, Vec<u8>)> {
+    let mut r = Rng::new(seed);
+    let n = 4096 * scale;
+    let w = |r: &mut Rng, n: usize| weights(r, n, 0.05, 0);
+    let f32s = |v: Vec<f32>| -> Vec<u8> { v.iter().flat_map(|v| v.to_le_bytes()).collect() };
+    let bf16s = |v: Vec<f32>| -> Vec<u8> { v.iter().flat_map(|&v| f32_to_bf16(v).to_le_bytes()).collect() };
+    vec![
+        ("F32", f32s(w(&mut r, 3 * n + 7))),
+        ("BF16", bf16s(w(&mut r, 2 * n))),
+        ("F16", w(&mut r, n + 1).iter().flat_map(|&v| f32_to_f16(v).to_le_bytes()).collect()),
+        ("F32", f32s(w(&mut r, 50))),
+        ("I64", (0..n as u64 / 4).flat_map(|i| (i * 7 % 1000).to_le_bytes()).collect()),
+        ("BF16", bf16s(w(&mut r, n))),
+    ]
+}
+
+/// Bytes of an element of a type of safetensors' (of [`floats`]).
+fn width(ty: &str) -> usize {
+    match ty {
+        "F16" | "BF16" => 2,
+        "F32" => 4,
+        _ => 8,
+    }
+}
+
+/// A safetensors file of seed `seed`, its tensors of `scale` times a few thousand elements each.
+pub fn safetensors(seed: u64, scale: usize) -> Vec<u8> {
+    let ts = floats(seed, scale);
+    let mut h = String::from(r#"{"__metadata__":{"format":"pt","note":"a \"quote\" {}"}"#);
+    let mut at = 0;
+    for (i, (ty, d)) in ts.iter().enumerate() {
+        let (n, end) = (d.len() / width(ty), at + d.len());
+        h += &format!(r#","layer.{i}.weight":{{"dtype":"{ty}","shape":[{n}],"data_offsets":[{at},{end}]}}"#);
+        at = end;
+    }
+    h.push('}');
+    while h.len() % 8 != 0 {
+        h.push(' ');
+    }
+    let mut out = (h.len() as u64).to_le_bytes().to_vec();
+    out.extend_from_slice(h.as_bytes());
+    ts.iter().for_each(|(_, d)| out.extend_from_slice(d));
+    out
+}
+
+/// The pickle of a state dict as `torch.save` writes it (protocol 2, the strings and globals got
+/// from the memo again) of tensors `ts`, the last a view of the second's storage.
+fn pickle(ts: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let mut p = vec![0x80, 2, b'}', b'q', 0, b'('];
+    let mut memo: std::collections::HashMap<String, u8> = Default::default();
+    // (what `make` puts the first time, memoised; got from the memo after)
+    let mut once = |p: &mut Vec<u8>, key: &str, make: &dyn Fn(&mut Vec<u8>)| match memo.get(key) {
+        Some(&m) => p.extend_from_slice(&[b'h', m]),
+        None => {
+            make(p);
+            let m = memo.len() as u8 + 1;
+            p.extend_from_slice(&[b'q', m]);
+            memo.insert(key.into(), m);
+        }
+    };
+    let s = |p: &mut Vec<u8>, s: &str| {
+        p.push(b'X');
+        p.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        p.extend_from_slice(s.as_bytes());
+    };
+    let storage = |ty: &str| match ty {
+        "F32" => "FloatStorage",
+        "F16" => "HalfStorage",
+        "BF16" => "BFloat16Storage",
+        _ => "LongStorage",
+    };
+    for (i, (ty, d)) in ts.iter().enumerate() {
+        let key = if i == ts.len() - 1 { 1 } else { i };
+        s(&mut p, &format!("layer.{i}.weight"));
+        once(&mut p, "rebuild", &|p| p.extend_from_slice(b"ctorch._utils\n_rebuild_tensor_v2\n"));
+        p.extend_from_slice(b"((");
+        once(&mut p, "storage", &|p| s(p, "storage"));
+        once(&mut p, ty, &|p| p.extend_from_slice(format!("ctorch\n{}\n", storage(ty)).as_bytes()));
+        s(&mut p, &key.to_string());
+        once(&mut p, "cpu", &|p| s(p, "cpu"));
+        p.push(b'J');
+        p.extend_from_slice(&((ts[key].1.len() / width(ty)) as i32).to_le_bytes());
+        p.extend_from_slice(b"tQK\x00(J");
+        p.extend_from_slice(&((d.len() / width(ty)) as i32).to_le_bytes());
+        p.extend_from_slice(b"t(K\x01t\x89");
+        once(&mut p, "dict", &|p| p.extend_from_slice(b"ccollections\nOrderedDict\n"));
+        p.extend_from_slice(b")RtR");
+    }
+    p.extend_from_slice(b"u.");
+    p
+}
+
+/// A file of `torch.save` of seed `seed` (a state dict, its tensors those of [`safetensors`]', the
+/// last a view of the second's storage), its tensors of `scale` times a few thousand elements each.
+pub fn pth(seed: u64, scale: usize) -> Vec<u8> {
+    let ts = floats(seed, scale);
+    // (the archive's entries stored, their data at multiples of 64, padded by an extra field)
+    let mut entries: Vec<(String, Vec<u8>)> = vec![("archive/data.pkl".into(), pickle(&ts))];
+    for (i, (_, d)) in ts.iter().enumerate().take(ts.len() - 1) {
+        entries.push((format!("archive/data/{i}"), d.clone()));
+    }
+    entries.push(("archive/version".into(), b"3\n".to_vec()));
+    entries.push(("archive/byteorder".into(), b"little".to_vec()));
+    let mut out = Vec::new();
+    let mut central = Vec::new();
+    for (name, d) in &entries {
+        let at = out.len();
+        let crc = aqr_common::crc32::hash(d);
+        let pad = (64 - (at + 30 + name.len() + 4) % 64) % 64;
+        let fields = |h: &mut Vec<u8>, extra: usize| {
+            h.extend_from_slice(&[0, 0, 8, 8, 0, 0, 0, 0, 0, 0]);
+            h.extend_from_slice(&crc.to_le_bytes());
+            h.extend_from_slice(&(d.len() as u32).to_le_bytes());
+            h.extend_from_slice(&(d.len() as u32).to_le_bytes());
+            h.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            h.extend_from_slice(&(extra as u16).to_le_bytes());
+        };
+        out.extend_from_slice(b"PK\x03\x04");
+        fields(&mut out, pad + 4);
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(b"FB");
+        out.extend_from_slice(&(pad as u16).to_le_bytes());
+        out.resize(out.len() + pad, b'Z');
+        out.extend_from_slice(d);
+        central.extend_from_slice(b"PK\x01\x02\x00\x00");
+        fields(&mut central, 0);
+        central.extend_from_slice(&[0; 10]);
+        central.extend_from_slice(&(at as u32).to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+    }
+    let cd = out.len();
+    out.extend_from_slice(&central);
+    out.extend_from_slice(b"PK\x05\x06\0\0\0\0");
+    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(cd as u32).to_le_bytes());
+    out.extend_from_slice(&[0, 0]);
+    out
 }

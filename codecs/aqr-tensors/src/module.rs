@@ -1,4 +1,4 @@
-//! The code of the module `gguf-recons` (FORMAT.md §5), which needs no aqr-formula, so that
+//! The code of the module `tensors-recons` (FORMAT.md §5), which needs no aqr-formula, so that
 //! aqr-modules builds it into its Wasm module. It is a part module: its three inputs are read and
 //! its output written in order through windows, a chunk of a run at a time, and nothing of their
 //! lengths is held.
@@ -267,7 +267,7 @@ fn float(
         // (the escapes over what was put for them: whole, or their exponents)
         if esc > 0 {
             let mut j = 0;
-            // (a counter of its own: of `enumerate`, gguf-recons is 5 bytes larger)
+            // (a counter of its own: of `enumerate`, tensors-recons is 5 bytes larger)
             #[allow(clippy::explicit_counter_loop)]
             for i in (0..e).filter(|&i| a[i] >= m) {
                 if r.whole {

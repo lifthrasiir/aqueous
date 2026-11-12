@@ -1,8 +1,8 @@
 [package]
-name = "aqr-gguf"
+name = "aqr-tensors"
 version = "0.1.0"
 edition = "2024"
-description = "GGUF model files rebuilt bit for bit: the floats' exponents and the quantised blocks' nibbles coded by a SIMD rANS of 16 symbols, the rest as it is"
+description = "Files of tensors (GGUF, torch.save, safetensors) rebuilt bit for bit: the floats' exponents and the quantised blocks' nibbles coded by a SIMD rANS of 16 symbols, the rest as it is"
 publish = false
 
 [features]
@@ -19,7 +19,7 @@ aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 # that names do not collide in the workspace's target directory.
 
 [[example]]
-name = "aqr-gguf-bench"
+name = "aqr-tensors-bench"
 path = "examples/bench.rs"
 
 [dev-dependencies]

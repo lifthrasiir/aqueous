@@ -4761,15 +4761,21 @@ fn fasta_plans_hold() {
     }
 }
 
-/// gguf-recons is a part module whose plan follows its params alone, to the page: of made-up GGUF
+/// tensors-recons is a part module whose plan follows its params alone, to the page: of made-up GGUF
 /// files of every type it codes, in segments of an application each (runs of floats and blocks
-/// cut at chunks, the Wasm SIMD decoder's groups whole and partial).
+/// cut at chunks, the Wasm SIMD decoder's groups whole and partial), and of files of `torch.save`
+/// and safetensors.
 #[test]
-fn gguf_plans_hold() {
-    for (seed, scale) in [(1, 1), (3, 8)] {
-        let d = aqr_gguf::synth::file(seed, scale);
-        let f = aqr_gguf::formula::encode_in(&d, 2, 1 << 16).unwrap();
-        assert!(applications_hold(&format!("gguf {seed}"), &f, &d, |_| 0) > 1, "{seed}");
+fn tensors_plans_hold() {
+    use aqr_tensors::synth;
+    for (name, seed, scale) in [("gguf", 1, 1), ("gguf", 3, 8), ("pth", 1, 3), ("safetensors", 2, 3)] {
+        let d = match name {
+            "gguf" => synth::file(seed, scale),
+            "pth" => synth::pth(seed, scale),
+            _ => synth::safetensors(seed, scale),
+        };
+        let f = aqr_tensors::formula::encode_in(&d, 2, 1 << 16).unwrap();
+        assert!(applications_hold(&format!("{name} {seed}"), &f, &d, |_| 0) > 1, "{name} {seed}");
     }
 }
 

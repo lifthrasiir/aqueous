@@ -1,5 +1,5 @@
-//! `aqr-gguf-bench FILE [MAX_BYTES]`: the formula of a GGUF file (or of its first MAX_BYTES of
-//! tensor data, cut there), its streams' sizes, and the speed of making it and of decoding its
+//! `aqr-tensors-bench FILE [MAX_BYTES]`: the formula of a file of tensors (or of its first
+//! MAX_BYTES of tensor data, cut there), its streams' sizes, and the speed of making it and of decoding its
 //! applications natively (on all threads, as the archive's decoder would, and on one).
 
 use std::time::Instant;
@@ -17,7 +17,7 @@ fn main() {
         .map_or_else(|_| std::thread::available_parallelism().map_or(1, |n| n.get()), |s| s.parse().unwrap());
     let d = &map[..map.len().min(max)];
     let t = Instant::now();
-    let Some(f) = aqr_gguf::formula::encode(d, threads) else {
+    let Some(f) = aqr_tensors::formula::encode(d, threads) else {
         println!("{path}: not taken");
         return;
     };
@@ -37,14 +37,14 @@ fn main() {
     let ok = aqr_common::pool::par_map(apps.len(), threads, |i| {
         let a = apps[i];
         let ins: Vec<&[u8]> = a.inputs.iter().map(input).collect();
-        aqr_gguf::module::decode(&a.params, &ins, a.len, 1).map(|o| o.len() as u64 == a.len)
+        aqr_tensors::module::decode(&a.params, &ins, a.len, 1).map(|o| o.len() as u64 == a.len)
     });
     let dec = t.elapsed().as_secs_f64();
     assert!(ok.iter().all(|r| *r == Ok(true)));
     let one = apps.iter().take(4).fold((0u64, 0f64), |(b, s), a| {
         let ins: Vec<&[u8]> = a.inputs.iter().map(input).collect();
         let t = Instant::now();
-        let o = aqr_gguf::module::decode(&a.params, &ins, a.len, 1).unwrap();
+        let o = aqr_tensors::module::decode(&a.params, &ins, a.len, 1).unwrap();
         (b + o.len() as u64, s + t.elapsed().as_secs_f64())
     });
     // (the whole, rebuilt, against the file)
@@ -53,7 +53,7 @@ fn main() {
         let o = match n {
             Node::Apply(a) => {
                 let ins: Vec<&[u8]> = a.inputs.iter().map(input).collect();
-                aqr_gguf::module::decode(&a.params, &ins, a.len, 1).unwrap()
+                aqr_tensors::module::decode(&a.params, &ins, a.len, 1).unwrap()
             }
             n => input(n).to_vec(),
         };
@@ -63,7 +63,7 @@ fn main() {
     assert_eq!(at, d.len());
     let mb = d.len() as f64 / 1e6;
     let coded: u64 =
-        sizes.iter().filter(|(k, _)| k.as_str() != "gguf/header" && k.as_str() != "gguf/data").map(|(_, v)| v).sum();
+        sizes.iter().filter(|(k, _)| k.as_str() != "gguf/header" && k.as_str() != "tensors/data").map(|(_, v)| v).sum();
     println!(
         "{path}: {mb:.1} MB, {} applications of {:.1} MB -> {:.1} MB ({:.4})",
         apps.len(),

@@ -455,13 +455,30 @@ formats! {
         heap: 2.0,
         exts: &["fa", "fasta", "fna", "ffn", "fas"],
     }
-    /// GGUF model file (aqr-gguf), known by its header: at the start of data only.
+    /// GGUF model file (aqr-tensors), known by its header: at the start of data only. (aqr-tensors'
+    /// heap, cost and archiving directly are those of the other files of tensors too: `Pth`,
+    /// `Safetensors`.)
     Gguf = "gguf" {
-        recompressor: PureWith(crate::gguf),
+        recompressor: PureWith(crate::tensors),
         // segments of 16 MiB, as many at once as threads, each holding its symbols and streams
         // (about 4 bytes a byte); the long runs not coded are slices of the input
         heap: 0.0,
         exts: &["gguf"],
+        cost: 4,
+    }
+    /// PyTorch's file of `torch.save`, of the ZIP format (aqr-tensors: its storages of floats, by its
+    /// pickle), known by its first entry: at the start of data only.
+    Pth = "pth" {
+        recompressor: PureWith(crate::tensors),
+        heap: 0.0,
+        exts: &["pth", "pt", "ckpt"],
+        cost: 4,
+    }
+    /// safetensors file (aqr-tensors), known by its header: at the start of data only.
+    Safetensors = "safetensors" {
+        recompressor: PureWith(crate::tensors),
+        heap: 0.0,
+        exts: &["safetensors"],
         cost: 4,
     }
     /// Android DEX file (aqr-dex), known by its header: at the start of data only.

@@ -304,7 +304,7 @@ impl Decoder {
     /// Decodes `out.len() / 32` full groups of table `t` into `out`, reading words from
     /// `words` at `*pos` (which must have [`GROUP_BYTES`] bytes for each group past it).
     #[inline]
-    // (groups as slices: of arrays, the scalar kernel is unrolled for them, gguf-recons 787
+    // (groups as slices: of arrays, the scalar kernel is unrolled for them, tensors-recons 787
     // bytes larger)
     #[allow(clippy::chunks_exact_to_as_chunks)]
     pub fn groups(&mut self, t: &Table, words: &[u8], pos: &mut usize, out: &mut [u8]) {

@@ -256,12 +256,6 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/flate-set.block"),
     },
     Known {
-        name: "gguf-recons",
-        version: 1,
-        sha512_256: hex("f0a95cf5a72b5eaf8f5f51246369c827e2661b6bfe016cc066178e4a9bf75880"),
-        block: include_bytes!("../wasm/gguf-recons.block"),
-    },
-    Known {
         name: "gif-recons",
         version: 2,
         sha512_256: hex("8f53a39d83da2c850989320f0f64709ceaec9d8d4046c03258cf776a9b496288"),
@@ -500,6 +494,12 @@ pub const KNOWN: &[Known] = &[
         version: 2,
         sha512_256: hex("85a3c401c7dd5e63493fcca59f208db346ec4f1c8ef5e11ff325352612faebc9"),
         block: include_bytes!("../wasm/sqlite-recons.block"),
+    },
+    Known {
+        name: "tensors-recons",
+        version: 1,
+        sha512_256: hex("f98d5c82951b1587331b8ea0e09753b9bd7822f8631ab60c8684e9494a7a3a5d"),
+        block: include_bytes!("../wasm/tensors-recons.block"),
     },
     Known {
         name: "vorbis-recons",

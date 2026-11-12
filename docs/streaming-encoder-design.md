@@ -1142,8 +1142,8 @@ I + 출력 L + 모델 2 MiB + 초기 1.1 MiB = 2(I+L) + 3.1 MiB. 무작위 염�
 ## 출력에 바로 쓰기: formula 자리의 spacer (2026-11-12)
 
 봉인과 싱크로도 스필은 아카이브만큼 남는다. 싱크의 블록은 압축된 채 formula를 기다린다(명세 "Block order": formula
-블록이 그 non-leaf 블록보다 앞에 온다). aqr-gguf처럼 거의 줄지 않는 큰 파일에서는 그것이 입력에 가깝다. 49.9 GB 샤드는
-스필 41.6 GB(256 MiB 영역 155개)에 읽은 입력의 페이지까지 80 GB가 resident였다(`codecs/aqr-gguf/README.md`). 메타데이터 없는
+블록이 그 non-leaf 블록보다 앞에 온다). aqr-tensors처럼 거의 줄지 않는 큰 파일에서는 그것이 입력에 가깝다. 49.9 GB 샤드는
+스필 41.6 GB(256 MiB 영역 155개)에 읽은 입력의 페이지까지 80 GB가 resident였다(`codecs/aqr-tensors/README.md`). 메타데이터 없는
 아카이브를 parcel 여럿으로 끊는 길은 파일 하나일 때만 되고, 트리에서는 파일 하나가 leaf 하나다.
 
 **방식.** 큰 입력에서는 formula가 올 자리에 그 크기의 상한보다 조금 큰 spacer를 먼저 쓰고, 싱크가 블록을 만드는 대로
@@ -1164,10 +1164,10 @@ I + 출력 L + 모델 2 MiB + 초기 1.1 MiB = 2(I+L) + 3.1 MiB. 무작위 염�
   기다린다(대기 블록은 스레드 수 정도로 묶는다). 스필에는 아무것도 가지 않는다. `Kind::Compressed`처럼 스트림마다 따로 둔 싱크
   스트림은 봉인이 끝나면 더 자라지 않으므로 그 자리에서 마지막 블록을 닫는다(끝까지 쥐지 않는다; 직접 쓰지 않는 경로에서도
   블록 내용이 같아 아카이브는 같다). `How::Light`의 판단은 싱크에서 이미 블록마다다.
-- **재압축기.** 공식을 다 만든 뒤에 봉인하면 늦으므로, aqr-gguf는 세그먼트마다 부분 공식(적용 하나와 그 스트림)을 aqr-compress가
+- **재압축기.** 공식을 다 만든 뒤에 봉인하면 늦으므로, aqr-tensors는 세그먼트마다 부분 공식(적용 하나와 그 스트림)을 aqr-compress가
   준 봉인 함수에 넘기고(사전 검증 제출, 메모리 한도 선언, 봉인), 남은 것은 싱크의 스트림을 가리키는 노드다(`Formula::append`).
   세그먼트를 코딩하면 그 입력은 놓는다(`store::let_go`). 남은 최상위 스트림(헤더, 코딩하지 않은 구간)은 `finish`에서 봉인한다.
-- **크기의 상한.** formula_data는 zstd라 크기는 끝에야 안다. 재압축기가 입력에서 비압축 상한을 낸다(aqr-gguf: 세그먼트 수와
+- **크기의 상한.** formula_data는 zstd라 크기는 끝에야 안다. 재압축기가 입력에서 비압축 상한을 낸다(aqr-tensors: 세그먼트 수와
   세그먼트마다의 적용 크기). 모듈 블록은 재압축기가 쓰는 모듈들의 블록 길이로 더한다. 넘치면 쓴 블록을 뒤로 민다(ordinal
   참조라 formula는 그대로 맞다). 아카이브만큼의 디스크 I/O지만 일어나지 않아야 하는 경우의 대비다.
 - **검증과 대체.** 출력을 다시 매핑해 읽는다(`hashed`, 아니면 `write_file`). 실패하거나, 재압축이 도중에 포기해 쓴 블록이
@@ -1176,14 +1176,14 @@ I + 출력 L + 모델 2 MiB + 초기 1.1 MiB = 2(I+L) + 3.1 MiB. 무작위 염�
   다시 쓰면 키스트림이 드러난다: 하려면 예약한 청크를 쓰지 않고 두었다가 한 번만 써야 한다), `-A`(미러 블록과의 배치를 아직
   정하지 않았다). 트리 아카이브는 7단계(배치의 leaf를 출력에 바로)와 함께 배치마다 같은 예약을 둔다.
 
-### 진행: aqr-gguf, 파일 하나 (2026-11-12)
+### 진행: aqr-tensors, 파일 하나 (2026-11-12)
 
 - `aqr_formula::aqr::sink`: `Sink::direct`(`Place`에 채워진 차례대로 쓰고, 대기 블록은 스레드 수까지), `close_direct`(블록의
   ordinal과 끝), `Sink::ready`/`seal_ready`(제 스트림을 가질 스트림의 블록을 아무 스레드에서 미리 압축; 이전 슬라이스와의
   중복은 찾지 않는다), 봉인 끝에 제 스트림의 마지막 블록을 닫기. `Encoder::direct_head`(모듈·리소스·formula 블록; 싱크의 블록이
   모두 참조되는지 확인), `footer_bytes`, `module_len`.
-- aqr-compress: `direct_room`(`DIRECT` = 1 GiB, aqr-gguf의 `formula_bound`), `Sink::place`(비어 있는 파일), `written_direct`(넘치면
-  `moved_back`), `Pure::made`. aqr-gguf의 `encode_sealing`: 세그먼트를 코딩한 일꾼에서 부분 공식을 만들어 메모리 한도 선언, 사전 검증,
+- aqr-compress: `direct_room`(`DIRECT` = 1 GiB, aqr-tensors의 `formula_bound`), `Sink::place`(비어 있는 파일), `written_direct`(넘치면
+  `moved_back`), `Pure::made`. aqr-tensors의 `encode_sealing`: 세그먼트를 코딩한 일꾼에서 부분 공식을 만들어 메모리 한도 선언, 사전 검증,
   블록 압축까지 하고, 차례를 지키는 스레드는 붙이기와 쓰기만 한다. 처음에 그 셋을 차례 스레드에서 했더니 5.3 GB가 18.65 → 24.04 s로
   느려졌다(차례 스레드에 약 17 s가 몰렸다).
 - 검증(`hashed`)이 아카이브와 입력을 매핑으로 다 읽고 끝에야 놓아, 압축이 1.2 GB로 끝난 뒤 resident가 95 GB까지 올랐다. 아카이브는
