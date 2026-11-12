@@ -375,6 +375,12 @@ pub fn find(b: &[u8], lo: usize, hi: usize) -> Vec<Table> {
 /// data has tables of its own: blocks of textures), then a run's own stride before those
 /// related to it, then by score; at most `keep`, at most `per` for a region.
 pub fn rank(tables: Vec<Table>, len: usize, keep: usize, per: usize) -> Vec<Table> {
+    rank_near(tables, len, keep, per, false)
+}
+
+/// [`rank`], and with `near_only` only the tables near the head or tail (for a big file: those
+/// in the middle are the data's own, code and texture blocks).
+pub fn rank_near(tables: Vec<Table>, len: usize, keep: usize, per: usize, near_only: bool) -> Vec<Table> {
     let edge = |t: &Table| t.start < 1 << 16 || t.end + (1 << 16) > len;
     let edges: Vec<Table> = tables.iter().copied().filter(edge).collect();
     let near = |t: &Table| edge(t) || edges.iter().any(|u| t.start <= u.end + 4096 && t.end + 4096 >= u.start);
@@ -382,7 +388,10 @@ pub fn rank(tables: Vec<Table>, len: usize, keep: usize, per: usize) -> Vec<Tabl
     v.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)).then(a.2.partial_cmp(&b.2).unwrap()));
     let mut out: Vec<Table> = Vec::new();
     let mut per_region = std::collections::HashMap::new();
-    for (_, _, _, t) in v {
+    for (far, _, _, t) in v {
+        if far && near_only {
+            break; // sorted: the rest are far too
+        }
         let key = (t.start >> 12, t.end >> 12);
         let c = per_region.entry(key).or_insert(0);
         if *c >= per || out.iter().any(|u| u.same(&t)) {
@@ -429,5 +438,5 @@ pub fn of_file(b: &[u8], keep: usize, per: usize) -> Vec<Table> {
     if hi < n - TAIL {
         ts.extend(find(b, n - TAIL, n));
     }
-    rank(ts, n, keep, per)
+    rank_near(ts, n, keep, per, true)
 }

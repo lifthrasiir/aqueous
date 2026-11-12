@@ -26,14 +26,16 @@ tile the target.
 
 Not used by aqr yet (docs/pak-inference-design.md, section 8). On the test set (The Crew,
 No Man's Sky, four files of other formats), `scripts/check.py` against the counts the headers
-give: 15 of 15 directories found, none found wrongly. Directories of fewer than 8 rows are not
-looked for (a layout learned from a bigger file of the family would be: section 7).
+give: 15 of 15 directories found, none found wrongly. The samples and their counts are in an
+expectations file of the user's (the script's docstring has its format), not in the repository.
+Directories of fewer than 8 rows are not looked for (a layout learned from a bigger file of the
+family would be: section 7).
 
 ## Usage
 
 ```sh
 cargo build -r -p aqr-infer-pak --examples
 target/release/examples/aqr-infer-pak-probe FILE...   # AQR_PAK_VERBOSE=1: each table's tests and times
-.venv/Scripts/python -I crates/aqr-infer-pak/scripts/check.py        # the test set (local paths)
+.venv/Scripts/python -I crates/aqr-infer-pak/scripts/check.py EXPECT  # samples against what is known of them
 AQR_PAK_VERBOSE=1 target/release/examples/aqr-infer-pak-probe FILE 2>&1 | python crates/aqr-infer-pak/scripts/costs.py
 ```

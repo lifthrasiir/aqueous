@@ -67,7 +67,7 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { keep: 64, per: 8, tries: 16, verbose: false }
+        Options { keep: 16, per: 4, tries: 16, verbose: false }
     }
 }
 
