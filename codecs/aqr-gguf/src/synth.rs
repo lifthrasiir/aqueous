@@ -52,6 +52,24 @@ fn weights(r: &mut Rng, n: usize, scale: f64, wide: u64) -> Vec<f32> {
 fn blocks(r: &mut Rng, q: Quant, blocks: usize) -> Vec<u8> {
     let mut d = Vec::with_capacity(blocks * q.block());
     let nib = |r: &mut Rng| ((bell(r) * 7.5 + 8.0) as i32).clamp(0, 15) as u8;
+    // (the types below 4 bits: their symbols of a bell, raw bytes noise, side bytes as above)
+    if Quant::ALL[11..].contains(&q) {
+        use crate::layout::{join_quant, quant_raw, quant_side};
+        let mut b = vec![0u8; q.block()];
+        for _ in 0..blocks {
+            let mut syms = Vec::new();
+            for p in q.coded() {
+                let a = p.alphabet() as f64;
+                syms.extend((0..p.syms()).map(|_| ((bell(r) + 1.0) * a / 2.0).clamp(0.0, a - 1.0) as u8));
+            }
+            let raw: Vec<u8> = (0..quant_raw(q, 1)).map(|_| r.below(256) as u8).collect();
+            let side: Vec<u8> =
+                (0..quant_side(q, 1)).map(|i| if i % 2 == 1 { 0x2c } else { r.below(256) as u8 }).collect();
+            join_quant(q, 1, &syms, &raw, &side, &mut b);
+            d.extend_from_slice(&b);
+        }
+        return d;
+    }
     for _ in 0..blocks {
         for p in q.parts() {
             match *p {
@@ -81,6 +99,8 @@ fn blocks(r: &mut Rng, q: Quant, blocks: usize) -> Vec<u8> {
                     }
                     d.extend_from_slice(&b);
                 }
+                // (only of the types below 4 bits, made above)
+                _ => unreachable!(),
             }
         }
     }
@@ -120,15 +140,15 @@ pub fn file(seed: u64, scale: usize) -> Vec<u8> {
     // (too small to code)
     ts.push(float(&mut r, 0, 100, 0));
     for (k, q) in Quant::ALL.into_iter().enumerate() {
-        let t = [2, 3, 8, 12, 14, 20, 23, 39, 6, 7, 13][k];
+        let t = [2, 3, 8, 12, 14, 20, 23, 39, 6, 7, 13, 10, 11, 16, 17, 18, 19, 21, 22, 29][k];
         let b = (n * (k + 2)).div_ceil(q.weights());
         ts.push(Tensor { ty: t, n: (b * q.weights()) as u64, data: blocks(&mut r, q, b) });
     }
-    // (a type not coded, short and long: Q2_K's bytes of noise)
-    ts.push(Tensor { ty: 10, n: 512, data: (0..2 * 84).map(|_| r.below(256) as u8).collect() });
+    // (a type not coded, short and long: TQ1_0's bytes of noise)
+    ts.push(Tensor { ty: 34, n: 512, data: (0..2 * 54).map(|_| r.below(256) as u8).collect() });
     if scale >= 8 {
-        let b = (1 << 20) / 84 + 3;
-        ts.push(Tensor { ty: 10, n: (b * 256) as u64, data: (0..b * 84).map(|_| r.below(256) as u8).collect() });
+        let b = (1 << 20) / 54 + 3;
+        ts.push(Tensor { ty: 34, n: (b * 256) as u64, data: (0..b * 54).map(|_| r.below(256) as u8).collect() });
     }
     // (a quantised tensor after it, of an odd length)
     ts.push(Tensor { ty: 12, n: 256 * 41, data: blocks(&mut r, Quant::Q4K, 41) });

@@ -88,8 +88,10 @@ impl Kept {
 pub enum Part {
     /// Bytes as they are, to the side.
     Side(usize),
-    /// Bytes of two nibbles, each a symbol: of each 16 bytes, a group of their low nibbles then
-    /// their high ones.
+    /// Bytes as they are, raw.
+    Raw(usize),
+    /// Bytes of two nibbles, each a symbol: of each 16 bytes (or of all where fewer), their low
+    /// nibbles then their high ones.
     Nib(usize),
     /// Bytes of four 2-bit fields, each a symbol: of each 8 bytes, a group of their bits 0–1,
     /// then 2–3, 4–5 and 6–7.
@@ -108,36 +110,79 @@ pub enum Part {
     /// `2k + 1`. 8 groups of the quants' high 4 bits, in their order, and 32 raw bytes of their
     /// lowest bits (bit `j` of the little-endian 256 bits, quant `j`'s).
     Five256,
+    /// 256 quants of 3 bits, Q3_K's: 32 bytes `hmask` of their high bits, then 64 bytes `qs` of
+    /// their low 2 bits: of half `h` (0 or 1), `m` (0 to 3) and `l` (0 to 31), quant
+    /// `128h + 32m + l` is bits `2m` and `2m + 1` of `qs[32h + l]` and bit `4h + m` of
+    /// `hmask[l]` (its high bit). Its symbols the quants, in their order (each below 8).
+    Three256,
+    /// IQ1_S's `qh`, 8 little-endian 16-bit numbers: their bits 12–14 the symbols (each below
+    /// 8), and 13 raw bytes: their low 12 bits (number `i`'s bits `12i` to `12i + 11` of the
+    /// little-endian 96 bits), then a byte of their top bits (bit `i` number `i`'s).
+    Iq1sHigh,
+    /// IQ1_M's scales, 4 little-endian 16-bit numbers: their 3-bit fields `k` (0 to 3, bits `3k`
+    /// to `3k + 2`) the symbols (number `i`'s field `k` symbol `4i + k`, each below 8), and 2 raw
+    /// bytes of their top nibbles (number `2j`'s the low nibble of byte `j`, `2j + 1`'s its high
+    /// nibble: the block's F16 scale).
+    Iq1mScales,
+    /// Little-endian 32-bit numbers (`n` bytes, a multiple of 8): their top nibbles the symbols,
+    /// and of each two, 7 raw bytes of their low 28 bits (the first's the low ones of the
+    /// little-endian 56 bits).
+    TopNib(usize),
+    /// IQ2_XXS's `qs`, 8 pairs of little-endian 32-bit numbers: the top nibbles of the second of
+    /// each pair the symbols, and 60 raw bytes: the first of each pair, as they are, then the
+    /// second's as [`Part::TopNib`]'s.
+    Iq2Xxs,
 }
 
 impl Part {
     pub const fn bytes(self) -> usize {
         match self {
-            Part::Side(n) | Part::Nib(n) | Part::Crumb(n) | Part::HiNib(n) => n,
+            Part::Side(n) | Part::Raw(n) | Part::Nib(n) | Part::Crumb(n) | Part::HiNib(n) | Part::TopNib(n) => n,
             Part::Five32 => 20,
             Part::Five256 => 160,
+            Part::Three256 => 96,
+            Part::Iq1sHigh => 16,
+            Part::Iq1mScales => 8,
+            Part::Iq2Xxs => 64,
         }
     }
 
     /// Raw bytes of the part, of a block.
     pub const fn raw(self) -> usize {
         match self {
+            Part::Raw(n) => n,
             Part::HiNib(n) => n / 2,
             Part::Five32 => 4,
             Part::Five256 => 32,
+            Part::Iq1sHigh => 13,
+            Part::Iq1mScales => 2,
+            Part::TopNib(n) => n / 8 * 7,
+            Part::Iq2Xxs => 60,
             _ => 0,
         }
     }
 
-    /// Groups of symbols (of 32) of the part, of a block; 0 for a side part.
-    pub const fn groups(self) -> usize {
+    /// Symbols of the part, of a block; 0 for a part of no symbols.
+    pub const fn syms(self) -> usize {
         match self {
-            Part::Side(_) => 0,
-            Part::Nib(n) => n / 16,
-            Part::Crumb(n) => n / 8,
-            Part::HiNib(n) => n / 32,
-            Part::Five32 => 1,
-            Part::Five256 => 8,
+            Part::Side(_) | Part::Raw(_) => 0,
+            Part::Nib(n) => 2 * n,
+            Part::Crumb(n) => 4 * n,
+            Part::HiNib(n) => n,
+            Part::Five32 => 32,
+            Part::Five256 | Part::Three256 => 256,
+            Part::Iq1sHigh | Part::Iq2Xxs => 8,
+            Part::Iq1mScales => 16,
+            Part::TopNib(n) => n / 4,
+        }
+    }
+
+    /// The symbols of the part are below this.
+    pub const fn alphabet(self) -> usize {
+        match self {
+            Part::Crumb(_) => 4,
+            Part::Three256 | Part::Iq1sHigh | Part::Iq1mScales => 8,
+            _ => 16,
         }
     }
 }
@@ -156,10 +201,19 @@ pub enum Quant {
     Q5_0,
     Q5_1,
     Q5K,
+    Q2K,
+    Q3K,
+    Iq2Xxs,
+    Iq2Xs,
+    Iq3Xxs,
+    Iq1S,
+    Iq3S,
+    Iq2S,
+    Iq1M,
 }
 
 impl Quant {
-    pub const ALL: [Quant; 11] = [
+    pub const ALL: [Quant; 20] = [
         Quant::Q4_0,
         Quant::Q4_1,
         Quant::Q8_0,
@@ -171,6 +225,15 @@ impl Quant {
         Quant::Q5_0,
         Quant::Q5_1,
         Quant::Q5K,
+        Quant::Q2K,
+        Quant::Q3K,
+        Quant::Iq2Xxs,
+        Quant::Iq2Xs,
+        Quant::Iq3Xxs,
+        Quant::Iq1S,
+        Quant::Iq3S,
+        Quant::Iq2S,
+        Quant::Iq1M,
     ];
 
     /// Its pieces, in the order of the block's bytes.
@@ -187,6 +250,17 @@ impl Quant {
             Quant::Q5_0 => &[Side(2), Five32],
             Quant::Q5_1 => &[Side(4), Five32],
             Quant::Q5K => &[Side(16), Five256],
+            // (the quants of the types below 4 bits, but Q2_K's and Q3_K's, are of codebooks: their
+            // indices and signs raw, near their entropy; their scales the symbols)
+            Quant::Q2K => &[Nib(16), Crumb(64), Side(4)],
+            Quant::Q3K => &[Three256, Side(14)],
+            Quant::Iq2Xxs => &[Side(2), Iq2Xxs],
+            Quant::Iq2Xs => &[Side(2), Raw(64), Nib(8)],
+            Quant::Iq3Xxs => &[Side(2), Raw(64), TopNib(32)],
+            Quant::Iq1S => &[Side(2), Raw(32), Iq1sHigh],
+            Quant::Iq3S => &[Side(2), Raw(104), Nib(4)],
+            Quant::Iq2S => &[Side(2), Raw(72), Nib(8)],
+            Quant::Iq1M => &[Raw(48), Iq1mScales],
         }
     }
 
@@ -205,8 +279,8 @@ impl Quant {
     /// Weights of a block.
     pub const fn weights(self) -> usize {
         match self {
-            Quant::Q4K | Quant::Q6K | Quant::Iq4Xs | Quant::Q5K => 256,
-            _ => 32,
+            Quant::Q4_0 | Quant::Q4_1 | Quant::Q8_0 | Quant::Iq4Nl | Quant::Mxfp4 | Quant::Q5_0 | Quant::Q5_1 => 32,
+            _ => 256,
         }
     }
 
@@ -217,7 +291,7 @@ impl Quant {
 
     /// Parts of symbols, each with a table.
     pub fn coded(self) -> impl Iterator<Item = Part> {
-        self.parts().iter().copied().filter(|p| p.groups() > 0)
+        self.parts().iter().copied().filter(|p| p.syms() > 0)
     }
 
     pub const fn tag(self) -> u8 {
@@ -238,6 +312,15 @@ impl Quant {
             6 => Quant::Q5_0,
             7 => Quant::Q5_1,
             13 => Quant::Q5K,
+            10 => Quant::Q2K,
+            11 => Quant::Q3K,
+            16 => Quant::Iq2Xxs,
+            17 => Quant::Iq2Xs,
+            18 => Quant::Iq3Xxs,
+            19 => Quant::Iq1S,
+            21 => Quant::Iq3S,
+            22 => Quant::Iq2S,
+            29 => Quant::Iq1M,
             _ => return None,
         })
     }
@@ -360,7 +443,7 @@ impl Run {
             let blocks = num(p, at)?;
             let tables = q.coded().map(|_| table(p, at)).collect::<Result<Vec<_>>>()?;
             for (part, t) in q.coded().zip(&tables) {
-                if matches!(part, Part::Crumb(_)) && t.freq[4..].iter().any(|&f| f > 0) {
+                if t.freq[part.alphabet()..].iter().any(|&f| f > 0) {
                     return Err(corrupt());
                 }
             }
@@ -419,6 +502,23 @@ pub fn split_quant(q: Quant, d: &[u8], syms: &mut [u8], raw: &mut [u8], side: &m
                     side[side_at..side_at + n].copy_from_slice(&d[b * bs + at..][..n]);
                     side_at += n;
                 }
+            }
+            Part::Raw(_) => {
+                for b in 0..blocks {
+                    raw[raw_at..raw_at + n].copy_from_slice(&d[b * bs + at..][..n]);
+                    raw_at += n;
+                }
+            }
+            Part::Nib(_) if n < 16 => {
+                let s = &mut syms[s_at..s_at + blocks * n * 2];
+                for b in 0..blocks {
+                    let (src, g) = (&d[b * bs + at..][..n], &mut s[b * n * 2..][..n * 2]);
+                    for i in 0..n {
+                        g[i] = src[i] & 15;
+                        g[n + i] = src[i] >> 4;
+                    }
+                }
+                s_at += blocks * n * 2;
             }
             Part::Nib(_) => {
                 let s = &mut syms[s_at..s_at + blocks * n * 2];
@@ -482,8 +582,145 @@ pub fn split_quant(q: Quant, d: &[u8], syms: &mut [u8], raw: &mut [u8], side: &m
                 }
                 s_at += blocks * quants;
             }
+            Part::Three256 | Part::Iq1sHigh | Part::Iq1mScales | Part::TopNib(_) | Part::Iq2Xxs => {
+                let (k, nr) = (part.syms(), part.raw());
+                for b in 0..blocks {
+                    let src = &d[b * bs + at..][..n];
+                    split_small(*part, src, &mut syms[s_at + b * k..][..k], &mut raw[raw_at..][..nr]);
+                    raw_at += nr;
+                }
+                s_at += blocks * k;
+            }
         }
         at += n;
+    }
+}
+
+fn u16_at(d: &[u8], i: usize) -> u32 {
+    u16::from_le_bytes([d[2 * i], d[2 * i + 1]]) as u32
+}
+
+fn u32_at(d: &[u8], i: usize) -> u32 {
+    u32::from_le_bytes(d[4 * i..4 * i + 4].try_into().unwrap())
+}
+
+/// The low 28 bits of number `i` of the 32-bit numbers packed as [`Part::TopNib`]'s raw bytes
+/// `r`.
+fn low28(r: &[u8], i: usize) -> u32 {
+    let mut b = [0u8; 8];
+    b[..7].copy_from_slice(&r[7 * (i / 2)..][..7]);
+    (u64::from_le_bytes(b) >> (28 * (i % 2))) as u32 & 0x0fff_ffff
+}
+
+/// The low 28 bits of numbers `a` and `b` packed into `r` (7 bytes), [`low28`]'s.
+fn put28(a: u32, b: u32, r: &mut [u8]) {
+    let v = (a & 0x0fff_ffff) as u64 | ((b & 0x0fff_ffff) as u64) << 28;
+    r[..7].copy_from_slice(&v.to_le_bytes()[..7]);
+}
+
+/// A part of the small parts of a block taken apart: its bytes `src` into its symbols `g` and
+/// raw bytes `r`.
+fn split_small(part: Part, src: &[u8], g: &mut [u8], r: &mut [u8]) {
+    match part {
+        Part::Three256 => {
+            let (hm, qs) = src.split_at(32);
+            for h in 0..2 {
+                for m in 0..4 {
+                    for l in 0..32 {
+                        g[128 * h + 32 * m + l] = qs[32 * h + l] >> (2 * m) & 3 | (hm[l] >> (4 * h + m) & 1) << 2;
+                    }
+                }
+            }
+        }
+        Part::Iq1sHigh => {
+            r.fill(0);
+            for i in 0..8 {
+                let w = u16_at(src, i);
+                g[i] = (w >> 12 & 7) as u8;
+                let lo = (w & 0xfff) << (12 * (i % 2));
+                for k in 0..3 {
+                    r[3 * (i / 2) + k] |= (lo >> (8 * k)) as u8;
+                }
+                r[12] |= ((w >> 15) as u8) << i;
+            }
+        }
+        Part::Iq1mScales => {
+            for i in 0..4 {
+                let w = u16_at(src, i);
+                for k in 0..4 {
+                    g[4 * i + k] = (w >> (3 * k) & 7) as u8;
+                }
+            }
+            for (j, v) in r.iter_mut().enumerate() {
+                *v = (u16_at(src, 2 * j) >> 12 | u16_at(src, 2 * j + 1) >> 12 << 4) as u8;
+            }
+        }
+        Part::TopNib(n) => {
+            for (i, v) in g.iter_mut().enumerate() {
+                *v = (u32_at(src, i) >> 28) as u8;
+            }
+            for j in 0..n / 8 {
+                put28(u32_at(src, 2 * j), u32_at(src, 2 * j + 1), &mut r[7 * j..]);
+            }
+        }
+        Part::Iq2Xxs => {
+            for i in 0..8 {
+                g[i] = (u32_at(src, 2 * i + 1) >> 28) as u8;
+                r[4 * i..4 * i + 4].copy_from_slice(&src[8 * i..8 * i + 4]);
+            }
+            for j in 0..4 {
+                put28(u32_at(src, 4 * j + 1), u32_at(src, 4 * j + 3), &mut r[32 + 7 * j..]);
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// [`split_small`] undone: the part's bytes `o` from its symbols `g` and raw bytes `r`.
+fn join_small(part: Part, g: &[u8], r: &[u8], o: &mut [u8]) {
+    match part {
+        Part::Three256 => {
+            let (hm, qs) = o.split_at_mut(32);
+            hm.fill(0);
+            qs.fill(0);
+            for h in 0..2 {
+                for m in 0..4 {
+                    for l in 0..32 {
+                        let v = g[128 * h + 32 * m + l];
+                        qs[32 * h + l] |= (v & 3) << (2 * m);
+                        hm[l] |= (v >> 2) << (4 * h + m);
+                    }
+                }
+            }
+        }
+        Part::Iq1sHigh => {
+            for i in 0..8 {
+                let p = &r[3 * (i / 2)..][..3];
+                let lo = (p[0] as u32 | (p[1] as u32) << 8 | (p[2] as u32) << 16) >> (12 * (i % 2)) & 0xfff;
+                let w = lo | (g[i] as u32) << 12 | ((r[12] >> i & 1) as u32) << 15;
+                o[2 * i..2 * i + 2].copy_from_slice(&(w as u16).to_le_bytes());
+            }
+        }
+        Part::Iq1mScales => {
+            for i in 0..4 {
+                let top = (r[i / 2] >> (4 * (i % 2)) & 15) as u32;
+                let w = (0..4).fold(top << 12, |w, k| w | (g[4 * i + k] as u32) << (3 * k));
+                o[2 * i..2 * i + 2].copy_from_slice(&(w as u16).to_le_bytes());
+            }
+        }
+        Part::TopNib(_) => {
+            for (i, &v) in g.iter().enumerate() {
+                o[4 * i..4 * i + 4].copy_from_slice(&(low28(r, i) | (v as u32) << 28).to_le_bytes());
+            }
+        }
+        Part::Iq2Xxs => {
+            for i in 0..8 {
+                o[8 * i..8 * i + 4].copy_from_slice(&r[4 * i..4 * i + 4]);
+                let w = low28(&r[32..], i) | (g[i] as u32) << 28;
+                o[8 * i + 4..8 * i + 8].copy_from_slice(&w.to_le_bytes());
+            }
+        }
+        _ => unreachable!(),
     }
 }
 
@@ -504,7 +741,7 @@ fn five(src: &[u8], qh: usize, j: usize) -> u8 {
 
 /// Symbols of a chunk of `blocks` blocks of `q`.
 pub fn quant_syms(q: Quant, blocks: usize) -> usize {
-    q.coded().map(|p| p.groups() * LANES).sum::<usize>() * blocks
+    q.coded().map(|p| p.syms()).sum::<usize>() * blocks
 }
 
 /// [`split_quant`] undone: the chunk of `blocks` blocks into `out` from the symbols of each part
@@ -521,6 +758,22 @@ pub fn join_quant(q: Quant, blocks: usize, syms: &[u8], raw: &[u8], side: &[u8],
                     out[b * bs + at..][..n].copy_from_slice(&side[side_at..][..n]);
                     side_at += n;
                 }
+            }
+            Part::Raw(_) => {
+                for b in 0..blocks {
+                    out[b * bs + at..][..n].copy_from_slice(&raw[raw_at..][..n]);
+                    raw_at += n;
+                }
+            }
+            Part::Nib(_) if n < 16 => {
+                let s = &syms[s_at..s_at + blocks * n * 2];
+                for b in 0..blocks {
+                    let (o, g) = (&mut out[b * bs + at..][..n], &s[b * n * 2..][..n * 2]);
+                    for i in 0..n {
+                        o[i] = g[i] | g[n + i] << 4;
+                    }
+                }
+                s_at += blocks * n * 2;
             }
             Part::Nib(_) => {
                 let s = &syms[s_at..s_at + blocks * n * 2];
@@ -599,6 +852,14 @@ pub fn join_quant(q: Quant, blocks: usize, syms: &[u8], raw: &[u8], side: &[u8],
                 }
                 s_at += blocks * 256;
             }
+            Part::Three256 | Part::Iq1sHigh | Part::Iq1mScales | Part::TopNib(_) | Part::Iq2Xxs => {
+                let (k, nr) = (part.syms(), part.raw());
+                for b in 0..blocks {
+                    join_small(*part, &syms[s_at + b * k..][..k], &raw[raw_at..][..nr], &mut out[b * bs + at..][..n]);
+                    raw_at += nr;
+                }
+                s_at += blocks * k;
+            }
         }
         at += n;
     }
@@ -621,10 +882,8 @@ mod tests {
     #[test]
     fn blocks() {
         let sizes: Vec<usize> = Quant::ALL.iter().map(|q| q.block()).collect();
-        assert_eq!(sizes, [18, 20, 34, 144, 210, 18, 136, 17, 22, 24, 176]);
-        assert!(
-            Quant::ALL.iter().all(|q| q.coded().map(|p| p.groups() * 32).sum::<usize>() * q.chunk() <= MAX_CHUNK_SYMS)
-        );
+        assert_eq!(sizes, [18, 20, 34, 144, 210, 18, 136, 17, 22, 24, 176, 84, 110, 66, 74, 98, 50, 110, 82, 56]);
+        assert!(Quant::ALL.iter().all(|&q| quant_syms(q, q.chunk()) <= MAX_CHUNK_SYMS));
         assert!(Quant::ALL.iter().all(|&q| quant_side(q, q.chunk()) <= MAX_CHUNK_SIDE));
         assert!(Quant::ALL.iter().all(|&q| quant_raw(q, q.chunk()) <= MAX_CHUNK_RAW));
     }

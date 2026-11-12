@@ -133,8 +133,9 @@ commonest, the rest escapes, the commonest first (the smaller first on a tie).
 A block of a type is parts, in the order of its bytes, each:
 
 - **side** of `n` bytes: as they are, in `side`;
-- **nibbles** of `n` bytes (a multiple of 16): each 16 bytes a group, its symbols 0–15 the low
-  nibbles of the bytes and 16–31 their high nibbles;
+- **raw** of `n` bytes: as they are, in `raw`;
+- **nibbles** of `n` bytes (a multiple of 16, or 4 or 8): of each 16 bytes (or of all `n` where
+  fewer), the symbols the low nibbles of the bytes, then their high nibbles;
 - **crumbs** of `n` bytes (a multiple of 8): each 8 bytes a group, its symbols `8i + j` the bits
   `2i` and `2i + 1` of byte `j` (each symbol below 4; the table's frequencies from 4 on must be
   0);
@@ -152,6 +153,28 @@ A block of a type is parts, in the order of its bytes, each:
   and bit `2k + 1`. 8 groups of the quants' high 4 bits, quant `j` symbol `j mod 32` of group
   `floor(j / 32)`, and 32 bytes in `raw` of their lowest bits (bit `j mod 8` of byte
   `floor(j / 8)`, quant `j`'s).
+- **threes of 256** (96 bytes): 256 quants of 3 bits, Q3_K's: 32 bytes `hmask`, then 64 bytes
+  `qs`; of half `h` (0 or 1), `m` (0 to 3) and `l` (0 to 31), quant `128h + 32m + l` is bits
+  `2m` and `2m + 1` of `qs[32h + l]` and bit `4h + m` of `hmask[l]` (its high bit). The symbols
+  the quants, quant `j` symbol `j` (each below 8);
+- **IQ1_S high** (16 bytes): 8 numbers of 16 bits `qh[i]`. The symbols their bits 12–14
+  (`qh[i]` symbol `i`, each below 8), and 13 bytes in `raw`: their low 12 bits as a
+  little-endian number of 96 bits (`qh[i]`'s bits `12i` to `12i + 11`), then a byte of their
+  top bits (bit `i` that of `qh[i]`);
+- **IQ1_M scales** (8 bytes): 4 numbers of 16 bits `sc[i]`. The symbols their fields of 3 bits
+  (field `k` of `sc[i]`, bits `3k` to `3k + 2`, `k` from 0 to 3, symbol `4i + k`, each below 8),
+  and 2 bytes in `raw` of their top nibbles (byte `j` of `sc[2j] >> 12` and
+  `(sc[2j + 1] >> 12) << 4`);
+- **top nibbles** of `n` bytes (a multiple of 8): `n / 4` numbers of 32 bits `w[i]`. The
+  symbols their top nibbles (`w[i] >> 28` symbol `i`), and of each two `w[2j]`, `w[2j + 1]`,
+  7 bytes in `raw`: their low 28 bits as a little-endian number of 56 bits, `w[2j]`'s the low;
+- **IQ2_XXS words** (64 bytes): 16 numbers of 32 bits `w[i]`. The symbols the top nibbles of
+  the odd ones (`w[2i + 1] >> 28` symbol `i`), and 60 bytes in `raw`: the 8 even ones as they
+  are (4 bytes each, in order), then the odd ones' low 28 bits as a part of top nibbles has
+  them (28 bytes).
+
+Numbers in a block are little-endian. Where a part's symbols are each below 4 or 8, its
+table's frequencies from 4 or 8 on must be 0.
 
 | `q` | ggml type | bytes | parts | weights |
 |---|---|---|---|---|
@@ -166,13 +189,28 @@ A block of a type is parts, in the order of its bytes, each:
 | 8 | Q5_0 | 22 | side 2, fives of 32 | 32 |
 | 9 | Q5_1 | 24 | side 4, fives of 32 | 32 |
 | 10 | Q5_K | 176 | side 16, fives of 256 | 256 |
+| 11 | Q2_K | 84 | nibbles 16, crumbs 64, side 4 | 256 |
+| 12 | Q3_K | 110 | threes of 256, side 14 | 256 |
+| 13 | IQ2_XXS | 66 | side 2, IQ2_XXS words | 256 |
+| 14 | IQ2_XS | 74 | side 2, raw 64, nibbles 8 | 256 |
+| 15 | IQ3_XXS | 98 | side 2, raw 64, top nibbles 32 | 256 |
+| 16 | IQ1_S | 50 | side 2, raw 32, IQ1_S high | 256 |
+| 17 | IQ3_S | 110 | side 2, raw 104, nibbles 4 | 256 |
+| 18 | IQ2_S | 82 | side 2, raw 72, nibbles 8 | 256 |
+| 19 | IQ1_M | 56 | raw 48, IQ1_M scales | 256 |
 
-The parts but side parts are the *parts of symbols*, each with its table, in order. The blocks
+*(encoder)* Of the types of codebooks (IQ1 to IQ3), the grids' indices and the signs are raw:
+they are near their entropy order 0 (an index of 8 to 11 bits within 0.15–0.37 bits of it, the
+signs at it), and their alphabets are past the coder's 16 symbols. Their scales are the
+symbols, and so are Q2_K's and Q3_K's quants.
+
+The parts with symbols are the *parts of symbols*, each with its table, in order. The blocks
 are in *chunks* of 8192 weights (32 blocks of 256 weights, 256 of 32; the last chunk perhaps
-fewer). Of a chunk, for each part of symbols in turn, the groups of that part of every block of
-the chunk, the blocks in order; for each part of raw bytes in turn, its raw bytes of every
-block, the blocks in order; and for each side part in turn, its bytes of every block, the blocks
-in order.
+fewer). Of a chunk, for each part of symbols in turn, the symbols of that part of every block of
+the chunk, the blocks in order, in groups of 32 (the last perhaps fewer; a block of the types
+0–10 has a multiple of 32 of each part, so its groups are its own); for each part with raw bytes
+in turn, its raw bytes of every block, the blocks in order; and for each side part in turn, its
+bytes of every block, the blocks in order.
 
 ## 5. `gguf-recons`
 

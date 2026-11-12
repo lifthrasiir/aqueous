@@ -10,8 +10,12 @@ which
   3 bits; the few floats that are not, subnormals, are escapes whole);
 - the quantised blocks' quants are symbols: the nibbles of Q4_0, Q4_1, Q4_K, IQ4_NL, IQ4_XS
   and MXFP4, Q6_K's low nibbles and its 2-bit high parts, Q8_0's high nibbles and the high 4
-  bits of Q5_0's, Q5_1's and Q5_K's quants (their low nibbles and lowest bits as they are); the
-  blocks' scales go to the side, for the archive to compress;
+  bits of Q5_0's, Q5_1's and Q5_K's quants (their low nibbles and lowest bits as they are),
+  Q2_K's 2-bit quants and Q3_K's 3-bit ones; the blocks' scales go to the side, for the archive
+  to compress;
+- of the types of codebooks (IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S), the
+  scales of 3 or 4 bits are symbols (and Q2_K's scales and minimums), the grids' indices and the
+  signs as they are;
 - everything else (other types, padding, runs too short or that would not come to less) goes as
   it is, and runs of 1 MiB or more of it are left out of the applications.
 
@@ -60,6 +64,12 @@ back the same. (Q5_0, Q5_1 and Q5_K were coded after: Qwen3.5-4B Q4_K_M's 519 MB
 | Qwen3.5-9B BF16 | 17.92 GB | 0.6608 | 0.7788 | 392 MB/s | 160 MB/s | 1879 MB/s | 0.73 GB |
 | Qwen3.8-27B Q4_K_M | 16.81 GB | 0.9624 | 0.9824 | 362 MB/s | 139 MB/s | 1454 MB/s | 2.00 GB |
 | Qwen3.8-Flash UD-Q4_K_XL, 4 of 4 | 12.09 GB | 0.9656 | 0.9783 | 355 MB/s | 129 MB/s | 1315 MB/s | 2.16 GB |
+| Qwen3.8-27B UD-IQ1_S | 6.19 GB | 0.9714 | 0.9952 | 458 MB/s | 393 MB/s | 2764 MB/s | 1.47 GB |
+| Qwen3.8-27B UD-Q2_K_XL | 9.95 GB | 0.9765 | 0.9915 | 440 MB/s | 379 MB/s | 2980 MB/s | 1.30 GB |
+
+The last two (types below 4 bits, IQ1–IQ3 most of them) were measured after, written directly
+(below), "before" aqr-gguf without those types (and not written directly), decompressing by
+`aqr -K` (2405 and 2450 MB/s before).
 
 The coding itself (`aqr-gguf-bench`, 16 threads, the file cached) runs at 1.6–3.8 GB/s and
 decodes at 5–6 GB/s (one thread: 330–670 MB/s coding, 550–1080 decoding). Through `aqr`, the
@@ -83,7 +93,12 @@ order they filled).
 
 Left:
 
-- Q2_K, Q3_K, IQ1–IQ3 and the trellis types (EXL3's) are kept as they are.
+- The grids' indices of IQ1–IQ3 (8 to 11 bits) are as they are: they are near their entropy
+  (measured on Qwen3.8-27B's UD-IQ1_S and UD-Q2_K_XL: IQ1_S's 11 bits 10.77, IQ2_XXS's 8 bits
+  7.84–7.86, IQ2_S's 10 bits 9.63, IQ3_XXS's 8 bits 7.76–7.80; the index before as context
+  10.77 -> 10.72), worth about 1–2% of those files more, for a coder of alphabets past 16
+  symbols. The signs are at their entropy. The trellis types (ik_llama.cpp's KT) are kept as
+  they are.
 - The heap peak of the encoder reaches the budget on files of Q4_K and Q6_K (2.0–2.16 GB): the
   symbols of every segment in flight (17 of 16 MiB) and their words.
 - Files of tens of GB in an archive of several files: a file is one leaf there, its batch held

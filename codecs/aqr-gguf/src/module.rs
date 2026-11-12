@@ -172,8 +172,12 @@ fn run(
                     words.fill();
                     let mut o = 0;
                     for (part, t) in q.coded().zip(&tables) {
-                        let n = b * part.groups() * LANES;
-                        dec.groups(t, &words.buf, &mut words.pos, &mut sc.syms[o..o + n]);
+                        let n = b * part.syms();
+                        let full = n / LANES * LANES;
+                        dec.groups(t, &words.buf, &mut words.pos, &mut sc.syms[o..o + full]);
+                        if n > full {
+                            dec.partial(t, &words.buf, &mut words.pos, &mut sc.syms[o + full..o + n]);
+                        }
                         o += n;
                     }
                     let (nr, ns) = (layout::quant_raw(q, b), layout::quant_side(q, b));

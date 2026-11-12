@@ -164,6 +164,14 @@ impl Encoder {
         self.groups.extend(std::iter::repeat_n((table, LANES as u8), count));
     }
 
+    /// `n` symbols of table `table` of the symbols appended, in groups of 32 but the last.
+    pub fn told_syms(&mut self, table: u32, n: usize) {
+        self.told(table, n / LANES);
+        if !n.is_multiple_of(LANES) {
+            self.groups.push((table, (n % LANES) as u8));
+        }
+    }
+
     /// The symbols from `mark` on.
     pub fn since(&self, mark: (usize, usize)) -> &[u8] {
         &self.syms[mark.0..]

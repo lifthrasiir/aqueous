@@ -382,12 +382,16 @@ fn quant(
         // not wait on its own count)
         let mut at = 0;
         for (k, p) in parts.iter().enumerate() {
-            let len = b * p.groups() * LANES;
+            let len = b * p.syms();
             let mut h = [[0u32; 16]; 4];
-            for g in syms[at..at + len].as_chunks::<4>().0 {
+            let (fours, rest) = syms[at..at + len].as_chunks::<4>();
+            for g in fours {
                 for j in 0..4 {
                     h[j][g[j] as usize] += 1;
                 }
+            }
+            for &s in rest {
+                h[0][s as usize] += 1;
             }
             for s in 0..16 {
                 hist[k][s] += h.iter().map(|h| h[s] as u64).sum::<u64>();
@@ -395,7 +399,7 @@ fn quant(
             at += len;
         }
         for (k, p) in parts.iter().enumerate() {
-            enc.told(first + k as u32, b * p.groups());
+            enc.told_syms(first + k as u32, b * p.syms());
         }
         (ra, da) = (ra + nr, da + nd);
     }

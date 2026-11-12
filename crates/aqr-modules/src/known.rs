@@ -258,7 +258,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "gguf-recons",
         version: 1,
-        sha512_256: hex("4059cace682f979fc1645166e676770b6b1d388d49fe0e8121ca338e5fc5d931"),
+        sha512_256: hex("f0a95cf5a72b5eaf8f5f51246369c827e2661b6bfe016cc066178e4a9bf75880"),
         block: include_bytes!("../wasm/gguf-recons.block"),
     },
     Known {
