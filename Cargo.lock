@@ -1013,6 +1013,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-infer-pak"
+version = "0.1.0"
+dependencies = [
+ "aqr-lz4",
+ "aqr-lzo",
+ "flate2",
+ "memmap2",
+ "zstd",
+]
+
+[[package]]
 name = "aqr-infer-recs"
 version = "0.1.0"
 dependencies = [

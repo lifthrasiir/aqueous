@@ -1,0 +1,22 @@
+[package]
+name = "aqr-infer-pak"
+version = "0.1.0"
+edition = "2024"
+description = "Directories of unknown archive formats (game paks) inferred: tables of records whose fields tile a target"
+publish = false
+
+[dependencies]
+aqr-lz4 = { path = "../../codecs/aqr-lz4", default-features = false }
+aqr-lzo = { path = "../../codecs/aqr-lzo", default-features = false }
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+zstd = "0.13"
+
+[dev-dependencies]
+memmap2 = "0.9"
+
+# Tools are named <crate>-<tool>, so that names do not collide in the workspace's target
+# directory.
+
+[[example]]
+name = "aqr-infer-pak-probe"
+path = "examples/probe.rs"
