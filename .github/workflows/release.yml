@@ -306,3 +306,11 @@ jobs:
           gh release view "$TAG" > /dev/null 2>&1 ||
             gh release create "$TAG" --draft --verify-tag --title "Aqueous archiver $TAG" --notes ""
           gh release upload "$TAG" out/* --clobber
+
+  # The Homebrew tap pointed at the release, if it was published while this run built it
+  # (homebrew.yml; otherwise it is when the release is published).
+  homebrew:
+    needs: release
+    permissions:
+      contents: read
+    uses: ./.github/workflows/homebrew.yml # zizmor: ignore[self-repository] (actionlint knows only ./)

@@ -1,27 +1,55 @@
 name: homebrew
 
-# A release published (by hand, after release.yml made its draft and uploaded the assets: a
-# draft's assets cannot be downloaded) has lifthrasiir/homebrew-aqueous point its formula and
-# cask at it: its update workflow, run by repository_dispatch. The secret HOMEBREW_TAP_TOKEN is a
-# fine-grained token for that repository alone, with Contents: read and write, a secret of the
-# environment homebrew (its deployments limited to the tags v*), so that no other ref's workflow
-# can read it.
+# A release published, with its assets, has lifthrasiir/homebrew-aqueous point its formula and
+# cask at it: its update workflow, run by repository_dispatch. Run from two sides, as either can
+# come last: the release published (by hand), and release.yml once it has uploaded the assets
+# (workflow_call, the ref still the tag). Each dispatches only if the release is then published
+# (a draft's assets cannot be downloaded), not a prerelease, and has every asset SHA256SUMS
+# names (uploaded last by nothing in particular: checked by name), so that a release published
+# while it is still being built waits for release.yml. Both may dispatch if they meet; the tap's
+# update is the same twice.
+#
+# The secret HOMEBREW_TAP_TOKEN is a fine-grained token for that repository alone, with
+# Contents: read and write, a secret of the environment homebrew (its deployments limited to the
+# tags v*), so that no other ref's workflow can read it.
 
 on:
   release:
     types: [published]
+  workflow_call:
 
 permissions: {}
 
 jobs:
   dispatch:
-    if: '!github.event.release.prerelease'
     runs-on: ubuntu-latest
     environment: homebrew
+    permissions:
+      contents: read # the release looked at
     steps:
       - env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          TAG: ${{ github.event.release.tag_name }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ github.ref_name }}
         run: |
-          gh api repos/lifthrasiir/homebrew-aqueous/dispatches \
+          # (a draft is not seen by this token at all)
+          if ! state=$(gh release view "$TAG" --json isDraft,isPrerelease -q '[.isDraft, .isPrerelease] | @tsv'); then
+            echo "::notice::$TAG: no release published yet"; exit 0
+          fi
+          case "$state" in
+            false$'\t'false) ;;
+            true$'\t'*) echo "::notice::$TAG: still a draft"; exit 0 ;;
+            *) echo "::notice::$TAG: a prerelease, not for the tap"; exit 0 ;;
+          esac
+          assets=$(gh release view "$TAG" --json assets -q '.assets[].name')
+          if ! grep -qxF SHA256SUMS <<< "$assets"; then
+            echo "::notice::$TAG: no SHA256SUMS yet (release.yml still building)"; exit 0
+          fi
+          missing=$(gh release download "$TAG" -p SHA256SUMS -O - | awk '{print $2}' |
+            grep -vxF -f <(printf '%s\n' "$assets") || true)
+          if [ -n "$missing" ]; then
+            echo "::notice::$TAG: assets not all uploaded yet:"$'\n'"$missing"; exit 0
+          fi
+          GH_TOKEN=$TAP_TOKEN gh api repos/lifthrasiir/homebrew-aqueous/dispatches \
             -f event_type=release -f "client_payload[tag]=$TAG"
