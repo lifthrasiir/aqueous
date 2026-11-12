@@ -1,0 +1,24 @@
+name: homebrew
+
+# A release published (by hand, after release.yml made its draft and uploaded the assets: a
+# draft's assets cannot be downloaded) has lifthrasiir/homebrew-aqueous point its formula and
+# cask at it: its update workflow, run by repository_dispatch. The secret HOMEBREW_TAP_TOKEN is a
+# fine-grained token for that repository alone, with Contents: read and write.
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+jobs:
+  dispatch:
+    if: '!github.event.release.prerelease'
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh api repos/lifthrasiir/homebrew-aqueous/dispatches \
+            -f event_type=release -f "client_payload[tag]=$TAG"
