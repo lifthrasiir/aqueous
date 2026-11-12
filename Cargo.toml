@@ -62,6 +62,10 @@ opt-level = 0
 inherits = "release"
 lto = "fat"
 codegen-units = 1
+# `debug = 1` from release turns off Cargo's default `strip = "debuginfo"`, leaving the DWARF in
+# the ELF (Linux) and the debug map in Mach-O (macOS). Symbols stay for backtraces' names.
+# MSVC is unaffected: its debug info is in the .pdb.
+strip = "debuginfo"
 
 # The Wasm modules (crates/aqr-modules/build.sh): fat LTO and one
 # codegen unit as in dist, for small modules and for their bytes (hence hashes) to stay as they
