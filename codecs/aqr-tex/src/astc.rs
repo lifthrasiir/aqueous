@@ -367,15 +367,28 @@ impl Order {
     }
 
     /// The rank of the value that unquantizes nearest to `u` (the first of them).
+    #[inline]
     pub fn nearest(&self, u: i32) -> usize {
-        let mut best = (i32::MAX, 0);
-        for k in 0..self.levels {
-            let d = (self.unq[self.value[k] as usize] as i32 - u).abs();
-            if d < best.0 {
-                best = (d, k);
+        // (the ranks are in order of what they unquantize to: the first not below `u`, or the
+        // first of the ones before it, of what unquantizes nearer; the first of the lesser one
+        // where they are as near)
+        let at = |k: usize| self.unq[self.value[k] as usize] as i32;
+        let first = |u: i32| {
+            let (mut lo, mut hi) = (0, self.levels);
+            while lo < hi {
+                let mid = (lo + hi) / 2;
+                if at(mid) < u { lo = mid + 1 } else { hi = mid }
             }
+            lo
+        };
+        let k = first(u);
+        if k == self.levels {
+            return first(at(k - 1));
         }
-        best.1
+        if k == 0 || at(k) - u < u - at(k - 1) {
+            return k;
+        }
+        first(at(k - 1))
     }
 }
 
@@ -593,13 +606,11 @@ impl Block {
         let end = start + COLOUR_RANGES[cr].size(nv);
         (x.unused_at, x.unused_n) = (end as u8, (ccs_at - end) as u8);
         x.unused = (v >> end) & ((1u128 << (ccs_at - end)) - 1);
-        // the weights, from bit 127 down
+        // the weights, from bit 127 down (bit 127 − k of the block is bit k of it reversed)
+        let rv = v.reverse_bits();
         let mut at = 0;
         let mut get = |n: u32| {
-            let mut r = 0;
-            for i in 0..n {
-                r |= (((v >> (127 - at - i)) & 1) as u32) << i;
-            }
+            let r = (rv >> at) as u32 & ((1u64 << n) - 1) as u32;
             at += n;
             r
         };
@@ -656,15 +667,14 @@ impl Block {
         };
         write_seq(&mut put, &self.colours, COLOUR_RANGES[self.cr as usize]);
         v |= self.unused << self.unused_at;
-        let mut at = 0u32;
+        // (the weights from bit 127 down: written up from bit 0, then reversed)
+        let (mut rv, mut at) = (0u128, 0u32);
         let mut put = |n: u32, x: u32| {
-            for i in 0..n {
-                v |= (((x >> i) & 1) as u128) << (127 - at - i);
-            }
+            rv |= ((x & ((1u64 << n) - 1) as u32) as u128) << at;
             at += n;
         };
         write_seq(&mut put, &self.weights, range);
-        v.to_le_bytes()
+        (v | rv.reverse_bits()).to_le_bytes()
     }
 
     /// The bits of the block below its weights (of a void-extent or error block, all of them).
@@ -696,48 +706,60 @@ fn hash52(mut p: u32) -> u32 {
 
 /// The partition of texel (x, y) of a block of `texels` texels, of seed `seed` and `n` partitions.
 pub fn partition(seed: u32, x: u32, y: u32, n: u32, texels: u32) -> u32 {
-    if n == 1 {
-        return 0;
-    }
-    let (x, y) = if texels < 31 { (x << 1, y << 1) } else { (x, y) };
-    let seed = seed + (n - 1) * 1024;
-    let rnum = hash52(seed);
-    let mut s: [u32; 12] = std::array::from_fn(|i| match i {
-        8 => rnum >> 18 & 15,
-        9 => rnum >> 22 & 15,
-        10 => rnum >> 26 & 15,
-        11 => rnum.rotate_left(2) & 15,
-        _ => rnum >> (4 * i) & 15,
-    });
-    for v in s.iter_mut() {
-        *v *= *v;
-    }
-    let (sh1, sh2) = match seed & 1 {
-        1 => (if seed & 2 != 0 { 4 } else { 5 }, if n == 3 { 6 } else { 5 }),
-        _ => (if n == 3 { 6 } else { 5 }, if seed & 2 != 0 { 4 } else { 5 }),
-    };
-    let sh3 = if seed & 0x10 != 0 { sh1 } else { sh2 };
-    for (i, v) in s.iter_mut().enumerate() {
-        *v >>= if i >= 8 {
-            sh3
-        } else if i % 2 == 0 {
-            sh1
-        } else {
-            sh2
+    Partitions::new(seed, n, texels).of(x, y)
+}
+
+/// What [`partition`] takes of a block's seed, partitions and texels, once for its texels.
+#[derive(Clone, Copy)]
+pub struct Partitions {
+    n: u32,
+    small: bool,
+    s: [u32; 8],
+    rnum: u32,
+}
+
+impl Partitions {
+    pub fn new(seed: u32, n: u32, texels: u32) -> Partitions {
+        let mut p = Partitions { n, small: texels < 31, s: [0; 8], rnum: 0 };
+        if n == 1 {
+            return p;
+        }
+        let seed = seed + (n - 1) * 1024;
+        let rnum = hash52(seed);
+        let (sh1, sh2) = match seed & 1 {
+            1 => (if seed & 2 != 0 { 4 } else { 5 }, if n == 3 { 6 } else { 5 }),
+            _ => (if n == 3 { 6 } else { 5 }, if seed & 2 != 0 { 4 } else { 5 }),
         };
+        // (of the 12 seeds of the hash, the first 8 are of the texel's place; the rest unused)
+        p.s = std::array::from_fn(|i| {
+            let v = rnum >> (4 * i) & 15;
+            (v * v) >> if i % 2 == 0 { sh1 } else { sh2 }
+        });
+        p.rnum = rnum;
+        p
     }
-    let a = (s[0] * x + s[1] * y + (rnum >> 14)) & 0x3f;
-    let b = (s[2] * x + s[3] * y + (rnum >> 10)) & 0x3f;
-    let c = if n >= 3 { (s[4] * x + s[5] * y + (rnum >> 6)) & 0x3f } else { 0 };
-    let d = if n >= 4 { (s[6] * x + s[7] * y + (rnum >> 2)) & 0x3f } else { 0 };
-    if a >= b && a >= c && a >= d {
-        0
-    } else if b >= c && b >= d {
-        1
-    } else if c >= d {
-        2
-    } else {
-        3
+
+    /// The partition of texel (x, y).
+    #[inline]
+    pub fn of(&self, x: u32, y: u32) -> u32 {
+        let (n, s, rnum) = (self.n, &self.s, self.rnum);
+        if n == 1 {
+            return 0;
+        }
+        let (x, y) = if self.small { (x << 1, y << 1) } else { (x, y) };
+        let a = (s[0] * x + s[1] * y + (rnum >> 14)) & 0x3f;
+        let b = (s[2] * x + s[3] * y + (rnum >> 10)) & 0x3f;
+        let c = if n >= 3 { (s[4] * x + s[5] * y + (rnum >> 6)) & 0x3f } else { 0 };
+        let d = if n >= 4 { (s[6] * x + s[7] * y + (rnum >> 2)) & 0x3f } else { 0 };
+        if a >= b && a >= c && a >= d {
+            0
+        } else if b >= c && b >= d {
+            1
+        } else if c >= d {
+            2
+        } else {
+            3
+        }
     }
 }
 
@@ -824,10 +846,11 @@ pub fn pixels(b: &Block, (fw, fh): (u32, u32), out: &mut [[u8; 4]]) {
         Kind::Normal => {
             let ends = colour_ends(b);
             let w = texel_weights(b, (fw, fh));
+            let parts = Partitions::new(b.seed as u32, b.np as u32, fw * fh);
             for y in 0..fh {
                 for x in 0..fw {
                     let t = (y * fw + x) as usize;
-                    let p = partition(b.seed as u32, x, y, b.np as u32, fw * fh) as usize;
+                    let p = parts.of(x, y) as usize;
                     let (e0, e1) = (ends[p][0], ends[p][1]);
                     out[t] = std::array::from_fn(|c| {
                         let i = if b.dual && c == b.ccs as usize { w[1][t] } else { w[0][t] };
@@ -848,10 +871,13 @@ pub fn colour_ends(b: &Block) -> [[[i32; 4]; 2]; 4] {
         if p >= b.np as usize {
             return [[0; 4]; 2];
         }
-        let n = 2 * pairs(b.cem[p]) as usize;
-        let v: Vec<i32> = (0..n).map(|k| unquantize_colour(b.colours.v[at + k] as u32, r)).collect();
+        let n = (2 * pairs(b.cem[p]) as usize).min(8);
+        let mut v = [0i32; 8];
+        for k in 0..n {
+            v[k] = unquantize_colour(b.colours.v[(at + k).min(63)] as u32, r);
+        }
         at += n;
-        endpoints(b.cem[p], &v)
+        endpoints(b.cem[p], &v[..n])
     })
 }
 
@@ -861,20 +887,31 @@ pub fn texel_weights(b: &Block, (fw, fh): (u32, u32)) -> [[i32; 144]; 2] {
     let r = WEIGHT_RANGES[b.wr as usize];
     let (wx, wy) = (b.wx as u32, b.wy as u32);
     let planes = 1 + b.dual as usize;
-    let grid = |plane: usize, i: u32| unquantize_weight(b.weights.v[i as usize * planes + plane] as u32, r);
+    // (each plane's grid unquantized, and 0 past its end, where the infill of its last row and
+    // column reaches with a weight of 0)
+    let n = (wx * wy) as usize;
+    let mut grid = [[0i32; 64 + 16]; 2];
+    for plane in 0..planes {
+        for i in 0..n.min(64) {
+            grid[plane][i] = unquantize_weight(b.weights.v[(i * planes + plane).min(63)] as u32, r);
+        }
+    }
     let (ds, dt) = ((1024 + fw / 2) / (fw - 1).max(1), (1024 + fh / 2) / (fh - 1).max(1));
     let mut out = [[0i32; 144]; 2];
     for y in 0..fh {
+        let gt = (dt * y * (wy - 1) + 32) >> 6;
+        let (jt, ft) = (gt >> 4, gt & 15);
         for x in 0..fw {
-            let (gs, gt) = ((ds * x * (wx - 1) + 32) >> 6, (dt * y * (wy - 1) + 32) >> 6);
-            let (js, fs, jt, ft) = (gs >> 4, gs & 15, gt >> 4, gt & 15);
-            let v0 = js + jt * wx;
+            let gs = (ds * x * (wx - 1) + 32) >> 6;
+            let (js, fs) = (gs >> 4, gs & 15);
+            let v0 = (js + jt * wx) as usize;
             let w11 = ((fs * ft + 8) >> 4) as i32;
             let (w10, w01) = (ft as i32 - w11, fs as i32 - w11);
             let w00 = 16 - fs as i32 - ft as i32 + w11;
             for plane in 0..planes {
-                let at = |d: u32| if v0 + d < wx * wy { grid(plane, v0 + d) } else { 0 };
-                let i = (at(0) * w00 + at(1) * w01 + at(wx) * w10 + at(wx + 1) * w11 + 8) >> 4;
+                let g = &grid[plane];
+                let at = |d: usize| g[(v0 + d).min(64 + 15)];
+                let i = (at(0) * w00 + at(1) * w01 + at(wx as usize) * w10 + at(wx as usize + 1) * w11 + 8) >> 4;
                 out[plane][(y * fw + x) as usize] = i;
             }
         }
@@ -908,6 +945,18 @@ mod tests {
         for r in COLOUR_RANGES {
             let u: Vec<i32> = (0..r.levels()).map(|v| unquantize_colour(v, r)).collect();
             assert!(u.contains(&0) && u.contains(&255), "{r:?}");
+        }
+    }
+
+    /// [`Order::nearest`] is the first rank of the least distance, of every order and value.
+    #[test]
+    fn nearest() {
+        for o in COLOUR_ORDERS.iter().chain(&WEIGHT_ORDERS) {
+            for u in -20..300 {
+                let d = |k: usize| (o.unq[o.value[k] as usize] as i32 - u).abs();
+                let want = (0..o.levels).min_by_key(|&k| (d(k), k)).unwrap();
+                assert_eq!(o.nearest(u), want, "{} levels, {u}", o.levels);
+            }
         }
     }
 

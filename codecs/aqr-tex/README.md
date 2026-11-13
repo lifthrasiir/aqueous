@@ -121,11 +121,33 @@ texconv made their own. Every file came back as it was.
 | BC7 | texconv | photo | 16 | 22.4 | 0.6132 | 0.9401 | 6.7 / 7.2 |
 
 The encoders matter little (within 4%). Photographs' textures are noise to these models (BC7 of
-texconv on them 0.61, the game's 0.23); the game's textures hold flat areas and repeats. ASTC
-and PVRTC are 2 to 8 times slower than the rest (a block of ASTC is a parse of its fields and of
-the weights' grid, PVRTC's pixels are blended from four words), which is what to work on next.
-Through `aqr`, 3 files of each row (69 files, 86.3 MB): 35.9 MB (zstd -3 49.7 MB), natively and
-as WebAssembly given back.
+texconv on them 0.61, the game's 0.23); the game's textures hold flat areas and repeats. ASTC's
+and PVRTC's speeds above are of the first version; of their few bytes a pixel (ASTC 8×8 a
+quarter of a byte, PVRTC 2bpp a quarter), their pixels a second were not far from BC7's even
+then. Through `aqr`, 3 files of each row (69 files, 86.3 MB): 35.9 MB (zstd -3 49.7 MB),
+natively and as WebAssembly given back.
+
+Made faster (2026-11-14, `-j 8`, encoding / decoding MB/s, the coded streams the same):
+
+| set | before | after |
+|---|---|---|
+| PVRTC 4bpp | 4.6 / 4.8 | 8.9 / 8.8 |
+| PVRTC 2bpp | 2.0 / 2.1 | 4.3 / 4.3 |
+| ASTC 4×4 | 6.4 / 7.2 | 10.4 / 12.1 |
+| ASTC 6×6 | 4.9 / 5.5 | 7.1 / 8.1 |
+| ASTC 8×8 | 3.6 / 4.0 | 5.0 / 5.8 |
+| ASTC 4×4 HDR | 4.2 / 4.6 | 6.4 / 7.7 |
+
+- PVRTC: a word's images at its pixels (each a blend of the 4 words around) are taken of the
+  colours of the 3 × 3 words around it, decoded once, not of 4 words decoded for each pixel two
+  or three times; of 2 bits a pixel, only the pixels of no value stored are made again in the
+  end (the others are as the word alone tells).
+- ASTC: the partitions' hash once a block, not once a texel; the nearest rank of a value by a
+  table made with the work buffers (5,132 bytes; a search of every level before); the weights read
+  and written by the block's bits reversed, not a bit at a time; a weight's line between the
+  endpoints once for each partition and plane, of 32-bit products; the grid unquantized once
+  for its infill; the pixels of a copy of the left or upper block copied; a new block written
+  not read again where it is legal (its fields are what reading it gives).
 
 ### BC6H
 
@@ -237,7 +259,8 @@ written (the bits of each choice are of BC1 unless said):
 - **Formats.** PVRTC2; ASTC of 3D footprints.
 - **BC6H, ETC, EAC, PVRTC, ASTC** are measured on samples of real images made by encoders
   (above, "Encoders on real images"), not on textures of real games (mobile games' packages for
-  Android and iOS). ASTC and PVRTC are slow (2-4 and 1-3 MB/s a thread).
+  Android and iOS). ASTC (5-12 MB/s a thread) and PVRTC (4-9) are slower by their bytes than
+  the rest; what is left of them is mostly the coding and the parse of ASTC's blocks.
 - **BC7.** Most of its bits are indices; a model of their levels as an image (residuals from a
   predicted level) rather than the joint buckets of two predictions may do better on 4-bit
   indices. Real textures of mobile formats are missing (the sample is of Unity on Windows).

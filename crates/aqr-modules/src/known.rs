@@ -24,7 +24,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "astc-recons",
         version: 1,
-        sha512_256: hex("74130201ab88df03bbdbaf019f0e4f97395b9cd0625a8ed94046de0761e9c762"),
+        sha512_256: hex("ec4805bd1243d0f1f50ea68d4d7387b8a17693da0a50f9b2186721fc8382a728"),
         block: include_bytes!("../wasm/astc-recons.block"),
     },
     Known {
@@ -474,7 +474,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "pvrtc-recons",
         version: 1,
-        sha512_256: hex("41e701424cfd4b6b08e6203c2c82429f812fce51a0a0b0f027c71f2ae4fe95d4"),
+        sha512_256: hex("ddef6dfa7ec2a60cfabfd49d3462cb2a0158330b6477e1cb29e39a701e0989d6"),
         block: include_bytes!("../wasm/pvrtc-recons.block"),
     },
     Known {

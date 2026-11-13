@@ -30,6 +30,17 @@ fn unzz(v: u32) -> i32 {
     (v >> 1) as i32 ^ -((v & 1) as i32)
 }
 
+/// `v` modulo `levels` (as `rem_euclid`; of the ranks' sums and differences, by a test, where
+/// they are within one turn).
+#[inline(always)]
+fn wrap(v: i32, levels: i32) -> i32 {
+    match v {
+        _ if (0..levels).contains(&v) => v,
+        _ if (-levels..0).contains(&v) => v + levels,
+        _ => v.rem_euclid(levels),
+    }
+}
+
 /// Contexts of colour values: the source (3), the value's place in its partition's (8), the
 /// range's class (5); of weights: the range (12), the class of the predictions' agreement (4),
 /// the plane (2).
@@ -84,10 +95,37 @@ struct Seen {
     choice: u8,
 }
 
-/// Buffers of a surface's coding: its blocks seen, and an upsampling's.
+/// Buffers of a surface's coding: its blocks seen, an upsampling's, and the nearest ranks.
 pub struct Work {
     seen: Vec<Seen>,
     up: Up<u16>,
+    ranks: Vec<u8>,
+}
+
+/// Bytes of the nearest ranks ([`near_ranks`]).
+const RANKS: usize = COLOUR_ORDERS.len() * 256 + WEIGHT_ORDERS.len() * 65;
+
+/// The nearest ranks ([`astc::Order::nearest`]) to each value: of each colour range, of 0 to
+/// 255; then of each weight range, of 0 to 64.
+fn near_ranks(out: &mut Vec<u8>) {
+    out.clear();
+    for o in &COLOUR_ORDERS {
+        out.extend((0..256).map(|u| o.nearest(u) as u8));
+    }
+    for o in &WEIGHT_ORDERS {
+        out.extend((0..65).map(|u| o.nearest(u) as u8));
+    }
+}
+
+/// The nearest rank to `u` of colour range `range` (`weight` false) or of weight range `range`,
+/// by [`near_ranks`] (beyond the values, the nearest to the end of them).
+#[inline(always)]
+fn nearest(ranks: &[u8], weight: bool, range: usize, u: i32) -> i32 {
+    let at = match weight {
+        false => range * 256 + u.clamp(0, 255) as usize,
+        true => COLOUR_ORDERS.len() * 256 + range * 65 + u.clamp(0, 64) as usize,
+    };
+    ranks[at] as i32
 }
 
 #[derive(Default)]
@@ -179,6 +217,13 @@ impl Astc {
             return (out, src);
         }
         let texels = fp.0 * fp.1;
+        let parts = astc::Partitions::new(b.seed as u32, b.np as u32, texels);
+        let mut of = [0u8; 144];
+        if a.coarse.is_some() {
+            for t in 0..texels {
+                of[t as usize] = parts.of(t % fp.0, t / fp.0) as u8;
+            }
+        }
         let mut at = 0;
         for p in 0..b.np as usize {
             let cem = b.cem[p];
@@ -188,7 +233,7 @@ impl Astc {
             if let Some(c) = a.coarse {
                 for t in 0..texels {
                     let (x, y) = (t % fp.0, t / fp.0);
-                    if astc::partition(b.seed as u32, x, y, b.np as u32, texels) as usize == p {
+                    if of[t as usize] as usize == p {
                         px[m] =
                             c.at(bx * fp.0 as usize + x as usize, by * fp.1 as usize + y as usize).map(|c| c as i32);
                         m += 1;
@@ -234,6 +279,7 @@ impl Astc {
     fn colours(
         s: &mut impl Side,
         md: &mut Models,
+        ranks: &[u8],
         b: &mut Block,
         want: &Block,
         left: Option<&Block>,
@@ -251,12 +297,12 @@ impl Astc {
         for i in 0..b.colours.n as usize {
             let n = 2 * astc::pairs(b.cem[p]) as usize;
             let ctx = ((src[i] as usize * 8 + place.min(7)) * 5 + class) * 16;
-            let pr = ord.nearest(pred[i]) as i32;
+            let pr = nearest(ranks, false, b.cr as usize, pred[i]);
             let wr = ord.rank[want.colours.v[i] as usize] as i32;
-            let d = (wr - pr).rem_euclid(levels);
+            let d = wrap(wr - pr, levels);
             let d = if d >= (levels + 1) / 2 { d - levels } else { d };
             let v = s.token(&mut md.colour[ctx..ctx + 16], &mut md.colour_next[ctx..ctx + 16], zz(d), Cat::Endpoints);
-            let rank = (pr + unzz(v)).rem_euclid(levels);
+            let rank = wrap(pr + unzz(v), levels);
             b.colours.v[i] = ord.value[rank as usize];
             place += 1;
             if place == n {
@@ -272,6 +318,7 @@ impl Astc {
     fn weights(
         s: &mut impl Side,
         md: &mut Models,
+        ranks: &[u8],
         b: &mut Block,
         want: &Block,
         coarse: Option<&Plane<u8, 4>>,
@@ -287,23 +334,35 @@ impl Astc {
         let n = (wx * wy) as usize * planes;
         b.weights.n = n as u8;
         let unq = |b: &Block, i: usize| ord.unq[b.weights.v[i] as usize] as i32;
+        let parts = astc::Partitions::new(b.seed as u32, b.np as u32, texels);
+        // (of each partition and plane, its line between the endpoints: its start, its way of the
+        // plane's channels and their square; of 8-bit endpoints, within i32 below)
+        let mut line = [[([0i32; 4], [0i32; 4], 0i32); 2]; 4];
+        for (p, l) in line.iter_mut().enumerate().take(b.np as usize) {
+            for (plane, l) in l.iter_mut().enumerate().take(planes) {
+                let (e0, e1) = (ends[p][0], ends[p][1]);
+                let d: [i32; 4] = std::array::from_fn(|c| {
+                    let ours = !b.dual || (c == b.ccs as usize) == (plane == 1);
+                    if ours { e1[c].clamp(0, 255) - e0[c].clamp(0, 255) } else { 0 }
+                });
+                *l = (e0.map(|c| c.clamp(0, 255)), d, d.iter().map(|v| v * v).sum());
+            }
+        }
+        // (the texel of each column and row of the grid)
+        let place = |g: u32, w: u32, f: u32| if w > 1 { (g * (f - 1) + (w - 1) / 2) / (w - 1) } else { 0 };
+        let txs: [u32; 12] = std::array::from_fn(|g| place(g as u32, wx, fp.0));
+        let tys: [u32; 12] = std::array::from_fn(|g| place(g as u32, wy, fp.1));
         for i in 0..n {
             let (g, plane) = (i / planes, i % planes);
             let (gx, gy) = (g as u32 % wx, g as u32 / wx);
             // (the texel of the grid point, its partition, the pixel predicted there)
-            let tx = if wx > 1 { (gx * (fp.0 - 1) + (wx - 1) / 2) / (wx - 1) } else { 0 };
-            let ty = if wy > 1 { (gy * (fp.1 - 1) + (wy - 1) / 2) / (wy - 1) } else { 0 };
-            let p = astc::partition(b.seed as u32, tx, ty, b.np as u32, texels) as usize;
-            let (e0, e1) = (ends[p][0], ends[p][1]);
-            let chans = |c: usize| if b.dual { (c == b.ccs as usize) == (plane == 1) } else { true };
-            let wp = coarse.and_then(|cp| {
+            let (tx, ty) = (txs[gx as usize % 12], tys[gy as usize % 12]);
+            let p = parts.of(tx, ty) as usize;
+            let (e0, d, l2) = line[p][plane];
+            let wp = coarse.filter(|_| l2 > 0).map(|cp| {
                 let q = cp.at(bx * fp.0 as usize + tx as usize, by * fp.1 as usize + ty as usize);
-                let d: [i64; 4] = std::array::from_fn(|c| if chans(c) { (e1[c] - e0[c]) as i64 } else { 0 });
-                let l2: i64 = d.iter().map(|v| v * v).sum();
-                (l2 > 0).then(|| {
-                    let dot: i64 = (0..4).map(|c| (q[c] as i64 - e0[c] as i64) * d[c]).sum();
-                    ((dot * 64 + l2 / 2).div_euclid(l2)).clamp(0, 64) as i32
-                })
+                let dot: i32 = (0..4).map(|c| (q[c] as i32 - e0[c]) * d[c]).sum();
+                ((dot * 64 + l2 / 2).div_euclid(l2)).clamp(0, 64)
             });
             let near = |dx: u32, dy: u32| {
                 (gx >= dx && gy >= dy).then(|| unq(b, ((gy - dy) * wx + gx - dx) as usize * planes + plane))
@@ -321,12 +380,12 @@ impl Astc {
                 (None, None) => (32, 3),
             };
             let ctx = ((b.wr as usize * 4 + agree) * 2 + plane) * 16;
-            let pr = ord.nearest(pred) as i32;
+            let pr = nearest(ranks, true, b.wr as usize, pred);
             let wr = ord.rank[want.weights.v[i] as usize] as i32;
-            let d = (wr - pr).rem_euclid(levels);
+            let d = wrap(wr - pr, levels);
             let d = if d >= (levels + 1) / 2 { d - levels } else { d };
             let v = s.token(&mut md.weight[ctx..ctx + 16], &mut md.weight_next[ctx..ctx + 16], zz(d), Cat::Indices);
-            let rank = (pr + unzz(v)).rem_euclid(levels);
+            let rank = wrap(pr + unzz(v), levels);
             b.weights.v[i] = ord.value[rank as usize];
         }
         choices(s, md, &mut b.weights, &want.weights, r, true);
@@ -338,6 +397,7 @@ impl Astc {
     fn head(
         s: &mut impl Side,
         md: &mut Models,
+        ranks: &[u8],
         want: &Block,
         left: Option<&Block>,
         up: Option<&Block>,
@@ -417,7 +477,7 @@ impl Astc {
             (0..COLOUR_RANGES.len()).rev().find(|&i| COLOUR_RANGES[i].size(nv) as i32 <= avail).ok_or_else(corrupt)?;
         b.cr = cr as u8;
         b.colours.n = nv as u8;
-        Self::colours(s, md, &mut b, want, left, up, a, at);
+        Self::colours(s, md, ranks, &mut b, want, left, up, a, at);
         // the bits no field holds, as they are
         let end = start + COLOUR_RANGES[cr].size(nv);
         (b.unused_at, b.unused_n) = (end as u8, (ccs_at - end) as u8);
@@ -492,6 +552,7 @@ impl Astc {
     fn block(
         s: &mut impl Side,
         md: &mut Models,
+        ranks: &[u8],
         raw: &[u8; 16],
         seen: &[Seen],
         (bx, by, bw, fp): (usize, usize, usize, (u32, u32)),
@@ -518,7 +579,7 @@ impl Astc {
             Got::Head(c, choice) => {
                 let mut b = Block::read(&c, fp);
                 if b.kind == Kind::Normal {
-                    Self::weights(s, md, &mut b, &want, coarse, (bx, by, fp));
+                    Self::weights(s, md, ranks, &mut b, &want, coarse, (bx, by, fp));
                     b.raw = b.write();
                 }
                 (b, choice)
@@ -553,15 +614,34 @@ impl Astc {
                         Block::read(&r, fp)
                     }
                     _ => {
-                        let mut b = Self::head(s, md, &want, l, u, &a, (bx, by, fp))?;
-                        Self::weights(s, md, &mut b, &want, coarse, (bx, by, fp));
+                        let mut b = Self::head(s, md, ranks, &want, l, u, &a, (bx, by, fp))?;
+                        Self::weights(s, md, ranks, &mut b, &want, coarse, (bx, by, fp));
                         b.raw = b.write();
-                        Block::read(&b.raw, fp)
+                        // (a legal block's fields are what reading it gives; else it is read)
+                        match astc::legal(&b.raw, fp) {
+                            Some(_) => b,
+                            None => Block::read(&b.raw, fp),
+                        }
                     }
                 };
                 (b, NEW)
             }
         };
+        let (fw, fh) = (fp.0 as usize, fp.1 as usize);
+        // (a copy of the left or upper block: its pixels; else the block's decoded)
+        let from = match choice {
+            BLOCK_LEFT => Some((bx * fw - fw, by * fh)),
+            BLOCK_UP => Some((bx * fw, by * fh - fh)),
+            _ => None,
+        };
+        if let Some((x0, y0)) = from {
+            for y in 0..fh {
+                for x in 0..fw {
+                    plane.set(bx * fw + x, by * fh + y, plane.at(x0 + x, y0 + y));
+                }
+            }
+            return Ok(Seen { b, choice });
+        }
         let mut px = [[0u8; 4]; 144];
         astc::pixels(&b, fp, &mut px);
         for t in 0..(fp.0 * fp.1) as usize {
@@ -667,11 +747,14 @@ impl Family for Astc {
     }
 
     fn work(_: Format, blocks: usize, cols: usize, across: usize) -> Work {
-        Work { seen: Vec::with_capacity(blocks), up: Up::with_capacity(cols, across) }
+        let mut ranks = Vec::with_capacity(RANKS);
+        near_ranks(&mut ranks);
+        Work { seen: Vec::with_capacity(blocks), up: Up::with_capacity(cols, across), ranks }
     }
 
     fn work_plan(_: Format, blocks: usize, cols: usize, across: usize) -> u64 {
-        aqr_api::stack::block((blocks * size_of::<Seen>()) as u64) + Up::<u16>::plan(cols, across)
+        use aqr_api::stack::block;
+        block((blocks * size_of::<Seen>()) as u64) + Up::<u16>::plan(cols, across) + block(RANKS as u64)
     }
 
     fn across_values(_: Format) -> usize {
@@ -723,7 +806,7 @@ impl Family for Astc {
             for bx in 0..bw {
                 let at = &mut b[(by * bw + bx) * 16..][..16];
                 let raw: [u8; 16] = (*at).try_into().unwrap();
-                let x = Self::block(s, md, &raw, &work.seen, (bx, by, bw, fp), &mut plane, up.p.as_ref())?;
+                let x = Self::block(s, md, &work.ranks, &raw, &work.seen, (bx, by, bw, fp), &mut plane, up.p.as_ref())?;
                 at.copy_from_slice(&x.b.raw);
                 md.copies.used(head(&x.b.raw, fp), x.b.raw);
                 work.seen.push(x);

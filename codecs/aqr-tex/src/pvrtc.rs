@@ -86,6 +86,48 @@ pub fn images(words: &[u64], (w, h): (usize, usize), fw: usize, x: usize, y: usi
     })
 }
 
+/// The colours of the images A and B at each pixel of the word at (bx, by) (row by row, 16 or
+/// 32), as [`images`] tells them one by one: of the colours of the 3 × 3 words around it, each
+/// decoded once.
+#[inline]
+pub fn word_images(words: &[u64], (w, h): (usize, usize), fw: usize, bx: usize, by: usize) -> [[[i32; 4]; 2]; 32] {
+    let (xs, ys) = ([(bx + w - 1) % w, bx, (bx + 1) % w], [(by + h - 1) % h, by, (by + 1) % h]);
+    let mut cs = [[[0i32; 4]; 2]; 9];
+    for (j, &wy) in ys.iter().enumerate() {
+        for (i, &wx) in xs.iter().enumerate() {
+            let v = words[wy * w + wx];
+            cs[j * 3 + i] = [colour(v, false), colour(v, true)];
+        }
+    }
+    let (hx, fwi) = (fw / 2, fw as i32);
+    let mut out = [[[0i32; 4]; 2]; 32];
+    for ly in 0..4 {
+        // (the words above or here, and the pixel's place between them)
+        let (dy, yr) = if ly < 2 { (0, ly as i32 + 2) } else { (1, ly as i32 - 2) };
+        for lx in 0..fw {
+            let (dx, xr) = if lx < hx { (0, (lx + hx) as i32) } else { (1, (lx - hx) as i32) };
+            let (c00, c10, c01, c11) =
+                (&cs[dy * 3 + dx], &cs[dy * 3 + dx + 1], &cs[(dy + 1) * 3 + dx], &cs[(dy + 1) * 3 + dx + 1]);
+            let o = &mut out[ly * fw + lx];
+            for k in 0..2 {
+                for c in 0..4 {
+                    let v = c00[k][c] * (fwi - xr) * (4 - yr)
+                        + c10[k][c] * xr * (4 - yr)
+                        + c01[k][c] * (fwi - xr) * yr
+                        + c11[k][c] * xr * yr;
+                    o[k][c] = match (c, fw) {
+                        (0, 4) => v + v / 16,
+                        (_, 4) => v / 2 + v / 64,
+                        (0, _) => v / 2 + v / 32,
+                        _ => v / 4 + v / 128,
+                    };
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The weights of 2-bit modulation values: of modulation flag 0, and 1 (value 2: punch-through,
 /// transparent).
 pub const WEIGHTS: [[i32; 4]; 2] = [[0, 3, 5, 8], [0, 4, 4, 8]];
@@ -208,19 +250,35 @@ pub fn weight2(words: &[u64], (w, h): (usize, usize), x: usize, y: usize) -> (i3
     (wt, false)
 }
 
-/// The pixels of a surface of 2 bits a pixel set in `plane`, every one as [`weight2`] tells.
+/// The pixels of a surface of 2 bits a pixel set in `plane` as [`weight2`] tells, where they
+/// were set as [`pixels`] tells: those [`weights2`] did not know (of words of modulation flag 1,
+/// the ones of no value stored).
 pub fn exact2(words: &[u64], size: (usize, usize), plane: &mut Plane<u8, 4>) {
-    for y in 0..size.1 * 4 {
-        for x in 0..size.0 * 8 {
-            let (wt, punch) = weight2(words, size, x, y);
-            plane.set(x, y, blend(&images(words, size, 8, x, y), wt, punch));
+    for by in 0..size.1 {
+        for bx in 0..size.0 {
+            if words[by * size.0 + bx] >> 32 & 1 == 0 {
+                continue;
+            }
+            let ab = word_images(words, size, 8, bx, by);
+            for p in (0..32).filter(|p| (p % 8 + p / 8) % 2 == 1) {
+                let (x, y) = (bx * 8 + p % 8, by * 4 + p / 8);
+                let (wt, punch) = weight2(words, size, x, y);
+                plane.set(x, y, blend(&ab[p], wt, punch));
+            }
         }
     }
 }
 
 /// The pixels of a word at (bx, by) of `words` (row by row, of `w` × `h` words), row by row (16,
-/// or 32 of 2 bits a pixel).
-pub fn pixels(words: &[u64], size: (usize, usize), two: bool, bx: usize, by: usize) -> [[u8; 4]; 32] {
+/// or 32 of 2 bits a pixel), of the images there `ab` ([`word_images`]).
+pub fn pixels(
+    words: &[u64],
+    size: (usize, usize),
+    two: bool,
+    bx: usize,
+    by: usize,
+    ab: &[[[i32; 4]; 2]; 32],
+) -> [[u8; 4]; 32] {
     let fw = if two { 8 } else { 4 };
     let wd = words[by * size.0 + bx];
     let (mut wt, mut punch) = ([0i32; 32], [false; 32]);
@@ -236,7 +294,7 @@ pub fn pixels(words: &[u64], size: (usize, usize), two: bool, bx: usize, by: usi
     }
     let mut out = [[0u8; 4]; 32];
     for p in 0..4 * fw {
-        out[p] = blend(&images(words, size, fw, bx * fw + p % fw, by * 4 + p / fw), wt[p], punch[p]);
+        out[p] = blend(&ab[p], wt[p], punch[p]);
     }
     out
 }
@@ -398,6 +456,7 @@ fn modulation(
     (bx, by): (usize, usize),
     words: &[u64],
     size: (usize, usize),
+    images: &[[[i32; 4]; 2]; 32],
     plane: &mut Plane<u8, 4>,
     coarse: Option<&Plane<u8, 4>>,
 ) -> u64 {
@@ -426,14 +485,14 @@ fn modulation(
                 None => continue,
             },
         };
-        let ab = images(words, size, fw, x, y);
+        let ab = &images[p];
         let l2: i64 = (0..4).map(|c| ((ab[1][c] - ab[0][c]) as i64).pow(2)).sum();
         let (q1, q2) = match coarse {
             Some(c) => (Some(c.at(x, y)), plane.causal(x, y)),
             None => ((y > 0).then(|| plane.at(x, y - 1)), (x > 0).then(|| plane.at(x - 1, y))),
         };
         let bk = |q: Option<[u8; 4]>| match (q, l2) {
-            (Some(q), 1..) => bucket(&ab, q, l2),
+            (Some(q), 1..) => bucket(ab, q, l2),
             (Some(_), _) => 11,
             (None, _) => 11,
         };
@@ -454,7 +513,7 @@ fn modulation(
             (true, 2) => (8 * v as i32, false),
             _ => (WEIGHTS[0][if n == 1 { v * 3 } else { v } as usize], false),
         };
-        plane.set(x, y, blend(&ab, wt, punch));
+        plane.set(x, y, blend(ab, wt, punch));
     }
     w
 }
@@ -601,11 +660,12 @@ impl Family for Pvrtc {
         for by in 0..bh {
             for bx in 0..bw {
                 let i = by * bw + bx;
+                let ab = word_images(words, (bw, bh), fw, bx, by);
                 if !whole[i] {
                     let want = if enc { word(b, bx, by) } else { 0 };
-                    words[i] = modulation(s, md, want, two, (bx, by), words, (bw, bh), &mut plane, coarse);
+                    words[i] = modulation(s, md, want, two, (bx, by), words, (bw, bh), &ab, &mut plane, coarse);
                 }
-                let px = pixels(words, (bw, bh), two, bx, by);
+                let px = pixels(words, (bw, bh), two, bx, by, &ab);
                 for p in 0..4 * fw {
                     plane.set(bx * fw + p % fw, by * 4 + p / fw, px[p]);
                 }
@@ -620,5 +680,37 @@ impl Family for Pvrtc {
             exact2(words, (bw, bh), &mut plane);
         }
         Ok(Planes { p: Some(plane) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A word's images at once are those of each pixel, of both rates and of surfaces of one or
+    /// two words a side too (where the words around wrap onto themselves).
+    #[test]
+    fn word_images_are_images() {
+        let mut r = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            r ^= r << 13;
+            r ^= r >> 7;
+            r ^= r << 17;
+            r
+        };
+        for (w, h) in [(1, 1), (2, 1), (1, 2), (2, 2), (4, 8), (8, 2)] {
+            let words: Vec<u64> = (0..w * h).map(|_| next()).collect();
+            for fw in [4, 8] {
+                for by in 0..h {
+                    for bx in 0..w {
+                        let ab = word_images(&words, (w, h), fw, bx, by);
+                        for p in 0..4 * fw {
+                            let (x, y) = (bx * fw + p % fw, by * 4 + p / fw);
+                            assert_eq!(ab[p], images(&words, (w, h), fw, x, y), "{w}x{h} {fw} ({x}, {y})");
+                        }
+                    }
+                }
+            }
+        }
     }
 }
