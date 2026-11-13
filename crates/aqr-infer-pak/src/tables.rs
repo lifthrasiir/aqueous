@@ -2,7 +2,10 @@
 //! repeats, each region's stride by the code length of its columns under adaptive models, and
 //! its ends by a maximum-sum run of the bytes' log-ratio under the column models.
 
+use std::cell::RefCell;
 use std::sync::OnceLock;
+
+use crate::par_map;
 
 pub const KMIN: usize = 4;
 pub const KMAX: usize = 128;
@@ -42,6 +45,11 @@ fn lgh() -> &'static [f64] {
         }
         v
     })
+}
+
+thread_local! {
+    /// [`colcost`]'s counts, all zero between calls.
+    static COUNTS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Bits a byte of `z` costs under k adaptive (KT) order-0 column models. `counts` (k × 256,
@@ -214,8 +222,9 @@ fn refine(
     Some((bi, end.min(w.len()), best))
 }
 
-/// Tables in b[lo..hi].
-pub fn find(b: &[u8], lo: usize, hi: usize) -> Vec<Table> {
+/// Tables in b[lo..hi], the strides' densities, the windows' labels and the runs' ends
+/// computed on `threads` (each in order: the tables are the same on any number).
+pub fn find(b: &[u8], lo: usize, hi: usize, threads: usize) -> Vec<Table> {
     let w = &b[lo..hi];
     let n = w.len();
     if n < 64 {
@@ -231,9 +240,8 @@ pub fn find(b: &[u8], lo: usize, hi: usize) -> Vec<Table> {
     // a few records; regions where some stride's is 0.12 or more
     const B: usize = 16;
     let nb = n / B;
-    let mut top = vec![0f32; nb];
-    let mut dens: Vec<Vec<f32>> = Vec::with_capacity(cand.len());
-    for &k in &cand {
+    let dens: Vec<Vec<f32>> = par_map(cand.len(), threads, |ci| {
+        let k = cand[ci];
         let mut f = vec![0f32; nb];
         for (i, v) in f.iter_mut().enumerate() {
             let s = i * B;
@@ -251,13 +259,17 @@ pub fn find(b: &[u8], lo: usize, hi: usize) -> Vec<Table> {
         for i in 0..nb {
             let a = i.saturating_sub(r / 2);
             let z = (i + r - r / 2).min(nb);
-            let d = (c[z] - c[a]) / (z - a).max(1) as f32;
-            dk[i] = d;
-            if d > top[i] {
-                top[i] = d;
+            dk[i] = (c[z] - c[a]) / (z - a).max(1) as f32;
+        }
+        dk
+    });
+    let mut top = vec![0f32; nb];
+    for dk in &dens {
+        for (t, &d) in top.iter_mut().zip(dk) {
+            if d > *t {
+                *t = d;
             }
         }
-        dens.push(dk);
     }
     let mut regions: Vec<(usize, usize)> = Vec::new();
     let mut i = 0;
@@ -285,8 +297,8 @@ pub fn find(b: &[u8], lo: usize, hi: usize) -> Vec<Table> {
     }
     let t_regions = t0.elapsed();
     let mut t_label = std::time::Duration::ZERO;
-    let mut tables = Vec::new();
-    let mut counts = Vec::new();
+    // the runs to refine: (a, z, stride, primary, ta, tz)
+    let mut runs: Vec<(usize, usize, usize, bool, usize, usize)> = Vec::new();
     for (s, e) in regions {
         let (rs, re) = (s * B, (e * B + KMAX).min(n));
         if re - rs < 256 {
@@ -305,17 +317,17 @@ pub fn find(b: &[u8], lo: usize, hi: usize) -> Vec<Table> {
         // labelled 56; windows sized to the region lost a table of CREATURES' instead)
         let wn = 2048;
         let wins: Vec<usize> = (rs..re).step_by(wn).collect();
-        let lab: Vec<Option<usize>> = wins
-            .iter()
-            .map(|&a| {
-                let z = &w[a..(a + wn).min(re)];
+        let lab: Vec<Option<usize>> = par_map(wins.len(), threads, |i| {
+            let a = wins[i];
+            let z = &w[a..(a + wn).min(re)];
+            COUNTS.with_borrow_mut(|counts| {
                 cand.iter()
                     .filter(|&&k| z.len() >= MINROWS * k)
-                    .map(|&k| (colcost(z, k, &mut counts), k))
+                    .map(|&k| (colcost(z, k, counts), k))
                     .min_by(|x, y| x.0.partial_cmp(&y.0).unwrap())
                     .map(|(_, k)| k)
             })
-            .collect();
+        });
         t_label += tl.elapsed();
         let mut i = 0;
         while i < wins.len() {
@@ -344,17 +356,23 @@ pub fn find(b: &[u8], lo: usize, hi: usize) -> Vec<Table> {
                         seeds.push((z - wn, z));
                     }
                     for (ta, tz) in seeds {
-                        if let Some((st, en, sc)) = refine(w, a, z, kk, &bg, ta, tz)
-                            && (en - st) / kk >= MINROWS
-                        {
-                            tables.push(Table { start: lo + st, end: lo + en, k: kk, score: sc, primary: kk == k });
-                        }
+                        runs.push((a, z, kk, kk == k, ta, tz));
                     }
                 }
             }
             i = j;
         }
     }
+    let mut tables: Vec<Table> =
+        par_map(runs.len(), threads, |i| {
+            let (a, z, kk, primary, ta, tz) = runs[i];
+            refine(w, a, z, kk, &bg, ta, tz)
+                .filter(|&(st, en, _)| (en - st) / kk >= MINROWS)
+                .map(|(st, en, sc)| Table { start: lo + st, end: lo + en, k: kk, score: sc, primary })
+        })
+        .into_iter()
+        .flatten()
+        .collect();
     if std::env::var_os("AQR_PAK_VERBOSE").is_some() {
         eprintln!(
             "  find {lo:#x}..{hi:#x}: {} strides {:?} ({:.1} ms), regions ({:.1} ms), labels {:.1} ms, all {:.1} ms, {} tables",
@@ -439,19 +457,19 @@ pub fn rank_near(tables: Vec<Table>, len: usize, keep: usize, per: usize, near_o
 
 /// The tables of a file: its head (grown while a table runs to the window's end, up to
 /// 64 MiB) and tail, or the whole of a small file.
-pub fn of_file(b: &[u8], keep: usize, per: usize) -> Vec<Table> {
+pub fn of_file(b: &[u8], keep: usize, per: usize, threads: usize) -> Vec<Table> {
     const HEAD: usize = 1 << 20;
     const TAIL: usize = 256 << 10;
     let n = b.len();
     if n <= 2 * HEAD {
-        return rank(find(b, 0, n), n, keep, per);
+        return rank(find(b, 0, n, threads), n, keep, per);
     }
     let mut hi = HEAD;
     // the head grows while tables from the head, one meeting the next, run to its end
     // (MetadataEtc's entries run 1.6 MB, in fragments of different strides, its chunks' sizes
     // after them)
     let mut ts = loop {
-        let mut ts = find(b, 0, hi);
+        let mut ts = find(b, 0, hi, threads);
         ts.sort_by_key(|t| t.start);
         // (links of 16 KiB at least: data has small tables everywhere, 9 thousand in a MiB of
         // LZO, close enough to chain)
@@ -467,7 +485,7 @@ pub fn of_file(b: &[u8], keep: usize, per: usize) -> Vec<Table> {
         hi = (hi * 2).min(n);
     };
     if hi < n - TAIL {
-        ts.extend(find(b, n - TAIL, n));
+        ts.extend(find(b, n - TAIL, n, threads));
     }
     rank_near(ts, n, keep, per, true)
 }

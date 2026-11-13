@@ -72,7 +72,7 @@ pub struct Options {
     pub tries: usize,
     /// Tells on standard error what each table gave.
     pub verbose: bool,
-    /// Threads the tables are tested on.
+    /// Threads the tables are found and tested on.
     pub threads: usize,
 }
 
@@ -218,7 +218,7 @@ fn test_table(files: &[File], (owner, t): (usize, Table), l: u64, same: bool, op
 }
 
 /// `f` of 0..n on up to `threads` threads, in order.
-fn par_map<T: Send>(n: usize, threads: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+pub(crate) fn par_map<T: Send>(n: usize, threads: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
     if threads <= 1 || n <= 1 {
         return (0..n).map(f).collect();
     }
@@ -254,7 +254,7 @@ pub fn infer(files: &[File], opt: &Options) -> (Vec<Directory>, Times) {
     let t0 = Instant::now();
     let mut tables: Vec<(usize, Table)> = Vec::new();
     for (i, f) in files.iter().enumerate() {
-        tables.extend(tables::of_file(f.data, opt.keep, opt.per).into_iter().map(|t| (i, t)));
+        tables.extend(tables::of_file(f.data, opt.keep, opt.per, opt.threads).into_iter().map(|t| (i, t)));
     }
     times.tables += t0.elapsed();
     let mut targets: Vec<Target> = files.iter().enumerate().map(|(i, f)| Target::file(&f.name, i, f.data)).collect();
@@ -387,7 +387,7 @@ pub fn infer(files: &[File], opt: &Options) -> (Vec<Directory>, Times) {
             let a0 = best.cand.table.start;
             if a0 > 64 {
                 let tt = Instant::now();
-                let more = tables::rank(tables::find(b, a0.saturating_sub(1 << 16), a0), b.len(), 4, 4);
+                let more = tables::rank(tables::find(b, a0.saturating_sub(1 << 16), a0, opt.threads), b.len(), 4, 4);
                 for u in more {
                     if !tables.iter().any(|(o, x)| *o == owner && x.same(&u)) {
                         tables.push((owner, u));

@@ -42,7 +42,11 @@ fn main() {
             .collect();
         let sizes: Vec<String> = files.iter().map(|f| format!("{} {}", f.name, f.data.len())).collect();
         let t0 = Instant::now();
-        let opt = Options { verbose: std::env::var_os("AQR_PAK_VERBOSE").is_some(), ..Options::default() };
+        let mut opt = Options { verbose: std::env::var_os("AQR_PAK_VERBOSE").is_some(), ..Options::default() };
+        // (AQR_PAK_THREADS: the threads, for a comparison)
+        if let Some(t) = std::env::var("AQR_PAK_THREADS").ok().and_then(|v| v.parse().ok()) {
+            opt.threads = t;
+        }
         let (dirs, t) = infer(&files, &opt);
         let total = t0.elapsed();
         println!("{a}: {}", sizes.join(", "));
