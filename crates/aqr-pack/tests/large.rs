@@ -1,41 +1,11 @@
 //! A large file deflated in chunks on several threads (pigz's way): the stream is one valid
 //! DEFLATE stream, read back by aqr-unpack (and by `unzip` and 7-Zip, where they are at hand).
 
-use std::collections::BTreeMap;
-use std::sync::Mutex;
+use aqr_pack::{Entry, EntryNode, Extra, Options, Tree};
+use aqr_unpack::{Format, Opened};
 
-use aqr_pack::{Bytes, Contents, Entry, EntryNode, Extra, Options, Tree};
-use aqr_unpack::{Format, Opened, Sink};
-
-struct Files(Vec<Vec<u8>>);
-
-impl Contents for Files {
-    fn size(&self, c: usize) -> u64 {
-        self.0[c].len() as u64
-    }
-
-    fn read(&self, c: usize) -> std::io::Result<Bytes> {
-        Ok(Bytes::from(self.0[c].clone()))
-    }
-}
-
-#[derive(Default)]
-struct Kept(Mutex<BTreeMap<usize, Vec<u8>>>);
-
-impl Sink for Kept {
-    fn entries(&self, _: &Tree, _: &[usize]) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn content(&self, c: usize, d: Vec<u8>) -> Result<(), String> {
-        self.0.lock().unwrap().insert(c, d);
-        Ok(())
-    }
-
-    fn note(&self, n: &str) {
-        panic!("{n}");
-    }
-}
+mod common;
+use common::{Files, Kept};
 
 /// Text with long repeats (matches across chunk boundaries) and noise, `n` bytes: a size that is
 /// not a multiple of a chunk.

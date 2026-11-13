@@ -41,10 +41,7 @@ pub fn write(
     let mut out = Written::default();
     let keeps = Keeps { special: true, xattrs: true, links: true };
     let items = items(t, "tar", keeps, &mut out.notes);
-    let size = |it: &Item| match it.kind {
-        Kind::File(k) => c.size(k),
-        _ => 0,
-    };
+    let size = |it: &Item| it.size(c);
     let total: u64 = items.iter().map(size).sum();
     // (about: a header each, a pax header for some, and the bodies' padding)
     let estimate = total + items.len() as u64 * 1024 + RECORD;
@@ -261,21 +258,17 @@ fn header(it: &Item, x: &Extra, hard: Option<&[u8]>, size: u64, notes: &mut Vec<
         let name = it.path.rsplit(|&b| b == b'/').next().unwrap_or(&[]);
         let mut pname = b"PaxHeader/".to_vec();
         pname.extend(name.iter().take(100 - pname.len()).filter(|b| b.is_ascii() && **b != 0));
-        let h = block(
-            &pname,
-            &[],
-            b'x',
-            &[],
+        let h = Ustar {
+            name: &pname,
+            typeflag: b'x',
             mode,
-            uid.min(octal_max(7)),
-            gid.min(octal_max(7)),
-            pax.len() as u64,
-            mtime,
-            b"",
-            b"",
-            0,
-            0,
-        );
+            uid: uid.min(octal_max(7)),
+            gid: gid.min(octal_max(7)),
+            size: pax.len() as u64,
+            mtime: mtime.secs,
+            ..Ustar::default()
+        }
+        .block();
         out.extend(h);
         out.extend(&pax);
         out.resize(out.len().next_multiple_of(BLOCK), 0);
@@ -283,47 +276,57 @@ fn header(it: &Item, x: &Extra, hard: Option<&[u8]>, size: u64, notes: &mut Vec<
     let (prefix, name) = ustar.unwrap_or((&[], &path[..path.len().min(100)]));
     let link = &link[..link.len().min(100)];
     let (uname, gname) = (&uname[..uname.len().min(31)], &gname[..gname.len().min(31)]);
-    out.extend(block(name, prefix, typeflag, link, mode, uid, gid, size, mtime, uname, gname, major, minor));
+    out.extend(
+        Ustar { name, prefix, typeflag, link, mode, uid, gid, size, mtime: mtime.secs, uname, gname, major, minor }
+            .block(),
+    );
     out
 }
 
-/// A ustar header block.
-#[allow(clippy::too_many_arguments)]
-fn block(
-    name: &[u8],
-    prefix: &[u8],
+/// The fields of a ustar header block.
+#[derive(Default)]
+struct Ustar<'a> {
+    name: &'a [u8],
+    prefix: &'a [u8],
     typeflag: u8,
-    link: &[u8],
+    link: &'a [u8],
     mode: u32,
     uid: u64,
     gid: u64,
     size: u64,
-    mtime: Time,
-    uname: &[u8],
-    gname: &[u8],
+    /// Seconds since the epoch.
+    mtime: i64,
+    uname: &'a [u8],
+    gname: &'a [u8],
     major: u64,
     minor: u64,
-) -> [u8; BLOCK] {
-    let mut b = [0u8; BLOCK];
-    b[..name.len()].copy_from_slice(name);
-    octal(&mut b[100..108], mode as u64);
-    octal(&mut b[108..116], uid);
-    octal(&mut b[116..124], gid);
-    octal(&mut b[124..136], size);
-    octal(&mut b[136..148], mtime.secs.clamp(0, octal_max(11) as i64) as u64);
-    b[156] = typeflag;
-    b[157..157 + link.len()].copy_from_slice(link);
-    b[257..265].copy_from_slice(b"ustar\x0000");
-    b[265..265 + uname.len()].copy_from_slice(uname);
-    b[297..297 + gname.len()].copy_from_slice(gname);
-    if matches!(typeflag, b'3' | b'4') {
-        octal(&mut b[329..337], major.min(octal_max(7)));
-        octal(&mut b[337..345], minor.min(octal_max(7)));
+}
+
+impl Ustar<'_> {
+    /// The header block.
+    fn block(&self) -> [u8; BLOCK] {
+        let Ustar { name, prefix, typeflag, link, mode, uid, gid, size, mtime, uname, gname, major, minor } = *self;
+        let mut b = [0u8; BLOCK];
+        b[..name.len()].copy_from_slice(name);
+        octal(&mut b[100..108], mode as u64);
+        octal(&mut b[108..116], uid);
+        octal(&mut b[116..124], gid);
+        octal(&mut b[124..136], size);
+        octal(&mut b[136..148], mtime.clamp(0, octal_max(11) as i64) as u64);
+        b[156] = typeflag;
+        b[157..157 + link.len()].copy_from_slice(link);
+        b[257..265].copy_from_slice(b"ustar\x0000");
+        b[265..265 + uname.len()].copy_from_slice(uname);
+        b[297..297 + gname.len()].copy_from_slice(gname);
+        if matches!(typeflag, b'3' | b'4') {
+            octal(&mut b[329..337], major.min(octal_max(7)));
+            octal(&mut b[337..345], minor.min(octal_max(7)));
+        }
+        b[345..345 + prefix.len()].copy_from_slice(prefix);
+        // the checksum: of the block with its field as spaces, six digits, a NUL and a space
+        b[148..156].fill(b' ');
+        let sum: u32 = b.iter().map(|&v| v as u32).sum();
+        b[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        b
     }
-    b[345..345 + prefix.len()].copy_from_slice(prefix);
-    // the checksum: of the block with its field as spaces, six digits, a NUL and a space
-    b[148..156].fill(b' ');
-    let sum: u32 = b.iter().map(|&v| v as u32).sum();
-    b[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
-    b
 }

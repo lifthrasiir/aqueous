@@ -17,7 +17,6 @@ pub fn to_filetime(t: Time) -> u64 {
     if s < 0 { 0 } else { (s as u64).saturating_mul(10_000_000).saturating_add(t.nanos as u64 / 100) }
 }
 
-/// The parts of a civil time: year, month, day, hour, minute, second.
 /// A date and time of day: year, month, day, hour, minute and second.
 pub type Civil = (i32, u32, u32, u32, u32, u32);
 

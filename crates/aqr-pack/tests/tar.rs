@@ -3,44 +3,13 @@
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use aqr_pack::{Bytes, Contents, Entry, EntryNode, Extra, Filter, Format, Options, Time, Tree};
-use aqr_unpack::{Opened, Sink};
+use aqr_pack::{EntryNode, Extra, Filter, Format, Options, Time, Tree};
+use aqr_unpack::Opened;
 
-struct Files(Vec<Vec<u8>>);
-
-impl Contents for Files {
-    fn size(&self, c: usize) -> u64 {
-        self.0[c].len() as u64
-    }
-
-    fn read(&self, c: usize) -> std::io::Result<Bytes> {
-        Ok(Bytes::from(self.0[c].clone()))
-    }
-}
-
-#[derive(Default)]
-struct Kept(Mutex<BTreeMap<usize, Vec<u8>>>);
-
-impl Sink for Kept {
-    fn entries(&self, _: &Tree, _: &[usize]) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn content(&self, c: usize, d: Vec<u8>) -> Result<(), String> {
-        self.0.lock().unwrap().insert(c, d);
-        Ok(())
-    }
-
-    fn note(&self, n: &str) {
-        panic!("{n}");
-    }
-}
-
-fn entry(parent: Option<usize>, name: &[u8], node: EntryNode, extra: Extra) -> Entry {
-    Entry { parent, name: name.to_vec(), node, extra }
-}
+mod common;
+use common::{Files, Kept, entry};
 
 /// The entries by path: what each is (a file's content), and its metadata kept by tar.
 fn listed(t: &Tree, contents: &BTreeMap<usize, Vec<u8>>) -> BTreeMap<Vec<u8>, String> {
@@ -97,13 +66,7 @@ fn round_trip() {
             let out = out.into_inner();
             assert_eq!(w.len, out.len() as u64);
             assert!(w.notes.is_empty(), "{:?}", w.notes);
-            let format = aqr_unpack::Format::Tar(f.map(|f| match f {
-                Filter::Gzip => aqr_unpack::Filter::Gzip,
-                Filter::Bzip2 => aqr_unpack::Filter::Bzip2,
-                Filter::Xz => aqr_unpack::Filter::Xz,
-                Filter::Lzma => aqr_unpack::Filter::Lzma,
-                Filter::Zstd => aqr_unpack::Filter::Zstd,
-            }));
+            let format = aqr_unpack::Format::Tar(f);
             let kept = Kept::default();
             let done = Opened::open(format, &out).unwrap().unpack(threads, &kept).unwrap();
             let got = listed(&done.tree, &kept.0.into_inner().unwrap());

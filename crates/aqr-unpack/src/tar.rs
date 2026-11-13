@@ -461,7 +461,7 @@ impl Parser<'_> {
             return Ok(());
         }
         let Some(names) = build::split(&h.path, false) else {
-            self.note(format!("{}: a path reaching out of the directory, not extracted", show(&h.path)));
+            self.note(build::outside(&show(&h.path)));
             return Ok(());
         };
         let shown = build::shown(&names);
@@ -473,7 +473,7 @@ impl Parser<'_> {
             b'5' | b'D' => EntryNode::Dir,
             b'2' => {
                 if h.link.is_empty() {
-                    self.note(format!("{shown}: a link to nothing, not extracted"));
+                    self.note(build::dangling(&shown));
                     return Ok(());
                 }
                 EntryNode::Link(aqr_formula::aqr::name_from(&h.link))

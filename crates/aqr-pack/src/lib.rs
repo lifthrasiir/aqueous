@@ -54,15 +54,7 @@ pub struct Written {
     pub notes: Vec<String>,
 }
 
-/// A compressor of a stream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Filter {
-    Gzip,
-    Bzip2,
-    Xz,
-    Lzma,
-    Zstd,
-}
+pub use aqr_foreign::Filter;
 
 /// What an archive is written as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,6 +231,16 @@ pub(crate) struct Item {
     pub utf8: bool,
     pub entry: usize,
     pub kind: Kind,
+}
+
+impl Item {
+    /// The bytes of the file's data (0 for any other).
+    pub(crate) fn size(&self, c: &dyn Contents) -> u64 {
+        match self.kind {
+            Kind::File(k) => c.size(k),
+            _ => 0,
+        }
+    }
 }
 
 pub(crate) enum Kind {

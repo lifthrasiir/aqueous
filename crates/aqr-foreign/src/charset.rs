@@ -116,9 +116,10 @@ fn locale() -> Option<String> {
 }
 
 fn ibm437(c: u8) -> char {
+    static HIGH: std::sync::OnceLock<Vec<char>> = std::sync::OnceLock::new();
     match c {
         0..0x80 => c as char,
-        _ => IBM437_HIGH.chars().nth((c - 0x80) as usize).unwrap(),
+        _ => HIGH.get_or_init(|| IBM437_HIGH.chars().collect())[(c - 0x80) as usize],
     }
 }
 

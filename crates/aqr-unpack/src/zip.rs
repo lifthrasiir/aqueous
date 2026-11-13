@@ -12,11 +12,12 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 
 use aqr_common::{crc32, pool};
-use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, Tree, WIN_ATTRS_ALLOWED, name_from};
+use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, Time, Tree, WIN_ATTRS_ALLOWED, name_from};
 use aqr_zip::zip::{self as z, u16_at, u32_at, u64_at};
 
 use crate::build::{self, Builder, Named, Undeclared};
-use crate::{Done, Filter, Select, Sink, codec, stream, sys};
+use crate::{Done, Filter, Select, Sink, codec, stream};
+use aqr_foreign::attrs::{DOS_DIR, S_IFDIR, S_IFLNK, S_IFMT};
 use aqr_foreign::charset::Choice;
 use aqr_foreign::crypt::{self, Fail, ZipCrypto};
 use aqr_foreign::time;
@@ -30,10 +31,6 @@ fn dos_host(host: u8) -> bool {
 fn unix_host(host: u8) -> bool {
     matches!(host, 3 | 19)
 }
-
-const S_IFMT: u32 = 0o170000;
-const S_IFDIR: u32 = 0o040000;
-const S_IFLNK: u32 = 0o120000;
 
 /// An entry's data to decode: its content, its name (shown), method, body, size and CRC-32,
 /// and how it is encrypted.
@@ -122,7 +119,7 @@ fn times(x: &mut Extra, central: &[u8], local: &[u8]) {
                     return None;
                 }
                 p += 4;
-                Some(sys::unix(u32_at(f, p - 4) as i32 as i64))
+                Some(Time::new(u32_at(f, p - 4) as i32 as i64, 0))
             };
             let (m, a, c) = (next(1), next(2), next(4));
             x.mtime = m.or(x.mtime);
@@ -216,9 +213,9 @@ impl<'d> Listing<'d> {
         let cx = &d[c.extra.clone()];
         let name = self.undeclared.path(path, dos_host(host));
         let shown = String::from_utf8_lossy(&name).into_owned();
-        let lax = build::lax(&name, false);
+        let lax = || build::lax(&name, false);
         let Some(names) = build::split(&name, false) else {
-            self.notes.push((lax.clone(), format!("{shown}: a path reaching out of the directory, not extracted")));
+            self.notes.push((lax(), build::outside(&shown)));
             return Ok(());
         };
         // the local header, and the body after it
@@ -236,7 +233,7 @@ impl<'d> Listing<'d> {
             .map(|e| start..e)
             .ok_or_else(|| format!("ZIP: {shown}: cut short"))?;
         let mode = if unix_host(host) { external >> 16 } else { 0 };
-        let dir = name.ends_with(b"/") || dos_host(host) && external & 0x10 != 0 || mode & S_IFMT == S_IFDIR;
+        let dir = name.ends_with(b"/") || dos_host(host) && external & DOS_DIR != 0 || mode & S_IFMT == S_IFDIR;
         let mut x = Extra { mtime: time::from_dos(u16_at(f, 10), u16_at(f, 8)), ..Extra::default() };
         times(&mut x, cx, lx);
         owner(&mut x, cx, lx);
@@ -252,23 +249,21 @@ impl<'d> Listing<'d> {
                 false => self.b.add(&names, Some(EntryNode::Dir), x),
             };
             if let Err(e) = r {
-                self.notes.push((lax.clone(), e));
+                self.notes.push((lax(), e));
             }
             return Ok(());
         }
         let (enc, method) = match (flags & 1 != 0, method) {
             (true, _) if flags & 0x40 != 0 => {
-                self.notes.push((
-                    lax.clone(),
-                    format!("{shown}: of PKWARE's strong encryption, not known here, not extracted"),
-                ));
+                self.notes
+                    .push((lax(), format!("{shown}: of PKWARE's strong encryption, not known here, not extracted")));
                 return Ok(());
             }
             // WinZip's AES: its field gives the strength and the method
             (_, 99) => match fields(cx).chain(fields(lx)).find(|f| f.0 == 0x9901 && f.1.len() >= 7) {
                 Some((_, a)) => (Enc::Aes(a[4], u16_at(a, 0) == 1), u16_at(a, 5)),
                 None => {
-                    self.notes.push((lax.clone(), format!("{shown}: of AES without its field, not extracted")));
+                    self.notes.push((lax(), format!("{shown}: of AES without its field, not extracted")));
                     return Ok(());
                 }
             },
@@ -281,20 +276,20 @@ impl<'d> Listing<'d> {
                 98 => "PPMd".into(),
                 m => format!("method {m}"),
             };
-            self.notes.push((lax.clone(), format!("{shown}: of {what}, not known here, not extracted")));
+            self.notes.push((lax(), format!("{shown}: of {what}, not known here, not extracted")));
             return Ok(());
         }
         let unit =
             |c| Unit { c, name: shown.clone(), method, body: body.clone(), size: info.usize, crc: info.crc, enc };
         let node = if mode & S_IFMT == S_IFLNK {
             if enc != Enc::None {
-                self.notes.push((lax.clone(), format!("{shown}: an encrypted link, not extracted")));
+                self.notes.push((lax(), format!("{shown}: an encrypted link, not extracted")));
                 return Ok(());
             }
             // (the target, the entry's data, read now: the tree has it)
             let target = decode(d, &unit(0), None).map_err(|e| format!("ZIP: {shown}: {}", told(&e)))?;
             if target.is_empty() {
-                self.notes.push((lax.clone(), format!("{shown}: a link to nothing, not extracted")));
+                self.notes.push((lax(), build::dangling(&shown)));
                 return Ok(());
             }
             EntryNode::Link(name_from(&self.undeclared.target(&target, path.undeclared().is_some())))
@@ -311,7 +306,7 @@ impl<'d> Listing<'d> {
             EntryNode::File(c)
         };
         if let Err(e) = self.b.add(&names, Some(node), x) {
-            self.notes.push((lax.clone(), e));
+            self.notes.push((lax(), e));
         }
         Ok(())
     }

@@ -24,6 +24,15 @@ pub(crate) fn deflate_crc(d: &[u8], params: zlib::Params, threads: usize) -> Opt
     deflate_crc_in(d, params, threads, CHUNK, MIN)
 }
 
+/// `d` as [`deflate_crc`] has it at `level` (zlib's, 1 to 9), where that is smaller than `d`.
+pub(crate) fn deflate_smaller(d: &[u8], level: u8, threads: usize) -> Option<(Vec<u8>, u32)> {
+    if level == 0 || d.is_empty() {
+        return None;
+    }
+    let p = zlib::Params { level: level.min(9), ..zlib::Params::default() };
+    deflate_crc(d, p, threads).filter(|(v, _)| v.len() < d.len())
+}
+
 pub(crate) fn deflate_crc_in(
     d: &[u8],
     params: zlib::Params,

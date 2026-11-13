@@ -17,15 +17,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use aqr_alz::alz;
 use aqr_common::{crc32, pool};
 use aqr_egg::egg;
-use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, Tree, WIN_ATTRS_ALLOWED};
+use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, Time, Tree, WIN_ATTRS_ALLOWED};
 
 use crate::build::{self, Builder, Named, Undeclared};
-use crate::{Done, Select, Sink, codec, sys};
+use crate::{Done, Select, Sink, codec};
+use aqr_foreign::attrs::{DOS_DIR, DOS_KEPT, S_IFDIR, S_IFMT, S_IFREG};
 use aqr_foreign::charset::{Charset, Choice};
-
-const S_IFMT: u32 = 0o170000;
-const S_IFDIR: u32 = 0o040000;
-const S_IFREG: u32 = 0o100000;
 
 /// How a piece of data is coded.
 #[derive(Clone, Copy, Debug)]
@@ -112,7 +109,7 @@ fn named(b: &[u8], cp: u16) -> Named {
 
 /// Windows' attributes of `a` (bits that are Windows' own).
 fn win_attrs(a: u8) -> Option<u32> {
-    Some(a as u32 & 0x27 & WIN_ATTRS_ALLOWED).filter(|&a| a != 0)
+    Some(a as u32 & DOS_KEPT & WIN_ATTRS_ALLOWED).filter(|&a| a != 0)
 }
 
 fn size_of(n: u64) -> Option<usize> {
@@ -131,7 +128,7 @@ impl<'d> Listing<'d> {
                 win_attrs: win_attrs(e.attrs),
                 ..Extra::default()
             };
-            let kind = if e.attrs & 0x10 != 0 {
+            let kind = if e.attrs as u32 & DOS_DIR != 0 {
                 Kind::Dir
             } else if e.attrs & 0x40 != 0 {
                 Kind::Left { why: "a symbolic link".into(), size: 0 }
@@ -197,7 +194,7 @@ impl<'d> Listing<'d> {
             if let Some(p) = e.posix {
                 extra.mode = Some(p.mode & 0o7777);
                 (extra.uid, extra.gid) = (Some(p.uid as u64), Some(p.gid as u64));
-                extra.mtime = extra.mtime.or(Some(sys::unix(p.mtime as i64)));
+                extra.mtime = extra.mtime.or(Some(Time::new(p.mtime as i64, 0)));
                 match p.mode & S_IFMT {
                     S_IFDIR => dir = true,
                     0 | S_IFREG => {}
@@ -278,12 +275,12 @@ impl<'d> Listing<'d> {
         for h in heads {
             let name = self.undeclared.path(&h.name, true);
             let shown = String::from_utf8_lossy(&name).into_owned();
-            let lax = build::lax(&name, false);
+            let lax = || build::lax(&name, false);
             let names = build::split(&name, false);
             let dir_named = name.last() == Some(&b'/');
             let r = match h.kind {
                 Kind::Left { why, size } => {
-                    self.notes.push((lax.clone(), format!("{shown}: {why}, not extracted")));
+                    self.notes.push((lax(), format!("{shown}: {why}, not extracted")));
                     if solid && size > 0 {
                         pending.push(File { c: None, name: shown.clone(), size, crc: None });
                         broken.get_or_insert_with(|| format!("of a solid block with {shown}, which is not"));
@@ -291,22 +288,19 @@ impl<'d> Listing<'d> {
                     continue;
                 }
                 Kind::Dir => match names {
-                    None => Err(format!("{shown}: a path reaching out of the directory, not extracted")),
+                    None => Err(build::outside(&shown)),
                     Some(n) if n.is_empty() => self.b.add(&[], None, h.extra),
                     Some(n) => self.b.add(&n, Some(EntryNode::Dir), h.extra),
                 },
                 Kind::Data { pieces, size, .. } if size == 0 && pieces.is_empty() && dir_named => match names {
-                    None => Err(format!("{shown}: a path reaching out of the directory, not extracted")),
+                    None => Err(build::outside(&shown)),
                     Some(n) => self.b.add(&n, (!n.is_empty()).then_some(EntryNode::Dir), h.extra),
                 },
                 Kind::Data { pieces, size, crc } => {
                     let names = names.filter(|n| !n.is_empty());
                     let c = names.as_ref().map(|_| self.b.content());
                     if c.is_none() {
-                        self.notes.push((
-                            lax.clone(),
-                            format!("{shown}: a path reaching out of the directory, not extracted"),
-                        ));
+                        self.notes.push((lax(), build::outside(&shown)));
                     }
                     let f = File { c, name: shown.clone(), size, crc };
                     if size == 0 && pieces.is_empty() {
@@ -329,7 +323,7 @@ impl<'d> Listing<'d> {
                 }
             };
             if let Err(e) = r {
-                self.notes.push((lax.clone(), e));
+                self.notes.push((lax(), e));
             }
         }
         if !pending.is_empty() {

@@ -29,6 +29,8 @@ use crate::filter::xz_dict;
 use crate::{
     Bytes, Contents, Extra, Format, Item, Keeps, Kind, Options, Output, Progress, Tell, Tree, Written, batches, items,
 };
+use aqr_foreign::attrs::{DOS_DIR, DOS_READ_ONLY, S_IFDIR, S_IFLNK, S_IFREG, UNIX_EXTENSION};
+use aqr_foreign::crypt::SEVENZ_AES_ID;
 use aqr_foreign::{crypt, time};
 
 const MAGIC: [u8; 6] = [b'7', b'z', 0xbc, 0xaf, 0x27, 0x1c];
@@ -60,15 +62,6 @@ mod id {
 
 const COPY: &[u8] = &[0];
 const LZMA2: &[u8] = &[0x21];
-const AES: &[u8] = &[6, 0xf1, 7, 1];
-
-const S_IFDIR: u32 = 0o040000;
-const S_IFREG: u32 = 0o100000;
-const S_IFLNK: u32 = 0o120000;
-/// The bit of the attributes telling a Unix mode in their high 16 bits.
-const UNIX_EXTENSION: u32 = 0x8000;
-const DIRECTORY: u32 = 0x10;
-const READ_ONLY: u32 = 0x1;
 
 /// A coder of a folder: its id and properties.
 struct Coder {
@@ -145,12 +138,22 @@ struct Packer<'w> {
 impl Packer<'_> {
     fn push(&mut self, data: &[u8]) -> io::Result<()> {
         self.unpacked += data.len() as u64;
-        self.pending.extend_from_slice(data);
-        while self.pending.len() >= self.wave {
-            let rest = self.pending.split_off(self.wave);
-            let wave = std::mem::replace(&mut self.pending, rest);
-            self.compress(&wave, false)?;
+        let mut data = data;
+        // (the wave in the making is filled first; whole waves of `data` are compressed in place)
+        if !self.pending.is_empty() {
+            let take = (self.wave - self.pending.len()).min(data.len());
+            self.pending.extend_from_slice(&data[..take]);
+            data = &data[take..];
+            if self.pending.len() == self.wave {
+                let wave = std::mem::take(&mut self.pending);
+                self.compress(&wave, false)?;
+            }
         }
+        while data.len() >= self.wave {
+            self.compress(&data[..self.wave], false)?;
+            data = &data[self.wave..];
+        }
+        self.pending.extend_from_slice(data);
         Ok(())
     }
 
@@ -300,12 +303,12 @@ fn attributes(it: &Item, x: &Extra) -> Option<u32> {
     let (dir, link) = (matches!(it.kind, Kind::Dir), matches!(it.kind, Kind::Link(_)));
     let mut a = x.win_attrs.unwrap_or(0) & aqr_formula::aqr::WIN_ATTRS_ALLOWED;
     if dir {
-        a |= DIRECTORY;
+        a |= DOS_DIR;
     }
     if x.mode.is_some() || link {
         let perm = x.mode.unwrap_or(0o777) & 0o7777;
         if x.win_attrs.is_none() && perm & 0o222 == 0 {
-            a |= READ_ONLY;
+            a |= DOS_READ_ONLY;
         }
         let kind = if dir {
             S_IFDIR
@@ -319,8 +322,7 @@ fn attributes(it: &Item, x: &Extra) -> Option<u32> {
     (a != 0).then_some(a)
 }
 
-/// The header of `items` (`subs`: the size and CRC-32 of each file with data, in order, over the
-/// folder in `main`, if any).
+/// The header of `items` (`has`: whether each has data, in order, over the folder in `main`, if any).
 fn header(t: &Tree, items: &[Item], has: &[bool], notes: &mut Vec<String>, main: &[u8]) -> Vec<u8> {
     let mut h = vec![id::HEADER];
     if !main.is_empty() {
@@ -461,7 +463,7 @@ pub fn write(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Output, tell: 
         let mut coders = vec![main_coder];
         let mut sizes = vec![unpacked];
         if let Some(iv) = &iv {
-            coders.push(Coder { id: AES, props: crypt::SevenzProps::written(iv) });
+            coders.push(Coder { id: SEVENZ_AES_ID, props: crypt::SevenzProps::written(iv) });
             sizes.push(stream);
         }
         streams(0, packed, &coders, &sizes, None, &subs)
@@ -476,7 +478,7 @@ pub fn write(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Output, tell: 
         let enc = crypt::sevenz_aes_encrypt(key, &iv, &lz);
         let coders = [
             Coder { id: LZMA2, props: vec![dict_prop(hd)] },
-            Coder { id: AES, props: crypt::SevenzProps::written(&iv) },
+            Coder { id: SEVENZ_AES_ID, props: crypt::SevenzProps::written(&iv) },
         ];
         let s =
             streams(packed, enc.len() as u64, &coders, &[h.len() as u64, lz.len() as u64], Some(crc32::hash(&h)), &[]);

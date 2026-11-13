@@ -5,42 +5,11 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use aqr_pack::alzip::{write_alz, write_egg};
-use aqr_pack::{Bytes, Contents, Entry, EntryNode, Extra, Options, Progress, Time, Tree, Written};
-use aqr_unpack::{Format, Opened, Sink};
+use aqr_pack::{Contents, EntryNode, Extra, Options, Progress, Time, Tree, Written};
+use aqr_unpack::{Format, Opened};
 
-struct Files(Vec<Vec<u8>>);
-
-impl Contents for Files {
-    fn size(&self, c: usize) -> u64 {
-        self.0[c].len() as u64
-    }
-
-    fn read(&self, c: usize) -> std::io::Result<Bytes> {
-        Ok(Bytes::from(self.0[c].clone()))
-    }
-}
-
-#[derive(Default)]
-struct Kept(Mutex<BTreeMap<usize, Vec<u8>>>);
-
-impl Sink for Kept {
-    fn entries(&self, _: &Tree, _: &[usize]) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn content(&self, c: usize, d: Vec<u8>) -> Result<(), String> {
-        self.0.lock().unwrap().insert(c, d);
-        Ok(())
-    }
-
-    fn note(&self, n: &str) {
-        panic!("{n}");
-    }
-}
-
-fn entry(parent: Option<usize>, name: &str, node: EntryNode, extra: Extra) -> Entry {
-    Entry { parent, name: name.as_bytes().to_vec(), node, extra }
-}
+mod common;
+use common::{Files, Kept, entry};
 
 /// The tree's entries by path: what each is (its content's head and length for a file), and its
 /// modification time.
@@ -288,7 +257,7 @@ fn speed() {
                 .collect()
         })
         .collect();
-    let entries = (0..48).map(|k| entry(None, &format!("f{k}"), EntryNode::File(k), Extra::default())).collect();
+    let entries = (0..48).map(|k| entry(None, format!("f{k}"), EntryNode::File(k), Extra::default())).collect();
     let tree = Tree { root: Extra::default(), entries };
     let files = Files(files);
     for (name, write) in [("alz", write_alz as Writer), ("egg", write_egg)] {

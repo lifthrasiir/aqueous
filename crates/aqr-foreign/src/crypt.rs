@@ -39,7 +39,7 @@ fn crc_byte(c: u32, b: u8) -> u32 {
 pub struct ZipCrypto([u32; 3]);
 
 impl ZipCrypto {
-    pub fn new(passphrase: &[u8]) -> ZipCrypto {
+    fn new(passphrase: &[u8]) -> ZipCrypto {
         let mut z = ZipCrypto([0x1234_5678, 0x2345_6789, 0x3456_7890]);
         passphrase.iter().for_each(|&b| z.update(b));
         z
@@ -57,7 +57,7 @@ impl ZipCrypto {
         (t.wrapping_mul(t ^ 1) >> 8) as u8
     }
 
-    pub fn decrypt(&mut self, d: &mut [u8]) {
+    fn decrypt(&mut self, d: &mut [u8]) {
         for b in d {
             *b ^= self.key_byte();
             self.update(*b);
@@ -166,6 +166,9 @@ pub fn winzip_aes_verifies(passphrase: &[u8], strength: u8, body: &[u8]) -> bool
     let salt = key / 2;
     body.len() >= salt + 2 && winzip_keys(passphrase, &body[..salt], key)[2 * key..] == body[salt..salt + 2]
 }
+
+/// The id of 7-Zip's AES coder.
+pub const SEVENZ_AES_ID: &[u8] = &[6, 0xf1, 7, 1];
 
 /// The power of 7-Zip's rounds of SHA-256 for a key that is written (its default).
 pub const SEVENZ_POWER: u8 = 19;

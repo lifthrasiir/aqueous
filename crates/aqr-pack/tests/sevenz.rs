@@ -9,41 +9,10 @@ use std::sync::Mutex;
 
 use aqr_pack::sevenz::write;
 use aqr_pack::{Bytes, Contents, Entry, EntryNode, Extra, Options, Progress, Time, Tree};
-use aqr_unpack::{Format, Opened, Sink};
+use aqr_unpack::{Format, Opened};
 
-struct Files(Vec<Vec<u8>>);
-
-impl Contents for Files {
-    fn size(&self, c: usize) -> u64 {
-        self.0[c].len() as u64
-    }
-
-    fn read(&self, c: usize) -> std::io::Result<Bytes> {
-        Ok(Bytes::from(self.0[c].clone()))
-    }
-}
-
-#[derive(Default)]
-struct Kept(Mutex<BTreeMap<usize, Vec<u8>>>);
-
-impl Sink for Kept {
-    fn entries(&self, _: &Tree, _: &[usize]) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn content(&self, c: usize, d: Vec<u8>) -> Result<(), String> {
-        self.0.lock().unwrap().insert(c, d);
-        Ok(())
-    }
-
-    fn note(&self, n: &str) {
-        panic!("{n}");
-    }
-}
-
-fn entry(parent: Option<usize>, name: &str, node: EntryNode, extra: Extra) -> Entry {
-    Entry { parent, name: name.as_bytes().to_vec(), node, extra }
-}
+mod common;
+use common::{Files, Kept, entry};
 
 /// The tree's entries by path: what each is (its content's head and length for a file), and its
 /// times and mode.
@@ -115,7 +84,7 @@ fn sample(sizes: &[usize]) -> (Tree, Files) {
         let parent = if i % 2 == 0 { Some(0) } else { None };
         entries.push(entry(
             parent,
-            &format!("file{i} 한글.bin"),
+            format!("file{i} 한글.bin"),
             EntryNode::File(i),
             x(Some(if i % 3 == 0 { 0o644 } else { 0o600 })),
         ));

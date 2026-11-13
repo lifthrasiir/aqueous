@@ -16,10 +16,8 @@ use aqr_rar::{lz3, lz5, rar4, rar5};
 
 use crate::build::{self, Builder, Named, Undeclared};
 use crate::{Done, Select, Sink};
+use aqr_foreign::attrs::{S_IFLNK, S_IFMT};
 use aqr_foreign::charset::Choice;
-
-const S_IFMT: u32 = 0o170000;
-const S_IFLNK: u32 = 0o120000;
 
 /// How a unit's data is decoded.
 #[derive(Clone, Copy)]
@@ -131,12 +129,12 @@ impl<'d> Listing<'d> {
         for h in heads {
             let path = h.names.as_ref().map(|n| self.undeclared.path(n, h.backslash));
             let undeclared = h.names.as_ref().is_some_and(|n| n.undeclared().is_some());
-            let lax = path.as_deref().map_or_else(Vec::new, |n| build::lax(n, false));
+            let lax = || path.as_deref().map_or_else(Vec::new, |n| build::lax(n, false));
             let shown = String::from_utf8_lossy(path.as_deref().unwrap_or_default()).into_owned();
             let node = match h.kind {
                 Kind::Dir => Some(EntryNode::Dir),
                 Kind::Left { why, data } => {
-                    self.notes.push((lax.clone(), format!("{shown}: {why}, not extracted")));
+                    self.notes.push((lax(), format!("{shown}: {why}, not extracted")));
                     if data {
                         // (the files continuing its solid group cannot be decoded)
                         if let Some(u) = open.take() {
@@ -151,13 +149,10 @@ impl<'d> Listing<'d> {
                     let names = path.as_deref().and_then(|n| build::split(n, false));
                     let target = name_from(&self.undeclared.target(&target, undeclared));
                     match names {
-                        None => self.notes.push((
-                            lax.clone(),
-                            format!("{shown}: a path reaching out of the directory, not extracted"),
-                        )),
+                        None => self.notes.push((lax(), build::outside(&shown))),
                         Some(names) => {
                             if let Err(e) = self.b.add(&names, Some(EntryNode::Link(target)), x) {
-                                self.notes.push((lax.clone(), e));
+                                self.notes.push((lax(), e));
                             }
                         }
                     }
@@ -168,10 +163,7 @@ impl<'d> Listing<'d> {
                     let c = match &names {
                         Some(n) if !n.is_empty() => Some(self.b.content()),
                         _ => {
-                            self.notes.push((
-                                lax.clone(),
-                                format!("{shown}: a path reaching out of the directory, not extracted"),
-                            ));
+                            self.notes.push((lax(), build::outside(&shown)));
                             None
                         }
                     };
@@ -198,18 +190,18 @@ impl<'d> Listing<'d> {
                     }
                     let Some(names) = names.filter(|n| !n.is_empty()) else { continue };
                     if let Err(e) = self.b.add(&names, Some(EntryNode::File(c.unwrap())), h.extra) {
-                        self.notes.push((lax.clone(), e));
+                        self.notes.push((lax(), e));
                     }
                     continue;
                 }
             };
             let Some(names) = path.as_deref().and_then(|n| build::split(n, false)) else {
-                self.notes.push((lax.clone(), format!("{shown}: a path reaching out of the directory, not extracted")));
+                self.notes.push((lax(), build::outside(&shown)));
                 continue;
             };
             let r = if names.is_empty() { self.b.add(&[], None, h.extra) } else { self.b.add(&names, node, h.extra) };
             if let Err(e) = r {
-                self.notes.push((lax.clone(), e));
+                self.notes.push((lax(), e));
             }
         }
         for u in &mut self.units {

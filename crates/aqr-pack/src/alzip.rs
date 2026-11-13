@@ -25,23 +25,15 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use aqr_common::{crc32, pool};
-use aqr_flate::zlib;
 
 use crate::par;
 use crate::{Bytes, Contents, Format, Item, Keeps, Kind, Options, Progress, Tell, Tree, Written, batches, items};
+use aqr_foreign::attrs::{DOS_DIR, DOS_KEPT, S_IFDIR, S_IFREG};
 use aqr_foreign::time;
 
-/// The attributes of Windows kept by ALZ (read-only, hidden, system, archive), and its
-/// directory's.
-const ALZ_KEPT: u32 = 0x27;
-const ALZ_DIR: u8 = 0x10;
 /// The same in EGG: its own bits (read-only, hidden, system), and a directory's.
 const EGG_KEPT: u32 = 0x07;
 const EGG_DIR: u8 = 0x80;
-/// The kinds of a POSIX mode (EGG's POSIX file information).
-const S_IFDIR: u32 = 0o040000;
-const S_IFREG: u32 = 0o100000;
-
 /// ALZ's methods.
 const ALZ_STORED: u8 = 0;
 const ALZ_DEFLATE: u8 = 2;
@@ -79,11 +71,8 @@ struct Piece {
 fn piece(d: &Bytes, r: Range<usize>, level: u8, threads: usize) -> Piece {
     let s = &d[r.clone()];
     let size = s.len() as u64;
-    if level > 0 && !s.is_empty() {
-        let p = zlib::Params { level: level.min(9), ..zlib::Params::default() };
-        if let Some((v, crc)) = par::deflate_crc(s, p, threads).filter(|(v, _)| v.len() < s.len()) {
-            return Piece { crc, deflated: true, size, data: Data::Deflated(v) };
-        }
+    if let Some((v, crc)) = par::deflate_smaller(s, level, threads) {
+        return Piece { crc, deflated: true, size, data: Data::Deflated(v) };
     }
     let crc = crc32::hash(s);
     Piece { crc, deflated: false, size, data: Data::Stored(d.clone(), r) }
@@ -108,8 +97,6 @@ fn kept(t: &Tree, name: &str, o: &Options, notes: &mut Vec<String>) -> io::Resul
     Ok(items(t, name, Keeps { special: false, xattrs: false, links: false }, notes))
 }
 
-/// The bodies of the batch's items, read and coded on the pool's threads (in order), and the
-/// progress told.
 /// How files are cut and deflated: the zlib level, the most bytes of a piece, and whether an empty
 /// file has a piece (of no bytes).
 struct Cut {
@@ -118,6 +105,8 @@ struct Cut {
     empty_one: bool,
 }
 
+/// The bodies of the batch's items, read and coded on the pool's threads (in order), and the
+/// progress told.
 fn bodies(
     batch: &[Item],
     c: &dyn Contents,
@@ -148,19 +137,12 @@ pub fn write_alz(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tel
     let its = kept(t, "ALZ", o, &mut out.notes)?;
     let names = alz_names(&its, &mut out.notes);
     let level = o.level_of(Format::Alz);
-    let size = |it: &Item| match it.kind {
-        Kind::File(k) => c.size(k),
-        _ => 0,
-    };
+    let size = |it: &Item| it.size(c);
     let total: u64 = its.iter().map(size).sum();
     let done = AtomicU64::new(0);
     tell(Progress::Done { done: 0, total });
-    let mut at = 0u64;
-    let mut put = |w: &mut dyn Write, b: &[u8]| -> io::Result<()> {
-        at += b.len() as u64;
-        w.write_all(b)
-    };
-    put(w, b"ALZ\x01\x0a\x00\x00\x00")?;
+    let mut w = crate::Counted { w, n: 0 };
+    w.write_all(b"ALZ\x01\x0a\x00\x00\x00")?;
     for range in batches(&its, o.batch, size) {
         let start = range.start;
         let batch = &its[range];
@@ -179,7 +161,7 @@ pub fn write_alz(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tel
             let mut h = b"BLZ\x01".to_vec();
             h.extend((name.len() as u16).to_le_bytes());
             let dir = matches!(it.kind, Kind::Dir);
-            h.push((x.win_attrs.unwrap_or(0) & ALZ_KEPT) as u8 | if dir { ALZ_DIR } else { 0 });
+            h.push((x.win_attrs.unwrap_or(0) & DOS_KEPT) as u8 | if dir { DOS_DIR as u8 } else { 0 });
             h.extend(((date as u32) << 16 | tm as u32).to_le_bytes());
             let body = p.pop();
             match &body {
@@ -201,15 +183,15 @@ pub fn write_alz(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tel
                 }
             }
             h.extend(name);
-            put(w, &h)?;
+            w.write_all(&h)?;
             if let Some(b) = &body {
-                put(w, b.data.bytes())?;
+                w.write_all(b.data.bytes())?;
             }
         }
     }
     // the central directory (its 12 bytes unknown, 0) and the end record
-    put(w, b"CLZ\x01\0\0\0\0\0\0\0\0\0\0\0\0CLZ\x02")?;
-    out.len = at;
+    w.write_all(b"CLZ\x01\0\0\0\0\0\0\0\0\0\0\0\0CLZ\x02")?;
+    out.len = w.n;
     Ok(out)
 }
 
@@ -240,24 +222,17 @@ pub fn write_egg(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tel
     let mut out = Written::default();
     let its = kept(t, "EGG", o, &mut out.notes)?;
     let level = o.level_of(Format::Egg);
-    let size = |it: &Item| match it.kind {
-        Kind::File(k) => c.size(k),
-        _ => 0,
-    };
+    let size = |it: &Item| it.size(c);
     let total: u64 = its.iter().map(size).sum();
     let done = AtomicU64::new(0);
     tell(Progress::Done { done: 0, total });
-    let mut at = 0u64;
-    let mut put = |w: &mut dyn Write, b: &[u8]| -> io::Result<()> {
-        at += b.len() as u64;
-        w.write_all(b)
-    };
+    let mut w = crate::Counted { w, n: 0 };
     let id = u32::from_le_bytes(crate::random()?).max(1);
     let mut h = b"EGGA\x00\x01".to_vec();
     h.extend(id.to_le_bytes());
     h.extend([0; 4]);
     h.extend(END);
-    put(w, &h)?;
+    w.write_all(&h)?;
     let mut id = 0u32;
     for range in batches(&its, o.batch, size) {
         let batch = &its[range];
@@ -304,7 +279,7 @@ pub fn write_egg(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tel
                 h.extend(secs.to_le_bytes());
             }
             h.extend(END);
-            put(w, &h)?;
+            w.write_all(&h)?;
             for b in &p {
                 let data = b.data.bytes();
                 let mut h = 0x02B5_0C13u32.to_le_bytes().to_vec();
@@ -313,12 +288,12 @@ pub fn write_egg(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tel
                 h.extend((data.len() as u32).to_le_bytes());
                 h.extend(b.crc.to_le_bytes());
                 h.extend(END);
-                put(w, &h)?;
-                put(w, data)?;
+                w.write_all(&h)?;
+                w.write_all(data)?;
             }
         }
     }
-    put(w, &END)?;
-    out.len = at;
+    w.write_all(&END)?;
+    out.len = w.n;
     Ok(out)
 }

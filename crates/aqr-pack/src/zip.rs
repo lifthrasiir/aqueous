@@ -22,12 +22,12 @@ use std::io::{self, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use aqr_common::{crc32, pool};
-use aqr_flate::zlib;
 
 use crate::par;
 use crate::{
     Bytes, Contents, Extra, Format, Item, Keeps, Kind, Options, Progress, Tell, Tree, Written, batches, items,
 };
+use aqr_foreign::attrs::{DOS_DIR, DOS_KEPT, S_IFDIR, S_IFLNK, S_IFREG};
 use aqr_foreign::{crypt, time};
 
 const LOCAL: u32 = 0x0403_4b50;
@@ -52,14 +52,6 @@ const AES: u16 = 99;
 const NEEDS_AES: u16 = 51;
 /// Bit 0 of the flags: encrypted.
 const ENCRYPTED: u16 = 1;
-
-const S_IFDIR: u32 = 0o040000;
-const S_IFREG: u32 = 0o100000;
-const S_IFLNK: u32 = 0o120000;
-/// MS-DOS's attribute of a directory, and those of Windows kept (read-only, hidden, system,
-/// archive).
-const DOS_DIR: u32 = 0x10;
-const DOS_KEPT: u32 = 0x27;
 
 /// The body of an entry: its CRC-32, method, size and the data written; for WinZip's AES,
 /// the method under it.
@@ -106,10 +98,7 @@ pub fn write(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tell: &
         }
     }
     let level = o.level_of(Format::Zip);
-    let size = |it: &Item| match it.kind {
-        Kind::File(k) => c.size(k),
-        _ => 0,
-    };
+    let size = |it: &Item| it.size(c);
     let total: u64 = items.iter().map(size).sum();
     let done = AtomicU64::new(0);
     tell(Progress::Done { done: 0, total });
@@ -193,11 +182,8 @@ pub fn write(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tell: &
 /// The body of file data `d`: deflated at `level`, stored where that is not smaller.
 fn deflate(d: Bytes, level: u8, threads: usize) -> Body {
     let size = d.len() as u64;
-    if level > 0 && !d.is_empty() {
-        let p = zlib::Params { level: level.min(9), ..zlib::Params::default() };
-        if let Some((v, crc)) = par::deflate_crc(&d, p, threads).filter(|(v, _)| v.len() < d.len()) {
-            return Body { crc, method: DEFLATED, size, data: Data::Deflated(v), aes: None };
-        }
+    if let Some((v, crc)) = par::deflate_smaller(&d, level, threads) {
+        return Body { crc, method: DEFLATED, size, data: Data::Deflated(v), aes: None };
     }
     let crc = crc32::hash(&d);
     Body { crc, method: STORED, size, data: Data::Read(d), aes: None }

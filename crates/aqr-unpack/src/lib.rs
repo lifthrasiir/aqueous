@@ -28,19 +28,10 @@ mod lzma;
 mod rar;
 mod sevenz;
 mod stream;
-mod sys;
 mod tar;
 mod zip;
 
-/// A compressor of a stream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Filter {
-    Gzip,
-    Bzip2,
-    Xz,
-    Lzma,
-    Zstd,
-}
+pub use aqr_foreign::Filter;
 
 /// What an archive is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

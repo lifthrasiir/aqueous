@@ -22,19 +22,13 @@ use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, Tree, WIN_ATTRS_ALLOWED,
 use crate::build::{self, Builder};
 use crate::codec::Raw;
 use crate::{Done, Select, Sink, codec};
-
-const S_IFMT: u32 = 0o170000;
-const S_IFDIR: u32 = 0o040000;
-const S_IFLNK: u32 = 0o120000;
-/// The bit of 7-Zip's attributes telling a Unix mode in their high 16 bits.
-const UNIX_EXTENSION: u32 = 0x8000;
-const DIRECTORY: u32 = 0x10;
+use aqr_foreign::attrs::{DOS_DIR, S_IFDIR, S_IFLNK, S_IFMT, UNIX_EXTENSION};
+use aqr_foreign::crypt::SEVENZ_AES_ID;
 
 const BCJ2: &[u8] = &[3, 3, 1, 0x1b];
 const DEFLATE: &[u8] = &[4, 1, 8];
 const BZIP2: &[u8] = &[4, 2, 2];
 const PPMD: &[u8] = &[3, 4, 1];
-const AES: &[u8] = &[6, 0xf1, 7, 1];
 
 /// Why a folder is not decoded: coders not known here or encryption (its files left out, told),
 /// or damage.
@@ -86,7 +80,7 @@ const CHECKED: u64 = 64 << 20;
 
 /// Whether `folder` has an AES coder.
 fn encrypted(folder: &Folder) -> bool {
-    folder.coders.iter().any(|c| c.id == AES)
+    folder.coders.iter().any(|c| c.id == SEVENZ_AES_ID)
 }
 
 /// A part of a folder's data, decoded apart from the others: a segment of an LZMA2 stream, an
@@ -172,7 +166,7 @@ fn output<'d>(
             let s = bcj2::Streams { main: inputs[0].to_vec(), call: inputs[1].to_vec(), jump: inputs[2].to_vec() };
             Cow::Owned(bcj2::decode(&s, &inputs[3], size).map_err(|e| format!("BCJ2: {e:?}"))?)
         }
-        AES => match pass {
+        SEVENZ_AES_ID => match pass {
             None => return Err(Error::Unknown("encrypted, and no passphrase given".into())),
             Some(p) => {
                 let mut v = aqr_foreign::crypt::sevenz_aes_decrypt(p, &coder.props, one()?)?;
@@ -307,7 +301,7 @@ impl<'d> Listing<'d> {
         for file in files {
             let sub = if file.stream { subs.next() } else { None };
             let shown = String::from_utf8_lossy(&file.name).into_owned();
-            let lax = build::lax(&file.name, true);
+            let lax = || build::lax(&file.name, true);
             if let Some((f, k)) = sub {
                 self.units[f].files[k].1 = shown.clone();
             }
@@ -315,7 +309,7 @@ impl<'d> Listing<'d> {
                 continue;
             }
             let Some(names) = build::split(&file.name, true) else {
-                self.notes.push((lax.clone(), format!("{shown}: a path reaching out of the directory, not extracted")));
+                self.notes.push((lax(), build::outside(&shown)));
                 continue;
             };
             let attrib = file.attrib.unwrap_or(0);
@@ -332,13 +326,13 @@ impl<'d> Listing<'d> {
             if attrib & WIN_ATTRS_ALLOWED != 0 {
                 x.win_attrs = Some(attrib & WIN_ATTRS_ALLOWED);
             }
-            let dir = !file.stream && !file.empty_file || attrib & DIRECTORY != 0 || mode & S_IFMT == S_IFDIR;
+            let dir = !file.stream && !file.empty_file || attrib & DOS_DIR != 0 || mode & S_IFMT == S_IFDIR;
             let node = if dir {
                 EntryNode::Dir
             } else if mode & S_IFMT == S_IFLNK {
                 // (the target is its data: read before the tree is told)
                 let Some(_) = sub else {
-                    self.notes.push((lax.clone(), format!("{shown}: a link to nothing, not extracted")));
+                    self.notes.push((lax(), build::dangling(&shown)));
                     continue;
                 };
                 EntryNode::Link(Vec::new())
@@ -362,7 +356,7 @@ impl<'d> Listing<'d> {
                     self.links.push((f, k, i));
                 }
                 Ok(_) => {}
-                Err(e) => self.notes.push((lax.clone(), e)),
+                Err(e) => self.notes.push((lax(), e)),
             }
         }
         for u in &mut self.units {
@@ -618,7 +612,7 @@ impl<'d> Listing<'d> {
             let target = &held[f].as_ref().unwrap()[k];
             if target.is_empty() || target.contains(&0) {
                 // (told as a special entry not created)
-                sink.note(&format!("{}: a link to nothing, not extracted", self.units[f].files[k].1));
+                sink.note(&build::dangling(&self.units[f].files[k].1));
                 skipped += 1;
                 tree.entries[i].node = EntryNode::Special(0);
             } else {
@@ -656,8 +650,8 @@ impl<'d> Listing<'d> {
         let total: u64 = (0..self.units.len()).filter(|&f| decoded[f]).map(given).sum();
         let (done_packed, done) = (AtomicU64::new(0), AtomicU64::new(0));
         let failed = AtomicBool::new(false);
-        let held: Vec<std::sync::Mutex<Option<Vec<Vec<u8>>>>> = held.into_iter().map(std::sync::Mutex::new).collect();
-        let notes = std::sync::Mutex::new(0usize);
+        let held: Vec<Mutex<Option<Vec<Vec<u8>>>>> = held.into_iter().map(Mutex::new).collect();
+        let notes = Mutex::new(0usize);
         let made = pool::par_map(self.units.len(), threads, |f| -> Result<(), String> {
             let u = &self.units[f];
             if failed.load(Relaxed) || !decoded[f] {
@@ -672,7 +666,7 @@ impl<'d> Listing<'d> {
             let r = match held[f].lock().unwrap().take() {
                 // (the files of a folder written on as many threads as it takes)
                 Some(parts) => {
-                    let parts: Vec<_> = parts.into_iter().map(|p| std::sync::Mutex::new(Some(p))).collect();
+                    let parts: Vec<_> = parts.into_iter().map(|p| Mutex::new(Some(p))).collect();
                     let r = pool::par_map(parts.len(), threads, |k| match u.files[k].0 {
                         Some(c) if want(Some(c)) => sink.content(c, parts[k].lock().unwrap().take().unwrap()),
                         _ => Ok(()),

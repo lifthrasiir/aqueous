@@ -146,9 +146,13 @@ impl Gzip<'_> {
 
 impl Write for Gzip<'_> {
     fn write(&mut self, b: &[u8]) -> io::Result<usize> {
-        self.pending.extend_from_slice(b);
-        if self.pending.len() >= self.wave {
-            self.flush_parts(false)?;
+        // (in pieces, so that a big write does not hold all of its parts at once: the members are
+        // cut at multiples of `part` of the stream wherever the flushes fall)
+        for p in b.chunks(16 << 20) {
+            self.pending.extend_from_slice(p);
+            if self.pending.len() >= self.wave {
+                self.flush_parts(false)?;
+            }
         }
         Ok(b.len())
     }

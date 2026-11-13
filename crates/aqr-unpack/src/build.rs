@@ -76,29 +76,28 @@ impl Undeclared {
     /// encoding and that is decided (else as it is), and where `backslash`, its `\`s made `/`s
     /// as characters, not as bytes (5C is a byte of characters of Shift_JIS, GBK and Big5).
     pub fn path(&self, p: &Named, backslash: bool) -> Vec<u8> {
-        let text = match p {
-            Named::Text(t) => Some(t.clone()),
-            Named::Bytes(b) => self.d.decode(b).map(String::into_bytes),
-        };
-        match (text, p) {
-            (Some(mut t), _) => {
-                if backslash {
-                    t.iter_mut().filter(|c| **c == b'\\').for_each(|c| *c = b'/');
-                }
-                t
+        let slash = |mut t: Vec<u8>| {
+            if backslash {
+                t.iter_mut().filter(|c| **c == b'\\').for_each(|c| *c = b'/');
             }
-            (None, Named::Text(_)) => unreachable!(),
-            (None, Named::Bytes(b)) => {
-                let mut out = b.clone();
-                if backslash {
-                    for (i, c) in out.iter_mut().enumerate() {
-                        if *c == b'\\' && self.d.starts(b, i) {
-                            *c = b'/';
+            t
+        };
+        match p {
+            Named::Text(t) => slash(t.clone()),
+            Named::Bytes(b) => match self.d.decode(b) {
+                Some(s) => slash(s.into_bytes()),
+                None => {
+                    let mut out = b.clone();
+                    if backslash {
+                        for (i, c) in out.iter_mut().enumerate() {
+                            if *c == b'\\' && self.d.starts(b, i) {
+                                *c = b'/';
+                            }
                         }
                     }
+                    out
                 }
-                out
-            }
+            },
         }
     }
 
@@ -115,6 +114,16 @@ impl Undeclared {
     pub fn told(&self, what: &str) -> Option<String> {
         self.d.told(self.n).map(|t| format!("{what}: {t}"))
     }
+}
+
+/// The note of the entry shown as `shown` that reaches out of the directory.
+pub fn outside(shown: &str) -> String {
+    format!("{shown}: a path reaching out of the directory, not extracted")
+}
+
+/// The note of the link shown as `shown` that has no target.
+pub fn dangling(shown: &str) -> String {
+    format!("{shown}: a link to nothing, not extracted")
 }
 
 /// The names of `path` (separated by `/`, and `\` too where `backslash`): `None` where it has a
@@ -172,9 +181,14 @@ impl Select {
         let mut paths: Vec<Vec<Vec<u8>>> = Vec::with_capacity(t.entries.len());
         let mut out = Vec::with_capacity(t.entries.len());
         for e in &t.entries {
-            let mut p = e.parent.map_or_else(Vec::new, |q| paths[q].clone());
-            p.push(name_bytes(&e.name).0.to_vec());
-            out.push(e.parent.is_some_and(|q| out[q]) || self.wants(&p));
+            // (the path of an entry is read by its children, where it is not selected)
+            let under = e.parent.is_some_and(|q| out[q]);
+            let mut p = Vec::new();
+            if !under {
+                p = e.parent.map_or_else(Vec::new, |q| paths[q].clone());
+                p.push(name_bytes(&e.name).0.to_vec());
+            }
+            out.push(under || self.wants(&p));
             paths.push(p);
         }
         out
