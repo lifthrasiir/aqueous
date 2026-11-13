@@ -23,6 +23,7 @@ fn hex(b: &[u8]) -> String {
 }
 
 /// The hash and task slots of [`native_name`] `name`, if it is one.
+#[cfg(any(windows, test))]
 pub(crate) fn parse_native_name(name: &[u8]) -> Option<([u8; 32], Vec<u8>)> {
     let (hash, slots) = std::str::from_utf8(name).ok()?.split_once('/')?;
     let unhex = |h: &str| -> Option<Vec<u8>> {

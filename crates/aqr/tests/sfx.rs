@@ -19,6 +19,7 @@ fn aqr_in(dir: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_aqr")).current_dir(dir).args(args).output().unwrap()
 }
 
+#[cfg(all(windows, target_arch = "x86_64"))]
 /// Text of words (which aqr-wrt recompresses, so that the archive has a module).
 fn prose(n: usize) -> Vec<u8> {
     let words = ["the", "archive", "of", "files", "written", "out", "again", "when", "run", "and", "kept"];
@@ -32,6 +33,7 @@ fn prose(n: usize) -> Vec<u8> {
     t
 }
 
+#[cfg(all(windows, target_arch = "x86_64"))]
 /// Makes `out` (`--format sfx`) of `inputs` in `dir`; `false` where this aqr carries no stub.
 fn made(dir: &Path, inputs: &[&str], out: &str) -> bool {
     let mut args = vec!["-c", "--format", "sfx", "-o", out];
@@ -47,6 +49,7 @@ fn made(dir: &Path, inputs: &[&str], out: &str) -> bool {
     true
 }
 
+#[cfg(all(windows, target_arch = "x86_64"))]
 /// Runs self-extracting program `exe` in `dir`, writing the files under `to`.
 fn run(dir: &Path, exe: &str, to: &str) {
     let o = Command::new(dir.join(exe)).current_dir(dir).arg(to).output().unwrap();

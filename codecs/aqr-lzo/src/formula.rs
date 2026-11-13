@@ -90,8 +90,9 @@ pub fn encode_blocks(input: &[u8], blocks: &[Block], threads: usize, contents: b
             .filter(|sp| sp.used == b.len && b.data.is_none_or(|n| sp.data.len() == n))
     };
     // the first [`PROBE`] blocks a window of their own, then windows of [`WINDOW`] bytes
-    let mut windows = vec![0..blocks.len().min(PROBE)];
-    let mut i = windows[0].end;
+    let first = 0..blocks.len().min(PROBE);
+    let mut i = first.end;
+    let mut windows = vec![first];
     while i < blocks.len() {
         let (mut j, mut bytes) = (i, 0);
         while j < blocks.len() && (j == i || bytes + blocks[j].len <= WINDOW) {

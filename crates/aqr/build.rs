@@ -42,9 +42,11 @@ fn sfx_pack() {
     let win7 = target("CARGO_CFG_TARGET_VENDOR") == "win7";
     let os_arch = (&*target("CARGO_CFG_TARGET_OS"), &*target("CARGO_CFG_TARGET_ARCH"));
     let (Ok(list), ("windows", "x86_64"), false) = (list, os_arch, win7) else {
-        std::fs::write(&none, b"").unwrap();
+        // (left as they are when they are already empty: build.rs runs on every build where pack.id
+        // is missing, and the files would otherwise look changed during it to `cargo aqr`)
+        write_new(&none, b"");
         println!("cargo:rustc-env=AQR_SFX_ID={}", none.display());
-        std::fs::write(&out, b"").unwrap();
+        write_new(&out, b"");
         return;
     };
     let id = from.join("pack.id");
@@ -93,4 +95,11 @@ fn frame(data: &[u8]) -> Vec<u8> {
     z.set_pledged_src_size(Some(data.len() as u64)).unwrap();
     z.write_all(data).unwrap();
     z.finish().unwrap()
+}
+
+/// Writes `data` to `path` unless it already holds it, keeping its modification time.
+fn write_new(path: &Path, data: &[u8]) {
+    if std::fs::read(path).ok().as_deref() != Some(data) {
+        std::fs::write(path, data).unwrap();
+    }
 }

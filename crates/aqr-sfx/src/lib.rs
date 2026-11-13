@@ -8,10 +8,14 @@
 
 mod native;
 
-use aqr_blob::interp::{Interpreter, Vtable};
+use aqr_blob::interp::Interpreter;
+#[cfg(windows)]
+use aqr_blob::interp::Vtable;
 use aqr_formula::aqr::{Decoded, Failure, Loaded, Runner};
+#[cfg(windows)]
+use native::Fns;
 pub use native::native_name;
-use native::{Fns, Native, NativeLoaded};
+use native::{Native, NativeLoaded};
 
 /// The name of the interpreter blob in the dispatch table.
 pub const INTERP: &str = "aqr-interp";
