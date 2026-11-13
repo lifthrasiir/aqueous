@@ -958,7 +958,7 @@ pub fn decode(inputs: &[&[u8]], len: usize) -> Result<Vec<u8>> {
             prev = ret;
             let params = match raw[s::PROTO_PARAMS].var()? {
                 0 => 0,
-                k => *lists.get(k as usize - 1).ok_or_else(corrupt)?,
+                k => *usize::try_from(k - 1).ok().and_then(|i| lists.get(i)).ok_or_else(corrupt)?,
             };
             let shorty = match raw[s::PROTO_SHORTY].var()? {
                 0 => {
@@ -1040,7 +1040,7 @@ pub fn decode(inputs: &[&[u8]], len: usize) -> Result<Vec<u8>> {
             let sup = raw[s::CDEF_SUPER].var32()?.wrapping_sub(1);
             let ifaces = match raw[s::CDEF_IFACES].var()? {
                 0 => 0,
-                k => *lists.get(k as usize - 1).ok_or_else(corrupt)?,
+                k => *usize::try_from(k - 1).ok().and_then(|i| lists.get(i)).ok_or_else(corrupt)?,
             };
             let src = raw[s::CDEF_SRC].var32()?.wrapping_sub(1);
             let mut offs = [0u32; 3];
@@ -1416,7 +1416,7 @@ fn class_data(raw: &mut Raw, cd: &mut Vec<u8>, code: &mut Code, window: &mut Vec
     for _ in 0..methods {
         put_uleb(cd, raw[s::CDATA_MDIFF].var32()?);
         put_uleb(cd, raw[s::CDATA_MFLAGS].var32()?);
-        let v = raw[s::CDATA_CODE].var()? as usize;
+        let v = usize::try_from(raw[s::CDATA_CODE].var()?).map_err(|_| corrupt())?;
         let off = if v == 0 {
             0
         } else {

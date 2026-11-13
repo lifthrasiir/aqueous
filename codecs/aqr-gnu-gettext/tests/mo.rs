@@ -112,3 +112,16 @@ fn corrupt_inputs() {
     // (strings from elsewhere: another file, or none)
     assert!(mo::build(&rest, 0, &nuls, d.len()).ok().as_ref() != Some(&d));
 }
+
+/// A table whose size and probe step are not coprime has slots the probing never reaches: it
+/// gives up instead of looping (the keys "a", "c", "e" hash to odd numbers: step 2 in 4 slots).
+#[test]
+fn hash_table_with_unreachable_slots_ends() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let keys: [&[u8]; 3] = [b"a", b"c", b"e"];
+        tx.send(mo::hash_table(keys.iter(), 4)).ok();
+    });
+    let t = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("hash_table hangs");
+    assert!(t.is_none());
+}

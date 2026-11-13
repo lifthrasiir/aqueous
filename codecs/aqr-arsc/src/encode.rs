@@ -21,7 +21,7 @@ pub fn split(d: &[u8]) -> Option<Vec<Vec<u8>>> {
         return None;
     }
     let mut e = Enc { st: vec![Vec::new(); s::N], seen: Seen::default(), last_str: 0 };
-    e.chunk(d, 0, d.len())?;
+    e.chunk(d, 0, d.len(), 0)?;
     let st = arsc::pack(&e.st);
     let refs: Vec<&[u8]> = st.iter().map(|v| v.as_slice()).collect();
     (arsc::decode(&refs, d.len()).ok()? == d).then_some(st)
@@ -39,8 +39,8 @@ struct Enc {
 }
 
 impl Enc {
-    /// The chunk at `p` of `d`, within `end`; its end.
-    fn chunk(&mut self, d: &[u8], p: usize, end: usize) -> Option<usize> {
+    /// The chunk at `p` of `d`, nested `depth` deep, within `end`; its end.
+    fn chunk(&mut self, d: &[u8], p: usize, end: usize, depth: usize) -> Option<usize> {
         let t = le16(d, p).ok()?;
         let hs = le16(d, p + 2).ok()? as usize;
         let size = le32(d, p + 4).ok()? as usize;
@@ -53,13 +53,15 @@ impl Enc {
         // (what earlier entries predict, to go back to where the chunk is not taken: of its type,
         // or all of it for a container)
         let seen = match t {
-            ty::TYPE => Some(Saved::Type(d[p + 8], self.seen.of_type(d[p + 8]))),
+            ty::TYPE if hs >= 20 => Some(Saved::Type(d[p + 8], self.seen.of_type(d[p + 8]))),
             ty::TABLE | ty::PACKAGE => Some(Saved::All(self.seen.clone())),
             _ => None,
         };
         let last_str = self.last_str;
         let m = match t {
-            ty::TABLE | ty::PACKAGE if self.children(d, p + hs, stop) => mode::CONTAINER,
+            ty::TABLE | ty::PACKAGE if depth < arsc::DEPTH && self.children(d, p + hs, stop, depth + 1) => {
+                mode::CONTAINER
+            }
             ty::STRING_POOL if self.pool(d, p, hs, stop).is_some() => mode::POOL,
             ty::TYPE if self.entries(d, p, hs, stop).is_some() => mode::TYPE,
             _ => {
@@ -84,9 +86,9 @@ impl Enc {
     }
 
     /// Chunks one after another from `p` to `stop`: whether they are.
-    fn children(&mut self, d: &[u8], mut p: usize, stop: usize) -> bool {
+    fn children(&mut self, d: &[u8], mut p: usize, stop: usize, depth: usize) -> bool {
         while p < stop {
-            match self.chunk(d, p, stop) {
+            match self.chunk(d, p, stop, depth) {
                 Some(e) => p = e,
                 None => return false,
             }

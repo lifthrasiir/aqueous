@@ -70,7 +70,8 @@ its start plus `size` not past `end`), then `headerSize − 8` bytes; append the
 of `head`, its mode:
 
 - 0: `size − headerSize` bytes of `raw`;
-- 1: chunks, one after another, until its start plus `size`;
+- 1: chunks, one after another, until its start plus `size`; the chunk is less than 4
+  deep (the top, 0);
 - 2, where `type` is `0x0001`: a string pool's body (§4);
 - 3, where `type` is `0x0201`: a type's body (§5);
 - any other: the module fails.
@@ -82,7 +83,8 @@ The chunk must then end at its start plus `size`.
 The header, of `headerSize` at least 28, has at 8 `u32` the count `n` of strings (above 0),
 at 12 the count `m` of styles, at 16 the flags (bit `0x100`: UTF-8), at 20 the start of the
 strings and at 24 that of the styles, both from the chunk's start; the strings must start at
-`headerSize + 4 × (n + m)`, and where `m > 0`, the styles not before them.
+`headerSize + 4 × (n + m)`, and where `m > 0`, the styles not before them; both inside the
+chunk.
 
 The body: `n` offsets (`u32`), set below; `4 × m` bytes of `style`; then the strings, string
 `i`'s offset (from the strings' start) where it starts:

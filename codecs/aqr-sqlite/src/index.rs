@@ -93,8 +93,6 @@ fn key_cmp(f: u8, sa: u64, a: &[u8], sb: u64, b: &[u8]) -> Ordering {
     if f & F_DESC != 0 { o.reverse() } else { o }
 }
 
-/// The rows of a table (payloads, rowids) in the order of an index with key `key`.
-/// Encoder and decoder must agree on it exactly, so ties fall back to the row number.
 /// The indexed columns of a table's rows, and their rowids: either pointing into the rows
 /// (encoder, which keeps them), or copied out (decoder, which decodes the table twice
 /// rather than keep it).
@@ -237,7 +235,7 @@ impl<'a> Keys<'a> {
         let mut k = Self::over_rows(map, rows, std::borrow::Cow::Borrowed(rowids));
         let has_rowid = map.contains(&ROWID);
         for (&row, &rowid) in rows.iter().zip(rowids) {
-            k.add(row, rowid, false, cols);
+            k.add(row, false, cols);
             if has_rowid {
                 k.rb.push(rowid.to_be_bytes());
             }
@@ -265,7 +263,7 @@ impl<'a> Keys<'a> {
         if self.bounded && self.ok.len() == self.ok.capacity() {
             return false;
         }
-        if !self.add(row, rowid, true, cols) {
+        if !self.add(row, true, cols) {
             return false;
         }
         self.rowids.to_mut().push(rowid);
@@ -277,7 +275,7 @@ impl<'a> Keys<'a> {
 
     /// Adds a row's indexed columns; false where copying them would take its bytes past their
     /// room (where they were made of one).
-    fn add(&mut self, row: &[u8], _rowid: i64, copy: bool, cols: &mut Vec<(u64, u32)>) -> bool {
+    fn add(&mut self, row: &[u8], copy: bool, cols: &mut Vec<(u64, u32)>) -> bool {
         let ok = parse(row, cols);
         if copy && self.bounded && ok {
             let need: usize = self.map.iter().filter_map(|&c| cols.get(c as usize)).map(|&(st, _)| st_size(st)).sum();
@@ -319,41 +317,22 @@ impl<'a> Keys<'a> {
     }
 }
 
-/// A key above a row number in the low 32 bits.
-trait Packed: Copy + Ord {
-    fn byte(self, i: u32) -> u8;
-    fn row(self) -> u32;
-    fn key(self) -> u128;
+/// Byte `i` of the key of a packed key (a key above a row number in the low 32 bits).
+#[inline]
+fn packed_byte(x: u128, i: u32) -> u8 {
+    (x >> (32 + 8 * i)) as u8
 }
 
-impl Packed for u64 {
-    #[inline]
-    fn byte(self, i: u32) -> u8 {
-        (self >> (32 + 8 * i)) as u8
-    }
-    #[inline]
-    fn row(self) -> u32 {
-        self as u32
-    }
-    #[inline]
-    fn key(self) -> u128 {
-        (self >> 32) as u128
-    }
+/// The row number of a packed key.
+#[inline]
+fn packed_row(x: u128) -> u32 {
+    x as u32
 }
 
-impl Packed for u128 {
-    #[inline]
-    fn byte(self, i: u32) -> u8 {
-        (self >> (32 + 8 * i)) as u8
-    }
-    #[inline]
-    fn row(self) -> u32 {
-        self as u32
-    }
-    #[inline]
-    fn key(self) -> u128 {
-        self >> 32
-    }
+/// The key of a packed key.
+#[inline]
+fn packed_key(x: u128) -> u128 {
+    x >> 32
 }
 
 /// Sorts packed keys (rows in ascending order) by their `nb` key bytes: LSD radix sort, in
@@ -368,13 +347,13 @@ fn sort_packed(v: &mut Vec<u128>, nb: usize, tmp: &mut Vec<u128>) {
     for i in 0..nb as u32 {
         let mut cnt = [0usize; 257];
         for &x in v.iter() {
-            cnt[x.byte(i) as usize + 1] += 1;
+            cnt[packed_byte(x, i) as usize + 1] += 1;
         }
         for d in 0..256 {
             cnt[d + 1] += cnt[d];
         }
         for &x in v.iter() {
-            let d = x.byte(i) as usize;
+            let d = packed_byte(x, i) as usize;
             tmp[cnt[d]] = x;
             cnt[d] += 1;
         }
@@ -385,12 +364,16 @@ fn sort_packed(v: &mut Vec<u128>, nb: usize, tmp: &mut Vec<u128>) {
 /// The rows of sorted packed keys into `ix`, runs of equal keys sorted by `full`.
 fn fix_runs(v: &[u128], full: impl Fn(&u32, &u32) -> Ordering, ix: &mut Vec<u32>) {
     ix.clear();
-    ix.extend(v.iter().map(|x| x.row()));
-    let n = v.len();
+    ix.extend(v.iter().map(|&x| packed_row(x)));
+    sort_runs(v.len(), |i, j| packed_key(v[i]) == packed_key(v[j]), full, ix);
+}
+
+/// Sorts by `full` each run of the first `n` of `ix` that `same` tells to be of one key.
+fn sort_runs(n: usize, same: impl Fn(usize, usize) -> bool, full: impl Fn(&u32, &u32) -> Ordering, ix: &mut [u32]) {
     let mut i = 0;
     while i < n {
         let mut j = i + 1;
-        while j < n && v[j].key() == v[i].key() {
+        while j < n && same(j, i) {
             j += 1;
         }
         if j - i > 1 {
@@ -574,17 +557,7 @@ pub fn order_in(keys: &Keys, key: &Key, bufs: &mut OrderBufs, out: &mut Vec<u32>
         ix.clear();
         ix.extend(0..n as u32);
         radix_sort(a, ix, b, ti);
-        let mut i = 0;
-        while i < n {
-            let mut j = i + 1;
-            while j < n && a[j] == a[i] {
-                j += 1;
-            }
-            if j - i > 1 {
-                ix[i..j].sort_unstable_by(full);
-            }
-            i = j;
-        }
+        sort_runs(n, |i, j| a[i] == a[j], full, ix);
         out.clear();
         out.extend_from_slice(ix);
     }
@@ -604,7 +577,7 @@ fn text_is(b: &[u8], enc: u32, s: &str) -> bool {
 /// sqlite_schema (type, name, tbl_name, rootpage, sql).
 pub fn schema_indexes(schema: &[&[u8]], enc: u32) -> Vec<(u32, u32)> {
     let mut cols = Vec::new();
-    let mut tables: Vec<(&[u8], u32)> = Vec::new();
+    let mut tables: std::collections::HashMap<&[u8], u32> = Default::default();
     let mut indexes: Vec<(&[u8], u32)> = Vec::new();
     for rec in schema {
         if !parse(rec, &mut cols) || cols.len() < 4 {
@@ -626,12 +599,13 @@ pub fn schema_indexes(schema: &[&[u8]], enc: u32) -> Vec<(u32, u32)> {
         }
         if text_is(typ, enc, "table") {
             let (_, name) = get(1);
-            tables.push((name, root as u32));
+            // (the first table of a name wins)
+            tables.entry(name).or_insert(root as u32);
         } else if text_is(typ, enc, "index") {
             indexes.push((tbl, root as u32));
         }
     }
-    indexes.iter().filter_map(|&(tbl, ir)| tables.iter().find(|t| t.0 == tbl).map(|t| (ir, t.1))).collect()
+    indexes.iter().filter_map(|&(tbl, ir)| tables.get(tbl).map(|&t| (ir, t))).collect()
 }
 
 /// Finds the key of an index from its entries: the table column of every indexed column

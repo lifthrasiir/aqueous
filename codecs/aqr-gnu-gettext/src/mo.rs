@@ -97,7 +97,8 @@ pub fn hash(s: &[u8]) -> u32 {
 
 /// The hash table of `size` slots of the originals `keys`, as msgfmt fills it: each original in
 /// order at its hash modulo the size, else at steps of 1 plus its hash modulo the size less 2,
-/// the slot holding its index plus 1. None where the table cannot hold them.
+/// the slot holding its index plus 1. None where the table cannot hold them (or the probing, bounded
+/// by the size, finds no free slot).
 pub fn hash_table(keys: impl ExactSizeIterator<Item = impl AsRef<[u8]>>, size: usize) -> Option<Vec<u32>> {
     if keys.len() >= size {
         return None;
@@ -107,8 +108,15 @@ pub fn hash_table(keys: impl ExactSizeIterator<Item = impl AsRef<[u8]>>, size: u
     for (i, k) in keys.enumerate() {
         let h = hash(k.as_ref()) as u64;
         let (mut at, step) = (h % size, 1 + h % (size - 2));
-        while t[at as usize] != 0 {
+        // (a step not coprime to the size never reaches every slot: at most `size` probes)
+        for _ in 0..size {
+            if t[at as usize] == 0 {
+                break;
+            }
             at = if at >= size - step { at - (size - step) } else { at + step };
+        }
+        if t[at as usize] != 0 {
+            return None;
         }
         t[at as usize] = i as u32 + 1;
     }

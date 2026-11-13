@@ -6,9 +6,15 @@ pub const K_RAW: u8 = 0;
 pub const K_ZERO: u8 = 1;
 pub const K_OVF: u8 = 3;
 
+/// The b-tree page types (the page header's first byte).
+pub const T_INDEX_INTERIOR: u8 = 2;
+pub const T_TABLE_INTERIOR: u8 = 5;
+pub const T_INDEX_LEAF: u8 = 10;
+pub const T_TABLE_LEAF: u8 = 13;
+
 #[inline]
 pub fn is_btree(t: u8) -> bool {
-    matches!(t, 2 | 5 | 10 | 13)
+    matches!(t, T_INDEX_INTERIOR | T_TABLE_INTERIOR | T_INDEX_LEAF | T_TABLE_LEAF)
 }
 
 #[inline]
@@ -91,7 +97,7 @@ pub fn parse_page(g: &Geom, pg: &[u8], h: usize, cells: &mut Vec<Cell>, iv: &mut
     iv.clear();
     let typ = pg[h];
     let end = g.usable;
-    let interior = typ == 2 || typ == 5;
+    let interior = typ == T_INDEX_INTERIOR || typ == T_TABLE_INTERIOR;
     let hl = if interior { 12 } else { 8 };
     if h + hl > end {
         return false;
@@ -123,12 +129,12 @@ pub fn parse_page(g: &Geom, pg: &[u8], h: usize, cells: &mut Vec<Cell>, iv: &mut
             return false;
         }
         q += n;
-        if typ == 5 {
+        if typ == T_TABLE_INTERIOR {
             c.key = v;
             c.size = q - off;
         } else {
             c.plen = v;
-            if typ == 13 {
+            if typ == T_TABLE_LEAF {
                 let Some((k, n)) = get_sqlite(&pg[q..end]) else { return false };
                 if n != sqlite_len(k) {
                     return false;
@@ -137,7 +143,7 @@ pub fn parse_page(g: &Geom, pg: &[u8], h: usize, cells: &mut Vec<Cell>, iv: &mut
                 q += n;
             }
             c.pay = q;
-            c.local = g.local(v, typ == 13);
+            c.local = g.local(v, typ == T_TABLE_LEAF);
             if c.local as u64 == v {
                 c.size = q + c.local - off;
             } else {
@@ -223,17 +229,14 @@ impl Ends {
         let sz = sz.max(4);
         let n = self.v.len();
         let off = if code & 1 == 0 {
-            let r = (code / 2) as usize;
-            if r >= n {
-                return None;
-            }
+            let r = usize::try_from(code / 2).ok().filter(|&r| r < n)?;
             self.v[n - 1 - r].checked_sub(sz)?
         } else {
             let back = self.v.last().copied().unwrap_or(0) as i64;
             let off = (back - sz as i64).checked_add(crate::varint::unzz(code / 2))?;
             usize::try_from(off).ok()?
         };
-        self.update(off, off + sz);
+        self.update(off, off.checked_add(sz)?);
         Some(off)
     }
 }

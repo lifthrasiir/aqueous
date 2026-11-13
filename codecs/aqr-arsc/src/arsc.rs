@@ -25,6 +25,9 @@ pub mod mode {
     pub const TYPE: u8 = 3;
 }
 
+/// The most chunks nested: a table, its packages, their chunks (FORMAT.md §3).
+pub const DEPTH: usize = 4;
+
 /// The streams, by their index.
 pub mod s {
     pub const HEAD: usize = 0;
@@ -99,57 +102,37 @@ pub fn put_len16(out: &mut Vec<u8>, n: usize) -> Option<()> {
 }
 
 /// A stream as it is read.
-pub struct R<'a> {
-    d: &'a [u8],
-    at: usize,
+pub use aqr_common::cursor::Cursor as R;
+
+/// The bytes of `r` up to the next zero byte, past which it goes.
+fn until0<'a>(r: &mut R<'a>) -> Result<&'a [u8]> {
+    let rest = r.rest();
+    let n = rest.iter().position(|&b| b == 0).ok_or_else(corrupt)?;
+    r.p += n + 1;
+    Ok(&rest[..n])
 }
 
-impl<'a> R<'a> {
-    pub fn new(d: &'a [u8]) -> Self {
-        R { d, at: 0 }
-    }
+/// The units of `r` up to the next zero unit, past which it goes.
+fn until00<'a>(r: &mut R<'a>) -> Result<&'a [u8]> {
+    let rest = r.rest();
+    let n = rest.as_chunks::<2>().0.iter().position(|u| *u == [0, 0]).ok_or_else(corrupt)?;
+    r.p += 2 * n + 2;
+    Ok(&rest[..2 * n])
+}
 
-    pub fn var(&mut self) -> Result<u64> {
-        varint::get(self.d, &mut self.at).map_err(|_| corrupt())
+/// The streams of an input `d` holding those of `group`, each given to `f` by its index.
+fn split_group<'a>(d: &'a [u8], group: &[usize], mut f: impl FnMut(usize, &'a [u8])) -> Result<()> {
+    let mut r = R::new(d);
+    let mut lens = [0usize; s::N];
+    let (last, others) = group.split_last().ok_or_else(corrupt)?;
+    for n in &mut lens[..others.len()] {
+        *n = r.usize()?;
     }
-
-    pub fn var32(&mut self) -> Result<u32> {
-        u32::try_from(self.var()?).map_err(|_| corrupt())
+    for (&l, &n) in others.iter().zip(&lens) {
+        f(l, r.bytes(n)?);
     }
-
-    pub fn bytes(&mut self, n: usize) -> Result<&'a [u8]> {
-        let b = self.d.get(self.at..).and_then(|d| d.get(..n)).ok_or_else(corrupt)?;
-        self.at += n;
-        Ok(b)
-    }
-
-    pub fn u8(&mut self) -> Result<u8> {
-        Ok(self.bytes(1)?[0])
-    }
-
-    /// The bytes up to the next zero byte, past which it goes.
-    pub fn until0(&mut self) -> Result<&'a [u8]> {
-        let rest = &self.d[self.at..];
-        let n = rest.iter().position(|&b| b == 0).ok_or_else(corrupt)?;
-        self.at += n + 1;
-        Ok(&rest[..n])
-    }
-
-    /// The units up to the next zero unit, past which it goes.
-    pub fn until00(&mut self) -> Result<&'a [u8]> {
-        let rest = &self.d[self.at..];
-        let n = rest.as_chunks::<2>().0.iter().position(|u| *u == [0, 0]).ok_or_else(corrupt)?;
-        self.at += 2 * n + 2;
-        Ok(&rest[..2 * n])
-    }
-
-    pub fn rest(&self) -> &'a [u8] {
-        &self.d[self.at..]
-    }
-
-    pub fn done(&self) -> Result<()> {
-        if self.at == self.d.len() { Ok(()) } else { Err(corrupt()) }
-    }
+    f(*last, r.rest());
+    Ok(())
 }
 
 /// The streams from the module's inputs.
@@ -159,12 +142,7 @@ pub fn unpack<'a>(inputs: &[&'a [u8]]) -> Result<Vec<&'a [u8]>> {
     }
     let mut st: Vec<&[u8]> = vec![&[]; s::N];
     for (group, &d) in INPUTS.iter().zip(inputs) {
-        let mut r = R::new(d);
-        let lens: Vec<u64> = (1..group.len()).map(|_| r.var()).collect::<Result<_>>()?;
-        for (&l, &n) in group.iter().zip(&lens) {
-            st[l] = r.bytes(usize::try_from(n).map_err(|_| corrupt())?)?;
-        }
-        st[group[group.len() - 1]] = r.rest();
+        split_group(d, group, |l, b| st[l] = b)?;
     }
     Ok(st)
 }
@@ -273,15 +251,7 @@ fn readers<'a>(inputs: &[&'a [u8]]) -> Result<Vec<R<'a>>> {
     let mut st = Vec::with_capacity(s::N);
     st.resize_with(s::N, || R::new(&[]));
     for (group, &d) in INPUTS.iter().zip(inputs) {
-        let mut r = R::new(d);
-        let mut lens = [0usize; s::N];
-        for n in &mut lens[..group.len() - 1] {
-            *n = usize::try_from(r.var()?).map_err(|_| corrupt())?;
-        }
-        for (&l, &n) in group.iter().zip(&lens) {
-            st[l] = R::new(r.bytes(n)?);
-        }
-        st[group[group.len() - 1]] = R::new(r.rest());
+        split_group(d, group, |l, b| st[l] = R::new(b))?;
     }
     Ok(st)
 }
@@ -289,7 +259,7 @@ fn readers<'a>(inputs: &[&'a [u8]]) -> Result<Vec<R<'a>>> {
 /// Of each type id, the most entries of its type chunks, of the chunks the head stream `head`
 /// tells (of a file of `len` bytes).
 fn type_entries(head: &[u8], len: usize) -> Result<[u32; 256]> {
-    fn walk(h: &mut R, at: usize, end: usize, most: &mut [u32; 256]) -> Result<usize> {
+    fn walk(h: &mut R, at: usize, end: usize, depth: usize, most: &mut [u32; 256]) -> Result<usize> {
         let h8 = h.bytes(8)?;
         let (t, hs, size) = (le16(h8, 0)?, le16(h8, 2)? as usize, le32(h8, 4)? as usize);
         if hs < 8 || size < hs || at.checked_add(size).is_none_or(|e| e > end) {
@@ -298,10 +268,10 @@ fn type_entries(head: &[u8], len: usize) -> Result<[u32; 256]> {
         let rest = h.bytes(hs - 8)?;
         let stop = at + size;
         match h.u8()? {
-            mode::CONTAINER => {
+            mode::CONTAINER if depth < DEPTH => {
                 let mut p = at + hs;
                 while p < stop {
-                    p = walk(h, p, stop, most)?;
+                    p = walk(h, p, stop, depth + 1, most)?;
                 }
             }
             mode::TYPE if t == ty::TYPE && hs >= 20 => {
@@ -320,7 +290,7 @@ fn type_entries(head: &[u8], len: usize) -> Result<[u32; 256]> {
     }
     let (mut h, mut most, mut p) = (R::new(head), [0u32; 256], 0);
     while p < len {
-        p = walk(&mut h, p, len, &mut most)?;
+        p = walk(&mut h, p, len, 0, &mut most)?;
     }
     Ok(most)
 }
@@ -338,9 +308,9 @@ pub fn decode_plan(head: &[u8], len: u64) -> Option<u64> {
     use aqr_api::stack::block;
     // (the head stream the first of the first input, after the lengths)
     let mut r = R::new(head);
-    let n = usize::try_from(r.var().ok()?).ok()?;
+    let n = r.usize().ok()?;
     for _ in 2..INPUTS[0].len() {
-        r.var().ok()?;
+        r.uv().ok()?;
     }
     debug_assert_eq!(INPUTS[0][0], s::HEAD);
     let most = type_entries(r.bytes(n).ok()?, usize::try_from(len).ok()?).ok()?;
@@ -355,19 +325,21 @@ pub fn decode(inputs: &[&[u8]], len: usize) -> Result<Vec<u8>> {
     let mut d = Dec { r, seen, last_str: 0 };
     let mut out = Vec::with_capacity(len);
     while out.len() < len {
-        chunk(&mut d, &mut out, len)?;
+        chunk(&mut d, &mut out, len, 0)?;
     }
     if out.len() != len {
         return Err(corrupt());
     }
     for r in &d.r {
-        r.done()?;
+        if !r.at_end() {
+            return Err(corrupt());
+        }
     }
     Ok(out)
 }
 
-/// A chunk appended to `out`, which it must not take past `end`.
-fn chunk(d: &mut Dec, out: &mut Vec<u8>, end: usize) -> Result<()> {
+/// A chunk, nested `depth` deep, appended to `out`, which it must not take past `end`.
+fn chunk(d: &mut Dec, out: &mut Vec<u8>, end: usize, depth: usize) -> Result<()> {
     let start = out.len();
     let h8 = d.r[s::HEAD].bytes(8)?;
     let (t, hs, size) = (le16(h8, 0)?, le16(h8, 2)? as usize, le32(h8, 4)? as usize);
@@ -379,9 +351,9 @@ fn chunk(d: &mut Dec, out: &mut Vec<u8>, end: usize) -> Result<()> {
     let stop = start + size;
     match d.r[s::HEAD].u8()? {
         mode::RAW => out.extend_from_slice(d.r[s::RAW].bytes(size - hs)?),
-        mode::CONTAINER => {
+        mode::CONTAINER if depth < DEPTH => {
             while out.len() < stop {
-                chunk(d, out, stop)?;
+                chunk(d, out, stop, depth + 1)?;
             }
         }
         mode::POOL if t == ty::STRING_POOL => pool(d, out, start, hs, stop)?,
@@ -403,7 +375,13 @@ fn pool(d: &mut Dec, out: &mut Vec<u8>, start: usize, hs: usize, stop: usize) ->
     let (n, ns, flags) = (le32(h, 8)? as usize, le32(h, 12)? as usize, le32(h, 16)?);
     let (strings, styles) = (le32(h, 20)? as usize, le32(h, 24)? as usize);
     let offs = out.len();
-    if n == 0 || strings != hs + 4 * (n + ns) || (ns > 0 && styles < strings) {
+    let room = n.checked_add(ns).and_then(|c| c.checked_mul(4)).and_then(|b| b.checked_add(hs));
+    if n == 0 || room != Some(strings) || (ns > 0 && styles < strings) {
+        return Err(corrupt());
+    }
+    // (the offsets and the styles lie in the chunk, before their room is reserved)
+    let within = |at: usize| start.checked_add(at).is_some_and(|e| e <= stop);
+    if !within(strings) || (ns > 0 && !within(styles)) {
         return Err(corrupt());
     }
     out.resize(offs + 4 * n, 0);
@@ -413,13 +391,13 @@ fn pool(d: &mut Dec, out: &mut Vec<u8>, start: usize, hs: usize, stop: usize) ->
         let o = u32::try_from(out.len() - base).map_err(|_| corrupt())?;
         out[offs + 4 * i..offs + 4 * i + 4].copy_from_slice(&o.to_le_bytes());
         if flags & 0x100 != 0 {
-            let s = d.r[s::TEXT].until0()?;
+            let s = until0(&mut d.r[s::TEXT])?;
             put_len8(out, utf16_len(s)).ok_or_else(corrupt)?;
             put_len8(out, s.len()).ok_or_else(corrupt)?;
             out.extend_from_slice(s);
             out.push(0);
         } else {
-            let s = d.r[s::TEXT16].until00()?;
+            let s = until00(&mut d.r[s::TEXT16])?;
             put_len16(out, s.len() / 2).ok_or_else(corrupt)?;
             out.extend_from_slice(s);
             out.extend_from_slice(&[0, 0]);
@@ -446,7 +424,9 @@ fn entries(d: &mut Dec, out: &mut Vec<u8>, start: usize, hs: usize, stop: usize)
     }
     let tid = h[8];
     let (n, es) = (le32(h, 12)? as usize, le32(h, 16)? as usize);
-    if es != hs.checked_add(n.checked_mul(4).ok_or_else(corrupt)?).ok_or_else(corrupt)? || start + es > stop {
+    if es != hs.checked_add(n.checked_mul(4).ok_or_else(corrupt)?).ok_or_else(corrupt)?
+        || start.checked_add(es).is_none_or(|e| e > stop)
+    {
         return Err(corrupt());
     }
     let offs = out.len();
@@ -461,9 +441,9 @@ fn entries(d: &mut Dec, out: &mut Vec<u8>, start: usize, hs: usize, stop: usize)
         if o == u32::MAX {
             continue;
         }
-        let flags = u16::try_from(d.r[s::FLAGS].var()?).map_err(|_| corrupt())?;
+        let flags = u16::try_from(d.r[s::FLAGS].uv()?).map_err(|_| corrupt())?;
         let (pk, pt, pv) = d.seen.get(tid, i);
-        let key = match d.r[s::KEY].var()? {
+        let key = match d.r[s::KEY].uv()? {
             0 => pk,
             k => u32::try_from(k - 1).map_err(|_| corrupt())?,
         };
@@ -473,7 +453,7 @@ fn entries(d: &mut Dec, out: &mut Vec<u8>, start: usize, hs: usize, stop: usize)
         out.extend_from_slice(&key.to_le_bytes());
         if complex {
             out.extend_from_slice(d.r[s::MAP].bytes(4)?);
-            let count = d.r[s::FLAGS].var32()?;
+            let count = u32::try_from(d.r[s::FLAGS].uv()?).map_err(|_| corrupt())?;
             out.extend_from_slice(&count.to_le_bytes());
             let maps = (count as usize).checked_mul(12).filter(|&m| out.len() + m <= stop).ok_or_else(corrupt)?;
             out.extend_from_slice(d.r[s::MAP].bytes(maps)?);
@@ -481,11 +461,11 @@ fn entries(d: &mut Dec, out: &mut Vec<u8>, start: usize, hs: usize, stop: usize)
         } else {
             let vt = d.r[s::VTYPE].u8()?;
             let data = if vt == STRING {
-                let v = crate::arsc::moved(d.last_str, d.r[s::VSTR].var()?)?;
+                let v = crate::arsc::moved(d.last_str, d.r[s::VSTR].uv()?)?;
                 d.last_str = v;
                 v
             } else {
-                match d.r[s::VDATA].var()? {
+                match d.r[s::VDATA].uv()? {
                     0 if vt == pt => pv,
                     0 => return Err(corrupt()),
                     k => u32::try_from(k - 1).map_err(|_| corrupt())?,

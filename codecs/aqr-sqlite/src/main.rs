@@ -8,38 +8,9 @@ use aqr_sqlite::transform::{NSTREAMS, STREAM_NAMES};
 static ALLOC: Counting = Counting;
 use std::sync::atomic::Ordering::Relaxed;
 
-#[cfg(unix)]
-#[repr(C)]
-struct Timespec {
-    sec: i64,
-    nsec: i64,
-}
-
-#[cfg(unix)]
-unsafe extern "C" {
-    fn clock_gettime(clk: u32, tp: *mut Timespec) -> i32;
-}
-
-/// CPU time of this thread, in seconds (wall time is skewed by other load).
-#[cfg(unix)]
-fn cpu() -> f64 {
-    #[cfg(target_os = "macos")]
-    const CLOCK_THREAD_CPUTIME_ID: u32 = 16;
-    #[cfg(not(target_os = "macos"))]
-    const CLOCK_THREAD_CPUTIME_ID: u32 = 3;
-    let mut t = Timespec { sec: 0, nsec: 0 };
-    unsafe { clock_gettime(CLOCK_THREAD_CPUTIME_ID, &mut t) };
-    t.sec as f64 + t.nsec as f64 * 1e-9
-}
-
-#[cfg(not(unix))]
-fn cpu() -> f64 {
-    wall()
-}
-
 /// Seconds: the thread's CPU time with one thread, wall time with more.
 fn clock(threads: usize) -> f64 {
-    if threads > 1 { wall() } else { cpu() }
+    if threads > 1 { wall() } else { aqr_common::cpu::thread() }
 }
 
 fn wall() -> f64 {
@@ -242,7 +213,7 @@ fn mutate(r: &mut Rng, src: &[u8]) -> Vec<u8> {
             1 if base + h < v.len() => v[base + h] = [0, 2, 5, 10, 13][r.below(5)],
             2 if base + h + 40 < v.len() => {
                 let i = base + h + 8 + 2 * r.below(16);
-                let x = r.next() as u16 % ps as u16;
+                let x = (r.next() as u16 as usize % ps) as u16;
                 v[i..i + 2].copy_from_slice(&x.to_be_bytes());
             }
             3 => v.truncate(512 + r.below(v.len() - 511)),

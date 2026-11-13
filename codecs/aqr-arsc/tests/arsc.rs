@@ -239,6 +239,46 @@ fn not_taken() {
     assert!(encode::split(&[0; 64]).is_none());
 }
 
+/// A type chunk whose header is the 8 bytes of any chunk's, at the end of the file, is kept as
+/// it is (its type id would lie past the file).
+#[test]
+fn type_chunk_of_a_bare_header() {
+    let d = chunk(arsc::ty::TABLE, &[0; 4], &chunk(arsc::ty::TYPE, &[], &[]));
+    let st = encode::split(&d).expect("not taken");
+    let refs: Vec<&[u8]> = st.iter().map(|v| v.as_slice()).collect();
+    assert!(arsc::decode(&refs, d.len()).unwrap() == d);
+}
+
+/// Chunks nested without end (a table inside a table, 100000 deep) are kept as they are by the
+/// encoder, and refused by the decoder, rather than overflowing the stack.
+#[test]
+fn nesting_is_bounded() {
+    const N: usize = 100_000;
+    // (the table of each level takes the rest of the file, the innermost its own header)
+    let mut d = Vec::new();
+    for i in 0..N {
+        d.extend_from_slice(&[2, 0, 12, 0]);
+        d.extend_from_slice(&((12 * (N - i)) as u32).to_le_bytes());
+        d.extend_from_slice(&[0; 4]);
+    }
+    let st = encode::split(&d).expect("not taken");
+    let refs: Vec<&[u8]> = st.iter().map(|v| v.as_slice()).collect();
+    assert!(arsc::decode(&refs, d.len()).unwrap() == d);
+    // (a head stream of containers of the headers' 8 bytes and the mode)
+    let mut head = Vec::new();
+    for i in 0..N {
+        head.extend_from_slice(&arsc::ty::TABLE.to_le_bytes());
+        head.extend_from_slice(&8u16.to_le_bytes());
+        head.extend_from_slice(&((8 * (N - i)) as u32).to_le_bytes());
+        head.push(arsc::mode::CONTAINER);
+    }
+    let mut st = vec![Vec::new(); s::N];
+    st[s::HEAD] = head;
+    let inputs = arsc::pack(&st);
+    let refs: Vec<&[u8]> = inputs.iter().map(|v| v.as_slice()).collect();
+    assert!(arsc::decode(&refs, 8 * N).is_err());
+}
+
 /// Corrupted streams make the module fail or give a file of the length, never panic.
 #[test]
 fn corrupt() {

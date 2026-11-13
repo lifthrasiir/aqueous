@@ -27,8 +27,11 @@
 //! them), then rebuilds the pages in file order.
 
 use crate::index;
-use crate::page::{Cell, Ends, Geom, K_OVF, K_RAW, K_ZERO, be16, be32, hdr_off, is_btree, parse_page};
-use crate::record::{GroupDec, GroupEnc, RefCtx, int_value, is_int, predict, st_size};
+use crate::page::{
+    Cell, Ends, Geom, K_OVF, K_RAW, K_ZERO, T_INDEX_INTERIOR, T_INDEX_LEAF, T_TABLE_INTERIOR, T_TABLE_LEAF, be16, be32,
+    hdr_off, is_btree, parse_page,
+};
+use crate::record::{GROUP_STREAMS, GroupDec, GroupEnc, RefCtx, int_value, is_int, predict, st_size};
 use crate::varint::{Rd, put_sqlite, put_sv, put_uv};
 use crate::{Result, corrupt};
 
@@ -39,7 +42,7 @@ pub const S_RAW: usize = 1;
 pub const S_DIR: usize = 2;
 /// The group streams (see `record`), in this order.
 pub const S_REC: usize = 3;
-pub const S_BYTES: usize = 10;
+pub const S_BYTES: usize = S_REC + GROUP_STREAMS - 1;
 pub const S_GRP: usize = 11;
 pub const S_PHDR: usize = 12;
 pub const S_CHILD: usize = 13;
@@ -181,7 +184,7 @@ pub fn encode_threads(file: &[u8], threads: usize) -> Option<Encoded> {
     // Group b-tree pages into trees by their child pointers.
     let mut parent: Vec<u32> = (0..=n as u32).collect();
     for p in 1..=n {
-        if kind[p] != 2 && kind[p] != 5 {
+        if !(kind[p] == T_INDEX_INTERIOR || kind[p] == T_TABLE_INTERIOR) {
             continue;
         }
         let pg = page(p);
@@ -218,12 +221,12 @@ pub fn encode_threads(file: &[u8], threads: usize) -> Option<Encoded> {
         let h = hdr_off(p);
         let base = (p - 1) * ps;
         let mut grp = None;
-        if k != 5 {
+        if k != T_TABLE_INTERIOR {
             let root = find(&mut parent, p as u32) as usize;
-            let gid = if k == 13 { &mut gid_t[root] } else { &mut gid_i[root] };
+            let gid = if k == T_TABLE_LEAF { &mut gid_t[root] } else { &mut gid_i[root] };
             if *gid == u32::MAX {
                 *gid = groups.len() as u32;
-                groups.push(GroupRecs { table: k == 13, first: p, ..Default::default() });
+                groups.push(GroupRecs { table: k == T_TABLE_LEAF, first: p, ..Default::default() });
             }
             put_uv(&mut s[S_GRP], *gid as u64);
             grp = Some(&mut groups[*gid as usize]);
@@ -237,7 +240,7 @@ pub fn encode_threads(file: &[u8], threads: usize) -> Option<Encoded> {
         for c in &cells {
             put_uv(&mut s[S_CPTR], ends.encode(c.off, c.size));
             minoff = minoff.min(c.off);
-            if k == 2 || k == 5 {
+            if k == T_INDEX_INTERIOR || k == T_TABLE_INTERIOR {
                 put_sv(&mut s[S_CHILD], c.child as i64 - (prev_child + 1));
                 prev_child = c.child as i64;
             }
@@ -246,7 +249,7 @@ pub fn encode_threads(file: &[u8], threads: usize) -> Option<Encoded> {
                 prev_ikey = c.key as i64;
                 continue;
             };
-            if k == 13 {
+            if k == T_TABLE_LEAF {
                 grp.rowids.push(c.key as i64);
             }
             if c.local as u64 == c.plen {
@@ -271,7 +274,7 @@ pub fn encode_threads(file: &[u8], threads: usize) -> Option<Encoded> {
             grp.fix.push((grp.pays.len() as u32, start, c.plen as usize));
             grp.pays.push(&[]);
         }
-        if k == 2 || k == 5 {
+        if k == T_INDEX_INTERIOR || k == T_TABLE_INTERIOR {
             let rc = be32(pg, h + 8) as i64;
             put_sv(&mut s[S_CHILD], rc - (prev_child + 1));
             prev_child = rc;
@@ -294,7 +297,7 @@ pub fn encode_threads(file: &[u8], threads: usize) -> Option<Encoded> {
     // Indexes predicted from their tables: (table group, columns) per index group.
     let mut refs: Vec<Option<(usize, index::Key)>> = (0..groups.len()).map(|_| None).collect();
     let schema_root = find(&mut parent, 1) as usize;
-    if kind[1] == 13 || kind[1] == 5 {
+    if kind[1] == T_TABLE_LEAF || kind[1] == T_TABLE_INTERIOR {
         let sg = gid_t[schema_root];
         if sg != u32::MAX {
             let enc = u32::from_be_bytes(file[56..60].try_into().unwrap());
@@ -322,7 +325,7 @@ pub fn encode_threads(file: &[u8], threads: usize) -> Option<Encoded> {
     crate::mem::mark("enc: index keys");
     // Code the groups, freeing their payloads (and rowids) after their last use: a table's
     // with its last index.
-    let mut gs: [Vec<Vec<u8>>; 8] = Default::default();
+    let mut gs: [Vec<Vec<u8>>; GROUP_STREAMS] = Default::default();
     put_uv(&mut s[S_DIR], groups.len() as u64);
     if threads > 1 && groups.len() > 1 {
         code_groups_par(&g, &mut groups, &refs, threads, &mut s[S_DIR], &mut gs);
@@ -381,7 +384,7 @@ fn code_group(
     r: Option<(usize, &GroupRecs, &index::Key)>,
     sc: &mut Scratch,
     d: &mut Vec<u8>,
-    gs: &mut [Vec<Vec<u8>>; 8],
+    gs: &mut [Vec<Vec<u8>>; GROUP_STREAMS],
 ) {
     let Scratch { cols, pred } = sc;
     let pays_i = gr.view();
@@ -459,7 +462,7 @@ fn code_groups_par(
     refs: &[Option<(usize, index::Key)>],
     threads: usize,
     dir: &mut Vec<u8>,
-    gs: &mut [Vec<Vec<u8>>; 8],
+    gs: &mut [Vec<Vec<u8>>; GROUP_STREAMS],
 ) {
     use std::sync::RwLock;
     use std::sync::atomic::{
@@ -482,7 +485,7 @@ fn code_groups_par(
         }
     };
     let res = crate::par::map(threads, n, &order, Scratch::default, |sc, i| {
-        let (mut d, mut gp): (Vec<u8>, [Vec<Vec<u8>>; 8]) = Default::default();
+        let (mut d, mut gp): (Vec<u8>, [Vec<Vec<u8>>; GROUP_STREAMS]) = Default::default();
         {
             let gr = locks[i].read().unwrap();
             let tg = refs[i].as_ref().map(|r| locks[r.0].read().unwrap());
@@ -610,12 +613,8 @@ impl Sink for Checker<'_> {
     }
 }
 
-/// Rebuilds the file from its streams (of the sizes `sizes`). `len` is the original length.
-pub fn decode(g: &Geom, len: usize, s: &[Vec<u8>], sizes: &Sizes) -> Result<Vec<u8>> {
-    decode_threads(g, len, s, sizes, 1)
-}
-
-/// `decode` with `threads` threads (the first pass over the tables and indexes).
+/// Rebuilds the file from its streams (of the sizes `sizes`) with `threads` threads (the first
+/// pass over the tables and indexes). `len` is the original length.
 pub fn decode_threads(g: &Geom, len: usize, s: &[impl AsRef<[u8]>], sizes: &Sizes, threads: usize) -> Result<Vec<u8>> {
     // The output is no larger than the streams describe: a kind per page, the tail in `raw`
     // (checked before it is allocated).
@@ -666,11 +665,11 @@ struct ByTable {
 }
 
 impl ByTable {
-    fn of(meta: &[(bool, Option<(usize, index::Key)>)]) -> Result<ByTable> {
+    fn of(meta: &[Meta]) -> Result<ByTable> {
         let ng = meta.len();
         // (the counts by table, then where each table's start)
         let mut starts = vec![0u32; ng + 1];
-        for (_, r) in meta {
+        for Meta { from: r, .. } in meta {
             if let Some((t, _)) = r {
                 *starts.get_mut(*t).filter(|_| *t < ng).ok_or_else(corrupt)? += 1;
             }
@@ -681,7 +680,7 @@ impl ByTable {
         }
         let mut list = vec![u32::MAX; sum as usize];
         let mut at = starts.clone();
-        for (i, (_, r)) in meta.iter().enumerate() {
+        for (i, Meta { from: r, .. }) in meta.iter().enumerate() {
             if let Some((t, _)) = r {
                 list[at[*t] as usize] = i as u32;
                 at[*t] += 1;
@@ -699,18 +698,32 @@ impl ByTable {
     }
 }
 
-/// The sizes of [`Keys`](index::Keys) of index `i` (the `k`-th predicted) on table `t`: its
-/// columns, rows, bytes copied, whether the rowid is indexed.
-fn key_shape(
-    meta: &[(bool, Option<(usize, index::Key)>)],
-    gds: &[GroupDec],
-    i: usize,
-    bytes: u64,
-) -> Result<(usize, usize, usize, bool)> {
-    let (t, key) = meta[i].1.as_ref().ok_or_else(corrupt)?;
-    let n = gds[*t].records()?;
-    let b = usize::try_from(bytes).map_err(|_| corrupt())?;
-    Ok((key.cols.len(), n, b, key.cols.contains(&index::ROWID)))
+/// The sizes of the [`Keys`](index::Keys) of an index: its columns, rows, bytes copied, whether
+/// the rowid is indexed.
+#[derive(Clone, Copy)]
+struct Shape {
+    cols: usize,
+    rows: usize,
+    bytes: usize,
+    rowid: bool,
+}
+
+impl Shape {
+    fn plan(self) -> u64 {
+        index::Keys::plan(self.cols, self.rows, self.bytes, self.rowid)
+    }
+
+    fn written(self) -> usize {
+        index::Keys::written(self.cols, self.rows, self.bytes, self.rowid)
+    }
+}
+
+/// The sizes of the [`Keys`](index::Keys) of index `i` (the `k`-th predicted) on its table.
+fn key_shape(meta: &[Meta], gds: &[GroupDec], i: usize, bytes: u64) -> Result<Shape> {
+    let (t, key) = meta[i].from.as_ref().ok_or_else(corrupt)?;
+    let rows = gds[*t].records();
+    let bytes = usize::try_from(bytes).map_err(|_| corrupt())?;
+    Ok(Shape { cols: key.cols.len(), rows, bytes, rowid: key.cols.contains(&index::ROWID) })
 }
 
 /// The next overflow page of a chain, against the last one.
@@ -723,16 +736,26 @@ fn next_ovf(ovf: &mut Rd, last: &mut i64, np: usize) -> Result<usize> {
     Ok(q as usize)
 }
 
-/// Rebuilds the file onto `out`: of the sizes `given` (the module's, which bound it), or finding
-/// them into `found` (the encoder's check).
+/// What a first pass over a table gives: its indexes' keys as written, and as held, the most
+/// bytes of a record and the most columns of a row.
+struct Scanned {
+    written: Vec<u8>,
+    keys: Vec<index::Keys<'static>>,
+    most_rec: usize,
+    most_cols: usize,
+}
+
 /// A group's directory entry but its decoder: whether it is a table's, and the table and key
 /// of an index predicted from it.
-type Meta = (bool, Option<(usize, index::Key)>);
+struct Meta {
+    table: bool,
+    from: Option<(usize, index::Key)>,
+}
 
 /// The `ng` groups of the directory `dir` (after their count) over the streams `rd`: their
 /// decoders and entries, the decoders' parts covering their streams exactly.
 fn read_groups<'a>(dir: &mut Rd<'a>, rd: &[Rd<'a>], ng: usize) -> Result<(Vec<GroupDec<'a>>, Vec<Meta>)> {
-    let mut gstreams: [Rd; 8] = rd[S_REC..S_REC + 8].try_into().unwrap();
+    let mut gstreams: [Rd; GROUP_STREAMS] = rd[S_REC..S_REC + GROUP_STREAMS].try_into().unwrap();
     // (a group takes a byte of the directory at least)
     if ng > dir.rest().len() {
         return Err(corrupt());
@@ -765,7 +788,7 @@ fn read_groups<'a>(dir: &mut Rd<'a>, rd: &[Rd<'a>], ng: usize) -> Result<(Vec<Gr
         if table && r.is_some() {
             return Err(corrupt());
         }
-        meta.push((table, r));
+        meta.push(Meta { table, from: r });
         gds.push(GroupDec::new(dir, &mut gstreams)?);
     }
     if !dir.at_end() || gstreams.iter().any(|r| !r.at_end()) {
@@ -820,7 +843,7 @@ pub fn plan(g: &Geom, len: u64, s: &[&[u8]], z: &Sizes, initial: u64, held: u64)
     let ng64 = ng as u64;
     let mut top =
         initial + held + block(RD_BYTES * NSTREAMS as u64) + block(GROUP_BYTES * ng64) + block(META_BYTES * ng64);
-    for ((_, r), gd) in meta.iter().zip(&gds) {
+    for (Meta { from: r, .. }, gd) in meta.iter().zip(&gds) {
         if let Some((_, key)) = r {
             top += block(4 * key.cols.len() as u64) + block(key.cols.len() as u64);
         }
@@ -835,7 +858,7 @@ pub fn plan(g: &Geom, len: u64, s: &[&[u8]], z: &Sizes, initial: u64, held: u64)
     // (each index's keys: its shape, in the order of the groups)
     let mut k = 0;
     let mut shapes = vec![None; ng];
-    for (i, (_, r)) in meta.iter().enumerate() {
+    for (i, Meta { from: r, .. }) in meta.iter().enumerate() {
         if r.is_some() {
             shapes[i] = Some(key_shape(&meta, &gds, i, *z.keys.get(k)?).ok()?);
             k += 1;
@@ -844,8 +867,8 @@ pub fn plan(g: &Geom, len: u64, s: &[&[u8]], z: &Sizes, initial: u64, held: u64)
     if k != z.keys.len() {
         return None;
     }
-    let keys_plan = |i: usize| shapes[i].map_or(0, |(m, n, b, rowid)| index::Keys::plan(m, n, b, rowid));
-    let written = |i: usize| shapes[i].map_or(0, |(m, n, b, rowid)| index::Keys::written(m, n, b, rowid) as u64);
+    let keys_plan = |i: usize| shapes[i].map_or(0, Shape::plan);
+    let written = |i: usize| shapes[i].map_or(0, |s| s.written() as u64);
     let (mut end, mut most) = (pages(top), 0);
     if !by.tables.is_empty() {
         let scans: Vec<u64> = by
@@ -876,7 +899,7 @@ pub fn plan(g: &Geom, len: u64, s: &[&[u8]], z: &Sizes, initial: u64, held: u64)
         let idxs: Vec<usize> = (0..ng).filter(|&i| shapes[i].is_some()).collect();
         top += block(4 * idxs.len() as u64);
         end = end.max(pages(top));
-        let rows = |i: usize| shapes[i].map_or(0, |s| s.1) as u64;
+        let rows = |i: usize| shapes[i].map_or(0, |s| s.rows) as u64;
         let orders: Vec<u64> = idxs
             .iter()
             .map(|&i| {
@@ -897,6 +920,8 @@ pub fn plan(g: &Geom, len: u64, s: &[&[u8]], z: &Sizes, initial: u64, held: u64)
     Some((end.max(pages(top)), most))
 }
 
+/// Rebuilds the file onto `out`: of the sizes `given` (the module's, which bound it), or finding
+/// them into `found` (the encoder's check).
 fn rebuild<S: Sink>(
     g: &Geom,
     len: usize,
@@ -924,20 +949,20 @@ fn rebuild<S: Sink>(
     // The indexed columns of the tables indexes are predicted from: a first pass over each
     // such table (on a copy of its cursors), for all its indexes at once. Then every group
     // decodes record by record as the pages need them.
-    if meta.iter().any(|(_, r)| matches!(r, Some((t, _)) if *t >= ng)) {
+    if meta.iter().any(|m| matches!(&m.from, Some((t, _)) if *t >= ng)) {
         return Err(corrupt());
     }
     let mut ctxs: Vec<Option<RefCtx>> = (0..ng).map(|_| None).collect();
     let by = ByTable::of(&meta)?;
     for (t, _) in meta.iter().enumerate() {
-        if !by.of_table(t).is_empty() && (meta[t].1.is_some() || !meta[t].0) {
+        if !by.of_table(t).is_empty() && (meta[t].from.is_some() || !meta[t].table) {
             return Err(corrupt());
         }
     }
     // (the bytes of each index's keys, in the order of the groups)
-    let nidx = meta.iter().filter(|(_, r)| r.is_some()).count();
+    let nidx = meta.iter().filter(|m| m.from.is_some()).count();
     let key_bytes = |i: usize| -> u64 {
-        let k = meta[..i].iter().filter(|(_, r)| r.is_some()).count();
+        let k = meta[..i].iter().filter(|m| m.from.is_some()).count();
         given.map_or(0, |z| z.keys[k])
     };
     let (rec_cap, cols_cap) = match given {
@@ -955,22 +980,17 @@ fn rebuild<S: Sink>(
     let bounded = given.is_some();
     // The first pass over a table, for all its indexes at once: their keys (of the room the
     // sizes give, where they are given) written onto `out` (taken first: below the rest).
-    #[allow(clippy::type_complexity)]
-    let scan = |t: usize,
-                cols: &mut Vec<(u64, u32)>,
-                scratch: &mut Vec<u8>|
-     -> Result<(Vec<u8>, Vec<index::Keys<'static>>, usize, usize)> {
+    let scan = |t: usize, cols: &mut Vec<(u64, u32)>, scratch: &mut Vec<u8>| -> Result<Scanned> {
         let idx = by.of_table(t);
         let mut size = 0;
         for &i in idx {
-            let (m, n, b, rowid) = key_shape(&meta, &gds, i as usize, key_bytes(i as usize))?;
-            size += index::Keys::written(m, n, b, rowid);
+            size += key_shape(&meta, &gds, i as usize, key_bytes(i as usize))?.written();
         }
         let mut written = Vec::with_capacity(if bounded { size } else { 0 });
         let mut keys: Vec<index::Keys> = Vec::with_capacity(idx.len());
         for &i in idx {
-            let (_, n, b, _) = key_shape(&meta, &gds, i as usize, key_bytes(i as usize))?;
-            let map = &meta[i as usize].1.as_ref().unwrap().1.cols;
+            let Shape { rows: n, bytes: b, .. } = key_shape(&meta, &gds, i as usize, key_bytes(i as usize))?;
+            let map = &meta[i as usize].from.as_ref().unwrap().1.cols;
             keys.push(if bounded { index::Keys::with_capacity(map, n, b) } else { index::Keys::new(map) });
         }
         let mut gd = gds[t].clone_reserved();
@@ -993,7 +1013,7 @@ fn rebuild<S: Sink>(
             keys.iter().for_each(|k| k.write(&mut written));
         }
         drop(gd);
-        Ok((written, keys, most_rec, most_cols))
+        Ok(Scanned { written, keys, most_rec, most_cols })
     };
     let parallel = threads > 1 && !by.tables.is_empty() && bounded;
     if parallel {
@@ -1009,7 +1029,7 @@ fn rebuild<S: Sink>(
             |k| {
                 let mut sc = (Vec::with_capacity(cols_cap), Vec::with_capacity(rec_cap));
                 match scan(by.tables[k] as usize, &mut sc.0, &mut sc.1) {
-                    Ok((written, mut keys, ..)) => {
+                    Ok(Scanned { written, mut keys, .. }) => {
                         // (the keys given back from the last, then the buffers)
                         while keys.pop().is_some() {}
                         drop(keys);
@@ -1021,10 +1041,10 @@ fn rebuild<S: Sink>(
             || {
                 let mut ctxs = ctxs_c.borrow_mut();
                 for i in 0..ng {
-                    if meta[i].1.is_some()
-                        && let Ok((_, n, b, _)) = key_shape(&meta, &gds, i, key_bytes(i))
+                    if meta[i].from.is_some()
+                        && let Ok(Shape { rows: n, bytes: b, .. }) = key_shape(&meta, &gds, i, key_bytes(i))
                     {
-                        let map = &meta[i].1.as_ref().unwrap().1.cols;
+                        let map = &meta[i].from.as_ref().unwrap().1.cols;
                         ctxs[i] = Some(RefCtx { keys: index::Keys::with_capacity(map, n, b), perm: Vec::new() });
                     }
                 }
@@ -1033,8 +1053,7 @@ fn rebuild<S: Sink>(
                 let mut ctxs = ctxs_c.borrow_mut();
                 let mut at = 0;
                 for &i in by.of_table(by.tables[k] as usize) {
-                    let (m, n, b, rowid) = key_shape(&meta, &gds, i as usize, key_bytes(i as usize))?;
-                    let w = index::Keys::written(m, n, b, rowid);
+                    let w = key_shape(&meta, &gds, i as usize, key_bytes(i as usize))?.written();
                     let keys = &mut ctxs[i as usize].as_mut().ok_or_else(corrupt)?.keys;
                     if !keys.read(d.get(at..at + w).ok_or_else(corrupt)?) {
                         return Err(corrupt());
@@ -1058,7 +1077,7 @@ fn rebuild<S: Sink>(
                 let mut d = Vec::with_capacity(4 * keys.len());
                 let mut bufs = index::OrderBufs::with_capacity(keys.len());
                 let mut perm = Vec::with_capacity(keys.len());
-                index::order_in(keys, &meta[i].1.as_ref().unwrap().1, &mut bufs, &mut perm);
+                index::order_in(keys, &meta[i].from.as_ref().unwrap().1, &mut bufs, &mut perm);
                 perm.iter().for_each(|r| d.extend_from_slice(&r.to_le_bytes()));
                 d
             },
@@ -1084,7 +1103,7 @@ fn rebuild<S: Sink>(
         }
     } else {
         for &t in &by.tables {
-            let (_, keys, most_rec, most_cols) = scan(t as usize, &mut cols, &mut scratch)?;
+            let Scanned { keys, most_rec, most_cols, .. } = scan(t as usize, &mut cols, &mut scratch)?;
             if let Some(z) = found.as_deref_mut() {
                 z.record = z.record.max(most_rec as u64);
                 z.cols = z.cols.max(most_cols as u64);
@@ -1093,7 +1112,7 @@ fn rebuild<S: Sink>(
                 if let Some(z) = found.as_deref_mut() {
                     z.keys.push(keys.bytes_len() as u64);
                 }
-                let perm = index::order(&keys, &meta[i as usize].1.as_ref().unwrap().1);
+                let perm = index::order(&keys, &meta[i as usize].from.as_ref().unwrap().1);
                 ctxs[i as usize] = Some(RefCtx { keys, perm });
             }
         }
@@ -1134,13 +1153,13 @@ fn rebuild<S: Sink>(
                 continue;
             }
             K_OVF => continue,
-            2 | 5 | 10 | 13 => {}
+            T_INDEX_INTERIOR | T_TABLE_INTERIOR | T_INDEX_LEAF | T_TABLE_LEAF => {}
             _ => return Err(corrupt()),
         }
         let h = hdr_off(p);
-        let gi = if k != 5 {
+        let gi = if k != T_TABLE_INTERIOR {
             let gi = grp.usize()?;
-            if gi >= ng || meta[gi].0 != (k == 13) {
+            if gi >= ng || meta[gi].table != (k == T_TABLE_LEAF) {
                 return Err(corrupt());
             }
             gi
@@ -1153,7 +1172,7 @@ fn rebuild<S: Sink>(
         if fb > 0xffff || nc > 0xffff || frag > 0xff {
             return Err(corrupt());
         }
-        let interior = k == 2 || k == 5;
+        let interior = k == T_INDEX_INTERIOR || k == T_TABLE_INTERIOR;
         let hl = if interior { 12 } else { 8 };
         let ptr_end = h + hl + 2 * nc;
         if ptr_end > u {
@@ -1184,14 +1203,14 @@ fn rebuild<S: Sink>(
             let (mut novf, mut first) = (0, 0usize);
             let mut local = 0;
             let mut pay: &[u8] = &[];
-            if k == 5 {
+            if k == T_TABLE_INTERIOR {
                 let key = prev_ikey.wrapping_add(ikey.sv()?);
                 prev_ikey = key;
                 let n = put_sqlite(&mut vb, key as u64);
                 cell.extend_from_slice(&vb[..n]);
             } else {
                 scratch.clear();
-                let rowid = gds[gi].next(k == 13, g.fmt4, ctxs[gi].as_ref(), &mut scratch)?;
+                let rowid = gds[gi].next(k == T_TABLE_LEAF, g.fmt4, ctxs[gi].as_ref(), &mut scratch)?;
                 if given.is_some() && scratch.len() > rec_cap {
                     return Err(corrupt());
                 }
@@ -1203,11 +1222,11 @@ fn rebuild<S: Sink>(
                 let plen = pay.len() as u64;
                 let n = put_sqlite(&mut vb, plen);
                 cell.extend_from_slice(&vb[..n]);
-                if k == 13 {
+                if k == T_TABLE_LEAF {
                     let n = put_sqlite(&mut vb, rowid as u64);
                     cell.extend_from_slice(&vb[..n]);
                 }
-                local = g.local(plen, k == 13);
+                local = g.local(plen, k == T_TABLE_LEAF);
                 cell.extend_from_slice(&pay[..local]);
                 if local < pay.len() {
                     novf = g.ovf_pages(plen, local);

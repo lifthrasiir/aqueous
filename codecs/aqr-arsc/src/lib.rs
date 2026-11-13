@@ -27,3 +27,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub fn corrupt() -> Error {
     Error("corrupt input")
 }
+
+/// The streams' reads failing ([`aqr_common::cursor`]): corrupt input, as all of it.
+impl From<aqr_common::Corrupt> for Error {
+    fn from(_: aqr_common::Corrupt) -> Error {
+        corrupt()
+    }
+}

@@ -1,5 +1,5 @@
 //! aqr-sqlite as a module of entry formulas (see aqr-formula): the page geometry as
-//! parameters, the 18 streams of the transform as raw input slots (FORMAT.md, "Formula
+//! parameters, the streams of the transform as raw input slots (FORMAT.md, "Formula
 //! module").
 
 use crate::transform::{self, NSTREAMS, STREAM_NAMES};

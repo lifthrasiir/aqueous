@@ -14,6 +14,9 @@ use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 use xxhash_rust::xxh3::xxh3_64;
 
+/// The streams of a group: record, rowid, rawpay, tag, int, real, len, bytes.
+pub const GROUP_STREAMS: usize = 8;
+
 /// Integer content size by serial type 0..=9.
 pub const INT_SIZE: [usize; 10] = [0, 1, 2, 3, 4, 6, 8, 8, 0, 0];
 
@@ -96,7 +99,7 @@ pub fn parse(pay: &[u8], cols: &mut Vec<(u64, u32)>) -> bool {
             return false;
         }
     }
-    header_len((hl - n) as u64) == hl as u64 && b == pay.len()
+    hl >= n && header_len((hl - n) as u64) == hl as u64 && b == pay.len()
 }
 
 /// Appends the index entry SQLite builds from row `r` of a table: its indexed columns
@@ -367,10 +370,9 @@ impl GroupEnc {
         o
     }
 
-    /// Appends the group's streams, and its directory entry.
     /// Hands the group's streams over as pieces (moved, not copied), and writes its
     /// directory entry.
-    pub fn finish(self, dir: &mut Vec<u8>, s: &mut [Vec<Vec<u8>>; 8]) {
+    pub fn finish(self, dir: &mut Vec<u8>, s: &mut [Vec<Vec<u8>>; GROUP_STREAMS]) {
         let [rec, rowid, rawpay, tag, int, real, len, bytes] = s;
         let give = |to: &mut Vec<Vec<u8>>, v: Vec<u8>| {
             if !v.is_empty() {
@@ -570,7 +572,7 @@ pub struct RefCtx {
 
 impl<'a> GroupDec<'a> {
     /// Takes the group's directory entry and streams from the cursors.
-    pub fn new(dir: &mut Rd<'a>, s: &mut [Rd<'a>; 8]) -> Result<Self> {
+    pub fn new(dir: &mut Rd<'a>, s: &mut [Rd<'a>; GROUP_STREAMS]) -> Result<Self> {
         let [rec, rowid, rawpay, tag, int, real, len, bytes] = s;
         let rec = rec.sub(dir.usize()?)?;
         let rowid = rowid.sub(dir.usize()?)?;
@@ -614,8 +616,8 @@ impl<'a> GroupDec<'a> {
     }
 
     /// The group's records (as its codes of records tell).
-    pub fn records(&self) -> Result<usize> {
-        Ok(self.records)
+    pub fn records(&self) -> usize {
+        self.records
     }
 
     /// The room the decoder takes: of its columns, of each column's values to repeat, and of
@@ -657,7 +659,7 @@ impl<'a> GroupDec<'a> {
             }
             _ => {
                 let mut vals = std::mem::take(&mut self.vals);
-                let res = self.columns((code - R_COLS) as usize, fmt4, &mut vals, out);
+                let res = self.columns(usize::try_from(code - R_COLS).map_err(|_| corrupt())?, fmt4, &mut vals, out);
                 self.vals = vals;
                 res?
             }

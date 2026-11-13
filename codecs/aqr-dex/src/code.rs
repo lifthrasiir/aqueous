@@ -216,7 +216,7 @@ impl Caches {
 
     /// An index of kind `k` from `hit` and its stream of misses, below `max` + 1.
     pub fn decode(&mut self, k: Kind, raw: &mut Raw, max: u32) -> Result<u32> {
-        let i = raw[k.hits()].var()? as usize;
+        let i = usize::try_from(raw[k.hits()].var()?).map_err(|_| corrupt())?;
         let (v, at) = if i > 0 {
             let r = &self.recent[k as usize][..self.len[k as usize]];
             (*r.get(i - 1).ok_or_else(corrupt)?, Some(i - 1))
