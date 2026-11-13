@@ -336,7 +336,7 @@ where each eᵢ is a multiple of residue i's partition size (§8.2.1) with 0 ≤
 long blocks are 2048 samples; no setup of its has a larger `end`.) The search
 returns every candidate whose assembled setup has the CRC-32 sought, over all skeletons.
 
-A match is only probable: among the up to 32 × 129² candidates some other setup can share a
+A match is only probable: among the up to 44 × 129² candidates some other setup can share a
 CRC-32 by chance (about one sought CRC-32 in 8,000). The caller treats a found setup as a guess and confirms it by the stream, which a
 wrong setup does not parse (or does not reproduce).
 
@@ -351,8 +351,8 @@ look up crc(x₀) ⊕ their Dᵢ ⊕ target. Every database skeleton has one or 
 
 ### 8.4 How the database was made (informative)
 
-The setups are those of `vorbis_encode_setup_vbr(channels, rate, quality)` of libvorbis 1.3.7
-changed as FMOD changed it. FMOD codes more than two channels with the mono setups, so channels
+The rows' setups are those of `vorbis_encode_setup_vbr(channels, rate, quality)` of libvorbis
+1.3.7 changed as FMOD changed it. FMOD codes more than two channels with the mono setups, so channels
 are 1 or 2. The change, inferred by matching libvorbis's output against the 161 setups known
 from FMOD (vgmstream's table), is described in `scripts/vorbis_setups.py`; with it, every one of
 the 161 is reproduced. Unmodified libvorbis (1.1.0 to 1.3.7 agree) gives 107 of them.
@@ -369,6 +369,11 @@ vgmstream's table has it, and the channels, rates and quality intervals that giv
 The changed libvorbis is not in this repository. The database holds the parts of the setups,
 as found in libvorbis's output (Xiph.Org's codebooks among them).
 
-The database has 480 codebooks (69,374 bytes), 7 floors, 32 residues, 4 mappings and 2 modes,
-32 skeletons and 260 rows, 76,133 bytes in all. Of the rows, 197 are setups unmodified
+Then the setups of unmodified libvorbis 1.3.7 (from Xiph.Org's release) at FSB5's rates, 6000,
+7000, 12000 and 96000 Hz, channels 1 and 2 and the same qualities, 268 setups, added their parts
+and skeletons after those (`vorbis_setup_db.py --base`), and no rows: Wwise's media use these
+(blocks of 512 and 4096 below quality 0, which FMOD's change does not make).
+
+The database has 524 codebooks (71,648 bytes), 13 floors, 41 residues, 4 mappings and 2 modes,
+44 skeletons and 260 rows, 79,861 bytes in all. Of the rows, 197 are setups unmodified
 libvorbis makes and 63 only the changed one; all 161 of vgmstream's table are among them.

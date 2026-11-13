@@ -14,8 +14,13 @@ Every distinct setup found contributes its parts and skeleton; only those found 
 setup is reproduced (the oracle that made it, and the channels, rate and quality intervals) and
 whether `--table` (vgmstream's vorbis_codebooks_fsb.h, by CRC only) has it.
 
+`--base DB` extends a database instead: the setups of RUNS_DIR add their parts and skeletons
+after the database's own (whose numbers stay), and no rows; the database's rows and its TSV
+stay as they are.
+
 Usage: python3 scripts/vorbis_setup_db.py RUNS_DIR --write DB --tsv TSV [--rows-rates R,...]
        [--stock RUNS_DIR...] [--table FILE]
+       python3 scripts/vorbis_setup_db.py RUNS_DIR --base DB --write DB
 """
 
 import argparse
@@ -205,15 +210,85 @@ def bits_field(n, v):
     return varint(n) + v.to_bytes((n + 7) // 8, 'little')
 
 
+def read_db(db):
+    """A database's part pools ({(bits, value): id} per kind), skeletons ({ids: number}) and
+    the bytes of its row list (count and rows)."""
+    at = 5
+    assert db[:5] == b'AQVS', 'not a database'
+
+    def get():
+        nonlocal at
+        n, shift = 0, 0
+        while True:
+            b = db[at]
+            at += 1
+            n |= (b & 0x7F) << shift
+            shift += 7
+            if b < 0x80:
+                return n
+
+    pools = {}
+    for k in PART_KINDS:
+        pools[k] = {}
+        for i in range(get()):
+            n = get()
+            size = (n + 7) // 8
+            pools[k][(n, int.from_bytes(db[at:at + size], 'little'))] = i
+            at += size
+    skeletons = {}
+    for i in range(get()):
+        skeletons[tuple(tuple(get() for _ in range(get())) for _ in PART_KINDS)] = i
+    return pools, skeletons, db[at:]
+
+
+def write_db(pools, skeletons, rows):
+    db = bytearray(b'AQVS')
+    for k in PART_KINDS:
+        db += varint(len(pools[k]))
+        for n, v in pools[k]:
+            db += bits_field(n, v)
+    db += varint(len(skeletons))
+    for ids in skeletons:
+        for kind_ids in ids:
+            db += varint(len(kind_ids)) + b''.join(varint(i) for i in kind_ids)
+    return bytes(db + rows)
+
+
+def extend(args):
+    base = args.base.read_bytes()
+    pools, skeletons, rows = read_db(base)
+    assert write_db(pools, skeletons, rows) == base, 'the database does not read back'
+    found = runs(args.runs_dir)
+    before = {k: len(v) for k, v in pools.items()}, len(skeletons)
+    for crc in sorted(found):
+        data = (args.runs_dir / 'setups' / f'{crc}.bin').read_bytes()
+        assert '%08x' % zlib.crc32(data) == crc, crc
+        parts, ends = split(data, min(c for c, *_ in found[crc]))
+        assert assemble(parts, [e for e, _ in ends]) == data, f'{crc} does not assemble'
+        ids = tuple(tuple(pools[k].setdefault(p, len(pools[k])) for p in parts[k]) for k in PART_KINDS)
+        skeletons.setdefault(ids, len(skeletons))
+    db = write_db(pools, skeletons, rows)
+    args.write.write_bytes(db)
+    print(f'{len(found)} setups; skeletons {before[1]} -> {len(skeletons)}')
+    print('parts:', ', '.join(f'{k} {before[0][k]} -> {len(v)}' for k, v in pools.items()),
+          f'(codebooks {sum(n for n, _ in pools["codebook"]) // 8} bytes)')
+    print(f'{args.write}: {len(base)} -> {len(db)} bytes')
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('runs_dir', type=Path)
     ap.add_argument('--write', type=Path, required=True)
-    ap.add_argument('--tsv', type=Path, required=True)
+    ap.add_argument('--tsv', type=Path)
+    ap.add_argument('--base', type=Path, help='a database to extend (no rows added)')
     ap.add_argument('--rows-rates', default=ROW_RATES)
     ap.add_argument('--stock', type=Path, nargs='*', default=[], help='runs of unmodified libvorbis')
     ap.add_argument('--table', type=Path)
     args = ap.parse_args()
+    if args.base:
+        return extend(args)
+    if not args.tsv:
+        ap.error('--tsv is needed')
 
     found = runs(args.runs_dir)
     stock = set()
