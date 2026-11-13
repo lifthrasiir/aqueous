@@ -96,6 +96,9 @@ impl Sfx {
             natives: Vec::new(),
             threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
         };
+        // (the merged blobs' imports from the Visual C++ runtime are bound to this program's)
+        #[cfg(target_env = "msvc")]
+        aqr_blob::keep_vcruntime();
         let base = &raw const __ImageBase as usize;
         let u32_at = |b: &[u8], o: usize| b.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
         let (rva, len) = unsafe {

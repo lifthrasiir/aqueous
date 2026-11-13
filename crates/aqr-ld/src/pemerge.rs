@@ -471,6 +471,7 @@ pub fn merge_bytes(stub: Vec<u8>, modules: &[(String, Vec<u8>)], apply_name: &st
         blobs.push((name, va, va.wrapping_sub(b.first), b));
     }
     let placed: Vec<(String, u32)> = blobs.iter().map(|(_, _, c, b)| (b.name.clone(), *c)).collect();
+    let vcrt = vcruntime_table(&pe);
 
     for (name, va, c, b) in blobs {
         let mut img = b.image;
@@ -489,6 +490,16 @@ pub fn merge_bytes(stub: Vec<u8>, modules: &[(String, Vec<u8>)], apply_name: &st
             let v = u64::from_le_bytes(img[o..o + 8].try_into().unwrap()).wrapping_add(delta);
             img[o..o + 8].copy_from_slice(&v.to_le_bytes());
             new_relocs.push(c.wrapping_add(loc));
+        }
+        // the imports from the Visual C++ runtime: the stub's own copy, where it has its table
+        if let Some(vcrt) = &vcrt {
+            for (slot, i) in
+                aqr_blob::take_vcruntime(&mut img, b.first, b.import_dir_rva).map_err(|e| format!("{name}: {e}"))?
+            {
+                let o = (slot - b.first) as usize;
+                img[o..o + 8].copy_from_slice(&vcrt[i].to_le_bytes());
+                new_relocs.push(c.wrapping_add(slot));
+            }
         }
         descriptors.extend_from_slice(&fix_imports(&mut img, b.first, b.import_dir_rva, c)?);
         entries.push(Entry {
@@ -602,6 +613,29 @@ pub fn merge_bytes(stub: Vec<u8>, modules: &[(String, Vec<u8>)], apply_name: &st
     put_u32(&mut pe.buf, anchor + 16 + 4, disp_len);
 
     Ok(pe.buf)
+}
+
+/// The addresses (at the stub's image base) of the stub's functions of the Visual C++ runtime, as
+/// its `aqr_blob::VCRUNTIME_TABLE` has them, if it has one: the modules' imports from the runtime
+/// are bound to them, so that the merged program loads no `vcruntime140.dll` (which no Windows
+/// carries). A stub without the table (the stub of pemerge-test.sh, aqr-dll-shim) keeps them as
+/// imports.
+fn vcruntime_table(pe: &Pe) -> Option<Vec<u64>> {
+    let (base, size) = (pe.image_base(), pe.size_of_image() as u64);
+    let n = aqr_blob::VCRUNTIME_NAMES.len();
+    let magic = aqr_blob::VCRUNTIME_MAGIC;
+    let mut from = 0;
+    while let Some(k) = find(&pe.buf[from..], magic) {
+        let at = from + k + magic.len();
+        let table: Option<Vec<u64>> =
+            (0..n).map(|i| pe.buf.get(at + i * 8..at + i * 8 + 8)).map(|b| b.map(|b| u64(b, 0))).collect();
+        // (the table itself, not the magic's bytes elsewhere: each an address in the image)
+        if let Some(t) = table.filter(|t| t.iter().all(|&v| v > base && v < base + size)) {
+            return Some(t);
+        }
+        from += k + 1;
+    }
+    None
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {

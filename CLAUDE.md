@@ -78,6 +78,10 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     time (Windows x86-64: relocated, imports between them and from system libraries bound,
     exception tables registered), and (feature `runner`) the interpreter blob's client: its
     `Vtable`, `Interpreter` (a `Runner`), failures crossing the C ABI with their kinds.
+    Windows binaries link the Visual C++ runtime statically and the UCRT as Windows 10's DLL
+    (`.cargo/config.toml`), so no redistributable is needed; the blobs still import
+    vcruntime140.dll (a static copy would go uninitialised: no DllMain runs), and `load` and
+    `aqr-ld merge` bind those imports to the program's own (`VCRUNTIME_TABLE`).
   - `aqr-sfx` — the self-extracting apply logic (a library): `Sfx` finds the blobs merged into the
     program through the dispatch table's anchor — native module blobs named `HASH/SLOTS`
     (`native_name`: the module's hash and task slots), the interpreter blob `aqr-interp` — and is

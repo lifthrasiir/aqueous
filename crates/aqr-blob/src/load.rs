@@ -1,7 +1,8 @@
 //! Blobs placed in memory at run time (Windows x86-64): as `aqr-ld merge` places them in a stub,
 //! but into memory allocated for them, by the program that carries them as data. Each blob's
 //! relocations are applied for where it lands, its imports from the other blobs of the set
-//! written as their addresses, its imports from system libraries bound (`LoadLibraryA`,
+//! written as their addresses, its imports from the Visual C++ runtime bound to this program's
+//! own ([`crate::VCRUNTIME`]), those from system libraries bound (`LoadLibraryA`,
 //! `GetProcAddress`), and its exception table registered for the unwinder. No DllMain or TLS
 //! callback runs, as none does in a merge. What is placed stays for the life of the process.
 
@@ -92,6 +93,14 @@ pub fn load(set: &[&[u8]]) -> Result<Image> {
             let j = j.ok_or_else(|| format!("{}: {} is not loaded, which it imports from", b.name, bind.lib))?;
             let v = (bases[j] + bind.rva as usize) as u64;
             img[at(bind.slot)..at(bind.slot) + 8].copy_from_slice(&v.to_le_bytes());
+        }
+        // the imports from the Visual C++ runtime: this program's own copy (crate::VCRUNTIME)
+        #[cfg(target_env = "msvc")]
+        for (slot, i) in
+            crate::take_vcruntime(img, b.first, b.import_dir_rva).map_err(|e| format!("{}: {e}", b.name))?
+        {
+            let v = crate::VCRUNTIME_TABLE.functions[i] as usize as u64;
+            img[at(slot)..at(slot) + 8].copy_from_slice(&v.to_le_bytes());
         }
         // the imports from system libraries, as the loader binds them
         if b.import_dir_rva != 0 {

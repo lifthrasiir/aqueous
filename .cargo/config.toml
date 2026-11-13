@@ -10,5 +10,16 @@ aqr = "run -q -p aqr-bincache --"
 # statically (no redistributable to install).
 win7 = "build --profile dist --target x86_64-win7-windows-msvc -Zbuild-std"
 
+# Windows 10 on: the Visual C++ runtime linked statically (no Windows carries vcruntime140.dll:
+# the redistributable installs it), the UCRT of the system (Windows 10's own) linked as a DLL.
+# The blobs (the no-TLS target's builds) still import vcruntime140.dll; the programs placing them
+# bind those imports to their own copy (aqr_blob::VCRUNTIME).
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=/NODEFAULTLIB:libucrt.lib",
+    "-C", "link-arg=/DEFAULTLIB:ucrt.lib",
+]
+
 [target.x86_64-win7-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]

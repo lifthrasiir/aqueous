@@ -59,6 +59,141 @@ fn u32_at(b: &[u8], o: usize) -> u32 {
     u32::from_le_bytes(b[o..o + 4].try_into().unwrap())
 }
 
+// ---- the Visual C++ runtime of blobs
+
+/// The library of the Visual C++ runtime (lowercase), which blobs import from but no Windows
+/// carries (the redistributable installs it). The programs placing blobs link it statically
+/// (`.cargo/config.toml`: the C runtime static, the UCRT of Windows 10 on not), and bind the
+/// blobs' imports from it to their own copy ([`VCRUNTIME_TABLE`]), so none is loaded. A blob
+/// could not link it statically itself: its copy would be left uninitialised (no DllMain runs
+/// for a blob), and its exception handling, which panics go through, aborts so.
+pub const VCRUNTIME: &str = "vcruntime140.dll";
+
+/// The functions of [`VCRUNTIME`] that blobs import, in the order of [`VCRUNTIME_TABLE`]'s.
+pub const VCRUNTIME_NAMES: [&str; 8] = [
+    "memcpy",
+    "memmove",
+    "memset",
+    "memcmp",
+    "__C_specific_handler",
+    "__CxxFrameHandler3",
+    "_CxxThrowException",
+    "__std_type_info_destroy_list",
+];
+
+/// The magic of [`VCRUNTIME_TABLE`], by which `aqr-ld merge` finds it in a stub's file.
+pub const VCRUNTIME_MAGIC: &[u8; 16] = b"\x89AQRVCRUNTIMEv1\x00";
+
+/// The program's own functions of [`VCRUNTIME_NAMES`], after [`VCRUNTIME_MAGIC`].
+#[cfg(all(windows, target_arch = "x86_64", target_env = "msvc"))]
+#[repr(C)]
+pub struct VcruntimeTable {
+    pub magic: [u8; 16],
+    pub functions: [unsafe extern "C" fn(); 8],
+}
+
+#[cfg(all(windows, target_arch = "x86_64", target_env = "msvc"))]
+mod vcruntime {
+    use core::ffi::c_void;
+
+    // (only their addresses are taken: the signatures matter only to rustc, which checks the
+    // ones that std uses)
+    unsafe extern "C" {
+        fn memcpy(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
+        fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
+        fn memset(dst: *mut c_void, c: i32, n: usize) -> *mut c_void;
+        fn memcmp(a: *const c_void, b: *const c_void, n: usize) -> i32;
+        fn __C_specific_handler();
+        fn __CxxFrameHandler3();
+        fn _CxxThrowException();
+        fn __std_type_info_destroy_list();
+    }
+
+    type Mem = unsafe extern "C" fn(*mut c_void, *const c_void, usize) -> *mut c_void;
+
+    /// A function's address as the table holds it.
+    const fn erase<F: Copy>(f: F) -> unsafe extern "C" fn() {
+        assert!(size_of::<F>() == size_of::<unsafe extern "C" fn()>());
+        // SAFETY: a function pointer of another signature, never called through this one
+        unsafe { core::mem::transmute_copy(&f) }
+    }
+
+    /// The program's functions of the Visual C++ runtime that blobs import, found by its magic
+    /// in a stub's file by `aqr-ld merge` and used by [`crate::load`]. A program into which blobs
+    /// are merged must reference it ([`keep_vcruntime`]), or the linker drops it.
+    #[used]
+    #[unsafe(no_mangle)]
+    pub static VCRUNTIME_TABLE: super::VcruntimeTable = super::VcruntimeTable {
+        magic: *super::VCRUNTIME_MAGIC,
+        functions: [
+            erase::<Mem>(memcpy),
+            erase::<Mem>(memmove),
+            erase::<unsafe extern "C" fn(*mut c_void, i32, usize) -> *mut c_void>(memset),
+            erase::<unsafe extern "C" fn(*const c_void, *const c_void, usize) -> i32>(memcmp),
+            __C_specific_handler,
+            __CxxFrameHandler3,
+            _CxxThrowException,
+            __std_type_info_destroy_list,
+        ],
+    };
+
+    /// Keeps [`VCRUNTIME_TABLE`] in the program (for `aqr-ld merge` to find).
+    pub fn keep_vcruntime() {
+        std::hint::black_box(&VCRUNTIME_TABLE);
+    }
+}
+#[cfg(all(windows, target_arch = "x86_64", target_env = "msvc"))]
+pub use vcruntime::{VCRUNTIME_TABLE, keep_vcruntime};
+
+/// Takes the import descriptor of [`VCRUNTIME`] out of the import directory at `dir_rva` of image
+/// `img` (its bytes from RVA `first`), the others moved up, and gives the slots of its import
+/// address table with the index of each function in [`VCRUNTIME_NAMES`]: for whoever places the
+/// image to write the program's own functions there.
+pub fn take_vcruntime(img: &mut [u8], first: u32, dir_rva: u32) -> Result<Vec<(u32, usize)>> {
+    if dir_rva == 0 {
+        return Ok(Vec::new());
+    }
+    let at = |rva: u32| rva.checked_sub(first).map(|x| x as usize).filter(|&x| x < img.len());
+    let cstr = |img: &[u8], rva: u32| -> Result<Vec<u8>> {
+        let s = img.get(at(rva).ok_or("an import name out of the image")?..).unwrap_or_default();
+        let end = s.iter().position(|&c| c == 0).ok_or("unterminated import name")?;
+        Ok(s[..end].to_vec())
+    };
+    let u64_at = |img: &[u8], o: usize| u64::from_le_bytes(img[o..o + 8].try_into().unwrap());
+    let start = at(dir_rva).ok_or("the import directory out of the image")?;
+    let (mut slots, mut kept) = (Vec::new(), Vec::new());
+    let mut d = start;
+    while img[d..d + 20].iter().any(|&b| b != 0) {
+        let (oft, name, ft) = (u32_at(img, d), u32_at(img, d + 12), u32_at(img, d + 16));
+        if !cstr(img, name)?.eq_ignore_ascii_case(VCRUNTIME.as_bytes()) {
+            kept.extend_from_slice(&img[d..d + 20]);
+            d += 20;
+            continue;
+        }
+        let lookup = if oft != 0 { oft } else { ft };
+        let lookup = at(lookup).ok_or("an import table out of the image")?;
+        for k in 0.. {
+            let v = u64_at(img, lookup + k * 8);
+            if v == 0 {
+                break;
+            }
+            let n = match v & 0x8000_0000_0000_0000 {
+                0 => cstr(img, v as u32 + 2)?,
+                _ => return Err(format!("{VCRUNTIME}: an import by ordinal")),
+            };
+            let i = VCRUNTIME_NAMES.iter().position(|f| f.as_bytes() == n).ok_or_else(|| {
+                let n = String::from_utf8_lossy(&n);
+                format!("{VCRUNTIME}: {n} is imported, which aqr_blob::VCRUNTIME_NAMES does not have")
+            })?;
+            slots.push((ft + k as u32 * 8, i));
+        }
+        d += 20;
+    }
+    img[start..start + kept.len()].copy_from_slice(&kept);
+    img[start + kept.len()..d + 20].fill(0);
+    Ok(slots)
+}
+
 impl Blob {
     /// The libraries it binds imports from, each once.
     pub fn libs(&self) -> Vec<String> {
@@ -188,5 +323,46 @@ mod tests {
         assert_eq!(c.to_bytes(), b.to_bytes());
         assert_eq!(c.libs(), ["a.dll", "b.dll"]);
         assert!(Blob::from_bytes(&b.to_bytes()[..100]).is_err());
+    }
+
+    /// An image (from RVA 0x1000) importing from kernel32.dll and VCRUNTIME140.dll.
+    fn image(vcrt: &[&str]) -> Vec<u8> {
+        let mut img = vec![0u8; 0x1000];
+        let put = |img: &mut [u8], o: usize, v: u64, n: usize| img[o..o + n].copy_from_slice(&v.to_le_bytes()[..n]);
+        let name = |img: &mut [u8], o: usize, s: &str| img[o..o + s.len()].copy_from_slice(s.as_bytes());
+        // descriptors at 0x1000 (lookup table, name, address table), then the terminator
+        for (k, (lib, lookup, ft)) in [("kernel32.dll", 0x1200, 0x1300), ("VCRUNTIME140.dll", 0x1400, 0x1500)].iter().enumerate() {
+            put(&mut img, k * 20, *lookup, 4);
+            put(&mut img, k * 20 + 12, 0x1100 + k as u64 * 0x20, 4);
+            put(&mut img, k * 20 + 16, *ft, 4);
+            name(&mut img, 0x100 + k * 0x20, lib);
+        }
+        let funcs: [&[&str]; 2] = [&["GetLastError"], vcrt];
+        for (k, fs) in funcs.iter().enumerate() {
+            for (i, f) in fs.iter().enumerate() {
+                let hint = 0x600 + k * 0x200 + i * 0x40;
+                name(&mut img, hint + 2, f);
+                for table in [0x200 + k * 0x200, 0x300 + k * 0x200] {
+                    put(&mut img, table + i * 8, 0x1000 + hint as u64, 8);
+                }
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn vcruntime_taken() {
+        let mut img = image(&["memset", "__CxxFrameHandler3"]);
+        let slots = take_vcruntime(&mut img, 0x1000, 0x1000).unwrap();
+        assert_eq!(slots, [(0x1500, 2), (0x1508, 5)]);
+        // kernel32.dll's descriptor is left alone, then the terminator
+        assert_eq!(u32_at(&img, 12), 0x1100);
+        assert!(img[20..40].iter().all(|&b| b == 0));
+        // none left to take
+        assert_eq!(take_vcruntime(&mut img, 0x1000, 0x1000).unwrap(), []);
+
+        let mut img = image(&["memset", "strlen"]);
+        let e = take_vcruntime(&mut img, 0x1000, 0x1000).unwrap_err();
+        assert!(e.contains("strlen"), "{e}");
     }
 }
