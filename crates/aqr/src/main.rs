@@ -282,6 +282,7 @@ use aqr_compress::{Options, compress_formula_to, detect, kind_by_name};
 use aqr_decompress::{Native, Wasm, sandbox};
 use aqr_formula::Bytes;
 use aqr_formula::aqr::{self, Entry, EntryNode, Failure, Tree, name_bytes, name_from};
+use aqr_l10n::size;
 use meta::{os_bytes, os_from};
 use view::Ticking;
 
@@ -563,6 +564,46 @@ struct Args {
     /// the archive; decompressing, the file of an archive of a single file, or the one of its
     /// paths given.
     stdout: bool,
+}
+
+/// What is compressed, by input: the path found, the path as given (from the directory of `-C`
+/// before it, which it is archived by) and the path in the archive that `--rename` gives it.
+#[derive(Clone, Copy)]
+struct Inputs<'a> {
+    paths: &'a [PathBuf],
+    given: &'a [PathBuf],
+    renames: &'a [Option<PathBuf>],
+}
+
+impl<'a> Inputs<'a> {
+    fn of(a: &'a Args) -> Self {
+        Inputs { paths: &a.inputs, given: &a.given, renames: &a.renames }
+    }
+
+    /// The inputs from the `skip`th on.
+    fn from(self, skip: usize) -> Self {
+        Inputs { paths: &self.paths[skip..], given: &self.given[skip..], renames: &self.renames[skip..] }
+    }
+
+    /// Each input alone.
+    fn each(self) -> impl Iterator<Item = Inputs<'a>> {
+        use std::slice::from_ref as one;
+        let all = self.paths.iter().zip(self.given).zip(self.renames);
+        all.map(|((path, given), rename)| Inputs { paths: one(path), given: one(given), renames: one(rename) })
+    }
+
+    /// The path of the input where it is alone and not renamed.
+    fn sole(&self) -> Option<&'a PathBuf> {
+        match (self.paths, self.renames) {
+            ([input], [None]) => Some(input),
+            _ => None,
+        }
+    }
+
+    /// The paths found, as one line.
+    fn shown(&self) -> String {
+        self.paths.iter().map(|i| i.display().to_string()).collect::<Vec<_>>().join(" ")
+    }
 }
 
 /// The format of the archives made: Aqueous, or another of [`aqr_pack`] at its level.
@@ -1430,14 +1471,14 @@ fn bound_of(v: &str) -> Result<u64, String> {
     }
 }
 
-/// Bytes of a size, for people.
-fn size(n: f64) -> String {
-    match n {
-        n if n < 1e3 => format!("{n:.0} B"),
-        n if n < 1e6 => format!("{:.1} KB", n / 1e3),
-        n if n < 1e9 => format!("{:.2} MB", n / 1e6),
-        n => format!("{:.2} GB", n / 1e9),
-    }
+/// Bytes `b` as lowercase hexadecimal.
+pub(crate) fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// The ending of a noun counted `n`: `s` unless it is one.
+pub(crate) fn plural<T: PartialEq + From<u8>>(n: T) -> &'static str {
+    if n == T::from(1) { "" } else { "s" }
 }
 
 fn percent(a: f64, of: f64) -> String {
@@ -1501,17 +1542,16 @@ fn compress_all(a: &Args) -> Result<(), String> {
         if a.inputs.len() <= skip {
             return Err(format!("{}: no inputs given", a.verb()));
         }
-        return remove(&compress_into(a, &a.inputs[skip..], &a.given[skip..], &a.renames[skip..], &out)?);
+        return remove(&compress_into(a, Inputs::of(a).from(skip), &out)?);
     }
     match &a.output {
-        Some(out) => remove(&compress_into(a, &a.inputs, &a.given, &a.renames, out)?),
+        Some(out) => remove(&compress_into(a, Inputs::of(a), out)?),
         None => {
             // (where some of an input is kept, the next ones still archived and removed)
             let mut kept = Ok(());
-            for ((input, given), to) in a.inputs.iter().zip(&a.given).zip(&a.renames) {
-                let out = with_ext(input, &a.format.ext());
-                use std::slice::from_ref as one;
-                let gone = compress_into(a, one(input), one(given), one(to), &out)?;
+            for each in Inputs::of(a).each() {
+                let out = with_ext(&each.paths[0], &a.format.ext());
+                let gone = compress_into(a, each, &out)?;
                 kept = kept.and(remove(&gone));
             }
             kept
@@ -1531,7 +1571,7 @@ fn compress_stdio(a: &Args) -> Result<(), String> {
         (false, Some(o)) => o.clone(),
         (false, None) => unreachable!("standard input to standard output by default"),
     };
-    let gone = compress_into(a, &inputs, &given, &a.renames, &out)?;
+    let gone = compress_into(a, Inputs { paths: &inputs, given: &given, renames: &a.renames }, &out)?;
     if a.stdout && !stdio::streamed() {
         stdio::copy_out(&out)?;
     }
@@ -1729,17 +1769,10 @@ impl aqr_compress::Source for Gathered {
     }
 }
 
-/// Compresses `inputs` (`given` as they were given) into `out`, each in the archive at the path
-/// `renames` gives it, if any.
-fn compress_into(
-    a: &Args,
-    inputs: &[PathBuf],
-    given: &[PathBuf],
-    renames: &[Option<PathBuf>],
-    out: &Path,
-) -> Result<Vec<Gone>, String> {
+/// Compresses `inputs` into `out`.
+fn compress_into(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, String> {
     match a.format {
-        Pack::Aqr => compress_aqr(a, inputs, given, renames, out),
+        Pack::Aqr => compress_aqr(a, inputs, out),
         Pack::Other(f, level) => {
             if a.append {
                 return Err(format!("{}: Aqueous archives alone are appended to", a.verb()));
@@ -1747,31 +1780,25 @@ fn compress_into(
             if a.journal.is_some() {
                 return Err("-j: Aqueous archives alone have a journal".into());
             }
-            pack_into(a, f, level, inputs, given, renames, out)
+            pack_into(a, f, level, inputs, out)
         }
-        Pack::Sfx => sfx_into(a, inputs, given, renames, out),
+        Pack::Sfx => sfx_into(a, inputs, out),
     }
 }
 
 /// Compresses `inputs` into self-extracting program `out` ([`sfx`]): the Aqueous archive made
 /// beside it first (a single file in it by its name), then the program of it.
-fn sfx_into(
-    a: &Args,
-    inputs: &[PathBuf],
-    given: &[PathBuf],
-    renames: &[Option<PathBuf>],
-    out: &Path,
-) -> Result<Vec<Gone>, String> {
+fn sfx_into(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, String> {
     sfx::pack()?;
     let Some(_) = output(a, out)? else { return Ok(Vec::new()) };
-    let renames = match (inputs, renames) {
-        ([input], [None]) if !input.is_dir() => vec![input.file_name().map(PathBuf::from)],
-        _ => renames.to_vec(),
+    let renames = match inputs.sole() {
+        Some(input) if !input.is_dir() => vec![input.file_name().map(PathBuf::from)],
+        _ => inputs.renames.to_vec(),
     };
     let mut tmp = out.as_os_str().to_owned();
     tmp.push(format!(".{}.aqr", std::process::id()));
     let tmp = PathBuf::from(tmp);
-    let made = compress_aqr(a, inputs, given, &renames, &tmp).and_then(|gone| {
+    let made = compress_aqr(a, Inputs { renames: &renames, ..inputs }, &tmp).and_then(|gone| {
         let archive = fs::read(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
         let made = sfx::make(&archive)?;
         fs::write(out, &made.exe).map_err(|e| format!("{}: {e}", out.display()))?;
@@ -1784,7 +1811,7 @@ fn sfx_into(
             "{}: self-extracting, {} module{} native ({} shared librar{}){}: {} ({} of the archive){}",
             out.display(),
             made.natives,
-            if made.natives == 1 { "" } else { "s" },
+            plural(made.natives),
             made.libs,
             if made.libs == 1 { "y" } else { "ies" },
             if made.interp { " and the interpreter" } else { "" },
@@ -1800,13 +1827,7 @@ fn sfx_into(
 }
 
 /// Compresses `inputs` into Aqueous archive `out` ([`compress_into`]).
-fn compress_aqr(
-    a: &Args,
-    inputs: &[PathBuf],
-    given: &[PathBuf],
-    renames: &[Option<PathBuf>],
-    out: &Path,
-) -> Result<Vec<Gone>, String> {
+fn compress_aqr(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, String> {
     if a.append && (a.passphrase || a.opt.mirrors) {
         return Err(format!(
             "{}: not with {}",
@@ -1833,17 +1854,11 @@ fn compress_aqr(
             (true, false) => "append",
             (true, true) => "sync",
         },
-        inputs,
+        inputs.paths,
         Some(out),
     );
     let start = Instant::now();
-    let rec = stats::record(
-        a.stats,
-        "compress",
-        inputs.iter().map(|i| i.display().to_string()).collect::<Vec<_>>().join(" "),
-        out.display().to_string(),
-        a.opt.threads,
-    );
+    let rec = stats::record(a.stats, "compress", inputs.shown(), out.display().to_string(), a.opt.threads);
     let mut opt = a.opt.clone();
     let sealing = pass::keys().sealing();
     opt.spill = spill_of(out, sealing.is_some())?;
@@ -1852,20 +1867,19 @@ fn compress_aqr(
     let meta = |p: &Path| fs::symlink_metadata(p).map_err(|e| format!("{}: {e}", p.display()));
     let mapper = Mapper::new().map_err(|e| format!("files not to be mapped: {e}"))?;
     // a single file: an archive of the file alone (but renamed: in a tree, at its name)
-    let followed = match (inputs, renames) {
-        ([input], [None]) if a.dereference => Some(follow(input)?),
+    let followed = match inputs.sole() {
+        Some(input) if a.dereference => Some(follow(input)?),
         _ => None,
     };
-    let single = match (followed.as_ref().map(std::slice::from_ref).unwrap_or(inputs), renames) {
-        _ if a.append => None,
-        ([input], [None]) => Some((input, meta(input)?)).filter(|(_, m)| m.is_file()),
+    let single = match followed.as_ref().or(inputs.sole()) {
+        Some(input) if !a.append => Some((input, meta(input)?)).filter(|(_, m)| m.is_file()),
         _ => None,
     };
     if single.is_some() && a.journal.is_some() {
         return Err("-j: not with an archive of a single file (it has no segments to name)".into());
     }
-    if single.is_some() && a.exclude.excludes(&archive_names(&given[0], None)?) {
-        return Err(format!("nothing to archive in {} (-x)", inputs[0].display()));
+    if single.is_some() && a.exclude.excludes(&archive_names(&inputs.given[0], None)?) {
+        return Err(format!("nothing to archive in {} (-x)", inputs.paths[0].display()));
     }
     if let Some((input, m)) = single {
         let mut atimes = Atimes(a.preserve.then(Vec::new));
@@ -1945,21 +1959,13 @@ fn compress_aqr(
     g.gone = a.rm.then(Vec::new);
     let gathering = aqr_common::trace::span("gather");
     // (what a session's inventory gathered of the same, if any)
-    if let Some(cached) = session::cached(a, inputs, given, renames) {
+    if let Some(cached) = session::cached(a, inputs) {
         g = cached;
     } else {
-        // (as long as it takes: a bar of no end known, and how many files)
-        let listing = view::Listing::new(bars());
-        let gathered = ticking(a, &listing, || -> Result<(), String> {
-            gather(inputs, given, renames, &mut g, &listing, a)?;
-            listing.finish();
-            Ok(())
-        });
-        listing.finish();
-        gathered?;
+        gather_listed(a, inputs, &mut g)?;
     }
     if g.tree.entries.is_empty() {
-        return Err(format!("nothing to archive in {}", inputs[0].display()));
+        return Err(format!("nothing to archive in {}", inputs.paths[0].display()));
     }
     g.link_groups();
     drop(gathering);
@@ -2070,7 +2076,7 @@ fn compress_aqr(
             .collect();
         s.add(stats::Run {
             mode: "compress",
-            input: inputs.iter().map(|i| i.display().to_string()).collect::<Vec<_>>().join(" "),
+            input: inputs.shown(),
             output: out.display().to_string(),
             seconds: start.elapsed().as_secs_f64(),
             threads: a.opt.threads,
@@ -2091,35 +2097,27 @@ fn pack_into(
     a: &Args,
     f: aqr_pack::Format,
     level: Option<u8>,
-    inputs: &[PathBuf],
-    given: &[PathBuf],
-    renames: &[Option<PathBuf>],
+    inputs: Inputs,
     out: &Path,
 ) -> Result<Vec<Gone>, String> {
     let Some(force) = output(a, out)? else { return Ok(Vec::new()) };
-    begin("compress", inputs, Some(out));
+    begin("compress", inputs.paths, Some(out));
     let start = Instant::now();
-    let renames = match (inputs, renames) {
-        ([input], [None]) => vec![input.file_name().map(PathBuf::from)],
-        _ => renames.to_vec(),
+    let renames = match inputs.sole() {
+        Some(input) => vec![input.file_name().map(PathBuf::from)],
+        None => inputs.renames.to_vec(),
     };
+    let inputs = Inputs { renames: &renames, ..inputs };
     let mapper = Mapper::new().map_err(|e| format!("files not to be mapped: {e}"))?;
     let mut g = Gathered::new(mapper, a.preserve);
     g.gone = a.rm.then(Vec::new);
-    if let Some(cached) = session::cached(a, inputs, given, &renames) {
+    if let Some(cached) = session::cached(a, inputs) {
         g = cached;
     } else {
-        let listing = view::Listing::new(bars());
-        let gathered = ticking(a, &listing, || -> Result<(), String> {
-            gather(inputs, given, &renames, &mut g, &listing, a)?;
-            listing.finish();
-            Ok(())
-        });
-        listing.finish();
-        gathered?;
+        gather_listed(a, inputs, &mut g)?;
     }
     if g.tree.entries.is_empty() {
-        return Err(format!("nothing to archive in {}", inputs[0].display()));
+        return Err(format!("nothing to archive in {}", inputs.paths[0].display()));
     }
     // (tar writes the later files of a link group as hard links to the first)
     g.link_groups();
@@ -2257,16 +2255,21 @@ fn ticking<T>(a: &Args, view: &dyn view::Ticking, work: impl FnOnce() -> T) -> T
     let done = std::sync::atomic::AtomicBool::new(false);
     let bars = !a.quiet && view.shows();
     std::thread::scope(|s| {
-        if bars {
+        let ticker = bars.then(|| {
             s.spawn(|| {
                 while !done.load(std::sync::atomic::Ordering::Relaxed) {
                     std::thread::park_timeout(std::time::Duration::from_millis(250));
-                    view.tick();
+                    if !done.load(std::sync::atomic::Ordering::Relaxed) {
+                        view.tick();
+                    }
                 }
-            });
-        }
+            })
+        });
         let r = work();
         done.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(t) = &ticker {
+            t.thread().unpark();
+        }
         if bars {
             view.tick();
         }
@@ -2279,7 +2282,7 @@ fn summary(out: &Path, files: usize, total: usize, len: usize, start: Instant) {
     eprintln!(
         "{}: {files} file{}, {} -> {} ({}) in {}, {:.1} MB/s",
         stdio::shown(out),
-        if files == 1 { "" } else { "s" },
+        plural(files),
         size(total as f64),
         size(len as f64),
         percent(len as f64, total as f64),
@@ -2338,21 +2341,27 @@ fn archive_names(input: &Path, to: Option<&Path>) -> Result<Vec<OsString>, Strin
     Ok(names)
 }
 
+/// Gathers `inputs` into `g` as [`gather`] does, telling how far it is (a bar of no end known, and
+/// how many files) for as long as it takes.
+fn gather_listed(a: &Args, inputs: Inputs, g: &mut Gathered) -> Result<(), String> {
+    let listing = view::Listing::new(bars());
+    let gathered = ticking(a, &listing, || -> Result<(), String> {
+        gather(inputs, g, &listing, a)?;
+        listing.finish();
+        Ok(())
+    });
+    listing.finish();
+    gathered
+}
+
 /// Gathers `inputs` (a directory alone and not renamed: its entries at the root; else each at
-/// the path [`archive_names`] gives it, as `given`, with `renames`) into `g`: walked first (what the
+/// the path [`archive_names`] gives it, as given, with the renames) into `g`: walked first (what the
 /// directories hold, a call for each), then what is read of each by its path ([`meta::stat`], a
 /// handle or so each, the most of the time) read on `a`'s threads, then made the entries in the
 /// order they were found. The files of an inode archived already are of its content (and
 /// forks), read once. Where `a` dereferences (`-L`), the links given and found are followed
 /// ([`Follow`]); what `a` excludes (`-x`) is left out.
-fn gather(
-    inputs: &[PathBuf],
-    given: &[PathBuf],
-    renames: &[Option<PathBuf>],
-    g: &mut Gathered,
-    l: &view::Listing,
-    a: &Args,
-) -> Result<(), String> {
+fn gather(inputs: Inputs, g: &mut Gathered, l: &view::Listing, a: &Args) -> Result<(), String> {
     let (threads, dereference, x) = (a.opt.threads, a.dereference, &a.exclude);
     let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
     let privileged = g.reader.privileged;
@@ -2360,6 +2369,7 @@ fn gather(
     let mut follow = Follow { on: dereference, chain: Vec::new(), warnings: Vec::new() };
     // (each input as it is read: where followed, what it leads to)
     let read: Vec<(PathBuf, fs::FileType)> = inputs
+        .paths
         .iter()
         .map(|input| {
             let m = fs::symlink_metadata(input).map_err(|e| err(input, e))?;
@@ -2369,7 +2379,7 @@ fn gather(
             })
         })
         .collect::<Result<_, String>>()?;
-    match (&read[..], renames) {
+    match (&read[..], inputs.renames) {
         // (a directory alone, its entries at the root; a link alone, not followed, is archived
         // as a link at its name)
         ([(dir, t)], [None]) if t.is_dir() => {
@@ -2390,7 +2400,7 @@ fn gather(
         _ => {
             // (by their names in the archive, the directories found among the inputs or on the way)
             let mut dirs: std::collections::HashMap<Vec<OsString>, usize> = Default::default();
-            for (((input, t), given), to) in read.iter().zip(given).zip(renames) {
+            for (((input, t), given), to) in read.iter().zip(inputs.given).zip(inputs.renames) {
                 let names = archive_names(given, to.as_deref())?;
                 if x.excludes(&names) {
                     continue;
@@ -2710,22 +2720,14 @@ fn write_whole<T>(
     force: bool,
     write: impl FnOnce(&mut fs::File) -> std::io::Result<T>,
 ) -> Result<T, String> {
-    let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
-    let mut name = path.file_name().ok_or(format!("{}: not a file's name", path.display()))?.to_owned();
+    write_placing(path, force, |file, _| write(file).map(|t| (t, false)))
+}
+
+/// The name under which `path` is written before it is renamed: beside it, of the process.
+pub(crate) fn part_of(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_owned();
     name.push(format!(".{}.part", std::process::id()));
-    let part = path.with_file_name(name);
-    let open = || fs::OpenOptions::new().read(true).write(true).create_new(true).open(&part);
-    let (mut file, stop) = stop::create(&part, open).map_err(|e| err(&part, e))?;
-    let r = write(&mut file).map_err(|e| err(path, e)).and_then(|t| {
-        drop(file);
-        place(&part, path, force)?;
-        Ok(t)
-    });
-    if r.is_err() {
-        let _ = fs::remove_file(&part);
-    }
-    drop(stop);
-    r
+    path.with_file_name(name)
 }
 
 /// The archive `out` appended to, as [`append::Opened::prior`] found it, of what `g` holds (to be
@@ -2788,13 +2790,11 @@ fn stopped_tree(
         ipc::tell(serde_json::json!({"event": "stopped", "kept": null}));
         stop::now(STOPPED);
     }
-    if !placed.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        let mut name = out.file_name().unwrap_or_default().to_owned();
-        name.push(format!(".{}.part", std::process::id()));
-        if let Err(e) = place(&out.with_file_name(name), out, force) {
-            eprintln!("aqr: {e}");
-            stop::now(1);
-        }
+    if !placed.swap(true, std::sync::atomic::Ordering::SeqCst)
+        && let Err(e) = place(&part_of(out), out, force)
+    {
+        eprintln!("aqr: {e}");
+        stop::now(1);
     }
     let (kept, kept_bytes) = (files.saturating_sub(s.files), total.saturating_sub(s.bytes));
     if !a.quiet {
@@ -2936,9 +2936,8 @@ fn write_placing<T>(
     write: impl FnOnce(&mut fs::File, &Path) -> std::io::Result<(T, bool)>,
 ) -> Result<T, String> {
     let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
-    let mut name = path.file_name().ok_or(format!("{}: not a file's name", path.display()))?.to_owned();
-    name.push(format!(".{}.part", std::process::id()));
-    let part = path.with_file_name(name);
+    path.file_name().ok_or(format!("{}: not a file's name", path.display()))?;
+    let part = part_of(path);
     let open = || fs::OpenOptions::new().read(true).write(true).create_new(true).open(&part);
     let (mut file, stop) = stop::create(&part, open).map_err(|e| err(&part, e))?;
     let mut placed = false;
@@ -3128,6 +3127,39 @@ impl To {
             },
         }))
     }
+
+    /// Where `a` has what is decoded of an archive of several files (`is_tree`) or of one written
+    /// (nowhere, with `--test` or `-o -`), and whether what is there is written over (`None`: the
+    /// output skipped).
+    fn destination<'p>(
+        &'p self,
+        a: &Args,
+        foreign: bool,
+        is_tree: bool,
+        ask: &'p extract::Ask<'p>,
+    ) -> Result<Option<(Option<extract::Place<'p>>, bool)>, String> {
+        Ok(Some(match (a.test, is_tree) {
+            (true, _) => (None, false),
+            _ if a.stdout => (None, false),
+            (false, true) => match self.place(a, foreign, ask)? {
+                Some((p, f)) => (Some(p), f),
+                None => return Ok(None),
+            },
+            (false, false) => match output(a, &self.named)? {
+                Some(f) => (None, f),
+                None => return Ok(None),
+            },
+        }))
+    }
+
+    /// What a frontend is told of the output at `place` as it begins, where that is known yet.
+    fn told<'p>(&'p self, a: &Args, place: &Option<extract::Place<'p>>) -> Option<&'p Path> {
+        let told = match place {
+            Some(p) => shown(p),
+            None => (!a.test).then_some(&*self.named),
+        };
+        told.map(|t| if a.stdout { Path::new("-") } else { t })
+    }
 }
 
 /// What a frontend is told of the output of place `p` as it begins, where that is known yet.
@@ -3191,9 +3223,7 @@ impl aqr_unpack::Sink for Unpacking<'_, '_> {
 /// was (not skipped, as a frontend answers).
 fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Format) -> Result<bool, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", stdio::shown(input));
-    let file = fs::File::open(input).map_err(|e| err(&exit::seen(e)))?;
-    // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
-    let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&exit::seen(e)))?;
+    let c = map_archive(input, &stdio::shown(input))?;
     let mut opened = aqr_unpack::Opened::open_with(format, &c, &a.names.encoding).map_err(|e| err(&exit::seen(e)))?;
     tell_names(a, input, opened.names_told());
     if a.select.is_some() && !opened.is_tree() {
@@ -3217,22 +3247,8 @@ fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Forma
         opened.select(s.unpacking(None));
     }
     let ask = |p: &Path| output(a, p);
-    let (place, force) = match (a.test, opened.is_tree()) {
-        (true, _) => (None, false),
-        (false, true) => match to.place(a, true, &ask)? {
-            Some((p, f)) => (Some(p), f),
-            None => return Ok(false),
-        },
-        (false, false) => match output(a, &to.named)? {
-            Some(f) => (None, f),
-            None => return Ok(false),
-        },
-    };
-    let told = match &place {
-        Some(p) => shown(p),
-        None => (!a.test).then_some(&*to.named),
-    };
-    let told = told.map(|t| if a.stdout { Path::new("-") } else { t });
+    let Some((place, force)) = to.destination(a, true, opened.is_tree(), &ask)? else { return Ok(false) };
+    let told = to.told(a, &place);
     begin(if a.test { "test" } else { "decompress" }, &[input.to_owned()], told);
     let start = Instant::now();
     let rec = stats::record(
@@ -3361,6 +3377,14 @@ fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Forma
     Ok(true)
 }
 
+/// File `input`, an archive, mapped to be read; errors told as of `shown`.
+pub(crate) fn map_archive(input: &Path, shown: &dyn std::fmt::Display) -> Result<memmap2::Mmap, String> {
+    let err = |e: std::io::Error| format!("{shown}: {}", exit::seen(e));
+    let file = fs::File::open(input).map_err(err)?;
+    // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
+    unsafe { memmap2::Mmap::map(&file) }.map_err(err)
+}
+
 /// The archive in file `c` (`input`) as it is located (spec, "Locating an archive": an archive
 /// of a file appended to and not committed, one after other bytes, as a self-extracting
 /// executable has it), the bytes before or after it told where not `quiet`; all of `c` where
@@ -3392,7 +3416,7 @@ fn tell_incomplete(status: Option<aqr::Status>, input: &Path) {
         let left = match (files, bytes) {
             (Some(1), Some(b)) => format!(": 1 file ({}) not archived", size(b as f64)),
             (Some(n), Some(b)) => format!(": {n} files ({}) not archived", size(b as f64)),
-            (Some(n), None) => format!(": {n} file{} not archived", if n == 1 { "" } else { "s" }),
+            (Some(n), None) => format!(": {n} file{} not archived", plural(n)),
             _ => String::new(),
         };
         eprintln!("{}: incomplete, its writing stopped{left} (aqr -a adds them)", stdio::shown(input));
@@ -3438,7 +3462,7 @@ impl Repair {
                 eprintln!("{}: its header magic restored", input.display());
             }
             if r.restored > 0 {
-                let s = if r.restored == 1 { "" } else { "s" };
+                let s = plural(r.restored);
                 eprintln!("{}: {} damaged block{s} restored from mirror blocks", input.display(), r.restored);
             }
             if r.footer {
@@ -3506,10 +3530,8 @@ fn by_index<'c, 'n>(
 /// frontend answers).
 fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", stdio::shown(input));
-    let file = fs::File::open(input).map_err(|e| err(&exit::seen(e)))?;
     // (mapped, so that what is read of it is the system's to drop)
-    // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
-    let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&exit::seen(e)))?;
+    let c = map_archive(input, &stdio::shown(input))?;
     // an encrypted one decrypted as it is read, into memory (not backed by a file, so that
     // nothing decrypted is written out but the output)
     let decrypting = match aqr::envelope::is_encrypted(&c) || aqr::envelope::is_damaged_encrypted(&c) {
@@ -3575,23 +3597,8 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
         }
     };
     let ask = |p: &Path| output(a, p);
-    let (place, force) = match (a.test, archive.tree().is_some()) {
-        (true, _) => (None, false),
-        _ if a.stdout => (None, false),
-        (false, true) => match to.place(a, false, &ask)? {
-            Some((p, f)) => (Some(p), f),
-            None => return Ok(false),
-        },
-        (false, false) => match output(a, &to.named)? {
-            Some(f) => (None, f),
-            None => return Ok(false),
-        },
-    };
-    let told = match &place {
-        Some(p) => shown(p),
-        None => (!a.test).then_some(&*to.named),
-    };
-    let told = told.map(|t| if a.stdout { Path::new("-") } else { t });
+    let Some((place, force)) = to.destination(a, false, archive.tree().is_some(), &ask)? else { return Ok(false) };
+    let told = to.told(a, &place);
     begin(if a.test { "test" } else { "decompress" }, &[input.to_owned()], told);
     let start = Instant::now();
     let rec = stats::record(
@@ -3848,7 +3855,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
         let (n, bytes) = salvage_unnamed(a, r.damaged(plain), cut, &r.erased, runner, into.as_deref())
             .map_err(|e| err(&exit::seen(e)))?;
         if n > 0 {
-            let s = if n == 1 { "" } else { "s" };
+            let s = plural(n);
             let (what, bytes) = (stdio::shown(input), size(bytes as f64));
             match &into {
                 Some(d) => eprintln!(
@@ -3880,7 +3887,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
             eprintln!("{}: {}: lost ({f})", stdio::shown(input), paths[*c]);
         }
         let n = lost.len();
-        return Err(err(&format!("{n} file{} lost", if n == 1 { "" } else { "s" })));
+        return Err(err(&format!("{n} file{} lost", plural(n))));
     }
     // (salvaged, its files given back, but the blocks of a segment cut short lost with it, of
     // files of no name known)
@@ -4080,7 +4087,7 @@ fn decrypt_whole(
     let mut d = memmap2::MmapMut::map_anon(u.len()).map_err(|e| err(&exit::seen(e)))?;
     let failed = u.decrypt_lossy(&mut d, threads);
     if !failed.is_empty() {
-        let s = if failed.len() == 1 { "" } else { "s" };
+        let s = plural(failed.len());
         eprintln!("{}: {} encrypted chunk{s} not authenticating, not trusted", input.display(), failed.len());
     }
     let erased = failed.iter().map(|&m| u.chunk_range(m)).collect();
@@ -4194,7 +4201,7 @@ fn summary_d(input: &Path, out: Option<&Path>, files: usize, total: u64, start: 
     eprintln!(
         "{}{to}: {files} file{}, {} in {}, {:.1} MB/s",
         stdio::shown(input),
-        if files == 1 { "" } else { "s" },
+        plural(files),
         size(total as f64),
         aqr_l10n::duration(t, 2),
         total as f64 / 1e6 / t.max(1e-9)

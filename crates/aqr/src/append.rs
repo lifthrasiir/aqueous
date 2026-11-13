@@ -260,7 +260,7 @@ fn diff(g: &mut Gathered, old: &Tree, sizes: &[u64], sync: bool) -> bool {
     }
     for (up, name) in gone {
         let parent = up.map(|k| at[k].expect("a directory taken"));
-        entries.push(Entry { parent, name, node: EntryNode::Special(0), extra: Extra::default() });
+        entries.push(Entry::tombstone(parent, name));
     }
     let mut root = g.tree.root.clone();
     root.forks.iter_mut().for_each(|f| f.1 = content(f.1, &mut contents));

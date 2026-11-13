@@ -1,16 +1,13 @@
 //! `--rm`: the inputs removed once their archive is made, an archive once it is extracted whole;
 //! what was not archived, or changed since it was read, kept and told, the run failing.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("aqr-rm-{name}-{}", std::process::id()));
-    if d.exists() {
-        fs::remove_dir_all(&d).unwrap();
-    }
-    fs::create_dir_all(&d).unwrap();
-    d
+    common::scratch("rm", name)
 }
 
 /// `aqr -q` with `args`, run in directory `dir`: whether it succeeded, and its standard error.

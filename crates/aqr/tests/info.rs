@@ -3,17 +3,14 @@
 //! before them), the entries before the update too; of an archive of a single file, its
 //! formula at once.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("aqr-info-{name}-{}", std::process::id()));
-    if d.exists() {
-        fs::remove_dir_all(&d).unwrap();
-    }
-    fs::create_dir_all(&d).unwrap();
-    d
+    common::scratch("info", name)
 }
 
 /// `aqr` with `args`, run in `dir`: whether it succeeded, its standard output and error.

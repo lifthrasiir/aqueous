@@ -3,18 +3,15 @@
 //! Without it, links archived as links, one given alone too.
 #![cfg(unix)]
 
+mod common;
+
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("aqr-deref-{name}-{}", std::process::id()));
-    if d.exists() {
-        fs::remove_dir_all(&d).unwrap();
-    }
-    fs::create_dir_all(&d).unwrap();
-    d
+    common::scratch("deref", name)
 }
 
 /// `aqr` with `args`, run in directory `dir`: whether it succeeded, its standard output and

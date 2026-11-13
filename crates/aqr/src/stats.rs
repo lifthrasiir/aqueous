@@ -232,9 +232,7 @@ fn save(o: &Path, data: &str) -> Result<(), String> {
 
 /// Writes file `o` of `text`, replacing it whole (written aside, then renamed).
 fn write_whole(o: &Path, text: &str) -> Result<(), String> {
-    let mut aside = o.file_name().unwrap_or_default().to_owned();
-    aside.push(format!(".{}.part", std::process::id()));
-    let aside = o.with_file_name(aside);
+    let aside = crate::part_of(o);
     let r = std::fs::write(&aside, text).and_then(|()| std::fs::rename(&aside, o));
     if r.is_err() {
         _ = std::fs::remove_file(&aside);

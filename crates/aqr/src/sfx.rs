@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+use crate::hex;
 use aqr_formula::Module;
 use aqr_formula::aqr::{self, Wasm};
 
@@ -98,10 +99,6 @@ fn unpack() -> Result<Pack, String> {
         natives.insert(k.sha512_256, (blob, slots));
     }
     Ok(Pack { stub, natives, libs })
-}
-
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 /// How module `m` is written into a self-extracting archive ([`aqr_compress::Options::modules`]):

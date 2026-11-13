@@ -3,6 +3,8 @@
 //! stream of another file (spec, "Extraction").
 #![cfg(windows)]
 
+mod common;
+
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -11,12 +13,7 @@ use aqr_compress::{Input, Options, compress_tree};
 use aqr_formula::aqr::{Entry, EntryNode, Extra, Tree};
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("aqr-names-{name}-{}", std::process::id()));
-    if d.exists() {
-        fs::remove_dir_all(&d).unwrap();
-    }
-    fs::create_dir_all(&d).unwrap();
-    d
+    common::scratch("names", name)
 }
 
 /// A lone high surrogate in WTF-8.

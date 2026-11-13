@@ -25,14 +25,13 @@
 //! CBOR in its diagnostic notation, their strings cut at 64 bytes but with `-v`.
 
 use std::fmt::Write as _;
-use std::fs;
 use std::io::Write;
 use std::path::Path;
 
 use aqr_formula::aqr::inspect::{self, Content, Entry, Fate, Inspection, Node, Origin, State};
 use aqr_formula::aqr::{self, Extra, Member, Time, Zone, entry_key_name, name_bytes, name_from};
 
-use crate::Args;
+use crate::{Args, hex, plural};
 
 pub fn info(a: &Args) -> Result<(), String> {
     let input = &a.inputs[0];
@@ -47,9 +46,7 @@ fn info_of(a: &Args, input: &Path) -> Result<String, String> {
     if aqr_unpack::by_name(&name).is_some() {
         return Err(err(&"only Aqueous archives are told of"));
     }
-    let file = fs::File::open(input).map_err(|e| err(&crate::exit::seen(e)))?;
-    // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
-    let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&crate::exit::seen(e)))?;
+    let c = crate::map_archive(input, &input.display())?;
     let mut s = String::new();
     let paths = &a.inputs[1..];
     if paths.is_empty() {
@@ -334,7 +331,7 @@ fn path(s: &mut String, i: &Inspection, states: &[Vec<State>], p: &Path) -> Resu
 fn shown(names: &[Vec<u8>]) -> String {
     match names.is_empty() {
         true => "/".into(),
-        false => names.iter().map(|n| String::from_utf8_lossy(name_bytes(n).0)).collect::<Vec<_>>().join("/"),
+        false => crate::names::shown_path(names),
     }
 }
 
@@ -540,10 +537,7 @@ fn time(t: Time) -> String {
     }
     match t.zone {
         Zone::Utc => s.push('Z'),
-        Zone::Offset(o) => {
-            let m = (o as i32).abs() * 15;
-            let _ = write!(s, "{}{:02}:{:02}", if o < 0 { '-' } else { '+' }, m / 60, m % 60);
-        }
+        Zone::Offset(o) => s += &crate::list::offset(o),
         Zone::Local => s += " local",
     }
     let pow10 = |mut u: u64| {
@@ -582,14 +576,6 @@ fn value(v: &[u8]) -> String {
         Ok(t) if !t.chars().any(|c| c.is_control() && c != '\n' && c != '\t') => format!("{t:?}"),
         _ => hex(v),
     }
-}
-
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
-fn plural(n: usize) -> &'static str {
-    if n == 1 { "" } else { "s" }
 }
 
 #[cfg(test)]

@@ -1,17 +1,15 @@
 //! Archives edited in place: paths taken out (`--delete`) and moved (`--move`), the archive
 //! written again of what it holds (`--compact`).
 
+mod common;
+use common::{files, stderr, text};
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("aqr-edit-{name}-{}", std::process::id()));
-    if d.exists() {
-        fs::remove_dir_all(&d).unwrap();
-    }
-    fs::create_dir_all(&d).unwrap();
-    d
+    common::scratch("edit", name)
 }
 
 fn aqr(dir: &Path, args: &[&str]) -> Output {
@@ -22,41 +20,6 @@ fn ok(dir: &Path, args: &[&str]) -> Output {
     let o = aqr(dir, args);
     assert!(o.status.success(), "aqr {args:?}: {}", stderr(&o));
     o
-}
-
-fn stderr(o: &Output) -> String {
-    String::from_utf8_lossy(&o.stderr).into_owned()
-}
-
-fn text(seed: u64, n: usize) -> Vec<u8> {
-    let mut x = seed;
-    let words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"];
-    let mut t = Vec::new();
-    while t.len() < n {
-        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        t.extend_from_slice(format!("{} {} ", words[(x >> 61) as usize], (x >> 40) % 1000).as_bytes());
-    }
-    t.truncate(n);
-    t
-}
-
-/// The files under `d`, by path from it.
-fn files(d: &Path) -> Vec<(String, Vec<u8>)> {
-    let mut out = Vec::new();
-    let mut stack = vec![(d.to_owned(), String::new())];
-    while let Some((dir, at)) = stack.pop() {
-        for e in fs::read_dir(&dir).unwrap() {
-            let e = e.unwrap();
-            let name = format!("{at}{}", e.file_name().to_string_lossy());
-            if e.file_type().unwrap().is_dir() {
-                stack.push((e.path(), format!("{name}/")));
-            } else {
-                out.push((name, fs::read(e.path()).unwrap()));
-            }
-        }
-    }
-    out.sort();
-    out
 }
 
 /// A directory `src` under `d`: text files at the top and in `sub/` and `sub/deep/`.

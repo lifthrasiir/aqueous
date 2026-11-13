@@ -94,8 +94,7 @@ impl Selection {
 
     /// Path `k` for people.
     pub fn shown(&self, k: usize) -> String {
-        let names: Vec<&[u8]> = self.paths[k].0.iter().map(|n| name_bytes(n).0).collect();
-        String::from_utf8_lossy(&names.join(&b'/')).into_owned()
+        names::shown_path(&self.paths[k].0)
     }
 
     /// The paths (of those of indices `of`, where given) as names of bytes, as aqr-unpack
@@ -406,7 +405,8 @@ impl<'a> Extractor<'a> {
             if renamed {
                 continue;
             }
-            if let Some(key) = folding.key(&self.names.name(&e.name).os) {
+            let os = self.names.name(&e.name).os;
+            if let Some(key) = folding.key(&os) {
                 let j = *s.taken.entry((e.parent, key)).or_insert(i);
                 if j != i {
                     s.clashed[i] = Some(Some(j));
@@ -416,7 +416,7 @@ impl<'a> Extractor<'a> {
             // best fit of the OEM code page, `pÀq` as `paq`; and FAT and NTFS take a short name
             // made, `LONGFI~1.TXT`, as the long name's)
             if short && s.clashed[i].is_none() {
-                match short_key(&self.names.name(&e.name).os) {
+                match short_key(&os) {
                     Some(k) => {
                         let long = s.long_named.get(&e.parent).copied().filter(|&j| j != i && made_short(&k));
                         let j = long.unwrap_or_else(|| *s.taken_short.entry((e.parent, k)).or_insert(i));
@@ -708,12 +708,7 @@ impl<'a> Extractor<'a> {
             if s.content[i] != Some(c) {
                 continue;
             }
-            if s.made[i].take().is_some() {
-                match fs::remove_file(&s.paths[i]) {
-                    Err(x) if x.kind() != std::io::ErrorKind::NotFound => return Err(err(&s.paths[i], x)),
-                    _ => {}
-                }
-            }
+            unmake(s, i)?;
             s.soon[i] = None;
         }
         Ok(())
@@ -777,12 +772,7 @@ impl<'a> Extractor<'a> {
                 if written.get(c).copied().flatten().is_some() {
                     continue;
                 }
-                if s.made[i].take().is_some() {
-                    match fs::remove_file(&s.paths[i]) {
-                        Err(x) if x.kind() != std::io::ErrorKind::NotFound => return Err(err(&s.paths[i], x)),
-                        _ => removed += 1,
-                    }
-                }
+                removed += unmake(s, i)? as usize;
                 s.soon[i] = None;
             }
             removed
@@ -949,40 +939,6 @@ fn grow<T: Default>(v: &mut Vec<T>, i: usize) -> &mut T {
         v.resize_with(i + 1, T::default);
     }
     &mut v[i]
-}
-
-/// The name `name` takes on Windows where it cannot be as it is ([`windows_wide`]). `None`
-/// where it can be.
-#[cfg(windows)]
-pub fn windows_name(name: &std::ffi::OsStr) -> Option<OsString> {
-    use std::os::windows::ffi::{OsStrExt, OsStringExt};
-    windows_wide(&name.encode_wide().collect::<Vec<_>>()).map(|w| OsString::from_wide(&w))
-}
-
-/// The name of UTF-16 `name` (lone surrogates and all) on Windows where it cannot be as it is:
-/// the characters a name cannot have (`<>:"/\|?*` and controls) and a dot or a space at its end
-/// as `_`, and `_` before a device's name (`CON`, `NUL.txt`, ...). `None` where it can be.
-#[cfg(any(windows, test))]
-fn windows_wide(name: &[u16]) -> Option<Vec<u16>> {
-    let bad = |c: u16| c < 0x20 || b"<>:\"/\\|?*".iter().any(|&b| b as u16 == c);
-    let mut out: Vec<u16> = name.iter().map(|&c| if bad(c) { b'_' as u16 } else { c }).collect();
-    if let Some(last) = out.last_mut()
-        && (*last == b'.' as u16 || *last == b' ' as u16)
-    {
-        *last = b'_' as u16;
-    }
-    // (devices' names are of ASCII and superscripts, which surrogates do not change)
-    let s = String::from_utf16_lossy(&out);
-    let stem = s.split('.').next().unwrap_or("").trim_end_matches(' ').to_ascii_uppercase();
-    let device = matches!(&stem[..], "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
-        || stem.len() == 4
-            && (stem.starts_with("COM") || stem.starts_with("LPT"))
-            && matches!(stem.as_bytes()[3], b'1'..=b'9')
-        || (stem.starts_with("COM") || stem.starts_with("LPT")) && ["¹", "²", "³"].contains(&&stem[3..]);
-    if device {
-        out.insert(0, b'_' as u16);
-    }
-    (out != name).then_some(out)
 }
 
 /// How the file system extracted into takes names of a directory as one, as far as it is told
@@ -1184,16 +1140,19 @@ struct Name {
 impl Name {
     /// The name of `os` (a name on this system, mapped: [`Names`]).
     fn of(os: &std::ffi::OsStr) -> Name {
-        Name { fold: fold::fold(os), astral: fold::fold_astral(os), short: short_key(os) }
+        let (fold, astral) = fold::fold_both(os);
+        Name { fold, astral, short: short_key(os) }
     }
 
-    /// The keys of the name in [`ByName`].
     /// The keys of the name in [`ByName`] (each kind of every name, as `x😀`'s `Astral` key is
     /// `x????`'s).
-    fn keys(&self) -> impl Iterator<Item = Key> + '_ {
-        [Key::Fold(self.fold.clone()), Key::Astral(self.astral.clone())]
-            .into_iter()
-            .chain(self.short.clone().map(Key::Short))
+    fn keys(&self) -> impl Iterator<Item = Key> {
+        self.clone().into_keys()
+    }
+
+    /// [`Name::keys`], the name given up.
+    fn into_keys(self) -> impl Iterator<Item = Key> {
+        [Key::Fold(self.fold), Key::Astral(self.astral)].into_iter().chain(self.short.map(Key::Short))
     }
 }
 
@@ -1211,7 +1170,7 @@ type ByName = HashMap<(Option<usize>, Key), Vec<usize>>;
 
 /// Adds entry `j` of `parent` and name `n` to `m`.
 fn by_name_add(m: &mut ByName, parent: Option<usize>, n: Name, j: usize) {
-    for k in n.keys() {
+    for k in n.into_keys() {
         m.entry((parent, k)).or_default().push(j);
     }
 }
@@ -1255,6 +1214,18 @@ fn own_dir(dir: &Path, force: bool) -> Result<(), String> {
             Err(_) => Err(err(dir, e)),
         },
         r => r.map_err(|e| err(dir, e)),
+    }
+}
+
+/// Takes away the file made for entry `i`, if one was (one gone already is no error): whether there
+/// was one.
+fn unmake(s: &mut State, i: usize) -> Result<bool, String> {
+    if s.made[i].take().is_none() {
+        return Ok(false);
+    }
+    match fs::remove_file(&s.paths[i]) {
+        Err(x) if x.kind() != std::io::ErrorKind::NotFound => Err(err(&s.paths[i], x)),
+        _ => Ok(true),
     }
 }
 
@@ -1397,7 +1368,7 @@ fn symlink(target: &std::ffi::OsStr, at: &Path, dir: bool) -> std::io::Result<()
 
 #[cfg(test)]
 mod tests {
-    use super::{made_short, short_valid, windows_wide};
+    use super::{made_short, short_valid};
 
     #[test]
     fn short_names() {
@@ -1410,25 +1381,5 @@ mod tests {
             assert!(!short_valid(n.as_bytes()), "{n}");
         }
         assert!(made_short(b"LONGFI~1.TXT") && made_short(b"A~12") && !made_short(b"A~B") && !made_short(b"A"));
-    }
-
-    #[test]
-    fn windows_names() {
-        let w = |s: &str| windows_wide(&s.encode_utf16().collect::<Vec<_>>()).map(|o| String::from_utf16(&o).unwrap());
-        assert_eq!(w("a.txt"), None);
-        assert_eq!(w("12:30.txt").as_deref(), Some("12_30.txt"));
-        assert_eq!(w("what?").as_deref(), Some("what_"));
-        assert_eq!(w("dots..").as_deref(), Some("dots._"));
-        assert_eq!(w("con").as_deref(), Some("_con"));
-        assert_eq!(w("NUL.tar.gz").as_deref(), Some("_NUL.tar.gz"));
-        assert_eq!(w("COM1").as_deref(), Some("_COM1"));
-        assert_eq!(w("COM10"), None);
-        assert_eq!(w("console"), None);
-        assert_eq!(w("a\\b").as_deref(), Some("a_b"));
-        // a lone surrogate kept, the rest as any other name's
-        let lone = |a: &str, b: &str| [a.encode_utf16().collect(), vec![0xd800], b.encode_utf16().collect()].concat();
-        assert_eq!(windows_wide(&lone("x", ":ads")), Some(lone("x", "_ads")));
-        assert_eq!(windows_wide(&lone("", "\\..\\..\\x")), Some(lone("", "_.._.._x")));
-        assert_eq!(windows_wide(&lone("x", "y")), None);
     }
 }

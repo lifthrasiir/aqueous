@@ -3,16 +3,13 @@
 //! given; decompressing, what is extracted goes into `DIR` (`-o` there too), the archives
 //! where they are given.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("aqr-chdir-{name}-{}", std::process::id()));
-    if d.exists() {
-        fs::remove_dir_all(&d).unwrap();
-    }
-    fs::create_dir_all(&d).unwrap();
-    d
+    common::scratch("chdir", name)
 }
 
 /// `aqr -q` with `args`, run in directory `dir`: whether it succeeded, and its standard error.

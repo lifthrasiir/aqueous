@@ -113,12 +113,12 @@ impl Reader {
     pub fn extra(&mut self, path: &Path, s: &Stat, warn: &mut dyn FnMut(String)) -> (Extra, Vec<Fork>) {
         let m = &s.m;
         let time = |t: std::io::Result<std::time::SystemTime>| t.ok().map(time_of);
-        let mut x = Extra {
-            crtime: time(m.created()),
-            mtime: time(m.modified()),
-            atime: if self.privileged { time(m.accessed()) } else { None },
-            ..Extra::default()
-        };
+        let mut x = Extra { crtime: time(m.created()), ..Extra::default() };
+        #[cfg(not(unix))]
+        {
+            x.mtime = time(m.modified());
+            x.atime = if self.privileged { time(m.accessed()) } else { None };
+        }
         let mut forks = Vec::new();
         #[cfg(unix)]
         {
@@ -312,12 +312,7 @@ pub fn restore_atime(path: &Path, t: Time) {
     if atime_of(&m) == Some(t) {
         return;
     }
-    let kind = match m.file_type() {
-        f if f.is_dir() => Kind::Dir,
-        f if f.is_symlink() => Kind::Link,
-        _ => Kind::File,
-    };
-    let _ = os::set_times(path, kind, &Extra { atime: Some(t), ..Extra::default() });
+    let _ = os::set_times(path, &Extra { atime: Some(t), ..Extra::default() });
 }
 
 fn time_of(t: std::time::SystemTime) -> Time {
@@ -405,7 +400,7 @@ impl Applier {
             let mode = if self.privileged { mode } else { mode & 0o1777 };
             os::set_mode(path, kind, mode).map_err(err)?;
         }
-        os::set_times(path, kind, x).map_err(err)?;
+        os::set_times(path, x).map_err(err)?;
         // (the attributes after the times, as read-only forbids them; from the mode where there
         // are none, read-only where the owner cannot write)
         #[cfg(windows)]
@@ -607,7 +602,7 @@ mod os {
     }
 
     /// Sets the access and modification times of `path` (not followed) where `x` has them.
-    pub fn set_times(path: &Path, _: Kind, x: &Extra) -> io::Result<()> {
+    pub fn set_times(path: &Path, x: &Extra) -> io::Result<()> {
         if x.atime.is_none() && x.mtime.is_none() {
             return Ok(());
         }
@@ -956,12 +951,11 @@ mod os {
 
     /// Sets the creation, access and modification times of `path` (not followed) where `x` has
     /// them.
-    pub fn set_times(path: &Path, kind: Kind, x: &Extra) -> io::Result<()> {
+    pub fn set_times(path: &Path, x: &Extra) -> io::Result<()> {
         if x.crtime.is_none() && x.atime.is_none() && x.mtime.is_none() {
             return Ok(());
         }
-        // (not followed whatever `kind` it was made as, as `set_mode` of Unix)
-        let _ = kind;
+        // (not followed, as `set_mode` of Unix)
         let f = fs::OpenOptions::new()
             .access_mode(FILE_WRITE_ATTRIBUTES)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)

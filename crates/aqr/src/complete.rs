@@ -44,6 +44,16 @@ pub struct Opt {
     pub help: &'static str,
 }
 
+impl Opt {
+    /// Its names as given: `-x`, `--long`.
+    fn names(&self) -> Vec<String> {
+        self.short.map(|c| format!("-{c}")).into_iter().chain(self.long.map(|l| format!("--{l}"))).collect()
+    }
+}
+
+/// The levels with options of their own: `-0` to `-9`.
+const LEVELS: std::ops::RangeInclusive<u8> = 0..=9;
+
 const fn opt(short: Option<char>, long: Option<&'static str>, value: Value, help: &'static str) -> Opt {
     Opt { short, long, value, many: false, help }
 }
@@ -58,13 +68,11 @@ fn formats() -> Vec<String> {
 
 fn levels() -> Vec<String> {
     let words = ["low", "mid", "high"].into_iter().map(String::from);
-    (0..=9).map(|n| n.to_string()).chain(words).chain((1..=19).map(|n| format!("zstd{n}"))).collect()
+    LEVELS.map(|n| n.to_string()).chain(words).chain((1..=19).map(|n| format!("zstd{n}"))).collect()
 }
 
 fn encodings() -> Vec<String> {
-    ["auto", "raw", "system", "shift_jis", "euc-kr", "gbk", "gb18030", "big5", "cp437", "utf-8", "windows-1252"]
-        .map(String::from)
-        .to_vec()
+    of(&["auto", "raw", "system", "shift_jis", "euc-kr", "gbk", "gb18030", "big5", "cp437", "utf-8", "windows-1252"])
 }
 
 fn of(words: &[&str]) -> Vec<String> {
@@ -103,6 +111,7 @@ pub const OPTIONS: &[Opt] = &[
     many(None, Some("stats"), Value::OptionalFile, "tell what stands out; FILE.json or FILE.html"),
     opt(None, Some("json"), Value::None, "list as JSON (with -t)"),
     opt(None, Some("ipc"), Value::None, "be driven by a frontend"),
+    opt(None, Some("session"), Value::None, "as --ipc, told what to do later"),
     opt(Some('P'), Some("passphrase"), Value::None, "encrypt with a passphrase asked for"),
     opt(None, Some("passphrase-from"), Value::Of(|| of(&["stdin", "fd:", "env:"])), "the passphrase from SOURCE"),
     opt(Some('l'), Some("level"), Value::Of(levels), "the level of compression"),
@@ -143,12 +152,8 @@ pub const OPTIONS: &[Opt] = &[
 
 /// The options' names as given: `-x`, `--long`; the levels `-0` to `-9` too.
 pub fn names() -> Vec<String> {
-    let mut out = Vec::new();
-    for o in OPTIONS {
-        out.extend(o.short.map(|c| format!("-{c}")));
-        out.extend(o.long.map(|l| format!("--{l}")));
-    }
-    out.extend((0..=9).map(|n| format!("-{n}")));
+    let mut out: Vec<String> = OPTIONS.iter().flat_map(Opt::names).collect();
+    out.extend(LEVELS.map(|n| format!("-{n}")));
     out
 }
 
@@ -184,7 +189,7 @@ pub fn zsh() -> String {
             specs.push(format!("{star}--{l}{arg}[{}]{action}", help(o.help)));
         }
     }
-    specs.extend((0..=9).map(|n| format!("-{n}[level {n}]")));
+    specs.extend(LEVELS.map(|n| format!("-{n}[level {n}]")));
     specs.push("*:file:_files".into());
     let specs: Vec<String> = specs.iter().map(|s| format!("    {} \\\n", quoted(s))).collect();
     format!(
@@ -207,8 +212,7 @@ pub fn bash() -> String {
             Value::Text => "COMPREPLY=(); return 0".to_string(),
             Value::Of(f) => format!("COMPREPLY=($(compgen -W {} -- \"$cur\")); return 0", quoted(&f().join(" "))),
         };
-        let names: Vec<String> =
-            o.short.map(|c| format!("-{c}")).into_iter().chain(o.long.map(|l| format!("--{l}"))).collect();
+        let names = o.names();
         cases += &format!("    {}) {words} ;;\n", names.join("|"));
     }
     format!(
@@ -257,7 +261,7 @@ pub fn fish(cmd: &str) -> String {
         line += &format!(" -d {}\n", quoted(o.help));
         s += &line;
     }
-    for n in 0..=9 {
+    for n in LEVELS {
         s += &format!("complete -c aqr -o {n} -d 'level {n}'\n");
     }
     s
@@ -269,8 +273,7 @@ pub fn powershell() -> String {
     let mut opts = Vec::new();
     let mut values = Vec::new();
     for o in OPTIONS {
-        let names: Vec<String> =
-            o.short.map(|c| format!("-{c}")).into_iter().chain(o.long.map(|l| format!("--{l}"))).collect();
+        let names = o.names();
         for n in &names {
             opts.push(format!("    @({}, {})", q(n), q(o.help)));
             match o.value {
@@ -285,7 +288,7 @@ pub fn powershell() -> String {
             }
         }
     }
-    for n in 0..=9 {
+    for n in LEVELS {
         opts.push(format!("    @('-{n}', 'level {n}')"));
     }
     format!(

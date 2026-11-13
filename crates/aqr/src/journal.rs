@@ -248,10 +248,7 @@ pub fn history_all(a: &crate::Args) -> Result<(), String> {
     use std::io::Write;
     let mut out = std::io::stdout().lock();
     for (k, input) in a.inputs.iter().enumerate() {
-        let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
-        let file = std::fs::File::open(input).map_err(|e| err(&crate::exit::seen(e)))?;
-        // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
-        let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&crate::exit::seen(e)))?;
+        let c = crate::map_archive(input, &input.display())?;
         let text = history(input, crate::located(&c, input, a.quiet), a.json)?;
         if a.inputs.len() > 1 && !a.json {
             if k > 0 {
@@ -264,12 +261,15 @@ pub fn history_all(a: &crate::Args) -> Result<(), String> {
     out.flush().map_err(|e| e.to_string())
 }
 
-/// An entry of a state as `--diff` tells states apart: its path, and what it is (a file by its
-/// size) with its metadata but for what is numbered by the archive (forks, link groups).
-type Seen = (Vec<Vec<u8>>, aqr::EntryNode, aqr::Extra);
+/// An entry of a state as `--diff` tells states apart: what it is (a file by its size) with its
+/// metadata but for what is numbered by the archive (forks, link groups).
+type Seen = (aqr::EntryNode, aqr::Extra);
+
+/// The entries of a state, by path.
+type Seens = std::collections::BTreeMap<Vec<Vec<u8>>, Seen>;
 
 /// The entries of `archive` (a directory by its path alone), by path.
-fn seen(archive: &aqr::Archive) -> std::collections::BTreeMap<Vec<Vec<u8>>, Seen> {
+fn seen(archive: &aqr::Archive) -> Seens {
     let Some(t) = archive.tree() else { return Default::default() };
     let mut out = std::collections::BTreeMap::new();
     for (e, path) in t.entries.iter().zip(crate::append::paths(t)) {
@@ -282,14 +282,14 @@ fn seen(archive: &aqr::Archive) -> std::collections::BTreeMap<Vec<Vec<u8>>, Seen
             }
             ref other => (other.clone(), aqr::Extra { forks: Vec::new(), link_group: None, ..e.extra.clone() }),
         };
-        out.insert(path.clone(), (path, node, extra));
+        out.insert(path, (node, extra));
     }
     out
 }
 
 /// The entries of `archive` as a quick check tells them apart (`-a`'s: a file by its size and
 /// modification time, other entries by what they are), by path.
-fn quick(archive: &aqr::Archive) -> std::collections::BTreeMap<Vec<Vec<u8>>, Seen> {
+fn quick(archive: &aqr::Archive) -> Seens {
     let Some(t) = archive.tree() else { return Default::default() };
     let sized = |e: &aqr::Entry| match e.node {
         aqr::EntryNode::File(c) => aqr::EntryNode::File(archive.content_size(c).unwrap_or(u64::MAX) as usize),
@@ -299,15 +299,12 @@ fn quick(archive: &aqr::Archive) -> std::collections::BTreeMap<Vec<Vec<u8>>, See
 }
 
 /// The entries of `t` as a quick check tells them apart, a file's content told by `node`.
-fn keyed(
-    t: &aqr::Tree,
-    node: &dyn Fn(&aqr::Entry) -> aqr::EntryNode,
-) -> std::collections::BTreeMap<Vec<Vec<u8>>, Seen> {
+fn keyed(t: &aqr::Tree, node: &dyn Fn(&aqr::Entry) -> aqr::EntryNode) -> Seens {
     let mut out = std::collections::BTreeMap::new();
     for (e, path) in t.entries.iter().zip(crate::append::paths(t)) {
         let node = node(e);
         let mtime = matches!(node, aqr::EntryNode::File(_)).then_some(e.extra.mtime).flatten();
-        out.insert(path.clone(), (path, node, aqr::Extra { mtime, ..aqr::Extra::default() }));
+        out.insert(path, (node, aqr::Extra { mtime, ..aqr::Extra::default() }));
     }
     out
 }
@@ -315,17 +312,13 @@ fn keyed(
 /// Writes how `after` differs from `before` (a line each: `+` added, `~` changed, `-` removed),
 /// and tells how many of each.
 fn changes(before: &Seens, after: &Seens) -> Vec<(char, String)> {
-    let shown = |path: &[Vec<u8>], dir: bool| {
-        let names: Vec<String> =
-            path.iter().map(|n| String::from_utf8_lossy(aqr::name_bytes(n).0).into_owned()).collect();
-        names.join("/") + if dir { "/" } else { "" }
-    };
-    let is_dir = |e: &Seen| e.1 == aqr::EntryNode::Dir;
+    let shown = |path: &[Vec<u8>], dir: bool| crate::names::shown_path(path) + if dir { "/" } else { "" };
+    let is_dir = |e: &Seen| e.0 == aqr::EntryNode::Dir;
     let mut out = Vec::new();
     for (path, now) in after {
         let mark = match before.get(path) {
             None => '+',
-            Some(was) if was.1 != now.1 || was.2 != now.2 => '~',
+            Some(was) if was != now => '~',
             Some(_) => continue,
         };
         out.push((mark, shown(path, is_dir(now))));
@@ -372,8 +365,6 @@ fn emit(
     Ok((added, changed, removed))
 }
 
-type Seens = std::collections::BTreeMap<Vec<Vec<u8>>, Seen>;
-
 /// `--diff`: what differs between two states of the archive of `a` (its first input), a line
 /// each: `+` added, `~` changed (by size and metadata), `-` removed; a directory with a `/` after
 /// it, and not told for its metadata. The states are the points `--from` and `--at` pick; `--at`
@@ -384,9 +375,7 @@ pub fn diff_all(a: &crate::Args) -> Result<(), String> {
     use std::io::Write;
     let input = a.inputs.first().ok_or("--diff takes an archive")?;
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
-    let file = std::fs::File::open(input).map_err(|e| err(&crate::exit::seen(e)))?;
-    // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
-    let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&crate::exit::seen(e)))?;
+    let c = crate::map_archive(input, &input.display())?;
     let bytes = crate::located(&c, input, a.quiet);
     if aqr::envelope::is_encrypted(bytes) {
         return Err(err(&"an encrypted archive has no journal (it is not appended to)"));
@@ -451,14 +440,7 @@ fn compare(a: &crate::Args, whole: &aqr::Archive, bytes: &[u8], out: &mut dyn st
     };
     let mapper = crate::Mapper::new().map_err(|e| format!("files not to be mapped: {e}"))?;
     let mut g = crate::Gathered::new(mapper, a.preserve);
-    let listing = crate::view::Listing::new(crate::bars());
-    let gathered = crate::ticking(a, &listing, || -> Result<(), String> {
-        crate::gather(&a.inputs[1..], &a.given[1..], &a.renames[1..], &mut g, &listing, a)?;
-        listing.finish();
-        Ok(())
-    });
-    listing.finish();
-    gathered?;
+    crate::gather_listed(a, crate::Inputs::of(a).from(1), &mut g)?;
     if !a.quiet {
         g.skipped.iter().for_each(|s| eprintln!("skipped {s}"));
         g.warnings.iter().for_each(|w| eprintln!("{w}"));

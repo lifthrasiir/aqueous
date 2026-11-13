@@ -2,17 +2,15 @@
 //! named by a run, returned to by a number, a label or a date, also where the run changed
 //! nothing.
 
+mod common;
+use common::stderr;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("aqr-journal-{name}-{}", std::process::id()));
-    if d.exists() {
-        fs::remove_dir_all(&d).unwrap();
-    }
-    fs::create_dir_all(&d).unwrap();
-    d
+    common::scratch("journal", name)
 }
 
 /// 2026-11-01 12:00 UTC and a day later each, as the clock of a run.
@@ -33,10 +31,6 @@ fn ok(dir: &Path, now: Option<&str>, args: &[&str]) -> Output {
     let o = aqr_at(dir, now, args);
     assert!(o.status.success(), "aqr {args:?}: {}", stderr(&o));
     o
-}
-
-fn stderr(o: &Output) -> String {
-    String::from_utf8_lossy(&o.stderr).into_owned()
 }
 
 fn stdout(o: &Output) -> String {

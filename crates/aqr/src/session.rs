@@ -34,7 +34,7 @@ use std::time::Duration;
 use aqr_ipc::{BEGIN, INVENTORY};
 use serde_json::{Value, json};
 
-use crate::{Args, Exclude, Gathered, Mapper, gather, ipc, parse_from, view};
+use crate::{Args, Exclude, Gathered, Inputs, Mapper, gather, ipc, parse_from, view};
 
 /// What a gathering depends on.
 #[derive(Clone, PartialEq)]
@@ -49,11 +49,11 @@ struct Key {
 }
 
 impl Key {
-    fn new(a: &Args, inputs: &[PathBuf], given: &[PathBuf], renames: &[Option<PathBuf>]) -> Key {
+    fn new(a: &Args, inputs: Inputs) -> Key {
         Key {
-            inputs: inputs.to_vec(),
-            given: given.to_vec(),
-            renames: renames.to_vec(),
+            inputs: inputs.paths.to_vec(),
+            given: inputs.given.to_vec(),
+            renames: inputs.renames.to_vec(),
             exclude: a.exclude.clone(),
             dereference: a.dereference,
             preserve: a.preserve,
@@ -69,14 +69,9 @@ pub const CANCELLED: &str = "cancelled";
 static CACHE: Mutex<Option<(Key, Gathered)>> = Mutex::new(None);
 
 /// What was gathered for these inputs, as `a` has them gathered, where an inventory did.
-pub fn cached(
-    a: &Args,
-    inputs: &[PathBuf],
-    given: &[PathBuf],
-    renames: &[Option<PathBuf>],
-) -> Option<Gathered> {
+pub fn cached(a: &Args, inputs: Inputs) -> Option<Gathered> {
     let mut c = CACHE.lock().unwrap();
-    if c.as_ref().is_some_and(|(k, _)| *k == Key::new(a, inputs, given, renames)) {
+    if c.as_ref().is_some_and(|(k, _)| *k == Key::new(a, inputs)) {
         c.take().map(|(_, g)| g)
     } else {
         None
@@ -106,7 +101,7 @@ struct Running {
 
 impl Running {
     fn start(id: u64, a: Args) -> Running {
-        let key = Key::new(&a, &a.inputs, &a.given, &a.renames);
+        let key = Key::new(&a, Inputs::of(&a));
         let id = Arc::new(AtomicU64::new(id));
         let listing = Arc::new(view::Listing::new(false));
         let last = Arc::new(Mutex::new(None));
@@ -146,7 +141,7 @@ fn event(id: &AtomicU64, l: &view::Listing, done: bool) -> Value {
 fn inventory(key: Key, a: Args, id: &AtomicU64, l: &view::Listing, last: &Mutex<Option<Value>>) {
     let finished = AtomicBool::new(false);
     let r = std::thread::scope(|s| {
-        s.spawn(|| {
+        let ticker = s.spawn(|| {
             while !finished.load(Ordering::Relaxed) {
                 std::thread::park_timeout(Duration::from_millis(250));
                 if !finished.load(Ordering::Relaxed) {
@@ -158,10 +153,11 @@ fn inventory(key: Key, a: Args, id: &AtomicU64, l: &view::Listing, last: &Mutex<
             let mapper = Mapper::new().map_err(|e| format!("files not to be mapped: {e}"))?;
             let mut g = Gathered::new(mapper, a.preserve);
             g.gone = a.rm.then(Vec::new);
-            gather(&a.inputs, &a.given, &a.renames, &mut g, l, &a)?;
+            gather(Inputs::of(&a), &mut g, l, &a)?;
             Ok(g)
         });
         finished.store(true, Ordering::Relaxed);
+        ticker.thread().unpark();
         r
     });
     match r {
@@ -192,7 +188,7 @@ pub fn serve(a: Args) -> Result<Args, String> {
             Some(INVENTORY) => match request(&v) {
                 Err(e) => ipc::tell(json!({"event": "inventory", "id": id, "error": e, "done": true})),
                 Ok(a) => {
-                    let key = Key::new(&a, &a.inputs, &a.given, &a.renames);
+                    let key = Key::new(&a, Inputs::of(&a));
                     match running.take() {
                         Some(r) if r.key == key => {
                             r.adopt(id);
@@ -211,7 +207,7 @@ pub fn serve(a: Args) -> Result<Args, String> {
                 let a = request(&v)?;
                 if let Some(r) = running.take() {
                     // (the same gathering is waited for: it is the work to be done)
-                    if r.key == Key::new(&a, &a.inputs, &a.given, &a.renames) {
+                    if r.key == Key::new(&a, Inputs::of(&a)) {
                         _ = r.handle.join();
                     } else {
                         r.stop();

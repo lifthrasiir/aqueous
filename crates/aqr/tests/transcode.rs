@@ -6,6 +6,8 @@
 //! written) or a file system of Linux taking names as bytes.
 #![cfg(unix)]
 
+mod common;
+
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
@@ -16,12 +18,7 @@ use aqr_compress::{Input, Options, compress_tree};
 use aqr_formula::aqr::{Entry, EntryNode, Extra, Tree};
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("aqr-transcode-{name}-{}", std::process::id()));
-    if d.exists() {
-        fs::remove_dir_all(&d).unwrap();
-    }
-    fs::create_dir_all(&d).unwrap();
-    d
+    common::scratch("transcode", name)
 }
 
 /// A tree of a directory `dir` holding a file `file` (both as encoded: `C1` before bytes of no

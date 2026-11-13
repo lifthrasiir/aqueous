@@ -27,7 +27,7 @@ use aqr_formula::aqr::{Reached, Step};
 
 use serde_json::{Value, json};
 
-use crate::{Gathered, ipc, percent, size};
+use crate::{Gathered, ipc, percent, plural, size};
 
 /// Columns that the bar's lines take at most (no more than a terminal has, mostly).
 const WIDTH: usize = 79;
@@ -102,17 +102,9 @@ impl<'g> View<'g> {
             lines.iter().for_each(|l| _ = writeln!(out, "{l}"));
             return;
         }
-        let mut text = String::new();
-        if s.drawn > 0 {
-            // (to the start of the bar's first line, and all after it cleared)
-            text += &format!("\x1b[{}F\x1b[J", s.drawn);
-        }
-        lines.iter().for_each(|l| text += &format!("{l}\n"));
         let bar = bar(s, self.slowest(s));
+        paint(&mut out, s.drawn, lines.iter().chain(&bar));
         s.drawn = bar.len();
-        bar.iter().for_each(|l| text += &format!("{l}\n"));
-        _ = out.write_all(text.as_bytes());
-        _ = out.flush();
     }
 
     /// The lines of the log of `contents`, written as of `r`, and the solid blocks, sets and
@@ -263,6 +255,14 @@ impl Decoding {
         Decoding { bar, names, state: Mutex::default() }
     }
 
+    /// Leaf `i` for people: its name, or its number.
+    fn leaf(&self, i: usize) -> String {
+        match self.names.get(i) {
+            Some(n) if !n.is_empty() => n.clone(),
+            _ => format!("leaf #{}", i + 1),
+        }
+    }
+
     pub fn tell(&self, step: Step) {
         let mut s = self.state.lock().unwrap();
         match step {
@@ -295,10 +295,11 @@ impl Ticking for Decoding {
         let mut s = self.state.lock().unwrap();
         let Some(r) = s.reached else { return };
         if ipc::get().is_some() {
-            let file = s.working.iter().min_by_key(|(_, t)| **t).map(|(&i, since)| {
-                let name = self.names.get(i).filter(|n| !n.is_empty()).cloned();
-                json!({"path": name.unwrap_or_else(|| format!("leaf #{}", i + 1)), "seconds": since.elapsed().as_secs_f64()})
-            });
+            let file = s
+                .working
+                .iter()
+                .min_by_key(|(_, t)| **t)
+                .map(|(&i, since)| json!({"path": self.leaf(i), "seconds": since.elapsed().as_secs_f64()}));
             ipc::tell(json!({
                 "event": "progress",
                 "decompressed": [r.decompressed.0, r.decompressed.1],
@@ -317,23 +318,16 @@ impl Ticking for Decoding {
         if let Some((&i, since)) = s.working.iter().min_by_key(|(_, t)| **t)
             && since.elapsed() >= SLOW
         {
-            let name = self.names.get(i).map_or("", |n| n.as_str());
-            let name = if name.is_empty() { format!("leaf #{}", i + 1) } else { name.into() };
             lines.push(format!(
                 "  {}",
-                fit(&format!("{name}, {}", aqr_l10n::duration(since.elapsed().as_secs() as f64, 0)), WIDTH - 2)
+                fit(
+                    &format!("{}, {}", self.leaf(i), aqr_l10n::duration(since.elapsed().as_secs() as f64, 0)),
+                    WIDTH - 2
+                )
             ));
         }
-        let mut text = String::new();
-        if s.drawn > 0 {
-            // (to the start of the bar's first line, and all after it cleared)
-            text += &format!("\x1b[{}F\x1b[J", s.drawn);
-        }
-        lines.iter().for_each(|l| text += &format!("{l}\n"));
+        paint(&mut std::io::stderr().lock(), s.drawn, &lines);
         s.drawn = lines.len();
-        let mut out = std::io::stderr().lock();
-        _ = out.write_all(text.as_bytes());
-        _ = out.flush();
     }
 }
 
@@ -449,10 +443,10 @@ impl Ticking for Listing {
         if !self.bar {
             return;
         }
-        let plural = if files == 1 { "" } else { "s" };
+        let ending = plural(files);
         let (b, what) = if s.walked {
             let b = cells(&[('-', share((read, files)))]);
-            (b, format!("listing {files} file{plural}: {read} read, {}", size(bytes as f64)))
+            (b, format!("listing {files} file{ending}: {read} read, {}", size(bytes as f64)))
         } else {
             // (a stretch of a quarter of the bar, there and back every 4 s)
             const RUN: usize = CELLS / 4;
@@ -462,7 +456,7 @@ impl Ticking for Listing {
                 t => 2 * (CELLS - RUN) - t,
             };
             let b = (0..CELLS).map(|i| if (at..at + RUN).contains(&i) { '-' } else { ' ' }).collect();
-            (b, format!("listing {files} file{plural}"))
+            (b, format!("listing {files} file{ending}"))
         };
         let mut lines = vec![fit(&format!("[{b}] {what}"), WIDTH)];
         if let Some((d, t)) = dir {
@@ -471,16 +465,21 @@ impl Ticking for Listing {
                 fit(&format!("{}, {}", d.display(), aqr_l10n::duration(t.elapsed().as_secs() as f64, 0)), WIDTH - 2)
             ));
         }
-        let mut text = String::new();
-        if s.drawn > 0 {
-            text += &format!("\x1b[{}F\x1b[J", s.drawn);
-        }
-        lines.iter().for_each(|l| text += &format!("{l}\n"));
+        paint(&mut std::io::stderr().lock(), s.drawn, &lines);
         s.drawn = lines.len();
-        let mut out = std::io::stderr().lock();
-        _ = out.write_all(text.as_bytes());
-        _ = out.flush();
     }
+}
+
+/// Writes `lines` to `out` in place of the `drawn` lines written last (cleared first), at once.
+fn paint<'l>(out: &mut impl Write, drawn: usize, lines: impl IntoIterator<Item = &'l String>) {
+    let mut text = String::new();
+    if drawn > 0 {
+        // (to the start of the bar's first line, and all after it cleared)
+        text += &format!("\x1b[{drawn}F\x1b[J");
+    }
+    lines.into_iter().for_each(|l| text += &format!("{l}\n"));
+    _ = out.write_all(text.as_bytes());
+    _ = out.flush();
 }
 
 /// What has a bar drawn again now and then, as long as it is at work.

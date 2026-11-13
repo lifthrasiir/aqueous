@@ -1,17 +1,14 @@
 //! Archives of other formats made by `aqr -c` (`--format zip`, or `-o NAME.zip`), extracted by
 //! `aqr -d` as they were.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("aqr-pack-{name}-{}", std::process::id()));
-    if d.exists() {
-        fs::remove_dir_all(&d).unwrap();
-    }
-    fs::create_dir_all(&d).unwrap();
-    d
+    common::scratch("pack", name)
 }
 
 fn aqr_in(dir: &Path, args: &[&str]) -> Output {

@@ -3,17 +3,14 @@
 //! absolute one or one with `..` by its last name, as 7-Zip does; `--rename TO` the path in the
 //! archive exactly; names taken twice told by the inputs that take them.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("aqr-inputs-{name}-{}", std::process::id()));
-    if d.exists() {
-        fs::remove_dir_all(&d).unwrap();
-    }
-    fs::create_dir_all(&d).unwrap();
-    d
+    common::scratch("inputs", name)
 }
 
 /// `aqr` with `args`, run in directory `dir`: whether it succeeded, and its standard error.

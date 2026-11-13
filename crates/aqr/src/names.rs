@@ -153,7 +153,7 @@ impl Names {
             }
         };
         #[cfg(windows)]
-        if let Some(sub) = crate::extract::windows_name(&os) {
+        if let Some(sub) = windows_name(&os) {
             m.replaced = true;
             m.os = sub;
             return m;
@@ -259,6 +259,11 @@ fn bytes_os(b: &[u8]) -> OsString {
     OsString::from(escaped(b))
 }
 
+/// The names of a path of an archive joined with `/`, for people.
+pub fn shown_path(names: &[Vec<u8>]) -> String {
+    names.iter().map(|n| String::from_utf8_lossy(name_bytes(n).0)).collect::<Vec<_>>().join("/")
+}
+
 /// Bytes `b` as text: what is UTF-8 as it is, other bytes as `%XX` (as macOS writes names of HFS
 /// that are not UTF-8), and so `%` itself, and `\\` (on Windows a separator; here likely a byte
 /// of a character not decoded, as 5C of Shift_JIS's): one name, to be taken back as it was.
@@ -351,6 +356,40 @@ pub fn compose(s: &str) -> String {
     out
 }
 
+/// The name `name` takes on Windows where it cannot be as it is ([`windows_wide`]). `None`
+/// where it can be.
+#[cfg(windows)]
+fn windows_name(name: &std::ffi::OsStr) -> Option<OsString> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    windows_wide(&name.encode_wide().collect::<Vec<_>>()).map(|w| OsString::from_wide(&w))
+}
+
+/// The name of UTF-16 `name` (lone surrogates and all) on Windows where it cannot be as it is:
+/// the characters a name cannot have (`<>:"/\|?*` and controls) and a dot or a space at its end
+/// as `_`, and `_` before a device's name (`CON`, `NUL.txt`, ...). `None` where it can be.
+#[cfg(any(windows, test))]
+fn windows_wide(name: &[u16]) -> Option<Vec<u16>> {
+    let bad = |c: u16| c < 0x20 || b"<>:\"/\\|?*".iter().any(|&b| b as u16 == c);
+    let mut out: Vec<u16> = name.iter().map(|&c| if bad(c) { b'_' as u16 } else { c }).collect();
+    if let Some(last) = out.last_mut()
+        && (*last == b'.' as u16 || *last == b' ' as u16)
+    {
+        *last = b'_' as u16;
+    }
+    // (devices' names are of ASCII and superscripts, which surrogates do not change)
+    let s = String::from_utf16_lossy(&out);
+    let stem = s.split('.').next().unwrap_or("").trim_end_matches(' ').to_ascii_uppercase();
+    let device = matches!(&stem[..], "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
+        || stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9')
+        || (stem.starts_with("COM") || stem.starts_with("LPT")) && ["¹", "²", "³"].contains(&&stem[3..]);
+    if device {
+        out.insert(0, b'_' as u16);
+    }
+    (out != name).then_some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,5 +412,25 @@ mod tests {
         // (5C, of a character of Shift_JIS not decoded, and `%` escaped too: one name, taken
         // back as it was)
         assert_eq!(escaped(b"\x95\\\x8e\xa6%.txt"), "%95%5C%8E%A6%25.txt");
+    }
+
+    #[test]
+    fn windows_names() {
+        let w = |s: &str| windows_wide(&s.encode_utf16().collect::<Vec<_>>()).map(|o| String::from_utf16(&o).unwrap());
+        assert_eq!(w("a.txt"), None);
+        assert_eq!(w("12:30.txt").as_deref(), Some("12_30.txt"));
+        assert_eq!(w("what?").as_deref(), Some("what_"));
+        assert_eq!(w("dots..").as_deref(), Some("dots._"));
+        assert_eq!(w("con").as_deref(), Some("_con"));
+        assert_eq!(w("NUL.tar.gz").as_deref(), Some("_NUL.tar.gz"));
+        assert_eq!(w("COM1").as_deref(), Some("_COM1"));
+        assert_eq!(w("COM10"), None);
+        assert_eq!(w("console"), None);
+        assert_eq!(w("a\\b").as_deref(), Some("a_b"));
+        // a lone surrogate kept, the rest as any other name's
+        let lone = |a: &str, b: &str| [a.encode_utf16().collect(), vec![0xd800], b.encode_utf16().collect()].concat();
+        assert_eq!(windows_wide(&lone("x", ":ads")), Some(lone("x", "_ads")));
+        assert_eq!(windows_wide(&lone("", "\\..\\..\\x")), Some(lone("", "_.._.._x")));
+        assert_eq!(windows_wide(&lone("x", "y")), None);
     }
 }

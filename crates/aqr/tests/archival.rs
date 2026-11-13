@@ -1,18 +1,16 @@
 //! Archives made with `-A` (mirror blocks), damaged and still read by `aqr -K` and `aqr -d`,
 //! which restore the damaged blocks from their mirror blocks.
 
+mod common;
+use common::{stderr, text};
+
 use std::fs;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("aqr-archival-{name}-{}", std::process::id()));
-    if d.exists() {
-        fs::remove_dir_all(&d).unwrap();
-    }
-    fs::create_dir_all(&d).unwrap();
-    d
+    common::scratch("archival", name)
 }
 
 /// `aqr` given `args` in `dir`, standard input `input`.
@@ -39,22 +37,6 @@ fn aqr_in(dir: &Path, args: &[&str]) -> Output {
     let o = aqr_fed(dir, args, b"");
     assert!(o.status.success(), "aqr {args:?}: {}", String::from_utf8_lossy(&o.stderr));
     o
-}
-
-fn stderr(o: &Output) -> String {
-    String::from_utf8_lossy(&o.stderr).into_owned()
-}
-
-fn text(seed: u64, n: usize) -> Vec<u8> {
-    let mut x = seed;
-    let words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"];
-    let mut t = Vec::new();
-    while t.len() < n {
-        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        t.extend_from_slice(format!("{} {} ", words[(x >> 61) as usize], (x >> 40) % 1000).as_bytes());
-    }
-    t.truncate(n);
-    t
 }
 
 /// A directory `src` of text files and a gzip file (made by `aqr --format gz`, recompressed:

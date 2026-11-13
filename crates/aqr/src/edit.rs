@@ -30,7 +30,7 @@ use std::time::Instant;
 
 use aqr_formula::aqr::{self, Entry, EntryNode, Extra, SegmentWriter, Tree};
 
-use crate::{Args, append, exit, stop};
+use crate::{Args, append, exit, plural, stop};
 
 /// How an archive is edited, besides `--compact`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,10 +77,9 @@ pub fn edit(a: &Args) -> Result<(), String> {
             eprintln!("{}: {what}", path.display());
         }
     };
-    let s = |n: usize| if n == 1 { "" } else { "s" };
     let paths = |n: usize| match a.edit {
-        Some(Edit::Move) => format!("{n} path{} moved", s(n)),
-        _ => format!("{n} path{} deleted", s(n)),
+        Some(Edit::Move) => format!("{n} path{} moved", plural(n)),
+        _ => format!("{n} path{} deleted", plural(n)),
     };
     if a.edit == Some(Edit::Delete) && !a.compact {
         let t = tombstones(opened.tree(), &gone);
@@ -128,9 +127,7 @@ fn compact(a: &Args, path: &Path, o: &append::Opened, t: &Tree) -> Result<(u64, 
     // (a link to the archive: the archive written again where it is)
     let path = &fs::canonicalize(path).map_err(io)?;
     let p = o.prior();
-    let mut part = path.file_name().unwrap_or_default().to_owned();
-    part.push(format!(".{}.part", std::process::id()));
-    let part = path.with_file_name(part);
+    let part = crate::part_of(path);
     let (file, _guard) = stop::create(&part, || fs::OpenOptions::new().write(true).create_new(true).open(&part))
         .map_err(|e| format!("{}: {e}", part.display()))?;
     let r = (|| {
@@ -181,7 +178,7 @@ fn history_of(a: &Args, c: &[u8]) -> Result<aqr::History, String> {
         (None, false) => Err(format!(
             "it has {} journal point{}: --keep-since SPEC keeps those from one on, --drop-history drops them all",
             points.len(),
-            if points.len() == 1 { "" } else { "s" }
+            plural(points.len())
         )),
     }
 }
@@ -243,7 +240,7 @@ fn moved(t: &mut Tree, e: usize, to: &[Vec<u8>]) -> Result<(), String> {
         parent = Some(match there {
             Some(k) if k == e => return Err("moved under itself".into()),
             Some(k) if matches!(t.entries[k].node, EntryNode::Dir) => k,
-            Some(_) => return Err(format!("{} not a directory", shown(&dirs[..=i]))),
+            Some(_) => return Err(format!("{} not a directory", crate::names::shown_path(&dirs[..=i]))),
             None => {
                 t.entries.push(Entry { parent, name: d.clone(), node: EntryNode::Dir, extra: Extra::default() });
                 t.entries.len() - 1
@@ -259,16 +256,10 @@ fn moved(t: &mut Tree, e: usize, to: &[Vec<u8>]) -> Result<(), String> {
         up = t.entries[p].parent;
     }
     if t.entries.iter().enumerate().any(|(k, x)| k != e && x.parent == parent && x.name == *name) {
-        return Err(format!("{} there already", shown(to)));
+        return Err(format!("{} there already", crate::names::shown_path(to)));
     }
     (t.entries[e].parent, t.entries[e].name) = (parent, name.clone());
     Ok(())
-}
-
-/// Names `p` of a path, for people.
-fn shown(p: &[Vec<u8>]) -> String {
-    let names: Vec<&[u8]> = p.iter().map(|n| aqr::name_bytes(n).0).collect();
-    String::from_utf8_lossy(&names.join(&b'/')).into_owned()
 }
 
 /// Tree `t` of its entries in an order each after its parent (each directory's as they were).
@@ -337,7 +328,7 @@ fn tombstones(t: &Tree, gone: &[usize]) -> Tree {
             parent = Some(at);
         }
         let name = t.entries[g].name.clone();
-        entries.push(Entry { parent, name, node: EntryNode::Special(0), extra: Extra::default() });
+        entries.push(Entry::tombstone(parent, name));
     }
     Tree { root: Extra::default(), entries }
 }

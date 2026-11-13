@@ -32,13 +32,12 @@
 //! one is, none of a local time in an unknown time zone; the digits of a quantization interval
 //! over a second `?` (`??:??:??` of a date).
 
-use std::fs;
 use std::io::Write;
 use std::path::Path;
 
 use aqr_formula::aqr::{self, EntryNode, Extra, Time, Zone, name_bytes};
 
-use crate::{Args, decrypt, size};
+use crate::{Args, decrypt, plural, size};
 
 /// What `-t` lists of each entry.
 struct Row {
@@ -63,15 +62,6 @@ pub fn list_all(a: &Args) -> Result<(), String> {
             return Err(format!("{}: only Aqueous archives are listed", input.display()));
         }
         let text = list(a, input)?;
-        // (named by its path as given)
-        let text = match a.json {
-            true => {
-                let mut v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-                v["archive"] = crate::stdio::shown(input).to_string().into();
-                v.to_string() + "\n"
-            }
-            false => text,
-        };
         if several && !a.quiet && !a.json {
             if i > 0 {
                 writeln!(out).map_err(|e| e.to_string())?;
@@ -86,9 +76,7 @@ pub fn list_all(a: &Args) -> Result<(), String> {
 /// The listing of archive `input`.
 fn list(a: &Args, input: &Path) -> Result<String, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
-    let file = fs::File::open(input).map_err(|e| err(&crate::exit::seen(e)))?;
-    // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
-    let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&crate::exit::seen(e)))?;
+    let c = crate::map_archive(input, &input.display())?;
     // the paths alone, or those of paths given but of their blocks: of its metadata blocks alone
     // (of paths given, those back from the last as far as they tell them) and the blocks of
     // those files, an encrypted archive decrypted as it is read
@@ -110,7 +98,7 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
         let archive = crate::by_index(payload, &aqr::NoModules, a.opt.threads, paths.as_deref(), upto)
             .map_err(|e| err(&crate::exit::seen(e)))?;
         if a.quiet {
-            return listed(a, &archive, Vec::new(), &err, None);
+            return listed(a, input, &archive, Vec::new(), &err, None);
         }
         crate::tell_incomplete(archive.status(), input);
         // (their sizes and instructions alone, all that is shown without -v)
@@ -134,7 +122,7 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
                 })
             })
             .collect();
-        return listed(a, &archive, listing, &err, None);
+        return listed(a, input, &archive, listing, &err, None);
     }
     let decrypted = match aqr::envelope::is_encrypted(&c) {
         // (not listed from chunks that do not authenticate, whose bytes are not to be trusted:
@@ -162,13 +150,14 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
     }
     let name = |wasm: &[u8]| aqr_decompress::identify(wasm).map(|n| n.split('@').next().unwrap_or(&n).to_owned());
     let listing = archive.listing(&name).map_err(|e| err(&crate::exit::seen(e)))?.into_iter().map(Some).collect();
-    listed(a, &archive, listing, &err, Some(c.len() as u64))
+    listed(a, input, &archive, listing, &err, Some(c.len() as u64))
 }
 
 /// The listing of `archive` (of `len` bytes: none, of the paths alone), the files `listed` (by
 /// content; none, of the paths alone).
 fn listed(
     a: &Args,
+    input: &Path,
     archive: &aqr::Archive,
     mut listed: Vec<Option<aqr::Listed>>,
     err: &dyn Fn(&dyn std::fmt::Display) -> String,
@@ -245,7 +234,7 @@ fn listed(
         if r.is_dir { p + "/" } else { p }
     };
     if a.json {
-        return json(a, archive, &rows, len, err);
+        return json(a, input, archive, &rows, len, err);
     }
     let mut s = String::new();
     if a.quiet {
@@ -260,15 +249,15 @@ fn listed(
     let links = rows.iter().filter(|r| r.link.is_some()).count();
     let others = rows.len() - files - dirs - links;
     let total: u64 = rows.iter().filter_map(|r| r.listed.as_ref()).map(|l| l.size).sum();
-    let mut counts = format!("{files} file{}", if files == 1 { "" } else { "s" });
+    let mut counts = format!("{files} file{}", plural(files));
     if dirs > 0 {
         counts += &format!(", {dirs} director{}", if dirs == 1 { "y" } else { "ies" });
     }
     if links > 0 {
-        counts += &format!(", {links} link{}", if links == 1 { "" } else { "s" });
+        counts += &format!(", {links} link{}", plural(links));
     }
     if others > 0 {
-        counts += &format!(", {others} other{}", if others == 1 { "" } else { "s" });
+        counts += &format!(", {others} other{}", plural(others));
     }
     let mut table: Vec<Vec<String>> = Vec::new();
     // (columns aligned to the right, the others to the left; the last not padded)
@@ -389,7 +378,7 @@ fn listed(
 }
 
 /// The listing of `archive` (of `len` bytes, where known) as a line of JSON, of its `rows`:
-/// `{"archive" (set by [`list_all`]), "entries": [...], "files", "directories", "links", "others", "size"}`, and the
+/// `{"archive" (`input` as given), "entries": [...], "files", "directories", "links", "others", "size"}`, and the
 /// archive's `"data"` and `"overhead"` bytes where they are known. Each entry has its `"path"`
 /// (`"path_hex"` too where it is not UTF-8; null of an archive of a single file), its `"type"` (`file`, `dir`, `link`, `fifo`, `chr`,
 /// `blk`, `special`) and what is known of it: of a file, `"size"` and `"nodes"` (with all of
@@ -398,6 +387,7 @@ fn listed(
 /// in RFC 3339, without an offset where it is a local time of an unknown time zone).
 fn json(
     a: &Args,
+    input: &Path,
     archive: &aqr::Archive,
     rows: &[Row],
     len: Option<u64>,
@@ -412,7 +402,7 @@ fn json(
         // (none of the file of an archive of a single file)
         e.insert("path".into(), if r.node.is_some() { text(&r.path) } else { Value::Null });
         if r.node.is_some() && std::str::from_utf8(&r.path).is_err() {
-            e.insert("path_hex".into(), r.path.iter().map(|b| format!("{b:02x}")).collect::<String>().into());
+            e.insert("path_hex".into(), crate::hex(&r.path).into());
         }
         let kind = match &r.node {
             None | Some(EntryNode::File(_)) => "file",
@@ -502,7 +492,23 @@ fn json(
         o["data"] = data.into();
         o["overhead"] = (len - data.min(len)).into();
     }
+    o["archive"] = crate::stdio::shown(input).to_string().into();
     Ok(o.to_string() + "\n")
+}
+
+/// An offset of `o` 15 minutes from UTC as `+HH:MM`.
+pub(crate) fn offset(o: i8) -> String {
+    let m = (o as i32).abs() * 15;
+    format!("{}{:02}:{:02}", if o < 0 { '-' } else { '+' }, m / 60, m % 60)
+}
+
+/// A time zone as RFC 3339 has it: `Z`, the offset, or nothing of a local time.
+fn zone(z: Zone) -> String {
+    match z {
+        Zone::Utc => "Z".into(),
+        Zone::Offset(o) => offset(o),
+        Zone::Local => String::new(),
+    }
 }
 
 /// A time as RFC 3339 has it: of its offset (`Z` of none told), none of a local time in an
@@ -513,14 +519,7 @@ fn rfc3339(t: Time) -> String {
         0 => String::new(),
         n => format!(".{n:09}").trim_end_matches('0').to_owned(),
     };
-    let zone = match t.zone {
-        Zone::Utc => "Z".into(),
-        Zone::Offset(o) => {
-            let m = (o as i32).abs() * 15;
-            format!("{}{:02}:{:02}", if o < 0 { '-' } else { '+' }, m / 60, m % 60)
-        }
-        Zone::Local => String::new(),
-    };
+    let zone = zone(t.zone);
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{sec:02}{frac}{zone}")
 }
 
@@ -543,14 +542,7 @@ fn time(t: Option<Time>) -> String {
         u if u > 1_000_000_000 => format!("{h:02}:{mi:02}:{}?", sec / 10),
         _ => format!("{h:02}:{mi:02}:{sec:02}"),
     };
-    let zone = match t.zone {
-        Zone::Utc => "Z".into(),
-        Zone::Offset(o) => {
-            let m = (o as i32).abs() * 15;
-            format!("{}{:02}:{:02}", if o < 0 { '-' } else { '+' }, m / 60, m % 60)
-        }
-        Zone::Local => String::new(),
-    };
+    let zone = zone(t.zone);
     format!("{y:04}-{mo:02}-{d:02} {clock}{zone}")
 }
 

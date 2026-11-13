@@ -75,12 +75,36 @@ fn legacy(c: char) -> char {
 /// as Linux's hfsplus keeps it (a `?` for each byte of its UTF-8, not decomposed nor ignored):
 /// `x😀`, `x😁` and `x????` alike.
 pub fn fold_astral(name: &OsStr) -> String {
-    let s = name.to_string_lossy();
-    if s.chars().all(|c| (c as u32) < 0x1_0000) {
-        return fold(name);
+    match astral(&name.to_string_lossy()) {
+        None => fold(name),
+        Some(x) => fold(x.as_ref()),
     }
-    let x: String = s.chars().map(|c| if (c as u32) < 0x1_0000 { c.to_string() } else { "????".into() }).collect();
-    fold(x.as_ref())
+}
+
+/// `name` folded ([`fold`]) and folded as [`fold_astral`] does, the first run once where the two
+/// are alike.
+pub fn fold_both(name: &OsStr) -> (String, String) {
+    let folded = fold(name);
+    match astral(&name.to_string_lossy()) {
+        None => (folded.clone(), folded),
+        Some(x) => (folded, fold(x.as_ref())),
+    }
+}
+
+/// `s` with each character beyond the Basic Multilingual Plane `????`; `None` where there is none.
+fn astral(s: &str) -> Option<String> {
+    if s.chars().all(|c| (c as u32) < 0x1_0000) {
+        return None;
+    }
+    let mut x = String::with_capacity(s.len());
+    for c in s.chars() {
+        if (c as u32) < 0x1_0000 {
+            x.push(c);
+        } else {
+            x.push_str("????");
+        }
+    }
+    Some(x)
 }
 
 /// `name` folded as file systems taking names by case but normalization aside could take it

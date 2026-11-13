@@ -2,17 +2,14 @@
 //! files out as they were. Skipped where this aqr carries no stub (built without
 //! `target/aqr-sfx/`, which `crates/aqr-sfx/pack.sh` gathers).
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("aqr-sfx-{name}-{}", std::process::id()));
-    if d.exists() {
-        fs::remove_dir_all(&d).unwrap();
-    }
-    fs::create_dir_all(&d).unwrap();
-    d
+    common::scratch("sfx", name)
 }
 
 fn aqr_in(dir: &Path, args: &[&str]) -> Output {

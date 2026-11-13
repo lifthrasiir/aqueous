@@ -1,17 +1,14 @@
 //! The summary `-c` prints ("N files, X -> Y (ratio)") counts the bytes of the files as `-d` and
 //! `-K` do: each hard link of a file for its size, though the archive reads its content once.
 
+mod common;
+
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("aqr-summary-{name}-{}", std::process::id()));
-    if d.exists() {
-        fs::remove_dir_all(&d).unwrap();
-    }
-    fs::create_dir_all(&d).unwrap();
-    d
+    common::scratch("summary", name)
 }
 
 /// Standard error of `aqr` with `args` run in `dir`, which it has to succeed in.

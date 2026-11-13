@@ -3,17 +3,14 @@
 //! they need decoded; and the errors of paths given wrong. Of Aqueous archives and of others.
 //! Some paths of an Aqueous archive listed alone (`aqr -t ARCHIVE PATH...`) too.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("aqr-select-{name}-{}", std::process::id()));
-    if d.exists() {
-        fs::remove_dir_all(&d).unwrap();
-    }
-    fs::create_dir_all(&d).unwrap();
-    d
+    common::scratch("select", name)
 }
 
 /// `aqr` with `args`, run in directory `dir`: whether it succeeded, and its standard error.
