@@ -305,6 +305,7 @@ dependencies = [
  "aqr-wasmrt",
  "aqr-wim",
  "aqr-wrt",
+ "aqr-wwise",
  "aqr-xsv",
  "aqr-zip",
  "aqr-zstd",
@@ -1716,6 +1717,8 @@ dependencies = [
 name = "aqr-wwise"
 version = "0.1.0"
 dependencies = [
+ "aqr-common",
+ "aqr-formula",
  "aqr-vorbis",
 ]
 

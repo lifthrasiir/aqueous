@@ -2,8 +2,12 @@
 name = "aqr-wwise"
 version = "0.1.0"
 edition = "2024"
-description = "Audiokinetic Wwise's Vorbis media (.wem): their stripped setup headers rebuilt"
+description = "Audiokinetic Wwise's Vorbis media (.wem): their stripped setup headers rebuilt, their packets recoded by aqr-vorbis"
 publish = false
 
 [dependencies]
+aqr-formula = { path = "../../crates/aqr-formula" }
 aqr-vorbis = { path = "../aqr-vorbis" }
+
+[dev-dependencies]
+aqr-common = { path = "../../crates/aqr-common" }

@@ -154,6 +154,8 @@ static ROWS: &[Row] = {
         start(Fsb5, aqr_fsb::fsb5::starts),
         anywhere(Ogg, Of(&[b"Og"]), aqr_ogg::formula::starts),
         magic(Flac, &[(0, b"fLaC")]),
+        // (Wwise's Vorbis, format FFFF: before the WAVs of aqr-raw)
+        start(Wem, aqr_wwise::wem::starts),
         magic(Raw, &[(0, b"RIFF"), (8, b"WAVE")]),
         magic(Raw, &[(0, b"FORM"), (8, b"AIFF")]),
         magic(Raw, &[(0, b"FORM"), (8, b"AIFC")]),
@@ -508,6 +510,8 @@ mod tests {
             (b"CSFCHUNK\0\0\0\0", Some(Format::Clip)),
             (b"fLaC\0\0\0\x22", Some(Format::Flac)),
             (b"RIFF\0\0\0\0WAVEfmt ", Some(Format::Raw)),
+            (b"RIFF\0\0\0\0WAVEfmt \x42\0\0\0\xff\xff\x02\0", Some(Format::Wem)),
+            (b"RIFF\0\0\0\0WAVEfmt \x10\0\0\0\x01\0\x02\0", Some(Format::Raw)),
             (b"FORM\0\0\0\0AIFCFVER", Some(Format::Raw)),
             (&id3_flac, Some(Format::Flac)),
             (b"P5 2 1 255 \x00\x01", Some(Format::Raw)),

@@ -215,10 +215,132 @@ fn diagnose(s: &Stripped, setup: &Setup, media: &[&Medium]) {
     }
 }
 
+/// The files named by `args` (`@LIST`: those in LIST, a line each).
+fn names(args: &[String]) -> Vec<String> {
+    args.iter()
+        .flat_map(|a| match a.strip_prefix('@') {
+            Some(list) => std::fs::read_to_string(list).expect("list").lines().map(str::to_owned).collect(),
+            None => vec![a.clone()],
+        })
+        .collect()
+}
+
+/// The media of file `d`: those of a bank, itself, or those found in it.
+fn media_of(d: &[u8]) -> Vec<std::ops::Range<usize>> {
+    if d.starts_with(b"BKHD") {
+        bank_media(d)
+    } else if d.starts_with(b"RIFF") {
+        std::iter::once(0..d.len()).collect()
+    } else {
+        embedded(d)
+    }
+}
+
+/// `recode`: each Vorbis medium through its formula and back (aqr-vorbis's module run
+/// natively), checked; the bytes of the media taken, of their formulas' streams, and the time.
+fn recode(names: &[String]) {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[derive(Default, Debug)]
+    struct Sums {
+        media: usize,
+        taken: usize,
+        bytes: u64,
+        streams: u64,
+        record: u64,
+        setup: u64,
+        setups: std::collections::HashSet<u64>,
+        encode: f64,
+        decode: f64,
+        wrong: usize,
+    }
+    let sums = Mutex::new(Sums::default());
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let t0 = std::time::Instant::now();
+    for name in names {
+        let d = std::fs::read(name).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let ranges: Vec<_> = media_of(&d).into_iter().filter(|r| wem::starts(&d[r.clone()])).collect();
+        let next = AtomicUsize::new(0);
+        std::thread::scope(|sc| {
+            for _ in 0..threads {
+                sc.spawn(|| {
+                    let mut s = Sums::default();
+                    while let Some(r) = ranges.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        let m = &d[r.clone()];
+                        s.media += 1;
+                        let t = std::time::Instant::now();
+                        let Some(f) = aqr_wwise::formula::encode(m, 1) else { continue };
+                        s.encode += t.elapsed().as_secs_f64();
+                        let t = std::time::Instant::now();
+                        let back = f.eval(&|a: &aqr_formula::Apply, inputs: &[&[u8]]| {
+                            aqr_vorbis::formula::decode(&a.params, inputs, a.len)
+                                .map_err(|e| aqr_formula::Error::new(e.0))
+                        });
+                        s.decode += t.elapsed().as_secs_f64();
+                        if back.as_deref().ok() != Some(m) {
+                            s.wrong += 1;
+                            eprintln!("{name}@{:x}: not given back", r.start);
+                            continue;
+                        }
+                        s.taken += 1;
+                        s.bytes += m.len() as u64;
+                        for st in &f.streams {
+                            s.streams += st.data.len() as u64;
+                            if st.class == "vorbis/record" {
+                                s.record += st.data.len() as u64;
+                            }
+                            if st.class == "vorbis/setup" {
+                                s.setup += st.data.len() as u64;
+                                use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
+                                s.setups.insert(BuildHasherDefault::<DefaultHasher>::default().hash_one(&st.data[..]));
+                            }
+                        }
+                    }
+                    let mut all = sums.lock().unwrap();
+                    all.media += s.media;
+                    all.taken += s.taken;
+                    all.bytes += s.bytes;
+                    all.streams += s.streams;
+                    all.record += s.record;
+                    all.setup += s.setup;
+                    all.setups.extend(s.setups);
+                    all.encode += s.encode;
+                    all.decode += s.decode;
+                    all.wrong += s.wrong;
+                });
+            }
+        });
+    }
+    let s = sums.into_inner().unwrap();
+    println!(
+        "{} of {} media taken ({} not given back): {} -> {} bytes of streams but setups ({:.4}; records {};          setups {} bytes, {} distinct); thread seconds: encode {:.1} ({:.1} MB/s), decode {:.1} ({:.1} MB/s); {:.1} s",
+        s.taken,
+        s.media,
+        s.wrong,
+        s.bytes,
+        s.streams - s.setup,
+        (s.streams - s.setup) as f64 / s.bytes.max(1) as f64,
+        s.record,
+        s.setup,
+        s.setups.len(),
+        s.encode,
+        s.bytes as f64 / 1e6 / s.encode,
+        s.decode,
+        s.bytes as f64 / 1e6 / s.decode,
+        t0.elapsed().as_secs_f64()
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("recode") {
+        return recode(&names(&args[1..]));
+    }
     if args.first().map(String::as_str) != Some("ids") {
-        eprintln!("usage: aqr-wwise ids [--db FILE] FILE...|@LIST...");
+        eprintln!(
+            "usage: aqr-wwise ids [--db FILE] FILE...|@LIST...
+       aqr-wwise recode FILE...|@LIST..."
+        );
         std::process::exit(2);
     }
     let mut media = Vec::new();
@@ -231,23 +353,9 @@ fn main() {
         db_file = Some(std::fs::read(&rest[1]).expect("database"));
         rest = &rest[2..];
     }
-    let names: Vec<String> = rest
-        .iter()
-        .flat_map(|a| match a.strip_prefix('@') {
-            Some(list) => std::fs::read_to_string(list).expect("list").lines().map(str::to_owned).collect(),
-            None => vec![a.clone()],
-        })
-        .collect();
-    for name in &names {
+    for name in &names(rest) {
         let d = std::fs::read(name).unwrap_or_else(|e| panic!("{name}: {e}"));
-        let ranges = if d.starts_with(b"BKHD") {
-            bank_media(&d)
-        } else if d.starts_with(b"RIFF") {
-            std::iter::once(0..d.len()).collect()
-        } else {
-            embedded(&d)
-        };
-        for (i, r) in ranges.into_iter().enumerate() {
+        for (i, r) in media_of(&d).into_iter().enumerate() {
             let m = &d[r.clone()];
             match wem::parse(m) {
                 Ok(w) => media.push(Medium { name: format!("{name}#{i}@{:x}", r.start), d: m.to_vec(), w }),

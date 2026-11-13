@@ -27,6 +27,24 @@ pub struct Wem {
     pub setup: Range<usize>,
     /// The audio packets' bytes (each after its packet header).
     pub packets: Vec<Range<usize>>,
+    /// The `data` chunk's contents.
+    pub data: Range<usize>,
+    /// Where the first audio packet's header is.
+    pub audio: usize,
+    /// The packets end inside a packet: the medium is cut short (a bank's prefetched part of a
+    /// streamed medium).
+    pub cut: bool,
+}
+
+/// Whether `d` starts as a medium of Wwise's Vorbis: a RIFF WAVE whose first chunk is `fmt `
+/// of format `FFFF`.
+pub fn starts(d: &[u8]) -> bool {
+    d.get(..4) == Some(b"RIFF") && d.get(8..16) == Some(b"WAVEfmt ") && d.get(20..22) == Some(&[0xff, 0xff])
+}
+
+/// The bytes of medium `d` (its RIFF size), if it starts as one.
+pub fn extent(d: &[u8]) -> Option<usize> {
+    starts(d).then(|| (8 + u32le(d, 4).unwrap() as usize).min(d.len()))
 }
 
 /// Why a medium is not read.
@@ -84,12 +102,32 @@ pub fn parse(d: &[u8]) -> Result<Wem, Error> {
         (at + 2 + n <= data.end).then_some(at + 2..at + 2 + n)
     };
     let setup = packet(setup_at).ok_or("setup packet")?;
+    if audio_at > data.end {
+        return Err("audio packets");
+    }
     let mut packets = Vec::new();
     let mut at = audio_at;
+    let mut cut = false;
     while at < data.end {
-        let p = packet(at).ok_or("audio packet")?;
+        let Some(p) = packet(at) else {
+            cut = true;
+            break;
+        };
         at = p.end;
         packets.push(p);
     }
-    Ok(Wem { channels, rate, samples, vorb_size: v.len(), mod_packets, blocksize_pows, uid, setup, packets })
+    Ok(Wem {
+        channels,
+        rate,
+        samples,
+        vorb_size: v.len(),
+        mod_packets,
+        blocksize_pows,
+        uid,
+        setup,
+        packets,
+        data,
+        audio: audio_at,
+        cut,
+    })
 }

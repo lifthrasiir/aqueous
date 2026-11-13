@@ -67,10 +67,9 @@ pub fn files(d: &[u8]) -> Option<Vec<File>> {
     Some(files)
 }
 
-/// The extension of a medium `m` of Wwise's: `wem` of its Vorbis (format `FFFF`, whose setup a
-/// recompressor would rebuild, as aqr-fsb does FSB5's), `wav` of the others (PCM, ADPCM, ...) of
-/// RIFF, `bin` of the plugins' media (impulse
-/// responses), which are not RIFF.
+/// The extension of a medium `m` of Wwise's: `wem` of its Vorbis (format `FFFF`, which aqr-wwise
+/// recompresses), `wav` of the others (PCM, ADPCM, ...) of RIFF, `bin` of the plugins' media
+/// (impulse responses), which are not RIFF.
 pub fn medium(m: &[u8]) -> &'static str {
     match (m.starts_with(b"RIFF"), m.get(12..16) == Some(b"fmt "), m.get(20..22)) {
         (false, ..) => "bin",

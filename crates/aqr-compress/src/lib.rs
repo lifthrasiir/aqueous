@@ -47,7 +47,9 @@
 //! - QuickTime and MXF files of ProRes frames: aqr-prores, the frames' coefficients under a
 //!   context model with the frame before, in chunks of about 32 MiB.
 //! - Ogg files of Vorbis streams: aqr-ogg, rebuilding the pages from the streams' packets with
-//!   their lacing and CRCs derived, the Vorbis audio packets by aqr-vorbis.
+//!   their lacing and CRCs derived, the Vorbis audio packets by aqr-vorbis. Wwise's Vorbis
+//!   media (`.wem`): aqr-wwise, the setup that their stripped one stands for rebuilt from
+//!   aqr-vorbis's database, their packets by aqr-vorbis.
 //! - PNG, GIF, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, Clip Studio Paint, DDS, PDF, SQLite, FASTA, DEX, `resources.arsc`, FITS,
 //!   PDB (its container and modules' symbols) and Wavefront OBJ (by its text, not its name): the recompressor's own formula, its module
 //!   applied to its streams, and files it embeds (PDF's DEFLATE streams and images, PSD's and

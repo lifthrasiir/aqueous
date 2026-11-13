@@ -23,9 +23,13 @@ pub struct Stripped {
     pub used: (usize, usize),
 }
 
+/// The walk of a setup's lists after its codebooks, either way: reading a stripped header and
+/// writing the Vorbis one's bits (`strip` false), or reading those and writing the stripped
+/// header's (`strip` true).
 struct Copy<'a> {
     r: Reader<'a>,
     out: Vec<u8>,
+    strip: bool,
 }
 
 impl Copy<'_> {
@@ -39,19 +43,43 @@ impl Copy<'_> {
         self.put(v, n);
         Some(v)
     }
+
+    /// A field of `n` bits, always `v`, that the stripped header leaves out.
+    fn fixed(&mut self, v: u32, n: u32) -> Option<()> {
+        if self.strip {
+            (self.r.bits(n)? == v).then_some(())
+        } else {
+            self.put(v, n);
+            Some(())
+        }
+    }
+
+    /// A field of `short` bits in the stripped header and `long` in Vorbis's.
+    fn widen(&mut self, short: u32, long: u32) -> Option<u32> {
+        if self.strip {
+            let v = self.r.bits(long)?;
+            if v >> short != 0 {
+                return None;
+            }
+            self.put(v, short);
+            Some(v)
+        } else {
+            let v = self.r.bits(short)?;
+            self.put(v, long);
+            Some(v)
+        }
+    }
 }
 
-/// Reads stripped setup header `d` of a stream of `channels`.
-pub fn parse(d: &[u8], channels: usize) -> Option<Stripped> {
-    let mut c = Copy { r: Reader::new(d), out: Vec::new() };
-    let n = c.r.bits(8)? as usize + 1;
-    let ids = (0..n).map(|_| c.r.bits(10).map(|v| v as u16)).collect::<Option<Vec<_>>>()?;
+/// The lists from the time-domain one to the framing flag, either way ([`Copy`]): the residues'
+/// ends and the modes' block flags.
+fn lists(c: &mut Copy, channels: usize) -> Option<(Vec<u32>, Vec<bool>)> {
     // The time-domain placeholder.
-    c.put(0, 6);
-    c.put(0, 16);
+    c.fixed(0, 6)?;
+    c.fixed(0, 16)?;
     let floors = c.copy(6)? + 1;
     for _ in 0..floors {
-        c.put(1, 16);
+        c.fixed(1, 16)?;
         let partitions = c.copy(5)?;
         let classes: Vec<u32> = (0..partitions).map(|_| c.copy(4)).collect::<Option<_>>()?;
         let nclasses = classes.iter().max().map_or(0, |m| m + 1);
@@ -77,8 +105,7 @@ pub fn parse(d: &[u8], channels: usize) -> Option<Stripped> {
     let residues = c.copy(6)? + 1;
     let mut ends = Vec::new();
     for _ in 0..residues {
-        let kind = c.r.bits(2)?;
-        c.put(kind, 16);
+        c.widen(2, 16)?;
         c.copy(24)?;
         ends.push(c.copy(24)?);
         c.copy(24)?;
@@ -100,7 +127,7 @@ pub fn parse(d: &[u8], channels: usize) -> Option<Stripped> {
     }
     let mappings = c.copy(6)? + 1;
     for _ in 0..mappings {
-        c.put(0, 16);
+        c.fixed(0, 16)?;
         let submaps = if c.copy(1)? == 1 { c.copy(4)? + 1 } else { 1 };
         if c.copy(1)? == 1 {
             let steps = c.copy(8)? + 1;
@@ -128,13 +155,44 @@ pub fn parse(d: &[u8], channels: usize) -> Option<Stripped> {
     let mut blockflags = Vec::new();
     for _ in 0..modes {
         blockflags.push(c.copy(1)? == 1);
-        c.put(0, 16);
-        c.put(0, 16);
+        c.fixed(0, 16)?;
+        c.fixed(0, 16)?;
         c.copy(8)?;
     }
-    c.put(1, 1);
+    c.fixed(1, 1)?;
+    Some((ends, blockflags))
+}
+
+/// Bits (one a byte) as bytes, the last padded with zero bits.
+fn pack(bits: &[u8]) -> Vec<u8> {
+    let mut w = Writer::new();
+    bits.iter().for_each(|&b| w.bit(b as u32));
+    w.finish()
+}
+
+/// Reads stripped setup header `d` of a stream of `channels`.
+pub fn parse(d: &[u8], channels: usize) -> Option<Stripped> {
+    let mut c = Copy { r: Reader::new(d), out: Vec::new(), strip: false };
+    let n = c.r.bits(8)? as usize + 1;
+    let ids = (0..n).map(|_| c.r.bits(10).map(|v| v as u16)).collect::<Option<Vec<_>>>()?;
+    let (ends, blockflags) = lists(&mut c, channels)?;
     let used = (c.r.pos(), c.r.len());
     Some(Stripped { ids, rest: c.out, ends, blockflags, used })
+}
+
+/// The stripped setup header of ids `ids` and of the lists of Vorbis setup header bits `rest`
+/// (its bits after its codebooks, one a byte), of a stream of `channels`: [`parse`]'s inverse
+/// (its last byte padded with zero bits).
+pub fn strip(ids: &[u16], rest: &[u8], channels: usize) -> Option<Vec<u8>> {
+    if !(1..=256).contains(&ids.len()) || ids.iter().any(|&i| i >= 1 << 10) {
+        return None;
+    }
+    let rest = pack(rest);
+    let mut c = Copy { r: Reader::new(&rest), out: Vec::new(), strip: true };
+    c.put(ids.len() as u32 - 1, 8);
+    ids.iter().for_each(|&i| c.put(i as u32, 10));
+    lists(&mut c, channels)?;
+    Some(pack(&c.out))
 }
 
 impl Stripped {

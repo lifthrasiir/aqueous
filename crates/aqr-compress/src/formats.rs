@@ -318,6 +318,14 @@ formats! {
         exts: &["fsb"],
         extent: aqr_fsb::fsb5::extent,
     }
+    /// Audiokinetic Wwise's Vorbis medium (`.wem`, aqr-wwise): a RIFF WAVE of format `FFFF`, its
+    /// stripped setup rebuilt and its packets recoded by aqr-vorbis.
+    Wem = "wem" {
+        recompressor: Pure(aqr_wwise::formula::encode),
+        heap: 7.0,
+        exts: &["wem"],
+        extent: aqr_wwise::wem::extent,
+    }
     /// Ogg file of Vorbis streams (aqr-ogg, and aqr-vorbis on their audio packets), known by its
     /// first page's CRC.
     Ogg = "ogg" {

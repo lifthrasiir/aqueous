@@ -2,7 +2,7 @@
 name = "aqr-dll-cfg-if"
 version = "0.1.0"
 edition = "2024"
-description = "Made by layout.py: the crates that the same 77 modules use, as a dylib that their native libraries link against"
+description = "Made by layout.py: the crates that the same 78 modules use, as a dylib that their native libraries link against"
 publish = false
 
 [lib]

@@ -130,8 +130,8 @@ engines' (Godot's and Wwise's `.pck`, Unreal's and Quake's `.pak`):
 The members' names give their kinds: of Wwise's media, its Vorbis `.wem` and the others
 `.wav`; CRI's HCA (`.hca`) is of compressed data by its name (aqr-compress), as files of their own
 a scan's fallbacks took it for samples and coded it worse (SE_Kinetic.acb 93.96 -> 97.00 MB).
-Both are of codecs a recompressor could take (Wwise's Vorbis as aqr-fsb does FSB5's, HCA's
-MDCT), which is left.
+Wwise's Vorbis media are recompressed by aqr-wwise (their setups rebuilt, as aqr-fsb does
+FSB5's); HCA's MDCT is left.
 
 A pack whose one file is all of it has no formula: its contents would be it again (a chunk of an
 Unreal 3 texture cache, alone, starts as a cache does).

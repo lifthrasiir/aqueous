@@ -27,6 +27,7 @@ aqr-fasta = { path = "../../codecs/aqr-fasta" }
 aqr-tensors = { path = "../../codecs/aqr-tensors" }
 aqr-wasm = { path = "../../codecs/aqr-wasm" }
 aqr-fsb = { path = "../../codecs/aqr-fsb" }
+aqr-wwise = { path = "../../codecs/aqr-wwise" }
 aqr-ogg = { path = "../../codecs/aqr-ogg" }
 aqr-mkv = { path = "../../codecs/aqr-mkv" }
 aqr-gnu-gettext = { path = "../../codecs/aqr-gnu-gettext" }
