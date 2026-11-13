@@ -1,8 +1,10 @@
 //! Fields of a table's records, and the candidates for them a bit profile gives.
 //!
 //! A field is a bit field of the 64-bit word at a byte of the record, either endianness:
-//! `((word >> shift) & mask(bits)) << scale`. Its byte may be outside the record (a row of a
-//! table need not start where its records do), up to a record either way.
+//! `(word >> shift) & mask(bits)`, in bytes (no units: where members are aligned, their sizes
+//! are stored as they are and rounded up, not the sizes rounded up; offsets scaled down tile a
+//! smaller file as well, the same sizes scaled with them). Its byte may be outside the record (a
+//! row of a table need not start where its records do), up to a record either way.
 
 use crate::tables::Table;
 
@@ -13,8 +15,6 @@ pub struct Field {
     pub be: bool,
     pub shift: u8,
     pub bits: u8,
-    /// Units of 2^scale bytes (sectors, aligned offsets).
-    pub scale: u8,
 }
 
 #[inline]
@@ -49,7 +49,7 @@ impl Field {
 
     #[inline]
     pub fn get(&self, b: &[u8], t: &Table, row: i64) -> u64 {
-        (self.shifted(b, t, row) & mask(self.bits)) << self.scale
+        self.shifted(b, t, row) & mask(self.bits)
     }
 
     pub fn values(&self, b: &[u8], t: &Table, rows: &[i64]) -> Vec<u64> {
@@ -68,20 +68,12 @@ impl Field {
     pub fn with_bits(self, bits: u8) -> Field {
         Field { bits, ..self }
     }
-
-    pub fn with_scale(self, scale: u8) -> Field {
-        Field { scale, ..self }
-    }
 }
 
 impl std::fmt::Display for Field {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let e = if self.be { '>' } else { '<' };
-        write!(f, "@{}{}[{}:+{}]", self.pos, e, self.shift, self.bits)?;
-        if self.scale > 0 {
-            write!(f, "<<{}", self.scale)?;
-        }
-        Ok(())
+        write!(f, "@{}{}[{}:+{}]", self.pos, e, self.shift, self.bits)
     }
 }
 
@@ -165,7 +157,7 @@ impl Profile {
             ws.sort_unstable();
             ws.dedup();
             for w in ws {
-                out.push(Field { pos, be: false, shift, bits: w as u8, scale: 0 });
+                out.push(Field { pos, be: false, shift, bits: w as u8 });
             }
         }
         // and the whole fields of 2, 4 and 8 bytes at every byte, either endianness (a field
@@ -173,8 +165,8 @@ impl Profile {
         // bytes long)
         for pos in -k..2 * k {
             for w in [2u8, 4, 8] {
-                out.push(Field { pos, be: true, shift: 64 - 8 * w, bits: 8 * w, scale: 0 });
-                out.push(Field { pos, be: false, shift: 0, bits: 8 * w, scale: 0 });
+                out.push(Field { pos, be: true, shift: 64 - 8 * w, bits: 8 * w });
+                out.push(Field { pos, be: false, shift: 0, bits: 8 * w });
             }
         }
         out.sort_by_key(|f| (f.pos, f.be, f.shift, f.bits));

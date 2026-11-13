@@ -190,17 +190,13 @@ pub fn explicit(b: &[u8], t: &Table, prof: &Profile, l: u64, sizes: &[Field]) ->
         if distinct * 10 < v.len() || distinct < MINROWS {
             continue;
         }
-        for a in 0..12u8 {
-            let la = l.div_ceil(1 << a);
-            let inr = v.iter().filter(|&&x| x < la).count();
-            if inr * 10 < v.len() * 9 || *sorted.last().unwrap() < la / 8 {
-                continue;
-            }
-            let vals: Vec<u64> = v.iter().map(|&x| x << a).collect();
-            if seen.insert(vals.clone()) {
-                let max = vals.iter().copied().filter(|&x| x < l).max().unwrap_or(0);
-                offs.push((l.abs_diff(max), f.with_scale(a)));
-            }
+        let inr = v.iter().filter(|&&x| x < l).count();
+        if inr * 10 < v.len() * 9 || *sorted.last().unwrap() < l / 8 {
+            continue;
+        }
+        if seen.insert(v.clone()) {
+            let max = v.iter().copied().filter(|&x| x < l).max().unwrap_or(0);
+            offs.push((l.abs_diff(max), *f));
         }
     }
     // first those whose last member (at the greatest offset, over all rows) ends at the end of
@@ -211,11 +207,23 @@ pub fn explicit(b: &[u8], t: &Table, prof: &Profile, l: u64, sizes: &[Field]) ->
     // 16-byte header found from byte 27)
     let before = (t.start >= t.k) as i64;
     let all: Vec<i64> = (-before..n as i64).collect();
+    // (the greatest offset of a big table by 16384 rows and its last 256: a sorted table's is
+    // at its end; ranked over all of the rows, the offsets of a table of 490 thousand rows of
+    // 4 bytes, of floats, took 100 ms)
+    let looked: Vec<i64> = if all.len() <= 1 << 14 {
+        all.clone()
+    } else {
+        let mut v: Vec<i64> = even(n, 1 << 14);
+        v.extend(n as i64 - 256..n as i64);
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
     let mut ranked: Vec<(bool, u64, Field)> = offs
         .iter()
         .map(|&(d, off)| {
             let (mut om, mut rm_) = (0u64, 0i64);
-            for &r in &all {
+            for &r in &looked {
                 let v = off.get(b, t, r);
                 if v < l && v >= om {
                     (om, rm_) = (v, r);
@@ -238,8 +246,10 @@ pub fn explicit(b: &[u8], t: &Table, prof: &Profile, l: u64, sizes: &[Field]) ->
         .collect();
     ranked.sort_by_key(|x| (x.0, x.1));
     let mut out = Vec::new();
-    // up to 64 where the table is small (a candidate costs a sort of its rows), else 32
-    let take = (2_000_000 / n.max(1)).clamp(32, 64);
+    // up to 64 where the table is small (a candidate costs a sort of its rows), fewer where it
+    // is big, 8 at least (a table of 490 thousand rows took 600 ms for 32; the directories seen
+    // of over 50 thousand rows came within the first 16)
+    let take = (2_000_000 / n.max(1)).clamp(8, 64);
     for &(_, _, off) in ranked.iter().take(take) {
         let o = off.values(b, t, &all);
         let rm = edge_rooms(&o, before as usize, l);
@@ -348,6 +358,15 @@ pub fn explicit(b: &[u8], t: &Table, prof: &Profile, l: u64, sizes: &[Field]) ->
         }
         if bj < all.len() && rm[bj].is_none() {
             bj += 1; // the last member (its room unknown) right after the run
+        }
+        // the rows just before the run again, by the rooms of the run's own offsets (rows of a
+        // header before a table, their small values taken for offsets, split its first
+        // member's room: a Wwise bank's first entry, of 1708 bytes, given 8)
+        for _ in 0..4 {
+            match bi.checked_sub(1).and_then(|p| rooms(&o[p..bj], l)[0].map(|room| (p, room))) {
+                Some((p, room)) if size_in(p, room).is_some() => bi = p,
+                _ => break,
+            }
         }
         if bj - bi < MINROWS {
             continue;
