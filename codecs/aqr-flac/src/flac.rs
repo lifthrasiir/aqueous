@@ -224,7 +224,7 @@ fn read_rice(r: &mut BitReader, k: u32, out: &mut [i32], limit: usize) -> bool {
         let (u2, l2) = rice_one(w << l1, k);
         let l12 = l1 + l2;
         let (u3, l3) = rice_one(w.wrapping_shl(l12), k);
-        let fits2 = l12 <= 57 && i + 2 < n + 1;
+        let fits2 = l12 <= 57;
         let fits3 = fits2 && l12 + l3 <= 57 && i + 3 <= n;
         out[i] = unzigzag(u1);
         out[i + 1] = unzigzag(u2);
@@ -529,13 +529,27 @@ pub struct StreamInfo {
     pub sample_rate: u32,
 }
 
+impl StreamInfo {
+    /// Of the 8 bytes at offset 10 of a STREAMINFO block (sample rate, channels, bits a sample).
+    pub fn from_block(x: [u8; 8]) -> Self {
+        let x = u64::from_be_bytes(x);
+        Self { sample_rate: (x >> 44) as u32, channels: ((x >> 41) & 7) as u32 + 1, bps: ((x >> 36) & 31) as u32 + 1 }
+    }
+}
+
+/// Bytes of the ID3v2 tag at the start of `d` (its 10 bytes at least), footer included.
+#[inline(always)]
+pub fn id3v2_len(d: &[u8]) -> usize {
+    let sz = d[6..10].iter().fold(0usize, |a, &b| a << 7 | (b & 0x7f) as usize);
+    10 + sz + if d[5] & 0x10 != 0 { 10 } else { 0 }
+}
+
 /// Finds "fLaC" (possibly after an ID3v2 tag) and walks the metadata blocks. Returns the
 /// stream info and the offset of the first byte after the metadata.
 pub fn parse_metadata(d: &[u8]) -> Option<(StreamInfo, usize)> {
     let mut p = 0;
     if d.len() >= 10 && &d[..3] == b"ID3" {
-        let sz = d[6..10].iter().fold(0usize, |a, &b| a << 7 | (b & 0x7f) as usize);
-        p = 10 + sz + if d[5] & 0x10 != 0 { 10 } else { 0 };
+        p = id3v2_len(d);
     }
     if d.get(p..p + 4)? != b"fLaC" {
         return None;
@@ -549,12 +563,7 @@ pub fn parse_metadata(d: &[u8]) -> Option<(StreamInfo, usize)> {
         let len = (h[1] as usize) << 16 | (h[2] as usize) << 8 | h[3] as usize;
         let body = d.get(p + 4..p + 4 + len)?;
         if typ == 0 && len >= 18 {
-            let x = u64::from_be_bytes(body[10..18].try_into().unwrap());
-            si = Some(StreamInfo {
-                sample_rate: (x >> 44) as u32,
-                channels: ((x >> 41) & 7) as u32 + 1,
-                bps: ((x >> 36) & 31) as u32 + 1,
-            });
+            si = Some(StreamInfo::from_block(body[10..18].try_into().unwrap()));
         }
         p += 4 + len;
         if last {

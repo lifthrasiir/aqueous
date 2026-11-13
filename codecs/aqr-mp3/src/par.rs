@@ -13,7 +13,8 @@
 
 use crate::bits::{BitReader, BitWriter, FastWriter};
 use crate::codec::{
-    self, Dec, Error, Frames, N_BYTE_STREAMS, S_CRC, S_GAPS, S_HDR, S_JUNK, S_RAWGR, S_SEGS, S_SIDE, S_TAILBITS,
+    self, Dec, Error, FrameRec, Frames, N_BYTE_STREAMS, S_CRC, S_GAPS, S_HDR, S_JUNK, S_RAWGR, S_SEGS, S_SIDE,
+    S_TAILBITS,
 };
 #[cfg(feature = "encode")]
 use crate::codec::{Coded, Enc};
@@ -21,7 +22,7 @@ use crate::codec::{Coded, Enc};
 use crate::frame::scf_layout;
 use crate::frame::{Granule, Header, SideInfo, crc16};
 #[cfg(feature = "encode")]
-use crate::model::{self, NBX, NCUR, NOC, NPOS};
+use crate::model::{self, NBX, NOC};
 use crate::rans::{self, Tables};
 use crate::rc;
 use crate::side::SideModel;
@@ -110,12 +111,12 @@ fn prewarm(t: &Tables, ctxs: &[u32], stop: &AtomicBool) {
 /// superset, most likely first): count1 tables, escapes and pairs of the Huffman tables
 /// used (by number of pairs), scalefactors of the sizes used.
 #[cfg(feature = "encode")]
-fn likely_contexts(frames: &[(Header, SideInfo, usize, usize)]) -> Vec<u32> {
+fn likely_contexts(frames: &[FrameRec]) -> Vec<u32> {
     let mut pairs = [0u64; 32];
     let mut c1 = [false; 2];
     let mut sizes = [0u64; 6];
     let mut stereo = false;
-    for (h, si, _, _) in frames {
+    for FrameRec { h, si, .. } in frames {
         stereo |= h.channels() == 2;
         for gr in 0..h.granules() {
             for ch in 0..h.channels() {
@@ -160,11 +161,7 @@ fn likely_contexts(frames: &[(Header, SideInfo, usize, usize)]) -> Vec<u32> {
         for bucket in 0..NBX {
             for o in oc.clone() {
                 let bv = bucket * NOC + o;
-                for pos in 0..NPOS {
-                    for cur in 0..NCUR {
-                        v.push((base + (bv * NPOS + pos) * NCUR + cur) as u32);
-                    }
-                }
+                v.push((base + bv) as u32);
             }
         }
     }
@@ -346,7 +343,7 @@ pub(crate) fn decode(
         });
         let res = (move || -> Result<Vec<u8>, Error> {
             let mut fr = codec::parse_frames(streams[S_SEGS], streams[S_HDR], file_len)?;
-            hs_tx.send(fr.frames.iter().map(|f| f.0).collect()).expect("side information thread");
+            hs_tx.send(fr.frames.iter().map(|f| f.h).collect()).expect("side information thread");
             drop(hs_tx);
             let (rans, raw_buf) = match dec_t {
                 Some(t) => t.join().unwrap_or_else(|e| std::panic::resume_unwind(e)),
@@ -356,7 +353,7 @@ pub(crate) fn decode(
             let mut side = ThreadSide::new(side_rx);
             // The reservoir whole, for the output assembled in parallel pieces; room for the
             // largest reservation (a granule's) at its end.
-            let cap = fr.frames.iter().map(|f| f.3).sum::<usize>() + 4096;
+            let cap = fr.frames.iter().map(|f| f.len).sum::<usize>() + 4096;
             let (tail, raw_gr, gaps) =
                 (codec::padded(streams[S_TAILBITS]), codec::padded(streams[S_RAWGR]), codec::padded(streams[S_GAPS]));
             let mut w = FastWriter::with_capacity(cap);
@@ -403,7 +400,7 @@ fn assemble(fr: &Frames, junk_s: &[u8], crc_s: &[u8], r_out: &[u8], threads: usi
         jp += j;
         let Some(&(n, _)) = fr.runs.get(k) else { break };
         for _ in 0..n {
-            let c = if !fr.frames[fi].0.protected() {
+            let c = if !fr.frames[fi].h.protected() {
                 CRC_NONE
             } else if crc.u8()? != 0 {
                 CRC_COMPUTE
@@ -413,7 +410,7 @@ fn assemble(fr: &Frames, junk_s: &[u8], crc_s: &[u8], r_out: &[u8], threads: usi
                 p
             };
             items.push((off, Item::Frame(fi, c)));
-            off += fr.flens[fi];
+            off += fr.frames[fi].flen();
             fi += 1;
         }
     }
@@ -474,7 +471,7 @@ fn write_items(
         match it {
             Item::Junk(jp, j) => put(&junk_s[jp..jp + j]),
             Item::Frame(fi, c) => {
-                let (h, si, pay, len) = &fr.frames[fi];
+                let FrameRec { h, si, pay, len } = &fr.frames[fi];
                 let hb = h.0.to_be_bytes();
                 put(&hb);
                 let mut sw = BitWriter::new();

@@ -92,7 +92,7 @@ pub type Segments = (Vec<u32>, Vec<(u32, u32)>, Vec<(usize, usize)>);
 /// Splits `d` into junk and frame runs. Returns alternating junk lengths and frame runs
 /// (as (count, free format length)), starting and ending with junk, and the frames
 /// (offset, length).
-pub(crate) fn segment(d: &[u8]) -> Segments {
+pub fn segment(d: &[u8]) -> Segments {
     let mut junk = Vec::new();
     let mut runs = Vec::new();
     let mut frames = Vec::new();
@@ -140,9 +140,4 @@ pub(crate) fn place(si: &SideInfo, h: Header, payload: usize, len: usize, end: u
         }
     }
     (start >= end && start + total <= (payload + len) * 8).then_some(start)
-}
-
-/// `segment`, for benchmarks.
-pub fn segment_pub(d: &[u8]) -> Segments {
-    segment(d)
 }

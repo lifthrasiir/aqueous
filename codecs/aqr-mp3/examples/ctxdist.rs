@@ -16,6 +16,4 @@ fn main() {
             println!("top {:5} contexts: {:.1}% of {} symbols", k + 1, 100.0 * acc as f64 / total as f64, total);
         }
     }
-    let tables = aqr_mp3::codec::tables();
-    let _ = tables;
 }

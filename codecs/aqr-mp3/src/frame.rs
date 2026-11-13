@@ -58,17 +58,8 @@ impl Header {
         self.mode() == 1 && self.mode_ext() & 1 != 0
     }
 
-    /// Sync, a known version, Layer III, a bitrate index other than free format or 15,
-    /// and a valid sample rate.
-    pub fn valid(self) -> bool {
-        self.0 >> 21 == 0x7ff
-            && self.version() != 1
-            && self.layer() == 1
-            && (1..15).contains(&self.bitrate_index())
-            && self.sr_index() != 3
-    }
-
-    /// Like [`Header::valid`], but also accepts free format (bitrate index 0).
+    /// Sync, a known version, Layer III, a bitrate index other than 15 (0 is free format), and a
+    /// valid sample rate.
     pub fn valid_any(self) -> bool {
         self.0 >> 21 == 0x7ff
             && self.version() != 1
@@ -365,9 +356,6 @@ pub struct ScfLayout {
 }
 
 impl ScfLayout {
-    pub fn total(&self) -> usize {
-        self.count.iter().map(|&c| c as usize).sum()
-    }
     pub fn bits(&self) -> u32 {
         (0..4).filter(|&i| !self.copy[i]).map(|i| self.size[i] as u32 * self.count[i] as u32).sum()
     }
@@ -443,7 +431,7 @@ mod tests {
     fn frame_len() {
         // 128 kbps, 44.1 kHz, MPEG-1, no padding: 417 bytes.
         let h = Header(0xfffb9000);
-        assert!(h.valid());
+        assert!(h.valid_any());
         assert_eq!(h.sample_rate(), 44100);
         assert_eq!(h.frame_len(), 417);
         assert_eq!(h.sfb_row(), 5);

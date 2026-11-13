@@ -109,9 +109,6 @@ fn fast_lut(codes: &[u32; 256], lin: bool) -> Vec<u16> {
             continue;
         }
         let (x, y) = (sym as u32 >> 4, sym as u32 & 15);
-        if lin && (x == 15 || y == 15) {
-            continue;
-        }
         let ns = (x != 0) as u32 + (y != 0) as u32;
         let total = len + ns;
         if total > FL {
@@ -386,6 +383,7 @@ pub(crate) struct BitBuf<'a> {
 impl<'a> BitBuf<'a> {
     #[inline(always)]
     pub(crate) fn new(r: &BitReader<'a>) -> Self {
+        debug_assert!(r.data().len() >= 8);
         let mut b = BitBuf { data: r.data(), next: r.pos >> 3, acc: 0, bits: 0 };
         b.refill();
         let skip = (r.pos & 7) as u32;

@@ -12,7 +12,7 @@ use aqr_raw::audio::par::{self, DecBatch, EncBatch, Item};
 use aqr_raw::audio::residual::ResStream;
 #[cfg(feature = "encode")]
 pub use aqr_raw::audio::residual::freqs_to_bytes;
-pub use aqr_raw::audio::residual::{Coded, Error, Rd, layout_id, put_varint, tables};
+pub use aqr_raw::audio::residual::{Coded, Error, Rd, put_varint, tables};
 use aqr_raw::audio::residual::{LmsEncoder, ResCounter, ResDecoder, ResEncoder, get_subframes, put_subframes};
 use aqr_raw::audio::slide::Slide;
 use std::sync::mpsc::sync_channel;
@@ -92,10 +92,19 @@ impl Room {
         self.frame + 8 * self.block + 64
     }
 
+    /// What a frame reads of each byte stream at most ([`pcm::Reads`]): samples of 32 bits at
+    /// most, a subframe's partitions as many as its samples (and 2^15).
+    ///
+    /// [`pcm::Reads`]: aqr_raw::audio::pcm::Reads
+    pub fn reads(&self) -> aqr_raw::audio::pcm::Reads {
+        aqr_raw::audio::pcm::Reads::of(self.channels, self.block, 32, self.block.min(1 << 15))
+    }
+
     fn check(&self, f: &Frame) -> Result<(), Error> {
-        match f.block_size <= self.block && f.channels <= self.channels {
-            true => Ok(()),
-            false => Err(Error("frame past its room")),
+        if f.block_size <= self.block && f.channels <= self.channels {
+            Ok(())
+        } else {
+            Err(Error("frame past its room"))
         }
     }
 }
@@ -366,12 +375,9 @@ fn decode_start(c: &Coded) -> Result<flac::StreamInfo, Error> {
 
 /// Decodes into `out` (appending), frames of `room`.
 pub fn decode(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>, room: Room) -> Result<(), Error> {
-    if c.streams.len() != N_BYTE_STREAMS {
-        return Err(Error("stream count"));
-    }
+    let si = decode_start(c)?;
     out.reserve(total_len);
     out.extend_from_slice(&c.streams[S_PREFIX]);
-    let si = decode_start(c)?;
     let mut layout = Rd::new(&c.streams[S_LAYOUT]);
     let mut junk = Rd::new(&c.streams[S_JUNK]);
     let mut hdr = Rd::new(&c.streams[S_HDR]);
@@ -381,6 +387,7 @@ pub fn decode(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>, room: 
     let mut rd = ResDecoder::new(t, &c.words, &raw_buf)?;
     let mut f = Frame::default();
     let mut hs = Headers::new(room);
+    let mut w = frame_writer(room);
     loop {
         let run = layout.uv()?;
         for _ in 0..run {
@@ -391,7 +398,8 @@ pub fn decode(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>, room: 
             rd.frame(&mut f)?;
             check_escapes(&f)?;
             let at = out.len();
-            if !flac::write_frame(&f, out, total_len.saturating_sub(out.len())) {
+            let budget = (total_len.saturating_sub(out.len()) as u64).saturating_mul(8);
+            if flac::write_frame_with(&f, out, budget, &mut w).is_none() {
                 return Err(Error("too long"));
             }
             if out.len() - at > room.frame {
@@ -405,6 +413,27 @@ pub fn decode(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>, room: 
         out.extend_from_slice(junk.bytes(n)?);
     }
     rd.finish()
+}
+
+/// A writer for the frames of `room`, which [`flac::write_frame_with`] grows for a larger one.
+fn frame_writer(room: Room) -> bits::FastWriter {
+    bits::FastWriter::with_capacity(room.block * room.channels * 4 + 64)
+}
+
+/// The writer of a pool worker, made when it first writes a frame (a clone is a worker's own).
+#[derive(Default)]
+struct WorkerWriter(Option<bits::FastWriter>);
+
+impl WorkerWriter {
+    fn get(&mut self, room: Room) -> &mut bits::FastWriter {
+        self.0.get_or_insert_with(|| frame_writer(room))
+    }
+}
+
+impl Clone for WorkerWriter {
+    fn clone(&self) -> Self {
+        Self(None)
+    }
 }
 
 /// Bits of long Rice codes a frame may take when it is written ahead on the pool; one
@@ -473,18 +502,15 @@ pub fn decode_threads(
     if threads <= 1 {
         return decode(c, t, total_len, out, room);
     }
-    if c.streams.len() != N_BYTE_STREAMS {
-        return Err(Error("stream count"));
-    }
     // three stages and a pool of one at least, on workers of the pool
     let workers = aqr_common::pool::reserve((threads - 1).max(4));
     if workers.len() < 4 {
         return decode(c, t, total_len, out, room);
     }
     let pool = workers.len() - 3;
+    let si = decode_start(c)?;
     out.reserve(total_len);
     out.extend_from_slice(&c.streams[S_PREFIX]);
-    let si = decode_start(c)?;
     let raw_buf = [bits::padded(&c.raw[0]), bits::padded(&c.raw[1])];
     let rd = ResDecoder::new(t, &c.words, &raw_buf)?;
     let nb = par::in_flight(threads);
@@ -506,7 +532,9 @@ pub fn decode_threads(
         });
         sc.spawn(move || par::errors_stage(rd, rx1, tx2));
         sc.spawn(move || par::lms_stage(rx2, tx3));
-        par::pool(sc, pool, rx3, otx, |mut b: B| {
+        let mut fw = WorkerWriter::default();
+        par::pool(sc, pool, rx3, otx, move |mut b: B| {
+            let fw = fw.get(room);
             let w = &mut b.x;
             for it in &b.items {
                 let Item::Frame(f) = it else { continue };
@@ -515,7 +543,7 @@ pub fn decode_threads(
                     break;
                 }
                 let at = w.bytes.len();
-                w.wrote.push(match flac::write_frame_bits(f, &mut w.bytes, AHEAD_BUDGET) {
+                w.wrote.push(match flac::write_frame_with(f, &mut w.bytes, AHEAD_BUDGET, fw) {
                     Some(_) if w.bytes.len() - at > room.frame => Wrote::Err(Error("frame past its room")),
                     Some(left) => Wrote::Ok(w.bytes.len(), AHEAD_BUDGET - left),
                     None => Wrote::Again,
@@ -525,6 +553,7 @@ pub fn decode_threads(
         });
         // Appends the batches in order, with the checks of `decode`.
         let mut ro = par::Reorder::default();
+        let mut again = frame_writer(room);
         loop {
             let Ok(b) = orx.recv() else { return Err(Error("pipeline")) };
             let b = par::unwrap(b);
@@ -549,7 +578,7 @@ pub fn decode_threads(
                                 }
                                 Wrote::Again => {
                                     let at = out.len();
-                                    if flac::write_frame_bits(f, out, budget).is_none() {
+                                    if flac::write_frame_with(f, out, budget, &mut again).is_none() {
                                         return Err(Error("too long"));
                                     }
                                     if out.len() - at > room.frame {
@@ -622,16 +651,6 @@ pub fn plan(room: Room, res: u64, top: u64, workers: usize) -> ((u64, u64), u64)
 pub const PIECE: usize = 4096;
 const LAYOUT_READ: usize = 20;
 
-impl Room {
-    /// What a frame reads of each byte stream at most ([`pcm::Reads`]): samples of 32 bits at
-    /// most, a subframe's partitions as many as its samples (and 2^15).
-    ///
-    /// [`pcm::Reads`]: aqr_raw::audio::pcm::Reads
-    pub fn reads(&self) -> aqr_raw::audio::pcm::Reads {
-        aqr_raw::audio::pcm::Reads::of(self.channels, self.block, 32, self.block.min(1 << 15))
-    }
-}
-
 /// Copies `n` bytes of `src` to `out`, in pieces; `written` counts them.
 fn copy_through(src: &mut Slide<'_>, mut n: u64, out: &mut dyn Put, written: &mut u64) -> Result<(), Error> {
     while n > 0 {
@@ -656,8 +675,7 @@ fn copy_prefix(src: &mut Slide<'_>, out: &mut dyn Put, written: &mut u64) -> Res
     src.need(10);
     let d = src.data();
     if d.len() >= 10 && &d[..3] == b"ID3" {
-        let sz = d[6..10].iter().fold(0u64, |a, &b| a << 7 | (b & 0x7f) as u64);
-        copy_through(src, 10 + sz + if d[5] & 0x10 != 0 { 10 } else { 0 }, out, written)?;
+        copy_through(src, flac::id3v2_len(d) as u64, out, written)?;
     }
     src.need(4);
     if src.data().get(..4) != Some(b"fLaC") {
@@ -674,12 +692,7 @@ fn copy_prefix(src: &mut Slide<'_>, out: &mut dyn Put, written: &mut u64) -> Res
         if typ == 0 && len >= 18 {
             src.need(18);
             let body = src.data().get(10..18).ok_or(Error("metadata"))?;
-            let x = u64::from_be_bytes(body.try_into().unwrap());
-            si = Some(flac::StreamInfo {
-                sample_rate: (x >> 44) as u32,
-                channels: ((x >> 41) & 7) as u32 + 1,
-                bps: ((x >> 36) & 31) as u32 + 1,
-            });
+            si = Some(flac::StreamInfo::from_block(body.try_into().unwrap()));
         }
         copy_through(src, len, out, written)?;
         if last {
@@ -687,10 +700,7 @@ fn copy_prefix(src: &mut Slide<'_>, out: &mut dyn Put, written: &mut u64) -> Res
         }
     }
     src.need(1);
-    match src.at_end() {
-        true => si.ok_or(bad),
-        false => Err(Error("metadata length")),
-    }
+    if src.at_end() { si.ok_or(bad) } else { Err(Error("metadata length")) }
 }
 
 /// [`decode`] as the instance of a part module: the streams taken in pieces (`inputs`: the six
@@ -780,10 +790,7 @@ pub fn decode_part(
         let mut pipe = par::apart::Pipe::new(link, errors, &mut take, Error("pipeline"));
         let end = front_part(&mut pipe, si.bps, room, rd, &mut layout, [&mut hdr, &mut sub, &mut warm]);
         pipe.finish(end)?;
-        match written == total_len {
-            true => Ok(()),
-            false => Err(Error("length")),
-        }
+        if written == total_len { Ok(()) } else { Err(Error("length")) }
     })
 }
 

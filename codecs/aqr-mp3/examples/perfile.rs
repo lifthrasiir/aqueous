@@ -3,9 +3,7 @@
 use aqr_mp3::model::Counter;
 
 fn main() {
-    let t = aqr_mp3::codec::tables();
-    let _ = t;
-    let freqs = aqr_mp3::codec::builtin_freqs_pub().unwrap();
+    let freqs = aqr_mp3::codec::builtin_freqs().unwrap();
     let ks = [8usize, 16, 32, 64, 128, 100000];
     let (mut tin, mut stat, mut best) = (0usize, 0f64, vec![0f64; ks.len()]);
     for a in std::env::args().skip(1) {

@@ -26,8 +26,8 @@ pub trait BitCoder {
         (m - (1 << n)) as u32
     }
 
-    /// Unsigned value: Elias-gamma style, the bit length through `len` (at least 33
-    /// probabilities), then the bits below the top one through `bits` (32 x 32, by length).
+    /// Unsigned value: Elias-gamma style, the bit length through `p.len`, then the bits below
+    /// the top one through `p.bits` (by length and position).
     #[inline]
     fn uint(&mut self, p: &mut UIntProbs, v: u32) -> u32 {
         // Length: unary with a probability per position.

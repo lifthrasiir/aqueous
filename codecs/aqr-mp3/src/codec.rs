@@ -1,6 +1,6 @@
 //! Encoding and decoding of whole files.
 //!
-//! The coefficients of decodable granules go through [`model::code_granule`] into one rANS
+//! The coefficients of decodable granules go through [`model::encode_granule`] into one rANS
 //! stream and one raw bit stream (signs, escape mantissas). Everything else (file structure,
 //! side information, scalefactors, gaps) goes into small byte streams.
 
@@ -200,7 +200,7 @@ impl Model {
 
 /// The frequencies of every context in the built-in model, if any (for tools).
 #[cfg(feature = "encode")]
-pub fn builtin_freqs_pub() -> Option<Vec<Vec<u16>>> {
+pub fn builtin_freqs() -> Option<Vec<Vec<u16>>> {
     Some(Model::parse(&builtin::decompress(BUILTIN)?)?.freqs())
 }
 
@@ -377,12 +377,29 @@ fn encode_with<C: Coder>(d: &[u8], c: &mut C) -> (Vec<Vec<u8>>, [u64; 3]) {
     model_pass(split(d), c)
 }
 
+/// A frame: its header, side information, where its payload lies in the reservoir and its
+/// length.
+#[derive(Clone, Copy)]
+pub(crate) struct FrameRec {
+    pub(crate) h: Header,
+    pub(crate) si: SideInfo,
+    pub(crate) pay: usize,
+    pub(crate) len: usize,
+}
+
+impl FrameRec {
+    /// The frame's length in the file.
+    pub(crate) fn flen(&self) -> usize {
+        self.h.prefix_len() + self.len
+    }
+}
+
 /// A file split into frames, before the model pass: the byte streams of the file structure
 /// (segments, junk, headers, CRCs) are complete.
 pub(crate) struct Split {
     pub(crate) b: Vec<Vec<u8>>,
-    /// Header, side information, payload offset in `r_buf` and payload length per frame.
-    pub(crate) frames: Vec<(Header, SideInfo, usize, usize)>,
+    /// The payload offsets are in `r_buf`.
+    pub(crate) frames: Vec<FrameRec>,
     /// The reservoir (payloads of all frames), padded with `R_PAD` zero bytes.
     r_buf: Vec<u8>,
     r_len: usize,
@@ -416,7 +433,7 @@ pub(crate) fn split(d: &[u8]) -> Split {
 
     // Headers, side information, CRCs, reservoir.
     let mut r_buf = Vec::with_capacity(d.len() + R_PAD);
-    let mut frames: Vec<(Header, SideInfo, usize, usize)> = Vec::with_capacity(offsets.len());
+    let mut frames: Vec<FrameRec> = Vec::with_capacity(offsets.len());
     let mut prev_h = 0u32;
     for &(p, flen) in &offsets {
         let h = Header::from_bytes(&d[p..]);
@@ -437,7 +454,7 @@ pub(crate) fn split(d: &[u8]) -> Split {
             }
         }
         let len = flen - h.prefix_len();
-        frames.push((h, si, r_buf.len(), len));
+        frames.push(FrameRec { h, si, pay: r_buf.len(), len });
         r_buf.extend_from_slice(&d[p + h.prefix_len()..p + flen]);
     }
     let r_len = r_buf.len();
@@ -457,7 +474,7 @@ pub(crate) fn model_pass<C: Coder>(s: Split, c: &mut C) -> (Vec<Vec<u8>>, [u64; 
     let mut coefs = [0i32; 576];
     let mut scf = [0u8; 39];
     let mut end = 0usize;
-    for (fi, (h, si, pay, len)) in frames.iter().enumerate() {
+    for (fi, FrameRec { h, si, pay, len }) in frames.iter().enumerate() {
         if fi > 0 && fi % RUN_FRAMES == 0 {
             c.restart();
         }
@@ -586,12 +603,10 @@ pub(crate) fn padded(v: &[u8]) -> Vec<u8> {
 
 /// The file structure: junk and frame runs, and the frames.
 ///
-/// The vectors are made in the opposite order of their fields here (junk, runs, frames, flens),
-/// each of the size it ends at ([`counts`]), so that they are dropped last first.
+/// The vectors are made in the opposite order of their fields here (junk, runs, frames), each of
+/// the size it ends at ([`counts`]), so that they are dropped last first.
 pub(crate) struct Frames {
-    pub(crate) flens: Vec<usize>,
-    /// Header, side information, payload offset in the reservoir, payload length.
-    pub(crate) frames: Vec<(Header, SideInfo, usize, usize)>,
+    pub(crate) frames: Vec<FrameRec>,
     /// Junk lengths and frame runs (count, free format length), alternating.
     pub(crate) runs: Vec<(usize, usize)>,
     pub(crate) junk: Vec<usize>,
@@ -636,8 +651,7 @@ pub(crate) fn parse_frames(segs: &[u8], hdr: &[u8], file_len: u64) -> Result<Fra
         runs.push((n, free));
     }
 
-    let mut frames: Vec<(Header, SideInfo, usize, usize)> = Vec::with_capacity(nframes);
-    let mut flens = Vec::with_capacity(nframes);
+    let mut frames: Vec<FrameRec> = Vec::with_capacity(nframes);
     let mut r_len = 0usize;
     let mut prev_h = 0u32;
     for &(n, free) in &runs {
@@ -653,12 +667,11 @@ pub(crate) fn parse_frames(segs: &[u8], hdr: &[u8], file_len: u64) -> Result<Fra
                 return Err(Error("frame length"));
             }
             let len = flen - h.prefix_len();
-            frames.push((h, SideInfo::default(), r_len, len));
-            flens.push(flen);
+            frames.push(FrameRec { h, si: SideInfo::default(), pay: r_len, len });
             r_len += len;
         }
     }
-    Ok(Frames { junk, runs, frames, flens, r_len })
+    Ok(Frames { junk, runs, frames, r_len })
 }
 
 /// Where the main pass gets the side information from (the decoding order is fixed: per
@@ -761,7 +774,7 @@ impl<'a> Assembler<'a> {
                 self.left = fr.runs.get(self.k).map_or(0, |r| r.0);
                 self.k += 1;
             }
-            let (h, si, pay, len) = &fr.frames[self.fi];
+            let FrameRec { h, si, pay, len } = &fr.frames[self.fi];
             if self.fi >= ready || pay + len > base + r.len() {
                 return Ok(());
             }
@@ -804,7 +817,7 @@ impl Sink for Assembler<'_> {
             self.err = Some(e);
             return;
         }
-        let keep = fr.frames.get(self.fi).map_or(base + r.len(), |f| f.2.min(base + r.len()));
+        let keep = fr.frames.get(self.fi).map_or(base + r.len(), |f| f.pay.min(base + r.len()));
         if keep - base >= DISCARD_MIN {
             w.discard(keep);
         }
@@ -974,12 +987,12 @@ pub(crate) fn main_pass<C: Coder, S: SideSrc, K: Sink>(
         if fi > 0 && fi % RUN_FRAMES == 0 {
             dc.restart();
         }
-        let (h, mut si, pay, len) = fr.frames[fi];
+        let FrameRec { h, mut si, pay, len } = fr.frames[fi];
         pass.frame((h, pay, len), &mut si, side, dc, &mut bufs, w, &mut |w| {
             sink.ready(fr, fi, w);
             Ok(())
         })?;
-        fr.frames[fi].1 = si;
+        fr.frames[fi].si = si;
     }
     if !side.in_bounds() {
         return Err(Error("side stream exhausted"));
@@ -1012,7 +1025,7 @@ pub(crate) fn copy_gap<B: BitIn>(
 /// The output file: junk, and per frame header, CRC, side information and main data, from
 /// the whole reservoir `r_out`.
 pub(crate) fn assemble(fr: &Frames, junk_s: &[u8], crc_s: &[u8], r_out: &[u8]) -> Result<Vec<u8>, Error> {
-    let total = junk_s.len() + fr.flens.iter().sum::<usize>();
+    let total = junk_s.len() + fr.frames.iter().map(FrameRec::flen).sum::<usize>();
     let mut a = Assembler::new(Vec::with_capacity(total), junk_s, crc_s);
     a.write(fr, fr.frames.len(), 0, r_out)?;
     Ok(a.out)

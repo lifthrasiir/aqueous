@@ -16,7 +16,7 @@ fn main() {
         let d = std::fs::read(p).unwrap();
         tin += d.len();
         let t = Instant::now();
-        let _ = aqr_mp3::stream::segment_pub(&d);
+        let _ = aqr_mp3::stream::segment(&d);
         t_seg += t.elapsed().as_secs_f64();
         let t = Instant::now();
         let c = aqr_mp3::codec::encode(&d);
