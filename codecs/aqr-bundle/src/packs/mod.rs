@@ -119,6 +119,8 @@ packs! {
     HlWad = "hl-wad3", hl_wad;
     /// Garry's Mod's addons (`GMAD`)
     GmodGma = "gmod-gma", gmod_gma;
+    /// XNA's and MonoGame's compiled content (`.xnb`): a texture's mipmaps, a sound's samples.
+    XnaXnb = "xna-xnb", xna_xnb;
 }
 
 /// The pack `d` is, if any: [`Pack::starts`] of the first that holds.

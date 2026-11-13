@@ -229,7 +229,15 @@ fn not_serialized() {
 /// A `Texture2D` object of Unity 2019.4 (name, fallback format, downscale, then width, height,
 /// image size, format, mipmaps, other fields, the image's data, the streamed data): its blocks
 /// inline (`data`), or streamed from `path` at `offset` (`data` empty, `size` the blocks').
-fn texture2d(w: u32, h: u32, format: u32, mips: u32, size: u32, data: &[u8], stream: Option<(u32, u32, &str)>) -> Vec<u8> {
+fn texture2d(
+    w: u32,
+    h: u32,
+    format: u32,
+    mips: u32,
+    size: u32,
+    data: &[u8],
+    stream: Option<(u32, u32, &str)>,
+) -> Vec<u8> {
     let mut o = Vec::new();
     let str4 = |o: &mut Vec<u8>, s: &[u8]| {
         o.extend((s.len() as u32).to_le_bytes());
@@ -277,7 +285,9 @@ fn eval(f: &aqr_formula::Formula) -> Vec<u8> {
 /// rebuilt by aqr-tex.
 #[test]
 fn textures() {
-    use aqr_bundle::packs::unity_assets::{Data, Pixels, Raw, encode_resource, encode_with, objects, streamed, texture};
+    use aqr_bundle::packs::unity_assets::{
+        Data, Pixels, Raw, encode_resource, encode_with, objects, streamed, texture,
+    };
     let blocks = bc1(64, 32, 7);
     let n = blocks.len() as u32;
     let inline = texture2d(64, 32, 10, 7, n, &blocks, None);

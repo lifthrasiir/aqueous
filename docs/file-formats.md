@@ -480,7 +480,7 @@ files (pages, logs) copied by a backup tool. What they share:
 | Wwise (`.wem`, `.bnk`: the banks are taken apart, aqr-bundle's `wwise-bnk`, Done) | most AAA games' audio | Vorbis without its setup header (codebooks referenced from a known set), ADPCM, Opus in newer versions; banks of them | as FSB5: the setup rebuilt, the Vorbis recoded; the ADPCM through aqr-ima | aqr-fsb, aqr-vorbis, aqr-ima |
 | CRI ADX, HCA, USM, CPK | Japanese games | ADX: 4-bit ADPCM at fixed width; HCA: MDCT with static tables; USM: MPEG-1, VP9 or H.264 in its own container; CPK: an archive of CRILAYLA (an LZ of its own) | ADX's samples modelled (a large gain); CRILAYLA reproduced | aqr-ima's approach |
 | Valve VTF | Source engine games | DXT1/DXT5 textures with mipmaps (VPKs are taken apart: aqr-bundle's `source-vpk`, Done) | the textures as aqr-tex does DDS | aqr-tex |
-| XNA, MonoGame `.xnb` | indie games | XMemCompress's LZX (XNA) or LZ4 (MonoGame) | the LZX as aqr-lzx's record of the parse, the LZ4 reproduced | aqr-lzx, aqr-lz4 |
+| XNA, MonoGame `.xnb` | indie games | XMemCompress's LZX (XNA) or LZ4 (MonoGame) | the LZX as aqr-lzx's record of the parse, the LZ4 reproduced (stored files' textures and sounds are taken: aqr-bundle's `xna-xnb`, Done; 69 of three games' stored files 11.85 → 10.37 MB) | aqr-lzx, aqr-lz4 |
 | GameCube and Wii disc images | emulation | none; padding of junk from a known generator; Wii's partitions encrypted with known keys and hashed | the junk regenerated (as RVZ does), Wii's data decrypted and its hashes derived | |
 
 ### Older archives

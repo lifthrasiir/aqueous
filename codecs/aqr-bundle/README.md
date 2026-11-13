@@ -113,6 +113,10 @@ engines' (Godot's and Wwise's `.pck`, Unreal's and Quake's `.pak`):
   archives (the last two unverified on real files). `cri_utf` reads their `@UTF` tables.
 - `gamemaker-win`: GameMaker's `data.win` and `audiogroupN.dat`: the textures of `TXTR` (PNG,
   QOI, bzip2 of QOI) and the sounds of `AUDO`.
+- `xna-xnb`: XNA's and MonoGame's compiled content (`.xnb`), stored: a `Texture2D`'s mipmaps
+  (Color by aqr-raw, DXT1/3/5 by aqr-tex), a sprite font's texture, a `SoundEffect`'s PCM samples
+  (aqr-raw), in a formula of its own (`xna_xnb::encode_with`). Compressed ones (LZX, LZ4) are not
+  read yet.
 - `chromium-pak`: Chromium's resource packs (versions 4 and 5: Electron's and NW.js's games),
   brotli resources compressed. Read, but not looked for by aqr-compress: of no magic, and their
   small members (gzip, text, PNG) archived apart code worse than the pack scanned (60 packs:

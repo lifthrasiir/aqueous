@@ -122,6 +122,7 @@ static ROWS: &[Row] = {
         start(GodotPck, aqr_bundle::packs::godot::starts),
         start(UnityBundle, aqr_bundle::packs::unity::starts),
         start(SourceVpk, aqr_bundle::packs::vpk::starts),
+        start(XnaXnb, aqr_bundle::packs::xna_xnb::starts),
         start(GmodGma, aqr_bundle::packs::gmod_gma::starts),
         start(HlWad, aqr_bundle::packs::hl_wad::starts),
         start(QuakeWad, aqr_bundle::packs::quake_wad::starts),

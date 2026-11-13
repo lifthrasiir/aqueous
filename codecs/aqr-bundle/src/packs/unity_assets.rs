@@ -160,7 +160,13 @@ fn extension(class: i32) -> String {
 
 /// The objects of serialized file `d`; None where it is not one, or its metadata is not read.
 pub fn files(d: &[u8]) -> Option<Vec<File>> {
-    Some(objects(d)?.objects.into_iter().map(|o| file(format!("{}.{}", o.id, extension(o.class)).into_bytes(), o.extent)).collect())
+    Some(
+        objects(d)?
+            .objects
+            .into_iter()
+            .map(|o| file(format!("{}.{}", o.id, extension(o.class)).into_bytes(), o.extent))
+            .collect(),
+    )
 }
 
 /// An object of a serialized file: its id, its class, where its bytes are in the file.
@@ -475,7 +481,9 @@ pub fn texture(o: &[u8], engine: (u32, u32), big: bool) -> Option<Texture> {
         let p = &o[o.len() - path.next_multiple_of(4)..][..path];
         if s > 0 && s.is_multiple_of(size) && p.ends_with(b".resS") {
             pixels.set_layers(u32::try_from(s / size).ok()?);
-            return pixels.valid().then(|| Texture { pixels, data: Data::Stream { path: p.to_vec(), offset, size: s } });
+            return pixels
+                .valid()
+                .then(|| Texture { pixels, data: Data::Stream { path: p.to_vec(), offset, size: s } });
         }
     }
     // inline: the image's data before an empty stream (no path, size 0), its length before it

@@ -833,6 +833,18 @@ formats! {
         heap: 3.0,
         bundle: true,
     }
+    /// XNA's and MonoGame's compiled content (`.xnb`, aqr-bundle's `packs`), stored: a texture's
+    /// mipmaps rebuilt by aqr-tex or aqr-raw, a sound's samples by aqr-raw. At the start of data
+    /// only.
+    XnaXnb = "xna-xnb" {
+        recompressor: Cx(|d, _, opt, _, _| {
+            aqr_bundle::packs::xna_xnb::encode_with(d, opt.threads)
+                .or_else(|| crate::bundle::pack(aqr_bundle::packs::Pack::XnaXnb, d))
+        }),
+        // the coded streams of a mipmap at a time (aqr-tex takes 12 times one's)
+        heap: 3.0,
+        bundle: true,
+    }
     /// Valve's VPK (aqr-bundle's `packs`): a directory file known by its header (the files whose
     /// data it holds), or an archive of one found among the files archived along
     /// ([`crate::siblings`]: never detected).
