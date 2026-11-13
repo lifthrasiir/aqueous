@@ -105,9 +105,15 @@ fn len_base(i: usize) -> u32 {
     if i < 8 { i as u32 } else { (4 + (i as u32 & 3)) << ((i as u32 - 4) / 4) }
 }
 
+/// The slot (0 to 27) of the length `v` less 2 or 3, the last for all above it.
 #[inline]
 fn len_slot(v: u32) -> usize {
-    (0..28).rev().find(|&i| len_base(i) <= v).unwrap()
+    if v < 8 {
+        v as usize
+    } else {
+        let e = 31 - v.leading_zeros() - 2;
+        ((4 * (e + 1) + (v >> e) - 4) as usize).min(27)
+    }
 }
 
 #[inline]
@@ -563,7 +569,7 @@ impl Decoder3 {
     /// whether it ends the file.
     fn ppmd_block(&mut self, d: &[u8], base: usize, filters: &mut Vec<FilterRec>) -> Result<(Vec<u8>, usize, bool)> {
         let model = self.ppmd.as_mut().ok_or_else(corrupt)?;
-        let mut rc = ppmd3::Reader::new(d)?;
+        let mut rc = ppmd3::Reader::new(d);
         let mut syms = Vec::new();
         let out = &mut self.out;
         let esc = self.esc;
@@ -1155,5 +1161,17 @@ impl Audio {
             }
         }
         self.count += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn len_slot_inverts_len_base() {
+        for v in 0..1000 {
+            assert_eq!(len_slot(v), (0..28).rev().find(|&i| len_base(i) <= v).unwrap(), "{v}");
+        }
     }
 }

@@ -150,7 +150,7 @@ pub fn lengths(freq: &[u32], max: usize) -> Vec<u8> {
         }
         _ => {}
     }
-    // nodes (count, depth, order, index), the leaves first
+    // nodes (count, depth, index), the leaves first
     let mut parent = vec![usize::MAX; 2 * used.len()];
     let mut heap: BinaryHeap<_> = used.iter().enumerate().map(|(i, &s)| Reverse((freq[s] as u64, 0u32, i))).collect();
     let mut next = used.len();

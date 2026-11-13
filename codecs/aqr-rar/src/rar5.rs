@@ -3,7 +3,7 @@
 
 use std::ops::Range;
 
-use aqr_common::crc32;
+use aqr_common::{crc32, varint};
 
 pub const SIGNATURE: &[u8; 8] = b"Rar!\x1a\x07\x01\x00";
 
@@ -55,21 +55,9 @@ pub struct Rar5 {
     pub volume: bool,
 }
 
-/// A vint at `*at` of `d`: 7 bits a byte, the lowest first, the top bit set where more follow.
-pub fn vint(d: &[u8], at: &mut usize) -> Option<u64> {
-    let mut v = 0u64;
-    for i in 0..10 {
-        let b = *d.get(*at)?;
-        *at += 1;
-        if i == 9 && b > 1 {
-            return None;
-        }
-        v |= ((b & 0x7f) as u64) << (7 * i);
-        if b & 0x80 == 0 {
-            return Some(v);
-        }
-    }
-    None
+/// A vint at `*at` of `d` ([`aqr_common::varint`]).
+fn vint(d: &[u8], at: &mut usize) -> Option<u64> {
+    varint::get(d, at).ok()
 }
 
 /// Whether `d` starts with a RAR5 archive: its signature and a first header of its CRC-32.

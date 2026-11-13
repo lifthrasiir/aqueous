@@ -16,7 +16,7 @@ use aqr_common::msb::BitWriter;
 
 use crate::huff;
 use crate::lz3::{self, Block, Decoder3, Encoder3, FilterRec, Prog, Stream, Table, Token, bonus};
-use crate::rec::{Bits, Cat, Dec, Enc, Mf, bits, lcp_up};
+use crate::rec::{Bits, Cat, Dec, Enc, Mf, SCRATCH, bits, db, g32, lb, lcp_up};
 use crate::{Error, Result, corrupt};
 
 /// The longest match RAR writes.
@@ -114,18 +114,6 @@ fn filter_raw(progs: &[Prog], last: usize, p: u64, start: u64, len: u32, kind: u
     }
     raw.extend(body);
     Some(raw)
-}
-
-/// Bucket of a length: itself below 8, else 8-11 by its bit length.
-#[inline]
-fn lb(l: usize) -> usize {
-    if l < 8 { l } else { (5 + (usize::BITS - l.leading_zeros()) as usize).min(11) }
-}
-
-/// Bucket of a distance (0-7); 8 for none.
-#[inline]
-fn db(d: usize) -> usize {
-    [16, 256, 1024, 4096, 16384, 1 << 16, 1 << 20].iter().filter(|&&x| d >= x).count()
 }
 
 /// Whether an explicit or short match of `l` bytes at `d` can be written.
@@ -243,10 +231,6 @@ impl Ctx {
             count: v(23),
         }
     }
-}
-
-fn g32(t: &mut [Bit], i: usize) -> &mut [Bit] {
-    &mut t[i * 32..i * 32 + 32]
 }
 
 /// The bytes of data of LZ tokens, `last` the last match's length before.
@@ -1072,10 +1056,7 @@ fn walk(
                             m.min(LONG)
                         } else {
                             let top = m.min(CAP);
-                            let s = bits.gamma(
-                                &mut ctx.rep_shorter[lb(m) * 32..lb(m) * 32 + 32],
-                                top.wrapping_sub(g_len) as u64,
-                            )?;
+                            let s = bits.gamma(g32(&mut ctx.rep_shorter, lb(m)), top.wrapping_sub(g_len) as u64)?;
                             top.checked_sub(s as usize).ok_or_else(corrupt)?
                         };
                         (len, rep[i])
@@ -1108,10 +1089,7 @@ fn walk(
                             let len = if bits.bit(&mut ctx.full[lb(top)], g_len == top.min(LONG)) {
                                 top.min(LONG)
                             } else {
-                                let s = bits.gamma(
-                                    &mut ctx.shorter[lb(top) * 32..lb(top) * 32 + 32],
-                                    top.wrapping_sub(g_len) as u64,
-                                )?;
+                                let s = bits.gamma(g32(&mut ctx.shorter, lb(top)), top.wrapping_sub(g_len) as u64)?;
                                 top.checked_sub(s as usize).ok_or_else(corrupt)?
                             };
                             (len, dist)
@@ -1366,12 +1344,6 @@ fn code_lens(bits: &mut impl Bits, ctx: &mut Ctx, c: usize, pred: Vec<u8>, given
     Ok(out)
 }
 
-/// Bytes the tables' work takes at most (the counts, the lengths, Huffman's heap, the run-length
-/// coding): with room for the vectors that grow, and for the holes that leaves. The decoder takes
-/// them from the stack once before the blocks and gives them back, so that what it takes does not
-/// depend on the data.
-pub const SCRATCH: usize = 64 << 10;
-
 /// The stream written onto the end of `out` (room for it reserved): each file's blocks in turn,
 /// the tables of the LZ blocks read from the record (`bits`, `ctx`) as they are reached, which is
 /// the record's order, and the PPMd blocks' symbols made of the data `u` and the tokens. The end
@@ -1556,9 +1528,9 @@ pub fn split_with(packed: &[&[u8]], sizes: &[usize], dict: u64, ppmd: bool) -> R
     for (&p, &size) in packed.iter().zip(sizes) {
         let at = dec.out.len();
         let st = dec.file(p, size)?;
-        let mut file = dec.out[at..].to_vec();
-        lz3::unfilter(&mut file, &st.filters)?;
-        data.extend_from_slice(&file);
+        let from = data.len();
+        data.extend_from_slice(&dec.out[at..]);
+        lz3::unfilter(&mut data[from..], &st.filters)?;
         streams.push(st);
     }
     let u = dec.out;

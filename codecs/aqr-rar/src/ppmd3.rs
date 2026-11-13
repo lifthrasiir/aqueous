@@ -26,8 +26,8 @@ pub fn start(m: &mut Option<Ppmd>, order: u32, mem: u32) -> Result<()> {
 pub struct Reader<'a>(RangeDecoder<'a>);
 
 impl<'a> Reader<'a> {
-    pub fn new(d: &'a [u8]) -> Result<Reader<'a>> {
-        Ok(Reader(RangeDecoder::new(d)))
+    pub fn new(d: &'a [u8]) -> Reader<'a> {
+        Reader(RangeDecoder::new(d))
     }
 
     /// The bytes read, an error where past the data.
@@ -44,14 +44,9 @@ pub fn decode(m: &mut Ppmd, r: &mut Reader) -> Result<u8> {
 }
 
 /// A range encoder of a block's bytes.
-#[derive(Default)]
 pub struct Writer(RangeEncoder);
 
 impl Writer {
-    pub fn new() -> Writer {
-        Writer(RangeEncoder::new())
-    }
-
     /// Writing onto the end of `out`.
     pub fn with_output(out: Vec<u8>) -> Writer {
         Writer(RangeEncoder::with_output(out))

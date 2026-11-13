@@ -23,10 +23,10 @@ const INIT_BIN_ESC: [u16; 8] = [0x3CDD, 0x1F3F, 0x59BF, 0x48F3, 0x64A1, 0x5ABC, 
 /// The SEE contexts are `see[0..400]`; `see[DUMMY]` is the dummy one of 256-symbol contexts.
 const DUMMY: usize = 25 * 16;
 
-pub const MIN_ORDER: u32 = 2;
-pub const MAX_ORDER: u32 = 64;
-pub const MIN_MEM: u32 = 1 << 11;
-pub const MAX_MEM: u32 = 0xFFFF_FFFF - 12 * 3;
+const MIN_ORDER: u32 = 2;
+const MAX_ORDER: u32 = 64;
+const MIN_MEM: u32 = 1 << 11;
+const MAX_MEM: u32 = 0xFFFF_FFFF - 12 * 3;
 
 const TOP: u32 = 1 << 24;
 const BOT: u32 = 1 << 15;
@@ -268,11 +268,6 @@ impl Model {
         Some(m)
     }
 
-    /// The memory size in use (that given to [`Model::new`], or to [`Model::set_size`]).
-    pub fn size(&self) -> u32 {
-        self.size
-    }
-
     /// The most bytes of memory the model holds: the size that [`Model::set_size`] may set.
     pub fn capacity(&self) -> u32 {
         self.mem.len() as u32
@@ -286,11 +281,6 @@ impl Model {
         }
         self.size = size;
         true
-    }
-
-    /// The order given to the last [`Model::init`].
-    pub fn order(&self) -> u32 {
-        self.max_order
     }
 
     /// A fresh model of `order` (Ppmd7_Init), clamped to 2..=64.

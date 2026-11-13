@@ -72,7 +72,32 @@ pub fn bits(n: usize) -> Vec<Bit> {
     vec![Bit::default(); n]
 }
 
+/// Bucket of a length: itself below 8, else 8-11 by its bit length.
+#[inline]
+pub fn lb(l: usize) -> usize {
+    if l < 8 { l } else { (5 + (usize::BITS - l.leading_zeros()) as usize).min(11) }
+}
+
+/// Bucket of a distance (0-7); 8 for none.
+#[inline]
+pub fn db(d: usize) -> usize {
+    [16, 256, 1024, 4096, 16384, 1 << 16, 1 << 20].iter().filter(|&&x| d >= x).count()
+}
+
+/// A slice of 32 adaptive bits of `t` for gammas, the `i`th.
+pub fn g32(t: &mut [Bit], i: usize) -> &mut [Bit] {
+    &mut t[i * 32..i * 32 + 32]
+}
+
+/// Bytes the tables' work takes at most (the counts, the lengths, Huffman's heap, the run-length
+/// coding, the tables): with room for the vectors that grow, and for the holes that leaves. The
+/// decoder takes them from the stack once before the blocks and gives them back, so that what it
+/// takes does not depend on the data.
+pub const SCRATCH: usize = 64 << 10;
+
 const NONE: u32 = u32::MAX;
+/// Chains of the match finder, one for each of [`Mf::KEYS`].
+const CHAINS: usize = 5;
 
 /// The match finder: the positions before the current one, on a chain for each key length of
 /// [`Mf::KEYS`], each chain holding the positions of its ring.
@@ -85,8 +110,8 @@ pub struct Mf<'a> {
     /// one ring after another.
     prev: Vec<u32>,
     /// The start and mask of each ring in `prev`.
-    ring_at: [usize; 5],
-    mask: [usize; 5],
+    ring_at: [usize; CHAINS],
+    mask: [usize; CHAINS],
     /// Positions below this are inserted.
     next: usize,
     found: Vec<(usize, usize)>,
@@ -113,7 +138,7 @@ fn key(d: &[u8], p: usize, k: usize, bits: u32) -> usize {
 impl<'a> Mf<'a> {
     /// Key lengths of the chains, and the most positions each holds (log 2): the chain of 2
     /// bytes serves near matches only.
-    pub const KEYS: [(usize, u32); 5] = [(2, 10), (3, 18), (5, 22), (8, 22), (16, 22)];
+    pub const KEYS: [(usize, u32); CHAINS] = [(2, 10), (3, 18), (5, 22), (8, 22), (16, 22)];
     /// Candidates looked at on each chain for the longest matches.
     pub const DEPTH: usize = 32;
     /// Candidates looked at for an escape's rank.
@@ -135,7 +160,7 @@ impl<'a> Mf<'a> {
     pub fn new(d: &'a [u8], reach: usize) -> Self {
         let bits = head_bits(d.len() as u64);
         let (heads, rings) = Self::slots(d.len());
-        let (mut ring_at, mut mask, mut at) = ([0; 5], [0; 5], 0);
+        let (mut ring_at, mut mask, mut at) = ([0; CHAINS], [0; CHAINS], 0);
         for c in 0..Self::KEYS.len() {
             let r = Self::ring(d.len(), c);
             (ring_at[c], mask[c]) = (at, r - 1);
@@ -235,9 +260,10 @@ impl<'a> Mf<'a> {
         self.found = found;
     }
 
-    /// The chain an escape of `len` bytes is ranked on: the longest key within it.
+    /// The chain an escape of `len` bytes is ranked on: the longest key within it, of 5 bytes at
+    /// most (the third chain's).
     fn rank_chain(len: usize) -> usize {
-        Self::KEYS.iter().rposition(|&(k, _)| k <= len.min(5)).unwrap_or(0)
+        Self::KEYS.iter().rposition(|&(k, _)| k <= len.min(Self::KEYS[2].0)).unwrap_or(0)
     }
 
     /// The rank of the match `dist` back of at least `len` bytes at `pos` among those that

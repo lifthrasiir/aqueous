@@ -13,7 +13,7 @@ use aqr_common::arith::{ArithDecoder, Bit};
 
 use crate::huff;
 use crate::lz5::{self, Block, Decoder5, Encoder5, Filter, Placed, Stream, Tables, Token, bonus};
-use crate::rec::{Bits, CATS, Cat, Dec, Enc, Mf, bits, lcp_up};
+use crate::rec::{Bits, CATS, Cat, Dec, Enc, Mf, SCRATCH, bits, db, g32, lb, lcp_up};
 use crate::{Error, Result, corrupt};
 
 /// The longest copy RAR writes.
@@ -24,18 +24,6 @@ const CAP: usize = 4100;
 const UNITS: usize = 16384;
 /// The span of the parser's segments, at whose starts repeated distances are not known.
 const SEGMENT: usize = 1 << 17;
-
-/// Bucket of a length: itself below 8, else 8-11 by its bit length.
-#[inline]
-fn lb(l: usize) -> usize {
-    if l < 8 { l } else { (5 + (usize::BITS - l.leading_zeros()) as usize).min(11) }
-}
-
-/// Bucket of a distance (0-7); 8 for none.
-#[inline]
-fn db(d: usize) -> usize {
-    [16, 256, 1024, 4096, 16384, 1 << 16, 1 << 20].iter().filter(|&&x| d >= x).count()
-}
 
 /// The units of a token in RAR's buffer.
 #[inline]
@@ -145,11 +133,6 @@ const _: () = {
     assert!(size_of::<Bit>() as u64 == wasm::BIT);
     assert!(size_of::<(u16, u8)>() as u64 == wasm::CODE);
 };
-
-/// A slice of 32 adaptive bits of `t` for gammas, the `i`th.
-fn g32(t: &mut [Bit], i: usize) -> &mut [Bit] {
-    &mut t[i * 32..i * 32 + 32]
-}
 
 /// The files of a stream as the record has them: each file's tokens without its filters, its
 /// filters with where they are declared.
@@ -736,12 +719,6 @@ fn code_tables(
     Ok(Tables { pre: pre.try_into().unwrap(), lens })
 }
 
-/// Bytes the tables' work takes at most (the counts, the lengths, the heap, the run-length
-/// coding, the tables): with room for the vectors that grow, and for the holes that leaves. The
-/// decoder takes them from the stack once before the blocks and gives them back, so that what it
-/// takes does not depend on the data.
-pub const SCRATCH: usize = 64 << 10;
-
 /// The blocks of the files written onto the end of `out`: each block after its tables, if it
 /// sends any (coded as they come: `streams` are the encoder's), in the order of the stream. The
 /// end of each file's part in `out` is put in `parts` if given.
@@ -885,9 +862,9 @@ pub fn split(parts: &[&[u8]], sizes: &[usize], v1: bool, dict: u64) -> Result<Sp
         let last = dec.last();
         let at = dec.out.len();
         let st = dec.file(p, size)?;
-        let mut file = dec.out[at..].to_vec();
-        lz5::unfilter(&mut file, &st.placed(last))?;
-        data.extend_from_slice(&file);
+        let from = data.len();
+        data.extend_from_slice(&dec.out[at..]);
+        lz5::unfilter(&mut data[from..], &st.placed(last))?;
         streams.push(st);
     }
     let u = dec.out;
