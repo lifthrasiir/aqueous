@@ -98,9 +98,14 @@ fn medium(setup: &[u8], full: &[u8], ident: Ident, packets: u64, extra: usize, c
     d
 }
 
-/// `d` through its formula and aqr-vorbis's module.
+/// `d` through its formula (whatever its size: random packets code to more than their bytes)
+/// and aqr-vorbis's module.
 fn round_trip(d: &[u8]) -> Vec<u8> {
-    let f = formula::encode(d, 1).expect("a formula");
+    let f = formula::formula_of(d).expect("a formula");
+    // (`encode` gives it only where its streams but the setup are fewer bytes than `d`)
+    let own: usize = f.streams.iter().filter(|s| s.class != "vorbis/setup").map(|s| s.data.len()).sum();
+    assert_eq!(formula::encode(d, 1).is_some(), own < d.len());
+    assert!(formula::is(&f));
     assert_eq!(f.applies().len(), 1);
     f.eval(&|a: &Apply, inputs: &[&[u8]]| {
         assert_eq!(a.module, aqr_vorbis::formula::MODULE);
@@ -161,7 +166,7 @@ fn media_through_their_formula() {
                 assert_eq!(wem::extent(&d), Some(d.len()));
                 if packets == 1 && ids[0] == 1000 {
                     // no packet to find the skeleton by
-                    assert!(formula::encode(&d, 1).is_none());
+                    assert!(formula::formula_of(&d).is_none());
                     continue;
                 }
                 assert_eq!(round_trip(&d), d);

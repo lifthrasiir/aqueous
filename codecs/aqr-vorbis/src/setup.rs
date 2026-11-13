@@ -632,4 +632,30 @@ impl Setup {
         }
         Ok(Setup { ident, codebooks, floors, residues, mappings, modes })
     }
+
+    /// [`Setup::parse`] through a cache of the setups parsed lately (natively, not in the
+    /// module): streams share a few setups (the media of a bank, the samples of FSB5 banks), and
+    /// parsing one costs as much as decoding a small stream's packets. Its plan, an encoder's
+    /// and the module's decode each parsed a stream's setup again.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn parse_cached(d: &[u8], ident: Ident) -> Result<std::sync::Arc<Setup>> {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex, OnceLock};
+        type Cache = Mutex<HashMap<(Vec<u8>, Ident), Arc<Setup>>>;
+        /// The most setups kept (then all are dropped).
+        const CACHED: usize = 64;
+        static CACHE: OnceLock<Cache> = OnceLock::new();
+        let cache = CACHE.get_or_init(Cache::default);
+        let key = (d.to_vec(), ident);
+        if let Some(s) = cache.lock().unwrap().get(&key) {
+            return Ok(s.clone());
+        }
+        let s = Arc::new(Setup::parse(d, ident)?);
+        let mut c = cache.lock().unwrap();
+        if c.len() >= CACHED {
+            c.clear();
+        }
+        c.insert(key, s.clone());
+        Ok(s)
+    }
 }

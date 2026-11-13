@@ -53,12 +53,13 @@ encoding and 15.5 MB/s decoding a thread. Through `aqr -c -T 16` (against `1c506
 
 | | before | after |
 |---|---|---|
-| Unpacking (66 `.wem`, 3 banks, 15,492 media, 278.95 MB) | 270.28 MB, 1.9 s | 253.28 MB (−6.3%), 12.6 s |
-| Chants of Sennaar (2 banks, 308.38 MB) | 307.01 MB, 1.9 s | 285.34 MB (−7.1%), 4.0 s |
+| Unpacking (66 `.wem`, 3 banks, 15,492 media, 278.95 MB) | 270.28 MB, 1.9 s | 252.35 MB (−6.6%), 4.5 s |
+| Chants of Sennaar (2 banks, 308.38 MB) | 307.01 MB, 1.9 s | 284.41 MB (−7.4%), 3.2 s |
 
-Unpacking's media are small (18 KB on average): a medium's decode (for the archive's check)
-parses its setup and makes its tables again each time, and that, not the encode, is most of the
-time.
+`aqr -K -T 16` of Unpacking's archive: 3.9 s. Its main bank holds 15,425 media of 8 KB on
+average; what each costs apart from its packets (a setup parsed, the formula compared with the
+medium) was most of the time, until setups were parsed once (aqr-vorbis's `parse_cached`) and
+media's formulas were taken without comparing (`encode` gives one only where it is smaller).
 
 The packets that do not end exactly end early with zero bits only, so they do not tell against
 the setups found: a stream's last packet often ends 21 to 28 bits early, and in some of No Man's
@@ -67,4 +68,5 @@ ids (423, 438) are the same codebook, as libvorbis's tables have it twice, which
 the library is libvorbis's books in the order of its tables.
 
 Left: the ids of other Wwise versions, where the library differs (`vorb` chunks of other sizes,
-packets with granules); aoTuV's setups (Satisfactory's low rates); the decode's cost a medium.
+packets with granules); aoTuV's setups (Satisfactory's low rates); a stream's fixed cost in
+aqr-vorbis's encoder (about 0.24 ms: its keys, default tables and rANS tables).

@@ -28,7 +28,7 @@ pub fn decode(initial: u64, params: &[u8], inputs: &[u64], len: u64, setup: &[u8
     let mut m = Sim::new(initial);
     m.take(aqr_api::stack::whole(params.len() as u64, &[], inputs));
     m.take(len);
-    let s = Setup::parse(setup, ident(params).ok()?).ok()?;
+    let s = Setup::parse_cached(setup, ident(params).ok()?).ok()?;
     // `Setup::parse`: the lists, and the vectors of each codebook (its tree grown to a power of
     // two of nodes, then cut to its size)
     m.take(wasm::CODEBOOK * s.codebooks.len() as u64);

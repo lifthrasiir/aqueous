@@ -87,9 +87,26 @@ fn cached(stripped: &[u8], s: &Stripped, ident: Ident, d: &[u8], w: &wem::Wem) -
     Some(made)
 }
 
-/// The formula of medium `input` (a `.wem` of Wwise's Vorbis), or None where it is not one or
-/// its setup is not found.
+/// The class of a medium's head (its bytes up to its first audio packet).
+pub const HEAD: &str = "wem/head";
+
+/// Whether formula `f` is one of [`encode`]'s, or holds one.
+pub fn is(f: &Formula) -> bool {
+    f.streams.iter().any(|s| s.class == HEAD)
+}
+
+/// The formula of medium `input` (a `.wem` of Wwise's Vorbis), or None where it is not one, its
+/// setup is not found, or its streams but the setup (which media share) come to no less than
+/// its bytes: so a formula given is smaller than the medium, which zstd hardly compresses (its
+/// packets are coded), and need not be compared with it.
 pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
+    let f = formula_of(input)?;
+    let own: usize = f.streams.iter().filter(|s| s.class != "vorbis/setup").map(|s| s.data.len()).sum();
+    (own < input.len()).then_some(f)
+}
+
+/// The formula of medium `input`, whatever its size ([`encode`]'s, before it is weighed).
+pub fn formula_of(input: &[u8]) -> Option<Formula> {
     let w = wem::parse(input).ok()?;
     let s = stripped::parse(&input[w.setup.clone()], w.channels)?;
     let [b0, b1] = w.blocksize_pows;
@@ -102,7 +119,7 @@ pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
     let end = w.packets.last().map_or(w.audio, |p| p.end);
     let mut f = Formula::default();
     let (node, used) = aqr_vorbis::formula::packets_parsed(&mut f, &setup.0, &setup.1, &input[w.audio..end])?;
-    let mut parts = vec![f.push("wem/head", input[..w.audio].to_vec()), node];
+    let mut parts = vec![f.push(HEAD, input[..w.audio].to_vec()), node];
     if w.audio + used < input.len() {
         parts.push(f.push("wem/tail", input[w.audio + used..].to_vec()));
     }

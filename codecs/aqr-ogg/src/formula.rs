@@ -127,7 +127,8 @@ fn vorbis(f: &mut Formula, s: &Setup, p: &Packets, audio: &Audio, records: Vec<O
     let mut at = 0;
     for (r, record) in audio.pieces.iter().zip(records) {
         if let Some((used, record)) = record {
-            let inputs = vec![node.clone(), f.push("vorbis/record", record)];
+            let inputs =
+                vec![node.clone(), f.push_as(aqr_vorbis::formula::RECORD, aqr_formula::Kind::Compressed, record)];
             let params = aqr_vorbis::module::params(s.ident);
             parts.push(Node::apply(aqr_vorbis::formula::MODULE, params, inputs, used as u64));
             at = r.start + used;

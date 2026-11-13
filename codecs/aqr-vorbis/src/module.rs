@@ -46,6 +46,10 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     // (the output first: all else is freed above it, last made first)
     let len = usize::try_from(len).map_err(|_| corrupt())?;
     let mut out = Vec::with_capacity(len);
+    // (natively, a setup parsed before is taken again)
+    #[cfg(not(target_family = "wasm"))]
+    let setup = Setup::parse_cached(setup, ident(params)?)?;
+    #[cfg(target_family = "wasm")]
     let setup = Setup::parse(setup, ident(params)?)?;
     codec::decode_into(&setup, record, len, &mut out)?;
     Ok(out)

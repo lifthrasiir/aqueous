@@ -28,6 +28,9 @@ aqr-fsb gives it the samples of FSB5 banks, aqr-ogg the audio packets of Ogg's V
   hashing), the decoder, the contexts (slots only for the floors' values and the residues'
   partitions the setup has) and the walk's room; freed top first (`Codebooks`, and fields
   declared in the reverse of the order they are made in).
+- Natively, setups are parsed once (`Setup::parse_cached`: by the encoder, the plan and the
+  module's decode alike), as many small streams share a few (a Wwise bank's media, FSB5's
+  samples). The record is of `Kind::Compressed`: its rANS words are stored as they are.
 
 - `setups`: the setup database (`data/vorbis-setups.bin`, FORMAT.md §8), for streams kept
   without their setups: libvorbis's setups as parts (codebooks, floors, residues with their

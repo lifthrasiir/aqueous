@@ -1691,7 +1691,9 @@ fn files_len(d: &[u8]) -> usize {
 /// compared still: what zstd makes of nearly blank frames may beat the formula's modules. So is a
 /// file of tensors' (aqr-tensors'): its encoder codes a run only where that comes to less than its
 /// bytes (which zstd hardly compresses: weights), and comparing compresses gigabytes twice on one thread (3.6 of
-/// 6.3 s for a model of 1.2 GB).
+/// 6.3 s for a model of 1.2 GB). So is a Wwise medium's (aqr-wwise's): its encoder gives a formula only where
+/// its streams but the setup come to less than its bytes (coded packets, which zstd hardly compresses),
+/// and comparing took a third of the time of a bank of 15,425 small media (17 of 47 thread-seconds).
 fn smaller(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], opt: &Options, cx: &Cx) -> bool {
     smaller_as(f, gaps, d, bundle::Kinds::of(f), opt, cx)
 }
@@ -1722,6 +1724,7 @@ fn smaller_as(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], of: bundle::
         || aqr_ppmd::formula::is(f)
         || (d.len() >= PRORES_UNCOMPARED && aqr_prores::formula::is(f))
         || aqr_tensors::formula::is(f)
+        || aqr_wwise::formula::is(f)
         || {
             #[cfg(test)]
             tests::COMPARED.with(|c| c.borrow_mut().push(d.len()));
