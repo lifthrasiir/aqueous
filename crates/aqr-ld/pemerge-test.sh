@@ -2,7 +2,8 @@
 # Validates `aqr-ld merge` (crates/aqr-ld/src/pemerge.rs): merges trivial native modules
 # (demo/modadd, demo/modxor; out[i] = in[i] + 7 and in[i] ^ 0x5a) into a stub executable
 # (demo/stub) as sections, and checks that each merged subset carries exactly the modules it was
-# given and that they produce the right bytes. Windows x86-64 only.
+# given and that they produce the right bytes; then that a module's panics are caught, merged
+# and loaded (demo/modpanic, which needs the nightly of nightly-toolchain). Windows x86-64 only.
 set -eu
 cd "$(dirname "$0")/../.."
 cargo build --release -p aqr-ld -p aqr-pemerge-stub
@@ -50,4 +51,19 @@ PY
 "$dir/both.exe" run add "$dir/in" "$dir/oa"; check "$dir/oa" "b+7"
 "$dir/both.exe" run xor "$dir/in" "$dir/ox"; check "$dir/ox" "b^0x5a"
 
-echo "pemerge-test: ok (subsets {}, {add}, {xor}, {add,xor} each carry and run exactly their modules)"
+# panics: a module that unwinds (demo/modpanic, catching its own panics), built as the modules'
+# blobs are (aqr-dll's no-TLS target: the nightly of nightly-toolchain with build-std), merged
+# and placed by aqr_blob::load
+target=crates/aqr-dll/x86_64-aqr-windows-msvc.json
+cargo "+${AQR_NIGHTLY:-$(cat nightly-toolchain)}" build -q --release -p aqr-pemerge-modpanic --target $target \
+    -Z json-target-spec -Z build-std
+"$ld" blob --apply aqr_mod_apply --info - --out "$dir/modpanic.blob" \
+    target/x86_64-aqr-windows-msvc/release/aqr_pemerge_modpanic.dll
+"$ld" merge --stub "$dir/stub.exe" --out "$dir/panic.exe" --apply aqr_mod_apply --info - panic="$dir/modpanic.blob"
+"$dir/panic.exe" run panic "$dir/in" "$dir/op" || fail "merged, the panics were not caught"
+check "$dir/op" "b"
+"$dir/stub.exe" load "$dir/modpanic.blob" "$dir/in" "$dir/ol" || fail "loaded, the panics were not caught"
+check "$dir/ol" "b"
+
+echo "pemerge-test: ok (subsets {}, {add}, {xor}, {add,xor} each carry and run exactly their modules;"
+echo "  panics caught in a module merged and loaded)"

@@ -76,21 +76,21 @@ struct Anchor {
 #[used]
 #[unsafe(no_mangle)]
 static AQR_PEMERGE_ANCHOR: Anchor =
-    Anchor { magic: *b"\x89AQRPEMERGEv1\x00\x00\x00", dispatch_rva: 0, dispatch_len: 0 };
+    Anchor { magic: *b"\x89AQRPEMERGEv2\x00\x00\x00", dispatch_rva: 0, dispatch_len: 0 };
 
 #[cfg(windows)]
 impl Sfx {
     /// The blobs merged into this program, as the dispatch table names them: the interpreter
     /// blob ([`INTERP`], the RVA of its `aqr_interp_vtable`) and the native module blobs
-    /// ([`native_name`], the RVA of each `aqr_dll_apply`), each one's exception table registered
-    /// here (for the unwinder: traps, panics).
+    /// ([`native_name`], the RVA of each `aqr_dll_apply`), each one's image registered here
+    /// (`aqr_blob::register_image`: its panics' type information is relative to its RVA 0). Their
+    /// exception data is in this program's own directory (the merge put it there: the unwinder
+    /// reads no other for the addresses of an image).
     pub fn find() -> Sfx {
         unsafe extern "C" {
             static __ImageBase: u8;
         }
-        unsafe extern "system" {
-            fn RtlAddFunctionTable(table: *const u8, count: u32, base: u64) -> i32;
-        }
+        static REGISTERED: std::sync::Once = std::sync::Once::new();
         let mut sfx = Sfx {
             interp: None,
             natives: Vec::new(),
@@ -111,24 +111,20 @@ impl Sfx {
             return sfx;
         }
         let table = unsafe { std::slice::from_raw_parts((base + rva as usize) as *const u8, len as usize) };
-        // the count, then an entry each (apply_rva, info_rva, pdata_rva, pdata_count, mod_base,
+        // the count, then an entry each (apply_rva, info_rva, image_rva, image_len, mod_base,
         // name_off: 6 u32), then the names (each its length, u32, and its bytes)
-        for k in 0..u32_at(table, 0).unwrap_or(0) as usize {
-            let field = |i: usize| u32_at(table, 4 + k * 24 + i * 4).unwrap_or(0);
-            let (apply_rva, info_rva, pdata_rva, pdata_count, mod_base, name_at) =
-                (field(0), field(1), field(2), field(3), field(4), field(5) as usize);
+        let count = u32_at(table, 0).unwrap_or(0) as usize;
+        let field = |k: usize, i: usize| u32_at(table, 4 + k * 24 + i * 4).unwrap_or(0) as usize;
+        REGISTERED.call_once(|| {
+            for k in 0..count {
+                aqr_blob::register_image(base + field(k, 2), field(k, 3), base + field(k, 4));
+            }
+        });
+        for k in 0..count {
+            let (apply_rva, info_rva, name_at) = (field(k, 0), field(k, 1), field(k, 5));
             let Some(n) = u32_at(table, name_at) else { continue };
             let Some(name) = table.get(name_at + 4..name_at + 4 + n as usize) else { continue };
-            if pdata_count > 0 {
-                unsafe {
-                    RtlAddFunctionTable(
-                        (base + pdata_rva as usize) as *const u8,
-                        pdata_count,
-                        (base + mod_base as usize) as u64,
-                    )
-                };
-            }
-            let at = base + apply_rva as usize;
+            let at = base + apply_rva;
             if name == INTERP.as_bytes() {
                 // SAFETY: the merge wrote the RVA of aqr_interp_vtable, which returns the static vtable
                 let vtable_fn: extern "C" fn() -> *const Vtable = unsafe { std::mem::transmute(at) };
@@ -138,7 +134,7 @@ impl Sfx {
             {
                 // SAFETY: the merge wrote the RVAs of the blob's aqr_dll_apply and aqr_dll_info
                 let apply: aqr_api::dll::ApplyFn = unsafe { std::mem::transmute(at) };
-                let info: aqr_api::dll::InfoFn = unsafe { std::mem::transmute(base + info_rva as usize) };
+                let info: aqr_api::dll::InfoFn = unsafe { std::mem::transmute(base + info_rva) };
                 // (a blob of another version of the interface left out: its info is not this)
                 let info = unsafe { info() };
                 if info.version == aqr_api::dll::VERSION {

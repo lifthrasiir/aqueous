@@ -3,7 +3,8 @@
 //! relocations are applied for where it lands, its imports from the other blobs of the set
 //! written as their addresses, its imports from the Visual C++ runtime bound to this program's
 //! own ([`crate::VCRUNTIME`]), those from system libraries bound (`LoadLibraryA`,
-//! `GetProcAddress`), and its exception table registered for the unwinder. No DllMain or TLS
+//! `GetProcAddress`), its exception table registered for the unwinder, and its image for its
+//! panics ([`crate::register_image`]). No DllMain or TLS
 //! callback runs, as none does in a merge. What is placed stays for the life of the process.
 
 use core::ffi::c_void;
@@ -157,7 +158,8 @@ pub fn load(set: &[&[u8]]) -> Result<Image> {
         }
         FlushInstructionCache(GetCurrentProcess(), mem, total);
     }
-    for (b, &base) in blobs.iter().zip(&bases) {
+    for ((b, &base), &o) in blobs.iter().zip(&bases).zip(&offsets) {
+        crate::register_image(mem as usize + o, b.image.len(), base);
         if b.pdata_count > 0 {
             // SAFETY: the blob's exception table, in the region, of entries over its base
             unsafe { RtlAddFunctionTable((base + b.pdata_rva as usize) as *const c_void, b.pdata_count, base as u64) };

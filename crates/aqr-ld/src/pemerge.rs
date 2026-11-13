@@ -8,10 +8,13 @@
 //! TlsAlloc): the whole of its image is copied into the stub at a chosen RVA with its layout
 //! kept, so that every RIP-relative reference stays valid, its base relocations (`DIR64` only)
 //! are applied for the new address and emitted into the stub's relocations so that ASLR still
-//! works, and its imports are merged into the stub's import table. The modules' images are in
-//! one section, each at an RVA of its own (the stub's headers have room for few more section
-//! headers). A dispatch table naming each module and the RVA of its entry is added too, and its
-//! place written into the stub's anchor (its magic). Validated by `crates/aqr-ld/pemerge-test.sh`
+//! works, and its imports are merged into the stub's import table. Its function entries go into
+//! the stub's exception directory, its unwind data rebased ([`crate::unwind`]): the unwinder
+//! reads no other table for an address in an image. The modules' images are in one section, each
+//! at an RVA of its own (the stub's headers have room for few more section headers). A dispatch
+//! table naming each module, the RVA of its entry and where its image is (for the stub to
+//! register it, `aqr_blob::register_image`, for its panics) is added too, and its place written
+//! into the stub's anchor (its magic). Validated by `crates/aqr-ld/pemerge-test.sh`
 //! on trivial modules, `crates/aqr-dll/merge-test.sh` on the codec modules.
 //!
 //! x86-64 only. The structures are the PE/COFF ones (Microsoft's "PE Format").
@@ -20,7 +23,7 @@ use std::path::Path;
 
 use aqr_blob::{Bind, Blob};
 
-const MAGIC: &[u8; 16] = b"\x89AQRPEMERGEv1\x00\x00\x00";
+const MAGIC: &[u8; 16] = b"\x89AQRPEMERGEv2\x00\x00\x00";
 
 /// The characteristics of a merged section: code and data, readable, writable and executable
 /// (a module holds all three; writable, as its relocations are applied where it loads).
@@ -417,10 +420,11 @@ struct Entry {
     name: String,
     apply_rva: u32,
     info_rva: u32,
-    /// The merged RVA of the module's exception table, its count, and the module's base RVA (`r`,
-    /// what the stub passes `RtlAddFunctionTable` so its entries' RVAs resolve).
-    pdata_rva: u32,
-    pdata_count: u32,
+    /// Where its image is (RVA and length), and the RVA where its RVA 0 lands (`c`): for the stub
+    /// to register it (`aqr_blob::register_image`), its panics' type information being relative
+    /// to its RVA 0.
+    image_rva: u32,
+    image_len: u32,
     mod_base: u32,
 }
 
@@ -456,6 +460,12 @@ pub fn merge_bytes(stub: Vec<u8>, modules: &[(String, Vec<u8>)], apply_name: &st
     let mut entries: Vec<Entry> = Vec::new();
     // the stub's import descriptors, then each module's (its thunks and names in its own image)
     let mut descriptors = pe.descriptors()?;
+    // the stub's exception directory, then each module's function entries, rebased (crate::unwind)
+    let mut functions: Vec<[u32; 3]> = {
+        let (rva, size) = pe.dir(3);
+        let at = if rva == 0 { 0 } else { pe.off(rva)? };
+        (0..size as usize / 12).map(|i| [0, 4, 8].map(|k| u32(&pe.buf, at + i * 12 + k))).collect()
+    };
     // the modules' images, each at an RVA of its own, section-aligned, in one section (the stub's
     // headers have room for few more section headers)
     let modules_va = next_va;
@@ -491,6 +501,10 @@ pub fn merge_bytes(stub: Vec<u8>, modules: &[(String, Vec<u8>)], apply_name: &st
             img[o..o + 8].copy_from_slice(&v.to_le_bytes());
             new_relocs.push(c.wrapping_add(loc));
         }
+        // the exception data: the unwinder reads only the stub's directory for its addresses
+        let names = crate::unwind::import_names(&img, b.first, b.import_dir_rva)?;
+        let rebased = crate::unwind::rebase(&mut img, b.first, b.pdata_rva, b.pdata_count, c, &names);
+        functions.extend(rebased.map_err(|e| format!("{name}: {e}"))?);
         // the imports from the Visual C++ runtime: the stub's own copy, where it has its table
         if let Some(vcrt) = &vcrt {
             for (slot, i) in
@@ -506,8 +520,8 @@ pub fn merge_bytes(stub: Vec<u8>, modules: &[(String, Vec<u8>)], apply_name: &st
             name: name.clone(),
             apply_rva: if b.apply_rva == 0 { 0 } else { c.wrapping_add(b.apply_rva) },
             info_rva: if b.info_rva == 0 { 0 } else { c.wrapping_add(b.info_rva) },
-            pdata_rva: if b.pdata_rva == 0 { 0 } else { c.wrapping_add(b.pdata_rva) },
-            pdata_count: b.pdata_count,
+            image_rva: va,
+            image_len: img.len() as u32,
             mod_base: c,
         });
         images.resize((va - modules_va) as usize, 0);
@@ -518,12 +532,28 @@ pub fn merge_bytes(stub: Vec<u8>, modules: &[(String, Vec<u8>)], apply_name: &st
         news.push(New { name: *b".aqrm\0\0\0", va: modules_va, vsize, flags: SEC_FLAGS, data: images });
     }
 
-    // the import directory: the descriptors gathered, zero-terminated
+    // the import directory: the descriptors gathered, zero-terminated; then the exception
+    // directory, in the same section (the stub's headers have room for few more section headers)
     descriptors.extend_from_slice(&[0u8; 20]);
     let imp_va = next_va;
     let imp_len = descriptors.len() as u32;
-    news.push(New { name: *b".aqri\0\0\0", va: imp_va, vsize: imp_len, flags: DATA_FLAGS, data: descriptors });
-    next_va = align(imp_va + imp_len, salign);
+    let mut data = descriptors;
+    data.resize(data.len().next_multiple_of(4), 0);
+    let exc_va = imp_va + data.len() as u32;
+    // (in order of their addresses, as the unwinder searches it: the stub's, then each module's
+    // in the order they land)
+    if !functions.is_sorted_by_key(|f| f[0]) {
+        return Err("the function entries are not in order".into());
+    }
+    for f in &functions {
+        for v in f {
+            data.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    let exc_len = functions.len() as u32 * 12;
+    let data_len = data.len() as u32;
+    news.push(New { name: *b".aqri\0\0\0", va: imp_va, vsize: data_len, flags: DATA_FLAGS, data });
+    next_va = align(imp_va + data_len, salign);
 
     // the dispatch table: count, then an entry each (6 u32), then the names
     let mut disp = Vec::new();
@@ -531,7 +561,7 @@ pub fn merge_bytes(stub: Vec<u8>, modules: &[(String, Vec<u8>)], apply_name: &st
     let names_at = 4 + entries.len() * 24;
     let mut names = Vec::new();
     for e in &entries {
-        for v in [e.apply_rva, e.info_rva, e.pdata_rva, e.pdata_count, e.mod_base, (names_at + names.len()) as u32] {
+        for v in [e.apply_rva, e.info_rva, e.image_rva, e.image_len, e.mod_base, (names_at + names.len()) as u32] {
             disp.extend_from_slice(&v.to_le_bytes());
         }
         names.extend_from_slice(&(e.name.len() as u32).to_le_bytes());
@@ -596,11 +626,14 @@ pub fn merge_bytes(stub: Vec<u8>, modules: &[(String, Vec<u8>)], apply_name: &st
         pe.buf.resize(pad, 0);
     }
 
-    // the header fields: section count, image size, the import and relocation directories
+    // the header fields: section count, image size, the import, exception and relocation
+    // directories
     put_u16(&mut pe.buf, pe.pe + 6, (old_n + news.len()) as u32);
     put_u32(&mut pe.buf, pe.opt + 56, align(next_va, salign));
     put_u32(&mut pe.buf, pe.opt + 112 + 8, imp_va); // directory 1 (import)
     put_u32(&mut pe.buf, pe.opt + 112 + 8 + 4, imp_len);
+    put_u32(&mut pe.buf, pe.opt + 112 + 3 * 8, exc_va); // directory 3 (exception)
+    put_u32(&mut pe.buf, pe.opt + 112 + 3 * 8 + 4, exc_len);
     // the bound-import directory (11) would pin the stub's imports to stale addresses; drop it
     put_u32(&mut pe.buf, pe.opt + 112 + 11 * 8, 0);
     put_u32(&mut pe.buf, pe.opt + 112 + 11 * 8 + 4, 0);

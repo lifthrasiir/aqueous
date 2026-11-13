@@ -771,6 +771,7 @@ name = "aqr-dll-shim"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-blob",
  "aqr-decompress",
  "aqr-formula",
  "aqr-modules",
@@ -1444,12 +1445,19 @@ name = "aqr-pemerge-modadd"
 version = "0.1.0"
 
 [[package]]
+name = "aqr-pemerge-modpanic"
+version = "0.1.0"
+
+[[package]]
 name = "aqr-pemerge-modxor"
 version = "0.1.0"
 
 [[package]]
 name = "aqr-pemerge-stub"
 version = "0.1.0"
+dependencies = [
+ "aqr-blob",
+]
 
 [[package]]
 name = "aqr-png"

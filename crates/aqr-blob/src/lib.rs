@@ -69,7 +69,8 @@ fn u32_at(b: &[u8], o: usize) -> u32 {
 /// for a blob), and its exception handling, which panics go through, aborts so.
 pub const VCRUNTIME: &str = "vcruntime140.dll";
 
-/// The functions of [`VCRUNTIME`] that blobs import, in the order of [`VCRUNTIME_TABLE`]'s.
+/// The functions of [`VCRUNTIME`] that blobs import, in the order of [`VCRUNTIME_TABLE`]'s (where
+/// `_CxxThrowException` is one of its own for blobs).
 pub const VCRUNTIME_NAMES: [&str; 8] = [
     "memcpy",
     "memmove",
@@ -105,8 +106,33 @@ mod vcruntime {
         fn memcmp(a: *const c_void, b: *const c_void, n: usize) -> i32;
         fn __C_specific_handler();
         fn __CxxFrameHandler3();
-        fn _CxxThrowException();
+        fn _CxxThrowException(object: *mut c_void, info: *const c_void) -> !;
         fn __std_type_info_destroy_list();
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn RaiseException(code: u32, flags: u32, count: u32, arguments: *const usize) -> !;
+    }
+
+    /// `_CxxThrowException` for blobs. A panic is a C++ exception whose type information is
+    /// given relative to the image of its code: Rust's `panic_unwind` takes the offsets from its
+    /// `__ImageBase`, the blob's RVA 0. The runtime's own finds that base by `RtlPcToFileHeader`
+    /// of the throw info, which knows only the images the system loaded: none for a blob placed
+    /// by [`crate::load`] (the throw then taken for a pure one, which nothing catches: fail-fast),
+    /// the stub's for one merged into it (offset from the blob's: no catch matches). This one
+    /// takes the base of the blob holding the throw info ([`crate::register_image`]) and raises
+    /// the exception as the runtime does with it (WinRT and pure throws, which Rust has not,
+    /// aside).
+    unsafe extern "C" fn throw_from_blob(object: *mut c_void, info: *const c_void) -> ! {
+        let Some(base) = super::image_base_of(info as usize) else {
+            // (not a blob's: the runtime's way, then)
+            unsafe { _CxxThrowException(object, info) }
+        };
+        // EH_MAGIC_NUMBER1, the object, its throw info, the image base of its type information
+        let arguments = [0x1993_0520, object as usize, info as usize, base];
+        // SAFETY: the C++ exception as the runtime raises it (EH_EXCEPTION_NUMBER, noncontinuable)
+        unsafe { RaiseException(0xe06d_7363, 1, arguments.len() as u32, arguments.as_ptr()) }
     }
 
     type Mem = unsafe extern "C" fn(*mut c_void, *const c_void, usize) -> *mut c_void;
@@ -132,7 +158,7 @@ mod vcruntime {
             erase::<unsafe extern "C" fn(*const c_void, *const c_void, usize) -> i32>(memcmp),
             __C_specific_handler,
             __CxxFrameHandler3,
-            _CxxThrowException,
+            erase::<unsafe extern "C" fn(*mut c_void, *const c_void) -> !>(throw_from_blob),
             __std_type_info_destroy_list,
         ],
     };
@@ -144,6 +170,47 @@ mod vcruntime {
 }
 #[cfg(all(windows, target_arch = "x86_64", target_env = "msvc"))]
 pub use vcruntime::{VCRUNTIME_TABLE, keep_vcruntime};
+
+/// The images of the blobs placed in this process: start, end, and the address of RVA 0 of each.
+/// Only added to (what is placed stays for the life of the process), and read without a lock:
+/// an entry is written before the count that covers it.
+#[cfg(all(windows, target_arch = "x86_64"))]
+mod images {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// (a set of blobs is about 120; a process places a few)
+    const MAX: usize = 4096;
+    static IMAGES: [[AtomicUsize; 3]; MAX] = [const { [const { AtomicUsize::new(0) }; 3] }; MAX];
+    static COUNT: AtomicUsize = AtomicUsize::new(0);
+    static ADDING: Mutex<()> = Mutex::new(());
+
+    /// Registers the image of a blob placed at `[start, start + len)`, its RVA 0 at `base`: the
+    /// throws of its code (its panics) take their type information relative to `base`. Placing
+    /// blobs ([`crate::load`], or a stub finding those merged into it) registers each; past
+    /// 4096 images, the rest are left out (their panics then abort).
+    pub fn register_image(start: usize, len: usize, base: usize) {
+        let _adding = ADDING.lock().unwrap_or_else(|e| e.into_inner());
+        let n = COUNT.load(Ordering::Relaxed);
+        if n < MAX {
+            for (slot, v) in IMAGES[n].iter().zip([start, start + len, base]) {
+                slot.store(v, Ordering::Relaxed);
+            }
+            COUNT.store(n + 1, Ordering::Release);
+        }
+    }
+
+    /// The base of the registered image holding `addr`, if any.
+    pub fn image_base_of(addr: usize) -> Option<usize> {
+        let n = COUNT.load(Ordering::Acquire);
+        IMAGES[..n].iter().find_map(|[start, end, base]| {
+            let range = start.load(Ordering::Relaxed)..end.load(Ordering::Relaxed);
+            range.contains(&addr).then(|| base.load(Ordering::Relaxed))
+        })
+    }
+}
+#[cfg(all(windows, target_arch = "x86_64"))]
+pub use images::{image_base_of, register_image};
 
 /// Takes the import descriptor of [`VCRUNTIME`] out of the import directory at `dir_rva` of image
 /// `img` (its bytes from RVA `first`), the others moved up, and gives the slots of its import
@@ -331,7 +398,9 @@ mod tests {
         let put = |img: &mut [u8], o: usize, v: u64, n: usize| img[o..o + n].copy_from_slice(&v.to_le_bytes()[..n]);
         let name = |img: &mut [u8], o: usize, s: &str| img[o..o + s.len()].copy_from_slice(s.as_bytes());
         // descriptors at 0x1000 (lookup table, name, address table), then the terminator
-        for (k, (lib, lookup, ft)) in [("kernel32.dll", 0x1200, 0x1300), ("VCRUNTIME140.dll", 0x1400, 0x1500)].iter().enumerate() {
+        for (k, (lib, lookup, ft)) in
+            [("kernel32.dll", 0x1200, 0x1300), ("VCRUNTIME140.dll", 0x1400, 0x1500)].iter().enumerate()
+        {
             put(&mut img, k * 20, *lookup, 4);
             put(&mut img, k * 20 + 12, 0x1100 + k as u64 * 0x20, 4);
             put(&mut img, k * 20 + 16, *ft, 4);

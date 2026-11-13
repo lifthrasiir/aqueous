@@ -6,6 +6,8 @@
 //!
 //! - `list` prints the names of the modules merged in.
 //! - `run NAME IN OUT` applies module `NAME` to the bytes of `IN`, writing its output to `OUT`.
+//! - `load BLOB IN OUT` does the same with the module of blob `BLOB` (`aqr-ld blob`), placed in
+//!   memory by `aqr_blob::load` rather than merged.
 
 use std::process::ExitCode;
 
@@ -21,7 +23,7 @@ struct Anchor {
 #[used]
 #[unsafe(no_mangle)]
 static AQR_PEMERGE_ANCHOR: Anchor =
-    Anchor { magic: *b"\x89AQRPEMERGEv1\x00\x00\x00", dispatch_rva: 0, dispatch_len: 0 };
+    Anchor { magic: *b"\x89AQRPEMERGEv2\x00\x00\x00", dispatch_rva: 0, dispatch_len: 0 };
 
 unsafe extern "C" {
     /// The image base, a symbol the MSVC linker defines.
@@ -50,9 +52,10 @@ fn u32_at(b: &[u8], o: usize) -> u32 {
     u32::from_le_bytes(b[o..o + 4].try_into().unwrap())
 }
 
-/// The modules merged in, from the dispatch table:
-/// `count: u32`, then `count` × `{ apply_rva: u32, name_off: u32, name_len: u32 }`, then names.
+/// The modules merged in, from the dispatch table (each image registered for its panics,
+/// `aqr_blob::register_image`).
 fn modules() -> Vec<Module> {
+    aqr_blob::keep_vcruntime();
     let (rva, len) = unsafe {
         (
             std::ptr::read_volatile(&AQR_PEMERGE_ANCHOR.dispatch_rva),
@@ -66,9 +69,12 @@ fn modules() -> Vec<Module> {
     let count = u32_at(table, 0) as usize;
     (0..count)
         .map(|i| {
-            // entry: apply_rva, info_rva, pdata_rva, pdata_count, mod_base, name_off (6 u32)
+            // entry: apply_rva, info_rva, image_rva, image_len, mod_base, name_off (6 u32)
             let e = 4 + i * 24;
             let apply_rva = u32_at(table, e);
+            let (image_rva, image_len, mod_base) = (u32_at(table, e + 8), u32_at(table, e + 12), u32_at(table, e + 16));
+            let at = |rva: u32| base() as usize + rva as usize;
+            aqr_blob::register_image(at(image_rva), image_len as usize, at(mod_base));
             let off = u32_at(table, e + 20) as usize;
             let nlen = u32_at(table, off) as usize;
             Module {
@@ -90,8 +96,28 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Some("run") if args.len() == 4 => {
-            let Some(m) = mods.iter().find(|m| m.name == args[1]) else {
+        Some(cmd @ ("run" | "load")) if args.len() == 4 => {
+            let loaded;
+            let m = match cmd {
+                "run" => mods.iter().find(|m| m.name == args[1]),
+                _ => {
+                    let blob = std::fs::read(&args[1]).map_err(|e| e.to_string());
+                    match blob.and_then(|b| aqr_blob::load(&[&b])) {
+                        Ok(image) => {
+                            let p = &image.blobs[0];
+                            // SAFETY: the blob's entry, aqr_mod_apply (`aqr-ld blob --apply`)
+                            let apply = unsafe { std::mem::transmute::<usize, ApplyFn>(p.at(p.apply_rva)) };
+                            loaded = Module { name: args[1].clone(), apply };
+                            Some(&loaded)
+                        }
+                        Err(e) => {
+                            eprintln!("stub: {}: {e}", args[1]);
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                }
+            };
+            let Some(m) = m else {
                 eprintln!("stub: no module {}", args[1]);
                 return ExitCode::FAILURE;
             };
@@ -115,7 +141,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         _ => {
-            eprintln!("usage: stub list | stub run NAME IN OUT");
+            eprintln!("usage: stub list | stub run NAME IN OUT | stub load BLOB IN OUT");
             ExitCode::FAILURE
         }
     }

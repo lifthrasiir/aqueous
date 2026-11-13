@@ -2,3 +2,4 @@
 //! executable (the self-extracting archives that `aqr --format sfx` makes).
 
 pub mod pemerge;
+mod unwind;

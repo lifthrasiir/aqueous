@@ -65,7 +65,7 @@ struct Anchor {
 #[used]
 #[unsafe(no_mangle)]
 static AQR_PEMERGE_ANCHOR: Anchor =
-    Anchor { magic: *b"\x89AQRPEMERGEv1\x00\x00\x00", dispatch_rva: 0, dispatch_len: 0 };
+    Anchor { magic: *b"\x89AQRPEMERGEv2\x00\x00\x00", dispatch_rva: 0, dispatch_len: 0 };
 
 #[cfg(windows)]
 unsafe extern "C" {
@@ -73,15 +73,11 @@ unsafe extern "C" {
     static __ImageBase: u8;
 }
 
-#[cfg(windows)]
-unsafe extern "system" {
-    fn RtlAddFunctionTable(table: *const u8, count: u32, base: u64) -> i32;
-}
-
 impl Lib {
     /// The library of module `name` merged into this executable (`aqr-ld merge`), if any: its
-    /// `aqr_dll_apply` and `aqr_dll_info` called by the RVAs in the dispatch table, with its
-    /// exception table registered so unwinding through it works.
+    /// `aqr_dll_apply` and `aqr_dll_info` called by the RVAs in the dispatch table. The images
+    /// merged are registered (`aqr_blob::register_image`: their panics' type information is
+    /// relative to their RVA 0); their exception data is this executable's (the merge's).
     #[cfg(windows)]
     fn embedded(name: &str) -> Option<Result<Lib>> {
         let base = &raw const __ImageBase as usize;
@@ -97,29 +93,20 @@ impl Lib {
             return None;
         }
         let table = read(rva, len as usize);
-        // the shared libraries the modules link against (`lib:NAME`, their imports bound by the
-        // merge): their exception tables registered once, as the modules' are
-        static LIBS: std::sync::Once = std::sync::Once::new();
-        LIBS.call_once(|| {
+        // every image merged (the modules and the shared libraries they link against), once
+        static IMAGES: std::sync::Once = std::sync::Once::new();
+        IMAGES.call_once(|| {
+            #[cfg(target_env = "msvc")]
+            aqr_blob::keep_vcruntime();
             for i in 0..u32_at(table, 0) as usize {
                 let e = 4 + i * 24;
-                let off = u32_at(table, e + 20) as usize;
-                let nlen = u32_at(table, off) as usize;
-                let (pdata_rva, pdata_count, mod_base) =
+                let (image_rva, image_len, mod_base) =
                     (u32_at(table, e + 8), u32_at(table, e + 12), u32_at(table, e + 16));
-                if table[off + 4..off + 4 + nlen].starts_with(b"lib:") && pdata_count > 0 {
-                    unsafe {
-                        RtlAddFunctionTable(
-                            (base + pdata_rva as usize) as *const u8,
-                            pdata_count,
-                            (base + mod_base as usize) as u64,
-                        )
-                    };
-                }
+                aqr_blob::register_image(base + image_rva as usize, image_len as usize, base + mod_base as usize);
             }
         });
         for i in 0..u32_at(table, 0) as usize {
-            // entry: apply_rva, info_rva, pdata_rva, pdata_count, mod_base, name_off (6 u32)
+            // entry: apply_rva, info_rva, image_rva, image_len, mod_base, name_off (6 u32)
             let e = 4 + i * 24;
             let off = u32_at(table, e + 20) as usize;
             let nlen = u32_at(table, off) as usize;
@@ -127,20 +114,8 @@ impl Lib {
                 continue;
             }
             let (apply_rva, info_rva) = (u32_at(table, e), u32_at(table, e + 4));
-            let (pdata_rva, pdata_count, mod_base) =
-                (u32_at(table, e + 8), u32_at(table, e + 12), u32_at(table, e + 16));
             if info_rva == 0 {
                 return Some(Err(format!("{name}: no info in the merged module")));
-            }
-            // the unwinder finds the module's functions from here (its RVAs over the module base)
-            if pdata_count > 0 {
-                unsafe {
-                    RtlAddFunctionTable(
-                        (base + pdata_rva as usize) as *const u8,
-                        pdata_count,
-                        (base + mod_base as usize) as u64,
-                    )
-                };
             }
             // SAFETY: the merge wrote the RVAs of the module's aqr_dll_info and aqr_dll_apply
             let info = unsafe { std::mem::transmute::<usize, InfoFn>(base + info_rva as usize)() };

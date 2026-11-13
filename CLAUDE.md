@@ -81,7 +81,12 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     Windows binaries link the Visual C++ runtime statically and the UCRT as Windows 10's DLL
     (`.cargo/config.toml`), so no redistributable is needed; the blobs still import
     vcruntime140.dll (a static copy would go uninitialised: no DllMain runs), and `load` and
-    `aqr-ld merge` bind those imports to the program's own (`VCRUNTIME_TABLE`).
+    `aqr-ld merge` bind those imports to the program's own (`VCRUNTIME_TABLE`), with a
+    `_CxxThrowException` of its own: a panic's type information is relative to its blob's
+    RVA 0, which it takes from the images registered (`register_image`: `load`, and the stubs
+    for the blobs merged into them). A merge moves the blobs' function entries into the stub's
+    exception directory, their unwind data rebased (aqr-ld's `src/unwind.rs`): the unwinder
+    reads only an image's own for its addresses. `pemerge-test.sh` checks panics both ways.
   - `aqr-sfx` — the self-extracting apply logic (a library): `Sfx` finds the blobs merged into the
     program through the dispatch table's anchor — native module blobs named `HASH/SLOTS`
     (`native_name`: the module's hash and task slots), the interpreter blob `aqr-interp` — and is
@@ -89,7 +94,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     and the hash in custom sections), which `load` takes to the native blob (a part module
     streamed through `aqr_dll_apply_part`, as `Info::apply_part` gives it); any other module
     goes to the interpreter. The shared libraries the native blobs link against are
-    entries `lib:NAME` (their exception tables registered, nothing else). `extract` writes a
+    entries `lib:NAME` (their images registered, nothing else). `extract` writes a
     decoded archive's files out. Shared by the stub and aqr. `pack.sh` gathers what aqr embeds
     (the stub, the blobs of the modules and of the shared libraries).
   - `aqr-sfx-shim` — the self-extracting stub (lean: aqr-formula + aqr-sfx, no codecs or Wasmtime,
