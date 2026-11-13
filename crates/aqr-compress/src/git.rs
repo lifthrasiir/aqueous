@@ -17,11 +17,11 @@ use crate::sets::Set;
 use crate::{Cx, Made, Options};
 
 pub(crate) fn pack(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
-    let (profile, zlib) = opt.flate();
+    let profile = opt.flate_profile();
     let mut gopt = aqr_git::formula::Options {
         threads: opt.threads,
         profile,
-        zlib,
+        zlib: true,
         limit: cx.inflate_left(),
         probe: crate::probe(opt, depth),
         held: cx.held.clone().map(|h| {

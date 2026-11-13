@@ -7,12 +7,12 @@ use aqr_formula::Formula;
 use crate::{Cx, Options};
 
 pub(crate) fn file(d: &[u8], opt: &Options, _depth: u32, cx: &Cx) -> Option<Formula> {
-    let (profile, zlib) = opt.flate();
+    let profile = opt.flate_profile();
     let floats = aqr_decompress::wasm_of(aqr_hdf5::formula::FLOAT).is_some();
     let mut hopt = aqr_hdf5::formula::Options {
         threads: opt.threads,
         profile,
-        zlib,
+        zlib: true,
         floats,
         limit: cx.inflate_left(),
         trial: true,

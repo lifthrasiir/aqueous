@@ -155,8 +155,8 @@ pub(crate) fn gzip_deflate(d: &[u8]) -> Option<Range<usize>> {
     Some(p..end)
 }
 
-/// The data of the gzip member at the start of `d`, or None where it does not inflate or its
-/// data would be over `max` bytes.
+/// The data of the gzip file `d` (a single member, ending where `d` does), or None where it does
+/// not inflate or its data would be over `max` bytes.
 pub(crate) fn gunzip(d: &[u8], max: usize) -> Option<Vec<u8>> {
     let isize = u32::from_le_bytes(*d.get(d.len().checked_sub(4)?..)?.first_chunk()?);
     if isize as usize > max {
@@ -295,11 +295,11 @@ fn member(
     probed: bool,
     cx: &Cx,
 ) -> Option<(u16, Member)> {
-    let (profile, zlib) = opt.flate();
+    let profile = opt.flate_profile();
     let fopt = aqr_flate::Options {
         threads: opt.threads,
         max_data: usize::try_from(cx.inflate_left()).unwrap_or(usize::MAX),
-        zlib,
+        zlib: true,
         store: true,
         ..aqr_flate::Options::for_profile(profile).ok()?
     };

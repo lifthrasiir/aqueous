@@ -8,11 +8,11 @@ use aqr_formula::Formula;
 use crate::{Cx, Options, kind_by_name};
 
 pub(crate) fn zip(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
-    let (profile, zlib) = opt.flate();
+    let profile = opt.flate_profile();
     let zopt = aqr_zip::formula::Options {
         threads: opt.threads,
         profile,
-        zlib,
+        zlib: true,
         // (below level 4, no DEFLATE body rebuilt: files holding their data are made of them,
         // [`crate::inflated`])
         limit: if crate::inflated::on(opt) { 0 } else { cx.inflate_left() },

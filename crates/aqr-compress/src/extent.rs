@@ -316,14 +316,14 @@ fn id3v1(d: &[u8]) -> usize {
     if d.starts_with(b"TAG") && d.len() >= 128 { 128 } else { 0 }
 }
 
-/// The header, the three sections given by their lengths, and the image data where it is raw
-/// or RLE.
 /// A Clip Studio Paint file: the size its header gives.
 pub(crate) fn clip(d: &[u8]) -> Option<usize> {
     let n = u64be(d, 8)?;
     (n >= 24).then(|| clamp(d, n))
 }
 
+/// The header, the three sections given by their lengths, and the image data where it is raw
+/// or RLE.
 pub(crate) fn psd(d: &[u8]) -> Option<usize> {
     let psb = match u16be(d, 4)? {
         1 => false,

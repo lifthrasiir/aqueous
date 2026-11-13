@@ -87,7 +87,7 @@ fn chunked(d: &[u8], u: &Chunked, kept: &'static str, opt: &Options, cx: &Cx) ->
     if !cx.inflate(u.len) {
         return None;
     }
-    let (mut profile, zlib) = opt.flate();
+    let mut profile = opt.flate_profile();
     // hdiutil writes every chunk with zlib's level 1 (qemu's clusters zlib's level 6, of a window of
     // 4 KiB), whose misses the default profile codes in about a tenth of the stream, and zlib's
     // emulation (of the adaptive profiles) in none: where
@@ -102,7 +102,7 @@ fn chunked(d: &[u8], u: &Chunked, kept: &'static str, opt: &Options, cx: &Cx) ->
     let sample = (by_disk.iter().take(SAMPLED).map(|&k| &u.chunks[k]))
         .filter(|c| matches!(c.how, How::Zlib | How::Deflate) && c.file.len() > 2)
         .max_by_key(|c| (c.disk.end - c.disk.start, c.file.len()));
-    if let Some(c) = sample.filter(|_| zlib) {
+    if let Some(c) = sample {
         let profile = profile.max(aqr_flate::ADAPTIVE);
         let sopt = aqr_flate::Options {
             threads: 1,
@@ -122,7 +122,8 @@ fn chunked(d: &[u8], u: &Chunked, kept: &'static str, opt: &Options, cx: &Cx) ->
     if params.is_some() {
         profile = profile.max(aqr_flate::ADAPTIVE);
     }
-    let fopt = aqr_flate::Options { threads: 1, zlib, store: true, ..aqr_flate::Options::for_profile(profile).ok()? };
+    let fopt =
+        aqr_flate::Options { threads: 1, zlib: true, store: true, ..aqr_flate::Options::for_profile(profile).ok()? };
     let mut made: Vec<Made> = vec![Made::Kept; u.chunks.len()];
     let mut disk = Writer::new(Some(len));
     for batch in by_disk.chunks(BATCH) {
@@ -193,7 +194,16 @@ fn chunked(d: &[u8], u: &Chunked, kept: &'static str, opt: &Options, cx: &Cx) ->
             match data {
                 Some(data) => disk.write(&data),
                 None if c.how == How::Raw => disk.write(&d[c.file.clone()]),
-                None => disk.write(&vec![0; (c.disk.end - c.disk.start) as usize]),
+                None => {
+                    // (in pieces: a chunk of zeros may be much of the disk)
+                    let mut left = (c.disk.end - c.disk.start) as usize;
+                    let zeros = vec![0; left.min(1 << 20)];
+                    while left > 0 {
+                        let n = left.min(zeros.len());
+                        disk.write(&zeros[..n]);
+                        left -= n;
+                    }
+                }
             }
             made[k] = m;
         }

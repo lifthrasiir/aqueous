@@ -315,7 +315,7 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
 /// A SQLite database header: the magic string, a page size, and the fields that must have one
 /// value (the file format's versions 1 or 2, payload fractions 64, 32 and 32). SQLite's code
 /// holds the magic string too.
-pub(crate) fn sqlite_header(d: &[u8]) -> bool {
+fn sqlite_header(d: &[u8]) -> bool {
     let Some(h) = d.first_chunk::<24>().filter(|h| h.starts_with(b"SQLite format 3\0")) else { return false };
     let size = u16::from_be_bytes([h[16], h[17]]);
     (size == 1 || size.is_power_of_two() && (512..=32768).contains(&size))
@@ -340,7 +340,7 @@ pub(crate) fn mp3_header(d: &[u8]) -> bool {
 }
 
 /// "MZ" with `e_lfanew` pointing at "PE\0\0".
-pub(crate) fn pe(d: &[u8]) -> bool {
+fn pe(d: &[u8]) -> bool {
     let Some(&[b'M', b'Z']) = d.first_chunk() else { return false };
     let Some(&lfanew) = d.get(0x3c..0x40).and_then(|s| s.first_chunk::<4>()) else { return false };
     let p = u32::from_le_bytes(lfanew) as usize;

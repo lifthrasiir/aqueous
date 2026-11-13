@@ -217,10 +217,10 @@ impl StoreWriter for Region {
             d.chunks(BOUNCE).enumerate().try_for_each(|(i, c)| {
                 copy.clear();
                 copy.extend_from_slice(c);
-                write_at(&self.segment.file, &copy, at + (i * BOUNCE) as u64)
+                crate::write_all_at(&self.segment.file, &copy, at + (i * BOUNCE) as u64)
             })
         } else {
-            write_at(&self.segment.file, d, at)
+            crate::write_all_at(&self.segment.file, d, at)
         };
         if written.is_err() {
             return false;
@@ -288,7 +288,7 @@ impl Spill {
         }
         sparse(&file)?;
         file.set_len(n as u64)?;
-        write_at(&file, &MAGIC, 0)?;
+        crate::write_all_at(&file, &MAGIC, 0)?;
         // SAFETY: the file is this segment's alone, written only by the positioned writes of its
         // regions' writers (each its own bytes), read by its regions after
         let map = unsafe { MmapOptions::new().len(n).map(&file)? };
@@ -372,20 +372,6 @@ fn sparse(f: &File) -> io::Result<()> {
         )
     };
     if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
-}
-
-#[cfg(unix)]
-fn write_at(f: &File, d: &[u8], at: u64) -> io::Result<()> {
-    std::os::unix::fs::FileExt::write_all_at(f, d, at)
-}
-
-#[cfg(windows)]
-fn write_at(f: &File, mut d: &[u8], mut at: u64) -> io::Result<()> {
-    while !d.is_empty() {
-        let n = std::os::windows::fs::FileExt::seek_write(f, d, at)?;
-        (d, at) = (&d[n..], at + n as u64);
-    }
-    Ok(())
 }
 
 #[cfg(test)]

@@ -302,18 +302,18 @@ impl Nest {
 }
 
 impl Options {
-    /// The aqr-flate profile that DEFLATE streams (of gzip, zlib and ZIP) are rebuilt with, and
-    /// whether it tries zlib emulation (at every level): up to level 6, the default profile;
+    /// The aqr-flate profile that DEFLATE streams (of gzip, zlib and ZIP) are rebuilt with (zlib
+    /// emulation is tried at every level): up to level 6, the default profile;
     /// from 7 on, the adaptive one with chain rules and zlib emulation (enwik8 by
     /// Info-ZIP 3.0 `-9`, 10 threads of a Ryzen 7 9700X: a record of 0.41% of the data rather
     /// than 2.6% with chain rules alone, split at 66 MB/s rather than 163, joined at 147 MB/s
     /// rather than 302; 2.8 KB with zlib emulation, split at 54 MB/s, joined at 165 MB/s, but at
     /// 25 MB/s on a thread: `enwik9.zip` alone some 40 s of decoding). Streams not of zlib's
     /// cost nothing more: detection turns them down at once.
-    pub fn flate(&self) -> (u16, bool) {
+    pub fn flate_profile(&self) -> u16 {
         match self.level.scale() {
-            ..7 => (aqr_flate::DEFAULT_PROFILE, true),
-            _ => (aqr_flate::ADAPTIVE, true),
+            ..7 => aqr_flate::DEFAULT_PROFILE,
+            _ => aqr_flate::ADAPTIVE,
         }
     }
 
@@ -429,6 +429,8 @@ pub(crate) struct Cx {
 pub(crate) struct Once {
     /// By the length and XXH3-128 of the text.
     slots: HashMap<(usize, u128), std::sync::Mutex<Slot>>,
+    /// The lengths of the texts of `slots`: a text of another length is not hashed.
+    lens: HashSet<usize>,
     /// Where the texts whose formulas are not evaluated beforehand are (address and length).
     copies: std::sync::Mutex<HashSet<(usize, usize)>>,
 }
@@ -445,13 +447,14 @@ impl Once {
 
     /// For the texts of these lengths and XXH3-128s.
     pub(crate) fn of(texts: impl IntoIterator<Item = (usize, u128)>) -> Once {
-        let slots = texts.into_iter().map(|k| (k, std::sync::Mutex::new(Slot::Empty))).collect();
-        Once { slots, copies: Default::default() }
+        let slots: HashMap<_, _> = texts.into_iter().map(|k| (k, std::sync::Mutex::new(Slot::Empty))).collect();
+        let lens = slots.keys().map(|k| k.0).collect();
+        Once { slots, lens, copies: Default::default() }
     }
 
     /// The formula `code` makes of text `d`, or the one made of the same text before, kept.
     fn code(&self, d: &[u8], code: impl FnOnce() -> Option<Formula>) -> Option<Formula> {
-        let slot = match self.slots.keys().any(|k| k.0 == d.len()) {
+        let slot = match self.lens.contains(&d.len()) {
             true => self.slots.get(&(d.len(), xxhash_rust::xxh3::xxh3_128(d))),
             false => None,
         };
@@ -703,6 +706,23 @@ pub trait Sink: Write {
     }
 }
 
+/// `d` written to `f` at offset `at`.
+pub(crate) fn write_all_at(f: &std::fs::File, d: &[u8], at: u64) -> io::Result<()> {
+    #[cfg(unix)]
+    return std::os::unix::fs::FileExt::write_all_at(f, d, at);
+    #[cfg(windows)]
+    {
+        let (mut at, mut d) = (at, d);
+        while !d.is_empty() {
+            match std::os::windows::fs::FileExt::seek_write(f, d, at)? {
+                0 => return Err(io::ErrorKind::WriteZero.into()),
+                n => (at, d) = (at + n as u64, &d[n..]),
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A file written at offsets ([`Sink::place`]).
 pub struct Placing(std::fs::File);
 
@@ -726,19 +746,7 @@ impl Placing {
 
 impl aqr::sink::Place for Placing {
     fn write_at(&self, at: u64, d: &[u8]) -> io::Result<()> {
-        #[cfg(unix)]
-        return std::os::unix::fs::FileExt::write_all_at(&self.0, d, at);
-        #[cfg(windows)]
-        {
-            let (mut at, mut d) = (at, d);
-            while !d.is_empty() {
-                match std::os::windows::fs::FileExt::seek_write(&self.0, d, at)? {
-                    0 => return Err(io::ErrorKind::WriteZero.into()),
-                    n => (at, d) = (at + n as u64, &d[n..]),
-                }
-            }
-            Ok(())
-        }
+        write_all_at(&self.0, d, at)
     }
 }
 
@@ -1187,6 +1195,7 @@ fn written<T>(out: &mut dyn Sink, write: impl FnOnce(&mut dyn Write) -> io::Resu
 }
 
 /// [`recompress`] for data `depth` formats deep, within `cx`.
+///
 /// A file of `kind` is recompressed as [`Options::file`] and the kind tell ([`Nest::of`]), as a
 /// file in an archive of many is, but for a format: that is looked for as in a file of no kind,
 /// as a scan finds the file the data starts with, and what is in it where that is turned down
@@ -1219,7 +1228,6 @@ pub(crate) fn made(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> O
 }
 
 fn made_alone(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option<Made> {
-    let text = how == Nest::As(Format::Text) || how == Nest::Scan && is_text(detect(d));
     // (the data of a DEFLATE stream archived along with it, kept as it is: made of it)
     if depth < opt.depth
         && let Some(f) = cx.bodies.as_ref().and_then(|b| b.formula(d))
@@ -1236,13 +1244,15 @@ fn made_alone(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option
         // else text as aqr-wrt tells of it alone (not [`smaller`]), so that the same text is
         // taken alike wherever it is; else scanned as other data is, or kept raw where named as
         // text
-        _ if text => match table(d, opt, depth, cx).or_else(|| recompress_as(Format::Text, d, opt, depth, cx)) {
-            Some(f) => Some(Made::from(f)),
-            None if how == Nest::Scan => {
-                scan(d, None, opt, depth, cx).filter(|m| smaller(&m.f, m.gaps.as_deref(), d, opt, cx))
+        _ if how == Nest::As(Format::Text) || how == Nest::Scan && is_text(detect(d)) => {
+            match table(d, opt, depth, cx).or_else(|| recompress_as(Format::Text, d, opt, depth, cx)) {
+                Some(f) => Some(Made::from(f)),
+                None if how == Nest::Scan => {
+                    scan(d, None, opt, depth, cx).filter(|m| smaller(&m.f, m.gaps.as_deref(), d, opt, cx))
+                }
+                None => None,
             }
-            None => None,
-        },
+        }
         // else its samples after a header telling their size, or its tables of records, if any
         Nest::Scan => scan(d, None, opt, depth, cx)
             .filter(|m| smaller(&m.f, m.gaps.as_deref(), d, opt, cx))
@@ -1521,7 +1531,7 @@ fn recompress_sealed(
                 }
             }
         }
-        place_all(&mut f, children.into_iter().map(|c| c.1).collect(), sets, opt);
+        place_all(&mut f, children.into_iter().map(|c| c.1).collect(), sets);
         aqr_formula::store::spill_streams(&mut f);
     }
     // the contents' put off, but those taken into a set
@@ -2109,14 +2119,7 @@ fn make_later(
         })
         .collect();
     let apps = applications_of_lazy(f);
-    let mut slices = vec![0usize; f.streams.len()];
-    f.visit(&mut |n| {
-        if let &Node::Slice { stream, .. } = n
-            && let Some(n) = slices.get_mut(stream)
-        {
-            *n += 1;
-        }
-    });
+    let slices = slice_counts(f);
     let whole = |f: &Formula, n: &Node| match *n {
         Node::Slice { stream, start: 0, len } if take(n) => {
             (slices[stream] == 1 && len > 0 && len == f.streams[stream].data.len() as u64).then_some(stream)
@@ -2172,7 +2175,9 @@ fn make_later(
     // order where sealed: each waits for those before it)
     let mut order: Vec<usize> = (0..later.len()).collect();
     if sealing.is_none() {
-        order.sort_by_cached_key(|&i| std::cmp::Reverse(peek(&later[i].1).map_or(later[i].1.len() * 50, cost)));
+        order.sort_by_cached_key(|&i| {
+            std::cmp::Reverse(peek(&later[i].1).map_or(later[i].1.len() * formats::Spec::DEFAULT.cost, cost))
+        });
     }
     // (the bytes of the streams taken, shared so as to be moved without a copy)
     let taken: Vec<std::sync::Mutex<Option<Bytes>>> = owned
@@ -2425,10 +2430,23 @@ enum Placed {
     Node(Node),
 }
 
+/// How many slices there are of each stream of `f`.
+fn slice_counts(f: &Formula) -> Vec<usize> {
+    let mut slices = vec![0; f.streams.len()];
+    f.visit(&mut |n| {
+        if let &Node::Slice { stream, .. } = n
+            && let Some(n) = slices.get_mut(stream)
+        {
+            *n += 1;
+        }
+    });
+    slices
+}
+
 /// Puts the formulas of [`nested`] in place in `f`, and the outputs of the `sets` of them
 /// ([`sets::sets`], whose formulas are `None` in `children`); the bytes left without a slice
 /// are dropped.
-fn place_all(f: &mut Formula, children: Vec<Option<Made>>, sets: Vec<sets::Set>, opt: &Options) {
+fn place_all(f: &mut Formula, children: Vec<Option<Made>>, sets: Vec<sets::Set>) {
     // (the applications of several outputs [`nested`] looked into, not those of the sets)
     let own = f.shared.len();
     let mut outputs: Vec<Option<Node>> = (0..children.len()).map(|_| None).collect();
@@ -2441,14 +2459,7 @@ fn place_all(f: &mut Formula, children: Vec<Option<Made>>, sets: Vec<sets::Set>,
         None => c.map(Placed::Made),
     });
     // (of the applications of several outputs too)
-    let mut slices = vec![0; f.streams.len()];
-    f.visit(&mut |n| {
-        if let &Node::Slice { stream, .. } = n
-            && let Some(n) = slices.get_mut(stream)
-        {
-            *n += 1;
-        }
-    });
+    let slices = slice_counts(f);
     let mut children = children.into_iter();
     // (the applications embedded in the inputs of one of them go before it, as its inputs take
     // their outputs)
@@ -2459,13 +2470,13 @@ fn place_all(f: &mut Formula, children: Vec<Option<Made>>, sets: Vec<sets::Set>,
         if let Some(module) = f.shared[i].apply().map(|a| a.module) {
             let inputs = std::mem::take(&mut f.shared[i].apply_mut().expect("an application").inputs);
             let mut n = Node::apply(module, Vec::new(), inputs, 0);
-            place(&mut n, f, &slices, opt, &mut children);
+            place(&mut n, f, &slices, &mut children);
             let Node::Apply(a) = n else { unreachable!("an application") };
             f.shared[i].apply_mut().expect("an application").inputs = a.inputs;
         } else if let aqr_formula::Of::Node(n) = &mut f.shared[i].of {
             // (a node split: what is placed in it is cut into the same outputs)
             let mut n = std::mem::replace(n, Node::Concat(Vec::new()));
-            place(&mut n, f, &slices, opt, &mut children);
+            place(&mut n, f, &slices, &mut children);
             f.shared[i].of = aqr_formula::Of::Node(n);
         }
         order.extend(embedded..f.shared.len());
@@ -2473,7 +2484,8 @@ fn place_all(f: &mut Formula, children: Vec<Option<Made>>, sets: Vec<sets::Set>,
     }
     let mut root = std::mem::replace(&mut f.root, Node::Concat(Vec::new()));
     let embedded = f.shared.len();
-    place(&mut root, f, &slices, opt, &mut children);
+    place(&mut root, f, &slices, &mut children);
+    debug_assert!(children.next().is_none(), "a child left without a slice");
     f.root = root;
     order.extend(embedded..f.shared.len());
     f.reorder_shared(&order);
@@ -2518,9 +2530,7 @@ fn contents(
     out: &mut Vec<(Node, Option<Made>)>,
 ) {
     match n {
-        &Node::Slice { stream, .. } if is_content(f, stream) => {
-            content_slices(n, Nest::Scan, f, apart, opt, depth, cx, out)
-        }
+        &Node::Slice { stream, .. } if is_content(f, stream) => content_slices(n, f, apart, opt, depth, cx, out),
         // (patches are made of recompressed data, not looked into)
         Node::Slice { .. } | Node::Output { .. } | Node::Patch(_) | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
         Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| contents(n, f, apart, opt, depth, cx, out)),
@@ -2528,12 +2538,10 @@ fn contents(
     }
 }
 
-/// [`contents`] of node `n`, a content recompressed as `nest`: each of its slices is a content
-/// of the kind of its stream, and the applications in it have contents of their own.
-#[allow(clippy::too_many_arguments)]
+/// [`contents`] of node `n`, a content scanned: each of its slices is a content of the kind of
+/// its stream, and the applications in it have contents of their own.
 fn content_slices(
     n: &Node,
-    nest: Nest,
     f: &Formula,
     apart: bool,
     opt: &Options,
@@ -2548,7 +2556,7 @@ fn content_slices(
             if let Some(st) = s.filter(|s| s.data.is_lazy())
                 && start + len <= st.data.len() as u64
                 && apart
-                && let Some(nest) = nest.of(st.kind)
+                && let Some(nest) = Nest::Scan.of(st.kind)
             {
                 cx.later.borrow_mut().push((out.len(), n.clone(), nest));
                 out.push((n.clone(), None));
@@ -2563,18 +2571,16 @@ fn content_slices(
             // (the files of an archive made later, at once, and so are those of an image or a
             // WIM file, and a ZIP archive's entries)
             if (depth == 0 && cx.top_sets.is_some() || apart)
-                && let Some(nest) = s.and_then(|s| nest.of(s.kind)).filter(|_| d.is_some())
+                && let Some(nest) = s.and_then(|s| Nest::Scan.of(s.kind)).filter(|_| d.is_some())
             {
                 cx.later.borrow_mut().push((out.len(), n.clone(), nest));
                 out.push((n.clone(), None));
                 return;
             }
-            let child = s.zip(d).and_then(|(s, d)| made(d, opt, depth + 1, nest.of(s.kind)?, cx));
+            let child = s.zip(d).and_then(|(s, d)| made(d, opt, depth + 1, Nest::Scan.of(s.kind)?, cx));
             out.push((n.clone(), child.filter(|c| takes_place(&c.f))));
         }
-        Node::Concat(ns) | Node::Pack(ns) => {
-            ns.iter().for_each(|n| content_slices(n, nest, f, apart, opt, depth, cx, out))
-        }
+        Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| content_slices(n, f, apart, opt, depth, cx, out)),
         Node::Apply(_) => contents(n, f, apart, opt, depth, cx, out),
         Node::Output { .. } | Node::Patch(_) | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
     }
@@ -2583,29 +2589,17 @@ fn content_slices(
 /// Puts the formulas of the contents below node `n` of `f`, in the order of [`contents`], in
 /// place of their slices: cut out of the stream of their data itself where they are all of it,
 /// the only slice of it (of the `slices` of each stream).
-fn place(
-    n: &mut Node,
-    f: &mut Formula,
-    slices: &[usize],
-    opt: &Options,
-    children: &mut impl Iterator<Item = Option<Placed>>,
-) {
+fn place(n: &mut Node, f: &mut Formula, slices: &[usize], children: &mut impl Iterator<Item = Option<Placed>>) {
     match n {
-        &mut Node::Slice { stream, .. } if is_content(f, stream) => place_slices(n, f, slices, opt, children),
+        &mut Node::Slice { stream, .. } if is_content(f, stream) => place_slices(n, f, slices, children),
         Node::Slice { .. } | Node::Output { .. } | Node::Patch(_) | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
-        Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| place(n, f, slices, opt, children)),
-        Node::Apply(a) => a.inputs.iter_mut().for_each(|n| place(n, f, slices, opt, children)),
+        Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| place(n, f, slices, children)),
+        Node::Apply(a) => a.inputs.iter_mut().for_each(|n| place(n, f, slices, children)),
     }
 }
 
 /// [`place`] in node `n`, a content: in the order of [`content_slices`].
-fn place_slices(
-    n: &mut Node,
-    f: &mut Formula,
-    slices: &[usize],
-    opt: &Options,
-    children: &mut impl Iterator<Item = Option<Placed>>,
-) {
+fn place_slices(n: &mut Node, f: &mut Formula, slices: &[usize], children: &mut impl Iterator<Item = Option<Placed>>) {
     match n {
         &mut Node::Slice { stream, start, len } => match children.next().flatten() {
             Some(Placed::Node(o)) => *n = o,
@@ -2624,8 +2618,8 @@ fn place_slices(
             }
             None => {}
         },
-        Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| place_slices(n, f, slices, opt, children)),
-        Node::Apply(_) => place(n, f, slices, opt, children),
+        Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| place_slices(n, f, slices, children)),
+        Node::Apply(_) => place(n, f, slices, children),
         Node::Output { .. } | Node::Patch(_) | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
     }
 }
@@ -2755,8 +2749,8 @@ fn attempted(format: Format, d: &[u8], make: impl FnOnce() -> Option<Formula>) -
 /// format (a tar archive, say), whose files further on or what they share the start does not
 /// tell, is decoded whole first; other data (text, say) is told by its start. The record is the
 /// params, a few bytes.
-fn bz2(d: &[u8], opt: &Options, depth: u32, threads: usize, held: Option<&Held>) -> Option<Formula> {
-    aqr_bz2::formula::encode_if(d, threads, &mut bz2_pays(d, opt, depth, held))
+fn bz2(d: &[u8], opt: &Options, depth: u32, held: Option<&Held>) -> Option<Formula> {
+    aqr_bz2::formula::encode_if(d, opt.threads, &mut bz2_pays(d, opt, depth, held))
 }
 
 /// Whether a bzip2 stream in file `d` pays, as aqr-bz2's `encode_if` asks: see [`bz2`].
@@ -2786,9 +2780,14 @@ fn bz2_pays<'a>(
 /// budget ([`Options::expansion`]); a bzip2 body is taken where its data may pay, as a bzip2
 /// file is ([`bz2`]).
 fn alz(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
-    let (profile, zlib) = opt.flate();
-    let o =
-        aqr_alz::formula::Options { threads: opt.threads, profile, zlib, limit: cx.inflate_left(), kind: kind_by_name };
+    let profile = opt.flate_profile();
+    let o = aqr_alz::formula::Options {
+        threads: opt.threads,
+        profile,
+        zlib: true,
+        limit: cx.inflate_left(),
+        kind: kind_by_name,
+    };
     let e = aqr_alz::formula::encode_with(d, &o, &mut bz2_pays(d, opt, depth, cx.held.as_deref()))?;
     cx.inflate(e.inflated);
     Some(e.formula)
@@ -2798,8 +2797,8 @@ fn alz(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
 /// application, recompressed in turn. Its chunks decode within what is left of the budget
 /// ([`Options::expansion`]).
 fn isc(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
-    let (profile, zlib) = opt.flate();
-    let o = aqr_isc::formula::Options { threads: opt.threads, profile, zlib, limit: cx.inflate_left() };
+    let profile = opt.flate_profile();
+    let o = aqr_isc::formula::Options { threads: opt.threads, profile, zlib: true, limit: cx.inflate_left() };
     let e = aqr_isc::formula::encode_with(d, &o)?;
     cx.inflate(e.inflated);
     Some(e.formula)
@@ -2811,9 +2810,14 @@ fn isc(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
 /// budget ([`Options::expansion`]); a bzip2 block is taken where its data may pay, as a bzip2
 /// file is ([`bz2`]).
 fn egg(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
-    let (profile, zlib) = opt.flate();
-    let o =
-        aqr_egg::formula::Options { threads: opt.threads, profile, zlib, limit: cx.inflate_left(), kind: kind_by_name };
+    let profile = opt.flate_profile();
+    let o = aqr_egg::formula::Options {
+        threads: opt.threads,
+        profile,
+        zlib: true,
+        limit: cx.inflate_left(),
+        kind: kind_by_name,
+    };
     let e = aqr_egg::formula::encode_with(d, &o, &mut bz2_pays(d, opt, depth, cx.held.as_deref()))?;
     cx.inflate(e.inflated);
     Some(e.formula)
@@ -2859,11 +2863,11 @@ fn sevenz(d: &[u8], opt: &Options) -> Option<Formula> {
 /// folders (the latter from level 9, [`lzx_on`]) inflate within what is left of the budget
 /// ([`Options::expansion`]).
 fn cab(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
-    let (profile, zlib) = opt.flate();
+    let profile = opt.flate_profile();
     let o = aqr_mszip::formula::Options {
         threads: opt.threads,
         profile,
-        zlib,
+        zlib: true,
         limit: cx.inflate_left(),
         kind: kind_by_name,
         lzx: lzx_on(opt),
@@ -2891,11 +2895,11 @@ fn chm(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
 /// aqr-pdf's options at the level of `opt`: the records of its DEFLATE streams of the profile
 /// that [`Options::flate`] tells, and from level 7 on with no time budget, as DEFLATE is always
 /// rebuilt there ([`probe`]).
-fn pdf_options(opt: &Options, threads: usize) -> aqr_pdf::encode::Options {
-    let (profile, zlib) = opt.flate();
+fn pdf_options(opt: &Options) -> aqr_pdf::encode::Options {
+    let profile = opt.flate_profile();
     let default = aqr_pdf::encode::Options::default();
     let speed = if opt.level.scale() >= 7 { f64::INFINITY } else { default.speed };
-    aqr_pdf::encode::Options { speed, profile, zlib, threads, ..default }
+    aqr_pdf::encode::Options { speed, profile, zlib: true, threads: opt.threads, ..default }
 }
 
 /// Whether `format` is one of [`pure`].
@@ -2976,7 +2980,7 @@ fn prepare(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> (Vec<(usize, usiz
     let p =
         Pure { opt, depth, words: words.as_deref(), once: &cx.once, held: cx.held.as_deref(), seal: None, pre: None };
     let files = cx.files.as_deref();
-    let made = sets::par_map(jobs.len(), workers, |i| {
+    let made = aqr_common::pool::par_map(jobs.len(), workers, |i| {
         files.inspect(|f| f.tell(jobs[i].1.as_ptr(), false));
         let _item = aqr_common::trace::item(files.and_then(|f| f.content(jobs[i].1.as_ptr())));
         let mut made = pure(jobs[i].0, jobs[i].1, &p).flatten();
@@ -4254,7 +4258,7 @@ mod tests {
         let cx = Cx::new(&d, &opt);
         let (children, plan) = nested(&mut f, &d, &opt, 0, &cx).unwrap();
         assert!(plan.is_empty());
-        place_all(&mut f, children.into_iter().map(|c| c.1).collect(), Vec::new(), &opt);
+        place_all(&mut f, children.into_iter().map(|c| c.1).collect(), Vec::new());
         let jpegs = |n: &Node| matches!(n, Node::Apply(a) if a.module == aqr_decompress::JPEG);
         assert!(f.shared.iter().any(|s| matches!(&s.of, aqr_formula::Of::Node(n) if jpegs(n))));
         assert!(f.eval(&Native::default()).unwrap() == d);
@@ -4421,7 +4425,7 @@ mod tests {
             let stream = |class: &str| &f.streams.iter().find(|s| s.class == class).expect(class).data;
             // (none at mid, where the budget leaves them all to the token mode)
             let profile = aqr_flate::record_profile(stream("pdf/meta")).ok();
-            let want = Options { level, ..Options::default() }.flate().0;
+            let want = Options { level, ..Options::default() }.flate_profile();
             assert!(profile.is_none_or(|p| p == want) && (level == Level::MID || profile.is_some()), "{level:?}");
             let raw_or_tok = !stream("pdf/raw").is_empty() || !stream("pdf/tok-symbols").is_empty();
             assert_eq!(raw_or_tok, level == Level::MID, "{level:?}");
@@ -4694,9 +4698,13 @@ mod tests {
         let tail = b"what follows the stream".to_vec();
         let d = [deflated.clone(), tail.clone()].concat();
         let opt = Options::default();
-        let (profile, zlib) = opt.flate();
-        let fopt =
-            aqr_flate::Options { threads: 1, zlib, store: true, ..aqr_flate::Options::for_profile(profile).unwrap() };
+        let profile = opt.flate_profile();
+        let fopt = aqr_flate::Options {
+            threads: 1,
+            zlib: true,
+            store: true,
+            ..aqr_flate::Options::for_profile(profile).unwrap()
+        };
         let parsed = aqr_flate::Parsed::head(&deflated, &fopt).unwrap();
         assert_eq!(parsed.len(), deflated.len());
         let (data, record, _) = parsed.deconstruct_bytes(&fopt, &Default::default()).unwrap();
@@ -4847,12 +4855,12 @@ mod tests {
         copied.root = Node::concat([f.root.clone(), whole]);
 
         let at = f.streams[0].data.as_ptr();
-        place_all(&mut f, vec![Some(child())], vec![], &Options::default());
+        place_all(&mut f, vec![Some(child())], vec![]);
         let cut = f.streams.iter().find(|s| s.class == "raw").unwrap();
         assert!(cut.data.as_ptr() == at && cut.data == gaps);
         assert_eq!(f.streams.len(), 3);
 
-        place_all(&mut copied, vec![Some(child())], vec![], &Options::default());
+        place_all(&mut copied, vec![Some(child())], vec![]);
         let raw: Vec<_> = copied.streams.iter().filter(|s| s.class == "raw").map(|s| &s.data[..]).collect();
         assert!(raw == [&data[..], &gaps[..]]);
     }

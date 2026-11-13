@@ -1302,6 +1302,10 @@ pub(crate) const SLICE_MIN: usize = 1 << 10;
 /// ([`together`]).
 const CHUNK_COMMON: usize = 8;
 
+/// Two to this many contents of the same start (its first bytes) are taken for one file; more
+/// have a header in common ([`together`]).
+const SAME_HEADS: usize = 8;
+
 /// Contents of at least this many bytes of the same bytes as others are put in one batch
 /// ([`together`]): one smaller costs little made again in a segment of its own.
 const SAME_MIN: u64 = 64 << 10;
@@ -1370,14 +1374,14 @@ fn together<S: Source + ?Sized>(
         };
         let mut held: Vec<(u32, u64)> = held.into_iter().filter(|e| e.1 >= TOGETHER_MIN).collect();
         if format == Some(detect::Format::Lzma) && size <= TOGETHER_MAX {
-            held.extend(stream_sums(aqr_lzma::formula::data(&src.read(c)?)));
+            held.extend(stream_sums(aqr_lzma::formula::data(&src.read(c)?).as_deref()));
         }
         if format == Some(detect::Format::Xz) && size <= TOGETHER_MAX {
-            held.extend(stream_sums(aqr_lzma::formula::data_xz(&src.read(c)?)));
+            held.extend(stream_sums(aqr_lzma::formula::data_xz(&src.read(c)?).as_deref()));
         }
         // (a Zstandard file's frames, which the files they hold are taken from: `crate::zst`)
         if opt.recompresses() && aqr_zstd::starts(&head) && size <= TOGETHER_MAX {
-            held.extend(stream_sums(crate::zst::content(&src.read(c)?, crate::zst::bound(opt))));
+            held.extend(stream_sums(crate::zst::content(&src.read(c)?, crate::zst::bound(opt)).as_deref()));
         }
         // (an NSIS installer's stored files: tarballs of the files installed, mostly)
         if format == Some(detect::Format::Pe) && size <= TOGETHER_MAX {
@@ -1442,7 +1446,7 @@ fn together<S: Source + ?Sized>(
     for c in (0..n).filter(|&c| src.size(c) >= MEMBER_MIN) {
         sizes.entry(src.size(c)).or_default().push(c);
     }
-    for cs in heads.values().filter(|cs| (2..=8).contains(&cs.len())) {
+    for cs in heads.values().filter(|cs| (2..=SAME_HEADS).contains(&cs.len())) {
         cs.iter().for_each(|&c| join(cs[0], c));
     }
     // and by pieces of their starts, two or more in common ([`probe::chunks`]: the same start
@@ -1511,7 +1515,7 @@ fn together<S: Source + ?Sized>(
     // joined by it already
     let mut by_size: HashMap<u64, Vec<usize>> = HashMap::new();
     for c in (0..n).filter(|&c| src.size(c) >= SAME_MIN) {
-        if same.get(&c).is_some_and(|s| (2..=8).contains(&heads[&s.1].len())) {
+        if same.get(&c).is_some_and(|s| (2..=SAME_HEADS).contains(&heads[&s.1].len())) {
             continue;
         }
         by_size.entry(src.size(c)).or_default().push(c);
@@ -1590,10 +1594,10 @@ fn windowed<S: Source + ?Sized>(src: &S, c: usize) -> impl FnMut(Range<u64>) -> 
 /// What the data of a `.lzma`, `.xz` or Zstandard file holds (None where it does not decode), as
 /// [`together`] takes it: the CRC-32 and size of the members of an ar, tar or cpio archive
 /// ([`member_sums`]), or else of all of it.
-pub(crate) fn stream_sums(data: Option<Vec<u8>>) -> Vec<(u32, u64)> {
+pub(crate) fn stream_sums(data: Option<&[u8]>) -> Vec<(u32, u64)> {
     match data {
-        Some(data) if detect(&data).is_some_and(detect::Format::is_bundle) => member_sums(&data, 1),
-        Some(data) if data.len() as u64 >= MEMBER_MIN => vec![(aqr_common::crc32::hash(&data), data.len() as u64)],
+        Some(data) if detect(data).is_some_and(detect::Format::is_bundle) => member_sums(data, 1),
+        Some(data) if data.len() as u64 >= MEMBER_MIN => vec![(aqr_common::crc32::hash(data), data.len() as u64)],
         _ => Vec::new(),
     }
 }
@@ -1786,7 +1790,7 @@ fn analyze(
                 }
             }
         }
-        place_all(&mut f, children.into_iter().map(|c| c.1).collect(), sets, &nopt);
+        place_all(&mut f, children.into_iter().map(|c| c.1).collect(), sets);
     }
     // (what the files hold of each other, by what they are taken for: a file and the same in
     // an archive, both kept as they are; files none of which is recompressed too)

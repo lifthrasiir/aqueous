@@ -80,15 +80,22 @@ static LARGE: std::sync::LazyLock<Mutex<HashMap<Key, Vec<Ch>>>> = std::sync::Laz
 /// (by address), the range of a file it is.
 struct Recording {
     native: Native,
-    known: Vec<(usize, (usize, Range<usize>))>,
+    known: HashMap<usize, (usize, Range<usize>)>,
     seen: Mutex<Vec<(Key, Record)>>,
     limits: Mutex<Limits>,
+}
+
+impl Recording {
+    /// The file and range of it that `a` is, if it is one of the applications at the top.
+    fn file_of(&self, a: &Apply) -> Option<(usize, Range<usize>)> {
+        self.known.get(&(a as *const Apply as usize)).cloned()
+    }
 }
 
 impl Modules for Recording {
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
         let out = self.native.apply(a, inputs)?;
-        let file = self.known.iter().find(|(at, _)| std::ptr::addr_eq(a, *at as *const Apply)).map(|(_, f)| f.clone());
+        let file = self.file_of(a);
         let r = Record { outputs: vec![Ch::of(&out)], file };
         self.seen.lock().unwrap().push((key(a, inputs, &[a.len]), r));
         self.limit(a, &[a.len], inputs);
@@ -115,7 +122,7 @@ impl Modules for Recording {
         for t in &mut tees {
             t.finish().map_err(|f| aqr_formula::Error::new(format!("{}: {f:?}", a.module)))?;
         }
-        let file = self.known.iter().find(|(at, _)| std::ptr::addr_eq(a, *at as *const Apply)).map(|(_, f)| f.clone());
+        let file = self.file_of(a);
         let hashes: Vec<Ch> = tees.iter().map(|t| t.ch).collect();
         let r = Record { outputs: vec![out.ch], file };
         self.seen.lock().unwrap().push((key_of(a, &hashes, &[a.len]), r));
@@ -419,7 +426,7 @@ fn evaluate((f, d, at): Job, threads: usize, memo: &mut Memo) {
         native,
         known: match at {
             Where::File(i, at) => top.map(|(a, r)| (a, (i, at + r.start..at + r.end))).collect(),
-            Where::Elsewhere => Vec::new(),
+            Where::Elsewhere => HashMap::new(),
         },
         seen: Mutex::default(),
         limits: Mutex::default(),

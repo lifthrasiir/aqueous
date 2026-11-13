@@ -26,7 +26,7 @@
 //! image's formula holds a copy of the root's stream ([`REFERENCE`]), which [`resolve`] makes
 //! the root's own once the formulas are put together.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::sync::{Arc, OnceLock};
 
@@ -371,11 +371,11 @@ pub(crate) fn plan(files: &[&[u8]], threads: usize, min: usize) -> Remaps {
         return Remaps::default();
     }
     // (x86 code parsed once, for its signature and its matches)
-    let parsed = crate::sets::par_map(images.len(), threads, |i| match images[i].2 {
+    let parsed = aqr_common::pool::par_map(images.len(), threads, |i| match images[i].2 {
         Arch::X86(is64, _) => Some(x86::remap::Image::new(&images[i].3, is64)),
         _ => None,
     });
-    let signatures = crate::sets::par_map(images.len(), threads, |i| match &parsed[i] {
+    let signatures = aqr_common::pool::par_map(images.len(), threads, |i| match &parsed[i] {
         Some(image) => image.signature(),
         None => arm64::remap::signature(&images[i].3),
     });
@@ -384,7 +384,7 @@ pub(crate) fn plan(files: &[&[u8]], threads: usize, min: usize) -> Remaps {
         (Arch::X86(a, _), Arch::X86(b, _)) => a == b,
         (a, b) => std::mem::discriminant(&a) == std::mem::discriminant(&b),
     };
-    let rows = crate::sets::par_map(n, threads, |i| {
+    let rows = aqr_common::pool::par_map(n, threads, |i| {
         (0..n)
             .map(|j| match () {
                 _ if i == j => 1.0,
@@ -394,7 +394,7 @@ pub(crate) fn plan(files: &[&[u8]], threads: usize, min: usize) -> Remaps {
             .collect()
     });
     let (order, parents) = crate::sets::tree(&rows, MIN_ALIKE);
-    let raw = crate::sets::par_map(n, threads, |i| {
+    let raw = aqr_common::pool::par_map(n, threads, |i| {
         let p = parents[i]?;
         let (a, b) = (order[p], order[i]);
         Some(match (&parsed[a], &parsed[b]) {
@@ -435,19 +435,18 @@ pub(crate) fn plan(files: &[&[u8]], threads: usize, min: usize) -> Remaps {
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
-    let codes = crate::sets::par_map(roots.len(), threads, |r| {
+    let codes = aqr_common::pool::par_map(roots.len(), threads, |r| {
         let (va, code) = largest(roots[r]).expect("an image of code");
         Arc::new(arm64::encode(code, va).streams()[0].clone())
     });
     let code_of: HashMap<usize, Arc<Vec<u8>>> = roots.into_iter().zip(codes).collect();
+    let (piece, root_piece) = ((min * 2 / PIECE_SHARE).max(PIECE_MIN), (min * 2).max(PIECE_MIN));
     let mut deltas: HashMap<usize, Vec<Option<Delta>>> = HashMap::new();
     for i in (0..n).filter(|&i| matches!(images[order[i]].2, Arch::Arm64(_))) {
         let Some(root) = code_of.get(&root_of(i)) else { continue };
         let ((file, k, ..), (va, _)) = (&images[order[i]], largest(i).expect("an image of code"));
         let v = deltas.entry(files[*file].as_ptr() as usize).or_default();
         v.resize(v.len().max(k + 1), None);
-        let piece = (min * 2 / PIECE_SHARE).max(PIECE_MIN);
-        let root_piece = (min * 2).max(piece);
         v[*k] = Some(Delta { va, root: root.clone(), is_root: parents[i].is_none(), root_piece, piece });
     }
     // the sections of data of the Mach-O images of each tree, of either architecture: those of
@@ -459,8 +458,7 @@ pub(crate) fn plan(files: &[&[u8]], threads: usize, min: usize) -> Remaps {
         };
         image.data.into_iter().filter(|s| POINTERS.contains(&&s.0[..]) && s.2 >= PIECE_MIN).collect()
     };
-    let of: Vec<Vec<(Vec<u8>, usize, usize)>> = crate::sets::par_map(n, threads, sections);
-    let (piece, root_piece) = ((min * 2 / PIECE_SHARE).max(PIECE_MIN), (min * 2).max(PIECE_MIN));
+    let of: Vec<Vec<(Vec<u8>, usize, usize)>> = aqr_common::pool::par_map(n, threads, sections);
     let mut data: HashMap<usize, HashMap<usize, Delta>> = HashMap::new();
     for i in (0..n).filter(|&i| parents[i].is_some()) {
         let r = root_of(i);
@@ -529,7 +527,7 @@ fn against(f: &mut Formula, code: &[u8], d: &Delta, class: &'static str, delta: 
 /// slices moved; one with a slice not of such pieces is left as it is. (The copies are then
 /// sliced no more, for [`Formula::compact`] to drop.)
 pub(crate) fn resolve(f: &mut Formula) {
-    let copies: Vec<usize> = (0..f.streams.len()).filter(|&s| f.streams[s].class == REFERENCE).collect();
+    let copies: HashSet<usize> = (0..f.streams.len()).filter(|&s| f.streams[s].class == REFERENCE).collect();
     if copies.is_empty() {
         return;
     }
@@ -563,7 +561,7 @@ pub(crate) fn resolve(f: &mut Formula) {
             to.entry((s, a, l)).or_insert_with(|| of(f.streams[s].data.get(a as usize..)?.get(..l as usize)?));
         }
     });
-    let left: Vec<usize> = to.iter().filter(|(_, p)| p.is_none()).map(|(k, _)| k.0).collect();
+    let left: HashSet<usize> = to.iter().filter(|(_, p)| p.is_none()).map(|(k, _)| k.0).collect();
     f.map_slices(&mut |s, a, l| match to.get(&(s, a, l)) {
         Some(Some(ps)) if !left.contains(&s) => Node::concat(ps.clone()),
         _ => Node::slice(s, a, l),

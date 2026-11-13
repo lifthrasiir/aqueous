@@ -11,6 +11,7 @@
 //! The compressed blocks and solid data are kept as they are: NSIS's compressors are not
 //! reproduced (10gb's installers hold some tens of KB of LZMA).
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use crate::detect::{Format, detect};
@@ -68,19 +69,19 @@ pub(crate) fn sums(d: &[u8], blocks: &[Range<usize>], threads: usize) -> Vec<(u3
     let each = aqr_common::pool::par_map(blocks.len(), threads, |i| {
         let b = blocks[i];
         let mut sums = vec![(aqr_common::crc32::hash(b), b.len() as u64)];
-        let data = match format(b) {
-            Some(Format::Gzip) => crate::flate::gunzip(b, DATA_MAX),
-            Some(Format::Bzip2) => aqr_bz2::stream::decode(b, true, DATA_MAX).ok().map(|s| s.data),
-            Some(Format::Lzma) => aqr_lzma::formula::data(b),
-            Some(Format::Xz) => aqr_lzma::formula::data_xz(b),
+        let data: Option<Cow<[u8]>> = match format(b) {
+            Some(Format::Gzip) => crate::flate::gunzip(b, DATA_MAX).map(Cow::Owned),
+            Some(Format::Bzip2) => aqr_bz2::stream::decode(b, true, DATA_MAX).ok().map(|s| Cow::Owned(s.data)),
+            Some(Format::Lzma) => aqr_lzma::formula::data(b).map(Cow::Owned),
+            Some(Format::Xz) => aqr_lzma::formula::data_xz(b).map(Cow::Owned),
             Some(Format::Zip) => {
                 sums.extend(aqr_zip::zip::entry_sums(b));
                 None
             }
-            Some(f) if f.is_bundle() => Some(b.to_vec()),
+            Some(f) if f.is_bundle() => Some(Cow::Borrowed(b)),
             _ => None,
         };
-        sums.extend(crate::archive::stream_sums(data));
+        sums.extend(crate::archive::stream_sums(data.as_deref()));
         sums
     });
     each.into_iter().flatten().collect()

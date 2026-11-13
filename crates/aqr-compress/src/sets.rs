@@ -16,7 +16,7 @@
 //! git packs with their indexes are sets too ([`crate::git::sets`]), of no bound: an index
 //! takes its pack to decode.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use aqr_formula::{Formula, Node};
 use aqr_png::similar::Signature;
@@ -95,20 +95,23 @@ fn forests(files: &[&[u8]], threads: usize, limit: usize) -> Vec<(Vec<usize>, Ve
     if files.len() < 2 {
         return Vec::new();
     }
-    let signatures = par_map(files.len(), threads, |i| Signature::of(files[i]));
-    let mut keys: Vec<_> = signatures.iter().flatten().map(Signature::key).collect();
-    keys.sort_unstable();
-    keys.dedup();
+    let signatures = aqr_common::pool::par_map(files.len(), threads, |i| Signature::of(files[i]));
+    let mut groups: BTreeMap<_, Vec<usize>> = BTreeMap::new();
+    for (i, s) in signatures.iter().enumerate() {
+        if let Some(s) = s {
+            groups.entry(s.key()).or_default().push(i);
+        }
+    }
     let mut out = Vec::new();
-    for key in keys {
-        let group: Vec<usize> =
-            (0..files.len()).filter(|&i| signatures[i].as_ref().is_some_and(|s| s.key() == key)).collect();
+    for group in groups.into_values() {
         if group.len() < 2 {
             continue;
         }
         let sig = |i: usize| signatures[group[i]].as_ref().unwrap();
         let n = group.len();
-        let rows = par_map(n, threads, |i| (0..n).map(|j| if i == j { 1.0 } else { sig(i).alike(sig(j)) }).collect());
+        let rows = aqr_common::pool::par_map(n, threads, |i| {
+            (0..n).map(|j| if i == j { 1.0 } else { sig(i).alike(sig(j)) }).collect()
+        });
         let (order, parents) = tree(&rows, MIN_ALIKE);
         for (order, parents) in cut(&order, &parents, |i| files[group[i]].len(), limit) {
             if parents.iter().any(Option::is_some) {
@@ -233,6 +236,7 @@ pub(crate) fn tree(alike: &[Vec<f64>], min: f64) -> (Vec<usize>, Vec<Option<usiz
     let mut parent = vec![None; n];
     let mut done = vec![false; n];
     let mut best: Vec<(f64, usize)> = vec![(f64::NEG_INFINITY, 0); n];
+    let sums: Vec<f64> = alike.iter().map(|r| r.iter().sum()).collect();
     let mut roots = Vec::new();
     for _ in 0..n {
         let next = (0..n).filter(|&k| !done[k]).max_by(|&a, &b| best[a].0.total_cmp(&best[b].0)).unwrap();
@@ -241,10 +245,7 @@ pub(crate) fn tree(alike: &[Vec<f64>], min: f64) -> (Vec<usize>, Vec<Option<usiz
             next
         } else {
             // a new tree, from the one most like the rest
-            let r = (0..n)
-                .filter(|&k| !done[k])
-                .max_by(|&a, &b| alike[a].iter().sum::<f64>().total_cmp(&alike[b].iter().sum()))
-                .unwrap();
+            let r = (0..n).filter(|&k| !done[k]).max_by(|&a, &b| sums[a].total_cmp(&sums[b])).unwrap();
             roots.push(r);
             r
         };
@@ -298,11 +299,6 @@ fn cut(
         piece.1.push(parents[i].filter(|&p| p >= start).map(|p| p - start));
     }
     out
-}
-
-/// `f(0..n)` on up to `threads` threads, in order.
-pub(crate) fn par_map<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
-    aqr_common::pool::par_map(n, threads, f)
 }
 
 #[cfg(test)]
