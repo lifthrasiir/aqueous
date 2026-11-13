@@ -497,7 +497,6 @@ pub fn texture(o: &[u8], engine: (u32, u32), big: bool) -> Option<Texture> {
 /// aqr-disk's formula has it), the other objects contents of their kinds by `kind`, a stream
 /// each. None where no texture's blocks are in it (the file is then aqr-disk's formula).
 pub fn encode_with(d: &[u8], kind: fn(&[u8]) -> aqr_formula::Kind, threads: usize) -> Option<aqr_formula::Formula> {
-    use aqr_formula::{Formula, Kind, Node};
     let o = objects(d)?;
     let mut objects: Vec<(Object, Option<Texture>)> = o
         .objects
@@ -511,54 +510,25 @@ pub fn encode_with(d: &[u8], kind: fn(&[u8]) -> aqr_formula::Kind, threads: usiz
         return None;
     }
     objects.sort_by_key(|x| x.0.extent.start);
-    let mut f = Formula::default();
-    f.push_content("raw", Kind::Unknown, Vec::new());
-    f.push(aqr_disk::formula::rest("unity-assets"), Vec::new());
-    let (mut rest, mut parts, mut at) = (Vec::new(), Vec::new(), 0);
-    let kept = |rest: &mut Vec<u8>, parts: &mut Vec<Node>, b: &[u8]| {
-        if !b.is_empty() {
-            parts.push(Node::slice(1, rest.len() as u64, b.len() as u64));
-            rest.extend_from_slice(b);
-        }
-    };
+    let mut p = super::Pieces::new(d, "unity-assets", kind);
     for (ob, t) in &objects {
         let r = ob.extent.clone();
         // (objects overlapping one before are the rest's)
-        if r.start < at {
+        if r.start < p.at() {
             continue;
         }
-        kept(&mut rest, &mut parts, &d[at..r.start]);
-        let b = &d[r.clone()];
-        let app = t.as_ref().and_then(|t| {
+        let pixels = t.as_ref().and_then(|t| {
             let Data::Inline(i) = &t.data else { return None };
-            Some((i.clone(), apply_pixels(&mut f, &b[i.clone()], &t.pixels, threads)?))
+            let i = r.start + i.start..r.start + i.end;
+            Some((i.clone(), apply_pixels(&mut p.f, &d[i], &t.pixels, threads)?))
         });
-        match app {
-            Some((i, node)) => {
-                kept(&mut rest, &mut parts, &b[..i.start]);
-                parts.push(node);
-                kept(&mut rest, &mut parts, &b[i.end..]);
-            }
-            None => {
-                let name = format!("{}.{}", ob.id, extension(ob.class));
-                let k = kind(name.as_bytes());
-                let class = match k {
-                    Kind::Unknown => "raw".to_string(),
-                    Kind::Format(name) => format!("unity-assets/{name}"),
-                    k => format!("unity-assets/{k}"),
-                };
-                parts.push(f.push_content(class, k, b.to_vec()));
-            }
+        match pixels {
+            Some((i, node)) => p.node(node, i),
+            None => p.content(format!("{}.{}", ob.id, extension(ob.class)).as_bytes(), r),
         }
-        at = r.end;
     }
-    kept(&mut rest, &mut parts, &d[at..]);
-    f.streams[1].data = rest.into();
-    f.root = Node::concat(parts);
-    debug_assert_eq!(f.root.len(), d.len() as u64);
-    Some(f)
+    Some(p.finish())
 }
-
 /// The textures whose blocks are in resource file `name` (a `.resS`, by its name: the last part
 /// of the textures' paths) of serialized file `d`: where their blocks are in it, their layouts.
 pub fn streamed(d: &[u8], name: &[u8]) -> Vec<(std::ops::Range<u64>, Pixels)> {
@@ -589,35 +559,33 @@ pub fn encode_resource(
     textures: &[(std::ops::Range<u64>, Pixels)],
     threads: usize,
 ) -> Option<aqr_formula::Formula> {
-    use aqr_formula::{Formula, Kind, Node};
-    let mut t: Vec<_> = textures.iter().filter(|(r, _)| r.end <= d.len() as u64).collect();
+    let mut p = super::Pieces::new(d, "unity-ress", |_| aqr_formula::Kind::Unknown);
+    (resource_pieces(&mut p, 0..d.len(), textures, threads) > 0).then(|| p.finish())
+}
+
+/// The pieces of the resource file at `at` of what `p` makes (a file, or a node of a bundle)
+/// of the textures `textures` (their places in it): their pixels rebuilt ([`apply_pixels`]), the
+/// rest the rest's. Textures overlapping one before, or past its end, are the rest's. Returns how
+/// many are rebuilt.
+pub fn resource_pieces(
+    p: &mut super::Pieces,
+    at: std::ops::Range<usize>,
+    textures: &[(std::ops::Range<u64>, Pixels)],
+    threads: usize,
+) -> usize {
+    let mut t: Vec<_> = textures.iter().filter(|(r, _)| r.end <= at.len() as u64).collect();
     t.sort_by_key(|(r, _)| r.start);
-    let mut f = Formula::default();
-    f.push_content("raw", Kind::Unknown, Vec::new());
-    f.push(aqr_disk::formula::rest("unity-ress"), Vec::new());
-    let (mut rest, mut parts, mut at, mut made) = (Vec::new(), Vec::new(), 0, 0);
-    let kept = |rest: &mut Vec<u8>, parts: &mut Vec<Node>, b: &[u8]| {
-        if !b.is_empty() {
-            parts.push(Node::slice(1, rest.len() as u64, b.len() as u64));
-            rest.extend_from_slice(b);
-        }
-    };
+    let mut made = 0;
     for (r, pixels) in t {
-        let r = r.start as usize..r.end as usize;
-        if r.start < at {
+        let r = at.start + r.start as usize..at.start + r.end as usize;
+        if r.start < p.at() {
             continue;
         }
-        let Some(node) = apply_pixels(&mut f, &d[r.clone()], pixels, threads) else { continue };
-        kept(&mut rest, &mut parts, &d[at..r.start]);
-        parts.push(node);
-        (at, made) = (r.end, made + 1);
+        let d = p.data();
+        let Some(node) = apply_pixels(&mut p.f, &d[r.clone()], pixels, threads) else { continue };
+        p.node(node, r);
+        made += 1;
     }
-    if made == 0 {
-        return None;
-    }
-    kept(&mut rest, &mut parts, &d[at..]);
-    f.streams[1].data = rest.into();
-    f.root = Node::concat(parts);
-    debug_assert_eq!(f.root.len(), d.len() as u64);
-    Some(f)
+    p.rest_to(at.end);
+    made
 }

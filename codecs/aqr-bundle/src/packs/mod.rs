@@ -195,3 +195,75 @@ fn zlib_inflate(d: &[u8], max: usize) -> Option<Vec<u8>> {
     let flat = aqr_flate::inflate::parse_segments_max(&d[2..], usize::MAX, max, 0, false).ok()?;
     Some(flat.data.to_vec())
 }
+
+/// The formula of a pack of its own (not aqr-disk's, where its contents are applications as well):
+/// the pack as pieces in order, each a content (a stream of its kind), an application, or bytes of
+/// the rest, the stream `{prefix}/rest`, stream 1, as aqr-disk's formula has it (stream 0 `raw`).
+pub struct Pieces<'a> {
+    d: &'a [u8],
+    pub f: Formula,
+    prefix: &'static str,
+    kind: fn(&[u8]) -> Kind,
+    rest: Vec<u8>,
+    parts: Vec<aqr_formula::Node>,
+    at: usize,
+}
+
+impl<'a> Pieces<'a> {
+    pub fn new(d: &'a [u8], prefix: &'static str, kind: fn(&[u8]) -> Kind) -> Pieces<'a> {
+        let mut f = Formula::default();
+        f.push_content("raw", Kind::Unknown, Vec::new());
+        f.push(aqr_disk::formula::rest(prefix), Vec::new());
+        Pieces { d, f, prefix, kind, rest: Vec::new(), parts: Vec::new(), at: 0 }
+    }
+
+    /// Where the pieces are up to.
+    pub fn at(&self) -> usize {
+        self.at
+    }
+
+    /// The pack's bytes.
+    pub fn data(&self) -> &'a [u8] {
+        self.d
+    }
+
+    /// The bytes up to `end` the rest's.
+    pub fn rest_to(&mut self, end: usize) {
+        if end > self.at {
+            let b = &self.d[self.at..end];
+            self.parts.push(aqr_formula::Node::slice(1, self.rest.len() as u64, b.len() as u64));
+            self.rest.extend_from_slice(b);
+            self.at = end;
+        }
+    }
+
+    /// The bytes of `r` (from where the pieces are) a content of the kind of `name`.
+    pub fn content(&mut self, name: &[u8], r: std::ops::Range<usize>) {
+        self.rest_to(r.start);
+        let k = (self.kind)(name);
+        let class = match k {
+            Kind::Unknown => "raw".to_string(),
+            Kind::Format(n) => format!("{}/{n}", self.prefix),
+            k => format!("{}/{k}", self.prefix),
+        };
+        let node = self.f.push_content(class, k, self.d[r.clone()].to_vec());
+        self.parts.push(node);
+        self.at = r.end;
+    }
+
+    /// `node` (of the formula, of `r`'s bytes) in place of the bytes of `r`.
+    pub fn node(&mut self, node: aqr_formula::Node, r: std::ops::Range<usize>) {
+        self.rest_to(r.start);
+        self.parts.push(node);
+        self.at = r.end;
+    }
+
+    /// The formula, the bytes left the rest's.
+    pub fn finish(mut self) -> Formula {
+        self.rest_to(self.d.len());
+        self.f.streams[1].data = self.rest.into();
+        self.f.root = aqr_formula::Node::concat(self.parts);
+        debug_assert_eq!(self.f.root.len(), self.d.len() as u64);
+        self.f
+    }
+}

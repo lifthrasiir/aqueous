@@ -108,3 +108,41 @@ pub fn files(d: &[u8]) -> Option<Vec<File>> {
     }
     Some(files)
 }
+
+/// The formula of bundle `d` where any node of a resource file (`NAME.resS`) has textures that
+/// its serialized file (the node `NAME`) streams from it: their pixels rebuilt
+/// (`unity_assets::resource_pieces`), the other nodes contents of their kinds by `kind` (the
+/// serialized files taken apart in turn, as aqr-compress takes contents), the rest the stream
+/// `unity-bundle/rest`. None where no node has such textures (the bundle is then aqr-disk's
+/// formula).
+pub fn encode_with(d: &[u8], kind: fn(&[u8]) -> aqr_formula::Kind, threads: usize) -> Option<aqr_formula::Formula> {
+    use super::unity_assets;
+    let mut nodes = files(d)?;
+    let textures: Vec<_> = nodes
+        .iter()
+        .map(|f| {
+            let base = f.name.strip_suffix(b".resS")?;
+            let cab = nodes.iter().find(|g| g.name == base)?;
+            let t = unity_assets::streamed(&d[cab.extents[0].clone()], &f.name);
+            (!t.is_empty()).then_some(t)
+        })
+        .collect();
+    if textures.iter().all(Option::is_none) {
+        return None;
+    }
+    let mut order: Vec<usize> = (0..nodes.len()).collect();
+    order.sort_by_key(|&i| nodes[i].extents[0].start);
+    let mut p = super::Pieces::new(d, "unity-bundle", kind);
+    for i in order {
+        let r = nodes[i].extents[0].clone();
+        // (nodes overlapping one before are the rest's)
+        if r.start < p.at() {
+            continue;
+        }
+        match &textures[i] {
+            Some(t) => _ = unity_assets::resource_pieces(&mut p, r, t, threads),
+            None => p.content(&std::mem::take(&mut nodes[i].name), r),
+        }
+    }
+    Some(p.finish())
+}

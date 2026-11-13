@@ -108,50 +108,23 @@ pub fn waves(d: &[u8]) -> Option<Vec<(File, u32)>> {
 /// block) the stream `xact-xwb/rest`, stream 1, as aqr-disk's formula has it. None where no wave
 /// is of such ADPCM (the bank is then aqr-disk's formula).
 pub fn encode_with(d: &[u8], kind: fn(&[u8]) -> aqr_formula::Kind) -> Option<aqr_formula::Formula> {
-    use aqr_formula::{Formula, Kind, Node};
     let mut waves = waves(d)?;
     if !waves.iter().any(|w| adpcm_layout(w.1).is_some()) {
         return None;
     }
     waves.sort_by_key(|w| w.0.extents[0].start);
-    let mut f = Formula::default();
-    f.push_content("raw", Kind::Unknown, Vec::new());
-    f.push(aqr_disk::formula::rest("xact-xwb"), Vec::new());
-    let (mut rest, mut parts, mut at) = (Vec::new(), Vec::new(), 0);
-    let kept = |rest: &mut Vec<u8>, parts: &mut Vec<Node>, b: &[u8]| {
-        if !b.is_empty() {
-            parts.push(Node::slice(1, rest.len() as u64, b.len() as u64));
-            rest.extend_from_slice(b);
-        }
-    };
+    let mut p = super::Pieces::new(d, "xact-xwb", kind);
     for (file, format) in &waves {
         let r = file.extents[0].clone();
         // (waves overlapping one before are the rest's)
-        if r.start < at {
+        if r.start < p.at() {
             continue;
         }
-        kept(&mut rest, &mut parts, &d[at..r.start]);
-        let w = &d[r.clone()];
-        match adpcm_layout(*format).and_then(|l| aqr_msadpcm::formula::blocks(&mut f, l, w)) {
-            Some((node, used)) => {
-                parts.push(node);
-                kept(&mut rest, &mut parts, &w[used..]);
-            }
-            None => {
-                let k = kind(&file.name);
-                let class = match k {
-                    Kind::Unknown => "raw".to_string(),
-                    Kind::Format(name) => format!("xact-xwb/{name}"),
-                    k => format!("xact-xwb/{k}"),
-                };
-                parts.push(f.push_content(class, k, w.to_vec()));
-            }
+        match adpcm_layout(*format).and_then(|l| aqr_msadpcm::formula::blocks(&mut p.f, l, &d[r.clone()])) {
+            // (a partial block after the whole ones the rest's)
+            Some((node, used)) => p.node(node, r.start..r.start + used),
+            None => p.content(&file.name, r),
         }
-        at = r.end;
     }
-    kept(&mut rest, &mut parts, &d[at..]);
-    f.streams[1].data = rest.into();
-    f.root = Node::concat(parts);
-    debug_assert_eq!(f.root.len(), d.len() as u64);
-    Some(f)
+    Some(p.finish())
 }

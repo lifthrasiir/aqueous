@@ -313,3 +313,57 @@ fn textures() {
     assert!(eval(&f) == ress);
     assert!(encode_resource(&ress[..1100], &t, 1).is_none());
 }
+
+/// A UnityFS bundle (format 7, its table stored, one stored block) of `nodes` (path, bytes).
+fn bundle(nodes: &[(&str, &[u8])]) -> Vec<u8> {
+    let data: Vec<u8> = nodes.iter().flat_map(|n| n.1.iter().copied()).collect();
+    let mut t = vec![0u8; 16];
+    t.extend(1u32.to_be_bytes());
+    t.extend((data.len() as u32).to_be_bytes());
+    t.extend((data.len() as u32).to_be_bytes());
+    t.extend(0u16.to_be_bytes());
+    t.extend((nodes.len() as u32).to_be_bytes());
+    let mut at = 0u64;
+    for (name, b) in nodes {
+        t.extend(at.to_be_bytes());
+        t.extend((b.len() as u64).to_be_bytes());
+        t.extend(4u32.to_be_bytes());
+        t.extend(name.as_bytes());
+        t.push(0);
+        at += b.len() as u64;
+    }
+    let mut d = b"UnityFS\0".to_vec();
+    d.extend(7u32.to_be_bytes());
+    d.extend(b"5.x.x\0" as &[u8]);
+    d.extend(b"2019.4.1f1\0" as &[u8]);
+    let size_at = d.len();
+    d.extend([0; 8]);
+    d.extend((t.len() as u32).to_be_bytes());
+    d.extend((t.len() as u32).to_be_bytes());
+    d.extend(0x40u32.to_be_bytes());
+    d.resize(d.len().next_multiple_of(16), 0);
+    d.extend(t);
+    d.extend(data);
+    let n = d.len() as u64;
+    d[size_at..size_at + 8].copy_from_slice(&n.to_be_bytes());
+    d
+}
+
+/// A bundle's resource node, of the textures its serialized node streams from it: their blocks
+/// rebuilt by aqr-tex, the bundle given back; of no texture streamed, no such formula.
+#[test]
+fn bundle_resources() {
+    let blocks = bc1(64, 32, 7);
+    let n = blocks.len() as u32;
+    let path = "archive:/CAB-0123/CAB-0123.resS";
+    let obj = texture2d(64, 32, 10, 7, n, &[], Some((16, n, path)));
+    let (cab, _) = build(21, false, true, &[(1, 1, b"GameObject"), (2, 28, &obj)]);
+    let mut ress = vec![0x44u8; 16];
+    ress.extend(&blocks);
+    let d = bundle(&[("CAB-0123", &cab), ("CAB-0123.resS", &ress)]);
+    let f = aqr_bundle::packs::unity::encode_with(&d, |_| aqr_formula::Kind::Unknown, 1).unwrap();
+    assert_eq!(f.applies().len(), 1);
+    assert!(eval(&f) == d);
+    let plain = bundle(&[("CAB-0123", &cab), ("other.resS", &ress)]);
+    assert!(aqr_bundle::packs::unity::encode_with(&plain, |_| aqr_formula::Kind::Unknown, 1).is_none());
+}

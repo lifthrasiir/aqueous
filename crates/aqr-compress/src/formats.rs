@@ -619,9 +619,13 @@ formats! {
     /// Unity's AssetBundle (`UnityFS`, aqr-bundle's `packs`): the nodes in blocks stored as they
     /// are, known by its header: at the start of data only.
     UnityBundle = "unity-bundle" {
-        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::UnityBundle, d)),
-        // slices of the input, and the blocks' table decompressed
-        heap: 0.0,
+        recompressor: Cx(|d, _, opt, _, _| {
+            aqr_bundle::packs::unity::encode_with(d, crate::kind_by_name, opt.threads)
+                .or_else(|| crate::bundle::pack(aqr_bundle::packs::Pack::UnityBundle, d))
+        }),
+        // slices of the input, the blocks' table decompressed; the textures of its resource files'
+        // coded streams, a texture coded at a time (aqr-tex takes 12 times one's)
+        heap: 3.0,
         bundle: true,
     }
     /// Unreal Engine's `.pak` (aqr-bundle's `packs`), known by its footer: all of the data

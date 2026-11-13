@@ -71,7 +71,9 @@ engines' (Godot's and Wwise's `.pck`, Unreal's and Quake's `.pak`):
   executable is not looked for.
 - `unity-bundle`: Unity's AssetBundles (`UnityFS`, formats 6 to 8), their table of blocks stored
   or of LZ4: the nodes (serialized files, `.resS`, `.resource`) that lie in blocks stored as they
-  are. Those in blocks of LZ4 or LZMA are the rest.
+  are. Those in blocks of LZ4 or LZMA are the rest. Where a node of a resource file
+  (`CAB-….resS`) has textures its serialized node streams from it, the bundle is a formula of its
+  own (`unity::encode_with`): their pixels rebuilt as a `.resS` file's are.
 - `unreal-pak`: Unreal Engine 4 and 5's `.pak`, versions 1 to 11 (the entries encoded in bits
   of 4.26 on, named by the full directory index). Stored entries and those of zlib or gzip (as
   their compressed blocks, which aqr-compress's scan finds) are files; those of other methods
