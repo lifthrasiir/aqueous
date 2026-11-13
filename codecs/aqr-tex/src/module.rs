@@ -83,3 +83,13 @@ pub fn plan_etc(params: &[u8], inputs: &[u64], initial: u64, len: u64) -> Option
 pub fn decode_etc(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
     decode_of::<crate::etcm::Etc>(params, inputs, len, threads)
 }
+
+/// `pvrtc-recons`'s plan ([`plan_of`]).
+pub fn plan_pvrtc(params: &[u8], inputs: &[u64], initial: u64, len: u64) -> Option<(u64, u64)> {
+    plan_of::<crate::pvrtc::Pvrtc>(params, inputs, initial, len)
+}
+
+/// `pvrtc-recons` ([`decode_of`]).
+pub fn decode_pvrtc(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
+    decode_of::<crate::pvrtc::Pvrtc>(params, inputs, len, threads)
+}

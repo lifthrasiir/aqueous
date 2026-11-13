@@ -11,7 +11,9 @@ rebuilds the blocks of a texture of a group of block formats from its coded form
   its indices as a block's around it or before, or new), its indices as `bcn-recons`'s;
 - `bc6h-recons` (§12): BC6H, as `bc7-recons`;
 - `etc-recons` (§13): ETC1, ETC2 and EAC, each part of a block (RGB, EAC) as `bc7-recons`'s
-  blocks, the fields of its mode by the pixels predicted, its indices by a ladder of its levels.
+  blocks, the fields of its mode by the pixels predicted, its indices by a ladder of its levels;
+- `pvrtc-recons` (§14): PVRTC1, a surface's colours (as `bc7-recons`'s blocks, new ones by the
+  words around) then its modulation (by the images between which it blends).
 
 The document is meant to be complete: an implementation of the modules can be written from it
 alone (with the partition tables of BC7 and the bit layouts of BC6H, which are their formats').
@@ -33,6 +35,7 @@ Contents:
 11. [`bc7-recons`](#11-bc7-recons)
 12. [`bc6h-recons`](#12-bc6h-recons)
 13. [`etc-recons`](#13-etc-recons)
+14. [`pvrtc-recons`](#14-pvrtc-recons)
 
 ## 1. Conventions
 
@@ -53,7 +56,7 @@ Contents:
 
   ```text
   u8      format   1: BC1, 2: BC2, 3: BC3, 4: BC4, 5: BC5 (8: BC7, of §11; 6, 7: BC6H, of §12;
-                   16 to 23: ETC and EAC, of §13)
+                   16 to 23: ETC and EAC, of §13; 32, 33: PVRTC1, of §14)
   varint  W        the width of the largest mipmap, in pixels, 1 to 65536
   varint  H        its height, 1 to 65536
   varint  M        the mipmaps of a layer, 1 to bitlen(max(W, H))
@@ -729,3 +732,97 @@ the level `tree_3(idx[((c·17 + a)·17 + b)·8 …])`, c = 0 (span of the ladder
 - KTX files of OpenGL's internal formats 0x8D64 (ETC1), 0x9274–0x9279 (ETC2) and 0x9270–0x9273
   (EAC), KTX 2 of Vulkan's 147–156, PVR 3 of pixel formats 6 (ETC1) and 22–26 (signed EAC by its
   channel type), as §11.6; Unity's textures of formats 34 (ETC1), 41–47 (EAC and ETC2) by aqr-bundle.
+
+## 14. `pvrtc-recons`
+
+- **Module**: name `pvrtc-recons`, version 1.
+- **Params**: the layout of §2, of format 32 (PVRTC1 of 4 bits a pixel: words of 4×4 pixels) or
+  33 (of 2 bits: 8×4), its sides powers of two. A surface is of at least 2 × 2 words.
+- **Resources**, **inputs** and **output**: as §2's.
+
+The walk is §5's, but every surface is one stripe (its words depend on those around them); of
+one part, the word, its contexts and cache those of §14.2 to §14.4; the planes §6's, of 4
+channels (R, G, B, A). A surface's words are taken row by row (word (X, Y) of a surface of w × h
+words), each at the offset of its *reflected Morton order* in the output: the bits of X and Y
+interleaved from the lowest, Y's the lower of each pair, as far as the bits of min(w, h) − 1 go,
+then the rest of X's (or Y's) above them.
+
+### 14.1 Words
+
+A word is 8 bytes, little-endian. Bit 32 is the modulation flag M; colour A is bits 33–47, colour
+B bits 48–63, each of a top bit 1 (opaque: A of R 5, G 5, B 4 bits; B of 5, 5, 5) or 0
+(translucent: alpha 3 bits, then A of R 4, G 4, B 3; B of 4, 4, 4), its channels from the top. As
+ARGB 4555: alpha `a·2` (15 opaque); a channel of 3 bits `c·4 + c/2`, of 4 `c·2 + c/8`, of 5 as it
+is.
+
+The images A and B at pixel (x, y), of footprint (fw, 4): of `XL = floor((x − fw/2) / fw)`, `YL =
+floor((y − 2) / 4)`, `xr = x − fw/2 − fw·XL`, `yr = y − 2 − 4·YL`, and the words at (XL, YL), (XL
++ 1, YL), (XL, YL + 1), (XL + 1, YL + 1) (wrapping at the sides), each channel `C = c00·(fw −
+xr)·(4 − yr) + c10·xr·(4 − yr) + c01·(fw − xr)·yr + c11·xr·yr` of the colour's in each word, as 8
+bits: of 4 bits a pixel, alpha `C + C/16` and the others `C/2 + C/64`; of 2, alpha `C/2 + C/32`
+and the others `C/4 + C/128`. A pixel of weight w is `(A·(8 − w) + B·w) / 8` of each channel;
+alpha 0 where it is punch-through.
+
+Of 4 bits a pixel, pixel p = 4y + x's 2-bit value at bits 2p, 2p + 1: its weight, of M = 0, 0,
+3, 5, 8; of M = 1, 0, 4, 4 (punch-through), 8. Of 2 bits, pixel p = 8y + x: of M = 0, bit p, of
+weight 0 or 8. Of M = 1, bit 0 is the *mode* (0: of the four neighbours; 1: of the two of a way,
+vertical where bit 20 is 1); the pixels of x + y even are *stored*, the k-th (k = (8y + x) / 2)
+at bits 2k, 2k + 1, but pixel (0, 0) at bit 1 alone and, of mode 1, (4, 2) at bit 21 alone (a bit
+alone repeated as two), of weights 0, 3, 5, 8 (of none punch-through); a pixel not stored, the
+mean of the weights of its neighbours (`(w1 + w2 + w3 + w4 + 2) / 4`, or of a way `(w1 + w2 + 1) /
+2`), each in the word it is in (wrapping at the sides): stored there, or of weight 0 or 8 by its
+bit of a word of M = 0.
+
+### 14.2 The first pass: colours
+
+The words in turn: §11.2's choices, the head of a word its bits 32–63; a word taken whole is
+done; a head taken is its colours; else new colours (§14.3). Its modulation is 0 until the second
+pass.
+
+### 14.3 New colours
+
+L, U and UL the words to the left, above and above to the left (of the surface).
+
+1. M: `flag[lm·3 + um]`, lm and um those of L and U (2 where there is none).
+2. Of colour A then B (k = 0, 1): the opacity `opaque[(k·3 + o)·2 + (k = 1 ? A's opacity : 0)]`,
+   o L's opacity of the colour (2 where there is none); then its channels in the order G, R, B, A
+   (slots 0 to 3; A skipped where opaque), of n bits:
+
+   ```text
+   N      = the channel of L's, U's and UL's colour k (ARGB 4555), of `full` 4 bits (A) or 5
+   pred   = MED of them where all three are; else L's, else U's; else 2^(full − 1)
+   act    = min(|L − U|, 3) where both are, else 3
+   p      = pred >> (full − n), plus rG (the residual of G) of R and B
+   before = 0 of G, class(rG) (§11.4) of the others
+   ctx    = (((k·2 + opaque)·4 + slot)·4 + act)·4 + before
+   v      = token(res[ctx·16 …], res_next[ctx·16 …])                 (256 pairs)
+   ```
+
+   the residual r the value of [−2^(n − 1), 2^(n − 1)) congruent to unzz(v), the channel `(p +
+   r) mod 2^n`.
+
+### 14.4 The second pass: modulation
+
+The words in turn: of a word not taken whole, its modulation; then its pixels set in the plane
+(of 2 bits a pixel, those not stored by the mean of the weights of their neighbours of the mode
+within the word, `(Σ + n/2) / n` of the n there are); and it is used (the cache's key of its
+head, its bytes). After the last, of 2 bits a pixel, every pixel of the plane
+set as §14.1 tells.
+
+Of 2 bits of M = 1, the mode `bits2[0]`, and of mode 1 the way `bits2[1]`. Then each pixel p in
+turn (but those not stored), at (x, y), of its value's bits n (1 or 2) and *kind*: of 4 bits a
+pixel, M; of 2, of M = 0, 2; else 3. Of the images A and B there, `l2 = Σ (B_c − A_c)²` over
+ARGB; Q1 and Q2 as §11.5 (the coarse and causal predictions, or the pixels above and to the left),
+each of bucket `clamp(floor((Σ (Q_c − A_c)·(B_c − A_c)·8 + floor(l2 / 2)) / l2) + 1, 0, 10)`, or
+11 where l2 = 0 or there is none; contrast 0 (l2 ≤ 300), 1 (≤ 3000) or 2. The value by
+`tree_n(modu[(((kind·3 + contrast)·12 + a)·12 + c)·4 …])`; the pixel set in the plane (§14.1, of
+2 bits a pixel of its weight alone).
+
+### 14.5 Encoding *(encoder)*
+
+- PVR 3 files of pixel formats 0 to 3, KTX of OpenGL's internal formats 0x8C00–0x8C03, KTX 2 of
+  Vulkan's 1000054000, 1000054001, 1000054004 and 1000054005, as §11.6; Unity's textures of
+  formats 30 to 33 by aqr-bundle.
+- The pixels of 2 bits a pixel of M = 1 are PowerVR's decoders' (and texture2ddecoder's): their
+  stored values of weights 0, 3, 5, 8, none punch-through, which the Khronos description has as
+  those of 4 bits of M = 1.

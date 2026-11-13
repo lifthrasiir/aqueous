@@ -442,6 +442,11 @@ path = "src/bin/etc-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]
+name = "pvrtc-recons"
+path = "src/bin/pvrtc-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
 name = "mp3-recons"
 path = "src/bin/mp3-recons.rs"
 required-features = ["wasm"]

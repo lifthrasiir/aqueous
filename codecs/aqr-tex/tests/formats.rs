@@ -582,3 +582,77 @@ fn eac_smooth_codes_small() {
     eprintln!("eac smooth: {} -> {n} (zstd -19 {z}) {cost:?}", blocks.len());
     assert!(n * 10 < z * 9, "{n} against zstd's {z}");
 }
+
+#[test]
+fn pvrtc_layouts() {
+    for two in [false, true] {
+        let format = Format::Pvrtc { two };
+        for (size, mips, layers) in [((8, 8), 1, 1), ((64, 32), 6, 2), ((16, 128), 8, 1), ((256, 256), 2, 1)] {
+            let l = Layout { format, width: size.0, height: size.1, mips, layers };
+            let b = etc_random(l.len() as usize / 8, 8, size.0 as u64 + two as u64);
+            round(&l, &b);
+        }
+    }
+}
+
+/// PVRTC1 blocks of 4 bits a pixel (in Morton order) of `img` (`w` × `h`, powers of two, at
+/// least 8): of each word, colour A the least of each channel of its pixels (opaque, RGB 554), B
+/// the most (RGB 555), each pixel's modulation the weight nearest it (of flag 0).
+fn pvrtc_encode(img: &[[u8; 4]], w: usize, h: usize) -> Vec<u8> {
+    use aqr_tex::pvrtc;
+    let (bw, bh) = (w / 4, h / 4);
+    let mut words = vec![0u64; bw * bh];
+    for by in 0..bh {
+        for bx in 0..bw {
+            let px: Vec<[u8; 4]> = (0..16).map(|p| img[(by * 4 + p / 4) * w + bx * 4 + p % 4]).collect();
+            let lo: [u64; 3] = std::array::from_fn(|c| px.iter().map(|v| v[c]).min().unwrap() as u64);
+            let hi: [u64; 3] = std::array::from_fn(|c| px.iter().map(|v| v[c]).max().unwrap() as u64);
+            let a = 1 << 15 | (lo[0] >> 3) << 10 | (lo[1] >> 3) << 5 | (lo[2] >> 4) << 1;
+            let b = 1 << 15 | (hi[0] >> 3) << 10 | (hi[1] >> 3) << 5 | hi[2] >> 3;
+            words[by * bw + bx] = b << 48 | a << 32;
+        }
+    }
+    let colours = words.clone();
+    for by in 0..bh {
+        for bx in 0..bw {
+            let mut m = 0u64;
+            for p in 0..16 {
+                let (x, y) = (bx * 4 + p % 4, by * 4 + p / 4);
+                let ab = pvrtc::images(&colours, (bw, bh), 4, x, y);
+                let v = img[y * w + x];
+                let err = |k: usize| {
+                    let c = pvrtc::blend(&ab, pvrtc::WEIGHTS[0][k], false);
+                    (0..3).map(|ch| (c[ch] as i32 - v[ch] as i32).pow(2)).sum::<i32>()
+                };
+                m |= ((0..4).min_by_key(|&k| err(k)).unwrap() as u64) << (2 * p);
+            }
+            words[by * bw + bx] |= m;
+        }
+    }
+    let mut out = vec![0u8; bw * bh * 8];
+    for by in 0..bh {
+        for bx in 0..bw {
+            let k = pvrtc::morton(bx, by, bw, bh) * 8;
+            out[k..k + 8].copy_from_slice(&words[by * bw + bx].to_le_bytes());
+        }
+    }
+    out
+}
+
+#[test]
+fn pvrtc_smooth_codes_small() {
+    let (w, h) = (128, 128);
+    let (mut blocks, mut mips, mut mw, mut mh) = (vec![], 0, w, h);
+    while mips < 5 {
+        blocks.extend(pvrtc_encode(&image(mw, mh, (1 << mips) as f64), mw, mh));
+        mips += 1;
+        (mw, mh) = (mw / 2, mh / 2);
+    }
+    let l = Layout { format: Format::Pvrtc { two: false }, width: w as u32, height: h as u32, mips, layers: 1 };
+    assert_eq!(l.len() as usize, blocks.len());
+    let n = round(&l, &blocks);
+    let z = zstd::bulk::compress(&blocks, 19).unwrap().len();
+    let cost = texture::encode_any(&l, &blocks, 1).2.map(|c| c / 65536 / 8);
+    eprintln!("pvrtc smooth: {} -> {n} (zstd -19 {z}) {cost:?}", blocks.len());
+    assert!(n * 10 < z * 9, "{n} against zstd's {z}");
+}

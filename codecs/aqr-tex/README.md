@@ -3,7 +3,7 @@
 Block-compressed textures rebuilt bit for bit from one coded stream (`FORMAT.md`), a module for
 each group of formats: `bcn-recons` of BC1 to BC5 (DXT1–DXT5, ATI1, ATI2), `bc7-recons` of BC7,
 `bc6h-recons` of BC6H, `etc-recons` of ETC1, ETC2 (RGB, RGBA, punch-through alpha) and EAC (R11,
-RG11, signed or not).
+RG11, signed or not), `pvrtc-recons` of PVRTC1 (4 and 2 bits a pixel).
 The containers are taken apart around them: DDS files (the header and whatever follows the blocks
 kept as they are), and KTX, KTX 2, PVR (version 3) and astcenc's `.astc` files (the bytes between
 their surfaces kept, the module's output cut into the surfaces where the file has them), the
@@ -12,8 +12,7 @@ uncompressed 8-, 24- and 32-bit pixels go surface by surface to aqr-raw's `raste
 
 The modules know nothing of containers: a recompressor that finds blocks of a known layout in a
 format of its own (an engine's bundles: Unity's textures in aqr-bundle) applies them the same
-way (`formula::apply`). PVRTC and ASTC are read in the containers (and Unity's textures) but not
-taken yet.
+way (`formula::apply`). ASTC is read in the containers (and Unity's textures) but not taken yet.
 
 ## How it does
 
@@ -106,6 +105,18 @@ Windows): on smooth textures of `tests/formats.rs`, ETC1's (differential, of the
 texture2ddecoder's (MIT, as a black box) on random blocks of every format, but for the colour of
 punch-through's transparent pixels (the spec's are black, its not).
 
+### PVRTC1
+
+A word's colours are samples of two images of low resolution, each pixel blended between them
+from the 4 words around it (wrapping), so a surface is coded in two passes of no stripes: every
+word's colours (copies, or new ones predicted by MED of the words around), then the modulation
+of the words not copied whole, each pixel's level on the line between the images there. The
+walk takes the words row by row, the data has them in Morton order. On a smooth texture of 4
+bits a pixel (`tests/formats.rs`: of each word the least and most of its pixels, the weights
+nearest), 0.42 of zstd -19. The pixels matched texture2ddecoder's on random words of both rates,
+of 2 bits a pixel once its stored values are of weights 0, 3, 5, 8 and never punch-through (as
+PowerVR's decoders; the Khronos description has mode 1's weights). PVRTC2 is not taken.
+
 ## Design
 
 Measured on the first 400 files of the sample (123 MB) by code length, before the coder was
@@ -161,9 +172,10 @@ written (the bits of each choice are of BC1 unless said):
   the mispredictions it saves), and the decoder's read-ahead on the encoder too. Across stripes, what is left serial bounds one file: the
   mipmaps too small to split (about 6% of a 2048×2048 texture's blocks) and a stripe of each
   split one, about 6.4 times faster than one thread at best for that texture.
-- **Formats.** PVRTC, ASTC (their containers are read already).
-- **BC6H, ETC, EAC** are not measured on real textures (HDR environment maps; mobile games'
-  textures, as of Android packages); their models were tried only on smooth textures.
+- **Formats.** ASTC (its containers are read already); PVRTC2.
+- **BC6H, ETC, EAC, PVRTC** are not measured on real textures (HDR environment maps; mobile
+  games' textures, as of Android and iOS packages); their models were tried only on smooth
+  textures of simple encoders.
 - **BC7.** Most of its bits are indices; a model of their levels as an image (residuals from a
   predicted level) rather than the joint buckets of two predictions may do better on 4-bit
   indices. Real textures of mobile formats are missing (the sample is of Unity on Windows).
@@ -204,8 +216,9 @@ let node = formula::apply(&mut its_formula, blocks, &layout, threads);
 | `src/bc6h.rs` | BC6H as a family of the walk, as BC7 |
 | `src/etc.rs` | ETC1's, ETC2's and EAC's blocks: modes, fields and the bits left over, pixels |
 | `src/etcm.rs` | ETC1, ETC2 and EAC as a family of the walk: their parts (RGB, EAC), models and ladders |
+| `src/pvrtc.rs` | PVRTC1: its words, images and pixels, Morton order, and its family of two passes |
 | `src/texture.rs` | The walk over a texture's surfaces (of any family of formats), the stripes and their threads |
 | `src/module.rs`, `src/formula.rs` | The modules, and formulas of DDS files and the other containers |
 | `tests/dds.rs` | Every format and layout (mipmaps, cube maps, DX10 arrays, odd sizes), stripes on any number of threads, pixels, trailers, files not taken, corrupted inputs |
-| `tests/formats.rs` | The other groups (BC7, BC6H, ETC and EAC): random blocks of every mode, stripes, smooth textures; the containers, DDS's DX10 |
+| `tests/formats.rs` | The other groups (BC7, BC6H, ETC and EAC, PVRTC): random blocks of every mode, stripes, smooth textures; the containers, DDS's DX10 |
 | `examples/bench.rs` | `aqr-tex-bench` |

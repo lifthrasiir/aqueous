@@ -466,6 +466,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/psd-recons.block"),
     },
     Known {
+        name: "pvrtc-recons",
+        version: 1,
+        sha512_256: hex("41e701424cfd4b6b08e6203c2c82429f812fce51a0a0b0f027c71f2ae4fe95d4"),
+        block: include_bytes!("../wasm/pvrtc-recons.block"),
+    },
+    Known {
         name: "rar3-recons",
         version: 2,
         sha512_256: hex("c4bd41d21394500590ea019717ce486151cacfc6645165bf2124fbd6e1de5ec0"),

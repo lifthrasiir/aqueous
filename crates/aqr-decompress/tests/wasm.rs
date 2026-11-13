@@ -5388,6 +5388,31 @@ fn etc_plans_hold() {
     }
 }
 
+/// pvrtc-recons lays its memory out as a stack (no tasks): of both rates, mipmaps down to the
+/// least surfaces, layers.
+#[test]
+fn pvrtc_plans_hold() {
+    use aqr_tex::layout::{Format, Layout};
+    let mut rng = aqr_common::rng::Rng::new(15);
+    for (two, width, height, mips, layers) in
+        [(false, 1024, 1024, 3, 1), (true, 512, 256, 10, 2), (false, 64, 64, 7, 1)]
+    {
+        let l = Layout { format: Format::Pvrtc { two }, width, height, mips, layers };
+        let mut blocks = rng.bytes(l.len() as usize);
+        for i in (8..blocks.len()).step_by(8) {
+            if rng.below(3) == 0 {
+                let k = rng.below((i / 8) as u64) as usize * 8;
+                blocks.copy_within(k..k + 8, i);
+            }
+        }
+        let (main, apart, _) = aqr_tex::texture::encode_any(&l, &blocks, 4);
+        let mut f = Formula::default();
+        let inputs = vec![f.push("bcn/coded", main), f.push("bcn/stripes", apart)];
+        f.root = Node::apply(aqr_tex::formula::MODULE_PVRTC, l.to_bytes(), inputs, l.len());
+        plan_holds(&format!("pvrtc {two} {width}x{height} {mips} {layers}"), f, &blocks);
+    }
+}
+
 /// prores-recons lays its memory out as a stack, its limit its plan of the instance and its gang of
 /// tasks (a task for each stripe, and the messages of their channels): of 4:2:2, 4:4:4 with
 /// alpha, interlaced frames, and of chunks of a few stripes and of 16; each application of a file

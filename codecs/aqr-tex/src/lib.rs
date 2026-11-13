@@ -23,6 +23,7 @@ pub mod layout;
 pub mod model;
 pub mod module;
 pub mod plane;
+pub mod pvrtc;
 pub mod texture;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

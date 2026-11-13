@@ -493,7 +493,7 @@ pub fn decode_held<F: Family>(l: &Layout) -> u64 {
 
 /// Whether the formats of group `g` are taken.
 pub fn taken(g: Group) -> bool {
-    matches!(g, Group::Bcn | Group::Bc7 | Group::Bc6h | Group::Etc)
+    matches!(g, Group::Bcn | Group::Bc7 | Group::Bc6h | Group::Etc | Group::Pvrtc)
 }
 
 /// [`encode`] of the family of `l`'s format.
@@ -503,6 +503,7 @@ pub fn encode_any(l: &Layout, blocks: &[u8], threads: usize) -> (Vec<u8>, Vec<u8
         Group::Bc7 => encode::<Bc7>(l, blocks, threads),
         Group::Bc6h => encode::<crate::bc6h::Bc6h>(l, blocks, threads),
         Group::Etc => encode::<crate::etcm::Etc>(l, blocks, threads),
+        Group::Pvrtc => encode::<crate::pvrtc::Pvrtc>(l, blocks, threads),
         g => unimplemented!("{g:?}"),
     }
 }
@@ -514,6 +515,7 @@ pub fn decode_any(l: &Layout, main: &[u8], apart: &[u8], threads: usize) -> Resu
         Group::Bc7 => decode::<Bc7>(l, main, apart, threads),
         Group::Bc6h => decode::<crate::bc6h::Bc6h>(l, main, apart, threads),
         Group::Etc => decode::<crate::etcm::Etc>(l, main, apart, threads),
+        Group::Pvrtc => decode::<crate::pvrtc::Pvrtc>(l, main, apart, threads),
         _ => Err(corrupt()),
     }
 }

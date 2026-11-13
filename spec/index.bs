@@ -6503,6 +6503,11 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/psd-recons.wasm" title="crates/aqr-modules/wasm/psd-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-psd/FORMAT.md" title="codecs/aqr-psd/FORMAT.md">R</a>
     <tr>
+      <td><code>41e701424cfd4b6b08e6203c2c82429f812fce51a0a0b0f027c71f2ae4fe95d4</code>
+      <td>pvrtc-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/pvrtc-recons.wasm" title="crates/aqr-modules/wasm/pvrtc-recons.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-tex/FORMAT.md" title="codecs/aqr-tex/FORMAT.md">R</a>
+    <tr>
       <td><code>c4bd41d21394500590ea019717ce486151cacfc6645165bf2124fbd6e1de5ec0</code>
       <td>rar3-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/rar3-recons.wasm" title="crates/aqr-modules/wasm/rar3-recons.wasm">D</a>
