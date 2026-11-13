@@ -1,13 +1,19 @@
-# The `bcn-recons` module
+# The modules of aqr-tex
 
-This document specifies the module `bcn-recons` of aqr-formula entry formulas. The module
-rebuilds the blocks of a texture compressed in BC1, BC2, BC3, BC4 or BC5 (DXT1 to DXT5, ATI1 and
-ATI2) from one coded stream: each block's endpoints, as those of a block before or as new, and
-its indices, as levels on the line between its endpoints, under contexts of where the pixels
-around (decoded so far, and those of the next smaller mipmap) predict them. The document is
-meant to be complete: an implementation of the module can be written from it alone. Sections
-marked *(encoder)* describe the choices this implementation makes when it builds formulas; the
-module does not depend on them.
+This document specifies the modules of aqr-formula entry formulas that aqr-tex makes. Each
+rebuilds the blocks of a texture of a group of block formats from its coded form:
+
+- `bcn-recons` (§2 to §10): BC1, BC2, BC3, BC4 or BC5 (DXT1 to DXT5, ATI1 and ATI2), each
+  block's endpoints, as those of a block before or as new, and its indices, as levels on the line
+  between its endpoints, under contexts of where the pixels around (decoded so far, and those of
+  the next smaller mipmap) predict them;
+- `bc7-recons` (§11): BC7, each block as a block around it or before, or its fields (all but
+  its indices as a block's around it or before, or new), its indices as `bcn-recons`'s.
+
+The document is meant to be complete: an implementation of the modules can be written from it
+alone (with the partition tables of BC7, which are its format's). Sections marked *(encoder)*
+describe the choices this implementation makes when it builds formulas; the modules do not
+depend on them.
 
 Contents:
 
@@ -21,6 +27,7 @@ Contents:
 8. [Indices](#8-indices)
 9. [BC2's alpha](#9-bc2s-alpha)
 10. [Encoding](#10-encoding-encoder)
+11. [`bc7-recons`](#11-bc7-recons)
 
 ## 1. Conventions
 
@@ -40,7 +47,7 @@ Contents:
 - **Params**, the *layout*:
 
   ```text
-  u8      format   1: BC1, 2: BC2, 3: BC3, 4: BC4, 5: BC5
+  u8      format   1: BC1, 2: BC2, 3: BC3, 4: BC4, 5: BC5 (8: BC7, of §11)
   varint  W        the width of the largest mipmap, in pixels, 1 to 65536
   varint  H        its height, 1 to 65536
   varint  M        the mipmaps of a layer, 1 to bitlen(max(W, H))
@@ -278,3 +285,180 @@ alpha = tree_4(a[(q1 · 17 + q2) · 16 …])    (289 trees)
   does not code kept as they are (`dds/pixels`).
 - The choice of a block is the first of 1–3 of §7 that holds; the residuals of new endpoints
   are those in [−2^(n − 1), 2^(n − 1)).
+
+## 11. `bc7-recons`
+
+- **Module**: name `bc7-recons`, version 1.
+- **Params**: the layout of §2, of format 8 (BC7).
+- **Resources**, **inputs** and **output**: as §2's.
+
+The walk is §5's, of one part (the block), its contexts and cache those of §11.3 to §11.6;
+the planes §6's, of 4 channels (R, G, B, A: the pixels of §11.1).
+
+### 11.1 Blocks
+
+A block is 16 bytes, its bits numbered from bit 0 of byte 0 up. Its *mode* m is the number of
+0 bits below its lowest 1 bit, or 8 (*reserved*) where byte 0 is 0; the m + 1 bits up to that
+1 bit are followed by the fields of the mode:
+
+| m | NS | PB | RB | ISB | CB | AB | p-bits | IB | IB2 |
+|---|---|---|---|---|---|---|---|---|---|
+| 0 | 3 | 4 | 0 | 0 | 4 | 0 | each endpoint | 3 | 0 |
+| 1 | 2 | 6 | 0 | 0 | 6 | 0 | each subset | 3 | 0 |
+| 2 | 3 | 6 | 0 | 0 | 5 | 0 | none | 2 | 0 |
+| 3 | 2 | 6 | 0 | 0 | 7 | 0 | each endpoint | 2 | 0 |
+| 4 | 1 | 0 | 2 | 1 | 5 | 6 | none | 2 | 3 |
+| 5 | 1 | 0 | 2 | 0 | 7 | 8 | none | 2 | 2 |
+| 6 | 1 | 0 | 0 | 0 | 7 | 7 | each endpoint | 4 | 0 |
+| 7 | 2 | 6 | 0 | 0 | 5 | 5 | each endpoint | 2 | 0 |
+
+In order: the partition (PB bits), the rotation (RB), the index selection (ISB); the endpoints,
+channel by channel (R, G, B, then A where AB > 0), each channel of every endpoint j = 0 … 2·NS
+− 1 in turn (CB bits, AB of A; endpoint 2s + e is endpoint e of subset s); the p-bits, of each
+endpoint in turn, or of each subset (both of its endpoints'); the indices of the pixels p = 0 …
+15 (p = 4y + x of the block), IB bits each, one bit fewer of an *anchor*; the second indices,
+IB2 bits each, one bit fewer of pixel 0. Every 128 bits of a mode are a block of it.
+
+The subset of each pixel, and the anchors (pixel 0 of subset 0, and one pixel of each other
+subset), are those of the partition in BC7's tables of partitions of two subsets (modes 1, 3, 7)
+and of three (modes 0 and 2; mode 0 of the first 16).
+
+Its pixels, which the planes hold: an endpoint's channel of n bits, with its p-bit where the
+mode has them (2v + p, n + 1 bits), is expanded to 8 bits as `v·2^(8 − n) + v·2^(8 − n) / 2^n`
+(its top bits repeated below); A is 255 of a mode of no AB. Of an index i of b bits, its weight
+w is entry i of (0, 21, 43, 64), (0, 9, 18, 27, 37, 46, 55, 64) or (0, 4, 9, 13, 17, 21, 26, 30,
+34, 38, 43, 47, 51, 55, 60, 64) for b = 2, 3, 4; a channel between endpoints a and z of subset s
+is `(a·(64 − w) + z·w + 32) >> 6`. All four channels are by the index of the pixel, but of
+modes 4 and 5: R, G and B by its index and A by its second (mode 4 of index selection 1: R, G, B
+by its second, A by its index). Then rotation r > 0 swaps channel r − 1 (R, G, B) with A. A
+reserved block's pixels are (0, 0, 0, 0).
+
+### 11.2 The choices
+
+Of the block at (bx, by) of the stripe, L is the block to its left and U the block above (of
+the stripe; none past its sides), and lc, uc their *choices* (as below; 6 where there is none).
+The block's *head* is all of its bits but its indices (of mode m < 8, its low 128 − I(m) bits,
+I = 45, 46, 29, 30, 78, 62, 63, 30; of mode 8, all of them).
+
+1. If L: the adaptive bit `copy[lc·7 + uc]` (98 bits); 1: the block is L, choice 0.
+2. If U and U is not L (bytes): `copy[49 + lc·7 + uc]`; 1: the block is U, choice 1.
+3. If L: `head[lc]` (21 bits); 1: the head is L's, choice 2.
+4. Else, if U and its head is not L's (where there is an L): `head[7 + uc]`; 1: the head is U's,
+   choice 3.
+5. Else `head[14 + lc]`; 1: r by `token(rank, rank_next)`, and C the block of rank r in the cache
+   (an error if r ≥ 4096 or there is none): `whole[lc]` (7 bits); 1: the block is C, else its
+   head is C's; choice 4.
+6. Else the head is new (§11.3), choice 5.
+
+A head taken (choices 2 to 4) of mode 8 is the block; else its indices are coded (§11.5), the
+fields of the head as they are. After the block, it is *used*: the cache is §7's of keys, each
+use of a key carrying a block, the block of a key's rank that of its last use. Its key is a hash
+of its head h (128 bits): `x = (h mod 2^64 XOR rotl64(h >> 64, 29)) · 0x9e3779b97f4a7c15 mod
+2^64`, the key `(x >> 32) XOR (x mod 2^32)`.
+
+*(encoder)* The choice is the first of 1 to 5 that holds; a block of the cache, only where the
+block of its key's last use has the block's head (keys can collide).
+
+### 11.3 New heads
+
+- The mode: `tree_4(mode[(ml·10 + mu)·16 …])` (100 trees), ml and mu the modes of L and U (9
+  where there is none); a value above 8 is 8. Of mode 8, the bytes 1 to 15 of the block, raw
+  (byte 0 is 0); then its pixels are set, and nothing else is coded.
+- The partition, of NS > 1. A block *fits* where it is not of mode 8, its NS is the mode's and
+  its partition below 2^PB. If L fits: `same[k]`, k = 1 where L is of the mode, else 0; 1: L's
+  partition. Else (or where L does not fit), if U fits and its partition is not L's (where L
+  fits): `same[2 + k]`, of U; 1: U's partition. Else `tree_PB(part[t·64 …])`, t = 0 of mode 0,
+  1 of NS = 2, 2 of NS = 3.
+- The rotation, of RB > 0: `tree_2(rot[((m − 4)·5 + r)·4 …])`, r L's rotation where L is of the
+  mode, else 4. The index selection, of mode 4: `isb[i]`, i L's where L is of mode 4, else 2.
+- The endpoints and p-bits (§11.4), then the indices (§11.5).
+
+### 11.4 Endpoints
+
+Pixels here are *as stored*: rotation r > 0 swaps channel r − 1 with A of the planes' pixels.
+The *groups* of channels are (R, G, B) and (A) of modes 4 and 5, (R, G, B, A) of the others.
+
+For each subset s, of first pixel a (in the order of p), predicted endpoints P0 and P1 and the
+*source* of the prediction:
+
+- of mipmap m < M − 1, source 0: the *ends* of the coarse predictions (§6) of the subset's
+  pixels, in the order of p, by that of a;
+- else, where there are L or U, source 1: the ends of the pixels of the stripe's plane that
+  touch the subset: for each of its pixels p in turn, (4bx − 1, 4by + p/4) where L and p mod 4 =
+  0, then (4bx + p, 4by − 1) where U and p < 4; where none do, all of the column to the left (top
+  to bottom) and of the row above (left to right). They are by the pixel near a, (ax, ay) in the
+  block: the left one of row ay where L, and U is none or ax ≤ ay; else the upper one of column
+  ax;
+- else, source 2: 128 in every channel of both.
+
+The *ends* of pixels Q_1 … Q_n by a pixel A, group by group: `mean_k = (Σ_i Q_i,k) / n` of each
+channel k of the group; F the first of the pixels of the most `Σ_k (Q_k − mean_k)²`; of a pixel
+Q, `t(Q) = Σ_k (Q_k − mean_k)·(F_k − mean_k)`; lo the first pixel of the least t, hi the first of
+the most. Where `|t(A) − t(lo)| ≤ |t(hi) − t(A)|`, P0 is lo and P1 hi in the group's channels,
+else P0 hi and P1 lo.
+
+Then of each endpoint e = 0, 1 of the subset, its channels in the order G, R, B, A (slots 0 to
+3; A skipped where AB = 0), of n = CB bits (AB of A), with pb = 1 where the mode has p-bits:
+
+```text
+q      = (P_e,c · (2^(n + pb) − 1) + 127) / 255
+pred   = q >> pb, plus rG (the residual of G of this endpoint) of R and B
+before = class(rG) of R and B; class(r0_c) of G and A of e = 1 (r0_c the residual of channel c
+         of endpoint 0); 0 of G and A of e = 0
+ctx    = (((source · 2 + prec) · 4 + slot) · 2 + e) · 4 + before    (prec = 1 where CB ≥ 6)
+v      = token(res[ctx·16 …], res_next[ctx·16 …])                  (96 pairs of 16 bits)
+```
+
+with `class(r)` 0 (r = 0), 1 (|r| = 1), 2 (|r| ≤ 3) or 3. The residual r is the value of
+[−2^(n − 1), 2^(n − 1)) congruent to `unzz(v)` modulo 2^n, the channel `(pred + r) mod 2^n`; and
+the predicted p-bit of the endpoint is q mod 2 of its G.
+
+Then the p-bits: of each endpoint j in turn, `pbit[pp_j]`; or of each subset s, `pbit[3 +
+pp_2s]`, both of its endpoints' (pp_j the predicted p-bit of endpoint j).
+
+*(encoder)* The residuals are those of [−2^(n − 1), 2^(n − 1)).
+
+### 11.5 Indices
+
+The endpoints E_j expanded to 8 bits (§11.1), not rotated. The *sets* of indices of the mode,
+each (b bits, kind, channels):
+
+| mode | first | second |
+|---|---|---|
+| 0, 1 | (3, 1, RGBA) | |
+| 2, 3, 7 | (2, 0, RGBA) | |
+| 6 | (4, 2, RGBA) | |
+| 4, index selection 0 | (2, 3, RGB) | (3, 6, A) |
+| 4, index selection 1 | (2, 5, A) | (3, 4, RGB) |
+| 5 | (2, 3, RGB) | (2, 5, A) |
+
+Of each set and subset s, a *line*: `D = E_2s+1 − E_2s` in the set's channels (0 in the others),
+`l2 = |D|²`. Where l2 > 0: `contrast` = 0 (l2 ≤ 100), 1 (≤ 1000) or 2; `steps = 2^b − 1`; `res`
+= 4, 2, 1 of b = 2, 3, 4; `nb = steps·res + 3`; `m = steps·res·2^16 / l2`; and
+
+```text
+bucket(Q) = clamp(((Σ_c (Q_c − E_2s,c) · D_c · m + 2^15) >> 16) + 1, 0, nb − 1)
+```
+
+The pixels p = 0 … 15 in turn, at (x, y) of the plane: of mipmap m < M − 1, Q1 its coarse
+prediction and Q2 its causal one (§6); else Q1 the pixel above (y > 0) and Q2 the one to the
+left (x > 0), of the stripe's plane; as stored. Then of each set in turn (first, second), its
+index: where p *leads* (an anchor, of the first set; p = 0, of the second), its b − 1 bits below
+a top bit of 0 by the tree from node 2 (node 2, then 4 or 5, …); else by `tree_b`; of the trees
+
+- where l2 > 0: `idx[base_k + ((contrast·(nb + 1) + a)·(nb + 1) + c)·2^b …]`, a and c the
+  buckets of Q1 and Q2, nb where there is none;
+- else: `flat[fbase_k + (left·(2^b + 1) + above)·2^b …]`, left 1 + the index of the set of pixel
+  p − 1 where p mod 4 > 0 (else 0), above that of pixel p − 4 where p ≥ 4;
+
+with base_k the sum of `3·(nb + 1)²·2^b` and fbase_k of `(2^b + 1)²·2^b` over the kinds before k
+(b and nb of each kind's). Then pixel p is set in the plane (§11.1).
+
+### 11.6 Encoding *(encoder)*
+
+- DDS files of a DX10 header of DXGI formats 97 to 99 are BC7 (§10); KTX files of OpenGL's
+  internal formats 0x8E8C and 0x8E8D, KTX 2 of Vulkan's formats 145 and 146, PVR 3 of pixel
+  format 15. The blocks of a KTX, KTX 2 or PVR file (by its mipmap, each its layers) are those of
+  a layout taken in the layout's order: the application's output is cut into its surfaces
+  (`Formula::split`), each where the file has it, the bytes between them as they are
+  (`tex/container`).

@@ -123,3 +123,5 @@ own terms; the code is written from that description, not from the encoder's cod
 ## Data
 
 - **minimp3** (lieff, CC0): aqr-mp3's Huffman tables are generated from `minimp3.h`.
+- **bcdec** (Sergii Kudlai, MIT or the Unlicense, taken under the Unlicense): aqr-tex's tables of
+  BC7's partitions and anchors are generated from `bcdec.h`.

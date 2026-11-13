@@ -281,8 +281,8 @@ pub enum Data {
     Stream { path: Vec<u8>, offset: u64, size: u64 },
 }
 
-/// What a texture's pixels are: blocks that aqr-tex takes (BC1, BC3, BC4, BC5), or uncompressed
-/// pixels of 8-bit samples that aqr-raw takes ([`Raw`]).
+/// What a texture's pixels are: blocks that aqr-tex takes (BC1, BC3 to BC7, ETC1, ETC2, EAC,
+/// PVRTC and ASTC), or uncompressed pixels of 8-bit samples that aqr-raw takes ([`Raw`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pixels {
     Blocks(aqr_tex::layout::Layout),
@@ -422,8 +422,22 @@ pub fn texture(o: &[u8], engine: (u32, u32), big: bool) -> Option<Texture> {
         let format = match u32_at(at)? {
             10 => Ok(Format::Bc1),
             12 => Ok(Format::Bc3),
+            24 => Ok(Format::Bc6h { signed: false }),
+            25 => Ok(Format::Bc7),
             26 => Ok(Format::Bc4),
             27 => Ok(Format::Bc5),
+            30 | 31 => Ok(Format::Pvrtc { two: true }),
+            32 | 33 => Ok(Format::Pvrtc { two: false }),
+            34 => Ok(Format::Etc1),
+            41..=44 => Ok(Format::Eac { rg: u32_at(at)? >= 43, signed: u32_at(at)? % 2 == 0 }),
+            45 => Ok(Format::Etc2),
+            46 => Ok(Format::Etc2P),
+            47 => Ok(Format::Etc2A),
+            // (ASTC's of LDR, of the old RGBA formats and of HDR)
+            c @ (48..=59 | 66..=71) => {
+                let s = [4, 5, 6, 8, 10, 12][((c - 48) % 6) as usize];
+                Ok(Format::Astc { w: s, h: s })
+            }
             1 | 63 => Err(1),
             62 => Err(2),
             3 => Err(3),

@@ -81,13 +81,17 @@ fn len(v: u32) -> usize {
 /// Only ranks below [`RECENT`] are asked for, so only the most recent keys are kept: those of
 /// the uses of a window of times, renumbered from 0 when it is full, the keys of rank
 /// [`RECENT`] or more forgotten (which changes the rank of no other key).
+///
+/// Each use may carry a payload `P` (none of BC1 to BC5's), which a key's rank gives back with
+/// it: what the key stands for (BC7's blocks, by a hash of their endpoints).
 #[derive(Clone)]
-pub struct Recent {
+pub struct Recent<P = ()> {
     /// The time of each key's last use: a table of [`SLOTS`] (key, time), by open addressing
     /// (a time of [`EMPTY`] for none), at most half of them used.
     last: Vec<(u32, u32)>,
-    /// The key used at each time.
+    /// The key used at each time, and its payload.
     keys: Vec<u32>,
+    payload: Vec<P>,
     /// 1 at the times that are some key's last use, a bit each (`WINDOW / 64` words), and the
     /// count of them in each group of [`GROUP`] words: a use changes two bits and two counts,
     /// whatever the window, and a rank is counted over at most a group's words and the groups.
@@ -114,17 +118,18 @@ fn slot(key: u32) -> usize {
     ((key as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 40) as usize & (SLOTS - 1)
 }
 
-impl Default for Recent {
+impl<P: Copy + Default> Default for Recent<P> {
     fn default() -> Self {
         Recent::new()
     }
 }
 
-impl Recent {
-    pub fn new() -> Recent {
+impl<P: Copy + Default> Recent<P> {
+    pub fn new() -> Recent<P> {
         Recent {
             last: vec![(0, EMPTY); SLOTS],
             keys: Vec::with_capacity(WINDOW),
+            payload: Vec::with_capacity(WINDOW),
             bits: vec![0; WINDOW / 64],
             groups: vec![0; GROUPS],
             live: 0,
@@ -132,9 +137,10 @@ impl Recent {
     }
 
     /// As [`Colour::copy_from`].
-    pub fn copy_from(&mut self, o: &Recent) {
+    pub fn copy_from(&mut self, o: &Recent<P>) {
         self.last.clone_from(&o.last);
         self.keys.clone_from(&o.keys);
+        self.payload.clone_from(&o.payload);
         self.bits.clone_from(&o.bits);
         self.groups.clone_from(&o.groups);
         self.live = o.live;
@@ -143,7 +149,12 @@ impl Recent {
     /// Bytes that [`Recent::new`] takes of [`aqr_api::stack`].
     pub fn plan() -> u64 {
         use aqr_api::stack::block;
-        block(8 * SLOTS as u64) + block(4 * WINDOW as u64) + block(WINDOW as u64 / 8) + block(4 * GROUPS as u64)
+        let payload = if size_of::<P>() > 0 { block((size_of::<P>() * WINDOW) as u64) } else { 0 };
+        block(8 * SLOTS as u64)
+            + block(4 * WINDOW as u64)
+            + payload
+            + block(WINDOW as u64 / 8)
+            + block(4 * GROUPS as u64)
     }
 
     /// The table's entry of `key`: where it is, or where it goes.
@@ -177,11 +188,14 @@ impl Recent {
                 n += 1;
                 let at = self.keys.len() - n;
                 self.keys[at] = k;
+                self.payload[at] = self.payload[t];
             }
         }
         let from = self.keys.len() - n;
         self.keys.copy_within(from.., 0);
         self.keys.truncate(n);
+        self.payload.copy_within(from.., 0);
+        self.payload.truncate(n);
         self.last.fill((0, EMPTY));
         self.bits.fill(0);
         self.groups.fill(0);
@@ -222,8 +236,25 @@ impl Recent {
         Some(self.after(t as usize))
     }
 
+    /// The payload of `key`'s last use, if it was used.
+    pub fn payload(&self, key: u32) -> Option<&P> {
+        Some(&self.payload[self.get(key)? as usize])
+    }
+
     /// The key of rank `r`, if there is one.
     pub fn at(&self, r: u32) -> Option<u32> {
+        Some(self.keys[self.time_of(r)?])
+    }
+
+    /// The key of rank `r` and its payload, if there is one.
+    pub fn at_with(&self, r: u32) -> Option<(u32, &P)> {
+        let t = self.time_of(r)?;
+        Some((self.keys[t], &self.payload[t]))
+    }
+
+    /// The time of the key of rank `r`, if there is one.
+    #[inline(always)]
+    fn time_of(&self, r: u32) -> Option<usize> {
         if r >= self.live {
             return None;
         }
@@ -246,11 +277,16 @@ impl Recent {
                 p += s;
             }
         }
-        Some(self.keys[w * 64 + p as usize])
+        Some(w * 64 + p as usize)
     }
 
     /// Uses `key`, now.
     pub fn touch(&mut self, key: u32) {
+        self.touch_with(key, P::default());
+    }
+
+    /// Uses `key` of payload `p`, now.
+    pub fn touch_with(&mut self, key: u32, p: P) {
         if self.keys.len() == WINDOW {
             self.compact();
         }
@@ -261,6 +297,7 @@ impl Recent {
             t => self.flip(t as usize, -1),
         }
         self.keys.push(key);
+        self.payload.push(p);
         self.flip(now, 1);
     }
 }
@@ -859,9 +896,10 @@ mod tests {
     #[test]
     fn recent() {
         // a few keys, every rank checked; then many, across compactions of the window, the
-        // ranks of the cache checked
+        // ranks of the cache checked, and the payloads of the last uses
         for (n, keys, every) in [(100, 13, 1), (5 * WINDOW, 6000, 997)] {
-            let mut r = Recent::new();
+            let mut r = Recent::<u32>::new();
+            let mut last = std::collections::HashMap::new();
             let mut mtf: Vec<u32> = vec![];
             let mut x = 7u32;
             for i in 0..n {
@@ -872,6 +910,8 @@ mod tests {
                 if i % every == 0 {
                     for (p, &k) in mtf.iter().take(RECENT as usize).enumerate() {
                         assert_eq!(r.at(p as u32), Some(k));
+                        assert_eq!(r.at_with(p as u32), Some((k, &last[&k])));
+                        assert_eq!(r.payload(k), Some(&last[&k]));
                     }
                     if mtf.len() < RECENT as usize {
                         assert_eq!(r.at(mtf.len() as u32), None);
@@ -881,7 +921,8 @@ mod tests {
                     mtf.remove(p);
                 }
                 mtf.insert(0, key);
-                r.touch(key);
+                r.touch_with(key, i as u32);
+                last.insert(key, i as u32);
             }
         }
     }

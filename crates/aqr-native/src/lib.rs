@@ -488,6 +488,7 @@ pub const NATIVE: &[Native] = &[
     bare("psd-recons", |p, _, i, n, t| aqr_psd::module::decode(p, i, n, t).map_err(err)),
     bare("clip-recons", |p, _, i, n, t| aqr_clip::module::decode(p, i, n, t).map_err(err)),
     bare("bcn-recons", |p, _, i, n, t| aqr_tex::module::decode(p, i, n, t).map_err(err)),
+    bare("bc7-recons", |p, _, i, n, t| aqr_tex::module::decode_bc7(p, i, n, t).map_err(err)),
     bare("pdf-recons", |p, _, i, n, t| aqr_pdf::module::decode(p, i, n, t).map_err(err)),
     bare("sqlite-recons", |p, _, i, n, t| aqr_sqlite::module::decode(p, i, n, t).map_err(err)),
     part(

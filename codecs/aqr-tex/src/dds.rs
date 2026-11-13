@@ -5,7 +5,7 @@
 //!
 //! Taken: BC1 to BC5 by their FourCC (`DXT1` to `DXT5`, `ATI1`, `ATI2`, `BC4U`, `BC4S`,
 //! `BC5U`, `BC5S`) or their DXGI format (typeless, unsigned, sRGB and signed: their blocks are
-//! alike), and uncompressed pixels of 8, 24 or 32 bits without a FourCC (their channels as
+//! alike), BC6H and BC7 by their DXGI format, and uncompressed pixels of 8, 24 or 32 bits without a FourCC (their channels as
 //! they are, a byte each; [`Data::Pixels`]); 2D textures, arrays of them and cube maps of all
 //! six faces. Volume textures are not.
 
@@ -99,6 +99,9 @@ pub fn detect(d: &[u8]) -> Option<Found> {
             76..=78 => Format::Bc3,
             79..=81 => Format::Bc4,
             82..=84 => Format::Bc5,
+            94 | 95 => Format::Bc6h { signed: false },
+            96 => Format::Bc6h { signed: true },
+            97..=99 => Format::Bc7,
             _ => return None,
         };
         let (dimension, misc, array) = (u32le(d, HEADER + 4)?, u32le(d, HEADER + 8)?, u32le(d, HEADER + 12)?);

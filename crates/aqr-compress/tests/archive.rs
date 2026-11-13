@@ -1897,7 +1897,8 @@ fn unity_assets(w: u32, h: u32, mips: u32, n: u32, offset: u32, path: &str) -> V
 /// not.
 #[test]
 fn unity_resource_file() {
-    let l = aqr_tex::layout::Layout { format: aqr_tex::layout::Format::Bc1, width: 256, height: 256, mips: 9, layers: 1 };
+    let l =
+        aqr_tex::layout::Layout { format: aqr_tex::layout::Format::Bc1, width: 256, height: 256, mips: 9, layers: 1 };
     let mut x = 0x1234_5678u32;
     let blocks: Vec<u8> = (0..l.len())
         .map(|i| {

@@ -50,7 +50,7 @@
 //!   their lacing and CRCs derived, the Vorbis audio packets by aqr-vorbis. Wwise's Vorbis
 //!   media (`.wem`): aqr-wwise, the setup that their stripped one stands for rebuilt from
 //!   aqr-vorbis's database, their packets by aqr-vorbis.
-//! - PNG, GIF, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, Clip Studio Paint, DDS, PDF, SQLite, FASTA, DEX, `resources.arsc`, FITS,
+//! - PNG, GIF, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, Clip Studio Paint, DDS, KTX/KTX 2/PVR/.astc, PDF, SQLite, FASTA, DEX, `resources.arsc`, FITS,
 //!   PDB (its container and modules' symbols) and Wavefront OBJ (by its text, not its name): the recompressor's own formula, its module
 //!   applied to its streams, and files it embeds (PDF's DEFLATE streams and images, PSD's and
 //!   JPEG's embedded files, Clip Studio Paint's database) applied to theirs (see aqr-decompress

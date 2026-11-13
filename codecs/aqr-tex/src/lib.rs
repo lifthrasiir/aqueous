@@ -7,8 +7,11 @@
 #![allow(clippy::needless_range_loop, clippy::len_without_is_empty)]
 
 pub mod bc;
+pub mod bc7;
 pub mod bcn;
+pub mod bptc;
 pub mod coder;
+pub mod container;
 pub mod dds;
 #[cfg(feature = "encode")]
 pub mod formula;

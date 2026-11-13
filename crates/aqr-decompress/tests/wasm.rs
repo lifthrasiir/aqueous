@@ -5308,6 +5308,30 @@ fn bcn_plans_hold() {
     }
 }
 
+/// bc7-recons lays its memory out as a stack, as bcn-recons does: of surfaces of stripes, mipmaps
+/// and layers, sides not of whole blocks; of random blocks, a third of them repeated (blocks of the
+/// cache).
+#[test]
+fn bc7_plans_hold() {
+    use aqr_tex::layout::{Format, Layout};
+    let mut rng = aqr_common::rng::Rng::new(12);
+    for (width, height, mips, layers) in [(1024, 1024, 3, 1), (1030, 514, 4, 2), (64, 64, 7, 1), (2048, 64, 1, 1)] {
+        let l = Layout { format: Format::Bc7, width, height, mips, layers };
+        let mut blocks = rng.bytes(l.len() as usize);
+        for i in (16..blocks.len()).step_by(16) {
+            if rng.below(3) == 0 {
+                let k = rng.below((i / 16) as u64) as usize * 16;
+                blocks.copy_within(k..k + 16, i);
+            }
+        }
+        let (main, apart, _) = aqr_tex::texture::encode_any(&l, &blocks, 4);
+        let mut f = Formula::default();
+        let inputs = vec![f.push("bcn/coded", main), f.push("bcn/stripes", apart)];
+        f.root = Node::apply(aqr_tex::formula::MODULE_BC7, l.to_bytes(), inputs, l.len());
+        plan_holds(&format!("bc7 {width}x{height} {mips} {layers}"), f, &blocks);
+    }
+}
+
 /// prores-recons lays its memory out as a stack, its limit its plan of the instance and its gang of
 /// tasks (a task for each stripe, and the messages of their channels): of 4:2:2, 4:4:4 with
 /// alpha, interlaced frames, and of chunks of a few stripes and of 16; each application of a file

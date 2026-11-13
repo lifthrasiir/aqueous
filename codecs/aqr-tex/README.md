@@ -1,13 +1,17 @@
 # aqr-tex
 
-Block-compressed textures (BC1 to BC5: DXT1–DXT5, ATI1, ATI2) rebuilt bit for bit from one
-coded stream (`FORMAT.md`), and DDS files taken apart around them: the header and whatever
-follows the blocks kept as they are, the blocks given by the module `bcn-recons` from their
-layout (format, size, mipmaps, layers). DDS files of uncompressed 8-, 24- and 32-bit pixels go
-surface by surface to aqr-raw's `raster-recons`.
+Block-compressed textures rebuilt bit for bit from one coded stream (`FORMAT.md`), a module for
+each group of formats: `bcn-recons` of BC1 to BC5 (DXT1–DXT5, ATI1, ATI2), `bc7-recons` of BC7.
+The containers are taken apart around them: DDS files (the header and whatever follows the blocks
+kept as they are), and KTX, KTX 2, PVR (version 3) and astcenc's `.astc` files (the bytes between
+their surfaces kept, the module's output cut into the surfaces where the file has them), the
+blocks given by the module from their layout (format, size, mipmaps, layers). DDS files of
+uncompressed 8-, 24- and 32-bit pixels go surface by surface to aqr-raw's `raster-recons`.
 
-The module knows nothing of DDS: a recompressor that finds blocks of a known layout in a format
-of its own (KTX, an engine's bundles) applies it the same way (`formula::apply`).
+The modules know nothing of containers: a recompressor that finds blocks of a known layout in a
+format of its own (an engine's bundles: Unity's textures in aqr-bundle) applies them the same
+way (`formula::apply`). BC6H, ETC1, ETC2, EAC, PVRTC and ASTC are read in the containers (and
+Unity's textures) but not taken yet.
 
 ## How it does
 
@@ -45,6 +49,36 @@ Coded in one stripe a surface (before stripes, below), all of them came to 0.324
   100.2 MB, and stripes cost 0.4% of it (60.85 MB without).
 - Where the bits go (bytes per byte of the files, all of them): indices 0.255, the cache ranks
   0.043, the choices 0.011, new endpoints 0.015.
+
+### BC7
+
+Measured 2026-11-13 on the Ryzen 7 9700X, on the BC7 textures of 9 games of Unity on Steam (A
+Dance of Fire and Ice, Donut County, Ellipsis, Freshly Frosted, Getting Over It, Girls Like
+Robots, Glass Masquerade 2, HUMANITY's demo, Hidden Folks: 164 textures, 194.5 MB, dumped by
+aqr-bundle's `aqr-bundle-textures`) by `aqr-tex-bench -j 4`: 0.2340 bytes per byte, against
+zstd -19's 0.3466 (endpoints 0.066, indices 0.135, the choices and the cache 0.021, the modes
+and the like 0.012); 19.5 MB/s encoding and 21.6 decoding a thread. Through `aqr`, 6 of them
+each as KTX, KTX 2 and DDS (37.3 MB): 4.05 MB, natively and as WebAssembly given back.
+
+- **Copies.** These textures repeat their blocks: of the largest mipmaps of the first 56 of them,
+  67% of the blocks are the block to their left or above, and 18% more have the endpoints (all
+  but the indices) of a block before. So a block is first the left or upper one, then its
+  endpoints are those of the left or upper one or of a block of the cache (by a hash of them, the
+  last block of each kept, as BC1's endpoints are): 0.1583 → 0.1358 on those 56 (zstd -19's
+  0.1770), and twice as fast.
+- **Endpoints** are predicted from pixels, not from the neighbours' endpoints: the ends of the
+  line through the subset's pixels of the smaller mipmap, else through the pixels decoded around
+  that touch the subset, their order by the subset's first pixel. Against the mean of the pixels
+  around: 0.2466 → 0.2423 on all of them; the endpoints of a neighbour of the same mode and
+  partition, where there is one, predicted worse than the pixels (0.2423 → 0.2340 without them).
+  The smaller mipmap is the better of the two where there is one (the pixels around alone,
+  0.2348; their average, 0.2343).
+- **Indices** as BC1's, of 7 kinds (the bits, and whether of all the channels, the colour or the
+  alpha); of no smaller mipmap, the pixels above and to the left as the two contexts rather than
+  none and MED (0.1358 → 0.1336 on the 56). The resolution of the buckets mattered little (a
+  quarter of a level of 3-bit indices, or a whole one of 4-bit: within 0.1%); an edge context
+  (which of the left and upper pixels the upper left one is nearer) gained 0.4% for 10% of the
+  speed, and is not used.
 
 ## Design
 
@@ -101,8 +135,10 @@ written (the bits of each choice are of BC1 unless said):
   the mispredictions it saves), and the decoder's read-ahead on the encoder too. Across stripes, what is left serial bounds one file: the
   mipmaps too small to split (about 6% of a 2048×2048 texture's blocks) and a stripe of each
   split one, about 6.4 times faster than one thread at best for that texture.
-- **Formats.** BC6H and BC7 (modes and partitions, then the same models of endpoints and
-  indices); KTX and KTX2 containers; ETC2 and ASTC.
+- **Formats.** BC6H, ETC1, ETC2 and EAC, PVRTC, ASTC (their containers are read already).
+- **BC7.** Most of its bits are indices; a model of their levels as an image (residuals from a
+  predicted level) rather than the joint buckets of two predictions may do better on 4-bit
+  indices. Real textures of mobile formats are missing (the sample is of Unity on Windows).
 - **Mipmaps generated.** Where a mipmap is the encoder's output on the box filter of the one
   above, the encoder could be reproduced; whether this corpus's are was not checked.
 
@@ -110,13 +146,14 @@ written (the bits of each choice are of BC1 unless said):
 
 ```sh
 cargo build --release
-aqr-tex-bench [-j FILES] [-t THREADS] [-z LEVEL] FILE... | @LIST   # ratio by format, speeds (a file on -t threads), round trip checked
+aqr-tex-bench [-j FILES] [-t THREADS] [-z LEVEL] FILE... | @LIST   # of DDS or .tex files: ratio by format, speeds (a file on -t threads), round trip checked
 ```
 
 ```rust
 use aqr_tex::formula;
-// A DDS file taken apart (None where it is not one):
+// A DDS file taken apart (None where it is not one), or a KTX, KTX 2, PVR or .astc file:
 let f = formula::encode(&input, threads).unwrap();
+let f = formula::encode_container(&input, threads).unwrap();
 // Or blocks of a known layout found by a recompressor of its own, as an input of its formula:
 let node = formula::apply(&mut its_formula, blocks, &layout, threads);
 ```
@@ -125,14 +162,18 @@ let node = formula::apply(&mut its_formula, blocks, &layout, threads);
 
 | File | Contents |
 |---|---|
-| `src/layout.rs` | Formats, the surfaces of a layout, the module's params |
+| `src/layout.rs` | Formats and their groups, the surfaces of a layout, the modules' params |
 | `src/dds.rs` | DDS headers (with DX10): where the data is, and what it is |
+| `src/container.rs` | KTX, KTX 2, PVR and `.astc` files: their layout, where each surface is |
 | `src/bc.rs` | What blocks decode to: colours, values, levels |
 | `src/coder.rs` | The two sides of the coder, trees and tokens of adaptive bits |
 | `src/plane.rs` | Planes of 8- or 16-bit samples, their predictions: causal, and the smaller mipmap upsampled |
 | `src/model.rs` | The cache, the models of colours, values and BC2's alpha |
 | `src/bcn.rs` | BC1 to BC5 as a family of the walk: their parts, planes and models |
+| `src/bptc.rs` | BC7's blocks: their fields read and written back, their pixels (bcdec's partition tables) |
+| `src/bc7.rs` | BC7 as a family of the walk: the choices, the models of modes, endpoints and indices |
 | `src/texture.rs` | The walk over a texture's surfaces (of any family of formats), the stripes and their threads |
-| `src/module.rs`, `src/formula.rs` | The module `bcn-recons`, and formulas of DDS files |
+| `src/module.rs`, `src/formula.rs` | The modules, and formulas of DDS files and the other containers |
 | `tests/dds.rs` | Every format and layout (mipmaps, cube maps, DX10 arrays, odd sizes), stripes on any number of threads, pixels, trailers, files not taken, corrupted inputs |
+| `tests/formats.rs` | The other groups (BC7): random blocks of every mode, stripes, smooth textures; the containers |
 | `examples/bench.rs` | `aqr-tex-bench` |

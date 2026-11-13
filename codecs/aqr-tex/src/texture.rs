@@ -8,6 +8,7 @@
 use aqr_common::arith::ArithDecoder;
 use aqr_common::packed;
 
+use crate::bc7::Bc7;
 use crate::bcn::Bcn;
 use crate::coder::{CATS, Dec, Enc, Side};
 use crate::layout::{Format, Group, Layout, Shape, Surface};
@@ -490,10 +491,16 @@ pub fn decode_held<F: Family>(l: &Layout) -> u64 {
     block(l.len_in(F::shape(l.format))) + block(8 * apart_streams::<F>(l) as u64)
 }
 
+/// Whether the formats of group `g` are taken.
+pub fn taken(g: Group) -> bool {
+    matches!(g, Group::Bcn | Group::Bc7)
+}
+
 /// [`encode`] of the family of `l`'s format.
 pub fn encode_any(l: &Layout, blocks: &[u8], threads: usize) -> (Vec<u8>, Vec<u8>, [u64; CATS]) {
     match l.format.group() {
         Group::Bcn => encode::<Bcn>(l, blocks, threads),
+        Group::Bc7 => encode::<Bc7>(l, blocks, threads),
         g => unimplemented!("{g:?}"),
     }
 }
@@ -502,6 +509,7 @@ pub fn encode_any(l: &Layout, blocks: &[u8], threads: usize) -> (Vec<u8>, Vec<u8
 pub fn decode_any(l: &Layout, main: &[u8], apart: &[u8], threads: usize) -> Result<Vec<u8>> {
     match l.format.group() {
         Group::Bcn => decode::<Bcn>(l, main, apart, threads),
+        Group::Bc7 => decode::<Bc7>(l, main, apart, threads),
         _ => Err(corrupt()),
     }
 }

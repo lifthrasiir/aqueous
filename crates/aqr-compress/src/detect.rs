@@ -165,6 +165,7 @@ static ROWS: &[Row] = {
         magic(Jpeg, &[(0, &[0xff, 0xd8, 0xff])]),
         anywhere(Mp3, Pairs::Fn(|a, b| a == 0xff && b & 0xe0 == 0xe0), mp3_header),
         anywhere(Dds, Of(&[b"DD"]), aqr_tex::dds::starts),
+        anywhere(Ktx, Of(&[&[0xab, b'K'], b"PV", &[0x13, 0xab]]), aqr_tex::container::starts),
         anywhere(Pe, Of(&[b"MZ"]), pe),
         // little-endian (32- or 64-bit), and universal
         anywhere(MachO, Of(&[&[0xce, 0xfa], &[0xcf, 0xfa], &[0xca, 0xfe]]), aqr_exe::format::macho::starts),

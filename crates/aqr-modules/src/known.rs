@@ -28,6 +28,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/azo-recons.block"),
     },
     Known {
+        name: "bc7-recons",
+        version: 1,
+        sha512_256: hex("da7913583339f9e71dbf9b63cbd1b0f03b6663e86dfaec72317dbec1b8c4b085"),
+        block: include_bytes!("../wasm/bc7-recons.block"),
+    },
+    Known {
         name: "bcj-arm",
         version: 2,
         sha512_256: hex("8f3fd3dbf3966a8ecb590084559a4f93bdde14b6a9a50ad4f313e04bffc07dd9"),
@@ -102,7 +108,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "bcn-recons",
         version: 1,
-        sha512_256: hex("dcd6ce3bedde0910b6573e489657ae7df30490d6b82ded7687ebc6da96904b69"),
+        sha512_256: hex("571378d8523623c5d8e043d6f83bc8ceb814e2c6e4ce36df2e175461087f05eb"),
         block: include_bytes!("../wasm/bcn-recons.block"),
     },
     Known {

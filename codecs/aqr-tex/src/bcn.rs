@@ -76,7 +76,7 @@ impl Family for Bcn {
     }
 
     fn models_plan(_: Format) -> u64 {
-        Colour::plan() + 2 * Value::plan() + Alpha::plan() + 2 * Recent::plan()
+        Colour::plan() + 2 * Value::plan() + Alpha::plan() + 2 * Recent::<()>::plan()
     }
 
     fn copy_models(m: &mut Models, o: &Models) {

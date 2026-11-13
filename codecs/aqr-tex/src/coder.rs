@@ -19,9 +19,11 @@ pub enum Cat {
     Indices,
     /// BC2's explicit alpha.
     Alpha,
+    /// Modes, partitions and the like: how a block of several layouts is laid out.
+    Mode,
 }
 
-pub const CATS: usize = 5;
+pub const CATS: usize = 6;
 
 pub trait Side {
     /// Whether the values given are coded (rather than taken from the coded bytes).
@@ -29,6 +31,12 @@ pub trait Side {
 
     /// Codes `v` (when encoding) of probability `p1`/65536 of being 1, and gives the bit coded.
     fn code(&mut self, p1: u32, v: bool, cat: Cat) -> bool;
+
+    /// Whether the values given are coded ([`Side::ENCODING`]).
+    #[inline(always)]
+    fn encoding(&self) -> bool {
+        Self::ENCODING
+    }
 
     /// Codes `v` (when encoding) by `b`, and gives the bit coded.
     #[inline(always)]
@@ -69,6 +77,17 @@ pub trait Side {
             p = std::hint::select_unpredictable(x, c1, c0);
         }
         node as u32 - (1 << n)
+    }
+
+    /// `v < 2^n` by the subtree of node `root` of the adaptive bits `t` (as [`Side::tree`] codes
+    /// a value whose top bits lead to `root`).
+    #[inline]
+    fn tree_at(&mut self, t: &mut [Bit], root: usize, n: u32, v: u32, cat: Cat) -> u32 {
+        let mut node = root;
+        for i in (0..n).rev() {
+            node = node << 1 | self.bit(&mut t[node], v >> i & 1 != 0, cat) as usize;
+        }
+        (node - (root << n)) as u32
     }
 
     /// `v < 2^15` as its bit length by the tree `t` (16 bits), then the bit below its top one

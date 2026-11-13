@@ -1,8 +1,9 @@
 //! usage: aqr-tex-bench [-j FILES] [-t THREADS] [-z LEVEL] FILE... | @LIST
 //!
-//! For each DDS file (or each path of LIST): its blocks coded and decoded back, checked, by
-//! format: the ratio (the coded blocks, and the rest of the file as zstd -19 takes it), the
-//! bits of each part, and the speeds a thread (of the blocks' bytes). `-z` adds zstd at that
+//! For each DDS file (or each path of LIST; or `.tex` file of aqr-bundle-textures): its blocks
+//! coded and decoded back, checked, by format: the ratio (the coded blocks, and the rest of the
+//! file as zstd -19 takes it), the bits of each part, and the speeds a thread (of the blocks'
+//! bytes). `-z` adds zstd at that
 //! level of the whole file, for reference. Files are taken several at once (`-j`, by default as
 //! many as the machine has threads), each coded and decoded on up to `-t` threads (1); the
 //! speeds are of a file's bytes by the time it takes. The digest at the end is of every file's
@@ -52,15 +53,29 @@ fn main() {
             s.spawn(|| {
                 while let Some(path) = paths.get(next.fetch_add(1, Ordering::Relaxed)) {
                     let d = std::fs::read(path).unwrap();
-                    let Some(found) = dds::detect(&d) else {
-                        eprintln!("{path}: not taken");
-                        continue;
+                    // (aqr-bundle-textures' files: the layout's params, then the blocks)
+                    let (l, start) = match d.strip_prefix(b"AQRTEX\0\0") {
+                        Some(r) => {
+                            let n = u32::from_le_bytes(r[..4].try_into().unwrap()) as usize;
+                            (aqr_tex::layout::Layout::from_bytes(&r[4..4 + n]).unwrap(), 12 + n)
+                        }
+                        None => {
+                            let Some(found) = dds::detect(&d) else {
+                                eprintln!("{path}: not taken");
+                                continue;
+                            };
+                            let dds::Data::Blocks(l) = found.data else {
+                                eprintln!("{path}: not of blocks");
+                                continue;
+                            };
+                            (l, found.start)
+                        }
                     };
-                    let dds::Data::Blocks(l) = found.data else {
-                        eprintln!("{path}: not of blocks");
+                    if !texture::taken(l.format.group()) {
+                        eprintln!("{path}: {} not taken", l.format.name());
                         continue;
-                    };
-                    let blocks = &d[found.start..found.start + l.len() as usize];
+                    }
+                    let blocks = &d[start..start + l.len() as usize];
                     let t = Instant::now();
                     let (main, apart, cost) = texture::encode_any(&l, blocks, within);
                     let enc = t.elapsed().as_secs_f64();
@@ -68,8 +83,8 @@ fn main() {
                     let back = texture::decode_any(&l, &main, &apart, within).unwrap_or_else(|e| panic!("{path}: {e}"));
                     let dec = t.elapsed().as_secs_f64();
                     assert!(back == blocks, "{path}: not given back");
-                    let mut rest = d[..found.start].to_vec();
-                    rest.extend_from_slice(&d[found.start + blocks.len()..]);
+                    let mut rest = d[..start].to_vec();
+                    rest.extend_from_slice(&d[start + blocks.len()..]);
                     let rest = zstd::bulk::compress(&rest, 19).unwrap().len();
                     let z = if level > 0 { zstd::bulk::compress(&d, level).unwrap().len() } else { 0 };
                     digest.fetch_add(fnv(&[path.as_bytes(), &main, &apart]), Ordering::Relaxed);
@@ -92,7 +107,7 @@ fn main() {
     });
     let mut all = Total::default();
     let show = |name: &str, t: &Total| {
-        let parts: Vec<String> = ["choice", "cache", "endpoints", "indices", "alpha"]
+        let parts: Vec<String> = ["choice", "cache", "endpoints", "indices", "alpha", "mode"]
             .iter()
             .zip(t.cost)
             .filter(|(_, c)| *c > 0)

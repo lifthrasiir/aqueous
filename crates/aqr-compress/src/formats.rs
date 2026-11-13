@@ -334,12 +334,21 @@ formats! {
         exts: &["ogg", "oga"],
         extent: aqr_ogg::formula::extent,
     }
-    /// DDS texture (aqr-tex): BC1 to BC5 blocks, or uncompressed pixels (aqr-raw's module).
+    /// DDS texture (aqr-tex): BC1 to BC5 and BC7 blocks, or uncompressed pixels (aqr-raw's
+    /// module).
     Dds = "dds" {
         recompressor: Pure(aqr_tex::formula::encode),
         heap: 12.0,
         exts: &["dds"],
         extent: |d| aqr_tex::dds::detect(d).map(|f| f.start + f.data.len() as usize),
+    }
+    /// KTX, KTX 2, PVR or `.astc` texture (aqr-tex): the blocks of its surfaces rebuilt, the bytes
+    /// around them as they are.
+    Ktx = "ktx" {
+        recompressor: Pure(aqr_tex::formula::encode_container),
+        heap: 12.0,
+        exts: &["ktx", "ktx2", "pvr", "astc"],
+        extent: aqr_tex::container::extent,
     }
     Pdf = "pdf" {
         // (as `pdf_options` tells)

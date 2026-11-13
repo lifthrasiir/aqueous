@@ -318,6 +318,9 @@ pub const CLIP: Module = aqr_clip::formula::MODULE;
 /// The blocks of a BC1 to BC5 texture of a layout (its params), for a DDS file's header around
 /// them or for any recompressor that finds them (aqr-tex).
 pub const BCN: Module = aqr_tex::formula::MODULE;
+/// The blocks of a BC7 texture of a layout (its params), for a container's bytes around them or
+/// for any recompressor that finds them (aqr-tex).
+pub const BC7: Module = aqr_tex::formula::MODULE_BC7;
 pub const PDF: Module = aqr_pdf::formula::MODULE;
 pub const SQLITE: Module = aqr_sqlite::formula::MODULE;
 pub const FASTA: Module = aqr_fasta::formula::MODULE;
@@ -484,6 +487,7 @@ const NATIVE: &[Entry] = &[
     entry(PSD),
     entry(CLIP),
     entry(BCN),
+    entry(BC7),
     entry(PDF),
     entry(SQLITE),
     entry(FASTA),

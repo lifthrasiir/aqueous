@@ -53,3 +53,13 @@ pub fn plan(params: &[u8], inputs: &[u64], initial: u64, len: u64) -> Option<(u6
 pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
     decode_of::<Bcn>(params, inputs, len, threads)
 }
+
+/// `bc7-recons`'s plan ([`plan_of`]).
+pub fn plan_bc7(params: &[u8], inputs: &[u64], initial: u64, len: u64) -> Option<(u64, u64)> {
+    plan_of::<crate::bc7::Bc7>(params, inputs, initial, len)
+}
+
+/// `bc7-recons` ([`decode_of`]).
+pub fn decode_bc7(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
+    decode_of::<crate::bc7::Bc7>(params, inputs, len, threads)
+}

@@ -35,3 +35,7 @@ path = "examples/check.rs"
 [[example]]
 name = "aqr-bundle-packs"
 path = "examples/packs.rs"
+
+[[example]]
+name = "aqr-bundle-textures"
+path = "examples/textures.rs"
