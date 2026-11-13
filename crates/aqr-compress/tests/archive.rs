@@ -1813,3 +1813,34 @@ fn game_packs() {
     let (_, r) = archived(&[("game/pak01_000.vpk", archive)], &Options::default());
     assert!(!modules(&r, 0).iter().any(|m| m == "raster-recons"), "{:?}", modules(&r, 0));
 }
+
+/// An Unreal 3 texture cache (`.tfc`) of LZO1X chunks: its blocks rebuilt by aqr-lzo, their
+/// data a content.
+#[test]
+fn unreal_texture_cache() {
+    // (liblzo2's streams of aqr-lzo's tests, their data's sizes by aqr-lzo)
+    let streams: Vec<Vec<u8>> = ["mixed.1.lzo1x", "mixed.999-9.lzo1x", "mixed.1_12.lzo1x"]
+        .iter()
+        .map(|n| fixture(&format!("codecs/aqr-lzo/tests/data/{n}")))
+        .collect();
+    let raw = |s: &[u8]| aqr_lzo::recons::split_as(s, 1 << 24, None).unwrap().data.len();
+    let mut tfc = Vec::new();
+    // (a block a chunk: each chunk's blocks are of its block size of data, but the last)
+    for c in 0..9 {
+        let blocks: Vec<&Vec<u8>> = vec![&streams[c % 3]];
+        let size: usize = blocks.iter().map(|s| s.len()).sum();
+        let total: usize = blocks.iter().map(|s| raw(s)).sum();
+        tfc.extend_from_slice(&[0xC1, 0x83, 0x2A, 0x9E]);
+        for v in [0x20000, size, total] {
+            tfc.extend_from_slice(&(v as u32).to_le_bytes());
+        }
+        for s in &blocks {
+            tfc.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            tfc.extend_from_slice(&(raw(s) as u32).to_le_bytes());
+        }
+        blocks.iter().for_each(|s| tfc.extend_from_slice(s));
+    }
+    let (_, r) = archived(&[("CookedPC/Textures.tfc", tfc)], &Options::default());
+    let m: Vec<&str> = r.files[0].modules.iter().map(|m| m.name).collect();
+    assert!(m.contains(&"lzo-recons"), "{m:?}");
+}

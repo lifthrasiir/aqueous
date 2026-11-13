@@ -90,8 +90,9 @@ engines' (Godot's and Wwise's `.pck`, Unreal's and Quake's `.pak`):
   VideoClips) back to back, where more than one bank (a bank alone is aqr-fsb's).
 - `unreal-upk`: Unreal Engine 3's packages (`.upk`, `.u`, `.umap`) and texture caches (`.tfc`):
   the exports (`Outer/Name.Class`) and thumbnails of a package stored as it is (the exports' table
-  as of versions 865 to 893, else none); the compressed chunks of others, files of zlib or of
-  compressed contents (LZO, LZX: `Opaque`).
+  as of versions 865 to 893, else none); the compressed chunks of others, files of zlib, of LZO1X
+  (a file of chunks alone, which aqr-compress rebuilds by aqr-lzo: `unreal_upk::lzo_blocks`) or of
+  compressed contents (LZX: `Opaque`).
 - `fmod-bank`: FMOD Studio's banks (RIFF `FEV `): the FSB5 banks of their `SND ` chunks.
 - `wwise-bnk`: Wwise's SoundBanks: the media of `DIDX`/`DATA` (`<id>.wem`). `wwise-pck`: Wwise's
   file packages (`AKPK`): banks and streamed files (unverified on real files).
@@ -123,7 +124,7 @@ Unreal 3 texture cache, alone, starts as a cache does).
 
 Compressed data is left for separate work: Unity's LZ4 blocks (LZ4HC, which aqr-lz4 does not
 reproduce) and LZMA, the zlib blocks of Unreal's entries rebuilt as streams of their own (rather
-than found by the scan), Unreal 3's LZO chunks (raw LZO1X blocks: aqr-lzo), Oodle not at all.
+than found by the scan), Oodle not at all.
 
 ## Tests
 

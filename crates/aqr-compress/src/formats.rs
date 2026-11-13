@@ -635,9 +635,9 @@ formats! {
     /// Unreal Engine 3's packages (`.upk`, `.u`, `.umap`) and texture caches (`.tfc`): exports,
     /// thumbnails, or compressed chunks (aqr-bundle's `packs`): at the start of data only.
     UnrealUpk = "unreal-upk" {
-        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::UnrealUpk, d)),
-        // slices of the input
-        heap: 0.0,
+        recompressor: Cx(|d, _, opt, _, _| crate::bundle::unreal_upk(d, opt)),
+        // slices of the input; or LZO1X blocks rebuilt (as Lzo's)
+        heap: 9.0,
         bundle: true,
     }
     /// FMOD Studio's banks (`.bank`, RIFF `FEV `): the FSB5 banks of their sound data (aqr-bundle's

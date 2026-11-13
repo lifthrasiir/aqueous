@@ -73,6 +73,10 @@ python3 -I scripts/gen-fixtures.py        # rewrites tests/data (needs liblzo2 a
 The module `lzo-recons` (natively and as a Wasm module of aqr-modules) and lzop files in
 aqr-compress (at the start of a file or found in other data) are done.
 
+Raw LZO1X streams in other containers: Unreal 3's compressed chunks (packages and `.tfc` texture
+caches, aqr-bundle's `unreal-upk`, aqr-compress's `bundle::unreal_upk`): Goat Simulator's 40 files
+1419.50 -> 1273.27 MB.
+
 Not yet: LZO1X streams in other containers (the Linux kernel's images and initramfs are lzop
 files; squashfs, UBIFS, btrfs and zram hold raw streams), LZO-RLE, and the other LZO formats
 (LZO1, LZO1A-1C, LZO1F, LZO1Y, LZO1Z, LZO2A).

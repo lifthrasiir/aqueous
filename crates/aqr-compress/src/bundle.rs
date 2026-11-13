@@ -18,6 +18,18 @@ pub(crate) fn pack(pack: aqr_bundle::packs::Pack, d: &[u8]) -> Option<Formula> {
     aqr_bundle::packs::encode_with(pack, d, kind_by_name)
 }
 
+/// The formula of an Unreal 3 package or texture cache `d`: where it is compressed chunks alone
+/// (a `.tfc`, or a package's chunk as a content), their LZO1X blocks rebuilt by aqr-lzo (their
+/// data a content); else the pack's formula (its chunks, or its exports).
+pub(crate) fn unreal_upk(d: &[u8], opt: &crate::Options) -> Option<Formula> {
+    let blocks = aqr_bundle::packs::unreal_upk::lzo_blocks(d).map(|b| {
+        b.into_iter().map(|(at, len, data)| aqr_lzo::formula::Block { at, len, data: Some(data), stored: false })
+    });
+    blocks
+        .and_then(|b| aqr_lzo::formula::encode_blocks(d, &b.collect::<Vec<_>>(), opt.threads, true))
+        .or_else(|| pack(aqr_bundle::packs::Pack::UnrealUpk, d))
+}
+
 /// Whether `class` is that of the rest of aqr-disk's formula: of an image, or of a game pack.
 fn is_rest(class: &str) -> bool {
     class == aqr_disk::formula::REST

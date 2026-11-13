@@ -215,6 +215,10 @@ fn compressed_packages() {
         if method == 1 {
             assert_eq!(fs[0].name, b"chunk0.zlib");
             assert!(fs.iter().all(|f| f.compressed.is_none()));
+        } else if method == 2 {
+            // (LZO's chunks files of their own, which aqr-compress rebuilds as files of chunks)
+            assert_eq!(fs[1].name, b"chunk1");
+            assert!(fs.iter().all(|f| f.compressed.is_none()));
         } else {
             assert_eq!(fs[1].name, b"chunk1");
             assert_eq!(fs[0].compressed, Some(Compressed::Opaque { len: 0x20000 + 100 }));
@@ -302,4 +306,33 @@ fn a_chunk_alone_has_no_formula() {
     let mut two = one.clone();
     two.extend_from_slice(&chunk(0x20000, &[(lzo, 0x2000)]));
     assert!(packs::encode_with(Pack::UnrealUpk, &two, |_| aqr_formula::Kind::Unknown).is_some());
+}
+
+/// The blocks of a file of LZO chunks alone, in order with their data's sizes: a chunk whose
+/// blocks start as zlib streams do among them (by chance) does not keep the others from being
+/// LZO1X; a file of chunks mostly of zlib has none, nor a package.
+#[test]
+fn lzo_blocks_of_chunks() {
+    use aqr_bundle::packs::unreal_upk::lzo_blocks;
+    let (lzo, zlibish): (&[u8], &[u8]) = (&[0x11; 40], &[0x78, 0x9c, 1, 2, 3]);
+    let mut tfc = chunk(0x20000, &[(lzo, 0x20000), (&lzo[..10], 300)]);
+    let second = tfc.len();
+    tfc.extend_from_slice(&chunk(0x20000, &[(zlibish, 0x100)]));
+    let third = tfc.len();
+    tfc.extend_from_slice(&chunk(0x20000, &[(lzo, 0x400)]));
+    let header = |n: usize| 16 + 8 * n;
+    assert_eq!(
+        lzo_blocks(&tfc),
+        Some(vec![
+            (header(2), 40, 0x20000),
+            (header(2) + 40, 10, 300),
+            (second + header(1), 5, 0x100),
+            (third + header(1), 40, 0x400)
+        ])
+    );
+    let mut zlib = chunk(0x20000, &[(zlibish, 0x100)]);
+    zlib.extend_from_slice(&chunk(0x20000, &[(zlibish, 0x100)]));
+    zlib.extend_from_slice(&chunk(0x20000, &[(lzo, 0x400)]));
+    assert_eq!(lzo_blocks(&zlib), None);
+    assert_eq!(lzo_blocks(&package(868).0), None);
 }

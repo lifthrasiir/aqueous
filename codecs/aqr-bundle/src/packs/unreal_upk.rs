@@ -51,6 +51,8 @@ use aqr_disk::{Compressed, File};
 const MAGIC: [u8; 4] = [0xC1, 0x83, 0x2A, 0x9E];
 const VERSIONS: std::ops::RangeInclusive<u32> = 415..=1000;
 const ZLIB: u32 = 1;
+/// The compression flags of LZO1X chunks.
+const LZO: u32 = 2;
 /// The blocks a chunk may have, at most (8 GiB of data in blocks of 128 KiB; the samples' biggest
 /// chunk has 3774).
 const BLOCKS: usize = 1 << 16;
@@ -159,6 +161,31 @@ fn chunk_file(d: &[u8], at: usize, k: usize, zlib: Option<bool>) -> Option<File>
     Some(f)
 }
 
+/// The blocks of `d`, a file of compressed chunks alone (a `.tfc`, or a chunk of a package as a
+/// content of its own), one after another from its start: each block's place, bytes and bytes of
+/// data, as LZO1X streams (aqr-lzo's `encode_blocks`). None where it is no such file, or most of
+/// its chunks are of zlib (found by aqr-compress's scan): a file's chunks are of one method, and
+/// an LZO1X block may start as a zlib header does (one chunk of Goat Simulator's 48957).
+pub fn lzo_blocks(d: &[u8]) -> Option<Vec<(usize, usize, usize)>> {
+    if !(d.starts_with(&MAGIC) && u32le(d, 4).is_some_and(block_size)) {
+        return None;
+    }
+    let (mut blocks, mut at, mut chunks, mut zlibs) = (Vec::new(), 0, 0usize, 0usize);
+    while let Some((extent, _, zlib)) = chunk(d, at) {
+        (chunks, zlibs) = (chunks + 1, zlibs + zlib as usize);
+        // (the header: magic, block size, sizes; then a pair of sizes a block, then the blocks)
+        let n = (u32le(d, at + 12)? as usize).div_ceil(u32le(d, at + 4)? as usize);
+        let mut data = at + 16 + 8 * n;
+        for k in 0..n {
+            let (s, u) = (u32le(d, at + 16 + 8 * k)? as usize, u32le(d, at + 20 + 8 * k)? as usize);
+            blocks.push((data, s, u));
+            data += s;
+        }
+        at = extent.end;
+    }
+    (!blocks.is_empty() && zlibs * 2 <= chunks).then_some(blocks)
+}
+
 /// The chunks of a file of chunks alone (a `.tfc`), one after another from its start.
 fn chunks(d: &[u8]) -> Vec<File> {
     let (mut files, mut at) = (Vec::new(), 0);
@@ -219,7 +246,15 @@ pub fn files(d: &[u8]) -> Option<Vec<File>> {
         let mut files = Vec::with_capacity(n);
         for k in 0..n {
             let at = u32le(d, r.at + 16 * k + 8)? as usize;
-            files.extend(chunk_file(d, at, k, Some(method == ZLIB)));
+            // (an LZO chunk a file of its own, which aqr-compress rebuilds by aqr-lzo, as a file of
+            // chunks alone: [`lzo_blocks`]; LZX's compressed contents)
+            let mut f = chunk_file(d, at, k, Some(method == ZLIB));
+            if method == LZO
+                && let Some(f) = &mut f
+            {
+                f.compressed = None;
+            }
+            files.extend(f);
         }
         return Some(files);
     }
