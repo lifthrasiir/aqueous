@@ -16,6 +16,7 @@
 
 use super::{cstr, file, u32be, u64be};
 use aqr_disk::File;
+use std::borrow::Cow;
 
 const MAGIC: &[u8; 8] = b"UnityFS\0";
 const AT_END: u32 = 0x80;
@@ -26,7 +27,7 @@ pub fn starts(d: &[u8]) -> bool {
 }
 
 /// The table of blocks of bundle `d` decompressed, and where its blocks start.
-fn table(d: &[u8]) -> Option<(Vec<u8>, usize)> {
+fn table(d: &[u8]) -> Option<(Cow<'_, [u8]>, usize)> {
     let version = u32be(d, 8)?;
     let (_, at) = cstr(d, 12)?;
     let (_, mut at) = cstr(d, at)?;
@@ -47,15 +48,24 @@ fn table(d: &[u8]) -> Option<(Vec<u8>, usize)> {
         blocks = blocks.next_multiple_of(16);
     }
     let table = match flags & 0x3f {
-        0 if packed == unpacked => raw.to_vec(),
+        0 if packed == unpacked => Cow::Borrowed(raw),
         2 | 3 => {
             let mut out = Vec::with_capacity(unpacked);
             aqr_lz4::block::decode(raw, &mut out, 0, unpacked).ok()?;
-            (out.len() == unpacked).then_some(out)?
+            Cow::Owned((out.len() == unpacked).then_some(out)?)
         }
         _ => return None,
     };
     Some((table, blocks))
+}
+
+/// A block of the data: where it starts decompressed (`data`) and in the bundle (`at`), its
+/// size decompressed, and whether it is stored as it is.
+struct Block {
+    data: u64,
+    at: u64,
+    size: u64,
+    stored: bool,
 }
 
 /// The nodes of bundle `d` that lie in blocks stored as they are; None where it is no bundle,
@@ -69,15 +79,13 @@ pub fn files(d: &[u8]) -> Option<Vec<File>> {
     if n > t.len() / 10 {
         return None;
     }
-    // the blocks: where each starts in the data decompressed and in `d`, its size, and whether
-    // it is stored as it is
     let (mut at, mut data, mut pos) = (20, 0u64, start as u64);
     let mut blocks = Vec::with_capacity(n);
     for _ in 0..n {
         let (size, packed) = (u32be(&t, at)? as u64, u32be(&t, at + 4)? as u64);
         let flags = u16::from_be_bytes(t.get(at + 8..at + 10)?.try_into().ok()?);
         let stored = flags & 0x3f == 0 && size == packed;
-        blocks.push((data, pos, size, stored));
+        blocks.push(Block { data, at: pos, size, stored });
         (data, pos, at) = (data + size, pos + packed, at + 10);
     }
     if pos > d.len() as u64 {
@@ -98,11 +106,11 @@ pub fn files(d: &[u8]) -> Option<Vec<File>> {
             continue;
         }
         // (the blocks it lies in, all stored: then contiguous in `d`)
-        let first = blocks.partition_point(|b| b.0 + b.2 <= offset);
-        let last = blocks.partition_point(|b| b.0 < end);
-        if blocks[first..last].iter().all(|b| b.3) {
-            let b = blocks[first];
-            let s = (b.1 + offset - b.0) as usize;
+        let first = blocks.partition_point(|b| b.data + b.size <= offset);
+        let last = blocks.partition_point(|b| b.data < end);
+        if blocks[first..last].iter().all(|b| b.stored) {
+            let b = &blocks[first];
+            let s = (b.at + offset - b.data) as usize;
             files.push(file(path.to_vec(), s..s + size as usize));
         }
     }

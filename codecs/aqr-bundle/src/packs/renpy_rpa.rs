@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 
-use super::{file, u32le, within, zlib_inflate};
+use super::{file, slashes, u32le, within, zlib_inflate};
 use aqr_disk::File;
 
 pub fn starts(d: &[u8]) -> bool {
@@ -224,11 +224,7 @@ pub fn files(d: &[u8]) -> Option<Vec<File>> {
         }
         let Some(r) = within(d, o as u64, l as u64) else { continue };
         let mut name = name;
-        for b in &mut name {
-            if *b == b'\\' {
-                *b = b'/';
-            }
-        }
+        slashes(&mut name);
         out.push(file(name, r));
     }
     Some(out)

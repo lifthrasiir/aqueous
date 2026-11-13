@@ -45,7 +45,8 @@
 //! Hat in Time's licensee version 5); not read: UE2's packages (compact indices) and those
 //! before version 415, UE4's (a negative legacy version first).
 
-use super::{file, u32le, within};
+use super::ue::R;
+use super::{file, file_with, u32le, within};
 use aqr_disk::{Compressed, File};
 
 const MAGIC: [u8; 4] = [0xC1, 0x83, 0x2A, 0x9E];
@@ -67,28 +68,7 @@ pub fn starts(d: &[u8]) -> bool {
     d.starts_with(&MAGIC) && u32le(d, 4).is_some_and(|v| block_size(v) || VERSIONS.contains(&(v & 0xffff)))
 }
 
-/// A reader of a table.
-struct R<'a> {
-    d: &'a [u8],
-    at: usize,
-}
-
 impl R<'_> {
-    fn u32(&mut self) -> Option<u32> {
-        let v = u32le(self.d, self.at)?;
-        self.at += 4;
-        Some(v)
-    }
-
-    fn i32(&mut self) -> Option<i32> {
-        self.u32().map(|v| v as i32)
-    }
-
-    fn skip(&mut self, n: usize) -> Option<()> {
-        self.at = self.at.checked_add(n).filter(|&e| e <= self.d.len())?;
-        Some(())
-    }
-
     /// A count of items of `size` bytes at least each, if they may fit in what is left.
     fn count(&mut self, size: usize) -> Option<usize> {
         let n = usize::try_from(self.i32()?).ok()?;
@@ -98,26 +78,6 @@ impl R<'_> {
     /// `n`, if as many items of `size` bytes at least may fit in what is left.
     fn count_of(&self, n: usize, size: usize) -> Option<usize> {
         (self.at <= self.d.len() && n <= (self.d.len() - self.at) / size).then_some(n)
-    }
-
-    /// An `FString`, as UTF-8 (lossy, of UTF-16 ones), up to its NUL.
-    fn string(&mut self) -> Option<Vec<u8>> {
-        let n = self.i32()?;
-        let s = match n {
-            0.. => {
-                let b = self.d.get(self.at..self.at.checked_add(n as usize)?)?;
-                self.at += n as usize;
-                b.to_vec()
-            }
-            _ => {
-                let n = (n as i64).unsigned_abs() as usize;
-                let b = self.d.get(self.at..self.at.checked_add(n.checked_mul(2)?)?)?;
-                self.at += 2 * n;
-                let units = b.as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c));
-                char::decode_utf16(units).map(|c| c.unwrap_or('\u{fffd}')).collect::<String>().into_bytes()
-            }
-        };
-        Some(s.split(|&b| b == 0).next().unwrap_or(&[]).to_vec())
     }
 }
 
@@ -156,9 +116,8 @@ fn chunk(d: &[u8], at: usize) -> Option<(std::ops::Range<usize>, u64, bool)> {
 fn chunk_file(d: &[u8], at: usize, k: usize, zlib: Option<bool>) -> Option<File> {
     let (extent, raw, found) = chunk(d, at)?;
     let zlib = zlib.unwrap_or(found);
-    let mut f = file(format!("chunk{k}{}", if zlib { ".zlib" } else { "" }).into_bytes(), extent);
-    f.compressed = (!zlib).then_some(Compressed::Opaque { len: raw });
-    Some(f)
+    let name = format!("chunk{k}{}", if zlib { ".zlib" } else { "" }).into_bytes();
+    Some(file_with(name, extent, (!zlib).then_some(Compressed::Opaque { len: raw })))
 }
 
 /// The blocks of `d`, a file of compressed chunks alone (a `.tfc`, or a chunk of a package as a

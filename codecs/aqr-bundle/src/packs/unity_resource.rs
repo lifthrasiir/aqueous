@@ -14,6 +14,7 @@
 //! (a `.resource` of videos alone is not taken). Only version 1 of FSB5 was seen in `.resource`
 //! files; version 0 is read by the description.
 
+use super::fmod_bank::fsb5_size;
 use super::{file, u32be, u32le, u64be};
 use aqr_disk::File;
 
@@ -27,18 +28,7 @@ const BOXES: [&[u8; 4]; 13] = [
 
 /// The size of the bank at `at` of `d`, if one is there and fits.
 fn bank(d: &[u8], at: usize) -> Option<usize> {
-    if d.get(at..)?.get(..4)? != MAGIC {
-        return None;
-    }
-    let head = match u32le(d, at + 4)? {
-        0 => 64,
-        1 => 60,
-        _ => return None,
-    };
-    let mut size = head as u64;
-    for k in [12, 16, 20] {
-        size += u32le(d, at + k)? as u64;
-    }
+    let size = fsb5_size(d.get(at..)?)?;
     (size <= (d.len() - at) as u64).then_some(size as usize)
 }
 

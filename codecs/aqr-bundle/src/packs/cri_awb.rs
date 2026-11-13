@@ -8,7 +8,7 @@
 //! aligned).
 //!
 //! Each file is taken as `<id>.<ext>`, the extension by its magic: `.hca` (`HCA\0`, each byte
-//! possibly with its high bit set by the HCA's masking), `.adx` (`80 00`), else `.bin`. Other
+//! possibly with its high bit set by the HCA's masking), `.adx` (`80 00`), `.wav` (`RIFF`), `.ogg` (`OggS`), else `.bin`. Other
 //! `.awb` files (`QUAVMAGI`, ...) are not AFS2: not taken. The header and the padding between
 //! files are the rest.
 

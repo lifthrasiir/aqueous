@@ -17,7 +17,7 @@
 //! ([`aqr_disk::Compressed::Opaque`]) of that size. Aliases are no files; the rest is the header
 //! and the entries.
 
-use super::{u16le, u32le, within};
+use super::{file_with, u16le, u32le, within};
 use aqr_disk::{Compressed, File};
 
 pub fn starts(d: &[u8]) -> bool {
@@ -60,7 +60,7 @@ fn kind(b: &[u8]) -> (&'static str, Option<u64>) {
         [0xff, 0xd8, 0xff, ..] => "jpg",
         [b'G', b'I', b'F', b'8', ..] => "gif",
         [0x1f, 0x8b, ..] => "gz",
-        b"wOF2" | [b'w', b'O', b'F', b'2', ..] => "woff2",
+        [b'w', b'O', b'F', b'2', ..] => "woff2",
         [b'w', b'O', b'F', b'F', ..] => "woff",
         [0, 1, 0, 0, ..] | [b't', b'r', b'u', b'e', ..] => "ttf",
         [b'O', b'T', b'T', b'O', ..] => "otf",
@@ -106,7 +106,7 @@ pub fn files(d: &[u8]) -> Option<Vec<File>> {
         }
         let (ext, packed) = kind(&d[range.clone()]);
         let compressed = packed.map(|len| Compressed::Opaque { len });
-        files.push(File { name: format!("{id}.{ext}").into_bytes(), extents: vec![range], rank: 0, compressed });
+        files.push(file_with(format!("{id}.{ext}").into_bytes(), range, compressed));
     }
     Some(files)
 }

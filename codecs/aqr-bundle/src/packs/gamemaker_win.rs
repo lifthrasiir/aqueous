@@ -80,33 +80,58 @@ pub fn files(d: &[u8]) -> Option<Vec<File>> {
     Some(files)
 }
 
+/// The format of a texture's blob.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Format {
+    Png,
+    Qoi,
+    Zqoi,
+}
+
+impl Format {
+    fn extension(self) -> &'static str {
+        match self {
+            Format::Png => "png",
+            Format::Qoi => "qoi",
+            Format::Zqoi => "zqoi",
+        }
+    }
+}
+
+/// A texture's blob: where it starts, its format and the size its entry gives (if it does).
+struct Blob {
+    at: usize,
+    format: Format,
+    size: Option<usize>,
+}
+
 fn textures(d: &[u8], chunk: &std::ops::Range<usize>, files: &mut Vec<File>) {
     let Some(entries) = pointers(d, chunk.start, chunk) else { return };
-    let mut blobs: Vec<(usize, &'static str, Option<usize>)> = Vec::new();
+    let mut blobs: Vec<Blob> = Vec::new();
     for (i, &p) in entries.iter().enumerate() {
         let limit = entries.get(i + 1).copied().filter(|&n| n > p).unwrap_or(p + 28).min(chunk.end);
         for w in (p..limit.min(p + 28)).step_by(4) {
             let Some(target) = u32le(d, w) else { break };
             let target = target as usize;
             let Some(head) = d.get(target..target + 4) else { continue };
-            let kind = match head {
-                [0x89, b'P', b'N', b'G'] => "png",
-                b"fioq" | b"qoif" => "qoi",
-                b"2zoq" => "zqoi",
+            let format = match head {
+                [0x89, b'P', b'N', b'G'] => Format::Png,
+                b"fioq" | b"qoif" => Format::Qoi,
+                b"2zoq" => Format::Zqoi,
                 _ => continue,
             };
             if target >= chunk.start {
                 // (the entries of 2022.9 on have the blob's size before the dimensions)
                 let size = (w == p + 24).then(|| u32le(d, p + 8)).flatten().map(|s| s as usize);
-                blobs.push((target, kind, size));
+                blobs.push(Blob { at: target, format, size });
             }
             break;
         }
     }
-    let mut starts: Vec<usize> = blobs.iter().map(|b| b.0).collect();
+    let mut starts: Vec<usize> = blobs.iter().map(|b| b.at).collect();
     starts.sort_unstable();
-    for (n, &(start, kind, size)) in blobs.iter().enumerate() {
-        let len = if kind == "png" {
+    for (n, &Blob { at: start, format, size }) in blobs.iter().enumerate() {
+        let len = if format == Format::Png {
             d.get(start..chunk.end).and_then(|s| s.starts_with(&PNG).then(|| png_len(s)).flatten())
         } else {
             let next = starts.partition_point(|&s| s <= start);
@@ -114,7 +139,7 @@ fn textures(d: &[u8], chunk: &std::ops::Range<usize>, files: &mut Vec<File>) {
             Some(size.filter(|&s| s <= bound).unwrap_or(bound))
         };
         let Some(len) = len.filter(|&l| l > 0) else { continue };
-        files.push(file(format!("txtr/{n:03}.{kind}").into_bytes(), start..start + len));
+        files.push(file(format!("txtr/{n:03}.{}", format.extension()).into_bytes(), start..start + len));
     }
 }
 

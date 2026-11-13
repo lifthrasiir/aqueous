@@ -14,7 +14,8 @@ pub struct Value {
 pub enum Kind {
     /// The members: each key's span between its quotes, and the value.
     Object(Vec<(Range<usize>, Value)>),
-    Array(Vec<Value>),
+    /// An array (its values are checked, not kept).
+    Array,
     String,
     Number,
     /// `true`, `false` or `null`.
@@ -94,10 +95,9 @@ impl Parser<'_> {
             }
             b'[' => {
                 self.at += 1;
-                let mut vs = Vec::new();
                 if !self.eat(b']') {
                     loop {
-                        vs.push(self.value(depth + 1)?);
+                        self.value(depth + 1)?;
                         if self.eat(b']') {
                             break;
                         }
@@ -106,7 +106,7 @@ impl Parser<'_> {
                         }
                     }
                 }
-                Kind::Array(vs)
+                Kind::Array
             }
             b'"' => {
                 self.string()?;

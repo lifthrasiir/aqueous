@@ -20,7 +20,7 @@
 //! the flag of protection (bit 31 of the `info` flags: encrypted) are left out. Encryption
 //! that leaves the flag clear (the games' own) cannot be told apart.
 
-use super::{u32le, u64le, within, zlib_inflate};
+use super::{u32le, u64le, utf16_lossy, within, zlib_inflate};
 use aqr_disk::File;
 
 const MAGIC: &[u8; 11] = b"XP3\r\n \n\x1a\x8b\x67\x01";
@@ -48,9 +48,7 @@ fn index(d: &[u8], at: u64) -> Option<Vec<u8>> {
 }
 
 fn utf16(b: &[u8]) -> Vec<u8> {
-    let units = b.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]]));
-    let s: String = char::decode_utf16(units).map(|c| c.unwrap_or('\u{fffd}')).collect();
-    s.replace('\\', "/").into_bytes()
+    utf16_lossy(b).replace('\\', "/").into_bytes()
 }
 
 /// The chunks of `d` as (tag, contents).
@@ -94,7 +92,7 @@ fn entries(index: &[u8], d: &[u8]) -> Option<Vec<File>> {
             continue;
         }
         let extents: Option<Vec<_>> = match segments[..] {
-            [(1, offset, _, packed)] => within(d, offset, packed).map(|r| vec![r]).into_iter().next(),
+            [(1, offset, _, packed)] => within(d, offset, packed).map(|r| vec![r]),
             _ if segments.iter().all(|s| s.0 == 0) => {
                 let mut v = Vec::new();
                 let mut ok = true;

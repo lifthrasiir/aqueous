@@ -32,7 +32,7 @@
 //! Left out: Xbox 360 archives, files out of the archive. Whether the size of a file with an
 //! embedded name counts that name is not pinned down; it is taken to.
 
-use super::{cstr, file, u32le, u64le, within};
+use super::{cstr, file, file_with, slashes, u32le, u64le, within};
 use aqr_disk::{Compressed, File};
 
 fn morrowind(d: &[u8]) -> bool {
@@ -64,11 +64,7 @@ fn path(folder: &[u8], name: &[u8]) -> Vec<u8> {
         p.push(b'\\');
     }
     p.extend_from_slice(name);
-    for b in &mut p {
-        if *b == b'\\' {
-            *b = b'/';
-        }
-    }
+    slashes(&mut p);
     p
 }
 
@@ -159,9 +155,7 @@ fn bsa(d: &[u8]) -> Option<Vec<File>> {
             if start >= end {
                 continue;
             }
-            let mut f = file(path(&folder, &name), start..end);
-            f.compressed = packed;
-            out.push(f);
+            out.push(file_with(path(&folder, &name), start..end, packed));
         }
     }
     Some(out)

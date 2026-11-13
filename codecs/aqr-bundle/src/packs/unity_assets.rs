@@ -30,6 +30,7 @@
 
 use super::{file, u32be, u64be, within};
 use aqr_disk::File;
+use std::borrow::Cow;
 
 /// The versions read.
 const VERSIONS: std::ops::RangeInclusive<u32> = 9..=22;
@@ -135,7 +136,7 @@ pub fn starts(d: &[u8]) -> bool {
 }
 
 /// The extension of the files of objects of class `class`.
-fn extension(class: i32) -> String {
+fn extension(class: i32) -> Cow<'static, str> {
     let known = match class {
         21 => "mat",
         28 => "tex2d",
@@ -153,9 +154,9 @@ fn extension(class: i32) -> String {
         187 => "tex2darray",
         213 => "sprite",
         329 => "videoclip",
-        _ => return format!("c{class}"),
+        _ => return Cow::Owned(format!("c{class}")),
     };
-    known.to_string()
+    Cow::Borrowed(known)
 }
 
 /// The objects of serialized file `d`; None where it is not one, or its metadata is not read.

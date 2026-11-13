@@ -12,8 +12,9 @@
 
 /// CRI's `@UTF` tables, which its ACBs and CPKs are.
 pub mod cri_utf;
+mod ue;
 
-use aqr_disk::File;
+use aqr_disk::{Compressed, File};
 use aqr_formula::{Formula, Kind};
 
 /// The packs, each `Variant = "name", module;` (its reader `module::starts` and `module::files`):
@@ -150,7 +151,21 @@ pub fn encode_files(pack: Pack, d: &[u8], files: &[File], kind: fn(&[u8]) -> Kin
 
 /// A file of one extent, of rank 0.
 fn file(name: Vec<u8>, extent: std::ops::Range<usize>) -> File {
-    File { name, extents: vec![extent], rank: 0, compressed: None }
+    file_with(name, extent, None)
+}
+
+/// A file of one extent, of rank 0, as it is stored (`compressed`).
+fn file_with(name: Vec<u8>, extent: std::ops::Range<usize>, compressed: Option<Compressed>) -> File {
+    File { name, extents: vec![extent], rank: 0, compressed }
+}
+
+/// `name` with its `\` made `/`.
+fn slashes(name: &mut [u8]) {
+    for b in name {
+        if *b == b'\\' {
+            *b = b'/';
+        }
+    }
 }
 
 /// Little-endian reads of `d` at `at`, None past its end.
@@ -178,6 +193,12 @@ fn u64be(d: &[u8], at: usize) -> Option<u64> {
 fn within(d: &[u8], start: u64, len: u64) -> Option<std::ops::Range<usize>> {
     let end = start.checked_add(len)?;
     (end <= d.len() as u64).then_some(start as usize..end as usize)
+}
+
+/// `b` as UTF-16LE units decoded to UTF-8, lossy (a trailing odd byte dropped).
+fn utf16_lossy(b: &[u8]) -> String {
+    let units = b.as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c));
+    char::decode_utf16(units).map(|c| c.unwrap_or('\u{fffd}')).collect()
 }
 
 /// The bytes of a NUL-terminated string at `at`, and the position after its NUL.

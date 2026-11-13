@@ -24,7 +24,8 @@
 //! files of compressed contents ([`aqr_disk::Compressed::Opaque`]); encrypted and deleted ones
 //! are the rest. An encrypted index is not read.
 
-use super::{u32le, u64le, within};
+use super::ue::R;
+use super::{file_with, u32le, u64le, within};
 use aqr_disk::{Compressed, File};
 
 const MAGIC: [u8; 4] = [0xE1, 0x12, 0x6F, 0x5A];
@@ -74,57 +75,6 @@ pub fn footer(d: &[u8]) -> Option<Footer> {
         return Some(Footer { at, version, index, methods: methods.collect(), encrypted });
     }
     None
-}
-
-/// A reader of an index.
-struct R<'a> {
-    d: &'a [u8],
-    at: usize,
-}
-
-impl R<'_> {
-    fn u8(&mut self) -> Option<u8> {
-        let b = *self.d.get(self.at)?;
-        self.at += 1;
-        Some(b)
-    }
-
-    fn u32(&mut self) -> Option<u32> {
-        let v = u32le(self.d, self.at)?;
-        self.at += 4;
-        Some(v)
-    }
-
-    fn u64(&mut self) -> Option<u64> {
-        let v = u64le(self.d, self.at)?;
-        self.at += 8;
-        Some(v)
-    }
-
-    fn skip(&mut self, n: usize) -> Option<()> {
-        self.at = self.at.checked_add(n).filter(|&e| e <= self.d.len())?;
-        Some(())
-    }
-
-    /// An `FString`, as UTF-8 (lossy, of UTF-16 ones).
-    fn string(&mut self) -> Option<Vec<u8>> {
-        let n = self.u32()? as i32;
-        let s = match n {
-            0.. => {
-                let b = self.d.get(self.at..self.at.checked_add(n as usize)?)?;
-                self.at += n as usize;
-                b.to_vec()
-            }
-            _ => {
-                let n = (n as i64).unsigned_abs() as usize;
-                let b = self.d.get(self.at..self.at.checked_add(n.checked_mul(2)?)?)?;
-                self.at += 2 * n;
-                let units = b.as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c));
-                char::decode_utf16(units).map(|c| c.unwrap_or('\u{fffd}')).collect::<String>().into_bytes()
-            }
-        };
-        Some(s.split(|&b| b == 0).next().unwrap_or(&[]).to_vec())
-    }
 }
 
 /// An entry as far as its data goes: the offset of its copy, its size compressed and not, the
@@ -283,7 +233,7 @@ pub fn files(d: &[u8]) -> Option<Vec<File>> {
             }
         };
         let compressed = (e.method != 0 && !zlib).then_some(Compressed::Opaque { len: e.raw });
-        files.push(File { name, extents: vec![extent], rank: 0, compressed });
+        files.push(file_with(name, extent, compressed));
     }
     Some(files)
 }

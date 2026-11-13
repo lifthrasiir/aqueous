@@ -13,7 +13,7 @@
 //! read, its order not being pinned down: it is a plain file. Entries out of the archive are
 //! left out.
 
-use super::{cstr, file, u32be, within};
+use super::{cstr, file, slashes, u32be, within};
 use aqr_disk::{Compressed, File};
 
 pub fn starts(d: &[u8]) -> bool {
@@ -36,11 +36,7 @@ pub fn files(d: &[u8]) -> Option<Vec<File>> {
             continue;
         }
         let mut name = name.to_vec();
-        for b in &mut name {
-            if *b == b'\\' {
-                *b = b'/';
-            }
-        }
+        slashes(&mut name);
         let mut f = file(name, r.clone());
         let h = &d[r.start..r.end];
         if h.len() >= 5 && h[0] & 0x7e == 0x10 && h[1] == 0xfb && h[0] & 1 == 0 {

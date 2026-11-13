@@ -21,7 +21,7 @@
 //! when its blocks are stored or zlib. Where it cannot be read (`lzma` compressed, for one) the
 //! files are named by their index.
 
-use super::{file, u32be, within, zlib_inflate};
+use super::{file, file_with, u32be, within, zlib_inflate};
 use aqr_disk::{Compressed, File};
 
 pub fn starts(d: &[u8]) -> bool {
@@ -40,9 +40,9 @@ struct Toc<'a> {
     blocks: usize,
 }
 
-/// How a file's blocks lie: the bytes of its extent in all, and the blocks as (size in the
-/// archive, stored).
 impl Toc<'_> {
+    /// How a file's blocks lie: the bytes of its extent in all, and the blocks as (size in the
+    /// archive, stored).
     fn blocks(&self, start: u64, size: u64, budget: &mut usize) -> Option<Vec<(u64, bool)>> {
         let n = size.div_ceil(self.block);
         if n > (self.blocks as u64).saturating_sub(start) || n as usize > *budget {
@@ -113,9 +113,8 @@ pub fn files(d: &[u8]) -> Option<Vec<File>> {
                 }
             }
             if ok {
-                let lines: Vec<&[u8]> = text.split(|&b| b == b'\n').collect();
-                let lines: Vec<Vec<u8>> = lines
-                    .into_iter()
+                let lines: Vec<Vec<u8>> = text
+                    .split(|&b| b == b'\n')
                     .map(|l| l.strip_suffix(b"\r").unwrap_or(l))
                     .map(|l| l.strip_prefix(b"/").unwrap_or(l).to_vec())
                     .collect();
@@ -129,8 +128,11 @@ pub fn files(d: &[u8]) -> Option<Vec<File>> {
     let mut out = Vec::new();
     for i in 1..count {
         let (start, size, offset) = record(i)?;
-        let name =
-            names.get(i - 1).filter(|n| !n.is_empty()).cloned().unwrap_or_else(|| format!("{i:06}").into_bytes());
+        let name = names
+            .get_mut(i - 1)
+            .filter(|n| !n.is_empty())
+            .map(std::mem::take)
+            .unwrap_or_else(|| format!("{i:06}").into_bytes());
         let Some(bs) = t.blocks(start, size, &mut budget) else { continue };
         let total: u64 = bs.iter().map(|b| b.0).sum();
         let Some(r) = within(d, offset, total) else { continue };
@@ -140,9 +142,7 @@ pub fn files(d: &[u8]) -> Option<Vec<File>> {
         if bs.iter().all(|b| b.1) {
             out.push(file(name, r));
         } else if lzma {
-            let mut f = file(name, r);
-            f.compressed = Some(Compressed::Opaque { len: size });
-            out.push(f);
+            out.push(file_with(name, r, Some(Compressed::Opaque { len: size })));
         } else if bs.len() == 1 {
             out.push(file(name, r));
         }

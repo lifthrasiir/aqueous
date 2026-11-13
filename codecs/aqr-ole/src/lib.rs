@@ -57,6 +57,13 @@ struct Header {
     difat_sectors: u32,
 }
 
+impl Header {
+    /// Where sector `n` starts.
+    fn sector_at(&self, n: u32) -> Option<usize> {
+        (n as usize).checked_add(1)?.checked_mul(self.sector)
+    }
+}
+
 /// The header in `b` (the first 512 bytes), if it is one that holds: the signature, byte order
 /// little-endian, version 3 with sectors of 512 bytes or version 4 with 4096, mini sectors of 64.
 fn header(b: &[u8]) -> Option<Header> {
@@ -96,7 +103,7 @@ struct Sectors<'a> {
 impl Sectors<'_> {
     /// Where sector `n` starts.
     fn at(&self, n: u32) -> Option<usize> {
-        (n as usize).checked_add(1)?.checked_mul(self.h.sector)
+        self.h.sector_at(n)
     }
 
     fn read(&self, n: u32) -> Option<std::borrow::Cow<'_, [u8]>> {
@@ -124,10 +131,9 @@ fn fat(d: &dyn Image, h: Header) -> Option<Vec<u32>> {
     let mut listed: Vec<u32> = (0..109).map(|i| le32(&b, 76 + 4 * i)).collect();
     // the DIFAT's sectors: the numbers of FAT sectors, and the next DIFAT sector at the end
     let per = h.sector / 4 - 1;
-    let at = |n: u32| (n as usize).checked_add(1)?.checked_mul(h.sector);
     let (mut next, mut seen) = (h.difat_start, 0u32);
     while next <= MAX_SECTOR && seen < h.difat_sectors && listed.len() < FAT_BYTES / 4 {
-        let a = at(next)?;
+        let a = h.sector_at(next)?;
         let s = d.get(a..a.checked_add(h.sector)?)?;
         listed.extend((0..per).map(|i| le32(&s, 4 * i)));
         next = le32(&s, 4 * per);
@@ -138,7 +144,7 @@ fn fat(d: &dyn Image, h: Header) -> Option<Vec<u32>> {
         if fat.len() * 4 >= FAT_BYTES {
             break;
         }
-        let a = at(n)?;
+        let a = h.sector_at(n)?;
         let Some(s) = a.checked_add(h.sector).and_then(|e| d.get(a..e)) else { break };
         fat.extend((0..h.sector / 4).map(|i| le32(&s, 4 * i)));
     }
@@ -225,8 +231,9 @@ pub fn files(d: &dyn Image) -> Vec<File> {
             continue;
         }
         // (the siblings at this level, then the entry's children below it)
-        stack.push((e.left, path.clone(), depth + 1));
-        stack.push((e.right, path.clone(), depth + 1));
+        for sibling in [e.left, e.right].into_iter().filter(|&s| s != NO_STREAM) {
+            stack.push((sibling, path.clone(), depth + 1));
+        }
         let mut here = path;
         if !here.is_empty() {
             here.push(b'/');

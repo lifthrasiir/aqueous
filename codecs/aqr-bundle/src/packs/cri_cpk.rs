@@ -83,11 +83,8 @@ fn toc_files(d: &[u8], toc: u64, content: u64) -> Option<Vec<File>> {
                 if (r.start as u64) < content {
                     return None;
                 }
-                let mut f = super::file(name.clone(), r);
-                if *size < *extract {
-                    f.compressed = Some(Compressed::Opaque { len: *extract });
-                }
-                Some(f)
+                let compressed = (*size < *extract).then_some(Compressed::Opaque { len: *extract });
+                Some(super::file_with(name.clone(), r, compressed))
             })
             .collect()
     };
@@ -121,11 +118,8 @@ fn itoc_files(d: &[u8], itoc: u64, content: u64, align: u64) -> Option<Vec<File>
     for (id, size, extract) in items {
         if let Some(r) = within(d, pos, size) {
             let ext = if size < extract { "bin" } else { cri_awb::ext(&d[r.clone()]) };
-            let mut f = super::file(format!("{id}.{ext}").into_bytes(), r);
-            if size < extract {
-                f.compressed = Some(Compressed::Opaque { len: extract });
-            }
-            out.push(f);
+            let compressed = (size < extract).then_some(Compressed::Opaque { len: extract });
+            out.push(super::file_with(format!("{id}.{ext}").into_bytes(), r, compressed));
         }
         pos = pos.checked_add(size)?.div_ceil(align).checked_mul(align)?;
     }

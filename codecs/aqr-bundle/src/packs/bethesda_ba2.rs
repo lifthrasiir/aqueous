@@ -25,7 +25,7 @@
 //! The names are the name table's (u16 length and the bytes for each file, in order, with
 //! `\` made `/`); without the table, the index with the extension.
 
-use super::{file, u16le, u32le, u64le, within};
+use super::{file_with, slashes, u16le, u32le, u64le, within};
 use aqr_disk::{Compressed, File};
 
 pub fn starts(d: &[u8]) -> bool {
@@ -50,11 +50,7 @@ fn named(path: &[u8], i: usize, extension: &[u8]) -> Vec<u8> {
     } else {
         path.to_vec()
     };
-    for b in &mut n {
-        if *b == b'\\' {
-            *b = b'/';
-        }
-    }
+    slashes(&mut n);
     n
 }
 
@@ -106,9 +102,7 @@ pub fn files(d: &[u8]) -> Option<Vec<File>> {
             };
             let Some(extent) = within(d, offset, len as u64) else { continue };
             if !extent.is_empty() {
-                let mut f = file(name(i, ext(&r[4..8])), extent);
-                f.compressed = compressed;
-                out.push(f);
+                out.push(file_with(name(i, ext(&r[4..8])), extent, compressed));
             }
         } else {
             let r = d.get(at..at + 24)?;

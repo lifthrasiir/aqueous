@@ -131,7 +131,7 @@ fn holes(text: &[u8], e: &Entry, d: &[u8], out: &mut Vec<(Range<usize>, Hole)>) 
         }
     }
     let size = int.get(text, b"blockSize").and_then(|s| canonical(text, s, false)).filter(|&s| s > 0);
-    if let (Some(bs), Some(b)) = (size, int.get(text, b"blocks").filter(|b| matches!(b.kind, json::Kind::Array(_)))) {
+    if let (Some(bs), Some(b)) = (size, int.get(text, b"blocks").filter(|b| matches!(b.kind, json::Kind::Array))) {
         let inner = b.span.start + 1..b.span.end - 1;
         expect.clear();
         if (bs as usize) >= d.len() && !d.is_empty() {

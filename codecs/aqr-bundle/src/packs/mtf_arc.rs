@@ -11,7 +11,7 @@
 //! The extension tells the type in the game's own hash; the table of the hashes is not pinned
 //! down, so a file is named `NAME.HASH` with the hash in 8 hex digits.
 
-use super::{file, u16le, u32le, within};
+use super::{file, slashes, u16le, u32le, within};
 use aqr_disk::File;
 
 pub fn starts(d: &[u8]) -> bool {
@@ -30,11 +30,7 @@ pub fn files(d: &[u8]) -> Option<Vec<File>> {
         let e = d.get(8 + i * 80..8 + i * 80 + 80)?;
         let n = e[..64].iter().position(|&b| b == 0).unwrap_or(64);
         let mut name = e[..n].to_vec();
-        for b in &mut name {
-            if *b == b'\\' {
-                *b = b'/';
-            }
-        }
+        slashes(&mut name);
         name.extend_from_slice(format!(".{:08x}", u32le(e, 64)?).as_bytes());
         // Stored or zlib, the bytes in the archive are the packed size's.
         let (packed, offset) = (u32le(e, 68)?, u32le(e, 76)?);

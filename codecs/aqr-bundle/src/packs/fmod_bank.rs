@@ -24,7 +24,7 @@ pub fn starts(d: &[u8]) -> bool {
 }
 
 /// The size of the FSB5 bank at the start of `d`, if it is one.
-fn fsb5_size(d: &[u8]) -> Option<u64> {
+pub(super) fn fsb5_size(d: &[u8]) -> Option<u64> {
     if !d.starts_with(b"FSB5") {
         return None;
     }

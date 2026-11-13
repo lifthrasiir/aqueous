@@ -11,7 +11,7 @@
 //! real files.)
 
 use super::doom_wad::label;
-use super::{u32le, within};
+use super::{file_with, u32le, within};
 use aqr_disk::{Compressed, File};
 
 pub fn starts(d: &[u8]) -> bool {
@@ -45,7 +45,7 @@ pub(super) fn entries(d: &[u8], ext: &dyn Fn(u8) -> &'static str) -> Option<Vec<
         let name = e[16..32].iter().take_while(|&&c| c != 0).map(|&c| label(c)).collect::<String>();
         let compressed = (e[13] != 0).then_some(Compressed::Opaque { len: size as u64 });
         let name = format!("{i:04}_{name}.{}", ext(e[12])).into_bytes();
-        files.push(File { name, extents: vec![body], rank: 0, compressed });
+        files.push(file_with(name, body, compressed));
     }
     Some(files)
 }
