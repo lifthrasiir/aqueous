@@ -104,7 +104,7 @@ impl Stream {
                     last = len;
                 }
                 Token::Last => pos += last as usize,
-                Token::Filter(f) => out.push(Placed { at: pos + f.start as usize, f }),
+                Token::Filter(f) => out.push(Placed { at: pos.saturating_add(f.start as usize), f }),
             }
         }
         out
@@ -252,11 +252,13 @@ pub struct Decoder5 {
     cache: [usize; 4],
     last: u32,
     codes: Option<Codes>,
+    /// The length [`Decoder5::out`] is to have after the file being decoded.
+    want: usize,
 }
 
 impl Decoder5 {
     pub fn new(v1: bool, dict: u64) -> Self {
-        Decoder5 { v1, dict, out: Vec::new(), cache: [0; 4], last: 0, codes: None }
+        Decoder5 { v1, dict, out: Vec::new(), cache: [0; 4], last: 0, codes: None, want: 0 }
     }
 
     /// The length of the last copy so far.
@@ -268,7 +270,9 @@ impl Decoder5 {
     pub fn file(&mut self, packed: &[u8], size: usize) -> Result<Stream> {
         let base = self.out.len();
         let want = base.checked_add(size).ok_or_else(corrupt)?;
-        self.out.reserve(size);
+        self.want = want;
+        // (a symbol of a bit gives 4100 bytes at most)
+        self.out.reserve(size.min(packed.len().saturating_mul(8 * 4100)));
         let buf = padded(packed);
         let mut st = Stream::default();
         let mut at = 0usize;
@@ -318,6 +322,7 @@ impl Decoder5 {
     fn symbols(&mut self, r: &mut BitReader, end: usize, tokens: &mut Vec<Token>) -> Result<()> {
         let Some(Codes([main, dist, low, rep])) = &self.codes else { return Err(corrupt()) };
         let out = &mut self.out;
+        let want = self.want;
         while r.pos < end {
             let s = main.read(r)? as usize;
             let t = if s < 256 {
@@ -341,7 +346,7 @@ impl Decoder5 {
                 if self.last == 0 {
                     return Err(Error("the last copy before any"));
                 }
-                copy(out, self.cache[0], self.last as usize)?;
+                copy(out, self.cache[0], self.last as usize, want)?;
                 Token::Last
             } else if s < 262 {
                 let idx = s - 258;
@@ -355,7 +360,7 @@ impl Decoder5 {
                 let (b, e) = len_base(c);
                 let len = b + r.get(e);
                 self.last = len;
-                copy(out, d, len as usize)?;
+                copy(out, d, len as usize, want)?;
                 Token::Rep { idx: idx as u8, len }
             } else {
                 let (b, e) = len_base(s - 262);
@@ -372,7 +377,7 @@ impl Decoder5 {
                 self.cache.copy_within(0..3, 1);
                 self.cache[0] = d;
                 self.last = len;
-                copy(out, d, len as usize)?;
+                copy(out, d, len as usize, want)?;
                 Token::Copy { len, dist: d }
             };
             tokens.push(t);
@@ -386,9 +391,12 @@ impl Decoder5 {
 
 /// Appends `n` bytes from `d` back.
 #[inline]
-fn copy(out: &mut Vec<u8>, d: usize, n: usize) -> Result<()> {
+fn copy(out: &mut Vec<u8>, d: usize, n: usize, want: usize) -> Result<()> {
     if d == 0 || d > out.len() {
         return Err(Error("a distance past the data"));
+    }
+    if n > want.saturating_sub(out.len()) {
+        return Err(Error("a stream of another length"));
     }
     let from = out.len() - d;
     if d >= n {
@@ -615,10 +623,9 @@ pub fn unfilter(d: &mut [u8], placed: &[Placed]) -> Result<()> {
     let mut src = Vec::new();
     for p in placed {
         let (at, len) = (p.at, p.f.len as usize);
-        if at < end || at + len > d.len() {
-            return Err(Error("a filter out of place"));
-        }
-        end = at + len;
+        let to = at.checked_add(len).filter(|&to| at >= end && to <= d.len());
+        let Some(to) = to else { return Err(Error("a filter out of place")) };
+        end = to;
         let dst = &mut d[at..end];
         src.clear();
         src.extend_from_slice(dst);

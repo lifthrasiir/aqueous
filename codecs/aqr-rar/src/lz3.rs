@@ -274,6 +274,8 @@ pub struct Decoder3 {
     last_prog: usize,
     /// Whether PPMd blocks are decoded (else they fail at once).
     pub ppmd_on: bool,
+    /// The length [`Decoder3::out`] is to have after the file being decoded.
+    want: usize,
 }
 
 impl Decoder3 {
@@ -292,6 +294,7 @@ impl Decoder3 {
             progs: Vec::new(),
             last_prog: 0,
             ppmd_on: true,
+            want: 0,
         }
     }
 
@@ -299,7 +302,9 @@ impl Decoder3 {
     pub fn file(&mut self, packed: &[u8], size: usize) -> Result<Stream> {
         let base = self.out.len();
         let want = base.checked_add(size).ok_or_else(corrupt)?;
-        self.out.reserve(size);
+        self.want = want;
+        // (a symbol of a bit gives 4100 bytes at most)
+        self.out.reserve(size.min(packed.len().saturating_mul(8 * 4100)));
         let buf = padded(packed);
         let mut r = BitReader::new(&buf, 0);
         let mut st = Stream::default();
@@ -368,7 +373,7 @@ impl Decoder3 {
         }
         // the filters, placed in the file
         for f in &st.filters {
-            if f.at + f.len as usize > size {
+            if f.at.checked_add(f.len as usize).is_none_or(|to| to > size) {
                 return Err(Error("a filter past the file"));
             }
         }
@@ -489,7 +494,8 @@ impl Decoder3 {
                     raw.extend((0..n).map(|_| r.get(8) as u8));
                     let (start, flen, kind, regs) =
                         parse_filter(&raw, &mut self.progs, &mut self.last_prog, out.len() as u64)?;
-                    let at = start.checked_sub(base as u64).ok_or_else(corrupt)? as usize;
+                    let at =
+                        usize::try_from(start.checked_sub(base as u64).ok_or_else(corrupt)?).map_err(|_| corrupt())?;
                     st.filters.push(FilterRec { raw, at, len: flen, kind, regs });
                     Token::Filter(st.filters.len() as u32 - 1)
                 }
@@ -497,7 +503,7 @@ impl Decoder3 {
                     if self.last.1 == 0 {
                         return Err(Error("the last match before any"));
                     }
-                    copy(out, self.last.0 as usize, self.last.1 as usize, self.dict)?;
+                    copy(out, self.last.0 as usize, self.last.1 as usize, self.dict, self.want)?;
                     Token::Last
                 }
                 259..=262 => {
@@ -511,7 +517,7 @@ impl Decoder3 {
                     }
                     let l = len_base(i) + 2 + r.get(LEN_BITS[i] as u32);
                     self.last = (d, l);
-                    copy(out, d as usize, l as usize, self.dict)?;
+                    copy(out, d as usize, l as usize, self.dict, self.want)?;
                     Token::Rep { idx: k as u8, len: l }
                 }
                 263..=270 => {
@@ -520,7 +526,7 @@ impl Decoder3 {
                     self.rep.copy_within(0..3, 1);
                     self.rep[0] = d;
                     self.last = (d, 2);
-                    copy(out, d as usize, 2, self.dict)?;
+                    copy(out, d as usize, 2, self.dict, self.want)?;
                     Token::Short { dist: d }
                 }
                 _ => {
@@ -557,7 +563,7 @@ impl Decoder3 {
                     self.rep.copy_within(0..3, 1);
                     self.rep[0] = d;
                     self.last = (d, l);
-                    copy(out, d as usize, l as usize, self.dict)?;
+                    copy(out, d as usize, l as usize, self.dict, self.want)?;
                     Token::Copy { len: l, dist: d, run }
                 }
             };
@@ -610,7 +616,8 @@ impl Decoder3 {
                     }
                     let (start, len, kind, regs) =
                         parse_filter(&raw, &mut self.progs, &mut self.last_prog, out.len() as u64)?;
-                    let at = start.checked_sub(base as u64).ok_or_else(corrupt)? as usize;
+                    let at =
+                        usize::try_from(start.checked_sub(base as u64).ok_or_else(corrupt)?).map_err(|_| corrupt())?;
                     filters.push(FilterRec { raw, at, len, kind, regs });
                 }
                 4 => {
@@ -619,11 +626,11 @@ impl Decoder3 {
                         v = v << 8 | get(&mut rc, &mut syms)? as u32;
                     }
                     let l = get(&mut rc, &mut syms)? as usize + 32;
-                    copy(out, v as usize + 2, l, self.dict)?;
+                    copy(out, v as usize + 2, l, self.dict, self.want)?;
                 }
                 5 => {
                     let l = get(&mut rc, &mut syms)? as usize + 4;
-                    copy(out, 1, l, self.dict)?;
+                    copy(out, 1, l, self.dict, self.want)?;
                 }
                 _ => return Err(Error("a PPMd escape of no known meaning")),
             }
@@ -640,9 +647,12 @@ fn order(flags: u8) -> Result<u32> {
 
 /// Appends `n` bytes from `d` back.
 #[inline]
-fn copy(out: &mut Vec<u8>, d: usize, n: usize, dict: u64) -> Result<()> {
+fn copy(out: &mut Vec<u8>, d: usize, n: usize, dict: u64, want: usize) -> Result<()> {
     if d == 0 || d > out.len() || d as u64 > dict {
         return Err(Error("a distance past the data"));
+    }
+    if n > want.saturating_sub(out.len()) {
+        return Err(Error("a stream of another length"));
     }
     let from = out.len() - d;
     if d >= n {
@@ -996,10 +1006,9 @@ pub fn unfilter(d: &mut [u8], filters: &[FilterRec]) -> Result<()> {
     let mut src = Vec::new();
     for f in filters {
         let (at, len) = (f.at, f.len as usize);
-        if at < end || at + len > d.len() {
-            return Err(Error("a filter out of place"));
-        }
-        end = at + len;
+        let to = at.checked_add(len).filter(|&to| at >= end && to <= d.len());
+        let Some(to) = to else { return Err(Error("a filter out of place")) };
+        end = to;
         let dst = &mut d[at..end];
         src.clear();
         src.extend_from_slice(dst);
