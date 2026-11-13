@@ -1,6 +1,7 @@
 //! usage: aqr-tex-bench [-j FILES] [-t THREADS] [-z LEVEL] FILE... | @LIST
 //!
-//! For each DDS file (or each path of LIST; or `.tex` file of aqr-bundle-textures): its blocks
+//! For each DDS, KTX, KTX 2, PVR or `.astc` file (or each path of LIST; or `.tex` file of
+//! aqr-bundle-textures): its blocks
 //! coded and decoded back, checked, by format: the ratio (the coded blocks, and the rest of the
 //! file as zstd -19 takes it), the bits of each part, and the speeds a thread (of the blocks'
 //! bytes). `-z` adds zstd at that
@@ -14,7 +15,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use aqr_tex::{dds, texture};
+use aqr_tex::{container, dds, texture};
 
 #[derive(Default)]
 struct Total {
@@ -53,29 +54,38 @@ fn main() {
             s.spawn(|| {
                 while let Some(path) = paths.get(next.fetch_add(1, Ordering::Relaxed)) {
                     let d = std::fs::read(path).unwrap();
-                    // (aqr-bundle-textures' files: the layout's params, then the blocks)
-                    let (l, start) = match d.strip_prefix(b"AQRTEX\0\0") {
+                    // (aqr-bundle-textures' files: the layout's params, then the blocks; else a
+                    // DDS file, or one of the containers)
+                    let (l, pieces) = match d.strip_prefix(b"AQRTEX\0\0") {
                         Some(r) => {
                             let n = u32::from_le_bytes(r[..4].try_into().unwrap()) as usize;
-                            (aqr_tex::layout::Layout::from_bytes(&r[4..4 + n]).unwrap(), 12 + n)
+                            let l = aqr_tex::layout::Layout::from_bytes(&r[4..4 + n]).unwrap();
+                            (l, vec![(12 + n, l.len() as usize)])
                         }
-                        None => {
-                            let Some(found) = dds::detect(&d) else {
+                        None => match (dds::detect(&d), container::detect(&d)) {
+                            (Some(found), _) => {
+                                let dds::Data::Blocks(l) = found.data else {
+                                    eprintln!("{path}: not of blocks");
+                                    continue;
+                                };
+                                (l, vec![(found.start, l.len() as usize)])
+                            }
+                            (None, Some(found)) => {
+                                let pieces = found.pieces(d.len()).unwrap();
+                                (found.layout, pieces)
+                            }
+                            (None, None) => {
                                 eprintln!("{path}: not taken");
                                 continue;
-                            };
-                            let dds::Data::Blocks(l) = found.data else {
-                                eprintln!("{path}: not of blocks");
-                                continue;
-                            };
-                            (l, found.start)
-                        }
+                            }
+                        },
                     };
                     if !texture::taken(l.format.group()) {
                         eprintln!("{path}: {} not taken", l.format.name());
                         continue;
                     }
-                    let blocks = &d[start..start + l.len() as usize];
+                    let blocks: Vec<u8> = pieces.iter().flat_map(|&(s, n)| &d[s..s + n]).copied().collect();
+                    let blocks = &blocks[..];
                     let t = Instant::now();
                     let (main, apart, cost) = texture::encode_any(&l, blocks, within);
                     let enc = t.elapsed().as_secs_f64();
@@ -83,8 +93,14 @@ fn main() {
                     let back = texture::decode_any(&l, &main, &apart, within).unwrap_or_else(|e| panic!("{path}: {e}"));
                     let dec = t.elapsed().as_secs_f64();
                     assert!(back == blocks, "{path}: not given back");
-                    let mut rest = d[..start].to_vec();
-                    rest.extend_from_slice(&d[start + blocks.len()..]);
+                    let mut sorted = pieces.clone();
+                    sorted.sort();
+                    let (mut rest, mut at) = (vec![], 0);
+                    for (s, n) in sorted {
+                        rest.extend_from_slice(&d[at..s]);
+                        at = s + n;
+                    }
+                    rest.extend_from_slice(&d[at..]);
                     let rest = zstd::bulk::compress(&rest, 19).unwrap().len();
                     let z = if level > 0 { zstd::bulk::compress(&d, level).unwrap().len() } else { 0 };
                     digest.fetch_add(fnv(&[path.as_bytes(), &main, &apart]), Ordering::Relaxed);

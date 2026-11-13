@@ -82,13 +82,58 @@ each as KTX, KTX 2 and DDS (37.3 MB): 4.05 MB, natively and as WebAssembly given
   (which of the left and upper pixels the upper left one is nearer) gained 0.4% for 10% of the
   speed, and is not used.
 
+### Encoders on real images
+
+Measured 2026-11-14 on the Ryzen 7 9700X by `aqr-tex-bench -z 3` (16 files at once, a thread
+each; zstd -3 is of each whole file): samples made of real images by encoders run as black
+boxes. The images: the 163 BC7 textures above of 64 pixels or more each way, decoded (*game*,
+mostly RGBA; opaque formats take their RGB); 16 CC0 textures of Poly Haven at 1024×1024 (diffuse
+*photo*, `nor_gl` *normal*, *rough*ness) and 6 of its HDRIs at 2048×1024 (*hdr*). Mipmaps down
+to 1×1: etcpak (UnityPy's binding) and astcenc 5.7.1 (`-medium`) were given each mipmap (box
+filtered) and the KTX written around them; Compressonator 4.6.0, PVRTexTool 4.17
+(`etcfast`, `pvrtcnormal`; PVRTC resized to a power of two square, at most 2048) and
+texconv made their own. Every file came back as it was.
+
+| format | encoder | images | files | MB | ratio | zstd -3 | MB/s enc. / dec. |
+|---|---|---|---|---|---|---|---|
+| ETC1 | etcpak | game, photo | 179 | 136.4 | 0.2022 | 0.3125 | 10.2 / 11.0 |
+| ETC1 | Compressonator | game, photo | 179 | 136.4 | 0.2049 | 0.3214 | 10.1 / 11.2 |
+| ETC2 RGB | etcpak | game, photo | 179 | 136.4 | 0.2118 | 0.3321 | 11.2 / 13.0 |
+| ETC2 RGB | Compressonator | game, photo | 179 | 136.4 | 0.2195 | 0.3484 | 10.3 / 11.6 |
+| ETC2 RGBA | etcpak | game | 163 | 250.3 | 0.1267 | 0.2221 | 17.0 / 19.8 |
+| ETC2 RGBA | Compressonator | game | 163 | 250.3 | 0.1240 | 0.2139 | 17.9 / 21.6 |
+| ETC2 RGB A1 | Compressonator | game | 163 | 125.2 | 0.1634 | 0.2709 | 12.4 / 14.7 |
+| ETC2 RGB A1 | PVRTexTool | game | 163 | 125.2 | 0.1650 | 0.2721 | 12.1 / 14.0 |
+| EAC R11 | etcpak | rough | 16 | 11.2 | 0.6344 | 0.8584 | 8.9 / 9.4 |
+| EAC R11 | PVRTexTool | rough | 16 | 11.2 | 0.6548 | 0.8796 | 8.8 / 9.3 |
+| EAC RG11 | etcpak | normal | 16 | 22.4 | 0.7439 | 0.9435 | 7.6 / 8.2 |
+| EAC RG11 | PVRTexTool | normal | 16 | 22.4 | 0.7573 | 0.9538 | 7.8 / 8.3 |
+| PVRTC 4bpp | PVRTexTool | game, photo | 179 | 101.6 | 0.3109 | 0.4798 | 3.0 / 3.1 |
+| PVRTC 2bpp | PVRTexTool | game, photo | 179 | 50.8 | 0.3655 | 0.5333 | 1.3 / 1.4 |
+| ASTC 4×4 | astcenc | game, photo | 179 | 272.7 | 0.3477 | 0.4504 | 4.0 / 4.7 |
+| ASTC 6×6 | astcenc | game, photo | 179 | 121.7 | 0.4349 | 0.5413 | 3.1 / 3.5 |
+| ASTC 8×8 | astcenc | game, photo | 179 | 68.3 | 0.4291 | 0.5414 | 2.3 / 2.7 |
+| ASTC 6×6 (`-normal`) | astcenc | normal | 16 | 10.0 | 0.7593 | 0.9552 | 1.6 / 2.4 |
+| ASTC 4×4 HDR | astcenc (`-ch`) | hdr | 6 | 16.8 | 0.8142 | 0.9540 | 3.9 / 4.4 |
+| ASTC 6×6 HDR | astcenc (`-ch`) | hdr | 6 | 7.5 | 0.8131 | 0.9667 | 3.3 / 4.0 |
+| BC6H (UF16) | texconv | hdr | 6 | 16.8 | 0.6605 | 0.9859 | 11.4 / 11.9 |
+| BC6H | Compressonator | hdr | 6 | 16.8 | 0.6561 | 0.9829 | 10.9 / 11.6 |
+| BC7 | texconv | photo | 16 | 22.4 | 0.6132 | 0.9401 | 6.7 / 7.2 |
+
+The encoders matter little (within 4%). Photographs' textures are noise to these models (BC7 of
+texconv on them 0.61, the game's 0.23); the game's textures hold flat areas and repeats. ASTC
+and PVRTC are 2 to 8 times slower than the rest (a block of ASTC is a parse of its fields and of
+the weights' grid, PVRTC's pixels are blended from four words), which is what to work on next.
+Through `aqr`, 3 files of each row (69 files, 86.3 MB): 35.9 MB (zstd -3 49.7 MB), natively and
+as WebAssembly given back.
+
 ### BC6H
 
 As BC7 (the same copies, endpoints predicted from the pixels, indices by their buckets), of
 planes of the endpoints unquantized (16 bits, before they are scaled to half floats), the
 endpoints coded as stored (of transformed modes, the differences from the first) against the
-prediction quantized. No real textures of BC6H were at hand (none in the 88 games of Unity
-surveyed): on a smooth texture of mode 10 alone (`tests/formats.rs`), 0.645 of zstd -19, BC7's
+prediction quantized. No games' textures of BC6H were at hand (none in the 88 games of Unity
+surveyed; HDRIs encoded, above): on a smooth texture of mode 10 alone (`tests/formats.rs`), 0.645 of zstd -19, BC7's
 alike 0.51.
 
 ### ETC1, ETC2 and EAC
@@ -100,8 +145,8 @@ by which split of them spreads less, planar's colours by the pixels at its corne
 of no field (those that only make the overflows of T, H and planar) as they are, so that any 64
 bits are a block; its indices as levels on a *ladder* of their values (the sums of a level's
 channels), by where the predictions fall on it (T's and H's by the paint colour nearest). No
-real textures of these formats were at hand (none in the games of Unity surveyed, which are of
-Windows): on smooth textures of `tests/formats.rs`, ETC1's (differential, of the least error)
+games' textures of these formats were at hand (none in the games of Unity surveyed, which are of
+Windows; real images encoded, above): on smooth textures of `tests/formats.rs`, ETC1's (differential, of the least error)
 0.46 of zstd -19, EAC R11's 0.83. The decoding of the blocks, which the planes hold, matched
 texture2ddecoder's (MIT, as a black box) on random blocks of every format, but for the colour of
 punch-through's transparent pixels (the spec's are black, its not).
@@ -190,10 +235,9 @@ written (the bits of each choice are of BC1 unless said):
   mipmaps too small to split (about 6% of a 2048×2048 texture's blocks) and a stripe of each
   split one, about 6.4 times faster than one thread at best for that texture.
 - **Formats.** PVRTC2; ASTC of 3D footprints.
-- **BC6H, ETC, EAC, PVRTC, ASTC** are not measured on real textures (HDR environment maps; mobile
-  games' textures, as of Android and iOS packages); their models were tried only on smooth
-  textures of simple encoders. Encoders to make samples of real images with (astcenc,
-  Compressonator, DirectXTex's texconv) are to be run as black boxes.
+- **BC6H, ETC, EAC, PVRTC, ASTC** are measured on samples of real images made by encoders
+  (above, "Encoders on real images"), not on textures of real games (mobile games' packages for
+  Android and iOS). ASTC and PVRTC are slow (2-4 and 1-3 MB/s a thread).
 - **BC7.** Most of its bits are indices; a model of their levels as an image (residuals from a
   predicted level) rather than the joint buckets of two predictions may do better on 4-bit
   indices. Real textures of mobile formats are missing (the sample is of Unity on Windows).
