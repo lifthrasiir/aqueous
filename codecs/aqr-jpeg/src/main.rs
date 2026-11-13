@@ -242,7 +242,7 @@ fn main() {
                     j.scans.len()
                 );
                 let (mut coefs, mut clean) = (Vec::new(), aqr_jpeg::jpeg::Clean::default());
-                match aqr_jpeg::jpeg::decode_all(&j, &d, aqr_jpeg::jpeg::Order::Zigzag, &mut coefs, &mut clean) {
+                match aqr_jpeg::jpeg::decode_all(&j, &d, &mut coefs, &mut clean) {
                     Ok(infos) => {
                         if !j.progressive {
                             let (e, _) = aqr_jpeg::model::encode(&j, &coefs);

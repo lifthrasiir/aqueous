@@ -9,7 +9,7 @@ fn main() {
     let j = jpeg::parse(&data).unwrap();
     let mut clean = jpeg::Clean::default();
     let mut coefs = Vec::new();
-    let infos = jpeg::decode_all(&j, &data, jpeg::Order::Zigzag, &mut coefs, &mut clean).unwrap();
+    let infos = jpeg::decode_all(&j, &data, &mut coefs, &mut clean).unwrap();
     let (e, _) = model::encode(&j, &coefs);
     let mut out = Vec::new();
     if args.get(3).map(String::as_str) == Some("huff") {

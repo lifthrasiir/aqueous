@@ -296,7 +296,8 @@ struct Rec<'a> {
 
 fn rec<'a>(script: &'a [u8], at: &mut usize) -> Result<Rec<'a>, Error> {
     use crate::model::get_varint;
-    let mut n = || -> Result<usize, Error> { usize::try_from(get_varint(script, at)?).map_err(|_| Error("bad number".into())) };
+    let mut n =
+        || -> Result<usize, Error> { usize::try_from(get_varint(script, at)?).map_err(|_| Error("bad number".into())) };
     let (gap, header, len) = (n()?, n()?, n()?);
     let flag = *script.get(*at).ok_or(Error("bad script".into()))?;
     *at += 1;
@@ -394,10 +395,12 @@ fn groups(st: &mut State, sink: &mut Sink, count: u64, mut left: u64) -> Result<
                     gap as usize
                 };
                 let at = script.len();
-                st.cut.each(gap as u64, |p| {
-                    script.extend_from_slice(p);
-                    Some(())
-                }).ok_or(Error("bad cut".into()))?;
+                st.cut
+                    .each(gap as u64, |p| {
+                        script.extend_from_slice(p);
+                        Some(())
+                    })
+                    .ok_or(Error("bad cut".into()))?;
                 st.read_header(flags == 1)?;
                 let hlen = st.hb.len();
                 if script.len() - job_at + script_bytes(gap, hlen, len) - gap > SCRIPT_JOB {
@@ -681,7 +684,7 @@ pub fn plan(initial: u64, cut: &[u8], info: &[u8], lens: &[u8]) -> Option<(u64, 
     let mut j = 0;
     while j < jobs.len() {
         let job = &jobs[j];
-        let (soi, _, h0) = &job.streams[0];
+        let (_, _, h0) = &job.streams[0];
         if job.bands == 1 {
             // groups, a round of them at a time: the script, the places, then for each round the
             // list of chunks and the chunks
@@ -740,7 +743,6 @@ pub fn plan(initial: u64, cut: &[u8], info: &[u8], lens: &[u8]) -> Option<(u64, 
         }
         j += 1;
         taken = h0.start + 2;
-        let _ = soi;
         let chunks = &job.chunks;
         let bands = job.bands;
         let model = model_of(h0);
@@ -761,7 +763,9 @@ pub fn plan(initial: u64, cut: &[u8], info: &[u8], lens: &[u8]) -> Option<(u64, 
             // a task: its model, its frame and the rows it gives, over that copy
             let first = rows.iter().position(|r| r == &round[0])?;
             let size = |i: usize| block(n(band_bytes(h0, round[i].1 - round[i].0, job.bits[first + i])));
-            let own = |i: usize| model + Frame::bytes(&lmodel_band(h0, round[i])) + Emitter::bytes() + size(i);
+            let own = |i: usize| {
+                model + Frame::bytes(&lmodel::band_header(h0, round[i].0, round[i].1)) + Emitter::bytes() + size(i)
+            };
             if round.len() >= 2 {
                 let tasks = (0..round.len()).map(|i| sim.task(own(i))).collect();
                 sim.spawned(0, tasks);
@@ -776,9 +780,4 @@ pub fn plan(initial: u64, cut: &[u8], info: &[u8], lens: &[u8]) -> Option<(u64, 
     }
     let (instance, tasks) = sim.plans(1);
     Some((instance, tasks[0]))
-}
-
-/// The header of the band `r` of the frame of `h`.
-fn lmodel_band(h: &Header, r: (usize, usize)) -> Header {
-    lmodel::band_header(h, r.0, r.1)
 }

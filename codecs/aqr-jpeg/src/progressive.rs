@@ -856,7 +856,6 @@ fn encode_blocks(
                             r += (zeros & range).count_ones();
                             let rest = take_bits!((hist & range).count_ones());
                             br = BitList { v: rest.v, n: rest.n };
-                            let _ = cleft;
                             if r > 0 || br.n > 0 {
                                 eobrun += 1;
                                 if br.n > 0 {
@@ -894,13 +893,6 @@ fn encode_blocks(
     Ok(pos)
 }
 
-/// Decode all scans of a progressive JPEG `d` into zigzag-ordered coefficients with masks, and
-/// determine for each scan whether `encode_scan` reproduces it (inline, see `decode_scan`). The
-/// first scan that fails to decode and all later ones (which may depend on it) are marked `raw`,
-/// as are scans not encoded the way `encode_scan` would.
-///
-/// With JRC_VERIFY_PROGRESSIVE set, every scan is also re-encoded and the inline verdict is
-/// checked against the outcome (a scan judged reproducible that is not panics: test oracle).
 /// Number of leading scans that form a valid scan script: every coefficient bit is coded once,
 /// by a first scan (ah = 0) of a not yet coded position, then by refinements continuing exactly
 /// where the previous scan stopped (ah = previous al). Re-emitting a scan from the final
@@ -923,6 +915,13 @@ fn valid_script_len(j: &Jpeg) -> usize {
     j.scans.len()
 }
 
+/// Decode all scans of a progressive JPEG `d` into zigzag-ordered coefficients with masks, and
+/// determine for each scan whether `encode_scan` reproduces it (inline, see `decode_scan`). The
+/// first scan that fails to decode and all later ones (which may depend on it) are marked `raw`,
+/// as are scans not encoded the way `encode_scan` would.
+///
+/// With JRC_VERIFY_PROGRESSIVE set, every scan is also re-encoded and the inline verdict is
+/// checked against the outcome (a scan judged reproducible that is not panics: test oracle).
 pub fn decode_all(j: &Jpeg, d: &[u8], out: &mut Vec<Coefs>, clean: &mut Clean) -> Result<Vec<ScanInfo>, Error> {
     let n = valid_script_len(j);
     let mut res: Vec<Option<(Canon, u32)>> = Vec::new();

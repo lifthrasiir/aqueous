@@ -12,8 +12,6 @@
 //! coefficients are held at once (see `jpeg::decode_striped`, `model::Modeller` and
 //! `jpeg::encode_striped`). Other files, and scans that do not decode cleanly, are held whole.
 
-#[cfg(feature = "encode")]
-use crate::jpeg::Order;
 use crate::jpeg::{self, Clean, Coefs, Error, Jpeg, Scan, ScanInfo};
 use crate::model::{self, get_varint};
 use crate::progressive;
@@ -211,7 +209,7 @@ pub(crate) fn encode_core<'a>(input: &'a [u8], coefs: &mut Vec<Coefs>, clean: &m
     let (infos, model, sizes) = match model_striped(&j, input, clean) {
         Some((_, None)) => {
             if std::env::var_os("JRC_VERIFY_STRIPED").is_some()
-                && let Ok(infos) = jpeg::decode_all(&j, input, Order::Zigzag, coefs, clean)
+                && let Ok(infos) = jpeg::decode_all(&j, input, coefs, clean)
             {
                 // test oracle: decoding the scan whole must not take it either
                 assert!(infos.iter().all(|i| i.raw), "striped decoding: rejected a reproducible scan");
@@ -221,7 +219,7 @@ pub(crate) fn encode_core<'a>(input: &'a [u8], coefs: &mut Vec<Coefs>, clean: &m
         Some((info, Some((model, bits)))) => {
             if std::env::var_os("JRC_VERIFY_STRIPED").is_some() {
                 // test oracle: the outcome must equal that of decoding the scan whole
-                let infos = jpeg::decode_all(&j, input, Order::Zigzag, coefs, clean)?;
+                let infos = jpeg::decode_all(&j, input, coefs, clean)?;
                 assert!(infos == [info.clone()], "striped decoding: scan info differs");
                 let e = model::encode(&j, coefs).0;
                 let same = e.tables == model.tables
@@ -236,7 +234,7 @@ pub(crate) fn encode_core<'a>(input: &'a [u8], coefs: &mut Vec<Coefs>, clean: &m
             let infos = if j.progressive {
                 progressive::decode_all(&j, input, coefs, clean)?
             } else {
-                jpeg::decode_all(&j, input, Order::Zigzag, coefs, clean)?
+                jpeg::decode_all(&j, input, coefs, clean)?
             };
             if infos.iter().all(|i| i.raw) {
                 return none();
@@ -566,7 +564,6 @@ pub(crate) fn decode_core<'a>(
         if buf.len() < writer_len(&j, s, n) {
             return Err(Error("bad scan size".into()));
         }
-        let at = out.len();
         let pos = if j.progressive {
             progressive::encode_onto(&j, s, info, coefs, &mut buf, &mut be, &mut out)?
         } else {
@@ -575,7 +572,6 @@ pub(crate) fn decode_core<'a>(
         if pos != n || out.len() > len {
             return Err(Error("bad scan size".into()));
         }
-        let _ = at;
     }
     out.extend_from_slice(&blob[q..]);
     #[cfg(target_family = "wasm")]

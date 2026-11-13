@@ -9,7 +9,7 @@
 //!
 //! Deliberately simple (per position, per bit); not used by the codec.
 
-use crate::jpeg::{self, BitOut, Clean, Coefs, EncTable, Error, Jpeg, Order, Scan, size_bits};
+use crate::jpeg::{self, BitOut, Clean, Coefs, EncTable, Error, Jpeg, Scan, size_bits};
 use crate::progressive;
 
 /// xorshift64*
@@ -352,7 +352,7 @@ pub fn reencode(d: &[u8], rng: &mut Rng) -> Option<(Vec<u8>, String)> {
     let infos = if j.progressive {
         progressive::decode_all(&j, d, &mut coefs, &mut clean).ok()?
     } else {
-        jpeg::decode_all(&j, d, Order::Zigzag, &mut coefs, &mut clean).ok()?
+        jpeg::decode_all(&j, d, &mut coefs, &mut clean).ok()?
     };
     if infos.iter().any(|i| i.raw || i.truncated.is_some()) {
         return None;
@@ -387,7 +387,7 @@ pub fn coefficients(d: &[u8]) -> Option<Vec<Coefs>> {
     if j.progressive {
         progressive::decode_all(&j, d, &mut coefs, &mut clean).ok()?;
     } else {
-        jpeg::decode_all(&j, d, Order::Zigzag, &mut coefs, &mut clean).ok()?;
+        jpeg::decode_all(&j, d, &mut coefs, &mut clean).ok()?;
     }
     Some(coefs)
 }

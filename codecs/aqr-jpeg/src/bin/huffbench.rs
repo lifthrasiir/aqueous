@@ -11,8 +11,7 @@ fn main() {
     let j = jpeg::parse(&data).unwrap();
     let mut clean = Clean::default();
     let mut coefs = Vec::new();
-    jpeg::decode_all(&j, &data, jpeg::Order::Natural, &mut coefs, &mut clean).unwrap();
-    let slow = jpeg::SLOW_CALLS.with(|c| c.get());
+    jpeg::decode_all(&j, &data, &mut coefs, &mut clean).unwrap();
 
     if let Some(p) = args.get(2).filter(|s| !s.is_empty()) {
         let b = std::fs::read(p).unwrap();
@@ -29,9 +28,9 @@ fn main() {
                     for z in 0..64 {
                         let o = off + ((y * w + x) * 64 + ZIGZAG[z]) * 2;
                         let r = i16::from_le_bytes([b[o], b[o + 1]]);
-                        assert_eq!(blk[ZIGZAG[z]], r, "comp {ci} block ({x},{y}) zz {z}");
+                        assert_eq!(blk[z], r, "comp {ci} block ({x},{y}) zz {z}");
                     }
-                    let m = (0..64).fold(0u64, |m, k| m | ((blk[ZIGZAG[k]] != 0) as u64) << k);
+                    let m = (0..64).fold(0u64, |m, k| m | ((blk[k] != 0) as u64) << k);
                     assert_eq!(m, c.masks[y * c.bw + x]);
                 }
             }
@@ -50,7 +49,7 @@ fn main() {
     let mut reuse = Vec::new();
     let t2 = Instant::now();
     for _ in 0..iters {
-        jpeg::decode_all(&j, &data, jpeg::Order::Natural, &mut reuse, &mut clean).unwrap();
+        jpeg::decode_all(&j, &data, &mut reuse, &mut clean).unwrap();
         std::hint::black_box(&reuse);
     }
     let tr = t2.elapsed().as_secs_f64() / iters as f64;
@@ -71,10 +70,5 @@ fn main() {
         nsym as f64 / n,
         th * 1e9 / nsym as f64
     );
-    println!(
-        "    slow-path fraction {:.1}%; reused buffers: decode {:.1} MB/s ({:.2} ns/sym)",
-        slow as f64 * 100.0 / nsym as f64,
-        n / tr / 1e6,
-        tr * 1e9 / nsym as f64
-    );
+    println!("    reused buffers: decode {:.1} MB/s ({:.2} ns/sym)", n / tr / 1e6, tr * 1e9 / nsym as f64);
 }

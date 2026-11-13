@@ -8,8 +8,8 @@
 //! - one combined lookup table per Huffman table, indexed by the next `FAST_BITS` bits, that
 //!   yields code length + run + the sign-extended coefficient whenever code and extra bits fit,
 //!   plus a two-symbol variant for AC;
-//! - coefficients are stored in natural or zigzag order, with a per-block nonzero bitmask in
-//!   zigzag bit order.
+//! - coefficients are stored in zigzag order, with a per-block nonzero bitmask in zigzag bit
+//!   order.
 //!
 //! Re-emission is only bit-exact for "standard" encoders. The decoder therefore checks, cheaply
 //! and inline, every degree of freedom an encoder has beyond the coefficients themselves (EOB
@@ -613,9 +613,8 @@ impl<'a> Bits<'a> {
 
 // ---------------------------------------------------------------- decoding
 
-/// Decoded coefficients of one component: blocks in natural or zigzag order (see `Order`);
-/// `masks` always in zigzag bit order. Holds block rows `y0..y0 + bh`: the whole component, or
-/// one stripe of it.
+/// Decoded coefficients of one component: blocks in zigzag order, `masks` in zigzag bit
+/// order. Holds block rows `y0..y0 + bh`: the whole component, or one stripe of it.
 #[derive(Default)]
 pub struct Coefs {
     pub bw: usize,
@@ -638,12 +637,6 @@ impl Coefs {
         self.blocks.resize(bw * rows.len(), [0; 64]);
         self.masks.resize(bw * rows.len(), 0);
     }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Order {
-    Natural,
-    Zigzag,
 }
 
 /// Outcome of decoding one scan: everything `encode_scan` needs besides the coefficients.
@@ -676,17 +669,11 @@ pub struct Truncation {
 
 const BAD_RUN: u32 = 255;
 
-thread_local! {
-    /// slow-path decodes on this thread (profiling aid; thread-local to stay contention-free)
-    pub static SLOW_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
 /// Slow path (code longer than FAST_BITS, or extra bits not fitting in the fast entry).
 /// Operates on a `Bits` copy so the hot loop's scalars never have their address taken.
 #[inline(never)]
 #[cold]
 fn decode_slow(b: &mut Bits, t: &Table, e: Entry) -> (u32, i32) {
-    SLOW_CALLS.with(|c| c.set(c.get() + 1));
     let (run, size) = if e.len & CODE != 0 {
         b.consume((e.len & 31) as u32);
         (e.run as u32, e.val as u32)
@@ -730,13 +717,7 @@ pub fn alloc_coefs(j: &Jpeg, out: &mut Vec<Coefs>, zero: bool) {
 
 /// Decode all scans of a sequential JPEG `d` into `out`. Returns per-scan info; scans that
 /// cannot be decoded or reproduced are marked `raw`. Fails only on structural problems.
-pub fn decode_all(
-    j: &Jpeg,
-    d: &[u8],
-    order: Order,
-    out: &mut Vec<Coefs>,
-    clean: &mut Clean,
-) -> Result<Vec<ScanInfo>, Error> {
+pub fn decode_all(j: &Jpeg, d: &[u8], out: &mut Vec<Coefs>, clean: &mut Clean) -> Result<Vec<ScanInfo>, Error> {
     if j.progressive {
         return err("progressive JPEG: use progressive::decode_all");
     }
@@ -755,10 +736,7 @@ pub fn decode_all(
             }
         }
         destuff(&d[s.start..s.end], clean);
-        let r = match order {
-            Order::Natural => decode_scan::<true>(j, s, clean, out),
-            Order::Zigzag => decode_scan::<false>(j, s, clean, out),
-        };
+        let r = decode_scan(j, s, clean, out);
         // sequential scans are independent: a bad one is simply kept verbatim
         infos.push(match r {
             Ok(i) if i.standard => i,
@@ -766,11 +744,6 @@ pub fn decode_all(
         });
     }
     Ok(infos)
-}
-
-#[inline(always)]
-fn store_idx<const NAT: bool>(k: usize) -> usize {
-    if NAT { ZIGZAG[k] } else { k }
 }
 
 /// Block geometry of a scan: (component index, h, v) per scan component; non-interleaved
@@ -935,12 +908,7 @@ impl Ctx<'_> {
     /// mask (bits 1..64) and whether the block ends other than a standard encoder ends it
     /// (right after the last nonzero coefficient, with EOB unless at 63).
     #[inline(always)]
-    fn decode_ac<const NAT: bool>(
-        &self,
-        br: &mut Br,
-        si: usize,
-        blk: &mut [i16; 64],
-    ) -> Result<(u64, bool), &'static str> {
+    fn decode_ac(&self, br: &mut Br, si: usize, blk: &mut [i16; 64]) -> Result<(u64, bool), &'static str> {
         let at = &self.act[si];
         let data = self.data;
         let apair: &[Pair; 1 << FAST_BITS] = &at.pair;
@@ -967,7 +935,7 @@ impl Ctx<'_> {
                     if k > 63 {
                         return Err("coefficient index overflow");
                     }
-                    blk[store_idx::<NAT>(k)] = p.v1;
+                    blk[k] = p.v1;
                     mask |= ((p.v1 != 0) as u64) << k;
                     k += 1;
                     if k == 64 {
@@ -986,7 +954,7 @@ impl Ctx<'_> {
                     if k > 63 {
                         return Err("coefficient index overflow");
                     }
-                    blk[store_idx::<NAT>(k)] = p.v2;
+                    blk[k] = p.v2;
                     mask |= ((p.v2 != 0) as u64) << k;
                     k += (p.len != p.l1) as usize;
                 } else {
@@ -999,7 +967,7 @@ impl Ctx<'_> {
                     if k > 63 {
                         return Err(if run == BAD_RUN { "bad AC code" } else { "coefficient index overflow" });
                     }
-                    blk[store_idx::<NAT>(k)] = val as i16;
+                    blk[k] = val as i16;
                     mask |= ((val != 0) as u64) << k;
                     k += 1;
                 }
@@ -1017,7 +985,7 @@ impl Ctx<'_> {
     /// predictions `pred` (MCU `*m` must start a restart interval or continue the decoding of
     /// MCU `*m - 1`). `hook(bit position, MCU)` is asked before every MCU whether to stop there.
     #[inline(always)]
-    fn run<const NAT: bool>(
+    fn run(
         &self,
         br: &mut Br,
         pred: &mut [i32; 4],
@@ -1026,7 +994,7 @@ impl Ctx<'_> {
         chk: &mut Checks,
         hook: impl FnMut(usize, usize) -> bool,
     ) -> End {
-        self.run_in::<NAT, false>(&self.comps, br, pred, m, m1, false, chk, hook)
+        self.run_in::<false>(&self.comps, br, pred, m, m1, false, chk, hook)
     }
 
     /// `run_in` (zigzag order) without a hook.
@@ -1042,7 +1010,7 @@ impl Ctx<'_> {
         cont: bool,
         chk: &mut Checks,
     ) -> End {
-        self.run_in::<false, REL>(comps, br, pred, m, m1, cont, chk, |_, _| false)
+        self.run_in::<REL>(comps, br, pred, m, m1, cont, chk, |_, _| false)
     }
 
     /// `run` into the components `comps`. With `cont`, MCU `*m` continues an earlier run even
@@ -1051,7 +1019,7 @@ impl Ctx<'_> {
     /// limit, and the masks' DC bits are left for the caller to set.
     #[inline(always)]
     #[allow(clippy::too_many_arguments)]
-    fn run_in<const NAT: bool, const REL: bool>(
+    fn run_in<const REL: bool>(
         &self,
         comps: &[CompPtr],
         br: &mut Br,
@@ -1105,7 +1073,7 @@ impl Ctx<'_> {
                                 break 'mcu Err("DC out of range");
                             }
                             blk[0] = pred[si] as i16;
-                            let (mask, bad) = match self.decode_ac::<NAT>(br, si, blk) {
+                            let (mask, bad) = match self.decode_ac(br, si, blk) {
                                 Ok(x) => x,
                                 Err(e) => break 'mcu Err(e),
                             };
@@ -1160,7 +1128,7 @@ fn clear_mcus(s: &Scan, layout: &[(usize, usize, usize)], from: usize, out: &mut
 /// beyond the coefficients (see the module documentation). Large scans are decoded in parallel
 /// chunks: whole restart intervals if there are any, otherwise by speculative decoding (see
 /// `decode_speculative`); the outcome is identical to decoding serially.
-fn decode_scan<const NAT: bool>(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Coefs]) -> Result<ScanInfo, Error> {
+fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Coefs]) -> Result<ScanInfo, Error> {
     let mut dct = Vec::new();
     let mut act = Vec::new();
     for sc in &s.comps {
@@ -1194,7 +1162,7 @@ fn decode_scan<const NAT: bool>(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Co
     let serial = |ctx: &Ctx| -> ScanResult {
         let mut chk = Checks::default();
         let (mut br, mut pred, mut m) = (Br { buf: 0, cnt: 0, pos: 0 }, [0; 4], 0);
-        match ctx.run::<NAT>(&mut br, &mut pred, &mut m, nmcu, &mut chk, |_, _| false) {
+        match ctx.run(&mut br, &mut pred, &mut m, nmcu, &mut chk, |_, _| false) {
             End::Done => {
                 ctx.check_segment_end(br.used(), nseg - 1, &mut chk);
                 Ok((chk, None))
@@ -1206,9 +1174,9 @@ fn decode_scan<const NAT: bool>(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Co
     };
     let mut r = None;
     if chunks >= 2 && nseg > 1 && clean.segments.len() >= nseg {
-        r = decode_intervals::<NAT>(&ctx, chunks);
+        r = decode_intervals(&ctx, chunks);
     } else if chunks >= 2 && clean.segments.len() == 1 {
-        r = decode_speculative::<NAT>(&ctx, chunks);
+        r = decode_speculative(&ctx, chunks);
     }
     if let Some(p) = &r
         && std::env::var_os("JRC_VERIFY_PARALLEL").is_some()
@@ -1266,7 +1234,7 @@ type ScanResult = Result<(Checks, Option<Truncation>), Error>;
 
 /// Restart intervals in parallel: chunks of whole intervals. Only for scans whose RST markers
 /// are all present; a truncation can then only happen in the last interval (last chunk).
-fn decode_intervals<const NAT: bool>(c: &Ctx, chunks: usize) -> Option<ScanResult> {
+fn decode_intervals(c: &Ctx, chunks: usize) -> Option<ScanResult> {
     use crate::par::prelude::*;
     let nseg = c.nmcu.div_ceil(c.ri);
     let k = chunks.min(nseg);
@@ -1277,7 +1245,7 @@ fn decode_intervals<const NAT: bool>(c: &Ctx, chunks: usize) -> Option<ScanResul
             let mut chk = Checks::default();
             let mut br = Br { buf: 0, cnt: 0, pos: c.segments[s0] };
             let (mut pred, mut m) = ([0; 4], s0 * c.ri);
-            let e = c.run::<NAT>(&mut br, &mut pred, &mut m, (s1 * c.ri).min(c.nmcu), &mut chk, |_, _| false);
+            let e = c.run(&mut br, &mut pred, &mut m, (s1 * c.ri).min(c.nmcu), &mut chk, |_, _| false);
             if let End::Done = e {
                 c.check_segment_end(br.used(), s1 - 1, &mut chk);
             }
@@ -1333,7 +1301,7 @@ thread_local! {
 /// started there, recording every MCU start. Huffman codes resynchronise quickly, so the
 /// decoding soon coincides with the true one (same bit position at an MCU start); a decoding
 /// error means the guess was wrong so far, and decoding restarts after it.
-fn speculate<const NAT: bool>(c: &Ctx, from: usize, to: usize, o: &mut SpecOut) {
+fn speculate(c: &Ctx, from: usize, to: usize, o: &mut SpecOut) {
     let bpm: usize = c.layout.iter().map(|&(_, h, v)| h * v).sum();
     let (stop, limit) = (to * 8, c.data_len * 8);
     o.recs.clear();
@@ -1367,7 +1335,7 @@ fn speculate<const NAT: bool>(c: &Ctx, from: usize, to: usize, o: &mut SpecOut) 
                         };
                         blk[0] = diff as i16; // |diff| < 2^15
                         dc[si] = dc[si].wrapping_add(diff);
-                        let (mask, bd) = match c.decode_ac::<NAT>(&mut br, si, blk) {
+                        let (mask, bd) = match c.decode_ac(&mut br, si, blk) {
                             Ok(x) => x,
                             Err(e) => break 'mcu Err(e),
                         };
@@ -1392,18 +1360,18 @@ fn speculate<const NAT: bool>(c: &Ctx, from: usize, to: usize, o: &mut SpecOut) 
     }
 }
 
-/// Scans without restart intervals: chunks of the data are decoded speculatively in parallel
-/// (the first one for real), then the true decoding is followed serially across each chunk
-/// boundary until it meets an MCU start the next chunk's decoder recorded; from there on that
-/// decoder's blocks are the true ones and are copied into place (DC differences summed).
-/// Returns None (decode serially) whenever anything is out of the ordinary.
 fn spec_dbg(why: &str) {
     if std::env::var_os("JRC_DEBUG_SPEC").is_some() {
         eprintln!("speculative decoding fell back: {why}");
     }
 }
 
-fn decode_speculative<const NAT: bool>(c: &Ctx, chunks: usize) -> Option<ScanResult> {
+/// Scans without restart intervals: chunks of the data are decoded speculatively in parallel
+/// (the first one for real), then the true decoding is followed serially across each chunk
+/// boundary until it meets an MCU start the next chunk's decoder recorded; from there on that
+/// decoder's blocks are the true ones and are copied into place (DC differences summed).
+/// Returns None (decode serially) whenever anything is out of the ordinary.
+fn decode_speculative(c: &Ctx, chunks: usize) -> Option<ScanResult> {
     use crate::par::prelude::*;
     let bpm: usize = c.layout.iter().map(|&(_, h, v)| h * v).sum();
     let bounds: Vec<usize> = (0..=chunks).map(|i| i * c.data_len / chunks).collect();
@@ -1415,10 +1383,10 @@ fn decode_speculative<const NAT: bool>(c: &Ctx, chunks: usize) -> Option<ScanRes
         || {
             let mut chk = Checks::default();
             let (mut br, mut pred, mut m) = (Br { buf: 0, cnt: 0, pos: 0 }, [0; 4], 0);
-            let e = c.run::<NAT>(&mut br, &mut pred, &mut m, c.nmcu, &mut chk, |b, _| b >= bounds[1] * 8);
+            let e = c.run(&mut br, &mut pred, &mut m, c.nmcu, &mut chk, |b, _| b >= bounds[1] * 8);
             (chk, br, pred, m, e)
         },
-        || outs[1..].par_iter_mut().enumerate().for_each(|(i, o)| speculate::<NAT>(c, bounds[i + 1], bounds[i + 2], o)),
+        || outs[1..].par_iter_mut().enumerate().for_each(|(i, o)| speculate(c, bounds[i + 1], bounds[i + 2], o)),
     );
     let t1 = std::time::Instant::now();
     let mut t2 = t1;
@@ -1435,7 +1403,7 @@ fn decode_speculative<const NAT: bool>(c: &Ctx, chunks: usize) -> Option<ScanRes
         while m < c.nmcu {
             // follow the true decoding until it meets a record of chunk i (or a later chunk)
             let mut hit = None;
-            let e = c.run::<NAT>(&mut br, &mut pred, &mut m, c.nmcu, &mut chk, |b, _| {
+            let e = c.run(&mut br, &mut pred, &mut m, c.nmcu, &mut chk, |b, _| {
                 while i < chunks {
                     let recs = &outs[i].recs;
                     let p = recs.partition_point(|r| r.bit < b);
@@ -1858,7 +1826,7 @@ fn skim(c: &Ctx, from: usize, to: usize, o: &mut Skim) {
                         if let Err(e) = c.decode_dc(&mut br, si) {
                             break 'mcu Err(e);
                         }
-                        if let Err(e) = c.decode_ac::<false>(&mut br, si, &mut blk) {
+                        if let Err(e) = c.decode_ac(&mut br, si, &mut blk) {
                             break 'mcu Err(e);
                         }
                     }
@@ -1902,7 +1870,7 @@ fn locate(c: &Ctx, skip: &[CompPtr], starts: &[usize], chunks: usize) -> Option<
     let ((mut br, mut m, e0), ()) = crate::par::join(
         || {
             let (mut br, mut pred, mut m) = (Br { buf: 0, cnt: 0, pos: 0 }, [0; 4], 0);
-            let e = c.run_in::<false, true>(skip, &mut br, &mut pred, &mut m, c.nmcu, false, &mut chk, |b, mm| {
+            let e = c.run_in::<true>(skip, &mut br, &mut pred, &mut m, c.nmcu, false, &mut chk, |b, mm| {
                 see(&mut found, b, mm);
                 b >= bounds[1] * 8
             });
@@ -1919,7 +1887,7 @@ fn locate(c: &Ctx, skip: &[CompPtr], starts: &[usize], chunks: usize) -> Option<
         // predictions are relative to where it was last resumed
         let mut hit = None;
         let mut pred = [0; 4];
-        let e = c.run_in::<false, true>(skip, &mut br, &mut pred, &mut m, c.nmcu, false, &mut chk, |b, mm| {
+        let e = c.run_in::<true>(skip, &mut br, &mut pred, &mut m, c.nmcu, false, &mut chk, |b, mm| {
             see(&mut found, b, mm);
             while i < chunks {
                 let base = bounds[i] * 8;

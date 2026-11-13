@@ -22,11 +22,9 @@ const RANS_L: u64 = 1 << 31;
 const N_NZ: usize = 2 * 64; // alphabet 64
 const NREM: usize = 11; // remaining-nonzero classes, see `rem_class`
 const N_AC: usize = 2 * 63 * NREM; // alphabet 16
-/// DC prediction: boundary continuity with neighbour blocks (true) or MED over the DC grid
-const DC_BOUNDARY: bool = true;
 /// DC sub-contexts per (component class, neighbour residual bucket): prediction uncertainty
-/// (boundary) or AC count bucket (MED)
-const DC_SUB: usize = if DC_BOUNDARY { 8 } else { 6 };
+/// (DC prediction is boundary continuity with the neighbour blocks)
+const DC_SUB: usize = 8;
 const N_DC: usize = 2 * 9 * DC_SUB; // alphabet 16
 const NZ_BASE: usize = 0;
 const AC_BASE: usize = NZ_BASE + N_NZ * 64;
@@ -77,15 +75,6 @@ static DCN_B: [u8; 64] = {
     let mut i = 0;
     while i < 64 {
         t[i] = bucket(i as u32, &[0, 1, 2, 4, 6, 8, 10, 12]) as u8;
-        i += 1;
-    }
-    t
-};
-static NZ_B: [u8; 64] = {
-    let mut t = [0u8; 64];
-    let mut i = 0;
-    while i < 64 {
-        t[i] = bucket(i as u32, &[0, 2, 5, 10, 20]) as u8;
         i += 1;
     }
     t
@@ -203,27 +192,6 @@ impl DcBound {
         (bot, rgt)
     }
 }
-#[inline(always)]
-fn med(a: i32, b: i32, c: i32) -> i32 {
-    let (mx, mn) = (a.max(b), a.min(b));
-    if c >= mx {
-        mn
-    } else if c <= mn {
-        mx
-    } else {
-        a + b - c
-    }
-}
-#[inline(always)]
-fn dc_pred(blocks: &[[i16; 64]], i: usize, bw: usize, bx: usize, by: usize) -> i32 {
-    match (by > 0, bx > 0) {
-        (true, true) => med(blocks[i - 1][0] as i32, blocks[i - bw][0] as i32, blocks[i - bw - 1][0] as i32),
-        (false, true) => blocks[i - 1][0] as i32,
-        (true, false) => blocks[i - bw][0] as i32,
-        _ => 0,
-    }
-}
-
 /// cat (bit length of |x|) and the raw payload: (|x| without its top bit) << 1 | sign.
 #[inline(always)]
 fn split_value(x: i32) -> (u32, u32) {
@@ -400,19 +368,13 @@ fn walk_enc(s: &mut Sink, blocks: &[[i16; 64]], masks: &[u64], bw: usize, cc: us
                     rem -= (x != 0) as usize;
                 }
             }
-            let (pred, sub) = if DC_BOUNDARY {
-                dcb.pred(b, bottom[bx], right, has_a, has_l)
-            } else {
-                (dc_pred(blocks, i, bw, bx, by), NZ_B[nz as usize] as usize)
-            };
+            let (pred, sub) = dcb.pred(b, bottom[bx], right, has_a, has_l);
             let (cat, payload) = split_value(b[0] as i32 - pred);
             let cs = if has_a { dcc[i - bw] as u32 } else { 0 } + if has_l { dcc[i - 1] as u32 } else { 0 };
             s.sym(dc_ctx(cc, cs, sub) + cat as usize);
             s.raw.put(cat, payload);
             dcc[i] = cat as u8;
-            if DC_BOUNDARY {
-                (bottom[bx], right) = dcb.bounds(b);
-            }
+            (bottom[bx], right) = dcb.bounds(b);
         }
     }
 }
@@ -1127,19 +1089,13 @@ fn walk_dec(
                 (keep, dec, nzp) = (keep2, dec2, nzv);
                 k += 1;
             }
-            let (pred, sub) = if DC_BOUNDARY {
-                dcb.pred(&blocks[i], bottom[bx], right, has_a, has_l)
-            } else {
-                (dc_pred(blocks, i, bw, bx, by), NZ_B[nz as usize] as usize)
-            };
+            let (pred, sub) = dcb.pred(&blocks[i], bottom[bx], right, has_a, has_l);
             let cs = if has_a { dcc[i - bw] as u32 } else { 0 } + if has_l { dcc[i - 1] as u32 } else { 0 };
             let cat = d.sym(dc_ctx(cc, cs, sub));
             let w = d.raw(cat);
             let dc = pred + join_value(cat, w);
             blocks[i][0] = dc as i16;
-            if DC_BOUNDARY {
-                (bottom[bx], right) = dcb.bounds(&blocks[i]);
-            }
+            (bottom[bx], right) = dcb.bounds(&blocks[i]);
             masks[i] = mask | (dc != 0) as u64;
             dcc[i] = cat as u8;
             if d.bp > d.raw_bits || d.pos > d.src_len {
