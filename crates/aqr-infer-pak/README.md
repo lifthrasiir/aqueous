@@ -28,9 +28,9 @@ tile the target.
 
 ## Status
 
-Not used by aqr yet (docs/pak-inference-design.md, section 8). On the test set (The Crew,
-No Man's Sky, four files of other formats), `scripts/check.py` against the counts the headers
-give: 15 of 15 directories found, none found wrongly. The samples and their counts are in an
+Used by aqr-compress (`src/pak.rs`: families of a file of 4 MiB or more inferred, the others
+verified by templates). On the test set (The Crew, No Man's Sky, four files of other formats),
+`scripts/check.py` against the counts the headers give: 15 of 15 directories found, none found wrongly. The samples and their counts are in an
 expectations file of the user's (the script's docstring has its format), not in the repository.
 The inference does not look for directories of fewer than 8 rows; templates find them.
 

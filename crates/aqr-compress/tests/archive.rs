@@ -1765,11 +1765,13 @@ fn paks() {
         index.extend((n as u64).to_le_bytes());
         for _ in 0..n {
             // (the small families' members big: a data file of a few KB is better kept as it is
-            // than rebuilt by a module)
+            // than rebuilt by a module; the biggest family's data file over 4 MiB, as only a
+            // family of such a file is inferred, the others verifying its template)
             let len = match n {
                 1 => 200_000,
                 2..10 => 20_000,
-                _ => 200,
+                57 => 200,
+                _ => 15_000,
             } + (next() % 3000) as usize;
             let text: Vec<u8> = (0..len).map(|_| b"lorem ipsum dolor sit amet "[(next() % 27) as usize]).collect();
             let stream = lzo_literals(&text);

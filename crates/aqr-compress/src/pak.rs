@@ -33,6 +33,11 @@ const ALONE: u64 = 16 << 20;
 /// Contents shorter than this are not looked at (an index may be small: The Crew's of one
 /// entry is 40 bytes).
 const MIN: u64 = 16;
+/// A family is inferred only if its biggest file has this many bytes (smaller ones are only
+/// verified by the templates learned in their group): many contents start alike but are no
+/// archives (Python's `.pyc`, gettext's `.mo`), some 17800 families of the 10 GB benchmark
+/// inferred in 101 s before any batch was made.
+const INFER: u64 = 4 << 20;
 
 /// The members of a data file to take apart: where they are, and whether they are LZO1X
 /// streams (else stored).
@@ -131,6 +136,7 @@ pub(crate) fn plan<S: Source + ?Sized>(src: &S, stop: Option<&crate::archive::St
     if unknown.is_empty() {
         return Plan::default();
     }
+    let heads_time = t0.elapsed();
     let mut families: HashMap<(Vec<u8>, Vec<u8>), Vec<usize>> = HashMap::new();
     for c in 0..n {
         families.entry(family_key(src.name(c))).or_default().push(c);
@@ -167,8 +173,9 @@ pub(crate) fn plan<S: Source + ?Sized>(src: &S, stop: Option<&crate::archive::St
             if stop.is_some_and(|s| s.is_requested()) {
                 return plan;
             }
-            looked += 1;
-            if let Some(dirs) = directories(src, fam, &mut templates, true) {
+            let infer = fam.iter().map(|&c| src.size(c)).max().unwrap_or(0) >= INFER;
+            looked += infer as usize;
+            if let Some(dirs) = directories(src, fam, &mut templates, infer) {
                 take(&mut plan, src, fam, &dirs);
             } else {
                 retry.push(fam);
@@ -182,10 +189,12 @@ pub(crate) fn plan<S: Source + ?Sized>(src: &S, stop: Option<&crate::archive::St
     }
     if std::env::var_os("AQR_PAK_VERBOSE").is_some() {
         eprintln!(
-            "paks: {} unknown contents, {looked} families looked at, {} data files to take apart ({:.0} ms)",
+            "paks: {} unknown contents, {looked} families inferred, {} data files to take apart ({:.0} ms, \
+             heads {:.0} ms)",
             unknown.len(),
             plan.len(),
-            t0.elapsed().as_secs_f64() * 1e3
+            t0.elapsed().as_secs_f64() * 1e3,
+            heads_time.as_secs_f64() * 1e3
         );
     }
     plan
@@ -199,6 +208,9 @@ fn directories<S: Source + ?Sized>(
     templates: &mut Vec<Template>,
     infer: bool,
 ) -> Option<Vec<Directory>> {
+    if !infer && templates.is_empty() {
+        return None;
+    }
     let data: Vec<_> = fam.iter().map(|&c| src.read(c)).collect::<std::io::Result<_>>().ok()?;
     let files: Vec<File> = fam
         .iter()
