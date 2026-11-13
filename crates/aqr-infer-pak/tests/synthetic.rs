@@ -227,3 +227,40 @@ fn index_and_data_of(base: usize) {
         assert_eq!(dirs[0].members.len(), n);
     }
 }
+
+/// Nor is a table taken for a directory of a file beside it about as long as its offsets go
+/// (Slime Rancher's `level3` and `level3.resS`): its rooms fill any target, but its members
+/// would start far into it. The objects here are a part of their file (of the data after the
+/// table, from 1 MB in), too little of it for a directory of it.
+#[test]
+fn no_directory_of_a_sibling() {
+    let mut rng = Rng(0x51b1);
+    let n = 2000;
+    let pre = 1 << 20;
+    let (mut data, mut table) = (Vec::new(), Vec::new());
+    for _ in 0..n {
+        let size = 40 + rng.below(1000) as usize;
+        table.extend(rng.next().to_le_bytes());
+        table.extend(((pre + data.len()) as u32).to_le_bytes());
+        table.extend((size as u32).to_le_bytes());
+        table.extend((rng.below(200) as u32).to_le_bytes());
+        data.extend(rng.bytes(size));
+        while data.len() % 8 != 0 {
+            data.push(0);
+        }
+    }
+    let mut f = b"OBJS\0\0\0\x15".to_vec();
+    f.extend((n as u32).to_le_bytes());
+    f.extend(table);
+    while f.len() % 4096 != 0 {
+        f.push(0);
+    }
+    f.extend(rng.bytes(pre));
+    f.extend(&data);
+    f.extend(rng.bytes(8 * data.len()));
+    let res = rng.bytes(pre + data.len() + 4096);
+    let files = [File { name: "level3".into(), data: &f }, File { name: "level3.resS".into(), data: &res }];
+    let (dirs, _) = infer(&files, &Options::default());
+    let what: Vec<_> = dirs.iter().map(|d| (d.target.clone(), d.members.len())).collect();
+    assert!(dirs.iter().all(|d| d.target == "level3"), "{what:?}");
+}

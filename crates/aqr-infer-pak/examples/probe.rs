@@ -80,14 +80,15 @@ fn main() {
         }
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
         println!(
-            "  ({:.1} ms: tables {:.1}, profiles {:.1}, explicit {:.1}, implicit {:.1}, codecs {:.1}, decoded targets {:.1})",
+            "  ({:.1} ms: tables {:.1}, profiles {:.1}, explicit {:.1}, implicit {:.1}, codecs {:.1}, decoded targets {:.1}; {} rows tested)",
             ms(total),
             ms(t.tables),
             ms(t.profiles),
             ms(t.explicit),
             ms(t.implicit),
             ms(t.codecs),
-            ms(t.decode)
+            ms(t.decode),
+            t.rows
         );
     }
 }

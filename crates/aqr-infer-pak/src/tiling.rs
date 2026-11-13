@@ -301,12 +301,23 @@ pub fn explicit(b: &[u8], t: &Table, prof: &Profile, l: u64, sizes: &[Field]) ->
                             used[i] = s2[i];
                         }
                     }
-                    fit = fit_of(&mroom, &used);
                     break;
                 }
             }
         }
-        let _ = (fit, used);
+        // the control on the sample first (sizes of data that looks like a table, texture
+        // blocks, fit wrong members as well), before the run of rows is looked for over all
+        // the rows: in tables of 100 thousand rows and more, most of the cost
+        let g = rooms_slack(&mroom, &used);
+        let fit_g = |s: &[u64]| {
+            mroom.iter().zip(s).filter(|(r, x)| fits(**r, **x) && **r - **x < g).count() as f64
+                / mroom.len().max(1) as f64
+        };
+        let mut ctrl_s = used.clone();
+        ctrl_s.rotate_right(1);
+        if binomial_bits(mroom.len(), fit_g(&used), fit_g(&ctrl_s)) < EVIDENCE {
+            continue;
+        }
         // the rows that are the directory: the longest run of rows that fit (+1 each, -3 for
         // each that does not), as a table found may hold rows of its neighbours (a run of 3976
         // rows of AnimMBIN's is 3251 entries and the start of its chunks' sizes)
@@ -370,7 +381,10 @@ pub fn explicit(b: &[u8], t: &Table, prof: &Profile, l: u64, sizes: &[Field]) ->
         ctrl_s.rotate_right(1);
         let ctrl = fit_g(&ctrl_s);
         let ev = room_bits(&mroom, &used).min(binomial_bits(mroom.len(), fit_g(&used), ctrl));
-        if fit >= 0.8 && ev >= EVIDENCE {
+        // (and sizes fitting wrong members half the time are no evidence, however many: sizes
+        // about as alike as their rooms, of data or of a table of another kind, Outer Wilds'
+        // and Slime Rancher's Unity files at 0.60 and 0.41; NMS's decoded entries 0.36)
+        if fit >= 0.8 && ev >= EVIDENCE && ctrl < 0.5 {
             out.push(Cand { layout: Layout::Explicit { off, size, alt, fit, ctrl }, table: tt, ev });
         }
     }

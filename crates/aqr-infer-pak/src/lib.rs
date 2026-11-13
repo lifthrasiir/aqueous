@@ -62,6 +62,9 @@ pub struct Times {
     pub implicit: Duration,
     pub codecs: Duration,
     pub decode: Duration,
+    /// Rows of the tables tested (for each target they are tested on): the work of the tests,
+    /// as a measure that does not depend on the machine.
+    pub rows: u64,
 }
 
 pub struct Options {
@@ -276,6 +279,7 @@ pub fn infer(files: &[File], opt: &Options) -> (Vec<Directory>, Times) {
             (!skip(j)).then(|| test_table(files, tables[j], l, tg_is_file && tg_file == tables[j].0, opt))
         });
         times.explicit += tp.elapsed();
+        times.rows += (0..tables.len()).filter(|&j| !skip(j)).map(|j| tables[j].1.rows() as u64).sum::<u64>();
         let mut j = 0;
         while j < tables.len() {
             let (owner, t) = tables[j];
@@ -326,6 +330,13 @@ pub fn infer(files: &[File], opt: &Options) -> (Vec<Directory>, Times) {
                 let fill = filled(&ms);
                 let first = ms.iter().map(|m| m.offset).min().unwrap();
                 if (fill as f64) < COVER * (l - first) as f64 || fill < l / 2 {
+                    continue;
+                }
+                // in a target the table is not in, the members start near its start: a
+                // table's rooms fill any target as long, from where its offsets begin
+                // (Slime Rancher's `level3`, a Unity file, its objects' rows taken for its
+                // `level3.resS` from 2.7 MB on)
+                if !(tg.is_file() && tg.file == owner) && first > tiling::SLACK.max(l / 64) {
                     continue;
                 }
                 let idx: Vec<usize> = if ms.len() <= SAMPLE {

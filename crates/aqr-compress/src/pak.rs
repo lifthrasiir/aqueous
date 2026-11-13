@@ -38,6 +38,15 @@ const MIN: u64 = 16;
 /// archives (Python's `.pyc`, gettext's `.mo`), some 17800 families of the 10 GB benchmark
 /// inferred in 101 s before any batch was made.
 const INFER: u64 = 4 << 20;
+/// The inferences of a group that found nothing since its last directory found, after which
+/// its other families are only verified by templates: those that tested rows of tables (about
+/// 0.5 s a million) more than this many, and more than one for each [`GIVE_UP_BYTES`] of
+/// their families (slower than about 120 MB/s). Data that looks like tables (textures) costs
+/// a second or more a file (Ori DE: a group of 32 `.resS` files, 61 s), where inferences
+/// finding nothing may still come before one that does (Subnautica's bundles: 23 big ones,
+/// 11 million rows, before the second of 5 that find any, 66 found by their templates).
+const GIVE_UP: u64 = 2_000_000;
+const GIVE_UP_BYTES: u64 = 64;
 
 /// The members of a data file to take apart: where they are, and whether they are LZO1X
 /// streams (else stored).
@@ -118,6 +127,8 @@ pub(crate) fn plan<S: Source + ?Sized>(src: &S, stop: Option<&crate::archive::St
         return Plan::default();
     }
     let t0 = Instant::now();
+    // (`AQR_PAK_VERBOSE=2`: each family looked at too)
+    let each = std::env::var_os("AQR_PAK_VERBOSE").is_some_and(|v| v == "2");
     let n = src.len();
     // the contents of no format detected, by their head
     let mut heads: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
@@ -185,20 +196,39 @@ pub(crate) fn plan<S: Source + ?Sized>(src: &S, stop: Option<&crate::archive::St
         keys.sort_by_key(|(_, fam)| std::cmp::Reverse(fam.iter().map(|&c| src.size(c)).sum::<u64>()));
         let mut templates: Vec<Template> = Vec::new();
         let mut retry = Vec::new();
+        let mut wasted = (0u64, 0u64);
         for (_, fam) in &keys {
             if stop.is_some_and(|s| s.is_requested()) {
                 return plan;
             }
-            let infer = fam.iter().map(|&c| src.size(c)).max().unwrap_or(0) >= INFER;
+            let infer = wasted.0 < GIVE_UP.max(wasted.1 / GIVE_UP_BYTES)
+                && fam.iter().map(|&c| src.size(c)).max().unwrap_or(0) >= INFER;
             looked += infer as usize;
-            if let Some(dirs) = directories(src, fam, &mut templates, infer, threads) {
+            let t = Instant::now();
+            let (dirs, rows) = directories(src, fam, &mut templates, infer, threads);
+            if each {
+                eprintln!(
+                    "  {} ({} in group, {} B): {} in {:.0} ms, {rows} rows",
+                    String::from_utf8_lossy(src.name(fam[0])),
+                    g.len(),
+                    src.size(fam[0]),
+                    dirs.as_ref().map_or(0, |d| d.len()),
+                    t.elapsed().as_secs_f64() * 1e3
+                );
+            }
+            if let Some(dirs) = dirs {
                 take(&mut plan, src, fam, &dirs);
+                wasted = (0, 0);
             } else {
+                if infer {
+                    wasted.0 += rows;
+                    wasted.1 += fam.iter().map(|&c| src.size(c)).sum::<u64>();
+                }
                 retry.push(fam);
             }
         }
         for fam in retry {
-            if let Some(dirs) = directories(src, fam, &mut templates, false, threads) {
+            if let (Some(dirs), _) = directories(src, fam, &mut templates, false, threads) {
                 take(&mut plan, src, fam, &dirs);
             }
         }
@@ -217,34 +247,35 @@ pub(crate) fn plan<S: Source + ?Sized>(src: &S, stop: Option<&crate::archive::St
 }
 
 /// The directories of family `fam` (its key first), by a template of `templates` or inferred
-/// where `infer` (its template then learned), or None.
+/// where `infer` (its template then learned), or None; and the rows of the tables the
+/// inference tested.
 fn directories<S: Source + ?Sized>(
     src: &S,
     fam: &[usize],
     templates: &mut Vec<Template>,
     infer: bool,
     threads: usize,
-) -> Option<Vec<Directory>> {
+) -> (Option<Vec<Directory>>, u64) {
     if !infer && templates.is_empty() {
-        return None;
+        return (None, 0);
     }
-    let data: Vec<_> = fam.iter().map(|&c| src.read(c)).collect::<std::io::Result<_>>().ok()?;
+    let Ok(data) = fam.iter().map(|&c| src.read(c)).collect::<std::io::Result<Vec<_>>>() else { return (None, 0) };
     let files: Vec<File> = fam
         .iter()
         .zip(&data)
         .map(|(&c, d)| File { name: String::from_utf8_lossy(src.name(c)).into_owned(), data: &d[..] })
         .collect();
     if let Some(dirs) = templates.iter().find_map(|t| template::verify(t, &files, 0)) {
-        return Some(dirs).filter(|d| !d.is_empty());
+        return (Some(dirs).filter(|d| !d.is_empty()), 0);
     }
     if !infer {
-        return None;
+        return (None, 0);
     }
-    let (dirs, _) = aqr_infer_pak::infer(&files, &aqr_infer_pak::Options { threads, ..Default::default() });
+    let (dirs, times) = aqr_infer_pak::infer(&files, &aqr_infer_pak::Options { threads, ..Default::default() });
     if let Some(t) = template::learn(&files, 0, &dirs) {
         templates.push(t);
     }
-    Some(dirs).filter(|d| !d.is_empty())
+    (Some(dirs).filter(|d| !d.is_empty()), times.rows)
 }
 
 /// The data files of directories `dirs` of family `fam` to take apart: those of members in

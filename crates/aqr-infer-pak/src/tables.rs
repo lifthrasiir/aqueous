@@ -456,7 +456,7 @@ pub fn rank_near(tables: Vec<Table>, len: usize, keep: usize, per: usize, near_o
 }
 
 /// The tables of a file: its head (grown while a table runs to the window's end, up to
-/// 64 MiB) and tail, or the whole of a small file.
+/// 4 MiB) and tail, or the whole of a small file.
 pub fn of_file(b: &[u8], keep: usize, per: usize, threads: usize) -> Vec<Table> {
     const HEAD: usize = 1 << 20;
     const TAIL: usize = 256 << 10;
@@ -467,7 +467,11 @@ pub fn of_file(b: &[u8], keep: usize, per: usize, threads: usize) -> Vec<Table> 
     let mut hi = HEAD;
     // the head grows while tables from the head, one meeting the next, run to its end
     // (MetadataEtc's entries run 1.6 MB, in fragments of different strides, its chunks' sizes
-    // after them)
+    // after them), to 4 MiB: texture data looks like tables run on (Ori's `.resS` grew to
+    // 16 MiB, 0.6 s of tables and 3 s of their tests). The tables running on past it are left
+    // out: their rows cut off, their sizes fill less than their target, and so may fill
+    // another (Slime Rancher's `level3`, a Unity file of 186 thousand objects in 4 MiB, its
+    // `level3.resS` of 17 MB)
     let mut ts = loop {
         let mut ts = find(b, 0, hi, threads);
         ts.sort_by_key(|t| t.start);
@@ -479,7 +483,11 @@ pub fn of_file(b: &[u8], keep: usize, per: usize, threads: usize) -> Vec<Table> 
                 reach = reach.max(t.end);
             }
         }
-        if reach + 4096 < hi || hi >= n || hi >= 16 << 20 {
+        if reach + 4096 < hi || hi >= n {
+            break ts;
+        }
+        if hi >= 4 << 20 {
+            ts.retain(|t| t.end + 4096 < hi);
             break ts;
         }
         hi = (hi * 2).min(n);

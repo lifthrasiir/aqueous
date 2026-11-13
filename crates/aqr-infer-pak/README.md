@@ -37,11 +37,20 @@ The inference does not look for directories of fewer than 8 rows; templates find
 `aqr-infer-pak-batch` runs a batch as aqr would trigger it: files that start with the same 8
 bytes (3 at least, not text or zeros) are a group, each with its family; the biggest family is
 inferred, the others verify its template (or are inferred, and learned from, where it does not
-hold), those left with nothing retried by the templates learned later. The Crew's `data_win32`
+hold), those left with nothing retried by the templates learned later; a group's inferences
+stop where those since its last directory found tested more rows of tables than 2 million and
+than one for each 64 bytes of their families (as aqr-compress's do). The Crew's `data_win32`
 (174 files, 87 families): all 87, 85 by templates in 0.1 s in all, 2 inferred in 2.4 s. No Man's
 Sky's `PCBANKS` (98 files): 95 of 97 paks, 93 by templates in 4.5 s (mostly the first touch of
 the mapped files), 4 inferred in 6.0 s; the two paks stored uncompressed are missed (their
 entries' table is labelled the wrong stride).
+
+Other games (a survey of a Steam library: about 150 games, 416 files of 66 kinds, by
+`aqr-infer-pak-probe`): Wwise banks, XACT wave banks, Unreal 3 packages, Unity files and others
+found with their headers' counts; Unreal 4 paks, Godot's, Source's VPKs (records of names),
+Chromium's paks and CRI's AFS2 (offsets with no sizes) are not looked for. aqr's plan of the
+paks on 22 of the games (`AQR_PAK_VERBOSE=1`, before the archive's batches): 0.1 to 49 s, the
+most for Unity games of textures (Ori DE, 10 GB: 158 -> 35 s; Outer Wilds 90 -> 39 s).
 
 ## Usage
 

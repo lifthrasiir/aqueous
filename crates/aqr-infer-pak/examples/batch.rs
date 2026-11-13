@@ -72,6 +72,10 @@ fn main() {
         println!("group {:02x?} ({} families)", magic, members.len());
         let mut templates: Vec<Template> = Vec::new();
         let mut retry = Vec::new();
+        // (rows tested and bytes of the families inferred since the group's last directory
+        // found, after which only templates are verified, as aqr-compress does: GIVE_UP in its
+        // pak.rs)
+        let mut wasted = (0u64, 0u64);
         for (key, fam) in members {
             // the key file first
             let mut order = vec![key];
@@ -85,13 +89,18 @@ fn main() {
                 .collect();
             let t0 = Instant::now();
             let mut how = "template";
+            let mut rows = 0;
             let mut dirs: Option<Vec<Directory>> = templates.iter().find_map(|t| template::verify(t, &files, 0));
             if dirs.is_some() {
                 t_tmpl += t0.elapsed();
                 n_tmpl += 1;
+            } else if wasted.0 >= 2_000_000u64.max(wasted.1 / 64) {
+                how = "given up";
+                dirs = Some(Vec::new());
             } else {
                 how = "inferred";
-                let (d, _) = infer(&files, &Options::default());
+                let (d, t) = infer(&files, &Options::default());
+                rows = t.rows;
                 if let Some(t) = template::learn(&files, 0, &d) {
                     if std::env::var_os("AQR_PAK_VERBOSE").is_some() {
                         eprintln!("    learned {:?}", t.dirs);
@@ -104,7 +113,13 @@ fn main() {
             }
             let dirs = dirs.unwrap();
             if dirs.is_empty() {
+                if how == "inferred" {
+                    wasted.0 += rows;
+                    wasted.1 += fam.iter().map(|&i| maps[i].len() as u64).sum::<u64>();
+                }
                 retry.push((key, fam.clone()));
+            } else {
+                wasted = (0, 0);
             }
             dirs_found += dirs.len();
             let what: Vec<String> = dirs.iter().map(|d| format!("{} {}", d.target, d.members.len())).collect();
