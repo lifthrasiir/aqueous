@@ -416,8 +416,11 @@ fn compress_tree_noting<S: Source + ?Sized>(
     let w_at = w.len();
     let weights: Vec<u64> = batches.iter().map(weight).collect();
     // (the files of unknown archive formats: the directories of those that start alike)
-    let paks =
-        opt.recompresses().then(|| crate::pak::plan(src, stop)).filter(|p| !p.is_empty()).map(std::sync::Arc::new);
+    let paks = opt
+        .recompresses()
+        .then(|| crate::pak::plan(src, stop, opt.threads))
+        .filter(|p| !p.is_empty())
+        .map(std::sync::Arc::new);
     let cx = Ctx { src, opt, notes: &notes, batches: &batches, weights: &weights, entries: &entries, tree, stop, paks };
     let pipe = Pipe {
         reader: Mutex::new(Reader { first: HashMap::new() }),

@@ -93,6 +93,13 @@ fn magic_like(h: &[u8]) -> bool {
     h.len() == 8 && h.iter().any(|&x| x != h[0]) && !h.iter().all(|&x| (0x20..0x7f).contains(&x) || x == b'\n')
 }
 
+/// Whether bytes look like text: hardly any control bytes but tabs and line ends (UTF-8 and
+/// other encodings' high bytes allowed).
+fn texty(b: &[u8]) -> bool {
+    let ctl = b.iter().filter(|&&x| (x < 0x20 && !matches!(x, b'\t' | b'\n' | b'\r')) || x == 0x7f).count();
+    !b.is_empty() && ctl * 100 < b.len()
+}
+
 /// A name's directory and stem (lowercased): the family it is of.
 fn family_key(name: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let cut = name.iter().rposition(|&b| b == b'/' || b == b'\\').map_or(0, |i| i + 1);
@@ -105,7 +112,7 @@ fn family_key(name: &[u8]) -> (Vec<u8>, Vec<u8>) {
 }
 
 /// The plan of the contents of `src` ([`Plan`]): empty where nothing is to be taken apart.
-pub(crate) fn plan<S: Source + ?Sized>(src: &S, stop: Option<&crate::archive::Stop>) -> Plan {
+pub(crate) fn plan<S: Source + ?Sized>(src: &S, stop: Option<&crate::archive::Stop>, threads: usize) -> Plan {
     // (`AQR_PAKS=0`: none, for a comparison)
     if std::env::var_os("AQR_PAKS").is_some_and(|v| v == "0") {
         return Plan::default();
@@ -115,9 +122,11 @@ pub(crate) fn plan<S: Source + ?Sized>(src: &S, stop: Option<&crate::archive::St
     // the contents of no format detected, by their head
     let mut heads: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
     let mut unknown = Vec::new();
+    let mut text = Vec::new();
     for c in 0..n {
         // (of a name telling no kind: the extensions known are formats' own, and a read of
-        // each file before its batch delays the archive)
+        // each file before its batch delays the archive; read on one thread, as reads of many
+        // small files on several were slower)
         if src.size(c) < MIN || crate::kind_by_name(src.name(c)) != Kind::Unknown {
             continue;
         }
@@ -127,6 +136,13 @@ pub(crate) fn plan<S: Source + ?Sized>(src: &S, stop: Option<&crate::archive::St
         let Ok(head) = src.read_range(c, 0..4096) else { continue };
         if crate::detect(&head).is_some() {
             continue;
+        }
+        // (a big one inferred alone only where its head or tail is no text: a directory is
+        // binary, at the one or the other; the 10 GB benchmark's primes, 57 MB of numbers,
+        // took 5 s)
+        let size = src.size(c);
+        if size >= ALONE && texty(&head) && src.read_range(c, size - 4096..size).is_ok_and(|t| texty(&t)) {
+            text.push(c);
         }
         unknown.push(c);
         if magic_like(&head[..8.min(head.len())]) {
@@ -155,7 +171,7 @@ pub(crate) fn plan<S: Source + ?Sized>(src: &S, stop: Option<&crate::archive::St
     for g in groups
         .iter()
         .map(|g| g.as_slice())
-        .chain(unknown.iter().filter(|&&c| src.size(c) >= ALONE).map(std::slice::from_ref))
+        .chain(unknown.iter().filter(|&&c| src.size(c) >= ALONE && !text.contains(&c)).map(std::slice::from_ref))
     {
         let mut keys: Vec<(usize, Vec<usize>)> = g
             .iter()
@@ -175,14 +191,14 @@ pub(crate) fn plan<S: Source + ?Sized>(src: &S, stop: Option<&crate::archive::St
             }
             let infer = fam.iter().map(|&c| src.size(c)).max().unwrap_or(0) >= INFER;
             looked += infer as usize;
-            if let Some(dirs) = directories(src, fam, &mut templates, infer) {
+            if let Some(dirs) = directories(src, fam, &mut templates, infer, threads) {
                 take(&mut plan, src, fam, &dirs);
             } else {
                 retry.push(fam);
             }
         }
         for fam in retry {
-            if let Some(dirs) = directories(src, fam, &mut templates, false) {
+            if let Some(dirs) = directories(src, fam, &mut templates, false, threads) {
                 take(&mut plan, src, fam, &dirs);
             }
         }
@@ -207,6 +223,7 @@ fn directories<S: Source + ?Sized>(
     fam: &[usize],
     templates: &mut Vec<Template>,
     infer: bool,
+    threads: usize,
 ) -> Option<Vec<Directory>> {
     if !infer && templates.is_empty() {
         return None;
@@ -223,7 +240,7 @@ fn directories<S: Source + ?Sized>(
     if !infer {
         return None;
     }
-    let (dirs, _) = aqr_infer_pak::infer(&files, &aqr_infer_pak::Options::default());
+    let (dirs, _) = aqr_infer_pak::infer(&files, &aqr_infer_pak::Options { threads, ..Default::default() });
     if let Some(t) = template::learn(&files, 0, &dirs) {
         templates.push(t);
     }
