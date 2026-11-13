@@ -8,10 +8,8 @@ use std::ops::Range;
 
 use aqr_disk::Image;
 
-use crate::{File, extents, le16, le32, utf16};
-
-/// Deepest directory read, from the root.
-const DEPTH: usize = 256;
+use crate::{File, extents, le16, le32};
+use aqr_disk::{MAX_DEPTH, join_path, utf16_to_utf8};
 
 /// Most bytes of a directory read: the 65536 entries a directory may have.
 const DIRECTORY: usize = 65536 * 32;
@@ -237,21 +235,18 @@ pub fn files(d: &dyn Image) -> Vec<File> {
             let name = match long.filter(|l| l.next == 0 && l.sum == sum) {
                 Some(l) => {
                     let n = l.units.iter().position(|&u| u == 0 || u == 0xffff).unwrap_or(l.units.len());
-                    utf16(&l.units[..n])
+                    utf16_to_utf8(l.units[..n].iter().copied())
                 }
                 None => short_name(e),
             };
             if name.is_empty() {
                 continue;
             }
-            let full = match path.is_empty() {
-                true => name,
-                false => [&path[..], b"/", &name].concat(),
-            };
+            let full = join_path(&path, name);
             let high = if v.width == Width::Fat32 { (le16(e, 20) as u32) << 16 } else { 0 };
             let cluster = high | le16(e, 26) as u32;
             if attr & 0x10 != 0 {
-                if depth < DEPTH && cluster >= 2 && seen.insert(cluster) {
+                if depth < MAX_DEPTH && cluster >= 2 && seen.insert(cluster) {
                     todo.push((full, Some(cluster), depth + 1));
                 }
                 continue;

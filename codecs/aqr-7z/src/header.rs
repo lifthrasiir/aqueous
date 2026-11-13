@@ -17,7 +17,8 @@ pub const COPY: &[u8] = &[0];
 pub const LZMA: &[u8] = &[3, 1, 1];
 pub const LZMA2: &[u8] = &[0x21];
 
-mod id {
+/// Property ids.
+pub mod id {
     pub const END: u64 = 0;
     pub const HEADER: u64 = 1;
     pub const ARCHIVE_PROPERTIES: u64 = 2;
@@ -86,8 +87,7 @@ pub struct Folder {
 impl Folder {
     /// The size of its output: of the output no bind pair takes.
     pub fn size(&self) -> Option<u64> {
-        let o = (0..self.sizes.len() as u64).find(|o| !self.binds.iter().any(|b| b.1 == *o))?;
-        Some(self.sizes[o as usize])
+        self.output().map(|o| self.sizes[o as usize])
     }
 
     /// The coder of a folder of one coder, of one packed stream.

@@ -3,6 +3,8 @@
 //! directory is read once, however many records point at it; the records of a file of several
 //! extents (the multi-extent flag on all but the last) are one file.
 
+use aqr_disk::{join_path, utf16_to_utf8};
+
 use crate::{File, SECTOR, le16, le32};
 
 /// The files of every volume descriptor's tree in image `d`, Joliet's first (whose names are
@@ -57,7 +59,7 @@ fn walk(d: &dyn aqr_disk::Image, root: &[u8], block: usize, ucs2: bool, out: &mu
             if id == [0] || id == [1] {
                 continue;
             }
-            let name = [&path[..], if path.is_empty() { b"" } else { b"/" }, &name(id, ucs2)].concat();
+            let name = join_path(&path, name(id, ucs2));
             let (at, size) = ((le32(r, 2) as usize + r[1] as usize) * block, le32(r, 10) as usize);
             if flags & 2 != 0 {
                 dirs.push((le32(r, 2) as usize, size, name));
@@ -84,10 +86,7 @@ fn walk(d: &dyn aqr_disk::Image, root: &[u8], block: usize, ucs2: bool, out: &mu
 /// A file identifier as a name: UCS-2 to UTF-8, without its version (`;1`) or a trailing dot.
 fn name(id: &[u8], ucs2: bool) -> Vec<u8> {
     let mut s = match ucs2 {
-        true => char::decode_utf16(id.as_chunks::<2>().0.iter().map(|&c| u16::from_be_bytes(c)))
-            .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
-            .collect::<String>()
-            .into_bytes(),
+        true => utf16_to_utf8(id.as_chunks::<2>().0.iter().map(|&c| u16::from_be_bytes(c))),
         false => id.to_vec(),
     };
     if let Some(semi) = s.iter().rposition(|&b| b == b';') {

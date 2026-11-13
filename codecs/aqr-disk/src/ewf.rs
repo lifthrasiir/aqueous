@@ -11,15 +11,8 @@
 //! of EnCase 6.7.1 past 2 GiB (offsets of 32 bits: none in order, so no image), older images'
 //! chunks of a table of no `sectors` section, `.L01`'s files.
 
+use crate::bytes::{le32, le64};
 use crate::chunked::{Chunk, Chunked, How};
-
-fn le32(b: &[u8], p: usize) -> u32 {
-    u32::from_le_bytes(b[p..p + 4].try_into().unwrap())
-}
-
-fn le64(b: &[u8], p: usize) -> u64 {
-    u64::from_le_bytes(b[p..p + 8].try_into().unwrap())
-}
 
 /// Most sections read: of more, no segment file this big.
 fn most(d: &[u8]) -> usize {

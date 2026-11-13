@@ -53,6 +53,9 @@ pub fn wof_chunks(s: &[u8], len: u64, chunk: usize) -> Option<Chunks> {
     }
     let es = if len > u32::MAX as usize { 8 } else { 4 };
     let table = (k - 1).checked_mul(es)?;
+    if table > s.len() {
+        return None;
+    }
     let entry = |i: usize| -> Option<usize> {
         let e = s.get(i * es..i * es + es)?;
         let v = if es == 8 {

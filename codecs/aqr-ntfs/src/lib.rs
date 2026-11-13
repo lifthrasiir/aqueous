@@ -10,8 +10,9 @@
 //! of their VCNs across the base record and its extension records. A stream's contents are its
 //! clusters up to its initialized size, holes of a sparse stream left out.
 //!
-//! Left in the rest: resident data (in its record), compressed and encrypted streams (their
-//! clusters as they are; LZNT1 is for later), the system files (records 0 to 15, and those below
+//! Compressed streams are told as such, [`aqr_disk::Compressed`]: an LZNT1 attribute's units, and
+//! a file of WOF's by its `WofCompressedData`. Left in the rest: resident data (in its record),
+//! encrypted streams (their clusters as they are), the system files (records 0 to 15, and those below
 //! `$Extend`), directories and their indexes, and what does not read: a record whose fixups do not
 //! match, runs that do not decode.
 
@@ -20,12 +21,11 @@ use std::ops::Range;
 
 pub use aqr_disk::File;
 use aqr_disk::Image;
+use aqr_disk::bytes::{le16, le32, le64};
+use aqr_disk::{MAX_DEPTH, utf16_to_utf8};
 
 /// NTFS as a file system of aqr-disk.
 pub const FS: aqr_disk::FileSystem = aqr_disk::FileSystem { name: "ntfs", starts, files };
-
-/// Deepest path made, from the root.
-const DEPTH: usize = 256;
 
 /// The records of the system files, and the root directory's and `$Extend`'s.
 const SYSTEM: u64 = 16;
@@ -34,18 +34,6 @@ const EXTEND: u64 = 11;
 
 /// The stride of the fixups: they end every 512 bytes of a record, whatever the sector.
 const STRIDE: usize = 512;
-
-fn le16(b: &[u8], p: usize) -> u16 {
-    u16::from_le_bytes([b[p], b[p + 1]])
-}
-
-fn le32(b: &[u8], p: usize) -> u32 {
-    u32::from_le_bytes(b[p..p + 4].try_into().unwrap())
-}
-
-fn le64(b: &[u8], p: usize) -> u64 {
-    u64::from_le_bytes(b[p..p + 8].try_into().unwrap())
-}
 
 /// What the boot sector tells of a volume.
 struct Volume {
@@ -214,6 +202,24 @@ struct Entry {
     resident: Option<u64>,
 }
 
+/// The runs of stream `s` in order of their VCNs, up to where one is missing.
+fn in_vcn_order(s: &Stream) -> Vec<Run> {
+    let mut pieces: Vec<&(u64, Vec<Run>)> = s.pieces.iter().collect();
+    pieces.sort_by_key(|p| p.0);
+    let mut all: Vec<Run> = Vec::new();
+    let mut vcn = 0u64;
+    for (start, runs) in pieces {
+        if *start != vcn {
+            break;
+        }
+        for &r in runs {
+            vcn = vcn.saturating_add(r.0);
+            all.push(r);
+        }
+    }
+    all
+}
+
 /// The extents of `runs` (in order) up to `len` bytes of clusters of `cluster` bytes, holes left
 /// out (their bytes counted).
 fn extents(runs: &[Run], cluster: u64, len: u64) -> Vec<Range<usize>> {
@@ -229,10 +235,7 @@ fn extents(runs: &[Run], cluster: u64, len: u64) -> Vec<Range<usize>> {
             continue;
         };
         let end = start.saturating_add(usize::try_from(bytes).unwrap_or(usize::MAX));
-        match out.last_mut() {
-            Some(r) if r.end == start => r.end = end,
-            _ => out.push(start..end),
-        }
+        aqr_disk::push_extent(&mut out, start..end);
     }
     out
 }
@@ -329,12 +332,12 @@ pub fn files(d: &dyn Image) -> Vec<File> {
         }
         let out = match entries.get(&n).and_then(|e| e.name.as_ref()) {
             // (below $Extend, or of no way to the root: none)
-            Some((_, name, parent)) if n != EXTEND && depth < DEPTH && *parent != n => {
+            Some((_, name, parent)) if n != EXTEND && depth < MAX_DEPTH && *parent != n => {
                 path(*parent, entries, paths, depth + 1).map(|mut p| {
                     if !p.is_empty() {
                         p.push(b'/');
                     }
-                    p.extend(utf16(name));
+                    p.extend(utf16_to_utf8(name.iter().copied()));
                     p
                 })
             }
@@ -346,29 +349,13 @@ pub fn files(d: &dyn Image) -> Vec<File> {
     let mut numbers: Vec<u64> = entries.keys().copied().filter(|&n| n >= SYSTEM).collect();
     numbers.sort_unstable();
     let mut out = Vec::new();
+    let wof: Vec<u16> = "WofCompressedData".encode_utf16().collect();
     for n in numbers {
         let e = &entries[&n];
         if e.directory {
             continue;
         }
         let Some(p) = path(n, &entries, &mut paths, 0) else { continue };
-        // (the runs of stream `s` in order of their VCNs, up to where one is missing)
-        let ordered = |s: &Stream| -> Vec<Run> {
-            let mut pieces: Vec<&(u64, Vec<Run>)> = s.pieces.iter().collect();
-            pieces.sort_by_key(|p| p.0);
-            let mut all: Vec<Run> = Vec::new();
-            let mut vcn = 0u64;
-            for (start, runs) in pieces {
-                if *start != vcn {
-                    break;
-                }
-                for &r in runs {
-                    vcn = vcn.saturating_add(r.0);
-                    all.push(r);
-                }
-            }
-            all
-        };
         // (a compressed stream: its units' clusters allocated, in order, and the bytes of each)
         let units = |s: &Stream| -> Option<(Vec<Range<usize>>, aqr_disk::Compressed)> {
             let ((len, _), unit) = (s.sizes?, s.lznt1?);
@@ -381,7 +368,7 @@ pub fn files(d: &dyn Image) -> Vec<File> {
             let mut allocated = vec![0u32; count as usize];
             let mut out: Vec<Range<usize>> = Vec::new();
             let mut vcn = 0u64;
-            for (n, lcn) in ordered(s) {
+            for (n, lcn) in in_vcn_order(s) {
                 // (each unit the run overlaps, its clusters of it)
                 let (mut k, end) = (0u64, n.min((count * cu).saturating_sub(vcn)));
                 while k < end {
@@ -392,10 +379,7 @@ pub fn files(d: &dyn Image) -> Vec<File> {
                     {
                         let bytes = (m * v.cluster) as usize;
                         allocated[u as usize] += bytes as u32;
-                        match out.last_mut() {
-                            Some(r) if r.end == at => r.end = at + bytes,
-                            _ => out.push(at..at + bytes),
-                        }
+                        aqr_disk::push_extent(&mut out, at..at + bytes);
                     }
                     k += m;
                 }
@@ -410,25 +394,10 @@ pub fn files(d: &dyn Image) -> Vec<File> {
         // (the extents of stream `s`, up to its initialized size)
         let taken = |s: &Stream| -> Option<Vec<Range<usize>>> {
             let (data, initialized) = s.sizes.filter(|_| !s.packed)?;
-            let mut pieces: Vec<&(u64, Vec<Run>)> = s.pieces.iter().collect();
-            pieces.sort_by_key(|p| p.0);
-            // (the runs in order of their VCNs, up to where one is missing)
-            let mut all: Vec<Run> = Vec::new();
-            let mut vcn = 0u64;
-            for (start, runs) in pieces {
-                if *start != vcn {
-                    break;
-                }
-                for &r in runs {
-                    vcn = vcn.saturating_add(r.0);
-                    all.push(r);
-                }
-            }
-            Some(extents(&all, v.cluster, initialized.min(data)))
+            Some(extents(&in_vcn_order(s), v.cluster, initialized.min(data)))
         };
         // a file of WOF's: its contents the stream WofCompressedData holds compressed, of the
         // unnamed stream's size
-        let wof: Vec<u16> = "WofCompressedData".encode_utf16().collect();
         let len = e.streams.get(&[][..]).and_then(|s| s.sizes).map(|s| s.0).or(e.resident);
         if let (Some(algorithm), Some(s), Some(len)) = (e.wof, e.streams.get(&wof), len)
             && aqr_disk::Compressed::wof_chunk(algorithm).is_some()
@@ -456,7 +425,7 @@ pub fn files(d: &dyn Image) -> Vec<File> {
             let mut full = p.clone();
             if !name.is_empty() {
                 full.push(b':');
-                full.extend(utf16(name));
+                full.extend(utf16_to_utf8(name.iter().copied()));
             }
             out.push(File { name: full, extents, rank: 0, compressed });
         }
@@ -526,12 +495,4 @@ impl MftMap {
 /// The UTF-16 code units of `b`.
 fn units(b: &[u8]) -> Vec<u16> {
     b.as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c)).collect()
-}
-
-/// A name of UTF-16 code units as UTF-8, unpaired surrogates replaced.
-fn utf16(units: &[u16]) -> Vec<u8> {
-    char::decode_utf16(units.iter().copied())
-        .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
-        .collect::<String>()
-        .into_bytes()
 }

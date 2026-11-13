@@ -184,7 +184,7 @@ pub fn encode_with(
     // the blocks that may be rebuilt, those decoding within the limit by their headers' sizes
     let mut left = opt.limit;
     let mut made: Vec<Option<Made>> = blocks.iter().map(|_| None).collect();
-    let (mut deflated, mut bzip2, mut lzma, mut azo) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut order, mut bzip2, mut lzma, mut azo) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for (i, &(b, encrypted)) in blocks.iter().enumerate() {
         if encrypted || b.body.is_empty() {
             continue;
@@ -195,7 +195,7 @@ pub fn encode_with(
             m @ (DEFLATE | BZIP2 | LZMA | AZO) if size <= left => {
                 left -= size;
                 match m {
-                    DEFLATE => deflated.push(i),
+                    DEFLATE => order.push(i),
                     BZIP2 => bzip2.push(i),
                     LZMA => lzma.push(i),
                     _ => azo.push(i),
@@ -206,7 +206,6 @@ pub fn encode_with(
     }
     let fopt = aqr_flate::Options { zlib: opt.zlib, ..aqr_flate::Options::for_profile(opt.profile).ok()? };
     // (the large ones first, each on all threads, the small ones side by side on one each)
-    let mut order = deflated.clone();
     order.sort_by_key(|&i| std::cmp::Reverse(blocks[i].0.body.len()));
     let done = aqr_common::pool::par_map(order.len(), opt.threads, |k| {
         let b = blocks[order[k]].0;

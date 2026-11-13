@@ -10,7 +10,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ops::Range;
 
-use aqr_disk::Image;
+use aqr_disk::{Image, join_path, push_extent, utf16_to_utf8};
 
 use crate::{File, SECTOR, le16, le32};
 
@@ -52,7 +52,7 @@ pub fn files(d: &dyn Image) -> Vec<File> {
     for s in loc..loc + (len / SECTOR).min(64) {
         let at = s * SECTOR;
         let Some(id) = d.get(at..at + 2).map(|t| t[0]) else { break };
-        match (id, tag(d, at, id as u16, 440 + 64 * 255)) {
+        match (id, matches!(id, 5 | 6 | 8).then(|| tag(d, at, id as u16, 440 + 64 * 255)).flatten()) {
             (5, Some(p)) if p.len() >= 196 => numbers.push((le16(&p, 22), le32(&p, 188) as usize)),
             (6, Some(l)) if lvd.is_none() && l.len() >= 440 => lvd = Some(l),
             (8, Some(_)) => break,
@@ -87,7 +87,7 @@ pub fn files(d: &dyn Image) -> Vec<File> {
         let Some(dir) = entry(d, &vol, icb) else { continue };
         let data: Vec<u8> = match dir.inline {
             Some(r) => d.get(r).map(Cow::into_owned).unwrap_or_default(),
-            None => dir.extents.into_iter().flat_map(|r| d.cut(r).into_owned()).collect(),
+            None => gather(d, dir.extents),
         };
         let mut p = 0;
         while let Some(fid) = data.get(p..).filter(|r| is_tag(r, 257)).filter(|f| f.len() >= 38) {
@@ -98,7 +98,7 @@ pub fn files(d: &dyn Image) -> Vec<File> {
             if chars & 0x0c != 0 {
                 continue;
             }
-            let name = [&path[..], if path.is_empty() { b"" } else { b"/" }, &name(id)].concat();
+            let name = join_path(&path, name(id));
             let icb = long_ad(&fid[20..36]);
             if chars & 2 != 0 {
                 dirs.push((icb, name));
@@ -108,6 +108,19 @@ pub fn files(d: &dyn Image) -> Vec<File> {
         }
     }
     out
+}
+
+/// The bytes of `extents` of `d`, one after another, up to the image's length in all (a directory
+/// holds no more, whatever its descriptors say).
+fn gather(d: &dyn Image, extents: Vec<Range<usize>>) -> Vec<u8> {
+    let mut data = Vec::new();
+    for r in extents {
+        if data.len() >= d.len() {
+            break;
+        }
+        data.extend_from_slice(&d.cut(r));
+    }
+    data
 }
 
 /// A long allocation descriptor's location.
@@ -136,6 +149,10 @@ fn entry(d: &dyn Image, vol: &Volume, icb: Long) -> Option<Entry> {
         None => (tag(d, at, 266, SECTOR)?, 216),
     };
     let fe = &fe[..];
+    // (cut short by the image's end)
+    if fe.len() < ad_at {
+        return None;
+    }
     let flags = le16(fe, 16 + 18);
     let info = u64::from_le_bytes(fe.get(56..64)?.try_into().unwrap());
     let (l_ea, l_ad) = (le32(fe, ad_at - 8) as usize, le32(fe, ad_at - 4) as usize);
@@ -169,7 +186,7 @@ fn entry(d: &dyn Image, vol: &Volume, icb: Long) -> Option<Entry> {
                 chained += 1;
                 // (an allocation extent descriptor is within a block)
                 let aed = start.filter(|_| chained <= 1024).and_then(|s| tag(d, s, 258, SECTOR))?;
-                list = aed.get(24..24 + le32(&aed, 20) as usize)?.to_vec();
+                list = aed.get(24..24 + le32(aed.get(..24)?, 20) as usize)?.to_vec();
             }
             0 => {
                 let n = len.min(left);
@@ -187,10 +204,7 @@ fn entry(d: &dyn Image, vol: &Volume, icb: Long) -> Option<Entry> {
     // (contiguous extents as one)
     let mut merged: Vec<Range<usize>> = Vec::with_capacity(extents.len());
     for r in extents {
-        match merged.last_mut() {
-            Some(m) if m.end == r.start => m.end = r.end,
-            _ => merged.push(r),
-        }
+        push_extent(&mut merged, r);
     }
     Some(Entry { extents: merged, inline: None })
 }
@@ -198,12 +212,57 @@ fn entry(d: &dyn Image, vol: &Volume, icb: Long) -> Option<Entry> {
 /// A file identifier (OSTA compressed Unicode: 8 or 16 bits a character after a byte telling
 /// which) as UTF-8.
 fn name(id: &[u8]) -> Vec<u8> {
-    let s: String = match id.split_first() {
-        Some((16, r)) => char::decode_utf16(r.as_chunks::<2>().0.iter().map(|&c| u16::from_be_bytes(c)))
-            .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
-            .collect(),
-        Some((_, r)) => r.iter().map(|&b| b as char).collect(),
-        None => String::new(),
-    };
-    s.into_bytes()
+    match id.split_first() {
+        Some((16, r)) => utf16_to_utf8(r.as_chunks::<2>().0.iter().map(|&c| u16::from_be_bytes(c))),
+        Some((_, r)) => r.iter().map(|&b| b as char).collect::<String>().into_bytes(),
+        None => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aqr_disk::Plain;
+
+    /// A descriptor of tag `id` of `len` bytes, after `at` bytes of zeros.
+    fn desc(at: usize, id: u16, len: usize) -> Vec<u8> {
+        let mut d = vec![0u8; at + len];
+        d[at..at + 2].copy_from_slice(&id.to_le_bytes());
+        d[at + 4] = (id as u8).wrapping_add((id >> 8) as u8);
+        d
+    }
+
+    /// Extents all of the same bytes do not make a directory many times the image.
+    #[test]
+    fn gather_of_repeated_extents() {
+        let d = vec![7u8; 1000];
+        let data = gather(&Plain(&d), vec![0..1000; 100_000]);
+        assert!(data.len() <= 2 * d.len(), "{}", data.len());
+        assert_eq!(gather(&Plain(&d), vec![0..10, 500..520]).len(), 30);
+    }
+
+    fn entry_at_0(d: &[u8], lbn: u32) -> Option<Entry> {
+        entry(&Plain(d), &Volume { parts: vec![Some(0)] }, Long { lbn, part: 0 })
+    }
+
+    /// A file entry cut short by the image's end is not one.
+    #[test]
+    fn entry_cut_short() {
+        for n in [16, 100, 175] {
+            assert!(entry_at_0(&desc(0, 261, n), 0).is_none(), "{n}");
+        }
+    }
+
+    /// An allocation extent descriptor cut short by the image's end is not one.
+    #[test]
+    fn allocation_extent_cut_short() {
+        let mut d = desc(0, 261, SECTOR);
+        d[56..64].copy_from_slice(&8u64.to_le_bytes());
+        d[172..176].copy_from_slice(&8u32.to_le_bytes());
+        d[176..180].copy_from_slice(&((3u32 << 30) | 1).to_le_bytes());
+        d[180..184].copy_from_slice(&1u32.to_le_bytes());
+        let mut aed = desc(0, 258, 20);
+        d.append(&mut aed);
+        assert!(entry_at_0(&d, 0).is_none());
+    }
 }

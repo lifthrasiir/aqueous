@@ -6,13 +6,7 @@
 
 use std::ops::Range;
 
-fn be32(b: &[u8], p: usize) -> u32 {
-    u32::from_be_bytes(b[p..p + 4].try_into().unwrap())
-}
-
-fn be64(b: &[u8], p: usize) -> u64 {
-    u64::from_be_bytes(b[p..p + 8].try_into().unwrap())
-}
+use crate::bytes::{be32, be64};
 
 pub use crate::chunked::{Chunk, How};
 

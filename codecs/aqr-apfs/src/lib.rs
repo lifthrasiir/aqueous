@@ -18,28 +18,17 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
+use aqr_disk::bytes::{le16, le32, le64};
 pub use aqr_disk::{File, Image};
+use aqr_disk::{MAX_DEPTH, join_path};
 
 /// APFS as a file system of aqr-disk.
 pub const FS: aqr_disk::FileSystem = aqr_disk::FileSystem { name: "apfs", starts, files };
 
-/// Deepest directory read, from the root, and deepest B-tree.
-const DEPTH: usize = 256;
+/// Deepest B-tree.
 const TREE: u16 = 16;
 
 const ROOT_DIR: u64 = 2;
-
-fn le16(b: &[u8], p: usize) -> u16 {
-    u16::from_le_bytes([b[p], b[p + 1]])
-}
-
-fn le32(b: &[u8], p: usize) -> u32 {
-    u32::from_le_bytes(b[p..p + 4].try_into().unwrap())
-}
-
-fn le64(b: &[u8], p: usize) -> u64 {
-    u64::from_le_bytes(b[p..p + 8].try_into().unwrap())
-}
 
 /// The Fletcher-64 checksum of object `b` (all but its first 8 bytes, as 32-bit words).
 fn fletcher(b: &[u8]) -> u64 {
@@ -132,8 +121,8 @@ fn container(d: &dyn Image) -> Option<Container<'_>> {
 /// An entry of a B-tree node: key and value.
 type Entry<'b> = (&'b [u8], &'b [u8]);
 
-/// A B-tree node `b` (a block): its level and flags, and its entries (those within it).
-fn node(b: &[u8]) -> Option<(u16, u16, Vec<Entry<'_>>)> {
+/// A B-tree node `b` (a block): its level and its entries (those within it).
+fn node(b: &[u8]) -> Option<(u16, Vec<Entry<'_>>)> {
     if b.len() < 56 {
         return None;
     }
@@ -165,7 +154,7 @@ fn node(b: &[u8]) -> Option<(u16, u16, Vec<Entry<'_>>)> {
         let Some(v) = b[..end].get(v..).and_then(|v| v.get(..vl)) else { continue };
         out.push((k, v));
     }
-    Some((level, flags, out))
+    Some((level, out))
 }
 
 impl Container<'_> {
@@ -180,7 +169,7 @@ impl Container<'_> {
             }
             self.budget.set(self.budget.get() - 1);
             let Some(b) = self.block(n) else { continue };
-            let Some((level, _, entries)) = node(&b) else { continue };
+            let Some((level, entries)) = node(&b) else { continue };
             if level >= above {
                 continue;
             }
@@ -244,7 +233,8 @@ fn dstream_size(x: &[u8]) -> Option<u64> {
     let num = le16(x, 0) as usize;
     let mut at = 4 + 4 * num;
     for i in 0..num {
-        let (ty, len) = (*x.get(4 + 4 * i)?, le16(x, 6 + 4 * i) as usize);
+        let h = x.get(4 + 4 * i..8 + 4 * i)?;
+        let (ty, len) = (h[0], le16(h, 2) as usize);
         if ty == 8 && len >= 8 {
             return Some(le64(x.get(at..at + 8)?, 0));
         }
@@ -316,10 +306,7 @@ impl Tree {
                 continue;
             }
             let end = start.saturating_add(len as usize);
-            match out.last_mut() {
-                Some(r) if r.end == start => r.end = end,
-                _ => out.push(start..end),
-            }
+            aqr_disk::push_extent(&mut out, start..end);
         }
         out
     }
@@ -343,13 +330,10 @@ fn volume(c: &Container, comap: &HashMap<u64, u64>, oid: u64, out: &mut Vec<File
         let Some(list) = t.entries.get(&dir) else { continue };
         for (name, id) in list {
             let Some(i) = t.inodes.get(id) else { continue };
-            let full = match path.is_empty() {
-                true => name.clone(),
-                false => [&path[..], b"/", name].concat(),
-            };
+            let full = join_path(&path, name);
             match i.mode & 0o170000 {
                 0o040000 => {
-                    if depth < DEPTH && seen.insert(*id) {
+                    if depth < MAX_DEPTH && seen.insert(*id) {
                         todo.push((full, *id, depth + 1));
                     }
                 }
@@ -373,4 +357,17 @@ pub fn files(d: &dyn Image) -> Vec<File> {
         volume(&c, &comap, oid, &mut out);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dstream_size;
+
+    /// Extended fields cut within a field's header end the walk.
+    #[test]
+    fn dstream_size_of_cut_fields() {
+        for n in 4..8 {
+            assert_eq!(dstream_size(&[1, 0, 0, 0, 8, 0, 8, 0][..n]), None, "{n}");
+        }
+    }
 }

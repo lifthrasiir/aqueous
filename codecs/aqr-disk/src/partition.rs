@@ -4,6 +4,7 @@
 
 use std::ops::Range;
 
+use crate::bytes::{be16, be32, le32, le64};
 use crate::image::Image;
 
 /// A partition: where it is in the image (perhaps past its end, of an image cut short).
@@ -23,22 +24,6 @@ pub enum Scheme {
 /// Most entries read of a table, and most EBRs of a chain (a loop's end).
 const MOST: usize = 1024;
 
-fn le32(b: &[u8], p: usize) -> u32 {
-    u32::from_le_bytes(b[p..p + 4].try_into().unwrap())
-}
-
-fn le64(b: &[u8], p: usize) -> u64 {
-    u64::from_le_bytes(b[p..p + 8].try_into().unwrap())
-}
-
-fn be16(b: &[u8], p: usize) -> u16 {
-    u16::from_be_bytes([b[p], b[p + 1]])
-}
-
-fn be32(b: &[u8], p: usize) -> u32 {
-    u32::from_be_bytes(b[p..p + 4].try_into().unwrap())
-}
-
 /// `n` units of `unit` bytes from unit `start`, where it is a range of `usize`, and not empty.
 fn span(start: u64, n: u64, unit: u64) -> Option<Range<usize>> {
     let a = usize::try_from(start.checked_mul(unit)?).ok()?;
@@ -49,11 +34,12 @@ fn span(start: u64, n: u64, unit: u64) -> Option<Range<usize>> {
 /// The partitions of image `d`, in the order of its table: of its GPT where it has one, else of
 /// its MBR, else of its APM. None where it has none of them.
 pub fn partitions(d: &dyn Image) -> Vec<Partition> {
-    let (gpt, mbr) = (gpt(d), mbr(d));
-    let (spans, scheme) = match () {
-        _ if !gpt.is_empty() => (gpt, Scheme::Gpt),
-        _ if !mbr.is_empty() => (mbr, Scheme::Mbr),
-        _ => (apm(d), Scheme::Apm),
+    let gpt = gpt(d);
+    let (spans, scheme) = if !gpt.is_empty() {
+        (gpt, Scheme::Gpt)
+    } else {
+        let mbr = mbr(d);
+        if !mbr.is_empty() { (mbr, Scheme::Mbr) } else { (apm(d), Scheme::Apm) }
     };
     spans.into_iter().map(|span| Partition { span, scheme }).collect()
 }

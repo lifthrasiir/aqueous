@@ -8,6 +8,7 @@ pub mod iso9660;
 pub mod udf;
 
 pub use aqr_disk::File;
+use aqr_disk::bytes::{le16, le32};
 
 /// Bytes of a sector, of which the volume descriptors and UDF's logical blocks are.
 pub const SECTOR: usize = 2048;
@@ -16,14 +17,6 @@ pub const SECTOR: usize = 2048;
 /// of the lowest rank names it: UDF's (0), Joliet's (1), then ISO 9660's own (2), whose names are
 /// the shortest.
 pub const FS: aqr_disk::FileSystem = aqr_disk::FileSystem { name: "iso", starts, files };
-
-fn le16(b: &[u8], p: usize) -> u16 {
-    u16::from_le_bytes([b[p], b[p + 1]])
-}
-
-fn le32(b: &[u8], p: usize) -> u32 {
-    u32::from_le_bytes(b[p..p + 4].try_into().unwrap())
-}
 
 /// Whether `d` starts like an image: a volume structure descriptor at sector 16 (`CD001` of
 /// ISO 9660, `BEA01` of UDF's recognition sequence).

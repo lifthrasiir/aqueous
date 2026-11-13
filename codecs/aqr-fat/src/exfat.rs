@@ -7,14 +7,11 @@
 //! (undefined on disk). Checksums (the sets', the boot region's) are not checked: a damaged one
 //! does not stop the reading.
 
-use crate::{File, le16, le32, le64, utf16};
-use aqr_disk::Image;
+use crate::{File, le16, le32, le64};
+use aqr_disk::{Image, MAX_DEPTH, utf16_to_utf8};
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ops::Range;
-
-/// How deep directories are followed.
-const DEPTH: usize = 256;
 
 /// What the main boot sector tells of the volume.
 struct Volume {
@@ -152,11 +149,11 @@ impl Walk<'_> {
             if !full.is_empty() {
                 full.push(b'/');
             }
-            full.extend(utf16(&name).into_iter().map(|b| if b == b'/' { b'_' } else { b }));
+            full.extend(utf16_to_utf8(name).into_iter().map(|b| if b == b'/' { b'_' } else { b }));
             let contiguous = flags & 2 != 0;
             if attributes & 0x10 != 0 {
                 // each directory once, and not too deep
-                if depth < DEPTH && self.v.valid(first) && self.seen.insert(first) {
+                if depth < MAX_DEPTH && self.v.valid(first) && self.seen.insert(first) {
                     let extents = self.v.stream(self.d, self.fat, first, contiguous, length);
                     self.dir(&full, &extents, depth + 1);
                 }

@@ -9,6 +9,7 @@ pub mod exfat;
 pub mod fat;
 
 pub use aqr_disk::File;
+use aqr_disk::bytes::{le16, le32, le64};
 
 /// FAT12, FAT16 and FAT32 as a file system of aqr-disk.
 pub const FAT: aqr_disk::FileSystem = aqr_disk::FileSystem { name: "fat", starts: fat::starts, files: fat::files };
@@ -16,18 +17,6 @@ pub const FAT: aqr_disk::FileSystem = aqr_disk::FileSystem { name: "fat", starts
 /// exFAT as a file system of aqr-disk.
 pub const EXFAT: aqr_disk::FileSystem =
     aqr_disk::FileSystem { name: "exfat", starts: exfat::starts, files: exfat::files };
-
-fn le16(b: &[u8], p: usize) -> u16 {
-    u16::from_le_bytes([b[p], b[p + 1]])
-}
-
-fn le32(b: &[u8], p: usize) -> u32 {
-    u32::from_le_bytes(b[p..p + 4].try_into().unwrap())
-}
-
-fn le64(b: &[u8], p: usize) -> u64 {
-    u64::from_le_bytes(b[p..p + 8].try_into().unwrap())
-}
 
 /// The byte ranges of `clusters` (cluster numbers, in order, of `size` bytes each, the first
 /// cluster of the data at byte `heap`, numbered from 2), runs of contiguous ones one range, up to
@@ -45,18 +34,7 @@ fn extents(clusters: &[u32], heap: usize, size: usize, len: u64) -> Vec<std::ops
         };
         let n = (size as u64).min(left) as usize;
         left -= n as u64;
-        match out.last_mut() {
-            Some(r) if r.end == at => r.end = at + n,
-            _ => out.push(at..at + n),
-        }
+        aqr_disk::push_extent(&mut out, at..at + n);
     }
     out
-}
-
-/// A name of UTF-16 code units as UTF-8, unpaired surrogates replaced.
-fn utf16(units: &[u16]) -> Vec<u8> {
-    char::decode_utf16(units.iter().copied())
-        .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
-        .collect::<String>()
-        .into_bytes()
 }

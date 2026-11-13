@@ -44,10 +44,6 @@ impl Default for Options {
     }
 }
 
-/// The class of the streams of the bytes kept of files stored compressed (WOF's chunk tables),
-/// of the prefix `disk`.
-pub const KEPT: &str = "disk/kept";
-
 /// The formula of image `input` with `opt`, or None where none of its file systems is read or
 /// no file of them has contents.
 pub fn encode_with(input: &[u8], opt: &Options) -> Option<Formula> {

@@ -9,19 +9,20 @@ pub const MAGIC: [u8; 4] = *b"EGGA";
 /// Bytes of the archive's header.
 pub const HEADER: usize = 14;
 
+/// Ids of records.
 const SPLIT: u32 = 0x24F5_A262;
 const SOLID: u32 = 0x24E5_A060;
 const GLOBAL_ENCRYPT: u32 = 0x08D1_44A8;
 const SKIP: u32 = 0xFFFF_0000;
-const FILE: u32 = 0x0A85_90E3;
-const FILENAME: u32 = 0x0A85_91AC;
+pub const FILE: u32 = 0x0A85_90E3;
+pub const FILENAME: u32 = 0x0A85_91AC;
 const COMMENT: u32 = 0x04C6_3672;
-const WINDOWS_INFO: u32 = 0x2C86_950B;
-const POSIX_INFO: u32 = 0x1EE9_22E5;
+pub const WINDOWS_INFO: u32 = 0x2C86_950B;
+pub const POSIX_INFO: u32 = 0x1EE9_22E5;
 const ENCRYPT: u32 = 0x08D1_470F;
-const BLOCK: u32 = 0x02B5_0C13;
+pub const BLOCK: u32 = 0x02B5_0C13;
 const DUMMY: u32 = 0x0746_3307;
-const END: u32 = 0x08E2_8222;
+pub const END: u32 = 0x08E2_8222;
 
 /// Bytes of a filename's locale (a code page), where its flags' bit 3 is set.
 const LOCALE: usize = 2;

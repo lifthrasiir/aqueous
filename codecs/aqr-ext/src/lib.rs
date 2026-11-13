@@ -17,24 +17,17 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ops::Range;
 
+use aqr_disk::bytes::{le16, le32};
 pub use aqr_disk::{File, Image};
+use aqr_disk::{MAX_DEPTH, join_path};
 
 /// ext2, ext3 and ext4 as a file system of aqr-disk.
 pub const FS: aqr_disk::FileSystem = aqr_disk::FileSystem { name: "ext", starts, files };
 
-/// Deepest directory read, from the root, and deepest extent tree.
-const DEPTH: usize = 256;
+/// Deepest extent tree.
 const TREE: usize = 8;
 
 const ROOT: u32 = 2;
-
-fn le16(b: &[u8], p: usize) -> u16 {
-    u16::from_le_bytes([b[p], b[p + 1]])
-}
-
-fn le32(b: &[u8], p: usize) -> u32 {
-    u32::from_le_bytes(b[p..p + 4].try_into().unwrap())
-}
 
 /// What the superblock tells of a volume.
 struct Volume {
@@ -100,7 +93,7 @@ fn volume(d: &dyn Image) -> Option<Volume> {
     let meta = incompat & 0x10 != 0;
     let first_meta = le32(s, 0x104) as u64;
     let sparse = le32(s, 100) & 1 != 0;
-    let backup = |g: u64| !sparse || g <= 1 || [3u64, 5, 7].iter().any(|&p| (0..40).map(|k| p.pow(k)).any(|x| x == g));
+    let backup = |g: u64| !sparse || g <= 1 || [3, 5, 7].iter().any(|&p| is_power_of(g, p));
     let mut tables = Vec::with_capacity(groups as usize);
     for g in 0..groups {
         let b = g / per_block;
@@ -116,6 +109,14 @@ fn volume(d: &dyn Image) -> Option<Volume> {
     }
     let budget = std::cell::Cell::new(2 * blocks.min(d.len() as u64 / block + 1) + 1024);
     Some(Volume { block, blocks, inodes, per_group, inode_size, tables, filetype: incompat & 0x2 != 0, budget })
+}
+
+/// Whether `g` is a positive power of `p`.
+fn is_power_of(mut g: u64, p: u64) -> bool {
+    while g != 0 && g.is_multiple_of(p) {
+        g /= p;
+    }
+    g == 1
 }
 
 /// Where the inode table of each group of ext volume `d` starts (a block), as its descriptors
@@ -256,10 +257,7 @@ impl Volume {
                 continue;
             };
             let end = start.saturating_add(bytes as usize);
-            match out.last_mut() {
-                Some(r) if r.end == start => r.end = end,
-                _ => out.push(start..end),
-            }
+            aqr_disk::push_extent(&mut out, start..end);
         }
         out
     }
@@ -309,12 +307,9 @@ pub fn files(d: &dyn Image) -> Vec<File> {
                     let Some(i) = v.inode(d, ino) else { continue };
                     let i = &i[..];
                     let mode = le16(i, 0) & 0xf000;
-                    let full = match path.is_empty() {
-                        true => name.to_vec(),
-                        false => [&path[..], b"/", name].concat(),
-                    };
+                    let full = join_path(&path, name);
                     if mode == 0x4000 && kind != 1 {
-                        if depth < DEPTH && seen.insert(ino) {
+                        if depth < MAX_DEPTH && seen.insert(ino) {
                             todo.push((full, ino, depth + 1));
                         }
                         continue;
@@ -331,4 +326,17 @@ pub fn files(d: &dyn Image) -> Vec<File> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_power_of;
+
+    #[test]
+    fn powers() {
+        let is = |g| [3, 5, 7].iter().any(|&p| is_power_of(g, p));
+        let yes = [1, 3, 9, 27, 5, 25, 125, 7, 49, 343, 3u64.pow(39), 5u64.pow(27), 7u64.pow(22)];
+        assert!(yes.iter().all(|&g| is(g)));
+        assert!(![0, 2, 4, 6, 8, 15, 21, 35, 45, 63, u64::MAX].iter().any(|&g| is(g)));
+    }
 }

@@ -145,7 +145,8 @@ fn part(f: &Folder, i: u64) -> Option<Part> {
 fn shape(f: &Folder) -> Option<Shape> {
     let mut o = f.output()?;
     let mut filters = Vec::new();
-    loop {
+    // (a chain visits each coder once: binds in a cycle end it)
+    for _ in 0..f.coders.len() {
         let c = f.coder_of_out(o)?;
         let coder = &f.coders[c];
         let (base, _) = f.bases(c);
@@ -170,6 +171,7 @@ fn shape(f: &Folder) -> Option<Shape> {
             Err(_) => return None,
         }
     }
+    None
 }
 
 /// A packed stream rebuilt: its index among the archive's, the bytes of its data, and how.
@@ -200,11 +202,10 @@ impl Made {
     }
 }
 
-/// Makes folder `i` of `s` ready, its packed streams of `packs` (by the archive's indices,
-/// `input`'s bytes).
-fn make(s: &Streams, i: usize, packs: &[Range<usize>], input: &[u8], threads: usize) -> Option<Made> {
+/// Makes folder `i` of `s` ready, its packed streams of `packs` (by the archive's indices, the
+/// folder's first `first`; `input`'s bytes).
+fn make(s: &Streams, i: usize, first: usize, packs: &[Range<usize>], input: &[u8], threads: usize) -> Option<Made> {
     let f = &s.folders[i];
-    let first = s.folder_packs()?[i].start;
     let taken = |(c, size, pack): Part| {
         let (data, how) = take(&f.coders[c], size, &input[packs[first + pack].clone()], threads)?;
         Some((data, Packed { pack: first + pack, data_len: size as usize, how }))
@@ -309,7 +310,10 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Formula> {
         return None;
     }
     // (the folders side by side, each stream's parts on the workers free)
-    let made = aqr_common::pool::par_map(s.folders.len(), opt.threads, |i| make(s, i, &packs, input, opt.threads));
+    let first_packs: Vec<usize> = s.folder_packs()?.iter().map(|r| r.start).collect();
+    let made = aqr_common::pool::par_map(s.folders.len(), opt.threads, |i| {
+        make(s, i, first_packs[i], &packs, input, opt.threads)
+    });
     // the names of the files of each folder's substreams
     let names: Vec<&[u8]> = h.files.iter().filter(|f| f.stream).map(|f| &f.name[..]).collect();
     let firsts: Vec<usize> = s.subs.iter().scan(0, |a, x| Some(std::mem::replace(a, *a + x.len()))).collect();
@@ -414,4 +418,25 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Formula> {
     f.streams[0].data = container.into();
     f.root = Node::concat(nodes);
     Some(f)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A folder of three Delta filters whose second takes its own output.
+    #[test]
+    fn shape_of_bound_cycle_ends() {
+        let delta = Coder { id: vec![3], ins: 1, outs: 1, props: vec![0] };
+        let folder = Folder {
+            coders: vec![delta.clone(), delta.clone(), delta],
+            binds: vec![(0, 1), (1, 1)],
+            packed: vec![2],
+            sizes: vec![9, 9, 9],
+            crc: None,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || _ = tx.send(shape(&folder).is_none()));
+        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)), Ok(true));
+    }
 }

@@ -229,8 +229,10 @@ pub fn find_end(d: &[u8]) -> Option<(i64, Range<usize>)> {
         if q >= 20 && d[q - 20..q - 16] == LOCATOR {
             let at = u64_at(d, q - 12);
             let tries = [usize::try_from(at).ok(), (q - 20).checked_sub(4 + END64_FIXED)];
-            if let Some(e) =
-                tries.into_iter().flatten().find(|&e| e + 4 + END64_FIXED <= q - 20 && d[e..e + 4] == END64)
+            if let Some(e) = tries
+                .into_iter()
+                .flatten()
+                .find(|&e| e.checked_add(4 + END64_FIXED).is_some_and(|x| x <= q - 20) && d[e..e + 4] == END64)
             {
                 (size, off, end) = (u64_at(d, e + 40), u64_at(d, e + 48), e);
             }

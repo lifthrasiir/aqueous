@@ -18,27 +18,15 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
+use aqr_disk::bytes::{be16, be32, be64};
 pub use aqr_disk::{File, Image};
+use aqr_disk::{MAX_DEPTH, push_extent, utf16_to_utf8};
 
 /// HFS+ and HFSX as a file system of aqr-disk.
 pub const FS: aqr_disk::FileSystem = aqr_disk::FileSystem { name: "hfs", starts, files };
 
-/// Deepest directory read, from the root.
-const DEPTH: usize = 256;
 const ROOT: u32 = 2;
 const CATALOG_ID: u32 = 4;
-
-fn be16(b: &[u8], p: usize) -> u16 {
-    u16::from_be_bytes([b[p], b[p + 1]])
-}
-
-fn be32(b: &[u8], p: usize) -> u32 {
-    u32::from_be_bytes(b[p..p + 4].try_into().unwrap())
-}
-
-fn be64(b: &[u8], p: usize) -> u64 {
-    u64::from_be_bytes(b[p..p + 8].try_into().unwrap())
-}
 
 /// The block size and count of a volume header `b` (the volume's byte 1024 on) as `starts` accepts
 /// it.
@@ -201,8 +189,7 @@ struct Catalog {
 fn key_name(k: &[u8]) -> Option<Vec<u8>> {
     let n = be16(k, 4) as usize;
     let units = k.get(6..6 + 2 * n).filter(|_| n <= 255)?;
-    let units: Vec<u16> = units.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes(*c)).collect();
-    Some(String::from_utf16_lossy(&units).into_bytes())
+    Some(utf16_to_utf8(units.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes(*c))))
 }
 
 impl Catalog {
@@ -319,7 +306,7 @@ pub fn files(d: &dyn Image) -> Vec<File> {
                 for &i in files.get(&id).into_iter().flatten() {
                     todo.push(Item::File(i));
                 }
-                if depth < DEPTH {
+                if depth < MAX_DEPTH {
                     for &c in sub.get(&id).into_iter().flatten() {
                         if Some(c) != private.filter(|_| id == ROOT) && seen.insert(c) {
                             todo.push(Item::Folder(c, depth + 1));
@@ -375,10 +362,7 @@ fn ranges(d: &dyn Image, r: &Rec, bs: u64, total: u64, overflow: &Overflow) -> V
         if start >= end {
             continue;
         }
-        match out.last_mut() {
-            Some(l) if l.end == start => l.end = end,
-            _ => out.push(start..end),
-        }
+        push_extent(&mut out, start..end);
     }
     out
 }

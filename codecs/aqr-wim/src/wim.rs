@@ -22,8 +22,7 @@ pub const XPRESS: u32 = 0x2_0000;
 pub const LZX: u32 = 0x4_0000;
 pub const LZMS: u32 = 0x8_0000;
 
-/// Flags of a resource: metadata (an image's), compressed.
-pub const RES_METADATA: u8 = 0x2;
+/// Flags of a resource: compressed, spanned.
 pub const RES_COMPRESSED: u8 = 0x4;
 pub const RES_SPANNED: u8 = 0x8;
 
@@ -57,15 +56,6 @@ impl Reshdr {
 pub enum Resource {
     Chunks { table: Range<usize>, chunks: Vec<(Range<usize>, usize)> },
     Data(Range<usize>),
-}
-
-impl Resource {
-    pub fn span(&self) -> Range<usize> {
-        match self {
-            Resource::Chunks { table, chunks } => table.start..chunks.last().map_or(table.end, |c| c.0.end),
-            Resource::Data(r) => r.clone(),
-        }
-    }
 }
 
 /// The WIM file at the start of `d`: its header's flags, and the resources of its lookup table

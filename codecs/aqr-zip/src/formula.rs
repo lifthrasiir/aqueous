@@ -4,6 +4,7 @@
 //! `FORMAT.md` specifies it. The contents may be recompressed in turn.
 
 use std::cell::RefCell;
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
@@ -152,10 +153,11 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         .enumerate()
         .map(|(i, l)| {
             let b = &input[l.body.clone()];
-            match first.get(b) {
-                Some(&j) if b.len() >= SAME_MIN => Some(Made::Same(j)),
-                _ => {
-                    first.entry(b).or_insert(i);
+            match first.entry(b) {
+                Entry::Occupied(e) if b.len() >= SAME_MIN => Some(Made::Same(*e.get())),
+                Entry::Occupied(_) => None,
+                Entry::Vacant(v) => {
+                    v.insert(i);
                     None
                 }
             }

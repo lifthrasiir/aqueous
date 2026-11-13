@@ -274,3 +274,9 @@ fn pieces_of_a_file_left_out() {
     let sizes: Vec<usize> = f.streams.iter().filter(|s| s.content).map(|s| s.data.len()).collect();
     assert_eq!(sizes, [300]);
 }
+
+/// A WOF stream whose declared length needs far more chunks than its bytes can hold is not taken.
+#[test]
+fn wof_chunks_of_huge_length() {
+    assert!(aqr_disk::compressed::wof_chunks(&[0; 16], 1 << 60, 4096).is_none());
+}

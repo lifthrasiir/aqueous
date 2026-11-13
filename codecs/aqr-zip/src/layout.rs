@@ -498,7 +498,7 @@ impl<'a> Reader<'a> {
         if n > max {
             return Err(corrupt());
         }
-        self.take(n as usize)
+        self.take(usize::try_from(n).map_err(|_| corrupt())?)
     }
 }
 

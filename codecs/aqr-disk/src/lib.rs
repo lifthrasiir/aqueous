@@ -9,6 +9,7 @@
 //! the virtual disk of its [`container`]) and on each partition of its partition table
 //! ([`partition`]), and [`pieces`] lays the extents out over the image.
 
+pub mod bytes;
 pub mod chunked;
 pub mod compressed;
 pub mod container;
@@ -18,9 +19,35 @@ pub mod formula;
 pub mod image;
 pub mod partition;
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 pub use image::{Image, Plain, Sub};
+
+/// Deepest directory a file system's reader goes into, from the root.
+pub const MAX_DEPTH: usize = 256;
+
+/// Appends byte range `r` to `out`, as part of its last range where that ends where `r` starts.
+pub fn push_extent(out: &mut Vec<Range<usize>>, r: Range<usize>) {
+    match out.last_mut() {
+        Some(l) if l.end == r.start => l.end = r.end,
+        _ => out.push(r),
+    }
+}
+
+/// The path of `name` in directory `path` (empty for the root).
+pub fn join_path<'a>(path: &[u8], name: impl Into<Cow<'a, [u8]>>) -> Vec<u8> {
+    let name = name.into();
+    match path.is_empty() {
+        true => name.into_owned(),
+        false => [path, b"/", &name].concat(),
+    }
+}
+
+/// A name of UTF-16 code units as UTF-8, unpaired surrogates replaced.
+pub fn utf16_to_utf8(units: impl IntoIterator<Item = u16>) -> Vec<u8> {
+    char::decode_utf16(units).map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER)).collect::<String>().into_bytes()
+}
 
 /// A file of a file system: its path (of `/` separators, as UTF-8) and its contents, byte ranges
 /// in order (of the volume, as a [`FileSystem`] gives them; of the image, as [`files`] does).

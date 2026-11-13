@@ -14,32 +14,13 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
+use crate::bytes::{be32, be64, le16, le32, le64};
 use crate::image::Image;
 
 /// Most entries of a block table read: a block table of more is no table of a disk of an image
 /// this big anyway.
 fn most(d: &[u8], block: u64) -> u64 {
     (d.len() as u64 / block.max(1)).saturating_mul(64).saturating_add(1 << 16)
-}
-
-fn be32(b: &[u8], p: usize) -> u32 {
-    u32::from_be_bytes(b[p..p + 4].try_into().unwrap())
-}
-
-fn be64(b: &[u8], p: usize) -> u64 {
-    u64::from_be_bytes(b[p..p + 8].try_into().unwrap())
-}
-
-fn le16(b: &[u8], p: usize) -> u16 {
-    u16::from_le_bytes([b[p], b[p + 1]])
-}
-
-fn le32(b: &[u8], p: usize) -> u32 {
-    u32::from_le_bytes(b[p..p + 4].try_into().unwrap())
-}
-
-fn le64(b: &[u8], p: usize) -> u64 {
-    u64::from_le_bytes(b[p..p + 8].try_into().unwrap())
 }
 
 /// The kind of a container.
@@ -212,7 +193,7 @@ fn vhd(d: &[u8]) -> Option<Map<'_>> {
     let bat = usize::try_from(table).ok()?;
     let entry = |i: u64| -> Option<u64> {
         let p = bat.checked_add(4 * i as usize)?;
-        let s = be32(d.get(p..p + 4)?, 0);
+        let s = be32(d.get(p..p.checked_add(4)?)?, 0);
         (s != u32::MAX).then(|| s as u64 * 512 + bitmap)
     };
     Map::of(Kind::Vhd, d, size, block, count, entry)
@@ -283,7 +264,7 @@ fn vhdx(d: &[u8]) -> Option<Map<'_>> {
             return None;
         }
         let p = table.checked_add(usize::try_from(8 * k).ok()?)?;
-        let e = le64(d.get(p..p + 8)?, 0);
+        let e = le64(d.get(p..p.checked_add(8)?)?, 0);
         matches!(e & 7, 6 | 7).then_some(e >> 20 << 20)
     };
     Map::of(Kind::Vhdx, d, size, block, count, entry)
@@ -307,9 +288,9 @@ fn vmdk(d: &[u8]) -> Option<Map<'_>> {
     let entry = |i: u64| -> Option<u64> {
         let (t, k) = (i / per_gt, i % per_gt);
         let p = gd.checked_add(usize::try_from(4 * t).ok()?)?;
-        let gt = le32(d.get(p..p + 4)?, 0) as u64;
+        let gt = le32(d.get(p..p.checked_add(4)?)?, 0) as u64;
         let p = usize::try_from(gt.checked_mul(512)?.checked_add(4 * k)?).ok()?;
-        let s = le32(d.get(p..p + 4)?, 0) as u64;
+        let s = le32(d.get(p..p.checked_add(4)?)?, 0) as u64;
         (gt != 0 && s > 1).then(|| s * 512)
     };
     Map::of(Kind::Vmdk, d, capacity.checked_mul(512)?, block, count, entry)
@@ -340,12 +321,12 @@ fn qcow2(d: &[u8]) -> Option<Map<'_>> {
             return None;
         }
         let p = l1.checked_add(usize::try_from(8 * t).ok()?)?;
-        let l2 = be64(d.get(p..p + 8)?, 0) & mask;
+        let l2 = be64(d.get(p..p.checked_add(8)?)?, 0) & mask;
         if l2 == 0 {
             return None;
         }
         let p = usize::try_from(l2.checked_add(8 * k)?).ok()?;
-        let e = be64(d.get(p..p + 8)?, 0);
+        let e = be64(d.get(p..p.checked_add(8)?)?, 0);
         // (compressed, or of zeros: as zeros)
         let at = e & mask;
         (e & 1 << 62 == 0 && e & 1 == 0 && at != 0).then_some(at)
@@ -395,7 +376,7 @@ pub fn qcow2_chunks(d: &[u8]) -> Option<crate::chunked::Chunked> {
     let mut compressed = false;
     for t in 0..count.div_ceil(per_l2) {
         let p = l1.checked_add(usize::try_from(8 * t).ok()?)?;
-        let l2 = be64(d.get(p..p + 8)?, 0) & mask;
+        let l2 = be64(d.get(p..p.checked_add(8)?)?, 0) & mask;
         let first = t * per_l2;
         let n = per_l2.min(count - first);
         if l2 == 0 {
@@ -405,7 +386,7 @@ pub fn qcow2_chunks(d: &[u8]) -> Option<crate::chunked::Chunked> {
         }
         for k in 0..n {
             let p = usize::try_from(l2.checked_add(8 * k)?).ok()?;
-            let e = be64(d.get(p..p + 8)?, 0);
+            let e = be64(d.get(p..p.checked_add(8)?)?, 0);
             let disk = (first + k) * cluster..((first + k + 1) * cluster).min(size);
             let len = (disk.end - disk.start) as usize;
             let c = if e & 1 << 62 != 0 {
@@ -452,7 +433,7 @@ pub fn vmdk_stream_chunks(d: &[u8]) -> Option<crate::chunked::Chunked> {
     let (len, grain) = (capacity.checked_mul(512)?, grain.checked_mul(512)?);
     let mut grains = Vec::new();
     let mut p = usize::try_from(over.checked_mul(512)?).ok()?;
-    while let Some(m) = d.get(p..p + 16) {
+    while let Some(m) = d.get(p..p.checked_add(16)?) {
         let (lba, size) = (le64(m, 0), le32(m, 8) as usize);
         if size > 0 {
             let start = lba.checked_mul(512)?;
@@ -511,7 +492,7 @@ fn vdi(d: &[u8]) -> Option<Map<'_>> {
     let count = count.min(most(d, block));
     let entry = |i: u64| -> Option<u64> {
         let p = blocks.checked_add(usize::try_from(4 * i).ok()?)?;
-        let n = le32(d.get(p..p + 4)?, 0);
+        let n = le32(d.get(p..p.checked_add(4)?)?, 0);
         (n < 0xffff_fffe).then(|| data + n as u64 * (block + extra) + extra)
     };
     Map::of(Kind::Vdi, d, size, block, count, entry)
