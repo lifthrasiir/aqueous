@@ -5,12 +5,9 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-pub use aqr_ipc::{Point, Verb, failure, file_name, intact, tested};
-
-/// The time given `aqr` to stop before it is killed.
-const STOP: Duration = Duration::from_secs(10);
+pub use aqr_ipc::{Outcome, Point, STOP, Verb, file_name, outcome};
 
 pub struct Job {
     /// What `aqr` tells, and what it is told.

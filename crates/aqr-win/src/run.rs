@@ -5,7 +5,7 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use aqr_ipc::{Job, Point, Verb, failure, intact, tested};
+use aqr_ipc::{Job, Outcome, Point, Verb, outcome};
 
 use crate::dialog::{self, Icon};
 use crate::options;
@@ -99,19 +99,17 @@ fn drive(verb: Verb, cmd: std::process::Command, count: usize) -> ExitCode {
 /// (or, testing, what was found).
 fn conclude(verb: Verb, job: Job, status: Option<std::process::ExitStatus>, count: usize) -> ExitCode {
     let s = job.state.into_inner().unwrap();
-    if s.stopped || s.cancelled {
-        return ExitCode::FAILURE;
-    }
-    let log: Vec<&str> = s.log.iter().map(String::as_str).collect();
-    let log = log.join("\n");
     let name = s.name();
-    if let Some(e) = failure(&s, status) {
-        dialog::message(Icon::Error, &verb.failed(&name), &e, (!log.is_empty()).then_some(&log));
-        return ExitCode::FAILURE;
+    match outcome(verb, count, &s, status, &name) {
+        Outcome::Failed { main, text, log } => {
+            dialog::message(Icon::Error, &main, &text, log.as_deref());
+            ExitCode::FAILURE
+        }
+        Outcome::Tested { main, text } => {
+            dialog::message(Icon::Information, &main, &text, None);
+            ExitCode::SUCCESS
+        }
+        Outcome::Silent => ExitCode::FAILURE,
+        Outcome::Done => ExitCode::SUCCESS,
     }
-    if verb == Verb::Test {
-        let lines: Vec<String> = s.ended.iter().map(|(n, e)| tested(n, e, count > 1)).collect();
-        dialog::message(Icon::Information, &intact(&name, count), &lines.join("\n"), None);
-    }
-    ExitCode::SUCCESS
 }

@@ -58,7 +58,7 @@ pub fn choose(mtm: MainThreadMarker, archive: &Path) -> Option<Point> {
     };
     if points.is_empty() {
         let info = mac::no_versions_info(services::name_version());
-        alert(mtm, NSAlertStyle::Informational, &mac::no_versions(&shown), &info, None);
+        alert(mtm, NSAlertStyle::Informational, &common::no_versions(&shown), &info, None);
         return None;
     }
     let k = ask_point(mtm, &shown, &points)?;
@@ -179,7 +179,7 @@ const WIDTHS: [f64; 3] = [48.0, 150.0, 240.0];
 fn ask_point(mtm: MainThreadMarker, archive: &str, points: &[Point]) -> Option<usize> {
     let a = NSAlert::new(mtm);
     a.setAlertStyle(NSAlertStyle::Informational);
-    a.setMessageText(&NSString::from_str(&mac::choose_version(archive)));
+    a.setMessageText(&NSString::from_str(&common::choose_version(archive)));
     a.setInformativeText(&NSString::from_str(mac::choose_version_info()));
     let width = WIDTHS.iter().sum::<f64>() + 24.0;
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, 240.0));

@@ -33,6 +33,8 @@ wrong_passphrase = "Wrong passphrase, try again."
 passphrases_differ = "The two passphrases differ, try again."
 ok = "OK"
 cancel = "Cancel"
+choose_version = "Extract which version of {name}?"
+no_versions = "{name} has no named versions"
 
 # The parts of a time, as `aqr_l10n::duration` puts them together (by a space, those of zero left
 # out): `{n}` a number of seconds under a minute (of decimals, maybe), else whole numbers.
@@ -106,9 +108,7 @@ name_version_ask = "Name this version of {name}.\n{{today}} stands for the date,
 name_label = "Name:"
 version_named = "The version is named"
 could_not_name = "Could not name the version"
-choose_version = "Extract which version of {name}?"
 could_not_list = "Could not list the versions"
-no_versions = "{name} has no named versions"
 no_versions_info = "A version is named when an archive is updated with aqr -j, or by \"{name_version}\" in Explorer."
 registered = "Aqueous is registered"
 not_registered = "Aqueous is not registered"
@@ -195,10 +195,8 @@ name_version_info = "{{today}} stands for the date, {{now}} for the date and tim
 version_name = "Name"
 version_named = "The version of {name} is named"
 could_not_name = "Could not name the version of {name}"
-choose_version = "Extract which version of {name}?"
 choose_version_info = "It is extracted into a folder beside the archive, named after the version."
 could_not_list = "Could not list the versions of {name}"
-no_versions = "{name} has no named versions"
 no_versions_info = "A version is named when an archive is updated with aqr -j, or by \"{name_version}\" in Finder."
 # A service of one archive given several files.
 one_archive = "Choose one archive"

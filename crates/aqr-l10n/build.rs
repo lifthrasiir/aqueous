@@ -13,7 +13,7 @@ const PLURALS: [&str; 6] = ["zero", "one", "two", "few", "many", "other"];
 /// The sections in Windows' string table (`RC`), read by Explorer itself (indirect strings in the
 /// registry): no placeholders. Each has the ids of `messages/ids.toml` in its own range, which a
 /// message keeps for good (Windows keeps what it read of them).
-const RC_SECTIONS: [&str; 2] = ["types", "shell"];
+const RC_SECTIONS: [&str; 2] = [RC_RANGES[0].0, RC_RANGES[1].0];
 
 /// The range of resource ids of each of [`RC_SECTIONS`].
 const RC_RANGES: [(&str, std::ops::RangeInclusive<u16>); 2] = [("types", 1100..=1199), ("shell", 1200..=1299)];
@@ -112,6 +112,9 @@ fn read(langs: &[(String, toml::Table)]) -> Vec<Message> {
             }
             if RC_SECTIONS.contains(&section.as_str()) && (plural || !params.is_empty()) {
                 fail(&format!("{at}: a message of Windows' string table takes no placeholders"));
+            }
+            if LPROJ.iter().any(|(s, _)| *s == section) && (plural || !params.is_empty()) {
+                fail(&format!("{at}: a message of a .strings file takes no placeholders"));
             }
             let m =
                 Message { section: section.clone(), key: key.clone(), forms: vec![english], plural, params, id: None };

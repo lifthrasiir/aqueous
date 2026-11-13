@@ -9,12 +9,15 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
 /// The version of the protocol.
 pub const VERSION: u64 = 1;
+
+/// The time given `aqr` to stop before it is killed.
+pub const STOP: Duration = Duration::from_secs(10);
 
 /// The kinds of question asked, which a frontend answers where its hello says so.
 pub mod ask {
@@ -45,14 +48,6 @@ pub enum Verb {
 }
 
 impl Verb {
-    pub fn name(self) -> &'static str {
-        match self {
-            Verb::Compress => "compress",
-            Verb::Extract => "extract",
-            Verb::Test => "test",
-        }
-    }
-
     /// What it is doing to archive `name` (shown; none: "Compressing…").
     pub fn doing(self, name: &str) -> String {
         use aqr_l10n::common as c;
@@ -540,7 +535,7 @@ pub fn file_name(path: &Path) -> String {
 }
 
 /// What an `end` event `e` of a test of archive `name` tells (the name too, where `named`).
-pub fn tested(name: &str, e: &Value, named: bool) -> String {
+fn tested(name: &str, e: &Value, named: bool) -> String {
     let files = e["files"].as_u64().unwrap_or(0);
     let bytes = aqr_l10n::size(e["written"].as_u64().unwrap_or(0) as f64);
     let archive = aqr_l10n::size(e["read"].as_u64().unwrap_or(0) as f64);
@@ -554,7 +549,7 @@ pub fn tested(name: &str, e: &Value, named: bool) -> String {
 }
 
 /// What is told of `count` archives (`name` the last, where one) all tested intact.
-pub fn intact(name: &str, count: usize) -> String {
+fn intact(name: &str, count: usize) -> String {
     if count == 1 {
         aqr_l10n::common::intact(name)
     } else {
@@ -564,13 +559,45 @@ pub fn intact(name: &str, count: usize) -> String {
 
 /// What failed of the job, ended with `status` (`None`: unknown), where it did: `aqr`'s error,
 /// else how it ended where that was not a success.
-pub fn failure(s: &State, status: Option<std::process::ExitStatus>) -> Option<String> {
+fn failure(s: &State, status: Option<std::process::ExitStatus>) -> Option<String> {
     match (&s.error, status) {
         (Some(e), _) => Some(e.clone()),
         (None, Some(st)) if !st.success() => Some(aqr_l10n::common::ended_with(st)),
         (None, None) => Some(aqr_l10n::common::did_not_end().into()),
         _ => None,
     }
+}
+
+/// What came of a job of `verb` over `count` archives, ended with `status` (`None`: unknown),
+/// for the frontend to show.
+pub enum Outcome {
+    /// Stopped or given up by the user: nothing to tell.
+    Silent,
+    /// It failed: what happened, in what `aqr` told of it, and the last lines of its standard
+    /// error where it said any.
+    Failed { main: String, text: String, log: Option<String> },
+    /// A test found all intact.
+    Tested { main: String, text: String },
+    /// Done, with nothing to tell.
+    Done,
+}
+
+/// The [`Outcome`] of the job whose [`State`] is `s`; `name` is the archive it names in what it
+/// tells.
+pub fn outcome(verb: Verb, count: usize, s: &State, status: Option<std::process::ExitStatus>, name: &str) -> Outcome {
+    if s.stopped || s.cancelled {
+        return Outcome::Silent;
+    }
+    if let Some(text) = failure(s, status) {
+        let log: Vec<&str> = s.log.iter().map(String::as_str).collect();
+        let log = log.join("\n");
+        return Outcome::Failed { main: verb.failed(name), text, log: (!log.is_empty()).then_some(log) };
+    }
+    if verb == Verb::Test {
+        let lines: Vec<String> = s.ended.iter().map(|(n, e)| tested(n, e, count > 1)).collect();
+        return Outcome::Tested { main: intact(name, count), text: lines.join("\n") };
+    }
+    Outcome::Done
 }
 
 #[cfg(test)]

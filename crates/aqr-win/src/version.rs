@@ -79,7 +79,7 @@ pub fn extract(archive: PathBuf) -> ExitCode {
     if points.is_empty() {
         dialog::message(
             Icon::Information,
-            &win::no_versions(&shown),
+            &common::no_versions(&shown),
             &win::no_versions_info(shell::NAME_VERSION.text()),
             None,
         );
@@ -149,7 +149,7 @@ unsafe extern "system" fn name_proc(hwnd: HWND, msg: u32, wp: WPARAM, _: LPARAM)
 /// chosen at first: its index; `None` where the user cancels.
 fn choose(parent: HWND, archive: &str, points: &[Point]) -> Option<usize> {
     let mut t = template(4, 270, 160);
-    t.item(0, [7, 7, 256, 12], MESSAGE, STATIC, &win::choose_version(archive));
+    t.item(0, [7, 7, 256, 12], MESSAGE, STATIC, &common::choose_version(archive));
     let style = (WS_BORDER | WS_TABSTOP | WS_VSCROLL) | (LBS_NOTIFY | LBS_NOINTEGRALHEIGHT) as u32;
     t.item(style, [7, 22, 256, 112], FIELD, LISTBOX, "");
     t.item(WS_TABSTOP | BS_DEFPUSHBUTTON as u32, [157, 140, 50, 14], IDOK, BUTTON, common::ok());

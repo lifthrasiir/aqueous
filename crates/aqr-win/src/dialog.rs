@@ -173,9 +173,6 @@ struct Window<'a> {
     bar: Cell<HWND>,
 }
 
-/// The time given `aqr` to stop before it is killed.
-const STOP: Duration = Duration::from_secs(10);
-
 /// The time a job may take without a window.
 const UNSEEN: Duration = Duration::from_millis(400);
 
@@ -273,7 +270,7 @@ impl Window<'_> {
         }
         let eof = self.job.state.lock().unwrap().eof;
         if let Some(t) = self.stopping.get()
-            && t.elapsed() > STOP
+            && t.elapsed() > aqr_ipc::STOP
         {
             _ = self.child.borrow_mut().kill();
         }

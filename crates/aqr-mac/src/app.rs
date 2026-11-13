@@ -46,7 +46,7 @@ use serde_json::Value;
 
 use aqr_l10n::{common, mac, services};
 
-use crate::job::{Job, Verb, failure, file_name, intact, tested};
+use crate::job::{Job, Outcome, Verb, file_name, outcome};
 use crate::version;
 
 /// How often the jobs are looked at, in seconds.
@@ -324,18 +324,11 @@ fn show(r: &mut Running) {
 /// Tells what came of `job`, ended with `status`: an error, or what a test checked.
 fn finished(mtm: MainThreadMarker, job: &Job, status: std::process::ExitStatus) {
     let s = job.ipc.state.lock().unwrap();
-    if s.stopped || s.cancelled {
-        return;
-    }
     let name = s.input().map(file_name).unwrap_or_default();
-    if let Some(e) = failure(&s, Some(status)) {
-        let main = job.ipc.verb.failed(&name);
-        let log: Vec<&str> = s.log.iter().map(String::as_str).collect();
-        let log = log.join("\n");
-        alert(mtm, NSAlertStyle::Critical, &main, &e, (!log.is_empty()).then_some(&log));
-    } else if job.ipc.verb == Verb::Test {
-        let lines: Vec<String> = s.ended.iter().map(|(n, e)| tested(n, e, job.ipc.count > 1)).collect();
-        alert(mtm, NSAlertStyle::Informational, &intact(&name, job.ipc.count), &lines.join("\n"), None);
+    match outcome(job.ipc.verb, job.ipc.count, &s, Some(status), &name) {
+        Outcome::Failed { main, text, log } => alert(mtm, NSAlertStyle::Critical, &main, &text, log.as_deref()),
+        Outcome::Tested { main, text } => alert(mtm, NSAlertStyle::Informational, &main, &text, None),
+        Outcome::Silent | Outcome::Done => {}
     }
 }
 
