@@ -64,7 +64,13 @@ pub fn parse(d: &[u8]) -> Result<Wem, Error> {
     let v = &d[vorb.clone()];
     let data = data.ok_or("no data")?;
     if v.len() != 0x2A {
-        return Err("vorb size not 0x2A");
+        return Err(match v.len() {
+            0x28 => "vorb of 0x28 bytes",
+            0x2C => "vorb of 0x2C bytes",
+            0x32 => "vorb of 0x32 bytes",
+            0x34 => "vorb of 0x34 bytes",
+            _ => "vorb of another size",
+        });
     }
     let samples = u32le(v, 0).ok_or("vorb")?;
     let mod_signal = u32le(v, 4).ok_or("vorb")?;
