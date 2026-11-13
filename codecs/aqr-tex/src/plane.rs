@@ -101,12 +101,6 @@ impl<T: Px, const C: usize> Plane<T, C> {
         self.px
     }
 
-    /// The plane of nothing yet of a surface `w` pixels wide, in `px` (to be grown).
-    pub fn empty_in(mut px: Vec<[T; C]>, w: usize) -> Self {
-        px.clear();
-        Plane { w, h: 0, px }
-    }
-
     /// The plane grown by `h` rows below it (within its room); the first of them.
     pub fn grow(&mut self, h: usize) -> usize {
         let y0 = self.h;

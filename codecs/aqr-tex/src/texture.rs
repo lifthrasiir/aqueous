@@ -491,11 +491,6 @@ pub fn decode_held<F: Family>(l: &Layout) -> u64 {
     block(l.len_in(F::shape(l.format))) + block(8 * apart_streams::<F>(l) as u64)
 }
 
-/// Whether the formats of group `g` are taken.
-pub fn taken(g: Group) -> bool {
-    matches!(g, Group::Bcn | Group::Bc7 | Group::Bc6h | Group::Etc | Group::Pvrtc | Group::Astc)
-}
-
 /// [`encode`] of the family of `l`'s format.
 pub fn encode_any(l: &Layout, blocks: &[u8], threads: usize) -> (Vec<u8>, Vec<u8>, [u64; CATS]) {
     match l.format.group() {
@@ -517,13 +512,5 @@ pub fn decode_any(l: &Layout, main: &[u8], apart: &[u8], threads: usize) -> Resu
         Group::Etc => decode::<crate::etcm::Etc>(l, main, apart, threads),
         Group::Pvrtc => decode::<crate::pvrtc::Pvrtc>(l, main, apart, threads),
         Group::Astc => decode::<crate::astcm::Astc>(l, main, apart, threads),
-    }
-}
-
-/// [`stripes`] of a surface of `blocks` blocks of format `f`.
-pub fn stripes_of(f: Format, blocks: usize) -> usize {
-    match f.group() {
-        Group::Pvrtc => 1,
-        _ => stripes::<Bcn>(blocks),
     }
 }

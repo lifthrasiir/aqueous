@@ -12,10 +12,6 @@ use crate::{Result, corrupt, texture};
 /// module take much memory.
 const MAX_RATIO: u64 = 8192;
 
-/// The task slots of each module (aqr-modules' `bcn-recons` and the others), and so its
-/// threads.
-pub const SLOTS: usize = 8;
-
 /// The layout of params `params`, of a format of family `F` and of `len` bytes.
 fn layout<F: Family>(params: &[u8], len: u64) -> Option<Layout> {
     Layout::from_bytes(params).filter(|l| l.format.group() == F::GROUP && l.len_in(F::shape(l.format)) == len)
@@ -44,19 +40,9 @@ pub fn decode_of<F: Family>(params: &[u8], inputs: &[&[u8]], len: u64, threads: 
     texture::decode::<F>(&layout, main, apart, threads)
 }
 
-/// `bcn-recons`'s plan ([`plan_of`]).
-pub fn plan(params: &[u8], inputs: &[u64], initial: u64, len: u64) -> Option<(u64, u64)> {
-    plan_of::<Bcn>(params, inputs, initial, len)
-}
-
 /// `bcn-recons` ([`decode_of`]).
 pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
     decode_of::<Bcn>(params, inputs, len, threads)
-}
-
-/// `bc7-recons`'s plan ([`plan_of`]).
-pub fn plan_bc7(params: &[u8], inputs: &[u64], initial: u64, len: u64) -> Option<(u64, u64)> {
-    plan_of::<crate::bc7::Bc7>(params, inputs, initial, len)
 }
 
 /// `bc7-recons` ([`decode_of`]).
@@ -64,29 +50,14 @@ pub fn decode_bc7(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> 
     decode_of::<crate::bc7::Bc7>(params, inputs, len, threads)
 }
 
-/// `bc6h-recons`'s plan ([`plan_of`]).
-pub fn plan_bc6h(params: &[u8], inputs: &[u64], initial: u64, len: u64) -> Option<(u64, u64)> {
-    plan_of::<crate::bc6h::Bc6h>(params, inputs, initial, len)
-}
-
 /// `bc6h-recons` ([`decode_of`]).
 pub fn decode_bc6h(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
     decode_of::<crate::bc6h::Bc6h>(params, inputs, len, threads)
 }
 
-/// `etc-recons`'s plan ([`plan_of`]).
-pub fn plan_etc(params: &[u8], inputs: &[u64], initial: u64, len: u64) -> Option<(u64, u64)> {
-    plan_of::<crate::etcm::Etc>(params, inputs, initial, len)
-}
-
 /// `etc-recons` ([`decode_of`]).
 pub fn decode_etc(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
     decode_of::<crate::etcm::Etc>(params, inputs, len, threads)
-}
-
-/// `pvrtc-recons`'s plan ([`plan_of`]).
-pub fn plan_pvrtc(params: &[u8], inputs: &[u64], initial: u64, len: u64) -> Option<(u64, u64)> {
-    plan_of::<crate::pvrtc::Pvrtc>(params, inputs, initial, len)
 }
 
 /// `pvrtc-recons` ([`decode_of`]).

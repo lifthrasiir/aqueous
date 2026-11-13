@@ -7,6 +7,7 @@
 //! Taken: 2D textures (arrays of them, cube maps) of the formats of [`Format`], not
 //! supercompressed (KTX 2's scheme 0), every surface whole in the file.
 
+use crate::dds::u32le;
 use crate::layout::{ASTC_FOOTPRINTS, Format, Layout};
 
 /// Where a container's surfaces are: its layout, and the start of the blocks of each surface in
@@ -22,7 +23,7 @@ impl Found {
     /// layout's data; None where any is past `len` bytes or two overlap.
     pub fn pieces(&self, len: usize) -> Option<Vec<(usize, usize)>> {
         let l = &self.layout;
-        let layer: Vec<usize> = l.mip_surfaces().map(|s| s.blocks() * l.format.block_bytes()).collect();
+        let layer = surface_bytes(l);
         let sizes: Vec<usize> = (0..l.layers).flat_map(|_| layer.iter().copied()).collect();
         if sizes.len() != self.starts.len() {
             return None;
@@ -41,12 +42,13 @@ impl Found {
     }
 }
 
-fn u32le(d: &[u8], p: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(*d.get(p..)?.first_chunk()?))
-}
-
 fn u64le(d: &[u8], p: usize) -> Option<u64> {
     Some(u64::from_le_bytes(*d.get(p..)?.first_chunk()?))
+}
+
+/// The bytes of the blocks of each mipmap of `l`'s surfaces, from the largest.
+fn surface_bytes(l: &Layout) -> Vec<usize> {
+    l.mip_surfaces().map(|s| s.blocks() * l.format.block_bytes()).collect()
 }
 
 /// The layout of `width` × `height`, of `mips` mipmaps (0 for 1) and `layers` (0 for 1), if it is
@@ -116,7 +118,7 @@ pub fn ktx(d: &[u8]) -> Option<Found> {
     let format = gl_format(internal)?;
     let l = layout(format, width, height, mips, elements.max(1).checked_mul(faces)?)?;
     let cube = faces == 6 && elements == 0;
-    let surfaces: Vec<usize> = l.mip_surfaces().map(|s| s.blocks() * format.block_bytes()).collect();
+    let surfaces = surface_bytes(&l);
     let mut at = 64usize.checked_add(kv as usize)?;
     let mut starts = vec![0; l.layers as usize * surfaces.len()];
     for (m, &n) in surfaces.iter().enumerate() {
@@ -182,7 +184,7 @@ pub fn ktx2(d: &[u8]) -> Option<Found> {
         return None;
     }
     let l = layout(format, width, height, mips, elements.max(1).checked_mul(faces)?)?;
-    let surfaces: Vec<usize> = l.mip_surfaces().map(|s| s.blocks() * format.block_bytes()).collect();
+    let surfaces = surface_bytes(&l);
     let mut starts = vec![0; l.layers as usize * surfaces.len()];
     for (m, &n) in surfaces.iter().enumerate() {
         let at = 80 + 24 * m;
@@ -240,7 +242,7 @@ pub fn pvr(d: &[u8]) -> Option<Found> {
         return None;
     }
     let l = layout(format, width, height, mips, elements.max(1).checked_mul(faces)?)?;
-    let surfaces: Vec<usize> = l.mip_surfaces().map(|s| s.blocks() * format.block_bytes()).collect();
+    let surfaces = surface_bytes(&l);
     let mut at = 52usize.checked_add(meta as usize)?;
     let mut starts = vec![0; l.layers as usize * surfaces.len()];
     for (m, &n) in surfaces.iter().enumerate() {

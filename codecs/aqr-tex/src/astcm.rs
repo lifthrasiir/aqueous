@@ -11,7 +11,7 @@ use aqr_common::arith::Bit;
 use crate::astc::{
     self, Block, COLOUR_ORDERS, COLOUR_RANGES, Kind, QUINTS, Range, Sequence, TRITS, WEIGHT_ORDERS, WEIGHT_RANGES,
 };
-use crate::coder::{Cat, Side, wide_token};
+use crate::coder::{Cat, Side, bit_models, unzz, wide_token, zz};
 use crate::copies::{BLOCK_LEFT, BLOCK_UP, Copies, Got, NEW, NONE};
 use crate::layout::{Format, Group, Shape};
 use crate::plane::{Plane, Up, med};
@@ -19,16 +19,6 @@ use crate::texture::Family;
 use crate::{Result, corrupt};
 
 pub struct Astc;
-
-#[inline(always)]
-fn zz(v: i32) -> u32 {
-    ((v << 1) ^ (v >> 31)) as u32
-}
-
-#[inline(always)]
-fn unzz(v: u32) -> i32 {
-    (v >> 1) as i32 ^ -((v & 1) as i32)
-}
 
 /// `v` modulo `levels` (as `rem_euclid`; of the ranks' sums and differences, by a test, where
 /// they are within one turn).
@@ -47,45 +37,27 @@ fn wrap(v: i32, levels: i32) -> i32 {
 const COLOUR_CTX: usize = 3 * 8 * 5;
 const WEIGHT_CTX: usize = 12 * 4 * 2;
 
-/// The models of a texture, or of a stripe.
-#[derive(Clone)]
-pub struct Models {
-    copies: Copies<16>,
-    kind: Vec<Bit>,
-    same: Vec<Bit>,
-    mode: Vec<Bit>,
-    np: Vec<Bit>,
-    seed: Vec<Bit>,
-    cem: Vec<Bit>,
-    ccs: Vec<Bit>,
-    colour: Vec<Bit>,
-    colour_next: Vec<Bit>,
-    choice: Vec<Bit>,
-    unused: Vec<Bit>,
-    weight: Vec<Bit>,
-    weight_next: Vec<Bit>,
-    void: Vec<Bit>,
-    void_next: Vec<Bit>,
-}
-
-impl Models {
-    const SIZES: [usize; 15] = [
-        4 * 4 * 4,
-        8,
-        2048,
-        5 * 4,
-        1024,
-        5 * 16 * 16 + 4 * 4 + 8 * 2 * 4,
-        4,
-        COLOUR_CTX * 16,
-        COLOUR_CTX * 16,
-        2 * 6 * 2 * 8,
-        8,
-        WEIGHT_CTX * 16,
-        WEIGHT_CTX * 16,
-        8 * 32 + 2,
-        8 * 32,
-    ];
+bit_models! {
+    /// The models of a texture, or of a stripe.
+    #[derive(Clone)]
+    pub struct Models {
+        copies: Copies<16>,
+        kind: 4 * 4 * 4,
+        same: 8,
+        mode: 2048,
+        np: 5 * 4,
+        seed: 1024,
+        cem: 5 * 16 * 16 + 4 * 4 + 8 * 2 * 4,
+        ccs: 4,
+        colour: COLOUR_CTX * 16,
+        colour_next: COLOUR_CTX * 16,
+        choice: 2 * 6 * 2 * 8,
+        unused: 8,
+        weight: WEIGHT_CTX * 16,
+        weight_next: WEIGHT_CTX * 16,
+        void: 8 * 32 + 2,
+        void_next: 8 * 32,
+    }
 }
 
 /// What a block of a surface was, for the blocks after: its fields and its choice.
@@ -404,7 +376,6 @@ impl Astc {
         a: &Around,
         at: (usize, usize, (u32, u32)),
     ) -> Result<Block> {
-        let fp = at.2;
         let (ln, un) = (normal(left), normal(up));
         // the block mode: the left one's, the upper one's, or its bits
         let mode = match (ln, un) {
@@ -485,7 +456,6 @@ impl Astc {
             let v = s.bit(&mut md.unused[k.min(7) as usize], want.unused >> k & 1 != 0, Cat::Mode);
             b.unused |= (v as u128) << k;
         }
-        let _ = fp;
         Ok(b)
     }
 
@@ -666,66 +636,15 @@ impl Family for Astc {
     type Work = Work;
 
     fn models(_: Format) -> Models {
-        let v = |n| vec![Bit::default(); n];
-        let [
-            kind,
-            same,
-            mode,
-            np,
-            seed,
-            cem,
-            ccs,
-            colour,
-            colour_next,
-            choice,
-            unused,
-            weight,
-            weight_next,
-            void,
-            void_next,
-        ] = Models::SIZES;
-        Models {
-            copies: Copies::new(),
-            kind: v(kind),
-            same: v(same),
-            mode: v(mode),
-            np: v(np),
-            seed: v(seed),
-            cem: v(cem),
-            ccs: v(ccs),
-            colour: v(colour),
-            colour_next: v(colour_next),
-            choice: v(choice),
-            unused: v(unused),
-            weight: v(weight),
-            weight_next: v(weight_next),
-            void: v(void),
-            void_next: v(void_next),
-        }
+        Models::new()
     }
 
     fn models_plan(_: Format) -> u64 {
-        let bits: u64 = Models::SIZES.iter().map(|&n| aqr_api::stack::block((n * size_of::<Bit>()) as u64)).sum();
-        bits + Copies::<16>::plan()
+        Models::plan()
     }
 
     fn copy_models(m: &mut Models, o: &Models) {
-        m.copies.copy_from(&o.copies);
-        m.kind.clone_from(&o.kind);
-        m.same.clone_from(&o.same);
-        m.mode.clone_from(&o.mode);
-        m.np.clone_from(&o.np);
-        m.seed.clone_from(&o.seed);
-        m.cem.clone_from(&o.cem);
-        m.ccs.clone_from(&o.ccs);
-        m.colour.clone_from(&o.colour);
-        m.colour_next.clone_from(&o.colour_next);
-        m.choice.clone_from(&o.choice);
-        m.unused.clone_from(&o.unused);
-        m.weight.clone_from(&o.weight);
-        m.weight_next.clone_from(&o.weight_next);
-        m.void.clone_from(&o.void);
-        m.void_next.clone_from(&o.void_next);
+        m.copy_from(o);
     }
 
     fn bufs(_: Format, px: usize) -> Vec<[u8; 4]> {

@@ -207,7 +207,8 @@ impl Default for Sequence {
     }
 }
 
-/// Reads `n` values of range `r` from `bits` at `at` (a reader from bit 0 up).
+/// Reads `n` values of range `r`, their bits taken by `get` (given a count of bits, the next ones
+/// of a stream from bit 0 up).
 fn read_seq(get: &mut impl FnMut(u32) -> u32, n: u32, r: Range) -> Sequence {
     let mut s = Sequence { n: n as u8, ..Default::default() };
     let g = r.group();
@@ -704,12 +705,8 @@ fn hash52(mut p: u32) -> u32 {
     p
 }
 
-/// The partition of texel (x, y) of a block of `texels` texels, of seed `seed` and `n` partitions.
-pub fn partition(seed: u32, x: u32, y: u32, n: u32, texels: u32) -> u32 {
-    Partitions::new(seed, n, texels).of(x, y)
-}
-
-/// What [`partition`] takes of a block's seed, partitions and texels, once for its texels.
+/// What the partition of a texel takes of a block's seed, partitions and texels, once for its
+/// texels.
 #[derive(Clone, Copy)]
 pub struct Partitions {
     n: u32,

@@ -206,7 +206,7 @@ fn smooth_textures_code_small() {
 fn stripes() {
     for (format, size, mips, layers) in [(Format::Bc1, (1024, 1024), 3, 1), (Format::Bc5, (1024, 520), 2, 2)] {
         let l = Layout { format, width: size.0, height: size.1, mips, layers };
-        assert!(texture::stripes_of(l.format, l.mip_surfaces().next().unwrap().blocks()) > 1);
+        assert!(texture::stripes::<aqr_tex::bcn::Bcn>(l.mip_surfaces().next().unwrap().blocks()) > 1);
         let b = blocks(format, (l.len() / format.block_bytes() as u64) as usize, 21);
         let (main, apart, _) = texture::encode_any(&l, &b, 1);
         for threads in [2, 3, 8] {

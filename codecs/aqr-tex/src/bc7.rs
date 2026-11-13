@@ -9,7 +9,7 @@ use aqr_common::arith::Bit;
 
 use crate::Result;
 use crate::bptc::{Block7, MODES, Mode, RESERVED};
-use crate::coder::{Cat, Side};
+use crate::coder::{Cat, Side, bit_models, class, unzz, wrap, zz};
 use crate::copies::{Copies, Got, NEW, NONE};
 use crate::layout::{Format, Group, Shape};
 use crate::plane::{Plane, Up};
@@ -69,28 +69,26 @@ const fn offsets(flat: bool) -> [usize; KINDS + 1] {
 const IDX: [usize; KINDS + 1] = offsets(false);
 const FLAT: [usize; KINDS + 1] = offsets(true);
 
-/// The models of a texture, or of a stripe.
-#[derive(Clone)]
-pub struct Models {
-    /// The mode by the modes of the blocks to the left and above (10 each: none or reserved).
-    mode: Vec<Bit>,
-    /// Whether the partition is the left block's, or the upper one's (of the same subsets).
-    same: Vec<Bit>,
-    /// The partition by its kind: of mode 0, of two subsets, of three.
-    part: Vec<Bit>,
-    rot: Vec<Bit>,
-    isb: Vec<Bit>,
-    res: Vec<Bit>,
-    res_next: Vec<Bit>,
-    pbit: Vec<Bit>,
-    idx: Vec<Bit>,
-    flat: Vec<Bit>,
-    /// Blocks as those around or before.
-    copies: Copies<16>,
-}
-
-impl Models {
-    const SIZES: [usize; 10] = [100 * 16, 4, 3 * 64, 2 * 5 * 4, 3, RES * 16, RES * 16, 2 * 3, IDX[KINDS], FLAT[KINDS]];
+bit_models! {
+    /// The models of a texture, or of a stripe.
+    #[derive(Clone)]
+    pub struct Models {
+        /// The mode by the modes of the blocks to the left and above (10 each: none or reserved).
+        mode: 100 * 16,
+        /// Whether the partition is the left block's, or the upper one's (of the same subsets).
+        same: 4,
+        /// The partition by its kind: of mode 0, of two subsets, of three.
+        part: 3 * 64,
+        rot: 2 * 5 * 4,
+        isb: 3,
+        res: RES * 16,
+        res_next: RES * 16,
+        pbit: 2 * 3,
+        idx: IDX[KINDS],
+        flat: FLAT[KINDS];
+        /// Blocks as those around or before.
+        copies: Copies<16>,
+    }
 }
 
 /// The bits of block `b` but its indices (all of them of the reserved mode).
@@ -117,33 +115,6 @@ pub struct Work {
 #[derive(Default)]
 pub struct Planes {
     p: Option<Plane<u8, 4>>,
-}
-
-#[inline(always)]
-fn zz(v: i32) -> u32 {
-    ((v << 1) ^ (v >> 31)) as u32
-}
-
-#[inline(always)]
-fn unzz(v: u32) -> i32 {
-    (v >> 1) as i32 ^ -((v & 1) as i32)
-}
-
-/// `v` modulo 2^`bits`, in [−2^(bits−1), 2^(bits−1)).
-#[inline(always)]
-fn wrap(v: i32, bits: u32) -> i32 {
-    (v << (32 - bits)) >> (32 - bits)
-}
-
-/// The class of a residual before (none or 0, 1, 2 or 3, more).
-#[inline(always)]
-fn class(r: i32) -> usize {
-    match r.unsigned_abs() {
-        0 => 0,
-        1 => 1,
-        2 | 3 => 2,
-        _ => 3,
-    }
 }
 
 /// A line between two endpoints, of which a pixel's bucket is where it projects on it.
@@ -594,40 +565,15 @@ impl Family for Bc7 {
     type Work = Work;
 
     fn models(_: Format) -> Models {
-        let v = |n| vec![Bit::default(); n];
-        let [mode, same, part, rot, isb, res, res_next, pbit, idx, flat] = Models::SIZES;
-        Models {
-            mode: v(mode),
-            same: v(same),
-            part: v(part),
-            rot: v(rot),
-            isb: v(isb),
-            res: v(res),
-            res_next: v(res_next),
-            pbit: v(pbit),
-            idx: v(idx),
-            flat: v(flat),
-            copies: Copies::new(),
-        }
+        Models::new()
     }
 
     fn models_plan(_: Format) -> u64 {
-        let bits: u64 = Models::SIZES.iter().map(|&n| aqr_api::stack::block((n * size_of::<Bit>()) as u64)).sum();
-        bits + Copies::<16>::plan()
+        Models::plan()
     }
 
     fn copy_models(m: &mut Models, o: &Models) {
-        m.mode.clone_from(&o.mode);
-        m.same.clone_from(&o.same);
-        m.part.clone_from(&o.part);
-        m.rot.clone_from(&o.rot);
-        m.isb.clone_from(&o.isb);
-        m.res.clone_from(&o.res);
-        m.res_next.clone_from(&o.res_next);
-        m.pbit.clone_from(&o.pbit);
-        m.idx.clone_from(&o.idx);
-        m.flat.clone_from(&o.flat);
-        m.copies.copy_from(&o.copies);
+        m.copy_from(o);
     }
 
     fn bufs(_: Format, px: usize) -> Vec<[u8; 4]> {

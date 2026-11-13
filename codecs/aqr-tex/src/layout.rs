@@ -95,7 +95,7 @@ impl Format {
     /// The formats of BC1 to BC5, of `bcn-recons`.
     pub const ALL: [Format; 5] = [Format::Bc1, Format::Bc2, Format::Bc3, Format::Bc4, Format::Bc5];
 
-    /// Every format but ASTC, and ASTC of 4×4 and 8×8.
+    /// Every format but ASTC, and ASTC of 4×4, 6×5, 8×8 and 12×12.
     pub const SOME: [Format; 22] = [
         Format::Bc1,
         Format::Bc2,
@@ -147,12 +147,6 @@ impl Format {
             Format::Astc { w, h } => (w as usize, h as usize),
             _ => (4, 4),
         }
-    }
-
-    /// The pixels of a block.
-    pub fn block_pixels(self) -> usize {
-        let (w, h) = self.footprint();
-        w * h
     }
 
     /// The fewest blocks across and down of a surface: 2 of PVRTC (whose blocks are between
@@ -298,6 +292,7 @@ impl Layout {
     }
 
     /// Bytes of the blocks of every surface; of a valid layout, under 2^56.
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> u64 {
         self.len_in(self.format.shape())
     }

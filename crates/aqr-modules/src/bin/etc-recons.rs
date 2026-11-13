@@ -3,7 +3,7 @@
 
 #![no_main]
 
-// (its memory laid out as a stack: what it takes is its plan, `aqr_tex::module::plan_etc`)
+// (its memory laid out as a stack: what it takes is its plan, `aqr_tex::module::plan_of`)
 #[global_allocator]
 static STACK: aqr_api::stack::Stack = aqr_api::stack::Stack::new();
 

@@ -23,6 +23,7 @@ pub enum Data {
 
 impl Data {
     /// Bytes of the data.
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> u64 {
         match *self {
             Data::Blocks(l) => l.len(),
@@ -64,7 +65,7 @@ const DDSCAPS2_VOLUME: u32 = 0x20_0000;
 const DIMENSION_TEXTURE2D: u32 = 3;
 const RESOURCE_MISC_TEXTURECUBE: u32 = 0x4;
 
-fn u32le(d: &[u8], p: usize) -> Option<u32> {
+pub(crate) fn u32le(d: &[u8], p: usize) -> Option<u32> {
     Some(u32::from_le_bytes(*d.get(p..)?.first_chunk()?))
 }
 

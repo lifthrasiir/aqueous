@@ -10,41 +10,14 @@
 use aqr_common::arith::Bit;
 
 use crate::Result;
-use crate::coder::{Cat, Side};
+use crate::coder::{Cat, Side, class, unzz, wrap, zz};
 use crate::copies::{Copies, Got, NEW, NONE};
-use crate::etc::{self, DIFFERENTIAL, Eac, FIELDS, H, INDIVIDUAL, PLANAR, T};
+use crate::etc::{self, DIFFERENTIAL, EAC, Eac, FIELDS, H, INDIVIDUAL, PLANAR, T};
 use crate::layout::{Format, Group, Shape};
 use crate::plane::{Plane, Up};
 use crate::texture::Family;
 
 pub struct Etc;
-
-#[inline(always)]
-fn zz(v: i32) -> u32 {
-    ((v << 1) ^ (v >> 31)) as u32
-}
-
-#[inline(always)]
-fn unzz(v: u32) -> i32 {
-    (v >> 1) as i32 ^ -((v & 1) as i32)
-}
-
-/// `v` modulo 2^`bits`, in [−2^(bits−1), 2^(bits−1)).
-#[inline(always)]
-fn wrap(v: i32, bits: u32) -> i32 {
-    (v << (32 - bits)) >> (32 - bits)
-}
-
-/// The class of a residual before (0, 1, 2 or 3, more).
-#[inline(always)]
-fn class(r: i32) -> usize {
-    match r.unsigned_abs() {
-        0 => 0,
-        1 => 1,
-        2 | 3 => 2,
-        _ => 3,
-    }
-}
 
 /// The bucket of `x` on the ladder of sorted values `v`: the thresholds it is at or above, of
 /// the values and the midpoints between them (0 to 2·n − 1).
@@ -778,7 +751,12 @@ impl Values {
     }
 }
 
-use crate::etc::EAC;
+/// The values across of the colours' upsampling and of the EAC parts', of an `across` of 4 values a
+/// pixel.
+fn up_sizes(f: Format, across: usize) -> (usize, usize) {
+    let (c, a, _) = parts(f);
+    (if c { across } else { 0 }, if a.is_some() { across / Etc::across_values(f) } else { 0 })
+}
 
 /// The parts of a format: RGB, and the first and second EAC parts (and what their values are).
 fn parts(f: Format) -> (bool, Option<Eac>, Option<Eac>) {
@@ -885,15 +863,13 @@ impl Family for Etc {
 
     fn work(f: Format, blocks: usize, cols: usize, across: usize) -> Work {
         // (the upsampling of the colours takes 4 values a pixel, of the EAC parts' 1)
-        let (c, a, _) = parts(f);
-        let (a8, a16) = (if c { across } else { 0 }, if a.is_some() { across / Self::across_values(f) } else { 0 });
+        let (a8, a16) = up_sizes(f, across);
         Work { seen: Vec::with_capacity(blocks), up8: Up::with_capacity(cols, a8), up16: Up::with_capacity(cols, a16) }
     }
 
     fn work_plan(f: Format, blocks: usize, cols: usize, across: usize) -> u64 {
         use aqr_api::stack::block;
-        let (c, a, _) = parts(f);
-        let (a8, a16) = (if c { across } else { 0 }, if a.is_some() { across / Self::across_values(f) } else { 0 });
+        let (a8, a16) = up_sizes(f, across);
         block((blocks * size_of::<Seen>()) as u64) + Up::<u16>::plan(cols, a8) + Up::<u32>::plan(cols, a16)
     }
 

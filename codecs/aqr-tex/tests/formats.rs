@@ -6,7 +6,7 @@
 #![allow(clippy::needless_range_loop)]
 
 use aqr_tex::layout::{Format, Layout};
-use aqr_tex::texture;
+use aqr_tex::texture::{self, Family};
 
 struct Rng(u64);
 
@@ -129,11 +129,27 @@ fn bc7_layouts() {
     }
 }
 
+/// What each family says of its formats' blocks is what the format says.
+#[test]
+fn families_shapes() {
+    fn agree<F: Family>() {
+        for f in Format::SOME.into_iter().filter(|f| f.group() == F::GROUP) {
+            assert_eq!(F::shape(f), f.shape(), "{}", f.name());
+        }
+    }
+    agree::<aqr_tex::bcn::Bcn>();
+    agree::<aqr_tex::bc7::Bc7>();
+    agree::<aqr_tex::bc6h::Bc6h>();
+    agree::<aqr_tex::etcm::Etc>();
+    agree::<aqr_tex::pvrtc::Pvrtc>();
+    agree::<aqr_tex::astcm::Astc>();
+}
+
 #[test]
 fn bc7_stripes() {
     // a largest mipmap of 4 stripes, its second of one
     let l = Layout { format: Format::Bc7, width: 1024, height: 520, mips: 2, layers: 1 };
-    assert!(texture::stripes_of(l.format, l.mip_surfaces().next().unwrap().blocks()) > 1);
+    assert!(texture::stripes::<aqr_tex::bcn::Bcn>(l.mip_surfaces().next().unwrap().blocks()) > 1);
     let b = bc7_random(l.len() as usize / 16, 7);
     round(&l, &b);
 }

@@ -109,12 +109,9 @@ pub fn encode_container(input: &[u8], threads: usize) -> Option<Formula> {
 }
 
 /// The application giving `blocks`, exactly the blocks of layout `l`, its inputs pushed to `f`.
-/// None where its format is not taken, or the coder panics. It is the same whatever `threads`
+/// None where the coder panics. It is the same whatever `threads`
 /// is.
 pub fn apply(f: &mut Formula, blocks: &[u8], l: &Layout, threads: usize) -> Option<Node> {
-    if !texture::taken(l.format.group()) {
-        return None;
-    }
     let (main, apart, _) = std::panic::catch_unwind(|| texture::encode_any(l, blocks, threads)).ok()?;
     let inputs =
         vec![f.push_as("bcn/coded", Kind::Compressed, main), f.push_as("bcn/stripes", Kind::Compressed, apart)];

@@ -11,7 +11,7 @@
 use aqr_common::arith::Bit;
 
 use crate::Result;
-use crate::coder::{Cat, Side};
+use crate::coder::{Cat, Side, bit_models, class, unzz, wrap, zz};
 use crate::copies::{Copies, Got, NEW, NONE};
 use crate::layout::{Format, Group, Shape};
 use crate::plane::{Plane, Up, med};
@@ -306,20 +306,18 @@ const RES: usize = 2 * 2 * 4 * 4 * 4;
 /// value), the contrast (3), the buckets of the two predictions (12 each).
 const MOD: usize = 4 * 3 * 12 * 12 * 4;
 
-/// The models of a texture.
-#[derive(Clone)]
-pub struct Models {
-    copies: Copies<8>,
-    opaque: Vec<Bit>,
-    flag: Vec<Bit>,
-    res: Vec<Bit>,
-    res_next: Vec<Bit>,
-    modu: Vec<Bit>,
-    bits2: Vec<Bit>,
-}
-
-impl Models {
-    const SIZES: [usize; 6] = [2 * 3 * 2, 3 * 3, RES * 16, RES * 16, MOD, 4 * 3];
+bit_models! {
+    /// The models of a texture.
+    #[derive(Clone)]
+    pub struct Models {
+        copies: Copies<8>,
+        opaque: 2 * 3 * 2,
+        flag: 3 * 3,
+        res: RES * 16,
+        res_next: RES * 16,
+        modu: MOD,
+        bits2: 4 * 3,
+    }
 }
 
 /// Buffers of a surface's coding: its words row by row, their choices and whether they were copied
@@ -334,31 +332,6 @@ pub struct Work {
 #[derive(Default)]
 pub struct Planes {
     p: Option<Plane<u8, 4>>,
-}
-
-#[inline(always)]
-fn zz(v: i32) -> u32 {
-    ((v << 1) ^ (v >> 31)) as u32
-}
-
-#[inline(always)]
-fn unzz(v: u32) -> i32 {
-    (v >> 1) as i32 ^ -((v & 1) as i32)
-}
-
-#[inline(always)]
-fn wrap(v: i32, bits: u32) -> i32 {
-    (v << (32 - bits)) >> (32 - bits)
-}
-
-#[inline(always)]
-fn class(r: i32) -> usize {
-    match r.unsigned_abs() {
-        0 => 0,
-        1 => 1,
-        2 | 3 => 2,
-        _ => 3,
-    }
 }
 
 /// The fields of the channels A, R, G, B of a colour (A or B) of opacity `opaque`: their bits (0
@@ -533,32 +506,15 @@ impl Family for Pvrtc {
     type Work = Work;
 
     fn models(_: Format) -> Models {
-        let v = |n| vec![Bit::default(); n];
-        let [opaque, flag, res, res_next, modu, bits2] = Models::SIZES;
-        Models {
-            copies: Copies::new(),
-            opaque: v(opaque),
-            flag: v(flag),
-            res: v(res),
-            res_next: v(res_next),
-            modu: v(modu),
-            bits2: v(bits2),
-        }
+        Models::new()
     }
 
     fn models_plan(_: Format) -> u64 {
-        let bits: u64 = Models::SIZES.iter().map(|&n| aqr_api::stack::block((n * size_of::<Bit>()) as u64)).sum();
-        bits + Copies::<8>::plan()
+        Models::plan()
     }
 
     fn copy_models(m: &mut Models, o: &Models) {
-        m.copies.copy_from(&o.copies);
-        m.opaque.clone_from(&o.opaque);
-        m.flag.clone_from(&o.flag);
-        m.res.clone_from(&o.res);
-        m.res_next.clone_from(&o.res_next);
-        m.modu.clone_from(&o.modu);
-        m.bits2.clone_from(&o.bits2);
+        m.copy_from(o);
     }
 
     fn bufs(_: Format, px: usize) -> Vec<[u8; 4]> {
@@ -603,14 +559,13 @@ impl Family for Pvrtc {
 
     fn upsampled(
         p: &Planes,
-        f: Format,
+        _: Format,
         w: usize,
         rows: std::ops::Range<usize>,
         bufs: &mut Vec<[u8; 4]>,
         work: &mut Work,
     ) -> Planes {
         let take = std::mem::take(bufs);
-        let _ = f;
         Planes { p: p.p.as_ref().map(|p| p.upsampled::<4>(w, rows, take, &mut work.up)) }
     }
 

@@ -80,10 +80,6 @@ fn main() {
                             }
                         },
                     };
-                    if !texture::taken(l.format.group()) {
-                        eprintln!("{path}: {} not taken", l.format.name());
-                        continue;
-                    }
                     let blocks: Vec<u8> = pieces.iter().flat_map(|&(s, n)| &d[s..s + n]).copied().collect();
                     let blocks = &blocks[..];
                     let t = Instant::now();

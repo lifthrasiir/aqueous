@@ -12,7 +12,7 @@
 use aqr_common::arith::Bit;
 
 use crate::bc;
-use crate::coder::{Cat, Side};
+use crate::coder::{Cat, Side, unzz, wrap, zz};
 use crate::plane::{Up, med};
 use crate::{Result, corrupt};
 
@@ -51,22 +51,6 @@ impl Work {
         self.choices.resize(n, NONE);
         (&mut self.keys, &mut self.choices)
     }
-}
-
-#[inline(always)]
-fn zz(v: i32) -> u32 {
-    ((v << 1) ^ (v >> 31)) as u32
-}
-
-#[inline(always)]
-fn unzz(v: u32) -> i32 {
-    (v >> 1) as i32 ^ -((v & 1) as i32)
-}
-
-/// `v` modulo 2^`bits`, in [−2^(bits−1), 2^(bits−1)).
-#[inline(always)]
-fn wrap(v: i32, bits: u32) -> i32 {
-    (v << (32 - bits)) >> (32 - bits)
 }
 
 /// The bit length of `v`.

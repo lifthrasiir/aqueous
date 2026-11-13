@@ -10,7 +10,7 @@ use aqr_common::arith::Bit;
 
 use crate::Result;
 use crate::bptc::{Block6, MODES6, Mode6, RESERVED6, quantize};
-use crate::coder::{Cat, Side, wide_token};
+use crate::coder::{Cat, Side, bit_models, unzz, wide_token, wrap, zz};
 use crate::copies::{BLOCK_LEFT, BLOCK_UP, Copies, Got, NEW, NONE};
 use crate::layout::{Format, Group, Shape};
 use crate::plane::{Plane, Up};
@@ -36,23 +36,21 @@ const IDX4: usize = CONTRASTS * (buckets(4) + 1) * (buckets(4) + 1) * 16;
 const FLAT3: usize = 9 * 9 * 8;
 const FLAT4: usize = 17 * 17 * 16;
 
-/// The models of a texture, or of a stripe.
-#[derive(Clone)]
-pub struct Models {
-    /// The mode by the modes of the blocks to the left and above (16 each: reserved, none).
-    mode: Vec<Bit>,
-    /// Whether the partition is the left block's, or the upper one's (of two subsets).
-    same: Vec<Bit>,
-    part: Vec<Bit>,
-    res: Vec<Bit>,
-    res_next: Vec<Bit>,
-    idx: Vec<Bit>,
-    flat: Vec<Bit>,
-    copies: Copies<16>,
-}
-
-impl Models {
-    const SIZES: [usize; 7] = [256 * 16, 4, 32, RES * 32, RES * 32, IDX3 + IDX4, FLAT3 + FLAT4];
+bit_models! {
+    /// The models of a texture, or of a stripe.
+    #[derive(Clone)]
+    pub struct Models {
+        /// The mode by the modes of the blocks to the left and above (16 each: reserved, none).
+        mode: 256 * 16,
+        /// Whether the partition is the left block's, or the upper one's (of two subsets).
+        same: 4,
+        part: 32,
+        res: RES * 32,
+        res_next: RES * 32,
+        idx: IDX3 + IDX4,
+        flat: FLAT3 + FLAT4;
+        copies: Copies<16>,
+    }
 }
 
 /// The bits of block `b` but its indices (all of them of a reserved mode).
@@ -79,22 +77,6 @@ pub struct Work {
 #[derive(Default)]
 pub struct Planes {
     p: Option<Plane<u16, 3>>,
-}
-
-#[inline(always)]
-fn zz(v: i32) -> u32 {
-    ((v << 1) ^ (v >> 31)) as u32
-}
-
-#[inline(always)]
-fn unzz(v: u32) -> i32 {
-    (v >> 1) as i32 ^ -((v & 1) as i32)
-}
-
-/// `v` modulo 2^`bits`, in [−2^(bits−1), 2^(bits−1)).
-#[inline(always)]
-fn wrap(v: i32, bits: u32) -> i32 {
-    (v << (32 - bits)) >> (32 - bits)
 }
 
 /// The class of a residual before: its bit length, up to 7.
@@ -447,34 +429,15 @@ impl Family for Bc6h {
     type Work = Work;
 
     fn models(_: Format) -> Models {
-        let v = |n| vec![Bit::default(); n];
-        let [mode, same, part, res, res_next, idx, flat] = Models::SIZES;
-        Models {
-            mode: v(mode),
-            same: v(same),
-            part: v(part),
-            res: v(res),
-            res_next: v(res_next),
-            idx: v(idx),
-            flat: v(flat),
-            copies: Copies::new(),
-        }
+        Models::new()
     }
 
     fn models_plan(_: Format) -> u64 {
-        let bits: u64 = Models::SIZES.iter().map(|&n| aqr_api::stack::block((n * size_of::<Bit>()) as u64)).sum();
-        bits + Copies::<16>::plan()
+        Models::plan()
     }
 
     fn copy_models(m: &mut Models, o: &Models) {
-        m.mode.clone_from(&o.mode);
-        m.same.clone_from(&o.same);
-        m.part.clone_from(&o.part);
-        m.res.clone_from(&o.res);
-        m.res_next.clone_from(&o.res_next);
-        m.idx.clone_from(&o.idx);
-        m.flat.clone_from(&o.flat);
-        m.copies.copy_from(&o.copies);
+        m.copy_from(o);
     }
 
     fn bufs(_: Format, px: usize) -> Vec<[u16; 3]> {

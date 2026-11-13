@@ -1,10 +1,11 @@
-//! Block-compressed textures (BC1 to BC5), rebuilt bit for bit from their blocks' endpoints
-//! and indices coded by context models ([`model`]): the endpoints predicted from the blocks
-//! around, the indices from the pixels around as the blocks decode. The DDS container
-//! ([`dds`]) is its header around the blocks, kept as it is. `formula` is the entry point (a
+//! Block-compressed textures (BC1 to BC7, ETC1/2 and EAC, PVRTC, ASTC), rebuilt bit for bit from
+//! their blocks' endpoints and indices coded by context models (BC1 to BC5's are [`model`]'s, the
+//! other families' their own): the endpoints predicted from the blocks around, the indices from
+//! the pixels around as the blocks decode. The DDS container ([`dds`]) is its header around the
+//! blocks, kept as it is. `formula` is the entry point (a
 //! module of aqr-formula); `FORMAT.md` specifies it.
 
-#![allow(clippy::needless_range_loop, clippy::len_without_is_empty)]
+#![allow(clippy::needless_range_loop)]
 
 pub mod astc;
 pub mod astcm;

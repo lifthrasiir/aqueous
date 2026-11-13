@@ -25,6 +25,101 @@ pub enum Cat {
 
 pub const CATS: usize = 6;
 
+/// The zigzag of `v`: 0, −1, 1, −2, … as 0, 1, 2, 3, ….
+#[inline(always)]
+pub(crate) fn zz(v: i32) -> u32 {
+    ((v << 1) ^ (v >> 31)) as u32
+}
+
+/// The value whose zigzag is `v`.
+#[inline(always)]
+pub(crate) fn unzz(v: u32) -> i32 {
+    (v >> 1) as i32 ^ -((v & 1) as i32)
+}
+
+/// `v` modulo 2^`bits`, in [−2^(bits−1), 2^(bits−1)).
+#[inline(always)]
+pub(crate) fn wrap(v: i32, bits: u32) -> i32 {
+    (v << (32 - bits)) >> (32 - bits)
+}
+
+/// The class of a residual before (none or 0, 1, 2 or 3, more), as a context.
+#[inline(always)]
+pub(crate) fn class(r: i32) -> usize {
+    match r.unsigned_abs() {
+        0 => 0,
+        1 => 1,
+        2 | 3 => 2,
+        _ => 3,
+    }
+}
+
+/// A struct of a vector of adaptive bits for each field (its length given beside it) and the
+/// copies' models (`copies`, first or, after a `;`, last), with `new`, `plan` (of the vectors,
+/// [`aqr_api::stack`], the copies' too) and `copy_from`, which take the fields in the order written.
+macro_rules! bit_models {
+    ($(#[$meta:meta])* pub struct $name:ident {
+        copies: $copies:ty,
+        $($(#[$fmeta:meta])* $field:ident: $size:expr),* $(,)?
+    }) => {
+        $(#[$meta])*
+        pub struct $name {
+            copies: $copies,
+            $($(#[$fmeta])* $field: Vec<Bit>,)*
+        }
+
+        impl $name {
+            #[inline(always)]
+            fn new() -> Self {
+                Self { copies: <$copies>::new(), $($field: vec![Bit::default(); $size],)* }
+            }
+
+            /// The bytes of the blocks of the copies' models and the vectors.
+            #[inline(always)]
+            fn plan() -> u64 {
+                <$copies>::plan() $(+ aqr_api::stack::block(($size * size_of::<Bit>()) as u64))*
+            }
+
+            #[inline(always)]
+            fn copy_from(&mut self, o: &Self) {
+                self.copies.copy_from(&o.copies);
+                $(self.$field.clone_from(&o.$field);)*
+            }
+        }
+    };
+    ($(#[$meta:meta])* pub struct $name:ident {
+        $($(#[$fmeta:meta])* $field:ident: $size:expr),* $(,)?
+        ; $(#[$cmeta:meta])* copies: $copies:ty $(,)?
+    }) => {
+        $(#[$meta])*
+        pub struct $name {
+            $($(#[$fmeta])* $field: Vec<Bit>,)*
+            $(#[$cmeta])*
+            copies: $copies,
+        }
+
+        impl $name {
+            #[inline(always)]
+            fn new() -> Self {
+                Self { $($field: vec![Bit::default(); $size],)* copies: <$copies>::new() }
+            }
+
+            /// The bytes of the blocks of the copies' models and the vectors.
+            #[inline(always)]
+            fn plan() -> u64 {
+                <$copies>::plan() $(+ aqr_api::stack::block(($size * size_of::<Bit>()) as u64))*
+            }
+
+            #[inline(always)]
+            fn copy_from(&mut self, o: &Self) {
+                $(self.$field.clone_from(&o.$field);)*
+                self.copies.copy_from(&o.copies);
+            }
+        }
+    };
+}
+pub(crate) use bit_models;
+
 pub trait Side {
     /// Whether the values given are coded (rather than taken from the coded bytes).
     const ENCODING: bool;
