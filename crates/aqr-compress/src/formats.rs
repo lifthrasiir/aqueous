@@ -73,7 +73,7 @@ const OTHER_EXTS: &[(Kind, &[&str])] = &[
     (
         Kind::Compressed,
         &[
-            "zst", "br", "mp4", "m4a", "m4v", "ogv", "opus", "aac", "webp", "avif", "heic", "heif", "jxl", "jp2",
+            "zst", "br", "mp4", "m4a", "m4v", "opus", "aac", "webp", "avif", "heic", "heif", "jxl", "jp2",
             "woff2",
         ],
     ),
@@ -604,6 +604,39 @@ formats! {
         // slices of the input
         heap: 0.0,
         exts: &["asar"],
+        bundle: true,
+    }
+    /// Godot's pack (`.pck`, aqr-bundle's `packs`), known by its header: at the start of data
+    /// only.
+    GodotPck = "godot-pck" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::GodotPck, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// Unity's AssetBundle (`UnityFS`, aqr-bundle's `packs`): the nodes in blocks stored as they
+    /// are, known by its header: at the start of data only.
+    UnityBundle = "unity-bundle" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::UnityBundle, d)),
+        // slices of the input, and the blocks' table decompressed
+        heap: 0.0,
+        bundle: true,
+    }
+    /// Unreal Engine's `.pak` (aqr-bundle's `packs`), known by its footer: all of the data
+    /// only.
+    UnrealPak = "unreal-pak" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::UnrealPak, d)),
+        // slices of the input, and the names of the index
+        heap: 0.0,
+        bundle: true,
+    }
+    /// Valve's VPK (aqr-bundle's `packs`): a directory file known by its header (the files whose
+    /// data it holds), or an archive of one found among the files archived along
+    /// ([`crate::vpk`]: never detected).
+    SourceVpk = "source-vpk" {
+        recompressor: Cx(crate::vpk::encode),
+        // slices of the input
+        heap: 0.0,
         bundle: true,
     }
     /// Delimited text table (aqr-xsv): CSV, TSV, USV and the like, a whole file known by its

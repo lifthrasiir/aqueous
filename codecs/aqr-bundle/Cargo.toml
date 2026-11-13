@@ -8,12 +8,15 @@ publish = false
 [features]
 default = ["encode"]
 # The formulas (`formula`); without it, the code of the module alone (`module`).
-encode = ["dep:aqr-formula"]
+# The packs of game engines (`packs`) are formulas of aqr-disk's, of no module.
+encode = ["dep:aqr-formula", "dep:aqr-disk", "dep:aqr-lz4"]
 
 [dependencies]
 aqr-api = { path = "../../crates/aqr-api", default-features = false }
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+aqr-disk = { path = "../aqr-disk", optional = true }
+aqr-lz4 = { path = "../aqr-lz4", default-features = false, optional = true }
 
 [dev-dependencies]
 zstd = "0.13"
@@ -24,3 +27,7 @@ zstd = "0.13"
 [[example]]
 name = "aqr-bundle-check"
 path = "examples/check.rs"
+
+[[example]]
+name = "aqr-bundle-packs"
+path = "examples/packs.rs"

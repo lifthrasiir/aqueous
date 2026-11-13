@@ -185,7 +185,9 @@ version = "0.1.0"
 dependencies = [
  "aqr-api",
  "aqr-common",
+ "aqr-disk",
  "aqr-formula",
+ "aqr-lz4",
  "zstd",
 ]
 

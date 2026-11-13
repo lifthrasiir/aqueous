@@ -41,7 +41,7 @@ fn main() {
                         std::fs::write(format!("{at}.alloc"), lines.join("\n") + "\n").unwrap();
                         println!("  lznt1 {len} {} units {}", allocated.len(), String::from_utf8_lossy(&f.name));
                     }
-                    None => {}
+                    Some(aqr_disk::Compressed::Opaque { .. }) | None => {}
                 }
             }
         }

@@ -415,7 +415,9 @@ fn compress_tree_noting<S: Source + ?Sized>(
     };
     let w_at = w.len();
     let weights: Vec<u64> = batches.iter().map(weight).collect();
-    let cx = Ctx { src, opt, notes: &notes, batches: &batches, weights: &weights, entries: &entries, tree, stop };
+    // (the archives of VPKs, by their directory files)
+    let vpks = opt.recompresses().then(|| crate::vpk::plan(src)).filter(|p| !p.is_empty()).map(std::sync::Arc::new);
+    let cx = Ctx { src, opt, notes: &notes, batches: &batches, weights: &weights, entries: &entries, tree, stop, vpks };
     let pipe = Pipe {
         reader: Mutex::new(Reader { first: HashMap::new() }),
         state: Mutex::new(State {
@@ -555,6 +557,8 @@ struct Ctx<'a, S: ?Sized> {
     /// The entries archived, those of each segment written as it is closed.
     tree: &'a Tree,
     stop: Option<&'a Stop<'a>>,
+    /// The archives of VPKs to take apart ([`crate::vpk`]).
+    vpks: Option<std::sync::Arc<crate::vpk::Plan>>,
 }
 
 impl<S: ?Sized> Ctx<'_, S> {
@@ -652,7 +656,7 @@ impl Pipe {
             taken.map(|(files, data)| {
                 // (what is cut out of the files mapped shared, not copied: an image's files, say)
                 let _known: Vec<_> = data.iter().map(aqr_formula::store::known).collect();
-                let a = analyze(i, &files, data, &HashSet::new(), cx.opt, cx.notes);
+                let a = analyze(i, &files, data, &HashSet::new(), cx.opt, cx.notes, cx.vpks.clone());
                 (files, a)
             })
         }));
@@ -965,7 +969,8 @@ impl Writer {
                     File::of(c, d, hash, kind_by_name(src.name(c)), cx.entries.contains(&c))
                 })
                 .collect();
-            let part = self.watched(cx, out, || analyze(i, &files, data, &HashSet::new(), cx.opt, notes))?;
+            let part =
+                self.watched(cx, out, || analyze(i, &files, data, &HashSet::new(), cx.opt, notes, cx.vpks.clone()))?;
             self.put(i, &files, part, cx, out)?;
         }
         batch.iter().try_for_each(|&c| src.intact(c))?;
@@ -999,7 +1004,7 @@ impl Writer {
             let bytes = batch.iter().map(|&c| src.size(c)).sum();
             notes.send(Note::Batch { batch: i, bytes, verify: opt.verify, contents: batch.clone() });
             let data = reread(src, files, opt.threads)?;
-            part = self.watched(cx, out, || analyze(i, files, data, &raw, opt, notes))?;
+            part = self.watched(cx, out, || analyze(i, files, data, &raw, opt, notes, cx.vpks.clone()))?;
         };
         files.iter().try_for_each(|f| src.intact(f.c))?;
         self.w.commit(&made.batch);
@@ -1712,7 +1717,15 @@ struct Analyzed {
 /// The formula of batch `i` of `files` (by index, the data of each in `data`), recompressed but
 /// those (by index) in `raw`. The data is the formula's: where it is needed again, to verify
 /// the batch, it is read from the source ([`finish`]). Below level 2, [`analyze_plain`].
-fn analyze(i: usize, files: &[File], data: Vec<Bytes>, raw: &HashSet<usize>, opt: &Options, notes: &Notes) -> Analyzed {
+fn analyze(
+    i: usize,
+    files: &[File],
+    data: Vec<Bytes>,
+    raw: &HashSet<usize>,
+    opt: &Options,
+    notes: &Notes,
+    vpks: Option<std::sync::Arc<crate::vpk::Plan>>,
+) -> Analyzed {
     if !opt.recompresses() {
         return analyze_plain(i, files, data, opt, notes);
     }
@@ -1757,6 +1770,10 @@ fn analyze(i: usize, files: &[File], data: Vec<Bytes>, raw: &HashSet<usize>, opt
     let bases: Vec<usize> = f.streams.iter().map(|s| s.data.as_ptr() as usize).collect();
     let contents = files.iter().zip(&f.streams).map(|(file, s)| (file.c, &s.data[..]));
     cx.files = Some(std::sync::Arc::new(Files::of(notes, contents)));
+    cx.vpks = vpks
+        .map(|p| p.placed(files.iter().zip(&f.streams).map(|(file, s)| (file.c, &s.data[..]))))
+        .filter(|p| !p.is_empty())
+        .map(std::sync::Arc::new);
     let mut taken = HashSet::new();
     if let Some((mut children, plan)) = nested(&mut f, &[], &nopt, 0, &cx) {
         let sets = sets::sets(&f, &mut children, &plan, &nopt, 0, &cx);

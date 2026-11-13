@@ -10,8 +10,18 @@ use aqr_formula::{Bytes, Formula, Kind, Node};
 use crate::compressed::{By, STREAM_DATA};
 use crate::{File, FileSystem, Piece};
 
-/// The class of the stream of the rest of the image, stream 1.
+/// The class of the stream of the rest of the image, stream 1 (of the prefix `disk`: [`rest`]).
 pub const REST: &str = "disk/rest";
+
+/// The class of the stream of the rest, of the classes' prefix `prefix` ([`Options::prefix`]).
+pub fn rest(prefix: &str) -> String {
+    format!("{prefix}/rest")
+}
+
+/// Whether `class` is that of the stream of the rest ([`rest`]) of one of `prefixes`.
+pub fn is_rest(class: &str, prefixes: &[&str]) -> bool {
+    class.strip_suffix("/rest").is_some_and(|p| prefixes.contains(&p))
+}
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -19,19 +29,23 @@ pub struct Options {
     pub file_systems: &'static [FileSystem],
     /// What a file's contents are by its path: the contents of each [`Kind`] are a content
     /// stream of their own (those of [`Kind::Unknown`] the stream `raw`, the others after it,
-    /// `disk/{kind}`, or `disk/{name}` for a format). By default all are unknown.
+    /// `{prefix}/{kind}`, or `{prefix}/{name}` for a format). By default all are unknown.
     pub kind: fn(&[u8]) -> Kind,
     /// Threads the files stored compressed are taken apart on.
     pub threads: usize,
+    /// The prefix of the streams' classes (`{prefix}/rest`, `{prefix}/kept`, of the kinds):
+    /// by default `disk`; aqr-bundle's packs give their format's name.
+    pub prefix: &'static str,
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options { file_systems: &[], kind: |_| Kind::Unknown, threads: 1 }
+        Options { file_systems: &[], kind: |_| Kind::Unknown, threads: 1, prefix: "disk" }
     }
 }
 
-/// The class of the streams of the bytes kept of files stored compressed (WOF's chunk tables).
+/// The class of the streams of the bytes kept of files stored compressed (WOF's chunk tables),
+/// of the prefix `disk`.
 pub const KEPT: &str = "disk/kept";
 
 /// The formula of image `input` with `opt`, or None where none of its file systems is read or
@@ -67,7 +81,12 @@ pub fn build(input: &[u8], files: &[File], pieces: &[Piece], opt: &Options) -> F
     }
     of.iter_mut().for_each(|js| js.sort_by_key(|&j| pieces[j].file.map(|f| f.1)));
     // the files stored compressed taken apart (their contents their data), on up to `threads`
-    let packed: Vec<usize> = (0..files.len()).filter(|&i| files[i].compressed.is_some() && !of[i].is_empty()).collect();
+    let packed: Vec<usize> = (0..files.len())
+        .filter(|&i| {
+            !of[i].is_empty()
+                && files[i].compressed.as_ref().is_some_and(|c| !matches!(c, crate::Compressed::Opaque { .. }))
+        })
+        .collect();
     let made = aqr_common::pool::par_map(packed.len(), opt.threads.max(1), |k| {
         let i = packed[k];
         let s: Vec<u8> = of[i].iter().flat_map(|&j| input[pieces[j].span.clone()].iter().copied()).collect();
@@ -106,8 +125,8 @@ pub fn build(input: &[u8], files: &[File], pieces: &[Piece], opt: &Options) -> F
     let class = |kind: Kind| -> Cow<'static, str> {
         match kind {
             Kind::Unknown => "raw".into(),
-            Kind::Format(name) => format!("disk/{name}").into(),
-            kind => format!("disk/{kind}").into(),
+            Kind::Format(name) => format!("{}/{name}", opt.prefix).into(),
+            kind => format!("{}/{kind}", opt.prefix).into(),
         }
     };
     let mut contents = |i: usize| {
@@ -137,7 +156,7 @@ pub fn build(input: &[u8], files: &[File], pieces: &[Piece], opt: &Options) -> F
     }
     // (filled below, in the order of the pieces)
     let mut rest = Writer::new(Some(rest_len));
-    f.push(REST, Vec::new());
+    f.push(self::rest(opt.prefix), Vec::new());
     for (n, (kind, is)) in kinds.iter().enumerate() {
         // (the first of `raw` stream 0, if any)
         for &i in is.iter().skip((n == 0) as usize) {
@@ -156,7 +175,7 @@ pub fn build(input: &[u8], files: &[File], pieces: &[Piece], opt: &Options) -> F
                 let len = files[i].compressed.as_ref().expect("compressed").len();
                 // applications of streams of chunks, each of 32 MiB of data at most (as the module
                 // holds it whole), the chunk table kept before the first stream
-                let mut kept = Some((f.push(KEPT, u.table.clone()), u.table.len() as u64));
+                let mut kept = Some((f.push(format!("{}/kept", opt.prefix), u.table.clone()), u.table.len() as u64));
                 let (mut at, mut apps) = (0, Vec::new());
                 let mut streams = u.streams.into_iter().peekable();
                 while streams.peek().is_some() {

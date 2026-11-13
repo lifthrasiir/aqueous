@@ -104,6 +104,7 @@ pub fn unpack(s: &[u8], how: &Compressed) -> Option<Unpacked> {
         Compressed::Lznt1 { len, unit, ref allocated } => {
             (0..0, lznt1_units(s, len, unit, allocated)?, unit as usize, By::Lznt1)
         }
+        Compressed::Opaque { .. } => return None,
     };
     let mut data = vec![0; aqr_lzx::recons::data_len(&chunks)];
     let (mut streams, mut at) = (Vec::new(), 0);

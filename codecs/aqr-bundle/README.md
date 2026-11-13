@@ -54,9 +54,42 @@ instructions, resident 180 -> 109 MB, Wasm 1.45 -> 1.49 G, 536 -> 226 MB. The pr
 checksum of cpio's crc form (version 1 predicted it from the body, which version 2 has not at
 hand when it puts the header): its 4 bytes of each member are stored.
 
+## Packs of game engines
+
+`packs`: the asset packs of game engines, as aqr-disk's formulas (no module). A pack's directory
+is read into the files it holds and their extents in it; each file's contents become a content of
+the application, of its kind by its name, and the rest (headers, directories, padding, what no
+file points at, what is encrypted) is the stream `{format}/rest`, the pack their concatenation.
+What a directory holds that follows from the contents (offsets, sizes, the copies of Unreal's
+entries before their data) is about 0.01% to 0.1% of a pack: a module deriving it would cost an
+archive more than it saves. The formats are named `<engine>-<extension>` (the formats of
+aqr-compress and the prefixes of the classes), as one extension is several engines' (Godot's and
+Wwise's `.pck`, Unreal's and Quake's `.pak`):
+
+- `godot-pck`: Godot's `.pck` (`GDPC`), versions 1 (Godot 3) to 4 (4.4 on: the directory at the
+  end). Not read: an encrypted directory; encrypted files are the rest. A pack embedded in an
+  executable is not looked for.
+- `unity-bundle`: Unity's AssetBundles (`UnityFS`, formats 6 to 8), their table of blocks stored
+  or of LZ4: the nodes (serialized files, `.resS`, `.resource`) that lie in blocks stored as they
+  are. Those in blocks of LZ4 or LZMA are the rest.
+- `unreal-pak`: Unreal Engine 4 and 5's `.pak`, versions 1 to 11 (the entries encoded in bits
+  of 4.26 on, named by the full directory index). Stored entries and those of zlib or gzip (as
+  their compressed blocks, which aqr-compress's scan finds) are files; those of other methods
+  (Oodle) are files of compressed contents (`Compressed::Opaque`); encrypted and deleted ones,
+  and an encrypted index, are not read. IoStore (`.utoc`/`.ucas`) is not read.
+- `source-vpk`: Valve's VPK, versions 1 and 2. A directory file's own files (preload bytes and
+  data); its archives (`NAME_000.vpk`, …, of no header) are taken apart by its tree where they
+  are archived along with it (aqr-compress's `vpk`: planned before the batches, by their names).
+
+Compressed data is left for separate work: Unity's LZ4 blocks (LZ4HC, which aqr-lz4 does not
+reproduce) and LZMA, the zlib blocks of Unreal's entries rebuilt as streams of their own (rather
+than found by the scan), Oodle not at all.
+
 ## Tests
 
 `cargo rt -p aqr-bundle`; `aqr-bundle-check [-v] FILE_OR_DIR...` (the archives
-found, whether each is rebuilt, zstd -3 of the archives against the module's inputs, speeds).
+found, whether each is rebuilt, zstd -3 of the archives against the module's inputs, speeds);
+`aqr-bundle-packs FILE...` (the game packs read: their files, the bytes taken, whether the
+formula gives each back). The packs' tests write their packs themselves (`tests/packs.rs`).
 `scripts/gen-fixtures.sh` makes `tests/data` with the tools of this machine (bsdtar, bsdcpio,
 Python's tarfile, the ar of macOS, llvm-ar and mingw).

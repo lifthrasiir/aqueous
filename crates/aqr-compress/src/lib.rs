@@ -143,6 +143,7 @@ mod nsis;
 mod progress;
 mod seal;
 mod sets;
+mod vpk;
 pub mod spill;
 mod verify;
 mod zip;
@@ -409,6 +410,9 @@ pub(crate) struct Cx {
     /// The files of an archive (the contents of a formula 0 formats deep), to tell as they are
     /// made. Not shared with the contexts of the files.
     files: Option<Arc<progress::Files>>,
+    /// The archives of Valve's VPKs to take apart by their directory files, by where their data
+    /// is ([`vpk::plan`]). Shared with the contexts of the files.
+    vpks: Option<Arc<vpk::Placed>>,
 }
 
 /// Text coded once, for the files of an archive that other files of it hold as the contents of
@@ -524,6 +528,7 @@ impl Cx {
             coded_held: Default::default(),
             once: Default::default(),
             files: None,
+            vpks: None,
         }
     }
 
@@ -1220,6 +1225,9 @@ fn made_alone(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option
     }
     match how {
         _ if depth >= opt.depth || !opt.recompresses() => None,
+        // an archive of a VPK whose directory file is archived along (of no header, of whatever
+        // its first file starts like: taken apart by the tree)
+        _ if vpk::has(d, cx) => recompress_as(Format::SourceVpk, d, opt, depth, cx).map(Made::from),
         Nest::Exact => detect(d).and_then(|format| recompress_as(format, d, opt, depth, cx)).map(Made::from),
         // JSON lines or a table where aqr-jsonl or aqr-xsv takes it (and it is [`smaller`]);
         // else text as aqr-wrt tells of it alone (not [`smaller`]), so that the same text is
@@ -1519,9 +1527,6 @@ fn recompress_sealed(
         deferred.into_iter().filter(|(at, _)| !taken.contains(at)).for_each(|(_, j)| pre.send(j));
     }
     // (text as aqr-wrt tells, see [`made`])
-    // (nor a data file of an unknown archive format taken apart: its members' data is held to
-    // it as contents, and its check compressed it all again on a thread, 1.5 s of 7 for The
-    // Crew's)
     (format == Format::Text || smaller_as(&f, None, d, of, opt, cx)).then_some(f)
 }
 
@@ -2358,6 +2363,7 @@ struct Apart {
     coded_held: Arc<HashSet<(usize, u64)>>,
     once: Arc<Once>,
     shares_modules: bool,
+    vpks: Option<Arc<vpk::Placed>>,
 }
 
 impl Cx {
@@ -2371,6 +2377,7 @@ impl Cx {
             coded_held: Arc::new(self.coded_held.borrow().clone()),
             once: self.once.clone(),
             shares_modules: self.enc.shares_modules(),
+            vpks: self.vpks.clone(),
         }
     }
 }
@@ -2389,6 +2396,7 @@ impl Apart {
         own.share_words(self.words.clone());
         own.coded_held = RefCell::new((*self.coded_held).clone());
         own.once = self.once.clone();
+        own.vpks = self.vpks.clone();
         own
     }
 }

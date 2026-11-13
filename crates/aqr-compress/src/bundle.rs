@@ -1,8 +1,8 @@
 //! Archives that only bundle files: ar, tar and cpio archives (aqr-bundle's formula, the
-//! contents of the members a content of the application), asar archives (aqr-asar's, alike)
-//! and disk images (aqr-disk's, of the file systems of [`FILE_SYSTEMS`], the contents of the
-//! files content streams), the contents recompressed in turn, each by its kind by its name
-//! ([`kind_by_name`]).
+//! contents of the members a content of the application), asar archives (aqr-asar's, alike),
+//! disk images (aqr-disk's, of the file systems of [`FILE_SYSTEMS`], the contents of the
+//! files content streams) and game engines' packs (aqr-bundle's `packs`, aqr-disk's formula
+//! too), the contents recompressed in turn, each by its kind by its name ([`kind_by_name`]).
 
 use aqr_formula::Formula;
 
@@ -10,6 +10,18 @@ use crate::kind_by_name;
 
 pub(crate) fn bundle(d: &[u8]) -> Option<Formula> {
     aqr_bundle::formula::encode_with(d, &aqr_bundle::formula::Options { kind: kind_by_name, ..Default::default() })
+}
+
+/// The formula of game pack `d` of `pack` (aqr-bundle's `packs`: aqr-disk's formula, of the
+/// classes of the pack's name).
+pub(crate) fn pack(pack: aqr_bundle::packs::Pack, d: &[u8]) -> Option<Formula> {
+    aqr_bundle::packs::encode_with(pack, d, kind_by_name)
+}
+
+/// Whether `class` is that of the rest of aqr-disk's formula: of an image, or of a game pack.
+fn is_rest(class: &str) -> bool {
+    class == aqr_disk::formula::REST
+        || aqr_bundle::packs::Pack::ALL.iter().any(|p| aqr_disk::formula::is_rest(class, &[p.name()]))
 }
 
 pub(crate) fn asar(d: &[u8]) -> Option<Formula> {
@@ -24,7 +36,7 @@ pub(crate) const FILE_SYSTEMS: &[aqr_disk::FileSystem] =
 pub(crate) fn disk(d: &[u8], threads: usize) -> Option<Formula> {
     aqr_disk::formula::encode_with(
         d,
-        &aqr_disk::formula::Options { file_systems: FILE_SYSTEMS, kind: kind_by_name, threads },
+        &aqr_disk::formula::Options { file_systems: FILE_SYSTEMS, kind: kind_by_name, threads, ..Default::default() },
     )
 }
 
@@ -37,7 +49,8 @@ pub(crate) fn bundles(f: &Formula) -> bool {
 /// (its headers, the rest of an image), not the files'.
 pub(crate) fn own_class(class: &str) -> bool {
     class.starts_with("bundle/")
-        || [aqr_disk::formula::REST, aqr_asar::formula::HEADER, aqr_asar::formula::INDEX].contains(&class)
+        || is_rest(class)
+        || [aqr_asar::formula::HEADER, aqr_asar::formula::INDEX].contains(&class)
 }
 
 /// Whether formula `f` is one whose contents are files, each made apart (on a thread of its
@@ -71,7 +84,7 @@ impl Kinds {
     }
 }
 
-/// Whether formula `f` is aqr-disk's, of an image.
+/// Whether formula `f` is aqr-disk's, of an image or a game pack.
 pub(crate) fn is_disk(f: &Formula) -> bool {
-    f.streams.get(1).is_some_and(|s| s.class == aqr_disk::formula::REST)
+    f.streams.get(1).is_some_and(|s| is_rest(&s.class))
 }

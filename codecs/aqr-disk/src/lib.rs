@@ -50,13 +50,16 @@ pub enum Compressed {
     /// 0 a hole of zeros, else compressed (the chunks of LZNT1, then what is left of the last
     /// cluster). `len` bytes of data in all.
     Lznt1 { len: u64, unit: u32, allocated: Vec<u32> },
+    /// By a codec not taken apart (a game pack's Oodle): its contents are its extents as they
+    /// are, a content of the kind `Compressed` whatever its name. `len` bytes of data in all.
+    Opaque { len: u64 },
 }
 
 impl Compressed {
     /// Bytes of data.
     pub fn len(&self) -> u64 {
         match *self {
-            Compressed::Wof { len, .. } | Compressed::Lznt1 { len, .. } => len,
+            Compressed::Wof { len, .. } | Compressed::Lznt1 { len, .. } | Compressed::Opaque { len } => len,
         }
     }
 

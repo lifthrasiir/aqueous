@@ -15,6 +15,8 @@ pub mod cpio;
 pub mod formula;
 pub mod layout;
 pub mod module;
+#[cfg(feature = "encode")]
+pub mod packs;
 pub mod tar;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1730,3 +1730,86 @@ fn plain_levels() {
         assert!(check.walked && check.mirrored(&m, false), "{level:?}: {check:?}");
     }
 }
+
+/// A VPK directory file (version 1) of `files` (path, data, in the directory file or in
+/// archive 0), and archive 0.
+fn vpk(files: &[(&str, &[u8], bool)]) -> (Vec<u8>, Vec<u8>) {
+    let (mut tree, mut here, mut archive) = (Vec::new(), Vec::<u8>::new(), Vec::<u8>::new());
+    for &(name, b, in_dir) in files {
+        let (path, ext) = name.rsplit_once('.').unwrap();
+        let (dir, base) = path.rsplit_once('/').unwrap_or((" ", path));
+        for s in [ext, dir, base] {
+            tree.extend(s.as_bytes());
+            tree.push(0);
+        }
+        let (index, at) = if in_dir { (0x7fffu16, here.len()) } else { (0, archive.len()) };
+        tree.extend(aqr_common::crc32::hash(b).to_le_bytes());
+        tree.extend([0, 0]);
+        tree.extend(index.to_le_bytes());
+        tree.extend((at as u32).to_le_bytes());
+        tree.extend((b.len() as u32).to_le_bytes());
+        tree.extend([0xff, 0xff, 0, 0]);
+        if in_dir { here.extend(b) } else { archive.extend(b) }
+    }
+    tree.push(0);
+    let mut d = vec![0x34, 0x12, 0xAA, 0x55, 1, 0, 0, 0];
+    d.extend((tree.len() as u32).to_le_bytes());
+    d.extend(tree);
+    d.extend(here);
+    (d, archive)
+}
+
+/// A BMP file of 24 bits of `w` x `h` (rows of a multiple of 4 bytes), of a gradient and
+/// noise.
+fn bmp(w: usize, h: usize) -> Vec<u8> {
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let row = (3 * w).next_multiple_of(4);
+    let mut d = b"BM".to_vec();
+    d.extend(((54 + row * h) as u32).to_le_bytes());
+    d.extend([0; 4]);
+    d.extend(54u32.to_le_bytes());
+    d.extend(40u32.to_le_bytes());
+    d.extend((w as i32).to_le_bytes());
+    d.extend((h as i32).to_le_bytes());
+    d.extend(1u16.to_le_bytes());
+    d.extend(24u16.to_le_bytes());
+    d.extend([0; 24]);
+    for y in 0..h {
+        for x in 0..row {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            d.push(if x < 3 * w { ((x * 3 + y * 5) / 4 + (seed >> 61) as usize) as u8 } else { 0 });
+        }
+    }
+    d
+}
+
+/// A VPK's archive (of no header, starting with a PNG file) taken apart by its directory file
+/// archived along: its PNG files recompressed by aqr-png, its BMP file by aqr-raw (which a scan
+/// of the archive alone does not find: only at the start of data); a Godot pack's alike (as
+/// each of aqr-bundle's packs, by its own header).
+#[test]
+fn game_packs() {
+    let (a, b, t) = (variant(64, 48, None), variant(80, 40, Some((3, 4, 20, 10))), bmp(120, 90));
+    let (dir, archive) = vpk(&[("materials/a.png", &a, false), ("sky.bmp", &t, false), ("materials/b.png", &b, false)]);
+    let mut pck = b"GDPC             ".to_vec();
+    pck.extend([0; 64]);
+    pck.extend(1u32.to_le_bytes());
+    let path = b"res://a.png ";
+    pck.extend((path.len() as u32).to_le_bytes());
+    pck.extend(path);
+    pck.extend(((pck.len() + 32) as u64).to_le_bytes());
+    pck.extend((b.len() as u64).to_le_bytes());
+    pck.extend([0x77; 16]);
+    pck.extend(&b);
+    let files = [("game/pak01_dir.vpk", dir), ("game/pak01_000.vpk", archive.clone()), ("game/game.pck", pck)];
+    let (_, r) = archived(&files, &Options::default());
+    let modules = |r: &aqr_compress::Report, c: usize| -> Vec<String> {
+        r.files[c].modules.iter().map(|m| m.name.to_string()).collect()
+    };
+    let m = modules(&r, 1);
+    assert!(m.iter().any(|m| m == "png-recons") && m.iter().any(|m| m == "raster-recons"), "{m:?}");
+    assert!(modules(&r, 2).iter().any(|m| m == "png-recons"), "{:?}", modules(&r, 2));
+    // (alone, of no directory file, the archive is not taken apart)
+    let (_, r) = archived(&[("game/pak01_000.vpk", archive)], &Options::default());
+    assert!(!modules(&r, 0).iter().any(|m| m == "raster-recons"), "{:?}", modules(&r, 0));
+}
