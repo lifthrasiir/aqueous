@@ -3,6 +3,8 @@
 //! threads, of odd sizes and mipmaps, given back; smooth textures coded small; corrupted streams
 //! turned down.
 
+#![allow(clippy::needless_range_loop)]
+
 use aqr_tex::layout::{Format, Layout};
 use aqr_tex::texture;
 
@@ -389,7 +391,9 @@ fn bc6h_smooth_codes_small() {
 #[test]
 fn dds_of_dx10() {
     // BC7 (DXGI 98), BC6H unsigned (95) and signed (96), of mipmaps and an array of 2
-    for (format, dxgi) in [(Format::Bc7, 98u32), (Format::Bc6h { signed: false }, 95), (Format::Bc6h { signed: true }, 96)] {
+    for (format, dxgi) in
+        [(Format::Bc7, 98u32), (Format::Bc6h { signed: false }, 95), (Format::Bc6h { signed: true }, 96)]
+    {
         let l = Layout { format, width: 24, height: 20, mips: 3, layers: 2 };
         let b = if dxgi == 98 { bc7_random(l.len() as usize / 16, 3) } else { bc6h_random(l.len() as usize / 16, 4) };
         let mut d = vec![0u8; 148];
@@ -406,4 +410,175 @@ fn dds_of_dx10() {
         let f = aqr_tex::formula::encode(&d, 2).unwrap();
         assert!(eval(&f) == d, "{format:?}");
     }
+}
+
+/// The formats of ETC and EAC.
+const ETC: [Format; 8] = [
+    Format::Etc1,
+    Format::Etc2,
+    Format::Etc2P,
+    Format::Etc2A,
+    Format::Eac { rg: false, signed: false },
+    Format::Eac { rg: false, signed: true },
+    Format::Eac { rg: true, signed: false },
+    Format::Eac { rg: true, signed: true },
+];
+
+/// Random blocks of `bytes` bytes (any 64 bits are a block of ETC or EAC), some repeated, some of
+/// their first 4 bytes (all but the indices of most of RGB's) repeated.
+fn etc_random(n: usize, bytes: usize, seed: u64) -> Vec<u8> {
+    let mut r = Rng(seed | 1);
+    let mut out: Vec<u8> = Vec::with_capacity(n * bytes);
+    for i in 0..n {
+        let mut b: Vec<u8> = (0..bytes).map(|_| r.next() as u8).collect();
+        if i > 0 && r.next().is_multiple_of(4) {
+            let k = (r.next() as usize % i) * bytes;
+            let (all, half) = (r.next().is_multiple_of(2), bytes / 2);
+            let take = if all { bytes } else { half };
+            b[..take].copy_from_slice(&out[k..k + take]);
+        }
+        out.extend(b);
+    }
+    out
+}
+
+#[test]
+fn etc_layouts() {
+    for (k, format) in ETC.into_iter().enumerate() {
+        for (size, mips, layers) in [((4, 4), 1, 1), ((13, 7), 3, 2), ((64, 64), 7, 1)] {
+            let l = Layout { format, width: size.0, height: size.1, mips, layers };
+            let bb = format.block_bytes();
+            let b = etc_random(l.len() as usize / bb, bb, k as u64 * 7 + mips as u64);
+            round(&l, &b);
+        }
+    }
+    let l = Layout { format: Format::Etc2, width: 1024, height: 520, mips: 2, layers: 1 };
+    round(&l, &etc_random(l.len() as usize / 8, 8, 99));
+}
+
+/// ETC1 blocks (differential, or individual where the bases are far apart) of `img`: each
+/// subblock's base the mean of its pixels (split left and right), the codeword of the least error.
+fn etc1_encode(img: &[[u8; 4]], w: usize, h: usize) -> Vec<u8> {
+    use aqr_tex::etc;
+    let mut out = vec![];
+    for by in 0..h.div_ceil(4) {
+        for bx in 0..w.div_ceil(4) {
+            let px: Vec<[i32; 3]> = (0..16)
+                .map(|p| {
+                    let v = img[(by * 4 + p / 4).min(h - 1) * w + (bx * 4 + p % 4).min(w - 1)];
+                    [v[0] as i32, v[1] as i32, v[2] as i32]
+                })
+                .collect();
+            let sub = |k: usize| -> Vec<usize> { (0..16).filter(|&p| etc::subblock(p, false) == k).collect() };
+            let means: [[i32; 3]; 2] =
+                std::array::from_fn(|k| std::array::from_fn(|c| sub(k).iter().map(|&p| px[p][c]).sum::<i32>() / 8));
+            let q5 = means.map(|m| m.map(|v| (v * 31 + 127) / 255));
+            let diff = (0..3).all(|c| (-4..=3).contains(&(q5[1][c] - q5[0][c])));
+            let mut word: u64 = 0;
+            let bases: [[i32; 3]; 2] = if diff {
+                word |= 1 << 33;
+                for c in 0..3 {
+                    word |= (q5[0][c] as u64) << (59 - 8 * c) | (((q5[1][c] - q5[0][c]) & 7) as u64) << (56 - 8 * c);
+                }
+                q5.map(|q| q.map(|v| etc::ext(v, 5)))
+            } else {
+                let q4 = means.map(|m| m.map(|v| (v * 15 + 127) / 255));
+                for c in 0..3 {
+                    word |= (q4[0][c] as u64) << (60 - 8 * c) | (q4[1][c] as u64) << (56 - 8 * c);
+                }
+                q4.map(|q| q.map(|v| etc::ext(v, 4)))
+            };
+            for k in 0..2 {
+                let err = |cw: usize, p: usize| {
+                    (0..4u32)
+                        .map(|i| {
+                            let c = etc::modified(bases[k], cw, i, true);
+                            ((0..3).map(|ch| (c[ch] as i32 - px[p][ch]).pow(2)).sum::<i32>(), i)
+                        })
+                        .min()
+                        .unwrap()
+                };
+                let cw = (0..8).min_by_key(|&cw| sub(k).iter().map(|&p| err(cw, p).0).sum::<i32>()).unwrap();
+                word |= (cw as u64) << (37 - 3 * k);
+                for p in sub(k) {
+                    let i = err(cw, p).1 as u64;
+                    let col = etc::column(p);
+                    word |= (i >> 1) << (16 + col) | (i & 1) << col;
+                }
+            }
+            out.extend(word.to_be_bytes());
+        }
+    }
+    out
+}
+
+#[test]
+fn etc_smooth_codes_small() {
+    let (w, h) = (256, 128);
+    let (mut blocks, mut mips, mut mw, mut mh) = (vec![], 0, w, h);
+    while mips < 6 {
+        blocks.extend(etc1_encode(&image(mw, mh, (1 << mips) as f64), mw, mh));
+        mips += 1;
+        (mw, mh) = (mw / 2, mh / 2);
+    }
+    for format in [Format::Etc1, Format::Etc2] {
+        let l = Layout { format, width: w as u32, height: h as u32, mips, layers: 1 };
+        assert_eq!(l.len() as usize, blocks.len());
+        let n = round(&l, &blocks);
+        let z = zstd::bulk::compress(&blocks, 19).unwrap().len();
+        let cost = texture::encode_any(&l, &blocks, 1).2.map(|c| c / 65536 / 8);
+        eprintln!("{format:?} smooth: {} -> {n} (zstd -19 {z}) {cost:?}", blocks.len());
+        assert!(n * 10 < z * 9, "{n} against zstd's {z}");
+    }
+}
+
+/// EAC R11 blocks (unsigned) of channel 0 of `img` (its 8 bits as 11, times 8): the base the mean,
+/// the table and multiplier of the least error.
+fn eac_encode(img: &[[u8; 4]], w: usize, h: usize) -> Vec<u8> {
+    use aqr_tex::etc::{self, Eac};
+    let mut out = vec![];
+    for by in 0..h.div_ceil(4) {
+        for bx in 0..w.div_ceil(4) {
+            let px: Vec<i32> = (0..16)
+                .map(|p| img[(by * 4 + p / 4).min(h - 1) * w + (bx * 4 + p % 4).min(w - 1)][0] as i32 * 8)
+                .collect();
+            let base = ((px.iter().sum::<i32>() / 16 - 4) / 8).clamp(0, 255) as u32;
+            let best = |t: u32, m: u32| -> (i32, [u32; 16]) {
+                let mut e = 0;
+                let ix = std::array::from_fn(|p| {
+                    let (d, i) = (0..8).map(|i| ((Eac::R11.value(base, m, t, i) - px[p]).abs(), i)).min().unwrap();
+                    e += d;
+                    i
+                });
+                (e, ix)
+            };
+            let (t, m) = (0..16).flat_map(|t| (1..16).map(move |m| (t, m))).min_by_key(|&(t, m)| best(t, m).0).unwrap();
+            let ix = best(t, m).1;
+            let mut word = (base as u64) << 56 | (m as u64) << 52 | (t as u64) << 48;
+            for p in 0..16 {
+                word |= (ix[p] as u64) << (45 - 3 * etc::column(p));
+            }
+            out.extend(word.to_be_bytes());
+        }
+    }
+    out
+}
+
+#[test]
+fn eac_smooth_codes_small() {
+    let (w, h) = (128, 64);
+    let (mut blocks, mut mips, mut mw, mut mh) = (vec![], 0, w, h);
+    while mips < 5 {
+        blocks.extend(eac_encode(&image(mw, mh, (1 << mips) as f64), mw, mh));
+        mips += 1;
+        (mw, mh) = (mw / 2, mh / 2);
+    }
+    let l =
+        Layout { format: Format::Eac { rg: false, signed: false }, width: w as u32, height: h as u32, mips, layers: 1 };
+    assert_eq!(l.len() as usize, blocks.len());
+    let n = round(&l, &blocks);
+    let z = zstd::bulk::compress(&blocks, 19).unwrap().len();
+    let cost = texture::encode_any(&l, &blocks, 1).2.map(|c| c / 65536 / 8);
+    eprintln!("eac smooth: {} -> {n} (zstd -19 {z}) {cost:?}", blocks.len());
+    assert!(n * 10 < z * 9, "{n} against zstd's {z}");
 }

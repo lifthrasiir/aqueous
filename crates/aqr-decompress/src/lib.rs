@@ -323,6 +323,8 @@ pub const BCN: Module = aqr_tex::formula::MODULE;
 pub const BC7: Module = aqr_tex::formula::MODULE_BC7;
 /// The blocks of a BC6H texture of a layout (its params), as [`BC7`]'s.
 pub const BC6H: Module = aqr_tex::formula::MODULE_BC6H;
+/// The blocks of an ETC1, ETC2 or EAC texture of a layout (its params), as [`BC7`]'s.
+pub const ETC: Module = aqr_tex::formula::MODULE_ETC;
 pub const PDF: Module = aqr_pdf::formula::MODULE;
 pub const SQLITE: Module = aqr_sqlite::formula::MODULE;
 pub const FASTA: Module = aqr_fasta::formula::MODULE;
@@ -491,6 +493,7 @@ const NATIVE: &[Entry] = &[
     entry(BCN),
     entry(BC7),
     entry(BC6H),
+    entry(ETC),
     entry(PDF),
     entry(SQLITE),
     entry(FASTA),

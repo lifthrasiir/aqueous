@@ -6258,6 +6258,11 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/dwarf-info.wasm" title="crates/aqr-modules/wasm/dwarf-info.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-dwarf/FORMAT.md" title="codecs/aqr-dwarf/FORMAT.md">R</a>
     <tr>
+      <td><code>4e97e9c4ff2d0614307208251694aa7905319e77cb89a7c72e89e52504f98af7</code>
+      <td>etc-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/etc-recons.wasm" title="crates/aqr-modules/wasm/etc-recons.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-tex/FORMAT.md" title="codecs/aqr-tex/FORMAT.md">R</a>
+    <tr>
       <td><code>dbd3de347ffd906cc61c0b1a1fb685e7f1b47c71d2833e00e0c41e16599be597</code>
       <td>exe-recons/arm64-delta@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/exe-recons-arm64-delta.wasm" title="crates/aqr-modules/wasm/exe-recons-arm64-delta.wasm">D</a>

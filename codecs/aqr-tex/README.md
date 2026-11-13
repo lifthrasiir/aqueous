@@ -2,7 +2,8 @@
 
 Block-compressed textures rebuilt bit for bit from one coded stream (`FORMAT.md`), a module for
 each group of formats: `bcn-recons` of BC1 to BC5 (DXT1–DXT5, ATI1, ATI2), `bc7-recons` of BC7,
-`bc6h-recons` of BC6H.
+`bc6h-recons` of BC6H, `etc-recons` of ETC1, ETC2 (RGB, RGBA, punch-through alpha) and EAC (R11,
+RG11, signed or not).
 The containers are taken apart around them: DDS files (the header and whatever follows the blocks
 kept as they are), and KTX, KTX 2, PVR (version 3) and astcenc's `.astc` files (the bytes between
 their surfaces kept, the module's output cut into the surfaces where the file has them), the
@@ -11,8 +12,8 @@ uncompressed 8-, 24- and 32-bit pixels go surface by surface to aqr-raw's `raste
 
 The modules know nothing of containers: a recompressor that finds blocks of a known layout in a
 format of its own (an engine's bundles: Unity's textures in aqr-bundle) applies them the same
-way (`formula::apply`). ETC1, ETC2, EAC, PVRTC and ASTC are read in the containers (and Unity's
-textures) but not taken yet.
+way (`formula::apply`). PVRTC and ASTC are read in the containers (and Unity's textures) but not
+taken yet.
 
 ## How it does
 
@@ -90,6 +91,21 @@ prediction quantized. No real textures of BC6H were at hand (none in the 88 game
 surveyed): on a smooth texture of mode 10 alone (`tests/formats.rs`), 0.645 of zstd -19, BC7's
 alike 0.51.
 
+### ETC1, ETC2 and EAC
+
+Each part of a block (RGB; EAC of alpha, R11) as BC7's blocks are (copies, then new fields): an
+RGB block's mode (individual, differential, T, H, planar), its fields predicted from the pixels
+(a subblock's base by the mean of its predicted pixels, its codeword by their spread, the flip
+by which split of them spreads less, planar's colours by the pixels at its corners), the bits
+of no field (those that only make the overflows of T, H and planar) as they are, so that any 64
+bits are a block; its indices as levels on a *ladder* of their values (the sums of a level's
+channels), by where the predictions fall on it (T's and H's by the paint colour nearest). No
+real textures of these formats were at hand (none in the games of Unity surveyed, which are of
+Windows): on smooth textures of `tests/formats.rs`, ETC1's (differential, of the least error)
+0.46 of zstd -19, EAC R11's 0.83. The decoding of the blocks, which the planes hold, matched
+texture2ddecoder's (MIT, as a black box) on random blocks of every format, but for the colour of
+punch-through's transparent pixels (the spec's are black, its not).
+
 ## Design
 
 Measured on the first 400 files of the sample (123 MB) by code length, before the coder was
@@ -145,8 +161,9 @@ written (the bits of each choice are of BC1 unless said):
   the mispredictions it saves), and the decoder's read-ahead on the encoder too. Across stripes, what is left serial bounds one file: the
   mipmaps too small to split (about 6% of a 2048×2048 texture's blocks) and a stripe of each
   split one, about 6.4 times faster than one thread at best for that texture.
-- **Formats.** ETC1, ETC2 and EAC, PVRTC, ASTC (their containers are read already).
-- **BC6H** is not measured on real textures (HDR environment maps, light maps).
+- **Formats.** PVRTC, ASTC (their containers are read already).
+- **BC6H, ETC, EAC** are not measured on real textures (HDR environment maps; mobile games'
+  textures, as of Android packages); their models were tried only on smooth textures.
 - **BC7.** Most of its bits are indices; a model of their levels as an image (residuals from a
   predicted level) rather than the joint buckets of two predictions may do better on 4-bit
   indices. Real textures of mobile formats are missing (the sample is of Unity on Windows).
@@ -185,8 +202,10 @@ let node = formula::apply(&mut its_formula, blocks, &layout, threads);
 | `src/copies.rs` | Blocks as those around or before (the choices, the cache of heads), of BC7 and BC6H |
 | `src/bc7.rs` | BC7 as a family of the walk: the models of modes, endpoints and indices |
 | `src/bc6h.rs` | BC6H as a family of the walk, as BC7 |
+| `src/etc.rs` | ETC1's, ETC2's and EAC's blocks: modes, fields and the bits left over, pixels |
+| `src/etcm.rs` | ETC1, ETC2 and EAC as a family of the walk: their parts (RGB, EAC), models and ladders |
 | `src/texture.rs` | The walk over a texture's surfaces (of any family of formats), the stripes and their threads |
 | `src/module.rs`, `src/formula.rs` | The modules, and formulas of DDS files and the other containers |
 | `tests/dds.rs` | Every format and layout (mipmaps, cube maps, DX10 arrays, odd sizes), stripes on any number of threads, pixels, trailers, files not taken, corrupted inputs |
-| `tests/formats.rs` | The other groups (BC7, BC6H): random blocks of every mode, stripes, smooth textures; the containers, DDS's DX10 |
+| `tests/formats.rs` | The other groups (BC7, BC6H, ETC and EAC): random blocks of every mode, stripes, smooth textures; the containers, DDS's DX10 |
 | `examples/bench.rs` | `aqr-tex-bench` |

@@ -2,7 +2,7 @@
 name = "aqr-tex"
 version = "0.1.0"
 edition = "2024"
-description = "Block-compressed textures (BC1 to BC7) rebuilt bit for bit from their endpoints and indices, coded by context models in the pixel domain, and the containers around them (DDS, KTX, KTX 2, PVR)"
+description = "Block-compressed textures (BC1 to BC7, ETC1, ETC2, EAC) rebuilt bit for bit from their endpoints and indices, coded by context models in the pixel domain, and the containers around them (DDS, KTX, KTX 2, PVR)"
 publish = false
 
 [features]

@@ -5357,6 +5357,37 @@ fn bc6h_plans_hold() {
     }
 }
 
+/// etc-recons lays its memory out as a stack, as bc7-recons does: of each of its formats (of one
+/// part and of two), of random blocks (any 64 bits are a block), a third of them repeated.
+#[test]
+fn etc_plans_hold() {
+    use aqr_tex::layout::{Format, Layout};
+    let mut rng = aqr_common::rng::Rng::new(14);
+    for (format, width, height, mips, layers) in [
+        (Format::Etc1, 1024, 1024, 3, 1),
+        (Format::Etc2, 1030, 514, 4, 2),
+        (Format::Etc2A, 64, 64, 7, 1),
+        (Format::Etc2P, 2048, 64, 1, 1),
+        (Format::Eac { rg: false, signed: true }, 520, 1024, 2, 1),
+        (Format::Eac { rg: true, signed: false }, 1024, 1024, 2, 1),
+    ] {
+        let l = Layout { format, width, height, mips, layers };
+        let bb = format.block_bytes();
+        let mut blocks = rng.bytes(l.len() as usize);
+        for i in (bb..blocks.len()).step_by(bb) {
+            if rng.below(3) == 0 {
+                let k = rng.below((i / bb) as u64) as usize * bb;
+                blocks.copy_within(k..k + bb, i);
+            }
+        }
+        let (main, apart, _) = aqr_tex::texture::encode_any(&l, &blocks, 4);
+        let mut f = Formula::default();
+        let inputs = vec![f.push("bcn/coded", main), f.push("bcn/stripes", apart)];
+        f.root = Node::apply(aqr_tex::formula::MODULE_ETC, l.to_bytes(), inputs, l.len());
+        plan_holds(&format!("etc {format:?} {width}x{height} {mips} {layers}"), f, &blocks);
+    }
+}
+
 /// prores-recons lays its memory out as a stack, its limit its plan of the instance and its gang of
 /// tasks (a task for each stripe, and the messages of their channels): of 4:2:2, 4:4:4 with
 /// alpha, interlaced frames, and of chunks of a few stripes and of 16; each application of a file

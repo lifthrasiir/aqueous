@@ -15,6 +15,8 @@ pub mod coder;
 pub mod container;
 pub mod copies;
 pub mod dds;
+pub mod etc;
+pub mod etcm;
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod layout;

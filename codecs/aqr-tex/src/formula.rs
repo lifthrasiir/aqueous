@@ -18,6 +18,7 @@ pub use crate::module::decode;
 pub const MODULE: Module = Module::new("bcn-recons", 1).with_task_plan(memory::<crate::bcn::Bcn>);
 pub const MODULE_BC7: Module = Module::new("bc7-recons", 1).with_task_plan(memory::<crate::bc7::Bc7>);
 pub const MODULE_BC6H: Module = Module::new("bc6h-recons", 1).with_task_plan(memory::<crate::bc6h::Bc6h>);
+pub const MODULE_ETC: Module = Module::new("etc-recons", 1).with_task_plan(memory::<crate::etcm::Etc>);
 
 /// The module of the formats of group `g`.
 pub fn module(g: Group) -> Module {
@@ -25,6 +26,7 @@ pub fn module(g: Group) -> Module {
         Group::Bcn => MODULE,
         Group::Bc7 => MODULE_BC7,
         Group::Bc6h => MODULE_BC6H,
+        Group::Etc => MODULE_ETC,
         _ => unimplemented!("{g:?}"),
     }
 }
@@ -130,6 +132,7 @@ pub fn decode_any(a: &aqr_formula::Apply, inputs: &[&[u8]], threads: usize) -> a
         "bcn-recons" => crate::module::decode(&a.params, inputs, a.len, threads),
         "bc7-recons" => crate::module::decode_bc7(&a.params, inputs, a.len, threads),
         "bc6h-recons" => crate::module::decode_bc6h(&a.params, inputs, a.len, threads),
+        "etc-recons" => crate::module::decode_etc(&a.params, inputs, a.len, threads),
         _ => return Err(aqr_formula::Error::new(format!("{}: not of aqr-tex", a.module.name))),
     };
     r.map_err(|e| aqr_formula::Error::new(e.0))

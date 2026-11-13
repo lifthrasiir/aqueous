@@ -9,7 +9,9 @@ rebuilds the blocks of a texture of a group of block formats from its coded form
   the next smaller mipmap) predict them;
 - `bc7-recons` (§11): BC7, each block as a block around it or before, or its fields (all but
   its indices as a block's around it or before, or new), its indices as `bcn-recons`'s;
-- `bc6h-recons` (§12): BC6H, as `bc7-recons`.
+- `bc6h-recons` (§12): BC6H, as `bc7-recons`;
+- `etc-recons` (§13): ETC1, ETC2 and EAC, each part of a block (RGB, EAC) as `bc7-recons`'s
+  blocks, the fields of its mode by the pixels predicted, its indices by a ladder of its levels.
 
 The document is meant to be complete: an implementation of the modules can be written from it
 alone (with the partition tables of BC7 and the bit layouts of BC6H, which are their formats').
@@ -30,6 +32,7 @@ Contents:
 10. [Encoding](#10-encoding-encoder)
 11. [`bc7-recons`](#11-bc7-recons)
 12. [`bc6h-recons`](#12-bc6h-recons)
+13. [`etc-recons`](#13-etc-recons)
 
 ## 1. Conventions
 
@@ -49,7 +52,8 @@ Contents:
 - **Params**, the *layout*:
 
   ```text
-  u8      format   1: BC1, 2: BC2, 3: BC3, 4: BC4, 5: BC5 (8: BC7, of §11; 6, 7: BC6H, of §12)
+  u8      format   1: BC1, 2: BC2, 3: BC3, 4: BC4, 5: BC5 (8: BC7, of §11; 6, 7: BC6H, of §12;
+                   16 to 23: ETC and EAC, of §13)
   varint  W        the width of the largest mipmap, in pixels, 1 to 65536
   varint  H        its height, 1 to 65536
   varint  M        the mipmaps of a layer, 1 to bitlen(max(W, H))
@@ -564,3 +568,164 @@ plane: `(E_2s,c·(64 − w) + E_2s+1,c·w + 32) >> 6` of each channel.
 - DDS files of a DX10 header of DXGI formats 94 and 95 are BC6H unsigned, of 96 signed; KTX files
   of OpenGL's internal formats 0x8E8F (unsigned) and 0x8E8E (signed), KTX 2 of Vulkan's 143 and
   144, PVR 3 of pixel format 14 (signed by its channel type), as §11.6.
+
+## 13. `etc-recons`
+
+- **Module**: name `etc-recons`, version 1.
+- **Params**: the layout of §2, of format 16 (ETC1), 17 (ETC2's RGB), 18 (ETC2's RGBA), 19 (ETC2's
+  RGB of punch-through alpha), 20 to 23 (EAC: R11, R11 signed, RG11, RG11 signed).
+- **Resources**, **inputs** and **output**: as §2's.
+
+The walk is §5's, of the parts of §13.1, each its own contexts and cache (§11.2's), in the order
+of the table; the planes §6's: of an RGB part 4 channels (R, G, B, A) of 8 bits, of an EAC part 1
+channel of 16 bits (its values, §13.1).
+
+### 13.1 Blocks
+
+| format | bytes 0–7 | bytes 8–15 |
+|---|---|---|
+| ETC1, ETC2, ETC2 A1 | RGB | |
+| ETC2 RGBA | EAC of alpha | RGB (of ETC2) |
+| R11 | EAC of R11 | |
+| RG11 | EAC of R11 (red) | EAC of R11 (green) |
+
+A part is a 64-bit word, its bytes most significant first (bit 63 the top bit of its byte 0).
+Of the pixels p = 4y + x of a block, the indices go column by column: pixel p's is the k-th, k =
+4x + y.
+
+**RGB.** Of a word w, its *mode*: of ETC1, *individual* where bit 33 is 0, else *differential*;
+of ETC2, individual where bit 33 is 0; of ETC2 and ETC2 A1 (whose bit 33 is its *opacity*), else
+by the 5-bit values R (bits 63–59), G (55–51), B (47–43) and the 3-bit two's-complement Rd
+(58–56), Gd (50–48), Bd (42–40): *T* where R + Rd is outside 0–31, else *H* where G + Gd is,
+else *planar* where B + Bd is, else differential. The fields of each mode, each its segments of
+bits from its most significant:
+
+| mode | fields |
+|---|---|
+| individual | R1 63–60, R2 59–56, G1 55–52, G2 51–48, B1 47–44, B2 43–40, cw1 39–37, cw2 36–34, flip 32 |
+| differential | R 63–59, Rd 58–56, G 55–51, Gd 50–48, B 47–43, Bd 42–40, cw1 39–37, cw2 36–34, flip 32 |
+| T | R1 (60–59, 57–56), G1 55–52, B1 51–48, R2 47–44, G2 43–40, B2 39–36, dist (35–34, 32) |
+| H | R1 62–59, G1 (58–56, 52), B1 (51, 49–47), R2 46–43, G2 42–39, B2 38–35, da 34, db 32 |
+| planar | RO 62–57, GO (56, 54–49), BO (48, 44–43, 41–39), RH (38–34, 32), GH 31–25, BH 24–19, RV 18–13, GV 12–6, BV 5–0 |
+
+Bit 33, and of every mode but planar the indices (bits 0–31:
+the k-th pixel's index of 2 bits, its top bit at 16 + k and its low bit at k), are apart; the bits
+of no field of the mode are its bits *left over* (T: 63–61, 58; H: 63, 55–53, 50; planar: 63,
+55, 47–45, 42; none of the others).
+
+Its pixels: of individual and differential blocks, the subblock of pixel p is by x (x ≥ 2) where
+flip is 0, by y (y ≥ 2) where it is 1; base colours of 4 bits (individual: R1, G1, B1 and R2, G2,
+B2) times 17, of 5 bits (differential: R, G, B, and `(R + Rd) mod 32` and the like) expanded as
+`v·8 + v/4`; of codeword cw, modifiers a, b = (2, 8), (5, 17), (9, 29), (13, 42), (18, 60), (24,
+80), (33, 106), (47, 183); index 0 the base plus a, 1 plus b, 2 minus a, 3 minus b, of every
+channel, clamped to 0–255; but of ETC2 A1 of opacity 0, index 0 the base and index 2 transparent.
+Of T and H blocks, c1 = (R1, G1, B1) and c2 = (R2, G2, B2) times 17, d the distance of DIST =
+(3, 6, 11, 16, 23, 32, 41, 64): of T, by dist, its paint colours c1, c2 + d, c2, c2 − d; of H, by
+`da·4 + db·2 + (c1 ≥ c2)` (as `R·256 + G·16 + B` of their 4 bits), c1 + d, c1 − d, c2 + d, c2 −
+d (each channel clamped); index i its paint colour i, index 2 transparent of ETC2 A1 of opacity
+0. Of planar blocks, O, H and V of 6, 7 and 6 bits expanded (6: `v·4 + v/16`; 7: `v·2 + v/64`),
+each channel `clamp((x·(H − O) + y·(V − O) + 4·O + 2) >> 2, 0, 255)`. Alpha is 255; a
+transparent pixel is (0, 0, 0, 0).
+
+**EAC.** Of a word: base (bits 63–56), multiplier m (55–52), table t (51–48), and the k-th
+pixel's index at bits 47 − 3k to 45 − 3k. Of modifier M of row t of EAC's table of 16 rows by
+index, the value of an index: of ETC2's alpha, `clamp(base + M·m, 0, 255)`; of R11,
+`clamp(base·8 + 4 + M·m·8, 0, 2047)` (M where m = 0); of R11 signed, of b the base as a signed
+byte (−127 for −128), `clamp(b·8 + M·m·8, −1023, 1023) + 1024` (M where m = 0). The planes hold
+the values of the pixels' indices.
+
+### 13.2 Copies
+
+Of each part, §11.2's choices (L and U of the part; the cache of 8-byte blocks), the block its
+bytes. The head of an RGB block: of planar mode, all 64 bits; else 2^64 + its bits 63–32. Of an
+EAC block, its bits 63–48. A head taken is of the block's fields; of a planar block it is the
+block, else its indices are coded (§13.4, §13.6).
+
+### 13.3 New RGB blocks
+
+The predicted pixels of the block, A, and the source: of mipmap m < M − 1, the coarse
+predictions (§6) of the block's pixels, source 0; else, where there are L or U, source 1, and of
+pixels `of`, those of the stripe's plane that touch them (§11.4: of each of them in turn, the
+pixel to the left where x = 0, then above where y = 0; else all of the column to the left and the
+row above); else source 2, no pixels. And A(x, y): the coarse prediction of pixel (x, y), or the
+left pixel of row y where L, and U is none or x ≤ y, else the upper one of column x.
+
+1. The mode: of ETC1, `mode[ml·6 + mu]` (1: differential); else `tree_3(mode[(ml·6 + mu)·8 …])`
+   (a value above 4 is 4); ml and mu the modes of L and U (5 where there is none).
+2. Bit 33: of ETC2 A1, `opaque[min(mode, 1)·3 + o]`, o L's bit 33 (2 where there is none); else
+   1 but of individual blocks.
+3. Of individual and differential blocks: the flip, `flip[(fl·3 + fu)·3 + s]` (fl and fu L's
+   and U's flips where they are individual or differential, else 2; s of source 0: 1 where the
+   coarse predictions split top and bottom into two of less spread than left and right — of
+   each half the sum over its pixels of `|S(p) − (Σ S)/8|`, S the sum of a pixel's channels — 0
+   where not; 2 of the others). Then of each subblock k, the mean P_k of its predicted pixels
+   (`(Σ + n/2) / n` of each channel; 128 of none) and the class of their *spread* (the range of
+   their sums of channels: 0 up to 24, 1 up to 96, 2 up to 300, 3; 0 of none).
+   - individual: the colours (below) of fields (R1, G1, B1) of kind 0 by P_0, (R2, G2, B2) of kind
+     5 by P_1, of 4 bits;
+   - differential: (R, G, B) of kind 1 by P_0, of 5 bits; then of each channel c in the order G,
+     R, B (slots 0 to 2), the difference `pred = clamp(q − base_c, −4, 3)` (q = `(P_1,c·31 + 127)
+     / 255`, base_c the channel just decoded), its field `(pred + v) mod 8` of v by
+     `tree_3(delta[(slot·4 + (pred + 4)/2)·8 …])`;
+   - the codewords cw1 and cw2 in turn: `tree_3(cw[((mode·4 + spread_k)·9 + before)·8 …])`,
+     before 8 of cw1, cw1 of cw2.
+4. Of T and H blocks: (R1, G1, B1) of kind 2 (T) or 3 (H) by the mean of all the predicted pixels,
+   of 4 bits; (R2, G2, B2) of kind 7 (T) or 8 (H) by c1 (times 17); then T's dist, H's da and db
+   in turn, `tree_n(dist[(t·4 + j)·8 …])` (n the field's bits; t 0 of T and 1 of H, j the field's
+   place).
+5. Of planar blocks: O, H, V in turn, of kind 4, of 6, 7 and 6 bits, by O = A(0, 0) (128 of none),
+   H = O + (A(3, 0) − O)·4/3 and V = O + (A(0, 3) − O)·4/3 (of each channel; division toward zero;
+   O where there is none).
+6. The bits left over, from the most significant: the j-th (from 0) by
+   `over[(min(max(mode − 2, 0), 2)·6 + min(j, 5))·2 + bit 63]` (bit 63 as decoded so far).
+7. Of planar blocks, the pixels; of the others, the indices (§13.4).
+
+The *colours* of fields (F_R, F_G, F_B) of kind k, of n_c bits, by prediction P: of each channel
+in the order G, R, B (slots 0 to 2), `pred = (clamp(P_c, 0, 255)·(2^n − 1) + 127) / 255`, plus rG
+(the residual of G) of R and B; `ctx = ((k·3 + source)·3 + slot)·4 + before`, before 0 of G and
+class(rG) of R and B (§11.4's class); `v = token(res[ctx·16 …], res_next[ctx·16 …])` (360 pairs);
+the residual r the value of [−2^(n − 1), 2^(n − 1)) congruent to unzz(v), the field `(pred + r)
+mod 2^n`.
+
+### 13.4 RGB indices
+
+Of each pixel p in turn, at (x, y) of the plane, Q1 and Q2 as §11.5 (of mipmap m < M − 1 the
+coarse and causal predictions, else the pixels above and to the left), of a *kind* 1 of ETC2 A1
+of opacity 0, else 0:
+
+- of individual and differential blocks, of p's subblock k: the *ladder* of its levels l = 0 to 3,
+  of indices 3, 2, 0, 1 (opaque, as §13.1), the sums of their channels; of a prediction of A ≥
+  128, its *rung* (below) of the sum of its channels, else (or where there is none) 8; the level
+  by `tree_2(idx[(((kind·3 + c)·9 + a)·9 + b)·4 …])` (c = min(cw_k / 3, 2), a and b of Q1 and Q2),
+  and the index that of the level;
+- of T and H blocks: of each prediction, the paint colour nearest it (the first of the least
+  Σ (Q_c − paint_c)² over R, G, B), 4 where its A < 128, 5 where there is none; the index by
+  `tree_2(paint[(((t·2 + kind)·6 + a)·6 + b)·4 …])`.
+
+The *rung* of x on a ladder of values v_0 ≤ … ≤ v_n−1: the number of its thresholds at or below
+x, of v_i (x ≥ v_i) and of the midpoints (2x ≥ v_i + v_i+1). The pixel is set in the plane as it
+decodes.
+
+### 13.5 New EAC blocks
+
+The predicted values (as §13.3, one channel) and their mean m (1024, or 128 of alpha, of none),
+and their range where there are any. The base: `pred` = m of alpha, `(m − 4) >> 3` of R11, `((m −
+1024) >> 3) mod 256` of R11 signed; `v = token(res[source·16 …], res_next[source·16 …])`, the base
+`(pred + r) mod 256`, r of [−128, 128) congruent to unzz(v). The table by `tree_4(table[t·16 …])`,
+t L's table (16 where there is none). The multiplier by `tree_4(mult[s·16 …])`, s (8 where there
+are no values) the range by the table's span u = (EAC[t][7] − EAC[t][3]) times 1 (alpha) or 8
+(R11): `min((range + u/2) / u, 7)`.
+
+### 13.6 EAC indices
+
+The ladder of the block's levels l = 0 to 7, of indices 3, 2, 1, 0, 4, 5, 6, 7, their values.
+Where its first and last are equal (*flat*), of each pixel p in turn, its index by
+`tree_3(flat[(left·9 + above)·8 …])` (§11.5's left and above, of this block's indices); else by
+the level `tree_3(idx[((c·17 + a)·17 + b)·8 …])`, c = 0 (span of the ladder up to 8), 1 (up to
+64) or 2, a and b the rungs of Q1 and Q2 (16 where there is none). The pixel is set in the plane.
+
+### 13.7 Encoding *(encoder)*
+
+- KTX files of OpenGL's internal formats 0x8D64 (ETC1), 0x9274–0x9279 (ETC2) and 0x9270–0x9273
+  (EAC), KTX 2 of Vulkan's 147–156, PVR 3 of pixel formats 6 (ETC1) and 22–26 (signed EAC by its
+  channel type), as §11.6; Unity's textures of formats 34 (ETC1), 41–47 (EAC and ETC2) by aqr-bundle.
